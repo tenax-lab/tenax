@@ -209,3 +209,26 @@ When ``A_init`` is provided explicitly, ``su_init`` is ignored.
 
 For AD-based excitation spectra on top of an optimised iPEPS, see
 {doc}`ad_excitations`.
+
+## Fermionic iPEPS (fPEPS)
+
+Tenax supports fermionic PEPS using `SymmetricTensor` with `FermionParity`
+symmetry. All contractions and decompositions automatically handle Koszul
+signs (fermionic anticommutation).
+
+### Spinless fermion example
+
+```python
+import jax
+from tenax import FPEPSConfig, spinless_fermion_gate, fpeps
+
+config = FPEPSConfig(D=2, ctm_chi=8, num_imaginary_steps=200, dt=0.01)
+gate = spinless_fermion_gate(config)
+energy, A_opt, env = fpeps(gate, config, key=jax.random.PRNGKey(0))
+print(f"Energy per site: {energy:.6f}")
+```
+
+The `spinless_fermion_gate()` builds $H = -t \sum (c^\dagger_i c_j + \text{h.c.}) + V \sum n_i n_j$
+as a `SymmetricTensor` with `FermionParity` charges. The simple update uses
+`contract()` and `truncated_svd()` which automatically compute Koszul
+signs at every leg crossing. Energy is evaluated via dense CTM fallback.
