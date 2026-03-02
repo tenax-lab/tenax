@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from tenax.core import LOG_EPS
 from tenax.core.tensor import DenseTensor, Tensor
@@ -67,6 +68,13 @@ def hotrg(
     Returns:
         Scalar JAX array: estimated log(Z)/N (free energy per site).
     """
+    valid_directions = ("alternating", "horizontal", "vertical")
+    if config.direction_order not in valid_directions:
+        raise ValueError(
+            f"Invalid direction_order {config.direction_order!r}. "
+            f"Must be one of {valid_directions}."
+        )
+
     if isinstance(tensor, DenseTensor):
         T = tensor.todense()
     else:
@@ -77,13 +85,21 @@ def hotrg(
     for step in range(config.num_steps):
         if config.direction_order == "alternating":
             if step % 2 == 0:
-                T, log_norm = _hotrg_step_horizontal(T, config.max_bond_dim)
+                T, log_norm = _hotrg_step_horizontal(
+                    T, config.max_bond_dim, config.svd_trunc_err
+                )
             else:
-                T, log_norm = _hotrg_step_vertical(T, config.max_bond_dim)
+                T, log_norm = _hotrg_step_vertical(
+                    T, config.max_bond_dim, config.svd_trunc_err
+                )
         elif config.direction_order == "horizontal":
-            T, log_norm = _hotrg_step_horizontal(T, config.max_bond_dim)
-        else:  # "vertical"
-            T, log_norm = _hotrg_step_vertical(T, config.max_bond_dim)
+            T, log_norm = _hotrg_step_horizontal(
+                T, config.max_bond_dim, config.svd_trunc_err
+            )
+        else:
+            T, log_norm = _hotrg_step_vertical(
+                T, config.max_bond_dim, config.svd_trunc_err
+            )
 
         # Each HOTRG step halves the number of tensors.
         log_norm_total = log_norm_total + log_norm / (2.0 ** (step + 1))
@@ -91,10 +107,33 @@ def hotrg(
     return log_norm_total
 
 
-@jax.jit(static_argnums=(1,))
+def _apply_svd_trunc_err(s: jax.Array, chi: int, svd_trunc_err: float) -> int:
+    """Reduce chi so that the relative truncation error stays within bound.
+
+    Args:
+        s:             Singular values (sorted descending).
+        chi:           Current maximum number of values to keep.
+        svd_trunc_err: Maximum allowed relative truncation error.
+
+    Returns:
+        Possibly reduced chi.
+    """
+    s_np = np.array(s[:chi])
+    total_sq = float(np.sum(np.array(s) ** 2))
+    if total_sq == 0:
+        return chi
+    trunc_sq = 0.0
+    for i in range(len(s_np) - 1, 0, -1):
+        trunc_sq += float(s_np[i] ** 2)
+        if trunc_sq / total_sq > svd_trunc_err**2:
+            return i + 1
+    return chi
+
+
 def _hotrg_step_horizontal(
     T: jax.Array,
     max_bond_dim: int,
+    svd_trunc_err: float | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Single horizontal HOTRG coarse-graining step.
 
@@ -102,8 +141,9 @@ def _hotrg_step_horizontal(
     the optimal truncation isometries for the paired up and down bonds.
 
     Args:
-        T:            Site tensor of shape (d_u, d_d, d_l, d_r).
-        max_bond_dim: Maximum chi after truncation.
+        T:             Site tensor of shape (d_u, d_d, d_l, d_r).
+        max_bond_dim:  Maximum chi after truncation.
+        svd_trunc_err: Optional maximum truncation error per HOSVD.
 
     Returns:
         (T_new, log_norm) where T_new has compressed up/down bonds.
@@ -118,7 +158,11 @@ def _hotrg_step_horizontal(
     # Step 2: Compute paired isometries via SVD of M reshaped to (d_u^2, d_d^2)
     chi = min(max_bond_dim, d_u * d_u, d_d * d_d)
     M_mat = M.reshape(d_u * d_u, d_d * d_d)
-    U_full, _, Vh_full = jnp.linalg.svd(M_mat, full_matrices=False)
+    U_full, s_full, Vh_full = jnp.linalg.svd(M_mat, full_matrices=False)
+
+    if svd_trunc_err is not None:
+        chi = _apply_svd_trunc_err(s_full, chi, svd_trunc_err)
+
     U_u = U_full[:, :chi]  # (d_u^2, chi)
     U_d = Vh_full[:chi, :].T  # (d_d^2, chi)
 
@@ -139,18 +183,19 @@ def _hotrg_step_horizontal(
     return T_new, log_norm
 
 
-@jax.jit(static_argnums=(1,))
 def _hotrg_step_vertical(
     T: jax.Array,
     max_bond_dim: int,
+    svd_trunc_err: float | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Single vertical HOTRG coarse-graining step.
 
     Analogous to horizontal step but contracts along the up-down direction.
 
     Args:
-        T:            Site tensor of shape (d_u, d_d, d_l, d_r).
-        max_bond_dim: Maximum chi after truncation.
+        T:             Site tensor of shape (d_u, d_d, d_l, d_r).
+        max_bond_dim:  Maximum chi after truncation.
+        svd_trunc_err: Optional maximum truncation error per HOSVD.
 
     Returns:
         (T_new, log_norm) where T_new has compressed left/right bonds.
@@ -164,7 +209,11 @@ def _hotrg_step_vertical(
     # Paired isometries via SVD of M reshaped to (d_l^2, d_r^2)
     chi = min(max_bond_dim, d_l * d_l, d_r * d_r)
     M_mat = M.reshape(d_l * d_l, d_r * d_r)
-    U_full, _, Vh_full = jnp.linalg.svd(M_mat, full_matrices=False)
+    U_full, s_full, Vh_full = jnp.linalg.svd(M_mat, full_matrices=False)
+
+    if svd_trunc_err is not None:
+        chi = _apply_svd_trunc_err(s_full, chi, svd_trunc_err)
+
     U_l = U_full[:, :chi]  # (d_l^2, chi)
     U_r = Vh_full[:chi, :].T  # (d_r^2, chi)
 

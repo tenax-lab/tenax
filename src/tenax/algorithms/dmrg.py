@@ -166,7 +166,7 @@ def dmrg(
                 left_envs[i + 1] = _update_left_env(l_env, A, mpo_tensors[i])
             else:
                 # 1-site update
-                _ri = right_envs[i]
+                _ri = right_envs[i + 1]
                 r_env_1s = _ri if _ri is not None else _build_trivial_right_env()
                 new_site, e = _one_site_update(
                     mps_tensors[i],
@@ -222,7 +222,7 @@ def dmrg(
                 )
                 energy = float(e)
                 mps_tensors[i] = new_site
-                right_envs[i + 1] = _update_right_env(r2_env, new_site, mpo_tensors[i])
+                right_envs[i] = _update_right_env(r1_env, new_site, mpo_tensors[i])
 
         energies_per_sweep.append(energy)
         if config.verbose:
@@ -405,8 +405,13 @@ def _update_left_env(
 
     # Pad A to always be 3D: if boundary site is 2D, add a trivial dim
     if A_dense.ndim == 2:
-        # Left boundary: (d, chi_r) -> (1, d, chi_r)
-        A_dense = A_dense[jnp.newaxis, :]
+        labels = mps_site.labels()
+        if isinstance(labels[0], str) and labels[0].startswith("p"):
+            # Left boundary: (d, chi_r) -> (1, d, chi_r)
+            A_dense = A_dense[jnp.newaxis, :]
+        else:
+            # Right boundary: (chi_l, d) -> (chi_l, d, 1)
+            A_dense = A_dense[:, :, jnp.newaxis]
 
     # new_L[chi_r, D_w_r, chi_r'] =
     #   L[chi_l, D_w_l, chi_l'] * A[chi_l, d, chi_r] * W[D_w_l, d, d', D_w_r] * A*[chi_l', d', chi_r']
@@ -444,10 +449,15 @@ def _update_right_env(
     B_dense = mps_site.todense()  # shape (chi_l, d, chi_r) for middle sites
     W_dense = mpo_site.todense()  # shape (D_w_l, d_top, d_bot, D_w_r)
 
-    # Pad B to 3D if boundary
+    # Pad B to 3D if boundary site (2D tensor)
     if B_dense.ndim == 2:
-        # Right boundary: (chi_l, d) -> (chi_l, d, 1)
-        B_dense = B_dense[:, :, jnp.newaxis]
+        labels = mps_site.labels()
+        if isinstance(labels[0], str) and labels[0].startswith("p"):
+            # Left boundary: (d, chi_r) -> (1, d, chi_r)
+            B_dense = B_dense[jnp.newaxis, :, :]
+        else:
+            # Right boundary: (chi_l, d) -> (chi_l, d, 1)
+            B_dense = B_dense[:, :, jnp.newaxis]
 
     # new_R[chi_l, D_w_l, chi_l'] =
     #   R[chi_r, D_w_r, chi_r'] * B[chi_l, d, chi_r] * W[D_w_l, d, d', D_w_r] * B*[chi_l', d', chi_r']
@@ -775,7 +785,7 @@ def _svd_and_truncate_site(
 
     # Find physical and virtual labels
     left_virt = f"v{site - 1}_{site}" if site > 0 else None
-    right_virt = f"v{site + 1}_{site + 2}" if site < 1000 else None  # approximate
+    right_virt = f"v{site + 1}_{site + 2}"
     left_phys = f"p{site}"
     right_phys = f"p{site + 1}"
 
