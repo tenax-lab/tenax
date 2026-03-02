@@ -13,7 +13,9 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **`.net` file support** — cytnx-style declarative network topology; parse once, load tensors, contract repeatedly (template pattern)
 - **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), TRG, HOTRG, iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), quasiparticle excitations
 - **AutoMPO** — build Hamiltonian MPOs from symbolic operator descriptions (custom couplings, NNN, arbitrary spin); supports `symmetric=True` for U(1) block-sparse MPOs
-- **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point (Francuz et al. PRR 7, 013237)
+- **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237)
+- **QR-based CTMRG projectors** — optional QR projectors for faster CTM convergence (replaces expensive `eigh`)
+- **Split-CTMRG** — ket/bra-separated CTM environment tensors for O(χ³D³) projector cost instead of O(χ³D⁶) (Rader & Läuchli, arXiv:2502.10298)
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary Brillouin-zone momenta (Ponsioen et al. 2022)
 - **Block-sparse SVD and QR** — native symmetry-aware decompositions for `SymmetricTensor`
 - **Extensible symmetry system** — non-Abelian symmetry interface for future SU(2) support
@@ -299,6 +301,26 @@ config = iPEPSConfig(
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
 print(f"Ground-state energy: {E_gs:.6f}")
 
+# 2-site AD optimization for antiferromagnets (Néel order)
+config_2site = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(chi=16, max_iter=50),
+    gs_num_steps=200,
+    gs_learning_rate=1e-3,
+    unit_cell="2site",
+    su_init=True,
+)
+(A_opt, B_opt), (env_A, env_B), E_gs = optimize_gs_ad(gate, None, config_2site)
+
+# Use QR projectors for faster CTM convergence
+config_qr = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(chi=16, max_iter=50, projector_method="qr"),
+    gs_num_steps=200,
+    gs_learning_rate=1e-3,
+)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config_qr)
+
 # Quasiparticle excitations (Ponsioen et al. 2022)
 momenta = make_momentum_path("brillouin", num_points=20)
 exc_config = ExcitationConfig(num_excitations=3)
@@ -309,6 +331,18 @@ print(result.energies.shape)  # (20, 3)
 See `examples/heisenberg_ipeps_ad.py` for AD optimization with random vs simple
 update initialization, and `examples/heisenberg_ipeps_excitations.py` for the
 full excitation spectrum along Gamma-X-M-Gamma.
+
+## Split-CTMRG
+
+```python
+from tenax import CTMConfig, ctm_split, compute_energy_split_ctm
+
+# Split-CTMRG keeps ket/bra layers separate for O(χ³D³) projector cost
+# instead of O(χ³D⁶) — significant speedup at large bond dimension D
+config = CTMConfig(chi=20, max_iter=100, chi_I=10)
+env = ctm_split(A, config)
+E = compute_energy_split_ctm(A, env, gate, d=2)
+```
 
 ## Examples
 
@@ -448,6 +482,7 @@ The generated HTML is in `docs/_build/html/`.
 - H.-J. Liao, J.-G. Liu, L. Wang, T. Xiang, *Phys. Rev. X* **9**, 031041 (2019) — AD-based iPEPS ground-state optimization
 - A. Francuz, N. Schuch, B. Vanhecke, *PRR* **7**, 013237 (2025) — Stable AD through CTM (SVD regularization, truncation correction, implicit differentiation)
 - L. Ponsioen, F. F. Assaad, P. Corboz, *SciPost Phys.* **12**, 006 (2022) — Quasiparticle excitations for iPEPS
+- M. Rader, A. M. Läuchli, arXiv:2502.10298 (2025) — Split-CTMRG with factored projectors for efficient iPEPS environments
 
 ## License
 
