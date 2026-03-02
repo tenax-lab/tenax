@@ -156,10 +156,11 @@ def _ctm_step(A: jax.Array, env: CTMEnvironment, config: CTMConfig) -> CTMEnviro
         a = a.reshape(D**2, D**2, D**2, D**2)
 
     chi = config.chi
-    env = _ctm_left_move(env, a, chi)
-    env = _ctm_right_move(env, a, chi)
-    env = _ctm_top_move(env, a, chi)
-    env = _ctm_bottom_move(env, a, chi)
+    pm = config.projector_method
+    env = _ctm_left_move(env, a, chi, pm)
+    env = _ctm_right_move(env, a, chi, pm)
+    env = _ctm_top_move(env, a, chi, pm)
+    env = _ctm_bottom_move(env, a, chi, pm)
 
     if config.renormalize:
         env = _renormalize_env(env)
@@ -293,6 +294,21 @@ def _ctm_fixed_point_impl(
     return env
 
 
+def _config_from_tuple(config_tuple: tuple):
+    """Reconstruct CTMConfig from a packed tuple."""
+    from tenax.algorithms.ipeps import CTMConfig
+
+    pm_map = {0: "eigh", 1: "qr"}
+    pm_int = config_tuple[4] if len(config_tuple) > 4 else 0
+    return CTMConfig(
+        chi=config_tuple[0],
+        max_iter=config_tuple[1],
+        conv_tol=config_tuple[2],
+        renormalize=bool(config_tuple[3]),
+        projector_method=pm_map.get(pm_int, "eigh"),
+    )
+
+
 @partial(jax.custom_vjp, nondiff_argnums=(1,))
 def ctm_converge(A: jax.Array, config_tuple: tuple) -> tuple[jax.Array, ...]:
     """CTM convergence with custom VJP for implicit differentiation.
@@ -303,18 +319,12 @@ def ctm_converge(A: jax.Array, config_tuple: tuple) -> tuple[jax.Array, ...]:
     Args:
         A:            PEPS site tensor.
         config_tuple: CTMConfig fields packed as tuple for JAX tracing.
+                      ``(chi, max_iter, conv_tol, renormalize[, projector_method_int])``.
 
     Returns:
         Flat tuple of environment tensors (C1, C2, ..., T4).
     """
-    from tenax.algorithms.ipeps import CTMConfig
-
-    config = CTMConfig(
-        chi=config_tuple[0],
-        max_iter=config_tuple[1],
-        conv_tol=config_tuple[2],
-        renormalize=bool(config_tuple[3]),
-    )
+    config = _config_from_tuple(config_tuple)
     env = _ctm_fixed_point_impl(A, config)
     return tuple(env)
 
@@ -324,14 +334,7 @@ def _ctm_converge_fwd(
     config_tuple: tuple,
 ) -> tuple[tuple[jax.Array, ...], tuple]:
     """Forward pass — run CTM, cache result for backward."""
-    from tenax.algorithms.ipeps import CTMConfig
-
-    config = CTMConfig(
-        chi=config_tuple[0],
-        max_iter=config_tuple[1],
-        conv_tol=config_tuple[2],
-        renormalize=bool(config_tuple[3]),
-    )
+    config = _config_from_tuple(config_tuple)
     env = _ctm_fixed_point_impl(A, config)
     env_tuple = tuple(env)
     residuals = (A, env_tuple)
@@ -349,15 +352,10 @@ def _ctm_converge_bwd(
     013237), where J = d(ctm_step)/d(env) is the Jacobian of one CTM step.
     Then ``dA = d(ctm_step)/dA^T @ lambda``.
     """
-    from tenax.algorithms.ipeps import CTMConfig, CTMEnvironment
+    from tenax.algorithms.ipeps import CTMEnvironment
 
     A, env_tuple = residuals
-    config = CTMConfig(
-        chi=config_tuple[0],
-        max_iter=config_tuple[1],
-        conv_tol=config_tuple[2],
-        renormalize=bool(config_tuple[3]),
-    )
+    config = _config_from_tuple(config_tuple)
 
     # g is a tuple of cotangents for (C1, C2, ..., T4)
 
@@ -397,3 +395,181 @@ def _ctm_converge_bwd(
 
 
 ctm_converge.defvjp(_ctm_converge_fwd, _ctm_converge_bwd)
+
+
+# ---------------------------------------------------------------------------
+# 4. 2-site CTM fixed-point implicit differentiation
+# ---------------------------------------------------------------------------
+
+
+def _ctm_step_2site(
+    A: jax.Array,
+    B: jax.Array,
+    env_A: CTMEnvironment,
+    env_B: CTMEnvironment,
+    config: CTMConfig,
+) -> tuple[CTMEnvironment, CTMEnvironment]:
+    """One full 2-site CTM iteration + gauge fixing.
+
+    Imports 2-site CTM sweep from ipeps module to avoid circular imports.
+    """
+    from tenax.algorithms.ipeps import (
+        _build_double_layer,
+        _ctm_2site_sweep,
+    )
+
+    a_A = _build_double_layer(A)
+    a_B = _build_double_layer(B)
+    if a_A.ndim == 8:
+        D = a_A.shape[0]
+        a_A = a_A.reshape(D**2, D**2, D**2, D**2)
+    if a_B.ndim == 8:
+        D = a_B.shape[0]
+        a_B = a_B.reshape(D**2, D**2, D**2, D**2)
+
+    env_A, env_B = _ctm_2site_sweep(
+        env_A, env_B, a_A, a_B, config.chi, config.renormalize
+    )
+    return env_A, env_B
+
+
+def _ctm_2site_fixed_point_impl(
+    A: jax.Array,
+    B: jax.Array,
+    config: CTMConfig,
+) -> tuple[CTMEnvironment, CTMEnvironment]:
+    """Run 2-site CTM to convergence with gauge fixing."""
+    from tenax.algorithms.ipeps import (
+        _build_double_layer,
+        _initialize_ctm_env,
+    )
+
+    a_A = _build_double_layer(A)
+    a_B = _build_double_layer(B)
+    if a_A.ndim == 8:
+        D = a_A.shape[0]
+        a_A = a_A.reshape(D**2, D**2, D**2, D**2)
+    if a_B.ndim == 8:
+        D = a_B.shape[0]
+        a_B = a_B.reshape(D**2, D**2, D**2, D**2)
+
+    env_A = _initialize_ctm_env(a_A, config.chi)
+    env_B = _initialize_ctm_env(a_B, config.chi)
+
+    prev_sv_A = None
+    prev_sv_B = None
+    for _ in range(config.max_iter):
+        env_A, env_B = _ctm_step_2site(A, B, env_A, env_B, config)
+        env_A = _gauge_fix_ctm(env_A)
+        env_B = _gauge_fix_ctm(env_B)
+
+        sv_A = jnp.linalg.svd(env_A.C1, compute_uv=False)
+        sv_B = jnp.linalg.svd(env_B.C1, compute_uv=False)
+
+        if prev_sv_A is not None:
+            sv1_A = sv_A / (jnp.sum(sv_A) + 1e-15)
+            sv2_A = prev_sv_A / (jnp.sum(prev_sv_A) + 1e-15)
+            sv1_B = sv_B / (jnp.sum(sv_B) + 1e-15)
+            sv2_B = prev_sv_B / (jnp.sum(prev_sv_B) + 1e-15)
+            min_len_A = min(len(sv1_A), len(sv2_A))
+            min_len_B = min(len(sv1_B), len(sv2_B))
+            diff_A = float(jnp.max(jnp.abs(sv1_A[:min_len_A] - sv2_A[:min_len_A])))
+            diff_B = float(jnp.max(jnp.abs(sv1_B[:min_len_B] - sv2_B[:min_len_B])))
+            if max(diff_A, diff_B) < config.conv_tol:
+                break
+        prev_sv_A = sv_A
+        prev_sv_B = sv_B
+
+    return env_A, env_B
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(2,))
+def ctm_converge_2site(
+    A: jax.Array,
+    B: jax.Array,
+    config_tuple: tuple,
+) -> tuple[jax.Array, ...]:
+    """2-site CTM convergence with custom VJP for implicit differentiation.
+
+    Args:
+        A:            Site tensor for sublattice A.
+        B:            Site tensor for sublattice B.
+        config_tuple: CTMConfig fields packed as tuple.
+
+    Returns:
+        Flat tuple ``(*env_A_tensors, *env_B_tensors)`` (16 arrays total).
+    """
+    config = _config_from_tuple(config_tuple)
+    env_A, env_B = _ctm_2site_fixed_point_impl(A, B, config)
+    return tuple(env_A) + tuple(env_B)
+
+
+def _ctm_converge_2site_fwd(
+    A: jax.Array,
+    B: jax.Array,
+    config_tuple: tuple,
+) -> tuple[tuple[jax.Array, ...], tuple]:
+    """Forward pass — run 2-site CTM, cache result."""
+    config = _config_from_tuple(config_tuple)
+    env_A, env_B = _ctm_2site_fixed_point_impl(A, B, config)
+    out = tuple(env_A) + tuple(env_B)
+    residuals = (A, B, out)
+    return out, residuals
+
+
+def _ctm_converge_2site_bwd(
+    config_tuple: tuple,
+    residuals: tuple,
+    g: tuple[jax.Array, ...],
+) -> tuple[jax.Array, jax.Array]:
+    """Backward pass via implicit differentiation of 2-site CTM fixed point.
+
+    Solves ``(I - J^T) lambda = g`` using GMRES where the state vector
+    spans both sublattice environments ``(env_A, env_B)``.
+    """
+    from tenax.algorithms.ipeps import CTMEnvironment
+
+    A, B, env_flat = residuals
+    config = _config_from_tuple(config_tuple)
+
+    # Split env_flat and g into A and B parts
+    env_A_tuple = env_flat[:8]
+    env_B_tuple = env_flat[8:]
+    g_A = g[:8]
+    g_B = g[8:]
+
+    def step_fn(A_in, B_in, env_combined):
+        eA = CTMEnvironment(*env_combined[:8])
+        eB = CTMEnvironment(*env_combined[8:])
+        eA_out, eB_out = _ctm_step_2site(A_in, B_in, eA, eB, config)
+        eA_out = _gauge_fix_ctm(eA_out)
+        eB_out = _gauge_fix_ctm(eB_out)
+        return tuple(eA_out) + tuple(eB_out)
+
+    env_combined = env_A_tuple + env_B_tuple
+    g_combined = g_A + g_B
+
+    from jax.scipy.sparse.linalg import gmres as jax_gmres
+
+    def apply_I_minus_Jt(v):
+        _, vjp_fn = jax.vjp(lambda e: step_fn(A, B, e), env_combined)
+        Jt_v = vjp_fn(v)[0]
+        return tuple(vi - ji for vi, ji in zip(v, Jt_v))
+
+    max_fp_iter = min(config.max_iter, 50)
+    lam, info = jax_gmres(
+        apply_I_minus_Jt,
+        g_combined,
+        x0=g_combined,
+        tol=config.conv_tol,
+        maxiter=max_fp_iter,
+    )
+
+    # Compute dA and dB
+    _, vjp_AB_fn = jax.vjp(lambda a, b: step_fn(a, b, env_combined), A, B)
+    dA, dB = vjp_AB_fn(lam)
+
+    return (dA, dB)
+
+
+ctm_converge_2site.defvjp(_ctm_converge_2site_fwd, _ctm_converge_2site_bwd)

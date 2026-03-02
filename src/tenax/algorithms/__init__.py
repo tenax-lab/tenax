@@ -25,9 +25,12 @@ from tenax.algorithms.idmrg import (
 from tenax.algorithms.ipeps import (
     CTMConfig,
     CTMEnvironment,
+    SplitCTMEnvironment,
     compute_energy_ctm_2site,
+    compute_energy_split_ctm,
     ctm,
     ctm_2site,
+    ctm_split,
     ipeps,
     iPEPSConfig,
     optimize_gs_ad,
@@ -79,7 +82,10 @@ __all__ = [
     "ipeps",
     "ctm",
     "ctm_2site",
+    "SplitCTMEnvironment",
     "compute_energy_ctm_2site",
+    "compute_energy_split_ctm",
+    "ctm_split",
     "optimize_gs_ad",
     # iPEPS Excitations
     "ExcitationConfig",
