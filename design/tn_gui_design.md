@@ -38,21 +38,22 @@ Tenax already has `NetworkBlueprint` / `.net` files and a `TensorNetwork` graph 
 - Free legs = dangling handles (output indices)
 - Built-in minimap, controls, pan/zoom
 
-### Backend: FastAPI (Python)
+### Backend: Two Options
 
-Thin **FastAPI** server wrapping Tenax directly:
-- `/api/optimize` -- find optimal contraction order + FLOP cost via `opt_einsum`
-- `/api/codegen` -- convert network JSON to Tenax Python code
-- `/api/export` -- generate `.net` file or LaTeX/TikZ
-- `/api/validate` -- check charge conservation for symmetric networks
+Both options expose the same four operations wrapping Tenax:
+- **optimize** -- find optimal contraction order + FLOP cost via `opt_einsum`
+- **codegen** -- convert network JSON to Tenax Python code
+- **export** -- generate `.net` file or LaTeX/TikZ
+- **validate** -- check charge conservation for symmetric networks
 
-Why FastAPI:
+#### Option A: FastAPI (REST)
+
+Thin **FastAPI** server with REST endpoints (`/api/optimize`, `/api/codegen`, etc.):
 - Async, minimal overhead
 - Direct access to Tenax (no serialization/pyodide hacks)
 - Auto-generated OpenAPI docs for free
 - Single `pip install` with `uvicorn`
-
-### Architecture
+- Straightforward for GUI-only use case
 
 ```
 Browser (Svelte)                    Server (FastAPI)
@@ -71,11 +72,46 @@ Browser (Svelte)                    Server (FastAPI)
 +----------------------------+
 ```
 
-Data flow:
+#### Option B: MCP Server
+
+Expose the same operations as **MCP tools** (`optimize_contraction`, `generate_code`,
+`export_netfile`, `validate_network`) via Streamable HTTP transport:
+- **Same server, two clients** -- both the GUI and AI assistants (Claude Code,
+  or a chat panel embedded in the GUI) connect to the same MCP server
+- **AI-assisted editing** -- user can ask "add a Heisenberg MPO for L=10" and
+  the AI calls MCP tools to modify the network on the canvas
+- **Single protocol** -- no separate REST API to maintain
+- Trade-off: MCP is heavier than plain REST for simple tool calls; the win is
+  native AI integration
+
+```
+Browser (Svelte)              MCP Server (Python)
++----------------------+      +---------------------+
+| Svelte Flow Canvas   |      | Tools:              |
+| + AI Chat Panel      | HTTP | - optimize          |
+|                      |----->| - codegen           |
+|                      |      | - export            |
+|                      |<-----| - validate          |
++----------------------+      |                     |
+                              | Tenax (opt_einsum,  |
+Claude Code / any      |      | NetworkBlueprint)   |
+MCP client             |----->|                     |
+                              +---------------------+
+```
+
+#### Recommendation
+
+Start with **Option A** (FastAPI) for MVP -- simpler to build and debug. The core
+logic (codegen, optimization, export) lives in shared modules either way. Option B
+can be added later by wrapping the same modules as MCP tools, and both can coexist
+(FastAPI serving the GUI, MCP serving AI clients).
+
+### Data Flow
+
 1. User draws network on canvas (Svelte Flow nodes + edges)
 2. Frontend holds network state as JSON (see schema below)
-3. On change, POST to `/api/optimize` for live cost estimate
-4. "Generate Code" button POSTs to `/api/codegen`, result shown in CodeMirror
+3. On change, call `optimize` for live cost estimate
+4. "Generate Code" button calls `codegen`, result shown in CodeMirror
 5. Code panel is read-only display (no bidirectional sync in MVP)
 
 ### 4. Internal JSON Schema (the "source of truth")
