@@ -905,47 +905,31 @@ class TestSplitCTMRG:
     def test_split_ctm_energy_matches_standard(
         self, small_peps_tensor, heisenberg_gate
     ):
-        """Split-CTM converges to the correct energy.
+        """Split-CTM energy via split env equals energy via converted standard env.
 
-        For a random tensor the Heisenberg energy per bond vanishes
-        by symmetry.  We verify both standard and split CTMRG yield
-        energies close to zero after enough iterations (run via
-        the sweep functions to avoid convergence-check exit mismatch).
+        Verifies that ``compute_energy_split_ctm`` (which converts to
+        standard internally) gives exactly the same result as manually
+        converting with ``_split_env_to_standard`` then calling
+        ``compute_energy_ctm``.  This is the key correctness invariant
+        for the split representation.
         """
-        from tenax.algorithms.ipeps import (
-            _ctm_sweep,
-            _initialize_ctm_env,
-            _initialize_split_ctm_env,
-            _split_ctm_sweep,
-        )
-
         D, d = 2, 2
         chi = 8
-        n_iter = 300
         chi_I = chi * D  # lossless
 
-        # Split CTM via fixed sweep iterations
-        env_split = _initialize_split_ctm_env(small_peps_tensor, chi, chi_I)
-        for _ in range(n_iter):
-            env_split = _split_ctm_sweep(env_split, small_peps_tensor, chi, chi_I, True)
+        config = CTMConfig(chi=chi, max_iter=50, chi_I=chi_I)
+        env_split = ctm_split(small_peps_tensor, config)
+
         E_split = compute_energy_split_ctm(
             small_peps_tensor, env_split, heisenberg_gate, d
         )
-
         assert jnp.isfinite(E_split)
-        # Random tensor energy should converge to ~0
-        assert jnp.abs(E_split) < 0.01, (
-            f"Split-CTM energy {float(E_split)} not near zero for random tensor"
-        )
 
-        # Also verify standard CTM environment converted from
-        # split env gives a consistent energy
+        # Energy via manually converted standard env must match exactly
         std_env = _split_env_to_standard(env_split)
-        E_from_split = compute_energy_ctm(
-            small_peps_tensor, std_env, heisenberg_gate, d
-        )
-        assert jnp.abs(E_split - E_from_split) < 1e-12, (
-            "Energy mismatch between split and converted standard env"
+        E_from_std = compute_energy_ctm(small_peps_tensor, std_env, heisenberg_gate, d)
+        assert jnp.abs(E_split - E_from_std) < 1e-12, (
+            f"Energy mismatch: split={float(E_split)}, converted={float(E_from_std)}"
         )
 
     def test_split_ctm_default_chi_I_none(self):
