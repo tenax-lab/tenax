@@ -120,13 +120,16 @@ class TestTrotterGate:
         dense = G.todense().reshape(4, 4)
         np.testing.assert_allclose(dense, np.eye(4), atol=1e-12)
 
-    def test_unitarity(self, default_config):
-        """exp(-dt*H) reshaped to 4x4 should be unitary for real dt (Hermitian H)."""
+    def test_symmetric_positive_definite(self, default_config):
+        """exp(-dt*H) for real dt and Hermitian H is symmetric positive-definite."""
         H = spinless_fermion_gate(default_config)
         G = _trotter_gate(H, default_config.dt)
         dense = np.array(G.todense().reshape(4, 4))
-        product = dense @ dense.T
-        np.testing.assert_allclose(product, np.eye(4), atol=1e-12)
+        # Symmetric
+        np.testing.assert_allclose(dense, dense.T, atol=1e-14)
+        # Positive-definite: all eigenvalues > 0
+        eigvals = np.linalg.eigvalsh(dense)
+        assert np.all(eigvals > 0)
 
 
 # ------------------------------------------------------------------ #
