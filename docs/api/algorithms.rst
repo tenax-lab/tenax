@@ -104,6 +104,17 @@ iPEPS Excitations
 
 .. autofunction:: tenax.algorithms.ipeps_excitations.make_momentum_path
 
+Fermionic iPEPS (fPEPS)
+-----------------------
+
+.. autoclass:: tenax.algorithms.fermionic_ipeps.FPEPSConfig
+   :members:
+   :no-index:
+
+.. autofunction:: tenax.algorithms.fermionic_ipeps.spinless_fermion_gate
+
+.. autofunction:: tenax.algorithms.fermionic_ipeps.fpeps
+
 AutoMPO
 -------
 

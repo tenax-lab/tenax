@@ -352,3 +352,17 @@ class TestFPEPS:
         key = jax.random.PRNGKey(99)
         energy, A_opt, env = fpeps(H, cfg, key=key)
         assert isinstance(A_opt, SymmetricTensor)
+
+
+# ------------------------------------------------------------------ #
+# Task 8: Exports                                                      #
+# ------------------------------------------------------------------ #
+
+
+def test_fpeps_importable_from_tenax():
+    """Public API should be importable from top-level tenax package."""
+    from tenax import FPEPSConfig, fpeps, spinless_fermion_gate
+
+    assert FPEPSConfig is not None
+    assert fpeps is not None
+    assert spinless_fermion_gate is not None
