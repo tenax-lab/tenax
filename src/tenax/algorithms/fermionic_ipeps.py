@@ -128,7 +128,7 @@ def _trotter_gate(H: SymmetricTensor, dt: float) -> SymmetricTensor:
 
     # Compute exp(-dt * H)
     exp_eigvals = np.exp(-dt * eigvals)
-    gate = eigvecs @ np.diag(exp_eigvals) @ eigvecs.T
+    gate = eigvecs @ np.diag(exp_eigvals) @ eigvecs.conj().T
 
     # Reshape back to (2, 2, 2, 2)
     gate_4leg = gate.reshape(2, 2, 2, 2)
@@ -171,6 +171,19 @@ def _initialize_fpeps(config: FPEPSConfig, key: jax.Array) -> SymmetricTensor:
     )
 
     return SymmetricTensor.random_normal(indices, key)
+
+
+def _normalize_tensor(T: SymmetricTensor) -> SymmetricTensor:
+    """Normalize a SymmetricTensor to unit norm."""
+    norm_val = float(T.norm())
+    if norm_val <= EPS:
+        return T
+    scale_factor = 1.0 / norm_val
+    new_blocks = {k: v * scale_factor for k, v in T._blocks.items()}
+    obj = object.__new__(SymmetricTensor)
+    obj._indices = T._indices
+    obj._blocks = new_blocks
+    return obj
 
 
 def _absorb_lambdas(
@@ -307,15 +320,7 @@ def _fpeps_simple_update_horizontal(
     U_final = _scale_bond_axis(U_final, 2, inv_lam_h)  # l
 
     # 10. Normalize
-    norm = U_final.norm()
-    norm_val = float(norm)
-    if norm_val > EPS:
-        scale_factor = 1.0 / norm_val
-        new_blocks = {k: v * scale_factor for k, v in U_final._blocks.items()}
-        obj = object.__new__(SymmetricTensor)
-        obj._indices = U_final._indices
-        obj._blocks = new_blocks
-        U_final = obj
+    U_final = _normalize_tensor(U_final)
 
     return U_final, lam_h_new
 
@@ -393,15 +398,7 @@ def _fpeps_simple_update_vertical(
     U_final = _scale_bond_axis(U_final, 3, inv_lam_h)  # r
 
     # 10. Normalize
-    norm = U_final.norm()
-    norm_val = float(norm)
-    if norm_val > EPS:
-        scale_factor = 1.0 / norm_val
-        new_blocks = {k: v * scale_factor for k, v in U_final._blocks.items()}
-        obj = object.__new__(SymmetricTensor)
-        obj._indices = U_final._indices
-        obj._blocks = new_blocks
-        U_final = obj
+    U_final = _normalize_tensor(U_final)
 
     return U_final, lam_v_new
 
