@@ -3,8 +3,17 @@
 **JAX-based tensor network library with symmetry-aware block-sparse tensors.**
 
 Tenax provides label-based tensor contraction (Cytnx-style), abelian symmetry
-support (U(1), Z_n), and production-ready implementations of DMRG, TRG, HOTRG,
+support (U(1), Z_n), and implementations of DMRG, TRG, HOTRG,
 and iPEPS algorithms.
+
+```{admonition} Experimental project
+:class: warning
+
+This library is under active development and largely written with the assistance
+of Claude Code (AI). While we test extensively, AI-generated code can contain
+subtle bugs. Please verify results against known benchmarks before using them in
+research. Bug reports and contributions are welcome.
+```
 
 ## Key Features
 

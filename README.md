@@ -4,6 +4,8 @@ A JAX-based tensor network library with symmetry-aware block-sparse tensors and 
 
 The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for "holding fast" — reflecting how tensor networks bind indices together through contraction.
 
+> **Experimental project** — This library is under active development and largely written with the assistance of Claude Code (AI). While we test extensively, AI-generated code can contain subtle bugs. Please verify results against known benchmarks before using them in research. Bug reports and contributions are welcome.
+
 ## Features
 
 - **Block-sparse symmetric tensors** — only symmetry-allowed charge sectors stored (U(1), Z_n)
