@@ -12,6 +12,7 @@ from tenax.core.tensor import (
     SymmetricTensor,
     _block_slices,
     _compute_valid_blocks,
+    inner,
 )
 
 
@@ -400,3 +401,135 @@ class TestDenseSymmetricParity:
                 grid = np.ix_(*idx_arrays)
                 covered[grid] = True
         np.testing.assert_allclose(dense[~covered], 0.0, atol=1e-7)
+
+
+class TestDenseTensorArithmetic:
+    def test_mul(self, small_dense_matrix):
+        t2 = small_dense_matrix * 3.0
+        np.testing.assert_allclose(t2.todense(), small_dense_matrix.todense() * 3.0)
+
+    def test_rmul(self, small_dense_matrix):
+        t2 = 3.0 * small_dense_matrix
+        np.testing.assert_allclose(t2.todense(), small_dense_matrix.todense() * 3.0)
+
+    def test_add(self, small_dense_matrix):
+        t2 = small_dense_matrix + small_dense_matrix
+        np.testing.assert_allclose(t2.todense(), small_dense_matrix.todense() * 2.0)
+
+    def test_sub(self, small_dense_matrix):
+        t2 = small_dense_matrix - small_dense_matrix
+        np.testing.assert_allclose(t2.todense(), 0.0, atol=1e-14)
+
+    def test_neg(self, small_dense_matrix):
+        t2 = -small_dense_matrix
+        np.testing.assert_allclose(t2.todense(), -small_dense_matrix.todense())
+
+    def test_max_abs(self, small_dense_matrix):
+        m = small_dense_matrix.max_abs()
+        expected = jnp.max(jnp.abs(small_dense_matrix.todense()))
+        np.testing.assert_allclose(float(m), float(expected))
+
+    def test_labels_preserved_after_mul(self, small_dense_matrix):
+        t2 = small_dense_matrix * 2.0
+        assert t2.labels() == small_dense_matrix.labels()
+
+    def test_labels_preserved_after_add(self, small_dense_matrix):
+        t2 = small_dense_matrix + small_dense_matrix
+        assert t2.labels() == small_dense_matrix.labels()
+
+
+class TestSymmetricTensorArithmetic:
+    def test_mul(self, u1_sym_tensor_2leg):
+        t = u1_sym_tensor_2leg
+        t2 = t * 3.0
+        np.testing.assert_allclose(t2.todense(), t.todense() * 3.0, rtol=1e-6)
+
+    def test_rmul(self, u1_sym_tensor_2leg):
+        t = u1_sym_tensor_2leg
+        t2 = 3.0 * t
+        np.testing.assert_allclose(t2.todense(), t.todense() * 3.0, rtol=1e-6)
+
+    def test_add(self, u1_sym_tensor_2leg):
+        t = u1_sym_tensor_2leg
+        t2 = t + t
+        np.testing.assert_allclose(t2.todense(), t.todense() * 2.0, rtol=1e-6)
+
+    def test_sub(self, u1_sym_tensor_2leg):
+        t = u1_sym_tensor_2leg
+        t2 = t - t
+        np.testing.assert_allclose(t2.todense(), 0.0, atol=1e-14)
+
+    def test_neg(self, u1_sym_tensor_2leg):
+        t = u1_sym_tensor_2leg
+        t2 = -t
+        np.testing.assert_allclose(t2.todense(), -t.todense(), rtol=1e-6)
+
+    def test_max_abs(self, u1_sym_tensor_2leg):
+        t = u1_sym_tensor_2leg
+        m = t.max_abs()
+        expected = jnp.max(jnp.abs(t.todense()))
+        np.testing.assert_allclose(float(m), float(expected), rtol=1e-6)
+
+    def test_max_abs_empty(self, u1):
+        """max_abs on a tensor with no blocks returns 0."""
+        charges = np.array([0], dtype=np.int32)
+        indices = (
+            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex(
+                u1, np.array([1], dtype=np.int32), FlowDirection.OUT, label="b"
+            ),
+        )
+        t = SymmetricTensor.zeros(indices)
+        assert float(t.max_abs()) == 0.0
+
+    def test_add_mixed_type_raises(self, u1_sym_tensor_2leg, small_dense_matrix):
+        with pytest.raises(TypeError, match="Cannot add"):
+            u1_sym_tensor_2leg + small_dense_matrix
+
+    def test_block_structure_preserved(self, u1_sym_tensor_2leg):
+        t = u1_sym_tensor_2leg
+        t2 = t * 2.0 + t
+        assert set(t2.blocks.keys()) == set(t.blocks.keys())
+
+    def test_labels_preserved_after_mul(self, u1_sym_tensor_2leg):
+        t2 = u1_sym_tensor_2leg * 2.0
+        assert t2.labels() == u1_sym_tensor_2leg.labels()
+
+
+class TestInner:
+    def test_dense_self_inner(self, small_dense_matrix):
+        t = small_dense_matrix
+        result = inner(t, t)
+        expected = jnp.sum(jnp.abs(t.todense()) ** 2)
+        np.testing.assert_allclose(float(result), float(expected), rtol=1e-6)
+
+    def test_symmetric_self_inner(self, u1_sym_tensor_2leg):
+        t = u1_sym_tensor_2leg
+        result = inner(t, t)
+        expected = jnp.sum(jnp.abs(t.todense()) ** 2)
+        np.testing.assert_allclose(float(result), float(expected), rtol=1e-6)
+
+    def test_inner_equals_norm_squared(self, u1_sym_tensor_2leg):
+        t = u1_sym_tensor_2leg
+        ip = inner(t, t)
+        norm_sq = t.norm() ** 2
+        np.testing.assert_allclose(float(ip), float(norm_sq), rtol=1e-6)
+
+    def test_inner_equals_norm_squared_dense(self, small_dense_matrix):
+        t = small_dense_matrix
+        ip = inner(t, t)
+        norm_sq = t.norm() ** 2
+        np.testing.assert_allclose(float(ip), float(norm_sq), rtol=1e-6)
+
+    def test_mixed_type_fallback(self, u1, rng):
+        """inner(dense, symmetric) falls back to dense contraction."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
+            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+        )
+        sym = SymmetricTensor.random_normal(indices, rng)
+        dense = DenseTensor(sym.todense(), indices)
+        result = inner(dense, sym)
+        expected = jnp.sum(jnp.abs(sym.todense()) ** 2)
+        np.testing.assert_allclose(float(result), float(expected), rtol=1e-6)

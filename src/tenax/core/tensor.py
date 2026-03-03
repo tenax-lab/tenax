@@ -247,6 +247,56 @@ class Tensor:
         """
         raise NotImplementedError
 
+    def __mul__(self, scalar: float) -> Tensor:
+        """Scalar multiplication: T * scalar."""
+        raise NotImplementedError
+
+    def __rmul__(self, scalar: float) -> Tensor:
+        """Scalar multiplication: scalar * T."""
+        return self.__mul__(scalar)
+
+    def __add__(self, other: Tensor) -> Tensor:
+        """Element-wise addition of two tensors with the same indices."""
+        raise NotImplementedError
+
+    def __sub__(self, other: Tensor) -> Tensor:
+        """Element-wise subtraction."""
+        return self.__add__(other.__mul__(-1.0))
+
+    def __neg__(self) -> Tensor:
+        """Negate all elements."""
+        return self.__mul__(-1.0)
+
+    def max_abs(self) -> jax.Array:
+        """Maximum absolute value across all elements."""
+        raise NotImplementedError
+
+
+def inner(a: Tensor, b: Tensor) -> jax.Array:
+    """Compute the inner product (full contraction) of two tensors.
+
+    Contracts all shared labels to produce a scalar. Both tensors must
+    have the same set of labels.
+
+    Args:
+        a: First tensor.
+        b: Second tensor (will be conjugated).
+
+    Returns:
+        Scalar JAX array: sum of a_conj * b over all elements.
+    """
+    if isinstance(a, DenseTensor) and isinstance(b, DenseTensor):
+        return jnp.sum(jnp.conj(a._data) * b._data)
+    if isinstance(a, SymmetricTensor) and isinstance(b, SymmetricTensor):
+        # Both must have matching block keys
+        total = jnp.zeros((), dtype=a.dtype)
+        for key in a._blocks:
+            if key in b._blocks:
+                total = total + jnp.sum(jnp.conj(a._blocks[key]) * b._blocks[key])
+        return total
+    # Mixed types: fall back to dense
+    return jnp.sum(jnp.conj(a.todense()) * b.todense())
+
 
 # ---------- DenseTensor ----------
 
@@ -383,6 +433,28 @@ class DenseTensor(Tensor):
             for idx in self._indices
         )
         return DenseTensor(self._data, new_indices)
+
+    def __mul__(self, scalar: float) -> DenseTensor:
+        return DenseTensor(self._data * scalar, self._indices)
+
+    def __rmul__(self, scalar: float) -> DenseTensor:
+        return self.__mul__(scalar)
+
+    def __add__(self, other: Tensor) -> DenseTensor:
+        if not isinstance(other, DenseTensor):
+            other = DenseTensor(other.todense(), other.indices)
+        return DenseTensor(self._data + other._data, self._indices)
+
+    def __sub__(self, other: Tensor) -> DenseTensor:
+        if not isinstance(other, DenseTensor):
+            other = DenseTensor(other.todense(), other.indices)
+        return DenseTensor(self._data - other._data, self._indices)
+
+    def __neg__(self) -> DenseTensor:
+        return DenseTensor(-self._data, self._indices)
+
+    def max_abs(self) -> jax.Array:
+        return jnp.max(jnp.abs(self._data))
 
     def __repr__(self) -> str:
         return (
@@ -780,6 +852,52 @@ class SymmetricTensor(Tensor):
         obj._indices = new_indices
         obj._blocks = self._blocks
         return obj
+
+    def __mul__(self, scalar: float) -> SymmetricTensor:
+        new_blocks = {k: v * scalar for k, v in self._blocks.items()}
+        obj = object.__new__(SymmetricTensor)
+        obj._indices = self._indices
+        obj._blocks = new_blocks
+        return obj
+
+    def __rmul__(self, scalar: float) -> SymmetricTensor:
+        return self.__mul__(scalar)
+
+    def __add__(self, other: Tensor) -> SymmetricTensor:
+        if not isinstance(other, SymmetricTensor):
+            raise TypeError(
+                f"Cannot add SymmetricTensor and {type(other).__name__}; "
+                f"convert to matching type first."
+            )
+        # Union of block keys: add where both exist, copy where only one exists
+        new_blocks: dict[BlockKey, jax.Array] = {}
+        all_keys = set(self._blocks.keys()) | set(other._blocks.keys())
+        for key in all_keys:
+            if key in self._blocks and key in other._blocks:
+                new_blocks[key] = self._blocks[key] + other._blocks[key]
+            elif key in self._blocks:
+                new_blocks[key] = self._blocks[key]
+            else:
+                new_blocks[key] = other._blocks[key]
+        obj = object.__new__(SymmetricTensor)
+        obj._indices = self._indices
+        obj._blocks = new_blocks
+        return obj
+
+    def __sub__(self, other: Tensor) -> SymmetricTensor:
+        if not isinstance(other, SymmetricTensor):
+            raise TypeError(
+                f"Cannot subtract {type(other).__name__} from SymmetricTensor."
+            )
+        return self.__add__(other.__mul__(-1.0))
+
+    def __neg__(self) -> SymmetricTensor:
+        return self.__mul__(-1.0)
+
+    def max_abs(self) -> jax.Array:
+        if not self._blocks:
+            return jnp.zeros((), dtype=self.dtype)
+        return jnp.max(jnp.stack([jnp.max(jnp.abs(v)) for v in self._blocks.values()]))
 
     def __repr__(self) -> str:
         total_elements = sum(v.size for v in self._blocks.values())
