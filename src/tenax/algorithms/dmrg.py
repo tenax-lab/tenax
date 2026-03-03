@@ -148,21 +148,20 @@ def dmrg(
     # Select backend: symmetric when both MPS and MPO are all SymmetricTensor
     all_mps_sym = all(isinstance(t, SymmetricTensor) for t in mps_tensors)
     all_mpo_sym = all(isinstance(t, SymmetricTensor) for t in mpo_tensors)
-    use_symmetric = all_mps_sym and all_mpo_sym
+    all_mps_dense = all(isinstance(t, DenseTensor) for t in mps_tensors)
+    all_mpo_dense = all(isinstance(t, DenseTensor) for t in mpo_tensors)
 
-    if use_symmetric:
+    if all_mps_sym and all_mpo_sym:
+        use_symmetric = True
         ops = _symmetric_ops()
-    else:
+    elif all_mps_dense and all_mpo_dense:
+        use_symmetric = False
         ops = _dense_ops()
-        # Convert any SymmetricTensor to DenseTensor for the dense path
-        mps_tensors = [
-            DenseTensor(t.todense(), t.indices) if not isinstance(t, DenseTensor) else t
-            for t in mps_tensors
-        ]
-        mpo_tensors = [
-            DenseTensor(t.todense(), t.indices) if not isinstance(t, DenseTensor) else t
-            for t in mpo_tensors
-        ]
+    else:
+        raise TypeError(
+            "dmrg() requires uniform tensor types: all DenseTensor or all "
+            "SymmetricTensor. Got mixed types — convert explicitly."
+        )
 
     # Validate initial MPS sector if target_charge is specified
     if config.target_charge is not None and use_symmetric:

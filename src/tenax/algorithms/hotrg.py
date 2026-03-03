@@ -25,10 +25,10 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
-from tenax.core import LOG_EPS
-from tenax.core.tensor import DenseTensor, Tensor
+from tenax.algorithms._tensor_utils import max_abs_normalize
+from tenax.contraction.contractor import contract, truncated_svd
+from tenax.core.tensor import Tensor
 
 
 @dataclass
@@ -61,8 +61,8 @@ def hotrg(
     providing better accuracy than TRG at the same bond dimension.
 
     Args:
-        tensor: Initial site tensor with 4 legs (up, down, left, right).
-                Can be a DenseTensor or raw tensor-like with shape (d,d,d,d).
+        tensor: Initial site tensor (DenseTensor or SymmetricTensor) with
+                4 legs labeled ("up", "down", "left", "right").
         config: HOTRGConfig parameters.
 
     Returns:
@@ -75,12 +75,11 @@ def hotrg(
             f"Must be one of {valid_directions}."
         )
 
-    if isinstance(tensor, DenseTensor):
-        T = tensor.todense()
-    else:
-        T = tensor.todense()
+    if not isinstance(tensor, Tensor):
+        raise TypeError(f"hotrg() requires a Tensor, got {type(tensor).__name__}")
 
-    log_norm_total = jnp.zeros((), dtype=T.dtype)
+    T = tensor
+    log_norm_total = jnp.zeros((), dtype=T.todense().dtype)
 
     for step in range(config.num_steps):
         if config.direction_order == "alternating":
@@ -107,128 +106,110 @@ def hotrg(
     return log_norm_total
 
 
-def _apply_svd_trunc_err(s: jax.Array, chi: int, svd_trunc_err: float) -> int:
-    """Reduce chi so that the relative truncation error stays within bound.
-
-    Args:
-        s:             Singular values (sorted descending).
-        chi:           Current maximum number of values to keep.
-        svd_trunc_err: Maximum allowed relative truncation error.
-
-    Returns:
-        Possibly reduced chi.
-    """
-    s_np = np.array(s[:chi])
-    total_sq = float(np.sum(np.array(s) ** 2))
-    if total_sq == 0:
-        return chi
-    trunc_sq = 0.0
-    for i in range(len(s_np) - 1, 0, -1):
-        trunc_sq += float(s_np[i] ** 2)
-        if trunc_sq / total_sq > svd_trunc_err**2:
-            return i + 1
-    return chi
-
-
 def _hotrg_step_horizontal(
-    T: jax.Array,
+    T: Tensor,
     max_bond_dim: int,
     svd_trunc_err: float | None = None,
-) -> tuple[jax.Array, jax.Array]:
-    """Single horizontal HOTRG coarse-graining step.
+) -> tuple[Tensor, jax.Array]:
+    """Single horizontal HOTRG coarse-graining step (polymorphic).
 
-    Contracts two adjacent tensors horizontally and uses HOSVD to find
+    Contracts two adjacent tensors horizontally and uses SVD to find
     the optimal truncation isometries for the paired up and down bonds.
 
     Args:
-        T:             Site tensor of shape (d_u, d_d, d_l, d_r).
+        T:             Site tensor with labels ("up", "down", "left", "right").
         max_bond_dim:  Maximum chi after truncation.
         svd_trunc_err: Optional maximum truncation error per HOSVD.
 
     Returns:
         (T_new, log_norm) where T_new has compressed up/down bonds.
     """
-    d_u, d_d, d_l, d_r = T.shape
+    # Step 1: Form environment M by contracting T with itself over (left, right).
+    # T has labels (up, down, left, right). Second copy relabeled to avoid collision.
+    T_copy = T.relabels({"up": "U", "down": "D", "left": "right", "right": "left"})
+    # T_copy: (U, D, right, left) — shares "left" and "right" with T
+    M = contract(T, T_copy)  # contracts left↔left, right↔right → (up, down, U, D)
 
-    # Step 1: Form environment tensor M by contracting over horizontal bonds
-    # M[u,U,d,D] = sum_{l,r} T[u,d,l,r] * T[U,D,r,l]
-    M = jnp.einsum("udlr,UDrl->uUdD", T, T)
-    # Shape: (d_u, d_u, d_d, d_d)
+    # Step 2: Isometries via SVD of environment
+    # Group (up, U) vs (down, D) → get paired isometries
+    U_iso, _, Vh_iso, _ = truncated_svd(
+        M,
+        left_labels=["up", "U"],
+        right_labels=["down", "D"],
+        new_bond_label="a",
+        max_singular_values=max_bond_dim,
+        max_truncation_err=svd_trunc_err,
+    )
+    # U_iso: (up, U, a),  Vh_iso: (a, down, D)
 
-    # Step 2: Compute paired isometries via SVD of M reshaped to (d_u^2, d_d^2)
-    chi = min(max_bond_dim, d_u * d_u, d_d * d_d)
-    M_mat = M.reshape(d_u * d_u, d_d * d_d)
-    U_full, s_full, Vh_full = jnp.linalg.svd(M_mat, full_matrices=False)
+    # Step 3: Merge two T copies over the shared horizontal bond
+    T_left = T.relabel("right", "k")  # (up, down, left, k)
+    T_right = T.relabels({"up": "U", "down": "D", "left": "k"})  # (U, D, k, right)
+    T_merged = contract(T_left, T_right)  # contracts k → (up, down, left, U, D, right)
 
-    if svd_trunc_err is not None:
-        chi = _apply_svd_trunc_err(s_full, chi, svd_trunc_err)
+    # Step 4: Apply isometries to compress (up, U) → a and (down, D) → b
+    # Dagger flips flow directions so contracted legs have opposite flows,
+    # which is required for SymmetricTensor charge conservation.
+    # Use two-step contraction (multi-tensor symmetric contraction has
+    # limitations when different tensor pairs share different bonds).
+    U_iso_dag = U_iso.dagger()  # (up_out, U_out, a_in)
+    Vh_iso_b = Vh_iso.relabel("a", "b").dagger()  # (b_out, down_in, D_in)
+    T_tmp = contract(U_iso_dag, T_merged)  # contracts up, U → (a, down, left, D, right)
+    T_new = contract(T_tmp, Vh_iso_b, output_labels=("a", "b", "left", "right"))
+    T_new = T_new.relabels({"a": "up", "b": "down"})
 
-    U_u = U_full[:, :chi]  # (d_u^2, chi)
-    U_d = Vh_full[:chi, :].T  # (d_d^2, chi)
-
-    # Step 3: Contract two T tensors over shared horizontal bond,
-    # then apply paired isometries
-    # T_merged[u,U,d,D,l,r] = T[u,d,l,k] * T[U,D,k,r]
-    T_merged = jnp.einsum("udlk,UDkr->uUdDlr", T, T)
-    # Reshape paired indices: (u,U) -> d_u^2, (d,D) -> d_d^2
-    T_merged = T_merged.reshape(d_u * d_u, d_d * d_d, d_l, d_r)
-    # Apply isometries: T_new[a,b,l,r] = U_u[(uU),a] * T_merged[(uU),(dD),l,r] * U_d[(dD),b]
-    T_new = jnp.einsum("ua,udlr,db->ablr", U_u, T_merged, U_d)
-
-    # Normalize
-    norm = jnp.max(jnp.abs(T_new))
-    log_norm = jnp.log(norm + LOG_EPS)
-    T_new = T_new / (norm + LOG_EPS)
-
+    # Step 5: Normalize
+    T_new, log_norm = max_abs_normalize(T_new)
     return T_new, log_norm
 
 
 def _hotrg_step_vertical(
-    T: jax.Array,
+    T: Tensor,
     max_bond_dim: int,
     svd_trunc_err: float | None = None,
-) -> tuple[jax.Array, jax.Array]:
-    """Single vertical HOTRG coarse-graining step.
+) -> tuple[Tensor, jax.Array]:
+    """Single vertical HOTRG coarse-graining step (polymorphic).
 
     Analogous to horizontal step but contracts along the up-down direction.
 
     Args:
-        T:             Site tensor of shape (d_u, d_d, d_l, d_r).
+        T:             Site tensor with labels ("up", "down", "left", "right").
         max_bond_dim:  Maximum chi after truncation.
         svd_trunc_err: Optional maximum truncation error per HOSVD.
 
     Returns:
         (T_new, log_norm) where T_new has compressed left/right bonds.
     """
-    d_u, d_d, d_l, d_r = T.shape
+    # Step 1: Form environment M by contracting T with itself over (up, down).
+    T_copy = T.relabels({"left": "L", "right": "R", "up": "down", "down": "up"})
+    # T_copy: (down, up, L, R) — shares "up" and "down" with T
+    M = contract(T, T_copy)  # contracts up↔up, down↔down → (left, right, L, R)
 
-    # Form environment: M[l,L,r,R] = sum_{u,d} T[u,d,l,r] * T[d,u,L,R]
-    M = jnp.einsum("udlr,duLR->lLrR", T, T)
-    # Shape: (d_l, d_l, d_r, d_r)
+    # Step 2: Isometries via SVD of environment
+    U_iso, _, Vh_iso, _ = truncated_svd(
+        M,
+        left_labels=["left", "L"],
+        right_labels=["right", "R"],
+        new_bond_label="a",
+        max_singular_values=max_bond_dim,
+        max_truncation_err=svd_trunc_err,
+    )
+    # U_iso: (left, L, a),  Vh_iso: (a, right, R)
 
-    # Paired isometries via SVD of M reshaped to (d_l^2, d_r^2)
-    chi = min(max_bond_dim, d_l * d_l, d_r * d_r)
-    M_mat = M.reshape(d_l * d_l, d_r * d_r)
-    U_full, s_full, Vh_full = jnp.linalg.svd(M_mat, full_matrices=False)
+    # Step 3: Merge two T copies over the shared vertical bond
+    T_top = T.relabel("down", "k")  # (up, k, left, right)
+    T_bottom = T.relabels({"left": "L", "right": "R", "up": "k"})  # (k, down, L, R)
+    T_merged = contract(T_top, T_bottom)  # contracts k → (up, left, right, down, L, R)
 
-    if svd_trunc_err is not None:
-        chi = _apply_svd_trunc_err(s_full, chi, svd_trunc_err)
+    # Step 4: Apply isometries to compress (left, L) → a and (right, R) → b
+    # Dagger flips flow directions for SymmetricTensor charge conservation.
+    # Use two-step contraction (see horizontal step comment).
+    U_iso_dag = U_iso.dagger()
+    Vh_iso_b = Vh_iso.relabel("a", "b").dagger()
+    T_tmp = contract(U_iso_dag, T_merged)  # contracts left, L → (up, right, down, R, a)
+    T_new = contract(T_tmp, Vh_iso_b, output_labels=("up", "down", "a", "b"))
+    T_new = T_new.relabels({"a": "left", "b": "right"})
 
-    U_l = U_full[:, :chi]  # (d_l^2, chi)
-    U_r = Vh_full[:chi, :].T  # (d_r^2, chi)
-
-    # Contract two T tensors over shared vertical bond,
-    # then apply paired isometries
-    # T_merged[u,d,l,L,r,R] = T[u,k,l,r] * T[k,d,L,R]
-    T_merged = jnp.einsum("uklr,kdLR->udlLrR", T, T)
-    # Reshape paired indices: (l,L) -> d_l^2, (r,R) -> d_r^2
-    T_merged = T_merged.reshape(d_u, d_d, d_l * d_l, d_r * d_r)
-    # Apply isometries
-    T_new = jnp.einsum("la,udlr,rb->udab", U_l, T_merged, U_r)
-
-    # Normalize
-    norm = jnp.max(jnp.abs(T_new))
-    log_norm = jnp.log(norm + LOG_EPS)
-    T_new = T_new / (norm + LOG_EPS)
-
+    # Step 5: Normalize
+    T_new, log_norm = max_abs_normalize(T_new)
     return T_new, log_norm

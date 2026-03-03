@@ -11,7 +11,23 @@ from tenax.algorithms.hotrg import (
     hotrg,
 )
 from tenax.algorithms.trg import compute_ising_tensor, ising_free_energy_exact
-from tenax.core.tensor import DenseTensor
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.symmetry import U1Symmetry
+from tenax.core.tensor import DenseTensor, SymmetricTensor
+
+
+def _make_dense_tensor(arr: np.ndarray) -> DenseTensor:
+    """Wrap a raw (d,d,d,d) array as a DenseTensor with HOTRG labels."""
+    sym = U1Symmetry()
+    d = arr.shape[0]
+    charges = np.zeros(d, dtype=np.int32)
+    indices = (
+        TensorIndex(sym, charges, FlowDirection.IN, label="up"),
+        TensorIndex(sym, charges, FlowDirection.OUT, label="down"),
+        TensorIndex(sym, charges, FlowDirection.IN, label="left"),
+        TensorIndex(sym, charges, FlowDirection.OUT, label="right"),
+    )
+    return DenseTensor(jnp.array(arr), indices)
 
 
 class TestHOTRGConfig:
@@ -29,56 +45,76 @@ class TestHOTRGConfig:
 
 
 class TestHOTRGStepHorizontal:
-    def test_output_shape(self):
-        """Horizontal HOTRG step: output tensor should have 4 legs."""
-        T = np.random.default_rng(0).random((2, 2, 2, 2)).astype(np.float64)
+    def test_output_is_tensor(self):
+        """Horizontal HOTRG step: output should be a Tensor with 4 legs."""
+        T = _make_dense_tensor(
+            np.random.default_rng(0).random((2, 2, 2, 2)).astype(np.float64)
+        )
         T_new, log_norm = _hotrg_step_horizontal(T, max_bond_dim=3)
-        assert T_new.ndim == 4
+        assert isinstance(T_new, DenseTensor)
+        assert T_new.todense().ndim == 4
 
     def test_log_norm_finite(self):
-        T = np.random.default_rng(0).random((2, 2, 2, 2)).astype(np.float64)
+        T = _make_dense_tensor(
+            np.random.default_rng(0).random((2, 2, 2, 2)).astype(np.float64)
+        )
         _, log_norm = _hotrg_step_horizontal(T, max_bond_dim=3)
         assert np.isfinite(float(log_norm))
 
     def test_bond_dim_truncation(self):
         """Up/down bond dims should be bounded by max_bond_dim after step."""
-        T = np.random.default_rng(0).random((4, 4, 4, 4)).astype(np.float64)
+        T = _make_dense_tensor(
+            np.random.default_rng(0).random((4, 4, 4, 4)).astype(np.float64)
+        )
         T_new, _ = _hotrg_step_horizontal(T, max_bond_dim=3)
+        arr = T_new.todense()
         # After horizontal step, up/down legs (axes 0,1) are compressed
-        assert T_new.shape[0] <= 3
-        assert T_new.shape[1] <= 3
+        assert arr.shape[0] <= 3
+        assert arr.shape[1] <= 3
 
     def test_output_normalized(self):
         """Output tensor should be normalized (max |entry| ≈ 1)."""
-        T = np.random.default_rng(42).random((2, 2, 2, 2)).astype(np.float64)
+        T = _make_dense_tensor(
+            np.random.default_rng(42).random((2, 2, 2, 2)).astype(np.float64)
+        )
         T_new, _ = _hotrg_step_horizontal(T, max_bond_dim=4)
-        arr = np.array(T_new)
+        arr = np.array(T_new.todense())
         max_val = np.max(np.abs(arr))
         assert np.isclose(max_val, 1.0, atol=0.05), f"Expected ~1, got {max_val}"
 
 
 class TestHOTRGStepVertical:
-    def test_output_shape(self):
-        T = np.random.default_rng(0).random((2, 2, 2, 2)).astype(np.float64)
+    def test_output_is_tensor(self):
+        T = _make_dense_tensor(
+            np.random.default_rng(0).random((2, 2, 2, 2)).astype(np.float64)
+        )
         T_new, log_norm = _hotrg_step_vertical(T, max_bond_dim=3)
-        assert T_new.ndim == 4
+        assert isinstance(T_new, DenseTensor)
+        assert T_new.todense().ndim == 4
 
     def test_log_norm_finite(self):
-        T = np.random.default_rng(0).random((2, 2, 2, 2)).astype(np.float64)
+        T = _make_dense_tensor(
+            np.random.default_rng(0).random((2, 2, 2, 2)).astype(np.float64)
+        )
         _, log_norm = _hotrg_step_vertical(T, max_bond_dim=3)
         assert np.isfinite(float(log_norm))
 
     def test_bond_dim_truncation(self):
         """Left/right bond dims should be bounded by max_bond_dim."""
-        T = np.random.default_rng(0).random((4, 4, 4, 4)).astype(np.float64)
+        T = _make_dense_tensor(
+            np.random.default_rng(0).random((4, 4, 4, 4)).astype(np.float64)
+        )
         T_new, _ = _hotrg_step_vertical(T, max_bond_dim=3)
-        assert T_new.shape[2] <= 3
-        assert T_new.shape[3] <= 3
+        arr = T_new.todense()
+        assert arr.shape[2] <= 3
+        assert arr.shape[3] <= 3
 
     def test_output_normalized(self):
-        T = np.random.default_rng(42).random((2, 2, 2, 2)).astype(np.float64)
+        T = _make_dense_tensor(
+            np.random.default_rng(42).random((2, 2, 2, 2)).astype(np.float64)
+        )
         T_new, _ = _hotrg_step_vertical(T, max_bond_dim=4)
-        arr = np.array(T_new)
+        arr = np.array(T_new.todense())
         max_val = np.max(np.abs(arr))
         assert np.isclose(max_val, 1.0, atol=0.05), f"Expected ~1, got {max_val}"
 
@@ -229,4 +265,39 @@ class TestHOTRGRun:
         assert err_hotrg <= err_trg + 1e-6, (
             f"HOTRG should be at least as accurate as TRG: "
             f"err_trg={err_trg:.6f}, err_hotrg={err_hotrg:.6f}"
+        )
+
+    def test_rejects_non_tensor(self):
+        """hotrg() should reject raw arrays with TypeError."""
+        raw_arr = np.random.default_rng(0).random((2, 2, 2, 2))
+        config = HOTRGConfig(max_bond_dim=4, num_steps=3)
+        with pytest.raises(TypeError, match="requires a Tensor"):
+            hotrg(raw_arr, config)
+
+
+class TestHOTRGSymmetric:
+    """Tests for HOTRG with SymmetricTensor (Z₂-symmetric Ising tensor)."""
+
+    def test_symmetric_hotrg_runs(self):
+        """HOTRG should run on a symmetric Ising tensor without error."""
+        tensor = compute_ising_tensor(beta=0.3, symmetric=True)
+        assert isinstance(tensor, SymmetricTensor)
+        config = HOTRGConfig(max_bond_dim=8, num_steps=5)
+        result = hotrg(tensor, config)
+        assert jnp.isfinite(result)
+
+    def test_symmetric_hotrg_matches_exact(self):
+        """Symmetric HOTRG at beta=0.3 should match exact free energy within 1%."""
+        beta = 0.3
+        tensor = compute_ising_tensor(beta=beta, symmetric=True)
+        config = HOTRGConfig(max_bond_dim=16, num_steps=20)
+        log_z_per_n = hotrg(tensor, config)
+        hotrg_free_energy = float(-log_z_per_n / beta)
+        exact_free_energy = ising_free_energy_exact(beta)
+        relative_error = abs(hotrg_free_energy - exact_free_energy) / abs(
+            exact_free_energy
+        )
+        assert relative_error < 0.01, (
+            f"Symmetric HOTRG free energy {hotrg_free_energy:.6f} too far from "
+            f"exact {exact_free_energy:.6f} (rel err={relative_error:.4f})"
         )

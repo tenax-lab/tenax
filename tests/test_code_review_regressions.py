@@ -82,9 +82,18 @@ class TestOneSiteDMRG:
             build_random_mps,
             dmrg,
         )
+        from tenax.core.tensor import DenseTensor
+        from tenax.network.network import TensorNetwork
 
         L = 6
-        mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
+        mpo_sym = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
+        mpo = TensorNetwork()
+        for nid in mpo_sym.node_ids():
+            t = mpo_sym.get_tensor(nid)
+            if not isinstance(t, DenseTensor):
+                mpo.add_node(nid, DenseTensor(t.todense(), t.indices))
+            else:
+                mpo.add_node(nid, t)
         mps = build_random_mps(L, physical_dim=2, bond_dim=8, seed=42)
         config = DMRGConfig(
             max_bond_dim=8,
@@ -104,9 +113,18 @@ class TestOneSiteDMRG:
             build_random_mps,
             dmrg,
         )
+        from tenax.core.tensor import DenseTensor
+        from tenax.network.network import TensorNetwork
 
         L = 4
-        mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
+        mpo_sym = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
+        mpo = TensorNetwork()
+        for nid in mpo_sym.node_ids():
+            t = mpo_sym.get_tensor(nid)
+            if not isinstance(t, DenseTensor):
+                mpo.add_node(nid, DenseTensor(t.todense(), t.indices))
+            else:
+                mpo.add_node(nid, t)
         mps = build_random_mps(L, physical_dim=2, bond_dim=4, seed=7)
         config = DMRGConfig(
             max_bond_dim=4,
@@ -263,11 +281,21 @@ class TestHOTRGSvdTruncErr:
     def test_svd_trunc_err_reduces_bond_dim(self):
         from tenax.algorithms.hotrg import _hotrg_step_horizontal
 
-        T = np.random.default_rng(0).random((4, 4, 4, 4)).astype(np.float64)
+        T = _make_tensor(
+            (4, 4, 4, 4),
+            ["up", "down", "left", "right"],
+            flows=[
+                FlowDirection.IN,
+                FlowDirection.OUT,
+                FlowDirection.IN,
+                FlowDirection.OUT,
+            ],
+            seed=0,
+        )
         T_no_trunc, _ = _hotrg_step_horizontal(T, max_bond_dim=16)
         T_trunc, _ = _hotrg_step_horizontal(T, max_bond_dim=16, svd_trunc_err=0.01)
         # With truncation error, bond dim should be <= without
-        assert T_trunc.shape[0] <= T_no_trunc.shape[0]
+        assert T_trunc.todense().shape[0] <= T_no_trunc.todense().shape[0]
 
 
 # ------------------------------------------------------------------ #

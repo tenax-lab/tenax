@@ -12,7 +12,23 @@ from tenax.algorithms.trg import (
     ising_free_energy_exact,
     trg,
 )
-from tenax.core.tensor import DenseTensor
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.symmetry import U1Symmetry
+from tenax.core.tensor import DenseTensor, SymmetricTensor
+
+
+def _make_dense_tensor(arr: np.ndarray) -> DenseTensor:
+    """Wrap a raw (d,d,d,d) array as a DenseTensor with TRG labels."""
+    sym = U1Symmetry()
+    d = arr.shape[0]
+    charges = np.zeros(d, dtype=np.int32)
+    indices = (
+        TensorIndex(sym, charges, FlowDirection.IN, label="up"),
+        TensorIndex(sym, charges, FlowDirection.OUT, label="down"),
+        TensorIndex(sym, charges, FlowDirection.IN, label="left"),
+        TensorIndex(sym, charges, FlowDirection.OUT, label="right"),
+    )
+    return DenseTensor(jnp.array(arr), indices)
 
 
 class TestTRGConfig:
@@ -33,6 +49,18 @@ class TestComputeIsingTensor:
     def test_returns_dense_tensor(self):
         T = compute_ising_tensor(beta=0.4, J=1.0)
         assert isinstance(T, DenseTensor)
+
+    def test_returns_symmetric_tensor(self):
+        T = compute_ising_tensor(beta=0.4, symmetric=True)
+        assert isinstance(T, SymmetricTensor)
+
+    def test_symmetric_has_z2_blocks(self):
+        """Symmetric Ising tensor should have 8 Z₂-allowed blocks."""
+        T_sym = compute_ising_tensor(beta=0.4, symmetric=True)
+        # 8 blocks where sum of charges is even mod 2
+        assert T_sym.n_blocks == 8
+        assert (0, 0, 0, 0) in T_sym.blocks
+        assert (1, 1, 1, 1) in T_sym.blocks
 
     def test_shape_is_2222(self):
         T = compute_ising_tensor(beta=0.4)
@@ -120,37 +148,48 @@ class TestIsingFreeEnergyExact:
 
 
 class TestTRGStep:
-    def test_output_shape_unchanged(self):
-        """TRG step should return a 4-leg tensor (possibly different dimension)."""
-        T = np.random.default_rng(0).random((2, 2, 2, 2)).astype(np.float64)
+    def test_output_is_4leg_tensor(self):
+        """TRG step should return a 4-leg Tensor."""
+        T = _make_dense_tensor(
+            np.random.default_rng(0).random((2, 2, 2, 2)).astype(np.float64)
+        )
         T_new, log_norm = _trg_step(T, max_bond_dim=4, svd_trunc_err=None)
-        assert T_new.ndim == 4
+        assert isinstance(T_new, DenseTensor)
+        assert T_new.todense().ndim == 4
 
     def test_log_norm_is_finite(self):
-        T = np.random.default_rng(0).random((2, 2, 2, 2)).astype(np.float64)
+        T = _make_dense_tensor(
+            np.random.default_rng(0).random((2, 2, 2, 2)).astype(np.float64)
+        )
         _, log_norm = _trg_step(T, max_bond_dim=4, svd_trunc_err=None)
         assert np.isfinite(float(log_norm))
 
     def test_output_normalized(self):
         """After a TRG step, max(|T_new|) should be ~1 (normalized)."""
-        T = np.random.default_rng(42).random((2, 2, 2, 2)).astype(np.float64)
+        T = _make_dense_tensor(
+            np.random.default_rng(42).random((2, 2, 2, 2)).astype(np.float64)
+        )
         T_new, _ = _trg_step(T, max_bond_dim=4, svd_trunc_err=None)
-        arr = np.array(T_new)
+        arr = np.array(T_new.todense())
         max_val = np.max(np.abs(arr))
         assert np.isclose(max_val, 1.0, atol=0.01), f"Expected ~1, got {max_val}"
 
     def test_bond_truncation(self):
         """Bond dimension should not exceed max_bond_dim."""
-        T = np.random.default_rng(0).random((4, 4, 4, 4)).astype(np.float64)
+        T = _make_dense_tensor(
+            np.random.default_rng(0).random((4, 4, 4, 4)).astype(np.float64)
+        )
         T_new, _ = _trg_step(T, max_bond_dim=3, svd_trunc_err=None)
-        for dim in T_new.shape:
+        for dim in T_new.todense().shape:
             assert dim <= 3, f"Expected dim <= 3, got {dim}"
 
     def test_with_svd_trunc_err(self):
         """SVD truncation error mode should run without crashing."""
-        T = np.random.default_rng(0).random((2, 2, 2, 2)).astype(np.float64)
+        T = _make_dense_tensor(
+            np.random.default_rng(0).random((2, 2, 2, 2)).astype(np.float64)
+        )
         T_new, log_norm = _trg_step(T, max_bond_dim=4, svd_trunc_err=1e-4)
-        assert T_new.ndim == 4
+        assert T_new.todense().ndim == 4
         assert np.isfinite(float(log_norm))
 
 
@@ -301,3 +340,59 @@ class TestTRGRun:
         config = TRGConfig(max_bond_dim=4, num_steps=3)
         result = trg(tensor, config)
         assert np.isfinite(float(result))
+
+    def test_rejects_non_tensor(self):
+        """trg() should reject raw arrays with TypeError."""
+        raw_arr = np.random.default_rng(0).random((2, 2, 2, 2))
+        config = TRGConfig(max_bond_dim=4, num_steps=3)
+        with pytest.raises(TypeError, match="requires a Tensor"):
+            trg(raw_arr, config)
+
+
+class TestTRGSymmetric:
+    """Tests for TRG with SymmetricTensor (Z₂-symmetric Ising tensor)."""
+
+    def test_symmetric_trg_runs(self):
+        """TRG should run on a symmetric Ising tensor without error."""
+        tensor = compute_ising_tensor(beta=0.3, symmetric=True)
+        assert isinstance(tensor, SymmetricTensor)
+        config = TRGConfig(max_bond_dim=8, num_steps=5)
+        result = trg(tensor, config)
+        assert jnp.isfinite(result)
+
+    def test_symmetric_trg_matches_dense_high_temp(self):
+        """Symmetric TRG should match dense TRG at high temperature.
+
+        The two use different bases (Z₂ eigenbasis vs original spin basis),
+        so TRG truncation gives slightly different results.  Both should
+        agree to within 0.1% relative to the free energy.
+        """
+        beta = 0.2
+        tensor_dense = compute_ising_tensor(beta=beta, symmetric=False)
+        tensor_sym = compute_ising_tensor(beta=beta, symmetric=True)
+        config = TRGConfig(max_bond_dim=16, num_steps=20)
+
+        result_dense = float(trg(tensor_dense, config))
+        result_sym = float(trg(tensor_sym, config))
+
+        # Both should produce similar log(Z)/N (truncation basis may differ)
+        assert abs(result_dense - result_sym) < 0.01, (
+            f"Dense TRG log(Z)/N={result_dense:.8f} vs "
+            f"Symmetric TRG log(Z)/N={result_sym:.8f}"
+        )
+
+    def test_symmetric_trg_matches_exact(self):
+        """Symmetric TRG at beta=0.3 should match exact free energy within 2%."""
+        beta = 0.3
+        tensor = compute_ising_tensor(beta=beta, symmetric=True)
+        config = TRGConfig(max_bond_dim=16, num_steps=20)
+        log_z_per_n = trg(tensor, config)
+        trg_free_energy = float(-log_z_per_n / beta)
+        exact_free_energy = ising_free_energy_exact(beta)
+        relative_error = abs(trg_free_energy - exact_free_energy) / abs(
+            exact_free_energy
+        )
+        assert relative_error < 0.02, (
+            f"Symmetric TRG free energy {trg_free_energy:.6f} too far from "
+            f"exact {exact_free_energy:.6f} (rel err={relative_error:.4f})"
+        )

@@ -20,7 +20,8 @@ from tenax.algorithms.dmrg import (
     build_random_mps,
     dmrg,
 )
-from tenax.core.tensor import SymmetricTensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor
+from tenax.network.network import TensorNetwork
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -35,6 +36,18 @@ def _heisenberg_terms(L: int, Jz: float = 1.0, Jxy: float = 1.0) -> list[tuple]:
         terms.append((Jxy / 2, "Sp", i, "Sm", i + 1))
         terms.append((Jxy / 2, "Sm", i, "Sp", i + 1))
     return terms
+
+
+def _densify_tensor_network(tn: TensorNetwork) -> TensorNetwork:
+    """Convert all tensors in a TensorNetwork to DenseTensor."""
+    result = TensorNetwork()
+    for nid in tn.node_ids():
+        t = tn.get_tensor(nid)
+        if isinstance(t, DenseTensor):
+            result.add_node(nid, t)
+        else:
+            result.add_node(nid, DenseTensor(t.todense(), t.indices))
+    return result
 
 
 def _build_heisenberg_matrix(L: int, Jz: float = 1.0, Jxy: float = 1.0) -> np.ndarray:
@@ -298,7 +311,15 @@ class TestAutoMPOReproducesHeisenberg:
     @pytest.mark.parametrize("L", [3, 4])
     def test_dmrg_energy_matches_hardcoded(self, L: int):
         auto_mpo = build_auto_mpo(_heisenberg_terms(L), L=L)
-        ref_mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
+        ref_mpo_sym = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
+        # Densify ref_mpo to match DenseTensor MPS
+        ref_mpo = TensorNetwork()
+        for nid in ref_mpo_sym.node_ids():
+            t = ref_mpo_sym.get_tensor(nid)
+            if not isinstance(t, DenseTensor):
+                ref_mpo.add_node(nid, DenseTensor(t.todense(), t.indices))
+            else:
+                ref_mpo.add_node(nid, t)
 
         config = DMRGConfig(
             max_bond_dim=16, num_sweeps=6, lanczos_max_iter=15, verbose=False
@@ -640,6 +661,8 @@ class TestAutoMPOSymmetric:
         terms = _heisenberg_terms(L)
         mpo_dense = build_auto_mpo(terms, L=L)
         mpo_sym = build_auto_mpo(terms, L=L, symmetric=True)
+        # Densify the symmetric MPO so it can be used with dense MPS
+        mpo_sym_dense = _densify_tensor_network(mpo_sym)
 
         config = DMRGConfig(
             max_bond_dim=16, num_sweeps=6, lanczos_max_iter=15, verbose=False
@@ -649,7 +672,7 @@ class TestAutoMPOSymmetric:
         mps2 = build_random_mps(L, physical_dim=2, bond_dim=4, seed=seed)
 
         res_dense = dmrg(mpo_dense, mps1, config)
-        res_sym = dmrg(mpo_sym, mps2, config)
+        res_sym = dmrg(mpo_sym_dense, mps2, config)
 
         assert abs(res_sym.energy - res_dense.energy) < 0.05, (
             f"Symmetric DMRG energy {res_sym.energy:.4f} differs from "

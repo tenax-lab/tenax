@@ -216,6 +216,9 @@ class Tensor:
     def conj(self) -> Tensor:
         raise NotImplementedError
 
+    def dagger(self) -> Tensor:
+        raise NotImplementedError
+
     def transpose(self, axes: tuple[int, ...]) -> Tensor:
         raise NotImplementedError
 
@@ -377,6 +380,11 @@ class DenseTensor(Tensor):
 
     def conj(self) -> DenseTensor:
         return DenseTensor(jnp.conj(self._data), self._indices)
+
+    def dagger(self) -> DenseTensor:
+        """Conjugate transpose: conjugate data and dual all indices."""
+        new_indices = tuple(idx.dual() for idx in self._indices)
+        return DenseTensor(jnp.conj(self._data), new_indices)
 
     def transpose(self, axes: tuple[int, ...]) -> DenseTensor:
         """Permute tensor legs.
