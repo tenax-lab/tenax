@@ -60,7 +60,7 @@ def spinless_fermion_gate(config: FPEPSConfig) -> SymmetricTensor:
     """Build the 2-site Hamiltonian H = -t(c†c + h.c.) + V(n_i n_j).
 
     The Hamiltonian acts on two spinless fermion sites with local
-    Hilbert space {|0>, |1>} (empty, occupied). The fermionic
+    Hilbert space ``{|0>, |1>}`` (empty, occupied). The fermionic
     anti-commutation relations are encoded via FermionParity symmetry.
 
     Args:
