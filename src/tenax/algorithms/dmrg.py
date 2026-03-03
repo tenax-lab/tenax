@@ -30,12 +30,14 @@ from typing import Any, NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+import opt_einsum
 
 from tenax.algorithms._tensor_utils import scale_bond_axis
+from tenax.algorithms.auto_mpo import build_auto_mpo
 from tenax.contraction.contractor import contract, qr_decompose, truncated_svd
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor, Tensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor, inner
 from tenax.network.network import TensorNetwork
 
 
@@ -89,6 +91,33 @@ class DMRGResult(NamedTuple):
     converged: bool
 
 
+class SweepOps(NamedTuple):
+    """Callback bundle holding all backend-specific operations for a DMRG sweep.
+
+    Dense and symmetric backends each provide their own implementations.
+    The sweep loop is backend-agnostic — it only calls through ``ops.*``.
+    """
+
+    build_trivial_left_env: Callable[..., Tensor]
+    build_trivial_right_env: Callable[..., Tensor]
+    update_left_env: Callable[[Tensor, Tensor, Tensor], Tensor]
+    update_right_env: Callable[[Tensor, Tensor, Tensor], Tensor]
+    two_site_update: Callable[..., tuple[Tensor, float]]
+    one_site_update: Callable[..., tuple[Tensor, float]]
+
+
+def _dense_ops() -> SweepOps:
+    """Return the dense (existing) backend callbacks."""
+    return SweepOps(
+        build_trivial_left_env=_build_trivial_left_env,
+        build_trivial_right_env=_build_trivial_right_env,
+        update_left_env=_update_left_env,
+        update_right_env=_update_right_env,
+        two_site_update=_two_site_update,
+        one_site_update=_one_site_update,
+    )
+
+
 def dmrg(
     hamiltonian: TensorNetwork,
     initial_mps: TensorNetwork,
@@ -109,21 +138,31 @@ def dmrg(
         DMRGResult with energy, sweep history, optimized MPS, and diagnostics.
     """
     L = hamiltonian.n_nodes()
-    # Convert any SymmetricTensor initial states to DenseTensor.  The DMRG
-    # engine operates entirely in dense mode (all contractions go through
-    # .todense()), so the block-sparse structure is not preserved across sweeps.
-    mps_tensors: list[Tensor] = [
-        DenseTensor(t.todense(), t.indices) if not isinstance(t, DenseTensor) else t
-        for t in [initial_mps.get_tensor(i) for i in range(L)]
-    ]
+    mps_tensors: list[Tensor] = [initial_mps.get_tensor(i) for i in range(L)]
     mpo_tensors = [hamiltonian.get_tensor(i) for i in range(L)]
 
-    # Right-canonicalize the initial MPS (skipped: label-based QR may reorder legs)
-    # mps_tensors = _right_canonicalize(mps_tensors)
+    # Select backend: symmetric when both MPS and MPO are all SymmetricTensor
+    all_mps_sym = all(isinstance(t, SymmetricTensor) for t in mps_tensors)
+    all_mpo_sym = all(isinstance(t, SymmetricTensor) for t in mpo_tensors)
+    use_symmetric = all_mps_sym and all_mpo_sym
+
+    if use_symmetric:
+        ops = _symmetric_ops()
+    else:
+        ops = _dense_ops()
+        # Convert any SymmetricTensor to DenseTensor for the dense path
+        mps_tensors = [
+            DenseTensor(t.todense(), t.indices) if not isinstance(t, DenseTensor) else t
+            for t in mps_tensors
+        ]
+        mpo_tensors = [
+            DenseTensor(t.todense(), t.indices) if not isinstance(t, DenseTensor) else t
+            for t in mpo_tensors
+        ]
 
     # Build left environments (L[i] = trivial for i=0)
-    left_envs = _build_left_environments_list(mps_tensors, mpo_tensors, L)
-    right_envs = _build_right_environments_list(mps_tensors, mpo_tensors, L)
+    left_envs = _build_left_environments_list(mps_tensors, mpo_tensors, L, ops)
+    right_envs = _build_right_environments_list(mps_tensors, mpo_tensors, L, ops)
 
     energies_per_sweep: list[float] = []
     truncation_errors: list[float] = []
@@ -135,18 +174,16 @@ def dmrg(
 
         # Rebuild left environments from updated MPS before left-to-right sweep
         if sweep > 0:
-            left_envs = _build_left_environments_list(mps_tensors, mpo_tensors, L)
+            left_envs = _build_left_environments_list(mps_tensors, mpo_tensors, L, ops)
 
         # Left-to-right sweep
         for i in range(L - 1):
             l_env = left_envs[i]
             assert l_env is not None
             if config.two_site:
-                # 2-site update at sites (i, i+1)
-                # right_envs[i+2] = environment to the right of site i+1
                 _r = right_envs[i + 2]
-                r_env = _r if _r is not None else _build_trivial_right_env()
-                theta, e = _two_site_update(
+                r_env = _r if _r is not None else ops.build_trivial_right_env()
+                theta, e = ops.two_site_update(
                     mps_tensors[i],
                     mps_tensors[i + 1],
                     l_env,
@@ -157,19 +194,16 @@ def dmrg(
                 )
                 energy = float(e)
 
-                # SVD and truncate
                 A, s, B, trunc_err = _svd_and_truncate_site(theta, i, config)
                 mps_tensors[i] = A
                 mps_tensors[i + 1] = B
                 truncation_errors.append(float(trunc_err))
 
-                # Update left environment
-                left_envs[i + 1] = _update_left_env(l_env, A, mpo_tensors[i])
+                left_envs[i + 1] = ops.update_left_env(l_env, A, mpo_tensors[i])
             else:
-                # 1-site update
                 _ri = right_envs[i + 1]
-                r_env_1s = _ri if _ri is not None else _build_trivial_right_env()
-                new_site, e = _one_site_update(
+                r_env_1s = _ri if _ri is not None else ops.build_trivial_right_env()
+                new_site, e = ops.one_site_update(
                     mps_tensors[i],
                     l_env,
                     mpo_tensors[i],
@@ -178,21 +212,19 @@ def dmrg(
                 )
                 energy = float(e)
                 mps_tensors[i] = new_site
-                left_envs[i + 1] = _update_left_env(l_env, new_site, mpo_tensors[i])
+                left_envs[i + 1] = ops.update_left_env(l_env, new_site, mpo_tensors[i])
 
         # Rebuild right environments from updated MPS before right-to-left sweep
-        right_envs = _build_right_environments_list(mps_tensors, mpo_tensors, L)
+        right_envs = _build_right_environments_list(mps_tensors, mpo_tensors, L, ops)
 
         # Right-to-left sweep
         for i in range(L - 2, -1, -1):
             l_env = left_envs[i]
             assert l_env is not None
             _r2 = right_envs[i + 2]
-            r2_env = _r2 if _r2 is not None else _build_trivial_right_env()
+            r2_env = _r2 if _r2 is not None else ops.build_trivial_right_env()
             if config.two_site:
-                # 2-site update at sites (i, i+1)
-                # right_envs[i+2] = environment to the right of site i+1
-                theta, e = _two_site_update(
+                theta, e = ops.two_site_update(
                     mps_tensors[i],
                     mps_tensors[i + 1],
                     l_env,
@@ -210,11 +242,11 @@ def dmrg(
                 mps_tensors[i + 1] = B
                 truncation_errors.append(float(trunc_err))
 
-                right_envs[i + 1] = _update_right_env(r2_env, B, mpo_tensors[i + 1])
+                right_envs[i + 1] = ops.update_right_env(r2_env, B, mpo_tensors[i + 1])
             else:
                 _r1 = right_envs[i + 1]
-                r1_env = _r1 if _r1 is not None else _build_trivial_right_env()
-                new_site, e = _one_site_update(
+                r1_env = _r1 if _r1 is not None else ops.build_trivial_right_env()
+                new_site, e = ops.one_site_update(
                     mps_tensors[i],
                     l_env,
                     mpo_tensors[i],
@@ -223,7 +255,7 @@ def dmrg(
                 )
                 energy = float(e)
                 mps_tensors[i] = new_site
-                right_envs[i] = _update_right_env(r1_env, new_site, mpo_tensors[i])
+                right_envs[i] = ops.update_right_env(r1_env, new_site, mpo_tensors[i])
 
         energies_per_sweep.append(energy)
         if config.verbose:
@@ -304,19 +336,11 @@ def _find_right_bond(labels: tuple, site: int) -> str | None:
     return None
 
 
-def _trivial_env() -> DenseTensor:
-    """Create a trivial (scalar 1) environment tensor."""
-    from tenax.core.symmetry import U1Symmetry
-
-    sym = U1Symmetry()
-    idx = TensorIndex(sym, np.zeros(1, dtype=np.int32), FlowDirection.IN, label="env")
-    return DenseTensor(jnp.ones((1,), dtype=jnp.float64), (idx,))
-
-
 def _build_left_environments_list(
     mps_tensors: list[Tensor],
     mpo_tensors: list[Tensor],
     L: int,
+    ops: SweepOps | None = None,
 ) -> list[Tensor | None]:
     """Build all left environment tensors by sweeping left to right.
 
@@ -325,14 +349,15 @@ def _build_left_environments_list(
     Returns list of L+1 environment tensors (None used as placeholder where
     not yet computed; replaced with dense contractions in full implementation).
     """
+    if ops is None:
+        ops = _dense_ops()
     envs: list[Tensor | None] = [None] * (L + 1)
-    # Trivial left environment (scalar 1)
-    envs[0] = _build_trivial_left_env()
+    envs[0] = ops.build_trivial_left_env()
 
     for i in range(L - 1):
         env = envs[i]
         if env is not None:
-            envs[i + 1] = _update_left_env(env, mps_tensors[i], mpo_tensors[i])
+            envs[i + 1] = ops.update_left_env(env, mps_tensors[i], mpo_tensors[i])
 
     return envs
 
@@ -341,15 +366,18 @@ def _build_right_environments_list(
     mps_tensors: list[Tensor],
     mpo_tensors: list[Tensor],
     L: int,
+    ops: SweepOps | None = None,
 ) -> list[Tensor | None]:
     """Build all right environment tensors by sweeping right to left."""
+    if ops is None:
+        ops = _dense_ops()
     envs: list[Tensor | None] = [None] * (L + 1)
-    envs[L] = _build_trivial_right_env()
+    envs[L] = ops.build_trivial_right_env()
 
     for i in range(L - 1, 0, -1):
         env = envs[i + 1]
         if env is not None:
-            envs[i] = _update_right_env(env, mps_tensors[i], mpo_tensors[i])
+            envs[i] = ops.update_right_env(env, mps_tensors[i], mpo_tensors[i])
 
     return envs
 
@@ -839,6 +867,489 @@ def _svd_and_truncate_site(
 
 
 # ------------------------------------------------------------------ #
+# Symmetric (block-sparse) backend                                     #
+# ------------------------------------------------------------------ #
+
+
+def _build_trivial_left_env_symmetric(dtype=None) -> SymmetricTensor:
+    """Build trivial (1x1x1) left boundary environment as SymmetricTensor."""
+    if dtype is None:
+        dtype = jnp.float64
+    sym = U1Symmetry()
+    bond = np.zeros(1, dtype=np.int32)
+    indices = (
+        TensorIndex(sym, bond, FlowDirection.IN, label="env_mps_l"),
+        TensorIndex(sym, bond, FlowDirection.IN, label="env_mpo_l"),
+        TensorIndex(sym, bond, FlowDirection.OUT, label="env_mps_conj_l"),
+    )
+    blocks: dict[tuple[int, ...], jax.Array] = {
+        (0, 0, 0): jnp.ones((1, 1, 1), dtype=dtype)
+    }
+    return SymmetricTensor(blocks, indices)
+
+
+def _build_trivial_right_env_symmetric(dtype=None) -> SymmetricTensor:
+    """Build trivial (1x1x1) right boundary environment as SymmetricTensor."""
+    if dtype is None:
+        dtype = jnp.float64
+    sym = U1Symmetry()
+    bond = np.zeros(1, dtype=np.int32)
+    indices = (
+        TensorIndex(sym, bond, FlowDirection.OUT, label="env_mps_r"),
+        TensorIndex(sym, bond, FlowDirection.OUT, label="env_mpo_r"),
+        TensorIndex(sym, bond, FlowDirection.IN, label="env_mps_conj_r"),
+    )
+    blocks: dict[tuple[int, ...], jax.Array] = {
+        (0, 0, 0): jnp.ones((1, 1, 1), dtype=dtype)
+    }
+    return SymmetricTensor(blocks, indices)
+
+
+def _pad_boundary_symmetric(t: SymmetricTensor, pad_left: bool) -> SymmetricTensor:
+    """Pad a 2D boundary SymmetricTensor to 3D by adding a trivial dimension.
+
+    Args:
+        t:        2D SymmetricTensor (boundary MPS site).
+        pad_left: If True, prepend trivial dim (left boundary: (p,v) -> (1,p,v)).
+                  If False, append trivial dim (right boundary: (v,p) -> (v,p,1)).
+
+    Returns:
+        3D SymmetricTensor with a trivial charge-0 dimension added.
+    """
+    sym = U1Symmetry()
+    trivial_bond = np.zeros(1, dtype=np.int32)
+
+    if pad_left:
+        trivial_idx = TensorIndex(sym, trivial_bond, FlowDirection.IN, label="_pad_l")
+        new_indices = (trivial_idx,) + t.indices
+        new_blocks = {(0,) + key: arr[np.newaxis, :] for key, arr in t._blocks.items()}
+    else:
+        trivial_idx = TensorIndex(sym, trivial_bond, FlowDirection.OUT, label="_pad_r")
+        new_indices = t.indices + (trivial_idx,)
+        new_blocks = {
+            key + (0,): arr[:, :, np.newaxis] for key, arr in t._blocks.items()
+        }
+
+    obj = object.__new__(SymmetricTensor)
+    obj._indices = new_indices
+    obj._blocks = new_blocks
+    return obj
+
+
+def _unpad_boundary_symmetric(t: SymmetricTensor, pad_left: bool) -> SymmetricTensor:
+    """Remove a trivial dimension added by _pad_boundary_symmetric.
+
+    Args:
+        t:        3D SymmetricTensor with a trivial padding dimension.
+        pad_left: If True, remove first dim. If False, remove last dim.
+
+    Returns:
+        2D SymmetricTensor with the trivial dimension removed.
+    """
+    if pad_left:
+        new_indices = t.indices[1:]
+        new_blocks = {key[1:]: arr[0] for key, arr in t._blocks.items()}
+    else:
+        new_indices = t.indices[:-1]
+        new_blocks = {key[:-1]: arr[:, :, 0] for key, arr in t._blocks.items()}
+
+    obj = object.__new__(SymmetricTensor)
+    obj._indices = new_indices
+    obj._blocks = new_blocks
+    return obj
+
+
+def _lanczos_solve_tensor(
+    matvec: Callable[[Tensor], Tensor],
+    initial: Tensor,
+    num_steps: int,
+    tol: float,
+) -> tuple[float, Tensor]:
+    """Lanczos eigensolver operating on Tensor objects (dense or symmetric).
+
+    Uses inner(), norm(), and Tensor arithmetic instead of flat JAX arrays.
+
+    Args:
+        matvec:   Function applying H_eff to a Tensor, returning a Tensor.
+        initial:  Starting vector (Tensor).
+        num_steps: Maximum Lanczos iterations.
+        tol:      Convergence tolerance on the residual norm.
+
+    Returns:
+        (eigenvalue, eigenvector) for the ground state as Tensor.
+    """
+    v_norm = initial.norm()
+    v = initial * (1.0 / (float(v_norm) + 1e-15))
+
+    basis: list[Tensor] = [v]
+    alphas: list[float] = []
+    betas: list[float] = [0.0]
+
+    for step in range(num_steps):
+        w = matvec(basis[-1])
+        alpha_val = float(inner(basis[-1], w).real)
+        alphas.append(alpha_val)
+
+        w = w - basis[-1] * alpha_val
+        if step > 0:
+            w = w - basis[-2] * betas[-1]
+
+        beta_val = float(w.norm())
+        betas.append(beta_val)
+
+        if beta_val < tol:
+            break
+
+        basis.append(w * (1.0 / beta_val))
+
+    n = len(alphas)
+    if n == 0:
+        return 0.0, v
+    if n == 1:
+        return alphas[0], basis[0]
+
+    # Build tridiagonal matrix and diagonalize
+    alphas_arr = jnp.array(alphas)
+    betas_arr = jnp.array(betas[1:n])
+    T = jnp.diag(alphas_arr) + jnp.diag(betas_arr, k=1) + jnp.diag(betas_arr, k=-1)
+
+    eigvals, eigvecs = jnp.linalg.eigh(T)
+    idx = int(jnp.argmin(eigvals))
+    eigenvalue = float(eigvals[idx])
+    krylov_coefs = eigvecs[:, idx]
+
+    # Reconstruct eigenvector: sum(c_k * basis[k]) — can't stack SymmetricTensors
+    eigenvector = basis[0] * float(krylov_coefs[0])
+    for k in range(1, n):
+        eigenvector = eigenvector + basis[k] * float(krylov_coefs[k])
+
+    ev_norm = float(eigenvector.norm())
+    eigenvector = eigenvector * (1.0 / (ev_norm + 1e-15))
+
+    return eigenvalue, eigenvector
+
+
+def _blockwise_contract(
+    tensors: list[SymmetricTensor],
+    subscripts: str,
+    output_indices: tuple[TensorIndex, ...],
+    expr_cache: dict[tuple[tuple[int, ...], ...], Any] | None = None,
+) -> SymmetricTensor:
+    """Contract multiple SymmetricTensors using block-level charge matching.
+
+    Unlike ``_contract_symmetric`` in contractor.py, this handles multi-tensor
+    contractions correctly by iterating over all compatible block combinations
+    (with early pruning via charge matching) and does NOT filter output blocks
+    by a conservation law — it trusts the contraction result.
+
+    This is necessary for DMRG environment updates and matvec where contracted
+    indices may have same-direction flows (ket-ket or bra-bra physical indices),
+    which violates the opposite-flow assumption in ``_contract_symmetric``.
+
+    Args:
+        tensors:        List of SymmetricTensor inputs.
+        subscripts:     Einsum subscript string (e.g., "abc,apd,bpxe,cxf->def").
+        output_indices: TensorIndex metadata for the output legs.
+        expr_cache:     Optional shared cache for opt_einsum contraction
+                        expressions. Pass the same dict across calls (e.g.,
+                        Lanczos iterations) to avoid recomputing paths.
+
+    Returns:
+        SymmetricTensor with contracted result (bypasses conservation validation).
+
+    Note:
+        Callers must validate inputs via ``_assert_symmetric`` before calling.
+    """
+    input_part, output_part = subscripts.split("->")
+    input_subs = input_part.split(",")
+
+    # Accumulate contributions per output key, then sum once at the end
+    # to avoid repeated intermediate JAX array allocations.
+    output_accum: dict[tuple[int, ...], list[jax.Array]] = {}
+
+    # Cache for opt_einsum contraction expressions
+    if expr_cache is None:
+        expr_cache = {}
+
+    # Backtracking state (mutated in-place to avoid per-branch allocations)
+    combo_arrays: list[jax.Array] = []
+    char_charges: dict[str, int] = {}
+
+    def _recurse(tensor_idx: int) -> None:
+        if tensor_idx == len(tensors):
+            # All tensors matched — compute contraction
+            output_key = tuple(char_charges.get(c, 0) for c in output_part)
+
+            block_shapes = tuple(a.shape for a in combo_arrays)
+            if block_shapes in expr_cache:
+                expr = expr_cache[block_shapes]
+            else:
+                expr = opt_einsum.contract_expression(
+                    subscripts, *block_shapes, optimize="auto"
+                )
+                expr_cache[block_shapes] = expr
+            result_array = expr(*combo_arrays, backend="jax")
+
+            output_accum.setdefault(output_key, []).append(result_array)
+            return
+
+        subs = input_subs[tensor_idx]
+        for key, arr in tensors[tensor_idx].blocks.items():
+            # Check charge compatibility and track new assignments
+            added_chars: list[str] = []
+            compatible = True
+            for char, q in zip(subs, key):
+                qi = int(q)
+                if char in char_charges:
+                    if char_charges[char] != qi:
+                        compatible = False
+                        break
+                else:
+                    char_charges[char] = qi
+                    added_chars.append(char)
+
+            if compatible:
+                combo_arrays.append(arr)
+                _recurse(tensor_idx + 1)
+                combo_arrays.pop()
+
+            # Restore char_charges (backtrack)
+            for char in added_chars:
+                del char_charges[char]
+
+    _recurse(0)
+
+    # Sum accumulated contributions per output key
+    output_blocks: dict[tuple[int, ...], jax.Array] = {}
+    for key, arrays in output_accum.items():
+        total = arrays[0]
+        for a in arrays[1:]:
+            total = total + a
+        output_blocks[key] = total
+
+    # Build result bypassing SymmetricTensor validation (flows may not
+    # satisfy the standard conservation law for environment tensors).
+    obj = object.__new__(SymmetricTensor)
+    obj._indices = output_indices
+    obj._blocks = output_blocks
+    return obj
+
+
+def _assert_symmetric(*tensors: Tensor, context: str) -> None:
+    """Assert all tensors are SymmetricTensor; raise TypeError otherwise."""
+    for i, t in enumerate(tensors):
+        if not isinstance(t, SymmetricTensor):
+            raise TypeError(
+                f"{context}: expected SymmetricTensor for input {i}, "
+                f"got {type(t).__name__}. "
+                f"The symmetric DMRG path must never fall back to dense."
+            )
+
+
+def _update_left_env_symmetric(
+    left_env: Tensor,
+    mps_site: Tensor,
+    mpo_site: Tensor,
+) -> SymmetricTensor:
+    """Update left environment using block-sparse contraction.
+
+    Contracts: new_L[d,e,f] = L[a,b,c] * A[a,p,d] * W[b,p,x,e] * A*[c,x,f]
+
+    All inputs must be SymmetricTensor. The symmetric path must never
+    fall back to dense operations.
+    """
+    _assert_symmetric(
+        left_env, mps_site, mpo_site, context="_update_left_env_symmetric"
+    )
+    A = mps_site
+    # Pad boundary sites to 3D
+    if A.ndim == 2:
+        labels = A.labels()
+        is_left_boundary = isinstance(labels[0], str) and labels[0].startswith("p")
+        A = _pad_boundary_symmetric(A, pad_left=is_left_boundary)
+
+    A_conj = A.conj()
+
+    # Build output indices from the free legs of the contraction:
+    # d = A's right virtual, e = W's right bond, f = A_conj's right virtual
+    # Use generic env labels so subsequent contractions find consistent metadata.
+    out_indices = (A.indices[2], mpo_site.indices[3], A_conj.indices[2])
+    result = _blockwise_contract(
+        [left_env, A, mpo_site, A_conj],
+        "abc,apd,bpxe,cxf->def",
+        output_indices=out_indices,
+    )
+    return result
+
+
+def _update_right_env_symmetric(
+    right_env: Tensor,
+    mps_site: Tensor,
+    mpo_site: Tensor,
+) -> SymmetricTensor:
+    """Update right environment using block-sparse contraction.
+
+    Contracts: new_R[d,e,f] = R[a,b,c] * B[d,p,a] * W[e,p,x,b] * B*[f,x,c]
+
+    All inputs must be SymmetricTensor. The symmetric path must never
+    fall back to dense operations.
+    """
+    _assert_symmetric(
+        right_env, mps_site, mpo_site, context="_update_right_env_symmetric"
+    )
+    B = mps_site
+    # Pad boundary sites to 3D
+    if B.ndim == 2:
+        labels = B.labels()
+        is_left_boundary = isinstance(labels[0], str) and labels[0].startswith("p")
+        B = _pad_boundary_symmetric(B, pad_left=is_left_boundary)
+
+    B_conj = B.conj()
+
+    # Output: d = B's left virtual, e = W's left bond, f = B_conj's left virtual
+    out_indices = (B.indices[0], mpo_site.indices[0], B_conj.indices[0])
+    result = _blockwise_contract(
+        [right_env, B, mpo_site, B_conj],
+        "abc,dpa,epxb,fxc->def",
+        output_indices=out_indices,
+    )
+    return result
+
+
+def _two_site_update_symmetric(
+    site_l: Tensor,
+    site_r: Tensor,
+    left_env: Tensor,
+    mpo_l: Tensor,
+    mpo_r: Tensor,
+    right_env: Tensor,
+    config: DMRGConfig,
+) -> tuple[Tensor, float]:
+    """Perform 2-site DMRG update using block-sparse tensors.
+
+    All tensor inputs must be SymmetricTensor. The symmetric path must never
+    fall back to dense operations.
+    """
+    _assert_symmetric(
+        site_l,
+        site_r,
+        left_env,
+        mpo_l,
+        mpo_r,
+        right_env,
+        context="_two_site_update_symmetric",
+    )
+    # Contract theta = A[i] * A[i+1]
+    shared = set(site_l.labels()) & set(site_r.labels())
+    if shared:
+        theta = contract(site_l, site_r)
+    else:
+        theta = site_l
+
+    # Pad boundary sites to 4D
+    original_ndim = theta.ndim
+    pad_left = False
+    if theta.ndim == 3:
+        labels_list = [idx.label for idx in theta.indices]
+        has_left_virt = any(
+            isinstance(lbl, str) and lbl.startswith("v") for lbl in labels_list[:1]
+        )
+        if not has_left_virt:
+            pad_left = True
+            theta = _pad_boundary_symmetric(theta, pad_left=True)
+        else:
+            theta = _pad_boundary_symmetric(theta, pad_left=False)
+
+    # Shared cache for opt_einsum expressions across Lanczos iterations
+    _matvec_cache: dict[tuple[tuple[int, ...], ...], Any] = {}
+
+    def matvec(v: Tensor) -> Tensor:
+        result = _blockwise_contract(
+            [left_env, v, mpo_l, mpo_r, right_env],
+            "abc,apqd,bpse,eqtf,dfg->cstg",
+            output_indices=v.indices,
+            expr_cache=_matvec_cache,
+        )
+        return result
+
+    energy, theta_opt = _lanczos_solve_tensor(
+        matvec, theta, config.lanczos_max_iter, config.lanczos_tol
+    )
+
+    # Unpad if we padded
+    if original_ndim == 3:
+        theta_opt = _unpad_boundary_symmetric(theta_opt, pad_left=pad_left)
+
+    return theta_opt, energy
+
+
+def _one_site_update_symmetric(
+    site: Tensor,
+    left_env: Tensor,
+    mpo_site: Tensor,
+    right_env: Tensor,
+    config: DMRGConfig,
+) -> tuple[Tensor, float]:
+    """Perform 1-site DMRG update using block-sparse tensors.
+
+    All tensor inputs must be SymmetricTensor. The symmetric path must never
+    fall back to dense operations.
+    """
+    _assert_symmetric(
+        site, left_env, mpo_site, right_env, context="_one_site_update_symmetric"
+    )
+    original_ndim = site.ndim
+    pad_left = False
+
+    if site.ndim == 2:
+        labels_list = list(site.labels())
+        has_left_virt = any(
+            isinstance(lbl, str) and lbl.startswith("v") for lbl in labels_list[:1]
+        )
+        if not has_left_virt:
+            pad_left = True
+            site_3d = _pad_boundary_symmetric(site, pad_left=True)
+        else:
+            site_3d = _pad_boundary_symmetric(site, pad_left=False)
+    else:
+        site_3d = site
+
+    # Shared cache for opt_einsum expressions across Lanczos iterations
+    _matvec_cache: dict[tuple[tuple[int, ...], ...], Any] = {}
+
+    def matvec(v: Tensor) -> Tensor:
+        result = _blockwise_contract(
+            [left_env, v, mpo_site, right_env],
+            "abc,apd,bpxe,def->cxf",
+            output_indices=v.indices,
+            expr_cache=_matvec_cache,
+        )
+        return result
+
+    energy, site_opt = _lanczos_solve_tensor(
+        matvec, site_3d, config.lanczos_max_iter, config.lanczos_tol
+    )
+
+    # Unpad if we padded
+    if original_ndim == 2:
+        site_opt = _unpad_boundary_symmetric(site_opt, pad_left=pad_left)
+
+    return site_opt, energy
+
+
+def _symmetric_ops() -> SweepOps:
+    """Return the block-sparse symmetric backend callbacks."""
+    return SweepOps(
+        build_trivial_left_env=_build_trivial_left_env_symmetric,
+        build_trivial_right_env=_build_trivial_right_env_symmetric,
+        update_left_env=_update_left_env_symmetric,
+        update_right_env=_update_right_env_symmetric,
+        two_site_update=_two_site_update_symmetric,
+        one_site_update=_one_site_update_symmetric,
+    )
+
+
+# ------------------------------------------------------------------ #
 # MPO builders                                                        #
 # ------------------------------------------------------------------ #
 
@@ -855,8 +1366,9 @@ def build_mpo_heisenberg(
     H = Jz * sum_i Sz_i Sz_{i+1} + Jxy/2 * sum_i (S+_i S-_{i+1} + S-_i S+_{i+1})
         + hz * sum_i Sz_i
 
-    The MPO is constructed using the standard 5x5 MPO representation
-    with bond dimension 5 (I, S+, S-, Sz, I boundaries).
+    Returns a block-sparse (SymmetricTensor) MPO with U(1) charge conservation.
+    Paired with a symmetric MPS (e.g. from ``build_random_symmetric_mps``),
+    DMRG will use the fully block-sparse backend automatically.
 
     Args:
         L:      Chain length (number of sites).
@@ -869,103 +1381,19 @@ def build_mpo_heisenberg(
         TensorNetwork representing the MPO with L site tensors connected
         by virtual bonds. Each site tensor has legs:
         ("w{i-1}_{i}", "mpo_top_{i}", "mpo_bot_{i}", "w{i}_{i+1}")
-        Boundary sites have only 3 legs (one virtual bond removed).
     """
-    # Spin-1/2 operators (physical dimension d=2)
-    d = 2
-    Sp = jnp.array([[0, 1], [0, 0]], dtype=dtype)  # S+ = |up><down|
-    Sm = jnp.array([[0, 0], [1, 0]], dtype=dtype)  # S- = |down><up|
-    Sz = 0.5 * jnp.array([[1, 0], [0, -1]], dtype=dtype)
-    I2 = jnp.eye(d, dtype=dtype)
-
-    # MPO bond dimension = 5
-    # W = [[I,  0,  0,  0,  0 ],
-    #      [S+, 0,  0,  0,  0 ],
-    #      [S-, 0,  0,  0,  0 ],
-    #      [Sz, 0,  0,  0,  0 ],
-    #      [h*Sz, Jxy/2*Sm, Jxy/2*Sp, Jz*Sz, I]]
-    # Shape: (D_w, d, d, D_w) where D_w = 5
-    D_w = 5
-
-    def make_bulk_W() -> jax.Array:
-        W = jnp.zeros((D_w, d, d, D_w), dtype=dtype)
-        # Row 0: I (pass-through left boundary)
-        W = W.at[0, :, :, 0].set(I2)
-        # Row 1: S+ (start Jxy/2 * S+ S- term)
-        W = W.at[1, :, :, 0].set(Sp)
-        # Row 2: S- (start Jxy/2 * S- S+ term)
-        W = W.at[2, :, :, 0].set(Sm)
-        # Row 3: Sz (start Jz * Sz Sz term)
-        W = W.at[3, :, :, 0].set(Sz)
-        # Row 4: complete terms + on-site field + pass-through right boundary
-        W = W.at[4, :, :, 0].set(hz * Sz)
-        W = W.at[4, :, :, 1].set((Jxy / 2) * Sm)
-        W = W.at[4, :, :, 2].set((Jxy / 2) * Sp)
-        W = W.at[4, :, :, 3].set(Jz * Sz)
-        W = W.at[4, :, :, 4].set(I2)
-        return W
-
-    # Left boundary: shape (1, d, d, D_w) — last row of W only
-    W_left = make_bulk_W()[D_w - 1 : D_w, :, :, :]  # shape (1, d, d, D_w)
-
-    # Right boundary: shape (D_w, d, d, 1) — first column of W only
-    W_right = make_bulk_W()[:, :, :, 0:1]  # shape (D_w, d, d, 1)
-
-    W_bulk = make_bulk_W()
-
-    sym = U1Symmetry()
-    bond_1 = np.zeros(1, dtype=np.int32)
-    bond_dw = np.zeros(D_w, dtype=np.int32)
-    bond_d = np.zeros(d, dtype=np.int32)
-
-    mpo = TensorNetwork(name=f"Heisenberg_MPO_L{L}")
-
-    for i in range(L):
-        if L == 1:
-            W = make_bulk_W()[D_w - 1 : D_w, :, :, 0:1]
-            left_bond = bond_1
-            right_bond = bond_1
-        elif i == 0:
-            W = W_left
-            left_bond = bond_1
-            right_bond = bond_dw
-        elif i == L - 1:
-            W = W_right
-            left_bond = bond_dw
-            right_bond = bond_1
-        else:
-            W = W_bulk
-            left_bond = bond_dw
-            right_bond = bond_dw
-
-        if i == 0:
-            left_label = "w_left_0"
-        else:
-            left_label = f"w{i - 1}_{i}"
-
-        if i == L - 1:
-            right_label = "w_right"
-        else:
-            right_label = f"w{i}_{i + 1}"
-
-        indices = (
-            TensorIndex(sym, left_bond, FlowDirection.IN, label=left_label),
-            TensorIndex(sym, bond_d, FlowDirection.IN, label=f"mpo_top_{i}"),
-            TensorIndex(sym, bond_d, FlowDirection.OUT, label=f"mpo_bot_{i}"),
-            TensorIndex(sym, right_bond, FlowDirection.OUT, label=right_label),
-        )
-        mpo.add_node(i, DenseTensor(W, indices))
-
-    # Connect virtual MPO bonds
+    terms: list[tuple[float, ...]] = []
     for i in range(L - 1):
-        shared = set(mpo.get_tensor(i).labels()) & set(mpo.get_tensor(i + 1).labels())
-        for label in sorted(shared, key=str):
-            try:
-                mpo.connect(i, label, i + 1, label)
-            except (ValueError, KeyError):
-                pass
-
-    return mpo
+        terms.append((Jz, "Sz", i, "Sz", i + 1))
+        terms.append((Jxy / 2, "Sp", i, "Sm", i + 1))
+        terms.append((Jxy / 2, "Sm", i, "Sp", i + 1))
+    if hz != 0.0:
+        for i in range(L):
+            terms.append((hz, "Sz", i))
+    if not terms:
+        # L=1 with hz=0: add a zero on-site term so AutoMPO has at least one term
+        terms.append((0.0, "Sz", 0))
+    return build_auto_mpo(terms, L=L, symmetric=True)
 
 
 def build_random_symmetric_mps(
@@ -993,8 +1421,6 @@ def build_random_symmetric_mps(
     Returns:
         TensorNetwork representing the symmetric random MPS.
     """
-    from tenax.core.tensor import SymmetricTensor
-
     sym = U1Symmetry()
 
     # Physical: spin up = +1, spin down = −1

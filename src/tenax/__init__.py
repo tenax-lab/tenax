@@ -49,6 +49,7 @@ from tenax.algorithms.dmrg import (
     DMRGResult,
     build_mpo_heisenberg,
     build_random_mps,
+    build_random_symmetric_mps,
     dmrg,
 )
 from tenax.algorithms.fermionic_ipeps import (
@@ -151,6 +152,7 @@ __all__ = [
     "dmrg",
     "build_mpo_heisenberg",
     "build_random_mps",
+    "build_random_symmetric_mps",
     # TRG
     "TRGConfig",
     "trg",

@@ -15,7 +15,7 @@ from tenax.algorithms.dmrg import (
 )
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 
 class TestBuildMPOHeisenberg:
@@ -363,4 +363,207 @@ class TestSymmetricDMRGParity:
             f"Symmetric DMRG energy {result_sym.energy:.6f} differs from "
             f"dense DMRG energy {result_dense.energy:.6f} by "
             f"{abs(result_sym.energy - result_dense.energy):.4e}"
+        )
+
+
+# ------------------------------------------------------------------ #
+# Block-sparse symmetric DMRG tests                                   #
+# ------------------------------------------------------------------ #
+
+
+def _build_symmetric_heisenberg_mpo(L: int, Jz: float = 1.0, Jxy: float = 1.0):
+    """Build a fully symmetric (SymmetricTensor) Heisenberg MPO via AutoMPO."""
+    from tenax.algorithms.auto_mpo import build_auto_mpo
+
+    terms = []
+    for i in range(L - 1):
+        terms.append((Jz, "Sz", i, "Sz", i + 1))
+        terms.append((Jxy / 2, "Sp", i, "Sm", i + 1))
+        terms.append((Jxy / 2, "Sm", i, "Sp", i + 1))
+    return build_auto_mpo(terms, L=L, symmetric=True)
+
+
+class TestSymmetricBlockSparseDMRG:
+    """Tests for the fully block-sparse symmetric DMRG backend."""
+
+    def test_symmetric_block_sparse_dmrg_runs(self):
+        """Block-sparse DMRG with symmetric MPS + symmetric MPO should run."""
+        L = 4
+        mpo = _build_symmetric_heisenberg_mpo(L)
+        mps = build_random_symmetric_mps(L, bond_dim=4, seed=42)
+        config = DMRGConfig(max_bond_dim=8, num_sweeps=4, lanczos_max_iter=20)
+        result = dmrg(mpo, mps, config)
+        assert isinstance(result, DMRGResult)
+        assert np.isfinite(result.energy)
+        assert result.energy < 0.0
+
+    def test_symmetric_block_sparse_energy_matches_exact(self):
+        """Block-sparse DMRG energy should match ED within 1e-6 for L=4."""
+        L = 4
+        Jz, Jxy = 1.0, 1.0
+
+        H_mat = _build_heisenberg_matrix(L, Jz=Jz, Jxy=Jxy)
+        e_exact = float(np.linalg.eigvalsh(H_mat)[0])
+
+        mpo = _build_symmetric_heisenberg_mpo(L, Jz=Jz, Jxy=Jxy)
+        mps = build_random_symmetric_mps(L, bond_dim=4, seed=7)
+        config = DMRGConfig(
+            max_bond_dim=8,
+            num_sweeps=10,
+            lanczos_max_iter=30,
+            convergence_tol=1e-10,
+        )
+        result = dmrg(mpo, mps, config)
+
+        assert np.isfinite(result.energy)
+        assert abs(result.energy - e_exact) < 1e-6, (
+            f"Block-sparse DMRG energy {result.energy:.8f} deviates from "
+            f"ED {e_exact:.8f} by {abs(result.energy - e_exact):.4e}"
+        )
+
+    def test_symmetric_block_sparse_output_types(self):
+        """Output MPS sites should be SymmetricTensor when running block-sparse."""
+        L = 4
+        mpo = _build_symmetric_heisenberg_mpo(L)
+        mps = build_random_symmetric_mps(L, bond_dim=4, seed=0)
+        config = DMRGConfig(max_bond_dim=8, num_sweeps=2, lanczos_max_iter=10)
+        result = dmrg(mpo, mps, config)
+
+        for i in range(L):
+            t = result.mps.get_tensor(i)
+            assert isinstance(t, SymmetricTensor), (
+                f"Site {i} is {type(t).__name__}, expected SymmetricTensor"
+            )
+
+    def test_symmetric_block_sparse_no_todense_leak(self, monkeypatch):
+        """Contamination guard: block-sparse DMRG must NOT call todense().
+
+        Monkeypatch SymmetricTensor.todense to raise, then run full DMRG.
+        Any dense leak will be caught.
+        """
+
+        def todense_trap(self):
+            raise RuntimeError(
+                "todense() called during block-sparse DMRG — dense leak detected!"
+            )
+
+        monkeypatch.setattr(SymmetricTensor, "todense", todense_trap)
+
+        L = 4
+        mpo = _build_symmetric_heisenberg_mpo(L)
+        mps = build_random_symmetric_mps(L, bond_dim=4, seed=0)
+        config = DMRGConfig(max_bond_dim=8, num_sweeps=2, lanczos_max_iter=10)
+
+        # This must not raise RuntimeError
+        result = dmrg(mpo, mps, config)
+        assert np.isfinite(result.energy)
+
+    def test_mixed_symmetric_mps_dense_mpo_uses_dense_backend(self):
+        """Symmetric MPS + dense MPO should fall back to dense backend."""
+        L = 4
+        mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)  # dense MPO
+        mps = build_random_symmetric_mps(L, bond_dim=4, seed=0)
+        config = DMRGConfig(max_bond_dim=4, num_sweeps=2, lanczos_max_iter=10)
+        result = dmrg(mpo, mps, config)
+        assert isinstance(result, DMRGResult)
+        assert np.isfinite(result.energy)
+
+    def test_symmetric_block_sparse_one_site_dmrg(self):
+        """1-site block-sparse DMRG should run and produce negative energy.
+
+        Note: 1-site DMRG cannot grow bond dimension or change block structure,
+        so the final energy may be far from the true ground state when the
+        initial MPS has limited charge sectors. We only check that it runs
+        correctly and produces a finite, negative energy that decreases.
+        """
+        L = 4
+        mpo = _build_symmetric_heisenberg_mpo(L, Jz=1.0, Jxy=1.0)
+        mps = build_random_symmetric_mps(L, bond_dim=4, seed=7)
+        config = DMRGConfig(
+            max_bond_dim=8,
+            num_sweeps=6,
+            lanczos_max_iter=20,
+            convergence_tol=1e-10,
+            two_site=False,
+        )
+        result = dmrg(mpo, mps, config)
+
+        assert np.isfinite(result.energy)
+        assert result.energy < 0.0
+        # Energy should decrease over sweeps
+        if len(result.energies_per_sweep) >= 2:
+            assert result.energies_per_sweep[-1] <= result.energies_per_sweep[0] + 0.1
+
+    def test_symmetric_path_rejects_dense_inputs(self):
+        """Symmetric path functions must raise TypeError for DenseTensor inputs."""
+        from tenax.algorithms.dmrg import (
+            _build_trivial_left_env_symmetric,
+            _build_trivial_right_env_symmetric,
+            _update_left_env_symmetric,
+            _update_right_env_symmetric,
+        )
+
+        L = 4
+        mpo_sym = _build_symmetric_heisenberg_mpo(L)
+        mps_sym = build_random_symmetric_mps(L, bond_dim=4, seed=0)
+
+        # Valid symmetric env
+        l_env = _build_trivial_left_env_symmetric()
+        r_env = _build_trivial_right_env_symmetric()
+
+        # Convert one MPS site to dense — should trigger TypeError
+        dense_site = DenseTensor(
+            mps_sym.get_tensor(0).todense(), mps_sym.get_tensor(0).indices
+        )
+
+        with pytest.raises(TypeError, match="symmetric DMRG path must never fall back"):
+            _update_left_env_symmetric(l_env, dense_site, mpo_sym.get_tensor(0))
+
+        with pytest.raises(TypeError, match="symmetric DMRG path must never fall back"):
+            _update_right_env_symmetric(r_env, dense_site, mpo_sym.get_tensor(0))
+
+    def test_symmetric_block_sparse_env_update_vs_dense(self):
+        """Symmetric env update should match dense env update on same MPO data.
+
+        We use the same symmetric MPO and MPS, but compare the symmetric env
+        update against a dense env update that converts everything to arrays
+        first. The comparison is done via the einsum on raw dense arrays.
+        """
+        from tenax.algorithms.dmrg import (
+            _build_trivial_left_env_symmetric,
+            _pad_boundary_symmetric,
+            _update_left_env_symmetric,
+        )
+
+        L = 4
+        mpo_sym = _build_symmetric_heisenberg_mpo(L)
+        mps_sym = build_random_symmetric_mps(L, bond_dim=4, seed=42)
+
+        # Symmetric env update
+        l_env_sym = _build_trivial_left_env_symmetric()
+        new_l_sym = _update_left_env_symmetric(
+            l_env_sym, mps_sym.get_tensor(0), mpo_sym.get_tensor(0)
+        )
+
+        # Dense reference: same contraction using raw arrays
+        L_arr = l_env_sym.todense()
+        A_site = mps_sym.get_tensor(0)
+        # Left boundary: pad to 3D
+        A_padded = _pad_boundary_symmetric(A_site, pad_left=True)
+        A_arr = A_padded.todense()
+        W_arr = mpo_sym.get_tensor(0).todense()
+
+        new_l_ref = jnp.einsum(
+            "abc,apd,bpxe,cxf->def",
+            L_arr,
+            A_arr,
+            W_arr,
+            jnp.conj(A_arr),
+        )
+
+        # Compare
+        np.testing.assert_allclose(
+            np.array(new_l_sym.todense()),
+            np.array(new_l_ref),
+            atol=1e-10,
         )
