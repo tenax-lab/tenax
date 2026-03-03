@@ -400,16 +400,44 @@ class TensorNetwork:
         # Build a mapping: for each node, which labels should be renamed and to what
         relabel_map: dict[NodeId, dict[Label, Label]] = {n: {} for n in nodes}
 
+        # Collect all labels currently in use across the subset so we can
+        # generate fresh intermediate labels that don't collide with anything.
+        all_used_labels: set[Label] = set()
+        for n in nodes:
+            all_used_labels.update(self._tensors[n].labels())
+
+        _fresh_counter = 0
+
+        def _fresh_label() -> str:
+            """Generate a label not present on any tensor in the subset."""
+            nonlocal _fresh_counter
+            while True:
+                candidate = f"__internal_bond_{_fresh_counter}__"
+                _fresh_counter += 1
+                if candidate not in all_used_labels:
+                    all_used_labels.add(candidate)
+                    return candidate
+
         for node_a, label_a, node_b, label_b in internal_edges:
-            # Make label_b on node_b match label_a on node_a
+            # Make the two legs share a common label so the subscript
+            # builder contracts them.
             if label_a != label_b:
-                # Rename label_b to label_a on node_b
-                # But be careful: label_a might already be used on node_b for something else
-                if (
-                    label_a not in self._tensors[node_b].labels()
-                    or label_a in relabel_map[node_b].values()
-                ):
+                # Determine the effective labels after any prior relabeling
+                effective_b_labels = set(self._tensors[node_b].labels())
+                # Account for labels already scheduled for renaming
+                for old, new in relabel_map[node_b].items():
+                    effective_b_labels.discard(old)
+                    effective_b_labels.add(new)
+
+                if label_a not in effective_b_labels:
+                    # Safe to rename label_b → label_a on node_b
                     relabel_map[node_b][label_b] = label_a
+                else:
+                    # label_a already exists on node_b for a *different* leg.
+                    # Use a fresh intermediate label for both sides.
+                    fresh = _fresh_label()
+                    relabel_map[node_a][label_a] = fresh
+                    relabel_map[node_b][label_b] = fresh
 
         # Apply relabeling
         relabeled_tensors = []
