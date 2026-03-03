@@ -11,7 +11,9 @@ from tenax.algorithms.dmrg import (
     build_mpo_heisenberg,
     build_random_mps,
     build_random_symmetric_mps,
+    compute_mps_sector,
     dmrg,
+    validate_mps_sector,
 )
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
@@ -567,3 +569,120 @@ class TestSymmetricBlockSparseDMRG:
             np.array(new_l_ref),
             atol=1e-10,
         )
+
+
+# ------------------------------------------------------------------ #
+# Target sector tests                                                  #
+# ------------------------------------------------------------------ #
+
+
+def _ed_ground_state_in_sector(
+    L: int, Sz_target: int, Jz: float = 1.0, Jxy: float = 1.0
+) -> float:
+    """Return the ground-state energy in a specific Sz sector via ED.
+
+    Args:
+        L:         Number of sites.
+        Sz_target: Target total Sz (integer, not 2*Sz).
+        Jz, Jxy:   Coupling constants.
+
+    Returns:
+        Ground-state energy in the given Sz sector.
+    """
+    H_full = _build_heisenberg_matrix(L, Jz=Jz, Jxy=Jxy)
+    dim = 2**L
+
+    # Build Sz_total for each basis state |s_1, ..., s_L>
+    # Bit i = 0 → spin up (Sz = +1/2), bit i = 1 → spin down (Sz = -1/2)
+    sz_vals = np.zeros(dim)
+    for state in range(dim):
+        total = 0.0
+        for site in range(L):
+            if (state >> (L - 1 - site)) & 1:
+                total -= 0.5  # spin down
+            else:
+                total += 0.5  # spin up
+        sz_vals[state] = total
+
+    # Select states in the target sector
+    mask = np.abs(sz_vals - Sz_target) < 0.01
+    sector_indices = np.where(mask)[0]
+    if len(sector_indices) == 0:
+        raise ValueError(f"No states in Sz={Sz_target} sector for L={L}")
+
+    H_sector = H_full[np.ix_(sector_indices, sector_indices)]
+    eigvals = np.linalg.eigvalsh(H_sector)
+    return float(eigvals[0])
+
+
+class TestTargetSector:
+    """Tests for target_charge sector enforcement in symmetric DMRG."""
+
+    def test_target_charge_sz0(self):
+        """DMRG with target_charge=0 should match ED in Sz=0 sector."""
+        L = 4
+        e_exact = _ed_ground_state_in_sector(L, Sz_target=0)
+
+        mpo = _build_symmetric_heisenberg_mpo(L)
+        mps = build_random_symmetric_mps(L, bond_dim=4, seed=7, target_charge=0)
+        config = DMRGConfig(
+            max_bond_dim=8,
+            num_sweeps=10,
+            lanczos_max_iter=30,
+            convergence_tol=1e-10,
+            target_charge=0,
+        )
+        result = dmrg(mpo, mps, config)
+
+        assert np.isfinite(result.energy)
+        assert abs(result.energy - e_exact) < 1e-6, (
+            f"Sz=0 DMRG energy {result.energy:.8f} deviates from "
+            f"ED {e_exact:.8f} by {abs(result.energy - e_exact):.4e}"
+        )
+
+    def test_target_charge_sz1(self):
+        """DMRG with target_charge=2 (2*Sz=2) should match ED in Sz=1 sector."""
+        L = 4
+        e_exact = _ed_ground_state_in_sector(L, Sz_target=1)
+
+        mpo = _build_symmetric_heisenberg_mpo(L)
+        mps = build_random_symmetric_mps(L, bond_dim=4, seed=7, target_charge=2)
+        config = DMRGConfig(
+            max_bond_dim=8,
+            num_sweeps=10,
+            lanczos_max_iter=30,
+            convergence_tol=1e-10,
+            target_charge=2,
+        )
+        result = dmrg(mpo, mps, config)
+
+        assert np.isfinite(result.energy)
+        assert abs(result.energy - e_exact) < 1e-6, (
+            f"Sz=1 DMRG energy {result.energy:.8f} deviates from "
+            f"ED {e_exact:.8f} by {abs(result.energy - e_exact):.4e}"
+        )
+
+    def test_target_charge_parity_error(self):
+        """Odd L + even target_charge should raise ValueError."""
+        with pytest.raises(ValueError, match="parity"):
+            build_random_symmetric_mps(L=3, bond_dim=4, target_charge=0)
+
+    def test_build_symmetric_mps_sector(self):
+        """compute_mps_sector should return the correct target for built MPS."""
+        for target in [0, 2, -2]:
+            mps = build_random_symmetric_mps(
+                L=4, bond_dim=4, seed=0, target_charge=target
+            )
+            tensors = [mps.get_tensor(i) for i in range(4)]
+            sector = compute_mps_sector(tensors)
+            assert sector == target, f"Expected sector={target}, got {sector}"
+
+    def test_sector_validation_mixed(self):
+        """validate_mps_sector should raise for wrong target."""
+        mps = build_random_symmetric_mps(L=4, bond_dim=4, seed=0, target_charge=0)
+        tensors = [mps.get_tensor(i) for i in range(4)]
+        # Should pass for correct target
+        validate_mps_sector(tensors, target_charge=0)
+        # Should fail for wrong target
+        with pytest.raises(ValueError, match="does not match"):
+            validate_mps_sector(tensors, target_charge=2)

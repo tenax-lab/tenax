@@ -58,6 +58,9 @@ class DMRGConfig:
                             escape local minima in 2-site DMRG).
         svd_trunc_err:      Maximum truncation error per SVD (overrides
                             max_bond_dim when set and more restrictive).
+        target_charge:      Target total charge (e.g. 2*Sz for U(1)). If set,
+                            validates MPS sector before and after each sweep.
+                            Use with ``build_random_symmetric_mps(target_charge=...)``.
         verbose:            Print energy at each sweep.
     """
 
@@ -70,6 +73,7 @@ class DMRGConfig:
     lanczos_tol: float = 1e-12
     noise: float = 0.0
     svd_trunc_err: float | None = None
+    target_charge: int | None = None
     verbose: bool = False
 
 
@@ -159,6 +163,10 @@ def dmrg(
             DenseTensor(t.todense(), t.indices) if not isinstance(t, DenseTensor) else t
             for t in mpo_tensors
         ]
+
+    # Validate initial MPS sector if target_charge is specified
+    if config.target_charge is not None and use_symmetric:
+        validate_mps_sector(mps_tensors, config.target_charge)
 
     # Build left environments (L[i] = trivial for i=0)
     left_envs = _build_left_environments_list(mps_tensors, mpo_tensors, L, ops)
@@ -260,6 +268,15 @@ def dmrg(
         energies_per_sweep.append(energy)
         if config.verbose:
             print(f"Sweep {sweep + 1}/{config.num_sweeps}: E = {energy:.10f}")
+
+        # Validate sector preservation after each sweep
+        if config.target_charge is not None and use_symmetric:
+            sector = compute_mps_sector(mps_tensors)
+            if sector != config.target_charge:
+                raise RuntimeError(
+                    f"Sector drift detected after sweep {sweep + 1}: "
+                    f"MPS sector={sector}, expected target_charge={config.target_charge}."
+                )
 
         # Check convergence
         if sweep > 0 and abs(energy - prev_energy) < config.convergence_tol:
@@ -1401,47 +1418,74 @@ def build_random_symmetric_mps(
     bond_dim: int = 4,
     dtype: Any = jnp.float64,
     seed: int = 42,
+    target_charge: int = 0,
 ) -> TensorNetwork:
     """Build a random block-sparse MPS with U(1) charge conservation.
 
     Physical dimension is 2 (spin-1/2). Charges represent accumulated Sz:
     spin up = +1, spin down = -1. Virtual bonds carry sectors that allow
-    the total-Sz = 0 subspace.
-
-    The resulting tensors are SymmetricTensor objects with non-trivial block
-    structure. DMRG treats them identically to DenseTensor via .todense().
+    the specified total-Sz subspace.
 
     Args:
-        L:         Chain length.
-        bond_dim:  Virtual bond dimension (must be >= 2; blocks distributed
-                   across Sz = -1, 0, +1 sectors).
-        dtype:     JAX dtype.
-        seed:      Random seed for block initialisation.
+        L:              Chain length.
+        bond_dim:       Virtual bond dimension (must be >= 2; blocks distributed
+                        across charge sectors).
+        dtype:          JAX dtype.
+        seed:           Random seed for block initialisation.
+        target_charge:  Target total charge (2*Sz). Default 0 (Sz=0 sector).
+                        Must satisfy parity: target_charge % 2 == L % 2
+                        (each site contributes ±1).
 
     Returns:
         TensorNetwork representing the symmetric random MPS.
+
+    Raises:
+        ValueError: If target_charge has incompatible parity with L.
     """
+    if target_charge % 2 != L % 2:
+        raise ValueError(
+            f"target_charge={target_charge} has parity {target_charge % 2} but "
+            f"L={L} has parity {L % 2}. Each site contributes ±1, so total "
+            f"charge must have the same parity as L."
+        )
+
     sym = U1Symmetry()
 
     # Physical: spin up = +1, spin down = −1
     phys_charges = np.array([1, -1], dtype=np.int32)
 
-    # Virtual bond: distribute bond_dim states across Sz = {-1, 0, +1}.
-    # Ensures at least one state per sector so blocks are non-trivial.
-    q_each = max(1, bond_dim // 4)
-    q_zero = max(1, bond_dim - 2 * q_each)
-    virt_charges = np.concatenate(
-        [
-            np.full(q_each, -1, dtype=np.int32),
-            np.full(q_zero, 0, dtype=np.int32),
-            np.full(q_each, 1, dtype=np.int32),
-        ]
-    )[:bond_dim]  # Trim to exact bond_dim
+    # Virtual bond: include charge sectors compatible with target propagation.
+    # For total charge Q, the right boundary needs virt charges in {Q-1, Q+1}
+    # (since phys charges are ±1 and we need virt + phys = Q).
+    # Interior bonds need a range that connects left boundary (near 0) to
+    # right boundary (near Q). We include charges from -1 to max(1, Q+1)
+    # (or min(-1, Q-1) to 1 for negative Q).
+    if target_charge == 0:
+        required_charges = [-1, 0, 1]
+    else:
+        # Include range from 0 to target, plus margins for both boundaries
+        lo = min(-1, target_charge - 1)
+        hi = max(1, target_charge + 1)
+        required_charges = list(range(lo, hi + 1))
+
+    # Distribute bond_dim states across the required charge sectors
+    n_sectors = len(required_charges)
+    per_sector = max(1, bond_dim // n_sectors)
+    arrays = [np.full(per_sector, q, dtype=np.int32) for q in required_charges]
+    virt_charges = np.concatenate(arrays)[:bond_dim]
+    # If bond_dim is larger, pad with the middle charge
+    if len(virt_charges) < bond_dim:
+        mid_q = required_charges[n_sectors // 2]
+        pad = np.full(bond_dim - len(virt_charges), mid_q, dtype=np.int32)
+        virt_charges = np.concatenate([virt_charges, pad])
 
     mps = TensorNetwork(name=f"symmetric_MPS_L{L}")
 
     for i in range(L):
         key = jax.random.PRNGKey(seed + i)
+
+        # Right boundary tensor uses target_charge; all others use identity (0)
+        site_target = target_charge if i == L - 1 else None
 
         if i == 0:
             # Left boundary: (phys_IN, virt_right_OUT)
@@ -1467,7 +1511,9 @@ def build_random_symmetric_mps(
                 ),
             )
 
-        tensor = SymmetricTensor.random_normal(indices, key=key, dtype=dtype)
+        tensor = SymmetricTensor.random_normal(
+            indices, key=key, dtype=dtype, target=site_target
+        )
         mps.add_node(i, tensor)
 
     # Connect virtual bonds
@@ -1476,6 +1522,61 @@ def build_random_symmetric_mps(
         mps.connect(i, bond_label, i + 1, bond_label)
 
     return mps
+
+
+def compute_mps_sector(mps_tensors: list[Tensor]) -> int | None:
+    """Infer total charge sector of an MPS from its right boundary tensor.
+
+    For an OBC MPS with U(1) symmetry, the conservation law on each tensor is
+    ``sum(flow_i * charge_i) = 0`` (or ``= target`` for the boundary tensor).
+    The total sector Q is determined by the right boundary tensor: for each
+    block, ``sum(flow_i * charge_i)`` gives Q.
+
+    Args:
+        mps_tensors: List of SymmetricTensor MPS site tensors.
+
+    Returns:
+        The total charge if all blocks agree, or None if the MPS is in a
+        mixed sector (or contains no SymmetricTensor).
+    """
+    right_site = mps_tensors[-1]
+    if not isinstance(right_site, SymmetricTensor):
+        return None
+    if not right_site.blocks:
+        return None
+
+    sectors: set[int] = set()
+    for key in right_site.blocks:
+        total = 0
+        for idx, q in zip(right_site.indices, key):
+            total += int(idx.flow) * q
+        sectors.add(total)
+
+    if len(sectors) == 1:
+        return sectors.pop()
+    return None
+
+
+def validate_mps_sector(mps_tensors: list[Tensor], target_charge: int) -> None:
+    """Assert that an MPS is in the specified charge sector.
+
+    Args:
+        mps_tensors:   List of MPS site tensors (SymmetricTensor).
+        target_charge: Expected total charge (e.g. 2*Sz for spin-1/2 U(1)).
+
+    Raises:
+        ValueError: If the MPS is not in the target sector.
+    """
+    sector = compute_mps_sector(mps_tensors)
+    if sector is None:
+        raise ValueError(
+            f"Cannot determine MPS sector (mixed or no SymmetricTensor blocks). "
+            f"Expected target_charge={target_charge}."
+        )
+    if sector != target_charge:
+        raise ValueError(
+            f"MPS sector {sector} does not match target_charge={target_charge}."
+        )
 
 
 def build_random_mps(

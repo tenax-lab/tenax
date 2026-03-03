@@ -50,7 +50,9 @@ from tenax.algorithms.dmrg import (
     build_mpo_heisenberg,
     build_random_mps,
     build_random_symmetric_mps,
+    compute_mps_sector,
     dmrg,
+    validate_mps_sector,
 )
 from tenax.algorithms.fermionic_ipeps import (
     FPEPSConfig,
@@ -83,6 +85,11 @@ from tenax.algorithms.ipeps_excitations import (
     ExcitationResult,
     compute_excitations,
     make_momentum_path,
+)
+from tenax.algorithms.observables import (
+    correlation,
+    expectation_value,
+    operator_charge,
 )
 from tenax.algorithms.trg import (
     TRGConfig,
@@ -153,6 +160,12 @@ __all__ = [
     "build_mpo_heisenberg",
     "build_random_mps",
     "build_random_symmetric_mps",
+    "compute_mps_sector",
+    "validate_mps_sector",
+    # Observables
+    "expectation_value",
+    "correlation",
+    "operator_charge",
     # TRG
     "TRGConfig",
     "trg",

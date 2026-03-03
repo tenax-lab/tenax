@@ -52,6 +52,7 @@ def _koszul_sign(parities: list[int] | tuple[int, ...], perm: tuple[int, ...]) -
 
 def _compute_valid_blocks(
     indices: tuple[TensorIndex, ...],
+    target: int | None = None,
 ) -> list[BlockKey]:
     """Find all charge-sector tuples satisfying the symmetry conservation law.
 
@@ -63,6 +64,11 @@ def _compute_valid_blocks(
 
     Args:
         indices: Tuple of TensorIndex objects, one per tensor leg.
+        target:  Target charge for the conservation law. If None, uses the
+                 symmetry identity (standard conservation). For U(1), setting
+                 target=Q selects blocks where sum(flow_i * charge_i) == Q
+                 instead of 0. Used at MPS boundaries to enforce a specific
+                 quantum number sector.
 
     Returns:
         List of BlockKey tuples (one charge per leg) for valid sectors.
@@ -71,7 +77,7 @@ def _compute_valid_blocks(
         return [()]
 
     sym = indices[0].symmetry
-    identity = sym.identity()
+    effective_target = target if target is not None else sym.identity()
 
     # Collect unique charge values per leg (sorted for determinism)
     unique_charges_per_leg = [sorted(set(idx.charges.tolist())) for idx in indices]
@@ -83,11 +89,11 @@ def _compute_valid_blocks(
     is_infinite = sym.n_values() is None
 
     if n_legs == 1:
-        # Single leg: only identity charge is valid
+        # Single leg: only target charge is valid
         return [
             (q,)
             for q in unique_charges_per_leg[0]
-            if int(indices[0].flow) * q == identity
+            if int(indices[0].flow) * q == effective_target
         ]
 
     # Incremental propagation: partial_combos maps
@@ -127,18 +133,17 @@ def _compute_valid_blocks(
 
     if is_infinite:
         # For U1: the required effective charge for the last leg is
-        # the dual of the running sum. Check if that charge exists.
+        # determined by: fuse(prev_fused, flow_last * q_last) == effective_target
+        # For U1: prev_fused + flow_last * q_last == effective_target
+        # => q_last = (effective_target - prev_fused) * flow_last
         last_charge_set = set(unique_charges_per_leg[last_leg_idx])
         for prev_fused, prev_combos in partial.items():
-            # We need: fuse(prev_fused, flow_last * q_last) == identity
-            # For U1: prev_fused + flow_last * q_last == 0
-            # => q_last = -prev_fused / flow_last
-            needed_effective = int(sym.dual(np.array([prev_fused], dtype=np.int32))[0])
             if flow_last == 0:
                 continue
-            # needed_effective = flow_last * q_last => q_last = needed_effective / flow_last
-            # For U1 with flow IN(+1)/OUT(-1): q_last = needed_effective * flow_last
-            q_last = needed_effective * flow_last
+            # needed = effective_target - prev_fused (what flow_last * q_last must equal)
+            needed = effective_target - prev_fused
+            # q_last = needed / flow_last; for flow IN(+1)/OUT(-1): q_last = needed * flow_last
+            q_last = needed * flow_last
             if q_last in last_charge_set:
                 for combo in prev_combos:
                     valid_keys.append(combo + (q_last,))
@@ -153,7 +158,7 @@ def _compute_valid_blocks(
                         np.array([effective_q], dtype=np.int32),
                     )[0]
                 )
-                if total == identity:
+                if total == effective_target:
                     for combo in prev_combos:
                         valid_keys.append(combo + (q,))
 
@@ -562,22 +567,32 @@ class SymmetricTensor(Tensor):
         cls,
         indices: tuple[TensorIndex, ...],
         dtype: Any = jnp.float64,
+        target: int | None = None,
     ) -> SymmetricTensor:
         """Create a zero tensor with all valid charge sectors initialized to zero.
 
         Args:
             indices: Tuple of TensorIndex objects.
             dtype:   Data type for block arrays.
+            target:  Target charge for block selection (construction-time only).
+                     If None, uses the symmetry identity (standard conservation).
 
         Returns:
             SymmetricTensor with all valid blocks set to zero.
         """
-        valid_keys = _compute_valid_blocks(indices)
+        valid_keys = _compute_valid_blocks(indices, target=target)
         blocks: dict[BlockKey, jax.Array] = {}
         for key in valid_keys:
             _, shape = _block_slices(indices, key)
             if all(s > 0 for s in shape):
                 blocks[key] = jnp.zeros(shape, dtype=dtype)
+        if target is not None and target != 0:
+            # Non-identity target: blocks satisfy sum(flow*q) == target,
+            # which would fail standard validation. Bypass it.
+            obj = object.__new__(cls)
+            obj._indices = tuple(indices)
+            obj._blocks = dict(blocks)
+            return obj
         return cls(blocks, indices)
 
     @classmethod
@@ -587,6 +602,7 @@ class SymmetricTensor(Tensor):
         key: jax.Array,
         dtype: Any = jnp.float64,
         stddev: float = 1.0,
+        target: int | None = None,
     ) -> SymmetricTensor:
         """Create a random tensor with blocks drawn from N(0, stddev).
 
@@ -597,11 +613,13 @@ class SymmetricTensor(Tensor):
             key:     JAX random key.
             dtype:   Data type for block arrays.
             stddev:  Standard deviation of the normal distribution.
+            target:  Target charge for block selection (construction-time only).
+                     If None, uses the symmetry identity (standard conservation).
 
         Returns:
             SymmetricTensor with random entries in all valid blocks.
         """
-        valid_keys = _compute_valid_blocks(indices)
+        valid_keys = _compute_valid_blocks(indices, target=target)
         blocks: dict[BlockKey, jax.Array] = {}
         for i, block_key in enumerate(sorted(valid_keys)):
             _, shape = _block_slices(indices, block_key)
@@ -609,6 +627,13 @@ class SymmetricTensor(Tensor):
                 subkey = jax.random.fold_in(key, i)
                 data = jax.random.normal(subkey, shape, dtype=dtype) * stddev
                 blocks[block_key] = data
+        if target is not None and target != 0:
+            # Non-identity target: blocks satisfy sum(flow*q) == target,
+            # which would fail standard validation. Bypass it.
+            obj = object.__new__(cls)
+            obj._indices = tuple(indices)
+            obj._blocks = dict(blocks)
+            return obj
         return cls(blocks, indices)
 
     @classmethod

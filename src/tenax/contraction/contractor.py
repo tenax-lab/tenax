@@ -335,8 +335,30 @@ def _contract_symmetric(
     char_counts: dict[str, int] = Counter(input_part.replace(",", ""))
     contracted_chars = {c for c, n in char_counts.items() if n >= 2}
 
+    # Infer the output target charge from input tensors.
+    # For U(1): output target = sum of input targets, since contracted legs
+    # have opposite flows and cancel.  This allows contracting tensors with
+    # non-identity targets (e.g. boundary MPS tensors targeting Sz != 0).
+    # We only count a tensor's target if ALL its blocks agree on the same
+    # value of sum(flow*q).  Mixed-charge tensors (e.g. operators that
+    # create/annihilate particles) contribute 0.
+    output_target: int | None = None
+    total_target = 0
+    for tensor in tensors:
+        if tensor.blocks:
+            targets = set()
+            for key in tensor.blocks:
+                t = sum(int(idx.flow) * int(q) for idx, q in zip(tensor.indices, key))
+                targets.add(t)
+            if len(targets) == 1:
+                total_target += targets.pop()
+    if total_target != 0:
+        output_target = total_target
+
     # Precompute valid output keys as a set for O(1) lookup
-    valid_output_set = set(_compute_valid_blocks(out_indices_ordered))
+    valid_output_set = set(
+        _compute_valid_blocks(out_indices_ordered, target=output_target)
+    )
 
     # Precompute fermionic sign structure (once, outside block loop)
     sym = tensors[0].indices[0].symmetry if tensors and tensors[0].indices else None
@@ -454,6 +476,12 @@ def _contract_symmetric(
             else:
                 output_blocks[output_key] = result_array
 
+    if output_target is not None:
+        # Non-identity target: bypass conservation validation
+        obj = object.__new__(SymmetricTensor)
+        obj._indices = out_indices_ordered
+        obj._blocks = output_blocks
+        return obj
     return SymmetricTensor(output_blocks, out_indices_ordered)
 
 
@@ -830,8 +858,27 @@ def _truncated_svd_symmetric(
             Vh_blocks[block_key] = vh_block
             col_offset += n_cols
 
-    U_tensor = SymmetricTensor(U_blocks, U_indices)
-    Vh_tensor = SymmetricTensor(Vh_blocks, Vh_indices)
+    # Check if input tensor has a non-identity target (e.g. boundary MPS
+    # tensor targeting Sz != 0).  If so, the output tensors may also have
+    # non-identity targets and need to bypass standard validation.
+    input_target = 0
+    if tensor.blocks:
+        key0 = next(iter(tensor.blocks))
+        input_target = sum(
+            int(idx.flow) * int(q) for idx, q in zip(tensor.indices, key0)
+        )
+
+    if input_target != 0:
+        # Bypass validation for non-identity targets
+        U_tensor = object.__new__(SymmetricTensor)
+        U_tensor._indices = U_indices
+        U_tensor._blocks = U_blocks
+        Vh_tensor = object.__new__(SymmetricTensor)
+        Vh_tensor._indices = Vh_indices
+        Vh_tensor._blocks = Vh_blocks
+    else:
+        U_tensor = SymmetricTensor(U_blocks, U_indices)
+        Vh_tensor = SymmetricTensor(Vh_blocks, Vh_indices)
 
     return U_tensor, s_final, Vh_tensor, s_full
 
