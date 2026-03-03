@@ -1,5 +1,7 @@
 # Tenax
 
+[Website](https://tenax-lab.github.io) | [Docs](https://tenax.readthedocs.io) | [PyPI](https://pypi.org/project/tenax-tn/)
+
 A JAX-based tensor network library with symmetry-aware block-sparse tensors and label-based contraction.
 
 The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for "holding fast" — reflecting how tensor networks bind indices together through contraction.
