@@ -64,3 +64,6 @@ benchmarks/results/
 
 # Docs
 docs/_build/
+
+# Worktrees
+.worktrees/
