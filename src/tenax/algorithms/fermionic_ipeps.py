@@ -60,7 +60,7 @@ def spinless_fermion_gate(config: FPEPSConfig) -> SymmetricTensor:
     """Build the 2-site Hamiltonian H = -t(c†c + h.c.) + V(n_i n_j).
 
     The Hamiltonian acts on two spinless fermion sites with local
-    Hilbert space {|0>, |1>} (empty, occupied). The fermionic
+    Hilbert space ``{|0>, |1>}`` (empty, occupied). The fermionic
     anti-commutation relations are encoded via FermionParity symmetry.
 
     Args:
@@ -435,6 +435,66 @@ def _fpeps_simple_update(
     return A, lam_h, lam_v
 
 
+# ------------------------------------------------------------------ #
+# CTM energy evaluation                                                #
+# ------------------------------------------------------------------ #
+#
+# For FermionParity (Z₂), the twist phase in dagger() is always +1,
+# so the fermionic double-layer tensor is identical to the bosonic one.
+# We therefore convert to dense and delegate to the bosonic CTM for
+# environment and energy computation.  The SymmetricTensor simple
+# update (above) handles Koszul signs correctly for optimization.
+# ------------------------------------------------------------------ #
+
+
+def fermionic_ctm(A, config):
+    """Run CTM to convergence for a fermionic PEPS site tensor.
+
+    For FermionParity (Z₂), the twist phase in ``dagger()`` is always +1,
+    so the fermionic double-layer tensor is identical to the bosonic one.
+    This function converts *A* to a dense array and delegates to the
+    bosonic CTM implementation.
+
+    Args:
+        A:      fPEPS site tensor (SymmetricTensor with lambdas absorbed).
+        config: FPEPSConfig.
+
+    Returns:
+        Converged bosonic ``CTMEnvironment``.
+    """
+    from tenax.algorithms.ipeps import CTMConfig, ctm
+
+    A_dense = A.todense()  # shape (D, D, D, D, d) — (u, d, l, r, phys)
+    ctm_cfg = CTMConfig(
+        chi=config.ctm_chi,
+        max_iter=config.ctm_max_iter,
+        conv_tol=config.ctm_conv_tol,
+    )
+    return ctm(A_dense, ctm_cfg)
+
+
+def compute_energy_fermionic_ctm(A, env, hamiltonian_gate):
+    """Compute energy per site using a bosonic CTM environment.
+
+    Args:
+        A:                fPEPS site tensor (SymmetricTensor).
+        env:              Converged CTMEnvironment (from :func:`fermionic_ctm`).
+        hamiltonian_gate: 2-site Hamiltonian (SymmetricTensor or dense array).
+
+    Returns:
+        Energy per site (float).
+    """
+    from tenax.algorithms.ipeps import compute_energy_ctm
+
+    A_dense = A.todense()
+    d = A_dense.shape[-1]
+    if isinstance(hamiltonian_gate, SymmetricTensor):
+        H = hamiltonian_gate.todense().reshape(d, d, d, d)
+    else:
+        H = hamiltonian_gate.reshape(d, d, d, d)
+    return float(compute_energy_ctm(A_dense, env, H, d))
+
+
 def fpeps(
     hamiltonian_gate: SymmetricTensor,
     config: FPEPSConfig,
@@ -442,10 +502,6 @@ def fpeps(
     key: jax.Array | None = None,
 ) -> tuple[float, SymmetricTensor, object]:
     """Run fPEPS: simple update optimization + CTM energy evaluation.
-
-    Entry point for the fermionic iPEPS algorithm. Runs simple update
-    to optimize the site tensor, then evaluates the energy using the
-    dense CTM method.
 
     Args:
         hamiltonian_gate: 2-site Hamiltonian as SymmetricTensor.
@@ -457,9 +513,6 @@ def fpeps(
         (energy, A_opt, env) where energy is a scalar, A_opt is the
         optimized SymmetricTensor, and env is the CTMEnvironment.
     """
-    from tenax.algorithms.ipeps import CTMConfig, compute_energy_ctm, ctm
-
-    # 1. Initialize A if not provided
     if initial_tensor is not None:
         A = initial_tensor
     else:
@@ -467,7 +520,6 @@ def fpeps(
             key = jax.random.PRNGKey(0)
         A = _initialize_fpeps(config, key)
 
-    # 2. Run simple update
     A_opt, lam_h, lam_v = _fpeps_simple_update(
         A,
         hamiltonian_gate,
@@ -476,20 +528,9 @@ def fpeps(
         steps=config.num_imaginary_steps,
     )
 
-    # 3. Convert A_opt to dense for CTM evaluation
-    A_dense = A_opt.todense()
-
-    # 4. Run CTM
-    ctm_config = CTMConfig(
-        chi=config.ctm_chi,
-        max_iter=config.ctm_max_iter,
-        conv_tol=config.ctm_conv_tol,
-    )
-    env = ctm(A_dense, ctm_config)
-
-    # 5. Compute energy
-    gate_dense = hamiltonian_gate.todense()
-    d = 2  # physical dimension for spinless fermions
-    energy = compute_energy_ctm(A_dense, env, gate_dense, d)
+    A_abs = _absorb_lambdas(A_opt, lam_h, lam_v)
+    A_abs = _normalize_tensor(A_abs)
+    env = fermionic_ctm(A_abs, config)
+    energy = compute_energy_fermionic_ctm(A_abs, env, hamiltonian_gate)
 
     return float(energy), A_opt, env
