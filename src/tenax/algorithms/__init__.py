@@ -14,6 +14,11 @@ from tenax.algorithms.dmrg import (
     build_random_mps,
     dmrg,
 )
+from tenax.algorithms.fermionic_ipeps import (
+    FPEPSConfig,
+    fpeps,
+    spinless_fermion_gate,
+)
 from tenax.algorithms.hotrg import HOTRGConfig, hotrg
 from tenax.algorithms.idmrg import (
     build_bulk_mpo_heisenberg,
@@ -25,9 +30,12 @@ from tenax.algorithms.idmrg import (
 from tenax.algorithms.ipeps import (
     CTMConfig,
     CTMEnvironment,
+    SplitCTMEnvironment,
     compute_energy_ctm_2site,
+    compute_energy_split_ctm,
     ctm,
     ctm_2site,
+    ctm_split,
     ipeps,
     iPEPSConfig,
     optimize_gs_ad,
@@ -79,8 +87,15 @@ __all__ = [
     "ipeps",
     "ctm",
     "ctm_2site",
+    "SplitCTMEnvironment",
     "compute_energy_ctm_2site",
+    "compute_energy_split_ctm",
+    "ctm_split",
     "optimize_gs_ad",
+    # fPEPS (fermionic iPEPS)
+    "FPEPSConfig",
+    "fpeps",
+    "spinless_fermion_gate",
     # iPEPS Excitations
     "ExcitationConfig",
     "ExcitationResult",

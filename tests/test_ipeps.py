@@ -8,19 +8,25 @@ import pytest
 from tenax.algorithms.ipeps import (
     CTMConfig,
     CTMEnvironment,
+    SplitCTMEnvironment,
     _build_double_layer,
     _build_double_layer_open,
+    _initialize_split_ctm_env,
     _rdm1x2,
     _rdm2x1,
     _simple_update_1x1,
     _simple_update_2site_horizontal,
     _simple_update_2site_vertical,
+    _split_env_to_standard,
     compute_energy_ctm,
     compute_energy_ctm_2site,
+    compute_energy_split_ctm,
     ctm,
     ctm_2site,
+    ctm_split,
     ipeps,
     iPEPSConfig,
+    optimize_gs_ad,
 )
 
 
@@ -707,3 +713,226 @@ class TestIPEPS2Site:
         )
         energy, _, _ = ipeps(heisenberg_gate, (A, B), config)
         assert jnp.isfinite(energy)
+
+
+class TestQRProjectors:
+    """Tests for QR-based CTMRG projectors (Phase 1)."""
+
+    @pytest.fixture
+    def heisenberg_gate(self):
+        d = 2
+        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+        return H.reshape(d, d, d, d)
+
+    def test_qr_backward_compat(self):
+        """CTMConfig() still defaults to eigh."""
+        cfg = CTMConfig()
+        assert cfg.projector_method == "eigh"
+        assert cfg.qr_warmup_steps == 3
+
+    def test_qr_ctm_converges(self):
+        """QR CTM should produce finite environment tensors."""
+        key = jax.random.PRNGKey(42)
+        D, d = 2, 2
+        A = jax.random.normal(key, (D, D, D, D, d))
+        A = A / (jnp.linalg.norm(A) + 1e-10)
+        config = CTMConfig(chi=8, max_iter=20, projector_method="qr", qr_warmup_steps=3)
+        env = ctm(A, config)
+        assert isinstance(env, CTMEnvironment)
+        for t in env:
+            assert jnp.all(jnp.isfinite(t)), "QR CTM produced non-finite tensors"
+
+    def test_qr_energy_matches_eigh(self, heisenberg_gate):
+        """QR and eigh should converge to the same energy given enough iterations."""
+        key = jax.random.PRNGKey(7)
+        D, d = 2, 2
+        A = jax.random.normal(key, (D, D, D, D, d))
+        A = A / (jnp.linalg.norm(A) + 1e-10)
+
+        config_eigh = CTMConfig(chi=8, max_iter=100, projector_method="eigh")
+        env_eigh = ctm(A, config_eigh)
+        E_eigh = compute_energy_ctm(A, env_eigh, heisenberg_gate, d)
+
+        config_qr = CTMConfig(
+            chi=8, max_iter=100, projector_method="qr", qr_warmup_steps=5
+        )
+        env_qr = ctm(A, config_qr)
+        E_qr = compute_energy_ctm(A, env_qr, heisenberg_gate, d)
+
+        assert jnp.isfinite(E_qr)
+        assert jnp.abs(E_eigh - E_qr) < 1e-3, (
+            f"QR energy {float(E_qr)} differs from eigh {float(E_eigh)} by > 1e-3"
+        )
+
+
+class TestOptimizeGsAd2Site:
+    """Tests for 2-site AD optimization (Phase 2)."""
+
+    @pytest.fixture
+    def heisenberg_gate(self):
+        d = 2
+        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+        return H.reshape(d, d, d, d)
+
+    def test_2site_ad_runs(self, heisenberg_gate):
+        """2-site AD optimization should run without crashing."""
+
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=3,
+            gs_learning_rate=1e-3,
+            unit_cell="2site",
+        )
+        result = optimize_gs_ad(heisenberg_gate, None, config)
+        (A_opt, B_opt), (env_A, env_B), E_gs = result
+        assert A_opt.shape == (2, 2, 2, 2, 2)
+        assert B_opt.shape == (2, 2, 2, 2, 2)
+        assert isinstance(env_A, CTMEnvironment)
+        assert isinstance(env_B, CTMEnvironment)
+        assert np.isfinite(E_gs)
+
+    def test_2site_ad_energy_decreases(self, heisenberg_gate):
+        """Energy after optimization should be lower than initial energy."""
+
+        # Compute initial energy with random tensors
+        D, d = 2, 2
+        key_A, key_B = jax.random.split(jax.random.PRNGKey(0))
+        A0 = jax.random.normal(key_A, (D, D, D, D, d))
+        A0 = A0 / (jnp.linalg.norm(A0) + 1e-10)
+        B0 = jax.random.normal(key_B, (D, D, D, D, d))
+        B0 = B0 / (jnp.linalg.norm(B0) + 1e-10)
+
+        env_A0, env_B0 = ctm_2site(A0, B0, CTMConfig(chi=4, max_iter=10))
+        E_init = float(
+            compute_energy_ctm_2site(A0, B0, env_A0, env_B0, heisenberg_gate, d)
+        )
+
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=10,
+            gs_learning_rate=1e-2,
+            unit_cell="2site",
+        )
+        _, _, E_opt = optimize_gs_ad(heisenberg_gate, (A0, B0), config)
+        assert E_opt < E_init, f"Energy did not decrease: {E_opt} >= {E_init}"
+
+    def test_2site_ad_with_su_init(self, heisenberg_gate):
+        """su_init=True path should work for 2-site."""
+
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            num_imaginary_steps=10,
+            dt=0.3,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=3,
+            gs_learning_rate=1e-3,
+            unit_cell="2site",
+            su_init=True,
+        )
+        result = optimize_gs_ad(heisenberg_gate, None, config)
+        _, _, E_gs = result
+        assert np.isfinite(E_gs)
+
+
+class TestSplitCTMRG:
+    """Tests for Split-CTMRG (Phase 3)."""
+
+    @pytest.fixture
+    def small_peps_tensor(self):
+        key = jax.random.PRNGKey(42)
+        D, d = 2, 2
+        A = jax.random.normal(key, (D, D, D, D, d))
+        return A / (jnp.linalg.norm(A) + 1e-10)
+
+    @pytest.fixture
+    def heisenberg_gate(self):
+        d = 2
+        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+        return H.reshape(d, d, d, d)
+
+    def test_split_env_shapes(self, small_peps_tensor):
+        """All 12 tensors in SplitCTMEnvironment should have correct shapes."""
+        chi, chi_I, D = 8, 4, 2
+        env = _initialize_split_ctm_env(small_peps_tensor, chi, chi_I)
+        assert isinstance(env, SplitCTMEnvironment)
+        # Corners
+        for C in [env.C1, env.C2, env.C3, env.C4]:
+            assert C.shape == (chi, chi)
+        # Ket edges
+        for T_ket in [env.T1_ket, env.T2_ket, env.T3_ket, env.T4_ket]:
+            assert T_ket.shape == (chi, D, chi_I)
+        # Bra edges
+        for T_bra in [env.T1_bra, env.T2_bra, env.T3_bra, env.T4_bra]:
+            assert T_bra.shape == (chi_I, D, chi)
+
+    def test_split_env_to_standard(self, small_peps_tensor):
+        """Merged edges should have shape (chi, D^2, chi)."""
+        chi, chi_I, D = 8, 4, 2
+        env = _initialize_split_ctm_env(small_peps_tensor, chi, chi_I)
+        std = _split_env_to_standard(env)
+        assert isinstance(std, CTMEnvironment)
+        for T in [std.T1, std.T2, std.T3, std.T4]:
+            assert T.shape == (chi, D * D, chi)
+        for C in [std.C1, std.C2, std.C3, std.C4]:
+            assert C.shape == (chi, chi)
+
+    def test_split_ctm_converges(self, small_peps_tensor):
+        """Split-CTM should produce finite environment tensors."""
+        config = CTMConfig(chi=8, max_iter=20, chi_I=4)
+        env = ctm_split(small_peps_tensor, config)
+        assert isinstance(env, SplitCTMEnvironment)
+        for t in env:
+            assert jnp.all(jnp.isfinite(t)), "Split-CTM produced non-finite tensors"
+
+    def test_split_ctm_chi_I_equals_chi(self, small_peps_tensor):
+        """chi_I=chi should also work (no interlayer compression)."""
+        config = CTMConfig(chi=8, max_iter=20, chi_I=8)
+        env = ctm_split(small_peps_tensor, config)
+        for t in env:
+            assert jnp.all(jnp.isfinite(t))
+
+    def test_split_ctm_energy_matches_standard(
+        self, small_peps_tensor, heisenberg_gate
+    ):
+        """Split-CTM energy via split env equals energy via converted standard env.
+
+        Verifies that ``compute_energy_split_ctm`` (which converts to
+        standard internally) gives exactly the same result as manually
+        converting with ``_split_env_to_standard`` then calling
+        ``compute_energy_ctm``.  This is the key correctness invariant
+        for the split representation.
+        """
+        D, d = 2, 2
+        chi = 8
+        chi_I = chi * D  # lossless
+
+        config = CTMConfig(chi=chi, max_iter=50, chi_I=chi_I)
+        env_split = ctm_split(small_peps_tensor, config)
+
+        E_split = compute_energy_split_ctm(
+            small_peps_tensor, env_split, heisenberg_gate, d
+        )
+        assert jnp.isfinite(E_split)
+
+        # Energy via manually converted standard env must match exactly
+        std_env = _split_env_to_standard(env_split)
+        E_from_std = compute_energy_ctm(small_peps_tensor, std_env, heisenberg_gate, d)
+        assert jnp.abs(E_split - E_from_std) < 1e-12, (
+            f"Energy mismatch: split={float(E_split)}, converted={float(E_from_std)}"
+        )
+
+    def test_split_ctm_default_chi_I_none(self):
+        """CTMConfig with chi_I=None should default to chi."""
+        cfg = CTMConfig()
+        assert cfg.chi_I is None
