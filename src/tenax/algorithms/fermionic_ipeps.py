@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._tensor_utils import scale_bond_axis
 from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
@@ -178,12 +179,7 @@ def _normalize_tensor(T: SymmetricTensor) -> SymmetricTensor:
     norm_val = float(T.norm())
     if norm_val <= EPS:
         return T
-    scale_factor = 1.0 / norm_val
-    new_blocks = {k: v * scale_factor for k, v in T._blocks.items()}
-    obj = object.__new__(SymmetricTensor)
-    obj._indices = T._indices
-    obj._blocks = new_blocks
-    return obj
+    return T * (1.0 / norm_val)
 
 
 def _absorb_lambdas(
@@ -202,48 +198,11 @@ def _absorb_lambdas(
     Returns:
         SymmetricTensor with lambdas absorbed.
     """
-    result = _scale_bond_axis(A, 0, lam_v)  # u
-    result = _scale_bond_axis(result, 1, lam_v)  # d
-    result = _scale_bond_axis(result, 2, lam_h)  # l
-    result = _scale_bond_axis(result, 3, lam_h)  # r
+    result = scale_bond_axis(A, "u", lam_v)
+    result = scale_bond_axis(result, "d", lam_v)
+    result = scale_bond_axis(result, "l", lam_h)
+    result = scale_bond_axis(result, "r", lam_h)
     return result
-
-
-def _scale_bond_axis(
-    T: SymmetricTensor, axis: int, scale: jax.Array
-) -> SymmetricTensor:
-    """Scale a SymmetricTensor along a given axis by a vector, block by block.
-
-    This modifies the block data in-place (creates new blocks dict) to multiply
-    each slice along the specified axis by the corresponding element of scale.
-
-    Args:
-        T:     SymmetricTensor.
-        axis:  Axis index to scale along.
-        scale: 1D JAX array; scale[i] multiplies elements where the axis charge
-               maps to index i within the block.
-
-    Returns:
-        New SymmetricTensor with scaled blocks.
-    """
-    new_blocks = {}
-    idx = T.indices[axis]
-    for key, block in T._blocks.items():
-        charge_val = key[axis]
-        # Find which positions in the full index have this charge
-        positions = np.where(idx.charges == charge_val)[0]
-        # Build scale vector for this block along the axis
-        block_size = block.shape[axis]
-        scale_slice = scale[positions[:block_size]]
-        # Broadcast shape
-        shape = [1] * T.ndim
-        shape[axis] = block_size
-        new_blocks[key] = block * scale_slice.reshape(shape)
-
-    obj = object.__new__(SymmetricTensor)
-    obj._indices = T._indices
-    obj._blocks = new_blocks
-    return obj
 
 
 def _fpeps_simple_update_horizontal(
@@ -308,16 +267,16 @@ def _fpeps_simple_update_horizontal(
     U_reordered = U.transpose((0, 1, 2, 4, 3))
     U_final = U_reordered.relabels({"r_new": "r", "si_out": "phys"})
 
-    # 8. Absorb sqrt(sigma) into the bond axis (axis 3 = "r")
+    # 8. Absorb sqrt(sigma) into the bond axis "r"
     sqrt_sig = jnp.sqrt(sigma + EPS)
-    U_final = _scale_bond_axis(U_final, 3, sqrt_sig)
+    U_final = scale_bond_axis(U_final, "r", sqrt_sig)
 
     # 9. Remove outer lambdas: u <- lam_v^{-1}, d <- lam_v^{-1}, l <- lam_h^{-1}
     inv_lam_v = 1.0 / (lam_v + EPS)
     inv_lam_h = 1.0 / (lam_h + EPS)
-    U_final = _scale_bond_axis(U_final, 0, inv_lam_v)  # u
-    U_final = _scale_bond_axis(U_final, 1, inv_lam_v)  # d
-    U_final = _scale_bond_axis(U_final, 2, inv_lam_h)  # l
+    U_final = scale_bond_axis(U_final, "u", inv_lam_v)
+    U_final = scale_bond_axis(U_final, "d", inv_lam_v)
+    U_final = scale_bond_axis(U_final, "l", inv_lam_h)
 
     # 10. Normalize
     U_final = _normalize_tensor(U_final)
@@ -386,16 +345,16 @@ def _fpeps_simple_update_vertical(
     U_reordered = U.transpose((0, 4, 1, 2, 3))
     U_final = U_reordered.relabels({"d_new": "d", "si_out": "phys"})
 
-    # 8. Absorb sqrt(sigma) into the bond axis (axis 1 = "d")
+    # 8. Absorb sqrt(sigma) into the bond axis "d"
     sqrt_sig = jnp.sqrt(sigma + EPS)
-    U_final = _scale_bond_axis(U_final, 1, sqrt_sig)
+    U_final = scale_bond_axis(U_final, "d", sqrt_sig)
 
     # 9. Remove outer lambdas: u <- lam_v^{-1}, l <- lam_h^{-1}, r <- lam_h^{-1}
     inv_lam_v = 1.0 / (lam_v + EPS)
     inv_lam_h = 1.0 / (lam_h + EPS)
-    U_final = _scale_bond_axis(U_final, 0, inv_lam_v)  # u
-    U_final = _scale_bond_axis(U_final, 2, inv_lam_h)  # l
-    U_final = _scale_bond_axis(U_final, 3, inv_lam_h)  # r
+    U_final = scale_bond_axis(U_final, "u", inv_lam_v)
+    U_final = scale_bond_axis(U_final, "l", inv_lam_h)
+    U_final = scale_bond_axis(U_final, "r", inv_lam_h)
 
     # 10. Normalize
     U_final = _normalize_tensor(U_final)

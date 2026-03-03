@@ -31,6 +31,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._tensor_utils import scale_bond_axis
 from tenax.contraction.contractor import contract, qr_decompose, truncated_svd
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
@@ -829,14 +830,10 @@ def _svd_and_truncate_site(
     # orthogonality center so the MPS stays in canonical form.
     if sweep_right:
         # Left-to-right: A = U (left-canonical), absorb s into B
-        B_data = B.todense()
-        s_shape = (-1,) + (1,) * (B_data.ndim - 1)
-        B = DenseTensor(s.reshape(s_shape) * B_data, B.indices)
+        B = scale_bond_axis(B, bond_label, s)
     else:
         # Right-to-left: B = Vh (right-canonical), absorb s into A
-        A_data = A.todense()
-        s_shape = (1,) * (A_data.ndim - 1) + (-1,)
-        A = DenseTensor(A_data * s.reshape(s_shape), A.indices)
+        A = scale_bond_axis(A, bond_label, s)
 
     return A, s, B, trunc_err
 

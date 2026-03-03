@@ -106,7 +106,7 @@ from tenax.core.symmetry import (
     U1Symmetry,
     ZnSymmetry,
 )
-from tenax.core.tensor import BlockKey, DenseTensor, SymmetricTensor, Tensor
+from tenax.core.tensor import BlockKey, DenseTensor, SymmetricTensor, Tensor, inner
 from tenax.network.netfile import NetworkBlueprint, from_netfile
 from tenax.network.network import TensorNetwork, build_mps, build_peps
 
@@ -133,6 +133,7 @@ __all__ = [
     "DenseTensor",
     "SymmetricTensor",
     "BlockKey",
+    "inner",
     # Contraction
     "contract",
     "contract_with_subscripts",
