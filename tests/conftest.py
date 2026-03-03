@@ -30,6 +30,8 @@ _FILE_MARKERS = {
     "test_ad_utils.py": "algorithm",
     "test_fermionic_ipeps.py": "algorithm",
     "test_ipeps_excitations.py": "slow",
+    "test_code_review_regressions.py": "core",
+    "test_tensor_utils.py": "core",
 }
 
 

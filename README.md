@@ -1,8 +1,12 @@
 # Tenax
 
+[Website](https://tenax-lab.github.io) | [Docs](https://tenax.readthedocs.io) | [PyPI](https://pypi.org/project/tenax-tn/)
+
 A JAX-based tensor network library with symmetry-aware block-sparse tensors and label-based contraction.
 
 The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for "holding fast" — reflecting how tensor networks bind indices together through contraction.
+
+> **Experimental project** — This library is under active development and largely written with the assistance of Claude Code (AI). While we test extensively, AI-generated code can contain subtle bugs. Please verify results against known benchmarks before using them in research. Bug reports and contributions are welcome.
 
 ## Features
 
@@ -17,6 +21,7 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **QR-based CTMRG projectors** — optional QR projectors for faster CTM convergence (replaces expensive `eigh`)
 - **Split-CTMRG** — ket/bra-separated CTM environment tensors for O(χ³D³) projector cost instead of O(χ³D⁶) (Rader & Läuchli, arXiv:2502.10298)
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary Brillouin-zone momenta (Ponsioen et al. 2022)
+- **Polymorphic tensor arithmetic** — `+`, `-`, `*`, `-T`, `max_abs`, `inner()` work identically on `DenseTensor` and `SymmetricTensor`, enabling algorithm code that is agnostic to the underlying storage
 - **Block-sparse SVD and QR** — native symmetry-aware decompositions for `SymmetricTensor`
 - **Extensible symmetry system** — non-Abelian symmetry interface for future SU(2) support
 - **Benchmark suite** — CLI-driven performance benchmarks for all algorithms across CPU, CUDA, TPU, and Metal backends

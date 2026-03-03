@@ -1127,7 +1127,7 @@ def truncated_svd(
         for i in range(len(s_np) - 1, -1, -1):
             trunc_sq += float(s_np[i] ** 2)
             if trunc_sq / total_sq > max_truncation_err**2:
-                n_keep = i + 2  # keep up to i+1 (1-indexed)
+                n_keep = i + 1
                 break
         else:
             n_keep = len(s_np)
