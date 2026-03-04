@@ -273,41 +273,41 @@ _EDGE_KET_SPECS = {
         "u_ket",
         "t1k_I",
         FlowDirection.IN,
-        FlowDirection.OUT,
+        FlowDirection.IN,
         FlowDirection.OUT,
         3,
         0,
-    ),  # ref=r(3), D=u(0)
+    ),  # ref=r(3), D=u(0); D-flow opposite to A's u(OUT)
     "T2": (
         "t2k_u",
         "r_ket",
         "t2k_I",
         FlowDirection.OUT,
-        FlowDirection.IN,
+        FlowDirection.OUT,
         FlowDirection.IN,
         0,
         3,
-    ),  # ref=u(0), D=r(3)
+    ),  # ref=u(0), D=r(3); D-flow opposite to A's r(IN)
     "T3": (
         "t3k_r",
         "d_ket",
         "t3k_I",
         FlowDirection.OUT,
-        FlowDirection.IN,
+        FlowDirection.OUT,
         FlowDirection.IN,
         3,
         1,
-    ),  # ref=r(3), D=d(1)
+    ),  # ref=r(3), D=d(1); D-flow opposite to A's d(IN)
     "T4": (
         "t4k_d",
         "l_ket",
         "t4k_I",
         FlowDirection.IN,
-        FlowDirection.OUT,
+        FlowDirection.IN,
         FlowDirection.OUT,
         1,
         2,
-    ),  # ref=d(1), D=l(2)
+    ),  # ref=d(1), D=l(2); D-flow opposite to A's l(OUT)
 }
 
 _EDGE_BRA_SPECS = {
@@ -316,41 +316,41 @@ _EDGE_BRA_SPECS = {
         "u_bra",
         "t1b_r",
         FlowDirection.IN,
-        FlowDirection.IN,
+        FlowDirection.OUT,
         FlowDirection.IN,
         3,
         0,
-    ),
+    ),  # D-flow opposite to A.dagger()'s u(IN)
     "T2": (
         "t2b_I",
         "r_bra",
         "t2b_d",
         FlowDirection.OUT,
-        FlowDirection.OUT,
+        FlowDirection.IN,
         FlowDirection.OUT,
         0,
         3,
-    ),
+    ),  # D-flow opposite to A.dagger()'s r(OUT)
     "T3": (
         "t3b_I",
         "d_bra",
         "t3b_l",
         FlowDirection.OUT,
-        FlowDirection.OUT,
+        FlowDirection.IN,
         FlowDirection.OUT,
         3,
         1,
-    ),
+    ),  # D-flow opposite to A.dagger()'s d(OUT)
     "T4": (
         "t4b_I",
         "l_bra",
         "t4b_u",
         FlowDirection.IN,
-        FlowDirection.IN,
+        FlowDirection.OUT,
         FlowDirection.IN,
         1,
         2,
-    ),
+    ),  # D-flow opposite to A.dagger()'s l(IN)
 }
 
 
@@ -454,19 +454,52 @@ def _compute_projector_dense(
 
 
 # ------------------------------------------------------------------ #
-# Double-layer helper                                                  #
+# No-double-layer edge growth                                          #
 # ------------------------------------------------------------------ #
 
+_VIRTUAL_LEGS = ("u", "d", "l", "r")
 
-def _closed_double_layer_dense(A: Tensor) -> jax.Array:
-    """Build closed (traced-over physical) double-layer tensor.
 
-    Returns shape ``(D², D², D², D²)`` with index order ``(uU, dD, lL, rR)``.
+def _grow_edge_no_double_layer(
+    T_ket: Tensor,
+    T_bra: Tensor,
+    A: Tensor,
+    contracted_leg: str,
+    ket_D_label: str,
+    bra_D_label: str,
+    ket_I_label: str,
+    bra_I_label: str,
+    output_labels: tuple[str, ...],
+    chi: int,
+) -> jax.Array:
+    """Grow a T-edge by contracting ket/bra layers separately.
+
+    Instead of building a closed double-layer tensor, this contracts each
+    half-edge with its copy of A (ket or daggered-bra), then traces the
+    physical and interlayer indices via label-based contraction.
+
+    Returns a dense array of shape ``(chi*D², D², chi*D²)``.
     """
-    A_dense = A.todense()
-    D = A_dense.shape[0]
-    a = jnp.einsum("udlrs,UDLRs->uUdDlLrR", A_dense, jnp.conj(A_dense))
-    return a.reshape(D**2, D**2, D**2, D**2)
+    D = A.indices[0].dim
+
+    # --- Ket side ---
+    A_ket = A.relabel(contracted_leg, ket_D_label)
+    ket_half = contract(T_ket, A_ket)
+
+    # --- Bra side: dagger + relabel virtual legs to uppercase ---
+    bra_mapping: dict[str, str] = {contracted_leg: bra_D_label}
+    for v in _VIRTUAL_LEGS:
+        if v != contracted_leg:
+            bra_mapping[v] = v.upper()
+    A_bra = A.dagger().relabels(bra_mapping)
+    bra_half = contract(T_bra, A_bra)
+
+    # --- Match interlayer labels, then contract (traces _I + phys) ---
+    ket_half = ket_half.relabel(ket_I_label, "_I")
+    bra_half = bra_half.relabel(bra_I_label, "_I")
+    grown = contract(ket_half, bra_half, output_labels=output_labels)
+
+    return grown.todense().reshape(chi * D * D, D * D, chi * D * D)
 
 
 # ------------------------------------------------------------------ #
@@ -540,23 +573,19 @@ def _split_ctm_move_left(
     chi_new = P_full.shape[3]
     P_full = P_full.reshape(chi * D * D, chi_new)
 
-    # --- Step 8: Merge T4 edges ---
-    # T4_ket(t4k_d, l_ket, t4k_I) · T4_bra(t4b_I, l_bra, t4b_u)
-    # Contract: t4k_I ↔ t4b_I
-    T4k = env.T4_ket.relabel("t4k_I", "t4_I")
-    T4b = env.T4_bra.relabel("t4b_I", "t4_I")
-    T4_merged = contract(T4k, T4b)  # (t4k_d, l_ket, l_bra, t4b_u)
-    T4_full_dense = T4_merged.todense()
-    # Reshape to (chi, D, D, chi) then (chi, D*D, chi)
-    T4_full_dense = T4_full_dense.reshape(chi, D * D, chi)
-
-    # --- Step 9: Grow T4 with double-layer ---
-    a = _closed_double_layer_dense(A)  # (uU, dD, lL, rR)
-
-    # T4g: grow T4_full with double-layer a
-    # T4_full[chi, lL, chi] · a[uU, dD, lL, rR]
-    T4g = jnp.einsum("alg,udlr->augdr", T4_full_dense, a)
-    T4g = T4g.transpose(0, 1, 4, 2, 3).reshape(chi * D**2, D**2, chi * D**2)
+    # --- Step 8+9: Grow T4 via separate ket/bra contraction ---
+    T4g = _grow_edge_no_double_layer(
+        env.T4_ket,
+        env.T4_bra,
+        A,
+        "l",
+        "l_ket",
+        "l_bra",
+        "t4k_I",
+        "t4b_I",
+        ("t4k_d", "u", "U", "r", "R", "t4b_u", "d", "D"),
+        chi,
+    )
 
     # Apply projectors
     T4_new_full_dense = jnp.einsum("ia,idj,jb->adb", P_full, T4g, P_full)
@@ -644,17 +673,19 @@ def _split_ctm_move_right(
     chi_new = P_full.shape[3]
     P_full = P_full.reshape(chi * D * D, chi_new)
 
-    # Merge T2 edges
-    T2k = env.T2_ket.relabel("t2k_I", "t2_I")
-    T2b = env.T2_bra.relabel("t2b_I", "t2_I")
-    T2_merged = contract(T2k, T2b)
-    T2_full_dense = T2_merged.todense().reshape(chi, D * D, chi)
-
-    # Grow with double layer
-    a = _closed_double_layer_dense(A)
-
-    T2g = jnp.einsum("erm,udlr->eumdl", T2_full_dense, a)
-    T2g = T2g.transpose(0, 1, 4, 2, 3).reshape(chi * D**2, D**2, chi * D**2)
+    # Grow T2 via separate ket/bra contraction
+    T2g = _grow_edge_no_double_layer(
+        env.T2_ket,
+        env.T2_bra,
+        A,
+        "r",
+        "r_ket",
+        "r_bra",
+        "t2k_I",
+        "t2b_I",
+        ("t2k_u", "u", "U", "l", "L", "t2b_d", "d", "D"),
+        chi,
+    )
     T2_new_full_dense = jnp.einsum("ia,idj,jb->adb", P_full, T2g, P_full)
 
     T2_ket_new_dense, T2_bra_new_dense = _svd_split_edge_dense(T2_new_full_dense, chi_I)
@@ -733,17 +764,19 @@ def _split_ctm_move_top(
     chi_new = P_full.shape[3]
     P_full = P_full.reshape(chi * D * D, chi_new)
 
-    # Merge T1 edges
-    T1k = env.T1_ket.relabel("t1k_I", "t1_I")
-    T1b = env.T1_bra.relabel("t1b_I", "t1_I")
-    T1_merged = contract(T1k, T1b)
-    T1_full_dense = T1_merged.todense().reshape(chi, D * D, chi)
-
-    # Grow with double layer
-    a = _closed_double_layer_dense(A)
-
-    T1g = jnp.einsum("buc,udlr->bcdlr", T1_full_dense, a)
-    T1g = T1g.transpose(0, 3, 2, 1, 4).reshape(chi * D**2, D**2, chi * D**2)
+    # Grow T1 via separate ket/bra contraction
+    T1g = _grow_edge_no_double_layer(
+        env.T1_ket,
+        env.T1_bra,
+        A,
+        "u",
+        "u_ket",
+        "u_bra",
+        "t1k_I",
+        "t1b_I",
+        ("t1k_l", "l", "L", "d", "D", "t1b_r", "r", "R"),
+        chi,
+    )
     T1_new_full_dense = jnp.einsum("ia,idj,jb->adb", P_full, T1g, P_full)
 
     T1_ket_new_dense, T1_bra_new_dense = _svd_split_edge_dense(T1_new_full_dense, chi_I)
@@ -824,17 +857,19 @@ def _split_ctm_move_bottom(
     chi_new = P_full.shape[3]
     P_full = P_full.reshape(chi * D * D, chi_new)
 
-    # Merge T3 edges
-    T3k = env.T3_ket.relabel("t3k_I", "t3_I")
-    T3b = env.T3_bra.relabel("t3b_I", "t3_I")
-    T3_merged = contract(T3k, T3b)
-    T3_full_dense = T3_merged.todense().reshape(chi, D * D, chi)
-
-    # Grow with double layer
-    a = _closed_double_layer_dense(A)
-
-    T3g = jnp.einsum("hdi,udlr->hiulr", T3_full_dense, a)
-    T3g = T3g.transpose(0, 3, 2, 1, 4).reshape(chi * D**2, D**2, chi * D**2)
+    # Grow T3 via separate ket/bra contraction
+    T3g = _grow_edge_no_double_layer(
+        env.T3_ket,
+        env.T3_bra,
+        A,
+        "d",
+        "d_ket",
+        "d_bra",
+        "t3k_I",
+        "t3b_I",
+        ("t3k_r", "l", "L", "u", "U", "t3b_l", "r", "R"),
+        chi,
+    )
     T3_new_full_dense = jnp.einsum("ia,idj,jb->adb", P_full, T3g, P_full)
 
     T3_ket_new_dense, T3_bra_new_dense = _svd_split_edge_dense(T3_new_full_dense, chi_I)
@@ -1059,18 +1094,6 @@ def ctm_split_tensor(
 # ------------------------------------------------------------------ #
 # Energy computation (split, no double-layer)                          #
 # ------------------------------------------------------------------ #
-
-
-def _build_open_double_layer_dense(A: Tensor) -> jax.Array:
-    """Build open double-layer tensor from A (dense fallback).
-
-    Returns shape (D², D², D², D², d, d).
-    """
-    data = A.todense()
-    D = data.shape[0]
-    d = data.shape[4]
-    ao = jnp.einsum("udlrs,UDLRt->uUdDlLrRst", data, jnp.conj(data))
-    return ao.reshape(D**2, D**2, D**2, D**2, d, d)
 
 
 def _split_env_to_dense_standard(env: SplitCTMTensorEnv) -> tuple:
