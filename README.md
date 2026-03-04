@@ -373,7 +373,7 @@ uv run python examples/<script>.py
 ## Symmetry System
 
 ```python
-from tenax import U1Symmetry, ZnSymmetry
+from tenax import U1Symmetry, ZnSymmetry, ProductSymmetry, FermionParity
 import numpy as np
 
 # U(1): integer charges, fusion by addition
@@ -386,7 +386,17 @@ print(u1.dual(charges))           # [1, 0, -1]
 z3 = ZnSymmetry(3)
 print(z3.fuse(np.array([1, 2], dtype=np.int32),
               np.array([2, 2], dtype=np.int32)))  # [0, 1]
+
+# Product symmetry: combine two symmetries (e.g., charge × S_z)
+sym = ProductSymmetry(U1Symmetry(), U1Symmetry())
+packed = ProductSymmetry.encode_charges(
+    np.array([0, 1, -1], dtype=np.int32),  # charge
+    np.array([1, 0, -1], dtype=np.int32),  # S_z
+)
+q1, q2 = ProductSymmetry.decode_charges(packed)
 ```
+
+**Limitations:** `ProductSymmetry` combines exactly two factors by bit-packing two int16 charges into one int32. Nesting is not supported, so three-factor groups (e.g., U(1)×U(1)×Z₂) require a future `MultiProductSymmetry`. Each factor charge must fit in the int16 range [-32768, 32767].
 
 ## Gotchas
 

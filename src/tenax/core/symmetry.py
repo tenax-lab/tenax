@@ -463,6 +463,11 @@ class ProductSymmetry(BaseSymmetry):
     Raises:
         TypeError: If either factor is itself a ProductSymmetry (no nesting).
 
+    Limitations:
+        Only two factors are supported.  Three-factor groups
+        (e.g., U(1)×U(1)×Z₂) would require a ``MultiProductSymmetry``
+        with wider bit-packing or variable-length charge vectors.
+
     Example:
         >>> sym = ProductSymmetry(FermionParity(), U1Symmetry())
         >>> encoded = ProductSymmetry.encode(1, 3)
