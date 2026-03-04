@@ -27,13 +27,7 @@ from tenax.algorithms._tensor_utils import (
 from tenax.contraction.contractor import contract
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, Label, TensorIndex
-from tenax.core.tensor import (
-    DenseTensor,
-    SymmetricTensor,
-    Tensor,
-    _block_slices,
-    _compute_valid_blocks,
-)
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 # ------------------------------------------------------------------ #
 # Environment data structure                                          #
@@ -150,21 +144,6 @@ def _trivial_symmetry():
     return U1Symmetry()
 
 
-def _project_to_valid_blocks(
-    data: jax.Array, indices: tuple[TensorIndex, ...]
-) -> jax.Array:
-    """Zero out elements of a dense array that lie outside valid charge sectors."""
-    valid_keys = _compute_valid_blocks(indices)
-    mask = np.zeros(data.shape, dtype=bool)
-    for key in valid_keys:
-        masks, shape = _block_slices(indices, key)
-        if all(s > 0 for s in shape):
-            idx_arrays = [np.where(m)[0] for m in masks]
-            grid = np.ix_(*idx_arrays)
-            mask[grid] = True
-    return data * jnp.array(mask, dtype=data.dtype)
-
-
 def _init_symmetric_corner(
     A: SymmetricTensor,
     chi: int,
@@ -224,15 +203,14 @@ def _init_symmetric_edge_ket(
     )
     idx_I = TensorIndex(sym, I_charges, flow_I, label=label_I)
 
-    # Build identity-like dense, project onto valid blocks, then convert
+    # Build identity-like dense, then extract valid blocks (tol=inf
+    # silently discards elements outside charge-conserving sectors).
     T = jnp.zeros((chi, D, chi_I), dtype=A.dtype)
     chi_D = min(chi, D)
     chi_I_D = min(chi_I, D)
     for i in range(min(chi_D, chi_I_D)):
         T = T.at[i, :, i].set(jnp.ones(D, dtype=A.dtype))
-    indices = (idx_chi, idx_D, idx_I)
-    T = _project_to_valid_blocks(T, indices)
-    return SymmetricTensor.from_dense(T, indices)
+    return SymmetricTensor.from_dense(T, (idx_chi, idx_D, idx_I), tol=float("inf"))
 
 
 def _init_symmetric_edge_bra(
@@ -267,9 +245,7 @@ def _init_symmetric_edge_bra(
     chi_I_D = min(chi_I, D)
     for i in range(min(chi_I_D, chi_D)):
         T = T.at[i, :, i].set(jnp.ones(D, dtype=A.dtype))
-    indices = (idx_I, idx_D, idx_chi)
-    T = _project_to_valid_blocks(T, indices)
-    return SymmetricTensor.from_dense(T, indices)
+    return SymmetricTensor.from_dense(T, (idx_I, idx_D, idx_chi), tol=float("inf"))
 
 
 def _derive_charges(base_charges: np.ndarray, target_dim: int) -> np.ndarray:

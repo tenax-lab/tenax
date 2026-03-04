@@ -526,36 +526,21 @@ class TestBar:
             assert barred.flow == FlowDirection(-int(orig.flow))
             np.testing.assert_array_equal(barred.charges, orig.charges)
 
-    def test_symmetric_bar_todense_equals_conj(self, u1, rng):
+    def test_symmetric_bar_todense_equals_conj(self, u1_sym_tensor_2leg):
         """SymmetricTensor.bar().todense() == conj(todense())."""
-        charges = np.array([-1, 0, 1], dtype=np.int32)
-        indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
-        )
-        t = SymmetricTensor.random_normal(indices, rng)
+        t = u1_sym_tensor_2leg
         tb = t.bar()
         np.testing.assert_allclose(tb.todense(), jnp.conj(t.todense()), rtol=1e-6)
 
-    def test_symmetric_bar_block_keys_unchanged(self, u1, rng):
+    def test_symmetric_bar_block_keys_unchanged(self, u1_sym_tensor_2leg):
         """SymmetricTensor.bar() preserves block keys (no charge dual)."""
-        charges = np.array([-1, 0, 1], dtype=np.int32)
-        indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
-        )
-        t = SymmetricTensor.random_normal(indices, rng)
+        t = u1_sym_tensor_2leg
         tb = t.bar()
         assert set(tb.blocks.keys()) == set(t.blocks.keys())
 
-    def test_symmetric_bar_flows_flipped_charges_unchanged(self, u1, rng):
+    def test_symmetric_bar_flows_flipped_charges_unchanged(self, u1_sym_tensor_2leg):
         """SymmetricTensor.bar() flips flows, keeps charges."""
-        charges = np.array([-1, 0, 1], dtype=np.int32)
-        indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
-        )
-        t = SymmetricTensor.random_normal(indices, rng)
+        t = u1_sym_tensor_2leg
         tb = t.bar()
         for orig, barred in zip(t.indices, tb.indices):
             assert barred.flow == FlowDirection(-int(orig.flow))
