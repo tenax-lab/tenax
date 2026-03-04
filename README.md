@@ -19,7 +19,7 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **AutoMPO** — build Hamiltonian MPOs from symbolic operator descriptions (custom couplings, NNN, arbitrary spin); supports `symmetric=True` for U(1) block-sparse MPOs
 - **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237)
 - **QR-based CTMRG projectors** — optional QR projectors for faster CTM convergence (replaces expensive `eigh`)
-- **Split-CTMRG** — ket/bra-separated CTM environment tensors for O(χ³D³) projector cost instead of O(χ³D⁶) (Rader & Läuchli, arXiv:2502.10298)
+- **Split-CTMRG** — ket/bra-separated CTM environment tensors for O(χ³D³) projector cost instead of O(χ³D⁶) (Naumann et al., arXiv:2502.10298)
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary Brillouin-zone momenta (Ponsioen et al. 2022)
 - **Polymorphic tensor arithmetic** — `+`, `-`, `*`, `-T`, `max_abs`, `inner()` work identically on `DenseTensor` and `SymmetricTensor`, enabling algorithm code that is agnostic to the underlying storage
 - **Block-sparse SVD and QR** — native symmetry-aware decompositions for `SymmetricTensor`
@@ -373,7 +373,7 @@ uv run python examples/<script>.py
 ## Symmetry System
 
 ```python
-from tenax import U1Symmetry, ZnSymmetry
+from tenax import U1Symmetry, ZnSymmetry, ProductSymmetry, FermionParity
 import numpy as np
 
 # U(1): integer charges, fusion by addition
@@ -386,7 +386,17 @@ print(u1.dual(charges))           # [1, 0, -1]
 z3 = ZnSymmetry(3)
 print(z3.fuse(np.array([1, 2], dtype=np.int32),
               np.array([2, 2], dtype=np.int32)))  # [0, 1]
+
+# Product symmetry: combine two symmetries (e.g., charge × S_z)
+sym = ProductSymmetry(U1Symmetry(), U1Symmetry())
+packed = ProductSymmetry.encode_charges(
+    np.array([0, 1, -1], dtype=np.int32),  # charge
+    np.array([1, 0, -1], dtype=np.int32),  # S_z
+)
+q1, q2 = ProductSymmetry.decode_charges(packed)
 ```
+
+**Limitations:** `ProductSymmetry` combines exactly two factors by bit-packing two int16 charges into one int32. Nesting is not supported, so three-factor groups (e.g., U(1)×U(1)×Z₂) require a future `MultiProductSymmetry`. Each factor charge must fit in the int16 range [-32768, 32767].
 
 ## Gotchas
 
@@ -488,7 +498,7 @@ The generated HTML is in `docs/_build/html/`.
 - H.-J. Liao, J.-G. Liu, L. Wang, T. Xiang, *Phys. Rev. X* **9**, 031041 (2019) — AD-based iPEPS ground-state optimization
 - A. Francuz, N. Schuch, B. Vanhecke, *PRR* **7**, 013237 (2025) — Stable AD through CTM (SVD regularization, truncation correction, implicit differentiation)
 - L. Ponsioen, F. F. Assaad, P. Corboz, *SciPost Phys.* **12**, 006 (2022) — Quasiparticle excitations for iPEPS
-- M. Rader, A. M. Läuchli, arXiv:2502.10298 (2025) — Split-CTMRG with factored projectors for efficient iPEPS environments
+- J. Naumann, E. L. Weerda, J. Eisert, M. Rizzi, P. Schmoll, arXiv:2502.10298 (2025) — Split-CTMRG with factored projectors for efficient iPEPS environments
 
 ## License
 

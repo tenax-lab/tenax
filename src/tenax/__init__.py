@@ -37,6 +37,11 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
+from tenax.algorithms._split_ctm_tensor import (
+    SplitCTMTensorEnv,
+    compute_energy_split_ctm_tensor,
+    ctm_split_tensor,
+)
 from tenax.algorithms.auto_mpo import (
     AutoMPO,
     HamiltonianTerm,
@@ -192,6 +197,10 @@ __all__ = [
     "compute_energy_ctm_2site",
     "compute_energy_split_ctm",
     "optimize_gs_ad",
+    # Split CTM (Tensor protocol)
+    "SplitCTMTensorEnv",
+    "ctm_split_tensor",
+    "compute_energy_split_ctm_tensor",
     # fPEPS (fermionic iPEPS)
     "FPEPSConfig",
     "fpeps",

@@ -29,7 +29,7 @@ from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity
-from tenax.core.tensor import SymmetricTensor
+from tenax.core.tensor import SymmetricTensor, Tensor
 
 
 @dataclass
@@ -414,6 +414,9 @@ def fermionic_ctm(A, config):
     This function converts *A* to a dense array and delegates to the
     bosonic CTM implementation.
 
+    For symmetric CTM without densification, use
+    :func:`tenax.algorithms._split_ctm_tensor.ctm_split_tensor` directly.
+
     Args:
         A:      fPEPS site tensor (SymmetricTensor with lambdas absorbed).
         config: FPEPSConfig.
@@ -423,7 +426,7 @@ def fermionic_ctm(A, config):
     """
     from tenax.algorithms.ipeps import CTMConfig, ctm
 
-    A_dense = A.todense()  # shape (D, D, D, D, d) — (u, d, l, r, phys)
+    A_dense = A.todense() if isinstance(A, Tensor) else A
     ctm_cfg = CTMConfig(
         chi=config.ctm_chi,
         max_iter=config.ctm_max_iter,
@@ -433,11 +436,14 @@ def fermionic_ctm(A, config):
 
 
 def compute_energy_fermionic_ctm(A, env, hamiltonian_gate):
-    """Compute energy per site using a bosonic CTM environment.
+    """Compute energy per site using a CTM environment.
+
+    Supports both ``SplitCTMTensorEnv`` (from split-CTM) and legacy
+    ``CTMEnvironment`` (from dense CTM).
 
     Args:
-        A:                fPEPS site tensor (SymmetricTensor).
-        env:              Converged CTMEnvironment (from :func:`fermionic_ctm`).
+        A:                fPEPS site tensor (SymmetricTensor or dense).
+        env:              Converged environment from :func:`fermionic_ctm`.
         hamiltonian_gate: 2-site Hamiltonian (SymmetricTensor or dense array).
 
     Returns:
@@ -445,7 +451,7 @@ def compute_energy_fermionic_ctm(A, env, hamiltonian_gate):
     """
     from tenax.algorithms.ipeps import compute_energy_ctm
 
-    A_dense = A.todense()
+    A_dense = A.todense() if isinstance(A, Tensor) else A
     d = A_dense.shape[-1]
     if isinstance(hamiltonian_gate, SymmetricTensor):
         H = hamiltonian_gate.todense().reshape(d, d, d, d)

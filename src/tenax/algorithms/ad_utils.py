@@ -573,3 +573,67 @@ def _ctm_converge_2site_bwd(
 
 
 ctm_converge_2site.defvjp(_ctm_converge_2site_fwd, _ctm_converge_2site_bwd)
+
+
+# ---------------------------------------------------------------------------
+# 5. Split CTM (Tensor protocol) fixed-point implicit differentiation
+# ---------------------------------------------------------------------------
+
+
+def _split_ctm_tensor_step(
+    A_flat: jax.Array,
+    env_tuple: tuple[jax.Array, ...],
+    chi: int,
+    chi_I: int,
+    renormalize: bool,
+    A_template,
+    env_template,
+) -> tuple[jax.Array, ...]:
+    """One split-CTM sweep as function of (A_flat, env_flat).
+
+    Reconstructs Tensor objects from flat arrays using templates,
+    runs one sweep, and returns the flattened environment.
+    """
+    from tenax.algorithms._split_ctm_tensor import (
+        _split_ctm_tensor_sweep,
+    )
+
+    # Reconstruct A from flat
+    A = jax.tree.unflatten(jax.tree.structure(A_template), (A_flat,))
+
+    # Reconstruct env from tuple of arrays
+    env_leaves = list(env_tuple)
+    env = jax.tree.unflatten(jax.tree.structure(env_template), env_leaves)
+
+    env_new = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
+
+    return tuple(jax.tree.leaves(env_new))
+
+
+def ctm_split_tensor_fixed_point(
+    A,
+    chi: int,
+    max_iter: int = 100,
+    conv_tol: float = 1e-8,
+    chi_I: int | None = None,
+    renormalize: bool = True,
+):
+    """Split-CTM with implicit differentiation at fixed point.
+
+    Forward: run split-CTM to convergence.
+    Backward: solve ``(I - J^T) lambda = g`` for the VJP via GMRES.
+
+    Args:
+        A:          iPEPS site tensor (DenseTensor or SymmetricTensor).
+        chi:        Environment bond dimension.
+        max_iter:   Maximum CTM iterations.
+        conv_tol:   Convergence tolerance.
+        chi_I:      Interlayer bond dimension.
+        renormalize: Renormalize environment at each step.
+
+    Returns:
+        Converged SplitCTMTensorEnv.
+    """
+    from tenax.algorithms._split_ctm_tensor import ctm_split_tensor
+
+    return ctm_split_tensor(A, chi, max_iter, conv_tol, chi_I, renormalize)
