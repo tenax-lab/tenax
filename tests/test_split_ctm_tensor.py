@@ -45,6 +45,25 @@ def small_peps_dense():
 
 
 @pytest.fixture
+def small_peps_symmetric():
+    """Random SymmetricTensor iPEPS site tensor with trivial U(1) charges."""
+    key = jax.random.PRNGKey(99)
+    D, d = 2, 2
+    sym = U1Symmetry()
+    charges = np.zeros(D, dtype=np.int32)
+    phys_charges = np.zeros(d, dtype=np.int32)
+    indices = (
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+    )
+    data = jax.random.normal(key, (D, D, D, D, d))
+    return SymmetricTensor.from_dense(data, indices)
+
+
+@pytest.fixture
 def heisenberg_gate():
     """Heisenberg 2-site Hamiltonian gate as dense array."""
     d = 2
@@ -102,26 +121,11 @@ class TestSplitCTMTensorInit:
         for t in env:
             assert jnp.all(jnp.isfinite(t.todense()))
 
-    def test_symmetric_init_shapes(self):
+    def test_symmetric_init_shapes(self, small_peps_symmetric):
         """SymmetricTensor initialization should produce correct shapes."""
-        key = jax.random.PRNGKey(99)
-        D, d = 2, 2
-        sym = U1Symmetry()
-        # Use trivial (all-zero) charges so all elements are symmetry-allowed
-        charges = np.zeros(D, dtype=np.int32)
-        phys_charges = np.zeros(d, dtype=np.int32)
-        indices = (
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
-        )
-        data = jax.random.normal(key, (D, D, D, D, d))
-        A_sym = SymmetricTensor.from_dense(data, indices)
-
         chi, chi_I = 4, 2
-        env = initialize_split_ctm_tensor_env(A_sym, chi, chi_I)
+        D = 2
+        env = initialize_split_ctm_tensor_env(small_peps_symmetric, chi, chi_I)
         assert isinstance(env, SplitCTMTensorEnv)
 
         for C in [env.C1, env.C2, env.C3, env.C4]:
@@ -240,6 +244,7 @@ class TestSplitCTMTensorEnergy:
 
         env_t = initialize_split_ctm_tensor_env(small_peps_dense, chi, chi_I)
         env_d = _initialize_split_ctm_env(A_raw, chi, chi_I)
+        A_dag = small_peps_dense.dagger()
 
         a = _build_double_layer(A_raw)
         if a.ndim == 8:
@@ -255,13 +260,11 @@ class TestSplitCTMTensorEnergy:
             env_t.T4_ket,
             env_t.T4_bra,
             small_peps_dense,
+            A_dag,
             "l",
-            "l_ket",
-            "l_bra",
             "t4k_I",
             "t4b_I",
             ("t4k_d", "u", "U", "r", "R", "t4b_u", "d", "D"),
-            chi,
         )
         assert jnp.allclose(T4g_old, T4g_new, atol=1e-12), "T4 (left) growth mismatch"
 
@@ -275,13 +278,11 @@ class TestSplitCTMTensorEnergy:
             env_t.T2_ket,
             env_t.T2_bra,
             small_peps_dense,
+            A_dag,
             "r",
-            "r_ket",
-            "r_bra",
             "t2k_I",
             "t2b_I",
             ("t2k_u", "u", "U", "l", "L", "t2b_d", "d", "D"),
-            chi,
         )
         assert jnp.allclose(T2g_old, T2g_new, atol=1e-12), "T2 (right) growth mismatch"
 
@@ -295,13 +296,11 @@ class TestSplitCTMTensorEnergy:
             env_t.T1_ket,
             env_t.T1_bra,
             small_peps_dense,
+            A_dag,
             "u",
-            "u_ket",
-            "u_bra",
             "t1k_I",
             "t1b_I",
             ("t1k_l", "l", "L", "d", "D", "t1b_r", "r", "R"),
-            chi,
         )
         assert jnp.allclose(T1g_old, T1g_new, atol=1e-12), "T1 (top) growth mismatch"
 
@@ -315,13 +314,11 @@ class TestSplitCTMTensorEnergy:
             env_t.T3_ket,
             env_t.T3_bra,
             small_peps_dense,
+            A_dag,
             "d",
-            "d_ket",
-            "d_bra",
             "t3k_I",
             "t3b_I",
             ("t3k_r", "l", "L", "u", "U", "t3b_l", "r", "R"),
-            chi,
         )
         assert jnp.allclose(T3g_old, T3g_new, atol=1e-12), "T3 (bottom) growth mismatch"
 
@@ -334,26 +331,11 @@ class TestSplitCTMTensorEnergy:
 class TestSplitCTMSymmetric:
     """Tests for SymmetricTensor iPEPS with trivial charges."""
 
-    def test_symmetric_one_sweep_finite(self):
+    def test_symmetric_one_sweep_finite(self, small_peps_symmetric):
         """One CTM sweep with trivial-charge SymmetricTensor A produces finite tensors."""
-        key = jax.random.PRNGKey(99)
-        D, d = 2, 2
-        sym = U1Symmetry()
-        charges = np.zeros(D, dtype=np.int32)
-        phys_charges = np.zeros(d, dtype=np.int32)
-        indices = (
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
-        )
-        data = jax.random.normal(key, (D, D, D, D, d))
-        A_sym = SymmetricTensor.from_dense(data, indices)
-
         chi, chi_I = 4, 2
-        env = initialize_split_ctm_tensor_env(A_sym, chi, chi_I)
-        env = _split_ctm_tensor_sweep(env, A_sym, chi, chi_I, True)
+        env = initialize_split_ctm_tensor_env(small_peps_symmetric, chi, chi_I)
+        env = _split_ctm_tensor_sweep(env, small_peps_symmetric, chi, chi_I, True)
         for t in env:
             assert jnp.all(jnp.isfinite(t.todense())), (
                 "SymmetricTensor sweep produced non-finite tensors"

@@ -464,13 +464,11 @@ def _grow_edge_no_double_layer(
     T_ket: Tensor,
     T_bra: Tensor,
     A: Tensor,
+    A_dag: Tensor,
     contracted_leg: str,
-    ket_D_label: str,
-    bra_D_label: str,
     ket_I_label: str,
     bra_I_label: str,
     output_labels: tuple[str, ...],
-    chi: int,
 ) -> jax.Array:
     """Grow a T-edge by contracting ket/bra layers separately.
 
@@ -481,17 +479,20 @@ def _grow_edge_no_double_layer(
     Returns a dense array of shape ``(chi*D², D², chi*D²)``.
     """
     D = A.indices[0].dim
+    chi = T_ket.indices[0].dim
+    ket_D_label = f"{contracted_leg}_ket"
+    bra_D_label = f"{contracted_leg}_bra"
 
     # --- Ket side ---
     A_ket = A.relabel(contracted_leg, ket_D_label)
     ket_half = contract(T_ket, A_ket)
 
-    # --- Bra side: dagger + relabel virtual legs to uppercase ---
+    # --- Bra side: relabel virtual legs to uppercase ---
     bra_mapping: dict[str, str] = {contracted_leg: bra_D_label}
     for v in _VIRTUAL_LEGS:
         if v != contracted_leg:
             bra_mapping[v] = v.upper()
-    A_bra = A.dagger().relabels(bra_mapping)
+    A_bra = A_dag.relabels(bra_mapping)
     bra_half = contract(T_bra, A_bra)
 
     # --- Match interlayer labels, then contract (traces _I + phys) ---
@@ -510,6 +511,7 @@ def _grow_edge_no_double_layer(
 def _split_ctm_move_left(
     env: SplitCTMTensorEnv,
     A: Tensor,
+    A_dag: Tensor,
     chi: int,
     chi_I: int,
 ) -> SplitCTMTensorEnv:
@@ -578,13 +580,11 @@ def _split_ctm_move_left(
         env.T4_ket,
         env.T4_bra,
         A,
+        A_dag,
         "l",
-        "l_ket",
-        "l_bra",
         "t4k_I",
         "t4b_I",
         ("t4k_d", "u", "U", "r", "R", "t4b_u", "d", "D"),
-        chi,
     )
 
     # Apply projectors
@@ -619,6 +619,7 @@ def _split_ctm_move_left(
 def _split_ctm_move_right(
     env: SplitCTMTensorEnv,
     A: Tensor,
+    A_dag: Tensor,
     chi: int,
     chi_I: int,
 ) -> SplitCTMTensorEnv:
@@ -678,13 +679,11 @@ def _split_ctm_move_right(
         env.T2_ket,
         env.T2_bra,
         A,
+        A_dag,
         "r",
-        "r_ket",
-        "r_bra",
         "t2k_I",
         "t2b_I",
         ("t2k_u", "u", "U", "l", "L", "t2b_d", "d", "D"),
-        chi,
     )
     T2_new_full_dense = jnp.einsum("ia,idj,jb->adb", P_full, T2g, P_full)
 
@@ -715,6 +714,7 @@ def _split_ctm_move_right(
 def _split_ctm_move_top(
     env: SplitCTMTensorEnv,
     A: Tensor,
+    A_dag: Tensor,
     chi: int,
     chi_I: int,
 ) -> SplitCTMTensorEnv:
@@ -769,13 +769,11 @@ def _split_ctm_move_top(
         env.T1_ket,
         env.T1_bra,
         A,
+        A_dag,
         "u",
-        "u_ket",
-        "u_bra",
         "t1k_I",
         "t1b_I",
         ("t1k_l", "l", "L", "d", "D", "t1b_r", "r", "R"),
-        chi,
     )
     T1_new_full_dense = jnp.einsum("ia,idj,jb->adb", P_full, T1g, P_full)
 
@@ -806,6 +804,7 @@ def _split_ctm_move_top(
 def _split_ctm_move_bottom(
     env: SplitCTMTensorEnv,
     A: Tensor,
+    A_dag: Tensor,
     chi: int,
     chi_I: int,
 ) -> SplitCTMTensorEnv:
@@ -862,13 +861,11 @@ def _split_ctm_move_bottom(
         env.T3_ket,
         env.T3_bra,
         A,
+        A_dag,
         "d",
-        "d_ket",
-        "d_bra",
         "t3k_I",
         "t3b_I",
         ("t3k_r", "l", "L", "u", "U", "t3b_l", "r", "R"),
-        chi,
     )
     T3_new_full_dense = jnp.einsum("ia,idj,jb->adb", P_full, T3g, P_full)
 
@@ -1002,10 +999,11 @@ def _split_ctm_tensor_sweep(
     renormalize: bool,
 ) -> SplitCTMTensorEnv:
     """One full split-CTM sweep: L/R/T/B moves + optional renormalize."""
-    env = _split_ctm_move_left(env, A, chi, chi_I)
-    env = _split_ctm_move_right(env, A, chi, chi_I)
-    env = _split_ctm_move_top(env, A, chi, chi_I)
-    env = _split_ctm_move_bottom(env, A, chi, chi_I)
+    A_dag = A.dagger()
+    env = _split_ctm_move_left(env, A, A_dag, chi, chi_I)
+    env = _split_ctm_move_right(env, A, A_dag, chi, chi_I)
+    env = _split_ctm_move_top(env, A, A_dag, chi, chi_I)
+    env = _split_ctm_move_bottom(env, A, A_dag, chi, chi_I)
 
     if renormalize:
         env = _renormalize_split_env(env)
