@@ -29,7 +29,7 @@ from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity
-from tenax.core.tensor import SymmetricTensor
+from tenax.core.tensor import SymmetricTensor, Tensor
 
 
 @dataclass
@@ -426,7 +426,7 @@ def fermionic_ctm(A, config):
     """
     from tenax.algorithms.ipeps import CTMConfig, ctm
 
-    A_dense = A.todense() if hasattr(A, "todense") else A
+    A_dense = A.todense() if isinstance(A, Tensor) else A
     ctm_cfg = CTMConfig(
         chi=config.ctm_chi,
         max_iter=config.ctm_max_iter,
@@ -451,7 +451,7 @@ def compute_energy_fermionic_ctm(A, env, hamiltonian_gate):
     """
     from tenax.algorithms.ipeps import compute_energy_ctm
 
-    A_dense = A.todense() if hasattr(A, "todense") else A
+    A_dense = A.todense() if isinstance(A, Tensor) else A
     d = A_dense.shape[-1]
     if isinstance(hamiltonian_gate, SymmetricTensor):
         H = hamiltonian_gate.todense().reshape(d, d, d, d)

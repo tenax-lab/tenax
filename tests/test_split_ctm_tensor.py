@@ -17,7 +17,7 @@ from tenax.algorithms._split_ctm_tensor import (
 from tenax.algorithms.ipeps import CTMConfig, compute_energy_ctm, ctm, ctm_split
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 # ------------------------------------------------------------------ #
 # Fixtures                                                             #
@@ -101,6 +101,40 @@ class TestSplitCTMTensorInit:
         env = initialize_split_ctm_tensor_env(small_peps_dense, chi, chi_I)
         for t in env:
             assert jnp.all(jnp.isfinite(t.todense()))
+
+    def test_symmetric_init_shapes(self):
+        """SymmetricTensor initialization should produce correct shapes."""
+        key = jax.random.PRNGKey(99)
+        D, d = 2, 2
+        sym = U1Symmetry()
+        # Use trivial (all-zero) charges so all elements are symmetry-allowed
+        charges = np.zeros(D, dtype=np.int32)
+        phys_charges = np.zeros(d, dtype=np.int32)
+        indices = (
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        data = jax.random.normal(key, (D, D, D, D, d))
+        A_sym = SymmetricTensor.from_dense(data, indices)
+
+        chi, chi_I = 4, 2
+        env = initialize_split_ctm_tensor_env(A_sym, chi, chi_I)
+        assert isinstance(env, SplitCTMTensorEnv)
+
+        for C in [env.C1, env.C2, env.C3, env.C4]:
+            assert isinstance(C, SymmetricTensor)
+            assert C.todense().shape == (chi, chi)
+
+        for T_ket in [env.T1_ket, env.T2_ket, env.T3_ket, env.T4_ket]:
+            assert isinstance(T_ket, SymmetricTensor)
+            assert T_ket.todense().shape == (chi, D, chi_I)
+
+        for T_bra in [env.T1_bra, env.T2_bra, env.T3_bra, env.T4_bra]:
+            assert isinstance(T_bra, SymmetricTensor)
+            assert T_bra.todense().shape == (chi_I, D, chi)
 
 
 # ------------------------------------------------------------------ #

@@ -13,6 +13,7 @@ Reference: arXiv:2502.10298
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import jax
@@ -23,7 +24,7 @@ from tenax.algorithms._tensor_utils import (
     fuse_indices,
     max_abs_normalize,
 )
-from tenax.contraction.contractor import contract, truncated_svd
+from tenax.contraction.contractor import contract
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, Label, TensorIndex
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
@@ -452,37 +453,20 @@ def _compute_projector_dense(
 # ------------------------------------------------------------------ #
 
 
-def _svd_split_edge_tensor(
-    T_full: Tensor,
-    chi_I: int,
-    left_labels: list[Label],
-    right_labels: list[Label],
-    bond_label_ket: Label,
-    bond_label_bra: Label,
-) -> tuple[Tensor, Tensor]:
-    """Split a full edge tensor into ket/bra via truncated SVD.
+# ------------------------------------------------------------------ #
+# Double-layer helper                                                  #
+# ------------------------------------------------------------------ #
 
-    T_full has labels for (chi, D_ket, D_bra, chi) or similar.
-    Groups left_labels vs right_labels, SVDs, absorbs sqrt(s) into both sides.
 
-    Returns (T_ket, T_bra) with interlayer bond of dimension chi_I.
+def _closed_double_layer_dense(A: Tensor) -> jax.Array:
+    """Build closed (traced-over physical) double-layer tensor.
+
+    Returns shape ``(D², D², D², D²)`` with index order ``(uU, dD, lL, rR)``.
     """
-    U, s, Vh, _ = truncated_svd(
-        T_full,
-        left_labels=left_labels,
-        right_labels=right_labels,
-        new_bond_label=bond_label_ket,
-        max_singular_values=chi_I,
-    )
-    # Absorb sqrt(s) into both sides
-    sqrt_s = jnp.sqrt(s)
-    from tenax.algorithms._tensor_utils import scale_bond_axis
-
-    T_ket = scale_bond_axis(U, bond_label_ket, sqrt_s)
-    # Rename bond for bra side
-    Vh_renamed = Vh.relabel(bond_label_ket, bond_label_bra)
-    T_bra = scale_bond_axis(Vh_renamed, bond_label_bra, sqrt_s)
-    return T_ket, T_bra
+    A_dense = A.todense()
+    D = A_dense.shape[0]
+    a = jnp.einsum("udlrs,UDLRs->uUdDlLrR", A_dense, jnp.conj(A_dense))
+    return a.reshape(D**2, D**2, D**2, D**2)
 
 
 # ------------------------------------------------------------------ #
@@ -567,10 +551,7 @@ def _split_ctm_move_left(
     T4_full_dense = T4_full_dense.reshape(chi, D * D, chi)
 
     # --- Step 9: Grow T4 with double-layer ---
-    # Build double layer from A (dense): a[u,U,d,D,l,L,r,R] via einsum
-    A_dense = A.todense()
-    a = jnp.einsum("udlrs,UDLRs->uUdDlLrR", A_dense, jnp.conj(A_dense))
-    a = a.reshape(D**2, D**2, D**2, D**2)  # (uU, dD, lL, rR)
+    a = _closed_double_layer_dense(A)  # (uU, dD, lL, rR)
 
     # T4g: grow T4_full with double-layer a
     # T4_full[chi, lL, chi] · a[uU, dD, lL, rR]
@@ -670,9 +651,7 @@ def _split_ctm_move_right(
     T2_full_dense = T2_merged.todense().reshape(chi, D * D, chi)
 
     # Grow with double layer
-    A_dense = A.todense()
-    a = jnp.einsum("udlrs,UDLRs->uUdDlLrR", A_dense, jnp.conj(A_dense))
-    a = a.reshape(D**2, D**2, D**2, D**2)
+    a = _closed_double_layer_dense(A)
 
     T2g = jnp.einsum("erm,udlr->eumdl", T2_full_dense, a)
     T2g = T2g.transpose(0, 1, 4, 2, 3).reshape(chi * D**2, D**2, chi * D**2)
@@ -761,9 +740,7 @@ def _split_ctm_move_top(
     T1_full_dense = T1_merged.todense().reshape(chi, D * D, chi)
 
     # Grow with double layer
-    A_dense = A.todense()
-    a = jnp.einsum("udlrs,UDLRs->uUdDlLrR", A_dense, jnp.conj(A_dense))
-    a = a.reshape(D**2, D**2, D**2, D**2)
+    a = _closed_double_layer_dense(A)
 
     T1g = jnp.einsum("buc,udlr->bcdlr", T1_full_dense, a)
     T1g = T1g.transpose(0, 3, 2, 1, 4).reshape(chi * D**2, D**2, chi * D**2)
@@ -854,9 +831,7 @@ def _split_ctm_move_bottom(
     T3_full_dense = T3_merged.todense().reshape(chi, D * D, chi)
 
     # Grow with double layer
-    A_dense = A.todense()
-    a = jnp.einsum("udlrs,UDLRs->uUdDlLrR", A_dense, jnp.conj(A_dense))
-    a = a.reshape(D**2, D**2, D**2, D**2)
+    a = _closed_double_layer_dense(A)
 
     T3g = jnp.einsum("hdi,udlr->hiulr", T3_full_dense, a)
     T3g = T3g.transpose(0, 3, 2, 1, 4).reshape(chi * D**2, D**2, chi * D**2)
@@ -898,7 +873,7 @@ def _svd_split_edge_dense(
     """Split a standard edge (chi, D², chi) into ket/bra via SVD (dense)."""
     chi = T_full.shape[0]
     D2 = T_full.shape[1]
-    D = int(round(D2**0.5))
+    D = math.isqrt(D2)
     T_4d = T_full.reshape(chi, D, D, chi)
     T_mat = T_4d.reshape(chi * D, D * chi)
 
