@@ -11,11 +11,26 @@ from tenax.algorithms.dmrg import (
     build_mpo_heisenberg,
     build_random_mps,
     build_random_symmetric_mps,
+    compute_mps_sector,
     dmrg,
+    validate_mps_sector,
 )
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
+from tenax.network.network import TensorNetwork
+
+
+def _densify_tensor_network(tn: TensorNetwork) -> TensorNetwork:
+    """Convert all tensors in a TensorNetwork to DenseTensor."""
+    result = TensorNetwork()
+    for nid in tn.node_ids():
+        t = tn.get_tensor(nid)
+        if isinstance(t, DenseTensor):
+            result.add_node(nid, t)
+        else:
+            result.add_node(nid, DenseTensor(t.todense(), t.indices))
+    return result
 
 
 class TestBuildMPOHeisenberg:
@@ -129,7 +144,7 @@ class TestDMRGRun:
     def test_dmrg_runs_without_error(self):
         """DMRG should run end-to-end on a small system."""
         L = 4
-        mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
+        mpo = _densify_tensor_network(build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0))
         mps = build_random_mps(L, physical_dim=2, bond_dim=4)
         config = DMRGConfig(
             max_bond_dim=4,
@@ -144,7 +159,7 @@ class TestDMRGRun:
 
     def test_energy_is_finite(self):
         L = 4
-        mpo = build_mpo_heisenberg(L)
+        mpo = _densify_tensor_network(build_mpo_heisenberg(L))
         mps = build_random_mps(L, physical_dim=2, bond_dim=4)
         config = DMRGConfig(max_bond_dim=4, num_sweeps=2, lanczos_max_iter=5)
         result = dmrg(mpo, mps, config)
@@ -153,7 +168,7 @@ class TestDMRGRun:
     def test_energies_per_sweep_length(self):
         L = 4
         n_sweeps = 3
-        mpo = build_mpo_heisenberg(L)
+        mpo = _densify_tensor_network(build_mpo_heisenberg(L))
         mps = build_random_mps(L, physical_dim=2, bond_dim=4)
         config = DMRGConfig(max_bond_dim=4, num_sweeps=n_sweeps, lanczos_max_iter=3)
         result = dmrg(mpo, mps, config)
@@ -161,7 +176,7 @@ class TestDMRGRun:
 
     def test_result_mps_has_correct_nodes(self):
         L = 4
-        mpo = build_mpo_heisenberg(L)
+        mpo = _densify_tensor_network(build_mpo_heisenberg(L))
         mps = build_random_mps(L, physical_dim=2, bond_dim=4)
         config = DMRGConfig(max_bond_dim=4, num_sweeps=2, lanczos_max_iter=3)
         result = dmrg(mpo, mps, config)
@@ -170,7 +185,7 @@ class TestDMRGRun:
     def test_converged_field(self):
         """Very tight tolerance should NOT converge in 2 sweeps."""
         L = 4
-        mpo = build_mpo_heisenberg(L)
+        mpo = _densify_tensor_network(build_mpo_heisenberg(L))
         mps = build_random_mps(L, physical_dim=2, bond_dim=4)
         config = DMRGConfig(
             max_bond_dim=4,
@@ -186,7 +201,7 @@ class TestDMRGRun:
     def test_energy_decreases_with_sweeps(self):
         """Energy should not increase over sweeps (monotone DMRG)."""
         L = 4
-        mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
+        mpo = _densify_tensor_network(build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0))
         mps = build_random_mps(L, physical_dim=2, bond_dim=4, seed=0)
         config = DMRGConfig(max_bond_dim=4, num_sweeps=4, lanczos_max_iter=10)
         result = dmrg(mpo, mps, config)
@@ -261,7 +276,7 @@ class TestDMRGExactDiag:
         e_exact = float(np.linalg.eigvalsh(H_mat)[0])
 
         # DMRG
-        mpo = build_mpo_heisenberg(L, Jz=Jz, Jxy=Jxy)
+        mpo = _densify_tensor_network(build_mpo_heisenberg(L, Jz=Jz, Jxy=Jxy))
         mps = build_random_mps(L, physical_dim=2, bond_dim=4, seed=7)
         config = DMRGConfig(
             max_bond_dim=4,
@@ -283,7 +298,7 @@ class TestDMRGExactDiag:
         L4_H = _build_heisenberg_matrix(4)
         e_l4_exact = float(np.linalg.eigvalsh(L4_H)[0])
 
-        mpo = build_mpo_heisenberg(6, Jz=1.0, Jxy=1.0)
+        mpo = _densify_tensor_network(build_mpo_heisenberg(6, Jz=1.0, Jxy=1.0))
         mps = build_random_mps(6, physical_dim=2, bond_dim=8, seed=5)
         config = DMRGConfig(max_bond_dim=8, num_sweeps=8, lanczos_max_iter=20)
         result = dmrg(mpo, mps, config)
@@ -343,19 +358,20 @@ class TestSymmetricDMRGParity:
     def test_symmetric_vs_dense_parity(self):
         """Energies from symmetric and dense initial MPS should be close after enough sweeps.
 
-        Both start from random initial states and DMRG operates densely via .todense().
+        Both start from random initial states. Dense path uses densified MPO.
         With bond_dim=4 (exact for L=4) and 8 sweeps, both should find the ground state.
         """
         L = 4
         Jz, Jxy = 1.0, 1.0
-        mpo = build_mpo_heisenberg(L, Jz=Jz, Jxy=Jxy)
+        mpo_sym = build_mpo_heisenberg(L, Jz=Jz, Jxy=Jxy)
+        mpo_dense = _densify_tensor_network(mpo_sym)
         config = DMRGConfig(max_bond_dim=4, num_sweeps=8, lanczos_max_iter=20)
 
         mps_dense = build_random_mps(L, physical_dim=2, bond_dim=4, seed=1)
-        result_dense = dmrg(mpo, mps_dense, config)
+        result_dense = dmrg(mpo_dense, mps_dense, config)
 
         mps_sym = build_random_symmetric_mps(L, bond_dim=4, seed=1)
-        result_sym = dmrg(mpo, mps_sym, config)
+        result_sym = dmrg(mpo_sym, mps_sym, config)
 
         # Both should converge to the same ground state energy within 1e-1
         assert np.isfinite(result_sym.energy)
@@ -458,15 +474,14 @@ class TestSymmetricBlockSparseDMRG:
         result = dmrg(mpo, mps, config)
         assert np.isfinite(result.energy)
 
-    def test_mixed_symmetric_mps_dense_mpo_uses_dense_backend(self):
-        """Symmetric MPS + dense MPO should fall back to dense backend."""
+    def test_mixed_symmetric_mps_dense_mpo_raises(self):
+        """Symmetric MPS + dense MPO should raise TypeError (no silent fallback)."""
         L = 4
-        mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)  # dense MPO
+        mpo = _densify_tensor_network(build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0))
         mps = build_random_symmetric_mps(L, bond_dim=4, seed=0)
         config = DMRGConfig(max_bond_dim=4, num_sweeps=2, lanczos_max_iter=10)
-        result = dmrg(mpo, mps, config)
-        assert isinstance(result, DMRGResult)
-        assert np.isfinite(result.energy)
+        with pytest.raises(TypeError, match="uniform tensor types"):
+            dmrg(mpo, mps, config)
 
     def test_symmetric_block_sparse_one_site_dmrg(self):
         """1-site block-sparse DMRG should run and produce negative energy.
@@ -567,3 +582,149 @@ class TestSymmetricBlockSparseDMRG:
             np.array(new_l_ref),
             atol=1e-10,
         )
+
+
+# ------------------------------------------------------------------ #
+# Target sector tests                                                  #
+# ------------------------------------------------------------------ #
+
+
+def _ed_ground_state_in_sector(
+    L: int, Sz_target: int, Jz: float = 1.0, Jxy: float = 1.0
+) -> float:
+    """Return the ground-state energy in a specific Sz sector via ED.
+
+    Args:
+        L:         Number of sites.
+        Sz_target: Target total Sz (integer, not 2*Sz).
+        Jz, Jxy:   Coupling constants.
+
+    Returns:
+        Ground-state energy in the given Sz sector.
+    """
+    H_full = _build_heisenberg_matrix(L, Jz=Jz, Jxy=Jxy)
+    dim = 2**L
+
+    # Build Sz_total for each basis state |s_1, ..., s_L>
+    # Bit i = 0 → spin up (Sz = +1/2), bit i = 1 → spin down (Sz = -1/2)
+    sz_vals = np.zeros(dim)
+    for state in range(dim):
+        total = 0.0
+        for site in range(L):
+            if (state >> (L - 1 - site)) & 1:
+                total -= 0.5  # spin down
+            else:
+                total += 0.5  # spin up
+        sz_vals[state] = total
+
+    # Select states in the target sector
+    mask = np.abs(sz_vals - Sz_target) < 0.01
+    sector_indices = np.where(mask)[0]
+    if len(sector_indices) == 0:
+        raise ValueError(f"No states in Sz={Sz_target} sector for L={L}")
+
+    H_sector = H_full[np.ix_(sector_indices, sector_indices)]
+    eigvals = np.linalg.eigvalsh(H_sector)
+    return float(eigvals[0])
+
+
+class TestTargetSector:
+    """Tests for target_charge sector enforcement in symmetric DMRG."""
+
+    def test_target_charge_sz0(self):
+        """DMRG with target_charge=0 should match ED in Sz=0 sector."""
+        L = 4
+        e_exact = _ed_ground_state_in_sector(L, Sz_target=0)
+
+        mpo = _build_symmetric_heisenberg_mpo(L)
+        mps = build_random_symmetric_mps(L, bond_dim=4, seed=7, target_charge=0)
+        config = DMRGConfig(
+            max_bond_dim=8,
+            num_sweeps=10,
+            lanczos_max_iter=30,
+            convergence_tol=1e-10,
+            target_charge=0,
+        )
+        result = dmrg(mpo, mps, config)
+
+        assert np.isfinite(result.energy)
+        assert abs(result.energy - e_exact) < 1e-6, (
+            f"Sz=0 DMRG energy {result.energy:.8f} deviates from "
+            f"ED {e_exact:.8f} by {abs(result.energy - e_exact):.4e}"
+        )
+
+    def test_target_charge_sz1(self):
+        """DMRG with target_charge=2 (2*Sz=2) should match ED in Sz=1 sector."""
+        L = 4
+        e_exact = _ed_ground_state_in_sector(L, Sz_target=1)
+
+        mpo = _build_symmetric_heisenberg_mpo(L)
+        mps = build_random_symmetric_mps(L, bond_dim=4, seed=7, target_charge=2)
+        config = DMRGConfig(
+            max_bond_dim=8,
+            num_sweeps=10,
+            lanczos_max_iter=30,
+            convergence_tol=1e-10,
+            target_charge=2,
+        )
+        result = dmrg(mpo, mps, config)
+
+        assert np.isfinite(result.energy)
+        assert abs(result.energy - e_exact) < 1e-6, (
+            f"Sz=1 DMRG energy {result.energy:.8f} deviates from "
+            f"ED {e_exact:.8f} by {abs(result.energy - e_exact):.4e}"
+        )
+
+    def test_target_charge_parity_error(self):
+        """Odd L + even target_charge should raise ValueError."""
+        with pytest.raises(ValueError, match="parity"):
+            build_random_symmetric_mps(L=3, bond_dim=4, target_charge=0)
+
+    def test_build_symmetric_mps_sector(self):
+        """compute_mps_sector should return the correct target for built MPS."""
+        for target in [0, 2, -2]:
+            mps = build_random_symmetric_mps(
+                L=4, bond_dim=4, seed=0, target_charge=target
+            )
+            tensors = [mps.get_tensor(i) for i in range(4)]
+            sector = compute_mps_sector(tensors)
+            assert sector == target, f"Expected sector={target}, got {sector}"
+
+
+class TestMixedTypeRejection:
+    """Test that dmrg() rejects mixed DenseTensor/SymmetricTensor inputs."""
+
+    def test_symmetric_mps_dense_mpo_raises(self):
+        """SymmetricTensor MPS + DenseTensor MPO should raise TypeError."""
+        L = 4
+        mps = build_random_symmetric_mps(L, bond_dim=4, seed=0, target_charge=0)
+        mpo = build_mpo_heisenberg(L)
+        # Force MPO tensors to DenseTensor
+        from tenax.network.network import TensorNetwork
+
+        mpo_dense = TensorNetwork()
+        for i in range(L):
+            t = mpo.get_tensor(i)
+            mpo_dense.add_node(i, DenseTensor(t.todense(), t.indices))
+        config = DMRGConfig(max_bond_dim=8, num_sweeps=2)
+        with pytest.raises(TypeError, match="uniform tensor types"):
+            dmrg(mpo_dense, mps, config)
+
+    def test_dense_mps_symmetric_mpo_raises(self):
+        """DenseTensor MPS + SymmetricTensor MPO should raise TypeError."""
+        L = 4
+        mps = build_random_mps(L, bond_dim=4)
+        mpo = build_mpo_heisenberg(L)  # returns SymmetricTensor MPO
+        config = DMRGConfig(max_bond_dim=8, num_sweeps=2)
+        with pytest.raises(TypeError, match="uniform tensor types"):
+            dmrg(mpo, mps, config)
+
+    def test_sector_validation_mixed(self):
+        """validate_mps_sector should raise for wrong target."""
+        mps = build_random_symmetric_mps(L=4, bond_dim=4, seed=0, target_charge=0)
+        tensors = [mps.get_tensor(i) for i in range(4)]
+        # Should pass for correct target
+        validate_mps_sector(tensors, target_charge=0)
+        # Should fail for wrong target
+        with pytest.raises(ValueError, match="does not match"):
+            validate_mps_sector(tensors, target_charge=2)

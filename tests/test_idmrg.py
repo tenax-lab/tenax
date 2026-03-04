@@ -94,9 +94,20 @@ class TestBuildBulkMPO:
         L = 4
 
         mpo_ref = build_mpo_heisenberg(L=L, Jz=Jz, Jxy=Jxy, hz=hz)
+        # Densify MPO to match DenseTensor MPS
+        from tenax.core.tensor import DenseTensor
+        from tenax.network.network import TensorNetwork as TN
+
+        mpo_dense = TN()
+        for nid in mpo_ref.node_ids():
+            t = mpo_ref.get_tensor(nid)
+            if not isinstance(t, DenseTensor):
+                mpo_dense.add_node(nid, DenseTensor(t.todense(), t.indices))
+            else:
+                mpo_dense.add_node(nid, t)
         mps = build_random_mps(L, bond_dim=4, seed=0)
         config = DMRGConfig(max_bond_dim=8, num_sweeps=8, lanczos_max_iter=20)
-        result = dmrg(mpo_ref, mps, config)
+        result = dmrg(mpo_dense, mps, config)
 
         # Energy should be close to exact L=4 Heisenberg ground state
         assert result.energy < -1.5, f"Energy {result.energy} too high"
