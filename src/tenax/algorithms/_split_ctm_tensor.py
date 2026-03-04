@@ -6,7 +6,7 @@ iPEPS to run CTM without densification.
 
 The algorithm follows the dense split-CTMRG in ``ipeps.py`` but uses
 ``contract()``, ``truncated_svd()``, ``max_abs_normalize()`` and
-``.relabel()`` / ``.dagger()`` for automatic dense/symmetric dispatch.
+``.relabel()`` / ``.bar()`` for automatic dense/symmetric dispatch.
 
 Reference: arXiv:2502.10298
 """
@@ -27,7 +27,13 @@ from tenax.algorithms._tensor_utils import (
 from tenax.contraction.contractor import contract
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, Label, TensorIndex
-from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.core.tensor import (
+    DenseTensor,
+    SymmetricTensor,
+    Tensor,
+    _block_slices,
+    _compute_valid_blocks,
+)
 
 # ------------------------------------------------------------------ #
 # Environment data structure                                          #
@@ -144,6 +150,21 @@ def _trivial_symmetry():
     return U1Symmetry()
 
 
+def _project_to_valid_blocks(
+    data: jax.Array, indices: tuple[TensorIndex, ...]
+) -> jax.Array:
+    """Zero out elements of a dense array that lie outside valid charge sectors."""
+    valid_keys = _compute_valid_blocks(indices)
+    mask = np.zeros(data.shape, dtype=bool)
+    for key in valid_keys:
+        masks, shape = _block_slices(indices, key)
+        if all(s > 0 for s in shape):
+            idx_arrays = [np.where(m)[0] for m in masks]
+            grid = np.ix_(*idx_arrays)
+            mask[grid] = True
+    return data * jnp.array(mask, dtype=data.dtype)
+
+
 def _init_symmetric_corner(
     A: SymmetricTensor,
     chi: int,
@@ -203,13 +224,15 @@ def _init_symmetric_edge_ket(
     )
     idx_I = TensorIndex(sym, I_charges, flow_I, label=label_I)
 
-    # Build identity-like dense, then convert
+    # Build identity-like dense, project onto valid blocks, then convert
     T = jnp.zeros((chi, D, chi_I), dtype=A.dtype)
     chi_D = min(chi, D)
     chi_I_D = min(chi_I, D)
     for i in range(min(chi_D, chi_I_D)):
         T = T.at[i, :, i].set(jnp.ones(D, dtype=A.dtype))
-    return SymmetricTensor.from_dense(T, (idx_chi, idx_D, idx_I))
+    indices = (idx_chi, idx_D, idx_I)
+    T = _project_to_valid_blocks(T, indices)
+    return SymmetricTensor.from_dense(T, indices)
 
 
 def _init_symmetric_edge_bra(
@@ -244,7 +267,9 @@ def _init_symmetric_edge_bra(
     chi_I_D = min(chi_I, D)
     for i in range(min(chi_I_D, chi_D)):
         T = T.at[i, :, i].set(jnp.ones(D, dtype=A.dtype))
-    return SymmetricTensor.from_dense(T, (idx_I, idx_D, idx_chi))
+    indices = (idx_I, idx_D, idx_chi)
+    T = _project_to_valid_blocks(T, indices)
+    return SymmetricTensor.from_dense(T, indices)
 
 
 def _derive_charges(base_charges: np.ndarray, target_dim: int) -> np.ndarray:
@@ -320,7 +345,7 @@ _EDGE_BRA_SPECS = {
         FlowDirection.IN,
         3,
         0,
-    ),  # D-flow opposite to A.dagger()'s u(IN)
+    ),  # D-flow opposite to A.bar()'s u(IN)
     "T2": (
         "t2b_I",
         "r_bra",
@@ -330,7 +355,7 @@ _EDGE_BRA_SPECS = {
         FlowDirection.OUT,
         0,
         3,
-    ),  # D-flow opposite to A.dagger()'s r(OUT)
+    ),  # D-flow opposite to A.bar()'s r(OUT)
     "T3": (
         "t3b_I",
         "d_bra",
@@ -340,7 +365,7 @@ _EDGE_BRA_SPECS = {
         FlowDirection.OUT,
         3,
         1,
-    ),  # D-flow opposite to A.dagger()'s d(OUT)
+    ),  # D-flow opposite to A.bar()'s d(OUT)
     "T4": (
         "t4b_I",
         "l_bra",
@@ -350,7 +375,7 @@ _EDGE_BRA_SPECS = {
         FlowDirection.IN,
         1,
         2,
-    ),  # D-flow opposite to A.dagger()'s l(IN)
+    ),  # D-flow opposite to A.bar()'s l(IN)
 }
 
 
@@ -464,7 +489,7 @@ def _grow_edge_no_double_layer(
     T_ket: Tensor,
     T_bra: Tensor,
     A: Tensor,
-    A_dag: Tensor,
+    A_bar: Tensor,
     contracted_leg: str,
     ket_I_label: str,
     bra_I_label: str,
@@ -473,7 +498,7 @@ def _grow_edge_no_double_layer(
     """Grow a T-edge by contracting ket/bra layers separately.
 
     Instead of building a closed double-layer tensor, this contracts each
-    half-edge with its copy of A (ket or daggered-bra), then traces the
+    half-edge with its copy of A (ket) and A.bar() (bra), then traces the
     physical and interlayer indices via label-based contraction.
 
     Returns a dense array of shape ``(chi*D², D², chi*D²)``.
@@ -492,7 +517,7 @@ def _grow_edge_no_double_layer(
     for v in _VIRTUAL_LEGS:
         if v != contracted_leg:
             bra_mapping[v] = v.upper()
-    A_bra = A_dag.relabels(bra_mapping)
+    A_bra = A_bar.relabels(bra_mapping)
     bra_half = contract(T_bra, A_bra)
 
     # --- Match interlayer labels, then contract (traces _I + phys) ---
@@ -511,7 +536,7 @@ def _grow_edge_no_double_layer(
 def _split_ctm_move_left(
     env: SplitCTMTensorEnv,
     A: Tensor,
-    A_dag: Tensor,
+    A_bar: Tensor,
     chi: int,
     chi_I: int,
 ) -> SplitCTMTensorEnv:
@@ -580,7 +605,7 @@ def _split_ctm_move_left(
         env.T4_ket,
         env.T4_bra,
         A,
-        A_dag,
+        A_bar,
         "l",
         "t4k_I",
         "t4b_I",
@@ -619,7 +644,7 @@ def _split_ctm_move_left(
 def _split_ctm_move_right(
     env: SplitCTMTensorEnv,
     A: Tensor,
-    A_dag: Tensor,
+    A_bar: Tensor,
     chi: int,
     chi_I: int,
 ) -> SplitCTMTensorEnv:
@@ -679,7 +704,7 @@ def _split_ctm_move_right(
         env.T2_ket,
         env.T2_bra,
         A,
-        A_dag,
+        A_bar,
         "r",
         "t2k_I",
         "t2b_I",
@@ -714,7 +739,7 @@ def _split_ctm_move_right(
 def _split_ctm_move_top(
     env: SplitCTMTensorEnv,
     A: Tensor,
-    A_dag: Tensor,
+    A_bar: Tensor,
     chi: int,
     chi_I: int,
 ) -> SplitCTMTensorEnv:
@@ -769,7 +794,7 @@ def _split_ctm_move_top(
         env.T1_ket,
         env.T1_bra,
         A,
-        A_dag,
+        A_bar,
         "u",
         "t1k_I",
         "t1b_I",
@@ -804,7 +829,7 @@ def _split_ctm_move_top(
 def _split_ctm_move_bottom(
     env: SplitCTMTensorEnv,
     A: Tensor,
-    A_dag: Tensor,
+    A_bar: Tensor,
     chi: int,
     chi_I: int,
 ) -> SplitCTMTensorEnv:
@@ -861,7 +886,7 @@ def _split_ctm_move_bottom(
         env.T3_ket,
         env.T3_bra,
         A,
-        A_dag,
+        A_bar,
         "d",
         "t3k_I",
         "t3b_I",
@@ -999,11 +1024,11 @@ def _split_ctm_tensor_sweep(
     renormalize: bool,
 ) -> SplitCTMTensorEnv:
     """One full split-CTM sweep: L/R/T/B moves + optional renormalize."""
-    A_dag = A.dagger()
-    env = _split_ctm_move_left(env, A, A_dag, chi, chi_I)
-    env = _split_ctm_move_right(env, A, A_dag, chi, chi_I)
-    env = _split_ctm_move_top(env, A, A_dag, chi, chi_I)
-    env = _split_ctm_move_bottom(env, A, A_dag, chi, chi_I)
+    A_bar = A.bar()
+    env = _split_ctm_move_left(env, A, A_bar, chi, chi_I)
+    env = _split_ctm_move_right(env, A, A_bar, chi, chi_I)
+    env = _split_ctm_move_top(env, A, A_bar, chi, chi_I)
+    env = _split_ctm_move_bottom(env, A, A_bar, chi, chi_I)
 
     if renormalize:
         env = _renormalize_split_env(env)

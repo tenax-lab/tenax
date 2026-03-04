@@ -219,6 +219,19 @@ class Tensor:
     def dagger(self) -> Tensor:
         raise NotImplementedError
 
+    def bar(self) -> Tensor:
+        """Element-wise conjugate with all flows flipped (no charge dual).
+
+        Unlike :meth:`dagger`, this keeps the original charge values and
+        applies no fermionic twist phases.  The result has opposite flows
+        (enabling contraction) but identical charges (enabling equality-based
+        block matching in the contraction engine).
+
+        Used as the bra operation in split CTM to avoid the charge-mismatch
+        problem that arises with :meth:`dagger` for nontrivial U(1) charges.
+        """
+        raise NotImplementedError
+
     def transpose(self, axes: tuple[int, ...]) -> Tensor:
         raise NotImplementedError
 
@@ -384,6 +397,11 @@ class DenseTensor(Tensor):
     def dagger(self) -> DenseTensor:
         """Conjugate transpose: conjugate data and dual all indices."""
         new_indices = tuple(idx.dual() for idx in self._indices)
+        return DenseTensor(jnp.conj(self._data), new_indices)
+
+    def bar(self) -> DenseTensor:
+        """Element-wise conjugate with flipped flows. No charge dual."""
+        new_indices = tuple(idx.flip_flow() for idx in self._indices)
         return DenseTensor(jnp.conj(self._data), new_indices)
 
     def transpose(self, axes: tuple[int, ...]) -> DenseTensor:
@@ -790,6 +808,15 @@ class SymmetricTensor(Tensor):
                 if twist != 1.0:
                     val = val * twist
             new_blocks[new_key] = val
+        obj = object.__new__(SymmetricTensor)
+        obj._indices = new_indices
+        obj._blocks = new_blocks
+        return obj
+
+    def bar(self) -> SymmetricTensor:
+        """Element-wise conjugate with flipped flows. No charge dual, no twist."""
+        new_indices = tuple(idx.flip_flow() for idx in self._indices)
+        new_blocks = {k: jnp.conj(v) for k, v in self._blocks.items()}
         obj = object.__new__(SymmetricTensor)
         obj._indices = new_indices
         obj._blocks = new_blocks

@@ -153,6 +153,33 @@ def norm_squared(t):
 print(norm_squared(tensor))
 ```
 
+### Conjugation: `conj()`, `dagger()`, and `bar()`
+
+All three methods are available on both `DenseTensor` and `SymmetricTensor`.
+
+| Method | Data | Charges | Flows | Twist phases |
+|--------|------|---------|-------|--------------|
+| `conj()` | conjugated | unchanged | unchanged | no |
+| `dagger()` | conjugated | dualled | flipped | yes (fermionic) |
+| `bar()` | conjugated | unchanged | flipped | no |
+
+- **`conj()`** — element-wise complex conjugation, nothing else changes.
+- **`dagger()`** — full conjugate transpose: conjugate data, dual all charges
+  (negate for U(1)), flip all flows, and apply fermionic twist phases.
+- **`bar()`** — conjugate with flipped flows but **no charge dual**. This is
+  used by the split CTM algorithm as the bra operation because it produces
+  opposite flows (needed for contraction) with identical charges (needed for
+  equality-based block matching in the contraction engine).
+
+```python
+t_conj = tensor.conj()     # conjugate data only
+t_dag  = tensor.dagger()   # conjugate + dual indices
+t_bar  = tensor.bar()      # conjugate + flip flows (no charge dual)
+```
+
+For trivial (zero) charges, `dagger()` and `bar()` produce the same dense
+result. They differ only when charges are nontrivial.
+
 ### Relabeling
 
 Labels are the key to contraction. Use `relabel` and `relabels` to rename

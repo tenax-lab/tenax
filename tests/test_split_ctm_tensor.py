@@ -244,7 +244,7 @@ class TestSplitCTMTensorEnergy:
 
         env_t = initialize_split_ctm_tensor_env(small_peps_dense, chi, chi_I)
         env_d = _initialize_split_ctm_env(A_raw, chi, chi_I)
-        A_dag = small_peps_dense.dagger()
+        A_bar = small_peps_dense.bar()
 
         a = _build_double_layer(A_raw)
         if a.ndim == 8:
@@ -260,7 +260,7 @@ class TestSplitCTMTensorEnergy:
             env_t.T4_ket,
             env_t.T4_bra,
             small_peps_dense,
-            A_dag,
+            A_bar,
             "l",
             "t4k_I",
             "t4b_I",
@@ -278,7 +278,7 @@ class TestSplitCTMTensorEnergy:
             env_t.T2_ket,
             env_t.T2_bra,
             small_peps_dense,
-            A_dag,
+            A_bar,
             "r",
             "t2k_I",
             "t2b_I",
@@ -296,7 +296,7 @@ class TestSplitCTMTensorEnergy:
             env_t.T1_ket,
             env_t.T1_bra,
             small_peps_dense,
-            A_dag,
+            A_bar,
             "u",
             "t1k_I",
             "t1b_I",
@@ -314,7 +314,7 @@ class TestSplitCTMTensorEnergy:
             env_t.T3_ket,
             env_t.T3_bra,
             small_peps_dense,
-            A_dag,
+            A_bar,
             "d",
             "t3k_I",
             "t3b_I",
@@ -329,7 +329,7 @@ class TestSplitCTMTensorEnergy:
 
 
 class TestSplitCTMSymmetric:
-    """Tests for SymmetricTensor iPEPS with trivial charges."""
+    """Tests for SymmetricTensor iPEPS with trivial and nontrivial charges."""
 
     def test_symmetric_one_sweep_finite(self, small_peps_symmetric):
         """One CTM sweep with trivial-charge SymmetricTensor A produces finite tensors."""
@@ -339,4 +339,33 @@ class TestSplitCTMSymmetric:
         for t in env:
             assert jnp.all(jnp.isfinite(t.todense())), (
                 "SymmetricTensor sweep produced non-finite tensors"
+            )
+
+    def test_fermionic_u1_one_sweep_finite(self):
+        """One CTM sweep with FermionicU1 charges produces finite tensors.
+
+        This is the key regression test: with dagger(), the physical trace
+        loses blocks because charge 1 is dualled to -1 and mismatches.
+        With bar(), charges stay identical so all blocks are preserved.
+        """
+        from tenax.core.symmetry import FermionicU1
+
+        key = jax.random.PRNGKey(77)
+        sym = FermionicU1()
+        virt_charges = np.array([0, 1], dtype=np.int32)
+        phys_charges = np.array([0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        A = SymmetricTensor.random_normal(indices, key)
+        chi, chi_I = 4, 2
+        env = initialize_split_ctm_tensor_env(A, chi, chi_I)
+        env = _split_ctm_tensor_sweep(env, A, chi, chi_I, True)
+        for t in env:
+            assert jnp.all(jnp.isfinite(t.todense())), (
+                "FermionicU1 sweep produced non-finite tensors"
             )

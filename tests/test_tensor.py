@@ -496,6 +496,83 @@ class TestSymmetricTensorArithmetic:
         assert t2.labels() == u1_sym_tensor_2leg.labels()
 
 
+class TestBar:
+    """Tests for the bar() operation (conjugate + flip flows, no charge dual)."""
+
+    def test_dense_bar_todense_equals_conj(self, u1, rng):
+        """DenseTensor.bar().todense() == conj(todense())."""
+        charges = np.array([0, 1], dtype=np.int32)
+        data = jax.random.normal(rng, (2, 2)) + 1j * jax.random.normal(rng, (2, 2))
+        data = data.astype(jnp.complex64)
+        indices = (
+            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+        )
+        t = DenseTensor(data, indices)
+        tb = t.bar()
+        np.testing.assert_allclose(tb.todense(), jnp.conj(data))
+
+    def test_dense_bar_flows_flipped_charges_unchanged(self, u1, rng):
+        """DenseTensor.bar() flips flows but keeps charges identical."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        data = jax.random.normal(rng, (3, 3))
+        indices = (
+            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+        )
+        t = DenseTensor(data, indices)
+        tb = t.bar()
+        for orig, barred in zip(t.indices, tb.indices):
+            assert barred.flow == FlowDirection(-int(orig.flow))
+            np.testing.assert_array_equal(barred.charges, orig.charges)
+
+    def test_symmetric_bar_todense_equals_conj(self, u1, rng):
+        """SymmetricTensor.bar().todense() == conj(todense())."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
+            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+        )
+        t = SymmetricTensor.random_normal(indices, rng)
+        tb = t.bar()
+        np.testing.assert_allclose(tb.todense(), jnp.conj(t.todense()), rtol=1e-6)
+
+    def test_symmetric_bar_block_keys_unchanged(self, u1, rng):
+        """SymmetricTensor.bar() preserves block keys (no charge dual)."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
+            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+        )
+        t = SymmetricTensor.random_normal(indices, rng)
+        tb = t.bar()
+        assert set(tb.blocks.keys()) == set(t.blocks.keys())
+
+    def test_symmetric_bar_flows_flipped_charges_unchanged(self, u1, rng):
+        """SymmetricTensor.bar() flips flows, keeps charges."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
+            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+        )
+        t = SymmetricTensor.random_normal(indices, rng)
+        tb = t.bar()
+        for orig, barred in zip(t.indices, tb.indices):
+            assert barred.flow == FlowDirection(-int(orig.flow))
+            np.testing.assert_array_equal(barred.charges, orig.charges)
+
+    def test_trivial_charges_bar_equals_dagger(self, u1, rng):
+        """With trivial (zero) charges, bar() and dagger() give same dense result."""
+        charges = np.zeros(3, dtype=np.int32)
+        data = jax.random.normal(rng, (3, 3))
+        indices = (
+            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+        )
+        t = DenseTensor(data, indices)
+        np.testing.assert_allclose(t.bar().todense(), t.dagger().todense())
+
+
 class TestInner:
     def test_dense_self_inner(self, small_dense_matrix):
         t = small_dense_matrix

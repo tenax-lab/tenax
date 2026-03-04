@@ -210,6 +210,24 @@ When ``A_init`` is provided explicitly, ``su_init`` is ignored.
 For AD-based excitation spectra on top of an optimised iPEPS, see
 {doc}`ad_excitations`.
 
+## Split-CTMRG with Tensor protocol
+
+The `ctm_split_tensor()` function provides a polymorphic split-CTMRG that
+works with both `DenseTensor` and `SymmetricTensor` iPEPS site tensors.
+It uses `bar()` (conjugate + flip flows, no charge dual) for the bra layer
+instead of `dagger()`, which ensures correct physical-trace block matching
+for nontrivial U(1) or fermionic charges.
+
+```python
+from tenax import ctm_split_tensor, compute_energy_split_ctm_tensor
+
+env = ctm_split_tensor(A, chi=20, max_iter=100, chi_I=10)
+E = compute_energy_split_ctm_tensor(A, env, H_bond, d=2)
+```
+
+`A` can be either a `DenseTensor` or `SymmetricTensor` with 5 legs
+`(u, d, l, r, phys)`.
+
 ## Fermionic iPEPS (fPEPS)
 
 Tenax supports fermionic PEPS using `SymmetricTensor` with `FermionParity`
