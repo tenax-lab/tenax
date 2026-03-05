@@ -411,34 +411,43 @@ def fermionic_ctm(A, config):
 
     For FermionParity (Z₂), the twist phase in ``dagger()`` is always +1,
     so the fermionic double-layer tensor is identical to the bosonic one.
-    This function converts *A* to a dense array and delegates to the
-    bosonic CTM implementation.
 
-    For symmetric CTM without densification, use
-    :func:`tenax.algorithms._split_ctm_tensor.ctm_split_tensor` directly.
+    When *A* is a ``Tensor`` (DenseTensor or SymmetricTensor), uses the
+    Tensor-protocol CTM (``ctm_tensor``) which avoids densification.
+    Otherwise falls back to the dense bosonic CTM.
 
     Args:
         A:      fPEPS site tensor (SymmetricTensor with lambdas absorbed).
         config: FPEPSConfig.
 
     Returns:
-        Converged bosonic ``CTMEnvironment``.
+        Converged ``CTMTensorEnv`` (if Tensor input) or ``CTMEnvironment``.
     """
+    if isinstance(A, Tensor):
+        from tenax.algorithms._ctm_tensor import ctm_tensor
+
+        return ctm_tensor(
+            A,
+            chi=config.ctm_chi,
+            max_iter=config.ctm_max_iter,
+            conv_tol=config.ctm_conv_tol,
+        )
+
     from tenax.algorithms.ipeps import CTMConfig, ctm
 
-    A_dense = A.todense() if isinstance(A, Tensor) else A
     ctm_cfg = CTMConfig(
         chi=config.ctm_chi,
         max_iter=config.ctm_max_iter,
         conv_tol=config.ctm_conv_tol,
     )
-    return ctm(A_dense, ctm_cfg)
+    return ctm(A, ctm_cfg)
 
 
 def compute_energy_fermionic_ctm(A, env, hamiltonian_gate):
     """Compute energy per site using a CTM environment.
 
-    Supports both ``SplitCTMTensorEnv`` (from split-CTM) and legacy
+    Supports ``CTMTensorEnv`` (from ``ctm_tensor``),
+    ``SplitCTMTensorEnv`` (from split-CTM), and legacy
     ``CTMEnvironment`` (from dense CTM).
 
     Args:
@@ -449,6 +458,11 @@ def compute_energy_fermionic_ctm(A, env, hamiltonian_gate):
     Returns:
         Energy per site (float).
     """
+    from tenax.algorithms._ctm_tensor import CTMTensorEnv, compute_energy_ctm_tensor
+
+    if isinstance(env, CTMTensorEnv):
+        return float(compute_energy_ctm_tensor(A, env, hamiltonian_gate))
+
     from tenax.algorithms.ipeps import compute_energy_ctm
 
     A_dense = A.todense() if isinstance(A, Tensor) else A

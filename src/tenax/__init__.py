@@ -37,6 +37,11 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
+from tenax.algorithms._ctm_tensor import (
+    CTMTensorEnv,
+    compute_energy_ctm_tensor,
+    ctm_tensor,
+)
 from tenax.algorithms._split_ctm_tensor import (
     SplitCTMTensorEnv,
     compute_energy_split_ctm_tensor,
@@ -197,6 +202,10 @@ __all__ = [
     "compute_energy_ctm_2site",
     "compute_energy_split_ctm",
     "optimize_gs_ad",
+    # Standard CTM (Tensor protocol)
+    "CTMTensorEnv",
+    "ctm_tensor",
+    "compute_energy_ctm_tensor",
     # Split CTM (Tensor protocol)
     "SplitCTMTensorEnv",
     "ctm_split_tensor",
