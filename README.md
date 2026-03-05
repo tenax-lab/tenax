@@ -474,6 +474,7 @@ uv run pre-commit install
 
 # Run tests
 uv run pytest -m core          # fast core tests only
+uv run pytest -m algorithm     # algorithm tests (DMRG, TRG, iPEPS, integration)
 uv run pytest -m "not slow"    # skip expensive tests
 uv run pytest                  # full suite
 
