@@ -381,6 +381,20 @@ class TestTRGSymmetric:
             f"Symmetric TRG log(Z)/N={result_sym:.8f}"
         )
 
+    def test_symmetric_trg_preserves_blocks(self):
+        """TRG should not collapse Z₂ block sectors during coarse-graining."""
+        tensor = compute_ising_tensor(beta=0.3, symmetric=True)
+        initial_blocks = tensor.n_blocks
+        assert initial_blocks == 8  # sanity check
+
+        T = tensor
+        for _ in range(3):
+            T, _ = _trg_step(T, max_bond_dim=8, svd_trunc_err=None)
+            assert isinstance(T, SymmetricTensor)
+            assert T.n_blocks >= initial_blocks, (
+                f"Block count collapsed from {initial_blocks} to {T.n_blocks}"
+            )
+
     def test_symmetric_trg_matches_exact(self):
         """Symmetric TRG at beta=0.3 should match exact free energy within 2%."""
         beta = 0.3
