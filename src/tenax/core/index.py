@@ -97,6 +97,23 @@ class TensorIndex:
             label=self.label,
         )
 
+    def flip_flow(self) -> TensorIndex:
+        """Return a new TensorIndex with flipped flow but unchanged charges.
+
+        Unlike :meth:`dual`, this does **not** negate the charge values.
+        Used by :meth:`Tensor.bar` to produce opposite flows for contraction
+        while keeping charges identical for equality-based block matching.
+
+        Returns:
+            New TensorIndex with opposite flow and identical charges.
+        """
+        return TensorIndex(
+            symmetry=self.symmetry,
+            charges=self.charges,
+            flow=FlowDirection(-int(self.flow)),
+            label=self.label,
+        )
+
     def relabel(self, new_label: Label) -> TensorIndex:
         """Return a new TensorIndex with a different label, otherwise identical.
 

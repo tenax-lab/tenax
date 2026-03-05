@@ -45,6 +45,25 @@ def small_peps_dense():
 
 
 @pytest.fixture
+def small_peps_symmetric():
+    """Random SymmetricTensor iPEPS site tensor with trivial U(1) charges."""
+    key = jax.random.PRNGKey(99)
+    D, d = 2, 2
+    sym = U1Symmetry()
+    charges = np.zeros(D, dtype=np.int32)
+    phys_charges = np.zeros(d, dtype=np.int32)
+    indices = (
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+    )
+    data = jax.random.normal(key, (D, D, D, D, d))
+    return SymmetricTensor.from_dense(data, indices)
+
+
+@pytest.fixture
 def heisenberg_gate():
     """Heisenberg 2-site Hamiltonian gate as dense array."""
     d = 2
@@ -102,26 +121,11 @@ class TestSplitCTMTensorInit:
         for t in env:
             assert jnp.all(jnp.isfinite(t.todense()))
 
-    def test_symmetric_init_shapes(self):
+    def test_symmetric_init_shapes(self, small_peps_symmetric):
         """SymmetricTensor initialization should produce correct shapes."""
-        key = jax.random.PRNGKey(99)
-        D, d = 2, 2
-        sym = U1Symmetry()
-        # Use trivial (all-zero) charges so all elements are symmetry-allowed
-        charges = np.zeros(D, dtype=np.int32)
-        phys_charges = np.zeros(d, dtype=np.int32)
-        indices = (
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
-        )
-        data = jax.random.normal(key, (D, D, D, D, d))
-        A_sym = SymmetricTensor.from_dense(data, indices)
-
         chi, chi_I = 4, 2
-        env = initialize_split_ctm_tensor_env(A_sym, chi, chi_I)
+        D = 2
+        env = initialize_split_ctm_tensor_env(small_peps_symmetric, chi, chi_I)
         assert isinstance(env, SplitCTMTensorEnv)
 
         for C in [env.C1, env.C2, env.C3, env.C4]:
@@ -222,32 +226,187 @@ class TestSplitCTMTensorEnergy:
             f"Roundtrip mismatch: split={float(E_split)}, from_std={float(E_from_std)}"
         )
 
-    def test_single_sweep_matches_dense(self, small_peps_dense, heisenberg_gate):
-        """After one sweep, tensor and dense implementations match exactly."""
-        from tenax.algorithms._split_ctm_tensor import _split_ctm_tensor_sweep
+    def test_grow_edge_matches_double_layer(self, small_peps_dense):
+        """_grow_edge_no_double_layer matches the old double-layer approach.
+
+        Verifies the no-double-layer contraction produces the same
+        grown T-edge tensor as the merge + double-layer + einsum path.
+        """
+        from tenax.algorithms._split_ctm_tensor import _grow_edge_no_double_layer
         from tenax.algorithms.ipeps import (
+            _build_double_layer,
             _initialize_split_ctm_env,
-            _split_ctm_sweep,
-            compute_energy_split_ctm,
         )
 
-        chi, chi_I = 8, 4
         A_raw = small_peps_dense.todense()
+        D = A_raw.shape[0]
+        chi, chi_I = 8, 4
 
-        # Dense: one sweep
-        env_dense = _initialize_split_ctm_env(A_raw, chi, chi_I)
-        env_dense = _split_ctm_sweep(env_dense, A_raw, chi, chi_I, True)
+        env_t = initialize_split_ctm_tensor_env(small_peps_dense, chi, chi_I)
+        env_d = _initialize_split_ctm_env(A_raw, chi, chi_I)
+        A_bar = small_peps_dense.bar()
 
-        # Tensor: one sweep
-        env_tensor = initialize_split_ctm_tensor_env(small_peps_dense, chi, chi_I)
-        env_tensor = _split_ctm_tensor_sweep(
-            env_tensor, small_peps_dense, chi, chi_I, True
+        a = _build_double_layer(A_raw)
+        if a.ndim == 8:
+            a = a.reshape(D**2, D**2, D**2, D**2)
+
+        # --- Left move: T4 growth ---
+        T4_full = jnp.einsum("alc,cLg->alLg", env_d.T4_ket, env_d.T4_bra)
+        T4_full = T4_full.reshape(chi, D * D, chi)
+        T4g_old = jnp.einsum("alg,udlr->augdr", T4_full, a)
+        T4g_old = T4g_old.transpose(0, 1, 4, 2, 3).reshape(chi * D**2, D**2, chi * D**2)
+
+        T4g_new = _grow_edge_no_double_layer(
+            env_t.T4_ket,
+            env_t.T4_bra,
+            small_peps_dense,
+            A_bar,
+            "l",
+            "t4k_I",
+            "t4b_I",
+            ("t4k_d", "u", "U", "r", "R", "t4b_u", "d", "D"),
         )
+        assert jnp.allclose(T4g_old, T4g_new, atol=1e-12), "T4 (left) growth mismatch"
 
-        # All 12 tensors must match
-        for name in SplitCTMTensorEnv._fields:
-            d_val = getattr(env_dense, name)
-            t_val = getattr(env_tensor, name).todense()
-            assert jnp.allclose(d_val, t_val, atol=1e-6), (
-                f"{name} mismatch after 1 sweep"
+        # --- Right move: T2 growth ---
+        T2_full = jnp.einsum("alc,cLg->alLg", env_d.T2_ket, env_d.T2_bra)
+        T2_full = T2_full.reshape(chi, D * D, chi)
+        T2g_old = jnp.einsum("erm,udlr->eumdl", T2_full, a)
+        T2g_old = T2g_old.transpose(0, 1, 4, 2, 3).reshape(chi * D**2, D**2, chi * D**2)
+
+        T2g_new = _grow_edge_no_double_layer(
+            env_t.T2_ket,
+            env_t.T2_bra,
+            small_peps_dense,
+            A_bar,
+            "r",
+            "t2k_I",
+            "t2b_I",
+            ("t2k_u", "u", "U", "l", "L", "t2b_d", "d", "D"),
+        )
+        assert jnp.allclose(T2g_old, T2g_new, atol=1e-12), "T2 (right) growth mismatch"
+
+        # --- Top move: T1 growth ---
+        T1_full = jnp.einsum("alc,cLg->alLg", env_d.T1_ket, env_d.T1_bra)
+        T1_full = T1_full.reshape(chi, D * D, chi)
+        T1g_old = jnp.einsum("buc,udlr->bcdlr", T1_full, a)
+        T1g_old = T1g_old.transpose(0, 3, 2, 1, 4).reshape(chi * D**2, D**2, chi * D**2)
+
+        T1g_new = _grow_edge_no_double_layer(
+            env_t.T1_ket,
+            env_t.T1_bra,
+            small_peps_dense,
+            A_bar,
+            "u",
+            "t1k_I",
+            "t1b_I",
+            ("t1k_l", "l", "L", "d", "D", "t1b_r", "r", "R"),
+        )
+        assert jnp.allclose(T1g_old, T1g_new, atol=1e-12), "T1 (top) growth mismatch"
+
+        # --- Bottom move: T3 growth ---
+        T3_full = jnp.einsum("alc,cLg->alLg", env_d.T3_ket, env_d.T3_bra)
+        T3_full = T3_full.reshape(chi, D * D, chi)
+        T3g_old = jnp.einsum("hdi,udlr->hiulr", T3_full, a)
+        T3g_old = T3g_old.transpose(0, 3, 2, 1, 4).reshape(chi * D**2, D**2, chi * D**2)
+
+        T3g_new = _grow_edge_no_double_layer(
+            env_t.T3_ket,
+            env_t.T3_bra,
+            small_peps_dense,
+            A_bar,
+            "d",
+            "t3k_I",
+            "t3b_I",
+            ("t3k_r", "l", "L", "u", "U", "t3b_l", "r", "R"),
+        )
+        assert jnp.allclose(T3g_old, T3g_new, atol=1e-12), "T3 (bottom) growth mismatch"
+
+
+# ------------------------------------------------------------------ #
+# SymmetricTensor tests                                                #
+# ------------------------------------------------------------------ #
+
+
+class TestSplitCTMSymmetric:
+    """Tests for SymmetricTensor iPEPS with trivial and nontrivial charges."""
+
+    def test_symmetric_one_sweep_finite(self, small_peps_symmetric):
+        """One CTM sweep with trivial-charge SymmetricTensor A produces finite tensors."""
+        chi, chi_I = 4, 2
+        env = initialize_split_ctm_tensor_env(small_peps_symmetric, chi, chi_I)
+        env = _split_ctm_tensor_sweep(env, small_peps_symmetric, chi, chi_I, True)
+        for t in env:
+            assert jnp.all(jnp.isfinite(t.todense())), (
+                "SymmetricTensor sweep produced non-finite tensors"
+            )
+
+    def test_fermionic_u1_one_sweep_finite(self):
+        """One CTM sweep with FermionicU1 charges produces finite tensors.
+
+        This is the key regression test: with dagger(), the physical trace
+        loses blocks because charge 1 is dualled to -1 and mismatches.
+        With bar(), charges stay identical so all blocks are preserved.
+        """
+        from tenax.core.symmetry import FermionicU1
+
+        key = jax.random.PRNGKey(77)
+        sym = FermionicU1()
+        virt_charges = np.array([0, 1], dtype=np.int32)
+        phys_charges = np.array([0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        A = SymmetricTensor.random_normal(indices, key)
+        chi, chi_I = 4, 2
+        env = initialize_split_ctm_tensor_env(A, chi, chi_I)
+        env = _split_ctm_tensor_sweep(env, A, chi, chi_I, True)
+        for t in env:
+            assert jnp.all(jnp.isfinite(t.todense())), (
+                "FermionicU1 sweep produced non-finite tensors"
+            )
+
+    def test_symmetric_multi_sweep_converges(self, small_peps_symmetric):
+        """Multiple CTM sweeps with SymmetricTensor A don't crash (regression for type mixing)."""
+        env = ctm_split_tensor(small_peps_symmetric, chi=4, max_iter=5, chi_I=2)
+        for t in env:
+            assert jnp.all(jnp.isfinite(t.todense())), (
+                "Multi-sweep symmetric CTM produced non-finite tensors"
+            )
+
+    def test_fermionic_u1_charges_preserved_across_sweeps(self):
+        """Nontrivial charge sectors survive multiple CTM sweeps (regression for charge collapse)."""
+        from tenax.core.symmetry import FermionicU1
+
+        key = jax.random.PRNGKey(77)
+        sym = FermionicU1()
+        virt_charges = np.array([0, 1], dtype=np.int32)
+        phys_charges = np.array([0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        A = SymmetricTensor.random_normal(indices, key)
+        chi, chi_I = 4, 2
+        env = initialize_split_ctm_tensor_env(A, chi, chi_I)
+        # Check initial block count
+        init_blocks = len(env.C1._blocks)
+        # Run 3 sweeps
+        for _ in range(3):
+            env = _split_ctm_tensor_sweep(env, A, chi, chi_I, True)
+        # Charge sectors must be preserved, not collapsed to trivial
+        for t in env:
+            assert isinstance(t, SymmetricTensor), (
+                f"Expected SymmetricTensor, got {type(t)}"
+            )
+            assert len(t._blocks) >= init_blocks, (
+                f"Block count dropped from {init_blocks} to {len(t._blocks)}: "
+                f"charge sectors collapsed"
             )

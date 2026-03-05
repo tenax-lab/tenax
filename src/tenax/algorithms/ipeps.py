@@ -931,7 +931,7 @@ def _ctm_move_eigh(
     then truncate both corners and the edge to bond dimension ``chi``.
 
     The projector ``P`` is obtained from the eigendecomposition of the
-    half-system density matrix ``rho = C1g @ C1g.T + C2g @ C2g.T``.
+    half-system density matrix ``rho = C1g @ C1g^H + C2g @ C2g^H``.
     Using ``eigh`` (symmetric eigendecomposition) is more numerically
     stable than SVD of the concatenated corners when ``chi * D2 == 2 * chi``
     (square matrix case), avoiding spurious sign oscillations in the
@@ -943,8 +943,8 @@ def _ctm_move_eigh(
     # Half-system density matrix (Corboz et al. 2014).
     # rho = C1g @ C1g^T + C2g @ C2g^T is positive semi-definite.
     # Its leading eigenvectors form the optimal isometric projector.
-    rho = C1g @ C1g.T + C2g @ C2g.T
-    rho = 0.5 * (rho + rho.T)  # enforce exact symmetry
+    rho = C1g @ C1g.conj().T + C2g @ C2g.conj().T
+    rho = 0.5 * (rho + rho.conj().T)  # enforce exact Hermiticity
 
     eigvals, eigvecs = jnp.linalg.eigh(rho)
     # eigh returns eigenvalues in ascending order; take the top chi.
@@ -956,8 +956,8 @@ def _ctm_move_eigh(
     # the overall response; differentiating through the projector
     # eigenvectors causes gradient blowup from degenerate eigenvalues.
     P_sg = jax.lax.stop_gradient(P)
-    C1_new = P_sg.T @ C1g  # (chi', col1)
-    C2_new = P_sg.T @ C2g  # (chi', col2)
+    C1_new = P_sg.conj().T @ C1g  # (chi', col1)
+    C2_new = P_sg.conj().T @ C2g  # (chi', col2)
     T_new = jnp.einsum("ia,idj,jb->adb", P_sg, Tg, P_sg)
     return C1_new, C2_new, T_new
 
@@ -984,9 +984,9 @@ def _ctm_move_qr(
     M = jnp.concatenate([C1g, C2g], axis=1)  # (n, 2*m)
     Q, R = jnp.linalg.qr(M)  # Q: (n, 2m), R: (2m, 2m)
 
-    # Small eigh on R @ R.T (size 2*chi x 2*chi)
-    rho_small = R @ R.T
-    rho_small = 0.5 * (rho_small + rho_small.T)
+    # Small eigh on R @ R^H (size 2*chi x 2*chi)
+    rho_small = R @ R.conj().T
+    rho_small = 0.5 * (rho_small + rho_small.conj().T)
     eigvals, eigvecs = jnp.linalg.eigh(rho_small)
 
     k = min(chi, len(eigvals))
@@ -994,8 +994,8 @@ def _ctm_move_qr(
     P = Q @ V  # (n, k)
 
     P_sg = jax.lax.stop_gradient(P)
-    C1_new = P_sg.T @ C1g
-    C2_new = P_sg.T @ C2g
+    C1_new = P_sg.conj().T @ C1g
+    C2_new = P_sg.conj().T @ C2g
     T_new = jnp.einsum("ia,idj,jb->adb", P_sg, Tg, P_sg)
     return C1_new, C2_new, T_new
 
@@ -1885,8 +1885,8 @@ def _split_ctm_projector(
     Uses eigh-based projector on the smaller (chi*D) matrices instead of
     the (chi*D^2) matrices used in standard CTMRG.
     """
-    rho = C1g @ C1g.T + C2g @ C2g.T
-    rho = 0.5 * (rho + rho.T)
+    rho = C1g @ C1g.conj().T + C2g @ C2g.conj().T
+    rho = 0.5 * (rho + rho.conj().T)
     eigvals, eigvecs = jnp.linalg.eigh(rho)
     k = min(chi, len(eigvals))
     P = eigvecs[:, -k:][:, ::-1]
@@ -1946,14 +1946,14 @@ def _split_ctm_move(
         C1g_ket = jnp.einsum("ab,buc->auc", env.C1, env.T1_ket).reshape(-1, chi_I)
         C4g_ket = jnp.einsum("gh,hdi->gdi", env.C4, env.T3_ket).reshape(-1, chi_I)
         P_ket = _split_ctm_projector(C1g_ket, C4g_ket, chi)
-        C1_mid = P_ket.T @ C1g_ket  # (chi, chi_I)
-        C4_mid = P_ket.T @ C4g_ket
+        C1_mid = P_ket.conj().T @ C1g_ket  # (chi, chi_I)
+        C4_mid = P_ket.conj().T @ C4g_ket
 
         C1g_bra = jnp.einsum("ac,cdb->adb", C1_mid, env.T1_bra).reshape(-1, chi)
         C4g_bra = jnp.einsum("ac,cdb->adb", C4_mid, env.T3_bra).reshape(-1, chi)
         P_bra = _split_ctm_projector(C1g_bra, C4g_bra, chi)
-        C1_new = P_bra.T @ C1g_bra  # (chi, chi)
-        C4_new = P_bra.T @ C4g_bra
+        C1_new = P_bra.conj().T @ C1g_bra  # (chi, chi)
+        C4_new = P_bra.conj().T @ C4g_bra
 
         # Combined projector: P_full[(a,u,U), b] = sum_J P_ket[a,u,J] * P_bra[J,U,b]
         P_ket_3d = P_ket.reshape(chi, D, -1)  # (chi, D, chi_k)
@@ -1993,15 +1993,15 @@ def _split_ctm_move(
         # C3 absorbs T3_bra: C3[i,m] * T3_bra[f,d,i] → (m, d, f) = (chi, D, chi_I)
         C3g_bra = jnp.einsum("im,fdi->mdf", env.C3, env.T3_bra).reshape(-1, chi_I)
         P_bra = _split_ctm_projector(C2g_bra, C3g_bra, chi)
-        C2_mid = P_bra.T @ C2g_bra  # (chi, chi_I)
-        C3_mid = P_bra.T @ C3g_bra
+        C2_mid = P_bra.conj().T @ C2g_bra  # (chi, chi_I)
+        C3_mid = P_bra.conj().T @ C3g_bra
 
         # Absorb ket via interlayer: C_mid[a,f] * T_ket[b,u,f] → (a, u, b)
         C2g_ket = jnp.einsum("af,buf->aub", C2_mid, env.T1_ket).reshape(-1, chi)
         C3g_ket = jnp.einsum("af,hdf->adh", C3_mid, env.T3_ket).reshape(-1, chi)
         P_ket = _split_ctm_projector(C2g_ket, C3g_ket, chi)
-        C2_new = P_ket.T @ C2g_ket  # (chi, chi)
-        C3_new = P_ket.T @ C3g_ket
+        C2_new = P_ket.conj().T @ C2g_ket  # (chi, chi)
+        C3_new = P_ket.conj().T @ C3g_ket
 
         # Combined: P_full[(a,u,U), b] = sum_J P_bra[a,U,J] * P_ket[J,u,b]
         P_bra_3d = P_bra.reshape(chi, D, -1)  # (chi, D_bra, chi_k)
@@ -2039,14 +2039,14 @@ def _split_ctm_move(
         C1g_ket = jnp.einsum("ab,alg->blg", env.C1, env.T4_ket).reshape(-1, chi_I)
         C2g_ket = jnp.einsum("ce,erm->crm", env.C2, env.T2_ket).reshape(-1, chi_I)
         P_ket = _split_ctm_projector(C1g_ket, C2g_ket, chi)
-        C1_mid = P_ket.T @ C1g_ket  # (chi, chi_I)
-        C2_mid = P_ket.T @ C2g_ket
+        C1_mid = P_ket.conj().T @ C1g_ket  # (chi, chi_I)
+        C2_mid = P_ket.conj().T @ C2g_ket
 
         C1g_bra = jnp.einsum("ac,cdb->adb", C1_mid, env.T4_bra).reshape(-1, chi)
         C2g_bra = jnp.einsum("ac,cdb->adb", C2_mid, env.T2_bra).reshape(-1, chi)
         P_bra = _split_ctm_projector(C1g_bra, C2g_bra, chi)
-        C1_new = P_bra.T @ C1g_bra  # (chi, chi)
-        C2_new = P_bra.T @ C2g_bra
+        C1_new = P_bra.conj().T @ C1g_bra  # (chi, chi)
+        C2_new = P_bra.conj().T @ C2g_bra
 
         # Combined: P_full[(a,u,U), b] = sum_J P_ket[a,u,J] * P_bra[J,U,b]
         P_ket_3d = P_ket.reshape(chi, D, -1)
@@ -2086,8 +2086,8 @@ def _split_ctm_move(
         # C3 absorbs T2_bra: C3[i,m] * T2_bra[f,r,m] → (i, r, f) = (chi, D, chi_I)
         C3g_bra = jnp.einsum("im,frm->irf", env.C3, env.T2_bra).reshape(-1, chi_I)
         P_bra = _split_ctm_projector(C4g_bra, C3g_bra, chi)
-        C4_mid = P_bra.T @ C4g_bra  # (chi, chi_I)
-        C3_mid = P_bra.T @ C3g_bra
+        C4_mid = P_bra.conj().T @ C4g_bra  # (chi, chi_I)
+        C3_mid = P_bra.conj().T @ C3g_bra
 
         # Absorb ket via interlayer
         # C4_mid[a,f] * T4_ket[b,l,f] → (a, l, b) = (chi, D, chi)
@@ -2095,8 +2095,8 @@ def _split_ctm_move(
         # C3_mid[a,f] * T2_ket[e,r,f] → (a, r, e) = (chi, D, chi)
         C3g_ket = jnp.einsum("af,erf->are", C3_mid, env.T2_ket).reshape(-1, chi)
         P_ket = _split_ctm_projector(C4g_ket, C3g_ket, chi)
-        C4_new = P_ket.T @ C4g_ket  # (chi, chi)
-        C3_new = P_ket.T @ C3g_ket
+        C4_new = P_ket.conj().T @ C4g_ket  # (chi, chi)
+        C3_new = P_ket.conj().T @ C3g_ket
 
         # Combined: P_full[(a,u,U), b] = sum_J P_bra[a,U,J] * P_ket[J,u,b]
         P_bra_3d = P_bra.reshape(chi, D, -1)
@@ -2177,8 +2177,8 @@ def _split_ctm_sweep(
             T2_bra=T2b,
             T3_ket=T3k,
             T3_bra=T3b,
-            T4_ket=normalize(env.T4_ket),
-            T4_bra=normalize(env.T4_bra),
+            T4_ket=T4k,
+            T4_bra=T4b,
         )
     return env
 
