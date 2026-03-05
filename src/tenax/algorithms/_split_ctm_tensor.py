@@ -441,8 +441,8 @@ def _compute_projector_dense(
     Returns:
         Projector ``P`` of shape ``(chi*D, chi)``.
     """
-    rho = C1g_dense @ C1g_dense.T + C2g_dense @ C2g_dense.T
-    rho = 0.5 * (rho + rho.T)
+    rho = C1g_dense @ C1g_dense.conj().T + C2g_dense @ C2g_dense.conj().T
+    rho = 0.5 * (rho + rho.conj().T)
     eigvals, eigvecs = jnp.linalg.eigh(rho)
     k = min(chi, len(eigvals))
     P = eigvecs[:, -k:][:, ::-1]
@@ -540,8 +540,8 @@ def _split_ctm_move_left(
     P_ket = _compute_projector_dense(C1g_ket_dense, C4g_ket_dense, chi)
 
     # --- Step 4: Mid-corners ---
-    C1_mid_dense = P_ket.T @ C1g_ket_dense  # (chi, chi_I)
-    C4_mid_dense = P_ket.T @ C4g_ket_dense  # (chi, chi_I)
+    C1_mid_dense = P_ket.conj().T @ C1g_ket_dense  # (chi, chi_I)
+    C4_mid_dense = P_ket.conj().T @ C4g_ket_dense  # (chi, chi_I)
 
     # --- Step 5: Grow mid-corners with bra ---
     # C1_mid(chi, chi_I) · T1_bra(t1b_I, u_bra, t1b_r)
@@ -556,15 +556,28 @@ def _split_ctm_move_left(
 
     # --- Step 6: Bra projector + new corners ---
     P_bra = _compute_projector_dense(C1g_bra_dense, C4g_bra_dense, chi)
-    C1_new_dense = P_bra.T @ C1g_bra_dense  # (chi, chi)
-    C4_new_dense = P_bra.T @ C4g_bra_dense  # (chi, chi)
+    C1_new_dense = P_bra.conj().T @ C1g_bra_dense  # (chi, chi)
+    C4_new_dense = P_bra.conj().T @ C4g_bra_dense  # (chi, chi)
 
     # Wrap new corners as Tensors
+    _sym = isinstance(A, SymmetricTensor)
     C1_new = _wrap_corner_dense(
-        C1_new_dense, "c1_d", "c1_r", env.C1.indices[0], env.C1.indices[1], chi
+        C1_new_dense,
+        "c1_d",
+        "c1_r",
+        env.C1.indices[0],
+        env.C1.indices[1],
+        chi,
+        symmetric=_sym,
     )
     C4_new = _wrap_corner_dense(
-        C4_new_dense, "c4_r", "c4_u", env.C4.indices[0], env.C4.indices[1], chi
+        C4_new_dense,
+        "c4_r",
+        "c4_u",
+        env.C4.indices[0],
+        env.C4.indices[1],
+        chi,
+        symmetric=_sym,
     )
 
     # --- Step 7: Combined full projector ---
@@ -595,10 +608,26 @@ def _split_ctm_move_left(
     T4_ket_new_dense, T4_bra_new_dense = _svd_split_edge_dense(T4_new_full_dense, chi_I)
 
     T4_ket_new = _wrap_edge_ket_dense(
-        T4_ket_new_dense, "t4k_d", "l_ket", "t4k_I", env.T4_ket.indices, chi, D, chi_I
+        T4_ket_new_dense,
+        "t4k_d",
+        "l_ket",
+        "t4k_I",
+        env.T4_ket.indices,
+        chi,
+        D,
+        chi_I,
+        symmetric=_sym,
     )
     T4_bra_new = _wrap_edge_bra_dense(
-        T4_bra_new_dense, "t4b_I", "l_bra", "t4b_u", env.T4_bra.indices, chi, D, chi_I
+        T4_bra_new_dense,
+        "t4b_I",
+        "l_bra",
+        "t4b_u",
+        env.T4_bra.indices,
+        chi,
+        D,
+        chi_I,
+        symmetric=_sym,
     )
 
     return SplitCTMTensorEnv(
@@ -644,8 +673,8 @@ def _split_ctm_move_right(
     C3g_bra_dense = C3g_bra_fused.todense()
 
     P_bra = _compute_projector_dense(C2g_bra_dense, C3g_bra_dense, chi)
-    C2_mid_dense = P_bra.T @ C2g_bra_dense  # (chi, chi_I)
-    C3_mid_dense = P_bra.T @ C3g_bra_dense
+    C2_mid_dense = P_bra.conj().T @ C2g_bra_dense  # (chi, chi_I)
+    C3_mid_dense = P_bra.conj().T @ C3g_bra_dense
 
     # --- ket via interlayer ---
     # C2_mid(chi, chi_I) · T1_ket(t1k_l, u_ket, t1k_I) → contract chi_I ↔ t1k_I
@@ -657,14 +686,27 @@ def _split_ctm_move_right(
     ).reshape(-1, chi)
 
     P_ket = _compute_projector_dense(C2g_ket_dense, C3g_ket_dense, chi)
-    C2_new_dense = P_ket.T @ C2g_ket_dense
-    C3_new_dense = P_ket.T @ C3g_ket_dense
+    C2_new_dense = P_ket.conj().T @ C2g_ket_dense
+    C3_new_dense = P_ket.conj().T @ C3g_ket_dense
 
+    _sym = isinstance(A, SymmetricTensor)
     C2_new = _wrap_corner_dense(
-        C2_new_dense, "c2_l", "c2_d", env.C2.indices[0], env.C2.indices[1], chi
+        C2_new_dense,
+        "c2_l",
+        "c2_d",
+        env.C2.indices[0],
+        env.C2.indices[1],
+        chi,
+        symmetric=_sym,
     )
     C3_new = _wrap_corner_dense(
-        C3_new_dense, "c3_u", "c3_l", env.C3.indices[0], env.C3.indices[1], chi
+        C3_new_dense,
+        "c3_u",
+        "c3_l",
+        env.C3.indices[0],
+        env.C3.indices[1],
+        chi,
+        symmetric=_sym,
     )
 
     # Combined projector
@@ -690,10 +732,26 @@ def _split_ctm_move_right(
 
     T2_ket_new_dense, T2_bra_new_dense = _svd_split_edge_dense(T2_new_full_dense, chi_I)
     T2_ket_new = _wrap_edge_ket_dense(
-        T2_ket_new_dense, "t2k_u", "r_ket", "t2k_I", env.T2_ket.indices, chi, D, chi_I
+        T2_ket_new_dense,
+        "t2k_u",
+        "r_ket",
+        "t2k_I",
+        env.T2_ket.indices,
+        chi,
+        D,
+        chi_I,
+        symmetric=_sym,
     )
     T2_bra_new = _wrap_edge_bra_dense(
-        T2_bra_new_dense, "t2b_I", "r_bra", "t2b_d", env.T2_bra.indices, chi, D, chi_I
+        T2_bra_new_dense,
+        "t2b_I",
+        "r_bra",
+        "t2b_d",
+        env.T2_bra.indices,
+        chi,
+        D,
+        chi_I,
+        symmetric=_sym,
     )
 
     return SplitCTMTensorEnv(
@@ -735,8 +793,8 @@ def _split_ctm_move_top(
     C2g_ket_dense = C2g_ket_fused.todense()
 
     P_ket = _compute_projector_dense(C1g_ket_dense, C2g_ket_dense, chi)
-    C1_mid_dense = P_ket.T @ C1g_ket_dense
-    C2_mid_dense = P_ket.T @ C2g_ket_dense
+    C1_mid_dense = P_ket.conj().T @ C1g_ket_dense
+    C2_mid_dense = P_ket.conj().T @ C2g_ket_dense
 
     # Bra layer
     C1g_bra_dense = jnp.einsum(
@@ -747,14 +805,27 @@ def _split_ctm_move_top(
     ).reshape(-1, chi)
 
     P_bra = _compute_projector_dense(C1g_bra_dense, C2g_bra_dense, chi)
-    C1_new_dense = P_bra.T @ C1g_bra_dense
-    C2_new_dense = P_bra.T @ C2g_bra_dense
+    C1_new_dense = P_bra.conj().T @ C1g_bra_dense
+    C2_new_dense = P_bra.conj().T @ C2g_bra_dense
 
+    _sym = isinstance(A, SymmetricTensor)
     C1_new = _wrap_corner_dense(
-        C1_new_dense, "c1_d", "c1_r", env.C1.indices[0], env.C1.indices[1], chi
+        C1_new_dense,
+        "c1_d",
+        "c1_r",
+        env.C1.indices[0],
+        env.C1.indices[1],
+        chi,
+        symmetric=_sym,
     )
     C2_new = _wrap_corner_dense(
-        C2_new_dense, "c2_l", "c2_d", env.C2.indices[0], env.C2.indices[1], chi
+        C2_new_dense,
+        "c2_l",
+        "c2_d",
+        env.C2.indices[0],
+        env.C2.indices[1],
+        chi,
+        symmetric=_sym,
     )
 
     # Combined projector
@@ -780,10 +851,26 @@ def _split_ctm_move_top(
 
     T1_ket_new_dense, T1_bra_new_dense = _svd_split_edge_dense(T1_new_full_dense, chi_I)
     T1_ket_new = _wrap_edge_ket_dense(
-        T1_ket_new_dense, "t1k_l", "u_ket", "t1k_I", env.T1_ket.indices, chi, D, chi_I
+        T1_ket_new_dense,
+        "t1k_l",
+        "u_ket",
+        "t1k_I",
+        env.T1_ket.indices,
+        chi,
+        D,
+        chi_I,
+        symmetric=_sym,
     )
     T1_bra_new = _wrap_edge_bra_dense(
-        T1_bra_new_dense, "t1b_I", "u_bra", "t1b_r", env.T1_bra.indices, chi, D, chi_I
+        T1_bra_new_dense,
+        "t1b_I",
+        "u_bra",
+        "t1b_r",
+        env.T1_bra.indices,
+        chi,
+        D,
+        chi_I,
+        symmetric=_sym,
     )
 
     return SplitCTMTensorEnv(
@@ -825,8 +912,8 @@ def _split_ctm_move_bottom(
     C3g_bra_dense = C3g_bra_fused.todense()
 
     P_bra = _compute_projector_dense(C4g_bra_dense, C3g_bra_dense, chi)
-    C4_mid_dense = P_bra.T @ C4g_bra_dense
-    C3_mid_dense = P_bra.T @ C3g_bra_dense
+    C4_mid_dense = P_bra.conj().T @ C4g_bra_dense
+    C3_mid_dense = P_bra.conj().T @ C3g_bra_dense
 
     # Ket via interlayer
     # C4_mid · T4_ket(t4k_d, l_ket, t4k_I) → contract chi_I ↔ t4k_I
@@ -839,14 +926,27 @@ def _split_ctm_move_bottom(
     ).reshape(-1, chi)
 
     P_ket = _compute_projector_dense(C4g_ket_dense, C3g_ket_dense, chi)
-    C4_new_dense = P_ket.T @ C4g_ket_dense
-    C3_new_dense = P_ket.T @ C3g_ket_dense
+    C4_new_dense = P_ket.conj().T @ C4g_ket_dense
+    C3_new_dense = P_ket.conj().T @ C3g_ket_dense
 
+    _sym = isinstance(A, SymmetricTensor)
     C4_new = _wrap_corner_dense(
-        C4_new_dense, "c4_r", "c4_u", env.C4.indices[0], env.C4.indices[1], chi
+        C4_new_dense,
+        "c4_r",
+        "c4_u",
+        env.C4.indices[0],
+        env.C4.indices[1],
+        chi,
+        symmetric=_sym,
     )
     C3_new = _wrap_corner_dense(
-        C3_new_dense, "c3_u", "c3_l", env.C3.indices[0], env.C3.indices[1], chi
+        C3_new_dense,
+        "c3_u",
+        "c3_l",
+        env.C3.indices[0],
+        env.C3.indices[1],
+        chi,
+        symmetric=_sym,
     )
 
     # Combined projector
@@ -872,10 +972,26 @@ def _split_ctm_move_bottom(
 
     T3_ket_new_dense, T3_bra_new_dense = _svd_split_edge_dense(T3_new_full_dense, chi_I)
     T3_ket_new = _wrap_edge_ket_dense(
-        T3_ket_new_dense, "t3k_r", "d_ket", "t3k_I", env.T3_ket.indices, chi, D, chi_I
+        T3_ket_new_dense,
+        "t3k_r",
+        "d_ket",
+        "t3k_I",
+        env.T3_ket.indices,
+        chi,
+        D,
+        chi_I,
+        symmetric=_sym,
     )
     T3_bra_new = _wrap_edge_bra_dense(
-        T3_bra_new_dense, "t3b_I", "d_bra", "t3b_l", env.T3_bra.indices, chi, D, chi_I
+        T3_bra_new_dense,
+        "t3b_I",
+        "d_bra",
+        "t3b_l",
+        env.T3_bra.indices,
+        chi,
+        D,
+        chi_I,
+        symmetric=_sym,
     )
 
     return SplitCTMTensorEnv(
@@ -930,13 +1046,17 @@ def _wrap_corner_dense(
     ref_idx_a: TensorIndex,
     ref_idx_b: TensorIndex,
     chi: int,
-) -> DenseTensor:
-    """Wrap a dense (chi, chi) array as DenseTensor with correct labels/flows."""
+    symmetric: bool = False,
+) -> Tensor:
+    """Wrap a dense (chi, chi) array as DenseTensor/SymmetricTensor with correct labels/flows."""
     sym = ref_idx_a.symmetry
     charges = np.zeros(chi, dtype=np.int32)
     idx_a = TensorIndex(sym, charges.copy(), ref_idx_a.flow, label=label_a)
     idx_b = TensorIndex(sym, charges.copy(), ref_idx_b.flow, label=label_b)
-    return DenseTensor(data, (idx_a, idx_b))
+    indices = (idx_a, idx_b)
+    if symmetric:
+        return SymmetricTensor.from_dense(data, indices, tol=float("inf"))
+    return DenseTensor(data, indices)
 
 
 def _wrap_edge_ket_dense(
@@ -948,8 +1068,9 @@ def _wrap_edge_ket_dense(
     chi: int,
     D: int,
     chi_I: int,
-) -> DenseTensor:
-    """Wrap a dense (chi, D, chi_I) array as DenseTensor edge ket."""
+    symmetric: bool = False,
+) -> Tensor:
+    """Wrap a dense (chi, D, chi_I) array as DenseTensor/SymmetricTensor edge ket."""
     sym = ref_indices[0].symmetry
     idx_chi = TensorIndex(
         sym, np.zeros(chi, dtype=np.int32), ref_indices[0].flow, label=label_chi
@@ -960,7 +1081,10 @@ def _wrap_edge_ket_dense(
     idx_I = TensorIndex(
         sym, np.zeros(chi_I, dtype=np.int32), ref_indices[2].flow, label=label_I
     )
-    return DenseTensor(data, (idx_chi, idx_D, idx_I))
+    indices = (idx_chi, idx_D, idx_I)
+    if symmetric:
+        return SymmetricTensor.from_dense(data, indices, tol=float("inf"))
+    return DenseTensor(data, indices)
 
 
 def _wrap_edge_bra_dense(
@@ -972,8 +1096,9 @@ def _wrap_edge_bra_dense(
     chi: int,
     D: int,
     chi_I: int,
-) -> DenseTensor:
-    """Wrap a dense (chi_I, D, chi) array as DenseTensor edge bra."""
+    symmetric: bool = False,
+) -> Tensor:
+    """Wrap a dense (chi_I, D, chi) array as DenseTensor/SymmetricTensor edge bra."""
     sym = ref_indices[0].symmetry
     idx_I = TensorIndex(
         sym, np.zeros(chi_I, dtype=np.int32), ref_indices[0].flow, label=label_I
@@ -984,7 +1109,10 @@ def _wrap_edge_bra_dense(
     idx_chi = TensorIndex(
         sym, np.zeros(chi, dtype=np.int32), ref_indices[2].flow, label=label_chi
     )
-    return DenseTensor(data, (idx_I, idx_D, idx_chi))
+    indices = (idx_I, idx_D, idx_chi)
+    if symmetric:
+        return SymmetricTensor.from_dense(data, indices, tol=float("inf"))
+    return DenseTensor(data, indices)
 
 
 # ------------------------------------------------------------------ #

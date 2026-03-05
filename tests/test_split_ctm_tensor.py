@@ -369,3 +369,11 @@ class TestSplitCTMSymmetric:
             assert jnp.all(jnp.isfinite(t.todense())), (
                 "FermionicU1 sweep produced non-finite tensors"
             )
+
+    def test_symmetric_multi_sweep_converges(self, small_peps_symmetric):
+        """Multiple CTM sweeps with SymmetricTensor A don't crash (regression for type mixing)."""
+        env = ctm_split_tensor(small_peps_symmetric, chi=4, max_iter=5, chi_I=2)
+        for t in env:
+            assert jnp.all(jnp.isfinite(t.todense())), (
+                "Multi-sweep symmetric CTM produced non-finite tensors"
+            )
