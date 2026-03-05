@@ -377,3 +377,36 @@ class TestSplitCTMSymmetric:
             assert jnp.all(jnp.isfinite(t.todense())), (
                 "Multi-sweep symmetric CTM produced non-finite tensors"
             )
+
+    def test_fermionic_u1_charges_preserved_across_sweeps(self):
+        """Nontrivial charge sectors survive multiple CTM sweeps (regression for charge collapse)."""
+        from tenax.core.symmetry import FermionicU1
+
+        key = jax.random.PRNGKey(77)
+        sym = FermionicU1()
+        virt_charges = np.array([0, 1], dtype=np.int32)
+        phys_charges = np.array([0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        A = SymmetricTensor.random_normal(indices, key)
+        chi, chi_I = 4, 2
+        env = initialize_split_ctm_tensor_env(A, chi, chi_I)
+        # Check initial block count
+        init_blocks = len(env.C1._blocks)
+        # Run 3 sweeps
+        for _ in range(3):
+            env = _split_ctm_tensor_sweep(env, A, chi, chi_I, True)
+        # Charge sectors must be preserved, not collapsed to trivial
+        for t in env:
+            assert isinstance(t, SymmetricTensor), (
+                f"Expected SymmetricTensor, got {type(t)}"
+            )
+            assert len(t._blocks) >= init_blocks, (
+                f"Block count dropped from {init_blocks} to {len(t._blocks)}: "
+                f"charge sectors collapsed"
+            )
