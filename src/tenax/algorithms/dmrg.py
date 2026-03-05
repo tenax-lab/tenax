@@ -943,7 +943,7 @@ def _pad_boundary_symmetric(t: SymmetricTensor, pad_left: bool) -> SymmetricTens
         trivial_idx = TensorIndex(sym, trivial_bond, FlowDirection.OUT, label="_pad_r")
         new_indices = t.indices + (trivial_idx,)
         new_blocks = {
-            key + (0,): arr[:, :, np.newaxis] for key, arr in t._blocks.items()
+            key + (0,): arr[..., np.newaxis] for key, arr in t._blocks.items()
         }
 
     obj = object.__new__(SymmetricTensor)
@@ -967,7 +967,7 @@ def _unpad_boundary_symmetric(t: SymmetricTensor, pad_left: bool) -> SymmetricTe
         new_blocks = {key[1:]: arr[0] for key, arr in t._blocks.items()}
     else:
         new_indices = t.indices[:-1]
-        new_blocks = {key[:-1]: arr[:, :, 0] for key, arr in t._blocks.items()}
+        new_blocks = {key[:-1]: arr[..., 0] for key, arr in t._blocks.items()}
 
     obj = object.__new__(SymmetricTensor)
     obj._indices = new_indices
