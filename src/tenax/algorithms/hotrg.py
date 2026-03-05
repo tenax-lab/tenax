@@ -79,7 +79,7 @@ def hotrg(
         raise TypeError(f"hotrg() requires a Tensor, got {type(tensor).__name__}")
 
     T = tensor
-    log_norm_total = jnp.zeros((), dtype=T.todense().dtype)
+    log_norm_total = jnp.zeros((), dtype=T.dtype)
 
     for step in range(config.num_steps):
         if config.direction_order == "alternating":

@@ -79,7 +79,7 @@ def trg(
         raise TypeError(f"trg() requires a Tensor, got {type(tensor).__name__}")
 
     T = tensor
-    log_norm_total = jnp.zeros((), dtype=T.todense().dtype)
+    log_norm_total = jnp.zeros((), dtype=T.dtype)
 
     for step in range(config.num_steps):
         T, log_norm = _trg_step(T, config.max_bond_dim, config.svd_trunc_err)
@@ -156,7 +156,13 @@ def _trg_step(
     F2 = F2.relabel("k", "K")  # (K, down, right)
     F4 = F4.relabel("m", "M")  # (M, down, left)
 
-    T_new = contract(F3, F1, F4, F2, output_labels=("m", "M", "k", "K"))
+    # Pairwise contraction avoids _contract_symmetric limitation where
+    # different tensor pairs share different contracted bonds.
+    top = contract(F3, F1)  # contracts "up"; result: (right, m, left, k)
+    bottom = contract(F4, F2)  # contracts "down"; result: (M, left, K, right)
+    T_new = contract(
+        top, bottom, output_labels=("m", "M", "k", "K")
+    )  # contracts left, right
     T_new = T_new.relabels({"m": "up", "M": "down", "k": "left", "K": "right"})
 
     # --- Normalize ---

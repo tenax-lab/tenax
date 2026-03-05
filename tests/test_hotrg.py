@@ -286,6 +286,20 @@ class TestHOTRGSymmetric:
         result = hotrg(tensor, config)
         assert jnp.isfinite(result)
 
+    def test_symmetric_hotrg_preserves_blocks(self):
+        """HOTRG should not collapse Z₂ block sectors during coarse-graining."""
+        tensor = compute_ising_tensor(beta=0.3, symmetric=True)
+        initial_blocks = tensor.n_blocks
+        assert initial_blocks == 8  # sanity check
+
+        T = tensor
+        for _ in range(3):
+            T, _ = _hotrg_step_horizontal(T, max_bond_dim=8)
+            assert isinstance(T, SymmetricTensor)
+            assert T.n_blocks >= initial_blocks, (
+                f"Block count collapsed from {initial_blocks} to {T.n_blocks}"
+            )
+
     def test_symmetric_hotrg_matches_exact(self):
         """Symmetric HOTRG at beta=0.3 should match exact free energy within 1%."""
         beta = 0.3
