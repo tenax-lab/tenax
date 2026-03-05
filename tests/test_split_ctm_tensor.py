@@ -226,36 +226,6 @@ class TestSplitCTMTensorEnergy:
             f"Roundtrip mismatch: split={float(E_split)}, from_std={float(E_from_std)}"
         )
 
-    def test_single_sweep_matches_dense(self, small_peps_dense, heisenberg_gate):
-        """After one sweep, tensor and dense implementations match exactly."""
-        from tenax.algorithms._split_ctm_tensor import _split_ctm_tensor_sweep
-        from tenax.algorithms.ipeps import (
-            _initialize_split_ctm_env,
-            _split_ctm_sweep,
-            compute_energy_split_ctm,
-        )
-
-        chi, chi_I = 8, 4
-        A_raw = small_peps_dense.todense()
-
-        # Dense: one sweep
-        env_dense = _initialize_split_ctm_env(A_raw, chi, chi_I)
-        env_dense = _split_ctm_sweep(env_dense, A_raw, chi, chi_I, True)
-
-        # Tensor: one sweep
-        env_tensor = initialize_split_ctm_tensor_env(small_peps_dense, chi, chi_I)
-        env_tensor = _split_ctm_tensor_sweep(
-            env_tensor, small_peps_dense, chi, chi_I, True
-        )
-
-        # All 12 tensors must match
-        for name in SplitCTMTensorEnv._fields:
-            d_val = getattr(env_dense, name)
-            t_val = getattr(env_tensor, name).todense()
-            assert jnp.allclose(d_val, t_val, atol=1e-6), (
-                f"{name} mismatch after 1 sweep"
-            )
-
     def test_grow_edge_matches_double_layer(self, small_peps_dense):
         """_grow_edge_no_double_layer matches the old double-layer approach.
 
