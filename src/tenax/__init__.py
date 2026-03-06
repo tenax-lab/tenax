@@ -127,6 +127,7 @@ from tenax.core.symmetry import (
     ZnSymmetry,
 )
 from tenax.core.tensor import BlockKey, DenseTensor, SymmetricTensor, Tensor, inner
+from tenax.linalg import eigh, qr, svd
 from tenax.network.netfile import NetworkBlueprint, from_netfile
 from tenax.network.network import TensorNetwork, build_mps, build_peps
 
@@ -159,6 +160,10 @@ __all__ = [
     "contract_with_subscripts",
     "truncated_svd",
     "qr_decompose",
+    # Linear algebra (tenax.linalg)
+    "svd",
+    "qr",
+    "eigh",
     # AutoMPO
     "AutoMPO",
     "HamiltonianTerm",
