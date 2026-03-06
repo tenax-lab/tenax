@@ -363,12 +363,17 @@ def _wrap_standard_edge_dense(
 
 
 def _ctm_tensor_move_left(
-    env: CTMTensorEnv,
+    env_self: CTMTensorEnv,
+    env_neighbor: CTMTensorEnv,
     a: Tensor,
     chi: int,
     projector_method: str = "eigh",
 ) -> CTMTensorEnv:
     """Left move: updates C1, T4, C4.
+
+    Corners (C1, C4) from env_self, perpendicular edges (T1, T3) from
+    env_neighbor, parallel edge (T4) from env_self, double-layer ``a``
+    from neighbor site.
 
     Dense reference: C1g = einsum('ab,buc->auc', C1, T1)
                      C4g = einsum('gh,hdi->gdi', C4, T3)
@@ -376,20 +381,18 @@ def _ctm_tensor_move_left(
     """
     D2 = a.indices[0].dim
 
-    # C1(c1_d=a, c1_r=b) · T1(t1_l=b, u2, t1_r=c) → contract b: c1_r ↔ t1_l
-    C1_r = env.C1.relabel("c1_r", "t1_l")
-    C1g = contract(C1_r, env.T1)  # (c1_d, u2, t1_r)
+    # C1(self) · T1(neighbor)
+    C1_r = env_self.C1.relabel("c1_r", "t1_l")
+    C1g = contract(C1_r, env_neighbor.T1)  # (c1_d, u2, t1_r)
     C1g = _fuse_pair_by_label(C1g, "c1_d", "u2", "fused", IN)  # (fused, t1_r)
 
-    # C4(c4_r=g, c4_u=h) · T3(t3_r=h, d2, t3_l) → contract h: c4_u ↔ t3_r
-    C4_u = env.C4.relabel("c4_u", "t3_r")
-    C4g = contract(C4_u, env.T3)  # (c4_r, d2, t3_l)
+    # C4(self) · T3(neighbor)
+    C4_u = env_self.C4.relabel("c4_u", "t3_r")
+    C4g = contract(C4_u, env_neighbor.T3)  # (c4_r, d2, t3_l)
     C4g = _fuse_pair_by_label(C4g, "c4_r", "d2", "fused", IN)  # (fused, t3_l)
 
-    # T4(t4_d=a, l2, t4_u=g) · a(u2, d2, l2, r2) → contract l2
-    # Dense result (a,u,g,d,r), transpose(0,1,4,2,3)→(a,u,r,g,d)
-    # reshape → (a*u, r, g*d) = fuse(t4_d,u2), r2, fuse(t4_u,d2)
-    T4_with_a = contract(env.T4, a)
+    # T4(self) · a(neighbor)
+    T4_with_a = contract(env_self.T4, a)
     T4g = _fuse_pair_by_label(T4_with_a, "t4_d", "u2", "fl", IN)
     T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", IN)
     T4g_dense = T4g.todense()
@@ -416,8 +419,8 @@ def _ctm_tensor_move_left(
         C1_new_dense,
         "c1_d",
         "c1_r",
-        env.C1.indices[0],
-        env.C1.indices[1],
+        env_self.C1.indices[0],
+        env_self.C1.indices[1],
         chi,
         symmetric=_sym,
         base_charges=_c1_q,
@@ -426,21 +429,21 @@ def _ctm_tensor_move_left(
         C4_new_dense,
         "c4_r",
         "c4_u",
-        env.C4.indices[0],
-        env.C4.indices[1],
+        env_self.C4.indices[0],
+        env_self.C4.indices[1],
         chi,
         symmetric=_sym,
         base_charges=_c4_q,
     )
 
     _t4_chi_q = a.indices[1].charges if _sym else None
-    _t4_D2_q = env.T4.indices[1].charges if _sym else None
+    _t4_D2_q = env_self.T4.indices[1].charges if _sym else None
     T4_new = _wrap_standard_edge_dense(
         T4_new_dense,
         "t4_d",
         "l2",
         "t4_u",
-        env.T4.indices,
+        env_self.T4.indices,
         chi,
         D2,
         symmetric=_sym,
@@ -448,16 +451,21 @@ def _ctm_tensor_move_left(
         base_D2_charges=_t4_D2_q,
     )
 
-    return env._replace(C1=C1_new, C4=C4_new, T4=T4_new)
+    return env_self._replace(C1=C1_new, C4=C4_new, T4=T4_new)
 
 
 def _ctm_tensor_move_right(
-    env: CTMTensorEnv,
+    env_self: CTMTensorEnv,
+    env_neighbor: CTMTensorEnv,
     a: Tensor,
     chi: int,
     projector_method: str = "eigh",
 ) -> CTMTensorEnv:
     """Right move: updates C2, T2, C3.
+
+    Corners (C2, C3) from env_self, perpendicular edges (T1, T3) from
+    env_neighbor, parallel edge (T2) from env_self, double-layer ``a``
+    from neighbor site.
 
     Dense reference: C2g = einsum('ce,buc->eub', C2, T1)
                      C3g = einsum('im,hdi->mdh', C3, T3)
@@ -465,20 +473,18 @@ def _ctm_tensor_move_right(
     """
     D2 = a.indices[0].dim
 
-    # C2(c2_l=c, c2_d=e) · T1(t1_l=b, u2, t1_r=c) → contract c: c2_l ↔ t1_r
-    C2_l = env.C2.relabel("c2_l", "t1_r")
-    C2g = contract(C2_l, env.T1)  # (c2_d, t1_l, u2)
+    # C2(self) · T1(neighbor)
+    C2_l = env_self.C2.relabel("c2_l", "t1_r")
+    C2g = contract(C2_l, env_neighbor.T1)  # (c2_d, t1_l, u2)
     C2g = _fuse_pair_by_label(C2g, "c2_d", "u2", "fused", IN)  # (fused, t1_l)
 
-    # C3(c3_u=i, c3_l=m) · T3(t3_r=h, d2, t3_l=i) → contract i: c3_u ↔ t3_l
-    C3_u = env.C3.relabel("c3_u", "t3_l")
-    C3g = contract(C3_u, env.T3)  # (c3_l, t3_r, d2)
+    # C3(self) · T3(neighbor)
+    C3_u = env_self.C3.relabel("c3_u", "t3_l")
+    C3g = contract(C3_u, env_neighbor.T3)  # (c3_l, t3_r, d2)
     C3g = _fuse_pair_by_label(C3g, "c3_l", "d2", "fused", IN)  # (fused, t3_r)
 
-    # T2(t2_u=e, r2, t2_d=m) · a(u2, d2, l2, r2) → contract r2
-    # Dense result (e,u,m,d,l), transpose(0,1,4,2,3)→(e,u,l,m,d)
-    # reshape → (e*u, l, m*d) = fuse(t2_u,u2), l2, fuse(t2_d,d2)
-    T2_with_a = contract(env.T2, a)
+    # T2(self) · a(neighbor)
+    T2_with_a = contract(env_self.T2, a)
     T2g = _fuse_pair_by_label(T2_with_a, "t2_u", "u2", "fl", IN)
     T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", IN)
     T2g_dense = T2g.todense()
@@ -502,8 +508,8 @@ def _ctm_tensor_move_right(
         C2_new_dense,
         "c2_l",
         "c2_d",
-        env.C2.indices[0],
-        env.C2.indices[1],
+        env_self.C2.indices[0],
+        env_self.C2.indices[1],
         chi,
         symmetric=_sym,
         base_charges=_c2_q,
@@ -512,21 +518,21 @@ def _ctm_tensor_move_right(
         C3_new_dense,
         "c3_u",
         "c3_l",
-        env.C3.indices[0],
-        env.C3.indices[1],
+        env_self.C3.indices[0],
+        env_self.C3.indices[1],
         chi,
         symmetric=_sym,
         base_charges=_c3_q,
     )
 
     _t2_chi_q = a.indices[0].charges if _sym else None
-    _t2_D2_q = env.T2.indices[1].charges if _sym else None
+    _t2_D2_q = env_self.T2.indices[1].charges if _sym else None
     T2_new = _wrap_standard_edge_dense(
         T2_new_dense,
         "t2_u",
         "r2",
         "t2_d",
-        env.T2.indices,
+        env_self.T2.indices,
         chi,
         D2,
         symmetric=_sym,
@@ -534,16 +540,21 @@ def _ctm_tensor_move_right(
         base_D2_charges=_t2_D2_q,
     )
 
-    return env._replace(C2=C2_new, C3=C3_new, T2=T2_new)
+    return env_self._replace(C2=C2_new, C3=C3_new, T2=T2_new)
 
 
 def _ctm_tensor_move_top(
-    env: CTMTensorEnv,
+    env_self: CTMTensorEnv,
+    env_neighbor: CTMTensorEnv,
     a: Tensor,
     chi: int,
     projector_method: str = "eigh",
 ) -> CTMTensorEnv:
     """Top move: updates C1, T1, C2.
+
+    Corners (C1, C2) from env_self, perpendicular edges (T4, T2) from
+    env_neighbor, parallel edge (T1) from env_self, double-layer ``a``
+    from neighbor site.
 
     Dense reference: C1g = einsum('ab,alg->blg', C1, T4)
                      C2g = einsum('ce,erm->crm', C2, T2)
@@ -551,20 +562,18 @@ def _ctm_tensor_move_top(
     """
     D2 = a.indices[0].dim
 
-    # C1(c1_d=a, c1_r=b) · T4(t4_d=a, l2, t4_u) → contract a: c1_d ↔ t4_d
-    C1_d = env.C1.relabel("c1_d", "t4_d")
-    C1g = contract(C1_d, env.T4)  # (c1_r, l2, t4_u)
+    # C1(self) · T4(neighbor)
+    C1_d = env_self.C1.relabel("c1_d", "t4_d")
+    C1g = contract(C1_d, env_neighbor.T4)  # (c1_r, l2, t4_u)
     C1g = _fuse_pair_by_label(C1g, "c1_r", "l2", "fused", IN)  # (fused, t4_u)
 
-    # C2(c2_l=c, c2_d=e) · T2(t2_u=e, r2, t2_d) → contract e: c2_d ↔ t2_u
-    C2_d = env.C2.relabel("c2_d", "t2_u")
-    C2g = contract(C2_d, env.T2)  # (c2_l, r2, t2_d)
+    # C2(self) · T2(neighbor)
+    C2_d = env_self.C2.relabel("c2_d", "t2_u")
+    C2g = contract(C2_d, env_neighbor.T2)  # (c2_l, r2, t2_d)
     C2g = _fuse_pair_by_label(C2g, "c2_l", "r2", "fused", IN)  # (fused, t2_d)
 
-    # T1(t1_l=b, u2, t1_r=c) · a(u2, d2, l2, r2) → contract u2
-    # Dense result (b,c,d,l,r), transpose(0,3,2,1,4)→(b,l,d,c,r)
-    # reshape → (b*l, d, c*r) = fuse(t1_l,l2), d2, fuse(t1_r,r2)
-    T1_with_a = contract(env.T1, a)
+    # T1(self) · a(neighbor)
+    T1_with_a = contract(env_self.T1, a)
     T1g = _fuse_pair_by_label(T1_with_a, "t1_l", "l2", "fl", IN)
     T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", IN)
     T1g_dense = T1g.todense()
@@ -588,8 +597,8 @@ def _ctm_tensor_move_top(
         C1_new_dense,
         "c1_d",
         "c1_r",
-        env.C1.indices[0],
-        env.C1.indices[1],
+        env_self.C1.indices[0],
+        env_self.C1.indices[1],
         chi,
         symmetric=_sym,
         base_charges=_c1_q,
@@ -598,21 +607,21 @@ def _ctm_tensor_move_top(
         C2_new_dense,
         "c2_l",
         "c2_d",
-        env.C2.indices[0],
-        env.C2.indices[1],
+        env_self.C2.indices[0],
+        env_self.C2.indices[1],
         chi,
         symmetric=_sym,
         base_charges=_c2_q,
     )
 
     _t1_chi_q = a.indices[3].charges if _sym else None
-    _t1_D2_q = env.T1.indices[1].charges if _sym else None
+    _t1_D2_q = env_self.T1.indices[1].charges if _sym else None
     T1_new = _wrap_standard_edge_dense(
         T1_new_dense,
         "t1_l",
         "u2",
         "t1_r",
-        env.T1.indices,
+        env_self.T1.indices,
         chi,
         D2,
         symmetric=_sym,
@@ -620,16 +629,21 @@ def _ctm_tensor_move_top(
         base_D2_charges=_t1_D2_q,
     )
 
-    return env._replace(C1=C1_new, C2=C2_new, T1=T1_new)
+    return env_self._replace(C1=C1_new, C2=C2_new, T1=T1_new)
 
 
 def _ctm_tensor_move_bottom(
-    env: CTMTensorEnv,
+    env_self: CTMTensorEnv,
+    env_neighbor: CTMTensorEnv,
     a: Tensor,
     chi: int,
     projector_method: str = "eigh",
 ) -> CTMTensorEnv:
     """Bottom move: updates C4, T3, C3.
+
+    Corners (C4, C3) from env_self, perpendicular edges (T4, T2) from
+    env_neighbor, parallel edge (T3) from env_self, double-layer ``a``
+    from neighbor site.
 
     Dense reference: C4g = einsum('gh,alg->hal', C4, T4).transpose(0,2,1)
                      C3g = einsum('im,erm->ire', C3, T2)
@@ -637,21 +651,18 @@ def _ctm_tensor_move_bottom(
     """
     D2 = a.indices[0].dim
 
-    # C4(c4_r=g, c4_u=h) · T4(t4_d=a, l2, t4_u=g) → contract g: c4_r ↔ t4_u
-    C4_r = env.C4.relabel("c4_r", "t4_u")
-    C4g = contract(C4_r, env.T4)  # (c4_u, t4_d, l2)
-    # Dense: result (h,a,l) transposed to (h,l,a), reshape → fuse(c4_u, l2), t4_d
+    # C4(self) · T4(neighbor)
+    C4_r = env_self.C4.relabel("c4_r", "t4_u")
+    C4g = contract(C4_r, env_neighbor.T4)  # (c4_u, t4_d, l2)
     C4g = _fuse_pair_by_label(C4g, "c4_u", "l2", "fused", IN)  # (fused, t4_d)
 
-    # C3(c3_u=i, c3_l=m) · T2(t2_u=e, r2, t2_d=m) → contract m: c3_l ↔ t2_d
-    C3_l = env.C3.relabel("c3_l", "t2_d")
-    C3g = contract(C3_l, env.T2)  # (c3_u, t2_u, r2)
+    # C3(self) · T2(neighbor)
+    C3_l = env_self.C3.relabel("c3_l", "t2_d")
+    C3g = contract(C3_l, env_neighbor.T2)  # (c3_u, t2_u, r2)
     C3g = _fuse_pair_by_label(C3g, "c3_u", "r2", "fused", IN)  # (fused, t2_u)
 
-    # T3(t3_r=h, d2, t3_l=i) · a(u2, d2, l2, r2) → contract d2
-    # Dense result (h,i,u,l,r), transpose(0,3,2,1,4)→(h,l,u,i,r)
-    # reshape → (h*l, u, i*r) = fuse(t3_r,l2), u2, fuse(t3_l,r2)
-    T3_with_a = contract(env.T3, a)
+    # T3(self) · a(neighbor)
+    T3_with_a = contract(env_self.T3, a)
     T3g = _fuse_pair_by_label(T3_with_a, "t3_r", "l2", "fl", IN)
     T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", IN)
     T3g_dense = T3g.todense()
@@ -675,8 +686,8 @@ def _ctm_tensor_move_bottom(
         C4_new_dense,
         "c4_r",
         "c4_u",
-        env.C4.indices[0],
-        env.C4.indices[1],
+        env_self.C4.indices[0],
+        env_self.C4.indices[1],
         chi,
         symmetric=_sym,
         base_charges=_c4_q,
@@ -685,21 +696,21 @@ def _ctm_tensor_move_bottom(
         C3_new_dense,
         "c3_u",
         "c3_l",
-        env.C3.indices[0],
-        env.C3.indices[1],
+        env_self.C3.indices[0],
+        env_self.C3.indices[1],
         chi,
         symmetric=_sym,
         base_charges=_c3_q,
     )
 
     _t3_chi_q = a.indices[3].charges if _sym else None
-    _t3_D2_q = env.T3.indices[1].charges if _sym else None
+    _t3_D2_q = env_self.T3.indices[1].charges if _sym else None
     T3_new = _wrap_standard_edge_dense(
         T3_new_dense,
         "t3_r",
         "d2",
         "t3_l",
-        env.T3.indices,
+        env_self.T3.indices,
         chi,
         D2,
         symmetric=_sym,
@@ -707,7 +718,7 @@ def _ctm_tensor_move_bottom(
         base_D2_charges=_t3_D2_q,
     )
 
-    return env._replace(C4=C4_new, C3=C3_new, T3=T3_new)
+    return env_self._replace(C4=C4_new, C3=C3_new, T3=T3_new)
 
 
 # ------------------------------------------------------------------ #
@@ -752,13 +763,56 @@ def _ctm_tensor_sweep(
     projector_method: str = "eigh",
 ) -> CTMTensorEnv:
     """One full CTM sweep: left, right, top, bottom + optional renormalize."""
-    env = _ctm_tensor_move_left(env, a, chi, projector_method)
-    env = _ctm_tensor_move_right(env, a, chi, projector_method)
-    env = _ctm_tensor_move_top(env, a, chi, projector_method)
-    env = _ctm_tensor_move_bottom(env, a, chi, projector_method)
+    env = _ctm_tensor_move_left(env, env, a, chi, projector_method)
+    env = _ctm_tensor_move_right(env, env, a, chi, projector_method)
+    env = _ctm_tensor_move_top(env, env, a, chi, projector_method)
+    env = _ctm_tensor_move_bottom(env, env, a, chi, projector_method)
     if renormalize:
         env = _renormalize_tensor_env(env)
     return env
+
+
+# ------------------------------------------------------------------ #
+# Neighbor maps for unit cell topologies                              #
+# ------------------------------------------------------------------ #
+
+Coord = tuple[int, int]
+
+SINGLE_SITE_NEIGHBORS: dict[Coord, dict[str, Coord]] = {
+    (0, 0): {"left": (0, 0), "right": (0, 0), "top": (0, 0), "bottom": (0, 0)},
+}
+
+CHECKERBOARD_NEIGHBORS: dict[Coord, dict[str, Coord]] = {
+    (0, 0): {"left": (1, 0), "right": (1, 0), "top": (1, 0), "bottom": (1, 0)},
+    (1, 0): {"left": (0, 0), "right": (0, 0), "top": (0, 0), "bottom": (0, 0)},
+}
+
+_DIRECTION_MOVES = [
+    ("left", _ctm_tensor_move_left),
+    ("right", _ctm_tensor_move_right),
+    ("top", _ctm_tensor_move_top),
+    ("bottom", _ctm_tensor_move_bottom),
+]
+
+
+def _ctm_tensor_sweep_multisite(
+    envs: dict[Coord, CTMTensorEnv],
+    double_layers: dict[Coord, Tensor],
+    neighbors: dict[Coord, dict[str, Coord]],
+    chi: int,
+    renormalize: bool,
+    projector_method: str = "eigh",
+) -> dict[Coord, CTMTensorEnv]:
+    """One full multisite CTM sweep over all sites and directions."""
+    for direction, move_fn in _DIRECTION_MOVES:
+        for coord in sorted(envs.keys()):
+            nb = neighbors[coord][direction]
+            envs[coord] = move_fn(
+                envs[coord], envs[nb], double_layers[nb], chi, projector_method
+            )
+    if renormalize:
+        envs = {c: _renormalize_tensor_env(e) for c, e in envs.items()}
+    return envs
 
 
 # ------------------------------------------------------------------ #
@@ -816,6 +870,88 @@ def ctm_tensor(
     return env
 
 
+def _ctm_tensor_multisite(
+    site_tensors: dict[Coord, Tensor],
+    neighbors: dict[Coord, dict[str, Coord]],
+    chi: int,
+    max_iter: int = 100,
+    conv_tol: float = 1e-8,
+    renormalize: bool = True,
+    projector_method: str = "eigh",
+) -> dict[Coord, CTMTensorEnv]:
+    """Run multisite CTM to convergence using the Tensor protocol.
+
+    Args:
+        site_tensors: Map from coordinate to iPEPS site tensor.
+        neighbors:    Map from coordinate to direction→neighbor coordinate.
+        chi:          Environment bond dimension.
+        max_iter:     Maximum CTM iterations.
+        conv_tol:     Convergence tolerance on corner singular values.
+        renormalize:  Renormalize environment at each step.
+        projector_method: ``"eigh"`` or ``"qr"``.
+
+    Returns:
+        Dict mapping coordinates to converged CTMTensorEnv.
+    """
+    double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
+    envs = {c: initialize_ctm_tensor_env(A, chi) for c, A in site_tensors.items()}
+
+    prev_svs: dict[Coord, jax.Array] = {}
+    for _ in range(max_iter):
+        envs = _ctm_tensor_sweep_multisite(
+            envs, double_layers, neighbors, chi, renormalize, projector_method
+        )
+        converged = True
+        for c in sorted(envs):
+            sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
+            if c in prev_svs:
+                if float(_ctm_sv_diff(sv, prev_svs[c])) >= conv_tol:
+                    converged = False
+            else:
+                converged = False
+            prev_svs[c] = sv
+        if converged:
+            break
+
+    return envs
+
+
+def ctm_tensor_2site(
+    A: Tensor,
+    B: Tensor,
+    chi: int,
+    max_iter: int = 100,
+    conv_tol: float = 1e-8,
+    renormalize: bool = True,
+    projector_method: str = "eigh",
+) -> tuple[CTMTensorEnv, CTMTensorEnv]:
+    """Run 2-site checkerboard CTM to convergence using the Tensor protocol.
+
+    Args:
+        A:   Site tensor for sublattice A (DenseTensor or SymmetricTensor)
+             with 5 legs ``(u, d, l, r, phys)``.
+        B:   Site tensor for sublattice B.
+        chi: Environment bond dimension.
+        max_iter:     Maximum CTM iterations.
+        conv_tol:     Convergence tolerance on corner singular values.
+        renormalize:  Renormalize environment at each step.
+        projector_method: ``"eigh"`` or ``"qr"``.
+
+    Returns:
+        ``(env_A, env_B)`` — converged CTMTensorEnv for each sublattice.
+    """
+    envs = _ctm_tensor_multisite(
+        {(0, 0): A, (1, 0): B},
+        CHECKERBOARD_NEIGHBORS,
+        chi,
+        max_iter,
+        conv_tol,
+        renormalize,
+        projector_method,
+    )
+    return envs[(0, 0)], envs[(1, 0)]
+
+
 # ------------------------------------------------------------------ #
 # RDMs + energy                                                        #
 # ------------------------------------------------------------------ #
@@ -870,3 +1006,43 @@ def compute_energy_ctm_tensor(
 
     std_env = _env_to_dense_standard(env)
     return compute_energy_ctm(A_dense, std_env, H, d)
+
+
+def compute_energy_ctm_tensor_2site(
+    A: Tensor,
+    B: Tensor,
+    env_A: CTMTensorEnv,
+    env_B: CTMTensorEnv,
+    hamiltonian_gate: Tensor | jax.Array,
+    d: int | None = None,
+) -> jax.Array:
+    """Compute energy per site for a 2-site checkerboard iPEPS.
+
+    Converts to dense and delegates to ``compute_energy_ctm_2site``.
+
+    Args:
+        A:                Site tensor for sublattice A.
+        B:                Site tensor for sublattice B.
+        env_A:            Converged CTMTensorEnv for sublattice A.
+        env_B:            Converged CTMTensorEnv for sublattice B.
+        hamiltonian_gate: 2-site Hamiltonian gate.
+        d:                Physical dimension (inferred from A if None).
+
+    Returns:
+        Scalar energy per site.
+    """
+    from tenax.algorithms.ipeps import compute_energy_ctm_2site
+
+    A_d = A.todense()
+    B_d = B.todense()
+    if d is None:
+        d = A_d.shape[-1]
+
+    if isinstance(hamiltonian_gate, Tensor):
+        H = hamiltonian_gate.todense().reshape(d, d, d, d)
+    else:
+        H = hamiltonian_gate.reshape(d, d, d, d)
+
+    std_env_A = _env_to_dense_standard(env_A)
+    std_env_B = _env_to_dense_standard(env_B)
+    return compute_energy_ctm_2site(A_d, B_d, std_env_A, std_env_B, H, d)
