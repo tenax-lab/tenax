@@ -2329,7 +2329,10 @@ def optimize_gs_ad(
         return energy
 
     # Set up optimizer
-    optimizer = optax.adam(config.gs_learning_rate)
+    if config.gs_optimizer == "adam":
+        optimizer = optax.adam(config.gs_learning_rate)
+    else:
+        optimizer = optax.adam(config.gs_learning_rate)
 
     opt_state = optimizer.init(A)
 
@@ -2337,7 +2340,7 @@ def optimize_gs_ad(
     best_A = A
     prev_energy = float("inf")
 
-    for _ in range(config.gs_num_steps):
+    for step in range(config.gs_num_steps):
         energy_val, grads = jax.value_and_grad(loss_fn)(A)
         energy_float = float(energy_val)
 
@@ -2369,11 +2372,10 @@ def _optimize_gs_ad_tensor(
     A_init: Tensor,
     config: iPEPSConfig,
 ):
-    """AD-based ground state optimization for Tensor-protocol iPEPS.
+    """AD-based ground state optimization for Tensor-protocol iPEPS (1-site).
 
     Uses ``ctm_tensor_converge`` with implicit differentiation through
-    the standard Tensor-protocol CTM.  Works with both DenseTensor and
-    SymmetricTensor (block-sparse) site tensors.
+    the standard Tensor-protocol CTM.
     """
     import optax
 
@@ -2387,7 +2389,6 @@ def _optimize_gs_ad_tensor(
     d_phys = gate.shape[0]
 
     A = A_init
-    # Normalize using Tensor norm
     A = A * (1.0 / (A.norm() + 1e-10))
 
     config_tuple = _config_to_tuple(config.ctm)
@@ -2395,7 +2396,6 @@ def _optimize_gs_ad_tensor(
     _env_template = initialize_ctm_tensor_env(A, config.ctm.chi)
     env_treedef = jax.tree.structure(_env_template)
 
-    # Define loss: A -> energy
     def loss_fn(A_param):
         A_norm = A_param * (1.0 / (A_param.norm() + 1e-10))
         env_leaves = ctm_tensor_converge(A_norm, config_tuple)
@@ -2403,16 +2403,14 @@ def _optimize_gs_ad_tensor(
         energy = compute_energy_ctm_tensor(A_norm, env, gate, d_phys)
         return energy
 
-    # optax works natively on pytrees (DenseTensor/SymmetricTensor are pytrees)
     optimizer = optax.adam(config.gs_learning_rate)
-
     opt_state = optimizer.init(A)
 
     best_energy = float("inf")
     best_A = A
     prev_energy = float("inf")
 
-    for _ in range(config.gs_num_steps):
+    for step in range(config.gs_num_steps):
         energy_val, grads = jax.value_and_grad(loss_fn)(A)
         energy_float = float(energy_val)
 
@@ -2420,17 +2418,14 @@ def _optimize_gs_ad_tensor(
             best_energy = energy_float
             best_A = A
 
-        # Check convergence
         if abs(energy_float - prev_energy) < config.gs_conv_tol:
             break
         prev_energy = energy_float
 
         updates, opt_state = optimizer.update(grads, opt_state, A)
         A = optax.apply_updates(A, updates)
-        # Re-normalize using Tensor norm
         A = A * (1.0 / (A.norm() + 1e-10))
 
-    # Final CTM environment
     A_final = best_A * (1.0 / (best_A.norm() + 1e-10))
     env_leaves = ctm_tensor_converge(A_final, config_tuple)
     env = jax.tree.unflatten(env_treedef, env_leaves)
@@ -2502,7 +2497,10 @@ def _optimize_gs_ad_2site(
 
     # optax.adam supports pytree params natively
     params = (A, B)
-    optimizer = optax.adam(config.gs_learning_rate)
+    if config.gs_optimizer == "adam":
+        optimizer = optax.adam(config.gs_learning_rate)
+    else:
+        optimizer = optax.adam(config.gs_learning_rate)
 
     opt_state = optimizer.init(params)
 
@@ -2510,7 +2508,7 @@ def _optimize_gs_ad_2site(
     best_params = params
     prev_energy = float("inf")
 
-    for _ in range(config.gs_num_steps):
+    for step in range(config.gs_num_steps):
         energy_val, grads = jax.value_and_grad(loss_fn)(params)
         energy_float = float(energy_val)
 

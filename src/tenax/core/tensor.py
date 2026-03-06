@@ -698,27 +698,29 @@ class SymmetricTensor(Tensor):
 
         valid_keys = _compute_valid_blocks(indices)
 
-        # Extract blocks using JAX indexing (differentiable w.r.t. data).
-        # Cache numpy index arrays for reuse in validation below.
+        # Extract blocks using JAX-compatible indexing so that from_dense()
+        # works under JAX tracing (e.g. inside jax.grad / jax.vjp).
+        # Masks and index arrays are static (derived from charges), only
+        # the data values may be JAX tracers.
+        full_mask = np.zeros(data.shape, dtype=bool)
         blocks: dict[BlockKey, jax.Array] = {}
-        block_idx_cache: list[list[np.ndarray]] = []  # per-block idx_arrays
+
         for key in sorted(valid_keys):
             masks, shape = _block_slices(indices, key)
             if not all(s > 0 for s in shape):
                 continue
-            # Static index computation (charge data is auxiliary)
             idx_arrays = [np.where(m)[0] for m in masks]
-            block_idx_cache.append(idx_arrays)
-            grid = jnp.ix_(*[jnp.array(a) for a in idx_arrays])
-            blocks[key] = data[grid]  # JAX indexing, differentiable
+            grid = np.ix_(*idx_arrays)
+            blocks[key] = data[grid]
 
-        # Validate only when tol is finite (concrete arrays, not JIT tracing)
-        if tol < float("inf"):
-            data_np = np.array(data)
-            full_mask = np.zeros(data_np.shape, dtype=bool)
-            for idx_arrays in block_idx_cache:
-                grid_np = np.ix_(*idx_arrays)
-                full_mask[grid_np] = True
+            # Mark these positions as valid (static mask for validation)
+            full_mask[grid] = True
+
+        # Validation: check for non-zero elements outside valid blocks.
+        # Skip when tol is infinite (used by CTM wrapping) or when data
+        # is a JAX tracer (validation requires concrete values).
+        if tol != float("inf") and not isinstance(data, jax.core.Tracer):
+            data_np = np.asarray(data)
             outside = data_np[~full_mask]
             if np.any(np.abs(outside) > tol):
                 raise ValueError(
@@ -726,13 +728,8 @@ class SymmetricTensor(Tensor):
                     f"outside symmetry-allowed sectors (max abs value: "
                     f"{np.max(np.abs(outside)):.3e})"
                 )
-            return cls(blocks, indices)
 
-        # Bypass __init__ validation for tol=inf (used by CTM wrapping)
-        obj = object.__new__(cls)
-        obj._indices = tuple(indices)
-        obj._blocks = blocks
-        return obj
+        return cls(blocks, indices)
 
     # --- Tensor interface ---
 
@@ -761,11 +758,7 @@ class SymmetricTensor(Tensor):
         return self._blocks
 
     def todense(self) -> jax.Array:
-        """Materialize the full dense tensor.
-
-        This operation is differentiable: gradients flow through the
-        scatter (``jnp.zeros().at[...].set(block)``) back into the
-        block arrays, enabling AD through ``todense()`` round-trips.
+        """Materialize the full dense tensor (for testing/debugging only).
 
         Warning: Creates an array of full size; avoid for large tensors.
 
@@ -776,13 +769,13 @@ class SymmetricTensor(Tensor):
         if not self._blocks:
             return jnp.zeros(shape, dtype=self.dtype)
 
-        # Use JAX operations for differentiable scatter
+        # Start from zeros and scatter blocks using JAX-compatible ops
+        # so that todense() works under JAX tracing (e.g. inside jax.grad).
         result = jnp.zeros(shape, dtype=self.dtype)
         for key, block in self._blocks.items():
             masks, _ = _block_slices(self._indices, key)
-            # Index computation is static (charge data is auxiliary)
             idx_arrays = [np.where(m)[0] for m in masks]
-            grid = jnp.ix_(*[jnp.array(a) for a in idx_arrays])
+            grid = np.ix_(*idx_arrays)
             result = result.at[grid].set(block)
 
         return result

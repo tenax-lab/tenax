@@ -1,8 +1,8 @@
 """Standard CTM using the Tensor protocol (polymorphic dense/symmetric).
 
 Builds the full double-layer tensor via ``bar()`` + ``contract()`` + ``fuse_indices()``,
-then runs the standard projector-based CTM with dense projectors and Tensor-protocol
-environment tensors.
+then runs the standard projector-based CTM with native Tensor projectors applied
+via label-based contraction.
 
 This module parallels the dense CTM in ``ipeps.py`` but uses Tensor objects
 (DenseTensor or SymmetricTensor) throughout, enabling block-sparse acceleration
@@ -21,10 +21,8 @@ import numpy as np
 
 from tenax.algorithms._split_ctm_tensor import (
     _CORNER_SPECS,
-    _compute_projector_dense,
     _derive_charges,
     _make_dense_corner,
-    _wrap_corner_dense,
 )
 from tenax.algorithms._tensor_utils import fuse_indices
 from tenax.contraction.contractor import contract
@@ -76,6 +74,93 @@ def _fuse_pair_by_label(
     axis_a = labels.index(label_a)
     axis_b = labels.index(label_b)
     return fuse_indices(T, axis_a, axis_b, fused_label, fused_flow)
+
+
+def _compute_projector_tensor(
+    C1g: Tensor,
+    C4g: Tensor,
+    chi: int,
+) -> Tensor:
+    r"""Compute isometric projector P as a Tensor via eigh of the density matrix.
+
+    Forms :math:`\rho = C_{1g} C_{1g}^\dagger + C_{4g} C_{4g}^\dagger`
+    in dense space, eigendecomposes via ``eigh``, then wraps the top-k
+    eigenvectors as a Tensor with indices matching C1g's ``fused`` leg.
+
+    Args:
+        C1g: Grown corner with labels ``(fused, <col1>)``.
+        C4g: Grown corner with labels ``(fused, <col2>)``.
+        chi: Target bond dimension.
+
+    Returns:
+        Projector ``P`` with labels ``(fused, chi_new)``,
+        flows ``(IN, OUT)``.  Wrapped in ``stop_gradient``.
+    """
+    C1g_dense = C1g.todense()
+    C4g_dense = C4g.todense()
+
+    rho = C1g_dense @ C1g_dense.conj().T + C4g_dense @ C4g_dense.conj().T
+    rho = 0.5 * (rho + rho.conj().T)
+    eigvals, eigvecs = jnp.linalg.eigh(rho)
+    k = min(chi, len(eigvals))
+    P_dense = eigvecs[:, -k:][:, ::-1]
+    P_dense = jax.lax.stop_gradient(P_dense)
+
+    # Wrap as Tensor with fused index from C1g and new chi_new bond
+    fused_idx = C1g.indices[C1g.labels().index("fused")]
+    chi_new_idx = TensorIndex(
+        fused_idx.symmetry,
+        np.zeros(k, dtype=np.int32),
+        OUT,
+        label="chi_new",
+    )
+    if isinstance(C1g, SymmetricTensor):
+        return SymmetricTensor.from_dense(
+            P_dense, (fused_idx, chi_new_idx), tol=float("inf")
+        )
+    return DenseTensor(P_dense, (fused_idx, chi_new_idx))
+
+
+def _apply_projector_tensor(
+    P: Tensor,
+    C1g: Tensor,
+    C4g: Tensor,
+    Tg: Tensor,
+    fused_l: str,
+    fused_r: str,
+) -> tuple[Tensor, Tensor, Tensor]:
+    r"""Apply projector to grown corners and edge using Tensor contraction.
+
+    Computes :math:`P^\dagger C_{1g}`, :math:`P^\dagger C_{4g}`,
+    and the sandwich :math:`P^\dagger T_g P`.
+
+    Uses ``P.bar()`` (= :math:`P^\dagger` for real isometries) on the left
+    and ``P`` on the right of the edge sandwich.
+
+    Args:
+        P:       Projector with labels ``(fused, chi_new)``.
+        C1g:     Grown corner ``(fused, col1)``.
+        C4g:     Grown corner ``(fused, col2)``.
+        Tg:      Grown edge ``(fused_l, D2_label, fused_r)``.
+        fused_l: Label of Tg's left fused leg.
+        fused_r: Label of Tg's right fused leg.
+
+    Returns:
+        ``(C1_new, C4_new, T_new)`` as Tensor objects.
+    """
+    P_bar = P.bar()  # (fused_OUT, chi_new_IN) — contracts on "fused"
+
+    C1_new = contract(P_bar, C1g)  # (chi_new, col1)
+    C4_new = contract(P_bar, C4g)  # (chi_new, col2)
+
+    # Sandwich: P^bar @ Tg @ P  (left fused, then right fused)
+    P_left = P_bar.relabel("fused", fused_l)
+    step = contract(P_left, Tg)  # (chi_new, D2, fused_r)
+
+    P_right = P.relabels({"fused": fused_r, "chi_new": "chi_new_r"})
+    T_new = contract(step, P_right)  # (chi_new, D2, chi_new_r)
+
+    return C1_new, C4_new, T_new
 
 
 # ------------------------------------------------------------------ #
@@ -319,45 +404,6 @@ def initialize_ctm_tensor_env(
 
 
 # ------------------------------------------------------------------ #
-# Wrap dense results back as Tensor                                    #
-# ------------------------------------------------------------------ #
-
-
-def _wrap_standard_edge_dense(
-    data: jax.Array,
-    label_chi1: Label,
-    label_D2: Label,
-    label_chi2: Label,
-    ref_indices: tuple[TensorIndex, ...],
-    chi: int,
-    D2: int,
-    symmetric: bool = False,
-    base_chi_charges: np.ndarray | None = None,
-    base_D2_charges: np.ndarray | None = None,
-) -> Tensor:
-    """Wrap a dense (chi, D², chi) array as a Tensor with correct metadata."""
-    sym = ref_indices[0].symmetry
-    chi_charges = (
-        _derive_charges(base_chi_charges, chi)
-        if base_chi_charges is not None
-        else np.zeros(chi, dtype=np.int32)
-    )
-    D2_charges = (
-        np.asarray(base_D2_charges, dtype=np.int32)
-        if base_D2_charges is not None
-        else np.zeros(D2, dtype=np.int32)
-    )
-
-    idx1 = TensorIndex(sym, chi_charges.copy(), ref_indices[0].flow, label=label_chi1)
-    idx2 = TensorIndex(sym, D2_charges, ref_indices[1].flow, label=label_D2)
-    idx3 = TensorIndex(sym, chi_charges.copy(), ref_indices[2].flow, label=label_chi2)
-    indices = (idx1, idx2, idx3)
-    if symmetric:
-        return SymmetricTensor.from_dense(data, indices, tol=float("inf"))
-    return DenseTensor(data, indices)
-
-
-# ------------------------------------------------------------------ #
 # CTM moves                                                            #
 # ------------------------------------------------------------------ #
 
@@ -379,8 +425,6 @@ def _ctm_tensor_move_left(
                      C4g = einsum('gh,hdi->gdi', C4, T3)
                      T4g = einsum('alg,udlr->augdr', T4, a)
     """
-    D2 = a.indices[0].dim
-
     # C1(self) · T1(neighbor)
     C1_r = env_self.C1.relabel("c1_r", "t1_l")
     C1g = contract(C1_r, env_neighbor.T1)  # (c1_d, u2, t1_r)
@@ -394,62 +438,16 @@ def _ctm_tensor_move_left(
     # T4(self) · a(neighbor)
     T4_with_a = contract(env_self.T4, a)
     T4g = _fuse_pair_by_label(T4_with_a, "t4_d", "u2", "fl", IN)
-    T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", IN)
-    T4g_dense = T4g.todense()
-    T4g_labels = T4g.labels()
-    perm = [T4g_labels.index("fl"), T4g_labels.index("r2"), T4g_labels.index("fr")]
-    T4g_dense = T4g_dense.transpose(perm)
+    T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", OUT)
 
-    # 4. Dense projector
-    C1g_dense = C1g.todense()
-    C4g_dense = C4g.todense()
-    P = _compute_projector_dense(C1g_dense, C4g_dense, chi)
+    # Native projector
+    P = _compute_projector_tensor(C1g, C4g, chi)
+    C1_new, C4_new, T4_new = _apply_projector_tensor(P, C1g, C4g, T4g, "fl", "fr")
 
-    # 5. Apply P
-    C1_new_dense = P.conj().T @ C1g_dense  # (chi, col1)
-    C4_new_dense = P.conj().T @ C4g_dense  # (chi, col2)
-    T4_new_dense = jnp.einsum("ia,idj,jb->adb", P, T4g_dense, P)  # (chi, D2, chi)
-
-    # 6. Wrap back as Tensor
-    _sym = isinstance(a, SymmetricTensor)
-    _c1_q = a.indices[1].charges if _sym else None  # ref for C1 charges
-    _c4_q = a.indices[0].charges if _sym else None  # ref for C4 charges
-
-    C1_new = _wrap_corner_dense(
-        C1_new_dense,
-        "c1_d",
-        "c1_r",
-        env_self.C1.indices[0],
-        env_self.C1.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c1_q,
-    )
-    C4_new = _wrap_corner_dense(
-        C4_new_dense,
-        "c4_r",
-        "c4_u",
-        env_self.C4.indices[0],
-        env_self.C4.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c4_q,
-    )
-
-    _t4_chi_q = a.indices[1].charges if _sym else None
-    _t4_D2_q = env_self.T4.indices[1].charges if _sym else None
-    T4_new = _wrap_standard_edge_dense(
-        T4_new_dense,
-        "t4_d",
-        "l2",
-        "t4_u",
-        env_self.T4.indices,
-        chi,
-        D2,
-        symmetric=_sym,
-        base_chi_charges=_t4_chi_q,
-        base_D2_charges=_t4_D2_q,
-    )
+    # Relabel to expected output labels
+    C1_new = C1_new.relabels({"chi_new": "c1_d", "t1_r": "c1_r"})
+    C4_new = C4_new.relabels({"chi_new": "c4_r", "t3_l": "c4_u"})
+    T4_new = T4_new.relabels({"chi_new": "t4_d", "chi_new_r": "t4_u", "r2": "l2"})
 
     return env_self._replace(C1=C1_new, C4=C4_new, T4=T4_new)
 
@@ -471,8 +469,6 @@ def _ctm_tensor_move_right(
                      C3g = einsum('im,hdi->mdh', C3, T3)
                      T2g = einsum('erm,udlr->eumdl', T2, a)
     """
-    D2 = a.indices[0].dim
-
     # C2(self) · T1(neighbor)
     C2_l = env_self.C2.relabel("c2_l", "t1_r")
     C2g = contract(C2_l, env_neighbor.T1)  # (c2_d, t1_l, u2)
@@ -486,59 +482,16 @@ def _ctm_tensor_move_right(
     # T2(self) · a(neighbor)
     T2_with_a = contract(env_self.T2, a)
     T2g = _fuse_pair_by_label(T2_with_a, "t2_u", "u2", "fl", IN)
-    T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", IN)
-    T2g_dense = T2g.todense()
-    T2g_labels = T2g.labels()
-    perm = [T2g_labels.index("fl"), T2g_labels.index("l2"), T2g_labels.index("fr")]
-    T2g_dense = T2g_dense.transpose(perm)
+    T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", OUT)
 
-    C2g_dense = C2g.todense()
-    C3g_dense = C3g.todense()
-    P = _compute_projector_dense(C2g_dense, C3g_dense, chi)
+    # Native projector
+    P = _compute_projector_tensor(C2g, C3g, chi)
+    C2_new, C3_new, T2_new = _apply_projector_tensor(P, C2g, C3g, T2g, "fl", "fr")
 
-    C2_new_dense = P.conj().T @ C2g_dense
-    C3_new_dense = P.conj().T @ C3g_dense
-    T2_new_dense = jnp.einsum("ia,idj,jb->adb", P, T2g_dense, P)
-
-    _sym = isinstance(a, SymmetricTensor)
-    _c2_q = a.indices[0].charges if _sym else None
-    _c3_q = a.indices[1].charges if _sym else None
-
-    C2_new = _wrap_corner_dense(
-        C2_new_dense,
-        "c2_l",
-        "c2_d",
-        env_self.C2.indices[0],
-        env_self.C2.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c2_q,
-    )
-    C3_new = _wrap_corner_dense(
-        C3_new_dense,
-        "c3_u",
-        "c3_l",
-        env_self.C3.indices[0],
-        env_self.C3.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c3_q,
-    )
-
-    _t2_chi_q = a.indices[0].charges if _sym else None
-    _t2_D2_q = env_self.T2.indices[1].charges if _sym else None
-    T2_new = _wrap_standard_edge_dense(
-        T2_new_dense,
-        "t2_u",
-        "r2",
-        "t2_d",
-        env_self.T2.indices,
-        chi,
-        D2,
-        symmetric=_sym,
-        base_chi_charges=_t2_chi_q,
-        base_D2_charges=_t2_D2_q,
-    )
+    # Relabel to expected output labels
+    C2_new = C2_new.relabels({"chi_new": "c2_l", "t1_l": "c2_d"})
+    C3_new = C3_new.relabels({"chi_new": "c3_u", "t3_r": "c3_l"})
+    T2_new = T2_new.relabels({"chi_new": "t2_u", "chi_new_r": "t2_d", "l2": "r2"})
 
     return env_self._replace(C2=C2_new, C3=C3_new, T2=T2_new)
 
@@ -560,8 +513,6 @@ def _ctm_tensor_move_top(
                      C2g = einsum('ce,erm->crm', C2, T2)
                      T1g = einsum('buc,udlr->bcdlr', T1, a)
     """
-    D2 = a.indices[0].dim
-
     # C1(self) · T4(neighbor)
     C1_d = env_self.C1.relabel("c1_d", "t4_d")
     C1g = contract(C1_d, env_neighbor.T4)  # (c1_r, l2, t4_u)
@@ -575,59 +526,16 @@ def _ctm_tensor_move_top(
     # T1(self) · a(neighbor)
     T1_with_a = contract(env_self.T1, a)
     T1g = _fuse_pair_by_label(T1_with_a, "t1_l", "l2", "fl", IN)
-    T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", IN)
-    T1g_dense = T1g.todense()
-    T1g_labels = T1g.labels()
-    perm = [T1g_labels.index("fl"), T1g_labels.index("d2"), T1g_labels.index("fr")]
-    T1g_dense = T1g_dense.transpose(perm)
+    T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", OUT)
 
-    C1g_dense = C1g.todense()
-    C2g_dense = C2g.todense()
-    P = _compute_projector_dense(C1g_dense, C2g_dense, chi)
+    # Native projector
+    P = _compute_projector_tensor(C1g, C2g, chi)
+    C1_new, C2_new, T1_new = _apply_projector_tensor(P, C1g, C2g, T1g, "fl", "fr")
 
-    C1_new_dense = P.conj().T @ C1g_dense
-    C2_new_dense = P.conj().T @ C2g_dense
-    T1_new_dense = jnp.einsum("ia,idj,jb->adb", P, T1g_dense, P)
-
-    _sym = isinstance(a, SymmetricTensor)
-    _c1_q = a.indices[1].charges if _sym else None
-    _c2_q = a.indices[0].charges if _sym else None
-
-    C1_new = _wrap_corner_dense(
-        C1_new_dense,
-        "c1_d",
-        "c1_r",
-        env_self.C1.indices[0],
-        env_self.C1.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c1_q,
-    )
-    C2_new = _wrap_corner_dense(
-        C2_new_dense,
-        "c2_l",
-        "c2_d",
-        env_self.C2.indices[0],
-        env_self.C2.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c2_q,
-    )
-
-    _t1_chi_q = a.indices[3].charges if _sym else None
-    _t1_D2_q = env_self.T1.indices[1].charges if _sym else None
-    T1_new = _wrap_standard_edge_dense(
-        T1_new_dense,
-        "t1_l",
-        "u2",
-        "t1_r",
-        env_self.T1.indices,
-        chi,
-        D2,
-        symmetric=_sym,
-        base_chi_charges=_t1_chi_q,
-        base_D2_charges=_t1_D2_q,
-    )
+    # Relabel to expected output labels
+    C1_new = C1_new.relabels({"chi_new": "c1_d", "t4_u": "c1_r"})
+    C2_new = C2_new.relabels({"chi_new": "c2_l", "t2_d": "c2_d"})
+    T1_new = T1_new.relabels({"chi_new": "t1_l", "chi_new_r": "t1_r", "d2": "u2"})
 
     return env_self._replace(C1=C1_new, C2=C2_new, T1=T1_new)
 
@@ -649,8 +557,6 @@ def _ctm_tensor_move_bottom(
                      C3g = einsum('im,erm->ire', C3, T2)
                      T3g = einsum('hdi,udlr->hiulr', T3, a)
     """
-    D2 = a.indices[0].dim
-
     # C4(self) · T4(neighbor)
     C4_r = env_self.C4.relabel("c4_r", "t4_u")
     C4g = contract(C4_r, env_neighbor.T4)  # (c4_u, t4_d, l2)
@@ -664,59 +570,16 @@ def _ctm_tensor_move_bottom(
     # T3(self) · a(neighbor)
     T3_with_a = contract(env_self.T3, a)
     T3g = _fuse_pair_by_label(T3_with_a, "t3_r", "l2", "fl", IN)
-    T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", IN)
-    T3g_dense = T3g.todense()
-    T3g_labels = T3g.labels()
-    perm = [T3g_labels.index("fl"), T3g_labels.index("u2"), T3g_labels.index("fr")]
-    T3g_dense = T3g_dense.transpose(perm)
+    T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", OUT)
 
-    C4g_dense = C4g.todense()
-    C3g_dense = C3g.todense()
-    P = _compute_projector_dense(C4g_dense, C3g_dense, chi)
+    # Native projector
+    P = _compute_projector_tensor(C4g, C3g, chi)
+    C4_new, C3_new, T3_new = _apply_projector_tensor(P, C4g, C3g, T3g, "fl", "fr")
 
-    C4_new_dense = P.conj().T @ C4g_dense
-    C3_new_dense = P.conj().T @ C3g_dense
-    T3_new_dense = jnp.einsum("ia,idj,jb->adb", P, T3g_dense, P)
-
-    _sym = isinstance(a, SymmetricTensor)
-    _c4_q = a.indices[0].charges if _sym else None
-    _c3_q = a.indices[1].charges if _sym else None
-
-    C4_new = _wrap_corner_dense(
-        C4_new_dense,
-        "c4_r",
-        "c4_u",
-        env_self.C4.indices[0],
-        env_self.C4.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c4_q,
-    )
-    C3_new = _wrap_corner_dense(
-        C3_new_dense,
-        "c3_u",
-        "c3_l",
-        env_self.C3.indices[0],
-        env_self.C3.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c3_q,
-    )
-
-    _t3_chi_q = a.indices[3].charges if _sym else None
-    _t3_D2_q = env_self.T3.indices[1].charges if _sym else None
-    T3_new = _wrap_standard_edge_dense(
-        T3_new_dense,
-        "t3_r",
-        "d2",
-        "t3_l",
-        env_self.T3.indices,
-        chi,
-        D2,
-        symmetric=_sym,
-        base_chi_charges=_t3_chi_q,
-        base_D2_charges=_t3_D2_q,
-    )
+    # Relabel to expected output labels
+    C4_new = C4_new.relabels({"chi_new": "c4_r", "t4_d": "c4_u"})
+    C3_new = C3_new.relabels({"chi_new": "c3_u", "t2_u": "c3_l"})
+    T3_new = T3_new.relabels({"chi_new": "t3_r", "chi_new_r": "t3_l", "u2": "d2"})
 
     return env_self._replace(C4=C4_new, C3=C3_new, T3=T3_new)
 
