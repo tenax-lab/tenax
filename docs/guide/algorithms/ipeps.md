@@ -248,5 +248,5 @@ print(f"Energy per site: {energy:.6f}")
 
 The `spinless_fermion_gate()` builds $H = -t \sum (c^\dagger_i c_j + \text{h.c.}) + V \sum n_i n_j$
 as a `SymmetricTensor` with `FermionParity` charges. The simple update uses
-`contract()` and `truncated_svd()` which automatically compute Koszul
+`contract()` and `svd()` which automatically compute Koszul
 signs at every leg crossing. Energy is evaluated via dense CTM fallback.
