@@ -693,14 +693,17 @@ class SymmetricTensor(Tensor):
 
         valid_keys = _compute_valid_blocks(indices)
 
-        # Extract blocks using JAX indexing (differentiable w.r.t. data)
+        # Extract blocks using JAX indexing (differentiable w.r.t. data).
+        # Cache numpy index arrays for reuse in validation below.
         blocks: dict[BlockKey, jax.Array] = {}
+        block_idx_cache: list[list[np.ndarray]] = []  # per-block idx_arrays
         for key in sorted(valid_keys):
             masks, shape = _block_slices(indices, key)
             if not all(s > 0 for s in shape):
                 continue
             # Static index computation (charge data is auxiliary)
             idx_arrays = [np.where(m)[0] for m in masks]
+            block_idx_cache.append(idx_arrays)
             grid = jnp.ix_(*[jnp.array(a) for a in idx_arrays])
             blocks[key] = data[grid]  # JAX indexing, differentiable
 
@@ -708,11 +711,7 @@ class SymmetricTensor(Tensor):
         if tol < float("inf"):
             data_np = np.array(data)
             full_mask = np.zeros(data_np.shape, dtype=bool)
-            for key in sorted(valid_keys):
-                masks, shape = _block_slices(indices, key)
-                if not all(s > 0 for s in shape):
-                    continue
-                idx_arrays = [np.where(m)[0] for m in masks]
+            for idx_arrays in block_idx_cache:
                 grid_np = np.ix_(*idx_arrays)
                 full_mask[grid_np] = True
             outside = data_np[~full_mask]

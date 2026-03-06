@@ -294,18 +294,32 @@ def _ctm_fixed_point_impl(
     return env
 
 
+_PM_STR_TO_INT = {"eigh": 0, "qr": 1}
+_PM_INT_TO_STR = {0: "eigh", 1: "qr"}
+
+
+def _config_to_tuple(config) -> tuple:
+    """Pack CTMConfig into a hashable tuple for JAX tracing."""
+    return (
+        config.chi,
+        config.max_iter,
+        config.conv_tol,
+        int(config.renormalize),
+        _PM_STR_TO_INT.get(config.projector_method, 0),
+    )
+
+
 def _config_from_tuple(config_tuple: tuple):
     """Reconstruct CTMConfig from a packed tuple."""
     from tenax.algorithms.ipeps import CTMConfig
 
-    pm_map = {0: "eigh", 1: "qr"}
     pm_int = config_tuple[4] if len(config_tuple) > 4 else 0
     return CTMConfig(
         chi=config_tuple[0],
         max_iter=config_tuple[1],
         conv_tol=config_tuple[2],
         renormalize=bool(config_tuple[3]),
-        projector_method=pm_map.get(pm_int, "eigh"),
+        projector_method=_PM_INT_TO_STR.get(pm_int, "eigh"),
     )
 
 
