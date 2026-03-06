@@ -696,36 +696,43 @@ class SymmetricTensor(Tensor):
                 f"{tuple(idx.dim for idx in indices)}"
             )
 
-        data_np = np.array(data)
         valid_keys = _compute_valid_blocks(indices)
 
-        # Build a mask of all valid positions
-        full_mask = np.zeros(data_np.shape, dtype=bool)
+        # Extract blocks using JAX indexing (differentiable w.r.t. data).
+        # Cache numpy index arrays for reuse in validation below.
         blocks: dict[BlockKey, jax.Array] = {}
-
+        block_idx_cache: list[list[np.ndarray]] = []  # per-block idx_arrays
         for key in sorted(valid_keys):
             masks, shape = _block_slices(indices, key)
             if not all(s > 0 for s in shape):
                 continue
-            # Use np.ix_ to build the index grid for this block
+            # Static index computation (charge data is auxiliary)
             idx_arrays = [np.where(m)[0] for m in masks]
-            grid = np.ix_(*idx_arrays)
-            block_data = data_np[grid]
-            blocks[key] = jnp.array(block_data, dtype=data.dtype)
+            block_idx_cache.append(idx_arrays)
+            grid = jnp.ix_(*[jnp.array(a) for a in idx_arrays])
+            blocks[key] = data[grid]  # JAX indexing, differentiable
 
-            # Mark these positions as valid
-            full_mask[grid] = True
+        # Validate only when tol is finite (concrete arrays, not JIT tracing)
+        if tol < float("inf"):
+            data_np = np.array(data)
+            full_mask = np.zeros(data_np.shape, dtype=bool)
+            for idx_arrays in block_idx_cache:
+                grid_np = np.ix_(*idx_arrays)
+                full_mask[grid_np] = True
+            outside = data_np[~full_mask]
+            if np.any(np.abs(outside) > tol):
+                raise ValueError(
+                    f"data has {np.sum(np.abs(outside) > tol)} non-zero elements "
+                    f"outside symmetry-allowed sectors (max abs value: "
+                    f"{np.max(np.abs(outside)):.3e})"
+                )
+            return cls(blocks, indices)
 
-        # Check for non-zero elements outside valid blocks
-        outside = data_np[~full_mask]
-        if np.any(np.abs(outside) > tol):
-            raise ValueError(
-                f"data has {np.sum(np.abs(outside) > tol)} non-zero elements "
-                f"outside symmetry-allowed sectors (max abs value: "
-                f"{np.max(np.abs(outside)):.3e})"
-            )
-
-        return cls(blocks, indices)
+        # Bypass __init__ validation for tol=inf (used by CTM wrapping)
+        obj = object.__new__(cls)
+        obj._indices = tuple(indices)
+        obj._blocks = blocks
+        return obj
 
     # --- Tensor interface ---
 
@@ -754,7 +761,11 @@ class SymmetricTensor(Tensor):
         return self._blocks
 
     def todense(self) -> jax.Array:
-        """Materialize the full dense tensor (for testing/debugging only).
+        """Materialize the full dense tensor.
+
+        This operation is differentiable: gradients flow through the
+        scatter (``jnp.zeros().at[...].set(block)``) back into the
+        block arrays, enabling AD through ``todense()`` round-trips.
 
         Warning: Creates an array of full size; avoid for large tensors.
 
@@ -765,18 +776,16 @@ class SymmetricTensor(Tensor):
         if not self._blocks:
             return jnp.zeros(shape, dtype=self.dtype)
 
-        # Start from zeros and fill blocks
-        np_dtype = (
-            np.dtype(self.dtype) if not isinstance(self.dtype, np.dtype) else self.dtype
-        )
-        result = np.zeros(shape, dtype=np_dtype)
+        # Use JAX operations for differentiable scatter
+        result = jnp.zeros(shape, dtype=self.dtype)
         for key, block in self._blocks.items():
             masks, _ = _block_slices(self._indices, key)
+            # Index computation is static (charge data is auxiliary)
             idx_arrays = [np.where(m)[0] for m in masks]
-            grid = np.ix_(*idx_arrays)
-            result[grid] = np.array(block)
+            grid = jnp.ix_(*[jnp.array(a) for a in idx_arrays])
+            result = result.at[grid].set(block)
 
-        return jnp.array(result)
+        return result
 
     def conj(self) -> SymmetricTensor:
         """Return conjugate tensor (conjugate all block arrays)."""

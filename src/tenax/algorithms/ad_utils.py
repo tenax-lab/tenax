@@ -294,15 +294,18 @@ def _ctm_fixed_point_impl(
     return env
 
 
+_PM_STR_TO_INT = {"eigh": 0, "qr": 1}
+_PM_INT_TO_STR = {0: "eigh", 1: "qr"}
+
+
 def _config_to_tuple(config) -> tuple:
     """Pack CTMConfig into a hashable tuple for JAX tracing."""
-    _pm_map = {"eigh": 0, "qr": 1}
     return (
         config.chi,
         config.max_iter,
         config.conv_tol,
         int(config.renormalize),
-        _pm_map.get(config.projector_method, 0),
+        _PM_STR_TO_INT.get(config.projector_method, 0),
     )
 
 
@@ -310,14 +313,13 @@ def _config_from_tuple(config_tuple: tuple):
     """Reconstruct CTMConfig from a packed tuple."""
     from tenax.algorithms.ipeps import CTMConfig
 
-    pm_map = {0: "eigh", 1: "qr"}
     pm_int = config_tuple[4] if len(config_tuple) > 4 else 0
     return CTMConfig(
         chi=config_tuple[0],
         max_iter=config_tuple[1],
         conv_tol=config_tuple[2],
         renormalize=bool(config_tuple[3]),
-        projector_method=pm_map.get(pm_int, "eigh"),
+        projector_method=_PM_INT_TO_STR.get(pm_int, "eigh"),
     )
 
 
@@ -638,7 +640,11 @@ def _ctm_tensor_step(
     A_treedef,
     env_treedef,
 ) -> tuple[jax.Array, ...]:
-    """One CTM tensor sweep + gauge fix, mapping flat leaves to flat leaves."""
+    """One CTM tensor sweep + gauge fix, mapping flat leaves to flat leaves.
+
+    Reconstructs Tensor objects from pytree leaves, runs one sweep
+    (``_ctm_tensor_sweep``), applies gauge fix, and returns flattened env.
+    """
     from tenax.algorithms._ctm_tensor import (
         _build_double_layer_tensor,
         _ctm_tensor_sweep,
@@ -655,9 +661,18 @@ def _ctm_tensor_step(
 
 
 def _ctm_tensor_fixed_point_impl(A, config):
-    """Run standard Tensor-protocol CTM to convergence with gauge fixing."""
+    """Run standard Tensor-protocol CTM to convergence with gauge fixing.
+
+    Args:
+        A:      iPEPS site tensor (DenseTensor or SymmetricTensor).
+        config: CTMConfig.
+
+    Returns:
+        Converged CTMTensorEnv.
+    """
     from tenax.algorithms._ctm_tensor import (
         _build_double_layer_tensor,
+        _ctm_sv_diff,
         _ctm_tensor_sweep,
         initialize_ctm_tensor_env,
     )
@@ -674,19 +689,12 @@ def _ctm_tensor_fixed_point_impl(A, config):
 
         current_sv = jnp.linalg.svd(env.C1.todense(), compute_uv=False)
         if prev_sv is not None:
-            diff = _ctm_sv_diff_local(current_sv, prev_sv)
+            diff = _ctm_sv_diff(current_sv, prev_sv)
             if float(diff) < config.conv_tol:
                 break
         prev_sv = current_sv
 
     return env
-
-
-def _ctm_sv_diff_local(sv_new, sv_old):
-    """Compute max abs diff between normalized SVs (local helper)."""
-    sv1 = sv_new / (jnp.sum(sv_new) + 1e-15)
-    sv2 = sv_old / (jnp.sum(sv_old) + 1e-15)
-    return jnp.max(jnp.abs(sv1 - sv2))
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(1,))
@@ -696,9 +704,13 @@ def ctm_tensor_converge(
 ) -> tuple[jax.Array, ...]:
     """Standard Tensor-protocol CTM with implicit differentiation.
 
+    Wraps the Tensor-protocol CTM iteration as a differentiable function
+    ``A -> env_leaves`` with implicit fixed-point backward pass.
+
     Args:
         A:            iPEPS site tensor (DenseTensor or SymmetricTensor).
         config_tuple: CTMConfig fields packed as tuple for JAX tracing.
+                      ``(chi, max_iter, conv_tol, renormalize[, projector_method_int])``.
 
     Returns:
         Flat tuple of environment pytree leaf arrays.
@@ -709,16 +721,26 @@ def ctm_tensor_converge(
 
 
 def _ctm_tensor_converge_fwd(A, config_tuple):
-    """Forward pass — run Tensor CTM, cache A and env for backward."""
+    """Forward pass — run Tensor CTM, cache A and env for backward.
+
+    Stores full pytree objects (A, env) as residuals so the backward
+    pass can reconstruct treedefs for unflatten.
+    """
     config = _config_from_tuple(config_tuple)
     env = _ctm_tensor_fixed_point_impl(A, config)
     env_leaves = tuple(jax.tree.leaves(env))
+    # A and env are pytrees of jax.Array; JAX handles pytree residuals natively
     residuals = (A, env)
     return env_leaves, residuals
 
 
 def _ctm_tensor_converge_bwd(config_tuple, residuals, g):
-    """Backward pass via implicit differentiation of Tensor CTM fixed point."""
+    """Backward pass via implicit differentiation of Tensor CTM fixed point.
+
+    Solves ``(I - J^T) lambda = g`` using GMRES (Francuz et al. PRR 7,
+    013237), where J = d(ctm_step)/d(env) is the Jacobian of one CTM
+    sweep + gauge fix.  Then ``dA = d(step)/dA^T @ lambda``.
+    """
     A, env = residuals
     config = _config_from_tuple(config_tuple)
 
@@ -727,6 +749,7 @@ def _ctm_tensor_converge_bwd(config_tuple, residuals, g):
     env_leaves = tuple(jax.tree.leaves(env))
 
     def step_fn(A_in, env_in_leaves):
+        """One CTM step mapping (A_pytree, env_leaves) -> env_leaves."""
         return _ctm_tensor_step(
             tuple(jax.tree.leaves(A_in)),
             env_in_leaves,
@@ -737,6 +760,7 @@ def _ctm_tensor_converge_bwd(config_tuple, residuals, g):
             env_treedef,
         )
 
+    # Solve (I - J_env^T) lambda = g via GMRES
     from jax.scipy.sparse.linalg import gmres as jax_gmres
 
     def apply_I_minus_Jt(v):
@@ -753,6 +777,7 @@ def _ctm_tensor_converge_bwd(config_tuple, residuals, g):
         maxiter=max_fp_iter,
     )
 
+    # dA = d(step)/dA^T @ lambda
     _, vjp_A_fn = jax.vjp(lambda a: step_fn(a, env_leaves), A)
     dA = vjp_A_fn(lam)[0]
 
@@ -771,6 +796,7 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config):
     """Run multisite Tensor-protocol CTM to convergence with gauge fixing."""
     from tenax.algorithms._ctm_tensor import (
         _build_double_layer_tensor,
+        _ctm_sv_diff,
         _ctm_tensor_sweep_multisite,
         initialize_ctm_tensor_env,
     )
@@ -796,7 +822,7 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config):
         for c in sorted(envs):
             sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
             if c in prev_svs:
-                if float(_ctm_sv_diff_local(sv, prev_svs[c])) >= config.conv_tol:
+                if float(_ctm_sv_diff(sv, prev_svs[c])) >= config.conv_tol:
                     converged = False
             else:
                 converged = False
