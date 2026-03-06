@@ -32,6 +32,9 @@ _FILE_MARKERS = {
     "test_ipeps_excitations.py": "slow",
     "test_code_review_regressions.py": "core",
     "test_tensor_utils.py": "core",
+    "test_split_ctm_tensor.py": "algorithm",
+    "test_ctm_tensor.py": "algorithm",
+    "test_integration_regression.py": "algorithm",
 }
 
 

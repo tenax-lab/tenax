@@ -788,6 +788,183 @@ ctm_tensor_converge.defvjp(_ctm_tensor_converge_fwd, _ctm_tensor_converge_bwd)
 
 
 # ---------------------------------------------------------------------------
+# 5b. 2-site Tensor-protocol CTM fixed-point implicit differentiation
+# ---------------------------------------------------------------------------
+
+
+def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config):
+    """Run multisite Tensor-protocol CTM to convergence with gauge fixing."""
+    from tenax.algorithms._ctm_tensor import (
+        _build_double_layer_tensor,
+        _ctm_sv_diff,
+        _ctm_tensor_sweep_multisite,
+        initialize_ctm_tensor_env,
+    )
+
+    double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
+    envs = {
+        c: initialize_ctm_tensor_env(A, config.chi) for c, A in site_tensors.items()
+    }
+
+    prev_svs = {}
+    for _ in range(config.max_iter):
+        envs = _ctm_tensor_sweep_multisite(
+            envs,
+            double_layers,
+            neighbors,
+            config.chi,
+            config.renormalize,
+            config.projector_method,
+        )
+        envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
+
+        converged = True
+        for c in sorted(envs):
+            sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
+            if c in prev_svs:
+                if float(_ctm_sv_diff(sv, prev_svs[c])) >= config.conv_tol:
+                    converged = False
+            else:
+                converged = False
+            prev_svs[c] = sv
+        if converged:
+            break
+
+    return envs
+
+
+def _ctm_tensor_step_2site(
+    A_leaves,
+    B_leaves,
+    env_leaves,
+    chi,
+    renormalize,
+    projector_method,
+    A_treedef,
+    B_treedef,
+    env_A_treedef,
+    n_env_A_leaves,
+):
+    """One 2-site CTM tensor sweep + gauge fix, flat leaves → flat leaves."""
+    from tenax.algorithms._ctm_tensor import (
+        CHECKERBOARD_NEIGHBORS,
+        _build_double_layer_tensor,
+        _ctm_tensor_sweep_multisite,
+    )
+
+    A = jax.tree.unflatten(A_treedef, A_leaves)
+    B = jax.tree.unflatten(B_treedef, B_leaves)
+    env_A = jax.tree.unflatten(env_A_treedef, list(env_leaves[:n_env_A_leaves]))
+    env_B = jax.tree.unflatten(env_A_treedef, list(env_leaves[n_env_A_leaves:]))
+
+    double_layers = {
+        (0, 0): _build_double_layer_tensor(A),
+        (1, 0): _build_double_layer_tensor(B),
+    }
+    envs = {(0, 0): env_A, (1, 0): env_B}
+    envs = _ctm_tensor_sweep_multisite(
+        envs, double_layers, CHECKERBOARD_NEIGHBORS, chi, renormalize, projector_method
+    )
+    envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
+
+    return tuple(jax.tree.leaves(envs[(0, 0)])) + tuple(jax.tree.leaves(envs[(1, 0)]))
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(2,))
+def ctm_tensor_converge_2site(
+    A,
+    B,
+    config_tuple: tuple,
+) -> tuple[jax.Array, ...]:
+    """2-site Tensor-protocol CTM with implicit differentiation.
+
+    Args:
+        A:            iPEPS site tensor A (DenseTensor or SymmetricTensor).
+        B:            iPEPS site tensor B.
+        config_tuple: CTMConfig fields packed as tuple for JAX tracing.
+
+    Returns:
+        Flat tuple ``(*env_A_leaves, *env_B_leaves)``.
+    """
+    from tenax.algorithms._ctm_tensor import CHECKERBOARD_NEIGHBORS
+
+    config = _config_from_tuple(config_tuple)
+    envs = _ctm_tensor_multisite_fixed_point(
+        {(0, 0): A, (1, 0): B}, CHECKERBOARD_NEIGHBORS, config
+    )
+    return tuple(jax.tree.leaves(envs[(0, 0)])) + tuple(jax.tree.leaves(envs[(1, 0)]))
+
+
+def _ctm_tensor_converge_2site_fwd(A, B, config_tuple):
+    """Forward pass — run 2-site Tensor CTM, cache A, B, envs."""
+    from tenax.algorithms._ctm_tensor import CHECKERBOARD_NEIGHBORS
+
+    config = _config_from_tuple(config_tuple)
+    envs = _ctm_tensor_multisite_fixed_point(
+        {(0, 0): A, (1, 0): B}, CHECKERBOARD_NEIGHBORS, config
+    )
+    env_A, env_B = envs[(0, 0)], envs[(1, 0)]
+    out = tuple(jax.tree.leaves(env_A)) + tuple(jax.tree.leaves(env_B))
+    residuals = (A, B, env_A, env_B)
+    return out, residuals
+
+
+def _ctm_tensor_converge_2site_bwd(config_tuple, residuals, g):
+    """Backward pass via implicit differentiation of 2-site Tensor CTM."""
+    A, B, env_A, env_B = residuals
+    config = _config_from_tuple(config_tuple)
+
+    A_treedef = jax.tree.structure(A)
+    B_treedef = jax.tree.structure(B)
+    env_A_treedef = jax.tree.structure(env_A)
+
+    env_A_leaves = tuple(jax.tree.leaves(env_A))
+    env_B_leaves = tuple(jax.tree.leaves(env_B))
+    n_env_A_leaves = len(env_A_leaves)
+    env_leaves = env_A_leaves + env_B_leaves
+
+    def step_fn(A_in, B_in, env_in_leaves):
+        return _ctm_tensor_step_2site(
+            tuple(jax.tree.leaves(A_in)),
+            tuple(jax.tree.leaves(B_in)),
+            env_in_leaves,
+            config.chi,
+            config.renormalize,
+            config.projector_method,
+            A_treedef,
+            B_treedef,
+            env_A_treedef,
+            n_env_A_leaves,
+        )
+
+    from jax.scipy.sparse.linalg import gmres as jax_gmres
+
+    def apply_I_minus_Jt(v):
+        _, vjp_fn = jax.vjp(lambda e: step_fn(A, B, e), env_leaves)
+        Jt_v = vjp_fn(v)[0]
+        return tuple(vi - ji for vi, ji in zip(v, Jt_v))
+
+    max_fp_iter = min(config.max_iter, 50)
+    lam, info = jax_gmres(
+        apply_I_minus_Jt,
+        g,
+        x0=g,
+        tol=config.conv_tol,
+        maxiter=max_fp_iter,
+    )
+
+    _, vjp_AB_fn = jax.vjp(lambda a, b: step_fn(a, b, env_leaves), A, B)
+    dA, dB = vjp_AB_fn(lam)
+
+    return (dA, dB)
+
+
+ctm_tensor_converge_2site.defvjp(
+    _ctm_tensor_converge_2site_fwd, _ctm_tensor_converge_2site_bwd
+)
+
+
+# ---------------------------------------------------------------------------
 # 6. Split CTM (Tensor protocol) fixed-point implicit differentiation
 # ---------------------------------------------------------------------------
 

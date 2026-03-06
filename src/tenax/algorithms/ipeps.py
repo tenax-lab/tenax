@@ -2379,6 +2379,7 @@ def _optimize_gs_ad_tensor(
 
     from tenax.algorithms._ctm_tensor import (
         compute_energy_ctm_tensor,
+        initialize_ctm_tensor_env,
     )
     from tenax.algorithms.ad_utils import _config_to_tuple, ctm_tensor_converge
 
@@ -2390,10 +2391,6 @@ def _optimize_gs_ad_tensor(
     A = A * (1.0 / (A.norm() + 1e-10))
 
     config_tuple = _config_to_tuple(config.ctm)
-
-    # env treedef is needed to reconstruct CTMTensorEnv from leaves
-    # We get it from a dummy initialization
-    from tenax.algorithms._ctm_tensor import initialize_ctm_tensor_env
 
     _env_template = initialize_ctm_tensor_env(A, config.ctm.chi)
     env_treedef = jax.tree.structure(_env_template)
@@ -2444,25 +2441,18 @@ def _optimize_gs_ad_tensor(
 
 def _optimize_gs_ad_2site(
     hamiltonian_gate: jax.Array,
-    AB_init: tuple[jax.Array, jax.Array] | None,
+    AB_init: tuple[jax.Array, jax.Array] | tuple[Tensor, Tensor] | None,
     config: iPEPSConfig,
-) -> tuple[
-    tuple[jax.Array, jax.Array],
-    tuple[CTMEnvironment, CTMEnvironment],
-    float,
-]:
+):
     """AD-based ground state optimization for 2-site iPEPS unit cell.
 
     Uses implicit differentiation through the 2-site CTM fixed point
     to compute gradients of energy w.r.t. both site tensors (A, B).
 
-    Dense-only: 2-site Tensor-protocol CTM is not yet implemented.
+    Accepts dense ``jax.Array`` or Tensor-protocol objects.
     """
     if isinstance(AB_init, tuple) and any(isinstance(t, Tensor) for t in AB_init):
-        raise TypeError(
-            "_optimize_gs_ad_2site requires dense jax.Array inputs. "
-            "Tensor-protocol 2-site CTM is not yet implemented."
-        )
+        return _optimize_gs_ad_tensor_2site(hamiltonian_gate, AB_init, config)
 
     import optax
 
@@ -2549,5 +2539,91 @@ def _optimize_gs_ad_2site(
     env_A = CTMEnvironment(*env_tuple[:8])
     env_B = CTMEnvironment(*env_tuple[8:])
     E_gs = float(compute_energy_ctm_2site(A_final, B_final, env_A, env_B, gate, d_phys))
+
+    return (A_final, B_final), (env_A, env_B), E_gs
+
+
+def _optimize_gs_ad_tensor_2site(
+    hamiltonian_gate: jax.Array,
+    AB_init: tuple[Tensor, Tensor],
+    config: iPEPSConfig,
+):
+    """AD-based ground state optimization for 2-site Tensor-protocol iPEPS.
+
+    Uses ``ctm_tensor_converge_2site`` with implicit differentiation through
+    the 2-site Tensor-protocol CTM.
+    """
+    import optax
+
+    from tenax.algorithms._ctm_tensor import (
+        compute_energy_ctm_tensor_2site,
+        initialize_ctm_tensor_env,
+    )
+    from tenax.algorithms.ad_utils import _config_to_tuple, ctm_tensor_converge_2site
+
+    gate = jnp.array(hamiltonian_gate)
+    d_phys = gate.shape[0]
+
+    A, B = AB_init
+    A = A * (1.0 / (A.norm() + 1e-10))
+    B = B * (1.0 / (B.norm() + 1e-10))
+
+    config_tuple = _config_to_tuple(config.ctm)
+
+    # Get env treedef from a template
+    _env_template = initialize_ctm_tensor_env(A, config.ctm.chi)
+    env_treedef = jax.tree.structure(_env_template)
+    n_env_leaves = len(jax.tree.leaves(_env_template))
+
+    def loss_fn(params):
+        A_p, B_p = params
+        A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
+        B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
+        env_leaves = ctm_tensor_converge_2site(A_norm, B_norm, config_tuple)
+        env_A = jax.tree.unflatten(env_treedef, env_leaves[:n_env_leaves])
+        env_B = jax.tree.unflatten(env_treedef, env_leaves[n_env_leaves:])
+        energy = compute_energy_ctm_tensor_2site(
+            A_norm, B_norm, env_A, env_B, gate, d_phys
+        )
+        return energy
+
+    params = (A, B)
+    optimizer = optax.adam(config.gs_learning_rate)
+    opt_state = optimizer.init(params)
+
+    best_energy = float("inf")
+    best_params = params
+    prev_energy = float("inf")
+
+    for _ in range(config.gs_num_steps):
+        energy_val, grads = jax.value_and_grad(loss_fn)(params)
+        energy_float = float(energy_val)
+
+        if energy_float < best_energy:
+            best_energy = energy_float
+            best_params = params
+
+        if abs(energy_float - prev_energy) < config.gs_conv_tol:
+            break
+        prev_energy = energy_float
+
+        updates, opt_state = optimizer.update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
+        A_p, B_p = params
+        params = (
+            A_p * (1.0 / (A_p.norm() + 1e-10)),
+            B_p * (1.0 / (B_p.norm() + 1e-10)),
+        )
+
+    # Final CTM environment
+    A_final, B_final = best_params
+    A_final = A_final * (1.0 / (A_final.norm() + 1e-10))
+    B_final = B_final * (1.0 / (B_final.norm() + 1e-10))
+    env_leaves = ctm_tensor_converge_2site(A_final, B_final, config_tuple)
+    env_A = jax.tree.unflatten(env_treedef, env_leaves[:n_env_leaves])
+    env_B = jax.tree.unflatten(env_treedef, env_leaves[n_env_leaves:])
+    E_gs = float(
+        compute_energy_ctm_tensor_2site(A_final, B_final, env_A, env_B, gate, d_phys)
+    )
 
     return (A_final, B_final), (env_A, env_B), E_gs

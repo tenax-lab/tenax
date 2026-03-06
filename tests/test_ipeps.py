@@ -838,7 +838,8 @@ class TestOptimizeGsAd2Site:
 class TestOptimizeGsAdDenseOnly:
     """Verify optimize_gs_ad 2-site rejects SymmetricTensor inputs."""
 
-    def test_symmetric_tensor_2site_raises(self):
+    def test_symmetric_tensor_2site_runs(self):
+        """2-site AD optimization accepts SymmetricTensor inputs."""
         from tenax.core.index import FlowDirection, TensorIndex
         from tenax.core.symmetry import U1Symmetry
         from tenax.core.tensor import SymmetricTensor
@@ -871,8 +872,9 @@ class TestOptimizeGsAdDenseOnly:
             gs_num_steps=1,
             unit_cell="2site",
         )
-        with pytest.raises(TypeError, match="2-site CTM is not yet implemented"):
-            optimize_gs_ad(gate, (A_sym, B_sym), config)
+        result = optimize_gs_ad(gate, (A_sym, B_sym), config)
+        (A_opt, B_opt), (env_A, env_B), E_gs = result
+        assert np.isfinite(E_gs)
 
 
 class TestADSymmetric:

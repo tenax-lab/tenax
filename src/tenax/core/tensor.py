@@ -372,7 +372,12 @@ class DenseTensor(Tensor):
         aux: tuple[TensorIndex, ...],
         children: tuple[jax.Array],
     ) -> DenseTensor:
-        return cls(children[0], aux)
+        # Bypass validation for JAX-internal dummy objects (e.g., custom_vjp
+        # backward pass creates object() placeholders to probe pytree structure).
+        obj = object.__new__(cls)
+        obj._data = children[0]
+        obj._indices = tuple(aux)
+        return obj
 
     # --- Tensor interface ---
 
