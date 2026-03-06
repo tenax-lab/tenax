@@ -13,14 +13,18 @@ from tenax.algorithms._ctm_tensor import (
     _build_double_layer_tensor,
     _ctm_tensor_sweep,
     compute_energy_ctm_tensor,
+    compute_energy_ctm_tensor_2site,
     ctm_tensor,
+    ctm_tensor_2site,
     initialize_ctm_tensor_env,
 )
 from tenax.algorithms.ipeps import (
     CTMConfig,
     _build_double_layer,
     compute_energy_ctm,
+    compute_energy_ctm_2site,
     ctm,
+    ctm_2site,
 )
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity, U1Symmetry
@@ -323,3 +327,128 @@ class TestFermionicIntegration:
         energy, A_opt, env = fpeps(H, config)
         assert isinstance(env, CTMTensorEnv)
         assert np.isfinite(energy)
+
+
+# ------------------------------------------------------------------ #
+# 2-site CTM tests                                                     #
+# ------------------------------------------------------------------ #
+
+
+@pytest.fixture
+def small_peps_pair_dense():
+    """Two random DenseTensor iPEPS site tensors for 2-site unit cell."""
+    D, d = 2, 2
+    sym = U1Symmetry()
+    charges = np.zeros(D, dtype=np.int32)
+    phys_charges = np.zeros(d, dtype=np.int32)
+
+    def _make(seed):
+        key = jax.random.PRNGKey(seed)
+        data = jax.random.normal(key, (D, D, D, D, d))
+        data = data / (jnp.linalg.norm(data) + 1e-10)
+        indices = (
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        return DenseTensor(data, indices)
+
+    return _make(42), _make(123)
+
+
+@pytest.fixture
+def small_peps_pair_symmetric():
+    """Two random SymmetricTensor iPEPS site tensors (trivial U(1) charges)."""
+    D, d = 2, 2
+    sym = U1Symmetry()
+    charges = np.zeros(D, dtype=np.int32)
+    phys_charges = np.zeros(d, dtype=np.int32)
+
+    def _make(seed):
+        key = jax.random.PRNGKey(seed)
+        data = jax.random.normal(key, (D, D, D, D, d))
+        indices = (
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        return SymmetricTensor.from_dense(data, indices)
+
+    return _make(99), _make(200)
+
+
+class TestTwoSiteCTM:
+    def test_2site_dense_converges(self, small_peps_pair_dense):
+        """2-site DenseTensor CTM converges (finite env after max_iter)."""
+        A, B = small_peps_pair_dense
+        env_A, env_B = ctm_tensor_2site(A, B, chi=4, max_iter=20, conv_tol=1e-6)
+        for field in env_A:
+            assert jnp.all(jnp.isfinite(field.todense()))
+        for field in env_B:
+            assert jnp.all(jnp.isfinite(field.todense()))
+
+    def test_2site_dense_matches_legacy(self, small_peps_pair_dense, heisenberg_gate):
+        """2-site DenseTensor CTM energy matches legacy dense CTM energy."""
+        A, B = small_peps_pair_dense
+        chi = 6
+        A_raw, B_raw = A.todense(), B.todense()
+
+        # Legacy dense CTM
+        cfg = CTMConfig(chi=chi, max_iter=50, conv_tol=1e-8)
+        env_A_leg, env_B_leg = ctm_2site(A_raw, B_raw, cfg)
+        E_legacy = float(
+            compute_energy_ctm_2site(
+                A_raw, B_raw, env_A_leg, env_B_leg, heisenberg_gate, d=2
+            )
+        )
+
+        # Tensor-protocol 2-site CTM
+        env_A, env_B = ctm_tensor_2site(A, B, chi=chi, max_iter=50, conv_tol=1e-8)
+        E_tensor = float(
+            compute_energy_ctm_tensor_2site(A, B, env_A, env_B, heisenberg_gate, d=2)
+        )
+
+        np.testing.assert_allclose(E_tensor, E_legacy, atol=1e-4)
+
+    def test_2site_symmetric_converges(self, small_peps_pair_symmetric):
+        """2-site SymmetricTensor CTM converges."""
+        A, B = small_peps_pair_symmetric
+        env_A, env_B = ctm_tensor_2site(A, B, chi=4, max_iter=20, conv_tol=1e-6)
+        for field in env_A:
+            assert jnp.all(jnp.isfinite(field.todense()))
+        for field in env_B:
+            assert jnp.all(jnp.isfinite(field.todense()))
+
+    def test_2site_symmetric_energy_matches_dense(
+        self, small_peps_pair_symmetric, heisenberg_gate
+    ):
+        """2-site SymmetricTensor energy matches DenseTensor result."""
+        A_sym, B_sym = small_peps_pair_symmetric
+        chi = 6
+
+        A_dense = DenseTensor(A_sym.todense(), A_sym.indices)
+        B_dense = DenseTensor(B_sym.todense(), B_sym.indices)
+
+        env_Ad, env_Bd = ctm_tensor_2site(
+            A_dense, B_dense, chi=chi, max_iter=40, conv_tol=1e-8
+        )
+        E_dense = float(
+            compute_energy_ctm_tensor_2site(
+                A_dense, B_dense, env_Ad, env_Bd, heisenberg_gate, d=2
+            )
+        )
+
+        env_As, env_Bs = ctm_tensor_2site(
+            A_sym, B_sym, chi=chi, max_iter=40, conv_tol=1e-8
+        )
+        E_sym = float(
+            compute_energy_ctm_tensor_2site(
+                A_sym, B_sym, env_As, env_Bs, heisenberg_gate, d=2
+            )
+        )
+
+        np.testing.assert_allclose(E_sym, E_dense, atol=1e-4)
