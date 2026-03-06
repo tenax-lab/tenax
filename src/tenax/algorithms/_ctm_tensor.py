@@ -718,16 +718,12 @@ def _ctm_tensor_move_bottom(
 def _normalize_tensor(T: Tensor) -> Tensor:
     """Normalize tensor by max abs value, matching dense CTM convention.
 
-    Uses ``data / (norm + EPS)`` (single division) rather than
-    ``data * (1/norm)`` (reciprocal + multiplication) to avoid
-    O(eps) floating-point differences vs the dense path.
+    Uses native Tensor ops (``max_abs()``, scalar ``*``) so this is
+    fully differentiable for both DenseTensor and SymmetricTensor
+    without any ``todense()`` round-trip.
     """
-    data = T.todense()
-    norm = jnp.max(jnp.abs(data))
-    data_normed = data / (norm + EPS)
-    if isinstance(T, SymmetricTensor):
-        return SymmetricTensor.from_dense(data_normed, T.indices, tol=float("inf"))
-    return type(T)(data_normed, T.indices)
+    norm = T.max_abs()
+    return T * (1.0 / (norm + EPS))
 
 
 def _renormalize_tensor_env(env: CTMTensorEnv) -> CTMTensorEnv:

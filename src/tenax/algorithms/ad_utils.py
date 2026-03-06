@@ -576,7 +576,205 @@ ctm_converge_2site.defvjp(_ctm_converge_2site_fwd, _ctm_converge_2site_bwd)
 
 
 # ---------------------------------------------------------------------------
-# 5. Split CTM (Tensor protocol) fixed-point implicit differentiation
+# 5. Standard CTM (Tensor protocol) fixed-point implicit differentiation
+# ---------------------------------------------------------------------------
+
+
+def _gauge_fix_ctm_tensor(env):
+    """Fix gauge of CTMTensorEnv via QR decomposition of corners.
+
+    Converts to dense arrays, applies the standard QR gauge fix,
+    then wraps results back into Tensor objects.  All operations
+    (``todense()``, dense QR/einsum, ``from_dense()``) are differentiable.
+    """
+    from tenax.algorithms._ctm_tensor import CTMTensorEnv
+    from tenax.algorithms.ipeps import CTMEnvironment
+    from tenax.core.tensor import SymmetricTensor
+
+    # todense() is differentiable (jnp scatter)
+    C1, C2, C3, C4 = (c.todense() for c in (env.C1, env.C2, env.C3, env.C4))
+    T1, T2, T3, T4 = (t.todense() for t in (env.T1, env.T2, env.T3, env.T4))
+
+    # Standard QR gauge fix on dense arrays
+    dense_env = CTMEnvironment(C1, C2, C3, C4, T1, T2, T3, T4)
+    fixed = _gauge_fix_ctm(dense_env)
+
+    # Wrap back into Tensor objects preserving original index structure
+    def _wrap(data, original):
+        if isinstance(original, SymmetricTensor):
+            return SymmetricTensor.from_dense(data, original.indices, tol=float("inf"))
+        return type(original)(data, original.indices)
+
+    return CTMTensorEnv(
+        C1=_wrap(fixed.C1, env.C1),
+        C2=_wrap(fixed.C2, env.C2),
+        C3=_wrap(fixed.C3, env.C3),
+        C4=_wrap(fixed.C4, env.C4),
+        T1=_wrap(fixed.T1, env.T1),
+        T2=_wrap(fixed.T2, env.T2),
+        T3=_wrap(fixed.T3, env.T3),
+        T4=_wrap(fixed.T4, env.T4),
+    )
+
+
+def _ctm_tensor_step(
+    A_leaves: tuple[jax.Array, ...],
+    env_leaves: tuple[jax.Array, ...],
+    chi: int,
+    renormalize: bool,
+    projector_method: str,
+    A_treedef,
+    env_treedef,
+) -> tuple[jax.Array, ...]:
+    """One CTM tensor sweep + gauge fix, mapping flat leaves to flat leaves.
+
+    Reconstructs Tensor objects from pytree leaves, runs one sweep
+    (``_ctm_tensor_sweep``), applies gauge fix, and returns flattened env.
+    """
+    from tenax.algorithms._ctm_tensor import (
+        _build_double_layer_tensor,
+        _ctm_tensor_sweep,
+    )
+
+    A = jax.tree.unflatten(A_treedef, A_leaves)
+    env = jax.tree.unflatten(env_treedef, list(env_leaves))
+
+    a = _build_double_layer_tensor(A)
+    env_new = _ctm_tensor_sweep(env, a, chi, renormalize, projector_method)
+    env_new = _gauge_fix_ctm_tensor(env_new)
+
+    return tuple(jax.tree.leaves(env_new))
+
+
+def _ctm_tensor_fixed_point_impl(A, config):
+    """Run standard Tensor-protocol CTM to convergence with gauge fixing.
+
+    Args:
+        A:      iPEPS site tensor (DenseTensor or SymmetricTensor).
+        config: CTMConfig.
+
+    Returns:
+        Converged CTMTensorEnv.
+    """
+    from tenax.algorithms._ctm_tensor import (
+        _build_double_layer_tensor,
+        _ctm_sv_diff,
+        _ctm_tensor_sweep,
+        initialize_ctm_tensor_env,
+    )
+
+    a = _build_double_layer_tensor(A)
+    env = initialize_ctm_tensor_env(A, config.chi)
+
+    prev_sv = None
+    for _ in range(config.max_iter):
+        env = _ctm_tensor_sweep(
+            env, a, config.chi, config.renormalize, config.projector_method
+        )
+        env = _gauge_fix_ctm_tensor(env)
+
+        current_sv = jnp.linalg.svd(env.C1.todense(), compute_uv=False)
+        if prev_sv is not None:
+            diff = _ctm_sv_diff(current_sv, prev_sv)
+            if float(diff) < config.conv_tol:
+                break
+        prev_sv = current_sv
+
+    return env
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(1,))
+def ctm_tensor_converge(
+    A,
+    config_tuple: tuple,
+) -> tuple[jax.Array, ...]:
+    """Standard Tensor-protocol CTM with implicit differentiation.
+
+    Wraps the Tensor-protocol CTM iteration as a differentiable function
+    ``A -> env_leaves`` with implicit fixed-point backward pass.
+
+    Args:
+        A:            iPEPS site tensor (DenseTensor or SymmetricTensor).
+        config_tuple: CTMConfig fields packed as tuple for JAX tracing.
+                      ``(chi, max_iter, conv_tol, renormalize[, projector_method_int])``.
+
+    Returns:
+        Flat tuple of environment pytree leaf arrays.
+    """
+    config = _config_from_tuple(config_tuple)
+    env = _ctm_tensor_fixed_point_impl(A, config)
+    return tuple(jax.tree.leaves(env))
+
+
+def _ctm_tensor_converge_fwd(A, config_tuple):
+    """Forward pass — run Tensor CTM, cache A and env for backward.
+
+    Stores full pytree objects (A, env) as residuals so the backward
+    pass can reconstruct treedefs for unflatten.
+    """
+    config = _config_from_tuple(config_tuple)
+    env = _ctm_tensor_fixed_point_impl(A, config)
+    env_leaves = tuple(jax.tree.leaves(env))
+    # A and env are pytrees of jax.Array; JAX handles pytree residuals natively
+    residuals = (A, env)
+    return env_leaves, residuals
+
+
+def _ctm_tensor_converge_bwd(config_tuple, residuals, g):
+    """Backward pass via implicit differentiation of Tensor CTM fixed point.
+
+    Solves ``(I - J^T) lambda = g`` using GMRES (Francuz et al. PRR 7,
+    013237), where J = d(ctm_step)/d(env) is the Jacobian of one CTM
+    sweep + gauge fix.  Then ``dA = d(step)/dA^T @ lambda``.
+    """
+    A, env = residuals
+    config = _config_from_tuple(config_tuple)
+
+    A_treedef = jax.tree.structure(A)
+    env_treedef = jax.tree.structure(env)
+    env_leaves = tuple(jax.tree.leaves(env))
+
+    def step_fn(A_in, env_in_leaves):
+        """One CTM step mapping (A_pytree, env_leaves) -> env_leaves."""
+        return _ctm_tensor_step(
+            tuple(jax.tree.leaves(A_in)),
+            env_in_leaves,
+            config.chi,
+            config.renormalize,
+            config.projector_method,
+            A_treedef,
+            env_treedef,
+        )
+
+    # Solve (I - J_env^T) lambda = g via GMRES
+    from jax.scipy.sparse.linalg import gmres as jax_gmres
+
+    def apply_I_minus_Jt(v):
+        _, vjp_fn = jax.vjp(lambda e: step_fn(A, e), env_leaves)
+        Jt_v = vjp_fn(v)[0]
+        return tuple(vi - ji for vi, ji in zip(v, Jt_v))
+
+    max_fp_iter = min(config.max_iter, 50)
+    lam, info = jax_gmres(
+        apply_I_minus_Jt,
+        g,
+        x0=g,
+        tol=config.conv_tol,
+        maxiter=max_fp_iter,
+    )
+
+    # dA = d(step)/dA^T @ lambda
+    _, vjp_A_fn = jax.vjp(lambda a: step_fn(a, env_leaves), A)
+    dA = vjp_A_fn(lam)[0]
+
+    return (dA,)
+
+
+ctm_tensor_converge.defvjp(_ctm_tensor_converge_fwd, _ctm_tensor_converge_bwd)
+
+
+# ---------------------------------------------------------------------------
+# 6. Split CTM (Tensor protocol) fixed-point implicit differentiation
 # ---------------------------------------------------------------------------
 
 

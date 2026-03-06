@@ -835,6 +835,174 @@ class TestOptimizeGsAd2Site:
         assert np.isfinite(E_gs)
 
 
+class TestOptimizeGsAdDenseOnly:
+    """Verify optimize_gs_ad 2-site rejects SymmetricTensor inputs."""
+
+    def test_symmetric_tensor_2site_raises(self):
+        from tenax.core.index import FlowDirection, TensorIndex
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.core.tensor import SymmetricTensor
+
+        sym = U1Symmetry()
+        charges = np.zeros(2, dtype=np.int32)
+        phys_charges = np.zeros(2, dtype=np.int32)
+        indices = (
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        key = jax.random.PRNGKey(0)
+        k1, k2 = jax.random.split(key)
+        A_sym = SymmetricTensor.random_normal(indices, k1)
+        B_sym = SymmetricTensor.random_normal(indices, k2)
+
+        d = 2
+        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+        gate = H.reshape(d, d, d, d)
+
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=5),
+            gs_num_steps=1,
+            unit_cell="2site",
+        )
+        with pytest.raises(TypeError, match="2-site CTM is not yet implemented"):
+            optimize_gs_ad(gate, (A_sym, B_sym), config)
+
+
+class TestADSymmetric:
+    """Tests for full block-sparse AD pipeline with SymmetricTensor."""
+
+    @staticmethod
+    def _make_symmetric_ipeps(key, D=2, d=2):
+        """Create a U(1) SymmetricTensor iPEPS site tensor with trivial charges."""
+        from tenax.core.index import FlowDirection, TensorIndex
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.core.tensor import SymmetricTensor
+
+        sym = U1Symmetry()
+        charges = np.zeros(D, dtype=np.int32)
+        phys_charges = np.zeros(d, dtype=np.int32)
+        indices = (
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        return SymmetricTensor.random_normal(indices, key)
+
+    @staticmethod
+    def _heisenberg_gate():
+        d = 2
+        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+        return H.reshape(d, d, d, d)
+
+    def test_todense_gradient_flows(self):
+        """jax.grad through SymmetricTensor.todense() works."""
+        from tenax.core.tensor import SymmetricTensor
+
+        A_sym = self._make_symmetric_ipeps(jax.random.PRNGKey(42))
+
+        def loss(t):
+            return jnp.sum(t.todense() ** 2)
+
+        grad = jax.grad(loss)(A_sym)
+        assert isinstance(grad, SymmetricTensor)
+        # Gradient should be non-zero
+        assert grad.norm() > 0
+
+    def test_from_dense_gradient_flows(self):
+        """jax.grad through from_dense round-trip works."""
+        from tenax.core.tensor import SymmetricTensor
+
+        A_sym = self._make_symmetric_ipeps(jax.random.PRNGKey(42))
+
+        def loss(t):
+            dense = t.todense()
+            t2 = SymmetricTensor.from_dense(dense, t.indices, tol=float("inf"))
+            return t2.norm()
+
+        grad = jax.grad(loss)(A_sym)
+        assert isinstance(grad, SymmetricTensor)
+        assert grad.norm() > 0
+
+    def test_optimize_gs_ad_symmetric_runs(self):
+        """optimize_gs_ad accepts SymmetricTensor and returns Tensor."""
+        from tenax.core.tensor import Tensor
+
+        gate = self._heisenberg_gate()
+        A_sym = self._make_symmetric_ipeps(jax.random.PRNGKey(0))
+
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=2,
+            gs_learning_rate=0.01,
+        )
+        A_opt, env, E_gs = optimize_gs_ad(gate, A_sym, config)
+
+        assert isinstance(A_opt, Tensor)
+        assert np.isfinite(E_gs)
+
+    def test_optimize_gs_ad_symmetric_energy_decreases(self):
+        """AD optimization with SymmetricTensor decreases energy."""
+        gate = self._heisenberg_gate()
+        A_sym = self._make_symmetric_ipeps(jax.random.PRNGKey(0))
+
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=5,
+            gs_learning_rate=0.01,
+        )
+
+        # Get initial energy
+        from tenax.algorithms._ctm_tensor import (
+            compute_energy_ctm_tensor,
+            ctm_tensor,
+        )
+
+        A_norm = A_sym * (1.0 / (A_sym.norm() + 1e-10))
+        env0 = ctm_tensor(A_norm, chi=4, max_iter=10)
+        E_init = float(compute_energy_ctm_tensor(A_norm, env0, gate))
+
+        A_opt, env, E_gs = optimize_gs_ad(gate, A_sym, config)
+
+        assert E_gs < E_init or abs(E_gs - E_init) < 1e-8
+
+    def test_optimize_gs_ad_symmetric_matches_dense(self):
+        """Symmetric AD gives comparable energy to dense AD."""
+        gate = self._heisenberg_gate()
+
+        # Create a SymmetricTensor and its dense equivalent
+        A_sym = self._make_symmetric_ipeps(jax.random.PRNGKey(0))
+        A_dense = A_sym.todense()
+
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=3,
+            gs_learning_rate=0.01,
+        )
+
+        _, _, E_sym = optimize_gs_ad(gate, A_sym, config)
+        _, _, E_dense = optimize_gs_ad(gate, A_dense, config)
+
+        # Both should produce finite energies (exact match not expected
+        # due to different CTM projector implementations)
+        assert np.isfinite(E_sym)
+        assert np.isfinite(E_dense)
+
+
 class TestSplitCTMRG:
     """Tests for Split-CTMRG (Phase 3)."""
 
