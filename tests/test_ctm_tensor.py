@@ -40,9 +40,9 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor
 @pytest.fixture
 def small_peps_dense():
     """Random DenseTensor iPEPS site tensor, D=2, d=2."""
-    key = jax.random.PRNGKey(42)
     D, d = 2, 2
-    data = jax.random.normal(key, (D, D, D, D, d))
+    rng = np.random.RandomState(42)
+    data = jnp.array(rng.standard_normal((D, D, D, D, d)))
     data = data / (jnp.linalg.norm(data) + 1e-10)
     sym = U1Symmetry()
     charges = np.zeros(D, dtype=np.int32)
@@ -60,7 +60,6 @@ def small_peps_dense():
 @pytest.fixture
 def small_peps_symmetric():
     """Random SymmetricTensor iPEPS with trivial U(1) charges."""
-    key = jax.random.PRNGKey(99)
     D, d = 2, 2
     sym = U1Symmetry()
     charges = np.zeros(D, dtype=np.int32)
@@ -72,7 +71,8 @@ def small_peps_symmetric():
         TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
         TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
     )
-    data = jax.random.normal(key, (D, D, D, D, d))
+    rng = np.random.RandomState(99)
+    data = jnp.array(rng.standard_normal((D, D, D, D, d)))
     return SymmetricTensor.from_dense(data, indices)
 
 
@@ -345,8 +345,8 @@ def small_peps_pair_dense():
     phys_charges = np.zeros(d, dtype=np.int32)
 
     def _make(seed):
-        key = jax.random.PRNGKey(seed)
-        data = jax.random.normal(key, (D, D, D, D, d))
+        rng = np.random.RandomState(seed)
+        data = jnp.array(rng.standard_normal((D, D, D, D, d)))
         data = data / (jnp.linalg.norm(data) + 1e-10)
         indices = (
             TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
@@ -369,8 +369,8 @@ def small_peps_pair_symmetric():
     phys_charges = np.zeros(d, dtype=np.int32)
 
     def _make(seed):
-        key = jax.random.PRNGKey(seed)
-        data = jax.random.normal(key, (D, D, D, D, d))
+        rng = np.random.RandomState(seed)
+        data = jnp.array(rng.standard_normal((D, D, D, D, d)))
         indices = (
             TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
             TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
