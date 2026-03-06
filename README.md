@@ -22,7 +22,7 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **Split-CTMRG** — ket/bra-separated CTM environment tensors for O(χ³D³) projector cost instead of O(χ³D⁶); works with both `DenseTensor` and `SymmetricTensor` via the Tensor protocol (Naumann et al., arXiv:2502.10298)
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary Brillouin-zone momenta (Ponsioen et al. 2022)
 - **Polymorphic tensor arithmetic** — `+`, `-`, `*`, `-T`, `max_abs`, `inner()`, `conj()`, `dagger()`, `bar()` work identically on `DenseTensor` and `SymmetricTensor`, enabling algorithm code that is agnostic to the underlying storage
-- **Block-sparse SVD and QR** — native symmetry-aware decompositions for `SymmetricTensor`
+- **Block-sparse SVD, QR, and eigh** — native symmetry-aware decompositions in `tenax.linalg` for `SymmetricTensor`
 - **Extensible symmetry system** — non-Abelian symmetry interface for future SU(2) support
 - **Benchmark suite** — CLI-driven performance benchmarks for all algorithms across CPU, CUDA, TPU, and Metal backends
 

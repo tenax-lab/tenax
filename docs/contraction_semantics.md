@@ -84,13 +84,13 @@ strings receive independent cache entries.
 
 ---
 
-## `truncated_svd(tensor, left_labels, right_labels, ...)`
+## `svd(tensor, left_labels, right_labels, ...)`
 
 SVD splits a tensor into `U, S, Vh, S_full` with an optional truncation of
 singular values:
 
 ```python
-U, S, Vh, S_full = truncated_svd(
+U, S, Vh, S_full = svd(
     theta,
     left_labels=["v0_1", "p0"],
     right_labels=["p1", "v1_2"],
@@ -110,12 +110,27 @@ U, S, Vh, S_full = truncated_svd(
 contains all singular values before truncation, useful for computing truncation
 error without a second SVD.
 
+> The legacy name `truncated_svd` is still available for backward compatibility.
+
 ---
 
-## `qr_decompose(tensor, left_labels, right_labels, new_bond_label)`
+## `qr(tensor, left_labels, right_labels, new_bond_label)`
 
 Thin QR decomposition. The orthogonality column of `Q` corresponds to
 `left_labels`; `R` carries `right_labels`. Used in MPS right-canonicalization.
+
+> The legacy name `qr_decompose` is still available for backward compatibility.
+
+---
+
+## `eigh(tensor, left_labels, right_labels, ...)`
+
+Hermitian eigendecomposition. Reshapes the tensor into a square matrix
+(left_labels vs right_labels), computes `jnp.linalg.eigh`, and returns
+eigenvectors as a Tensor with labels `(left_labels..., new_bond_label)`.
+
+Eigenvalues are sorted in descending order. `max_eigenvalues` keeps only
+the top-k. Dispatches to a block-sparse path for `SymmetricTensor`.
 
 ---
 

@@ -1,4 +1,4 @@
-# Contraction, SVD, and QR
+# Contraction and Decompositions
 
 The contraction engine translates label-based tensor operations into optimised
 einsum calls executed by JAX.
@@ -45,16 +45,19 @@ C = contract(A, B, optimize="greedy")     # faster for large networks
 C = contract(A, B, optimize="optimal")    # brute-force optimal
 ```
 
-## Truncated SVD
+Decompositions live in `tenax.linalg` and are re-exported from top-level
+`tenax`.
 
-`truncated_svd` decomposes a tensor into U, s, V^dagger with truncation:
+## SVD
+
+`svd` decomposes a tensor into U, s, V^dagger with truncation:
 
 ```python
-from tenax import truncated_svd
+from tenax import svd
 
 # Split tensor T with legs ("left", "phys", "right") along the cut
 # left_labels vs right_labels
-U, s, Vh, s_full = truncated_svd(
+U, s, Vh, s_full = svd(
     T,
     left_labels=["left", "phys"],
     right_labels=["right"],
@@ -76,15 +79,18 @@ Parameters controlling truncation:
 Both dense and symmetric tensors are supported. For `SymmetricTensor`,
 the SVD is performed block-by-block within each charge sector.
 
+> The legacy name `truncated_svd` is still available for backward
+> compatibility.
+
 ## QR decomposition
 
-`qr_decompose` splits a tensor into an orthogonal factor Q and an upper-
+`qr` splits a tensor into an orthogonal factor Q and an upper-
 triangular factor R:
 
 ```python
-from tenax import qr_decompose
+from tenax import qr
 
-Q, R = qr_decompose(
+Q, R = qr(
     T,
     left_labels=["left", "phys"],
     right_labels=["right"],
@@ -96,6 +102,31 @@ Q, R = qr_decompose(
 
 QR is cheaper than SVD and is useful for canonicalising MPS tensors
 during DMRG sweeps.
+
+> The legacy name `qr_decompose` is still available for backward
+> compatibility.
+
+## Eigendecomposition (eigh)
+
+`eigh` eigendecomposes a Hermitian tensor, returning eigenvectors and
+eigenvalues sorted in descending order:
+
+```python
+from tenax import eigh
+
+V, eigenvalues = eigh(
+    T,
+    left_labels=["left", "phys"],
+    right_labels=["right"],
+    new_bond_label="bond",
+    max_eigenvalues=16,
+)
+# V has legs ("left", "phys", "bond")
+# eigenvalues is a 1D JAX array (descending order)
+```
+
+Like SVD and QR, `eigh` dispatches to a block-sparse path for
+`SymmetricTensor`.
 
 ## Lower-level API
 
