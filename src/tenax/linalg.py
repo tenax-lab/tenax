@@ -236,25 +236,17 @@ def _truncated_svd_symmetric(
 
     # Count per-sector keep
     kept = all_sv_pairs[:n_keep]
-    sector_keep_count: dict[int, int] = {}
-    for _, q, _ in kept:
-        sector_keep_count[q] = sector_keep_count.get(q, 0) + 1
 
-    # Build the bond index charges: one entry per kept singular value,
-    # charge = q for the sector it belongs to.
-    # We need to order them: iterate sectors in sorted order.
-    bond_charges_list: list[int] = []
-    # Collect the final singular values in the same order
-    final_sv_list: list[float] = []
+    # Build bond charges and singular values in global descending order
+    # so that s_final[k] pairs with U[:,k] and Vh[k,:].
+    bond_charges = np.array([q for _, q, _ in kept], dtype=np.int32)
+    s_final = jnp.array([v for v, _, _ in kept])
 
-    for q in sorted(sector_keep_count.keys()):
-        n_q = sector_keep_count[q]
-        bond_charges_list.extend([q] * n_q)
-        s_q_np = np.array(sector_results[q][1])
-        final_sv_list.extend(s_q_np[:n_q].tolist())
-
-    bond_charges = np.array(bond_charges_list, dtype=np.int32)
-    s_final = jnp.array(final_sv_list)
+    # Per-sector: map each kept singular value to its global position
+    # sector_cols[q] = list of (global_col, index_in_sector)
+    sector_cols: dict[int, list[tuple[int, int]]] = {}
+    for global_col, (_, q, idx_in_sector) in enumerate(kept):
+        sector_cols.setdefault(q, []).append((global_col, idx_in_sector))
 
     if normalize and jnp.sum(s_final) > 0:
         s_final = s_final / jnp.sum(s_final)
@@ -276,15 +268,16 @@ def _truncated_svd_symmetric(
     U_blocks: dict[BlockKey, jax.Array] = {}
     Vh_blocks: dict[BlockKey, jax.Array] = {}
 
-    for q in sorted(sector_keep_count.keys()):
+    for q, cols in sector_cols.items():
         U_q, _, Vh_q, left_subkeys, right_subkeys, left_row_sizes, right_col_sizes = (
             sector_results[q]
         )
-        n_q = sector_keep_count[q]
+        sv_indices = [idx for _, idx in cols]
+        n_q = len(cols)
 
-        # Slice U_q and Vh_q to keep only n_q singular vectors
-        U_q_trunc = U_q[:, :n_q]
-        Vh_q_trunc = Vh_q[:n_q, :]
+        # Select kept singular vectors in their global order
+        U_q_trunc = U_q[:, sv_indices]
+        Vh_q_trunc = Vh_q[sv_indices, :]
 
         # Split U_q rows back into individual left_subkey blocks
         row_offset = 0
@@ -621,17 +614,9 @@ def _eigh_symmetric(
     # Eigenvalues in descending order
     eigenvalues = jnp.array([v for v, _, _ in kept])
 
-    # Per-sector keep count and which indices to keep
-    sector_keep: dict[int, list[int]] = {}
-    for _, q, idx_in_sector in kept:
-        sector_keep.setdefault(q, []).append(idx_in_sector)
-
-    # Build bond index charges
-    bond_charges_list: list[int] = []
-    for q in sorted(sector_keep.keys()):
-        bond_charges_list.extend([q] * len(sector_keep[q]))
-
-    bond_charges = np.array(bond_charges_list, dtype=np.int32)
+    # Build bond charges in global descending eigenvalue order (matching
+    # the eigenvalues array) so that V[:,k] pairs with eigenvalues[k].
+    bond_charges = np.array([q for _, q, _ in kept], dtype=np.int32)
     sym = tensor.indices[0].symmetry
 
     bond_index_out = TensorIndex(
@@ -639,15 +624,23 @@ def _eigh_symmetric(
     )
 
     V_indices = left_indices + (bond_index_out,)
+
+    # Per-sector: collect which eigenvector columns to keep and their
+    # position in the global output bond dimension.
+    # sector_cols[q] = list of (global_col, eigvec_index_in_sector)
+    sector_cols: dict[int, list[tuple[int, int]]] = {}
+    for global_col, (_, q, idx_in_sector) in enumerate(kept):
+        sector_cols.setdefault(q, []).append((global_col, idx_in_sector))
+
     V_blocks: dict[BlockKey, jax.Array] = {}
 
-    for q in sorted(sector_keep.keys()):
+    for q, cols in sector_cols.items():
         eigvecs_q, _, left_subkeys, left_row_sizes = sector_results[q]
-        keep_indices = sorted(sector_keep[q])
-        n_q = len(keep_indices)
+        eigvec_indices = [idx for _, idx in cols]
+        n_q = len(cols)
 
-        # Select kept eigenvectors
-        V_q = eigvecs_q[:, keep_indices]
+        # Select kept eigenvectors in their global order
+        V_q = eigvecs_q[:, eigvec_indices]
 
         # Split rows back into left_subkey blocks
         row_offset = 0

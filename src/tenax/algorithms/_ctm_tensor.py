@@ -219,7 +219,10 @@ def _compute_projector_tensor(
     # JAX tracers (during AD), in which case fall back to dense path
     # since eigenvalue sorting requires concrete values.
     if isinstance(C1g, SymmetricTensor) and isinstance(C4g, SymmetricTensor):
-        has_tracers = any(isinstance(b, jax.core.Tracer) for b in C1g.blocks.values())
+        has_tracers = any(
+            isinstance(b, jax.core.Tracer)
+            for b in (*C1g.blocks.values(), *C4g.blocks.values())
+        )
         if not has_tracers and C1g.blocks and C4g.blocks:
             return _eigh_projector_symmetric(C1g, C4g, chi)
 
