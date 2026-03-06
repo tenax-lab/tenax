@@ -11,7 +11,9 @@ from tenax.algorithms._ctm_tensor import (
     CTMTensorEnv,
     _build_double_layer_open_tensor,
     _build_double_layer_tensor,
+    _compute_projector_tensor,
     _ctm_tensor_sweep,
+    _fuse_pair_by_label,
     compute_energy_ctm_tensor,
     compute_energy_ctm_tensor_2site,
     ctm_tensor,
@@ -452,3 +454,48 @@ class TestTwoSiteCTM:
         )
 
         np.testing.assert_allclose(E_sym, E_dense, atol=1e-4)
+
+
+# ------------------------------------------------------------------ #
+# Projector tests                                                      #
+# ------------------------------------------------------------------ #
+
+
+class TestProjectorSymmetric:
+    def test_projector_symmetric_matches_dense(self, small_peps_symmetric):
+        """Block-sparse projector matches dense projector output."""
+        from tenax.contraction.contractor import contract
+
+        A = small_peps_symmetric
+        chi = 4
+
+        _build_double_layer_tensor(A)  # ensure it doesn't error
+        env = initialize_ctm_tensor_env(A, chi)
+
+        # Build grown corners like a left move
+        C1_r = env.C1.relabel("c1_r", "t1_l")
+        C1g = contract(C1_r, env.T1)
+        C1g = _fuse_pair_by_label(C1g, "c1_d", "u2", "fused", FlowDirection.IN)
+
+        C4_u = env.C4.relabel("c4_u", "t3_r")
+        C4g = contract(C4_u, env.T3)
+        C4g = _fuse_pair_by_label(C4g, "c4_r", "d2", "fused", FlowDirection.IN)
+
+        # Compute projector via symmetric path
+        P_sym = _compute_projector_tensor(C1g, C4g, chi)
+
+        # Dense reference
+        C1g_d = C1g.todense()
+        C4g_d = C4g.todense()
+        rho = C1g_d @ C1g_d.conj().T + C4g_d @ C4g_d.conj().T
+        rho = 0.5 * (rho + rho.conj().T)
+        eigvals, eigvecs = jnp.linalg.eigh(rho)
+        k = min(chi, len(eigvals))
+        P_ref = eigvecs[:, -k:][:, ::-1]
+
+        # The projector subspaces should match (up to sign/phase per column)
+        P_sym_d = P_sym.todense()
+        # Compare via P P^T (projection matrix)
+        proj_sym = P_sym_d @ P_sym_d.T
+        proj_ref = P_ref @ P_ref.T
+        np.testing.assert_allclose(proj_sym, proj_ref, atol=1e-10)
