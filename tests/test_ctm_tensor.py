@@ -514,6 +514,67 @@ class TestTwoSiteCTM:
 # ------------------------------------------------------------------ #
 
 
+class TestQRProjectorMethod:
+    def test_ctm_tensor_qr_converges(self, small_peps_dense):
+        """CTM with projector_method='qr' converges to finite env."""
+        env = ctm_tensor(
+            small_peps_dense,
+            chi=4,
+            max_iter=20,
+            conv_tol=1e-6,
+            projector_method="qr",
+            qr_warmup_steps=3,
+        )
+        for field in env:
+            assert jnp.all(jnp.isfinite(field.todense()))
+
+    def test_ctm_tensor_qr_energy_close_to_eigh(
+        self, small_peps_dense, heisenberg_gate
+    ):
+        """QR and eigh projector methods produce similar energies.
+
+        With random (non-optimized) iPEPS tensors, the two projector
+        methods converge to slightly different environments, so we use a
+        generous tolerance.  The key check is that QR gives a finite,
+        reasonable energy — not exact agreement.
+        """
+        chi = 6
+        env_eigh = ctm_tensor(
+            small_peps_dense,
+            chi=chi,
+            max_iter=40,
+            conv_tol=1e-8,
+            projector_method="eigh",
+        )
+        E_eigh = float(
+            compute_energy_ctm_tensor(small_peps_dense, env_eigh, heisenberg_gate, d=2)
+        )
+
+        env_qr = ctm_tensor(
+            small_peps_dense,
+            chi=chi,
+            max_iter=40,
+            conv_tol=1e-8,
+            projector_method="qr",
+            qr_warmup_steps=3,
+        )
+        E_qr = float(
+            compute_energy_ctm_tensor(small_peps_dense, env_qr, heisenberg_gate, d=2)
+        )
+
+        np.testing.assert_allclose(E_qr, E_eigh, rtol=0.1)
+
+    def test_invalid_projector_method_raises(self, small_peps_dense):
+        """Unknown projector_method raises ValueError."""
+        with pytest.raises(ValueError, match="Unknown projector_method"):
+            ctm_tensor(
+                small_peps_dense,
+                chi=4,
+                max_iter=1,
+                projector_method="invalid",
+            )
+
+
 class TestProjectorSymmetric:
     def test_projector_symmetric_matches_dense(self, small_peps_symmetric):
         """Block-sparse projector matches dense projector output."""
