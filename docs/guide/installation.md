@@ -5,54 +5,52 @@
 - Python 3.11 or 3.12
 - A working JAX installation (CPU or GPU)
 
-## Install with pip
+## Install from source
+
+> **Note:** The PyPI package (`tenax-tn`) is not yet available. Install from source using the instructions below.
+
+### With uv (recommended)
 
 ```bash
-pip install tenax-tn
+git clone https://github.com/tenax-lab/tenax.git
+cd tenax
+uv sync --all-extras --dev
 ```
 
-## Install with uv (recommended for development)
+### With pip
 
 ```bash
-# Clone the repository
 git clone https://github.com/tenax-lab/tenax.git
-cd Tenax
-
-# Install in development mode with all extras
-uv sync --all-extras --dev
+cd tenax
+pip install -e ".[dev]"
 ```
 
 ## Hardware acceleration
 
-Tenax uses JAX as its backend. Install with a hardware-specific extra to
-enable GPU or TPU acceleration:
+Tenax uses JAX as its backend. To enable GPU or TPU acceleration,
+install the appropriate JAX variant **before** installing Tenax:
 
 ```bash
 # NVIDIA GPU (CUDA 13, recommended)
-pip install tenax-tn[cuda13]
+pip install -U "jax[cuda13]"
 
 # NVIDIA GPU (CUDA 12)
-pip install tenax-tn[cuda12]
+pip install -U "jax[cuda12]"
 
 # NVIDIA GPU with locally installed CUDA
-pip install tenax-tn[cuda12-local]
-pip install tenax-tn[cuda13-local]
+pip install -U "jax[cuda12-local]"
+pip install -U "jax[cuda13-local]"
 
 # Google Cloud TPU
-pip install tenax-tn[tpu]
+pip install -U "jax[tpu]"
 
 # Apple Silicon GPU (macOS only, experimental)
-pip install tenax-tn[metal]
+pip install jax-metal
 ```
 
 For AMD ROCm GPUs, install JAX with ROCm support separately following
 [AMD's installation guide](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/install/3rd-party/jax-install.html),
-then install Tenax on top:
-
-```bash
-# After installing jax+jaxlib with ROCm
-pip install tenax-tn
-```
+then install Tenax on top.
 
 See the [JAX installation guide](https://docs.jax.dev/en/latest/installation.html) for the latest accelerator options.
 
