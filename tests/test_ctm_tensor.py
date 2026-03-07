@@ -249,9 +249,12 @@ class TestConvergence:
         chi = 6
         A_raw = small_peps_dense.todense()
 
-        # Legacy dense CTM
+        # Legacy dense CTM — run eagerly to match tensor-protocol's Python loop
+        # (jax.lax.while_loop under JIT can produce different floating-point
+        # rounding than eager execution, causing divergent CTM trajectories)
         cfg = CTMConfig(chi=chi, max_iter=50, conv_tol=1e-8)
-        env_legacy = ctm(A_raw, cfg)
+        with jax.disable_jit():
+            env_legacy = ctm(A_raw, cfg)
         E_legacy = float(compute_energy_ctm(A_raw, env_legacy, heisenberg_gate, d=2))
 
         # Tensor-protocol CTM
@@ -399,9 +402,10 @@ class TestTwoSiteCTM:
         chi = 6
         A_raw, B_raw = A.todense(), B.todense()
 
-        # Legacy dense CTM
+        # Legacy dense CTM — run eagerly to match tensor-protocol's Python loop
         cfg = CTMConfig(chi=chi, max_iter=50, conv_tol=1e-8)
-        env_A_leg, env_B_leg = ctm_2site(A_raw, B_raw, cfg)
+        with jax.disable_jit():
+            env_A_leg, env_B_leg = ctm_2site(A_raw, B_raw, cfg)
         E_legacy = float(
             compute_energy_ctm_2site(
                 A_raw, B_raw, env_A_leg, env_B_leg, heisenberg_gate, d=2
