@@ -196,25 +196,70 @@ def _compute_projector_tensor(
     C1g: Tensor,
     C4g: Tensor,
     chi: int,
+    projector_method: str = "eigh",
 ) -> Tensor:
-    r"""Compute isometric projector P as a Tensor via eigh of the density matrix.
+    r"""Compute isometric projector P as a Tensor.
 
-    Forms :math:`\rho = C_{1g} C_{1g}^\dagger + C_{4g} C_{4g}^\dagger`,
-    eigendecomposes, then wraps the top-k eigenvectors as a Tensor with
-    indices matching C1g's ``fused`` leg.
+    When ``projector_method == "eigh"``, forms the full density matrix
+    :math:`\rho = C_{1g} C_{1g}^\dagger + C_{4g} C_{4g}^\dagger`,
+    eigendecomposes, then wraps the top-k eigenvectors as a Tensor.
 
-    For SymmetricTensor inputs, uses block-sparse eigh (per charge sector)
-    to avoid dense round-trip.
+    When ``projector_method == "qr"``, QR-factors the concatenated corners
+    ``[C1g, C4g]`` to reduce to a small ``(2*col, 2*col)`` eigenproblem,
+    following the approach in arXiv:2505.00494.
+
+    For SymmetricTensor inputs with ``"eigh"``, uses block-sparse eigh
+    (per charge sector) to avoid dense round-trip.
 
     Args:
         C1g: Grown corner with labels ``(fused, <col1>)``.
         C4g: Grown corner with labels ``(fused, <col2>)``.
         chi: Target bond dimension.
+        projector_method: ``"eigh"`` or ``"qr"``.
 
     Returns:
         Projector ``P`` with labels ``(fused, chi_new)``,
         flows ``(IN, OUT)``.  Wrapped in ``stop_gradient``.
+
+    Raises:
+        ValueError: If ``projector_method`` is not ``"eigh"`` or ``"qr"``.
     """
+    if projector_method not in ("eigh", "qr"):
+        raise ValueError(
+            f"Unknown projector_method={projector_method!r}; expected 'eigh' or 'qr'."
+        )
+
+    # --- QR path: densify → QR → small eigh ---
+    if projector_method == "qr":
+        C1g_dense = C1g.todense()
+        C4g_dense = C4g.todense()
+
+        M = jnp.concatenate([C1g_dense, C4g_dense], axis=1)
+        Q, R = jnp.linalg.qr(M)
+
+        rho_small = R @ R.conj().T
+        rho_small = 0.5 * (rho_small + rho_small.conj().T)
+        eigvals, eigvecs = jnp.linalg.eigh(rho_small)
+
+        k = min(chi, len(eigvals))
+        V = eigvecs[:, -k:][:, ::-1]
+        P_dense = Q @ V
+        P_dense = jax.lax.stop_gradient(P_dense)
+
+        fused_idx = C1g.indices[C1g.labels().index("fused")]
+        chi_new_idx = TensorIndex(
+            fused_idx.symmetry,
+            np.zeros(k, dtype=np.int32),
+            OUT,
+            label="chi_new",
+        )
+        if isinstance(C1g, SymmetricTensor):
+            return SymmetricTensor.from_dense(
+                P_dense, (fused_idx, chi_new_idx), tol=float("inf")
+            )
+        return DenseTensor(P_dense, (fused_idx, chi_new_idx))
+
+    # --- eigh path ---
     # Use block-sparse path for SymmetricTensor unless blocks contain
     # JAX tracers (during AD), in which case fall back to dense path
     # since eigenvalue sorting requires concrete values.
@@ -571,7 +616,7 @@ def _ctm_tensor_move_left(
     T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", OUT)
 
     # Native projector
-    P = _compute_projector_tensor(C1g, C4g, chi)
+    P = _compute_projector_tensor(C1g, C4g, chi, projector_method)
     C1_new, C4_new, T4_new = _apply_projector_tensor(P, C1g, C4g, T4g, "fl", "fr")
 
     # Relabel to expected output labels
@@ -615,7 +660,7 @@ def _ctm_tensor_move_right(
     T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", OUT)
 
     # Native projector
-    P = _compute_projector_tensor(C2g, C3g, chi)
+    P = _compute_projector_tensor(C2g, C3g, chi, projector_method)
     C2_new, C3_new, T2_new = _apply_projector_tensor(P, C2g, C3g, T2g, "fl", "fr")
 
     # Relabel to expected output labels
@@ -659,7 +704,7 @@ def _ctm_tensor_move_top(
     T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", OUT)
 
     # Native projector
-    P = _compute_projector_tensor(C1g, C2g, chi)
+    P = _compute_projector_tensor(C1g, C2g, chi, projector_method)
     C1_new, C2_new, T1_new = _apply_projector_tensor(P, C1g, C2g, T1g, "fl", "fr")
 
     # Relabel to expected output labels
@@ -703,7 +748,7 @@ def _ctm_tensor_move_bottom(
     T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", OUT)
 
     # Native projector
-    P = _compute_projector_tensor(C4g, C3g, chi)
+    P = _compute_projector_tensor(C4g, C3g, chi, projector_method)
     C4_new, C3_new, T3_new = _apply_projector_tensor(P, C4g, C3g, T3g, "fl", "fr")
 
     # Relabel to expected output labels
@@ -827,6 +872,7 @@ def ctm_tensor(
     conv_tol: float = 1e-8,
     renormalize: bool = True,
     projector_method: str = "eigh",
+    qr_warmup_steps: int = 3,
 ) -> CTMTensorEnv:
     """Run standard CTM to convergence using the Tensor protocol.
 
@@ -842,12 +888,20 @@ def ctm_tensor(
         conv_tol:          Convergence tolerance on corner singular values.
         renormalize:       Renormalize environment at each step.
         projector_method:  ``"eigh"`` or ``"qr"``.
+        qr_warmup_steps:   Number of eigh warm-up sweeps before QR kicks in.
 
     Returns:
         Converged CTMTensorEnv.
     """
     a = _build_double_layer_tensor(A)
     env = initialize_ctm_tensor_env(A, chi)
+
+    # QR warm-up: run a few eigh iterations before switching to QR
+    if projector_method == "qr" and qr_warmup_steps > 0:
+        warmup = min(qr_warmup_steps, max_iter)
+        for _ in range(warmup):
+            env = _ctm_tensor_sweep(env, a, chi, renormalize, "eigh")
+        max_iter = max_iter - warmup
 
     prev_sv = None
     for _ in range(max_iter):
@@ -871,6 +925,7 @@ def _ctm_tensor_multisite(
     conv_tol: float = 1e-8,
     renormalize: bool = True,
     projector_method: str = "eigh",
+    qr_warmup_steps: int = 3,
 ) -> dict[Coord, CTMTensorEnv]:
     """Run multisite CTM to convergence using the Tensor protocol.
 
@@ -882,12 +937,22 @@ def _ctm_tensor_multisite(
         conv_tol:     Convergence tolerance on corner singular values.
         renormalize:  Renormalize environment at each step.
         projector_method: ``"eigh"`` or ``"qr"``.
+        qr_warmup_steps:  Number of eigh warm-up sweeps before QR kicks in.
 
     Returns:
         Dict mapping coordinates to converged CTMTensorEnv.
     """
     double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
     envs = {c: initialize_ctm_tensor_env(A, chi) for c, A in site_tensors.items()}
+
+    # QR warm-up: run a few eigh iterations before switching to QR
+    if projector_method == "qr" and qr_warmup_steps > 0:
+        warmup = min(qr_warmup_steps, max_iter)
+        for _ in range(warmup):
+            envs = _ctm_tensor_sweep_multisite(
+                envs, double_layers, neighbors, chi, renormalize, "eigh"
+            )
+        max_iter = max_iter - warmup
 
     prev_svs: dict[Coord, jax.Array] = {}
     for _ in range(max_iter):
@@ -917,6 +982,7 @@ def ctm_tensor_2site(
     conv_tol: float = 1e-8,
     renormalize: bool = True,
     projector_method: str = "eigh",
+    qr_warmup_steps: int = 3,
 ) -> tuple[CTMTensorEnv, CTMTensorEnv]:
     """Run 2-site checkerboard CTM to convergence using the Tensor protocol.
 
@@ -929,6 +995,7 @@ def ctm_tensor_2site(
         conv_tol:     Convergence tolerance on corner singular values.
         renormalize:  Renormalize environment at each step.
         projector_method: ``"eigh"`` or ``"qr"``.
+        qr_warmup_steps:  Number of eigh warm-up sweeps before QR kicks in.
 
     Returns:
         ``(env_A, env_B)`` — converged CTMTensorEnv for each sublattice.
@@ -941,6 +1008,7 @@ def ctm_tensor_2site(
         conv_tol,
         renormalize,
         projector_method,
+        qr_warmup_steps,
     )
     return envs[(0, 0)], envs[(1, 0)]
 
