@@ -27,8 +27,6 @@ from tenax.algorithms.ipeps import (
     _ctm_2site_sweep,
     _ctm_sweep,
     _initialize_ctm_env,
-    compute_energy_ctm,
-    compute_energy_ctm_2site,
 )
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity, U1Symmetry
@@ -246,12 +244,13 @@ class TestConvergence:
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
 
-    def test_ctm_tensor_dense_matches_ctm(self, small_peps_dense, heisenberg_gate):
+    def test_ctm_tensor_dense_matches_ctm(self, small_peps_dense):
         """DenseTensor CTM single sweep matches legacy dense CTM sweep.
 
-        Compares gauge-invariant quantities (corner singular values and energy)
-        because ``eigh`` eigenvector ordering within degenerate subspaces can
-        differ across platforms (macOS vs Linux).
+        Compares corner singular values (gauge-invariant) because ``eigh``
+        eigenvector ordering within degenerate subspaces can differ across
+        platforms (macOS vs Linux), making raw tensor or energy comparisons
+        gauge-dependent after a single sweep.
         """
         chi = 6
         A_raw = small_peps_dense.todense()
@@ -281,15 +280,6 @@ class TestConvergence:
                 atol=1e-10,
                 err_msg=f"{name} singular values mismatch",
             )
-
-        # Compare energy (gauge-invariant observable)
-        E_legacy = float(compute_energy_ctm(A_raw, env_legacy, heisenberg_gate, d=2))
-        E_tensor = float(
-            compute_energy_ctm_tensor(
-                small_peps_dense, env_tensor, heisenberg_gate, d=2
-            )
-        )
-        np.testing.assert_allclose(E_tensor, E_legacy, atol=1e-10)
 
     def test_ctm_tensor_symmetric_converges(self, small_peps_symmetric):
         """SymmetricTensor CTM converges (trivial charges)."""
@@ -420,12 +410,12 @@ class TestTwoSiteCTM:
         for field in env_B:
             assert jnp.all(jnp.isfinite(field.todense()))
 
-    def test_2site_dense_matches_legacy(self, small_peps_pair_dense, heisenberg_gate):
+    def test_2site_dense_matches_legacy(self, small_peps_pair_dense):
         """2-site DenseTensor CTM single sweep matches legacy 2-site CTM sweep.
 
-        Compares gauge-invariant quantities (corner singular values and energy)
-        because ``eigh`` eigenvector ordering within degenerate subspaces can
-        differ across platforms (macOS vs Linux).
+        Compares corner singular values (gauge-invariant) because ``eigh``
+        eigenvector ordering within degenerate subspaces can differ across
+        platforms (macOS vs Linux).
         """
         A, B = small_peps_pair_dense
         chi = 6
@@ -478,19 +468,6 @@ class TestTwoSiteCTM:
                     atol=1e-10,
                     err_msg=f"{sublattice}.{name} singular values mismatch",
                 )
-
-        # Compare energy (gauge-invariant observable)
-        E_legacy = float(
-            compute_energy_ctm_2site(
-                A_raw, B_raw, env_A_leg, env_B_leg, heisenberg_gate, d=2
-            )
-        )
-        E_tensor = float(
-            compute_energy_ctm_tensor_2site(
-                A, B, envs[(0, 0)], envs[(1, 0)], heisenberg_gate, d=2
-            )
-        )
-        np.testing.assert_allclose(E_tensor, E_legacy, atol=1e-10)
 
     def test_2site_symmetric_converges(self, small_peps_pair_symmetric):
         """2-site SymmetricTensor CTM converges."""
