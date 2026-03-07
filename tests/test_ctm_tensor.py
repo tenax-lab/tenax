@@ -8,11 +8,13 @@ import numpy as np
 import pytest
 
 from tenax.algorithms._ctm_tensor import (
+    CHECKERBOARD_NEIGHBORS,
     CTMTensorEnv,
     _build_double_layer_open_tensor,
     _build_double_layer_tensor,
     _compute_projector_tensor,
     _ctm_tensor_sweep,
+    _ctm_tensor_sweep_multisite,
     _fuse_pair_by_label,
     compute_energy_ctm_tensor,
     compute_energy_ctm_tensor_2site,
@@ -21,12 +23,10 @@ from tenax.algorithms._ctm_tensor import (
     initialize_ctm_tensor_env,
 )
 from tenax.algorithms.ipeps import (
-    CTMConfig,
     _build_double_layer,
-    compute_energy_ctm,
-    compute_energy_ctm_2site,
-    ctm,
-    ctm_2site,
+    _ctm_2site_sweep,
+    _ctm_sweep,
+    _initialize_ctm_env,
 )
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity, U1Symmetry
@@ -244,28 +244,34 @@ class TestConvergence:
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
 
-    def test_ctm_tensor_dense_matches_ctm(self, small_peps_dense, heisenberg_gate):
-        """DenseTensor CTM energy matches legacy dense CTM energy."""
+    def test_ctm_tensor_dense_matches_ctm(self, small_peps_dense):
+        """DenseTensor CTM single sweep matches legacy dense CTM sweep."""
         chi = 6
         A_raw = small_peps_dense.todense()
+        a_raw = _build_double_layer(A_raw)
+        D = A_raw.shape[0]
+        D2 = D * D
+        a_raw = a_raw.reshape(D2, D2, D2, D2)
 
-        # Legacy dense CTM — run eagerly to match tensor-protocol's Python loop
-        # (jax.lax.while_loop under JIT can produce different floating-point
-        # rounding than eager execution, causing divergent CTM trajectories)
-        cfg = CTMConfig(chi=chi, max_iter=50, conv_tol=1e-8)
-        with jax.disable_jit():
-            env_legacy = ctm(A_raw, cfg)
-        E_legacy = float(compute_energy_ctm(A_raw, env_legacy, heisenberg_gate, d=2))
+        # Legacy: init + one sweep
+        env_legacy = _initialize_ctm_env(a_raw, chi)
+        env_legacy = _ctm_sweep(env_legacy, a_raw, chi, renormalize=True)
 
-        # Tensor-protocol CTM
-        env_tensor = ctm_tensor(small_peps_dense, chi=chi, max_iter=50, conv_tol=1e-8)
-        E_tensor = float(
-            compute_energy_ctm_tensor(
-                small_peps_dense, env_tensor, heisenberg_gate, d=2
+        # Tensor-protocol: init + one sweep
+        a_tensor = _build_double_layer_tensor(small_peps_dense)
+        env_tensor = initialize_ctm_tensor_env(small_peps_dense, chi)
+        env_tensor = _ctm_tensor_sweep(env_tensor, a_tensor, chi, renormalize=True)
+
+        # Compare all 8 environment tensors
+        for name in ("C1", "C2", "C3", "C4", "T1", "T2", "T3", "T4"):
+            legacy = getattr(env_legacy, name)
+            tensor = getattr(env_tensor, name).todense()
+            np.testing.assert_allclose(
+                tensor,
+                legacy,
+                atol=1e-10,
+                err_msg=f"{name} mismatch after one sweep",
             )
-        )
-
-        np.testing.assert_allclose(E_tensor, E_legacy, atol=1e-4)
 
     def test_ctm_tensor_symmetric_converges(self, small_peps_symmetric):
         """SymmetricTensor CTM converges (trivial charges)."""
@@ -396,29 +402,57 @@ class TestTwoSiteCTM:
         for field in env_B:
             assert jnp.all(jnp.isfinite(field.todense()))
 
-    def test_2site_dense_matches_legacy(self, small_peps_pair_dense, heisenberg_gate):
-        """2-site DenseTensor CTM energy matches legacy dense CTM energy."""
+    def test_2site_dense_matches_legacy(self, small_peps_pair_dense):
+        """2-site DenseTensor CTM single sweep matches legacy 2-site CTM sweep."""
         A, B = small_peps_pair_dense
         chi = 6
+
+        # Legacy: build double-layers, init, one sweep
         A_raw, B_raw = A.todense(), B.todense()
-
-        # Legacy dense CTM — run eagerly to match tensor-protocol's Python loop
-        cfg = CTMConfig(chi=chi, max_iter=50, conv_tol=1e-8)
-        with jax.disable_jit():
-            env_A_leg, env_B_leg = ctm_2site(A_raw, B_raw, cfg)
-        E_legacy = float(
-            compute_energy_ctm_2site(
-                A_raw, B_raw, env_A_leg, env_B_leg, heisenberg_gate, d=2
-            )
+        a_A = _build_double_layer(A_raw)
+        a_B = _build_double_layer(B_raw)
+        D_A, D_B = A_raw.shape[0], B_raw.shape[0]
+        a_A = a_A.reshape(D_A**2, D_A**2, D_A**2, D_A**2)
+        a_B = a_B.reshape(D_B**2, D_B**2, D_B**2, D_B**2)
+        env_A_leg = _initialize_ctm_env(a_A, chi)
+        env_B_leg = _initialize_ctm_env(a_B, chi)
+        env_A_leg, env_B_leg = _ctm_2site_sweep(
+            env_A_leg,
+            env_B_leg,
+            a_A,
+            a_B,
+            chi,
+            renormalize=True,
         )
 
-        # Tensor-protocol 2-site CTM
-        env_A, env_B = ctm_tensor_2site(A, B, chi=chi, max_iter=50, conv_tol=1e-8)
-        E_tensor = float(
-            compute_energy_ctm_tensor_2site(A, B, env_A, env_B, heisenberg_gate, d=2)
+        # Tensor-protocol: init, one sweep
+        dl = {
+            (0, 0): _build_double_layer_tensor(A),
+            (1, 0): _build_double_layer_tensor(B),
+        }
+        envs = {
+            (0, 0): initialize_ctm_tensor_env(A, chi),
+            (1, 0): initialize_ctm_tensor_env(B, chi),
+        }
+        envs = _ctm_tensor_sweep_multisite(
+            envs, dl, CHECKERBOARD_NEIGHBORS, chi, renormalize=True
         )
 
-        np.testing.assert_allclose(E_tensor, E_legacy, atol=1e-4)
+        # Compare all 8 environment tensors for each sublattice
+        for sublattice, legacy_env, coord in [
+            ("A", env_A_leg, (0, 0)),
+            ("B", env_B_leg, (1, 0)),
+        ]:
+            tensor_env = envs[coord]
+            for name in ("C1", "C2", "C3", "C4", "T1", "T2", "T3", "T4"):
+                legacy = getattr(legacy_env, name)
+                tensor = getattr(tensor_env, name).todense()
+                np.testing.assert_allclose(
+                    tensor,
+                    legacy,
+                    atol=1e-10,
+                    err_msg=f"{sublattice}.{name} mismatch after one sweep",
+                )
 
     def test_2site_symmetric_converges(self, small_peps_pair_symmetric):
         """2-site SymmetricTensor CTM converges."""
