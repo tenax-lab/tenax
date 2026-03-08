@@ -584,15 +584,9 @@ def _solve_excitations(
     H_tilde = 0.5 * (H_tilde + H_tilde.conj().T)
     eigvals = np.linalg.eigvalsh(H_tilde)
 
-    # Excitation energies are physically non-negative (variational bound).
-    # Large negative values indicate ill-conditioned modes; discard them.
-    eigvals = eigvals[eigvals > -1.0]
-
-    # Always return exactly num_excitations values (pad with zeros if needed)
-    result = np.zeros(num_excitations)
-    n_fill = min(num_excitations, len(eigvals))
-    result[:n_fill] = eigvals[:n_fill]
-    return result
+    # Return the lowest excitation energies
+    n_ret = min(num_excitations, len(eigvals))
+    return eigvals[:n_ret]
 
 
 # ---------------------------------------------------------------------------
