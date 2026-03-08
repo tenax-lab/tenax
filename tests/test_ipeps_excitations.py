@@ -1,5 +1,8 @@
 """Tests for iPEPS excitation calculations."""
 
+import logging
+import os
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -316,6 +319,43 @@ class TestSolveExcitations:
         eigvals = _solve_excitations(H, N, num_excitations=3)
         assert np.all(np.diff(eigvals) >= -1e-10)
 
+    def test_output_shape_always_num_excitations(self):
+        """Output length must always equal num_excitations, even when the
+        safe subspace is smaller."""
+        # Only 2 non-null modes, but request 5 excitations
+        N = np.diag([1.0, 1.0, 0.0, 0.0, 0.0])
+        H = np.diag([3.0, 7.0, 0.0, 0.0, 0.0])
+        eigvals = _solve_excitations(H, N, num_excitations=5, null_tol=1e-3)
+        assert len(eigvals) == 5
+        # Padded entries should be zero
+        np.testing.assert_allclose(eigvals[2:], 0.0)
+
+    def test_output_finite(self):
+        """All returned eigenvalues must be finite."""
+        rng = np.random.default_rng(42)
+        A = rng.standard_normal((6, 6))
+        N = A.T @ A + 0.1 * np.eye(6)  # positive definite
+        H = rng.standard_normal((6, 6))
+        H = 0.5 * (H + H.T)
+        eigvals = _solve_excitations(H, N, num_excitations=4)
+        assert np.all(np.isfinite(eigvals))
+
+    def test_physical_branch_nonnegative(self):
+        """For H = E*N (zero excitation gap), eigenvalues should be ~0."""
+        N = np.diag([1.0, 0.5, 0.25])
+        # H_eff = H - E_gs*N; if physical H = E_gs*N then H_eff = 0
+        H_eff = np.zeros((3, 3))
+        eigvals = _solve_excitations(H_eff, N, num_excitations=3)
+        np.testing.assert_allclose(eigvals, 0.0, atol=1e-12)
+
+    def test_zero_N_returns_zeros(self):
+        """When N is all zeros, should return zeros without error."""
+        N = np.zeros((4, 4))
+        H = np.eye(4)
+        eigvals = _solve_excitations(H, N, num_excitations=3)
+        assert len(eigvals) == 3
+        np.testing.assert_allclose(eigvals, 0.0)
+
 
 # ---------------------------------------------------------------------------
 # Excitation energy tests
@@ -384,26 +424,28 @@ class TestMomentumPath:
 
 
 # ---------------------------------------------------------------------------
-# Slow benchmark: Heisenberg excitation dispersion
+# Opt-in benchmark: RUN_EXCITATION_BENCH=1 for local/nightly runs
 # ---------------------------------------------------------------------------
 
+_RUN_BENCH = os.environ.get("RUN_EXCITATION_BENCH", "") == "1"
+_bench_reason = "Set RUN_EXCITATION_BENCH=1 to run (GEV is ill-conditioned at D=2)"
 
+logger = logging.getLogger(__name__)
+
+
+@pytest.mark.slow
 class TestExcitationBenchmark:
-    @pytest.mark.skip(
-        reason="GEV is ill-conditioned at D=2; spurious eigenvalues are BLAS-dependent",
-    )
+    @pytest.mark.skipif(not _RUN_BENCH, reason=_bench_reason)
     def test_heisenberg_excitation_dispersion(self, heisenberg_gate):
         """Verify excitation spectrum for 2D Heisenberg AFM (D=2, chi=16).
 
         Checks that the excitation spectrum is physically reasonable:
         finite excitation energies and positive gaps at zone-boundary
-        momenta. Dispersion ordering (Gamma < X, M) is not tested
-        because D=2 is too small to resolve it reliably.
+        momenta. Opt-in via ``RUN_EXCITATION_BENCH=1`` because the GEV
+        is ill-conditioned at D=2 and results are BLAS-dependent.
         """
         D, d = 2, 2
 
-        # Try multiple seeds to find a good ground state (optimizer can
-        # land in a bad local minimum for some initial tensors).
         best_A, best_env, best_E = None, None, 0.0
         for seed in [42, 0, 7]:
             key = jax.random.PRNGKey(seed)
@@ -424,21 +466,50 @@ class TestExcitationBenchmark:
 
         assert best_E < -0.3, f"Ground state energy should be negative, got {best_E}"
 
-        # 2. Compute excitations at high-symmetry k-points
+        # Compute excitations with diagnostic logging
         momenta = [(0.0, 0.0), (np.pi, 0.0), (np.pi, np.pi)]
         exc_config = ExcitationConfig(num_excitations=2)
+
+        for i, (kx, ky) in enumerate(momenta):
+            k = jnp.array([kx, ky])
+            H_eff, N_mat = _build_H_and_N(
+                best_A, best_env, k, heisenberg_gate, best_E, d, exc_config
+            )
+            # Diagnostic: log cond(N) and null-space filtering
+            N_sym = 0.5 * (np.array(N_mat) + np.array(N_mat).conj().T)
+            eigvals_N = np.linalg.eigvalsh(N_sym)
+            max_eig = eigvals_N[-1]
+            kept = np.sum(eigvals_N > exc_config.null_space_tol * max_eig)
+            cond = max_eig / max(eigvals_N[eigvals_N > 0].min(), 1e-30)
+            logger.info(
+                "k=(%.3f,%.3f) cond(N)=%.2e  kept=%d/%d  eigN_range=[%.2e, %.2e]",
+                kx,
+                ky,
+                cond,
+                kept,
+                len(eigvals_N),
+                eigvals_N[0],
+                max_eig,
+            )
+
         result = compute_excitations(
             best_A, best_env, heisenberg_gate, best_E, momenta, exc_config
         )
 
-        # 3. Assertions
         assert result.energies.shape == (3, 2)
         assert np.all(np.isfinite(result.energies)), (
             f"Non-finite excitation energies: {result.energies}"
         )
 
-        E_X = result.energies[1, 0]  # lowest at X=(pi,0)
-        E_M = result.energies[2, 0]  # lowest at M=(pi,pi)
+        E_X = result.energies[1, 0]
+        E_M = result.energies[2, 0]
+        logger.info("Excitation energies:\n%s", result.energies)
 
-        assert E_X > 0.1, f"Excitation at X should be positive, got {E_X}"
-        assert E_M > 0.1, f"Excitation at M should be positive, got {E_M}"
+        assert E_X > 0.1, (
+            f"Excitation at X should be positive, got {E_X}; "
+            f"all energies: {result.energies}"
+        )
+        assert E_M > 0.1, (
+            f"Excitation at M should be positive, got {E_M}; "
+            f"all energies: {result.energies}"
+        )
