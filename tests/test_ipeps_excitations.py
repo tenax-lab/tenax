@@ -437,5 +437,11 @@ class TestExcitationBenchmark:
         E_X = result.energies[1, 0]  # lowest at X=(pi,0)
         E_M = result.energies[2, 0]  # lowest at M=(pi,pi)
 
-        assert E_X > 0.1, f"Excitation at X should be positive, got {E_X}"
-        assert E_M > 0.1, f"Excitation at M should be positive, got {E_M}"
+        assert E_X > 0.1, (
+            f"Excitation at X should be positive, got {E_X}; "
+            f"all energies: {result.energies}"
+        )
+        assert E_M > 0.1, (
+            f"Excitation at M should be positive, got {E_M}; "
+            f"all energies: {result.energies}"
+        )

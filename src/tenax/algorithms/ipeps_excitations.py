@@ -46,7 +46,7 @@ class ExcitationConfig:
     ctm_max_iter: int = 100
     ctm_conv_tol: float = 1e-8
     num_excitations: int = 3
-    null_space_tol: float = 1e-2
+    null_space_tol: float = 5e-2
 
 
 @dataclass
@@ -573,7 +573,8 @@ def _solve_excitations(
     if max_eigval < 1e-15:
         return np.zeros(num_excitations)
 
-    safe = eigvals_N > null_tol * max_eigval
+    threshold = null_tol * max_eigval
+    safe = eigvals_N > threshold
     if not np.any(safe):
         return np.zeros(num_excitations)
 
