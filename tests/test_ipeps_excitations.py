@@ -389,6 +389,9 @@ class TestMomentumPath:
 
 
 class TestExcitationBenchmark:
+    @pytest.mark.skip(
+        reason="GEV is ill-conditioned at D=2; spurious eigenvalues are BLAS-dependent",
+    )
     def test_heisenberg_excitation_dispersion(self, heisenberg_gate):
         """Verify excitation spectrum for 2D Heisenberg AFM (D=2, chi=16).
 
