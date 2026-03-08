@@ -46,7 +46,7 @@ class ExcitationConfig:
     ctm_max_iter: int = 100
     ctm_conv_tol: float = 1e-8
     num_excitations: int = 3
-    null_space_tol: float = 1e-2
+    null_space_tol: float = 5e-2
 
 
 @dataclass
