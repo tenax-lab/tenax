@@ -563,38 +563,24 @@ def _solve_excitations(
     H_eff = 0.5 * (H_eff + H_eff.conj().T)
     N_mat = 0.5 * (N_mat + N_mat.conj().T)
 
-    # Eigendecompose N to find null space
+    # Single eigendecomposition of N — use eigenvectors directly for N^{-1/2}
+    # transform (avoids redundant projection + re-eigendecomposition which can
+    # introduce numerical errors on ill-conditioned norm matrices).
     eigvals_N, P = np.linalg.eigh(N_mat)
 
-    # Filter: keep eigenvalues above threshold
-    max_eigval = np.max(np.abs(eigvals_N)) if len(eigvals_N) > 0 else 1.0
+    # eigh returns sorted eigenvalues; largest is last
+    max_eigval = eigvals_N[-1] if len(eigvals_N) > 0 else 1.0
     if max_eigval < 1e-15:
-        # N is essentially zero — return zeros
         return np.zeros(num_excitations)
 
-    mask = eigvals_N / max_eigval > null_tol
-    if not np.any(mask):
-        return np.zeros(num_excitations)
-
-    P_red = P[:, mask]
-
-    # Project into non-null subspace
-    H_red = P_red.conj().T @ H_eff @ P_red
-    N_red = P_red.conj().T @ N_mat @ P_red
-
-    # Re-symmetrize after projection
-    H_red = 0.5 * (H_red + H_red.conj().T)
-    N_red = 0.5 * (N_red + N_red.conj().T)
-
-    # Solve via N^{-1/2} regularised ordinary eigenvalue problem
-    # (more stable than scipy GEV when N is ill-conditioned)
-    eigvals_n, vecs_n = np.linalg.eigh(N_red)
-    safe = eigvals_n > null_tol * eigvals_n[-1]
+    safe = eigvals_N > null_tol * max_eigval
     if not np.any(safe):
         return np.zeros(num_excitations)
-    vecs_safe = vecs_n[:, safe]
-    inv_sqrt = np.diag(1.0 / np.sqrt(eigvals_n[safe]))
-    H_tilde = inv_sqrt @ vecs_safe.conj().T @ H_red @ vecs_safe @ inv_sqrt
+
+    # N^{-1/2} regularised ordinary eigenvalue problem
+    P_safe = P[:, safe]
+    inv_sqrt = np.diag(1.0 / np.sqrt(eigvals_N[safe]))
+    H_tilde = inv_sqrt @ P_safe.conj().T @ H_eff @ P_safe @ inv_sqrt
     H_tilde = 0.5 * (H_tilde + H_tilde.conj().T)
     eigvals = np.linalg.eigvalsh(H_tilde)
 
