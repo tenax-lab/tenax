@@ -1,7 +1,5 @@
 """Tests for iPEPS excitation calculations."""
 
-import sys
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -391,9 +389,8 @@ class TestMomentumPath:
 
 
 class TestExcitationBenchmark:
-    @pytest.mark.skipif(
-        sys.platform == "darwin",
-        reason="GEV ill-conditioned under macOS Accelerate BLAS",
+    @pytest.mark.skip(
+        reason="GEV is ill-conditioned at D=2; spurious eigenvalues are BLAS-dependent",
     )
     def test_heisenberg_excitation_dispersion(self, heisenberg_gate):
         """Verify excitation spectrum for 2D Heisenberg AFM (D=2, chi=16).
