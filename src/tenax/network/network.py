@@ -504,6 +504,50 @@ class TensorNetwork:
             f"Available labels: {list(tensor.labels())}"
         )
 
+    def to_mermaid(self) -> str:
+        """Return a Mermaid graph diagram of the network.
+
+        Contracted edges are shown as solid lines with bond labels.
+        Open (free) legs are shown as dangling circle nodes.
+        """
+        lines = ["graph LR"]
+
+        # Node definitions with shapes
+        for nid in sorted(self._tensors, key=str):
+            tensor = self._tensors[nid]
+            shape = ",".join(str(idx.dim) for idx in tensor.indices)
+            safe_id = str(nid).replace(" ", "_")
+            lines.append(f'  {safe_id}["{nid} ({shape})"]')
+
+        # Contracted edges
+        seen_edges: set[tuple] = set()
+        for u, v, data in self._graph.edges(data=True):
+            label_a = data.get("label_a", "")
+            label_b = data.get("label_b", "")
+            edge_key = (
+                min(str(u), str(v)),
+                max(str(u), str(v)),
+                str(label_a),
+                str(label_b),
+            )
+            if edge_key in seen_edges:
+                continue
+            seen_edges.add(edge_key)
+            safe_u = str(u).replace(" ", "_")
+            safe_v = str(v).replace(" ", "_")
+            bond_label = label_a if label_a == label_b else f"{label_a}/{label_b}"
+            lines.append(f"  {safe_u} ---|{bond_label}| {safe_v}")
+
+        # Open legs as dangling nodes
+        for nid in sorted(self._tensors, key=str):
+            safe_id = str(nid).replace(" ", "_")
+            for label in self.open_legs(nid):
+                safe_label = str(label).replace(" ", "_")
+                open_id = f"{safe_id}_{safe_label}"
+                lines.append(f'  {safe_id} -.- {open_id}(("{label}"))')
+
+        return "\n".join(lines)
+
     def __repr__(self) -> str:
         return (
             f"TensorNetwork(name={self.name!r}, "

@@ -122,8 +122,8 @@ class TestDenseTensor:
 
     def test_repr(self, small_dense_matrix):
         r = repr(small_dense_matrix)
-        assert "DenseTensor" in r
-        assert "shape" in r
+        assert "Dense" in r
+        assert "──▶" in r
 
     def test_dtype(self, u1, u1_charges_3, rng):
         data = jax.random.normal(rng, (3,), dtype=jnp.float64)
@@ -296,8 +296,9 @@ class TestSymmetricTensorOperations:
 
     def test_repr(self, u1_sym_tensor_2leg):
         r = repr(u1_sym_tensor_2leg)
-        assert "SymmetricTensor" in r
-        assert "n_blocks" in r
+        assert "Symmetric" in r
+        assert "blk" in r
+        assert "charges:" in r
 
     def test_3leg_conservation(self, u1_sym_tensor_3leg, u1):
         """All blocks in a 3-leg tensor satisfy U(1) conservation."""

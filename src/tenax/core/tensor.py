@@ -17,16 +17,88 @@ Block-sparse design (SymmetricTensor):
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.core.index import Label, TensorIndex
+from tenax.core.index import FlowDirection, Label, TensorIndex
 
 # Block key: tuple of one charge value per leg identifying a charge sector
 BlockKey = tuple[int, ...]
+
+
+def _charge_summary(charges: np.ndarray) -> str:
+    """Format charge array as ``{charge: count, ...}``."""
+    counts = Counter(int(q) for q in charges)
+    parts = [f"{q}:{n}" for q, n in sorted(counts.items())]
+    return "{" + ", ".join(parts) + "}"
+
+
+def _tensor_box_repr(
+    type_name: str,
+    indices: tuple[TensorIndex, ...],
+    info_lines: list[str],
+    charge_lines: list[str] | None = None,
+) -> str:
+    """Build an ASCII box with legs extending left (IN) and right (OUT).
+
+    Args:
+        type_name:    Short type name shown inside the box.
+        indices:      Tuple of TensorIndex objects for the legs.
+        info_lines:   Additional lines inside the box (dtype, block stats).
+        charge_lines: Optional charge summary lines appended below the box.
+    """
+    in_legs = [(idx.label, idx.dim) for idx in indices if idx.flow == FlowDirection.IN]
+    out_legs = [
+        (idx.label, idx.dim) for idx in indices if idx.flow == FlowDirection.OUT
+    ]
+
+    # Format leg strings
+    in_strs = [f"{lbl} ({dim}) ──▶" for lbl, dim in in_legs]
+    out_strs = [f"◀── {lbl} ({dim})" for lbl, dim in out_legs]
+
+    # Box content: type name + info lines
+    box_content = [type_name] + info_lines
+
+    # Number of rows = max(in legs, out legs, content lines)
+    n_rows = max(len(in_strs), len(out_strs), len(box_content))
+
+    # Pad lists to n_rows
+    while len(in_strs) < n_rows:
+        in_strs.append("")
+    while len(out_strs) < n_rows:
+        out_strs.append("")
+    while len(box_content) < n_rows:
+        box_content.append("")
+
+    # Compute widths
+    left_w = max((len(s) for s in in_strs), default=0)
+    box_w = max(len(s) for s in box_content) + 2  # 1 space padding each side
+
+    # Build lines
+    lines = []
+    # Top border
+    lines.append(f"{'':<{left_w}}┌{'─' * box_w}┐")
+    for i in range(n_rows):
+        left = f"{in_strs[i]:>{left_w}}"
+        content = f" {box_content[i]:<{box_w - 1}}"
+        right_edge = "├" if out_strs[i] else "│"
+        left_edge = "┤" if in_strs[i] else "│"
+        right = out_strs[i]
+        lines.append(f"{left}{left_edge}{content}{right_edge}{right}")
+    # Bottom border
+    lines.append(f"{'':<{left_w}}└{'─' * box_w}┘")
+
+    # Charge summary below the box
+    if charge_lines:
+        lines.append(" charges: " + charge_lines[0])
+        for cl in charge_lines[1:]:
+            lines.append("          " + cl)
+
+    return "\n".join(lines)
 
 
 def _koszul_sign(parities: list[int] | tuple[int, ...], perm: tuple[int, ...]) -> int:
@@ -493,9 +565,10 @@ class DenseTensor(Tensor):
         return jnp.max(jnp.abs(self._data))
 
     def __repr__(self) -> str:
-        return (
-            f"DenseTensor(shape={self._data.shape}, dtype={self.dtype}, "
-            f"labels={self.labels()})"
+        return _tensor_box_repr(
+            "Dense",
+            self._indices,
+            [str(self.dtype)],
         )
 
 
@@ -968,7 +1041,40 @@ class SymmetricTensor(Tensor):
 
     def __repr__(self) -> str:
         total_elements = sum(v.size for v in self._blocks.values())
-        return (
-            f"SymmetricTensor(ndim={self.ndim}, n_blocks={self.n_blocks}, "
-            f"nnz={total_elements}, dtype={self.dtype}, labels={self.labels()})"
+        sym_name = self._indices[0].symmetry.__class__.__name__ if self._indices else ""
+        # Short symmetry label: U1Symmetry -> U(1), ZnSymmetry(3) -> Z(3)
+        sym = self._indices[0].symmetry if self._indices else None
+        if sym_name == "U1Symmetry":
+            sym_label = "U(1)"
+        elif sym_name == "ZnSymmetry":
+            sym_label = f"Z({sym.n})"
+        elif sym_name == "ProductSymmetry":
+            sym_label = "Product"
+        else:
+            sym_label = sym_name
+
+        # Build charge summary lines
+        charge_parts = [
+            f"{idx.label}{_charge_summary(idx.charges)}" for idx in self._indices
+        ]
+        # Group into lines of roughly 50 chars
+        charge_lines = []
+        current = ""
+        for part in charge_parts:
+            if current and len(current) + len(part) + 1 > 50:
+                charge_lines.append(current)
+                current = part
+            else:
+                current = current + " " + part if current else part
+        if current:
+            charge_lines.append(current)
+
+        return _tensor_box_repr(
+            "Symmetric",
+            self._indices,
+            [
+                f"{sym_label} {self.dtype}",
+                f"{self.n_blocks}blk nnz={total_elements}",
+            ],
+            charge_lines,
         )
