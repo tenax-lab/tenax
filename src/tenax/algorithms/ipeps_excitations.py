@@ -46,7 +46,7 @@ class ExcitationConfig:
     ctm_max_iter: int = 100
     ctm_conv_tol: float = 1e-8
     num_excitations: int = 3
-    null_space_tol: float = 1e-3
+    null_space_tol: float = 1e-2
 
 
 @dataclass
@@ -559,8 +559,6 @@ def _solve_excitations(
     Returns:
         Array of the lowest *num_excitations* excitation energies.
     """
-    from scipy.linalg import eigh as scipy_eigh
-
     # Symmetrize
     H_eff = 0.5 * (H_eff + H_eff.conj().T)
     N_mat = 0.5 * (N_mat + N_mat.conj().T)
@@ -588,16 +586,17 @@ def _solve_excitations(
     H_red = 0.5 * (H_red + H_red.conj().T)
     N_red = 0.5 * (N_red + N_red.conj().T)
 
-    # Solve GEV
-    try:
-        eigvals, _ = scipy_eigh(H_red, N_red)
-    except np.linalg.LinAlgError:
-        # Fallback: solve ordinary eigenvalue problem with N^{-1/2}
-        eigvals_n, vecs_n = np.linalg.eigh(N_red)
-        sqrt_inv = np.diag(1.0 / np.sqrt(np.maximum(eigvals_n, 1e-15)))
-        H_tilde = sqrt_inv @ vecs_n.conj().T @ H_red @ vecs_n @ sqrt_inv
-        H_tilde = 0.5 * (H_tilde + H_tilde.conj().T)
-        eigvals = np.linalg.eigvalsh(H_tilde)
+    # Solve via N^{-1/2} regularised ordinary eigenvalue problem
+    # (more stable than scipy GEV when N is ill-conditioned)
+    eigvals_n, vecs_n = np.linalg.eigh(N_red)
+    safe = eigvals_n > null_tol * eigvals_n[-1]
+    if not np.any(safe):
+        return np.zeros(num_excitations)
+    vecs_safe = vecs_n[:, safe]
+    inv_sqrt = np.diag(1.0 / np.sqrt(eigvals_n[safe]))
+    H_tilde = inv_sqrt @ vecs_safe.conj().T @ H_red @ vecs_safe @ inv_sqrt
+    H_tilde = 0.5 * (H_tilde + H_tilde.conj().T)
+    eigvals = np.linalg.eigvalsh(H_tilde)
 
     # Return the lowest excitation energies
     n_ret = min(num_excitations, len(eigvals))

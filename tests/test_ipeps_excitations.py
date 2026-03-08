@@ -423,7 +423,7 @@ class TestExcitationBenchmark:
 
         # 2. Compute excitations at high-symmetry k-points
         momenta = [(0.0, 0.0), (np.pi, 0.0), (np.pi, np.pi)]
-        exc_config = ExcitationConfig(num_excitations=2, null_space_tol=1e-2)
+        exc_config = ExcitationConfig(num_excitations=2)
         result = compute_excitations(
             best_A, best_env, heisenberg_gate, best_E, momenta, exc_config
         )
