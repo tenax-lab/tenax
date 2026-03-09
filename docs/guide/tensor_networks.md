@@ -111,3 +111,30 @@ Label convention for PEPS site tensors:
 - Horizontal bond (column j to j+1 in row i): `h{i}_{j}_{j+1}`
 - Vertical bond (row i to i+1 in column j): `v{i}_{i+1}_{j}`
 - Physical leg at (i, j): `p{i}_{j}`
+
+## Mermaid diagram export
+
+`TensorNetwork.to_mermaid()` returns a [Mermaid](https://mermaid.js.org/)
+graph string for visualization. Contracted edges are shown as solid lines
+with bond labels; open (free) legs are shown as dangling circle nodes.
+
+```python
+tn = TensorNetwork(name="MPS")
+tn.add_node("A", tensor_A)
+tn.add_node("B", tensor_B)
+tn.connect("A", "bond", "B", "bond")
+
+print(tn.to_mermaid())
+```
+
+```
+graph LR
+  A["A (2,3)"]
+  B["B (3,4)"]
+  A ---|bond| B
+  A -.- A_phys(("phys"))
+  B -.- B_phys(("phys"))
+```
+
+Paste the output into any Mermaid renderer (GitHub markdown, Mermaid Live
+Editor, or VS Code preview) to get an interactive diagram.

@@ -180,6 +180,41 @@ t_bar  = tensor.bar()      # conjugate + flip flows (no charge dual)
 For trivial (zero) charges, `dagger()` and `bar()` produce the same dense
 result. They differ only when charges are nontrivial.
 
+### Tensor display
+
+Printing a tensor shows an ASCII box diagram with legs extending left (IN)
+and right (OUT), along with dimension and dtype information:
+
+```python
+print(tensor)
+```
+
+```
+          ┌──────────┐
+phys (2) ──▶┤ Dense    │
+          │ float64  │
+          └──────────┘
+```
+
+For `SymmetricTensor`, the display also shows the symmetry type, block
+count, and charge degeneracy for each leg:
+
+```python
+print(st)
+```
+
+```
+           ┌───────────────┐
+left (3) ──▶┤ Symmetric     ├◀── right (3)
+           │ U(1) 3 blk    │
+           │ float64       │
+           └───────────────┘
+ charges: left{-1:1, 0:1, 1:1} right{-1:1, 0:1, 1:1}
+```
+
+The charge summary `{q: count}` shows how many basis states carry each
+quantum number. For example, `{-1:1, 0:1, 1:1}` means one state per sector.
+
 ### Relabeling
 
 Labels are the key to contraction. Use `relabel` and `relabels` to rename

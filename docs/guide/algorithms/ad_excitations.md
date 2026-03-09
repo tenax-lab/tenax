@@ -156,10 +156,7 @@ solved after projecting out the null space of $N$.
 import numpy as np
 from tenax import ExcitationConfig, compute_excitations, make_momentum_path
 
-config = ExcitationConfig(
-    num_excitations=3,
-    null_space_tol=1e-3,
-)
+config = ExcitationConfig(num_excitations=3)
 
 momenta = make_momentum_path("brillouin", num_points=20)
 result = compute_excitations(A_opt, env, H_bond, E_gs, momenta, config)
