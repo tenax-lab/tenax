@@ -57,8 +57,8 @@ def _tensor_box_repr(
     ]
 
     # Format leg strings
-    in_strs = [f"{lbl} ({dim}) ──▶" for lbl, dim in in_legs]
-    out_strs = [f"◀── {lbl} ({dim})" for lbl, dim in out_legs]
+    in_strs = [f"{lbl} ({dim}) ──>" for lbl, dim in in_legs]
+    out_strs = [f"<── {lbl} ({dim})" for lbl, dim in out_legs]
 
     # Box content: type name + info lines
     box_content = [type_name] + info_lines
