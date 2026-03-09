@@ -398,19 +398,18 @@ def _fpeps_simple_update(
 # CTM energy evaluation                                                #
 # ------------------------------------------------------------------ #
 #
-# For FermionParity (Z₂), the twist phase in dagger() is always +1,
-# so the fermionic double-layer tensor is identical to the bosonic one.
-# We therefore convert to dense and delegate to the bosonic CTM for
-# environment and energy computation.  The SymmetricTensor simple
-# update (above) handles Koszul signs correctly for optimization.
+# The simple update above absorbs fermionic swap gates into local
+# tensors during imaginary time evolution.  The resulting site tensor
+# can then be contracted with a standard (bosonic) CTM — no additional
+# swap-gate insertion is needed during the environment contraction.
 # ------------------------------------------------------------------ #
 
 
 def fermionic_ctm(A, config):
     """Run CTM to convergence for a fermionic PEPS site tensor.
 
-    For FermionParity (Z₂), the twist phase in ``dagger()`` is always +1,
-    so the fermionic double-layer tensor is identical to the bosonic one.
+    The simple update absorbs fermionic swap gates into the local tensor,
+    so the CTM contraction uses the standard bosonic double-layer.
 
     When *A* is a ``Tensor`` (DenseTensor or SymmetricTensor), uses the
     Tensor-protocol CTM (``ctm_tensor``) which avoids densification.
