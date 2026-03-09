@@ -313,6 +313,25 @@ class TestTensorNetworkContraction:
         # The underlying data should be transposed relative to each other
         np.testing.assert_allclose(r_ab.todense(), r_ba.todense().T, rtol=1e-7)
 
+    def test_disconnected_same_label_not_contracted(self, u1):
+        """Two unconnected tensors sharing a label should NOT be contracted."""
+        charges = np.zeros(3, dtype=np.int32)
+        A = DenseTensor(
+            jnp.array([1.0, 2.0, 3.0]),
+            (TensorIndex(u1, charges, FlowDirection.IN, label="p"),),
+        )
+        B = DenseTensor(
+            jnp.array([4.0, 5.0, 6.0]),
+            (TensorIndex(u1, charges, FlowDirection.IN, label="p"),),
+        )
+        tn = TensorNetwork()
+        tn.add_node("A", A)
+        tn.add_node("B", B)
+        # No tn.connect() — the two "p" legs are NOT connected
+        result = tn.contract()
+        # Should be an outer product (3, 3), not a scalar dot product
+        assert result.todense().shape == (3, 3)
+
     def test_repr(self, u1):
         tn = TensorNetwork(name="test")
         r = repr(tn)
