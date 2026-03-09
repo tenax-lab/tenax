@@ -27,12 +27,14 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: uv sync --extra dev
 
       - name: Run linter
         run: uv run ruff check src/ tests/
 
       - name: Run core tests
+        env:
+          JAX_PLATFORMS: cpu
         run: |
           uv run pytest tests/ -m "core" \
             --cov=tenax \
@@ -68,9 +70,11 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: uv sync --extra dev
 
       - name: Run all tests
+        env:
+          JAX_PLATFORMS: cpu
         run: |
           uv run pytest tests/ \
             --cov=tenax \
