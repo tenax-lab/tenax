@@ -555,17 +555,13 @@ class TestQRProjectorMethod:
 
 
 class TestProjectorSymmetric:
-    def test_projector_symmetric_matches_dense(self, small_peps_symmetric):
-        """Block-sparse projector matches dense projector output."""
+    @staticmethod
+    def _build_grown_corners(A, chi):
+        """Build grown corners from a symmetric iPEPS tensor (left move)."""
         from tenax.contraction.contractor import contract
 
-        A = small_peps_symmetric
-        chi = 4
-
-        _build_double_layer_tensor(A)  # ensure it doesn't error
         env = initialize_ctm_tensor_env(A, chi)
 
-        # Build grown corners like a left move
         C1_r = env.C1.relabel("c1_r", "t1_l")
         C1g = contract(C1_r, env.T1)
         C1g = _fuse_pair_by_label(C1g, "c1_d", "u2", "fused", FlowDirection.IN)
@@ -574,8 +570,18 @@ class TestProjectorSymmetric:
         C4g = contract(C4_u, env.T3)
         C4g = _fuse_pair_by_label(C4g, "c4_r", "d2", "fused", FlowDirection.IN)
 
+        return C1g, C4g
+
+    def test_projector_symmetric_matches_dense(self, small_peps_symmetric):
+        """Block-sparse eigh projector matches dense projector output."""
+        A = small_peps_symmetric
+        chi = 4
+
+        _build_double_layer_tensor(A)  # ensure it doesn't error
+        C1g, C4g = self._build_grown_corners(A, chi)
+
         # Compute projector via symmetric path
-        P_sym = _compute_projector_tensor(C1g, C4g, chi)
+        P_sym = _compute_projector_tensor(C1g, C4g, chi, projector_method="eigh")
 
         # Dense reference
         C1g_d = C1g.todense()
@@ -592,3 +598,37 @@ class TestProjectorSymmetric:
         proj_sym = P_sym_d @ P_sym_d.T
         proj_ref = P_ref @ P_ref.T
         np.testing.assert_allclose(proj_sym, proj_ref, atol=1e-10)
+
+    def test_qr_projector_symmetric_matches_eigh(self, small_peps_symmetric):
+        """Block-sparse QR projector subspace matches eigh projector subspace."""
+        A = small_peps_symmetric
+        chi = 4
+
+        C1g, C4g = self._build_grown_corners(A, chi)
+
+        P_eigh = _compute_projector_tensor(C1g, C4g, chi, projector_method="eigh")
+        P_qr = _compute_projector_tensor(C1g, C4g, chi, projector_method="qr")
+
+        # Both should be SymmetricTensor
+        assert isinstance(P_eigh, SymmetricTensor)
+        assert isinstance(P_qr, SymmetricTensor)
+
+        # Projection matrices should span the same subspace
+        Pe = P_eigh.todense()
+        Pq = P_qr.todense()
+        proj_eigh = Pe @ Pe.T
+        proj_qr = Pq @ Pq.T
+        np.testing.assert_allclose(proj_qr, proj_eigh, atol=1e-10)
+
+    def test_ctm_tensor_qr_symmetric_converges(self, small_peps_symmetric):
+        """CTM with QR projector converges for symmetric tensors."""
+        env = ctm_tensor(
+            small_peps_symmetric,
+            chi=4,
+            max_iter=20,
+            conv_tol=1e-6,
+            projector_method="qr",
+            qr_warmup_steps=3,
+        )
+        for field in env:
+            assert jnp.all(jnp.isfinite(field.todense()))
