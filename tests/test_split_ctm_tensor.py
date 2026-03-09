@@ -378,6 +378,33 @@ class TestSplitCTMSymmetric:
                 "Multi-sweep symmetric CTM produced non-finite tensors"
             )
 
+    def test_symmetric_energy_matches_dense(self, small_peps_dense, heisenberg_gate):
+        """SymmetricTensor split-CTM energy should match DenseTensor result.
+
+        Uses the same tensor data wrapped as both DenseTensor and SymmetricTensor
+        (with trivial U(1) charges) to verify the symmetric path is correct.
+        """
+        # Build SymmetricTensor with same data as small_peps_dense
+        A_sym = SymmetricTensor.from_dense(
+            small_peps_dense.todense(), small_peps_dense.indices
+        )
+
+        chi, chi_I = 8, 4
+        d = 2
+
+        env_d = ctm_split_tensor(small_peps_dense, chi=chi, max_iter=50, chi_I=chi_I)
+        E_dense = compute_energy_split_ctm_tensor(
+            small_peps_dense, env_d, heisenberg_gate, d
+        )
+
+        env_s = ctm_split_tensor(A_sym, chi=chi, max_iter=50, chi_I=chi_I)
+        E_sym = compute_energy_split_ctm_tensor(A_sym, env_s, heisenberg_gate, d)
+
+        assert jnp.isfinite(E_sym), f"Symmetric energy is not finite: {float(E_sym)}"
+        assert jnp.abs(E_dense - E_sym) < 1e-6, (
+            f"Energy mismatch: dense={float(E_dense)}, sym={float(E_sym)}"
+        )
+
     def test_fermionic_u1_charges_preserved_across_sweeps(self):
         """Nontrivial charge sectors survive multiple CTM sweeps (regression for charge collapse)."""
         from tenax.core.symmetry import FermionicU1
