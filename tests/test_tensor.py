@@ -123,7 +123,7 @@ class TestDenseTensor:
     def test_repr(self, small_dense_matrix):
         r = repr(small_dense_matrix)
         assert "Dense" in r
-        assert "──▶" in r
+        assert "──>" in r
 
     def test_dtype(self, u1, u1_charges_3, rng):
         data = jax.random.normal(rng, (3,), dtype=jnp.float64)
