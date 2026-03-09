@@ -24,6 +24,7 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **Polymorphic tensor arithmetic** — `+`, `-`, `*`, `-T`, `max_abs`, `inner()`, `conj()`, `dagger()`, `bar()` work identically on `DenseTensor` and `SymmetricTensor`, enabling algorithm code that is agnostic to the underlying storage
 - **Block-sparse SVD, QR, and eigh** — native symmetry-aware decompositions in `tenax.linalg` for `SymmetricTensor`
 - **Extensible symmetry system** — non-Abelian symmetry interface for future SU(2) support
+- **Tensor display** — ASCII box repr for `DenseTensor` and `SymmetricTensor` showing legs, dimensions, charges, and block stats; `TensorNetwork.to_mermaid()` for Mermaid diagram export
 - **Benchmark suite** — CLI-driven performance benchmarks for all algorithms across CPU, CUDA, TPU, and Metal backends
 
 ## Installation
