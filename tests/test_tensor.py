@@ -447,6 +447,51 @@ class TestDenseTensorArithmetic:
         t2 = small_dense_matrix + small_dense_matrix
         assert t2.labels() == small_dense_matrix.labels()
 
+    def test_add_mismatched_labels_raises(self, u1):
+        charges = np.array([0, 1], dtype=np.int32)
+        idx_a = TensorIndex(u1, charges, FlowDirection.IN, label="a")
+        idx_b = TensorIndex(u1, charges, FlowDirection.OUT, label="b")
+        idx_c = TensorIndex(u1, charges, FlowDirection.OUT, label="c")
+        t1 = DenseTensor(jnp.ones((2, 2)), (idx_a, idx_b))
+        t2 = DenseTensor(jnp.ones((2, 2)), (idx_a, idx_c))
+        with pytest.raises(ValueError, match="label mismatch"):
+            t1 + t2
+
+    def test_add_mismatched_dim_raises(self, u1):
+        idx_a = TensorIndex(
+            u1, np.array([0, 1], dtype=np.int32), FlowDirection.IN, label="a"
+        )
+        idx_b2 = TensorIndex(
+            u1, np.array([0, 1], dtype=np.int32), FlowDirection.OUT, label="b"
+        )
+        idx_b3 = TensorIndex(
+            u1, np.array([0, 1, 2], dtype=np.int32), FlowDirection.OUT, label="b"
+        )
+        t1 = DenseTensor(jnp.ones((2, 2)), (idx_a, idx_b2))
+        t2 = DenseTensor(jnp.ones((2, 3)), (idx_a, idx_b3))
+        with pytest.raises(ValueError, match="dimension mismatch"):
+            t1 + t2
+
+    def test_add_mismatched_flow_raises(self, u1):
+        charges = np.array([0, 1], dtype=np.int32)
+        idx_a = TensorIndex(u1, charges, FlowDirection.IN, label="a")
+        idx_b_out = TensorIndex(u1, charges, FlowDirection.OUT, label="b")
+        idx_b_in = TensorIndex(u1, charges, FlowDirection.IN, label="b")
+        t1 = DenseTensor(jnp.ones((2, 2)), (idx_a, idx_b_out))
+        t2 = DenseTensor(jnp.ones((2, 2)), (idx_a, idx_b_in))
+        with pytest.raises(ValueError, match="flow mismatch"):
+            t1 + t2
+
+    def test_sub_mismatched_labels_raises(self, u1):
+        charges = np.array([0, 1], dtype=np.int32)
+        idx_a = TensorIndex(u1, charges, FlowDirection.IN, label="a")
+        idx_b = TensorIndex(u1, charges, FlowDirection.OUT, label="b")
+        idx_c = TensorIndex(u1, charges, FlowDirection.OUT, label="c")
+        t1 = DenseTensor(jnp.ones((2, 2)), (idx_a, idx_b))
+        t2 = DenseTensor(jnp.ones((2, 2)), (idx_a, idx_c))
+        with pytest.raises(ValueError, match="label mismatch"):
+            t1 - t2
+
 
 class TestSymmetricTensorArithmetic:
     def test_mul(self, u1_sym_tensor_2leg):
@@ -495,6 +540,44 @@ class TestSymmetricTensorArithmetic:
     def test_add_mixed_type_raises(self, u1_sym_tensor_2leg, small_dense_matrix):
         with pytest.raises(TypeError, match="Cannot add"):
             u1_sym_tensor_2leg + small_dense_matrix
+
+    def test_add_mismatched_labels_raises(self, u1):
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        t1 = SymmetricTensor.random_normal(
+            (
+                TensorIndex(u1, charges, FlowDirection.IN, label="a"),
+                TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+            ),
+            key=jax.random.PRNGKey(0),
+        )
+        t2 = SymmetricTensor.random_normal(
+            (
+                TensorIndex(u1, charges, FlowDirection.IN, label="a"),
+                TensorIndex(u1, charges, FlowDirection.OUT, label="c"),
+            ),
+            key=jax.random.PRNGKey(1),
+        )
+        with pytest.raises(ValueError, match="label mismatch"):
+            t1 + t2
+
+    def test_sub_mismatched_labels_raises(self, u1):
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        t1 = SymmetricTensor.random_normal(
+            (
+                TensorIndex(u1, charges, FlowDirection.IN, label="a"),
+                TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+            ),
+            key=jax.random.PRNGKey(0),
+        )
+        t2 = SymmetricTensor.random_normal(
+            (
+                TensorIndex(u1, charges, FlowDirection.IN, label="a"),
+                TensorIndex(u1, charges, FlowDirection.OUT, label="c"),
+            ),
+            key=jax.random.PRNGKey(1),
+        )
+        with pytest.raises(ValueError, match="label mismatch"):
+            t1 - t2
 
     def test_block_structure_preserved(self, u1_sym_tensor_2leg):
         t = u1_sym_tensor_2leg
