@@ -409,8 +409,35 @@ class TestFromNetfile:
 
 class TestToTensorNetwork:
     def test_to_tensor_network_contracts_same(self):
-        A = _make_dense((3, 4), ("i", "j"), seed=80)
-        B = _make_dense((4, 5), ("j", "k"), seed=81)
+        # Bond leg "j" must have compatible flows (IN on A, OUT on B)
+        # so that to_tensor_network() can actually connect them.
+        u1 = U1Symmetry()
+        rng_a = np.random.RandomState(80)
+        rng_b = np.random.RandomState(81)
+        data_a = jnp.array(rng_a.randn(3, 4), dtype=jnp.float32)
+        data_b = jnp.array(rng_b.randn(4, 5), dtype=jnp.float32)
+        A = DenseTensor(
+            data_a,
+            (
+                TensorIndex(
+                    u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="i"
+                ),
+                TensorIndex(
+                    u1, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="j"
+                ),
+            ),
+        )
+        B = DenseTensor(
+            data_b,
+            (
+                TensorIndex(
+                    u1, np.zeros(4, dtype=np.int32), FlowDirection.IN, label="j"
+                ),
+                TensorIndex(
+                    u1, np.zeros(5, dtype=np.int32), FlowDirection.IN, label="k"
+                ),
+            ),
+        )
 
         bp = NetworkBlueprint("A: i, j\nB: j, k\nTOUT: i, k")
         bp.put_tensors({"A": A, "B": B})

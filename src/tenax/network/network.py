@@ -447,6 +447,37 @@ class TensorNetwork:
                 tensor = tensor.relabels(relabel_map[node])
             relabeled_tensors.append(tensor)
 
+        # Disambiguate duplicate labels on disconnected legs.
+        # After edge-relabeling, any label appearing on multiple tensors that
+        # is NOT an intentionally-shared bond label must be renamed so that
+        # _labels_to_subscripts treats them as independent free legs.
+        bonded_label_pairs: set[tuple[int, Label]] = set()
+        node_index = {n: i for i, n in enumerate(nodes)}
+        for node_a, label_a, node_b, label_b in internal_edges:
+            # After relabeling, both sides share the same label.
+            effective_a = relabel_map[node_a].get(label_a, label_a)
+            bonded_label_pairs.add((node_index[node_a], effective_a))
+            bonded_label_pairs.add((node_index[node_b], effective_a))
+
+        # Find labels that appear on multiple tensors but aren't bonded
+        label_occurrences: dict[Label, list[int]] = {}
+        for ti, tensor in enumerate(relabeled_tensors):
+            for lbl in tensor.labels():
+                label_occurrences.setdefault(lbl, []).append(ti)
+
+        for lbl, tensor_idxs in label_occurrences.items():
+            if len(tensor_idxs) <= 1:
+                continue
+            # Check if ALL occurrences are bonded (intentional)
+            all_bonded = all((ti, lbl) in bonded_label_pairs for ti in tensor_idxs)
+            if all_bonded:
+                continue
+            # Disambiguate: rename on all tensors except the first occurrence
+            for ti in tensor_idxs[1:]:
+                if (ti, lbl) not in bonded_label_pairs:
+                    fresh = _fresh_label()
+                    relabeled_tensors[ti] = relabeled_tensors[ti].relabel(lbl, fresh)
+
         # Now use the label-based subscript builder
         subscripts, auto_output_indices = _labels_to_subscripts(
             relabeled_tensors, output_labels
