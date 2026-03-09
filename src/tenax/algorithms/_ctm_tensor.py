@@ -1381,20 +1381,154 @@ def compute_energy_ctm_tensor(
     return (E_h + E_v).real
 
 
-def _env_to_dense_standard(env: CTMTensorEnv):
-    """Convert CTMTensorEnv to dense CTMEnvironment for RDM computation."""
-    from tenax.algorithms.ipeps import CTMEnvironment
+def _rdm2x1_tensor_2site(
+    A: Tensor,
+    B: Tensor,
+    env_A: CTMTensorEnv,
+    env_B: CTMTensorEnv,
+) -> jax.Array:
+    """Horizontal 2×1 RDM for checkerboard (A left, B right).
 
-    return CTMEnvironment(
-        C1=env.C1.todense(),
-        C2=env.C2.todense(),
-        C3=env.C3.todense(),
-        C4=env.C4.todense(),
-        T1=env.T1.todense(),
-        T2=env.T2.todense(),
-        T3=env.T3.todense(),
-        T4=env.T4.todense(),
+    Mixed environment::
+
+        C1_A — T1_A — T1_B — C2_B
+        |        |       |       |
+        T4_A   ao_A    ao_B    T2_B
+        |        |       |       |
+        C4_A — T3_A — T3_B — C3_B
+    """
+    ao_A = _build_double_layer_open_tensor(A)
+    ao_B = _build_double_layer_open_tensor(B)
+
+    # Right-side copies from env_B
+    T1_R = env_B.T1.relabels({"t1_l": "t1_lR", "u2": "u2R", "t1_r": "t1_rR"})
+    T3_R = env_B.T3.relabels({"t3_r": "t3_rR", "d2": "d2R", "t3_l": "t3_lR"})
+    ao_R = ao_B.relabels(
+        {
+            "u2": "u2R",
+            "d2": "d2R",
+            "l2": "l2R",
+            "r2": "r2R",
+            "phys": "phys_R",
+            "phys_bra": "phys_braR",
+        }
     )
+
+    # Left boundary from env_A
+    C1 = env_A.C1.relabel("c1_r", "t1_l")
+    UL = contract(C1, env_A.T1)
+    C4 = env_A.C4.relabel("c4_u", "t3_r")
+    LL = contract(C4, env_A.T3)
+    T4 = env_A.T4.relabels({"t4_d": "c1_d", "t4_u": "c4_r"})
+    UL_T4 = contract(UL, T4)
+    Lenv = contract(UL_T4, LL)
+
+    # Right boundary from env_B
+    C2 = env_B.C2.relabel("c2_l", "t1_rR")
+    UR = contract(T1_R, C2)
+    C3 = env_B.C3.relabel("c3_l", "t3_lR")
+    LR = contract(T3_R, C3)
+    T2 = env_B.T2.relabels({"t2_u": "c2_d", "r2": "r2R", "t2_d": "c3_u"})
+    UR_T2 = contract(UR, T2)
+    Renv = contract(UR_T2, LR)
+
+    # Contract with site tensors
+    Lenv_ao = contract(Lenv, ao_A)
+    Renv_ao = contract(Renv, ao_R)
+    Renv_ao = Renv_ao.relabels({"t1_lR": "t1_r", "t3_rR": "t3_l", "l2R": "r2"})
+    rdm_t = contract(
+        Lenv_ao,
+        Renv_ao,
+        output_labels=["phys", "phys_R", "phys_bra", "phys_braR"],
+    )
+
+    rdm = rdm_t.todense()
+    d = rdm.shape[0]
+    rdm_mat = rdm.reshape(d * d, d * d)
+    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
+    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    return rdm_mat.reshape(d, d, d, d)
+
+
+def _rdm1x2_tensor_2site(
+    A: Tensor,
+    B: Tensor,
+    env_A: CTMTensorEnv,
+    env_B: CTMTensorEnv,
+) -> jax.Array:
+    """Vertical 1×2 RDM for checkerboard (A top, B bottom).
+
+    Mixed environment::
+
+        C1_A — T1_A — C2_A
+        |        |       |
+        T4_A   ao_A    T2_A
+        |        |       |
+        T4_B   ao_B    T2_B
+        |        |       |
+        C4_B — T3_B — C3_B
+    """
+    ao_A = _build_double_layer_open_tensor(A)
+    ao_B = _build_double_layer_open_tensor(B)
+
+    # Bottom copies from env_B
+    T4_B = env_B.T4.relabels({"t4_d": "t4_dB", "l2": "l2B", "t4_u": "t4_uB"})
+    T2_B = env_B.T2.relabels({"t2_u": "t2_uB", "r2": "r2B", "t2_d": "t2_dB"})
+    ao_Br = ao_B.relabels(
+        {
+            "u2": "u2B",
+            "d2": "d2B",
+            "l2": "l2B",
+            "r2": "r2B",
+            "phys": "phys_B",
+            "phys_bra": "phys_braB",
+        }
+    )
+
+    # Top row from env_A
+    C1 = env_A.C1.relabel("c1_r", "t1_l")
+    C2 = env_A.C2.relabel("c2_l", "t1_r")
+    C1_T1 = contract(C1, env_A.T1)
+    top_row = contract(C1_T1, C2)
+
+    # Top env row from env_A
+    T4_T = env_A.T4.relabels({"t4_d": "c1_d"})
+    T2_T = env_A.T2.relabels({"t2_u": "c2_d"})
+    top_T4 = contract(top_row, T4_T)
+    env_row1 = contract(top_T4, T2_T)
+
+    # Contract with ao_A (top site)
+    site1 = contract(env_row1, ao_A)
+
+    # Bottom: T4_B · ao_B
+    T4_ao_B = contract(T4_B, ao_Br)
+    T4_ao_B = T4_ao_B.relabels({"u2B": "d2", "t4_dB": "t4_u"})
+    site12 = contract(site1, T4_ao_B)
+
+    # T2_B
+    T2_B = T2_B.relabel("t2_uB", "t2_d")
+    site12_r = contract(site12, T2_B)
+
+    # Bottom row from env_B
+    C4 = env_B.C4.relabel("c4_u", "t3_r")
+    T3 = env_B.T3.relabel("d2", "d2B")
+    C3 = env_B.C3.relabel("c3_l", "t3_l")
+    C4_T3 = contract(C4, T3)
+    bot_row = contract(C4_T3, C3)
+
+    bot_row = bot_row.relabels({"c4_r": "t4_uB", "c3_u": "t2_dB"})
+    rdm_t = contract(
+        site12_r,
+        bot_row,
+        output_labels=["phys", "phys_B", "phys_bra", "phys_braB"],
+    )
+
+    rdm = rdm_t.todense()
+    d = rdm.shape[0]
+    rdm_mat = rdm.reshape(d * d, d * d)
+    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
+    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    return rdm_mat.reshape(d, d, d, d)
 
 
 def compute_energy_ctm_tensor_2site(
@@ -1407,7 +1541,8 @@ def compute_energy_ctm_tensor_2site(
 ) -> jax.Array:
     """Compute energy per site for a 2-site checkerboard iPEPS.
 
-    Converts to dense and delegates to ``compute_energy_ctm_2site``.
+    Uses native Tensor contractions for the RDM computation, avoiding
+    densification of the chi-dimensional environment.
 
     Args:
         A:                Site tensor for sublattice A.
@@ -1420,18 +1555,17 @@ def compute_energy_ctm_tensor_2site(
     Returns:
         Scalar energy per site.
     """
-    from tenax.algorithms.ipeps import compute_energy_ctm_2site
-
-    A_d = A.todense()
-    B_d = B.todense()
     if d is None:
-        d = A_d.shape[-1]
+        phys_idx = [i for i in A.indices if i.label == "phys"]
+        d = phys_idx[0].dim if phys_idx else A.indices[-1].dim
 
     if isinstance(hamiltonian_gate, Tensor):
         H = hamiltonian_gate.todense().reshape(d, d, d, d)
     else:
         H = hamiltonian_gate.reshape(d, d, d, d)
 
-    std_env_A = _env_to_dense_standard(env_A)
-    std_env_B = _env_to_dense_standard(env_B)
-    return compute_energy_ctm_2site(A_d, B_d, std_env_A, std_env_B, H, d)
+    rdm_h = _rdm2x1_tensor_2site(A, B, env_A, env_B)
+    rdm_v = _rdm1x2_tensor_2site(A, B, env_A, env_B)
+    E_h = jnp.einsum("ijkl,ijkl->", rdm_h, H)
+    E_v = jnp.einsum("ijkl,ijkl->", rdm_v, H)
+    return (E_h + E_v).real
