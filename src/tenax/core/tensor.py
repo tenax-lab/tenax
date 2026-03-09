@@ -122,6 +122,29 @@ def _koszul_sign(parities: list[int] | tuple[int, ...], perm: tuple[int, ...]) -
     return sign
 
 
+def _check_add_indices(a: tuple[TensorIndex, ...], b: tuple[TensorIndex, ...]) -> None:
+    """Validate that two tensors have matching indices for addition."""
+    if len(a) != len(b):
+        raise ValueError(
+            f"Cannot add tensors with different ranks: {len(a)} vs {len(b)}."
+        )
+    for i, (ai, bi) in enumerate(zip(a, b)):
+        if ai.label != bi.label:
+            raise ValueError(
+                f"Index {i} label mismatch: {ai.label!r} vs {bi.label!r}. "
+                f"Relabel tensors to match before adding."
+            )
+        if ai.dim != bi.dim:
+            raise ValueError(
+                f"Index {i} ({ai.label!r}) dimension mismatch: {ai.dim} vs {bi.dim}."
+            )
+        if ai.flow != bi.flow:
+            raise ValueError(
+                f"Index {i} ({ai.label!r}) flow mismatch: "
+                f"{ai.flow.name} vs {bi.flow.name}."
+            )
+
+
 def _compute_valid_blocks(
     indices: tuple[TensorIndex, ...],
     target: int | None = None,
@@ -556,11 +579,13 @@ class DenseTensor(Tensor):
     def __add__(self, other: Tensor) -> DenseTensor:
         if not isinstance(other, DenseTensor):
             other = DenseTensor(other.todense(), other.indices)
+        _check_add_indices(self._indices, other._indices)
         return DenseTensor(self._data + other._data, self._indices)
 
     def __sub__(self, other: Tensor) -> DenseTensor:
         if not isinstance(other, DenseTensor):
             other = DenseTensor(other.todense(), other.indices)
+        _check_add_indices(self._indices, other._indices)
         return DenseTensor(self._data - other._data, self._indices)
 
     def __neg__(self) -> DenseTensor:
@@ -1076,6 +1101,7 @@ class SymmetricTensor(Tensor):
                 f"Cannot add SymmetricTensor and {type(other).__name__}; "
                 f"convert to matching type first."
             )
+        _check_add_indices(self._indices, other._indices)
         # Fast path: identical block structure → single buffer add
         if (
             self._block_keys == other._block_keys
