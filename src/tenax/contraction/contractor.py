@@ -479,7 +479,7 @@ def _contract_symmetric(
         # Non-identity target: bypass conservation validation
         obj = object.__new__(SymmetricTensor)
         obj._indices = out_indices_ordered
-        obj._blocks = output_blocks
+        obj._init_flat_buffer(output_blocks)
         return obj
     return SymmetricTensor(output_blocks, out_indices_ordered)
 

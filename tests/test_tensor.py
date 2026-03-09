@@ -227,6 +227,15 @@ class TestSymmetricTensorCreation:
         with pytest.raises(ValueError):
             SymmetricTensor.from_dense(dense, indices)
 
+    def test_flat_buffer_storage(self, u1_sym_tensor_2leg):
+        """SymmetricTensor stores data in a single flat buffer."""
+        t = u1_sym_tensor_2leg
+        assert hasattr(t, "_data"), "Expected flat buffer _data attribute"
+        assert isinstance(t._data, jax.Array), "_data should be a jax.Array"
+        assert t._data.ndim == 1, "_data should be 1D"
+        total = sum(v.size for v in t.blocks.values())
+        assert t._data.size == total
+
 
 class TestSymmetricTensorOperations:
     def test_todense_shape(self, u1_sym_tensor_2leg):

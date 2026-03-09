@@ -322,10 +322,10 @@ def _truncated_svd_symmetric(
         # Bypass validation for non-identity targets
         U_tensor = object.__new__(SymmetricTensor)
         U_tensor._indices = U_indices
-        U_tensor._blocks = U_blocks
+        U_tensor._init_flat_buffer(U_blocks)
         Vh_tensor = object.__new__(SymmetricTensor)
         Vh_tensor._indices = Vh_indices
-        Vh_tensor._blocks = Vh_blocks
+        Vh_tensor._init_flat_buffer(Vh_blocks)
     else:
         U_tensor = SymmetricTensor(U_blocks, U_indices)
         Vh_tensor = SymmetricTensor(Vh_blocks, Vh_indices)

@@ -563,7 +563,7 @@ class TestSymmetricBlockSparseDMRG:
         # Pad right: (v0, p0, p1) → (v0, p0, p1, _pad_r)
         padded = _pad_boundary_symmetric(t_3d, pad_left=False)
         assert padded.ndim == 4
-        for key, arr in padded._blocks.items():
+        for key, arr in padded.blocks.items():
             assert arr.shape == (2, 2, 2, 1), f"Expected (2,2,2,1) but got {arr.shape}"
 
         # Unpad right: (v0, p0, p1, _pad_r) → (v0, p0, p1)
