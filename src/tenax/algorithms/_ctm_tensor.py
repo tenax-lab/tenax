@@ -88,9 +88,9 @@ def _eigh_projector_symmetric(
     is the sector's dense block of C_ig, then eigendecomposes :math:`\rho_q`.
     Eigenvalues are merged across sectors and globally truncated to *chi*.
 
-    The result is wrapped via ``from_dense`` with trivial ``chi_new`` charges
-    so that downstream label-based contractions remain charge-consistent with
-    the existing CTM environment structure.
+    The projector is constructed directly as a SymmetricTensor with
+    correct per-sector charges on the ``chi_new`` index (charge = fused
+    charge of the originating sector), preserving full block-sparse structure.
 
     Args:
         C1g: Grown corner SymmetricTensor ``(fused, col1)``.
@@ -104,7 +104,6 @@ def _eigh_projector_symmetric(
     col_pos = 1 - fused_pos  # the other leg
     fused_idx = C1g.indices[fused_pos]
     sym = fused_idx.symmetry
-    fused_total = fused_idx.dim
 
     # Group blocks by fused charge for each corner
     def _group_by_fused(Cg: SymmetricTensor) -> dict[int, list[tuple[int, jax.Array]]]:
@@ -167,29 +166,47 @@ def _eigh_projector_symmetric(
     for _, fq, idx in all_eig_pairs[:n_keep]:
         sector_keep.setdefault(fq, []).append(idx)
 
-    # Assemble dense projector from per-sector eigenvectors, then wrap via
-    # from_dense with trivial chi_new charges.  Only the identity-charge
-    # sector survives conservation filtering, matching the dense path.
-    P_dense = jnp.zeros((fused_total, n_keep), dtype=C1g.dtype)
-    col = 0
+    # Build projector blocks directly with correct per-sector charges.
+    # Each kept eigenvector from sector fq gets chi_new charge = fq
+    # (conservation: flow_fused*fq + flow_chi_new*q_chi = 0 → q_chi = fq).
+    chi_new_charges: list[int] = []
+    proj_blocks: dict[tuple[int, ...], jax.Array] = {}
+
     for fq in sorted(sector_keep.keys()):
         keep_indices = sorted(sector_keep[fq], reverse=True)
         n_q = len(keep_indices)
+        chi_new_charges.extend([fq] * n_q)
 
         eigvecs, _, fused_dim, row_idx = sector_results[fq]
         V_q = eigvecs[:, keep_indices]  # (fused_dim, n_q)
-
-        P_dense = P_dense.at[row_idx, col : col + n_q].set(V_q)
-        col += n_q
-
-    P_dense = jax.lax.stop_gradient(P_dense)
+        V_q = jax.lax.stop_gradient(V_q)
+        proj_blocks[(fq, fq)] = V_q
 
     chi_new_idx = TensorIndex(
-        sym, np.zeros(n_keep, dtype=np.int32), OUT, label="chi_new"
+        sym, np.array(chi_new_charges, dtype=np.int32), OUT, label="chi_new"
     )
-    return SymmetricTensor.from_dense(
-        P_dense, (fused_idx, chi_new_idx), tol=float("inf")
-    )
+    # Construct SymmetricTensor directly — blocks already satisfy conservation.
+    obj = object.__new__(SymmetricTensor)
+    obj._indices = (fused_idx, chi_new_idx)
+    sorted_keys = sorted(proj_blocks.keys())
+    if sorted_keys:
+        flat_parts = [proj_blocks[k].ravel() for k in sorted_keys]
+        obj._data = jnp.concatenate(flat_parts)
+    else:
+        obj._data = jnp.zeros(0, dtype=C1g.dtype)
+    obj._block_keys = tuple(sorted_keys)
+    shapes = [proj_blocks[k].shape for k in sorted_keys]
+    obj._block_shapes = tuple(shapes)
+    offsets: list[int] = []
+    offset = 0
+    for s in shapes:
+        size = 1
+        for d in s:
+            size *= d
+        offsets.append(offset)
+        offset += size
+    obj._block_offsets = tuple(offsets)
+    return obj
 
 
 def _compute_projector_tensor(
@@ -264,11 +281,10 @@ def _compute_projector_tensor(
     # JAX tracers (during AD), in which case fall back to dense path
     # since eigenvalue sorting requires concrete values.
     if isinstance(C1g, SymmetricTensor) and isinstance(C4g, SymmetricTensor):
-        has_tracers = any(
-            isinstance(b, jax.core.Tracer)
-            for b in (*C1g.blocks.values(), *C4g.blocks.values())
+        has_tracers = isinstance(C1g._data, jax.core.Tracer) or isinstance(
+            C4g._data, jax.core.Tracer
         )
-        if not has_tracers and C1g.blocks and C4g.blocks:
+        if not has_tracers and C1g.n_blocks > 0 and C4g.n_blocks > 0:
             return _eigh_projector_symmetric(C1g, C4g, chi)
 
     C1g_dense = C1g.todense()
@@ -767,16 +783,11 @@ def _ctm_tensor_move_bottom(
 def _normalize_tensor(T: Tensor) -> Tensor:
     """Normalize tensor by max abs value, matching dense CTM convention.
 
-    Uses ``data / (norm + EPS)`` (single division) rather than
-    ``data * (1/norm)`` (reciprocal + multiplication) to avoid
-    O(eps) floating-point differences vs the dense path.
+    Uses polymorphic ``max_abs()`` and scalar division so that
+    SymmetricTensor stays block-sparse without a dense round-trip.
     """
-    data = T.todense()
-    norm = jnp.max(jnp.abs(data))
-    data_normed = data / (norm + EPS)
-    if isinstance(T, SymmetricTensor):
-        return SymmetricTensor.from_dense(data_normed, T.indices, tol=float("inf"))
-    return type(T)(data_normed, T.indices)
+    norm = T.max_abs()
+    return T * (1.0 / (norm + EPS))
 
 
 def _renormalize_tensor_env(env: CTMTensorEnv) -> CTMTensorEnv:
