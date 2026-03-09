@@ -397,7 +397,7 @@ class TestSplitCTMSymmetric:
         chi, chi_I = 4, 2
         env = initialize_split_ctm_tensor_env(A, chi, chi_I)
         # Check initial block count
-        init_blocks = len(env.C1._blocks)
+        init_blocks = env.C1.n_blocks
         # Run 3 sweeps
         for _ in range(3):
             env = _split_ctm_tensor_sweep(env, A, chi, chi_I, True)
@@ -406,7 +406,7 @@ class TestSplitCTMSymmetric:
             assert isinstance(t, SymmetricTensor), (
                 f"Expected SymmetricTensor, got {type(t)}"
             )
-            assert len(t._blocks) >= init_blocks, (
-                f"Block count dropped from {init_blocks} to {len(t._blocks)}: "
+            assert t.n_blocks >= init_blocks, (
+                f"Block count dropped from {init_blocks} to {t.n_blocks}: "
                 f"charge sectors collapsed"
             )

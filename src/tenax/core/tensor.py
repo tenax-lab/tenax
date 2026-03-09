@@ -381,11 +381,16 @@ def inner(a: Tensor, b: Tensor) -> jax.Array:
     if isinstance(a, DenseTensor) and isinstance(b, DenseTensor):
         return jnp.sum(jnp.conj(a._data) * b._data)
     if isinstance(a, SymmetricTensor) and isinstance(b, SymmetricTensor):
-        # Both must have matching block keys
+        # Fast path: identical block structure → single buffer dot
+        if a._block_keys == b._block_keys and a._block_shapes == b._block_shapes:
+            return jnp.sum(jnp.conj(a._data) * b._data)
+        # Slow path: iterate over matching keys
+        a_blocks = a.blocks
+        b_blocks = b.blocks
         total = jnp.zeros((), dtype=a.dtype)
-        for key in a._blocks:
-            if key in b._blocks:
-                total = total + jnp.sum(jnp.conj(a._blocks[key]) * b._blocks[key])
+        for key in a._block_keys:
+            if key in b_blocks:
+                total = total + jnp.sum(jnp.conj(a_blocks[key]) * b_blocks[key])
         return total
     # Mixed types: fall back to dense
     return jnp.sum(jnp.conj(a.todense()) * b.todense())
@@ -618,8 +623,29 @@ class SymmetricTensor(Tensor):
         indices: tuple[TensorIndex, ...],
     ) -> None:
         self._indices = tuple(indices)
-        self._blocks: dict[BlockKey, jax.Array] = dict(blocks)
+        self._init_flat_buffer(blocks)
         self._validate()
+
+    def _init_flat_buffer(self, blocks: dict[BlockKey, jax.Array]) -> None:
+        """Pack block arrays into a single flat 1D buffer with index metadata."""
+        sorted_keys = sorted(blocks.keys())
+        if sorted_keys:
+            flat_parts = [blocks[k].ravel() for k in sorted_keys]
+            self._data: jax.Array = jnp.concatenate(flat_parts)
+        else:
+            self._data = jnp.zeros(0, dtype=jnp.float64)
+        self._block_keys: tuple[BlockKey, ...] = tuple(sorted_keys)
+        shapes = [blocks[k].shape for k in sorted_keys]
+        self._block_shapes: tuple[tuple[int, ...], ...] = tuple(shapes)
+        offsets = []
+        offset = 0
+        for s in shapes:
+            offsets.append(offset)
+            size = 1
+            for d in s:
+                size *= d
+            offset += size
+        self._block_offsets: tuple[int, ...] = tuple(offsets)
 
     def _validate(self) -> None:
         """Verify all block keys satisfy the symmetry conservation law."""
@@ -628,7 +654,7 @@ class SymmetricTensor(Tensor):
         sym = self._indices[0].symmetry
         identity = sym.identity()
 
-        for key in self._blocks:
+        for key in self._block_keys:
             effective = [
                 np.array([int(idx.flow) * int(charge)], dtype=np.int32)
                 for idx, charge in zip(self._indices, key)
@@ -640,28 +666,54 @@ class SymmetricTensor(Tensor):
                     f"fused={fused_val}, expected identity={identity}"
                 )
 
+    def _get_block(self, idx: int) -> jax.Array:
+        """Return the block array at position idx in sorted key order."""
+        offset = self._block_offsets[idx]
+        shape = self._block_shapes[idx]
+        size = 1
+        for d in shape:
+            size *= d
+        return self._data[offset : offset + size].reshape(shape)
+
     # --- Pytree interface ---
 
     def tree_flatten(
         self,
-    ) -> tuple[list[jax.Array], tuple[list[BlockKey], tuple[TensorIndex, ...]]]:
-        # Sort keys for deterministic ordering
-        keys = sorted(self._blocks.keys())
-        arrays = [self._blocks[k] for k in keys]
-        return arrays, (keys, self._indices)
+    ) -> tuple[
+        list[jax.Array],
+        tuple[
+            tuple[BlockKey, ...],
+            tuple[tuple[int, ...], ...],
+            tuple[int, ...],
+            tuple[TensorIndex, ...],
+        ],
+    ]:
+        # Single leaf: the flat data buffer
+        return [self._data], (
+            self._block_keys,
+            self._block_shapes,
+            self._block_offsets,
+            self._indices,
+        )
 
     @classmethod
     def tree_unflatten(
         cls,
-        aux: tuple[list[BlockKey], tuple[TensorIndex, ...]],
+        aux: tuple[
+            tuple[BlockKey, ...],
+            tuple[tuple[int, ...], ...],
+            tuple[int, ...],
+            tuple[TensorIndex, ...],
+        ],
         children: list[jax.Array],
     ) -> SymmetricTensor:
-        keys, indices = aux
-        blocks = dict(zip(keys, children))
-        # Skip validation (keys are already validated at construction time)
+        block_keys, block_shapes, block_offsets, indices = aux
         obj = object.__new__(cls)
+        obj._data = children[0]
+        obj._block_keys = block_keys
+        obj._block_shapes = block_shapes
+        obj._block_offsets = block_offsets
         obj._indices = indices
-        obj._blocks = blocks
         return obj
 
     # --- Factory methods ---
@@ -695,7 +747,7 @@ class SymmetricTensor(Tensor):
             # which would fail standard validation. Bypass it.
             obj = object.__new__(cls)
             obj._indices = tuple(indices)
-            obj._blocks = dict(blocks)
+            obj._init_flat_buffer(dict(blocks))
             return obj
         return cls(blocks, indices)
 
@@ -736,7 +788,7 @@ class SymmetricTensor(Tensor):
             # which would fail standard validation. Bypass it.
             obj = object.__new__(cls)
             obj._indices = tuple(indices)
-            obj._blocks = dict(blocks)
+            obj._init_flat_buffer(dict(blocks))
             return obj
         return cls(blocks, indices)
 
@@ -816,19 +868,20 @@ class SymmetricTensor(Tensor):
 
     @property
     def dtype(self) -> Any:
-        if not self._blocks:
-            return jnp.float64
-        return next(iter(self._blocks.values())).dtype
+        return self._data.dtype if self._data.size > 0 else jnp.float64
 
     @property
     def n_blocks(self) -> int:
         """Number of non-empty charge sectors."""
-        return len(self._blocks)
+        return len(self._block_keys)
 
     @property
     def blocks(self) -> dict[BlockKey, jax.Array]:
-        """Read-only view of the block dict."""
-        return self._blocks
+        """Reconstruct block dict from flat buffer (compatibility layer)."""
+        return {
+            self._block_keys[i]: self._get_block(i)
+            for i in range(len(self._block_keys))
+        }
 
     def todense(self) -> jax.Array:
         """Materialize the full dense tensor (for testing/debugging only).
@@ -839,13 +892,13 @@ class SymmetricTensor(Tensor):
             Dense JAX array of shape tuple(idx.dim for idx in indices).
         """
         shape = tuple(idx.dim for idx in self._indices)
-        if not self._blocks:
+        if self.n_blocks == 0:
             return jnp.zeros(shape, dtype=self.dtype)
 
         # Start from zeros and scatter blocks using JAX-compatible ops
         # so that todense() works under JAX tracing (e.g. inside jax.grad).
         result = jnp.zeros(shape, dtype=self.dtype)
-        for key, block in self._blocks.items():
+        for key, block in self.blocks.items():
             masks, _ = _block_slices(self._indices, key)
             idx_arrays = [np.where(m)[0] for m in masks]
             grid = np.ix_(*idx_arrays)
@@ -854,11 +907,13 @@ class SymmetricTensor(Tensor):
         return result
 
     def conj(self) -> SymmetricTensor:
-        """Return conjugate tensor (conjugate all block arrays)."""
-        new_blocks = {k: jnp.conj(v) for k, v in self._blocks.items()}
+        """Return conjugate tensor (single flat buffer op)."""
         obj = object.__new__(SymmetricTensor)
+        obj._data = jnp.conj(self._data)
+        obj._block_keys = self._block_keys
+        obj._block_shapes = self._block_shapes
+        obj._block_offsets = self._block_offsets
         obj._indices = self._indices
-        obj._blocks = new_blocks
         return obj
 
     def dagger(self) -> SymmetricTensor:
@@ -876,7 +931,7 @@ class SymmetricTensor(Tensor):
         sym = self._indices[0].symmetry if self._indices else None
         new_indices = tuple(idx.dual() for idx in self._indices)
         new_blocks: dict[BlockKey, jax.Array] = {}
-        for key, block in self._blocks.items():
+        for key, block in self.blocks.items():
             new_key = (
                 tuple(int(sym.dual(np.array([q]))[0]) for q in key) if sym else key
             )
@@ -890,16 +945,18 @@ class SymmetricTensor(Tensor):
             new_blocks[new_key] = val
         obj = object.__new__(SymmetricTensor)
         obj._indices = new_indices
-        obj._blocks = new_blocks
+        obj._init_flat_buffer(new_blocks)
         return obj
 
     def bar(self) -> SymmetricTensor:
         """Element-wise conjugate with flipped flows. No charge dual, no twist."""
         new_indices = tuple(idx.flip_flow() for idx in self._indices)
-        new_blocks = {k: jnp.conj(v) for k, v in self._blocks.items()}
         obj = object.__new__(SymmetricTensor)
+        obj._data = jnp.conj(self._data)
+        obj._block_keys = self._block_keys
+        obj._block_shapes = self._block_shapes
+        obj._block_offsets = self._block_offsets
         obj._indices = new_indices
-        obj._blocks = new_blocks
         return obj
 
     def transpose(self, axes: tuple[int, ...]) -> SymmetricTensor:
@@ -919,7 +976,7 @@ class SymmetricTensor(Tensor):
         is_ferm = sym is not None and sym.is_fermionic
 
         new_blocks: dict[BlockKey, jax.Array] = {}
-        for key, block in self._blocks.items():
+        for key, block in self.blocks.items():
             new_key = tuple(key[i] for i in axes)
             transposed = jnp.transpose(block, axes)
             if is_ferm:
@@ -930,19 +987,21 @@ class SymmetricTensor(Tensor):
             new_blocks[new_key] = transposed
         obj = object.__new__(SymmetricTensor)
         obj._indices = new_indices
-        obj._blocks = new_blocks
+        obj._init_flat_buffer(new_blocks)
         return obj
 
     def norm(self) -> jax.Array:
         """Frobenius norm across all blocks."""
-        if not self._blocks:
+        if self.n_blocks == 0:
             return jnp.zeros((), dtype=self.dtype)
-        sq_norms = [jnp.sum(jnp.abs(v) ** 2) for v in self._blocks.values()]
-        return jnp.sqrt(sum(sq_norms))
+        return jnp.sqrt(jnp.sum(jnp.abs(self._data) ** 2))
 
     def block_shapes(self) -> dict[BlockKey, tuple[int, ...]]:
         """Return the shape of each stored block."""
-        return {k: v.shape for k, v in self._blocks.items()}
+        return {
+            self._block_keys[i]: self._block_shapes[i]
+            for i in range(len(self._block_keys))
+        }
 
     def relabel(self, old: Label, new: Label) -> SymmetricTensor:
         """Return a copy with one leg label renamed.
@@ -971,7 +1030,10 @@ class SymmetricTensor(Tensor):
             )
         obj = object.__new__(SymmetricTensor)
         obj._indices = tuple(new_indices)
-        obj._blocks = self._blocks
+        obj._data = self._data
+        obj._block_keys = self._block_keys
+        obj._block_shapes = self._block_shapes
+        obj._block_offsets = self._block_offsets
         return obj
 
     def relabels(self, mapping: dict[Label, Label]) -> SymmetricTensor:
@@ -990,14 +1052,19 @@ class SymmetricTensor(Tensor):
         )
         obj = object.__new__(SymmetricTensor)
         obj._indices = new_indices
-        obj._blocks = self._blocks
+        obj._data = self._data
+        obj._block_keys = self._block_keys
+        obj._block_shapes = self._block_shapes
+        obj._block_offsets = self._block_offsets
         return obj
 
     def __mul__(self, scalar: float) -> SymmetricTensor:
-        new_blocks = {k: v * scalar for k, v in self._blocks.items()}
         obj = object.__new__(SymmetricTensor)
         obj._indices = self._indices
-        obj._blocks = new_blocks
+        obj._data = self._data * scalar
+        obj._block_keys = self._block_keys
+        obj._block_shapes = self._block_shapes
+        obj._block_offsets = self._block_offsets
         return obj
 
     def __rmul__(self, scalar: float) -> SymmetricTensor:
@@ -1009,19 +1076,33 @@ class SymmetricTensor(Tensor):
                 f"Cannot add SymmetricTensor and {type(other).__name__}; "
                 f"convert to matching type first."
             )
-        # Union of block keys: add where both exist, copy where only one exists
+        # Fast path: identical block structure → single buffer add
+        if (
+            self._block_keys == other._block_keys
+            and self._block_shapes == other._block_shapes
+        ):
+            obj = object.__new__(SymmetricTensor)
+            obj._data = self._data + other._data
+            obj._block_keys = self._block_keys
+            obj._block_shapes = self._block_shapes
+            obj._block_offsets = self._block_offsets
+            obj._indices = self._indices
+            return obj
+        # Slow path: union of block keys
+        self_blocks = self.blocks
+        other_blocks = other.blocks
         new_blocks: dict[BlockKey, jax.Array] = {}
-        all_keys = set(self._blocks.keys()) | set(other._blocks.keys())
+        all_keys = set(self._block_keys) | set(other._block_keys)
         for key in all_keys:
-            if key in self._blocks and key in other._blocks:
-                new_blocks[key] = self._blocks[key] + other._blocks[key]
-            elif key in self._blocks:
-                new_blocks[key] = self._blocks[key]
+            if key in self_blocks and key in other_blocks:
+                new_blocks[key] = self_blocks[key] + other_blocks[key]
+            elif key in self_blocks:
+                new_blocks[key] = self_blocks[key]
             else:
-                new_blocks[key] = other._blocks[key]
+                new_blocks[key] = other_blocks[key]
         obj = object.__new__(SymmetricTensor)
         obj._indices = self._indices
-        obj._blocks = new_blocks
+        obj._init_flat_buffer(new_blocks)
         return obj
 
     def __sub__(self, other: Tensor) -> SymmetricTensor:
@@ -1035,12 +1116,12 @@ class SymmetricTensor(Tensor):
         return self.__mul__(-1.0)
 
     def max_abs(self) -> jax.Array:
-        if not self._blocks:
+        if self.n_blocks == 0:
             return jnp.zeros((), dtype=self.dtype)
-        return jnp.max(jnp.stack([jnp.max(jnp.abs(v)) for v in self._blocks.values()]))
+        return jnp.max(jnp.abs(self._data))
 
     def __repr__(self) -> str:
-        total_elements = sum(v.size for v in self._blocks.values())
+        total_elements = int(self._data.size)
         sym_name = self._indices[0].symmetry.__class__.__name__ if self._indices else ""
         # Short symmetry label: U1Symmetry -> U(1), ZnSymmetry(3) -> Z(3)
         sym = self._indices[0].symmetry if self._indices else None

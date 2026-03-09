@@ -938,17 +938,15 @@ def _pad_boundary_symmetric(t: SymmetricTensor, pad_left: bool) -> SymmetricTens
     if pad_left:
         trivial_idx = TensorIndex(sym, trivial_bond, FlowDirection.IN, label="_pad_l")
         new_indices = (trivial_idx,) + t.indices
-        new_blocks = {(0,) + key: arr[np.newaxis, :] for key, arr in t._blocks.items()}
+        new_blocks = {(0,) + key: arr[np.newaxis, :] for key, arr in t.blocks.items()}
     else:
         trivial_idx = TensorIndex(sym, trivial_bond, FlowDirection.OUT, label="_pad_r")
         new_indices = t.indices + (trivial_idx,)
-        new_blocks = {
-            key + (0,): arr[..., np.newaxis] for key, arr in t._blocks.items()
-        }
+        new_blocks = {key + (0,): arr[..., np.newaxis] for key, arr in t.blocks.items()}
 
     obj = object.__new__(SymmetricTensor)
     obj._indices = new_indices
-    obj._blocks = new_blocks
+    obj._init_flat_buffer(new_blocks)
     return obj
 
 
@@ -964,14 +962,14 @@ def _unpad_boundary_symmetric(t: SymmetricTensor, pad_left: bool) -> SymmetricTe
     """
     if pad_left:
         new_indices = t.indices[1:]
-        new_blocks = {key[1:]: arr[0] for key, arr in t._blocks.items()}
+        new_blocks = {key[1:]: arr[0] for key, arr in t.blocks.items()}
     else:
         new_indices = t.indices[:-1]
-        new_blocks = {key[:-1]: arr[..., 0] for key, arr in t._blocks.items()}
+        new_blocks = {key[:-1]: arr[..., 0] for key, arr in t.blocks.items()}
 
     obj = object.__new__(SymmetricTensor)
     obj._indices = new_indices
-    obj._blocks = new_blocks
+    obj._init_flat_buffer(new_blocks)
     return obj
 
 
@@ -1147,7 +1145,7 @@ def _blockwise_contract(
     # satisfy the standard conservation law for environment tensors).
     obj = object.__new__(SymmetricTensor)
     obj._indices = output_indices
-    obj._blocks = output_blocks
+    obj._init_flat_buffer(output_blocks)
     return obj
 
 

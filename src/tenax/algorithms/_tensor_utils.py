@@ -47,7 +47,7 @@ def _scale_bond_axis_symmetric(
     """Block-wise scaling for SymmetricTensor (same logic as fermionic_ipeps)."""
     new_blocks = {}
     idx = T.indices[axis]
-    for key, block in T._blocks.items():
+    for key, block in T.blocks.items():
         charge_val = key[axis]
         positions = np.where(idx.charges == charge_val)[0]
         block_size = block.shape[axis]
@@ -58,7 +58,7 @@ def _scale_bond_axis_symmetric(
 
     obj = object.__new__(SymmetricTensor)
     obj._indices = T._indices
-    obj._blocks = new_blocks
+    obj._init_flat_buffer(new_blocks)
     return obj
 
 
@@ -279,7 +279,7 @@ def _fuse_indices_symmetric(
     # If b is not adjacent to a, we need to transpose the block first
     new_blocks: dict[BlockKey, jax.Array] = {}
 
-    for key, block in T._blocks.items():
+    for key, block in T.blocks.items():
         qa = key[a]
         qb = key[b]
         q_f, offset = offset_map[(int(qa), int(qb))]
@@ -321,7 +321,7 @@ def _fuse_indices_symmetric(
 
     obj = object.__new__(SymmetricTensor)
     obj._indices = new_indices
-    obj._blocks = new_blocks
+    obj._init_flat_buffer(new_blocks)
     return obj
 
 
