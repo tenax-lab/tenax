@@ -1005,6 +1005,167 @@ class TestADSymmetric:
         assert np.isfinite(E_dense)
 
 
+class TestTensorSimpleUpdate:
+    """Tests for the Tensor-protocol simple update (Phase 1)."""
+
+    @staticmethod
+    def _make_dense_ipeps(key, D=2, d=2):
+        """Create a DenseTensor iPEPS site tensor with trivial charges."""
+        from tenax.core.index import FlowDirection, TensorIndex
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.core.tensor import DenseTensor
+
+        sym = U1Symmetry()
+        charges = np.zeros(D, dtype=np.int32)
+        phys_charges = np.zeros(d, dtype=np.int32)
+        data = jax.random.normal(key, (D, D, D, D, d))
+        data = data / (jnp.linalg.norm(data) + 1e-10)
+        indices = (
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        return DenseTensor(data, indices)
+
+    @staticmethod
+    def _make_symmetric_ipeps(key, D=2, d=2):
+        """Create a U(1) SymmetricTensor iPEPS site tensor."""
+        from tenax.core.index import FlowDirection, TensorIndex
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.core.tensor import SymmetricTensor
+
+        sym = U1Symmetry()
+        charges = np.zeros(D, dtype=np.int32)
+        phys_charges = np.zeros(d, dtype=np.int32)
+        indices = (
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        return SymmetricTensor.random_normal(indices, key)
+
+    @staticmethod
+    def _heisenberg_gate():
+        d = 2
+        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+        return H.reshape(d, d, d, d)
+
+    def test_horizontal_dense_tensor_runs(self):
+        """Horizontal simple update works with DenseTensor."""
+        from tenax.algorithms.ipeps import (
+            _make_trotter_gate_tensor,
+            _simple_update_horizontal_tensor,
+        )
+
+        A = self._make_dense_ipeps(jax.random.PRNGKey(0))
+        gate = _make_trotter_gate_tensor(self._heisenberg_gate(), dt=0.01)
+        D = 2
+        lam_h = jnp.ones(D)
+        lam_v = jnp.ones(D)
+
+        A_new, lam_new = _simple_update_horizontal_tensor(A, gate, lam_h, lam_v, D)
+        assert A_new.labels() == ("u", "d", "l", "r", "phys")
+        assert np.isfinite(float(A_new.norm()))
+
+    def test_vertical_dense_tensor_runs(self):
+        """Vertical simple update works with DenseTensor."""
+        from tenax.algorithms.ipeps import (
+            _make_trotter_gate_tensor,
+            _simple_update_vertical_tensor,
+        )
+
+        A = self._make_dense_ipeps(jax.random.PRNGKey(0))
+        gate = _make_trotter_gate_tensor(self._heisenberg_gate(), dt=0.01)
+        D = 2
+        lam_h = jnp.ones(D)
+        lam_v = jnp.ones(D)
+
+        A_new, lam_new = _simple_update_vertical_tensor(A, gate, lam_h, lam_v, D)
+        assert A_new.labels() == ("u", "d", "l", "r", "phys")
+        assert np.isfinite(float(A_new.norm()))
+
+    def test_symmetric_tensor_runs(self):
+        """Simple update works with SymmetricTensor."""
+        from tenax.algorithms.ipeps import (
+            _make_trotter_gate_tensor,
+            _simple_update_horizontal_tensor,
+            _simple_update_vertical_tensor,
+        )
+        from tenax.core.tensor import SymmetricTensor
+
+        A = self._make_symmetric_ipeps(jax.random.PRNGKey(0))
+        gate = _make_trotter_gate_tensor(
+            self._heisenberg_gate(), dt=0.01, site_tensor=A
+        )
+        D = 2
+        lam_h = jnp.ones(D)
+        lam_v = jnp.ones(D)
+
+        A_h, lam_h_new = _simple_update_horizontal_tensor(A, gate, lam_h, lam_v, D)
+        assert isinstance(A_h, SymmetricTensor)
+        assert A_h.labels() == ("u", "d", "l", "r", "phys")
+
+        A_v, lam_v_new = _simple_update_vertical_tensor(A_h, gate, lam_h_new, lam_v, D)
+        assert isinstance(A_v, SymmetricTensor)
+        assert np.isfinite(float(A_v.norm()))
+
+    def test_dense_tensor_energy_finite(self):
+        """DenseTensor simple update gives a finite Heisenberg energy."""
+        gate = self._heisenberg_gate()
+        A_dt = self._make_dense_ipeps(jax.random.PRNGKey(42))
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            num_imaginary_steps=20,
+            dt=0.05,
+            ctm=CTMConfig(chi=4, max_iter=10),
+        )
+        E_tensor, _, _ = ipeps(gate, A_dt, config)
+        assert np.isfinite(E_tensor)
+
+    def test_ipeps_dispatch_tensor(self):
+        """ipeps() correctly dispatches Tensor input to tensor path."""
+        from tenax.algorithms._ctm_tensor import CTMTensorEnv
+        from tenax.core.tensor import Tensor
+
+        gate = self._heisenberg_gate()
+        A = self._make_dense_ipeps(jax.random.PRNGKey(0))
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            num_imaginary_steps=10,
+            dt=0.05,
+            ctm=CTMConfig(chi=4, max_iter=10),
+        )
+        energy, A_opt, env = ipeps(gate, A, config)
+        assert isinstance(A_opt, Tensor)
+        assert isinstance(env, CTMTensorEnv)
+        assert np.isfinite(energy)
+
+    def test_ipeps_symmetric_runs(self):
+        """ipeps() with SymmetricTensor runs end-to-end."""
+        from tenax.algorithms._ctm_tensor import CTMTensorEnv
+        from tenax.core.tensor import SymmetricTensor
+
+        gate = self._heisenberg_gate()
+        A = self._make_symmetric_ipeps(jax.random.PRNGKey(0))
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            num_imaginary_steps=10,
+            dt=0.05,
+            ctm=CTMConfig(chi=4, max_iter=10),
+        )
+        energy, A_opt, env = ipeps(gate, A, config)
+        assert isinstance(A_opt, SymmetricTensor)
+        assert isinstance(env, CTMTensorEnv)
+        assert np.isfinite(energy)
+
+
 class TestSplitCTMRG:
     """Tests for Split-CTMRG (Phase 3)."""
 

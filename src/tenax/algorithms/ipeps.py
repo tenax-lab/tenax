@@ -27,10 +27,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._tensor_utils import scale_bond_axis
+from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor, Tensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 from tenax.network.network import TensorNetwork
 
 
@@ -147,11 +149,9 @@ class SplitCTMEnvironment(NamedTuple):
 
 def ipeps(
     hamiltonian_gate: jax.Array,
-    initial_peps: TensorNetwork | jax.Array | tuple[jax.Array, jax.Array] | None,
+    initial_peps: TensorNetwork | jax.Array | Tensor | tuple | None,
     config: iPEPSConfig,
-) -> tuple[
-    float, TensorNetwork, CTMEnvironment | tuple[CTMEnvironment, CTMEnvironment]
-]:
+) -> tuple[float, TensorNetwork | Tensor, object]:
     """Run iPEPS simple update + CTM for a 2D quantum lattice model.
 
     Algorithm overview:
@@ -165,8 +165,8 @@ def ipeps(
     Args:
         hamiltonian_gate: The 2-site Hamiltonian as a 4-leg tensor of shape
                           (d, d, d, d) representing H on a bond.
-        initial_peps:     TensorNetwork, raw JAX array, or tuple of two JAX
-                          arrays ``(A, B)`` for the 2-site unit cell. ``None``
+        initial_peps:     TensorNetwork, raw JAX array, Tensor (DenseTensor or
+                          SymmetricTensor), tuple for 2-site, or ``None``
                           for random initialization.
         config:           iPEPSConfig.
 
@@ -178,6 +178,10 @@ def ipeps(
         if isinstance(initial_peps, tuple):
             init_2site = initial_peps
         return _ipeps_2site(hamiltonian_gate, init_2site, config)
+
+    # Dispatch Tensor-protocol path (DenseTensor / SymmetricTensor)
+    if isinstance(initial_peps, Tensor):
+        return _ipeps_tensor(hamiltonian_gate, initial_peps, config)
 
     # Get site tensor
     if initial_peps is None:
@@ -473,6 +477,281 @@ def _simple_update_vertical(
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Simple update on the vertical bond (A.d ↔ B.u, B=A by periodicity)."""
     return _simple_update_bond(A, lam_h, lam_v, gate, max_bond_dim, lambdas, "vertical")
+
+
+# ------------------------------------------------------------------ #
+# Tensor-protocol simple update (polymorphic DenseTensor/SymmetricTensor) #
+# ------------------------------------------------------------------ #
+
+
+def _absorb_lambdas_tensor(A: Tensor, lam_h: jax.Array, lam_v: jax.Array) -> Tensor:
+    """Absorb lambda vectors into all virtual legs of a 5-leg site tensor.
+
+    Args:
+        A:     Site tensor with labels (u, d, l, r, phys).
+        lam_h: Horizontal bond lambda vector.
+        lam_v: Vertical bond lambda vector.
+
+    Returns:
+        Tensor with lambdas absorbed on u(lam_v), d(lam_v), l(lam_h), r(lam_h).
+    """
+    result = scale_bond_axis(A, "u", lam_v)
+    result = scale_bond_axis(result, "d", lam_v)
+    result = scale_bond_axis(result, "l", lam_h)
+    result = scale_bond_axis(result, "r", lam_h)
+    return result
+
+
+def _simple_update_horizontal_tensor(
+    A: Tensor,
+    gate: Tensor,
+    lam_h: jax.Array,
+    lam_v: jax.Array,
+    max_D: int,
+) -> tuple[Tensor, jax.Array]:
+    """Simple update on the horizontal bond using label-based contraction.
+
+    Works polymorphically with DenseTensor and SymmetricTensor.
+
+    Args:
+        A:     iPEPS site tensor with labels (u, d, l, r, phys).
+        gate:  Trotter gate with labels (si, sj, si_out, sj_out).
+        lam_h: Horizontal bond lambda vector.
+        lam_v: Vertical bond lambda vector.
+        max_D: Maximum bond dimension after SVD.
+
+    Returns:
+        (A_new, lam_h_new) where A_new has labels (u, d, l, r, phys).
+    """
+    A_abs = _absorb_lambdas_tensor(A, lam_h, lam_v)
+
+    A_left = A_abs.relabel("r", "shared")
+    B_right = A_abs.relabels(
+        {
+            "u": "u_B",
+            "d": "d_B",
+            "l": "shared",
+            "r": "r_B",
+            "phys": "phys_B",
+        }
+    )
+
+    theta = contract(A_left, B_right)
+
+    theta = theta.relabel("phys", "si")
+    theta = theta.relabel("phys_B", "sj")
+    theta = contract(theta, gate)
+
+    U, sigma, Vh, s_full = truncated_svd(
+        theta,
+        left_labels=["u", "d", "l", "si_out"],
+        right_labels=["u_B", "d_B", "r_B", "sj_out"],
+        new_bond_label="r_new",
+        max_singular_values=max_D,
+    )
+
+    lam_h_new = sigma / (jnp.max(sigma) + EPS)
+
+    U_reordered = U.transpose((0, 1, 2, 4, 3))
+    U_final = U_reordered.relabels({"r_new": "r", "si_out": "phys"})
+
+    sqrt_sig = jnp.sqrt(sigma + EPS)
+    U_final = scale_bond_axis(U_final, "r", sqrt_sig)
+
+    inv_lam_v = 1.0 / (lam_v + EPS)
+    inv_lam_h = 1.0 / (lam_h + EPS)
+    U_final = scale_bond_axis(U_final, "u", inv_lam_v)
+    U_final = scale_bond_axis(U_final, "d", inv_lam_v)
+    U_final = scale_bond_axis(U_final, "l", inv_lam_h)
+
+    norm_val = float(U_final.norm())
+    if norm_val > EPS:
+        U_final = U_final * (1.0 / norm_val)
+
+    return U_final, lam_h_new
+
+
+def _simple_update_vertical_tensor(
+    A: Tensor,
+    gate: Tensor,
+    lam_h: jax.Array,
+    lam_v: jax.Array,
+    max_D: int,
+) -> tuple[Tensor, jax.Array]:
+    """Simple update on the vertical bond using label-based contraction.
+
+    Works polymorphically with DenseTensor and SymmetricTensor.
+
+    Args:
+        A:     iPEPS site tensor with labels (u, d, l, r, phys).
+        gate:  Trotter gate with labels (si, sj, si_out, sj_out).
+        lam_h: Horizontal bond lambda vector.
+        lam_v: Vertical bond lambda vector.
+        max_D: Maximum bond dimension after SVD.
+
+    Returns:
+        (A_new, lam_v_new) where A_new has labels (u, d, l, r, phys).
+    """
+    A_abs = _absorb_lambdas_tensor(A, lam_h, lam_v)
+
+    A_top = A_abs.relabel("d", "shared")
+    B_bottom = A_abs.relabels(
+        {
+            "u": "shared",
+            "d": "d_B",
+            "l": "l_B",
+            "r": "r_B",
+            "phys": "phys_B",
+        }
+    )
+
+    theta = contract(A_top, B_bottom)
+
+    theta = theta.relabel("phys", "si")
+    theta = theta.relabel("phys_B", "sj")
+    theta = contract(theta, gate)
+
+    U, sigma, Vh, s_full = truncated_svd(
+        theta,
+        left_labels=["u", "l", "r", "si_out"],
+        right_labels=["d_B", "l_B", "r_B", "sj_out"],
+        new_bond_label="d_new",
+        max_singular_values=max_D,
+    )
+
+    lam_v_new = sigma / (jnp.max(sigma) + EPS)
+
+    U_reordered = U.transpose((0, 4, 1, 2, 3))
+    U_final = U_reordered.relabels({"d_new": "d", "si_out": "phys"})
+
+    sqrt_sig = jnp.sqrt(sigma + EPS)
+    U_final = scale_bond_axis(U_final, "d", sqrt_sig)
+
+    inv_lam_v = 1.0 / (lam_v + EPS)
+    inv_lam_h = 1.0 / (lam_h + EPS)
+    U_final = scale_bond_axis(U_final, "u", inv_lam_v)
+    U_final = scale_bond_axis(U_final, "l", inv_lam_h)
+    U_final = scale_bond_axis(U_final, "r", inv_lam_h)
+
+    norm_val = float(U_final.norm())
+    if norm_val > EPS:
+        U_final = U_final * (1.0 / norm_val)
+
+    return U_final, lam_v_new
+
+
+def _make_trotter_gate_tensor(
+    hamiltonian_gate: jax.Array | Tensor,
+    dt: float,
+    site_tensor: Tensor | None = None,
+) -> Tensor:
+    """Build the Trotter gate exp(-dt * H) as a 4-leg Tensor.
+
+    When *site_tensor* is provided, the gate indices use the same symmetry
+    and physical charges as the site tensor's physical leg.  If the site
+    tensor is a ``SymmetricTensor``, the gate is built via ``from_dense``
+    so that it matches the type and can be contracted directly.
+
+    Args:
+        hamiltonian_gate: 2-site Hamiltonian as (d,d,d,d) array or Tensor.
+        dt: Imaginary time step.
+        site_tensor: Optional reference tensor whose physical index provides
+                     symmetry and charge information for the gate.
+
+    Returns:
+        Tensor with labels (si, sj, si_out, sj_out).
+    """
+    if isinstance(hamiltonian_gate, Tensor):
+        H_dense = hamiltonian_gate.todense()
+    else:
+        H_dense = jnp.asarray(hamiltonian_gate)
+
+    d = H_dense.shape[0]
+    H_mat = H_dense.reshape(d * d, d * d)
+    H_mat = 0.5 * (H_mat + H_mat.conj().T)
+    eigvals, eigvecs = jnp.linalg.eigh(H_mat)
+    gate_mat = eigvecs @ jnp.diag(jnp.exp(-dt * eigvals)) @ eigvecs.conj().T
+    gate_4leg = gate_mat.reshape(d, d, d, d)
+
+    # Derive index metadata from site tensor's physical leg if available
+    if site_tensor is not None:
+        phys_idx = site_tensor.indices[-1]  # last leg = phys
+        sym = phys_idx.symmetry
+        charges = phys_idx.charges
+    else:
+        sym = U1Symmetry()
+        charges = np.zeros(d, dtype=np.int32)
+
+    indices = (
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="si"),
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="sj"),
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="si_out"),
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="sj_out"),
+    )
+
+    if isinstance(site_tensor, SymmetricTensor):
+        return SymmetricTensor.from_dense(gate_4leg, indices)
+
+    return DenseTensor(gate_4leg, indices)
+
+
+def _ipeps_tensor(
+    hamiltonian_gate: jax.Array,
+    A_init: Tensor,
+    config: iPEPSConfig,
+) -> tuple[float, Tensor, object]:
+    """Run iPEPS simple update + CTM for a Tensor-protocol site tensor.
+
+    Works with DenseTensor and SymmetricTensor via polymorphic operations.
+
+    Args:
+        hamiltonian_gate: 2-site Hamiltonian (d,d,d,d).
+        A_init:           Initial site tensor with labels (u, d, l, r, phys).
+        config:           iPEPSConfig.
+
+    Returns:
+        (energy, A_opt, CTMTensorEnv)
+    """
+    from tenax.algorithms._ctm_tensor import (
+        compute_energy_ctm_tensor,
+        ctm_tensor,
+    )
+
+    D = config.max_bond_dim
+    gate = _make_trotter_gate_tensor(hamiltonian_gate, config.dt, site_tensor=A_init)
+
+    A = A_init
+    norm_val = float(A.norm())
+    if norm_val > EPS:
+        A = A * (1.0 / norm_val)
+
+    lam_h = jnp.ones(D)
+    lam_v = jnp.ones(D)
+
+    for step in range(config.num_imaginary_steps):
+        if step % 2 == 0:
+            A, lam_h = _simple_update_horizontal_tensor(A, gate, lam_h, lam_v, D)
+        else:
+            A, lam_v = _simple_update_vertical_tensor(A, gate, lam_h, lam_v, D)
+
+    # Absorb lambdas for CTM
+    A_abs = _absorb_lambdas_tensor(A, lam_h, lam_v)
+    norm_val = float(A_abs.norm())
+    if norm_val > EPS:
+        A_abs = A_abs * (1.0 / norm_val)
+
+    env = ctm_tensor(
+        A_abs,
+        chi=config.ctm.chi,
+        max_iter=config.ctm.max_iter,
+        conv_tol=config.ctm.conv_tol,
+        renormalize=config.ctm.renormalize,
+        projector_method=config.ctm.projector_method,
+        qr_warmup_steps=config.ctm.qr_warmup_steps,
+    )
+    energy = compute_energy_ctm_tensor(A_abs, env, hamiltonian_gate)
+
+    return float(energy), A, env
 
 
 def _simple_update_2site_bond(
