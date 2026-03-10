@@ -727,6 +727,7 @@ def build_auto_mpo(
     L: int,
     d: int = 2,
     site_ops: dict[str, np.ndarray] | None = None,
+    fermionic_ops: set[str] | None = None,
     compress: bool = False,
     compress_tol: float = 1e-12,
     dtype: Any = jnp.float64,
@@ -741,6 +742,9 @@ def build_auto_mpo(
         d:             Local Hilbert-space dimension (2 for spin-1/2).
         site_ops:      Operator name → matrix dict; defaults to spin_half_ops()
                        for d=2 and spin_one_ops() for d=3.
+        fermionic_ops: Set of operator names that are fermionic (e.g. {"C", "Cd"}).
+                       When set, JW F strings are auto-inserted between
+                       fermionic operators.
         compress:      Apply left-to-right SVD compression.
         compress_tol:  Relative singular-value threshold for compression.
         dtype:         JAX dtype for MPO tensors.
@@ -759,7 +763,7 @@ def build_auto_mpo(
             L=L,
         )
     """
-    auto = AutoMPO(L=L, d=d, site_ops=site_ops)
+    auto = AutoMPO(L=L, d=d, site_ops=site_ops, fermionic_ops=fermionic_ops)
     for term in terms_spec:
         auto.add_term(term[0], *term[1:])
     return auto.to_mpo(

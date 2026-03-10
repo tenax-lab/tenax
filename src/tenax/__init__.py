@@ -53,6 +53,7 @@ from tenax.algorithms.auto_mpo import (
     AutoMPO,
     HamiltonianTerm,
     build_auto_mpo,
+    fermion_site_ops,
     spin_half_ops,
     spin_one_ops,
 )
@@ -170,6 +171,7 @@ __all__ = [
     "build_auto_mpo",
     "spin_half_ops",
     "spin_one_ops",
+    "fermion_site_ops",
     # DMRG
     "DMRGConfig",
     "DMRGResult",

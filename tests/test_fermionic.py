@@ -768,3 +768,29 @@ class TestAutoMPOJordanWigner:
         auto.add_term(1.0, "Cd", 0, "C", 2)
         term = auto._terms[0]
         assert len(term.ops) == 2  # No auto-insertion
+
+
+class TestBuildAutoMPOFermionic:
+    def test_build_auto_mpo_with_fermionic_ops(self):
+        """build_auto_mpo should accept fermionic_ops kwarg."""
+        from tenax.algorithms.auto_mpo import build_auto_mpo, fermion_site_ops
+
+        L = 4
+        ops = fermion_site_ops()
+        terms = [
+            (-1.0, "Cd", i, "C", i + 1) for i in range(L - 1)
+        ] + [
+            (-1.0, "C", i, "Cd", i + 1) for i in range(L - 1)
+        ]
+        mpo = build_auto_mpo(
+            terms, L=L, d=2, site_ops=ops,
+            fermionic_ops={"C", "Cd"},
+        )
+        assert mpo is not None
+        assert mpo.n_nodes() == L
+
+    def test_fermion_site_ops_importable_from_tenax(self):
+        from tenax import fermion_site_ops
+
+        ops = fermion_site_ops()
+        assert "C" in ops
