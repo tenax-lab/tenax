@@ -98,6 +98,15 @@ class TestParseNetfile:
         spec = parse_netfile(["A: i, j", "B: j, k"])
         assert spec["tensors"] == {"A": ["i", "j"], "B": ["j", "k"]}
 
+    def test_inline_source_not_treated_as_path_when_too_long(self):
+        # Regression test: very long inline content should not be passed through
+        # Path.is_file(), which can raise OSError([Errno 36] File name too long).
+        source = "\n".join(f"T{i}: a{i}, b{i}" for i in range(40))
+        spec = parse_netfile(source)
+        assert len(spec["tensors"]) == 40
+        assert spec["tout"] is None
+        assert spec["order"] is None
+
 
 # ===================================================================
 # ORDER parser tests
