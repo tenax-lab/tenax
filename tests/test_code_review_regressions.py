@@ -583,3 +583,109 @@ class TestReplaceTensorValidation:
         )
         with pytest.raises(ValueError, match="flow"):
             tn.replace_tensor("A", T1_bad)
+
+
+# ------------------------------------------------------------------ #
+# P1: connect_by_shared_label atomicity                               #
+# ------------------------------------------------------------------ #
+
+
+class TestConnectBySharedLabelAtomicity:
+    """connect_by_shared_label must not leave partial edges on failure."""
+
+    def test_no_partial_edges_on_incompatible_label(self):
+        from tenax.network.network import TensorNetwork
+
+        u1 = U1Symmetry()
+        # Tensors share labels "a" (compatible) and "b" (incompatible dim).
+        T1 = DenseTensor(
+            jnp.ones((3, 4)),
+            (
+                TensorIndex(u1, np.zeros(3, dtype=np.int32), FlowDirection.OUT, label="a"),
+                TensorIndex(u1, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="b"),
+            ),
+        )
+        T2 = DenseTensor(
+            jnp.ones((3, 5)),
+            (
+                TensorIndex(u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="a"),
+                TensorIndex(u1, np.zeros(5, dtype=np.int32), FlowDirection.IN, label="b"),
+            ),
+        )
+        tn = TensorNetwork()
+        tn.add_node("X", T1)
+        tn.add_node("Y", T2)
+
+        with pytest.raises(ValueError, match="Incompatible"):
+            tn.connect_by_shared_label("X", "Y")
+
+        # No edges should have been created.
+        assert tn.n_edges() == 0
+
+
+# ------------------------------------------------------------------ #
+# P2: build_peps grid shape validation                                #
+# ------------------------------------------------------------------ #
+
+
+class TestBuildPepsValidation:
+    """build_peps must reject mismatched grid dimensions."""
+
+    def _make_tensor(self):
+        u1 = U1Symmetry()
+        return DenseTensor(
+            jnp.ones((2,)),
+            (TensorIndex(u1, np.zeros(2, dtype=np.int32), FlowDirection.IN, label="p"),),
+        )
+
+    def test_too_few_rows_raises(self):
+        from tenax.network.network import build_peps
+
+        T = self._make_tensor()
+        with pytest.raises(ValueError, match="rows"):
+            build_peps([[T]], 2, 1)
+
+    def test_too_few_columns_raises(self):
+        from tenax.network.network import build_peps
+
+        T = self._make_tensor()
+        with pytest.raises(ValueError, match="columns"):
+            build_peps([[T]], 1, 2)
+
+    def test_extra_columns_raises(self):
+        from tenax.network.network import build_peps
+
+        T = self._make_tensor()
+        with pytest.raises(ValueError, match="columns"):
+            build_peps([[T, T]], 1, 1)
+
+
+# ------------------------------------------------------------------ #
+# P2: build_mps / build_peps propagate incompatible-index errors      #
+# ------------------------------------------------------------------ #
+
+
+class TestBuildersPropagateBondErrors:
+    """build_mps and build_peps must not silently drop incompatible bonds."""
+
+    def test_build_mps_raises_on_incompatible_shared_label(self):
+        from tenax.network.network import build_mps
+
+        u1 = U1Symmetry()
+        A = DenseTensor(
+            jnp.ones((2, 4)),
+            (
+                TensorIndex(u1, np.zeros(2, dtype=np.int32), FlowDirection.IN, label="p0"),
+                TensorIndex(u1, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="v"),
+            ),
+        )
+        B = DenseTensor(
+            jnp.ones((5, 2)),
+            (
+                TensorIndex(u1, np.zeros(5, dtype=np.int32), FlowDirection.OUT, label="v"),
+                TensorIndex(u1, np.zeros(2, dtype=np.int32), FlowDirection.IN, label="p1"),
+            ),
+        )
+        # "v" is shared but dims 4 vs 5 are incompatible — must raise.
+        with pytest.raises(ValueError, match="Incompatible"):
+            build_mps([A, B])
