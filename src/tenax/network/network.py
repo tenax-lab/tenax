@@ -139,20 +139,20 @@ class TensorNetwork:
         old_idx_map = {idx.label: idx for idx in old_tensor.indices}
         new_idx_map = {idx.label: idx for idx in tensor.indices}
         for u, v, data in self._graph.edges(node_id, data=True):
-            label = self._label_for_node(data, node_id)
-            if label is not None and label in old_idx_map and label in new_idx_map:
-                old_idx = old_idx_map[label]
-                new_idx = new_idx_map[label]
-                if old_idx.dim != new_idx.dim:
-                    raise ValueError(
-                        f"Replacement tensor changes dimension of connected "
-                        f"leg {label!r}: {old_idx.dim} -> {new_idx.dim}."
-                    )
-                if old_idx.flow != new_idx.flow:
-                    raise ValueError(
-                        f"Replacement tensor changes flow of connected "
-                        f"leg {label!r}: {old_idx.flow.name} -> {new_idx.flow.name}."
-                    )
+            for label in self._labels_for_node(data, node_id):
+                if label in old_idx_map and label in new_idx_map:
+                    old_idx = old_idx_map[label]
+                    new_idx = new_idx_map[label]
+                    if old_idx.dim != new_idx.dim:
+                        raise ValueError(
+                            f"Replacement tensor changes dimension of connected "
+                            f"leg {label!r}: {old_idx.dim} -> {new_idx.dim}."
+                        )
+                    if old_idx.flow != new_idx.flow:
+                        raise ValueError(
+                            f"Replacement tensor changes flow of connected "
+                            f"leg {label!r}: {old_idx.flow.name} -> {new_idx.flow.name}."
+                        )
 
         self._tensors[node_id] = tensor
         self._invalidate_cache()
@@ -377,9 +377,7 @@ class TensorNetwork:
         # Collect all connected labels for this node
         connected_labels: set[Label] = set()
         for u, v, data in self._graph.edges(node_id, data=True):
-            label = self._label_for_node(data, node_id)
-            if label is not None:
-                connected_labels.add(label)
+            connected_labels.update(self._labels_for_node(data, node_id))
 
         return sorted(all_labels - connected_labels, key=str)
 
@@ -583,18 +581,22 @@ class TensorNetwork:
         return self._graph.number_of_edges()
 
     @staticmethod
-    def _label_for_node(data: dict, node_id: NodeId) -> Label | None:
-        """Return the label that belongs to *node_id* in an edge's data dict.
+    def _labels_for_node(data: dict, node_id: NodeId) -> list[Label]:
+        """Return the label(s) that belong to *node_id* in an edge's data dict.
 
         Edge data stores ``owner_a``/``owner_b`` to track which node owns
         ``label_a``/``label_b``, since ``nx.MultiGraph.edges(node)`` does
         not guarantee a stable ``(u, v)`` ordering.
+
+        For self-loops (``owner_a == owner_b == node_id``), both labels are
+        returned.
         """
+        result: list[Label] = []
         if data.get("owner_a") == node_id:
-            return data.get("label_a")
+            result.append(data.get("label_a"))
         if data.get("owner_b") == node_id:
-            return data.get("label_b")
-        return None
+            result.append(data.get("label_b"))
+        return result
 
     def _get_index(self, node_id: NodeId, label: Label) -> TensorIndex:
         """Retrieve TensorIndex for a specific labeled leg."""
