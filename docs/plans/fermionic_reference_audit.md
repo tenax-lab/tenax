@@ -4,12 +4,13 @@ Date: 2026-03-10
 
 ## Scope
 
-This audit checks the current Tenax fermion implementation against four
+This audit checks the current Tenax fermion implementation against five
 reference libraries:
 
 - ITensor
 - quimb
 - TeNPy
+- MPToolkit
 - TensorKit
 
 The goal is not to rank the projects globally. The narrower question is:
@@ -124,7 +125,37 @@ Verdict:
 - quimb looks stronger if the question is "how flexible is the surrounding
   tensor-network and backend ecosystem?"
 
-### 4. Versus TensorKit
+### 4. Versus MPToolkit
+
+Assessment:
+
+- MPToolkit looks stronger than Tenax in mature 1D MPS/DMRG fermion-era
+  workflow depth.
+- Tenax looks more modern and internally unified at the graded tensor object
+  level.
+
+Why:
+
+- MPToolkit describes itself as a long-running MPS/DMRG toolkit with strong
+  emphasis on internal and non-abelian symmetries.
+- Its documentation explicitly supports product operators for string
+  correlators and Jordan-Wigner strings.
+- Its lattice/model tooling clearly includes Hubbard- and particle-number
+  style workflows, for example the documented projection of an `SO(4)`
+  Hubbard wavefunction to `U(1) x U(1)`.
+- Tenax now has fermionic AutoMPO insertion and graded block-sparse tensor
+  operations in one Python-native stack, but it does not yet match the depth
+  of a toolkit that has spent many years centered on 1D symmetry-heavy MPS
+  workflows.
+
+Verdict:
+
+- Tenax should be viewed as ahead on implementation coherence between
+  symmetric tensors and fermionic tensor operations.
+- MPToolkit should be viewed as ahead on battle-tested 1D MPS/DMRG tooling,
+  symmetry-heavy workflows, and explicit string-operator infrastructure.
+
+### 5. Versus TensorKit
 
 Assessment:
 
@@ -190,6 +221,8 @@ internal audit implies.
   construction.
 - Compared with quimb, Tenax has a more self-contained graded
   block-sparse tensor story, but a narrower surrounding ecosystem.
+- Compared with MPToolkit, Tenax has a cleaner modern graded tensor API, but
+  less historical depth in symmetry-heavy 1D fermion workflows.
 - Compared with TensorKit, Tenax is still far less expressive on explicit
   braiding/twist/category-theoretic structure.
 
@@ -230,5 +263,15 @@ External references:
   https://quimb.readthedocs.io/en/latest/
 - quimb array ops:
   https://quimb.readthedocs.io/en/latest/autoapi/quimb/tensor/array_ops/index.html
+- MPToolkit GitHub repository:
+  https://github.com/mptoolkit/mptoolkit
+- MPToolkit About:
+  https://mptoolkit.qusim.net/Main/About
+- MPToolkit operator expressions:
+  https://mptoolkit.qusim.net/Main/OperatorExpressions
+- MPToolkit iDMRG overview:
+  https://mptoolkit.qusim.net/IDMRG/Overview
+- MPToolkit basis/symmetry example with Hubbard wavefunctions:
+  https://mptoolkit.qusim.net/Tools/MpReorderBasis
 - TensorKit sectors / braiding / twist:
   https://jutho.github.io/TensorKit.jl/stable/lib/sectors/
