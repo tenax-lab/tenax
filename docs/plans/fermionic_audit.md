@@ -101,3 +101,17 @@ Three symmetry classes support fermionic statistics: `FermionParity`,
 
 - **`eigh` has no fermionic sign handling**: Intentional — eigendecomposition
   assumes Hermiticity, which is incompatible with fermionic leg reordering.
+
+## Comparison with Other Libraries
+
+For a detailed comparison of Tenax's fermionic implementation with
+TensorKit.jl, ITensor, TeNPy, Cytnx, and quimb, see the
+[migration guides](https://tenax-lab.github.io/migration/#tensorkitjl).
+
+Key difference with TensorKit.jl: TensorKit encodes fermionic statistics
+via abstract category theory (R-symbols, fusion trees, ribbon twists),
+which generalises to non-Abelian and anyonic symmetries. Tenax applies
+Koszul signs explicitly in each operation, which is simpler to audit but
+limited to Abelian fermionic systems. Tenax's `contract()` handles
+fermionic signs automatically; TensorKit's `@tensor` fermionic contraction
+is still TODO.
