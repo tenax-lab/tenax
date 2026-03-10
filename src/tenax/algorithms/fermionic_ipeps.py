@@ -445,8 +445,7 @@ def fermionic_ctm(A, config):
 def compute_energy_fermionic_ctm(A, env, hamiltonian_gate):
     """Compute energy per site using a CTM environment.
 
-    Supports ``CTMTensorEnv`` (from ``ctm_tensor``),
-    ``SplitCTMTensorEnv`` (from split-CTM), and legacy
+    Supports ``CTMTensorEnv`` (from ``ctm_tensor``) and legacy
     ``CTMEnvironment`` (from dense CTM).
 
     Args:
