@@ -794,3 +794,36 @@ class TestBuildAutoMPOFermionic:
 
         ops = fermion_site_ops()
         assert "C" in ops
+
+
+class TestFermionicDMRG:
+    def test_free_fermion_chain_energy(self):
+        """DMRG on free fermion chain H = -t sum c†_i c_{i+1} + h.c.
+
+        Exact ground state energy for L sites, N=L/2 particles:
+        E = -2t * sum_{k=1}^{N} cos(pi*k/(L+1))
+        For L=6, half-filling (N=3).
+        """
+        from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
+        from tenax.algorithms.dmrg import DMRGConfig, build_random_mps, dmrg
+
+        L = 6
+        t_hop = 1.0
+        ops = fermion_site_ops()
+        auto = AutoMPO(L=L, d=2, site_ops=ops, fermionic_ops={"C", "Cd"})
+        for i in range(L - 1):
+            auto += (-t_hop, "Cd", i, "C", i + 1)
+            auto += (-t_hop, "C", i, "Cd", i + 1)
+        mpo = auto.to_mpo()
+
+        mps = build_random_mps(L=L, physical_dim=2, bond_dim=16, seed=0)
+        config = DMRGConfig(num_sweeps=20, max_bond_dim=16, convergence_tol=1e-8)
+        result = dmrg(mpo, mps, config)
+
+        # Exact GS energy for free fermions on L=6 open chain at half filling
+        # E = -2t * sum_{k=1}^{N} cos(pi*k/(L+1))
+        # N = 3 (half filling), L = 6
+        exact_energy = -2 * t_hop * sum(
+            np.cos(np.pi * k / (L + 1)) for k in range(1, L // 2 + 1)
+        )
+        np.testing.assert_allclose(result.energy, exact_energy, atol=1e-6)
