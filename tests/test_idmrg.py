@@ -10,10 +10,12 @@ import pytest
 from tenax.algorithms.idmrg import (
     build_bulk_mpo_heisenberg,
     build_bulk_mpo_heisenberg_cylinder,
+    build_bulk_mpo_heisenberg_symmetric,
     idmrg,
     iDMRGConfig,
     iDMRGResult,
 )
+from tenax.core.tensor import SymmetricTensor
 
 # ---------------------------------------------------------------------------
 # TestiDMRGConfig
@@ -311,3 +313,80 @@ class TestiDMRGCylinderRun:
         assert -1.0 < e_per_spin < -0.3, (
             f"Ly=2 e/spin = {e_per_spin:.6f} out of expected range"
         )
+
+
+# ---------------------------------------------------------------------------
+# Symmetric iDMRG
+# ---------------------------------------------------------------------------
+
+
+class TestBuildBulkMPOSymmetric:
+    def test_returns_symmetric_tensor(self):
+        W = build_bulk_mpo_heisenberg_symmetric()
+        assert isinstance(W, SymmetricTensor)
+
+    def test_shape_matches_dense(self):
+        W_dense = build_bulk_mpo_heisenberg()
+        W_sym = build_bulk_mpo_heisenberg_symmetric()
+        # Same number of legs and same leg dimensions
+        for i in range(4):
+            assert len(W_sym.indices[i].charges) == W_dense.todense().shape[i]
+
+    def test_data_matches_dense(self):
+        """Symmetric MPO should have the same data as the dense version."""
+        W_dense = build_bulk_mpo_heisenberg()
+        W_sym = build_bulk_mpo_heisenberg_symmetric()
+        np.testing.assert_allclose(W_sym.todense(), W_dense.todense(), atol=1e-14)
+
+    def test_has_nontrivial_blocks(self):
+        """Symmetric MPO should have multiple non-trivial charge sectors."""
+        W = build_bulk_mpo_heisenberg_symmetric()
+        assert W.n_blocks >= 8
+
+    def test_custom_couplings(self):
+        W = build_bulk_mpo_heisenberg_symmetric(Jz=2.0, Jxy=0.5, hz=0.1)
+        assert isinstance(W, SymmetricTensor)
+        W_dense = build_bulk_mpo_heisenberg(Jz=2.0, Jxy=0.5, hz=0.1)
+        np.testing.assert_allclose(W.todense(), W_dense.todense(), atol=1e-14)
+
+
+class TestiDMRGSymmetric:
+    def test_symmetric_idmrg_runs(self):
+        """Symmetric iDMRG should run without error."""
+        W = build_bulk_mpo_heisenberg_symmetric()
+        cfg = iDMRGConfig(max_bond_dim=8, max_iterations=10)
+        result = idmrg(W, cfg)
+        assert isinstance(result, iDMRGResult)
+        assert np.isfinite(result.energy_per_site)
+
+    def test_symmetric_idmrg_energy_accuracy(self):
+        """Symmetric iDMRG at chi=16 should match exact within 0.5%."""
+        W = build_bulk_mpo_heisenberg_symmetric()
+        cfg = iDMRGConfig(max_bond_dim=16, max_iterations=50)
+        result = idmrg(W, cfg)
+        exact_e = -0.4431471805
+        rel_err = abs(result.energy_per_site - exact_e) / abs(exact_e)
+        assert rel_err < 0.005, (
+            f"Symmetric iDMRG e/site={result.energy_per_site:.8f} "
+            f"vs exact {exact_e:.8f} (rel err={rel_err:.4f})"
+        )
+
+    def test_symmetric_matches_dense_energy(self):
+        """Symmetric and dense iDMRG should give similar energies."""
+        W_sym = build_bulk_mpo_heisenberg_symmetric()
+        W_dense = build_bulk_mpo_heisenberg()
+        cfg = iDMRGConfig(max_bond_dim=16, max_iterations=30)
+        result_sym = idmrg(W_sym, cfg)
+        result_dense = idmrg(W_dense, cfg)
+        assert abs(result_sym.energy_per_site - result_dense.energy_per_site) < 0.002, (
+            f"sym={result_sym.energy_per_site:.8f} vs "
+            f"dense={result_dense.energy_per_site:.8f}"
+        )
+
+    def test_output_tensors_are_symmetric(self):
+        """MPS tensors from symmetric iDMRG should be SymmetricTensors."""
+        W = build_bulk_mpo_heisenberg_symmetric()
+        cfg = iDMRGConfig(max_bond_dim=8, max_iterations=10)
+        result = idmrg(W, cfg)
+        for t in result.mps_tensors:
+            assert isinstance(t, SymmetricTensor)

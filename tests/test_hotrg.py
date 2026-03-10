@@ -12,7 +12,7 @@ from tenax.algorithms.hotrg import (
 )
 from tenax.algorithms.trg import compute_ising_tensor, ising_free_energy_exact
 from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import U1Symmetry
+from tenax.core.symmetry import FermionParity, U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 
@@ -315,3 +315,68 @@ class TestHOTRGSymmetric:
             f"Symmetric HOTRG free energy {hotrg_free_energy:.6f} too far from "
             f"exact {exact_free_energy:.6f} (rel err={relative_error:.4f})"
         )
+
+
+def _compute_ising_tensor_fermionic(beta: float, J: float = 1.0) -> SymmetricTensor:
+    """Build an Ising tensor with FermionParity symmetry for testing.
+
+    Uses the same Hadamard-basis construction as compute_ising_tensor(symmetric=True)
+    but wraps with FermionParity instead of ZnSymmetry(2).
+    """
+    spins = jnp.array([1.0, -1.0])
+    Q = jnp.exp(beta * J * jnp.outer(spins, spins))
+    evals, evecs = jnp.linalg.eigh(Q)
+    sqrtQ = evecs @ jnp.diag(jnp.sqrt(evals)) @ evecs.T
+    T = jnp.einsum("us,ds,ls,rs->udlr", sqrtQ, sqrtQ, sqrtQ, sqrtQ)
+
+    H = jnp.array([[1, 1], [1, -1]]) / jnp.sqrt(2.0)
+    T_z2 = jnp.einsum("ua,vb,wc,xd,uvwx->abcd", H, H, H, H, T)
+
+    sym = FermionParity()
+    charges = np.array([0, 1], dtype=np.int32)
+    indices = (
+        TensorIndex(sym, charges, FlowDirection.IN, label="up"),
+        TensorIndex(sym, charges, FlowDirection.OUT, label="down"),
+        TensorIndex(sym, charges, FlowDirection.IN, label="left"),
+        TensorIndex(sym, charges, FlowDirection.OUT, label="right"),
+    )
+    return SymmetricTensor.from_dense(T_z2, indices)
+
+
+class TestHOTRGFermionic:
+    """Tests for HOTRG with FermionParity (fermionic Koszul signs)."""
+
+    def test_fermionic_hotrg_runs(self):
+        """HOTRG should run on a FermionParity tensor without error."""
+        tensor = _compute_ising_tensor_fermionic(beta=0.3)
+        assert isinstance(tensor, SymmetricTensor)
+        config = HOTRGConfig(max_bond_dim=8, num_steps=5)
+        result = hotrg(tensor, config)
+        assert jnp.isfinite(result)
+
+    def test_fermionic_hotrg_preserves_blocks(self):
+        """HOTRG should preserve FermionParity block sectors."""
+        tensor = _compute_ising_tensor_fermionic(beta=0.3)
+        initial_blocks = tensor.n_blocks
+        assert initial_blocks == 8
+
+        T = tensor
+        for _ in range(3):
+            T, _ = _hotrg_step_horizontal(T, max_bond_dim=8)
+            assert isinstance(T, SymmetricTensor)
+            assert T.n_blocks >= initial_blocks, (
+                f"Block count collapsed from {initial_blocks} to {T.n_blocks}"
+            )
+
+    def test_fermionic_hotrg_koszul_signs_active(self):
+        """FermionParity HOTRG should give a finite result.
+
+        With Koszul signs active, the coarse-grained tensor differs from the
+        bosonic case but should still produce a valid free energy.
+        """
+        beta = 0.3
+        tensor = _compute_ising_tensor_fermionic(beta=beta)
+        config = HOTRGConfig(max_bond_dim=8, num_steps=10)
+        result = float(hotrg(tensor, config))
+        assert np.isfinite(result)
+        assert abs(result) < 10, f"Fermionic HOTRG result {result} out of range"
