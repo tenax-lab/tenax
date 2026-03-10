@@ -139,12 +139,13 @@ def _read_lines(source: str | Path | list[str]) -> list[str]:
     # str — could be a file path or inline content
     try:
         p = Path(source)
-        if p.is_file():
-            return p.read_text().splitlines()
-    except OSError:
+        is_file = p.is_file()
+    except (OSError, ValueError):
         # Long/invalid inline strings can raise during path checks; in that
         # case treat the input as inline netfile content.
-        pass
+        is_file = False
+    if is_file:
+        return p.read_text().splitlines()
     return source.splitlines()
 
 
