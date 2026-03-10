@@ -381,6 +381,29 @@ class TestBuildMPS:
         # Virtual bonds should be connected
         assert mps.n_edges() >= 2
 
+    def test_incompatible_shared_label_raises(self, u1):
+        charges_phys = np.zeros(2, dtype=np.int32)
+        charges_bond = np.zeros(3, dtype=np.int32)
+        tensors = [
+            DenseTensor(
+                jnp.ones((2, 3)),
+                (
+                    TensorIndex(u1, charges_phys, FlowDirection.IN, label="p0"),
+                    TensorIndex(u1, charges_bond, FlowDirection.OUT, label="v0_1"),
+                ),
+            ),
+            DenseTensor(
+                jnp.ones((3, 2)),
+                (
+                    TensorIndex(u1, charges_bond, FlowDirection.OUT, label="v0_1"),
+                    TensorIndex(u1, charges_phys, FlowDirection.IN, label="p1"),
+                ),
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="Incompatible indices"):
+            build_mps(tensors)
+
 
 class TestCacheMutationFuzz:
     """Cache must be invalidated after every structural mutation.
@@ -563,3 +586,50 @@ class TestBuildPEPS:
 
         peps = build_peps(tensors, 2, 2)
         assert peps.n_nodes() == 4
+
+    def test_invalid_row_count_raises(self, u1):
+        charges = np.zeros(2, dtype=np.int32)
+        tensor = DenseTensor(
+            jnp.ones((2,)),
+            (TensorIndex(u1, charges, FlowDirection.IN, label="p"),),
+        )
+
+        with pytest.raises(ValueError, match="rows"):
+            build_peps([[tensor]], 2, 1)
+
+    def test_invalid_column_count_raises(self, u1):
+        charges = np.zeros(2, dtype=np.int32)
+        tensor = DenseTensor(
+            jnp.ones((2,)),
+            (TensorIndex(u1, charges, FlowDirection.IN, label="p"),),
+        )
+
+        with pytest.raises(ValueError, match="columns"):
+            build_peps([[tensor, tensor]], 1, 1)
+
+    def test_incompatible_shared_label_raises(self, u1):
+        charges_phys = np.zeros(2, dtype=np.int32)
+        charges_bond = np.zeros(3, dtype=np.int32)
+        tensors = [[
+            DenseTensor(
+                jnp.ones((2, 3)),
+                (
+                    TensorIndex(u1, charges_phys, FlowDirection.IN, label="p00"),
+                    TensorIndex(
+                        u1, charges_bond, FlowDirection.OUT, label="h0_0_1"
+                    ),
+                ),
+            ),
+            DenseTensor(
+                jnp.ones((3, 2)),
+                (
+                    TensorIndex(
+                        u1, charges_bond, FlowDirection.OUT, label="h0_0_1"
+                    ),
+                    TensorIndex(u1, charges_phys, FlowDirection.IN, label="p01"),
+                ),
+            ),
+        ]]
+
+        with pytest.raises(ValueError, match="Incompatible indices"):
+            build_peps(tensors, 1, 2)
