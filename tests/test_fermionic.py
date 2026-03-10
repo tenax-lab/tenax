@@ -827,3 +827,40 @@ class TestFermionicDMRG:
             np.cos(np.pi * k / (L + 1)) for k in range(1, L // 2 + 1)
         )
         np.testing.assert_allclose(result.energy, exact_energy, atol=1e-6)
+
+
+class TestDaggerTwistPhaseCorrectness:
+    def test_dagger_parity_odd_tensor(self, fp, rng):
+        """dagger(dagger(T)) == T for FermionParity."""
+        charges = np.array([0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(fp, charges, FlowDirection.IN, label="a"),
+            TensorIndex(fp, charges, FlowDirection.OUT, label="b"),
+        )
+        t = SymmetricTensor.random_normal(indices, rng)
+        t_dd = t.dagger().dagger()
+
+        for key in t.blocks:
+            np.testing.assert_allclose(
+                np.array(t.blocks[key]),
+                np.array(t_dd.blocks[key]),
+                atol=1e-12,
+                err_msg=f"dagger is not involutive for block {key}",
+            )
+
+    def test_dagger_involution_fu1(self, fu1, rng):
+        """dagger(dagger(T)) == T for FermionicU1."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(fu1, charges, FlowDirection.IN, label="a"),
+            TensorIndex(fu1, fu1.dual(charges), FlowDirection.OUT, label="b"),
+        )
+        t = SymmetricTensor.random_normal(indices, rng)
+        t_dd = t.dagger().dagger()
+
+        for key in t.blocks:
+            np.testing.assert_allclose(
+                np.array(t.blocks[key]),
+                np.array(t_dd.blocks[key]),
+                atol=1e-12,
+            )
