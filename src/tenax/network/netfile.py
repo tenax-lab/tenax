@@ -141,12 +141,13 @@ def _read_lines(source: str | Path | list[str]) -> list[str]:
     # guard path checks because very long/invalid pseudo-paths may raise.
     if "\n" in source:
         return source.splitlines()
-    p = Path(source)
     try:
-        if p.is_file():
-            return p.read_text().splitlines()
+        p = Path(source)
+        is_file = p.is_file()
     except (OSError, ValueError):
-        pass
+        is_file = False
+    if is_file:
+        return p.read_text().splitlines()
     return source.splitlines()
 
 
