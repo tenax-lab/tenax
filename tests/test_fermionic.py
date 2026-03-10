@@ -694,3 +694,77 @@ class TestFermionSiteOps:
         ops = fermion_site_ops()
         expected = ops["Id"] - 2 * ops["N"]
         np.testing.assert_allclose(ops["F"], expected)
+
+
+class TestAutoMPOJordanWigner:
+    def test_jw_insertion_nn_hopping(self):
+        """Nearest-neighbor hopping: no F needed between adjacent sites."""
+        from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
+
+        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(),
+                       fermionic_ops={"C", "Cd"})
+        auto.add_term(1.0, "Cd", 0, "C", 1)
+        # NN: no intermediate sites, so only 1 term with 2 ops
+        assert auto.n_terms() == 1
+        term = auto._terms[0]
+        assert len(term.ops) == 2
+        sites = [s for s, _ in term.ops]
+        assert sites == [0, 1]
+
+    def test_jw_insertion_nnn_hopping(self):
+        """Next-nearest-neighbor: F inserted on intermediate site 1."""
+        from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
+
+        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(),
+                       fermionic_ops={"C", "Cd"})
+        auto.add_term(1.0, "Cd", 0, "C", 2)
+        assert auto.n_terms() == 1
+        term = auto._terms[0]
+        # Should have 3 ops: Cd@0, F@1, C@2
+        assert len(term.ops) == 3
+        sites = [s for s, _ in term.ops]
+        assert sites == [0, 1, 2]
+        # Middle op should be F = diag(1, -1)
+        np.testing.assert_allclose(term.ops[1][1], np.diag([1.0, -1.0]))
+
+    def test_jw_long_range(self):
+        """Long-range hopping Cd@0 C@4: F inserted on sites 1, 2, 3."""
+        from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
+
+        auto = AutoMPO(L=6, d=2, site_ops=fermion_site_ops(),
+                       fermionic_ops={"C", "Cd"})
+        auto.add_term(1.0, "Cd", 0, "C", 4)
+        term = auto._terms[0]
+        assert len(term.ops) == 5  # Cd@0, F@1, F@2, F@3, C@4
+        for i in range(1, 4):
+            np.testing.assert_allclose(term.ops[i][1], np.diag([1.0, -1.0]))
+
+    def test_no_jw_for_bosonic_ops(self):
+        """Density-density N@0 N@2: no F insertion (N is not fermionic)."""
+        from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
+
+        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(),
+                       fermionic_ops={"C", "Cd"})
+        auto.add_term(1.0, "N", 0, "N", 2)
+        term = auto._terms[0]
+        assert len(term.ops) == 2  # No F inserted
+
+    def test_jw_mixed_term(self):
+        """Term with one fermionic and one bosonic op: Cd@0 N@2 needs F@1."""
+        from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
+
+        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(),
+                       fermionic_ops={"C", "Cd"})
+        auto.add_term(1.0, "Cd", 0, "N", 2)
+        term = auto._terms[0]
+        # Odd number of fermionic ops in the range => F on intermediates
+        assert len(term.ops) == 3  # Cd@0, F@1, N@2
+
+    def test_no_jw_when_not_specified(self):
+        """Without fermionic_ops, no JW insertion even for C/Cd."""
+        from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
+
+        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops())
+        auto.add_term(1.0, "Cd", 0, "C", 2)
+        term = auto._terms[0]
+        assert len(term.ops) == 2  # No auto-insertion
