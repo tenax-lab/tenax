@@ -477,24 +477,22 @@ class TestSymmetricTensorAddChargeValidation:
 
 
 class TestDMRGSingleSite:
-    """P1 regression: DMRG on L=1 must return correct on-site energy,
-    not the default 0.0."""
+    """P1 regression: DMRG on L=1 must reject the input instead of
+    silently returning a bogus zero energy."""
 
-    def test_dmrg_l1_returns_correct_energy(self):
+    def test_dmrg_l1_raises(self):
         from tenax.algorithms.auto_mpo import AutoMPO, spin_half_ops
         from tenax.algorithms.dmrg import DMRGConfig, build_random_mps, dmrg
 
         L = 1
-        hz = 1.0
         ops = spin_half_ops()
         auto = AutoMPO(L=L, d=2, site_ops=ops)
-        auto.add_term(hz, "Sz", 0)
+        auto.add_term(1.0, "Sz", 0)
         mpo = auto.to_mpo()
         mps = build_random_mps(L=L, physical_dim=2, bond_dim=2, seed=0)
-        config = DMRGConfig(max_bond_dim=4, num_sweeps=5, convergence_tol=1e-10)
-        result = dmrg(mpo, mps, config)
-        # Ground state of hz*Sz is E = -hz/2
-        np.testing.assert_allclose(result.energy, -hz / 2, atol=1e-8)
+        config = DMRGConfig(max_bond_dim=4, num_sweeps=5)
+        with pytest.raises(ValueError, match="at least 2 sites"):
+            dmrg(mpo, mps, config)
 
 
 # ------------------------------------------------------------------ #

@@ -622,26 +622,18 @@ class TensorNetwork:
 
 def build_mps(
     tensors: list[Tensor],
-    open_boundary: bool = True,
 ) -> TensorNetwork:
     """Build a Matrix Product State as a TensorNetwork.
 
-    Tensors are expected to have legs labeled with a convention that
-    allows adjacent tensors to share virtual bond labels. If the tensors
-    already have matching virtual bond labels (e.g., right label of site i
-    matches left label of site i+1), they will be auto-connected.
-
-    If virtual bond labels don't match, default virtual bonds are created:
-    - Site i: left="v{i-1}_{i}", phys="p{i}", right="v{i}_{i+1}"
-
-    Physical legs are not connected (they remain open).
+    Adjacent tensors are connected wherever they share a common label
+    with compatible dimensions.  Labels that appear on only one tensor
+    remain as open (dangling) legs.
 
     Args:
-        tensors:        List of site tensors [A_0, A_1, ..., A_{L-1}].
-        open_boundary:  If True, boundary virtual legs remain open.
+        tensors: List of site tensors [A_0, A_1, ..., A_{L-1}].
 
     Returns:
-        TensorNetwork with virtual bonds connected.
+        TensorNetwork with shared virtual bonds connected.
     """
     L = len(tensors)
     tn = TensorNetwork(name="MPS")
@@ -669,23 +661,17 @@ def build_peps(
     tensors: list[list[Tensor]],
     Lx: int,
     Ly: int,
-    open_boundary: bool = True,
 ) -> TensorNetwork:
     """Build a PEPS (2D tensor network) as a TensorNetwork.
 
-    Tensors are organized in a 2D grid tensors[i][j] for row i, column j.
-    Adjacent tensors are connected by shared virtual bond labels.
-
-    Convention for virtual bond labels (if not already matching):
-    - Horizontal bond (j, j+1) in row i: "h{i}_{j}_{j+1}"
-    - Vertical bond row (i, i+1) in column j: "v{i}_{i+1}_{j}"
-    - Physical leg at (i,j): "p{i}_{j}"
+    Tensors are organized in a 2D grid ``tensors[i][j]`` for row *i*,
+    column *j*.  Horizontal and vertical neighbours are connected wherever
+    they share a common label with compatible dimensions.
 
     Args:
-        tensors:       2D list [Lx][Ly] of site tensors.
-        Lx:            Number of rows.
-        Ly:            Number of columns.
-        open_boundary: If True, boundary virtual legs remain open.
+        tensors: 2D list [Lx][Ly] of site tensors.
+        Lx:      Number of rows.
+        Ly:      Number of columns.
 
     Returns:
         TensorNetwork with virtual bonds connected.
