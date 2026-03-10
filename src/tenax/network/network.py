@@ -139,7 +139,7 @@ class TensorNetwork:
         old_idx_map = {idx.label: idx for idx in old_tensor.indices}
         new_idx_map = {idx.label: idx for idx in tensor.indices}
         for u, v, data in self._graph.edges(node_id, data=True):
-            label = data.get("label_a") if u == node_id else data.get("label_b")
+            label = self._label_for_node(data, node_id)
             if label is not None and label in old_idx_map and label in new_idx_map:
                 old_idx = old_idx_map[label]
                 new_idx = new_idx_map[label]
@@ -215,7 +215,14 @@ class TensorNetwork:
                 f"and {node_b!r}[{label_b!r}] (dim={idx_b.dim}, flow={idx_b.flow.name})"
             )
 
-        self._graph.add_edge(node_a, node_b, label_a=label_a, label_b=label_b)
+        self._graph.add_edge(
+            node_a,
+            node_b,
+            label_a=label_a,
+            label_b=label_b,
+            owner_a=node_a,
+            owner_b=node_b,
+        )
         self._invalidate_cache()
 
     def connect_by_shared_label(self, node_a: NodeId, node_b: NodeId) -> int:
@@ -263,7 +270,14 @@ class TensorNetwork:
 
         # Already validated; bypass connect() to avoid re-checking.
         for label in sorted_shared:
-            self._graph.add_edge(node_a, node_b, label_a=label, label_b=label)
+            self._graph.add_edge(
+                node_a,
+                node_b,
+                label_a=label,
+                label_b=label,
+                owner_a=node_a,
+                owner_b=node_b,
+            )
         self._invalidate_cache()
 
         return len(sorted_shared)
@@ -288,20 +302,21 @@ class TensorNetwork:
         """
         edges = list(self._graph.edges(node_a, data=True, keys=True))
         for u, v, key, data in edges:
+            owner_a = data.get("owner_a")
+            owner_b = data.get("owner_b")
+            la = data.get("label_a")
+            lb = data.get("label_b")
+            # Match regardless of iteration order: check owner-based labels
             if (
-                v == node_b
-                and data.get("label_a") == label_a
-                and data.get("label_b") == label_b
-            ):
-                self._graph.remove_edge(u, v, key)
-                self._invalidate_cache()
-                return
-            # Also check reversed direction
-            if (
-                v == node_a
-                and u == node_b
-                and data.get("label_a") == label_b
-                and data.get("label_b") == label_a
+                owner_a == node_a
+                and la == label_a
+                and owner_b == node_b
+                and lb == label_b
+            ) or (
+                owner_a == node_b
+                and la == label_b
+                and owner_b == node_a
+                and lb == label_a
             ):
                 self._graph.remove_edge(u, v, key)
                 self._invalidate_cache()
@@ -340,9 +355,9 @@ class TensorNetwork:
 
         # Update any edges that reference this label
         for u, v, key, data in list(self._graph.edges(node_id, data=True, keys=True)):
-            if data.get("label_a") == old_label and u == node_id:
+            if data.get("owner_a") == node_id and data.get("label_a") == old_label:
                 self._graph[u][v][key]["label_a"] = new_label
-            if data.get("label_b") == old_label and v == node_id:
+            elif data.get("owner_b") == node_id and data.get("label_b") == old_label:
                 self._graph[u][v][key]["label_b"] = new_label
 
         self._invalidate_cache()
@@ -362,10 +377,9 @@ class TensorNetwork:
         # Collect all connected labels for this node
         connected_labels: set[Label] = set()
         for u, v, data in self._graph.edges(node_id, data=True):
-            if u == node_id:
-                connected_labels.add(data.get("label_a"))
-            if v == node_id:
-                connected_labels.add(data.get("label_b"))
+            label = self._label_for_node(data, node_id)
+            if label is not None:
+                connected_labels.add(label)
 
         return sorted(all_labels - connected_labels, key=str)
 
@@ -429,10 +443,12 @@ class TensorNetwork:
         # Collect all edges within the subset, mapping them to shared labels
         internal_edges: list[tuple[NodeId, Label, NodeId, Label]] = []
         for u, v, data in self._graph.edges(data=True):
-            if u in node_set and v in node_set:
+            owner_a = data.get("owner_a", u)
+            owner_b = data.get("owner_b", v)
+            if owner_a in node_set and owner_b in node_set:
                 la = data.get("label_a")
                 lb = data.get("label_b")
-                internal_edges.append((u, la, v, lb))
+                internal_edges.append((owner_a, la, owner_b, lb))
 
         # We need to build a new set of tensors with relabeled legs so that
         # internally-connected legs share a common label for the subscript builder.
@@ -566,6 +582,20 @@ class TensorNetwork:
         """Number of edges (connected leg pairs) in the network."""
         return self._graph.number_of_edges()
 
+    @staticmethod
+    def _label_for_node(data: dict, node_id: NodeId) -> Label | None:
+        """Return the label that belongs to *node_id* in an edge's data dict.
+
+        Edge data stores ``owner_a``/``owner_b`` to track which node owns
+        ``label_a``/``label_b``, since ``nx.MultiGraph.edges(node)`` does
+        not guarantee a stable ``(u, v)`` ordering.
+        """
+        if data.get("owner_a") == node_id:
+            return data.get("label_a")
+        if data.get("owner_b") == node_id:
+            return data.get("label_b")
+        return None
+
     def _get_index(self, node_id: NodeId, label: Label) -> TensorIndex:
         """Retrieve TensorIndex for a specific labeled leg."""
         tensor = self._tensors[node_id]
@@ -686,14 +716,10 @@ def build_peps(
         TensorNetwork with virtual bonds connected.
     """
     if len(tensors) != Lx:
-        raise ValueError(
-            f"tensors has {len(tensors)} rows but Lx={Lx}"
-        )
+        raise ValueError(f"tensors has {len(tensors)} rows but Lx={Lx}")
     for i, row in enumerate(tensors):
         if len(row) != Ly:
-            raise ValueError(
-                f"tensors[{i}] has {len(row)} columns but Ly={Ly}"
-            )
+            raise ValueError(f"tensors[{i}] has {len(row)} columns but Ly={Ly}")
 
     tn = TensorNetwork(name="PEPS")
 
