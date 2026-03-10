@@ -136,13 +136,15 @@ def _read_lines(source: str | Path | list[str]) -> list[str]:
         return source
     if isinstance(source, Path):
         return source.read_text().splitlines()
-    # str — could be a file path or inline content
+    # str — could be a file path or inline content.
+    # Prefer inline content if it clearly looks like one (multiline), and
+    # guard path checks because very long/invalid pseudo-paths may raise.
+    if "\n" in source:
+        return source.splitlines()
     try:
         p = Path(source)
         is_file = p.is_file()
     except (OSError, ValueError):
-        # Long/invalid inline strings can raise during path checks; in that
-        # case treat the input as inline netfile content.
         is_file = False
     if is_file:
         return p.read_text().splitlines()
@@ -425,6 +427,13 @@ class NetworkBlueprint:
                     f"label_order has {len(label_order)} entries but "
                     f"blueprint expects {len(blueprint_labels)}"
                 )
+            current = list(tensor.labels())
+            provided = list(label_order)
+            if sorted(provided, key=str) != sorted(current, key=str):
+                raise ValueError(
+                    f"label_order {label_order} doesn't match tensor labels "
+                    f"{current} (as sets)."
+                )
             mapping = {
                 old: new
                 for old, new in zip(label_order, blueprint_labels)
@@ -436,7 +445,7 @@ class NetworkBlueprint:
             # No label_order — check that the tensor already carries the
             # correct label *set*, then reorder if necessary.
             current = list(tensor.labels())
-            if sorted(str(lb) for lb in current) != sorted(blueprint_labels):
+            if sorted(current, key=str) != sorted(blueprint_labels, key=str):
                 raise ValueError(
                     f"Tensor {name!r} labels {current} don't match blueprint "
                     f"labels {blueprint_labels} (as sets). Pass label_order "
