@@ -137,9 +137,14 @@ def _read_lines(source: str | Path | list[str]) -> list[str]:
     if isinstance(source, Path):
         return source.read_text().splitlines()
     # str — could be a file path or inline content
-    p = Path(source)
-    if p.is_file():
-        return p.read_text().splitlines()
+    try:
+        p = Path(source)
+        if p.is_file():
+            return p.read_text().splitlines()
+    except OSError:
+        # Long/invalid inline strings can raise during path checks; in that
+        # case treat the input as inline netfile content.
+        pass
     return source.splitlines()
 
 
