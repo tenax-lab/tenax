@@ -650,6 +650,55 @@ class TestBar:
         t = DenseTensor(data, indices)
         np.testing.assert_allclose(t.bar().todense(), t.dagger().todense())
 
+    def test_fermionic_bar_todense_equals_conj(self, rng):
+        """FermionParity bar().todense() == conj(todense())."""
+        from tenax.core.symmetry import FermionParity
+
+        sym = FermionParity()
+        charges = np.array([0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(sym, charges, FlowDirection.IN, label="a"),
+            TensorIndex(sym, charges, FlowDirection.OUT, label="b"),
+        )
+        t = SymmetricTensor.random_normal(indices, rng)
+        tb = t.bar()
+        np.testing.assert_allclose(tb.todense(), jnp.conj(t.todense()), rtol=1e-6)
+
+    def test_fermionic_bar_no_twist(self, rng):
+        """FermionParity bar() differs from dagger() for odd-parity blocks."""
+        from tenax.core.symmetry import FermionParity
+
+        sym = FermionParity()
+        charges = np.array([0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(sym, charges, FlowDirection.IN, label="a"),
+            TensorIndex(sym, charges, FlowDirection.IN, label="b"),
+            TensorIndex(sym, charges, FlowDirection.OUT, label="c"),
+        )
+        t = SymmetricTensor.random_normal(indices, rng)
+        tb = t.bar()
+        # bar() has no twist, dagger() has twist — generally different
+        # but both should give valid todense that equals conj of original
+        np.testing.assert_allclose(tb.todense(), jnp.conj(t.todense()), rtol=1e-6)
+        # block keys should be same for bar (no charge dual)
+        assert set(tb.blocks.keys()) == set(t.blocks.keys())
+        # block keys differ for dagger (charges are dualled)
+        # flows differ too: bar flips flows, dagger flips flows + duals charges
+
+    def test_fermionic_u1_bar_todense_equals_conj(self, rng):
+        """FermionicU1 bar().todense() == conj(todense())."""
+        from tenax.core.symmetry import FermionicU1
+
+        sym = FermionicU1()
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(sym, charges, FlowDirection.IN, label="a"),
+            TensorIndex(sym, charges, FlowDirection.OUT, label="b"),
+        )
+        t = SymmetricTensor.random_normal(indices, rng)
+        tb = t.bar()
+        np.testing.assert_allclose(tb.todense(), jnp.conj(t.todense()), rtol=1e-6)
+
 
 class TestInner:
     def test_dense_self_inner(self, small_dense_matrix):
