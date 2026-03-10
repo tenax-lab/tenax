@@ -426,12 +426,12 @@ class NetworkBlueprint:
                     f"label_order has {len(label_order)} entries but "
                     f"blueprint expects {len(blueprint_labels)}"
                 )
-            current = [str(lb) for lb in tensor.labels()]
-            provided = [str(lb) for lb in label_order]
-            if sorted(provided) != sorted(current):
+            current = list(tensor.labels())
+            provided = list(label_order)
+            if sorted(provided, key=str) != sorted(current, key=str):
                 raise ValueError(
                     f"label_order {label_order} doesn't match tensor labels "
-                    f"{list(tensor.labels())} (as sets)."
+                    f"{current} (as sets)."
                 )
             mapping = {
                 old: new
@@ -444,7 +444,7 @@ class NetworkBlueprint:
             # No label_order — check that the tensor already carries the
             # correct label *set*, then reorder if necessary.
             current = list(tensor.labels())
-            if sorted(str(lb) for lb in current) != sorted(blueprint_labels):
+            if sorted(current, key=str) != sorted(blueprint_labels, key=str):
                 raise ValueError(
                     f"Tensor {name!r} labels {current} don't match blueprint "
                     f"labels {blueprint_labels} (as sets). Pass label_order "
