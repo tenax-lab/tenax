@@ -954,10 +954,11 @@ class SymmetricTensor(Tensor):
     def dagger(self) -> SymmetricTensor:
         """Conjugate transpose with fermionic twist phases.
 
-        For each block, applies complex conjugation, reverses all leg flows
-        (via dual), and multiplies by the product of twist phases for all
-        charges in the block key. For bosonic symmetries this is equivalent
-        to ``conj()`` with dualled indices.
+        For each block, applies complex conjugation and reverses all leg
+        flows (via dual).  For fermionic symmetries, multiplies by the
+        super-algebra sign ``(-1)^{sum_{i<j} p_i p_j}`` where ``p_i``
+        is the parity of the i-th charge.  For bosonic symmetries this
+        is equivalent to ``conj()`` with dualled indices (sign is always +1).
 
         Returns:
             New SymmetricTensor with conjugated data, dual indices, and
