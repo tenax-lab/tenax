@@ -76,6 +76,7 @@ from tenax.algorithms.hotrg import HOTRGConfig, hotrg
 from tenax.algorithms.idmrg import (
     build_bulk_mpo_heisenberg,
     build_bulk_mpo_heisenberg_cylinder,
+    build_bulk_mpo_heisenberg_symmetric,
     idmrg,
     iDMRGConfig,
     iDMRGResult,
@@ -199,6 +200,7 @@ __all__ = [
     "idmrg",
     "build_bulk_mpo_heisenberg",
     "build_bulk_mpo_heisenberg_cylinder",
+    "build_bulk_mpo_heisenberg_symmetric",
     # iPEPS
     "iPEPSConfig",
     "CTMConfig",
