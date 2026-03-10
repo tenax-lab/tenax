@@ -864,3 +864,94 @@ class TestDaggerTwistPhaseCorrectness:
                 np.array(t_dd.blocks[key]),
                 atol=1e-12,
             )
+
+
+class TestFermionicContractionCrossValidation:
+    """Compare block-sparse fermionic contraction against dense einsum."""
+
+    def test_2tensor_3leg_contraction(self, fp, rng, rng2):
+        """Contract two 3-leg fermionic tensors, compare to dense."""
+        charges = np.array([0, 1], dtype=np.int32)
+        # A: (a, b, c) with c=OUT contracted with B: (c, d, e)
+        idx_A = (
+            TensorIndex(fp, charges, FlowDirection.IN, label="a"),
+            TensorIndex(fp, charges, FlowDirection.IN, label="b"),
+            TensorIndex(fp, charges, FlowDirection.OUT, label="c"),
+        )
+        idx_B = (
+            TensorIndex(fp, charges, FlowDirection.IN, label="c"),
+            TensorIndex(fp, charges, FlowDirection.IN, label="d"),
+            TensorIndex(fp, charges, FlowDirection.OUT, label="e"),
+        )
+        A = SymmetricTensor.random_normal(idx_A, rng)
+        B = SymmetricTensor.random_normal(idx_B, rng2)
+
+        result = contract(A, B)
+        result_dense = result.todense()
+
+        # Dense reference
+        A_dense = A.todense()
+        B_dense = B.todense()
+        ref = jnp.einsum("abc,cde->abde", A_dense, B_dense)
+
+        np.testing.assert_allclose(
+            np.array(result_dense), np.array(ref), atol=1e-10,
+            err_msg="Fermionic block-sparse contraction differs from dense einsum"
+        )
+
+    def test_matrix_contraction_fu1(self, fu1, rng, rng2):
+        """Contract two 2-leg FermionicU1 tensors (matrix multiply)."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        dual_charges = fu1.dual(charges)
+        # Shared bond "b": same charge array in both tensors so
+        # todense() positions align for dense einsum cross-check.
+        idx_A = (
+            TensorIndex(fu1, charges, FlowDirection.IN, label="a"),
+            TensorIndex(fu1, charges, FlowDirection.OUT, label="b"),
+        )
+        idx_B = (
+            TensorIndex(fu1, charges, FlowDirection.IN, label="b"),
+            TensorIndex(fu1, dual_charges, FlowDirection.OUT, label="c"),
+        )
+        A = SymmetricTensor.random_normal(idx_A, rng)
+        B = SymmetricTensor.random_normal(idx_B, rng2)
+
+        result = contract(A, B)
+        result_dense = result.todense()
+
+        A_dense = A.todense()
+        B_dense = B.todense()
+        ref = jnp.einsum("ab,bc->ac", A_dense, B_dense)
+
+        np.testing.assert_allclose(
+            np.array(result_dense), np.array(ref), atol=1e-10,
+            err_msg="FermionicU1 matrix contraction differs from dense einsum"
+        )
+
+    def test_product_symmetry_contraction(self, rng, rng2):
+        """Cross-validate with ProductSymmetry(FermionParity, U1)."""
+        sym = ProductSymmetry(FermionParity(), U1Symmetry())
+        charges = np.array(
+            [ProductSymmetry.encode(0, 0), ProductSymmetry.encode(1, 1)],
+            dtype=np.int32,
+        )
+        dual_charges = sym.dual(charges)
+
+        idx_A = (
+            TensorIndex(sym, charges, FlowDirection.IN, label="a"),
+            TensorIndex(sym, dual_charges, FlowDirection.OUT, label="b"),
+        )
+        idx_B = (
+            TensorIndex(sym, charges, FlowDirection.IN, label="b"),
+            TensorIndex(sym, dual_charges, FlowDirection.OUT, label="c"),
+        )
+        A = SymmetricTensor.random_normal(idx_A, rng)
+        B = SymmetricTensor.random_normal(idx_B, rng2)
+
+        result = contract(A, B)
+        result_dense = result.todense()
+
+        ref = jnp.einsum("ab,bc->ac", A.todense(), B.todense())
+        np.testing.assert_allclose(
+            np.array(result_dense), np.array(ref), atol=1e-10,
+        )
