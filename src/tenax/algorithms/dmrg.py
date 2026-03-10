@@ -142,6 +142,11 @@ def dmrg(
         DMRGResult with energy, sweep history, optimized MPS, and diagnostics.
     """
     L = hamiltonian.n_nodes()
+    if L < 2:
+        raise ValueError(
+            f"DMRG requires at least 2 sites, got L={L}. "
+            "For a single site, diagonalize the operator directly."
+        )
     mps_tensors: list[Tensor] = [initial_mps.get_tensor(i) for i in range(L)]
     mpo_tensors = [hamiltonian.get_tensor(i) for i in range(L)]
 

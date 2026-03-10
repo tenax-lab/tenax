@@ -221,8 +221,8 @@ result = tn.contract()  # Contract the whole network
 ```python
 from tenax import build_mps, build_peps
 
-mps = build_mps(tensors, open_boundary=True)    # 1D chain
-peps = build_peps(tensors, Lx, Ly, open_boundary=True)  # 2D grid
+mps = build_mps(tensors)                # 1D chain
+peps = build_peps(tensors, Lx, Ly)      # 2D grid
 ```
 
 ---
