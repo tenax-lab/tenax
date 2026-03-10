@@ -770,3 +770,23 @@ class TestEdgeLabelOwnership:
         )
         with pytest.raises(ValueError, match="dimension"):
             tn.replace_tensor("B", B_bad)
+
+    def test_self_loop_both_labels_connected(self, u1):
+        """Self-loop: both labels on the same node must be marked connected."""
+        charges = np.zeros(3, dtype=np.int32)
+        T = DenseTensor(
+            jnp.ones((3, 3, 3)),
+            (
+                TensorIndex(u1, charges, FlowDirection.IN, label="phys"),
+                TensorIndex(u1, charges, FlowDirection.OUT, label="trace_a"),
+                TensorIndex(u1, charges, FlowDirection.IN, label="trace_b"),
+            ),
+        )
+        tn = TensorNetwork()
+        tn.add_node("T", T)
+        tn.connect("T", "trace_a", "T", "trace_b")
+
+        open_t = tn.open_legs("T")
+        assert "trace_a" not in open_t
+        assert "trace_b" not in open_t
+        assert "phys" in open_t
