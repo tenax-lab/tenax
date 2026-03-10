@@ -402,3 +402,186 @@ class TestDMRGSiteLabelCeiling:
         assert np.isfinite(float(jnp.sum(A.todense())))
         assert np.isfinite(float(jnp.sum(B.todense())))
         assert len(s) > 0
+
+
+# ------------------------------------------------------------------ #
+# P1: SymmetricTensor add/sub with incompatible charge metadata        #
+# ------------------------------------------------------------------ #
+
+
+class TestSymmetricTensorAddChargeValidation:
+    """P1 regression: adding SymmetricTensors with different charge arrays
+    or symmetry types must raise ValueError, not silently corrupt data."""
+
+    def test_add_different_charges_raises(self):
+        """Adding tensors with same label/dim/flow but different charges."""
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.core.tensor import SymmetricTensor
+
+        u1 = U1Symmetry()
+        idx_a = (
+            TensorIndex(u1, np.array([0, 1], dtype=np.int32), FlowDirection.IN, label="x"),
+            TensorIndex(u1, np.array([0, -1], dtype=np.int32), FlowDirection.OUT, label="y"),
+        )
+        idx_b = (
+            TensorIndex(u1, np.array([0, 2], dtype=np.int32), FlowDirection.IN, label="x"),
+            TensorIndex(u1, np.array([0, -2], dtype=np.int32), FlowDirection.OUT, label="y"),
+        )
+        A = SymmetricTensor.random_normal(idx_a, jax.random.PRNGKey(0))
+        B = SymmetricTensor.random_normal(idx_b, jax.random.PRNGKey(1))
+        with pytest.raises(ValueError, match="charge array mismatch"):
+            A + B
+
+    def test_sub_different_charges_raises(self):
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.core.tensor import SymmetricTensor
+
+        u1 = U1Symmetry()
+        idx_a = (
+            TensorIndex(u1, np.array([0, 1], dtype=np.int32), FlowDirection.IN, label="x"),
+            TensorIndex(u1, np.array([0, -1], dtype=np.int32), FlowDirection.OUT, label="y"),
+        )
+        idx_b = (
+            TensorIndex(u1, np.array([0, 2], dtype=np.int32), FlowDirection.IN, label="x"),
+            TensorIndex(u1, np.array([0, -2], dtype=np.int32), FlowDirection.OUT, label="y"),
+        )
+        A = SymmetricTensor.random_normal(idx_a, jax.random.PRNGKey(0))
+        B = SymmetricTensor.random_normal(idx_b, jax.random.PRNGKey(1))
+        with pytest.raises(ValueError, match="charge array mismatch"):
+            A - B
+
+    def test_add_different_symmetry_raises(self):
+        from tenax.core.symmetry import FermionParity, ZnSymmetry
+        from tenax.core.tensor import SymmetricTensor
+
+        fp = FermionParity()
+        z2 = ZnSymmetry(2)
+        charges = np.array([0, 1], dtype=np.int32)
+        idx_a = (
+            TensorIndex(fp, charges, FlowDirection.IN, label="x"),
+            TensorIndex(fp, charges, FlowDirection.OUT, label="y"),
+        )
+        idx_b = (
+            TensorIndex(z2, charges, FlowDirection.IN, label="x"),
+            TensorIndex(z2, charges, FlowDirection.OUT, label="y"),
+        )
+        A = SymmetricTensor.random_normal(idx_a, jax.random.PRNGKey(0))
+        B = SymmetricTensor.random_normal(idx_b, jax.random.PRNGKey(1))
+        with pytest.raises(ValueError, match="symmetry mismatch"):
+            A + B
+
+
+# ------------------------------------------------------------------ #
+# P1: DMRG L=1 single-site problem                                    #
+# ------------------------------------------------------------------ #
+
+
+class TestDMRGSingleSite:
+    """P1 regression: DMRG on L=1 must return correct on-site energy,
+    not the default 0.0."""
+
+    def test_dmrg_l1_returns_correct_energy(self):
+        from tenax.algorithms.auto_mpo import AutoMPO, spin_half_ops
+        from tenax.algorithms.dmrg import DMRGConfig, build_random_mps, dmrg
+
+        L = 1
+        hz = 1.0
+        ops = spin_half_ops()
+        auto = AutoMPO(L=L, d=2, site_ops=ops)
+        auto.add_term(hz, "Sz", 0)
+        mpo = auto.to_mpo()
+        mps = build_random_mps(L=L, physical_dim=2, bond_dim=2, seed=0)
+        config = DMRGConfig(max_bond_dim=4, num_sweeps=5, convergence_tol=1e-10)
+        result = dmrg(mpo, mps, config)
+        # Ground state of hz*Sz is E = -hz/2
+        np.testing.assert_allclose(result.energy, -hz / 2, atol=1e-8)
+
+
+# ------------------------------------------------------------------ #
+# P2: TensorNetwork.relabel_bond duplicate label                       #
+# ------------------------------------------------------------------ #
+
+
+class TestRelabelBondDuplicateLabel:
+    """P2 regression: relabel_bond must reject renaming a leg onto an
+    existing label, not silently create an invalid tensor."""
+
+    def test_relabel_onto_existing_label_raises(self):
+        tn = TensorNetwork()
+        T = _make_tensor((3, 4), ["a", "b"])
+        tn.add_node("T", T)
+        with pytest.raises(ValueError, match="already exists"):
+            tn.relabel_bond("T", "a", "b")
+
+
+# ------------------------------------------------------------------ #
+# P2: TensorNetwork.replace_tensor dimension/flow validation           #
+# ------------------------------------------------------------------ #
+
+
+class TestReplaceTensorValidation:
+    """P2 regression: replace_tensor must reject replacements that change
+    dimension or flow on connected legs."""
+
+    def test_replace_with_different_dim_raises(self):
+        u1 = U1Symmetry()
+        T1 = DenseTensor(
+            jnp.ones((3, 4)),
+            (
+                TensorIndex(u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="a"),
+                TensorIndex(u1, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="b"),
+            ),
+        )
+        T2_peer = DenseTensor(
+            jnp.ones((4, 5)),
+            (
+                TensorIndex(u1, np.zeros(4, dtype=np.int32), FlowDirection.IN, label="b"),
+                TensorIndex(u1, np.zeros(5, dtype=np.int32), FlowDirection.OUT, label="c"),
+            ),
+        )
+        tn = TensorNetwork()
+        tn.add_node("A", T1)
+        tn.add_node("B", T2_peer)
+        tn.connect("A", "b", "B", "b")
+
+        # Try to replace A with a tensor that has different dim on 'b'
+        T1_bad = DenseTensor(
+            jnp.ones((3, 7)),
+            (
+                TensorIndex(u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="a"),
+                TensorIndex(u1, np.zeros(7, dtype=np.int32), FlowDirection.OUT, label="b"),
+            ),
+        )
+        with pytest.raises(ValueError, match="dimension"):
+            tn.replace_tensor("A", T1_bad)
+
+    def test_replace_with_different_flow_raises(self):
+        u1 = U1Symmetry()
+        T1 = DenseTensor(
+            jnp.ones((3, 4)),
+            (
+                TensorIndex(u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="a"),
+                TensorIndex(u1, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="b"),
+            ),
+        )
+        T2_peer = DenseTensor(
+            jnp.ones((4, 5)),
+            (
+                TensorIndex(u1, np.zeros(4, dtype=np.int32), FlowDirection.IN, label="b"),
+                TensorIndex(u1, np.zeros(5, dtype=np.int32), FlowDirection.OUT, label="c"),
+            ),
+        )
+        tn = TensorNetwork()
+        tn.add_node("A", T1)
+        tn.add_node("B", T2_peer)
+        tn.connect("A", "b", "B", "b")
+
+        T1_bad = DenseTensor(
+            jnp.ones((3, 4)),
+            (
+                TensorIndex(u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="a"),
+                TensorIndex(u1, np.zeros(4, dtype=np.int32), FlowDirection.IN, label="b"),
+            ),
+        )
+        with pytest.raises(ValueError, match="flow"):
+            tn.replace_tensor("A", T1_bad)

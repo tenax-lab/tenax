@@ -111,7 +111,8 @@ class TensorNetwork:
         """Replace the tensor at an existing node.
 
         The new tensor must have the same set of labels as the old one,
-        since labels define the connectivity in the graph.
+        since labels define the connectivity in the graph. Dimensions and
+        flows on connected legs are also validated.
 
         Args:
             node_id: The node to update.
@@ -119,18 +120,39 @@ class TensorNetwork:
 
         Raises:
             KeyError:   If node_id not found.
-            ValueError: If labels differ from the original tensor.
+            ValueError: If labels differ, or if a connected leg has a
+                        different dimension or flow from the original.
         """
         if node_id not in self._tensors:
             raise KeyError(f"Node {node_id!r} not found")
 
-        old_labels = set(self._tensors[node_id].labels())
+        old_tensor = self._tensors[node_id]
+        old_labels = set(old_tensor.labels())
         new_labels = set(tensor.labels())
         if old_labels != new_labels:
             raise ValueError(
                 f"Replacement tensor has different labels. "
                 f"Old: {sorted(old_labels)}, New: {sorted(new_labels)}"
             )
+
+        # Validate dimensions and flows on connected legs
+        old_idx_map = {idx.label: idx for idx in old_tensor.indices}
+        new_idx_map = {idx.label: idx for idx in tensor.indices}
+        for u, v, data in self._graph.edges(node_id, data=True):
+            label = data.get("label_a") if u == node_id else data.get("label_b")
+            if label is not None and label in old_idx_map and label in new_idx_map:
+                old_idx = old_idx_map[label]
+                new_idx = new_idx_map[label]
+                if old_idx.dim != new_idx.dim:
+                    raise ValueError(
+                        f"Replacement tensor changes dimension of connected "
+                        f"leg {label!r}: {old_idx.dim} -> {new_idx.dim}."
+                    )
+                if old_idx.flow != new_idx.flow:
+                    raise ValueError(
+                        f"Replacement tensor changes flow of connected "
+                        f"leg {label!r}: {old_idx.flow.name} -> {new_idx.flow.name}."
+                    )
 
         self._tensors[node_id] = tensor
         self._invalidate_cache()
@@ -291,9 +313,16 @@ class TensorNetwork:
             new_label: The new label.
 
         Raises:
-            KeyError: If node not found or old_label not in tensor.
+            KeyError:   If node not found or old_label not in tensor.
+            ValueError: If new_label already exists on the tensor (and
+                        differs from old_label).
         """
         tensor = self._tensors[node_id]
+        if new_label != old_label and new_label in tensor.labels():
+            raise ValueError(
+                f"Cannot relabel {old_label!r} -> {new_label!r} on node "
+                f"{node_id!r}: label {new_label!r} already exists on this tensor."
+            )
         self._tensors[node_id] = tensor.relabel(old_label, new_label)
 
         # Update any edges that reference this label
