@@ -610,26 +610,163 @@ class TestBuildPEPS:
     def test_incompatible_shared_label_raises(self, u1):
         charges_phys = np.zeros(2, dtype=np.int32)
         charges_bond = np.zeros(3, dtype=np.int32)
-        tensors = [[
-            DenseTensor(
-                jnp.ones((2, 3)),
-                (
-                    TensorIndex(u1, charges_phys, FlowDirection.IN, label="p00"),
-                    TensorIndex(
-                        u1, charges_bond, FlowDirection.OUT, label="h0_0_1"
+        tensors = [
+            [
+                DenseTensor(
+                    jnp.ones((2, 3)),
+                    (
+                        TensorIndex(u1, charges_phys, FlowDirection.IN, label="p00"),
+                        TensorIndex(
+                            u1, charges_bond, FlowDirection.OUT, label="h0_0_1"
+                        ),
                     ),
                 ),
-            ),
-            DenseTensor(
-                jnp.ones((3, 2)),
-                (
-                    TensorIndex(
-                        u1, charges_bond, FlowDirection.OUT, label="h0_0_1"
+                DenseTensor(
+                    jnp.ones((3, 2)),
+                    (
+                        TensorIndex(
+                            u1, charges_bond, FlowDirection.OUT, label="h0_0_1"
+                        ),
+                        TensorIndex(u1, charges_phys, FlowDirection.IN, label="p01"),
                     ),
-                    TensorIndex(u1, charges_phys, FlowDirection.IN, label="p01"),
                 ),
-            ),
-        ]]
+            ]
+        ]
 
         with pytest.raises(ValueError, match="Incompatible indices"):
             build_peps(tensors, 1, 2)
+
+
+class TestEdgeLabelOwnership:
+    """Regression tests for edge-label ownership tracking.
+
+    networkx.MultiGraph.edges(node) always yields u=node as the first
+    element, so checking `u == node_id` to decide between label_a and
+    label_b is always True. The fix stores owner_a/owner_b in edge data.
+
+    These tests use *different* label names on each side of a bond
+    (e.g. "left" on A, "right" on B) to distinguish ownership.
+    """
+
+    def _make_pair(self, u1, dim=3):
+        """Return (A, B) with different bond labels and compatible flows."""
+        charges = np.zeros(dim, dtype=np.int32)
+        A = DenseTensor(
+            jnp.ones((dim, dim)),
+            (
+                TensorIndex(u1, charges, FlowDirection.IN, label="phys_a"),
+                TensorIndex(u1, charges, FlowDirection.OUT, label="left"),
+            ),
+        )
+        B = DenseTensor(
+            jnp.ones((dim, dim)),
+            (
+                TensorIndex(u1, charges, FlowDirection.IN, label="right"),
+                TensorIndex(u1, charges, FlowDirection.IN, label="phys_b"),
+            ),
+        )
+        return A, B
+
+    def test_open_legs_with_different_bond_labels(self, u1):
+        """open_legs must report the correct label for each node."""
+        A, B = self._make_pair(u1)
+        tn = TensorNetwork()
+        tn.add_node("A", A)
+        tn.add_node("B", B)
+        tn.connect("A", "left", "B", "right")
+
+        open_a = tn.open_legs("A")
+        open_b = tn.open_legs("B")
+
+        # "left" is connected on A → should NOT appear as open
+        assert "left" not in open_a
+        assert "phys_a" in open_a
+
+        # "right" is connected on B → should NOT appear as open
+        assert "right" not in open_b
+        assert "phys_b" in open_b
+
+    def test_relabel_bond_with_different_labels(self, u1):
+        """relabel_bond must update the correct side of an asymmetric bond."""
+        A, B = self._make_pair(u1)
+        tn = TensorNetwork()
+        tn.add_node("A", A)
+        tn.add_node("B", B)
+        tn.connect("A", "left", "B", "right")
+
+        # Relabel B's side of the bond
+        tn.relabel_bond("B", "right", "new_right")
+
+        # B's tensor should have the new label
+        assert "new_right" in tn.get_tensor("B").labels()
+        assert "right" not in tn.get_tensor("B").labels()
+
+        # The bond should still work — open_legs should not include new_right
+        assert "new_right" not in tn.open_legs("B")
+
+    def test_disconnect_reversed_argument_order(self, u1):
+        """disconnect(B, lb, A, la) must work even though connect(A, la, B, lb)."""
+        A, B = self._make_pair(u1)
+        tn = TensorNetwork()
+        tn.add_node("A", A)
+        tn.add_node("B", B)
+        tn.connect("A", "left", "B", "right")
+        assert tn.n_edges() == 1
+
+        # Disconnect with reversed node order
+        tn.disconnect("B", "right", "A", "left")
+        assert tn.n_edges() == 0
+
+    def test_contraction_with_different_bond_labels(self, u1):
+        """Contraction must correctly pair legs even with asymmetric labels."""
+        charges = np.zeros(3, dtype=np.int32)
+        data_a = jnp.array([1.0, 2.0, 3.0])
+        data_b = jnp.array([4.0, 5.0, 6.0])
+        A = DenseTensor(
+            data_a, (TensorIndex(u1, charges, FlowDirection.OUT, label="x"),)
+        )
+        B = DenseTensor(
+            data_b, (TensorIndex(u1, charges, FlowDirection.IN, label="y"),)
+        )
+        tn = TensorNetwork()
+        tn.add_node("A", A)
+        tn.add_node("B", B)
+        tn.connect("A", "x", "B", "y")
+
+        result = tn.contract()
+        expected = float(jnp.dot(data_a, data_b))
+        np.testing.assert_allclose(float(result.todense()), expected, rtol=1e-5)
+
+    def test_replace_tensor_validates_connected_leg(self, u1):
+        """replace_tensor must validate the leg that is actually connected."""
+        charges3 = np.zeros(3, dtype=np.int32)
+        charges4 = np.zeros(4, dtype=np.int32)
+        A = DenseTensor(
+            jnp.ones((3, 3)),
+            (
+                TensorIndex(u1, charges3, FlowDirection.IN, label="phys"),
+                TensorIndex(u1, charges3, FlowDirection.OUT, label="left"),
+            ),
+        )
+        B = DenseTensor(
+            jnp.ones((3, 3)),
+            (
+                TensorIndex(u1, charges3, FlowDirection.IN, label="right"),
+                TensorIndex(u1, charges3, FlowDirection.IN, label="phys_b"),
+            ),
+        )
+        tn = TensorNetwork()
+        tn.add_node("A", A)
+        tn.add_node("B", B)
+        tn.connect("A", "left", "B", "right")
+
+        # Replacing B with a tensor that changes dim on "right" should raise
+        B_bad = DenseTensor(
+            jnp.ones((4, 3)),
+            (
+                TensorIndex(u1, charges4, FlowDirection.IN, label="right"),
+                TensorIndex(u1, charges3, FlowDirection.IN, label="phys_b"),
+            ),
+        )
+        with pytest.raises(ValueError, match="dimension"):
+            tn.replace_tensor("B", B_bad)
