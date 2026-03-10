@@ -187,9 +187,17 @@ def dmrg(
     if L == 1:
         l_env = left_envs[0]
         assert l_env is not None
-        r_env = right_envs[1] if right_envs[1] is not None else ops.build_trivial_right_env()
+        r_env = (
+            right_envs[1]
+            if right_envs[1] is not None
+            else ops.build_trivial_right_env()
+        )
         new_site, e = ops.one_site_update(
-            mps_tensors[0], l_env, mpo_tensors[0], r_env, config,
+            mps_tensors[0],
+            l_env,
+            mpo_tensors[0],
+            r_env,
+            config,
         )
         energy = float(e)
         mps_tensors[0] = new_site
@@ -1208,14 +1216,15 @@ def _update_left_env_symmetric(
         is_left_boundary = isinstance(labels[0], str) and labels[0].startswith("p")
         A = _pad_boundary_symmetric(A, pad_left=is_left_boundary)
 
-    A_conj = A.conj()
+    A_bra = A.bar()
 
     # Build output indices from the free legs of the contraction:
-    # d = A's right virtual, e = W's right bond, f = A_conj's right virtual
-    # Use generic env labels so subsequent contractions find consistent metadata.
-    out_indices = (A.indices[2], mpo_site.indices[3], A_conj.indices[2])
+    # d = A's right virtual, e = W's right bond, f = A_bra's right virtual
+    # bar() flips flows so bra virtual legs have opposite flow to ket legs,
+    # which is the physically correct convention for environment tensors.
+    out_indices = (A.indices[2], mpo_site.indices[3], A_bra.indices[2])
     result = _blockwise_contract(
-        [left_env, A, mpo_site, A_conj],
+        [left_env, A, mpo_site, A_bra],
         "abc,apd,bpxe,cxf->def",
         output_indices=out_indices,
     )
@@ -1244,12 +1253,13 @@ def _update_right_env_symmetric(
         is_left_boundary = isinstance(labels[0], str) and labels[0].startswith("p")
         B = _pad_boundary_symmetric(B, pad_left=is_left_boundary)
 
-    B_conj = B.conj()
+    B_bra = B.bar()
 
-    # Output: d = B's left virtual, e = W's left bond, f = B_conj's left virtual
-    out_indices = (B.indices[0], mpo_site.indices[0], B_conj.indices[0])
+    # Output: d = B's left virtual, e = W's left bond, f = B_bra's left virtual
+    # bar() flips flows for physically correct bra convention.
+    out_indices = (B.indices[0], mpo_site.indices[0], B_bra.indices[0])
     result = _blockwise_contract(
-        [right_env, B, mpo_site, B_conj],
+        [right_env, B, mpo_site, B_bra],
         "abc,dpa,epxb,fxc->def",
         output_indices=out_indices,
     )
@@ -1635,9 +1645,7 @@ def build_random_mps(
         if L == 1:
             # Single-site MPS: only physical index, no virtual bonds.
             shape = (physical_dim,)
-            indices = (
-                TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
-            )
+            indices = (TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),)
         elif i == 0:
             shape = (physical_dim, bond_dim)
             indices = (

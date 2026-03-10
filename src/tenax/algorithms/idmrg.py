@@ -27,11 +27,16 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms.dmrg import (
+    _blockwise_contract,
     _lanczos_solve,
+    _lanczos_solve_tensor,
+    _update_left_env_symmetric,
+    _update_right_env_symmetric,
 )
+from tenax.contraction.contractor import truncated_svd
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor, Tensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 # ---------------------------------------------------------------------------
 # Config & Result
@@ -251,6 +256,68 @@ def build_bulk_mpo_heisenberg_cylinder(
     return DenseTensor(W, indices)
 
 
+def build_bulk_mpo_heisenberg_symmetric(
+    Jz: float = 1.0,
+    Jxy: float = 1.0,
+    hz: float = 0.0,
+    d: int = 2,
+    dtype: Any = jnp.float64,
+) -> SymmetricTensor:
+    """Build a U(1) block-sparse bulk W-matrix for spin-1/2 XXZ Heisenberg.
+
+    Same Hamiltonian as :func:`build_bulk_mpo_heisenberg` but returns a
+    ``SymmetricTensor`` with proper U(1) charge assignments on every leg,
+    enabling block-sparse iDMRG.
+
+    MPO bond charges encode the finite automaton state:
+    - State 0 (done):    charge  0
+    - State 1 (Sp sent): charge -2
+    - State 2 (Sm sent): charge +2
+    - State 3 (Sz sent): charge  0
+    - State 4 (vacuum):  charge  0
+
+    Physical charges: spin up = +1, spin down = -1.
+
+    Args:
+        Jz, Jxy, hz, d, dtype: Same as :func:`build_bulk_mpo_heisenberg`.
+
+    Returns:
+        ``SymmetricTensor`` with legs ``("w_l", "mpo_top", "mpo_bot", "w_r")``.
+    """
+    if d != 2:
+        raise ValueError(
+            f"build_bulk_mpo_heisenberg_symmetric only supports d=2, got {d}"
+        )
+
+    Sp = jnp.array([[0, 1], [0, 0]], dtype=dtype)
+    Sm = jnp.array([[0, 0], [1, 0]], dtype=dtype)
+    Sz = 0.5 * jnp.array([[1, 0], [0, -1]], dtype=dtype)
+    I2 = jnp.eye(d, dtype=dtype)
+
+    D_w = 5
+    W = jnp.zeros((D_w, d, d, D_w), dtype=dtype)
+    W = W.at[0, :, :, 0].set(I2)
+    W = W.at[1, :, :, 0].set(Sp)
+    W = W.at[2, :, :, 0].set(Sm)
+    W = W.at[3, :, :, 0].set(Sz)
+    W = W.at[4, :, :, 0].set(hz * Sz)
+    W = W.at[4, :, :, 1].set((Jxy / 2) * Sm)
+    W = W.at[4, :, :, 2].set((Jxy / 2) * Sp)
+    W = W.at[4, :, :, 3].set(Jz * Sz)
+    W = W.at[4, :, :, 4].set(I2)
+
+    sym = U1Symmetry()
+    mpo_bond_charges = np.array([0, -2, 2, 0, 0], dtype=np.int32)
+    phys_charges = np.array([1, -1], dtype=np.int32)
+    indices = (
+        TensorIndex(sym, mpo_bond_charges, FlowDirection.IN, label="w_l"),
+        TensorIndex(sym, phys_charges, FlowDirection.IN, label="mpo_top"),
+        TensorIndex(sym, phys_charges, FlowDirection.OUT, label="mpo_bot"),
+        TensorIndex(sym, mpo_bond_charges, FlowDirection.OUT, label="w_r"),
+    )
+    return SymmetricTensor.from_dense(W, indices)
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -391,12 +458,195 @@ def _update_right_env_dense(
 
 
 # ---------------------------------------------------------------------------
+# Symmetric helpers
+# ---------------------------------------------------------------------------
+
+
+def _trivial_left_env_symmetric(
+    mpo: SymmetricTensor, dtype: Any = jnp.float64
+) -> SymmetricTensor:
+    """Build trivial (1,D_w,1) left environment matching the MPO symmetry."""
+    sym = mpo.indices[0].symmetry
+    bond_mps = np.zeros(1, dtype=np.int32)
+    mpo_charges = mpo.indices[0].charges  # w_l charges
+    indices = (
+        TensorIndex(sym, bond_mps, FlowDirection.IN, label="env_mps_l"),
+        TensorIndex(sym, mpo_charges, FlowDirection.IN, label="env_mpo_l"),
+        TensorIndex(sym, bond_mps, FlowDirection.OUT, label="env_mps_conj_l"),
+    )
+    # Only the vacuum row (last MPO state) is non-zero.
+    # For Heisenberg: vacuum = state D_w-1, charge = 0.
+    D_w = len(mpo_charges)
+    data = jnp.zeros((1, D_w, 1), dtype=dtype)
+    data = data.at[0, D_w - 1, 0].set(1.0)
+    return SymmetricTensor.from_dense(data, indices)
+
+
+def _trivial_right_env_symmetric(
+    mpo: SymmetricTensor, dtype: Any = jnp.float64
+) -> SymmetricTensor:
+    """Build trivial (1,D_w,1) right environment matching the MPO symmetry."""
+    sym = mpo.indices[3].symmetry
+    bond_mps = np.zeros(1, dtype=np.int32)
+    mpo_charges = mpo.indices[3].charges  # w_r charges
+    indices = (
+        TensorIndex(sym, bond_mps, FlowDirection.OUT, label="env_mps_r"),
+        TensorIndex(sym, mpo_charges, FlowDirection.OUT, label="env_mpo_r"),
+        TensorIndex(sym, bond_mps, FlowDirection.IN, label="env_mps_conj_r"),
+    )
+    # Only the "done" row (index 0) is non-zero.
+    D_w = len(mpo_charges)
+    data = jnp.zeros((1, D_w, 1), dtype=dtype)
+    data = data.at[0, 0, 0].set(1.0)
+    return SymmetricTensor.from_dense(data, indices)
+
+
+def _idmrg_symmetric(
+    bulk_mpo: SymmetricTensor,
+    config: iDMRGConfig,
+    d: int,
+    dtype: Any,
+) -> iDMRGResult:
+    """Symmetric (block-sparse) iDMRG implementation.
+
+    Uses the same Lanczos + SVD + environment update approach as the dense
+    path, but operates on SymmetricTensors throughout.  The block-sparse
+    structure reduces computational cost when exploiting U(1) symmetry.
+    """
+    W_sym = bulk_mpo
+    sym = W_sym.indices[0].symmetry
+    phys_charges = np.array(W_sym.indices[1].charges)
+
+    L_env: Tensor = _trivial_left_env_symmetric(W_sym, dtype=dtype)
+    R_env: Tensor = _trivial_right_env_symmetric(W_sym, dtype=dtype)
+
+    energies_per_step: list[float] = []
+    converged = False
+    key = jax.random.PRNGKey(0)
+    E_prev: float | None = None
+
+    # Virtual bond starts trivial: single charge-0 state.
+    virt_charges = np.zeros(1, dtype=np.int32)
+
+    # Store MPS tensors and previous theta for warm start
+    A_L_tensor: Tensor | None = None
+    A_R_tensor: Tensor | None = None
+    s_vals = jnp.ones(1, dtype=dtype)
+    theta_prev: Tensor | None = None
+
+    for step in range(config.max_iterations):
+        # ---- Build initial theta ----
+        theta_indices = (
+            TensorIndex(sym, virt_charges, FlowDirection.IN, label="v_l"),
+            TensorIndex(sym, phys_charges, FlowDirection.IN, label="p_l"),
+            TensorIndex(sym, phys_charges, FlowDirection.IN, label="p_r"),
+            TensorIndex(sym, virt_charges, FlowDirection.OUT, label="v_r"),
+        )
+
+        if theta_prev is not None and np.array_equal(
+            np.array(theta_prev.indices[0].charges), virt_charges
+        ):
+            # Warm start: reuse previous theta when charges match
+            theta = theta_prev
+        else:
+            # Cold start: random init when bond dimension changed
+            key, subkey = jax.random.split(key)
+            theta = SymmetricTensor.random_normal(theta_indices, subkey, dtype=dtype)
+
+        theta_norm = theta.norm()
+        if theta_norm > 1e-15:
+            theta = theta * (1.0 / theta_norm)
+
+        # Shared cache for opt_einsum contraction expressions
+        _matvec_cache: dict = {}
+
+        def matvec(v: Tensor) -> Tensor:
+            return _blockwise_contract(
+                [L_env, v, W_sym, W_sym, R_env],
+                "abc,apqd,bpse,eqtf,dfg->cstg",
+                output_indices=v.indices,
+                expr_cache=_matvec_cache,
+            )
+
+        E_total_val, theta_opt = _lanczos_solve_tensor(
+            matvec, theta, config.lanczos_max_iter, config.lanczos_tol
+        )
+        E_total = float(E_total_val)
+        theta_prev = theta_opt
+
+        # ---- SVD and truncate ----
+        U_t, s_full, Vh_t, _ = truncated_svd(
+            theta_opt,
+            left_labels=["v_l", "p_l"],
+            right_labels=["p_r", "v_r"],
+            new_bond_label="v_c",
+            max_singular_values=config.max_bond_dim,
+            max_truncation_err=config.svd_trunc_err,
+        )
+        # U_t: (v_l, p_l, v_c),  Vh_t: (v_c, p_r, v_r)
+        s_vals = s_full
+        s_norm = float(jnp.linalg.norm(s_vals))
+        if s_norm > 1e-15:
+            s_vals = s_vals / s_norm
+
+        # A_L = U (left-isometric), A_R = Vh (right-isometric)
+        A_L_tensor = U_t
+        A_R_tensor = Vh_t
+
+        # ---- Update environments ----
+        L_env = _update_left_env_symmetric(L_env, A_L_tensor, W_sym)
+        R_env = _update_right_env_symmetric(R_env, A_R_tensor, W_sym)
+
+        # Update virtual charges for next step from the SVD bond
+        virt_charges = np.array(A_L_tensor.indices[2].charges)
+
+        # ---- Compute energy per site ----
+        if E_prev is not None:
+            e_per_site = (E_total - E_prev) / 2.0
+        else:
+            e_per_site = E_total / 2.0
+        energies_per_step.append(e_per_site)
+
+        if config.verbose:
+            n_keep = len(s_vals)
+            print(
+                f"iDMRG step {step + 1}: E_total={E_total:.10f}, "
+                f"e/site={e_per_site:.10f}, chi={n_keep}"
+            )
+
+        # ---- Check convergence ----
+        n_e = len(energies_per_step)
+        if n_e >= 4:
+            n_half = min(n_e // 2, 5)
+            avg_recent = sum(energies_per_step[-n_half:]) / n_half
+            avg_prev = sum(energies_per_step[-2 * n_half : -n_half]) / n_half
+            if abs(avg_recent - avg_prev) < config.convergence_tol:
+                converged = True
+                if config.verbose:
+                    print(f"Converged at step {step + 1}")
+                break
+
+        E_prev = E_total
+
+    n_avg = max(len(energies_per_step) // 2, 1)
+    e_per_site_avg = sum(energies_per_step[-n_avg:]) / n_avg
+
+    return iDMRGResult(
+        energy_per_site=e_per_site_avg,
+        energies_per_step=energies_per_step,
+        mps_tensors=[A_L_tensor, A_R_tensor],
+        singular_values=s_vals,
+        converged=converged,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main algorithm
 # ---------------------------------------------------------------------------
 
 
 def idmrg(
-    bulk_mpo: DenseTensor,
+    bulk_mpo: Tensor,
     config: iDMRGConfig | None = None,
     d: int = 2,
     dtype: Any = jnp.float64,
@@ -404,7 +654,9 @@ def idmrg(
     """Run infinite DMRG to find the ground-state energy per site.
 
     Args:
-        bulk_mpo: Bulk MPO tensor (D_w, d, d, D_w) as a ``DenseTensor``.
+        bulk_mpo: Bulk MPO tensor (D_w, d, d, D_w) as a ``Tensor``.
+                  Accepts both ``DenseTensor`` (dense path) and
+                  ``SymmetricTensor`` (block-sparse path with U(1) charges).
         config:   iDMRG configuration. Uses defaults if *None*.
         d:        Physical dimension.
         dtype:    JAX dtype for computation.
@@ -414,6 +666,9 @@ def idmrg(
     """
     if config is None:
         config = iDMRGConfig()
+
+    if isinstance(bulk_mpo, SymmetricTensor):
+        return _idmrg_symmetric(bulk_mpo, config, d, dtype)
 
     W = bulk_mpo.todense()  # (D_w, d, d, D_w)
     D_w = W.shape[0]
