@@ -8,9 +8,11 @@ import pytest
 from tenax.algorithms.trg import (
     TRGConfig,
     _trg_step,
+    compute_free_wilson_fermion_tensor,
     compute_ising_tensor,
     ising_free_energy_exact,
     trg,
+    wilson_fermion_free_energy_exact,
 )
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity, U1Symmetry
@@ -490,4 +492,61 @@ class TestTRGFermionic:
         # We check they're at least in the same ballpark (both valid free energies).
         assert abs(result_fermionic) < 10, (
             f"Fermionic TRG result {result_fermionic} out of range"
+        )
+
+
+class TestFreeWilsonFermion:
+    """Tests for the free Wilson fermion tensor and TRG benchmark.
+
+    These test a genuinely fermionic model (not the Ising model with
+    FermionParity dressing) against the exact free energy from the
+    momentum-space determinant of the Wilson-Dirac operator.
+
+    Reference: Akiyama & Kadoh, JHEP 2021:188.
+    """
+
+    def test_tensor_construction(self):
+        """Free Wilson fermion tensor has correct structure."""
+        T = compute_free_wilson_fermion_tensor(mass=1.0)
+        assert isinstance(T, SymmetricTensor)
+        assert T.labels() == ("right", "up", "left", "down")
+        for idx in T.indices:
+            assert idx.dim == 4
+            assert isinstance(idx.symmetry, FermionParity)
+        assert T.n_blocks == 8
+
+    def test_tensor_norm_finite(self):
+        """Tensor norm should be finite for reasonable mass values."""
+        for mass in [0.1, 1.0, 5.0]:
+            T = compute_free_wilson_fermion_tensor(mass=mass)
+            assert jnp.isfinite(T.norm()), f"Non-finite norm at mass={mass}"
+
+    def test_exact_free_energy_finite(self):
+        """Exact free energy should be finite and positive for m > 0."""
+        for mass in [0.1, 1.0, 5.0]:
+            f = wilson_fermion_free_energy_exact(mass=mass, N=256)
+            assert np.isfinite(f), f"Non-finite free energy at mass={mass}"
+            assert f > 0, f"Free energy should be positive, got {f} at mass={mass}"
+
+    @pytest.mark.slow
+    def test_trg_matches_exact(self):
+        """TRG free energy matches exact Wilson fermion result within 1%.
+
+        Uses mass=1.0 where TRG converges well (short correlation length).
+        """
+        mass = 1.0
+        f_exact = wilson_fermion_free_energy_exact(mass=mass, N=2048)
+
+        T = compute_free_wilson_fermion_tensor(mass=mass)
+        config = TRGConfig(max_bond_dim=16, num_steps=20)
+        result = trg(T, config)
+
+        f_trg = float(result.real)
+        # Imaginary part should vanish (partition function is real)
+        assert abs(float(result.imag)) < 1e-10, (
+            f"Non-zero imaginary part: {float(result.imag):.2e}"
+        )
+        rel_err = abs(f_trg - f_exact) / abs(f_exact)
+        assert rel_err < 0.02, (
+            f"TRG ln(Z)/V={f_trg:.8f} vs exact={f_exact:.8f} (rel err={rel_err:.4f})"
         )

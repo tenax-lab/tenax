@@ -31,7 +31,7 @@ from tenax.algorithms._tensor_utils import (
 )
 from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import U1Symmetry, ZnSymmetry
+from tenax.core.symmetry import FermionParity, U1Symmetry, ZnSymmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 
@@ -289,3 +289,257 @@ def ising_free_energy_exact(beta: float, J: float = 1.0) -> float:
     # f = -ln(Z)/(N*beta) = -ln(2)/beta - integral/(2*beta)
     free_energy = -float(jnp.log(2.0)) / beta - integral / (2 * beta)
     return float(free_energy)
+
+
+def compute_free_wilson_fermion_tensor(
+    mass: float,
+    mu: float = 0.0,
+) -> SymmetricTensor:
+    """Build the initial tensor for the 2D free Wilson fermion.
+
+    Constructs the Grassmann tensor network representation of the partition
+    function Z = det(D_W) for a single-flavor Wilson fermion on a 2D square
+    lattice with no gauge field (U=1).
+
+    The construction follows Akiyama & Kadoh, JHEP 2021:188 and the reference
+    implementation at github.com/akiyama-es/Grassmann-BTRG.
+
+    Each bond carries two Grassmann indices (one per spinor component), giving
+    bond dimension 4 with FermionParity charges [0, 1, 1, 0].
+
+    Args:
+        mass: Fermion mass parameter.
+        mu:   Chemical potential (default 0).
+
+    Returns:
+        SymmetricTensor with FermionParity symmetry, bond dimension 4,
+        legs ("up", "down", "left", "right").
+    """
+    coeff = _wilson_coeff_tensor(mass)
+    phase = _wilson_phase_tensor(mu)
+    # Combine: T[i1,j1,i2,j2,pi1,pj1,pi2,pj2] = coeff * phase
+    T8 = coeff * phase
+
+    # Reshape 8 binary indices -> 4 bond indices of dim 4
+    # Bond encoding: (a, b) -> a*2 + b for pairs:
+    #   right = (i1, i2), up = (j1, j2), left = (pi1, pi2), down = (pj1, pj2)
+    # The 8-index tensor has shape [i1,j1,i2,j2,pi1,pj1,pi2,pj2]
+    # Transpose to group bond pairs: [i1,i2, j1,j2, pi1,pi2, pj1,pj2]
+    T8 = T8.transpose(0, 2, 1, 3, 4, 6, 5, 7)
+    T4 = T8.reshape(4, 4, 4, 4)
+
+    # FermionParity charges for each bond state:
+    # (0,0)->0, (0,1)->1, (1,0)->1, (1,1)->0
+    sym = FermionParity()
+    charges = np.array([0, 1, 1, 0], dtype=np.int32)
+    indices = (
+        TensorIndex(sym, charges, FlowDirection.IN, label="right"),
+        TensorIndex(sym, charges, FlowDirection.IN, label="up"),
+        TensorIndex(sym, charges, FlowDirection.OUT, label="left"),
+        TensorIndex(sym, charges, FlowDirection.OUT, label="down"),
+    )
+    return SymmetricTensor.from_dense(T4, indices)
+
+
+def _wilson_fundamental_tensor_1() -> np.ndarray:
+    """Fundamental tensor for spatial (x) hopping.
+
+    Computes 2x2 determinants of Wilson-Dirac projector columns.
+    Indices: (pi2, pi1, j2, j1), binary.
+    """
+    # Columns of the spatial hopping matrix (1 - gamma_1) / 2
+    # gamma_1 = sigma_1 = [[0,1],[1,0]]
+    # (1 - sigma_1)/2 has eigenvalues/columns:
+    arrays = np.array(
+        [
+            [1, 1j],  # col from (1-gamma_1)/2, spinor 1
+            [1, -1],  # col from sigma_3 factor
+            [1, -1j],  # conjugate
+            [1, 1],  # identity col
+        ],
+        dtype=np.complex128,
+    )
+
+    out = np.zeros((2, 2, 2, 2), dtype=np.complex128)
+    for pi2 in range(2):
+        for pi1 in range(2):
+            for j2 in range(2):
+                for j1 in range(2):
+                    if pi2 + pi1 + j2 + j1 == 2:
+                        # Select two rows from the 4 arrays based on which
+                        # indices are 1, then compute 2x2 determinant
+                        rows = []
+                        for idx_val, arr in zip([pi2, pi1, j2, j1], arrays):
+                            if idx_val == 1:
+                                rows.append(arr)
+                        if len(rows) == 2:
+                            out[pi2, pi1, j2, j1] = (
+                                rows[0][0] * rows[1][1] - rows[0][1] * rows[1][0]
+                            )
+    return out
+
+
+def _wilson_fundamental_tensor_2() -> np.ndarray:
+    """Fundamental tensor for temporal (t) hopping.
+
+    Computes 2x2 determinants of Wilson-Dirac projector columns.
+    Indices: (pj2, pj1, i2, i1), binary.
+    """
+    # Columns of the temporal hopping matrix (1 - gamma_2) / 2
+    # gamma_2 = sigma_3 = [[1,0],[0,-1]]
+    # Different column ordering from the spatial case
+    arrays = np.array(
+        [
+            [1, 1j],  # col 1
+            [1, 1],  # col 2 (identity-like)
+            [1, -1j],  # col 3
+            [1, -1],  # col 4
+        ],
+        dtype=np.complex128,
+    )
+
+    out = np.zeros((2, 2, 2, 2), dtype=np.complex128)
+    for pj2 in range(2):
+        for pj1 in range(2):
+            for i2 in range(2):
+                for i1 in range(2):
+                    if pj2 + pj1 + i2 + i1 == 2:
+                        rows = []
+                        for idx_val, arr in zip([pj2, pj1, i2, i1], arrays):
+                            if idx_val == 1:
+                                rows.append(arr)
+                        if len(rows) == 2:
+                            out[pj2, pj1, i2, i1] = (
+                                rows[0][0] * rows[1][1] - rows[0][1] * rows[1][0]
+                            )
+    return out
+
+
+def _wilson_coeff_tensor(mass: float, coupling: float = 0.0) -> np.ndarray:
+    """Coefficient tensor for the free Wilson fermion.
+
+    Combines mass term with hopping (fundamental) tensors.
+    Output shape: (2,2,2,2,2,2,2,2) indexed as
+    (i1, j1, i2, j2, pi1, pj1, pi2, pj2).
+    """
+    fund1 = _wilson_fundamental_tensor_1()  # (pi2,pi1,j2,j1)
+    fund2 = _wilson_fundamental_tensor_2()  # (pj2,pj1,i2,i1)
+
+    M = mass + 2.0
+    out = np.zeros((2,) * 8, dtype=np.complex128)
+
+    for i1 in range(2):
+        for j1 in range(2):
+            for i2 in range(2):
+                for j2 in range(2):
+                    for pi1 in range(2):
+                        for pj1 in range(2):
+                            for pi2 in range(2):
+                                for pj2 in range(2):
+                                    s_i = pj2 + pj1 + i2 + i1
+                                    s_j = pi2 + pi1 + j2 + j1
+
+                                    val = 0.0 + 0.0j
+                                    # Mass term: (M^2 + g^2) * delta(s_i,0) * delta(s_j,0)
+                                    if s_i == 0 and s_j == 0:
+                                        val += M * M + coupling
+                                    # Cross mass terms
+                                    if s_i == 1 and s_j == 1:
+                                        sign = (-1) ** (i2 + i1 + pi1 + j2)
+                                        phase = (1j) ** (pj2 + i2 + pi2 + j2)
+                                        val -= M * sign * phase
+                                        val -= M  # second M term (no extra phase)
+                                    # Hopping determinant term
+                                    val -= (
+                                        fund2[pj2, pj1, i2, i1]
+                                        * fund1[pi2, pi1, j2, j1]
+                                    )
+                                    out[i1, j1, i2, j2, pi1, pj1, pi2, pj2] = val
+    return out
+
+
+def _wilson_phase_tensor(mu: float = 0.0) -> np.ndarray:
+    """Phase tensor encoding Grassmann signs and chemical potential.
+
+    Output shape: (2,2,2,2,2,2,2,2) indexed as
+    (i1, j1, i2, j2, pi1, pj1, pi2, pj2).
+    """
+    out = np.zeros((2,) * 8, dtype=np.complex128)
+    sqrt2_inv = 1.0 / np.sqrt(2.0)
+
+    for i1 in range(2):
+        for j1 in range(2):
+            for i2 in range(2):
+                for j2 in range(2):
+                    for pi1 in range(2):
+                        for pj1 in range(2):
+                            for pi2 in range(2):
+                                for pj2 in range(2):
+                                    # Koszul signs
+                                    sign = (
+                                        (-1) ** (i1 * (j1 + j2 + pi1 + pi2))
+                                        * (-1) ** (i2 * (j2 + pi1 + pi2))
+                                        * (-1) ** (pj1 * (pi1 + pi2))
+                                        * (-1) ** (pj2 * pi2)
+                                    )
+                                    # Chemical potential
+                                    chem = np.exp(0.5 * mu * (i2 - j2 + pi2 - pj2))
+                                    # Normalization
+                                    total_occ = (
+                                        i1 + j1 + i2 + j2 + pi1 + pj1 + pi2 + pj2
+                                    )
+                                    norm = sqrt2_inv**total_occ
+
+                                    out[i1, j1, i2, j2, pi1, pj1, pi2, pj2] = (
+                                        sign * chem * norm
+                                    )
+    return out
+
+
+def wilson_fermion_free_energy_exact(
+    mass: float,
+    mu: float = 0.0,
+    N: int = 1024,
+) -> float:
+    """Exact free energy per site for the 2D free Wilson fermion.
+
+    Computes ln(Z)/V by summing ln det D_W(p) over the Brillouin zone,
+    where D_W is the 2x2 momentum-space Wilson-Dirac operator:
+
+        D_11 = D_22 = m + 2 - cos(p1) - cos(p2)*cosh(mu)
+                      - i*sin(p2)*sinh(mu)
+        D_12 = i*sin(p1) + sin(p2)*cosh(mu) - i*cos(p2)*sinh(mu)
+        D_21 = i*sin(p1) - sin(p2)*cosh(mu) + i*cos(p2)*sinh(mu)
+
+    Anti-periodic boundary conditions in the temporal direction shift
+    p2 -> p2 + pi/N.
+
+    Args:
+        mass: Fermion mass parameter.
+        mu:   Chemical potential (default 0).
+        N:    Brillouin zone grid size (N x N).
+
+    Returns:
+        ln(Z) / V (free energy density, not divided by beta).
+    """
+    dp = 2 * np.pi / N
+
+    # Momentum grids: periodic in p1, anti-periodic in p2
+    p1 = np.arange(N) * dp
+    p2 = np.arange(N) * dp + np.pi / N  # anti-periodic shift
+
+    p1g, p2g = np.meshgrid(p1, p2, indexing="ij")
+
+    cosh_mu = np.cosh(mu)
+    sinh_mu = np.sinh(mu)
+
+    # Wilson-Dirac operator elements
+    a11 = (mass + 2) - np.cos(p1g) - np.cos(p2g) * cosh_mu - 1j * np.sin(p2g) * sinh_mu
+    a12 = 1j * np.sin(p1g) + np.sin(p2g) * cosh_mu - 1j * np.cos(p2g) * sinh_mu
+    a21 = 1j * np.sin(p1g) - np.sin(p2g) * cosh_mu + 1j * np.cos(p2g) * sinh_mu
+
+    # det D = a11*a22 - a12*a21, with a22 = a11
+    det_D = a11 * a11 - a12 * a21
+
+    ln_Z_per_site = np.sum(np.log(det_D)).real / (N * N)
+    return float(ln_Z_per_site)
