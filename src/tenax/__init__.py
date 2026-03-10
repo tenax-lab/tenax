@@ -107,9 +107,11 @@ from tenax.algorithms.observables import (
 )
 from tenax.algorithms.trg import (
     TRGConfig,
+    compute_free_wilson_fermion_tensor,
     compute_ising_tensor,
     ising_free_energy_exact,
     trg,
+    wilson_fermion_free_energy_exact,
 )
 from tenax.contraction.contractor import (
     contract,
@@ -190,7 +192,9 @@ __all__ = [
     "TRGConfig",
     "trg",
     "compute_ising_tensor",
+    "compute_free_wilson_fermion_tensor",
     "ising_free_energy_exact",
+    "wilson_fermion_free_energy_exact",
     # HOTRG
     "HOTRGConfig",
     "hotrg",
