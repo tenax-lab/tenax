@@ -659,3 +659,38 @@ class TestDagger:
 
         assert td.indices[0].flow == FlowDirection.OUT
         assert td.indices[1].flow == FlowDirection.IN
+
+
+# ------------------------------------------------------------------ #
+# Fermionic site operators                                             #
+# ------------------------------------------------------------------ #
+
+
+class TestFermionSiteOps:
+    def test_fermion_site_ops_keys(self):
+        from tenax.algorithms.auto_mpo import fermion_site_ops
+
+        ops = fermion_site_ops()
+        assert set(ops.keys()) == {"C", "Cd", "N", "F", "Id"}
+
+    def test_anticommutation_C_Cd(self):
+        """C Cd + Cd C = Id (canonical anticommutation)."""
+        from tenax.algorithms.auto_mpo import fermion_site_ops
+
+        ops = fermion_site_ops()
+        C, Cd, Id = ops["C"], ops["Cd"], ops["Id"]
+        np.testing.assert_allclose(C @ Cd + Cd @ C, Id)
+
+    def test_N_equals_Cd_C(self):
+        from tenax.algorithms.auto_mpo import fermion_site_ops
+
+        ops = fermion_site_ops()
+        np.testing.assert_allclose(ops["N"], ops["Cd"] @ ops["C"])
+
+    def test_F_equals_minus_one_to_N(self):
+        """F = (-1)^N = Id - 2*N."""
+        from tenax.algorithms.auto_mpo import fermion_site_ops
+
+        ops = fermion_site_ops()
+        expected = ops["Id"] - 2 * ops["N"]
+        np.testing.assert_allclose(ops["F"], expected)

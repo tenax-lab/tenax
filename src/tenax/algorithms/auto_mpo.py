@@ -67,6 +67,27 @@ def spin_one_ops() -> dict[str, np.ndarray]:
     }
 
 
+def fermion_site_ops() -> dict[str, np.ndarray]:
+    """Spinless fermion single-site operators (d=2).
+
+    Basis ordering: ``|0>`` (empty), ``|1>`` (occupied).
+    Returns a dict with keys "C", "Cd", "N", "F", "Id".
+
+    - C  = annihilation operator
+    - Cd = creation operator (C†)
+    - N  = number operator (Cd @ C)
+    - F  = Jordan-Wigner string operator (-1)^N = diag(1, -1)
+    - Id = identity
+    """
+    return {
+        "C": np.array([[0.0, 1.0], [0.0, 0.0]], dtype=np.float64),
+        "Cd": np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64),
+        "N": np.array([[0.0, 0.0], [0.0, 1.0]], dtype=np.float64),
+        "F": np.array([[1.0, 0.0], [0.0, -1.0]], dtype=np.float64),
+        "Id": np.eye(2, dtype=np.float64),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Data structure
 # ---------------------------------------------------------------------------
