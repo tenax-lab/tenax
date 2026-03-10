@@ -67,6 +67,27 @@ def spin_one_ops() -> dict[str, np.ndarray]:
     }
 
 
+def fermion_site_ops() -> dict[str, np.ndarray]:
+    """Spinless fermion single-site operators (d=2).
+
+    Basis ordering: ``|0>`` (empty), ``|1>`` (occupied).
+    Returns a dict with keys "C", "Cd", "N", "F", "Id".
+
+    - C  = annihilation operator
+    - Cd = creation operator (C†)
+    - N  = number operator (Cd @ C)
+    - F  = Jordan-Wigner string operator (-1)^N = diag(1, -1)
+    - Id = identity
+    """
+    return {
+        "C": np.array([[0.0, 1.0], [0.0, 0.0]], dtype=np.float64),
+        "Cd": np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64),
+        "N": np.array([[0.0, 0.0], [0.0, 1.0]], dtype=np.float64),
+        "F": np.array([[1.0, 0.0], [0.0, -1.0]], dtype=np.float64),
+        "Id": np.eye(2, dtype=np.float64),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Data structure
 # ---------------------------------------------------------------------------
@@ -475,6 +496,7 @@ class AutoMPO:
         L: int,
         d: int = 2,
         site_ops: dict[str, np.ndarray] | None = None,
+        fermionic_ops: set[str] | None = None,
     ) -> None:
         if L < 1:
             raise ValueError(f"L must be >= 1, got {L}")
@@ -490,6 +512,7 @@ class AutoMPO:
             raise ValueError(
                 f"No default site_ops for d={d}; provide site_ops explicitly."
             )
+        self._fermionic_ops: set[str] = fermionic_ops or set()
         self._terms: list[HamiltonianTerm] = []
 
     # ------------------------------------------------------------------
@@ -536,9 +559,68 @@ class AutoMPO:
         if len(sites) != len(set(sites)):
             raise ValueError(f"Duplicate sites in term: {sites}")
 
+        # Auto-insert Jordan-Wigner F operators on intermediate sites
+        if self._fermionic_ops:
+            pairs = self._insert_jw_strings(pairs)
+
         self._terms.append(
             HamiltonianTerm(coefficient=complex(coeff), ops=tuple(pairs))
         )
+
+    def _insert_jw_strings(
+        self, pairs: list[tuple[int, np.ndarray]]
+    ) -> list[tuple[int, np.ndarray]]:
+        """Insert JW F operators between fermionic operators.
+
+        Scans the sorted operator list left-to-right. Each fermionic op
+        toggles a parity flag. While the flag is odd (string active),
+        F = (-1)^n is inserted on every intermediate site not already
+        occupied by an operator in this term.
+        """
+        if "F" not in self._site_ops:
+            return pairs
+
+        # Identify which sites carry fermionic ops
+        occupied_sites = {s for s, _ in pairs}
+        fermionic_sites: list[int] = []
+        for site, op_matrix in pairs:
+            for op_name in self._fermionic_ops:
+                if op_name in self._site_ops and (
+                    self._site_ops[op_name] is op_matrix
+                    or np.array_equal(self._site_ops[op_name], op_matrix)
+                ):
+                    fermionic_sites.append(site)
+                    break
+
+        if not fermionic_sites:
+            return pairs
+
+        fermionic_sites.sort()
+        f_op = self._site_ops["F"]
+        extra: list[tuple[int, np.ndarray]] = []
+
+        # Insert F between each consecutive pair of fermionic ops
+        for k in range(0, len(fermionic_sites) - 1, 2):
+            s_left = fermionic_sites[k]
+            s_right = fermionic_sites[k + 1]
+            for s in range(s_left + 1, s_right):
+                if s not in occupied_sites:
+                    extra.append((s, f_op))
+                    occupied_sites.add(s)
+
+        # If odd number of fermionic ops, the last one has a dangling string
+        # (string extends from last fermionic op to the rightmost site in the term)
+        if len(fermionic_sites) % 2 == 1:
+            s_last = fermionic_sites[-1]
+            s_max = max(s for s, _ in pairs)
+            for s in range(s_last + 1, s_max):
+                if s not in occupied_sites:
+                    extra.append((s, f_op))
+                    occupied_sites.add(s)
+
+        result = list(pairs) + extra
+        result.sort(key=lambda x: x[0])
+        return result
 
     def __iadd__(self, args: tuple) -> AutoMPO:
         """Convenience operator: ``auto_mpo += (coeff, op1, site1, ...)``.
@@ -645,6 +727,7 @@ def build_auto_mpo(
     L: int,
     d: int = 2,
     site_ops: dict[str, np.ndarray] | None = None,
+    fermionic_ops: set[str] | None = None,
     compress: bool = False,
     compress_tol: float = 1e-12,
     dtype: Any = jnp.float64,
@@ -659,6 +742,9 @@ def build_auto_mpo(
         d:             Local Hilbert-space dimension (2 for spin-1/2).
         site_ops:      Operator name → matrix dict; defaults to spin_half_ops()
                        for d=2 and spin_one_ops() for d=3.
+        fermionic_ops: Set of operator names that are fermionic (e.g. {"C", "Cd"}).
+                       When set, JW F strings are auto-inserted between
+                       fermionic operators.
         compress:      Apply left-to-right SVD compression.
         compress_tol:  Relative singular-value threshold for compression.
         dtype:         JAX dtype for MPO tensors.
@@ -677,7 +763,7 @@ def build_auto_mpo(
             L=L,
         )
     """
-    auto = AutoMPO(L=L, d=d, site_ops=site_ops)
+    auto = AutoMPO(L=L, d=d, site_ops=site_ops, fermionic_ops=fermionic_ops)
     for term in terms_spec:
         auto.add_term(term[0], *term[1:])
     return auto.to_mpo(

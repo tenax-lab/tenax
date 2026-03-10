@@ -962,11 +962,15 @@ class SymmetricTensor(Tensor):
             )
             val = jnp.conj(block)
             if sym is not None and sym.is_fermionic:
-                twist = 1.0
-                for q in key:
-                    twist *= sym.twist_phase(q)
-                if twist != 1.0:
-                    val = val * twist
+                # Super-algebra dagger: (-1)^{sum_{i<j} p_i * p_j}
+                # where p_i is the parity of the i-th charge.
+                parities = [int(sym.parity(np.array([q]))[0]) for q in key]
+                n_sign = 0
+                for i in range(len(parities)):
+                    for j in range(i + 1, len(parities)):
+                        n_sign += parities[i] * parities[j]
+                if n_sign % 2 == 1:
+                    val = -val
             new_blocks[new_key] = val
         obj = object.__new__(SymmetricTensor)
         obj._indices = new_indices

@@ -659,3 +659,299 @@ class TestDagger:
 
         assert td.indices[0].flow == FlowDirection.OUT
         assert td.indices[1].flow == FlowDirection.IN
+
+
+# ------------------------------------------------------------------ #
+# Fermionic site operators                                             #
+# ------------------------------------------------------------------ #
+
+
+class TestFermionSiteOps:
+    def test_fermion_site_ops_keys(self):
+        from tenax.algorithms.auto_mpo import fermion_site_ops
+
+        ops = fermion_site_ops()
+        assert set(ops.keys()) == {"C", "Cd", "N", "F", "Id"}
+
+    def test_anticommutation_C_Cd(self):
+        """C Cd + Cd C = Id (canonical anticommutation)."""
+        from tenax.algorithms.auto_mpo import fermion_site_ops
+
+        ops = fermion_site_ops()
+        C, Cd, Id = ops["C"], ops["Cd"], ops["Id"]
+        np.testing.assert_allclose(C @ Cd + Cd @ C, Id)
+
+    def test_N_equals_Cd_C(self):
+        from tenax.algorithms.auto_mpo import fermion_site_ops
+
+        ops = fermion_site_ops()
+        np.testing.assert_allclose(ops["N"], ops["Cd"] @ ops["C"])
+
+    def test_F_equals_minus_one_to_N(self):
+        """F = (-1)^N = Id - 2*N."""
+        from tenax.algorithms.auto_mpo import fermion_site_ops
+
+        ops = fermion_site_ops()
+        expected = ops["Id"] - 2 * ops["N"]
+        np.testing.assert_allclose(ops["F"], expected)
+
+
+class TestAutoMPOJordanWigner:
+    def test_jw_insertion_nn_hopping(self):
+        """Nearest-neighbor hopping: no F needed between adjacent sites."""
+        from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
+
+        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(),
+                       fermionic_ops={"C", "Cd"})
+        auto.add_term(1.0, "Cd", 0, "C", 1)
+        # NN: no intermediate sites, so only 1 term with 2 ops
+        assert auto.n_terms() == 1
+        term = auto._terms[0]
+        assert len(term.ops) == 2
+        sites = [s for s, _ in term.ops]
+        assert sites == [0, 1]
+
+    def test_jw_insertion_nnn_hopping(self):
+        """Next-nearest-neighbor: F inserted on intermediate site 1."""
+        from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
+
+        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(),
+                       fermionic_ops={"C", "Cd"})
+        auto.add_term(1.0, "Cd", 0, "C", 2)
+        assert auto.n_terms() == 1
+        term = auto._terms[0]
+        # Should have 3 ops: Cd@0, F@1, C@2
+        assert len(term.ops) == 3
+        sites = [s for s, _ in term.ops]
+        assert sites == [0, 1, 2]
+        # Middle op should be F = diag(1, -1)
+        np.testing.assert_allclose(term.ops[1][1], np.diag([1.0, -1.0]))
+
+    def test_jw_long_range(self):
+        """Long-range hopping Cd@0 C@4: F inserted on sites 1, 2, 3."""
+        from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
+
+        auto = AutoMPO(L=6, d=2, site_ops=fermion_site_ops(),
+                       fermionic_ops={"C", "Cd"})
+        auto.add_term(1.0, "Cd", 0, "C", 4)
+        term = auto._terms[0]
+        assert len(term.ops) == 5  # Cd@0, F@1, F@2, F@3, C@4
+        for i in range(1, 4):
+            np.testing.assert_allclose(term.ops[i][1], np.diag([1.0, -1.0]))
+
+    def test_no_jw_for_bosonic_ops(self):
+        """Density-density N@0 N@2: no F insertion (N is not fermionic)."""
+        from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
+
+        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(),
+                       fermionic_ops={"C", "Cd"})
+        auto.add_term(1.0, "N", 0, "N", 2)
+        term = auto._terms[0]
+        assert len(term.ops) == 2  # No F inserted
+
+    def test_jw_mixed_term(self):
+        """Term with one fermionic and one bosonic op: Cd@0 N@2 needs F@1."""
+        from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
+
+        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(),
+                       fermionic_ops={"C", "Cd"})
+        auto.add_term(1.0, "Cd", 0, "N", 2)
+        term = auto._terms[0]
+        # Odd number of fermionic ops in the range => F on intermediates
+        assert len(term.ops) == 3  # Cd@0, F@1, N@2
+
+    def test_no_jw_when_not_specified(self):
+        """Without fermionic_ops, no JW insertion even for C/Cd."""
+        from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
+
+        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops())
+        auto.add_term(1.0, "Cd", 0, "C", 2)
+        term = auto._terms[0]
+        assert len(term.ops) == 2  # No auto-insertion
+
+
+class TestBuildAutoMPOFermionic:
+    def test_build_auto_mpo_with_fermionic_ops(self):
+        """build_auto_mpo should accept fermionic_ops kwarg."""
+        from tenax.algorithms.auto_mpo import build_auto_mpo, fermion_site_ops
+
+        L = 4
+        ops = fermion_site_ops()
+        terms = [
+            (-1.0, "Cd", i, "C", i + 1) for i in range(L - 1)
+        ] + [
+            (-1.0, "C", i, "Cd", i + 1) for i in range(L - 1)
+        ]
+        mpo = build_auto_mpo(
+            terms, L=L, d=2, site_ops=ops,
+            fermionic_ops={"C", "Cd"},
+        )
+        assert mpo is not None
+        assert mpo.n_nodes() == L
+
+    def test_fermion_site_ops_importable_from_tenax(self):
+        from tenax import fermion_site_ops
+
+        ops = fermion_site_ops()
+        assert "C" in ops
+
+
+class TestFermionicDMRG:
+    def test_free_fermion_chain_energy(self):
+        """DMRG on free fermion chain H = -t sum c†_i c_{i+1} + h.c.
+
+        Exact ground state energy for L sites, N=L/2 particles:
+        E = -2t * sum_{k=1}^{N} cos(pi*k/(L+1))
+        For L=6, half-filling (N=3).
+        """
+        from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
+        from tenax.algorithms.dmrg import DMRGConfig, build_random_mps, dmrg
+
+        L = 6
+        t_hop = 1.0
+        ops = fermion_site_ops()
+        auto = AutoMPO(L=L, d=2, site_ops=ops, fermionic_ops={"C", "Cd"})
+        for i in range(L - 1):
+            auto += (-t_hop, "Cd", i, "C", i + 1)
+            auto += (-t_hop, "C", i, "Cd", i + 1)
+        mpo = auto.to_mpo()
+
+        mps = build_random_mps(L=L, physical_dim=2, bond_dim=16, seed=0)
+        config = DMRGConfig(num_sweeps=20, max_bond_dim=16, convergence_tol=1e-8)
+        result = dmrg(mpo, mps, config)
+
+        # Exact GS energy for free fermions on L=6 open chain at half filling
+        # E = -2t * sum_{k=1}^{N} cos(pi*k/(L+1))
+        # N = 3 (half filling), L = 6
+        exact_energy = -2 * t_hop * sum(
+            np.cos(np.pi * k / (L + 1)) for k in range(1, L // 2 + 1)
+        )
+        np.testing.assert_allclose(result.energy, exact_energy, atol=1e-6)
+
+
+class TestDaggerTwistPhaseCorrectness:
+    def test_dagger_parity_odd_tensor(self, fp, rng):
+        """dagger(dagger(T)) == T for FermionParity."""
+        charges = np.array([0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(fp, charges, FlowDirection.IN, label="a"),
+            TensorIndex(fp, charges, FlowDirection.OUT, label="b"),
+        )
+        t = SymmetricTensor.random_normal(indices, rng)
+        t_dd = t.dagger().dagger()
+
+        for key in t.blocks:
+            np.testing.assert_allclose(
+                np.array(t.blocks[key]),
+                np.array(t_dd.blocks[key]),
+                atol=1e-12,
+                err_msg=f"dagger is not involutive for block {key}",
+            )
+
+    def test_dagger_involution_fu1(self, fu1, rng):
+        """dagger(dagger(T)) == T for FermionicU1."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(fu1, charges, FlowDirection.IN, label="a"),
+            TensorIndex(fu1, fu1.dual(charges), FlowDirection.OUT, label="b"),
+        )
+        t = SymmetricTensor.random_normal(indices, rng)
+        t_dd = t.dagger().dagger()
+
+        for key in t.blocks:
+            np.testing.assert_allclose(
+                np.array(t.blocks[key]),
+                np.array(t_dd.blocks[key]),
+                atol=1e-12,
+            )
+
+
+class TestFermionicContractionCrossValidation:
+    """Compare block-sparse fermionic contraction against dense einsum."""
+
+    def test_2tensor_3leg_contraction(self, fp, rng, rng2):
+        """Contract two 3-leg fermionic tensors, compare to dense."""
+        charges = np.array([0, 1], dtype=np.int32)
+        # A: (a, b, c) with c=OUT contracted with B: (c, d, e)
+        idx_A = (
+            TensorIndex(fp, charges, FlowDirection.IN, label="a"),
+            TensorIndex(fp, charges, FlowDirection.IN, label="b"),
+            TensorIndex(fp, charges, FlowDirection.OUT, label="c"),
+        )
+        idx_B = (
+            TensorIndex(fp, charges, FlowDirection.IN, label="c"),
+            TensorIndex(fp, charges, FlowDirection.IN, label="d"),
+            TensorIndex(fp, charges, FlowDirection.OUT, label="e"),
+        )
+        A = SymmetricTensor.random_normal(idx_A, rng)
+        B = SymmetricTensor.random_normal(idx_B, rng2)
+
+        result = contract(A, B)
+        result_dense = result.todense()
+
+        # Dense reference
+        A_dense = A.todense()
+        B_dense = B.todense()
+        ref = jnp.einsum("abc,cde->abde", A_dense, B_dense)
+
+        np.testing.assert_allclose(
+            np.array(result_dense), np.array(ref), atol=1e-10,
+            err_msg="Fermionic block-sparse contraction differs from dense einsum"
+        )
+
+    def test_matrix_contraction_fu1(self, fu1, rng, rng2):
+        """Contract two 2-leg FermionicU1 tensors (matrix multiply)."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        dual_charges = fu1.dual(charges)
+        # Shared bond "b": same charge array in both tensors so
+        # todense() positions align for dense einsum cross-check.
+        idx_A = (
+            TensorIndex(fu1, charges, FlowDirection.IN, label="a"),
+            TensorIndex(fu1, charges, FlowDirection.OUT, label="b"),
+        )
+        idx_B = (
+            TensorIndex(fu1, charges, FlowDirection.IN, label="b"),
+            TensorIndex(fu1, dual_charges, FlowDirection.OUT, label="c"),
+        )
+        A = SymmetricTensor.random_normal(idx_A, rng)
+        B = SymmetricTensor.random_normal(idx_B, rng2)
+
+        result = contract(A, B)
+        result_dense = result.todense()
+
+        A_dense = A.todense()
+        B_dense = B.todense()
+        ref = jnp.einsum("ab,bc->ac", A_dense, B_dense)
+
+        np.testing.assert_allclose(
+            np.array(result_dense), np.array(ref), atol=1e-10,
+            err_msg="FermionicU1 matrix contraction differs from dense einsum"
+        )
+
+    def test_product_symmetry_contraction(self, rng, rng2):
+        """Cross-validate with ProductSymmetry(FermionParity, U1)."""
+        sym = ProductSymmetry(FermionParity(), U1Symmetry())
+        charges = np.array(
+            [ProductSymmetry.encode(0, 0), ProductSymmetry.encode(1, 1)],
+            dtype=np.int32,
+        )
+        dual_charges = sym.dual(charges)
+
+        idx_A = (
+            TensorIndex(sym, charges, FlowDirection.IN, label="a"),
+            TensorIndex(sym, dual_charges, FlowDirection.OUT, label="b"),
+        )
+        idx_B = (
+            TensorIndex(sym, charges, FlowDirection.IN, label="b"),
+            TensorIndex(sym, dual_charges, FlowDirection.OUT, label="c"),
+        )
+        A = SymmetricTensor.random_normal(idx_A, rng)
+        B = SymmetricTensor.random_normal(idx_B, rng2)
+
+        result = contract(A, B)
+        result_dense = result.todense()
+
+        ref = jnp.einsum("ab,bc->ac", A.todense(), B.todense())
+        np.testing.assert_allclose(
+            np.array(result_dense), np.array(ref), atol=1e-10,
+        )
