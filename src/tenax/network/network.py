@@ -248,12 +248,25 @@ class TensorNetwork:
                 f"(labels={sorted(labels_b)})"
             )
 
-        count = 0
-        for label in sorted(shared, key=str):
-            self.connect(node_a, label, node_b, label)
-            count += 1
+        # Validate all shared labels before mutating, so the network is
+        # not left partially connected on failure.
+        sorted_shared = sorted(shared, key=str)
+        for label in sorted_shared:
+            idx_a = self._get_index(node_a, label)
+            idx_b = self._get_index(node_b, label)
+            if not idx_a.compatible_with(idx_b):
+                raise ValueError(
+                    f"Incompatible indices on shared label {label!r}: "
+                    f"{node_a!r} (dim={idx_a.dim}, flow={idx_a.flow.name}) "
+                    f"vs {node_b!r} (dim={idx_b.dim}, flow={idx_b.flow.name})"
+                )
 
-        return count
+        # Already validated; bypass connect() to avoid re-checking.
+        for label in sorted_shared:
+            self._graph.add_edge(node_a, node_b, label_a=label, label_b=label)
+        self._invalidate_cache()
+
+        return len(sorted_shared)
 
     def disconnect(
         self,
@@ -647,12 +660,8 @@ def build_mps(
         labels_next = set(tensors[i + 1].labels())
         shared = labels_i & labels_next
 
-        if shared:
-            for label in sorted(shared, key=str):
-                try:
-                    tn.connect(i, label, i + 1, label)
-                except ValueError:
-                    pass  # incompatible dimensions, skip
+        for label in sorted(shared, key=str):
+            tn.connect(i, label, i + 1, label)
 
     return tn
 
@@ -676,6 +685,16 @@ def build_peps(
     Returns:
         TensorNetwork with virtual bonds connected.
     """
+    if len(tensors) != Lx:
+        raise ValueError(
+            f"tensors has {len(tensors)} rows but Lx={Lx}"
+        )
+    for i, row in enumerate(tensors):
+        if len(row) != Ly:
+            raise ValueError(
+                f"tensors[{i}] has {len(row)} columns but Ly={Ly}"
+            )
+
     tn = TensorNetwork(name="PEPS")
 
     # Add all nodes
@@ -690,10 +709,7 @@ def build_peps(
             labels_next = set(tensors[i][j + 1].labels())
             shared = labels_ij & labels_next
             for label in sorted(shared, key=str):
-                try:
-                    tn.connect((i, j), label, (i, j + 1), label)
-                except ValueError:
-                    pass
+                tn.connect((i, j), label, (i, j + 1), label)
 
     # Connect vertical neighbors
     for i in range(Lx - 1):
@@ -702,9 +718,6 @@ def build_peps(
             labels_next = set(tensors[i + 1][j].labels())
             shared = labels_ij & labels_next
             for label in sorted(shared, key=str):
-                try:
-                    tn.connect((i, j), label, (i + 1, j), label)
-                except ValueError:
-                    pass
+                tn.connect((i, j), label, (i + 1, j), label)
 
     return tn
