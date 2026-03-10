@@ -176,7 +176,22 @@ def dmrg(
     energy = 0.0
     converged = False
 
-    for sweep in range(config.num_sweeps):
+    # Special case: single-site system (L=1). Both sweep loops iterate
+    # range(0) and range(-1, -1, -1) respectively, so no optimisation
+    # happens and the energy stays at the default 0.0.  Solve once.
+    if L == 1:
+        l_env = left_envs[0]
+        assert l_env is not None
+        r_env = right_envs[1] if right_envs[1] is not None else ops.build_trivial_right_env()
+        new_site, e = ops.one_site_update(
+            mps_tensors[0], l_env, mpo_tensors[0], r_env, config,
+        )
+        energy = float(e)
+        mps_tensors[0] = new_site
+        converged = True
+        energies_per_sweep.append(energy)
+
+    for sweep in range(config.num_sweeps if L > 1 else 0):
         prev_energy = energy
 
         # Rebuild left environments from updated MPS before left-to-right sweep
@@ -680,7 +695,10 @@ def _one_site_update(
     original_site_shape = site_dense.shape
 
     # Ensure site is always 3D: (chi_l, d, chi_r)
-    if site_dense.ndim == 2:
+    if site_dense.ndim == 1:
+        # Single-site MPS with only a physical index: (d,) -> (1, d, 1)
+        site_dense = site_dense[jnp.newaxis, :, jnp.newaxis]
+    elif site_dense.ndim == 2:
         labels_list = list(site.labels())
         has_left_virt = any(
             isinstance(lbl, str) and lbl.startswith("v") for lbl in labels_list[:1]
@@ -716,7 +734,10 @@ def _one_site_update(
 
     site_opt_dense = site_opt_flat.reshape(site_shape)
     # Remove trivial dims if we added them
-    if len(original_site_shape) == 2 and site_opt_dense.ndim == 3:
+    if len(original_site_shape) == 1 and site_opt_dense.ndim == 3:
+        # 1D input: (1, d, 1) -> (d,)
+        site_opt_dense = site_opt_dense[0, :, 0]
+    elif len(original_site_shape) == 2 and site_opt_dense.ndim == 3:
         labels_list = list(site.labels())
         has_left_virt = any(
             isinstance(lbl, str) and lbl.startswith("v") for lbl in labels_list[:1]
@@ -1606,7 +1627,13 @@ def build_random_mps(
     for i in range(L):
         key = jax.random.PRNGKey(seed + i)
 
-        if i == 0:
+        if L == 1:
+            # Single-site MPS: only physical index, no virtual bonds.
+            shape = (physical_dim,)
+            indices = (
+                TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
+            )
+        elif i == 0:
             shape = (physical_dim, bond_dim)
             indices = (
                 TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),

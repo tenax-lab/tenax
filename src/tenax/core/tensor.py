@@ -143,6 +143,16 @@ def _check_add_indices(a: tuple[TensorIndex, ...], b: tuple[TensorIndex, ...]) -
                 f"Index {i} ({ai.label!r}) flow mismatch: "
                 f"{ai.flow.name} vs {bi.flow.name}."
             )
+        if ai.symmetry != bi.symmetry:
+            raise ValueError(
+                f"Index {i} ({ai.label!r}) symmetry mismatch: "
+                f"{ai.symmetry!r} vs {bi.symmetry!r}."
+            )
+        if not np.array_equal(ai.charges, bi.charges):
+            raise ValueError(
+                f"Index {i} ({ai.label!r}) charge array mismatch: "
+                f"{ai.charges} vs {bi.charges}."
+            )
 
 
 def _compute_valid_blocks(
