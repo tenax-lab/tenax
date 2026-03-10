@@ -136,10 +136,17 @@ def _read_lines(source: str | Path | list[str]) -> list[str]:
         return source
     if isinstance(source, Path):
         return source.read_text().splitlines()
-    # str — could be a file path or inline content
+    # str — could be a file path or inline content.
+    # Prefer inline content if it clearly looks like one (multiline), and
+    # guard path checks because very long/invalid pseudo-paths may raise.
+    if "\n" in source:
+        return source.splitlines()
     p = Path(source)
-    if p.is_file():
-        return p.read_text().splitlines()
+    try:
+        if p.is_file():
+            return p.read_text().splitlines()
+    except (OSError, ValueError):
+        pass
     return source.splitlines()
 
 
@@ -418,6 +425,13 @@ class NetworkBlueprint:
                 raise ValueError(
                     f"label_order has {len(label_order)} entries but "
                     f"blueprint expects {len(blueprint_labels)}"
+                )
+            current = [str(lb) for lb in tensor.labels()]
+            provided = [str(lb) for lb in label_order]
+            if sorted(provided) != sorted(current):
+                raise ValueError(
+                    f"label_order {label_order} doesn't match tensor labels "
+                    f"{list(tensor.labels())} (as sets)."
                 )
             mapping = {
                 old: new

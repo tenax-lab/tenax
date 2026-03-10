@@ -98,6 +98,15 @@ class TestParseNetfile:
         spec = parse_netfile(["A: i, j", "B: j, k"])
         assert spec["tensors"] == {"A": ["i", "j"], "B": ["j", "k"]}
 
+    def test_string_path_probe_errors_fall_back_to_inline(self, monkeypatch):
+        def _boom(self):
+            raise OSError("invalid path")
+
+        monkeypatch.setattr("pathlib.Path.is_file", _boom)
+        spec = parse_netfile("A: i, j")
+
+        assert spec["tensors"] == {"A": ["i", "j"]}
+
 
 # ===================================================================
 # ORDER parser tests
@@ -263,6 +272,13 @@ class TestNetworkBlueprint:
 
         expected = jnp.einsum("ij,jk->ik", A.todense(), B.todense())
         np.testing.assert_allclose(result.todense(), expected, atol=1e-5)
+
+    def test_label_order_must_match_tensor_labels(self):
+        bp = NetworkBlueprint("A: i, j")
+        A = _make_dense((3, 4), ("x", "y"), seed=0)
+
+        with pytest.raises(ValueError, match="label_order .* doesn't match"):
+            bp.put_tensor("A", A, label_order=["x", "z"])
 
 
 # ===================================================================
