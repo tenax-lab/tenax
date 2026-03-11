@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 
 if TYPE_CHECKING:
-    from tenax.algorithms.ipeps import CTMConfig, CTMEnvironment
+    from tenax.algorithms.ipeps_config import CTMConfig, CTMEnvironment
 
 # ---------------------------------------------------------------------------
 # 1. Truncated SVD with stable backward pass
@@ -141,7 +141,7 @@ def _ctm_step(A: jax.Array, env: CTMEnvironment, config: CTMConfig) -> CTMEnviro
 
     Imports CTM move functions from ipeps module to avoid circular imports.
     """
-    from tenax.algorithms.ipeps import (
+    from tenax.algorithms.ipeps_ctm import (
         _build_double_layer,
         _ctm_bottom_move,
         _ctm_left_move,
@@ -176,7 +176,7 @@ def _env_to_flat(env: CTMEnvironment) -> jax.Array:
 
 def _flat_to_env(flat: jax.Array, env_template: CTMEnvironment) -> CTMEnvironment:
     """Reconstruct CTMEnvironment from a flat array using template shapes."""
-    from tenax.algorithms.ipeps import CTMEnvironment as CTMEnv
+    from tenax.algorithms.ipeps_config import CTMEnvironment as CTMEnv
 
     arrays = []
     offset = 0
@@ -197,7 +197,7 @@ def _gauge_fix_ctm(env: CTMEnvironment) -> CTMEnvironment:
     and the corresponding Q factors are absorbed into the adjacent edge
     tensors. This removes the gauge freedom in the CTM environment.
     """
-    from tenax.algorithms.ipeps import CTMEnvironment as CTMEnv
+    from tenax.algorithms.ipeps_config import CTMEnvironment as CTMEnv
 
     C1, C2, C3, C4, T1, T2, T3, T4 = env
 
@@ -260,7 +260,7 @@ def _ctm_fixed_point_impl(
     initial_env: CTMEnvironment | None = None,
 ) -> CTMEnvironment:
     """Implementation of CTM with custom VJP for implicit differentiation."""
-    from tenax.algorithms.ipeps import (
+    from tenax.algorithms.ipeps_ctm import (
         _build_double_layer,
         _initialize_ctm_env,
     )
@@ -311,7 +311,7 @@ def _config_to_tuple(config) -> tuple:
 
 def _config_from_tuple(config_tuple: tuple):
     """Reconstruct CTMConfig from a packed tuple."""
-    from tenax.algorithms.ipeps import CTMConfig
+    from tenax.algorithms.ipeps_config import CTMConfig
 
     pm_int = config_tuple[4] if len(config_tuple) > 4 else 0
     return CTMConfig(
@@ -366,7 +366,7 @@ def _ctm_converge_bwd(
     013237), where J = d(ctm_step)/d(env) is the Jacobian of one CTM step.
     Then ``dA = d(ctm_step)/dA^T @ lambda``.
     """
-    from tenax.algorithms.ipeps import CTMEnvironment
+    from tenax.algorithms.ipeps_config import CTMEnvironment
 
     A, env_tuple = residuals
     config = _config_from_tuple(config_tuple)
@@ -427,7 +427,7 @@ def _ctm_step_2site(
 
     Imports 2-site CTM sweep from ipeps module to avoid circular imports.
     """
-    from tenax.algorithms.ipeps import (
+    from tenax.algorithms.ipeps_ctm import (
         _build_double_layer,
         _ctm_2site_sweep,
     )
@@ -453,7 +453,7 @@ def _ctm_2site_fixed_point_impl(
     config: CTMConfig,
 ) -> tuple[CTMEnvironment, CTMEnvironment]:
     """Run 2-site CTM to convergence with gauge fixing."""
-    from tenax.algorithms.ipeps import (
+    from tenax.algorithms.ipeps_ctm import (
         _build_double_layer,
         _initialize_ctm_env,
     )
@@ -541,7 +541,7 @@ def _ctm_converge_2site_bwd(
     Solves ``(I - J^T) lambda = g`` using GMRES where the state vector
     spans both sublattice environments ``(env_A, env_B)``.
     """
-    from tenax.algorithms.ipeps import CTMEnvironment
+    from tenax.algorithms.ipeps_config import CTMEnvironment
 
     A, B, env_flat = residuals
     config = _config_from_tuple(config_tuple)
@@ -602,7 +602,7 @@ def _gauge_fix_ctm_tensor(env):
     (``todense()``, dense QR/einsum, ``from_dense()``) are differentiable.
     """
     from tenax.algorithms._ctm_tensor import CTMTensorEnv
-    from tenax.algorithms.ipeps import CTMEnvironment
+    from tenax.algorithms.ipeps_config import CTMEnvironment
     from tenax.core.tensor import SymmetricTensor
 
     # todense() is differentiable (jnp scatter)

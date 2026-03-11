@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms.ipeps import CTMEnvironment
+from tenax.algorithms.ipeps_config import CTMEnvironment
 
 # ---------------------------------------------------------------------------
 # Configuration and result dataclasses
@@ -294,7 +294,7 @@ def _make_open_tensor(
     Returns:
         Open double-layer tensor ``(D^2, D^2, D^2, D^2, d, d)``.
     """
-    from tenax.algorithms.ipeps import _build_double_layer_open
+    from tenax.algorithms.ipeps_rdm import _build_double_layer_open
 
     ket_type, bra_type = sub
     if ket_type == "A" and bra_type == "A":
@@ -331,7 +331,7 @@ def _compute_norm(
     The norm is bilinear in B and B*, so ``jax.grad`` of this w.r.t. B
     at ``B = e_m`` gives the m-th column of the norm matrix N.
     """
-    from tenax.algorithms.ipeps import _build_double_layer_open
+    from tenax.algorithms.ipeps_rdm import _build_double_layer_open
 
     # On-site term: B in ket, B* in bra at same site, A elsewhere
     ao_BB = _build_double_layer_BB_open(B)
@@ -396,7 +396,7 @@ def _compute_excitation_energy(
     Contracts 2-site RDMs with B substituted in various positions,
     weighted by momentum phases.
     """
-    from tenax.algorithms.ipeps import _build_double_layer_open
+    from tenax.algorithms.ipeps_rdm import _build_double_layer_open
 
     H = hamiltonian_gate.reshape(d, d, d, d)
     # Shift Hamiltonian: subtract E_gs/2 per bond (2 bonds per site)

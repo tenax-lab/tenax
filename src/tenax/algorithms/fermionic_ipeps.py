@@ -432,7 +432,8 @@ def fermionic_ctm(A, config):
             conv_tol=config.ctm_conv_tol,
         )
 
-    from tenax.algorithms.ipeps import CTMConfig, ctm
+    from tenax.algorithms.ipeps_config import CTMConfig
+    from tenax.algorithms.ipeps_ctm import ctm
 
     ctm_cfg = CTMConfig(
         chi=config.ctm_chi,
@@ -461,7 +462,7 @@ def compute_energy_fermionic_ctm(A, env, hamiltonian_gate):
     if isinstance(env, CTMTensorEnv):
         return float(compute_energy_ctm_tensor(A, env, hamiltonian_gate))
 
-    from tenax.algorithms.ipeps import compute_energy_ctm
+    from tenax.algorithms.ipeps_rdm import compute_energy_ctm
 
     A_dense = A.todense() if isinstance(A, Tensor) else A
     d = A_dense.shape[-1]
