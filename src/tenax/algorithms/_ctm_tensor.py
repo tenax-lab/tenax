@@ -25,7 +25,7 @@ from tenax.algorithms._ctm_projector import (
     _eigh_projector_symmetric,
     _qr_projector_symmetric,
 )
-from tenax.algorithms._split_ctm_tensor import (
+from tenax.algorithms._ctm_utils import (
     _CORNER_SPECS,
     _derive_charges,
     _make_dense_corner,
@@ -47,7 +47,7 @@ class CTMTensorEnv(NamedTuple):
     Corners are 2-leg tensors ``(chi, chi)``.
     Edges are 3-leg tensors ``(chi, D², chi)`` carrying the fused double-layer.
 
-    Corner label/flow conventions match ``_split_ctm_tensor._CORNER_SPECS``.
+    Corner label/flow conventions match ``_ctm_utils._CORNER_SPECS``.
     """
 
     C1: Tensor  # (c1_d, c1_r)    flows: (IN, OUT)
