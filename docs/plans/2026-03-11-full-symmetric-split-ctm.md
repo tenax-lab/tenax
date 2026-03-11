@@ -58,14 +58,25 @@ C1g_bra = contract(C1_mid, T1_bra) → fuse_indices     [Tensor]
 P_bra = _compute_projector_tensor(C1g_bra, C4g_bra)   [SymmetricTensor]
 C1_new = contract(P_bra.bar(), C1g_bra)                [Tensor, no wrap]
 
-P_ket_3d = unfuse_indices(P_ket, ...)                  [Tensor]
-P_bra_3d = unfuse_indices(P_bra, ...)                  [Tensor]
-P_full = contract(P_ket_3d, P_bra_3d) → fuse_indices  [Tensor]
-
-T_grown = _grow_edge_no_double_layer(...)              [Tensor, stop before todense]
-T_projected = contract(P_full.bar(), T_grown, P_full)  [Tensor]
+T_grown = _grow_edge_no_double_layer(...)              [8-leg Tensor]
+  apply P_ket to left ket legs:
+    fuse(t4k_d, u) → contract P_ket.bar() → chi_new leg
+  apply P_bra to left bra legs:
+    fuse(chi_new, U) → contract P_bra.bar() → chi leg
+  apply P_ket to right ket legs:
+    fuse(d, t4b_u) → contract P_ket.bar() → chi_new leg
+  apply P_bra to right bra legs:
+    fuse(chi_new, D) → contract P_bra.bar() → chi leg
+  result: (chi, r, R, chi) [4-leg Tensor]
+  fuse(r, R) → (chi, D², chi) [projected double-layer edge]
 T_ket_new, T_bra_new = linalg.svd(T_projected, chi_I) [block-sparse SVD]
 ```
+
+Note: Sequential projector application avoids needing `unfuse_indices` (which
+does not exist). The fused charges match because:
+- fuse(t4k_d, u) produces the same charges as P_ket's fused index
+- fuse(chi_new, U) produces the same charges as P_bra's fused index
+  (chi_new charges come from P_ket's eigh output, matching how C1g_bra was built)
 
 ## Energy computation
 
@@ -99,18 +110,19 @@ SymmetricTensor.
 - `compute_energy_split_ctm_tensor` — rewritten to merge env and delegate
 - `ctm_split_tensor` — convergence check uses block-sparse SVD
 
-## Key risk: combined projector unfuse/fuse
+## Key design choice: sequential projector application
 
-The combined projector requires:
-```
-P_ket: (fused[chi,D], chi_new) → unfuse → (chi, D, chi_new)
-P_bra: (fused[chi_k,D], chi) → unfuse → (chi_k, D, chi)
-P_full = contract over chi_k → (chi, D, D, chi) → fuse(D,D) → (chi*D², chi)
-```
+Instead of building a combined P_full tensor (which would require unfuse_indices,
+a utility that does not exist), we apply P_ket and P_bra sequentially to the
+grown edge. This works because:
 
-`unfuse_indices` must correctly recover the original two indices from the fused
-index. This works because `fuse_indices` stores the original structure in the
-fused TensorIndex metadata.
+1. The grown edge has separate labeled legs for ket and bra virtual bonds
+2. Fusing the ket pair (corner, D_ket) produces the same charge structure
+   as P_ket's fused index (both come from the same underlying indices)
+3. After P_ket contraction, the output chi_new leg + D_bra leg can be fused
+   to match P_bra's fused index (same charge derivation as C1g_bra construction)
+
+This approach is simpler and avoids building the large P_full tensor entirely.
 
 ## Testing
 
