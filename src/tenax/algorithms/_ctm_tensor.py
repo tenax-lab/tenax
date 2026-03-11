@@ -20,10 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms._ctm_projector import (
-    _build_symmetric_projector,
     _compute_projector_tensor,
-    _eigh_projector_symmetric,
-    _qr_projector_symmetric,
 )
 from tenax.algorithms._ctm_utils import (
     _CORNER_SPECS,

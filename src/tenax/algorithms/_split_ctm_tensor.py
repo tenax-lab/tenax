@@ -20,18 +20,18 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms._tensor_utils import (
-    fuse_indices,
-    max_abs_normalize,
-)
-from tenax.contraction.contractor import contract
-from tenax.core import EPS
 from tenax.algorithms._ctm_utils import (
     _CORNER_SPECS,
     _derive_charges,
     _make_dense_corner,
     _trivial_symmetry,
 )
+from tenax.algorithms._tensor_utils import (
+    fuse_indices,
+    max_abs_normalize,
+)
+from tenax.contraction.contractor import contract
+from tenax.core import EPS
 from tenax.core.index import FlowDirection, Label, TensorIndex
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
