@@ -25,40 +25,74 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms.ipeps_config import (
-    CTMConfig,
+    CTMConfig,  # noqa: F401
     CTMEnvironment,
-    SplitCTMEnvironment,
+    SplitCTMEnvironment,  # noqa: F401
     iPEPSConfig,
 )
-from tenax.contraction.contractor import contract, truncated_svd
-from tenax.core import EPS
-from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.algorithms.ipeps_ctm import (
+    _build_double_layer,  # noqa: F401
+    _ctm_2site_sweep,  # noqa: F401
+    _ctm_bottom_move,  # noqa: F401
+    _ctm_bottom_move_2site,  # noqa: F401
+    _ctm_left_move,  # noqa: F401
+    _ctm_left_move_2site,  # noqa: F401
+    _ctm_move,  # noqa: F401
+    _ctm_move_eigh,  # noqa: F401
+    _ctm_move_qr,  # noqa: F401
+    _ctm_right_move,  # noqa: F401
+    _ctm_right_move_2site,  # noqa: F401
+    _ctm_sv_diff,  # noqa: F401
+    _ctm_sweep,  # noqa: F401
+    _ctm_top_move,  # noqa: F401
+    _ctm_top_move_2site,  # noqa: F401
+    _initialize_ctm_env,  # noqa: F401
+    _initialize_split_ctm_env,  # noqa: F401
+    _renormalize_env,  # noqa: F401
+    _split_ctm_move,  # noqa: F401
+    _split_ctm_projector,  # noqa: F401
+    _split_ctm_sweep,  # noqa: F401
+    _split_env_to_standard,  # noqa: F401
+    _svd_split_edge,  # noqa: F401
+    ctm,
+    ctm_2site,
+    ctm_split,  # noqa: F401
+)
+from tenax.algorithms.ipeps_optimize import (
+    _optimize_gs_ad_2site,  # noqa: F401
+    _optimize_gs_ad_tensor,  # noqa: F401
+    _optimize_gs_ad_tensor_2site,  # noqa: F401
+    optimize_gs_ad,  # noqa: F401
+)
+from tenax.algorithms.ipeps_rdm import (
+    _build_double_layer_open,  # noqa: F401
+    _rdm1x2,  # noqa: F401
+    _rdm1x2_2site,  # noqa: F401
+    _rdm2x1,  # noqa: F401
+    _rdm2x1_2site,  # noqa: F401
+    compute_energy_ctm,
+    compute_energy_ctm_2site,
+    compute_energy_split_ctm,  # noqa: F401
+)
 from tenax.algorithms.ipeps_simple_update import (
     _absorb_lambdas_tensor,
     _make_trotter_gate_tensor,
     _simple_update_1x1,
-    _simple_update_2site_bond,
+    _simple_update_2site_bond,  # noqa: F401
     _simple_update_2site_horizontal,
     _simple_update_2site_vertical,
-    _simple_update_3leg,
-    _simple_update_bond,
-    _simple_update_horizontal,
+    _simple_update_3leg,  # noqa: F401
+    _simple_update_bond,  # noqa: F401
+    _simple_update_horizontal,  # noqa: F401
     _simple_update_horizontal_tensor,
-    _simple_update_vertical,
+    _simple_update_vertical,  # noqa: F401
     _simple_update_vertical_tensor,
 )
-from tenax.algorithms.ipeps_rdm import (
-    _build_double_layer_open,
-    _rdm1x2,
-    _rdm1x2_2site,
-    _rdm2x1,
-    _rdm2x1_2site,
-    compute_energy_ctm,
-    compute_energy_ctm_2site,
-    compute_energy_split_ctm,
-)
+from tenax.contraction.contractor import contract, truncated_svd  # noqa: F401
+from tenax.core import EPS
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.symmetry import U1Symmetry
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor  # noqa: F401
 from tenax.network.network import TensorNetwork
 
 
@@ -229,36 +263,6 @@ def _ipeps_tensor(
     return float(energy), A, env
 
 
-from tenax.algorithms.ipeps_ctm import (  # noqa: E402
-    _build_double_layer,
-    _ctm_2site_sweep,
-    _ctm_bottom_move,
-    _ctm_bottom_move_2site,
-    _ctm_left_move,
-    _ctm_left_move_2site,
-    _ctm_move,
-    _ctm_move_eigh,
-    _ctm_move_qr,
-    _ctm_right_move,
-    _ctm_right_move_2site,
-    _ctm_sv_diff,
-    _ctm_sweep,
-    _ctm_top_move,
-    _ctm_top_move_2site,
-    _initialize_ctm_env,
-    _initialize_split_ctm_env,
-    _renormalize_env,
-    _split_ctm_move,
-    _split_ctm_projector,
-    _split_ctm_sweep,
-    _split_env_to_standard,
-    _svd_split_edge,
-    ctm,
-    ctm_2site,
-    ctm_split,
-)
-
-
 def _build_1x1_peps(A: jax.Array, d: int, D: int) -> TensorNetwork:
     """Build a 1x1 unit cell PEPS TensorNetwork from a site tensor.
 
@@ -417,13 +421,3 @@ def _ipeps_2site(
     energy = compute_energy_ctm_2site(A, B, env_A, env_B, gate, d)
 
     return float(energy), peps, (env_A, env_B)
-
-
-
-
-from tenax.algorithms.ipeps_optimize import (  # noqa: E402
-    _optimize_gs_ad_2site,
-    _optimize_gs_ad_tensor,
-    _optimize_gs_ad_tensor_2site,
-    optimize_gs_ad,
-)
