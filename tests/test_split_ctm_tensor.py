@@ -16,7 +16,6 @@ from tenax.algorithms._split_ctm_tensor import (
 )
 from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.algorithms.ipeps_ctm import ctm, ctm_split
-from tenax.algorithms.ipeps_rdm import compute_energy_ctm
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
@@ -203,10 +202,10 @@ class TestSplitCTMTensorEnergy:
 
         This mirrors the existing ``test_split_ctm_energy_matches_standard``
         for the dense split-CTM: convert the split environment to a standard
-        CTMEnvironment and verify the energy is identical.
+        CTMTensorEnv and verify the energy is identical.
         """
-        from tenax.algorithms._split_ctm_tensor import _split_env_to_dense_standard
-        from tenax.algorithms.ipeps_config import CTMEnvironment
+        from tenax.algorithms._split_ctm_tensor import _split_env_to_tensor_standard
+        from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
 
         d = 2
         chi = 8
@@ -218,11 +217,8 @@ class TestSplitCTMTensorEnergy:
         )
 
         # Manually convert and compute
-        C1, C2, C3, C4, T1, T2, T3, T4 = _split_env_to_dense_standard(env)
-        std_env = CTMEnvironment(C1=C1, C2=C2, C3=C3, C4=C4, T1=T1, T2=T2, T3=T3, T4=T4)
-        A_raw = small_peps_dense.todense()
-        H = heisenberg_gate.reshape(d, d, d, d)
-        E_from_std = compute_energy_ctm(A_raw, std_env, H, d)
+        std_env = _split_env_to_tensor_standard(env)
+        E_from_std = compute_energy_ctm_tensor(small_peps_dense, std_env, heisenberg_gate, d)
 
         assert jnp.abs(E_split - E_from_std) < 1e-12, (
             f"Roundtrip mismatch: split={float(E_split)}, from_std={float(E_from_std)}"
@@ -442,12 +438,6 @@ class TestSplitCTMSymmetric:
                 f"All blocks collapsed to 0 — environment degenerated"
             )
 
-    @pytest.mark.xfail(
-        reason="Split CTM sweeps still densify for projectors and interlayer "
-        "contractions (20 todense calls). Will pass once tensor-protocol "
-        "projectors are integrated into the split CTM moves.",
-        strict=True,
-    )
     def test_symmetric_sweep_no_todense(self, small_peps_symmetric):
         """CTM sweeps on SymmetricTensor must not call todense() or from_dense().
 

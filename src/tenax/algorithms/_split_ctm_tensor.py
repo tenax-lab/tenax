@@ -13,7 +13,6 @@ Reference: arXiv:2502.10298
 
 from __future__ import annotations
 
-import math
 from typing import NamedTuple
 
 import jax
@@ -27,6 +26,7 @@ from tenax.algorithms._ctm_utils import (
     _trivial_symmetry,
 )
 from tenax.algorithms._ctm_projector import _compute_projector_tensor, _reembed_fused
+from tenax.algorithms._ctm_tensor import CTMTensorEnv, compute_energy_ctm_tensor
 from tenax.algorithms._tensor_utils import (
     absorb_sqrt_singular_values,
     fuse_indices,
@@ -461,32 +461,6 @@ def initialize_split_ctm_tensor_env(
 # ------------------------------------------------------------------ #
 
 
-def _compute_projector_dense(
-    C1g_dense: jax.Array, C2g_dense: jax.Array, chi: int
-) -> jax.Array:
-    """Compute eigh-based projector from two grown corner matrices.
-
-    Args:
-        C1g_dense: Dense grown corner, shape ``(chi*D, chi_I)``.
-        C2g_dense: Dense grown corner, shape ``(chi*D, chi_I)``.
-        chi:       Target bond dimension.
-
-    Returns:
-        Projector ``P`` of shape ``(chi*D, chi)``.
-    """
-    rho = C1g_dense @ C1g_dense.conj().T + C2g_dense @ C2g_dense.conj().T
-    rho = 0.5 * (rho + rho.conj().T)
-    eigvals, eigvecs = jnp.linalg.eigh(rho)
-    k = min(chi, len(eigvals))
-    P = eigvecs[:, -k:][:, ::-1]
-    return jax.lax.stop_gradient(P)
-
-
-# ------------------------------------------------------------------ #
-# SVD edge split                                                       #
-# ------------------------------------------------------------------ #
-
-
 # ------------------------------------------------------------------ #
 # No-double-layer edge growth                                          #
 # ------------------------------------------------------------------ #
@@ -695,65 +669,6 @@ def _select_bond_entries(
     obj._init_flat_buffer(new_blocks)
     return obj
 
-
-def _flip_D_legs(T: Tensor, labels_to_flip: list[str]) -> Tensor:
-    """Flip flow of multiple legs in one from_dense call.
-
-    Used to align the D-legs of a grown edge tensor with the flow
-    convention of the perpendicular edges (used in the corners that
-    define the projectors).  Without this, the fused charge formula
-    differs between projector and edge, causing the projector to
-    destroy nonzero charge sectors.
-
-    For DenseTensor, returns T unchanged (flows are metadata-only).
-    """
-    if not isinstance(T, SymmetricTensor):
-        return T
-
-    tensor_labels = T.labels()
-    needs_flip = False
-    new_indices = list(T.indices)
-    for lbl in labels_to_flip:
-        if lbl in tensor_labels:
-            ax = tensor_labels.index(lbl)
-            new_indices[ax] = T.indices[ax].flip_flow()
-            needs_flip = True
-
-    if not needs_flip:
-        return T
-
-    return SymmetricTensor.from_dense(
-        T.todense(), tuple(new_indices), tol=float("inf")
-    )
-
-
-def _flip_leg_flow(T: Tensor, label: str) -> Tensor:
-    """Rebuild a SymmetricTensor with one leg's flow flipped.
-
-    This is needed when the projector was computed with one D-leg flow
-    convention (from the perpendicular edge) but the edge tensor being
-    projected has the opposite D-leg flow (from A/A_bar).  Flipping the
-    flow ensures the fused charge formula matches the projector's, so
-    the dense projection doesn't destroy nonzero charge sectors.
-
-    For DenseTensor, flows are metadata-only and this is a no-op.
-    """
-    if not isinstance(T, SymmetricTensor):
-        return T
-
-    labels = T.labels()
-    axis = labels.index(label)
-    idx = T.indices[axis]
-    flipped_idx = idx.flip_flow()
-
-    if flipped_idx.flow == idx.flow:
-        return T  # Already correct
-
-    new_indices = list(T.indices)
-    new_indices[axis] = flipped_idx
-    return SymmetricTensor.from_dense(
-        T.todense(), tuple(new_indices), tol=float("inf")
-    )
 
 
 def _fused_charge_permutation(
@@ -1257,131 +1172,6 @@ def _split_ctm_move_bottom(
 # ------------------------------------------------------------------ #
 
 
-def _svd_split_edge_dense(
-    T_full: jax.Array,
-    chi_I: int,
-) -> tuple[jax.Array, jax.Array]:
-    """Split a standard edge (chi, D², chi) into ket/bra via SVD (dense)."""
-    chi = T_full.shape[0]
-    D2 = T_full.shape[1]
-    D = math.isqrt(D2)
-    T_4d = T_full.reshape(chi, D, D, chi)
-    T_mat = T_4d.reshape(chi * D, D * chi)
-
-    U, s, Vh = jnp.linalg.svd(T_mat, full_matrices=False)
-    k = min(chi_I, len(s))
-    sqrt_s = jnp.sqrt(s[:k])
-    T_ket = (U[:, :k] * sqrt_s[None, :]).reshape(chi, D, k)
-    T_bra = (sqrt_s[:, None] * Vh[:k, :]).reshape(k, D, chi)
-    return T_ket, T_bra
-
-
-# ------------------------------------------------------------------ #
-# Dense wrapping helpers                                               #
-# ------------------------------------------------------------------ #
-
-
-def _wrap_corner_dense(
-    data: jax.Array,
-    label_a: Label,
-    label_b: Label,
-    ref_idx_a: TensorIndex,
-    ref_idx_b: TensorIndex,
-    chi: int,
-    symmetric: bool = False,
-    base_charges: np.ndarray | None = None,
-) -> Tensor:
-    """Wrap a dense (chi, chi) array as DenseTensor/SymmetricTensor with correct labels/flows."""
-    sym = ref_idx_a.symmetry
-    if base_charges is not None:
-        charges = _derive_charges(base_charges, chi)
-    else:
-        charges = np.zeros(chi, dtype=np.int32)
-    idx_a = TensorIndex(sym, charges.copy(), ref_idx_a.flow, label=label_a)
-    idx_b = TensorIndex(sym, charges.copy(), ref_idx_b.flow, label=label_b)
-    indices = (idx_a, idx_b)
-    if symmetric:
-        return SymmetricTensor.from_dense(data, indices, tol=float("inf"))
-    return DenseTensor(data, indices)
-
-
-def _wrap_edge_ket_dense(
-    data: jax.Array,
-    label_chi: Label,
-    label_D: Label,
-    label_I: Label,
-    ref_indices: tuple[TensorIndex, ...],
-    chi: int,
-    D: int,
-    chi_I: int,
-    symmetric: bool = False,
-    base_chi_charges: np.ndarray | None = None,
-    base_D_charges: np.ndarray | None = None,
-) -> Tensor:
-    """Wrap a dense (chi, D, chi_I) array as DenseTensor/SymmetricTensor edge ket."""
-    sym = ref_indices[0].symmetry
-    chi_charges = (
-        _derive_charges(base_chi_charges, chi)
-        if base_chi_charges is not None
-        else np.zeros(chi, dtype=np.int32)
-    )
-    D_charges = (
-        np.asarray(base_D_charges, dtype=np.int32)
-        if base_D_charges is not None
-        else np.zeros(D, dtype=np.int32)
-    )
-    I_charges = (
-        _derive_charges(base_chi_charges, chi_I)
-        if base_chi_charges is not None
-        else np.zeros(chi_I, dtype=np.int32)
-    )
-    idx_chi = TensorIndex(sym, chi_charges, ref_indices[0].flow, label=label_chi)
-    idx_D = TensorIndex(sym, D_charges, ref_indices[1].flow, label=label_D)
-    idx_I = TensorIndex(sym, I_charges, ref_indices[2].flow, label=label_I)
-    indices = (idx_chi, idx_D, idx_I)
-    if symmetric:
-        return SymmetricTensor.from_dense(data, indices, tol=float("inf"))
-    return DenseTensor(data, indices)
-
-
-def _wrap_edge_bra_dense(
-    data: jax.Array,
-    label_I: Label,
-    label_D: Label,
-    label_chi: Label,
-    ref_indices: tuple[TensorIndex, ...],
-    chi: int,
-    D: int,
-    chi_I: int,
-    symmetric: bool = False,
-    base_chi_charges: np.ndarray | None = None,
-    base_D_charges: np.ndarray | None = None,
-) -> Tensor:
-    """Wrap a dense (chi_I, D, chi) array as DenseTensor/SymmetricTensor edge bra."""
-    sym = ref_indices[0].symmetry
-    I_charges = (
-        _derive_charges(base_chi_charges, chi_I)
-        if base_chi_charges is not None
-        else np.zeros(chi_I, dtype=np.int32)
-    )
-    D_charges = (
-        np.asarray(base_D_charges, dtype=np.int32)
-        if base_D_charges is not None
-        else np.zeros(D, dtype=np.int32)
-    )
-    chi_charges = (
-        _derive_charges(base_chi_charges, chi)
-        if base_chi_charges is not None
-        else np.zeros(chi, dtype=np.int32)
-    )
-    idx_I = TensorIndex(sym, I_charges, ref_indices[0].flow, label=label_I)
-    idx_D = TensorIndex(sym, D_charges, ref_indices[1].flow, label=label_D)
-    idx_chi = TensorIndex(sym, chi_charges, ref_indices[2].flow, label=label_chi)
-    indices = (idx_I, idx_D, idx_chi)
-    if symmetric:
-        return SymmetricTensor.from_dense(data, indices, tol=float("inf"))
-    return DenseTensor(data, indices)
-
 
 # ------------------------------------------------------------------ #
 # Sweep + convergence                                                  #
@@ -1473,7 +1263,12 @@ def ctm_split_tensor(
     for _ in range(max_iter):
         env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
 
-        current_sv = jnp.linalg.svd(env.C1.todense(), compute_uv=False)
+        _, current_sv, _, _ = tensor_svd(
+            env.C1,
+            left_labels=[env.C1.labels()[0]],
+            right_labels=[env.C1.labels()[1]],
+            new_bond_label="_conv_bond",
+        )
         if prev_sv is not None:
             sv1 = current_sv / (jnp.sum(current_sv) + 1e-15)
             sv2 = prev_sv / (jnp.sum(prev_sv) + 1e-15)
@@ -1491,27 +1286,54 @@ def ctm_split_tensor(
 # ------------------------------------------------------------------ #
 
 
-def _split_env_to_dense_standard(env: SplitCTMTensorEnv) -> tuple:
-    """Convert SplitCTMTensorEnv to (C1..C4, T1..T4) dense arrays.
+def _split_env_to_tensor_standard(env: SplitCTMTensorEnv) -> CTMTensorEnv:
+    """Convert SplitCTMTensorEnv to CTMTensorEnv via Tensor contraction.
 
-    Returns 8 dense arrays matching CTMEnvironment convention.
+    Merges each (T_ket, T_bra) pair by contracting over the interlayer bond
+    and fusing the two D-legs into a single double-layer D² leg.
+    Corners pass through unchanged (same labels/flows).
     """
-    chi = env.C1.todense().shape[0]
 
-    def merge(T_ket, T_bra):
-        D_ket = T_ket.todense().shape[1]
-        T = jnp.einsum("auc,cUb->auUb", T_ket.todense(), T_bra.todense())
-        return T.reshape(chi, D_ket * D_ket, chi)
+    def _merge_edge(T_ket, T_bra, ket_I, bra_I, d_ket, d_bra, fused_label,
+                    fused_flow, ket_chi, bra_chi, std_chi_l, std_chi_r):
+        # Contract over interlayer bond by relabelling both I-labels to "_I"
+        k = T_ket.relabel(ket_I, "_I")
+        b = T_bra.relabel(bra_I, "_I")
+        merged = contract(k, b)
+        # Fuse D-ket and D-bra legs
+        labels = merged.labels()
+        merged = fuse_indices(
+            merged, labels.index(d_ket), labels.index(d_bra),
+            fused_label, fused_flow,
+        )
+        # Relabel chi legs to standard CTMTensorEnv convention
+        merged = merged.relabels({ket_chi: std_chi_l, bra_chi: std_chi_r})
+        return merged
 
-    return (
-        env.C1.todense(),
-        env.C2.todense(),
-        env.C3.todense(),
-        env.C4.todense(),
-        merge(env.T1_ket, env.T1_bra),
-        merge(env.T2_ket, env.T2_bra),
-        merge(env.T3_ket, env.T3_bra),
-        merge(env.T4_ket, env.T4_bra),
+    T1 = _merge_edge(
+        env.T1_ket, env.T1_bra,
+        "t1k_I", "t1b_I", "u_ket", "u_bra", "u2", FlowDirection.IN,
+        "t1k_l", "t1b_r", "t1_l", "t1_r",
+    )
+    T2 = _merge_edge(
+        env.T2_ket, env.T2_bra,
+        "t2k_I", "t2b_I", "r_ket", "r_bra", "r2", FlowDirection.IN,
+        "t2k_u", "t2b_d", "t2_u", "t2_d",
+    )
+    T3 = _merge_edge(
+        env.T3_ket, env.T3_bra,
+        "t3k_I", "t3b_I", "d_ket", "d_bra", "d2", FlowDirection.IN,
+        "t3k_r", "t3b_l", "t3_r", "t3_l",
+    )
+    T4 = _merge_edge(
+        env.T4_ket, env.T4_bra,
+        "t4k_I", "t4b_I", "l_ket", "l_bra", "l2", FlowDirection.IN,
+        "t4k_d", "t4b_u", "t4_d", "t4_u",
+    )
+
+    return CTMTensorEnv(
+        C1=env.C1, C2=env.C2, C3=env.C3, C4=env.C4,
+        T1=T1, T2=T2, T3=T3, T4=T4,
     )
 
 
@@ -1523,10 +1345,9 @@ def compute_energy_split_ctm_tensor(
 ) -> jax.Array:
     """Compute energy per site using split CTM environment.
 
-    Converts to standard dense CTM internally and delegates to the
-    existing RDM-based energy computation. This is correct because
-    the ket/bra merge over the interlayer bond reconstructs the standard
-    double-layer edges.
+    Converts to standard Tensor-protocol CTM internally and delegates to
+    ``compute_energy_ctm_tensor``. The ket/bra merge over the interlayer
+    bond reconstructs the standard double-layer edges.
 
     Args:
         A:                iPEPS site tensor.
@@ -1537,18 +1358,5 @@ def compute_energy_split_ctm_tensor(
     Returns:
         Scalar energy per site.
     """
-    from tenax.algorithms.ipeps_config import CTMEnvironment
-    from tenax.algorithms.ipeps_rdm import compute_energy_ctm
-
-    A_dense = A.todense()
-    if d is None:
-        d = A_dense.shape[-1]
-
-    if isinstance(hamiltonian_gate, Tensor):
-        H = hamiltonian_gate.todense().reshape(d, d, d, d)
-    else:
-        H = hamiltonian_gate.reshape(d, d, d, d)
-
-    C1, C2, C3, C4, T1, T2, T3, T4 = _split_env_to_dense_standard(env)
-    std_env = CTMEnvironment(C1=C1, C2=C2, C3=C3, C4=C4, T1=T1, T2=T2, T3=T3, T4=T4)
-    return compute_energy_ctm(A_dense, std_env, H, d)
+    std_env = _split_env_to_tensor_standard(env)
+    return compute_energy_ctm_tensor(A, std_env, hamiltonian_gate, d)
