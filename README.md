@@ -29,39 +29,28 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 
 ## Installation
 
-> **Note:** The PyPI package (`tenax-tn`) is not yet available. Install from source using the instructions below.
+```bash
+pip install tenax-tn
+```
+
+With hardware acceleration:
+
+```bash
+pip install tenax-tn[cuda13]   # NVIDIA GPU (CUDA 13, recommended)
+pip install tenax-tn[cuda12]   # NVIDIA GPU (CUDA 12)
+pip install tenax-tn[tpu]      # Google Cloud TPU
+pip install tenax-tn[metal]    # Apple Silicon GPU (experimental)
+```
+
+### From source
 
 ```bash
 git clone https://github.com/tenax-lab/tenax.git
 cd tenax
-
-# With uv (recommended)
-uv sync --all-extras --dev
-
-# Or with pip
-pip install -e .
+uv sync --all-extras --dev     # or: pip install -e ".[dev]"
 ```
 
-### Hardware acceleration
-
-Tenax uses JAX as its backend. To enable GPU or TPU acceleration, install
-the appropriate JAX variant **before** installing Tenax:
-
-```bash
-# NVIDIA GPU (CUDA 13, recommended)
-pip install -U "jax[cuda13]"
-
-# NVIDIA GPU (CUDA 12)
-pip install -U "jax[cuda12]"
-
-# Google Cloud TPU
-pip install -U "jax[tpu]"
-
-# Apple Silicon GPU (macOS only, experimental)
-pip install jax-metal
-```
-
-See the [JAX installation guide](https://docs.jax.dev/en/latest/installation.html) for the latest accelerator options.
+See the [JAX installation guide](https://docs.jax.dev/en/latest/installation.html) for more accelerator options.
 
 ## Quick Start
 
