@@ -19,24 +19,24 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ctm_projector import _compute_projector_tensor, _reembed_fused
+from tenax.algorithms._ctm_tensor import CTMTensorEnv, compute_energy_ctm_tensor
 from tenax.algorithms._ctm_utils import (
     _CORNER_SPECS,
     _derive_charges,
     _make_dense_corner,
     _trivial_symmetry,
 )
-from tenax.algorithms._ctm_projector import _compute_projector_tensor, _reembed_fused
-from tenax.algorithms._ctm_tensor import CTMTensorEnv, compute_energy_ctm_tensor
 from tenax.algorithms._tensor_utils import (
     absorb_sqrt_singular_values,
     fuse_indices,
     max_abs_normalize,
 )
-from tenax.linalg import svd as tensor_svd
 from tenax.contraction.contractor import contract
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, Label, TensorIndex
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.linalg import svd as tensor_svd
 
 # ------------------------------------------------------------------ #
 # Environment data structure                                          #
@@ -533,7 +533,7 @@ def _svd_split_edge_tensor(
     """
     # Ensure axes are in (left..., right...) order for block-sparse SVD
     labels = T.labels()
-    perm = tuple(labels.index(l) for l in left_labels + right_labels)
+    perm = tuple(labels.index(lbl) for lbl in left_labels + right_labels)
     if perm != tuple(range(len(labels))):
         T = T.transpose(perm)
 

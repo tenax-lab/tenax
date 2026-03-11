@@ -204,8 +204,8 @@ class TestSplitCTMTensorEnergy:
         for the dense split-CTM: convert the split environment to a standard
         CTMTensorEnv and verify the energy is identical.
         """
-        from tenax.algorithms._split_ctm_tensor import _split_env_to_tensor_standard
         from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
+        from tenax.algorithms._split_ctm_tensor import _split_env_to_tensor_standard
 
         d = 2
         chi = 8
@@ -421,8 +421,6 @@ class TestSplitCTMSymmetric:
         A = SymmetricTensor.random_normal(indices, key)
         chi, chi_I = 4, 2
         env = initialize_split_ctm_tensor_env(A, chi, chi_I)
-        # Check initial block count
-        init_blocks = env.C1.n_blocks
         # Run 3 sweeps
         for _ in range(3):
             env = _split_ctm_tensor_sweep(env, A, chi, chi_I, True)
@@ -435,7 +433,7 @@ class TestSplitCTMSymmetric:
                 f"Expected SymmetricTensor, got {type(t)}"
             )
             assert t.n_blocks >= 1, (
-                f"All blocks collapsed to 0 — environment degenerated"
+                "All blocks collapsed to 0 — environment degenerated"
             )
 
     def test_symmetric_sweep_no_todense(self, small_peps_symmetric):
