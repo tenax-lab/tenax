@@ -191,8 +191,10 @@ def compute_energy_ctm(
         Scalar energy per site.
     """
     if A.ndim != 5:
-        # Fallback for legacy 3-leg tensors
-        return jnp.array(-0.25, dtype=A.dtype)
+        raise ValueError(
+            f"compute_energy_ctm requires a 5-leg tensor (D, D, D, D, d), "
+            f"got ndim={A.ndim}"
+        )
 
     rdm_h = _rdm2x1(A, env, d)
     rdm_v = _rdm1x2(A, env, d)

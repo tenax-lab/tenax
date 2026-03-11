@@ -439,3 +439,49 @@ class TestSplitCTMSymmetric:
                 f"Block count dropped from {init_blocks} to {t.n_blocks}: "
                 f"charge sectors collapsed"
             )
+
+    @pytest.mark.xfail(
+        reason="Split CTM sweeps still densify for projectors and interlayer "
+        "contractions (20 todense calls). Will pass once tensor-protocol "
+        "projectors are integrated into the split CTM moves.",
+        strict=True,
+    )
+    def test_symmetric_sweep_no_todense(self, small_peps_symmetric):
+        """CTM sweeps on SymmetricTensor must not call todense() or from_dense().
+
+        This guards against regressions that silently densify during the
+        symmetric path.  The energy measurement is excluded because it
+        currently bridges to dense (known limitation).
+        """
+        from unittest.mock import patch
+
+        chi, chi_I = 4, 2
+        env = initialize_split_ctm_tensor_env(small_peps_symmetric, chi, chi_I)
+
+        todense_calls = []
+        from_dense_calls = []
+
+        orig_todense = SymmetricTensor.todense
+        orig_from_dense = SymmetricTensor.from_dense
+
+        def tracking_todense(self):
+            todense_calls.append(True)
+            return orig_todense(self)
+
+        @classmethod
+        def tracking_from_dense(cls, *args, **kwargs):
+            from_dense_calls.append(True)
+            return orig_from_dense(*args, **kwargs)
+
+        with (
+            patch.object(SymmetricTensor, "todense", tracking_todense),
+            patch.object(SymmetricTensor, "from_dense", tracking_from_dense),
+        ):
+            _split_ctm_tensor_sweep(env, small_peps_symmetric, chi, chi_I, True)
+
+        assert len(todense_calls) == 0, (
+            f"todense() called {len(todense_calls)} times during symmetric sweep"
+        )
+        assert len(from_dense_calls) == 0, (
+            f"from_dense() called {len(from_dense_calls)} times during symmetric sweep"
+        )
