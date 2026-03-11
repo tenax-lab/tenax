@@ -81,24 +81,24 @@ from tenax.algorithms.idmrg import (
     iDMRGConfig,
     iDMRGResult,
 )
-from tenax.algorithms.ipeps import (
+from tenax.algorithms.ipeps import ipeps
+from tenax.algorithms.ipeps_config import (
     CTMConfig,
     CTMEnvironment,
     SplitCTMEnvironment,
-    compute_energy_ctm_2site,
-    compute_energy_split_ctm,
-    ctm,
-    ctm_2site,
-    ctm_split,
-    ipeps,
     iPEPSConfig,
-    optimize_gs_ad,
 )
+from tenax.algorithms.ipeps_ctm import ctm, ctm_2site, ctm_split
 from tenax.algorithms.ipeps_excitations import (
     ExcitationConfig,
     ExcitationResult,
     compute_excitations,
     make_momentum_path,
+)
+from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+from tenax.algorithms.ipeps_rdm import (
+    compute_energy_ctm_2site,
+    compute_energy_split_ctm,
 )
 from tenax.algorithms.observables import (
     correlation,

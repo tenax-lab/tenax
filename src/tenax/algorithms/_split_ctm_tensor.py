@@ -1335,7 +1335,8 @@ def compute_energy_split_ctm_tensor(
     Returns:
         Scalar energy per site.
     """
-    from tenax.algorithms.ipeps import CTMEnvironment, compute_energy_ctm
+    from tenax.algorithms.ipeps_config import CTMEnvironment
+    from tenax.algorithms.ipeps_rdm import compute_energy_ctm
 
     A_dense = A.todense()
     if d is None:
