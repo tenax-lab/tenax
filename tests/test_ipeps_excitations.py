@@ -8,15 +8,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax.algorithms.ipeps import (
+from tenax.algorithms.ipeps_config import (
     CTMConfig,
     CTMEnvironment,
-    _build_double_layer_open,
-    compute_energy_ctm,
-    ctm,
     iPEPSConfig,
-    optimize_gs_ad,
 )
+from tenax.algorithms.ipeps_ctm import ctm
 from tenax.algorithms.ipeps_excitations import (
     ExcitationConfig,
     ExcitationResult,
@@ -31,6 +28,8 @@ from tenax.algorithms.ipeps_excitations import (
     compute_excitations,
     make_momentum_path,
 )
+from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+from tenax.algorithms.ipeps_rdm import _build_double_layer_open, compute_energy_ctm
 
 # ---------------------------------------------------------------------------
 # Fixtures

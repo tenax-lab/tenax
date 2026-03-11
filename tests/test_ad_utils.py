@@ -20,7 +20,8 @@ from tenax.algorithms.ad_utils import (
     ctm_converge,
     truncated_svd_ad,
 )
-from tenax.algorithms.ipeps import CTMConfig, CTMEnvironment, ctm
+from tenax.algorithms.ipeps_config import CTMConfig, CTMEnvironment
+from tenax.algorithms.ipeps_ctm import ctm
 
 
 class TestTruncatedSVDADForward:
@@ -210,7 +211,7 @@ class TestCTMFixedPointGradient:
             A_norm = A_in / (jnp.linalg.norm(A_in) + 1e-10)
             env_tuple = ctm_converge(A_norm, config_tuple)
             env = CTMEnvironment(*env_tuple)
-            from tenax.algorithms.ipeps import compute_energy_ctm
+            from tenax.algorithms.ipeps_rdm import compute_energy_ctm
 
             return compute_energy_ctm(A_norm, env, gate, d)
 
@@ -275,7 +276,7 @@ class TestGMRESBackward:
             A_norm = A_in / (jnp.linalg.norm(A_in) + 1e-10)
             env_tuple = ctm_converge(A_norm, config_tuple)
             env = CTMEnvironment(*env_tuple)
-            from tenax.algorithms.ipeps import compute_energy_ctm
+            from tenax.algorithms.ipeps_rdm import compute_energy_ctm
 
             return compute_energy_ctm(A_norm, env, gate, d)
 
@@ -297,7 +298,7 @@ class TestGMRESBackward:
             A_norm = A_in / (jnp.linalg.norm(A_in) + 1e-10)
             env_tuple = ctm_converge(A_norm, config_tuple)
             env = CTMEnvironment(*env_tuple)
-            from tenax.algorithms.ipeps import compute_energy_ctm
+            from tenax.algorithms.ipeps_rdm import compute_energy_ctm
 
             return compute_energy_ctm(A_norm, env, gate, d)
 

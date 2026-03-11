@@ -14,7 +14,9 @@ from tenax.algorithms._split_ctm_tensor import (
     ctm_split_tensor,
     initialize_split_ctm_tensor_env,
 )
-from tenax.algorithms.ipeps import CTMConfig, compute_energy_ctm, ctm, ctm_split
+from tenax.algorithms.ipeps_config import CTMConfig
+from tenax.algorithms.ipeps_ctm import ctm, ctm_split
+from tenax.algorithms.ipeps_rdm import compute_energy_ctm
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
@@ -204,7 +206,7 @@ class TestSplitCTMTensorEnergy:
         CTMEnvironment and verify the energy is identical.
         """
         from tenax.algorithms._split_ctm_tensor import _split_env_to_dense_standard
-        from tenax.algorithms.ipeps import CTMEnvironment
+        from tenax.algorithms.ipeps_config import CTMEnvironment
 
         d = 2
         chi = 8
@@ -233,7 +235,7 @@ class TestSplitCTMTensorEnergy:
         grown T-edge tensor as the merge + double-layer + einsum path.
         """
         from tenax.algorithms._split_ctm_tensor import _grow_edge_no_double_layer
-        from tenax.algorithms.ipeps import (
+        from tenax.algorithms.ipeps_ctm import (
             _build_double_layer,
             _initialize_split_ctm_env,
         )

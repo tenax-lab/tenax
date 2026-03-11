@@ -5,28 +5,34 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax.algorithms.ipeps import (
+from tenax.algorithms.ipeps import ipeps
+from tenax.algorithms.ipeps_config import (
     CTMConfig,
     CTMEnvironment,
     SplitCTMEnvironment,
+    iPEPSConfig,
+)
+from tenax.algorithms.ipeps_ctm import (
     _build_double_layer,
-    _build_double_layer_open,
     _initialize_split_ctm_env,
-    _rdm1x2,
-    _rdm2x1,
-    _simple_update_1x1,
-    _simple_update_2site_horizontal,
-    _simple_update_2site_vertical,
     _split_env_to_standard,
-    compute_energy_ctm,
-    compute_energy_ctm_2site,
-    compute_energy_split_ctm,
     ctm,
     ctm_2site,
     ctm_split,
-    ipeps,
-    iPEPSConfig,
-    optimize_gs_ad,
+)
+from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+from tenax.algorithms.ipeps_rdm import (
+    _build_double_layer_open,
+    _rdm1x2,
+    _rdm2x1,
+    compute_energy_ctm,
+    compute_energy_ctm_2site,
+    compute_energy_split_ctm,
+)
+from tenax.algorithms.ipeps_simple_update import (
+    _simple_update_1x1,
+    _simple_update_2site_horizontal,
+    _simple_update_2site_vertical,
 )
 
 
@@ -183,7 +189,7 @@ class TestCTM:
     def test_ctm_edge_tensors_change(self, small_peps_tensor):
         """After a full CTM run, edge tensors should differ from initialization."""
         config = CTMConfig(chi=4, max_iter=10)
-        from tenax.algorithms.ipeps import _build_double_layer, _initialize_ctm_env
+        from tenax.algorithms.ipeps_ctm import _build_double_layer, _initialize_ctm_env
 
         a = _build_double_layer(small_peps_tensor)
         D = small_peps_tensor.shape[0]
@@ -1059,7 +1065,7 @@ class TestTensorSimpleUpdate:
 
     def test_horizontal_dense_tensor_runs(self):
         """Horizontal simple update works with DenseTensor."""
-        from tenax.algorithms.ipeps import (
+        from tenax.algorithms.ipeps_simple_update import (
             _make_trotter_gate_tensor,
             _simple_update_horizontal_tensor,
         )
@@ -1076,7 +1082,7 @@ class TestTensorSimpleUpdate:
 
     def test_vertical_dense_tensor_runs(self):
         """Vertical simple update works with DenseTensor."""
-        from tenax.algorithms.ipeps import (
+        from tenax.algorithms.ipeps_simple_update import (
             _make_trotter_gate_tensor,
             _simple_update_vertical_tensor,
         )
@@ -1093,7 +1099,7 @@ class TestTensorSimpleUpdate:
 
     def test_symmetric_tensor_runs(self):
         """Simple update works with SymmetricTensor."""
-        from tenax.algorithms.ipeps import (
+        from tenax.algorithms.ipeps_simple_update import (
             _make_trotter_gate_tensor,
             _simple_update_horizontal_tensor,
             _simple_update_vertical_tensor,
