@@ -5,10 +5,6 @@ on:
     tags:
       - "v*.*.*"
 
-permissions:
-  contents: read
-  id-token: write  # Required for OIDC trusted publishing
-
 jobs:
   build:
     name: Build distribution
@@ -50,9 +46,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
-          # OIDC trusted publishing: no API token needed.
-          # Configure at https://test.pypi.org/manage/project/tenax-tn/settings/publishing/
-          # Set: owner=tenax-lab, repo=tenax, workflow=publish.yml, env=testpypi
+          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
 
   publish-pypi:
     name: Publish to PyPI
@@ -71,6 +65,5 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        # OIDC trusted publishing: configure at
-        # https://pypi.org/manage/project/tenax-tn/settings/publishing/
-        # Set: owner=tenax-lab, repo=tenax, workflow=publish.yml, env=pypi
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
