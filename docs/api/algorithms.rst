@@ -60,27 +60,27 @@ HOTRG
 iPEPS
 -----
 
-.. autoclass:: tenax.algorithms.ipeps.iPEPSConfig
+.. autoclass:: tenax.algorithms.ipeps_config.iPEPSConfig
    :members:
    :no-index:
 
-.. autoclass:: tenax.algorithms.ipeps.CTMConfig
+.. autoclass:: tenax.algorithms.ipeps_config.CTMConfig
    :members:
    :no-index:
 
-.. autoclass:: tenax.algorithms.ipeps.CTMEnvironment
+.. autoclass:: tenax.algorithms.ipeps_config.CTMEnvironment
    :members:
    :no-index:
 
 .. autofunction:: tenax.algorithms.ipeps.ipeps
 
-.. autofunction:: tenax.algorithms.ipeps.ctm
+.. autofunction:: tenax.algorithms.ipeps_ctm.ctm
 
-.. autofunction:: tenax.algorithms.ipeps.ctm_2site
+.. autofunction:: tenax.algorithms.ipeps_ctm.ctm_2site
 
-.. autofunction:: tenax.algorithms.ipeps.compute_energy_ctm_2site
+.. autofunction:: tenax.algorithms.ipeps_rdm.compute_energy_ctm_2site
 
-.. autofunction:: tenax.algorithms.ipeps.optimize_gs_ad
+.. autofunction:: tenax.algorithms.ipeps_optimize.optimize_gs_ad
 
 AD Utilities
 ------------
