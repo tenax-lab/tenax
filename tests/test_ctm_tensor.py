@@ -22,7 +22,7 @@ from tenax.algorithms._ctm_tensor import (
     ctm_tensor_2site,
     initialize_ctm_tensor_env,
 )
-from tenax.algorithms.ipeps import (
+from tenax.algorithms.ipeps_ctm import (
     _build_double_layer,
     _ctm_2site_sweep,
     _ctm_sweep,
