@@ -24,6 +24,29 @@ OUT = FlowDirection.OUT
 # ------------------------------------------------------------------ #
 
 
+def _build_unified_fused_idx(
+    idx1: TensorIndex, idx2: TensorIndex
+) -> TensorIndex:
+    """Build a fused TensorIndex covering all charge sectors from both inputs.
+
+    For each unique charge, allocates ``max(count_in_idx1, count_in_idx2)``
+    entries.  The resulting index may be larger than either input.
+    """
+    c1 = np.asarray(idx1.charges)
+    c2 = np.asarray(idx2.charges)
+    all_charges = sorted(set(int(q) for q in c1) | set(int(q) for q in c2))
+    unified: list[int] = []
+    for q in all_charges:
+        count = max(int(np.sum(c1 == q)), int(np.sum(c2 == q)))
+        unified.extend([q] * count)
+    return TensorIndex(
+        idx1.symmetry,
+        np.array(unified, dtype=np.int32),
+        idx1.flow,
+        label=idx1.label,
+    )
+
+
 def _build_symmetric_projector(
     proj_blocks: dict[tuple[int, ...], jax.Array],
     chi_new_charges: list[int],
@@ -68,10 +91,129 @@ def _build_symmetric_projector(
     return obj
 
 
+def _infer_eigvec_charges(
+    P: np.ndarray, fused_charges: np.ndarray
+) -> np.ndarray:
+    """Infer the charge of each eigenvector column from its non-zero rows.
+
+    For a block-diagonal rho (arising from symmetric tensors), each
+    eigenvector belongs to exactly one charge sector. The charge of
+    column j equals the fused charge of the row with maximum absolute
+    value in that column.
+
+    Args:
+        P: Dense projector matrix ``(fused_dim, k)``.
+        fused_charges: 1-D int32 array of length ``fused_dim``.
+
+    Returns:
+        1-D int32 array of length ``k`` with the inferred charge for
+        each column.
+    """
+    k = P.shape[1]
+    chi_new_charges = np.zeros(k, dtype=np.int32)
+    for j in range(k):
+        col = np.abs(P[:, j])
+        max_row = int(np.argmax(col))
+        chi_new_charges[j] = fused_charges[max_row]
+    return chi_new_charges
+
+
+def _unified_fused_index(
+    idx_a: TensorIndex, idx_b: TensorIndex
+) -> TensorIndex:
+    """Build a fused index whose charge array is the union of two indices.
+
+    When two grown corners are fused along different edges, their fused
+    indices may contain different charge sectors.  The unified index has
+    enough room for every sector that appears in *either* corner so that
+    the projector can act on both.
+
+    If the two indices already have the same charges array, returns *idx_a*
+    unchanged (fast path).
+    """
+    if np.array_equal(idx_a.charges, idx_b.charges):
+        return idx_a
+
+    # Collect sector sizes from both: for each unique charge keep the
+    # *maximum* multiplicity seen in either index so the projector's
+    # fused dimension is large enough for both corners' blocks.
+    unique_charges = sorted(
+        set(int(c) for c in idx_a.charges) | set(int(c) for c in idx_b.charges)
+    )
+    charges_list: list[int] = []
+    for q in unique_charges:
+        n_a = int(np.sum(idx_a.charges == q))
+        n_b = int(np.sum(idx_b.charges == q))
+        charges_list.extend([q] * max(n_a, n_b))
+
+    return TensorIndex(
+        idx_a.symmetry,
+        np.array(charges_list, dtype=np.int32),
+        idx_a.flow,
+        label=idx_a.label,
+    )
+
+
+def _reembed_fused(
+    T: SymmetricTensor, target_fused_idx: TensorIndex
+) -> SymmetricTensor:
+    """Re-embed *T* so its ``fused`` leg uses *target_fused_idx*.
+
+    For each charge sector *q*, if the target index has more states than
+    T's current fused index, the block is zero-padded along the fused axis.
+    Sectors present in *target_fused_idx* but absent from *T* produce
+    no blocks (they would be all-zero anyway).
+
+    If T's fused index already equals *target_fused_idx*, returns *T* as-is.
+    """
+    fused_pos = T.labels().index("fused")
+    current_fused_idx = T.indices[fused_pos]
+
+    if np.array_equal(current_fused_idx.charges, target_fused_idx.charges):
+        return T
+
+    # Precompute per-charge dimensions in both current and target
+    cur_charges = np.asarray(current_fused_idx.charges)
+    tgt_charges = np.asarray(target_fused_idx.charges)
+
+    new_blocks: dict[tuple[int, ...], jax.Array] = {}
+    for key, block in T.blocks.items():
+        fq = int(key[fused_pos])
+        cur_dim = int(np.sum(cur_charges == fq))
+        tgt_dim = int(np.sum(tgt_charges == fq))
+        if tgt_dim == 0:
+            # Charge sector absent from target — drop the block
+            continue
+        elif tgt_dim == cur_dim:
+            new_blocks[key] = block
+        elif tgt_dim > cur_dim:
+            # Pad along fused axis
+            pad_width = [(0, 0)] * T.ndim
+            pad_width[fused_pos] = (0, tgt_dim - cur_dim)
+            new_blocks[key] = jnp.pad(block, pad_width)
+        else:
+            # Target is smaller — truncate
+            slices = [slice(None)] * T.ndim
+            slices[fused_pos] = slice(0, tgt_dim)
+            new_blocks[key] = block[tuple(slices)]
+
+    # Build new indices
+    new_indices = list(T.indices)
+    new_indices[fused_pos] = target_fused_idx
+    new_indices = tuple(new_indices)
+
+    obj = object.__new__(SymmetricTensor)
+    obj._indices = new_indices
+    obj._init_flat_buffer(new_blocks)
+    return obj
+
+
 def _eigh_projector_symmetric(
     C1g: SymmetricTensor,
     C4g: SymmetricTensor,
     chi: int,
+    fused_idx: TensorIndex | None = None,
+    base_charges: np.ndarray | None = None,
 ) -> SymmetricTensor:
     r"""Block-sparse projector via per-sector density matrix eigh.
 
@@ -79,6 +221,10 @@ def _eigh_projector_symmetric(
     :math:`\rho_q = M_1 M_1^\dagger + M_4 M_4^\dagger` where :math:`M_i`
     is the sector's dense block of C_ig, then eigendecomposes :math:`\rho_q`.
     Eigenvalues are merged across sectors and globally truncated to *chi*.
+
+    When ``base_charges`` is provided, the chi budget is distributed
+    per sector to match ``_derive_charges(base_charges, chi)`` — this
+    prevents cascading charge-sector loss across CTM sweeps.
 
     The projector is constructed directly as a SymmetricTensor with
     correct per-sector charges on the ``chi_new`` index (charge = fused
@@ -88,13 +234,20 @@ def _eigh_projector_symmetric(
         C1g: Grown corner SymmetricTensor ``(fused, col1)``.
         C4g: Grown corner SymmetricTensor ``(fused, col2)``.
         chi: Target bond dimension.
+        fused_idx: Optional unified fused TensorIndex covering both
+            corners' charge sectors.  When ``None``, uses C1g's fused
+            index (safe when both corners have matching fused indices).
+        base_charges: Bond charges from the iPEPS tensor A.  When provided,
+            per-sector allocation via ``_derive_charges`` is used instead
+            of purely global eigenvalue truncation.
 
     Returns:
         Projector ``P`` with labels ``(fused, chi_new)``, flows ``(IN, OUT)``.
     """
     fused_pos = C1g.labels().index("fused")
     col_pos = 1 - fused_pos  # the other leg
-    fused_idx = C1g.indices[fused_pos]
+    if fused_idx is None:
+        fused_idx = C1g.indices[fused_pos]
 
     # Group blocks by fused charge for each corner
     def _group_by_fused(Cg: SymmetricTensor) -> dict[int, list[tuple[int, jax.Array]]]:
@@ -111,38 +264,48 @@ def _eigh_projector_symmetric(
 
     all_fused_charges = sorted(set(c1_groups.keys()) | set(c4_groups.keys()))
 
-    # Per-sector eigh results: q -> (eigvecs, eigvals, fused_dim, row_offset)
-    sector_results: dict[int, tuple[jax.Array, jax.Array, int, int]] = {}
+    # Per-sector eigh results: q -> (eigvecs, eigvals, fused_dim)
+    sector_results: dict[int, tuple[jax.Array, jax.Array, int]] = {}
 
-    # Build a map from fused charge to its row indices in the dense fused index
+    # Build a map from fused charge to its dimension in the *unified* fused index.
+    # Include ALL charges in fused_idx, not just those with data,
+    # so seed eigenvectors can be created for absent-but-valid sectors.
     charges_arr = np.asarray(fused_idx.charges)
-    charge_rows: dict[int, np.ndarray] = {}
-    for fq in all_fused_charges:
-        charge_rows[fq] = np.where(charges_arr == fq)[0]
+    charge_dim: dict[int, int] = {}
+    for fq in set(int(q) for q in charges_arr):
+        charge_dim[fq] = int(np.sum(charges_arr == fq))
 
     for fq in all_fused_charges:
-        fused_dim = int(len(charge_rows.get(fq, [])))
+        fused_dim = charge_dim.get(fq, 0)
         if fused_dim == 0:
             continue
 
         # Accumulate rho = sum of M @ M^dagger for both corners
         rho = jnp.zeros((fused_dim, fused_dim), dtype=C1g.dtype)
 
-        for entries in [c1_groups.get(fq, []), c4_groups.get(fq, [])]:
+        for Cg, entries in [(C1g, c1_groups.get(fq, [])), (C4g, c4_groups.get(fq, []))]:
+            # Determine this corner's own fused dimension for the sector
+            cg_fused_charges = np.asarray(Cg.indices[fused_pos].charges)
+            cg_fused_dim = int(np.sum(cg_fused_charges == fq))
             for _cq, block in entries:
                 if fused_pos == 0:
-                    M = block.reshape(fused_dim, -1)
+                    M = block.reshape(cg_fused_dim, -1)
                 else:
-                    M = block.reshape(-1, fused_dim).T
+                    M = block.reshape(-1, cg_fused_dim).T
+                # If this corner's sector is smaller than the unified dim,
+                # pad M with zeros so it fits rho's shape.
+                if cg_fused_dim < fused_dim:
+                    pad_rows = fused_dim - cg_fused_dim
+                    M = jnp.pad(M, ((0, pad_rows), (0, 0)))
                 rho = rho + M @ M.conj().T
 
         rho = 0.5 * (rho + rho.conj().T)
         eigvals, eigvecs = jnp.linalg.eigh(rho)
-        sector_results[fq] = (eigvecs, eigvals, fused_dim, charge_rows[fq])
+        sector_results[fq] = (eigvecs, eigvals, fused_dim)
 
-    # Global truncation: merge eigenvalues, keep top-chi
+    # Truncation: merge eigenvalues and select which eigenvectors to keep.
     all_eig_pairs: list[tuple[float, int, int]] = []  # (value, fused_charge, index)
-    for fq, (_, eigvals, _, _) in sector_results.items():
+    for fq, (_, eigvals, _) in sector_results.items():
         for i, val in enumerate(np.array(eigvals)):
             all_eig_pairs.append((float(val), fq, i))
 
@@ -152,10 +315,64 @@ def _eigh_projector_symmetric(
     all_eig_pairs.sort(key=lambda x: (-x[0], -x[2]))
     n_keep = min(chi, len(all_eig_pairs))
 
-    # Count per-sector keeps
     sector_keep: dict[int, list[int]] = {}
-    for _, fq, idx in all_eig_pairs[:n_keep]:
-        sector_keep.setdefault(fq, []).append(idx)
+
+    if base_charges is not None:
+        # Per-sector allocation matching _derive_charges distribution.
+        # This prevents cascading charge-sector loss across CTM sweeps
+        # by ensuring every charge from A's bond is represented.
+        from tenax.algorithms._ctm_utils import _derive_charges
+        target_charges = _derive_charges(base_charges, n_keep)
+        target_count: dict[int, int] = {}
+        for q in target_charges:
+            target_count[int(q)] = target_count.get(int(q), 0) + 1
+
+        # Allocate per sector: take top eigenvalues within each sector.
+        # For sectors absent from the data, create identity-like seed
+        # eigenvectors to preserve charge structure (matching dense eigh
+        # behavior where zero-eigenvalue sectors still get eigenvectors).
+        for fq in sorted(target_count.keys()):
+            n_want = target_count[fq]
+            if fq in sector_results:
+                eigvals_arr = np.array(sector_results[fq][1])
+                n_avail = len(eigvals_arr)
+                n_take = min(n_want, n_avail)
+                top_indices = list(np.argsort(eigvals_arr)[-n_take:][::-1])
+                sector_keep[fq] = top_indices
+            else:
+                # Sector absent from data — create seed eigenvectors
+                # (identity columns) so the charge sector is preserved.
+                fused_dim = charge_dim.get(fq, 0)
+                if fused_dim > 0:
+                    n_take = min(n_want, fused_dim)
+                    seed_vecs = jnp.eye(fused_dim, dtype=C1g.dtype)[:, :n_take]
+                    seed_vals = jnp.zeros(n_take, dtype=jnp.float64)
+                    sector_results[fq] = (seed_vecs, seed_vals, fused_dim)
+                    sector_keep[fq] = list(range(n_take))
+
+        # If some target sectors had no data AND no fused_dim,
+        # redistribute budget to existing sectors via global ranking
+        all_eig_pairs = []
+        for fq, (_, eigvals, _) in sector_results.items():
+            for i, val in enumerate(np.array(eigvals)):
+                all_eig_pairs.append((float(val), fq, i))
+        all_eig_pairs.sort(key=lambda x: (-x[0], -x[2]))
+
+        used = sum(len(v) for v in sector_keep.values())
+        remaining = n_keep - used
+        if remaining > 0:
+            reserved = {(fq, idx) for fq, idxs in sector_keep.items() for idx in idxs}
+            for _, fq, idx in all_eig_pairs:
+                if remaining <= 0:
+                    break
+                if (fq, idx) not in reserved:
+                    sector_keep.setdefault(fq, []).append(idx)
+                    reserved.add((fq, idx))
+                    remaining -= 1
+    else:
+        # Pure global truncation (no base_charges)
+        for _, fq, idx in all_eig_pairs[:n_keep]:
+            sector_keep.setdefault(fq, []).append(idx)
 
     # Build projector blocks directly with correct per-sector charges.
     # Each kept eigenvector from sector fq gets chi_new charge = fq
@@ -168,7 +385,7 @@ def _eigh_projector_symmetric(
         n_q = len(keep_indices)
         chi_new_charges.extend([fq] * n_q)
 
-        eigvecs, _, fused_dim, row_idx = sector_results[fq]
+        eigvecs, _, fused_dim = sector_results[fq]
         V_q = eigvecs[:, keep_indices]  # (fused_dim, n_q)
         V_q = jax.lax.stop_gradient(V_q)
         proj_blocks[(fq, fq)] = V_q
@@ -298,6 +515,7 @@ def _compute_projector_tensor(
     C4g: Tensor,
     chi: int,
     projector_method: str = "eigh",
+    base_charges: np.ndarray | None = None,
 ) -> Tensor:
     r"""Compute isometric projector P as a Tensor.
 
@@ -357,9 +575,14 @@ def _compute_projector_tensor(
         P_dense = jax.lax.stop_gradient(P_dense)
 
         fused_idx = C1g.indices[C1g.labels().index("fused")]
+        if base_charges is not None:
+            from tenax.algorithms._ctm_utils import _derive_charges
+            chi_charges_qr = _derive_charges(base_charges, k)
+        else:
+            chi_charges_qr = np.zeros(k, dtype=np.int32)
         chi_new_idx = TensorIndex(
             fused_idx.symmetry,
-            np.zeros(k, dtype=np.int32),
+            chi_charges_qr,
             OUT,
             label="chi_new",
         )
@@ -377,8 +600,30 @@ def _compute_projector_tensor(
         has_tracers = isinstance(C1g._data, jax.core.Tracer) or isinstance(
             C4g._data, jax.core.Tracer
         )
-        if not has_tracers and C1g.n_blocks > 0 and C4g.n_blocks > 0:
-            return _eigh_projector_symmetric(C1g, C4g, chi)
+        if not has_tracers and (C1g.n_blocks > 0 or C4g.n_blocks > 0):
+            fused_pos = C1g.labels().index("fused")
+            c1_charges = C1g.indices[fused_pos].charges
+            c4_charges = C4g.indices[fused_pos].charges
+            if np.array_equal(c1_charges, c4_charges):
+                return _eigh_projector_symmetric(
+                    C1g, C4g, chi, base_charges=base_charges
+                )
+            # Mismatched fused charges (e.g. split CTM with different
+            # D-leg flows): build a unified fused index covering both
+            # corners' charge sectors, re-embed, and use block-sparse eigh.
+            unified_fused_idx = _build_unified_fused_idx(
+                C1g.indices[fused_pos], C4g.indices[fused_pos]
+            )
+            C1g_re = _reembed_fused(C1g, unified_fused_idx)
+            C4g_re = _reembed_fused(C4g, unified_fused_idx)
+            return _eigh_projector_symmetric(
+                C1g_re, C4g_re, chi, fused_idx=unified_fused_idx,
+                base_charges=base_charges,
+            )
+
+    # Dense fallback — used for DenseTensor inputs or JAX tracer context.
+    fused_pos = C1g.labels().index("fused")
+    fused_idx = C1g.indices[fused_pos]
 
     C1g_dense = C1g.todense()
     C4g_dense = C4g.todense()
@@ -390,11 +635,14 @@ def _compute_projector_tensor(
     P_dense = eigvecs[:, -k:][:, ::-1]
     P_dense = jax.lax.stop_gradient(P_dense)
 
-    # Wrap as Tensor with fused index from C1g and new chi_new bond
-    fused_idx = C1g.indices[C1g.labels().index("fused")]
+    if base_charges is not None:
+        from tenax.algorithms._ctm_utils import _derive_charges
+        chi_charges = _derive_charges(base_charges, k)
+    else:
+        chi_charges = np.zeros(k, dtype=np.int32)
     chi_new_idx = TensorIndex(
         fused_idx.symmetry,
-        np.zeros(k, dtype=np.int32),
+        chi_charges,
         OUT,
         label="chi_new",
     )
