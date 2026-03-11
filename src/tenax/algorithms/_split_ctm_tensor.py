@@ -435,17 +435,15 @@ def _grow_edge_no_double_layer(
     ket_I_label: str,
     bra_I_label: str,
     output_labels: tuple[str, ...],
-) -> jax.Array:
+) -> Tensor:
     """Grow a T-edge by contracting ket/bra layers separately.
 
     Instead of building a closed double-layer tensor, this contracts each
     half-edge with its copy of A (ket) and A.bar() (bra), then traces the
     physical and interlayer indices via label-based contraction.
 
-    Returns a dense array of shape ``(chi*D², D², chi*D²)``.
+    Returns an 8-leg Tensor with labels matching *output_labels*.
     """
-    D = A.indices[0].dim
-    chi = T_ket.indices[0].dim
     ket_D_label = f"{contracted_leg}_ket"
     bra_D_label = f"{contracted_leg}_bra"
 
@@ -464,9 +462,7 @@ def _grow_edge_no_double_layer(
     # --- Match interlayer labels, then contract (traces _I + phys) ---
     ket_half = ket_half.relabel(ket_I_label, "_I")
     bra_half = bra_half.relabel(bra_I_label, "_I")
-    grown = contract(ket_half, bra_half, output_labels=output_labels)
-
-    return grown.todense().reshape(chi * D * D, D * D, chi * D * D)
+    return contract(ket_half, bra_half, output_labels=output_labels)
 
 
 # ------------------------------------------------------------------ #
@@ -559,7 +555,7 @@ def _split_ctm_move_left(
     P_full = P_full.reshape(chi * D * D, chi_new)
 
     # --- Step 8+9: Grow T4 via separate ket/bra contraction ---
-    T4g = _grow_edge_no_double_layer(
+    T4g_tensor = _grow_edge_no_double_layer(
         env.T4_ket,
         env.T4_bra,
         A,
@@ -569,6 +565,7 @@ def _split_ctm_move_left(
         "t4b_I",
         ("t4k_d", "u", "U", "r", "R", "t4b_u", "d", "D"),
     )
+    T4g = T4g_tensor.todense().reshape(chi * D * D, D * D, chi * D * D)
 
     # Apply projectors
     T4_new_full_dense = jnp.einsum("ia,idj,jb->adb", P_full, T4g, P_full)
@@ -697,7 +694,7 @@ def _split_ctm_move_right(
     P_full = P_full.reshape(chi * D * D, chi_new)
 
     # Grow T2 via separate ket/bra contraction
-    T2g = _grow_edge_no_double_layer(
+    T2g_tensor = _grow_edge_no_double_layer(
         env.T2_ket,
         env.T2_bra,
         A,
@@ -707,6 +704,7 @@ def _split_ctm_move_right(
         "t2b_I",
         ("t2k_u", "u", "U", "l", "L", "t2b_d", "d", "D"),
     )
+    T2g = T2g_tensor.todense().reshape(chi * D * D, D * D, chi * D * D)
     T2_new_full_dense = jnp.einsum("ia,idj,jb->adb", P_full, T2g, P_full)
 
     T2_ket_new_dense, T2_bra_new_dense = _svd_split_edge_dense(T2_new_full_dense, chi_I)
@@ -826,7 +824,7 @@ def _split_ctm_move_top(
     P_full = P_full.reshape(chi * D * D, chi_new)
 
     # Grow T1 via separate ket/bra contraction
-    T1g = _grow_edge_no_double_layer(
+    T1g_tensor = _grow_edge_no_double_layer(
         env.T1_ket,
         env.T1_bra,
         A,
@@ -836,6 +834,7 @@ def _split_ctm_move_top(
         "t1b_I",
         ("t1k_l", "l", "L", "d", "D", "t1b_r", "r", "R"),
     )
+    T1g = T1g_tensor.todense().reshape(chi * D * D, D * D, chi * D * D)
     T1_new_full_dense = jnp.einsum("ia,idj,jb->adb", P_full, T1g, P_full)
 
     T1_ket_new_dense, T1_bra_new_dense = _svd_split_edge_dense(T1_new_full_dense, chi_I)
@@ -957,7 +956,7 @@ def _split_ctm_move_bottom(
     P_full = P_full.reshape(chi * D * D, chi_new)
 
     # Grow T3 via separate ket/bra contraction
-    T3g = _grow_edge_no_double_layer(
+    T3g_tensor = _grow_edge_no_double_layer(
         env.T3_ket,
         env.T3_bra,
         A,
@@ -967,6 +966,7 @@ def _split_ctm_move_bottom(
         "t3b_I",
         ("t3k_r", "l", "L", "u", "U", "t3b_l", "r", "R"),
     )
+    T3g = T3g_tensor.todense().reshape(chi * D * D, D * D, chi * D * D)
     T3_new_full_dense = jnp.einsum("ia,idj,jb->adb", P_full, T3g, P_full)
 
     T3_ket_new_dense, T3_bra_new_dense = _svd_split_edge_dense(T3_new_full_dense, chi_I)

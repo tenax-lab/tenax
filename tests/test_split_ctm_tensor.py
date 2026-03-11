@@ -267,7 +267,7 @@ class TestSplitCTMTensorEnergy:
             "t4k_I",
             "t4b_I",
             ("t4k_d", "u", "U", "r", "R", "t4b_u", "d", "D"),
-        )
+        ).todense().reshape(chi * D * D, D * D, chi * D * D)
         assert jnp.allclose(T4g_old, T4g_new, atol=1e-12), "T4 (left) growth mismatch"
 
         # --- Right move: T2 growth ---
@@ -285,7 +285,7 @@ class TestSplitCTMTensorEnergy:
             "t2k_I",
             "t2b_I",
             ("t2k_u", "u", "U", "l", "L", "t2b_d", "d", "D"),
-        )
+        ).todense().reshape(chi * D * D, D * D, chi * D * D)
         assert jnp.allclose(T2g_old, T2g_new, atol=1e-12), "T2 (right) growth mismatch"
 
         # --- Top move: T1 growth ---
@@ -303,7 +303,7 @@ class TestSplitCTMTensorEnergy:
             "t1k_I",
             "t1b_I",
             ("t1k_l", "l", "L", "d", "D", "t1b_r", "r", "R"),
-        )
+        ).todense().reshape(chi * D * D, D * D, chi * D * D)
         assert jnp.allclose(T1g_old, T1g_new, atol=1e-12), "T1 (top) growth mismatch"
 
         # --- Bottom move: T3 growth ---
@@ -321,7 +321,7 @@ class TestSplitCTMTensorEnergy:
             "t3k_I",
             "t3b_I",
             ("t3k_r", "l", "L", "u", "U", "t3b_l", "r", "R"),
-        )
+        ).todense().reshape(chi * D * D, D * D, chi * D * D)
         assert jnp.allclose(T3g_old, T3g_new, atol=1e-12), "T3 (bottom) growth mismatch"
 
 
