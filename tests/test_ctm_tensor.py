@@ -7,12 +7,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from tenax.algorithms._ctm_projector import _compute_projector_tensor
 from tenax.algorithms._ctm_tensor import (
     CHECKERBOARD_NEIGHBORS,
     CTMTensorEnv,
     _build_double_layer_open_tensor,
     _build_double_layer_tensor,
-    _compute_projector_tensor,
     _ctm_tensor_sweep,
     _ctm_tensor_sweep_multisite,
     _fuse_pair_by_label,
