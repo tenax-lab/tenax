@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from tenax.core.lattice import (
@@ -175,3 +178,79 @@ class TestCtmMultisiteExports:
 
     def test_importable_from_ctm_tensor_shim(self):
         from tenax.algorithms._ctm_tensor import ctm_multisite  # noqa: F401
+
+
+# ---------------------------------------------------------------------------
+# Integration tests for ctm_multisite
+# ---------------------------------------------------------------------------
+
+
+def _make_random_dense_site_tensor(key, D=2, d=2):
+    """Build a random DenseTensor site tensor with 5 legs (u, d, l, r, phys)."""
+    from tenax.core import DenseTensor, FlowDirection, TensorIndex, U1Symmetry
+
+    sym = U1Symmetry()
+    charges = np.zeros(D, dtype=np.int32)
+    phys_charges = np.zeros(d, dtype=np.int32)
+    indices = (
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="u"),
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="d"),
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="l"),
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="r"),
+        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+    )
+    data = jax.random.normal(key, shape=(D, D, D, D, d))
+    return DenseTensor(data, indices)
+
+
+class TestCtmMultisiteIntegration:
+    def test_checkerboard_returns_dict(self):
+        """ctm_multisite with checkerboard returns envs keyed by site name."""
+        from tenax.algorithms._ctm_tensor_convergence import ctm_multisite
+
+        lat = checkerboard()
+        key = jax.random.PRNGKey(42)
+        k1, k2 = jax.random.split(key)
+        A = _make_random_dense_site_tensor(k1)
+        B = _make_random_dense_site_tensor(k2)
+        envs = ctm_multisite({"a": A, "b": B}, lat, chi=4, max_iter=5, conv_tol=1e-6)
+        assert set(envs.keys()) == {"a", "b"}
+
+    def test_checkerboard_matches_ctm_tensor_2site(self):
+        """ctm_multisite with checkerboard matches ctm_tensor_2site."""
+        from tenax.algorithms._ctm_tensor_convergence import (
+            ctm_multisite,
+            ctm_tensor_2site,
+        )
+
+        key = jax.random.PRNGKey(0)
+        k1, k2 = jax.random.split(key)
+        A = _make_random_dense_site_tensor(k1)
+        B = _make_random_dense_site_tensor(k2)
+
+        lat = checkerboard()
+        envs_multi = ctm_multisite(
+            {"a": A, "b": B}, lat, chi=4, max_iter=30, conv_tol=1e-10
+        )
+        env_A, env_B = ctm_tensor_2site(A, B, chi=4, max_iter=30, conv_tol=1e-10)
+
+        # Compare normalized corner singular values
+        sv_multi_a = jnp.linalg.svd(envs_multi["a"].C1.todense(), compute_uv=False)
+        sv_direct_a = jnp.linalg.svd(env_A.C1.todense(), compute_uv=False)
+        sv_multi_a = sv_multi_a / jnp.sum(sv_multi_a)
+        sv_direct_a = sv_direct_a / jnp.sum(sv_direct_a)
+        assert jnp.allclose(sv_multi_a, sv_direct_a, atol=1e-6)
+
+    def test_kagome_runs_to_completion(self):
+        """ctm_multisite with kagome runs without error."""
+        from tenax.algorithms._ctm_tensor_convergence import ctm_multisite
+
+        lat = kagome()
+        key = jax.random.PRNGKey(7)
+        keys = jax.random.split(key, 3)
+        tensors = {
+            name: _make_random_dense_site_tensor(keys[i])
+            for i, name in enumerate(lat.sites)
+        }
+        envs = ctm_multisite(tensors, lat, chi=4, max_iter=5, conv_tol=1e-6)
+        assert set(envs.keys()) == set(lat.sites)
