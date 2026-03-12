@@ -47,6 +47,7 @@ def _build_unified_fused_idx(
     )
 
 
+
 def _build_symmetric_projector(
     proj_blocks: dict[tuple[int, ...], jax.Array],
     chi_new_charges: list[int],
@@ -208,6 +209,7 @@ def _reembed_fused(
     return obj
 
 
+
 def _eigh_projector_symmetric(
     C1g: SymmetricTensor,
     C4g: SymmetricTensor,
@@ -225,6 +227,7 @@ def _eigh_projector_symmetric(
     When ``base_charges`` is provided, the chi budget is distributed
     per sector to match ``_derive_charges(base_charges, chi)`` — this
     prevents cascading charge-sector loss across CTM sweeps.
+
 
     The projector is constructed directly as a SymmetricTensor with
     correct per-sector charges on the ``chi_new`` index (charge = fused
