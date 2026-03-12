@@ -238,7 +238,6 @@ def _fuse_indices_symmetric(
     # (qa, qb) sub-blocks by ascending i*db+j order, NOT group them
     # contiguously.
 
-    da = len(idx_a.charges)
     db = len(idx_b.charges)
     unique_qa = np.unique(idx_a.charges)
     unique_qb = np.unique(idx_b.charges)
@@ -255,9 +254,6 @@ def _fuse_indices_symmetric(
     positions_b: dict[int, np.ndarray] = {}
     for q in unique_qb:
         positions_b[int(q)] = np.where(idx_b.charges == q)[0]
-
-    dim_a: dict[int, int] = {int(q): len(positions_a[int(q)]) for q in unique_qa}
-    dim_b: dict[int, int] = {int(q): len(positions_b[int(q)]) for q in unique_qb}
 
     # Group (qa, qb) pairs by fused charge q_f
     fused_groups: dict[int, list[tuple[int, int]]] = {}

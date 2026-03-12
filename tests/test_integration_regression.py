@@ -179,7 +179,7 @@ class TestBlockPreservation:
                 "Env tensor lost SymmetricTensor type after split CTM sweeps"
             )
             assert t.n_blocks >= 1, (
-                f"All blocks collapsed to 0 — environment degenerated"
+                "All blocks collapsed to 0 — environment degenerated"
             )
 
 
