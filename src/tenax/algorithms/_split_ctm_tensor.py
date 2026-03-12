@@ -1317,12 +1317,12 @@ def _split_env_to_tensor_standard(env: SplitCTMTensorEnv) -> CTMTensorEnv:
     )
     T2 = _merge_edge(
         env.T2_ket, env.T2_bra,
-        "t2k_I", "t2b_I", "r_ket", "r_bra", "r2", FlowDirection.IN,
+        "t2k_I", "t2b_I", "r_ket", "r_bra", "r2", FlowDirection.OUT,
         "t2k_u", "t2b_d", "t2_u", "t2_d",
     )
     T3 = _merge_edge(
         env.T3_ket, env.T3_bra,
-        "t3k_I", "t3b_I", "d_ket", "d_bra", "d2", FlowDirection.IN,
+        "t3k_I", "t3b_I", "d_ket", "d_bra", "d2", FlowDirection.OUT,
         "t3k_r", "t3b_l", "t3_r", "t3_l",
     )
     T4 = _merge_edge(
