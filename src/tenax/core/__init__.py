@@ -1,6 +1,15 @@
 """Core tensor and symmetry classes."""
 
 from tenax.core.index import FlowDirection, Label, TensorIndex
+from tenax.core.lattice import (
+    Bond,
+    Lattice,
+    checkerboard,
+    honeycomb,
+    kagome,
+    square,
+    triangular,
+)
 from tenax.core.symmetry import (
     BaseNonAbelianSymmetry,
     BaseSymmetry,
@@ -29,4 +38,12 @@ __all__ = [
     "BlockKey",
     "EPS",
     "LOG_EPS",
+    # Lattice
+    "Bond",
+    "Lattice",
+    "square",
+    "checkerboard",
+    "honeycomb",
+    "triangular",
+    "kagome",
 ]

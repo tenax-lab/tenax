@@ -1,5 +1,6 @@
 """Tensor network algorithms: DMRG, iDMRG, TRG, HOTRG, iPEPS."""
 
+from tenax.algorithms._ctm_tensor_convergence import ctm_multisite
 from tenax.algorithms.auto_mpo import (
     AutoMPO,
     HamiltonianTerm,
@@ -94,6 +95,8 @@ __all__ = [
     "compute_energy_split_ctm",
     "ctm_split",
     "optimize_gs_ad",
+    # CTM multisite
+    "ctm_multisite",
     # fPEPS (fermionic iPEPS)
     "FPEPSConfig",
     "fpeps",

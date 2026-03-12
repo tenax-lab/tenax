@@ -44,6 +44,7 @@ from tenax.algorithms._ctm_tensor import (
     ctm_tensor,
     ctm_tensor_2site,
 )
+from tenax.algorithms._ctm_tensor_convergence import ctm_multisite
 from tenax.algorithms._split_ctm_tensor import (
     SplitCTMTensorEnv,
     compute_energy_split_ctm_tensor,
@@ -120,6 +121,15 @@ from tenax.contraction.contractor import (
     truncated_svd,
 )
 from tenax.core.index import FlowDirection, Label, TensorIndex
+from tenax.core.lattice import (
+    Bond,
+    Lattice,
+    checkerboard,
+    honeycomb,
+    kagome,
+    square,
+    triangular,
+)
 from tenax.core.symmetry import (
     BaseNonAbelianSymmetry,
     BaseSymmetry,
@@ -223,6 +233,7 @@ __all__ = [
     "CTMTensorEnv",
     "ctm_tensor",
     "ctm_tensor_2site",
+    "ctm_multisite",
     "compute_energy_ctm_tensor",
     "compute_energy_ctm_tensor_2site",
     # Split CTM (Tensor protocol)
@@ -238,6 +249,14 @@ __all__ = [
     "ExcitationResult",
     "compute_excitations",
     "make_momentum_path",
+    # Lattice
+    "Bond",
+    "Lattice",
+    "square",
+    "checkerboard",
+    "honeycomb",
+    "triangular",
+    "kagome",
     # Network
     "TensorNetwork",
     "build_mps",

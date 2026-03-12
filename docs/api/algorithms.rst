@@ -84,6 +84,29 @@ iPEPS
 
 .. autofunction:: tenax.algorithms.ipeps_optimize.optimize_gs_ad
 
+.. autofunction:: tenax.algorithms._ctm_tensor_convergence.ctm_multisite
+
+Lattice
+-------
+
+.. autoclass:: tenax.core.lattice.Bond
+   :members:
+   :no-index:
+
+.. autoclass:: tenax.core.lattice.Lattice
+   :members:
+   :no-index:
+
+.. autofunction:: tenax.core.lattice.square
+
+.. autofunction:: tenax.core.lattice.checkerboard
+
+.. autofunction:: tenax.core.lattice.honeycomb
+
+.. autofunction:: tenax.core.lattice.triangular
+
+.. autofunction:: tenax.core.lattice.kagome
+
 AD Utilities
 ------------
 
