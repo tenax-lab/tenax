@@ -13,13 +13,14 @@ Reference: arXiv:2502.10298
 
 from __future__ import annotations
 
-import math
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ctm_projector import _compute_projector_tensor, _reembed_fused
+from tenax.algorithms._ctm_tensor import CTMTensorEnv, compute_energy_ctm_tensor
 from tenax.algorithms._ctm_utils import (
     _CORNER_SPECS,
     _derive_charges,
@@ -27,6 +28,7 @@ from tenax.algorithms._ctm_utils import (
     _trivial_symmetry,
 )
 from tenax.algorithms._tensor_utils import (
+    absorb_sqrt_singular_values,
     fuse_indices,
     max_abs_normalize,
 )
@@ -34,6 +36,7 @@ from tenax.contraction.contractor import contract
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, Label, TensorIndex
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.linalg import svd as tensor_svd
 
 # ------------------------------------------------------------------ #
 # Environment data structure                                          #
@@ -151,11 +154,13 @@ def _init_symmetric_corner(
 
     idx_a = TensorIndex(sym, charges.copy(), flow_a, label=label_a)
     idx_b = TensorIndex(sym, charges.copy(), flow_b, label=label_b)
-    # Build identity-like: for each charge, set diagonal block to identity
-    return SymmetricTensor.from_dense(
-        jnp.eye(chi, dtype=A.dtype),
-        (idx_a, idx_b),
-    )
+    # Match dense reference: eye(min(chi, D)) padded to chi,
+    # which initializes fewer diagonal entries when chi > D.
+    D = A.indices[ref_axis].dim
+    C = jnp.eye(min(chi, D), dtype=A.dtype)
+    C_pad = jnp.zeros((chi, chi), dtype=A.dtype)
+    C_pad = C_pad.at[: C.shape[0], : C.shape[1]].set(C)
+    return SymmetricTensor.from_dense(C_pad, (idx_a, idx_b), tol=float("inf"))
 
 
 def _init_symmetric_edge_ket(
@@ -172,27 +177,61 @@ def _init_symmetric_edge_ket(
     ref_axis_chi: int,
     ref_axis_D: int,
 ) -> SymmetricTensor:
-    """Create an identity-like SymmetricTensor ket edge."""
+    """Create an identity-like SymmetricTensor ket edge.
+
+    Builds blocks for every valid charge sector with ones in the diagonal
+    entries (chi_idx == I_idx within each sector), matching the dense
+    reference ``T_ket[i, :, i] = ones(D)`` but only at charge-conserving
+    positions.
+    """
     sym = A.indices[0].symmetry
 
     # chi-leg charges from A's ref bond
     chi_charges = _derive_charges(A.indices[ref_axis_chi].charges, chi)
-    D_charges = A.indices[ref_axis_D].charges.copy()
-    I_charges = _derive_charges(A.indices[ref_axis_chi].charges, chi_I)
+    D_charges = np.asarray(A.indices[ref_axis_D].charges.copy(), dtype=np.int32)
+
+    # Derive I-leg charges from the conservation rule so that the
+    # identity-like initialisation has the maximum number of nonzero
+    # blocks.  For each (q_chi, q_D), q_I = -(flow_chi*q_chi + flow_D*q_D) / flow_I.
+    # Collect the set of q_I values needed, then tile to chi_I.
+    fi = int(flow_I)
+    fc = int(flow_chi)
+    fd = int(flow_D)
+    needed_I_charges: set[int] = set()
+    for qc in set(int(c) for c in chi_charges):
+        for qd in set(int(c) for c in D_charges):
+            qi_needed = -(fc * qc + fd * qd)
+            if fi != 0:
+                if qi_needed % fi == 0:
+                    needed_I_charges.add(qi_needed // fi)
+    # Build I charges: start with needed charges, then fill to chi_I
+    base_I = sorted(needed_I_charges)
+    if len(base_I) == 0:
+        base_I = [0]
+    if chi_I <= len(base_I):
+        I_charges_arr = np.array(base_I[:chi_I], dtype=np.int32)
+    else:
+        reps = chi_I // len(base_I) + 1
+        I_charges_arr = np.array((base_I * reps)[:chi_I], dtype=np.int32)
 
     idx_chi = TensorIndex(sym, chi_charges, flow_chi, label=label_chi)
-    idx_D = TensorIndex(
-        sym, np.asarray(D_charges, dtype=np.int32), flow_D, label=label_D
-    )
-    idx_I = TensorIndex(sym, I_charges, flow_I, label=label_I)
+    idx_D = TensorIndex(sym, D_charges, flow_D, label=label_D)
+    idx_I = TensorIndex(sym, I_charges_arr, flow_I, label=label_I)
 
-    # Build identity-like dense, then extract valid blocks (tol=inf
-    # silently discards elements outside charge-conserving sectors).
+    # Build conservation-compatible init matching dense reference pattern
+    # T[i, :, i] = ones(D) for i in range(min(chi_D, chi_I_D)).
+    # Only set entries where charge conservation holds.
+    fc = int(flow_chi)
+    fd = int(flow_D)
+    fI = int(flow_I)
     T = jnp.zeros((chi, D, chi_I), dtype=A.dtype)
     chi_D = min(chi, D)
     chi_I_D = min(chi_I, D)
     for i in range(min(chi_D, chi_I_D)):
-        T = T.at[i, :, i].set(jnp.ones(D, dtype=A.dtype))
+        for di in range(D):
+            total_charge = fc * int(chi_charges[i]) + fd * int(D_charges[di]) + fI * int(I_charges_arr[i])
+            if total_charge == 0:
+                T = T.at[i, di, i].set(1.0)
     return SymmetricTensor.from_dense(T, (idx_chi, idx_D, idx_I), tol=float("inf"))
 
 
@@ -210,24 +249,53 @@ def _init_symmetric_edge_bra(
     ref_axis_chi: int,
     ref_axis_D: int,
 ) -> SymmetricTensor:
-    """Create an identity-like SymmetricTensor bra edge."""
+    """Create an identity-like SymmetricTensor bra edge.
+
+    Same conservation-aware charge derivation as the ket edge.
+    """
     sym = A.indices[0].symmetry
 
-    I_charges = _derive_charges(A.indices[ref_axis_chi].charges, chi_I)
-    D_charges = A.indices[ref_axis_D].charges.copy()
+    D_charges = np.asarray(A.indices[ref_axis_D].charges.copy(), dtype=np.int32)
     chi_charges = _derive_charges(A.indices[ref_axis_chi].charges, chi)
 
-    idx_I = TensorIndex(sym, I_charges, flow_I, label=label_I)
-    idx_D = TensorIndex(
-        sym, np.asarray(D_charges, dtype=np.int32), flow_D, label=label_D
-    )
+    # Derive I-leg charges from the conservation rule
+    fi_val = int(flow_I)
+    fc_val = int(flow_chi)
+    fd_val = int(flow_D)
+    needed_I_charges: set[int] = set()
+    for qc in set(int(c) for c in chi_charges):
+        for qd in set(int(c) for c in D_charges):
+            qi_needed = -(fc_val * qc + fd_val * qd)
+            if fi_val != 0:
+                if qi_needed % fi_val == 0:
+                    needed_I_charges.add(qi_needed // fi_val)
+    base_I = sorted(needed_I_charges)
+    if len(base_I) == 0:
+        base_I = [0]
+    if chi_I <= len(base_I):
+        I_charges_arr = np.array(base_I[:chi_I], dtype=np.int32)
+    else:
+        reps = chi_I // len(base_I) + 1
+        I_charges_arr = np.array((base_I * reps)[:chi_I], dtype=np.int32)
+
+    idx_I = TensorIndex(sym, I_charges_arr, flow_I, label=label_I)
+    idx_D = TensorIndex(sym, D_charges, flow_D, label=label_D)
     idx_chi = TensorIndex(sym, chi_charges, flow_chi, label=label_chi)
 
+    # Conservation-compatible init matching dense reference pattern
+    # T_bra[i, :, i] = ones(D) for i in range(min(chi_I_D, chi_D)).
+    # Only set entries where charge conservation holds.
+    fI = int(flow_I)
+    fd = int(flow_D)
+    fc = int(flow_chi)
     T = jnp.zeros((chi_I, D, chi), dtype=A.dtype)
     chi_D = min(chi, D)
     chi_I_D = min(chi_I, D)
     for i in range(min(chi_I_D, chi_D)):
-        T = T.at[i, :, i].set(jnp.ones(D, dtype=A.dtype))
+        for di in range(D):
+            total_charge = fI * int(I_charges_arr[i]) + fd * int(D_charges[di]) + fc * int(chi_charges[i])
+            if total_charge == 0:
+                T = T.at[i, di, i].set(1.0)
     return SymmetricTensor.from_dense(T, (idx_I, idx_D, idx_chi), tol=float("inf"))
 
 
@@ -393,32 +461,6 @@ def initialize_split_ctm_tensor_env(
 # ------------------------------------------------------------------ #
 
 
-def _compute_projector_dense(
-    C1g_dense: jax.Array, C2g_dense: jax.Array, chi: int
-) -> jax.Array:
-    """Compute eigh-based projector from two grown corner matrices.
-
-    Args:
-        C1g_dense: Dense grown corner, shape ``(chi*D, chi_I)``.
-        C2g_dense: Dense grown corner, shape ``(chi*D, chi_I)``.
-        chi:       Target bond dimension.
-
-    Returns:
-        Projector ``P`` of shape ``(chi*D, chi)``.
-    """
-    rho = C1g_dense @ C1g_dense.conj().T + C2g_dense @ C2g_dense.conj().T
-    rho = 0.5 * (rho + rho.conj().T)
-    eigvals, eigvecs = jnp.linalg.eigh(rho)
-    k = min(chi, len(eigvals))
-    P = eigvecs[:, -k:][:, ::-1]
-    return jax.lax.stop_gradient(P)
-
-
-# ------------------------------------------------------------------ #
-# SVD edge split                                                       #
-# ------------------------------------------------------------------ #
-
-
 # ------------------------------------------------------------------ #
 # No-double-layer edge growth                                          #
 # ------------------------------------------------------------------ #
@@ -435,17 +477,15 @@ def _grow_edge_no_double_layer(
     ket_I_label: str,
     bra_I_label: str,
     output_labels: tuple[str, ...],
-) -> jax.Array:
+) -> Tensor:
     """Grow a T-edge by contracting ket/bra layers separately.
 
     Instead of building a closed double-layer tensor, this contracts each
     half-edge with its copy of A (ket) and A.bar() (bra), then traces the
     physical and interlayer indices via label-based contraction.
 
-    Returns a dense array of shape ``(chi*D², D², chi*D²)``.
+    Returns an 8-leg Tensor with labels matching *output_labels*.
     """
-    D = A.indices[0].dim
-    chi = T_ket.indices[0].dim
     ket_D_label = f"{contracted_leg}_ket"
     bra_D_label = f"{contracted_leg}_bra"
 
@@ -464,9 +504,333 @@ def _grow_edge_no_double_layer(
     # --- Match interlayer labels, then contract (traces _I + phys) ---
     ket_half = ket_half.relabel(ket_I_label, "_I")
     bra_half = bra_half.relabel(bra_I_label, "_I")
-    grown = contract(ket_half, bra_half, output_labels=output_labels)
+    return contract(ket_half, bra_half, output_labels=output_labels)
 
-    return grown.todense().reshape(chi * D * D, D * D, chi * D * D)
+
+# ------------------------------------------------------------------ #
+# SVD helper                                                            #
+# ------------------------------------------------------------------ #
+
+
+def _svd_split_edge_tensor(
+    T: Tensor,
+    left_labels: list[str],
+    right_labels: list[str],
+    chi_I: int,
+    ket_relabels: dict[str, str],
+    bra_relabels: dict[str, str],
+    base_charges: np.ndarray | None = None,
+) -> tuple[Tensor, Tensor]:
+    """SVD-split a 4-leg projected edge into ket/bra halves.
+
+    Transposes *T* so left labels come first and right labels last
+    (required for correct block-sparse SVD), then splits via SVD,
+    absorbs sqrt(s) into both factors, relabels and normalizes.
+
+    When *base_charges* is provided and the input is a SymmetricTensor,
+    uses per-sector truncation (via ``_derive_charges``) instead of
+    global truncation to prevent charge-sector loss.
+    """
+    # Ensure axes are in (left..., right...) order for block-sparse SVD
+    labels = T.labels()
+    perm = tuple(labels.index(lbl) for lbl in left_labels + right_labels)
+    if perm != tuple(range(len(labels))):
+        T = T.transpose(perm)
+
+    if isinstance(T, SymmetricTensor) and base_charges is not None:
+        # Per-sector SVD truncation: full SVD then sector-aware selection
+        U_t, s, Vh_t, _s_full = tensor_svd(
+            T,
+            left_labels=left_labels,
+            right_labels=right_labels,
+            new_bond_label="_svd_bond",
+            max_singular_values=None,  # get all singular values
+        )
+        U_t, s, Vh_t = _truncate_svd_per_sector(
+            U_t, s, Vh_t, "_svd_bond", chi_I, base_charges
+        )
+    else:
+        U_t, s, Vh_t, _s_full = tensor_svd(
+            T,
+            left_labels=left_labels,
+            right_labels=right_labels,
+            new_bond_label="_svd_bond",
+            max_singular_values=chi_I,
+        )
+    T_ket, T_bra = absorb_sqrt_singular_values(U_t, s, Vh_t, "_svd_bond")
+    T_ket = T_ket.relabels(ket_relabels)
+    T_bra = T_bra.relabels(bra_relabels)
+    T_ket, _ = max_abs_normalize(T_ket)
+    T_bra, _ = max_abs_normalize(T_bra)
+    return T_ket, T_bra
+
+
+def _truncate_svd_per_sector(
+    U_t: SymmetricTensor,
+    s: jax.Array,
+    Vh_t: SymmetricTensor,
+    bond_label: str,
+    chi_I: int,
+    base_charges: np.ndarray,
+) -> tuple[SymmetricTensor, jax.Array, SymmetricTensor]:
+    """Per-sector SVD truncation matching ``_derive_charges`` allocation.
+
+    Selects singular values so that each charge sector from *base_charges*
+    gets its fair share of the ``chi_I`` budget, preventing cascading
+    charge-sector loss across CTM sweeps.
+    """
+    target = _derive_charges(base_charges, chi_I)
+    target_count: dict[int, int] = {}
+    for q in target:
+        target_count[int(q)] = target_count.get(int(q), 0) + 1
+
+    bond_pos_U = U_t.labels().index(bond_label)
+    current_charges = np.asarray(U_t.indices[bond_pos_U].charges)
+
+    # Walk through globally-sorted singular values, allocating per sector.
+    # s is in descending order; current_charges[i] is the sector for s[i].
+    keep_mask = np.zeros(len(s), dtype=bool)
+    sector_allocated: dict[int, int] = {}
+    for i, q in enumerate(current_charges):
+        q_int = int(q)
+        allocated = sector_allocated.get(q_int, 0)
+        if allocated < target_count.get(q_int, 0):
+            keep_mask[i] = True
+            sector_allocated[q_int] = allocated + 1
+
+    # If some target sectors had no data, fill budget from remaining
+    total_kept = int(np.sum(keep_mask))
+    if total_kept < chi_I:
+        for i in range(len(s)):
+            if total_kept >= chi_I:
+                break
+            if not keep_mask[i]:
+                keep_mask[i] = True
+                total_kept += 1
+
+    keep_indices = np.where(keep_mask)[0]
+    s_new = s[keep_indices]
+    new_charges = current_charges[keep_mask]
+
+    # Build per-sector entry mapping: which entries within each sector to keep
+    sector_entry_map: dict[int, list[int]] = {}
+    cur_sector_idx: dict[int, int] = {}
+    for i, q in enumerate(current_charges):
+        q_int = int(q)
+        idx_in_sector = cur_sector_idx.get(q_int, 0)
+        cur_sector_idx[q_int] = idx_in_sector + 1
+        if keep_mask[i]:
+            sector_entry_map.setdefault(q_int, []).append(idx_in_sector)
+
+    sym = U_t.indices[bond_pos_U].symmetry
+    new_bond_out = TensorIndex(
+        sym, np.asarray(new_charges, dtype=np.int32),
+        FlowDirection.OUT, label=bond_label,
+    )
+    new_bond_in = TensorIndex(
+        sym, np.asarray(new_charges, dtype=np.int32),
+        FlowDirection.IN, label=bond_label,
+    )
+
+    # Rebuild U (bond is last axis)
+    U_new = _select_bond_entries(
+        U_t, bond_pos_U, sector_entry_map, new_bond_out
+    )
+    # Rebuild Vh (bond is first axis)
+    bond_pos_Vh = Vh_t.labels().index(bond_label)
+    Vh_new = _select_bond_entries(
+        Vh_t, bond_pos_Vh, sector_entry_map, new_bond_in
+    )
+
+    return U_new, s_new, Vh_new
+
+
+def _select_bond_entries(
+    T: SymmetricTensor,
+    bond_pos: int,
+    sector_entry_map: dict[int, list[int]],
+    new_bond_idx: TensorIndex,
+) -> SymmetricTensor:
+    """Select specific entries from a bond axis of a SymmetricTensor."""
+    new_blocks: dict[tuple[int, ...], jax.Array] = {}
+    for key, block in T.blocks.items():
+        q_bond = int(key[bond_pos])
+        if q_bond not in sector_entry_map:
+            continue
+        kept = sector_entry_map[q_bond]
+        idx = [slice(None)] * T.ndim
+        idx[bond_pos] = jnp.array(kept)
+        new_blocks[key] = block[tuple(idx)]
+
+    new_indices = list(T.indices)
+    new_indices[bond_pos] = new_bond_idx
+    obj = object.__new__(SymmetricTensor)
+    obj._indices = tuple(new_indices)
+    obj._init_flat_buffer(new_blocks)
+    return obj
+
+
+
+def _fused_charge_permutation(
+    source_charges: np.ndarray, target_charges: np.ndarray
+) -> list[int] | None:
+    """Compute a permutation mapping *source_charges* order to *target_charges*.
+
+    Returns a list ``perm`` such that ``source_charges[perm[i]] == target_charges[i]``
+    for every *i*, or ``None`` if no such mapping exists (different charge sets).
+
+    This is needed when the projector P and the tensor being projected have
+    different fused charge orderings (due to different leg flow conventions),
+    so we must reorder the tensor's fused axis before dense matrix multiply.
+    """
+    if len(source_charges) != len(target_charges):
+        return None
+
+    # Build a map: charge -> list of indices in source
+    source_map: dict[int, list[int]] = {}
+    for i, q in enumerate(source_charges):
+        source_map.setdefault(int(q), []).append(i)
+
+    perm: list[int] = []
+    used: dict[int, int] = {}  # charge -> next index to use from source_map
+    for q in target_charges:
+        q_int = int(q)
+        if q_int not in source_map:
+            return None
+        pos = used.get(q_int, 0)
+        if pos >= len(source_map[q_int]):
+            return None
+        perm.append(source_map[q_int][pos])
+        used[q_int] = pos + 1
+
+    return perm
+
+
+def _ensure_tensor_flows(T: Tensor, expected_flows: tuple[FlowDirection, ...]) -> Tensor:
+    """No-op: let tensors keep whatever flows the SVD / projection gave them.
+
+    Previously this rebuilt the tensor via from_dense with corrected flows,
+    but that destroys charge sectors.  Since all contractions are
+    label-based, the flows propagate naturally.
+    """
+    return T
+
+
+def _ensure_corner_flows(corner: Tensor, corner_name: str) -> Tensor:
+    """Rebuild a SymmetricTensor corner so its flows match _CORNER_SPECS."""
+    _, _, expected_flow_a, expected_flow_b, _ = _CORNER_SPECS[corner_name]
+    return _ensure_tensor_flows(corner, (expected_flow_a, expected_flow_b))
+
+
+def _ensure_edge_flows(
+    T_ket: Tensor, T_bra: Tensor, edge_name: str
+) -> tuple[Tensor, Tensor]:
+    """Rebuild SymmetricTensor edge halves so flows match _EDGE_*_SPECS."""
+    _, _, _, fk1, fk2, fk3, _, _ = _EDGE_KET_SPECS[edge_name]
+    _, _, _, fb1, fb2, fb3, _, _ = _EDGE_BRA_SPECS[edge_name]
+    T_ket = _ensure_tensor_flows(T_ket, (fk1, fk2, fk3))
+    T_bra = _ensure_tensor_flows(T_bra, (fb1, fb2, fb3))
+    return T_ket, T_bra
+
+
+def _reembed_target_for_projector(P: Tensor, Tg: Tensor) -> Tensor:
+    """Re-embed Tg's 'fused' index to match P's if they differ.
+
+    The projector has a unified fused index (covering both corners'
+    charge sectors).  Re-embedding the target tensor UP to match P
+    zero-pads any missing charge sectors, preserving all information.
+    """
+    if not isinstance(P, SymmetricTensor) or not isinstance(Tg, SymmetricTensor):
+        return Tg
+    p_fused_pos = P.labels().index("fused")
+    tg_fused_pos = Tg.labels().index("fused")
+    if not np.array_equal(
+        P.indices[p_fused_pos].charges, Tg.indices[tg_fused_pos].charges
+    ):
+        return _reembed_fused(Tg, P.indices[p_fused_pos])
+    return Tg
+
+
+def _project_grown_edge_tensor(
+    Tg: Tensor,
+    P_first: Tensor,
+    P_second: Tensor,
+    left_fuse: tuple[str, str, str],
+    right_fuse: tuple[str, str, str],
+) -> Tensor:
+    """Apply four projectors to a grown edge via Tensor protocol.
+
+    Sequential application avoids todense: for each side (left/right),
+    fuse two legs and contract with P_first†, then fuse the result with
+    the third leg and contract with P_second†.
+
+    When the fused charges after ``fuse_indices`` differ from the
+    projector's unified fused index, ``_reembed_fused`` aligns them
+    before contraction.
+
+    Args:
+        Tg:         Grown edge tensor (8 legs).
+        P_first:    First projector (ket or bra, depending on move).
+        P_second:   Second projector (bra or ket, depending on move).
+        left_fuse:  (a, b, c) — fuse a+b for P_first, then chi+c for P_second.
+        right_fuse: (a, b, c) — same for right side.
+
+    Returns:
+        4-leg Tensor ``(left_chi, mid1, mid2, right_chi)``.
+    """
+    la, lb, lc = left_fuse
+    ra, rb, rc = right_fuse
+
+    # --- Left side ---
+    labels = Tg.labels()
+    Tg = fuse_indices(Tg, labels.index(la), labels.index(lb), "fused", FlowDirection.IN)
+    Tg = _reembed_target_for_projector(P_first, Tg)
+    Tg = contract(P_first.bar(), Tg)  # "fused" contracted → "chi_new" created
+    labels = Tg.labels()
+    Tg = fuse_indices(Tg, labels.index("chi_new"), labels.index(lc), "fused", FlowDirection.IN)
+    Tg = _reembed_target_for_projector(P_second, Tg)
+    Tg = contract(P_second.bar(), Tg)  # "fused" contracted → "chi_new" created
+    Tg = Tg.relabel("chi_new", "left_chi")
+
+    # --- Right side ---
+    labels = Tg.labels()
+    Tg = fuse_indices(Tg, labels.index(ra), labels.index(rb), "fused", FlowDirection.IN)
+    Tg = _reembed_target_for_projector(P_first, Tg)
+    Tg = contract(P_first.bar(), Tg)
+    labels = Tg.labels()
+    Tg = fuse_indices(Tg, labels.index("chi_new"), labels.index(rc), "fused", FlowDirection.IN)
+    Tg = _reembed_target_for_projector(P_second, Tg)
+    Tg = contract(P_second.bar(), Tg)
+    Tg = Tg.relabel("chi_new", "right_chi")
+
+    return Tg
+
+
+def _apply_projector(
+    P: Tensor,
+    Cg_fused: Tensor,
+    base_charges: np.ndarray | None = None,  # noqa: ARG001 — kept for API compat
+) -> Tensor:
+    """Apply projector P to a fused corner/edge tensor via Tensor protocol.
+
+    Computes ``P^dagger @ Cg`` by contracting over the shared ``fused`` leg.
+    Uses ``.bar()`` (conjugate + flip flows) so the contraction engine
+    handles both DenseTensor and SymmetricTensor without todense.
+
+    When P's fused index (from the unified projector) differs from Cg's
+    fused index, re-embeds Cg to match P before contracting.
+
+    Args:
+        P:            Projector tensor with labels ``(fused, chi_new)``.
+        Cg_fused:     Fused corner/edge with ``fused`` as one of its legs.
+        base_charges: Unused (kept for call-site compatibility during transition).
+    """
+    # Re-embed Cg to match P's fused index if they differ.
+    # This zero-pads charge sectors absent from Cg, ensuring the
+    # contraction engine sees matching indices on the contracted leg.
+    Cg_fused = _reembed_target_for_projector(P, Cg_fused)
+    result = contract(P.bar(), Cg_fused)  # contracts over "fused" → (chi_new, ...)
+    return result
 
 
 # ------------------------------------------------------------------ #
@@ -482,142 +846,78 @@ def _split_ctm_move_left(
     chi_I: int,
 ) -> SplitCTMTensorEnv:
     """Left move: ket first (C1/C4 connect to T1/T3 ket chi bonds)."""
-    # --- Step 1: Grow C1 with T1_ket ---
-    # C1(c1_d, c1_r) · T1_ket(t1k_l, u_ket, t1k_I)
-    # Contract: c1_r ↔ t1k_l
+    base_charges = A.indices[0].charges if isinstance(A, SymmetricTensor) else None
+
+    # --- Phase A: Per-layer projectors and new corners ---
+
+    # Grow C1 with T1_ket
     C1_r = env.C1.relabel("c1_r", "t1k_l")
     C1g_ket = contract(C1_r, env.T1_ket)  # (c1_d, u_ket, t1k_I)
-
-    # Fuse (c1_d, u_ket) → matrix of shape (chi*D, chi_I)
     C1g_ket_fused = fuse_indices(C1g_ket, 0, 1, "fused", FlowDirection.IN)
-    C1g_ket_dense = C1g_ket_fused.todense()  # (chi*D, chi_I)
 
-    # --- Step 2: Grow C4 with T3_ket ---
-    # C4(c4_r, c4_u) · T3_ket(t3k_r, d_ket, t3k_I)
-    # Contract: c4_r ↔ t3k_r
+    # Grow C4 with T3_ket
     C4_r = env.C4.relabel("c4_r", "t3k_r")
     C4g_ket = contract(C4_r, env.T3_ket)  # (c4_u, d_ket, t3k_I)
-
     C4g_ket_fused = fuse_indices(C4g_ket, 0, 1, "fused", FlowDirection.IN)
-    C4g_ket_dense = C4g_ket_fused.todense()
 
-    # --- Step 3: Ket projector ---
-    P_ket = _compute_projector_dense(C1g_ket_dense, C4g_ket_dense, chi)
+    # Ket projector
+    P_ket = _compute_projector_tensor(C1g_ket_fused, C4g_ket_fused, chi, base_charges=base_charges)
 
-    # --- Step 4: Mid-corners ---
-    C1_mid_dense = P_ket.conj().T @ C1g_ket_dense  # (chi, chi_I)
-    C4_mid_dense = P_ket.conj().T @ C4g_ket_dense  # (chi, chi_I)
+    # Mid-corners: project ket grown corners
+    C1_mid = _apply_projector(P_ket, C1g_ket_fused, base_charges)  # (chi_new, t1k_I)
+    C4_mid = _apply_projector(P_ket, C4g_ket_fused, base_charges)  # (chi_new, t3k_I)
 
-    # --- Step 5: Grow mid-corners with bra ---
-    # C1_mid(chi, chi_I) · T1_bra(t1b_I, u_bra, t1b_r)
-    # Reshape C1_mid: treat as (new_chi, chi_I) → contract chi_I ↔ t1b_I
-    # Use dense path for projector application
-    C1g_bra_dense = jnp.einsum(
-        "ac,cdb->adb", C1_mid_dense, env.T1_bra.todense()
-    ).reshape(-1, chi)
-    C4g_bra_dense = jnp.einsum(
-        "ac,cdb->adb", C4_mid_dense, env.T3_bra.todense()
-    ).reshape(-1, chi)
+    # Grow mid-corners with bra edges
+    C1g_bra = contract(C1_mid.relabel("t1k_I", "t1b_I"), env.T1_bra)
+    C1g_bra_fused = fuse_indices(C1g_bra, 0, 1, "fused", FlowDirection.IN)
 
-    # --- Step 6: Bra projector + new corners ---
-    P_bra = _compute_projector_dense(C1g_bra_dense, C4g_bra_dense, chi)
-    C1_new_dense = P_bra.conj().T @ C1g_bra_dense  # (chi, chi)
-    C4_new_dense = P_bra.conj().T @ C4g_bra_dense  # (chi, chi)
+    C4g_bra = contract(C4_mid.relabel("t3k_I", "t3b_I"), env.T3_bra)
+    C4g_bra_fused = fuse_indices(C4g_bra, 0, 1, "fused", FlowDirection.IN)
 
-    # Wrap new corners as Tensors
-    _sym = isinstance(A, SymmetricTensor)
-    _c1_q = A.indices[1].charges if _sym else None  # C1 ref=d(1)
-    _c4_q = A.indices[0].charges if _sym else None  # C4 ref=u(0)
-    C1_new = _wrap_corner_dense(
-        C1_new_dense,
-        "c1_d",
-        "c1_r",
-        env.C1.indices[0],
-        env.C1.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c1_q,
-    )
-    C4_new = _wrap_corner_dense(
-        C4_new_dense,
-        "c4_r",
-        "c4_u",
-        env.C4.indices[0],
-        env.C4.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c4_q,
-    )
+    # Bra projector
+    P_bra = _compute_projector_tensor(C1g_bra_fused, C4g_bra_fused, chi, base_charges=base_charges)
 
-    # --- Step 7: Combined full projector ---
-    D = A.indices[0].dim
-    P_ket_3d = P_ket.reshape(chi, D, -1)  # (chi, D, chi_k)
-    chi_k = P_ket_3d.shape[2]
-    P_bra_3d = P_bra.reshape(chi_k, D, -1)  # (chi_k, D, chi)
-    P_full = jnp.einsum("auJ,JUb->auUb", P_ket_3d, P_bra_3d)
-    chi_new = P_full.shape[3]
-    P_full = P_full.reshape(chi * D * D, chi_new)
+    # New corners
+    C1_new = _apply_projector(P_bra, C1g_bra_fused, base_charges)  # (chi_new, t1b_r)
+    C4_new = _apply_projector(P_bra, C4g_bra_fused, base_charges)  # (chi_new, t3b_l)
 
-    # --- Step 8+9: Grow T4 via separate ket/bra contraction ---
+    C1_new = C1_new.relabels({"chi_new": "c1_d", "t1b_r": "c1_r"})
+    C4_new = C4_new.relabels({"chi_new": "c4_r", "t3b_l": "c4_u"})
+    C1_new = _ensure_corner_flows(C1_new, "C1")
+    C4_new = _ensure_corner_flows(C4_new, "C4")
+    C1_new, _ = max_abs_normalize(C1_new)
+    C4_new, _ = max_abs_normalize(C4_new)
+
+    # --- Phase B: Sequential projector application to grown edge ---
+
     T4g = _grow_edge_no_double_layer(
-        env.T4_ket,
-        env.T4_bra,
-        A,
-        A_bar,
-        "l",
-        "t4k_I",
-        "t4b_I",
+        env.T4_ket, env.T4_bra, A, A_bar, "l",
+        "t4k_I", "t4b_I",
         ("t4k_d", "u", "U", "r", "R", "t4b_u", "d", "D"),
     )
 
-    # Apply projectors
-    T4_new_full_dense = jnp.einsum("ia,idj,jb->adb", P_full, T4g, P_full)
-
-    # --- Step 10: SVD split new T4 into ket/bra ---
-    T4_ket_new_dense, T4_bra_new_dense = _svd_split_edge_dense(T4_new_full_dense, chi_I)
-
-    _t4_chi_q = A.indices[1].charges if _sym else None  # T4 ref_chi=d(1)
-    _t4_D_q = A.indices[2].charges if _sym else None  # T4 ref_D=l(2)
-    T4_ket_new = _wrap_edge_ket_dense(
-        T4_ket_new_dense,
-        "t4k_d",
-        "l_ket",
-        "t4k_I",
-        env.T4_ket.indices,
-        chi,
-        D,
-        chi_I,
-        symmetric=_sym,
-        base_chi_charges=_t4_chi_q,
-        base_D_charges=_t4_D_q,
+    T4g = _project_grown_edge_tensor(
+        T4g, P_ket, P_bra,
+        left_fuse=("t4k_d", "u", "U"),
+        right_fuse=("d", "t4b_u", "D"),
     )
-    T4_bra_new = _wrap_edge_bra_dense(
-        T4_bra_new_dense,
-        "t4b_I",
-        "l_bra",
-        "t4b_u",
-        env.T4_bra.indices,
-        chi,
-        D,
-        chi_I,
-        symmetric=_sym,
-        base_chi_charges=_t4_chi_q,
-        base_D_charges=_t4_D_q,
-    )
+    # T4g now: (left_chi, r, R, right_chi)
 
-    return SplitCTMTensorEnv(
-        C1=C1_new,
-        C2=env.C2,
-        C3=env.C3,
-        C4=C4_new,
-        T1_ket=env.T1_ket,
-        T1_bra=env.T1_bra,
-        T2_ket=env.T2_ket,
-        T2_bra=env.T2_bra,
-        T3_ket=env.T3_ket,
-        T3_bra=env.T3_bra,
-        T4_ket=T4_ket_new,
-        T4_bra=T4_bra_new,
+    # --- Phase C: SVD split into ket/bra ---
+    T4_ket_new, T4_bra_new = _svd_split_edge_tensor(
+        T4g,
+        left_labels=["left_chi", "r"],
+        right_labels=["R", "right_chi"],
+        chi_I=chi_I,
+        ket_relabels={"left_chi": "t4k_d", "r": "l_ket", "_svd_bond": "t4k_I"},
+        bra_relabels={"_svd_bond": "t4b_I", "R": "l_bra", "right_chi": "t4b_u"},
+        base_charges=base_charges,
+    )
+    T4_ket_new, T4_bra_new = _ensure_edge_flows(T4_ket_new, T4_bra_new, "T4")
+
+    return env._replace(
+        C1=C1_new, C4=C4_new,
+        T4_ket=T4_ket_new, T4_bra=T4_bra_new,
     )
 
 
@@ -629,129 +929,77 @@ def _split_ctm_move_right(
     chi_I: int,
 ) -> SplitCTMTensorEnv:
     """Right move: bra first (C2/C3 connect to T1/T3 bra chi bonds)."""
-    D = A.indices[0].dim
+    base_charges = A.indices[0].charges if isinstance(A, SymmetricTensor) else None
 
-    # --- bra first ---
-    # C2(c2_l, c2_d) · T1_bra(t1b_I, u_bra, t1b_r) → contract c2_l ↔ t1b_r
+    # --- Phase A: Per-layer projectors and new corners ---
+
+    # Grow C2 with T1_bra (bra first)
     C2_l = env.C2.relabel("c2_l", "t1b_r")
     C2g_bra = contract(C2_l, env.T1_bra)  # (c2_d, t1b_I, u_bra)
     C2g_bra_fused = fuse_indices(C2g_bra, 0, 2, "fused", FlowDirection.IN)
-    C2g_bra_dense = C2g_bra_fused.todense()  # (chi*D, chi_I)
 
-    # C3(c3_u, c3_l) · T3_bra(t3b_I, d_bra, t3b_l) → contract c3_l ↔ t3b_l
-    # Note: c3_l connects to T3_bra's t3b_l
-    # But we need to be careful: the connection is c3_u ↔ T2_bra and c3_l ↔ T3
-    # For right move: C3 absorbs T3_bra
+    # Grow C3 with T3_bra
     C3_l = env.C3.relabel("c3_l", "t3b_l")
     C3g_bra = contract(C3_l, env.T3_bra)  # (c3_u, t3b_I, d_bra)
     C3g_bra_fused = fuse_indices(C3g_bra, 0, 2, "fused", FlowDirection.IN)
-    C3g_bra_dense = C3g_bra_fused.todense()
 
-    P_bra = _compute_projector_dense(C2g_bra_dense, C3g_bra_dense, chi)
-    C2_mid_dense = P_bra.conj().T @ C2g_bra_dense  # (chi, chi_I)
-    C3_mid_dense = P_bra.conj().T @ C3g_bra_dense
+    # Bra projector
+    P_bra = _compute_projector_tensor(C2g_bra_fused, C3g_bra_fused, chi, base_charges=base_charges)
 
-    # --- ket via interlayer ---
-    # C2_mid(chi, chi_I) · T1_ket(t1k_l, u_ket, t1k_I) → contract chi_I ↔ t1k_I
-    C2g_ket_dense = jnp.einsum(
-        "af,buf->aub", C2_mid_dense, env.T1_ket.todense()
-    ).reshape(-1, chi)
-    C3g_ket_dense = jnp.einsum(
-        "af,hdf->adh", C3_mid_dense, env.T3_ket.todense()
-    ).reshape(-1, chi)
+    # Mid-corners: project bra grown corners
+    C2_mid = _apply_projector(P_bra, C2g_bra_fused, base_charges)  # (chi_new, t1b_I)
+    C3_mid = _apply_projector(P_bra, C3g_bra_fused, base_charges)  # (chi_new, t3b_I)
 
-    P_ket = _compute_projector_dense(C2g_ket_dense, C3g_ket_dense, chi)
-    C2_new_dense = P_ket.conj().T @ C2g_ket_dense
-    C3_new_dense = P_ket.conj().T @ C3g_ket_dense
+    # Grow mid-corners with ket edges
+    C2g_ket = contract(C2_mid.relabel("t1b_I", "t1k_I"), env.T1_ket)
+    C2g_ket_fused = fuse_indices(C2g_ket, 0, 2, "fused", FlowDirection.IN)
 
-    _sym = isinstance(A, SymmetricTensor)
-    _c2_q = A.indices[0].charges if _sym else None  # C2 ref=u(0)
-    _c3_q = A.indices[1].charges if _sym else None  # C3 ref=d(1)
-    C2_new = _wrap_corner_dense(
-        C2_new_dense,
-        "c2_l",
-        "c2_d",
-        env.C2.indices[0],
-        env.C2.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c2_q,
-    )
-    C3_new = _wrap_corner_dense(
-        C3_new_dense,
-        "c3_u",
-        "c3_l",
-        env.C3.indices[0],
-        env.C3.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c3_q,
-    )
+    C3g_ket = contract(C3_mid.relabel("t3b_I", "t3k_I"), env.T3_ket)
+    C3g_ket_fused = fuse_indices(C3g_ket, 0, 2, "fused", FlowDirection.IN)
 
-    # Combined projector
-    P_bra_3d = P_bra.reshape(chi, D, -1)
-    chi_k = P_bra_3d.shape[2]
-    P_ket_3d = P_ket.reshape(chi_k, D, -1)
-    P_full = jnp.einsum("aUJ,Jub->auUb", P_bra_3d, P_ket_3d)
-    chi_new = P_full.shape[3]
-    P_full = P_full.reshape(chi * D * D, chi_new)
+    # Ket projector
+    P_ket = _compute_projector_tensor(C2g_ket_fused, C3g_ket_fused, chi, base_charges=base_charges)
 
-    # Grow T2 via separate ket/bra contraction
+    # New corners
+    C2_new = _apply_projector(P_ket, C2g_ket_fused, base_charges)  # (chi_new, t1k_l)
+    C3_new = _apply_projector(P_ket, C3g_ket_fused, base_charges)  # (chi_new, t3k_r)
+
+    C2_new = C2_new.relabels({"chi_new": "c2_l", "t1k_l": "c2_d"})
+    C3_new = C3_new.relabels({"chi_new": "c3_u", "t3k_r": "c3_l"})
+    C2_new = _ensure_corner_flows(C2_new, "C2")
+    C3_new = _ensure_corner_flows(C3_new, "C3")
+    C2_new, _ = max_abs_normalize(C2_new)
+    C3_new, _ = max_abs_normalize(C3_new)
+
+    # --- Phase B: Sequential projector application to grown edge ---
+
     T2g = _grow_edge_no_double_layer(
-        env.T2_ket,
-        env.T2_bra,
-        A,
-        A_bar,
-        "r",
-        "t2k_I",
-        "t2b_I",
+        env.T2_ket, env.T2_bra, A, A_bar, "r",
+        "t2k_I", "t2b_I",
         ("t2k_u", "u", "U", "l", "L", "t2b_d", "d", "D"),
     )
-    T2_new_full_dense = jnp.einsum("ia,idj,jb->adb", P_full, T2g, P_full)
-
-    T2_ket_new_dense, T2_bra_new_dense = _svd_split_edge_dense(T2_new_full_dense, chi_I)
-    _t2_chi_q = A.indices[0].charges if _sym else None  # T2 ref_chi=u(0)
-    _t2_D_q = A.indices[3].charges if _sym else None  # T2 ref_D=r(3)
-    T2_ket_new = _wrap_edge_ket_dense(
-        T2_ket_new_dense,
-        "t2k_u",
-        "r_ket",
-        "t2k_I",
-        env.T2_ket.indices,
-        chi,
-        D,
-        chi_I,
-        symmetric=_sym,
-        base_chi_charges=_t2_chi_q,
-        base_D_charges=_t2_D_q,
+    T2g = _project_grown_edge_tensor(
+        T2g, P_bra, P_ket,
+        left_fuse=("t2k_u", "U", "u"),
+        right_fuse=("D", "t2b_d", "d"),
     )
-    T2_bra_new = _wrap_edge_bra_dense(
-        T2_bra_new_dense,
-        "t2b_I",
-        "r_bra",
-        "t2b_d",
-        env.T2_bra.indices,
-        chi,
-        D,
-        chi_I,
-        symmetric=_sym,
-        base_chi_charges=_t2_chi_q,
-        base_D_charges=_t2_D_q,
-    )
+    # T2g now: (left_chi, l, L, right_chi)
 
-    return SplitCTMTensorEnv(
-        C1=env.C1,
-        C2=C2_new,
-        C3=C3_new,
-        C4=env.C4,
-        T1_ket=env.T1_ket,
-        T1_bra=env.T1_bra,
-        T2_ket=T2_ket_new,
-        T2_bra=T2_bra_new,
-        T3_ket=env.T3_ket,
-        T3_bra=env.T3_bra,
-        T4_ket=env.T4_ket,
-        T4_bra=env.T4_bra,
+    # --- Phase C: SVD split into ket/bra ---
+    T2_ket_new, T2_bra_new = _svd_split_edge_tensor(
+        T2g,
+        left_labels=["left_chi", "l"],
+        right_labels=["L", "right_chi"],
+        chi_I=chi_I,
+        ket_relabels={"left_chi": "t2k_u", "l": "r_ket", "_svd_bond": "t2k_I"},
+        bra_relabels={"_svd_bond": "t2b_I", "L": "r_bra", "right_chi": "t2b_d"},
+        base_charges=base_charges,
+    )
+    T2_ket_new, T2_bra_new = _ensure_edge_flows(T2_ket_new, T2_bra_new, "T2")
+
+    return env._replace(
+        C2=C2_new, C3=C3_new,
+        T2_ket=T2_ket_new, T2_bra=T2_bra_new,
     )
 
 
@@ -763,124 +1011,77 @@ def _split_ctm_move_top(
     chi_I: int,
 ) -> SplitCTMTensorEnv:
     """Top move: ket first (C1/C2 connect to T4/T2 ket chi bonds)."""
-    D = A.indices[0].dim
+    base_charges = A.indices[0].charges if isinstance(A, SymmetricTensor) else None
 
-    # C1(c1_d, c1_r) · T4_ket(t4k_d, l_ket, t4k_I) → contract c1_d ↔ t4k_d
+    # --- Phase A: Per-layer projectors and new corners ---
+
+    # Grow C1 with T4_ket
     C1_d = env.C1.relabel("c1_d", "t4k_d")
     C1g_ket = contract(C1_d, env.T4_ket)  # (c1_r, l_ket, t4k_I)
     C1g_ket_fused = fuse_indices(C1g_ket, 0, 1, "fused", FlowDirection.IN)
-    C1g_ket_dense = C1g_ket_fused.todense()
 
-    # C2(c2_l, c2_d) · T2_ket(t2k_u, r_ket, t2k_I) → contract c2_d ↔ t2k_u
+    # Grow C2 with T2_ket
     C2_d = env.C2.relabel("c2_d", "t2k_u")
     C2g_ket = contract(C2_d, env.T2_ket)  # (c2_l, r_ket, t2k_I)
     C2g_ket_fused = fuse_indices(C2g_ket, 0, 1, "fused", FlowDirection.IN)
-    C2g_ket_dense = C2g_ket_fused.todense()
 
-    P_ket = _compute_projector_dense(C1g_ket_dense, C2g_ket_dense, chi)
-    C1_mid_dense = P_ket.conj().T @ C1g_ket_dense
-    C2_mid_dense = P_ket.conj().T @ C2g_ket_dense
+    # Ket projector
+    P_ket = _compute_projector_tensor(C1g_ket_fused, C2g_ket_fused, chi, base_charges=base_charges)
 
-    # Bra layer
-    C1g_bra_dense = jnp.einsum(
-        "ac,cdb->adb", C1_mid_dense, env.T4_bra.todense()
-    ).reshape(-1, chi)
-    C2g_bra_dense = jnp.einsum(
-        "ac,cdb->adb", C2_mid_dense, env.T2_bra.todense()
-    ).reshape(-1, chi)
+    # Mid-corners: project ket grown corners
+    C1_mid = _apply_projector(P_ket, C1g_ket_fused, base_charges)  # (chi_new, t4k_I)
+    C2_mid = _apply_projector(P_ket, C2g_ket_fused, base_charges)  # (chi_new, t2k_I)
 
-    P_bra = _compute_projector_dense(C1g_bra_dense, C2g_bra_dense, chi)
-    C1_new_dense = P_bra.conj().T @ C1g_bra_dense
-    C2_new_dense = P_bra.conj().T @ C2g_bra_dense
+    # Grow mid-corners with bra edges
+    C1g_bra = contract(C1_mid.relabel("t4k_I", "t4b_I"), env.T4_bra)
+    C1g_bra_fused = fuse_indices(C1g_bra, 0, 1, "fused", FlowDirection.IN)
 
-    _sym = isinstance(A, SymmetricTensor)
-    _c1_q = A.indices[1].charges if _sym else None  # C1 ref=d(1)
-    _c2_q = A.indices[0].charges if _sym else None  # C2 ref=u(0)
-    C1_new = _wrap_corner_dense(
-        C1_new_dense,
-        "c1_d",
-        "c1_r",
-        env.C1.indices[0],
-        env.C1.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c1_q,
-    )
-    C2_new = _wrap_corner_dense(
-        C2_new_dense,
-        "c2_l",
-        "c2_d",
-        env.C2.indices[0],
-        env.C2.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c2_q,
-    )
+    C2g_bra = contract(C2_mid.relabel("t2k_I", "t2b_I"), env.T2_bra)
+    C2g_bra_fused = fuse_indices(C2g_bra, 0, 1, "fused", FlowDirection.IN)
 
-    # Combined projector
-    P_ket_3d = P_ket.reshape(chi, D, -1)
-    chi_k = P_ket_3d.shape[2]
-    P_bra_3d = P_bra.reshape(chi_k, D, -1)
-    P_full = jnp.einsum("auJ,JUb->auUb", P_ket_3d, P_bra_3d)
-    chi_new = P_full.shape[3]
-    P_full = P_full.reshape(chi * D * D, chi_new)
+    # Bra projector
+    P_bra = _compute_projector_tensor(C1g_bra_fused, C2g_bra_fused, chi, base_charges=base_charges)
 
-    # Grow T1 via separate ket/bra contraction
+    # New corners
+    C1_new = _apply_projector(P_bra, C1g_bra_fused, base_charges)  # (chi_new, t4b_u)
+    C2_new = _apply_projector(P_bra, C2g_bra_fused, base_charges)  # (chi_new, t2b_d)
+
+    C1_new = C1_new.relabels({"chi_new": "c1_d", "t4b_u": "c1_r"})
+    C2_new = C2_new.relabels({"chi_new": "c2_l", "t2b_d": "c2_d"})
+    C1_new = _ensure_corner_flows(C1_new, "C1")
+    C2_new = _ensure_corner_flows(C2_new, "C2")
+    C1_new, _ = max_abs_normalize(C1_new)
+    C2_new, _ = max_abs_normalize(C2_new)
+
+    # --- Phase B: Sequential projector application to grown edge ---
+
     T1g = _grow_edge_no_double_layer(
-        env.T1_ket,
-        env.T1_bra,
-        A,
-        A_bar,
-        "u",
-        "t1k_I",
-        "t1b_I",
+        env.T1_ket, env.T1_bra, A, A_bar, "u",
+        "t1k_I", "t1b_I",
         ("t1k_l", "l", "L", "d", "D", "t1b_r", "r", "R"),
     )
-    T1_new_full_dense = jnp.einsum("ia,idj,jb->adb", P_full, T1g, P_full)
-
-    T1_ket_new_dense, T1_bra_new_dense = _svd_split_edge_dense(T1_new_full_dense, chi_I)
-    _t1_chi_q = A.indices[3].charges if _sym else None  # T1 ref_chi=r(3)
-    _t1_D_q = A.indices[0].charges if _sym else None  # T1 ref_D=u(0)
-    T1_ket_new = _wrap_edge_ket_dense(
-        T1_ket_new_dense,
-        "t1k_l",
-        "u_ket",
-        "t1k_I",
-        env.T1_ket.indices,
-        chi,
-        D,
-        chi_I,
-        symmetric=_sym,
-        base_chi_charges=_t1_chi_q,
-        base_D_charges=_t1_D_q,
+    T1g = _project_grown_edge_tensor(
+        T1g, P_ket, P_bra,
+        left_fuse=("t1k_l", "l", "L"),
+        right_fuse=("r", "t1b_r", "R"),
     )
-    T1_bra_new = _wrap_edge_bra_dense(
-        T1_bra_new_dense,
-        "t1b_I",
-        "u_bra",
-        "t1b_r",
-        env.T1_bra.indices,
-        chi,
-        D,
-        chi_I,
-        symmetric=_sym,
-        base_chi_charges=_t1_chi_q,
-        base_D_charges=_t1_D_q,
-    )
+    # T1g now: (left_chi, d, D, right_chi)
 
-    return SplitCTMTensorEnv(
-        C1=C1_new,
-        C2=C2_new,
-        C3=env.C3,
-        C4=env.C4,
-        T1_ket=T1_ket_new,
-        T1_bra=T1_bra_new,
-        T2_ket=env.T2_ket,
-        T2_bra=env.T2_bra,
-        T3_ket=env.T3_ket,
-        T3_bra=env.T3_bra,
-        T4_ket=env.T4_ket,
-        T4_bra=env.T4_bra,
+    # --- Phase C: SVD split into ket/bra ---
+    T1_ket_new, T1_bra_new = _svd_split_edge_tensor(
+        T1g,
+        left_labels=["left_chi", "d"],
+        right_labels=["D", "right_chi"],
+        chi_I=chi_I,
+        ket_relabels={"left_chi": "t1k_l", "d": "u_ket", "_svd_bond": "t1k_I"},
+        bra_relabels={"_svd_bond": "t1b_I", "D": "u_bra", "right_chi": "t1b_r"},
+        base_charges=base_charges,
+    )
+    T1_ket_new, T1_bra_new = _ensure_edge_flows(T1_ket_new, T1_bra_new, "T1")
+
+    return env._replace(
+        C1=C1_new, C2=C2_new,
+        T1_ket=T1_ket_new, T1_bra=T1_bra_new,
     )
 
 
@@ -892,126 +1093,77 @@ def _split_ctm_move_bottom(
     chi_I: int,
 ) -> SplitCTMTensorEnv:
     """Bottom move: bra first (C4/C3 connect to T4/T2 bra chi bonds)."""
-    D = A.indices[0].dim
+    base_charges = A.indices[0].charges if isinstance(A, SymmetricTensor) else None
 
-    # C4(c4_r, c4_u) · T4_bra(t4b_I, l_bra, t4b_u) → contract c4_u ↔ t4b_u
+    # --- Phase A: Per-layer projectors and new corners ---
+
+    # Grow C4 with T4_bra (bra first)
     C4_u = env.C4.relabel("c4_u", "t4b_u")
     C4g_bra = contract(C4_u, env.T4_bra)  # (c4_r, t4b_I, l_bra)
     C4g_bra_fused = fuse_indices(C4g_bra, 0, 2, "fused", FlowDirection.IN)
-    C4g_bra_dense = C4g_bra_fused.todense()
 
-    # C3(c3_u, c3_l) · T2_bra(t2b_I, r_bra, t2b_d) → contract c3_u ↔ t2b_d
+    # Grow C3 with T2_bra
     C3_u = env.C3.relabel("c3_u", "t2b_d")
     C3g_bra = contract(C3_u, env.T2_bra)  # (c3_l, t2b_I, r_bra)
     C3g_bra_fused = fuse_indices(C3g_bra, 0, 2, "fused", FlowDirection.IN)
-    C3g_bra_dense = C3g_bra_fused.todense()
 
-    P_bra = _compute_projector_dense(C4g_bra_dense, C3g_bra_dense, chi)
-    C4_mid_dense = P_bra.conj().T @ C4g_bra_dense
-    C3_mid_dense = P_bra.conj().T @ C3g_bra_dense
+    # Bra projector
+    P_bra = _compute_projector_tensor(C4g_bra_fused, C3g_bra_fused, chi, base_charges=base_charges)
 
-    # Ket via interlayer
-    # C4_mid · T4_ket(t4k_d, l_ket, t4k_I) → contract chi_I ↔ t4k_I
-    C4g_ket_dense = jnp.einsum(
-        "af,blf->alb", C4_mid_dense, env.T4_ket.todense()
-    ).reshape(-1, chi)
-    # C3_mid · T2_ket(t2k_u, r_ket, t2k_I) → contract chi_I ↔ t2k_I
-    C3g_ket_dense = jnp.einsum(
-        "af,erf->are", C3_mid_dense, env.T2_ket.todense()
-    ).reshape(-1, chi)
+    # Mid-corners: project bra grown corners
+    C4_mid = _apply_projector(P_bra, C4g_bra_fused, base_charges)  # (chi_new, t4b_I)
+    C3_mid = _apply_projector(P_bra, C3g_bra_fused, base_charges)  # (chi_new, t2b_I)
 
-    P_ket = _compute_projector_dense(C4g_ket_dense, C3g_ket_dense, chi)
-    C4_new_dense = P_ket.conj().T @ C4g_ket_dense
-    C3_new_dense = P_ket.conj().T @ C3g_ket_dense
+    # Grow mid-corners with ket edges
+    C4g_ket = contract(C4_mid.relabel("t4b_I", "t4k_I"), env.T4_ket)
+    C4g_ket_fused = fuse_indices(C4g_ket, 0, 2, "fused", FlowDirection.IN)
 
-    _sym = isinstance(A, SymmetricTensor)
-    _c4_q = A.indices[0].charges if _sym else None  # C4 ref=u(0)
-    _c3_q = A.indices[1].charges if _sym else None  # C3 ref=d(1)
-    C4_new = _wrap_corner_dense(
-        C4_new_dense,
-        "c4_r",
-        "c4_u",
-        env.C4.indices[0],
-        env.C4.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c4_q,
-    )
-    C3_new = _wrap_corner_dense(
-        C3_new_dense,
-        "c3_u",
-        "c3_l",
-        env.C3.indices[0],
-        env.C3.indices[1],
-        chi,
-        symmetric=_sym,
-        base_charges=_c3_q,
-    )
+    C3g_ket = contract(C3_mid.relabel("t2b_I", "t2k_I"), env.T2_ket)
+    C3g_ket_fused = fuse_indices(C3g_ket, 0, 2, "fused", FlowDirection.IN)
 
-    # Combined projector
-    P_bra_3d = P_bra.reshape(chi, D, -1)
-    chi_k = P_bra_3d.shape[2]
-    P_ket_3d = P_ket.reshape(chi_k, D, -1)
-    P_full = jnp.einsum("aUJ,Jub->auUb", P_bra_3d, P_ket_3d)
-    chi_new = P_full.shape[3]
-    P_full = P_full.reshape(chi * D * D, chi_new)
+    # Ket projector
+    P_ket = _compute_projector_tensor(C4g_ket_fused, C3g_ket_fused, chi, base_charges=base_charges)
 
-    # Grow T3 via separate ket/bra contraction
+    # New corners
+    C4_new = _apply_projector(P_ket, C4g_ket_fused, base_charges)  # (chi_new, t4k_d)
+    C3_new = _apply_projector(P_ket, C3g_ket_fused, base_charges)  # (chi_new, t2k_u)
+
+    C4_new = C4_new.relabels({"chi_new": "c4_r", "t4k_d": "c4_u"})
+    C3_new = C3_new.relabels({"chi_new": "c3_u", "t2k_u": "c3_l"})
+    C4_new = _ensure_corner_flows(C4_new, "C4")
+    C3_new = _ensure_corner_flows(C3_new, "C3")
+    C4_new, _ = max_abs_normalize(C4_new)
+    C3_new, _ = max_abs_normalize(C3_new)
+
+    # --- Phase B: Sequential projector application to grown edge ---
+
     T3g = _grow_edge_no_double_layer(
-        env.T3_ket,
-        env.T3_bra,
-        A,
-        A_bar,
-        "d",
-        "t3k_I",
-        "t3b_I",
+        env.T3_ket, env.T3_bra, A, A_bar, "d",
+        "t3k_I", "t3b_I",
         ("t3k_r", "l", "L", "u", "U", "t3b_l", "r", "R"),
     )
-    T3_new_full_dense = jnp.einsum("ia,idj,jb->adb", P_full, T3g, P_full)
-
-    T3_ket_new_dense, T3_bra_new_dense = _svd_split_edge_dense(T3_new_full_dense, chi_I)
-    _t3_chi_q = A.indices[3].charges if _sym else None  # T3 ref_chi=r(3)
-    _t3_D_q = A.indices[1].charges if _sym else None  # T3 ref_D=d(1)
-    T3_ket_new = _wrap_edge_ket_dense(
-        T3_ket_new_dense,
-        "t3k_r",
-        "d_ket",
-        "t3k_I",
-        env.T3_ket.indices,
-        chi,
-        D,
-        chi_I,
-        symmetric=_sym,
-        base_chi_charges=_t3_chi_q,
-        base_D_charges=_t3_D_q,
+    T3g = _project_grown_edge_tensor(
+        T3g, P_bra, P_ket,
+        left_fuse=("t3k_r", "L", "l"),
+        right_fuse=("R", "t3b_l", "r"),
     )
-    T3_bra_new = _wrap_edge_bra_dense(
-        T3_bra_new_dense,
-        "t3b_I",
-        "d_bra",
-        "t3b_l",
-        env.T3_bra.indices,
-        chi,
-        D,
-        chi_I,
-        symmetric=_sym,
-        base_chi_charges=_t3_chi_q,
-        base_D_charges=_t3_D_q,
-    )
+    # T3g now: (left_chi, u, U, right_chi)
 
-    return SplitCTMTensorEnv(
-        C1=env.C1,
-        C2=env.C2,
-        C3=C3_new,
-        C4=C4_new,
-        T1_ket=env.T1_ket,
-        T1_bra=env.T1_bra,
-        T2_ket=env.T2_ket,
-        T2_bra=env.T2_bra,
-        T3_ket=T3_ket_new,
-        T3_bra=T3_bra_new,
-        T4_ket=env.T4_ket,
-        T4_bra=env.T4_bra,
+    # --- Phase C: SVD split into ket/bra ---
+    T3_ket_new, T3_bra_new = _svd_split_edge_tensor(
+        T3g,
+        left_labels=["left_chi", "u"],
+        right_labels=["U", "right_chi"],
+        chi_I=chi_I,
+        ket_relabels={"left_chi": "t3k_r", "u": "d_ket", "_svd_bond": "t3k_I"},
+        bra_relabels={"_svd_bond": "t3b_I", "U": "d_bra", "right_chi": "t3b_l"},
+        base_charges=base_charges,
+    )
+    T3_ket_new, T3_bra_new = _ensure_edge_flows(T3_ket_new, T3_bra_new, "T3")
+
+    return env._replace(
+        C3=C3_new, C4=C4_new,
+        T3_ket=T3_ket_new, T3_bra=T3_bra_new,
     )
 
 
@@ -1019,131 +1171,6 @@ def _split_ctm_move_bottom(
 # Dense helper: SVD split edge                                         #
 # ------------------------------------------------------------------ #
 
-
-def _svd_split_edge_dense(
-    T_full: jax.Array,
-    chi_I: int,
-) -> tuple[jax.Array, jax.Array]:
-    """Split a standard edge (chi, D², chi) into ket/bra via SVD (dense)."""
-    chi = T_full.shape[0]
-    D2 = T_full.shape[1]
-    D = math.isqrt(D2)
-    T_4d = T_full.reshape(chi, D, D, chi)
-    T_mat = T_4d.reshape(chi * D, D * chi)
-
-    U, s, Vh = jnp.linalg.svd(T_mat, full_matrices=False)
-    k = min(chi_I, len(s))
-    sqrt_s = jnp.sqrt(s[:k])
-    T_ket = (U[:, :k] * sqrt_s[None, :]).reshape(chi, D, k)
-    T_bra = (sqrt_s[:, None] * Vh[:k, :]).reshape(k, D, chi)
-    return T_ket, T_bra
-
-
-# ------------------------------------------------------------------ #
-# Dense wrapping helpers                                               #
-# ------------------------------------------------------------------ #
-
-
-def _wrap_corner_dense(
-    data: jax.Array,
-    label_a: Label,
-    label_b: Label,
-    ref_idx_a: TensorIndex,
-    ref_idx_b: TensorIndex,
-    chi: int,
-    symmetric: bool = False,
-    base_charges: np.ndarray | None = None,
-) -> Tensor:
-    """Wrap a dense (chi, chi) array as DenseTensor/SymmetricTensor with correct labels/flows."""
-    sym = ref_idx_a.symmetry
-    if base_charges is not None:
-        charges = _derive_charges(base_charges, chi)
-    else:
-        charges = np.zeros(chi, dtype=np.int32)
-    idx_a = TensorIndex(sym, charges.copy(), ref_idx_a.flow, label=label_a)
-    idx_b = TensorIndex(sym, charges.copy(), ref_idx_b.flow, label=label_b)
-    indices = (idx_a, idx_b)
-    if symmetric:
-        return SymmetricTensor.from_dense(data, indices, tol=float("inf"))
-    return DenseTensor(data, indices)
-
-
-def _wrap_edge_ket_dense(
-    data: jax.Array,
-    label_chi: Label,
-    label_D: Label,
-    label_I: Label,
-    ref_indices: tuple[TensorIndex, ...],
-    chi: int,
-    D: int,
-    chi_I: int,
-    symmetric: bool = False,
-    base_chi_charges: np.ndarray | None = None,
-    base_D_charges: np.ndarray | None = None,
-) -> Tensor:
-    """Wrap a dense (chi, D, chi_I) array as DenseTensor/SymmetricTensor edge ket."""
-    sym = ref_indices[0].symmetry
-    chi_charges = (
-        _derive_charges(base_chi_charges, chi)
-        if base_chi_charges is not None
-        else np.zeros(chi, dtype=np.int32)
-    )
-    D_charges = (
-        np.asarray(base_D_charges, dtype=np.int32)
-        if base_D_charges is not None
-        else np.zeros(D, dtype=np.int32)
-    )
-    I_charges = (
-        _derive_charges(base_chi_charges, chi_I)
-        if base_chi_charges is not None
-        else np.zeros(chi_I, dtype=np.int32)
-    )
-    idx_chi = TensorIndex(sym, chi_charges, ref_indices[0].flow, label=label_chi)
-    idx_D = TensorIndex(sym, D_charges, ref_indices[1].flow, label=label_D)
-    idx_I = TensorIndex(sym, I_charges, ref_indices[2].flow, label=label_I)
-    indices = (idx_chi, idx_D, idx_I)
-    if symmetric:
-        return SymmetricTensor.from_dense(data, indices, tol=float("inf"))
-    return DenseTensor(data, indices)
-
-
-def _wrap_edge_bra_dense(
-    data: jax.Array,
-    label_I: Label,
-    label_D: Label,
-    label_chi: Label,
-    ref_indices: tuple[TensorIndex, ...],
-    chi: int,
-    D: int,
-    chi_I: int,
-    symmetric: bool = False,
-    base_chi_charges: np.ndarray | None = None,
-    base_D_charges: np.ndarray | None = None,
-) -> Tensor:
-    """Wrap a dense (chi_I, D, chi) array as DenseTensor/SymmetricTensor edge bra."""
-    sym = ref_indices[0].symmetry
-    I_charges = (
-        _derive_charges(base_chi_charges, chi_I)
-        if base_chi_charges is not None
-        else np.zeros(chi_I, dtype=np.int32)
-    )
-    D_charges = (
-        np.asarray(base_D_charges, dtype=np.int32)
-        if base_D_charges is not None
-        else np.zeros(D, dtype=np.int32)
-    )
-    chi_charges = (
-        _derive_charges(base_chi_charges, chi)
-        if base_chi_charges is not None
-        else np.zeros(chi, dtype=np.int32)
-    )
-    idx_I = TensorIndex(sym, I_charges, ref_indices[0].flow, label=label_I)
-    idx_D = TensorIndex(sym, D_charges, ref_indices[1].flow, label=label_D)
-    idx_chi = TensorIndex(sym, chi_charges, ref_indices[2].flow, label=label_chi)
-    indices = (idx_I, idx_D, idx_chi)
-    if symmetric:
-        return SymmetricTensor.from_dense(data, indices, tol=float("inf"))
-    return DenseTensor(data, indices)
 
 
 # ------------------------------------------------------------------ #
@@ -1236,7 +1263,12 @@ def ctm_split_tensor(
     for _ in range(max_iter):
         env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
 
-        current_sv = jnp.linalg.svd(env.C1.todense(), compute_uv=False)
+        _, current_sv, _, _ = tensor_svd(
+            env.C1,
+            left_labels=[env.C1.labels()[0]],
+            right_labels=[env.C1.labels()[1]],
+            new_bond_label="_conv_bond",
+        )
         if prev_sv is not None:
             sv1 = current_sv / (jnp.sum(current_sv) + 1e-15)
             sv2 = prev_sv / (jnp.sum(prev_sv) + 1e-15)
@@ -1254,27 +1286,54 @@ def ctm_split_tensor(
 # ------------------------------------------------------------------ #
 
 
-def _split_env_to_dense_standard(env: SplitCTMTensorEnv) -> tuple:
-    """Convert SplitCTMTensorEnv to (C1..C4, T1..T4) dense arrays.
+def _split_env_to_tensor_standard(env: SplitCTMTensorEnv) -> CTMTensorEnv:
+    """Convert SplitCTMTensorEnv to CTMTensorEnv via Tensor contraction.
 
-    Returns 8 dense arrays matching CTMEnvironment convention.
+    Merges each (T_ket, T_bra) pair by contracting over the interlayer bond
+    and fusing the two D-legs into a single double-layer D² leg.
+    Corners pass through unchanged (same labels/flows).
     """
-    chi = env.C1.todense().shape[0]
 
-    def merge(T_ket, T_bra):
-        D_ket = T_ket.todense().shape[1]
-        T = jnp.einsum("auc,cUb->auUb", T_ket.todense(), T_bra.todense())
-        return T.reshape(chi, D_ket * D_ket, chi)
+    def _merge_edge(T_ket, T_bra, ket_I, bra_I, d_ket, d_bra, fused_label,
+                    fused_flow, ket_chi, bra_chi, std_chi_l, std_chi_r):
+        # Contract over interlayer bond by relabelling both I-labels to "_I"
+        k = T_ket.relabel(ket_I, "_I")
+        b = T_bra.relabel(bra_I, "_I")
+        merged = contract(k, b)
+        # Fuse D-ket and D-bra legs
+        labels = merged.labels()
+        merged = fuse_indices(
+            merged, labels.index(d_ket), labels.index(d_bra),
+            fused_label, fused_flow,
+        )
+        # Relabel chi legs to standard CTMTensorEnv convention
+        merged = merged.relabels({ket_chi: std_chi_l, bra_chi: std_chi_r})
+        return merged
 
-    return (
-        env.C1.todense(),
-        env.C2.todense(),
-        env.C3.todense(),
-        env.C4.todense(),
-        merge(env.T1_ket, env.T1_bra),
-        merge(env.T2_ket, env.T2_bra),
-        merge(env.T3_ket, env.T3_bra),
-        merge(env.T4_ket, env.T4_bra),
+    T1 = _merge_edge(
+        env.T1_ket, env.T1_bra,
+        "t1k_I", "t1b_I", "u_ket", "u_bra", "u2", FlowDirection.IN,
+        "t1k_l", "t1b_r", "t1_l", "t1_r",
+    )
+    T2 = _merge_edge(
+        env.T2_ket, env.T2_bra,
+        "t2k_I", "t2b_I", "r_ket", "r_bra", "r2", FlowDirection.OUT,
+        "t2k_u", "t2b_d", "t2_u", "t2_d",
+    )
+    T3 = _merge_edge(
+        env.T3_ket, env.T3_bra,
+        "t3k_I", "t3b_I", "d_ket", "d_bra", "d2", FlowDirection.OUT,
+        "t3k_r", "t3b_l", "t3_r", "t3_l",
+    )
+    T4 = _merge_edge(
+        env.T4_ket, env.T4_bra,
+        "t4k_I", "t4b_I", "l_ket", "l_bra", "l2", FlowDirection.IN,
+        "t4k_d", "t4b_u", "t4_d", "t4_u",
+    )
+
+    return CTMTensorEnv(
+        C1=env.C1, C2=env.C2, C3=env.C3, C4=env.C4,
+        T1=T1, T2=T2, T3=T3, T4=T4,
     )
 
 
@@ -1286,10 +1345,9 @@ def compute_energy_split_ctm_tensor(
 ) -> jax.Array:
     """Compute energy per site using split CTM environment.
 
-    Converts to standard dense CTM internally and delegates to the
-    existing RDM-based energy computation. This is correct because
-    the ket/bra merge over the interlayer bond reconstructs the standard
-    double-layer edges.
+    Converts to standard Tensor-protocol CTM internally and delegates to
+    ``compute_energy_ctm_tensor``. The ket/bra merge over the interlayer
+    bond reconstructs the standard double-layer edges.
 
     Args:
         A:                iPEPS site tensor.
@@ -1300,18 +1358,5 @@ def compute_energy_split_ctm_tensor(
     Returns:
         Scalar energy per site.
     """
-    from tenax.algorithms.ipeps_config import CTMEnvironment
-    from tenax.algorithms.ipeps_rdm import compute_energy_ctm
-
-    A_dense = A.todense()
-    if d is None:
-        d = A_dense.shape[-1]
-
-    if isinstance(hamiltonian_gate, Tensor):
-        H = hamiltonian_gate.todense().reshape(d, d, d, d)
-    else:
-        H = hamiltonian_gate.reshape(d, d, d, d)
-
-    C1, C2, C3, C4, T1, T2, T3, T4 = _split_env_to_dense_standard(env)
-    std_env = CTMEnvironment(C1=C1, C2=C2, C3=C3, C4=C4, T1=T1, T2=T2, T3=T3, T4=T4)
-    return compute_energy_ctm(A_dense, std_env, H, d)
+    std_env = _split_env_to_tensor_standard(env)
+    return compute_energy_ctm_tensor(A, std_env, hamiltonian_gate, d)

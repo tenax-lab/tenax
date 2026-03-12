@@ -228,30 +228,35 @@ def _fuse_indices_symmetric(
     fused_charges = _compute_fused_charges(idx_a, idx_b, fused_flow, sym)
     fused_idx = TensorIndex(sym, fused_charges, fused_flow, label=fused_label)
 
-    # Compute offsets: for each (q_a, q_b) pair, where does it sit in the
-    # fused dimension?
-    # unique_qa and unique_qb are the unique charges on each leg
+    # Compute where each (i, j) element lands in the fused block.
+    #
+    # todense() scatters block data to positions np.where(charges == q_f)
+    # in ascending order, so block[k] must hold the data for the k-th
+    # smallest position with charge q_f.  The fused charges array has
+    # charge q_f at positions {i*db + j : charges_a[i]=qa, charges_b[j]=qb}
+    # for each (qa, qb) pair mapping to q_f.  We must interleave the
+    # (qa, qb) sub-blocks by ascending i*db+j order, NOT group them
+    # contiguously.
+
+    db = len(idx_b.charges)
     unique_qa = np.unique(idx_a.charges)
     unique_qb = np.unique(idx_b.charges)
 
-    # For each fused charge q_f, track the offset for each contributing (q_a, q_b) pair
-    # offset_map[(q_a, q_b)] = (q_f, start_position_in_fused_dim)
-    offset_map: dict[tuple[int, int], tuple[int, int]] = {}
-    # Compute number of states per charge
-    dim_a: dict[int, int] = {}
-    for q in unique_qa:
-        dim_a[int(q)] = int(np.sum(idx_a.charges == q))
-    dim_b: dict[int, int] = {}
-    for q in unique_qb:
-        dim_b[int(q)] = int(np.sum(idx_b.charges == q))
-
-    # Group (q_a, q_b) pairs by fused charge q_f, track offsets
-    fused_groups: dict[int, list[tuple[int, int]]] = {}
     flow_a_sign = int(idx_a.flow)
     flow_b_sign = int(idx_b.flow)
     fused_sign = int(fused_flow)
     n_vals = sym.n_values()
 
+    # For each (qa, qb) pair, find which positions in idx_a/idx_b have those charges
+    positions_a: dict[int, np.ndarray] = {}
+    for q in unique_qa:
+        positions_a[int(q)] = np.where(idx_a.charges == q)[0]
+    positions_b: dict[int, np.ndarray] = {}
+    for q in unique_qb:
+        positions_b[int(q)] = np.where(idx_b.charges == q)[0]
+
+    # Group (qa, qb) pairs by fused charge q_f
+    fused_groups: dict[int, list[tuple[int, int]]] = {}
     for qa in unique_qa:
         for qb in unique_qb:
             raw = flow_a_sign * int(qa) + flow_b_sign * int(qb)
@@ -260,14 +265,42 @@ def _fuse_indices_symmetric(
                 q_f = q_f % n_vals
             fused_groups.setdefault(q_f, []).append((int(qa), int(qb)))
 
-    # Compute fused dimension per fused charge and offsets
+    # For each fused charge q_f, compute:
+    #   fused_dim[q_f]: total number of elements in this block
+    #   scatter_map[(qa, qb)]: array of target offsets within the fused block
+    #     for each element of the (qa, qb) sub-block (in row-major order
+    #     over positions_a[qa] x positions_b[qb]).
     fused_dim: dict[int, int] = {}
+    scatter_map: dict[tuple[int, int], np.ndarray] = {}
+
     for q_f, pairs in fused_groups.items():
-        offset = 0
+        # Collect all (i*db + j) positions for this q_f, along with which
+        # (qa, qb) pair and local index each belongs to.
+        all_positions: list[tuple[int, int, int, int]] = []  # (flat_pos, qa, qb, local_idx)
         for qa, qb in pairs:
-            offset_map[(qa, qb)] = (q_f, offset)
-            offset += dim_a[qa] * dim_b[qb]
-        fused_dim[q_f] = offset
+            local_idx = 0
+            for i in positions_a[qa]:
+                for j in positions_b[qb]:
+                    all_positions.append((int(i) * db + int(j), qa, qb, local_idx))
+                    local_idx += 1
+
+        # Sort by flat position (ascending) — this is the order todense() expects
+        all_positions.sort(key=lambda x: x[0])
+        fused_dim[q_f] = len(all_positions)
+
+        # Build scatter arrays: for each (qa, qb) pair, scatter_map[(qa, qb)][local]
+        # = target offset in the fused block
+        tmp: dict[tuple[int, int], list[tuple[int, int]]] = {}  # (qa,qb) -> [(local, target)]
+        for target_offset, (_, qa, qb, local_idx) in enumerate(all_positions):
+            tmp.setdefault((qa, qb), []).append((local_idx, target_offset))
+
+        for qa, qb in pairs:
+            if (qa, qb) in tmp:
+                entries = tmp[(qa, qb)]
+                entries.sort(key=lambda x: x[0])  # sort by local_idx
+                scatter_map[(qa, qb)] = np.array([t for _, t in entries], dtype=np.int64)
+            else:
+                scatter_map[(qa, qb)] = np.array([], dtype=np.int64)
 
     # Build new indices list (axes a and b replaced by fused_idx at position a)
     other_axes = [i for i in range(ndim) if i not in (a, b)]
@@ -276,20 +309,24 @@ def _fuse_indices_symmetric(
     new_indices = tuple(new_indices)
 
     # Reassemble blocks
-    # If b is not adjacent to a, we need to transpose the block first
     new_blocks: dict[BlockKey, jax.Array] = {}
 
     for key, block in T.blocks.items():
-        qa = key[a]
-        qb = key[b]
-        q_f, offset = offset_map[(int(qa), int(qb))]
+        qa = int(key[a])
+        qb = int(key[b])
+
+        # Compute q_f for this (qa, qb) pair
+        raw = flow_a_sign * qa + flow_b_sign * qb
+        q_f = raw * fused_sign
+        if n_vals is not None:
+            q_f = q_f % n_vals
 
         # Transpose block to bring axes a and b adjacent
         other_block_axes = [i for i in range(ndim) if i not in (a, b)]
         perm = other_block_axes[:a] + [a, b] + other_block_axes[a:]
         block_t = jnp.transpose(block, perm)
 
-        # Reshape: merge the two axes
+        # Reshape: merge the two axes into one (at position a)
         shape = list(block_t.shape)
         new_shape = shape[:a] + [shape[a] * shape[a + 1]] + shape[a + 2 :]
         block_flat = block_t.reshape(new_shape)
@@ -298,26 +335,26 @@ def _fuse_indices_symmetric(
         other_charges = [key[i] for i in other_axes]
         new_key = tuple(other_charges[:a]) + (q_f,) + tuple(other_charges[a:])
 
-        if new_key in new_blocks:
-            # Multiple (q_a, q_b) pairs contribute to the same fused block.
-            # Place this sub-block at the correct offset within the fused dim.
-            existing = new_blocks[new_key]
-            # Use dynamic_update_slice to place block_flat at the offset
-            start_indices = [0] * len(new_shape)
-            start_indices[a] = offset
-            new_blocks[new_key] = jax.lax.dynamic_update_slice(
-                existing, block_flat, tuple(start_indices)
-            )
-        else:
-            # Create the full fused block (zeros) and place this sub-block
+        # Get the scatter offsets for this (qa, qb) pair
+        offsets = scatter_map[(qa, qb)]
+
+        if new_key not in new_blocks:
             full_shape = list(new_shape)
             full_shape[a] = fused_dim[q_f]
-            full_block = jnp.zeros(full_shape, dtype=block.dtype)
-            start_indices = [0] * len(new_shape)
-            start_indices[a] = offset
-            new_blocks[new_key] = jax.lax.dynamic_update_slice(
-                full_block, block_flat, tuple(start_indices)
-            )
+            new_blocks[new_key] = jnp.zeros(full_shape, dtype=block.dtype)
+
+        # Scatter sub-block elements to correct positions in fused block
+        existing = new_blocks[new_key]
+        sub_size = block_flat.shape[a]
+        for local_idx in range(sub_size):
+            target = int(offsets[local_idx])
+            # Extract slice along axis a at local_idx
+            slc_src = [slice(None)] * len(new_shape)
+            slc_src[a] = local_idx
+            slc_dst = [slice(None)] * len(new_shape)
+            slc_dst[a] = target
+            existing = existing.at[tuple(slc_dst)].set(block_flat[tuple(slc_src)])
+        new_blocks[new_key] = existing
 
     obj = object.__new__(SymmetricTensor)
     obj._indices = new_indices
