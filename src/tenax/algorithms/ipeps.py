@@ -171,9 +171,13 @@ def ipeps(
     peps = _build_1x1_peps(A_dense, d, D)
 
     # CTM environment
-    env = ctm(A_dense, config.ctm)
+    if config.ctm.ctm_method == "split":
+        from tenax.algorithms.ipeps_ctm import _split_env_to_standard, ctm_split
 
-    # Compute energy
+        split_env = ctm_split(A_dense, config.ctm)
+        env = _split_env_to_standard(split_env)
+    else:
+        env = ctm(A_dense, config.ctm)
     energy = compute_energy_ctm(A_dense, env, gate, d)
 
     return float(energy), peps, env
@@ -224,16 +228,32 @@ def _ipeps_tensor(
     if norm_val > EPS:
         A_abs = A_abs * (1.0 / norm_val)
 
-    env = ctm_tensor(
-        A_abs,
-        chi=config.ctm.chi,
-        max_iter=config.ctm.max_iter,
-        conv_tol=config.ctm.conv_tol,
-        renormalize=config.ctm.renormalize,
-        projector_method=config.ctm.projector_method,
-        qr_warmup_steps=config.ctm.qr_warmup_steps,
-    )
-    energy = compute_energy_ctm_tensor(A_abs, env, hamiltonian_gate)
+    if config.ctm.ctm_method == "split":
+        from tenax.algorithms._split_ctm_tensor import (
+            compute_energy_split_ctm_tensor,
+            ctm_split_tensor,
+        )
+
+        env = ctm_split_tensor(
+            A_abs,
+            chi=config.ctm.chi,
+            max_iter=config.ctm.max_iter,
+            conv_tol=config.ctm.conv_tol,
+            chi_I=config.ctm.chi_I,
+            renormalize=config.ctm.renormalize,
+        )
+        energy = compute_energy_split_ctm_tensor(A_abs, env, hamiltonian_gate)
+    else:
+        env = ctm_tensor(
+            A_abs,
+            chi=config.ctm.chi,
+            max_iter=config.ctm.max_iter,
+            conv_tol=config.ctm.conv_tol,
+            renormalize=config.ctm.renormalize,
+            projector_method=config.ctm.projector_method,
+            qr_warmup_steps=config.ctm.qr_warmup_steps,
+        )
+        energy = compute_energy_ctm_tensor(A_abs, env, hamiltonian_gate)
 
     return float(energy), A, env
 

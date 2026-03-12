@@ -28,6 +28,7 @@ class CTMConfig:
     projector_method: str = "eigh"  # "eigh" or "qr"
     qr_warmup_steps: int = 3  # eigh warm-up iterations before QR kicks in
     chi_I: int | None = None  # interlayer bond dim for split-CTMRG; None => chi_I = chi
+    ctm_method: str = "split"  # "split" (better scaling) or "standard"
 
 
 @dataclass

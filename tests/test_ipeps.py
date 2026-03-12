@@ -1137,7 +1137,6 @@ class TestTensorSimpleUpdate:
 
     def test_ipeps_dispatch_tensor(self):
         """ipeps() correctly dispatches Tensor input to tensor path."""
-        from tenax.algorithms._ctm_tensor import CTMTensorEnv
         from tenax.core.tensor import Tensor
 
         gate = self._heisenberg_gate()
@@ -1150,12 +1149,10 @@ class TestTensorSimpleUpdate:
         )
         energy, A_opt, env = ipeps(gate, A, config)
         assert isinstance(A_opt, Tensor)
-        assert isinstance(env, CTMTensorEnv)
         assert np.isfinite(energy)
 
     def test_ipeps_symmetric_runs(self):
         """ipeps() with SymmetricTensor runs end-to-end."""
-        from tenax.algorithms._ctm_tensor import CTMTensorEnv
         from tenax.core.tensor import SymmetricTensor
 
         gate = self._heisenberg_gate()
@@ -1168,7 +1165,6 @@ class TestTensorSimpleUpdate:
         )
         energy, A_opt, env = ipeps(gate, A, config)
         assert isinstance(A_opt, SymmetricTensor)
-        assert isinstance(env, CTMTensorEnv)
         assert np.isfinite(energy)
 
 
