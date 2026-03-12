@@ -72,6 +72,8 @@ iPEPS
    :members:
    :no-index:
 
+.. autofunction:: tenax.algorithms.ipeps.heisenberg_gate
+
 .. autofunction:: tenax.algorithms.ipeps.ipeps
 
 .. autofunction:: tenax.algorithms.ipeps_ctm.ctm

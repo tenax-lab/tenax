@@ -70,20 +70,10 @@ larger `dt` because the two independent tensors converge more slowly.
 ## Example -- 2D Heisenberg model
 
 ```python
-import jax.numpy as jnp
-from tenax import iPEPSConfig, CTMConfig, ipeps
+from tenax import iPEPSConfig, CTMConfig, heisenberg_gate, ipeps
 
 # Heisenberg gate: H = Sz Sz + 0.5 (S+ S- + S- S+)
-Sz = 0.5 * jnp.array([[1, 0], [0, -1]], dtype=jnp.float32)
-Sp = jnp.array([[0, 1], [0, 0]], dtype=jnp.float32)
-Sm = jnp.array([[0, 0], [1, 0]], dtype=jnp.float32)
-I2 = jnp.eye(2, dtype=jnp.float32)
-
-H_bond = (
-    jnp.kron(Sz, Sz)
-    + 0.5 * jnp.kron(Sp, Sm)
-    + 0.5 * jnp.kron(Sm, Sp)
-).reshape(2, 2, 2, 2)
+H_bond = heisenberg_gate()  # DenseTensor with labels (si, sj, si_out, sj_out)
 
 config = iPEPSConfig(
     max_bond_dim=2,

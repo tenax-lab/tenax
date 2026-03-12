@@ -251,16 +251,9 @@ mpo_sym = auto.to_mpo(symmetric=True)
 ## iPEPS Simple Update (2-site unit cell)
 
 ```python
-import jax.numpy as jnp
-from tenax import iPEPSConfig, CTMConfig, ipeps
+from tenax import iPEPSConfig, CTMConfig, heisenberg_gate, ipeps
 
-# Build a 2-site Heisenberg gate
-Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
-Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
-Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
-gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) \
-     + 0.5 * (jnp.einsum("ij,kl->ikjl", Sp, Sm)
-             + jnp.einsum("ij,kl->ikjl", Sm, Sp))
+gate = heisenberg_gate()  # DenseTensor with labels (si, sj, si_out, sj_out)
 
 # 2-site checkerboard iPEPS — captures Neel order
 config = iPEPSConfig(
@@ -279,19 +272,12 @@ See `examples/heisenberg_ipeps_su.py` for 1-site and 2-site unit cell examples.
 ## iPEPS AD Optimization and Excitations
 
 ```python
-import jax.numpy as jnp
 from tenax import (
-    iPEPSConfig, CTMConfig, optimize_gs_ad,
+    iPEPSConfig, CTMConfig, heisenberg_gate, optimize_gs_ad,
     ExcitationConfig, compute_excitations, make_momentum_path,
 )
 
-# Build a 2-site Heisenberg gate
-Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
-Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
-Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
-gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) \
-     + 0.5 * (jnp.einsum("ij,kl->ikjl", Sp, Sm)
-             + jnp.einsum("ij,kl->ikjl", Sm, Sp))
+gate = heisenberg_gate()
 
 # AD ground-state optimization (Francuz et al. PRR 7, 013237)
 # su_init=True runs simple update first for a better starting tensor
