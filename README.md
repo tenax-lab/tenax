@@ -453,12 +453,17 @@ python -m benchmarks.run -b cpu -a dmrg idmrg -s small medium -n 5
 # CSV output for analysis
 python -m benchmarks.run -b cpu -a all -s all --csv results.csv
 
+# Plot saved JSON results to PNG
+uv run --with matplotlib python -m benchmarks.plot_results
+
 # Show available backends
 python -m benchmarks.run --list-backends
 ```
 
 Each run prints a summary table and saves full results (timings, parameters,
-device info) to JSON. See `docs/guide/benchmarks.md` for the complete guide.
+device info) to JSON. `benchmarks.plot_results` reads those JSON files and
+generates per-algorithm PNG charts grouped by size and backend. See
+`docs/guide/benchmarks.md` for the complete guide.
 
 ## Development
 

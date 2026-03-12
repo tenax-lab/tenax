@@ -22,6 +22,7 @@ research. Bug reports and contributions are welcome.
 - **JAX integration** -- all tensor types are registered as JAX pytrees for seamless `jit`, `grad`, and `vmap`.
 - **Optimised contraction paths** -- `opt_einsum` finds the best contraction order before JAX executes.
 - **Batteries-included algorithms** -- DMRG, TRG, HOTRG, iPEPS with simple configuration dataclasses.
+- **Benchmark tooling** -- run reproducible CPU/GPU/TPU/Metal benchmarks and plot JSON outputs into PNG charts.
 
 ## Getting Started
 
