@@ -13,6 +13,7 @@ __all__ = [
     "_ctm_tensor_sweep_multisite",
     "_normalize_tensor",
     "_renormalize_tensor_env",
+    "ctm_multisite",
     "ctm_tensor",
     "ctm_tensor_2site",
 ]
@@ -32,6 +33,7 @@ from tenax.algorithms._ctm_tensor_moves import (
     _ctm_tensor_move_top,
 )
 from tenax.core import EPS
+from tenax.core.lattice import Lattice
 from tenax.core.tensor import Tensor
 
 # ------------------------------------------------------------------ #
@@ -281,3 +283,74 @@ def ctm_tensor_2site(
         qr_warmup_steps,
     )
     return envs[(0, 0)], envs[(1, 0)]
+
+
+def ctm_multisite(
+    site_tensors: dict[str, Tensor],
+    lattice: Lattice,
+    chi: int,
+    max_iter: int = 100,
+    conv_tol: float = 1e-8,
+    renormalize: bool = True,
+    projector_method: str = "eigh",
+    qr_warmup_steps: int = 3,
+) -> dict[str, CTMTensorEnv]:
+    """Run multisite CTM to convergence for an arbitrary lattice.
+
+    Translates the string-keyed ``Lattice.neighbor_map`` to the
+    coordinate-based format expected by ``_ctm_tensor_multisite()``,
+    then maps the results back to site names.
+
+    Use this for unit cells with 3+ sites.  For 1- or 2-site cells,
+    prefer ``ctm_tensor()`` or ``ctm_tensor_2site()`` which are
+    optimized for those cases.
+
+    Args:
+        site_tensors:      ``{site_name: Tensor}`` for each site in
+                           ``lattice.sites``.
+        lattice:           A :class:`~tenax.core.lattice.Lattice` describing
+                           the unit cell geometry.
+        chi:               Environment bond dimension.
+        max_iter:          Maximum CTM iterations.
+        conv_tol:          Convergence tolerance on corner singular values.
+        renormalize:       Renormalize environment at each step.
+        projector_method:  ``"eigh"`` or ``"qr"``.
+        qr_warmup_steps:   Number of eigh warm-up sweeps before QR kicks in.
+
+    Returns:
+        ``{site_name: CTMTensorEnv}`` — converged environments.
+    """
+    # Map site names to coordinates: site_i -> (i, 0)
+    name_to_coord: dict[str, Coord] = {
+        name: (i, 0) for i, name in enumerate(lattice.sites)
+    }
+    coord_to_name: dict[Coord, str] = {v: k for k, v in name_to_coord.items()}
+
+    # Translate site_tensors to coordinate keys
+    coord_tensors: dict[Coord, Tensor] = {
+        name_to_coord[name]: t for name, t in site_tensors.items()
+    }
+
+    # Translate neighbor_map to coordinate keys
+    coord_neighbors: dict[Coord, dict[str, Coord]] = {
+        name_to_coord[name]: {
+            direction: name_to_coord[nb_name]
+            for direction, nb_name in neighbors.items()
+        }
+        for name, neighbors in lattice.neighbor_map.items()
+    }
+
+    # Delegate to existing multisite CTM
+    coord_envs = _ctm_tensor_multisite(
+        coord_tensors,
+        coord_neighbors,
+        chi,
+        max_iter,
+        conv_tol,
+        renormalize,
+        projector_method,
+        qr_warmup_steps,
+    )
+
+    # Map results back to site names
+    return {coord_to_name[c]: env for c, env in coord_envs.items()}

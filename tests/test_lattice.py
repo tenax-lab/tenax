@@ -161,3 +161,17 @@ class TestExports:
         assert isinstance(honeycomb(), L)
         assert isinstance(triangular(), L)
         assert isinstance(kagome(), L)
+
+
+class TestCtmMultisiteExports:
+    def test_importable_from_convergence(self):
+        from tenax.algorithms._ctm_tensor_convergence import ctm_multisite  # noqa: F401
+
+    def test_importable_from_algorithms(self):
+        from tenax.algorithms import ctm_multisite  # noqa: F401
+
+    def test_importable_from_tenax(self):
+        from tenax import ctm_multisite  # noqa: F401
+
+    def test_importable_from_ctm_tensor_shim(self):
+        from tenax.algorithms._ctm_tensor import ctm_multisite  # noqa: F401
