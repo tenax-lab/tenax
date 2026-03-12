@@ -143,3 +143,21 @@ class TestKagomeFactory:
     def test_has_bonds(self):
         lat = kagome()
         assert len(lat.bonds) == 3
+
+
+class TestExports:
+    def test_importable_from_core(self):
+        from tenax.core import Bond, Lattice  # noqa: F401
+
+    def test_importable_from_tenax(self):
+        from tenax import Bond, Lattice, checkerboard, kagome, square  # noqa: F401
+
+    def test_factories_from_tenax(self):
+        from tenax import checkerboard, honeycomb, kagome, square, triangular
+        from tenax.core.lattice import Lattice as L
+
+        assert isinstance(square(), L)
+        assert isinstance(checkerboard(), L)
+        assert isinstance(honeycomb(), L)
+        assert isinstance(triangular(), L)
+        assert isinstance(kagome(), L)
