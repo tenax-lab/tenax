@@ -1266,3 +1266,40 @@ class TestSplitCTMRG:
         """CTMConfig with chi_I=None should default to chi."""
         cfg = CTMConfig()
         assert cfg.chi_I is None
+
+
+class TestXXZGate:
+    def test_xxz_gate_shape(self):
+        from tenax.algorithms.ipeps import xxz_gate
+
+        gate = xxz_gate(delta=1.0)
+        assert gate.todense().shape == (2, 2, 2, 2)
+
+    def test_xxz_gate_recovers_heisenberg(self):
+        from tenax.algorithms.ipeps import heisenberg_gate, xxz_gate
+
+        H_heis = heisenberg_gate().todense()
+        H_xxz = xxz_gate(delta=1.0).todense()
+        assert jnp.allclose(H_heis, H_xxz, atol=1e-14)
+
+    def test_xxz_gate_ising_limit(self):
+        from tenax.algorithms.ipeps import xxz_gate
+
+        H = xxz_gate(delta=0.0).todense()
+        Sp = jnp.array([[0, 1], [0, 0]], dtype=jnp.float64)
+        Sm = jnp.array([[0, 0], [1, 0]], dtype=jnp.float64)
+        H_expected = 0.5 * (jnp.kron(Sp, Sm) + jnp.kron(Sm, Sp))
+        assert jnp.allclose(H.reshape(4, 4), H_expected, atol=1e-14)
+
+    def test_xxz_gate_is_dense_tensor(self):
+        from tenax.algorithms.ipeps import xxz_gate
+        from tenax.core.tensor import DenseTensor
+
+        gate = xxz_gate(delta=0.5)
+        assert isinstance(gate, DenseTensor)
+
+    def test_xxz_gate_labels(self):
+        from tenax.algorithms.ipeps import xxz_gate
+
+        gate = xxz_gate(delta=1.0)
+        assert gate.labels() == ("si", "sj", "si_out", "sj_out")

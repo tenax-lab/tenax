@@ -27,7 +27,7 @@ from tenax.algorithms.idmrg import (
     iDMRGConfig,
     iDMRGResult,
 )
-from tenax.algorithms.ipeps import heisenberg_gate, ipeps
+from tenax.algorithms.ipeps import heisenberg_gate, ipeps, xxz_gate
 from tenax.algorithms.ipeps_config import (
     CTMConfig,
     CTMEnvironment,
@@ -86,6 +86,7 @@ __all__ = [
     "CTMEnvironment",
     "heisenberg_gate",
     "ipeps",
+    "xxz_gate",
     "ctm",
     "ctm_2site",
     "SplitCTMEnvironment",
