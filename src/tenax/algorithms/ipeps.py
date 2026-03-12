@@ -43,8 +43,29 @@ from tenax.core.tensor import DenseTensor, Tensor
 from tenax.network.network import TensorNetwork
 
 
+def heisenberg_gate(dtype=jnp.float64) -> DenseTensor:
+    """Build the 2-site Heisenberg Hamiltonian as a DenseTensor.
+
+    ``H = Sz Sz + 0.5 (S+ S- + S- S+)`` on two spin-1/2 sites, returned
+    as a 4-leg tensor with labels ``(si, sj, si_out, sj_out)``.
+    """
+    Sz = jnp.array([[0.5, 0.0], [0.0, -0.5]], dtype=dtype)
+    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]], dtype=dtype)
+    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]], dtype=dtype)
+    H = jnp.kron(Sz, Sz) + 0.5 * (jnp.kron(Sp, Sm) + jnp.kron(Sm, Sp))
+    sym = U1Symmetry()
+    charges = np.zeros(2, dtype=np.int32)
+    indices = (
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="si"),
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="sj"),
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="si_out"),
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="sj_out"),
+    )
+    return DenseTensor(H.reshape(2, 2, 2, 2), indices)
+
+
 def ipeps(
-    hamiltonian_gate: jax.Array,
+    hamiltonian_gate: Tensor | jax.Array,
     initial_peps: TensorNetwork | jax.Array | Tensor | tuple | None,
     config: iPEPSConfig,
 ) -> tuple[float, TensorNetwork | Tensor, object]:
@@ -79,12 +100,19 @@ def ipeps(
     if isinstance(initial_peps, Tensor):
         return _ipeps_tensor(hamiltonian_gate, initial_peps, config)
 
+    # Dense path: convert gate to JAX array if needed
+    gate_arr = (
+        hamiltonian_gate.todense()
+        if isinstance(hamiltonian_gate, Tensor)
+        else jnp.array(hamiltonian_gate)
+    )
+
     # Get site tensor
     if initial_peps is None:
         # Build random initial PEPS tensor
         key = jax.random.PRNGKey(0)
         D = config.max_bond_dim
-        d_phys = hamiltonian_gate.shape[0]  # physical dimension from gate shape
+        d_phys = gate_arr.shape[0]  # physical dimension from gate shape
         A_dense = jax.random.normal(key, (D, D, D, D, d_phys))
         A_dense = A_dense / (jnp.linalg.norm(A_dense) + 1e-10)
     elif isinstance(initial_peps, jax.Array):
@@ -104,7 +132,7 @@ def ipeps(
             raise ValueError("iPEPS: could not find site tensor")
 
         A_dense = A_tensor.todense()
-    gate = jnp.array(hamiltonian_gate)
+    gate = gate_arr
 
     # Build Trotter gate: exp(-dt * H_bond)
     # Reshape gate (d,d,d,d) -> (d^2, d^2), diagonalize, exponentiate
@@ -152,7 +180,7 @@ def ipeps(
 
 
 def _ipeps_tensor(
-    hamiltonian_gate: jax.Array,
+    hamiltonian_gate: Tensor | jax.Array,
     A_init: Tensor,
     config: iPEPSConfig,
 ) -> tuple[float, Tensor, object]:
@@ -273,7 +301,7 @@ def _build_1x1_peps(A: jax.Array, d: int, D: int) -> TensorNetwork:
 
 
 def _ipeps_2site(
-    hamiltonian_gate: jax.Array,
+    hamiltonian_gate: Tensor | jax.Array,
     initial_peps: tuple[jax.Array, jax.Array] | None,
     config: iPEPSConfig,
 ) -> tuple[float, TensorNetwork, tuple[CTMEnvironment, CTMEnvironment]]:
@@ -282,7 +310,11 @@ def _ipeps_2site(
     Returns:
         (energy_per_site, peps_network, (env_A, env_B))
     """
-    gate = jnp.array(hamiltonian_gate)
+    gate = (
+        hamiltonian_gate.todense()
+        if isinstance(hamiltonian_gate, Tensor)
+        else jnp.array(hamiltonian_gate)
+    )
     d = gate.shape[0]
     D = config.max_bond_dim
 

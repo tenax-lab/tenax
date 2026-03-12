@@ -26,25 +26,10 @@ from __future__ import annotations
 import time
 
 import jax
-import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
 
-from tenax import CTMConfig, ipeps, iPEPSConfig
-
-# ---------------------------------------------------------------------------
-# Hamiltonian
-# ---------------------------------------------------------------------------
-
-
-def heisenberg_gate(dtype=jnp.float64) -> jnp.ndarray:
-    """Build the 2-site Heisenberg gate H = Sz*Sz + 0.5*(S+S- + S-S+)."""
-    Sz = jnp.array([[0.5, 0.0], [0.0, -0.5]], dtype=dtype)
-    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]], dtype=dtype)
-    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]], dtype=dtype)
-    H = jnp.kron(Sz, Sz) + 0.5 * (jnp.kron(Sp, Sm) + jnp.kron(Sm, Sp))
-    return H.reshape(2, 2, 2, 2)
-
+from tenax import CTMConfig, heisenberg_gate, ipeps, iPEPSConfig
 
 # ---------------------------------------------------------------------------
 # Run simple update
@@ -52,7 +37,7 @@ def heisenberg_gate(dtype=jnp.float64) -> jnp.ndarray:
 
 
 def run_simple_update(
-    gate: jnp.ndarray,
+    gate,
     D: int,
     chi: int,
     num_steps: int,

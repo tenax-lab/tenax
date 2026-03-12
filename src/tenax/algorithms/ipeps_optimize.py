@@ -20,7 +20,7 @@ from tenax.core.tensor import Tensor
 
 
 def optimize_gs_ad(
-    hamiltonian_gate: jax.Array,
+    hamiltonian_gate: jax.Array | Tensor,
     A_init: jax.Array | Tensor | tuple | None,
     config: iPEPSConfig,
 ):
@@ -60,7 +60,11 @@ def optimize_gs_ad(
     from tenax.algorithms.ad_utils import _config_to_tuple, ctm_converge
     from tenax.algorithms.ipeps import ipeps
 
-    gate = jnp.array(hamiltonian_gate)
+    gate = (
+        hamiltonian_gate.todense()
+        if isinstance(hamiltonian_gate, Tensor)
+        else jnp.array(hamiltonian_gate)
+    )
     d_phys = gate.shape[0]
     D = config.max_bond_dim
 
@@ -143,7 +147,11 @@ def _optimize_gs_ad_tensor(
     )
     from tenax.algorithms.ad_utils import _config_to_tuple, ctm_tensor_converge
 
-    gate = jnp.array(hamiltonian_gate)
+    gate = (
+        hamiltonian_gate.todense()
+        if isinstance(hamiltonian_gate, Tensor)
+        else jnp.array(hamiltonian_gate)
+    )
     d_phys = gate.shape[0]
 
     A = A_init
@@ -211,7 +219,11 @@ def _optimize_gs_ad_2site(
 
     from tenax.algorithms.ad_utils import ctm_converge_2site
 
-    gate = jnp.array(hamiltonian_gate)
+    gate = (
+        hamiltonian_gate.todense()
+        if isinstance(hamiltonian_gate, Tensor)
+        else jnp.array(hamiltonian_gate)
+    )
     d_phys = gate.shape[0]
     D = config.max_bond_dim
 
@@ -319,7 +331,11 @@ def _optimize_gs_ad_tensor_2site(
     )
     from tenax.algorithms.ad_utils import _config_to_tuple, ctm_tensor_converge_2site
 
-    gate = jnp.array(hamiltonian_gate)
+    gate = (
+        hamiltonian_gate.todense()
+        if isinstance(hamiltonian_gate, Tensor)
+        else jnp.array(hamiltonian_gate)
+    )
     d_phys = gate.shape[0]
 
     A, B = AB_init
