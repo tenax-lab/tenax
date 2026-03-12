@@ -359,6 +359,7 @@ Runnable example scripts are in the `examples/` directory:
 | `heisenberg_ipeps_su.py` | iPEPS simple update | Heisenberg (1x1 and 2-site unit cells) |
 | `heisenberg_ipeps_ad.py` | iPEPS AD optimization | Heisenberg (random vs SU init) |
 | `heisenberg_ipeps_excitations.py` | iPEPS excitations | Heisenberg dispersion along Γ-X-M-Γ |
+| `kagome_xxz_pess.py` | PESS simple update | XXZ on Kagome lattice (PESS → iPEPS → CTM) |
 | `spinless_fermion_fpeps.py` | fPEPS simple update | Spinless fermions (free and interacting) |
 | `ising_trg.py` | TRG | 2D Ising vs Onsager exact |
 | `ising_hotrg.py` | HOTRG | 2D Ising vs Onsager exact |
