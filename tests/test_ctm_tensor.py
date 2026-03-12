@@ -7,12 +7,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from tenax.algorithms._ctm_projector import _compute_projector_tensor
 from tenax.algorithms._ctm_tensor import (
     CHECKERBOARD_NEIGHBORS,
     CTMTensorEnv,
     _build_double_layer_open_tensor,
     _build_double_layer_tensor,
-    _compute_projector_tensor,
     _ctm_tensor_sweep,
     _ctm_tensor_sweep_multisite,
     _fuse_pair_by_label,
@@ -632,3 +632,107 @@ class TestProjectorSymmetric:
         )
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
+
+
+# ------------------------------------------------------------------ #
+# Architecture guard tests                                             #
+# ------------------------------------------------------------------ #
+
+
+class TestStandardCTMArchitectureGuards:
+    """Architecture guards for the standard CTM tensor path."""
+
+    def test_symmetric_sweep_no_todense(self, small_peps_symmetric):
+        """CTM sweeps on SymmetricTensor must not call todense() or from_dense().
+
+        This guards against regressions that silently densify during the
+        standard CTM symmetric path.  Mirrors the equivalent test in
+        TestSplitCTMSymmetric for the split CTM path.
+        """
+        from unittest.mock import patch
+
+        chi = 4
+        a = _build_double_layer_tensor(small_peps_symmetric)
+        env = initialize_ctm_tensor_env(small_peps_symmetric, chi)
+
+        todense_calls = []
+        from_dense_calls = []
+
+        orig_todense = SymmetricTensor.todense
+        orig_from_dense = SymmetricTensor.from_dense
+
+        def tracking_todense(self):
+            todense_calls.append(True)
+            return orig_todense(self)
+
+        @classmethod
+        def tracking_from_dense(cls, *args, **kwargs):
+            from_dense_calls.append(True)
+            return orig_from_dense(*args, **kwargs)
+
+        with (
+            patch.object(SymmetricTensor, "todense", tracking_todense),
+            patch.object(SymmetricTensor, "from_dense", tracking_from_dense),
+        ):
+            _ctm_tensor_sweep(env, a, chi, renormalize=True)
+
+        assert len(todense_calls) == 0, (
+            f"todense() called {len(todense_calls)} times during symmetric sweep"
+        )
+        assert len(from_dense_calls) == 0, (
+            f"from_dense() called {len(from_dense_calls)} times during symmetric sweep"
+        )
+
+    def test_standard_vs_split_energy_equivalence(self, heisenberg_gate):
+        """Standard and split CTM produce the same energy for dense tensors.
+
+        Uses a near-product-state iPEPS (dominant diagonal element with
+        small perturbation) so that both algorithms converge to the same
+        unique CTM fixed point, and lossless chi_I so the split path
+        does not lose information.
+        """
+        from tenax.algorithms._split_ctm_tensor import (
+            compute_energy_split_ctm_tensor,
+            ctm_split_tensor,
+        )
+
+        D, d = 2, 2
+        # Near-product-state tensor: unique CTM fixed point guaranteed
+        rng = np.random.RandomState(42)
+        data = 0.01 * jnp.array(rng.standard_normal((D, D, D, D, d)))
+        data = data.at[0, 0, 0, 0, 0].set(1.0)
+        data = data / (jnp.linalg.norm(data) + 1e-10)
+
+        sym = U1Symmetry()
+        charges = np.zeros(D, dtype=np.int32)
+        phys_charges = np.zeros(d, dtype=np.int32)
+        indices = (
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        A = DenseTensor(data, indices)
+
+        chi = 8
+        chi_I = 16  # lossless
+
+        # Standard CTM
+        env_std = ctm_tensor(A, chi=chi, max_iter=50, conv_tol=1e-10)
+        E_std = float(compute_energy_ctm_tensor(A, env_std, heisenberg_gate, d=d))
+
+        # Split CTM with lossless chi_I
+        env_split = ctm_split_tensor(A, chi=chi, max_iter=50, chi_I=chi_I)
+        E_split = float(
+            compute_energy_split_ctm_tensor(A, env_split, heisenberg_gate, d=d)
+        )
+
+        assert np.isfinite(E_std), f"Standard CTM energy is not finite: {E_std}"
+        assert np.isfinite(E_split), f"Split CTM energy is not finite: {E_split}"
+        np.testing.assert_allclose(
+            E_split,
+            E_std,
+            atol=1e-6,
+            err_msg=(f"Energy mismatch: standard={E_std}, split={E_split}"),
+        )
