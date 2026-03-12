@@ -132,6 +132,31 @@ python -m benchmarks.run -b cpu -a all -s all --csv results.csv
 Columns: `algorithm`, `size_label`, `backend`, `dtype`, `warmup_time_s`,
 `mean_time_s`, `std_time_s`, `min_time_s`, `num_trials`, `error`.
 
+### Plot existing JSON results
+
+You can generate PNG charts directly from previously saved JSON files:
+
+```bash
+uv run --with matplotlib python -m benchmarks.plot_results
+```
+
+By default this reads `benchmarks/results/*.json` and writes plots to
+`benchmarks/results/plots/` (one PNG per algorithm, grouped by size and backend).
+
+Common options:
+
+```bash
+# Plot only DMRG/HOTRG from CPU+CUDA files
+uv run --with matplotlib python -m benchmarks.plot_results \
+  --algorithm dmrg hotrg \
+  --backend cpu cuda
+
+# Use minimum trial time and log-scale y axis
+uv run --with matplotlib python -m benchmarks.plot_results \
+  --metric min_time_s \
+  --logy
+```
+
 ## How timing works
 
 1. **Setup**: `setup_fn()` builds all input tensors and config objects.
@@ -177,5 +202,6 @@ benchmarks/
   bench_hotrg.py       # HOTRG benchmark cases
   bench_ipeps.py       # iPEPS simple-update benchmark cases
   bench_ipeps_ad.py    # iPEPS AD optimization benchmark cases
+  plot_results.py      # plot JSON benchmark outputs to PNG
   results/             # default output directory for JSON results
 ```
