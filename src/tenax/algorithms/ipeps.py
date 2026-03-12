@@ -64,6 +64,34 @@ def heisenberg_gate(dtype=jnp.float64) -> DenseTensor:
     return DenseTensor(H.reshape(2, 2, 2, 2), indices)
 
 
+def xxz_gate(delta: float = 1.0, dtype=jnp.float64) -> DenseTensor:
+    """Build the 2-site XXZ Hamiltonian as a DenseTensor.
+
+    ``H = delta * Sz Sz + 0.5 (S+ S- + S- S+)`` on two spin-1/2 sites.
+
+    Args:
+        delta: Anisotropy parameter. delta=1 is isotropic Heisenberg,
+               delta=0 is XX model, delta->inf is Ising limit.
+        dtype: Array dtype.
+
+    Returns:
+        4-leg DenseTensor with labels ``(si, sj, si_out, sj_out)``.
+    """
+    Sz = jnp.array([[0.5, 0.0], [0.0, -0.5]], dtype=dtype)
+    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]], dtype=dtype)
+    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]], dtype=dtype)
+    H = delta * jnp.kron(Sz, Sz) + 0.5 * (jnp.kron(Sp, Sm) + jnp.kron(Sm, Sp))
+    sym = U1Symmetry()
+    charges = np.zeros(2, dtype=np.int32)
+    indices = (
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="si"),
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="sj"),
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="si_out"),
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="sj_out"),
+    )
+    return DenseTensor(H.reshape(2, 2, 2, 2), indices)
+
+
 def ipeps(
     hamiltonian_gate: Tensor | jax.Array,
     initial_peps: TensorNetwork | jax.Array | Tensor | tuple | None,
