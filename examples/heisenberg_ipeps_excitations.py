@@ -37,24 +37,11 @@ from tenax import (
     ExcitationConfig,
     ExcitationResult,
     compute_excitations,
+    heisenberg_gate,
     iPEPSConfig,
     make_momentum_path,
     optimize_gs_ad,
 )
-
-# ---------------------------------------------------------------------------
-# Hamiltonian
-# ---------------------------------------------------------------------------
-
-
-def heisenberg_gate(dtype=jnp.float64) -> jnp.ndarray:
-    """Build the 2-site Heisenberg gate H = Sz*Sz + 0.5*(S+S- + S-S+)."""
-    Sz = jnp.array([[0.5, 0.0], [0.0, -0.5]], dtype=dtype)
-    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]], dtype=dtype)
-    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]], dtype=dtype)
-    H = jnp.kron(Sz, Sz) + 0.5 * (jnp.kron(Sp, Sm) + jnp.kron(Sm, Sp))
-    return H.reshape(2, 2, 2, 2)
-
 
 # ---------------------------------------------------------------------------
 # Ground state optimization
