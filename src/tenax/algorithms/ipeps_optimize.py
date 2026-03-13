@@ -358,7 +358,7 @@ def _optimize_gs_ad_2site(
         env_A = CTMEnvironment(*env_tuple[:8])
         env_B = CTMEnvironment(*env_tuple[8:])
         energy = compute_energy_ctm_2site(A_norm, B_norm, env_A, env_B, gate, d_phys)
-        return energy
+        return energy, env_tuple
 
     # optax.adam supports pytree params natively
     params = (A, B)
@@ -369,18 +369,20 @@ def _optimize_gs_ad_2site(
 
     opt_state = optimizer.init(params)
 
-    best_energy = float("inf")
-    best_params = params
+    last_energy = float("inf")
+    last_params = params
+    last_env_tuple = None
     prev_energy = float("inf")
     log_interval = config.gs_log_interval
 
     for step in range(config.gs_num_steps):
-        energy_val, grads = jax.value_and_grad(loss_fn)(params)
+        (energy_val, env_tuple), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+            params
+        )
         energy_float = float(energy_val)
-
-        if energy_float < best_energy:
-            best_energy = energy_float
-            best_params = params
+        last_energy = energy_float
+        last_params = params
+        last_env_tuple = jax.tree.map(lambda x: jax.lax.stop_gradient(x), env_tuple)
 
         delta_energy = abs(energy_float - prev_energy)
         logged = False
@@ -393,7 +395,7 @@ def _optimize_gs_ad_2site(
                 config.gs_num_steps,
                 energy_float,
                 delta_energy,
-                best_energy,
+                energy_float,
             )
             logged = True
 
@@ -406,7 +408,7 @@ def _optimize_gs_ad_2site(
                         config.gs_num_steps,
                         energy_float,
                         delta_energy,
-                        best_energy,
+                        energy_float,
                     )
                 _log_ad_converged("2site-dense", step, delta_energy, config.gs_conv_tol)
             break
@@ -421,14 +423,14 @@ def _optimize_gs_ad_2site(
             B_p / (jnp.linalg.norm(B_p) + 1e-10),
         )
 
-    # Final CTM environment
-    A_final, B_final = best_params
+    # Use the last evaluated params and environment (not "best" which can
+    # capture transient CTM artifacts at finite chi).
+    A_final, B_final = last_params
     A_final = A_final / (jnp.linalg.norm(A_final) + 1e-10)
     B_final = B_final / (jnp.linalg.norm(B_final) + 1e-10)
-    env_tuple = ctm_converge_2site(A_final, B_final, config_tuple)
-    env_A = CTMEnvironment(*env_tuple[:8])
-    env_B = CTMEnvironment(*env_tuple[8:])
-    E_gs = float(compute_energy_ctm_2site(A_final, B_final, env_A, env_B, gate, d_phys))
+    env_A = CTMEnvironment(*last_env_tuple[:8])
+    env_B = CTMEnvironment(*last_env_tuple[8:])
+    E_gs = last_energy
     if config.gs_verbose:
         print(f"[iPEPS-AD:2site-dense] final E={E_gs:.10f}")
 
@@ -481,24 +483,26 @@ def _optimize_gs_ad_tensor_2site(
         energy = compute_energy_ctm_tensor_2site(
             A_norm, B_norm, env_A, env_B, gate, d_phys
         )
-        return energy
+        return energy, env_leaves
 
     params = (A, B)
     optimizer = optax.adam(config.gs_learning_rate)
     opt_state = optimizer.init(params)
 
-    best_energy = float("inf")
-    best_params = params
+    last_energy = float("inf")
+    last_params = params
+    last_env_leaves = None
     prev_energy = float("inf")
     log_interval = config.gs_log_interval
 
     for step in range(config.gs_num_steps):
-        energy_val, grads = jax.value_and_grad(loss_fn)(params)
+        (energy_val, env_leaves), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+            params
+        )
         energy_float = float(energy_val)
-
-        if energy_float < best_energy:
-            best_energy = energy_float
-            best_params = params
+        last_energy = energy_float
+        last_params = params
+        last_env_leaves = jax.tree.map(lambda x: jax.lax.stop_gradient(x), env_leaves)
 
         delta_energy = abs(energy_float - prev_energy)
         logged = False
@@ -511,7 +515,7 @@ def _optimize_gs_ad_tensor_2site(
                 config.gs_num_steps,
                 energy_float,
                 delta_energy,
-                best_energy,
+                energy_float,
             )
             logged = True
 
@@ -524,7 +528,7 @@ def _optimize_gs_ad_tensor_2site(
                         config.gs_num_steps,
                         energy_float,
                         delta_energy,
-                        best_energy,
+                        energy_float,
                     )
                 _log_ad_converged(
                     "2site-tensor", step, delta_energy, config.gs_conv_tol
@@ -540,16 +544,13 @@ def _optimize_gs_ad_tensor_2site(
             B_p * (1.0 / (B_p.norm() + 1e-10)),
         )
 
-    # Final CTM environment
-    A_final, B_final = best_params
+    # Use last evaluated params and environment
+    A_final, B_final = last_params
     A_final = A_final * (1.0 / (A_final.norm() + 1e-10))
     B_final = B_final * (1.0 / (B_final.norm() + 1e-10))
-    env_leaves = ctm_tensor_converge_2site(A_final, B_final, config_tuple)
-    env_A = jax.tree.unflatten(env_treedef, env_leaves[:n_env_leaves])
-    env_B = jax.tree.unflatten(env_treedef, env_leaves[n_env_leaves:])
-    E_gs = float(
-        compute_energy_ctm_tensor_2site(A_final, B_final, env_A, env_B, gate, d_phys)
-    )
+    env_A = jax.tree.unflatten(env_treedef, last_env_leaves[:n_env_leaves])
+    env_B = jax.tree.unflatten(env_treedef, last_env_leaves[n_env_leaves:])
+    E_gs = last_energy
     if config.gs_verbose:
         print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}")
 
