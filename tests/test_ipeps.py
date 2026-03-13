@@ -60,6 +60,8 @@ class TestIPEPSConfig:
         assert cfg.dt == 0.01
         assert cfg.ctm is not None
         assert isinstance(cfg.ctm, CTMConfig)
+        assert cfg.gs_verbose is False
+        assert cfg.gs_log_interval == 10
 
     def test_custom_values(self):
         cfg = iPEPSConfig(max_bond_dim=4, num_imaginary_steps=50, dt=0.05)
@@ -839,6 +841,38 @@ class TestOptimizeGsAd2Site:
         result = optimize_gs_ad(heisenberg_gate, None, config)
         _, _, E_gs = result
         assert np.isfinite(E_gs)
+
+
+class TestOptimizeGsAdLogging:
+    """Tests for AD optimization progress logging."""
+
+    @pytest.fixture
+    def heisenberg_gate(self):
+        d = 2
+        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+        return H.reshape(d, d, d, d)
+
+    def test_invalid_log_interval_raises(self, heisenberg_gate):
+        config = iPEPSConfig(gs_log_interval=0)
+        with pytest.raises(ValueError, match="gs_log_interval"):
+            optimize_gs_ad(heisenberg_gate, None, config)
+
+    def test_verbose_prints_progress(self, heisenberg_gate, capsys):
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=5),
+            gs_num_steps=2,
+            gs_learning_rate=1e-3,
+            gs_verbose=True,
+            gs_log_interval=1,
+        )
+        optimize_gs_ad(heisenberg_gate, None, config)
+        out = capsys.readouterr().out
+        assert "[iPEPS-AD:1site-dense] step 1/2" in out
+        assert "[iPEPS-AD:1site-dense] final E=" in out
 
 
 class TestOptimizeGsAdDenseOnly:

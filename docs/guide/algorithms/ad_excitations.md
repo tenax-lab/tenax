@@ -115,6 +115,8 @@ config = iPEPSConfig(
     ctm=CTMConfig(chi=16, max_iter=50),
     gs_num_steps=200,
     gs_learning_rate=1e-3,
+    gs_verbose=True,
+    gs_log_interval=10,
 )
 A_opt, env, E_gs = optimize_gs_ad(H_bond, A_init=None, config=config)
 ```

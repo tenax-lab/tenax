@@ -5,6 +5,8 @@ Extracts optimize_gs_ad and related helpers from ipeps.py.
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 
@@ -17,6 +19,34 @@ from tenax.algorithms.ipeps_rdm import (
     compute_energy_ctm_2site,
 )
 from tenax.core.tensor import Tensor
+
+
+def _should_log_step(step: int, num_steps: int, interval: int) -> bool:
+    if step == 0 or step == num_steps - 1:
+        return True
+    return (step + 1) % interval == 0
+
+
+def _log_ad_step(
+    backend: str,
+    step: int,
+    num_steps: int,
+    energy: float,
+    delta_energy: float,
+    best_energy: float,
+) -> None:
+    delta_str = "N/A" if not math.isfinite(delta_energy) else f"{delta_energy:.3e}"
+    print(
+        f"[iPEPS-AD:{backend}] step {step + 1}/{num_steps} "
+        f"E={energy:.10f} dE={delta_str} E_best={best_energy:.10f}"
+    )
+
+
+def _log_ad_converged(backend: str, step: int, delta_energy: float, tol: float) -> None:
+    print(
+        f"[iPEPS-AD:{backend}] converged at step {step + 1} "
+        f"(dE={delta_energy:.3e} < tol={tol:.3e})"
+    )
 
 
 def optimize_gs_ad(
@@ -48,6 +78,9 @@ def optimize_gs_ad(
         For 1-site Tensor: ``(A_opt, env, E_gs)`` where A_opt is Tensor, env is CTMTensorEnv
         For 2-site: ``((A_opt, B_opt), (env_A, env_B), E_gs)``
     """
+    if config.gs_log_interval < 1:
+        raise ValueError(f"gs_log_interval must be >= 1, got {config.gs_log_interval}")
+
     if config.unit_cell == "2site":
         return _optimize_gs_ad_2site(hamiltonian_gate, A_init, config)
 
@@ -101,6 +134,7 @@ def optimize_gs_ad(
     best_energy = float("inf")
     best_A = A
     prev_energy = float("inf")
+    log_interval = config.gs_log_interval
 
     for step in range(config.gs_num_steps):
         energy_val, grads = jax.value_and_grad(loss_fn)(A)
@@ -110,8 +144,34 @@ def optimize_gs_ad(
             best_energy = energy_float
             best_A = A
 
+        delta_energy = abs(energy_float - prev_energy)
+        logged = False
+        if config.gs_verbose and _should_log_step(
+            step, config.gs_num_steps, log_interval
+        ):
+            _log_ad_step(
+                "1site-dense",
+                step,
+                config.gs_num_steps,
+                energy_float,
+                delta_energy,
+                best_energy,
+            )
+            logged = True
+
         # Check convergence
-        if abs(energy_float - prev_energy) < config.gs_conv_tol:
+        if delta_energy < config.gs_conv_tol:
+            if config.gs_verbose:
+                if not logged:
+                    _log_ad_step(
+                        "1site-dense",
+                        step,
+                        config.gs_num_steps,
+                        energy_float,
+                        delta_energy,
+                        best_energy,
+                    )
+                _log_ad_converged("1site-dense", step, delta_energy, config.gs_conv_tol)
             break
         prev_energy = energy_float
 
@@ -125,6 +185,8 @@ def optimize_gs_ad(
     env_tuple = ctm_converge(A_final, config_tuple)
     env = CTMEnvironment(*env_tuple)
     E_gs = float(compute_energy_ctm(A_final, env, gate, d_phys))
+    if config.gs_verbose:
+        print(f"[iPEPS-AD:1site-dense] final E={E_gs:.10f}")
 
     return A_final, env, E_gs
 
@@ -175,6 +237,7 @@ def _optimize_gs_ad_tensor(
     best_energy = float("inf")
     best_A = A
     prev_energy = float("inf")
+    log_interval = config.gs_log_interval
 
     for step in range(config.gs_num_steps):
         energy_val, grads = jax.value_and_grad(loss_fn)(A)
@@ -184,7 +247,35 @@ def _optimize_gs_ad_tensor(
             best_energy = energy_float
             best_A = A
 
-        if abs(energy_float - prev_energy) < config.gs_conv_tol:
+        delta_energy = abs(energy_float - prev_energy)
+        logged = False
+        if config.gs_verbose and _should_log_step(
+            step, config.gs_num_steps, log_interval
+        ):
+            _log_ad_step(
+                "1site-tensor",
+                step,
+                config.gs_num_steps,
+                energy_float,
+                delta_energy,
+                best_energy,
+            )
+            logged = True
+
+        if delta_energy < config.gs_conv_tol:
+            if config.gs_verbose:
+                if not logged:
+                    _log_ad_step(
+                        "1site-tensor",
+                        step,
+                        config.gs_num_steps,
+                        energy_float,
+                        delta_energy,
+                        best_energy,
+                    )
+                _log_ad_converged(
+                    "1site-tensor", step, delta_energy, config.gs_conv_tol
+                )
             break
         prev_energy = energy_float
 
@@ -196,6 +287,8 @@ def _optimize_gs_ad_tensor(
     env_leaves = ctm_tensor_converge(A_final, config_tuple)
     env = jax.tree.unflatten(env_treedef, env_leaves)
     E_gs = float(compute_energy_ctm_tensor(A_final, env, gate, d_phys))
+    if config.gs_verbose:
+        print(f"[iPEPS-AD:1site-tensor] final E={E_gs:.10f}")
 
     return A_final, env, E_gs
 
@@ -279,6 +372,7 @@ def _optimize_gs_ad_2site(
     best_energy = float("inf")
     best_params = params
     prev_energy = float("inf")
+    log_interval = config.gs_log_interval
 
     for step in range(config.gs_num_steps):
         energy_val, grads = jax.value_and_grad(loss_fn)(params)
@@ -288,7 +382,33 @@ def _optimize_gs_ad_2site(
             best_energy = energy_float
             best_params = params
 
-        if abs(energy_float - prev_energy) < config.gs_conv_tol:
+        delta_energy = abs(energy_float - prev_energy)
+        logged = False
+        if config.gs_verbose and _should_log_step(
+            step, config.gs_num_steps, log_interval
+        ):
+            _log_ad_step(
+                "2site-dense",
+                step,
+                config.gs_num_steps,
+                energy_float,
+                delta_energy,
+                best_energy,
+            )
+            logged = True
+
+        if delta_energy < config.gs_conv_tol:
+            if config.gs_verbose:
+                if not logged:
+                    _log_ad_step(
+                        "2site-dense",
+                        step,
+                        config.gs_num_steps,
+                        energy_float,
+                        delta_energy,
+                        best_energy,
+                    )
+                _log_ad_converged("2site-dense", step, delta_energy, config.gs_conv_tol)
             break
         prev_energy = energy_float
 
@@ -309,6 +429,8 @@ def _optimize_gs_ad_2site(
     env_A = CTMEnvironment(*env_tuple[:8])
     env_B = CTMEnvironment(*env_tuple[8:])
     E_gs = float(compute_energy_ctm_2site(A_final, B_final, env_A, env_B, gate, d_phys))
+    if config.gs_verbose:
+        print(f"[iPEPS-AD:2site-dense] final E={E_gs:.10f}")
 
     return (A_final, B_final), (env_A, env_B), E_gs
 
@@ -368,8 +490,9 @@ def _optimize_gs_ad_tensor_2site(
     best_energy = float("inf")
     best_params = params
     prev_energy = float("inf")
+    log_interval = config.gs_log_interval
 
-    for _ in range(config.gs_num_steps):
+    for step in range(config.gs_num_steps):
         energy_val, grads = jax.value_and_grad(loss_fn)(params)
         energy_float = float(energy_val)
 
@@ -377,7 +500,35 @@ def _optimize_gs_ad_tensor_2site(
             best_energy = energy_float
             best_params = params
 
-        if abs(energy_float - prev_energy) < config.gs_conv_tol:
+        delta_energy = abs(energy_float - prev_energy)
+        logged = False
+        if config.gs_verbose and _should_log_step(
+            step, config.gs_num_steps, log_interval
+        ):
+            _log_ad_step(
+                "2site-tensor",
+                step,
+                config.gs_num_steps,
+                energy_float,
+                delta_energy,
+                best_energy,
+            )
+            logged = True
+
+        if delta_energy < config.gs_conv_tol:
+            if config.gs_verbose:
+                if not logged:
+                    _log_ad_step(
+                        "2site-tensor",
+                        step,
+                        config.gs_num_steps,
+                        energy_float,
+                        delta_energy,
+                        best_energy,
+                    )
+                _log_ad_converged(
+                    "2site-tensor", step, delta_energy, config.gs_conv_tol
+                )
             break
         prev_energy = energy_float
 
@@ -399,5 +550,7 @@ def _optimize_gs_ad_tensor_2site(
     E_gs = float(
         compute_energy_ctm_tensor_2site(A_final, B_final, env_A, env_B, gate, d_phys)
     )
+    if config.gs_verbose:
+        print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}")
 
     return (A_final, B_final), (env_A, env_B), E_gs

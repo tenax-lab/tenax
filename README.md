@@ -301,6 +301,8 @@ config = iPEPSConfig(
     ctm=CTMConfig(chi=16, max_iter=50),
     gs_num_steps=200,
     gs_learning_rate=1e-3,
+    gs_verbose=True,      # print per-step AD progress
+    gs_log_interval=10,   # print every 10 steps
     su_init=True,
 )
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
