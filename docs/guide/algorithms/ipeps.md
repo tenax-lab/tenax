@@ -181,9 +181,13 @@ config = iPEPSConfig(
     gs_optimizer="adam",
     gs_learning_rate=1e-3,
     gs_num_steps=200,
+    gs_verbose=True,      # print optimization progress
+    gs_log_interval=10,   # print every 10 AD steps
 )
 A_opt, env, E_gs = optimize_gs_ad(H_bond, A_init=None, config=config)
 ```
+
+Set ``gs_verbose=False`` (default) to disable console output.
 
 #### Simple update initialization
 

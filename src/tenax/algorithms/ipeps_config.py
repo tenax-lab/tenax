@@ -45,6 +45,10 @@ class iPEPSConfig:
                                tensor via simple update (``ipeps()``) instead of
                                random initialization.  Ignored when ``A_init``
                                is provided explicitly.
+        gs_verbose:            If True, print AD optimization progress.
+        gs_log_interval:       Print every N AD steps when ``gs_verbose`` is
+                               enabled. The first and final steps are always
+                               logged.
     """
 
     max_bond_dim: int = 2
@@ -59,6 +63,8 @@ class iPEPSConfig:
     gs_learning_rate: float = 1e-3
     gs_num_steps: int = 200
     gs_conv_tol: float = 1e-8
+    gs_verbose: bool = False
+    gs_log_interval: int = 10
     su_init: bool = False
 
 
