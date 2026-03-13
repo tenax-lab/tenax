@@ -842,6 +842,33 @@ class TestOptimizeGsAd2Site:
         _, _, E_gs = result
         assert np.isfinite(E_gs)
 
+    @pytest.mark.slow
+    def test_2site_heisenberg_ad_energy_benchmark(self, heisenberg_gate):
+        """SU + AD at D=2, chi=16 should reach E/site < -0.648.
+
+        The exact 2D Heisenberg square-lattice ground-state energy is
+        E/site = -0.6694 (Sandvik, PRB 56, 11678, 1997).  D=2 iPEPS
+        with AD optimization reaches ~-0.6548 in the literature.  The
+        threshold -0.648 confirms that AD meaningfully improves over
+        simple update (SU-only D=2 gives ~-0.63) and that the full
+        gradient pipeline (CTM fixed-point differentiation, truncated
+        SVD VJP) is working correctly.
+        """
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            num_imaginary_steps=100,
+            dt=0.3,
+            ctm=CTMConfig(chi=16, max_iter=60),
+            gs_num_steps=30,
+            gs_learning_rate=1e-2,
+            unit_cell="2site",
+            su_init=True,
+        )
+        _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
+        assert E_gs < -0.648, (
+            f"E/site = {E_gs:.6f}, expected < -0.648 for D=2 AD-optimized iPEPS"
+        )
+
 
 class TestOptimizeGsAdLogging:
     """Tests for AD optimization progress logging."""
