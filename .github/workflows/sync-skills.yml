@@ -1,0 +1,45 @@
+name: Sync skills to tenax-toolkit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.claude/skills/**'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: tenax-lab/tenax-toolkit
+          token: ${{ secrets.PLUGIN_REPO_TOKEN }}
+          path: plugin-repo
+
+      - name: Sync skills
+        run: |
+          rm -rf plugin-repo/skills/
+          cp -r .claude/skills plugin-repo/skills/
+
+      - name: Create PR if changed
+        working-directory: plugin-repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+            echo "No changes to sync"
+            exit 0
+          fi
+          BRANCH="sync-skills-$(date +%Y%m%d-%H%M%S)"
+          git checkout -b "$BRANCH"
+          git add skills/
+          git commit -m "chore: sync skills from tenax main"
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "chore: sync skills from tenax" \
+            --body "Auto-synced from [tenax main](https://github.com/tenax-lab/tenax)." \
+            --repo tenax-lab/tenax-toolkit
+        env:
+          GH_TOKEN: ${{ secrets.PLUGIN_REPO_TOKEN }}
