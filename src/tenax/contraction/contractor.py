@@ -447,16 +447,13 @@ def _contract_symmetric(
                 expr = block_expr_cache[cache_key]
                 result_array = expr(*arrays, backend="jax")
             else:
-                try:
-                    expr = opt_einsum.contract_expression(
-                        subscripts,
-                        *block_shapes,
-                        optimize=optimize,
-                    )
-                    block_expr_cache[cache_key] = expr
-                    result_array = expr(*arrays, backend="jax")
-                except Exception:
-                    continue
+                expr = opt_einsum.contract_expression(
+                    subscripts,
+                    *block_shapes,
+                    optimize=optimize,
+                )
+                block_expr_cache[cache_key] = expr
+                result_array = expr(*arrays, backend="jax")
 
             # Apply fermionic sign from leg reordering
             if is_fermionic and inversion_pairs:

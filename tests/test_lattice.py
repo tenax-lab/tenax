@@ -58,6 +58,14 @@ class TestLatticeDataclass:
         for site in lat.sites:
             assert set(lat.neighbor_map[site].keys()) == DIRECTIONS
 
+    def test_neighbor_map_is_immutable(self):
+        """neighbor_map and its inner dicts must be read-only."""
+        lat = square()
+        with pytest.raises(TypeError):
+            lat.neighbor_map["a"] = {}  # type: ignore[index]
+        with pytest.raises(TypeError):
+            lat.neighbor_map["a"]["left"] = "z"  # type: ignore[index]
+
 
 # ---------------------------------------------------------------------------
 # Factory functions
@@ -254,3 +262,22 @@ class TestCtmMultisiteIntegration:
         }
         envs = ctm_multisite(tensors, lat, chi=4, max_iter=5, conv_tol=1e-6)
         assert set(envs.keys()) == set(lat.sites)
+
+    def test_missing_site_raises(self):
+        """ctm_multisite raises ValueError when a lattice site is missing."""
+        from tenax.algorithms._ctm_tensor_convergence import ctm_multisite
+
+        lat = checkerboard()
+        A = _make_random_dense_site_tensor(jax.random.PRNGKey(0))
+        with pytest.raises(ValueError, match="missing sites.*'b'"):
+            ctm_multisite({"a": A}, lat, chi=4)
+
+    def test_extra_site_raises(self):
+        """ctm_multisite raises ValueError for sites not in lattice."""
+        from tenax.algorithms._ctm_tensor_convergence import ctm_multisite
+
+        lat = square()
+        A = _make_random_dense_site_tensor(jax.random.PRNGKey(0))
+        B = _make_random_dense_site_tensor(jax.random.PRNGKey(1))
+        with pytest.raises(ValueError, match="not in lattice.*'z'"):
+            ctm_multisite({"a": A, "z": B}, lat, chi=4)
