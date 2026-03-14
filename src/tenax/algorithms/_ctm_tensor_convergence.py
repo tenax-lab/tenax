@@ -320,6 +320,16 @@ def ctm_multisite(
     Returns:
         ``{site_name: CTMTensorEnv}`` — converged environments.
     """
+    # Validate: every lattice site must have a corresponding tensor
+    missing = set(lattice.sites) - set(site_tensors.keys())
+    if missing:
+        raise ValueError(
+            f"site_tensors is missing sites defined in lattice: {sorted(missing)}"
+        )
+    extra = set(site_tensors.keys()) - set(lattice.sites)
+    if extra:
+        raise ValueError(f"site_tensors contains sites not in lattice: {sorted(extra)}")
+
     # Map site names to coordinates: site_i -> (i, 0)
     name_to_coord: dict[str, Coord] = {
         name: (i, 0) for i, name in enumerate(lattice.sites)

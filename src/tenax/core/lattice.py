@@ -7,6 +7,8 @@ functions for common lattice types used in tensor-network simulations.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Any
 
 __all__ = [
     "Bond",
@@ -40,12 +42,20 @@ class Lattice:
         Bonds connecting sites (may include self-bonds for single-site cells).
     neighbor_map : dict[str, dict[str, str]]
         For each site, a mapping from direction ("left", "right", "top",
-        "bottom") to the neighboring site label.
+        "bottom") to the neighboring site label.  Frozen on construction
+        via ``MappingProxyType`` to enforce immutability.
     """
 
     sites: tuple[str, ...]
     bonds: tuple[Bond, ...]
     neighbor_map: dict[str, dict[str, str]]
+
+    def __post_init__(self) -> None:
+        # Deep-freeze neighbor_map so callers cannot mutate topology.
+        frozen: Any = MappingProxyType(
+            {k: MappingProxyType(v) for k, v in self.neighbor_map.items()}
+        )
+        object.__setattr__(self, "neighbor_map", frozen)
 
 
 # ---------------------------------------------------------------------------
