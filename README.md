@@ -474,7 +474,8 @@ generates per-algorithm PNG charts grouped by size and backend. See
 Tenax has an official [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin with 18 domain-specific skills covering DMRG, iPEPS, TRG, fermionic PEPS, AutoMPO, migration guides, and more. Install it with:
 
 ```bash
-claude plugin add tenax-lab/tenax-toolkit
+claude plugin marketplace add tenax-lab/tenax-toolkit
+claude plugin install tenax-toolkit
 ```
 
 Once installed, Claude can guide you through tensor network calculations with Tenax-specific code examples and troubleshooting. See the [documentation](https://tenax.readthedocs.io/en/latest/guide/claude_code.html) for details.

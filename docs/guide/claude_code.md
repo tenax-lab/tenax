@@ -8,10 +8,12 @@ Tenax-specific code examples and troubleshooting.
 
 ## Installing the plugin
 
-In any terminal with Claude Code available, run:
+In any terminal with Claude Code available, first add the Tenax marketplace
+(one-time setup), then install the plugin:
 
 ```bash
-claude plugin add tenax-lab/tenax-toolkit
+claude plugin marketplace add tenax-lab/tenax-toolkit
+claude plugin install tenax-toolkit
 ```
 
 This installs all Tenax skills into your Claude Code session. No API keys
