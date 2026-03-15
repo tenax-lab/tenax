@@ -330,6 +330,39 @@ def ctm_multisite(
     if extra:
         raise ValueError(f"site_tensors contains sites not in lattice: {sorted(extra)}")
 
+    # Validate lattice neighbor map topology
+    required_dirs = {"left", "right", "top", "bottom"}
+    map_missing = set(lattice.sites) - set(lattice.neighbor_map.keys())
+    if map_missing:
+        raise ValueError(
+            f"lattice.neighbor_map is missing sites: {sorted(map_missing)}"
+        )
+    map_extra = set(lattice.neighbor_map.keys()) - set(lattice.sites)
+    if map_extra:
+        raise ValueError(
+            f"lattice.neighbor_map contains unknown sites: {sorted(map_extra)}"
+        )
+    for site in lattice.sites:
+        neighbors = lattice.neighbor_map[site]
+        dirs = set(neighbors.keys())
+        missing_dirs = required_dirs - dirs
+        extra_dirs = dirs - required_dirs
+        if missing_dirs or extra_dirs:
+            raise ValueError(
+                f"lattice.neighbor_map[{site!r}] has invalid directions: "
+                f"missing={sorted(missing_dirs)}, extra={sorted(extra_dirs)}"
+            )
+        bad_neighbors = {
+            direction: nb
+            for direction, nb in neighbors.items()
+            if nb not in lattice.sites
+        }
+        if bad_neighbors:
+            raise ValueError(
+                f"lattice.neighbor_map[{site!r}] has neighbors not in lattice.sites: "
+                f"{bad_neighbors}"
+            )
+
     # Map site names to coordinates: site_i -> (i, 0)
     name_to_coord: dict[str, Coord] = {
         name: (i, 0) for i, name in enumerate(lattice.sites)
