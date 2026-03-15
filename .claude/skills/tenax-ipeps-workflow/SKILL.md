@@ -39,7 +39,26 @@ systems or entanglement entropy, use cylinder DMRG.
 
 iPEPS works with nearest-neighbor gates (two-site operators), not MPOs.
 
-### Building a gate
+### Pre-built gates
+
+Tenax provides ready-made gates for common models:
+
+```python
+from tenax import heisenberg_gate, xxz_gate
+
+# Isotropic Heisenberg: H = Sz Sz + 0.5 (S+ S- + S- S+)
+gate = heisenberg_gate()
+
+# Anisotropic XXZ: H = delta * Sz Sz + 0.5 (S+ S- + S- S+)
+gate_xxz = xxz_gate(delta=1.5)  # delta=1.0 recovers Heisenberg
+```
+
+Both return a `DenseTensor` with shape `(2, 2, 2, 2)` and labels
+`(si, sj, si_out, sj_out)`. They also work as plain `jax.Array` gates.
+
+### Building a custom gate
+
+For models without a pre-built gate, construct the two-site operator manually:
 
 ```python
 import jax.numpy as jnp
@@ -49,7 +68,7 @@ Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
 Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
 Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
 
-# Heisenberg gate: h = Sz⊗Sz + (1/2)(S+⊗S- + S-⊗S+)
+# Custom gate example: J1-J2 nearest-neighbor part
 gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) \
      + 0.5 * (jnp.einsum("ij,kl->ikjl", Sp, Sm)
              + jnp.einsum("ij,kl->ikjl", Sm, Sp))
@@ -208,6 +227,81 @@ ax.set_ylabel("Excitation energy")
 ax.legend()
 plt.savefig("dispersion.png")
 ```
+
+---
+
+## Stage 4b: Lattice Abstraction and Multi-Site CTM
+
+For lattices beyond simple square (1-site) or checkerboard (2-site), Tenax
+provides a declarative `Lattice` class with built-in geometries and a
+`ctm_multisite()` entry point for 3+ site unit cells.
+
+### Built-in lattices
+
+```python
+from tenax import square, checkerboard, honeycomb, triangular, kagome
+
+lat = kagome()      # 3 sites (u, v, w) per unit cell
+print(lat.sites)    # ('u', 'v', 'w')
+print(lat.bonds)    # Bond connectivity
+print(lat.neighbor_map)  # site -> {left/right/top/bottom -> neighbor}
+```
+
+Available factories: `square()` (1-site), `checkerboard()` (2-site),
+`honeycomb()` (2-site), `triangular()` (1-site with diagonal bonds),
+`kagome()` (3-site).
+
+### Custom lattices
+
+```python
+from tenax import Lattice, Bond
+
+my_lattice = Lattice(
+    sites=("a", "b", "c"),
+    bonds=(Bond("a", "b", "horizontal"), Bond("b", "c", "vertical")),
+    neighbor_map={
+        "a": {"left": "c", "right": "b", "top": "c", "bottom": "b"},
+        "b": {"left": "a", "right": "c", "top": "a", "bottom": "c"},
+        "c": {"left": "b", "right": "a", "top": "b", "bottom": "a"},
+    },
+)
+```
+
+### Multi-site CTM with ctm_multisite()
+
+For 3+ site unit cells, use `ctm_multisite()` instead of `ctm()` or
+`ctm_2site()`. It accepts string-keyed site tensors and a `Lattice`:
+
+```python
+from tenax import ctm_multisite, kagome
+from tenax.algorithms._ctm_tensor_convergence import ctm_tensor, ctm_tensor_2site
+
+lat = kagome()
+# site_tensors: dict mapping site names to DenseTensor/SymmetricTensor
+envs = ctm_multisite(site_tensors, lat, chi=16, max_iter=60)
+# envs["u"], envs["v"], envs["w"] are the converged CTMTensorEnv objects
+```
+
+For 1-site and 2-site cells, prefer `ctm_tensor()` and `ctm_tensor_2site()`
+which are optimized for those cases.
+
+---
+
+## Stage 4c: Split-CTM (Alternative CTM Method)
+
+For large bond dimensions, the split-CTM algorithm keeps ket and bra layers
+separate, reducing the projector cost from O(chi^3 D^6) to O(chi^3 D^3):
+
+```python
+from tenax import ctm_split, compute_energy_split_ctm, CTMConfig
+
+config = CTMConfig(chi=20, chi_I=40, max_iter=60)
+env_split = ctm_split(A, config)
+E = compute_energy_split_ctm(A, env_split, gate, d)
+```
+
+The `chi_I` parameter controls the interlayer bond dimension. Set `chi_I >= chi`
+(typical: `chi_I = 2 * chi`).
 
 ---
 
