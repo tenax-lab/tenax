@@ -567,26 +567,18 @@ def compute_pess_energy(
     A = pess_to_ipeps(site_tensors, simplex_tensors, lambdas)
     d_eff = A.shape[4]
 
-    # Build an effective 2-site Hamiltonian for the super-site
-    # For simplicity, use the identity on the second super-site and
-    # the triangle Hamiltonian on the first — this measures E_triangle
-    # directly from the 1-site RDM of the super-site.
-    # However, compute_energy_ctm expects a 2-site gate.
-    # Instead, build H_eff = H_tri (x) I_8 + I_8 (x) H_tri as the
-    # nearest-neighbor effective Hamiltonian. The energy per super-site
-    # is then E_triangle.
-
-    # Effective 2-site gate: (d_eff, d_eff, d_eff, d_eff)
-    H_eff = np.kron(H_tri, np.eye(d_eff)) + np.kron(np.eye(d_eff), H_tri)
+    # Build an effective 2-site gate: H_tri (x) I measures the triangle
+    # Hamiltonian on the first super-site of each bond pair only.
+    # compute_energy_ctm returns E_h + E_v = 2*<H_tri>, correctly
+    # accounting for the 2 triangles (up + down) per unit cell.
+    # Dividing by 3 gives E/site = 2<H_tri>/3.
+    H_eff = np.kron(H_tri, np.eye(d_eff))
     H_eff_4leg = H_eff.reshape(d_eff, d_eff, d_eff, d_eff)
 
     config = CTMConfig(chi=chi, max_iter=100)
     env = ctm(A, config)
 
     E = compute_energy_ctm(A, env, jnp.array(H_eff_4leg), d_eff)
-    # E from CTM counts horizontal + vertical bonds, each carrying H_tri.
-    # Each super-site represents one triangle with 3 Kagome sites.
-    # Energy per Kagome site = E / 3.
     E_per_site = float(E) / 3.0
 
     return E_per_site

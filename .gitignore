@@ -67,3 +67,4 @@ docs/_build/
 
 # Worktrees
 .worktrees/
+plugin/

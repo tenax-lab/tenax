@@ -60,6 +60,7 @@ guide/algorithms/auto_mpo
 :caption: Tools
 
 guide/benchmarks
+guide/claude_code
 ```
 
 ## Reference
@@ -69,6 +70,15 @@ guide/benchmarks
 :caption: API Reference
 
 api/index
+```
+
+## Contributing
+
+```{toctree}
+:maxdepth: 2
+:caption: Contributing
+
+guide/contributing
 ```
 
 ## Additional Resources

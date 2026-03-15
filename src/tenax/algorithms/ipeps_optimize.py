@@ -80,6 +80,8 @@ def optimize_gs_ad(
     """
     if config.gs_log_interval < 1:
         raise ValueError(f"gs_log_interval must be >= 1, got {config.gs_log_interval}")
+    if config.gs_num_steps < 0:
+        raise ValueError(f"gs_num_steps must be >= 0, got {config.gs_num_steps}")
 
     if config.unit_cell == "2site":
         return _optimize_gs_ad_2site(hamiltonian_gate, A_init, config)
@@ -305,8 +307,19 @@ def _optimize_gs_ad_2site(
 
     Accepts dense ``jax.Array`` or Tensor-protocol objects.
     """
-    if isinstance(AB_init, tuple) and any(isinstance(t, Tensor) for t in AB_init):
-        return _optimize_gs_ad_tensor_2site(hamiltonian_gate, AB_init, config)
+    if AB_init is not None:
+        if not isinstance(AB_init, tuple) or len(AB_init) != 2:
+            raise TypeError(
+                "For unit_cell='2site', A_init must be None or a tuple (A, B)."
+            )
+        has_tensor = any(isinstance(t, Tensor) for t in AB_init)
+        if has_tensor and not all(isinstance(t, Tensor) for t in AB_init):
+            raise TypeError(
+                "For unit_cell='2site', A_init must be either "
+                "(Tensor, Tensor) or (array, array); mixed tuples are not supported."
+            )
+        if has_tensor:
+            return _optimize_gs_ad_tensor_2site(hamiltonian_gate, AB_init, config)
 
     import optax
 
@@ -422,6 +435,12 @@ def _optimize_gs_ad_2site(
             A_p / (jnp.linalg.norm(A_p) + 1e-10),
             B_p / (jnp.linalg.norm(B_p) + 1e-10),
         )
+
+    if last_env_tuple is None:
+        energy_val, env_tuple = loss_fn(params)
+        last_energy = float(energy_val)
+        last_params = params
+        last_env_tuple = jax.tree.map(lambda x: jax.lax.stop_gradient(x), env_tuple)
 
     # Use the last evaluated params and environment (not "best" which can
     # capture transient CTM artifacts at finite chi).
@@ -543,6 +562,12 @@ def _optimize_gs_ad_tensor_2site(
             A_p * (1.0 / (A_p.norm() + 1e-10)),
             B_p * (1.0 / (B_p.norm() + 1e-10)),
         )
+
+    if last_env_leaves is None:
+        energy_val, env_leaves = loss_fn(params)
+        last_energy = float(energy_val)
+        last_params = params
+        last_env_leaves = jax.tree.map(lambda x: jax.lax.stop_gradient(x), env_leaves)
 
     # Use last evaluated params and environment
     A_final, B_final = last_params

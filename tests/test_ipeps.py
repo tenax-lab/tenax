@@ -842,9 +842,68 @@ class TestOptimizeGsAd2Site:
         _, _, E_gs = result
         assert np.isfinite(E_gs)
 
+    def test_2site_ad_zero_steps_returns_energy(self, heisenberg_gate):
+        """gs_num_steps=0 should return initial energy without crashing."""
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=0,
+            unit_cell="2site",
+        )
+        (A_opt, B_opt), (env_A, env_B), E_gs = optimize_gs_ad(
+            heisenberg_gate, None, config
+        )
+        assert A_opt.shape == (2, 2, 2, 2, 2)
+        assert B_opt.shape == (2, 2, 2, 2, 2)
+        assert isinstance(env_A, CTMEnvironment)
+        assert isinstance(env_B, CTMEnvironment)
+        assert np.isfinite(E_gs)
+
+    def test_2site_ad_mixed_init_types_raise(self, heisenberg_gate):
+        """Mixed (Tensor, dense) init must raise a clear error."""
+        from tenax.core import DenseTensor, FlowDirection, TensorIndex, U1Symmetry
+
+        D, d = 2, 2
+        sym = U1Symmetry()
+        charges = np.zeros(D, dtype=np.int32)
+        phys_charges = np.zeros(d, dtype=np.int32)
+        indices = (
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="u"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="d"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="l"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        A_tensor = DenseTensor(
+            jax.random.normal(jax.random.PRNGKey(0), (D, D, D, D, d)),
+            indices,
+        )
+        B_dense = jax.random.normal(jax.random.PRNGKey(1), (D, D, D, D, d))
+
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=1,
+            unit_cell="2site",
+        )
+        with pytest.raises(TypeError, match="mixed tuples are not supported"):
+            optimize_gs_ad(heisenberg_gate, (A_tensor, B_dense), config)
+
+    def test_2site_ad_non_tuple_init_raises(self, heisenberg_gate):
+        """2-site AD requires A_init to be None or a tuple (A, B)."""
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=1,
+            unit_cell="2site",
+        )
+        A_dense = jax.random.normal(jax.random.PRNGKey(0), (2, 2, 2, 2, 2))
+        with pytest.raises(TypeError, match="must be None or a tuple"):
+            optimize_gs_ad(heisenberg_gate, A_dense, config)
+
     @pytest.mark.slow
     def test_2site_heisenberg_ad_energy_benchmark(self, heisenberg_gate):
-        """SU + AD at D=2, chi=16 should give E/site in a physical range.
+        """SU + AD at D=2, chi=16 should be physical and improve over SU init.
 
         The exact 2D Heisenberg square-lattice ground-state energy is
         E/site = -0.6694 (Sandvik, PRB 56, 11678, 1997).  At finite CTM
@@ -854,10 +913,22 @@ class TestOptimizeGsAd2Site:
         1. E > -0.9: catches unphysical results from numerical failures
            (the physical lower bound for S=1/2 Heisenberg is -3/2 per
            site, but D=2 chi=16 should never reach that far).
-        2. E < -0.648: confirms the AD gradient pipeline produces
-           competitive energies (literature D=2 ≈ -0.655).
+        2. E < -0.648: confirms competitive D=2 energy.
+        3. AD lowers energy compared with SU initialization from
+           the same starting tensors.
         """
-        config = iPEPSConfig(
+        su_config = iPEPSConfig(
+            max_bond_dim=2,
+            num_imaginary_steps=100,
+            dt=0.3,
+            ctm=CTMConfig(chi=16, max_iter=60),
+            unit_cell="2site",
+        )
+        E_su, peps_su, _ = ipeps(heisenberg_gate, None, su_config)
+        A_su = peps_su.get_tensor((0, 0)).todense()
+        B_su = peps_su.get_tensor((1, 0)).todense()
+
+        ad_config = iPEPSConfig(
             max_bond_dim=2,
             num_imaginary_steps=100,
             dt=0.3,
@@ -865,14 +936,16 @@ class TestOptimizeGsAd2Site:
             gs_num_steps=30,
             gs_learning_rate=1e-2,
             unit_cell="2site",
-            su_init=True,
         )
-        _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
+        _, _, E_gs = optimize_gs_ad(heisenberg_gate, (A_su, B_su), ad_config)
         assert E_gs > -0.9, (
             f"E/site = {E_gs:.6f} is unphysically low — possible numerical failure"
         )
         assert E_gs < -0.648, (
             f"E/site = {E_gs:.6f}, expected < -0.648 for D=2 AD-optimized iPEPS"
+        )
+        assert E_gs < float(E_su) - 1e-3, (
+            f"AD did not improve SU init: E_ad={E_gs:.6f}, E_su={float(E_su):.6f}"
         )
 
 
