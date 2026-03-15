@@ -72,6 +72,15 @@ guide/claude_code
 api/index
 ```
 
+## Contributing
+
+```{toctree}
+:maxdepth: 2
+:caption: Contributing
+
+guide/contributing
+```
+
 ## Additional Resources
 
 ```{toctree}

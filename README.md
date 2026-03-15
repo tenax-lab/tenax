@@ -479,35 +479,35 @@ claude plugin add tenax-lab/tenax-toolkit
 
 Once installed, Claude can guide you through tensor network calculations with Tenax-specific code examples and troubleshooting. See the [documentation](https://tenax.readthedocs.io/en/latest/guide/claude_code.html) for details.
 
-## Development
+## Contributing
+
+We welcome contributions! See the [contributing guide](https://tenax.readthedocs.io/en/latest/guide/contributing.html) for full details.
+
+Quick start:
 
 ```bash
-# Clone and install with dev dependencies
 git clone https://github.com/tenax-lab/tenax.git
 cd tenax
 uv sync --all-extras --dev
-
-# Install pre-commit hooks (ruff lint + format on every commit)
 uv run pre-commit install
 
-# Run tests
-uv run pytest -m core          # fast core tests only
-uv run pytest -m algorithm     # algorithm tests (DMRG, TRG, iPEPS, integration)
-uv run pytest -m "not slow"    # skip expensive tests
-uv run pytest                  # full suite
-
-# Lint
-uv run ruff check src/ tests/
+# Run tests before submitting a PR
+uv run pytest -m core          # fast core tests (~30s)
+uv run pytest -m "not slow"    # everything except expensive benchmarks
 ```
 
-Work-in-progress design documents live in `design/`.
+- **Branch workflow:** Create a feature branch, open a PR against `main`, CI must pass.
+- **Code style:** Enforced by ruff via pre-commit hooks.
+- **Tests:** Place in `tests/test_<module>.py`; mark expensive tests with `@pytest.mark.slow`.
+- **New public API:** Update `__init__.py` exports, `README.md`, and `docs/api/`.
 
 ## Documentation
 
 Full API documentation is built with Sphinx:
 
 ```bash
-cd docs && make html
+uv sync --extra docs
+cd docs && uv run make html
 ```
 
 The generated HTML is in `docs/_build/html/`.
