@@ -281,3 +281,29 @@ class TestCtmMultisiteIntegration:
         B = _make_random_dense_site_tensor(jax.random.PRNGKey(1))
         with pytest.raises(ValueError, match="not in lattice.*'z'"):
             ctm_multisite({"a": A, "z": B}, lat, chi=4)
+
+    def test_neighbor_map_missing_direction_raises(self):
+        """ctm_multisite validates required directions in neighbor_map."""
+        from tenax.algorithms._ctm_tensor_convergence import ctm_multisite
+
+        lat = Lattice(
+            sites=("a",),
+            bonds=(),
+            neighbor_map={"a": {"right": "a"}},
+        )
+        A = _make_random_dense_site_tensor(jax.random.PRNGKey(0))
+        with pytest.raises(ValueError, match="invalid directions"):
+            ctm_multisite({"a": A}, lat, chi=4)
+
+    def test_neighbor_map_unknown_site_raises(self):
+        """ctm_multisite validates neighbor targets exist in lattice.sites."""
+        from tenax.algorithms._ctm_tensor_convergence import ctm_multisite
+
+        lat = Lattice(
+            sites=("a",),
+            bonds=(),
+            neighbor_map={"a": {"left": "x", "right": "a", "top": "a", "bottom": "a"}},
+        )
+        A = _make_random_dense_site_tensor(jax.random.PRNGKey(0))
+        with pytest.raises(ValueError, match="neighbors not in lattice"):
+            ctm_multisite({"a": A}, lat, chi=4)
