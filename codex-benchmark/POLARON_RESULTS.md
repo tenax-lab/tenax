@@ -77,6 +77,8 @@ Times are in milliseconds and are means over the 3 recorded trials.
 - `loop_dispatch_then_sync` consistently beats `loop_sync_each`, which is
   evidence that repeated independent `jnp.linalg.qr` calls are dispatched
   asynchronously enough for device work to overlap with later host submission.
+- The single-GPU overlap is real but modest; it is not the same thing as an
+  explicit sector scheduler.
 - `batched_vmap_jit` is excellent for small matrices (`128`), roughly
   break-even by `256`, and dramatically worse for `512` and `1024`.
 - The catastrophic `1024`-size `batched_vmap_jit` result is not mainly compile

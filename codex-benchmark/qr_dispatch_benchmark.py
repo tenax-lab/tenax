@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 @dataclass
@@ -29,6 +30,7 @@ def device_summary() -> dict[str, str]:
         "platforms": ",".join(platforms),
         "devices": str(devices),
         "primary_device": str(devices[0]) if devices else "none",
+        "x64_enabled": str(jax.config.x64_enabled),
     }
 
 
@@ -43,11 +45,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", choices=("float32", "float64"), default="float32")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--split-devices",
+        type=int,
+        default=0,
+        help=(
+            "If at least this many visible JAX devices are present on the active "
+            "backend, split the workload across the first N devices and interleave "
+            "QR submissions."
+        ),
+    )
+    parser.add_argument(
         "--two-gpu-split",
         action="store_true",
         help=(
-            "If two or more GPU devices are available, split the workload across "
-            "the first two GPUs and benchmark concurrent dispatch."
+            "Compatibility alias for --split-devices 2 on GPU."
         ),
     )
     parser.add_argument(
@@ -58,17 +69,30 @@ def parse_args() -> argparse.Namespace:
             "second call for the vmap QR path."
         ),
     )
+    parser.add_argument(
+        "--split-only",
+        action="store_true",
+        help=(
+            "When a split-device benchmark is requested, run only the split mode. "
+            "This avoids materializing the full batch on a single default device."
+        ),
+    )
     return parser.parse_args()
 
 
 def make_inputs(
     num_matrices: int, matrix_size: int, dtype_name: str, seed: int
-) -> jax.Array:
-    dtype = getattr(jnp, dtype_name)
-    key = jax.random.PRNGKey(seed)
-    return jax.random.normal(
-        key, (num_matrices, matrix_size, matrix_size), dtype=dtype
-    )
+) -> np.ndarray:
+    dtype = getattr(np, dtype_name)
+    rng = np.random.default_rng(seed)
+    return rng.standard_normal(
+        (num_matrices, matrix_size, matrix_size)
+    ).astype(dtype, copy=False)
+
+
+def configure_precision(dtype_name: str) -> None:
+    if dtype_name == "float64" and not jax.config.x64_enabled:
+        jax.config.update("jax_enable_x64", True)
 
 
 def _checksum_terms(q: jax.Array, r: jax.Array) -> jax.Array:
@@ -197,79 +221,118 @@ def has_two_gpu_devices() -> bool:
     return len(gpus) >= 2
 
 
-def prepare_two_gpu_split_inputs(mats: jax.Array) -> tuple[jax.Array, jax.Array]:
-    gpu_devices = [device for device in jax.devices() if device.platform == "gpu"]
-    if len(gpu_devices) < 2:
-        raise RuntimeError("two_gpu_split benchmark requires at least two GPU devices")
+def visible_devices(platform: str | None = None) -> list[jax.Device]:
+    devices = jax.devices()
+    if platform is None:
+        return devices
+    return [device for device in devices if device.platform == platform]
 
-    split = mats.shape[0] // 2
-    if split == 0 or split == mats.shape[0]:
-        raise ValueError(
-            "two_gpu_split benchmark requires at least two matrices so the workload "
-            "can be split across devices"
+
+def has_at_least_n_devices(n: int, platform: str | None = None) -> bool:
+    return len(visible_devices(platform)) >= n
+
+
+def prepare_device_split_inputs(
+    mats: Any, num_devices: int, platform: str | None = None
+) -> tuple[jax.Array, ...]:
+    target_devices = visible_devices(platform)
+    if len(target_devices) < num_devices:
+        platform_msg = f" on platform '{platform}'" if platform else ""
+        raise RuntimeError(
+            f"split benchmark requires at least {num_devices} visible devices"
+            f"{platform_msg}"
         )
 
-    d0, d1 = gpu_devices[:2]
-    host_mats_0 = mats[:split]
-    host_mats_1 = mats[split:]
+    if mats.shape[0] < num_devices:
+        raise ValueError(
+            "split benchmark requires at least as many matrices as devices so the "
+            "workload can be partitioned across devices"
+        )
 
-    with jax.default_device(d0):
-        mats_0 = jax.device_put(host_mats_0, d0)
-    with jax.default_device(d1):
-        mats_1 = jax.device_put(host_mats_1, d1)
-    return mats_0, mats_1
+    selected_devices = target_devices[:num_devices]
+    device_batches = []
+    start = 0
+    total = mats.shape[0]
+    for offset, device in enumerate(selected_devices):
+        remaining = total - start
+        devices_left = len(selected_devices) - offset
+        batch_size = remaining // devices_left
+        host_batch = mats[start : start + batch_size]
+        start += batch_size
+        with jax.default_device(device):
+            device_batches.append(jax.device_put(host_batch, device))
+    return tuple(device_batches)
+
+
+def prepare_two_gpu_split_inputs(mats: jax.Array) -> tuple[jax.Array, jax.Array]:
+    device_batches = prepare_device_split_inputs(mats, num_devices=2, platform="gpu")
+    return device_batches[0], device_batches[1]
+
+
+def _is_device_batch_tuple(mats: Any) -> bool:
+    return isinstance(mats, tuple) and all(hasattr(batch, "shape") for batch in mats)
+
+
+def bench_multi_device_split_dispatch_then_sync(
+    mats: Any,
+    num_devices: int | None = None,
+    platform: str | None = None,
+    name: str | None = None,
+) -> Timing:
+    """Dispatch independent QR calls across pre-placed device batches.
+
+    Inputs are expected to already live on distinct devices if this function is
+    used from the timed benchmark path. Calls are interleaved across the
+    device-resident batches so the host alternates submissions rather than
+    draining one device fully before touching the next.
+    """
+    if _is_device_batch_tuple(mats):
+        device_batches = mats
+    else:
+        if num_devices is None:
+            raise ValueError("num_devices is required when mats are not pre-split")
+        device_batches = prepare_device_split_inputs(mats, num_devices, platform)
+
+    mode_name = name or f"split_{len(device_batches)}_devices_dispatch_then_sync"
+
+    start = time.perf_counter()
+
+    dispatch_start = time.perf_counter()
+    outputs_by_device = [[] for _ in device_batches]
+    max_len = max(batch.shape[0] for batch in device_batches)
+    for i in range(max_len):
+        for device_index, batch in enumerate(device_batches):
+            if i < batch.shape[0]:
+                q, r = jnp.linalg.qr(batch[i])
+                outputs_by_device[device_index].append(_checksum_terms(q, r))
+    dispatch_end = time.perf_counter()
+
+    sync_start = time.perf_counter()
+    stacked_outputs = []
+    for device_outputs in outputs_by_device:
+        stacked = jnp.stack(device_outputs)
+        stacked_outputs.append(jax.block_until_ready(stacked))
+    sync_end = time.perf_counter()
+
+    checksum = sum(float(jnp.sum(stacked)) for stacked in stacked_outputs)
+    total_s = time.perf_counter() - start
+    return Timing(
+        name=mode_name,
+        issue_phase_s=dispatch_end - dispatch_start,
+        tail_wait_s=sync_end - sync_start,
+        total_s=total_s,
+        checksum=checksum,
+    )
 
 
 def bench_two_gpu_split_dispatch_then_sync(
     mats: Any,
 ) -> Timing:
-    """Dispatch independent QR calls across two pre-placed GPU batches.
-
-    Inputs are expected to already live on distinct devices if this function is
-    used from the timed benchmark path. Calls are interleaved across the two
-    device-resident batches so the host alternates submissions to ``cuda:0`` and
-    ``cuda:1`` rather than draining one device fully before touching the other.
-    """
-    if (
-        isinstance(mats, tuple)
-        and len(mats) == 2
-        and hasattr(mats[0], "shape")
-        and hasattr(mats[1], "shape")
-    ):
-        mats_0, mats_1 = mats
-    else:
-        mats_0, mats_1 = prepare_two_gpu_split_inputs(mats)
-
-    start = time.perf_counter()
-
-    dispatch_start = time.perf_counter()
-    outputs_0 = []
-    outputs_1 = []
-    max_len = max(mats_0.shape[0], mats_1.shape[0])
-    for i in range(max_len):
-        if i < mats_0.shape[0]:
-            q0, r0 = jnp.linalg.qr(mats_0[i])
-            outputs_0.append(_checksum_terms(q0, r0))
-        if i < mats_1.shape[0]:
-            q1, r1 = jnp.linalg.qr(mats_1[i])
-            outputs_1.append(_checksum_terms(q1, r1))
-    dispatch_end = time.perf_counter()
-
-    sync_start = time.perf_counter()
-    stacked_0 = jnp.stack(outputs_0)
-    stacked_1 = jnp.stack(outputs_1)
-    stacked_0 = jax.block_until_ready(stacked_0)
-    stacked_1 = jax.block_until_ready(stacked_1)
-    sync_end = time.perf_counter()
-
-    checksum = float(jnp.sum(stacked_0)) + float(jnp.sum(stacked_1))
-    total_s = time.perf_counter() - start
-    return Timing(
+    return bench_multi_device_split_dispatch_then_sync(
+        mats,
+        num_devices=2,
+        platform="gpu",
         name="two_gpu_split_dispatch_then_sync",
-        issue_phase_s=dispatch_end - dispatch_start,
-        tail_wait_s=sync_end - sync_start,
-        total_s=total_s,
-        checksum=checksum,
     )
 
 
@@ -300,9 +363,13 @@ def summarize(results: list[Timing]) -> None:
 
 def main() -> None:
     args = parse_args()
-    mats = make_inputs(args.num_matrices, args.matrix_size, args.dtype, args.seed)
+    configure_precision(args.dtype)
+    host_mats = make_inputs(args.num_matrices, args.matrix_size, args.dtype, args.seed)
     summary = device_summary()
-    two_gpu_inputs = None
+    mats: jax.Array | None = None
+    split_inputs = None
+    split_benchmark: Callable[[Any], Timing] | None = None
+    split_only = False
 
     print("JAX QR dispatch benchmark")
     print("-------------------------")
@@ -311,8 +378,9 @@ def main() -> None:
     print(f"platforms    : {summary['platforms']}")
     print(f"device count : {summary['device_count']}")
     print(f"primary dev  : {summary['primary_device']}")
-    print(f"shape        : {mats.shape}")
-    print(f"dtype        : {mats.dtype}")
+    print(f"x64 enabled  : {summary['x64_enabled']}")
+    print(f"shape        : {host_mats.shape}")
+    print(f"dtype        : {host_mats.dtype}")
     print(f"trials       : {args.trials}")
     print(f"warmup       : {args.warmup}")
     print(f"all devices  : {summary['devices']}")
@@ -323,11 +391,44 @@ def main() -> None:
         bench_vmap_jit,
     ]
 
+    requested_split_devices = args.split_devices
     if args.two_gpu_split:
-        if has_two_gpu_devices():
-            two_gpu_inputs = prepare_two_gpu_split_inputs(mats)
-            benchmarks.append(bench_two_gpu_split_dispatch_then_sync)
+        requested_split_devices = max(requested_split_devices, 2)
+
+    if requested_split_devices > 1:
+        if has_at_least_n_devices(requested_split_devices):
+            split_inputs = prepare_device_split_inputs(
+                host_mats, requested_split_devices
+            )
+
+            def run_split(prepared_inputs: Any) -> Timing:
+                return bench_multi_device_split_dispatch_then_sync(
+                    prepared_inputs,
+                    name=(
+                        "two_gpu_split_dispatch_then_sync"
+                        if args.two_gpu_split and requested_split_devices == 2
+                        else f"split_{requested_split_devices}_devices_dispatch_then_sync"
+                    ),
+                )
+
+            split_benchmark = run_split
+            benchmarks.append(split_benchmark)
+            split_only = args.split_only
         else:
+            print(
+                "note         : "
+                f"--split-devices {requested_split_devices} requested, but fewer "
+                "visible devices were found"
+            )
+
+    if args.split_only and split_benchmark is None:
+        print("note         : --split-only requested without an active split benchmark")
+
+    if split_only:
+        benchmarks = [split_benchmark]
+
+    if args.two_gpu_split:
+        if not has_two_gpu_devices():
             print("note         : --two-gpu-split requested, but fewer than two GPUs found")
 
     compile_benchmarks: list = []
@@ -336,12 +437,16 @@ def main() -> None:
             bench_vmap_jit_compile_and_first_call,
             bench_vmap_jit_second_call,
         ]
+    if split_only:
+        compile_benchmarks = []
 
     for _ in range(args.warmup):
         for benchmark in benchmarks:
-            if benchmark is bench_two_gpu_split_dispatch_then_sync and two_gpu_inputs:
-                benchmark(two_gpu_inputs)
+            if split_benchmark is not None and benchmark is split_benchmark and split_inputs:
+                benchmark(split_inputs)
             else:
+                if mats is None:
+                    mats = jax.device_put(host_mats)
                 benchmark(mats)
 
     results: list[Timing] = []
@@ -353,9 +458,11 @@ def main() -> None:
         )
         print("-" * 76)
         for benchmark in benchmarks + compile_benchmarks:
-            if benchmark is bench_two_gpu_split_dispatch_then_sync and two_gpu_inputs:
-                result = benchmark(two_gpu_inputs)
+            if split_benchmark is not None and benchmark is split_benchmark and split_inputs:
+                result = benchmark(split_inputs)
             else:
+                if mats is None:
+                    mats = jax.device_put(host_mats)
                 result = benchmark(mats)
             results.append(result)
             print(
