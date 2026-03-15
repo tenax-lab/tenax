@@ -2,13 +2,15 @@
 name: tenax-tensor-ops
 description: >
   Teach users Tenax's core tensor operations: creating DenseTensor and
-  SymmetricTensor, label-based contraction, truncated SVD, QR decomposition,
-  and the TensorNetwork graph container. Use this skill when the user asks
-  about basic tensor operations, "how does contraction work", "how to do SVD",
+  SymmetricTensor, label-based contraction, truncated SVD, full SVD,
+  eigendecomposition (eigh), QR decomposition, and the TensorNetwork graph
+  container. Use this skill when the user asks about basic tensor operations,
+  "how does contraction work", "how to do SVD", "eigendecomposition",
   "create a tensor", "what are labels", DenseTensor, contract, truncated_svd,
-  qr_decompose, or wants to understand the building blocks before running
-  algorithms. Also trigger for "tensor basics", "label-based contraction",
-  or "how do I contract two tensors".
+  svd, eigh, qr_decompose, or wants to understand the building blocks before
+  running algorithms. Also trigger for "tensor basics", "label-based
+  contraction", "how do I contract two tensors", "entanglement spectrum",
+  or "diagonalize a density matrix".
 ---
 
 # Core Tensor Operations in Tenax
@@ -224,6 +226,79 @@ from tenax import build_mps, build_peps
 mps = build_mps(tensors)                # 1D chain
 peps = build_peps(tensors, Lx, Ly)      # 2D grid
 ```
+
+---
+
+## Full SVD
+
+The `svd` function is the same as `truncated_svd` — it reshapes a tensor
+into a matrix, computes the SVD, optionally truncates, and reshapes back.
+Use `svd` when you want the complete (or lightly truncated) decomposition
+as a standalone linalg operation.
+
+```python
+from tenax import svd
+
+U, S, Vh, S_full = svd(
+    A,
+    left_labels=["left", "phys"],
+    right_labels=["right"],
+    new_bond_label="bond",
+    max_singular_values=None,     # None = keep all
+    max_truncation_err=None,
+)
+# U: (left, phys, bond), S: 1D singular values, Vh: (bond, right)
+# S_full: complete singular value array (same as S when no truncation)
+```
+
+This is useful for custom algorithms where you need full control over
+the decomposition — for example, computing entanglement entropy without
+truncation, or implementing a custom bond compression scheme.
+
+---
+
+## Eigendecomposition (eigh)
+
+Decomposes a Hermitian tensor into eigenvectors and eigenvalues. Used for
+diagonalizing transfer matrices, density matrices, and Hamiltonians.
+
+```python
+from tenax import eigh
+
+V, eigenvalues = eigh(
+    rho,
+    left_labels=["row_phys", "row_bond"],
+    right_labels=["col_phys", "col_bond"],
+    new_bond_label="eig",
+    max_eigenvalues=8,            # Keep top-8 eigenvalues (optional)
+)
+# V: eigenvector tensor with legs (row_phys, row_bond, eig)
+# eigenvalues: 1D array, sorted descending
+```
+
+### Key parameters
+
+| Parameter | Purpose |
+|-----------|---------|
+| `left_labels` | Row legs of the matrix |
+| `right_labels` | Column legs of the matrix |
+| `new_bond_label` | Label for the eigenvector index |
+| `max_eigenvalues` | Keep only top-k eigenvalues (None = all) |
+
+### When to use eigh vs SVD
+
+- **eigh** — when the tensor is Hermitian (e.g., reduced density matrix,
+  Hamiltonian block). Returns eigenvalues (can be negative).
+- **SVD** — for general tensors. Returns singular values (non-negative).
+
+For a Hermitian positive-definite matrix, `eigh` eigenvalues equal `svd`
+singular values. For indefinite matrices, they differ.
+
+### Physics connection
+
+The eigenvalues of a reduced density matrix ρ are the entanglement
+spectrum. The von Neumann entropy is S = −Σ λᵢ ln(λᵢ). The `eigh`
+function lets you compute this directly without going through SVD.
 
 ---
 
