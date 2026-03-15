@@ -60,6 +60,7 @@ guide/algorithms/auto_mpo
 :caption: Tools
 
 guide/benchmarks
+guide/claude_code
 ```
 
 ## Reference
