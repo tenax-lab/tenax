@@ -67,6 +67,13 @@ class iPEPSConfig:
     gs_log_interval: int = 10
     su_init: bool = False
 
+    def __post_init__(self):
+        valid_unit_cells = {"1x1", "2site"}
+        if self.unit_cell not in valid_unit_cells:
+            raise ValueError(
+                f"unit_cell must be one of {valid_unit_cells}, got {self.unit_cell!r}"
+            )
+
 
 class CTMEnvironment(NamedTuple):
     """The 8 CTM environment tensors (4 corners + 4 edge tensors).
