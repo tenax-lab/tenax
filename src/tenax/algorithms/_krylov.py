@@ -34,6 +34,11 @@ def krylov_expm(
 
     Returns:
         The vector ``exp(dt * A) @ v``.
+
+    Note:
+        This function is **not JIT-safe** — it uses ``float()`` for
+        convergence checks, matching the pattern in ``_lanczos_solve``.
+        Call it from a Python loop, not inside ``jax.jit``.
     """
     norm_v = jnp.linalg.norm(v)
 
