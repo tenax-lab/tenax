@@ -11,6 +11,7 @@ __all__ = [
     "_ctm_tensor_multisite",
     "_ctm_tensor_sweep",
     "_ctm_tensor_sweep_multisite",
+    "_ctm_tensor_sweep_paired",
     "_normalize_tensor",
     "_renormalize_tensor_env",
     "ctm_multisite",
@@ -31,6 +32,10 @@ from tenax.algorithms._ctm_tensor_moves import (
     _ctm_tensor_move_left,
     _ctm_tensor_move_right,
     _ctm_tensor_move_top,
+)
+from tenax.algorithms._ctm_tensor_paired_moves import (
+    _ctm_tensor_move_horizontal,
+    _ctm_tensor_move_vertical,
 )
 from tenax.core import EPS
 from tenax.core.lattice import Lattice
@@ -77,6 +82,26 @@ def _ctm_tensor_sweep(
     env = _ctm_tensor_move_right(env, env, a, chi, projector_method)
     env = _ctm_tensor_move_top(env, env, a, chi, projector_method)
     env = _ctm_tensor_move_bottom(env, env, a, chi, projector_method)
+    if renormalize:
+        env = _renormalize_tensor_env(env)
+    return env
+
+
+def _ctm_tensor_sweep_paired(
+    env: CTMTensorEnv,
+    a: Tensor,
+    chi: int,
+    renormalize: bool,
+    projector_method: str = "eigh",
+) -> CTMTensorEnv:
+    """One full CTM sweep using paired moves: horizontal then vertical.
+
+    Uses 2x2 enlarged corners for projector computation, ensuring
+    consistent charge-sector distributions across sweeps for
+    SymmetricTensor inputs.
+    """
+    env = _ctm_tensor_move_horizontal(env, env, a, chi, projector_method)
+    env = _ctm_tensor_move_vertical(env, env, a, chi, projector_method)
     if renormalize:
         env = _renormalize_tensor_env(env)
     return env
@@ -165,16 +190,31 @@ def ctm_tensor(
     Returns:
         Converged CTMTensorEnv.
     """
-    # Fermionic SymmetricTensors have flow-direction tracking that is not
-    # preserved correctly through the projector-based CTM moves (the D²
-    # and chi leg flows accumulate errors over sweeps).  Fall back to
-    # DenseTensor for fermionic symmetries until the flow bookkeeping is
-    # fixed.  Non-fermionic SymmetricTensors work correctly.
+    # Determine sweep function: use paired moves for fermionic
+    # SymmetricTensors with symmetric virtual charges (fixes charge-sector
+    # mismatch from independent projectors).  When virtual charges are
+    # asymmetric (e.g. after simple update truncation), fall back to
+    # DenseTensor since the D^2 leg charges change per direction.
+    use_paired = False
     if isinstance(A, SymmetricTensor):
         from tenax.core.symmetry import BraidingStyle
 
         if A.indices[0].symmetry.braiding_style == BraidingStyle.FERMIONIC:
-            A = DenseTensor(A.todense(), A.indices)
+            # Check if all virtual charges are compatible
+            import numpy as _np
+
+            virtual_charges = [_np.sort(A.indices[i].charges) for i in range(4)]
+            all_same = all(
+                _np.array_equal(virtual_charges[0], virtual_charges[i])
+                for i in range(1, 4)
+            )
+            if all_same:
+                use_paired = True
+            else:
+                # Asymmetric virtual charges: densify for compatibility
+                A = DenseTensor(A.todense(), A.indices)
+
+    sweep_fn = _ctm_tensor_sweep_paired if use_paired else _ctm_tensor_sweep
 
     a = _build_double_layer_tensor(A)
     env = initialize_ctm_tensor_env(A, chi)
@@ -183,12 +223,12 @@ def ctm_tensor(
     if projector_method == "qr" and qr_warmup_steps > 0:
         warmup = min(qr_warmup_steps, max_iter)
         for _ in range(warmup):
-            env = _ctm_tensor_sweep(env, a, chi, renormalize, "eigh")
+            env = sweep_fn(env, a, chi, renormalize, "eigh")
         max_iter = max_iter - warmup
 
     prev_sv = None
     for _ in range(max_iter):
-        env = _ctm_tensor_sweep(env, a, chi, renormalize, projector_method)
+        env = sweep_fn(env, a, chi, renormalize, projector_method)
 
         current_sv = jnp.linalg.svd(env.C1.todense(), compute_uv=False)
         if prev_sv is not None:
