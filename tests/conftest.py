@@ -35,6 +35,8 @@ _FILE_MARKERS = {
     "test_split_ctm_tensor.py": "algorithm",
     "test_ctm_tensor.py": "algorithm",
     "test_integration_regression.py": "algorithm",
+    "test_krylov.py": "core",
+    "test_tdvp.py": "algorithm",
 }
 
 
