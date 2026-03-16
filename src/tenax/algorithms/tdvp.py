@@ -465,6 +465,32 @@ def _tdvp_step_1site(
         new_next = (R_mat_evolved @ next_mat).reshape(new_chi, next_d, next_chi_r)
         tensors_3d[i + 1] = new_next
 
+    # ---- Forward evolve site L-1 with dt/2 (no QR/back-evolve) ----
+    i = L - 1
+    l_env_last = L_envs[i]
+    assert l_env_last is not None
+    r_env_last = R_envs[i + 1]
+    assert r_env_last is not None
+
+    site_shape_last = tensors_3d[i].shape
+    L_arr_last = l_env_last.todense()
+    R_arr_last = r_env_last.todense()
+    W_arr_last = mpo_tensors[i].todense()
+
+    def site_mv_last(
+        v, _shape=site_shape_last, _L=L_arr_last, _W=W_arr_last, _R=R_arr_last
+    ):
+        return _matvec_1site_jit(v, _shape, _L, _W, _R)
+
+    evolved_last_flat = krylov_expm(
+        site_mv_last,
+        tensors_3d[i].ravel(),
+        dt_half,
+        config.krylov_dim,
+        config.krylov_tol,
+    )
+    tensors_3d[i] = evolved_last_flat.reshape(site_shape_last)
+
     # ---- Right-to-left sweep: sites L-1 to 1 ----
     R_envs_new: list[Tensor | None] = [None] * (L + 1)
     R_envs_new[L] = _build_trivial_right_env()
