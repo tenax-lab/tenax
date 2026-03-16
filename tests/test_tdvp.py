@@ -182,3 +182,52 @@ class TestTDVPDriver:
         assert call_count[0] == 4
         assert "step" in result.observables
         assert len(result.observables["step"]) == 4
+
+
+class TestTDVPComplexTime:
+    """Tests for complex-time evolution."""
+
+    def test_complex_time_runs(self):
+        """Complex-time TDVP runs without error."""
+        L, chi = 6, 8
+        mpo = _build_dense_heisenberg(L)
+        mps = build_random_mps(L, bond_dim=chi, seed=42)
+
+        # DMRG warmup
+        dmrg_cfg = DMRGConfig(max_bond_dim=chi, num_sweeps=5)
+        mps = dmrg(mpo, mps, dmrg_cfg).mps
+
+        # Complex time: real-time + small damping
+        cfg = TDVPConfig(
+            mode="1site",
+            dt=0.05 - 0.01j,
+            time_type="complex",
+            num_steps=3,
+        )
+        result = tdvp(mps, mpo, cfg)
+        # initial measurement + 3 steps = 4 entries
+        assert len(result.energies) == 4
+        assert all(np.isfinite(e) for e in result.energies)
+
+    def test_complex_time_pure_real_matches_real(self):
+        """Complex-time with zero imaginary part matches real-time."""
+        L, chi = 4, 4
+        mpo = _build_dense_heisenberg(L)
+        mps = build_random_mps(L, bond_dim=chi, seed=42)
+
+        dmrg_cfg = DMRGConfig(max_bond_dim=chi, num_sweeps=5)
+        mps = dmrg(mpo, mps, dmrg_cfg).mps
+
+        # Real-time via time_type="real"
+        cfg_real = TDVPConfig(mode="1site", dt=0.05, time_type="real", num_steps=3)
+        result_real = tdvp(mps, mpo, cfg_real)
+
+        # Same via time_type="complex" with real dt
+        cfg_complex = TDVPConfig(
+            mode="1site", dt=0.05 + 0j, time_type="complex", num_steps=3
+        )
+        result_complex = tdvp(mps, mpo, cfg_complex)
+
+        np.testing.assert_allclose(
+            result_real.energies, result_complex.energies, atol=1e-10
+        )

@@ -35,8 +35,14 @@ class TDVPConfig:
 
     Attributes:
         mode:          "1site" or "2site".
-        dt:            Time step size.
-        time_type:     "real" or "imaginary".
+        dt:            Time step size (real or complex).
+        time_type:     "real", "imaginary", or "complex".
+                       For "real": evolution is exp(-i dt H).
+                       For "imaginary": evolution is exp(-dt H).
+                       For "complex": dt is used as a complex time step,
+                       evolution is exp(-i dt H) with complex dt.
+                       This is useful for spectral functions, thermal
+                       states, and Schwinger-Keldysh contour evolution.
         num_steps:     Number of TDVP steps.
         max_bond_dim:  Maximum bond dimension (used in 2-site truncation).
         svd_trunc_err: Maximum truncation error per SVD (optional).
@@ -46,7 +52,7 @@ class TDVPConfig:
     """
 
     mode: str = "1site"
-    dt: float = 0.05
+    dt: float | complex = 0.05
     time_type: str = "real"
     num_steps: int = 100
     max_bond_dim: int = 64
@@ -385,11 +391,13 @@ def _tdvp_step_1site(
         arr, _, _ = _site_to_3d(mps.get_tensor(i))
         tensors_3d.append(arr)
 
-    # Determine dt factor
+    # Determine dt factor: exp(dt_factor * H) is the evolution operator
     if config.time_type == "real":
         dt_factor = -1j * config.dt
-    else:
+    elif config.time_type == "imaginary":
         dt_factor = -config.dt
+    else:  # "complex"
+        dt_factor = -1j * config.dt
     dt_half = dt_factor / 2.0
 
     # Right-canonicalize
