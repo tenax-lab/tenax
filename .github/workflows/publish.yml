@@ -31,8 +31,6 @@ jobs:
     name: Publish to TestPyPI
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
     environment:
       name: testpypi
       url: https://test.pypi.org/p/tenax-tn
@@ -44,12 +42,18 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Publish to TestPyPI
+      - name: Publish to TestPyPI (token auth)
+        if: ${{ secrets.TEST_PYPI_API_TOKEN != '' }}
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
           password: ${{ secrets.TEST_PYPI_API_TOKEN }}
           skip-existing: true
+
+      - name: Skip TestPyPI publish (no token configured)
+        if: ${{ secrets.TEST_PYPI_API_TOKEN == '' }}
+        run: |
+          echo "::notice::TEST_PYPI_API_TOKEN is not set; skipping TestPyPI publish."
 
   publish-pypi:
     name: Publish to PyPI
@@ -72,3 +76,4 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
