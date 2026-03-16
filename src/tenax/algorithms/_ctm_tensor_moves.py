@@ -20,7 +20,26 @@ from tenax.algorithms._ctm_tensor_init import (
     _fuse_pair_by_label,
 )
 from tenax.contraction.contractor import contract
-from tenax.core.tensor import Tensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+
+
+def _flip_leg_flow(tensor: Tensor, label: str) -> Tensor:
+    """Flip the FlowDirection of a single leg identified by label.
+
+    For SymmetricTensor this is required after CTM moves relabel the D²
+    leg (e.g. d2→u2) because the inherited flow from the double-layer
+    tensor is opposite to the edge spec.  DenseTensors are returned
+    unchanged since flow is cosmetic for non-fermionic tensors.
+    """
+    if isinstance(tensor, DenseTensor):
+        return tensor  # flow doesn't affect DenseTensor contractions
+    new_indices = []
+    for idx in tensor.indices:
+        if idx.label == label:
+            new_indices.append(idx.flip_flow())
+        else:
+            new_indices.append(idx)
+    return SymmetricTensor(tensor.blocks, tuple(new_indices))
 
 
 def _apply_projector_tensor(
@@ -105,6 +124,7 @@ def _ctm_tensor_move_left(
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t1_r": "c1_r"})
     C4_new = C4_new.relabels({"chi_new": "c4_r", "t3_l": "c4_u"})
     T4_new = T4_new.relabels({"chi_new": "t4_d", "chi_new_r": "t4_u", "r2": "l2"})
+    T4_new = _flip_leg_flow(T4_new, "l2")  # r2(OUT) -> l2 needs IN
 
     return env_self._replace(C1=C1_new, C4=C4_new, T4=T4_new)
 
@@ -149,6 +169,7 @@ def _ctm_tensor_move_right(
     C2_new = C2_new.relabels({"chi_new": "c2_l", "t1_l": "c2_d"})
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t3_r": "c3_l"})
     T2_new = T2_new.relabels({"chi_new": "t2_u", "chi_new_r": "t2_d", "l2": "r2"})
+    T2_new = _flip_leg_flow(T2_new, "r2")  # l2(IN) -> r2 needs OUT
 
     return env_self._replace(C2=C2_new, C3=C3_new, T2=T2_new)
 
@@ -193,6 +214,7 @@ def _ctm_tensor_move_top(
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t4_u": "c1_r"})
     C2_new = C2_new.relabels({"chi_new": "c2_l", "t2_d": "c2_d"})
     T1_new = T1_new.relabels({"chi_new": "t1_l", "chi_new_r": "t1_r", "d2": "u2"})
+    T1_new = _flip_leg_flow(T1_new, "u2")  # d2(OUT) -> u2 needs IN
 
     return env_self._replace(C1=C1_new, C2=C2_new, T1=T1_new)
 
@@ -237,5 +259,6 @@ def _ctm_tensor_move_bottom(
     C4_new = C4_new.relabels({"chi_new": "c4_r", "t4_d": "c4_u"})
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t2_u": "c3_l"})
     T3_new = T3_new.relabels({"chi_new": "t3_r", "chi_new_r": "t3_l", "u2": "d2"})
+    T3_new = _flip_leg_flow(T3_new, "d2")  # u2(IN) -> d2 needs OUT
 
     return env_self._replace(C4=C4_new, C3=C3_new, T3=T3_new)
