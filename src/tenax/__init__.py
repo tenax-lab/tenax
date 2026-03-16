@@ -60,6 +60,7 @@ from tenax.algorithms.auto_mpo import (
     spin_half_ops,
     spin_one_ops,
 )
+from tenax.algorithms.cbe import expand_bond
 from tenax.algorithms.dmrg import (
     DMRGConfig,
     DMRGResult,
@@ -187,6 +188,8 @@ __all__ = [
     "rsvd",
     "qr",
     "eigh",
+    # CBE
+    "expand_bond",
     # AutoMPO
     "AutoMPO",
     "HamiltonianTerm",
