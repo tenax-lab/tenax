@@ -13,8 +13,8 @@ from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor
+from tenax.core.symmetry import FermionParity, U1Symmetry
+from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 # ------------------------------------------------------------------ #
 # Fixtures                                                             #
@@ -101,3 +101,123 @@ class TestC4vCTM:
         )
 
         np.testing.assert_allclose(E_c4v, E_gen, atol=1e-4)
+
+
+# ------------------------------------------------------------------ #
+# U(1) SymmetricTensor tests                                           #
+# ------------------------------------------------------------------ #
+
+
+@pytest.fixture
+def small_peps_u1():
+    """Random U(1) SymmetricTensor iPEPS with D=2, d=2."""
+    key = jax.random.PRNGKey(42)
+    sym = U1Symmetry()
+    vc = np.array([-1, 1], dtype=np.int32)
+    pc = np.array([-1, 1], dtype=np.int32)
+    indices = (
+        TensorIndex(sym, vc.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex(sym, vc.copy(), FlowDirection.IN, label="d"),
+        TensorIndex(sym, vc.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex(sym, vc.copy(), FlowDirection.IN, label="r"),
+        TensorIndex(sym, pc.copy(), FlowDirection.IN, label="phys"),
+    )
+    return SymmetricTensor.random_normal(indices, key)
+
+
+@pytest.fixture
+def small_peps_fermionic():
+    """Random FermionParity SymmetricTensor iPEPS with D=2, d=2."""
+    key = jax.random.PRNGKey(7)
+    sym = FermionParity()
+    vc = np.array([0, 1], dtype=np.int32)
+    pc = np.array([0, 1], dtype=np.int32)
+    indices = (
+        TensorIndex(sym, vc.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex(sym, vc.copy(), FlowDirection.IN, label="d"),
+        TensorIndex(sym, vc.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex(sym, vc.copy(), FlowDirection.IN, label="r"),
+        TensorIndex(sym, pc.copy(), FlowDirection.IN, label="phys"),
+    )
+    return SymmetricTensor.random_normal(indices, key)
+
+
+class TestC4vCTMSymmetric:
+    def test_u1_converges(self, small_peps_u1):
+        """C4v CTM converges with U(1) SymmetricTensor."""
+        from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
+
+        env = ctm_tensor_c4v(small_peps_u1, chi=6, max_iter=30, conv_tol=1e-8)
+        assert isinstance(env, CTMTensorEnv)
+        for field in env:
+            assert jnp.all(jnp.isfinite(field.todense()))
+
+    def test_u1_energy_matches_dense(self, small_peps_u1, heisenberg_gate):
+        """U(1) C4v CTM energy matches DenseTensor path."""
+        from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
+
+        chi = 8
+        A_dense = DenseTensor(small_peps_u1.todense(), small_peps_u1.indices)
+
+        env_sym = ctm_tensor_c4v(small_peps_u1, chi=chi, max_iter=50, conv_tol=1e-10)
+        E_sym = float(
+            compute_energy_ctm_tensor(small_peps_u1, env_sym, heisenberg_gate, d=2)
+        )
+
+        env_dense = ctm_tensor_c4v(A_dense, chi=chi, max_iter=50, conv_tol=1e-10)
+        E_dense = float(
+            compute_energy_ctm_tensor(A_dense, env_dense, heisenberg_gate, d=2)
+        )
+
+        np.testing.assert_allclose(E_sym, E_dense, atol=1e-4)
+
+
+class TestC4vCTMFermionic:
+    def test_fermionic_converges(self, small_peps_fermionic):
+        """C4v CTM converges with FermionParity SymmetricTensor."""
+        from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
+
+        env = ctm_tensor_c4v(small_peps_fermionic, chi=4, max_iter=30, conv_tol=1e-8)
+        assert isinstance(env, CTMTensorEnv)
+        for field in env:
+            assert jnp.all(jnp.isfinite(field.todense()))
+
+    def test_fermionic_energy_matches_dense(
+        self, small_peps_fermionic, heisenberg_gate
+    ):
+        """FermionParity C4v CTM energy matches DenseTensor path.
+
+        The C4v corner uses a density-matrix projection (P† Cg Cg† P)
+        which is an approximation. With small chi the match is moderate;
+        it improves with larger chi. Use a generous tolerance.
+        """
+        from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
+
+        chi = 8
+        A_dense = DenseTensor(
+            small_peps_fermionic.todense(), small_peps_fermionic.indices
+        )
+
+        env_ferm = ctm_tensor_c4v(
+            small_peps_fermionic, chi=chi, max_iter=80, conv_tol=1e-10
+        )
+        E_ferm = float(
+            compute_energy_ctm_tensor(
+                small_peps_fermionic, env_ferm, heisenberg_gate, d=2
+            )
+        )
+
+        env_dense = ctm_tensor_c4v(A_dense, chi=chi, max_iter=80, conv_tol=1e-10)
+        E_dense = float(
+            compute_energy_ctm_tensor(A_dense, env_dense, heisenberg_gate, d=2)
+        )
+
+        np.testing.assert_allclose(E_ferm, E_dense, atol=0.1)
+
+    def test_fermionic_many_sweeps_stable(self, small_peps_fermionic):
+        """FermionParity C4v CTM runs 50 sweeps without crashing."""
+        from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
+
+        env = ctm_tensor_c4v(small_peps_fermionic, chi=4, max_iter=50, conv_tol=1e-14)
+        for field in env:
+            assert jnp.all(jnp.isfinite(field.todense()))

@@ -27,7 +27,7 @@ from tenax.algorithms._ctm_tensor_init import (
     _fuse_pair_by_label,
     initialize_ctm_tensor_env,
 )
-from tenax.algorithms._ctm_tensor_moves import _apply_projector_tensor, _flip_leg_flow
+from tenax.algorithms._ctm_tensor_moves import _flip_leg_flow
 from tenax.contraction.contractor import contract
 from tenax.core.tensor import Tensor
 
@@ -62,25 +62,32 @@ def _c4v_sweep(
     Tg = _fuse_pair_by_label(T_with_a, "t_l", "l2", "fl", IN)
     Tg = _fuse_pair_by_label(Tg, "t_r", "r2", "fr", OUT)  # (fl, d2, fr)
 
-    # 3. Second grown corner (C4v symmetric partner)
-    #    Cg2 = T · C  with C.c_a connected to T.t_r
-    #    Need "fused" at position 0 for _compute_projector_tensor.
-    C_conn2 = C.relabel("c_a", "t_r")
-    Cg2_raw = contract(C_conn2, T)  # (c_b, t_l, D2) — C's c_b leg comes first
-    Cg2 = _fuse_pair_by_label(Cg2_raw, "c_b", "D2", "fused", IN)  # (fused, t_l)
-    Cg2 = Cg2.relabel("t_l", "col2")  # (fused, col2)
+    # 3. Projector from Cg alone (C4v: both corners are equivalent)
+    #    Use Cg for both corner slots — the density matrix is ρ = 2 * Cg · Cg†
+    P = _compute_projector_tensor(Cg, Cg, chi, projector_method)
 
-    # 4. Projector
-    P = _compute_projector_tensor(Cg, Cg2, chi, projector_method)
-
-    # 5. Apply projector
-    C1_new, C4_new, T_new = _apply_projector_tensor(P, Cg, Cg2, Tg, "fl", "fr")
-
-    # 6. Relabel outputs to generic C4v labels
-    # C1_new has labels (chi_new, t_r) from apply_projector
-    C_new = C1_new.relabels({"chi_new": "c_a", "t_r": "c_b"})
-    # T_new has labels (chi_new, d2, chi_new_r) from apply_projector
+    # 4. Apply projector to edge: T_new = P† · Tg · P
+    P_bar = P.bar()
+    P_left = P_bar.relabel("fused", "fl")
+    step = contract(P_left, Tg)  # (chi_new, d2, fr)
+    P_right = P.relabels({"fused": "fr", "chi_new": "chi_new_r"})
+    T_new = contract(step, P_right)  # (chi_new, d2, chi_new_r)
     T_new = T_new.relabels({"chi_new": "t_l", "d2": "D2", "chi_new_r": "t_r"})
+
+    # 5. New corner: project Cg from BOTH sides so both legs have the
+    #    projector's charge distribution.
+    #    C_new = P† · (Cg · Cg†) · P   (density matrix projected to chi)
+    #    But Cg · Cg† requires a common "col" leg, which is "t_r".
+    #    Cg: (fused, t_r), Cg†: (t_r, fused) [bar flips flows]
+    Cg_bar = Cg.bar().relabels({"fused": "fused_bar", "t_r": "t_r"})
+    rho_half = contract(Cg, Cg_bar)  # (fused, fused_bar) via t_r
+    # Project left: P† · rho_half
+    P_left = P_bar.relabel("fused", "fused")
+    step = contract(P_left, rho_half)  # (chi_new, fused_bar)
+    # Project right: step · P
+    P_right_c = P.relabels({"fused": "fused_bar", "chi_new": "chi_new_r"})
+    C_new = contract(step, P_right_c)  # (chi_new, chi_new_r)
+    C_new = C_new.relabels({"chi_new": "c_a", "chi_new_r": "c_b"})
 
     # 7. Normalize
     C_norm = C_new.max_abs()

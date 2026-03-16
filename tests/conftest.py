@@ -37,6 +37,7 @@ _FILE_MARKERS = {
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",
     "test_tdvp.py": "algorithm",
+    "test_ctm_tensor_c4v.py": "algorithm",
 }
 
 
