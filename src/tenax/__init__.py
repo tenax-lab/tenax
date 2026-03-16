@@ -43,6 +43,7 @@ from tenax.algorithms._ctm_tensor import (
     compute_energy_ctm_tensor_2site,
     ctm_tensor,
     ctm_tensor_2site,
+    ctm_tensor_c4v,
 )
 from tenax.algorithms._ctm_tensor_convergence import ctm_multisite
 from tenax.algorithms._krylov import krylov_expm
@@ -245,6 +246,7 @@ __all__ = [
     # Standard CTM (Tensor protocol)
     "CTMTensorEnv",
     "ctm_tensor",
+    "ctm_tensor_c4v",
     "ctm_tensor_2site",
     "ctm_multisite",
     "compute_energy_ctm_tensor",

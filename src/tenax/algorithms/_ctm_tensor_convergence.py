@@ -34,7 +34,7 @@ from tenax.algorithms._ctm_tensor_moves import (
 )
 from tenax.core import EPS
 from tenax.core.lattice import Lattice
-from tenax.core.tensor import Tensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 # ------------------------------------------------------------------ #
 # Sweep + renormalize                                                  #
@@ -165,6 +165,17 @@ def ctm_tensor(
     Returns:
         Converged CTMTensorEnv.
     """
+    # Fermionic SymmetricTensors have flow-direction tracking that is not
+    # preserved correctly through the projector-based CTM moves (the D²
+    # and chi leg flows accumulate errors over sweeps).  Fall back to
+    # DenseTensor for fermionic symmetries until the flow bookkeeping is
+    # fixed.  Non-fermionic SymmetricTensors work correctly.
+    if isinstance(A, SymmetricTensor):
+        from tenax.core.symmetry import BraidingStyle
+
+        if A.indices[0].symmetry.braiding_style == BraidingStyle.FERMIONIC:
+            A = DenseTensor(A.todense(), A.indices)
+
     a = _build_double_layer_tensor(A)
     env = initialize_ctm_tensor_env(A, chi)
 
