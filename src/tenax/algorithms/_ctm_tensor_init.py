@@ -23,7 +23,6 @@ import numpy as np
 
 from tenax.algorithms._ctm_utils import (
     _CORNER_SPECS,
-    _derive_charges,
     _make_dense_corner,
 )
 from tenax.algorithms._tensor_utils import fuse_indices
@@ -129,19 +128,47 @@ def _build_double_layer_open_tensor(A: Tensor) -> Tensor:
 
 
 # Edge specs for standard CTM: (label_chi1, label_D2, label_chi2,
-#   flow_chi1, flow_D2, flow_chi2, ref_axis_chi, ref_axis_Da, ref_axis_Db)
+#   flow_chi1, flow_D2, flow_chi2, ref_axis_chi1, ref_axis_chi2,
+#   ref_axis_Da, ref_axis_Db)
+# ref_axis_chi1/chi2 are A's axes used to derive the two chi legs' charges
+# (matching the connecting corners' ref axes for charge compatibility).
 # ref_axis_Da/Db are A's axes that get fused into the D² leg.
 _STD_EDGE_SPECS = {
-    # T1: top edge. chi connects to C1.c1_r and C2.c2_l.
+    # T1: top edge. chi1(t1_l) connects to C1.c1_r (C1 ref=1=d),
+    #               chi2(t1_r) connects to C2.c2_l (C2 ref=0=u).
     # D² leg is "up" direction: fuse (u, U) = A axes (0, 0).
-    "T1": ("t1_l", "u2", "t1_r", IN, IN, OUT, 3, 0, 0),
-    # T2: right edge. chi connects to C2.c2_d and C3.c3_u.
-    "T2": ("t2_u", "r2", "t2_d", OUT, OUT, IN, 0, 3, 3),
-    # T3: bottom edge. chi connects to C4.c4_r and C3.c3_l.
-    "T3": ("t3_r", "d2", "t3_l", OUT, OUT, IN, 3, 1, 1),
-    # T4: left edge. chi connects to C1.c1_d and C4.c4_u.
-    "T4": ("t4_d", "l2", "t4_u", IN, IN, OUT, 1, 2, 2),
+    "T1": ("t1_l", "u2", "t1_r", IN, IN, OUT, 1, 0, 0, 0),
+    # T2: right edge. chi1(t2_u) connects to C2.c2_d (C2 ref=0=u),
+    #                 chi2(t2_d) connects to C3.c3_u (C3 ref=1=d).
+    "T2": ("t2_u", "r2", "t2_d", OUT, OUT, IN, 0, 1, 3, 3),
+    # T3: bottom edge. chi1(t3_r) connects to C4.c4_u (C4 ref=0=u),  # note: C4.c4_u
+    #                  chi2(t3_l) connects to C3.c3_l (C3 ref=1=d).
+    "T3": ("t3_r", "d2", "t3_l", OUT, OUT, IN, 0, 1, 1, 1),
+    # T4: left edge. chi1(t4_d) connects to C1.c1_d (C1 ref=1=d),
+    #                chi2(t4_u) connects to C4.c4_r (C4 ref=0=u).
+    "T4": ("t4_d", "l2", "t4_u", IN, IN, OUT, 1, 0, 2, 2),
 }
+
+
+# Backward-compatible accessor for tests/external code that destructures
+# the 9-element tuple format.
+def _std_edge_specs_compat() -> dict:
+    """Return edge specs in the old 9-element format for backward compat."""
+    return {
+        name: (l1, l2, l3, f1, f2, f3, rc1, rda, rdb)
+        for name, (
+            l1,
+            l2,
+            l3,
+            f1,
+            f2,
+            f3,
+            rc1,
+            _rc2,
+            rda,
+            rdb,
+        ) in _STD_EDGE_SPECS.items()
+    }
 
 
 def _make_dense_standard_edge(
@@ -187,29 +214,43 @@ def _init_symmetric_standard_edge(
     flow_chi1: FlowDirection,
     flow_D2: FlowDirection,
     flow_chi2: FlowDirection,
-    ref_axis_chi: int,
+    ref_axis_chi1: int,
+    ref_axis_chi2: int,
     ref_axis_Da: int,
     ref_axis_Db: int,
 ) -> SymmetricTensor:
     """Create identity-like SymmetricTensor standard edge (chi, D², chi).
 
     The D² leg charges are derived by fusing A's two virtual axes (ket+bra).
+    Each chi leg's charges are derived from D²-fused charges of the
+    corresponding corner's reference axis, ensuring charge compatibility.
     """
     from tenax.algorithms._tensor_utils import _compute_fused_charges
 
     sym = A.indices[0].symmetry
     D2 = D * D
 
-    chi_charges = _derive_charges(A.indices[ref_axis_chi].charges, chi)
+    def _fused_chi_charges(ref_axis: int, flow: FlowDirection) -> np.ndarray:
+        """Derive chi charges from D²-fused charges of the given ref axis."""
+        ref_idx = A.indices[ref_axis]
+        ref_bra = ref_idx.flip_flow()
+        fused = _compute_fused_charges(ref_idx, ref_bra, flow, sym)
+        if chi <= len(fused):
+            return np.asarray(fused[:chi], dtype=np.int32)
+        reps = chi // len(fused) + 1
+        return np.asarray(np.tile(fused, reps)[:chi], dtype=np.int32)
+
+    chi1_charges = _fused_chi_charges(ref_axis_chi1, flow_chi1)
+    chi2_charges = _fused_chi_charges(ref_axis_chi2, flow_chi2)
 
     # D² charges: fuse the ket virtual axis with the bar'd (flipped-flow) copy
     idx_ket = A.indices[ref_axis_Da]
     idx_bra = idx_ket.flip_flow()  # bar() flips flow
     D2_charges = _compute_fused_charges(idx_ket, idx_bra, flow_D2, sym)
 
-    idx_chi1 = TensorIndex(sym, chi_charges.copy(), flow_chi1, label=label_chi1)
+    idx_chi1 = TensorIndex(sym, chi1_charges, flow_chi1, label=label_chi1)
     idx_D2 = TensorIndex(sym, D2_charges, flow_D2, label=label_D2)
-    idx_chi2 = TensorIndex(sym, chi_charges.copy(), flow_chi2, label=label_chi2)
+    idx_chi2 = TensorIndex(sym, chi2_charges, flow_chi2, label=label_chi2)
 
     T = jnp.zeros((chi, D2, chi), dtype=A.dtype)
     T_chi = min(chi, D2)
@@ -287,12 +328,13 @@ def initialize_ctm_tensor_env(
             f1,
             f2,
             f3,
-            ref_chi,
+            ref_chi1,
+            ref_chi2,
             ref_Da,
             ref_Db,
         ) in _STD_EDGE_SPECS.items():
             edges[name] = _init_symmetric_standard_edge(
-                A, chi, D, l1, l2, l3, f1, f2, f3, ref_chi, ref_Da, ref_Db
+                A, chi, D, l1, l2, l3, f1, f2, f3, ref_chi1, ref_chi2, ref_Da, ref_Db
             )
     else:
         corners = {}
@@ -300,7 +342,18 @@ def initialize_ctm_tensor_env(
             corners[name] = _make_dense_corner(chi, D2, la, lb, fa, fb, dtype)
 
         edges = {}
-        for name, (l1, l2, l3, f1, f2, f3, _rc, _rda, _rdb) in _STD_EDGE_SPECS.items():
+        for name, (
+            l1,
+            l2,
+            l3,
+            f1,
+            f2,
+            f3,
+            _rc1,
+            _rc2,
+            _rda,
+            _rdb,
+        ) in _STD_EDGE_SPECS.items():
             edges[name] = _make_dense_standard_edge(
                 chi, D2, l1, l2, l3, f1, f2, f3, dtype
             )
