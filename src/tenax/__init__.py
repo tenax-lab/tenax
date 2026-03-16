@@ -45,6 +45,7 @@ from tenax.algorithms._ctm_tensor import (
     ctm_tensor_2site,
 )
 from tenax.algorithms._ctm_tensor_convergence import ctm_multisite
+from tenax.algorithms._krylov import krylov_expm
 from tenax.algorithms._split_ctm_tensor import (
     SplitCTMTensorEnv,
     compute_energy_split_ctm_tensor,
@@ -105,6 +106,12 @@ from tenax.algorithms.observables import (
     correlation,
     expectation_value,
     operator_charge,
+)
+from tenax.algorithms.tdvp import (
+    TDVPConfig,
+    TDVPResult,
+    tdvp,
+    tdvp_step,
 )
 from tenax.algorithms.trg import (
     TRGConfig,
@@ -215,6 +222,12 @@ __all__ = [
     "build_bulk_mpo_heisenberg",
     "build_bulk_mpo_heisenberg_cylinder",
     "build_bulk_mpo_heisenberg_symmetric",
+    # TDVP
+    "TDVPConfig",
+    "TDVPResult",
+    "tdvp",
+    "tdvp_step",
+    "krylov_expm",
     # iPEPS
     "iPEPSConfig",
     "CTMConfig",
