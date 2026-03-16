@@ -15,7 +15,7 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **opt_einsum integration** — optimal contraction path finding for multi-tensor contractions
 - **Network class** — graph-based tensor network container with contraction caching
 - **`.net` file support** — cytnx-style declarative network topology; parse once, load tensors, contract repeatedly (template pattern)
-- **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), TRG, HOTRG, iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), fermionic iPEPS (fPEPS), quasiparticle excitations
+- **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), TDVP (1-site & 2-site, real-time & imaginary-time), TRG, HOTRG, iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), fermionic iPEPS (fPEPS), quasiparticle excitations
 - **AutoMPO** — build Hamiltonian MPOs from symbolic operator descriptions (custom couplings, NNN, arbitrary spin); supports `symmetric=True` for U(1) block-sparse MPOs
 - **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237)
 - **Lattice abstraction** — built-in square, checkerboard, honeycomb, triangular, and kagome geometries; `ctm_multisite()` for 3+ site unit cells
