@@ -258,7 +258,10 @@ def _tensors_to_network(mps_tensors: list[Tensor]) -> TensorNetwork:
         for label in sorted(shared, key=str):
             try:
                 result.connect(i, label, i + 1, label)
-            except ValueError:
+            except (ValueError, KeyError):
+                # Bond indices may be incompatible after evolution changed
+                # dimensions.  Skip — TensorNetwork is still usable via
+                # shared labels.
                 pass
     return result
 

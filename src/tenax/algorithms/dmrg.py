@@ -321,7 +321,10 @@ def dmrg(
         for label in sorted(shared, key=str):
             try:
                 result_mps.connect(i, label, i + 1, label)
-            except ValueError:
+            except (ValueError, KeyError):
+                # Bond indices may be incompatible after SVD truncation
+                # changed dimensions.  Skip silently — the TensorNetwork
+                # is still usable for contraction via shared labels.
                 pass
 
     return DMRGResult(

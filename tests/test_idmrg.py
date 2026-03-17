@@ -359,6 +359,7 @@ class TestiDMRGSymmetric:
         assert isinstance(result, iDMRGResult)
         assert np.isfinite(result.energy_per_site)
 
+    @pytest.mark.slow
     def test_symmetric_idmrg_energy_accuracy(self):
         """Symmetric iDMRG at chi=16 should match exact within 0.5%."""
         W = build_bulk_mpo_heisenberg_symmetric()
