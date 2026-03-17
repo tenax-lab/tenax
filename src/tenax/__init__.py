@@ -60,7 +60,7 @@ from tenax.algorithms.auto_mpo import (
     spin_half_ops,
     spin_one_ops,
 )
-from tenax.algorithms.cbe import expand_bond
+from tenax.algorithms.cbe import expand_bond, expand_bond_symmetric
 from tenax.algorithms.dmrg import (
     DMRGConfig,
     DMRGResult,
@@ -190,6 +190,7 @@ __all__ = [
     "eigh",
     # CBE
     "expand_bond",
+    "expand_bond_symmetric",
     # AutoMPO
     "AutoMPO",
     "HamiltonianTerm",
