@@ -14,7 +14,7 @@ from tenax import (
 from tenax.algorithms.cbe import expand_bond
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 
 def _make_left_canonical_site(chi_l, d, chi_r, key, dtype=jnp.float64):
@@ -240,3 +240,119 @@ class TestEnergyImprovement:
         assert E_2site <= E_1site + 1e-8, (
             f"2-site energy {E_2site} should be <= 1-site energy {E_1site}"
         )
+
+
+class TestExpandBondSymmetric:
+    """Tests for block-sparse expand_bond_symmetric."""
+
+    def test_symmetric_cbe_runs(self):
+        """expand_bond_symmetric runs without error on Heisenberg MPS."""
+        from tenax import build_mpo_heisenberg, build_random_symmetric_mps
+        from tenax.algorithms.cbe import expand_bond_symmetric
+        from tenax.algorithms.dmrg import (
+            _build_right_environments_list,
+            _build_trivial_left_env,
+            _one_site_update_symmetric,
+            _right_canonicalize,
+            _symmetric_ops,
+        )
+
+        L = 4
+        chi = 4
+        k = 2
+
+        mpo = build_mpo_heisenberg(L)
+        mps = build_random_symmetric_mps(L, bond_dim=chi, seed=42)
+        config = DMRGConfig(max_bond_dim=chi, num_sweeps=3, two_site=False)
+        result = dmrg(mpo, mps, config)
+
+        mps_t = [result.mps.get_tensor(i) for i in range(L)]
+        mpo_t = [mpo.get_tensor(i) for i in range(L)]
+
+        from tenax.algorithms.dmrg import _build_left_environments_list
+
+        ops = _symmetric_ops()
+        # Don't re-canonicalize — _right_canonicalize has issues with
+        # SymmetricTensor. Use the DMRG result directly (already in
+        # mixed canonical form from the last sweep).
+        left_envs = _build_left_environments_list(mps_t, mpo_t, L, ops)
+        right_envs = _build_right_environments_list(mps_t, mpo_t, L, ops)
+
+        # Expand bond at site 1 (middle site, guaranteed 3-leg)
+        site_i = 1
+        l_env = left_envs[site_i]
+        r_env = right_envs[site_i + 2] or ops.build_trivial_right_env()
+
+        expanded = expand_bond_symmetric(
+            mps_t[site_i],
+            l_env,
+            mpo_t[site_i],
+            mpo_t[site_i + 1],
+            r_env,
+            mps_t[site_i + 1],
+            k=k,
+            key=jax.random.PRNGKey(7),
+        )
+
+        assert isinstance(expanded, SymmetricTensor)
+        # Bond dimension should increase
+        orig_chi_r = mps_t[site_i].indices[-1].dim
+        new_chi_r = expanded.indices[-1].dim
+        assert new_chi_r == orig_chi_r + k, (
+            f"Expected chi_r={orig_chi_r + k}, got {new_chi_r}"
+        )
+
+    def test_symmetric_cbe_charges_correct(self):
+        """Expanded bond has correct per-sector charge assignment."""
+        from tenax import build_mpo_heisenberg, build_random_symmetric_mps
+        from tenax.algorithms.cbe import expand_bond_symmetric
+        from tenax.algorithms.dmrg import (
+            _build_right_environments_list,
+            _right_canonicalize,
+            _symmetric_ops,
+        )
+
+        L = 4
+        chi = 4
+        k = 2
+
+        mpo = build_mpo_heisenberg(L)
+        mps = build_random_symmetric_mps(L, bond_dim=chi, seed=42)
+        config = DMRGConfig(max_bond_dim=chi, num_sweeps=3, two_site=False)
+        result = dmrg(mpo, mps, config)
+
+        mps_t = [result.mps.get_tensor(i) for i in range(L)]
+        mpo_t = [mpo.get_tensor(i) for i in range(L)]
+
+        from tenax.algorithms.dmrg import _build_left_environments_list
+
+        ops = _symmetric_ops()
+        left_envs = _build_left_environments_list(mps_t, mpo_t, L, ops)
+        right_envs = _build_right_environments_list(mps_t, mpo_t, L, ops)
+
+        site_i = 1
+        l_env = left_envs[site_i]
+        r_env = right_envs[site_i + 2] or ops.build_trivial_right_env()
+
+        orig_charges = np.asarray(mps_t[site_i].indices[-1].charges)
+
+        expanded = expand_bond_symmetric(
+            mps_t[site_i],
+            l_env,
+            mpo_t[site_i],
+            mpo_t[site_i + 1],
+            r_env,
+            mps_t[site_i + 1],
+            k=k,
+            key=jax.random.PRNGKey(42),
+        )
+
+        new_charges = np.asarray(expanded.indices[-1].charges)
+        # Original charges should be preserved
+        np.testing.assert_array_equal(new_charges[: len(orig_charges)], orig_charges)
+        # New charges should be valid (from the original charge set)
+        unique_orig = set(int(q) for q in orig_charges)
+        for q in new_charges[len(orig_charges) :]:
+            assert int(q) in unique_orig, (
+                f"New charge {q} not in original set {unique_orig}"
+            )
