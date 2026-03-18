@@ -41,6 +41,10 @@ _FILE_MARKERS = {
     "test_ctm_paired.py": "algorithm",
     "test_rsvd.py": "core",
     "test_cbe.py": "algorithm",
+    "test_lattice.py": "core",
+    "test_linalg.py": "core",
+    "test_observables.py": "algorithm",
+    "test_cbe_validation.py": "algorithm",
 }
 
 
