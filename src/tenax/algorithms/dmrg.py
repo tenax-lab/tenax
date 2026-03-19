@@ -34,7 +34,7 @@ import opt_einsum
 
 from tenax.algorithms._tensor_utils import scale_bond_axis
 from tenax.algorithms.auto_mpo import build_auto_mpo
-from tenax.contraction.contractor import contract, qr_decompose, truncated_svd
+from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.mps import FiniteMPS
 from tenax.core.symmetry import U1Symmetry
@@ -389,129 +389,6 @@ def dmrg(
         truncation_errors=truncation_errors,
         converged=converged,
     )
-
-
-def _qr_left_canonical(
-    site: Tensor,
-) -> tuple[Tensor, jax.Array | None]:
-    """QR-decompose site tensor to left-canonical form.
-
-    Returns (Q_tensor, R_matrix) where Q is left-canonical.
-    Returns (site, None) if QR would change bond dimensions
-    (e.g., at boundary sites where chi_l*d < chi_r).
-    """
-    data = site.todense()
-    ndim = data.ndim
-    if ndim == 2:
-        lbl = site.labels()[0]
-        is_lb = isinstance(lbl, str) and lbl.startswith("p")
-        data = data[jnp.newaxis, :] if is_lb else data[:, :, jnp.newaxis]
-
-    cl, dd, cr = data.shape
-    if cl * dd < cr:
-        return site, None  # fat matrix — QR would change chi_r
-
-    mat = data.reshape(cl * dd, cr)
-    Qm, Rm = jnp.linalg.qr(mat)
-    q_3d = Qm.reshape(cl, dd, cr)
-
-    if ndim == 2:
-        q_store = q_3d[0] if is_lb else q_3d[:, :, 0]
-    else:
-        q_store = q_3d
-
-    return DenseTensor(q_store, site.indices), Rm
-
-
-def _rq_right_canonical(
-    site: Tensor,
-) -> tuple[Tensor, jax.Array | None]:
-    """RQ-decompose site tensor to right-canonical form.
-
-    Returns (Q_tensor, L_matrix) where Q is right-canonical.
-    Returns (site, None) if RQ would change bond dimensions.
-    """
-    data = site.todense()
-    ndim = data.ndim
-    if ndim == 2:
-        lbl = site.labels()[0]
-        is_lb = isinstance(lbl, str) and lbl.startswith("p")
-        data = data[jnp.newaxis, :] if is_lb else data[:, :, jnp.newaxis]
-
-    cl, dd, cr = data.shape
-    if dd * cr < cl:
-        return site, None  # RQ would change chi_l
-
-    mat = data.reshape(cl, dd * cr)
-    Qt, Rt = jnp.linalg.qr(mat.T)
-    q_3d = Qt.T.reshape(cl, dd, cr)
-    Lm = Rt.T  # (cl, cl)
-
-    if ndim == 2:
-        q_store = q_3d[0] if is_lb else q_3d[:, :, 0]
-    else:
-        q_store = q_3d
-
-    return DenseTensor(q_store, site.indices), Lm
-
-
-def _absorb_r_into_next(R: jax.Array, mps_tensors: list[Tensor], next_idx: int) -> None:
-    """Absorb R matrix into site next_idx (in-place)."""
-    nb = mps_tensors[next_idx].todense()
-    nd = nb.ndim
-    if nd == 2:
-        lbl = mps_tensors[next_idx].labels()[0]
-        is_lb = isinstance(lbl, str) and lbl.startswith("p")
-        nb = nb[jnp.newaxis, :] if is_lb else nb[:, :, jnp.newaxis]
-    nb_new = jnp.einsum("ij,jpk->ipk", R, nb)
-    if nd == 2:
-        nb_new = nb_new[0] if is_lb else nb_new[:, :, 0]
-    mps_tensors[next_idx] = DenseTensor(nb_new, mps_tensors[next_idx].indices)
-
-
-def _absorb_l_into_prev(L: jax.Array, mps_tensors: list[Tensor], prev_idx: int) -> None:
-    """Absorb L matrix into site prev_idx (in-place)."""
-    pv = mps_tensors[prev_idx].todense()
-    nd = pv.ndim
-    if nd == 2:
-        lbl = mps_tensors[prev_idx].labels()[0]
-        is_lb = isinstance(lbl, str) and lbl.startswith("p")
-        pv = pv[jnp.newaxis, :] if is_lb else pv[:, :, jnp.newaxis]
-    pv_new = jnp.einsum("ijk,kl->ijl", pv, L)
-    if nd == 2:
-        pv_new = pv_new[0] if is_lb else pv_new[:, :, 0]
-    mps_tensors[prev_idx] = DenseTensor(pv_new, mps_tensors[prev_idx].indices)
-
-
-def _right_canonicalize(mps_tensors: list[Tensor]) -> list[Tensor]:
-    """Right-canonicalize MPS by QR from right to left."""
-    L = len(mps_tensors)
-    tensors = list(mps_tensors)
-
-    for i in range(L - 1, 0, -1):
-        tensor = tensors[i]
-        labels = tensor.labels()
-
-        # Find the virtual bond to the left
-        left_bond = _find_left_bond(labels, i)
-        if left_bond is None:
-            continue
-
-        other_labels = [lbl for lbl in labels if lbl != left_bond]
-        Q, R = qr_decompose(
-            tensor,
-            left_labels=[left_bond],
-            right_labels=other_labels,
-            new_bond_label=left_bond + "_new"
-            if isinstance(left_bond, str)
-            else f"b{i}",
-        )
-
-        # Absorb R into site i-1
-        tensors[i] = Q
-        tensors[i - 1] = contract(tensors[i - 1], R)
-
-    return tensors
 
 
 def _find_left_bond(labels: tuple, site: int) -> str | None:
