@@ -523,6 +523,65 @@ class TestInfiniteMPS:
         assert tensors[0] is imps.tensors[0]
 
 
+class TestFiniteMPSLogNorm:
+    def test_log_norm_default_zero(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4))
+        assert mps.log_norm == 0.0
+
+    def test_canonicalize_normalizes_svs(self):
+        """After canonicalize, singular values should sum-sq to 1."""
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3))
+        mps_c = mps.canonicalize(center=2)
+        sv = mps_c.singular_values[2]
+        assert sv is not None
+        np.testing.assert_allclose(float(jnp.sum(sv**2)), 1.0, atol=1e-12)
+
+    def test_norm_consistent_after_canonicalize(self):
+        """norm() should give same result before and after canonicalize."""
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3))
+        n_before = mps.norm()
+        mps_c = mps.canonicalize(center=2)
+        n_after = mps_c.norm()
+        np.testing.assert_allclose(n_before, n_after, rtol=1e-10)
+
+    def test_log_norm_nonzero_after_canonicalize(self):
+        """canonicalize should set log_norm to capture the original norm."""
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3))
+        mps_c = mps.canonicalize(center=2)
+        # For a random MPS, norm != 1, so log_norm should be nonzero
+        assert mps_c.log_norm != 0.0
+
+    def test_overlap_uses_log_norm(self):
+        """overlap should account for log_norm of both MPS."""
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3))
+        mps_c = mps.canonicalize(center=2)
+        # <mps|mps> should equal <mps_c|mps_c> (same state)
+        ov_orig = mps.overlap(mps)
+        ov_canon = mps_c.overlap(mps_c)
+        np.testing.assert_allclose(
+            float(jnp.abs(ov_orig)), float(jnp.abs(ov_canon)), rtol=1e-10
+        )
+
+    def test_multiple_canonicalize_consistent(self):
+        """Multiple canonicalize calls should accumulate log_norm correctly."""
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=6, chi=4))
+        mps1 = mps.canonicalize(center=3)
+        mps2 = mps1.canonicalize(center=1)
+        np.testing.assert_allclose(mps.norm(), mps2.norm(), rtol=1e-10)
+
+
 class TestFiniteMPSRandom:
     def test_random_dense(self):
         from tenax.core.mps import FiniteMPS

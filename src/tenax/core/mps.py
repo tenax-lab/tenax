@@ -21,6 +21,9 @@ from tenax.linalg import qr, svd
 class FiniteMPS:
     """Finite matrix product state with canonical form tracking.
 
+    The state represented is |psi> = exp(log_norm) * |psi_tensors>, where
+    |psi_tensors> is the state encoded by the site tensors alone.
+
     Attributes:
         tensors: Site tensors, length L.  Boundary sites are 2-leg
             (site 0: physical x right-bond, site L-1: left-bond x physical),
@@ -32,11 +35,16 @@ class FiniteMPS:
         singular_values: Singular values at each bond (length L-1).
             Entry i holds the singular values between sites i and i+1,
             or None if not yet computed.
+        log_norm: Logarithm of the norm factor.  After canonicalization the
+            singular values are normalized (sum(sv**2) == 1) and the original
+            norm information is stored here so that
+            ``norm() == exp(log_norm) * sqrt(<tensors|tensors>)``.
     """
 
     tensors: list[Tensor]
     orth_center: int | None = None
     singular_values: list[jnp.ndarray | None] = field(default_factory=list)
+    log_norm: float = 0.0
 
     def __post_init__(self):
         if not self.singular_values:
@@ -49,6 +57,7 @@ class FiniteMPS:
         tensors: list[Tensor],
         orth_center: int | None = None,
         singular_values: list[jnp.ndarray | None] | None = None,
+        log_norm: float = 0.0,
     ) -> FiniteMPS:
         """Wrap existing site tensors into a FiniteMPS."""
         L = len(tensors)
@@ -58,6 +67,7 @@ class FiniteMPS:
             tensors=list(tensors),
             orth_center=orth_center,
             singular_values=singular_values,
+            log_norm=log_norm,
         )
 
     @staticmethod
@@ -229,6 +239,7 @@ class FiniteMPS:
             tensors[i - 1] = absorbed.relabel(tmp_bond, left_bond)
 
         # --- SVD at center to extract singular values ---
+        new_log_norm = self.log_norm
         if center < L - 1:
             site = tensors[center]
             right_bond = f"v{center}_{center + 1}"
@@ -237,6 +248,15 @@ class FiniteMPS:
             U, s, Vh, s_full = svd(
                 site, left_labels, [right_bond], new_bond_label=tmp_bond
             )
+
+            # Normalize singular values and accumulate norm into log_norm
+            sv_norm_sq = jnp.sum(s_full**2)
+            sv_norm_sq = jnp.where(sv_norm_sq > 0, sv_norm_sq, 1.0)
+            inv_sv_norm = 1.0 / jnp.sqrt(sv_norm_sq)
+            s = s * inv_sv_norm
+            s_full = s_full * inv_sv_norm
+            new_log_norm = self.log_norm + 0.5 * float(jnp.log(sv_norm_sq))
+
             sv[center] = s_full
 
             # Absorb singular values into U along the bond axis
@@ -254,19 +274,13 @@ class FiniteMPS:
             tensors=tensors,
             orth_center=center,
             singular_values=sv,
+            log_norm=new_log_norm,
         )
 
     # -- Norm / Overlap -----------------------------------------------------
 
-    def overlap(self, other: FiniteMPS) -> complex:
-        """Compute <self|other> via left-to-right transfer matrix contraction.
-
-        Args:
-            other: Another FiniteMPS with the same length and physical dims.
-
-        Returns:
-            The scalar overlap <self|other>.
-        """
+    def _raw_overlap(self, other: FiniteMPS) -> complex:
+        """Compute <self_tensors|other_tensors> ignoring log_norm."""
         if len(self) != len(other):
             raise ValueError("MPS lengths must match for overlap")
 
@@ -292,13 +306,29 @@ class FiniteMPS:
         # env should be a scalar (or 0-dim); extract value
         return complex(env.todense())
 
+    def overlap(self, other: FiniteMPS) -> complex:
+        """Compute <self|other> via left-to-right transfer matrix contraction.
+
+        Accounts for log_norm of both MPS:
+        <self|other> = exp(self.log_norm + other.log_norm) * <self_tensors|other_tensors>.
+
+        Args:
+            other: Another FiniteMPS with the same length and physical dims.
+
+        Returns:
+            The scalar overlap <self|other>.
+        """
+        raw = self._raw_overlap(other)
+        return complex(jnp.exp(self.log_norm + other.log_norm) * raw)
+
     def norm(self) -> float:
-        """Compute the norm ||psi|| = sqrt(<psi|psi>).
+        """Compute the norm ||psi|| = exp(log_norm) * sqrt(<tensors|tensors>).
 
         Returns:
             The norm as a non-negative real number.
         """
-        return float(jnp.sqrt(jnp.abs(self.overlap(self))))
+        raw = self._raw_overlap(self)
+        return float(jnp.exp(self.log_norm) * jnp.sqrt(jnp.abs(raw)))
 
     def entanglement_entropy(self, bond: int) -> float:
         """Compute the Von Neumann entanglement entropy at a bond.
