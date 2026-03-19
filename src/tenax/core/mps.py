@@ -7,7 +7,9 @@ from dataclasses import dataclass, field
 
 import jax.numpy as jnp
 
-from tenax.core.tensor import SymmetricTensor, Tensor
+from tenax.contraction.contractor import contract
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.linalg import qr, svd
 
 
 @dataclass
@@ -123,3 +125,110 @@ class FiniteMPS:
     def is_symmetric(self) -> bool:
         """True if all site tensors are SymmetricTensor."""
         return all(isinstance(t, SymmetricTensor) for t in self.tensors)
+
+    # -- Canonicalization ---------------------------------------------------
+
+    def canonicalize(self, center: int) -> FiniteMPS:
+        """Return a new MPS in mixed-canonical form with orthogonality center.
+
+        Left-to-right QR sweep for sites 0..center-1, then right-to-left QR
+        sweep for sites L-1..center+1, and finally SVD at center to extract
+        singular values.
+
+        Args:
+            center: Site index of the orthogonality center.
+
+        Returns:
+            A new FiniteMPS with ``orth_center=center`` and
+            ``singular_values[center]`` populated (when center < L-1).
+        """
+        L = self.L
+        if center < 0 or center >= L:
+            raise ValueError(f"center={center} out of range [0, {L})")
+
+        tensors = [t for t in self.tensors]  # shallow copy
+        sv = [None] * max(L - 1, 0)
+
+        # --- Left-to-right QR sweep: sites 0 .. center-1 ---
+        for i in range(center):
+            site = tensors[i]
+            right_bond = f"v{i}_{i + 1}"
+            left_labels = [lb for lb in site.labels() if lb != right_bond]
+            # Use a temp bond label to avoid duplicate labels in R
+            tmp_bond = f"_qr_{right_bond}"
+            Q, R = qr(site, left_labels, [right_bond], new_bond_label=tmp_bond)
+            # Q has (..., tmp_bond), rename to right_bond
+            tensors[i] = Q.relabel(tmp_bond, right_bond)
+            # R has (tmp_bond, right_bond) — contract on right_bond with
+            # next site, then rename tmp_bond -> right_bond
+            absorbed = contract(R, tensors[i + 1])
+            tensors[i + 1] = absorbed.relabel(tmp_bond, right_bond)
+
+        # --- Right-to-left QR sweep: sites L-1 .. center+1 ---
+        for i in range(L - 1, center, -1):
+            site = tensors[i]
+            left_bond = f"v{i - 1}_{i}"
+            other_labels = [lb for lb in site.labels() if lb != left_bond]
+            # Use a temp bond label to avoid duplicate labels in R
+            tmp_bond = f"_qr_{left_bond}"
+            Q, R = qr(site, other_labels, [left_bond], new_bond_label=tmp_bond)
+            # Q has (other_labels..., tmp_bond), rename tmp_bond -> left_bond
+            Q = Q.relabel(tmp_bond, left_bond)
+            # Reorder legs so left_bond is first (MPS convention)
+            labels = Q.labels()
+            bond_pos = labels.index(left_bond)
+            if bond_pos != 0:
+                axes = (bond_pos,) + tuple(
+                    j for j in range(len(labels)) if j != bond_pos
+                )
+                Q = Q.transpose(axes)
+            tensors[i] = Q
+            # R has (tmp_bond, left_bond) — contract on left_bond with
+            # prev site, then rename tmp_bond -> left_bond
+            absorbed = contract(tensors[i - 1], R)
+            tensors[i - 1] = absorbed.relabel(tmp_bond, left_bond)
+
+        # --- SVD at center to extract singular values ---
+        if center < L - 1:
+            site = tensors[center]
+            right_bond = f"v{center}_{center + 1}"
+            left_labels = [lb for lb in site.labels() if lb != right_bond]
+            tmp_bond = f"_svd_{right_bond}"
+            U, s, Vh, s_full = svd(
+                site, left_labels, [right_bond], new_bond_label=tmp_bond
+            )
+            sv[center] = s_full
+
+            # Build diagonal tensor for s and absorb into U: U @ diag(s)
+            bond_idx_U = [idx for idx in U.indices if idx.label == tmp_bond][0]
+            bond_idx_Vh = [idx for idx in Vh.indices if idx.label == tmp_bond][0]
+            s_diag_data = jnp.diag(s)
+            # s_diag: (tmp_bond, _s_tmp) — contract with U on tmp_bond
+            s_tmp = f"_s_{tmp_bond}"
+            s_idx_left = bond_idx_U.relabel(tmp_bond)
+            s_idx_right = bond_idx_Vh.relabel(s_tmp)
+            s_tensor = DenseTensor(s_diag_data, (s_idx_left, s_idx_right))
+
+            US = contract(U, s_tensor)
+            # US has (left_labels..., s_tmp), rename to right_bond
+            tensors[center] = US.relabel(s_tmp, right_bond)
+
+            # Vh has (tmp_bond, right_bond) — contract with next site on
+            # right_bond, then rename tmp_bond -> right_bond
+            tensors[center + 1] = contract(Vh, tensors[center + 1]).relabel(
+                tmp_bond, right_bond
+            )
+
+        return FiniteMPS(
+            tensors=tensors,
+            orth_center=center,
+            singular_values=sv,
+        )
+
+    def left_canonicalize(self) -> FiniteMPS:
+        """Return a new MPS in left-canonical form (orth_center = L-1)."""
+        return self.canonicalize(center=self.L - 1)
+
+    def right_canonicalize(self) -> FiniteMPS:
+        """Return a new MPS in right-canonical form (orth_center = 0)."""
+        return self.canonicalize(center=0)

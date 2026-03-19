@@ -128,3 +128,88 @@ class TestFiniteMPSProperties:
 
         mps = FiniteMPS.from_tensors(_make_dense_mps(L=4))
         assert mps.is_symmetric is False
+
+
+class TestFiniteMPSCanonicalize:
+    def _check_left_canonical(self, tensor):
+        """Check that tensor is left-isometric: A^dag A = I on the bond index."""
+        d = tensor.todense()
+        if d.ndim == 2:
+            mat = d.reshape(-1, d.shape[-1])
+        else:
+            mat = d.reshape(-1, d.shape[-1])
+        eye = mat.conj().T @ mat
+        np.testing.assert_allclose(eye, np.eye(eye.shape[0]), atol=1e-12)
+
+    def _check_right_canonical(self, tensor):
+        """Check that tensor is right-isometric: A A^dag = I on the bond index."""
+        d = tensor.todense()
+        if d.ndim == 2:
+            mat = d.reshape(d.shape[0], -1)
+        else:
+            mat = d.reshape(d.shape[0], -1)
+        eye = mat @ mat.conj().T
+        np.testing.assert_allclose(eye, np.eye(eye.shape[0]), atol=1e-12)
+
+    def test_right_canonicalize_dense(self):
+        from tenax.core.mps import FiniteMPS
+
+        tensors = _make_dense_mps(L=6, d=2, chi=4)
+        mps = FiniteMPS.from_tensors(tensors)
+        mps_r = mps.right_canonicalize()
+        assert mps_r.orth_center == 0
+        for i in range(1, 6):
+            self._check_right_canonical(mps_r[i])
+
+    def test_left_canonicalize_dense(self):
+        from tenax.core.mps import FiniteMPS
+
+        tensors = _make_dense_mps(L=6, d=2, chi=4)
+        mps = FiniteMPS.from_tensors(tensors)
+        mps_l = mps.left_canonicalize()
+        assert mps_l.orth_center == 5
+        for i in range(5):
+            self._check_left_canonical(mps_l[i])
+
+    def test_canonicalize_center_dense(self):
+        from tenax.core.mps import FiniteMPS
+
+        tensors = _make_dense_mps(L=6, d=2, chi=4)
+        mps = FiniteMPS.from_tensors(tensors)
+        mps_c = mps.canonicalize(center=3)
+        assert mps_c.orth_center == 3
+        for i in range(3):
+            self._check_left_canonical(mps_c[i])
+        for i in range(4, 6):
+            self._check_right_canonical(mps_c[i])
+
+    def test_canonicalize_preserves_state(self):
+        from tenax.core.mps import FiniteMPS
+
+        tensors = _make_dense_mps(L=4, d=2, chi=3)
+        mps = FiniteMPS.from_tensors(tensors)
+        mps_c = mps.canonicalize(center=2)
+
+        def _to_statevector(mps_tensors):
+            v = mps_tensors[0].todense()
+            for t in mps_tensors[1:]:
+                v = jnp.tensordot(v, t.todense(), axes=([-1], [0]))
+            return v.ravel()
+
+        psi_orig = _to_statevector(mps.tensors)
+        psi_canon = _to_statevector(mps_c.tensors)
+        psi_orig = psi_orig / jnp.linalg.norm(psi_orig)
+        psi_canon = psi_canon / jnp.linalg.norm(psi_canon)
+        overlap = jnp.abs(jnp.dot(psi_orig.conj(), psi_canon))
+        np.testing.assert_allclose(float(overlap), 1.0, atol=1e-12)
+
+    def test_canonicalize_singular_values(self):
+        from tenax.core.mps import FiniteMPS
+
+        tensors = _make_dense_mps(L=6, d=2, chi=4)
+        mps = FiniteMPS.from_tensors(tensors).canonicalize(center=3)
+        assert mps.singular_values[3] is not None
+        assert len(mps.singular_values[3]) > 0
+        sv = np.array(mps.singular_values[3])
+        assert np.all(sv >= -1e-15)
+        np.testing.assert_allclose(sv, np.sort(sv)[::-1], atol=1e-15)
