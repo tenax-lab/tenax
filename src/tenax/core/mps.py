@@ -21,6 +21,9 @@ from tenax.linalg import qr, svd
 class FiniteMPS:
     """Finite matrix product state with canonical form tracking.
 
+    The state represented is |psi> = exp(log_norm) * |psi_tensors>, where
+    |psi_tensors> is the state encoded by the site tensors alone.
+
     Attributes:
         tensors: Site tensors, length L.  Boundary sites are 2-leg
             (site 0: physical x right-bond, site L-1: left-bond x physical),
@@ -32,11 +35,16 @@ class FiniteMPS:
         singular_values: Singular values at each bond (length L-1).
             Entry i holds the singular values between sites i and i+1,
             or None if not yet computed.
+        log_norm: Logarithm of the norm factor.  After canonicalization the
+            singular values are normalized (sum(sv**2) == 1) and the original
+            norm information is stored here so that
+            ``norm() == exp(log_norm) * sqrt(<tensors|tensors>)``.
     """
 
     tensors: list[Tensor]
     orth_center: int | None = None
     singular_values: list[jnp.ndarray | None] = field(default_factory=list)
+    log_norm: float = 0.0
 
     def __post_init__(self):
         if not self.singular_values:
@@ -49,8 +57,22 @@ class FiniteMPS:
         tensors: list[Tensor],
         orth_center: int | None = None,
         singular_values: list[jnp.ndarray | None] | None = None,
+        log_norm: float = 0.0,
+        verify: bool = False,
     ) -> FiniteMPS:
-        """Wrap existing site tensors into a FiniteMPS."""
+        """Wrap existing site tensors into a FiniteMPS.
+
+        Args:
+            tensors: Site tensors.
+            orth_center: Position of the orthogonality center, or None.
+            singular_values: Singular values at each bond.
+            log_norm: Logarithm of the norm factor.
+            verify: If True and orth_center is not None, verify that sites
+                left of orth_center are left-canonical and sites right of
+                orth_center are right-canonical.  Raises ValueError if not.
+        """
+        if verify and orth_center is not None:
+            _verify_orthogonality(tensors, orth_center)
         L = len(tensors)
         if singular_values is None:
             singular_values = [None] * max(L - 1, 0)
@@ -58,6 +80,7 @@ class FiniteMPS:
             tensors=list(tensors),
             orth_center=orth_center,
             singular_values=singular_values,
+            log_norm=log_norm,
         )
 
     @staticmethod
@@ -229,6 +252,7 @@ class FiniteMPS:
             tensors[i - 1] = absorbed.relabel(tmp_bond, left_bond)
 
         # --- SVD at center to extract singular values ---
+        new_log_norm = self.log_norm
         if center < L - 1:
             site = tensors[center]
             right_bond = f"v{center}_{center + 1}"
@@ -237,6 +261,15 @@ class FiniteMPS:
             U, s, Vh, s_full = svd(
                 site, left_labels, [right_bond], new_bond_label=tmp_bond
             )
+
+            # Normalize singular values and accumulate norm into log_norm
+            sv_norm_sq = jnp.sum(s_full**2)
+            sv_norm_sq = jnp.where(sv_norm_sq > 0, sv_norm_sq, 1.0)
+            inv_sv_norm = 1.0 / jnp.sqrt(sv_norm_sq)
+            s = s * inv_sv_norm
+            s_full = s_full * inv_sv_norm
+            new_log_norm = self.log_norm + 0.5 * float(jnp.log(sv_norm_sq))
+
             sv[center] = s_full
 
             # Absorb singular values into U along the bond axis
@@ -254,19 +287,13 @@ class FiniteMPS:
             tensors=tensors,
             orth_center=center,
             singular_values=sv,
+            log_norm=new_log_norm,
         )
 
     # -- Norm / Overlap -----------------------------------------------------
 
-    def overlap(self, other: FiniteMPS) -> complex:
-        """Compute <self|other> via left-to-right transfer matrix contraction.
-
-        Args:
-            other: Another FiniteMPS with the same length and physical dims.
-
-        Returns:
-            The scalar overlap <self|other>.
-        """
+    def _raw_overlap(self, other: FiniteMPS) -> complex:
+        """Compute <self_tensors|other_tensors> ignoring log_norm."""
         if len(self) != len(other):
             raise ValueError("MPS lengths must match for overlap")
 
@@ -292,13 +319,29 @@ class FiniteMPS:
         # env should be a scalar (or 0-dim); extract value
         return complex(env.todense())
 
+    def overlap(self, other: FiniteMPS) -> complex:
+        """Compute <self|other> via left-to-right transfer matrix contraction.
+
+        Accounts for log_norm of both MPS:
+        <self|other> = exp(self.log_norm + other.log_norm) * <self_tensors|other_tensors>.
+
+        Args:
+            other: Another FiniteMPS with the same length and physical dims.
+
+        Returns:
+            The scalar overlap <self|other>.
+        """
+        raw = self._raw_overlap(other)
+        return complex(jnp.exp(self.log_norm + other.log_norm) * raw)
+
     def norm(self) -> float:
-        """Compute the norm ||psi|| = sqrt(<psi|psi>).
+        """Compute the norm ||psi|| = exp(log_norm) * sqrt(<tensors|tensors>).
 
         Returns:
             The norm as a non-negative real number.
         """
-        return float(jnp.sqrt(jnp.abs(self.overlap(self))))
+        raw = self._raw_overlap(self)
+        return float(jnp.exp(self.log_norm) * jnp.sqrt(jnp.abs(raw)))
 
     def entanglement_entropy(self, bond: int) -> float:
         """Compute the Von Neumann entanglement entropy at a bond.
@@ -334,21 +377,111 @@ class FiniteMPS:
         """Return a new MPS in right-canonical form (orth_center = 0)."""
         return self.canonicalize(center=0)
 
+    def compute_singular_values(self) -> FiniteMPS:
+        """Compute singular values at ALL bonds via a single SVD sweep.
+
+        Returns a new FiniteMPS in right-canonical form (orth_center=0) with
+        all ``singular_values`` entries populated and normalized (sum(sv²)=1
+        at each bond).
+
+        Algorithm:
+            1. Start from left-canonical form (orth_center = L-1).
+            2. Sweep right-to-left with SVD (no truncation) at each bond:
+               for i = L-1 down to 1, SVD site i, store normalized SVs,
+               absorb U·s into site i-1.
+            3. Result: right-canonical MPS with all SVs populated.
+        """
+        L = self.L
+        if L <= 1:
+            return FiniteMPS(
+                tensors=list(self.tensors),
+                orth_center=0,
+                singular_values=[],
+                log_norm=self.log_norm,
+            )
+
+        # Step 1: ensure left-canonical form
+        if self.orth_center != L - 1:
+            mps = self.left_canonicalize()
+        else:
+            mps = FiniteMPS(
+                tensors=list(self.tensors),
+                orth_center=self.orth_center,
+                singular_values=list(self.singular_values),
+                log_norm=self.log_norm,
+            )
+
+        tensors = list(mps.tensors)
+        sv_list: list[jnp.ndarray | None] = [None] * (L - 1)
+        new_log_norm = mps.log_norm
+
+        # Step 2: sweep right-to-left with SVD
+        for i in range(L - 1, 0, -1):
+            site = tensors[i]
+            left_bond = f"v{i - 1}_{i}"
+            right_labels = [lb for lb in site.labels() if lb != left_bond]
+            tmp_bond = f"_svd_{left_bond}"
+
+            U, s, Vh, s_full = svd(
+                site, [left_bond], right_labels, new_bond_label=tmp_bond
+            )
+
+            # Normalize singular values
+            sv_norm_sq = jnp.sum(s_full**2)
+            sv_norm_sq = jnp.where(sv_norm_sq > 0, sv_norm_sq, 1.0)
+            inv_sv_norm = 1.0 / jnp.sqrt(sv_norm_sq)
+            s = s * inv_sv_norm
+            s_full = s_full * inv_sv_norm
+            new_log_norm = new_log_norm + 0.5 * float(jnp.log(sv_norm_sq))
+
+            sv_list[i - 1] = s_full
+
+            # Vh has (tmp_bond, right_labels...) — rename tmp_bond -> left_bond
+            # Reorder so left_bond is first
+            Vh_relabeled = Vh.relabel(tmp_bond, left_bond)
+            labels = Vh_relabeled.labels()
+            bond_pos = labels.index(left_bond)
+            if bond_pos != 0:
+                axes = (bond_pos,) + tuple(
+                    j for j in range(len(labels)) if j != bond_pos
+                )
+                Vh_relabeled = Vh_relabeled.transpose(axes)
+            tensors[i] = Vh_relabeled
+
+            # Absorb U·diag(s) into site i-1
+            US = scale_bond_axis(U, tmp_bond, s)
+            absorbed = contract(tensors[i - 1], US)
+            tensors[i - 1] = absorbed.relabel(tmp_bond, left_bond)
+
+        return FiniteMPS(
+            tensors=tensors,
+            orth_center=0,
+            singular_values=sv_list,
+            log_norm=new_log_norm,
+        )
+
 
 @dataclass
 class InfiniteMPS:
     """Infinite matrix product state with a finite unit cell.
 
     Attributes:
-        tensors: Unit cell site tensors (length = unit_cell_size).
+        tensors: Unit cell site tensors (length L = unit_cell_size).
             Labels: v_l/p_l/v_c for left site, v_c/p_r/v_r for right site (2-site cell).
             For general N-site cells, labels follow the iDMRG convention.
-        singular_values: Singular values at each bond in the unit cell.
-            For a 2-site cell, singular_values[0] is the bond between sites 0 and 1.
+        singular_values: Singular values at each bond, length L+1.
+            For a 2-site cell (L=2):
+              - singular_values[0]: left boundary bond (between adjacent unit cells)
+              - singular_values[1]: centre bond (between sites 0 and 1)
+              - singular_values[2]: right boundary bond (same as [0], shifted by qshift)
+        qshift: Charge per unit cell for U(1)-symmetric iMPS, or None for dense.
+        log_norm: Logarithm of the norm factor (consistent with FiniteMPS).
     """
 
     tensors: list[Tensor]
     singular_values: list[jax.Array]
+    qshift: int | None = None
+    log_norm: float = 0.0
 
     # -- Construction -------------------------------------------------------
 
@@ -356,11 +489,15 @@ class InfiniteMPS:
     def from_tensors(
         tensors: list[Tensor],
         singular_values: list[jax.Array],
+        qshift: int | None = None,
+        log_norm: float = 0.0,
     ) -> InfiniteMPS:
         """Wrap existing tensors into an InfiniteMPS."""
         return InfiniteMPS(
             tensors=list(tensors),
             singular_values=list(singular_values),
+            qshift=qshift,
+            log_norm=log_norm,
         )
 
     # -- Sequence protocol --------------------------------------------------
@@ -433,6 +570,33 @@ class InfiniteMPS:
         p = p / jnp.sum(p)
         S = -jnp.sum(p * jnp.log(p))
         return float(S)
+
+
+# ---------------------------------------------------------------------------
+# Orthogonality verification helper
+# ---------------------------------------------------------------------------
+
+
+def _verify_orthogonality(
+    tensors: list[Tensor], orth_center: int, atol: float = 1e-10
+) -> None:
+    """Verify canonical form: left sites are left-canonical, right are right-canonical.
+
+    Raises:
+        ValueError: If any site fails the isometry check.
+    """
+    for i in range(orth_center):
+        d = tensors[i].todense()
+        mat = d.reshape(-1, d.shape[-1])
+        eye = mat.conj().T @ mat
+        if not jnp.allclose(eye, jnp.eye(eye.shape[0]), atol=atol):
+            raise ValueError(f"Site {i} is not left-canonical (A†A ≠ I)")
+    for i in range(orth_center + 1, len(tensors)):
+        d = tensors[i].todense()
+        mat = d.reshape(d.shape[0], -1)
+        eye = mat @ mat.conj().T
+        if not jnp.allclose(eye, jnp.eye(eye.shape[0]), atol=atol):
+            raise ValueError(f"Site {i} is not right-canonical (AA† ≠ I)")
 
 
 # ---------------------------------------------------------------------------

@@ -470,7 +470,7 @@ class TestInfiniteMPS:
         A_L = SymmetricTensor.random_normal(idx_AL, k1)
         A_R = SymmetricTensor.random_normal(idx_AR, k2)
         sv = jnp.array([0.7, 0.5, 0.3, 0.1])
-        return InfiniteMPS.from_tensors([A_L, A_R], [sv])
+        return InfiniteMPS.from_tensors([A_L, A_R], [sv, sv, sv])
 
     def test_from_tensors(self):
         imps = self._make_imps()
@@ -512,15 +512,107 @@ class TestInfiniteMPS:
         )
         A = DenseTensor(jnp.ones((2, 2, 2)), idx0)
         B = DenseTensor(jnp.ones((2, 2, 2)), idx1)
-        imps = InfiniteMPS.from_tensors([A, B], [sv])
-        S = imps.entanglement_entropy(bond=0)
+        imps = InfiniteMPS.from_tensors([A, B], [sv, sv, sv])
+        S = imps.entanglement_entropy(bond=1)  # centre bond
         np.testing.assert_allclose(S, np.log(2), atol=1e-12)
+
+    def test_qshift_default_none(self):
+        imps = self._make_imps()
+        assert imps.qshift is None
+
+    def test_l_plus_1_bonds(self):
+        imps = self._make_imps()
+        assert len(imps.singular_values) == 3  # L+1 for 2-site cell
+
+    def test_log_norm_default(self):
+        imps = self._make_imps()
+        assert imps.log_norm == 0.0
+
+    def test_qshift_passthrough(self):
+        from tenax.core.mps import InfiniteMPS
+
+        sym = U1Symmetry()
+        charges = np.zeros(2, dtype=np.int32)
+        idx0 = (
+            TensorIndex(sym, charges, IN, label="v_l"),
+            TensorIndex(sym, charges, IN, label="p_l"),
+            TensorIndex(sym, charges, OUT, label="v_c"),
+        )
+        idx1 = (
+            TensorIndex(sym, charges, IN, label="v_c"),
+            TensorIndex(sym, charges, IN, label="p_r"),
+            TensorIndex(sym, charges, OUT, label="v_r"),
+        )
+        A = DenseTensor(jnp.ones((2, 2, 2)), idx0)
+        B = DenseTensor(jnp.ones((2, 2, 2)), idx1)
+        sv = jnp.array([0.5, 0.5])
+        imps = InfiniteMPS.from_tensors([A, B], [sv, sv, sv], qshift=2)
+        assert imps.qshift == 2
 
     def test_iter(self):
         imps = self._make_imps()
         tensors = list(imps)
         assert len(tensors) == 2
         assert tensors[0] is imps.tensors[0]
+
+
+class TestFiniteMPSLogNorm:
+    def test_log_norm_default_zero(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4))
+        assert mps.log_norm == 0.0
+
+    def test_canonicalize_normalizes_svs(self):
+        """After canonicalize, singular values should sum-sq to 1."""
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3))
+        mps_c = mps.canonicalize(center=2)
+        sv = mps_c.singular_values[2]
+        assert sv is not None
+        np.testing.assert_allclose(float(jnp.sum(sv**2)), 1.0, atol=1e-12)
+
+    def test_norm_consistent_after_canonicalize(self):
+        """norm() should give same result before and after canonicalize."""
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3))
+        n_before = mps.norm()
+        mps_c = mps.canonicalize(center=2)
+        n_after = mps_c.norm()
+        np.testing.assert_allclose(n_before, n_after, rtol=1e-10)
+
+    def test_log_norm_nonzero_after_canonicalize(self):
+        """canonicalize should set log_norm to capture the original norm."""
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3))
+        mps_c = mps.canonicalize(center=2)
+        # For a random MPS, norm != 1, so log_norm should be nonzero
+        assert mps_c.log_norm != 0.0
+
+    def test_overlap_uses_log_norm(self):
+        """overlap should account for log_norm of both MPS."""
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3))
+        mps_c = mps.canonicalize(center=2)
+        # <mps|mps> should equal <mps_c|mps_c> (same state)
+        ov_orig = mps.overlap(mps)
+        ov_canon = mps_c.overlap(mps_c)
+        np.testing.assert_allclose(
+            float(jnp.abs(ov_orig)), float(jnp.abs(ov_canon)), rtol=1e-10
+        )
+
+    def test_multiple_canonicalize_consistent(self):
+        """Multiple canonicalize calls should accumulate log_norm correctly."""
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=6, chi=4))
+        mps1 = mps.canonicalize(center=3)
+        mps2 = mps1.canonicalize(center=1)
+        np.testing.assert_allclose(mps.norm(), mps2.norm(), rtol=1e-10)
 
 
 class TestFiniteMPSRandom:
@@ -561,3 +653,72 @@ class TestFiniteMPSRandom:
         mps2 = FiniteMPS.random(L=4, d=2, chi=3, key=key)
         for t1, t2 in zip(mps1, mps2):
             np.testing.assert_allclose(t1.todense(), t2.todense())
+
+
+class TestComputeSingularValues:
+    def test_all_bonds_populated(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=6, chi=4))
+        mps_sv = mps.compute_singular_values()
+        for i in range(5):
+            assert mps_sv.singular_values[i] is not None
+            assert len(mps_sv.singular_values[i]) > 0
+
+    def test_svs_normalized(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=6, chi=4))
+        mps_sv = mps.compute_singular_values()
+        for i in range(5):
+            sv = mps_sv.singular_values[i]
+            np.testing.assert_allclose(float(jnp.sum(sv**2)), 1.0, atol=1e-10)
+
+    def test_preserves_state(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3))
+        mps_sv = mps.compute_singular_values()
+        np.testing.assert_allclose(mps.norm(), mps_sv.norm(), rtol=1e-10)
+
+    def test_entanglement_entropy_all_bonds(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(
+            _make_dense_mps(L=6, chi=4)
+        ).compute_singular_values()
+        for i in range(5):
+            S = mps.entanglement_entropy(bond=i)
+            assert S >= 0.0
+
+    def test_orth_center_is_zero(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3))
+        mps_sv = mps.compute_singular_values()
+        assert mps_sv.orth_center == 0
+
+
+class TestOrthogonalityVerification:
+    def test_verify_passes_for_canonical(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3))
+        mps_c = mps.canonicalize(center=2)
+        # Should not raise
+        FiniteMPS.from_tensors(mps_c.tensors, orth_center=2, verify=True)
+
+    def test_verify_fails_for_non_canonical(self):
+        from tenax.core.mps import FiniteMPS
+
+        tensors = _make_dense_mps(L=4, chi=3)
+        with pytest.raises(ValueError, match="not left-canonical|not right-canonical"):
+            FiniteMPS.from_tensors(tensors, orth_center=2, verify=True)
+
+    def test_verify_false_skips_check(self):
+        from tenax.core.mps import FiniteMPS
+
+        tensors = _make_dense_mps(L=4, chi=3)
+        # verify=False (default) should not raise even for non-canonical
+        mps = FiniteMPS.from_tensors(tensors, orth_center=2, verify=False)
+        assert mps.orth_center == 2
