@@ -520,6 +520,12 @@ The generated HTML is in `docs/_build/html/`.
 - L. Ponsioen, F. F. Assaad, P. Corboz, *SciPost Phys.* **12**, 006 (2022) — Quasiparticle excitations for iPEPS
 - J. Naumann, E. L. Weerda, J. Eisert, M. Rizzi, P. Schmoll, arXiv:2502.10298 (2025) — Split-CTMRG with factored projectors for efficient iPEPS environments
 
+## Authors
+
+**Maintainer:** Ying-Jer Kao
+
+**Contributors:** Ian McCulloch
+
 ## License
 
-MIT
+Apache 2.0
