@@ -55,6 +55,46 @@ def _make_dense_mps(L=4, d=2, chi=3, key=None):
     return tensors
 
 
+def _make_symmetric_mps(L=4, d=2, chi=4, key=None):
+    """Helper: build a random U(1)-symmetric MPS as list[SymmetricTensor]."""
+    if key is None:
+        key = jax.random.PRNGKey(0)
+    sym = U1Symmetry()
+    phys_charges = np.array([1, -1], dtype=np.int32)
+    # Virtual charges: sectors -1, 0, +1 distributed across chi states
+    # (mirrors build_random_symmetric_mps logic for target_charge=0)
+    required_charges = [-1, 0, 1]
+    n_sectors = len(required_charges)
+    per_sector = max(1, chi // n_sectors)
+    arrays = [np.full(per_sector, q, dtype=np.int32) for q in required_charges]
+    virt_charges = np.concatenate(arrays)[:chi]
+    if len(virt_charges) < chi:
+        pad = np.full(chi - len(virt_charges), 0, dtype=np.int32)
+        virt_charges = np.concatenate([virt_charges, pad])
+
+    tensors = []
+    for i in range(L):
+        key, subkey = jax.random.split(key)
+        if i == 0:
+            indices = (
+                TensorIndex(sym, phys_charges, IN, label=f"p{i}"),
+                TensorIndex(sym, virt_charges, OUT, label=f"v{i}_{i + 1}"),
+            )
+        elif i == L - 1:
+            indices = (
+                TensorIndex(sym, virt_charges, IN, label=f"v{i - 1}_{i}"),
+                TensorIndex(sym, phys_charges, IN, label=f"p{i}"),
+            )
+        else:
+            indices = (
+                TensorIndex(sym, virt_charges, IN, label=f"v{i - 1}_{i}"),
+                TensorIndex(sym, phys_charges, IN, label=f"p{i}"),
+                TensorIndex(sym, virt_charges, OUT, label=f"v{i}_{i + 1}"),
+            )
+        tensors.append(SymmetricTensor.random_normal(indices, subkey))
+    return tensors
+
+
 class TestFiniteMPSConstruction:
     def test_from_tensors_basic(self):
         from tenax.core.mps import FiniteMPS
@@ -213,3 +253,106 @@ class TestFiniteMPSCanonicalize:
         sv = np.array(mps.singular_values[3])
         assert np.all(sv >= -1e-15)
         np.testing.assert_allclose(sv, np.sort(sv)[::-1], atol=1e-15)
+
+
+class TestFiniteMPSNormOverlap:
+    def test_norm_positive(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, d=2, chi=3))
+        n = mps.norm()
+        assert n > 0
+        assert isinstance(float(n), float)
+
+    def test_norm_consistent_with_canonicalize(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, d=2, chi=3))
+        mps_c = mps.canonicalize(center=2)
+        n_full = mps.norm()
+        n_canon = mps_c.norm()
+        np.testing.assert_allclose(n_full, n_canon, rtol=1e-10)
+
+    def test_overlap_self(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, d=2, chi=3))
+        ov = mps.overlap(mps)
+        n2 = mps.norm() ** 2
+        np.testing.assert_allclose(float(jnp.abs(ov)), float(n2), rtol=1e-10)
+
+    def test_overlap_different(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps1 = FiniteMPS.from_tensors(
+            _make_dense_mps(L=4, d=2, chi=3, key=jax.random.PRNGKey(0))
+        )
+        mps2 = FiniteMPS.from_tensors(
+            _make_dense_mps(L=4, d=2, chi=3, key=jax.random.PRNGKey(99))
+        )
+        ov = mps1.overlap(mps2)
+        normalized = jnp.abs(ov) / (mps1.norm() * mps2.norm())
+        assert float(normalized) < 1.0
+
+
+class TestFiniteMPSCanonicalizeSymmetric:
+    def test_right_canonicalize_symmetric(self):
+        """Right-canonicalize works for SymmetricTensor MPS."""
+        from tenax.core.mps import FiniteMPS
+
+        tensors = _make_symmetric_mps(L=4, d=2, chi=4)
+        mps = FiniteMPS.from_tensors(tensors)
+        mps_r = mps.right_canonicalize()
+
+        assert mps_r.orth_center == 0
+        assert mps_r.is_symmetric  # all tensors remain SymmetricTensor
+        for i in range(1, 4):
+            d = mps_r[i].todense()
+            mat = d.reshape(d.shape[0], -1)
+            eye = mat @ mat.conj().T
+            np.testing.assert_allclose(eye, np.eye(eye.shape[0]), atol=1e-10)
+
+    def test_canonicalize_preserves_state_symmetric(self):
+        """Canonicalization preserves the physical state for SymmetricTensor."""
+        from tenax.core.mps import FiniteMPS
+
+        tensors = _make_symmetric_mps(L=4, d=2, chi=4)
+        mps = FiniteMPS.from_tensors(tensors)
+        mps_c = mps.canonicalize(center=2)
+
+        def _to_statevector(ts):
+            v = ts[0].todense()
+            for t in ts[1:]:
+                v = jnp.tensordot(v, t.todense(), axes=([-1], [0]))
+            return v.ravel()
+
+        psi_orig = _to_statevector(mps.tensors)
+        psi_canon = _to_statevector(mps_c.tensors)
+        psi_orig = psi_orig / jnp.linalg.norm(psi_orig)
+        psi_canon = psi_canon / jnp.linalg.norm(psi_canon)
+        overlap = jnp.abs(jnp.dot(psi_orig.conj(), psi_canon))
+        np.testing.assert_allclose(float(overlap), 1.0, atol=1e-10)
+
+    def test_no_todense_in_canonicalize(self):
+        """Verify that canonicalize does NOT call todense() internally."""
+        from unittest.mock import patch
+
+        from tenax.core.mps import FiniteMPS
+
+        tensors = _make_symmetric_mps(L=4, d=2, chi=4)
+        mps = FiniteMPS.from_tensors(tensors)
+
+        call_count = [0]
+        orig_todense = SymmetricTensor.todense
+
+        def counting_todense(self):
+            call_count[0] += 1
+            return orig_todense(self)
+
+        with patch.object(SymmetricTensor, "todense", counting_todense):
+            mps.canonicalize(center=2)
+
+        assert call_count[0] == 0, (
+            f"canonicalize() called todense() {call_count[0]} times; "
+            "should use block-sparse operations only"
+        )

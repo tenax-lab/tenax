@@ -7,8 +7,9 @@ from dataclasses import dataclass, field
 
 import jax.numpy as jnp
 
+from tenax.algorithms._tensor_utils import scale_bond_axis
 from tenax.contraction.contractor import contract
-from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.core.tensor import SymmetricTensor, Tensor
 from tenax.linalg import qr, svd
 
 
@@ -199,19 +200,10 @@ class FiniteMPS:
             )
             sv[center] = s_full
 
-            # Build diagonal tensor for s and absorb into U: U @ diag(s)
-            bond_idx_U = [idx for idx in U.indices if idx.label == tmp_bond][0]
-            bond_idx_Vh = [idx for idx in Vh.indices if idx.label == tmp_bond][0]
-            s_diag_data = jnp.diag(s)
-            # s_diag: (tmp_bond, _s_tmp) — contract with U on tmp_bond
-            s_tmp = f"_s_{tmp_bond}"
-            s_idx_left = bond_idx_U.relabel(tmp_bond)
-            s_idx_right = bond_idx_Vh.relabel(s_tmp)
-            s_tensor = DenseTensor(s_diag_data, (s_idx_left, s_idx_right))
-
-            US = contract(U, s_tensor)
-            # US has (left_labels..., s_tmp), rename to right_bond
-            tensors[center] = US.relabel(s_tmp, right_bond)
+            # Absorb singular values into U along the bond axis
+            US = scale_bond_axis(U, tmp_bond, s)
+            # Rename tmp_bond -> right_bond
+            tensors[center] = US.relabel(tmp_bond, right_bond)
 
             # Vh has (tmp_bond, right_bond) — contract with next site on
             # right_bond, then rename tmp_bond -> right_bond
@@ -224,6 +216,50 @@ class FiniteMPS:
             orth_center=center,
             singular_values=sv,
         )
+
+    # -- Norm / Overlap -----------------------------------------------------
+
+    def overlap(self, other: FiniteMPS) -> complex:
+        """Compute <self|other> via left-to-right transfer matrix contraction.
+
+        Args:
+            other: Another FiniteMPS with the same length and physical dims.
+
+        Returns:
+            The scalar overlap <self|other>.
+        """
+        if len(self) != len(other):
+            raise ValueError("MPS lengths must match for overlap")
+
+        env = None
+        for i in range(self.L):
+            ket = other[i]
+            bra = self[i].conj()
+
+            # Relabel bra's virtual bond labels to avoid collision with ket.
+            # Physical labels (p{i}) stay the same so they contract.
+            for label in bra.labels():
+                if label.startswith("v"):
+                    bra = bra.relabel(label, label + "*")
+
+            # Contract bra and ket on physical index
+            site_transfer = contract(bra, ket)
+
+            if env is None:
+                env = site_transfer
+            else:
+                env = contract(env, site_transfer)
+
+        # env should be a scalar (or 0-dim); extract value
+        return complex(env.todense())
+
+    def norm(self) -> float:
+        """Compute the norm ||psi|| = sqrt(<psi|psi>).
+
+        Returns:
+            The norm as a non-negative real number.
+        """
+        return float(jnp.sqrt(jnp.abs(self.overlap(self))))
 
     def left_canonicalize(self) -> FiniteMPS:
         """Return a new MPS in left-canonical form (orth_center = L-1)."""
