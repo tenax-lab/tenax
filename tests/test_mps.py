@@ -620,3 +620,72 @@ class TestFiniteMPSRandom:
         mps2 = FiniteMPS.random(L=4, d=2, chi=3, key=key)
         for t1, t2 in zip(mps1, mps2):
             np.testing.assert_allclose(t1.todense(), t2.todense())
+
+
+class TestComputeSingularValues:
+    def test_all_bonds_populated(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=6, chi=4))
+        mps_sv = mps.compute_singular_values()
+        for i in range(5):
+            assert mps_sv.singular_values[i] is not None
+            assert len(mps_sv.singular_values[i]) > 0
+
+    def test_svs_normalized(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=6, chi=4))
+        mps_sv = mps.compute_singular_values()
+        for i in range(5):
+            sv = mps_sv.singular_values[i]
+            np.testing.assert_allclose(float(jnp.sum(sv**2)), 1.0, atol=1e-10)
+
+    def test_preserves_state(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3))
+        mps_sv = mps.compute_singular_values()
+        np.testing.assert_allclose(mps.norm(), mps_sv.norm(), rtol=1e-10)
+
+    def test_entanglement_entropy_all_bonds(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(
+            _make_dense_mps(L=6, chi=4)
+        ).compute_singular_values()
+        for i in range(5):
+            S = mps.entanglement_entropy(bond=i)
+            assert S >= 0.0
+
+    def test_orth_center_is_zero(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3))
+        mps_sv = mps.compute_singular_values()
+        assert mps_sv.orth_center == 0
+
+
+class TestOrthogonalityVerification:
+    def test_verify_passes_for_canonical(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3))
+        mps_c = mps.canonicalize(center=2)
+        # Should not raise
+        FiniteMPS.from_tensors(mps_c.tensors, orth_center=2, verify=True)
+
+    def test_verify_fails_for_non_canonical(self):
+        from tenax.core.mps import FiniteMPS
+
+        tensors = _make_dense_mps(L=4, chi=3)
+        with pytest.raises(ValueError, match="not left-canonical|not right-canonical"):
+            FiniteMPS.from_tensors(tensors, orth_center=2, verify=True)
+
+    def test_verify_false_skips_check(self):
+        from tenax.core.mps import FiniteMPS
+
+        tensors = _make_dense_mps(L=4, chi=3)
+        # verify=False (default) should not raise even for non-canonical
+        mps = FiniteMPS.from_tensors(tensors, orth_center=2, verify=False)
+        assert mps.orth_center == 2
