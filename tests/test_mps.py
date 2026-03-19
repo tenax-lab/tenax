@@ -444,3 +444,43 @@ class TestFiniteMPSCanonicalizeSymmetric:
             f"canonicalize() called todense() {call_count[0]} times; "
             "should use block-sparse operations only"
         )
+
+
+class TestFiniteMPSRandom:
+    def test_random_dense(self):
+        from tenax.core.mps import FiniteMPS
+
+        key = jax.random.PRNGKey(42)
+        mps = FiniteMPS.random(L=6, d=2, chi=4, key=key)
+        assert len(mps) == 6
+        assert mps.orth_center == 0
+        # Boundary bonds are truncated to min(d, chi) during canonicalization
+        assert mps.bond_dims == [2, 4, 4, 4, 2]
+        assert mps.phys_dims == [2, 2, 2, 2, 2, 2]
+        assert mps.is_symmetric is False
+
+    def test_random_symmetric(self):
+        from tenax.core.mps import FiniteMPS
+
+        key = jax.random.PRNGKey(42)
+        mps = FiniteMPS.random(
+            L=6,
+            d=2,
+            chi=4,
+            key=key,
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
+        assert len(mps) == 6
+        assert mps.orth_center == 0
+        assert mps.is_symmetric is True
+
+    def test_random_reproducible(self):
+        from tenax.core.mps import FiniteMPS
+
+        key = jax.random.PRNGKey(42)
+        mps1 = FiniteMPS.random(L=4, d=2, chi=3, key=key)
+        mps2 = FiniteMPS.random(L=4, d=2, chi=3, key=key)
+        for t1, t2 in zip(mps1, mps2):
+            np.testing.assert_allclose(t1.todense(), t2.todense())

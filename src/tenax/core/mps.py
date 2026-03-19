@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from typing import Any
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 from tenax.algorithms._tensor_utils import scale_bond_axis
 from tenax.contraction.contractor import contract
-from tenax.core.tensor import SymmetricTensor, Tensor
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 from tenax.linalg import qr, svd
 
 
@@ -55,6 +59,31 @@ class FiniteMPS:
             orth_center=orth_center,
             singular_values=singular_values,
         )
+
+    @staticmethod
+    def random(
+        L: int,
+        d: int,
+        chi: int,
+        key: jax.Array,
+        *,
+        symmetric: bool = False,
+        symmetry: Any = None,
+        target_charge: int | None = None,
+        dtype: Any = jnp.float64,
+    ) -> FiniteMPS:
+        """Random MPS, right-canonicalized (orth_center=0).
+
+        For symmetric=True, requires symmetry and target_charge.
+        """
+        if symmetric:
+            tensors = _build_random_symmetric_tensors(
+                L, d, chi, key, symmetry, target_charge, dtype
+            )
+        else:
+            tensors = _build_random_dense_tensors(L, d, chi, key, dtype)
+        mps = FiniteMPS.from_tensors(tensors)
+        return mps.right_canonicalize()
 
     # -- Sequence protocol --------------------------------------------------
 
@@ -294,3 +323,127 @@ class FiniteMPS:
     def right_canonicalize(self) -> FiniteMPS:
         """Return a new MPS in right-canonical form (orth_center = 0)."""
         return self.canonicalize(center=0)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for FiniteMPS.random()
+# ---------------------------------------------------------------------------
+
+
+def _build_random_dense_tensors(
+    L: int, d: int, chi: int, key: jax.Array, dtype: Any
+) -> list[Tensor]:
+    """Build a list of random dense MPS tensors."""
+    from tenax.core.symmetry import U1Symmetry
+
+    sym = U1Symmetry()
+    phys_charges = np.zeros(d, dtype=np.int32)
+    virt_charges = np.zeros(chi, dtype=np.int32)
+
+    tensors: list[Tensor] = []
+    for i in range(L):
+        key, subkey = jax.random.split(key)
+        if L == 1:
+            shape = (d,)
+            indices: tuple[TensorIndex, ...] = (
+                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
+            )
+        elif i == 0:
+            shape = (d, chi)
+            indices = (
+                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    sym, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
+            )
+        elif i == L - 1:
+            shape = (chi, d)
+            indices = (
+                TensorIndex(sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"),
+                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
+            )
+        else:
+            shape = (chi, d, chi)
+            indices = (
+                TensorIndex(sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"),
+                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    sym, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
+            )
+        data = jax.random.normal(subkey, shape, dtype=dtype)
+        data = data / jnp.linalg.norm(data)
+        tensors.append(DenseTensor(data, indices))
+    return tensors
+
+
+def _build_random_symmetric_tensors(
+    L: int,
+    d: int,
+    chi: int,
+    key: jax.Array,
+    symmetry: Any,
+    target_charge: int | None,
+    dtype: Any,
+) -> list[Tensor]:
+    """Build a list of random symmetric MPS tensors."""
+    if symmetry is None:
+        raise ValueError("symmetry must be provided for symmetric MPS")
+    if target_charge is None:
+        raise ValueError("target_charge must be provided for symmetric MPS")
+
+    # Physical: spin up = +1, spin down = -1 (for d=2)
+    phys_charges = np.array([1, -1], dtype=np.int32)[:d]
+
+    # Virtual bond charges
+    if target_charge == 0:
+        required_charges = [-1, 0, 1]
+    else:
+        lo = min(-1, target_charge - 1)
+        hi = max(1, target_charge + 1)
+        required_charges = list(range(lo, hi + 1))
+
+    n_sectors = len(required_charges)
+    per_sector = max(1, chi // n_sectors)
+    arrays = [np.full(per_sector, q, dtype=np.int32) for q in required_charges]
+    virt_charges = np.concatenate(arrays)[:chi]
+    if len(virt_charges) < chi:
+        mid_q = required_charges[n_sectors // 2]
+        pad = np.full(chi - len(virt_charges), mid_q, dtype=np.int32)
+        virt_charges = np.concatenate([virt_charges, pad])
+
+    tensors: list[Tensor] = []
+    for i in range(L):
+        key, subkey = jax.random.split(key)
+        site_target = target_charge if i == L - 1 else None
+
+        if i == 0:
+            indices: tuple[TensorIndex, ...] = (
+                TensorIndex(symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    symmetry, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
+            )
+        elif i == L - 1:
+            indices = (
+                TensorIndex(
+                    symmetry, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"
+                ),
+                TensorIndex(symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"),
+            )
+        else:
+            indices = (
+                TensorIndex(
+                    symmetry, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"
+                ),
+                TensorIndex(symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    symmetry, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
+            )
+
+        tensor = SymmetricTensor.random_normal(
+            indices, key=subkey, dtype=dtype, target=site_target
+        )
+        tensors.append(tensor)
+    return tensors
