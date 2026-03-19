@@ -119,9 +119,15 @@ def ipeps(
         (energy_per_site, optimized_peps, ctm_environment)
     """
     if config.unit_cell == "2site":
-        init_2site = None
-        if isinstance(initial_peps, tuple):
+        if initial_peps is None:
+            init_2site = None
+        elif isinstance(initial_peps, tuple):
             init_2site = initial_peps
+        else:
+            raise TypeError(
+                f"ipeps() with unit_cell='2site' requires initial_peps to be "
+                f"a tuple of two arrays or None, got {type(initial_peps).__name__}"
+            )
         return _ipeps_2site(hamiltonian_gate, init_2site, config)
 
     # Dispatch Tensor-protocol path (DenseTensor / SymmetricTensor)
