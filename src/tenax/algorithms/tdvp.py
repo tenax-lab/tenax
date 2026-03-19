@@ -24,6 +24,7 @@ from tenax.algorithms.dmrg import (
     _update_right_env,
 )
 from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.mps import FiniteMPS
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, Tensor
 from tenax.network.network import TensorNetwork
@@ -67,13 +68,13 @@ class TDVPResult:
     """Result of a TDVP run.
 
     Attributes:
-        mps:          Final MPS as TensorNetwork.
+        mps:          Final MPS as FiniteMPS.
         times:        Time values at each measurement.
         energies:     Energy at each measurement.
         observables:  Dictionary of observable names to measurement lists.
     """
 
-    mps: TensorNetwork
+    mps: FiniteMPS
     times: list[float] = field(default_factory=list)
     energies: list[float] = field(default_factory=list)
     observables: dict[str, list[float]] = field(default_factory=dict)
@@ -380,10 +381,10 @@ def _build_left_envs_up_to(
 
 
 def _tdvp_step_1site(
-    mps: TensorNetwork,
+    mps: FiniteMPS | TensorNetwork,
     hamiltonian: TensorNetwork,
     config: TDVPConfig,
-) -> TensorNetwork:
+) -> FiniteMPS:
     """Perform one 1-site TDVP step with second-order Lie-Trotter splitting."""
     L = mps.n_nodes()
     mpo_tensors: list[Tensor] = [hamiltonian.get_tensor(i) for i in range(L)]
@@ -598,7 +599,7 @@ def _tdvp_step_1site(
 
     # Convert back to DenseTensors
     mps_tensors = [_make_site_tensor(tensors_3d[i], i, L) for i in range(L)]
-    return _tensors_to_network(mps_tensors)
+    return FiniteMPS.from_tensors(mps_tensors, orth_center=0)
 
 
 # ------------------------------------------------------------------ #
@@ -607,10 +608,10 @@ def _tdvp_step_1site(
 
 
 def _tdvp_step_2site(
-    mps: TensorNetwork,
+    mps: FiniteMPS | TensorNetwork,
     hamiltonian: TensorNetwork,
     config: TDVPConfig,
-) -> TensorNetwork:
+) -> FiniteMPS:
     """Perform one 2-site TDVP step."""
     L = mps.n_nodes()
     mpo_tensors: list[Tensor] = [hamiltonian.get_tensor(i) for i in range(L)]
@@ -766,7 +767,7 @@ def _tdvp_step_2site(
         tensors_3d = _normalize_3d(tensors_3d, L)
 
     mps_tensors = [_make_site_tensor(tensors_3d[i], i, L) for i in range(L)]
-    return _tensors_to_network(mps_tensors)
+    return FiniteMPS.from_tensors(mps_tensors, orth_center=0)
 
 
 # ------------------------------------------------------------------ #
@@ -790,20 +791,25 @@ def _normalize_3d(tensors_3d: list[jax.Array], L: int) -> list[jax.Array]:
 
 
 def tdvp_step(
-    mps: TensorNetwork,
+    mps: FiniteMPS | TensorNetwork,
     hamiltonian: TensorNetwork,
     config: TDVPConfig,
-) -> TensorNetwork:
+) -> FiniteMPS:
     """Perform one TDVP time step.
 
     Args:
-        mps:          MPS as TensorNetwork.
+        mps:          MPS as FiniteMPS or TensorNetwork (backward compat).
         hamiltonian:  MPO Hamiltonian as TensorNetwork.
         config:       TDVPConfig.
 
     Returns:
-        Updated MPS as TensorNetwork.
+        Updated MPS as FiniteMPS.
     """
+    # Convert TensorNetwork to FiniteMPS if needed
+    if isinstance(mps, TensorNetwork):
+        _tensors = [mps.get_tensor(i) for i in range(mps.n_nodes())]
+        mps = FiniteMPS.from_tensors(_tensors)
+
     if config.mode == "1site":
         return _tdvp_step_1site(mps, hamiltonian, config)
     elif config.mode == "2site":
@@ -813,7 +819,7 @@ def tdvp_step(
 
 
 def tdvp(
-    mps: TensorNetwork,
+    mps: FiniteMPS | TensorNetwork,
     hamiltonian: TensorNetwork,
     config: TDVPConfig,
     measure: Callable[[TensorNetwork, int], dict[str, float]] | None = None,
@@ -821,32 +827,40 @@ def tdvp(
     """Run multi-step TDVP time evolution.
 
     Args:
-        mps:          Initial MPS.
+        mps:          Initial MPS as FiniteMPS or TensorNetwork (backward compat).
         hamiltonian:  MPO Hamiltonian.
         config:       TDVPConfig.
         measure:      Optional callback(mps, step) -> dict of observables.
+                      Receives a TensorNetwork for backward compatibility.
 
     Returns:
-        TDVPResult with final MPS, times, energies, and observables.
+        TDVPResult with final MPS as FiniteMPS, times, energies, and observables.
     """
     L = hamiltonian.n_nodes()
     mpo_tensors = [hamiltonian.get_tensor(i) for i in range(L)]
 
-    current_mps = mps
+    # Convert TensorNetwork to FiniteMPS if needed
+    if isinstance(mps, TensorNetwork):
+        _tensors = [mps.get_tensor(i) for i in range(mps.n_nodes())]
+        mps = FiniteMPS.from_tensors(_tensors)
+
+    current_mps: FiniteMPS = mps
     times: list[float] = []
     energies: list[float] = []
     observables: dict[str, list[float]] = {}
 
-    def _record(step: int, current: TensorNetwork) -> None:
+    def _record(step: int, current: FiniteMPS) -> None:
         t = step * config.dt
         times.append(t)
 
-        cur_tensors = [current.get_tensor(i) for i in range(L)]
+        cur_tensors = list(current.tensors)
         e = _compute_energy(cur_tensors, mpo_tensors)
         energies.append(e)
 
         if measure is not None:
-            obs = measure(current, step)
+            # Convert to TensorNetwork for backward-compatible callback
+            mps_tn = _tensors_to_network(cur_tensors)
+            obs = measure(mps_tn, step)
             for key, val in obs.items():
                 if key not in observables:
                     observables[key] = []

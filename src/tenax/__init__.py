@@ -139,6 +139,7 @@ from tenax.core.lattice import (
     square,
     triangular,
 )
+from tenax.core.mps import FiniteMPS, InfiniteMPS
 from tenax.core.symmetry import (
     BaseNonAbelianSymmetry,
     BaseSymmetry,
@@ -178,6 +179,9 @@ __all__ = [
     "SymmetricTensor",
     "BlockKey",
     "inner",
+    # MPS
+    "FiniteMPS",
+    "InfiniteMPS",
     # Contraction
     "contract",
     "contract_with_subscripts",

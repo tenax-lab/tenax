@@ -190,9 +190,9 @@ class TestiDMRGRun:
         W = build_bulk_mpo_heisenberg()
         cfg = iDMRGConfig(max_bond_dim=8, max_iterations=10, lanczos_max_iter=10)
         result = idmrg(W, cfg)
-        assert result.singular_values is not None
-        assert len(result.singular_values) > 0
-        assert jnp.all(result.singular_values >= 0)
+        assert result.mps.singular_values[0] is not None
+        assert len(result.mps.singular_values[0]) > 0
+        assert jnp.all(result.mps.singular_values[0] >= 0)
 
     def test_convergence_flag(self):
         """With enough iterations and a generous tolerance, convergence should be True."""
@@ -214,7 +214,7 @@ class TestiDMRGRun:
         W = build_bulk_mpo_heisenberg()
         cfg = iDMRGConfig(max_bond_dim=8, max_iterations=10, lanczos_max_iter=10)
         result = idmrg(W, cfg)
-        A_L, A_R = result.mps_tensors
+        A_L, A_R = result.mps.tensors
         # A_L: (chi_l, d, chi_c)  — 3D
         assert A_L.todense().ndim == 3
         # A_R: (chi_c, d, chi_r)  — 3D
@@ -389,5 +389,5 @@ class TestiDMRGSymmetric:
         W = build_bulk_mpo_heisenberg_symmetric()
         cfg = iDMRGConfig(max_bond_dim=8, max_iterations=10)
         result = idmrg(W, cfg)
-        for t in result.mps_tensors:
+        for t in result.mps.tensors:
             assert isinstance(t, SymmetricTensor)

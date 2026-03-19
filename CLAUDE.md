@@ -12,6 +12,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 
 
+## Coding Rules
+
+- **Avoid `todense()` on the symmetric tensor path** unless the resulting dense matrix is guaranteed to be small (e.g. a local operator or a bond matrix after decomposition). Block-sparse operations (`SymmetricTensor` methods, `tenax.linalg.svd`/`qr`/`eigh`) should be used instead — they preserve sparsity, run faster at large bond dimension, and keep symmetry quantum numbers intact. Calling `todense()` on a large `SymmetricTensor` defeats the purpose of symmetric tensors.
+
 ## Documentation
 
 - When adding new public API (algorithms, classes, functions), update both `README.md` (features list, example sections) and `src/tenax/__init__.py` (`__all__` exports).
