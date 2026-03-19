@@ -60,7 +60,7 @@ from tenax.algorithms.auto_mpo import (
     spin_half_ops,
     spin_one_ops,
 )
-from tenax.algorithms.cbe import expand_bond
+from tenax.algorithms.cbe import expand_bond, expand_bond_symmetric
 from tenax.algorithms.dmrg import (
     DMRGConfig,
     DMRGResult,
@@ -139,6 +139,7 @@ from tenax.core.lattice import (
     square,
     triangular,
 )
+from tenax.core.mps import FiniteMPS, InfiniteMPS
 from tenax.core.symmetry import (
     BaseNonAbelianSymmetry,
     BaseSymmetry,
@@ -178,6 +179,9 @@ __all__ = [
     "SymmetricTensor",
     "BlockKey",
     "inner",
+    # MPS
+    "FiniteMPS",
+    "InfiniteMPS",
     # Contraction
     "contract",
     "contract_with_subscripts",
@@ -190,6 +194,7 @@ __all__ = [
     "eigh",
     # CBE
     "expand_bond",
+    "expand_bond_symmetric",
     # AutoMPO
     "AutoMPO",
     "HamiltonianTerm",

@@ -34,10 +34,12 @@ import opt_einsum
 
 from tenax.algorithms._tensor_utils import scale_bond_axis
 from tenax.algorithms.auto_mpo import build_auto_mpo
-from tenax.contraction.contractor import contract, qr_decompose, truncated_svd
+from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.mps import FiniteMPS
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor, inner
+from tenax.linalg import qr as _linalg_qr
 from tenax.network.network import TensorNetwork
 
 
@@ -83,14 +85,14 @@ class DMRGResult(NamedTuple):
     Attributes:
         energy:               Final ground state energy.
         energies_per_sweep:   Energy at the end of each sweep.
-        mps:                  TensorNetwork representing the optimized MPS.
+        mps:                  FiniteMPS representing the optimized MPS.
         truncation_errors:    List of truncation errors at each bond update step.
         converged:            True if energy converged within convergence_tol.
     """
 
     energy: float
     energies_per_sweep: list[float]
-    mps: TensorNetwork
+    mps: FiniteMPS
     truncation_errors: list[float]
     converged: bool
 
@@ -124,7 +126,7 @@ def _dense_ops() -> SweepOps:
 
 def dmrg(
     hamiltonian: TensorNetwork,
-    initial_mps: TensorNetwork,
+    initial_mps: FiniteMPS | TensorNetwork,
     config: DMRGConfig,
 ) -> DMRGResult:
     """Run DMRG to find the ground state of a 1D Hamiltonian given as MPO.
@@ -134,12 +136,12 @@ def dmrg(
 
     Args:
         hamiltonian:  MPO representation of the Hamiltonian.
-        initial_mps:  Starting MPS TensorNetwork (modified in-place conceptually;
-                      the result MPS is returned in DMRGResult).
+        initial_mps:  Starting MPS as FiniteMPS or TensorNetwork (backward compat).
+                      The result MPS is returned in DMRGResult.
         config:       DMRGConfig parameters.
 
     Returns:
-        DMRGResult with energy, sweep history, optimized MPS, and diagnostics.
+        DMRGResult with energy, sweep history, optimized FiniteMPS, and diagnostics.
     """
     L = hamiltonian.n_nodes()
     if L < 2:
@@ -147,7 +149,13 @@ def dmrg(
             f"DMRG requires at least 2 sites, got L={L}. "
             "For a single site, diagonalize the operator directly."
         )
-    mps_tensors: list[Tensor] = [initial_mps.get_tensor(i) for i in range(L)]
+
+    # Convert TensorNetwork to FiniteMPS if needed
+    if isinstance(initial_mps, TensorNetwork):
+        _mps_tensors = [initial_mps.get_tensor(i) for i in range(L)]
+        initial_mps = FiniteMPS.from_tensors(_mps_tensors)
+
+    mps_tensors: list[Tensor] = list(initial_mps.tensors)
     mpo_tensors = [hamiltonian.get_tensor(i) for i in range(L)]
 
     # Select backend: symmetric when both MPS and MPO are all SymmetricTensor
@@ -171,6 +179,12 @@ def dmrg(
     # Validate initial MPS sector if target_charge is specified
     if config.target_charge is not None and use_symmetric:
         validate_mps_sector(mps_tensors, config.target_charge)
+
+    # Right-canonicalize MPS before building environments (1-site mode).
+    # The L→R sweep needs right environments built from right-canonical MPS.
+    if not config.two_site:
+        _rc_mps = FiniteMPS.from_tensors(mps_tensors).right_canonicalize()
+        mps_tensors = list(_rc_mps.tensors)
 
     # Build left environments (L[i] = trivial for i=0)
     left_envs = _build_left_environments_list(mps_tensors, mpo_tensors, L, ops)
@@ -209,6 +223,11 @@ def dmrg(
 
         # Rebuild left environments from updated MPS before left-to-right sweep
         if sweep > 0:
+            # After R→L, site 0 has accumulated L factors. Normalize.
+            if not config.two_site:
+                _n0 = float(jnp.sqrt(jnp.abs(inner(mps_tensors[0], mps_tensors[0]))))
+                if _n0 > 1e-15 and abs(_n0 - 1.0) > 1e-10:
+                    mps_tensors[0] = mps_tensors[0] * (1.0 / _n0)
             left_envs = _build_left_environments_list(mps_tensors, mpo_tensors, L, ops)
 
         # Left-to-right sweep
@@ -246,8 +265,27 @@ def dmrg(
                     config,
                 )
                 energy = float(e)
-                mps_tensors[i] = new_site
-                left_envs[i + 1] = ops.update_left_env(l_env, new_site, mpo_tensors[i])
+
+                # QR + absorb R + build env (atomic step for 1-site)
+                right_bond = f"v{i}_{i + 1}"
+                left_labels = [lb for lb in new_site.labels() if lb != right_bond]
+                tmp_bond = f"_qr_{right_bond}"
+                Q, R = _linalg_qr(
+                    new_site, left_labels, [right_bond], new_bond_label=tmp_bond
+                )
+                mps_tensors[i] = Q.relabel(tmp_bond, right_bond)
+                absorbed = contract(R, mps_tensors[i + 1])
+                mps_tensors[i + 1] = absorbed.relabel(tmp_bond, right_bond)
+                left_envs[i + 1] = ops.update_left_env(
+                    l_env, mps_tensors[i], mpo_tensors[i]
+                )
+
+        # After L→R, site L-1 has accumulated R factors. Normalize it
+        # so right environments are built from a unit-norm MPS.
+        if not config.two_site:
+            _n = float(jnp.sqrt(jnp.abs(inner(mps_tensors[L - 1], mps_tensors[L - 1]))))
+            if _n > 1e-15 and abs(_n - 1.0) > 1e-10:
+                mps_tensors[L - 1] = mps_tensors[L - 1] * (1.0 / _n)
 
         # Rebuild right environments from updated MPS before right-to-left sweep
         right_envs = _build_right_environments_list(mps_tensors, mpo_tensors, L, ops)
@@ -289,8 +327,33 @@ def dmrg(
                     config,
                 )
                 energy = float(e)
-                mps_tensors[i] = new_site
-                right_envs[i] = ops.update_right_env(r1_env, new_site, mpo_tensors[i])
+
+                # RQ + absorb L + build env (atomic step for 1-site)
+                left_bond = f"v{i - 1}_{i}"
+                site_labels = new_site.labels()
+                if i > 0 and left_bond in site_labels:
+                    other_labels = [lb for lb in site_labels if lb != left_bond]
+                    tmp_bond = f"_qr_{left_bond}"
+                    Q, R = _linalg_qr(
+                        new_site, other_labels, [left_bond], new_bond_label=tmp_bond
+                    )
+                    Q = Q.relabel(tmp_bond, left_bond)
+                    # Reorder so left_bond is first (MPS convention)
+                    q_labels = Q.labels()
+                    bond_pos = q_labels.index(left_bond)
+                    if bond_pos != 0:
+                        axes = (bond_pos,) + tuple(
+                            j for j in range(len(q_labels)) if j != bond_pos
+                        )
+                        Q = Q.transpose(axes)
+                    mps_tensors[i] = Q
+                    absorbed = contract(mps_tensors[i - 1], R)
+                    mps_tensors[i - 1] = absorbed.relabel(tmp_bond, left_bond)
+                else:
+                    mps_tensors[i] = new_site
+                right_envs[i] = ops.update_right_env(
+                    r1_env, mps_tensors[i], mpo_tensors[i]
+                )
 
         energies_per_sweep.append(energy)
         if config.verbose:
@@ -312,17 +375,12 @@ def dmrg(
                 print(f"Converged at sweep {sweep + 1}")
             break
 
-    # Build result MPS as TensorNetwork
-    result_mps = TensorNetwork(name="DMRG_MPS")
-    for i, tensor in enumerate(mps_tensors):
-        result_mps.add_node(i, tensor)
-    for i in range(L - 1):
-        shared = set(mps_tensors[i].labels()) & set(mps_tensors[i + 1].labels())
-        for label in sorted(shared, key=str):
-            try:
-                result_mps.connect(i, label, i + 1, label)
-            except ValueError:
-                pass
+    # Build result MPS as FiniteMPS
+    if not config.two_site:
+        orth_center = 0  # after final R→L sweep
+    else:
+        orth_center = None  # 2-site doesn't maintain strict canonical form
+    result_mps = FiniteMPS.from_tensors(mps_tensors, orth_center=orth_center)
 
     return DMRGResult(
         energy=energy,
@@ -331,37 +389,6 @@ def dmrg(
         truncation_errors=truncation_errors,
         converged=converged,
     )
-
-
-def _right_canonicalize(mps_tensors: list[Tensor]) -> list[Tensor]:
-    """Right-canonicalize MPS by QR from right to left."""
-    L = len(mps_tensors)
-    tensors = list(mps_tensors)
-
-    for i in range(L - 1, 0, -1):
-        tensor = tensors[i]
-        labels = tensor.labels()
-
-        # Find the virtual bond to the left
-        left_bond = _find_left_bond(labels, i)
-        if left_bond is None:
-            continue
-
-        other_labels = [lbl for lbl in labels if lbl != left_bond]
-        Q, R = qr_decompose(
-            tensor,
-            left_labels=[left_bond],
-            right_labels=other_labels,
-            new_bond_label=left_bond + "_new"
-            if isinstance(left_bond, str)
-            else f"b{i}",
-        )
-
-        # Absorb R into site i-1
-        tensors[i] = Q
-        tensors[i - 1] = contract(tensors[i - 1], R)
-
-    return tensors
 
 
 def _find_left_bond(labels: tuple, site: int) -> str | None:
