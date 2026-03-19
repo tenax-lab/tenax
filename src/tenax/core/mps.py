@@ -100,6 +100,16 @@ class FiniteMPS:
     def __iter__(self) -> Iterator[Tensor]:
         return iter(self.tensors)
 
+    # -- TensorNetwork compatibility ----------------------------------------
+
+    def n_nodes(self) -> int:
+        """Return the number of sites (TensorNetwork compatibility)."""
+        return len(self.tensors)
+
+    def get_tensor(self, i: int) -> Tensor:
+        """Return the tensor at site *i* (TensorNetwork compatibility)."""
+        return self.tensors[i]
+
     # -- Properties ---------------------------------------------------------
 
     @property
