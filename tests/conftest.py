@@ -45,6 +45,7 @@ _FILE_MARKERS = {
     "test_linalg.py": "core",
     "test_observables.py": "algorithm",
     "test_cbe_validation.py": "algorithm",
+    "test_mps.py": "core",
 }
 
 
