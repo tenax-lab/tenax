@@ -18,7 +18,6 @@ from tenax.algorithms.dmrg import (
     _effective_hamiltonian_matvec,
     _lanczos_solve,
     _one_site_update_symmetric,
-    _right_canonicalize,
     _update_left_env_symmetric,
     _update_right_env_symmetric,
 )
