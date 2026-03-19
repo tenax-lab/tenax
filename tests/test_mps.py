@@ -295,6 +295,94 @@ class TestFiniteMPSNormOverlap:
         assert float(normalized) < 1.0
 
 
+class TestFiniteMPSEntanglement:
+    def test_entanglement_entropy_product_state(self):
+        """Product state has zero entanglement entropy."""
+        from tenax.core.mps import FiniteMPS
+
+        tensors = []
+        for i in range(4):
+            data = np.array([1.0, 0.0])  # |up>
+            if i == 0:
+                indices = (
+                    TensorIndex(
+                        U1Symmetry(), np.zeros(2, dtype=np.int32), IN, label=f"p{i}"
+                    ),
+                    TensorIndex(
+                        U1Symmetry(),
+                        np.zeros(1, dtype=np.int32),
+                        OUT,
+                        label=f"v{i}_{i + 1}",
+                    ),
+                )
+                data = data.reshape(2, 1)
+            elif i == 3:
+                indices = (
+                    TensorIndex(
+                        U1Symmetry(),
+                        np.zeros(1, dtype=np.int32),
+                        IN,
+                        label=f"v{i - 1}_{i}",
+                    ),
+                    TensorIndex(
+                        U1Symmetry(), np.zeros(2, dtype=np.int32), IN, label=f"p{i}"
+                    ),
+                )
+                data = data.reshape(1, 2)
+            else:
+                indices = (
+                    TensorIndex(
+                        U1Symmetry(),
+                        np.zeros(1, dtype=np.int32),
+                        IN,
+                        label=f"v{i - 1}_{i}",
+                    ),
+                    TensorIndex(
+                        U1Symmetry(), np.zeros(2, dtype=np.int32), IN, label=f"p{i}"
+                    ),
+                    TensorIndex(
+                        U1Symmetry(),
+                        np.zeros(1, dtype=np.int32),
+                        OUT,
+                        label=f"v{i}_{i + 1}",
+                    ),
+                )
+                data = data.reshape(1, 2, 1)
+            tensors.append(DenseTensor(jnp.array(data), indices))
+
+        mps = FiniteMPS.from_tensors(tensors).canonicalize(center=2)
+        S = mps.entanglement_entropy(bond=2)
+        np.testing.assert_allclose(S, 0.0, atol=1e-12)
+
+    def test_entanglement_entropy_bell_state(self):
+        """Bell state |00>+|11> has entropy ln(2)."""
+        from tenax.core.mps import FiniteMPS
+
+        A0 = jnp.array([[1.0, 0.0], [0.0, 1.0]])  # (d=2, chi=2)
+        A1 = jnp.array([[1.0, 0.0], [0.0, 1.0]])  # (chi=2, d=2)
+        sym = U1Symmetry()
+        idx0 = (
+            TensorIndex(sym, np.zeros(2, dtype=np.int32), IN, label="p0"),
+            TensorIndex(sym, np.zeros(2, dtype=np.int32), OUT, label="v0_1"),
+        )
+        idx1 = (
+            TensorIndex(sym, np.zeros(2, dtype=np.int32), IN, label="v0_1"),
+            TensorIndex(sym, np.zeros(2, dtype=np.int32), IN, label="p1"),
+        )
+        tensors = [DenseTensor(A0, idx0), DenseTensor(A1, idx1)]
+        mps = FiniteMPS.from_tensors(tensors).canonicalize(center=0)
+        S = mps.entanglement_entropy(bond=0)
+        np.testing.assert_allclose(S, np.log(2), atol=1e-12)
+
+    def test_entanglement_entropy_uses_cached_svs(self):
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, d=2, chi=3))
+        mps_c = mps.canonicalize(center=2)
+        S = mps_c.entanglement_entropy(bond=2)
+        assert S >= 0.0
+
+
 class TestFiniteMPSCanonicalizeSymmetric:
     def test_right_canonicalize_symmetric(self):
         """Right-canonicalize works for SymmetricTensor MPS."""

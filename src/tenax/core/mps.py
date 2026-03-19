@@ -261,6 +261,32 @@ class FiniteMPS:
         """
         return float(jnp.sqrt(jnp.abs(self.overlap(self))))
 
+    def entanglement_entropy(self, bond: int) -> float:
+        """Compute the Von Neumann entanglement entropy at a bond.
+
+        Args:
+            bond: Bond index (between sites ``bond`` and ``bond+1``).
+
+        Returns:
+            The entanglement entropy S = -sum(p * log(p)) where p = sv^2 / sum(sv^2).
+        """
+        L = self.L
+        if bond < 0 or bond >= L - 1:
+            raise ValueError(f"bond={bond} out of range [0, {L - 1})")
+
+        sv = self.singular_values[bond]
+        if sv is None:
+            mps_c = self.canonicalize(center=bond)
+            sv = mps_c.singular_values[bond]
+
+        sv = jnp.asarray(sv)
+        # Filter near-zero singular values
+        sv = sv[sv > 1e-15]
+        p = sv**2
+        p = p / jnp.sum(p)
+        S = -jnp.sum(p * jnp.log(p))
+        return float(S)
+
     def left_canonicalize(self) -> FiniteMPS:
         """Return a new MPS in left-canonical form (orth_center = L-1)."""
         return self.canonicalize(center=self.L - 1)
