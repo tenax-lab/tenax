@@ -470,7 +470,7 @@ class TestInfiniteMPS:
         A_L = SymmetricTensor.random_normal(idx_AL, k1)
         A_R = SymmetricTensor.random_normal(idx_AR, k2)
         sv = jnp.array([0.7, 0.5, 0.3, 0.1])
-        return InfiniteMPS.from_tensors([A_L, A_R], [sv])
+        return InfiniteMPS.from_tensors([A_L, A_R], [sv, sv, sv])
 
     def test_from_tensors(self):
         imps = self._make_imps()
@@ -512,9 +512,42 @@ class TestInfiniteMPS:
         )
         A = DenseTensor(jnp.ones((2, 2, 2)), idx0)
         B = DenseTensor(jnp.ones((2, 2, 2)), idx1)
-        imps = InfiniteMPS.from_tensors([A, B], [sv])
-        S = imps.entanglement_entropy(bond=0)
+        imps = InfiniteMPS.from_tensors([A, B], [sv, sv, sv])
+        S = imps.entanglement_entropy(bond=1)  # centre bond
         np.testing.assert_allclose(S, np.log(2), atol=1e-12)
+
+    def test_qshift_default_none(self):
+        imps = self._make_imps()
+        assert imps.qshift is None
+
+    def test_l_plus_1_bonds(self):
+        imps = self._make_imps()
+        assert len(imps.singular_values) == 3  # L+1 for 2-site cell
+
+    def test_log_norm_default(self):
+        imps = self._make_imps()
+        assert imps.log_norm == 0.0
+
+    def test_qshift_passthrough(self):
+        from tenax.core.mps import InfiniteMPS
+
+        sym = U1Symmetry()
+        charges = np.zeros(2, dtype=np.int32)
+        idx0 = (
+            TensorIndex(sym, charges, IN, label="v_l"),
+            TensorIndex(sym, charges, IN, label="p_l"),
+            TensorIndex(sym, charges, OUT, label="v_c"),
+        )
+        idx1 = (
+            TensorIndex(sym, charges, IN, label="v_c"),
+            TensorIndex(sym, charges, IN, label="p_r"),
+            TensorIndex(sym, charges, OUT, label="v_r"),
+        )
+        A = DenseTensor(jnp.ones((2, 2, 2)), idx0)
+        B = DenseTensor(jnp.ones((2, 2, 2)), idx1)
+        sv = jnp.array([0.5, 0.5])
+        imps = InfiniteMPS.from_tensors([A, B], [sv, sv, sv], qshift=2)
+        assert imps.qshift == 2
 
     def test_iter(self):
         imps = self._make_imps()

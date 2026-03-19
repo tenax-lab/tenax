@@ -466,15 +466,22 @@ class InfiniteMPS:
     """Infinite matrix product state with a finite unit cell.
 
     Attributes:
-        tensors: Unit cell site tensors (length = unit_cell_size).
+        tensors: Unit cell site tensors (length L = unit_cell_size).
             Labels: v_l/p_l/v_c for left site, v_c/p_r/v_r for right site (2-site cell).
             For general N-site cells, labels follow the iDMRG convention.
-        singular_values: Singular values at each bond in the unit cell.
-            For a 2-site cell, singular_values[0] is the bond between sites 0 and 1.
+        singular_values: Singular values at each bond, length L+1.
+            For a 2-site cell (L=2):
+              - singular_values[0]: left boundary bond (between adjacent unit cells)
+              - singular_values[1]: centre bond (between sites 0 and 1)
+              - singular_values[2]: right boundary bond (same as [0], shifted by qshift)
+        qshift: Charge per unit cell for U(1)-symmetric iMPS, or None for dense.
+        log_norm: Logarithm of the norm factor (consistent with FiniteMPS).
     """
 
     tensors: list[Tensor]
     singular_values: list[jax.Array]
+    qshift: int | None = None
+    log_norm: float = 0.0
 
     # -- Construction -------------------------------------------------------
 
@@ -482,11 +489,15 @@ class InfiniteMPS:
     def from_tensors(
         tensors: list[Tensor],
         singular_values: list[jax.Array],
+        qshift: int | None = None,
+        log_norm: float = 0.0,
     ) -> InfiniteMPS:
         """Wrap existing tensors into an InfiniteMPS."""
         return InfiniteMPS(
             tensors=list(tensors),
             singular_values=list(singular_values),
+            qshift=qshift,
+            log_norm=log_norm,
         )
 
     # -- Sequence protocol --------------------------------------------------

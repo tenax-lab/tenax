@@ -633,7 +633,10 @@ def _idmrg_symmetric(
     return iDMRGResult(
         energy_per_site=e_per_site_avg,
         energies_per_step=energies_per_step,
-        mps=InfiniteMPS.from_tensors([A_L_tensor, A_R_tensor], [s_vals]),
+        mps=InfiniteMPS.from_tensors(
+            [A_L_tensor, A_R_tensor],
+            [s_vals, s_vals, s_vals],  # L+1 = 3 bonds for 2-site cell
+        ),
         converged=converged,
     )
 
@@ -810,6 +813,9 @@ def idmrg(
     return iDMRGResult(
         energy_per_site=e_per_site_avg,
         energies_per_step=energies_per_step,
-        mps=InfiniteMPS.from_tensors([A_L_tensor, A_R_tensor], [s_vals]),
+        mps=InfiniteMPS.from_tensors(
+            [A_L_tensor, A_R_tensor],
+            [s_vals, s_vals, s_vals],  # L+1 = 3 bonds for 2-site cell
+        ),
         converged=converged,
     )
