@@ -446,6 +446,83 @@ class TestFiniteMPSCanonicalizeSymmetric:
         )
 
 
+class TestInfiniteMPS:
+    def _make_imps(self):
+        """Helper: create a simple 2-site InfiniteMPS."""
+        from tenax.core.mps import InfiniteMPS
+
+        sym = U1Symmetry()
+        virt_charges = np.array([-1, 0, 0, 1], dtype=np.int32)
+        phys_charges = np.array([1, -1], dtype=np.int32)
+        key = jax.random.PRNGKey(42)
+        k1, k2 = jax.random.split(key)
+
+        idx_AL = (
+            TensorIndex(sym, virt_charges, IN, label="v_l"),
+            TensorIndex(sym, phys_charges, IN, label="p_l"),
+            TensorIndex(sym, virt_charges, OUT, label="v_c"),
+        )
+        idx_AR = (
+            TensorIndex(sym, virt_charges, IN, label="v_c"),
+            TensorIndex(sym, phys_charges, IN, label="p_r"),
+            TensorIndex(sym, virt_charges, OUT, label="v_r"),
+        )
+        A_L = SymmetricTensor.random_normal(idx_AL, k1)
+        A_R = SymmetricTensor.random_normal(idx_AR, k2)
+        sv = jnp.array([0.7, 0.5, 0.3, 0.1])
+        return InfiniteMPS.from_tensors([A_L, A_R], [sv])
+
+    def test_from_tensors(self):
+        imps = self._make_imps()
+        assert imps.unit_cell_size == 2
+        assert len(imps) == 2
+
+    def test_getitem_modular(self):
+        imps = self._make_imps()
+        assert imps[0] is imps.tensors[0]
+        assert imps[2] is imps.tensors[0]  # modular
+        assert imps[-1] is imps.tensors[1]  # negative
+
+    def test_bond_dims(self):
+        imps = self._make_imps()
+        # bond_dims should have 1 entry for 2-site cell (the v_c bond)
+        assert len(imps.bond_dims) == 1
+        assert imps.bond_dims[0] == 4  # chi=4
+
+    def test_is_symmetric(self):
+        imps = self._make_imps()
+        assert imps.is_symmetric is True
+
+    def test_entanglement_entropy(self):
+        from tenax.core.mps import InfiniteMPS
+
+        sv = jnp.array([1.0 / jnp.sqrt(2.0), 1.0 / jnp.sqrt(2.0)])
+        # Create minimal dense tensors for a 2-site cell
+        sym = U1Symmetry()
+        charges = np.zeros(2, dtype=np.int32)
+        idx0 = (
+            TensorIndex(sym, charges, IN, label="v_l"),
+            TensorIndex(sym, charges, IN, label="p_l"),
+            TensorIndex(sym, charges, OUT, label="v_c"),
+        )
+        idx1 = (
+            TensorIndex(sym, charges, IN, label="v_c"),
+            TensorIndex(sym, charges, IN, label="p_r"),
+            TensorIndex(sym, charges, OUT, label="v_r"),
+        )
+        A = DenseTensor(jnp.ones((2, 2, 2)), idx0)
+        B = DenseTensor(jnp.ones((2, 2, 2)), idx1)
+        imps = InfiniteMPS.from_tensors([A, B], [sv])
+        S = imps.entanglement_entropy(bond=0)
+        np.testing.assert_allclose(S, np.log(2), atol=1e-12)
+
+    def test_iter(self):
+        imps = self._make_imps()
+        tensors = list(imps)
+        assert len(tensors) == 2
+        assert tensors[0] is imps.tensors[0]
+
+
 class TestFiniteMPSRandom:
     def test_random_dense(self):
         from tenax.core.mps import FiniteMPS

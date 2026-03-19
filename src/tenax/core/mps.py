@@ -325,6 +325,106 @@ class FiniteMPS:
         return self.canonicalize(center=0)
 
 
+@dataclass
+class InfiniteMPS:
+    """Infinite matrix product state with a finite unit cell.
+
+    Attributes:
+        tensors: Unit cell site tensors (length = unit_cell_size).
+            Labels: v_l/p_l/v_c for left site, v_c/p_r/v_r for right site (2-site cell).
+            For general N-site cells, labels follow the iDMRG convention.
+        singular_values: Singular values at each bond in the unit cell.
+            For a 2-site cell, singular_values[0] is the bond between sites 0 and 1.
+    """
+
+    tensors: list[Tensor]
+    singular_values: list[jax.Array]
+
+    # -- Construction -------------------------------------------------------
+
+    @staticmethod
+    def from_tensors(
+        tensors: list[Tensor],
+        singular_values: list[jax.Array],
+    ) -> InfiniteMPS:
+        """Wrap existing tensors into an InfiniteMPS."""
+        return InfiniteMPS(
+            tensors=list(tensors),
+            singular_values=list(singular_values),
+        )
+
+    # -- Sequence protocol --------------------------------------------------
+
+    @property
+    def unit_cell_size(self) -> int:
+        """Number of sites in the unit cell."""
+        return len(self.tensors)
+
+    def __len__(self) -> int:
+        return self.unit_cell_size
+
+    def __getitem__(self, i: int) -> Tensor:
+        return self.tensors[i % self.unit_cell_size]
+
+    def __iter__(self) -> Iterator[Tensor]:
+        return iter(self.tensors)
+
+    # -- Properties ---------------------------------------------------------
+
+    @property
+    def bond_dims(self) -> list[int]:
+        """Bond dimensions at each internal bond in the unit cell.
+
+        For each bond between site i and site (i+1) % N, finds the shared
+        label and returns its dimension.
+        """
+        N = self.unit_cell_size
+        dims = []
+        for i in range(N - 1):
+            labels_i = set(self.tensors[i].labels())
+            labels_next = set(self.tensors[(i + 1) % N].labels())
+            shared = labels_i & labels_next
+            if not shared:
+                raise ValueError(
+                    f"No shared label between site {i} and site {(i + 1) % N}. "
+                    f"Labels: {self.tensors[i].labels()}, "
+                    f"{self.tensors[(i + 1) % N].labels()}"
+                )
+            bond_label = shared.pop()
+            for idx in self.tensors[i].indices:
+                if idx.label == bond_label:
+                    dims.append(idx.dim)
+                    break
+        return dims
+
+    @property
+    def is_symmetric(self) -> bool:
+        """True if all site tensors are SymmetricTensor."""
+        return all(isinstance(t, SymmetricTensor) for t in self.tensors)
+
+    # -- Entanglement -------------------------------------------------------
+
+    def entanglement_entropy(self, bond: int = 0) -> float:
+        """Compute the Von Neumann entanglement entropy at a bond.
+
+        Args:
+            bond: Bond index within the unit cell.
+
+        Returns:
+            The entanglement entropy S = -sum(p * log(p)) where p = sv^2 / sum(sv^2).
+        """
+        if bond < 0 or bond >= len(self.singular_values):
+            raise ValueError(
+                f"bond={bond} out of range [0, {len(self.singular_values)})"
+            )
+        sv = jnp.asarray(self.singular_values[bond])
+        sv = sv[sv > 1e-15]
+        p = sv**2
+        p = p / jnp.sum(p)
+        S = -jnp.sum(p * jnp.log(p))
+        return float(S)
+
+
 # ---------------------------------------------------------------------------
 # Helpers for FiniteMPS.random()
 # ---------------------------------------------------------------------------
