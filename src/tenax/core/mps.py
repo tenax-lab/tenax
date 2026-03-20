@@ -712,8 +712,17 @@ def _build_random_symmetric_tensors(
         key, subkey = jax.random.split(key)
         site_target = target_charge if i == L - 1 else None
 
-        if i == 0:
+        if L == 1:
+            trivial_target = np.array([target_charge], dtype=np.int32)
             indices: tuple[TensorIndex, ...] = (
+                TensorIndex(symmetry, trivial_zero, FlowDirection.IN, label="v_-1_0"),
+                TensorIndex(symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    symmetry, trivial_target, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
+            )
+        elif i == 0:
+            indices = (
                 TensorIndex(symmetry, trivial_zero, FlowDirection.IN, label="v_-1_0"),
                 TensorIndex(symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"),
                 TensorIndex(

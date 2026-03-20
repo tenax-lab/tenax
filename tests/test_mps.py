@@ -817,3 +817,40 @@ class TestSymmetricMPS3LegBoundaries:
         assert mps.tensors[-1].indices[2].dim == 1
         assert mps.tensors[-1].indices[2].label == "v5_6"
         assert mps.target_charge == 0
+
+
+class TestSingleSiteMPS:
+    """Tests for L=1 (single-site) MPS construction."""
+
+    def test_dense_single_site(self):
+        from tenax.core.mps import FiniteMPS
+
+        key = jax.random.PRNGKey(0)
+        mps = FiniteMPS.random(L=1, d=2, chi=4, key=key)
+        t = mps.tensors[0]
+        assert t.ndim == 3
+        dense = t.todense()
+        assert dense.shape == (1, 2, 1)
+        assert t.labels() == ("v_-1_0", "p0", "v0_1")
+
+    def test_symmetric_single_site(self):
+        from tenax.core.mps import FiniteMPS
+
+        key = jax.random.PRNGKey(0)
+        mps = FiniteMPS.random(
+            L=1,
+            d=2,
+            chi=4,
+            key=key,
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
+        t = mps.tensors[0]
+        assert t.ndim == 3
+        dense = t.todense()
+        assert dense.shape == (1, 2, 1)
+        assert t.labels() == ("v_-1_0", "p0", "v0_1")
+        # Both boundary indices should have dim 1
+        assert t.indices[0].dim == 1
+        assert t.indices[2].dim == 1
