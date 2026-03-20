@@ -18,7 +18,8 @@ optimal value.
 ## Class-based API
 
 ```python
-from tenax import AutoMPO, dmrg, DMRGConfig, build_random_mps
+import jax
+from tenax import AutoMPO, dmrg, DMRGConfig, FiniteMPS
 
 L = 10
 auto = AutoMPO(L=L, d=2)  # spin-1/2, d=2
@@ -38,7 +39,7 @@ print(f"MPO bond dimensions: {auto.bond_dims()}")
 print(f"Number of terms: {auto.n_terms()}")
 
 # Use with DMRG
-mps = build_random_mps(L)
+mps = FiniteMPS.random(L=L, d=2, chi=4, key=jax.random.PRNGKey(0))
 result = dmrg(mpo, mps, DMRGConfig(max_bond_dim=32))
 ```
 

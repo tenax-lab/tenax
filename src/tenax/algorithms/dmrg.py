@@ -1305,6 +1305,13 @@ def build_random_symmetric_mps(
 ) -> TensorNetwork:
     """Build a random block-sparse MPS with U(1) charge conservation.
 
+    .. deprecated::
+        Use :meth:`FiniteMPS.random` instead::
+
+            mps = FiniteMPS.random(L=L, d=2, chi=bond_dim, key=key,
+                                   symmetric=True, symmetry=U1Symmetry(),
+                                   target_charge=target_charge)
+
     Physical dimension is 2 (spin-1/2). Charges represent accumulated Sz:
     spin up = +1, spin down = -1. Virtual bonds carry sectors that allow
     the specified total-Sz subspace.
@@ -1331,6 +1338,14 @@ def build_random_symmetric_mps(
             f"L={L} has parity {L % 2}. Each site contributes ±1, so total "
             f"charge must have the same parity as L."
         )
+
+    import warnings
+
+    warnings.warn(
+        "build_random_symmetric_mps is deprecated. Use FiniteMPS.random() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     sym = U1Symmetry()
 
@@ -1497,6 +1512,11 @@ def build_random_mps(
 ) -> TensorNetwork:
     """Build a random MPS for use as initial state in DMRG.
 
+    .. deprecated::
+        Use :meth:`FiniteMPS.random` instead::
+
+            mps = FiniteMPS.random(L=L, d=physical_dim, chi=bond_dim, key=key)
+
     Args:
         L:            Chain length.
         physical_dim: Physical dimension per site.
@@ -1507,6 +1527,13 @@ def build_random_mps(
     Returns:
         TensorNetwork representing the random MPS.
     """
+    import warnings
+
+    warnings.warn(
+        "build_random_mps is deprecated. Use FiniteMPS.random() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     sym = U1Symmetry()
     bond_d = np.zeros(physical_dim, dtype=np.int32)
     bond_chi = np.zeros(bond_dim, dtype=np.int32)

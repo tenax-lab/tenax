@@ -164,27 +164,40 @@ the long-range y-periodic bonds.
 ## Stage 3: Initialize the MPS
 
 ```python
-from tenax import build_random_mps
+from tenax import FiniteMPS
+import jax
 
-L = 20
-mps = build_random_mps(L, physical_dim=2, bond_dim=16)
+key = jax.random.PRNGKey(0)
+mps = FiniteMPS.random(L=20, d=2, chi=16, key=key)
+```
+
+Or using the legacy builder (still supported):
+```python
+from tenax import build_random_mps
+mps = build_random_mps(20, physical_dim=2, bond_dim=16)
 ```
 
 ### Key points
 
-- **Start with moderate χ.** `bond_dim=16` or `32` for a first run. You can
+- **Start with moderate χ.** `chi=16` or `32` for a first run. You can
   always increase in the DMRGConfig.
 - **`max_bond_dim` in DMRGConfig controls truncation.** The initial MPS bond
   dimension just needs to be ≤ max_bond_dim. DMRG will grow it as needed
   (in two-site DMRG).
-- **Symmetry sectors.** If using `symmetric=True` MPOs, the initial MPS must
-  be in the correct quantum number sector (e.g., Sz=0 for Heisenberg on
-  even-length chains).
+- **Symmetry sectors.** For symmetric MPS, pass `symmetric=True` and
+  `target_charge`:
+  ```python
+  from tenax.core.symmetry import U1Symmetry
+  mps = FiniteMPS.random(L=20, d=2, chi=16, key=key,
+                         symmetric=True, symmetry=U1Symmetry(),
+                         target_charge=0)  # Sz=0 sector
+  ```
+- **All sites are 3-leg** `(chi_l, d, chi_r)`, including boundaries (which
+  have trivial dim-1 bonds).
 
 For cylinders, the physical dimension matches the super-site:
 ```python
-# Ly=3 cylinder → d = 2^3 = 8 per super-site
-mps = build_random_mps(Lx, physical_dim=2**Ly, bond_dim=16)
+mps = FiniteMPS.random(L=Lx, d=2**Ly, chi=16, key=key)
 ```
 
 For iDMRG, the initial MPS is handled internally — you just pass the config.
@@ -277,7 +290,9 @@ chis = [16, 32, 64, 128]
 energies = []
 for chi in chis:
     config = DMRGConfig(max_bond_dim=chi, num_sweeps=15)
-    result = dmrg(mpo, build_random_mps(L, 2, 16), config)
+    key = jax.random.PRNGKey(chi)
+    mps = FiniteMPS.random(L=L, d=2, chi=16, key=key)
+    result = dmrg(mpo, mps, config)
     energies.append(result.energy)
     print(f"χ = {chi:4d} → E = {result.energy:.10f}")
 

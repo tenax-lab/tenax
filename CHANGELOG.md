@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.3.0 (unreleased)
+
+### Breaking Changes
+
+- **3-leg boundary tensors** — All MPS boundary tensors are now uniformly
+  3-leg with trivial dimension-1 bonds (#169)
+  - Site 0: `(1, d, chi)` with labels `(v_-1_0, p0, v0_1)`
+  - Site L-1: `(chi, d, 1)` with labels `(v{L-2}_{L-1}, p{L-1}, v{L-1}_{L})`
+  - Code that accessed `mps_tensor.ndim == 2` to detect boundaries must be
+    updated; all tensors are now `ndim == 3`
+
+### New Features
+
+- **`FiniteMPS` and `InfiniteMPS` classes** with canonical form tracking,
+  singular values at every bond, and `log_norm` normalization (#163, #169)
+  - `FiniteMPS.random()` replaces `build_random_mps()` / `build_random_symmetric_mps()`
+  - `canonicalize(center)` with QR sweeps (block-sparse, no `todense()`)
+  - `compute_singular_values()` populates all bonds in one SVD sweep
+  - `target_charge` field for symmetric MPS sector tracking
+  - `InfiniteMPS` with `qshift` and L+1 bond convention
+- **Controlled Bond Expansion (CBE)** for 1-site DMRG/TDVP (#154, #157)
+  - Dense and block-sparse (`expand_bond_symmetric`) implementations
+- **Randomized SVD** (`rsvd`) for large-scale truncation (#151)
+
+### Improvements
+
+- Eliminated ~23 boundary special-case code paths across DMRG, TDVP,
+  observables, and CBE
+- Deleted `_pad_boundary_symmetric` / `_unpad_boundary_symmetric` functions
+- DMRG and TDVP accept and return `FiniteMPS` with canonical form contracts
+
 ## v0.2.0 (2026-03-17)
 
 ### New Algorithms

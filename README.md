@@ -126,24 +126,23 @@ result2 = bp.launch()
 ## DMRG Example
 
 ```python
-from tenax.algorithms.dmrg import dmrg, build_mpo_heisenberg, DMRGConfig
-from tenax.network.network import build_mps
+import jax
+from tenax import dmrg, build_mpo_heisenberg, DMRGConfig, FiniteMPS
 
 L = 10  # chain length
 mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
-
-# Build random initial MPS
-# ...
+mps = FiniteMPS.random(L=L, d=2, chi=16, key=jax.random.PRNGKey(0))
 
 config = DMRGConfig(max_bond_dim=50, num_sweeps=10)
-result = dmrg(mpo, initial_mps, config)
+result = dmrg(mpo, mps, config)
 print(f"Ground state energy: {result.energy:.8f}")
 ```
 
 ## 2D Cylinder DMRG Example
 
 ```python
-from tenax import AutoMPO, DMRGConfig, build_random_mps, dmrg
+import jax
+from tenax import AutoMPO, DMRGConfig, FiniteMPS, dmrg
 
 # Build Heisenberg Hamiltonian on a 6x3 cylinder via AutoMPO
 Lx, Ly, N = 6, 3, 18
@@ -163,7 +162,7 @@ for x in range(Lx):
             auto += (0.5, "Sm", i, "Sp", j)
 
 mpo = auto.to_mpo(compress=True)
-mps = build_random_mps(N, physical_dim=2, bond_dim=16)
+mps = FiniteMPS.random(L=N, d=2, chi=16, key=jax.random.PRNGKey(0))
 config = DMRGConfig(max_bond_dim=100, num_sweeps=10, verbose=True)
 result = dmrg(mpo, mps, config)
 print(f"E/N = {result.energy / N:.8f}")  # converges in a few sweeps

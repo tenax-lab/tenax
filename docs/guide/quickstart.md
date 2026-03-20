@@ -42,14 +42,12 @@ print(C.todense().shape)  # (3, 5)
 ## Example 2 -- DMRG ground state of the Heisenberg chain
 
 ```python
-from tenax import (
-    DMRGConfig, dmrg,
-    build_mpo_heisenberg, build_random_mps,
-)
+import jax
+from tenax import DMRGConfig, dmrg, build_mpo_heisenberg, FiniteMPS
 
 L = 10  # 10-site chain
 mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
-mps = build_random_mps(L, physical_dim=2, bond_dim=4)
+mps = FiniteMPS.random(L=L, d=2, chi=4, key=jax.random.PRNGKey(0))
 
 config = DMRGConfig(
     max_bond_dim=32,

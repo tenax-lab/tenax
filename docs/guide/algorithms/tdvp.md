@@ -47,16 +47,17 @@ config = TDVPConfig(
 ## Example — real-time quench dynamics
 
 ```python
+import jax
 from tenax import (
     TDVPConfig, tdvp, tdvp_step,
     DMRGConfig, dmrg,
-    build_mpo_heisenberg, build_random_mps,
+    build_mpo_heisenberg, FiniteMPS,
 )
 
 # Prepare ground state via DMRG
 L = 20
 mpo = build_mpo_heisenberg(L)
-mps = build_random_mps(L, physical_dim=2, bond_dim=16)
+mps = FiniteMPS.random(L=L, d=2, chi=16, key=jax.random.PRNGKey(0))
 result = dmrg(mpo, mps, DMRGConfig(max_bond_dim=32, num_sweeps=20))
 mps_gs = result.mps
 

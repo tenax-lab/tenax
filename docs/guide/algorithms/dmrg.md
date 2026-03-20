@@ -39,14 +39,15 @@ config = DMRGConfig(
 ## Example -- Heisenberg chain
 
 ```python
+import jax
 from tenax import (
     DMRGConfig, dmrg,
-    build_mpo_heisenberg, build_random_mps,
+    build_mpo_heisenberg, FiniteMPS,
 )
 
 L = 20
 mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0, hz=0.0)
-mps = build_random_mps(L, physical_dim=2, bond_dim=4)
+mps = FiniteMPS.random(L=L, d=2, chi=4, key=jax.random.PRNGKey(0))
 
 config = DMRGConfig(max_bond_dim=64, num_sweeps=30, verbose=True)
 result = dmrg(mpo, mps, config)
@@ -83,7 +84,8 @@ For 2D systems, map the lattice to a 1D chain (column-major ordering) and
 use `AutoMPO` to build the long-range MPO:
 
 ```python
-from tenax import AutoMPO, DMRGConfig, build_random_mps, dmrg
+import jax
+from tenax import AutoMPO, DMRGConfig, FiniteMPS, dmrg
 
 Lx, Ly, N = 8, 4, 32
 auto = AutoMPO(L=N, d=2)
@@ -102,7 +104,7 @@ for x in range(Lx):
             auto += (0.5, "Sm", i, "Sp", j)
 
 mpo = auto.to_mpo(compress=True)
-mps = build_random_mps(N, physical_dim=2, bond_dim=16)
+mps = FiniteMPS.random(L=N, d=2, chi=16, key=jax.random.PRNGKey(0))
 config = DMRGConfig(max_bond_dim=200, num_sweeps=15, verbose=True)
 result = dmrg(mpo, mps, config)
 print(f"E/N = {result.energy / N:.8f}")
@@ -120,7 +122,8 @@ MPS and MPO tensors follow these leg-label conventions:
 - Left virtual bond: `v{i-1}_{i}`
 - Physical leg: `p{i}`
 - Right virtual bond: `v{i}_{i+1}`
-- Boundary sites omit one virtual bond
+- All sites are 3-leg; boundary sites have trivial dimension-1 bonds
+  (`v_-1_0` at site 0, `v{L-1}_{L}` at site L-1)
 
 **MPO site tensors:**
 

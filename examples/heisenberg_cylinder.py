@@ -33,7 +33,7 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-from tenax import AutoMPO, DMRGConfig, build_random_mps, dmrg
+from tenax import AutoMPO, DMRGConfig, FiniteMPS, dmrg
 
 # ---------------------------------------------------------------------------
 # Lattice helpers
@@ -186,7 +186,7 @@ def run_cylinder_dmrg(
     )
 
     # Build initial MPS
-    mps = build_random_mps(N, physical_dim=2, bond_dim=initial_bond_dim, seed=42)
+    mps = FiniteMPS.random(L=N, d=2, chi=initial_bond_dim, key=jax.random.PRNGKey(42))
 
     # Run DMRG
     config = DMRGConfig(
