@@ -29,7 +29,7 @@ DMRG), but differ in language (Julia/C++ vs Python/JAX) and tensor design.
 | `qr(T, i1, i2)` | `qr_decompose(T, left_labels, right_labels)` | Same pattern |
 | `AutoMPO()` | `AutoMPO(L, d)` | Very similar API |
 | `dmrg(H, psi0, sweeps)` | `dmrg(mpo, mps, config)` | Config replaces Sweeps object |
-| `siteinds("S=1/2", N)` | `build_random_mps(L, physical_dim=2, ...)` | No site-type system in Tenax |
+| `siteinds("S=1/2", N)` | `FiniteMPS.random(L, d=2, chi, key)` | No site-type system in Tenax |
 | `expect(psi, "Sz")` | Manual contraction (see observables skill) | No built-in expect function |
 
 ---
@@ -179,7 +179,8 @@ println("Energy: $energy")
 
 **Tenax (Python):**
 ```python
-from tenax import AutoMPO, DMRGConfig, build_random_mps, dmrg
+import jax
+from tenax import AutoMPO, DMRGConfig, FiniteMPS, dmrg
 
 L = 20
 auto = AutoMPO(L=L, d=2)
@@ -189,7 +190,8 @@ for i in range(L - 1):
     auto += (0.5, "Sm", i, "Sp", i + 1)
 mpo = auto.to_mpo()
 
-mps = build_random_mps(L, physical_dim=2, bond_dim=10)
+key = jax.random.PRNGKey(0)
+mps = FiniteMPS.random(L=L, d=2, chi=10, key=key)
 config = DMRGConfig(max_bond_dim=100, num_sweeps=10, verbose=True)
 result = dmrg(mpo, mps, config)
 print(f"Energy: {result.energy:.10f}")

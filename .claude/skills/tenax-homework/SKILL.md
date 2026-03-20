@@ -69,7 +69,8 @@ AutoMPO.
 
 ```python
 # Starter code
-from tenax import AutoMPO, DMRGConfig, build_random_mps, dmrg
+import jax
+from tenax import AutoMPO, DMRGConfig, FiniteMPS, dmrg
 
 Lx, Ly = 4, 3
 N = Lx * Ly
@@ -83,7 +84,8 @@ auto = AutoMPO(L=N, d=2)
 # YOUR CODE HERE
 
 mpo = auto.to_mpo(compress=True)
-mps = build_random_mps(N, physical_dim=2, bond_dim=16)
+key = jax.random.PRNGKey(0)
+mps = FiniteMPS.random(L=N, d=2, chi=16, key=key)
 config = DMRGConfig(max_bond_dim=64, num_sweeps=10, verbose=True)
 result = dmrg(mpo, mps, config)
 print(f"E/N = {result.energy / N:.8f}")

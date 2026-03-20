@@ -243,12 +243,12 @@ The algorithm runs without crashing but gives wrong or non-converging results.
 ### DMRG
 
 ```python
-from tenax.algorithms.dmrg import dmrg, build_mpo_heisenberg, DMRGConfig
-from tenax import build_random_mps
+import jax
+from tenax import dmrg, build_mpo_heisenberg, DMRGConfig, FiniteMPS
 
 L = 20
 mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
-mps = build_random_mps(L, physical_dim=2, bond_dim=16)
+mps = FiniteMPS.random(L=L, d=2, chi=16, key=jax.random.PRNGKey(0))
 config = DMRGConfig(max_bond_dim=64, num_sweeps=10, verbose=True)
 result = dmrg(mpo, mps, config)
 ```

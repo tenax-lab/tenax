@@ -40,7 +40,7 @@ python -m benchmarks.run -b cpu -a dmrg idmrg -s small medium -n 5
 
 ### DMRG
 
-Heisenberg chain via `build_mpo_heisenberg` + `build_random_mps` + `dmrg`.
+Heisenberg chain via `build_mpo_heisenberg` + `FiniteMPS.random()` + `dmrg`.
 
 | Size | L | chi | sweeps | initial bond dim |
 |------|---|-----|--------|------------------|

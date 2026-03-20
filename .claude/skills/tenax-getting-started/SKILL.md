@@ -79,8 +79,9 @@ This is the "hello world" of tensor networks — finding the ground state
 energy of the spin-1/2 Heisenberg antiferromagnet.
 
 ```python
+import jax
 from tenax import (
-    dmrg, build_mpo_heisenberg, build_random_mps, DMRGConfig
+    dmrg, build_mpo_heisenberg, FiniteMPS, DMRGConfig
 )
 
 # 1. Build the Hamiltonian as an MPO
@@ -88,7 +89,8 @@ L = 20
 mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
 
 # 2. Build a random initial MPS
-mps = build_random_mps(L, physical_dim=2, bond_dim=16)
+key = jax.random.PRNGKey(0)
+mps = FiniteMPS.random(L=L, d=2, chi=16, key=key)
 
 # 3. Configure and run DMRG
 config = DMRGConfig(max_bond_dim=64, num_sweeps=10, verbose=True)
