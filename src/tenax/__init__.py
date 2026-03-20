@@ -60,6 +60,7 @@ from tenax.algorithms.auto_mpo import (
     spin_half_ops,
     spin_one_ops,
 )
+from tenax.algorithms.cbe import expand_bond, expand_bond_symmetric
 from tenax.algorithms.dmrg import (
     DMRGConfig,
     DMRGResult,
@@ -138,6 +139,7 @@ from tenax.core.lattice import (
     square,
     triangular,
 )
+from tenax.core.mps import FiniteMPS, InfiniteMPS
 from tenax.core.symmetry import (
     BaseNonAbelianSymmetry,
     BaseSymmetry,
@@ -149,7 +151,7 @@ from tenax.core.symmetry import (
     ZnSymmetry,
 )
 from tenax.core.tensor import BlockKey, DenseTensor, SymmetricTensor, Tensor, inner
-from tenax.linalg import eigh, qr, svd
+from tenax.linalg import eigh, qr, rsvd, svd
 from tenax.network.netfile import NetworkBlueprint, from_netfile
 from tenax.network.network import TensorNetwork, build_mps, build_peps
 
@@ -177,6 +179,9 @@ __all__ = [
     "SymmetricTensor",
     "BlockKey",
     "inner",
+    # MPS
+    "FiniteMPS",
+    "InfiniteMPS",
     # Contraction
     "contract",
     "contract_with_subscripts",
@@ -184,8 +189,12 @@ __all__ = [
     "qr_decompose",
     # Linear algebra (tenax.linalg)
     "svd",
+    "rsvd",
     "qr",
     "eigh",
+    # CBE
+    "expand_bond",
+    "expand_bond_symmetric",
     # AutoMPO
     "AutoMPO",
     "HamiltonianTerm",

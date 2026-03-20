@@ -14,8 +14,9 @@ Architecture decisions:
 Label conventions::
 
     MPS site tensors:    legs = ("v{i-1}_{i}", "p{i}", "v{i}_{i+1}")
-                         boundary: left site has ("p0", "v0_1"),
-                                   right site has ("v{L-2}_{L-1}", "p{L-1}")
+                         All sites are 3-leg, including boundaries:
+                         site 0 has ("v_-1_0", "p0", "v0_1") with dim-1 left bond,
+                         site L-1 has ("v{L-2}_{L-1}", "p{L-1}", "v{L-1}_{L}") with dim-1 right bond.
     MPO site tensors:    legs = ("w{i-1}_{i}", "mpo_top_{i}", "mpo_bot_{i}", "w{i}_{i+1}")
     Environment tensors: left_env[i] has legs ("mps_l", "mpo_l", "mps_l_conj")
                          right_env[i] has legs ("mps_r", "mpo_r", "mps_r_conj")
@@ -34,10 +35,12 @@ import opt_einsum
 
 from tenax.algorithms._tensor_utils import scale_bond_axis
 from tenax.algorithms.auto_mpo import build_auto_mpo
-from tenax.contraction.contractor import contract, qr_decompose, truncated_svd
+from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.mps import FiniteMPS
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor, inner
+from tenax.linalg import qr as _linalg_qr
 from tenax.network.network import TensorNetwork
 
 
@@ -83,14 +86,14 @@ class DMRGResult(NamedTuple):
     Attributes:
         energy:               Final ground state energy.
         energies_per_sweep:   Energy at the end of each sweep.
-        mps:                  TensorNetwork representing the optimized MPS.
+        mps:                  FiniteMPS representing the optimized MPS.
         truncation_errors:    List of truncation errors at each bond update step.
         converged:            True if energy converged within convergence_tol.
     """
 
     energy: float
     energies_per_sweep: list[float]
-    mps: TensorNetwork
+    mps: FiniteMPS
     truncation_errors: list[float]
     converged: bool
 
@@ -124,7 +127,7 @@ def _dense_ops() -> SweepOps:
 
 def dmrg(
     hamiltonian: TensorNetwork,
-    initial_mps: TensorNetwork,
+    initial_mps: FiniteMPS | TensorNetwork,
     config: DMRGConfig,
 ) -> DMRGResult:
     """Run DMRG to find the ground state of a 1D Hamiltonian given as MPO.
@@ -134,12 +137,12 @@ def dmrg(
 
     Args:
         hamiltonian:  MPO representation of the Hamiltonian.
-        initial_mps:  Starting MPS TensorNetwork (modified in-place conceptually;
-                      the result MPS is returned in DMRGResult).
+        initial_mps:  Starting MPS as FiniteMPS or TensorNetwork (backward compat).
+                      The result MPS is returned in DMRGResult.
         config:       DMRGConfig parameters.
 
     Returns:
-        DMRGResult with energy, sweep history, optimized MPS, and diagnostics.
+        DMRGResult with energy, sweep history, optimized FiniteMPS, and diagnostics.
     """
     L = hamiltonian.n_nodes()
     if L < 2:
@@ -147,7 +150,13 @@ def dmrg(
             f"DMRG requires at least 2 sites, got L={L}. "
             "For a single site, diagonalize the operator directly."
         )
-    mps_tensors: list[Tensor] = [initial_mps.get_tensor(i) for i in range(L)]
+
+    # Convert TensorNetwork to FiniteMPS if needed
+    if isinstance(initial_mps, TensorNetwork):
+        _mps_tensors = [initial_mps.get_tensor(i) for i in range(L)]
+        initial_mps = FiniteMPS.from_tensors(_mps_tensors)
+
+    mps_tensors: list[Tensor] = list(initial_mps.tensors)
     mpo_tensors = [hamiltonian.get_tensor(i) for i in range(L)]
 
     # Select backend: symmetric when both MPS and MPO are all SymmetricTensor
@@ -171,6 +180,12 @@ def dmrg(
     # Validate initial MPS sector if target_charge is specified
     if config.target_charge is not None and use_symmetric:
         validate_mps_sector(mps_tensors, config.target_charge)
+
+    # Right-canonicalize MPS before building environments (1-site mode).
+    # The L→R sweep needs right environments built from right-canonical MPS.
+    if not config.two_site:
+        _rc_mps = FiniteMPS.from_tensors(mps_tensors).right_canonicalize()
+        mps_tensors = list(_rc_mps.tensors)
 
     # Build left environments (L[i] = trivial for i=0)
     left_envs = _build_left_environments_list(mps_tensors, mpo_tensors, L, ops)
@@ -209,6 +224,11 @@ def dmrg(
 
         # Rebuild left environments from updated MPS before left-to-right sweep
         if sweep > 0:
+            # After R→L, site 0 has accumulated L factors. Normalize.
+            if not config.two_site:
+                _n0 = float(jnp.sqrt(jnp.abs(inner(mps_tensors[0], mps_tensors[0]))))
+                if _n0 > 1e-15 and abs(_n0 - 1.0) > 1e-10:
+                    mps_tensors[0] = mps_tensors[0] * (1.0 / _n0)
             left_envs = _build_left_environments_list(mps_tensors, mpo_tensors, L, ops)
 
         # Left-to-right sweep
@@ -246,8 +266,27 @@ def dmrg(
                     config,
                 )
                 energy = float(e)
-                mps_tensors[i] = new_site
-                left_envs[i + 1] = ops.update_left_env(l_env, new_site, mpo_tensors[i])
+
+                # QR + absorb R + build env (atomic step for 1-site)
+                right_bond = f"v{i}_{i + 1}"
+                left_labels = [lb for lb in new_site.labels() if lb != right_bond]
+                tmp_bond = f"_qr_{right_bond}"
+                Q, R = _linalg_qr(
+                    new_site, left_labels, [right_bond], new_bond_label=tmp_bond
+                )
+                mps_tensors[i] = Q.relabel(tmp_bond, right_bond)
+                absorbed = contract(R, mps_tensors[i + 1])
+                mps_tensors[i + 1] = absorbed.relabel(tmp_bond, right_bond)
+                left_envs[i + 1] = ops.update_left_env(
+                    l_env, mps_tensors[i], mpo_tensors[i]
+                )
+
+        # After L→R, site L-1 has accumulated R factors. Normalize it
+        # so right environments are built from a unit-norm MPS.
+        if not config.two_site:
+            _n = float(jnp.sqrt(jnp.abs(inner(mps_tensors[L - 1], mps_tensors[L - 1]))))
+            if _n > 1e-15 and abs(_n - 1.0) > 1e-10:
+                mps_tensors[L - 1] = mps_tensors[L - 1] * (1.0 / _n)
 
         # Rebuild right environments from updated MPS before right-to-left sweep
         right_envs = _build_right_environments_list(mps_tensors, mpo_tensors, L, ops)
@@ -289,8 +328,33 @@ def dmrg(
                     config,
                 )
                 energy = float(e)
-                mps_tensors[i] = new_site
-                right_envs[i] = ops.update_right_env(r1_env, new_site, mpo_tensors[i])
+
+                # RQ + absorb L + build env (atomic step for 1-site)
+                left_bond = f"v{i - 1}_{i}"
+                site_labels = new_site.labels()
+                if i > 0 and left_bond in site_labels:
+                    other_labels = [lb for lb in site_labels if lb != left_bond]
+                    tmp_bond = f"_qr_{left_bond}"
+                    Q, R = _linalg_qr(
+                        new_site, other_labels, [left_bond], new_bond_label=tmp_bond
+                    )
+                    Q = Q.relabel(tmp_bond, left_bond)
+                    # Reorder so left_bond is first (MPS convention)
+                    q_labels = Q.labels()
+                    bond_pos = q_labels.index(left_bond)
+                    if bond_pos != 0:
+                        axes = (bond_pos,) + tuple(
+                            j for j in range(len(q_labels)) if j != bond_pos
+                        )
+                        Q = Q.transpose(axes)
+                    mps_tensors[i] = Q
+                    absorbed = contract(mps_tensors[i - 1], R)
+                    mps_tensors[i - 1] = absorbed.relabel(tmp_bond, left_bond)
+                else:
+                    mps_tensors[i] = new_site
+                right_envs[i] = ops.update_right_env(
+                    r1_env, mps_tensors[i], mpo_tensors[i]
+                )
 
         energies_per_sweep.append(energy)
         if config.verbose:
@@ -312,17 +376,12 @@ def dmrg(
                 print(f"Converged at sweep {sweep + 1}")
             break
 
-    # Build result MPS as TensorNetwork
-    result_mps = TensorNetwork(name="DMRG_MPS")
-    for i, tensor in enumerate(mps_tensors):
-        result_mps.add_node(i, tensor)
-    for i in range(L - 1):
-        shared = set(mps_tensors[i].labels()) & set(mps_tensors[i + 1].labels())
-        for label in sorted(shared, key=str):
-            try:
-                result_mps.connect(i, label, i + 1, label)
-            except ValueError:
-                pass
+    # Build result MPS as FiniteMPS
+    if not config.two_site:
+        orth_center = 0  # after final R→L sweep
+    else:
+        orth_center = None  # 2-site doesn't maintain strict canonical form
+    result_mps = FiniteMPS.from_tensors(mps_tensors, orth_center=orth_center)
 
     return DMRGResult(
         energy=energy,
@@ -331,37 +390,6 @@ def dmrg(
         truncation_errors=truncation_errors,
         converged=converged,
     )
-
-
-def _right_canonicalize(mps_tensors: list[Tensor]) -> list[Tensor]:
-    """Right-canonicalize MPS by QR from right to left."""
-    L = len(mps_tensors)
-    tensors = list(mps_tensors)
-
-    for i in range(L - 1, 0, -1):
-        tensor = tensors[i]
-        labels = tensor.labels()
-
-        # Find the virtual bond to the left
-        left_bond = _find_left_bond(labels, i)
-        if left_bond is None:
-            continue
-
-        other_labels = [lbl for lbl in labels if lbl != left_bond]
-        Q, R = qr_decompose(
-            tensor,
-            left_labels=[left_bond],
-            right_labels=other_labels,
-            new_bond_label=left_bond + "_new"
-            if isinstance(left_bond, str)
-            else f"b{i}",
-        )
-
-        # Absorb R into site i-1
-        tensors[i] = Q
-        tensors[i - 1] = contract(tensors[i - 1], R)
-
-    return tensors
 
 
 def _find_left_bond(labels: tuple, site: int) -> str | None:
@@ -473,18 +501,8 @@ def _update_left_env(
     """
     # Dense implementation using todense() for generality
     L_dense = left_env.todense()  # shape (chi_l, D_w, chi_l')
-    A_dense = mps_site.todense()  # shape (chi_l, d, chi_r) for middle sites
+    A_dense = mps_site.todense()  # shape (chi_l, d, chi_r) — always 3D
     W_dense = mpo_site.todense()  # shape (D_w_l, d_top, d_bot, D_w_r)
-
-    # Pad A to always be 3D: if boundary site is 2D, add a trivial dim
-    if A_dense.ndim == 2:
-        labels = mps_site.labels()
-        if isinstance(labels[0], str) and labels[0].startswith("p"):
-            # Left boundary: (d, chi_r) -> (1, d, chi_r)
-            A_dense = A_dense[jnp.newaxis, :]
-        else:
-            # Right boundary: (chi_l, d) -> (chi_l, d, 1)
-            A_dense = A_dense[:, :, jnp.newaxis]
 
     # new_L[chi_r, D_w_r, chi_r'] =
     #   L[chi_l, D_w_l, chi_l'] * A[chi_l, d, chi_r] * W[D_w_l, d, d', D_w_r] * A*[chi_l', d', chi_r']
@@ -519,18 +537,8 @@ def _update_right_env(
 ) -> DenseTensor:
     """Update right environment by absorbing one MPS/MPO site."""
     R_dense = right_env.todense()  # shape (chi_r, D_w, chi_r')
-    B_dense = mps_site.todense()  # shape (chi_l, d, chi_r) for middle sites
+    B_dense = mps_site.todense()  # shape (chi_l, d, chi_r) — always 3D
     W_dense = mpo_site.todense()  # shape (D_w_l, d_top, d_bot, D_w_r)
-
-    # Pad B to 3D if boundary site (2D tensor)
-    if B_dense.ndim == 2:
-        labels = mps_site.labels()
-        if isinstance(labels[0], str) and labels[0].startswith("p"):
-            # Left boundary: (d, chi_r) -> (1, d, chi_r)
-            B_dense = B_dense[jnp.newaxis, :, :]
-        else:
-            # Right boundary: (chi_l, d) -> (chi_l, d, 1)
-            B_dense = B_dense[:, :, jnp.newaxis]
 
     # new_R[chi_l, D_w_l, chi_l'] =
     #   R[chi_r, D_w_r, chi_r'] * B[chi_l, d, chi_r] * W[D_w_l, d, d', D_w_r] * B*[chi_l', d', chi_r']
@@ -637,27 +645,8 @@ def _two_site_update(
         theta = site_l
 
     # Use Lanczos to find the ground state
-    theta_dense = theta.todense()
+    theta_dense = theta.todense()  # always 4D: (chi_l, d_l, d_r, chi_r)
     theta_indices = theta.indices
-
-    # Ensure theta is always 4D: (chi_l, d_l, d_r, chi_r)
-    # Boundary cases: left site (i=0) → theta is 3D (d_l, d_r, chi_r)
-    #                 right site (i=L-2) → theta is 3D (chi_l, d_l, d_r)
-    original_ndim = theta_dense.ndim
-    if theta_dense.ndim == 3:
-        # Determine which boundary: check if first dim is small (=d) or large (=chi)
-        # Left boundary: first dim = d (physical), so add trivial dim at left
-        # Right boundary: last dim = d (physical), add trivial dim at right
-        # We detect by looking at the labels
-        labels_list = [idx.label for idx in theta_indices]
-        # Left boundary: no left virtual bond, first label is physical
-        has_left_virt = any(
-            isinstance(lbl, str) and lbl.startswith("v") for lbl in labels_list[:1]
-        )
-        if not has_left_virt:
-            theta_dense = theta_dense[jnp.newaxis, :]  # (1, d, d, chi_r)
-        else:
-            theta_dense = theta_dense[:, :, :, jnp.newaxis]  # (chi_l, d, d, 1)
 
     L_arr = left_env.todense()
     R_arr = right_env.todense()
@@ -681,17 +670,6 @@ def _two_site_update(
     )
 
     theta_opt_dense = theta_opt_flat.reshape(theta_shape)
-    # Remove trivial dims added for boundary sites
-    if original_ndim == 3:
-        labels_list = [idx.label for idx in theta_indices]
-        has_left_virt = any(
-            isinstance(lbl, str) and lbl.startswith("v") for lbl in labels_list[:1]
-        )
-        if not has_left_virt:
-            theta_opt_dense = theta_opt_dense[0, :, :, :]  # remove left trivial dim
-        else:
-            theta_opt_dense = theta_opt_dense[:, :, :, 0]  # remove right trivial dim
-
     theta_opt = DenseTensor(theta_opt_dense, theta_indices)
     return theta_opt, energy
 
@@ -704,23 +682,7 @@ def _one_site_update(
     config: DMRGConfig,
 ) -> tuple[Tensor, float]:
     """Perform 1-site DMRG update."""
-    site_dense = site.todense()
-    original_site_shape = site_dense.shape
-
-    # Ensure site is always 3D: (chi_l, d, chi_r)
-    if site_dense.ndim == 1:
-        # Single-site MPS with only a physical index: (d,) -> (1, d, 1)
-        site_dense = site_dense[jnp.newaxis, :, jnp.newaxis]
-    elif site_dense.ndim == 2:
-        labels_list = list(site.labels())
-        has_left_virt = any(
-            isinstance(lbl, str) and lbl.startswith("v") for lbl in labels_list[:1]
-        )
-        if not has_left_virt:
-            site_dense = site_dense[jnp.newaxis, :]  # (1, d, chi_r)
-        else:
-            site_dense = site_dense[:, :, jnp.newaxis]  # (chi_l, d, 1)
-
+    site_dense = site.todense()  # always 3D: (chi_l, d, chi_r)
     site_shape = site_dense.shape
     site_flat = site_dense.ravel()
 
@@ -746,19 +708,6 @@ def _one_site_update(
     )
 
     site_opt_dense = site_opt_flat.reshape(site_shape)
-    # Remove trivial dims if we added them
-    if len(original_site_shape) == 1 and site_opt_dense.ndim == 3:
-        # 1D input: (1, d, 1) -> (d,)
-        site_opt_dense = site_opt_dense[0, :, 0]
-    elif len(original_site_shape) == 2 and site_opt_dense.ndim == 3:
-        labels_list = list(site.labels())
-        has_left_virt = any(
-            isinstance(lbl, str) and lbl.startswith("v") for lbl in labels_list[:1]
-        )
-        if not has_left_virt:
-            site_opt_dense = site_opt_dense[0, :, :]
-        else:
-            site_opt_dense = site_opt_dense[:, :, 0]
     site_opt = DenseTensor(site_opt_dense, site.indices)
     return site_opt, energy
 
@@ -863,18 +812,20 @@ def _svd_and_truncate_site(
     labels = theta.labels()
 
     # Find physical and virtual labels
-    left_virt = f"v{site - 1}_{site}" if site > 0 else None
+    # With uniform 3-leg tensors, site 0 has left bond "v_-1_0"
+    if site > 0:
+        left_virt = f"v{site - 1}_{site}"
+    else:
+        left_virt = "v_-1_0"
     right_virt = f"v{site + 1}_{site + 2}"
     left_phys = f"p{site}"
     right_phys = f"p{site + 1}"
 
     # Build actual left/right label splits based on what's available
-    left_labels = [
-        lbl for lbl in labels if lbl in (left_virt, left_phys) and lbl is not None
-    ]
-    right_labels = [
-        lbl for lbl in labels if lbl in (right_virt, right_phys) and lbl is not None
-    ]
+    left_candidates = {left_virt, left_phys}
+    right_candidates = {right_virt, right_phys}
+    left_labels = [lbl for lbl in labels if lbl in left_candidates]
+    right_labels = [lbl for lbl in labels if lbl in right_candidates]
 
     if not left_labels or not right_labels:
         # Fallback: split roughly in half
@@ -953,58 +904,6 @@ def _build_trivial_right_env_symmetric(dtype=None) -> SymmetricTensor:
         (0, 0, 0): jnp.ones((1, 1, 1), dtype=dtype)
     }
     return SymmetricTensor(blocks, indices)
-
-
-def _pad_boundary_symmetric(t: SymmetricTensor, pad_left: bool) -> SymmetricTensor:
-    """Pad a 2D boundary SymmetricTensor to 3D by adding a trivial dimension.
-
-    Args:
-        t:        2D SymmetricTensor (boundary MPS site).
-        pad_left: If True, prepend trivial dim (left boundary: (p,v) -> (1,p,v)).
-                  If False, append trivial dim (right boundary: (v,p) -> (v,p,1)).
-
-    Returns:
-        3D SymmetricTensor with a trivial charge-0 dimension added.
-    """
-    sym = U1Symmetry()
-    trivial_bond = np.zeros(1, dtype=np.int32)
-
-    if pad_left:
-        trivial_idx = TensorIndex(sym, trivial_bond, FlowDirection.IN, label="_pad_l")
-        new_indices = (trivial_idx,) + t.indices
-        new_blocks = {(0,) + key: arr[np.newaxis, :] for key, arr in t.blocks.items()}
-    else:
-        trivial_idx = TensorIndex(sym, trivial_bond, FlowDirection.OUT, label="_pad_r")
-        new_indices = t.indices + (trivial_idx,)
-        new_blocks = {key + (0,): arr[..., np.newaxis] for key, arr in t.blocks.items()}
-
-    obj = object.__new__(SymmetricTensor)
-    obj._indices = new_indices
-    obj._init_flat_buffer(new_blocks)
-    return obj
-
-
-def _unpad_boundary_symmetric(t: SymmetricTensor, pad_left: bool) -> SymmetricTensor:
-    """Remove a trivial dimension added by _pad_boundary_symmetric.
-
-    Args:
-        t:        3D SymmetricTensor with a trivial padding dimension.
-        pad_left: If True, remove first dim. If False, remove last dim.
-
-    Returns:
-        2D SymmetricTensor with the trivial dimension removed.
-    """
-    if pad_left:
-        new_indices = t.indices[1:]
-        new_blocks = {key[1:]: arr[0] for key, arr in t.blocks.items()}
-    else:
-        new_indices = t.indices[:-1]
-        new_blocks = {key[:-1]: arr[..., 0] for key, arr in t.blocks.items()}
-
-    obj = object.__new__(SymmetricTensor)
-    obj._indices = new_indices
-    obj._init_flat_buffer(new_blocks)
-    return obj
 
 
 def _lanczos_solve_tensor(
@@ -1209,13 +1108,7 @@ def _update_left_env_symmetric(
     _assert_symmetric(
         left_env, mps_site, mpo_site, context="_update_left_env_symmetric"
     )
-    A = mps_site
-    # Pad boundary sites to 3D
-    if A.ndim == 2:
-        labels = A.labels()
-        is_left_boundary = isinstance(labels[0], str) and labels[0].startswith("p")
-        A = _pad_boundary_symmetric(A, pad_left=is_left_boundary)
-
+    A = mps_site  # always 3D: (chi_l, d, chi_r)
     A_bra = A.bar()
 
     # Build output indices from the free legs of the contraction:
@@ -1246,13 +1139,7 @@ def _update_right_env_symmetric(
     _assert_symmetric(
         right_env, mps_site, mpo_site, context="_update_right_env_symmetric"
     )
-    B = mps_site
-    # Pad boundary sites to 3D
-    if B.ndim == 2:
-        labels = B.labels()
-        is_left_boundary = isinstance(labels[0], str) and labels[0].startswith("p")
-        B = _pad_boundary_symmetric(B, pad_left=is_left_boundary)
-
+    B = mps_site  # always 3D: (chi_l, d, chi_r)
     B_bra = B.bar()
 
     # Output: d = B's left virtual, e = W's left bond, f = B_bra's left virtual
@@ -1289,26 +1176,12 @@ def _two_site_update_symmetric(
         right_env,
         context="_two_site_update_symmetric",
     )
-    # Contract theta = A[i] * A[i+1]
+    # Contract theta = A[i] * A[i+1] — always 4D: (chi_l, d_l, d_r, chi_r)
     shared = set(site_l.labels()) & set(site_r.labels())
     if shared:
         theta = contract(site_l, site_r)
     else:
         theta = site_l
-
-    # Pad boundary sites to 4D
-    original_ndim = theta.ndim
-    pad_left = False
-    if theta.ndim == 3:
-        labels_list = [idx.label for idx in theta.indices]
-        has_left_virt = any(
-            isinstance(lbl, str) and lbl.startswith("v") for lbl in labels_list[:1]
-        )
-        if not has_left_virt:
-            pad_left = True
-            theta = _pad_boundary_symmetric(theta, pad_left=True)
-        else:
-            theta = _pad_boundary_symmetric(theta, pad_left=False)
 
     # Shared cache for opt_einsum expressions across Lanczos iterations
     _matvec_cache: dict[tuple[tuple[int, ...], ...], Any] = {}
@@ -1325,10 +1198,6 @@ def _two_site_update_symmetric(
     energy, theta_opt = _lanczos_solve_tensor(
         matvec, theta, config.lanczos_max_iter, config.lanczos_tol
     )
-
-    # Unpad if we padded
-    if original_ndim == 3:
-        theta_opt = _unpad_boundary_symmetric(theta_opt, pad_left=pad_left)
 
     return theta_opt, energy
 
@@ -1348,21 +1217,6 @@ def _one_site_update_symmetric(
     _assert_symmetric(
         site, left_env, mpo_site, right_env, context="_one_site_update_symmetric"
     )
-    original_ndim = site.ndim
-    pad_left = False
-
-    if site.ndim == 2:
-        labels_list = list(site.labels())
-        has_left_virt = any(
-            isinstance(lbl, str) and lbl.startswith("v") for lbl in labels_list[:1]
-        )
-        if not has_left_virt:
-            pad_left = True
-            site_3d = _pad_boundary_symmetric(site, pad_left=True)
-        else:
-            site_3d = _pad_boundary_symmetric(site, pad_left=False)
-    else:
-        site_3d = site
 
     # Shared cache for opt_einsum expressions across Lanczos iterations
     _matvec_cache: dict[tuple[tuple[int, ...], ...], Any] = {}
@@ -1377,12 +1231,8 @@ def _one_site_update_symmetric(
         return result
 
     energy, site_opt = _lanczos_solve_tensor(
-        matvec, site_3d, config.lanczos_max_iter, config.lanczos_tol
+        matvec, site, config.lanczos_max_iter, config.lanczos_tol
     )
-
-    # Unpad if we padded
-    if original_ndim == 2:
-        site_opt = _unpad_boundary_symmetric(site_opt, pad_left=pad_left)
 
     return site_opt, energy
 
@@ -1486,6 +1336,7 @@ def build_random_symmetric_mps(
 
     # Physical: spin up = +1, spin down = −1
     phys_charges = np.array([1, -1], dtype=np.int32)
+    trivial_zero = np.array([0], dtype=np.int32)
 
     # Virtual bond: include charge sectors compatible with target propagation.
     # For total charge Q, the right boundary needs virt charges in {Q-1, Q+1}
@@ -1520,19 +1371,34 @@ def build_random_symmetric_mps(
         # Right boundary tensor uses target_charge; all others use identity (0)
         site_target = target_charge if i == L - 1 else None
 
-        if i == 0:
-            # Left boundary: (phys_IN, virt_right_OUT)
+        if L == 1:
+            # Single-site: (trivial_IN, phys_IN, trivial_OUT)
+            # target=target_charge enforces the sector; right bond carries charge 0.
             indices: tuple[TensorIndex, ...] = (
+                TensorIndex(sym, trivial_zero, FlowDirection.IN, label="v_-1_0"),
+                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    sym, trivial_zero, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
+            )
+        elif i == 0:
+            # Left boundary: (trivial_IN, phys_IN, virt_right_OUT)
+            indices = (
+                TensorIndex(sym, trivial_zero, FlowDirection.IN, label="v_-1_0"),
                 TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
                 TensorIndex(
                     sym, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         elif i == L - 1:
-            # Right boundary: (virt_left_IN, phys_IN)
+            # Right boundary: (virt_left_IN, phys_IN, trivial_OUT)
+            # target=target_charge enforces the sector; right bond carries charge 0.
             indices = (
                 TensorIndex(sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"),
                 TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    sym, trivial_zero, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
             )
         else:
             # Middle: (virt_left_IN, phys_IN, virt_right_OUT)
@@ -1558,36 +1424,46 @@ def build_random_symmetric_mps(
 
 
 def compute_mps_sector(mps_tensors: list[Tensor]) -> int | None:
-    """Infer total charge sector of an MPS from its right boundary tensor.
+    """Infer total charge sector of an MPS from its tensor block structure.
 
-    For an OBC MPS with U(1) symmetry, the conservation law on each tensor is
-    ``sum(flow_i * charge_i) = 0`` (or ``= target`` for the boundary tensor).
-    The total sector Q is determined by the right boundary tensor: for each
-    block, ``sum(flow_i * charge_i)`` gives Q.
+    With the 3-leg boundary convention every MPS tensor satisfies
+    ``sum(flow_i * charge_i) = 0`` per block, and both boundary bonds
+    carry charge 0.  The target charge Q is encoded through block
+    selection: exactly one tensor (typically the orthogonality center)
+    has all blocks satisfying ``sum(flow_i * charge_i) = Q`` instead
+    of 0.  This function scans all tensors and returns Q.
+
+    If all tensors satisfy standard conservation (``sum = 0``), the
+    function returns 0.
 
     Args:
         mps_tensors: List of SymmetricTensor MPS site tensors.
 
     Returns:
-        The total charge if all blocks agree, or None if the MPS is in a
-        mixed sector (or contains no SymmetricTensor).
+        The total charge if consistently detectable, or None if the
+        MPS is in a mixed sector (or contains no SymmetricTensor).
     """
-    right_site = mps_tensors[-1]
-    if not isinstance(right_site, SymmetricTensor):
-        return None
-    if not right_site.blocks:
-        return None
+    for site in mps_tensors:
+        if not isinstance(site, SymmetricTensor):
+            continue
+        if not site.blocks:
+            continue
 
-    sectors: set[int] = set()
-    for key in right_site.blocks:
-        total = 0
-        for idx, q in zip(right_site.indices, key):
-            total += int(idx.flow) * q
-        sectors.add(total)
+        sectors: set[int] = set()
+        for key in site.blocks:
+            total = 0
+            for idx, q in zip(site.indices, key):
+                total += int(idx.flow) * q
+            sectors.add(total)
 
-    if len(sectors) == 1:
-        return sectors.pop()
-    return None
+        if len(sectors) != 1:
+            return None
+        charge = sectors.pop()
+        if charge != 0:
+            return charge
+
+    # All tensors have standard conservation (sum = 0)
+    return 0
 
 
 def validate_mps_sector(mps_tensors: list[Tensor], target_charge: int) -> None:
@@ -1634,6 +1510,7 @@ def build_random_mps(
     sym = U1Symmetry()
     bond_d = np.zeros(physical_dim, dtype=np.int32)
     bond_chi = np.zeros(bond_dim, dtype=np.int32)
+    bond_trivial = np.zeros(1, dtype=np.int32)
 
     mps = TensorNetwork(name=f"random_MPS_L{L}")
 
@@ -1643,20 +1520,30 @@ def build_random_mps(
         key = jax.random.PRNGKey(seed + i)
 
         if L == 1:
-            # Single-site MPS: only physical index, no virtual bonds.
-            shape = (physical_dim,)
-            indices = (TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),)
-        elif i == 0:
-            shape = (physical_dim, bond_dim)
+            # Single-site MPS: (1, d, 1) with trivial bonds on both sides.
+            shape = (1, physical_dim, 1)
             indices = (
+                TensorIndex(sym, bond_trivial, FlowDirection.IN, label="v_-1_0"),
+                TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    sym, bond_trivial, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
+            )
+        elif i == 0:
+            shape = (1, physical_dim, bond_dim)
+            indices = (
+                TensorIndex(sym, bond_trivial, FlowDirection.IN, label="v_-1_0"),
                 TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
                 TensorIndex(sym, bond_chi, FlowDirection.OUT, label=f"v{i}_{i + 1}"),
             )
         elif i == L - 1:
-            shape = (bond_dim, physical_dim)
+            shape = (bond_dim, physical_dim, 1)
             indices = (
                 TensorIndex(sym, bond_chi, FlowDirection.IN, label=f"v{i - 1}_{i}"),
                 TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    sym, bond_trivial, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
             )
         else:
             shape = (bond_dim, physical_dim, bond_dim)

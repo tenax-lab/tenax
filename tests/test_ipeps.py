@@ -722,6 +722,19 @@ class TestIPEPS2Site:
         energy, _, _ = ipeps(heisenberg_gate, (A, B), config)
         assert jnp.isfinite(energy)
 
+    def test_2site_rejects_non_tuple_initial_peps(self, heisenberg_gate):
+        """2-site iPEPS should raise TypeError for non-tuple initial_peps."""
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            num_imaginary_steps=1,
+            dt=0.1,
+            ctm=CTMConfig(chi=4, max_iter=1),
+            unit_cell="2site",
+        )
+        bad_input = jax.random.normal(jax.random.PRNGKey(0), (2, 2, 2, 2, 2))
+        with pytest.raises(TypeError, match="tuple.*None"):
+            ipeps(heisenberg_gate, bad_input, config)
+
 
 class TestQRProjectors:
     """Tests for QR-based CTMRG projectors (Phase 1)."""

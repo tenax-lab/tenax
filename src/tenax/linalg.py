@@ -3,6 +3,7 @@ r"""Linear algebra decompositions for Tenax tensors.
 Public API::
 
     svd(tensor, left_labels, right_labels, ...) -> (U, s, Vh, s_full)
+    rsvd(tensor, left_labels, right_labels, ...) -> (U, s, Vh)
     qr(tensor, left_labels, right_labels, ...) -> (Q, R)
     eigh(tensor, left_labels, right_labels, ...) -> (V, eigenvalues)
 
@@ -29,6 +30,21 @@ from tenax.core.tensor import (
 )
 
 # ---------- Shared helpers ----------
+
+
+def _has_nonstandard_blocks(tensor: SymmetricTensor) -> bool:
+    """Return True if any block violates standard conservation sum(flow*q)==0."""
+    if not tensor.blocks:
+        return False
+    sym = tensor.indices[0].symmetry
+    identity = sym.identity()
+    for key in tensor.blocks:
+        total = 0
+        for idx, q in zip(tensor.indices, key):
+            total += int(idx.flow) * q
+        if total != identity:
+            return True
+    return False
 
 
 def _group_blocks_by_bond_charge(
@@ -505,8 +521,20 @@ def _qr_symmetric(
             R_blocks[(q,) + rk] = r_block
             col_offset += n_cols
 
-    Q_tensor = SymmetricTensor(Q_blocks, Q_indices)
-    R_tensor = SymmetricTensor(R_blocks, R_indices)
+    # If the input tensor has non-standard conservation (e.g. non-zero target
+    # charge at an MPS boundary), the factors may also violate sum(flow*q)==0.
+    # Bypass validation in that case.
+    _bypass = _has_nonstandard_blocks(tensor)
+    if _bypass:
+        Q_tensor = object.__new__(SymmetricTensor)
+        Q_tensor._indices = tuple(Q_indices)
+        Q_tensor._init_flat_buffer(Q_blocks)
+        R_tensor = object.__new__(SymmetricTensor)
+        R_tensor._indices = tuple(R_indices)
+        R_tensor._init_flat_buffer(R_blocks)
+    else:
+        Q_tensor = SymmetricTensor(Q_blocks, Q_indices)
+        R_tensor = SymmetricTensor(R_blocks, R_indices)
 
     return Q_tensor, R_tensor
 
@@ -823,6 +851,382 @@ def svd(
     Vh_tensor = DenseTensor(Vh_dense, Vh_indices)
 
     return U_tensor, s, Vh_tensor, s_full
+
+
+# ---------- Randomized SVD helpers ----------
+
+
+def _rsvd_matrix(
+    matrix: jax.Array,
+    rank: int,
+    oversampling: int,
+    n_power_iter: int,
+    key: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Randomized SVD of a 2-D JAX array (Halko, Martinsson & Tropp 2011).
+
+    Returns ``(U, s, Vh)`` with shapes ``(m, rank)``, ``(rank,)``,
+    ``(rank, n)`` respectively.
+    """
+    m, n = matrix.shape
+    k = min(rank + oversampling, m, n)
+
+    # Step 1: random Gaussian sketch
+    omega = jax.random.normal(key, (n, k), dtype=matrix.dtype)
+
+    # Step 2: form sample matrix and QR
+    Y = matrix @ omega
+    Q, _ = jnp.linalg.qr(Y)
+
+    # Step 3: power iteration for accuracy
+    for _ in range(n_power_iter):
+        Z = matrix.T @ Q
+        Q_z, _ = jnp.linalg.qr(Z)
+        Y2 = matrix @ Q_z
+        Q, _ = jnp.linalg.qr(Y2)
+
+    # Step 4: project to small matrix
+    B = Q.T @ matrix
+
+    # Step 5: SVD of small matrix
+    U_hat, s, Vh = jnp.linalg.svd(B, full_matrices=False)
+
+    # Step 6: recover left singular vectors, truncate to rank
+    U_full = Q @ U_hat
+    actual_rank = min(rank, len(s))
+    return U_full[:, :actual_rank], s[:actual_rank], Vh[:actual_rank, :]
+
+
+def _rsvd_symmetric(
+    tensor: SymmetricTensor,
+    left_labels: Sequence[Label],
+    right_labels: Sequence[Label],
+    rank: int,
+    oversampling: int,
+    n_power_iter: int,
+    key: jax.Array,
+    new_bond_label: Label,
+) -> tuple[SymmetricTensor, jax.Array, SymmetricTensor]:
+    """Block-diagonal randomized SVD for SymmetricTensor."""
+    all_labels = tensor.labels()
+    label_to_axis = {lbl: i for i, lbl in enumerate(all_labels)}
+    left_axes = [label_to_axis[lbl] for lbl in left_labels]
+    right_axes = [label_to_axis[lbl] for lbl in right_labels]
+    left_indices = tuple(tensor.indices[i] for i in left_axes)
+    right_indices = tuple(tensor.indices[i] for i in right_axes)
+
+    grouped = _group_blocks_by_bond_charge(tensor, left_axes, right_axes)
+
+    sym = tensor.indices[0].symmetry
+    is_fermionic = sym.is_fermionic
+    decomp_perm = tuple(left_axes + right_axes)
+
+    # Per-sector RSVD results
+    sector_results: dict[
+        int,
+        tuple[
+            jax.Array,
+            jax.Array,
+            jax.Array,
+            list[BlockKey],
+            list[BlockKey],
+            list[int],
+            list[int],
+        ],
+    ] = {}
+
+    sector_idx = 0
+    for q, entries in grouped.items():
+        left_subkeys_seen: dict[BlockKey, int] = {}
+        right_subkeys_seen: dict[BlockKey, int] = {}
+        for lk, rk, _ in entries:
+            if lk not in left_subkeys_seen:
+                left_subkeys_seen[lk] = len(left_subkeys_seen)
+            if rk not in right_subkeys_seen:
+                right_subkeys_seen[rk] = len(right_subkeys_seen)
+
+        left_subkeys = list(left_subkeys_seen.keys())
+        right_subkeys = list(right_subkeys_seen.keys())
+
+        left_row_sizes: list[int] = []
+        for lk in left_subkeys:
+            size = 1
+            for leg_pos, charge_val in zip(left_axes, lk):
+                idx = tensor.indices[leg_pos]
+                size *= int(np.sum(idx.charges == charge_val))
+            left_row_sizes.append(size)
+
+        right_col_sizes: list[int] = []
+        for rk in right_subkeys:
+            size = 1
+            for leg_pos, charge_val in zip(right_axes, rk):
+                idx = tensor.indices[leg_pos]
+                size *= int(np.sum(idx.charges == charge_val))
+            right_col_sizes.append(size)
+
+        total_rows = sum(left_row_sizes)
+        total_cols = sum(right_col_sizes)
+
+        if total_rows == 0 or total_cols == 0:
+            continue
+
+        matrix = jnp.zeros((total_rows, total_cols), dtype=tensor.dtype)
+        for lk, rk, block in entries:
+            li = left_subkeys_seen[lk]
+            ri = right_subkeys_seen[rk]
+            row_start = sum(left_row_sizes[:li])
+            col_start = sum(right_col_sizes[:ri])
+            flat_block = block.reshape(left_row_sizes[li], right_col_sizes[ri])
+            if is_fermionic:
+                full_key = [0] * len(tensor.indices)
+                for ax, ch in zip(left_axes, lk):
+                    full_key[ax] = ch
+                for ax, ch in zip(right_axes, rk):
+                    full_key[ax] = ch
+                parities = tuple(
+                    int(sym.parity(np.array([full_key[i]]))[0])
+                    for i in range(len(full_key))
+                )
+                ksign = _koszul_sign(parities, decomp_perm)
+                if ksign < 0:
+                    flat_block = -flat_block
+            matrix = matrix.at[
+                row_start : row_start + left_row_sizes[li],
+                col_start : col_start + right_col_sizes[ri],
+            ].set(flat_block)
+
+        # RSVD this sector
+        sector_rank = min(rank, total_rows, total_cols)
+        subkey = jax.random.fold_in(key, sector_idx)
+        sector_idx += 1
+        U_q, s_q, Vh_q = _rsvd_matrix(
+            matrix, sector_rank, oversampling, n_power_iter, subkey
+        )
+        sector_results[q] = (
+            U_q,
+            s_q,
+            Vh_q,
+            left_subkeys,
+            right_subkeys,
+            left_row_sizes,
+            right_col_sizes,
+        )
+
+    # Global truncation across sectors (keep top-`rank` singular values)
+    all_sv_pairs: list[tuple[float, int, int]] = []
+    for q, (_, s_q, _, _, _, _, _) in sector_results.items():
+        s_np = np.array(s_q)
+        for i, val in enumerate(s_np):
+            all_sv_pairs.append((float(val), q, i))
+
+    all_sv_pairs.sort(key=lambda x: -x[0])
+
+    n_keep = min(rank, len(all_sv_pairs))
+    n_keep = max(1, n_keep)
+    kept = all_sv_pairs[:n_keep]
+
+    bond_charges = np.array([q for _, q, _ in kept], dtype=np.int32)
+    s_final = jnp.array([v for v, _, _ in kept])
+
+    sector_cols: dict[int, list[tuple[int, int]]] = {}
+    for global_col, (_, q, idx_in_sector) in enumerate(kept):
+        sector_cols.setdefault(q, []).append((global_col, idx_in_sector))
+
+    bond_index_out = TensorIndex(
+        sym, bond_charges, FlowDirection.OUT, label=new_bond_label
+    )
+    bond_index_in = TensorIndex(
+        sym, bond_charges, FlowDirection.IN, label=new_bond_label
+    )
+
+    U_indices = left_indices + (bond_index_out,)
+    Vh_indices = (bond_index_in,) + right_indices
+
+    U_blocks: dict[BlockKey, jax.Array] = {}
+    Vh_blocks: dict[BlockKey, jax.Array] = {}
+
+    for q, cols in sector_cols.items():
+        U_q, _, Vh_q, left_subkeys, right_subkeys, left_row_sizes, right_col_sizes = (
+            sector_results[q]
+        )
+        sv_indices = [idx for _, idx in cols]
+        n_q = len(cols)
+
+        U_q_trunc = U_q[:, sv_indices]
+        Vh_q_trunc = Vh_q[sv_indices, :]
+
+        row_offset = 0
+        for li, lk in enumerate(left_subkeys):
+            n_rows = left_row_sizes[li]
+            u_slice = U_q_trunc[row_offset : row_offset + n_rows, :]
+            left_shape = tuple(
+                int(np.sum(tensor.indices[ax].charges == ch))
+                for ax, ch in zip(left_axes, lk)
+            )
+            u_block = u_slice.reshape(left_shape + (n_q,))
+            U_blocks[lk + (q,)] = u_block
+            row_offset += n_rows
+
+        col_offset = 0
+        for ri, rk in enumerate(right_subkeys):
+            n_cols = right_col_sizes[ri]
+            vh_slice = Vh_q_trunc[:, col_offset : col_offset + n_cols]
+            right_shape = tuple(
+                int(np.sum(tensor.indices[ax].charges == ch))
+                for ax, ch in zip(right_axes, rk)
+            )
+            vh_block = vh_slice.reshape((n_q,) + right_shape)
+            Vh_blocks[(q,) + rk] = vh_block
+            col_offset += n_cols
+
+    input_target = 0
+    if tensor.blocks:
+        key0 = next(iter(tensor.blocks))
+        input_target = sum(
+            int(idx.flow) * int(q) for idx, q in zip(tensor.indices, key0)
+        )
+
+    if input_target != 0:
+        U_tensor = object.__new__(SymmetricTensor)
+        U_tensor._indices = U_indices
+        U_tensor._init_flat_buffer(U_blocks)
+        Vh_tensor = object.__new__(SymmetricTensor)
+        Vh_tensor._indices = Vh_indices
+        Vh_tensor._init_flat_buffer(Vh_blocks)
+    else:
+        U_tensor = SymmetricTensor(U_blocks, U_indices)
+        Vh_tensor = SymmetricTensor(Vh_blocks, Vh_indices)
+
+    return U_tensor, s_final, Vh_tensor
+
+
+def rsvd(
+    tensor: Tensor,
+    left_labels: Sequence[Label],
+    right_labels: Sequence[Label],
+    new_bond_label: Label = "bond",
+    rank: int = 10,
+    oversampling: int = 5,
+    n_power_iter: int = 1,
+    key: jax.Array | None = None,
+) -> tuple[Tensor, jax.Array, Tensor]:
+    """Randomized SVD of a tensor (Halko, Martinsson & Tropp 2011).
+
+    Computes an approximate rank-*k* SVD using a randomized algorithm.
+    This is much faster than a full SVD when only the top singular values
+    are needed and the matrix is large.
+
+    The tensor is first reshaped into a matrix by grouping *left_labels* as
+    rows and *right_labels* as columns.  After the randomized SVD the result
+    is reshaped back.
+
+    Output labels::
+
+        U:  (left_labels..., new_bond_label)
+        Vh: (new_bond_label, right_labels...)
+
+    Args:
+        tensor:          Tensor to decompose.
+        left_labels:     Labels forming the "left" (U) factor.
+        right_labels:    Labels forming the "right" (Vh) factor.
+        new_bond_label:  Label for the new virtual bond.
+        rank:            Target rank (number of singular values to compute).
+        oversampling:    Extra random vectors for accuracy (default 5).
+        n_power_iter:    Number of power iterations (default 1).
+        key:             JAX PRNG key.  If *None*, ``PRNGKey(0)`` is used.
+
+    Returns:
+        ``(U_tensor, singular_values, Vh_tensor)``
+        -- U has labels ``(left_labels..., new_bond_label)``.
+        Vh has labels ``(new_bond_label, right_labels...)``.
+        singular_values is a 1-D JAX float array of length <= *rank*.
+
+    Raises:
+        ValueError: If left_labels + right_labels don't cover all tensor labels.
+    """
+    if key is None:
+        key = jax.random.PRNGKey(0)
+
+    all_labels = tensor.labels()
+    all_labels_set = set(all_labels)
+    left_set = set(left_labels)
+    right_set = set(right_labels)
+
+    if left_set | right_set != all_labels_set:
+        raise ValueError(
+            f"left_labels {list(left_labels)} + right_labels {list(right_labels)} "
+            f"must cover all tensor labels {list(all_labels)}"
+        )
+    if left_set & right_set:
+        raise ValueError(
+            f"left_labels and right_labels must be disjoint, "
+            f"got overlap: {left_set & right_set}"
+        )
+
+    # Dispatch to block-sparse path for SymmetricTensor
+    if isinstance(tensor, SymmetricTensor):
+        return _rsvd_symmetric(
+            tensor,
+            left_labels,
+            right_labels,
+            rank,
+            oversampling,
+            n_power_iter,
+            key,
+            new_bond_label,
+        )
+
+    # Dense path
+    label_to_axis = {lbl: i for i, lbl in enumerate(all_labels)}
+    left_axes = [label_to_axis[lbl] for lbl in left_labels]
+    right_axes = [label_to_axis[lbl] for lbl in right_labels]
+
+    dense = tensor.todense()
+    perm = left_axes + right_axes
+    dense_perm = jnp.transpose(dense, perm)
+
+    left_indices = tuple(tensor.indices[i] for i in left_axes)
+    right_indices = tuple(tensor.indices[i] for i in right_axes)
+    left_dim = int(np.prod([idx.dim for idx in left_indices]))
+    right_dim = int(np.prod([idx.dim for idx in right_indices]))
+
+    matrix = dense_perm.reshape(left_dim, right_dim)
+
+    U, s, Vh = _rsvd_matrix(matrix, rank, oversampling, n_power_iter, key)
+    n_keep = len(s)
+
+    # Reshape back and build output tensors
+    left_shape = tuple(idx.dim for idx in left_indices)
+    right_shape = tuple(idx.dim for idx in right_indices)
+
+    U_dense = U.reshape(left_shape + (n_keep,))
+    Vh_dense = Vh.reshape((n_keep,) + right_shape)
+
+    # Build new bond index
+    bond_charges_out = np.zeros(n_keep, dtype=np.int32)
+    if left_indices:
+        sym = left_indices[0].symmetry
+    elif right_indices:
+        sym = right_indices[0].symmetry
+    else:
+        from tenax.core.symmetry import U1Symmetry
+
+        sym = U1Symmetry()
+
+    bond_index_out = TensorIndex(
+        sym, bond_charges_out, FlowDirection.OUT, label=new_bond_label
+    )
+    bond_index_in = TensorIndex(
+        sym, bond_charges_out, FlowDirection.IN, label=new_bond_label
+    )
+
+    U_indices = left_indices + (bond_index_out,)
+    Vh_indices = (bond_index_in,) + right_indices
+
+    U_tensor = DenseTensor(U_dense, U_indices)
+    Vh_tensor = DenseTensor(Vh_dense, Vh_indices)
+
+    return U_tensor, s, Vh_tensor
 
 
 def qr(

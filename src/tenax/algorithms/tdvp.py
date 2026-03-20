@@ -24,6 +24,7 @@ from tenax.algorithms.dmrg import (
     _update_right_env,
 )
 from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.mps import FiniteMPS
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, Tensor
 from tenax.network.network import TensorNetwork
@@ -67,13 +68,13 @@ class TDVPResult:
     """Result of a TDVP run.
 
     Attributes:
-        mps:          Final MPS as TensorNetwork.
+        mps:          Final MPS as FiniteMPS.
         times:        Time values at each measurement.
         energies:     Energy at each measurement.
         observables:  Dictionary of observable names to measurement lists.
     """
 
-    mps: TensorNetwork
+    mps: FiniteMPS
     times: list[float] = field(default_factory=list)
     energies: list[float] = field(default_factory=list)
     observables: dict[str, list[float]] = field(default_factory=dict)
@@ -131,25 +132,12 @@ _bond_matvec_jit = jax.jit(_bond_hamiltonian_matvec, static_argnums=(1,))
 # ------------------------------------------------------------------ #
 
 
-def _site_to_3d(site: Tensor) -> tuple[jax.Array, bool, bool]:
-    """Convert site tensor to 3D array (chi_l, d, chi_r).
+def _site_to_3d(site: Tensor) -> jax.Array:
+    """Convert site tensor to 3D dense array (chi_l, d, chi_r).
 
-    Returns (array_3d, is_left_boundary, is_right_boundary).
-    Left boundary: (d, chi_r) -> (1, d, chi_r)
-    Right boundary: (chi_l, d) -> (chi_l, d, 1)
+    All MPS tensors are uniformly 3-leg, so this simply returns the dense array.
     """
-    dense = site.todense()
-    is_left = False
-    is_right = False
-    if dense.ndim == 2:
-        labels = site.labels()
-        if isinstance(labels[0], str) and labels[0].startswith("p"):
-            dense = dense[jnp.newaxis, :]
-            is_left = True
-        else:
-            dense = dense[:, :, jnp.newaxis]
-            is_right = True
-    return dense, is_left, is_right
+    return site.todense()
 
 
 def _make_site_tensor(
@@ -157,62 +145,35 @@ def _make_site_tensor(
     site_idx: int,
     L: int,
 ) -> DenseTensor:
-    """Create a DenseTensor for an MPS site with proper labels and indices.
+    """Create a 3-leg DenseTensor for an MPS site with proper labels and indices.
 
-    data_3d has shape (chi_l, d, chi_r). Boundary sites get 2D tensors.
+    data_3d has shape (chi_l, d, chi_r).  All sites (including boundaries)
+    are uniformly 3-leg with trivial dim-1 bonds at the edges.
     """
     sym = U1Symmetry()
     chi_l, d, chi_r = data_3d.shape
 
-    if site_idx == 0 and L > 1:
-        # Left boundary: (d, chi_r)
-        data = data_3d[0, :, :]
-        indices = (
-            TensorIndex(
-                sym, np.zeros(d, dtype=np.int32), FlowDirection.IN, label=f"p{site_idx}"
-            ),
-            TensorIndex(
-                sym,
-                np.zeros(chi_r, dtype=np.int32),
-                FlowDirection.OUT,
-                label=f"v{site_idx}_{site_idx + 1}",
-            ),
-        )
-    elif site_idx == L - 1 and L > 1:
-        # Right boundary: (chi_l, d)
-        data = data_3d[:, :, 0]
-        indices = (
-            TensorIndex(
-                sym,
-                np.zeros(chi_l, dtype=np.int32),
-                FlowDirection.IN,
-                label=f"v{site_idx - 1}_{site_idx}",
-            ),
-            TensorIndex(
-                sym, np.zeros(d, dtype=np.int32), FlowDirection.IN, label=f"p{site_idx}"
-            ),
-        )
-    else:
-        # Middle site: (chi_l, d, chi_r)
-        data = data_3d
-        indices = (
-            TensorIndex(
-                sym,
-                np.zeros(chi_l, dtype=np.int32),
-                FlowDirection.IN,
-                label=f"v{site_idx - 1}_{site_idx}",
-            ),
-            TensorIndex(
-                sym, np.zeros(d, dtype=np.int32), FlowDirection.IN, label=f"p{site_idx}"
-            ),
-            TensorIndex(
-                sym,
-                np.zeros(chi_r, dtype=np.int32),
-                FlowDirection.OUT,
-                label=f"v{site_idx}_{site_idx + 1}",
-            ),
-        )
-    return DenseTensor(data, indices)
+    left_label = f"v{site_idx - 1}_{site_idx}" if site_idx > 0 else "v_-1_0"
+    right_label = f"v{site_idx}_{site_idx + 1}"
+
+    indices = (
+        TensorIndex(
+            sym,
+            np.zeros(chi_l, dtype=np.int32),
+            FlowDirection.IN,
+            label=left_label,
+        ),
+        TensorIndex(
+            sym, np.zeros(d, dtype=np.int32), FlowDirection.IN, label=f"p{site_idx}"
+        ),
+        TensorIndex(
+            sym,
+            np.zeros(chi_r, dtype=np.int32),
+            FlowDirection.OUT,
+            label=right_label,
+        ),
+    )
+    return DenseTensor(data_3d, indices)
 
 
 def _right_canonicalize_dense(tensors_3d: list[jax.Array]) -> list[jax.Array]:
@@ -258,7 +219,10 @@ def _tensors_to_network(mps_tensors: list[Tensor]) -> TensorNetwork:
         for label in sorted(shared, key=str):
             try:
                 result.connect(i, label, i + 1, label)
-            except ValueError:
+            except (ValueError, KeyError):
+                # Bond indices may be incompatible after evolution changed
+                # dimensions.  Skip — TensorNetwork is still usable via
+                # shared labels.
                 pass
     return result
 
@@ -300,21 +264,11 @@ def _identity_mpo_site(mps_site: Tensor) -> DenseTensor:
     labels = mps_site.labels()
     dense = mps_site.todense()
 
-    if dense.ndim == 2:
-        if isinstance(labels[0], str) and labels[0].startswith("p"):
-            d = dense.shape[0]
-        else:
-            d = dense.shape[1]
-    elif dense.ndim == 3:
-        d = dense.shape[1]
-    else:
-        d = dense.shape[0]
+    # All MPS tensors are 3-leg: (chi_l, d, chi_r)
+    d = dense.shape[1]
 
-    site_idx = 0
-    for lbl in labels:
-        if isinstance(lbl, str) and lbl.startswith("p"):
-            site_idx = int(lbl[1:])
-            break
+    # Physical index is always at position 1 in a 3-leg MPS tensor
+    site_idx = int(labels[1][1:])
 
     eye = jnp.eye(d, dtype=dense.dtype).reshape(1, d, d, 1)
     sym = U1Symmetry()
@@ -377,10 +331,10 @@ def _build_left_envs_up_to(
 
 
 def _tdvp_step_1site(
-    mps: TensorNetwork,
+    mps: FiniteMPS | TensorNetwork,
     hamiltonian: TensorNetwork,
     config: TDVPConfig,
-) -> TensorNetwork:
+) -> FiniteMPS:
     """Perform one 1-site TDVP step with second-order Lie-Trotter splitting."""
     L = mps.n_nodes()
     mpo_tensors: list[Tensor] = [hamiltonian.get_tensor(i) for i in range(L)]
@@ -388,7 +342,7 @@ def _tdvp_step_1site(
     # Convert MPS to 3D arrays
     tensors_3d: list[jax.Array] = []
     for i in range(L):
-        arr, _, _ = _site_to_3d(mps.get_tensor(i))
+        arr = _site_to_3d(mps.get_tensor(i))
         tensors_3d.append(arr)
 
     # Determine dt factor: exp(dt_factor * H) is the evolution operator
@@ -595,7 +549,7 @@ def _tdvp_step_1site(
 
     # Convert back to DenseTensors
     mps_tensors = [_make_site_tensor(tensors_3d[i], i, L) for i in range(L)]
-    return _tensors_to_network(mps_tensors)
+    return FiniteMPS.from_tensors(mps_tensors, orth_center=0)
 
 
 # ------------------------------------------------------------------ #
@@ -604,17 +558,17 @@ def _tdvp_step_1site(
 
 
 def _tdvp_step_2site(
-    mps: TensorNetwork,
+    mps: FiniteMPS | TensorNetwork,
     hamiltonian: TensorNetwork,
     config: TDVPConfig,
-) -> TensorNetwork:
+) -> FiniteMPS:
     """Perform one 2-site TDVP step."""
     L = mps.n_nodes()
     mpo_tensors: list[Tensor] = [hamiltonian.get_tensor(i) for i in range(L)]
 
     tensors_3d: list[jax.Array] = []
     for i in range(L):
-        arr, _, _ = _site_to_3d(mps.get_tensor(i))
+        arr = _site_to_3d(mps.get_tensor(i))
         tensors_3d.append(arr)
 
     if config.time_type == "real":
@@ -763,7 +717,7 @@ def _tdvp_step_2site(
         tensors_3d = _normalize_3d(tensors_3d, L)
 
     mps_tensors = [_make_site_tensor(tensors_3d[i], i, L) for i in range(L)]
-    return _tensors_to_network(mps_tensors)
+    return FiniteMPS.from_tensors(mps_tensors, orth_center=0)
 
 
 # ------------------------------------------------------------------ #
@@ -787,20 +741,25 @@ def _normalize_3d(tensors_3d: list[jax.Array], L: int) -> list[jax.Array]:
 
 
 def tdvp_step(
-    mps: TensorNetwork,
+    mps: FiniteMPS | TensorNetwork,
     hamiltonian: TensorNetwork,
     config: TDVPConfig,
-) -> TensorNetwork:
+) -> FiniteMPS:
     """Perform one TDVP time step.
 
     Args:
-        mps:          MPS as TensorNetwork.
+        mps:          MPS as FiniteMPS or TensorNetwork (backward compat).
         hamiltonian:  MPO Hamiltonian as TensorNetwork.
         config:       TDVPConfig.
 
     Returns:
-        Updated MPS as TensorNetwork.
+        Updated MPS as FiniteMPS.
     """
+    # Convert TensorNetwork to FiniteMPS if needed
+    if isinstance(mps, TensorNetwork):
+        _tensors = [mps.get_tensor(i) for i in range(mps.n_nodes())]
+        mps = FiniteMPS.from_tensors(_tensors)
+
     if config.mode == "1site":
         return _tdvp_step_1site(mps, hamiltonian, config)
     elif config.mode == "2site":
@@ -810,7 +769,7 @@ def tdvp_step(
 
 
 def tdvp(
-    mps: TensorNetwork,
+    mps: FiniteMPS | TensorNetwork,
     hamiltonian: TensorNetwork,
     config: TDVPConfig,
     measure: Callable[[TensorNetwork, int], dict[str, float]] | None = None,
@@ -818,32 +777,40 @@ def tdvp(
     """Run multi-step TDVP time evolution.
 
     Args:
-        mps:          Initial MPS.
+        mps:          Initial MPS as FiniteMPS or TensorNetwork (backward compat).
         hamiltonian:  MPO Hamiltonian.
         config:       TDVPConfig.
         measure:      Optional callback(mps, step) -> dict of observables.
+                      Receives a TensorNetwork for backward compatibility.
 
     Returns:
-        TDVPResult with final MPS, times, energies, and observables.
+        TDVPResult with final MPS as FiniteMPS, times, energies, and observables.
     """
     L = hamiltonian.n_nodes()
     mpo_tensors = [hamiltonian.get_tensor(i) for i in range(L)]
 
-    current_mps = mps
+    # Convert TensorNetwork to FiniteMPS if needed
+    if isinstance(mps, TensorNetwork):
+        _tensors = [mps.get_tensor(i) for i in range(mps.n_nodes())]
+        mps = FiniteMPS.from_tensors(_tensors)
+
+    current_mps: FiniteMPS = mps
     times: list[float] = []
     energies: list[float] = []
     observables: dict[str, list[float]] = {}
 
-    def _record(step: int, current: TensorNetwork) -> None:
+    def _record(step: int, current: FiniteMPS) -> None:
         t = step * config.dt
         times.append(t)
 
-        cur_tensors = [current.get_tensor(i) for i in range(L)]
+        cur_tensors = list(current.tensors)
         e = _compute_energy(cur_tensors, mpo_tensors)
         energies.append(e)
 
         if measure is not None:
-            obs = measure(current, step)
+            # Convert to TensorNetwork for backward-compatible callback
+            mps_tn = _tensors_to_network(cur_tensors)
+            obs = measure(mps_tn, step)
             for key, val in obs.items():
                 if key not in observables:
                     observables[key] = []

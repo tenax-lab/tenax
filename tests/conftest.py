@@ -39,6 +39,13 @@ _FILE_MARKERS = {
     "test_tdvp.py": "algorithm",
     "test_ctm_tensor_c4v.py": "algorithm",
     "test_ctm_paired.py": "algorithm",
+    "test_rsvd.py": "core",
+    "test_cbe.py": "algorithm",
+    "test_lattice.py": "algorithm",
+    "test_linalg.py": "core",
+    "test_observables.py": "algorithm",
+    "test_cbe_validation.py": "algorithm",
+    "test_mps.py": "core",
 }
 
 
