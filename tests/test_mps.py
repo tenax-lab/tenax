@@ -16,27 +16,31 @@ OUT = FlowDirection.OUT
 
 
 def _make_dense_mps(L=4, d=2, chi=3, key=None):
-    """Helper: build a random dense MPS as list[DenseTensor]."""
+    """Helper: build a random dense MPS as list[DenseTensor] with 3-leg boundaries."""
     if key is None:
         key = jax.random.PRNGKey(0)
     u1 = U1Symmetry()
     tensors = []
     for i in range(L):
         if i == 0:
-            shape = (d, chi)
+            shape = (1, d, chi)
             indices = (
+                TensorIndex(u1, np.zeros(1, dtype=np.int32), IN, label="v_-1_0"),
                 TensorIndex(u1, np.zeros(d, dtype=np.int32), IN, label=f"p{i}"),
                 TensorIndex(
                     u1, np.zeros(chi, dtype=np.int32), OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         elif i == L - 1:
-            shape = (chi, d)
+            shape = (chi, d, 1)
             indices = (
                 TensorIndex(
                     u1, np.zeros(chi, dtype=np.int32), IN, label=f"v{i - 1}_{i}"
                 ),
                 TensorIndex(u1, np.zeros(d, dtype=np.int32), IN, label=f"p{i}"),
+                TensorIndex(
+                    u1, np.zeros(1, dtype=np.int32), OUT, label=f"v{i}_{i + 1}"
+                ),
             )
         else:
             shape = (chi, d, chi)
@@ -56,7 +60,7 @@ def _make_dense_mps(L=4, d=2, chi=3, key=None):
 
 
 def _make_symmetric_mps(L=4, d=2, chi=4, key=None):
-    """Helper: build a random U(1)-symmetric MPS as list[SymmetricTensor]."""
+    """Helper: build a random U(1)-symmetric MPS as list[SymmetricTensor] with 3-leg boundaries."""
     if key is None:
         key = jax.random.PRNGKey(0)
     sym = U1Symmetry()
@@ -72,11 +76,14 @@ def _make_symmetric_mps(L=4, d=2, chi=4, key=None):
         pad = np.full(chi - len(virt_charges), 0, dtype=np.int32)
         virt_charges = np.concatenate([virt_charges, pad])
 
+    trivial_zero = np.array([0], dtype=np.int32)
+
     tensors = []
     for i in range(L):
         key, subkey = jax.random.split(key)
         if i == 0:
             indices = (
+                TensorIndex(sym, trivial_zero, IN, label="v_-1_0"),
                 TensorIndex(sym, phys_charges, IN, label=f"p{i}"),
                 TensorIndex(sym, virt_charges, OUT, label=f"v{i}_{i + 1}"),
             )
@@ -84,6 +91,7 @@ def _make_symmetric_mps(L=4, d=2, chi=4, key=None):
             indices = (
                 TensorIndex(sym, virt_charges, IN, label=f"v{i - 1}_{i}"),
                 TensorIndex(sym, phys_charges, IN, label=f"p{i}"),
+                TensorIndex(sym, trivial_zero, OUT, label=f"v{i}_{i + 1}"),
             )
         else:
             indices = (
@@ -306,6 +314,12 @@ class TestFiniteMPSEntanglement:
             if i == 0:
                 indices = (
                     TensorIndex(
+                        U1Symmetry(),
+                        np.zeros(1, dtype=np.int32),
+                        IN,
+                        label="v_-1_0",
+                    ),
+                    TensorIndex(
                         U1Symmetry(), np.zeros(2, dtype=np.int32), IN, label=f"p{i}"
                     ),
                     TensorIndex(
@@ -315,7 +329,7 @@ class TestFiniteMPSEntanglement:
                         label=f"v{i}_{i + 1}",
                     ),
                 )
-                data = data.reshape(2, 1)
+                data = data.reshape(1, 2, 1)
             elif i == 3:
                 indices = (
                     TensorIndex(
@@ -327,8 +341,14 @@ class TestFiniteMPSEntanglement:
                     TensorIndex(
                         U1Symmetry(), np.zeros(2, dtype=np.int32), IN, label=f"p{i}"
                     ),
+                    TensorIndex(
+                        U1Symmetry(),
+                        np.zeros(1, dtype=np.int32),
+                        OUT,
+                        label=f"v{i}_{i + 1}",
+                    ),
                 )
-                data = data.reshape(1, 2)
+                data = data.reshape(1, 2, 1)
             else:
                 indices = (
                     TensorIndex(
@@ -358,16 +378,18 @@ class TestFiniteMPSEntanglement:
         """Bell state |00>+|11> has entropy ln(2)."""
         from tenax.core.mps import FiniteMPS
 
-        A0 = jnp.array([[1.0, 0.0], [0.0, 1.0]])  # (d=2, chi=2)
-        A1 = jnp.array([[1.0, 0.0], [0.0, 1.0]])  # (chi=2, d=2)
+        A0 = jnp.array([[[1.0, 0.0], [0.0, 1.0]]])  # (1, d=2, chi=2)
+        A1 = jnp.array([[[1.0], [0.0]], [[0.0], [1.0]]])  # (chi=2, d=2, 1)
         sym = U1Symmetry()
         idx0 = (
+            TensorIndex(sym, np.zeros(1, dtype=np.int32), IN, label="v_-1_0"),
             TensorIndex(sym, np.zeros(2, dtype=np.int32), IN, label="p0"),
             TensorIndex(sym, np.zeros(2, dtype=np.int32), OUT, label="v0_1"),
         )
         idx1 = (
             TensorIndex(sym, np.zeros(2, dtype=np.int32), IN, label="v0_1"),
             TensorIndex(sym, np.zeros(2, dtype=np.int32), IN, label="p1"),
+            TensorIndex(sym, np.zeros(1, dtype=np.int32), OUT, label="v1_2"),
         )
         tensors = [DenseTensor(A0, idx0), DenseTensor(A1, idx1)]
         mps = FiniteMPS.from_tensors(tensors).canonicalize(center=0)
@@ -751,3 +773,47 @@ class TestOrthogonalityVerification:
         # verify=False (default) should not raise even for non-canonical
         mps = FiniteMPS.from_tensors(tensors, orth_center=2, verify=False)
         assert mps.orth_center == 2
+
+
+class TestDenseMPS3LegBoundaries:
+    def test_dense_mps_3leg_boundaries(self):
+        """All sites including boundaries are 3-leg."""
+        from tenax.core.mps import FiniteMPS
+
+        key = jax.random.PRNGKey(0)
+        mps = FiniteMPS.random(L=6, d=2, chi=4, key=key)
+        for i, t in enumerate(mps.tensors):
+            assert t.ndim == 3, f"Site {i} has ndim={t.ndim}, expected 3"
+        # Left boundary: (1, d, chi)
+        assert mps.tensors[0].indices[0].dim == 1
+        # Right boundary: (chi, d, 1)
+        assert mps.tensors[-1].indices[2].dim == 1
+        # Labels follow v{i-1}_{i} pattern at boundaries
+        assert mps.tensors[0].labels()[0] == "v_-1_0"
+        assert mps.tensors[-1].labels()[2] == "v5_6"
+
+
+class TestSymmetricMPS3LegBoundaries:
+    def test_symmetric_mps_3leg_boundaries(self):
+        """Symmetric MPS boundaries are 3-leg with trivial charge bond."""
+        from tenax.core.mps import FiniteMPS
+
+        key = jax.random.PRNGKey(0)
+        mps = FiniteMPS.random(
+            L=6,
+            d=2,
+            chi=8,
+            key=key,
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
+        for i, t in enumerate(mps.tensors):
+            assert t.ndim == 3, f"Site {i} has ndim={t.ndim}, expected 3"
+        # Left boundary: trivial dim-1 bond with charge 0
+        assert mps.tensors[0].indices[0].dim == 1
+        assert mps.tensors[0].indices[0].label == "v_-1_0"
+        # Right boundary: trivial dim-1 bond with target charge
+        assert mps.tensors[-1].indices[2].dim == 1
+        assert mps.tensors[-1].indices[2].label == "v5_6"
+        assert mps.target_charge == 0

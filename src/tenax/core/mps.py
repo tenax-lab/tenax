@@ -25,9 +25,9 @@ class FiniteMPS:
     |psi_tensors> is the state encoded by the site tensors alone.
 
     Attributes:
-        tensors: Site tensors, length L.  Boundary sites are 2-leg
-            (site 0: physical x right-bond, site L-1: left-bond x physical),
-            bulk sites are 3-leg (left-bond x physical x right-bond).
+        tensors: Site tensors, length L.  All sites are 3-leg
+            (left-bond x physical x right-bond), including boundaries which
+            have a trivial (dimension-1) bond on the open end.
             Labels follow the convention p{i} for physical, v{i}_{i+1} for bonds.
         orth_center: Position of the orthogonality center, or None if the
             canonical form is unknown.  When set, sites 0..orth_center-1 are
@@ -320,8 +320,10 @@ class FiniteMPS:
             else:
                 env = contract(env, site_transfer)
 
-        # env should be a scalar (or 0-dim); extract value
-        return complex(env.todense())
+        # env should be a scalar (possibly with trivial dim-1 boundary legs);
+        # squeeze to extract value
+        result = env.todense()
+        return complex(result.reshape(()))
 
     def overlap(self, other: FiniteMPS) -> complex:
         """Compute <self|other> via left-to-right transfer matrix contraction.
@@ -621,27 +623,37 @@ def _build_random_dense_tensors(
     phys_charges = np.zeros(d, dtype=np.int32)
     virt_charges = np.zeros(chi, dtype=np.int32)
 
+    trivial_charges = np.zeros(1, dtype=np.int32)
+
     tensors: list[Tensor] = []
     for i in range(L):
         key, subkey = jax.random.split(key)
         if L == 1:
-            shape = (d,)
+            shape = (1, d, 1)
             indices: tuple[TensorIndex, ...] = (
+                TensorIndex(sym, trivial_charges, FlowDirection.IN, label="v_-1_0"),
                 TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    sym, trivial_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
             )
         elif i == 0:
-            shape = (d, chi)
+            shape = (1, d, chi)
             indices = (
+                TensorIndex(sym, trivial_charges, FlowDirection.IN, label="v_-1_0"),
                 TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
                 TensorIndex(
                     sym, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         elif i == L - 1:
-            shape = (chi, d)
+            shape = (chi, d, 1)
             indices = (
                 TensorIndex(sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"),
                 TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    sym, trivial_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
             )
         else:
             shape = (chi, d, chi)
@@ -693,6 +705,8 @@ def _build_random_symmetric_tensors(
         pad = np.full(chi - len(virt_charges), mid_q, dtype=np.int32)
         virt_charges = np.concatenate([virt_charges, pad])
 
+    trivial_zero = np.array([0], dtype=np.int32)
+
     tensors: list[Tensor] = []
     for i in range(L):
         key, subkey = jax.random.split(key)
@@ -700,17 +714,22 @@ def _build_random_symmetric_tensors(
 
         if i == 0:
             indices: tuple[TensorIndex, ...] = (
+                TensorIndex(symmetry, trivial_zero, FlowDirection.IN, label="v_-1_0"),
                 TensorIndex(symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"),
                 TensorIndex(
                     symmetry, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         elif i == L - 1:
+            trivial_target = np.array([target_charge], dtype=np.int32)
             indices = (
                 TensorIndex(
                     symmetry, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"
                 ),
                 TensorIndex(symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    symmetry, trivial_target, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
             )
         else:
             indices = (
