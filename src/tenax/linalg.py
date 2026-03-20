@@ -32,6 +32,21 @@ from tenax.core.tensor import (
 # ---------- Shared helpers ----------
 
 
+def _has_nonstandard_blocks(tensor: SymmetricTensor) -> bool:
+    """Return True if any block violates standard conservation sum(flow*q)==0."""
+    if not tensor.blocks:
+        return False
+    sym = tensor.indices[0].symmetry
+    identity = sym.identity()
+    for key in tensor.blocks:
+        total = 0
+        for idx, q in zip(tensor.indices, key):
+            total += int(idx.flow) * q
+        if total != identity:
+            return True
+    return False
+
+
 def _group_blocks_by_bond_charge(
     tensor: SymmetricTensor,
     left_leg_positions: list[int],
@@ -506,8 +521,20 @@ def _qr_symmetric(
             R_blocks[(q,) + rk] = r_block
             col_offset += n_cols
 
-    Q_tensor = SymmetricTensor(Q_blocks, Q_indices)
-    R_tensor = SymmetricTensor(R_blocks, R_indices)
+    # If the input tensor has non-standard conservation (e.g. non-zero target
+    # charge at an MPS boundary), the factors may also violate sum(flow*q)==0.
+    # Bypass validation in that case.
+    _bypass = _has_nonstandard_blocks(tensor)
+    if _bypass:
+        Q_tensor = object.__new__(SymmetricTensor)
+        Q_tensor._indices = tuple(Q_indices)
+        Q_tensor._init_flat_buffer(Q_blocks)
+        R_tensor = object.__new__(SymmetricTensor)
+        R_tensor._indices = tuple(R_indices)
+        R_tensor._init_flat_buffer(R_blocks)
+    else:
+        Q_tensor = SymmetricTensor(Q_blocks, Q_indices)
+        R_tensor = SymmetricTensor(R_blocks, R_indices)
 
     return Q_tensor, R_tensor
 

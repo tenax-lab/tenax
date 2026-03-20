@@ -25,9 +25,9 @@ class FiniteMPS:
     |psi_tensors> is the state encoded by the site tensors alone.
 
     Attributes:
-        tensors: Site tensors, length L.  Boundary sites are 2-leg
-            (site 0: physical x right-bond, site L-1: left-bond x physical),
-            bulk sites are 3-leg (left-bond x physical x right-bond).
+        tensors: Site tensors, length L.  All sites are 3-leg
+            (left-bond x physical x right-bond), including boundaries which
+            have a trivial (dimension-1) bond on the open end.
             Labels follow the convention p{i} for physical, v{i}_{i+1} for bonds.
         orth_center: Position of the orthogonality center, or None if the
             canonical form is unknown.  When set, sites 0..orth_center-1 are
@@ -39,12 +39,16 @@ class FiniteMPS:
             singular values are normalized (sum(sv**2) == 1) and the original
             norm information is stored here so that
             ``norm() == exp(log_norm) * sqrt(<tensors|tensors>)``.
+        target_charge: Total quantum number sector for symmetric MPS, or None
+            for dense MPS.  Set on construction and propagated through all
+            methods that return new FiniteMPS instances.
     """
 
     tensors: list[Tensor]
     orth_center: int | None = None
     singular_values: list[jnp.ndarray | None] = field(default_factory=list)
     log_norm: float = 0.0
+    target_charge: int | None = None
 
     def __post_init__(self):
         if not self.singular_values:
@@ -58,6 +62,7 @@ class FiniteMPS:
         orth_center: int | None = None,
         singular_values: list[jnp.ndarray | None] | None = None,
         log_norm: float = 0.0,
+        target_charge: int | None = None,
         verify: bool = False,
     ) -> FiniteMPS:
         """Wrap existing site tensors into a FiniteMPS.
@@ -81,6 +86,7 @@ class FiniteMPS:
             orth_center=orth_center,
             singular_values=singular_values,
             log_norm=log_norm,
+            target_charge=target_charge,
         )
 
     @staticmethod
@@ -105,7 +111,7 @@ class FiniteMPS:
             )
         else:
             tensors = _build_random_dense_tensors(L, d, chi, key, dtype)
-        mps = FiniteMPS.from_tensors(tensors)
+        mps = FiniteMPS.from_tensors(tensors, target_charge=target_charge)
         return mps.right_canonicalize()
 
     # -- Sequence protocol --------------------------------------------------
@@ -288,6 +294,7 @@ class FiniteMPS:
             orth_center=center,
             singular_values=sv,
             log_norm=new_log_norm,
+            target_charge=self.target_charge,
         )
 
     # -- Norm / Overlap -----------------------------------------------------
@@ -316,8 +323,10 @@ class FiniteMPS:
             else:
                 env = contract(env, site_transfer)
 
-        # env should be a scalar (or 0-dim); extract value
-        return complex(env.todense())
+        # env should be a scalar (possibly with trivial dim-1 boundary legs);
+        # squeeze to extract value
+        result = env.todense()
+        return complex(result.reshape(()))
 
     def overlap(self, other: FiniteMPS) -> complex:
         """Compute <self|other> via left-to-right transfer matrix contraction.
@@ -398,6 +407,7 @@ class FiniteMPS:
                 orth_center=0,
                 singular_values=[],
                 log_norm=self.log_norm,
+                target_charge=self.target_charge,
             )
 
         # Step 1: ensure left-canonical form
@@ -409,6 +419,7 @@ class FiniteMPS:
                 orth_center=self.orth_center,
                 singular_values=list(self.singular_values),
                 log_norm=self.log_norm,
+                target_charge=self.target_charge,
             )
 
         tensors = list(mps.tensors)
@@ -458,6 +469,7 @@ class FiniteMPS:
             orth_center=0,
             singular_values=sv_list,
             log_norm=new_log_norm,
+            target_charge=self.target_charge,
         )
 
 
@@ -614,27 +626,37 @@ def _build_random_dense_tensors(
     phys_charges = np.zeros(d, dtype=np.int32)
     virt_charges = np.zeros(chi, dtype=np.int32)
 
+    trivial_charges = np.zeros(1, dtype=np.int32)
+
     tensors: list[Tensor] = []
     for i in range(L):
         key, subkey = jax.random.split(key)
         if L == 1:
-            shape = (d,)
+            shape = (1, d, 1)
             indices: tuple[TensorIndex, ...] = (
+                TensorIndex(sym, trivial_charges, FlowDirection.IN, label="v_-1_0"),
                 TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    sym, trivial_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
             )
         elif i == 0:
-            shape = (d, chi)
+            shape = (1, d, chi)
             indices = (
+                TensorIndex(sym, trivial_charges, FlowDirection.IN, label="v_-1_0"),
                 TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
                 TensorIndex(
                     sym, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         elif i == L - 1:
-            shape = (chi, d)
+            shape = (chi, d, 1)
             indices = (
                 TensorIndex(sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"),
                 TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    sym, trivial_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
             )
         else:
             shape = (chi, d, chi)
@@ -686,24 +708,40 @@ def _build_random_symmetric_tensors(
         pad = np.full(chi - len(virt_charges), mid_q, dtype=np.int32)
         virt_charges = np.concatenate([virt_charges, pad])
 
+    trivial_zero = np.array([0], dtype=np.int32)
+
     tensors: list[Tensor] = []
     for i in range(L):
         key, subkey = jax.random.split(key)
         site_target = target_charge if i == L - 1 else None
 
-        if i == 0:
+        if L == 1:
+            trivial_target = np.array([0], dtype=np.int32)
             indices: tuple[TensorIndex, ...] = (
+                TensorIndex(symmetry, trivial_zero, FlowDirection.IN, label="v_-1_0"),
+                TensorIndex(symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    symmetry, trivial_target, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
+            )
+        elif i == 0:
+            indices = (
+                TensorIndex(symmetry, trivial_zero, FlowDirection.IN, label="v_-1_0"),
                 TensorIndex(symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"),
                 TensorIndex(
                     symmetry, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         elif i == L - 1:
+            trivial_target = np.array([0], dtype=np.int32)
             indices = (
                 TensorIndex(
                     symmetry, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"
                 ),
                 TensorIndex(symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex(
+                    symmetry, trivial_target, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
             )
         else:
             indices = (

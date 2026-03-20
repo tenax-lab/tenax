@@ -196,19 +196,10 @@ def expand_bond_symmetric(
     # Per-sector: build random probe as SymmetricTensor, apply matvec,
     # extract left part, project, QR
     site_data = site.todense()  # needed for projection (per-sector blocks)
-    if site_data.ndim == 2:
-        # Boundary site: pad to 3D
-        labels = site.labels()
-        if isinstance(labels[0], str) and labels[0].startswith("p"):
-            site_data = site_data[jnp.newaxis, :]
-        else:
-            site_data = site_data[:, :, jnp.newaxis]
     chi_l, d, chi_r = site_data.shape
     A_mat = site_data.reshape(chi_l * d, chi_r)
 
     right_data = right_tensor.todense()
-    if right_data.ndim == 2:
-        right_data = right_data[:, :, jnp.newaxis]
     _, d2, chi_rr = right_data.shape
 
     all_new_cols: list[jax.Array] = []

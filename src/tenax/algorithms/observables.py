@@ -150,54 +150,26 @@ def _contract_sandwich(
     tm = None  # will be (chi_ket, chi_bra) or scalar
 
     for i in range(L):
-        A = dense_sites[i]
+        A = dense_sites[i]  # (a, p, r) — all sites are uniformly 3-leg
         A_conj = jnp.conj(A)
 
         if i in ops_at_site:
             op = ops_at_site[i]
-            if A.ndim == 2:
-                labels = tensors[i].labels()
-                is_left = isinstance(labels[0], str) and labels[0].startswith("p")
-                if is_left:
-                    # A: (p, r), op: (p, q) → sum_pq op[p,q] A[p,r] A*[q,s] → (r, s)
-                    contracted = jnp.einsum("pq,pr,qs->rs", op, A, A_conj)
-                else:
-                    # A: (a, p), right boundary
-                    if tm is None:
-                        contracted = jnp.einsum("pq,ap,aq->", op, A, A_conj)
-                    else:
-                        contracted = jnp.einsum("ab,pq,ap,bq->", tm, op, A, A_conj)
+            if tm is None:
+                contracted = jnp.einsum("pq,apr,aqs->rs", op, A, A_conj)
             else:
-                # A: (a, p, r), middle site
-                if tm is None:
-                    contracted = jnp.einsum("pq,apr,aqs->rs", op, A, A_conj)
-                else:
-                    contracted = jnp.einsum("ab,pq,apr,bqs->rs", tm, op, A, A_conj)
+                contracted = jnp.einsum("ab,pq,apr,bqs->rs", tm, op, A, A_conj)
         else:
             # Identity: contract physical indices directly
-            if A.ndim == 2:
-                labels = tensors[i].labels()
-                is_left = isinstance(labels[0], str) and labels[0].startswith("p")
-                if is_left:
-                    # A: (p, r) → sum_p A[p,r] A*[p,s] → (r, s)
-                    contracted = jnp.einsum("pr,ps->rs", A, A_conj)
-                else:
-                    # A: (a, p), right boundary
-                    if tm is None:
-                        contracted = jnp.einsum("ap,ap->", A, A_conj)
-                    else:
-                        contracted = jnp.einsum("ab,ap,bp->", tm, A, A_conj)
+            if tm is None:
+                contracted = jnp.einsum("apr,aps->rs", A, A_conj)
             else:
-                # A: (a, p, r), middle site
-                if tm is None:
-                    contracted = jnp.einsum("apr,aps->rs", A, A_conj)
-                else:
-                    contracted = jnp.einsum("ab,apr,bps->rs", tm, A, A_conj)
+                contracted = jnp.einsum("ab,apr,bps->rs", tm, A, A_conj)
 
         tm = contracted
 
-    # tm should be a scalar at the end
-    return tm
+    # tm is (1, 1) after the final site (trivial right bond); extract scalar
+    return tm[0, 0]
 
 
 def operator_charge(op: np.ndarray, phys_charges: np.ndarray | None = None) -> int:
