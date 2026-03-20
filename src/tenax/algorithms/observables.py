@@ -168,8 +168,8 @@ def _contract_sandwich(
 
         tm = contracted
 
-    # tm is (1, 1) after the final site (trivial right bond); squeeze to scalar
-    return jnp.squeeze(tm)
+    # tm is (1, 1) after the final site (trivial right bond); extract scalar
+    return tm[0, 0]
 
 
 def operator_charge(op: np.ndarray, phys_charges: np.ndarray | None = None) -> int:

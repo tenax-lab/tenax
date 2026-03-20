@@ -813,7 +813,7 @@ class TestSymmetricMPS3LegBoundaries:
         # Left boundary: trivial dim-1 bond with charge 0
         assert mps.tensors[0].indices[0].dim == 1
         assert mps.tensors[0].indices[0].label == "v_-1_0"
-        # Right boundary: trivial dim-1 bond with target charge
+        # Right boundary: trivial dim-1 bond with charge 0
         assert mps.tensors[-1].indices[2].dim == 1
         assert mps.tensors[-1].indices[2].label == "v5_6"
         assert mps.target_charge == 0
@@ -854,3 +854,36 @@ class TestSingleSiteMPS:
         # Both boundary indices should have dim 1
         assert t.indices[0].dim == 1
         assert t.indices[2].dim == 1
+
+
+class TestSymmetricMPSNonzeroTargetCharge:
+    def test_symmetric_mps_nonzero_target_charge(self):
+        """Symmetric MPS with non-zero target charge builds and validates correctly."""
+        from tenax.algorithms.dmrg import compute_mps_sector
+        from tenax.core.mps import FiniteMPS
+
+        key = jax.random.PRNGKey(42)
+        mps = FiniteMPS.random(
+            L=6,
+            d=2,
+            chi=8,
+            key=key,
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=2,
+        )
+        assert mps.target_charge == 2
+        # All tensors should be 3-leg
+        for i, t in enumerate(mps.tensors):
+            assert t.ndim == 3, f"Site {i} has ndim={t.ndim}, expected 3"
+        # Right boundary should have trivial dim-1 bond with charge 0
+        right_bond = mps.tensors[-1].indices[2]
+        assert right_bond.dim == 1
+        assert int(right_bond.charges[0]) == 0
+        # Left boundary should have trivial dim-1 bond with charge 0
+        left_bond = mps.tensors[0].indices[0]
+        assert left_bond.dim == 1
+        assert int(left_bond.charges[0]) == 0
+        # Target charge is recoverable from block structure
+        sector = compute_mps_sector(list(mps.tensors))
+        assert sector == 2

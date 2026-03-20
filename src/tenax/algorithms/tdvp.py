@@ -267,11 +267,8 @@ def _identity_mpo_site(mps_site: Tensor) -> DenseTensor:
     # All MPS tensors are 3-leg: (chi_l, d, chi_r)
     d = dense.shape[1]
 
-    site_idx = 0
-    for lbl in labels:
-        if isinstance(lbl, str) and lbl.startswith("p"):
-            site_idx = int(lbl[1:])
-            break
+    # Physical index is always at position 1 in a 3-leg MPS tensor
+    site_idx = int(labels[1][1:])
 
     eye = jnp.eye(d, dtype=dense.dtype).reshape(1, d, d, 1)
     sym = U1Symmetry()

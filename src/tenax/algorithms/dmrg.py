@@ -1424,36 +1424,46 @@ def build_random_symmetric_mps(
 
 
 def compute_mps_sector(mps_tensors: list[Tensor]) -> int | None:
-    """Infer total charge sector of an MPS from its right boundary tensor.
+    """Infer total charge sector of an MPS from its tensor block structure.
 
-    For an OBC MPS with U(1) symmetry, the conservation law on each tensor is
-    ``sum(flow_i * charge_i) = 0`` (or ``= target`` for the boundary tensor).
-    The total sector Q is determined by the right boundary tensor: for each
-    block, ``sum(flow_i * charge_i)`` gives Q.
+    With the 3-leg boundary convention every MPS tensor satisfies
+    ``sum(flow_i * charge_i) = 0`` per block, and both boundary bonds
+    carry charge 0.  The target charge Q is encoded through block
+    selection: exactly one tensor (typically the orthogonality center)
+    has all blocks satisfying ``sum(flow_i * charge_i) = Q`` instead
+    of 0.  This function scans all tensors and returns Q.
+
+    If all tensors satisfy standard conservation (``sum = 0``), the
+    function returns 0.
 
     Args:
         mps_tensors: List of SymmetricTensor MPS site tensors.
 
     Returns:
-        The total charge if all blocks agree, or None if the MPS is in a
-        mixed sector (or contains no SymmetricTensor).
+        The total charge if consistently detectable, or None if the
+        MPS is in a mixed sector (or contains no SymmetricTensor).
     """
-    right_site = mps_tensors[-1]
-    if not isinstance(right_site, SymmetricTensor):
-        return None
-    if not right_site.blocks:
-        return None
+    for site in mps_tensors:
+        if not isinstance(site, SymmetricTensor):
+            continue
+        if not site.blocks:
+            continue
 
-    sectors: set[int] = set()
-    for key in right_site.blocks:
-        total = 0
-        for idx, q in zip(right_site.indices, key):
-            total += int(idx.flow) * q
-        sectors.add(total)
+        sectors: set[int] = set()
+        for key in site.blocks:
+            total = 0
+            for idx, q in zip(site.indices, key):
+                total += int(idx.flow) * q
+            sectors.add(total)
 
-    if len(sectors) == 1:
-        return sectors.pop()
-    return None
+        if len(sectors) != 1:
+            return None
+        charge = sectors.pop()
+        if charge != 0:
+            return charge
+
+    # All tensors have standard conservation (sum = 0)
+    return 0
 
 
 def validate_mps_sector(mps_tensors: list[Tensor], target_charge: int) -> None:

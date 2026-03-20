@@ -39,6 +39,9 @@ class FiniteMPS:
             singular values are normalized (sum(sv**2) == 1) and the original
             norm information is stored here so that
             ``norm() == exp(log_norm) * sqrt(<tensors|tensors>)``.
+        target_charge: Total quantum number sector for symmetric MPS, or None
+            for dense MPS.  Set on construction and propagated through all
+            methods that return new FiniteMPS instances.
     """
 
     tensors: list[Tensor]
@@ -713,7 +716,7 @@ def _build_random_symmetric_tensors(
         site_target = target_charge if i == L - 1 else None
 
         if L == 1:
-            trivial_target = np.array([target_charge], dtype=np.int32)
+            trivial_target = np.array([0], dtype=np.int32)
             indices: tuple[TensorIndex, ...] = (
                 TensorIndex(symmetry, trivial_zero, FlowDirection.IN, label="v_-1_0"),
                 TensorIndex(symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"),
@@ -730,7 +733,7 @@ def _build_random_symmetric_tensors(
                 ),
             )
         elif i == L - 1:
-            trivial_target = np.array([target_charge], dtype=np.int32)
+            trivial_target = np.array([0], dtype=np.int32)
             indices = (
                 TensorIndex(
                     symmetry, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"
