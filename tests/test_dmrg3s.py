@@ -5,7 +5,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax.algorithms.dmrg3s import build_expansion_tensor_dense
+from tenax.algorithms.dmrg3s import (
+    adapt_alpha,
+    build_expansion_tensor_dense,
+    expand_and_truncate_dense,
+)
 
 
 def _heisenberg_terms(L):
@@ -121,3 +125,99 @@ class TestBuildExpansionTensorDense:
         )
 
         np.testing.assert_allclose(P, 0.0, atol=1e-15)
+
+
+class TestExpandAndTruncateDense:
+    @pytest.fixture()
+    def heisenberg_setup(self):
+        from tenax.algorithms.auto_mpo import build_auto_mpo
+        from tenax.algorithms.dmrg import (
+            _build_left_environments_list,
+            _build_right_environments_list,
+            _dense_ops,
+        )
+        from tenax.core.mps import FiniteMPS
+
+        L, d, chi = 4, 2, 6
+        key = jax.random.PRNGKey(42)
+        mps = FiniteMPS.random(L, d, chi, key=key)
+        terms = _heisenberg_terms(L)
+        mpo = build_auto_mpo(terms, L)
+        mps_t = list(mps.tensors)
+        mpo_t = [mpo.get_tensor(i) for i in range(L)]
+        ops = _dense_ops()
+        left_envs = _build_left_environments_list(mps_t, mpo_t, L, ops)
+        right_envs = [None] * (L + 1)
+        right_envs[L] = ops.build_trivial_right_env()
+        for j in range(L - 1, 0, -1):
+            right_envs[j] = ops.update_right_env(right_envs[j + 1], mps_t[j], mpo_t[j])
+        return mps_t, mpo_t, left_envs, right_envs
+
+    def test_ltr_bond_dim_preserved(self, heisenberg_setup):
+        """After expand + truncate, bond dim <= max_bond_dim."""
+        mps_t, mpo_t, left_envs, _ = heisenberg_setup
+        i = 1
+        A, B = expand_and_truncate_dense(
+            mps_t[i].todense(),
+            mps_t[i + 1].todense(),
+            left_envs[i],
+            mpo_t[i],
+            alpha=1e-3,
+            max_bond_dim=8,
+            direction="left_to_right",
+        )
+        assert A.shape[-1] <= 8
+        assert B.shape[0] == A.shape[-1]
+
+    def test_rtl_bond_dim_preserved(self, heisenberg_setup):
+        """R->L: bond dim <= max_bond_dim, dims match."""
+        mps_t, mpo_t, _, right_envs = heisenberg_setup
+        i = 2
+        B, A = expand_and_truncate_dense(
+            mps_t[i].todense(),
+            mps_t[i - 1].todense(),
+            right_envs[i + 1],
+            mpo_t[i],
+            alpha=1e-3,
+            max_bond_dim=8,
+            direction="right_to_left",
+        )
+        assert B.shape[0] <= 8
+        assert A.shape[-1] == B.shape[0]
+
+    def test_alpha_zero_preserves_state(self, heisenberg_setup):
+        """With alpha=0, the two-site state is unchanged."""
+        mps_t, mpo_t, left_envs, _ = heisenberg_setup
+        i = 1
+        M = mps_t[i].todense()
+        B_orig = mps_t[i + 1].todense()
+        A, B = expand_and_truncate_dense(
+            M,
+            B_orig,
+            left_envs[i],
+            mpo_t[i],
+            alpha=0.0,
+            max_bond_dim=M.shape[-1],
+            direction="left_to_right",
+        )
+        theta_orig = jnp.einsum("apd,dqf->apqf", M, B_orig)
+        theta_new = jnp.einsum("apd,dqf->apqf", A, B)
+        np.testing.assert_allclose(theta_orig, theta_new, atol=1e-10)
+
+
+class TestAdaptAlpha:
+    def test_increases_when_truncation_small(self):
+        new = adapt_alpha(alpha=1e-3, delta_e_opt=-1.0, delta_e_trunc=0.01)
+        assert new > 1e-3
+
+    def test_decreases_when_truncation_large(self):
+        new = adapt_alpha(alpha=1e-3, delta_e_opt=-1.0, delta_e_trunc=0.9)
+        assert new < 1e-3
+
+    def test_stable_at_target_ratio(self):
+        new = adapt_alpha(alpha=1e-3, delta_e_opt=-1.0, delta_e_trunc=0.3)
+        assert new == 1e-3
+
+    def test_no_change_when_converged(self):
+        new = adapt_alpha(alpha=1e-3, delta_e_opt=0.0, delta_e_trunc=0.0)
+        assert new == 1e-3
