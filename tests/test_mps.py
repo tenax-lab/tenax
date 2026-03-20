@@ -699,6 +699,35 @@ class TestComputeSingularValues:
         assert mps_sv.orth_center == 0
 
 
+class TestFiniteMPSTargetCharge:
+    def test_finite_mps_target_charge_field(self):
+        """FiniteMPS stores target_charge."""
+        from tenax.core.mps import FiniteMPS
+
+        key = jax.random.PRNGKey(0)
+        mps = FiniteMPS.random(L=6, d=2, chi=4, key=key)
+        assert mps.target_charge is None  # dense MPS has no charge
+
+        mps2 = FiniteMPS.from_tensors(mps.tensors, target_charge=0)
+        assert mps2.target_charge == 0
+
+    def test_target_charge_propagated_by_canonicalize(self):
+        """canonicalize propagates target_charge."""
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3), target_charge=1)
+        mps_c = mps.canonicalize(center=2)
+        assert mps_c.target_charge == 1
+
+    def test_target_charge_propagated_by_compute_singular_values(self):
+        """compute_singular_values propagates target_charge."""
+        from tenax.core.mps import FiniteMPS
+
+        mps = FiniteMPS.from_tensors(_make_dense_mps(L=4, chi=3), target_charge=2)
+        mps_sv = mps.compute_singular_values()
+        assert mps_sv.target_charge == 2
+
+
 class TestOrthogonalityVerification:
     def test_verify_passes_for_canonical(self):
         from tenax.core.mps import FiniteMPS

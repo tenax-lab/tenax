@@ -45,6 +45,7 @@ class FiniteMPS:
     orth_center: int | None = None
     singular_values: list[jnp.ndarray | None] = field(default_factory=list)
     log_norm: float = 0.0
+    target_charge: int | None = None
 
     def __post_init__(self):
         if not self.singular_values:
@@ -58,6 +59,7 @@ class FiniteMPS:
         orth_center: int | None = None,
         singular_values: list[jnp.ndarray | None] | None = None,
         log_norm: float = 0.0,
+        target_charge: int | None = None,
         verify: bool = False,
     ) -> FiniteMPS:
         """Wrap existing site tensors into a FiniteMPS.
@@ -81,6 +83,7 @@ class FiniteMPS:
             orth_center=orth_center,
             singular_values=singular_values,
             log_norm=log_norm,
+            target_charge=target_charge,
         )
 
     @staticmethod
@@ -105,7 +108,7 @@ class FiniteMPS:
             )
         else:
             tensors = _build_random_dense_tensors(L, d, chi, key, dtype)
-        mps = FiniteMPS.from_tensors(tensors)
+        mps = FiniteMPS.from_tensors(tensors, target_charge=target_charge)
         return mps.right_canonicalize()
 
     # -- Sequence protocol --------------------------------------------------
@@ -288,6 +291,7 @@ class FiniteMPS:
             orth_center=center,
             singular_values=sv,
             log_norm=new_log_norm,
+            target_charge=self.target_charge,
         )
 
     # -- Norm / Overlap -----------------------------------------------------
@@ -398,6 +402,7 @@ class FiniteMPS:
                 orth_center=0,
                 singular_values=[],
                 log_norm=self.log_norm,
+                target_charge=self.target_charge,
             )
 
         # Step 1: ensure left-canonical form
@@ -409,6 +414,7 @@ class FiniteMPS:
                 orth_center=self.orth_center,
                 singular_values=list(self.singular_values),
                 log_norm=self.log_norm,
+                target_charge=self.target_charge,
             )
 
         tensors = list(mps.tensors)
@@ -458,6 +464,7 @@ class FiniteMPS:
             orth_center=0,
             singular_values=sv_list,
             log_norm=new_log_norm,
+            target_charge=self.target_charge,
         )
 
 
