@@ -537,40 +537,6 @@ class TestSymmetricBlockSparseDMRG:
         with pytest.raises(TypeError, match="symmetric DMRG path must never fall back"):
             _update_right_env_symmetric(r_env, dense_site, mpo_sym.get_tensor(0))
 
-    def test_boundary_pad_unpad_3d_blocks(self):
-        """Pad/unpad roundtrip must work for 3D blocks (two-site boundary).
-
-        Regression test: arr[:, :, np.newaxis] on a 3D block inserts at
-        axis 2 instead of the end, corrupting the block shape.
-        """
-        from tenax.algorithms.dmrg import (
-            _pad_boundary_symmetric,
-            _unpad_boundary_symmetric,
-        )
-
-        sym = U1Symmetry()
-        # Use multiplicity > 1 (charges [0, 0] → single sector with mult=2)
-        charges = np.zeros(2, dtype=np.int32)
-        phys_charges = np.zeros(2, dtype=np.int32)
-        indices_3d = (
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="v0"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="p0"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="p1"),
-        )
-        blocks_3d = {(0, 0, 0): jnp.ones((2, 2, 2))}
-        t_3d = SymmetricTensor(blocks_3d, indices_3d)
-
-        # Pad right: (v0, p0, p1) → (v0, p0, p1, _pad_r)
-        padded = _pad_boundary_symmetric(t_3d, pad_left=False)
-        assert padded.ndim == 4
-        for key, arr in padded.blocks.items():
-            assert arr.shape == (2, 2, 2, 1), f"Expected (2,2,2,1) but got {arr.shape}"
-
-        # Unpad right: (v0, p0, p1, _pad_r) → (v0, p0, p1)
-        unpadded = _unpad_boundary_symmetric(padded, pad_left=False)
-        assert unpadded.ndim == 3
-        np.testing.assert_allclose(unpadded.todense(), t_3d.todense(), atol=1e-15)
-
     def test_symmetric_block_sparse_env_update_vs_dense(self):
         """Symmetric env update should match dense env update on same MPO data.
 
@@ -580,7 +546,6 @@ class TestSymmetricBlockSparseDMRG:
         """
         from tenax.algorithms.dmrg import (
             _build_trivial_left_env_symmetric,
-            _pad_boundary_symmetric,
             _update_left_env_symmetric,
         )
 
@@ -595,11 +560,9 @@ class TestSymmetricBlockSparseDMRG:
         )
 
         # Dense reference: same contraction using raw arrays
+        # Site 0 is now always 3D: (1, d, chi_r)
         L_arr = l_env_sym.todense()
-        A_site = mps_sym.get_tensor(0)
-        # Left boundary: pad to 3D
-        A_padded = _pad_boundary_symmetric(A_site, pad_left=True)
-        A_arr = A_padded.todense()
+        A_arr = mps_sym.get_tensor(0).todense()
         W_arr = mpo_sym.get_tensor(0).todense()
 
         new_l_ref = jnp.einsum(
