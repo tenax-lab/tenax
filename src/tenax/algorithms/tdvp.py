@@ -132,25 +132,12 @@ _bond_matvec_jit = jax.jit(_bond_hamiltonian_matvec, static_argnums=(1,))
 # ------------------------------------------------------------------ #
 
 
-def _site_to_3d(site: Tensor) -> tuple[jax.Array, bool, bool]:
-    """Convert site tensor to 3D array (chi_l, d, chi_r).
+def _site_to_3d(site: Tensor) -> jax.Array:
+    """Convert site tensor to 3D dense array (chi_l, d, chi_r).
 
-    Returns (array_3d, is_left_boundary, is_right_boundary).
-    Left boundary: (d, chi_r) -> (1, d, chi_r)
-    Right boundary: (chi_l, d) -> (chi_l, d, 1)
+    All MPS tensors are uniformly 3-leg, so this simply returns the dense array.
     """
-    dense = site.todense()
-    is_left = False
-    is_right = False
-    if dense.ndim == 2:
-        labels = site.labels()
-        if isinstance(labels[0], str) and labels[0].startswith("p"):
-            dense = dense[jnp.newaxis, :]
-            is_left = True
-        else:
-            dense = dense[:, :, jnp.newaxis]
-            is_right = True
-    return dense, is_left, is_right
+    return site.todense()
 
 
 def _make_site_tensor(
@@ -158,62 +145,35 @@ def _make_site_tensor(
     site_idx: int,
     L: int,
 ) -> DenseTensor:
-    """Create a DenseTensor for an MPS site with proper labels and indices.
+    """Create a 3-leg DenseTensor for an MPS site with proper labels and indices.
 
-    data_3d has shape (chi_l, d, chi_r). Boundary sites get 2D tensors.
+    data_3d has shape (chi_l, d, chi_r).  All sites (including boundaries)
+    are uniformly 3-leg with trivial dim-1 bonds at the edges.
     """
     sym = U1Symmetry()
     chi_l, d, chi_r = data_3d.shape
 
-    if site_idx == 0 and L > 1:
-        # Left boundary: (d, chi_r)
-        data = data_3d[0, :, :]
-        indices = (
-            TensorIndex(
-                sym, np.zeros(d, dtype=np.int32), FlowDirection.IN, label=f"p{site_idx}"
-            ),
-            TensorIndex(
-                sym,
-                np.zeros(chi_r, dtype=np.int32),
-                FlowDirection.OUT,
-                label=f"v{site_idx}_{site_idx + 1}",
-            ),
-        )
-    elif site_idx == L - 1 and L > 1:
-        # Right boundary: (chi_l, d)
-        data = data_3d[:, :, 0]
-        indices = (
-            TensorIndex(
-                sym,
-                np.zeros(chi_l, dtype=np.int32),
-                FlowDirection.IN,
-                label=f"v{site_idx - 1}_{site_idx}",
-            ),
-            TensorIndex(
-                sym, np.zeros(d, dtype=np.int32), FlowDirection.IN, label=f"p{site_idx}"
-            ),
-        )
-    else:
-        # Middle site: (chi_l, d, chi_r)
-        data = data_3d
-        indices = (
-            TensorIndex(
-                sym,
-                np.zeros(chi_l, dtype=np.int32),
-                FlowDirection.IN,
-                label=f"v{site_idx - 1}_{site_idx}",
-            ),
-            TensorIndex(
-                sym, np.zeros(d, dtype=np.int32), FlowDirection.IN, label=f"p{site_idx}"
-            ),
-            TensorIndex(
-                sym,
-                np.zeros(chi_r, dtype=np.int32),
-                FlowDirection.OUT,
-                label=f"v{site_idx}_{site_idx + 1}",
-            ),
-        )
-    return DenseTensor(data, indices)
+    left_label = f"v{site_idx - 1}_{site_idx}" if site_idx > 0 else "v_-1_0"
+    right_label = f"v{site_idx}_{site_idx + 1}"
+
+    indices = (
+        TensorIndex(
+            sym,
+            np.zeros(chi_l, dtype=np.int32),
+            FlowDirection.IN,
+            label=left_label,
+        ),
+        TensorIndex(
+            sym, np.zeros(d, dtype=np.int32), FlowDirection.IN, label=f"p{site_idx}"
+        ),
+        TensorIndex(
+            sym,
+            np.zeros(chi_r, dtype=np.int32),
+            FlowDirection.OUT,
+            label=right_label,
+        ),
+    )
+    return DenseTensor(data_3d, indices)
 
 
 def _right_canonicalize_dense(tensors_3d: list[jax.Array]) -> list[jax.Array]:
@@ -304,15 +264,8 @@ def _identity_mpo_site(mps_site: Tensor) -> DenseTensor:
     labels = mps_site.labels()
     dense = mps_site.todense()
 
-    if dense.ndim == 2:
-        if isinstance(labels[0], str) and labels[0].startswith("p"):
-            d = dense.shape[0]
-        else:
-            d = dense.shape[1]
-    elif dense.ndim == 3:
-        d = dense.shape[1]
-    else:
-        d = dense.shape[0]
+    # All MPS tensors are 3-leg: (chi_l, d, chi_r)
+    d = dense.shape[1]
 
     site_idx = 0
     for lbl in labels:
@@ -392,7 +345,7 @@ def _tdvp_step_1site(
     # Convert MPS to 3D arrays
     tensors_3d: list[jax.Array] = []
     for i in range(L):
-        arr, _, _ = _site_to_3d(mps.get_tensor(i))
+        arr = _site_to_3d(mps.get_tensor(i))
         tensors_3d.append(arr)
 
     # Determine dt factor: exp(dt_factor * H) is the evolution operator
@@ -618,7 +571,7 @@ def _tdvp_step_2site(
 
     tensors_3d: list[jax.Array] = []
     for i in range(L):
-        arr, _, _ = _site_to_3d(mps.get_tensor(i))
+        arr = _site_to_3d(mps.get_tensor(i))
         tensors_3d.append(arr)
 
     if config.time_type == "real":
