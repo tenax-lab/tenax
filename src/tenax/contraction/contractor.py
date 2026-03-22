@@ -94,8 +94,11 @@ def _labels_to_subscripts(
     free_labels = [lbl for lbl, cnt in label_counts.items() if cnt == 1]
     # contracted_labels = [lbl for lbl, cnt in label_counts.items() if cnt == 2]
 
-    # Assign letters to labels (need at most 52 unique labels for a-zA-Z)
-    # For larger networks use a different encoding (multi-char not supported by einsum)
+    # Map labels to single characters for einsum subscripts (a-z + A-Z = 52 max).
+    # This limit comes from NumPy/JAX einsum's single-character subscript format.
+    # In practice, 52 labels is sufficient for all standard tensor network
+    # algorithms (DMRG, TRG, iPEPS).  For very large custom networks exceeding
+    # this limit, split the contraction into smaller pairwise steps.
     all_labels = sorted(label_counts.keys(), key=str)
     if len(all_labels) > 52:
         raise ValueError(
@@ -223,6 +226,27 @@ def _contraction_inversion_pairs(
     Returns:
         List of (char_i, char_j) pairs. For each pair, if both charges
         have odd parity, the overall sign flips.
+
+    Algorithm:
+        We build a permutation that maps the "natural" leg order (all input
+        legs concatenated left-to-right) to the "target" order (free legs in
+        output order, then contracted legs paired up).  Inversions in this
+        permutation identify leg crossings; each crossing of two odd-parity
+        legs produces a Koszul sign flip for fermionic tensors.
+
+        Because contracted labels appear *twice* in all_chars but only *once*
+        in target, we use a ``pos*2 + use_idx`` encoding to assign each
+        occurrence a distinct integer:
+
+        - ``*2`` creates interleaving room so that the two occurrences of a
+          contracted char (at positions ``pos*2`` and ``pos*2+1``) get
+          adjacent but distinct target values without colliding with other
+          chars.
+        - ``+ use_idx`` (0 for the first occurrence, 1 for the second)
+          distinguishes the two occurrences, ensuring the inversion count
+          captures whether they must cross other legs to become adjacent.
+        - Free chars also use ``*2`` to stay on the same scale, so
+          inversions between free and contracted chars are counted correctly.
     """
     # Build the "natural" order: all input legs concatenated in order
     all_chars: list[str] = []
@@ -262,16 +286,23 @@ def _contraction_inversion_pairs(
     for i, c in enumerate(target):
         char_positions_in_target.setdefault(c, []).append(i)
 
-    # Assign target positions to each element in all_chars
+    # Assign target positions to each element in all_chars.
+    # We use *2 to create interleaving room for contracted chars that appear
+    # twice in all_chars but once in target; +use_idx (0 or 1) distinguishes
+    # the first vs second occurrence so they get adjacent distinct integers.
     char_use_count: dict[str, int] = {}
     perm_targets: list[int] = []
     for c in all_chars:
         use_idx = char_use_count.get(c, 0)
         if c in contracted:
-            # Contracted chars: both occurrences map to the same target position
-            # (they'll be summed over), so we use the contracted-zone position
+            # pos*2 + use_idx: adjacent integers for the two occurrences,
+            # so the inversion count reflects whether other legs must cross
+            # between them.
             perm_targets.append(char_positions_in_target[c][0] * 2 + use_idx)
         else:
+            # Free chars also use *2 to stay on the same integer scale,
+            # ensuring inversions between free and contracted chars are
+            # counted correctly.
             perm_targets.append(char_positions_in_target[c][0] * 2)
         char_use_count[c] = use_idx + 1
 
@@ -474,10 +505,9 @@ def _contract_symmetric(
 
     if output_target is not None:
         # Non-identity target: bypass conservation validation
-        obj = object.__new__(SymmetricTensor)
-        obj._indices = out_indices_ordered
-        obj._init_flat_buffer(output_blocks)
-        return obj
+        return SymmetricTensor._from_blocks_unchecked(
+            output_blocks, out_indices_ordered
+        )
     return SymmetricTensor(output_blocks, out_indices_ordered)
 
 

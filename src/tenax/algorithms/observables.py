@@ -12,6 +12,8 @@ blocks and returns 0.
 
 from __future__ import annotations
 
+import warnings
+
 import jax.numpy as jnp
 import numpy as np
 
@@ -63,7 +65,16 @@ def expectation_value(
     ov = _contract_sandwich(tensors, op=operator, op_site=site)
 
     result = ov / norm_sq
-    return float(jnp.real(result))
+    imag_part = float(jnp.imag(result))
+    real_part = float(jnp.real(result))
+    if abs(imag_part) > 1e-10 and abs(imag_part) > 1e-6 * max(abs(real_part), 1e-15):
+        warnings.warn(
+            f"expectation_value has non-negligible imaginary part: "
+            f"{imag_part:.2e} (real part: {real_part:.2e}). "
+            f"This may indicate a non-Hermitian operator.",
+            stacklevel=2,
+        )
+    return real_part
 
 
 def correlation(
@@ -72,6 +83,8 @@ def correlation(
     site_i: int,
     op_j: np.ndarray,
     site_j: int,
+    *,
+    anticommute: bool = False,
 ) -> float:
     """Compute <psi|O_i O_j|psi> for two-point correlation.
 
@@ -81,6 +94,9 @@ def correlation(
         site_i: First site index.
         op_j:   d×d operator at site_j.
         site_j: Second site index.
+        anticommute: If True, applies a sign flip when operators are reordered
+            (site_i > site_j). Use for fermionic correlators like <c†_i c_j>
+            where operator order matters.
 
     Returns:
         Real part of the correlation function (float).
@@ -88,9 +104,11 @@ def correlation(
     tensors = _mps_tensors_from(mps)
     L = len(tensors)
 
+    swapped = False
     if site_i > site_j:
         site_i, site_j = site_j, site_i
         op_i, op_j = op_j, op_i
+        swapped = True
 
     if site_i < 0 or site_j >= L:
         raise ValueError(f"Sites ({site_i}, {site_j}) out of range for L={L}")
@@ -106,6 +124,8 @@ def correlation(
         )
 
     result = ov / norm_sq
+    if anticommute and swapped:
+        result = -result
     return float(jnp.real(result))
 
 

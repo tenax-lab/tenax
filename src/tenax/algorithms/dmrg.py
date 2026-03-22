@@ -918,6 +918,11 @@ def _lanczos_solve(
         if step > 0:
             w = w - betas_jax[-1] * basis[-2]
 
+        # Full reorthogonalization against all previous basis vectors
+        # to prevent loss of orthogonality and ghost eigenvalues.
+        for q in basis:
+            w = w - jnp.dot(q.conj(), w) * q
+
         beta = jnp.linalg.norm(w)
         betas_jax.append(beta)
 
@@ -1109,6 +1114,10 @@ def _lanczos_solve_tensor(
         w = w - basis[-1] * alpha_val
         if step > 0:
             w = w - basis[-2] * betas[-1]
+
+        # Full reorthogonalization against all previous basis vectors.
+        for q in basis:
+            w = w - q * float(inner(q, w))
 
         beta_val = float(w.norm())
         betas.append(beta_val)
