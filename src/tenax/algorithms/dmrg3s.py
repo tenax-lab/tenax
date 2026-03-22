@@ -143,6 +143,200 @@ def expand_and_truncate_dense(
         return B, new_A
 
 
+def expand_and_truncate_hybrid(
+    site: jax.Array,
+    neighbor: jax.Array,
+    env: Tensor,
+    mpo: Tensor,
+    max_bond_dim: int,
+    direction: str,
+    num_extra: int = 0,
+    hybrid: bool = True,
+    svd_trunc_err: float | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Improved post-expansion: null-space projection + adaptive mixing.
+
+    Based on the MPToolkit algorithm (McCulloch):
+      1. Build expansion P = env·M·W (full strength, no α scaling)
+      2. SVD of site → kept space + null space
+      3. Project P into the null space of the kept left singular vectors
+      4. QR-orthogonalize the null-space projection
+      5. Hybrid mode: scale by √(ε_trunc)/‖P_null‖, concatenate with site,
+         re-SVD → keep χ states (smoothly mixed)
+      6. Direct mode: keep χ + Δ states (extra expansion directions seeded
+         with zero amplitude, optimized in next sweep)
+
+    Args:
+        site:          3D JAX array of the optimized site tensor.
+        neighbor:      3D JAX array of the neighbor site tensor.
+        env:           Left env (L→R) or right env (R→L).
+        mpo:           MPO site tensor.
+        max_bond_dim:  Maximum kept bond dimension χ.
+        direction:     ``"left_to_right"`` or ``"right_to_left"``.
+        num_extra:     Number of extra expansion states Δ. 0 = auto (10% of χ).
+        hybrid:        If True, use √(ε_trunc) scaling + re-SVD (smooth mixing).
+                       If False, keep χ + Δ states (direct expansion).
+        svd_trunc_err: Optional max truncation error threshold.
+
+    Returns:
+        ``(new_site, new_neighbor)`` as JAX arrays with matching bond dims.
+    """
+    # Build expansion tensor at full strength (no α scaling)
+    P = build_expansion_tensor_dense(env, site, mpo, alpha=1.0, direction=direction)
+
+    if num_extra <= 0:
+        num_extra = max(1, max_bond_dim // 10)
+
+    if direction == "left_to_right":
+        return _hybrid_ltr(
+            site, neighbor, P, max_bond_dim, num_extra, hybrid, svd_trunc_err
+        )
+    else:
+        return _hybrid_rtl(
+            site, neighbor, P, max_bond_dim, num_extra, hybrid, svd_trunc_err
+        )
+
+
+def _hybrid_ltr(site, neighbor, P, max_bond_dim, num_extra, hybrid, svd_trunc_err):
+    """L→R hybrid expansion: expand right bond."""
+    chi_l, d, chi_r = site.shape
+    M_mat = site.reshape(chi_l * d, chi_r)
+
+    # Full SVD of site tensor
+    U, S, Vh = jnp.linalg.svd(M_mat, full_matrices=False)
+
+    # Truncate to χ, compute truncation error
+    k = _truncation_bond_dim(S, max_bond_dim, svd_trunc_err)
+    total_sq = float(jnp.sum(S**2))
+    trunc_sq = float(jnp.sum(S[k:] ** 2)) if len(S) > k else 0.0
+    trunc_err = trunc_sq / total_sq if total_sq > 0 else 0.0
+
+    # Project expansion into null space of kept left singular vectors
+    UKeep = U[:, :k]
+    P_mat = P.reshape(chi_l * d, -1)
+    P_null = P_mat - UKeep @ (UKeep.conj().T @ P_mat)
+
+    # QR-orthogonalize the null-space projection
+    Q_null, _ = jnp.linalg.qr(P_null)
+
+    # Cap extra states at available null-space rank
+    n_extra = min(num_extra, Q_null.shape[1])
+    s_max_q = float(jnp.linalg.norm(Q_null[:, 0])) if Q_null.shape[1] > 0 else 0.0
+    # Only keep columns with nonzero norm (numerical rank of null-space projection)
+    if Q_null.shape[1] > 0:
+        col_norms = jnp.linalg.norm(Q_null, axis=0)
+        n_rank = int(jnp.sum(col_norms > s_max_q * 1e-12))
+        n_extra = min(n_extra, n_rank)
+    Q_extra = Q_null[:, :n_extra]
+
+    if hybrid:
+        # Scale expansion by sqrt(truncation error) — adaptive mixing
+        norm_extra = float(jnp.linalg.norm(Q_extra))
+        if norm_extra > 1e-15 and trunc_err > 0:
+            Q_scaled = Q_extra * (jnp.sqrt(trunc_err) / norm_extra)
+        else:
+            Q_scaled = Q_extra * 0.0
+
+        # Concatenate [M | Q_scaled] and re-SVD to smoothly mix
+        expanded = jnp.concatenate([M_mat, Q_scaled], axis=1)
+        U2, S2, Vh2 = jnp.linalg.svd(expanded, full_matrices=False)
+        k2 = _truncation_bond_dim(S2, max_bond_dim, svd_trunc_err)
+        A = U2[:, :k2].reshape(chi_l, d, k2)
+        remainder = jnp.diag(S2[:k2]) @ Vh2[:k2, :]
+
+        # Zero-pad neighbor to match expanded right bond
+        pad_rows = expanded.shape[1] - chi_r
+        B_padded = jnp.concatenate(
+            [
+                neighbor,
+                jnp.zeros((pad_rows,) + neighbor.shape[1:], dtype=neighbor.dtype),
+            ],
+            axis=0,
+        )
+        new_B = jnp.einsum("ij,jqf->iqf", remainder, B_padded)
+        return A, new_B
+    else:
+        # Direct expansion: keep χ + Δ states
+        # The extra directions are seeded from the null-space projection
+        U_expanded = jnp.concatenate([UKeep, Q_extra], axis=1)
+        total_k = k + n_extra
+        A = U_expanded.reshape(chi_l, d, total_k)
+
+        # Project site into expanded basis → remainder for neighbor
+        # Kept columns: U_Keep.T @ M_mat = diag(S[:k]) @ Vh[:k,:]
+        # Extra columns: Q_extra.T @ M_mat ≈ 0 (null space)
+        remainder = U_expanded.conj().T @ M_mat  # (total_k, chi_r)
+        new_B = jnp.einsum("ij,jqf->iqf", remainder, neighbor)
+        return A, new_B
+
+
+def _hybrid_rtl(site, neighbor, P, max_bond_dim, num_extra, hybrid, svd_trunc_err):
+    """R→L hybrid expansion: expand left bond."""
+    chi_l, d, chi_r = site.shape
+    M_mat = site.reshape(chi_l, d * chi_r)
+
+    # Full SVD of site tensor
+    U, S, Vh = jnp.linalg.svd(M_mat, full_matrices=False)
+
+    # Truncate, compute truncation error
+    k = _truncation_bond_dim(S, max_bond_dim, svd_trunc_err)
+    total_sq = float(jnp.sum(S**2))
+    trunc_sq = float(jnp.sum(S[k:] ** 2)) if len(S) > k else 0.0
+    trunc_err = trunc_sq / total_sq if total_sq > 0 else 0.0
+
+    # Project expansion into null space of kept right singular vectors
+    VhKeep = Vh[:k, :]
+    P_mat = P.reshape(-1, d * chi_r)
+    P_null = P_mat - P_mat @ VhKeep.conj().T @ VhKeep
+
+    # QR-orthogonalize (transpose to get row-space orthogonalization)
+    Q_null_T, _ = jnp.linalg.qr(P_null.T)
+    Q_null = Q_null_T.T  # rows are orthonormal expansion directions
+
+    n_extra = min(num_extra, Q_null.shape[0])
+    if Q_null.shape[0] > 0:
+        row_norms = jnp.linalg.norm(Q_null, axis=1)
+        r_max = float(row_norms[0])
+        n_rank = int(jnp.sum(row_norms > r_max * 1e-12)) if r_max > 0 else 0
+        n_extra = min(n_extra, n_rank)
+    Q_extra = Q_null[:n_extra, :]
+
+    if hybrid:
+        norm_extra = float(jnp.linalg.norm(Q_extra))
+        if norm_extra > 1e-15 and trunc_err > 0:
+            Q_scaled = Q_extra * (jnp.sqrt(trunc_err) / norm_extra)
+        else:
+            Q_scaled = Q_extra * 0.0
+
+        # Concatenate [Q_scaled; M] along left bond (rows) and re-SVD
+        expanded = jnp.concatenate([Q_scaled, M_mat], axis=0)
+        U2, S2, Vh2 = jnp.linalg.svd(expanded, full_matrices=False)
+        k2 = _truncation_bond_dim(S2, max_bond_dim, svd_trunc_err)
+        B = Vh2[:k2, :].reshape(k2, d, chi_r)
+        remainder = U2[:, :k2] @ jnp.diag(S2[:k2])
+
+        # Zero-pad neighbor: [0 | A] along right bond
+        pad_cols = expanded.shape[0] - chi_l
+        A_padded = jnp.concatenate(
+            [
+                jnp.zeros(neighbor.shape[:-1] + (pad_cols,), dtype=neighbor.dtype),
+                neighbor,
+            ],
+            axis=-1,
+        )
+        new_A = jnp.einsum("apj,jk->apk", A_padded, remainder)
+        return B, new_A
+    else:
+        # Direct expansion: keep χ + Δ states
+        Vh_expanded = jnp.concatenate([VhKeep, Q_extra], axis=0)
+        total_k = k + n_extra
+        B = Vh_expanded.reshape(total_k, d, chi_r)
+
+        remainder = M_mat @ Vh_expanded.conj().T  # (chi_l, total_k)
+        new_A = jnp.einsum("apj,jk->apk", neighbor, remainder)
+        return B, new_A
+
+
 def adapt_alpha(
     alpha: float,
     delta_e_opt: float,
