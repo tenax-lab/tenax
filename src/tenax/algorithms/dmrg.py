@@ -64,6 +64,9 @@ class DMRGConfig:
         target_charge:      Target total charge (e.g. 2*Sz for U(1)). If set,
                             validates MPS sector before and after each sweep.
                             Use with ``build_random_symmetric_mps(target_charge=...)``.
+        subspace_expansion: If True, use DMRG3S enrichment during 1-site sweeps
+                            (Hubig et al. 2015). Requires ``two_site=False``.
+        mixing_factor:      Initial mixing strength α for DMRG3S expansion.
         verbose:            Print energy at each sweep.
     """
 
@@ -77,6 +80,8 @@ class DMRGConfig:
     noise: float = 0.0
     svd_trunc_err: float | None = None
     target_charge: int | None = None
+    subspace_expansion: bool = False
+    mixing_factor: float = 1e-3
     verbose: bool = False
 
 
@@ -144,6 +149,11 @@ def dmrg(
     Returns:
         DMRGResult with energy, sweep history, optimized FiniteMPS, and diagnostics.
     """
+    if config.subspace_expansion and config.two_site:
+        raise ValueError(
+            "subspace_expansion=True requires two_site=False. "
+            "DMRG3S enrichment is a 1-site algorithm."
+        )
     L = hamiltonian.n_nodes()
     if L < 2:
         raise ValueError(
@@ -219,6 +229,8 @@ def dmrg(
         converged = True
         energies_per_sweep.append(energy)
 
+    _current_alpha = config.mixing_factor if config.subspace_expansion else 0.0
+
     for sweep in range(config.num_sweeps if L > 1 else 0):
         prev_energy = energy
 
@@ -267,16 +279,60 @@ def dmrg(
                 )
                 energy = float(e)
 
-                # QR + absorb R + build env (atomic step for 1-site)
-                right_bond = f"v{i}_{i + 1}"
-                left_labels = [lb for lb in new_site.labels() if lb != right_bond]
-                tmp_bond = f"_qr_{right_bond}"
-                Q, R = _linalg_qr(
-                    new_site, left_labels, [right_bond], new_bond_label=tmp_bond
-                )
-                mps_tensors[i] = Q.relabel(tmp_bond, right_bond)
-                absorbed = contract(R, mps_tensors[i + 1])
-                mps_tensors[i + 1] = absorbed.relabel(tmp_bond, right_bond)
+                if config.subspace_expansion and i < L - 1:
+                    if use_symmetric:
+                        from tenax.algorithms.dmrg3s import (
+                            expand_and_truncate_symmetric,
+                        )
+
+                        mps_tensors[i], mps_tensors[i + 1] = (
+                            expand_and_truncate_symmetric(
+                                new_site,
+                                mps_tensors[i + 1],
+                                l_env,
+                                mpo_tensors[i],
+                                alpha=_current_alpha,
+                                max_bond_dim=config.max_bond_dim,
+                                direction="left_to_right",
+                                svd_trunc_err=config.svd_trunc_err,
+                            )
+                        )
+                    else:
+                        from tenax.algorithms.dmrg3s import (
+                            expand_and_truncate_dense,
+                        )
+
+                        A_arr, B_arr = expand_and_truncate_dense(
+                            new_site.todense(),
+                            mps_tensors[i + 1].todense(),
+                            l_env,
+                            mpo_tensors[i],
+                            alpha=_current_alpha,
+                            max_bond_dim=config.max_bond_dim,
+                            direction="left_to_right",
+                            svd_trunc_err=config.svd_trunc_err,
+                        )
+                        mps_tensors[i] = _rebuild_dense_tensor(
+                            A_arr, new_site.indices, bond_pos=-1
+                        )
+                        mps_tensors[i + 1] = _rebuild_dense_tensor(
+                            B_arr, mps_tensors[i + 1].indices, bond_pos=0
+                        )
+                else:
+                    # QR + absorb R + build env (atomic step for 1-site)
+                    right_bond = f"v{i}_{i + 1}"
+                    left_labels = [lb for lb in new_site.labels() if lb != right_bond]
+                    tmp_bond = f"_qr_{right_bond}"
+                    Q, R = _linalg_qr(
+                        new_site,
+                        left_labels,
+                        [right_bond],
+                        new_bond_label=tmp_bond,
+                    )
+                    mps_tensors[i] = Q.relabel(tmp_bond, right_bond)
+                    absorbed = contract(R, mps_tensors[i + 1])
+                    mps_tensors[i + 1] = absorbed.relabel(tmp_bond, right_bond)
+
                 left_envs[i + 1] = ops.update_left_env(
                     l_env, mps_tensors[i], mpo_tensors[i]
                 )
@@ -329,29 +385,72 @@ def dmrg(
                 )
                 energy = float(e)
 
-                # RQ + absorb L + build env (atomic step for 1-site)
-                left_bond = f"v{i - 1}_{i}"
-                site_labels = new_site.labels()
-                if i > 0 and left_bond in site_labels:
-                    other_labels = [lb for lb in site_labels if lb != left_bond]
-                    tmp_bond = f"_qr_{left_bond}"
-                    Q, R = _linalg_qr(
-                        new_site, other_labels, [left_bond], new_bond_label=tmp_bond
-                    )
-                    Q = Q.relabel(tmp_bond, left_bond)
-                    # Reorder so left_bond is first (MPS convention)
-                    q_labels = Q.labels()
-                    bond_pos = q_labels.index(left_bond)
-                    if bond_pos != 0:
-                        axes = (bond_pos,) + tuple(
-                            j for j in range(len(q_labels)) if j != bond_pos
+                if config.subspace_expansion and i > 0:
+                    if use_symmetric:
+                        from tenax.algorithms.dmrg3s import (
+                            expand_and_truncate_symmetric,
                         )
-                        Q = Q.transpose(axes)
-                    mps_tensors[i] = Q
-                    absorbed = contract(mps_tensors[i - 1], R)
-                    mps_tensors[i - 1] = absorbed.relabel(tmp_bond, left_bond)
+
+                        mps_tensors[i], mps_tensors[i - 1] = (
+                            expand_and_truncate_symmetric(
+                                new_site,
+                                mps_tensors[i - 1],
+                                r1_env,
+                                mpo_tensors[i],
+                                alpha=_current_alpha,
+                                max_bond_dim=config.max_bond_dim,
+                                direction="right_to_left",
+                                svd_trunc_err=config.svd_trunc_err,
+                            )
+                        )
+                    else:
+                        from tenax.algorithms.dmrg3s import (
+                            expand_and_truncate_dense,
+                        )
+
+                        B_arr, A_arr = expand_and_truncate_dense(
+                            new_site.todense(),
+                            mps_tensors[i - 1].todense(),
+                            r1_env,
+                            mpo_tensors[i],
+                            alpha=_current_alpha,
+                            max_bond_dim=config.max_bond_dim,
+                            direction="right_to_left",
+                            svd_trunc_err=config.svd_trunc_err,
+                        )
+                        mps_tensors[i] = _rebuild_dense_tensor(
+                            B_arr, new_site.indices, bond_pos=0
+                        )
+                        mps_tensors[i - 1] = _rebuild_dense_tensor(
+                            A_arr, mps_tensors[i - 1].indices, bond_pos=-1
+                        )
                 else:
-                    mps_tensors[i] = new_site
+                    # RQ + absorb L + build env (atomic step for 1-site)
+                    left_bond = f"v{i - 1}_{i}"
+                    site_labels = new_site.labels()
+                    if i > 0 and left_bond in site_labels:
+                        other_labels = [lb for lb in site_labels if lb != left_bond]
+                        tmp_bond = f"_qr_{left_bond}"
+                        Q, R = _linalg_qr(
+                            new_site,
+                            other_labels,
+                            [left_bond],
+                            new_bond_label=tmp_bond,
+                        )
+                        Q = Q.relabel(tmp_bond, left_bond)
+                        # Reorder so left_bond is first (MPS convention)
+                        q_labels = Q.labels()
+                        bond_pos = q_labels.index(left_bond)
+                        if bond_pos != 0:
+                            axes = (bond_pos,) + tuple(
+                                j for j in range(len(q_labels)) if j != bond_pos
+                            )
+                            Q = Q.transpose(axes)
+                        mps_tensors[i] = Q
+                        absorbed = contract(mps_tensors[i - 1], R)
+                        mps_tensors[i - 1] = absorbed.relabel(tmp_bond, left_bond)
+                    else:
+                        mps_tensors[i] = new_site
                 right_envs[i] = ops.update_right_env(
                     r1_env, mps_tensors[i], mpo_tensors[i]
                 )
@@ -390,6 +489,33 @@ def dmrg(
         truncation_errors=truncation_errors,
         converged=converged,
     )
+
+
+def _rebuild_dense_tensor(
+    data: jax.Array,
+    old_indices: tuple,
+    bond_pos: int,
+) -> DenseTensor:
+    """Rebuild a DenseTensor when the bond dimension has changed.
+
+    Creates a new TensorIndex at ``bond_pos`` with the correct dimension,
+    preserving the symmetry, flow, and label from the original index.
+    """
+    idx = bond_pos if bond_pos >= 0 else len(old_indices) + bond_pos
+    new_dim = data.shape[idx]
+    old_idx = old_indices[idx]
+
+    if old_idx.dim == new_dim:
+        return DenseTensor(data, old_indices)
+
+    new_bond_idx = TensorIndex(
+        symmetry=old_idx.symmetry,
+        charges=np.zeros(new_dim, dtype=np.int32),
+        flow=old_idx.flow,
+        label=old_idx.label,
+    )
+    new_indices = old_indices[:idx] + (new_bond_idx,) + old_indices[idx + 1 :]
+    return DenseTensor(data, new_indices)
 
 
 def _find_left_bond(labels: tuple, site: int) -> str | None:
