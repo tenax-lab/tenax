@@ -30,7 +30,7 @@ DMRG), but differ in language (Julia/C++ vs Python/JAX) and tensor design.
 | `AutoMPO()` | `AutoMPO(L, d)` | Very similar API |
 | `dmrg(H, psi0, sweeps)` | `dmrg(mpo, mps, config)` | Config replaces Sweeps object |
 | `siteinds("S=1/2", N)` | `FiniteMPS.random(L, d=2, chi, key)` | No site-type system in Tenax |
-| `expect(psi, "Sz")` | Manual contraction (see observables skill) | No built-in expect function |
+| `expect(psi, "Sz")` | `expectation_value(mps, Sz, site)` | From `tenax.algorithms.observables` |
 
 ---
 
@@ -208,7 +208,7 @@ print(f"Energy: {result.energy:.10f}")
 5. **Translate AutoMPO** — `"S+"` → `"Sp"`, `"S-"` → `"Sm"`, 1-based → 0-based indexing.
 6. **Replace `Sweeps` with `DMRGConfig`** — single dataclass instead of per-sweep settings.
 7. **Add JAX RNG keys** — `jax.random.PRNGKey(seed)` for all random operations.
-8. **No `expect()`** — compute observables manually via tensor contraction.
+8. **Use `expectation_value()` and `correlation()`** from `tenax.algorithms.observables` for measurements.
 
 ## What You Gain
 
@@ -222,7 +222,7 @@ print(f"Energy: {result.energy:.10f}")
 
 - **Tag system** — replaced by simple string labels
 - **Per-sweep bond dimension schedule** — use multiple DMRG runs instead
-- **`expect()` / `correlation_matrix()`** — no built-in observable functions
+- **`expect()` / `correlation_matrix()`** — basic versions available via `expectation_value()` / `correlation()`
 - **TEBD / TDVP** — not yet implemented in Tenax
 - **Non-Abelian symmetry** — Tenax currently supports only Abelian (U(1), Z_n)
 - **MPS/MPO as first-class types** — Tenax uses `TensorNetwork` (generic graph)

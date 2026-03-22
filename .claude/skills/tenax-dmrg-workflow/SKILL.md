@@ -326,6 +326,16 @@ The entanglement entropy across a bond reveals the nature of the state:
 
 ### Correlation functions
 
+Use the built-in `correlation()` function:
+
+```python
+from tenax.algorithms.observables import correlation
+import numpy as np
+
+Sz = np.array([[0.5, 0.0], [0.0, -0.5]])
+corr = [correlation(result.mps, Sz, 0, Sz, r) for r in range(L)]
+```
+
 Compute ⟨S^z_i S^z_j⟩ as a function of distance |i−j| to identify:
 - **Algebraic decay** (1/r^α) → gapless / quasi-long-range order.
 - **Exponential decay** (e^{−r/ξ}) → gapped, with correlation length ξ.
