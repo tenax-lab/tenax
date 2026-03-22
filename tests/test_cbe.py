@@ -253,7 +253,6 @@ class TestExpandBondSymmetric:
             _build_right_environments_list,
             _build_trivial_left_env,
             _one_site_update_symmetric,
-            _right_canonicalize,
             _symmetric_ops,
         )
 
@@ -308,7 +307,6 @@ class TestExpandBondSymmetric:
         from tenax.algorithms.cbe import expand_bond_symmetric
         from tenax.algorithms.dmrg import (
             _build_right_environments_list,
-            _right_canonicalize,
             _symmetric_ops,
         )
 

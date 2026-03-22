@@ -66,6 +66,11 @@ def krylov_expm(
         if step > 0:
             w = w - betas[-1] * basis[-2]
 
+        # Full reorthogonalization against all previous basis vectors
+        # to prevent loss of orthogonality and ghost eigenvalues.
+        for q in basis:
+            w = w - jnp.dot(q.conj(), w) * q
+
         beta = jnp.linalg.norm(w).real
         betas.append(beta)
 

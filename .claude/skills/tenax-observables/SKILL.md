@@ -79,63 +79,42 @@ print(f"Entanglement entropy: {S_ent:.6f}")
 
 ## Local Expectation Values from MPS
 
-To compute ⟨ψ|O_i|ψ⟩ for a local operator at site i, insert the operator
-into the MPS contraction using `NetworkBlueprint`:
+Tenax provides built-in functions for computing expectation values and
+correlation functions from MPS ground states:
 
 ```python
 import numpy as np
-from tenax import NetworkBlueprint, contract
+from tenax.algorithms.observables import expectation_value, correlation
 
-# Example: ⟨Sz_i⟩ for an MPS with L sites
+# Standard spin-1/2 operators
 Sz = np.array([[0.5, 0.0], [0.0, -0.5]])
+Sp = np.array([[0.0, 1.0], [0.0, 0.0]])
+Sm = np.array([[0.0, 0.0], [1.0, 0.0]])
 
-def measure_local(mps, op, site):
-    """Compute ⟨ψ|op_site|ψ⟩ from a DMRG MPS TensorNetwork."""
-    # Strategy: contract the MPS with its conjugate, inserting op at the
-    # target site. For efficiency, build left and right environments
-    # iteratively.
-    L = mps.n_nodes()
-
-    # Start with trivial left environment
-    left_env = None
-    for i in range(L):
-        A = mps.get_tensor(f"site_{i}")
-        A_conj = A.conj()
-
-        if i == site:
-            # Insert operator: contract op with ket physical leg
-            # This requires manual contraction with the operator matrix
-            pass  # See full implementation below
-
-        # Contract into running environment
-        # ... (site-by-site left-to-right sweep)
-
-    return expectation_value
+# ⟨Sz_i⟩ at site 0
+sz_val = expectation_value(result.mps, Sz, site=0)
 ```
 
-### Practical approach using contract()
+These functions work polymorphically on both `DenseTensor` and
+`SymmetricTensor` MPS.
 
-For small systems, the simplest approach is to contract the full MPS
-into a state vector and use standard linear algebra:
+> **Note:** `expectation_value()` returns `float(Re(⟨O⟩))` and emits a
+> warning if the imaginary part is non-negligible. This catches
+> accidental use of non-Hermitian operators.
+
+### Full state vector approach (small systems only)
+
+For systems with L ≤ ~18, you can contract the MPS into a full state
+vector and use standard linear algebra:
 
 ```python
 import jax.numpy as jnp
 
-def mps_to_vector(mps):
-    """Contract an MPS TensorNetwork into a full state vector.
-    Only practical for L <= ~20 (2^L memory).
-    """
-    result = mps.contract()
-    return result.todense().flatten()
-
-psi = mps_to_vector(result.mps)
-# ⟨Sz_i⟩
-Sz_full = build_full_operator(Sz, site=i, L=L)  # Embed in full Hilbert space
+psi = result.mps.contract().todense().flatten()
+# Embed operator in full Hilbert space
+Sz_full = build_full_operator(Sz, site=i, L=L)
 expectation = jnp.real(psi.conj() @ Sz_full @ psi)
 ```
-
-This is only feasible for small systems (L ≤ ~18 for spin-1/2). For
-larger systems, use the environment-based approach above.
 
 ---
 
@@ -144,11 +123,37 @@ larger systems, use the environment-based approach above.
 ⟨S^z_i S^z_j⟩ measures spin-spin correlations and reveals the nature of
 order in the ground state.
 
-### From a full state vector (small systems)
+### Using the built-in `correlation()` function
+
+```python
+from tenax.algorithms.observables import correlation
+
+# ⟨Sz_0 Sz_r⟩ for all r
+correlations = [correlation(result.mps, Sz, 0, Sz, r) for r in range(L)]
+```
+
+### Fermionic correlators
+
+For anticommuting operators (e.g., `⟨c†_i c_j⟩`), use `anticommute=True`
+to get the correct sign when the function reorders operators internally:
+
+```python
+Cdag = np.array([[0.0, 0.0], [1.0, 0.0]])  # creation operator
+C    = np.array([[0.0, 1.0], [0.0, 0.0]])  # annihilation operator
+
+# ⟨c†_0 c_r⟩ — anticommute ensures correct sign regardless of site ordering
+green_fn = [correlation(result.mps, Cdag, 0, C, r, anticommute=True) for r in range(L)]
+```
+
+Without `anticommute=True`, the default behavior swaps operators when
+`site_i > site_j` without a sign change — correct for bosonic operators
+like Sz but wrong for fermions.
+
+### Full state vector approach (small systems)
 
 ```python
 def correlation_function(psi, op1, op2, site_i, site_j, L, d=2):
-    """Compute ⟨ψ|op1_i op2_j|ψ⟩."""
+    """Compute ⟨ψ|op1_i op2_j|ψ⟩ via exact state vector."""
     from scipy.sparse import kron, eye, csr_matrix
 
     I = eye(d)
@@ -161,10 +166,6 @@ def correlation_function(psi, op1, op2, site_i, site_j, L, d=2):
         O = kron(O, ops[k])
 
     return float(jnp.real(psi.conj() @ O @ psi))
-
-# Example: ⟨Sz_0 Sz_r⟩ for all r
-Sz = np.array([[0.5, 0.0], [0.0, -0.5]])
-correlations = [correlation_function(psi, Sz, Sz, 0, r, L) for r in range(L)]
 ```
 
 ### Expected behavior
