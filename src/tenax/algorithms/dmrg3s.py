@@ -217,16 +217,10 @@ def _hybrid_ltr(site, neighbor, P, max_bond_dim, num_extra, hybrid, svd_trunc_er
     P_null = P_mat - UKeep @ (UKeep.conj().T @ P_mat)
 
     # QR-orthogonalize the null-space projection.
-    # Use R diagonal to detect rank (Q columns are always unit-norm,
-    # so column norms don't reveal rank deficiency).
-    Q_null, R_null = jnp.linalg.qr(P_null)
-
+    # Always keep num_extra directions even if some have zero weight —
+    # they may gain weight in future sweeps and are needed for bond growth.
+    Q_null, _ = jnp.linalg.qr(P_null)
     n_extra = min(num_extra, Q_null.shape[1])
-    if Q_null.shape[1] > 0:
-        r_diag = jnp.abs(jnp.diag(R_null))
-        r_max = float(r_diag[0]) if len(r_diag) > 0 else 0.0
-        n_rank = int(jnp.sum(r_diag > r_max * 1e-12)) if r_max > 0 else 0
-        n_extra = min(n_extra, n_rank)
     Q_extra = Q_null[:, :n_extra]
 
     if hybrid:
@@ -290,16 +284,10 @@ def _hybrid_rtl(site, neighbor, P, max_bond_dim, num_extra, hybrid, svd_trunc_er
     P_null = P_mat - P_mat @ VhKeep.conj().T @ VhKeep
 
     # QR-orthogonalize (transpose to get row-space orthogonalization).
-    # Use R diagonal for rank detection.
-    Q_null_T, R_null_T = jnp.linalg.qr(P_null.T)
+    # Always keep num_extra directions even if some have zero weight.
+    Q_null_T, _ = jnp.linalg.qr(P_null.T)
     Q_null = Q_null_T.T  # rows are orthonormal expansion directions
-
     n_extra = min(num_extra, Q_null.shape[0])
-    if Q_null.shape[0] > 0:
-        r_diag = jnp.abs(jnp.diag(R_null_T))
-        r_max = float(r_diag[0]) if len(r_diag) > 0 else 0.0
-        n_rank = int(jnp.sum(r_diag > r_max * 1e-12)) if r_max > 0 else 0
-        n_extra = min(n_extra, n_rank)
     Q_extra = Q_null[:n_extra, :]
 
     if hybrid:
