@@ -221,3 +221,75 @@ class TestAdaptAlpha:
     def test_no_change_when_converged(self):
         new = adapt_alpha(alpha=1e-3, delta_e_opt=0.0, delta_e_trunc=0.0)
         assert new == 1e-3
+
+
+class TestDMRG3SIntegration:
+    """Test DMRG with subspace expansion wired into sweep loop."""
+
+    def test_1site_with_expansion_runs(self):
+        """1-site + DMRG3S should complete without error."""
+        from tenax.algorithms.auto_mpo import build_auto_mpo
+        from tenax.algorithms.dmrg import DMRGConfig, dmrg
+        from tenax.core.mps import FiniteMPS
+
+        L, d, chi = 6, 2, 8
+        key = jax.random.PRNGKey(0)
+        mps = FiniteMPS.random(L, d, chi, key=key)
+        mpo = build_auto_mpo(_heisenberg_terms(L), L)
+        result = dmrg(
+            mpo,
+            mps,
+            DMRGConfig(
+                max_bond_dim=chi,
+                num_sweeps=4,
+                two_site=False,
+                subspace_expansion=True,
+                mixing_factor=1e-3,
+            ),
+        )
+        assert result.energy < 0  # should find a negative energy ground state
+
+    def test_expansion_improves_over_plain_1site(self):
+        """1-site + DMRG3S should get closer to 2-site energy."""
+        from tenax.algorithms.auto_mpo import build_auto_mpo
+        from tenax.algorithms.dmrg import DMRGConfig, dmrg
+        from tenax.core.mps import FiniteMPS
+
+        L, d, chi = 8, 2, 8
+        key = jax.random.PRNGKey(42)
+        mps = FiniteMPS.random(L, d, chi, key=key)
+        mpo = build_auto_mpo(_heisenberg_terms(L), L)
+
+        r_2site = dmrg(
+            mpo, mps, DMRGConfig(max_bond_dim=chi, num_sweeps=10, two_site=True)
+        )
+        r_1site = dmrg(
+            mpo, mps, DMRGConfig(max_bond_dim=chi, num_sweeps=10, two_site=False)
+        )
+        r_3s = dmrg(
+            mpo,
+            mps,
+            DMRGConfig(
+                max_bond_dim=chi,
+                num_sweeps=10,
+                two_site=False,
+                subspace_expansion=True,
+                mixing_factor=1e-3,
+            ),
+        )
+
+        gap_plain = abs(r_1site.energy - r_2site.energy)
+        gap_3s = abs(r_3s.energy - r_2site.energy)
+        assert gap_3s < gap_plain or gap_3s < 1e-6
+
+    def test_subspace_expansion_with_two_site_raises(self):
+        """subspace_expansion=True + two_site=True should raise."""
+        from tenax.algorithms.auto_mpo import build_auto_mpo
+        from tenax.algorithms.dmrg import DMRGConfig, dmrg
+        from tenax.core.mps import FiniteMPS
+
+        key = jax.random.PRNGKey(0)
+        mps = FiniteMPS.random(4, 2, 4, key=key)
+        mpo = build_auto_mpo(_heisenberg_terms(4), 4)
+        with pytest.raises(ValueError, match="subspace_expansion"):
+            dmrg(mpo, mps, DMRGConfig(two_site=True, subspace_expansion=True))
