@@ -293,3 +293,41 @@ class TestDMRG3SIntegration:
         mpo = build_auto_mpo(_heisenberg_terms(4), 4)
         with pytest.raises(ValueError, match="subspace_expansion"):
             dmrg(mpo, mps, DMRGConfig(two_site=True, subspace_expansion=True))
+
+
+@pytest.mark.slow
+class TestDMRG3SBenchmark:
+    """Benchmark: DMRG3S convergence improvement over plain 1-site."""
+
+    def test_3s_no_worse_than_plain_1site(self):
+        """L=12 Heisenberg: DMRG3S should not degrade 1-site energy."""
+        from tenax.algorithms.auto_mpo import build_auto_mpo
+        from tenax.algorithms.dmrg import DMRGConfig, dmrg
+        from tenax.core.mps import FiniteMPS
+
+        L, d, chi = 12, 2, 16
+        key = jax.random.PRNGKey(42)
+        mpo = build_auto_mpo(_heisenberg_terms(L), L)
+
+        mps = FiniteMPS.random(L, d, chi, key=key)
+        e_1site = dmrg(
+            mpo,
+            mps,
+            DMRGConfig(max_bond_dim=chi, num_sweeps=15, two_site=False),
+        ).energy
+
+        mps = FiniteMPS.random(L, d, chi, key=key)
+        e_3s = dmrg(
+            mpo,
+            mps,
+            DMRGConfig(
+                max_bond_dim=chi,
+                num_sweeps=15,
+                two_site=False,
+                subspace_expansion=True,
+                mixing_factor=1e-2,
+            ),
+        ).energy
+
+        # DMRG3S should be at least as good as plain 1-site (within noise)
+        assert e_3s <= e_1site + 1e-6
