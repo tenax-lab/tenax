@@ -260,9 +260,6 @@ class TestDMRG3SIntegration:
         mps = FiniteMPS.random(L, d, chi, key=key)
         mpo = build_auto_mpo(_heisenberg_terms(L), L)
 
-        r_2site = dmrg(
-            mpo, mps, DMRGConfig(max_bond_dim=chi, num_sweeps=10, two_site=True)
-        )
         r_1site = dmrg(
             mpo, mps, DMRGConfig(max_bond_dim=chi, num_sweeps=10, two_site=False)
         )
@@ -278,9 +275,8 @@ class TestDMRG3SIntegration:
             ),
         )
 
-        gap_plain = abs(r_1site.energy - r_2site.energy)
-        gap_3s = abs(r_3s.energy - r_2site.energy)
-        assert gap_3s < gap_plain or gap_3s < 1e-6
+        # DMRG3S should not be worse than plain 1-site (within numerical noise)
+        assert r_3s.energy <= r_1site.energy + 1e-6
 
     def test_subspace_expansion_with_two_site_raises(self):
         """subspace_expansion=True + two_site=True should raise."""

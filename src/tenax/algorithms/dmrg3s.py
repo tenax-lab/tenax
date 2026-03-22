@@ -125,12 +125,15 @@ def expand_and_truncate_dense(
         B = Vh[:k, :].reshape(k, d, chi_r)
         remainder = U[:, :k] @ jnp.diag(S[:k])
 
+        # Zero-pad neighbor: [0 | A] along right bond.
+        # P occupies the leading rows of expanded, site the trailing rows,
+        # so the neighbor's right bond aligns with the trailing block.
         chi_l_orig = site.shape[0]
         pad_cols = chi_exp - chi_l_orig
         A_padded = jnp.concatenate(
             [
-                neighbor,
                 jnp.zeros(neighbor.shape[:-1] + (pad_cols,), dtype=neighbor.dtype),
+                neighbor,
             ],
             axis=-1,
         )
@@ -176,8 +179,18 @@ def adapt_alpha(
 def _truncation_bond_dim(
     singular_values: jax.Array, max_bond_dim: int, svd_trunc_err: float | None
 ) -> int:
-    """Determine bond dimension from singular values, respecting both thresholds."""
-    k = min(max_bond_dim, len(singular_values))
+    """Determine bond dimension from singular values, respecting both thresholds.
+
+    Also caps at the numerical rank (drops near-zero singular values) to
+    avoid inflating the bond dimension with null Schmidt directions.
+    """
+    # Cap at numerical rank: drop singular values below machine epsilon
+    # relative to the largest
+    s_max = float(singular_values[0]) if len(singular_values) > 0 else 0.0
+    eps = s_max * 1e-14 if s_max > 0 else 1e-14
+    rank = int(jnp.sum(singular_values > eps))
+    k = min(max_bond_dim, rank, len(singular_values))
+
     if svd_trunc_err is not None:
         total = float(jnp.sum(singular_values**2))
         if total > 0:
