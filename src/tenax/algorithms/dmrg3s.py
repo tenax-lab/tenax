@@ -216,16 +216,16 @@ def _hybrid_ltr(site, neighbor, P, max_bond_dim, num_extra, hybrid, svd_trunc_er
     P_mat = P.reshape(chi_l * d, -1)
     P_null = P_mat - UKeep @ (UKeep.conj().T @ P_mat)
 
-    # QR-orthogonalize the null-space projection
-    Q_null, _ = jnp.linalg.qr(P_null)
+    # QR-orthogonalize the null-space projection.
+    # Use R diagonal to detect rank (Q columns are always unit-norm,
+    # so column norms don't reveal rank deficiency).
+    Q_null, R_null = jnp.linalg.qr(P_null)
 
-    # Cap extra states at available null-space rank
     n_extra = min(num_extra, Q_null.shape[1])
-    s_max_q = float(jnp.linalg.norm(Q_null[:, 0])) if Q_null.shape[1] > 0 else 0.0
-    # Only keep columns with nonzero norm (numerical rank of null-space projection)
     if Q_null.shape[1] > 0:
-        col_norms = jnp.linalg.norm(Q_null, axis=0)
-        n_rank = int(jnp.sum(col_norms > s_max_q * 1e-12))
+        r_diag = jnp.abs(jnp.diag(R_null))
+        r_max = float(r_diag[0]) if len(r_diag) > 0 else 0.0
+        n_rank = int(jnp.sum(r_diag > r_max * 1e-12)) if r_max > 0 else 0
         n_extra = min(n_extra, n_rank)
     Q_extra = Q_null[:, :n_extra]
 
@@ -289,15 +289,16 @@ def _hybrid_rtl(site, neighbor, P, max_bond_dim, num_extra, hybrid, svd_trunc_er
     P_mat = P.reshape(-1, d * chi_r)
     P_null = P_mat - P_mat @ VhKeep.conj().T @ VhKeep
 
-    # QR-orthogonalize (transpose to get row-space orthogonalization)
-    Q_null_T, _ = jnp.linalg.qr(P_null.T)
+    # QR-orthogonalize (transpose to get row-space orthogonalization).
+    # Use R diagonal for rank detection.
+    Q_null_T, R_null_T = jnp.linalg.qr(P_null.T)
     Q_null = Q_null_T.T  # rows are orthonormal expansion directions
 
     n_extra = min(num_extra, Q_null.shape[0])
     if Q_null.shape[0] > 0:
-        row_norms = jnp.linalg.norm(Q_null, axis=1)
-        r_max = float(row_norms[0])
-        n_rank = int(jnp.sum(row_norms > r_max * 1e-12)) if r_max > 0 else 0
+        r_diag = jnp.abs(jnp.diag(R_null_T))
+        r_max = float(r_diag[0]) if len(r_diag) > 0 else 0.0
+        n_rank = int(jnp.sum(r_diag > r_max * 1e-12)) if r_max > 0 else 0
         n_extra = min(n_extra, n_rank)
     Q_extra = Q_null[:n_extra, :]
 
