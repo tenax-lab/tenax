@@ -154,6 +154,11 @@ def dmrg(
             "subspace_expansion=True requires two_site=False. "
             "DMRG3S enrichment is a 1-site algorithm."
         )
+    if config.subspace_expansion:
+        # Defer validation until we know the tensor types
+        _subspace_expansion_requested = True
+    else:
+        _subspace_expansion_requested = False
 
     L = hamiltonian.n_nodes()
     if L < 2:
@@ -186,6 +191,12 @@ def dmrg(
         raise TypeError(
             "dmrg() requires uniform tensor types: all DenseTensor or all "
             "SymmetricTensor. Got mixed types — convert explicitly."
+        )
+
+    if _subspace_expansion_requested and use_symmetric:
+        raise NotImplementedError(
+            "subspace_expansion is not yet supported with symmetric tensors. "
+            "Use dense tensors or two_site=True for bond growth with symmetry."
         )
 
     # Validate initial MPS sector if target_charge is specified
