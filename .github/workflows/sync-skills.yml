@@ -37,9 +37,10 @@ jobs:
           git add skills/
           git commit -m "chore: sync skills from tenax main"
           git push origin "$BRANCH"
-          gh pr create \
+          PR_URL=$(gh pr create \
             --title "chore: sync skills from tenax" \
             --body "Auto-synced from [tenax main](https://github.com/tenax-lab/tenax)." \
-            --repo tenax-lab/tenax-toolkit
+            --repo tenax-lab/tenax-toolkit)
+          gh pr merge "$PR_URL" --squash --auto --delete-branch
         env:
           GH_TOKEN: ${{ secrets.PLUGIN_REPO_TOKEN }}
