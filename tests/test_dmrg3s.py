@@ -290,25 +290,26 @@ class TestDMRG3SIntegration:
         with pytest.raises(ValueError, match="subspace_expansion"):
             dmrg(mpo, mps, DMRGConfig(two_site=True, subspace_expansion=True))
 
-    def test_symmetric_with_expansion_raises_not_implemented(self):
-        """Symmetric DMRG3S is not yet supported — should raise."""
+    def test_symmetric_1site_with_expansion_runs(self):
+        """1-site + DMRG3S with U(1) symmetry should complete."""
         from tenax.algorithms.auto_mpo import build_auto_mpo
         from tenax.algorithms.dmrg import DMRGConfig, build_random_symmetric_mps, dmrg
 
-        L, chi = 4, 4
+        L, chi = 4, 8
         mps = build_random_symmetric_mps(L, bond_dim=chi, seed=42)
         mpo = build_auto_mpo(_heisenberg_terms(L), L, symmetric=True)
-        with pytest.raises(NotImplementedError, match="symmetric"):
-            dmrg(
-                mpo,
-                mps,
-                DMRGConfig(
-                    max_bond_dim=chi,
-                    num_sweeps=2,
-                    two_site=False,
-                    subspace_expansion=True,
-                ),
-            )
+        result = dmrg(
+            mpo,
+            mps,
+            DMRGConfig(
+                max_bond_dim=chi,
+                num_sweeps=4,
+                two_site=False,
+                subspace_expansion=True,
+                mixing_factor=1e-3,
+            ),
+        )
+        assert result.energy < 0
 
 
 @pytest.mark.slow

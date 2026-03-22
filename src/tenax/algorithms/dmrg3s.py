@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
-from tenax.core.tensor import Tensor
+from tenax.core.index import TensorIndex
+from tenax.core.tensor import SymmetricTensor, Tensor
 
 
 def build_expansion_tensor_dense(
@@ -200,3 +202,283 @@ def _truncation_bond_dim(
                     k = min(k, j)
                     break
     return max(k, 1)
+
+
+# ------------------------------------------------------------------ #
+# Symmetric (SymmetricTensor) DMRG3S expansion                        #
+# ------------------------------------------------------------------ #
+
+
+def expand_and_truncate_symmetric(
+    site: SymmetricTensor,
+    neighbor: SymmetricTensor,
+    env: SymmetricTensor,
+    mpo: SymmetricTensor,
+    alpha: float,
+    max_bond_dim: int,
+    direction: str,
+    svd_trunc_err: float | None = None,
+) -> tuple[SymmetricTensor, SymmetricTensor]:
+    """Expand and truncate for SymmetricTensor with charge-preserving SVD.
+
+    Pipeline:
+      1. Build 4-leg expansion tensor via ``_blockwise_contract``
+      2. Fuse the two uncontracted legs via ``fuse_indices``
+      3. Concatenate ``[M | P]`` as a SymmetricTensor (dense round-trip on
+         the small site-sized tensors, with correct charge arrays)
+      4. Block-sparse SVD via ``tenax.linalg.svd`` — preserves charge sectors
+      5. Absorb singular values into the neighbor via ``contract``
+
+    The ``todense()`` calls are only on site-sized tensors (bounded by
+    ``max_bond_dim``), not on environments.
+    """
+    from tenax.algorithms._tensor_utils import fuse_indices
+    from tenax.algorithms.dmrg import _blockwise_contract
+    from tenax.contraction.contractor import contract
+    from tenax.linalg import svd as _linalg_svd
+
+    if direction == "left_to_right":
+        return _expand_truncate_sym_ltr(
+            site,
+            neighbor,
+            env,
+            mpo,
+            alpha,
+            max_bond_dim,
+            svd_trunc_err,
+            fuse_indices,
+            _blockwise_contract,
+            contract,
+            _linalg_svd,
+        )
+    else:
+        return _expand_truncate_sym_rtl(
+            site,
+            neighbor,
+            env,
+            mpo,
+            alpha,
+            max_bond_dim,
+            svd_trunc_err,
+            fuse_indices,
+            _blockwise_contract,
+            contract,
+            _linalg_svd,
+        )
+
+
+def _expand_truncate_sym_ltr(
+    site,
+    neighbor,
+    env,
+    mpo,
+    alpha,
+    max_bond_dim,
+    svd_trunc_err,
+    fuse_indices,
+    _blockwise_contract,
+    contract,
+    _linalg_svd,
+):
+    """L→R symmetric expansion: expand right bond of site."""
+    # Step 1: Build 4-leg expansion tensor P[c, x, e, d]
+    # Using the 1-site matvec einsum minus right env:
+    #   L[a,b,c] M[a,p,d] W[b,p,x,e] → P[c,x,e,d]
+    output_indices_4leg = (
+        env.indices[2],  # c: virt_bra from left env
+        mpo.indices[2],  # x: phys_bra from MPO
+        mpo.indices[3],  # e: mpo_right
+        site.indices[2],  # d: virt_right from site
+    )
+    P4 = _blockwise_contract(
+        [env, site, mpo],
+        "abc,apd,bpxe->cxed",
+        output_indices=output_indices_4leg,
+    )
+    P4 = P4 * alpha
+
+    # Step 2: Fuse (e, d) → single expanded right bond
+    bond_label = site.indices[2].label
+    bond_flow = site.indices[2].flow
+    P3 = fuse_indices(P4, 2, 3, bond_label, bond_flow)
+
+    # Step 3: Concatenate [M | P] along right bond as SymmetricTensor
+    M_dense = site.todense()
+    P_dense = P3.todense()
+    expanded_dense = jnp.concatenate([M_dense, P_dense], axis=-1)
+
+    # Build combined right-bond charges
+    orig_charges = np.asarray(site.indices[2].charges)
+    exp_charges = np.asarray(P3.indices[2].charges)
+    combined_charges = np.concatenate([orig_charges, exp_charges])
+    combined_right_idx = TensorIndex(
+        symmetry=site.indices[2].symmetry,
+        charges=combined_charges,
+        flow=site.indices[2].flow,
+        label=site.indices[2].label,
+    )
+    expanded_indices = site.indices[:2] + (combined_right_idx,)
+    expanded = SymmetricTensor.from_dense(
+        expanded_dense, expanded_indices, tol=float("inf")
+    )
+
+    # Step 4: Block-sparse SVD
+    left_labels = [site.indices[0].label, site.indices[1].label]
+    right_labels = [combined_right_idx.label]
+    svd_bond = "_dmrg3s_bond"
+    A, s, Vh, _ = _linalg_svd(
+        expanded,
+        left_labels,
+        right_labels,
+        new_bond_label=svd_bond,
+        max_singular_values=max_bond_dim,
+    )
+
+    # Step 5: Absorb s into Vh directly (scale rows by singular values)
+    # Avoid label collision from s_diag by absorbing s into Vh's dense data
+    Vh_data = Vh.todense()
+    sVh_data = (
+        s[:, None] * Vh_data
+        if Vh_data.ndim == 2
+        else jnp.einsum("i,i...->i...", s, Vh_data)
+    )
+    sVh = SymmetricTensor.from_dense(sVh_data, Vh.indices, tol=float("inf"))
+
+    # Zero-pad neighbor's left bond to match expanded right bond,
+    # then contract with sVh
+    neigh_dense = neighbor.todense()
+    chi_r_orig = site.todense().shape[-1]
+    pad_rows = expanded_dense.shape[-1] - chi_r_orig
+    B_padded_dense = jnp.concatenate(
+        [
+            neigh_dense,
+            jnp.zeros((pad_rows,) + neigh_dense.shape[1:], dtype=neigh_dense.dtype),
+        ],
+        axis=0,
+    )
+    # Build SymmetricTensor for padded neighbor
+    padded_left_idx = TensorIndex(
+        symmetry=combined_right_idx.symmetry,
+        charges=combined_charges,
+        flow=neighbor.indices[0].flow,
+        label=neighbor.indices[0].label,
+    )
+    padded_neigh_indices = (padded_left_idx,) + neighbor.indices[1:]
+    B_padded = SymmetricTensor.from_dense(
+        B_padded_dense, padded_neigh_indices, tol=float("inf")
+    )
+
+    new_neighbor = contract(sVh, B_padded)
+
+    # Relabel the SVD bond to the original MPS bond label
+    orig_bond_label = site.indices[2].label
+    A = A.relabel(svd_bond, orig_bond_label)
+    new_neighbor = new_neighbor.relabel(svd_bond, neighbor.indices[0].label)
+
+    return A, new_neighbor
+
+
+def _expand_truncate_sym_rtl(
+    site,
+    neighbor,
+    env,
+    mpo,
+    alpha,
+    max_bond_dim,
+    svd_trunc_err,
+    fuse_indices,
+    _blockwise_contract,
+    contract,
+    _linalg_svd,
+):
+    """R→L symmetric expansion: expand left bond of site."""
+    # Step 1: Build 4-leg expansion tensor P[b, a, x, f]
+    #   M[a,p,d] W[b,p,x,e] R[d,e,f] → P[b,a,x,f]
+    output_indices_4leg = (
+        mpo.indices[0],  # b: mpo_left
+        site.indices[0],  # a: virt_left from site
+        mpo.indices[2],  # x: phys_bra from MPO
+        env.indices[2],  # f: virt_bra from right env
+    )
+    P4 = _blockwise_contract(
+        [site, mpo, env],
+        "apd,bpxe,def->baxf",
+        output_indices=output_indices_4leg,
+    )
+    P4 = P4 * alpha
+
+    # Step 2: Fuse (b, a) → single expanded left bond
+    bond_label = site.indices[0].label
+    bond_flow = site.indices[0].flow
+    P3 = fuse_indices(P4, 0, 1, bond_label, bond_flow)
+
+    # Step 3: Concatenate [P; M] along left bond
+    P_dense = P3.todense()
+    M_dense = site.todense()
+    expanded_dense = jnp.concatenate([P_dense, M_dense], axis=0)
+
+    orig_charges = np.asarray(site.indices[0].charges)
+    exp_charges = np.asarray(P3.indices[0].charges)
+    combined_charges = np.concatenate([exp_charges, orig_charges])
+    combined_left_idx = TensorIndex(
+        symmetry=site.indices[0].symmetry,
+        charges=combined_charges,
+        flow=site.indices[0].flow,
+        label=site.indices[0].label,
+    )
+    expanded_indices = (combined_left_idx,) + site.indices[1:]
+    expanded = SymmetricTensor.from_dense(
+        expanded_dense, expanded_indices, tol=float("inf")
+    )
+
+    # Step 4: Block-sparse SVD
+    left_labels = [combined_left_idx.label]
+    right_labels = [site.indices[1].label, site.indices[2].label]
+    svd_bond = "_dmrg3s_bond"
+    U, s, B, _ = _linalg_svd(
+        expanded,
+        left_labels,
+        right_labels,
+        new_bond_label=svd_bond,
+        max_singular_values=max_bond_dim,
+    )
+
+    # Step 5: Absorb s into U directly (scale columns by singular values)
+    U_data = U.todense()
+    Us_data = (
+        U_data * s[None, :]
+        if U_data.ndim == 2
+        else jnp.einsum("...i,i->...i", U_data, s)
+    )
+    Us = SymmetricTensor.from_dense(Us_data, U.indices, tol=float("inf"))
+
+    # Zero-pad neighbor's right bond: [0 | A]
+    neigh_dense = neighbor.todense()
+    chi_l_orig = site.todense().shape[0]
+    pad_cols = expanded_dense.shape[0] - chi_l_orig
+    A_padded_dense = jnp.concatenate(
+        [
+            jnp.zeros(neigh_dense.shape[:-1] + (pad_cols,), dtype=neigh_dense.dtype),
+            neigh_dense,
+        ],
+        axis=-1,
+    )
+    padded_right_idx = TensorIndex(
+        symmetry=combined_left_idx.symmetry,
+        charges=combined_charges,
+        flow=neighbor.indices[-1].flow,
+        label=neighbor.indices[-1].label,
+    )
+    padded_neigh_indices = neighbor.indices[:-1] + (padded_right_idx,)
+    A_padded = SymmetricTensor.from_dense(
+        A_padded_dense, padded_neigh_indices, tol=float("inf")
+    )
+
+    new_neighbor = contract(A_padded, Us)
+
+    # Relabel
+    orig_bond_label = site.indices[0].label
+    B = B.relabel(svd_bond, orig_bond_label)
+    new_neighbor = new_neighbor.relabel(svd_bond, neighbor.indices[-1].label)
+
+    return B, new_neighbor

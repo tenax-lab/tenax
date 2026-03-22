@@ -154,12 +154,6 @@ def dmrg(
             "subspace_expansion=True requires two_site=False. "
             "DMRG3S enrichment is a 1-site algorithm."
         )
-    if config.subspace_expansion:
-        # Defer validation until we know the tensor types
-        _subspace_expansion_requested = True
-    else:
-        _subspace_expansion_requested = False
-
     L = hamiltonian.n_nodes()
     if L < 2:
         raise ValueError(
@@ -191,12 +185,6 @@ def dmrg(
         raise TypeError(
             "dmrg() requires uniform tensor types: all DenseTensor or all "
             "SymmetricTensor. Got mixed types — convert explicitly."
-        )
-
-    if _subspace_expansion_requested and use_symmetric:
-        raise NotImplementedError(
-            "subspace_expansion is not yet supported with symmetric tensors. "
-            "Use dense tensors or two_site=True for bond growth with symmetry."
         )
 
     # Validate initial MPS sector if target_charge is specified
@@ -292,24 +280,44 @@ def dmrg(
                 energy = float(e)
 
                 if config.subspace_expansion and i < L - 1:
-                    from tenax.algorithms.dmrg3s import expand_and_truncate_dense
+                    if use_symmetric:
+                        from tenax.algorithms.dmrg3s import (
+                            expand_and_truncate_symmetric,
+                        )
 
-                    A_arr, B_arr = expand_and_truncate_dense(
-                        new_site.todense(),
-                        mps_tensors[i + 1].todense(),
-                        l_env,
-                        mpo_tensors[i],
-                        alpha=_current_alpha,
-                        max_bond_dim=config.max_bond_dim,
-                        direction="left_to_right",
-                        svd_trunc_err=config.svd_trunc_err,
-                    )
-                    mps_tensors[i] = _rebuild_dense_tensor(
-                        A_arr, new_site.indices, bond_pos=-1
-                    )
-                    mps_tensors[i + 1] = _rebuild_dense_tensor(
-                        B_arr, mps_tensors[i + 1].indices, bond_pos=0
-                    )
+                        mps_tensors[i], mps_tensors[i + 1] = (
+                            expand_and_truncate_symmetric(
+                                new_site,
+                                mps_tensors[i + 1],
+                                l_env,
+                                mpo_tensors[i],
+                                alpha=_current_alpha,
+                                max_bond_dim=config.max_bond_dim,
+                                direction="left_to_right",
+                                svd_trunc_err=config.svd_trunc_err,
+                            )
+                        )
+                    else:
+                        from tenax.algorithms.dmrg3s import (
+                            expand_and_truncate_dense,
+                        )
+
+                        A_arr, B_arr = expand_and_truncate_dense(
+                            new_site.todense(),
+                            mps_tensors[i + 1].todense(),
+                            l_env,
+                            mpo_tensors[i],
+                            alpha=_current_alpha,
+                            max_bond_dim=config.max_bond_dim,
+                            direction="left_to_right",
+                            svd_trunc_err=config.svd_trunc_err,
+                        )
+                        mps_tensors[i] = _rebuild_dense_tensor(
+                            A_arr, new_site.indices, bond_pos=-1
+                        )
+                        mps_tensors[i + 1] = _rebuild_dense_tensor(
+                            B_arr, mps_tensors[i + 1].indices, bond_pos=0
+                        )
                 else:
                     # QR + absorb R + build env (atomic step for 1-site)
                     right_bond = f"v{i}_{i + 1}"
@@ -378,24 +386,44 @@ def dmrg(
                 energy = float(e)
 
                 if config.subspace_expansion and i > 0:
-                    from tenax.algorithms.dmrg3s import expand_and_truncate_dense
+                    if use_symmetric:
+                        from tenax.algorithms.dmrg3s import (
+                            expand_and_truncate_symmetric,
+                        )
 
-                    B_arr, A_arr = expand_and_truncate_dense(
-                        new_site.todense(),
-                        mps_tensors[i - 1].todense(),
-                        r1_env,
-                        mpo_tensors[i],
-                        alpha=_current_alpha,
-                        max_bond_dim=config.max_bond_dim,
-                        direction="right_to_left",
-                        svd_trunc_err=config.svd_trunc_err,
-                    )
-                    mps_tensors[i] = _rebuild_dense_tensor(
-                        B_arr, new_site.indices, bond_pos=0
-                    )
-                    mps_tensors[i - 1] = _rebuild_dense_tensor(
-                        A_arr, mps_tensors[i - 1].indices, bond_pos=-1
-                    )
+                        mps_tensors[i], mps_tensors[i - 1] = (
+                            expand_and_truncate_symmetric(
+                                new_site,
+                                mps_tensors[i - 1],
+                                r1_env,
+                                mpo_tensors[i],
+                                alpha=_current_alpha,
+                                max_bond_dim=config.max_bond_dim,
+                                direction="right_to_left",
+                                svd_trunc_err=config.svd_trunc_err,
+                            )
+                        )
+                    else:
+                        from tenax.algorithms.dmrg3s import (
+                            expand_and_truncate_dense,
+                        )
+
+                        B_arr, A_arr = expand_and_truncate_dense(
+                            new_site.todense(),
+                            mps_tensors[i - 1].todense(),
+                            r1_env,
+                            mpo_tensors[i],
+                            alpha=_current_alpha,
+                            max_bond_dim=config.max_bond_dim,
+                            direction="right_to_left",
+                            svd_trunc_err=config.svd_trunc_err,
+                        )
+                        mps_tensors[i] = _rebuild_dense_tensor(
+                            B_arr, new_site.indices, bond_pos=0
+                        )
+                        mps_tensors[i - 1] = _rebuild_dense_tensor(
+                            A_arr, mps_tensors[i - 1].indices, bond_pos=-1
+                        )
                 else:
                     # RQ + absorb L + build env (atomic step for 1-site)
                     left_bond = f"v{i - 1}_{i}"
