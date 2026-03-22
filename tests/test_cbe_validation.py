@@ -64,34 +64,28 @@ class TestCBEValidation:
         )
 
     def test_expand_bond_produces_orthogonal_directions(self):
-        """CBE expansion vectors from H sketch differ from random noise."""
-        L = 4
-        chi = 3
+        """CBE expansion adds columns orthogonal to the original site tensor.
+
+        Uses a deterministic left-canonical site (via QR) and a non-trivial
+        diagonal matvec to ensure the sketch has components outside the
+        original column space.
+        """
+        chi_l, d, chi_r = 4, 2, 3
+        d2, chi_rr = 2, 3
         k = 2
 
-        mpo = build_mpo_heisenberg(L)
-        mps = build_random_symmetric_mps(L, bond_dim=chi, seed=0)
-        result = dmrg(
-            mpo, mps, DMRGConfig(max_bond_dim=chi, num_sweeps=5, two_site=False)
-        )
+        # Build a left-canonical site tensor: A_mat has orthonormal columns
+        key0, key1 = jax.random.split(jax.random.PRNGKey(0))
+        A_mat, _ = jnp.linalg.qr(jax.random.normal(key0, (chi_l * d, chi_r)))
+        site_3d = A_mat.reshape(chi_l, d, chi_r)
+        right_3d = jax.random.normal(key1, (chi_r, d2, chi_rr))
 
-        # Get site 1 (middle site) and its neighbors
-        site = result.mps.get_tensor(1)
-        right = result.mps.get_tensor(2)
-
-        site_3d = site.todense()
-        right_3d = right.todense()
-        if site_3d.ndim == 2:
-            site_3d = site_3d[:, :, jnp.newaxis]
-        if right_3d.ndim == 2:
-            right_3d = right_3d[:, :, jnp.newaxis]
-
-        chi_l, d, chi_r = site_3d.shape
-        _, d2, chi_rr = right_3d.shape
-
-        # Build a simple matvec (identity — just for shape test)
-        def identity_matvec(v, shape):
-            return v
+        # Non-trivial matvec: diagonal H with distinct eigenvalues.
+        # Identity matvec is broken for CBE because the sketch Y = A @ M lies
+        # entirely in A's column space, making Y_perp = 0 and QR degenerate.
+        def diagonal_matvec(v, shape):
+            n = v.shape[0]
+            return v * jnp.arange(1, n + 1, dtype=v.dtype)
 
         sym = U1Symmetry()
 
@@ -114,14 +108,13 @@ class TestCBEValidation:
         right_t = _wrap(right_3d, "w")
 
         expanded = expand_bond(
-            site_t, identity_matvec, right_t, k=k, key=jax.random.PRNGKey(42)
+            site_t, diagonal_matvec, right_t, k=k, key=jax.random.PRNGKey(42)
         )
         exp = expanded.todense()
 
         assert exp.shape == (chi_l, d, chi_r + k)
 
-        # Check orthogonality of new columns to original
-        A_mat = site_3d.reshape(chi_l * d, chi_r)
+        # Verify orthogonality: new columns should be perpendicular to original
         new_cols = exp.reshape(chi_l * d, chi_r + k)[:, chi_r:]
         overlap = jnp.conj(A_mat).T @ new_cols
         assert float(jnp.max(jnp.abs(overlap))) < 1e-10, (

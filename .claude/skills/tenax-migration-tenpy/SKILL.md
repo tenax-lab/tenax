@@ -121,8 +121,21 @@ C = psi.correlation_function("Sz", "Sz")
 S = psi.entanglement_entropy()
 ```
 
-**Tenax:** Observables require manual contraction. The iDMRG result exposes
-`singular_values` for entanglement entropy:
+**Tenax:** Built-in `expectation_value()` and `correlation()` functions:
+
+```python
+from tenax.algorithms.observables import expectation_value, correlation
+import numpy as np
+
+Sz = np.array([[0.5, 0.0], [0.0, -0.5]])
+sz_val = expectation_value(result.mps, Sz, site=0)
+corr = correlation(result.mps, Sz, 0, Sz, 5)
+
+# For fermionic correlators: anticommute=True handles operator ordering
+corr_f = correlation(result.mps, Cdag, 0, C, 3, anticommute=True)
+```
+
+Entanglement entropy from iDMRG singular values:
 
 ```python
 import jax.numpy as jnp

@@ -17,6 +17,8 @@ Block-sparse design (SymmetricTensor):
 
 from __future__ import annotations
 
+import warnings
+from abc import ABC, abstractmethod
 from collections import Counter
 from typing import Any
 
@@ -296,34 +298,35 @@ def _block_slices(
 # ---------- Tensor Protocol ----------
 
 
-class Tensor:
-    """Structural base class (duck-typed protocol) for tensor objects.
+class Tensor(ABC):
+    """Abstract base class for tensor objects.
 
     Both DenseTensor and SymmetricTensor satisfy this interface.
     Users should type-hint with Tensor for polymorphic code.
     """
 
     @property
-    def indices(self) -> tuple[TensorIndex, ...]:
-        raise NotImplementedError
+    @abstractmethod
+    def indices(self) -> tuple[TensorIndex, ...]: ...
 
     @property
-    def ndim(self) -> int:
-        raise NotImplementedError
+    @abstractmethod
+    def ndim(self) -> int: ...
 
     @property
-    def dtype(self) -> Any:
-        raise NotImplementedError
+    @abstractmethod
+    def dtype(self) -> Any: ...
 
-    def todense(self) -> jax.Array:
-        raise NotImplementedError
+    @abstractmethod
+    def todense(self) -> jax.Array: ...
 
-    def conj(self) -> Tensor:
-        raise NotImplementedError
+    @abstractmethod
+    def conj(self) -> Tensor: ...
 
-    def dagger(self) -> Tensor:
-        raise NotImplementedError
+    @abstractmethod
+    def dagger(self) -> Tensor: ...
 
+    @abstractmethod
     def bar(self) -> Tensor:
         """Element-wise conjugate with all flows flipped (no charge dual).
 
@@ -335,18 +338,19 @@ class Tensor:
         Used as the bra operation in split CTM to avoid the charge-mismatch
         problem that arises with :meth:`dagger` for nontrivial U(1) charges.
         """
-        raise NotImplementedError
+        ...
 
-    def transpose(self, axes: tuple[int, ...]) -> Tensor:
-        raise NotImplementedError
+    @abstractmethod
+    def transpose(self, axes: tuple[int, ...]) -> Tensor: ...
 
-    def norm(self) -> jax.Array:
-        raise NotImplementedError
+    @abstractmethod
+    def norm(self) -> jax.Array: ...
 
     def labels(self) -> tuple[Label, ...]:
         """Return the label of each leg in order."""
         return tuple(idx.label for idx in self.indices)
 
+    @abstractmethod
     def relabel(self, old: Label, new: Label) -> Tensor:
         """Return a new tensor with one label renamed.
 
@@ -360,7 +364,7 @@ class Tensor:
         Raises:
             KeyError: If old label not found.
         """
-        raise NotImplementedError
+        ...
 
     def relabels(self, mapping: dict[Label, Label]) -> Tensor:
         """Return a new tensor with multiple labels renamed.
@@ -426,6 +430,11 @@ def inner(a: Tensor, b: Tensor) -> jax.Array:
                 total = total + jnp.sum(jnp.conj(a_blocks[key]) * b_blocks[key])
         return total
     # Mixed types: fall back to dense
+    warnings.warn(
+        "inner() called with mixed tensor types (DenseTensor + SymmetricTensor). "
+        "Falling back to todense() which may be slow for large tensors.",
+        stacklevel=2,
+    )
     return jnp.sum(jnp.conj(a.todense()) * b.todense())
 
 
@@ -682,6 +691,37 @@ class SymmetricTensor(Tensor):
             offset += size
         self._block_offsets: tuple[int, ...] = tuple(offsets)
 
+    @classmethod
+    def _raw(
+        cls,
+        *,
+        indices: tuple[TensorIndex, ...],
+        data: jax.Array,
+        block_keys: tuple[BlockKey, ...],
+        block_shapes: tuple[tuple[int, ...], ...],
+        block_offsets: tuple[int, ...],
+    ) -> SymmetricTensor:
+        """Construct without validation from pre-computed flat-buffer fields."""
+        obj = object.__new__(cls)
+        obj._indices = indices
+        obj._data = data
+        obj._block_keys = block_keys
+        obj._block_shapes = block_shapes
+        obj._block_offsets = block_offsets
+        return obj
+
+    @classmethod
+    def _from_blocks_unchecked(
+        cls,
+        blocks: dict[BlockKey, jax.Array],
+        indices: tuple[TensorIndex, ...],
+    ) -> SymmetricTensor:
+        """Construct without validation from a blocks dict."""
+        obj = object.__new__(cls)
+        obj._indices = tuple(indices)
+        obj._init_flat_buffer(blocks)
+        return obj
+
     def _validate(self) -> None:
         """Verify all block keys satisfy the symmetry conservation law."""
         if not self._indices:
@@ -743,13 +783,13 @@ class SymmetricTensor(Tensor):
         children: list[jax.Array],
     ) -> SymmetricTensor:
         block_keys, block_shapes, block_offsets, indices = aux
-        obj = object.__new__(cls)
-        obj._data = children[0]
-        obj._block_keys = block_keys
-        obj._block_shapes = block_shapes
-        obj._block_offsets = block_offsets
-        obj._indices = indices
-        return obj
+        return cls._raw(
+            indices=indices,
+            data=children[0],
+            block_keys=block_keys,
+            block_shapes=block_shapes,
+            block_offsets=block_offsets,
+        )
 
     # --- Factory methods ---
 
@@ -780,10 +820,7 @@ class SymmetricTensor(Tensor):
         if target is not None and target != 0:
             # Non-identity target: blocks satisfy sum(flow*q) == target,
             # which would fail standard validation. Bypass it.
-            obj = object.__new__(cls)
-            obj._indices = tuple(indices)
-            obj._init_flat_buffer(dict(blocks))
-            return obj
+            return cls._from_blocks_unchecked(dict(blocks), indices)
         return cls(blocks, indices)
 
     @classmethod
@@ -821,10 +858,7 @@ class SymmetricTensor(Tensor):
         if target is not None and target != 0:
             # Non-identity target: blocks satisfy sum(flow*q) == target,
             # which would fail standard validation. Bypass it.
-            obj = object.__new__(cls)
-            obj._indices = tuple(indices)
-            obj._init_flat_buffer(dict(blocks))
-            return obj
+            return cls._from_blocks_unchecked(dict(blocks), indices)
         return cls(blocks, indices)
 
     @classmethod
@@ -943,13 +977,13 @@ class SymmetricTensor(Tensor):
 
     def conj(self) -> SymmetricTensor:
         """Return conjugate tensor (single flat buffer op)."""
-        obj = object.__new__(SymmetricTensor)
-        obj._data = jnp.conj(self._data)
-        obj._block_keys = self._block_keys
-        obj._block_shapes = self._block_shapes
-        obj._block_offsets = self._block_offsets
-        obj._indices = self._indices
-        return obj
+        return SymmetricTensor._raw(
+            indices=self._indices,
+            data=jnp.conj(self._data),
+            block_keys=self._block_keys,
+            block_shapes=self._block_shapes,
+            block_offsets=self._block_offsets,
+        )
 
     def dagger(self) -> SymmetricTensor:
         """Conjugate transpose with fermionic twist phases.
@@ -983,21 +1017,18 @@ class SymmetricTensor(Tensor):
                 if n_sign % 2 == 1:
                     val = -val
             new_blocks[new_key] = val
-        obj = object.__new__(SymmetricTensor)
-        obj._indices = new_indices
-        obj._init_flat_buffer(new_blocks)
-        return obj
+        return SymmetricTensor._from_blocks_unchecked(new_blocks, new_indices)
 
     def bar(self) -> SymmetricTensor:
         """Element-wise conjugate with flipped flows. No charge dual, no twist."""
         new_indices = tuple(idx.flip_flow() for idx in self._indices)
-        obj = object.__new__(SymmetricTensor)
-        obj._data = jnp.conj(self._data)
-        obj._block_keys = self._block_keys
-        obj._block_shapes = self._block_shapes
-        obj._block_offsets = self._block_offsets
-        obj._indices = new_indices
-        return obj
+        return SymmetricTensor._raw(
+            indices=new_indices,
+            data=jnp.conj(self._data),
+            block_keys=self._block_keys,
+            block_shapes=self._block_shapes,
+            block_offsets=self._block_offsets,
+        )
 
     def transpose(self, axes: tuple[int, ...]) -> SymmetricTensor:
         """Permute tensor legs.
@@ -1025,10 +1056,7 @@ class SymmetricTensor(Tensor):
                 if sign < 0:
                     transposed = -transposed
             new_blocks[new_key] = transposed
-        obj = object.__new__(SymmetricTensor)
-        obj._indices = new_indices
-        obj._init_flat_buffer(new_blocks)
-        return obj
+        return SymmetricTensor._from_blocks_unchecked(new_blocks, new_indices)
 
     def norm(self) -> jax.Array:
         """Frobenius norm across all blocks."""
@@ -1068,13 +1096,13 @@ class SymmetricTensor(Tensor):
             raise KeyError(
                 f"Label {old!r} not found in tensor with labels {self.labels()}"
             )
-        obj = object.__new__(SymmetricTensor)
-        obj._indices = tuple(new_indices)
-        obj._data = self._data
-        obj._block_keys = self._block_keys
-        obj._block_shapes = self._block_shapes
-        obj._block_offsets = self._block_offsets
-        return obj
+        return SymmetricTensor._raw(
+            indices=tuple(new_indices),
+            data=self._data,
+            block_keys=self._block_keys,
+            block_shapes=self._block_shapes,
+            block_offsets=self._block_offsets,
+        )
 
     def relabels(self, mapping: dict[Label, Label]) -> SymmetricTensor:
         """Return a copy with multiple leg labels renamed at once.
@@ -1090,22 +1118,22 @@ class SymmetricTensor(Tensor):
             idx.relabel(mapping[idx.label]) if idx.label in mapping else idx
             for idx in self._indices
         )
-        obj = object.__new__(SymmetricTensor)
-        obj._indices = new_indices
-        obj._data = self._data
-        obj._block_keys = self._block_keys
-        obj._block_shapes = self._block_shapes
-        obj._block_offsets = self._block_offsets
-        return obj
+        return SymmetricTensor._raw(
+            indices=new_indices,
+            data=self._data,
+            block_keys=self._block_keys,
+            block_shapes=self._block_shapes,
+            block_offsets=self._block_offsets,
+        )
 
     def __mul__(self, scalar: float) -> SymmetricTensor:
-        obj = object.__new__(SymmetricTensor)
-        obj._indices = self._indices
-        obj._data = self._data * scalar
-        obj._block_keys = self._block_keys
-        obj._block_shapes = self._block_shapes
-        obj._block_offsets = self._block_offsets
-        return obj
+        return SymmetricTensor._raw(
+            indices=self._indices,
+            data=self._data * scalar,
+            block_keys=self._block_keys,
+            block_shapes=self._block_shapes,
+            block_offsets=self._block_offsets,
+        )
 
     def __rmul__(self, scalar: float) -> SymmetricTensor:
         return self.__mul__(scalar)
@@ -1122,13 +1150,13 @@ class SymmetricTensor(Tensor):
             self._block_keys == other._block_keys
             and self._block_shapes == other._block_shapes
         ):
-            obj = object.__new__(SymmetricTensor)
-            obj._data = self._data + other._data
-            obj._block_keys = self._block_keys
-            obj._block_shapes = self._block_shapes
-            obj._block_offsets = self._block_offsets
-            obj._indices = self._indices
-            return obj
+            return SymmetricTensor._raw(
+                indices=self._indices,
+                data=self._data + other._data,
+                block_keys=self._block_keys,
+                block_shapes=self._block_shapes,
+                block_offsets=self._block_offsets,
+            )
         # Slow path: union of block keys
         self_blocks = self.blocks
         other_blocks = other.blocks
@@ -1141,10 +1169,7 @@ class SymmetricTensor(Tensor):
                 new_blocks[key] = self_blocks[key]
             else:
                 new_blocks[key] = other_blocks[key]
-        obj = object.__new__(SymmetricTensor)
-        obj._indices = self._indices
-        obj._init_flat_buffer(new_blocks)
-        return obj
+        return SymmetricTensor._from_blocks_unchecked(new_blocks, self._indices)
 
     def __sub__(self, other: Tensor) -> SymmetricTensor:
         if not isinstance(other, SymmetricTensor):

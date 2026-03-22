@@ -214,7 +214,16 @@ def _truncated_svd_symmetric(
             right_col_sizes,
         )
 
-    # Global truncation: merge all singular values across sectors
+    # Global ("democratic") truncation: merge singular values from all charge
+    # sectors and sort globally descending.  The largest singular values are
+    # kept regardless of which sector they belong to.  This is the standard
+    # choice for ground-state DMRG — it minimises the total truncation error
+    # in the 2-norm (Frobenius norm of the discarded weight).
+    #
+    # Alternative: per-sector truncation preserves sector weight ratios but
+    # can waste bond dimension on sectors with small total weight.  It may be
+    # preferable for finite-temperature (purification) or time-evolution
+    # applications where sector balance matters physically.
     all_sv_pairs: list[
         tuple[float, int, int]
     ] = []  # (value, sector_q, index_in_sector)

@@ -64,9 +64,16 @@ class DMRGConfig:
         target_charge:      Target total charge (e.g. 2*Sz for U(1)). If set,
                             validates MPS sector before and after each sweep.
                             Use with ``build_random_symmetric_mps(target_charge=...)``.
-        subspace_expansion: If True, use DMRG3S enrichment during 1-site sweeps
-                            (Hubig et al. 2015). Requires ``two_site=False``.
-        mixing_factor:      Initial mixing strength α for DMRG3S expansion.
+        subspace_expansion: If True, use subspace expansion during 1-site sweeps
+                            to escape local minima. Requires ``two_site=False``.
+        mixing_factor:      Mixing strength α for DMRG3S expansion (Hubig 2015).
+                            Ignored when ``hybrid_mixing=True``.
+        expansion_num_extra: Number of extra expansion states Δ beyond the kept
+                            χ states. Default 0 means Δ = int(0.1 * χ).
+        hybrid_mixing:      If True (default), use adaptive √(ε_trunc) scaling
+                            instead of fixed α. The expansion is weighted by the
+                            truncation error, giving strong mixing when needed
+                            and vanishing mixing at convergence.
         verbose:            Print energy at each sweep.
     """
 
@@ -82,6 +89,8 @@ class DMRGConfig:
     target_charge: int | None = None
     subspace_expansion: bool = False
     mixing_factor: float = 1e-3
+    expansion_num_extra: int = 0
+    hybrid_mixing: bool = True
     verbose: bool = False
 
 
@@ -298,20 +307,37 @@ def dmrg(
                             )
                         )
                     else:
-                        from tenax.algorithms.dmrg3s import (
-                            expand_and_truncate_dense,
-                        )
+                        if config.hybrid_mixing:
+                            from tenax.algorithms.dmrg3s import (
+                                expand_and_truncate_hybrid,
+                            )
 
-                        A_arr, B_arr = expand_and_truncate_dense(
-                            new_site.todense(),
-                            mps_tensors[i + 1].todense(),
-                            l_env,
-                            mpo_tensors[i],
-                            alpha=_current_alpha,
-                            max_bond_dim=config.max_bond_dim,
-                            direction="left_to_right",
-                            svd_trunc_err=config.svd_trunc_err,
-                        )
+                            A_arr, B_arr = expand_and_truncate_hybrid(
+                                new_site.todense(),
+                                mps_tensors[i + 1].todense(),
+                                l_env,
+                                mpo_tensors[i],
+                                max_bond_dim=config.max_bond_dim,
+                                direction="left_to_right",
+                                num_extra=config.expansion_num_extra,
+                                hybrid=True,
+                                svd_trunc_err=config.svd_trunc_err,
+                            )
+                        else:
+                            from tenax.algorithms.dmrg3s import (
+                                expand_and_truncate_dense,
+                            )
+
+                            A_arr, B_arr = expand_and_truncate_dense(
+                                new_site.todense(),
+                                mps_tensors[i + 1].todense(),
+                                l_env,
+                                mpo_tensors[i],
+                                alpha=_current_alpha,
+                                max_bond_dim=config.max_bond_dim,
+                                direction="left_to_right",
+                                svd_trunc_err=config.svd_trunc_err,
+                            )
                         mps_tensors[i] = _rebuild_dense_tensor(
                             A_arr, new_site.indices, bond_pos=-1
                         )
@@ -404,20 +430,37 @@ def dmrg(
                             )
                         )
                     else:
-                        from tenax.algorithms.dmrg3s import (
-                            expand_and_truncate_dense,
-                        )
+                        if config.hybrid_mixing:
+                            from tenax.algorithms.dmrg3s import (
+                                expand_and_truncate_hybrid,
+                            )
 
-                        B_arr, A_arr = expand_and_truncate_dense(
-                            new_site.todense(),
-                            mps_tensors[i - 1].todense(),
-                            r1_env,
-                            mpo_tensors[i],
-                            alpha=_current_alpha,
-                            max_bond_dim=config.max_bond_dim,
-                            direction="right_to_left",
-                            svd_trunc_err=config.svd_trunc_err,
-                        )
+                            B_arr, A_arr = expand_and_truncate_hybrid(
+                                new_site.todense(),
+                                mps_tensors[i - 1].todense(),
+                                r1_env,
+                                mpo_tensors[i],
+                                max_bond_dim=config.max_bond_dim,
+                                direction="right_to_left",
+                                num_extra=config.expansion_num_extra,
+                                hybrid=True,
+                                svd_trunc_err=config.svd_trunc_err,
+                            )
+                        else:
+                            from tenax.algorithms.dmrg3s import (
+                                expand_and_truncate_dense,
+                            )
+
+                            B_arr, A_arr = expand_and_truncate_dense(
+                                new_site.todense(),
+                                mps_tensors[i - 1].todense(),
+                                r1_env,
+                                mpo_tensors[i],
+                                alpha=_current_alpha,
+                                max_bond_dim=config.max_bond_dim,
+                                direction="right_to_left",
+                                svd_trunc_err=config.svd_trunc_err,
+                            )
                         mps_tensors[i] = _rebuild_dense_tensor(
                             B_arr, new_site.indices, bond_pos=0
                         )
@@ -875,6 +918,11 @@ def _lanczos_solve(
         if step > 0:
             w = w - betas_jax[-1] * basis[-2]
 
+        # Full reorthogonalization against all previous basis vectors
+        # to prevent loss of orthogonality and ghost eigenvalues.
+        for q in basis:
+            w = w - jnp.dot(q.conj(), w) * q
+
         beta = jnp.linalg.norm(w)
         betas_jax.append(beta)
 
@@ -1066,6 +1114,10 @@ def _lanczos_solve_tensor(
         w = w - basis[-1] * alpha_val
         if step > 0:
             w = w - basis[-2] * betas[-1]
+
+        # Full reorthogonalization against all previous basis vectors.
+        for q in basis:
+            w = w - q * float(inner(q, w))
 
         beta_val = float(w.norm())
         betas.append(beta_val)

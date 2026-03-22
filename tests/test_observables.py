@@ -153,3 +153,43 @@ class TestOperatorCharge:
     def test_identity_charge(self):
         """Identity has charge 0."""
         assert operator_charge(I2) == 0
+
+
+class TestCorrelationAnticommute:
+    def test_anticommute_sign_flip(self):
+        """correlation() with anticommute=True should negate result when sites are swapped."""
+        L = 4
+        result = _run_dmrg_sz0(L, bond_dim=8)
+
+        # Compute <Sp_0 Sm_2> in both orderings
+        corr_normal = correlation(result.mps, Sp, 0, Sm, 2)
+        # Call with sites reversed — should swap internally
+        corr_reversed = correlation(result.mps, Sm, 2, Sp, 0)
+        corr_reversed_anti = correlation(result.mps, Sm, 2, Sp, 0, anticommute=True)
+
+        # Without anticommute: swap makes no sign difference (default behavior)
+        np.testing.assert_allclose(corr_normal, corr_reversed, atol=1e-10)
+        # With anticommute: swap introduces a sign flip
+        np.testing.assert_allclose(corr_normal, -corr_reversed_anti, atol=1e-10)
+
+
+class TestExpectationValueWarning:
+    def test_hermitian_no_warning(self):
+        """Hermitian operator should not trigger warning."""
+        L = 4
+        result = _run_dmrg_sz0(L, bond_dim=8)
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            # Sz is Hermitian — should not warn
+            expectation_value(result.mps, Sz, 0)
+
+    def test_non_hermitian_warning(self):
+        """Non-Hermitian operator with large imaginary expectation should warn."""
+        L = 4
+        result = _run_dmrg_sz0(L, bond_dim=8)
+        # i * identity gives expectation value = i, which is purely imaginary
+        non_herm_op = 1j * I2
+        with pytest.warns(match="non-negligible imaginary part"):
+            expectation_value(result.mps, non_herm_op, 0)

@@ -296,6 +296,22 @@ result = idmrg(W, config)
 
 ---
 
+## Common Runtime Warnings
+
+Tenax emits warnings in specific situations — they are diagnostic clues:
+
+- **`expectation_value has non-negligible imaginary part`** — the operator
+  is likely not Hermitian. Check that the operator matrix is self-adjoint.
+  If intentional (e.g., measuring a non-Hermitian order parameter), the
+  warning is safe to suppress.
+
+- **`inner() called with mixed tensor types`** — a `DenseTensor` and
+  `SymmetricTensor` were passed to `inner()`. Both are converted to dense
+  arrays, which may be slow for large bond dimensions. This usually
+  indicates an accidental mixing of tensor types in the algorithm.
+
+---
+
 ## Style Notes
 
 Explain the *why* alongside the fix — a traceback is a teaching moment.

@@ -23,8 +23,9 @@ in Tenax.
 
 1. **Every tensor leg has a label** — contraction happens automatically on
    shared labels. No manual index bookkeeping.
-2. **Two tensor types** — `DenseTensor` (full arrays) and `SymmetricTensor`
-   (block-sparse with charge conservation). Same API for both.
+2. **Two tensor types** — `DenseTensor` and `SymmetricTensor`
+   (block-sparse with charge conservation). Both implement the abstract
+   `Tensor` base class (ABC), ensuring a consistent API.
 3. **JAX pytrees** — both tensor types work with `jax.jit`, `jax.grad`,
    `jax.vmap` natively.
 

@@ -290,6 +290,56 @@ class TestDMRG3SIntegration:
         with pytest.raises(ValueError, match="subspace_expansion"):
             dmrg(mpo, mps, DMRGConfig(two_site=True, subspace_expansion=True))
 
+    def test_hybrid_expansion_runs(self):
+        """1-site + hybrid expansion should complete and find negative energy."""
+        from tenax.algorithms.auto_mpo import build_auto_mpo
+        from tenax.algorithms.dmrg import DMRGConfig, dmrg
+        from tenax.core.mps import FiniteMPS
+
+        L, d, chi = 6, 2, 8
+        key = jax.random.PRNGKey(0)
+        mps = FiniteMPS.random(L, d, chi, key=key)
+        mpo = build_auto_mpo(_heisenberg_terms(L), L)
+        result = dmrg(
+            mpo,
+            mps,
+            DMRGConfig(
+                max_bond_dim=chi,
+                num_sweeps=4,
+                two_site=False,
+                subspace_expansion=True,
+                hybrid_mixing=True,
+            ),
+        )
+        assert result.energy < 0
+
+    def test_hybrid_no_worse_than_plain_1site(self):
+        """Hybrid expansion should not degrade 1-site energy."""
+        from tenax.algorithms.auto_mpo import build_auto_mpo
+        from tenax.algorithms.dmrg import DMRGConfig, dmrg
+        from tenax.core.mps import FiniteMPS
+
+        L, d, chi = 8, 2, 8
+        key = jax.random.PRNGKey(42)
+        mps = FiniteMPS.random(L, d, chi, key=key)
+        mpo = build_auto_mpo(_heisenberg_terms(L), L)
+
+        r_1site = dmrg(
+            mpo, mps, DMRGConfig(max_bond_dim=chi, num_sweeps=10, two_site=False)
+        )
+        r_hybrid = dmrg(
+            mpo,
+            mps,
+            DMRGConfig(
+                max_bond_dim=chi,
+                num_sweeps=10,
+                two_site=False,
+                subspace_expansion=True,
+                hybrid_mixing=True,
+            ),
+        )
+        assert r_hybrid.energy <= r_1site.energy + 1e-6
+
     def test_symmetric_1site_with_expansion_runs(self):
         """1-site + DMRG3S with U(1) symmetry should complete."""
         from tenax.algorithms.auto_mpo import build_auto_mpo

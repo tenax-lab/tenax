@@ -15,43 +15,52 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **opt_einsum integration** — optimal contraction path finding for multi-tensor contractions
 - **Network class** — graph-based tensor network container with contraction caching
 - **`.net` file support** — cytnx-style declarative network topology; parse once, load tensors, contract repeatedly (template pattern)
-- **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), TDVP (1-site & 2-site, real-time & imaginary-time), TRG, HOTRG, iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), fermionic iPEPS (fPEPS), quasiparticle excitations
+- **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), TRG, HOTRG, iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), fermionic iPEPS (fPEPS), quasiparticle excitations
 - **AutoMPO** — build Hamiltonian MPOs from symbolic operator descriptions (custom couplings, NNN, arbitrary spin); supports `symmetric=True` for U(1) block-sparse MPOs
 - **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237)
-- **Lattice abstraction** — built-in square, checkerboard, honeycomb, triangular, and kagome geometries; `ctm_multisite()` for 3+ site unit cells
 - **QR-based CTMRG projectors** — optional QR projectors for faster CTM convergence (replaces expensive `eigh`)
 - **Split-CTMRG** — ket/bra-separated CTM environment tensors for O(χ³D³) projector cost instead of O(χ³D⁶); works with both `DenseTensor` and `SymmetricTensor` via the Tensor protocol (Naumann et al., arXiv:2502.10298)
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary Brillouin-zone momenta (Ponsioen et al. 2022)
 - **Polymorphic tensor arithmetic** — `+`, `-`, `*`, `-T`, `max_abs`, `inner()`, `conj()`, `dagger()`, `bar()` work identically on `DenseTensor` and `SymmetricTensor`, enabling algorithm code that is agnostic to the underlying storage
 - **Block-sparse SVD, QR, and eigh** — native symmetry-aware decompositions in `tenax.linalg` for `SymmetricTensor`
 - **Extensible symmetry system** — non-Abelian symmetry interface for future SU(2) support
-- **Tensor display** — ASCII box repr for `DenseTensor` and `SymmetricTensor` showing legs, dimensions, charges, and block stats; `TensorNetwork.to_mermaid()` for Mermaid diagram export
 - **Benchmark suite** — CLI-driven performance benchmarks for all algorithms across CPU, CUDA, TPU, and Metal backends
 
 ## Installation
 
-```bash
-pip install tenax-tn
-```
-
-With hardware acceleration:
-
-```bash
-pip install tenax-tn[cuda13]   # NVIDIA GPU (CUDA 13, recommended)
-pip install tenax-tn[cuda12]   # NVIDIA GPU (CUDA 12)
-pip install tenax-tn[tpu]      # Google Cloud TPU
-pip install tenax-tn[metal]    # Apple Silicon GPU (experimental)
-```
-
-### From source
+> **Note:** The PyPI package (`tenax-tn`) is not yet available. Install from source using the instructions below.
 
 ```bash
 git clone https://github.com/tenax-lab/tenax.git
 cd tenax
-uv sync --all-extras --dev     # or: pip install -e ".[dev]"
+
+# With uv (recommended)
+uv sync --all-extras --dev
+
+# Or with pip
+pip install -e .
 ```
 
-See the [JAX installation guide](https://docs.jax.dev/en/latest/installation.html) for more accelerator options.
+### Hardware acceleration
+
+Tenax uses JAX as its backend. To enable GPU or TPU acceleration, install
+the appropriate JAX variant **before** installing Tenax:
+
+```bash
+# NVIDIA GPU (CUDA 13, recommended)
+pip install -U "jax[cuda13]"
+
+# NVIDIA GPU (CUDA 12)
+pip install -U "jax[cuda12]"
+
+# Google Cloud TPU
+pip install -U "jax[tpu]"
+
+# Apple Silicon GPU (macOS only, experimental)
+pip install jax-metal
+```
+
+See the [JAX installation guide](https://docs.jax.dev/en/latest/installation.html) for the latest accelerator options.
 
 ## Quick Start
 
@@ -126,23 +135,24 @@ result2 = bp.launch()
 ## DMRG Example
 
 ```python
-import jax
-from tenax import dmrg, build_mpo_heisenberg, DMRGConfig, FiniteMPS
+from tenax.algorithms.dmrg import dmrg, build_mpo_heisenberg, DMRGConfig
+from tenax.network.network import build_mps
 
 L = 10  # chain length
 mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
-mps = FiniteMPS.random(L=L, d=2, chi=16, key=jax.random.PRNGKey(0))
+
+# Build random initial MPS
+# ...
 
 config = DMRGConfig(max_bond_dim=50, num_sweeps=10)
-result = dmrg(mpo, mps, config)
+result = dmrg(mpo, initial_mps, config)
 print(f"Ground state energy: {result.energy:.8f}")
 ```
 
 ## 2D Cylinder DMRG Example
 
 ```python
-import jax
-from tenax import AutoMPO, DMRGConfig, FiniteMPS, dmrg
+from tenax import AutoMPO, DMRGConfig, build_random_mps, dmrg
 
 # Build Heisenberg Hamiltonian on a 6x3 cylinder via AutoMPO
 Lx, Ly, N = 6, 3, 18
@@ -162,7 +172,7 @@ for x in range(Lx):
             auto += (0.5, "Sm", i, "Sp", j)
 
 mpo = auto.to_mpo(compress=True)
-mps = FiniteMPS.random(L=N, d=2, chi=16, key=jax.random.PRNGKey(0))
+mps = build_random_mps(N, physical_dim=2, bond_dim=16)
 config = DMRGConfig(max_bond_dim=100, num_sweeps=10, verbose=True)
 result = dmrg(mpo, mps, config)
 print(f"E/N = {result.energy / N:.8f}")  # converges in a few sweeps
@@ -300,8 +310,6 @@ config = iPEPSConfig(
     ctm=CTMConfig(chi=16, max_iter=50),
     gs_num_steps=200,
     gs_learning_rate=1e-3,
-    gs_verbose=True,      # print per-step AD progress
-    gs_log_interval=10,   # print every 10 steps
     su_init=True,
 )
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
@@ -361,7 +369,6 @@ Runnable example scripts are in the `examples/` directory:
 | `heisenberg_ipeps_su.py` | iPEPS simple update | Heisenberg (1x1 and 2-site unit cells) |
 | `heisenberg_ipeps_ad.py` | iPEPS AD optimization | Heisenberg (random vs SU init) |
 | `heisenberg_ipeps_excitations.py` | iPEPS excitations | Heisenberg dispersion along Γ-X-M-Γ |
-| `kagome_xxz_pess.py` | PESS simple update | XXZ on Kagome lattice (PESS → iPEPS → CTM) |
 | `spinless_fermion_fpeps.py` | fPEPS simple update | Spinless fermions (free and interacting) |
 | `ising_trg.py` | TRG | 2D Ising vs Onsager exact |
 | `ising_hotrg.py` | HOTRG | 2D Ising vs Onsager exact |
@@ -456,58 +463,42 @@ python -m benchmarks.run -b cpu -a dmrg idmrg -s small medium -n 5
 # CSV output for analysis
 python -m benchmarks.run -b cpu -a all -s all --csv results.csv
 
-# Plot saved JSON results to PNG
-uv run --with matplotlib python -m benchmarks.plot_results
-
 # Show available backends
 python -m benchmarks.run --list-backends
 ```
 
 Each run prints a summary table and saves full results (timings, parameters,
-device info) to JSON. `benchmarks.plot_results` reads those JSON files and
-generates per-algorithm PNG charts grouped by size and backend. See
-`docs/guide/benchmarks.md` for the complete guide.
+device info) to JSON. See `docs/guide/benchmarks.md` for the complete guide.
 
-## Claude Code Plugin
-
-Tenax has an official [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin with 18 domain-specific skills covering DMRG, iPEPS, TRG, fermionic PEPS, AutoMPO, migration guides, and more. Install it with:
+## Development
 
 ```bash
-claude plugin marketplace add tenax-lab/tenax-toolkit
-claude plugin install tenax-toolkit
-```
-
-Once installed, Claude can guide you through tensor network calculations with Tenax-specific code examples and troubleshooting. See the [documentation](https://tenax.readthedocs.io/en/latest/guide/claude_code.html) for details.
-
-## Contributing
-
-We welcome contributions! See the [contributing guide](https://tenax.readthedocs.io/en/latest/guide/contributing.html) for full details.
-
-Quick start:
-
-```bash
+# Clone and install with dev dependencies
 git clone https://github.com/tenax-lab/tenax.git
 cd tenax
 uv sync --all-extras --dev
+
+# Install pre-commit hooks (ruff lint + format on every commit)
 uv run pre-commit install
 
-# Run tests before submitting a PR
-uv run pytest -m core          # fast core tests (~30s)
-uv run pytest -m "not slow"    # everything except expensive benchmarks
+# Run tests
+uv run pytest -m core          # fast core tests only
+uv run pytest -m algorithm     # algorithm tests (DMRG, TRG, iPEPS, integration)
+uv run pytest -m "not slow"    # skip expensive tests
+uv run pytest                  # full suite
+
+# Lint
+uv run ruff check src/ tests/
 ```
 
-- **Branch workflow:** Create a feature branch, open a PR against `main`, CI must pass.
-- **Code style:** Enforced by ruff via pre-commit hooks.
-- **Tests:** Place in `tests/test_<module>.py`; mark expensive tests with `@pytest.mark.slow`.
-- **New public API:** Update `__init__.py` exports, `README.md`, and `docs/api/`.
+Work-in-progress design documents live in `design/`.
 
 ## Documentation
 
 Full API documentation is built with Sphinx:
 
 ```bash
-uv sync --extra docs
-cd docs && uv run make html
+cd docs && make html
 ```
 
 The generated HTML is in `docs/_build/html/`.
@@ -519,12 +510,6 @@ The generated HTML is in `docs/_build/html/`.
 - L. Ponsioen, F. F. Assaad, P. Corboz, *SciPost Phys.* **12**, 006 (2022) — Quasiparticle excitations for iPEPS
 - J. Naumann, E. L. Weerda, J. Eisert, M. Rizzi, P. Schmoll, arXiv:2502.10298 (2025) — Split-CTMRG with factored projectors for efficient iPEPS environments
 
-## Authors
-
-**Maintainer:** Ying-Jer Kao
-
-**Contributors:** Ian McCulloch
-
 ## License
 
-Apache 2.0
+MIT
