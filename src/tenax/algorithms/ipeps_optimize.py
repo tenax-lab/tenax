@@ -9,16 +9,34 @@ import math
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
-from tenax.algorithms.ipeps_config import (
-    CTMEnvironment,
-    iPEPSConfig,
-)
-from tenax.algorithms.ipeps_rdm import (
-    compute_energy_ctm,
-    compute_energy_ctm_2site,
-)
-from tenax.core.tensor import Tensor
+from tenax.algorithms.ipeps_config import iPEPSConfig
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.symmetry import U1Symmetry
+from tenax.core.tensor import DenseTensor, Tensor
+
+
+def _wrap_as_dense_tensor(arr: jax.Array) -> DenseTensor:
+    """Wrap a raw ``jax.Array`` iPEPS site tensor as a ``DenseTensor``.
+
+    Assumes shape ``(D, D, D, D, d)`` with trivial U(1) charges
+    (all zeros), matching the convention used by DenseTensor tests.
+    """
+    arr = jnp.asarray(arr)
+    D = arr.shape[0]
+    d = arr.shape[4]
+    sym = U1Symmetry()
+    charges = np.zeros(D, dtype=np.int32)
+    phys_charges = np.zeros(d, dtype=np.int32)
+    indices = (
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+    )
+    return DenseTensor(arr, indices)
 
 
 def _should_log_step(step: int, num_steps: int, interval: int) -> bool:
@@ -86,111 +104,36 @@ def optimize_gs_ad(
     if config.unit_cell == "2site":
         return _optimize_gs_ad_2site(hamiltonian_gate, A_init, config)
 
-    # Dispatch: Tensor-protocol path vs dense path
-    if isinstance(A_init, Tensor):
-        return _optimize_gs_ad_tensor(hamiltonian_gate, A_init, config)
+    # Wrap raw jax.Array as DenseTensor so we always use the Tensor-protocol path.
+    if A_init is not None and not isinstance(A_init, Tensor):
+        A_init = _wrap_as_dense_tensor(A_init)
 
-    import optax
-
-    from tenax.algorithms.ad_utils import _config_to_tuple, ctm_converge
-    from tenax.algorithms.ipeps import ipeps
-
-    gate = (
-        hamiltonian_gate.todense()
-        if isinstance(hamiltonian_gate, Tensor)
-        else jnp.array(hamiltonian_gate)
-    )
-    d_phys = gate.shape[0]
-    D = config.max_bond_dim
-
-    # Initialize site tensor
     if A_init is None:
+        from tenax.algorithms.ipeps import ipeps
+
+        gate = (
+            hamiltonian_gate.todense()
+            if isinstance(hamiltonian_gate, Tensor)
+            else jnp.array(hamiltonian_gate)
+        )
+        d_phys = gate.shape[0]
+        D = config.max_bond_dim
+
         if config.su_init:
             _, su_peps, _ = ipeps(gate, None, config)
-            A = su_peps.get_tensor((0, 0)).todense()
+            A_init = su_peps.get_tensor((0, 0))
+            # Ensure Tensor protocol labels
+            if not isinstance(A_init, Tensor):
+                A_init = _wrap_as_dense_tensor(
+                    A_init.todense()
+                    if hasattr(A_init, "todense")
+                    else jnp.array(A_init)
+                )
         else:
             key = jax.random.PRNGKey(0)
-            A = jax.random.normal(key, (D, D, D, D, d_phys))
-    else:
-        A = jnp.array(A_init)
-    A = A / (jnp.linalg.norm(A) + 1e-10)
+            A_init = _wrap_as_dense_tensor(jax.random.normal(key, (D, D, D, D, d_phys)))
 
-    config_tuple = _config_to_tuple(config.ctm)
-
-    # Define loss: A -> energy
-    def loss_fn(A_param):
-        A_norm = A_param / (jnp.linalg.norm(A_param) + 1e-10)
-        env_tuple = ctm_converge(A_norm, config_tuple)
-        env = CTMEnvironment(*env_tuple)
-        energy = compute_energy_ctm(A_norm, env, gate, d_phys)
-        return energy
-
-    # Set up optimizer
-    if config.gs_optimizer == "adam":
-        optimizer = optax.adam(config.gs_learning_rate)
-    else:
-        optimizer = optax.adam(config.gs_learning_rate)
-
-    opt_state = optimizer.init(A)
-
-    best_energy = float("inf")
-    best_A = A
-    prev_energy = float("inf")
-    log_interval = config.gs_log_interval
-
-    for step in range(config.gs_num_steps):
-        energy_val, grads = jax.value_and_grad(loss_fn)(A)
-        energy_float = float(energy_val)
-
-        if energy_float < best_energy:
-            best_energy = energy_float
-            best_A = A
-
-        delta_energy = abs(energy_float - prev_energy)
-        logged = False
-        if config.gs_verbose and _should_log_step(
-            step, config.gs_num_steps, log_interval
-        ):
-            _log_ad_step(
-                "1site-dense",
-                step,
-                config.gs_num_steps,
-                energy_float,
-                delta_energy,
-                best_energy,
-            )
-            logged = True
-
-        # Check convergence
-        if delta_energy < config.gs_conv_tol:
-            if config.gs_verbose:
-                if not logged:
-                    _log_ad_step(
-                        "1site-dense",
-                        step,
-                        config.gs_num_steps,
-                        energy_float,
-                        delta_energy,
-                        best_energy,
-                    )
-                _log_ad_converged("1site-dense", step, delta_energy, config.gs_conv_tol)
-            break
-        prev_energy = energy_float
-
-        updates, opt_state = optimizer.update(grads, opt_state, A)
-        A = optax.apply_updates(A, updates)
-        # Re-normalize
-        A = A / (jnp.linalg.norm(A) + 1e-10)
-
-    # Final CTM environment
-    A_final = best_A / (jnp.linalg.norm(best_A) + 1e-10)
-    env_tuple = ctm_converge(A_final, config_tuple)
-    env = CTMEnvironment(*env_tuple)
-    E_gs = float(compute_energy_ctm(A_final, env, gate, d_phys))
-    if config.gs_verbose:
-        print(f"[iPEPS-AD:1site-dense] final E={E_gs:.10f}")
-
-    return A_final, env, E_gs
+    return _optimize_gs_ad_tensor(hamiltonian_gate, A_init, config)
 
 
 def _optimize_gs_ad_tensor(
@@ -295,6 +238,17 @@ def _optimize_gs_ad_tensor(
     return A_final, env, E_gs
 
 
+def _maybe_relabel_su_tensor(t: Tensor) -> Tensor:
+    """Relabel simple-update tensor labels to standard iPEPS convention if needed."""
+    _SU_LABEL_MAP = {"up": "u", "down": "d", "left": "l", "right": "r"}
+    current_labels = {idx.label for idx in t.indices}
+    if current_labels & {"up", "down", "left", "right"}:
+        for old, new in _SU_LABEL_MAP.items():
+            if old in current_labels:
+                t = t.relabel(old, new)
+    return t
+
+
 def _optimize_gs_ad_2site(
     hamiltonian_gate: jax.Array,
     AB_init: tuple[jax.Array, jax.Array] | tuple[Tensor, Tensor] | None,
@@ -305,36 +259,29 @@ def _optimize_gs_ad_2site(
     Uses implicit differentiation through the 2-site CTM fixed point
     to compute gradients of energy w.r.t. both site tensors (A, B).
 
-    Accepts dense ``jax.Array`` or Tensor-protocol objects.
+    Always uses the Tensor-protocol path. Raw ``jax.Array`` inputs are
+    automatically wrapped as ``DenseTensor`` with trivial U(1) charges.
     """
     if AB_init is not None:
         if not isinstance(AB_init, tuple) or len(AB_init) != 2:
             raise TypeError(
                 "For unit_cell='2site', A_init must be None or a tuple (A, B)."
             )
-        has_tensor = any(isinstance(t, Tensor) for t in AB_init)
-        if has_tensor and not all(isinstance(t, Tensor) for t in AB_init):
-            raise TypeError(
-                "For unit_cell='2site', A_init must be either "
-                "(Tensor, Tensor) or (array, array); mixed tuples are not supported."
-            )
-        if has_tensor:
-            return _optimize_gs_ad_tensor_2site(hamiltonian_gate, AB_init, config)
+        # Wrap raw arrays as DenseTensor
+        AB_init = tuple(
+            _wrap_as_dense_tensor(t) if not isinstance(t, Tensor) else t
+            for t in AB_init
+        )
 
-    import optax
-
-    from tenax.algorithms.ad_utils import ctm_converge_2site
-
-    gate = (
-        hamiltonian_gate.todense()
-        if isinstance(hamiltonian_gate, Tensor)
-        else jnp.array(hamiltonian_gate)
-    )
-    d_phys = gate.shape[0]
-    D = config.max_bond_dim
-
-    # Initialize site tensors
     if AB_init is None:
+        gate = (
+            hamiltonian_gate.todense()
+            if isinstance(hamiltonian_gate, Tensor)
+            else jnp.array(hamiltonian_gate)
+        )
+        d_phys = gate.shape[0]
+        D = config.max_bond_dim
+
         if config.su_init:
             from tenax.algorithms.ipeps import ipeps
 
@@ -346,114 +293,28 @@ def _optimize_gs_ad_2site(
                 unit_cell="2site",
             )
             _, su_peps, _ = ipeps(gate, None, su_config)
-            A = su_peps.get_tensor((0, 0)).todense()
-            B = su_peps.get_tensor((1, 0)).todense()
+            A = su_peps.get_tensor((0, 0))
+            B = su_peps.get_tensor((1, 0))
+            if not isinstance(A, Tensor):
+                A = _wrap_as_dense_tensor(
+                    A.todense() if hasattr(A, "todense") else jnp.array(A)
+                )
+            else:
+                A = _maybe_relabel_su_tensor(A)
+            if not isinstance(B, Tensor):
+                B = _wrap_as_dense_tensor(
+                    B.todense() if hasattr(B, "todense") else jnp.array(B)
+                )
+            else:
+                B = _maybe_relabel_su_tensor(B)
+            AB_init = (A, B)
         else:
             key_A, key_B = jax.random.split(jax.random.PRNGKey(0))
-            A = jax.random.normal(key_A, (D, D, D, D, d_phys))
-            B = jax.random.normal(key_B, (D, D, D, D, d_phys))
-    else:
-        A, B = AB_init
-        A = jnp.array(A)
-        B = jnp.array(B)
-    A = A / (jnp.linalg.norm(A) + 1e-10)
-    B = B / (jnp.linalg.norm(B) + 1e-10)
+            A = _wrap_as_dense_tensor(jax.random.normal(key_A, (D, D, D, D, d_phys)))
+            B = _wrap_as_dense_tensor(jax.random.normal(key_B, (D, D, D, D, d_phys)))
+            AB_init = (A, B)
 
-    from tenax.algorithms.ad_utils import _config_to_tuple
-
-    config_tuple = _config_to_tuple(config.ctm)
-
-    def loss_fn(params):
-        A_p, B_p = params
-        A_norm = A_p / (jnp.linalg.norm(A_p) + 1e-10)
-        B_norm = B_p / (jnp.linalg.norm(B_p) + 1e-10)
-        env_tuple = ctm_converge_2site(A_norm, B_norm, config_tuple)
-        env_A = CTMEnvironment(*env_tuple[:8])
-        env_B = CTMEnvironment(*env_tuple[8:])
-        energy = compute_energy_ctm_2site(A_norm, B_norm, env_A, env_B, gate, d_phys)
-        return energy, env_tuple
-
-    # optax.adam supports pytree params natively
-    params = (A, B)
-    if config.gs_optimizer == "adam":
-        optimizer = optax.adam(config.gs_learning_rate)
-    else:
-        optimizer = optax.adam(config.gs_learning_rate)
-
-    opt_state = optimizer.init(params)
-
-    last_energy = float("inf")
-    last_params = params
-    last_env_tuple = None
-    prev_energy = float("inf")
-    log_interval = config.gs_log_interval
-
-    for step in range(config.gs_num_steps):
-        (energy_val, env_tuple), grads = jax.value_and_grad(loss_fn, has_aux=True)(
-            params
-        )
-        energy_float = float(energy_val)
-        last_energy = energy_float
-        last_params = params
-        last_env_tuple = jax.tree.map(lambda x: jax.lax.stop_gradient(x), env_tuple)
-
-        delta_energy = abs(energy_float - prev_energy)
-        logged = False
-        if config.gs_verbose and _should_log_step(
-            step, config.gs_num_steps, log_interval
-        ):
-            _log_ad_step(
-                "2site-dense",
-                step,
-                config.gs_num_steps,
-                energy_float,
-                delta_energy,
-                energy_float,
-            )
-            logged = True
-
-        if delta_energy < config.gs_conv_tol:
-            if config.gs_verbose:
-                if not logged:
-                    _log_ad_step(
-                        "2site-dense",
-                        step,
-                        config.gs_num_steps,
-                        energy_float,
-                        delta_energy,
-                        energy_float,
-                    )
-                _log_ad_converged("2site-dense", step, delta_energy, config.gs_conv_tol)
-            break
-        prev_energy = energy_float
-
-        updates, opt_state = optimizer.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
-        # Re-normalize
-        A_p, B_p = params
-        params = (
-            A_p / (jnp.linalg.norm(A_p) + 1e-10),
-            B_p / (jnp.linalg.norm(B_p) + 1e-10),
-        )
-
-    if last_env_tuple is None:
-        energy_val, env_tuple = loss_fn(params)
-        last_energy = float(energy_val)
-        last_params = params
-        last_env_tuple = jax.tree.map(lambda x: jax.lax.stop_gradient(x), env_tuple)
-
-    # Use the last evaluated params and environment (not "best" which can
-    # capture transient CTM artifacts at finite chi).
-    A_final, B_final = last_params
-    A_final = A_final / (jnp.linalg.norm(A_final) + 1e-10)
-    B_final = B_final / (jnp.linalg.norm(B_final) + 1e-10)
-    env_A = CTMEnvironment(*last_env_tuple[:8])
-    env_B = CTMEnvironment(*last_env_tuple[8:])
-    E_gs = last_energy
-    if config.gs_verbose:
-        print(f"[iPEPS-AD:2site-dense] final E={E_gs:.10f}")
-
-    return (A_final, B_final), (env_A, env_B), E_gs
+    return _optimize_gs_ad_tensor_2site(hamiltonian_gate, AB_init, config)
 
 
 def _optimize_gs_ad_tensor_2site(
