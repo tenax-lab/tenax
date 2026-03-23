@@ -53,10 +53,17 @@ def _flip_leg_flow(tensor: Tensor, label: str) -> Tensor:
     if axis is None:
         return SymmetricTensor(tensor.blocks, tuple(new_indices))
 
-    # For trivial charges, block keys don't change
+    # For trivial charges, block keys don't change — use _raw to skip
+    # validation (the flow flip is an intentional convention change).
     old_idx = tensor.indices[axis]
     if all(c == 0 for c in old_idx.charges):
-        return SymmetricTensor(tensor.blocks, tuple(new_indices))
+        return SymmetricTensor._raw(
+            indices=tuple(new_indices),
+            data=tensor._data,
+            block_keys=tensor._block_keys,
+            block_shapes=tensor._block_shapes,
+            block_offsets=tensor._block_offsets,
+        )
 
     # Non-trivial charges: remap block keys to use dual charges
     sym = old_idx.symmetry

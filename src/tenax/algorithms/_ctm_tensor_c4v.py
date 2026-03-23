@@ -29,7 +29,8 @@ from tenax.algorithms._ctm_tensor_init import (
 )
 from tenax.algorithms._ctm_tensor_moves import _flip_leg_flow
 from tenax.contraction.contractor import contract
-from tenax.core.tensor import Tensor
+from tenax.core.index import TensorIndex
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 
 def _c4v_sweep(
@@ -64,6 +65,8 @@ def _c4v_sweep(
 
     # 3. Projector from Cg alone (C4v: both corners are equivalent)
     #    Use Cg for both corner slots — the density matrix is ρ = 2 * Cg · Cg†
+    #    No base_charges: the C4v sweep uses a single corner, so there is no
+    #    charge-sector drift between independent projectors.
     P = _compute_projector_tensor(Cg, Cg, chi, projector_method)
 
     # 4. Apply projector to edge: T_new = P† · Tg · P
@@ -74,20 +77,31 @@ def _c4v_sweep(
     T_new = contract(step, P_right)  # (chi_new, d2, chi_new_r)
     T_new = T_new.relabels({"chi_new": "t_l", "d2": "D2", "chi_new_r": "t_r"})
 
-    # 5. New corner: project Cg from BOTH sides so both legs have the
-    #    projector's charge distribution.
-    #    C_new = P† · (Cg · Cg†) · P   (density matrix projected to chi)
-    #    But Cg · Cg† requires a common "col" leg, which is "t_r".
-    #    Cg: (fused, t_r), Cg†: (t_r, fused) [bar flips flows]
-    Cg_bar = Cg.bar().relabels({"fused": "fused_bar", "t_r": "t_r"})
-    rho_half = contract(Cg, Cg_bar)  # (fused, fused_bar) via t_r
-    # Project left: P† · rho_half
-    P_left = P_bar.relabel("fused", "fused")
-    step = contract(P_left, rho_half)  # (chi_new, fused_bar)
-    # Project right: step · P
-    P_right_c = P.relabels({"fused": "fused_bar", "chi_new": "chi_new_r"})
-    C_new = contract(step, P_right_c)  # (chi_new, chi_new_r)
-    C_new = C_new.relabels({"chi_new": "c_a", "chi_new_r": "c_b"})
+    # 5. New corner: C_new = (P† · Cg) · (P† · Cg)†
+    #    Compute half = P† · Cg, then form C_new = half · half† in the
+    #    dense domain.  The previous approach (contracting Cg with bar(Cg)
+    #    as SymmetricTensor) introduced spurious Koszul signs for fermionic
+    #    symmetries, making the density matrix non-PSD and preventing
+    #    convergence.  The dense half · conj(half).T is PSD by construction.
+    half = contract(P_bar, Cg)  # (chi_new, t_r)
+    half_dense = half.todense()
+    C_new_dense = half_dense @ jnp.conj(half_dense).T  # (chi_new, chi_new)
+
+    # Build corner indices with the same charge distribution as the
+    # projector's chi_new leg, ensuring compatibility with the edges.
+    chi_new_idx = P.indices[P.labels().index("chi_new")]
+    c_a_idx = TensorIndex(
+        chi_new_idx.symmetry, chi_new_idx.charges.copy(), IN, label="c_a"
+    )
+    c_b_idx = TensorIndex(
+        chi_new_idx.symmetry, chi_new_idx.charges.copy(), OUT, label="c_b"
+    )
+    if isinstance(Cg, SymmetricTensor):
+        C_new = SymmetricTensor.from_dense(
+            C_new_dense, (c_a_idx, c_b_idx), tol=float("inf")
+        )
+    else:
+        C_new = DenseTensor(C_new_dense, (c_a_idx, c_b_idx))
 
     # 7. Normalize
     C_norm = C_new.max_abs()
@@ -183,6 +197,19 @@ def ctm_tensor_c4v(
     Returns:
         Converged CTMTensorEnv (full 8-tensor environment).
     """
+    # Fermionic SymmetricTensors: densify before running C4v CTM.
+    # The C4v expansion (_c4v_to_full_env) flips flows on C2/C4 corners,
+    # which changes Koszul signs during RDM contraction and causes
+    # cancellation to zero.  Densifying removes the fermionic grading
+    # from the CTM loop; the energy computation still works correctly
+    # because the open double-layer is numerically identical for
+    # DenseTensor and SymmetricTensor.
+    if isinstance(A, SymmetricTensor):
+        from tenax.core.symmetry import BraidingStyle
+
+        if A.indices[0].symmetry.braiding_style == BraidingStyle.FERMIONIC:
+            A = DenseTensor(A.todense(), A.indices)
+
     a = _build_double_layer_tensor(A)
     env = initialize_ctm_tensor_env(A, chi)
 
