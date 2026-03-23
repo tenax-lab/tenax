@@ -130,6 +130,19 @@ _DIRECTION_MOVES = [
 ]
 
 
+def _get_base_charges(a: Tensor):
+    """Extract base charges from a double-layer tensor for projector stabilization."""
+    if not isinstance(a, SymmetricTensor):
+        return None
+    import numpy as _np
+
+    u2_pos = a.labels().index("u2")
+    charges = _np.asarray(a.indices[u2_pos].charges, dtype=_np.int32)
+    if _np.all(charges == 0):
+        return None
+    return charges
+
+
 def _ctm_tensor_sweep_multisite(
     envs: dict[Coord, CTMTensorEnv],
     double_layers: dict[Coord, Tensor],
@@ -139,11 +152,23 @@ def _ctm_tensor_sweep_multisite(
     projector_method: str = "eigh",
 ) -> dict[Coord, CTMTensorEnv]:
     """One full multisite CTM sweep over all sites and directions."""
+    # Extract base charges from any double-layer tensor for projector stabilization
+    base_charges = None
+    for a in double_layers.values():
+        base_charges = _get_base_charges(a)
+        if base_charges is not None:
+            break
+
     for direction, move_fn in _DIRECTION_MOVES:
         for coord in sorted(envs.keys()):
             nb = neighbors[coord][direction]
             envs[coord] = move_fn(
-                envs[coord], envs[nb], double_layers[nb], chi, projector_method
+                envs[coord],
+                envs[nb],
+                double_layers[nb],
+                chi,
+                projector_method,
+                base_charges=base_charges,
             )
     if renormalize:
         envs = {c: _renormalize_tensor_env(e) for c, e in envs.items()}
@@ -190,29 +215,26 @@ def ctm_tensor(
     Returns:
         Converged CTMTensorEnv.
     """
-    # Determine sweep function: use paired moves for fermionic
-    # SymmetricTensors with symmetric virtual charges (fixes charge-sector
-    # mismatch from independent projectors).  When virtual charges are
-    # asymmetric (e.g. after simple update truncation), fall back to
-    # DenseTensor since the D^2 leg charges change per direction.
+    # Determine sweep function: use paired moves for SymmetricTensors
+    # with non-trivial virtual charges (fixes charge-sector mismatch
+    # from independent projectors in standard 4-move CTM).  When virtual
+    # charges are asymmetric (e.g. after simple update truncation),
+    # fall back to DenseTensor since the D^2 leg charges change per
+    # direction.
     use_paired = False
     if isinstance(A, SymmetricTensor):
-        from tenax.core.symmetry import BraidingStyle
+        import numpy as _np
 
-        if A.indices[0].symmetry.braiding_style == BraidingStyle.FERMIONIC:
-            # Check if all virtual charges are compatible
-            import numpy as _np
-
-            virtual_charges = [_np.sort(A.indices[i].charges) for i in range(4)]
-            all_same = all(
-                _np.array_equal(virtual_charges[0], virtual_charges[i])
-                for i in range(1, 4)
-            )
-            if all_same:
-                use_paired = True
-            else:
-                # Asymmetric virtual charges: densify for compatibility
-                A = DenseTensor(A.todense(), A.indices)
+        virtual_charges = [_np.sort(A.indices[i].charges) for i in range(4)]
+        has_nontrivial = any(not _np.all(vc == 0) for vc in virtual_charges)
+        all_same = all(
+            _np.array_equal(virtual_charges[0], virtual_charges[i]) for i in range(1, 4)
+        )
+        if has_nontrivial and all_same:
+            use_paired = True
+        elif has_nontrivial and not all_same:
+            # Asymmetric virtual charges: densify for compatibility
+            A = DenseTensor(A.todense(), A.indices)
 
     sweep_fn = _ctm_tensor_sweep_paired if use_paired else _ctm_tensor_sweep
 
