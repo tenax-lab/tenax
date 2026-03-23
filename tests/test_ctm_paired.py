@@ -15,7 +15,10 @@ from tenax.algorithms._ctm_tensor_convergence import (
     _renormalize_tensor_env,
     ctm_tensor,
 )
-from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+from tenax.algorithms._ctm_tensor_energy import (
+    _rdm2x1_tensor,
+    compute_energy_ctm_tensor,
+)
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     _build_double_layer_tensor,
@@ -146,25 +149,47 @@ class TestPairedSweepFermionic:
                 f"Non-finite values in tensor with labels {field.labels()}"
             )
 
-    def test_paired_sweep_fermionic_energy_matches_dense(
-        self, small_peps_fermionic, heisenberg_gate
-    ):
-        """Fermionic energy matches DenseTensor path (atol=0.5)."""
+    def test_paired_sweep_fermionic_energy_converged(self, heisenberg_gate):
+        """Fermionic paired CTM converges to a valid RDM.
+
+        Uses a near-product-state tensor (dominated by vacuum) so the CTM
+        fixed point is well-conditioned.  Validates convergence and RDM
+        positivity instead of comparing against the dense (bosonic) path,
+        which lacks Koszul signs and computes a physically different quantity.
+        """
         chi = 8
-        A = small_peps_fermionic
-
-        # Paired sweep with native fermionic SymmetricTensor
-        env_ferm = ctm_tensor(A, chi=chi, max_iter=60, conv_tol=1e-10)
-        E_ferm = float(compute_energy_ctm_tensor(A, env_ferm, heisenberg_gate, d=2))
-
-        # Dense reference
-        A_dense = DenseTensor(A.todense(), A.indices)
-        env_dense = ctm_tensor(A_dense, chi=chi, max_iter=60, conv_tol=1e-10)
-        E_dense = float(
-            compute_energy_ctm_tensor(A_dense, env_dense, heisenberg_gate, d=2)
+        sym = FermionParity()
+        D, d = 2, 2
+        vc = np.array([0, 1], dtype=np.int32)
+        pc = np.array([0, 1], dtype=np.int32)
+        data = jnp.zeros((D, D, D, D, d))
+        data = data.at[0, 0, 0, 0, 0].set(1.0)
+        data = data + 0.05 * jax.random.normal(jax.random.PRNGKey(7), (D, D, D, D, d))
+        data = data / jnp.linalg.norm(data)
+        indices = (
+            TensorIndex(sym, vc.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, vc.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, vc.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, vc.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, pc.copy(), FlowDirection.IN, label="phys"),
         )
+        A = SymmetricTensor.from_dense(data, indices, tol=float("inf"))
 
-        np.testing.assert_allclose(E_ferm, E_dense, atol=0.5)
+        env = ctm_tensor(A, chi=chi, max_iter=60, conv_tol=1e-10)
+        E = float(compute_energy_ctm_tensor(A, env, heisenberg_gate, d=2))
+
+        assert jnp.isfinite(E), f"Energy not finite: {E}"
+
+        rdm = _rdm2x1_tensor(A, env)
+        rdm_mat = rdm.reshape(d * d, d * d)
+        eigvals = np.linalg.eigvalsh(np.array(rdm_mat))
+        assert eigvals[0] > -1e-4, f"RDM not PSD: min eigenvalue = {eigvals[0]}"
+        np.testing.assert_allclose(
+            float(jnp.trace(rdm_mat).real),
+            1.0,
+            atol=1e-8,
+            err_msg="RDM trace != 1",
+        )
 
 
 class TestPairedSweepU1:
