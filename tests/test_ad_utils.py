@@ -15,13 +15,22 @@ def _enable_x64():
     jax.config.update("jax_enable_x64", prev)
 
 
+from tenax.algorithms._ctm_tensor import (
+    CTMTensorEnv,
+    _build_double_layer_tensor,
+    initialize_ctm_tensor_env,
+)
+from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms.ad_utils import (
-    _gauge_fix_ctm,
-    ctm_converge,
+    _config_to_tuple,
+    _gauge_fix_ctm_tensor,
+    ctm_tensor_converge,
     truncated_svd_ad,
 )
-from tenax.algorithms.ipeps_config import CTMConfig, CTMEnvironment
-from tenax.algorithms.ipeps_ctm import ctm
+from tenax.algorithms.ipeps_config import CTMConfig
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.symmetry import U1Symmetry
+from tenax.core.tensor import DenseTensor
 
 
 class TestTruncatedSVDADForward:
@@ -192,120 +201,122 @@ class TestTruncatedSVDADMissingTerm:
         assert max_diff < 1e-3, f"Gradient error too large: {max_diff}"
 
 
+def _make_dense_tensor(key, D=2, d=2):
+    """Create a DenseTensor iPEPS site tensor for testing."""
+    sym = U1Symmetry()
+    charges = np.zeros(D, dtype=np.int32)
+    phys_charges = np.zeros(d, dtype=np.int32)
+    data = jax.random.normal(key, (D, D, D, D, d))
+    data = data / (jnp.linalg.norm(data) + 1e-10)
+    indices = (
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+    )
+    return DenseTensor(data, indices)
+
+
 class TestCTMFixedPointGradient:
-    """Gradient through ctm_converge matches finite-difference."""
+    """Gradient through ctm_tensor_converge matches finite-difference."""
 
     def test_gradient_exists_and_finite(self):
-        """Gradient of energy through ctm_converge should be finite."""
-        key = jax.random.PRNGKey(42)
-        D, d = 2, 2
-        A = jax.random.normal(key, (D, D, D, D, d))
-        A = A / (jnp.linalg.norm(A) + 1e-10)
-
-        config_tuple = (4, 5, 1e-6, 1)  # chi, max_iter, conv_tol, renormalize
-
-        # Heisenberg SzSz Hamiltonian
-        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(d, d, d, d)
+        """Gradient of energy through ctm_tensor_converge should be finite."""
+        A = _make_dense_tensor(jax.random.PRNGKey(42))
+        config = CTMConfig(chi=4, max_iter=5, conv_tol=1e-6)
+        config_tuple = _config_to_tuple(config)
+        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
 
         def energy_fn(A_in):
-            A_norm = A_in / (jnp.linalg.norm(A_in) + 1e-10)
-            env_tuple = ctm_converge(A_norm, config_tuple)
-            env = CTMEnvironment(*env_tuple)
-            from tenax.algorithms.ipeps_rdm import compute_energy_ctm
+            A_norm = A_in * (1.0 / (A_in.norm() + 1e-10))
+            env_leaves = ctm_tensor_converge(A_norm, config_tuple)
+            import jax
 
-            return compute_energy_ctm(A_norm, env, gate, d)
+            env = jax.tree.unflatten(
+                jax.tree.structure(initialize_ctm_tensor_env(A_in, 4)),
+                list(env_leaves),
+            )
+            return compute_energy_ctm_tensor(A_norm, env, gate)
 
         grad = jax.grad(energy_fn)(A)
-        assert jnp.all(jnp.isfinite(grad)), "Gradient contains NaN/Inf"
-        assert jnp.max(jnp.abs(grad)) > 1e-15, "Gradient is all zeros"
+        assert jnp.all(jnp.isfinite(grad.todense())), "Gradient contains NaN/Inf"
+        assert grad.norm() > 1e-15, "Gradient is all zeros"
 
 
 class TestGaugeFix:
-    """Tests for CTM gauge fixing."""
+    """Tests for CTM gauge fixing (Tensor protocol)."""
 
     @pytest.fixture
     def random_env(self):
-        """Random CTM environment for testing."""
-        key = jax.random.PRNGKey(0)
-        chi, D2 = 4, 4
-        keys = jax.random.split(key, 8)
-        C1 = jax.random.normal(keys[0], (chi, chi))
-        C2 = jax.random.normal(keys[1], (chi, chi))
-        C3 = jax.random.normal(keys[2], (chi, chi))
-        C4 = jax.random.normal(keys[3], (chi, chi))
-        T1 = jax.random.normal(keys[4], (chi, D2, chi))
-        T2 = jax.random.normal(keys[5], (chi, D2, chi))
-        T3 = jax.random.normal(keys[6], (chi, D2, chi))
-        T4 = jax.random.normal(keys[7], (chi, D2, chi))
-        return CTMEnvironment(C1, C2, C3, C4, T1, T2, T3, T4)
+        """Random CTMTensorEnv for testing."""
+        A = _make_dense_tensor(jax.random.PRNGKey(0))
+        return initialize_ctm_tensor_env(A, chi=4)
 
     def test_gauge_fix_idempotent(self, random_env):
         """Applying gauge fix twice should give the same result."""
-        env1 = _gauge_fix_ctm(random_env)
-        env2 = _gauge_fix_ctm(env1)
+        env1 = _gauge_fix_ctm_tensor(random_env)
+        env2 = _gauge_fix_ctm_tensor(env1)
 
         for t1, t2 in zip(env1, env2):
-            assert jnp.allclose(t1, t2, atol=1e-10), (
+            assert jnp.allclose(t1.todense(), t2.todense(), atol=1e-10), (
                 f"Gauge fix not idempotent: max diff = "
-                f"{float(jnp.max(jnp.abs(t1 - t2)))}"
+                f"{float(jnp.max(jnp.abs(t1.todense() - t2.todense())))}"
             )
 
     def test_gauge_fix_preserves_shapes(self, random_env):
         """Gauge-fixed environment should have same tensor shapes."""
-        env_fixed = _gauge_fix_ctm(random_env)
+        env_fixed = _gauge_fix_ctm_tensor(random_env)
         for t_orig, t_fixed in zip(random_env, env_fixed):
-            assert t_orig.shape == t_fixed.shape
+            assert t_orig.todense().shape == t_fixed.todense().shape
 
 
 class TestGMRESBackward:
-    """Validate GMRES-based backward pass for ctm_converge."""
+    """Validate GMRES-based backward pass for ctm_tensor_converge."""
 
     def test_gmres_backward_finite_gradient(self):
         """GMRES backward pass should produce finite, nonzero gradients."""
-        key = jax.random.PRNGKey(123)
-        D, d = 2, 2
-        A = jax.random.normal(key, (D, D, D, D, d))
-        A = A / (jnp.linalg.norm(A) + 1e-10)
-
-        config_tuple = (4, 10, 1e-6, 1)  # chi, max_iter, conv_tol, renormalize
-
-        # Simple SzSz Hamiltonian
-        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(d, d, d, d)
+        A = _make_dense_tensor(jax.random.PRNGKey(123))
+        config = CTMConfig(chi=4, max_iter=10, conv_tol=1e-6)
+        config_tuple = _config_to_tuple(config)
+        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
 
         def energy_fn(A_in):
-            A_norm = A_in / (jnp.linalg.norm(A_in) + 1e-10)
-            env_tuple = ctm_converge(A_norm, config_tuple)
-            env = CTMEnvironment(*env_tuple)
-            from tenax.algorithms.ipeps_rdm import compute_energy_ctm
+            A_norm = A_in * (1.0 / (A_in.norm() + 1e-10))
+            env_leaves = ctm_tensor_converge(A_norm, config_tuple)
+            import jax
 
-            return compute_energy_ctm(A_norm, env, gate, d)
+            env = jax.tree.unflatten(
+                jax.tree.structure(initialize_ctm_tensor_env(A_in, 4)),
+                list(env_leaves),
+            )
+            return compute_energy_ctm_tensor(A_norm, env, gate)
 
         grad = jax.grad(energy_fn)(A)
-        assert jnp.all(jnp.isfinite(grad)), "GMRES backward: gradient contains NaN/Inf"
-        assert jnp.max(jnp.abs(grad)) > 1e-15, "GMRES backward: gradient is all zeros"
+        assert jnp.all(jnp.isfinite(grad.todense())), "GMRES backward: NaN/Inf"
+        assert grad.norm() > 1e-15, "GMRES backward: gradient is all zeros"
 
     def test_gmres_backward_deterministic(self):
         """GMRES backward pass should be deterministic across calls."""
-        key = jax.random.PRNGKey(77)
-        D, d = 2, 2
-        A = jax.random.normal(key, (D, D, D, D, d))
-        A = A / (jnp.linalg.norm(A) + 1e-10)
-
-        config_tuple = (4, 10, 1e-6, 1)
-        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(d, d, d, d)
+        A = _make_dense_tensor(jax.random.PRNGKey(77))
+        config = CTMConfig(chi=4, max_iter=10, conv_tol=1e-6)
+        config_tuple = _config_to_tuple(config)
+        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
 
         def energy_fn(A_in):
-            A_norm = A_in / (jnp.linalg.norm(A_in) + 1e-10)
-            env_tuple = ctm_converge(A_norm, config_tuple)
-            env = CTMEnvironment(*env_tuple)
-            from tenax.algorithms.ipeps_rdm import compute_energy_ctm
+            A_norm = A_in * (1.0 / (A_in.norm() + 1e-10))
+            env_leaves = ctm_tensor_converge(A_norm, config_tuple)
+            import jax
 
-            return compute_energy_ctm(A_norm, env, gate, d)
+            env = jax.tree.unflatten(
+                jax.tree.structure(initialize_ctm_tensor_env(A_in, 4)),
+                list(env_leaves),
+            )
+            return compute_energy_ctm_tensor(A_norm, env, gate)
 
-        # Two independent gradient calls should give the same result
         grad1 = jax.grad(energy_fn)(A)
         grad2 = jax.grad(energy_fn)(A)
-        assert jnp.allclose(grad1, grad2, atol=1e-10), (
+        assert jnp.allclose(grad1.todense(), grad2.todense(), atol=1e-10), (
             f"GMRES backward not deterministic: max diff = "
-            f"{float(jnp.max(jnp.abs(grad1 - grad2)))}"
+            f"{float(jnp.max(jnp.abs(grad1.todense() - grad2.todense())))}"
         )
