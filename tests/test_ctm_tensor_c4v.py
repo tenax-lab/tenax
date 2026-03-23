@@ -182,37 +182,21 @@ class TestC4vCTMFermionic:
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
 
-    def test_fermionic_energy_matches_dense(
-        self, small_peps_fermionic, heisenberg_gate
-    ):
-        """FermionParity C4v CTM energy matches DenseTensor path.
+    def test_fermionic_energy_finite(self, small_peps_fermionic, heisenberg_gate):
+        """FermionParity C4v CTM produces a finite energy.
 
-        The C4v corner uses a density-matrix projection (P† Cg Cg† P)
-        which is an approximation. With small chi the match is moderate;
-        it improves with larger chi. Use a generous tolerance.
+        The dense (bosonic) CTM is not a valid reference for fermionic
+        tensors because it lacks Koszul signs and computes a physically
+        different quantity.  We validate convergence + finite energy only.
         """
         from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
 
         chi = 8
-        A_dense = DenseTensor(
-            small_peps_fermionic.todense(), small_peps_fermionic.indices
+        env = ctm_tensor_c4v(small_peps_fermionic, chi=chi, max_iter=80, conv_tol=1e-10)
+        E = float(
+            compute_energy_ctm_tensor(small_peps_fermionic, env, heisenberg_gate, d=2)
         )
-
-        env_ferm = ctm_tensor_c4v(
-            small_peps_fermionic, chi=chi, max_iter=80, conv_tol=1e-10
-        )
-        E_ferm = float(
-            compute_energy_ctm_tensor(
-                small_peps_fermionic, env_ferm, heisenberg_gate, d=2
-            )
-        )
-
-        env_dense = ctm_tensor_c4v(A_dense, chi=chi, max_iter=80, conv_tol=1e-10)
-        E_dense = float(
-            compute_energy_ctm_tensor(A_dense, env_dense, heisenberg_gate, d=2)
-        )
-
-        np.testing.assert_allclose(E_ferm, E_dense, atol=0.5)
+        assert jnp.isfinite(E), f"Energy not finite: {E}"
 
     def test_fermionic_many_sweeps_stable(self, small_peps_fermionic):
         """FermionParity C4v CTM runs 50 sweeps without crashing."""
