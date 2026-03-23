@@ -26,6 +26,18 @@
 
 ### Improvements
 
+- **iPEPS CTM: non-trivial U(1) charges** — `SymmetricTensor` iPEPS with
+  non-trivial charge sectors now work through the full CTM pipeline (#180)
+  - Fixed `_flip_leg_flow` to dual charges + remap block keys
+  - Standard and multisite CTM sweeps pass `base_charges` for stable projector truncation
+- **Block-sparse gauge fix for CTM AD** — replaced `todense()`/`from_dense()`
+  round-trip with direct `tenax.linalg.qr` + `contract`, giving cleaner
+  gradients and closing the energy quality gap between dense and Tensor
+  AD paths (#182)
+- **Unified AD on Tensor protocol** — removed legacy dense AD paths
+  (`ctm_converge`, `ctm_converge_2site`); all optimization now uses
+  `ctm_tensor_converge` / `ctm_tensor_converge_2site` with `DenseTensor`
+  or `SymmetricTensor` (#183)
 - Eliminated ~23 boundary special-case code paths across DMRG, TDVP,
   observables, and CBE
 - Deleted `_pad_boundary_symmetric` / `_unpad_boundary_symmetric` functions
