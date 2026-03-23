@@ -86,13 +86,16 @@ mps = build_mps(site_tensors)
 # Virtual bonds v{i}_{i+1} are connected automatically
 ```
 
-Label convention for MPS site tensors:
+Label convention for MPS site tensors (all sites are 3-leg):
 
 | Site | Left bond | Physical | Right bond |
 |------|-----------|----------|------------|
-| 0 | -- | `p0` | `v0_1` |
+| 0 | `v_-1_0` (dim=1) | `p0` | `v0_1` |
 | i | `v{i-1}_{i}` | `p{i}` | `v{i}_{i+1}` |
-| L-1 | `v{L-2}_{L-1}` | `p{L-1}` | -- |
+| L-1 | `v{L-2}_{L-1}` | `p{L-1}` | `v{L-1}_{L}` (dim=1) |
+
+Boundary sites have explicit trivial dimension-1 bonds rather than omitting
+the virtual leg. This makes all MPS tensors uniformly 3-leg.
 
 ## Building a PEPS
 

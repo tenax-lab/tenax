@@ -243,12 +243,12 @@ The algorithm runs without crashing but gives wrong or non-converging results.
 ### DMRG
 
 ```python
-from tenax.algorithms.dmrg import dmrg, build_mpo_heisenberg, DMRGConfig
-from tenax import build_random_mps
+import jax
+from tenax import dmrg, build_mpo_heisenberg, DMRGConfig, FiniteMPS
 
 L = 20
 mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
-mps = build_random_mps(L, physical_dim=2, bond_dim=16)
+mps = FiniteMPS.random(L=L, d=2, chi=16, key=jax.random.PRNGKey(0))
 config = DMRGConfig(max_bond_dim=64, num_sweeps=10, verbose=True)
 result = dmrg(mpo, mps, config)
 ```
@@ -293,6 +293,22 @@ result = idmrg(W, config)
 | 1D Heisenberg S=1/2 | ≈ −0.4431 | `build_bulk_mpo_heisenberg(Jz=1.0, Jxy=1.0)` |
 | 2D Ising β_c | ≈ 0.4407 | `compute_ising_tensor(beta)` |
 | 2D Heisenberg iPEPS D=2 | ≈ −0.6548 | `ipeps(gate, None, config)` |
+
+---
+
+## Common Runtime Warnings
+
+Tenax emits warnings in specific situations — they are diagnostic clues:
+
+- **`expectation_value has non-negligible imaginary part`** — the operator
+  is likely not Hermitian. Check that the operator matrix is self-adjoint.
+  If intentional (e.g., measuring a non-Hermitian order parameter), the
+  warning is safe to suppress.
+
+- **`inner() called with mixed tensor types`** — a `DenseTensor` and
+  `SymmetricTensor` were passed to `inner()`. Both are converted to dense
+  arrays, which may be slow for large bond dimensions. This usually
+  indicates an accidental mixing of tensor types in the algorithm.
 
 ---
 

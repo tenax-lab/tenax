@@ -13,7 +13,7 @@ All MPS site tensors become uniformly 3-leg `(chi_l, d, chi_r)`:
 |------|-------|--------|-------|
 | 0 | `(1, d, chi)` | `v_-1_0, p0, v0_1` | Left bond = trivial (charge 0) |
 | bulk | `(chi_l, d, chi_r)` | `v{i-1}_{i}, p{i}, v{i}_{i+1}` | Unchanged |
-| L-1 | `(chi, d, 1)` | `v{L-2}_{L-1}, p{L-1}, v{L-1}_{L}` | Right bond = trivial (charge = target_charge) |
+| L-1 | `(chi, d, 1)` | `v{L-2}_{L-1}, p{L-1}, v{L-1}_{L}` | Right bond = trivial (charge = 0); target charge encoded via block selection |
 
 ## `target_charge` Field
 

@@ -28,7 +28,7 @@ scope.
 | `qtn.DMRG2(ham)` | `dmrg(mpo, mps, config)` | Functional API |
 | `qtn.SpinHam1D(S=0.5)` | `AutoMPO(L, d=2)` | Similar builder pattern |
 | `ham.build_mpo(L)` | `auto.to_mpo()` | Explicit L in AutoMPO constructor |
-| `qtn.MPS_rand_state(L, bond_dim)` | `build_random_mps(L, d, bond_dim)` | Similar |
+| `qtn.MPS_rand_state(L, bond_dim)` | `FiniteMPS.random(L, d, chi, key)` | Similar |
 | `tensor_network.draw()` | — | No visualization in Tenax |
 
 ---
@@ -159,7 +159,8 @@ print(f"Energy: {dmrg.energy:.10f}")
 
 **Tenax:**
 ```python
-from tenax import AutoMPO, DMRGConfig, build_random_mps, dmrg
+import jax
+from tenax import AutoMPO, DMRGConfig, FiniteMPS, dmrg
 
 L = 20
 auto = AutoMPO(L=L, d=2)
@@ -169,7 +170,8 @@ for i in range(L - 1):
     auto += (0.5, "Sm", i, "Sp", i + 1)
 mpo = auto.to_mpo()
 
-mps = build_random_mps(L, physical_dim=2, bond_dim=10)
+key = jax.random.PRNGKey(0)
+mps = FiniteMPS.random(L=L, d=2, chi=10, key=key)
 config = DMRGConfig(max_bond_dim=100, num_sweeps=10, verbose=True)
 result = dmrg(mpo, mps, config)
 print(f"Energy: {result.energy:.10f}")

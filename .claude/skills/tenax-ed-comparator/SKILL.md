@@ -36,7 +36,8 @@ due to exponential memory scaling (2^L states). DMRG has no such limit.
 ### For DMRG: use AutoMPO
 
 ```python
-from tenax import AutoMPO, DMRGConfig, build_random_mps, dmrg
+import jax
+from tenax import AutoMPO, DMRGConfig, FiniteMPS, dmrg
 
 L = 12  # Small enough for ED
 auto = AutoMPO(L=L, d=2)
@@ -98,7 +99,8 @@ chis = [2, 4, 8, 16, 32, 64]
 results = {}
 
 for chi in chis:
-    mps = build_random_mps(L, physical_dim=2, bond_dim=min(chi, 4))
+    key = jax.random.PRNGKey(chi)  # different key per bond dim
+    mps = FiniteMPS.random(L=L, d=2, chi=min(chi, 4), key=key)
     config = DMRGConfig(max_bond_dim=chi, num_sweeps=15)
     result = dmrg(mpo, mps, config)
     results[chi] = result

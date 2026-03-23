@@ -18,7 +18,7 @@ functional-style JAX-based approach.
 | TeNPy | Tenax | Notes |
 |-------|-------|-------|
 | `SpinHalfSite()` | `spin_half_ops()` | Returns operator dict, no Site object |
-| `MPS.from_lat_product_state(...)` | `build_random_mps(L, d, chi)` | No lattice/product-state builder |
+| `MPS.from_lat_product_state(...)` | `FiniteMPS.random(L, d, chi, key)` | No lattice/product-state builder |
 | `MPOModel` / `CouplingMPOModel` | `AutoMPO(L, d)` | Functional, not class-based |
 | `model.calc_H_MPO()` | `auto.to_mpo()` | Direct construction |
 | `TwoSiteDMRGEngine(psi, model, params)` | `dmrg(mpo, mps, config)` | Functional API |
@@ -121,8 +121,21 @@ C = psi.correlation_function("Sz", "Sz")
 S = psi.entanglement_entropy()
 ```
 
-**Tenax:** Observables require manual contraction. The iDMRG result exposes
-`singular_values` for entanglement entropy:
+**Tenax:** Built-in `expectation_value()` and `correlation()` functions:
+
+```python
+from tenax.algorithms.observables import expectation_value, correlation
+import numpy as np
+
+Sz = np.array([[0.5, 0.0], [0.0, -0.5]])
+sz_val = expectation_value(result.mps, Sz, site=0)
+corr = correlation(result.mps, Sz, 0, Sz, 5)
+
+# For fermionic correlators: anticommute=True handles operator ordering
+corr_f = correlation(result.mps, Cdag, 0, C, 3, anticommute=True)
+```
+
+Entanglement entropy from iDMRG singular values:
 
 ```python
 import jax.numpy as jnp
@@ -158,7 +171,8 @@ print(f"Entanglement entropy: {psi.entanglement_entropy()}")
 
 **Tenax:**
 ```python
-from tenax import AutoMPO, DMRGConfig, build_random_mps, dmrg
+import jax
+from tenax import AutoMPO, DMRGConfig, FiniteMPS, dmrg
 
 L = 20
 auto = AutoMPO(L=L, d=2)
@@ -168,7 +182,8 @@ for i in range(L - 1):
     auto += (0.5, "Sm", i, "Sp", i + 1)
 mpo = auto.to_mpo()
 
-mps = build_random_mps(L, physical_dim=2, bond_dim=16)
+key = jax.random.PRNGKey(0)
+mps = FiniteMPS.random(L=L, d=2, chi=16, key=key)
 config = DMRGConfig(max_bond_dim=100, num_sweeps=10, verbose=True)
 result = dmrg(mpo, mps, config)
 print(f"Energy: {result.energy:.10f}")

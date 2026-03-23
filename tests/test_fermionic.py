@@ -4,6 +4,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from tenax.contraction.contractor import contract, qr_decompose, truncated_svd
 from tenax.core.index import FlowDirection, TensorIndex
@@ -701,8 +703,7 @@ class TestAutoMPOJordanWigner:
         """Nearest-neighbor hopping: no F needed between adjacent sites."""
         from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
 
-        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(),
-                       fermionic_ops={"C", "Cd"})
+        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(), fermionic_ops={"C", "Cd"})
         auto.add_term(1.0, "Cd", 0, "C", 1)
         # NN: no intermediate sites, so only 1 term with 2 ops
         assert auto.n_terms() == 1
@@ -715,8 +716,7 @@ class TestAutoMPOJordanWigner:
         """Next-nearest-neighbor: F inserted on intermediate site 1."""
         from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
 
-        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(),
-                       fermionic_ops={"C", "Cd"})
+        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(), fermionic_ops={"C", "Cd"})
         auto.add_term(1.0, "Cd", 0, "C", 2)
         assert auto.n_terms() == 1
         term = auto._terms[0]
@@ -731,8 +731,7 @@ class TestAutoMPOJordanWigner:
         """Long-range hopping Cd@0 C@4: F inserted on sites 1, 2, 3."""
         from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
 
-        auto = AutoMPO(L=6, d=2, site_ops=fermion_site_ops(),
-                       fermionic_ops={"C", "Cd"})
+        auto = AutoMPO(L=6, d=2, site_ops=fermion_site_ops(), fermionic_ops={"C", "Cd"})
         auto.add_term(1.0, "Cd", 0, "C", 4)
         term = auto._terms[0]
         assert len(term.ops) == 5  # Cd@0, F@1, F@2, F@3, C@4
@@ -743,8 +742,7 @@ class TestAutoMPOJordanWigner:
         """Density-density N@0 N@2: no F insertion (N is not fermionic)."""
         from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
 
-        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(),
-                       fermionic_ops={"C", "Cd"})
+        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(), fermionic_ops={"C", "Cd"})
         auto.add_term(1.0, "N", 0, "N", 2)
         term = auto._terms[0]
         assert len(term.ops) == 2  # No F inserted
@@ -753,8 +751,7 @@ class TestAutoMPOJordanWigner:
         """Term with one fermionic and one bosonic op: Cd@0 N@2 needs F@1."""
         from tenax.algorithms.auto_mpo import AutoMPO, fermion_site_ops
 
-        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(),
-                       fermionic_ops={"C", "Cd"})
+        auto = AutoMPO(L=4, d=2, site_ops=fermion_site_ops(), fermionic_ops={"C", "Cd"})
         auto.add_term(1.0, "Cd", 0, "N", 2)
         term = auto._terms[0]
         # Odd number of fermionic ops in the range => F on intermediates
@@ -777,13 +774,14 @@ class TestBuildAutoMPOFermionic:
 
         L = 4
         ops = fermion_site_ops()
-        terms = [
-            (-1.0, "Cd", i, "C", i + 1) for i in range(L - 1)
-        ] + [
+        terms = [(-1.0, "Cd", i, "C", i + 1) for i in range(L - 1)] + [
             (-1.0, "C", i, "Cd", i + 1) for i in range(L - 1)
         ]
         mpo = build_auto_mpo(
-            terms, L=L, d=2, site_ops=ops,
+            terms,
+            L=L,
+            d=2,
+            site_ops=ops,
             fermionic_ops={"C", "Cd"},
         )
         assert mpo is not None
@@ -823,8 +821,8 @@ class TestFermionicDMRG:
         # Exact GS energy for free fermions on L=6 open chain at half filling
         # E = -2t * sum_{k=1}^{N} cos(pi*k/(L+1))
         # N = 3 (half filling), L = 6
-        exact_energy = -2 * t_hop * sum(
-            np.cos(np.pi * k / (L + 1)) for k in range(1, L // 2 + 1)
+        exact_energy = (
+            -2 * t_hop * sum(np.cos(np.pi * k / (L + 1)) for k in range(1, L // 2 + 1))
         )
         np.testing.assert_allclose(result.energy, exact_energy, atol=1e-6)
 
@@ -895,8 +893,10 @@ class TestFermionicContractionCrossValidation:
         ref = jnp.einsum("abc,cde->abde", A_dense, B_dense)
 
         np.testing.assert_allclose(
-            np.array(result_dense), np.array(ref), atol=1e-10,
-            err_msg="Fermionic block-sparse contraction differs from dense einsum"
+            np.array(result_dense),
+            np.array(ref),
+            atol=1e-10,
+            err_msg="Fermionic block-sparse contraction differs from dense einsum",
         )
 
     def test_matrix_contraction_fu1(self, fu1, rng, rng2):
@@ -924,8 +924,10 @@ class TestFermionicContractionCrossValidation:
         ref = jnp.einsum("ab,bc->ac", A_dense, B_dense)
 
         np.testing.assert_allclose(
-            np.array(result_dense), np.array(ref), atol=1e-10,
-            err_msg="FermionicU1 matrix contraction differs from dense einsum"
+            np.array(result_dense),
+            np.array(ref),
+            atol=1e-10,
+            err_msg="FermionicU1 matrix contraction differs from dense einsum",
         )
 
     def test_product_symmetry_contraction(self, rng, rng2):
@@ -953,5 +955,156 @@ class TestFermionicContractionCrossValidation:
 
         ref = jnp.einsum("ab,bc->ac", A.todense(), B.todense())
         np.testing.assert_allclose(
-            np.array(result_dense), np.array(ref), atol=1e-10,
+            np.array(result_dense),
+            np.array(ref),
+            atol=1e-10,
+        )
+
+
+# ------------------------------------------------------------------ #
+# Hypothesis property-based tests for fermionic contraction signs      #
+# ------------------------------------------------------------------ #
+
+
+class TestFermionicContractionHypothesis:
+    """Property-based tests cross-validating block-sparse vs dense contraction."""
+
+    @given(seed=st.integers(min_value=0, max_value=2**31 - 1))
+    @settings(max_examples=20, deadline=None)
+    def test_2tensor_contraction_sign_cross_validation(self, seed):
+        """Block-sparse contract(A, B) matches dense einsum for FermionParity."""
+        fp = FermionParity()
+        charges = np.array([0, 1], dtype=np.int32)
+        indices_A = (
+            TensorIndex(fp, charges, FlowDirection.IN, label="a"),
+            TensorIndex(fp, charges, FlowDirection.IN, label="b"),
+            TensorIndex(fp, charges, FlowDirection.OUT, label="c"),
+        )
+        indices_B = (
+            TensorIndex(fp, charges, FlowDirection.IN, label="c"),
+            TensorIndex(fp, charges, FlowDirection.IN, label="d"),
+            TensorIndex(fp, charges, FlowDirection.OUT, label="e"),
+        )
+        key = jax.random.PRNGKey(seed)
+        k1, k2 = jax.random.split(key)
+        A = SymmetricTensor.random_normal(indices_A, k1)
+        B = SymmetricTensor.random_normal(indices_B, k2)
+
+        result = contract(A, B)
+        result_dense = result.todense()
+
+        ref = jnp.einsum("abc,cde->abde", A.todense(), B.todense())
+        np.testing.assert_allclose(
+            np.array(result_dense),
+            np.array(ref),
+            atol=1e-10,
+        )
+
+    @given(seed=st.integers(min_value=0, max_value=2**31 - 1))
+    @settings(max_examples=20, deadline=None)
+    def test_3tensor_contraction_sign_cross_validation(self, seed):
+        """Chain contraction A(a,b)*B(b,c)*C(c,d) matches dense einsum."""
+        fp = FermionParity()
+        charges = np.array([0, 1], dtype=np.int32)
+        indices_A = (
+            TensorIndex(fp, charges, FlowDirection.IN, label="a"),
+            TensorIndex(fp, charges, FlowDirection.OUT, label="b"),
+        )
+        indices_B = (
+            TensorIndex(fp, charges, FlowDirection.IN, label="b"),
+            TensorIndex(fp, charges, FlowDirection.OUT, label="c"),
+        )
+        indices_C = (
+            TensorIndex(fp, charges, FlowDirection.IN, label="c"),
+            TensorIndex(fp, charges, FlowDirection.OUT, label="d"),
+        )
+        key = jax.random.PRNGKey(seed)
+        k1, k2, k3 = jax.random.split(key, 3)
+        A = SymmetricTensor.random_normal(indices_A, k1)
+        B = SymmetricTensor.random_normal(indices_B, k2)
+        C = SymmetricTensor.random_normal(indices_C, k3)
+
+        result = contract(contract(A, B), C)
+        result_dense = result.todense()
+
+        ref = jnp.einsum("ab,bc,cd->ad", A.todense(), B.todense(), C.todense())
+        np.testing.assert_allclose(
+            np.array(result_dense),
+            np.array(ref),
+            atol=1e-10,
+        )
+
+    @given(seed=st.integers(min_value=0, max_value=2**31 - 1))
+    @settings(max_examples=20, deadline=None)
+    def test_contraction_order_independence(self, seed):
+        """contract(A, B) matches dense einsum for both input orderings.
+
+        For fermionic tensors, swapping tensor order changes the Koszul sign
+        structure. We verify each ordering individually against dense einsum,
+        confirming the block-sparse path applies the correct signs in both cases.
+        """
+        fp = FermionParity()
+        charges = np.array([0, 1], dtype=np.int32)
+        indices_A = (
+            TensorIndex(fp, charges, FlowDirection.IN, label="a"),
+            TensorIndex(fp, charges, FlowDirection.OUT, label="b"),
+        )
+        indices_B = (
+            TensorIndex(fp, charges, FlowDirection.IN, label="b"),
+            TensorIndex(fp, charges, FlowDirection.OUT, label="c"),
+        )
+        key = jax.random.PRNGKey(seed)
+        k1, k2 = jax.random.split(key)
+        A = SymmetricTensor.random_normal(indices_A, k1)
+        B = SymmetricTensor.random_normal(indices_B, k2)
+
+        Ad, Bd = A.todense(), B.todense()
+
+        # contract(A, B) -> output labels [a, c]
+        ab = contract(A, B)
+        ref_ab = jnp.einsum("ab,bc->ac", Ad, Bd)
+        np.testing.assert_allclose(
+            np.array(ab.todense()),
+            np.array(ref_ab),
+            atol=1e-10,
+        )
+
+        # contract(B, A) -> output labels [c, a] (reversed free legs)
+        ba = contract(B, A)
+        ref_ba = jnp.einsum("bc,ab->ca", Ad, Bd)
+        np.testing.assert_allclose(
+            np.array(ba.todense()),
+            np.array(ref_ba),
+            atol=1e-10,
+        )
+
+    @given(seed=st.integers(min_value=0, max_value=2**31 - 1))
+    @settings(max_examples=20, deadline=None)
+    def test_fermionic_u1_multi_leg_contraction(self, seed):
+        """Block-sparse contract matches dense einsum for FermionicU1."""
+        fu1 = FermionicU1()
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices_A = (
+            TensorIndex(fu1, charges, FlowDirection.IN, label="a"),
+            TensorIndex(fu1, charges, FlowDirection.IN, label="b"),
+            TensorIndex(fu1, charges, FlowDirection.OUT, label="c"),
+        )
+        indices_B = (
+            TensorIndex(fu1, charges, FlowDirection.IN, label="c"),
+            TensorIndex(fu1, charges, FlowDirection.IN, label="d"),
+            TensorIndex(fu1, charges, FlowDirection.OUT, label="e"),
+        )
+        key = jax.random.PRNGKey(seed)
+        k1, k2 = jax.random.split(key)
+        A = SymmetricTensor.random_normal(indices_A, k1)
+        B = SymmetricTensor.random_normal(indices_B, k2)
+
+        result = contract(A, B)
+        result_dense = result.todense()
+
+        ref = jnp.einsum("abc,cde->abde", A.todense(), B.todense())
+        np.testing.assert_allclose(
+            np.array(result_dense),
+            np.array(ref),
+            atol=1e-10,
         )
