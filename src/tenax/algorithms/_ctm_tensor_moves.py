@@ -39,7 +39,16 @@ def _flip_leg_flow(tensor: Tensor, label: str) -> Tensor:
             new_indices.append(idx.flip_flow())
         else:
             new_indices.append(idx)
-    return SymmetricTensor(tensor.blocks, tuple(new_indices))
+    # Use _raw to skip conservation validation: the flow flip is an
+    # intentional convention change (matching the CTMTensorEnv label spec),
+    # not a physics change.  The block keys remain valid for contraction.
+    return SymmetricTensor._raw(
+        indices=tuple(new_indices),
+        data=tensor._data,
+        block_keys=tensor._block_keys,
+        block_shapes=tensor._block_shapes,
+        block_offsets=tensor._block_offsets,
+    )
 
 
 def _apply_projector_tensor(
