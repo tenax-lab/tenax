@@ -28,6 +28,9 @@ from tenax.algorithms._ctm_tensor import (
 from tenax.algorithms._ctm_tensor import (
     _ctm_sv_diff as _ctm_sv_diff_tensor,
 )
+from tenax.algorithms._ctm_tensor_convergence import (
+    _ctm_tensor_sweep_paired,
+)
 from tenax.algorithms._split_ctm_tensor import (
     _split_ctm_tensor_sweep,
     ctm_split_tensor,
@@ -235,7 +238,9 @@ def _gauge_fix_ctm(env: CTMEnvironment) -> CTMEnvironment:
     T3_new = jnp.einsum("ab,bdc->adc", Q4.conj().T, T3_new)
     T4_new = jnp.einsum("adb,bc->adc", T4_new, Q4)
 
-    return CTMEnvironment(C1_new, C2_new, C3_new, C4_new, T1_new, T2_new, T3_new, T4_new)
+    return CTMEnvironment(
+        C1_new, C2_new, C3_new, C4_new, T1_new, T2_new, T3_new, T4_new
+    )
 
 
 def ctm_fixed_point(
@@ -421,9 +426,7 @@ def _ctm_step_2site(
     env_B: CTMEnvironment,
     config: CTMConfig,
 ) -> tuple[CTMEnvironment, CTMEnvironment]:
-    """One full 2-site CTM iteration + gauge fixing.
-
-    """
+    """One full 2-site CTM iteration + gauge fixing."""
     a_A = _build_double_layer(A)
     a_B = _build_double_layer(B)
     if a_A.ndim == 8:
@@ -610,6 +613,22 @@ def _gauge_fix_ctm_tensor(env):
     )
 
 
+def _needs_paired_sweep(A) -> bool:
+    """Check if A is a SymmetricTensor with non-trivial virtual charges."""
+    from tenax.core.tensor import SymmetricTensor
+
+    if not isinstance(A, SymmetricTensor):
+        return False
+    import numpy as _np
+
+    virtual_charges = [_np.sort(A.indices[i].charges) for i in range(4)]
+    has_nontrivial = any(not _np.all(vc == 0) for vc in virtual_charges)
+    all_same = all(
+        _np.array_equal(virtual_charges[0], virtual_charges[i]) for i in range(1, 4)
+    )
+    return has_nontrivial and all_same
+
+
 def _ctm_tensor_step(
     A_leaves: tuple[jax.Array, ...],
     env_leaves: tuple[jax.Array, ...],
@@ -618,13 +637,15 @@ def _ctm_tensor_step(
     projector_method: str,
     A_treedef,
     env_treedef,
+    use_paired: bool = False,
 ) -> tuple[jax.Array, ...]:
     """One CTM tensor sweep + gauge fix, mapping flat leaves to flat leaves."""
     A = jax.tree.unflatten(A_treedef, A_leaves)
     env = jax.tree.unflatten(env_treedef, list(env_leaves))
 
     a = _build_double_layer_tensor(A)
-    env_new = _ctm_tensor_sweep(env, a, chi, renormalize, projector_method)
+    sweep_fn = _ctm_tensor_sweep_paired if use_paired else _ctm_tensor_sweep
+    env_new = sweep_fn(env, a, chi, renormalize, projector_method)
     env_new = _gauge_fix_ctm_tensor(env_new)
 
     return tuple(jax.tree.leaves(env_new))
@@ -634,12 +655,11 @@ def _ctm_tensor_fixed_point_impl(A, config):
     """Run standard Tensor-protocol CTM to convergence with gauge fixing."""
     a = _build_double_layer_tensor(A)
     env = initialize_ctm_tensor_env(A, config.chi)
+    sweep_fn = _ctm_tensor_sweep_paired if _needs_paired_sweep(A) else _ctm_tensor_sweep
 
     prev_sv = None
     for _ in range(config.max_iter):
-        env = _ctm_tensor_sweep(
-            env, a, config.chi, config.renormalize, config.projector_method
-        )
+        env = sweep_fn(env, a, config.chi, config.renormalize, config.projector_method)
         env = _gauge_fix_ctm_tensor(env)
 
         current_sv = jnp.linalg.svd(env.C1.todense(), compute_uv=False)
@@ -694,6 +714,8 @@ def _ctm_tensor_converge_bwd(config_tuple, residuals, g):
     env_treedef = jax.tree.structure(env)
     env_leaves = tuple(jax.tree.leaves(env))
 
+    paired = _needs_paired_sweep(A)
+
     def step_fn(A_in, env_in_leaves):
         return _ctm_tensor_step(
             tuple(jax.tree.leaves(A_in)),
@@ -703,6 +725,7 @@ def _ctm_tensor_converge_bwd(config_tuple, residuals, g):
             config.projector_method,
             A_treedef,
             env_treedef,
+            use_paired=paired,
         )
 
     def apply_I_minus_Jt(v):

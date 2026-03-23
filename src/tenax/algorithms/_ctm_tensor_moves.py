@@ -10,8 +10,11 @@ __all__ = [
     "_ctm_tensor_move_top",
 ]
 
+import numpy as np
+
 from tenax.algorithms._ctm_projector import (
     _compute_projector_tensor,
+    _reembed_fused,
 )
 from tenax.algorithms._ctm_tensor_init import (
     IN,
@@ -30,25 +33,50 @@ def _flip_leg_flow(tensor: Tensor, label: str) -> Tensor:
     leg (e.g. d2→u2) because the inherited flow from the double-layer
     tensor is opposite to the edge spec.  DenseTensors are returned
     unchanged since flow is cosmetic for non-fermionic tensors.
+
+    For non-trivial charges, this duals the leg (flips flow + negates
+    charges) and remaps the corresponding block keys so that the
+    conservation law ``sum(flow_i * charge_i) = 0`` is preserved.
     """
     if isinstance(tensor, DenseTensor):
         return tensor  # flow doesn't affect DenseTensor contractions
+
+    axis = None
     new_indices = []
-    for idx in tensor.indices:
+    for i, idx in enumerate(tensor.indices):
         if idx.label == label:
-            new_indices.append(idx.flip_flow())
+            axis = i
+            new_indices.append(idx.dual())
         else:
             new_indices.append(idx)
-    # Use _raw to skip conservation validation: the flow flip is an
-    # intentional convention change (matching the CTMTensorEnv label spec),
-    # not a physics change.  The block keys remain valid for contraction.
-    return SymmetricTensor._raw(
-        indices=tuple(new_indices),
-        data=tensor._data,
-        block_keys=tensor._block_keys,
-        block_shapes=tensor._block_shapes,
-        block_offsets=tensor._block_offsets,
-    )
+
+    if axis is None:
+        return SymmetricTensor(tensor.blocks, tuple(new_indices))
+
+    # For trivial charges, block keys don't change — use _raw to skip
+    # validation (the flow flip is an intentional convention change).
+    old_idx = tensor.indices[axis]
+    if all(c == 0 for c in old_idx.charges):
+        return SymmetricTensor._raw(
+            indices=tuple(new_indices),
+            data=tensor._data,
+            block_keys=tensor._block_keys,
+            block_shapes=tensor._block_shapes,
+            block_offsets=tensor._block_offsets,
+        )
+
+    # Non-trivial charges: remap block keys to use dual charges
+    sym = old_idx.symmetry
+    dual_charges = sym.dual(old_idx.charges)
+    charge_to_dual = {int(o): int(d) for o, d in zip(old_idx.charges, dual_charges)}
+
+    new_blocks = {}
+    for key, val in tensor.blocks.items():
+        new_key = list(key)
+        new_key[axis] = charge_to_dual[key[axis]]
+        new_blocks[tuple(new_key)] = val
+
+    return SymmetricTensor(new_blocks, tuple(new_indices))
 
 
 def _apply_projector_tensor(
@@ -93,12 +121,61 @@ def _apply_projector_tensor(
     return C1_new, C4_new, T_new
 
 
+def _apply_projector_with_reembed(
+    P: Tensor,
+    C1g: Tensor,
+    C4g: Tensor,
+    Tg: Tensor,
+    fused_l: str,
+    fused_r: str,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Apply projector with automatic re-embedding for mismatched fused indices.
+
+    When the projector has a unified fused index (from combining two corners
+    with different charge distributions), re-embeds the grown corners and
+    edge to match the projector's fused dimension before applying.
+
+    For DenseTensor inputs, delegates directly to ``_apply_projector_tensor``.
+    """
+    if not isinstance(P, SymmetricTensor):
+        return _apply_projector_tensor(P, C1g, C4g, Tg, fused_l, fused_r)
+
+    p_fused_idx = P.indices[P.labels().index("fused")]
+
+    def _maybe_reembed(T: SymmetricTensor, fused_label: str) -> SymmetricTensor:
+        fused_pos = T.labels().index(fused_label)
+        current_idx = T.indices[fused_pos]
+        if np.array_equal(current_idx.charges, p_fused_idx.charges):
+            return T
+        from tenax.core.index import TensorIndex
+
+        target_idx = TensorIndex(
+            p_fused_idx.symmetry,
+            p_fused_idx.charges.copy(),
+            current_idx.flow,
+            label="fused",
+        )
+        orig_label = fused_label
+        T_tmp = T.relabel(orig_label, "fused")
+        T_re = _reembed_fused(T_tmp, target_idx)
+        return T_re.relabel("fused", orig_label)
+
+    if isinstance(C1g, SymmetricTensor):
+        C1g = _maybe_reembed(C1g, "fused")
+        C4g = _maybe_reembed(C4g, "fused")
+        Tg = _maybe_reembed(Tg, fused_l)
+        Tg = _maybe_reembed(Tg, fused_r)
+
+    return _apply_projector_tensor(P, C1g, C4g, Tg, fused_l, fused_r)
+
+
 def _ctm_tensor_move_left(
     env_self: CTMTensorEnv,
     env_neighbor: CTMTensorEnv,
     a: Tensor,
     chi: int,
     projector_method: str = "eigh",
+    base_charges: np.ndarray | None = None,
 ) -> CTMTensorEnv:
     """Left move: updates C1, T4, C4.
 
@@ -126,8 +203,8 @@ def _ctm_tensor_move_left(
     T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", OUT)
 
     # Native projector
-    P = _compute_projector_tensor(C1g, C4g, chi, projector_method)
-    C1_new, C4_new, T4_new = _apply_projector_tensor(P, C1g, C4g, T4g, "fl", "fr")
+    P = _compute_projector_tensor(C1g, C4g, chi, projector_method, base_charges)
+    C1_new, C4_new, T4_new = _apply_projector_with_reembed(P, C1g, C4g, T4g, "fl", "fr")
 
     # Relabel to expected output labels
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t1_r": "c1_r"})
@@ -144,6 +221,7 @@ def _ctm_tensor_move_right(
     a: Tensor,
     chi: int,
     projector_method: str = "eigh",
+    base_charges: np.ndarray | None = None,
 ) -> CTMTensorEnv:
     """Right move: updates C2, T2, C3.
 
@@ -171,8 +249,8 @@ def _ctm_tensor_move_right(
     T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", OUT)
 
     # Native projector
-    P = _compute_projector_tensor(C2g, C3g, chi, projector_method)
-    C2_new, C3_new, T2_new = _apply_projector_tensor(P, C2g, C3g, T2g, "fl", "fr")
+    P = _compute_projector_tensor(C2g, C3g, chi, projector_method, base_charges)
+    C2_new, C3_new, T2_new = _apply_projector_with_reembed(P, C2g, C3g, T2g, "fl", "fr")
 
     # Relabel to expected output labels
     C2_new = C2_new.relabels({"chi_new": "c2_l", "t1_l": "c2_d"})
@@ -189,6 +267,7 @@ def _ctm_tensor_move_top(
     a: Tensor,
     chi: int,
     projector_method: str = "eigh",
+    base_charges: np.ndarray | None = None,
 ) -> CTMTensorEnv:
     """Top move: updates C1, T1, C2.
 
@@ -216,8 +295,8 @@ def _ctm_tensor_move_top(
     T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", OUT)
 
     # Native projector
-    P = _compute_projector_tensor(C1g, C2g, chi, projector_method)
-    C1_new, C2_new, T1_new = _apply_projector_tensor(P, C1g, C2g, T1g, "fl", "fr")
+    P = _compute_projector_tensor(C1g, C2g, chi, projector_method, base_charges)
+    C1_new, C2_new, T1_new = _apply_projector_with_reembed(P, C1g, C2g, T1g, "fl", "fr")
 
     # Relabel to expected output labels
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t4_u": "c1_r"})
@@ -234,6 +313,7 @@ def _ctm_tensor_move_bottom(
     a: Tensor,
     chi: int,
     projector_method: str = "eigh",
+    base_charges: np.ndarray | None = None,
 ) -> CTMTensorEnv:
     """Bottom move: updates C4, T3, C3.
 
@@ -261,8 +341,8 @@ def _ctm_tensor_move_bottom(
     T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", OUT)
 
     # Native projector
-    P = _compute_projector_tensor(C4g, C3g, chi, projector_method)
-    C4_new, C3_new, T3_new = _apply_projector_tensor(P, C4g, C3g, T3g, "fl", "fr")
+    P = _compute_projector_tensor(C4g, C3g, chi, projector_method, base_charges)
+    C4_new, C3_new, T3_new = _apply_projector_with_reembed(P, C4g, C3g, T3g, "fl", "fr")
 
     # Relabel to expected output labels
     C4_new = C4_new.relabels({"chi_new": "c4_r", "t4_d": "c4_u"})
