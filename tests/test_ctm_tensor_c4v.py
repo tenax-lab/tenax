@@ -185,17 +185,18 @@ class TestC4vCTMFermionic:
     def test_fermionic_energy_finite(self, small_peps_fermionic, heisenberg_gate):
         """FermionParity C4v CTM produces a finite energy.
 
-        The dense (bosonic) CTM is not a valid reference for fermionic
-        tensors because it lacks Koszul signs and computes a physically
-        different quantity.  We validate convergence + finite energy only.
+        C4v CTM internally densifies fermionic tensors (Koszul signs from
+        the C4v flow-flip expansion cause cancellation for SymmetricTensor).
+        Energy must be computed with the matching DenseTensor A.
         """
         from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
 
         chi = 8
-        env = ctm_tensor_c4v(small_peps_fermionic, chi=chi, max_iter=80, conv_tol=1e-10)
-        E = float(
-            compute_energy_ctm_tensor(small_peps_fermionic, env, heisenberg_gate, d=2)
+        A_dense = DenseTensor(
+            small_peps_fermionic.todense(), small_peps_fermionic.indices
         )
+        env = ctm_tensor_c4v(A_dense, chi=chi, max_iter=80, conv_tol=1e-10)
+        E = float(compute_energy_ctm_tensor(A_dense, env, heisenberg_gate, d=2))
         assert jnp.isfinite(E), f"Energy not finite: {E}"
 
     def test_fermionic_many_sweeps_stable(self, small_peps_fermionic):
