@@ -43,7 +43,7 @@ from tenax.algorithms.ipeps_ctm import (
     _initialize_ctm_env,
     _renormalize_env,
 )
-from tenax.core.tensor import SymmetricTensor
+from tenax.contraction.contractor import contract
 
 # ---------------------------------------------------------------------------
 # 1. Truncated SVD with stable backward pass
@@ -235,7 +235,9 @@ def _gauge_fix_ctm(env: CTMEnvironment) -> CTMEnvironment:
     T3_new = jnp.einsum("ab,bdc->adc", Q4.conj().T, T3_new)
     T4_new = jnp.einsum("adb,bc->adc", T4_new, Q4)
 
-    return CTMEnvironment(C1_new, C2_new, C3_new, C4_new, T1_new, T2_new, T3_new, T4_new)
+    return CTMEnvironment(
+        C1_new, C2_new, C3_new, C4_new, T1_new, T2_new, T3_new, T4_new
+    )
 
 
 def ctm_fixed_point(
@@ -421,9 +423,7 @@ def _ctm_step_2site(
     env_B: CTMEnvironment,
     config: CTMConfig,
 ) -> tuple[CTMEnvironment, CTMEnvironment]:
-    """One full 2-site CTM iteration + gauge fixing.
-
-    """
+    """One full 2-site CTM iteration + gauge fixing."""
     a_A = _build_double_layer(A)
     a_B = _build_double_layer(B)
     if a_A.ndim == 8:
@@ -580,33 +580,72 @@ ctm_converge_2site.defvjp(_ctm_converge_2site_fwd, _ctm_converge_2site_bwd)
 def _gauge_fix_ctm_tensor(env):
     """Fix gauge of CTMTensorEnv via QR decomposition of corners.
 
-    Converts to dense arrays, applies the standard QR gauge fix,
-    then wraps results back into Tensor objects.  All operations
-    (``todense()``, dense QR/einsum, ``from_dense()``) are differentiable.
+    Uses block-sparse ``tenax.linalg.qr`` directly on Tensor objects,
+    avoiding ``todense()``/``from_dense()`` round-trips.  This preserves
+    sparsity and gives cleaner gradients during AD.
+
+    Each corner C is QR-decomposed; Q is absorbed into the two adjacent
+    edge tensors, and C is replaced by R.
     """
-    # todense() is differentiable (jnp scatter)
-    C1, C2, C3, C4 = (c.todense() for c in (env.C1, env.C2, env.C3, env.C4))
-    T1, T2, T3, T4 = (t.todense() for t in (env.T1, env.T2, env.T3, env.T4))
+    from tenax.linalg import qr as tensor_qr
 
-    # Standard QR gauge fix on dense arrays
-    dense_env = CTMEnvironment(C1, C2, C3, C4, T1, T2, T3, T4)
-    fixed = _gauge_fix_ctm(dense_env)
+    # C1(c1_d, c1_r) = Q1(c1_d, q1) @ R1(q1, c1_r)
+    # C1_new = R1, absorb Q1^bar into T1's left (t1_l) and T4's top (t4_d)
+    Q1, R1 = tensor_qr(
+        env.C1, left_labels=["c1_d"], right_labels=["c1_r"], new_bond_label="q1"
+    )
+    C1_new = R1.relabel("q1", "c1_d")
+    # Q1^bar: (q1_OUT, c1_d_IN) — relabel c1_d to match edge's chi label
+    Q1b = Q1.bar()
+    T1_new = contract(Q1b.relabel("c1_d", "t1_l"), env.T1)  # (q1, u2, t1_r)
+    T1_new = T1_new.relabel("q1", "t1_l")  # restore label
+    T4_new = contract(Q1b.relabel("c1_d", "t4_d"), env.T4)  # (q1, l2, t4_u)
+    T4_new = T4_new.relabel("q1", "t4_d")  # restore label
 
-    # Wrap back into Tensor objects preserving original index structure
-    def _wrap(data, original):
-        if isinstance(original, SymmetricTensor):
-            return SymmetricTensor.from_dense(data, original.indices, tol=float("inf"))
-        return type(original)(data, original.indices)
+    # C2(c2_l, c2_d) = Q2(c2_l, q2) @ R2(q2, c2_d)
+    # C2_new = R2, absorb Q2 into T1's right (t1_r) and Q2^bar into T2's top (t2_u)
+    Q2, R2 = tensor_qr(
+        env.C2, left_labels=["c2_l"], right_labels=["c2_d"], new_bond_label="q2"
+    )
+    C2_new = R2.relabel("q2", "c2_l")
+    T1_new = contract(T1_new, Q2.relabel("c2_l", "t1_r"))  # (t1_l, u2, q2)
+    T1_new = T1_new.relabel("q2", "t1_r")  # restore label
+    Q2b = Q2.bar()
+    T2_new = contract(Q2b.relabel("c2_l", "t2_u"), env.T2)  # (q2, r2, t2_d)
+    T2_new = T2_new.relabel("q2", "t2_u")  # restore label
+
+    # C3(c3_u, c3_l) = Q3(c3_u, q3) @ R3(q3, c3_l)
+    # C3_new = R3, absorb Q3 into T2's bottom (t2_d) and T3's right (t3_r)
+    Q3, R3 = tensor_qr(
+        env.C3, left_labels=["c3_u"], right_labels=["c3_l"], new_bond_label="q3"
+    )
+    C3_new = R3.relabel("q3", "c3_u")
+    T2_new = contract(T2_new, Q3.relabel("c3_u", "t2_d"))  # (t2_u, r2, q3)
+    T2_new = T2_new.relabel("q3", "t2_d")  # restore label
+    T3_new = contract(env.T3, Q3.relabel("c3_u", "t3_r"))  # (t3_r→q3 side)
+    T3_new = T3_new.relabel("q3", "t3_r")  # restore label
+
+    # C4(c4_r, c4_u) = Q4(c4_r, q4) @ R4(q4, c4_u)
+    # C4_new = R4, absorb Q4^bar into T3's left (t3_l) and Q4 into T4's bottom (t4_u)
+    Q4, R4 = tensor_qr(
+        env.C4, left_labels=["c4_r"], right_labels=["c4_u"], new_bond_label="q4"
+    )
+    C4_new = R4.relabel("q4", "c4_r")
+    Q4b = Q4.bar()
+    T3_new = contract(Q4b.relabel("c4_r", "t3_l"), T3_new)  # (q4, d2, t3_r)
+    T3_new = T3_new.relabel("q4", "t3_l")  # restore label
+    T4_new = contract(T4_new, Q4.relabel("c4_r", "t4_u"))  # (t4_d, l2, q4)
+    T4_new = T4_new.relabel("q4", "t4_u")  # restore label
 
     return CTMTensorEnv(
-        C1=_wrap(fixed.C1, env.C1),
-        C2=_wrap(fixed.C2, env.C2),
-        C3=_wrap(fixed.C3, env.C3),
-        C4=_wrap(fixed.C4, env.C4),
-        T1=_wrap(fixed.T1, env.T1),
-        T2=_wrap(fixed.T2, env.T2),
-        T3=_wrap(fixed.T3, env.T3),
-        T4=_wrap(fixed.T4, env.T4),
+        C1=C1_new,
+        C2=C2_new,
+        C3=C3_new,
+        C4=C4_new,
+        T1=T1_new,
+        T2=T2_new,
+        T3=T3_new,
+        T4=T4_new,
     )
 
 
