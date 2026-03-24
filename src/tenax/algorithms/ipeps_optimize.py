@@ -56,14 +56,16 @@ def _log_ad_step(
     delta_str = "N/A" if not math.isfinite(delta_energy) else f"{delta_energy:.3e}"
     print(
         f"[iPEPS-AD:{backend}] step {step + 1}/{num_steps} "
-        f"E={energy:.10f} dE={delta_str} E_best={best_energy:.10f}"
+        f"E={energy:.10f} dE={delta_str} E_best={best_energy:.10f}",
+        flush=True,
     )
 
 
 def _log_ad_converged(backend: str, step: int, delta_energy: float, tol: float) -> None:
     print(
         f"[iPEPS-AD:{backend}] converged at step {step + 1} "
-        f"(dE={delta_energy:.3e} < tol={tol:.3e})"
+        f"(dE={delta_energy:.3e} < tol={tol:.3e})",
+        flush=True,
     )
 
 
@@ -233,7 +235,7 @@ def _optimize_gs_ad_tensor(
     env = jax.tree.unflatten(env_treedef, env_leaves)
     E_gs = float(compute_energy_ctm_tensor(A_final, env, gate, d_phys))
     if config.gs_verbose:
-        print(f"[iPEPS-AD:1site-tensor] final E={E_gs:.10f}")
+        print(f"[iPEPS-AD:1site-tensor] final E={E_gs:.10f}", flush=True)
 
     return A_final, env, E_gs
 
@@ -438,6 +440,6 @@ def _optimize_gs_ad_tensor_2site(
     env_B = jax.tree.unflatten(env_treedef, last_env_leaves[n_env_leaves:])
     E_gs = last_energy
     if config.gs_verbose:
-        print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}")
+        print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}", flush=True)
 
     return (A_final, B_final), (env_A, env_B), E_gs
