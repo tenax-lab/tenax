@@ -610,7 +610,8 @@ def _idmrg_symmetric(
             n_keep = len(s_vals)
             print(
                 f"iDMRG step {step + 1}: E_total={E_total:.10f}, "
-                f"e/site={e_per_site:.10f}, chi={n_keep}"
+                f"e/site={e_per_site:.10f}, chi={n_keep}",
+                flush=True,
             )
 
         # ---- Check convergence ----
@@ -622,7 +623,7 @@ def _idmrg_symmetric(
             if abs(avg_recent - avg_prev) < config.convergence_tol:
                 converged = True
                 if config.verbose:
-                    print(f"Converged at step {step + 1}")
+                    print(f"Converged at step {step + 1}", flush=True)
                 break
 
         E_prev = E_total
@@ -764,7 +765,8 @@ def idmrg(
         if config.verbose:
             print(
                 f"iDMRG step {step + 1}: E_total={E_total:.10f}, "
-                f"e/site={e_per_site:.10f}, chi={n_keep}"
+                f"e/site={e_per_site:.10f}, chi={n_keep}",
+                flush=True,
             )
 
         # ---- Check convergence (rolling average to handle oscillation) ----
@@ -776,7 +778,7 @@ def idmrg(
             if abs(avg_recent - avg_prev) < config.convergence_tol:
                 converged = True
                 if config.verbose:
-                    print(f"Converged at step {step + 1}")
+                    print(f"Converged at step {step + 1}", flush=True)
                 break
 
         # ---- Prepare for next iteration ----
