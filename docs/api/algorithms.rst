@@ -112,7 +112,7 @@ AD Utilities
 
 .. autofunction:: tenax.algorithms.ad_utils.truncated_svd_ad
 
-.. autofunction:: tenax.algorithms.ad_utils.ctm_converge
+.. autofunction:: tenax.algorithms.ad_utils.ctm_tensor_converge
 
 iPEPS Excitations
 -----------------

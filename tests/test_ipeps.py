@@ -806,27 +806,29 @@ class TestOptimizeGsAd2Site:
         )
         result = optimize_gs_ad(heisenberg_gate, None, config)
         (A_opt, B_opt), (env_A, env_B), E_gs = result
-        assert A_opt.shape == (2, 2, 2, 2, 2)
-        assert B_opt.shape == (2, 2, 2, 2, 2)
-        assert isinstance(env_A, CTMEnvironment)
-        assert isinstance(env_B, CTMEnvironment)
+        assert A_opt.todense().shape == (2, 2, 2, 2, 2)
+        assert B_opt.todense().shape == (2, 2, 2, 2, 2)
         assert np.isfinite(E_gs)
 
     def test_2site_ad_energy_decreases(self, heisenberg_gate):
         """Energy after optimization should be lower than initial energy."""
+        from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor
 
-        # Compute initial energy with random tensors
+        # Compute initial energy via the Tensor-protocol CTM (same path
+        # used during optimization) so that the comparison is consistent.
         D, d = 2, 2
         key_A, key_B = jax.random.split(jax.random.PRNGKey(0))
-        A0 = jax.random.normal(key_A, (D, D, D, D, d))
-        A0 = A0 / (jnp.linalg.norm(A0) + 1e-10)
-        B0 = jax.random.normal(key_B, (D, D, D, D, d))
-        B0 = B0 / (jnp.linalg.norm(B0) + 1e-10)
+        A0 = _wrap_as_dense_tensor(jax.random.normal(key_A, (D, D, D, D, d)))
+        B0 = _wrap_as_dense_tensor(jax.random.normal(key_B, (D, D, D, D, d)))
 
-        env_A0, env_B0 = ctm_2site(A0, B0, CTMConfig(chi=4, max_iter=10))
-        E_init = float(
-            compute_energy_ctm_2site(A0, B0, env_A0, env_B0, heisenberg_gate, d)
+        # Run 0 optimization steps to get initial energy from tensor CTM
+        config_init = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=0,
+            unit_cell="2site",
         )
+        _, _, E_init = optimize_gs_ad(heisenberg_gate, (A0, B0), config_init)
 
         config = iPEPSConfig(
             max_bond_dim=2,
@@ -866,14 +868,12 @@ class TestOptimizeGsAd2Site:
         (A_opt, B_opt), (env_A, env_B), E_gs = optimize_gs_ad(
             heisenberg_gate, None, config
         )
-        assert A_opt.shape == (2, 2, 2, 2, 2)
-        assert B_opt.shape == (2, 2, 2, 2, 2)
-        assert isinstance(env_A, CTMEnvironment)
-        assert isinstance(env_B, CTMEnvironment)
+        assert A_opt.todense().shape == (2, 2, 2, 2, 2)
+        assert B_opt.todense().shape == (2, 2, 2, 2, 2)
         assert np.isfinite(E_gs)
 
-    def test_2site_ad_mixed_init_types_raise(self, heisenberg_gate):
-        """Mixed (Tensor, dense) init must raise a clear error."""
+    def test_2site_ad_mixed_init_types_work(self, heisenberg_gate):
+        """Mixed (Tensor, dense) init should work — arrays are auto-wrapped."""
         from tenax.core import DenseTensor, FlowDirection, TensorIndex, U1Symmetry
 
         D, d = 2, 2
@@ -881,10 +881,10 @@ class TestOptimizeGsAd2Site:
         charges = np.zeros(D, dtype=np.int32)
         phys_charges = np.zeros(d, dtype=np.int32)
         indices = (
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="u"),
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="d"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="l"),
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="r"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
             TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
         )
         A_tensor = DenseTensor(
@@ -899,8 +899,10 @@ class TestOptimizeGsAd2Site:
             gs_num_steps=1,
             unit_cell="2site",
         )
-        with pytest.raises(TypeError, match="mixed tuples are not supported"):
-            optimize_gs_ad(heisenberg_gate, (A_tensor, B_dense), config)
+        # Should not raise — dense arrays are auto-wrapped as DenseTensor
+        result = optimize_gs_ad(heisenberg_gate, (A_tensor, B_dense), config)
+        (A_opt, B_opt), (env_A, env_B), E_gs = result
+        assert np.isfinite(E_gs)
 
     def test_2site_ad_non_tuple_init_raises(self, heisenberg_gate):
         """2-site AD requires A_init to be None or a tuple (A, B)."""
@@ -946,8 +948,8 @@ class TestOptimizeGsAd2Site:
             num_imaginary_steps=100,
             dt=0.3,
             ctm=CTMConfig(chi=16, max_iter=60),
-            gs_num_steps=30,
-            gs_learning_rate=1e-2,
+            gs_num_steps=50,
+            gs_learning_rate=5e-3,
             unit_cell="2site",
         )
         _, _, E_gs = optimize_gs_ad(heisenberg_gate, (A_su, B_su), ad_config)
@@ -990,8 +992,8 @@ class TestOptimizeGsAdLogging:
         )
         optimize_gs_ad(heisenberg_gate, None, config)
         out = capsys.readouterr().out
-        assert "[iPEPS-AD:1site-dense] step 1/2" in out
-        assert "[iPEPS-AD:1site-dense] final E=" in out
+        assert "[iPEPS-AD:1site-tensor] step 1/2" in out
+        assert "[iPEPS-AD:1site-tensor] final E=" in out
 
 
 class TestOptimizeGsAdDenseOnly:

@@ -23,8 +23,8 @@ venv/
 ENV/
 env/
 
-# uv
-uv.lock
+# uv cache
+.uv/
 
 # Testing
 .pytest_cache/

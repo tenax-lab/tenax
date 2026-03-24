@@ -28,22 +28,15 @@ from tenax.algorithms._ctm_tensor import (
 from tenax.algorithms._ctm_tensor import (
     _ctm_sv_diff as _ctm_sv_diff_tensor,
 )
+from tenax.algorithms._ctm_tensor_convergence import (
+    _ctm_tensor_sweep_paired,
+)
 from tenax.algorithms._split_ctm_tensor import (
     _split_ctm_tensor_sweep,
     ctm_split_tensor,
 )
-from tenax.algorithms.ipeps_config import CTMConfig, CTMEnvironment
-from tenax.algorithms.ipeps_ctm import (
-    _build_double_layer,
-    _ctm_2site_sweep,
-    _ctm_bottom_move,
-    _ctm_left_move,
-    _ctm_right_move,
-    _ctm_top_move,
-    _initialize_ctm_env,
-    _renormalize_env,
-)
-from tenax.core.tensor import SymmetricTensor
+from tenax.algorithms.ipeps_config import CTMConfig
+from tenax.contraction.contractor import contract
 
 # ---------------------------------------------------------------------------
 # 1. Truncated SVD with stable backward pass
@@ -157,145 +150,8 @@ truncated_svd_ad.defvjp(_truncated_svd_ad_fwd, _truncated_svd_ad_bwd)
 
 
 # ---------------------------------------------------------------------------
-# 2. CTM fixed-point implicit differentiation
+# 2. Config tuple helpers (shared by all CTM AD paths)
 # ---------------------------------------------------------------------------
-
-
-def _ctm_step(A: jax.Array, env: CTMEnvironment, config: CTMConfig) -> CTMEnvironment:
-    """One full CTM iteration (left, right, top, bottom moves + renormalize)."""
-    a = _build_double_layer(A)
-    if a.ndim == 8:
-        D = a.shape[0]
-        a = a.reshape(D**2, D**2, D**2, D**2)
-
-    chi = config.chi
-    pm = config.projector_method
-    env = _ctm_left_move(env, a, chi, pm)
-    env = _ctm_right_move(env, a, chi, pm)
-    env = _ctm_top_move(env, a, chi, pm)
-    env = _ctm_bottom_move(env, a, chi, pm)
-
-    if config.renormalize:
-        env = _renormalize_env(env)
-
-    return env
-
-
-def _env_to_flat(env: CTMEnvironment) -> jax.Array:
-    """Flatten CTMEnvironment into a single 1-D array."""
-    arrays = [t.ravel() for t in env]
-    return jnp.concatenate(arrays)
-
-
-def _flat_to_env(flat: jax.Array, env_template: CTMEnvironment) -> CTMEnvironment:
-    """Reconstruct CTMEnvironment from a flat array using template shapes."""
-    arrays = []
-    offset = 0
-    for t in env_template:
-        size = t.size
-        arrays.append(flat[offset : offset + size].reshape(t.shape))
-        offset += size
-    return CTMEnvironment(*arrays)
-
-
-def _gauge_fix_ctm(env: CTMEnvironment) -> CTMEnvironment:
-    """Fix gauge of CTM tensors via QR decomposition of corners.
-
-    Ensures unique element-wise convergence needed for fixed-point
-    implicit differentiation (Francuz et al. PRR 7, 013237).
-
-    Each corner C is replaced by R from its QR decomposition (C = Q R),
-    and the corresponding Q factors are absorbed into the adjacent edge
-    tensors. This removes the gauge freedom in the CTM environment.
-    """
-    C1, C2, C3, C4, T1, T2, T3, T4 = env
-
-    # C1 = Q1 @ R1 -> C1_new = R1, T1_new = Q1^H @ T1, T4_new = Q1^H @ T4
-    Q1, R1 = jnp.linalg.qr(C1)
-    C1_new = R1
-    # Absorb Q1^H into top edge (T1's left leg) and left edge (T4's left leg)
-    T1_new = jnp.einsum("ab,bdc->adc", Q1.conj().T, T1)
-    T4_new = jnp.einsum("ab,bdc->adc", Q1.conj().T, T4)
-
-    # C2 = Q2 @ R2 -> C2_new = R2
-    Q2, R2 = jnp.linalg.qr(C2)
-    C2_new = R2
-    T1_new = jnp.einsum("adb,bc->adc", T1_new, Q2)
-    T2_new = jnp.einsum("ab,bdc->adc", Q2.conj().T, T2)
-
-    # C3 = Q3 @ R3 -> C3_new = R3
-    Q3, R3 = jnp.linalg.qr(C3)
-    C3_new = R3
-    T2_new = jnp.einsum("adb,bc->adc", T2_new, Q3)
-    T3_new = jnp.einsum("adb,bc->adc", T3, Q3)
-
-    # C4 = Q4 @ R4 -> C4_new = R4
-    Q4, R4 = jnp.linalg.qr(C4)
-    C4_new = R4
-    T3_new = jnp.einsum("ab,bdc->adc", Q4.conj().T, T3_new)
-    T4_new = jnp.einsum("adb,bc->adc", T4_new, Q4)
-
-    return CTMEnvironment(C1_new, C2_new, C3_new, C4_new, T1_new, T2_new, T3_new, T4_new)
-
-
-def ctm_fixed_point(
-    A: jax.Array,
-    config: CTMConfig,
-    initial_env: CTMEnvironment | None = None,
-) -> CTMEnvironment:
-    """CTM with implicit differentiation at fixed point.
-
-    Forward: run CTM to convergence (standard iteration).
-    Backward: solve ``(I - J^T) lambda = v`` for the VJP via fixed-point
-    iteration of the transpose CTM Jacobian.
-
-    This avoids storing all intermediate CTM iterations and gives exact
-    gradients at convergence.
-
-    Args:
-        A:           PEPS site tensor of shape ``(D, D, D, D, d)``.
-        config:      CTMConfig.
-        initial_env: Optional warm-start environment.
-
-    Returns:
-        Converged CTMEnvironment.
-    """
-    return _ctm_fixed_point_impl(A, config, initial_env)
-
-
-def _ctm_fixed_point_impl(
-    A: jax.Array,
-    config: CTMConfig,
-    initial_env: CTMEnvironment | None = None,
-) -> CTMEnvironment:
-    """Implementation of CTM with custom VJP for implicit differentiation."""
-    a = _build_double_layer(A)
-    if a.ndim == 8:
-        D_phys = a.shape[0]
-        a = a.reshape(D_phys**2, D_phys**2, D_phys**2, D_phys**2)
-
-    if initial_env is not None:
-        env = initial_env
-    else:
-        env = _initialize_ctm_env(a, config.chi)
-
-    # Run CTM to convergence
-    prev_sv = None
-    for _ in range(config.max_iter):
-        env = _ctm_step(A, env, config)
-        env = _gauge_fix_ctm(env)
-
-        current_sv = jnp.linalg.svd(env.C1, compute_uv=False)
-        if prev_sv is not None:
-            sv1 = current_sv / (jnp.sum(current_sv) + 1e-15)
-            sv2 = prev_sv / (jnp.sum(prev_sv) + 1e-15)
-            min_len = min(len(sv1), len(sv2))
-            diff = float(jnp.max(jnp.abs(sv1[:min_len] - sv2[:min_len])))
-            if diff < config.conv_tol:
-                break
-        prev_sv = current_sv
-
-    return env
 
 
 _PM_STR_TO_INT = {"eigh": 0, "qr": 1}
@@ -325,289 +181,97 @@ def _config_from_tuple(config_tuple: tuple):
     )
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(1,))
-def ctm_converge(A: jax.Array, config_tuple: tuple) -> tuple[jax.Array, ...]:
-    """CTM convergence with custom VJP for implicit differentiation.
-
-    Wraps the CTM iteration as a differentiable function
-    ``A -> env_flat`` with implicit fixed-point backward pass.
-
-    Args:
-        A:            PEPS site tensor.
-        config_tuple: CTMConfig fields packed as tuple for JAX tracing.
-                      ``(chi, max_iter, conv_tol, renormalize[, projector_method_int])``.
-
-    Returns:
-        Flat tuple of environment tensors (C1, C2, ..., T4).
-    """
-    config = _config_from_tuple(config_tuple)
-    env = _ctm_fixed_point_impl(A, config)
-    return tuple(env)
-
-
-def _ctm_converge_fwd(
-    A: jax.Array,
-    config_tuple: tuple,
-) -> tuple[tuple[jax.Array, ...], tuple]:
-    """Forward pass — run CTM, cache result for backward."""
-    config = _config_from_tuple(config_tuple)
-    env = _ctm_fixed_point_impl(A, config)
-    env_tuple = tuple(env)
-    residuals = (A, env_tuple)
-    return env_tuple, residuals
-
-
-def _ctm_converge_bwd(
-    config_tuple: tuple,
-    residuals: tuple,
-    g: tuple[jax.Array, ...],
-) -> tuple[jax.Array]:
-    """Backward pass via implicit differentiation of CTM fixed point.
-
-    Solves ``(I - J^T) lambda = g`` using GMRES (Francuz et al. PRR 7,
-    013237), where J = d(ctm_step)/d(env) is the Jacobian of one CTM step.
-    Then ``dA = d(ctm_step)/dA^T @ lambda``.
-    """
-    A, env_tuple = residuals
-    config = _config_from_tuple(config_tuple)
-
-    # g is a tuple of cotangents for (C1, C2, ..., T4)
-
-    # Define one CTM step as function of (A, env_flat)
-    def step_fn(A_in, env_in_tuple):
-        env_in = CTMEnvironment(*env_in_tuple)
-        env_out = _ctm_step(A_in, env_in, config)
-        env_out = _gauge_fix_ctm(env_out)
-        return tuple(env_out)
-
-    # Solve (I - J_env^T) lambda = g via GMRES (Francuz et al. PRR 7, 013237).
-    # GMRES converges superlinearly (Krylov acceleration) and directly
-    # monitors the residual norm, unlike the Neumann series which converges
-    # only geometrically with rate equal to the spectral radius.
-    def apply_I_minus_Jt(v):
-        """Apply (I - J_env^T) to vector v (a tuple of arrays)."""
-        _, vjp_fn = jax.vjp(lambda e: step_fn(A, e), env_tuple)
-        Jt_v = vjp_fn(v)[0]
-        return tuple(vi - ji for vi, ji in zip(v, Jt_v))
-
-    max_fp_iter = min(config.max_iter, 50)
-    lam, info = jax_gmres(
-        apply_I_minus_Jt,
-        g,
-        x0=g,
-        tol=config.conv_tol,
-        maxiter=max_fp_iter,
-    )
-
-    # Now compute dA = d(step)/dA^T @ lambda
-    _, vjp_A_fn = jax.vjp(lambda a: step_fn(a, env_tuple), A)
-    dA = vjp_A_fn(lam)[0]
-
-    return (dA,)
-
-
-ctm_converge.defvjp(_ctm_converge_fwd, _ctm_converge_bwd)
-
-
 # ---------------------------------------------------------------------------
-# 4. 2-site CTM fixed-point implicit differentiation
-# ---------------------------------------------------------------------------
-
-
-def _ctm_step_2site(
-    A: jax.Array,
-    B: jax.Array,
-    env_A: CTMEnvironment,
-    env_B: CTMEnvironment,
-    config: CTMConfig,
-) -> tuple[CTMEnvironment, CTMEnvironment]:
-    """One full 2-site CTM iteration + gauge fixing.
-
-    """
-    a_A = _build_double_layer(A)
-    a_B = _build_double_layer(B)
-    if a_A.ndim == 8:
-        D = a_A.shape[0]
-        a_A = a_A.reshape(D**2, D**2, D**2, D**2)
-    if a_B.ndim == 8:
-        D = a_B.shape[0]
-        a_B = a_B.reshape(D**2, D**2, D**2, D**2)
-
-    env_A, env_B = _ctm_2site_sweep(
-        env_A, env_B, a_A, a_B, config.chi, config.renormalize
-    )
-    return env_A, env_B
-
-
-def _ctm_2site_fixed_point_impl(
-    A: jax.Array,
-    B: jax.Array,
-    config: CTMConfig,
-) -> tuple[CTMEnvironment, CTMEnvironment]:
-    """Run 2-site CTM to convergence with gauge fixing."""
-    a_A = _build_double_layer(A)
-    a_B = _build_double_layer(B)
-    if a_A.ndim == 8:
-        D = a_A.shape[0]
-        a_A = a_A.reshape(D**2, D**2, D**2, D**2)
-    if a_B.ndim == 8:
-        D = a_B.shape[0]
-        a_B = a_B.reshape(D**2, D**2, D**2, D**2)
-
-    env_A = _initialize_ctm_env(a_A, config.chi)
-    env_B = _initialize_ctm_env(a_B, config.chi)
-
-    prev_sv_A = None
-    prev_sv_B = None
-    for _ in range(config.max_iter):
-        env_A, env_B = _ctm_step_2site(A, B, env_A, env_B, config)
-        env_A = _gauge_fix_ctm(env_A)
-        env_B = _gauge_fix_ctm(env_B)
-
-        sv_A = jnp.linalg.svd(env_A.C1, compute_uv=False)
-        sv_B = jnp.linalg.svd(env_B.C1, compute_uv=False)
-
-        if prev_sv_A is not None:
-            sv1_A = sv_A / (jnp.sum(sv_A) + 1e-15)
-            sv2_A = prev_sv_A / (jnp.sum(prev_sv_A) + 1e-15)
-            sv1_B = sv_B / (jnp.sum(sv_B) + 1e-15)
-            sv2_B = prev_sv_B / (jnp.sum(prev_sv_B) + 1e-15)
-            min_len_A = min(len(sv1_A), len(sv2_A))
-            min_len_B = min(len(sv1_B), len(sv2_B))
-            diff_A = float(jnp.max(jnp.abs(sv1_A[:min_len_A] - sv2_A[:min_len_A])))
-            diff_B = float(jnp.max(jnp.abs(sv1_B[:min_len_B] - sv2_B[:min_len_B])))
-            if max(diff_A, diff_B) < config.conv_tol:
-                break
-        prev_sv_A = sv_A
-        prev_sv_B = sv_B
-
-    return env_A, env_B
-
-
-@partial(jax.custom_vjp, nondiff_argnums=(2,))
-def ctm_converge_2site(
-    A: jax.Array,
-    B: jax.Array,
-    config_tuple: tuple,
-) -> tuple[jax.Array, ...]:
-    """2-site CTM convergence with custom VJP for implicit differentiation.
-
-    Args:
-        A:            Site tensor for sublattice A.
-        B:            Site tensor for sublattice B.
-        config_tuple: CTMConfig fields packed as tuple.
-
-    Returns:
-        Flat tuple ``(*env_A_tensors, *env_B_tensors)`` (16 arrays total).
-    """
-    config = _config_from_tuple(config_tuple)
-    env_A, env_B = _ctm_2site_fixed_point_impl(A, B, config)
-    return tuple(env_A) + tuple(env_B)
-
-
-def _ctm_converge_2site_fwd(
-    A: jax.Array,
-    B: jax.Array,
-    config_tuple: tuple,
-) -> tuple[tuple[jax.Array, ...], tuple]:
-    """Forward pass — run 2-site CTM, cache result."""
-    config = _config_from_tuple(config_tuple)
-    env_A, env_B = _ctm_2site_fixed_point_impl(A, B, config)
-    out = tuple(env_A) + tuple(env_B)
-    residuals = (A, B, out)
-    return out, residuals
-
-
-def _ctm_converge_2site_bwd(
-    config_tuple: tuple,
-    residuals: tuple,
-    g: tuple[jax.Array, ...],
-) -> tuple[jax.Array, jax.Array]:
-    """Backward pass via implicit differentiation of 2-site CTM fixed point.
-
-    Solves ``(I - J^T) lambda = g`` using GMRES where the state vector
-    spans both sublattice environments ``(env_A, env_B)``.
-    """
-    A, B, env_flat = residuals
-    config = _config_from_tuple(config_tuple)
-
-    # Split env_flat and g into A and B parts
-    env_A_tuple = env_flat[:8]
-    env_B_tuple = env_flat[8:]
-    g_A = g[:8]
-    g_B = g[8:]
-
-    def step_fn(A_in, B_in, env_combined):
-        eA = CTMEnvironment(*env_combined[:8])
-        eB = CTMEnvironment(*env_combined[8:])
-        eA_out, eB_out = _ctm_step_2site(A_in, B_in, eA, eB, config)
-        eA_out = _gauge_fix_ctm(eA_out)
-        eB_out = _gauge_fix_ctm(eB_out)
-        return tuple(eA_out) + tuple(eB_out)
-
-    env_combined = env_A_tuple + env_B_tuple
-    g_combined = g_A + g_B
-
-    def apply_I_minus_Jt(v):
-        _, vjp_fn = jax.vjp(lambda e: step_fn(A, B, e), env_combined)
-        Jt_v = vjp_fn(v)[0]
-        return tuple(vi - ji for vi, ji in zip(v, Jt_v))
-
-    max_fp_iter = min(config.max_iter, 50)
-    lam, info = jax_gmres(
-        apply_I_minus_Jt,
-        g_combined,
-        x0=g_combined,
-        tol=config.conv_tol,
-        maxiter=max_fp_iter,
-    )
-
-    # Compute dA and dB
-    _, vjp_AB_fn = jax.vjp(lambda a, b: step_fn(a, b, env_combined), A, B)
-    dA, dB = vjp_AB_fn(lam)
-
-    return (dA, dB)
-
-
-ctm_converge_2site.defvjp(_ctm_converge_2site_fwd, _ctm_converge_2site_bwd)
-
-
-# ---------------------------------------------------------------------------
-# 5. Standard CTM (Tensor protocol) fixed-point implicit differentiation
+# 3. Standard CTM (Tensor protocol) fixed-point implicit differentiation
 # ---------------------------------------------------------------------------
 
 
 def _gauge_fix_ctm_tensor(env):
     """Fix gauge of CTMTensorEnv via QR decomposition of corners.
 
-    Converts to dense arrays, applies the standard QR gauge fix,
-    then wraps results back into Tensor objects.  All operations
-    (``todense()``, dense QR/einsum, ``from_dense()``) are differentiable.
+    Uses block-sparse ``tenax.linalg.qr`` directly on Tensor objects,
+    avoiding ``todense()``/``from_dense()`` round-trips.  This preserves
+    sparsity and gives cleaner gradients during AD.
+
+    Each corner C is QR-decomposed; Q is absorbed into the two adjacent
+    edge tensors, and C is replaced by R.
     """
-    # todense() is differentiable (jnp scatter)
-    C1, C2, C3, C4 = (c.todense() for c in (env.C1, env.C2, env.C3, env.C4))
-    T1, T2, T3, T4 = (t.todense() for t in (env.T1, env.T2, env.T3, env.T4))
+    from tenax.linalg import qr as tensor_qr
 
-    # Standard QR gauge fix on dense arrays
-    dense_env = CTMEnvironment(C1, C2, C3, C4, T1, T2, T3, T4)
-    fixed = _gauge_fix_ctm(dense_env)
+    # C1(c1_d, c1_r) = Q1(c1_d, q1) @ R1(q1, c1_r)
+    # C1_new = R1, absorb Q1^bar into T1's left (t1_l) and T4's top (t4_d)
+    Q1, R1 = tensor_qr(
+        env.C1, left_labels=["c1_d"], right_labels=["c1_r"], new_bond_label="q1"
+    )
+    C1_new = R1.relabel("q1", "c1_d")
+    # Q1^bar: (q1_OUT, c1_d_IN) — relabel c1_d to match edge's chi label
+    Q1b = Q1.bar()
+    T1_new = contract(Q1b.relabel("c1_d", "t1_l"), env.T1)  # (q1, u2, t1_r)
+    T1_new = T1_new.relabel("q1", "t1_l")  # restore label
+    T4_new = contract(Q1b.relabel("c1_d", "t4_d"), env.T4)  # (q1, l2, t4_u)
+    T4_new = T4_new.relabel("q1", "t4_d")  # restore label
 
-    # Wrap back into Tensor objects preserving original index structure
-    def _wrap(data, original):
-        if isinstance(original, SymmetricTensor):
-            return SymmetricTensor.from_dense(data, original.indices, tol=float("inf"))
-        return type(original)(data, original.indices)
+    # C2(c2_l, c2_d) = Q2(c2_l, q2) @ R2(q2, c2_d)
+    # C2_new = R2, absorb Q2 into T1's right (t1_r) and Q2^bar into T2's top (t2_u)
+    Q2, R2 = tensor_qr(
+        env.C2, left_labels=["c2_l"], right_labels=["c2_d"], new_bond_label="q2"
+    )
+    C2_new = R2.relabel("q2", "c2_l")
+    T1_new = contract(T1_new, Q2.relabel("c2_l", "t1_r"))  # (t1_l, u2, q2)
+    T1_new = T1_new.relabel("q2", "t1_r")  # restore label
+    Q2b = Q2.bar()
+    T2_new = contract(Q2b.relabel("c2_l", "t2_u"), env.T2)  # (q2, r2, t2_d)
+    T2_new = T2_new.relabel("q2", "t2_u")  # restore label
+
+    # C3(c3_u, c3_l) = Q3(c3_u, q3) @ R3(q3, c3_l)
+    # C3_new = R3, absorb Q3 into T2's bottom (t2_d) and T3's right (t3_r)
+    Q3, R3 = tensor_qr(
+        env.C3, left_labels=["c3_u"], right_labels=["c3_l"], new_bond_label="q3"
+    )
+    C3_new = R3.relabel("q3", "c3_u")
+    T2_new = contract(T2_new, Q3.relabel("c3_u", "t2_d"))  # (t2_u, r2, q3)
+    T2_new = T2_new.relabel("q3", "t2_d")  # restore label
+    T3_new = contract(env.T3, Q3.relabel("c3_u", "t3_r"))  # (t3_r→q3 side)
+    T3_new = T3_new.relabel("q3", "t3_r")  # restore label
+
+    # C4(c4_r, c4_u) = Q4(c4_r, q4) @ R4(q4, c4_u)
+    # C4_new = R4, absorb Q4^bar into T3's left (t3_l) and Q4 into T4's bottom (t4_u)
+    Q4, R4 = tensor_qr(
+        env.C4, left_labels=["c4_r"], right_labels=["c4_u"], new_bond_label="q4"
+    )
+    C4_new = R4.relabel("q4", "c4_r")
+    Q4b = Q4.bar()
+    T3_new = contract(Q4b.relabel("c4_r", "t3_l"), T3_new)  # (q4, d2, t3_r)
+    T3_new = T3_new.relabel("q4", "t3_l")  # restore label
+    T4_new = contract(T4_new, Q4.relabel("c4_r", "t4_u"))  # (t4_d, l2, q4)
+    T4_new = T4_new.relabel("q4", "t4_u")  # restore label
 
     return CTMTensorEnv(
-        C1=_wrap(fixed.C1, env.C1),
-        C2=_wrap(fixed.C2, env.C2),
-        C3=_wrap(fixed.C3, env.C3),
-        C4=_wrap(fixed.C4, env.C4),
-        T1=_wrap(fixed.T1, env.T1),
-        T2=_wrap(fixed.T2, env.T2),
-        T3=_wrap(fixed.T3, env.T3),
-        T4=_wrap(fixed.T4, env.T4),
+        C1=C1_new,
+        C2=C2_new,
+        C3=C3_new,
+        C4=C4_new,
+        T1=T1_new,
+        T2=T2_new,
+        T3=T3_new,
+        T4=T4_new,
     )
+
+
+def _needs_paired_sweep(A) -> bool:
+    """Check if A is a SymmetricTensor with non-trivial virtual charges."""
+    from tenax.core.tensor import SymmetricTensor
+
+    if not isinstance(A, SymmetricTensor):
+        return False
+    import numpy as _np
+
+    virtual_charges = [_np.sort(A.indices[i].charges) for i in range(4)]
+    has_nontrivial = any(not _np.all(vc == 0) for vc in virtual_charges)
+    all_same = all(
+        _np.array_equal(virtual_charges[0], virtual_charges[i]) for i in range(1, 4)
+    )
+    return has_nontrivial and all_same
 
 
 def _ctm_tensor_step(
@@ -618,13 +282,15 @@ def _ctm_tensor_step(
     projector_method: str,
     A_treedef,
     env_treedef,
+    use_paired: bool = False,
 ) -> tuple[jax.Array, ...]:
     """One CTM tensor sweep + gauge fix, mapping flat leaves to flat leaves."""
     A = jax.tree.unflatten(A_treedef, A_leaves)
     env = jax.tree.unflatten(env_treedef, list(env_leaves))
 
     a = _build_double_layer_tensor(A)
-    env_new = _ctm_tensor_sweep(env, a, chi, renormalize, projector_method)
+    sweep_fn = _ctm_tensor_sweep_paired if use_paired else _ctm_tensor_sweep
+    env_new = sweep_fn(env, a, chi, renormalize, projector_method)
     env_new = _gauge_fix_ctm_tensor(env_new)
 
     return tuple(jax.tree.leaves(env_new))
@@ -634,12 +300,11 @@ def _ctm_tensor_fixed_point_impl(A, config):
     """Run standard Tensor-protocol CTM to convergence with gauge fixing."""
     a = _build_double_layer_tensor(A)
     env = initialize_ctm_tensor_env(A, config.chi)
+    sweep_fn = _ctm_tensor_sweep_paired if _needs_paired_sweep(A) else _ctm_tensor_sweep
 
     prev_sv = None
     for _ in range(config.max_iter):
-        env = _ctm_tensor_sweep(
-            env, a, config.chi, config.renormalize, config.projector_method
-        )
+        env = sweep_fn(env, a, config.chi, config.renormalize, config.projector_method)
         env = _gauge_fix_ctm_tensor(env)
 
         current_sv = jnp.linalg.svd(env.C1.todense(), compute_uv=False)
@@ -694,6 +359,8 @@ def _ctm_tensor_converge_bwd(config_tuple, residuals, g):
     env_treedef = jax.tree.structure(env)
     env_leaves = tuple(jax.tree.leaves(env))
 
+    paired = _needs_paired_sweep(A)
+
     def step_fn(A_in, env_in_leaves):
         return _ctm_tensor_step(
             tuple(jax.tree.leaves(A_in)),
@@ -703,6 +370,7 @@ def _ctm_tensor_converge_bwd(config_tuple, residuals, g):
             config.projector_method,
             A_treedef,
             env_treedef,
+            use_paired=paired,
         )
 
     def apply_I_minus_Jt(v):
@@ -729,7 +397,7 @@ ctm_tensor_converge.defvjp(_ctm_tensor_converge_fwd, _ctm_tensor_converge_bwd)
 
 
 # ---------------------------------------------------------------------------
-# 5b. 2-site Tensor-protocol CTM fixed-point implicit differentiation
+# 4. 2-site Tensor-protocol CTM fixed-point implicit differentiation
 # ---------------------------------------------------------------------------
 
 
@@ -904,7 +572,7 @@ ctm_tensor_converge_2site.defvjp(
 
 
 # ---------------------------------------------------------------------------
-# 6. Split CTM (Tensor protocol) fixed-point implicit differentiation
+# 5. Split CTM (Tensor protocol) fixed-point implicit differentiation
 # ---------------------------------------------------------------------------
 
 

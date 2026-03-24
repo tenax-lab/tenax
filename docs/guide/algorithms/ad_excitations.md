@@ -57,7 +57,7 @@ The full backward pass assembles five terms:
 | 4 | $(I - UU^\dagger)\,\bar{U}\,\text{diag}(1/s)\,V_h$ | Truncation correction from $\bar{U}$ |
 | 5 | $U\,\text{diag}(1/s)\,\bar{V}_h\,(I - VV^\dagger)$ | Truncation correction from $\bar{V}_h$ |
 
-### 2. CTM fixed-point differentiation (`ctm_converge`)
+### 2. CTM fixed-point differentiation (`ctm_tensor_converge`)
 
 Instead of backpropagating through all CTM iterations (storing
 $O(\text{max\_iter})$ intermediate environments), we use **implicit
@@ -85,14 +85,15 @@ $$
 \bar{A} = \frac{\partial f}{\partial A}^T \lambda
 $$
 
-### 3. Gauge fixing (`_gauge_fix_ctm`)
+### 3. Gauge fixing (`_gauge_fix_ctm_tensor`)
 
 CTM environments have a gauge ambiguity -- the fixed point is only unique
 up to invertible transformations on bond indices. Without fixing this,
 element-wise convergence fails and the implicit differentiation equation is
 ill-defined.
 
-The fix applies **QR decomposition** to each corner after every CTM step:
+The fix applies **QR decomposition** (via ``tenax.linalg.qr``, block-sparse
+for ``SymmetricTensor``) to each corner after every CTM step:
 
 $$
 C = QR \quad\Longrightarrow\quad C_{\text{new}} = R, \quad
@@ -100,7 +101,9 @@ Q^\dagger \text{ absorbed into adjacent edge tensors}
 $$
 
 The R factor from QR has a unique sign convention (positive diagonal),
-giving a unique fixed point.
+giving a unique fixed point. Using block-sparse QR directly on ``Tensor``
+objects avoids ``todense()``/``from_dense()`` round-trips, giving cleaner
+gradients during AD.
 
 ## AD Ground State Optimization
 
@@ -122,7 +125,7 @@ A_opt, env, E_gs = optimize_gs_ad(H_bond, A_init=None, config=config)
 ```
 
 The gradient flows through the full CTM + energy pipeline: the
-`ctm_converge` custom VJP handles implicit differentiation, and
+`ctm_tensor_converge` custom VJP handles implicit differentiation, and
 `truncated_svd_ad` handles SVD stability.
 
 ## Excitation Spectrum
