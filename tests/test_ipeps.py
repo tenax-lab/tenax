@@ -948,8 +948,8 @@ class TestOptimizeGsAd2Site:
             num_imaginary_steps=100,
             dt=0.3,
             ctm=CTMConfig(chi=16, max_iter=60),
-            gs_num_steps=30,
-            gs_learning_rate=1e-2,
+            gs_num_steps=50,
+            gs_learning_rate=5e-3,
             unit_cell="2site",
         )
         _, _, E_gs = optimize_gs_ad(heisenberg_gate, (A_su, B_su), ad_config)

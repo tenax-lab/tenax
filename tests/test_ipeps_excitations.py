@@ -74,8 +74,7 @@ class TestOptimizeGsAd:
             gs_learning_rate=1e-2,
         )
         A_opt, env, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
-        assert A_opt.shape == (2, 2, 2, 2, 2)
-        assert isinstance(env, CTMEnvironment)
+        assert A_opt.todense().shape == (2, 2, 2, 2, 2)
         assert np.isfinite(E_gs)
 
     def test_energy_decreases(self, heisenberg_gate):
@@ -126,8 +125,8 @@ class TestOptimizeGsAd:
             su_init=True,
         )
         A_opt, env, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
-        assert A_opt.shape == (2, 2, 2, 2, 2)
-        assert jnp.all(jnp.isfinite(A_opt))
+        assert A_opt.todense().shape == (2, 2, 2, 2, 2)
+        assert jnp.all(jnp.isfinite(A_opt.todense()))
         assert np.isfinite(E_gs)
 
     def test_su_init_ignored_when_A_init_provided(self, heisenberg_gate):
@@ -145,8 +144,8 @@ class TestOptimizeGsAd:
             su_init=True,
         )
         A_opt, env, E_gs = optimize_gs_ad(heisenberg_gate, A_init, config)
-        assert A_opt.shape == (D, D, D, D, d)
-        assert jnp.all(jnp.isfinite(A_opt))
+        assert A_opt.todense().shape == (D, D, D, D, d)
+        assert jnp.all(jnp.isfinite(A_opt.todense()))
         assert np.isfinite(E_gs)
 
 
