@@ -138,6 +138,7 @@ from tenax.core.lattice import (
     square,
     triangular,
 )
+from tenax.core.mps import FiniteMPS, InfiniteMPS
 from tenax.core.symmetry import (
     BaseNonAbelianSymmetry,
     BaseSymmetry,
@@ -171,6 +172,9 @@ __all__ = [
     "FlowDirection",
     "Label",
     "TensorIndex",
+    # MPS
+    "FiniteMPS",
+    "InfiniteMPS",
     # Tensors
     "Tensor",
     "DenseTensor",
