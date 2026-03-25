@@ -1026,7 +1026,7 @@ def _idmrg_sweep(
                     print(f"Converged at sweep {sweep + 1}", flush=True)
                 break
 
-    # ---- Post-convergence orthogonalization ----
+    # ---- Final orthogonalization ----
     if (
         config.orthogonalize_interval > 0
         and chi_env > 1
@@ -1252,6 +1252,16 @@ def idmrg(
     """
     if config is None:
         config = iDMRGConfig()
+
+    if config.unit_cell_size != 2:
+        raise NotImplementedError(
+            f"unit_cell_size={config.unit_cell_size} is not yet supported; "
+            "only unit_cell_size=2 is implemented."
+        )
+    if not config.two_site:
+        raise NotImplementedError(
+            "1-site iDMRG updates (two_site=False) are not yet supported."
+        )
 
     if isinstance(bulk_mpo, SymmetricTensor):
         return _idmrg_sweep_symmetric(bulk_mpo, config, d, dtype)
