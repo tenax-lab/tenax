@@ -50,12 +50,17 @@ class iDMRGConfig:
 
     Attributes:
         max_bond_dim:    Maximum allowed bond dimension (chi).
-        max_iterations:  Maximum number of 2-site growth steps.
+        max_iterations:  Maximum number of sweeps (or growth steps for the
+                         growing-chain variant).
         convergence_tol: Convergence threshold on energy per site.
         lanczos_max_iter: Maximum Lanczos iterations.
         lanczos_tol:     Lanczos convergence tolerance.
         svd_trunc_err:   Maximum SVD truncation error (None = use max_bond_dim).
         verbose:         Print per-step diagnostics.
+        unit_cell_size:  Number of sites in the unit cell.
+        two_site:        Use 2-site updates (True) or 1-site updates (False).
+        arnoldi_tol:     Transfer matrix eigensolver tolerance.
+        orthogonalize_interval: Number of sweeps between orthogonalization steps.
     """
 
     max_bond_dim: int = 100
@@ -65,6 +70,10 @@ class iDMRGConfig:
     lanczos_tol: float = 1e-12
     svd_trunc_err: float | None = None
     verbose: bool = False
+    unit_cell_size: int = 2
+    two_site: bool = True
+    arnoldi_tol: float = 1e-12
+    orthogonalize_interval: int = 10
 
 
 class iDMRGResult(NamedTuple):
@@ -500,13 +509,13 @@ def _trivial_right_env_symmetric(
     return SymmetricTensor.from_dense(data, indices)
 
 
-def _idmrg_symmetric(
+def _idmrg_growing_chain_symmetric(
     bulk_mpo: SymmetricTensor,
     config: iDMRGConfig,
     d: int,
     dtype: Any,
 ) -> iDMRGResult:
-    """Symmetric (block-sparse) iDMRG implementation.
+    """Symmetric (block-sparse) growing-chain iDMRG implementation.
 
     Uses the same Lanczos + SVD + environment update approach as the dense
     path, but operates on SymmetricTensors throughout.  The block-sparse
@@ -647,32 +656,27 @@ def _idmrg_symmetric(
 # ---------------------------------------------------------------------------
 
 
-def idmrg(
-    bulk_mpo: Tensor,
-    config: iDMRGConfig | None = None,
-    d: int = 2,
-    dtype: Any = jnp.float64,
+def _idmrg_growing_chain(
+    bulk_mpo_dense: jax.Array,
+    config: iDMRGConfig,
+    d: int,
+    dtype: Any,
 ) -> iDMRGResult:
-    """Run infinite DMRG to find the ground-state energy per site.
+    """Dense growing-chain iDMRG implementation.
+
+    Grows the chain by two sites per iteration, optimising a two-site
+    wavefunction via Lanczos and updating environments incrementally.
 
     Args:
-        bulk_mpo: Bulk MPO tensor (D_w, d, d, D_w) as a ``Tensor``.
-                  Accepts both ``DenseTensor`` (dense path) and
-                  ``SymmetricTensor`` (block-sparse path with U(1) charges).
-        config:   iDMRG configuration. Uses defaults if *None*.
-        d:        Physical dimension.
-        dtype:    JAX dtype for computation.
+        bulk_mpo_dense: Raw dense MPO array, shape (D_w, d, d, D_w).
+        config: iDMRG configuration.
+        d: Physical dimension.
+        dtype: JAX dtype for computation.
 
     Returns:
         ``iDMRGResult`` with energy per site and diagnostic information.
     """
-    if config is None:
-        config = iDMRGConfig()
-
-    if isinstance(bulk_mpo, SymmetricTensor):
-        return _idmrg_symmetric(bulk_mpo, config, d, dtype)
-
-    W = bulk_mpo.todense()  # (D_w, d, d, D_w)
+    W = bulk_mpo_dense
     D_w = W.shape[0]
 
     # ---- Initialise environments ----
@@ -821,3 +825,50 @@ def idmrg(
         ),
         converged=converged,
     )
+
+
+def _idmrg_sweep(
+    bulk_mpo: Tensor,
+    config: iDMRGConfig,
+    d: int,
+    dtype: Any,
+) -> iDMRGResult:
+    """Sweep-based iDMRG (dense path). TODO: implement."""
+    return _idmrg_growing_chain(bulk_mpo.todense(), config, d, dtype)
+
+
+def _idmrg_sweep_symmetric(
+    bulk_mpo: SymmetricTensor,
+    config: iDMRGConfig,
+    d: int,
+    dtype: Any,
+) -> iDMRGResult:
+    """Sweep-based iDMRG (symmetric path). TODO: implement."""
+    return _idmrg_growing_chain_symmetric(bulk_mpo, config, d, dtype)
+
+
+def idmrg(
+    bulk_mpo: Tensor,
+    config: iDMRGConfig | None = None,
+    d: int = 2,
+    dtype: Any = jnp.float64,
+) -> iDMRGResult:
+    """Run infinite DMRG to find the ground-state energy per site.
+
+    Args:
+        bulk_mpo: Bulk MPO tensor (D_w, d, d, D_w) as a ``Tensor``.
+                  Accepts both ``DenseTensor`` (dense path) and
+                  ``SymmetricTensor`` (block-sparse path with U(1) charges).
+        config:   iDMRG configuration. Uses defaults if *None*.
+        d:        Physical dimension.
+        dtype:    JAX dtype for computation.
+
+    Returns:
+        ``iDMRGResult`` with energy per site and diagnostic information.
+    """
+    if config is None:
+        config = iDMRGConfig()
+
+    if isinstance(bulk_mpo, SymmetricTensor):
+        return _idmrg_sweep_symmetric(bulk_mpo, config, d, dtype)
+    return _idmrg_sweep(bulk_mpo, config, d, dtype)
