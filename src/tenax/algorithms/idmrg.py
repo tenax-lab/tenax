@@ -1085,8 +1085,150 @@ def _idmrg_sweep_symmetric(
     d: int,
     dtype: Any,
 ) -> iDMRGResult:
-    """Sweep-based iDMRG (symmetric path). TODO: implement."""
-    return _idmrg_growing_chain_symmetric(bulk_mpo, config, d, dtype)
+    """Sweep-based iDMRG for a 2-site unit cell (symmetric/block-sparse path).
+
+    Mirrors ``_idmrg_sweep`` but operates on ``SymmetricTensor`` throughout,
+    preserving block-sparse structure and U(1) quantum numbers.  Uses the same
+    Lanczos + SVD + environment update approach as the growing-chain symmetric
+    variant but in a sweep-based fashion.
+
+    Args:
+        bulk_mpo: Bulk MPO tensor as a ``SymmetricTensor``.
+        config: iDMRG configuration.
+        d: Physical dimension.
+        dtype: JAX dtype for computation.
+
+    Returns:
+        ``iDMRGResult`` with energy per site and diagnostic information.
+    """
+    W_sym = bulk_mpo
+    sym = W_sym.indices[0].symmetry
+    phys_charges = np.array(W_sym.indices[1].charges)
+
+    L_env: Tensor = _trivial_left_env_symmetric(W_sym, dtype=dtype)
+    R_env: Tensor = _trivial_right_env_symmetric(W_sym, dtype=dtype)
+
+    energies_per_step: list[float] = []
+    converged = False
+    key = jax.random.PRNGKey(0)
+    E_prev: float | None = None
+
+    # Virtual bond starts trivial: single charge-0 state.
+    virt_charges = np.zeros(1, dtype=np.int32)
+
+    # Store MPS tensors and previous theta for warm start
+    A_L_tensor: Tensor | None = None
+    A_R_tensor: Tensor | None = None
+    s_vals = jnp.ones(1, dtype=dtype)
+    theta_prev: Tensor | None = None
+
+    for sweep in range(config.max_iterations):
+        # ---- Build initial theta ----
+        theta_indices = (
+            TensorIndex(sym, virt_charges, FlowDirection.IN, label="v_l"),
+            TensorIndex(sym, phys_charges, FlowDirection.IN, label="p_l"),
+            TensorIndex(sym, phys_charges, FlowDirection.IN, label="p_r"),
+            TensorIndex(sym, virt_charges, FlowDirection.OUT, label="v_r"),
+        )
+
+        if theta_prev is not None and np.array_equal(
+            np.array(theta_prev.indices[0].charges), virt_charges
+        ):
+            # Warm start: reuse previous theta when charges match
+            theta = theta_prev
+        else:
+            # Cold start: random init when bond dimension changed
+            key, subkey = jax.random.split(key)
+            theta = SymmetricTensor.random_normal(theta_indices, subkey, dtype=dtype)
+
+        theta_norm = theta.norm()
+        if theta_norm > 1e-15:
+            theta = theta * (1.0 / theta_norm)
+
+        # Shared cache for opt_einsum contraction expressions
+        _matvec_cache: dict = {}
+
+        def matvec(v: Tensor) -> Tensor:
+            return _blockwise_contract(
+                [L_env, v, W_sym, W_sym, R_env],
+                "abc,apqd,bpse,eqtf,dfg->cstg",
+                output_indices=v.indices,
+                expr_cache=_matvec_cache,
+            )
+
+        E_total_val, theta_opt = _lanczos_solve_tensor(
+            matvec, theta, config.lanczos_max_iter, config.lanczos_tol
+        )
+        E_total = float(E_total_val)
+        theta_prev = theta_opt
+
+        # ---- SVD and truncate ----
+        U_t, s_full, Vh_t, _ = truncated_svd(
+            theta_opt,
+            left_labels=["v_l", "p_l"],
+            right_labels=["p_r", "v_r"],
+            new_bond_label="v_c",
+            max_singular_values=config.max_bond_dim,
+            max_truncation_err=config.svd_trunc_err,
+        )
+        # U_t: (v_l, p_l, v_c),  Vh_t: (v_c, p_r, v_r)
+        s_vals = s_full
+        s_norm = float(jnp.linalg.norm(s_vals))
+        if s_norm > 1e-15:
+            s_vals = s_vals / s_norm
+
+        # A_L = U (left-isometric), A_R = Vh (right-isometric)
+        A_L_tensor = U_t
+        A_R_tensor = Vh_t
+
+        # ---- Update environments ----
+        L_env = _update_left_env_symmetric(L_env, A_L_tensor, W_sym)
+        R_env = _update_right_env_symmetric(R_env, A_R_tensor, W_sym)
+
+        # Update virtual charges for next step from the SVD bond
+        virt_charges = np.array(A_L_tensor.indices[2].charges)
+
+        # ---- Compute energy per site via energy difference ----
+        if E_prev is not None:
+            e_per_site = (E_total - E_prev) / 2.0
+        else:
+            e_per_site = E_total / 2.0
+        energies_per_step.append(e_per_site)
+
+        if config.verbose:
+            n_keep = len(s_vals)
+            print(
+                f"iDMRG sweep {sweep + 1}: E_total={E_total:.10f}, "
+                f"e/site={e_per_site:.10f}, chi={n_keep}",
+                flush=True,
+            )
+
+        # ---- Check convergence ----
+        n_e = len(energies_per_step)
+        if n_e >= 4:
+            n_half = min(n_e // 2, 5)
+            avg_recent = sum(energies_per_step[-n_half:]) / n_half
+            avg_prev = sum(energies_per_step[-2 * n_half : -n_half]) / n_half
+            if abs(avg_recent - avg_prev) < config.convergence_tol:
+                converged = True
+                if config.verbose:
+                    print(f"Converged at sweep {sweep + 1}", flush=True)
+                break
+
+        E_prev = E_total
+
+    n_avg = max(len(energies_per_step) // 2, 1)
+    e_per_site_avg = sum(energies_per_step[-n_avg:]) / n_avg
+
+    return iDMRGResult(
+        energy_per_site=e_per_site_avg,
+        energies_per_step=energies_per_step,
+        mps=InfiniteMPS.from_tensors(
+            [A_L_tensor, A_R_tensor],
+            [s_vals, s_vals, s_vals],  # L+1 = 3 bonds for 2-site cell
+        ),
+        converged=converged,
+    )
 
 
 def idmrg(
