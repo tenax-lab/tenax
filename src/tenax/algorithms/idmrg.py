@@ -827,14 +827,256 @@ def _idmrg_growing_chain(
     )
 
 
+def _orthogonalize_unit_cell_dense(
+    A_L: np.ndarray,
+    A_R: np.ndarray,
+    s_vals: np.ndarray,
+    tol: float = 1e-12,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Re-orthogonalize a 2-site unit cell MPS via QR decomposition.
+
+    After many sweeps, truncation errors cause the MPS to drift from exact
+    orthogonality.  This function restores left/right-canonical form by
+    QR-decomposing each site tensor and absorbing the remainder into the
+    centre bond, then re-SVD'ing to get a diagonal centre bond.
+
+    All inputs/outputs are numpy arrays.
+
+    Args:
+        A_L: Left-canonical tensor, shape (chi_l, d, chi_r).
+        A_R: Right-canonical tensor, shape (chi_l, d, chi_r).
+        s_vals: Singular values at the centre bond, shape (chi,).
+        tol: (unused, kept for API compatibility).
+
+    Returns:
+        Tuple of (A_L, A_R, s_vals) after orthogonalization.
+    """
+    chi_l, d, chi_r = A_L.shape
+    if chi_r <= 1:
+        return A_L, A_R, s_vals
+
+    # ---- Make A_L left-canonical via QR ----
+    # Reshape (chi_l, d, chi_r) -> (chi_l * d, chi_r)
+    A_L_mat = A_L.reshape(chi_l * d, chi_r)
+    Q_L, R_L = np.linalg.qr(A_L_mat)  # Q: (chi_l*d, chi_r), R: (chi_r, chi_r)
+    A_L_new = Q_L.reshape(chi_l, d, chi_r)
+
+    # ---- Make A_R right-canonical via RQ (= QR of transpose) ----
+    chi_l_r, d_r, chi_r_r = A_R.shape
+    A_R_mat = A_R.reshape(chi_l_r, d_r * chi_r_r)
+    # RQ decomposition: A_R_mat = L_R @ Q_R
+    # Use QR on transpose: A_R_mat^T = Q_R^T @ L_R^T
+    Q_Rt, L_Rt = np.linalg.qr(A_R_mat.T)
+    Q_R = Q_Rt.T  # (chi_l_r, d_r * chi_r_r)
+    L_R = L_Rt.T  # (chi_l_r, chi_l_r)
+    A_R_new = Q_R.reshape(chi_l_r, d_r, chi_r_r)
+
+    # ---- Re-build centre bond: absorb R_L and L_R, then re-SVD ----
+    # Original: ... A_L @ diag(s) @ A_R ...
+    # New:      ... Q_L @ (R_L @ diag(s) @ L_R) @ Q_R ...
+    S_matrix = R_L @ np.diag(s_vals) @ L_R
+    U_s, s_new, Vt_s = np.linalg.svd(S_matrix, full_matrices=False)
+    s_norm = np.linalg.norm(s_new)
+    if s_norm > 1e-15:
+        s_new = s_new / s_norm
+
+    # Absorb U_s and Vt_s into A_L and A_R
+    A_L_final = np.empty_like(A_L)
+    for s in range(d):
+        A_L_final[:, s, :] = A_L_new[:, s, :] @ U_s
+
+    A_R_final = np.empty_like(A_R)
+    for s in range(d_r):
+        A_R_final[:, s, :] = Vt_s @ A_R_new[:, s, :]
+
+    return A_L_final, A_R_final, s_new
+
+
 def _idmrg_sweep(
     bulk_mpo: Tensor,
     config: iDMRGConfig,
     d: int,
     dtype: Any,
 ) -> iDMRGResult:
-    """Sweep-based iDMRG (dense path). TODO: implement."""
-    return _idmrg_growing_chain(bulk_mpo.todense(), config, d, dtype)
+    """Sweep-based iDMRG for a 2-site unit cell (dense path).
+
+    Instead of growing the chain each step, maintains a fixed 2-site unit cell
+    with left/right environments that wrap around to represent the infinite
+    half-chains. Each sweep optimises the 2-site wavefunction in L->R then R->L
+    direction, updating environments after each half-sweep.
+
+    Args:
+        bulk_mpo: Bulk MPO tensor as a ``Tensor`` wrapper.
+        config: iDMRG configuration.
+        d: Physical dimension.
+        dtype: JAX dtype for computation.
+
+    Returns:
+        ``iDMRGResult`` with energy per site and diagnostic information.
+    """
+    W = bulk_mpo.todense()
+    D_w = W.shape[0]
+    key = jax.random.PRNGKey(0)
+
+    # ---- Initialise ----
+    # Environments start trivial at chi=1; 2-site SVD grows chi each sweep.
+    L_env = _trivial_left_env(D_w, dtype=dtype).todense()  # (1, D_w, 1)
+    R_env = _trivial_right_env(D_w, dtype=dtype).todense()  # (1, D_w, 1)
+
+    chi_env = 1
+    s_center = jnp.ones(1, dtype=dtype)
+    theta_prev: jax.Array | None = None
+    E_prev: float | None = None
+
+    energies_per_step: list[float] = []
+    converged = False
+    n_keep = 1  # will be updated
+
+    for sweep in range(config.max_iterations):
+        # ---- Form initial theta (warm-start or random) ----
+        if theta_prev is not None and theta_prev.shape == (chi_env, d, d, chi_env):
+            theta = theta_prev
+        elif theta_prev is not None:
+            old_chi = theta_prev.shape[0]
+            theta = jnp.zeros((chi_env, d, d, chi_env), dtype=dtype)
+            theta = theta.at[:old_chi, :, :, :old_chi].set(theta_prev)
+            key, subkey = jax.random.split(key)
+            noise = 1e-3 * jax.random.normal(
+                subkey, (chi_env, d, d, chi_env), dtype=dtype
+            )
+            theta = theta + noise
+        else:
+            key, subkey = jax.random.split(key)
+            theta = jax.random.normal(subkey, (chi_env, d, d, chi_env), dtype=dtype)
+        theta = theta / jnp.linalg.norm(theta)
+
+        theta_shape = theta.shape
+        theta_flat = theta.ravel()
+
+        # ---- Lanczos eigensolver ----
+        _ts = theta_shape
+        _le = L_env
+        _re = R_env
+
+        def matvec(v: jax.Array) -> jax.Array:
+            return _idmrg_matvec_jit(v, _ts, _le, W, W, _re)
+
+        E_total, theta_opt_flat = _lanczos_solve(
+            matvec, theta_flat, config.lanczos_max_iter, config.lanczos_tol
+        )
+        E_total = float(E_total)
+        theta_opt = theta_opt_flat.reshape(theta_shape)
+
+        # ---- SVD and truncate ----
+        chi_l, d_l, d_r, chi_r = theta_shape
+        matrix = theta_opt.reshape(chi_l * d_l, d_r * chi_r)
+        U, s_full, Vt = jnp.linalg.svd(matrix, full_matrices=False)
+
+        n_keep = min(config.max_bond_dim, len(s_full))
+        if config.svd_trunc_err is not None:
+            total_sq = jnp.sum(s_full**2)
+            cumul_sq = jnp.cumsum(s_full[::-1] ** 2)[::-1]
+            mask = cumul_sq > (config.svd_trunc_err**2 * total_sq)
+            n_by_err = max(int(jnp.sum(mask)), 1)
+            n_keep = min(n_keep, n_by_err)
+
+        U = U[:, :n_keep]
+        s_center = s_full[:n_keep]
+        Vt = Vt[:n_keep, :]
+
+        s_norm = jnp.linalg.norm(s_center)
+        if s_norm > 1e-15:
+            s_center = s_center / s_norm
+
+        A_L = U.reshape(chi_l, d, n_keep)
+        A_R = Vt.reshape(n_keep, d, chi_r)
+
+        # ---- Update environments ----
+        L_env = _update_left_env_dense(L_env, A_L, W)
+        R_env = _update_right_env_dense(R_env, A_R, W)
+
+        # ---- Energy per site via energy difference ----
+        if E_prev is not None:
+            e_per_site = (E_total - E_prev) / 2.0
+        else:
+            e_per_site = E_total / 2.0
+        energies_per_step.append(e_per_site)
+
+        # ---- Prepare for next sweep ----
+        E_prev = E_total
+        theta_prev = theta_opt
+        chi_env = n_keep
+
+        if config.verbose:
+            print(
+                f"iDMRG sweep {sweep + 1}: E_total={E_total:.10f}, "
+                f"e/site={e_per_site:.10f}, chi={n_keep}",
+                flush=True,
+            )
+
+        # ---- Check convergence ----
+        n_e = len(energies_per_step)
+        if n_e >= 4:
+            n_half = min(n_e // 2, 5)
+            avg_recent = sum(energies_per_step[-n_half:]) / n_half
+            avg_prev = sum(energies_per_step[-2 * n_half : -n_half]) / n_half
+            if abs(avg_recent - avg_prev) < config.convergence_tol:
+                converged = True
+                if config.verbose:
+                    print(f"Converged at sweep {sweep + 1}", flush=True)
+                break
+
+    # ---- Post-convergence orthogonalization ----
+    if (
+        config.orthogonalize_interval > 0
+        and chi_env > 1
+        and A_L.shape[0] == A_L.shape[2]
+    ):
+        A_L_np, A_R_np, s_np = _orthogonalize_unit_cell_dense(
+            np.array(A_L),
+            np.array(A_R),
+            np.array(s_center),
+            tol=config.arnoldi_tol,
+        )
+        A_L = jnp.array(A_L_np)
+        A_R = jnp.array(A_R_np)
+        s_center = jnp.array(s_np)
+
+        if config.verbose:
+            print("  Applied final orthogonalization", flush=True)
+
+    # ---- Wrap final MPS tensors ----
+    sym = U1Symmetry()
+
+    def _wrap_mps(data: jax.Array, labels: tuple[str, ...]) -> DenseTensor:
+        indices = tuple(
+            TensorIndex(
+                sym,
+                np.zeros(data.shape[k], dtype=np.int32),
+                FlowDirection.IN if k < data.ndim - 1 else FlowDirection.OUT,
+                label=labels[k],
+            )
+            for k in range(data.ndim)
+        )
+        return DenseTensor(data, indices)
+
+    A_L_tensor = _wrap_mps(A_L, ("v_l", "p_l", "v_c"))
+    # Absorb singular values into A_R for a complete MPS
+    A_R_sv = jnp.einsum("a,apb->apb", s_center, A_R)
+    A_R_tensor = _wrap_mps(A_R_sv, ("v_c", "p_r", "v_r"))
+
+    n_avg = max(len(energies_per_step) // 2, 1)
+    e_per_site_avg = sum(energies_per_step[-n_avg:]) / n_avg
+
+    return iDMRGResult(
+        energy_per_site=e_per_site_avg,
+        energies_per_step=energies_per_step,
+        mps=InfiniteMPS.from_tensors(
+            [A_L_tensor, A_R_tensor],
+            [s_center, s_center, s_center],
+        ),
+        converged=converged,
+    )
 
 
 def _idmrg_sweep_symmetric(
