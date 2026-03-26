@@ -946,11 +946,21 @@ class SymmetricTensor(Tensor):
 
     @property
     def blocks(self) -> dict[BlockKey, jax.Array]:
-        """Reconstruct block dict from flat buffer (compatibility layer)."""
-        return {
-            self._block_keys[i]: self._get_block(i)
-            for i in range(len(self._block_keys))
-        }
+        """Block dict from flat buffer, cached for repeated access.
+
+        The cache is valid because ``_data`` (a JAX array) is immutable.
+        Eliminates redundant slice+reshape calls when ``blocks`` is
+        accessed multiple times (e.g. during ``_blockwise_contract``).
+        """
+        try:
+            return self._blocks_cache
+        except AttributeError:
+            cache = {
+                self._block_keys[i]: self._get_block(i)
+                for i in range(len(self._block_keys))
+            }
+            object.__setattr__(self, "_blocks_cache", cache)
+            return cache
 
     def todense(self) -> jax.Array:
         """Materialize the full dense tensor (for testing/debugging only).
