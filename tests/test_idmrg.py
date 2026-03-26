@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from tenax.algorithms.idmrg import (
+    _orthogonalize_unit_cell_dense,
     build_bulk_mpo_heisenberg,
     build_bulk_mpo_heisenberg_cylinder,
     build_bulk_mpo_heisenberg_symmetric,
@@ -391,3 +392,110 @@ class TestiDMRGSymmetric:
         result = idmrg(W, cfg)
         for t in result.mps.tensors:
             assert isinstance(t, SymmetricTensor)
+
+
+# ---------------------------------------------------------------------------
+# Transfer matrix orthogonalization
+# ---------------------------------------------------------------------------
+
+
+class TestOrthogonalization:
+    def test_orthogonalization_idempotent(self):
+        """Running orthogonalization twice should give the same result."""
+        # Create a random MPS-like state to orthogonalize
+        rng = np.random.RandomState(42)
+        chi, d = 8, 2
+        # Start with a random (non-canonical) A_L and A_R
+        A_L = rng.randn(chi, d, chi)
+        A_R = rng.randn(chi, d, chi)
+        s_vals = np.sort(np.abs(rng.randn(chi)))[::-1]
+        s_vals = s_vals / np.linalg.norm(s_vals)
+
+        # First orthogonalization
+        A_L1, A_R1, s1 = _orthogonalize_unit_cell_dense(A_L, A_R, s_vals)
+        # Second orthogonalization
+        A_L2, A_R2, s2 = _orthogonalize_unit_cell_dense(A_L1, A_R1, s1)
+
+        # After two passes, singular values should be nearly identical
+        np.testing.assert_allclose(
+            s1,
+            s2,
+            atol=1e-8,
+            err_msg="Singular values changed after second orthogonalization",
+        )
+
+        # Check that T_L(I) = I after orthogonalization
+        TL_I = np.zeros((chi, chi))
+        for s in range(d):
+            As = A_L1[:, s, :]
+            TL_I += As.conj().T @ As
+        np.testing.assert_allclose(
+            TL_I,
+            np.eye(chi),
+            atol=1e-6,
+            err_msg="T_L(I) != I after first orthogonalization",
+        )
+
+        # Check that T_R(I) = I after orthogonalization
+        TR_I = np.zeros((chi, chi))
+        for s in range(d):
+            Bs = A_R1[:, s, :]
+            TR_I += Bs @ Bs.conj().T
+        np.testing.assert_allclose(
+            TR_I,
+            np.eye(chi),
+            atol=1e-6,
+            err_msg="T_R(I) != I after first orthogonalization",
+        )
+
+    def test_energy_unchanged_after_orthogonalization(self):
+        """Orthogonalization shouldn't change the energy."""
+        W = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+
+        # Run without orthogonalization
+        cfg_no = iDMRGConfig(
+            max_bond_dim=16,
+            max_iterations=40,
+            lanczos_max_iter=20,
+            orthogonalize_interval=0,
+            convergence_tol=1e-8,
+        )
+        result_no = idmrg(W, cfg_no, dtype=jnp.float64)
+
+        # Run with orthogonalization (applied at end only)
+        cfg_yes = iDMRGConfig(
+            max_bond_dim=16,
+            max_iterations=40,
+            lanczos_max_iter=20,
+            orthogonalize_interval=10,
+            convergence_tol=1e-8,
+        )
+        result_yes = idmrg(W, cfg_yes, dtype=jnp.float64)
+
+        # Energies should be the same since orthogonalization only
+        # changes the gauge, not the physical state
+        assert abs(result_no.energy_per_site - result_yes.energy_per_site) < 0.01, (
+            f"Energy changed: without={result_no.energy_per_site:.8f}, "
+            f"with={result_yes.energy_per_site:.8f}"
+        )
+
+    def test_left_canonical_after_orthogonalization(self):
+        """After orthogonalization, A_L should satisfy T_L(I) = I."""
+        W = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+        cfg = iDMRGConfig(
+            max_bond_dim=16,
+            max_iterations=30,
+            lanczos_max_iter=20,
+            orthogonalize_interval=10,
+        )
+        result = idmrg(W, cfg, dtype=jnp.float64)
+        A_L = np.array(result.mps.tensors[0].todense())
+        chi = A_L.shape[2]
+        d = A_L.shape[1]
+        TL_I = np.zeros((chi, chi))
+        for s in range(d):
+            As = A_L[:, s, :]
+            TL_I += As.conj().T @ As
+        np.testing.assert_allclose(
+            TL_I, np.eye(chi), atol=1e-6, err_msg="T_L(I) != I after orthogonalization"
+        )
