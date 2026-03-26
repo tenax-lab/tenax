@@ -144,6 +144,12 @@ from tenax import ctm_2site, CTMConfig
 env_A, env_B = ctm_2site(A, B, CTMConfig(chi=20, max_iter=100))
 ```
 
+> **Note:** ``ctm_2site()`` is the legacy dense CTM used internally by
+> simple update (``ipeps()``).  For AD-based optimization, use
+> ``optimize_gs_ad()`` with ``unit_cell="2site"`` — it routes through
+> the Tensor-protocol multisite CTM which supports both ``DenseTensor``
+> and ``SymmetricTensor``.
+
 | Argument | Type | Description |
 |----------|------|-------------|
 | `A` | `jax.Array` | Site tensor for sublattice A, shape `(D, D, D, D, d)` |
