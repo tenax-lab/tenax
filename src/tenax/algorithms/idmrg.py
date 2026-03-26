@@ -918,22 +918,20 @@ def _idmrg_sweep(
     D_w = W.shape[0]
     key = jax.random.PRNGKey(0)
 
-    # ---- Initialise ----
-    # Environments start trivial at chi=1; 2-site SVD grows chi each sweep.
+    # ---- Phase 1: Grow bond dimension from chi=1 to max_bond_dim ----
     L_env = _trivial_left_env(D_w, dtype=dtype).todense()  # (1, D_w, 1)
     R_env = _trivial_right_env(D_w, dtype=dtype).todense()  # (1, D_w, 1)
 
     chi_env = 1
     s_center = jnp.ones(1, dtype=dtype)
+    A_L: jax.Array | None = None
+    A_R: jax.Array | None = None
     theta_prev: jax.Array | None = None
     E_prev: float | None = None
 
-    energies_per_step: list[float] = []
-    converged = False
-    n_keep = 1  # will be updated
-
-    for sweep in range(config.max_iterations):
-        # ---- Form initial theta (warm-start or random) ----
+    warmup_steps = 0
+    while chi_env < config.max_bond_dim:
+        # Form initial theta
         if theta_prev is not None and theta_prev.shape == (chi_env, d, d, chi_env):
             theta = theta_prev
         elif theta_prev is not None:
@@ -953,7 +951,119 @@ def _idmrg_sweep(
         theta_shape = theta.shape
         theta_flat = theta.ravel()
 
-        # ---- Lanczos eigensolver ----
+        _ts = theta_shape
+        _le = L_env
+        _re = R_env
+
+        def matvec(v: jax.Array) -> jax.Array:
+            return _idmrg_matvec_jit(v, _ts, _le, W, W, _re)
+
+        E_total, theta_opt_flat = _lanczos_solve(
+            matvec, theta_flat, config.lanczos_max_iter, config.lanczos_tol
+        )
+        E_total = float(E_total)
+        theta_opt = theta_opt_flat.reshape(theta_shape)
+
+        chi_l, d_l, d_r, chi_r = theta_shape
+        matrix = theta_opt.reshape(chi_l * d_l, d_r * chi_r)
+        U, s_full, Vt = jnp.linalg.svd(matrix, full_matrices=False)
+
+        n_keep = min(config.max_bond_dim, len(s_full))
+        U = U[:, :n_keep]
+        s_center = s_full[:n_keep]
+        Vt = Vt[:n_keep, :]
+        s_norm = jnp.linalg.norm(s_center)
+        if s_norm > 1e-15:
+            s_center = s_center / s_norm
+
+        A_L = U.reshape(chi_l, d, n_keep)
+        A_R = Vt.reshape(n_keep, d, chi_r)
+
+        L_env = _update_left_env_dense(L_env, A_L, W)
+        R_env = _update_right_env_dense(R_env, A_R, W)
+
+        E_prev = E_total
+        theta_prev = theta_opt
+        chi_env = n_keep
+        warmup_steps += 1
+
+        if config.verbose:
+            print(
+                f"  Warmup step {warmup_steps}: chi={n_keep}, E_total={E_total:.10f}",
+                flush=True,
+            )
+
+    # ---- Phase 2: First optimization at target chi + environment warmup ----
+    # Do one optimization step at full chi to get square A_L/A_R tensors,
+    # then run environment-only warmup sweeps for self-consistency.
+    assert A_L is not None and A_R is not None
+
+    # First optimization at target chi (A_L/A_R from growth may be non-square)
+    old_chi = theta_prev.shape[0] if theta_prev is not None else 1
+    theta = jnp.zeros((chi_env, d, d, chi_env), dtype=dtype)
+    if theta_prev is not None:
+        theta = theta.at[:old_chi, :, :, :old_chi].set(theta_prev)
+    key, subkey = jax.random.split(key)
+    noise = 1e-3 * jax.random.normal(subkey, (chi_env, d, d, chi_env), dtype=dtype)
+    theta = theta + noise
+    theta = theta / jnp.linalg.norm(theta)
+
+    theta_shape = theta.shape
+    _ts = theta_shape
+    _le = L_env
+    _re = R_env
+
+    def _matvec_init(v: jax.Array) -> jax.Array:
+        return _idmrg_matvec_jit(v, _ts, _le, W, W, _re)
+
+    E_total, theta_opt_flat = _lanczos_solve(
+        _matvec_init, theta.ravel(), config.lanczos_max_iter, config.lanczos_tol
+    )
+    E_total = float(E_total)
+    theta_opt = theta_opt_flat.reshape(theta_shape)
+
+    chi_l, d_l, d_r, chi_r = theta_shape
+    matrix = theta_opt.reshape(chi_l * d_l, d_r * chi_r)
+    U, s_full, Vt = jnp.linalg.svd(matrix, full_matrices=False)
+    n_keep = min(config.max_bond_dim, len(s_full))
+    U = U[:, :n_keep]
+    s_center = s_full[:n_keep]
+    Vt = Vt[:n_keep, :]
+    s_norm = jnp.linalg.norm(s_center)
+    if s_norm > 1e-15:
+        s_center = s_center / s_norm
+    A_L = U.reshape(chi_l, d, n_keep)
+    A_R = Vt.reshape(n_keep, d, chi_r)
+    L_env = _update_left_env_dense(L_env, A_L, W)
+    R_env = _update_right_env_dense(R_env, A_R, W)
+    chi_env = n_keep
+
+    # Environment warmup: contract A_L/A_R through environments repeatedly
+    # to build self-consistent infinite environments before optimization.
+    n_env_warmup = 10
+    for warmup in range(n_env_warmup):
+        L_env = _update_left_env_dense(L_env, A_L, W)
+        R_env = _update_right_env_dense(R_env, A_R, W)
+        if config.verbose:
+            print(
+                f"  Env warmup {warmup + 1}/{n_env_warmup}: L_env shape={L_env.shape}",
+                flush=True,
+            )
+
+    # ---- Phase 3: Self-consistent optimization sweeps ----
+    energies_per_step: list[float] = []
+    converged = False
+    n_keep = chi_env
+    E_prev = None
+
+    for sweep in range(config.max_iterations):
+        # Form theta from current MPS tensors
+        theta = jnp.einsum("ija,a,akl->ijkl", A_L, s_center, A_R)
+        theta = theta / jnp.linalg.norm(theta)
+
+        theta_shape = theta.shape
+        theta_flat = theta.ravel()
+
         _ts = theta_shape
         _le = L_env
         _re = R_env
@@ -991,11 +1101,13 @@ def _idmrg_sweep(
         A_L = U.reshape(chi_l, d, n_keep)
         A_R = Vt.reshape(n_keep, d, chi_r)
 
-        # ---- Update environments ----
+        # ---- Update both environments with optimized tensors ----
         L_env = _update_left_env_dense(L_env, A_L, W)
         R_env = _update_right_env_dense(R_env, A_R, W)
 
         # ---- Energy per site via energy difference ----
+        # Each sweep adds 2 sites to the effective chain via environment updates,
+        # so the energy per site is the change in total energy divided by 2.
         if E_prev is not None:
             e_per_site = (E_total - E_prev) / 2.0
         else:
@@ -1004,7 +1116,6 @@ def _idmrg_sweep(
 
         # ---- Prepare for next sweep ----
         E_prev = E_total
-        theta_prev = theta_opt
         chi_env = n_keep
 
         if config.verbose:
