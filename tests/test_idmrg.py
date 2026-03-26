@@ -499,3 +499,71 @@ class TestOrthogonalization:
         np.testing.assert_allclose(
             TL_I, np.eye(chi), atol=1e-6, err_msg="T_L(I) != I after orthogonalization"
         )
+
+
+# ---------------------------------------------------------------------------
+# 1-site iDMRG with DMRG3S
+# ---------------------------------------------------------------------------
+
+
+class TestiDMRG1Site:
+    def test_1site_idmrg_runs(self):
+        """1-site iDMRG with DMRG3S should run and give reasonable energy."""
+        W = build_bulk_mpo_heisenberg()
+        config = iDMRGConfig(
+            max_bond_dim=16, max_iterations=50, two_site=False, verbose=False
+        )
+        result = idmrg(W, config, d=2)
+        assert isinstance(result, iDMRGResult)
+        assert np.isfinite(result.energy_per_site)
+        assert result.energy_per_site < -0.40
+
+    def test_1site_matches_2site_energy(self):
+        """1-site with DMRG3S should give comparable energy to 2-site."""
+        W = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+
+        cfg_2site = iDMRGConfig(
+            max_bond_dim=16,
+            max_iterations=80,
+            convergence_tol=1e-8,
+            lanczos_max_iter=30,
+            two_site=True,
+        )
+        cfg_1site = iDMRGConfig(
+            max_bond_dim=16,
+            max_iterations=80,
+            convergence_tol=1e-8,
+            lanczos_max_iter=30,
+            two_site=False,
+            mixing_factor=0.05,
+        )
+        res_2site = idmrg(W, cfg_2site, dtype=jnp.float64)
+        res_1site = idmrg(W, cfg_1site, dtype=jnp.float64)
+
+        # 1-site should be within 5% of 2-site energy
+        assert abs(res_1site.energy_per_site - res_2site.energy_per_site) < 0.03, (
+            f"1-site={res_1site.energy_per_site:.8f} vs "
+            f"2-site={res_2site.energy_per_site:.8f}"
+        )
+
+    def test_1site_mps_shapes(self):
+        """The returned MPS tensors should have valid shapes."""
+        W = build_bulk_mpo_heisenberg()
+        config = iDMRGConfig(
+            max_bond_dim=8, max_iterations=20, two_site=False, verbose=False
+        )
+        result = idmrg(W, config)
+        A_L, A_R = result.mps.tensors
+        assert A_L.todense().ndim == 3
+        assert A_R.todense().ndim == 3
+        # Centre bond should match
+        assert A_L.todense().shape[2] == A_R.todense().shape[0]
+
+    def test_1site_config_mixing_factor(self):
+        """iDMRGConfig should accept mixing_factor."""
+        cfg = iDMRGConfig(mixing_factor=0.1)
+        assert cfg.mixing_factor == 0.1
+
+        # Default
+        cfg2 = iDMRGConfig()
+        assert cfg2.mixing_factor == 0.05
