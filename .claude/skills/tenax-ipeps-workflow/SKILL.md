@@ -269,8 +269,12 @@ my_lattice = Lattice(
 
 ### Multi-site CTM with ctm_multisite()
 
-For 3+ site unit cells, use `ctm_multisite()` instead of `ctm()` or
-`ctm_2site()`. It accepts string-keyed site tensors and a `Lattice`:
+For 3+ site unit cells, use `ctm_multisite()` instead of `ctm()`.
+Note: `ctm_2site()` is the legacy dense CTM used by simple update only;
+for AD optimization with 2-site cells, use `optimize_gs_ad()` with
+`unit_cell="2site"` which uses the Tensor-protocol multisite CTM.
+
+`ctm_multisite()` accepts string-keyed site tensors and a `Lattice`:
 
 ```python
 from tenax import ctm_multisite, kagome

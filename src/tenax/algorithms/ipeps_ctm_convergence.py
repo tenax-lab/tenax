@@ -165,6 +165,8 @@ def _ctm_2site_sweep(
     a_A: jax.Array,
     a_B: jax.Array,
     chi: int,
+    # NOTE: Legacy dense 2-site sweep, used by simple update only.
+    # AD optimization uses _ctm_tensor_sweep_multisite instead.
     renormalize: bool,
 ) -> tuple[CTMEnvironment, CTMEnvironment]:
     """One full 2-site CTM sweep: L/R/T/B moves for both sublattices + renormalize."""
@@ -192,6 +194,13 @@ def ctm_2site(
     config: CTMConfig,
 ) -> tuple[CTMEnvironment, CTMEnvironment]:
     """Compute CTM environments for a 2-site checkerboard unit cell.
+
+    .. note::
+        This is the **legacy dense** 2-site CTM used by simple update
+        (``ipeps()``).  For AD-based optimization, use
+        ``optimize_gs_ad()`` with ``unit_cell="2site"``, which routes
+        through the Tensor-protocol multisite CTM
+        (``ctm_tensor_converge_2site``).
 
     On a checkerboard, all neighbors of A are B and vice versa. Each
     absorption move for env_A uses B's double-layer tensor and T's from
