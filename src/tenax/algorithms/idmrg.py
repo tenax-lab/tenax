@@ -1371,13 +1371,17 @@ def _idmrg_1site_sweep(
 ) -> iDMRGResult:
     """1-site iDMRG with DMRG3S subspace expansion (dense path).
 
-    Uses 1-site Lanczos optimization at each site of a 2-site unit cell,
-    followed by DMRG3S subspace expansion to grow the bond dimension.
+    Uses 1-site Lanczos optimization followed by DMRG3S subspace expansion
+    to grow the bond dimension.  The structure mirrors the 2-site sweep:
 
-    The structure mirrors the 2-site sweep but with 1-site effective
-    Hamiltonians and DMRG3S bond expansion.  Each iteration does a full
-    2-site update (like the 2-site code) to maintain consistent environments,
-    using the energy difference method for e/site.
+      1. Form 2-site theta from A_L, s_center, A_R.
+      2. Solve the 2-site effective Hamiltonian via Lanczos (for total energy).
+      3. SVD -> A_L, s, A_R.
+      4. DMRG3S expansion (L->R): expand A_L's right bond, absorb into A_R.
+      5. Update environments.
+
+    The key difference from pure 2-site is the DMRG3S expansion step, which
+    provides controlled bond growth beyond what the 2-site SVD gives.
 
     Args:
         bulk_mpo: Bulk MPO tensor as a ``Tensor`` wrapper.
@@ -1395,8 +1399,8 @@ def _idmrg_1site_sweep(
     key = jax.random.PRNGKey(0)
 
     # ---- Initialise ----
-    L_env = _trivial_left_env(D_w, dtype=dtype).todense()  # (1, D_w, 1)
-    R_env = _trivial_right_env(D_w, dtype=dtype).todense()  # (1, D_w, 1)
+    L_env = _trivial_left_env(D_w, dtype=dtype).todense()
+    R_env = _trivial_right_env(D_w, dtype=dtype).todense()
 
     chi_env = 1
     alpha = config.mixing_factor
@@ -1409,8 +1413,7 @@ def _idmrg_1site_sweep(
     n_keep = 1
 
     for sweep in range(config.max_iterations):
-        # ---- Form initial 2-site theta (same as 2-site iDMRG) ----
-        # We build a 2-site wavefunction to keep environments consistent.
+        # ---- Form initial 2-site theta ----
         if theta_prev is not None and theta_prev.shape == (chi_env, d, d, chi_env):
             theta = theta_prev
         elif theta_prev is not None:
@@ -1427,7 +1430,7 @@ def _idmrg_1site_sweep(
             theta = jax.random.normal(subkey, (chi_env, d, d, chi_env), dtype=dtype)
         theta = theta / jnp.linalg.norm(theta)
 
-        # ---- 2-site Lanczos to get theta_opt ----
+        # ---- 2-site Lanczos for total energy ----
         theta_shape = theta.shape
         theta_flat = theta.ravel()
 
@@ -1468,8 +1471,9 @@ def _idmrg_1site_sweep(
         A_L = U.reshape(chi_l, d, n_keep)
         A_R = Vt.reshape(n_keep, d, chi_r)
 
-        # ---- DMRG3S subspace expansion on both sites ----
-        # L→R: expand A_L's right bond, adjust A_R
+        # ---- DMRG3S subspace expansion (L->R) ----
+        # Expand A_L's right bond using the expansion tensor from L_env + MPO,
+        # then SVD-truncate back to max_bond_dim.
         new_A_L, new_A_R = expand_and_truncate_dense(
             site=A_L,
             neighbor=jnp.einsum("a,apb->apb", s_center, A_R),
@@ -1481,11 +1485,24 @@ def _idmrg_1site_sweep(
             svd_trunc_err=config.svd_trunc_err,
         )
         A_L = new_A_L
+        # new_A_R has s absorbed; extract s_center and right-canonical A_R
+        chi_c = A_L.shape[2]
+        mat_r = new_A_R.reshape(chi_c, d * chi_r)
+        U_r, s_r, Vt_r = jnp.linalg.svd(mat_r, full_matrices=False)
+        s_norm = jnp.linalg.norm(s_r)
+        if s_norm > 1e-15:
+            s_center = s_r / s_norm
+        else:
+            s_center = s_r
+        # Absorb U_r into A_L to maintain left-isometry
+        A_L = jnp.einsum("ija,ab->ijb", A_L, U_r)
+        A_R = Vt_r.reshape(chi_c, d, chi_r)
 
         # ---- Update environments ----
-        L_env_new = _update_left_env_dense(L_env, A_L, W)
-        # For R_env update, we need right-isometric A_R
-        R_env_new = _update_right_env_dense(R_env, A_R, W)
+        L_env = _update_left_env_dense(L_env, A_L, W)
+        R_env = _update_right_env_dense(R_env, A_R, W)
+
+        n_keep = chi_c
 
         # ---- Energy per site via energy difference ----
         if E_prev is not None:
@@ -1498,8 +1515,6 @@ def _idmrg_1site_sweep(
         E_prev = E_total
         theta_prev = theta_opt
         chi_env = n_keep
-        L_env = L_env_new
-        R_env = R_env_new
 
         if config.verbose:
             print(
