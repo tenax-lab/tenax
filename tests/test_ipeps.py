@@ -964,6 +964,120 @@ class TestOptimizeGsAd2Site:
         )
 
 
+class TestHeisenbergBenchmark:
+    """Regression tests against known iPEPS results for 2D Heisenberg AFM.
+
+    Reference values:
+        QMC exact: E/site = -0.669437(5) (Sandvik, PRB 56, 11678, 1997)
+        QMC m_s   = 0.3070(3)
+
+    iPEPS literature (Corboz et al.):
+        D=2: E/site ≈ -0.6548
+        D=3: E/site ≈ -0.6646
+        D=4: E/site ≈ -0.6670
+    """
+
+    @pytest.fixture
+    def heisenberg_gate(self):
+        d = 2
+        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+        return H.reshape(d, d, d, d)
+
+    @pytest.mark.slow
+    def test_su_d2_energy(self, heisenberg_gate):
+        """Simple update at D=2 should give E/site < -0.60."""
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            num_imaginary_steps=200,
+            dt=0.05,
+            ctm=CTMConfig(chi=16, max_iter=60),
+            unit_cell="2site",
+        )
+        E_su, _, _ = ipeps(heisenberg_gate, None, config)
+        E = float(E_su)
+        assert E < -0.60, f"SU D=2 E/site={E:.6f}, expected < -0.60"
+        assert E > -0.80, f"SU D=2 E/site={E:.6f}, unphysically low"
+
+    @pytest.mark.slow
+    def test_ad_d2_energy(self, heisenberg_gate):
+        """AD optimization at D=2, chi=16 should give E/site < -0.648.
+
+        Literature value for D=2 iPEPS Heisenberg is E/site ≈ -0.6548.
+        We use a loose bound since chi=16 is moderate.
+        """
+        su_config = iPEPSConfig(
+            max_bond_dim=2,
+            num_imaginary_steps=200,
+            dt=0.05,
+            ctm=CTMConfig(chi=16, max_iter=60),
+            unit_cell="2site",
+        )
+        _, peps_su, _ = ipeps(heisenberg_gate, None, su_config)
+        A_su = peps_su.get_tensor((0, 0)).todense()
+        B_su = peps_su.get_tensor((1, 0)).todense()
+
+        ad_config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=16, max_iter=60),
+            gs_num_steps=50,
+            gs_learning_rate=5e-3,
+            unit_cell="2site",
+        )
+        _, _, E_gs = optimize_gs_ad(heisenberg_gate, (A_su, B_su), ad_config)
+        assert E_gs < -0.648, (
+            f"AD D=2 chi=16 E/site={E_gs:.6f}, expected < -0.648 "
+            "(literature D=2 ≈ -0.6548)"
+        )
+        assert E_gs > -0.80, f"AD D=2 E/site={E_gs:.6f}, unphysically low"
+
+    @pytest.mark.slow
+    def test_su_1site_d2_energy(self, heisenberg_gate):
+        """1-site SU at D=2 should give finite energy (paramagnetic)."""
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            num_imaginary_steps=100,
+            dt=0.1,
+            ctm=CTMConfig(chi=16, max_iter=40),
+            unit_cell="1x1",
+        )
+        E, _, _ = ipeps(heisenberg_gate, None, config)
+        assert np.isfinite(float(E)), f"1-site SU gave non-finite energy {E}"
+
+    @pytest.mark.slow
+    def test_ad_d2_chi_scaling(self, heisenberg_gate):
+        """Energy should improve (decrease) with increasing chi at fixed D=2."""
+        su_config = iPEPSConfig(
+            max_bond_dim=2,
+            num_imaginary_steps=100,
+            dt=0.1,
+            ctm=CTMConfig(chi=8, max_iter=40),
+            unit_cell="2site",
+        )
+        _, peps_su, _ = ipeps(heisenberg_gate, None, su_config)
+        A_su = peps_su.get_tensor((0, 0)).todense()
+        B_su = peps_su.get_tensor((1, 0)).todense()
+
+        energies = []
+        for chi in [8, 16]:
+            ad_config = iPEPSConfig(
+                max_bond_dim=2,
+                ctm=CTMConfig(chi=chi, max_iter=60),
+                gs_num_steps=30,
+                gs_learning_rate=5e-3,
+                unit_cell="2site",
+            )
+            _, _, E = optimize_gs_ad(heisenberg_gate, (A_su, B_su), ad_config)
+            energies.append(float(E))
+
+        assert energies[1] <= energies[0] + 0.01, (
+            f"Energy should improve with chi: chi=8 E={energies[0]:.6f}, "
+            f"chi=16 E={energies[1]:.6f}"
+        )
+
+
 class TestOptimizeGsAdLogging:
     """Tests for AD optimization progress logging."""
 
