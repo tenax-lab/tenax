@@ -188,17 +188,19 @@ def _config_from_tuple(config_tuple: tuple):
 def _gauge_fix_ctm_tensor(env):
     """Fix gauge of CTMTensorEnv via QR decomposition of corners.
 
-    Performs dense QR on corner arrays and dense einsum for Q absorption
-    into edges, then wraps results back into Tensor objects preserving
-    the original index structure.  All dense operations (``todense()``,
-    ``jnp.linalg.qr``, ``jnp.einsum``) are JAX-differentiable.
+    Performs dense QR on corner and edge arrays, then wraps results back
+    into Tensor objects preserving the original index structure.  All
+    dense operations (``todense()``, ``jnp.linalg.qr``, ``jnp.einsum``)
+    are JAX-differentiable.
 
-    For SymmetricTensor inputs, the results are wrapped back via
-    ``from_dense(..., tol=inf)`` to maintain the original charge layout.
+    For SymmetricTensor with trivial charges (all zeros), the dense
+    round-trip is cheap (single block).  For non-trivial charges, the
+    ``from_dense(..., tol=inf)`` wrapping preserves the charge layout.
     """
     from tenax.core.tensor import SymmetricTensor
 
-    # Extract dense arrays
+    # Extract dense arrays — for SymmetricTensor with trivial charges
+    # this is essentially free (single block covers the full tensor).
     C1, C2, C3, C4 = (c.todense() for c in (env.C1, env.C2, env.C3, env.C4))
     T1, T2, T3, T4 = (t.todense() for t in (env.T1, env.T2, env.T3, env.T4))
 
