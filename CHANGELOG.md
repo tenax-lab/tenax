@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.3.0 (unreleased)
+## v0.3.0 (2026-03-27)
 
 ### Breaking Changes
 
@@ -38,6 +38,30 @@
   (`ctm_converge`, `ctm_converge_2site`); all optimization now uses
   `ctm_tensor_converge` / `ctm_tensor_converge_2site` with `DenseTensor`
   or `SymmetricTensor` (#183)
+- **Sweep-based iDMRG** — replaced growing-chain algorithm with proper
+  sweep-based iDMRG with environment warmup (#191, #197)
+  - Environment warmup phase for self-consistent infinite environments
+  - 1-site update with DMRG3S subspace expansion (`two_site=False`)
+  - Energy monotonically improves with chi (fixed chi scaling issue)
+  - QR-based orthogonalization for numerical stability
+- **Gradient clipping for iPEPS AD** — `gs_max_grad_norm` field in
+  iPEPSConfig (default 1.0) prevents gradient spikes from diverging
+  the optimizer. lr=1e-2 now gives E=-0.663 for D=2 Heisenberg
+  (previously diverged) (#198)
+- **SymmetricTensor 23x speedup** — cached `blocks` dict + NumPy einsum
+  in `_blockwise_contract` (#196)
+  - `blocks` property returns immutable `MappingProxyType`, cached on
+    first access (8.5x from avoiding redundant slice+reshape)
+  - NumPy einsum for per-block contractions avoids JAX dispatch
+    overhead (74x faster per operation)
+- **JIT-compiled Lanczos** — `_lanczos_solve_jit` via `lax.fori_loop`,
+  120x faster per call for dense tensors (#199)
+- **Precomputed block plan** — `_precompute_block_plan` enumerates
+  valid charge-sector combinations once before Lanczos loop (#199)
+- **Non-trivial U(1) gauge fix** — dense QR + `from_dense()` wrapping
+  preserves charge layout for 2-site iPEPS CTM (#193)
+- **iPEPS regression benchmarks** — D=2 Heisenberg SU/AD energy and
+  chi scaling tests (#192)
 - Eliminated ~23 boundary special-case code paths across DMRG, TDVP,
   observables, and CBE
 - Deleted `_pad_boundary_symmetric` / `_unpad_boundary_symmetric` functions
