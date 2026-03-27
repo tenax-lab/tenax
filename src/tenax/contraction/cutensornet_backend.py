@@ -55,7 +55,15 @@ def is_available() -> bool:
 
 
 def _cutn_contract_raw(subscripts: str, arrays: list) -> jax.Array:
-    """Raw cuTensorNet contraction (no AD support)."""
+    """Raw cuTensorNet contraction (no AD support).
+
+    Falls back to jnp.einsum if arrays contain JAX tracers (during AD
+    backward pass) since DLPack cannot convert traced arrays.
+    """
+    # Check for tracers — DLPack doesn't work with JAX tracers
+    if any(isinstance(a, jax.core.Tracer) for a in arrays):
+        return jnp.einsum(subscripts, *arrays)
+
     import cupy as cp
     from cuquantum.tensornet import contract as cutn_contract_fn
 
