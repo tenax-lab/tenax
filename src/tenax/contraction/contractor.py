@@ -192,6 +192,20 @@ def _contract_dense(
         Contracted DenseTensor.
     """
     arrays = [t.todense() for t in tensors]
+
+    # Optional cuTensorNet GPU path for dense contractions (~5x over opt_einsum).
+    # Enabled when TENAX_USE_CUTENSORNET=1 and cuTensorNet is available on GPU.
+    import os
+
+    if os.environ.get("TENAX_USE_CUTENSORNET", "0") == "1":
+        from tenax.contraction.cutensornet_backend import is_available as _cutn_ok
+
+        if _cutn_ok():
+            from tenax.contraction.cutensornet_backend import contract_ad
+
+            result = contract_ad(subscripts, *arrays)
+            return DenseTensor(result, output_indices)
+
     shapes = tuple(a.shape for a in arrays)
 
     # Look up cached contraction path (or compute & cache it)

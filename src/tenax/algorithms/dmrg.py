@@ -1302,6 +1302,14 @@ def _blockwise_contract(
     Note:
         Callers must validate inputs via ``_assert_symmetric`` before calling.
     """
+    # NOTE: cuTensorNet integration for _blockwise_contract is not beneficial.
+    # The todense→contract→extract-blocks approach (370s) is slower than the
+    # NumPy per-block path (34s) due to block extraction overhead.
+    # cuTensorNet is useful for dense contractions (see cutensornet_backend.py)
+    # and for the dense iDMRG/DMRG paths. See issue #200 for future
+    # block-sparse GPU acceleration via cuTENSOR or padded vmap.
+
+    # --- CPU/fallback path ---
     # Cache for opt_einsum contraction expressions
     if expr_cache is None:
         expr_cache = {}
