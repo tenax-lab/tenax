@@ -28,8 +28,9 @@ import numpy as np
 
 from tenax.algorithms.dmrg import (
     _blockwise_contract,
-    _lanczos_solve,
+    _lanczos_solve_jit,
     _lanczos_solve_tensor,
+    _precompute_block_plan,
     _update_left_env_symmetric,
     _update_right_env_symmetric,
 )
@@ -570,12 +571,17 @@ def _idmrg_growing_chain_symmetric(
         # Shared cache for opt_einsum contraction expressions
         _matvec_cache: dict = {}
 
+        # Precompute block plan once — reused across all Lanczos iterations
+        _subs = "abc,apqd,bpse,eqtf,dfg->cstg"
+        _plan = _precompute_block_plan([L_env, theta, W_sym, W_sym, R_env], _subs)
+
         def matvec(v: Tensor) -> Tensor:
             return _blockwise_contract(
                 [L_env, v, W_sym, W_sym, R_env],
-                "abc,apqd,bpse,eqtf,dfg->cstg",
+                _subs,
                 output_indices=v.indices,
                 expr_cache=_matvec_cache,
+                block_plan=_plan,
             )
 
         E_total_val, theta_opt = _lanczos_solve_tensor(
@@ -723,8 +729,8 @@ def _idmrg_growing_chain(
         def matvec(v: jax.Array) -> jax.Array:
             return _idmrg_matvec_jit(v, _ts, _le, W, W, _re)
 
-        E_total, theta_opt_flat = _lanczos_solve(
-            matvec, theta_flat, config.lanczos_max_iter, config.lanczos_tol
+        E_total, theta_opt_flat = _lanczos_solve_jit(
+            matvec, theta_flat, config.lanczos_max_iter
         )
         E_total = float(E_total)
 
@@ -960,8 +966,8 @@ def _idmrg_sweep(
         def matvec(v: jax.Array) -> jax.Array:
             return _idmrg_matvec_jit(v, _ts, _le, W, W, _re)
 
-        E_total, theta_opt_flat = _lanczos_solve(
-            matvec, theta_flat, config.lanczos_max_iter, config.lanczos_tol
+        E_total, theta_opt_flat = _lanczos_solve_jit(
+            matvec, theta_flat, config.lanczos_max_iter
         )
         E_total = float(E_total)
         theta_opt = theta_opt_flat.reshape(theta_shape)
@@ -1018,8 +1024,8 @@ def _idmrg_sweep(
     def _matvec_init(v: jax.Array) -> jax.Array:
         return _idmrg_matvec_jit(v, _ts, _le, W, W, _re)
 
-    E_total, theta_opt_flat = _lanczos_solve(
-        _matvec_init, theta.ravel(), config.lanczos_max_iter, config.lanczos_tol
+    E_total, theta_opt_flat = _lanczos_solve_jit(
+        _matvec_init, theta.ravel(), config.lanczos_max_iter
     )
     E_total = float(E_total)
     theta_opt = theta_opt_flat.reshape(theta_shape)
@@ -1073,8 +1079,8 @@ def _idmrg_sweep(
         def matvec(v: jax.Array) -> jax.Array:
             return _idmrg_matvec_jit(v, _ts, _le, W, W, _re)
 
-        E_total, theta_opt_flat = _lanczos_solve(
-            matvec, theta_flat, config.lanczos_max_iter, config.lanczos_tol
+        E_total, theta_opt_flat = _lanczos_solve_jit(
+            matvec, theta_flat, config.lanczos_max_iter
         )
         E_total = float(E_total)
         theta_opt = theta_opt_flat.reshape(theta_shape)
@@ -1261,12 +1267,17 @@ def _idmrg_sweep_symmetric(
         # Shared cache for opt_einsum contraction expressions
         _matvec_cache: dict = {}
 
+        # Precompute block plan once — reused across all Lanczos iterations
+        _subs = "abc,apqd,bpse,eqtf,dfg->cstg"
+        _plan = _precompute_block_plan([L_env, theta, W_sym, W_sym, R_env], _subs)
+
         def matvec(v: Tensor) -> Tensor:
             return _blockwise_contract(
                 [L_env, v, W_sym, W_sym, R_env],
-                "abc,apqd,bpse,eqtf,dfg->cstg",
+                _subs,
                 output_indices=v.indices,
                 expr_cache=_matvec_cache,
+                block_plan=_plan,
             )
 
         E_total_val, theta_opt = _lanczos_solve_tensor(
@@ -1441,8 +1452,8 @@ def _idmrg_1site_sweep(
         def matvec_2site(v: jax.Array) -> jax.Array:
             return _idmrg_matvec_jit(v, _ts, _le, W, W, _re)
 
-        E_total, theta_opt_flat = _lanczos_solve(
-            matvec_2site, theta_flat, config.lanczos_max_iter, config.lanczos_tol
+        E_total, theta_opt_flat = _lanczos_solve_jit(
+            matvec_2site, theta_flat, config.lanczos_max_iter
         )
         E_total = float(E_total)
         theta_opt = theta_opt_flat.reshape(theta_shape)
