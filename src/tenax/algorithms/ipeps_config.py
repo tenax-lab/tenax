@@ -65,6 +65,7 @@ class iPEPSConfig:
     gs_conv_tol: float = 1e-8
     gs_verbose: bool = False
     gs_log_interval: int = 10
+    gs_max_grad_norm: float = 1.0  # gradient clipping (max global norm)
     su_init: bool = False
 
     def __post_init__(self):
