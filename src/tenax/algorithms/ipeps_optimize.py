@@ -178,7 +178,10 @@ def _optimize_gs_ad_tensor(
         energy = compute_energy_ctm_tensor(A_norm, env, gate, d_phys)
         return energy
 
-    optimizer = optax.adam(config.gs_learning_rate)
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(config.gs_max_grad_norm),
+        optax.adam(config.gs_learning_rate),
+    )
     opt_state = optimizer.init(A)
 
     best_energy = float("inf")
@@ -368,7 +371,10 @@ def _optimize_gs_ad_tensor_2site(
         return energy, env_leaves
 
     params = (A, B)
-    optimizer = optax.adam(config.gs_learning_rate)
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(config.gs_max_grad_norm),
+        optax.adam(config.gs_learning_rate),
+    )
     opt_state = optimizer.init(params)
 
     last_energy = float("inf")
