@@ -124,6 +124,7 @@ def optimize_gs_ad(
         if config.su_init:
             _, su_peps, _ = ipeps(gate, None, config)
             A_init = su_peps.get_tensor((0, 0))
+            A_init = _maybe_relabel_su_tensor(A_init)
             # Ensure Tensor protocol labels
             if not isinstance(A_init, Tensor):
                 A_init = _wrap_as_dense_tensor(
