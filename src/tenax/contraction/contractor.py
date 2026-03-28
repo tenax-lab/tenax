@@ -30,6 +30,7 @@ from collections import Counter
 from collections.abc import Sequence
 from typing import Any
 
+import jax
 import numpy as np
 import opt_einsum
 
@@ -341,6 +342,10 @@ def _contract_symmetric(
 ) -> SymmetricTensor:
     """Contract block-sparse symmetric tensors using charge-indexed matching.
 
+    When ``TENAX_USE_CUTENSOR_BLOCKSPARSE=1`` and a CUDA GPU is available,
+    pairwise contractions use cuTENSOR's native block-sparse API (~32μs per
+    contraction vs ~1ms Python per-block).
+
     Instead of iterating over the full Cartesian product of all input blocks
     (which is O(product of block counts) and mostly incompatible), this
     implementation pre-indexes blocks by their contracted-leg charge
@@ -362,6 +367,23 @@ def _contract_symmetric(
     Returns:
         Contracted SymmetricTensor.
     """
+    # --- Optional cuTENSOR block-sparse GPU path ---
+    import os
+
+    if (
+        len(tensors) == 2
+        and os.environ.get("TENAX_USE_CUTENSOR_BLOCKSPARSE", "0") == "1"
+        and not any(isinstance(t._data, jax.core.Tracer) for t in tensors)
+    ):
+        from tenax.contraction.cutensor_blocksparse import is_available as _ct_ok
+
+        if _ct_ok():
+            from tenax.contraction.cutensor_blocksparse import contract_blocksparse
+
+            return contract_blocksparse(
+                tensors[0], tensors[1], subscripts, output_indices
+            )
+
     # Parse subscripts: e.g., "ij,jk->ik" → inputs=["ij","jk"], output="ik"
     input_part, output_part = subscripts.split("->")
     input_subs = input_part.split(",")
