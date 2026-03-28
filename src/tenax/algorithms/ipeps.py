@@ -243,8 +243,13 @@ def _ipeps_tensor(
     if norm_val > EPS:
         A = A * (1.0 / norm_val)
 
-    lam_h = jnp.ones(D)
-    lam_v = jnp.ones(D)
+    # Initialize lambdas from the tensor's actual bond dimensions, not
+    # max_bond_dim — the tensor may start smaller and grow via SVD.
+    _labels = A.labels()
+    D_h = A.indices[_labels.index("r")].dim
+    D_v = A.indices[_labels.index("d")].dim
+    lam_h = jnp.ones(D_h)
+    lam_v = jnp.ones(D_v)
 
     for step in range(config.num_imaginary_steps):
         if step % 2 == 0:

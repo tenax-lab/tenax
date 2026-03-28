@@ -1446,6 +1446,11 @@ class TestTensorSimpleUpdate:
         assert isinstance(env, CTMTensorEnv)
         assert np.isfinite(energy)
 
+    # NOTE: 1-site iPEPS with non-trivial U(1) charges (e.g., spin-1/2
+    # Heisenberg with bond charges [-1,0,1]) requires a 2-site unit cell
+    # to represent Neel order.  The 1-site SU collapses because the SVD
+    # fused charge space is larger than the bond space.  See #204.
+
 
 class TestSplitCTMRG:
     """Tests for Split-CTMRG (Phase 3)."""
