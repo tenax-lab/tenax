@@ -153,3 +153,26 @@ class TestCaching:
         plan1 = get_cached_blas_plan(subscripts, shapes)
         plan2 = get_cached_blas_plan(subscripts, shapes)
         assert plan1 is plan2
+
+
+class TestCythonAvailability:
+    def test_cython_blas_flag_exists(self):
+        """CYTHON_BLAS_AVAILABLE flag should be importable."""
+        from tenax.contraction import CYTHON_BLAS_AVAILABLE
+
+        assert isinstance(CYTHON_BLAS_AVAILABLE, bool)
+
+    def test_disable_env_var(self):
+        """TENAX_DISABLE_CYTHON_BLAS=1 should force CYTHON_BLAS_AVAILABLE=False."""
+        import importlib
+        import os
+
+        os.environ["TENAX_DISABLE_CYTHON_BLAS"] = "1"
+        try:
+            import tenax.contraction as mod
+
+            importlib.reload(mod)
+            assert not mod.CYTHON_BLAS_AVAILABLE
+        finally:
+            del os.environ["TENAX_DISABLE_CYTHON_BLAS"]
+            importlib.reload(mod)

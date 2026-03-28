@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-cython>=0.5", "cython>=3.0", "numpy>=1.26", "scipy>=1.11"]
 build-backend = "hatchling.build"
 
 [project]
@@ -42,6 +42,7 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
     "twine>=5.0",
+    "cython>=3.0",
 ]
 docs = [
     "sphinx>=7.0",
@@ -59,6 +60,9 @@ Issues = "https://github.com/tenax-lab/tenax/issues"
 
 [dependency-groups]
 dev = ["tenax-tn[dev]"]
+
+[tool.hatch.build.hooks.cython]
+src = "src"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tenax"]
