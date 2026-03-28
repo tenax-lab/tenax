@@ -137,7 +137,10 @@ def build_blas_plan(subscripts: str, shapes: list[tuple[int, ...]]) -> BlasExecP
     assert len(shapes) == n_inputs
 
     # Get optimal pairwise contraction path from opt_einsum.
-    dummy_arrays = [np.empty(s) for s in shapes]
+    # Use broadcast_to to create zero-copy views — avoids allocating
+    # large temporaries for big bond dimensions.
+    _zero = np.float64(0)
+    dummy_arrays = [np.broadcast_to(_zero, s) for s in shapes]
     path, _ = opt_einsum.contract_path(subscripts, *dummy_arrays)
 
     # Track "active operands" -- list of (subscript_chars, shape, buffer_idx).

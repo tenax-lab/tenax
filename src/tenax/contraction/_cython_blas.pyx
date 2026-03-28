@@ -54,8 +54,17 @@ def execute_block_plan(plan, list block_combos, list np_blocks):
             left_2d = np.ascontiguousarray(left.reshape(step.m, step.k))
             right_2d = np.ascontiguousarray(right.reshape(step.k, step.n))
 
-            # Use scipy BLAS dgemm for the matrix multiply
-            out_2d = scipy_blas.dgemm(1.0, left_2d, right_2d)
+            # Dispatch GEMM by dtype
+            if left_2d.dtype == np.float64:
+                out_2d = scipy_blas.dgemm(1.0, left_2d, right_2d)
+            elif left_2d.dtype == np.float32:
+                out_2d = scipy_blas.sgemm(1.0, left_2d, right_2d)
+            elif left_2d.dtype == np.complex128:
+                out_2d = scipy_blas.zgemm(1.0, left_2d, right_2d)
+            elif left_2d.dtype == np.complex64:
+                out_2d = scipy_blas.cgemm(1.0, left_2d, right_2d)
+            else:
+                out_2d = left_2d @ right_2d
             buffers[step.out_idx] = out_2d.reshape(step.out_shape)
 
         result = buffers[steps[n_steps - 1].out_idx]
