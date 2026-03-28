@@ -403,6 +403,215 @@ def _simple_update_vertical_tensor(
     return U_final, lam_v_new
 
 
+# ------------------------------------------------------------------ #
+# 2-site Tensor-protocol simple update                                #
+# ------------------------------------------------------------------ #
+
+
+def _simple_update_2site_horizontal_tensor(
+    A: Tensor,
+    B: Tensor,
+    gate: Tensor,
+    lam_h: jax.Array,
+    lam_v: jax.Array,
+    max_D: int,
+) -> tuple[Tensor, Tensor, jax.Array]:
+    """2-site simple update on the horizontal bond (A.r <-> B.l).
+
+    Works polymorphically with DenseTensor and SymmetricTensor.
+
+    Args:
+        A:     Left site tensor with labels (u, d, l, r, phys).
+        B:     Right site tensor with labels (u, d, l, r, phys).
+        gate:  Trotter gate with labels (si, sj, si_out, sj_out).
+        lam_h: Horizontal bond lambda vector.
+        lam_v: Vertical bond lambda vector.
+        max_D: Maximum bond dimension after SVD.
+
+    Returns:
+        (A_new, B_new, lam_h_new).
+    """
+    # 1. Absorb outer lambdas onto A: u<-lam_v, d<-lam_v, l<-lam_h
+    #    + shared lambda on A.r<-lam_h
+    A_abs = scale_bond_axis(A, "u", lam_v)
+    A_abs = scale_bond_axis(A_abs, "d", lam_v)
+    A_abs = scale_bond_axis(A_abs, "l", lam_h)
+    A_abs = scale_bond_axis(A_abs, "r", lam_h)
+
+    # 2. Absorb outer lambdas onto B: u<-lam_v, d<-lam_v, r<-lam_h (NOT l)
+    B_abs = scale_bond_axis(B, "u", lam_v)
+    B_abs = scale_bond_axis(B_abs, "d", lam_v)
+    B_abs = scale_bond_axis(B_abs, "r", lam_h)
+
+    # 3. Contract A.r with B.l
+    A_left = A_abs.relabel("r", "shared")
+    B_right = B_abs.relabels(
+        {
+            "u": "u_B",
+            "d": "d_B",
+            "l": "shared",
+            "r": "r_B",
+            "phys": "phys_B",
+        }
+    )
+    theta = contract(A_left, B_right)
+
+    # 4. Apply gate
+    theta = theta.relabel("phys", "si")
+    theta = theta.relabel("phys_B", "sj")
+    theta = contract(theta, gate)
+
+    # 5. Truncated SVD
+    U, sigma, Vh, s_full = truncated_svd(
+        theta,
+        left_labels=["u", "d", "l", "si_out"],
+        right_labels=["u_B", "d_B", "r_B", "sj_out"],
+        new_bond_label="bond_new",
+        max_singular_values=max_D,
+    )
+
+    # 6. New lambda (normalized)
+    lam_h_new = sigma / (jnp.max(sigma) + EPS)
+    sqrt_sig = jnp.sqrt(sigma + EPS)
+
+    # 7. Reconstruct A_new from U: labels are (u, d, l, si_out, bond_new)
+    #    Transpose so bond_new is in the r position: (u, d, l, bond_new, si_out)
+    A_new = U.transpose((0, 1, 2, 4, 3))
+    A_new = A_new.relabels({"bond_new": "r", "si_out": "phys"})
+    A_new = scale_bond_axis(A_new, "r", sqrt_sig)
+
+    # 8. Reconstruct B_new from Vh: labels are (bond_new, u_B, d_B, r_B, sj_out)
+    #    Transpose so bond_new is in the l position: (u_B, d_B, bond_new, r_B, sj_out)
+    B_new = Vh.transpose((1, 2, 0, 3, 4))
+    B_new = B_new.relabels(
+        {"bond_new": "l", "u_B": "u", "d_B": "d", "r_B": "r", "sj_out": "phys"}
+    )
+    B_new = scale_bond_axis(B_new, "l", sqrt_sig)
+
+    # 9. Remove outer lambdas
+    inv_lam_v = 1.0 / (lam_v + EPS)
+    inv_lam_h = 1.0 / (lam_h + EPS)
+    A_new = scale_bond_axis(A_new, "u", inv_lam_v)
+    A_new = scale_bond_axis(A_new, "d", inv_lam_v)
+    A_new = scale_bond_axis(A_new, "l", inv_lam_h)
+
+    B_new = scale_bond_axis(B_new, "u", inv_lam_v)
+    B_new = scale_bond_axis(B_new, "d", inv_lam_v)
+    B_new = scale_bond_axis(B_new, "r", inv_lam_h)
+
+    # 10. Normalize each tensor
+    norm_A = float(A_new.norm())
+    if norm_A > EPS:
+        A_new = A_new * (1.0 / norm_A)
+    norm_B = float(B_new.norm())
+    if norm_B > EPS:
+        B_new = B_new * (1.0 / norm_B)
+
+    return A_new, B_new, lam_h_new
+
+
+def _simple_update_2site_vertical_tensor(
+    A: Tensor,
+    B: Tensor,
+    gate: Tensor,
+    lam_h: jax.Array,
+    lam_v: jax.Array,
+    max_D: int,
+) -> tuple[Tensor, Tensor, jax.Array]:
+    """2-site simple update on the vertical bond (A.d <-> B.u).
+
+    Works polymorphically with DenseTensor and SymmetricTensor.
+
+    Args:
+        A:     Top site tensor with labels (u, d, l, r, phys).
+        B:     Bottom site tensor with labels (u, d, l, r, phys).
+        gate:  Trotter gate with labels (si, sj, si_out, sj_out).
+        lam_h: Horizontal bond lambda vector.
+        lam_v: Vertical bond lambda vector.
+        max_D: Maximum bond dimension after SVD.
+
+    Returns:
+        (A_new, B_new, lam_v_new).
+    """
+    # 1. Absorb outer lambdas onto A: u<-lam_v, l<-lam_h, r<-lam_h
+    #    + shared lambda on A.d<-lam_v
+    A_abs = scale_bond_axis(A, "u", lam_v)
+    A_abs = scale_bond_axis(A_abs, "d", lam_v)
+    A_abs = scale_bond_axis(A_abs, "l", lam_h)
+    A_abs = scale_bond_axis(A_abs, "r", lam_h)
+
+    # 2. Absorb outer lambdas onto B: d<-lam_v, l<-lam_h, r<-lam_h (NOT u)
+    B_abs = scale_bond_axis(B, "d", lam_v)
+    B_abs = scale_bond_axis(B_abs, "l", lam_h)
+    B_abs = scale_bond_axis(B_abs, "r", lam_h)
+
+    # 3. Contract A.d with B.u
+    A_top = A_abs.relabel("d", "shared")
+    B_bottom = B_abs.relabels(
+        {
+            "u": "shared",
+            "d": "d_B",
+            "l": "l_B",
+            "r": "r_B",
+            "phys": "phys_B",
+        }
+    )
+    theta = contract(A_top, B_bottom)
+
+    # 4. Apply gate
+    theta = theta.relabel("phys", "si")
+    theta = theta.relabel("phys_B", "sj")
+    theta = contract(theta, gate)
+
+    # 5. Truncated SVD
+    U, sigma, Vh, s_full = truncated_svd(
+        theta,
+        left_labels=["u", "l", "r", "si_out"],
+        right_labels=["d_B", "l_B", "r_B", "sj_out"],
+        new_bond_label="bond_new",
+        max_singular_values=max_D,
+    )
+
+    # 6. New lambda (normalized)
+    lam_v_new = sigma / (jnp.max(sigma) + EPS)
+    sqrt_sig = jnp.sqrt(sigma + EPS)
+
+    # 7. Reconstruct A_new from U: labels are (u, l, r, si_out, bond_new)
+    #    Transpose so bond_new is in the d position: (u, bond_new, l, r, si_out)
+    A_new = U.transpose((0, 4, 1, 2, 3))
+    A_new = A_new.relabels({"bond_new": "d", "si_out": "phys"})
+    A_new = scale_bond_axis(A_new, "d", sqrt_sig)
+
+    # 8. Reconstruct B_new from Vh: labels are (bond_new, d_B, l_B, r_B, sj_out)
+    #    Transpose so bond_new is in the u position: (bond_new, d_B, l_B, r_B, sj_out)
+    #    Already in the right order for (u, d, l, r, phys)
+    B_new = Vh.relabels(
+        {"bond_new": "u", "d_B": "d", "l_B": "l", "r_B": "r", "sj_out": "phys"}
+    )
+    B_new = scale_bond_axis(B_new, "u", sqrt_sig)
+
+    # 9. Remove outer lambdas
+    inv_lam_v = 1.0 / (lam_v + EPS)
+    inv_lam_h = 1.0 / (lam_h + EPS)
+    A_new = scale_bond_axis(A_new, "u", inv_lam_v)
+    A_new = scale_bond_axis(A_new, "l", inv_lam_h)
+    A_new = scale_bond_axis(A_new, "r", inv_lam_h)
+
+    B_new = scale_bond_axis(B_new, "d", inv_lam_v)
+    B_new = scale_bond_axis(B_new, "l", inv_lam_h)
+    B_new = scale_bond_axis(B_new, "r", inv_lam_h)
+
+    # 10. Normalize each tensor
+    norm_A = float(A_new.norm())
+    if norm_A > EPS:
+        A_new = A_new * (1.0 / norm_A)
+    norm_B = float(B_new.norm())
+    if norm_B > EPS:
+        B_new = B_new * (1.0 / norm_B)
+
+    return A_new, B_new, lam_v_new
+
+
 def _make_trotter_gate_tensor(
     hamiltonian_gate: jax.Array | Tensor,
     dt: float,

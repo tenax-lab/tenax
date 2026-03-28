@@ -1452,6 +1452,177 @@ class TestTensorSimpleUpdate:
     # fused charge space is larger than the bond space.  See #204.
 
 
+class TestTensor2SiteSimpleUpdate:
+    """Tests for the 2-site Tensor-protocol simple update."""
+
+    @staticmethod
+    def _make_dense_ipeps(key, D=2, d=2):
+        """Create a DenseTensor iPEPS site tensor with trivial charges."""
+        from tenax.core.index import FlowDirection, TensorIndex
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.core.tensor import DenseTensor
+
+        sym = U1Symmetry()
+        charges = np.zeros(D, dtype=np.int32)
+        phys_charges = np.zeros(d, dtype=np.int32)
+        data = jax.random.normal(key, (D, D, D, D, d))
+        data = data / (jnp.linalg.norm(data) + 1e-10)
+        indices = (
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        return DenseTensor(data, indices)
+
+    @staticmethod
+    def _make_symmetric_ipeps(key, D=2, d=2):
+        """Create a U(1) SymmetricTensor iPEPS site tensor."""
+        from tenax.core.index import FlowDirection, TensorIndex
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.core.tensor import SymmetricTensor
+
+        sym = U1Symmetry()
+        charges = np.zeros(D, dtype=np.int32)
+        phys_charges = np.zeros(d, dtype=np.int32)
+        indices = (
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        return SymmetricTensor.random_normal(indices, key)
+
+    @staticmethod
+    def _heisenberg_gate():
+        d = 2
+        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+        return H.reshape(d, d, d, d)
+
+    def test_horizontal_dense_tensor_runs(self):
+        """Horizontal 2-site simple update works with DenseTensor."""
+        from tenax.algorithms.ipeps_simple_update import (
+            _make_trotter_gate_tensor,
+            _simple_update_2site_horizontal_tensor,
+        )
+
+        A = self._make_dense_ipeps(jax.random.PRNGKey(0))
+        B = self._make_dense_ipeps(jax.random.PRNGKey(1))
+        gate = _make_trotter_gate_tensor(self._heisenberg_gate(), dt=0.01)
+        D = 2
+        lam_h = jnp.ones(D)
+        lam_v = jnp.ones(D)
+
+        A_new, B_new, lam_new = _simple_update_2site_horizontal_tensor(
+            A, B, gate, lam_h, lam_v, D
+        )
+        assert A_new.labels() == ("u", "d", "l", "r", "phys")
+        assert B_new.labels() == ("u", "d", "l", "r", "phys")
+        assert np.isfinite(float(A_new.norm()))
+        assert np.isfinite(float(B_new.norm()))
+
+    def test_vertical_dense_tensor_runs(self):
+        """Vertical 2-site simple update works with DenseTensor."""
+        from tenax.algorithms.ipeps_simple_update import (
+            _make_trotter_gate_tensor,
+            _simple_update_2site_vertical_tensor,
+        )
+
+        A = self._make_dense_ipeps(jax.random.PRNGKey(0))
+        B = self._make_dense_ipeps(jax.random.PRNGKey(1))
+        gate = _make_trotter_gate_tensor(self._heisenberg_gate(), dt=0.01)
+        D = 2
+        lam_h = jnp.ones(D)
+        lam_v = jnp.ones(D)
+
+        A_new, B_new, lam_new = _simple_update_2site_vertical_tensor(
+            A, B, gate, lam_h, lam_v, D
+        )
+        assert A_new.labels() == ("u", "d", "l", "r", "phys")
+        assert B_new.labels() == ("u", "d", "l", "r", "phys")
+        assert np.isfinite(float(A_new.norm()))
+        assert np.isfinite(float(B_new.norm()))
+
+    def test_symmetric_tensor_2site_runs(self):
+        """2-site simple update works with SymmetricTensor."""
+        from tenax.algorithms.ipeps_simple_update import (
+            _make_trotter_gate_tensor,
+            _simple_update_2site_horizontal_tensor,
+            _simple_update_2site_vertical_tensor,
+        )
+        from tenax.core.tensor import SymmetricTensor
+
+        A = self._make_symmetric_ipeps(jax.random.PRNGKey(0))
+        B = self._make_symmetric_ipeps(jax.random.PRNGKey(1))
+        gate = _make_trotter_gate_tensor(
+            self._heisenberg_gate(), dt=0.01, site_tensor=A
+        )
+        D = 2
+        lam_h = jnp.ones(D)
+        lam_v = jnp.ones(D)
+
+        A_h, B_h, lam_h_new = _simple_update_2site_horizontal_tensor(
+            A, B, gate, lam_h, lam_v, D
+        )
+        assert isinstance(A_h, SymmetricTensor)
+        assert isinstance(B_h, SymmetricTensor)
+        assert A_h.labels() == ("u", "d", "l", "r", "phys")
+        assert B_h.labels() == ("u", "d", "l", "r", "phys")
+
+        A_v, B_v, lam_v_new = _simple_update_2site_vertical_tensor(
+            A_h, B_h, gate, lam_h_new, lam_v, D
+        )
+        assert isinstance(A_v, SymmetricTensor)
+        assert isinstance(B_v, SymmetricTensor)
+        assert np.isfinite(float(A_v.norm()))
+        assert np.isfinite(float(B_v.norm()))
+
+    def test_returns_different_A_and_B(self):
+        """A_new and B_new should differ after horizontal update."""
+        from tenax.algorithms.ipeps_simple_update import (
+            _make_trotter_gate_tensor,
+            _simple_update_2site_horizontal_tensor,
+        )
+
+        A = self._make_dense_ipeps(jax.random.PRNGKey(0))
+        B = self._make_dense_ipeps(jax.random.PRNGKey(1))
+        gate = _make_trotter_gate_tensor(self._heisenberg_gate(), dt=0.01)
+        D = 2
+        lam_h = jnp.ones(D)
+        lam_v = jnp.ones(D)
+
+        A_new, B_new, _ = _simple_update_2site_horizontal_tensor(
+            A, B, gate, lam_h, lam_v, D
+        )
+        # A_new and B_new come from U and Vh of an SVD, so they should differ
+        diff = float(jnp.linalg.norm(A_new.todense() - B_new.todense()))
+        assert diff > 1e-10, "A_new and B_new should not be identical"
+
+    def test_lambda_normalized(self):
+        """max(lam_new) should be approximately 1.0."""
+        from tenax.algorithms.ipeps_simple_update import (
+            _make_trotter_gate_tensor,
+            _simple_update_2site_horizontal_tensor,
+        )
+
+        A = self._make_dense_ipeps(jax.random.PRNGKey(0))
+        B = self._make_dense_ipeps(jax.random.PRNGKey(1))
+        gate = _make_trotter_gate_tensor(self._heisenberg_gate(), dt=0.01)
+        D = 2
+        lam_h = jnp.ones(D)
+        lam_v = jnp.ones(D)
+
+        _, _, lam_new = _simple_update_2site_horizontal_tensor(
+            A, B, gate, lam_h, lam_v, D
+        )
+        assert abs(float(jnp.max(lam_new)) - 1.0) < 1e-6
+
+
 class TestSplitCTMRG:
     """Tests for Split-CTMRG (Phase 3)."""
 
