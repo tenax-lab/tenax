@@ -155,6 +155,108 @@ class TestCaching:
         assert plan1 is plan2
 
 
+class TestCythonKernel:
+    @pytest.fixture(autouse=True)
+    def require_cython(self):
+        from tenax.contraction import CYTHON_BLAS_AVAILABLE
+
+        if not CYTHON_BLAS_AVAILABLE:
+            pytest.skip("Cython BLAS not compiled")
+
+    def test_single_gemm(self):
+        """Single pairwise matmul via Cython matches numpy."""
+        from tenax.contraction._cython_blas import execute_block_plan
+
+        rng = np.random.default_rng(42)
+        subs = "ij,jk->ik"
+        shapes = [(3, 4), (4, 5)]
+        arrays = [rng.standard_normal(s) for s in shapes]
+        plan = build_blas_plan(subs, shapes)
+
+        block_combos = [([(), ()], ())]
+        np_blocks = [{(): arrays[0]}, {(): arrays[1]}]
+
+        result = execute_block_plan(plan, block_combos, np_blocks)
+        expected = np.einsum(subs, *arrays)
+        np.testing.assert_allclose(result[()], expected, rtol=1e-10)
+
+    def test_dmrg_one_site_matvec(self):
+        """1-site DMRG matvec via Cython matches numpy."""
+        from tenax.contraction._cython_blas import execute_block_plan
+
+        rng = np.random.default_rng(7)
+        subs = "abc,apd,bpxe,def->cxf"
+        shapes = [(3, 3, 3), (3, 2, 3), (3, 2, 2, 3), (3, 3, 3)]
+        arrays = [rng.standard_normal(s) for s in shapes]
+        plan = build_blas_plan(subs, shapes)
+
+        block_combos = [([(), (), (), ()], ())]
+        np_blocks = [{(): a} for a in arrays]
+
+        result = execute_block_plan(plan, block_combos, np_blocks)
+        expected = np.einsum(subs, *arrays)
+        np.testing.assert_allclose(result[()], expected, rtol=1e-10)
+
+    def test_dmrg_two_site_matvec(self):
+        """2-site DMRG matvec via Cython matches numpy."""
+        from tenax.contraction._cython_blas import execute_block_plan
+
+        rng = np.random.default_rng(99)
+        subs = "abc,apqd,bpse,eqtf,dfg->cstg"
+        shapes = [(3, 3, 3), (3, 2, 2, 3), (3, 2, 2, 3), (3, 2, 2, 3), (3, 3, 3)]
+        arrays = [rng.standard_normal(s) for s in shapes]
+        plan = build_blas_plan(subs, shapes)
+
+        block_combos = [([(), (), (), (), ()], ())]
+        np_blocks = [{(): a} for a in arrays]
+
+        result = execute_block_plan(plan, block_combos, np_blocks)
+        expected = np.einsum(subs, *arrays)
+        np.testing.assert_allclose(result[()], expected, rtol=1e-10)
+
+    def test_accumulation_same_output_key(self):
+        """Multiple combos with same output key accumulate."""
+        from tenax.contraction._cython_blas import execute_block_plan
+
+        rng = np.random.default_rng(123)
+        subs = "ij,jk->ik"
+        shapes = [(3, 4), (4, 5)]
+        a1, a2, b = [rng.standard_normal(s) for s in [shapes[0], shapes[0], shapes[1]]]
+        plan = build_blas_plan(subs, shapes)
+
+        block_combos = [
+            ([(0,), (0,)], (0,)),
+            ([(1,), (0,)], (0,)),
+        ]
+        np_blocks = [{(0,): a1, (1,): a2}, {(0,): b}]
+
+        result = execute_block_plan(plan, block_combos, np_blocks)
+        expected = a1 @ b + a2 @ b
+        np.testing.assert_allclose(result[(0,)], expected, rtol=1e-10)
+
+    def test_multiple_output_keys(self):
+        """Different combos writing to different output keys."""
+        from tenax.contraction._cython_blas import execute_block_plan
+
+        rng = np.random.default_rng(456)
+        subs = "ij,jk->ik"
+        shapes = [(3, 4), (4, 5)]
+        a1, a2, b1, b2 = [
+            rng.standard_normal(s) for s in [shapes[0], shapes[0], shapes[1], shapes[1]]
+        ]
+        plan = build_blas_plan(subs, shapes)
+
+        block_combos = [
+            ([(0,), (0,)], (0,)),
+            ([(1,), (1,)], (1,)),
+        ]
+        np_blocks = [{(0,): a1, (1,): a2}, {(0,): b1, (1,): b2}]
+
+        result = execute_block_plan(plan, block_combos, np_blocks)
+        np.testing.assert_allclose(result[(0,)], a1 @ b1, rtol=1e-10)
+        np.testing.assert_allclose(result[(1,)], a2 @ b2, rtol=1e-10)
+
+
 class TestCythonAvailability:
     def test_cython_blas_flag_exists(self):
         """CYTHON_BLAS_AVAILABLE flag should be importable."""
