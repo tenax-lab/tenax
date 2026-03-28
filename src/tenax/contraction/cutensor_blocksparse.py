@@ -153,6 +153,21 @@ def contract_blocksparse(
                 _, _, c2i = section_maps[mode_idx]
                 coords.append(c2i[int(q)])
 
+        # Compute row-major strides per block.
+        # cuTENSOR default (stride=0) is column-major, but JAX uses row-major.
+        # Stride array: num_modes × num_non_zero_blocks (block-first).
+        strides = []
+        for i, key in enumerate(tensor._block_keys):
+            shape = tensor._block_shapes[i]
+            # Row-major strides: last dimension has stride 1
+            block_strides = []
+            stride = 1
+            for d in reversed(shape):
+                block_strides.append(stride)
+                stride *= d
+            block_strides.reverse()
+            strides.extend(block_strides)
+
         # Create descriptor
         desc = ct.create_block_sparse_tensor_descriptor(
             handle,
@@ -161,7 +176,7 @@ def contract_blocksparse(
             np.array(num_sections, dtype=np.uint32),
             np.array(all_extents, dtype=np.int64),
             np.array(coords, dtype=np.int32),
-            0,  # contiguous stride
+            np.array(strides, dtype=np.int64),
             ct_dtype,
         )
 
@@ -241,6 +256,21 @@ def contract_blocksparse(
             _, _, c2i = out_section_maps[mode_idx]
             out_coords.append(c2i[int(q)])
 
+    # Output strides (row-major)
+    out_strides = []
+    for key in output_block_keys:
+        shape = []
+        for mode_idx, q in enumerate(key):
+            _, sizes, c2i = out_section_maps[mode_idx]
+            shape.append(sizes[c2i[int(q)]])
+        stride = 1
+        block_strides = []
+        for d in reversed(shape):
+            block_strides.append(stride)
+            stride *= d
+        block_strides.reverse()
+        out_strides.extend(block_strides)
+
     desc_d = ct.create_block_sparse_tensor_descriptor(
         handle,
         np.uint32(len(output_part)),
@@ -248,7 +278,7 @@ def contract_blocksparse(
         np.array(out_num_sections, dtype=np.uint32),
         np.array(out_extents, dtype=np.int64),
         np.array(out_coords, dtype=np.int32),
-        0,
+        np.array(out_strides, dtype=np.int64),
         ct_dtype,
     )
     modes_d = [ord(c) for c in output_part]
