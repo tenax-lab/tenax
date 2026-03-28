@@ -370,10 +370,12 @@ def _contract_symmetric(
     # --- Optional cuTENSOR block-sparse GPU path ---
     import os
 
+    sym = tensors[0].indices[0].symmetry if tensors and tensors[0].indices else None
     if (
         len(tensors) == 2
         and os.environ.get("TENAX_USE_CUTENSOR_BLOCKSPARSE", "0") == "1"
         and not any(isinstance(t._data, jax.core.Tracer) for t in tensors)
+        and (sym is None or not sym.is_fermionic)
     ):
         from tenax.contraction.cutensor_blocksparse import is_available as _ct_ok
 
