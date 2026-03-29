@@ -97,6 +97,121 @@ class BlasExecPlan:
         return result
 
 
+@dataclass
+class KernelData:
+    """Pre-processed data for the Cython BLAS kernel.
+
+    All block arrays are pre-transposed and reshaped to their
+    GEMM-ready 2D C-contiguous layout.
+    """
+
+    plan: BlasExecPlan
+    combo_input_blocks: list[list[np.ndarray]]  # [combo_idx][buf_idx] -> 2D array
+    combo_output_idx: np.ndarray  # int32 array, length n_combos
+    output_buffers: list[np.ndarray]  # [slot_idx] -> zeroed array with out_shape
+    output_keys: list[tuple[int, ...]]  # [slot_idx] -> charge key
+    work_buffers: list[np.ndarray]  # intermediate buffers, reused per combo
+    dtype: np.dtype
+
+
+def prepare_kernel_data(
+    plan: BlasExecPlan,
+    combos: list[tuple[list[tuple[int, ...]], tuple[int, ...]]],
+    np_blocks: list[dict[tuple[int, ...], np.ndarray]],
+) -> KernelData:
+    """Pre-transpose all blocks and pack into flat structures for the C kernel.
+
+    Parameters
+    ----------
+    plan : BlasExecPlan
+        Execution plan from :func:`build_blas_plan`.
+    combos : list of (combo_keys, output_key)
+        Each element is ``(combo_keys, output_key)`` where *combo_keys* is a
+        list of block keys (one per input tensor) and *output_key* is the
+        charge-sector key for the output.
+    np_blocks : list of dict
+        One dict per input tensor, mapping block keys to N-d numpy arrays.
+
+    Returns
+    -------
+    KernelData
+        Pre-transposed data ready for the Cython kernel.
+    """
+    n_combos = len(combos)
+    n_inputs = plan.n_inputs
+    steps = plan.steps
+
+    # Detect dtype from first block
+    first_block = next(iter(np_blocks[0].values()))
+    dtype = first_block.dtype
+
+    # Map each input buffer to the step that first uses it as left or right.
+    # For input buffers (idx < n_inputs), find which step uses them and
+    # what perm/reshape to apply.
+    buf_to_step_role: dict[int, tuple[GemmStep, str]] = {}
+    for step in steps:
+        if step.left_idx not in buf_to_step_role:
+            buf_to_step_role[step.left_idx] = (step, "left")
+        if step.right_idx not in buf_to_step_role:
+            buf_to_step_role[step.right_idx] = (step, "right")
+
+    # Pre-transpose each input block for each combo
+    combo_input_blocks: list[list[np.ndarray]] = []
+    for combo_keys, _ in combos:
+        blocks_for_combo: list[np.ndarray] = [None] * plan.n_buffers  # type: ignore
+        for inp_idx in range(n_inputs):
+            arr = np_blocks[inp_idx][combo_keys[inp_idx]]
+            if inp_idx in buf_to_step_role:
+                step, role = buf_to_step_role[inp_idx]
+                if role == "left":
+                    perm = step.left_perm
+                    shape_2d = (step.m, step.k)
+                else:
+                    perm = step.right_perm
+                    shape_2d = (step.k, step.n)
+                if perm:
+                    arr = np.transpose(arr, perm)
+                arr = np.ascontiguousarray(arr.reshape(shape_2d))
+            else:
+                arr = np.ascontiguousarray(arr)
+            blocks_for_combo[inp_idx] = arr
+        combo_input_blocks.append(blocks_for_combo)
+
+    # Assign integer IDs to unique output keys
+    output_key_to_idx: dict[tuple[int, ...], int] = {}
+    combo_output_idx = np.empty(n_combos, dtype=np.int32)
+    for i, (_, out_key) in enumerate(combos):
+        if out_key not in output_key_to_idx:
+            output_key_to_idx[out_key] = len(output_key_to_idx)
+        combo_output_idx[i] = output_key_to_idx[out_key]
+
+    output_keys: list[tuple[int, ...]] = [None] * len(output_key_to_idx)  # type: ignore
+    for key, idx in output_key_to_idx.items():
+        output_keys[idx] = key
+
+    # Pre-allocate output buffers (zeroed) with the last step's out_shape
+    last_step = steps[-1]
+    output_buffers = [
+        np.zeros(last_step.out_shape, dtype=dtype)
+        for _ in range(len(output_key_to_idx))
+    ]
+
+    # Pre-allocate work buffers for intermediate steps
+    work_buffers = []
+    for step in steps[:-1]:
+        work_buffers.append(np.empty(step.out_shape, dtype=dtype))
+
+    return KernelData(
+        plan=plan,
+        combo_input_blocks=combo_input_blocks,
+        combo_output_idx=combo_output_idx,
+        output_buffers=output_buffers,
+        output_keys=output_keys,
+        work_buffers=work_buffers,
+        dtype=dtype,
+    )
+
+
 # ------------------------------------------------------------------ #
 # Plan builder                                                         #
 # ------------------------------------------------------------------ #

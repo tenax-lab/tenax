@@ -8,6 +8,7 @@ from tenax.contraction._blas_plan import (
     GemmStep,
     build_blas_plan,
     get_cached_blas_plan,
+    prepare_kernel_data,
 )
 
 
@@ -278,3 +279,98 @@ class TestCythonAvailability:
         finally:
             del os.environ["TENAX_DISABLE_CYTHON_BLAS"]
             importlib.reload(mod)
+
+
+class TestPrepareKernelData:
+    """Tests for prepare_kernel_data -- pre-transposes blocks for C kernel."""
+
+    def test_returns_correct_structure(self):
+        rng = np.random.default_rng(42)
+        subs = "abc,apd,bpxe,def->cxf"
+        shapes = [(2, 3, 4), (2, 5, 7), (3, 5, 6, 9), (7, 9, 4)]
+        plan = build_blas_plan(subs, shapes)
+
+        np_blocks = [{(0,): rng.standard_normal(s)} for s in shapes]
+        combos = [
+            ([(0,)] * len(shapes), (0,)),
+            ([(0,)] * len(shapes), (0,)),
+        ]
+
+        kdata = prepare_kernel_data(plan, combos, np_blocks)
+
+        # combo_input_blocks: list of list of 2D arrays
+        assert hasattr(kdata, "combo_input_blocks")
+        # output_idx: int array mapping combo -> output slot
+        assert hasattr(kdata, "combo_output_idx")
+        assert len(kdata.combo_output_idx) == 2
+        # output_buffers: list of zeroed arrays
+        assert hasattr(kdata, "output_buffers")
+        # output_keys: list mapping slot -> output key tuple
+        assert hasattr(kdata, "output_keys")
+        # work_buffers: intermediate buffers
+        assert hasattr(kdata, "work_buffers")
+        # dtype
+        assert hasattr(kdata, "dtype")
+
+    def test_pre_transposed_shapes_match_gemm(self):
+        rng = np.random.default_rng(42)
+        subs = "ij,jk->ik"
+        shapes = [(3, 4), (4, 5)]
+        plan = build_blas_plan(subs, shapes)
+        step = plan.steps[0]
+
+        np_blocks = [{(0,): rng.standard_normal(s)} for s in shapes]
+        combos = [([(0,)] * 2, (0,))]
+
+        kdata = prepare_kernel_data(plan, combos, np_blocks)
+
+        # Left block should be (M, K) = (3, 4)
+        left_2d = kdata.combo_input_blocks[0][step.left_idx]
+        assert left_2d.shape == (step.m, step.k)
+        assert left_2d.flags["C_CONTIGUOUS"]
+
+        # Right block should be (K, N) = (4, 5)
+        right_2d = kdata.combo_input_blocks[0][step.right_idx]
+        assert right_2d.shape == (step.k, step.n)
+        assert right_2d.flags["C_CONTIGUOUS"]
+
+    def test_numerical_correctness(self):
+        """Pre-transposed blocks, when multiplied, give same result as np.einsum."""
+        rng = np.random.default_rng(42)
+        subs = "abc,apd,bpxe,def->cxf"
+        shapes = [(2, 3, 4), (2, 5, 7), (3, 5, 6, 9), (7, 9, 4)]
+        arrays = [rng.standard_normal(s) for s in shapes]
+
+        expected = np.einsum(subs, *arrays)
+
+        plan = build_blas_plan(subs, shapes)
+        np_blocks = [{(0,): a} for a in arrays]
+        combos = [([(0,)] * len(shapes), (0,))]
+        kdata = prepare_kernel_data(plan, combos, np_blocks)
+
+        # Manual execute: walk steps using pre-transposed blocks.
+        # Input blocks are already transposed+reshaped to 2D; intermediate
+        # results still need the step's perm applied before reshape.
+        n_bufs = plan.n_buffers
+        buffers = [None] * n_bufs
+        # Load pre-transposed inputs
+        for idx in range(plan.n_inputs):
+            buffers[idx] = kdata.combo_input_blocks[0][idx]
+
+        for step in plan.steps:
+            left = buffers[step.left_idx]
+            right = buffers[step.right_idx]
+            # Input buffers are already 2D; intermediates need transpose
+            if step.left_idx >= plan.n_inputs and step.left_perm:
+                left = np.transpose(left, step.left_perm)
+            if step.right_idx >= plan.n_inputs and step.right_perm:
+                right = np.transpose(right, step.right_perm)
+            left_2d = left.reshape(step.m, step.k)
+            right_2d = right.reshape(step.k, step.n)
+            buffers[step.out_idx] = (left_2d @ right_2d).reshape(step.out_shape)
+
+        result = buffers[plan.steps[-1].out_idx]
+        if plan.output_perm:
+            result = np.transpose(result, plan.output_perm)
+
+        np.testing.assert_allclose(result, expected, rtol=1e-10)
