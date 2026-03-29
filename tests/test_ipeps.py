@@ -29,11 +29,6 @@ from tenax.algorithms.ipeps_rdm import (
     compute_energy_ctm_2site,
     compute_energy_split_ctm,
 )
-from tenax.algorithms.ipeps_simple_update import (
-    _simple_update_1x1,
-    _simple_update_2site_horizontal,
-    _simple_update_2site_vertical,
-)
 
 
 class TestCTMConfig:
@@ -237,144 +232,6 @@ class TestComputeEnergyCTM:
         assert jnp.isfinite(energy)
 
 
-class TestSimpleUpdate1x1:
-    def test_simple_update_runs(self):
-        """Simple update step should run and return updated tensors + lambdas."""
-        key = jax.random.PRNGKey(0)
-        D, d = 2, 2
-        A = jax.random.normal(key, (D, D, D, D, d))
-        A = A / (jnp.linalg.norm(A) + 1e-10)
-
-        lambdas = {
-            "horizontal": jnp.ones(D),
-            "vertical": jnp.ones(D),
-        }
-
-        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(d, d, d, d)
-        dt = 0.01
-        gate_flat = gate.reshape(d * d, d * d)
-        trotter_gate = jax.scipy.linalg.expm(-dt * gate_flat).reshape(d, d, d, d)
-
-        max_bond_dim = 3
-        A_new, lambdas_new = _simple_update_1x1(
-            A,
-            A,
-            lambdas,
-            trotter_gate,
-            max_bond_dim,
-            bond="horizontal",
-        )
-
-        # Should return tensors with same number of legs
-        assert A_new.ndim == A.ndim
-
-    def test_simple_update_bond_dim_bounded(self):
-        """Updated tensor bond dimension should not exceed max_bond_dim."""
-        key = jax.random.PRNGKey(1)
-        D, d = 2, 2
-        max_D = 3
-        A = jax.random.normal(key, (D, D, D, D, d))
-        A = A / (jnp.linalg.norm(A) + 1e-10)
-
-        lambdas = {
-            "horizontal": jnp.ones(D),
-            "vertical": jnp.ones(D),
-        }
-
-        gate_flat = jnp.eye(d * d)
-        trotter_gate = gate_flat.reshape(d, d, d, d)
-
-        A_new, _ = _simple_update_1x1(
-            A,
-            A,
-            lambdas,
-            trotter_gate,
-            max_D,
-            bond="horizontal",
-        )
-        # Check all bond dims are bounded
-        assert A_new.shape[0] <= max_D  # up dim
-        assert A_new.shape[2] <= max_D  # left dim
-
-    def test_simple_update_5leg_modifies_tensor(self):
-        """Passing a 5-leg tensor with a non-trivial gate should modify A."""
-        key = jax.random.PRNGKey(10)
-        D, d = 2, 2
-        A = jax.random.normal(key, (D, D, D, D, d))
-        A = A / (jnp.linalg.norm(A) + 1e-10)
-
-        lambdas = {"horizontal": jnp.ones(D), "vertical": jnp.ones(D)}
-        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(d, d, d, d)
-        dt = 0.1
-        gate_flat = gate.reshape(d * d, d * d)
-        trotter_gate = jax.scipy.linalg.expm(-dt * gate_flat).reshape(d, d, d, d)
-
-        A_new, _ = _simple_update_1x1(
-            A,
-            A,
-            lambdas,
-            trotter_gate,
-            D,
-            bond="horizontal",
-        )
-        assert not jnp.allclose(A, A_new, atol=1e-8), "A should change after update"
-
-    def test_simple_update_5leg_preserves_shape(self):
-        """After update, tensor should still have 5 legs."""
-        key = jax.random.PRNGKey(20)
-        D, d = 2, 2
-        A = jax.random.normal(key, (D, D, D, D, d))
-        A = A / (jnp.linalg.norm(A) + 1e-10)
-
-        lambdas = {"horizontal": jnp.ones(D), "vertical": jnp.ones(D)}
-        trotter_gate = jnp.eye(d * d).reshape(d, d, d, d)
-
-        for bond in ["horizontal", "vertical"]:
-            A_new, _ = _simple_update_1x1(
-                A,
-                A,
-                lambdas,
-                trotter_gate,
-                D,
-                bond=bond,
-            )
-            assert A_new.ndim == 5
-            assert A_new.shape[-1] == d  # physical dim unchanged
-
-    def test_lambda_normalized(self):
-        """Lambda vectors should have max element = 1 after update."""
-        key = jax.random.PRNGKey(30)
-        D, d = 2, 2
-        A = jax.random.normal(key, (D, D, D, D, d))
-        A = A / (jnp.linalg.norm(A) + 1e-10)
-
-        lambdas = {"horizontal": jnp.ones(D), "vertical": jnp.ones(D)}
-        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(d, d, d, d)
-        dt = 0.1
-        gate_flat = gate.reshape(d * d, d * d)
-        trotter_gate = jax.scipy.linalg.expm(-dt * gate_flat).reshape(d, d, d, d)
-
-        _, lam_h = _simple_update_1x1(
-            A,
-            A,
-            lambdas,
-            trotter_gate,
-            D,
-            bond="horizontal",
-        )
-        _, lam_v = _simple_update_1x1(
-            A,
-            A,
-            lambdas,
-            trotter_gate,
-            D,
-            bond="vertical",
-        )
-
-        assert jnp.allclose(jnp.max(lam_h["horizontal"]), 1.0, atol=1e-10)
-        assert jnp.allclose(jnp.max(lam_v["vertical"]), 1.0, atol=1e-10)
-
-
 class TestRDM:
     """Tests for the 2-site reduced density matrices."""
 
@@ -484,11 +341,11 @@ class TestIPEPSRun:
             dt=0.1,
             ctm=CTMConfig(chi=4, max_iter=3),
         )
-        energy, peps_out, env = ipeps(heisenberg_gate, None, config)
+        energy, (A, B), (env_A, env_B) = ipeps(heisenberg_gate, None, config)
         assert jnp.isfinite(energy)
 
     def test_ipeps_returns_three_tuple(self, heisenberg_gate):
-        """ipeps() should return (energy, peps, env) triple."""
+        """ipeps() should return (energy, (A, B), (env_A, env_B)) triple."""
         config = iPEPSConfig(
             max_bond_dim=2,
             num_imaginary_steps=2,
@@ -497,6 +354,9 @@ class TestIPEPSRun:
         )
         result = ipeps(heisenberg_gate, None, config)
         assert len(result) == 3
+        energy, peps, envs = result
+        assert isinstance(peps, tuple) and len(peps) == 2
+        assert isinstance(envs, tuple) and len(envs) == 2
 
     def test_ipeps_energy_is_scalar(self, heisenberg_gate):
         config = iPEPSConfig(
@@ -515,15 +375,16 @@ class TestIPEPSRun:
             dt=0.1,
             ctm=CTMConfig(chi=4, max_iter=3),
         )
-        _, _, env = ipeps(heisenberg_gate, None, config)
-        assert isinstance(env, CTMEnvironment)
+        _, _, (env_A, env_B) = ipeps(heisenberg_gate, None, config)
+        assert isinstance(env_A, CTMEnvironment)
+        assert isinstance(env_B, CTMEnvironment)
 
     def test_ipeps_with_initial_peps(self, heisenberg_gate):
-        """iPEPS should accept an initial PEPS tensor (non-None initial_peps)."""
-        key = jax.random.PRNGKey(99)
+        """iPEPS should accept an initial (A, B) tuple."""
         D, d = 2, 2
-        initial_A = jax.random.normal(key, (D, D, D, D, d))
-        initial_A = initial_A / (jnp.linalg.norm(initial_A) + 1e-10)
+        key_A, key_B = jax.random.split(jax.random.PRNGKey(99))
+        initial_A = jax.random.normal(key_A, (D, D, D, D, d))
+        initial_B = jax.random.normal(key_B, (D, D, D, D, d))
 
         config = iPEPSConfig(
             max_bond_dim=2,
@@ -531,107 +392,8 @@ class TestIPEPSRun:
             dt=0.1,
             ctm=CTMConfig(chi=4, max_iter=3),
         )
-        energy, _, _ = ipeps(heisenberg_gate, initial_A, config)
+        energy, _, _ = ipeps(heisenberg_gate, (initial_A, initial_B), config)
         assert jnp.isfinite(energy)
-
-
-class TestSimpleUpdate2Site:
-    """Tests for the 2-site simple update functions."""
-
-    @pytest.fixture
-    def setup(self):
-        key_A, key_B = jax.random.split(jax.random.PRNGKey(0))
-        D, d = 2, 2
-        A = jax.random.normal(key_A, (D, D, D, D, d))
-        A = A / (jnp.linalg.norm(A) + 1e-10)
-        B = jax.random.normal(key_B, (D, D, D, D, d))
-        B = B / (jnp.linalg.norm(B) + 1e-10)
-        lambdas = {"horizontal": jnp.ones(D), "vertical": jnp.ones(D)}
-
-        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
-        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
-        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
-        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
-        gate = jax.scipy.linalg.expm(-0.1 * H).reshape(d, d, d, d)
-        return A, B, lambdas, gate, D
-
-    def test_horizontal_runs(self, setup):
-        A, B, lambdas, gate, D = setup
-        A_new, B_new, lam_new = _simple_update_2site_horizontal(
-            A,
-            B,
-            lambdas["horizontal"],
-            lambdas["vertical"],
-            gate,
-            D,
-            lambdas,
-        )
-        assert A_new.ndim == 5
-        assert B_new.ndim == 5
-
-    def test_vertical_runs(self, setup):
-        A, B, lambdas, gate, D = setup
-        A_new, B_new, lam_new = _simple_update_2site_vertical(
-            A,
-            B,
-            lambdas["horizontal"],
-            lambdas["vertical"],
-            gate,
-            D,
-            lambdas,
-        )
-        assert A_new.ndim == 5
-        assert B_new.ndim == 5
-
-    def test_returns_different_A_and_B(self, setup):
-        A, B, lambdas, gate, D = setup
-        A_new, B_new, _ = _simple_update_2site_horizontal(
-            A,
-            B,
-            lambdas["horizontal"],
-            lambdas["vertical"],
-            gate,
-            D,
-            lambdas,
-        )
-        assert not jnp.allclose(A_new, B_new, atol=1e-8)
-
-    def test_preserves_physical_dim(self, setup):
-        A, B, lambdas, gate, D = setup
-        A_new, B_new, _ = _simple_update_2site_horizontal(
-            A,
-            B,
-            lambdas["horizontal"],
-            lambdas["vertical"],
-            gate,
-            D,
-            lambdas,
-        )
-        assert A_new.shape[-1] == 2
-        assert B_new.shape[-1] == 2
-
-    def test_lambda_normalized(self, setup):
-        A, B, lambdas, gate, D = setup
-        _, _, lam_h = _simple_update_2site_horizontal(
-            A,
-            B,
-            lambdas["horizontal"],
-            lambdas["vertical"],
-            gate,
-            D,
-            lambdas,
-        )
-        _, _, lam_v = _simple_update_2site_vertical(
-            A,
-            B,
-            lambdas["horizontal"],
-            lambdas["vertical"],
-            gate,
-            D,
-            lambdas,
-        )
-        assert jnp.allclose(jnp.max(lam_h["horizontal"]), 1.0, atol=1e-10)
-        assert jnp.allclose(jnp.max(lam_v["vertical"]), 1.0, atol=1e-10)
 
 
 class TestIPEPS2Site:
@@ -692,19 +454,6 @@ class TestIPEPS2Site:
         assert float(energy) < -0.66, (
             f"Energy {float(energy)} not low enough — D=4 iPEPS should give E < -0.66"
         )
-
-    def test_1x1_backward_compatible(self, heisenberg_gate):
-        """unit_cell='1x1' should give the same behavior as before."""
-        config = iPEPSConfig(
-            max_bond_dim=2,
-            num_imaginary_steps=3,
-            dt=0.1,
-            ctm=CTMConfig(chi=4, max_iter=3),
-            unit_cell="1x1",
-        )
-        energy, _, env = ipeps(heisenberg_gate, None, config)
-        assert jnp.isfinite(energy)
-        assert isinstance(env, CTMEnvironment)
 
     def test_2site_with_initial_peps(self, heisenberg_gate):
         """2-site iPEPS should accept initial (A, B) tuple."""
@@ -942,9 +691,7 @@ class TestOptimizeGsAd2Site:
             ctm=CTMConfig(chi=16, max_iter=60),
             unit_cell="2site",
         )
-        E_su, peps_su, _ = ipeps(heisenberg_gate, None, su_config)
-        A_su = peps_su.get_tensor((0, 0)).todense()
-        B_su = peps_su.get_tensor((1, 0)).todense()
+        E_su, (A_su, B_su), _ = ipeps(heisenberg_gate, None, su_config)
 
         ad_config = iPEPSConfig(
             max_bond_dim=2,
@@ -955,7 +702,9 @@ class TestOptimizeGsAd2Site:
             gs_learning_rate=5e-3,
             unit_cell="2site",
         )
-        _, _, E_gs = optimize_gs_ad(heisenberg_gate, (A_su, B_su), ad_config)
+        _, _, E_gs = optimize_gs_ad(
+            heisenberg_gate, (A_su.todense(), B_su.todense()), ad_config
+        )
         assert E_gs > -0.9, (
             f"E/site = {E_gs:.6f} is unphysically low — possible numerical failure"
         )
@@ -1018,9 +767,7 @@ class TestHeisenbergBenchmark:
             ctm=CTMConfig(chi=16, max_iter=60),
             unit_cell="2site",
         )
-        _, peps_su, _ = ipeps(heisenberg_gate, None, su_config)
-        A_su = peps_su.get_tensor((0, 0)).todense()
-        B_su = peps_su.get_tensor((1, 0)).todense()
+        _, (A_su, B_su), _ = ipeps(heisenberg_gate, None, su_config)
 
         ad_config = iPEPSConfig(
             max_bond_dim=2,
@@ -1029,25 +776,14 @@ class TestHeisenbergBenchmark:
             gs_learning_rate=5e-3,
             unit_cell="2site",
         )
-        _, _, E_gs = optimize_gs_ad(heisenberg_gate, (A_su, B_su), ad_config)
+        _, _, E_gs = optimize_gs_ad(
+            heisenberg_gate, (A_su.todense(), B_su.todense()), ad_config
+        )
         assert E_gs < -0.648, (
             f"AD D=2 chi=16 E/site={E_gs:.6f}, expected < -0.648 "
             "(literature D=2 ≈ -0.6548)"
         )
         assert E_gs > -0.80, f"AD D=2 E/site={E_gs:.6f}, unphysically low"
-
-    @pytest.mark.slow
-    def test_su_1site_d2_energy(self, heisenberg_gate):
-        """1-site SU at D=2 should give finite energy (paramagnetic)."""
-        config = iPEPSConfig(
-            max_bond_dim=2,
-            num_imaginary_steps=100,
-            dt=0.1,
-            ctm=CTMConfig(chi=16, max_iter=40),
-            unit_cell="1x1",
-        )
-        E, _, _ = ipeps(heisenberg_gate, None, config)
-        assert np.isfinite(float(E)), f"1-site SU gave non-finite energy {E}"
 
     @pytest.mark.slow
     def test_ad_d2_chi_scaling(self, heisenberg_gate):
@@ -1059,9 +795,7 @@ class TestHeisenbergBenchmark:
             ctm=CTMConfig(chi=8, max_iter=40),
             unit_cell="2site",
         )
-        _, peps_su, _ = ipeps(heisenberg_gate, None, su_config)
-        A_su = peps_su.get_tensor((0, 0)).todense()
-        B_su = peps_su.get_tensor((1, 0)).todense()
+        _, (A_su, B_su), _ = ipeps(heisenberg_gate, None, su_config)
 
         energies = []
         for chi in [8, 16]:
@@ -1072,7 +806,9 @@ class TestHeisenbergBenchmark:
                 gs_learning_rate=5e-3,
                 unit_cell="2site",
             )
-            _, _, E = optimize_gs_ad(heisenberg_gate, (A_su, B_su), ad_config)
+            _, _, E = optimize_gs_ad(
+                heisenberg_gate, (A_su.todense(), B_su.todense()), ad_config
+            )
             energies.append(float(E))
 
         assert energies[1] <= energies[0] + 0.01, (
@@ -1284,172 +1020,6 @@ class TestADSymmetric:
         # due to different CTM projector implementations)
         assert np.isfinite(E_sym)
         assert np.isfinite(E_dense)
-
-
-class TestTensorSimpleUpdate:
-    """Tests for the Tensor-protocol simple update (Phase 1)."""
-
-    @staticmethod
-    def _make_dense_ipeps(key, D=2, d=2):
-        """Create a DenseTensor iPEPS site tensor with trivial charges."""
-        from tenax.core.index import FlowDirection, TensorIndex
-        from tenax.core.symmetry import U1Symmetry
-        from tenax.core.tensor import DenseTensor
-
-        sym = U1Symmetry()
-        charges = np.zeros(D, dtype=np.int32)
-        phys_charges = np.zeros(d, dtype=np.int32)
-        data = jax.random.normal(key, (D, D, D, D, d))
-        data = data / (jnp.linalg.norm(data) + 1e-10)
-        indices = (
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
-        )
-        return DenseTensor(data, indices)
-
-    @staticmethod
-    def _make_symmetric_ipeps(key, D=2, d=2):
-        """Create a U(1) SymmetricTensor iPEPS site tensor."""
-        from tenax.core.index import FlowDirection, TensorIndex
-        from tenax.core.symmetry import U1Symmetry
-        from tenax.core.tensor import SymmetricTensor
-
-        sym = U1Symmetry()
-        charges = np.zeros(D, dtype=np.int32)
-        phys_charges = np.zeros(d, dtype=np.int32)
-        indices = (
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
-        )
-        return SymmetricTensor.random_normal(indices, key)
-
-    @staticmethod
-    def _heisenberg_gate():
-        d = 2
-        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
-        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
-        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
-        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
-        return H.reshape(d, d, d, d)
-
-    def test_horizontal_dense_tensor_runs(self):
-        """Horizontal simple update works with DenseTensor."""
-        from tenax.algorithms.ipeps_simple_update import (
-            _make_trotter_gate_tensor,
-            _simple_update_horizontal_tensor,
-        )
-
-        A = self._make_dense_ipeps(jax.random.PRNGKey(0))
-        gate = _make_trotter_gate_tensor(self._heisenberg_gate(), dt=0.01)
-        D = 2
-        lam_h = jnp.ones(D)
-        lam_v = jnp.ones(D)
-
-        A_new, lam_new = _simple_update_horizontal_tensor(A, gate, lam_h, lam_v, D)
-        assert A_new.labels() == ("u", "d", "l", "r", "phys")
-        assert np.isfinite(float(A_new.norm()))
-
-    def test_vertical_dense_tensor_runs(self):
-        """Vertical simple update works with DenseTensor."""
-        from tenax.algorithms.ipeps_simple_update import (
-            _make_trotter_gate_tensor,
-            _simple_update_vertical_tensor,
-        )
-
-        A = self._make_dense_ipeps(jax.random.PRNGKey(0))
-        gate = _make_trotter_gate_tensor(self._heisenberg_gate(), dt=0.01)
-        D = 2
-        lam_h = jnp.ones(D)
-        lam_v = jnp.ones(D)
-
-        A_new, lam_new = _simple_update_vertical_tensor(A, gate, lam_h, lam_v, D)
-        assert A_new.labels() == ("u", "d", "l", "r", "phys")
-        assert np.isfinite(float(A_new.norm()))
-
-    def test_symmetric_tensor_runs(self):
-        """Simple update works with SymmetricTensor."""
-        from tenax.algorithms.ipeps_simple_update import (
-            _make_trotter_gate_tensor,
-            _simple_update_horizontal_tensor,
-            _simple_update_vertical_tensor,
-        )
-        from tenax.core.tensor import SymmetricTensor
-
-        A = self._make_symmetric_ipeps(jax.random.PRNGKey(0))
-        gate = _make_trotter_gate_tensor(
-            self._heisenberg_gate(), dt=0.01, site_tensor=A
-        )
-        D = 2
-        lam_h = jnp.ones(D)
-        lam_v = jnp.ones(D)
-
-        A_h, lam_h_new = _simple_update_horizontal_tensor(A, gate, lam_h, lam_v, D)
-        assert isinstance(A_h, SymmetricTensor)
-        assert A_h.labels() == ("u", "d", "l", "r", "phys")
-
-        A_v, lam_v_new = _simple_update_vertical_tensor(A_h, gate, lam_h_new, lam_v, D)
-        assert isinstance(A_v, SymmetricTensor)
-        assert np.isfinite(float(A_v.norm()))
-
-    def test_dense_tensor_energy_finite(self):
-        """DenseTensor simple update gives a finite Heisenberg energy."""
-        gate = self._heisenberg_gate()
-        A_dt = self._make_dense_ipeps(jax.random.PRNGKey(42))
-        config = iPEPSConfig(
-            max_bond_dim=2,
-            num_imaginary_steps=20,
-            dt=0.05,
-            ctm=CTMConfig(chi=4, max_iter=10),
-        )
-        E_tensor, _, _ = ipeps(gate, A_dt, config)
-        assert np.isfinite(E_tensor)
-
-    def test_ipeps_dispatch_tensor(self):
-        """ipeps() correctly dispatches Tensor input to tensor path."""
-        from tenax.algorithms._ctm_tensor import CTMTensorEnv
-        from tenax.core.tensor import Tensor
-
-        gate = self._heisenberg_gate()
-        A = self._make_dense_ipeps(jax.random.PRNGKey(0))
-        config = iPEPSConfig(
-            max_bond_dim=2,
-            num_imaginary_steps=10,
-            dt=0.05,
-            ctm=CTMConfig(chi=4, max_iter=10),
-        )
-        energy, A_opt, env = ipeps(gate, A, config)
-        assert isinstance(A_opt, Tensor)
-        assert isinstance(env, CTMTensorEnv)
-        assert np.isfinite(energy)
-
-    def test_ipeps_symmetric_runs(self):
-        """ipeps() with SymmetricTensor runs end-to-end."""
-        from tenax.algorithms._ctm_tensor import CTMTensorEnv
-        from tenax.core.tensor import SymmetricTensor
-
-        gate = self._heisenberg_gate()
-        A = self._make_symmetric_ipeps(jax.random.PRNGKey(0))
-        config = iPEPSConfig(
-            max_bond_dim=2,
-            num_imaginary_steps=10,
-            dt=0.05,
-            ctm=CTMConfig(chi=4, max_iter=10),
-        )
-        energy, A_opt, env = ipeps(gate, A, config)
-        assert isinstance(A_opt, SymmetricTensor)
-        assert isinstance(env, CTMTensorEnv)
-        assert np.isfinite(energy)
-
-    # NOTE: 1-site iPEPS with non-trivial U(1) charges (e.g., spin-1/2
-    # Heisenberg with bond charges [-1,0,1]) requires a 2-site unit cell
-    # to represent Neel order.  The 1-site SU collapses because the SVD
-    # fused charge space is larger than the bond space.  See #204.
 
 
 class TestTensor2SiteSimpleUpdate:
