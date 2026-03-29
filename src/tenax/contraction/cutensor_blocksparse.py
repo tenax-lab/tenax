@@ -123,7 +123,14 @@ def contract_blocksparse(
         jnp.complex64: int(CudaDataType.CUDA_C_32F),
     }
     ct_dtype = dtype_map.get(tensor_a.dtype, int(CudaDataType.CUDA_R_64F))
-    element_size = 8 if tensor_a.dtype in (jnp.float64, jnp.complex128) else 4
+    # Element size in bytes for pointer arithmetic
+    _dtype_sizes = {
+        jnp.float32: 4,
+        jnp.float64: 8,
+        jnp.complex64: 8,
+        jnp.complex128: 16,
+    }
+    element_size = _dtype_sizes.get(tensor_a.dtype, np.dtype(tensor_a.dtype).itemsize)
 
     # Parse subscripts
     input_part, output_part = subscripts.split("->")
