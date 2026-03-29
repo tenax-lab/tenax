@@ -11,7 +11,7 @@ Remove the 1-site SU code path (physically limited, can't represent AFM Neel ord
 
 - **Unify:** Single Tensor-protocol path replaces both the dense JAX-array and Tensor-protocol 1-site paths. No more duplicate logic.
 - **Lambdas stay as plain JAX arrays.** `truncated_svd` returns singular values as a 1D array regardless of tensor type.
-- **`ipeps()` always does 2-site SU**, returns `(A, B)` tuple. `unit_cell` config field removed.
+- **`ipeps()` always does 2-site SU**, returns `(A, B)` tuple. `unit_cell` stays in config for `optimize_gs_ad` dispatch but `ipeps()` ignores it.
 - **Sublattice rotation** is a public utility, not wired into `ipeps()` automatically.
 
 ## Section 1: Removals
@@ -28,7 +28,7 @@ Remove the 1-site SU code path (physically limited, can't represent AFM Neel ord
 - `_ipeps_tensor()` (1-site Tensor-protocol path)
 
 **`ipeps_config.py`:**
-- `unit_cell` field and its validation
+- `unit_cell` stays (still used by `optimize_gs_ad` and multisite CTM)
 
 **`test_ipeps.py`:**
 - `TestSimpleUpdate1x1` class

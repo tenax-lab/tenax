@@ -740,11 +740,16 @@ class TestHeisenbergBenchmark:
 
     @pytest.mark.slow
     def test_su_d2_energy(self, heisenberg_gate):
-        """Simple update at D=2 should give E/site < -0.60."""
+        """Simple update at D=2 should give E/site < -0.60.
+
+        A moderate dt (0.3) is essential: small dt (e.g. 0.01) causes the
+        bond lambdas to converge to a product-like fixed point with too
+        little entanglement, giving E ~ -0.51 regardless of step count.
+        """
         config = iPEPSConfig(
             max_bond_dim=2,
-            num_imaginary_steps=500,
-            dt=0.01,
+            num_imaginary_steps=200,
+            dt=0.3,
             ctm=CTMConfig(chi=16, max_iter=60),
             unit_cell="2site",
         )

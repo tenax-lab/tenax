@@ -473,20 +473,15 @@ git commit -m "refactor: remove 1-site and dense 2-site SU code"
 
 ---
 
-### Task 3: Remove `unit_cell` from config and rewrite `ipeps()` entry point
+### Task 3: Rewrite `ipeps()` entry point (keep `unit_cell` for AD)
 
 **Files:**
-- Modify: `src/tenax/algorithms/ipeps_config.py:54-76`
 - Modify: `src/tenax/algorithms/ipeps.py`
 - Modify: `src/tenax/algorithms/ipeps_optimize.py`
 
-**Step 1: Remove `unit_cell` from `iPEPSConfig`**
+**Note:** `unit_cell` stays in `iPEPSConfig` — it is still used by `optimize_gs_ad` to dispatch between 1-site and 2-site AD optimization. `ipeps()` ignores it since SU is always 2-site.
 
-In `src/tenax/algorithms/ipeps_config.py`:
-- Delete the `unit_cell` field (line 60)
-- Delete the entire `__post_init__` method (lines 71-76)
-
-**Step 2: Rewrite `ipeps()` in `src/tenax/algorithms/ipeps.py`**
+**Step 1: Rewrite `ipeps()` in `src/tenax/algorithms/ipeps.py`**
 
 Replace the entire function body. The new `ipeps()`:
 
@@ -585,7 +580,7 @@ def ipeps(
     return float(energy), (A, B), (env_A, env_B)
 ```
 
-**Step 3: Add `_wrap_as_dense_tensor` helper** (if not already present in `ipeps.py`)
+**Step 2: Add `_wrap_as_dense_tensor` helper** (if not already present in `ipeps.py`)
 
 Check if this helper exists. If not, add it:
 
@@ -638,25 +633,25 @@ if config.su_init:
     B = B_su if isinstance(B_su, Tensor) else _wrap_as_dense_tensor(B_su)
 ```
 
-Also remove all `unit_cell` references from `ipeps_optimize.py`.
+Keep all `unit_cell` references in `ipeps_optimize.py` — AD still uses them.
 
-**Step 6: Update remaining test files**
+**Step 5: Update remaining test files**
 
 In `test_ipeps.py`:
-- `TestIPEPS2Site`: Remove all `unit_cell="2site"` from configs. Update assertions for new return type (tuple instead of TensorNetwork).
-- `TestIPEPSRun`: Update for new signature.
-- `TestHeisenbergBenchmark`: Remove `unit_cell` from configs. Update `test_ad_d2_energy` — it currently does `peps_su.get_tensor((0,0))`, change to unpack tuple.
-- `TestOptimizeGsAd2Site`: Remove `unit_cell` from configs.
+- `TestIPEPS2Site`: Keep `unit_cell="2site"` in configs (still valid, just ignored by SU). Update assertions for new return type (tuple instead of TensorNetwork).
+- `TestIPEPSRun`: Update for new signature — `ipeps()` now always returns `(A, B)` tuple.
+- `TestHeisenbergBenchmark`: Update `test_ad_d2_energy` — it currently does `peps_su.get_tensor((0,0))`, change to unpack tuple from `ipeps()`.
+- `TestOptimizeGsAd2Site`: Keep as-is (AD path unchanged).
 
-**Step 7: Run all core tests**
+**Step 6: Run all core tests**
 
 Run: `uv run pytest -m core tests/test_ipeps.py -v`
 Expected: PASS
 
-**Step 8: Commit**
+**Step 7: Commit**
 
 ```bash
-git add src/tenax/algorithms/ipeps_config.py src/tenax/algorithms/ipeps.py \
+git add src/tenax/algorithms/ipeps.py \
         src/tenax/algorithms/ipeps_optimize.py tests/test_ipeps.py
 git commit -m "refactor: unify ipeps() to always-2site Tensor-protocol path"
 ```
