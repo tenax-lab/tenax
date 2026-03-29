@@ -122,16 +122,8 @@ def optimize_gs_ad(
         D = config.max_bond_dim
 
         if config.su_init:
-            _, su_peps, _ = ipeps(gate, None, config)
-            A_init = su_peps.get_tensor((0, 0))
-            A_init = _maybe_relabel_su_tensor(A_init)
-            # Ensure Tensor protocol labels
-            if not isinstance(A_init, Tensor):
-                A_init = _wrap_as_dense_tensor(
-                    A_init.todense()
-                    if hasattr(A_init, "todense")
-                    else jnp.array(A_init)
-                )
+            _, (A_su, _B_su), _ = ipeps(gate, None, config)
+            A_init = A_su
         else:
             key = jax.random.PRNGKey(0)
             A_init = _wrap_as_dense_tensor(jax.random.normal(key, (D, D, D, D, d_phys)))
@@ -296,24 +288,9 @@ def _optimize_gs_ad_2site(
                 num_imaginary_steps=config.num_imaginary_steps,
                 dt=config.dt,
                 ctm=config.ctm,
-                unit_cell="2site",
             )
-            _, su_peps, _ = ipeps(gate, None, su_config)
-            A = su_peps.get_tensor((0, 0))
-            B = su_peps.get_tensor((1, 0))
-            if not isinstance(A, Tensor):
-                A = _wrap_as_dense_tensor(
-                    A.todense() if hasattr(A, "todense") else jnp.array(A)
-                )
-            else:
-                A = _maybe_relabel_su_tensor(A)
-            if not isinstance(B, Tensor):
-                B = _wrap_as_dense_tensor(
-                    B.todense() if hasattr(B, "todense") else jnp.array(B)
-                )
-            else:
-                B = _maybe_relabel_su_tensor(B)
-            AB_init = (A, B)
+            _, (A_su, B_su), _ = ipeps(gate, None, su_config)
+            AB_init = (A_su, B_su)
         else:
             key_A, key_B = jax.random.split(jax.random.PRNGKey(0))
             A = _wrap_as_dense_tensor(jax.random.normal(key_A, (D, D, D, D, d_phys)))

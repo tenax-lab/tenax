@@ -1,7 +1,7 @@
 """iPEPS simple update functions for imaginary time evolution.
 
-Contains dense-array, Tensor-protocol, and 2-site simple update routines
-extracted from the monolithic ``ipeps.py``.
+Contains 2-site Tensor-protocol simple update routines and the Trotter gate
+builder, extracted from the monolithic ``ipeps.py``.
 """
 
 from __future__ import annotations
@@ -17,279 +17,49 @@ from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
-
-def _simple_update_1x1(
-    A: jax.Array,
-    B: jax.Array,
-    lambdas: dict[str, jax.Array],
-    gate: jax.Array,
-    max_bond_dim: int,
-    *,
-    bond: str = "horizontal",
-) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Simple update step for a 1x1 unit cell PEPS.
-
-    Applies the gate on the bond between A and B (treating B = A by translational
-    invariance). Updates lambda matrices for environment approximation.
-
-    Args:
-        A:            Left/top site tensor of shape (D, D, D, D, d) or (D, D, d).
-                      Convention: A[u, d, l, r, s] for full 5-leg PEPS.
-        B:            Right/bottom site tensor (same as A for 1x1 unit cell).
-        lambdas:      Dict of lambda vectors for each bond direction.
-        gate:         2-site gate of shape (d, d, d, d).
-        max_bond_dim: Maximum D after truncation.
-        bond:         Which bond to update: ``"horizontal"`` (A.r ↔ B.l) or
-                      ``"vertical"`` (A.d ↔ B.u).
-
-    Returns:
-        (A_new, lambdas_new)
-    """
-    d = gate.shape[0]
-
-    if A.ndim == 3:
-        return _simple_update_3leg(A, B, lambdas, gate, max_bond_dim, d)
-
-    # --- Full 5-leg tensors: A[u, d, l, r, s] ---
-    D_u, D_d, D_l, D_r, phys = A.shape
-    lam_h = lambdas.get("horizontal", jnp.ones(D_r))
-    lam_v = lambdas.get("vertical", jnp.ones(D_d))
-
-    if bond == "horizontal":
-        return _simple_update_horizontal(A, lam_h, lam_v, gate, max_bond_dim, lambdas)
-    else:
-        return _simple_update_vertical(A, lam_h, lam_v, gate, max_bond_dim, lambdas)
-
-
-def _simple_update_3leg(
-    A: jax.Array,
-    B: jax.Array,
-    lambdas: dict[str, jax.Array],
-    gate: jax.Array,
-    max_bond_dim: int,
-    d: int,
-) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Simple update for the legacy 3-leg (D_l, D_r, d) tensor path."""
-    D_l, D_r, phys = A.shape
-    lam_r = lambdas.get(
-        "horizontal", lambdas.get("right", jnp.ones(min(D_r, max_bond_dim)))
-    )
-
-    A_abs = A * lam_r[None, : min(D_r, len(lam_r)), None]
-    theta = jnp.einsum("lrs,Lrs,sstT->lLtT", A_abs, A, gate.reshape(phys, phys, d, d))
-
-    theta_mat = theta.reshape(D_l * D_l, d * d)
-    U, s, Vh = jnp.linalg.svd(theta_mat, full_matrices=False)
-
-    n_keep = min(max_bond_dim, len(s))
-    U = U[:, :n_keep]
-    s_new = s[:n_keep]
-
-    s_norm = s_new / (jnp.max(s_new) + 1e-15)
-    lam_inv = 1.0 / (lam_r[: min(D_r, len(lam_r))] + 1e-15)
-
-    A_new_mat = U.reshape(D_l, D_l, n_keep)[:, 0, :]
-    A_new = (A_new_mat * lam_inv[None, : min(D_l, len(lam_inv))]).reshape(
-        D_l, n_keep, d
-    )
-
-    lambdas_new = dict(lambdas)
-    lambdas_new["horizontal"] = s_norm
-    lambdas_new.pop("right", None)
-    return A_new, lambdas_new
-
-
-def _simple_update_bond(
-    A: jax.Array,
-    lam_h: jax.Array,
-    lam_v: jax.Array,
-    gate: jax.Array,
-    max_bond_dim: int,
-    lambdas: dict[str, jax.Array],
-    axis: str,
-) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Simple update on a single bond, parameterized by axis.
-
-    A[u, d, l, r, s]:
-      axis="horizontal": shared bond = r (horizontal lambda)
-      axis="vertical":   shared bond = d (vertical lambda)
-
-    Args:
-        A:             iPEPS site tensor, shape (D_u, D_d, D_l, D_r, d).
-        lam_h:         Horizontal bond lambdas.
-        lam_v:         Vertical bond lambdas.
-        gate:          Trotter gate, shape (d, d, d, d).
-        max_bond_dim:  Maximum bond dimension after SVD.
-        lambdas:       Current lambdas dict.
-        axis:          "horizontal" or "vertical".
-
-    Returns:
-        (A_new, lambdas_new).
-    """
-    D_u, D_d, D_l, D_r, d = A.shape
-    eps = EPS
-
-    if axis == "horizontal":
-        # Absorb outer lambdas onto A (all except shared bond r)
-        A_abs = A * lam_v[:D_u, None, None, None, None]
-        A_abs = A_abs * lam_v[None, :D_d, None, None, None]
-        A_abs = A_abs * lam_h[None, None, :D_l, None, None]
-        # Absorb shared-bond lambda onto A.r
-        A_abs = A_abs * lam_h[None, None, None, :D_r, None]
-
-        # B = A, absorb outer lambdas (all except B.l = shared)
-        B_abs = A * lam_v[:D_u, None, None, None, None]
-        B_abs = B_abs * lam_v[None, :D_d, None, None, None]
-        B_abs = B_abs * lam_h[None, None, None, :D_r, None]
-
-        # Contract A_abs.r with B_abs.l → theta
-        theta = jnp.einsum("udlrs,UDrRt->udlUDRst", A_abs, B_abs)
-        theta = jnp.einsum("udlUDRst,stST->udlUDRST", theta, gate)
-
-        left_size = D_u * D_d * D_l * d
-        right_size = D_u * D_d * D_r * d
-        left_shape = (D_u, D_d, D_l, d)
-        # new bond goes into r slot: transpose to (D_u, D_d, D_l, keep, d)
-        left_perm = (0, 1, 2, 4, 3)
-
-        # Outer lambda removal: u←lam_v, d←lam_v, l←lam_h
-        outer_inv_slices = [
-            (1.0 / (lam_v + eps), 0, D_u),  # axis 0
-            (1.0 / (lam_v + eps), 1, D_d),  # axis 1
-            (1.0 / (lam_h + eps), 2, D_l),  # axis 2
-        ]
-    else:  # vertical
-        # Absorb outer lambdas onto A (all except shared bond d)
-        A_abs = A * lam_v[:D_u, None, None, None, None]
-        A_abs = A_abs * lam_h[None, None, :D_l, None, None]
-        A_abs = A_abs * lam_h[None, None, None, :D_r, None]
-        # Absorb shared-bond lambda onto A.d
-        A_abs = A_abs * lam_v[None, :D_d, None, None, None]
-
-        # B = A, absorb outer lambdas (all except B.u = shared)
-        B_abs = A * lam_v[None, :D_d, None, None, None]
-        B_abs = B_abs * lam_h[None, None, :D_l, None, None]
-        B_abs = B_abs * lam_h[None, None, None, :D_r, None]
-
-        # Contract A_abs.d with B_abs.u → theta
-        theta = jnp.einsum("udlrs,dDLRt->ulrDLRst", A_abs, B_abs)
-        theta = jnp.einsum("ulrDLRst,stST->ulrDLRST", theta, gate)
-
-        left_size = D_u * D_l * D_r * d
-        right_size = D_d * D_l * D_r * d
-        left_shape = (D_u, D_l, D_r, d)
-        # new bond goes into d slot: transpose to (D_u, keep, D_l, D_r, d)
-        left_perm = (0, 4, 1, 2, 3)
-
-        # Outer lambda removal: u←lam_v, l←lam_h, r←lam_h
-        outer_inv_slices = [
-            (1.0 / (lam_v + eps), 0, D_u),  # axis 0
-            (1.0 / (lam_h + eps), 2, D_l),  # axis 2
-            (1.0 / (lam_h + eps), 3, D_r),  # axis 3 (after transpose)
-        ]
-
-    # SVD split
-    mat = theta.transpose(0, 1, 2, 6, 3, 4, 5, 7).reshape(left_size, right_size)
-    U_mat, sigma, Vh_mat = jnp.linalg.svd(mat, full_matrices=False)
-    keep = min(max_bond_dim, len(sigma))
-    U_mat = U_mat[:, :keep]
-    sigma = sigma[:keep]
-
-    # New lambda (normalized)
-    lam_new = sigma / (jnp.max(sigma) + eps)
-
-    # Reconstruct A_new from U_mat
-    sqrt_sig = jnp.sqrt(sigma + eps)
-    A_left = (U_mat * sqrt_sig[None, :]).reshape(*left_shape, keep)
-    A_new = A_left.transpose(left_perm)
-
-    # Remove outer lambdas
-    for inv_lam, ax, dim in outer_inv_slices:
-        shape = [1] * 5
-        shape[ax] = dim
-        A_new = A_new * inv_lam[:dim].reshape(shape)
-
-    A_new = A_new / (jnp.linalg.norm(A_new) + eps)
-
-    lambdas_new = dict(lambdas)
-    lambdas_new[axis] = lam_new
-    return A_new, lambdas_new
-
-
-def _simple_update_horizontal(
-    A: jax.Array,
-    lam_h: jax.Array,
-    lam_v: jax.Array,
-    gate: jax.Array,
-    max_bond_dim: int,
-    lambdas: dict[str, jax.Array],
-) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Simple update on the horizontal bond (A.r ↔ B.l, B=A by periodicity)."""
-    return _simple_update_bond(
-        A, lam_h, lam_v, gate, max_bond_dim, lambdas, "horizontal"
-    )
-
-
-def _simple_update_vertical(
-    A: jax.Array,
-    lam_h: jax.Array,
-    lam_v: jax.Array,
-    gate: jax.Array,
-    max_bond_dim: int,
-    lambdas: dict[str, jax.Array],
-) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Simple update on the vertical bond (A.d ↔ B.u, B=A by periodicity)."""
-    return _simple_update_bond(A, lam_h, lam_v, gate, max_bond_dim, lambdas, "vertical")
-
-
 # ------------------------------------------------------------------ #
-# Tensor-protocol simple update (polymorphic DenseTensor/SymmetricTensor) #
+# 2-site Tensor-protocol simple update                                #
 # ------------------------------------------------------------------ #
 
 
-def _absorb_lambdas_tensor(A: Tensor, lam_h: jax.Array, lam_v: jax.Array) -> Tensor:
-    """Absorb lambda vectors into all virtual legs of a 5-leg site tensor.
-
-    Args:
-        A:     Site tensor with labels (u, d, l, r, phys).
-        lam_h: Horizontal bond lambda vector.
-        lam_v: Vertical bond lambda vector.
-
-    Returns:
-        Tensor with lambdas absorbed on u(lam_v), d(lam_v), l(lam_h), r(lam_h).
-    """
-    result = scale_bond_axis(A, "u", lam_v)
-    result = scale_bond_axis(result, "d", lam_v)
-    result = scale_bond_axis(result, "l", lam_h)
-    result = scale_bond_axis(result, "r", lam_h)
-    return result
-
-
-def _simple_update_horizontal_tensor(
+def _simple_update_2site_horizontal_tensor(
     A: Tensor,
+    B: Tensor,
     gate: Tensor,
     lam_h: jax.Array,
     lam_v: jax.Array,
     max_D: int,
-) -> tuple[Tensor, jax.Array]:
-    """Simple update on the horizontal bond using label-based contraction.
+) -> tuple[Tensor, Tensor, jax.Array]:
+    """2-site simple update on the horizontal bond (A.r <-> B.l).
 
     Works polymorphically with DenseTensor and SymmetricTensor.
 
     Args:
-        A:     iPEPS site tensor with labels (u, d, l, r, phys).
+        A:     Left site tensor with labels (u, d, l, r, phys).
+        B:     Right site tensor with labels (u, d, l, r, phys).
         gate:  Trotter gate with labels (si, sj, si_out, sj_out).
         lam_h: Horizontal bond lambda vector.
         lam_v: Vertical bond lambda vector.
         max_D: Maximum bond dimension after SVD.
 
     Returns:
-        (A_new, lam_h_new) where A_new has labels (u, d, l, r, phys).
+        (A_new, B_new, lam_h_new).
     """
-    A_abs = _absorb_lambdas_tensor(A, lam_h, lam_v)
+    # 1. Absorb outer lambdas onto A: u<-lam_v, d<-lam_v, l<-lam_h
+    #    + shared lambda on A.r<-lam_h
+    A_abs = scale_bond_axis(A, "u", lam_v)
+    A_abs = scale_bond_axis(A_abs, "d", lam_v)
+    A_abs = scale_bond_axis(A_abs, "l", lam_h)
+    A_abs = scale_bond_axis(A_abs, "r", lam_h)
 
+    # 2. Absorb outer lambdas onto B: u<-lam_v, d<-lam_v, r<-lam_h (NOT l)
+    B_abs = scale_bond_axis(B, "u", lam_v)
+    B_abs = scale_bond_axis(B_abs, "d", lam_v)
+    B_abs = scale_bond_axis(B_abs, "r", lam_h)
+
+    # 3. Contract A.r with B.l
     A_left = A_abs.relabel("r", "shared")
-    B_right = A_abs.relabels(
+    B_right = B_abs.relabels(
         {
             "u": "u_B",
             "d": "d_B",
@@ -298,67 +68,100 @@ def _simple_update_horizontal_tensor(
             "phys": "phys_B",
         }
     )
-
     theta = contract(A_left, B_right)
 
+    # 4. Apply gate
     theta = theta.relabel("phys", "si")
     theta = theta.relabel("phys_B", "sj")
     theta = contract(theta, gate)
 
+    # 5. Truncated SVD
     U, sigma, Vh, s_full = truncated_svd(
         theta,
         left_labels=["u", "d", "l", "si_out"],
         right_labels=["u_B", "d_B", "r_B", "sj_out"],
-        new_bond_label="r_new",
+        new_bond_label="bond_new",
         max_singular_values=max_D,
     )
 
+    # 6. New lambda (normalized)
     lam_h_new = sigma / (jnp.max(sigma) + EPS)
-
-    U_reordered = U.transpose((0, 1, 2, 4, 3))
-    U_final = U_reordered.relabels({"r_new": "r", "si_out": "phys"})
-
     sqrt_sig = jnp.sqrt(sigma + EPS)
-    U_final = scale_bond_axis(U_final, "r", sqrt_sig)
 
+    # 7. Reconstruct A_new from U: labels are (u, d, l, si_out, bond_new)
+    #    Transpose so bond_new is in the r position: (u, d, l, bond_new, si_out)
+    A_new = U.transpose((0, 1, 2, 4, 3))
+    A_new = A_new.relabels({"bond_new": "r", "si_out": "phys"})
+    A_new = scale_bond_axis(A_new, "r", sqrt_sig)
+
+    # 8. Reconstruct B_new from Vh: labels are (bond_new, u_B, d_B, r_B, sj_out)
+    #    Transpose so bond_new is in the l position: (u_B, d_B, bond_new, r_B, sj_out)
+    B_new = Vh.transpose((1, 2, 0, 3, 4))
+    B_new = B_new.relabels(
+        {"bond_new": "l", "u_B": "u", "d_B": "d", "r_B": "r", "sj_out": "phys"}
+    )
+    B_new = scale_bond_axis(B_new, "l", sqrt_sig)
+
+    # 9. Remove outer lambdas
     inv_lam_v = 1.0 / (lam_v + EPS)
     inv_lam_h = 1.0 / (lam_h + EPS)
-    U_final = scale_bond_axis(U_final, "u", inv_lam_v)
-    U_final = scale_bond_axis(U_final, "d", inv_lam_v)
-    U_final = scale_bond_axis(U_final, "l", inv_lam_h)
+    A_new = scale_bond_axis(A_new, "u", inv_lam_v)
+    A_new = scale_bond_axis(A_new, "d", inv_lam_v)
+    A_new = scale_bond_axis(A_new, "l", inv_lam_h)
 
-    norm_val = float(U_final.norm())
-    if norm_val > EPS:
-        U_final = U_final * (1.0 / norm_val)
+    B_new = scale_bond_axis(B_new, "u", inv_lam_v)
+    B_new = scale_bond_axis(B_new, "d", inv_lam_v)
+    B_new = scale_bond_axis(B_new, "r", inv_lam_h)
 
-    return U_final, lam_h_new
+    # 10. Normalize each tensor
+    norm_A = float(A_new.norm())
+    if norm_A > EPS:
+        A_new = A_new * (1.0 / norm_A)
+    norm_B = float(B_new.norm())
+    if norm_B > EPS:
+        B_new = B_new * (1.0 / norm_B)
+
+    return A_new, B_new, lam_h_new
 
 
-def _simple_update_vertical_tensor(
+def _simple_update_2site_vertical_tensor(
     A: Tensor,
+    B: Tensor,
     gate: Tensor,
     lam_h: jax.Array,
     lam_v: jax.Array,
     max_D: int,
-) -> tuple[Tensor, jax.Array]:
-    """Simple update on the vertical bond using label-based contraction.
+) -> tuple[Tensor, Tensor, jax.Array]:
+    """2-site simple update on the vertical bond (A.d <-> B.u).
 
     Works polymorphically with DenseTensor and SymmetricTensor.
 
     Args:
-        A:     iPEPS site tensor with labels (u, d, l, r, phys).
+        A:     Top site tensor with labels (u, d, l, r, phys).
+        B:     Bottom site tensor with labels (u, d, l, r, phys).
         gate:  Trotter gate with labels (si, sj, si_out, sj_out).
         lam_h: Horizontal bond lambda vector.
         lam_v: Vertical bond lambda vector.
         max_D: Maximum bond dimension after SVD.
 
     Returns:
-        (A_new, lam_v_new) where A_new has labels (u, d, l, r, phys).
+        (A_new, B_new, lam_v_new).
     """
-    A_abs = _absorb_lambdas_tensor(A, lam_h, lam_v)
+    # 1. Absorb outer lambdas onto A: u<-lam_v, l<-lam_h, r<-lam_h
+    #    + shared lambda on A.d<-lam_v
+    A_abs = scale_bond_axis(A, "u", lam_v)
+    A_abs = scale_bond_axis(A_abs, "d", lam_v)
+    A_abs = scale_bond_axis(A_abs, "l", lam_h)
+    A_abs = scale_bond_axis(A_abs, "r", lam_h)
 
+    # 2. Absorb outer lambdas onto B: d<-lam_v, l<-lam_h, r<-lam_h (NOT u)
+    B_abs = scale_bond_axis(B, "d", lam_v)
+    B_abs = scale_bond_axis(B_abs, "l", lam_h)
+    B_abs = scale_bond_axis(B_abs, "r", lam_h)
+
+    # 3. Contract A.d with B.u
     A_top = A_abs.relabel("d", "shared")
-    B_bottom = A_abs.relabels(
+    B_bottom = B_abs.relabels(
         {
             "u": "shared",
             "d": "d_B",
@@ -367,40 +170,60 @@ def _simple_update_vertical_tensor(
             "phys": "phys_B",
         }
     )
-
     theta = contract(A_top, B_bottom)
 
+    # 4. Apply gate
     theta = theta.relabel("phys", "si")
     theta = theta.relabel("phys_B", "sj")
     theta = contract(theta, gate)
 
+    # 5. Truncated SVD
     U, sigma, Vh, s_full = truncated_svd(
         theta,
         left_labels=["u", "l", "r", "si_out"],
         right_labels=["d_B", "l_B", "r_B", "sj_out"],
-        new_bond_label="d_new",
+        new_bond_label="bond_new",
         max_singular_values=max_D,
     )
 
+    # 6. New lambda (normalized)
     lam_v_new = sigma / (jnp.max(sigma) + EPS)
-
-    U_reordered = U.transpose((0, 4, 1, 2, 3))
-    U_final = U_reordered.relabels({"d_new": "d", "si_out": "phys"})
-
     sqrt_sig = jnp.sqrt(sigma + EPS)
-    U_final = scale_bond_axis(U_final, "d", sqrt_sig)
 
+    # 7. Reconstruct A_new from U: labels are (u, l, r, si_out, bond_new)
+    #    Transpose so bond_new is in the d position: (u, bond_new, l, r, si_out)
+    A_new = U.transpose((0, 4, 1, 2, 3))
+    A_new = A_new.relabels({"bond_new": "d", "si_out": "phys"})
+    A_new = scale_bond_axis(A_new, "d", sqrt_sig)
+
+    # 8. Reconstruct B_new from Vh: labels are (bond_new, d_B, l_B, r_B, sj_out)
+    #    Transpose so bond_new is in the u position: (bond_new, d_B, l_B, r_B, sj_out)
+    #    Already in the right order for (u, d, l, r, phys)
+    B_new = Vh.relabels(
+        {"bond_new": "u", "d_B": "d", "l_B": "l", "r_B": "r", "sj_out": "phys"}
+    )
+    B_new = scale_bond_axis(B_new, "u", sqrt_sig)
+
+    # 9. Remove outer lambdas
     inv_lam_v = 1.0 / (lam_v + EPS)
     inv_lam_h = 1.0 / (lam_h + EPS)
-    U_final = scale_bond_axis(U_final, "u", inv_lam_v)
-    U_final = scale_bond_axis(U_final, "l", inv_lam_h)
-    U_final = scale_bond_axis(U_final, "r", inv_lam_h)
+    A_new = scale_bond_axis(A_new, "u", inv_lam_v)
+    A_new = scale_bond_axis(A_new, "l", inv_lam_h)
+    A_new = scale_bond_axis(A_new, "r", inv_lam_h)
 
-    norm_val = float(U_final.norm())
-    if norm_val > EPS:
-        U_final = U_final * (1.0 / norm_val)
+    B_new = scale_bond_axis(B_new, "d", inv_lam_v)
+    B_new = scale_bond_axis(B_new, "l", inv_lam_h)
+    B_new = scale_bond_axis(B_new, "r", inv_lam_h)
 
-    return U_final, lam_v_new
+    # 10. Normalize each tensor
+    norm_A = float(A_new.norm())
+    if norm_A > EPS:
+        A_new = A_new * (1.0 / norm_A)
+    norm_B = float(B_new.norm())
+    if norm_B > EPS:
+        B_new = B_new * (1.0 / norm_B)
+
+    return A_new, B_new, lam_v_new
 
 
 def _make_trotter_gate_tensor(
@@ -456,280 +279,3 @@ def _make_trotter_gate_tensor(
         return SymmetricTensor.from_dense(gate_4leg, indices)
 
     return DenseTensor(gate_4leg, indices)
-
-
-def _simple_update_2site_bond(
-    A: jax.Array,
-    B: jax.Array,
-    lam_h: jax.Array,
-    lam_v: jax.Array,
-    gate: jax.Array,
-    max_bond_dim: int,
-    lambdas: dict[str, jax.Array],
-    axis: str,
-) -> tuple[jax.Array, jax.Array, dict[str, jax.Array]]:
-    """Simple update on a single bond for a 2-site unit cell.
-
-    Args:
-        A, B:          iPEPS site tensors, shape (D_u, D_d, D_l, D_r, d).
-        lam_h, lam_v:  Bond lambdas.
-        gate:          Trotter gate.
-        max_bond_dim:  Maximum bond dimension.
-        lambdas:       Current lambdas dict.
-        axis:          "horizontal" or "vertical".
-
-    Returns:
-        (A_new, B_new, lambdas_new).
-    """
-    D_u, D_d, D_l, D_r, d = A.shape
-    B_u, B_d, B_l, B_r, _ = B.shape
-    eps = EPS
-
-    if axis == "horizontal":
-        # A: outer = u(v), d(v), l(h); shared = r(h)
-        A_abs = A * lam_v[:D_u, None, None, None, None]
-        A_abs = A_abs * lam_v[None, :D_d, None, None, None]
-        A_abs = A_abs * lam_h[None, None, :D_l, None, None]
-        A_abs = A_abs * lam_h[None, None, None, :D_r, None]
-
-        # B: outer = u(v), d(v), r(h); shared = l (from contraction)
-        B_abs = B * lam_v[:B_u, None, None, None, None]
-        B_abs = B_abs * lam_v[None, :B_d, None, None, None]
-        B_abs = B_abs * lam_h[None, None, None, :B_r, None]
-
-        theta = jnp.einsum("udlrs,UDrRt->udlUDRst", A_abs, B_abs)
-        theta = jnp.einsum("udlUDRst,stST->udlUDRST", theta, gate)
-
-        left_size = D_u * D_d * D_l * d
-        right_size = B_u * B_d * B_r * d
-        a_left_shape = (D_u, D_d, D_l, d)
-        b_right_shape = (B_u, B_d, B_r, d)
-        a_perm = (0, 1, 2, 4, 3)  # new bond → r slot
-        b_perm = (1, 2, 0, 3, 4)  # new bond → l slot
-        a_outer_inv = [
-            (1.0 / (lam_v + eps), 0, D_u),
-            (1.0 / (lam_v + eps), 1, D_d),
-            (1.0 / (lam_h + eps), 2, D_l),
-        ]
-        b_outer_inv = [
-            (1.0 / (lam_v + eps), 0, B_u),
-            (1.0 / (lam_v + eps), 1, B_d),
-            (1.0 / (lam_h + eps), 3, B_r),
-        ]
-    else:  # vertical
-        # A: outer = u(v), l(h), r(h); shared = d(v)
-        A_abs = A * lam_v[:D_u, None, None, None, None]
-        A_abs = A_abs * lam_h[None, None, :D_l, None, None]
-        A_abs = A_abs * lam_h[None, None, None, :D_r, None]
-        A_abs = A_abs * lam_v[None, :D_d, None, None, None]
-
-        # B: outer = d(v), l(h), r(h); shared = u (from contraction)
-        B_abs = B * lam_v[None, :B_d, None, None, None]
-        B_abs = B_abs * lam_h[None, None, :B_l, None, None]
-        B_abs = B_abs * lam_h[None, None, None, :B_r, None]
-
-        theta = jnp.einsum("udlrs,dDLRt->ulrDLRst", A_abs, B_abs)
-        theta = jnp.einsum("ulrDLRst,stST->ulrDLRST", theta, gate)
-
-        left_size = D_u * D_l * D_r * d
-        right_size = B_d * B_l * B_r * d
-        a_left_shape = (D_u, D_l, D_r, d)
-        b_right_shape = (B_d, B_l, B_r, d)
-        a_perm = (0, 4, 1, 2, 3)  # new bond → d slot
-        b_perm = (0, 1, 2, 3, 4)  # new bond → u slot
-        a_outer_inv = [
-            (1.0 / (lam_v + eps), 0, D_u),
-            (1.0 / (lam_h + eps), 2, D_l),
-            (1.0 / (lam_h + eps), 3, D_r),
-        ]
-        b_outer_inv = [
-            (1.0 / (lam_v + eps), 1, B_d),
-            (1.0 / (lam_h + eps), 2, B_l),
-            (1.0 / (lam_h + eps), 3, B_r),
-        ]
-
-    # SVD
-    mat = theta.transpose(0, 1, 2, 6, 3, 4, 5, 7).reshape(left_size, right_size)
-    U_mat, sigma, Vh_mat = jnp.linalg.svd(mat, full_matrices=False)
-    keep = min(max_bond_dim, len(sigma))
-    U_mat = U_mat[:, :keep]
-    sigma = sigma[:keep]
-    Vh_mat = Vh_mat[:keep, :]
-
-    lam_new = sigma / (jnp.max(sigma) + eps)
-    sqrt_sig = jnp.sqrt(sigma + eps)
-
-    # Reconstruct A_new
-    A_left = (U_mat * sqrt_sig[None, :]).reshape(*a_left_shape, keep)
-    A_new = A_left.transpose(a_perm)
-
-    # Reconstruct B_new
-    B_right = (sqrt_sig[:, None] * Vh_mat).reshape(keep, *b_right_shape)
-    B_new = B_right.transpose(b_perm)
-
-    # Remove outer lambdas
-    for inv_lam, ax, dim in a_outer_inv:
-        shape = [1] * 5
-        shape[ax] = dim
-        A_new = A_new * inv_lam[:dim].reshape(shape)
-    A_new = A_new / (jnp.linalg.norm(A_new) + eps)
-
-    for inv_lam, ax, dim in b_outer_inv:
-        shape = [1] * 5
-        shape[ax] = dim
-        B_new = B_new * inv_lam[:dim].reshape(shape)
-    B_new = B_new / (jnp.linalg.norm(B_new) + eps)
-
-    lambdas_new = dict(lambdas)
-    lambdas_new[axis] = lam_new
-    return A_new, B_new, lambdas_new
-
-
-def _simple_update_2site_horizontal(
-    A: jax.Array,
-    B: jax.Array,
-    lam_h: jax.Array,
-    lam_v: jax.Array,
-    gate: jax.Array,
-    max_bond_dim: int,
-    lambdas: dict[str, jax.Array],
-) -> tuple[jax.Array, jax.Array, dict[str, jax.Array]]:
-    """Simple update on the horizontal bond A.r ↔ B.l for a 2-site unit cell.
-
-    Returns (A_new, B_new, lambdas_new).
-    """
-    D_u, D_d, D_l, D_r, d = A.shape
-    eps = 1e-15
-
-    # 1. Absorb outer lambdas onto A: u←lam_v, d←lam_v, l←lam_h
-    A_abs = A * lam_v[:D_u, None, None, None, None]
-    A_abs = A_abs * lam_v[None, :D_d, None, None, None]
-    A_abs = A_abs * lam_h[None, None, :D_l, None, None]
-    # 2. Absorb shared-bond lambda onto A.r
-    A_abs = A_abs * lam_h[None, None, None, :D_r, None]
-
-    # 3. Absorb outer lambdas onto B: u←lam_v, d←lam_v, r←lam_h
-    B_u, B_d, B_l, B_r, _ = B.shape
-    B_abs = B * lam_v[:B_u, None, None, None, None]
-    B_abs = B_abs * lam_v[None, :B_d, None, None, None]
-    B_abs = B_abs * lam_h[None, None, None, :B_r, None]
-
-    # 4. Contract A_abs.r with B_abs.l
-    theta = jnp.einsum("udlrs,UDrRt->udlUDRst", A_abs, B_abs)
-
-    # 5. Apply gate
-    theta = jnp.einsum("udlUDRst,stST->udlUDRST", theta, gate)
-
-    # 6. SVD: group (u,d,l,S) vs (U,D,R,T)
-    left_size = D_u * D_d * D_l * d
-    right_size = B_u * B_d * B_r * d
-    mat = theta.transpose(0, 1, 2, 6, 3, 4, 5, 7).reshape(left_size, right_size)
-
-    U_mat, sigma, Vh_mat = jnp.linalg.svd(mat, full_matrices=False)
-    keep = min(max_bond_dim, len(sigma))
-    U_mat = U_mat[:, :keep]
-    sigma = sigma[:keep]
-    Vh_mat = Vh_mat[:keep, :]
-
-    # 7. New lambda
-    lam_new = sigma / (jnp.max(sigma) + eps)
-
-    # 8. Reconstruct A_new and B_new with sqrt(sigma) absorbed
-    sqrt_sig = jnp.sqrt(sigma + eps)
-    A_left = (U_mat * sqrt_sig[None, :]).reshape(D_u, D_d, D_l, d, keep)
-    A_new = A_left.transpose(0, 1, 2, 4, 3)  # (D_u, D_d, D_l, keep, d)
-
-    B_right = (sqrt_sig[:, None] * Vh_mat).reshape(keep, B_u, B_d, B_r, d)
-    B_new = B_right.transpose(1, 2, 0, 3, 4)  # (B_u, B_d, keep, B_r, d)
-
-    # 9. Remove outer lambdas
-    lam_v_inv = 1.0 / (lam_v + eps)
-    lam_h_inv = 1.0 / (lam_h + eps)
-    A_new = A_new * lam_v_inv[:D_u, None, None, None, None]
-    A_new = A_new * lam_v_inv[None, :D_d, None, None, None]
-    A_new = A_new * lam_h_inv[None, None, :D_l, None, None]
-    A_new = A_new / (jnp.linalg.norm(A_new) + eps)
-
-    B_new = B_new * lam_v_inv[:B_u, None, None, None, None]
-    B_new = B_new * lam_v_inv[None, :B_d, None, None, None]
-    B_new = B_new * lam_h_inv[None, None, None, :B_r, None]
-    B_new = B_new / (jnp.linalg.norm(B_new) + eps)
-
-    lambdas_new = dict(lambdas)
-    lambdas_new["horizontal"] = lam_new
-    return A_new, B_new, lambdas_new
-
-
-def _simple_update_2site_vertical(
-    A: jax.Array,
-    B: jax.Array,
-    lam_h: jax.Array,
-    lam_v: jax.Array,
-    gate: jax.Array,
-    max_bond_dim: int,
-    lambdas: dict[str, jax.Array],
-) -> tuple[jax.Array, jax.Array, dict[str, jax.Array]]:
-    """Simple update on the vertical bond A.d ↔ B.u for a 2-site unit cell.
-
-    Returns (A_new, B_new, lambdas_new).
-    """
-    D_u, D_d, D_l, D_r, d = A.shape
-    eps = 1e-15
-
-    # 1. Absorb outer lambdas onto A: u←lam_v, l←lam_h, r←lam_h
-    A_abs = A * lam_v[:D_u, None, None, None, None]
-    A_abs = A_abs * lam_h[None, None, :D_l, None, None]
-    A_abs = A_abs * lam_h[None, None, None, :D_r, None]
-    # 2. Absorb shared-bond lambda onto A.d
-    A_abs = A_abs * lam_v[None, :D_d, None, None, None]
-
-    # 3. Absorb outer lambdas onto B: d←lam_v, l←lam_h, r←lam_h
-    B_u, B_d, B_l, B_r, _ = B.shape
-    B_abs = B * lam_v[None, :B_d, None, None, None]
-    B_abs = B_abs * lam_h[None, None, :B_l, None, None]
-    B_abs = B_abs * lam_h[None, None, None, :B_r, None]
-
-    # 4. Contract A_abs.d with B_abs.u
-    theta = jnp.einsum("udlrs,dDLRt->ulrDLRst", A_abs, B_abs)
-
-    # 5. Apply gate
-    theta = jnp.einsum("ulrDLRst,stST->ulrDLRST", theta, gate)
-
-    # 6. SVD: group (u,l,r,S) vs (D,L,R,T)
-    left_size = D_u * D_l * D_r * d
-    right_size = B_d * B_l * B_r * d
-    mat = theta.transpose(0, 1, 2, 6, 3, 4, 5, 7).reshape(left_size, right_size)
-
-    U_mat, sigma, Vh_mat = jnp.linalg.svd(mat, full_matrices=False)
-    keep = min(max_bond_dim, len(sigma))
-    U_mat = U_mat[:, :keep]
-    sigma = sigma[:keep]
-    Vh_mat = Vh_mat[:keep, :]
-
-    # 7. New lambda
-    lam_new = sigma / (jnp.max(sigma) + eps)
-
-    # 8. Reconstruct A_new and B_new
-    sqrt_sig = jnp.sqrt(sigma + eps)
-    A_left = (U_mat * sqrt_sig[None, :]).reshape(D_u, D_l, D_r, d, keep)
-    A_new = A_left.transpose(0, 4, 1, 2, 3)  # (D_u, keep, D_l, D_r, d)
-
-    B_right = (sqrt_sig[:, None] * Vh_mat).reshape(keep, B_d, B_l, B_r, d)
-    B_new = B_right.transpose(0, 1, 2, 3, 4)  # (keep, B_d, B_l, B_r, d)
-
-    # 9. Remove outer lambdas
-    lam_v_inv = 1.0 / (lam_v + eps)
-    lam_h_inv = 1.0 / (lam_h + eps)
-    A_new = A_new * lam_v_inv[:D_u, None, None, None, None]
-    A_new = A_new * lam_h_inv[None, None, :D_l, None, None]
-    A_new = A_new * lam_h_inv[None, None, None, :D_r, None]
-    A_new = A_new / (jnp.linalg.norm(A_new) + eps)
-
-    B_new = B_new * lam_v_inv[None, :B_d, None, None, None]
-    B_new = B_new * lam_h_inv[None, None, :B_l, None, None]
-    B_new = B_new * lam_h_inv[None, None, None, :B_r, None]
-    B_new = B_new / (jnp.linalg.norm(B_new) + eps)
-
-    lambdas_new = dict(lambdas)
-    lambdas_new["vertical"] = lam_new
-    return A_new, B_new, lambdas_new
