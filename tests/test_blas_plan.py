@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from tenax.contraction import CYTHON_BLAS_AVAILABLE
 from tenax.contraction._blas_plan import (
     BlasExecPlan,
     GemmStep,
@@ -373,4 +374,76 @@ class TestPrepareKernelData:
         if plan.output_perm:
             result = np.transpose(result, plan.output_perm)
 
+        np.testing.assert_allclose(result, expected, rtol=1e-10)
+
+
+@pytest.mark.skipif(not CYTHON_BLAS_AVAILABLE, reason="Cython not compiled")
+class TestCythonKernelV2:
+    """Tests for execute_blas_kernel_v2 -- raw BLAS calls via cython_blas."""
+
+    def test_kernel_matches_numpy(self):
+        """1-site matvec via v2 kernel matches np.einsum."""
+        from tenax.contraction._cython_blas import execute_blas_kernel_v2
+
+        rng = np.random.default_rng(42)
+        subs = "abc,apd,bpxe,def->cxf"
+        shapes = [(2, 3, 4), (2, 5, 7), (3, 5, 6, 9), (7, 9, 4)]
+        arrays = [rng.standard_normal(s) for s in shapes]
+
+        expected = np.einsum(subs, *arrays)
+
+        plan = build_blas_plan(subs, shapes)
+        np_blocks = [{(0,): a} for a in arrays]
+        combos = [([(0,)] * len(shapes), (0,))]
+        kdata = prepare_kernel_data(plan, combos, np_blocks)
+
+        execute_blas_kernel_v2(kdata)
+
+        result = kdata.output_buffers[0]
+        np.testing.assert_allclose(result, expected, rtol=1e-10)
+
+    def test_kernel_accumulates_multiple_combos(self):
+        """Two combos with same output key accumulate correctly."""
+        from tenax.contraction._cython_blas import execute_blas_kernel_v2
+
+        rng = np.random.default_rng(123)
+        subs = "abc,apd,bpxe,def->cxf"
+        shapes = [(2, 3, 4), (2, 5, 7), (3, 5, 6, 9), (7, 9, 4)]
+        arrays1 = [rng.standard_normal(s) for s in shapes]
+        arrays2 = [rng.standard_normal(s) for s in shapes]
+
+        expected = np.einsum(subs, *arrays1) + np.einsum(subs, *arrays2)
+
+        plan = build_blas_plan(subs, shapes)
+        np_blocks = [{(0,): arrays1[i], (1,): arrays2[i]} for i in range(len(shapes))]
+        combos = [
+            ([(0,)] * len(shapes), (0,)),
+            ([(1,)] * len(shapes), (0,)),
+        ]
+        kdata = prepare_kernel_data(plan, combos, np_blocks)
+
+        execute_blas_kernel_v2(kdata)
+
+        result = kdata.output_buffers[0]
+        np.testing.assert_allclose(result, expected, rtol=1e-10)
+
+    def test_kernel_complex128(self):
+        """1-site matvec with complex128 via v2 kernel matches np.einsum."""
+        from tenax.contraction._cython_blas import execute_blas_kernel_v2
+
+        rng = np.random.default_rng(42)
+        subs = "abc,apd,bpxe,def->cxf"
+        shapes = [(2, 3, 4), (2, 5, 7), (3, 5, 6, 9), (7, 9, 4)]
+        arrays = [rng.standard_normal(s) + 1j * rng.standard_normal(s) for s in shapes]
+
+        expected = np.einsum(subs, *arrays)
+
+        plan = build_blas_plan(subs, shapes)
+        np_blocks = [{(0,): a} for a in arrays]
+        combos = [([(0,)] * len(shapes), (0,))]
+        kdata = prepare_kernel_data(plan, combos, np_blocks)
+
+        execute_blas_kernel_v2(kdata)
+
+        result = kdata.output_buffers[0]
         np.testing.assert_allclose(result, expected, rtol=1e-10)
