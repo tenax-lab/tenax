@@ -1267,12 +1267,20 @@ def _precompute_block_plan(
     return plan
 
 
+def _to_np_blocks(t: SymmetricTensor) -> dict:
+    """Convert a SymmetricTensor's blocks to NumPy arrays (cached-friendly)."""
+    import numpy as np
+
+    return {k: np.asarray(v) for k, v in t.blocks.items()}
+
+
 def _blockwise_contract(
     tensors: list[SymmetricTensor],
     subscripts: str,
     output_indices: tuple[TensorIndex, ...],
     expr_cache: dict[tuple[tuple[int, ...], ...], Any] | None = None,
     block_plan: list[tuple[list[tuple[int, ...]], str]] | None = None,
+    np_blocks_cache: list[dict | None] | None = None,
 ) -> SymmetricTensor:
     """Contract multiple SymmetricTensors using block-level charge matching.
 
@@ -1295,6 +1303,10 @@ def _blockwise_contract(
         block_plan:     Optional precomputed plan from ``_precompute_block_plan``.
                         When provided, skips charge-matching backtracking and
                         directly iterates over the valid block combinations.
+        np_blocks_cache: Optional pre-converted NumPy blocks for each tensor.
+                        List of dicts (one per tensor), or None entries for
+                        tensors that should be converted fresh. Avoids repeated
+                        JAX→NumPy conversion for fixed environment tensors.
 
     Returns:
         SymmetricTensor with contracted result (bypasses conservation validation).
@@ -1319,77 +1331,27 @@ def _blockwise_contract(
     output_accum: dict[tuple[int, ...], list[jax.Array]] = {}
 
     if block_plan is not None:
-        from tenax.contraction import CYTHON_BLAS_AVAILABLE, CYTHON_BLAS_V2_AVAILABLE
+        # Build NumPy blocks — use cache for env tensors, convert fresh otherwise
+        np_blocks_list = []
+        for i, t in enumerate(tensors):
+            if np_blocks_cache is not None and np_blocks_cache[i] is not None:
+                np_blocks_list.append(np_blocks_cache[i])
+            else:
+                np_blocks_list.append(_to_np_blocks(t))
 
-        if CYTHON_BLAS_V2_AVAILABLE:
-            import numpy as np
-
-            from tenax.contraction._blas_plan import (
-                get_cached_blas_plan,
-                prepare_kernel_data,
-            )
-            from tenax.contraction._cython_blas import execute_blas_kernel_v2
-
-            np_blocks_list = [
-                {k: np.array(v) for k, v in t.blocks.items()} for t in tensors
-            ]
-
-            # Group block combos by shape signature — each group gets its own
-            # BLAS plan (M, N, K vary across charge sectors).
-            shape_groups: dict[tuple, list] = {}
-            for combo_keys, output_key in block_plan:
-                shapes = tuple(
-                    np_blocks_list[i][k].shape for i, k in enumerate(combo_keys)
+        # Use opt_einsum with NumPy arrays (avoids JAX dispatch overhead)
+        for combo_keys, output_key in block_plan:
+            combo_arrays = [np_blocks_list[i][k] for i, k in enumerate(combo_keys)]
+            block_shapes = tuple(a.shape for a in combo_arrays)
+            if block_shapes in expr_cache:
+                expr = expr_cache[block_shapes]
+            else:
+                expr = opt_einsum.contract_expression(
+                    subscripts, *block_shapes, optimize="auto"
                 )
-                shape_groups.setdefault(shapes, []).append((combo_keys, output_key))
-
-            for shapes_key, combos in shape_groups.items():
-                blas_plan = get_cached_blas_plan(subscripts, shapes_key)
-                kdata = prepare_kernel_data(blas_plan, combos, np_blocks_list)
-                execute_blas_kernel_v2(kdata)
-
-                for slot_idx, key in enumerate(kdata.output_keys):
-                    arr = kdata.output_buffers[slot_idx]
-                    output_accum.setdefault(key, []).append(arr)
-
-        elif CYTHON_BLAS_AVAILABLE:
-            import numpy as np
-
-            from tenax.contraction._blas_plan import get_cached_blas_plan
-            from tenax.contraction._cython_blas import execute_block_plan
-
-            np_blocks_list = [
-                {k: np.asarray(v) for k, v in t.blocks.items()} for t in tensors
-            ]
-
-            # Group block combos by shape signature — each group gets its own
-            # BLAS plan (M, N, K vary across charge sectors).
-            shape_groups: dict[tuple, list] = {}
-            for combo_keys, output_key in block_plan:
-                shapes = tuple(
-                    np_blocks_list[i][k].shape for i, k in enumerate(combo_keys)
-                )
-                shape_groups.setdefault(shapes, []).append((combo_keys, output_key))
-
-            for shapes_key, combos in shape_groups.items():
-                blas_plan = get_cached_blas_plan(subscripts, shapes_key)
-                group_result = execute_block_plan(blas_plan, combos, np_blocks_list)
-                for key, arr in group_result.items():
-                    output_accum.setdefault(key, []).append(arr)
-        else:
-            # Fallback: per-block opt_einsum with JAX arrays (no host copy)
-            for combo_keys, output_key in block_plan:
-                combo_arrays = [tensors[i].blocks[k] for i, k in enumerate(combo_keys)]
-                block_shapes = tuple(a.shape for a in combo_arrays)
-                if block_shapes in expr_cache:
-                    expr = expr_cache[block_shapes]
-                else:
-                    expr = opt_einsum.contract_expression(
-                        subscripts, *block_shapes, optimize="auto"
-                    )
-                    expr_cache[block_shapes] = expr
-                result_array = expr(*combo_arrays, backend="jax")
-                output_accum.setdefault(output_key, []).append(result_array)
+                expr_cache[block_shapes] = expr
+            result_array = expr(*combo_arrays)
+            output_accum.setdefault(output_key, []).append(result_array)
     else:
         # Original backtracking approach
         input_part, output_part = subscripts.split("->")
@@ -1563,6 +1525,16 @@ def _two_site_update_symmetric(
     _subs = "abc,apqd,bpse,eqtf,dfg->cstg"
     _plan = _precompute_block_plan([left_env, theta, mpo_l, mpo_r, right_env], _subs)
 
+    # Pre-convert env blocks to NumPy once — only v changes per Lanczos iteration
+    # Tensor order: [left_env, v, mpo_l, mpo_r, right_env]
+    _env_np = [
+        _to_np_blocks(left_env),
+        None,  # v — converted fresh each call
+        _to_np_blocks(mpo_l),
+        _to_np_blocks(mpo_r),
+        _to_np_blocks(right_env),
+    ]
+
     def matvec(v: Tensor) -> Tensor:
         result = _blockwise_contract(
             [left_env, v, mpo_l, mpo_r, right_env],
@@ -1570,6 +1542,7 @@ def _two_site_update_symmetric(
             output_indices=v.indices,
             expr_cache=_matvec_cache,
             block_plan=_plan,
+            np_blocks_cache=_env_np,
         )
         return result
 
@@ -1603,6 +1576,15 @@ def _one_site_update_symmetric(
     _subs = "abc,apd,bpxe,def->cxf"
     _plan = _precompute_block_plan([left_env, site, mpo_site, right_env], _subs)
 
+    # Pre-convert env blocks to NumPy once — only v changes per Lanczos iteration
+    # Tensor order: [left_env, v, mpo_site, right_env]
+    _env_np = [
+        _to_np_blocks(left_env),
+        None,  # v — converted fresh each call
+        _to_np_blocks(mpo_site),
+        _to_np_blocks(right_env),
+    ]
+
     def matvec(v: Tensor) -> Tensor:
         result = _blockwise_contract(
             [left_env, v, mpo_site, right_env],
@@ -1610,6 +1592,7 @@ def _one_site_update_symmetric(
             output_indices=v.indices,
             expr_cache=_matvec_cache,
             block_plan=_plan,
+            np_blocks_cache=_env_np,
         )
         return result
 
