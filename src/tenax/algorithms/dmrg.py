@@ -1319,9 +1319,40 @@ def _blockwise_contract(
     output_accum: dict[tuple[int, ...], list[jax.Array]] = {}
 
     if block_plan is not None:
-        from tenax.contraction import CYTHON_BLAS_AVAILABLE
+        from tenax.contraction import CYTHON_BLAS_AVAILABLE, CYTHON_BLAS_V2_AVAILABLE
 
-        if CYTHON_BLAS_AVAILABLE:
+        if CYTHON_BLAS_V2_AVAILABLE:
+            import numpy as np
+
+            from tenax.contraction._blas_plan import (
+                get_cached_blas_plan,
+                prepare_kernel_data,
+            )
+            from tenax.contraction._cython_blas import execute_blas_kernel_v2
+
+            np_blocks_list = [
+                {k: np.array(v) for k, v in t.blocks.items()} for t in tensors
+            ]
+
+            # Group block combos by shape signature — each group gets its own
+            # BLAS plan (M, N, K vary across charge sectors).
+            shape_groups: dict[tuple, list] = {}
+            for combo_keys, output_key in block_plan:
+                shapes = tuple(
+                    np_blocks_list[i][k].shape for i, k in enumerate(combo_keys)
+                )
+                shape_groups.setdefault(shapes, []).append((combo_keys, output_key))
+
+            for shapes_key, combos in shape_groups.items():
+                blas_plan = get_cached_blas_plan(subscripts, shapes_key)
+                kdata = prepare_kernel_data(blas_plan, combos, np_blocks_list)
+                execute_blas_kernel_v2(kdata)
+
+                for slot_idx, key in enumerate(kdata.output_keys):
+                    arr = kdata.output_buffers[slot_idx]
+                    output_accum.setdefault(key, []).append(arr)
+
+        elif CYTHON_BLAS_AVAILABLE:
             import numpy as np
 
             from tenax.contraction._blas_plan import get_cached_blas_plan
