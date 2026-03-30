@@ -74,6 +74,14 @@ class DMRGConfig:
                             instead of fixed α. The expansion is weighted by the
                             truncation error, giving strong mixing when needed
                             and vanishing mixing at convergence.
+        accelerator:        Backend dispatch mode for the DMRG sweep:
+                            ``"auto"`` (default) — GPU/TPU uses JIT path; CPU with
+                            symmetric tensors uses numpy/Cython path; CPU with
+                            dense tensors uses JIT path.
+                            ``"jit"`` — force JIT-compiled ``lax.scan`` sweep
+                            (requires dense tensors; silently falls back for
+                            symmetric or 1-site DMRG).
+                            ``"off"`` — always use the existing Python sweep loop.
         verbose:            Print energy at each sweep.
     """
 
@@ -91,6 +99,7 @@ class DMRGConfig:
     mixing_factor: float = 1e-3
     expansion_num_extra: int = 0
     hybrid_mixing: bool = True
+    accelerator: str = "auto"
     verbose: bool = False
 
 
@@ -195,6 +204,72 @@ def dmrg(
             "dmrg() requires uniform tensor types: all DenseTensor or all "
             "SymmetricTensor. Got mixed types — convert explicitly."
         )
+
+    # --- Accelerator dispatch: JIT-compiled sweep via lax.scan -----------
+    if config.accelerator not in ("auto", "jit", "off"):
+        raise ValueError(
+            f"accelerator must be 'auto', 'jit', or 'off', got {config.accelerator!r}"
+        )
+
+    use_jit = False
+    if config.accelerator == "jit":
+        use_jit = True
+    elif config.accelerator == "auto":
+        device = jax.devices()[0].platform
+        if device in ("gpu", "tpu"):
+            use_jit = True
+        elif not use_symmetric:
+            use_jit = True
+
+    if use_jit and config.two_site and not use_symmetric:
+        from tenax.algorithms._jit_sweep import jit_dmrg_sweep_dense
+
+        # Extract raw JAX arrays from DenseTensor wrappers
+        raw_mps = [t.todense() for t in mps_tensors]
+        raw_mpo = [t.todense() for t in mpo_tensors]
+
+        energies, mps_out_raw = jit_dmrg_sweep_dense(
+            raw_mps,
+            raw_mpo,
+            chi_max=config.max_bond_dim,
+            num_sweeps=config.num_sweeps,
+            lanczos_max_iter=config.lanczos_max_iter,
+        )
+
+        # Build DenseTensor wrappers for the output MPS.
+        # The JIT path pads tensors to (chi_max, d, chi_max). Create new
+        # indices that match the padded shape while preserving labels.
+        sym = U1Symmetry()
+        result_mps_tensors = []
+        for i, orig_t in enumerate(mps_tensors):
+            new_indices = []
+            for leg_idx, orig_idx in enumerate(orig_t.indices):
+                padded_dim = mps_out_raw[i].shape[leg_idx]
+                if padded_dim == orig_idx.dim:
+                    new_indices.append(orig_idx)
+                else:
+                    new_charges = np.zeros(padded_dim, dtype=np.int32)
+                    new_indices.append(
+                        TensorIndex(
+                            sym, new_charges, orig_idx.flow, label=orig_idx.label
+                        )
+                    )
+            result_mps_tensors.append(DenseTensor(mps_out_raw[i], tuple(new_indices)))
+        result_mps = FiniteMPS.from_tensors(result_mps_tensors)
+
+        converged = (
+            len(energies) >= 2
+            and abs(energies[-1] - energies[-2]) < config.convergence_tol
+        )
+        return DMRGResult(
+            energy=energies[-1] if energies else 0.0,
+            energies_per_sweep=energies,
+            mps=result_mps,
+            truncation_errors=[],
+            converged=converged,
+        )
+    # (If use_jit is True but conditions not met, fall through silently
+    #  to the Python sweep loop below.)
 
     # Validate initial MPS sector if target_charge is specified
     if config.target_charge is not None and use_symmetric:

@@ -517,7 +517,7 @@ def jit_dmrg_sweep_dense(
     chi_max: int,
     num_sweeps: int = 10,
     lanczos_max_iter: int = 20,
-) -> list[float]:
+) -> tuple[list[float], list[jax.Array]]:
     """Run full DMRG sweeps compiled to a single XLA program via ``jax.lax.scan``.
 
     Operates on raw JAX arrays (not Tensor objects). All MPS and MPO tensors
@@ -531,8 +531,9 @@ def jit_dmrg_sweep_dense(
         lanczos_max_iter: Number of Lanczos iterations per site update.
 
     Returns:
-        List of energies, one per sweep (energy from the last bond update of
-        the right-to-left half-sweep).
+        Tuple of ``(energies, mps_out)`` where *energies* is a list of floats
+        (one per sweep) and *mps_out* is a list of L JAX arrays with padded
+        shape ``(chi_max, d, chi_max)`` representing the optimized MPS.
     """
     L = len(mps_tensors)
     d = mps_tensors[0].shape[1]  # physical dimension
@@ -554,11 +555,12 @@ def jit_dmrg_sweep_dense(
         W_stack = W_stack.at[i, :dw_l, :, :, :dw_r].set(W)
 
     # Run sweeps via the JIT-compiled inner function
-    energies = _jit_sweep_loop(
+    energies, mps_final = _jit_sweep_loop(
         mps_stack, W_stack, L, chi_max, D_w_max, d, num_sweeps, lanczos_max_iter
     )
 
-    return [float(e) for e in energies]
+    mps_out = [mps_final[i] for i in range(L)]
+    return [float(e) for e in energies], mps_out
 
 
 @functools.partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7))
@@ -609,6 +611,6 @@ def _jit_sweep_loop(
         return mps, L_envs, R_envs, Es
 
     init_state = (mps_stack, left_envs, right_envs, energies)
-    _, _, _, energies = jax.lax.fori_loop(0, num_sweeps, sweep_body, init_state)
+    mps_final, _, _, energies = jax.lax.fori_loop(0, num_sweeps, sweep_body, init_state)
 
-    return energies
+    return energies, mps_final

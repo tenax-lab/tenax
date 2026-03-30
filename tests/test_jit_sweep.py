@@ -613,7 +613,7 @@ class TestDenseJitSweep:
         mps_raw = [mps_tn2.get_tensor(i).todense() for i in range(L)]
         mpo_raw = [t.todense() for t in mpo_tensors_obj]
 
-        energies = jit_dmrg_sweep_dense(
+        energies, _ = jit_dmrg_sweep_dense(
             mps_raw, mpo_raw, chi_max, num_sweeps=num_sweeps, lanczos_max_iter=20
         )
 
@@ -653,12 +653,12 @@ class TestDenseJitSweep:
         mps_raw = [mps_tn.get_tensor(i).todense() for i in range(L)]
 
         # First call (triggers compilation)
-        energies_1 = jit_dmrg_sweep_dense(
+        energies_1, _ = jit_dmrg_sweep_dense(
             mps_raw, mpo_raw, chi_max, num_sweeps=num_sweeps, lanczos_max_iter=10
         )
 
         # Second call (should reuse compiled XLA program)
-        energies_2 = jit_dmrg_sweep_dense(
+        energies_2, _ = jit_dmrg_sweep_dense(
             mps_raw, mpo_raw, chi_max, num_sweeps=num_sweeps, lanczos_max_iter=10
         )
 
@@ -682,7 +682,7 @@ class TestDenseJitSweep:
             mps_tn = build_random_mps(L=L, physical_dim=2, bond_dim=chi_max, seed=123)
         mps_raw = [mps_tn.get_tensor(i).todense() for i in range(L)]
 
-        energies = jit_dmrg_sweep_dense(
+        energies, _ = jit_dmrg_sweep_dense(
             mps_raw, mpo_raw, chi_max, num_sweeps=num_sweeps, lanczos_max_iter=20
         )
 
