@@ -1,0 +1,191 @@
+"""Tests for PaddedBlockArray data structure."""
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from tenax.algorithms._padded_block_array import PaddedBlockArray, pad_dense
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.symmetry import U1Symmetry
+from tenax.core.tensor import SymmetricTensor
+
+
+@pytest.fixture
+def u1():
+    return U1Symmetry()
+
+
+@pytest.fixture
+def rng():
+    return jax.random.PRNGKey(42)
+
+
+@pytest.fixture
+def sym_matrix(u1, rng):
+    """2-leg U(1) symmetric tensor with charges [-1, 0, 1] on each leg."""
+    charges = np.array([-1, 0, 1], dtype=np.int32)
+    indices = (
+        TensorIndex(u1, charges, FlowDirection.IN, label="in"),
+        TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+    )
+    return SymmetricTensor.random_normal(indices, rng)
+
+
+@pytest.fixture
+def sym_3leg(u1, rng):
+    """3-leg U(1) symmetric tensor: (phys, left, right) like an MPS tensor."""
+    phys_c = np.array([-1, 1], dtype=np.int32)
+    virt_c = np.array([-1, 0, 1], dtype=np.int32)
+    indices = (
+        TensorIndex(u1, phys_c, FlowDirection.IN, label="phys"),
+        TensorIndex(u1, virt_c, FlowDirection.IN, label="left"),
+        TensorIndex(u1, u1.dual(virt_c), FlowDirection.OUT, label="right"),
+    )
+    return SymmetricTensor.random_normal(indices, rng)
+
+
+class TestFromSymmetricCreatesPaddedArray:
+    """Verify from_symmetric produces a 3D padded array with correct shape."""
+
+    def test_2leg_shape(self, sym_matrix):
+        pba = PaddedBlockArray.from_symmetric(sym_matrix)
+        # Data should be 3D: (num_blocks, M_max, N_max)
+        assert pba.data.ndim == 3
+        assert pba.data.shape[0] == sym_matrix.n_blocks
+
+    def test_3leg_shape(self, sym_3leg):
+        pba = PaddedBlockArray.from_symmetric(sym_3leg)
+        # For a 3-leg tensor, blocks are reshaped to 2D (fused_left, fused_right)
+        # Data should still be 3D: (num_blocks, M_max, N_max)
+        assert pba.data.ndim == 3
+        assert pba.data.shape[0] == sym_3leg.n_blocks
+
+    def test_padded_dimensions_are_max(self, sym_matrix):
+        pba = PaddedBlockArray.from_symmetric(sym_matrix)
+        # M_max and N_max should be >= every block's row/col dimension
+        for shape in pba.block_shapes:
+            assert pba.data.shape[1] >= shape[0]
+            assert pba.data.shape[2] >= shape[1]
+
+
+class TestRoundTripSymmetric:
+    """from_symmetric -> to_symmetric should be identity."""
+
+    def test_2leg_round_trip(self, sym_matrix):
+        pba = PaddedBlockArray.from_symmetric(sym_matrix)
+        recovered = pba.to_symmetric()
+        # Check same indices
+        assert recovered.indices == sym_matrix.indices
+        # Check same block keys
+        assert recovered._block_keys == sym_matrix._block_keys
+        # Check same block data (dense comparison)
+        np.testing.assert_allclose(
+            recovered.todense(), sym_matrix.todense(), atol=1e-12
+        )
+
+    def test_3leg_round_trip(self, sym_3leg):
+        pba = PaddedBlockArray.from_symmetric(sym_3leg)
+        recovered = pba.to_symmetric()
+        assert recovered.indices == sym_3leg.indices
+        assert recovered._block_keys == sym_3leg._block_keys
+        np.testing.assert_allclose(recovered.todense(), sym_3leg.todense(), atol=1e-12)
+
+
+class TestPytreeRegistration:
+    """PaddedBlockArray should work inside jax.jit."""
+
+    def test_jit_identity(self, sym_matrix):
+        pba = PaddedBlockArray.from_symmetric(sym_matrix)
+
+        @jax.jit
+        def identity(x):
+            return x
+
+        result = identity(pba)
+        np.testing.assert_allclose(result.data, pba.data, atol=1e-12)
+
+    def test_jit_scale(self, sym_matrix):
+        pba = PaddedBlockArray.from_symmetric(sym_matrix)
+
+        @jax.jit
+        def scale(x):
+            return PaddedBlockArray(
+                data=x.data * 2.0,
+                mask=x.mask,
+                block_charges=x.block_charges,
+                block_shapes=x.block_shapes,
+                indices=x.indices,
+                symmetry=x.symmetry,
+            )
+
+        result = scale(pba)
+        np.testing.assert_allclose(result.data, pba.data * 2.0, atol=1e-12)
+
+    def test_tree_leaves(self, sym_matrix):
+        pba = PaddedBlockArray.from_symmetric(sym_matrix)
+        leaves = jax.tree_util.tree_leaves(pba)
+        # Should have exactly 2 leaves: data and mask
+        assert len(leaves) == 2
+
+
+class TestMaskZerosPadding:
+    """Padding region should have mask=False and data=0."""
+
+    def test_mask_shape_matches_data(self, sym_matrix):
+        pba = PaddedBlockArray.from_symmetric(sym_matrix)
+        assert pba.mask.shape == pba.data.shape
+
+    def test_padding_is_zero(self, sym_matrix):
+        pba = PaddedBlockArray.from_symmetric(sym_matrix)
+        # Where mask is False, data must be 0
+        padding_data = pba.data[~pba.mask]
+        np.testing.assert_allclose(padding_data, 0.0, atol=1e-15)
+
+    def test_mask_true_in_block_region(self, sym_matrix):
+        pba = PaddedBlockArray.from_symmetric(sym_matrix)
+        # For each block, the mask should be True in the block's actual region
+        for i, shape in enumerate(pba.block_shapes):
+            block_mask = pba.mask[i, : shape[0], : shape[1]]
+            assert jnp.all(block_mask), (
+                f"Block {i} with shape {shape} has False values in its data region"
+            )
+
+    def test_mask_false_outside_block(self, sym_matrix):
+        pba = PaddedBlockArray.from_symmetric(sym_matrix)
+        M_max = pba.data.shape[1]
+        N_max = pba.data.shape[2]
+        for i, shape in enumerate(pba.block_shapes):
+            # Check padding rows
+            if shape[0] < M_max:
+                assert not jnp.any(pba.mask[i, shape[0] :, :])
+            # Check padding cols
+            if shape[1] < N_max:
+                assert not jnp.any(pba.mask[i, :, shape[1] :])
+
+
+class TestPadDense:
+    """pad_dense should pad a dense (chi_l, d, chi_r) tensor to (chi_max, d, chi_max)."""
+
+    def test_basic_padding(self, rng):
+        data = jax.random.normal(rng, (3, 2, 4))
+        padded = pad_dense(data, chi_max=8)
+        assert padded.shape == (8, 2, 8)
+
+    def test_original_data_preserved(self, rng):
+        data = jax.random.normal(rng, (3, 2, 4))
+        padded = pad_dense(data, chi_max=8)
+        np.testing.assert_allclose(padded[:3, :, :4], data, atol=1e-12)
+
+    def test_padding_is_zero(self, rng):
+        data = jax.random.normal(rng, (3, 2, 4))
+        padded = pad_dense(data, chi_max=8)
+        # Padding region should be zero
+        np.testing.assert_allclose(padded[3:, :, :], 0.0, atol=1e-15)
+        np.testing.assert_allclose(padded[:, :, 4:], 0.0, atol=1e-15)
+
+    def test_no_op_when_already_max(self, rng):
+        data = jax.random.normal(rng, (5, 2, 5))
+        padded = pad_dense(data, chi_max=5)
+        assert padded.shape == (5, 2, 5)
+        np.testing.assert_allclose(padded, data, atol=1e-12)
