@@ -343,10 +343,20 @@ class TestDMRG3SIntegration:
     def test_symmetric_1site_with_expansion_runs(self):
         """1-site + DMRG3S with U(1) symmetry should complete."""
         from tenax.algorithms.auto_mpo import build_auto_mpo
-        from tenax.algorithms.dmrg import DMRGConfig, build_random_symmetric_mps, dmrg
+        from tenax.algorithms.dmrg import DMRGConfig, dmrg
+        from tenax.core.mps import FiniteMPS
+        from tenax.core.symmetry import U1Symmetry
 
         L, chi = 4, 8
-        mps = build_random_symmetric_mps(L, bond_dim=chi, seed=42)
+        mps = FiniteMPS.random(
+            L,
+            d=2,
+            chi=chi,
+            key=jax.random.PRNGKey(42),
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
         mpo = build_auto_mpo(_heisenberg_terms(L), L, symmetric=True)
         result = dmrg(
             mpo,

@@ -26,7 +26,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
+
+if TYPE_CHECKING:
+    from tenax.algorithms._block_array import BlockArray
 
 import jax
 import jax.numpy as jnp
@@ -42,6 +45,25 @@ from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor, inner
 from tenax.linalg import qr as _linalg_qr
 from tenax.network.network import TensorNetwork
+
+# Optional Cython BLAS acceleration for hot loops.
+try:
+    from tenax.contraction._cython_blas import (
+        cython_execute_plan as _cython_execute_plan,
+    )
+
+    _USE_CYTHON_PLAN = True
+except ImportError:
+    _USE_CYTHON_PLAN = False
+
+try:
+    from tenax.contraction._cython_blas import (
+        cython_ba_sub_scaled_inplace as _cython_ba_sub_scaled_inplace,
+    )
+
+    _USE_CYTHON_SUB = True
+except ImportError:
+    _USE_CYTHON_SUB = False
 
 
 @dataclass
@@ -74,6 +96,9 @@ class DMRGConfig:
                             instead of fixed α. The expansion is weighted by the
                             truncation error, giving strong mixing when needed
                             and vanishing mixing at convergence.
+        numpy_blockwise:    Use numpy-only path for symmetric DMRG (no JAX
+                            overhead). Default True. Set False to use the
+                            original JAX-backed symmetric path.
         accelerator:        Backend dispatch mode for the DMRG sweep:
                             ``"auto"`` (default) — GPU/TPU uses JIT path; CPU with
                             symmetric tensors uses numpy/Cython path; CPU with
@@ -99,6 +124,9 @@ class DMRGConfig:
     mixing_factor: float = 1e-3
     expansion_num_extra: int = 0
     hybrid_mixing: bool = True
+    numpy_blockwise: bool = (
+        True  # Use numpy-only path for symmetric DMRG (no JAX overhead)
+    )
     accelerator: str = "auto"
     verbose: bool = False
 
@@ -195,7 +223,7 @@ def dmrg(
 
     if all_mps_sym and all_mpo_sym:
         use_symmetric = True
-        ops = _symmetric_ops()
+        ops = _symmetric_ops(config)
     elif all_mps_dense and all_mpo_dense:
         use_symmetric = False
         ops = _dense_ops()
@@ -593,12 +621,18 @@ def dmrg(
                 print(f"Converged at sweep {sweep + 1}")
             break
 
-    # Build result MPS as FiniteMPS
+    # Build result MPS as FiniteMPS.
+    # Convert any BlockArray tensors back to SymmetricTensor for storage.
+    from tenax.algorithms._block_array import BlockArray, ba_to_symmetric
+
+    final_tensors = [
+        ba_to_symmetric(t) if isinstance(t, BlockArray) else t for t in mps_tensors
+    ]
     if not config.two_site:
         orth_center = 0  # after final R→L sweep
     else:
         orth_center = None  # 2-site doesn't maintain strict canonical form
-    result_mps = FiniteMPS.from_tensors(mps_tensors, orth_center=orth_center)
+    result_mps = FiniteMPS.from_tensors(final_tensors, orth_center=orth_center)
 
     return DMRGResult(
         energy=energy,
@@ -1120,7 +1154,12 @@ def _svd_and_truncate_site(
     Returns:
         (A_tensor, singular_values, B_tensor, truncation_error)
     """
-    labels = theta.labels()
+    from tenax.algorithms._block_array import BlockArray
+
+    if isinstance(theta, BlockArray):
+        labels = tuple(idx.label for idx in theta.indices)
+    else:
+        labels = theta.labels()
 
     # Find physical and virtual labels
     # With uniform 3-leg tensors, site 0 has left bond "v_-1_0"
@@ -1146,7 +1185,45 @@ def _svd_and_truncate_site(
 
     bond_label = f"v{site}_{site + 1}"
 
-    # Single SVD via truncated_svd (handles both Dense and Symmetric)
+    # Dispatch to numpy-only SVD when numpy_blockwise is enabled.
+    # Returns BlockArray directly — avoids JAX array creation in the sweep loop.
+    # The sweep loop stores these as BlockArray; env updates accept either type.
+    # Only converted to SymmetricTensor at the end of dmrg() for the result.
+    from tenax.algorithms._block_array import BlockArray
+
+    if config.numpy_blockwise and isinstance(theta, (SymmetricTensor, BlockArray)):
+        from tenax.algorithms._block_array import ba_to_symmetric
+        from tenax.linalg import _truncated_svd_symmetric_np
+
+        # _truncated_svd_symmetric_np needs SymmetricTensor for index metadata
+        theta_sym = ba_to_symmetric(theta) if isinstance(theta, BlockArray) else theta
+
+        A_ba, s, B_ba, s_full = _truncated_svd_symmetric_np(
+            theta_sym,
+            left_labels=left_labels,
+            right_labels=right_labels,
+            max_singular_values=config.max_bond_dim,
+            max_truncation_err=config.svd_trunc_err,
+            new_bond_label=bond_label,
+            normalize=False,
+        )
+
+        n_keep = len(s)
+        if len(s_full) > n_keep:
+            total_sq = np.sum(s_full**2)
+            trunc_sq = np.sum(s_full[n_keep:] ** 2)
+            trunc_err = float(np.sqrt(trunc_sq / (total_sq + 1e-15)))
+        else:
+            trunc_err = 0.0
+
+        if sweep_right:
+            B_ba = _scale_bond_axis_ba(B_ba, bond_label, s)
+        else:
+            A_ba = _scale_bond_axis_ba(A_ba, bond_label, s)
+
+        return A_ba, s, B_ba, trunc_err
+
+    # JAX path: single SVD via truncated_svd (handles both Dense and Symmetric)
     A, s, B, s_full = truncated_svd(
         theta,
         left_labels=left_labels,
@@ -1291,6 +1368,97 @@ def _lanczos_solve_tensor(
     return eigenvalue, eigenvector
 
 
+def _lanczos_solve_np(
+    matvec: Callable,
+    initial: BlockArray,
+    num_steps: int,
+    tol: float,
+) -> tuple[float, BlockArray]:
+    """Lanczos eigensolver on BlockArray — pure numpy, no JAX.
+
+    Same algorithm as ``_lanczos_solve_tensor`` but operates on BlockArray
+    objects using ``ba_*`` functions from ``_block_array.py``.
+
+    Args:
+        matvec:    Function applying H_eff to a BlockArray, returning a BlockArray.
+        initial:   Starting vector (BlockArray).
+        num_steps: Maximum Lanczos iterations.
+        tol:       Convergence tolerance on the residual norm.
+
+    Returns:
+        (eigenvalue, eigenvector) for the ground state as BlockArray.
+    """
+    from tenax.algorithms._block_array import (
+        ba_add,
+        ba_inner,
+        ba_norm,
+        ba_scale,
+        ba_sub_scaled,
+    )
+
+    v_nrm = ba_norm(initial)
+    v = ba_scale(initial, 1.0 / (v_nrm + 1e-15))
+
+    basis = [v]
+    alphas = []
+    betas = [0.0]
+
+    for step in range(num_steps):
+        w = matvec(basis[-1])
+        alpha_val = ba_inner(basis[-1], w)
+        alphas.append(alpha_val)
+
+        # w = w - alpha * v_k  (fused, no intermediate dict)
+        if _USE_CYTHON_SUB:
+            _cython_ba_sub_scaled_inplace(w.blocks, basis[-1].blocks, alpha_val)
+        else:
+            w = ba_sub_scaled(w, basis[-1], alpha_val)
+        if step > 0:
+            if _USE_CYTHON_SUB:
+                _cython_ba_sub_scaled_inplace(w.blocks, basis[-2].blocks, betas[-1])
+            else:
+                w = ba_sub_scaled(w, basis[-2], betas[-1])
+
+        # Full reorthogonalization (fused sub+scale)
+        for q in basis:
+            coeff = ba_inner(q, w)
+            if _USE_CYTHON_SUB:
+                _cython_ba_sub_scaled_inplace(w.blocks, q.blocks, coeff)
+            else:
+                w = ba_sub_scaled(w, q, coeff)
+
+        beta_val = ba_norm(w)
+        betas.append(beta_val)
+
+        if beta_val < tol:
+            break
+
+        basis.append(ba_scale(w, 1.0 / beta_val))
+
+    n = len(alphas)
+    if n == 0:
+        return 0.0, v
+    if n == 1:
+        return alphas[0], basis[0]
+
+    # Tridiagonal eigendecomposition — pure numpy
+    T = np.diag(alphas) + np.diag(betas[1:n], k=1) + np.diag(betas[1:n], k=-1)
+    eigvals, eigvecs = np.linalg.eigh(T)
+    idx = int(np.argmin(eigvals))
+    eigenvalue = float(eigvals[idx])
+    krylov_coefs = eigvecs[:, idx]
+
+    # Reconstruct eigenvector
+    eigenvector = ba_scale(basis[0], float(krylov_coefs[0]))
+    for k in range(1, n):
+        eigenvector = ba_add(eigenvector, ba_scale(basis[k], float(krylov_coefs[k])))
+
+    ev_norm = ba_norm(eigenvector)
+    eigenvector = ba_scale(eigenvector, 1.0 / (ev_norm + 1e-15))
+
+    return eigenvalue, eigenvector
+
+
 def _precompute_block_plan(
     tensors: list[SymmetricTensor],
     subscripts: str,
@@ -1342,12 +1510,21 @@ def _precompute_block_plan(
     return plan
 
 
+def _to_np_blocks(t: SymmetricTensor) -> dict:
+    """Convert a SymmetricTensor's blocks to NumPy arrays (cached-friendly)."""
+    import numpy as np
+
+    return {k: np.asarray(v) for k, v in t.blocks.items()}
+
+
 def _blockwise_contract(
     tensors: list[SymmetricTensor],
     subscripts: str,
     output_indices: tuple[TensorIndex, ...],
     expr_cache: dict[tuple[tuple[int, ...], ...], Any] | None = None,
     block_plan: list[tuple[list[tuple[int, ...]], str]] | None = None,
+    np_blocks_cache: list[dict | None] | None = None,
+    return_ba: bool = False,
 ) -> SymmetricTensor:
     """Contract multiple SymmetricTensors using block-level charge matching.
 
@@ -1370,6 +1547,10 @@ def _blockwise_contract(
         block_plan:     Optional precomputed plan from ``_precompute_block_plan``.
                         When provided, skips charge-matching backtracking and
                         directly iterates over the valid block combinations.
+        np_blocks_cache: Optional pre-converted NumPy blocks for each tensor.
+                        List of dicts (one per tensor), or None entries for
+                        tensors that should be converted fresh. Avoids repeated
+                        JAX→NumPy conversion for fixed environment tensors.
 
     Returns:
         SymmetricTensor with contracted result (bypasses conservation validation).
@@ -1394,46 +1575,58 @@ def _blockwise_contract(
     output_accum: dict[tuple[int, ...], list[jax.Array]] = {}
 
     if block_plan is not None:
-        from tenax.contraction import CYTHON_BLAS_AVAILABLE
+        # Build NumPy blocks — use cache for env tensors, convert fresh otherwise
+        np_blocks_list = []
+        for i, t in enumerate(tensors):
+            if np_blocks_cache is not None and np_blocks_cache[i] is not None:
+                np_blocks_list.append(np_blocks_cache[i])
+            else:
+                np_blocks_list.append(_to_np_blocks(t))
 
-        if CYTHON_BLAS_AVAILABLE:
-            import numpy as np
+        # Use BLAS plan instead of opt_einsum (2x less Python dispatch overhead)
+        from tenax.contraction._blas_plan import get_cached_blas_plan
 
-            from tenax.contraction._blas_plan import get_cached_blas_plan
-            from tenax.contraction._cython_blas import execute_block_plan
+        # Cache for pre-extracted Cython step params (keyed by shape group)
+        _step_params_cache: dict = {}
 
-            np_blocks_list = [
-                {k: np.asarray(v) for k, v in t.blocks.items()} for t in tensors
+        for combo_keys, output_key in block_plan:
+            combo_arrays = [
+                np_blocks_list[i][combo_keys[i]] for i in range(len(np_blocks_list))
             ]
-
-            # Group block combos by shape signature — each group gets its own
-            # BLAS plan (M, N, K vary across charge sectors).
-            shape_groups: dict[tuple, list] = {}
-            for combo_keys, output_key in block_plan:
-                shapes = tuple(
-                    np_blocks_list[i][k].shape for i, k in enumerate(combo_keys)
+            block_shapes = tuple(a.shape for a in combo_arrays)
+            if block_shapes not in expr_cache:
+                expr_cache[block_shapes] = get_cached_blas_plan(
+                    subscripts, block_shapes
                 )
-                shape_groups.setdefault(shapes, []).append((combo_keys, output_key))
+            plan = expr_cache[block_shapes]
 
-            for shapes_key, combos in shape_groups.items():
-                blas_plan = get_cached_blas_plan(subscripts, shapes_key)
-                group_result = execute_block_plan(blas_plan, combos, np_blocks_list)
-                for key, arr in group_result.items():
-                    output_accum.setdefault(key, []).append(arr)
-        else:
-            # Fallback: per-block opt_einsum with JAX arrays (no host copy)
-            for combo_keys, output_key in block_plan:
-                combo_arrays = [tensors[i].blocks[k] for i, k in enumerate(combo_keys)]
-                block_shapes = tuple(a.shape for a in combo_arrays)
-                if block_shapes in expr_cache:
-                    expr = expr_cache[block_shapes]
-                else:
-                    expr = opt_einsum.contract_expression(
-                        subscripts, *block_shapes, optimize="auto"
-                    )
-                    expr_cache[block_shapes] = expr
-                result_array = expr(*combo_arrays, backend="jax")
-                output_accum.setdefault(output_key, []).append(result_array)
+            if _USE_CYTHON_PLAN:
+                if block_shapes not in _step_params_cache:
+                    _step_params_cache[block_shapes] = [
+                        (
+                            s.left_idx,
+                            s.right_idx,
+                            s.out_idx,
+                            s.m,
+                            s.n,
+                            s.k,
+                            s.left_perm,
+                            s.right_perm,
+                            s.out_shape,
+                        )
+                        for s in plan.steps
+                    ]
+                result_array = _cython_execute_plan(
+                    _step_params_cache[block_shapes],
+                    plan.n_inputs,
+                    plan.n_buffers,
+                    plan.output_perm,
+                    combo_arrays,
+                )
+            else:
+                result_array = plan.execute_numpy(combo_arrays)
+
+            output_accum.setdefault(output_key, []).append(result_array)
     else:
         # Original backtracking approach
         input_part, output_part = subscripts.split("->")
@@ -1491,6 +1684,11 @@ def _blockwise_contract(
             total = total + a
         output_blocks[key] = total
 
+    if return_ba:
+        from tenax.algorithms._block_array import BlockArray
+
+        return BlockArray(blocks=output_blocks, indices=output_indices)
+
     # Build result bypassing SymmetricTensor validation (flows may not
     # satisfy the standard conservation law for environment tensors).
     obj = object.__new__(SymmetricTensor)
@@ -1500,9 +1698,11 @@ def _blockwise_contract(
 
 
 def _assert_symmetric(*tensors: Tensor, context: str) -> None:
-    """Assert all tensors are SymmetricTensor; raise TypeError otherwise."""
+    """Assert all tensors are SymmetricTensor or BlockArray; raise TypeError otherwise."""
+    from tenax.algorithms._block_array import BlockArray
+
     for i, t in enumerate(tensors):
-        if not isinstance(t, SymmetricTensor):
+        if not isinstance(t, (SymmetricTensor, BlockArray)):
             raise TypeError(
                 f"{context}: expected SymmetricTensor for input {i}, "
                 f"got {type(t).__name__}. "
@@ -1533,10 +1733,16 @@ def _update_left_env_symmetric(
     # bar() flips flows so bra virtual legs have opposite flow to ket legs,
     # which is the physically correct convention for environment tensors.
     out_indices = (A.indices[2], mpo_site.indices[3], A_bra.indices[2])
+    tensors = [left_env, A, mpo_site, A_bra]
+    subs = "abc,apd,bpxe,cxf->def"
+    plan = _precompute_block_plan(tensors, subs)
+    np_blocks = [_to_np_blocks(t) for t in tensors]
     result = _blockwise_contract(
-        [left_env, A, mpo_site, A_bra],
-        "abc,apd,bpxe,cxf->def",
+        tensors,
+        subs,
         output_indices=out_indices,
+        block_plan=plan,
+        np_blocks_cache=np_blocks,
     )
     return result
 
@@ -1562,10 +1768,16 @@ def _update_right_env_symmetric(
     # Output: d = B's left virtual, e = W's left bond, f = B_bra's left virtual
     # bar() flips flows for physically correct bra convention.
     out_indices = (B.indices[0], mpo_site.indices[0], B_bra.indices[0])
+    tensors = [right_env, B, mpo_site, B_bra]
+    subs = "abc,dpa,epxb,fxc->def"
+    plan = _precompute_block_plan(tensors, subs)
+    np_blocks = [_to_np_blocks(t) for t in tensors]
     result = _blockwise_contract(
-        [right_env, B, mpo_site, B_bra],
-        "abc,dpa,epxb,fxc->def",
+        tensors,
+        subs,
         output_indices=out_indices,
+        block_plan=plan,
+        np_blocks_cache=np_blocks,
     )
     return result
 
@@ -1607,6 +1819,16 @@ def _two_site_update_symmetric(
     _subs = "abc,apqd,bpse,eqtf,dfg->cstg"
     _plan = _precompute_block_plan([left_env, theta, mpo_l, mpo_r, right_env], _subs)
 
+    # Pre-convert env blocks to NumPy once — only v changes per Lanczos iteration
+    # Tensor order: [left_env, v, mpo_l, mpo_r, right_env]
+    _env_np = [
+        _to_np_blocks(left_env),
+        None,  # v — converted fresh each call
+        _to_np_blocks(mpo_l),
+        _to_np_blocks(mpo_r),
+        _to_np_blocks(right_env),
+    ]
+
     def matvec(v: Tensor) -> Tensor:
         result = _blockwise_contract(
             [left_env, v, mpo_l, mpo_r, right_env],
@@ -1614,6 +1836,7 @@ def _two_site_update_symmetric(
             output_indices=v.indices,
             expr_cache=_matvec_cache,
             block_plan=_plan,
+            np_blocks_cache=_env_np,
         )
         return result
 
@@ -1647,6 +1870,15 @@ def _one_site_update_symmetric(
     _subs = "abc,apd,bpxe,def->cxf"
     _plan = _precompute_block_plan([left_env, site, mpo_site, right_env], _subs)
 
+    # Pre-convert env blocks to NumPy once — only v changes per Lanczos iteration
+    # Tensor order: [left_env, v, mpo_site, right_env]
+    _env_np = [
+        _to_np_blocks(left_env),
+        None,  # v — converted fresh each call
+        _to_np_blocks(mpo_site),
+        _to_np_blocks(right_env),
+    ]
+
     def matvec(v: Tensor) -> Tensor:
         result = _blockwise_contract(
             [left_env, v, mpo_site, right_env],
@@ -1654,6 +1886,7 @@ def _one_site_update_symmetric(
             output_indices=v.indices,
             expr_cache=_matvec_cache,
             block_plan=_plan,
+            np_blocks_cache=_env_np,
         )
         return result
 
@@ -1664,8 +1897,386 @@ def _one_site_update_symmetric(
     return site_opt, energy
 
 
-def _symmetric_ops() -> SweepOps:
+# ------------------------------------------------------------------ #
+# NumPy-only symmetric DMRG updates (no JAX in inner loop)            #
+# ------------------------------------------------------------------ #
+
+
+def _scale_bond_axis_ba(ba: BlockArray, bond_label: str, s: np.ndarray) -> BlockArray:
+    """Scale BlockArray along its bond axis by singular values.
+
+    Mirrors ``_scale_bond_axis_symmetric`` but operates on BlockArray
+    with numpy singular values. Used after SVD to absorb singular values
+    into A or B for canonical form.
+    """
+    from tenax.algorithms._block_array import BlockArray as _BA
+
+    bond_axis = None
+    for i, idx in enumerate(ba.indices):
+        if idx.label == bond_label:
+            bond_axis = i
+            break
+    if bond_axis is None:
+        return ba
+
+    bond_idx = ba.indices[bond_axis]
+    new_blocks = {}
+    for key, block in ba.blocks.items():
+        charge_val = key[bond_axis]
+        positions = np.where(bond_idx.charges == charge_val)[0]
+        block_size = block.shape[bond_axis]
+        scale_slice = s[positions[:block_size]]
+        shape = [1] * block.ndim
+        shape[bond_axis] = block_size
+        new_blocks[key] = block * scale_slice.reshape(shape)
+    return _BA(blocks=new_blocks, indices=ba.indices)
+
+
+def _svd_and_truncate_site_np(
+    theta_ba: BlockArray,
+    site: int,
+    config: DMRGConfig,
+    sweep_right: bool = True,
+) -> tuple[BlockArray, np.ndarray, BlockArray, float]:
+    """SVD of 2-site tensor and truncation -- pure NumPy path.
+
+    Same logic as ``_svd_and_truncate_site`` but operates on BlockArray
+    and uses ``_truncated_svd_symmetric_np`` for the decomposition.
+
+    Args:
+        theta_ba:    2-site wavefunction as BlockArray.
+        site:        Left site index.
+        config:      DMRGConfig.
+        sweep_right: If True, left site gets orthogonality center (A-form);
+                     if False, right site gets it (B-form).
+
+    Returns:
+        (A_ba, singular_values, B_ba, truncation_error) -- all numpy.
+    """
+    from tenax.algorithms._block_array import ba_to_symmetric
+    from tenax.linalg import _truncated_svd_symmetric_np
+
+    labels = [idx.label for idx in theta_ba.indices]
+
+    # Find physical and virtual labels
+    if site > 0:
+        left_virt = f"v{site - 1}_{site}"
+    else:
+        left_virt = "v_-1_0"
+    right_virt = f"v{site + 1}_{site + 2}"
+    left_phys = f"p{site}"
+    right_phys = f"p{site + 1}"
+
+    # Build actual left/right label splits based on what's available
+    left_candidates = {left_virt, left_phys}
+    right_candidates = {right_virt, right_phys}
+    left_labels = [lbl for lbl in labels if lbl in left_candidates]
+    right_labels = [lbl for lbl in labels if lbl in right_candidates]
+
+    if not left_labels or not right_labels:
+        n = len(labels)
+        left_labels = list(labels[: n // 2])
+        right_labels = list(labels[n // 2 :])
+
+    bond_label = f"v{site}_{site + 1}"
+
+    # Convert to SymmetricTensor for SVD (needs full index metadata)
+    theta_sym = ba_to_symmetric(theta_ba)
+
+    # SVD via numpy path -- returns (U_ba, s_final, Vh_ba, s_full)
+    A_ba, s, B_ba, s_full = _truncated_svd_symmetric_np(
+        theta_sym,
+        left_labels=left_labels,
+        right_labels=right_labels,
+        max_singular_values=config.max_bond_dim,
+        max_truncation_err=config.svd_trunc_err,
+        new_bond_label=bond_label,
+        normalize=False,
+    )
+
+    # Compute truncation error from the full singular-value spectrum
+    n_keep = len(s)
+    if len(s_full) > n_keep:
+        total_sq = np.sum(s_full**2)
+        trunc_sq = np.sum(s_full[n_keep:] ** 2)
+        trunc_err = float(np.sqrt(trunc_sq / (total_sq + 1e-15)))
+    else:
+        trunc_err = 0.0
+
+    # Absorb singular values into the tensor moving away from the
+    # orthogonality center so the MPS stays in canonical form.
+    if sweep_right:
+        B_ba = _scale_bond_axis_ba(B_ba, bond_label, s)
+    else:
+        A_ba = _scale_bond_axis_ba(A_ba, bond_label, s)
+
+    return A_ba, s, B_ba, trunc_err
+
+
+def _two_site_update_symmetric_np(
+    site_l: Tensor,
+    site_r: Tensor,
+    left_env: Tensor,
+    mpo_l: Tensor,
+    mpo_r: Tensor,
+    right_env: Tensor,
+    config: DMRGConfig,
+) -> tuple[Tensor, float]:
+    """Perform 2-site DMRG update using numpy-only inner loop.
+
+    Accepts SymmetricTensor inputs (matching the SweepOps callback
+    signature) and returns SymmetricTensor + float. BlockArray is used
+    internally to avoid JAX overhead in the Lanczos iterations.
+    """
+    from tenax.algorithms._block_array import (
+        BlockArray,
+        symmetric_to_ba,
+    )
+
+    _assert_symmetric(
+        site_l,
+        site_r,
+        left_env,
+        mpo_l,
+        mpo_r,
+        right_env,
+        context="_two_site_update_symmetric_np",
+    )
+
+    # Convert inputs to BlockArray -- stays in numpy throughout
+    site_l_ba = (
+        symmetric_to_ba(site_l) if not isinstance(site_l, BlockArray) else site_l
+    )
+    site_r_ba = (
+        symmetric_to_ba(site_r) if not isinstance(site_r, BlockArray) else site_r
+    )
+
+    labels_l = site_l_ba.labels()
+    labels_r = site_r_ba.labels()
+    shared = set(labels_l) & set(labels_r)
+
+    if shared:
+        # Build einsum subscripts from labels
+        all_unique_labels = list(dict.fromkeys(list(labels_l) + list(labels_r)))
+        label_to_char = {lb: chr(97 + i) for i, lb in enumerate(all_unique_labels)}
+        input_l = "".join(label_to_char[lb] for lb in labels_l)
+        input_r = "".join(label_to_char[lb] for lb in labels_r)
+        output_chars = "".join(label_to_char[lb] for lb in labels_l if lb not in shared)
+        output_chars += "".join(
+            label_to_char[lb] for lb in labels_r if lb not in shared
+        )
+        theta_subs = f"{input_l},{input_r}->{output_chars}"
+
+        # Build output indices from free legs
+        out_indices = tuple(
+            idx for idx in site_l_ba.indices if idx.label not in shared
+        ) + tuple(idx for idx in site_r_ba.indices if idx.label not in shared)
+
+        theta_plan = _precompute_block_plan([site_l_ba, site_r_ba], theta_subs)
+        np_blocks = [site_l_ba.blocks, site_r_ba.blocks]
+        theta_ba = _blockwise_contract(
+            [site_l_ba, site_r_ba],
+            theta_subs,
+            output_indices=out_indices,
+            block_plan=theta_plan,
+            np_blocks_cache=np_blocks,
+            return_ba=True,
+        )
+    else:
+        theta_ba = site_l_ba
+
+    # Shared cache for opt_einsum expressions across Lanczos iterations
+    _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
+
+    # Precompute block plan once
+    _subs = "abc,apqd,bpse,eqtf,dfg->cstg"
+    _plan = _precompute_block_plan([left_env, theta_ba, mpo_l, mpo_r, right_env], _subs)
+
+    # Pre-convert env blocks to NumPy once
+    _env_np = [
+        _to_np_blocks(left_env)
+        if not isinstance(left_env, BlockArray)
+        else left_env.blocks,
+        None,  # v -- converted fresh each call
+        _to_np_blocks(mpo_l) if not isinstance(mpo_l, BlockArray) else mpo_l.blocks,
+        _to_np_blocks(mpo_r) if not isinstance(mpo_r, BlockArray) else mpo_r.blocks,
+        _to_np_blocks(right_env)
+        if not isinstance(right_env, BlockArray)
+        else right_env.blocks,
+    ]
+
+    _out_indices = theta_ba.indices  # fixed across Lanczos iterations
+
+    def matvec(v_ba: BlockArray) -> BlockArray:
+        # Pass v blocks directly as np_blocks_cache — avoids numpy→JAX→numpy roundtrip
+        _env_np[1] = v_ba.blocks
+        return _blockwise_contract(
+            [left_env, theta_ba, mpo_l, mpo_r, right_env],
+            _subs,
+            output_indices=_out_indices,
+            expr_cache=_cache,
+            block_plan=_plan,
+            np_blocks_cache=_env_np,
+            return_ba=True,
+        )
+
+    energy, theta_opt_ba = _lanczos_solve_np(
+        matvec, theta_ba, config.lanczos_max_iter, config.lanczos_tol
+    )
+
+    # Return BlockArray directly — stays as numpy through sweep loop.
+    # Converted to SymmetricTensor only at the end of dmrg().
+    return theta_opt_ba, energy
+
+
+def _one_site_update_symmetric_np(
+    site: Tensor,
+    left_env: Tensor,
+    mpo_site: Tensor,
+    right_env: Tensor,
+    config: DMRGConfig,
+) -> tuple[Tensor, float]:
+    """Perform 1-site DMRG update using numpy-only inner loop.
+
+    Accepts SymmetricTensor inputs (matching the SweepOps callback
+    signature) and returns SymmetricTensor + float. BlockArray is used
+    internally to avoid JAX overhead in the Lanczos iterations.
+    """
+    from tenax.algorithms._block_array import (
+        BlockArray,
+        ba_to_symmetric,
+        symmetric_to_ba,
+    )
+
+    _assert_symmetric(
+        site,
+        left_env,
+        mpo_site,
+        right_env,
+        context="_one_site_update_symmetric_np",
+    )
+
+    # Convert site to BlockArray -- stays in numpy throughout
+    site_ba = symmetric_to_ba(site) if not isinstance(site, BlockArray) else site
+
+    # Shared cache for opt_einsum expressions across Lanczos iterations
+    _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
+
+    # Precompute block plan once
+    _subs = "abc,apd,bpxe,def->cxf"
+    _plan = _precompute_block_plan([left_env, site_ba, mpo_site, right_env], _subs)
+
+    # Pre-convert env blocks to NumPy once
+    _env_np = [
+        _to_np_blocks(left_env)
+        if not isinstance(left_env, BlockArray)
+        else left_env.blocks,
+        None,  # v -- converted fresh each call
+        _to_np_blocks(mpo_site)
+        if not isinstance(mpo_site, BlockArray)
+        else mpo_site.blocks,
+        _to_np_blocks(right_env)
+        if not isinstance(right_env, BlockArray)
+        else right_env.blocks,
+    ]
+
+    _out_indices = site_ba.indices
+
+    def matvec(v_ba: BlockArray) -> BlockArray:
+        _env_np[1] = v_ba.blocks
+        return _blockwise_contract(
+            [left_env, site_ba, mpo_site, right_env],
+            _subs,
+            output_indices=_out_indices,
+            expr_cache=_cache,
+            block_plan=_plan,
+            np_blocks_cache=_env_np,
+            return_ba=True,
+        )
+
+    energy, site_opt_ba = _lanczos_solve_np(
+        matvec, site_ba, config.lanczos_max_iter, config.lanczos_tol
+    )
+
+    # 1-site mode needs SymmetricTensor for QR/relabel in sweep loop
+    return ba_to_symmetric(site_opt_ba), energy
+
+
+def _update_left_env_np(
+    left_env: Tensor,
+    mps_site: Tensor,
+    mpo_site: Tensor,
+) -> SymmetricTensor:
+    """Update left environment, accepting BlockArray or SymmetricTensor for MPS site."""
+    from tenax.algorithms._block_array import BlockArray, ba_bar
+
+    if isinstance(mps_site, BlockArray):
+        A = mps_site
+        A_bra = ba_bar(A)
+    else:
+        A = mps_site
+        A_bra = A.bar()
+
+    out_indices = (A.indices[2], mpo_site.indices[3], A_bra.indices[2])
+    tensors = [left_env, A, mpo_site, A_bra]
+    subs = "abc,apd,bpxe,cxf->def"
+    plan = _precompute_block_plan(tensors, subs)
+    np_blocks = [
+        _to_np_blocks(t) if not isinstance(t, BlockArray) else t.blocks for t in tensors
+    ]
+    return _blockwise_contract(
+        tensors,
+        subs,
+        output_indices=out_indices,
+        block_plan=plan,
+        np_blocks_cache=np_blocks,
+        return_ba=True,
+    )
+
+
+def _update_right_env_np(
+    right_env: Tensor,
+    mps_site: Tensor,
+    mpo_site: Tensor,
+) -> SymmetricTensor:
+    """Update right environment, accepting BlockArray or SymmetricTensor for MPS site."""
+    from tenax.algorithms._block_array import BlockArray, ba_bar
+
+    if isinstance(mps_site, BlockArray):
+        B = mps_site
+        B_bra = ba_bar(B)
+    else:
+        B = mps_site
+        B_bra = B.bar()
+
+    out_indices = (B.indices[0], mpo_site.indices[0], B_bra.indices[0])
+    tensors = [right_env, B, mpo_site, B_bra]
+    subs = "abc,dpa,epxb,fxc->def"
+    plan = _precompute_block_plan(tensors, subs)
+    np_blocks = [
+        _to_np_blocks(t) if not isinstance(t, BlockArray) else t.blocks for t in tensors
+    ]
+    return _blockwise_contract(
+        tensors,
+        subs,
+        output_indices=out_indices,
+        block_plan=plan,
+        np_blocks_cache=np_blocks,
+        return_ba=True,
+    )
+
+
+def _symmetric_ops(config: DMRGConfig) -> SweepOps:
     """Return the block-sparse symmetric backend callbacks."""
+    if config.numpy_blockwise:
+        return SweepOps(
+            build_trivial_left_env=_build_trivial_left_env_symmetric,
+            build_trivial_right_env=_build_trivial_right_env_symmetric,
+            update_left_env=_update_left_env_np,
+            update_right_env=_update_right_env_np,
+            two_site_update=_two_site_update_symmetric_np,
+            one_site_update=_one_site_update_symmetric_np,
+        )
     return SweepOps(
         build_trivial_left_env=_build_trivial_left_env_symmetric,
         build_trivial_right_env=_build_trivial_right_env_symmetric,
