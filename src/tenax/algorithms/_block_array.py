@@ -89,6 +89,24 @@ def ba_sub(a: BlockArray, b: BlockArray) -> BlockArray:
     return BlockArray(blocks=result, indices=a.indices)
 
 
+def ba_sub_scaled(a: BlockArray, b: BlockArray, scalar: float) -> BlockArray:
+    """Compute a - scalar * b without creating an intermediate dict.
+
+    Fuses ba_sub + ba_scale into one pass: ``result[k] = a[k] - scalar * b[k]``.
+    """
+    result: dict[tuple[int, ...], np.ndarray] = {}
+    for k, ak in a.blocks.items():
+        bk = b.blocks.get(k)
+        if bk is not None:
+            result[k] = ak - scalar * bk
+        else:
+            result[k] = ak.copy()
+    for k in b.blocks:
+        if k not in a.blocks:
+            result[k] = -(scalar * b.blocks[k])
+    return BlockArray(blocks=result, indices=a.indices)
+
+
 def ba_inner(a: BlockArray, b: BlockArray) -> float:
     """Frobenius inner product: sum of element-wise products over shared blocks."""
     if _HAS_CYTHON_BA:

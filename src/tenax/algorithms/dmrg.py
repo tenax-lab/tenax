@@ -1299,7 +1299,7 @@ def _lanczos_solve_np(
         ba_inner,
         ba_norm,
         ba_scale,
-        ba_sub,
+        ba_sub_scaled,
     )
 
     v_nrm = ba_norm(initial)
@@ -1314,13 +1314,14 @@ def _lanczos_solve_np(
         alpha_val = ba_inner(basis[-1], w)
         alphas.append(alpha_val)
 
-        w = ba_sub(w, ba_scale(basis[-1], alpha_val))
+        # w = w - alpha * v_k  (fused, no intermediate dict)
+        w = ba_sub_scaled(w, basis[-1], alpha_val)
         if step > 0:
-            w = ba_sub(w, ba_scale(basis[-2], betas[-1]))
+            w = ba_sub_scaled(w, basis[-2], betas[-1])
 
-        # Full reorthogonalization
+        # Full reorthogonalization (fused sub+scale)
         for q in basis:
-            w = ba_sub(w, ba_scale(q, ba_inner(q, w)))
+            w = ba_sub_scaled(w, q, ba_inner(q, w))
 
         beta_val = ba_norm(w)
         betas.append(beta_val)

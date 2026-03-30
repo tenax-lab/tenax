@@ -379,7 +379,7 @@ def build_blas_plan(subscripts: str, shapes: list[tuple[int, ...]]) -> BlasExecP
 # ------------------------------------------------------------------ #
 
 
-@functools.lru_cache(maxsize=256)
+@functools.lru_cache(maxsize=8192)
 def get_cached_blas_plan(
     subscripts: str,
     shapes: tuple[tuple[int, ...], ...],
