@@ -1281,6 +1281,7 @@ def _blockwise_contract(
     expr_cache: dict[tuple[tuple[int, ...], ...], Any] | None = None,
     block_plan: list[tuple[list[tuple[int, ...]], str]] | None = None,
     np_blocks_cache: list[dict | None] | None = None,
+    return_ba: bool = False,
 ) -> SymmetricTensor:
     """Contract multiple SymmetricTensors using block-level charge matching.
 
@@ -1408,6 +1409,11 @@ def _blockwise_contract(
         for a in arrays[1:]:
             total = total + a
         output_blocks[key] = total
+
+    if return_ba:
+        from tenax.algorithms._block_array import BlockArray
+
+        return BlockArray(blocks=output_blocks, indices=output_indices)
 
     # Build result bypassing SymmetricTensor validation (flows may not
     # satisfy the standard conservation law for environment tensors).
