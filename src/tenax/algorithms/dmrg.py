@@ -2087,14 +2087,14 @@ def _update_left_env_np(
     np_blocks = [
         _to_np_blocks(t) if not isinstance(t, BlockArray) else t.blocks for t in tensors
     ]
-    result = _blockwise_contract(
+    return _blockwise_contract(
         tensors,
         subs,
         output_indices=out_indices,
         block_plan=plan,
         np_blocks_cache=np_blocks,
+        return_ba=True,
     )
-    return result
 
 
 def _update_right_env_np(
@@ -2119,14 +2119,14 @@ def _update_right_env_np(
     np_blocks = [
         _to_np_blocks(t) if not isinstance(t, BlockArray) else t.blocks for t in tensors
     ]
-    result = _blockwise_contract(
+    return _blockwise_contract(
         tensors,
         subs,
         output_indices=out_indices,
         block_plan=plan,
         np_blocks_cache=np_blocks,
+        return_ba=True,
     )
-    return result
 
 
 def _symmetric_ops(config: DMRGConfig) -> SweepOps:
