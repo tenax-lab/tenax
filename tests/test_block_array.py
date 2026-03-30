@@ -280,10 +280,6 @@ class TestComplexBlockArray:
         result = ba_norm(complex_ba)
         np.testing.assert_allclose(result, expected, rtol=1e-12)
 
-    @pytest.mark.xfail(
-        reason="Cython BLAS dispatch needs complex support (Task 2)",
-        strict=False,
-    )
     def test_axpy_complex(self, complex_ba, another_complex_ba):
         """ba_axpy works with complex arrays and real scalar."""
         alpha = 2.0
@@ -295,10 +291,6 @@ class TestComplexBlockArray:
         for key in expected:
             np.testing.assert_allclose(another_complex_ba.blocks[key], expected[key])
 
-    @pytest.mark.xfail(
-        reason="Cython BLAS dispatch needs complex support (Task 2)",
-        strict=False,
-    )
     def test_scale_inplace_complex(self, complex_ba):
         """ba_scale_inplace works with complex arrays."""
         expected = {k: v * 3.0 for k, v in complex_ba.blocks.items()}
@@ -373,3 +365,86 @@ class TestRoundtrip:
                 np.asarray(t.blocks[key]),
                 rtol=1e-12,
             )
+
+
+class TestCythonComplexBa:
+    """Test Cython BA functions with complex dtypes."""
+
+    @pytest.fixture
+    def require_cython(self):
+        try:
+            from tenax.contraction._cython_blas import cython_ba_inner
+        except ImportError:
+            pytest.skip("Cython BA extension not available")
+
+    @pytest.fixture
+    def complex_blocks(self):
+        rng = np.random.default_rng(42)
+        return {
+            (0,): rng.standard_normal((3, 4)) + 1j * rng.standard_normal((3, 4)),
+            (1,): rng.standard_normal((2, 5)) + 1j * rng.standard_normal((2, 5)),
+        }
+
+    @pytest.fixture
+    def complex_blocks_b(self):
+        rng = np.random.default_rng(99)
+        return {
+            (0,): rng.standard_normal((3, 4)) + 1j * rng.standard_normal((3, 4)),
+            (1,): rng.standard_normal((2, 5)) + 1j * rng.standard_normal((2, 5)),
+        }
+
+    def test_cython_inner_complex128(
+        self, require_cython, complex_blocks, complex_blocks_b
+    ):
+        from tenax.contraction._cython_blas import cython_ba_inner
+
+        expected = sum(
+            np.vdot(complex_blocks[k], complex_blocks_b[k]) for k in complex_blocks
+        )
+        result = cython_ba_inner(complex_blocks, complex_blocks_b)
+        np.testing.assert_allclose(result, expected.real, rtol=1e-12)
+
+    def test_cython_inner_self_real(self, require_cython, complex_blocks):
+        from tenax.contraction._cython_blas import cython_ba_inner
+
+        result = cython_ba_inner(complex_blocks, complex_blocks)
+        assert result > 0
+        expected = sum(np.vdot(v, v).real for v in complex_blocks.values())
+        np.testing.assert_allclose(result, expected, rtol=1e-12)
+
+    def test_cython_axpy_complex128(
+        self, require_cython, complex_blocks, complex_blocks_b
+    ):
+        from tenax.contraction._cython_blas import cython_ba_axpy
+
+        alpha = 2.5
+        expected = {
+            k: complex_blocks_b[k] + alpha * complex_blocks[k] for k in complex_blocks
+        }
+        y = {k: v.copy() for k, v in complex_blocks_b.items()}
+        cython_ba_axpy(complex_blocks, y, alpha)
+        for k in expected:
+            np.testing.assert_allclose(y[k], expected[k], rtol=1e-12)
+
+    def test_cython_scale_complex128(self, require_cython, complex_blocks):
+        from tenax.contraction._cython_blas import cython_ba_scale_inplace
+
+        blocks = {k: v.copy() for k, v in complex_blocks.items()}
+        expected = {k: v * 3.0 for k, v in complex_blocks.items()}
+        cython_ba_scale_inplace(blocks, 3.0)
+        for k in expected:
+            np.testing.assert_allclose(blocks[k], expected[k])
+
+    def test_cython_sub_scaled_complex128(
+        self, require_cython, complex_blocks, complex_blocks_b
+    ):
+        from tenax.contraction._cython_blas import cython_ba_sub_scaled_inplace
+
+        scalar = 1.5
+        w = {k: v.copy() for k, v in complex_blocks.items()}
+        expected = {
+            k: complex_blocks[k] - scalar * complex_blocks_b[k] for k in complex_blocks
+        }
+        cython_ba_sub_scaled_inplace(w, complex_blocks_b, scalar)
+        for k in expected:
+            np.testing.assert_allclose(w[k], expected[k], rtol=1e-12)

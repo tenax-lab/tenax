@@ -113,11 +113,7 @@ def ba_inner(a: BlockArray, b: BlockArray) -> float:
     Uses ``np.vdot`` which conjugates the first argument, giving the correct
     Hermitian inner product for complex data and equivalent behavior for real.
     """
-    if (
-        _HAS_CYTHON_BA
-        and a.blocks
-        and not np.iscomplexobj(next(iter(a.blocks.values())))
-    ):
+    if _HAS_CYTHON_BA and a.blocks:
         return _c_inner(a.blocks, b.blocks)
     total = 0.0
     for k in a.blocks:

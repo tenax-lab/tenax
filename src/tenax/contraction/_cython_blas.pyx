@@ -13,6 +13,13 @@ from scipy.linalg.cython_blas cimport dgemm as _dgemm
 from scipy.linalg.cython_blas cimport dscal as _dscal
 from scipy.linalg.cython_blas cimport sgemm as _sgemm
 from scipy.linalg.cython_blas cimport zgemm as _zgemm
+from scipy.linalg.cython_blas cimport cgemm as _cgemm
+from scipy.linalg.cython_blas cimport zdotc as _zdotc
+from scipy.linalg.cython_blas cimport cdotc as _cdotc
+from scipy.linalg.cython_blas cimport zaxpy as _zaxpy
+from scipy.linalg.cython_blas cimport caxpy as _caxpy
+from scipy.linalg.cython_blas cimport zscal as _zscal
+from scipy.linalg.cython_blas cimport cscal as _cscal
 
 DEF MAX_NDIM = 8
 
@@ -760,32 +767,93 @@ cdef cnp.ndarray _c_transpose(cnp.ndarray arr, tuple perm, int dtype_code):
 # ------------------------------------------------------------------ #
 
 def cython_ba_inner(dict blocks_a, dict blocks_b):
-    """Fast Frobenius inner product for block dicts using BLAS ddot.
+    """Fast Hermitian inner product for block dicts using BLAS dot/dotc.
 
-    Computes sum_k dot(a[k].ravel(), b[k].ravel()) over shared keys.
+    Computes Re(sum_k vdot(a[k], b[k])) over shared keys.
+    For real: ddot.  For complex128: zdotc.  For complex64: cdotc.
     Handles read-only arrays (e.g. from JAX) by copying when necessary.
     """
     cdef double total = 0.0
     cdef int n, inc = 1
-    cdef double[::1] a_flat, b_flat
+    cdef double[::1] a_flat_d, b_flat_d
+    cdef double complex[::1] a_flat_z, b_flat_z
+    cdef float complex[::1] a_flat_c, b_flat_c
+    cdef double complex z_result
+    cdef float complex c_result
+    cdef int dtype_code = -1  # 0=f64, 1=z128, 2=c64, -1=unknown
 
+    # Detect dtype from first shared block
     for k in blocks_a:
         bk = blocks_b.get(k)
         if bk is not None:
-            ak = blocks_a[k]
-            # np.array with copy=False copies only when dtype differs or
-            # the source is read-only (JAX arrays).
-            a_arr = np.asarray(ak, dtype=np.float64)
-            if not a_arr.flags.writeable:
-                a_arr = a_arr.copy()
-            a_flat = np.ascontiguousarray(a_arr).ravel()
-            b_arr = np.asarray(bk, dtype=np.float64)
-            if not b_arr.flags.writeable:
-                b_arr = b_arr.copy()
-            b_flat = np.ascontiguousarray(b_arr).ravel()
-            n = a_flat.shape[0]
-            with nogil:
-                total += _ddot(&n, &a_flat[0], &inc, &b_flat[0], &inc)
+            dt = blocks_a[k].dtype
+            if dt == np.float64:
+                dtype_code = 0
+            elif dt == np.complex128:
+                dtype_code = 1
+            elif dt == np.complex64:
+                dtype_code = 2
+            break
+
+    if dtype_code == 0:
+        # float64 path: ddot
+        for k in blocks_a:
+            bk = blocks_b.get(k)
+            if bk is not None:
+                ak = blocks_a[k]
+                a_arr = np.asarray(ak, dtype=np.float64)
+                if not a_arr.flags.writeable:
+                    a_arr = a_arr.copy()
+                a_flat_d = np.ascontiguousarray(a_arr).ravel()
+                b_arr = np.asarray(bk, dtype=np.float64)
+                if not b_arr.flags.writeable:
+                    b_arr = b_arr.copy()
+                b_flat_d = np.ascontiguousarray(b_arr).ravel()
+                n = a_flat_d.shape[0]
+                with nogil:
+                    total += _ddot(&n, &a_flat_d[0], &inc, &b_flat_d[0], &inc)
+    elif dtype_code == 1:
+        # complex128 path: zdotc (conjugates first arg)
+        for k in blocks_a:
+            bk = blocks_b.get(k)
+            if bk is not None:
+                ak = blocks_a[k]
+                a_arr = np.asarray(ak, dtype=np.complex128)
+                if not a_arr.flags.writeable:
+                    a_arr = a_arr.copy()
+                a_flat_z = np.ascontiguousarray(a_arr).ravel()
+                b_arr = np.asarray(bk, dtype=np.complex128)
+                if not b_arr.flags.writeable:
+                    b_arr = b_arr.copy()
+                b_flat_z = np.ascontiguousarray(b_arr).ravel()
+                n = a_flat_z.shape[0]
+                with nogil:
+                    z_result = _zdotc(&n, &a_flat_z[0], &inc, &b_flat_z[0], &inc)
+                total += z_result.real
+    elif dtype_code == 2:
+        # complex64 path: cdotc
+        for k in blocks_a:
+            bk = blocks_b.get(k)
+            if bk is not None:
+                ak = blocks_a[k]
+                a_arr = np.asarray(ak, dtype=np.complex64)
+                if not a_arr.flags.writeable:
+                    a_arr = a_arr.copy()
+                a_flat_c = np.ascontiguousarray(a_arr).ravel()
+                b_arr = np.asarray(bk, dtype=np.complex64)
+                if not b_arr.flags.writeable:
+                    b_arr = b_arr.copy()
+                b_flat_c = np.ascontiguousarray(b_arr).ravel()
+                n = a_flat_c.shape[0]
+                with nogil:
+                    c_result = _cdotc(&n, &a_flat_c[0], &inc, &b_flat_c[0], &inc)
+                total += c_result.real
+    else:
+        # fallback: numpy vdot
+        for k in blocks_a:
+            bk = blocks_b.get(k)
+            if bk is not None:
+                total += np.vdot(blocks_a[k], bk).real
     return total
 
 
@@ -794,36 +862,119 @@ def cython_ba_axpy(dict blocks_x, dict blocks_y, double alpha):
 
     Used in Lanczos for orthogonalization: w -= q * inner(q, w).
     Modifies blocks_y in-place.  blocks_y arrays must be writable.
+    Dispatches to daxpy/zaxpy/caxpy based on dtype.
     """
     cdef int n, inc = 1
-    cdef double a = alpha
-    cdef double[::1] x_flat, y_flat
+    cdef double a_d = alpha
+    cdef double complex a_z = alpha
+    cdef float complex a_c = <float complex>alpha
+    cdef double[::1] x_flat_d, y_flat_d
+    cdef double complex[::1] x_flat_z, y_flat_z
+    cdef float complex[::1] x_flat_c, y_flat_c
+    cdef int dtype_code = -1
 
+    # Detect dtype from first shared block
     for k in blocks_x:
         yk = blocks_y.get(k)
         if yk is not None:
-            xk = blocks_x[k]
-            x_arr = np.asarray(xk, dtype=np.float64)
-            if not x_arr.flags.writeable:
-                x_arr = x_arr.copy()
-            x_flat = np.ascontiguousarray(x_arr).ravel()
-            y_flat = yk.ravel()
-            n = x_flat.shape[0]
-            with nogil:
-                _daxpy(&n, &a, &x_flat[0], &inc, &y_flat[0], &inc)
+            dt = blocks_x[k].dtype
+            if dt == np.float64:
+                dtype_code = 0
+            elif dt == np.complex128:
+                dtype_code = 1
+            elif dt == np.complex64:
+                dtype_code = 2
+            break
+
+    if dtype_code == 0:
+        for k in blocks_x:
+            yk = blocks_y.get(k)
+            if yk is not None:
+                xk = blocks_x[k]
+                x_arr = np.asarray(xk, dtype=np.float64)
+                if not x_arr.flags.writeable:
+                    x_arr = x_arr.copy()
+                x_flat_d = np.ascontiguousarray(x_arr).ravel()
+                y_flat_d = yk.ravel()
+                n = x_flat_d.shape[0]
+                with nogil:
+                    _daxpy(&n, &a_d, &x_flat_d[0], &inc, &y_flat_d[0], &inc)
+    elif dtype_code == 1:
+        for k in blocks_x:
+            yk = blocks_y.get(k)
+            if yk is not None:
+                xk = blocks_x[k]
+                x_arr = np.asarray(xk, dtype=np.complex128)
+                if not x_arr.flags.writeable:
+                    x_arr = x_arr.copy()
+                x_flat_z = np.ascontiguousarray(x_arr).ravel()
+                y_flat_z = yk.ravel()
+                n = x_flat_z.shape[0]
+                with nogil:
+                    _zaxpy(&n, &a_z, &x_flat_z[0], &inc, &y_flat_z[0], &inc)
+    elif dtype_code == 2:
+        for k in blocks_x:
+            yk = blocks_y.get(k)
+            if yk is not None:
+                xk = blocks_x[k]
+                x_arr = np.asarray(xk, dtype=np.complex64)
+                if not x_arr.flags.writeable:
+                    x_arr = x_arr.copy()
+                x_flat_c = np.ascontiguousarray(x_arr).ravel()
+                y_flat_c = yk.ravel()
+                n = x_flat_c.shape[0]
+                with nogil:
+                    _caxpy(&n, &a_c, &x_flat_c[0], &inc, &y_flat_c[0], &inc)
+    else:
+        for k in blocks_x:
+            yk = blocks_y.get(k)
+            if yk is not None:
+                yk += alpha * blocks_x[k]
 
 
 def cython_ba_scale_inplace(dict blocks, double scalar):
-    """Scale all blocks in-place by scalar using BLAS dscal."""
+    """Scale all blocks in-place by scalar using BLAS dscal/zscal/cscal."""
     cdef int n, inc = 1
-    cdef double s = scalar
-    cdef double[::1] flat
+    cdef double s_d = scalar
+    cdef double complex s_z = scalar
+    cdef float complex s_c = <float complex>scalar
+    cdef double[::1] flat_d
+    cdef double complex[::1] flat_z
+    cdef float complex[::1] flat_c
+    cdef int dtype_code = -1
 
+    # Detect dtype from first block
     for k in blocks:
-        flat = blocks[k].ravel()
-        n = flat.shape[0]
-        with nogil:
-            _dscal(&n, &s, &flat[0], &inc)
+        dt = blocks[k].dtype
+        if dt == np.float64:
+            dtype_code = 0
+        elif dt == np.complex128:
+            dtype_code = 1
+        elif dt == np.complex64:
+            dtype_code = 2
+        break
+
+    if dtype_code == 0:
+        for k in blocks:
+            flat_d = blocks[k].ravel()
+            n = flat_d.shape[0]
+            with nogil:
+                _dscal(&n, &s_d, &flat_d[0], &inc)
+    elif dtype_code == 1:
+        for k in blocks:
+            flat_z = blocks[k].ravel()
+            n = flat_z.shape[0]
+            with nogil:
+                _zscal(&n, &s_z, &flat_z[0], &inc)
+    elif dtype_code == 2:
+        for k in blocks:
+            flat_c = blocks[k].ravel()
+            n = flat_c.shape[0]
+            with nogil:
+                _cscal(&n, &s_c, &flat_c[0], &inc)
+    else:
+        for k in blocks:
+            blocks[k] *= scalar
 
 
 # ------------------------------------------------------------------ #
@@ -914,21 +1065,80 @@ def cython_ba_sub_scaled_inplace(dict w_blocks, dict q_blocks, double scalar):
 
     Replaces ``ba_sub_scaled`` in the Lanczos hot loop, avoiding dict and
     array creation on every call (~87K calls per DMRG run).
+    Dispatches to daxpy/zaxpy/caxpy based on dtype.
     """
-    cdef double neg_scalar = -scalar
+    cdef double neg_d = -scalar
+    cdef double complex neg_z = -scalar
+    cdef float complex neg_c = <float complex>(-scalar)
     cdef int n, inc = 1
-    cdef double[::1] w_flat, q_flat
+    cdef double[::1] w_flat_d, q_flat_d
+    cdef double complex[::1] w_flat_z, q_flat_z
+    cdef float complex[::1] w_flat_c, q_flat_c
+    cdef int dtype_code = -1
 
+    # Detect dtype from first shared block
     for k in q_blocks:
         wk = w_blocks.get(k)
         if wk is not None:
-            qk = q_blocks[k]
-            # Ensure writable (JAX arrays or frozen buffers may not be)
-            if not wk.flags.writeable:
-                wk = wk.copy()
-                w_blocks[k] = wk
-            w_flat = wk.ravel()
-            q_flat = np.ascontiguousarray(qk).ravel()
-            n = w_flat.shape[0]
-            with nogil:
-                _daxpy(&n, &neg_scalar, &q_flat[0], &inc, &w_flat[0], &inc)
+            dt = wk.dtype
+            if dt == np.float64:
+                dtype_code = 0
+            elif dt == np.complex128:
+                dtype_code = 1
+            elif dt == np.complex64:
+                dtype_code = 2
+            break
+
+    if dtype_code == 0:
+        for k in q_blocks:
+            wk = w_blocks.get(k)
+            if wk is not None:
+                qk = q_blocks[k]
+                if not wk.flags.writeable:
+                    wk = wk.copy()
+                    w_blocks[k] = wk
+                w_flat_d = wk.ravel()
+                q_flat_d = np.ascontiguousarray(qk).ravel()
+                n = w_flat_d.shape[0]
+                with nogil:
+                    _daxpy(&n, &neg_d, &q_flat_d[0], &inc, &w_flat_d[0], &inc)
+    elif dtype_code == 1:
+        for k in q_blocks:
+            wk = w_blocks.get(k)
+            if wk is not None:
+                qk = q_blocks[k]
+                if not wk.flags.writeable:
+                    wk = wk.copy()
+                    w_blocks[k] = wk
+                w_flat_z = wk.ravel()
+                q_arr = np.asarray(qk, dtype=np.complex128)
+                if not q_arr.flags.writeable:
+                    q_arr = q_arr.copy()
+                q_flat_z = np.ascontiguousarray(q_arr).ravel()
+                n = w_flat_z.shape[0]
+                with nogil:
+                    _zaxpy(&n, &neg_z, &q_flat_z[0], &inc, &w_flat_z[0], &inc)
+    elif dtype_code == 2:
+        for k in q_blocks:
+            wk = w_blocks.get(k)
+            if wk is not None:
+                qk = q_blocks[k]
+                if not wk.flags.writeable:
+                    wk = wk.copy()
+                    w_blocks[k] = wk
+                w_flat_c = wk.ravel()
+                q_arr = np.asarray(qk, dtype=np.complex64)
+                if not q_arr.flags.writeable:
+                    q_arr = q_arr.copy()
+                q_flat_c = np.ascontiguousarray(q_arr).ravel()
+                n = w_flat_c.shape[0]
+                with nogil:
+                    _caxpy(&n, &neg_c, &q_flat_c[0], &inc, &w_flat_c[0], &inc)
+    else:
+        for k in q_blocks:
+            wk = w_blocks.get(k)
+            if wk is not None:
+                if not wk.flags.writeable:
+                    wk = wk.copy()
+                    w_blocks[k] = wk
+                wk -= scalar * q_blocks[k]
