@@ -1483,7 +1483,9 @@ def _blockwise_contract(
         from tenax.contraction._blas_plan import get_cached_blas_plan
 
         for combo_keys, output_key in block_plan:
-            combo_arrays = [np_blocks_list[i][k] for i, k in enumerate(combo_keys)]
+            combo_arrays = [
+                np_blocks_list[i][combo_keys[i]] for i in range(len(np_blocks_list))
+            ]
             block_shapes = tuple(a.shape for a in combo_arrays)
             if block_shapes not in expr_cache:
                 expr_cache[block_shapes] = get_cached_blas_plan(
