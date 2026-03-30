@@ -1293,13 +1293,14 @@ def _idmrg_sweep_symmetric(
             ]
 
             theta_ba = symmetric_to_ba(theta)
+            _out_indices = theta_ba.indices
 
             def matvec_np(v_ba: BlockArray) -> BlockArray:
-                v_sym = ba_to_symmetric(v_ba)
+                _env_np[1] = v_ba.blocks
                 return _blockwise_contract(
-                    [L_env, v_sym, W_sym, W_sym, R_env],
+                    [L_env, theta, W_sym, W_sym, R_env],
                     _subs,
-                    output_indices=v_sym.indices,
+                    output_indices=_out_indices,
                     expr_cache=_matvec_cache,
                     block_plan=_plan,
                     np_blocks_cache=_env_np,

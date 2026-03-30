@@ -1887,13 +1887,15 @@ def _two_site_update_symmetric_np(
 
     # Convert theta to BlockArray for numpy Lanczos
     theta_ba = symmetric_to_ba(theta)
+    _out_indices = theta_ba.indices  # fixed across Lanczos iterations
 
     def matvec(v_ba: BlockArray) -> BlockArray:
-        v_sym = ba_to_symmetric(v_ba)
+        # Pass v blocks directly as np_blocks_cache — avoids numpy→JAX→numpy roundtrip
+        _env_np[1] = v_ba.blocks
         return _blockwise_contract(
-            [left_env, v_sym, mpo_l, mpo_r, right_env],
+            [left_env, theta, mpo_l, mpo_r, right_env],
             _subs,
-            output_indices=v_sym.indices,
+            output_indices=_out_indices,
             expr_cache=_cache,
             block_plan=_plan,
             np_blocks_cache=_env_np,
@@ -1947,13 +1949,14 @@ def _one_site_update_symmetric_np(
 
     # Convert site to BlockArray for numpy Lanczos
     site_ba = symmetric_to_ba(site)
+    _out_indices = site_ba.indices
 
     def matvec(v_ba: BlockArray) -> BlockArray:
-        v_sym = ba_to_symmetric(v_ba)
+        _env_np[1] = v_ba.blocks
         return _blockwise_contract(
-            [left_env, v_sym, mpo_site, right_env],
+            [left_env, site, mpo_site, right_env],
             _subs,
-            output_indices=v_sym.indices,
+            output_indices=_out_indices,
             expr_cache=_cache,
             block_plan=_plan,
             np_blocks_cache=_env_np,
