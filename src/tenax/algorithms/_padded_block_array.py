@@ -592,3 +592,444 @@ def contract_padded(
         indices=plan.output_tensor_indices,
         symmetry=A.symmetry,
     )
+
+
+# ===== Multi-tensor contraction (N-tensor einsum on PBAs) =====
+
+
+def _per_leg_max_dims(indices: tuple[TensorIndex, ...]) -> tuple[int, ...]:
+    """Compute the maximum charge-sector dimension for each leg.
+
+    For each leg, groups basis states by charge and returns the size of the
+    largest charge sector. This gives the per-leg padded dimension for ND
+    block reshaping.
+
+    Args:
+        indices: Tuple of TensorIndex objects, one per tensor leg.
+
+    Returns:
+        Tuple of ints, one per leg, giving the max sector size.
+    """
+    dims = []
+    for idx in indices:
+        charges = np.asarray(idx.charges)
+        unique_q = np.unique(charges)
+        max_d = max(int(np.sum(charges == q)) for q in unique_q)
+        dims.append(max_d)
+    return tuple(dims)
+
+
+@dataclass(frozen=True)
+class MultiContractionPlan:
+    """Plan for N-tensor contraction on PaddedBlockArrays.
+
+    Precomputes which block combinations from N input tensors contribute to
+    each output block, based on charge conservation on shared subscript chars.
+    All fields are static (not traced by JAX).
+
+    Attributes:
+        n_inputs:             Number of input tensors.
+        subscripts:           Full einsum subscript (e.g. "abc,apd,bpxe,cxf->def").
+        combo_indices:        Per-input tuple of block indices for each combo.
+                              combo_indices[i] is a tuple of length n_combos giving
+                              which block of input i participates in each combo.
+        output_indices:       Which output block each combo maps to.
+        n_combos:             Total number of valid block combinations.
+        num_output_blocks:    Number of output blocks.
+        input_nd_shapes:      Per-input padded ND shape (max dims per leg).
+        output_nd_shape:      Padded ND shape of output blocks.
+        output_charges:       BlockKey for each output block (sorted).
+        output_shapes:        Unpadded 2D (rows, cols) for each output block.
+        output_tensor_indices: TensorIndex metadata for the output legs.
+        output_mask_np:       Precomputed bool mask for output (num_out, M_max, N_max).
+    """
+
+    n_inputs: int
+    subscripts: str
+    combo_indices: tuple  # tuple of n_inputs tuples of ints
+    output_indices: tuple[int, ...]
+    n_combos: int
+    num_output_blocks: int
+    input_nd_shapes: tuple  # tuple of n_inputs tuples of ints
+    output_nd_shape: tuple[int, ...]
+    output_charges: tuple[BlockKey, ...]
+    output_shapes: tuple[tuple[int, int], ...]
+    output_tensor_indices: tuple[TensorIndex, ...]
+    output_mask_np: np.ndarray
+
+    @classmethod
+    def build(
+        cls,
+        tensors: list[SymmetricTensor],
+        subscripts: str,
+        output_indices: tuple[TensorIndex, ...],
+    ) -> MultiContractionPlan:
+        """Build a multi-tensor contraction plan.
+
+        Args:
+            tensors:        List of N SymmetricTensor inputs.
+            subscripts:     Full einsum subscript (e.g. "abc,apd,bpxe,cxf->def").
+            output_indices: TensorIndex metadata for the output legs.
+
+        Returns:
+            MultiContractionPlan with all static metadata.
+        """
+        input_part, output_part = subscripts.split("->")
+        input_subs = input_part.split(",")
+        n_inputs = len(tensors)
+
+        # 1. Compute per-input ND shapes (max dim per leg)
+        input_nd_shapes = []
+        for t in tensors:
+            input_nd_shapes.append(_per_leg_max_dims(t.indices))
+
+        # Output ND shape
+        output_nd_shape = _per_leg_max_dims(output_indices)
+
+        # 2. Build block-key-to-index lookup for each input
+        input_key_to_idx: list[dict[BlockKey, int]] = []
+        for t in tensors:
+            key_map = {key: i for i, key in enumerate(t._block_keys)}
+            input_key_to_idx.append(key_map)
+
+        # 3. Enumerate all charge-compatible combos using backtracking
+        #    (same algorithm as _precompute_block_plan in dmrg.py)
+        #
+        # NOTE: We do NOT pre-filter output blocks via _compute_valid_blocks
+        # because environment tensors (from DMRG left/right env updates) may
+        # have output charge combinations that violate the standard conservation
+        # law.  Instead, we discover valid output keys from the backtracking
+        # itself, matching the behaviour of _blockwise_contract in dmrg.py.
+        raw_combos: list[tuple[list[int], tuple[int, ...]]] = []
+        combo_keys: list[int] = []  # block indices per input
+        char_charges: dict[str, int] = {}
+
+        def _recurse(tensor_idx: int) -> None:
+            if tensor_idx == n_inputs:
+                # All inputs matched: compute output key
+                output_key = tuple(char_charges.get(c, 0) for c in output_part)
+                raw_combos.append(
+                    ([combo_keys[i] for i in range(n_inputs)], output_key)
+                )
+                return
+
+            subs = input_subs[tensor_idx]
+            t = tensors[tensor_idx]
+            for blk_idx, key in enumerate(t._block_keys):
+                added_chars: list[str] = []
+                compatible = True
+                for char, q in zip(subs, key):
+                    qi = int(q)
+                    if char in char_charges:
+                        if char_charges[char] != qi:
+                            compatible = False
+                            break
+                    else:
+                        char_charges[char] = qi
+                        added_chars.append(char)
+
+                if compatible:
+                    combo_keys.append(blk_idx)
+                    _recurse(tensor_idx + 1)
+                    combo_keys.pop()
+
+                for char in added_chars:
+                    del char_charges[char]
+
+        _recurse(0)
+
+        # Collect unique output keys discovered by backtracking (sorted for
+        # determinism), then assign indices and compute 2D shapes.
+        seen_keys: set[tuple[int, ...]] = set()
+        for _, out_key in raw_combos:
+            seen_keys.add(out_key)
+        valid_out_keys = sorted(seen_keys)
+        out_key_to_idx = {key: i for i, key in enumerate(valid_out_keys)}
+
+        # Compute output 2D shapes
+        out_shapes_2d: list[tuple[int, int]] = []
+        for key in valid_out_keys:
+            _, nd_shape = _block_slices(output_indices, key)
+            if len(nd_shape) == 1:
+                out_shapes_2d.append((nd_shape[0], 1))
+            elif len(nd_shape) == 2:
+                out_shapes_2d.append((nd_shape[0], nd_shape[1]))
+            else:
+                row_dim = 1
+                for d in nd_shape[:-1]:
+                    row_dim *= d
+                out_shapes_2d.append((row_dim, nd_shape[-1]))
+
+        # Now build combo_lists and output_list using the discovered mapping
+        combo_lists: list[list[int]] = [[] for _ in range(n_inputs)]
+        output_list: list[int] = []
+        for combo_k, out_key in raw_combos:
+            out_idx = out_key_to_idx[out_key]
+            for inp in range(n_inputs):
+                combo_lists[inp].append(combo_k[inp])
+            output_list.append(out_idx)
+
+        n_combos = len(output_list)
+
+        # Output dimensions (2D max)
+        if out_shapes_2d:
+            out_M_max = max(s[0] for s in out_shapes_2d)
+            out_N_max = max(s[1] for s in out_shapes_2d)
+        else:
+            out_M_max = 0
+            out_N_max = 0
+
+        # Precompute output mask
+        n_out = len(valid_out_keys)
+        if n_out > 0:
+            output_mask = np.zeros((n_out, out_M_max, out_N_max), dtype=bool)
+            for i, (m, n) in enumerate(out_shapes_2d):
+                output_mask[i, :m, :n] = True
+        else:
+            output_mask = np.zeros((0, 0, 0), dtype=bool)
+
+        return cls(
+            n_inputs=n_inputs,
+            subscripts=subscripts,
+            combo_indices=tuple(tuple(cl) for cl in combo_lists),
+            output_indices=tuple(output_list),
+            n_combos=n_combos,
+            num_output_blocks=n_out,
+            input_nd_shapes=tuple(tuple(s) for s in input_nd_shapes),
+            output_nd_shape=output_nd_shape,
+            output_charges=tuple(valid_out_keys),
+            output_shapes=tuple(out_shapes_2d),
+            output_tensor_indices=output_indices,
+            output_mask_np=output_mask,
+        )
+
+
+def contract_multi_padded(
+    plan: MultiContractionPlan,
+    pbas: list[PaddedBlockArray],
+) -> PaddedBlockArray:
+    """Execute a multi-tensor contraction plan using vmap.
+
+    Reshapes PBA blocks from 2D to ND, gathers blocks per combo, vmaps
+    the full ND einsum over all combos, then scatter-adds results into
+    output PBA blocks.
+
+    Args:
+        plan: MultiContractionPlan from MultiContractionPlan.build().
+        pbas: List of PaddedBlockArrays, one per input tensor.
+
+    Returns:
+        PaddedBlockArray with the contraction result.
+    """
+    if plan.n_combos == 0 or plan.num_output_blocks == 0:
+        # Compute output 2D max dims
+        if plan.output_shapes:
+            out_M = max(s[0] for s in plan.output_shapes)
+            out_N = max(s[1] for s in plan.output_shapes)
+        else:
+            out_M = 0
+            out_N = 0
+        data = jnp.zeros(
+            (plan.num_output_blocks, out_M, out_N),
+            dtype=pbas[0].data.dtype if pbas else jnp.float64,
+        )
+        return PaddedBlockArray(
+            data=data,
+            block_charges=plan.output_charges,
+            block_shapes=plan.output_shapes,
+            indices=plan.output_tensor_indices,
+            symmetry=pbas[0].symmetry if pbas else None,
+        )
+
+    # Parse subscripts for per-block einsum
+    input_part, output_part = plan.subscripts.split("->")
+    input_subs = input_part.split(",")
+
+    # 1. Reshape each input PBA from 2D to ND
+    nd_arrays = []
+    for i, pba in enumerate(pbas):
+        nd_shape = plan.input_nd_shapes[i]
+        num_blocks = pba.data.shape[0]
+        # Reshape from (num_blocks, M_max, N_max) to (num_blocks, *nd_shape)
+        # M_max = product(nd_shape[:-1]), N_max = nd_shape[-1]
+        # But the 2D M_max/N_max may be larger than product(nd_shape)/nd_shape[-1]
+        # due to padding. We need to slice first, then reshape.
+        nd_M = 1
+        for d in nd_shape[:-1]:
+            nd_M *= d
+        nd_N = nd_shape[-1] if len(nd_shape) > 0 else 1
+
+        if len(nd_shape) <= 2:
+            # Already effectively 2D (or 1D), just slice to nd_M x nd_N
+            nd_data = pba.data[:, :nd_M, :nd_N]
+            if len(nd_shape) == 1:
+                nd_data = nd_data.reshape(num_blocks, nd_shape[0])
+            # For 2D, already correct shape
+        else:
+            # Slice to exact product dimensions, then reshape
+            nd_data = pba.data[:, :nd_M, :nd_N]
+            nd_data = nd_data.reshape(num_blocks, *nd_shape)
+        nd_arrays.append(nd_data)
+
+    # 2. Gather blocks per combo for each input
+    gathered = []
+    for i in range(plan.n_inputs):
+        idx = jnp.array(plan.combo_indices[i], dtype=jnp.int32)
+        gathered.append(nd_arrays[i][idx])  # (n_combos, *nd_shape_i)
+
+    # 3. Build the per-block einsum subscript and vmap it
+    # Build subscript without batch dimensions
+    per_block_sub = ",".join(input_subs) + "->" + output_part
+
+    def single_combo_einsum(*blocks):
+        return jnp.einsum(per_block_sub, *blocks)
+
+    # vmap over the combo dimension (axis 0 of each gathered array)
+    vmapped_einsum = jax.vmap(single_combo_einsum)
+    combo_results = vmapped_einsum(*gathered)
+    # combo_results: (n_combos, *output_nd_shape)
+
+    # 4. Scatter-add combo results in ND, then convert per-block to 2D.
+    #
+    # We cannot simply reshape the padded ND output to 2D globally because
+    # different output blocks have different per-leg dims.  The PBA 2D layout
+    # uses product-of-actual-dims, not product-of-per-leg-maxes.  Reshaping
+    # with per-leg maxes would place valid data at wrong 2D row positions for
+    # blocks whose per-leg dims differ from the maxes.
+    #
+    # Instead: scatter-add in ND space, then convert each block individually
+    # from padded ND to the correct 2D layout.
+    out_nd = plan.output_nd_shape
+
+    output_idx = jnp.array(plan.output_indices, dtype=jnp.int32)
+
+    if len(out_nd) <= 2:
+        # For 1D/2D outputs, ND == 2D so the old reshape is correct.
+        if len(out_nd) == 1:
+            combo_results_2d = combo_results.reshape(plan.n_combos, out_nd[0], 1)
+        else:
+            combo_results_2d = combo_results  # already (n_combos, M, N)
+
+        if plan.output_shapes:
+            target_M = max(s[0] for s in plan.output_shapes)
+            target_N = max(s[1] for s in plan.output_shapes)
+        else:
+            target_M = combo_results_2d.shape[1]
+            target_N = combo_results_2d.shape[2]
+
+        result_M = combo_results_2d.shape[1]
+        result_N = combo_results_2d.shape[2]
+        if result_M < target_M or result_N < target_N:
+            pad_M = max(0, target_M - result_M)
+            pad_N = max(0, target_N - result_N)
+            combo_results_2d = jnp.pad(
+                combo_results_2d, ((0, 0), (0, pad_M), (0, pad_N))
+            )
+        elif result_M > target_M or result_N > target_N:
+            combo_results_2d = combo_results_2d[:, :target_M, :target_N]
+
+        output_data = jnp.zeros(
+            (plan.num_output_blocks, target_M, target_N),
+            dtype=combo_results_2d.dtype,
+        )
+        output_data = output_data.at[output_idx].add(combo_results_2d)
+    else:
+        # ND output (>2 legs): scatter-add in ND, then remap per-block to 2D.
+        output_nd_data = jnp.zeros(
+            (plan.num_output_blocks, *out_nd),
+            dtype=combo_results.dtype,
+        )
+        output_nd_data = output_nd_data.at[output_idx].add(combo_results)
+
+        # Compute per-block actual ND shapes and target 2D max dims
+        block_nd_shapes = _compute_nd_shapes(
+            plan.output_tensor_indices, plan.output_charges
+        )
+        if plan.output_shapes:
+            target_M = max(s[0] for s in plan.output_shapes)
+            target_N = max(s[1] for s in plan.output_shapes)
+        else:
+            out_M_nd = 1
+            for d in out_nd[:-1]:
+                out_M_nd *= d
+            target_M = out_M_nd
+            target_N = out_nd[-1] if out_nd else 1
+
+        # Convert each block from padded ND to correct 2D layout
+        blocks_2d = []
+        for blk_i in range(plan.num_output_blocks):
+            nd_shape = block_nd_shapes[blk_i]
+            # Slice padded ND block to actual per-leg dims
+            slices = tuple(slice(0, d) for d in nd_shape)
+            block_nd = output_nd_data[blk_i][slices]
+            # Flatten all legs except the last to get the correct 2D layout
+            rows_2d = 1
+            for d in nd_shape[:-1]:
+                rows_2d *= d
+            cols_2d = nd_shape[-1]
+            block_2d = block_nd.reshape(rows_2d, cols_2d)
+            # Pad to (target_M, target_N)
+            padded = jnp.zeros((target_M, target_N), dtype=block_2d.dtype)
+            padded = padded.at[:rows_2d, :cols_2d].set(block_2d)
+            blocks_2d.append(padded)
+
+        output_data = jnp.stack(blocks_2d, axis=0)
+
+    # Zero out padding regions
+    output_data = jnp.where(jnp.array(plan.output_mask_np), output_data, 0.0)
+
+    return PaddedBlockArray(
+        data=output_data,
+        block_charges=plan.output_charges,
+        block_shapes=plan.output_shapes,
+        indices=plan.output_tensor_indices,
+        symmetry=pbas[0].symmetry,
+    )
+
+
+def update_left_env_blocks_jit(
+    plan: MultiContractionPlan,
+    L_pba: PaddedBlockArray,
+    A_pba: PaddedBlockArray,
+    W_pba: PaddedBlockArray,
+    A_conj_pba: PaddedBlockArray,
+) -> PaddedBlockArray:
+    """Left environment update via multi-tensor contraction on PBAs.
+
+    Computes: new_L[d,e,f] = L[a,b,c] * A[a,p,d] * W[b,p,x,e] * conj(A)[c,x,f]
+
+    Args:
+        plan:       MultiContractionPlan built for the left env subscript.
+        L_pba:      Left environment as PaddedBlockArray.
+        A_pba:      MPS site tensor as PaddedBlockArray.
+        W_pba:      MPO site tensor as PaddedBlockArray.
+        A_conj_pba: Conjugate MPS tensor as PaddedBlockArray (data = conj(A.data)).
+
+    Returns:
+        Updated left environment as PaddedBlockArray.
+    """
+    return contract_multi_padded(plan, [L_pba, A_pba, W_pba, A_conj_pba])
+
+
+def update_right_env_blocks_jit(
+    plan: MultiContractionPlan,
+    R_pba: PaddedBlockArray,
+    B_pba: PaddedBlockArray,
+    W_pba: PaddedBlockArray,
+    B_conj_pba: PaddedBlockArray,
+) -> PaddedBlockArray:
+    """Right environment update via multi-tensor contraction on PBAs.
+
+    Computes: new_R[d,e,f] = R[a,b,c] * B[d,p,a] * W[e,p,x,b] * conj(B)[f,x,c]
+
+    Args:
+        plan:       MultiContractionPlan built for the right env subscript.
+        R_pba:      Right environment as PaddedBlockArray.
+        B_pba:      MPS site tensor as PaddedBlockArray.
+        W_pba:      MPO site tensor as PaddedBlockArray.
+        B_conj_pba: Conjugate MPS tensor as PaddedBlockArray (data = conj(B.data)).
+
+    Returns:
+        Updated right environment as PaddedBlockArray.
+    """
+    return contract_multi_padded(plan, [R_pba, B_pba, W_pba, B_conj_pba])

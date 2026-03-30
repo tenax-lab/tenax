@@ -628,3 +628,442 @@ class TestPBAVectorOps:
         s, added, axpy_result, n = do_ops(pba_a, pba_b)
         np.testing.assert_allclose(np.asarray(s.data), np.asarray(pba_a.data) * 2.0)
         assert float(n) > 0
+
+
+# ===== Tests for MultiContractionPlan and contract_multi_padded =====
+
+
+from tenax.algorithms._padded_block_array import (
+    MultiContractionPlan,
+    contract_multi_padded,
+    update_left_env_blocks_jit,
+    update_right_env_blocks_jit,
+)
+from tenax.core.mps import FiniteMPS
+
+
+def _build_symmetric_heisenberg_mpo(L: int, Jz: float = 1.0, Jxy: float = 1.0):
+    """Build a fully symmetric (SymmetricTensor) Heisenberg MPO via AutoMPO."""
+    from tenax.algorithms.auto_mpo import build_auto_mpo
+
+    terms = []
+    for i in range(L - 1):
+        terms.append((Jz, "Sz", i, "Sz", i + 1))
+        terms.append((Jxy / 2, "Sp", i, "Sm", i + 1))
+        terms.append((Jxy / 2, "Sm", i, "Sp", i + 1))
+    return build_auto_mpo(terms, L=L, symmetric=True)
+
+
+def _build_dmrg_env_tensors(L=4, chi=4, target_charge=0, seed=42):
+    """Build symmetric MPS, MPO, and environment tensors for testing.
+
+    Returns:
+        Tuple of (mps_tensors, mpo_tensors, left_envs, right_envs)
+        where each is a list of SymmetricTensor objects.
+    """
+    from tenax.algorithms.dmrg import (
+        _build_trivial_left_env_symmetric,
+        _build_trivial_right_env_symmetric,
+        _update_left_env_symmetric,
+        _update_right_env_symmetric,
+    )
+
+    mpo_net = _build_symmetric_heisenberg_mpo(L)
+    mps = FiniteMPS.random(
+        L,
+        d=2,
+        chi=chi,
+        key=jax.random.PRNGKey(seed),
+        symmetric=True,
+        symmetry=U1Symmetry(),
+        target_charge=target_charge,
+    )
+
+    mps_tensors = [mps.get_tensor(i) for i in range(L)]
+    mpo_tensors = [mpo_net.get_tensor(i) for i in range(L)]
+
+    # Build left environments
+    left_envs = [_build_trivial_left_env_symmetric()]
+    for i in range(L - 1):
+        new_l = _update_left_env_symmetric(
+            left_envs[-1], mps_tensors[i], mpo_tensors[i]
+        )
+        left_envs.append(new_l)
+
+    # Build right environments
+    right_envs = [None] * (L + 1)
+    right_envs[L] = _build_trivial_right_env_symmetric()
+    for i in range(L - 1, 0, -1):
+        right_envs[i] = _update_right_env_symmetric(
+            right_envs[i + 1], mps_tensors[i], mpo_tensors[i]
+        )
+
+    return mps_tensors, mpo_tensors, left_envs, right_envs
+
+
+class TestMultiContractionPlan:
+    """Tests for MultiContractionPlan and contract_multi_padded."""
+
+    def test_left_env_update_matches_symmetric(self):
+        """Block-sparse left env update via PBA matches SymmetricTensor reference."""
+        L = 4
+        mps_tensors, mpo_tensors, left_envs, _right_envs = _build_dmrg_env_tensors(
+            L=L, chi=4
+        )
+
+        # Pick site 0: L_env is trivial, A is site 0, W is MPO site 0
+        l_env = left_envs[0]
+        A = mps_tensors[0]
+        W = mpo_tensors[0]
+        A_bar = A.bar()
+
+        # Reference: symmetric env update (from _update_left_env_symmetric)
+        from tenax.algorithms.dmrg import _update_left_env_symmetric
+
+        ref_result = _update_left_env_symmetric(l_env, A, W)
+
+        # Build PBAs
+        l_pba = PaddedBlockArray.from_symmetric(l_env)
+        a_pba = PaddedBlockArray.from_symmetric(A)
+        w_pba = PaddedBlockArray.from_symmetric(W)
+        a_conj_pba = PaddedBlockArray.from_symmetric(A_bar)
+
+        # Build plan
+        subs = "abc,apd,bpxe,cxf->def"
+        out_indices = (A.indices[2], W.indices[3], A_bar.indices[2])
+        plan = MultiContractionPlan.build([l_env, A, W, A_bar], subs, out_indices)
+
+        # Execute contraction
+        result_pba = contract_multi_padded(plan, [l_pba, a_pba, w_pba, a_conj_pba])
+        result_sym = result_pba.to_symmetric()
+
+        # Compare against reference
+        np.testing.assert_allclose(
+            np.array(result_sym.todense()),
+            np.array(ref_result.todense()),
+            atol=1e-10,
+        )
+
+    def test_left_env_update_site1_matches(self):
+        """Left env update at site 1 (non-trivial L_env) matches reference."""
+        L = 4
+        mps_tensors, mpo_tensors, left_envs, _right_envs = _build_dmrg_env_tensors(
+            L=L, chi=4
+        )
+
+        # Site 1: L_env has non-trivial block structure
+        l_env = left_envs[1]
+        A = mps_tensors[1]
+        W = mpo_tensors[1]
+        A_bar = A.bar()
+
+        from tenax.algorithms.dmrg import _update_left_env_symmetric
+
+        ref_result = _update_left_env_symmetric(l_env, A, W)
+
+        l_pba = PaddedBlockArray.from_symmetric(l_env)
+        a_pba = PaddedBlockArray.from_symmetric(A)
+        w_pba = PaddedBlockArray.from_symmetric(W)
+        a_conj_pba = PaddedBlockArray.from_symmetric(A_bar)
+
+        subs = "abc,apd,bpxe,cxf->def"
+        out_indices = (A.indices[2], W.indices[3], A_bar.indices[2])
+        plan = MultiContractionPlan.build([l_env, A, W, A_bar], subs, out_indices)
+
+        result_pba = contract_multi_padded(plan, [l_pba, a_pba, w_pba, a_conj_pba])
+        result_sym = result_pba.to_symmetric()
+
+        np.testing.assert_allclose(
+            np.array(result_sym.todense()),
+            np.array(ref_result.todense()),
+            atol=1e-10,
+        )
+
+    def test_right_env_update_matches_symmetric(self):
+        """Block-sparse right env update via PBA matches SymmetricTensor reference."""
+        L = 4
+        mps_tensors, mpo_tensors, _left_envs, right_envs = _build_dmrg_env_tensors(
+            L=L, chi=4
+        )
+
+        # Pick last site: R_env is trivial
+        r_env = right_envs[L]
+        B = mps_tensors[L - 1]
+        W = mpo_tensors[L - 1]
+        B_bar = B.bar()
+
+        from tenax.algorithms.dmrg import _update_right_env_symmetric
+
+        ref_result = _update_right_env_symmetric(r_env, B, W)
+
+        r_pba = PaddedBlockArray.from_symmetric(r_env)
+        b_pba = PaddedBlockArray.from_symmetric(B)
+        w_pba = PaddedBlockArray.from_symmetric(W)
+        b_conj_pba = PaddedBlockArray.from_symmetric(B_bar)
+
+        subs = "abc,dpa,epxb,fxc->def"
+        out_indices = (B.indices[0], W.indices[0], B_bar.indices[0])
+        plan = MultiContractionPlan.build([r_env, B, W, B_bar], subs, out_indices)
+
+        result_pba = contract_multi_padded(plan, [r_pba, b_pba, w_pba, b_conj_pba])
+        result_sym = result_pba.to_symmetric()
+
+        np.testing.assert_allclose(
+            np.array(result_sym.todense()),
+            np.array(ref_result.todense()),
+            atol=1e-10,
+        )
+
+    def test_right_env_update_nontrivial_matches(self):
+        """Right env update with non-trivial R_env matches reference."""
+        L = 4
+        mps_tensors, mpo_tensors, _left_envs, right_envs = _build_dmrg_env_tensors(
+            L=L, chi=4
+        )
+
+        # Site 2: R_env from site 3 is non-trivial
+        r_env = right_envs[3]
+        B = mps_tensors[2]
+        W = mpo_tensors[2]
+        B_bar = B.bar()
+
+        from tenax.algorithms.dmrg import _update_right_env_symmetric
+
+        ref_result = _update_right_env_symmetric(r_env, B, W)
+
+        r_pba = PaddedBlockArray.from_symmetric(r_env)
+        b_pba = PaddedBlockArray.from_symmetric(B)
+        w_pba = PaddedBlockArray.from_symmetric(W)
+        b_conj_pba = PaddedBlockArray.from_symmetric(B_bar)
+
+        subs = "abc,dpa,epxb,fxc->def"
+        out_indices = (B.indices[0], W.indices[0], B_bar.indices[0])
+        plan = MultiContractionPlan.build([r_env, B, W, B_bar], subs, out_indices)
+
+        result_pba = contract_multi_padded(plan, [r_pba, b_pba, w_pba, b_conj_pba])
+        result_sym = result_pba.to_symmetric()
+
+        np.testing.assert_allclose(
+            np.array(result_sym.todense()),
+            np.array(ref_result.todense()),
+            atol=1e-10,
+        )
+
+    def test_convenience_wrappers(self):
+        """update_left_env_blocks_jit and update_right_env_blocks_jit work."""
+        L = 4
+        mps_tensors, mpo_tensors, left_envs, right_envs = _build_dmrg_env_tensors(
+            L=L, chi=4
+        )
+
+        from tenax.algorithms.dmrg import (
+            _update_left_env_symmetric,
+            _update_right_env_symmetric,
+        )
+
+        # Left env at site 0
+        l_env = left_envs[0]
+        A = mps_tensors[0]
+        W = mpo_tensors[0]
+        A_bar = A.bar()
+
+        subs_l = "abc,apd,bpxe,cxf->def"
+        out_indices_l = (A.indices[2], W.indices[3], A_bar.indices[2])
+        plan_l = MultiContractionPlan.build([l_env, A, W, A_bar], subs_l, out_indices_l)
+
+        l_pba = PaddedBlockArray.from_symmetric(l_env)
+        a_pba = PaddedBlockArray.from_symmetric(A)
+        w_pba = PaddedBlockArray.from_symmetric(W)
+        a_conj_pba = PaddedBlockArray.from_symmetric(A_bar)
+
+        result_l = update_left_env_blocks_jit(plan_l, l_pba, a_pba, w_pba, a_conj_pba)
+        ref_l = _update_left_env_symmetric(l_env, A, W)
+        np.testing.assert_allclose(
+            np.array(result_l.to_symmetric().todense()),
+            np.array(ref_l.todense()),
+            atol=1e-10,
+        )
+
+        # Right env at last site
+        r_env = right_envs[L]
+        B = mps_tensors[L - 1]
+        W_r = mpo_tensors[L - 1]
+        B_bar = B.bar()
+
+        subs_r = "abc,dpa,epxb,fxc->def"
+        out_indices_r = (B.indices[0], W_r.indices[0], B_bar.indices[0])
+        plan_r = MultiContractionPlan.build(
+            [r_env, B, W_r, B_bar], subs_r, out_indices_r
+        )
+
+        r_pba = PaddedBlockArray.from_symmetric(r_env)
+        b_pba = PaddedBlockArray.from_symmetric(B)
+        w_r_pba = PaddedBlockArray.from_symmetric(W_r)
+        b_conj_pba = PaddedBlockArray.from_symmetric(B_bar)
+
+        result_r = update_right_env_blocks_jit(
+            plan_r, r_pba, b_pba, w_r_pba, b_conj_pba
+        )
+        ref_r = _update_right_env_symmetric(r_env, B, W_r)
+        np.testing.assert_allclose(
+            np.array(result_r.to_symmetric().todense()),
+            np.array(ref_r.todense()),
+            atol=1e-10,
+        )
+
+    def test_multi_contraction_jit_compatible(self):
+        """contract_multi_padded works inside jax.jit."""
+        L = 4
+        mps_tensors, mpo_tensors, left_envs, _right_envs = _build_dmrg_env_tensors(
+            L=L, chi=4
+        )
+
+        l_env = left_envs[0]
+        A = mps_tensors[0]
+        W = mpo_tensors[0]
+        A_bar = A.bar()
+
+        subs = "abc,apd,bpxe,cxf->def"
+        out_indices = (A.indices[2], W.indices[3], A_bar.indices[2])
+        plan = MultiContractionPlan.build([l_env, A, W, A_bar], subs, out_indices)
+
+        l_pba = PaddedBlockArray.from_symmetric(l_env)
+        a_pba = PaddedBlockArray.from_symmetric(A)
+        w_pba = PaddedBlockArray.from_symmetric(W)
+        a_conj_pba = PaddedBlockArray.from_symmetric(A_bar)
+
+        @jax.jit
+        def do_contract(lp, a, w, ac):
+            return contract_multi_padded(plan, [lp, a, w, ac])
+
+        result = do_contract(l_pba, a_pba, w_pba, a_conj_pba)
+
+        from tenax.algorithms.dmrg import _update_left_env_symmetric
+
+        ref = _update_left_env_symmetric(l_env, A, W)
+        np.testing.assert_allclose(
+            np.array(result.to_symmetric().todense()),
+            np.array(ref.todense()),
+            atol=1e-10,
+        )
+
+    def test_plan_metadata_correct(self):
+        """MultiContractionPlan has correct structural metadata."""
+        L = 4
+        mps_tensors, mpo_tensors, left_envs, _right_envs = _build_dmrg_env_tensors(
+            L=L, chi=4
+        )
+
+        l_env = left_envs[0]
+        A = mps_tensors[0]
+        W = mpo_tensors[0]
+        A_bar = A.bar()
+
+        subs = "abc,apd,bpxe,cxf->def"
+        out_indices = (A.indices[2], W.indices[3], A_bar.indices[2])
+        plan = MultiContractionPlan.build([l_env, A, W, A_bar], subs, out_indices)
+
+        assert plan.n_inputs == 4
+        assert plan.subscripts == subs
+        assert plan.n_combos > 0
+        assert plan.num_output_blocks > 0
+        assert len(plan.combo_indices) == 4
+        # All combo_indices should have the same length (n_combos)
+        for ci in plan.combo_indices:
+            assert len(ci) == plan.n_combos
+        assert len(plan.output_indices) == plan.n_combos
+        assert len(plan.output_charges) == plan.num_output_blocks
+        assert len(plan.output_shapes) == plan.num_output_blocks
+
+    def test_output_padding_is_zero(self):
+        """Padding regions in the output PBA must be zero."""
+        L = 4
+        mps_tensors, mpo_tensors, left_envs, _right_envs = _build_dmrg_env_tensors(
+            L=L, chi=4
+        )
+
+        l_env = left_envs[1]
+        A = mps_tensors[1]
+        W = mpo_tensors[1]
+        A_bar = A.bar()
+
+        subs = "abc,apd,bpxe,cxf->def"
+        out_indices = (A.indices[2], W.indices[3], A_bar.indices[2])
+        plan = MultiContractionPlan.build([l_env, A, W, A_bar], subs, out_indices)
+
+        l_pba = PaddedBlockArray.from_symmetric(l_env)
+        a_pba = PaddedBlockArray.from_symmetric(A)
+        w_pba = PaddedBlockArray.from_symmetric(W)
+        a_conj_pba = PaddedBlockArray.from_symmetric(A_bar)
+
+        result = contract_multi_padded(plan, [l_pba, a_pba, w_pba, a_conj_pba])
+
+        # Padding must be zero
+        padding_data = result.data[~result.mask]
+        np.testing.assert_allclose(padding_data, 0.0, atol=1e-12)
+
+    def test_larger_bond_dim(self):
+        """Test with larger bond dimension (chi=8) for more block diversity."""
+        L = 6
+        mps_tensors, mpo_tensors, left_envs, right_envs = _build_dmrg_env_tensors(
+            L=L, chi=8, seed=99
+        )
+
+        from tenax.algorithms.dmrg import (
+            _update_left_env_symmetric,
+            _update_right_env_symmetric,
+        )
+
+        # Left env update at a middle site
+        site = 2
+        l_env = left_envs[site]
+        A = mps_tensors[site]
+        W = mpo_tensors[site]
+        A_bar = A.bar()
+
+        subs_l = "abc,apd,bpxe,cxf->def"
+        out_l = (A.indices[2], W.indices[3], A_bar.indices[2])
+        plan_l = MultiContractionPlan.build([l_env, A, W, A_bar], subs_l, out_l)
+
+        result_l = contract_multi_padded(
+            plan_l,
+            [
+                PaddedBlockArray.from_symmetric(l_env),
+                PaddedBlockArray.from_symmetric(A),
+                PaddedBlockArray.from_symmetric(W),
+                PaddedBlockArray.from_symmetric(A_bar),
+            ],
+        )
+        ref_l = _update_left_env_symmetric(l_env, A, W)
+        np.testing.assert_allclose(
+            np.array(result_l.to_symmetric().todense()),
+            np.array(ref_l.todense()),
+            atol=1e-10,
+        )
+
+        # Right env update at a middle site
+        site_r = 3
+        r_env = right_envs[site_r + 1]
+        B = mps_tensors[site_r]
+        W_r = mpo_tensors[site_r]
+        B_bar = B.bar()
+
+        subs_r = "abc,dpa,epxb,fxc->def"
+        out_r = (B.indices[0], W_r.indices[0], B_bar.indices[0])
+        plan_r = MultiContractionPlan.build([r_env, B, W_r, B_bar], subs_r, out_r)
+
+        result_r = contract_multi_padded(
+            plan_r,
+            [
+                PaddedBlockArray.from_symmetric(r_env),
+                PaddedBlockArray.from_symmetric(B),
+                PaddedBlockArray.from_symmetric(W_r),
+                PaddedBlockArray.from_symmetric(B_bar),
+            ],
+        )
+        ref_r = _update_right_env_symmetric(r_env, B, W_r)
+        np.testing.assert_allclose(
+            np.array(result_r.to_symmetric().todense()),
+            np.array(ref_r.todense()),
+            atol=1e-10,
+        )
