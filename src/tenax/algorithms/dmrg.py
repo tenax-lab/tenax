@@ -1893,7 +1893,6 @@ def _two_site_update_symmetric_np(
     """
     from tenax.algorithms._block_array import (
         BlockArray,
-        ba_to_symmetric,
         symmetric_to_ba,
     )
 
@@ -1907,42 +1906,75 @@ def _two_site_update_symmetric_np(
         context="_two_site_update_symmetric_np",
     )
 
-    # Convert BlockArray sites to SymmetricTensor for initial contraction
-    site_l_sym = ba_to_symmetric(site_l) if isinstance(site_l, BlockArray) else site_l
-    site_r_sym = ba_to_symmetric(site_r) if isinstance(site_r, BlockArray) else site_r
+    # Convert inputs to BlockArray -- stays in numpy throughout
+    site_l_ba = (
+        symmetric_to_ba(site_l) if not isinstance(site_l, BlockArray) else site_l
+    )
+    site_r_ba = (
+        symmetric_to_ba(site_r) if not isinstance(site_r, BlockArray) else site_r
+    )
 
-    # Contract theta = A[i] * A[i+1]
-    shared = set(site_l_sym.labels()) & set(site_r_sym.labels())
+    labels_l = site_l_ba.labels()
+    labels_r = site_r_ba.labels()
+    shared = set(labels_l) & set(labels_r)
+
     if shared:
-        theta = contract(site_l_sym, site_r_sym)
+        # Build einsum subscripts from labels
+        all_unique_labels = list(dict.fromkeys(list(labels_l) + list(labels_r)))
+        label_to_char = {lb: chr(97 + i) for i, lb in enumerate(all_unique_labels)}
+        input_l = "".join(label_to_char[lb] for lb in labels_l)
+        input_r = "".join(label_to_char[lb] for lb in labels_r)
+        output_chars = "".join(label_to_char[lb] for lb in labels_l if lb not in shared)
+        output_chars += "".join(
+            label_to_char[lb] for lb in labels_r if lb not in shared
+        )
+        theta_subs = f"{input_l},{input_r}->{output_chars}"
+
+        # Build output indices from free legs
+        out_indices = tuple(
+            idx for idx in site_l_ba.indices if idx.label not in shared
+        ) + tuple(idx for idx in site_r_ba.indices if idx.label not in shared)
+
+        theta_plan = _precompute_block_plan([site_l_ba, site_r_ba], theta_subs)
+        np_blocks = [site_l_ba.blocks, site_r_ba.blocks]
+        theta_ba = _blockwise_contract(
+            [site_l_ba, site_r_ba],
+            theta_subs,
+            output_indices=out_indices,
+            block_plan=theta_plan,
+            np_blocks_cache=np_blocks,
+            return_ba=True,
+        )
     else:
-        theta = site_l_sym
+        theta_ba = site_l_ba
 
     # Shared cache for opt_einsum expressions across Lanczos iterations
     _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
 
     # Precompute block plan once
     _subs = "abc,apqd,bpse,eqtf,dfg->cstg"
-    _plan = _precompute_block_plan([left_env, theta, mpo_l, mpo_r, right_env], _subs)
+    _plan = _precompute_block_plan([left_env, theta_ba, mpo_l, mpo_r, right_env], _subs)
 
     # Pre-convert env blocks to NumPy once
     _env_np = [
-        _to_np_blocks(left_env),
+        _to_np_blocks(left_env)
+        if not isinstance(left_env, BlockArray)
+        else left_env.blocks,
         None,  # v -- converted fresh each call
-        _to_np_blocks(mpo_l),
-        _to_np_blocks(mpo_r),
-        _to_np_blocks(right_env),
+        _to_np_blocks(mpo_l) if not isinstance(mpo_l, BlockArray) else mpo_l.blocks,
+        _to_np_blocks(mpo_r) if not isinstance(mpo_r, BlockArray) else mpo_r.blocks,
+        _to_np_blocks(right_env)
+        if not isinstance(right_env, BlockArray)
+        else right_env.blocks,
     ]
 
-    # Convert theta to BlockArray for numpy Lanczos
-    theta_ba = symmetric_to_ba(theta)
     _out_indices = theta_ba.indices  # fixed across Lanczos iterations
 
     def matvec(v_ba: BlockArray) -> BlockArray:
         # Pass v blocks directly as np_blocks_cache — avoids numpy→JAX→numpy roundtrip
         _env_np[1] = v_ba.blocks
         return _blockwise_contract(
-            [left_env, theta, mpo_l, mpo_r, right_env],
+            [left_env, theta_ba, mpo_l, mpo_r, right_env],
             _subs,
             output_indices=_out_indices,
             expr_cache=_cache,
@@ -1987,32 +2019,36 @@ def _one_site_update_symmetric_np(
         context="_one_site_update_symmetric_np",
     )
 
-    # Convert BlockArray site to SymmetricTensor for plan computation
-    site_sym = ba_to_symmetric(site) if isinstance(site, BlockArray) else site
+    # Convert site to BlockArray -- stays in numpy throughout
+    site_ba = symmetric_to_ba(site) if not isinstance(site, BlockArray) else site
 
     # Shared cache for opt_einsum expressions across Lanczos iterations
     _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
 
     # Precompute block plan once
     _subs = "abc,apd,bpxe,def->cxf"
-    _plan = _precompute_block_plan([left_env, site_sym, mpo_site, right_env], _subs)
+    _plan = _precompute_block_plan([left_env, site_ba, mpo_site, right_env], _subs)
 
     # Pre-convert env blocks to NumPy once
     _env_np = [
-        _to_np_blocks(left_env),
+        _to_np_blocks(left_env)
+        if not isinstance(left_env, BlockArray)
+        else left_env.blocks,
         None,  # v -- converted fresh each call
-        _to_np_blocks(mpo_site),
-        _to_np_blocks(right_env),
+        _to_np_blocks(mpo_site)
+        if not isinstance(mpo_site, BlockArray)
+        else mpo_site.blocks,
+        _to_np_blocks(right_env)
+        if not isinstance(right_env, BlockArray)
+        else right_env.blocks,
     ]
 
-    # Convert site to BlockArray for numpy Lanczos
-    site_ba = symmetric_to_ba(site) if not isinstance(site, BlockArray) else site
     _out_indices = site_ba.indices
 
     def matvec(v_ba: BlockArray) -> BlockArray:
         _env_np[1] = v_ba.blocks
         return _blockwise_contract(
-            [left_env, site, mpo_site, right_env],
+            [left_env, site_ba, mpo_site, right_env],
             _subs,
             output_indices=_out_indices,
             expr_cache=_cache,

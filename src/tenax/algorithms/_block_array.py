@@ -120,11 +120,26 @@ def symmetric_to_ba(t) -> BlockArray:
 def ba_to_symmetric(ba: BlockArray):
     """Reconstruct a SymmetricTensor from a BlockArray.
 
-    Uses _init_flat_buffer to pack numpy blocks into the JAX flat buffer.
+    Uses numpy concatenation -- no JAX overhead.  The SymmetricTensor
+    stores numpy ``_data`` internally, which works for the DMRG numpy path
+    where blocks are accessed via the ``.blocks`` property.
     """
     from tenax.core.tensor import SymmetricTensor
 
+    sorted_keys = sorted(ba.blocks.keys())
     obj = object.__new__(SymmetricTensor)
     obj._indices = ba.indices
-    obj._init_flat_buffer(ba.blocks)
+    if sorted_keys:
+        flat_parts = [ba.blocks[k].ravel() for k in sorted_keys]
+        obj._data = np.concatenate(flat_parts)
+    else:
+        obj._data = np.zeros(0, dtype=np.float64)
+    obj._block_keys = tuple(sorted_keys)
+    obj._block_shapes = tuple(ba.blocks[k].shape for k in sorted_keys)
+    offsets = []
+    offset = 0
+    for k in sorted_keys:
+        offsets.append(offset)
+        offset += ba.blocks[k].size
+    obj._block_offsets = tuple(offsets)
     return obj
