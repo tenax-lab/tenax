@@ -9,7 +9,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from tenax import DMRGConfig, build_mpo_heisenberg, build_random_symmetric_mps, dmrg
+from tenax import DMRGConfig, build_mpo_heisenberg, dmrg
 from tenax.algorithms.cbe import expand_bond
 from tenax.algorithms.dmrg import (
     _build_right_environments_list,
@@ -22,6 +22,7 @@ from tenax.algorithms.dmrg import (
     _update_right_env_symmetric,
 )
 from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.mps import FiniteMPS
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 
@@ -43,14 +44,30 @@ class TestCBEValidation:
         mpo = build_mpo_heisenberg(L)
 
         # 1-site DMRG at chi=4
-        mps1 = build_random_symmetric_mps(L, bond_dim=chi_small, seed=42)
+        mps1 = FiniteMPS.random(
+            L,
+            d=2,
+            chi=chi_small,
+            key=jax.random.PRNGKey(42),
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
         result_1s = dmrg(
             mpo, mps1, DMRGConfig(max_bond_dim=chi_small, num_sweeps=10, two_site=False)
         )
         E_1site = result_1s.energy
 
         # 2-site DMRG at chi=6 (reference)
-        mps2 = build_random_symmetric_mps(L, bond_dim=chi_small, seed=42)
+        mps2 = FiniteMPS.random(
+            L,
+            d=2,
+            chi=chi_small,
+            key=jax.random.PRNGKey(42),
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
         result_2s = dmrg(mpo, mps2, DMRGConfig(max_bond_dim=chi_large, num_sweeps=15))
         E_2site = result_2s.energy
 

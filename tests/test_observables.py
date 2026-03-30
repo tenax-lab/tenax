@@ -1,12 +1,12 @@
 """Tests for observable computation from MPS ground states."""
 
+import jax
 import numpy as np
 import pytest
 
 from tenax.algorithms.dmrg import (
     DMRGConfig,
     build_mpo_heisenberg,
-    build_random_symmetric_mps,
     dmrg,
 )
 from tenax.algorithms.observables import (
@@ -14,6 +14,8 @@ from tenax.algorithms.observables import (
     expectation_value,
     operator_charge,
 )
+from tenax.core.mps import FiniteMPS
+from tenax.core.symmetry import U1Symmetry
 
 # Standard spin-1/2 operators
 Sz = np.array([[0.5, 0.0], [0.0, -0.5]])
@@ -37,7 +39,15 @@ def _build_symmetric_heisenberg_mpo(L: int, Jz: float = 1.0, Jxy: float = 1.0):
 def _run_dmrg_sz0(L: int, bond_dim: int = 8) -> object:
     """Run DMRG on Heisenberg chain in Sz=0 sector, return result."""
     mpo = _build_symmetric_heisenberg_mpo(L)
-    mps = build_random_symmetric_mps(L, bond_dim=bond_dim, seed=7, target_charge=0)
+    mps = FiniteMPS.random(
+        L,
+        d=2,
+        chi=bond_dim,
+        key=jax.random.PRNGKey(7),
+        symmetric=True,
+        symmetry=U1Symmetry(),
+        target_charge=0,
+    )
     config = DMRGConfig(
         max_bond_dim=bond_dim,
         num_sweeps=10,
