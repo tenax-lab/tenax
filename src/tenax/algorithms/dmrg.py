@@ -46,6 +46,25 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor, inner
 from tenax.linalg import qr as _linalg_qr
 from tenax.network.network import TensorNetwork
 
+# Optional Cython BLAS acceleration for hot loops.
+try:
+    from tenax.contraction._cython_blas import (
+        cython_execute_plan as _cython_execute_plan,
+    )
+
+    _USE_CYTHON_PLAN = True
+except ImportError:
+    _USE_CYTHON_PLAN = False
+
+try:
+    from tenax.contraction._cython_blas import (
+        cython_ba_sub_scaled_inplace as _cython_ba_sub_scaled_inplace,
+    )
+
+    _USE_CYTHON_SUB = True
+except ImportError:
+    _USE_CYTHON_SUB = False
+
 
 @dataclass
 class DMRGConfig:
@@ -1315,13 +1334,23 @@ def _lanczos_solve_np(
         alphas.append(alpha_val)
 
         # w = w - alpha * v_k  (fused, no intermediate dict)
-        w = ba_sub_scaled(w, basis[-1], alpha_val)
+        if _USE_CYTHON_SUB:
+            _cython_ba_sub_scaled_inplace(w.blocks, basis[-1].blocks, alpha_val)
+        else:
+            w = ba_sub_scaled(w, basis[-1], alpha_val)
         if step > 0:
-            w = ba_sub_scaled(w, basis[-2], betas[-1])
+            if _USE_CYTHON_SUB:
+                _cython_ba_sub_scaled_inplace(w.blocks, basis[-2].blocks, betas[-1])
+            else:
+                w = ba_sub_scaled(w, basis[-2], betas[-1])
 
         # Full reorthogonalization (fused sub+scale)
         for q in basis:
-            w = ba_sub_scaled(w, q, ba_inner(q, w))
+            coeff = ba_inner(q, w)
+            if _USE_CYTHON_SUB:
+                _cython_ba_sub_scaled_inplace(w.blocks, q.blocks, coeff)
+            else:
+                w = ba_sub_scaled(w, q, coeff)
 
         beta_val = ba_norm(w)
         betas.append(beta_val)
@@ -1482,6 +1511,9 @@ def _blockwise_contract(
         # Use BLAS plan instead of opt_einsum (2x less Python dispatch overhead)
         from tenax.contraction._blas_plan import get_cached_blas_plan
 
+        # Cache for pre-extracted Cython step params (keyed by shape group)
+        _step_params_cache: dict = {}
+
         for combo_keys, output_key in block_plan:
             combo_arrays = [
                 np_blocks_list[i][combo_keys[i]] for i in range(len(np_blocks_list))
@@ -1491,7 +1523,34 @@ def _blockwise_contract(
                 expr_cache[block_shapes] = get_cached_blas_plan(
                     subscripts, block_shapes
                 )
-            result_array = expr_cache[block_shapes].execute_numpy(combo_arrays)
+            plan = expr_cache[block_shapes]
+
+            if _USE_CYTHON_PLAN:
+                if block_shapes not in _step_params_cache:
+                    _step_params_cache[block_shapes] = [
+                        (
+                            s.left_idx,
+                            s.right_idx,
+                            s.out_idx,
+                            s.m,
+                            s.n,
+                            s.k,
+                            s.left_perm,
+                            s.right_perm,
+                            s.out_shape,
+                        )
+                        for s in plan.steps
+                    ]
+                result_array = _cython_execute_plan(
+                    _step_params_cache[block_shapes],
+                    plan.n_inputs,
+                    plan.n_buffers,
+                    plan.output_perm,
+                    combo_arrays,
+                )
+            else:
+                result_array = plan.execute_numpy(combo_arrays)
+
             output_accum.setdefault(output_key, []).append(result_array)
     else:
         # Original backtracking approach

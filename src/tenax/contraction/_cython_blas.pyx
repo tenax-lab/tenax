@@ -824,3 +824,111 @@ def cython_ba_scale_inplace(dict blocks, double scalar):
         n = flat.shape[0]
         with nogil:
             _dscal(&n, &s, &flat[0], &inc)
+
+
+# ------------------------------------------------------------------ #
+# cython_execute_plan: fast per-combo BLAS plan execution              #
+# ------------------------------------------------------------------ #
+
+def cython_execute_plan(
+    list step_params,
+    int n_inputs,
+    int n_buffers,
+    tuple output_perm,
+    list arrays,
+):
+    """Execute BLAS plan with minimal Python dispatch.
+
+    Replaces BlasExecPlan.execute_numpy for the hot path in
+    _blockwise_contract. Uses raw dgemm instead of numpy's ``@``
+    operator, avoiding ~2us of numpy matmul dispatch per call.
+
+    Parameters
+    ----------
+    step_params : list of tuples
+        Pre-extracted (left_idx, right_idx, out_idx, m, n, k,
+        left_perm, right_perm, out_shape) from plan.steps.
+    n_inputs : int
+        Number of input arrays.
+    n_buffers : int
+        Total buffer slots (inputs + intermediates).
+    output_perm : tuple
+        Final output transpose permutation; () for identity.
+    arrays : list
+        Input numpy arrays, length == n_inputs.
+    """
+    cdef int n_steps = len(step_params)
+    cdef int s, li, ri, oi, M, N, K
+    cdef double alpha = 1.0, beta = 0.0
+    cdef double* left_p
+    cdef double* right_p
+    cdef double* out_p
+    cdef cnp.ndarray left_arr, right_arr, out_arr
+
+    cdef list buffers = list(arrays)
+    if n_buffers > n_inputs:
+        buffers.extend([None] * (n_buffers - n_inputs))
+
+    for s in range(n_steps):
+        li, ri, oi, M, N, K, lp, rp, os = step_params[s]
+
+        left = buffers[li]
+        right = buffers[ri]
+
+        if lp:
+            left = np.ascontiguousarray(np.transpose(left, lp).reshape(M, K))
+        else:
+            left = np.ascontiguousarray(left.reshape(M, K))
+
+        if rp:
+            right = np.ascontiguousarray(np.transpose(right, rp).reshape(K, N))
+        else:
+            right = np.ascontiguousarray(right.reshape(K, N))
+
+        if left.dtype == np.float64:
+            out_arr = np.empty((M, N), dtype=np.float64)
+            # Use PyArray_DATA to avoid writable requirement of typed memoryviews
+            left_arr = np.asarray(left)
+            right_arr = np.asarray(right)
+            left_p = <double*>cnp.PyArray_DATA(left_arr)
+            right_p = <double*>cnp.PyArray_DATA(right_arr)
+            out_p = <double*>cnp.PyArray_DATA(out_arr)
+            with nogil:
+                _dgemm_row_major(M, N, K, alpha, left_p, right_p, beta, out_p)
+            buffers[oi] = out_arr.reshape(os)
+        else:
+            buffers[oi] = (left @ right).reshape(os)
+
+    result = buffers[step_params[n_steps - 1][2]]
+    if output_perm:
+        result = np.ascontiguousarray(np.transpose(result, output_perm))
+    return result
+
+
+# ------------------------------------------------------------------ #
+# cython_ba_sub_scaled_inplace: in-place w -= scalar * q via daxpy     #
+# ------------------------------------------------------------------ #
+
+def cython_ba_sub_scaled_inplace(dict w_blocks, dict q_blocks, double scalar):
+    """w[k] -= scalar * q[k] for all shared keys. In-place, no allocation.
+
+    Replaces ``ba_sub_scaled`` in the Lanczos hot loop, avoiding dict and
+    array creation on every call (~87K calls per DMRG run).
+    """
+    cdef double neg_scalar = -scalar
+    cdef int n, inc = 1
+    cdef double[::1] w_flat, q_flat
+
+    for k in q_blocks:
+        wk = w_blocks.get(k)
+        if wk is not None:
+            qk = q_blocks[k]
+            # Ensure writable (JAX arrays or frozen buffers may not be)
+            if not wk.flags.writeable:
+                wk = wk.copy()
+                w_blocks[k] = wk
+            w_flat = wk.ravel()
+            q_flat = np.ascontiguousarray(qk).ravel()
+            n = w_flat.shape[0]
+            with nogil:
+                _daxpy(&n, &neg_scalar, &q_flat[0], &inc, &w_flat[0], &inc)
