@@ -378,6 +378,67 @@ class TestPrepareKernelData:
 
 
 @pytest.mark.skipif(not CYTHON_BLAS_AVAILABLE, reason="Cython not compiled")
+class TestV3KernelComplex:
+    """Test V3 kernel with complex dtypes."""
+
+    def test_v3_complex128_matches_einsum(self):
+        """V3 kernel with complex128 blocks matches np.einsum."""
+        from tenax.contraction._cython_blas import execute_all_combos_v3
+
+        rng = np.random.default_rng(42)
+        subs = "abc,apd,bpxe,def->cxf"
+        shapes = [(3, 3, 3), (3, 2, 3), (3, 2, 2, 3), (3, 3, 3)]
+        arrays = [rng.standard_normal(s) + 1j * rng.standard_normal(s) for s in shapes]
+        expected = np.einsum(subs, *arrays)
+
+        np_blocks = [{(0,): a} for a in arrays]
+        block_plan = [([(0,)] * 4, (0,))]
+        plan_cache = {}
+        result = execute_all_combos_v3(subs, block_plan, np_blocks, plan_cache)
+        np.testing.assert_allclose(result[(0,)], expected, rtol=1e-10)
+
+    def test_v3_complex128_accumulation(self):
+        """V3 kernel accumulates multiple complex128 combos correctly."""
+        from tenax.contraction._cython_blas import execute_all_combos_v3
+
+        rng = np.random.default_rng(7)
+        subs = "ij,jk->ik"
+        shapes = [(3, 4), (4, 5)]
+        a1 = rng.standard_normal(shapes[0]) + 1j * rng.standard_normal(shapes[0])
+        a2 = rng.standard_normal(shapes[0]) + 1j * rng.standard_normal(shapes[0])
+        b = rng.standard_normal(shapes[1]) + 1j * rng.standard_normal(shapes[1])
+        expected = a1 @ b + a2 @ b
+
+        np_blocks = [{(0,): a1, (1,): a2}, {(0,): b}]
+        block_plan = [
+            ([(0,), (0,)], (0,)),
+            ([(1,), (0,)], (0,)),
+        ]
+        plan_cache = {}
+        result = execute_all_combos_v3(subs, block_plan, np_blocks, plan_cache)
+        np.testing.assert_allclose(result[(0,)], expected, rtol=1e-10)
+
+    def test_v3_complex64_matches_einsum(self):
+        """V3 kernel with complex64 blocks (fallback path) matches np.einsum."""
+        from tenax.contraction._cython_blas import execute_all_combos_v3
+
+        rng = np.random.default_rng(42)
+        subs = "ij,jk->ik"
+        shapes = [(3, 4), (4, 5)]
+        arrays = [
+            (rng.standard_normal(s) + 1j * rng.standard_normal(s)).astype(np.complex64)
+            for s in shapes
+        ]
+        expected = np.einsum(subs, *arrays)
+
+        np_blocks = [{(0,): a} for a in arrays]
+        block_plan = [([(0,)] * 2, (0,))]
+        plan_cache = {}
+        result = execute_all_combos_v3(subs, block_plan, np_blocks, plan_cache)
+        np.testing.assert_allclose(result[(0,)], expected, rtol=1e-4)
+
+
+@pytest.mark.skipif(not CYTHON_BLAS_AVAILABLE, reason="Cython not compiled")
 class TestCythonKernelV2:
     """Tests for execute_blas_kernel_v2 -- raw BLAS calls via cython_blas."""
 

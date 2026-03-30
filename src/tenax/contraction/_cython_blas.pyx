@@ -370,6 +370,43 @@ cdef void _transpose_nd_f64(
             coords[d] = 0
 
 
+cdef void _transpose_nd_z128(
+    double complex* src,
+    double complex* dst,
+    int ndim,
+    int* shape,
+    int* perm,
+    int total_size,
+) noexcept nogil:
+    """Transpose an N-d complex128 array via strided copy. Small arrays only."""
+    cdef int src_strides[MAX_NDIM]
+    cdef int dst_shape[MAX_NDIM]
+    cdef int dst_strides[MAX_NDIM]
+    cdef int i, d, src_idx, dst_idx
+    cdef int coords[MAX_NDIM]
+
+    src_strides[ndim - 1] = 1
+    for d in range(ndim - 2, -1, -1):
+        src_strides[d] = src_strides[d + 1] * shape[d + 1]
+    for d in range(ndim):
+        dst_shape[d] = shape[perm[d]]
+    dst_strides[ndim - 1] = 1
+    for d in range(ndim - 2, -1, -1):
+        dst_strides[d] = dst_strides[d + 1] * dst_shape[d + 1]
+    for d in range(ndim):
+        coords[d] = 0
+    for dst_idx in range(total_size):
+        src_idx = 0
+        for d in range(ndim):
+            src_idx += coords[d] * src_strides[perm[d]]
+        dst[dst_idx] = src[src_idx]
+        for d in range(ndim - 1, -1, -1):
+            coords[d] += 1
+            if coords[d] < dst_shape[d]:
+                break
+            coords[d] = 0
+
+
 def execute_all_combos_v3(
     str subscripts,
     list block_plan,
@@ -453,6 +490,10 @@ cdef void _execute_group_pretransposed(
         dtype_code = 0
     elif dtype == np.float32:
         dtype_code = 1
+    elif dtype == np.complex128:
+        dtype_code = 2
+    elif dtype == np.complex64:
+        dtype_code = 3
     else:
         dtype_code = -1  # fallback
 
@@ -561,8 +602,15 @@ cdef void _execute_group_pretransposed(
             out_bufs, work_gemm, work_trans,
             int_perm, int_2d,
         )
+    elif dtype_code == 2:
+        _combo_loop_z128(
+            steps, n_steps, n_inputs, n_combos,
+            pool_list, combo_table_v, combo_out_v,
+            out_bufs, work_gemm, work_trans,
+            int_perm, int_2d,
+        )
     else:
-        # Fallback to Python for non-float64
+        # Fallback to Python for float32, complex64, etc.
         _combo_loop_fallback(
             steps, n_steps, n_inputs, n_combos,
             pool_list, combo_table_v, combo_out_v,
@@ -679,6 +727,103 @@ cdef void _combo_loop_f64(
                              beta_1, &out_v[0, 0])
 
 
+cdef void _combo_loop_z128(
+    tuple steps, int n_steps, int n_inputs, int n_combos,
+    list pool_list, int[:, ::1] combo_table, int[:] combo_out,
+    list out_bufs, list work_gemm, list work_trans,
+    list int_perm, list int_2d,
+):
+    """Tight combo loop with raw BLAS for complex128."""
+    cdef int i, s, d
+    cdef int M, N, K
+    cdef double complex alpha = 1.0 + 0j
+    cdef double complex beta_0 = 0.0 + 0j
+    cdef double complex beta_1 = 1.0 + 0j
+    cdef double complex[:, ::1] left_v, right_v, out_v, trans_v
+    cdef double complex* src_p
+    cdef double complex* dst_p
+
+    cdef int shape_arr[MAX_NDIM]
+    cdef int perm_arr[MAX_NDIM]
+    cdef int ndim, total_size
+
+    for i in range(n_combos):
+        # Execute GEMM chain
+        for s in range(n_steps - 1):
+            step = steps[s]
+            M = step.m; N = step.n; K = step.k
+
+            # Get left operand
+            if step.left_idx < n_inputs:
+                left_v = pool_list[combo_table[i, step.left_idx]]
+            else:
+                # Intermediate from previous step — already transposed to 2D
+                if int_perm[s - 1]:
+                    left_v = work_trans[s - 1]
+                else:
+                    left_v = (<cnp.ndarray>work_gemm[s - 1]).reshape(int_2d[s - 1])
+
+            # Get right operand
+            if step.right_idx < n_inputs:
+                right_v = pool_list[combo_table[i, step.right_idx]]
+            else:
+                if int_perm[s - 1]:
+                    right_v = work_trans[s - 1]
+                else:
+                    right_v = (<cnp.ndarray>work_gemm[s - 1]).reshape(int_2d[s - 1])
+
+            out_v = work_gemm[s]
+
+            with nogil:
+                _zgemm_row_major(M, N, K, alpha,
+                                 &left_v[0, 0], &right_v[0, 0],
+                                 beta_0, &out_v[0, 0])
+
+            # Transpose intermediate for next step if needed
+            perm = int_perm[s]
+            if perm:
+                ndim = len(step.out_shape)
+                for d in range(ndim):
+                    shape_arr[d] = step.out_shape[d]
+                    perm_arr[d] = perm[d]
+                total_size = M * N
+
+                trans_v = work_trans[s]
+                src_p = &out_v[0, 0]
+                dst_p = &trans_v[0, 0]
+                with nogil:
+                    _transpose_nd_z128(src_p, dst_p, ndim, shape_arr,
+                                       perm_arr, total_size)
+
+        # Last step: accumulate into output buffer
+        step = steps[n_steps - 1]
+        M = step.m; N = step.n; K = step.k
+
+        if step.left_idx < n_inputs:
+            left_v = pool_list[combo_table[i, step.left_idx]]
+        else:
+            s = n_steps - 2
+            if int_perm[s]:
+                left_v = work_trans[s]
+            else:
+                left_v = (<cnp.ndarray>work_gemm[s]).reshape(int_2d[s])
+
+        if step.right_idx < n_inputs:
+            right_v = pool_list[combo_table[i, step.right_idx]]
+        else:
+            s = n_steps - 2
+            if int_perm[s]:
+                right_v = work_trans[s]
+            else:
+                right_v = (<cnp.ndarray>work_gemm[s]).reshape(int_2d[s])
+
+        out_v = out_bufs[combo_out[i]]
+        with nogil:
+            _zgemm_row_major(M, N, K, alpha,
+                             &left_v[0, 0], &right_v[0, 0],
+                             beta_1, &out_v[0, 0])
+
+
 cdef void _combo_loop_fallback(
     tuple steps, int n_steps, int n_inputs, int n_combos,
     list pool_list, int[:, ::1] combo_table, int[:] combo_out,
@@ -734,30 +879,48 @@ cdef void _combo_loop_fallback(
 
 
 cdef cnp.ndarray _c_transpose(cnp.ndarray arr, tuple perm, int dtype_code):
-    """Transpose: C-level for small float64, numpy fallback otherwise."""
+    """Transpose: C-level for small float64/complex128, numpy fallback otherwise."""
     cdef int ndim = arr.ndim
     cdef int total = arr.size
     cdef int shape_arr[MAX_NDIM]
     cdef int perm_arr[MAX_NDIM]
     cdef int d
     cdef cnp.ndarray out, src
-    cdef double* src_p
-    cdef double* dst_p
+    cdef double* src_p_d
+    cdef double* dst_p_d
+    cdef double complex* src_p_z
+    cdef double complex* dst_p_z
 
-    if total <= 32768 and dtype_code == 0 and ndim <= MAX_NDIM:
-        for d in range(ndim):
-            shape_arr[d] = arr.shape[d]
-            perm_arr[d] = perm[d]
+    if total <= 32768 and ndim <= MAX_NDIM:
+        if dtype_code == 0:
+            for d in range(ndim):
+                shape_arr[d] = arr.shape[d]
+                perm_arr[d] = perm[d]
 
-        dst_shape_tuple = tuple(arr.shape[perm[d]] for d in range(ndim))
-        out = np.empty(dst_shape_tuple, dtype=np.float64)
-        src = np.ascontiguousarray(arr)
-        src_p = <double*>cnp.PyArray_DATA(src)
-        dst_p = <double*>cnp.PyArray_DATA(out)
+            dst_shape_tuple = tuple(arr.shape[perm[d]] for d in range(ndim))
+            out = np.empty(dst_shape_tuple, dtype=np.float64)
+            src = np.ascontiguousarray(arr)
+            src_p_d = <double*>cnp.PyArray_DATA(src)
+            dst_p_d = <double*>cnp.PyArray_DATA(out)
 
-        with nogil:
-            _transpose_nd_f64(src_p, dst_p, ndim, shape_arr, perm_arr, total)
-        return out
+            with nogil:
+                _transpose_nd_f64(src_p_d, dst_p_d, ndim, shape_arr, perm_arr, total)
+            return out
+
+        elif dtype_code == 2:
+            for d in range(ndim):
+                shape_arr[d] = arr.shape[d]
+                perm_arr[d] = perm[d]
+
+            dst_shape_tuple = tuple(arr.shape[perm[d]] for d in range(ndim))
+            out = np.empty(dst_shape_tuple, dtype=np.complex128)
+            src = np.ascontiguousarray(arr)
+            src_p_z = <double complex*>cnp.PyArray_DATA(src)
+            dst_p_z = <double complex*>cnp.PyArray_DATA(out)
+
+            with nogil:
+                _transpose_nd_z128(src_p_z, dst_p_z, ndim, shape_arr, perm_arr, total)
+            return out
 
     return np.ascontiguousarray(np.transpose(arr, perm))
 
@@ -1010,10 +1173,14 @@ def cython_execute_plan(
     """
     cdef int n_steps = len(step_params)
     cdef int s, li, ri, oi, M, N, K
-    cdef double alpha = 1.0, beta = 0.0
+    cdef double alpha_d = 1.0, beta_d = 0.0
+    cdef double complex alpha_z = 1.0 + 0j, beta_z = 0.0 + 0j
     cdef double* left_p
     cdef double* right_p
     cdef double* out_p
+    cdef double complex* left_p_z
+    cdef double complex* right_p_z
+    cdef double complex* out_p_z
     cdef cnp.ndarray left_arr, right_arr, out_arr
 
     cdef list buffers = list(arrays)
@@ -1045,7 +1212,17 @@ def cython_execute_plan(
             right_p = <double*>cnp.PyArray_DATA(right_arr)
             out_p = <double*>cnp.PyArray_DATA(out_arr)
             with nogil:
-                _dgemm_row_major(M, N, K, alpha, left_p, right_p, beta, out_p)
+                _dgemm_row_major(M, N, K, alpha_d, left_p, right_p, beta_d, out_p)
+            buffers[oi] = out_arr.reshape(os)
+        elif left.dtype == np.complex128:
+            out_arr = np.empty((M, N), dtype=np.complex128)
+            left_arr = np.asarray(left)
+            right_arr = np.asarray(right)
+            left_p_z = <double complex*>cnp.PyArray_DATA(left_arr)
+            right_p_z = <double complex*>cnp.PyArray_DATA(right_arr)
+            out_p_z = <double complex*>cnp.PyArray_DATA(out_arr)
+            with nogil:
+                _zgemm_row_major(M, N, K, alpha_z, left_p_z, right_p_z, beta_z, out_p_z)
             buffers[oi] = out_arr.reshape(os)
         else:
             buffers[oi] = (left @ right).reshape(os)
