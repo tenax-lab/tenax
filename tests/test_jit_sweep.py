@@ -1289,3 +1289,121 @@ class TestBlockSparseJITSweep:
 
         for t in result.mps.tensors:
             assert isinstance(t, SymmetricTensor)
+
+
+# ------------------------------------------------------------------ #
+# Warmup-to-JIT transition tests (Task 9)                             #
+# ------------------------------------------------------------------ #
+
+
+class TestWarmupToJIT:
+    """Test that the warmup-to-JIT transition produces correct energies.
+
+    When initial bond dimensions are smaller than chi_max, DMRG should run
+    Python sweeps to grow bonds, then switch to the JIT-compiled lax.scan
+    sweep once all bonds have reached chi_max.
+    """
+
+    def test_warmup_then_jit_dense(self):
+        """Start with small chi, grow via Python sweeps, switch to JIT."""
+        import warnings
+
+        L = 6
+        num_sweeps = 10
+
+        mpo_tn = _build_dense_heisenberg(L)
+
+        # Start with bond_dim=2, grow up to chi_max=8
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            mps_tn = build_random_mps(L=L, physical_dim=2, bond_dim=2, seed=7)
+
+        config = DMRGConfig(
+            max_bond_dim=8,
+            num_sweeps=num_sweeps,
+            lanczos_max_iter=20,
+            convergence_tol=1e-10,
+            accelerator="jit",
+        )
+        result = dmrg(mpo_tn, mps_tn, config)
+
+        assert np.isfinite(result.energy)
+        assert result.energy < 0.0
+
+        # Compare with pure Python path
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            mps_tn2 = build_random_mps(L=L, physical_dim=2, bond_dim=2, seed=7)
+
+        config_py = DMRGConfig(
+            max_bond_dim=8,
+            num_sweeps=num_sweeps,
+            lanczos_max_iter=20,
+            convergence_tol=1e-10,
+            accelerator="off",
+        )
+        result_py = dmrg(mpo_tn, mps_tn2, config_py)
+
+        assert abs(result.energy - result_py.energy) < 1e-4, (
+            f"Warmup+JIT E={result.energy:.8f} vs Python E={result_py.energy:.8f}"
+        )
+
+    def test_warmup_skipped_when_saturated(self):
+        """When initial chi == chi_max, no warmup sweeps should be needed."""
+        import warnings
+
+        L = 4
+        chi_max = 4
+        num_sweeps = 4
+
+        mpo_tn = _build_dense_heisenberg(L)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            mps_tn = build_random_mps(L=L, physical_dim=2, bond_dim=chi_max, seed=42)
+
+        config = DMRGConfig(
+            max_bond_dim=chi_max,
+            num_sweeps=num_sweeps,
+            lanczos_max_iter=20,
+            convergence_tol=1e-10,
+            accelerator="jit",
+        )
+        result = dmrg(mpo_tn, mps_tn, config)
+
+        assert np.isfinite(result.energy)
+        assert result.energy < 0.0
+        # When chi == chi_max, all sweeps go through JIT (no warmup truncation
+        # errors recorded since JIT path doesn't track them)
+        assert len(result.energies_per_sweep) == num_sweeps
+
+    def test_warmup_energy_monotone_decreasing(self):
+        """Energies should decrease (or stay flat) across warmup + JIT phases."""
+        import warnings
+
+        L = 6
+        num_sweeps = 8
+
+        mpo_tn = _build_dense_heisenberg(L)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            mps_tn = build_random_mps(L=L, physical_dim=2, bond_dim=2, seed=13)
+
+        config = DMRGConfig(
+            max_bond_dim=8,
+            num_sweeps=num_sweeps,
+            lanczos_max_iter=20,
+            convergence_tol=1e-12,
+            accelerator="jit",
+        )
+        result = dmrg(mpo_tn, mps_tn, config)
+
+        energies = result.energies_per_sweep
+        assert len(energies) >= 2
+        # Energy should decrease (allow small numerical noise)
+        for i in range(1, len(energies)):
+            assert energies[i] <= energies[i - 1] + 1e-6, (
+                f"Energy not decreasing: sweep {i - 1}={energies[i - 1]:.8f}, "
+                f"sweep {i}={energies[i]:.8f}"
+            )
