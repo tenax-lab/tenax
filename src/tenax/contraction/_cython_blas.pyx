@@ -7,7 +7,10 @@ import numpy as np
 from scipy.linalg import blas as scipy_blas
 
 cimport numpy as cnp
+from scipy.linalg.cython_blas cimport daxpy as _daxpy
+from scipy.linalg.cython_blas cimport ddot as _ddot
 from scipy.linalg.cython_blas cimport dgemm as _dgemm
+from scipy.linalg.cython_blas cimport dscal as _dscal
 from scipy.linalg.cython_blas cimport sgemm as _sgemm
 from scipy.linalg.cython_blas cimport zgemm as _zgemm
 
@@ -750,3 +753,74 @@ cdef cnp.ndarray _c_transpose(cnp.ndarray arr, tuple perm, int dtype_code):
         return out
 
     return np.ascontiguousarray(np.transpose(arr, perm))
+
+
+# ------------------------------------------------------------------ #
+# BlockArray arithmetic: BLAS-accelerated inner, axpy, scale          #
+# ------------------------------------------------------------------ #
+
+def cython_ba_inner(dict blocks_a, dict blocks_b):
+    """Fast Frobenius inner product for block dicts using BLAS ddot.
+
+    Computes sum_k dot(a[k].ravel(), b[k].ravel()) over shared keys.
+    Handles read-only arrays (e.g. from JAX) by copying when necessary.
+    """
+    cdef double total = 0.0
+    cdef int n, inc = 1
+    cdef double[::1] a_flat, b_flat
+
+    for k in blocks_a:
+        bk = blocks_b.get(k)
+        if bk is not None:
+            ak = blocks_a[k]
+            # np.array with copy=False copies only when dtype differs or
+            # the source is read-only (JAX arrays).
+            a_arr = np.asarray(ak, dtype=np.float64)
+            if not a_arr.flags.writeable:
+                a_arr = a_arr.copy()
+            a_flat = np.ascontiguousarray(a_arr).ravel()
+            b_arr = np.asarray(bk, dtype=np.float64)
+            if not b_arr.flags.writeable:
+                b_arr = b_arr.copy()
+            b_flat = np.ascontiguousarray(b_arr).ravel()
+            n = a_flat.shape[0]
+            with nogil:
+                total += _ddot(&n, &a_flat[0], &inc, &b_flat[0], &inc)
+    return total
+
+
+def cython_ba_axpy(dict blocks_x, dict blocks_y, double alpha):
+    """BLAS axpy: y[k] += alpha * x[k] for all shared keys (in-place).
+
+    Used in Lanczos for orthogonalization: w -= q * inner(q, w).
+    Modifies blocks_y in-place.  blocks_y arrays must be writable.
+    """
+    cdef int n, inc = 1
+    cdef double a = alpha
+    cdef double[::1] x_flat, y_flat
+
+    for k in blocks_x:
+        yk = blocks_y.get(k)
+        if yk is not None:
+            xk = blocks_x[k]
+            x_arr = np.asarray(xk, dtype=np.float64)
+            if not x_arr.flags.writeable:
+                x_arr = x_arr.copy()
+            x_flat = np.ascontiguousarray(x_arr).ravel()
+            y_flat = yk.ravel()
+            n = x_flat.shape[0]
+            with nogil:
+                _daxpy(&n, &a, &x_flat[0], &inc, &y_flat[0], &inc)
+
+
+def cython_ba_scale_inplace(dict blocks, double scalar):
+    """Scale all blocks in-place by scalar using BLAS dscal."""
+    cdef int n, inc = 1
+    cdef double s = scalar
+    cdef double[::1] flat
+
+    for k in blocks:
+        flat = blocks[k].ravel()
+        n = flat.shape[0]
+        with nogil:
+            _dscal(&n, &s, &flat[0], &inc)

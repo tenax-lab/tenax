@@ -7,10 +7,12 @@ from tenax import U1Symmetry
 from tenax.algorithms._block_array import (
     BlockArray,
     ba_add,
+    ba_axpy,
     ba_conj,
     ba_inner,
     ba_norm,
     ba_scale,
+    ba_scale_inplace,
     ba_sub,
     ba_to_symmetric,
     symmetric_to_ba,
@@ -139,6 +141,80 @@ class TestBaConj:
     def test_conj_preserves_indices(self, simple_ba):
         result = ba_conj(simple_ba)
         assert result.indices == simple_ba.indices
+
+
+class TestBaAxpy:
+    def test_axpy_in_place(self, simple_ba, another_ba):
+        """y += alpha * x should modify y in place."""
+        alpha = -2.0
+        # Save originals for expected values
+        expected = {
+            k: simple_ba.blocks[k] + alpha * another_ba.blocks[k]
+            for k in simple_ba.blocks
+        }
+        ba_axpy(another_ba, simple_ba, alpha)
+        for key in expected:
+            np.testing.assert_allclose(simple_ba.blocks[key], expected[key])
+
+    def test_axpy_skips_missing_keys(self):
+        """Keys in x but not y should be ignored."""
+        sym = U1Symmetry()
+        idx = TensorIndex(
+            sym, np.array([0, 1], dtype=np.int32), FlowDirection.IN, label="x"
+        )
+        idx_out = TensorIndex(
+            sym, np.array([0, 1], dtype=np.int32), FlowDirection.OUT, label="y"
+        )
+        x = BlockArray(
+            blocks={(0, 0): np.array([[1.0]]), (1, 1): np.array([[2.0]])},
+            indices=(idx, idx_out),
+        )
+        y = BlockArray(
+            blocks={(0, 0): np.array([[10.0]])},
+            indices=(idx, idx_out),
+        )
+        ba_axpy(x, y, 3.0)
+        np.testing.assert_allclose(y.blocks[(0, 0)], [[13.0]])
+        assert (1, 1) not in y.blocks
+
+
+class TestBaScaleInplace:
+    def test_scale_inplace(self, simple_ba):
+        """In-place scaling should modify blocks without creating new dict."""
+        original_blocks = simple_ba.blocks
+        expected = {k: v * 3.0 for k, v in simple_ba.blocks.items()}
+        ba_scale_inplace(simple_ba, 3.0)
+        assert simple_ba.blocks is original_blocks  # same dict object
+        for key in expected:
+            np.testing.assert_allclose(simple_ba.blocks[key], expected[key])
+
+
+class TestCythonBaInner:
+    """Test that cython_ba_inner gives same result as pure-Python ba_inner."""
+
+    def test_cython_inner_matches_python(self, simple_ba, another_ba):
+        """Cython inner product must match Python fallback."""
+        try:
+            from tenax.contraction._cython_blas import cython_ba_inner
+        except ImportError:
+            pytest.skip("Cython BA extension not available")
+        # Compute via Python fallback
+        python_result = sum(
+            float(np.sum(simple_ba.blocks[k] * another_ba.blocks[k]))
+            for k in simple_ba.blocks
+        )
+        cython_result = cython_ba_inner(simple_ba.blocks, another_ba.blocks)
+        np.testing.assert_allclose(cython_result, python_result, rtol=1e-14)
+
+    def test_cython_inner_self(self, simple_ba):
+        """Inner product with self should equal sum of squared elements."""
+        try:
+            from tenax.contraction._cython_blas import cython_ba_inner
+        except ImportError:
+            pytest.skip("Cython BA extension not available")
+        expected = sum(np.sum(b**2) for b in simple_ba.blocks.values())
+        result = cython_ba_inner(simple_ba.blocks, simple_ba.blocks)
+        np.testing.assert_allclose(result, expected, rtol=1e-14)
 
 
 class TestRoundtrip:

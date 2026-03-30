@@ -2,6 +2,10 @@
 
 Provides a minimal BlockArray container and free functions for arithmetic,
 avoiding JAX overhead in inner loops. All operations use plain numpy.
+
+When the Cython BLAS extension is available, ba_inner / ba_norm use BLAS
+ddot (no Python-layer numpy dispatch), and ba_axpy / ba_scale_inplace
+provide allocation-free in-place BLAS operations for the Lanczos loop.
 """
 
 from __future__ import annotations
@@ -12,6 +16,18 @@ from dataclasses import dataclass
 import numpy as np
 
 from tenax.core.index import TensorIndex
+
+# Cache the import check once at module load time.
+try:
+    from tenax.contraction._cython_blas import cython_ba_axpy as _c_axpy
+    from tenax.contraction._cython_blas import cython_ba_inner as _c_inner
+    from tenax.contraction._cython_blas import (
+        cython_ba_scale_inplace as _c_scale_inplace,
+    )
+
+    _HAS_CYTHON_BA = True
+except ImportError:
+    _HAS_CYTHON_BA = False
 
 
 @dataclass
@@ -75,12 +91,38 @@ def ba_sub(a: BlockArray, b: BlockArray) -> BlockArray:
 
 def ba_inner(a: BlockArray, b: BlockArray) -> float:
     """Frobenius inner product: sum of element-wise products over shared blocks."""
+    if _HAS_CYTHON_BA:
+        return _c_inner(a.blocks, b.blocks)
     total = 0.0
     for k in a.blocks:
         bk = b.blocks.get(k)
         if bk is not None:
             total += float(np.sum(a.blocks[k] * bk))
     return total
+
+
+def ba_axpy(x: BlockArray, y: BlockArray, alpha: float) -> None:
+    """y += alpha * x (in-place).  Uses BLAS daxpy when available.
+
+    For shared keys only; keys present in x but not y are ignored.
+    This is the pattern needed by Lanczos reorthogonalization.
+    """
+    if _HAS_CYTHON_BA:
+        _c_axpy(x.blocks, y.blocks, alpha)
+    else:
+        for k in x.blocks:
+            yk = y.blocks.get(k)
+            if yk is not None:
+                yk += alpha * x.blocks[k]
+
+
+def ba_scale_inplace(ba: BlockArray, scalar: float) -> None:
+    """Scale all blocks in-place.  Uses BLAS dscal when available."""
+    if _HAS_CYTHON_BA:
+        _c_scale_inplace(ba.blocks, scalar)
+    else:
+        for v in ba.blocks.values():
+            v *= scalar
 
 
 def ba_norm(ba: BlockArray) -> float:
