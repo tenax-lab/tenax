@@ -270,3 +270,221 @@ class TestVariedBlockSizes:
         # Padding region (where mask is False) must be zero
         padding_data = pba.data[~pba.mask]
         np.testing.assert_allclose(padding_data, 0.0, atol=1e-15)
+
+
+# ===== Tests for PaddedContractionPlan and contract_padded =====
+
+
+from tenax.algorithms._padded_block_array import PaddedContractionPlan, contract_padded
+from tenax.contraction.contractor import contract
+
+
+def _make_matrix_pair(u1, rng, charges_i, charges_j, charges_k):
+    """Create two SymmetricTensors A(i,j) and B(j,k) that can be multiplied."""
+    idx_i = TensorIndex(u1, charges_i, FlowDirection.IN, label="i")
+    idx_j_out = TensorIndex(u1, u1.dual(charges_j), FlowDirection.OUT, label="j")
+    idx_j_in = TensorIndex(u1, charges_j, FlowDirection.IN, label="j")
+    idx_k = TensorIndex(u1, u1.dual(charges_k), FlowDirection.OUT, label="k")
+
+    key_a, key_b = jax.random.split(rng)
+    A = SymmetricTensor.random_normal((idx_i, idx_j_out), key_a)
+    B = SymmetricTensor.random_normal((idx_j_in, idx_k), key_b)
+    return A, B
+
+
+class TestPaddedContractionPlanBuild:
+    """Verify PaddedContractionPlan.build produces correct static metadata."""
+
+    def test_build_basic(self, u1, rng):
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        A, B = _make_matrix_pair(u1, rng, charges, charges, charges)
+        plan = PaddedContractionPlan.build(A, B)
+
+        assert isinstance(plan.left_indices, tuple)
+        assert isinstance(plan.right_indices, tuple)
+        assert isinstance(plan.output_indices, tuple)
+        # All index arrays must have the same length (one entry per block pair)
+        assert len(plan.left_indices) == len(plan.right_indices)
+        assert len(plan.left_indices) == len(plan.output_indices)
+        assert plan.num_output_blocks > 0
+        assert isinstance(plan.subscripts, str)
+        assert "->" in plan.subscripts
+
+    def test_build_has_correct_subscripts(self, u1, rng):
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        A, B = _make_matrix_pair(u1, rng, charges, charges, charges)
+        plan = PaddedContractionPlan.build(A, B)
+        # For a 2-leg x 2-leg matmul, subscripts should have the form
+        # "XY,YZ->XZ" where Y is the contracted leg and X, Z are free.
+        lhs, rhs = plan.subscripts.split("->")
+        sub_a, sub_b = lhs.split(",")
+        assert len(sub_a) == 2  # A has 2 legs
+        assert len(sub_b) == 2  # B has 2 legs
+        assert len(rhs) == 2  # output has 2 free legs
+        # Contracted char appears in both sub_a and sub_b
+        assert sub_a[1] == sub_b[0]  # j is the contracted leg
+        # Free chars appear in output
+        assert rhs[0] == sub_a[0]
+        assert rhs[1] == sub_b[1]
+
+    def test_output_charges_match_valid_blocks(self, u1, rng):
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        A, B = _make_matrix_pair(u1, rng, charges, charges, charges)
+        plan = PaddedContractionPlan.build(A, B)
+
+        # The output charges should form valid charge-sector keys
+        assert len(plan.output_charges) == plan.num_output_blocks
+        assert len(plan.output_shapes) == plan.num_output_blocks
+
+
+class TestContractPaddedMatchesSymmetricContract:
+    """contract_padded must produce the same result as tenax.contract on SymmetricTensors."""
+
+    def test_matmul_simple(self, u1, rng):
+        """Simple case: charges [-1, 0, 1] on all legs."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        A, B = _make_matrix_pair(u1, rng, charges, charges, charges)
+
+        # Reference: SymmetricTensor contraction
+        C_ref = contract(A, B)
+
+        # Padded path
+        plan = PaddedContractionPlan.build(A, B)
+        pA = PaddedBlockArray.from_symmetric(A)
+        pB = PaddedBlockArray.from_symmetric(B)
+        pC = contract_padded(plan, pA, pB)
+
+        # Convert back and compare
+        C_padded = pC.to_symmetric()
+        np.testing.assert_allclose(C_padded.todense(), C_ref.todense(), atol=1e-12)
+
+    def test_matmul_varied_charges(self, u1, rng):
+        """Different charge multiplicities on each leg."""
+        charges_i = np.array([0, 0, 0, 1, 1], dtype=np.int32)
+        charges_j = np.array([-1, 0, 0, 1], dtype=np.int32)
+        charges_k = np.array([0, 1, 1, 1], dtype=np.int32)
+        A, B = _make_matrix_pair(u1, rng, charges_i, charges_j, charges_k)
+
+        C_ref = contract(A, B)
+
+        plan = PaddedContractionPlan.build(A, B)
+        pA = PaddedBlockArray.from_symmetric(A)
+        pB = PaddedBlockArray.from_symmetric(B)
+        pC = contract_padded(plan, pA, pB)
+        C_padded = pC.to_symmetric()
+
+        np.testing.assert_allclose(C_padded.todense(), C_ref.todense(), atol=1e-12)
+
+    def test_matmul_single_charge(self, u1, rng):
+        """Single charge sector: only one block each."""
+        charges = np.array([0, 0, 0], dtype=np.int32)
+        A, B = _make_matrix_pair(u1, rng, charges, charges, charges)
+
+        C_ref = contract(A, B)
+
+        plan = PaddedContractionPlan.build(A, B)
+        pA = PaddedBlockArray.from_symmetric(A)
+        pB = PaddedBlockArray.from_symmetric(B)
+        pC = contract_padded(plan, pA, pB)
+        C_padded = pC.to_symmetric()
+
+        np.testing.assert_allclose(C_padded.todense(), C_ref.todense(), atol=1e-12)
+
+    def test_matmul_larger_charges(self, u1, rng):
+        """Larger charge range to test more block pairs."""
+        charges = np.array([-2, -1, 0, 1, 2], dtype=np.int32)
+        A, B = _make_matrix_pair(u1, rng, charges, charges, charges)
+
+        C_ref = contract(A, B)
+
+        plan = PaddedContractionPlan.build(A, B)
+        pA = PaddedBlockArray.from_symmetric(A)
+        pB = PaddedBlockArray.from_symmetric(B)
+        pC = contract_padded(plan, pA, pB)
+        C_padded = pC.to_symmetric()
+
+        np.testing.assert_allclose(C_padded.todense(), C_ref.todense(), atol=1e-12)
+
+
+class TestContractPaddedJITCompatible:
+    """contract_padded must work inside jax.jit."""
+
+    def test_plan_is_jit_compatible(self, u1, rng):
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        A, B = _make_matrix_pair(u1, rng, charges, charges, charges)
+
+        plan = PaddedContractionPlan.build(A, B)
+        pA = PaddedBlockArray.from_symmetric(A)
+        pB = PaddedBlockArray.from_symmetric(B)
+
+        @jax.jit
+        def do_contract(a, b):
+            return contract_padded(plan, a, b)
+
+        pC = do_contract(pA, pB)
+
+        # Verify result matches non-jitted path
+        C_ref = contract(A, B)
+        C_padded = pC.to_symmetric()
+        np.testing.assert_allclose(C_padded.todense(), C_ref.todense(), atol=1e-12)
+
+    def test_jit_reuse_plan(self, u1, rng):
+        """Same plan, different data: no recompilation needed."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        A1, B1 = _make_matrix_pair(u1, rng, charges, charges, charges)
+
+        plan = PaddedContractionPlan.build(A1, B1)
+
+        @jax.jit
+        def do_contract(a, b):
+            return contract_padded(plan, a, b)
+
+        pA1 = PaddedBlockArray.from_symmetric(A1)
+        pB1 = PaddedBlockArray.from_symmetric(B1)
+        pC1 = do_contract(pA1, pB1)
+
+        # Create different data with the same charge structure
+        key2 = jax.random.PRNGKey(99)
+        A2, B2 = _make_matrix_pair(u1, key2, charges, charges, charges)
+        pA2 = PaddedBlockArray.from_symmetric(A2)
+        pB2 = PaddedBlockArray.from_symmetric(B2)
+        pC2 = do_contract(pA2, pB2)
+
+        # Both should match their respective reference contractions
+        C_ref1 = contract(A1, B1)
+        C_ref2 = contract(A2, B2)
+        np.testing.assert_allclose(
+            pC1.to_symmetric().todense(), C_ref1.todense(), atol=1e-12
+        )
+        np.testing.assert_allclose(
+            pC2.to_symmetric().todense(), C_ref2.todense(), atol=1e-12
+        )
+
+
+class TestContractPaddedOutputStructure:
+    """Verify the output PaddedBlockArray has correct structure."""
+
+    def test_output_has_correct_charges(self, u1, rng):
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        A, B = _make_matrix_pair(u1, rng, charges, charges, charges)
+
+        plan = PaddedContractionPlan.build(A, B)
+        pA = PaddedBlockArray.from_symmetric(A)
+        pB = PaddedBlockArray.from_symmetric(B)
+        pC = contract_padded(plan, pA, pB)
+
+        # Output block charges should match the plan
+        assert pC.block_charges == plan.output_charges
+
+    def test_output_padding_is_zero(self, u1, rng):
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        A, B = _make_matrix_pair(u1, rng, charges, charges, charges)
+
+        plan = PaddedContractionPlan.build(A, B)
+        pA = PaddedBlockArray.from_symmetric(A)
+        pB = PaddedBlockArray.from_symmetric(B)
+        pC = contract_padded(plan, pA, pB)
+
+        # Padding regions must be zero
+        padding_data = pC.data[~pC.mask]
+        np.testing.assert_allclose(padding_data, 0.0, atol=1e-12)
