@@ -219,3 +219,106 @@ class TestPaddedSVDBlocks:
         assert per_block_keeps.shape == (pba.data.shape[0],)
         # All keeps should be non-negative
         assert jnp.all(per_block_keeps >= 0)
+
+
+# ------------------------------------------------------------------ #
+# Block-sparse full SVD tests                                          #
+# ------------------------------------------------------------------ #
+
+
+class TestPaddedSVDBlocksFull:
+    def test_svd_full_matches_blocks(self):
+        """Full SVD keeps same per_block_keeps as padded_svd_blocks."""
+        from tenax.algorithms._padded_block_array import PaddedBlockArray
+        from tenax.algorithms._padded_linalg import (
+            padded_svd_blocks,
+            padded_svd_blocks_full,
+        )
+
+        sym = _make_symmetric_matrix(seed=42, chi=8)
+        pba = PaddedBlockArray.from_symmetric(sym)
+        chi_max = 5
+
+        _, per_block_keeps_ref = padded_svd_blocks(pba, chi_max)
+        _, _, _, per_block_keeps_full = padded_svd_blocks_full(pba, chi_max)
+
+        np.testing.assert_array_equal(
+            np.array(per_block_keeps_full), np.array(per_block_keeps_ref)
+        )
+
+    def test_svd_reconstruction_matches_original(self):
+        """U @ diag(s) @ Vh reconstructs original block data (within kept SVs)."""
+        from tenax.algorithms._padded_block_array import PaddedBlockArray
+        from tenax.algorithms._padded_linalg import padded_svd_blocks_full
+
+        sym = _make_symmetric_matrix(seed=55, chi=8)
+        pba = PaddedBlockArray.from_symmetric(sym)
+        # Use large chi_max to keep all SVs (no truncation loss)
+        chi_max = 100
+
+        U, s, Vh, per_block_keeps = padded_svd_blocks_full(pba, chi_max)
+
+        num_blocks = pba.data.shape[0]
+        for i in range(num_blocks):
+            k = int(per_block_keeps[i])
+            if k == 0:
+                continue
+            rows, cols = pba.block_shapes[i]
+            # Reconstruct: U[:, :k] @ diag(s[:k]) @ Vh[:k, :]
+            recon = U[i, :, :k] @ jnp.diag(s[i, :k]) @ Vh[i, :k, :]
+            original = pba.data[i, :rows, :cols]
+            np.testing.assert_allclose(
+                np.array(recon[:rows, :cols]), np.array(original), atol=1e-5
+            )
+
+    def test_svd_full_jit_compatible(self):
+        """padded_svd_blocks_full works inside jax.jit."""
+        from tenax.algorithms._padded_block_array import PaddedBlockArray
+        from tenax.algorithms._padded_linalg import padded_svd_blocks_full
+
+        sym = _make_symmetric_matrix(seed=7, chi=6)
+        pba = PaddedBlockArray.from_symmetric(sym)
+        chi_max = 3
+
+        @jax.jit
+        def f(data):
+            pba_inner = PaddedBlockArray(
+                data=data,
+                block_charges=pba.block_charges,
+                block_shapes=pba.block_shapes,
+                indices=pba.indices,
+                symmetry=pba.symmetry,
+            )
+            return padded_svd_blocks_full(pba_inner, chi_max)
+
+        U, s, Vh, per_block_keeps = f(pba.data)
+
+        sv_per_block = min(pba.data.shape[1], pba.data.shape[2])
+        assert U.shape == (pba.data.shape[0], pba.data.shape[1], sv_per_block)
+        assert s.shape == (pba.data.shape[0], sv_per_block)
+        assert Vh.shape == (pba.data.shape[0], sv_per_block, pba.data.shape[2])
+        assert per_block_keeps.shape == (pba.data.shape[0],)
+
+        # All singular values should be non-negative
+        assert jnp.all(s >= -1e-14)
+
+    def test_total_kept_equals_chi_max(self):
+        """sum(per_block_keeps) equals min(chi_max, total_valid_svs)."""
+        from tenax.algorithms._padded_block_array import PaddedBlockArray
+        from tenax.algorithms._padded_linalg import padded_svd_blocks_full
+
+        sym = _make_symmetric_matrix(seed=99, chi=8)
+        pba = PaddedBlockArray.from_symmetric(sym)
+        chi_max = 5
+
+        _, s, _, per_block_keeps = padded_svd_blocks_full(pba, chi_max)
+        total_kept = int(jnp.sum(per_block_keeps))
+
+        # Count total valid SVs across all blocks
+        total_valid = sum(min(m, n) for m, n in pba.block_shapes)
+
+        expected = min(chi_max, total_valid)
+        assert total_kept == expected, (
+            f"total_kept={total_kept}, expected={expected} "
+            f"(chi_max={chi_max}, total_valid={total_valid})"
+        )

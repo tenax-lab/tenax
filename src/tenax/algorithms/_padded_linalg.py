@@ -9,6 +9,7 @@ SVD+truncation fully JIT-compatible without host-device synchronization.
 Public API:
     padded_svd_dense(theta, chi_max) -> (U, s, Vh)
     padded_svd_blocks(pba, chi_max) -> (top_values, per_block_keeps)
+    padded_svd_blocks_full(pba, chi_max) -> (U, s, Vh, per_block_keeps)
 """
 
 from __future__ import annotations
@@ -143,3 +144,88 @@ def padded_svd_blocks(
     per_block_keeps = jnp.sum(one_hot, axis=0)  # (num_blocks,)
 
     return top_values, per_block_keeps
+
+
+def padded_svd_blocks_full(
+    pba,  # PaddedBlockArray
+    chi_max: int,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Block-sparse SVD with full reconstruction for DMRG.
+
+    Like :func:`padded_svd_blocks` but also returns the left and right
+    singular vectors (U, Vh) needed to reconstruct truncated MPS tensors
+    after a 2-site DMRG optimization step.
+
+    Vmaps ``jnp.linalg.svd`` over all blocks, selects the globally largest
+    ``chi_max`` singular values via ``jax.lax.top_k``, then zeros out the
+    discarded columns/rows in U, s, Vh so downstream code can simply
+    contract ``U @ diag(s) @ Vh`` per block.
+
+    Fully JIT-compatible (static shapes, no host-device sync).
+
+    Args:
+        pba: PaddedBlockArray with ``(num_blocks, M_max, N_max)`` data.
+        chi_max: Maximum total bond dimension across all sectors.
+
+    Returns:
+        U_blocks:        ``(num_blocks, M_max, sv_per_block)`` left singular
+                         vectors per block, with discarded columns zeroed.
+        s_blocks:        ``(num_blocks, sv_per_block)`` singular values per
+                         block, with discarded entries zeroed.
+        Vh_blocks:       ``(num_blocks, sv_per_block, N_max)`` right singular
+                         vectors per block, with discarded rows zeroed.
+        per_block_keeps: ``(num_blocks,)`` int32 -- how many SVs to keep per
+                         block after global truncation.
+    """
+    num_blocks = pba.data.shape[0]
+    M_max = pba.data.shape[1]
+    N_max = pba.data.shape[2]
+    sv_per_block = min(M_max, N_max)
+
+    # --- 1. vmap SVD over all blocks ---
+    U_all, s_all, Vh_all = jax.vmap(lambda m: jnp.linalg.svd(m, full_matrices=False))(
+        pba.data
+    )
+    # U_all:  (num_blocks, M_max, sv_per_block)
+    # s_all:  (num_blocks, sv_per_block)
+    # Vh_all: (num_blocks, sv_per_block, N_max)
+
+    # --- 2. Mask spurious SVs from padding ---
+    block_sv_limits = jnp.array(
+        [min(m, n) for m, n in pba.block_shapes], dtype=jnp.int32
+    )
+    sv_range = jnp.arange(sv_per_block)
+    sv_valid_mask = sv_range[None, :] < block_sv_limits[:, None]
+    # (num_blocks, sv_per_block) bool
+
+    s_masked = jnp.where(sv_valid_mask, s_all, 0.0)
+
+    # --- 3. Global truncation via lax.top_k ---
+    s_flat = s_masked.ravel()  # (num_blocks * sv_per_block,)
+    total_sv = s_flat.shape[0]
+    k = min(chi_max, total_sv)
+
+    top_values, top_indices = jax.lax.top_k(s_flat, k)
+
+    # Pad to chi_max if fewer total singular values available
+    if k < chi_max:
+        top_indices = jnp.pad(top_indices, (0, chi_max - k), constant_values=-1)
+
+    # --- 4. Compute per_block_keeps ---
+    block_ids = top_indices // sv_per_block
+
+    one_hot = jax.nn.one_hot(block_ids, num_blocks, dtype=jnp.int32)
+    per_block_keeps = jnp.sum(one_hot, axis=0)  # (num_blocks,)
+
+    # --- 5. Zero out discarded singular values ---
+    # Within each block, the kept SVs are the first per_block_keeps[i] ones
+    # (SVD returns them sorted descending, and top_k picks the globally
+    # largest, so the kept ones within a block are always the leading ones).
+    keep_mask = sv_range[None, :] < per_block_keeps[:, None]
+    # (num_blocks, sv_per_block) bool
+
+    s_truncated = jnp.where(keep_mask, s_masked, 0.0)
+    U_truncated = jnp.where(keep_mask[:, None, :], U_all, 0.0)
+    Vh_truncated = jnp.where(keep_mask[:, :, None], Vh_all, 0.0)
+
+    return U_truncated, s_truncated, Vh_truncated, per_block_keeps
