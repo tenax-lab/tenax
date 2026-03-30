@@ -26,7 +26,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
+
+if TYPE_CHECKING:
+    from tenax.algorithms._block_array import BlockArray
 
 import jax
 import jax.numpy as jnp
@@ -1216,6 +1219,86 @@ def _lanczos_solve_tensor(
     return eigenvalue, eigenvector
 
 
+def _lanczos_solve_np(
+    matvec: Callable,
+    initial: BlockArray,
+    num_steps: int,
+    tol: float,
+) -> tuple[float, BlockArray]:
+    """Lanczos eigensolver on BlockArray — pure numpy, no JAX.
+
+    Same algorithm as ``_lanczos_solve_tensor`` but operates on BlockArray
+    objects using ``ba_*`` functions from ``_block_array.py``.
+
+    Args:
+        matvec:    Function applying H_eff to a BlockArray, returning a BlockArray.
+        initial:   Starting vector (BlockArray).
+        num_steps: Maximum Lanczos iterations.
+        tol:       Convergence tolerance on the residual norm.
+
+    Returns:
+        (eigenvalue, eigenvector) for the ground state as BlockArray.
+    """
+    from tenax.algorithms._block_array import (
+        ba_add,
+        ba_inner,
+        ba_norm,
+        ba_scale,
+        ba_sub,
+    )
+
+    v_nrm = ba_norm(initial)
+    v = ba_scale(initial, 1.0 / (v_nrm + 1e-15))
+
+    basis = [v]
+    alphas = []
+    betas = [0.0]
+
+    for step in range(num_steps):
+        w = matvec(basis[-1])
+        alpha_val = ba_inner(basis[-1], w)
+        alphas.append(alpha_val)
+
+        w = ba_sub(w, ba_scale(basis[-1], alpha_val))
+        if step > 0:
+            w = ba_sub(w, ba_scale(basis[-2], betas[-1]))
+
+        # Full reorthogonalization
+        for q in basis:
+            w = ba_sub(w, ba_scale(q, ba_inner(q, w)))
+
+        beta_val = ba_norm(w)
+        betas.append(beta_val)
+
+        if beta_val < tol:
+            break
+
+        basis.append(ba_scale(w, 1.0 / beta_val))
+
+    n = len(alphas)
+    if n == 0:
+        return 0.0, v
+    if n == 1:
+        return alphas[0], basis[0]
+
+    # Tridiagonal eigendecomposition — pure numpy
+    T = np.diag(alphas) + np.diag(betas[1:n], k=1) + np.diag(betas[1:n], k=-1)
+    eigvals, eigvecs = np.linalg.eigh(T)
+    idx = int(np.argmin(eigvals))
+    eigenvalue = float(eigvals[idx])
+    krylov_coefs = eigvecs[:, idx]
+
+    # Reconstruct eigenvector
+    eigenvector = ba_scale(basis[0], float(krylov_coefs[0]))
+    for k in range(1, n):
+        eigenvector = ba_add(eigenvector, ba_scale(basis[k], float(krylov_coefs[k])))
+
+    ev_norm = ba_norm(eigenvector)
+    eigenvector = ba_scale(eigenvector, 1.0 / (ev_norm + 1e-15))
+
+    return eigenvalue, eigenvector
+
+
 def _precompute_block_plan(
     tensors: list[SymmetricTensor],
     subscripts: str,
@@ -1340,18 +1423,17 @@ def _blockwise_contract(
             else:
                 np_blocks_list.append(_to_np_blocks(t))
 
-        # Use opt_einsum with NumPy arrays (avoids JAX dispatch overhead)
+        # Use BLAS plan instead of opt_einsum (2x less Python dispatch overhead)
+        from tenax.contraction._blas_plan import get_cached_blas_plan
+
         for combo_keys, output_key in block_plan:
             combo_arrays = [np_blocks_list[i][k] for i, k in enumerate(combo_keys)]
             block_shapes = tuple(a.shape for a in combo_arrays)
-            if block_shapes in expr_cache:
-                expr = expr_cache[block_shapes]
-            else:
-                expr = opt_einsum.contract_expression(
-                    subscripts, *block_shapes, optimize="auto"
+            if block_shapes not in expr_cache:
+                expr_cache[block_shapes] = get_cached_blas_plan(
+                    subscripts, block_shapes
                 )
-                expr_cache[block_shapes] = expr
-            result_array = expr(*combo_arrays)
+            result_array = expr_cache[block_shapes].execute_numpy(combo_arrays)
             output_accum.setdefault(output_key, []).append(result_array)
     else:
         # Original backtracking approach
@@ -1457,10 +1539,16 @@ def _update_left_env_symmetric(
     # bar() flips flows so bra virtual legs have opposite flow to ket legs,
     # which is the physically correct convention for environment tensors.
     out_indices = (A.indices[2], mpo_site.indices[3], A_bra.indices[2])
+    tensors = [left_env, A, mpo_site, A_bra]
+    subs = "abc,apd,bpxe,cxf->def"
+    plan = _precompute_block_plan(tensors, subs)
+    np_blocks = [_to_np_blocks(t) for t in tensors]
     result = _blockwise_contract(
-        [left_env, A, mpo_site, A_bra],
-        "abc,apd,bpxe,cxf->def",
+        tensors,
+        subs,
         output_indices=out_indices,
+        block_plan=plan,
+        np_blocks_cache=np_blocks,
     )
     return result
 
@@ -1486,10 +1574,16 @@ def _update_right_env_symmetric(
     # Output: d = B's left virtual, e = W's left bond, f = B_bra's left virtual
     # bar() flips flows for physically correct bra convention.
     out_indices = (B.indices[0], mpo_site.indices[0], B_bra.indices[0])
+    tensors = [right_env, B, mpo_site, B_bra]
+    subs = "abc,dpa,epxb,fxc->def"
+    plan = _precompute_block_plan(tensors, subs)
+    np_blocks = [_to_np_blocks(t) for t in tensors]
     result = _blockwise_contract(
-        [right_env, B, mpo_site, B_bra],
-        "abc,dpa,epxb,fxc->def",
+        tensors,
+        subs,
         output_indices=out_indices,
+        block_plan=plan,
+        np_blocks_cache=np_blocks,
     )
     return result
 
