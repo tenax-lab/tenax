@@ -77,6 +77,9 @@ class DMRGConfig:
                             instead of fixed α. The expansion is weighted by the
                             truncation error, giving strong mixing when needed
                             and vanishing mixing at convergence.
+        numpy_blockwise:    Use numpy-only path for symmetric DMRG (no JAX
+                            overhead). Default True. Set False to use the
+                            original JAX-backed symmetric path.
         verbose:            Print energy at each sweep.
     """
 
@@ -94,6 +97,9 @@ class DMRGConfig:
     mixing_factor: float = 1e-3
     expansion_num_extra: int = 0
     hybrid_mixing: bool = True
+    numpy_blockwise: bool = (
+        True  # Use numpy-only path for symmetric DMRG (no JAX overhead)
+    )
     verbose: bool = False
 
 
@@ -189,7 +195,7 @@ def dmrg(
 
     if all_mps_sym and all_mpo_sym:
         use_symmetric = True
-        ops = _symmetric_ops()
+        ops = _symmetric_ops(config)
     elif all_mps_dense and all_mpo_dense:
         use_symmetric = False
         ops = _dense_ops()
@@ -1048,6 +1054,16 @@ def _svd_and_truncate_site(
     Returns:
         (A_tensor, singular_values, B_tensor, truncation_error)
     """
+    # Dispatch to numpy-only SVD when numpy_blockwise is enabled
+    if config.numpy_blockwise and isinstance(theta, SymmetricTensor):
+        from tenax.algorithms._block_array import ba_to_symmetric, symmetric_to_ba
+
+        theta_ba = symmetric_to_ba(theta)
+        A_ba, s_np, B_ba, trunc_err = _svd_and_truncate_site_np(
+            theta_ba, site, config, sweep_right
+        )
+        return ba_to_symmetric(A_ba), s_np, ba_to_symmetric(B_ba), trunc_err
+
     labels = theta.labels()
 
     # Find physical and virtual labels
@@ -1951,8 +1967,17 @@ def _one_site_update_symmetric_np(
     return ba_to_symmetric(site_opt_ba), energy
 
 
-def _symmetric_ops() -> SweepOps:
+def _symmetric_ops(config: DMRGConfig) -> SweepOps:
     """Return the block-sparse symmetric backend callbacks."""
+    if config.numpy_blockwise:
+        return SweepOps(
+            build_trivial_left_env=_build_trivial_left_env_symmetric,
+            build_trivial_right_env=_build_trivial_right_env_symmetric,
+            update_left_env=_update_left_env_symmetric,
+            update_right_env=_update_right_env_symmetric,
+            two_site_update=_two_site_update_symmetric_np,
+            one_site_update=_one_site_update_symmetric_np,
+        )
     return SweepOps(
         build_trivial_left_env=_build_trivial_left_env_symmetric,
         build_trivial_right_env=_build_trivial_right_env_symmetric,
