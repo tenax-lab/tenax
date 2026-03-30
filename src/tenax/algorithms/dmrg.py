@@ -527,12 +527,18 @@ def dmrg(
                 print(f"Converged at sweep {sweep + 1}")
             break
 
-    # Build result MPS as FiniteMPS
+    # Build result MPS as FiniteMPS.
+    # Convert any BlockArray tensors back to SymmetricTensor for storage.
+    from tenax.algorithms._block_array import BlockArray, ba_to_symmetric
+
+    final_tensors = [
+        ba_to_symmetric(t) if isinstance(t, BlockArray) else t for t in mps_tensors
+    ]
     if not config.two_site:
         orth_center = 0  # after final R→L sweep
     else:
         orth_center = None  # 2-site doesn't maintain strict canonical form
-    result_mps = FiniteMPS.from_tensors(mps_tensors, orth_center=orth_center)
+    result_mps = FiniteMPS.from_tensors(final_tensors, orth_center=orth_center)
 
     return DMRGResult(
         energy=energy,
@@ -1054,7 +1060,12 @@ def _svd_and_truncate_site(
     Returns:
         (A_tensor, singular_values, B_tensor, truncation_error)
     """
-    labels = theta.labels()
+    from tenax.algorithms._block_array import BlockArray
+
+    if isinstance(theta, BlockArray):
+        labels = tuple(idx.label for idx in theta.indices)
+    else:
+        labels = theta.labels()
 
     # Find physical and virtual labels
     # With uniform 3-leg tensors, site 0 has left bond "v_-1_0"
@@ -1081,14 +1092,20 @@ def _svd_and_truncate_site(
     bond_label = f"v{site}_{site + 1}"
 
     # Dispatch to numpy-only SVD when numpy_blockwise is enabled.
-    # Call _truncated_svd_symmetric_np directly on SymmetricTensor
-    # (avoids wasteful SymmetricTensor→BlockArray→SymmetricTensor roundtrip).
-    if config.numpy_blockwise and isinstance(theta, SymmetricTensor):
+    # Returns BlockArray directly — avoids JAX array creation in the sweep loop.
+    # The sweep loop stores these as BlockArray; env updates accept either type.
+    # Only converted to SymmetricTensor at the end of dmrg() for the result.
+    from tenax.algorithms._block_array import BlockArray
+
+    if config.numpy_blockwise and isinstance(theta, (SymmetricTensor, BlockArray)):
         from tenax.algorithms._block_array import ba_to_symmetric
         from tenax.linalg import _truncated_svd_symmetric_np
 
+        # _truncated_svd_symmetric_np needs SymmetricTensor for index metadata
+        theta_sym = ba_to_symmetric(theta) if isinstance(theta, BlockArray) else theta
+
         A_ba, s, B_ba, s_full = _truncated_svd_symmetric_np(
-            theta,
+            theta_sym,
             left_labels=left_labels,
             right_labels=right_labels,
             max_singular_values=config.max_bond_dim,
@@ -1110,7 +1127,7 @@ def _svd_and_truncate_site(
         else:
             A_ba = _scale_bond_axis_ba(A_ba, bond_label, s)
 
-        return ba_to_symmetric(A_ba), s, ba_to_symmetric(B_ba), trunc_err
+        return A_ba, s, B_ba, trunc_err
 
     # JAX path: single SVD via truncated_svd (handles both Dense and Symmetric)
     A, s, B, s_full = truncated_svd(
@@ -1544,9 +1561,11 @@ def _blockwise_contract(
 
 
 def _assert_symmetric(*tensors: Tensor, context: str) -> None:
-    """Assert all tensors are SymmetricTensor; raise TypeError otherwise."""
+    """Assert all tensors are SymmetricTensor or BlockArray; raise TypeError otherwise."""
+    from tenax.algorithms._block_array import BlockArray
+
     for i, t in enumerate(tensors):
-        if not isinstance(t, SymmetricTensor):
+        if not isinstance(t, (SymmetricTensor, BlockArray)):
             raise TypeError(
                 f"{context}: expected SymmetricTensor for input {i}, "
                 f"got {type(t).__name__}. "
@@ -1872,7 +1891,11 @@ def _two_site_update_symmetric_np(
     signature) and returns SymmetricTensor + float. BlockArray is used
     internally to avoid JAX overhead in the Lanczos iterations.
     """
-    from tenax.algorithms._block_array import ba_to_symmetric, symmetric_to_ba
+    from tenax.algorithms._block_array import (
+        BlockArray,
+        ba_to_symmetric,
+        symmetric_to_ba,
+    )
 
     _assert_symmetric(
         site_l,
@@ -1884,12 +1907,16 @@ def _two_site_update_symmetric_np(
         context="_two_site_update_symmetric_np",
     )
 
+    # Convert BlockArray sites to SymmetricTensor for initial contraction
+    site_l_sym = ba_to_symmetric(site_l) if isinstance(site_l, BlockArray) else site_l
+    site_r_sym = ba_to_symmetric(site_r) if isinstance(site_r, BlockArray) else site_r
+
     # Contract theta = A[i] * A[i+1]
-    shared = set(site_l.labels()) & set(site_r.labels())
+    shared = set(site_l_sym.labels()) & set(site_r_sym.labels())
     if shared:
-        theta = contract(site_l, site_r)
+        theta = contract(site_l_sym, site_r_sym)
     else:
-        theta = site_l
+        theta = site_l_sym
 
     # Shared cache for opt_einsum expressions across Lanczos iterations
     _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
@@ -1928,7 +1955,9 @@ def _two_site_update_symmetric_np(
         matvec, theta_ba, config.lanczos_max_iter, config.lanczos_tol
     )
 
-    return ba_to_symmetric(theta_opt_ba), energy
+    # Return BlockArray directly — stays as numpy through sweep loop.
+    # Converted to SymmetricTensor only at the end of dmrg().
+    return theta_opt_ba, energy
 
 
 def _one_site_update_symmetric_np(
@@ -1944,7 +1973,11 @@ def _one_site_update_symmetric_np(
     signature) and returns SymmetricTensor + float. BlockArray is used
     internally to avoid JAX overhead in the Lanczos iterations.
     """
-    from tenax.algorithms._block_array import ba_to_symmetric, symmetric_to_ba
+    from tenax.algorithms._block_array import (
+        BlockArray,
+        ba_to_symmetric,
+        symmetric_to_ba,
+    )
 
     _assert_symmetric(
         site,
@@ -1954,12 +1987,15 @@ def _one_site_update_symmetric_np(
         context="_one_site_update_symmetric_np",
     )
 
+    # Convert BlockArray site to SymmetricTensor for plan computation
+    site_sym = ba_to_symmetric(site) if isinstance(site, BlockArray) else site
+
     # Shared cache for opt_einsum expressions across Lanczos iterations
     _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
 
     # Precompute block plan once
     _subs = "abc,apd,bpxe,def->cxf"
-    _plan = _precompute_block_plan([left_env, site, mpo_site, right_env], _subs)
+    _plan = _precompute_block_plan([left_env, site_sym, mpo_site, right_env], _subs)
 
     # Pre-convert env blocks to NumPy once
     _env_np = [
@@ -1970,7 +2006,7 @@ def _one_site_update_symmetric_np(
     ]
 
     # Convert site to BlockArray for numpy Lanczos
-    site_ba = symmetric_to_ba(site)
+    site_ba = symmetric_to_ba(site) if not isinstance(site, BlockArray) else site
     _out_indices = site_ba.indices
 
     def matvec(v_ba: BlockArray) -> BlockArray:
@@ -1989,7 +2025,72 @@ def _one_site_update_symmetric_np(
         matvec, site_ba, config.lanczos_max_iter, config.lanczos_tol
     )
 
+    # 1-site mode needs SymmetricTensor for QR/relabel in sweep loop
     return ba_to_symmetric(site_opt_ba), energy
+
+
+def _update_left_env_np(
+    left_env: Tensor,
+    mps_site: Tensor,
+    mpo_site: Tensor,
+) -> SymmetricTensor:
+    """Update left environment, accepting BlockArray or SymmetricTensor for MPS site."""
+    from tenax.algorithms._block_array import BlockArray, ba_bar
+
+    if isinstance(mps_site, BlockArray):
+        A = mps_site
+        A_bra = ba_bar(A)
+    else:
+        A = mps_site
+        A_bra = A.bar()
+
+    out_indices = (A.indices[2], mpo_site.indices[3], A_bra.indices[2])
+    tensors = [left_env, A, mpo_site, A_bra]
+    subs = "abc,apd,bpxe,cxf->def"
+    plan = _precompute_block_plan(tensors, subs)
+    np_blocks = [
+        _to_np_blocks(t) if not isinstance(t, BlockArray) else t.blocks for t in tensors
+    ]
+    result = _blockwise_contract(
+        tensors,
+        subs,
+        output_indices=out_indices,
+        block_plan=plan,
+        np_blocks_cache=np_blocks,
+    )
+    return result
+
+
+def _update_right_env_np(
+    right_env: Tensor,
+    mps_site: Tensor,
+    mpo_site: Tensor,
+) -> SymmetricTensor:
+    """Update right environment, accepting BlockArray or SymmetricTensor for MPS site."""
+    from tenax.algorithms._block_array import BlockArray, ba_bar
+
+    if isinstance(mps_site, BlockArray):
+        B = mps_site
+        B_bra = ba_bar(B)
+    else:
+        B = mps_site
+        B_bra = B.bar()
+
+    out_indices = (B.indices[0], mpo_site.indices[0], B_bra.indices[0])
+    tensors = [right_env, B, mpo_site, B_bra]
+    subs = "abc,dpa,epxb,fxc->def"
+    plan = _precompute_block_plan(tensors, subs)
+    np_blocks = [
+        _to_np_blocks(t) if not isinstance(t, BlockArray) else t.blocks for t in tensors
+    ]
+    result = _blockwise_contract(
+        tensors,
+        subs,
+        output_indices=out_indices,
+        block_plan=plan,
+        np_blocks_cache=np_blocks,
+    )
+    return result
 
 
 def _symmetric_ops(config: DMRGConfig) -> SweepOps:
@@ -1998,8 +2099,8 @@ def _symmetric_ops(config: DMRGConfig) -> SweepOps:
         return SweepOps(
             build_trivial_left_env=_build_trivial_left_env_symmetric,
             build_trivial_right_env=_build_trivial_right_env_symmetric,
-            update_left_env=_update_left_env_symmetric,
-            update_right_env=_update_right_env_symmetric,
+            update_left_env=_update_left_env_np,
+            update_right_env=_update_right_env_np,
             two_site_update=_two_site_update_symmetric_np,
             one_site_update=_one_site_update_symmetric_np,
         )

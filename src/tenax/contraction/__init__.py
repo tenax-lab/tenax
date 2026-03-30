@@ -27,6 +27,15 @@ if os.environ.get("TENAX_DISABLE_CYTHON_BLAS", "0") != "1":
     except ImportError:
         pass
 
+CYTHON_BLAS_V3_AVAILABLE = False
+if os.environ.get("TENAX_DISABLE_CYTHON_BLAS", "0") != "1":
+    try:
+        from tenax.contraction._cython_blas import execute_all_combos_v3  # noqa: F401
+
+        CYTHON_BLAS_V3_AVAILABLE = True
+    except ImportError:
+        pass
+
 __all__ = [
     "contract",
     "contract_with_subscripts",
@@ -34,4 +43,5 @@ __all__ = [
     "qr_decompose",
     "CYTHON_BLAS_AVAILABLE",
     "CYTHON_BLAS_V2_AVAILABLE",
+    "CYTHON_BLAS_V3_AVAILABLE",
 ]

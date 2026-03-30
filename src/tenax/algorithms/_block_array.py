@@ -26,6 +26,10 @@ class BlockArray:
     blocks: dict[tuple[int, ...], np.ndarray]
     indices: tuple[TensorIndex, ...]
 
+    def labels(self) -> tuple[str, ...]:
+        """Return label strings for each leg (compatible with Tensor API)."""
+        return tuple(idx.label for idx in self.indices)
+
 
 def ba_scale(ba: BlockArray, scalar: float) -> BlockArray:
     """Multiply all blocks by a scalar."""
@@ -92,6 +96,18 @@ def ba_conj(ba: BlockArray) -> BlockArray:
     )
 
 
+def ba_bar(ba: BlockArray) -> BlockArray:
+    """Conjugate blocks and flip flow directions (bra version).
+
+    Mirrors ``SymmetricTensor.bar()`` for the numpy fast path.
+    """
+    new_indices = tuple(idx.flip_flow() for idx in ba.indices)
+    return BlockArray(
+        blocks={k: np.conj(v) for k, v in ba.blocks.items()},
+        indices=new_indices,
+    )
+
+
 def symmetric_to_ba(t) -> BlockArray:
     """Extract blocks and indices from a SymmetricTensor into a BlockArray.
 
@@ -104,14 +120,11 @@ def symmetric_to_ba(t) -> BlockArray:
 def ba_to_symmetric(ba: BlockArray):
     """Reconstruct a SymmetricTensor from a BlockArray.
 
-    Uses _init_flat_buffer to pack numpy blocks back into the flat JAX buffer.
+    Uses _init_flat_buffer to pack numpy blocks into the JAX flat buffer.
     """
-    import jax.numpy as jnp
-
     from tenax.core.tensor import SymmetricTensor
 
-    jax_blocks = {k: jnp.array(v) for k, v in ba.blocks.items()}
     obj = object.__new__(SymmetricTensor)
     obj._indices = ba.indices
-    obj._init_flat_buffer(jax_blocks)
+    obj._init_flat_buffer(ba.blocks)
     return obj

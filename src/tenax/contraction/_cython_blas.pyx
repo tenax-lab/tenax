@@ -1,6 +1,8 @@
 # cython: language_level=3, boundscheck=False, wraparound=False
 """Cython BLAS kernel for block-sparse tensor contractions."""
 
+from libc.string cimport memcpy, memset
+
 import numpy as np
 from scipy.linalg import blas as scipy_blas
 
@@ -8,6 +10,8 @@ cimport numpy as cnp
 from scipy.linalg.cython_blas cimport dgemm as _dgemm
 from scipy.linalg.cython_blas cimport sgemm as _sgemm
 from scipy.linalg.cython_blas cimport zgemm as _zgemm
+
+DEF MAX_NDIM = 8
 
 
 def execute_block_plan(plan, list block_combos, list np_blocks):
@@ -304,3 +308,445 @@ cdef void _dispatch_gemm(
         out_z = out
         with nogil:
             _zgemm_row_major(M, N, K, alpha_z, &left_z[0, 0], &right_z[0, 0], beta_z, &out_z[0, 0])
+
+
+# ------------------------------------------------------------------ #
+# V3 kernel: per-plan execution with C-level transpose + raw BLAS     #
+# ------------------------------------------------------------------ #
+
+cdef void _transpose_nd_f64(
+    double* src,
+    double* dst,
+    int ndim,
+    int* shape,      # source shape
+    int* perm,       # permutation
+    int total_size,
+) noexcept nogil:
+    """Transpose an N-d array via strided copy.  Small arrays only (<64K elts)."""
+    cdef int src_strides[MAX_NDIM]
+    cdef int dst_shape[MAX_NDIM]
+    cdef int dst_strides[MAX_NDIM]
+    cdef int i, d, src_idx, dst_idx
+    cdef int coords[MAX_NDIM]
+
+    # Compute source strides (row-major)
+    src_strides[ndim - 1] = 1
+    for d in range(ndim - 2, -1, -1):
+        src_strides[d] = src_strides[d + 1] * shape[d + 1]
+
+    # Compute destination shape and strides
+    for d in range(ndim):
+        dst_shape[d] = shape[perm[d]]
+    dst_strides[ndim - 1] = 1
+    for d in range(ndim - 2, -1, -1):
+        dst_strides[d] = dst_strides[d + 1] * dst_shape[d + 1]
+
+    # Walk through destination in linear order, compute source index
+    for d in range(ndim):
+        coords[d] = 0
+
+    for dst_idx in range(total_size):
+        # Compute source index: coords[d] maps to src dimension perm[d]
+        src_idx = 0
+        for d in range(ndim):
+            src_idx += coords[d] * src_strides[perm[d]]
+        dst[dst_idx] = src[src_idx]
+
+        # Increment coords (least-significant first)
+        for d in range(ndim - 1, -1, -1):
+            coords[d] += 1
+            if coords[d] < dst_shape[d]:
+                break
+            coords[d] = 0
+
+
+def execute_all_combos_v3(
+    str subscripts,
+    list block_plan,
+    list np_blocks_list,
+    dict plan_cache,
+):
+    """Execute all block combos with pre-transposed blocks and C-level BLAS.
+
+    For each shape group:
+    1. Pre-transpose unique input blocks to GEMM-ready 2D layout (Python).
+    2. Build combo pointer table.
+    3. Run combo loop with raw BLAS (C-level, no Python per combo).
+    4. Scatter-add results to output dict.
+
+    Parameters
+    ----------
+    subscripts : str
+        Einsum subscript string.
+    block_plan : list of (combo_keys, output_key)
+        Precomputed charge-compatible block combinations.
+    np_blocks_list : list of dict
+        One dict per input tensor, mapping block keys to numpy arrays.
+    plan_cache : dict
+        Shared cache for BlasExecPlan objects (keyed by shape tuple).
+
+    Returns
+    -------
+    dict mapping output_key -> numpy array (accumulated result).
+    """
+    from tenax.contraction._blas_plan import get_cached_blas_plan
+
+    cdef int n_inputs = len(np_blocks_list)
+    cdef int i, j
+
+    # Group combos by shape signature
+    cdef dict shape_groups = {}
+    for i in range(len(block_plan)):
+        combo_keys = block_plan[i][0]
+        output_key = block_plan[i][1]
+        shapes = tuple(
+            np_blocks_list[j][combo_keys[j]].shape for j in range(n_inputs)
+        )
+        if shapes not in shape_groups:
+            shape_groups[shapes] = []
+        (<list>shape_groups[shapes]).append((combo_keys, output_key))
+
+    cdef dict output_accum = {}
+
+    for shapes, combos in shape_groups.items():
+        if shapes not in plan_cache:
+            plan_cache[shapes] = get_cached_blas_plan(subscripts, shapes)
+        plan = plan_cache[shapes]
+
+        _execute_group_pretransposed(
+            plan, <list>combos, np_blocks_list, n_inputs, output_accum,
+        )
+
+    return output_accum
+
+
+cdef void _execute_group_pretransposed(
+    plan,
+    list combos,
+    list np_blocks_list,
+    int n_inputs,
+    dict output_accum,
+):
+    """Execute a shape group: pre-transpose inputs, then C-level combo loop."""
+    steps = plan.steps
+    cdef int n_steps = len(steps)
+    output_perm = plan.output_perm
+    cdef int n_combos = len(combos)
+    cdef int i, s, j
+    cdef int M, N, K
+
+    # Detect dtype
+    first_arr = np_blocks_list[0][combos[0][0][0]]
+    dtype = first_arr.dtype
+    cdef int dtype_code
+    if dtype == np.float64:
+        dtype_code = 0
+    elif dtype == np.float32:
+        dtype_code = 1
+    else:
+        dtype_code = -1  # fallback
+
+    # --- Phase 1: Pre-transpose unique input blocks ---
+    # Determine which perm+reshape each input buffer needs.
+    # Input buffer i is first used in a specific step as left or right.
+    cdef list input_perm = [None] * n_inputs  # perm to apply to input i
+    cdef list input_2d_shape = [None] * n_inputs  # 2D shape after perm+reshape
+    for s in range(n_steps):
+        step = steps[s]
+        li = step.left_idx
+        ri = step.right_idx
+        if li < n_inputs and input_perm[li] is None:
+            input_perm[li] = step.left_perm
+            input_2d_shape[li] = (step.m, step.k)
+        if ri < n_inputs and input_perm[ri] is None:
+            input_perm[ri] = step.right_perm
+            input_2d_shape[ri] = (step.k, step.n)
+
+    # Pre-transpose unique blocks into a pool
+    # pool_key = (tensor_idx, block_key) -> pool_list_idx
+    cdef dict block_pool = {}  # maps pool_key -> index in pool_list
+    cdef list pool_list = []   # flat list of pre-transposed 2D arrays
+    cdef int pool_idx
+
+    for i in range(n_combos):
+        combo_keys = combos[i][0]
+        for j in range(n_inputs):
+            block_key = combo_keys[j]
+            pool_key = (j, block_key)
+            if pool_key not in block_pool:
+                arr = np_blocks_list[j][block_key]
+                perm = input_perm[j]
+                if perm:
+                    arr = np.ascontiguousarray(np.transpose(arr, perm))
+                arr = np.ascontiguousarray(arr.reshape(input_2d_shape[j]))
+                block_pool[pool_key] = len(pool_list)
+                pool_list.append(arr)
+
+    # Build combo table: combo_idx -> [pool_idx_0, ..., pool_idx_{n_inputs-1}]
+    cdef cnp.ndarray combo_table = np.empty((n_combos, n_inputs), dtype=np.intc)
+    cdef int[:, ::1] combo_table_v = combo_table
+    for i in range(n_combos):
+        combo_keys = combos[i][0]
+        for j in range(n_inputs):
+            combo_table_v[i, j] = block_pool[(j, combo_keys[j])]
+
+    # Build output mapping: assign integer IDs to unique output keys
+    cdef dict out_key_to_idx = {}
+    cdef cnp.ndarray combo_out = np.empty(n_combos, dtype=np.intc)
+    cdef int[:] combo_out_v = combo_out
+    for i in range(n_combos):
+        output_key = combos[i][1]
+        if output_key not in out_key_to_idx:
+            out_key_to_idx[output_key] = len(out_key_to_idx)
+        combo_out_v[i] = out_key_to_idx[output_key]
+
+    cdef int n_outputs = len(out_key_to_idx)
+    cdef list out_keys = [None] * n_outputs
+    for k, idx in out_key_to_idx.items():
+        out_keys[idx] = k
+
+    # Pre-allocate output buffers (zeroed) — last step's out_shape
+    last_step = steps[n_steps - 1]
+    cdef list out_bufs = [
+        np.zeros((last_step.m, last_step.n), dtype=dtype)
+        for _ in range(n_outputs)
+    ]
+
+    # Pre-allocate work buffers for intermediate transposes
+    # For each non-final step, we need a buffer for the intermediate result
+    # AND a buffer for the transposed intermediate.
+    cdef list work_gemm = []    # GEMM output buffer per step (2D)
+    cdef list work_trans = []   # transpose output buffer per step (2D)
+    cdef list int_perm = []     # perm to apply after GEMM (for next step)
+    cdef list int_2d = []       # 2D shape for next step after perm
+
+    for s in range(n_steps - 1):
+        step = steps[s]
+        next_step = steps[s + 1]
+        work_gemm.append(np.empty((step.m, step.n), dtype=dtype))
+
+        # Determine perm for this intermediate when used by next step
+        oi = step.out_idx
+        if next_step.left_idx == oi:
+            p = next_step.left_perm
+            sh = (next_step.m, next_step.k)
+        else:
+            p = next_step.right_perm
+            sh = (next_step.k, next_step.n)
+        int_perm.append(p)
+        int_2d.append(sh)
+        if p:
+            work_trans.append(np.empty(sh, dtype=dtype))
+        else:
+            work_trans.append(None)  # no transpose needed
+
+    # Add a dummy for the last step (output goes to out_bufs)
+    work_gemm.append(None)
+
+    # --- Phase 2: C-level combo loop ---
+    if dtype_code == 0:
+        _combo_loop_f64(
+            steps, n_steps, n_inputs, n_combos,
+            pool_list, combo_table_v, combo_out_v,
+            out_bufs, work_gemm, work_trans,
+            int_perm, int_2d,
+        )
+    else:
+        # Fallback to Python for non-float64
+        _combo_loop_fallback(
+            steps, n_steps, n_inputs, n_combos,
+            pool_list, combo_table_v, combo_out_v,
+            out_bufs, work_gemm, work_trans,
+            int_perm, int_2d,
+        )
+
+    # --- Phase 3: Apply output perm and scatter to output_accum ---
+    for idx in range(n_outputs):
+        result = out_bufs[idx].reshape(last_step.out_shape)
+        if output_perm:
+            result = np.ascontiguousarray(np.transpose(result, output_perm))
+        key = out_keys[idx]
+        if key in output_accum:
+            output_accum[key] = output_accum[key] + result
+        else:
+            output_accum[key] = result
+
+
+cdef void _combo_loop_f64(
+    tuple steps, int n_steps, int n_inputs, int n_combos,
+    list pool_list, int[:, ::1] combo_table, int[:] combo_out,
+    list out_bufs, list work_gemm, list work_trans,
+    list int_perm, list int_2d,
+):
+    """Tight combo loop with raw BLAS for float64."""
+    cdef int i, s, d
+    cdef int M, N, K
+    cdef double alpha = 1.0
+    cdef double beta_0 = 0.0
+    cdef double beta_1 = 1.0
+    cdef double[:, ::1] left_v, right_v, out_v, trans_v
+    cdef double* src_p
+    cdef double* dst_p
+
+    cdef int shape_arr[MAX_NDIM]
+    cdef int perm_arr[MAX_NDIM]
+    cdef int ndim, total_size
+
+    for i in range(n_combos):
+        # Execute GEMM chain
+        for s in range(n_steps - 1):
+            step = steps[s]
+            M = step.m; N = step.n; K = step.k
+
+            # Get left operand
+            if step.left_idx < n_inputs:
+                left_v = pool_list[combo_table[i, step.left_idx]]
+            else:
+                # Intermediate from previous step — already transposed to 2D
+                if int_perm[s - 1]:
+                    left_v = work_trans[s - 1]
+                else:
+                    left_v = (<cnp.ndarray>work_gemm[s - 1]).reshape(int_2d[s - 1])
+
+            # Get right operand
+            if step.right_idx < n_inputs:
+                right_v = pool_list[combo_table[i, step.right_idx]]
+            else:
+                if int_perm[s - 1]:
+                    right_v = work_trans[s - 1]
+                else:
+                    right_v = (<cnp.ndarray>work_gemm[s - 1]).reshape(int_2d[s - 1])
+
+            out_v = work_gemm[s]
+
+            with nogil:
+                _dgemm_row_major(M, N, K, alpha,
+                                 &left_v[0, 0], &right_v[0, 0],
+                                 beta_0, &out_v[0, 0])
+
+            # Transpose intermediate for next step if needed
+            perm = int_perm[s]
+            if perm:
+                ndim = len(step.out_shape)
+                for d in range(ndim):
+                    shape_arr[d] = step.out_shape[d]
+                    perm_arr[d] = perm[d]
+                total_size = M * N
+
+                trans_v = work_trans[s]
+                src_p = &out_v[0, 0]
+                dst_p = &trans_v[0, 0]
+                with nogil:
+                    _transpose_nd_f64(src_p, dst_p, ndim, shape_arr,
+                                      perm_arr, total_size)
+
+        # Last step: accumulate into output buffer
+        step = steps[n_steps - 1]
+        M = step.m; N = step.n; K = step.k
+
+        if step.left_idx < n_inputs:
+            left_v = pool_list[combo_table[i, step.left_idx]]
+        else:
+            s = n_steps - 2
+            if int_perm[s]:
+                left_v = work_trans[s]
+            else:
+                left_v = (<cnp.ndarray>work_gemm[s]).reshape(int_2d[s])
+
+        if step.right_idx < n_inputs:
+            right_v = pool_list[combo_table[i, step.right_idx]]
+        else:
+            s = n_steps - 2
+            if int_perm[s]:
+                right_v = work_trans[s]
+            else:
+                right_v = (<cnp.ndarray>work_gemm[s]).reshape(int_2d[s])
+
+        out_v = out_bufs[combo_out[i]]
+        with nogil:
+            _dgemm_row_major(M, N, K, alpha,
+                             &left_v[0, 0], &right_v[0, 0],
+                             beta_1, &out_v[0, 0])
+
+
+cdef void _combo_loop_fallback(
+    tuple steps, int n_steps, int n_inputs, int n_combos,
+    list pool_list, int[:, ::1] combo_table, int[:] combo_out,
+    list out_bufs, list work_gemm, list work_trans,
+    list int_perm, list int_2d,
+):
+    """Fallback combo loop using scipy BLAS for non-float64."""
+    cdef int i, s
+    for i in range(n_combos):
+        for s in range(n_steps - 1):
+            step = steps[s]
+            if step.left_idx < n_inputs:
+                left = pool_list[combo_table[i, step.left_idx]]
+            else:
+                prev_s = s - 1
+                if int_perm[prev_s]:
+                    left = work_trans[prev_s]
+                else:
+                    left = work_gemm[prev_s].reshape(int_2d[prev_s])
+            if step.right_idx < n_inputs:
+                right = pool_list[combo_table[i, step.right_idx]]
+            else:
+                prev_s = s - 1
+                if int_perm[prev_s]:
+                    right = work_trans[prev_s]
+                else:
+                    right = work_gemm[prev_s].reshape(int_2d[prev_s])
+
+            out = work_gemm[s]
+            out[:] = left @ right
+
+            perm = int_perm[s]
+            if perm:
+                nd_out = out.reshape(step.out_shape)
+                trans = work_trans[s]
+                trans[:] = np.ascontiguousarray(
+                    np.transpose(nd_out, perm)
+                ).reshape(int_2d[s])
+
+        # Last step — accumulate
+        step = steps[n_steps - 1]
+        if step.left_idx < n_inputs:
+            left = pool_list[combo_table[i, step.left_idx]]
+        else:
+            prev_s = n_steps - 2
+            left = work_trans[prev_s] if int_perm[prev_s] else work_gemm[prev_s].reshape(int_2d[prev_s])
+        if step.right_idx < n_inputs:
+            right = pool_list[combo_table[i, step.right_idx]]
+        else:
+            prev_s = n_steps - 2
+            right = work_trans[prev_s] if int_perm[prev_s] else work_gemm[prev_s].reshape(int_2d[prev_s])
+        out_bufs[combo_out[i]] += left @ right
+
+
+cdef cnp.ndarray _c_transpose(cnp.ndarray arr, tuple perm, int dtype_code):
+    """Transpose: C-level for small float64, numpy fallback otherwise."""
+    cdef int ndim = arr.ndim
+    cdef int total = arr.size
+    cdef int shape_arr[MAX_NDIM]
+    cdef int perm_arr[MAX_NDIM]
+    cdef int d
+    cdef cnp.ndarray out, src
+    cdef double* src_p
+    cdef double* dst_p
+
+    if total <= 32768 and dtype_code == 0 and ndim <= MAX_NDIM:
+        for d in range(ndim):
+            shape_arr[d] = arr.shape[d]
+            perm_arr[d] = perm[d]
+
+        dst_shape_tuple = tuple(arr.shape[perm[d]] for d in range(ndim))
+        out = np.empty(dst_shape_tuple, dtype=np.float64)
+        src = np.ascontiguousarray(arr)
+        src_p = <double*>cnp.PyArray_DATA(src)
+        dst_p = <double*>cnp.PyArray_DATA(out)
+
+        with nogil:
+            _transpose_nd_f64(src_p, dst_p, ndim, shape_arr, perm_arr, total)
+        return out
+
+    return np.ascontiguousarray(np.transpose(arr, perm))
