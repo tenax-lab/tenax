@@ -13,7 +13,12 @@ from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import SymmetricTensor
-from tenax.linalg import _truncated_svd_symmetric, _truncated_svd_symmetric_np
+from tenax.linalg import (
+    _qr_symmetric,
+    _qr_symmetric_np,
+    _truncated_svd_symmetric,
+    _truncated_svd_symmetric_np,
+)
 
 IN = FlowDirection.IN
 OUT = FlowDirection.OUT
@@ -144,3 +149,51 @@ class TestTruncatedSvdSymmetricNp:
         assert Vh_ba.indices[0].label == "bond"
         assert Vh_ba.indices[0].flow == IN
         assert Vh_ba.indices[1].label == "r"
+
+
+# ------------------------------------------------------------------ #
+# QR Tests                                                              #
+# ------------------------------------------------------------------ #
+
+
+class TestQrSymmetricNp:
+    def test_reconstruction(self, sym_2leg):
+        """Q @ R reconstructs the original tensor."""
+        Q_ba, R_ba = _qr_symmetric_np(sym_2leg, ["l"], ["r"], "bond")
+
+        # Return types
+        assert isinstance(Q_ba, BlockArray)
+        assert isinstance(R_ba, BlockArray)
+
+        # Convert BlockArrays back to SymmetricTensors for contraction
+        Q_sym = ba_to_symmetric(Q_ba)
+        R_sym = ba_to_symmetric(R_ba)
+
+        # Contract Q @ R
+        reconstructed = contract(Q_sym, R_sym)
+
+        # Compare dense representations
+        orig_dense = sym_2leg.todense()
+        recon_dense = reconstructed.todense()
+        np.testing.assert_allclose(
+            np.asarray(recon_dense), np.asarray(orig_dense), atol=1e-12
+        )
+
+    def test_matches_jax_version(self, sym_2leg):
+        """NumPy QR reconstruction matches JAX QR reconstruction."""
+        # JAX version
+        Q_jax, R_jax = _qr_symmetric(sym_2leg, ["l"], ["r"], "bond")
+        recon_jax = contract(Q_jax, R_jax)
+
+        # NumPy version
+        Q_ba, R_ba = _qr_symmetric_np(sym_2leg, ["l"], ["r"], "bond")
+        Q_sym = ba_to_symmetric(Q_ba)
+        R_sym = ba_to_symmetric(R_ba)
+        recon_np = contract(Q_sym, R_sym)
+
+        # Both reconstructions should match
+        np.testing.assert_allclose(
+            np.asarray(recon_np.todense()),
+            np.asarray(recon_jax.todense()),
+            atol=1e-12,
+        )

@@ -595,6 +595,185 @@ def _truncated_svd_symmetric_np(
     return (U_ba, s_final, Vh_ba, s_full)
 
 
+def _qr_symmetric_np(
+    tensor: SymmetricTensor,
+    left_labels: Sequence[Label],
+    right_labels: Sequence[Label],
+    new_bond_label: Label,
+) -> tuple:
+    """Block-diagonal QR decomposition for SymmetricTensor using numpy (no JAX).
+
+    Same algorithm as ``_qr_symmetric`` but returns
+    ``(Q_ba, R_ba)`` where Q_ba and R_ba are
+    :class:`~tenax.algorithms._block_array.BlockArray` objects.
+    """
+    from tenax.algorithms._block_array import BlockArray
+
+    all_labels = tensor.labels()
+    label_to_axis = {lbl: i for i, lbl in enumerate(all_labels)}
+    left_axes = [label_to_axis[lbl] for lbl in left_labels]
+    right_axes = [label_to_axis[lbl] for lbl in right_labels]
+    left_indices = tuple(tensor.indices[i] for i in left_axes)
+    right_indices = tuple(tensor.indices[i] for i in right_axes)
+
+    grouped = _group_blocks_by_bond_charge(tensor, left_axes, right_axes)
+
+    # Check if fermionic signs are needed for leg reordering
+    sym = tensor.indices[0].symmetry
+    is_fermionic = sym.is_fermionic
+    decomp_perm = tuple(left_axes + right_axes)
+
+    # Per-sector QR results
+    sector_results: dict[
+        int,
+        tuple[
+            np.ndarray,
+            np.ndarray,
+            list[BlockKey],
+            list[BlockKey],
+            list[int],
+            list[int],
+            int,
+        ],
+    ] = {}
+
+    bond_charges_list: list[int] = []
+
+    for q in sorted(grouped.keys()):
+        entries = grouped[q]
+
+        left_subkeys_seen: dict[BlockKey, int] = {}
+        right_subkeys_seen: dict[BlockKey, int] = {}
+        for lk, rk, _ in entries:
+            if lk not in left_subkeys_seen:
+                left_subkeys_seen[lk] = len(left_subkeys_seen)
+            if rk not in right_subkeys_seen:
+                right_subkeys_seen[rk] = len(right_subkeys_seen)
+
+        left_subkeys = list(left_subkeys_seen.keys())
+        right_subkeys = list(right_subkeys_seen.keys())
+
+        left_row_sizes: list[int] = []
+        for lk in left_subkeys:
+            size = 1
+            for leg_pos, charge_val in zip(left_axes, lk):
+                idx = tensor.indices[leg_pos]
+                size *= int(np.sum(idx.charges == charge_val))
+            left_row_sizes.append(size)
+
+        right_col_sizes: list[int] = []
+        for rk in right_subkeys:
+            size = 1
+            for leg_pos, charge_val in zip(right_axes, rk):
+                idx = tensor.indices[leg_pos]
+                size *= int(np.sum(idx.charges == charge_val))
+            right_col_sizes.append(size)
+
+        total_rows = sum(left_row_sizes)
+        total_cols = sum(right_col_sizes)
+
+        if total_rows == 0 or total_cols == 0:
+            continue
+
+        # Assemble block matrix
+        matrix = np.zeros((total_rows, total_cols), dtype=tensor.dtype)
+        for lk, rk, block in entries:
+            li = left_subkeys_seen[lk]
+            ri = right_subkeys_seen[rk]
+            row_start = sum(left_row_sizes[:li])
+            col_start = sum(right_col_sizes[:ri])
+            flat_block = np.asarray(block).reshape(
+                left_row_sizes[li], right_col_sizes[ri]
+            )
+            # Apply Koszul sign for leg reordering (original -> left+right)
+            if is_fermionic:
+                full_key = [0] * len(tensor.indices)
+                for ax, ch in zip(left_axes, lk):
+                    full_key[ax] = ch
+                for ax, ch in zip(right_axes, rk):
+                    full_key[ax] = ch
+                parities = tuple(
+                    int(sym.parity(np.array([full_key[i]]))[0])
+                    for i in range(len(full_key))
+                )
+                ksign = _koszul_sign(parities, decomp_perm)
+                if ksign < 0:
+                    flat_block = -flat_block
+            matrix[
+                row_start : row_start + left_row_sizes[li],
+                col_start : col_start + right_col_sizes[ri],
+            ] = flat_block
+
+        Q_q, R_q = np.linalg.qr(matrix)
+        bond_dim_q = Q_q.shape[1]
+
+        bond_charges_list.extend([q] * bond_dim_q)
+        sector_results[q] = (
+            Q_q,
+            R_q,
+            left_subkeys,
+            right_subkeys,
+            left_row_sizes,
+            right_col_sizes,
+            bond_dim_q,
+        )
+
+    bond_charges = np.array(bond_charges_list, dtype=np.int32)
+    sym = tensor.indices[0].symmetry
+
+    bond_index_out = TensorIndex(
+        sym, bond_charges, FlowDirection.OUT, label=new_bond_label
+    )
+    bond_index_in = TensorIndex(
+        sym, bond_charges, FlowDirection.IN, label=new_bond_label
+    )
+
+    Q_indices = left_indices + (bond_index_out,)
+    R_indices = (bond_index_in,) + right_indices
+
+    Q_blocks: dict[BlockKey, np.ndarray] = {}
+    R_blocks: dict[BlockKey, np.ndarray] = {}
+
+    for q, (
+        Q_q,
+        R_q,
+        left_subkeys,
+        right_subkeys,
+        left_row_sizes,
+        right_col_sizes,
+        bond_dim_q,
+    ) in sector_results.items():
+        # Split Q rows back into left_subkey blocks
+        row_offset = 0
+        for li, lk in enumerate(left_subkeys):
+            n_rows = left_row_sizes[li]
+            q_slice = Q_q[row_offset : row_offset + n_rows, :]
+            left_shape = tuple(
+                int(np.sum(tensor.indices[ax].charges == ch))
+                for ax, ch in zip(left_axes, lk)
+            )
+            q_block = q_slice.reshape(left_shape + (bond_dim_q,))
+            Q_blocks[lk + (q,)] = q_block
+            row_offset += n_rows
+
+        # Split R cols back into right_subkey blocks
+        col_offset = 0
+        for ri, rk in enumerate(right_subkeys):
+            n_cols = right_col_sizes[ri]
+            r_slice = R_q[:, col_offset : col_offset + n_cols]
+            right_shape = tuple(
+                int(np.sum(tensor.indices[ax].charges == ch))
+                for ax, ch in zip(right_axes, rk)
+            )
+            r_block = r_slice.reshape((bond_dim_q,) + right_shape)
+            R_blocks[(q,) + rk] = r_block
+            col_offset += n_cols
+
+    Q_ba = BlockArray(blocks=Q_blocks, indices=Q_indices)
+    R_ba = BlockArray(blocks=R_blocks, indices=R_indices)
+    return (Q_ba, R_ba)
+
+
 # ---------- Block-sparse QR ----------
 
 
