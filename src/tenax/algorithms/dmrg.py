@@ -1054,16 +1054,6 @@ def _svd_and_truncate_site(
     Returns:
         (A_tensor, singular_values, B_tensor, truncation_error)
     """
-    # Dispatch to numpy-only SVD when numpy_blockwise is enabled
-    if config.numpy_blockwise and isinstance(theta, SymmetricTensor):
-        from tenax.algorithms._block_array import ba_to_symmetric, symmetric_to_ba
-
-        theta_ba = symmetric_to_ba(theta)
-        A_ba, s_np, B_ba, trunc_err = _svd_and_truncate_site_np(
-            theta_ba, site, config, sweep_right
-        )
-        return ba_to_symmetric(A_ba), s_np, ba_to_symmetric(B_ba), trunc_err
-
     labels = theta.labels()
 
     # Find physical and virtual labels
@@ -1090,7 +1080,39 @@ def _svd_and_truncate_site(
 
     bond_label = f"v{site}_{site + 1}"
 
-    # Single SVD via truncated_svd (handles both Dense and Symmetric)
+    # Dispatch to numpy-only SVD when numpy_blockwise is enabled.
+    # Call _truncated_svd_symmetric_np directly on SymmetricTensor
+    # (avoids wasteful SymmetricTensor→BlockArray→SymmetricTensor roundtrip).
+    if config.numpy_blockwise and isinstance(theta, SymmetricTensor):
+        from tenax.algorithms._block_array import ba_to_symmetric
+        from tenax.linalg import _truncated_svd_symmetric_np
+
+        A_ba, s, B_ba, s_full = _truncated_svd_symmetric_np(
+            theta,
+            left_labels=left_labels,
+            right_labels=right_labels,
+            max_singular_values=config.max_bond_dim,
+            max_truncation_err=config.svd_trunc_err,
+            new_bond_label=bond_label,
+            normalize=False,
+        )
+
+        n_keep = len(s)
+        if len(s_full) > n_keep:
+            total_sq = np.sum(s_full**2)
+            trunc_sq = np.sum(s_full[n_keep:] ** 2)
+            trunc_err = float(np.sqrt(trunc_sq / (total_sq + 1e-15)))
+        else:
+            trunc_err = 0.0
+
+        if sweep_right:
+            B_ba = _scale_bond_axis_ba(B_ba, bond_label, s)
+        else:
+            A_ba = _scale_bond_axis_ba(A_ba, bond_label, s)
+
+        return ba_to_symmetric(A_ba), s, ba_to_symmetric(B_ba), trunc_err
+
+    # JAX path: single SVD via truncated_svd (handles both Dense and Symmetric)
     A, s, B, s_full = truncated_svd(
         theta,
         left_labels=left_labels,
