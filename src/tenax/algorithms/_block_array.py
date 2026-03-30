@@ -108,14 +108,22 @@ def ba_sub_scaled(a: BlockArray, b: BlockArray, scalar: float) -> BlockArray:
 
 
 def ba_inner(a: BlockArray, b: BlockArray) -> float:
-    """Frobenius inner product: sum of element-wise products over shared blocks."""
-    if _HAS_CYTHON_BA:
+    """Hermitian inner product: sum conj(a)*b over shared blocks.
+
+    Uses ``np.vdot`` which conjugates the first argument, giving the correct
+    Hermitian inner product for complex data and equivalent behavior for real.
+    """
+    if (
+        _HAS_CYTHON_BA
+        and a.blocks
+        and not np.iscomplexobj(next(iter(a.blocks.values())))
+    ):
         return _c_inner(a.blocks, b.blocks)
     total = 0.0
     for k in a.blocks:
         bk = b.blocks.get(k)
         if bk is not None:
-            total += float(np.sum(a.blocks[k] * bk))
+            total += np.vdot(a.blocks[k], bk).real
     return total
 
 

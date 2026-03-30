@@ -217,6 +217,125 @@ class TestCythonBaInner:
         np.testing.assert_allclose(result, expected, rtol=1e-14)
 
 
+@pytest.fixture
+def complex_ba():
+    """A BlockArray with complex128 blocks for complex arithmetic tests."""
+    sym = U1Symmetry()
+    idx_a = TensorIndex(
+        sym, np.array([0, 0, 1, 1, 1], dtype=np.int32), FlowDirection.IN, label="a"
+    )
+    idx_b = TensorIndex(
+        sym, np.array([0, 0, 0, 0, 1, 1], dtype=np.int32), FlowDirection.OUT, label="b"
+    )
+    blocks = {
+        (0, 0): np.array(
+            [[1 + 2j, 3 + 4j, 5 + 6j, 7 + 8j], [9 + 10j, 11 + 12j, 13 + 14j, 15 + 16j]]
+        ),
+        (1, 1): np.array([[1 + 1j, 2 + 2j], [3 + 3j, 4 + 4j], [5 + 5j, 6 + 6j]]),
+    }
+    return BlockArray(blocks=blocks, indices=(idx_a, idx_b))
+
+
+@pytest.fixture
+def another_complex_ba():
+    """A second BlockArray with complex128 blocks and same structure."""
+    sym = U1Symmetry()
+    idx_a = TensorIndex(
+        sym, np.array([0, 0, 1, 1, 1], dtype=np.int32), FlowDirection.IN, label="a"
+    )
+    idx_b = TensorIndex(
+        sym, np.array([0, 0, 0, 0, 1, 1], dtype=np.int32), FlowDirection.OUT, label="b"
+    )
+    blocks = {
+        (0, 0): np.array(
+            [[2 - 1j, 4 - 3j, 6 - 5j, 8 - 7j], [10 - 9j, 12 - 11j, 14 - 13j, 16 - 15j]]
+        ),
+        (1, 1): np.array([[1 - 1j, 2 - 2j], [3 - 3j, 4 - 4j], [5 - 5j, 6 - 6j]]),
+    }
+    return BlockArray(blocks=blocks, indices=(idx_a, idx_b))
+
+
+class TestComplexBlockArray:
+    """Tests for BlockArray operations with complex128 data."""
+
+    def test_inner_hermitian(self, complex_ba, another_complex_ba):
+        """ba_inner must compute Hermitian inner product: sum conj(a)*b."""
+        result = ba_inner(complex_ba, another_complex_ba)
+        # Reference: np.vdot flattens and computes sum(conj(a)*b)
+        expected = sum(
+            np.vdot(complex_ba.blocks[k], another_complex_ba.blocks[k])
+            for k in complex_ba.blocks
+        )
+        np.testing.assert_allclose(result, expected.real, rtol=1e-12)
+
+    def test_inner_self_is_real(self, complex_ba):
+        """<v|v> must be real and positive for complex vectors."""
+        result = ba_inner(complex_ba, complex_ba)
+        assert isinstance(result, (float, np.floating))
+        assert result > 0
+
+    def test_norm_complex(self, complex_ba):
+        """Norm of complex BlockArray = sqrt(<v|v>)."""
+        expected = np.sqrt(ba_inner(complex_ba, complex_ba))
+        result = ba_norm(complex_ba)
+        np.testing.assert_allclose(result, expected, rtol=1e-12)
+
+    @pytest.mark.xfail(
+        reason="Cython BLAS dispatch needs complex support (Task 2)",
+        strict=False,
+    )
+    def test_axpy_complex(self, complex_ba, another_complex_ba):
+        """ba_axpy works with complex arrays and real scalar."""
+        alpha = 2.0
+        expected = {
+            k: another_complex_ba.blocks[k] + alpha * complex_ba.blocks[k]
+            for k in another_complex_ba.blocks
+        }
+        ba_axpy(complex_ba, another_complex_ba, alpha)
+        for key in expected:
+            np.testing.assert_allclose(another_complex_ba.blocks[key], expected[key])
+
+    @pytest.mark.xfail(
+        reason="Cython BLAS dispatch needs complex support (Task 2)",
+        strict=False,
+    )
+    def test_scale_inplace_complex(self, complex_ba):
+        """ba_scale_inplace works with complex arrays."""
+        expected = {k: v * 3.0 for k, v in complex_ba.blocks.items()}
+        ba_scale_inplace(complex_ba, 3.0)
+        for key in expected:
+            np.testing.assert_allclose(complex_ba.blocks[key], expected[key])
+
+    def test_roundtrip_complex(self):
+        """ba_to_symmetric preserves complex dtype (t._data.dtype == np.complex128)."""
+        sym = U1Symmetry()
+        idx_a = TensorIndex(
+            sym, np.array([0, 0, 1, 1, 1], dtype=np.int32), FlowDirection.IN, label="a"
+        )
+        idx_b = TensorIndex(
+            sym,
+            np.array([0, 0, 0, 0, 1, 1], dtype=np.int32),
+            FlowDirection.OUT,
+            label="b",
+        )
+        blocks = {
+            (0, 0): np.array(
+                [
+                    [1 + 2j, 3 + 4j, 5 + 6j, 7 + 8j],
+                    [9 + 10j, 11 + 12j, 13 + 14j, 15 + 16j],
+                ]
+            ),
+            (1, 1): np.array([[1 + 1j, 2 + 2j], [3 + 3j, 4 + 4j], [5 + 5j, 6 + 6j]]),
+        }
+        ba = BlockArray(blocks=blocks, indices=(idx_a, idx_b))
+        t = ba_to_symmetric(ba)
+        assert t._data.dtype == np.complex128
+        for key in blocks:
+            np.testing.assert_allclose(
+                np.asarray(t.blocks[key]), blocks[key], rtol=1e-12
+            )
+
+
 class TestRoundtrip:
     def test_symmetric_to_ba_and_back(self):
         """SymmetricTensor -> BlockArray -> SymmetricTensor preserves data."""
