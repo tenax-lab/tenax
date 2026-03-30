@@ -63,6 +63,8 @@ class iDMRGConfig:
         arnoldi_tol:     Transfer matrix eigensolver tolerance.
         orthogonalize_interval: Number of sweeps between orthogonalization steps.
         mixing_factor:   DMRG3S subspace expansion mixing factor α (1-site only).
+        numpy_blockwise: Use numpy-only path for symmetric iDMRG (no JAX
+                         overhead). Default True.
     """
 
     max_bond_dim: int = 100
@@ -77,6 +79,7 @@ class iDMRGConfig:
     arnoldi_tol: float = 1e-12
     orthogonalize_interval: int = 10
     mixing_factor: float = 0.05
+    numpy_blockwise: bool = True  # Use numpy-only path for symmetric iDMRG
 
 
 class iDMRGResult(NamedTuple):
@@ -1271,33 +1274,86 @@ def _idmrg_sweep_symmetric(
         _subs = "abc,apqd,bpse,eqtf,dfg->cstg"
         _plan = _precompute_block_plan([L_env, theta, W_sym, W_sym, R_env], _subs)
 
-        def matvec(v: Tensor) -> Tensor:
-            return _blockwise_contract(
-                [L_env, v, W_sym, W_sym, R_env],
-                _subs,
-                output_indices=v.indices,
-                expr_cache=_matvec_cache,
-                block_plan=_plan,
+        if config.numpy_blockwise:
+            from tenax.algorithms._block_array import (
+                BlockArray,
+                ba_to_symmetric,
+                symmetric_to_ba,
+            )
+            from tenax.algorithms.dmrg import _lanczos_solve_np, _to_np_blocks
+            from tenax.linalg import _truncated_svd_symmetric_np
+
+            # Pre-convert env blocks to NumPy once
+            _env_np = [
+                _to_np_blocks(L_env),
+                None,  # v -- converted fresh each call
+                _to_np_blocks(W_sym),
+                _to_np_blocks(W_sym),
+                _to_np_blocks(R_env),
+            ]
+
+            theta_ba = symmetric_to_ba(theta)
+            _out_indices = theta_ba.indices
+
+            def matvec_np(v_ba: BlockArray) -> BlockArray:
+                _env_np[1] = v_ba.blocks
+                return _blockwise_contract(
+                    [L_env, theta, W_sym, W_sym, R_env],
+                    _subs,
+                    output_indices=_out_indices,
+                    expr_cache=_matvec_cache,
+                    block_plan=_plan,
+                    np_blocks_cache=_env_np,
+                    return_ba=True,
+                )
+
+            E_total_val, theta_opt_ba = _lanczos_solve_np(
+                matvec_np, theta_ba, config.lanczos_max_iter, config.lanczos_tol
+            )
+            theta_opt = ba_to_symmetric(theta_opt_ba)
+        else:
+
+            def matvec(v: Tensor) -> Tensor:
+                return _blockwise_contract(
+                    [L_env, v, W_sym, W_sym, R_env],
+                    _subs,
+                    output_indices=v.indices,
+                    expr_cache=_matvec_cache,
+                    block_plan=_plan,
+                )
+
+            E_total_val, theta_opt = _lanczos_solve_tensor(
+                matvec, theta, config.lanczos_max_iter, config.lanczos_tol
             )
 
-        E_total_val, theta_opt = _lanczos_solve_tensor(
-            matvec, theta, config.lanczos_max_iter, config.lanczos_tol
-        )
         E_total = float(E_total_val)
         theta_prev = theta_opt
 
         # ---- SVD and truncate ----
-        U_t, s_full, Vh_t, _ = truncated_svd(
-            theta_opt,
-            left_labels=["v_l", "p_l"],
-            right_labels=["p_r", "v_r"],
-            new_bond_label="v_c",
-            max_singular_values=config.max_bond_dim,
-            max_truncation_err=config.svd_trunc_err,
-        )
+        if config.numpy_blockwise:
+            A_ba, s_full, B_ba, _ = _truncated_svd_symmetric_np(
+                theta_opt,
+                left_labels=["v_l", "p_l"],
+                right_labels=["p_r", "v_r"],
+                max_singular_values=config.max_bond_dim,
+                max_truncation_err=config.svd_trunc_err,
+                new_bond_label="v_c",
+                normalize=False,
+            )
+            U_t = ba_to_symmetric(A_ba)
+            Vh_t = ba_to_symmetric(B_ba)
+        else:
+            U_t, s_full, Vh_t, _ = truncated_svd(
+                theta_opt,
+                left_labels=["v_l", "p_l"],
+                right_labels=["p_r", "v_r"],
+                new_bond_label="v_c",
+                max_singular_values=config.max_bond_dim,
+                max_truncation_err=config.svd_trunc_err,
+            )
         # U_t: (v_l, p_l, v_c),  Vh_t: (v_c, p_r, v_r)
         s_vals = s_full
-        s_norm = float(jnp.linalg.norm(s_vals))
+        s_norm = float(np.linalg.norm(np.asarray(s_vals)))
         if s_norm > 1e-15:
             s_vals = s_vals / s_norm
 

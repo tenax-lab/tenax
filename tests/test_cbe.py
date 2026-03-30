@@ -8,11 +8,11 @@ import pytest
 from tenax import (
     DMRGConfig,
     build_mpo_heisenberg,
-    build_random_symmetric_mps,
     dmrg,
 )
 from tenax.algorithms.cbe import expand_bond
 from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.mps import FiniteMPS
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 
@@ -215,7 +215,15 @@ class TestEnergyImprovement:
         mpo = build_mpo_heisenberg(L)
 
         # 1-site DMRG with small bond dim
-        mps = build_random_symmetric_mps(L, bond_dim=4, seed=0)
+        mps = FiniteMPS.random(
+            L,
+            d=2,
+            chi=4,
+            key=jax.random.PRNGKey(0),
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
         config_1site = DMRGConfig(
             max_bond_dim=4,
             num_sweeps=5,
@@ -226,7 +234,15 @@ class TestEnergyImprovement:
         E_1site = result_1site.energy
 
         # 2-site DMRG with larger bond dim (more variational freedom)
-        mps2 = build_random_symmetric_mps(L, bond_dim=4, seed=0)
+        mps2 = FiniteMPS.random(
+            L,
+            d=2,
+            chi=4,
+            key=jax.random.PRNGKey(0),
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
         config_2site = DMRGConfig(
             max_bond_dim=6,
             num_sweeps=10,
@@ -247,7 +263,7 @@ class TestExpandBondSymmetric:
 
     def test_symmetric_cbe_runs(self):
         """expand_bond_symmetric runs without error on Heisenberg MPS."""
-        from tenax import build_mpo_heisenberg, build_random_symmetric_mps
+        from tenax import build_mpo_heisenberg
         from tenax.algorithms.cbe import expand_bond_symmetric
         from tenax.algorithms.dmrg import (
             _build_right_environments_list,
@@ -261,7 +277,15 @@ class TestExpandBondSymmetric:
         k = 2
 
         mpo = build_mpo_heisenberg(L)
-        mps = build_random_symmetric_mps(L, bond_dim=chi, seed=42)
+        mps = FiniteMPS.random(
+            L,
+            d=2,
+            chi=chi,
+            key=jax.random.PRNGKey(42),
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
         config = DMRGConfig(max_bond_dim=chi, num_sweeps=3, two_site=False)
         result = dmrg(mpo, mps, config)
 
@@ -303,7 +327,7 @@ class TestExpandBondSymmetric:
 
     def test_symmetric_cbe_charges_correct(self):
         """Expanded bond has correct per-sector charge assignment."""
-        from tenax import build_mpo_heisenberg, build_random_symmetric_mps
+        from tenax import build_mpo_heisenberg
         from tenax.algorithms.cbe import expand_bond_symmetric
         from tenax.algorithms.dmrg import (
             _build_right_environments_list,
@@ -315,7 +339,15 @@ class TestExpandBondSymmetric:
         k = 2
 
         mpo = build_mpo_heisenberg(L)
-        mps = build_random_symmetric_mps(L, bond_dim=chi, seed=42)
+        mps = FiniteMPS.random(
+            L,
+            d=2,
+            chi=chi,
+            key=jax.random.PRNGKey(42),
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
         config = DMRGConfig(max_bond_dim=chi, num_sweeps=3, two_site=False)
         result = dmrg(mpo, mps, config)
 

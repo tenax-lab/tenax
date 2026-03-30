@@ -16,6 +16,7 @@ setup(
                 "tenax.contraction._cython_blas",
                 ["src/tenax/contraction/_cython_blas.pyx"],
                 include_dirs=[np.get_include(), scipy_include],
+                define_macros=[("CYTHON_CCOMPLEX", "0")],
             )
         ]
     ),
