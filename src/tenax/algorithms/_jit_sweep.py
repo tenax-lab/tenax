@@ -9,14 +9,18 @@ Public API:
     update_right_env_dense_jit -- right environment update
     effective_ham_matvec_dense  -- 2-site effective Hamiltonian matvec
     lanczos_ground_state_dense -- JIT-compatible Lanczos eigensolver
+    jit_dmrg_sweep_dense       -- full DMRG sweep via lax.scan
 """
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
+
+from tenax.algorithms._padded_linalg import padded_svd_dense
 
 
 def update_left_env_dense_jit(
@@ -230,3 +234,381 @@ def lanczos_ground_state_dense(
     eigenvector = eigenvector / (jnp.linalg.norm(eigenvector) + 1e-15)
 
     return eigvals[0], eigenvector
+
+
+# ------------------------------------------------------------------ #
+# Full lax.scan DMRG sweep (dense path)                               #
+# ------------------------------------------------------------------ #
+
+
+def _update_left_env_scan(
+    L_env: jax.Array,
+    A: jax.Array,
+    W: jax.Array,
+) -> jax.Array:
+    """Left env update for scan (no padding -- shapes are already padded).
+
+    Contracts: new_L[d,e,f] = L[a,b,c] * A[a,p,d] * W[b,p,x,e] * conj(A)[c,x,f]
+    """
+    return jnp.einsum("abc,apd,bpxe,cxf->def", L_env, A, W, jnp.conj(A))
+
+
+def _update_right_env_scan(
+    R_env: jax.Array,
+    B: jax.Array,
+    W: jax.Array,
+) -> jax.Array:
+    """Right env update for scan (no padding -- shapes are already padded).
+
+    Contracts: new_R[d,e,f] = R[a,b,c] * B[d,p,a] * W[e,p,x,b] * conj(B)[f,x,c]
+    """
+    return jnp.einsum("abc,dpa,epxb,fxc->def", R_env, B, W, jnp.conj(B))
+
+
+def _build_initial_left_envs(
+    mps_stack: jax.Array,
+    W_stack: jax.Array,
+    L: int,
+    chi_max: int,
+    D_w: int,
+) -> jax.Array:
+    """Build all left environments from scratch.
+
+    Args:
+        mps_stack: ``(L, chi_max, d, chi_max)`` padded MPS tensors.
+        W_stack:   ``(L, D_w, d, d, D_w)`` padded MPO tensors.
+        L:         Number of sites.
+        chi_max:   Maximum bond dimension.
+        D_w:       Padded MPO bond dimension.
+
+    Returns:
+        Left environments ``(L+1, chi_max, D_w, chi_max)`` where
+        ``left_envs[0]`` is the trivial boundary.
+    """
+    dtype = mps_stack.dtype
+    left_envs = jnp.zeros((L + 1, chi_max, D_w, chi_max), dtype=dtype)
+    # Trivial left boundary: identity at (0,0,0)
+    left_envs = left_envs.at[0, 0, 0, 0].set(1.0)
+
+    def scan_fn(L_env, site_data):
+        A, W = site_data
+        new_L = _update_left_env_scan(L_env, A, W)
+        return new_L, new_L
+
+    # Scan over sites 0..L-2 (we need L_envs[1]..L_envs[L-1])
+    init_L = left_envs[0]
+    _, all_left = jax.lax.scan(scan_fn, init_L, (mps_stack[: L - 1], W_stack[: L - 1]))
+    # all_left: (L-1, chi_max, D_w, chi_max)
+    left_envs = left_envs.at[1:L].set(all_left)
+    return left_envs
+
+
+def _build_initial_right_envs(
+    mps_stack: jax.Array,
+    W_stack: jax.Array,
+    L: int,
+    chi_max: int,
+    D_w: int,
+) -> jax.Array:
+    """Build all right environments from scratch.
+
+    Args:
+        mps_stack: ``(L, chi_max, d, chi_max)`` padded MPS tensors.
+        W_stack:   ``(L, D_w, d, d, D_w)`` padded MPO tensors.
+        L:         Number of sites.
+        chi_max:   Maximum bond dimension.
+        D_w:       Padded MPO bond dimension.
+
+    Returns:
+        Right environments ``(L+1, chi_max, D_w, chi_max)`` where
+        ``right_envs[L]`` is the trivial boundary.
+    """
+    dtype = mps_stack.dtype
+    right_envs = jnp.zeros((L + 1, chi_max, D_w, chi_max), dtype=dtype)
+    # Trivial right boundary: identity at (0,0,0)
+    right_envs = right_envs.at[L, 0, 0, 0].set(1.0)
+
+    def scan_fn(R_env, site_data):
+        B, W = site_data
+        new_R = _update_right_env_scan(R_env, B, W)
+        return new_R, new_R
+
+    # Scan from site L-1 down to site 1 (reversed)
+    # We need right_envs[L-1]..right_envs[1]
+    mps_rev = mps_stack[1:][::-1]  # sites L-1, L-2, ..., 1
+    W_rev = W_stack[1:][::-1]
+    init_R = right_envs[L]
+    _, all_right_rev = jax.lax.scan(scan_fn, init_R, (mps_rev, W_rev))
+    # all_right_rev: (L-1, chi_max, D_w, chi_max) for sites L-1..1
+    # Reverse back so index 0 = site 1, index L-2 = site L-1
+    all_right = all_right_rev[::-1]
+    right_envs = right_envs.at[1:L].set(all_right)
+    return right_envs
+
+
+def _scan_left_to_right(
+    mps_stack: jax.Array,
+    left_envs: jax.Array,
+    right_envs: jax.Array,
+    W_stack: jax.Array,
+    chi_max: int,
+    D_w: int,
+    d: int,
+    L: int,
+    lanczos_max_iter: int,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Left-to-right half-sweep via ``jax.lax.scan``.
+
+    For each bond ``i`` in ``0..L-2``:
+      1. Build 2-site theta from ``mps[i]`` and ``mps[i+1]``
+      2. Lanczos eigensolver with effective Hamiltonian
+      3. SVD + truncation
+      4. Update ``mps[i]`` (left-canonical A) and ``mps[i+1]`` (sVh)
+      5. Update ``left_envs[i+1]``
+
+    Args:
+        mps_stack:   ``(L, chi_max, d, chi_max)``
+        left_envs:   ``(L+1, chi_max, D_w, chi_max)``
+        right_envs:  ``(L+1, chi_max, D_w, chi_max)``
+        W_stack:     ``(L, D_w, d, d, D_w)``
+        chi_max:     Maximum bond dimension.
+        D_w:         Padded MPO bond dimension.
+        d:           Physical dimension.
+        L:           Number of sites.
+        lanczos_max_iter: Number of Lanczos steps.
+
+    Returns:
+        ``(mps_stack, left_envs, energy)`` with updated MPS and left environments.
+    """
+
+    def step_fn(carry, idx):
+        mps, L_envs = carry
+        i = idx
+
+        # Load tensors for this 2-site update
+        A_i = mps[i]  # (chi_max, d, chi_max)
+        A_ip1 = mps[i + 1]  # (chi_max, d, chi_max)
+        L_env = L_envs[i]  # (chi_max, D_w, chi_max)
+        R_env = right_envs[i + 2]  # (chi_max, D_w, chi_max)
+        W_i = W_stack[i]  # (D_w, d, d, D_w)
+        W_ip1 = W_stack[i + 1]  # (D_w, d, d, D_w)
+
+        # Build theta = contract(A_i, A_ip1) = sum_j A_i[a,p,j] * A_ip1[j,q,b]
+        theta = jnp.einsum("ipj,jqk->ipqk", A_i, A_ip1)
+        # theta: (chi_max, d, d, chi_max)
+        theta_flat = theta.ravel()
+
+        # Lanczos: solve for ground state of effective Hamiltonian
+        def matvec(v):
+            return effective_ham_matvec_dense(v, L_env, W_i, W_ip1, R_env, chi_max)
+
+        E, theta_opt_flat = lanczos_ground_state_dense(
+            matvec, theta_flat, lanczos_max_iter
+        )
+        theta_opt = theta_opt_flat.reshape(chi_max, d, d, chi_max)
+
+        # SVD + truncation
+        U, s, Vh = padded_svd_dense(theta_opt, chi_max)
+        # U:  (chi_max * d, chi_max)
+        # s:  (chi_max,)
+        # Vh: (chi_max, d * chi_max)
+
+        # Reshape to MPS site tensors
+        # A_new = U reshaped to (chi_max, d, chi_max) -- left canonical
+        A_new = U.reshape(chi_max, d, chi_max)
+
+        # sVh = diag(s) @ Vh, reshaped to (chi_max, d, chi_max)
+        sVh = (s[:, None] * Vh).reshape(chi_max, d, chi_max)
+
+        # Update MPS
+        mps = mps.at[i].set(A_new)
+        mps = mps.at[i + 1].set(sVh)
+
+        # Update left environment
+        new_L = _update_left_env_scan(L_env, A_new, W_i)
+        L_envs = L_envs.at[i + 1].set(new_L)
+
+        return (mps, L_envs), E
+
+    init_carry = (mps_stack, left_envs)
+    indices = jnp.arange(L - 1)
+    (mps_out, L_envs_out), energies = jax.lax.scan(step_fn, init_carry, indices)
+
+    # Last energy from the sweep
+    last_energy = energies[-1]
+    return mps_out, L_envs_out, last_energy
+
+
+def _scan_right_to_left(
+    mps_stack: jax.Array,
+    left_envs: jax.Array,
+    right_envs: jax.Array,
+    W_stack: jax.Array,
+    chi_max: int,
+    D_w: int,
+    d: int,
+    L: int,
+    lanczos_max_iter: int,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Right-to-left half-sweep via ``jax.lax.scan``.
+
+    Mirrors _scan_left_to_right but processes bonds from L-2 down to 0.
+
+    Returns:
+        ``(mps_stack, right_envs, energy)`` with updated MPS and right environments.
+    """
+
+    def step_fn(carry, scan_idx):
+        mps, R_envs = carry
+        # Map scan index 0..L-2 to actual site index L-2..0
+        i = (L - 2) - scan_idx
+
+        A_i = mps[i]
+        A_ip1 = mps[i + 1]
+        L_env = left_envs[i]
+        R_env = R_envs[i + 2]
+        W_i = W_stack[i]
+        W_ip1 = W_stack[i + 1]
+
+        # Build theta
+        theta = jnp.einsum("ipj,jqk->ipqk", A_i, A_ip1)
+        theta_flat = theta.ravel()
+
+        # Lanczos
+        def matvec(v):
+            return effective_ham_matvec_dense(v, L_env, W_i, W_ip1, R_env, chi_max)
+
+        E, theta_opt_flat = lanczos_ground_state_dense(
+            matvec, theta_flat, lanczos_max_iter
+        )
+        theta_opt = theta_opt_flat.reshape(chi_max, d, d, chi_max)
+
+        # SVD + truncation
+        U, s, Vh = padded_svd_dense(theta_opt, chi_max)
+
+        # Right-to-left: B = Vh (right-canonical), absorb s into A = Us
+        A_new = U.reshape(chi_max, d, chi_max)
+        B_new = Vh.reshape(chi_max, d, chi_max)
+
+        # Us = A_new with singular values absorbed
+        # Us[a, p, k] = sum_k' A_new[a, p, k'] * diag(s)[k', k]
+        Us = A_new * s[None, None, :]
+
+        mps = mps.at[i].set(Us)
+        mps = mps.at[i + 1].set(B_new)
+
+        # Update right environment
+        new_R = _update_right_env_scan(R_env, B_new, W_ip1)
+        R_envs = R_envs.at[i + 1].set(new_R)
+
+        return (mps, R_envs), E
+
+    init_carry = (mps_stack, right_envs)
+    indices = jnp.arange(L - 1)
+    (mps_out, R_envs_out), energies = jax.lax.scan(step_fn, init_carry, indices)
+
+    last_energy = energies[-1]
+    return mps_out, R_envs_out, last_energy
+
+
+def jit_dmrg_sweep_dense(
+    mps_tensors: list[jax.Array],
+    mpo_tensors: list[jax.Array],
+    chi_max: int,
+    num_sweeps: int = 10,
+    lanczos_max_iter: int = 20,
+) -> list[float]:
+    """Run full DMRG sweeps compiled to a single XLA program via ``jax.lax.scan``.
+
+    Operates on raw JAX arrays (not Tensor objects). All MPS and MPO tensors
+    are padded to uniform shapes so the entire sweep can be JIT-compiled.
+
+    Args:
+        mps_tensors:  List of L MPS site tensors, each ``(chi_l, d, chi_r)``.
+        mpo_tensors:  List of L MPO site tensors, each ``(D_w_l, d, d, D_w_r)``.
+        chi_max:      Maximum bond dimension for MPS.
+        num_sweeps:   Number of full (L->R + R->L) sweeps.
+        lanczos_max_iter: Number of Lanczos iterations per site update.
+
+    Returns:
+        List of energies, one per sweep (energy from the last bond update of
+        the right-to-left half-sweep).
+    """
+    L = len(mps_tensors)
+    d = mps_tensors[0].shape[1]  # physical dimension
+
+    # Determine max MPO bond dimension for padding
+    D_w_max = max(max(W.shape[0], W.shape[3]) for W in mpo_tensors)
+
+    # Pad and stack MPS tensors to (L, chi_max, d, chi_max)
+    dtype = mps_tensors[0].dtype
+    mps_stack = jnp.zeros((L, chi_max, d, chi_max), dtype=dtype)
+    for i, M in enumerate(mps_tensors):
+        chi_l, _, chi_r = M.shape
+        mps_stack = mps_stack.at[i, :chi_l, :, :chi_r].set(M)
+
+    # Pad and stack MPO tensors to (L, D_w_max, d, d, D_w_max)
+    W_stack = jnp.zeros((L, D_w_max, d, d, D_w_max), dtype=dtype)
+    for i, W in enumerate(mpo_tensors):
+        dw_l, _, _, dw_r = W.shape
+        W_stack = W_stack.at[i, :dw_l, :, :, :dw_r].set(W)
+
+    # Run sweeps via the JIT-compiled inner function
+    energies = _jit_sweep_loop(
+        mps_stack, W_stack, L, chi_max, D_w_max, d, num_sweeps, lanczos_max_iter
+    )
+
+    return [float(e) for e in energies]
+
+
+@functools.partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7))
+def _jit_sweep_loop(
+    mps_stack: jax.Array,
+    W_stack: jax.Array,
+    L: int,
+    chi_max: int,
+    D_w: int,
+    d: int,
+    num_sweeps: int,
+    lanczos_max_iter: int,
+) -> jax.Array:
+    """Inner JIT-compiled sweep loop.
+
+    All integer parameters are static (traced at compile time) so that
+    shapes are known. The function body uses ``jax.lax.fori_loop`` over
+    sweeps, with ``jax.lax.scan`` inside each half-sweep.
+
+    Returns:
+        ``(num_sweeps,)`` array of energies.
+    """
+    # Build initial environments
+    left_envs = _build_initial_left_envs(mps_stack, W_stack, L, chi_max, D_w)
+    right_envs = _build_initial_right_envs(mps_stack, W_stack, L, chi_max, D_w)
+    energies = jnp.zeros(num_sweeps, dtype=mps_stack.dtype)
+
+    def sweep_body(sweep_idx, state):
+        mps, L_envs, R_envs, Es = state
+
+        # Left-to-right half-sweep
+        mps, L_envs, _ = _scan_left_to_right(
+            mps, L_envs, R_envs, W_stack, chi_max, D_w, d, L, lanczos_max_iter
+        )
+
+        # Rebuild right environments from updated MPS
+        R_envs = _build_initial_right_envs(mps, W_stack, L, chi_max, D_w)
+
+        # Right-to-left half-sweep
+        mps, R_envs, E_rl = _scan_right_to_left(
+            mps, L_envs, R_envs, W_stack, chi_max, D_w, d, L, lanczos_max_iter
+        )
+
+        # Rebuild left environments from updated MPS for next sweep
+        L_envs = _build_initial_left_envs(mps, W_stack, L, chi_max, D_w)
+
+        Es = Es.at[sweep_idx].set(E_rl)
+        return mps, L_envs, R_envs, Es
+
+    init_state = (mps_stack, left_envs, right_envs, energies)
+    _, _, _, energies = jax.lax.fori_loop(0, num_sweeps, sweep_body, init_state)
+
+    return energies

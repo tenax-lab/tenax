@@ -9,19 +9,26 @@ import numpy as np
 jax.config.update("jax_enable_x64", True)
 
 from tenax.algorithms._jit_sweep import (
+    _build_initial_left_envs,
+    _build_initial_right_envs,
+    _scan_left_to_right,
+    _scan_right_to_left,
     effective_ham_matvec_dense,
+    jit_dmrg_sweep_dense,
     lanczos_ground_state_dense,
     update_left_env_dense_jit,
     update_right_env_dense_jit,
 )
 from tenax.algorithms.auto_mpo import build_auto_mpo
 from tenax.algorithms.dmrg import (
+    DMRGConfig,
     _build_trivial_left_env,
     _build_trivial_right_env,
     _effective_hamiltonian_matvec,
     _update_left_env,
     _update_right_env,
     build_random_mps,
+    dmrg,
 )
 
 
@@ -563,3 +570,130 @@ class TestDenseLanczos:
         E_ref, _ = _lanczos_solve_jit(ref_matvec, theta_dense.ravel(), 20)
 
         np.testing.assert_allclose(float(E_padded), float(E_ref), atol=1e-8)
+
+
+# ------------------------------------------------------------------ #
+# Full lax.scan DMRG sweep tests (Task 6)                             #
+# ------------------------------------------------------------------ #
+
+
+class TestDenseJitSweep:
+    """Test jit_dmrg_sweep_dense produces correct energies."""
+
+    def test_dense_jit_sweep_matches_python_sweep(self):
+        """JIT sweep energy must match existing Python DMRG energy for Heisenberg L=6 chi=8."""
+        L = 6
+        chi_max = 8
+        num_sweeps = 6
+
+        # Build Heisenberg MPO
+        mpo_tn = _build_dense_heisenberg(L)
+        mpo_tensors_obj = [mpo_tn.get_tensor(i) for i in range(L)]
+
+        # Reference: run Python DMRG
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            mps_tn = build_random_mps(L=L, physical_dim=2, bond_dim=chi_max, seed=42)
+        config = DMRGConfig(
+            max_bond_dim=chi_max,
+            num_sweeps=num_sweeps,
+            two_site=True,
+            lanczos_max_iter=20,
+            verbose=False,
+        )
+        result = dmrg(mpo_tn, mps_tn, config)
+        E_python = result.energy
+
+        # JIT sweep: extract raw arrays from a fresh random MPS
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            mps_tn2 = build_random_mps(L=L, physical_dim=2, bond_dim=chi_max, seed=42)
+        mps_raw = [mps_tn2.get_tensor(i).todense() for i in range(L)]
+        mpo_raw = [t.todense() for t in mpo_tensors_obj]
+
+        energies = jit_dmrg_sweep_dense(
+            mps_raw, mpo_raw, chi_max, num_sweeps=num_sweeps, lanczos_max_iter=20
+        )
+
+        E_jit = energies[-1]
+
+        # Both should converge to approximately the same ground state energy.
+        # The algorithms differ slightly (padding, env rebuild strategy), so
+        # we allow a tolerance of 1e-4 for the final energy.
+        np.testing.assert_allclose(
+            E_jit,
+            E_python,
+            atol=1e-4,
+            err_msg=(f"JIT sweep E={E_jit:.8f} vs Python DMRG E={E_python:.8f}"),
+        )
+
+        # Also verify monotonic decrease (each sweep should lower or maintain energy)
+        for i in range(1, len(energies)):
+            assert energies[i] <= energies[i - 1] + 1e-8, (
+                f"Energy not monotonically decreasing: sweep {i - 1}={energies[i - 1]:.8f}, "
+                f"sweep {i}={energies[i]:.8f}"
+            )
+
+    def test_jit_sweep_compiles_once(self):
+        """Second call with same shapes should reuse compiled code (same result)."""
+        L = 4
+        chi_max = 4
+        num_sweeps = 2
+
+        mpo_tn = _build_dense_heisenberg(L)
+        mpo_raw = [mpo_tn.get_tensor(i).todense() for i in range(L)]
+
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            mps_tn = build_random_mps(L=L, physical_dim=2, bond_dim=chi_max, seed=7)
+        mps_raw = [mps_tn.get_tensor(i).todense() for i in range(L)]
+
+        # First call (triggers compilation)
+        energies_1 = jit_dmrg_sweep_dense(
+            mps_raw, mpo_raw, chi_max, num_sweeps=num_sweeps, lanczos_max_iter=10
+        )
+
+        # Second call (should reuse compiled XLA program)
+        energies_2 = jit_dmrg_sweep_dense(
+            mps_raw, mpo_raw, chi_max, num_sweeps=num_sweeps, lanczos_max_iter=10
+        )
+
+        # Results must be identical (exact same computation)
+        for i in range(num_sweeps):
+            np.testing.assert_allclose(energies_1[i], energies_2[i], atol=1e-14)
+
+    def test_jit_sweep_heisenberg_exact_energy(self):
+        """JIT sweep should get close to exact Heisenberg L=4 ground state energy."""
+        L = 4
+        chi_max = 8  # exact for L=4
+        num_sweeps = 8
+
+        mpo_tn = _build_dense_heisenberg(L)
+        mpo_raw = [mpo_tn.get_tensor(i).todense() for i in range(L)]
+
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            mps_tn = build_random_mps(L=L, physical_dim=2, bond_dim=chi_max, seed=123)
+        mps_raw = [mps_tn.get_tensor(i).todense() for i in range(L)]
+
+        energies = jit_dmrg_sweep_dense(
+            mps_raw, mpo_raw, chi_max, num_sweeps=num_sweeps, lanczos_max_iter=20
+        )
+
+        # Exact ground state energy of Heisenberg L=4: E = -1.61603...
+        # (from exact diagonalization of 4-site chain)
+        E_exact = -1.6160254037844388
+        E_jit = energies[-1]
+
+        np.testing.assert_allclose(
+            E_jit,
+            E_exact,
+            atol=1e-4,
+            err_msg=(f"JIT sweep E={E_jit:.8f} vs exact E={E_exact:.8f}"),
+        )
