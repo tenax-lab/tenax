@@ -348,23 +348,28 @@ def dmrg(
                 if config.verbose:
                     print(f"Warmup sweep {sweep + 1}: E = {energy:.10f}")
 
-                # Check if all bonds have reached chi_max
-                all_saturated = all(
-                    mps_tensors[i].todense().shape[-1] >= config.max_bond_dim
-                    for i in range(L - 1)
-                )
-                if all_saturated:
-                    break
-
                 # Check convergence during warmup
                 if sweep > 0 and abs(energy - prev_energy) < config.convergence_tol:
                     warmup_converged = True
+                    break
+
+                # Check if all bonds have reached chi_max
+                all_saturated = all(
+                    mps_tensors[idx].todense().shape[-1] >= config.max_bond_dim
+                    for idx in range(L - 1)
+                )
+                if all_saturated:
                     break
 
         # Phase 2: JIT sweeps for remaining budget (if not already converged)
         remaining = config.num_sweeps - warmup_sweeps
         jit_energies: list[float] = []
         if remaining > 0 and not warmup_converged:
+            if config.verbose:
+                print(
+                    f"Warmup complete after {warmup_sweeps} sweep(s), "
+                    f"switching to JIT for {remaining} sweep(s)"
+                )
             raw_mps = [t.todense() for t in mps_tensors]
             raw_mpo = [t.todense() for t in mpo_tensors]
 
