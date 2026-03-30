@@ -112,7 +112,6 @@ class TestPytreeRegistration:
         def scale(x):
             return PaddedBlockArray(
                 data=x.data * 2.0,
-                mask=x.mask,
                 block_charges=x.block_charges,
                 block_shapes=x.block_shapes,
                 indices=x.indices,
@@ -125,8 +124,8 @@ class TestPytreeRegistration:
     def test_tree_leaves(self, sym_matrix):
         pba = PaddedBlockArray.from_symmetric(sym_matrix)
         leaves = jax.tree_util.tree_leaves(pba)
-        # Should have exactly 2 leaves: data and mask
-        assert len(leaves) == 2
+        # Should have exactly 1 leaf: data (mask is derived from static aux data)
+        assert len(leaves) == 1
 
 
 class TestMaskZerosPadding:
@@ -189,3 +188,85 @@ class TestPadDense:
         padded = pad_dense(data, chi_max=5)
         assert padded.shape == (5, 2, 5)
         np.testing.assert_allclose(padded, data, atol=1e-12)
+
+
+class TestEmptyTensor:
+    """PaddedBlockArray from an empty SymmetricTensor (0 blocks)."""
+
+    def test_empty_shape(self, u1):
+        # Use a target charge that no block can satisfy to get 0 blocks
+        charges = np.array([0], dtype=np.int32)
+        indices = (
+            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
+            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+        )
+        empty = SymmetricTensor.zeros(indices, target=999)
+        assert empty.n_blocks == 0
+
+        pba = PaddedBlockArray.from_symmetric(empty)
+        assert pba.data.shape == (0, 0, 0)
+        assert pba.block_charges == ()
+        assert pba.block_shapes == ()
+
+    def test_empty_round_trip(self, u1):
+        charges = np.array([0], dtype=np.int32)
+        indices = (
+            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
+            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+        )
+        empty = SymmetricTensor.zeros(indices, target=999)
+        pba = PaddedBlockArray.from_symmetric(empty)
+        recovered = pba.to_symmetric()
+        assert recovered.n_blocks == 0
+        assert recovered.indices == empty.indices
+
+
+class TestVariedBlockSizes:
+    """PaddedBlockArray with blocks of genuinely different 2D sizes."""
+
+    def test_varied_shapes_padding(self, u1, rng):
+        # IN: charge 0 has multiplicity 3, charge 1 has multiplicity 2
+        in_charges = np.array([0, 0, 0, 1, 1], dtype=np.int32)
+        # OUT: charge 0 has multiplicity 2, charge 1 has multiplicity 3
+        out_charges = np.array([0, 0, 1, 1, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(u1, in_charges, FlowDirection.IN, label="in"),
+            TensorIndex(u1, out_charges, FlowDirection.OUT, label="out"),
+        )
+        tensor = SymmetricTensor.random_normal(indices, rng)
+        assert tensor.n_blocks == 2
+
+        pba = PaddedBlockArray.from_symmetric(tensor)
+        # Block shapes should be (3, 2) and (2, 3) -- different dimensions
+        shapes = set(pba.block_shapes)
+        assert (3, 2) in shapes
+        assert (2, 3) in shapes
+        # M_max = 3, N_max = 3 (max of each dimension)
+        assert pba.data.shape == (2, 3, 3)
+        # Mask should match data shape
+        assert pba.mask.shape == pba.data.shape
+
+    def test_varied_shapes_round_trip(self, u1, rng):
+        in_charges = np.array([0, 0, 0, 1, 1], dtype=np.int32)
+        out_charges = np.array([0, 0, 1, 1, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(u1, in_charges, FlowDirection.IN, label="in"),
+            TensorIndex(u1, out_charges, FlowDirection.OUT, label="out"),
+        )
+        tensor = SymmetricTensor.random_normal(indices, rng)
+        pba = PaddedBlockArray.from_symmetric(tensor)
+        recovered = pba.to_symmetric()
+        np.testing.assert_allclose(recovered.todense(), tensor.todense(), atol=1e-12)
+
+    def test_varied_shapes_padding_is_zero(self, u1, rng):
+        in_charges = np.array([0, 0, 0, 1, 1], dtype=np.int32)
+        out_charges = np.array([0, 0, 1, 1, 1], dtype=np.int32)
+        indices = (
+            TensorIndex(u1, in_charges, FlowDirection.IN, label="in"),
+            TensorIndex(u1, out_charges, FlowDirection.OUT, label="out"),
+        )
+        tensor = SymmetricTensor.random_normal(indices, rng)
+        pba = PaddedBlockArray.from_symmetric(tensor)
+        # Padding region (where mask is False) must be zero
+        padding_data = pba.data[~pba.mask]
+        np.testing.assert_allclose(padding_data, 0.0, atol=1e-15)

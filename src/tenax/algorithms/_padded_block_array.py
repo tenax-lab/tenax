@@ -30,7 +30,7 @@ class PaddedBlockArray:
 
     Attributes:
         data:           JAX array of shape (num_blocks, M_max, N_max).
-        mask:           Bool JAX array of same shape; True = real data.
+        mask:           Bool array of same shape; True = real data (computed on demand).
         block_charges:  Tuple of BlockKey tuples identifying each block's charges.
         block_shapes:   Tuple of (rows, cols) for each block's unpadded 2D shape.
         indices:        Tuple of TensorIndex objects from the source tensor.
@@ -41,23 +41,31 @@ class PaddedBlockArray:
         self,
         *,
         data: jax.Array,
-        mask: jax.Array,
         block_charges: tuple[BlockKey, ...],
         block_shapes: tuple[tuple[int, int], ...],
         indices: tuple,
         symmetry: object,
     ) -> None:
         self.data = data
-        self.mask = mask
         self.block_charges = block_charges
         self.block_shapes = block_shapes
         self.indices = indices
         self.symmetry = symmetry
 
+    @property
+    def mask(self):
+        """Boolean mask: True for real data, False for padding."""
+        num_blocks = self.data.shape[0]
+        M_max, N_max = self.data.shape[1], self.data.shape[2]
+        mask = np.zeros((num_blocks, M_max, N_max), dtype=bool)
+        for i, (m, n) in enumerate(self.block_shapes):
+            mask[i, :m, :n] = True
+        return jnp.array(mask)
+
     # --- JAX pytree registration ---
 
     def tree_flatten(self):
-        children = (self.data, self.mask)
+        children = (self.data,)
         aux = (
             self.block_charges,
             self.block_shapes,
@@ -69,10 +77,9 @@ class PaddedBlockArray:
     @classmethod
     def tree_unflatten(cls, aux, children):
         block_charges, block_shapes, indices, symmetry = aux
-        data, mask = children
+        (data,) = children
         return cls(
             data=data,
-            mask=mask,
             block_charges=block_charges,
             block_shapes=block_shapes,
             indices=indices,
@@ -103,7 +110,6 @@ class PaddedBlockArray:
             sym = tensor.indices[0].symmetry if tensor.indices else None
             return cls(
                 data=jnp.zeros((0, 0, 0), dtype=tensor.dtype),
-                mask=jnp.zeros((0, 0, 0), dtype=bool),
                 block_charges=(),
                 block_shapes=(),
                 indices=tensor.indices,
@@ -127,13 +133,11 @@ class PaddedBlockArray:
         M_max = max(s[0] for s in shapes_2d)
         N_max = max(s[1] for s in shapes_2d)
 
-        # Build padded data and mask arrays
+        # Build padded data array using direct block access (avoids dict construction)
         padded_blocks = []
-        mask_blocks = []
-        blocks_dict = tensor.blocks
 
-        for i, key in enumerate(block_keys):
-            block = blocks_dict[key]
+        for i in range(n_blocks):
+            block = tensor._get_block(i)
             rows, cols = shapes_2d[i]
             block_2d = block.reshape(rows, cols)
 
@@ -142,19 +146,12 @@ class PaddedBlockArray:
             padded = padded.at[:rows, :cols].set(block_2d)
             padded_blocks.append(padded)
 
-            # Build mask
-            m = np.zeros((M_max, N_max), dtype=bool)
-            m[:rows, :cols] = True
-            mask_blocks.append(m)
-
         data = jnp.stack(padded_blocks, axis=0)
-        mask = jnp.array(np.stack(mask_blocks, axis=0))
 
         sym = tensor.indices[0].symmetry if tensor.indices else None
 
         return cls(
             data=data,
-            mask=mask,
             block_charges=block_keys,
             block_shapes=tuple(shapes_2d),
             indices=tensor.indices,
