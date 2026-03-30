@@ -294,7 +294,7 @@ class TestExpandBondSymmetric:
 
         from tenax.algorithms.dmrg import _build_left_environments_list
 
-        ops = _symmetric_ops()
+        ops = _symmetric_ops(config)
         # Don't re-canonicalize — _right_canonicalize has issues with
         # SymmetricTensor. Use the DMRG result directly (already in
         # mixed canonical form from the last sweep).
@@ -356,7 +356,7 @@ class TestExpandBondSymmetric:
 
         from tenax.algorithms.dmrg import _build_left_environments_list
 
-        ops = _symmetric_ops()
+        ops = _symmetric_ops(config)
         left_envs = _build_left_environments_list(mps_t, mpo_t, L, ops)
         right_envs = _build_right_environments_list(mps_t, mpo_t, L, ops)
 

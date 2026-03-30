@@ -2415,14 +2415,16 @@ def compute_mps_sector(mps_tensors: list[Tensor]) -> int | None:
     function returns 0.
 
     Args:
-        mps_tensors: List of SymmetricTensor MPS site tensors.
+        mps_tensors: List of SymmetricTensor (or BlockArray) MPS site tensors.
 
     Returns:
         The total charge if consistently detectable, or None if the
-        MPS is in a mixed sector (or contains no SymmetricTensor).
+        MPS is in a mixed sector (or contains no block-sparse tensor).
     """
+    from tenax.algorithms._block_array import BlockArray
+
     for site in mps_tensors:
-        if not isinstance(site, SymmetricTensor):
+        if not isinstance(site, (SymmetricTensor, BlockArray)):
             continue
         if not site.blocks:
             continue
