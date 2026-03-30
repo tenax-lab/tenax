@@ -5,7 +5,16 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax.algorithms._padded_block_array import PaddedBlockArray, pad_dense
+from tenax.algorithms._padded_block_array import (
+    PaddedBlockArray,
+    pad_dense,
+    pba_add,
+    pba_axpy,
+    pba_inner,
+    pba_norm,
+    pba_scale,
+    pba_zeros_like,
+)
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import SymmetricTensor
@@ -517,3 +526,105 @@ class TestContractPaddedOutputStructure:
         assert pC.block_charges == plan.output_charges
         if pC.data.size > 0:
             np.testing.assert_allclose(pC.data, 0.0, atol=1e-15)
+
+
+# ===== Tests for PBA vector operations =====
+
+
+class TestPBAVectorOps:
+    """Test PBA vector operations needed for block-sparse Lanczos."""
+
+    @pytest.fixture
+    def pba_pair(self, u1):
+        """Two PBAs with same structure, random data."""
+        idx_a = TensorIndex(
+            u1,
+            np.array([0, 0, 1, 1, 1], dtype=np.int32),
+            FlowDirection.IN,
+            label="a",
+        )
+        idx_b = TensorIndex(
+            u1,
+            np.array([0, 0, 0, 1, 1], dtype=np.int32),
+            FlowDirection.OUT,
+            label="b",
+        )
+        t1 = SymmetricTensor.random_normal((idx_a, idx_b), jax.random.PRNGKey(0))
+        t2 = SymmetricTensor.random_normal((idx_a, idx_b), jax.random.PRNGKey(1))
+        return PaddedBlockArray.from_symmetric(t1), PaddedBlockArray.from_symmetric(t2)
+
+    def test_inner_matches_symmetric(self, pba_pair):
+        """PBA inner product matches SymmetricTensor block-wise inner product."""
+        pba_a, pba_b = pba_pair
+        result = pba_inner(pba_a, pba_b)
+        # Reference: convert back and compute with numpy
+        ta = pba_a.to_symmetric()
+        tb = pba_b.to_symmetric()
+        expected = 0.0
+        for i, key in enumerate(ta._block_keys):
+            ba = np.asarray(ta._get_block(i))
+            bb = np.asarray(tb._get_block(i))
+            expected += np.sum(np.conj(ba) * bb)
+        np.testing.assert_allclose(float(result), float(expected.real), rtol=1e-10)
+
+    def test_inner_self_positive(self, pba_pair):
+        pba_a, _ = pba_pair
+        result = pba_inner(pba_a, pba_a)
+        assert float(result) > 0
+
+    def test_inner_jit_compatible(self, pba_pair):
+        pba_a, pba_b = pba_pair
+        jit_inner = jax.jit(pba_inner)
+        result = jit_inner(pba_a, pba_b)
+        expected = pba_inner(pba_a, pba_b)
+        np.testing.assert_allclose(float(result), float(expected), rtol=1e-12)
+
+    def test_scale(self, pba_pair):
+        pba_a, _ = pba_pair
+        result = pba_scale(pba_a, 3.0)
+        np.testing.assert_allclose(
+            np.asarray(result.data), np.asarray(pba_a.data) * 3.0
+        )
+
+    def test_add(self, pba_pair):
+        pba_a, pba_b = pba_pair
+        result = pba_add(pba_a, pba_b)
+        np.testing.assert_allclose(
+            np.asarray(result.data),
+            np.asarray(pba_a.data) + np.asarray(pba_b.data),
+        )
+
+    def test_axpy(self, pba_pair):
+        pba_a, pba_b = pba_pair
+        result = pba_axpy(2.5, pba_a, pba_b)
+        expected = np.asarray(pba_b.data) + 2.5 * np.asarray(pba_a.data)
+        np.testing.assert_allclose(np.asarray(result.data), expected)
+
+    def test_norm(self, pba_pair):
+        pba_a, _ = pba_pair
+        result = pba_norm(pba_a)
+        expected = np.sqrt(float(pba_inner(pba_a, pba_a)))
+        np.testing.assert_allclose(float(result), expected, rtol=1e-10)
+
+    def test_zeros_like(self, pba_pair):
+        pba_a, _ = pba_pair
+        z = pba_zeros_like(pba_a)
+        assert z.block_charges == pba_a.block_charges
+        assert z.block_shapes == pba_a.block_shapes
+        np.testing.assert_array_equal(np.asarray(z.data), 0.0)
+
+    def test_ops_jit_compatible(self, pba_pair):
+        """All ops work under jax.jit."""
+        pba_a, pba_b = pba_pair
+
+        @jax.jit
+        def do_ops(a, b):
+            s = pba_scale(a, 2.0)
+            added = pba_add(a, b)
+            axpy_result = pba_axpy(0.5, a, b)
+            n = pba_norm(a)
+            return s, added, axpy_result, n
+
+        s, added, axpy_result, n = do_ops(pba_a, pba_b)
+        np.testing.assert_allclose(np.asarray(s.data), np.asarray(pba_a.data) * 2.0)
+        assert float(n) > 0

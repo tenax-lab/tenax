@@ -233,6 +233,81 @@ jax.tree_util.register_pytree_node(
 )
 
 
+# ===== PBA vector operations for Lanczos =====
+
+
+def pba_inner(a: PaddedBlockArray, b: PaddedBlockArray) -> jax.Array:
+    """Hermitian inner product: sum(conj(a) * b) over non-padding elements.
+
+    Uses the mask to zero out padding before summation so the result is
+    independent of pad size.  Returns a scalar JAX array (stays on device
+    for JIT compatibility).
+    """
+    return jnp.sum(jnp.conj(a.data) * b.data * a.mask)
+
+
+def pba_scale(a: PaddedBlockArray, scalar) -> PaddedBlockArray:
+    """Element-wise scaling: new PBA with data = a.data * scalar.
+
+    Padding stays zero because scalar * 0 = 0.
+    """
+    return PaddedBlockArray(
+        data=a.data * scalar,
+        block_charges=a.block_charges,
+        block_shapes=a.block_shapes,
+        indices=a.indices,
+        symmetry=a.symmetry,
+    )
+
+
+def pba_add(a: PaddedBlockArray, b: PaddedBlockArray) -> PaddedBlockArray:
+    """Element-wise addition of two PBAs with the same structure.
+
+    Both must share the same block_charges and block_shapes.
+    Padding: 0 + 0 = 0, so the result is correctly padded.
+    """
+    return PaddedBlockArray(
+        data=a.data + b.data,
+        block_charges=a.block_charges,
+        block_shapes=a.block_shapes,
+        indices=a.indices,
+        symmetry=a.symmetry,
+    )
+
+
+def pba_axpy(alpha, x: PaddedBlockArray, y: PaddedBlockArray) -> PaddedBlockArray:
+    """Compute y + alpha * x (AXPY), commonly used in Lanczos orthogonalization.
+
+    Both PBAs must have the same structure.
+    """
+    return PaddedBlockArray(
+        data=y.data + alpha * x.data,
+        block_charges=y.block_charges,
+        block_shapes=y.block_shapes,
+        indices=y.indices,
+        symmetry=y.symmetry,
+    )
+
+
+def pba_norm(a: PaddedBlockArray) -> jax.Array:
+    """Frobenius norm: sqrt(real(inner(a, a))).
+
+    Returns a scalar JAX array.
+    """
+    return jnp.sqrt(pba_inner(a, a).real)
+
+
+def pba_zeros_like(a: PaddedBlockArray) -> PaddedBlockArray:
+    """Zero PBA with the same structure (block_charges, block_shapes, etc.)."""
+    return PaddedBlockArray(
+        data=jnp.zeros_like(a.data),
+        block_charges=a.block_charges,
+        block_shapes=a.block_shapes,
+        indices=a.indices,
+        symmetry=a.symmetry,
+    )
+
+
 # ===== PaddedContractionPlan and contract_padded =====
 
 
