@@ -22,6 +22,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.core.index import TensorIndex
 from tenax.core.tensor import (
     BlockKey,
     SymmetricTensor,
@@ -266,8 +267,9 @@ class PaddedContractionPlan:
     output_N_max: int
     output_charges: tuple[BlockKey, ...]
     output_shapes: tuple[tuple[int, int], ...]
-    output_tensor_indices: tuple  # tuple of TensorIndex for the output legs
+    output_tensor_indices: tuple[TensorIndex, ...]
     subscripts: str
+    output_mask_np: np.ndarray  # precomputed bool mask (num_out, M_max, N_max)
 
     @classmethod
     def build(cls, A: SymmetricTensor, B: SymmetricTensor) -> PaddedContractionPlan:
@@ -293,6 +295,11 @@ class PaddedContractionPlan:
         shared_labels = set(a_labels.keys()) & set(b_labels.keys())
         if not shared_labels:
             raise ValueError("No shared labels between A and B for contraction.")
+        if len(shared_labels) != 1:
+            raise ValueError(
+                f"PaddedContractionPlan.build() currently supports exactly 1 contracted "
+                f"label, got {len(shared_labels)}: {shared_labels}"
+            )
 
         contracted_label = shared_labels.pop()
         a_contracted_pos = a_labels[contracted_label]
@@ -392,6 +399,15 @@ class PaddedContractionPlan:
             out_M_max = 0
             out_N_max = 0
 
+        # Precompute output mask (static numpy array, not traced by JAX)
+        n_out = len(valid_out_keys)
+        if n_out > 0:
+            output_mask = np.zeros((n_out, out_M_max, out_N_max), dtype=bool)
+            for i, (m, n) in enumerate(out_shapes_2d):
+                output_mask[i, :m, :n] = True
+        else:
+            output_mask = np.zeros((0, 0, 0), dtype=bool)
+
         return cls(
             left_indices=tuple(left_list),
             right_indices=tuple(right_list),
@@ -403,6 +419,7 @@ class PaddedContractionPlan:
             output_shapes=tuple(out_shapes_2d),
             output_tensor_indices=out_tensor_indices,
             subscripts=subscripts,
+            output_mask_np=output_mask,
         )
 
 
@@ -490,15 +507,8 @@ def contract_padded(
     )
     output_data = output_data.at[output_idx].add(pair_results)
 
-    # Zero out padding regions in the output to keep it clean.
-    # Build a mask for valid data in each output block.
-    output_mask = np.zeros(
-        (plan.num_output_blocks, plan.output_M_max, plan.output_N_max),
-        dtype=bool,
-    )
-    for i, (m, n) in enumerate(plan.output_shapes):
-        output_mask[i, :m, :n] = True
-    output_data = jnp.where(jnp.array(output_mask), output_data, 0.0)
+    # Zero out padding regions using the precomputed mask from the plan.
+    output_data = jnp.where(jnp.array(plan.output_mask_np), output_data, 0.0)
 
     return PaddedBlockArray(
         data=output_data,

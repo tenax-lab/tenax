@@ -488,3 +488,32 @@ class TestContractPaddedOutputStructure:
         # Padding regions must be zero
         padding_data = pC.data[~pC.mask]
         np.testing.assert_allclose(padding_data, 0.0, atol=1e-12)
+
+    def test_zero_pair_non_overlapping_charges(self, u1, rng):
+        """A has only charge 0, B has only charge 1: no matching contracted charge."""
+        charges_i = np.array([0, 0], dtype=np.int32)
+        charges_j_a = np.array([0, 0], dtype=np.int32)  # A's contracted leg: charge 0
+        charges_j_b = np.array([1, 1], dtype=np.int32)  # B's contracted leg: charge 1
+        charges_k = np.array([1, 1], dtype=np.int32)
+
+        idx_i = TensorIndex(u1, charges_i, FlowDirection.IN, label="i")
+        idx_j_out = TensorIndex(u1, u1.dual(charges_j_a), FlowDirection.OUT, label="j")
+        idx_j_in = TensorIndex(u1, charges_j_b, FlowDirection.IN, label="j")
+        idx_k = TensorIndex(u1, u1.dual(charges_k), FlowDirection.OUT, label="k")
+
+        key_a, key_b = jax.random.split(rng)
+        A = SymmetricTensor.random_normal((idx_i, idx_j_out), key_a)
+        B = SymmetricTensor.random_normal((idx_j_in, idx_k), key_b)
+
+        plan = PaddedContractionPlan.build(A, B)
+        pA = PaddedBlockArray.from_symmetric(A)
+        pB = PaddedBlockArray.from_symmetric(B)
+        pC = contract_padded(plan, pA, pB)
+
+        # No matching contracted charges means no contributing pairs
+        assert len(plan.left_indices) == 0
+        # Output should have valid structure (possibly non-zero output blocks
+        # from valid_out_keys, but all data should be zero)
+        assert pC.block_charges == plan.output_charges
+        if pC.data.size > 0:
+            np.testing.assert_allclose(pC.data, 0.0, atol=1e-15)
