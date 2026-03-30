@@ -1407,3 +1407,177 @@ class TestWarmupToJIT:
                 f"Energy not decreasing: sweep {i - 1}={energies[i - 1]:.8f}, "
                 f"sweep {i}={energies[i]:.8f}"
             )
+
+
+# ------------------------------------------------------------------ #
+# Integration tests (Task 10)                                          #
+# ------------------------------------------------------------------ #
+
+
+class TestIntegration:
+    """End-to-end integration tests for JIT-accelerated DMRG."""
+
+    @staticmethod
+    def _build_heisenberg_matrix(L):
+        """Build full Heisenberg Hamiltonian matrix for ED comparison."""
+        d = 2
+        N = d**L
+        Sz = np.array([[0.5, 0], [0, -0.5]])
+        Sp = np.array([[0, 1], [0, 0]])
+        Sm = np.array([[0, 0], [1, 0]])
+        eye = np.eye(d)
+        H = np.zeros((N, N))
+        for i in range(L - 1):
+            # S_i . S_{i+1} = Sz_i Sz_{i+1} + 0.5*(Sp_i Sm_{i+1} + Sm_i Sp_{i+1})
+            for op_a, op_b, coeff in [(Sz, Sz, 1.0), (Sp, Sm, 0.5), (Sm, Sp, 0.5)]:
+                term = np.eye(1)
+                for j in range(L):
+                    if j == i:
+                        term = np.kron(term, op_a)
+                    elif j == i + 1:
+                        term = np.kron(term, op_b)
+                    else:
+                        term = np.kron(term, eye)
+                H += coeff * term
+        return H
+
+    def test_heisenberg_l6_dense_jit_vs_exact(self):
+        """Dense JIT DMRG on L=6 Heisenberg matches ED within 1e-4."""
+        import warnings
+
+        L = 6
+        chi_max = 16  # more than enough for exact L=6 spin-1/2
+        num_sweeps = 12
+
+        # Exact energy from ED
+        H = self._build_heisenberg_matrix(L)
+        e_exact = float(np.linalg.eigvalsh(H)[0])
+
+        # Run DMRG with JIT accelerator
+        mpo_tn = _build_dense_heisenberg(L)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            mps_tn = build_random_mps(L=L, physical_dim=2, bond_dim=chi_max, seed=42)
+
+        config = DMRGConfig(
+            max_bond_dim=chi_max,
+            num_sweeps=num_sweeps,
+            two_site=True,
+            lanczos_max_iter=20,
+            convergence_tol=1e-10,
+            accelerator="jit",
+            verbose=False,
+        )
+        result = dmrg(mpo_tn, mps_tn, config)
+
+        np.testing.assert_allclose(
+            result.energy,
+            e_exact,
+            atol=1e-4,
+            err_msg=(f"JIT DMRG E={result.energy:.8f} vs exact E={e_exact:.8f}"),
+        )
+
+    def test_dmrg_accelerator_jit_on_cpu_runs(self):
+        """Smoke test: accelerator='jit' runs on CPU and gives finite negative energy."""
+        import warnings
+
+        L = 4
+        chi_max = 4
+        num_sweeps = 4
+
+        mpo_tn = _build_dense_heisenberg(L)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            mps_tn = build_random_mps(L=L, physical_dim=2, bond_dim=chi_max, seed=77)
+
+        config = DMRGConfig(
+            max_bond_dim=chi_max,
+            num_sweeps=num_sweeps,
+            two_site=True,
+            lanczos_max_iter=20,
+            accelerator="jit",
+            verbose=False,
+        )
+        result = dmrg(mpo_tn, mps_tn, config)
+
+        assert np.isfinite(result.energy), (
+            f"Energy should be finite, got {result.energy}"
+        )
+        assert result.energy < 0.0, (
+            f"Heisenberg ground state should be negative, got {result.energy}"
+        )
+        assert len(result.energies_per_sweep) == num_sweeps
+
+    def test_convergence_detection_in_jit_path(self):
+        """JIT dense path detects convergence (converged=True) after enough sweeps."""
+        import warnings
+
+        L = 4
+        chi_max = 8
+        num_sweeps = 50
+
+        mpo_tn = _build_dense_heisenberg(L)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            mps_tn = build_random_mps(L=L, physical_dim=2, bond_dim=chi_max, seed=42)
+
+        config = DMRGConfig(
+            max_bond_dim=chi_max,
+            num_sweeps=num_sweeps,
+            two_site=True,
+            lanczos_max_iter=20,
+            convergence_tol=1e-8,
+            accelerator="jit",
+            verbose=False,
+        )
+        result = dmrg(mpo_tn, mps_tn, config)
+
+        # With chi=8 on L=4, DMRG converges quickly.
+        # The JIT path runs all sweeps via lax.fori_loop (no early stopping
+        # inside JIT), but convergence is detected after the JIT call returns.
+        assert result.converged, (
+            f"Expected convergence, but converged={result.converged}. "
+            f"Last energies: {result.energies_per_sweep[-3:]}"
+        )
+
+    def test_symmetric_jit_vs_exact(self):
+        """Symmetric JIT DMRG on L=6 Heisenberg with U(1) matches ED within 1e-4."""
+        L = 6
+        chi = 8
+        num_sweeps = 10
+
+        # Exact energy from ED
+        H = self._build_heisenberg_matrix(L)
+        e_exact = float(np.linalg.eigvalsh(H)[0])
+
+        # Build symmetric MPO and MPS
+        mpo_net = _build_symmetric_heisenberg_mpo(L)
+        mps = FiniteMPS.random(
+            L,
+            d=2,
+            chi=chi,
+            key=jax.random.PRNGKey(42),
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
+
+        config = DMRGConfig(
+            max_bond_dim=chi,
+            num_sweeps=num_sweeps,
+            two_site=True,
+            lanczos_max_iter=20,
+            convergence_tol=1e-10,
+            accelerator="jit",
+            verbose=False,
+        )
+        result = dmrg(mpo_net, mps, config)
+
+        np.testing.assert_allclose(
+            result.energy,
+            e_exact,
+            atol=1e-4,
+            err_msg=(
+                f"Symmetric JIT DMRG E={result.energy:.8f} vs exact E={e_exact:.8f}"
+            ),
+        )
