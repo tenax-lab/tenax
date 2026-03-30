@@ -308,6 +308,78 @@ def pba_zeros_like(a: PaddedBlockArray) -> PaddedBlockArray:
     )
 
 
+def pba_expand_blocks(
+    a: PaddedBlockArray,
+    target_charges: tuple,
+    target_shapes: tuple[tuple[int, int], ...],
+    target_indices: tuple,
+) -> PaddedBlockArray:
+    """Expand a PBA to a (possibly larger) target block structure.
+
+    Copies existing blocks to their matching positions in the target layout
+    and fills new blocks with zeros.  Both the source and target must share
+    the same symmetry.  The target block set must be a superset of the
+    source blocks (every source charge key must appear in the target).
+
+    This is useful when a ``MultiContractionPlan`` discovers more valid
+    output blocks than the input tensor has.  Expanding the input to
+    match the plan's output structure ensures the matvec return shape is
+    consistent with the Lanczos basis vectors.
+
+    Args:
+        a:               Source PaddedBlockArray.
+        target_charges:  Block charge keys for the target layout.
+        target_shapes:   Unpadded 2D shapes for the target layout.
+        target_indices:  TensorIndex metadata for the target layout.
+
+    Returns:
+        PaddedBlockArray with ``target_charges`` / ``target_shapes``.
+    """
+    n_target = len(target_charges)
+    if n_target == 0:
+        return PaddedBlockArray(
+            data=jnp.zeros((0, 0, 0), dtype=a.data.dtype),
+            block_charges=target_charges,
+            block_shapes=target_shapes,
+            indices=target_indices,
+            symmetry=a.symmetry,
+        )
+
+    M_max = max(s[0] for s in target_shapes)
+    N_max = max(s[1] for s in target_shapes)
+
+    # Build lookup from source charge key -> source block index
+    src_map = {key: i for i, key in enumerate(a.block_charges)}
+
+    # Assemble target data: copy existing blocks, zero-fill new ones
+    blocks = []
+    for key in target_charges:
+        if key in src_map:
+            src_idx = src_map[key]
+            src_block = a.data[src_idx]
+            # Pad/slice to target (M_max, N_max) if source has different pad dims
+            src_M, src_N = src_block.shape
+            if src_M == M_max and src_N == N_max:
+                blocks.append(src_block)
+            else:
+                padded = jnp.zeros((M_max, N_max), dtype=a.data.dtype)
+                min_M = min(src_M, M_max)
+                min_N = min(src_N, N_max)
+                padded = padded.at[:min_M, :min_N].set(src_block[:min_M, :min_N])
+                blocks.append(padded)
+        else:
+            blocks.append(jnp.zeros((M_max, N_max), dtype=a.data.dtype))
+
+    data = jnp.stack(blocks, axis=0)
+    return PaddedBlockArray(
+        data=data,
+        block_charges=target_charges,
+        block_shapes=target_shapes,
+        indices=target_indices,
+        symmetry=a.symmetry,
+    )
+
+
 # ===== PaddedContractionPlan and contract_padded =====
 
 

@@ -13,8 +13,10 @@ from tenax.algorithms._jit_sweep import (
     _build_initial_right_envs,
     _scan_left_to_right,
     _scan_right_to_left,
+    effective_ham_matvec_blocks,
     effective_ham_matvec_dense,
     jit_dmrg_sweep_dense,
+    lanczos_ground_state_blocks,
     lanczos_ground_state_dense,
     update_left_env_dense_jit,
     update_right_env_dense_jit,
@@ -697,3 +699,431 @@ class TestDenseJitSweep:
             atol=1e-4,
             err_msg=(f"JIT sweep E={E_jit:.8f} vs exact E={E_exact:.8f}"),
         )
+
+
+# ------------------------------------------------------------------ #
+# Block-sparse effective Hamiltonian matvec tests (Task 8d)            #
+# ------------------------------------------------------------------ #
+
+
+from tenax.algorithms._padded_block_array import (
+    MultiContractionPlan,
+    PaddedBlockArray,
+    contract_multi_padded,
+)
+from tenax.core.mps import FiniteMPS
+from tenax.core.symmetry import U1Symmetry
+
+
+def _build_symmetric_heisenberg_mpo(L: int):
+    """Build a fully symmetric (SymmetricTensor) Heisenberg MPO via AutoMPO."""
+    terms = []
+    for i in range(L - 1):
+        terms.append((1.0, "Sz", i, "Sz", i + 1))
+        terms.append((0.5, "Sp", i, "Sm", i + 1))
+        terms.append((0.5, "Sm", i, "Sp", i + 1))
+    return build_auto_mpo(terms, L=L, symmetric=True)
+
+
+def _build_dmrg_env_tensors_symmetric(L=4, chi=4, target_charge=0, seed=42):
+    """Build symmetric MPS, MPO, and environment tensors for testing.
+
+    Returns:
+        Tuple of (mps_tensors, mpo_tensors, left_envs, right_envs)
+        where each is a list of SymmetricTensor objects.
+    """
+    from tenax.algorithms.dmrg import (
+        _build_trivial_left_env_symmetric,
+        _build_trivial_right_env_symmetric,
+        _update_left_env_symmetric,
+        _update_right_env_symmetric,
+    )
+
+    mpo_net = _build_symmetric_heisenberg_mpo(L)
+    mps = FiniteMPS.random(
+        L,
+        d=2,
+        chi=chi,
+        key=jax.random.PRNGKey(seed),
+        symmetric=True,
+        symmetry=U1Symmetry(),
+        target_charge=target_charge,
+    )
+
+    mps_tensors = [mps.get_tensor(i) for i in range(L)]
+    mpo_tensors = [mpo_net.get_tensor(i) for i in range(L)]
+
+    # Build left environments
+    left_envs = [_build_trivial_left_env_symmetric()]
+    for i in range(L - 1):
+        new_l = _update_left_env_symmetric(
+            left_envs[-1], mps_tensors[i], mpo_tensors[i]
+        )
+        left_envs.append(new_l)
+
+    # Build right environments
+    right_envs = [None] * (L + 1)
+    right_envs[L] = _build_trivial_right_env_symmetric()
+    for i in range(L - 1, 0, -1):
+        right_envs[i] = _update_right_env_symmetric(
+            right_envs[i + 1], mps_tensors[i], mpo_tensors[i]
+        )
+
+    return mps_tensors, mpo_tensors, left_envs, right_envs
+
+
+class TestBlockSparseMatvec:
+    """Test effective_ham_matvec_blocks matches _blockwise_contract reference."""
+
+    def test_matvec_matches_symmetric_reference(self):
+        """Block-sparse matvec via PBA matches _blockwise_contract reference."""
+        L = 6
+        chi = 4
+        mps_tensors, mpo_tensors, left_envs, right_envs = (
+            _build_dmrg_env_tensors_symmetric(L=L, chi=chi)
+        )
+
+        from tenax.algorithms.dmrg import _blockwise_contract
+        from tenax.contraction.contractor import contract
+
+        # Pick bond between sites 2 and 3
+        site_l = 2
+        site_r = 3
+        l_env = left_envs[site_l]
+        r_env = right_envs[site_r + 1]
+        W_l = mpo_tensors[site_l]
+        W_r = mpo_tensors[site_r]
+
+        # Build theta
+        theta = contract(mps_tensors[site_l], mps_tensors[site_r])
+
+        # Reference: _blockwise_contract
+        subs = "abc,apqd,bpse,eqtf,dfg->cstg"
+        ref_result = _blockwise_contract(
+            [l_env, theta, W_l, W_r, r_env],
+            subs,
+            output_indices=theta.indices,
+        )
+
+        # Block-sparse PBA path
+        l_pba = PaddedBlockArray.from_symmetric(l_env)
+        theta_pba = PaddedBlockArray.from_symmetric(theta)
+        wl_pba = PaddedBlockArray.from_symmetric(W_l)
+        wr_pba = PaddedBlockArray.from_symmetric(W_r)
+        r_pba = PaddedBlockArray.from_symmetric(r_env)
+
+        plan = MultiContractionPlan.build(
+            [l_env, theta, W_l, W_r, r_env],
+            subs,
+            output_indices=theta.indices,
+        )
+
+        result_pba = effective_ham_matvec_blocks(
+            plan, theta_pba, l_pba, wl_pba, wr_pba, r_pba
+        )
+        result_sym = result_pba.to_symmetric()
+
+        np.testing.assert_allclose(
+            np.array(result_sym.todense()),
+            np.array(ref_result.todense()),
+            atol=1e-10,
+        )
+
+    def test_matvec_larger_bond_dim(self):
+        """Block-sparse matvec with chi=8 for more block diversity."""
+        L = 6
+        chi = 8
+        mps_tensors, mpo_tensors, left_envs, right_envs = (
+            _build_dmrg_env_tensors_symmetric(L=L, chi=chi, seed=99)
+        )
+
+        from tenax.algorithms.dmrg import _blockwise_contract
+        from tenax.contraction.contractor import contract
+
+        site_l = 2
+        site_r = 3
+        l_env = left_envs[site_l]
+        r_env = right_envs[site_r + 1]
+        W_l = mpo_tensors[site_l]
+        W_r = mpo_tensors[site_r]
+
+        theta = contract(mps_tensors[site_l], mps_tensors[site_r])
+
+        subs = "abc,apqd,bpse,eqtf,dfg->cstg"
+        ref_result = _blockwise_contract(
+            [l_env, theta, W_l, W_r, r_env],
+            subs,
+            output_indices=theta.indices,
+        )
+
+        plan = MultiContractionPlan.build(
+            [l_env, theta, W_l, W_r, r_env],
+            subs,
+            output_indices=theta.indices,
+        )
+        result_pba = effective_ham_matvec_blocks(
+            plan,
+            PaddedBlockArray.from_symmetric(theta),
+            PaddedBlockArray.from_symmetric(l_env),
+            PaddedBlockArray.from_symmetric(W_l),
+            PaddedBlockArray.from_symmetric(W_r),
+            PaddedBlockArray.from_symmetric(r_env),
+        )
+        result_sym = result_pba.to_symmetric()
+
+        np.testing.assert_allclose(
+            np.array(result_sym.todense()),
+            np.array(ref_result.todense()),
+            atol=1e-10,
+        )
+
+    def test_matvec_jit_compatible(self):
+        """effective_ham_matvec_blocks works inside jax.jit."""
+        L = 4
+        chi = 4
+        mps_tensors, mpo_tensors, left_envs, right_envs = (
+            _build_dmrg_env_tensors_symmetric(L=L, chi=chi)
+        )
+
+        from tenax.algorithms._padded_block_array import pba_expand_blocks
+        from tenax.contraction.contractor import contract
+
+        l_env = left_envs[1]
+        r_env = right_envs[3]
+        W_l = mpo_tensors[1]
+        W_r = mpo_tensors[2]
+        theta = contract(mps_tensors[1], mps_tensors[2])
+
+        subs = "abc,apqd,bpse,eqtf,dfg->cstg"
+        plan = MultiContractionPlan.build(
+            [l_env, theta, W_l, W_r, r_env],
+            subs,
+            output_indices=theta.indices,
+        )
+
+        # Expand theta to match the plan's output block structure
+        theta_pba = PaddedBlockArray.from_symmetric(theta)
+        theta_pba = pba_expand_blocks(
+            theta_pba,
+            plan.output_charges,
+            plan.output_shapes,
+            plan.output_tensor_indices,
+        )
+
+        l_pba = PaddedBlockArray.from_symmetric(l_env)
+        wl_pba = PaddedBlockArray.from_symmetric(W_l)
+        wr_pba = PaddedBlockArray.from_symmetric(W_r)
+        r_pba = PaddedBlockArray.from_symmetric(r_env)
+
+        @jax.jit
+        def jit_matvec(tp, lp, wlp, wrp, rp):
+            return effective_ham_matvec_blocks(plan, tp, lp, wlp, wrp, rp)
+
+        result = jit_matvec(theta_pba, l_pba, wl_pba, wr_pba, r_pba)
+        # Output should match the plan's output structure
+        assert result.data.shape[0] == plan.num_output_blocks
+
+
+# ------------------------------------------------------------------ #
+# Block-sparse Lanczos eigensolver tests (Task 8d)                     #
+# ------------------------------------------------------------------ #
+
+
+class TestBlockSparseLanczos:
+    """Test lanczos_ground_state_blocks finds correct ground states."""
+
+    def test_lanczos_finds_ground_state(self):
+        """Block-sparse Lanczos finds the same ground state energy as dense."""
+        L = 6
+        chi = 4
+        mps_tensors, mpo_tensors, left_envs, right_envs = (
+            _build_dmrg_env_tensors_symmetric(L=L, chi=chi, seed=42)
+        )
+
+        from tenax.algorithms._padded_block_array import pba_expand_blocks
+        from tenax.algorithms.dmrg import _blockwise_contract
+        from tenax.contraction.contractor import contract
+
+        site_l = 2
+        site_r = 3
+        l_env = left_envs[site_l]
+        r_env = right_envs[site_r + 1]
+        W_l = mpo_tensors[site_l]
+        W_r = mpo_tensors[site_r]
+
+        theta = contract(mps_tensors[site_l], mps_tensors[site_r])
+
+        # Build plan and PBAs
+        subs = "abc,apqd,bpse,eqtf,dfg->cstg"
+        plan = MultiContractionPlan.build(
+            [l_env, theta, W_l, W_r, r_env],
+            subs,
+            output_indices=theta.indices,
+        )
+
+        l_pba = PaddedBlockArray.from_symmetric(l_env)
+        # Expand theta to match the plan's output block structure so that
+        # matvec input/output shapes are consistent for Lanczos iteration.
+        theta_pba = pba_expand_blocks(
+            PaddedBlockArray.from_symmetric(theta),
+            plan.output_charges,
+            plan.output_shapes,
+            plan.output_tensor_indices,
+        )
+        wl_pba = PaddedBlockArray.from_symmetric(W_l)
+        wr_pba = PaddedBlockArray.from_symmetric(W_r)
+        r_pba = PaddedBlockArray.from_symmetric(r_env)
+
+        def matvec(v_pba):
+            return effective_ham_matvec_blocks(
+                plan, v_pba, l_pba, wl_pba, wr_pba, r_pba
+            )
+
+        E_blocks, eigvec_pba = lanczos_ground_state_blocks(
+            matvec, theta_pba, max_iter=20
+        )
+
+        # Reference: dense Lanczos on the same problem
+        theta_dense = theta.todense()
+        theta_shape = theta_dense.shape
+        chi_l, d_l, d_r, chi_r = theta_shape
+        L_arr = l_env.todense()
+        R_arr = r_env.todense()
+        W_l_arr = W_l.todense()
+        W_r_arr = W_r.todense()
+
+        def ref_matvec(v):
+            return _effective_hamiltonian_matvec(
+                v, theta_shape, L_arr, W_l_arr, W_r_arr, R_arr
+            )
+
+        E_ref, _ = lanczos_ground_state_dense(
+            ref_matvec, theta_dense.ravel(), max_iter=20
+        )
+
+        # Both should converge to the same energy
+        np.testing.assert_allclose(float(E_blocks), float(E_ref), atol=1e-8)
+
+        # Verify eigenvector is an approximate eigenvector
+        Hv = matvec(eigvec_pba)
+        from tenax.algorithms._padded_block_array import pba_inner, pba_norm
+
+        rayleigh = pba_inner(eigvec_pba, Hv).real
+        norm_v = pba_norm(eigvec_pba)
+        # Rayleigh quotient should be close to eigenvalue
+        np.testing.assert_allclose(
+            float(rayleigh) / float(norm_v) ** 2,
+            float(E_blocks),
+            atol=1e-8,
+        )
+
+    def test_lanczos_larger_bond_dim(self):
+        """Block-sparse Lanczos with chi=8 for more block diversity."""
+        L = 6
+        chi = 8
+        mps_tensors, mpo_tensors, left_envs, right_envs = (
+            _build_dmrg_env_tensors_symmetric(L=L, chi=chi, seed=99)
+        )
+
+        from tenax.algorithms._padded_block_array import pba_expand_blocks
+        from tenax.contraction.contractor import contract
+
+        site_l = 2
+        site_r = 3
+        l_env = left_envs[site_l]
+        r_env = right_envs[site_r + 1]
+        W_l = mpo_tensors[site_l]
+        W_r = mpo_tensors[site_r]
+
+        theta = contract(mps_tensors[site_l], mps_tensors[site_r])
+
+        subs = "abc,apqd,bpse,eqtf,dfg->cstg"
+        plan = MultiContractionPlan.build(
+            [l_env, theta, W_l, W_r, r_env],
+            subs,
+            output_indices=theta.indices,
+        )
+
+        l_pba = PaddedBlockArray.from_symmetric(l_env)
+        theta_pba = pba_expand_blocks(
+            PaddedBlockArray.from_symmetric(theta),
+            plan.output_charges,
+            plan.output_shapes,
+            plan.output_tensor_indices,
+        )
+        wl_pba = PaddedBlockArray.from_symmetric(W_l)
+        wr_pba = PaddedBlockArray.from_symmetric(W_r)
+        r_pba = PaddedBlockArray.from_symmetric(r_env)
+
+        def matvec(v_pba):
+            return effective_ham_matvec_blocks(
+                plan, v_pba, l_pba, wl_pba, wr_pba, r_pba
+            )
+
+        E_blocks, _ = lanczos_ground_state_blocks(matvec, theta_pba, max_iter=20)
+
+        # Reference: dense Lanczos
+        theta_dense = theta.todense()
+        theta_shape = theta_dense.shape
+        L_arr = l_env.todense()
+        R_arr = r_env.todense()
+
+        def ref_matvec(v):
+            return _effective_hamiltonian_matvec(
+                v, theta_shape, L_arr, W_l.todense(), W_r.todense(), R_arr
+            )
+
+        E_ref, _ = lanczos_ground_state_dense(
+            ref_matvec, theta_dense.ravel(), max_iter=20
+        )
+
+        np.testing.assert_allclose(float(E_blocks), float(E_ref), atol=1e-8)
+
+    def test_lanczos_jit_compatible(self):
+        """Block-sparse Lanczos works inside jax.jit."""
+        L = 4
+        chi = 4
+        mps_tensors, mpo_tensors, left_envs, right_envs = (
+            _build_dmrg_env_tensors_symmetric(L=L, chi=chi)
+        )
+
+        from tenax.algorithms._padded_block_array import pba_expand_blocks
+        from tenax.contraction.contractor import contract
+
+        l_env = left_envs[1]
+        r_env = right_envs[3]
+        W_l = mpo_tensors[1]
+        W_r = mpo_tensors[2]
+        theta = contract(mps_tensors[1], mps_tensors[2])
+
+        subs = "abc,apqd,bpse,eqtf,dfg->cstg"
+        plan = MultiContractionPlan.build(
+            [l_env, theta, W_l, W_r, r_env],
+            subs,
+            output_indices=theta.indices,
+        )
+
+        l_pba = PaddedBlockArray.from_symmetric(l_env)
+        theta_pba = pba_expand_blocks(
+            PaddedBlockArray.from_symmetric(theta),
+            plan.output_charges,
+            plan.output_shapes,
+            plan.output_tensor_indices,
+        )
+        wl_pba = PaddedBlockArray.from_symmetric(W_l)
+        wr_pba = PaddedBlockArray.from_symmetric(W_r)
+        r_pba = PaddedBlockArray.from_symmetric(r_env)
+
+        def matvec(v_pba):
+            return effective_ham_matvec_blocks(
+                plan, v_pba, l_pba, wl_pba, wr_pba, r_pba
+            )
+
+        @jax.jit
+        def jit_lanczos(v0):
+            return lanczos_ground_state_blocks(matvec, v0, max_iter=10)
+
+        E, eigvec = jit_lanczos(theta_pba)
+        # Should return a scalar energy and a PBA
+        assert E.shape == ()
+        assert eigvec.data.shape == theta_pba.data.shape

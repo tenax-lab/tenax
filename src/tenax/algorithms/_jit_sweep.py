@@ -10,6 +10,8 @@ Public API:
     effective_ham_matvec_dense  -- 2-site effective Hamiltonian matvec
     lanczos_ground_state_dense -- JIT-compatible Lanczos eigensolver
     jit_dmrg_sweep_dense       -- full DMRG sweep via lax.scan
+    effective_ham_matvec_blocks -- block-sparse effective Hamiltonian matvec
+    lanczos_ground_state_blocks -- block-sparse Lanczos eigensolver
 """
 
 from __future__ import annotations
@@ -234,6 +236,177 @@ def lanczos_ground_state_dense(
     eigenvector = eigenvector / (jnp.linalg.norm(eigenvector) + 1e-15)
 
     return eigvals[0], eigenvector
+
+
+# ------------------------------------------------------------------ #
+# Block-sparse effective Hamiltonian matvec (PBA path)                 #
+# ------------------------------------------------------------------ #
+
+
+def effective_ham_matvec_blocks(
+    plan,
+    theta_pba,
+    L_env_pba,
+    W_l_pba,
+    W_r_pba,
+    R_env_pba,
+):
+    """Apply effective Hamiltonian to theta in block-sparse form.
+
+    Contracts: result[c,s,t,g] = L[a,b,c] * theta[a,p,q,d] * W_l[b,p,s,e]
+                                 * W_r[e,q,t,f] * R[d,f,g]
+
+    The plan is a :class:`MultiContractionPlan` pre-built from
+    SymmetricTensors at sweep initialization.  Only the PBA data arrays
+    are traced by JAX.
+
+    Args:
+        plan:        MultiContractionPlan for subscript
+                     ``"abc,apqd,bpse,eqtf,dfg->cstg"``.
+        theta_pba:   Two-site wavefunction as PaddedBlockArray.
+        L_env_pba:   Left environment as PaddedBlockArray.
+        W_l_pba:     Left MPO site as PaddedBlockArray.
+        W_r_pba:     Right MPO site as PaddedBlockArray.
+        R_env_pba:   Right environment as PaddedBlockArray.
+
+    Returns:
+        PaddedBlockArray with the same block structure as *theta_pba*.
+    """
+    from tenax.algorithms._padded_block_array import contract_multi_padded
+
+    return contract_multi_padded(
+        plan, [L_env_pba, theta_pba, W_l_pba, W_r_pba, R_env_pba]
+    )
+
+
+# ------------------------------------------------------------------ #
+# Lanczos eigensolver (block-sparse, fully JIT-compatible)             #
+# ------------------------------------------------------------------ #
+
+
+def lanczos_ground_state_blocks(
+    matvec: Callable,
+    v0,
+    max_iter: int,
+) -> tuple:
+    """JIT-compatible Lanczos eigensolver for PaddedBlockArray vectors.
+
+    Mirrors :func:`lanczos_ground_state_dense` but operates on
+    PaddedBlockArrays.  The Krylov basis is stored as a single 4D array
+    ``(max_iter, num_blocks, M_max, N_max)`` where each ``[i, :, :, :]``
+    slice is one basis vector's PBA data.
+
+    All operations are JIT-compatible: ``jax.lax.fori_loop`` for the
+    main iteration, ``jax.lax.scan`` for full reorthogonalization.
+
+    Args:
+        matvec:   Function that applies the effective Hamiltonian.
+                  Takes a PaddedBlockArray, returns one with the same
+                  structure.
+        v0:       Initial vector as PaddedBlockArray.
+        max_iter: Number of Lanczos steps (static, not data-dependent).
+
+    Returns:
+        ``(eigenvalue, eigenvector)`` where *eigenvalue* is a scalar
+        JAX array and *eigenvector* is a PaddedBlockArray.
+    """
+    from tenax.algorithms._padded_block_array import (
+        PaddedBlockArray,
+        pba_norm,
+    )
+
+    # Extract static metadata from v0
+    block_charges = v0.block_charges
+    block_shapes = v0.block_shapes
+    indices = v0.indices
+    symmetry = v0.symmetry
+    mask_jnp = v0.mask  # (num_blocks, M_max, N_max) bool array
+
+    # Normalize v0
+    v0_norm = pba_norm(v0)
+    v0_data = v0.data / (v0_norm + 1e-15)
+
+    # Pre-allocate Krylov basis as a 4D array: (max_iter, num_blocks, M_max, N_max)
+    num_blocks, M_max, N_max = v0.data.shape
+    basis = jnp.zeros((max_iter, num_blocks, M_max, N_max), dtype=v0.data.dtype)
+    basis = basis.at[0].set(v0_data)
+
+    # Tridiagonal coefficients
+    alphas = jnp.zeros(max_iter, dtype=v0.data.dtype)
+    betas = jnp.zeros(max_iter, dtype=v0.data.dtype)
+
+    def _make_pba(data):
+        return PaddedBlockArray(
+            data=data,
+            block_charges=block_charges,
+            block_shapes=block_shapes,
+            indices=indices,
+            symmetry=symmetry,
+        )
+
+    def body(step, state):
+        basis, alphas, betas = state
+        v_data = basis[step]
+
+        # Apply matvec: need to wrap data as PBA, then extract data
+        v_pba = _make_pba(v_data)
+        w_pba = matvec(v_pba)
+        w_data = w_pba.data
+
+        # Diagonal element: alpha = <v, w> (real part)
+        alpha = jnp.sum(jnp.conj(v_data) * w_data * mask_jnp).real
+        alphas = alphas.at[step].set(alpha)
+
+        # Subtract projection onto current basis vector
+        w_data = w_data - alpha * v_data
+
+        # Subtract projection onto previous basis vector
+        v_prev = jnp.where(step > 0, basis[step - 1], jnp.zeros_like(v_data))
+        beta_prev = jnp.where(step > 0, betas[step - 1], 0.0)
+        w_data = w_data - beta_prev * v_prev
+
+        # Full reorthogonalization via scan (prevents ghost eigenvalues)
+        def reorth_step(w, q):
+            # q is a basis vector: (num_blocks, M_max, N_max)
+            overlap = jnp.sum(jnp.conj(q) * w * mask_jnp)
+            return w - overlap * q, None
+
+        w_data, _ = jax.lax.scan(reorth_step, w_data, basis)
+
+        # Off-diagonal element: beta = ||w||
+        beta = jnp.sqrt(jnp.sum(jnp.conj(w_data) * w_data * mask_jnp).real)
+        betas = betas.at[step].set(beta)
+
+        # Normalize: new basis vector (zero if beta ~ 0)
+        v_new = jnp.where(beta > 1e-15, w_data / beta, jnp.zeros_like(w_data))
+        basis = jnp.where(
+            step + 1 < max_iter,
+            basis.at[step + 1].set(v_new),
+            basis,
+        )
+        return basis, alphas, betas
+
+    basis, alphas, betas = jax.lax.fori_loop(0, max_iter, body, (basis, alphas, betas))
+
+    # Solve the tridiagonal Ritz eigenproblem
+    T = jnp.diag(alphas) + jnp.diag(betas[:-1], k=1) + jnp.diag(betas[:-1], k=-1)
+    eigvals, eigvecs = jnp.linalg.eigh(T)
+
+    # Ground state: smallest eigenvalue (eigh returns sorted)
+    coefs = eigvecs[:, 0]
+
+    # Reconstruct eigenvector: linear combination of basis vectors
+    # coefs: (max_iter,) ; basis: (max_iter, num_blocks, M_max, N_max)
+    eigvec_data = jnp.einsum("i,ijkl->jkl", coefs, basis)
+
+    # Normalize
+    eigvec_norm = jnp.sqrt(jnp.sum(jnp.conj(eigvec_data) * eigvec_data * mask_jnp).real)
+    eigvec_data = eigvec_data / (eigvec_norm + 1e-15)
+
+    # Zero out padding (safety measure)
+    eigvec_data = jnp.where(mask_jnp, eigvec_data, 0.0)
+
+    return eigvals[0], _make_pba(eigvec_data)
 
 
 # ------------------------------------------------------------------ #
