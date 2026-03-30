@@ -21,6 +21,12 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor
 from tenax.network.network import TensorNetwork
 
 
+@pytest.fixture(params=[True, False], ids=["numpy", "jax"])
+def numpy_blockwise(request):
+    """Parametrize symmetric tests to run with both numpy and JAX backends."""
+    return request.param
+
+
 def _densify_tensor_network(tn: TensorNetwork) -> TensorNetwork:
     """Convert all tensors in a TensorNetwork to DenseTensor."""
     result = TensorNetwork()
@@ -345,17 +351,22 @@ class TestBuildRandomSymmetricMPS:
 class TestSymmetricDMRGParity:
     """Symmetric MPS gives compatible DMRG energies to dense MPS (Phase E parity)."""
 
-    def test_symmetric_mps_dmrg_runs(self):
+    def test_symmetric_mps_dmrg_runs(self, numpy_blockwise):
         """DMRG should run without error on a symmetric MPS initial state."""
         L = 4
         mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
         mps = build_random_symmetric_mps(L, bond_dim=4, seed=0)
-        config = DMRGConfig(max_bond_dim=4, num_sweeps=4, lanczos_max_iter=10)
+        config = DMRGConfig(
+            max_bond_dim=4,
+            num_sweeps=4,
+            lanczos_max_iter=10,
+            numpy_blockwise=numpy_blockwise,
+        )
         result = dmrg(mpo, mps, config)
         assert isinstance(result, DMRGResult)
         assert np.isfinite(result.energy)
 
-    def test_symmetric_vs_dense_parity(self):
+    def test_symmetric_vs_dense_parity(self, numpy_blockwise):
         """Energies from symmetric and dense initial MPS should be close after enough sweeps.
 
         Both start from random initial states. Dense path uses densified MPO.
@@ -365,13 +376,19 @@ class TestSymmetricDMRGParity:
         Jz, Jxy = 1.0, 1.0
         mpo_sym = build_mpo_heisenberg(L, Jz=Jz, Jxy=Jxy)
         mpo_dense = _densify_tensor_network(mpo_sym)
-        config = DMRGConfig(max_bond_dim=4, num_sweeps=8, lanczos_max_iter=20)
+        config_sym = DMRGConfig(
+            max_bond_dim=4,
+            num_sweeps=8,
+            lanczos_max_iter=20,
+            numpy_blockwise=numpy_blockwise,
+        )
+        config_dense = DMRGConfig(max_bond_dim=4, num_sweeps=8, lanczos_max_iter=20)
 
         mps_dense = build_random_mps(L, physical_dim=2, bond_dim=4, seed=1)
-        result_dense = dmrg(mpo_dense, mps_dense, config)
+        result_dense = dmrg(mpo_dense, mps_dense, config_dense)
 
         mps_sym = build_random_symmetric_mps(L, bond_dim=4, seed=1)
-        result_sym = dmrg(mpo_sym, mps_sym, config)
+        result_sym = dmrg(mpo_sym, mps_sym, config_sym)
 
         # Both should converge to the same ground state energy within 1e-1
         assert np.isfinite(result_sym.energy)
@@ -402,18 +419,23 @@ def _build_symmetric_heisenberg_mpo(L: int, Jz: float = 1.0, Jxy: float = 1.0):
 class TestSymmetricBlockSparseDMRG:
     """Tests for the fully block-sparse symmetric DMRG backend."""
 
-    def test_symmetric_block_sparse_dmrg_runs(self):
+    def test_symmetric_block_sparse_dmrg_runs(self, numpy_blockwise):
         """Block-sparse DMRG with symmetric MPS + symmetric MPO should run."""
         L = 4
         mpo = _build_symmetric_heisenberg_mpo(L)
         mps = build_random_symmetric_mps(L, bond_dim=4, seed=42)
-        config = DMRGConfig(max_bond_dim=8, num_sweeps=4, lanczos_max_iter=20)
+        config = DMRGConfig(
+            max_bond_dim=8,
+            num_sweeps=4,
+            lanczos_max_iter=20,
+            numpy_blockwise=numpy_blockwise,
+        )
         result = dmrg(mpo, mps, config)
         assert isinstance(result, DMRGResult)
         assert np.isfinite(result.energy)
         assert result.energy < 0.0
 
-    def test_symmetric_block_sparse_energy_matches_exact(self):
+    def test_symmetric_block_sparse_energy_matches_exact(self, numpy_blockwise):
         """Block-sparse DMRG energy should match ED within 1e-6 for L=4."""
         L = 4
         Jz, Jxy = 1.0, 1.0
@@ -428,6 +450,7 @@ class TestSymmetricBlockSparseDMRG:
             num_sweeps=10,
             lanczos_max_iter=30,
             convergence_tol=1e-10,
+            numpy_blockwise=numpy_blockwise,
         )
         result = dmrg(mpo, mps, config)
 
@@ -437,12 +460,17 @@ class TestSymmetricBlockSparseDMRG:
             f"ED {e_exact:.8f} by {abs(result.energy - e_exact):.4e}"
         )
 
-    def test_symmetric_block_sparse_output_types(self):
+    def test_symmetric_block_sparse_output_types(self, numpy_blockwise):
         """Output MPS sites should be SymmetricTensor when running block-sparse."""
         L = 4
         mpo = _build_symmetric_heisenberg_mpo(L)
         mps = build_random_symmetric_mps(L, bond_dim=4, seed=0)
-        config = DMRGConfig(max_bond_dim=8, num_sweeps=2, lanczos_max_iter=10)
+        config = DMRGConfig(
+            max_bond_dim=8,
+            num_sweeps=2,
+            lanczos_max_iter=10,
+            numpy_blockwise=numpy_blockwise,
+        )
         result = dmrg(mpo, mps, config)
 
         for i in range(L):
@@ -451,7 +479,7 @@ class TestSymmetricBlockSparseDMRG:
                 f"Site {i} is {type(t).__name__}, expected SymmetricTensor"
             )
 
-    def test_symmetric_block_sparse_no_todense_leak(self, monkeypatch):
+    def test_symmetric_block_sparse_no_todense_leak(self, monkeypatch, numpy_blockwise):
         """Contamination guard: block-sparse DMRG must NOT call todense().
 
         Monkeypatch SymmetricTensor.todense to raise, then run full DMRG.
@@ -468,7 +496,12 @@ class TestSymmetricBlockSparseDMRG:
         L = 4
         mpo = _build_symmetric_heisenberg_mpo(L)
         mps = build_random_symmetric_mps(L, bond_dim=4, seed=0)
-        config = DMRGConfig(max_bond_dim=8, num_sweeps=2, lanczos_max_iter=10)
+        config = DMRGConfig(
+            max_bond_dim=8,
+            num_sweeps=2,
+            lanczos_max_iter=10,
+            numpy_blockwise=numpy_blockwise,
+        )
 
         # This must not raise RuntimeError
         result = dmrg(mpo, mps, config)
@@ -483,7 +516,7 @@ class TestSymmetricBlockSparseDMRG:
         with pytest.raises(TypeError, match="uniform tensor types"):
             dmrg(mpo, mps, config)
 
-    def test_symmetric_block_sparse_one_site_dmrg(self):
+    def test_symmetric_block_sparse_one_site_dmrg(self, numpy_blockwise):
         """1-site block-sparse DMRG should run and produce negative energy.
 
         Note: 1-site DMRG cannot grow bond dimension or change block structure,
@@ -500,6 +533,7 @@ class TestSymmetricBlockSparseDMRG:
             lanczos_max_iter=20,
             convergence_tol=1e-10,
             two_site=False,
+            numpy_blockwise=numpy_blockwise,
         )
         result = dmrg(mpo, mps, config)
 
@@ -628,7 +662,7 @@ def _ed_ground_state_in_sector(
 class TestTargetSector:
     """Tests for target_charge sector enforcement in symmetric DMRG."""
 
-    def test_target_charge_sz0(self):
+    def test_target_charge_sz0(self, numpy_blockwise):
         """DMRG with target_charge=0 should match ED in Sz=0 sector."""
         L = 4
         e_exact = _ed_ground_state_in_sector(L, Sz_target=0)
@@ -641,6 +675,7 @@ class TestTargetSector:
             lanczos_max_iter=30,
             convergence_tol=1e-10,
             target_charge=0,
+            numpy_blockwise=numpy_blockwise,
         )
         result = dmrg(mpo, mps, config)
 
@@ -650,7 +685,7 @@ class TestTargetSector:
             f"ED {e_exact:.8f} by {abs(result.energy - e_exact):.4e}"
         )
 
-    def test_target_charge_sz1(self):
+    def test_target_charge_sz1(self, numpy_blockwise):
         """DMRG with target_charge=2 (2*Sz=2) should match ED in Sz=1 sector."""
         L = 4
         e_exact = _ed_ground_state_in_sector(L, Sz_target=1)
@@ -663,6 +698,7 @@ class TestTargetSector:
             lanczos_max_iter=30,
             convergence_tol=1e-10,
             target_charge=2,
+            numpy_blockwise=numpy_blockwise,
         )
         result = dmrg(mpo, mps, config)
 
