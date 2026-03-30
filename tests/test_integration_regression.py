@@ -30,12 +30,12 @@ from tenax.algorithms.auto_mpo import build_auto_mpo
 from tenax.algorithms.dmrg import (
     DMRGConfig,
     build_random_mps,
-    build_random_symmetric_mps,
     dmrg,
 )
 from tenax.algorithms.hotrg import HOTRGConfig, _hotrg_step_horizontal, hotrg
 from tenax.algorithms.trg import TRGConfig, _trg_step, compute_ising_tensor, trg
 from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.mps import FiniteMPS
 from tenax.core.symmetry import FermionicU1, U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 from tenax.network.network import TensorNetwork
@@ -91,7 +91,15 @@ class TestBlockPreservation:
         """U(1) symmetric DMRG: every MPS site retains blocks after sweeps."""
         L = 6
         mpo = _build_symmetric_heisenberg_mpo(L)
-        mps = build_random_symmetric_mps(L, bond_dim=4, seed=42)
+        mps = FiniteMPS.random(
+            L,
+            d=2,
+            chi=4,
+            key=jax.random.PRNGKey(42),
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
         config = DMRGConfig(max_bond_dim=8, num_sweeps=4, lanczos_max_iter=20)
         result = dmrg(mpo, mps, config)
 
@@ -197,7 +205,15 @@ class TestSymmetricMatchesDense:
 
         # Symmetric path
         mpo_sym = _build_symmetric_heisenberg_mpo(L)
-        mps_sym = build_random_symmetric_mps(L, bond_dim=4, seed=7)
+        mps_sym = FiniteMPS.random(
+            L,
+            d=2,
+            chi=4,
+            key=jax.random.PRNGKey(7),
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
         config = DMRGConfig(
             max_bond_dim=8,
             num_sweeps=6,
@@ -208,7 +224,10 @@ class TestSymmetricMatchesDense:
 
         # Dense path
         mpo_dense = _densify_tensor_network(mpo_sym)
-        mps_dense = _densify_tensor_network(mps_sym)
+        mps_dense = TensorNetwork()
+        for i in range(L):
+            t = mps_sym.get_tensor(i)
+            mps_dense.add_node(i, DenseTensor(t.todense(), t.indices))
         result_dense = dmrg(mpo_dense, mps_dense, config)
 
         np.testing.assert_allclose(
