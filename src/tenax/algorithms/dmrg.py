@@ -1703,6 +1703,254 @@ def _one_site_update_symmetric(
     return site_opt, energy
 
 
+# ------------------------------------------------------------------ #
+# NumPy-only symmetric DMRG updates (no JAX in inner loop)            #
+# ------------------------------------------------------------------ #
+
+
+def _scale_bond_axis_ba(ba: BlockArray, bond_label: str, s: np.ndarray) -> BlockArray:
+    """Scale BlockArray along its bond axis by singular values.
+
+    Mirrors ``_scale_bond_axis_symmetric`` but operates on BlockArray
+    with numpy singular values. Used after SVD to absorb singular values
+    into A or B for canonical form.
+    """
+    from tenax.algorithms._block_array import BlockArray as _BA
+
+    bond_axis = None
+    for i, idx in enumerate(ba.indices):
+        if idx.label == bond_label:
+            bond_axis = i
+            break
+    if bond_axis is None:
+        return ba
+
+    bond_idx = ba.indices[bond_axis]
+    new_blocks = {}
+    for key, block in ba.blocks.items():
+        charge_val = key[bond_axis]
+        positions = np.where(bond_idx.charges == charge_val)[0]
+        block_size = block.shape[bond_axis]
+        scale_slice = s[positions[:block_size]]
+        shape = [1] * block.ndim
+        shape[bond_axis] = block_size
+        new_blocks[key] = block * scale_slice.reshape(shape)
+    return _BA(blocks=new_blocks, indices=ba.indices)
+
+
+def _svd_and_truncate_site_np(
+    theta_ba: BlockArray,
+    site: int,
+    config: DMRGConfig,
+    sweep_right: bool = True,
+) -> tuple[BlockArray, np.ndarray, BlockArray, float]:
+    """SVD of 2-site tensor and truncation -- pure NumPy path.
+
+    Same logic as ``_svd_and_truncate_site`` but operates on BlockArray
+    and uses ``_truncated_svd_symmetric_np`` for the decomposition.
+
+    Args:
+        theta_ba:    2-site wavefunction as BlockArray.
+        site:        Left site index.
+        config:      DMRGConfig.
+        sweep_right: If True, left site gets orthogonality center (A-form);
+                     if False, right site gets it (B-form).
+
+    Returns:
+        (A_ba, singular_values, B_ba, truncation_error) -- all numpy.
+    """
+    from tenax.algorithms._block_array import ba_to_symmetric
+    from tenax.linalg import _truncated_svd_symmetric_np
+
+    labels = [idx.label for idx in theta_ba.indices]
+
+    # Find physical and virtual labels
+    if site > 0:
+        left_virt = f"v{site - 1}_{site}"
+    else:
+        left_virt = "v_-1_0"
+    right_virt = f"v{site + 1}_{site + 2}"
+    left_phys = f"p{site}"
+    right_phys = f"p{site + 1}"
+
+    # Build actual left/right label splits based on what's available
+    left_candidates = {left_virt, left_phys}
+    right_candidates = {right_virt, right_phys}
+    left_labels = [lbl for lbl in labels if lbl in left_candidates]
+    right_labels = [lbl for lbl in labels if lbl in right_candidates]
+
+    if not left_labels or not right_labels:
+        n = len(labels)
+        left_labels = list(labels[: n // 2])
+        right_labels = list(labels[n // 2 :])
+
+    bond_label = f"v{site}_{site + 1}"
+
+    # Convert to SymmetricTensor for SVD (needs full index metadata)
+    theta_sym = ba_to_symmetric(theta_ba)
+
+    # SVD via numpy path -- returns (U_ba, s_final, Vh_ba, s_full)
+    A_ba, s, B_ba, s_full = _truncated_svd_symmetric_np(
+        theta_sym,
+        left_labels=left_labels,
+        right_labels=right_labels,
+        max_singular_values=config.max_bond_dim,
+        max_truncation_err=config.svd_trunc_err,
+        new_bond_label=bond_label,
+        normalize=False,
+    )
+
+    # Compute truncation error from the full singular-value spectrum
+    n_keep = len(s)
+    if len(s_full) > n_keep:
+        total_sq = np.sum(s_full**2)
+        trunc_sq = np.sum(s_full[n_keep:] ** 2)
+        trunc_err = float(np.sqrt(trunc_sq / (total_sq + 1e-15)))
+    else:
+        trunc_err = 0.0
+
+    # Absorb singular values into the tensor moving away from the
+    # orthogonality center so the MPS stays in canonical form.
+    if sweep_right:
+        B_ba = _scale_bond_axis_ba(B_ba, bond_label, s)
+    else:
+        A_ba = _scale_bond_axis_ba(A_ba, bond_label, s)
+
+    return A_ba, s, B_ba, trunc_err
+
+
+def _two_site_update_symmetric_np(
+    site_l: Tensor,
+    site_r: Tensor,
+    left_env: Tensor,
+    mpo_l: Tensor,
+    mpo_r: Tensor,
+    right_env: Tensor,
+    config: DMRGConfig,
+) -> tuple[Tensor, float]:
+    """Perform 2-site DMRG update using numpy-only inner loop.
+
+    Accepts SymmetricTensor inputs (matching the SweepOps callback
+    signature) and returns SymmetricTensor + float. BlockArray is used
+    internally to avoid JAX overhead in the Lanczos iterations.
+    """
+    from tenax.algorithms._block_array import ba_to_symmetric, symmetric_to_ba
+
+    _assert_symmetric(
+        site_l,
+        site_r,
+        left_env,
+        mpo_l,
+        mpo_r,
+        right_env,
+        context="_two_site_update_symmetric_np",
+    )
+
+    # Contract theta = A[i] * A[i+1]
+    shared = set(site_l.labels()) & set(site_r.labels())
+    if shared:
+        theta = contract(site_l, site_r)
+    else:
+        theta = site_l
+
+    # Shared cache for opt_einsum expressions across Lanczos iterations
+    _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
+
+    # Precompute block plan once
+    _subs = "abc,apqd,bpse,eqtf,dfg->cstg"
+    _plan = _precompute_block_plan([left_env, theta, mpo_l, mpo_r, right_env], _subs)
+
+    # Pre-convert env blocks to NumPy once
+    _env_np = [
+        _to_np_blocks(left_env),
+        None,  # v -- converted fresh each call
+        _to_np_blocks(mpo_l),
+        _to_np_blocks(mpo_r),
+        _to_np_blocks(right_env),
+    ]
+
+    # Convert theta to BlockArray for numpy Lanczos
+    theta_ba = symmetric_to_ba(theta)
+
+    def matvec(v_ba: BlockArray) -> BlockArray:
+        v_sym = ba_to_symmetric(v_ba)
+        return _blockwise_contract(
+            [left_env, v_sym, mpo_l, mpo_r, right_env],
+            _subs,
+            output_indices=v_sym.indices,
+            expr_cache=_cache,
+            block_plan=_plan,
+            np_blocks_cache=_env_np,
+            return_ba=True,
+        )
+
+    energy, theta_opt_ba = _lanczos_solve_np(
+        matvec, theta_ba, config.lanczos_max_iter, config.lanczos_tol
+    )
+
+    return ba_to_symmetric(theta_opt_ba), energy
+
+
+def _one_site_update_symmetric_np(
+    site: Tensor,
+    left_env: Tensor,
+    mpo_site: Tensor,
+    right_env: Tensor,
+    config: DMRGConfig,
+) -> tuple[Tensor, float]:
+    """Perform 1-site DMRG update using numpy-only inner loop.
+
+    Accepts SymmetricTensor inputs (matching the SweepOps callback
+    signature) and returns SymmetricTensor + float. BlockArray is used
+    internally to avoid JAX overhead in the Lanczos iterations.
+    """
+    from tenax.algorithms._block_array import ba_to_symmetric, symmetric_to_ba
+
+    _assert_symmetric(
+        site,
+        left_env,
+        mpo_site,
+        right_env,
+        context="_one_site_update_symmetric_np",
+    )
+
+    # Shared cache for opt_einsum expressions across Lanczos iterations
+    _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
+
+    # Precompute block plan once
+    _subs = "abc,apd,bpxe,def->cxf"
+    _plan = _precompute_block_plan([left_env, site, mpo_site, right_env], _subs)
+
+    # Pre-convert env blocks to NumPy once
+    _env_np = [
+        _to_np_blocks(left_env),
+        None,  # v -- converted fresh each call
+        _to_np_blocks(mpo_site),
+        _to_np_blocks(right_env),
+    ]
+
+    # Convert site to BlockArray for numpy Lanczos
+    site_ba = symmetric_to_ba(site)
+
+    def matvec(v_ba: BlockArray) -> BlockArray:
+        v_sym = ba_to_symmetric(v_ba)
+        return _blockwise_contract(
+            [left_env, v_sym, mpo_site, right_env],
+            _subs,
+            output_indices=v_sym.indices,
+            expr_cache=_cache,
+            block_plan=_plan,
+            np_blocks_cache=_env_np,
+            return_ba=True,
+        )
+
+    energy, site_opt_ba = _lanczos_solve_np(
+        matvec, site_ba, config.lanczos_max_iter, config.lanczos_tol
+    )
+
+    return ba_to_symmetric(site_opt_ba), energy
+
+
 def _symmetric_ops() -> SweepOps:
     """Return the block-sparse symmetric backend callbacks."""
     return SweepOps(
