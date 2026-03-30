@@ -12,6 +12,7 @@ Public API:
     jit_dmrg_sweep_dense       -- full DMRG sweep via lax.scan
     effective_ham_matvec_blocks -- block-sparse effective Hamiltonian matvec
     lanczos_ground_state_blocks -- block-sparse Lanczos eigensolver
+    jit_dmrg_sweep_symmetric   -- block-sparse DMRG sweep with JIT primitives
 """
 
 from __future__ import annotations
@@ -787,3 +788,232 @@ def _jit_sweep_loop(
     mps_final, _, _, energies = jax.lax.fori_loop(0, num_sweeps, sweep_body, init_state)
 
     return energies, mps_final
+
+
+# ------------------------------------------------------------------ #
+# Block-sparse DMRG sweep (symmetric tensors, Python loop + JIT ops) #
+# ------------------------------------------------------------------ #
+
+
+def _build_left_envs_symmetric(mps_tensors, mpo_tensors):
+    """Build all left environments from SymmetricTensors.
+
+    Returns a list of L+1 SymmetricTensor environments where
+    left_envs[0] is the trivial boundary and left_envs[i] contracts
+    sites 0..i-1.
+    """
+    from tenax.algorithms.dmrg import (
+        _build_trivial_left_env_symmetric,
+        _update_left_env_symmetric,
+    )
+
+    L = len(mps_tensors)
+    left_envs = [_build_trivial_left_env_symmetric()]
+    for i in range(L - 1):
+        new_l = _update_left_env_symmetric(
+            left_envs[-1], mps_tensors[i], mpo_tensors[i]
+        )
+        left_envs.append(new_l)
+    # Pad to L+1 entries (left_envs[L-1] is the last we need for 2-site)
+    while len(left_envs) < L + 1:
+        left_envs.append(None)
+    return left_envs
+
+
+def _build_right_envs_symmetric(mps_tensors, mpo_tensors):
+    """Build all right environments from SymmetricTensors.
+
+    Returns a list of L+1 SymmetricTensor environments where
+    right_envs[L] is the trivial boundary and right_envs[i] contracts
+    sites i..L-1.
+    """
+    from tenax.algorithms.dmrg import (
+        _build_trivial_right_env_symmetric,
+        _update_right_env_symmetric,
+    )
+
+    L = len(mps_tensors)
+    right_envs = [None] * (L + 1)
+    right_envs[L] = _build_trivial_right_env_symmetric()
+    for i in range(L - 1, 0, -1):
+        right_envs[i] = _update_right_env_symmetric(
+            right_envs[i + 1], mps_tensors[i], mpo_tensors[i]
+        )
+    return right_envs
+
+
+def _two_site_update_symmetric_jit(
+    i,
+    mps_tensors,
+    mpo_tensors,
+    left_envs,
+    right_envs,
+    chi_max,
+    lanczos_max_iter,
+    direction,
+):
+    """Perform one 2-site DMRG update using block-sparse operations.
+
+    Uses the existing SymmetricTensor Lanczos for the core optimization
+    (which correctly handles heterogeneous block sizes), then SVD +
+    truncation and incremental environment updates.
+
+    The sweep loop is in Python (not lax.scan) because block structures
+    can change after SVD truncation. Individual operations still leverage
+    JAX for the underlying linear algebra.
+
+    Args:
+        i:                Site index (left site of the two-site block).
+        mps_tensors:      List of SymmetricTensor MPS tensors (modified in-place).
+        mpo_tensors:      List of SymmetricTensor MPO tensors.
+        left_envs:        List of SymmetricTensor left environments (modified in-place).
+        right_envs:       List of SymmetricTensor right environments (modified in-place).
+        chi_max:          Maximum bond dimension.
+        lanczos_max_iter: Number of Lanczos iterations.
+        direction:        "left_to_right" or "right_to_left".
+
+    Returns:
+        Energy (float) from this site update.
+    """
+    from tenax.algorithms._tensor_utils import scale_bond_axis
+    from tenax.algorithms.dmrg import (
+        _two_site_update_symmetric,
+        _update_left_env_symmetric,
+        _update_right_env_symmetric,
+    )
+    from tenax.linalg import svd as truncated_svd
+
+    l_env = left_envs[i]
+    r_env = right_envs[i + 2]
+    W_l = mpo_tensors[i]
+    W_r = mpo_tensors[i + 1]
+
+    # --- 1-3. Lanczos optimization using SymmetricTensor path ---
+    # Build a minimal config object for the Lanczos solver
+    from tenax.algorithms.dmrg import DMRGConfig
+
+    _config = DMRGConfig(
+        max_bond_dim=chi_max,
+        lanczos_max_iter=lanczos_max_iter,
+    )
+    theta_opt, energy_val = _two_site_update_symmetric(
+        mps_tensors[i],
+        mps_tensors[i + 1],
+        l_env,
+        W_l,
+        W_r,
+        r_env,
+        _config,
+    )
+    energy = float(energy_val)
+
+    # --- 4-5. SVD + reconstruct new MPS tensors ---
+    labels = theta_opt.labels()
+    left_virt = f"v{i - 1}_{i}" if i > 0 else "v_-1_0"
+    right_virt = f"v{i + 1}_{i + 2}"
+    left_phys = f"p{i}"
+    right_phys = f"p{i + 1}"
+    bond_label = f"v{i}_{i + 1}"
+
+    left_candidates = {left_virt, left_phys}
+    right_candidates = {right_virt, right_phys}
+    left_labels = [lbl for lbl in labels if lbl in left_candidates]
+    right_labels = [lbl for lbl in labels if lbl in right_candidates]
+
+    A, s_vals, B, s_full = truncated_svd(
+        theta_opt,
+        left_labels=left_labels,
+        right_labels=right_labels,
+        new_bond_label=bond_label,
+        max_singular_values=chi_max,
+    )
+
+    # Absorb singular values: in L->R sweep, absorb into B; in R->L, into A
+    if direction == "left_to_right":
+        B = scale_bond_axis(B, bond_label, s_vals)
+    else:
+        A = scale_bond_axis(A, bond_label, s_vals)
+
+    # --- 6-7. Update MPS and environments in-place ---
+    mps_tensors[i] = A
+    mps_tensors[i + 1] = B
+
+    if direction == "left_to_right":
+        left_envs[i + 1] = _update_left_env_symmetric(l_env, A, W_l)
+    else:
+        right_envs[i + 1] = _update_right_env_symmetric(r_env, B, W_r)
+
+    return energy
+
+
+def jit_dmrg_sweep_symmetric(
+    mps_tensors: list,
+    mpo_tensors: list,
+    chi_max: int,
+    num_sweeps: int = 10,
+    lanczos_max_iter: int = 20,
+) -> tuple[list[float], list]:
+    """Run DMRG sweeps on block-sparse tensors using JIT-compiled primitives.
+
+    Each individual operation (env update, Lanczos, SVD) is JIT-compiled
+    and runs on the accelerator. The sweep loop itself is in Python to
+    handle varying block structures across sites.
+
+    Args:
+        mps_tensors: L SymmetricTensor MPS tensors.
+        mpo_tensors: L SymmetricTensor MPO tensors.
+        chi_max:     Maximum bond dimension.
+        num_sweeps:  Number of full sweeps.
+        lanczos_max_iter: Lanczos iterations per site update.
+
+    Returns:
+        energies: List of energies (one per sweep).
+        mps_out:  List of optimized SymmetricTensor MPS tensors.
+    """
+    L = len(mps_tensors)
+
+    # Make mutable copies so we don't modify the caller's lists
+    mps_tensors = list(mps_tensors)
+
+    # Build initial environments from SymmetricTensors
+    left_envs = _build_left_envs_symmetric(mps_tensors, mpo_tensors)
+    right_envs = _build_right_envs_symmetric(mps_tensors, mpo_tensors)
+
+    energies = []
+    for _sweep in range(num_sweeps):
+        # Left-to-right half sweep
+        energy = 0.0
+        for i in range(L - 1):
+            energy = _two_site_update_symmetric_jit(
+                i,
+                mps_tensors,
+                mpo_tensors,
+                left_envs,
+                right_envs,
+                chi_max,
+                lanczos_max_iter,
+                direction="left_to_right",
+            )
+
+        # Rebuild right environments from updated MPS
+        right_envs = _build_right_envs_symmetric(mps_tensors, mpo_tensors)
+
+        # Right-to-left half sweep
+        for i in range(L - 2, -1, -1):
+            energy = _two_site_update_symmetric_jit(
+                i,
+                mps_tensors,
+                mpo_tensors,
+                left_envs,
+                right_envs,
+                chi_max,
+                lanczos_max_iter,
+                direction="right_to_left",
+            )
+
+        # Rebuild left environments from updated MPS for next sweep
+        left_envs = _build_left_envs_symmetric(mps_tensors, mpo_tensors)
+
+        energies.append(energy)
+
+    return energies, mps_tensors

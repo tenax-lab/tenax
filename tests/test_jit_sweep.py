@@ -1127,3 +1127,165 @@ class TestBlockSparseLanczos:
         # Should return a scalar energy and a PBA
         assert E.shape == ()
         assert eigvec.data.shape == theta_pba.data.shape
+
+
+# ------------------------------------------------------------------ #
+# Block-sparse full sweep tests (Task 8e)                              #
+# ------------------------------------------------------------------ #
+
+
+class TestBlockSparseJITSweep:
+    """Test jit_dmrg_sweep_symmetric produces correct energies."""
+
+    def test_symmetric_jit_sweep_matches_python(self):
+        """JIT sweep on U(1) symmetric Heisenberg matches Python sweep."""
+        from tenax.algorithms._jit_sweep import jit_dmrg_sweep_symmetric
+
+        L = 6
+        chi = 8
+        num_sweeps = 4
+
+        mpo_net = _build_symmetric_heisenberg_mpo(L)
+        mps = FiniteMPS.random(
+            L,
+            d=2,
+            chi=chi,
+            key=jax.random.PRNGKey(42),
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
+
+        mps_tensors = [mps.get_tensor(i) for i in range(L)]
+        mpo_tensors = [mpo_net.get_tensor(i) for i in range(L)]
+
+        # Run JIT symmetric sweep
+        energies_jit, mps_out = jit_dmrg_sweep_symmetric(
+            mps_tensors,
+            mpo_tensors,
+            chi_max=chi,
+            num_sweeps=num_sweeps,
+            lanczos_max_iter=20,
+        )
+
+        # Run Python DMRG (accelerator="off") as reference
+        mps2 = FiniteMPS.random(
+            L,
+            d=2,
+            chi=chi,
+            key=jax.random.PRNGKey(42),
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
+        config = DMRGConfig(
+            max_bond_dim=chi,
+            num_sweeps=num_sweeps,
+            two_site=True,
+            lanczos_max_iter=20,
+            verbose=False,
+            accelerator="off",
+        )
+        result_py = dmrg(mpo_net, mps2, config)
+
+        # Both should converge to approximately the same ground state energy.
+        # The algorithms differ slightly (Lanczos implementation, env rebuild
+        # strategy), so we allow a tolerance of 1e-3 for the final energy.
+        np.testing.assert_allclose(
+            energies_jit[-1],
+            result_py.energy,
+            atol=1e-3,
+            err_msg=(
+                f"JIT sweep E={energies_jit[-1]:.8f} vs "
+                f"Python DMRG E={result_py.energy:.8f}"
+            ),
+        )
+
+        # Verify energy is decreasing across sweeps
+        for i in range(1, len(energies_jit)):
+            assert energies_jit[i] <= energies_jit[i - 1] + 1e-6, (
+                f"Energy not monotonically decreasing: "
+                f"sweep {i - 1}={energies_jit[i - 1]:.8f}, "
+                f"sweep {i}={energies_jit[i]:.8f}"
+            )
+
+        # Output MPS tensors should all be SymmetricTensors
+        from tenax.core.tensor import SymmetricTensor
+
+        for t in mps_out:
+            assert isinstance(t, SymmetricTensor)
+
+    def test_symmetric_jit_sweep_small_exact(self):
+        """JIT sweep on L=4 produces correct ground state energy."""
+        from tenax.algorithms._jit_sweep import jit_dmrg_sweep_symmetric
+
+        L = 4
+        chi = 8  # exact for L=4
+        num_sweeps = 6
+
+        mpo_net = _build_symmetric_heisenberg_mpo(L)
+        mps = FiniteMPS.random(
+            L,
+            d=2,
+            chi=chi,
+            key=jax.random.PRNGKey(123),
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
+
+        mps_tensors = [mps.get_tensor(i) for i in range(L)]
+        mpo_tensors = [mpo_net.get_tensor(i) for i in range(L)]
+
+        energies, _ = jit_dmrg_sweep_symmetric(
+            mps_tensors,
+            mpo_tensors,
+            chi_max=chi,
+            num_sweeps=num_sweeps,
+            lanczos_max_iter=20,
+        )
+
+        # Exact ground state energy of Heisenberg L=4: E = -1.61603...
+        E_exact = -1.6160254037844388
+        np.testing.assert_allclose(
+            energies[-1],
+            E_exact,
+            atol=1e-4,
+            err_msg=(f"JIT sweep E={energies[-1]:.8f} vs exact E={E_exact:.8f}"),
+        )
+
+    def test_symmetric_jit_dispatch_via_dmrg(self):
+        """dmrg() with accelerator='jit' dispatches to the symmetric JIT path."""
+        L = 4
+        chi = 6
+        num_sweeps = 3
+
+        mpo_net = _build_symmetric_heisenberg_mpo(L)
+        mps = FiniteMPS.random(
+            L,
+            d=2,
+            chi=chi,
+            key=jax.random.PRNGKey(7),
+            symmetric=True,
+            symmetry=U1Symmetry(),
+            target_charge=0,
+        )
+
+        config = DMRGConfig(
+            max_bond_dim=chi,
+            num_sweeps=num_sweeps,
+            two_site=True,
+            lanczos_max_iter=20,
+            verbose=False,
+            accelerator="jit",
+        )
+        result = dmrg(mpo_net, mps, config)
+
+        # Should produce a reasonable energy (below zero for Heisenberg)
+        assert result.energy < 0.0, f"Energy should be negative, got {result.energy}"
+
+        # Output MPS should be FiniteMPS with symmetric tensors
+        from tenax.core.tensor import SymmetricTensor
+
+        for t in result.mps.tensors:
+            assert isinstance(t, SymmetricTensor)

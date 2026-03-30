@@ -296,6 +296,31 @@ def dmrg(
             truncation_errors=[],
             converged=converged,
         )
+    if use_jit and config.two_site and use_symmetric:
+        from tenax.algorithms._jit_sweep import jit_dmrg_sweep_symmetric
+
+        energies, mps_out = jit_dmrg_sweep_symmetric(
+            list(mps_tensors),
+            list(mpo_tensors),
+            chi_max=config.max_bond_dim,
+            num_sweeps=config.num_sweeps,
+            lanczos_max_iter=config.lanczos_max_iter,
+        )
+
+        result_mps = FiniteMPS.from_tensors(mps_out)
+
+        converged = (
+            len(energies) >= 2
+            and abs(energies[-1] - energies[-2]) < config.convergence_tol
+        )
+        return DMRGResult(
+            energy=energies[-1] if energies else 0.0,
+            energies_per_sweep=energies,
+            mps=result_mps,
+            truncation_errors=[],
+            converged=converged,
+        )
+
     # (If use_jit is True but conditions not met, fall through silently
     #  to the Python sweep loop below.)
 
