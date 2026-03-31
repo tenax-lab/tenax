@@ -38,7 +38,7 @@ def _extract_result(algorithm: str, raw: Any) -> dict:
     if raw is None:
         return {}
     algo = algorithm.lower()
-    if algo == "dmrg":
+    if algo in ("dmrg", "dmrg_sharded"):
         return {
             "energy": float(raw.energy),
             "converged": bool(raw.converged),
