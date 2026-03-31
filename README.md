@@ -515,4 +515,4 @@ The generated HTML is in `docs/_build/html/`.
 
 ## License
 
-MIT
+Apache 2.0
