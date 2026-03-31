@@ -106,6 +106,9 @@ class DMRGConfig:
                             ``"jit"`` — force JIT-compiled ``lax.scan`` sweep
                             (requires dense tensors; silently falls back for
                             symmetric or 1-site DMRG).
+                            ``"sharded"`` — like ``"jit"`` but shards the bond
+                            dimension across all available devices via GSPMD.
+                            Falls back to ``"jit"`` if only one device is present.
                             ``"off"`` — always use the existing Python sweep loop.
         verbose:            Print energy at each sweep.
     """
@@ -234,9 +237,10 @@ def dmrg(
         )
 
     # --- Accelerator dispatch: JIT-compiled sweep via lax.scan -----------
-    if config.accelerator not in ("auto", "jit", "off"):
+    if config.accelerator not in ("auto", "jit", "sharded", "off"):
         raise ValueError(
-            f"accelerator must be 'auto', 'jit', or 'off', got {config.accelerator!r}"
+            f"accelerator must be 'auto', 'jit', 'sharded', or 'off', "
+            f"got {config.accelerator!r}"
         )
 
     use_jit = False
@@ -247,6 +251,65 @@ def dmrg(
         if device in ("gpu", "tpu"):
             use_jit = True
         elif not use_symmetric:
+            use_jit = True
+
+    if config.accelerator == "sharded" and config.two_site and not use_symmetric:
+        from tenax.algorithms._jit_sweep import jit_dmrg_sweep_dense_sharded
+
+        # Check if all bonds are already at chi_max
+        all_saturated = all(
+            mps_tensors[idx].todense().shape[-1] >= config.max_bond_dim
+            for idx in range(L - 1)
+        )
+
+        if all_saturated:
+            raw_mps = [t.todense() for t in mps_tensors]
+            raw_mpo = [t.todense() for t in mpo_tensors]
+            energies, mps_out_raw = jit_dmrg_sweep_dense_sharded(
+                raw_mps,
+                raw_mpo,
+                chi_max=config.max_bond_dim,
+                num_sweeps=config.num_sweeps,
+                lanczos_max_iter=config.lanczos_max_iter,
+            )
+
+            # Reconstruct DenseTensor wrappers (same as JIT path)
+            sym = U1Symmetry()
+            result_mps_tensors = []
+            for i, orig_t in enumerate(mps_tensors):
+                new_indices = []
+                for leg_idx, orig_idx in enumerate(orig_t.indices):
+                    padded_dim = mps_out_raw[i].shape[leg_idx]
+                    if padded_dim == orig_idx.dim:
+                        new_indices.append(orig_idx)
+                    else:
+                        new_charges = np.zeros(padded_dim, dtype=np.int32)
+                        new_indices.append(
+                            TensorIndex(
+                                sym,
+                                new_charges,
+                                orig_idx.flow,
+                                label=orig_idx.label,
+                            )
+                        )
+                result_mps_tensors.append(
+                    DenseTensor(mps_out_raw[i], tuple(new_indices))
+                )
+            result_mps = FiniteMPS.from_tensors(result_mps_tensors)
+
+            converged = (
+                len(energies) >= 2
+                and abs(energies[-1] - energies[-2]) < config.convergence_tol
+            )
+            return DMRGResult(
+                energy=energies[-1] if energies else 0.0,
+                energies_per_sweep=energies,
+                mps=result_mps,
+                truncation_errors=[],
+                converged=converged,
+            )
+        else:
+            # Needs warmup — fall through to JIT warmup block
             use_jit = True
 
     if use_jit and config.two_site and not use_symmetric:

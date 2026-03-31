@@ -1641,3 +1641,56 @@ class TestShardedSweep:
                     f" vs jit={energies_jit[i]:.8f}"
                 ),
             )
+
+    def test_sharded_dispatch_via_dmrg(self):
+        """accelerator='sharded' produces correct energy via dmrg() entry point."""
+        L = 6
+        chi_max = 8
+        num_sweeps = 6
+
+        mpo_tn = _build_dense_heisenberg(L)
+
+        mps = FiniteMPS.random(L, d=2, chi=chi_max, key=jax.random.PRNGKey(42))
+        config = DMRGConfig(
+            max_bond_dim=chi_max,
+            num_sweeps=num_sweeps,
+            lanczos_max_iter=20,
+            accelerator="sharded",
+        )
+        result = dmrg(mpo_tn, mps, config)
+
+        assert np.isfinite(result.energy)
+        assert result.energy < 0.0
+
+        # Compare with Python path
+        mps2 = FiniteMPS.random(L, d=2, chi=chi_max, key=jax.random.PRNGKey(42))
+        config_py = DMRGConfig(
+            max_bond_dim=chi_max,
+            num_sweeps=num_sweeps,
+            lanczos_max_iter=20,
+            accelerator="off",
+        )
+        result_py = dmrg(mpo_tn, mps2, config_py)
+
+        np.testing.assert_allclose(
+            result.energy,
+            result_py.energy,
+            atol=1e-4,
+            err_msg=(f"Sharded={result.energy:.8f} vs Python={result_py.energy:.8f}"),
+        )
+
+    def test_sharded_fallback_single_device(self):
+        """accelerator='sharded' works even on single device."""
+        L = 4
+        chi_max = 4
+        mpo_tn = _build_dense_heisenberg(L)
+        mps = FiniteMPS.random(L, d=2, chi=chi_max, key=jax.random.PRNGKey(0))
+        config = DMRGConfig(
+            max_bond_dim=chi_max,
+            num_sweeps=3,
+            lanczos_max_iter=10,
+            accelerator="sharded",
+        )
+        result = dmrg(mpo_tn, mps, config)
+        assert np.isfinite(result.energy)
+        assert result.energy < 0.0
