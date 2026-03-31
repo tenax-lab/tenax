@@ -147,6 +147,7 @@ def _optimize_gs_ad_tensor(
         compute_energy_ctm_tensor,
         initialize_ctm_tensor_env,
     )
+    from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
     from tenax.algorithms.ad_utils import _config_to_tuple, ctm_tensor_converge
 
     gate = (
@@ -167,7 +168,10 @@ def _optimize_gs_ad_tensor(
 
     def loss_fn(A_param, env_init_leaves):
         A_norm = A_param * (1.0 / (A_param.norm() + 1e-10))
-        env_leaves = ctm_tensor_converge(A_norm, env_init_leaves, config_tuple)
+        site_tensors = {(0, 0): A_norm}
+        env_leaves = ctm_tensor_converge(
+            site_tensors, env_init_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
+        )
         env = jax.tree.unflatten(env_treedef, env_leaves)
         energy = compute_energy_ctm_tensor(A_norm, env, gate, d_phys)
         return energy, env_leaves
@@ -231,7 +235,9 @@ def _optimize_gs_ad_tensor(
         A = A * (1.0 / (A.norm() + 1e-10))
 
     A_final = best_A * (1.0 / (best_A.norm() + 1e-10))
-    env_leaves = ctm_tensor_converge(A_final, prev_env_leaves, config_tuple)
+    env_leaves = ctm_tensor_converge(
+        {(0, 0): A_final}, prev_env_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
+    )
     env = jax.tree.unflatten(env_treedef, env_leaves)
     E_gs = float(compute_energy_ctm_tensor(A_final, env, gate, d_phys))
     if config.gs_verbose:
@@ -311,7 +317,7 @@ def _optimize_gs_ad_tensor_2site(
 ):
     """AD-based ground state optimization for 2-site Tensor-protocol iPEPS.
 
-    Uses ``ctm_tensor_converge_2site`` with implicit differentiation through
+    Uses ``ctm_tensor_converge`` with implicit differentiation through
     the 2-site Tensor-protocol CTM.
     """
     import optax
@@ -320,7 +326,8 @@ def _optimize_gs_ad_tensor_2site(
         compute_energy_ctm_tensor_2site,
         initialize_ctm_tensor_env,
     )
-    from tenax.algorithms.ad_utils import _config_to_tuple, ctm_tensor_converge_2site
+    from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
+    from tenax.algorithms.ad_utils import _config_to_tuple, ctm_tensor_converge
 
     gate = (
         hamiltonian_gate.todense()
@@ -348,8 +355,9 @@ def _optimize_gs_ad_tensor_2site(
         A_p, B_p = params
         A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
         B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
-        env_leaves = ctm_tensor_converge_2site(
-            A_norm, B_norm, env_init_leaves, config_tuple
+        site_tensors = {(0, 0): A_norm, (1, 0): B_norm}
+        env_leaves = ctm_tensor_converge(
+            site_tensors, env_init_leaves, CHECKERBOARD_NEIGHBORS, config_tuple
         )
         env_A = jax.tree.unflatten(env_treedef, env_leaves[:n_env_leaves])
         env_B = jax.tree.unflatten(env_treedef, env_leaves[n_env_leaves:])

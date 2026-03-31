@@ -20,6 +20,7 @@ from tenax.algorithms._ctm_tensor import (
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
 )
+from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms.ad_utils import (
     _config_to_tuple,
@@ -230,7 +231,9 @@ class TestCTMFixedPointGradient:
 
         def energy_fn(A_in):
             A_norm = A_in * (1.0 / (A_in.norm() + 1e-10))
-            env_leaves = ctm_tensor_converge(A_norm, None, config_tuple)
+            env_leaves = ctm_tensor_converge(
+                {(0, 0): A_norm}, None, SINGLE_SITE_NEIGHBORS, config_tuple
+            )
             import jax
 
             env = jax.tree.unflatten(
@@ -283,7 +286,9 @@ class TestGMRESBackward:
 
         def energy_fn(A_in):
             A_norm = A_in * (1.0 / (A_in.norm() + 1e-10))
-            env_leaves = ctm_tensor_converge(A_norm, None, config_tuple)
+            env_leaves = ctm_tensor_converge(
+                {(0, 0): A_norm}, None, SINGLE_SITE_NEIGHBORS, config_tuple
+            )
             import jax
 
             env = jax.tree.unflatten(
@@ -305,7 +310,9 @@ class TestGMRESBackward:
 
         def energy_fn(A_in):
             A_norm = A_in * (1.0 / (A_in.norm() + 1e-10))
-            env_leaves = ctm_tensor_converge(A_norm, None, config_tuple)
+            env_leaves = ctm_tensor_converge(
+                {(0, 0): A_norm}, None, SINGLE_SITE_NEIGHBORS, config_tuple
+            )
             import jax
 
             env = jax.tree.unflatten(

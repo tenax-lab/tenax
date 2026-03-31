@@ -873,9 +873,6 @@ class TestOptimizeGsAdLogging:
 class TestOptimizeGsAdDenseOnly:
     """Verify optimize_gs_ad 2-site rejects SymmetricTensor inputs."""
 
-    @pytest.mark.xfail(
-        reason="UnexpectedTracerError — JAX tracing side effect in 2-site symmetric AD"
-    )
     def test_symmetric_tensor_2site_runs(self):
         """2-site AD optimization accepts SymmetricTensor inputs."""
         from tenax.core.index import FlowDirection, TensorIndex
