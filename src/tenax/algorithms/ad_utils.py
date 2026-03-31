@@ -353,13 +353,13 @@ def _ctm_tensor_converge_fwd(A, env_init_leaves, config_tuple):
     env_init = _unflatten_env_init(env_init_leaves, A, config.chi)
     env = _ctm_tensor_fixed_point_impl(A, config, env_init=env_init)
     env_leaves = tuple(jax.tree.leaves(env))
-    residuals = (A, env)
+    residuals = (A, env, env_init_leaves)
     return env_leaves, residuals
 
 
 def _ctm_tensor_converge_bwd(config_tuple, residuals, g):
     """Backward pass via implicit differentiation of Tensor CTM fixed point."""
-    A, env = residuals
+    A, env, env_init_leaves = residuals
     config = _config_from_tuple(config_tuple)
 
     A_treedef = jax.tree.structure(A)
@@ -397,8 +397,11 @@ def _ctm_tensor_converge_bwd(config_tuple, residuals, g):
     _, vjp_A_fn = jax.vjp(lambda a: step_fn(a, env_leaves), A)
     dA = vjp_A_fn(lam)[0]
 
-    # Zero gradient for env_init — it's an initialization hint only
-    d_env_init = tuple(jnp.zeros_like(x) for x in env_leaves)
+    # Zero gradient for env_init — match the input pytree structure
+    if env_init_leaves is None:
+        d_env_init = None
+    else:
+        d_env_init = tuple(jnp.zeros_like(x) for x in env_init_leaves)
     return (dA, d_env_init)
 
 
@@ -537,13 +540,13 @@ def _ctm_tensor_converge_2site_fwd(A, B, env_init_leaves, config_tuple):
     )
     env_A, env_B = envs[(0, 0)], envs[(1, 0)]
     out = tuple(jax.tree.leaves(env_A)) + tuple(jax.tree.leaves(env_B))
-    residuals = (A, B, env_A, env_B)
+    residuals = (A, B, env_A, env_B, env_init_leaves)
     return out, residuals
 
 
 def _ctm_tensor_converge_2site_bwd(config_tuple, residuals, g):
     """Backward pass via implicit differentiation of 2-site Tensor CTM."""
-    A, B, env_A, env_B = residuals
+    A, B, env_A, env_B, env_init_leaves = residuals
     config = _config_from_tuple(config_tuple)
 
     A_treedef = jax.tree.structure(A)
@@ -595,8 +598,11 @@ def _ctm_tensor_converge_2site_bwd(config_tuple, residuals, g):
     _, vjp_AB_fn = jax.vjp(lambda a, b: step_fn(a, b, env_leaves), A, B)
     dA, dB = vjp_AB_fn(lam)
 
-    # Zero gradient for env_init
-    d_env_init = tuple(jnp.zeros_like(x) for x in env_leaves)
+    # Zero gradient for env_init — match the input pytree structure
+    if env_init_leaves is None:
+        d_env_init = None
+    else:
+        d_env_init = tuple(jnp.zeros_like(x) for x in env_init_leaves)
     return (dA, dB, d_env_init)
 
 

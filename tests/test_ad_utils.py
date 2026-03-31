@@ -230,7 +230,7 @@ class TestCTMFixedPointGradient:
 
         def energy_fn(A_in):
             A_norm = A_in * (1.0 / (A_in.norm() + 1e-10))
-            env_leaves = ctm_tensor_converge(A_norm, config_tuple)
+            env_leaves = ctm_tensor_converge(A_norm, None, config_tuple)
             import jax
 
             env = jax.tree.unflatten(
@@ -283,7 +283,7 @@ class TestGMRESBackward:
 
         def energy_fn(A_in):
             A_norm = A_in * (1.0 / (A_in.norm() + 1e-10))
-            env_leaves = ctm_tensor_converge(A_norm, config_tuple)
+            env_leaves = ctm_tensor_converge(A_norm, None, config_tuple)
             import jax
 
             env = jax.tree.unflatten(
@@ -305,7 +305,7 @@ class TestGMRESBackward:
 
         def energy_fn(A_in):
             A_norm = A_in * (1.0 / (A_in.norm() + 1e-10))
-            env_leaves = ctm_tensor_converge(A_norm, config_tuple)
+            env_leaves = ctm_tensor_converge(A_norm, None, config_tuple)
             import jax
 
             env = jax.tree.unflatten(

@@ -163,13 +163,14 @@ def _optimize_gs_ad_tensor(
 
     _env_template = initialize_ctm_tensor_env(A, config.ctm.chi)
     env_treedef = jax.tree.structure(_env_template)
+    prev_env_leaves = tuple(jax.tree.leaves(_env_template))
 
-    def loss_fn(A_param):
+    def loss_fn(A_param, env_init_leaves):
         A_norm = A_param * (1.0 / (A_param.norm() + 1e-10))
-        env_leaves = ctm_tensor_converge(A_norm, config_tuple)
+        env_leaves = ctm_tensor_converge(A_norm, env_init_leaves, config_tuple)
         env = jax.tree.unflatten(env_treedef, env_leaves)
         energy = compute_energy_ctm_tensor(A_norm, env, gate, d_phys)
-        return energy
+        return energy, env_leaves
 
     optimizer = optax.chain(
         optax.clip_by_global_norm(config.gs_max_grad_norm),
@@ -183,7 +184,9 @@ def _optimize_gs_ad_tensor(
     log_interval = config.gs_log_interval
 
     for step in range(config.gs_num_steps):
-        energy_val, grads = jax.value_and_grad(loss_fn)(A)
+        (energy_val, env_leaves), grads = jax.value_and_grad(
+            loss_fn, argnums=0, has_aux=True
+        )(A, prev_env_leaves)
         energy_float = float(energy_val)
 
         if energy_float < best_energy:
@@ -221,13 +224,14 @@ def _optimize_gs_ad_tensor(
                 )
             break
         prev_energy = energy_float
+        prev_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
 
         updates, opt_state = optimizer.update(grads, opt_state, A)
         A = optax.apply_updates(A, updates)
         A = A * (1.0 / (A.norm() + 1e-10))
 
     A_final = best_A * (1.0 / (best_A.norm() + 1e-10))
-    env_leaves = ctm_tensor_converge(A_final, config_tuple)
+    env_leaves = ctm_tensor_converge(A_final, prev_env_leaves, config_tuple)
     env = jax.tree.unflatten(env_treedef, env_leaves)
     E_gs = float(compute_energy_ctm_tensor(A_final, env, gate, d_phys))
     if config.gs_verbose:
@@ -335,12 +339,18 @@ def _optimize_gs_ad_tensor_2site(
     _env_template = initialize_ctm_tensor_env(A, config.ctm.chi)
     env_treedef = jax.tree.structure(_env_template)
     n_env_leaves = len(jax.tree.leaves(_env_template))
+    _env_template_B = initialize_ctm_tensor_env(B, config.ctm.chi)
+    prev_env_leaves = tuple(jax.tree.leaves(_env_template)) + tuple(
+        jax.tree.leaves(_env_template_B)
+    )
 
-    def loss_fn(params):
+    def loss_fn(params, env_init_leaves):
         A_p, B_p = params
         A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
         B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
-        env_leaves = ctm_tensor_converge_2site(A_norm, B_norm, config_tuple)
+        env_leaves = ctm_tensor_converge_2site(
+            A_norm, B_norm, env_init_leaves, config_tuple
+        )
         env_A = jax.tree.unflatten(env_treedef, env_leaves[:n_env_leaves])
         env_B = jax.tree.unflatten(env_treedef, env_leaves[n_env_leaves:])
         energy = compute_energy_ctm_tensor_2site(
@@ -362,13 +372,13 @@ def _optimize_gs_ad_tensor_2site(
     log_interval = config.gs_log_interval
 
     for step in range(config.gs_num_steps):
-        (energy_val, env_leaves), grads = jax.value_and_grad(loss_fn, has_aux=True)(
-            params
-        )
+        (energy_val, env_leaves), grads = jax.value_and_grad(
+            loss_fn, argnums=0, has_aux=True
+        )(params, prev_env_leaves)
         energy_float = float(energy_val)
         last_energy = energy_float
         last_params = params
-        last_env_leaves = jax.tree.map(lambda x: jax.lax.stop_gradient(x), env_leaves)
+        last_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
 
         delta_energy = abs(energy_float - prev_energy)
         logged = False
@@ -401,6 +411,7 @@ def _optimize_gs_ad_tensor_2site(
                 )
             break
         prev_energy = energy_float
+        prev_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
 
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
@@ -411,10 +422,10 @@ def _optimize_gs_ad_tensor_2site(
         )
 
     if last_env_leaves is None:
-        energy_val, env_leaves = loss_fn(params)
+        energy_val, env_leaves = loss_fn(params, prev_env_leaves)
         last_energy = float(energy_val)
         last_params = params
-        last_env_leaves = jax.tree.map(lambda x: jax.lax.stop_gradient(x), env_leaves)
+        last_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
 
     # Use last evaluated params and environment
     A_final, B_final = last_params
