@@ -665,10 +665,23 @@ class TestOptimizeGsAd2Site:
         with pytest.raises(TypeError, match="must be None or a tuple"):
             optimize_gs_ad(heisenberg_gate, A_dense, config)
 
+    def test_2site_ad_warmstart_energy_physical(self, heisenberg_gate):
+        """With warm-start + min_iter, AD energy should stay physical at D=2 chi=8."""
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=8, max_iter=40, min_iter=10),
+            gs_num_steps=20,
+            gs_learning_rate=5e-3,
+            unit_cell="2site",
+            su_init=True,
+            num_imaginary_steps=100,
+            dt=0.1,
+        )
+        _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
+        assert E_gs > -0.9, f"E/site={E_gs:.6f} unphysically low"
+        assert np.isfinite(E_gs)
+
     @pytest.mark.slow
-    @pytest.mark.xfail(
-        reason="AD energy unreliable — gradient clipping helps but not deterministic"
-    )
     def test_2site_heisenberg_ad_energy_benchmark(self, heisenberg_gate):
         """SU + AD at D=2, chi=16 should be physical and improve over SU init.
 
@@ -759,9 +772,6 @@ class TestHeisenbergBenchmark:
         assert E > -0.80, f"SU D=2 E/site={E:.6f}, unphysically low"
 
     @pytest.mark.slow
-    @pytest.mark.xfail(
-        reason="AD can exploit underconverged CTM at small chi, giving misleadingly good energy"
-    )
     def test_ad_d2_energy(self, heisenberg_gate):
         """AD optimization at D=2, chi=16 should give E/site < -0.648.
 
@@ -795,7 +805,7 @@ class TestHeisenbergBenchmark:
 
     @pytest.mark.slow
     @pytest.mark.xfail(
-        reason="AD can exploit underconverged CTM at small chi, giving misleadingly good energy"
+        reason="AD still exploits underconverged CTM at chi=8 despite warm-start; needs larger min chi"
     )
     def test_ad_d2_chi_scaling(self, heisenberg_gate):
         """Energy should improve (decrease) with increasing chi at fixed D=2."""
