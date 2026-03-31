@@ -791,9 +791,13 @@ def jit_dmrg_sweep_dense_sharded(
         dw_l, _, _, dw_r = W.shape
         W_stack = W_stack.at[i, :dw_l, :, :, :dw_r].set(W)
 
-    # Create mesh and shardings
+    # Create mesh and shardings.
+    # Shard the first bond dimension (axis 1) across devices.
+    # PartitionSpec only allows each mesh axis once, so we shard one
+    # chi axis and replicate the other.  XLA GSPMD propagates the
+    # sharding through einsums that contract along axis 1.
     mesh = Mesh(np.array(devices), axis_names=("chi",))
-    mps_sharding = NamedSharding(mesh, P(None, "chi", None, "chi"))
+    mps_sharding = NamedSharding(mesh, P(None, "chi", None, None))
     w_sharding = NamedSharding(mesh, P())  # replicated
 
     # Shard inputs onto devices
