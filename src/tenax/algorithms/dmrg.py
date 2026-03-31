@@ -256,61 +256,54 @@ def dmrg(
     if config.accelerator == "sharded" and config.two_site and not use_symmetric:
         from tenax.algorithms._jit_sweep import jit_dmrg_sweep_dense_sharded
 
-        # Check if all bonds are already at chi_max
-        all_saturated = all(
-            mps_tensors[idx].todense().shape[-1] >= config.max_bond_dim
-            for idx in range(L - 1)
+        # Go straight to sharded JIT — no warmup phase.
+        # The sharded path pads small bonds to chi_max (zero-padding
+        # handles bonds < chi_max correctly). Warmup would run on a
+        # single GPU and OOM at large chi, defeating the purpose of
+        # sharding.
+        raw_mps = [t.todense() for t in mps_tensors]
+        raw_mpo = [t.todense() for t in mpo_tensors]
+        energies, mps_out_raw = jit_dmrg_sweep_dense_sharded(
+            raw_mps,
+            raw_mpo,
+            chi_max=config.max_bond_dim,
+            num_sweeps=config.num_sweeps,
+            lanczos_max_iter=config.lanczos_max_iter,
         )
 
-        if all_saturated:
-            raw_mps = [t.todense() for t in mps_tensors]
-            raw_mpo = [t.todense() for t in mpo_tensors]
-            energies, mps_out_raw = jit_dmrg_sweep_dense_sharded(
-                raw_mps,
-                raw_mpo,
-                chi_max=config.max_bond_dim,
-                num_sweeps=config.num_sweeps,
-                lanczos_max_iter=config.lanczos_max_iter,
-            )
-
-            # Reconstruct DenseTensor wrappers (same as JIT path)
-            sym = U1Symmetry()
-            result_mps_tensors = []
-            for i, orig_t in enumerate(mps_tensors):
-                new_indices = []
-                for leg_idx, orig_idx in enumerate(orig_t.indices):
-                    padded_dim = mps_out_raw[i].shape[leg_idx]
-                    if padded_dim == orig_idx.dim:
-                        new_indices.append(orig_idx)
-                    else:
-                        new_charges = np.zeros(padded_dim, dtype=np.int32)
-                        new_indices.append(
-                            TensorIndex(
-                                sym,
-                                new_charges,
-                                orig_idx.flow,
-                                label=orig_idx.label,
-                            )
+        # Reconstruct DenseTensor wrappers
+        sym = U1Symmetry()
+        result_mps_tensors = []
+        for i, orig_t in enumerate(mps_tensors):
+            new_indices = []
+            for leg_idx, orig_idx in enumerate(orig_t.indices):
+                padded_dim = mps_out_raw[i].shape[leg_idx]
+                if padded_dim == orig_idx.dim:
+                    new_indices.append(orig_idx)
+                else:
+                    new_charges = np.zeros(padded_dim, dtype=np.int32)
+                    new_indices.append(
+                        TensorIndex(
+                            sym,
+                            new_charges,
+                            orig_idx.flow,
+                            label=orig_idx.label,
                         )
-                result_mps_tensors.append(
-                    DenseTensor(mps_out_raw[i], tuple(new_indices))
-                )
-            result_mps = FiniteMPS.from_tensors(result_mps_tensors)
+                    )
+            result_mps_tensors.append(DenseTensor(mps_out_raw[i], tuple(new_indices)))
+        result_mps = FiniteMPS.from_tensors(result_mps_tensors)
 
-            converged = (
-                len(energies) >= 2
-                and abs(energies[-1] - energies[-2]) < config.convergence_tol
-            )
-            return DMRGResult(
-                energy=energies[-1] if energies else 0.0,
-                energies_per_sweep=energies,
-                mps=result_mps,
-                truncation_errors=[],
-                converged=converged,
-            )
-        else:
-            # Needs warmup — fall through to JIT warmup block
-            use_jit = True
+        converged = (
+            len(energies) >= 2
+            and abs(energies[-1] - energies[-2]) < config.convergence_tol
+        )
+        return DMRGResult(
+            energy=energies[-1] if energies else 0.0,
+            energies_per_sweep=energies,
+            mps=result_mps,
+            truncation_errors=[],
+            converged=converged,
+        )
 
     if use_jit and config.two_site and not use_symmetric:
         from tenax.algorithms._jit_sweep import jit_dmrg_sweep_dense
