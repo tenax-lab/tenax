@@ -20,6 +20,7 @@ _ALGORITHM_MODULES = {
     "hotrg": "benchmarks.bench_hotrg",
     "ipeps": "benchmarks.bench_ipeps",
     "ipeps_ad": "benchmarks.bench_ipeps_ad",
+    "dmrg_sharded": "benchmarks.bench_dmrg_sharded",
 }
 
 _ALL_SIZES = ["small", "medium", "large"]

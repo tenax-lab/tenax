@@ -48,6 +48,9 @@ _FILE_MARKERS = {
     "test_cbe_validation.py": "algorithm",
     "test_mps.py": "core",
     "test_blas_plan.py": "core",
+    "test_padded_block_array.py": "core",
+    "test_jit_sweep.py": "core",
+    "test_padded_linalg.py": "core",
     "test_lanczos_np.py": "algorithm",
 }
 
