@@ -22,6 +22,7 @@ from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from tenax.algorithms._padded_linalg import padded_svd_dense
 
@@ -737,8 +738,83 @@ def jit_dmrg_sweep_dense(
     return [float(e) for e in energies], mps_out
 
 
-@functools.partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7))
-def _jit_sweep_loop(
+def jit_dmrg_sweep_dense_sharded(
+    mps_tensors: list[jax.Array],
+    mpo_tensors: list[jax.Array],
+    chi_max: int,
+    num_sweeps: int = 10,
+    lanczos_max_iter: int = 20,
+) -> tuple[list[float], list[jax.Array]]:
+    """Run DMRG sweeps sharded across multiple devices via GSPMD.
+
+    Same interface as ``jit_dmrg_sweep_dense`` but distributes the MPS bond
+    dimension across all available JAX devices using ``NamedSharding``.
+    XLA's GSPMD compiler automatically inserts communication as needed.
+
+    Falls back to single-device JIT if only one device is available.
+
+    Args:
+        mps_tensors:  List of L MPS site tensors, each ``(chi_l, d, chi_r)``.
+        mpo_tensors:  List of L MPO site tensors, each ``(D_w_l, d, d, D_w_r)``.
+        chi_max:      Maximum bond dimension for MPS.
+        num_sweeps:   Number of full (L->R + R->L) sweeps.
+        lanczos_max_iter: Number of Lanczos iterations per site update.
+
+    Returns:
+        Tuple of ``(energies, mps_out)`` where *energies* is a list of floats
+        (one per sweep) and *mps_out* is a list of L JAX arrays with padded
+        shape ``(chi_max, d, chi_max)`` representing the optimized MPS.
+    """
+    devices = jax.devices()
+    if len(devices) < 2:
+        return jit_dmrg_sweep_dense(
+            mps_tensors, mpo_tensors, chi_max, num_sweeps, lanczos_max_iter
+        )
+
+    from jax.sharding import Mesh, NamedSharding
+    from jax.sharding import PartitionSpec as P
+
+    L = len(mps_tensors)
+    d = mps_tensors[0].shape[1]
+    D_w_max = max(max(W.shape[0], W.shape[3]) for W in mpo_tensors)
+    dtype = mps_tensors[0].dtype
+
+    # Pad and stack MPS tensors to (L, chi_max, d, chi_max)
+    mps_stack = jnp.zeros((L, chi_max, d, chi_max), dtype=dtype)
+    for i, M in enumerate(mps_tensors):
+        chi_l, _, chi_r = M.shape
+        mps_stack = mps_stack.at[i, :chi_l, :, :chi_r].set(M)
+
+    # Pad and stack MPO tensors to (L, D_w_max, d, d, D_w_max)
+    W_stack = jnp.zeros((L, D_w_max, d, d, D_w_max), dtype=dtype)
+    for i, W in enumerate(mpo_tensors):
+        dw_l, _, _, dw_r = W.shape
+        W_stack = W_stack.at[i, :dw_l, :, :, :dw_r].set(W)
+
+    # Create mesh and shardings
+    mesh = Mesh(np.array(devices), axis_names=("chi",))
+    mps_sharding = NamedSharding(mesh, P(None, "chi", None, "chi"))
+    w_sharding = NamedSharding(mesh, P())  # replicated
+
+    # Shard inputs onto devices
+    mps_stack = jax.device_put(mps_stack, mps_sharding)
+    W_stack = jax.device_put(W_stack, w_sharding)
+
+    # Re-JIT the sweep loop impl with sharding-aware compilation
+    _sharded_sweep = jax.jit(
+        _sweep_loop_impl,
+        static_argnums=(2, 3, 4, 5, 6, 7),
+    )
+
+    energies, mps_final = _sharded_sweep(
+        mps_stack, W_stack, L, chi_max, D_w_max, d, num_sweeps, lanczos_max_iter
+    )
+
+    mps_out = [mps_final[i] for i in range(L)]
+    return [float(e) for e in energies], mps_out
+
+
+def _sweep_loop_impl(
     mps_stack: jax.Array,
     W_stack: jax.Array,
     L: int,
@@ -748,7 +824,7 @@ def _jit_sweep_loop(
     num_sweeps: int,
     lanczos_max_iter: int,
 ) -> jax.Array:
-    """Inner JIT-compiled sweep loop.
+    """Pure sweep loop implementation (no ``@jit`` decorator).
 
     All integer parameters are static (traced at compile time) so that
     shapes are known. The function body uses ``jax.lax.fori_loop`` over
@@ -788,6 +864,12 @@ def _jit_sweep_loop(
     mps_final, _, _, energies = jax.lax.fori_loop(0, num_sweeps, sweep_body, init_state)
 
     return energies, mps_final
+
+
+# Single-device JIT version (preserves existing behavior)
+_jit_sweep_loop = functools.partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7))(
+    _sweep_loop_impl
+)
 
 
 # ------------------------------------------------------------------ #

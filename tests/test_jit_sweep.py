@@ -1581,3 +1581,63 @@ class TestIntegration:
                 f"Symmetric JIT DMRG E={result.energy:.8f} vs exact E={e_exact:.8f}"
             ),
         )
+
+
+# ------------------------------------------------------------------ #
+# Multi-device sharded DMRG sweep tests                               #
+# ------------------------------------------------------------------ #
+
+
+class TestShardedSweep:
+    """Test multi-device sharded DMRG sweep."""
+
+    def test_sharded_sweep_matches_single_device(self):
+        """Sharded sweep must produce same energy as single-device JIT."""
+        from tenax.algorithms._jit_sweep import (
+            jit_dmrg_sweep_dense,
+            jit_dmrg_sweep_dense_sharded,
+        )
+
+        L = 6
+        chi_max = 8
+        num_sweeps = 4
+
+        mpo_tn = _build_dense_heisenberg(L)
+        mpo_raw = [mpo_tn.get_tensor(i).todense() for i in range(L)]
+
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            mps_tn = build_random_mps(L=L, physical_dim=2, bond_dim=chi_max, seed=42)
+        mps_raw = [mps_tn.get_tensor(i).todense() for i in range(L)]
+
+        # Single-device JIT
+        energies_jit, _ = jit_dmrg_sweep_dense(
+            mps_raw, mpo_raw, chi_max, num_sweeps=num_sweeps, lanczos_max_iter=20
+        )
+
+        # Sharded (may use 1 or more devices depending on hardware)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            mps_tn2 = build_random_mps(L=L, physical_dim=2, bond_dim=chi_max, seed=42)
+        mps_raw2 = [mps_tn2.get_tensor(i).todense() for i in range(L)]
+
+        energies_sharded, _ = jit_dmrg_sweep_dense_sharded(
+            mps_raw2,
+            mpo_raw,
+            chi_max,
+            num_sweeps=num_sweeps,
+            lanczos_max_iter=20,
+        )
+
+        for i in range(len(energies_jit)):
+            np.testing.assert_allclose(
+                energies_sharded[i],
+                energies_jit[i],
+                atol=1e-6,
+                err_msg=(
+                    f"Sweep {i}: sharded={energies_sharded[i]:.8f}"
+                    f" vs jit={energies_jit[i]:.8f}"
+                ),
+            )
