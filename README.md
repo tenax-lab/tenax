@@ -134,7 +134,7 @@ result2 = bp.launch()
 
 ## DMRG Example
 
-> **Performance note:** Tenax's DMRG is functional and correct but significantly slower than [TeNPy](https://github.com/tenpy/tenpy) (5-10x at moderate bond dimensions). TeNPy's block-sparse engine is fully implemented in Cython, while Tenax dispatches to BLAS from Python. For production DMRG calculations requiring maximum throughput, consider TeNPy. Tenax's strengths lie in JAX-based AD optimization (iPEPS), GPU/TPU acceleration (TRG, HOTRG), and as an educational platform.
+> **Performance note:** Tenax's DMRG is functional and correct but not yet optimized for maximum throughput — the block-sparse contraction engine dispatches to BLAS from Python, which adds overhead at large bond dimensions. Tenax's strengths lie in JAX-based AD optimization (iPEPS), GPU/TPU acceleration (TRG, HOTRG), and as an educational platform.
 
 ```python
 from tenax.algorithms.dmrg import dmrg, build_mpo_heisenberg, DMRGConfig
