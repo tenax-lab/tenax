@@ -1518,7 +1518,7 @@ def _blockwise_contract(
                 np_blocks_list.append(_to_np_blocks(t))
 
         # Use BLAS plan instead of opt_einsum (2x less Python dispatch overhead)
-        from tenax.contraction._blas_plan import get_cached_blas_plan
+        from tenax.contraction._dmrg_plans import get_dmrg_plan
 
         # Cache for pre-extracted Cython step params (keyed by shape group)
         _step_params_cache: dict = {}
@@ -1529,9 +1529,7 @@ def _blockwise_contract(
             ]
             block_shapes = tuple(a.shape for a in combo_arrays)
             if block_shapes not in expr_cache:
-                expr_cache[block_shapes] = get_cached_blas_plan(
-                    subscripts, block_shapes
-                )
+                expr_cache[block_shapes] = get_dmrg_plan(subscripts, block_shapes)
             plan = expr_cache[block_shapes]
 
             if _USE_CYTHON_PLAN:
@@ -1966,7 +1964,7 @@ def _precompute_matvec_combos(
     ``env_blocks`` is a list of the raw N-d numpy arrays for all input
     tensors EXCEPT theta (which changes each matvec call).
     """
-    from tenax.contraction._blas_plan import get_cached_blas_plan
+    from tenax.contraction._dmrg_plans import get_dmrg_plan
 
     # Map output charge keys to integer slots
     output_key_to_slot: dict[tuple[int, ...], int] = {}
@@ -1986,7 +1984,7 @@ def _precompute_matvec_combos(
         block_shapes = tuple(a.shape for a in all_blocks)
 
         if block_shapes not in plan_cache:
-            plan = get_cached_blas_plan(subscripts, block_shapes)
+            plan = get_dmrg_plan(subscripts, block_shapes)
             sp = [
                 (
                     s.left_idx,
