@@ -26,6 +26,7 @@ class CTMConfig:
     conv_tol: float = 1e-8
     renormalize: bool = True
     projector_method: str = "eigh"  # "eigh" or "qr"
+    min_iter: int = 10  # minimum CTM sweeps before checking convergence
     qr_warmup_steps: int = 3  # eigh warm-up iterations before QR kicks in
     chi_I: int | None = None  # interlayer bond dim for split-CTMRG; None => chi_I = chi
 
