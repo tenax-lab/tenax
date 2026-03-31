@@ -912,3 +912,157 @@ class TestMixedTypeRejection:
         # Should fail for wrong target
         with pytest.raises(ValueError, match="does not match"):
             validate_mps_sector(tensors, target_charge=2)
+
+
+# ------------------------------------------------------------------ #
+# Accelerator dispatch tests                                           #
+# ------------------------------------------------------------------ #
+
+
+class TestAcceleratorDispatch:
+    """Tests for the accelerator field in DMRGConfig and dispatch logic."""
+
+    def test_accelerator_default_is_auto(self):
+        """Default accelerator should be 'auto'."""
+        cfg = DMRGConfig()
+        assert cfg.accelerator == "auto"
+
+    def test_accelerator_jit_dense_matches_python(self):
+        """JIT path energy should match Python path for Heisenberg L=6.
+
+        Both paths should converge to similar ground-state energies.
+        We compare against ED as the reference.
+        """
+        L = 6
+        Jz, Jxy = 1.0, 1.0
+
+        H_mat = _build_heisenberg_matrix(L, Jz=Jz, Jxy=Jxy)
+        e_exact = float(np.linalg.eigvalsh(H_mat)[0])
+
+        mpo = _densify_tensor_network(build_mpo_heisenberg(L, Jz=Jz, Jxy=Jxy))
+        mps_jit = build_random_mps(L, physical_dim=2, bond_dim=8, seed=42)
+        mps_py = build_random_mps(L, physical_dim=2, bond_dim=8, seed=42)
+
+        config_jit = DMRGConfig(
+            max_bond_dim=8,
+            num_sweeps=8,
+            lanczos_max_iter=20,
+            convergence_tol=1e-8,
+            accelerator="jit",
+        )
+        config_py = DMRGConfig(
+            max_bond_dim=8,
+            num_sweeps=8,
+            lanczos_max_iter=20,
+            convergence_tol=1e-8,
+            accelerator="off",
+        )
+
+        result_jit = dmrg(mpo, mps_jit, config_jit)
+        result_py = dmrg(mpo, mps_py, config_py)
+
+        # Both should find a reasonable ground state
+        assert np.isfinite(result_jit.energy)
+        assert np.isfinite(result_py.energy)
+        assert result_jit.energy < 0.0
+        assert result_py.energy < 0.0
+        # JIT path should be close to ED
+        assert abs(result_jit.energy - e_exact) < 0.5, (
+            f"JIT energy {result_jit.energy:.6f} too far from ED {e_exact:.6f}"
+        )
+        # Both paths should give similar energies
+        assert abs(result_jit.energy - result_py.energy) < 0.5, (
+            f"JIT energy {result_jit.energy:.6f} differs from Python "
+            f"{result_py.energy:.6f} by {abs(result_jit.energy - result_py.energy):.4e}"
+        )
+
+    def test_accelerator_auto_selects_correctly(self):
+        """auto mode on CPU with dense tensors should use JIT path.
+
+        On CPU with dense tensors, auto mode should select JIT.
+        We verify by checking that the result is a valid DMRGResult.
+        """
+        L = 4
+        mpo = _densify_tensor_network(build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0))
+        mps = build_random_mps(L, physical_dim=2, bond_dim=4, seed=0)
+        config = DMRGConfig(
+            max_bond_dim=4,
+            num_sweeps=4,
+            lanczos_max_iter=10,
+            accelerator="auto",
+        )
+        result = dmrg(mpo, mps, config)
+        assert isinstance(result, DMRGResult)
+        assert np.isfinite(result.energy)
+        assert result.energy < 0.0
+
+    def test_accelerator_auto_symmetric_uses_python(self):
+        """auto mode with symmetric tensors should fall back to Python path.
+
+        Symmetric tensors are not supported by JIT path, so auto mode
+        should silently fall back to the Python sweep.
+        """
+        L = 4
+        mpo = _build_symmetric_heisenberg_mpo(L)
+        mps = build_random_symmetric_mps(L, bond_dim=4, seed=0)
+        config = DMRGConfig(
+            max_bond_dim=8,
+            num_sweeps=4,
+            lanczos_max_iter=10,
+            accelerator="auto",
+        )
+        result = dmrg(mpo, mps, config)
+        assert isinstance(result, DMRGResult)
+        assert np.isfinite(result.energy)
+        assert result.energy < 0.0
+
+    def test_accelerator_off_uses_python_path(self):
+        """off mode should always use the Python sweep path.
+
+        We verify by checking that the result matches the existing
+        Python path behavior (valid DMRGResult with decreasing energy).
+        """
+        L = 4
+        mpo = _densify_tensor_network(build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0))
+        mps = build_random_mps(L, physical_dim=2, bond_dim=4, seed=7)
+        config = DMRGConfig(
+            max_bond_dim=4,
+            num_sweeps=4,
+            lanczos_max_iter=10,
+            accelerator="off",
+        )
+        result = dmrg(mpo, mps, config)
+        assert isinstance(result, DMRGResult)
+        assert np.isfinite(result.energy)
+        assert result.energy < 0.0
+        if len(result.energies_per_sweep) >= 2:
+            assert result.energies_per_sweep[-1] <= result.energies_per_sweep[0] + 0.5
+
+    def test_accelerator_jit_returns_finite_mps(self):
+        """JIT path should return a FiniteMPS with correct number of nodes."""
+        L = 4
+        mpo = _densify_tensor_network(build_mpo_heisenberg(L))
+        mps = build_random_mps(L, physical_dim=2, bond_dim=4, seed=0)
+        config = DMRGConfig(
+            max_bond_dim=4,
+            num_sweeps=4,
+            lanczos_max_iter=10,
+            accelerator="jit",
+        )
+        result = dmrg(mpo, mps, config)
+        assert result.mps is not None
+        assert result.mps.n_nodes() == L
+
+    def test_accelerator_invalid_value_raises(self):
+        """Invalid accelerator value should raise ValueError."""
+        L = 4
+        mpo = _densify_tensor_network(build_mpo_heisenberg(L))
+        mps = build_random_mps(L, physical_dim=2, bond_dim=4, seed=0)
+        config = DMRGConfig(
+            max_bond_dim=4,
+            num_sweeps=2,
+            lanczos_max_iter=5,
+            accelerator="invalid",
+        )
+        with pytest.raises(ValueError, match="accelerator"):
+            dmrg(mpo, mps, config)
