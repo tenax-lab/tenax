@@ -74,6 +74,15 @@ try:
 except ImportError:
     _USE_CYTHON_MATVEC = False
 
+try:
+    from tenax.contraction._cython_blas import (
+        cython_lanczos_reorth as _cython_lanczos_reorth,
+    )
+
+    _USE_CYTHON_REORTH = True
+except ImportError:
+    _USE_CYTHON_REORTH = False
+
 
 @dataclass
 class DMRGConfig:
@@ -1353,13 +1362,16 @@ def _lanczos_solve_np(
             else:
                 w = ba_sub_scaled(w, basis[-2], betas[-1])
 
-        # Full reorthogonalization (fused sub+scale)
-        for q in basis:
-            coeff = ba_inner(q, w)
-            if _USE_CYTHON_SUB:
-                _cython_ba_sub_scaled_inplace(w.blocks, q.blocks, coeff)
-            else:
-                w = ba_sub_scaled(w, q, coeff)
+        # Full reorthogonalization
+        if _USE_CYTHON_REORTH:
+            _cython_lanczos_reorth([q.blocks for q in basis], w.blocks)
+        else:
+            for q in basis:
+                coeff = ba_inner(q, w)
+                if _USE_CYTHON_SUB:
+                    _cython_ba_sub_scaled_inplace(w.blocks, q.blocks, coeff)
+                else:
+                    w = ba_sub_scaled(w, q, coeff)
 
         beta_val = ba_norm(w)
         betas.append(beta_val)
@@ -1953,16 +1965,22 @@ def _precompute_matvec_combos(
 ) -> tuple[list, list, list]:
     """Pre-extract env blocks and BLAS plan data for each combo.
 
+    Environment blocks are **pre-transposed** to their GEMM-ready 2D
+    C-contiguous layout so that the per-matvec Cython loop only needs to
+    transpose the theta block (which changes each iteration).
+
     Returns ``(combo_descriptors, output_keys, output_shapes)`` where:
 
     - ``combo_descriptors`` is a list of tuples, one per combo:
       ``(step_params, n_inputs, n_buffers, output_perm,
-        env_blocks, theta_key, output_slot)``
+        env_blocks_2d, theta_key, theta_perm, theta_shape_2d,
+        output_slot)``
     - ``output_keys`` maps output_slot -> charge key
     - ``output_shapes`` maps output_slot -> array shape (for pre-allocation)
 
-    ``env_blocks`` is a list of the raw N-d numpy arrays for all input
-    tensors EXCEPT theta (which changes each matvec call).
+    ``env_blocks_2d`` is a list of pre-transposed 2D C-contiguous numpy
+    arrays for all input tensors EXCEPT theta.  ``theta_perm`` and
+    ``theta_shape_2d`` describe how to transpose theta at call time.
     """
     from tenax.contraction._dmrg_plans import get_dmrg_plan
 
@@ -1970,7 +1988,7 @@ def _precompute_matvec_combos(
     output_key_to_slot: dict[tuple[int, ...], int] = {}
     output_keys: list[tuple[int, ...]] = []
 
-    # Cache BLAS plan + step_params by block_shapes
+    # Cache BLAS plan + step_params + pre-transpose info by block_shapes
     plan_cache: dict[tuple, tuple] = {}
 
     combo_descriptors = []
@@ -1999,19 +2017,63 @@ def _precompute_matvec_combos(
                 )
                 for s in plan.steps
             ]
+
+            # Map each input buffer to the first step that uses it
+            buf_to_step_role: dict[int, tuple[int, str]] = {}
+            for step_idx, s in enumerate(plan.steps):
+                if s.left_idx not in buf_to_step_role:
+                    buf_to_step_role[s.left_idx] = (step_idx, "left")
+                if s.right_idx not in buf_to_step_role:
+                    buf_to_step_role[s.right_idx] = (step_idx, "right")
+
+            # Build per-input-buffer pre-transpose info
+            buf_pretranspose = {}  # buf_idx -> (perm, shape_2d)
+            for inp_idx in range(plan.n_inputs):
+                if inp_idx in buf_to_step_role:
+                    step_idx, role = buf_to_step_role[inp_idx]
+                    step = plan.steps[step_idx]
+                    if role == "left":
+                        perm = step.left_perm
+                        shape_2d = (step.m, step.k)
+                    else:
+                        perm = step.right_perm
+                        shape_2d = (step.k, step.n)
+                    buf_pretranspose[inp_idx] = (perm, shape_2d)
+                else:
+                    buf_pretranspose[inp_idx] = ((), None)
+
             plan_cache[block_shapes] = (
                 sp,
                 plan.n_inputs,
                 plan.n_buffers,
                 plan.output_perm,
+                buf_pretranspose,
             )
-        step_params, n_inputs, n_buffers, output_perm = plan_cache[block_shapes]
+        (
+            step_params,
+            n_inputs,
+            n_buffers,
+            output_perm,
+            buf_pretranspose,
+        ) = plan_cache[block_shapes]
 
-        # Separate env blocks (everything except theta)
-        env_blocks = [
-            all_blocks[i] for i in range(len(all_blocks)) if i != theta_buf_idx
-        ]
+        # Pre-transpose env blocks to 2D (everything except theta)
+        env_blocks_2d = []
+        for i in range(len(all_blocks)):
+            if i == theta_buf_idx:
+                continue
+            arr = all_blocks[i]
+            perm, shape_2d = buf_pretranspose[i]
+            if shape_2d is not None:
+                if perm:
+                    arr = np.transpose(arr, perm)
+                arr = np.ascontiguousarray(arr.reshape(shape_2d))
+            else:
+                arr = np.ascontiguousarray(arr)
+            env_blocks_2d.append(arr)
+
         theta_key = combo_keys[theta_buf_idx]
+        theta_perm, theta_shape_2d = buf_pretranspose[theta_buf_idx]
 
         # Assign output slot
         if output_key not in output_key_to_slot:
@@ -2031,8 +2093,10 @@ def _precompute_matvec_combos(
                 n_inputs,
                 n_buffers,
                 output_perm,
-                env_blocks,
+                env_blocks_2d,
                 theta_key,
+                theta_perm,
+                theta_shape_2d,
                 output_slot,
             )
         )
@@ -2048,17 +2112,40 @@ def _execute_matvec_combos(
     output_shapes: list,
     output_indices: tuple,
 ) -> BlockArray:
-    """Execute all matvec combos, dispatching to Cython if available."""
+    """Execute all matvec combos, dispatching to Cython if available.
+
+    Combo descriptors contain pre-transposed 2D env blocks.  Theta blocks
+    are transposed once per matvec call (outside the combo loop) using the
+    ``theta_perm`` / ``theta_shape_2d`` stored in each descriptor.
+    """
     from tenax.algorithms._block_array import BlockArray
 
     n_slots = len(output_keys)
+
+    # Pre-transpose theta blocks ONCE for this matvec call.
+    # Group by (theta_key, theta_perm, theta_shape_2d) to avoid duplicates.
+    theta_2d_cache: dict[tuple, np.ndarray] = {}
+    for desc in combo_descriptors:
+        theta_key = desc[5]
+        theta_perm = desc[6]
+        theta_shape_2d = desc[7]
+        cache_key = (theta_key, theta_perm, theta_shape_2d)
+        if cache_key not in theta_2d_cache:
+            arr = theta_blocks[theta_key]
+            if theta_shape_2d is not None:
+                if theta_perm:
+                    arr = np.transpose(arr, theta_perm)
+                arr = np.ascontiguousarray(arr.reshape(theta_shape_2d))
+            else:
+                arr = np.ascontiguousarray(arr)
+            theta_2d_cache[cache_key] = arr
 
     if _USE_CYTHON_MATVEC:
         # Pre-allocate None output buffers (Cython will allocate on first write)
         output_buffers: list = [None] * n_slots
         _cython_matvec_combos(
             combo_descriptors,
-            theta_blocks,
+            theta_2d_cache,
             theta_buf_idx,
             output_buffers,
             output_shapes,
@@ -2069,7 +2156,7 @@ def _execute_matvec_combos(
                 output_blocks[output_keys[slot]] = output_buffers[slot]
         return BlockArray(blocks=output_blocks, indices=output_indices)
 
-    # Fallback: Python loop (same logic as _blockwise_contract but pre-computed)
+    # Fallback: Python loop with pre-transposed inputs
     output_accum: dict[tuple, list] = {}
     for desc in combo_descriptors:
         step_params, n_inputs, n_buffers, output_perm = (
@@ -2078,37 +2165,37 @@ def _execute_matvec_combos(
             desc[2],
             desc[3],
         )
-        env_blocks, theta_key, output_slot = desc[4], desc[5], desc[6]
+        env_blocks_2d = desc[4]
+        theta_key = desc[5]
+        theta_perm = desc[6]
+        theta_shape_2d = desc[7]
+        output_slot = desc[8]
 
-        theta_nd = theta_blocks[theta_key]
-        arrays = list(env_blocks)
-        arrays.insert(theta_buf_idx, theta_nd)
+        theta_2d = theta_2d_cache[(theta_key, theta_perm, theta_shape_2d)]
 
-        if _USE_CYTHON_PLAN:
-            result = _cython_execute_plan(
-                step_params,
-                n_inputs,
-                n_buffers,
-                output_perm,
-                arrays,
-            )
-        else:
-            # Inline plan execution (pure numpy fallback)
-            buffers = list(arrays) + [None] * (n_buffers - n_inputs)
-            for sp in step_params:
-                li, ri, oi, M, N, K, lp, rp, os = sp
-                left = buffers[li]
-                right = buffers[ri]
+        # Build full input buffer list with pre-transposed 2D arrays
+        input_2d = list(env_blocks_2d)
+        input_2d.insert(theta_buf_idx, theta_2d)
+
+        # Execute GEMM chain — inputs are already 2D, intermediates need reshape
+        buffers = list(input_2d) + [None] * (n_buffers - n_inputs)
+        for sp in step_params:
+            li, ri, oi, M, N, K, lp, rp, os = sp
+            left = buffers[li]
+            right = buffers[ri]
+            # Input buffers (< n_inputs) are pre-transposed 2D
+            if li >= n_inputs:
                 if lp:
                     left = np.transpose(left, lp)
+                left = np.ascontiguousarray(left.reshape(M, K))
+            if ri >= n_inputs:
                 if rp:
                     right = np.transpose(right, rp)
-                left_2d = np.ascontiguousarray(left.reshape(M, K))
-                right_2d = np.ascontiguousarray(right.reshape(K, N))
-                buffers[oi] = (left_2d @ right_2d).reshape(os)
-            result = buffers[step_params[-1][2]]
-            if output_perm:
-                result = np.ascontiguousarray(np.transpose(result, output_perm))
+                right = np.ascontiguousarray(right.reshape(K, N))
+            buffers[oi] = (left @ right).reshape(os)
+        result = buffers[step_params[-1][2]]
+        if output_perm:
+            result = np.ascontiguousarray(np.transpose(result, output_perm))
 
         out_key = output_keys[output_slot]
         output_accum.setdefault(out_key, []).append(result)

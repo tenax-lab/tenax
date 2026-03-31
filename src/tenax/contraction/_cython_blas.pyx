@@ -1240,34 +1240,36 @@ def cython_execute_plan(
 
 def cython_matvec_combos(
     list combo_descriptors,
-    dict theta_blocks,
+    dict theta_2d_cache,
     int theta_buf_idx,
     list output_buffers,
     list output_buf_shapes,
 ):
     """Execute ALL block combos for one matvec call in a single C loop.
 
+    All input blocks (env and theta) are **pre-transposed** to their
+    GEMM-ready 2D C-contiguous layout before this function is called.
+    Only intermediate buffers (from multi-step plans) need transposing
+    inside the loop.
+
     Each combo descriptor is a tuple:
         (step_params, n_inputs, n_buffers, output_perm,
-         env_blocks,          # list of pre-extracted N-d numpy arrays for env tensors
+         env_blocks_2d,       # list of pre-transposed 2D numpy arrays
          theta_key,           # block key into theta_blocks dict
-         theta_step_role,     # (perm, shape_2d) for theta's first-use step
+         theta_perm,          # transpose perm for theta (used as cache key)
+         theta_shape_2d,      # (M, K) or (K, N) for theta (used as cache key)
          output_slot,         # int index into output_buffers
         )
 
-    ``env_blocks[i]`` is the raw N-d numpy array for input buffer *i*
-    (skipping theta_buf_idx). The function transposes and reshapes
-    all blocks per step internally.
+    ``theta_2d_cache`` maps ``(theta_key, theta_perm, theta_shape_2d)``
+    to the pre-transposed 2D theta block.
 
     ``output_buffers`` is a list of pre-allocated numpy arrays (zeroed),
     one per unique output key. Results are accumulated in-place via +=.
-
-    This eliminates the Python loop in ``_blockwise_contract`` for the
-    matvec hot path, reducing ~100 Python→Cython round trips to 1.
     """
     cdef int n_combos = len(combo_descriptors)
     cdef int c, s, n_steps, n_elem, inc
-    cdef int li, ri, oi, M, N, K
+    cdef int li, ri, oi, M, N, K, n_inputs
     cdef double alpha_d = 1.0, beta_d = 0.0
     cdef double complex alpha_z = 1.0 + 0j, beta_z = 0.0 + 0j
     cdef double* left_p
@@ -1286,16 +1288,18 @@ def cython_matvec_combos(
         n_inputs = desc[1]
         n_buffers = desc[2]
         output_perm = desc[3]
-        env_blocks = desc[4]
+        env_blocks_2d = desc[4]
         theta_key = desc[5]
-        output_slot = desc[6]
+        theta_perm = desc[6]
+        theta_shape_2d = desc[7]
+        output_slot = desc[8]
 
         n_steps = len(step_params)
 
-        # Build buffer list: env blocks + theta block
-        theta_nd = theta_blocks[theta_key]
-        buffers = list(env_blocks)
-        buffers.insert(theta_buf_idx, theta_nd)
+        # Build buffer list: all inputs are pre-transposed 2D
+        theta_2d = theta_2d_cache[(theta_key, theta_perm, theta_shape_2d)]
+        buffers = list(env_blocks_2d)
+        buffers.insert(theta_buf_idx, theta_2d)
         if n_buffers > n_inputs:
             buffers.extend([None] * (n_buffers - n_inputs))
 
@@ -1306,15 +1310,19 @@ def cython_matvec_combos(
             left = buffers[li]
             right = buffers[ri]
 
-            if lp:
-                left = np.ascontiguousarray(np.transpose(left, lp).reshape(M, K))
-            else:
-                left = np.ascontiguousarray(left.reshape(M, K))
+            # Input buffers (idx < n_inputs) are already 2D C-contiguous.
+            # Intermediate buffers need transpose + reshape.
+            if li >= n_inputs:
+                if lp:
+                    left = np.ascontiguousarray(np.transpose(left, lp).reshape(M, K))
+                else:
+                    left = np.ascontiguousarray(left.reshape(M, K))
 
-            if rp:
-                right = np.ascontiguousarray(np.transpose(right, rp).reshape(K, N))
-            else:
-                right = np.ascontiguousarray(right.reshape(K, N))
+            if ri >= n_inputs:
+                if rp:
+                    right = np.ascontiguousarray(np.transpose(right, rp).reshape(K, N))
+                else:
+                    right = np.ascontiguousarray(right.reshape(K, N))
 
             if left.dtype == np.float64:
                 out_arr = np.empty((M, N), dtype=np.float64)
@@ -1364,6 +1372,193 @@ def cython_matvec_combos(
                     _zaxpy(&n_elem, &alpha_z, left_p_z, &inc, out_p_z, &inc)
             else:
                 output_buffers[output_slot] = ob + result
+
+
+# ------------------------------------------------------------------ #
+# cython_lanczos_reorth: fused full reorthogonalization                #
+# ------------------------------------------------------------------ #
+
+
+def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
+    """Fused full reorthogonalization: for each q in basis, w -= <q|w> * q.
+
+    In-place modification of w_blocks.
+    basis_blocks_list: list of dicts, each mapping charge key -> numpy array
+    w_blocks: dict mapping charge key -> numpy array (modified in-place)
+
+    Fuses what was 2*k Python->Cython calls (one ba_inner + one
+    ba_sub_scaled_inplace per basis vector) into a single call.
+    """
+    cdef int n_basis = len(basis_blocks_list)
+    cdef int i, n, inc
+    cdef double coeff, alpha_neg
+    cdef double* wp
+    cdef double* qp
+    cdef cnp.ndarray w_arr, q_arr
+    cdef double complex z_coeff, z_alpha_neg
+    cdef double complex* wp_z
+    cdef double complex* qp_z
+    cdef float complex c_coeff_val, c_alpha_neg
+    cdef float complex* wp_c
+    cdef float complex* qp_c
+    cdef int dtype_code = -1  # 0=f64, 1=z128, 2=c64
+
+    inc = 1
+
+    # Detect dtype from first shared block
+    if n_basis > 0:
+        q0_blocks = basis_blocks_list[0]
+        for k in q0_blocks:
+            wk = w_blocks.get(k)
+            if wk is not None:
+                dt = wk.dtype
+                if dt == np.float64:
+                    dtype_code = 0
+                elif dt == np.complex128:
+                    dtype_code = 1
+                elif dt == np.complex64:
+                    dtype_code = 2
+                break
+
+    for i in range(n_basis):
+        q_blocks = basis_blocks_list[i]
+
+        if dtype_code == 0:
+            # Phase 1: coeff = <q|w> via ddot
+            coeff = 0.0
+            for k in q_blocks:
+                wk = w_blocks.get(k)
+                if wk is None:
+                    continue
+                qk = q_blocks[k]
+                w_arr = np.ascontiguousarray(np.asarray(wk, dtype=np.float64).ravel())
+                q_arr = np.ascontiguousarray(np.asarray(qk, dtype=np.float64).ravel())
+                n = w_arr.size
+                wp = <double*>cnp.PyArray_DATA(w_arr)
+                qp = <double*>cnp.PyArray_DATA(q_arr)
+                with nogil:
+                    coeff += _ddot(&n, qp, &inc, wp, &inc)
+
+            # Phase 2: w -= coeff * q via daxpy
+            if coeff == 0.0:
+                continue
+            alpha_neg = -coeff
+            for k in q_blocks:
+                wk = w_blocks.get(k)
+                if wk is None:
+                    continue
+                qk = q_blocks[k]
+                if not wk.flags.writeable:
+                    wk = wk.copy()
+                    w_blocks[k] = wk
+                w_arr = <cnp.ndarray>np.ascontiguousarray(np.asarray(wk).ravel())
+                q_arr = <cnp.ndarray>np.ascontiguousarray(np.asarray(qk).ravel())
+                n = w_arr.size
+                wp = <double*>cnp.PyArray_DATA(w_arr)
+                qp = <double*>cnp.PyArray_DATA(q_arr)
+                with nogil:
+                    _daxpy(&n, &alpha_neg, qp, &inc, wp, &inc)
+
+        elif dtype_code == 1:
+            # Phase 1: coeff = Re(<q|w>) via zdotc
+            coeff = 0.0
+            for k in q_blocks:
+                wk = w_blocks.get(k)
+                if wk is None:
+                    continue
+                qk = q_blocks[k]
+                w_arr_z = np.asarray(wk, dtype=np.complex128)
+                if not w_arr_z.flags.writeable:
+                    w_arr_z = w_arr_z.copy()
+                w_flat_z = np.ascontiguousarray(w_arr_z).ravel()
+                q_arr_z = np.asarray(qk, dtype=np.complex128)
+                if not q_arr_z.flags.writeable:
+                    q_arr_z = q_arr_z.copy()
+                q_flat_z = np.ascontiguousarray(q_arr_z).ravel()
+                n = w_flat_z.shape[0]
+                wp_z = <double complex*>cnp.PyArray_DATA(<cnp.ndarray>w_flat_z)
+                qp_z = <double complex*>cnp.PyArray_DATA(<cnp.ndarray>q_flat_z)
+                with nogil:
+                    z_coeff = _zdotc(&n, qp_z, &inc, wp_z, &inc)
+                coeff += z_coeff.real
+
+            # Phase 2: w -= coeff * q via zaxpy
+            if coeff == 0.0:
+                continue
+            z_alpha_neg = -coeff
+            for k in q_blocks:
+                wk = w_blocks.get(k)
+                if wk is None:
+                    continue
+                qk = q_blocks[k]
+                if not wk.flags.writeable:
+                    wk = wk.copy()
+                    w_blocks[k] = wk
+                w_flat_z2 = np.ascontiguousarray(np.asarray(wk, dtype=np.complex128)).ravel()
+                q_flat_z2 = np.ascontiguousarray(np.asarray(qk, dtype=np.complex128)).ravel()
+                n = w_flat_z2.shape[0]
+                wp_z = <double complex*>cnp.PyArray_DATA(<cnp.ndarray>w_flat_z2)
+                qp_z = <double complex*>cnp.PyArray_DATA(<cnp.ndarray>q_flat_z2)
+                with nogil:
+                    _zaxpy(&n, &z_alpha_neg, qp_z, &inc, wp_z, &inc)
+
+        elif dtype_code == 2:
+            # Phase 1: coeff = Re(<q|w>) via cdotc
+            coeff = 0.0
+            for k in q_blocks:
+                wk = w_blocks.get(k)
+                if wk is None:
+                    continue
+                qk = q_blocks[k]
+                w_arr_c = np.asarray(wk, dtype=np.complex64)
+                if not w_arr_c.flags.writeable:
+                    w_arr_c = w_arr_c.copy()
+                w_flat_c = np.ascontiguousarray(w_arr_c).ravel()
+                q_arr_c = np.asarray(qk, dtype=np.complex64)
+                if not q_arr_c.flags.writeable:
+                    q_arr_c = q_arr_c.copy()
+                q_flat_c = np.ascontiguousarray(q_arr_c).ravel()
+                n = w_flat_c.shape[0]
+                wp_c = <float complex*>cnp.PyArray_DATA(<cnp.ndarray>w_flat_c)
+                qp_c = <float complex*>cnp.PyArray_DATA(<cnp.ndarray>q_flat_c)
+                with nogil:
+                    c_coeff_val = _cdotc(&n, qp_c, &inc, wp_c, &inc)
+                coeff += c_coeff_val.real
+
+            # Phase 2: w -= coeff * q via caxpy
+            if coeff == 0.0:
+                continue
+            c_alpha_neg = <float complex>(-coeff)
+            for k in q_blocks:
+                wk = w_blocks.get(k)
+                if wk is None:
+                    continue
+                qk = q_blocks[k]
+                if not wk.flags.writeable:
+                    wk = wk.copy()
+                    w_blocks[k] = wk
+                w_flat_c2 = np.ascontiguousarray(np.asarray(wk, dtype=np.complex64)).ravel()
+                q_flat_c2 = np.ascontiguousarray(np.asarray(qk, dtype=np.complex64)).ravel()
+                n = w_flat_c2.shape[0]
+                wp_c = <float complex*>cnp.PyArray_DATA(<cnp.ndarray>w_flat_c2)
+                qp_c = <float complex*>cnp.PyArray_DATA(<cnp.ndarray>q_flat_c2)
+                with nogil:
+                    _caxpy(&n, &c_alpha_neg, qp_c, &inc, wp_c, &inc)
+
+        else:
+            # Fallback: numpy
+            coeff = 0.0
+            for k in q_blocks:
+                wk = w_blocks.get(k)
+                if wk is None:
+                    continue
+                coeff += np.vdot(q_blocks[k], wk).real
+            if coeff == 0.0:
+                continue
+            for k in q_blocks:
+                wk = w_blocks.get(k)
+                if wk is not None:
+                    w_blocks[k] = wk - coeff * q_blocks[k]
 
 
 # ------------------------------------------------------------------ #
