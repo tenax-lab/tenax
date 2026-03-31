@@ -2302,26 +2302,43 @@ def _two_site_update_symmetric_np(
 
     _out_indices = theta_ba.indices  # fixed across Lanczos iterations
 
-    # Pre-compute combo descriptors for the batched matvec path.
-    # Temporarily fill the theta slot so block shapes can be computed.
-    _env_np[_theta_buf_idx] = theta_ba.blocks
-    _combo_descs, _out_keys, _out_shapes = _precompute_matvec_combos(
-        _plan,
-        _subs,
-        _env_np,
-        _theta_buf_idx,
-    )
-    _env_np[_theta_buf_idx] = None  # restore
+    # Use precomputed combo path for chi <= 128; at larger chi the
+    # pre-computation overhead exceeds savings (blocks are large, combos few).
+    _use_precomputed = config.max_bond_dim <= 128
 
-    def matvec(v_ba: BlockArray) -> BlockArray:
-        return _execute_matvec_combos(
-            _combo_descs,
-            v_ba.blocks,
+    if _use_precomputed:
+        _env_np[_theta_buf_idx] = theta_ba.blocks
+        _combo_descs, _out_keys, _out_shapes = _precompute_matvec_combos(
+            _plan,
+            _subs,
+            _env_np,
             _theta_buf_idx,
-            _out_keys,
-            _out_shapes,
-            _out_indices,
         )
+        _env_np[_theta_buf_idx] = None
+
+        def matvec(v_ba: BlockArray) -> BlockArray:
+            return _execute_matvec_combos(
+                _combo_descs,
+                v_ba.blocks,
+                _theta_buf_idx,
+                _out_keys,
+                _out_shapes,
+                _out_indices,
+            )
+    else:
+        _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
+
+        def matvec(v_ba: BlockArray) -> BlockArray:
+            _env_np[_theta_buf_idx] = v_ba.blocks
+            return _blockwise_contract(
+                [left_env, theta_ba, mpo_l, mpo_r, right_env],
+                _subs,
+                output_indices=_out_indices,
+                expr_cache=_cache,
+                block_plan=_plan,
+                np_blocks_cache=_env_np,
+                return_ba=True,
+            )
 
     energy, theta_opt_ba = _lanczos_solve_np(
         matvec, theta_ba, config.lanczos_max_iter, config.lanczos_tol
@@ -2383,25 +2400,41 @@ def _one_site_update_symmetric_np(
 
     _out_indices = site_ba.indices
 
-    # Pre-compute combo descriptors for the batched matvec path.
-    _env_np[_theta_buf_idx] = site_ba.blocks
-    _combo_descs, _out_keys, _out_shapes = _precompute_matvec_combos(
-        _plan,
-        _subs,
-        _env_np,
-        _theta_buf_idx,
-    )
-    _env_np[_theta_buf_idx] = None
+    _use_precomputed = config.max_bond_dim <= 128
 
-    def matvec(v_ba: BlockArray) -> BlockArray:
-        return _execute_matvec_combos(
-            _combo_descs,
-            v_ba.blocks,
+    if _use_precomputed:
+        _env_np[_theta_buf_idx] = site_ba.blocks
+        _combo_descs, _out_keys, _out_shapes = _precompute_matvec_combos(
+            _plan,
+            _subs,
+            _env_np,
             _theta_buf_idx,
-            _out_keys,
-            _out_shapes,
-            _out_indices,
         )
+        _env_np[_theta_buf_idx] = None
+
+        def matvec(v_ba: BlockArray) -> BlockArray:
+            return _execute_matvec_combos(
+                _combo_descs,
+                v_ba.blocks,
+                _theta_buf_idx,
+                _out_keys,
+                _out_shapes,
+                _out_indices,
+            )
+    else:
+        _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
+
+        def matvec(v_ba: BlockArray) -> BlockArray:
+            _env_np[_theta_buf_idx] = v_ba.blocks
+            return _blockwise_contract(
+                [left_env, site_ba, mpo_site, right_env],
+                _subs,
+                output_indices=_out_indices,
+                expr_cache=_cache,
+                block_plan=_plan,
+                np_blocks_cache=_env_np,
+                return_ba=True,
+            )
 
     energy, site_opt_ba = _lanczos_solve_np(
         matvec, site_ba, config.lanczos_max_iter, config.lanczos_tol
