@@ -65,6 +65,15 @@ try:
 except ImportError:
     _USE_CYTHON_SUB = False
 
+try:
+    from tenax.contraction._cython_blas import (
+        cython_matvec_combos as _cython_matvec_combos,
+    )
+
+    _USE_CYTHON_MATVEC = True
+except ImportError:
+    _USE_CYTHON_MATVEC = False
+
 
 @dataclass
 class DMRGConfig:
@@ -1938,6 +1947,184 @@ def _svd_and_truncate_site_np(
     return A_ba, s, B_ba, trunc_err
 
 
+def _precompute_matvec_combos(
+    block_plan: list,
+    subscripts: str,
+    np_blocks_list: list,
+    theta_buf_idx: int,
+) -> tuple[list, list, list]:
+    """Pre-extract env blocks and BLAS plan data for each combo.
+
+    Returns ``(combo_descriptors, output_keys, output_shapes)`` where:
+
+    - ``combo_descriptors`` is a list of tuples, one per combo:
+      ``(step_params, n_inputs, n_buffers, output_perm,
+        env_blocks, theta_key, output_slot)``
+    - ``output_keys`` maps output_slot -> charge key
+    - ``output_shapes`` maps output_slot -> array shape (for pre-allocation)
+
+    ``env_blocks`` is a list of the raw N-d numpy arrays for all input
+    tensors EXCEPT theta (which changes each matvec call).
+    """
+    from tenax.contraction._blas_plan import get_cached_blas_plan
+
+    # Map output charge keys to integer slots
+    output_key_to_slot: dict[tuple[int, ...], int] = {}
+    output_keys: list[tuple[int, ...]] = []
+
+    # Cache BLAS plan + step_params by block_shapes
+    plan_cache: dict[tuple, tuple] = {}
+
+    combo_descriptors = []
+    output_shapes: list[tuple[int, ...] | None] = []
+
+    for combo_keys, output_key in block_plan:
+        # Extract all blocks
+        all_blocks = [
+            np_blocks_list[i][combo_keys[i]] for i in range(len(np_blocks_list))
+        ]
+        block_shapes = tuple(a.shape for a in all_blocks)
+
+        if block_shapes not in plan_cache:
+            plan = get_cached_blas_plan(subscripts, block_shapes)
+            sp = [
+                (
+                    s.left_idx,
+                    s.right_idx,
+                    s.out_idx,
+                    s.m,
+                    s.n,
+                    s.k,
+                    s.left_perm,
+                    s.right_perm,
+                    s.out_shape,
+                )
+                for s in plan.steps
+            ]
+            plan_cache[block_shapes] = (
+                sp,
+                plan.n_inputs,
+                plan.n_buffers,
+                plan.output_perm,
+            )
+        step_params, n_inputs, n_buffers, output_perm = plan_cache[block_shapes]
+
+        # Separate env blocks (everything except theta)
+        env_blocks = [
+            all_blocks[i] for i in range(len(all_blocks)) if i != theta_buf_idx
+        ]
+        theta_key = combo_keys[theta_buf_idx]
+
+        # Assign output slot
+        if output_key not in output_key_to_slot:
+            slot = len(output_keys)
+            output_key_to_slot[output_key] = slot
+            output_keys.append(output_key)
+            # Determine output shape from plan's last step
+            last_step_shape = step_params[-1][8]  # out_shape
+            if output_perm:
+                last_step_shape = tuple(last_step_shape[p] for p in output_perm)
+            output_shapes.append(last_step_shape)
+        output_slot = output_key_to_slot[output_key]
+
+        combo_descriptors.append(
+            (
+                step_params,
+                n_inputs,
+                n_buffers,
+                output_perm,
+                env_blocks,
+                theta_key,
+                output_slot,
+            )
+        )
+
+    return combo_descriptors, output_keys, output_shapes
+
+
+def _execute_matvec_combos(
+    combo_descriptors: list,
+    theta_blocks: dict,
+    theta_buf_idx: int,
+    output_keys: list,
+    output_shapes: list,
+    output_indices: tuple,
+) -> BlockArray:
+    """Execute all matvec combos, dispatching to Cython if available."""
+    from tenax.algorithms._block_array import BlockArray
+
+    n_slots = len(output_keys)
+
+    if _USE_CYTHON_MATVEC:
+        # Pre-allocate None output buffers (Cython will allocate on first write)
+        output_buffers: list = [None] * n_slots
+        _cython_matvec_combos(
+            combo_descriptors,
+            theta_blocks,
+            theta_buf_idx,
+            output_buffers,
+            output_shapes,
+        )
+        output_blocks = {}
+        for slot in range(n_slots):
+            if output_buffers[slot] is not None:
+                output_blocks[output_keys[slot]] = output_buffers[slot]
+        return BlockArray(blocks=output_blocks, indices=output_indices)
+
+    # Fallback: Python loop (same logic as _blockwise_contract but pre-computed)
+    output_accum: dict[tuple, list] = {}
+    for desc in combo_descriptors:
+        step_params, n_inputs, n_buffers, output_perm = (
+            desc[0],
+            desc[1],
+            desc[2],
+            desc[3],
+        )
+        env_blocks, theta_key, output_slot = desc[4], desc[5], desc[6]
+
+        theta_nd = theta_blocks[theta_key]
+        arrays = list(env_blocks)
+        arrays.insert(theta_buf_idx, theta_nd)
+
+        if _USE_CYTHON_PLAN:
+            result = _cython_execute_plan(
+                step_params,
+                n_inputs,
+                n_buffers,
+                output_perm,
+                arrays,
+            )
+        else:
+            # Inline plan execution (pure numpy fallback)
+            buffers = list(arrays) + [None] * (n_buffers - n_inputs)
+            for sp in step_params:
+                li, ri, oi, M, N, K, lp, rp, os = sp
+                left = buffers[li]
+                right = buffers[ri]
+                if lp:
+                    left = np.transpose(left, lp)
+                if rp:
+                    right = np.transpose(right, rp)
+                left_2d = np.ascontiguousarray(left.reshape(M, K))
+                right_2d = np.ascontiguousarray(right.reshape(K, N))
+                buffers[oi] = (left_2d @ right_2d).reshape(os)
+            result = buffers[step_params[-1][2]]
+            if output_perm:
+                result = np.ascontiguousarray(np.transpose(result, output_perm))
+
+        out_key = output_keys[output_slot]
+        output_accum.setdefault(out_key, []).append(result)
+
+    output_blocks = {}
+    for key, arrays in output_accum.items():
+        total = arrays[0]
+        for a in arrays[1:]:
+            total = total + a
+        output_blocks[key] = total
+
+    return BlockArray(blocks=output_blocks, indices=output_indices)
+
+
 def _two_site_update_symmetric_np(
     site_l: Tensor,
     site_r: Tensor,
@@ -2010,11 +2197,9 @@ def _two_site_update_symmetric_np(
     else:
         theta_ba = site_l_ba
 
-    # Shared cache for opt_einsum expressions across Lanczos iterations
-    _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
-
     # Precompute block plan once
     _subs = "abc,apqd,bpse,eqtf,dfg->cstg"
+    _theta_buf_idx = 1  # theta is the 2nd tensor (index 1)
     _plan = _precompute_block_plan([left_env, theta_ba, mpo_l, mpo_r, right_env], _subs)
 
     # Pre-convert env blocks to NumPy once
@@ -2032,17 +2217,25 @@ def _two_site_update_symmetric_np(
 
     _out_indices = theta_ba.indices  # fixed across Lanczos iterations
 
+    # Pre-compute combo descriptors for the batched matvec path.
+    # Temporarily fill the theta slot so block shapes can be computed.
+    _env_np[_theta_buf_idx] = theta_ba.blocks
+    _combo_descs, _out_keys, _out_shapes = _precompute_matvec_combos(
+        _plan,
+        _subs,
+        _env_np,
+        _theta_buf_idx,
+    )
+    _env_np[_theta_buf_idx] = None  # restore
+
     def matvec(v_ba: BlockArray) -> BlockArray:
-        # Pass v blocks directly as np_blocks_cache — avoids numpy→JAX→numpy roundtrip
-        _env_np[1] = v_ba.blocks
-        return _blockwise_contract(
-            [left_env, theta_ba, mpo_l, mpo_r, right_env],
-            _subs,
-            output_indices=_out_indices,
-            expr_cache=_cache,
-            block_plan=_plan,
-            np_blocks_cache=_env_np,
-            return_ba=True,
+        return _execute_matvec_combos(
+            _combo_descs,
+            v_ba.blocks,
+            _theta_buf_idx,
+            _out_keys,
+            _out_shapes,
+            _out_indices,
         )
 
     energy, theta_opt_ba = _lanczos_solve_np(
@@ -2084,11 +2277,9 @@ def _one_site_update_symmetric_np(
     # Convert site to BlockArray -- stays in numpy throughout
     site_ba = symmetric_to_ba(site) if not isinstance(site, BlockArray) else site
 
-    # Shared cache for opt_einsum expressions across Lanczos iterations
-    _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
-
     # Precompute block plan once
     _subs = "abc,apd,bpxe,def->cxf"
+    _theta_buf_idx = 1  # site is the 2nd tensor (index 1)
     _plan = _precompute_block_plan([left_env, site_ba, mpo_site, right_env], _subs)
 
     # Pre-convert env blocks to NumPy once
@@ -2107,16 +2298,24 @@ def _one_site_update_symmetric_np(
 
     _out_indices = site_ba.indices
 
+    # Pre-compute combo descriptors for the batched matvec path.
+    _env_np[_theta_buf_idx] = site_ba.blocks
+    _combo_descs, _out_keys, _out_shapes = _precompute_matvec_combos(
+        _plan,
+        _subs,
+        _env_np,
+        _theta_buf_idx,
+    )
+    _env_np[_theta_buf_idx] = None
+
     def matvec(v_ba: BlockArray) -> BlockArray:
-        _env_np[1] = v_ba.blocks
-        return _blockwise_contract(
-            [left_env, site_ba, mpo_site, right_env],
-            _subs,
-            output_indices=_out_indices,
-            expr_cache=_cache,
-            block_plan=_plan,
-            np_blocks_cache=_env_np,
-            return_ba=True,
+        return _execute_matvec_combos(
+            _combo_descs,
+            v_ba.blocks,
+            _theta_buf_idx,
+            _out_keys,
+            _out_shapes,
+            _out_indices,
         )
 
     energy, site_opt_ba = _lanczos_solve_np(

@@ -1234,6 +1234,139 @@ def cython_execute_plan(
 
 
 # ------------------------------------------------------------------ #
+# cython_matvec_combos: batched combo execution for DMRG matvec        #
+# ------------------------------------------------------------------ #
+
+
+def cython_matvec_combos(
+    list combo_descriptors,
+    dict theta_blocks,
+    int theta_buf_idx,
+    list output_buffers,
+    list output_buf_shapes,
+):
+    """Execute ALL block combos for one matvec call in a single C loop.
+
+    Each combo descriptor is a tuple:
+        (step_params, n_inputs, n_buffers, output_perm,
+         env_blocks,          # list of pre-extracted N-d numpy arrays for env tensors
+         theta_key,           # block key into theta_blocks dict
+         theta_step_role,     # (perm, shape_2d) for theta's first-use step
+         output_slot,         # int index into output_buffers
+        )
+
+    ``env_blocks[i]`` is the raw N-d numpy array for input buffer *i*
+    (skipping theta_buf_idx). The function transposes and reshapes
+    all blocks per step internally.
+
+    ``output_buffers`` is a list of pre-allocated numpy arrays (zeroed),
+    one per unique output key. Results are accumulated in-place via +=.
+
+    This eliminates the Python loop in ``_blockwise_contract`` for the
+    matvec hot path, reducing ~100 Python→Cython round trips to 1.
+    """
+    cdef int n_combos = len(combo_descriptors)
+    cdef int c, s, n_steps, n_elem, inc
+    cdef int li, ri, oi, M, N, K
+    cdef double alpha_d = 1.0, beta_d = 0.0
+    cdef double complex alpha_z = 1.0 + 0j, beta_z = 0.0 + 0j
+    cdef double* left_p
+    cdef double* right_p
+    cdef double* out_p
+    cdef double complex* left_p_z
+    cdef double complex* right_p_z
+    cdef double complex* out_p_z
+    cdef cnp.ndarray left_arr, right_arr, out_arr
+
+    inc = 1
+
+    for c in range(n_combos):
+        desc = combo_descriptors[c]
+        step_params = desc[0]
+        n_inputs = desc[1]
+        n_buffers = desc[2]
+        output_perm = desc[3]
+        env_blocks = desc[4]
+        theta_key = desc[5]
+        output_slot = desc[6]
+
+        n_steps = len(step_params)
+
+        # Build buffer list: env blocks + theta block
+        theta_nd = theta_blocks[theta_key]
+        buffers = list(env_blocks)
+        buffers.insert(theta_buf_idx, theta_nd)
+        if n_buffers > n_inputs:
+            buffers.extend([None] * (n_buffers - n_inputs))
+
+        # Execute GEMM chain
+        for s in range(n_steps):
+            li, ri, oi, M, N, K, lp, rp, os = step_params[s]
+
+            left = buffers[li]
+            right = buffers[ri]
+
+            if lp:
+                left = np.ascontiguousarray(np.transpose(left, lp).reshape(M, K))
+            else:
+                left = np.ascontiguousarray(left.reshape(M, K))
+
+            if rp:
+                right = np.ascontiguousarray(np.transpose(right, rp).reshape(K, N))
+            else:
+                right = np.ascontiguousarray(right.reshape(K, N))
+
+            if left.dtype == np.float64:
+                out_arr = np.empty((M, N), dtype=np.float64)
+                left_arr = np.asarray(left)
+                right_arr = np.asarray(right)
+                left_p = <double*>cnp.PyArray_DATA(left_arr)
+                right_p = <double*>cnp.PyArray_DATA(right_arr)
+                out_p = <double*>cnp.PyArray_DATA(out_arr)
+                with nogil:
+                    _dgemm_row_major(M, N, K, alpha_d, left_p, right_p, beta_d, out_p)
+                buffers[oi] = out_arr.reshape(os)
+            elif left.dtype == np.complex128:
+                out_arr = np.empty((M, N), dtype=np.complex128)
+                left_arr = np.asarray(left)
+                right_arr = np.asarray(right)
+                left_p_z = <double complex*>cnp.PyArray_DATA(left_arr)
+                right_p_z = <double complex*>cnp.PyArray_DATA(right_arr)
+                out_p_z = <double complex*>cnp.PyArray_DATA(out_arr)
+                with nogil:
+                    _zgemm_row_major(M, N, K, alpha_z, left_p_z, right_p_z, beta_z, out_p_z)
+                buffers[oi] = out_arr.reshape(os)
+            else:
+                buffers[oi] = (left @ right).reshape(os)
+
+        result = buffers[step_params[n_steps - 1][2]]
+        if output_perm:
+            result = np.ascontiguousarray(np.transpose(result, output_perm))
+
+        # Accumulate into output buffer
+        ob = output_buffers[output_slot]
+        if ob is None:
+            output_buffers[output_slot] = result.copy()
+        else:
+            # In-place add via daxpy (avoid allocation)
+            n_elem = result.size
+            result_c = np.ascontiguousarray(result.reshape(-1))
+            ob_flat = ob.reshape(-1)
+            if ob.dtype == np.float64:
+                left_p = <double*>cnp.PyArray_DATA(<cnp.ndarray>result_c)
+                out_p = <double*>cnp.PyArray_DATA(<cnp.ndarray>ob_flat)
+                with nogil:
+                    _daxpy(&n_elem, &alpha_d, left_p, &inc, out_p, &inc)
+            elif ob.dtype == np.complex128:
+                left_p_z = <double complex*>cnp.PyArray_DATA(<cnp.ndarray>result_c)
+                out_p_z = <double complex*>cnp.PyArray_DATA(<cnp.ndarray>ob_flat)
+                with nogil:
+                    _zaxpy(&n_elem, &alpha_z, left_p_z, &inc, out_p_z, &inc)
+            else:
+                output_buffers[output_slot] = ob + result
+
+
+# ------------------------------------------------------------------ #
 # cython_ba_sub_scaled_inplace: in-place w -= scalar * q via daxpy     #
 # ------------------------------------------------------------------ #
 
