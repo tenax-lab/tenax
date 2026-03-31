@@ -135,6 +135,8 @@ result2 = bp.launch()
 
 ## DMRG Example
 
+> **Performance note:** Tenax's DMRG is functional and correct but not yet optimized for maximum throughput — the block-sparse contraction engine dispatches to BLAS from Python, which adds overhead at large bond dimensions. Tenax's strengths lie in JAX-based AD optimization (iPEPS), GPU/TPU acceleration (TRG, HOTRG), and as an educational platform.
+
 ```python
 from tenax.algorithms.dmrg import dmrg, build_mpo_heisenberg, DMRGConfig
 from tenax.network.network import build_mps
@@ -513,4 +515,4 @@ The generated HTML is in `docs/_build/html/`.
 
 ## License
 
-MIT
+Apache 2.0
