@@ -10,7 +10,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.core.index import FlowDirection, Label, TensorIndex
+from tenax.core.index import FlowDirection, FuseInfo, Label, TensorIndex
+from tenax.core.symmetry import BaseSymmetry
 from tenax.core.tensor import BlockKey, DenseTensor, SymmetricTensor, Tensor
 
 
@@ -156,12 +157,22 @@ def _fuse_indices_dense(
     new_shape = shape[:a] + [shape[a] * shape[a + 1]] + shape[a + 2 :]
     data = data.reshape(new_shape)
 
-    # Build fused index
+    # Build fused index with FuseInfo
     idx_a, idx_b = indices_perm[a], indices_perm[a + 1]
-    fused_charges = _compute_fused_charges(idx_a, idx_b, fused_flow, idx_a.symmetry)
-    fused_idx = TensorIndex.from_charges(
-        idx_a.symmetry, fused_charges, fused_flow, label=fused_label
+    sym = idx_a.symmetry
+    fused_charges = _compute_fused_charges(idx_a, idx_b, fused_flow, sym)
+    sectors, mults = np.unique(fused_charges, return_counts=True)
+    fuse_info = FuseInfo(parent_indices=(idx_a, idx_b))
+    fused_idx = TensorIndex(
+        sym,
+        sectors.astype(np.int32),
+        mults.astype(np.int32),
+        fused_flow,
+        label=fused_label,
+        fuse_info=fuse_info,
     )
+    # Preserve original charges ordering for from_dense/todense compat
+    object.__setattr__(fused_idx, "_charges_cache", fused_charges)
     new_indices = tuple(indices_perm[:a]) + (fused_idx,) + tuple(indices_perm[a + 2 :])
     return DenseTensor(data, new_indices)
 
@@ -205,6 +216,42 @@ def _compute_fused_charges(
     return fused
 
 
+def _compute_fused_sectors(
+    idx_a: TensorIndex,
+    idx_b: TensorIndex,
+    fused_flow: FlowDirection,
+    sym: BaseSymmetry,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute sectors and multiplicities for a fused index at O(n_sectors^2).
+
+    For each pair of sectors (qa, qb), the fused charge is
+    ``(flow_a * qa + flow_b * qb) * fused_flow_sign``, and the fused
+    multiplicity is ``m_a * m_b`` (summed over pairs giving the same q_f).
+
+    Returns:
+        (sectors, multiplicities) — sorted int32 arrays.
+    """
+    flow_a = int(idx_a.flow)
+    flow_b = int(idx_b.flow)
+    fused_sign = int(fused_flow)
+    n_vals = sym.n_values()
+
+    fused_mults: dict[int, int] = {}
+    for i, qa in enumerate(idx_a.sectors):
+        ma = int(idx_a.multiplicities[i])
+        for j, qb in enumerate(idx_b.sectors):
+            mb = int(idx_b.multiplicities[j])
+            raw = flow_a * int(qa) + flow_b * int(qb)
+            q_f = raw * fused_sign
+            if n_vals is not None:
+                q_f = q_f % n_vals
+            fused_mults[q_f] = fused_mults.get(q_f, 0) + ma * mb
+
+    sectors = np.array(sorted(fused_mults.keys()), dtype=np.int32)
+    multiplicities = np.array([fused_mults[int(q)] for q in sectors], dtype=np.int32)
+    return sectors, multiplicities
+
+
 def _fuse_indices_symmetric(
     T: SymmetricTensor,
     axis_a: int,
@@ -224,11 +271,19 @@ def _fuse_indices_symmetric(
     idx_b = T.indices[b]
     sym = idx_a.symmetry
 
-    # Build fused TensorIndex
+    # Build fused TensorIndex with FuseInfo
     fused_charges = _compute_fused_charges(idx_a, idx_b, fused_flow, sym)
-    fused_idx = TensorIndex.from_charges(
-        sym, fused_charges, fused_flow, label=fused_label
+    sectors, mults = np.unique(fused_charges, return_counts=True)
+    fuse_info = FuseInfo(parent_indices=(idx_a, idx_b))
+    fused_idx = TensorIndex(
+        sym,
+        sectors.astype(np.int32),
+        mults.astype(np.int32),
+        fused_flow,
+        label=fused_label,
+        fuse_info=fuse_info,
     )
+    object.__setattr__(fused_idx, "_charges_cache", fused_charges)
 
     # Compute where each (i, j) element lands in the fused block.
     #

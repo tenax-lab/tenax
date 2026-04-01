@@ -273,6 +273,60 @@ class TestFuseIndices:
         result = fuse_indices(T, 1, 3, "dr", FlowDirection.OUT)
         assert result.ndim == 3
 
+    def test_dense_fuse_populates_fuse_info(self, u1, rng):
+        """Fused DenseTensor leg should have FuseInfo with parent indices."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
+        )
+        data = jax.random.normal(rng, (3, 3, 3))
+        T = DenseTensor(data, indices)
+        result = fuse_indices(T, 0, 1, "ab", FlowDirection.IN)
+
+        fused_idx = result.indices[0]
+        assert fused_idx.fuse_info is not None
+        assert len(fused_idx.fuse_info.parent_indices) == 2
+        assert fused_idx.fuse_info.parent_indices[0].label == "a"
+        assert fused_idx.fuse_info.parent_indices[1].label == "b"
+
+    def test_symmetric_fuse_populates_fuse_info(self, u1, rng):
+        """Fused SymmetricTensor leg should have FuseInfo with parent indices."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="b"
+            ),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
+        )
+        T = SymmetricTensor.random_normal(indices, rng)
+        result = fuse_indices(T, 0, 1, "ab", FlowDirection.IN)
+
+        fused_idx = result.indices[0]
+        assert fused_idx.fuse_info is not None
+        assert len(fused_idx.fuse_info.parent_indices) == 2
+        assert fused_idx.fuse_info.parent_indices[0].label == "a"
+        assert fused_idx.fuse_info.parent_indices[1].label == "b"
+
+    def test_fuse_sectors_computation(self, u1):
+        """_compute_fused_sectors gives correct sectors and total dim."""
+        from tenax.algorithms._tensor_utils import _compute_fused_sectors
+
+        charges_a = np.array([-1, 0, 1], dtype=np.int32)
+        idx_a = TensorIndex.from_charges(u1, charges_a, FlowDirection.IN, label="a")
+        idx_b = TensorIndex.from_charges(
+            u1, u1.dual(charges_a), FlowDirection.OUT, label="b"
+        )
+
+        sectors, mults = _compute_fused_sectors(idx_a, idx_b, FlowDirection.IN, u1)
+
+        assert len(sectors) == len(mults)
+        assert int(np.sum(mults)) == 9  # 3 * 3
+        # sectors should be sorted
+        np.testing.assert_array_equal(sectors, np.sort(sectors))
+
 
 class TestDoubleLayerTensor:
     """Tests for double_layer_tensor on DenseTensor and SymmetricTensor."""
