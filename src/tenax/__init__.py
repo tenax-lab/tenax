@@ -128,7 +128,7 @@ from tenax.contraction.contractor import (
     qr_decompose,
     truncated_svd,
 )
-from tenax.core.index import FlowDirection, Label, TensorIndex
+from tenax.core.index import FlowDirection, FuseInfo, Label, TensorIndex
 from tenax.core.lattice import (
     Bond,
     Lattice,
@@ -170,6 +170,7 @@ __all__ = [
     "ProductSymmetry",
     # Index
     "FlowDirection",
+    "FuseInfo",
     "Label",
     "TensorIndex",
     # MPS
