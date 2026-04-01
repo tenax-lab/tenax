@@ -132,12 +132,12 @@ def _unified_fused_index(idx_a: TensorIndex, idx_b: TensorIndex) -> TensorIndex:
     # *maximum* multiplicity seen in either index so the projector's
     # fused dimension is large enough for both corners' blocks.
     unique_charges = sorted(
-        set(int(c) for c in idx_a.charges) | set(int(c) for c in idx_b.charges)
+        set(int(c) for c in idx_a.sectors) | set(int(c) for c in idx_b.sectors)
     )
     charges_list: list[int] = []
     for q in unique_charges:
-        n_a = int(np.sum(idx_a.charges == q))
-        n_b = int(np.sum(idx_b.charges == q))
+        n_a = idx_a.multiplicity(q)
+        n_b = idx_b.multiplicity(q)
         charges_list.extend([q] * max(n_a, n_b))
 
     return TensorIndex.from_charges(

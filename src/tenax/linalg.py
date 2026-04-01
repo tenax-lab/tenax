@@ -158,7 +158,7 @@ def _truncated_svd_symmetric(
             size = 1
             for leg_pos, charge_val in zip(left_axes, lk):
                 idx = tensor.indices[leg_pos]
-                size *= int(np.sum(idx.charges == charge_val))
+                size *= idx.multiplicity(charge_val)
             left_row_sizes.append(size)
 
         right_col_sizes: list[int] = []
@@ -166,7 +166,7 @@ def _truncated_svd_symmetric(
             size = 1
             for leg_pos, charge_val in zip(right_axes, rk):
                 idx = tensor.indices[leg_pos]
-                size *= int(np.sum(idx.charges == charge_val))
+                size *= idx.multiplicity(charge_val)
             right_col_sizes.append(size)
 
         total_rows = sum(left_row_sizes)
@@ -311,8 +311,7 @@ def _truncated_svd_symmetric(
             u_slice = U_q_trunc[row_offset : row_offset + n_rows, :]
             # Reshape: (prod(left_shape_for_lk), n_q) -> (left_shape_for_lk..., n_q)
             left_shape = tuple(
-                int(np.sum(tensor.indices[ax].charges == ch))
-                for ax, ch in zip(left_axes, lk)
+                tensor.indices[ax].multiplicity(ch) for ax, ch in zip(left_axes, lk)
             )
             u_block = u_slice.reshape(left_shape + (n_q,))
             block_key = lk + (q,)
@@ -325,8 +324,7 @@ def _truncated_svd_symmetric(
             n_cols = right_col_sizes[ri]
             vh_slice = Vh_q_trunc[:, col_offset : col_offset + n_cols]
             right_shape = tuple(
-                int(np.sum(tensor.indices[ax].charges == ch))
-                for ax, ch in zip(right_axes, rk)
+                tensor.indices[ax].multiplicity(ch) for ax, ch in zip(right_axes, rk)
             )
             vh_block = vh_slice.reshape((n_q,) + right_shape)
             block_key = (q,) + rk
@@ -427,7 +425,7 @@ def _truncated_svd_symmetric_np(
             size = 1
             for leg_pos, charge_val in zip(left_axes, lk):
                 idx = tensor.indices[leg_pos]
-                size *= int(np.sum(idx.charges == charge_val))
+                size *= idx.multiplicity(charge_val)
             left_row_sizes.append(size)
 
         right_col_sizes: list[int] = []
@@ -435,7 +433,7 @@ def _truncated_svd_symmetric_np(
             size = 1
             for leg_pos, charge_val in zip(right_axes, rk):
                 idx = tensor.indices[leg_pos]
-                size *= int(np.sum(idx.charges == charge_val))
+                size *= idx.multiplicity(charge_val)
             right_col_sizes.append(size)
 
         total_rows = sum(left_row_sizes)
@@ -568,8 +566,7 @@ def _truncated_svd_symmetric_np(
             n_rows = left_row_sizes[li]
             u_slice = U_q_trunc[row_offset : row_offset + n_rows, :]
             left_shape = tuple(
-                int(np.sum(tensor.indices[ax].charges == ch))
-                for ax, ch in zip(left_axes, lk)
+                tensor.indices[ax].multiplicity(ch) for ax, ch in zip(left_axes, lk)
             )
             u_block = u_slice.reshape(left_shape + (n_q,))
             block_key = lk + (q,)
@@ -582,8 +579,7 @@ def _truncated_svd_symmetric_np(
             n_cols = right_col_sizes[ri]
             vh_slice = Vh_q_trunc[:, col_offset : col_offset + n_cols]
             right_shape = tuple(
-                int(np.sum(tensor.indices[ax].charges == ch))
-                for ax, ch in zip(right_axes, rk)
+                tensor.indices[ax].multiplicity(ch) for ax, ch in zip(right_axes, rk)
             )
             vh_block = vh_slice.reshape((n_q,) + right_shape)
             block_key = (q,) + rk
@@ -658,7 +654,7 @@ def _qr_symmetric_np(
             size = 1
             for leg_pos, charge_val in zip(left_axes, lk):
                 idx = tensor.indices[leg_pos]
-                size *= int(np.sum(idx.charges == charge_val))
+                size *= idx.multiplicity(charge_val)
             left_row_sizes.append(size)
 
         right_col_sizes: list[int] = []
@@ -666,7 +662,7 @@ def _qr_symmetric_np(
             size = 1
             for leg_pos, charge_val in zip(right_axes, rk):
                 idx = tensor.indices[leg_pos]
-                size *= int(np.sum(idx.charges == charge_val))
+                size *= idx.multiplicity(charge_val)
             right_col_sizes.append(size)
 
         total_rows = sum(left_row_sizes)
@@ -749,8 +745,7 @@ def _qr_symmetric_np(
             n_rows = left_row_sizes[li]
             q_slice = Q_q[row_offset : row_offset + n_rows, :]
             left_shape = tuple(
-                int(np.sum(tensor.indices[ax].charges == ch))
-                for ax, ch in zip(left_axes, lk)
+                tensor.indices[ax].multiplicity(ch) for ax, ch in zip(left_axes, lk)
             )
             q_block = q_slice.reshape(left_shape + (bond_dim_q,))
             Q_blocks[lk + (q,)] = q_block
@@ -762,8 +757,7 @@ def _qr_symmetric_np(
             n_cols = right_col_sizes[ri]
             r_slice = R_q[:, col_offset : col_offset + n_cols]
             right_shape = tuple(
-                int(np.sum(tensor.indices[ax].charges == ch))
-                for ax, ch in zip(right_axes, rk)
+                tensor.indices[ax].multiplicity(ch) for ax, ch in zip(right_axes, rk)
             )
             r_block = r_slice.reshape((bond_dim_q,) + right_shape)
             R_blocks[(q,) + rk] = r_block
@@ -837,7 +831,7 @@ def _qr_symmetric(
             size = 1
             for leg_pos, charge_val in zip(left_axes, lk):
                 idx = tensor.indices[leg_pos]
-                size *= int(np.sum(idx.charges == charge_val))
+                size *= idx.multiplicity(charge_val)
             left_row_sizes.append(size)
 
         right_col_sizes: list[int] = []
@@ -845,7 +839,7 @@ def _qr_symmetric(
             size = 1
             for leg_pos, charge_val in zip(right_axes, rk):
                 idx = tensor.indices[leg_pos]
-                size *= int(np.sum(idx.charges == charge_val))
+                size *= idx.multiplicity(charge_val)
             right_col_sizes.append(size)
 
         total_rows = sum(left_row_sizes)
@@ -926,8 +920,7 @@ def _qr_symmetric(
             n_rows = left_row_sizes[li]
             q_slice = Q_q[row_offset : row_offset + n_rows, :]
             left_shape = tuple(
-                int(np.sum(tensor.indices[ax].charges == ch))
-                for ax, ch in zip(left_axes, lk)
+                tensor.indices[ax].multiplicity(ch) for ax, ch in zip(left_axes, lk)
             )
             q_block = q_slice.reshape(left_shape + (bond_dim_q,))
             Q_blocks[lk + (q,)] = q_block
@@ -939,8 +932,7 @@ def _qr_symmetric(
             n_cols = right_col_sizes[ri]
             r_slice = R_q[:, col_offset : col_offset + n_cols]
             right_shape = tuple(
-                int(np.sum(tensor.indices[ax].charges == ch))
-                for ax, ch in zip(right_axes, rk)
+                tensor.indices[ax].multiplicity(ch) for ax, ch in zip(right_axes, rk)
             )
             r_block = r_slice.reshape((bond_dim_q,) + right_shape)
             R_blocks[(q,) + rk] = r_block
@@ -1009,7 +1001,7 @@ def _eigh_symmetric(
             size = 1
             for leg_pos, charge_val in zip(left_axes, lk):
                 idx = tensor.indices[leg_pos]
-                size *= int(np.sum(idx.charges == charge_val))
+                size *= idx.multiplicity(charge_val)
             left_row_sizes.append(size)
 
         right_col_sizes: list[int] = []
@@ -1018,7 +1010,7 @@ def _eigh_symmetric(
             size = 1
             for leg_pos, charge_val in zip(right_axes, rk):
                 idx = tensor.indices[leg_pos]
-                size *= int(np.sum(idx.charges == charge_val))
+                size *= idx.multiplicity(charge_val)
             right_col_sizes.append(size)
 
         total_rows = sum(left_row_sizes)
@@ -1101,8 +1093,7 @@ def _eigh_symmetric(
             n_rows = left_row_sizes[li]
             v_slice = V_q[row_offset : row_offset + n_rows, :]
             left_shape = tuple(
-                int(np.sum(tensor.indices[ax].charges == ch))
-                for ax, ch in zip(left_axes, lk)
+                tensor.indices[ax].multiplicity(ch) for ax, ch in zip(left_axes, lk)
             )
             v_block = v_slice.reshape(left_shape + (n_q,))
             V_blocks[lk + (q,)] = v_block
@@ -1378,7 +1369,7 @@ def _rsvd_symmetric(
             size = 1
             for leg_pos, charge_val in zip(left_axes, lk):
                 idx = tensor.indices[leg_pos]
-                size *= int(np.sum(idx.charges == charge_val))
+                size *= idx.multiplicity(charge_val)
             left_row_sizes.append(size)
 
         right_col_sizes: list[int] = []
@@ -1386,7 +1377,7 @@ def _rsvd_symmetric(
             size = 1
             for leg_pos, charge_val in zip(right_axes, rk):
                 idx = tensor.indices[leg_pos]
-                size *= int(np.sum(idx.charges == charge_val))
+                size *= idx.multiplicity(charge_val)
             right_col_sizes.append(size)
 
         total_rows = sum(left_row_sizes)
@@ -1485,8 +1476,7 @@ def _rsvd_symmetric(
             n_rows = left_row_sizes[li]
             u_slice = U_q_trunc[row_offset : row_offset + n_rows, :]
             left_shape = tuple(
-                int(np.sum(tensor.indices[ax].charges == ch))
-                for ax, ch in zip(left_axes, lk)
+                tensor.indices[ax].multiplicity(ch) for ax, ch in zip(left_axes, lk)
             )
             u_block = u_slice.reshape(left_shape + (n_q,))
             U_blocks[lk + (q,)] = u_block
@@ -1497,8 +1487,7 @@ def _rsvd_symmetric(
             n_cols = right_col_sizes[ri]
             vh_slice = Vh_q_trunc[:, col_offset : col_offset + n_cols]
             right_shape = tuple(
-                int(np.sum(tensor.indices[ax].charges == ch))
-                for ax, ch in zip(right_axes, rk)
+                tensor.indices[ax].multiplicity(ch) for ax, ch in zip(right_axes, rk)
             )
             vh_block = vh_slice.reshape((n_q,) + right_shape)
             Vh_blocks[(q,) + rk] = vh_block

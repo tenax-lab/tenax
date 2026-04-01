@@ -241,8 +241,8 @@ def _fuse_indices_symmetric(
     # contiguously.
 
     db = len(idx_b.charges)
-    unique_qa = np.unique(idx_a.charges)
-    unique_qb = np.unique(idx_b.charges)
+    unique_qa = idx_a.sectors
+    unique_qb = idx_b.sectors
 
     flow_a_sign = int(idx_a.flow)
     flow_b_sign = int(idx_b.flow)
