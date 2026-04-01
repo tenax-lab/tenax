@@ -760,3 +760,27 @@ class TestSolveRightEnvFixedpoint:
         R_env = _solve_right_env_fixedpoint_dense(A_R, W)
         D_w = W.shape[0]
         np.testing.assert_allclose(R_env[:, D_w - 1, :], 0.0, atol=1e-15)
+
+
+# ---------------------------------------------------------------------------
+# TestFixedPointIntegration
+# ---------------------------------------------------------------------------
+
+
+class TestFixedPointIntegration:
+    def test_energy_accuracy_improved(self):
+        """With fixed-point envs, chi=16 should match Bethe within 0.1%."""
+        e_exact = 0.25 - math.log(2)
+        W = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+        cfg = iDMRGConfig(
+            max_bond_dim=16,
+            max_iterations=60,
+            convergence_tol=1e-10,
+            lanczos_max_iter=30,
+        )
+        result = idmrg(W, cfg, dtype=jnp.float64)
+        rel_err = abs(result.energy_per_site - e_exact) / abs(e_exact)
+        assert rel_err < 0.001, (
+            f"e/site={result.energy_per_site:.10f} vs exact {e_exact:.10f} "
+            f"(rel err={rel_err:.6f})"
+        )

@@ -1205,17 +1205,12 @@ def _idmrg_sweep(
     R_env = _update_right_env_dense(R_env, A_R, W)
     chi_env = n_keep
 
-    # Environment warmup: contract A_L/A_R through environments repeatedly
-    # to build self-consistent infinite environments before optimization.
-    n_env_warmup = 10
-    for warmup in range(n_env_warmup):
-        L_env = _update_left_env_dense(L_env, A_L, W)
-        R_env = _update_right_env_dense(R_env, A_R, W)
-        if config.verbose:
-            print(
-                f"  Env warmup {warmup + 1}/{n_env_warmup}: L_env shape={L_env.shape}",
-                flush=True,
-            )
+    # ---- Compute fixed-point environments ----
+    L_env = jnp.array(_solve_left_env_fixedpoint_dense(np.array(A_L), np.array(W)))
+    R_env = jnp.array(_solve_right_env_fixedpoint_dense(np.array(A_R), np.array(W)))
+
+    if config.verbose:
+        print("  Computed fixed-point environments", flush=True)
 
     # ---- Phase 3: Self-consistent optimization sweeps ----
     energies_per_step: list[float] = []
@@ -1268,20 +1263,17 @@ def _idmrg_sweep(
         A_L = U.reshape(chi_l, d, n_keep)
         A_R = Vt.reshape(n_keep, d, chi_r)
 
-        # ---- Update both environments with optimized tensors ----
+        # ---- Update environments with optimized tensors ----
         L_env = _update_left_env_dense(L_env, A_L, W)
         R_env = _update_right_env_dense(R_env, A_R, W)
 
         # ---- Energy per site via energy difference ----
-        # Each sweep adds 2 sites to the effective chain via environment updates,
-        # so the energy per site is the change in total energy divided by 2.
         if E_prev is not None:
             e_per_site = (E_total - E_prev) / 2.0
         else:
             e_per_site = E_total / 2.0
         energies_per_step.append(e_per_site)
 
-        # ---- Prepare for next sweep ----
         E_prev = E_total
         chi_env = n_keep
 
@@ -1293,12 +1285,9 @@ def _idmrg_sweep(
             )
 
         # ---- Check convergence ----
-        n_e = len(energies_per_step)
-        if n_e >= 4:
-            n_half = min(n_e // 2, 5)
-            avg_recent = sum(energies_per_step[-n_half:]) / n_half
-            avg_prev = sum(energies_per_step[-2 * n_half : -n_half]) / n_half
-            if abs(avg_recent - avg_prev) < config.convergence_tol:
+        if len(energies_per_step) >= 2:
+            de = abs(energies_per_step[-1] - energies_per_step[-2])
+            if de < config.convergence_tol:
                 converged = True
                 if config.verbose:
                     print(f"Converged at sweep {sweep + 1}", flush=True)
@@ -1343,8 +1332,7 @@ def _idmrg_sweep(
     A_R_sv = jnp.einsum("a,apb->apb", s_center, A_R)
     A_R_tensor = _wrap_mps(A_R_sv, ("v_c", "p_r", "v_r"))
 
-    n_avg = max(len(energies_per_step) // 2, 1)
-    e_per_site_avg = sum(energies_per_step[-n_avg:]) / n_avg
+    e_per_site_avg = energies_per_step[-1] if energies_per_step else 0.0
 
     return iDMRGResult(
         energy_per_site=e_per_site_avg,
@@ -1734,7 +1722,6 @@ def _idmrg_1site_sweep(
             e_per_site = E_total / 2.0
         energies_per_step.append(e_per_site)
 
-        # ---- Prepare for next sweep ----
         E_prev = E_total
         theta_prev = theta_opt
         chi_env = n_keep
@@ -1747,12 +1734,9 @@ def _idmrg_1site_sweep(
             )
 
         # ---- Check convergence ----
-        n_e = len(energies_per_step)
-        if n_e >= 4:
-            n_half = min(n_e // 2, 5)
-            avg_recent = sum(energies_per_step[-n_half:]) / n_half
-            avg_prev = sum(energies_per_step[-2 * n_half : -n_half]) / n_half
-            if abs(avg_recent - avg_prev) < config.convergence_tol:
+        if len(energies_per_step) >= 2:
+            de = abs(energies_per_step[-1] - energies_per_step[-2])
+            if de < config.convergence_tol:
                 converged = True
                 if config.verbose:
                     print(f"Converged at sweep {sweep + 1}", flush=True)
@@ -1796,8 +1780,7 @@ def _idmrg_1site_sweep(
     A_R_sv = jnp.einsum("a,apb->apb", s_center, A_R)
     A_R_tensor = _wrap_mps(A_R_sv, ("v_c", "p_r", "v_r"))
 
-    n_avg = max(len(energies_per_step) // 2, 1)
-    e_per_site_avg = sum(energies_per_step[-n_avg:]) / n_avg
+    e_per_site_avg = energies_per_step[-1] if energies_per_step else 0.0
 
     return iDMRGResult(
         energy_per_site=e_per_site_avg,
