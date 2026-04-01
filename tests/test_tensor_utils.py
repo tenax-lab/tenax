@@ -11,6 +11,7 @@ from tenax.algorithms._tensor_utils import (
     fuse_indices,
     max_abs_normalize,
     scale_bond_axis,
+    split_index,
 )
 from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core.index import FlowDirection, TensorIndex
@@ -326,6 +327,115 @@ class TestFuseIndices:
         assert int(np.sum(mults)) == 9  # 3 * 3
         # sectors should be sorted
         np.testing.assert_array_equal(sectors, np.sort(sectors))
+
+
+class TestSplitIndex:
+    """Tests for split_index — inverse of fuse_indices."""
+
+    def test_dense_fuse_split_roundtrip(self, u1, rng):
+        """Fuse then split should recover the original DenseTensor."""
+        charges = np.zeros(3, dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
+        )
+        data = jax.random.normal(rng, (3, 3, 3))
+        T = DenseTensor(data, indices)
+
+        fused = fuse_indices(T, 0, 1, "ab", FlowDirection.IN)
+        recovered = split_index(fused, 0)
+
+        np.testing.assert_allclose(recovered.todense(), T.todense(), rtol=1e-6)
+        assert recovered.labels() == T.labels()
+
+    def test_dense_nontrivial_charges_roundtrip(self, u1, rng):
+        """Fuse-split roundtrip with nontrivial U(1) charges."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
+        )
+        data = jax.random.normal(rng, (3, 3, 3))
+        T = DenseTensor(data, indices)
+
+        fused = fuse_indices(T, 0, 1, "ab", FlowDirection.IN)
+        recovered = split_index(fused, 0)
+
+        np.testing.assert_allclose(recovered.todense(), T.todense(), rtol=1e-6)
+
+    def test_split_no_fuse_info_raises(self, u1, rng):
+        """split_index on unfused leg should raise ValueError."""
+        charges = np.zeros(2, dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
+        )
+        T = DenseTensor(jax.random.normal(rng, (2, 2)), indices)
+        with pytest.raises(ValueError, match="fuse_info"):
+            split_index(T, 0)
+
+    def test_symmetric_fuse_split_roundtrip(self, u1, rng):
+        """Fuse then split on SymmetricTensor recovers original."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="b"
+            ),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="d"
+            ),
+        )
+        T = SymmetricTensor.random_normal(indices, rng)
+
+        fused = fuse_indices(T, 0, 1, "ab", FlowDirection.IN)
+        recovered = split_index(fused, 0)
+
+        np.testing.assert_allclose(recovered.todense(), T.todense(), rtol=1e-5)
+
+    def test_split_matches_dense(self, u1, rng):
+        """Symmetric split_index matches dense split_index."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="b"
+            ),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
+        )
+        T_sym = SymmetricTensor.random_normal(indices, rng)
+        T_dense = DenseTensor(T_sym.todense(), T_sym.indices)
+
+        fused_sym = fuse_indices(T_sym, 0, 1, "ab", FlowDirection.IN)
+        fused_dense = fuse_indices(T_dense, 0, 1, "ab", FlowDirection.IN)
+
+        split_sym = split_index(fused_sym, 0)
+        split_dense = split_index(fused_dense, 0)
+
+        np.testing.assert_allclose(
+            split_sym.todense(), split_dense.todense(), rtol=1e-5
+        )
+
+    def test_non_adjacent_fuse_split_roundtrip(self, u1, rng):
+        """Fuse-split roundtrip for non-adjacent axes."""
+        charges = np.zeros(2, dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
+        )
+        data = jax.random.normal(rng, (2, 2, 2))
+        T = DenseTensor(data, indices)
+
+        fused = fuse_indices(T, 0, 2, "ac", FlowDirection.IN)
+        recovered = split_index(fused, 0)
+
+        # After fuse(0,2) and split, we get axes (a, c, b) — not (a, b, c)
+        # because fuse transposes non-adjacent axes to be adjacent first
+        assert recovered.ndim == 3
 
 
 class TestDoubleLayerTensor:

@@ -425,6 +425,177 @@ def _fuse_indices_symmetric(
     return obj
 
 
+def split_index(tensor: Tensor, axis: int) -> Tensor:
+    """Split a fused leg back into its parent legs.
+
+    Inverse of ``fuse_indices``. The leg at *axis* must have ``fuse_info``
+    (i.e. it must have been produced by ``fuse_indices``).
+
+    Args:
+        tensor: Input tensor with a fused leg.
+        axis:   Position of the fused leg to split.
+
+    Returns:
+        Tensor with the fused leg replaced by its two parent legs.
+    """
+    fused_idx = tensor.indices[axis]
+    if fused_idx.fuse_info is None:
+        raise ValueError(
+            f"Cannot split index at axis {axis}: fuse_info is None "
+            f"(this leg was not created by fuse_indices)"
+        )
+    if isinstance(tensor, SymmetricTensor):
+        return _split_index_symmetric(tensor, axis)
+    return _split_index_dense(tensor, axis)
+
+
+def _split_index_dense(T: DenseTensor, axis: int) -> DenseTensor:
+    """Split a fused axis of a DenseTensor back into two axes."""
+    fused_idx = T.indices[axis]
+    parent_a, parent_b = fused_idx.fuse_info.parent_indices
+    sym = parent_a.symmetry
+
+    # The fuse step computed charges in (i,j) order then stored them as
+    # _charges_cache. We need to invert: un-permute so positions map back
+    # to the original (i*db + j) layout, then reshape.
+    fused_charges = fused_idx.charges  # original (i,j) order from _charges_cache
+    # Compute what fuse would have produced for the parent charges
+    expected_charges = _compute_fused_charges(parent_a, parent_b, fused_idx.flow, sym)
+
+    if not np.array_equal(fused_charges, expected_charges):
+        # If charges were reordered, compute and apply inverse permutation.
+        # This shouldn't happen when fuse_indices produced the tensor, but
+        # handle it for safety.
+        sort_perm = np.argsort(expected_charges, kind="stable")
+        inv_perm = np.argsort(sort_perm)
+        data = jnp.take(T.todense(), inv_perm, axis=axis)
+    else:
+        data = T.todense()
+
+    # Reshape: split fused axis into (dim_a, dim_b)
+    shape = list(data.shape)
+    new_shape = shape[:axis] + [parent_a.dim, parent_b.dim] + shape[axis + 1 :]
+    data = data.reshape(new_shape)
+
+    # Build new indices
+    new_indices = (
+        tuple(T.indices[:axis]) + (parent_a, parent_b) + tuple(T.indices[axis + 1 :])
+    )
+    return DenseTensor(data, new_indices)
+
+
+def _split_index_symmetric(T: SymmetricTensor, axis: int) -> SymmetricTensor:
+    """Split a fused axis of a SymmetricTensor back into two axes.
+
+    Inverts the scatter logic from ``_fuse_indices_symmetric``: for each
+    fused block, extracts sub-blocks for each (qa, qb) pair.
+    """
+    fused_idx = T.indices[axis]
+    parent_a, parent_b = fused_idx.fuse_info.parent_indices
+    sym = parent_a.symmetry
+    ndim = T.ndim
+
+    flow_a_sign = int(parent_a.flow)
+    flow_b_sign = int(parent_b.flow)
+    fused_sign = int(fused_idx.flow)
+    n_vals = sym.n_values()
+
+    # Reconstruct the scatter map from fuse (same logic as _fuse_indices_symmetric)
+    db = parent_b.dim
+    positions_a: dict[int, np.ndarray] = {}
+    for q in parent_a.sectors:
+        positions_a[int(q)] = np.where(parent_a.charges == q)[0]
+    positions_b: dict[int, np.ndarray] = {}
+    for q in parent_b.sectors:
+        positions_b[int(q)] = np.where(parent_b.charges == q)[0]
+
+    # Group (qa, qb) pairs by fused charge q_f
+    fused_groups: dict[int, list[tuple[int, int]]] = {}
+    for qa in parent_a.sectors:
+        for qb in parent_b.sectors:
+            raw = flow_a_sign * int(qa) + flow_b_sign * int(qb)
+            q_f = raw * fused_sign
+            if n_vals is not None:
+                q_f = q_f % n_vals
+            fused_groups.setdefault(q_f, []).append((int(qa), int(qb)))
+
+    # Rebuild scatter_map (same as fuse)
+    scatter_map: dict[tuple[int, int], np.ndarray] = {}
+    for q_f, pairs in fused_groups.items():
+        all_positions: list[tuple[int, int, int, int]] = []
+        for qa, qb in pairs:
+            local_idx = 0
+            for i in positions_a[qa]:
+                for j in positions_b[qb]:
+                    all_positions.append((int(i) * db + int(j), qa, qb, local_idx))
+                    local_idx += 1
+        all_positions.sort(key=lambda x: x[0])
+        tmp: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        for target_offset, (_, qa, qb, local_idx) in enumerate(all_positions):
+            tmp.setdefault((qa, qb), []).append((local_idx, target_offset))
+        for qa, qb in pairs:
+            if (qa, qb) in tmp:
+                entries = tmp[(qa, qb)]
+                entries.sort(key=lambda x: x[0])
+                scatter_map[(qa, qb)] = np.array(
+                    [t for _, t in entries], dtype=np.int64
+                )
+            else:
+                scatter_map[(qa, qb)] = np.array([], dtype=np.int64)
+
+    # Build new indices: replace fused axis with (parent_a, parent_b)
+    other_axes = [i for i in range(ndim) if i != axis]
+    new_indices = (
+        tuple(T.indices[:axis]) + (parent_a, parent_b) + tuple(T.indices[axis + 1 :])
+    )
+
+    # Gather blocks: for each fused block, extract sub-blocks for each (qa, qb)
+    new_blocks: dict[BlockKey, jax.Array] = {}
+
+    for key, block in T.blocks.items():
+        q_f = int(key[axis])
+        other_charges = tuple(key[i] for i in other_axes)
+
+        # Which (qa, qb) pairs produce this q_f?
+        if q_f not in fused_groups:
+            continue
+        for qa, qb in fused_groups[q_f]:
+            offsets = scatter_map[(qa, qb)]
+            if len(offsets) == 0:
+                continue
+
+            ma = len(positions_a[qa])
+            mb = len(positions_b[qb])
+
+            # Gather elements from fused block at scatter offsets
+            sub_size = ma * mb
+            # Build new block by gathering from fused axis
+            gathered_slices = []
+            for local_idx in range(sub_size):
+                target = int(offsets[local_idx])
+                slc = [slice(None)] * ndim
+                slc[axis] = target
+                gathered_slices.append(block[tuple(slc)])
+
+            if not gathered_slices:
+                continue
+
+            # Stack along fused axis, then reshape to (ma, mb)
+            sub_block = jnp.stack(gathered_slices, axis=axis)
+            shape = list(sub_block.shape)
+            new_shape = shape[:axis] + [ma, mb] + shape[axis + 1 :]
+            sub_block = sub_block.reshape(new_shape)
+
+            # Build new key
+            new_key = other_charges[:axis] + (qa, qb) + other_charges[axis:]
+            new_blocks[new_key] = sub_block
+
+    obj = object.__new__(SymmetricTensor)
+    obj._indices = new_indices
+    obj._init_flat_buffer(new_blocks)
+    return obj
+
+
 def double_layer_tensor(A: Tensor) -> Tensor:
     """Build the double-layer tensor a = A * conj(A) with physical index traced.
 
