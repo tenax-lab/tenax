@@ -9,6 +9,8 @@ import pytest
 
 from tenax.algorithms.idmrg import (
     _orthogonalize_unit_cell_dense,
+    _transfer_op_L,
+    _transfer_op_R,
     build_bulk_mpo_heisenberg,
     build_bulk_mpo_heisenberg_cylinder,
     build_bulk_mpo_heisenberg_symmetric,
@@ -583,3 +585,54 @@ class TestiDMRG1Site:
         # Default
         cfg2 = iDMRGConfig()
         assert cfg2.mixing_factor == 0.05
+
+
+# ---------------------------------------------------------------------------
+# TestTransferMatrixPrimitives
+# ---------------------------------------------------------------------------
+
+
+class TestTransferMatrixPrimitives:
+    def test_transfer_op_L_identity(self):
+        """T^L_I(I) = I for left-isometric A_L."""
+        rng = np.random.RandomState(42)
+        chi, d = 8, 2
+        A_raw = rng.randn(chi * d, chi)
+        Q, _ = np.linalg.qr(A_raw)
+        A_L = Q.reshape(chi, d, chi)
+        x = np.eye(chi)
+        result = _transfer_op_L(A_L, np.eye(d), x)
+        np.testing.assert_allclose(result, np.eye(chi), atol=1e-12)
+
+    def test_transfer_op_L_matches_einsum(self):
+        """_transfer_op_L should match the full einsum."""
+        rng = np.random.RandomState(42)
+        chi, d = 6, 2
+        A_L = rng.randn(chi, d, chi)
+        op = rng.randn(d, d)
+        x = rng.randn(chi, chi)
+        result = _transfer_op_L(A_L, op, x)
+        expected = np.einsum("apd,pq,ac,cqf->df", A_L, op, x, np.conj(A_L))
+        np.testing.assert_allclose(result, expected, atol=1e-12)
+
+    def test_transfer_op_R_identity(self):
+        """T^R_I(I) = I for right-isometric A_R."""
+        rng = np.random.RandomState(42)
+        chi, d = 8, 2
+        B_raw = rng.randn(chi, chi * d)
+        Q, _ = np.linalg.qr(B_raw.T)
+        A_R = Q.T.reshape(chi, d, chi)
+        x = np.eye(chi)
+        result = _transfer_op_R(A_R, np.eye(d), x)
+        np.testing.assert_allclose(result, np.eye(chi), atol=1e-12)
+
+    def test_transfer_op_R_matches_einsum(self):
+        """_transfer_op_R should match the full einsum."""
+        rng = np.random.RandomState(42)
+        chi, d = 6, 2
+        A_R = rng.randn(chi, d, chi)
+        op = rng.randn(d, d)
+        x = rng.randn(chi, chi)
+        result = _transfer_op_R(A_R, op, x)
+        expected = np.einsum("dpa,pq,ac,fqc->df", A_R, op, x, np.conj(A_R))
+        np.testing.assert_allclose(result, expected, atol=1e-12)

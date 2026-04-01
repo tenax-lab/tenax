@@ -471,6 +471,40 @@ def _update_right_env_dense(
     return jnp.einsum("abc,dpa,epxb,fxc->def", R_env, B, W, jnp.conj(B))
 
 
+def _transfer_op_L(
+    A_L: np.ndarray,
+    op: np.ndarray,
+    x: np.ndarray,
+) -> np.ndarray:
+    """Apply left transfer matrix with operator op.
+
+    T^L_op(x)[d,f] = Σ_{a,c,p,q} A_L[a,p,d] · op[p,q] · conj(A_L[c,q,f]) · x[a,c]
+
+    Two-step contraction for O(d² χ³) cost:
+      1. tmp[a,q,f] = x[a,c] · conj(A_L[c,q,f])
+      2. result[d,f] = A_L[a,p,d] · op[p,q] · tmp[a,q,f]
+    """
+    tmp = np.einsum("ac,cqf->aqf", x, np.conj(A_L))
+    return np.einsum("apd,pq,aqf->df", A_L, op, tmp)
+
+
+def _transfer_op_R(
+    A_R: np.ndarray,
+    op: np.ndarray,
+    x: np.ndarray,
+) -> np.ndarray:
+    """Apply right transfer matrix with operator op.
+
+    T^R_op(x)[d,f] = Σ_{a,c,p,q} A_R[d,p,a] · op[p,q] · conj(A_R[f,q,c]) · x[a,c]
+
+    Two-step contraction for O(d² χ³) cost:
+      1. tmp[a,q,f] = x[a,c] · conj(A_R[f,q,c])
+      2. result[d,f] = A_R[d,p,a] · op[p,q] · tmp[a,q,f]
+    """
+    tmp = np.einsum("ac,fqc->aqf", x, np.conj(A_R))
+    return np.einsum("dpa,pq,aqf->df", A_R, op, tmp)
+
+
 # ---------------------------------------------------------------------------
 # Symmetric helpers
 # ---------------------------------------------------------------------------
