@@ -65,6 +65,24 @@ try:
 except ImportError:
     _USE_CYTHON_SUB = False
 
+try:
+    from tenax.contraction._cython_blas import (
+        cython_matvec_combos as _cython_matvec_combos,
+    )
+
+    _USE_CYTHON_MATVEC = True
+except ImportError:
+    _USE_CYTHON_MATVEC = False
+
+try:
+    from tenax.contraction._cython_blas import (
+        cython_lanczos_reorth as _cython_lanczos_reorth,
+    )
+
+    _USE_CYTHON_REORTH = True
+except ImportError:
+    _USE_CYTHON_REORTH = False
+
 
 @dataclass
 class DMRGConfig:
@@ -99,6 +117,17 @@ class DMRGConfig:
         numpy_blockwise:    Use numpy-only path for symmetric DMRG (no JAX
                             overhead). Default True. Set False to use the
                             original JAX-backed symmetric path.
+        accelerator:        Backend dispatch mode for the DMRG sweep:
+                            ``"auto"`` (default) — GPU/TPU uses JIT path; CPU with
+                            symmetric tensors uses numpy/Cython path; CPU with
+                            dense tensors uses JIT path.
+                            ``"jit"`` — force JIT-compiled ``lax.scan`` sweep
+                            (requires dense tensors; silently falls back for
+                            symmetric or 1-site DMRG).
+                            ``"sharded"`` — like ``"jit"`` but shards the bond
+                            dimension across all available devices via GSPMD.
+                            Falls back to ``"jit"`` if only one device is present.
+                            ``"off"`` — always use the existing Python sweep loop.
         verbose:            Print energy at each sweep.
     """
 
@@ -119,6 +148,7 @@ class DMRGConfig:
     numpy_blockwise: bool = (
         True  # Use numpy-only path for symmetric DMRG (no JAX overhead)
     )
+    accelerator: str = "auto"
     verbose: bool = False
 
 
@@ -223,6 +253,276 @@ def dmrg(
             "dmrg() requires uniform tensor types: all DenseTensor or all "
             "SymmetricTensor. Got mixed types — convert explicitly."
         )
+
+    # --- Accelerator dispatch: JIT-compiled sweep via lax.scan -----------
+    if config.accelerator not in ("auto", "jit", "sharded", "off"):
+        raise ValueError(
+            f"accelerator must be 'auto', 'jit', 'sharded', or 'off', "
+            f"got {config.accelerator!r}"
+        )
+
+    use_jit = False
+    if config.accelerator == "jit":
+        use_jit = True
+    elif config.accelerator == "auto":
+        device = jax.devices()[0].platform
+        if device in ("gpu", "tpu"):
+            use_jit = True
+        elif not use_symmetric:
+            use_jit = True
+
+    if config.accelerator == "sharded" and config.two_site and not use_symmetric:
+        from tenax.algorithms._jit_sweep import jit_dmrg_sweep_dense_sharded
+
+        # Go straight to sharded JIT — no warmup phase.
+        # The sharded path pads small bonds to chi_max (zero-padding
+        # handles bonds < chi_max correctly). Warmup would run on a
+        # single GPU and OOM at large chi, defeating the purpose of
+        # sharding.
+        raw_mps = [t.todense() for t in mps_tensors]
+        raw_mpo = [t.todense() for t in mpo_tensors]
+        energies, mps_out_raw = jit_dmrg_sweep_dense_sharded(
+            raw_mps,
+            raw_mpo,
+            chi_max=config.max_bond_dim,
+            num_sweeps=config.num_sweeps,
+            lanczos_max_iter=config.lanczos_max_iter,
+        )
+
+        # Reconstruct DenseTensor wrappers
+        sym = U1Symmetry()
+        result_mps_tensors = []
+        for i, orig_t in enumerate(mps_tensors):
+            new_indices = []
+            for leg_idx, orig_idx in enumerate(orig_t.indices):
+                padded_dim = mps_out_raw[i].shape[leg_idx]
+                if padded_dim == orig_idx.dim:
+                    new_indices.append(orig_idx)
+                else:
+                    new_charges = np.zeros(padded_dim, dtype=np.int32)
+                    new_indices.append(
+                        TensorIndex(
+                            sym,
+                            new_charges,
+                            orig_idx.flow,
+                            label=orig_idx.label,
+                        )
+                    )
+            result_mps_tensors.append(DenseTensor(mps_out_raw[i], tuple(new_indices)))
+        result_mps = FiniteMPS.from_tensors(result_mps_tensors)
+
+        converged = (
+            len(energies) >= 2
+            and abs(energies[-1] - energies[-2]) < config.convergence_tol
+        )
+        return DMRGResult(
+            energy=energies[-1] if energies else 0.0,
+            energies_per_sweep=energies,
+            mps=result_mps,
+            truncation_errors=[],
+            converged=converged,
+        )
+
+    if use_jit and config.two_site and not use_symmetric:
+        from tenax.algorithms._jit_sweep import jit_dmrg_sweep_dense
+
+        # Check if all bonds are already at chi_max.
+        # When bonds are still growing (e.g. initial chi < chi_max), running
+        # the JIT path wastes compute on padded-to-chi_max tensors.  Instead
+        # we run Python sweeps first (warmup) and switch to JIT once all
+        # bonds have saturated at chi_max.
+        all_saturated = all(
+            mps_tensors[i].todense().shape[-1] >= config.max_bond_dim
+            for i in range(L - 1)
+        )
+
+        warmup_energies: list[float] = []
+        warmup_trunc_errs: list[float] = []
+        warmup_sweeps = 0
+        warmup_converged = False
+
+        if not all_saturated:
+            # Phase 1: Warmup with Python sweeps until chi saturates.
+            w_ops = _dense_ops()
+            left_envs = _build_left_environments_list(
+                mps_tensors, mpo_tensors, L, w_ops
+            )
+            right_envs = _build_right_environments_list(
+                mps_tensors, mpo_tensors, L, w_ops
+            )
+            energy = 0.0
+
+            for sweep in range(config.num_sweeps):
+                prev_energy = energy
+
+                if sweep > 0:
+                    left_envs = _build_left_environments_list(
+                        mps_tensors, mpo_tensors, L, w_ops
+                    )
+
+                # Left-to-right half-sweep
+                for i in range(L - 1):
+                    l_env = left_envs[i]
+                    assert l_env is not None
+                    _r = right_envs[i + 2]
+                    r_env = _r if _r is not None else w_ops.build_trivial_right_env()
+                    theta, e = w_ops.two_site_update(
+                        mps_tensors[i],
+                        mps_tensors[i + 1],
+                        l_env,
+                        mpo_tensors[i],
+                        mpo_tensors[i + 1],
+                        r_env,
+                        config,
+                    )
+                    energy = float(e)
+
+                    A, s, B, trunc_err = _svd_and_truncate_site(theta, i, config)
+                    mps_tensors[i] = A
+                    mps_tensors[i + 1] = B
+                    warmup_trunc_errs.append(float(trunc_err))
+
+                    left_envs[i + 1] = w_ops.update_left_env(l_env, A, mpo_tensors[i])
+
+                # Rebuild right environments before R->L half-sweep
+                right_envs = _build_right_environments_list(
+                    mps_tensors, mpo_tensors, L, w_ops
+                )
+
+                # Right-to-left half-sweep
+                for i in range(L - 2, -1, -1):
+                    l_env = left_envs[i]
+                    assert l_env is not None
+                    _r2 = right_envs[i + 2]
+                    r2_env = _r2 if _r2 is not None else w_ops.build_trivial_right_env()
+                    theta, e = w_ops.two_site_update(
+                        mps_tensors[i],
+                        mps_tensors[i + 1],
+                        l_env,
+                        mpo_tensors[i],
+                        mpo_tensors[i + 1],
+                        r2_env,
+                        config,
+                    )
+                    energy = float(e)
+
+                    A, s, B, trunc_err = _svd_and_truncate_site(
+                        theta, i, config, sweep_right=False
+                    )
+                    mps_tensors[i] = A
+                    mps_tensors[i + 1] = B
+                    warmup_trunc_errs.append(float(trunc_err))
+
+                    right_envs[i + 1] = w_ops.update_right_env(
+                        r2_env, B, mpo_tensors[i + 1]
+                    )
+
+                warmup_energies.append(energy)
+                warmup_sweeps += 1
+                if config.verbose:
+                    print(f"Warmup sweep {sweep + 1}: E = {energy:.10f}")
+
+                # Check convergence during warmup
+                if sweep > 0 and abs(energy - prev_energy) < config.convergence_tol:
+                    warmup_converged = True
+                    break
+
+                # Check if all bonds have reached chi_max
+                all_saturated = all(
+                    mps_tensors[idx].todense().shape[-1] >= config.max_bond_dim
+                    for idx in range(L - 1)
+                )
+                if all_saturated:
+                    break
+
+        # Phase 2: JIT sweeps for remaining budget (if not already converged)
+        remaining = config.num_sweeps - warmup_sweeps
+        jit_energies: list[float] = []
+        if remaining > 0 and not warmup_converged:
+            if config.verbose:
+                print(
+                    f"Warmup complete after {warmup_sweeps} sweep(s), "
+                    f"switching to JIT for {remaining} sweep(s)"
+                )
+            raw_mps = [t.todense() for t in mps_tensors]
+            raw_mpo = [t.todense() for t in mpo_tensors]
+
+            jit_energies, mps_out_raw = jit_dmrg_sweep_dense(
+                raw_mps,
+                raw_mpo,
+                chi_max=config.max_bond_dim,
+                num_sweeps=remaining,
+                lanczos_max_iter=config.lanczos_max_iter,
+            )
+
+            # Reconstruct DenseTensor wrappers from JIT output arrays.
+            # The JIT path pads tensors to (chi_max, d, chi_max). Create new
+            # indices that match the padded shape while preserving labels.
+            sym = U1Symmetry()
+            result_mps_tensors = []
+            for i, orig_t in enumerate(mps_tensors):
+                new_indices = []
+                for leg_idx, orig_idx in enumerate(orig_t.indices):
+                    padded_dim = mps_out_raw[i].shape[leg_idx]
+                    if padded_dim == orig_idx.dim:
+                        new_indices.append(orig_idx)
+                    else:
+                        new_charges = np.zeros(padded_dim, dtype=np.int32)
+                        new_indices.append(
+                            TensorIndex(
+                                sym,
+                                new_charges,
+                                orig_idx.flow,
+                                label=orig_idx.label,
+                            )
+                        )
+                result_mps_tensors.append(
+                    DenseTensor(mps_out_raw[i], tuple(new_indices))
+                )
+            mps_tensors = result_mps_tensors
+
+        all_energies = warmup_energies + jit_energies
+        final_energy = all_energies[-1] if all_energies else 0.0
+        converged = warmup_converged or (
+            len(all_energies) >= 2
+            and abs(all_energies[-1] - all_energies[-2]) < config.convergence_tol
+        )
+        result_mps = FiniteMPS.from_tensors(mps_tensors)
+
+        return DMRGResult(
+            energy=final_energy,
+            energies_per_sweep=all_energies,
+            mps=result_mps,
+            truncation_errors=warmup_trunc_errs,
+            converged=converged,
+        )
+    if use_jit and config.two_site and use_symmetric:
+        from tenax.algorithms._jit_sweep import jit_dmrg_sweep_symmetric
+
+        energies, mps_out = jit_dmrg_sweep_symmetric(
+            list(mps_tensors),
+            list(mpo_tensors),
+            chi_max=config.max_bond_dim,
+            num_sweeps=config.num_sweeps,
+            lanczos_max_iter=config.lanczos_max_iter,
+        )
+
+        result_mps = FiniteMPS.from_tensors(mps_out)
+
+        converged = (
+            len(energies) >= 2
+            and abs(energies[-1] - energies[-2]) < config.convergence_tol
+        )
+        return DMRGResult(
+            energy=energies[-1] if energies else 0.0,
+            energies_per_sweep=energies,
+            mps=result_mps,
+            truncation_errors=[],
+            converged=converged,
+        )
+
+    # (If use_jit is True but conditions not met, fall through silently
+    #  to the Python sweep loop below.)
 
     # Validate initial MPS sector if target_charge is specified
     if config.target_charge is not None and use_symmetric:
@@ -1346,13 +1646,16 @@ def _lanczos_solve_np(
             else:
                 w = ba_sub_scaled(w, basis[-2], betas[-1])
 
-        # Full reorthogonalization (fused sub+scale)
-        for q in basis:
-            coeff = ba_inner(q, w)
-            if _USE_CYTHON_SUB:
-                _cython_ba_sub_scaled_inplace(w.blocks, q.blocks, coeff)
-            else:
-                w = ba_sub_scaled(w, q, coeff)
+        # Full reorthogonalization
+        if _USE_CYTHON_REORTH:
+            _cython_lanczos_reorth([q.blocks for q in basis], w.blocks)
+        else:
+            for q in basis:
+                coeff = ba_inner(q, w)
+                if _USE_CYTHON_SUB:
+                    _cython_ba_sub_scaled_inplace(w.blocks, q.blocks, coeff)
+                else:
+                    w = ba_sub_scaled(w, q, coeff)
 
         beta_val = ba_norm(w)
         betas.append(beta_val)
@@ -1511,7 +1814,7 @@ def _blockwise_contract(
                 np_blocks_list.append(_to_np_blocks(t))
 
         # Use BLAS plan instead of opt_einsum (2x less Python dispatch overhead)
-        from tenax.contraction._blas_plan import get_cached_blas_plan
+        from tenax.contraction._dmrg_plans import get_dmrg_plan
 
         # Cache for pre-extracted Cython step params (keyed by shape group)
         _step_params_cache: dict = {}
@@ -1522,9 +1825,7 @@ def _blockwise_contract(
             ]
             block_shapes = tuple(a.shape for a in combo_arrays)
             if block_shapes not in expr_cache:
-                expr_cache[block_shapes] = get_cached_blas_plan(
-                    subscripts, block_shapes
-                )
+                expr_cache[block_shapes] = get_dmrg_plan(subscripts, block_shapes)
             plan = expr_cache[block_shapes]
 
             if _USE_CYTHON_PLAN:
@@ -1940,6 +2241,259 @@ def _svd_and_truncate_site_np(
     return A_ba, s, B_ba, trunc_err
 
 
+def _precompute_matvec_combos(
+    block_plan: list,
+    subscripts: str,
+    np_blocks_list: list,
+    theta_buf_idx: int,
+) -> tuple[list, list, list]:
+    """Pre-extract env blocks and BLAS plan data for each combo.
+
+    Environment blocks are **pre-transposed** to their GEMM-ready 2D
+    C-contiguous layout so that the per-matvec Cython loop only needs to
+    transpose the theta block (which changes each iteration).
+
+    Returns ``(combo_descriptors, output_keys, output_shapes)`` where:
+
+    - ``combo_descriptors`` is a list of tuples, one per combo:
+      ``(step_params, n_inputs, n_buffers, output_perm,
+        env_blocks_2d, theta_key, theta_perm, theta_shape_2d,
+        output_slot)``
+    - ``output_keys`` maps output_slot -> charge key
+    - ``output_shapes`` maps output_slot -> array shape (for pre-allocation)
+
+    ``env_blocks_2d`` is a list of pre-transposed 2D C-contiguous numpy
+    arrays for all input tensors EXCEPT theta.  ``theta_perm`` and
+    ``theta_shape_2d`` describe how to transpose theta at call time.
+    """
+    from tenax.contraction._dmrg_plans import get_dmrg_plan
+
+    # Map output charge keys to integer slots
+    output_key_to_slot: dict[tuple[int, ...], int] = {}
+    output_keys: list[tuple[int, ...]] = []
+
+    # Cache BLAS plan + step_params + pre-transpose info by block_shapes
+    plan_cache: dict[tuple, tuple] = {}
+
+    combo_descriptors = []
+    output_shapes: list[tuple[int, ...] | None] = []
+
+    for combo_keys, output_key in block_plan:
+        # Extract all blocks
+        all_blocks = [
+            np_blocks_list[i][combo_keys[i]] for i in range(len(np_blocks_list))
+        ]
+        block_shapes = tuple(a.shape for a in all_blocks)
+
+        if block_shapes not in plan_cache:
+            plan = get_dmrg_plan(subscripts, block_shapes)
+            sp = [
+                (
+                    s.left_idx,
+                    s.right_idx,
+                    s.out_idx,
+                    s.m,
+                    s.n,
+                    s.k,
+                    s.left_perm,
+                    s.right_perm,
+                    s.out_shape,
+                )
+                for s in plan.steps
+            ]
+
+            # Map each input buffer to the first step that uses it
+            buf_to_step_role: dict[int, tuple[int, str]] = {}
+            for step_idx, s in enumerate(plan.steps):
+                if s.left_idx not in buf_to_step_role:
+                    buf_to_step_role[s.left_idx] = (step_idx, "left")
+                if s.right_idx not in buf_to_step_role:
+                    buf_to_step_role[s.right_idx] = (step_idx, "right")
+
+            # Build per-input-buffer pre-transpose info
+            buf_pretranspose = {}  # buf_idx -> (perm, shape_2d)
+            for inp_idx in range(plan.n_inputs):
+                if inp_idx in buf_to_step_role:
+                    step_idx, role = buf_to_step_role[inp_idx]
+                    step = plan.steps[step_idx]
+                    if role == "left":
+                        perm = step.left_perm
+                        shape_2d = (step.m, step.k)
+                    else:
+                        perm = step.right_perm
+                        shape_2d = (step.k, step.n)
+                    buf_pretranspose[inp_idx] = (perm, shape_2d)
+                else:
+                    buf_pretranspose[inp_idx] = ((), None)
+
+            plan_cache[block_shapes] = (
+                sp,
+                plan.n_inputs,
+                plan.n_buffers,
+                plan.output_perm,
+                buf_pretranspose,
+            )
+        (
+            step_params,
+            n_inputs,
+            n_buffers,
+            output_perm,
+            buf_pretranspose,
+        ) = plan_cache[block_shapes]
+
+        # Pre-transpose env blocks to 2D (everything except theta)
+        env_blocks_2d = []
+        for i in range(len(all_blocks)):
+            if i == theta_buf_idx:
+                continue
+            arr = all_blocks[i]
+            perm, shape_2d = buf_pretranspose[i]
+            if shape_2d is not None:
+                if perm:
+                    arr = np.transpose(arr, perm)
+                arr = np.ascontiguousarray(arr.reshape(shape_2d))
+            else:
+                arr = np.ascontiguousarray(arr)
+            env_blocks_2d.append(arr)
+
+        theta_key = combo_keys[theta_buf_idx]
+        theta_perm, theta_shape_2d = buf_pretranspose[theta_buf_idx]
+
+        # Assign output slot
+        if output_key not in output_key_to_slot:
+            slot = len(output_keys)
+            output_key_to_slot[output_key] = slot
+            output_keys.append(output_key)
+            # Determine output shape from plan's last step
+            last_step_shape = step_params[-1][8]  # out_shape
+            if output_perm:
+                last_step_shape = tuple(last_step_shape[p] for p in output_perm)
+            output_shapes.append(last_step_shape)
+        output_slot = output_key_to_slot[output_key]
+
+        combo_descriptors.append(
+            (
+                step_params,
+                n_inputs,
+                n_buffers,
+                output_perm,
+                env_blocks_2d,
+                theta_key,
+                theta_perm,
+                theta_shape_2d,
+                output_slot,
+            )
+        )
+
+    return combo_descriptors, output_keys, output_shapes
+
+
+def _execute_matvec_combos(
+    combo_descriptors: list,
+    theta_blocks: dict,
+    theta_buf_idx: int,
+    output_keys: list,
+    output_shapes: list,
+    output_indices: tuple,
+) -> BlockArray:
+    """Execute all matvec combos, dispatching to Cython if available.
+
+    Combo descriptors contain pre-transposed 2D env blocks.  Theta blocks
+    are transposed once per matvec call (outside the combo loop) using the
+    ``theta_perm`` / ``theta_shape_2d`` stored in each descriptor.
+    """
+    from tenax.algorithms._block_array import BlockArray
+
+    n_slots = len(output_keys)
+
+    # Pre-transpose theta blocks ONCE for this matvec call.
+    # Group by (theta_key, theta_perm, theta_shape_2d) to avoid duplicates.
+    theta_2d_cache: dict[tuple, np.ndarray] = {}
+    for desc in combo_descriptors:
+        theta_key = desc[5]
+        theta_perm = desc[6]
+        theta_shape_2d = desc[7]
+        cache_key = (theta_key, theta_perm, theta_shape_2d)
+        if cache_key not in theta_2d_cache:
+            arr = theta_blocks[theta_key]
+            if theta_shape_2d is not None:
+                if theta_perm:
+                    arr = np.transpose(arr, theta_perm)
+                arr = np.ascontiguousarray(arr.reshape(theta_shape_2d))
+            else:
+                arr = np.ascontiguousarray(arr)
+            theta_2d_cache[cache_key] = arr
+
+    if _USE_CYTHON_MATVEC:
+        # Pre-allocate None output buffers (Cython will allocate on first write)
+        output_buffers: list = [None] * n_slots
+        _cython_matvec_combos(
+            combo_descriptors,
+            theta_2d_cache,
+            theta_buf_idx,
+            output_buffers,
+            output_shapes,
+        )
+        output_blocks = {}
+        for slot in range(n_slots):
+            if output_buffers[slot] is not None:
+                output_blocks[output_keys[slot]] = output_buffers[slot]
+        return BlockArray(blocks=output_blocks, indices=output_indices)
+
+    # Fallback: Python loop with pre-transposed inputs
+    output_accum: dict[tuple, list] = {}
+    for desc in combo_descriptors:
+        step_params, n_inputs, n_buffers, output_perm = (
+            desc[0],
+            desc[1],
+            desc[2],
+            desc[3],
+        )
+        env_blocks_2d = desc[4]
+        theta_key = desc[5]
+        theta_perm = desc[6]
+        theta_shape_2d = desc[7]
+        output_slot = desc[8]
+
+        theta_2d = theta_2d_cache[(theta_key, theta_perm, theta_shape_2d)]
+
+        # Build full input buffer list with pre-transposed 2D arrays
+        input_2d = list(env_blocks_2d)
+        input_2d.insert(theta_buf_idx, theta_2d)
+
+        # Execute GEMM chain — inputs are already 2D, intermediates need reshape
+        buffers = list(input_2d) + [None] * (n_buffers - n_inputs)
+        for sp in step_params:
+            li, ri, oi, M, N, K, lp, rp, os = sp
+            left = buffers[li]
+            right = buffers[ri]
+            # Input buffers (< n_inputs) are pre-transposed 2D
+            if li >= n_inputs:
+                if lp:
+                    left = np.transpose(left, lp)
+                left = np.ascontiguousarray(left.reshape(M, K))
+            if ri >= n_inputs:
+                if rp:
+                    right = np.transpose(right, rp)
+                right = np.ascontiguousarray(right.reshape(K, N))
+            buffers[oi] = (left @ right).reshape(os)
+        result = buffers[step_params[-1][2]]
+        if output_perm:
+            result = np.ascontiguousarray(np.transpose(result, output_perm))
+
+        out_key = output_keys[output_slot]
+        output_accum.setdefault(out_key, []).append(result)
+
+    output_blocks = {}
+    for key, arrays in output_accum.items():
+        total = arrays[0]
+        for a in arrays[1:]:
+            total = total + a
+        output_blocks[key] = total
+
+    return BlockArray(blocks=output_blocks, indices=output_indices)
+
+
 def _two_site_update_symmetric_np(
     site_l: Tensor,
     site_r: Tensor,
@@ -2012,11 +2566,9 @@ def _two_site_update_symmetric_np(
     else:
         theta_ba = site_l_ba
 
-    # Shared cache for opt_einsum expressions across Lanczos iterations
-    _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
-
     # Precompute block plan once
     _subs = "abc,apqd,bpse,eqtf,dfg->cstg"
+    _theta_buf_idx = 1  # theta is the 2nd tensor (index 1)
     _plan = _precompute_block_plan([left_env, theta_ba, mpo_l, mpo_r, right_env], _subs)
 
     # Pre-convert env blocks to NumPy once
@@ -2034,18 +2586,43 @@ def _two_site_update_symmetric_np(
 
     _out_indices = theta_ba.indices  # fixed across Lanczos iterations
 
-    def matvec(v_ba: BlockArray) -> BlockArray:
-        # Pass v blocks directly as np_blocks_cache — avoids numpy→JAX→numpy roundtrip
-        _env_np[1] = v_ba.blocks
-        return _blockwise_contract(
-            [left_env, theta_ba, mpo_l, mpo_r, right_env],
+    # Use precomputed combo path for chi <= 128; at larger chi the
+    # pre-computation overhead exceeds savings (blocks are large, combos few).
+    _use_precomputed = config.max_bond_dim <= 128
+
+    if _use_precomputed:
+        _env_np[_theta_buf_idx] = theta_ba.blocks
+        _combo_descs, _out_keys, _out_shapes = _precompute_matvec_combos(
+            _plan,
             _subs,
-            output_indices=_out_indices,
-            expr_cache=_cache,
-            block_plan=_plan,
-            np_blocks_cache=_env_np,
-            return_ba=True,
+            _env_np,
+            _theta_buf_idx,
         )
+        _env_np[_theta_buf_idx] = None
+
+        def matvec(v_ba: BlockArray) -> BlockArray:
+            return _execute_matvec_combos(
+                _combo_descs,
+                v_ba.blocks,
+                _theta_buf_idx,
+                _out_keys,
+                _out_shapes,
+                _out_indices,
+            )
+    else:
+        _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
+
+        def matvec(v_ba: BlockArray) -> BlockArray:
+            _env_np[_theta_buf_idx] = v_ba.blocks
+            return _blockwise_contract(
+                [left_env, theta_ba, mpo_l, mpo_r, right_env],
+                _subs,
+                output_indices=_out_indices,
+                expr_cache=_cache,
+                block_plan=_plan,
+                np_blocks_cache=_env_np,
+                return_ba=True,
+            )
 
     energy, theta_opt_ba = _lanczos_solve_np(
         matvec, theta_ba, config.lanczos_max_iter, config.lanczos_tol
@@ -2086,11 +2663,9 @@ def _one_site_update_symmetric_np(
     # Convert site to BlockArray -- stays in numpy throughout
     site_ba = symmetric_to_ba(site) if not isinstance(site, BlockArray) else site
 
-    # Shared cache for opt_einsum expressions across Lanczos iterations
-    _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
-
     # Precompute block plan once
     _subs = "abc,apd,bpxe,def->cxf"
+    _theta_buf_idx = 1  # site is the 2nd tensor (index 1)
     _plan = _precompute_block_plan([left_env, site_ba, mpo_site, right_env], _subs)
 
     # Pre-convert env blocks to NumPy once
@@ -2109,17 +2684,41 @@ def _one_site_update_symmetric_np(
 
     _out_indices = site_ba.indices
 
-    def matvec(v_ba: BlockArray) -> BlockArray:
-        _env_np[1] = v_ba.blocks
-        return _blockwise_contract(
-            [left_env, site_ba, mpo_site, right_env],
+    _use_precomputed = config.max_bond_dim <= 128
+
+    if _use_precomputed:
+        _env_np[_theta_buf_idx] = site_ba.blocks
+        _combo_descs, _out_keys, _out_shapes = _precompute_matvec_combos(
+            _plan,
             _subs,
-            output_indices=_out_indices,
-            expr_cache=_cache,
-            block_plan=_plan,
-            np_blocks_cache=_env_np,
-            return_ba=True,
+            _env_np,
+            _theta_buf_idx,
         )
+        _env_np[_theta_buf_idx] = None
+
+        def matvec(v_ba: BlockArray) -> BlockArray:
+            return _execute_matvec_combos(
+                _combo_descs,
+                v_ba.blocks,
+                _theta_buf_idx,
+                _out_keys,
+                _out_shapes,
+                _out_indices,
+            )
+    else:
+        _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
+
+        def matvec(v_ba: BlockArray) -> BlockArray:
+            _env_np[_theta_buf_idx] = v_ba.blocks
+            return _blockwise_contract(
+                [left_env, site_ba, mpo_site, right_env],
+                _subs,
+                output_indices=_out_indices,
+                expr_cache=_cache,
+                block_plan=_plan,
+                np_blocks_cache=_env_np,
+                return_ba=True,
+            )
 
     energy, site_opt_ba = _lanczos_solve_np(
         matvec, site_ba, config.lanczos_max_iter, config.lanczos_tol
