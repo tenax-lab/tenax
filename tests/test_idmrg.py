@@ -10,6 +10,7 @@ import pytest
 from tenax.algorithms.idmrg import (
     _orthogonalize_unit_cell_dense,
     _solve_left_env_fixedpoint_dense,
+    _solve_right_env_fixedpoint_dense,
     _transfer_op_L,
     _transfer_op_R,
     build_bulk_mpo_heisenberg,
@@ -697,3 +698,65 @@ class TestSolveLeftEnvFixedpoint:
         A_L = np.array(result.mps.tensors[0].todense())
         L_env = _solve_left_env_fixedpoint_dense(A_L, W)
         np.testing.assert_allclose(L_env[:, 0, :], 0.0, atol=1e-15)
+
+
+# ---------------------------------------------------------------------------
+# TestSolveRightEnvFixedpoint
+# ---------------------------------------------------------------------------
+
+
+class TestSolveRightEnvFixedpoint:
+    def test_fixedpoint_satisfies_update_equation(self):
+        """R_env from solver should satisfy the channel fixed-point equations."""
+        W_tensor = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+        W = np.array(W_tensor.todense())
+        D_w = W.shape[0]
+
+        cfg = iDMRGConfig(max_bond_dim=16, max_iterations=30, lanczos_max_iter=20)
+        result = idmrg(W_tensor, cfg, dtype=jnp.float64)
+        # Get a right-isometric A_R from the second MPS tensor.
+        # The stored tensor has s absorbed, so re-orthogonalize via RQ.
+        A_R_raw = np.array(result.mps.tensors[1].todense())
+        chi_l, d_phys, chi_r = A_R_raw.shape
+        Q, _ = np.linalg.qr(A_R_raw.reshape(chi_l, d_phys * chi_r).T)
+        A_R = Q.T.reshape(chi_l, d_phys, chi_r)
+
+        R_env = _solve_right_env_fixedpoint_dense(A_R, W)
+
+        for k in range(1, D_w - 1):
+            expected = np.zeros_like(R_env[:, k, :])
+            for j in range(0, k):
+                O_kj = W[k, :, :, j]
+                if np.linalg.norm(O_kj) > 1e-15:
+                    expected += _transfer_op_R(A_R, O_kj, R_env[:, j, :])
+            np.testing.assert_allclose(
+                R_env[:, k, :],
+                expected,
+                atol=1e-10,
+                err_msg=f"Right env channel {k} not at fixed point",
+            )
+
+    def test_done_channel_is_identity(self):
+        """The done channel of R_env should be the identity."""
+        W_tensor = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+        W = np.array(W_tensor.todense())
+        rng = np.random.RandomState(42)
+        chi, d = 8, 2
+        B_raw = rng.randn(chi, chi * d)
+        Q, _ = np.linalg.qr(B_raw.T)
+        A_R = Q.T.reshape(chi, d, chi)
+        R_env = _solve_right_env_fixedpoint_dense(A_R, W)
+        np.testing.assert_allclose(R_env[:, 0, :], np.eye(chi), atol=1e-12)
+
+    def test_vacuum_channel_is_zero(self):
+        """The vacuum channel of R_env should be zero."""
+        W_tensor = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+        W = np.array(W_tensor.todense())
+        rng = np.random.RandomState(42)
+        chi, d = 8, 2
+        B_raw = rng.randn(chi, chi * d)
+        Q, _ = np.linalg.qr(B_raw.T)
+        A_R = Q.T.reshape(chi, d, chi)
+        R_env = _solve_right_env_fixedpoint_dense(A_R, W)
+        D_w = W.shape[0]
+        np.testing.assert_allclose(R_env[:, D_w - 1, :], 0.0, atol=1e-15)

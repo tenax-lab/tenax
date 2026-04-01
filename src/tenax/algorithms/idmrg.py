@@ -569,6 +569,64 @@ def _solve_left_env_fixedpoint_dense(
     return L_env
 
 
+def _solve_right_env_fixedpoint_dense(
+    A_R: np.ndarray,
+    W: np.ndarray,
+    tol: float = 1e-12,
+) -> np.ndarray:
+    """Solve for the fixed-point right environment channel by channel.
+
+    Mirrors ``_solve_left_env_fixedpoint_dense`` but from the done end:
+      - done (0): T_I fixed point = I  (right-isometric A_R)
+      - intermediate k: r_k = Σ_{j<k} T^R_{W[k,:,:,j]}(r_j)
+      - vacuum (D_w-1): set to 0
+
+    Args:
+        A_R: Right-isometric MPS tensor, shape (chi, d, chi).
+        W: MPO tensor, shape (D_w, d, d, D_w).
+        tol: GMRES tolerance for channels with self-loops.
+
+    Returns:
+        R_env of shape (chi, D_w, chi).
+    """
+    chi = A_R.shape[0]
+    D_w = W.shape[0]
+    R_env = np.zeros((chi, D_w, chi), dtype=A_R.dtype)
+
+    # Done channel: identity
+    R_env[:, 0, :] = np.eye(chi, dtype=A_R.dtype)
+
+    # Intermediate channels: solve from 1 up to D_w-2
+    for k in range(1, D_w - 1):
+        source = np.zeros((chi, chi), dtype=A_R.dtype)
+        for j in range(0, k):
+            O_kj = W[k, :, :, j]
+            if np.linalg.norm(O_kj) > 1e-15:
+                source += _transfer_op_R(A_R, O_kj, R_env[:, j, :])
+
+        # Check for self-loop
+        O_kk = W[k, :, :, k]
+        if np.linalg.norm(O_kk) > 1e-15:
+            from scipy.sparse.linalg import LinearOperator, gmres
+
+            n = chi * chi
+
+            def matvec(x_flat, _A=A_R, _O=O_kk):
+                x = x_flat.reshape(chi, chi)
+                return (x - _transfer_op_R(_A, _O, x)).ravel()
+
+            op_lin = LinearOperator((n, n), matvec=matvec, dtype=A_R.dtype)
+            r_flat, info = gmres(op_lin, source.ravel(), atol=tol, restart=min(n, 50))
+            R_env[:, k, :] = r_flat.reshape(chi, chi)
+        else:
+            R_env[:, k, :] = source
+
+    # Vacuum channel: set to 0
+    # R_env[:, D_w-1, :] already zero from initialization
+
+    return R_env
+
+
 # ---------------------------------------------------------------------------
 # Symmetric helpers
 # ---------------------------------------------------------------------------
