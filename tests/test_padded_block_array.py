@@ -35,8 +35,8 @@ def sym_matrix(u1, rng):
     """2-leg U(1) symmetric tensor with charges [-1, 0, 1] on each leg."""
     charges = np.array([-1, 0, 1], dtype=np.int32)
     indices = (
-        TensorIndex(u1, charges, FlowDirection.IN, label="in"),
-        TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+        TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="in"),
+        TensorIndex.from_charges(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
     )
     return SymmetricTensor.random_normal(indices, rng)
 
@@ -47,9 +47,9 @@ def sym_3leg(u1, rng):
     phys_c = np.array([-1, 1], dtype=np.int32)
     virt_c = np.array([-1, 0, 1], dtype=np.int32)
     indices = (
-        TensorIndex(u1, phys_c, FlowDirection.IN, label="phys"),
-        TensorIndex(u1, virt_c, FlowDirection.IN, label="left"),
-        TensorIndex(u1, u1.dual(virt_c), FlowDirection.OUT, label="right"),
+        TensorIndex.from_charges(u1, phys_c, FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(u1, virt_c, FlowDirection.IN, label="left"),
+        TensorIndex.from_charges(u1, u1.dual(virt_c), FlowDirection.OUT, label="right"),
     )
     return SymmetricTensor.random_normal(indices, rng)
 
@@ -206,8 +206,10 @@ class TestEmptyTensor:
         # Use a target charge that no block can satisfy to get 0 blocks
         charges = np.array([0], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="out"
+            ),
         )
         empty = SymmetricTensor.zeros(indices, target=999)
         assert empty.n_blocks == 0
@@ -220,8 +222,10 @@ class TestEmptyTensor:
     def test_empty_round_trip(self, u1):
         charges = np.array([0], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="out"
+            ),
         )
         empty = SymmetricTensor.zeros(indices, target=999)
         pba = PaddedBlockArray.from_symmetric(empty)
@@ -239,8 +243,8 @@ class TestVariedBlockSizes:
         # OUT: charge 0 has multiplicity 2, charge 1 has multiplicity 3
         out_charges = np.array([0, 0, 1, 1, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, in_charges, FlowDirection.IN, label="in"),
-            TensorIndex(u1, out_charges, FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, in_charges, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(u1, out_charges, FlowDirection.OUT, label="out"),
         )
         tensor = SymmetricTensor.random_normal(indices, rng)
         assert tensor.n_blocks == 2
@@ -259,8 +263,8 @@ class TestVariedBlockSizes:
         in_charges = np.array([0, 0, 0, 1, 1], dtype=np.int32)
         out_charges = np.array([0, 0, 1, 1, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, in_charges, FlowDirection.IN, label="in"),
-            TensorIndex(u1, out_charges, FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, in_charges, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(u1, out_charges, FlowDirection.OUT, label="out"),
         )
         tensor = SymmetricTensor.random_normal(indices, rng)
         pba = PaddedBlockArray.from_symmetric(tensor)
@@ -271,8 +275,8 @@ class TestVariedBlockSizes:
         in_charges = np.array([0, 0, 0, 1, 1], dtype=np.int32)
         out_charges = np.array([0, 0, 1, 1, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, in_charges, FlowDirection.IN, label="in"),
-            TensorIndex(u1, out_charges, FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, in_charges, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(u1, out_charges, FlowDirection.OUT, label="out"),
         )
         tensor = SymmetricTensor.random_normal(indices, rng)
         pba = PaddedBlockArray.from_symmetric(tensor)
@@ -290,10 +294,14 @@ from tenax.contraction.contractor import contract
 
 def _make_matrix_pair(u1, rng, charges_i, charges_j, charges_k):
     """Create two SymmetricTensors A(i,j) and B(j,k) that can be multiplied."""
-    idx_i = TensorIndex(u1, charges_i, FlowDirection.IN, label="i")
-    idx_j_out = TensorIndex(u1, u1.dual(charges_j), FlowDirection.OUT, label="j")
-    idx_j_in = TensorIndex(u1, charges_j, FlowDirection.IN, label="j")
-    idx_k = TensorIndex(u1, u1.dual(charges_k), FlowDirection.OUT, label="k")
+    idx_i = TensorIndex.from_charges(u1, charges_i, FlowDirection.IN, label="i")
+    idx_j_out = TensorIndex.from_charges(
+        u1, u1.dual(charges_j), FlowDirection.OUT, label="j"
+    )
+    idx_j_in = TensorIndex.from_charges(u1, charges_j, FlowDirection.IN, label="j")
+    idx_k = TensorIndex.from_charges(
+        u1, u1.dual(charges_k), FlowDirection.OUT, label="k"
+    )
 
     key_a, key_b = jax.random.split(rng)
     A = SymmetricTensor.random_normal((idx_i, idx_j_out), key_a)
@@ -505,10 +513,16 @@ class TestContractPaddedOutputStructure:
         charges_j_b = np.array([1, 1], dtype=np.int32)  # B's contracted leg: charge 1
         charges_k = np.array([1, 1], dtype=np.int32)
 
-        idx_i = TensorIndex(u1, charges_i, FlowDirection.IN, label="i")
-        idx_j_out = TensorIndex(u1, u1.dual(charges_j_a), FlowDirection.OUT, label="j")
-        idx_j_in = TensorIndex(u1, charges_j_b, FlowDirection.IN, label="j")
-        idx_k = TensorIndex(u1, u1.dual(charges_k), FlowDirection.OUT, label="k")
+        idx_i = TensorIndex.from_charges(u1, charges_i, FlowDirection.IN, label="i")
+        idx_j_out = TensorIndex.from_charges(
+            u1, u1.dual(charges_j_a), FlowDirection.OUT, label="j"
+        )
+        idx_j_in = TensorIndex.from_charges(
+            u1, charges_j_b, FlowDirection.IN, label="j"
+        )
+        idx_k = TensorIndex.from_charges(
+            u1, u1.dual(charges_k), FlowDirection.OUT, label="k"
+        )
 
         key_a, key_b = jax.random.split(rng)
         A = SymmetricTensor.random_normal((idx_i, idx_j_out), key_a)
@@ -537,13 +551,13 @@ class TestPBAVectorOps:
     @pytest.fixture
     def pba_pair(self, u1):
         """Two PBAs with same structure, random data."""
-        idx_a = TensorIndex(
+        idx_a = TensorIndex.from_charges(
             u1,
             np.array([0, 0, 1, 1, 1], dtype=np.int32),
             FlowDirection.IN,
             label="a",
         )
-        idx_b = TensorIndex(
+        idx_b = TensorIndex.from_charges(
             u1,
             np.array([0, 0, 0, 1, 1], dtype=np.int32),
             FlowDirection.OUT,

@@ -301,7 +301,7 @@ def dmrg(
                 else:
                     new_charges = np.zeros(padded_dim, dtype=np.int32)
                     new_indices.append(
-                        TensorIndex(
+                        TensorIndex.from_charges(
                             sym,
                             new_charges,
                             orig_idx.flow,
@@ -469,7 +469,7 @@ def dmrg(
                     else:
                         new_charges = np.zeros(padded_dim, dtype=np.int32)
                         new_indices.append(
-                            TensorIndex(
+                            TensorIndex.from_charges(
                                 sym,
                                 new_charges,
                                 orig_idx.flow,
