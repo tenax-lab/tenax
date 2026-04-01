@@ -864,6 +864,43 @@ class SymmetricTensor(Tensor):
         return cls(blocks, indices)
 
     @classmethod
+    def random_normal_np(
+        cls,
+        indices: tuple[TensorIndex, ...],
+        rng: np.random.RandomState,
+        dtype: Any = jnp.float64,
+        stddev: float = 1.0,
+        target: int | None = None,
+    ) -> SymmetricTensor:
+        """Create a random tensor using numpy (no JAX compilation overhead).
+
+        Useful in tight loops (e.g. iDMRG) where JAX random_normal triggers
+        costly recompilation on each call.
+
+        Args:
+            indices: Tuple of TensorIndex objects.
+            rng:     numpy RandomState for reproducibility.
+            dtype:   Data type for block arrays.
+            stddev:  Standard deviation of the normal distribution.
+            target:  Target charge for block selection.
+
+        Returns:
+            SymmetricTensor with random entries in all valid blocks.
+        """
+        valid_keys = _compute_valid_blocks(indices, target=target)
+        blocks: dict[BlockKey, jax.Array] = {}
+        for block_key in sorted(valid_keys):
+            _, shape = _block_slices(indices, block_key)
+            if all(s > 0 for s in shape):
+                data = jnp.array(
+                    rng.randn(*shape).astype(np.float64) * stddev, dtype=dtype
+                )
+                blocks[block_key] = data
+        if target is not None and target != 0:
+            return cls._from_blocks_unchecked(dict(blocks), indices)
+        return cls(blocks, indices)
+
+    @classmethod
     def from_dense(
         cls,
         data: jax.Array,

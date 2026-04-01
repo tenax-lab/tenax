@@ -546,17 +546,15 @@ def _idmrg_growing_chain_symmetric(
 
     energies_per_step: list[float] = []
     converged = False
-    key = jax.random.PRNGKey(0)
     E_prev: float | None = None
 
     # Virtual bond starts trivial: single charge-0 state.
     virt_charges = np.zeros(1, dtype=np.int32)
 
-    # Store MPS tensors and previous theta for warm start
+    # Store MPS tensors
     A_L_tensor: Tensor | None = None
     A_R_tensor: Tensor | None = None
     s_vals = jnp.ones(1, dtype=dtype)
-    theta_prev: Tensor | None = None
 
     for step in range(config.max_iterations):
         # ---- Build initial theta ----
@@ -566,16 +564,10 @@ def _idmrg_growing_chain_symmetric(
             TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="p_r"),
             TensorIndex.from_charges(sym, virt_charges, FlowDirection.OUT, label="v_r"),
         )
-
-        if theta_prev is not None and np.array_equal(
-            np.array(theta_prev.indices[0].charges), virt_charges
-        ):
-            # Warm start: reuse previous theta when charges match
-            theta = theta_prev
-        else:
-            # Cold start: random init when bond dimension changed
-            key, subkey = jax.random.split(key)
-            theta = SymmetricTensor.random_normal(theta_indices, subkey, dtype=dtype)
+        # Use numpy random: iDMRG charge sectors alternate each sweep,
+        # preventing warm-start. Numpy avoids JAX compilation overhead.
+        _rng = np.random.RandomState(step)
+        theta = SymmetricTensor.random_normal_np(theta_indices, _rng, dtype=dtype)
 
         theta_norm = theta.norm()
         if theta_norm > 1e-15:
@@ -601,7 +593,6 @@ def _idmrg_growing_chain_symmetric(
             matvec, theta, config.lanczos_max_iter, config.lanczos_tol
         )
         E_total = float(E_total_val)
-        theta_prev = theta_opt
 
         # ---- SVD and truncate ----
         U_t, s_full, Vh_t, _ = truncated_svd(
@@ -1242,17 +1233,15 @@ def _idmrg_sweep_symmetric(
 
     energies_per_step: list[float] = []
     converged = False
-    key = jax.random.PRNGKey(0)
     E_prev: float | None = None
 
     # Virtual bond starts trivial: single charge-0 state.
     virt_charges = np.zeros(1, dtype=np.int32)
 
-    # Store MPS tensors and previous theta for warm start
+    # Store MPS tensors
     A_L_tensor: Tensor | None = None
     A_R_tensor: Tensor | None = None
     s_vals = jnp.ones(1, dtype=dtype)
-    theta_prev: Tensor | None = None
 
     for sweep in range(config.max_iterations):
         # ---- Build initial theta ----
@@ -1262,16 +1251,11 @@ def _idmrg_sweep_symmetric(
             TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="p_r"),
             TensorIndex.from_charges(sym, virt_charges, FlowDirection.OUT, label="v_r"),
         )
-
-        if theta_prev is not None and np.array_equal(
-            np.array(theta_prev.indices[0].charges), virt_charges
-        ):
-            # Warm start: reuse previous theta when charges match
-            theta = theta_prev
-        else:
-            # Cold start: random init when bond dimension changed
-            key, subkey = jax.random.split(key)
-            theta = SymmetricTensor.random_normal(theta_indices, subkey, dtype=dtype)
+        # Use numpy random instead of JAX to avoid compilation overhead.
+        # iDMRG charge sectors alternate (even/odd) each sweep, so
+        # warm-starting from the previous theta is not possible.
+        _rng = np.random.RandomState(sweep)
+        theta = SymmetricTensor.random_normal_np(theta_indices, _rng, dtype=dtype)
 
         theta_norm = theta.norm()
         if theta_norm > 1e-15:
@@ -1337,7 +1321,6 @@ def _idmrg_sweep_symmetric(
             )
 
         E_total = float(E_total_val)
-        theta_prev = theta_opt
 
         # ---- SVD and truncate ----
         if config.numpy_blockwise:
