@@ -25,8 +25,10 @@ from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms.ad_utils import (
     _config_to_tuple,
     _gauge_fix_ctm_tensor,
+    _svd_sector_backward,
     ctm_tensor_converge,
     truncated_svd_ad,
+    truncated_svd_symmetric_ad,
 )
 from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.core.index import FlowDirection, TensorIndex
@@ -327,3 +329,188 @@ class TestGMRESBackward:
             f"GMRES backward not deterministic: max diff = "
             f"{float(jnp.max(jnp.abs(grad1.todense() - grad2.todense())))}"
         )
+
+
+class TestSvdSectorBackward:
+    """Tests for the factored _svd_sector_backward function."""
+
+    def test_svd_sector_backward_matches_original(self):
+        """Factored function must reproduce the original backward exactly."""
+        key = jax.random.PRNGKey(42)
+        M = jax.random.normal(key, (6, 4))
+        chi = 3
+
+        # Full SVD
+        U_full, s_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
+        k = min(chi, s_full.shape[0])
+
+        # Fake incoming gradients
+        key2 = jax.random.PRNGKey(99)
+        dU = jax.random.normal(key2, (6, k))
+        ds = jax.random.normal(jax.random.PRNGKey(100), (k,))
+        dVh = jax.random.normal(jax.random.PRNGKey(101), (k, 4))
+
+        # Factored version
+        dM_new = _svd_sector_backward(U_full, s_full, Vh_full, dU, ds, dVh)
+
+        # Original inline version (reproduced for comparison)
+        eps = 1e-12
+        U = U_full[:, :k]
+        s = s_full[:k]
+        V = Vh_full[:k, :].conj().T
+        s2 = s**2
+        diff = s2[:, None] - s2[None, :]
+        F = diff / (diff**2 + eps**2)
+        F = F - jnp.diag(jnp.diag(F))
+        UtdU = U.conj().T @ dU
+        VtdV = V.conj().T @ dVh.conj().T
+        UtdU_anti = 0.5 * (UtdU - UtdU.conj().T)
+        VtdV_anti = 0.5 * (VtdV - VtdV.conj().T)
+        s_inv = jnp.where(s > eps, 1.0 / s, 0.0)
+        proj_U_perp = jnp.eye(M.shape[0]) - U @ U.conj().T
+        proj_V_perp = jnp.eye(M.shape[1]) - V @ V.conj().T
+        dM_orig = jnp.zeros_like(M)
+        dM_orig = dM_orig + U @ jnp.diag(ds) @ Vh_full[:k, :]
+        dM_orig = dM_orig + U @ (F * UtdU_anti) @ jnp.diag(s) @ Vh_full[:k, :]
+        dM_orig = dM_orig + U @ jnp.diag(s) @ (F * VtdV_anti) @ Vh_full[:k, :]
+        dM_orig = dM_orig + proj_U_perp @ dU @ jnp.diag(s_inv) @ Vh_full[:k, :]
+        dM_orig = dM_orig + U @ jnp.diag(s_inv) @ dVh @ proj_V_perp
+
+        assert jnp.allclose(dM_new, dM_orig, atol=1e-12), (
+            f"Max diff: {float(jnp.max(jnp.abs(dM_new - dM_orig)))}"
+        )
+
+    def test_svd_sector_backward_no_truncation(self):
+        """When k == min(m,n), the sector backward should still work."""
+        M = jax.random.normal(jax.random.PRNGKey(5), (4, 3))
+        U, s, Vh = jnp.linalg.svd(M, full_matrices=False)
+        k = s.shape[0]  # no truncation
+        dU = jax.random.normal(jax.random.PRNGKey(6), (4, k))
+        ds = jax.random.normal(jax.random.PRNGKey(7), (k,))
+        dVh = jax.random.normal(jax.random.PRNGKey(8), (k, 3))
+
+        dM = _svd_sector_backward(U, s, Vh, dU, ds, dVh)
+        assert jnp.all(jnp.isfinite(dM))
+        assert dM.shape == M.shape
+
+
+class TestDegenerateSvGradientFinite:
+    """Gradient through SVD with degenerate singular values is finite."""
+
+    def test_degenerate_sv_gradient_finite_lorentzian(self):
+        """Lorentzian regularization prevents NaN for degenerate SVs."""
+        # Build a matrix with exactly degenerate singular values
+        U_rand, _ = jnp.linalg.qr(jax.random.normal(jax.random.PRNGKey(0), (6, 6)))
+        V_rand, _ = jnp.linalg.qr(jax.random.normal(jax.random.PRNGKey(1), (4, 4)))
+        s_degen = jnp.array([5.0, 5.0, 2.0, 2.0])
+        M = U_rand[:, :4] * s_degen[None, :] @ V_rand.T
+        chi = 3
+
+        def loss(M_in):
+            U, s, Vh = truncated_svd_ad(M_in, chi)
+            return jnp.sum(U**2) + jnp.sum(s) + jnp.sum(Vh**2)
+
+        grad = jax.grad(loss)(M)
+        assert jnp.all(jnp.isfinite(grad)), f"NaN/Inf in gradient: {grad}"
+
+    def test_degenerate_sv_sector_backward_finite(self):
+        """_svd_sector_backward produces finite output for degenerate SVs."""
+        U_rand, _ = jnp.linalg.qr(jax.random.normal(jax.random.PRNGKey(10), (5, 5)))
+        V_rand, _ = jnp.linalg.qr(jax.random.normal(jax.random.PRNGKey(11), (4, 4)))
+        s_degen = jnp.array([3.0, 3.0, 3.0, 1.0])
+        M = U_rand[:, :4] * s_degen[None, :] @ V_rand.T
+
+        U, s, Vh = jnp.linalg.svd(M, full_matrices=False)
+        k = 3
+        dU = jax.random.normal(jax.random.PRNGKey(12), (5, k))
+        ds = jax.random.normal(jax.random.PRNGKey(13), (k,))
+        dVh = jax.random.normal(jax.random.PRNGKey(14), (k, 4))
+
+        dM = _svd_sector_backward(U, s, Vh, dU, ds, dVh)
+        assert jnp.all(jnp.isfinite(dM)), f"NaN/Inf in sector backward: {dM}"
+
+
+class TestSymmetricSvdAdMatchesDense:
+    """Per-sector regularized SVD matches dense truncated_svd_ad result."""
+
+    def test_symmetric_svd_ad_matches_dense_trivial_charges(self):
+        """With trivial (all-zero) charges, symmetric AD SVD should match dense."""
+        key = jax.random.PRNGKey(42)
+        D, d = 3, 2
+        data = jax.random.normal(key, (D, D, D, D, d))
+        data = data / jnp.linalg.norm(data)
+
+        sym = U1Symmetry()
+        charges = np.zeros(D, dtype=np.int32)
+        phys_charges = np.zeros(d, dtype=np.int32)
+        indices = (
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        A = DenseTensor(data, indices)
+
+        chi = 4
+        left_labels = ("u", "l")
+        right_labels = ("d", "r", "phys")
+
+        U_sym, s_sym, Vh_sym = truncated_svd_symmetric_ad(
+            A, left_labels, right_labels, chi, new_bond_label="bond"
+        )
+
+        # Compare via dense: reshape A the same way, apply truncated_svd_ad
+        dense = A.todense()
+        # Permute to (u, l, d, r, phys)
+        label_to_ax = {lbl: i for i, lbl in enumerate(A.labels())}
+        perm = [label_to_ax[lb] for lb in list(left_labels) + list(right_labels)]
+        dense_p = jnp.transpose(dense, perm)
+        m = D * D  # u, l
+        n = D * D * d  # d, r, phys
+        matrix = dense_p.reshape(m, n)
+        U_ref, s_ref, Vh_ref = truncated_svd_ad(matrix, chi)
+
+        # Singular values must match
+        assert jnp.allclose(s_sym, s_ref, atol=1e-10), (
+            f"SV mismatch: max diff = {float(jnp.max(jnp.abs(s_sym - s_ref)))}"
+        )
+
+        # Reconstruction must match
+        k = s_sym.shape[0]
+        recon_sym = (
+            U_sym.todense().reshape(m, k)
+            * s_sym[None, :]
+            @ Vh_sym.todense().reshape(k, n)
+        )
+        recon_ref = U_ref * s_ref[None, :] @ Vh_ref
+        assert jnp.allclose(recon_sym, recon_ref, atol=1e-10), (
+            f"Reconstruction mismatch: {float(jnp.max(jnp.abs(recon_sym - recon_ref)))}"
+        )
+
+    def test_symmetric_svd_ad_gradient_finite(self):
+        """Gradient through truncated_svd_symmetric_ad is finite."""
+        key = jax.random.PRNGKey(77)
+        D, d = 2, 2
+        data = jax.random.normal(key, (D, D, D, D, d))
+
+        sym = U1Symmetry()
+        charges = np.zeros(D, dtype=np.int32)
+        phys_charges = np.zeros(d, dtype=np.int32)
+        indices = (
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        )
+        A = DenseTensor(data, indices)
+
+        def loss(A_in):
+            U, s, Vh = truncated_svd_symmetric_ad(
+                A_in, ("u", "l"), ("d", "r", "phys"), chi=3
+            )
+            return jnp.sum(s)
+
+        grad = jax.grad(loss)(A)
+        assert jnp.all(jnp.isfinite(grad.todense())), "Gradient contains NaN/Inf"
