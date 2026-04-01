@@ -1,10 +1,11 @@
-"""Tensor index (leg) metadata with labels and charge information.
+"""Tensor index (leg) metadata with sector-based charge information.
 
 Each leg of a tensor is described by a TensorIndex, which carries:
 - The symmetry group governing charges on this leg
-- The charge of each basis state along this leg
+- Sorted unique charge sectors and their multiplicities
 - The flow direction (incoming/outgoing)
 - A label (string or integer) for identification and label-based contraction
+- Optional FuseInfo recording how fused legs can be split
 
 Labels are the primary user-facing API for specifying contractions.
 Two legs with the same label on different tensors will be automatically
@@ -13,7 +14,7 @@ contracted when contract() or TensorNetwork.contract() is called.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 
 import numpy as np
@@ -63,34 +64,61 @@ class TensorIndex:
     TensorIndex is frozen and slots-based for memory efficiency — large
     networks create millions of these objects.
 
+    The internal representation stores sorted unique charge sectors and
+    their multiplicities alongside the dense charges array. This makes
+    sector-level operations explicit and lays the foundation for
+    non-abelian symmetries.
+
     Attributes:
-        symmetry:  The symmetry group governing charges on this leg.
-        charges:   1-D numpy int32 array of length D (bond dimension).
-                   charges[i] is the charge of basis state i.
-        flow:      Whether this leg is incoming (IN) or outgoing (OUT).
-        label:     Human-readable or integer identifier for this leg.
-                   Shared labels across tensors drive automatic contraction.
+        symmetry:        The symmetry group governing charges on this leg.
+        sectors:         Sorted unique charges, shape (n_sectors,), dtype int32.
+        multiplicities:  Number of basis states per sector, shape (n_sectors,),
+                         dtype int32. ``dim == sum(multiplicities)``.
+        flow:            Whether this leg is incoming (IN) or outgoing (OUT).
+        label:           Human-readable or integer identifier for this leg.
+        fuse_info:       If this leg was produced by ``fuse_indices``, records
+                         the parent indices so ``split_index`` can reverse it.
 
     Example:
         >>> u1 = U1Symmetry()
-        >>> idx = TensorIndex(u1, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.IN, label="left")
+        >>> idx = TensorIndex.from_charges(u1, np.array([-1, 0, 1], dtype=np.int32),
+        ...                                FlowDirection.IN, label="left")
         >>> idx.dim
         3
-        >>> idx.dual().flow
-        <FlowDirection.OUT: -1>
+        >>> idx.sectors
+        array([-1,  0,  1], dtype=int32)
     """
 
     symmetry: BaseSymmetry
-    charges: np.ndarray  # shape (D,), dtype int32
+    sectors: np.ndarray  # shape (n_sectors,), dtype int32, sorted
+    multiplicities: np.ndarray  # shape (n_sectors,), dtype int32
     flow: FlowDirection
     label: Label = ""
+    fuse_info: FuseInfo | None = None
+    # Original charges array preserved for from_dense/todense compatibility.
+    # Set by from_charges(); None when constructed directly (sorted order used).
+    _charges_cache: np.ndarray | None = field(
+        default=None, init=False, repr=False, compare=False, hash=False
+    )
 
     def __post_init__(self) -> None:
-        if self.charges.ndim != 1:
-            raise ValueError(f"charges must be 1-D, got shape {self.charges.shape}")
-        # Coerce to int32 if needed (use object.__setattr__ since frozen)
-        if self.charges.dtype != np.int32:
-            object.__setattr__(self, "charges", self.charges.astype(np.int32))
+        if self.sectors.ndim != 1:
+            raise ValueError(f"sectors must be 1-D, got shape {self.sectors.shape}")
+        if self.multiplicities.ndim != 1:
+            raise ValueError(
+                f"multiplicities must be 1-D, got shape {self.multiplicities.shape}"
+            )
+        if len(self.sectors) != len(self.multiplicities):
+            raise ValueError(
+                f"sectors and multiplicities must have same length, "
+                f"got {len(self.sectors)} vs {len(self.multiplicities)}"
+            )
+        if self.sectors.dtype != np.int32:
+            object.__setattr__(self, "sectors", self.sectors.astype(np.int32))
+        if self.multiplicities.dtype != np.int32:
+            object.__setattr__(
+                self, "multiplicities", self.multiplicities.astype(np.int32)
+            )
 
     @classmethod
     def from_charges(
@@ -102,8 +130,9 @@ class TensorIndex:
     ) -> TensorIndex:
         """Construct a TensorIndex from a dense charges array.
 
-        This is the backward-compatible construction API. Internally converts
-        the charges array to the canonical form expected by the constructor.
+        Extracts sorted unique sectors and their multiplicities from the
+        charges array while preserving the original charge ordering for
+        backward-compatible dense tensor operations.
 
         Args:
             symmetry: Symmetry group for this leg.
@@ -112,19 +141,67 @@ class TensorIndex:
             label:    Leg label for contraction matching.
 
         Returns:
-            New TensorIndex.
+            New TensorIndex with sectors/multiplicities derived from charges.
         """
-        return cls(
+        charges = np.asarray(charges, dtype=np.int32)
+        if charges.ndim != 1:
+            raise ValueError(f"charges must be 1-D, got shape {charges.shape}")
+        sectors, multiplicities = np.unique(charges, return_counts=True)
+        obj = cls(
             symmetry=symmetry,
-            charges=np.asarray(charges, dtype=np.int32),
+            sectors=sectors.astype(np.int32),
+            multiplicities=multiplicities.astype(np.int32),
             flow=flow,
             label=label,
         )
+        # Preserve original ordering for from_dense/todense compatibility
+        object.__setattr__(obj, "_charges_cache", charges)
+        return obj
+
+    @property
+    def charges(self) -> np.ndarray:
+        """Dense charges array for this leg.
+
+        Returns the original ordering if constructed via ``from_charges``,
+        otherwise returns sorted charges (``np.repeat(sectors, multiplicities)``).
+        """
+        if self._charges_cache is not None:
+            return self._charges_cache
+        return np.repeat(self.sectors, self.multiplicities)
 
     @property
     def dim(self) -> int:
         """Bond dimension of this leg (number of basis states)."""
-        return len(self.charges)
+        return int(np.sum(self.multiplicities))
+
+    @property
+    def n_sectors(self) -> int:
+        """Number of distinct charge sectors."""
+        return len(self.sectors)
+
+    def multiplicity(self, charge: int) -> int:
+        """Return multiplicity of a charge sector (0 if not present)."""
+        idx = np.searchsorted(self.sectors, charge)
+        if idx < len(self.sectors) and self.sectors[idx] == charge:
+            return int(self.multiplicities[idx])
+        return 0
+
+    def sector_offset(self, charge: int) -> int:
+        """Return starting position of charge sector in the *sorted* charges array.
+
+        Note: this gives the offset in the sorted representation
+        (``np.repeat(sectors, multiplicities)``), not in the original charges
+        array from ``from_charges``.
+        """
+        idx = np.searchsorted(self.sectors, charge)
+        if idx < len(self.sectors) and self.sectors[idx] == charge:
+            return int(np.sum(self.multiplicities[:idx]))
+        raise KeyError(f"Charge {charge} not in sectors {self.sectors}")
+
+    def has_sector(self, charge: int) -> bool:
+        """Check if this index has a given charge sector."""
+        idx = np.searchsorted(self.sectors, charge)
+        return bool(idx < len(self.sectors) and self.sectors[idx] == charge)
 
     def dual(self) -> TensorIndex:
         """Return a new TensorIndex with flipped flow and dual charges.
@@ -135,12 +212,21 @@ class TensorIndex:
         Returns:
             New TensorIndex with opposite flow and dual charges.
         """
-        return TensorIndex(
+        dual_sectors = self.symmetry.dual(self.sectors)
+        sort_perm = np.argsort(dual_sectors)
+        obj = TensorIndex(
             symmetry=self.symmetry,
-            charges=self.symmetry.dual(self.charges),
+            sectors=dual_sectors[sort_perm],
+            multiplicities=self.multiplicities[sort_perm],
             flow=FlowDirection(-int(self.flow)),
             label=self.label,
         )
+        # Compute dual charges preserving original ordering if available
+        if self._charges_cache is not None:
+            object.__setattr__(
+                obj, "_charges_cache", self.symmetry.dual(self._charges_cache)
+            )
+        return obj
 
     def flip_flow(self) -> TensorIndex:
         """Return a new TensorIndex with flipped flow but unchanged charges.
@@ -152,12 +238,16 @@ class TensorIndex:
         Returns:
             New TensorIndex with opposite flow and identical charges.
         """
-        return TensorIndex(
+        obj = TensorIndex(
             symmetry=self.symmetry,
-            charges=self.charges,
+            sectors=self.sectors,
+            multiplicities=self.multiplicities,
             flow=FlowDirection(-int(self.flow)),
             label=self.label,
         )
+        if self._charges_cache is not None:
+            object.__setattr__(obj, "_charges_cache", self._charges_cache)
+        return obj
 
     def relabel(self, new_label: Label) -> TensorIndex:
         """Return a new TensorIndex with a different label, otherwise identical.
@@ -168,19 +258,23 @@ class TensorIndex:
         Returns:
             New frozen TensorIndex with the updated label.
         """
-        return TensorIndex(
+        obj = TensorIndex(
             symmetry=self.symmetry,
-            charges=self.charges,
+            sectors=self.sectors,
+            multiplicities=self.multiplicities,
             flow=self.flow,
             label=new_label,
+            fuse_info=self.fuse_info,
         )
+        if self._charges_cache is not None:
+            object.__setattr__(obj, "_charges_cache", self._charges_cache)
+        return obj
 
     def is_dual_of(self, other: TensorIndex) -> bool:
         """Check if this index is the exact dual of other.
 
-        Strict check: requires opposite flows AND charge arrays that are
-        dual of each other. Used to validate that two legs can be contracted
-        while preserving exact charge conservation.
+        Strict check: requires opposite flows AND charge sectors that are
+        dual of each other with matching multiplicities.
 
         Args:
             other: Another TensorIndex to compare against.
@@ -216,10 +310,6 @@ class TensorIndex:
         )
 
     def __hash__(self) -> int:
-        # Use value-based hash consistent with __eq__: two TensorIndex objects
-        # that compare equal (same symmetry type+params, same charges, same flow,
-        # same label) must have the same hash. id(self.symmetry) would break this
-        # invariant when two separately-constructed symmetry instances are equal.
         return hash((self.symmetry, self.charges.tobytes(), int(self.flow), self.label))
 
     def __eq__(self, other: object) -> bool:
@@ -236,5 +326,6 @@ class TensorIndex:
     def __repr__(self) -> str:
         return (
             f"TensorIndex(sym={self.symmetry!r}, dim={self.dim}, "
-            f"flow={self.flow.name}, label={self.label!r})"
+            f"n_sectors={self.n_sectors}, flow={self.flow.name}, "
+            f"label={self.label!r})"
         )

@@ -215,3 +215,78 @@ class TestTensorIndexHashEquality:
         assert "IN" in r
         assert "test" in r
         assert "dim=3" in r
+
+
+class TestTensorIndexSectors:
+    """Tests for the sector-based representation."""
+
+    def test_sectors_from_charges(self, u1):
+        idx = TensorIndex.from_charges(
+            u1, np.array([-1, 0, 1, 0], dtype=np.int32), FlowDirection.IN, label="test"
+        )
+        np.testing.assert_array_equal(idx.sectors, np.array([-1, 0, 1]))
+        np.testing.assert_array_equal(idx.multiplicities, np.array([1, 2, 1]))
+        assert idx.dim == 4
+
+    def test_charges_preserves_original_order(self, u1):
+        original = np.array([1, -1, 0], dtype=np.int32)
+        idx = TensorIndex.from_charges(u1, original, FlowDirection.IN)
+        # from_charges preserves original ordering for from_dense compat
+        np.testing.assert_array_equal(idx.charges, original)
+
+    def test_already_sorted_roundtrip(self, u1):
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        idx = TensorIndex.from_charges(u1, charges, FlowDirection.IN)
+        np.testing.assert_array_equal(idx.charges, charges)
+
+    def test_fuse_info_none_by_default(self, u1):
+        idx = TensorIndex.from_charges(
+            u1, np.array([0, 1], dtype=np.int32), FlowDirection.IN
+        )
+        assert idx.fuse_info is None
+
+    def test_direct_construction(self, u1):
+        sectors = np.array([-1, 0, 1], dtype=np.int32)
+        mults = np.array([1, 1, 1], dtype=np.int32)
+        idx = TensorIndex(u1, sectors, mults, FlowDirection.IN, label="test")
+        assert idx.dim == 3
+        np.testing.assert_array_equal(idx.sectors, sectors)
+        np.testing.assert_array_equal(idx.multiplicities, mults)
+
+    def test_n_sectors(self, u1):
+        idx = TensorIndex.from_charges(
+            u1, np.array([-1, 0, 0, 1], dtype=np.int32), FlowDirection.IN
+        )
+        assert idx.n_sectors == 3
+
+    def test_multiplicity_helper(self, u1):
+        idx = TensorIndex.from_charges(
+            u1, np.array([-1, 0, 0, 1], dtype=np.int32), FlowDirection.IN
+        )
+        assert idx.multiplicity(0) == 2
+        assert idx.multiplicity(-1) == 1
+        assert idx.multiplicity(99) == 0
+
+    def test_sector_offset_helper(self, u1):
+        idx = TensorIndex.from_charges(
+            u1, np.array([-1, 0, 0, 1], dtype=np.int32), FlowDirection.IN
+        )
+        assert idx.sector_offset(-1) == 0
+        assert idx.sector_offset(0) == 1
+        assert idx.sector_offset(1) == 3
+
+    def test_has_sector(self, u1):
+        idx = TensorIndex.from_charges(
+            u1, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.IN
+        )
+        assert idx.has_sector(0)
+        assert not idx.has_sector(2)
+
+    def test_dual_sectors(self, u1):
+        idx = TensorIndex.from_charges(
+            u1, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.IN
+        )
+        d = idx.dual()
+        # U(1) dual negates: [-1,0,1] → [1,0,-1], sorted → [-1,0,1]
+        np.testing.assert_array_equal(d.sectors, np.array([-1, 0, 1]))
+        np.testing.assert_array_equal(d.multiplicities, np.array([1, 1, 1]))
