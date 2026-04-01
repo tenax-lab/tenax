@@ -671,6 +671,81 @@ def _trivial_right_env_symmetric(
     return SymmetricTensor.from_dense(data, indices)
 
 
+def _solve_left_env_fixedpoint_symmetric(
+    A_L: SymmetricTensor,
+    W: SymmetricTensor,
+) -> SymmetricTensor:
+    """Solve for the fixed-point left environment (symmetric path).
+
+    V1 implementation: todense round-trip through the dense solver.
+    Pure block-sparse version can follow if profiling shows this is a bottleneck.
+
+    Args:
+        A_L: Left-isometric MPS tensor (chi_l, d, chi_r) as SymmetricTensor.
+        W: Full MPO tensor (D_w, d, d, D_w) as SymmetricTensor.
+
+    Returns:
+        SymmetricTensor L_env of shape (chi, D_w, chi) with correct indices.
+    """
+    sym = A_L.indices[0].symmetry
+    chi_charges = A_L.indices[2].charges
+    mpo_charges = W.indices[0].charges
+
+    A_L_dense = np.array(A_L.todense())
+    W_dense = np.array(W.todense())
+    L_env_dense = _solve_left_env_fixedpoint_dense(A_L_dense, W_dense)
+
+    L_indices = (
+        TensorIndex(sym, np.array(chi_charges), FlowDirection.IN, label="env_mps_l"),
+        TensorIndex(sym, np.array(mpo_charges), FlowDirection.IN, label="env_mpo_l"),
+        TensorIndex(
+            sym, np.array(chi_charges), FlowDirection.OUT, label="env_mps_conj_l"
+        ),
+    )
+    # The dense solver may populate entries outside symmetry-allowed sectors;
+    # use tol=inf to extract only the valid blocks (the physical solution
+    # respects the symmetry, so discarded entries are numerical noise).
+    return SymmetricTensor.from_dense(
+        jnp.array(L_env_dense), L_indices, tol=float("inf")
+    )
+
+
+def _solve_right_env_fixedpoint_symmetric(
+    A_R: SymmetricTensor,
+    W: SymmetricTensor,
+) -> SymmetricTensor:
+    """Solve for the fixed-point right environment (symmetric path).
+
+    V1 implementation: todense round-trip through the dense solver.
+
+    Args:
+        A_R: Right-isometric MPS tensor (chi_l, d, chi_r) as SymmetricTensor.
+        W: Full MPO tensor (D_w, d, d, D_w) as SymmetricTensor.
+
+    Returns:
+        SymmetricTensor R_env of shape (chi, D_w, chi) with correct indices.
+    """
+    sym = A_R.indices[0].symmetry
+    chi_charges = A_R.indices[0].charges
+    mpo_charges = W.indices[3].charges
+
+    A_R_dense = np.array(A_R.todense())
+    W_dense = np.array(W.todense())
+    R_env_dense = _solve_right_env_fixedpoint_dense(A_R_dense, W_dense)
+
+    R_indices = (
+        TensorIndex(sym, np.array(chi_charges), FlowDirection.OUT, label="env_mps_r"),
+        TensorIndex(sym, np.array(mpo_charges), FlowDirection.OUT, label="env_mpo_r"),
+        TensorIndex(
+            sym, np.array(chi_charges), FlowDirection.IN, label="env_mps_conj_r"
+        ),
+    )
+    # See comment in _solve_left_env_fixedpoint_symmetric.
+    return SymmetricTensor.from_dense(
+        jnp.array(R_env_dense), R_indices, tol=float("inf")
+    )
+
+
 def _idmrg_growing_chain_symmetric(
     bulk_mpo: SymmetricTensor,
     config: iDMRGConfig,
