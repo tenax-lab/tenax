@@ -52,6 +52,7 @@ from tenax.algorithms._split_ctm_tensor import (
     compute_energy_split_ctm_tensor,
     ctm_split_tensor,
 )
+from tenax.algorithms._tensor_utils import fuse_indices, split_index
 from tenax.algorithms.auto_mpo import (
     AutoMPO,
     HamiltonianTerm,
@@ -182,6 +183,9 @@ __all__ = [
     "SymmetricTensor",
     "BlockKey",
     "inner",
+    # Tensor utilities
+    "fuse_indices",
+    "split_index",
     # Contraction
     "contract",
     "contract_with_subscripts",
