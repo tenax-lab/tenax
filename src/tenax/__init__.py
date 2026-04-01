@@ -98,7 +98,7 @@ from tenax.algorithms.ipeps_excitations import (
     compute_excitations,
     make_momentum_path,
 )
-from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+from tenax.algorithms.ipeps_optimize import optimize_fpeps_ad, optimize_gs_ad
 from tenax.algorithms.ipeps_rdm import (
     compute_energy_ctm_2site,
     compute_energy_split_ctm,
@@ -263,6 +263,7 @@ __all__ = [
     # fPEPS (fermionic iPEPS)
     "FPEPSConfig",
     "fpeps",
+    "optimize_fpeps_ad",
     "spinless_fermion_gate",
     # iPEPS Excitations
     "ExcitationConfig",
