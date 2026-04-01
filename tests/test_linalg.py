@@ -29,10 +29,10 @@ def hermitian_dense():
     M = jax.random.normal(key, (4, 4))
     M = M @ M.T  # make positive semidefinite
     indices = (
-        TensorIndex(sym, np.zeros(2, dtype=np.int32), IN, label="i"),
-        TensorIndex(sym, np.zeros(2, dtype=np.int32), OUT, label="j"),
-        TensorIndex(sym, np.zeros(2, dtype=np.int32), OUT, label="k"),
-        TensorIndex(sym, np.zeros(2, dtype=np.int32), IN, label="l"),
+        TensorIndex.from_charges(sym, np.zeros(2, dtype=np.int32), IN, label="i"),
+        TensorIndex.from_charges(sym, np.zeros(2, dtype=np.int32), OUT, label="j"),
+        TensorIndex.from_charges(sym, np.zeros(2, dtype=np.int32), OUT, label="k"),
+        TensorIndex.from_charges(sym, np.zeros(2, dtype=np.int32), IN, label="l"),
     )
     return DenseTensor(M.reshape(2, 2, 2, 2), indices)
 
@@ -42,8 +42,8 @@ def hermitian_symmetric():
     """Small Hermitian SymmetricTensor with nontrivial U(1) charges."""
     sym = U1Symmetry()
     charges = np.array([-1, 0, 1], dtype=np.int32)
-    idx_in = TensorIndex(sym, charges, IN, label="row")
-    idx_out = TensorIndex(sym, charges, OUT, label="col")
+    idx_in = TensorIndex.from_charges(sym, charges, IN, label="row")
+    idx_out = TensorIndex.from_charges(sym, charges, OUT, label="col")
 
     # Build a symmetric-compatible random tensor, then form M M^T
     key = jax.random.PRNGKey(7)

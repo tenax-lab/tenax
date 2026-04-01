@@ -278,10 +278,10 @@ def _truncated_svd_symmetric(
 
     sym = tensor.indices[0].symmetry
 
-    bond_index_out = TensorIndex(
+    bond_index_out = TensorIndex.from_charges(
         sym, bond_charges, FlowDirection.OUT, label=new_bond_label
     )
-    bond_index_in = TensorIndex(
+    bond_index_in = TensorIndex.from_charges(
         sym, bond_charges, FlowDirection.IN, label=new_bond_label
     )
 
@@ -537,10 +537,10 @@ def _truncated_svd_symmetric_np(
 
     sym = tensor.indices[0].symmetry
 
-    bond_index_out = TensorIndex(
+    bond_index_out = TensorIndex.from_charges(
         sym, bond_charges, FlowDirection.OUT, label=new_bond_label
     )
-    bond_index_in = TensorIndex(
+    bond_index_in = TensorIndex.from_charges(
         sym, bond_charges, FlowDirection.IN, label=new_bond_label
     )
 
@@ -721,10 +721,10 @@ def _qr_symmetric_np(
     bond_charges = np.array(bond_charges_list, dtype=np.int32)
     sym = tensor.indices[0].symmetry
 
-    bond_index_out = TensorIndex(
+    bond_index_out = TensorIndex.from_charges(
         sym, bond_charges, FlowDirection.OUT, label=new_bond_label
     )
-    bond_index_in = TensorIndex(
+    bond_index_in = TensorIndex.from_charges(
         sym, bond_charges, FlowDirection.IN, label=new_bond_label
     )
 
@@ -898,10 +898,10 @@ def _qr_symmetric(
     bond_charges = np.array(bond_charges_list, dtype=np.int32)
     sym = tensor.indices[0].symmetry
 
-    bond_index_out = TensorIndex(
+    bond_index_out = TensorIndex.from_charges(
         sym, bond_charges, FlowDirection.OUT, label=new_bond_label
     )
-    bond_index_in = TensorIndex(
+    bond_index_in = TensorIndex.from_charges(
         sym, bond_charges, FlowDirection.IN, label=new_bond_label
     )
 
@@ -1072,7 +1072,7 @@ def _eigh_symmetric(
     bond_charges = np.array([q for _, q, _ in kept], dtype=np.int32)
     sym = tensor.indices[0].symmetry
 
-    bond_index_out = TensorIndex(
+    bond_index_out = TensorIndex.from_charges(
         sym, bond_charges, FlowDirection.OUT, label=new_bond_label
     )
 
@@ -1262,10 +1262,10 @@ def svd(
 
         sym = U1Symmetry()
 
-    bond_index_out = TensorIndex(
+    bond_index_out = TensorIndex.from_charges(
         sym, bond_charges_out, FlowDirection.OUT, label=new_bond_label
     )
-    bond_index_in = TensorIndex(
+    bond_index_in = TensorIndex.from_charges(
         sym, bond_charges_out, FlowDirection.IN, label=new_bond_label
     )
 
@@ -1457,10 +1457,10 @@ def _rsvd_symmetric(
     for global_col, (_, q, idx_in_sector) in enumerate(kept):
         sector_cols.setdefault(q, []).append((global_col, idx_in_sector))
 
-    bond_index_out = TensorIndex(
+    bond_index_out = TensorIndex.from_charges(
         sym, bond_charges, FlowDirection.OUT, label=new_bond_label
     )
-    bond_index_in = TensorIndex(
+    bond_index_in = TensorIndex.from_charges(
         sym, bond_charges, FlowDirection.IN, label=new_bond_label
     )
 
@@ -1638,10 +1638,10 @@ def rsvd(
 
         sym = U1Symmetry()
 
-    bond_index_out = TensorIndex(
+    bond_index_out = TensorIndex.from_charges(
         sym, bond_charges_out, FlowDirection.OUT, label=new_bond_label
     )
-    bond_index_in = TensorIndex(
+    bond_index_in = TensorIndex.from_charges(
         sym, bond_charges_out, FlowDirection.IN, label=new_bond_label
     )
 
@@ -1714,10 +1714,10 @@ def qr(
 
         sym = U1Symmetry()
 
-    bond_index_out = TensorIndex(
+    bond_index_out = TensorIndex.from_charges(
         sym, bond_charges, FlowDirection.OUT, label=new_bond_label
     )
-    bond_index_in = TensorIndex(
+    bond_index_in = TensorIndex.from_charges(
         sym, bond_charges, FlowDirection.IN, label=new_bond_label
     )
 
@@ -1812,7 +1812,9 @@ def eigh(
 
         sym = U1Symmetry()
 
-    bond_index = TensorIndex(sym, bond_charges, FlowDirection.OUT, label=new_bond_label)
+    bond_index = TensorIndex.from_charges(
+        sym, bond_charges, FlowDirection.OUT, label=new_bond_label
+    )
     V_indices = left_indices + (bond_index,)
     V_tensor = DenseTensor(V_dense, V_indices)
 

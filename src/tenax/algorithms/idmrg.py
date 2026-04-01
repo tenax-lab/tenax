@@ -150,10 +150,10 @@ def build_bulk_mpo_heisenberg(
     bond_d = np.zeros(d, dtype=np.int32)
 
     indices = (
-        TensorIndex(sym, bond_dw, FlowDirection.IN, label="w_l"),
-        TensorIndex(sym, bond_d, FlowDirection.IN, label="mpo_top"),
-        TensorIndex(sym, bond_d, FlowDirection.OUT, label="mpo_bot"),
-        TensorIndex(sym, bond_dw, FlowDirection.OUT, label="w_r"),
+        TensorIndex.from_charges(sym, bond_dw, FlowDirection.IN, label="w_l"),
+        TensorIndex.from_charges(sym, bond_d, FlowDirection.IN, label="mpo_top"),
+        TensorIndex.from_charges(sym, bond_d, FlowDirection.OUT, label="mpo_bot"),
+        TensorIndex.from_charges(sym, bond_dw, FlowDirection.OUT, label="w_r"),
     )
     return DenseTensor(W, indices)
 
@@ -262,10 +262,10 @@ def build_bulk_mpo_heisenberg_cylinder(
     bond_d = np.zeros(d, dtype=np.int32)
 
     indices = (
-        TensorIndex(sym, bond_dw, FlowDirection.IN, label="w_l"),
-        TensorIndex(sym, bond_d, FlowDirection.IN, label="mpo_top"),
-        TensorIndex(sym, bond_d, FlowDirection.OUT, label="mpo_bot"),
-        TensorIndex(sym, bond_dw, FlowDirection.OUT, label="w_r"),
+        TensorIndex.from_charges(sym, bond_dw, FlowDirection.IN, label="w_l"),
+        TensorIndex.from_charges(sym, bond_d, FlowDirection.IN, label="mpo_top"),
+        TensorIndex.from_charges(sym, bond_d, FlowDirection.OUT, label="mpo_bot"),
+        TensorIndex.from_charges(sym, bond_dw, FlowDirection.OUT, label="w_r"),
     )
     return DenseTensor(W, indices)
 
@@ -324,10 +324,10 @@ def build_bulk_mpo_heisenberg_symmetric(
     mpo_bond_charges = np.array([0, -2, 2, 0, 0], dtype=np.int32)
     phys_charges = np.array([1, -1], dtype=np.int32)
     indices = (
-        TensorIndex(sym, mpo_bond_charges, FlowDirection.IN, label="w_l"),
-        TensorIndex(sym, phys_charges, FlowDirection.IN, label="mpo_top"),
-        TensorIndex(sym, phys_charges, FlowDirection.OUT, label="mpo_bot"),
-        TensorIndex(sym, mpo_bond_charges, FlowDirection.OUT, label="w_r"),
+        TensorIndex.from_charges(sym, mpo_bond_charges, FlowDirection.IN, label="w_l"),
+        TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="mpo_top"),
+        TensorIndex.from_charges(sym, phys_charges, FlowDirection.OUT, label="mpo_bot"),
+        TensorIndex.from_charges(sym, mpo_bond_charges, FlowDirection.OUT, label="w_r"),
     )
     return SymmetricTensor.from_dense(W, indices)
 
@@ -347,9 +347,11 @@ def _trivial_left_env(D_w: int, dtype: Any = jnp.float64) -> DenseTensor:
     # In the standard MPO convention, the vacuum state is the last row.
     data = data.at[0, D_w - 1, 0].set(1.0)
     indices = (
-        TensorIndex(sym, bond_mps, FlowDirection.IN, label="env_mps_l"),
-        TensorIndex(sym, bond_mpo, FlowDirection.IN, label="env_mpo_l"),
-        TensorIndex(sym, bond_mps, FlowDirection.OUT, label="env_mps_conj_l"),
+        TensorIndex.from_charges(sym, bond_mps, FlowDirection.IN, label="env_mps_l"),
+        TensorIndex.from_charges(sym, bond_mpo, FlowDirection.IN, label="env_mpo_l"),
+        TensorIndex.from_charges(
+            sym, bond_mps, FlowDirection.OUT, label="env_mps_conj_l"
+        ),
     )
     return DenseTensor(data, indices)
 
@@ -363,9 +365,11 @@ def _trivial_right_env(D_w: int, dtype: Any = jnp.float64) -> DenseTensor:
     # Only the "done" row (index 0) is 1.
     data = data.at[0, 0, 0].set(1.0)
     indices = (
-        TensorIndex(sym, bond_mps, FlowDirection.OUT, label="env_mps_r"),
-        TensorIndex(sym, bond_mpo, FlowDirection.OUT, label="env_mpo_r"),
-        TensorIndex(sym, bond_mps, FlowDirection.IN, label="env_mps_conj_r"),
+        TensorIndex.from_charges(sym, bond_mps, FlowDirection.OUT, label="env_mps_r"),
+        TensorIndex.from_charges(sym, bond_mpo, FlowDirection.OUT, label="env_mpo_r"),
+        TensorIndex.from_charges(
+            sym, bond_mps, FlowDirection.IN, label="env_mps_conj_r"
+        ),
     )
     return DenseTensor(data, indices)
 
@@ -484,9 +488,11 @@ def _trivial_left_env_symmetric(
     bond_mps = np.zeros(1, dtype=np.int32)
     mpo_charges = mpo.indices[0].charges  # w_l charges
     indices = (
-        TensorIndex(sym, bond_mps, FlowDirection.IN, label="env_mps_l"),
-        TensorIndex(sym, mpo_charges, FlowDirection.IN, label="env_mpo_l"),
-        TensorIndex(sym, bond_mps, FlowDirection.OUT, label="env_mps_conj_l"),
+        TensorIndex.from_charges(sym, bond_mps, FlowDirection.IN, label="env_mps_l"),
+        TensorIndex.from_charges(sym, mpo_charges, FlowDirection.IN, label="env_mpo_l"),
+        TensorIndex.from_charges(
+            sym, bond_mps, FlowDirection.OUT, label="env_mps_conj_l"
+        ),
     )
     # Only the vacuum row (last MPO state) is non-zero.
     # For Heisenberg: vacuum = state D_w-1, charge = 0.
@@ -504,9 +510,13 @@ def _trivial_right_env_symmetric(
     bond_mps = np.zeros(1, dtype=np.int32)
     mpo_charges = mpo.indices[3].charges  # w_r charges
     indices = (
-        TensorIndex(sym, bond_mps, FlowDirection.OUT, label="env_mps_r"),
-        TensorIndex(sym, mpo_charges, FlowDirection.OUT, label="env_mpo_r"),
-        TensorIndex(sym, bond_mps, FlowDirection.IN, label="env_mps_conj_r"),
+        TensorIndex.from_charges(sym, bond_mps, FlowDirection.OUT, label="env_mps_r"),
+        TensorIndex.from_charges(
+            sym, mpo_charges, FlowDirection.OUT, label="env_mpo_r"
+        ),
+        TensorIndex.from_charges(
+            sym, bond_mps, FlowDirection.IN, label="env_mps_conj_r"
+        ),
     )
     # Only the "done" row (index 0) is non-zero.
     D_w = len(mpo_charges)
@@ -551,10 +561,10 @@ def _idmrg_growing_chain_symmetric(
     for step in range(config.max_iterations):
         # ---- Build initial theta ----
         theta_indices = (
-            TensorIndex(sym, virt_charges, FlowDirection.IN, label="v_l"),
-            TensorIndex(sym, phys_charges, FlowDirection.IN, label="p_l"),
-            TensorIndex(sym, phys_charges, FlowDirection.IN, label="p_r"),
-            TensorIndex(sym, virt_charges, FlowDirection.OUT, label="v_r"),
+            TensorIndex.from_charges(sym, virt_charges, FlowDirection.IN, label="v_l"),
+            TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="p_l"),
+            TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="p_r"),
+            TensorIndex.from_charges(sym, virt_charges, FlowDirection.OUT, label="v_r"),
         )
 
         if theta_prev is not None and np.array_equal(
@@ -808,7 +818,7 @@ def _idmrg_growing_chain(
 
     def _wrap_mps(data: jax.Array, labels: tuple[str, ...]) -> DenseTensor:
         indices = tuple(
-            TensorIndex(
+            TensorIndex.from_charges(
                 sym,
                 np.zeros(data.shape[k], dtype=np.int32),
                 FlowDirection.IN if k < data.ndim - 1 else FlowDirection.OUT,
@@ -1172,7 +1182,7 @@ def _idmrg_sweep(
 
     def _wrap_mps(data: jax.Array, labels: tuple[str, ...]) -> DenseTensor:
         indices = tuple(
-            TensorIndex(
+            TensorIndex.from_charges(
                 sym,
                 np.zeros(data.shape[k], dtype=np.int32),
                 FlowDirection.IN if k < data.ndim - 1 else FlowDirection.OUT,
@@ -1247,10 +1257,10 @@ def _idmrg_sweep_symmetric(
     for sweep in range(config.max_iterations):
         # ---- Build initial theta ----
         theta_indices = (
-            TensorIndex(sym, virt_charges, FlowDirection.IN, label="v_l"),
-            TensorIndex(sym, phys_charges, FlowDirection.IN, label="p_l"),
-            TensorIndex(sym, phys_charges, FlowDirection.IN, label="p_r"),
-            TensorIndex(sym, virt_charges, FlowDirection.OUT, label="v_r"),
+            TensorIndex.from_charges(sym, virt_charges, FlowDirection.IN, label="v_l"),
+            TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="p_l"),
+            TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="p_r"),
+            TensorIndex.from_charges(sym, virt_charges, FlowDirection.OUT, label="v_r"),
         )
 
         if theta_prev is not None and np.array_equal(
@@ -1626,7 +1636,7 @@ def _idmrg_1site_sweep(
 
     def _wrap_mps(data: jax.Array, labels: tuple[str, ...]) -> DenseTensor:
         indices = tuple(
-            TensorIndex(
+            TensorIndex.from_charges(
                 sym,
                 np.zeros(data.shape[k], dtype=np.int32),
                 FlowDirection.IN if k < data.ndim - 1 else FlowDirection.OUT,

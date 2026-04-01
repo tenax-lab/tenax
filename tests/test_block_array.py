@@ -26,11 +26,11 @@ def simple_ba():
     """A BlockArray with two blocks for basic arithmetic tests."""
     sym = U1Symmetry()
     # charges: [0, 0, 1, 1, 1] -> 2 states charge 0, 3 states charge 1
-    idx_a = TensorIndex(
+    idx_a = TensorIndex.from_charges(
         sym, np.array([0, 0, 1, 1, 1], dtype=np.int32), FlowDirection.IN, label="a"
     )
     # charges: [0, 0, 0, 0, 1, 1] -> 4 states charge 0, 2 states charge 1
-    idx_b = TensorIndex(
+    idx_b = TensorIndex.from_charges(
         sym, np.array([0, 0, 0, 0, 1, 1], dtype=np.int32), FlowDirection.OUT, label="b"
     )
     blocks = {
@@ -44,10 +44,10 @@ def simple_ba():
 def another_ba():
     """A BlockArray with same structure but different values."""
     sym = U1Symmetry()
-    idx_a = TensorIndex(
+    idx_a = TensorIndex.from_charges(
         sym, np.array([0, 0, 1, 1, 1], dtype=np.int32), FlowDirection.IN, label="a"
     )
-    idx_b = TensorIndex(
+    idx_b = TensorIndex.from_charges(
         sym, np.array([0, 0, 0, 0, 1, 1], dtype=np.int32), FlowDirection.OUT, label="b"
     )
     blocks = {
@@ -83,10 +83,10 @@ class TestBaAdd:
     def test_add_different_keys_union(self):
         """Adding with disjoint keys should produce union."""
         sym = U1Symmetry()
-        idx = TensorIndex(
+        idx = TensorIndex.from_charges(
             sym, np.array([0, 1], dtype=np.int32), FlowDirection.IN, label="x"
         )
-        idx_out = TensorIndex(
+        idx_out = TensorIndex.from_charges(
             sym, np.array([0, 1], dtype=np.int32), FlowDirection.OUT, label="y"
         )
         ba1 = BlockArray(blocks={(0, 0): np.array([[1.0]])}, indices=(idx, idx_out))
@@ -159,10 +159,10 @@ class TestBaAxpy:
     def test_axpy_skips_missing_keys(self):
         """Keys in x but not y should be ignored."""
         sym = U1Symmetry()
-        idx = TensorIndex(
+        idx = TensorIndex.from_charges(
             sym, np.array([0, 1], dtype=np.int32), FlowDirection.IN, label="x"
         )
-        idx_out = TensorIndex(
+        idx_out = TensorIndex.from_charges(
             sym, np.array([0, 1], dtype=np.int32), FlowDirection.OUT, label="y"
         )
         x = BlockArray(
@@ -221,10 +221,10 @@ class TestCythonBaInner:
 def complex_ba():
     """A BlockArray with complex128 blocks for complex arithmetic tests."""
     sym = U1Symmetry()
-    idx_a = TensorIndex(
+    idx_a = TensorIndex.from_charges(
         sym, np.array([0, 0, 1, 1, 1], dtype=np.int32), FlowDirection.IN, label="a"
     )
-    idx_b = TensorIndex(
+    idx_b = TensorIndex.from_charges(
         sym, np.array([0, 0, 0, 0, 1, 1], dtype=np.int32), FlowDirection.OUT, label="b"
     )
     blocks = {
@@ -240,10 +240,10 @@ def complex_ba():
 def another_complex_ba():
     """A second BlockArray with complex128 blocks and same structure."""
     sym = U1Symmetry()
-    idx_a = TensorIndex(
+    idx_a = TensorIndex.from_charges(
         sym, np.array([0, 0, 1, 1, 1], dtype=np.int32), FlowDirection.IN, label="a"
     )
-    idx_b = TensorIndex(
+    idx_b = TensorIndex.from_charges(
         sym, np.array([0, 0, 0, 0, 1, 1], dtype=np.int32), FlowDirection.OUT, label="b"
     )
     blocks = {
@@ -301,10 +301,10 @@ class TestComplexBlockArray:
     def test_roundtrip_complex(self):
         """ba_to_symmetric preserves complex dtype (t._data.dtype == np.complex128)."""
         sym = U1Symmetry()
-        idx_a = TensorIndex(
+        idx_a = TensorIndex.from_charges(
             sym, np.array([0, 0, 1, 1, 1], dtype=np.int32), FlowDirection.IN, label="a"
         )
-        idx_b = TensorIndex(
+        idx_b = TensorIndex.from_charges(
             sym,
             np.array([0, 0, 0, 0, 1, 1], dtype=np.int32),
             FlowDirection.OUT,
@@ -333,11 +333,11 @@ class TestRoundtrip:
         """SymmetricTensor -> BlockArray -> SymmetricTensor preserves data."""
         sym = U1Symmetry()
         # charges for idx_a: [0, 0, 1, 1, 1]  (2 with q=0, 3 with q=1)
-        idx_a = TensorIndex(
+        idx_a = TensorIndex.from_charges(
             sym, np.array([0, 0, 1, 1, 1], dtype=np.int32), FlowDirection.IN, label="a"
         )
         # charges for idx_b: [0, 0, 0, 0, 1, 1]  (4 with q=0, 2 with q=1)
-        idx_b = TensorIndex(
+        idx_b = TensorIndex.from_charges(
             sym,
             np.array([0, 0, 0, 0, 1, 1], dtype=np.int32),
             FlowDirection.OUT,

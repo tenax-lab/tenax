@@ -70,11 +70,17 @@ def _densify_tensor_network(tn: TensorNetwork) -> TensorNetwork:
 def _make_symmetric_peps(key, sym, virt_charges, phys_charges):
     """Build a random SymmetricTensor iPEPS site tensor."""
     indices = (
-        TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="u"),
-        TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="d"),
-        TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="l"),
-        TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="r"),
-        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(
+            sym, virt_charges.copy(), FlowDirection.OUT, label="u"
+        ),
+        TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(
+            sym, virt_charges.copy(), FlowDirection.OUT, label="l"
+        ),
+        TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
     )
     return SymmetricTensor.random_normal(indices, key)
 

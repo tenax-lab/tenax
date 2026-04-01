@@ -209,11 +209,13 @@ def _make_dense_tensor(key, D=2, d=2):
     data = jax.random.normal(key, (D, D, D, D, d))
     data = data / (jnp.linalg.norm(data) + 1e-10)
     indices = (
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
     )
     return DenseTensor(data, indices)
 

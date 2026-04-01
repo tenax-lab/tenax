@@ -203,13 +203,13 @@ def _truncate_svd_per_sector(
             sector_entry_map.setdefault(q_int, []).append(idx_in_sector)
 
     sym = U_t.indices[bond_pos_U].symmetry
-    new_bond_out = TensorIndex(
+    new_bond_out = TensorIndex.from_charges(
         sym,
         np.asarray(new_charges, dtype=np.int32),
         FlowDirection.OUT,
         label=bond_label,
     )
-    new_bond_in = TensorIndex(
+    new_bond_in = TensorIndex.from_charges(
         sym,
         np.asarray(new_charges, dtype=np.int32),
         FlowDirection.IN,

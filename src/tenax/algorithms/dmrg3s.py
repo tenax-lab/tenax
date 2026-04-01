@@ -494,7 +494,7 @@ def _expand_truncate_sym_ltr(
     orig_charges = np.asarray(site.indices[2].charges)
     exp_charges = np.asarray(P3.indices[2].charges)
     combined_charges = np.concatenate([orig_charges, exp_charges])
-    combined_right_idx = TensorIndex(
+    combined_right_idx = TensorIndex.from_charges(
         symmetry=site.indices[2].symmetry,
         charges=combined_charges,
         flow=site.indices[2].flow,
@@ -540,7 +540,7 @@ def _expand_truncate_sym_ltr(
         axis=0,
     )
     # Build SymmetricTensor for padded neighbor
-    padded_left_idx = TensorIndex(
+    padded_left_idx = TensorIndex.from_charges(
         symmetry=combined_right_idx.symmetry,
         charges=combined_charges,
         flow=neighbor.indices[0].flow,
@@ -603,7 +603,7 @@ def _expand_truncate_sym_rtl(
     orig_charges = np.asarray(site.indices[0].charges)
     exp_charges = np.asarray(P3.indices[0].charges)
     combined_charges = np.concatenate([exp_charges, orig_charges])
-    combined_left_idx = TensorIndex(
+    combined_left_idx = TensorIndex.from_charges(
         symmetry=site.indices[0].symmetry,
         charges=combined_charges,
         flow=site.indices[0].flow,
@@ -646,7 +646,7 @@ def _expand_truncate_sym_rtl(
         ],
         axis=-1,
     )
-    padded_right_idx = TensorIndex(
+    padded_right_idx = TensorIndex.from_charges(
         symmetry=combined_left_idx.symmetry,
         charges=combined_charges,
         flow=neighbor.indices[-1].flow,

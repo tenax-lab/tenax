@@ -35,12 +35,12 @@ def sym_2leg():
     sym = U1Symmetry()
     # Left: charge 0 x3, charge 1 x3, charge -1 x2
     charges_l = np.array([0, 0, 0, 1, 1, 1, -1, -1], dtype=np.int32)
-    idx_l = TensorIndex(sym, charges_l, IN, label="l")
+    idx_l = TensorIndex.from_charges(sym, charges_l, IN, label="l")
     # Right: must be dual (opposite flow) with same charge multiplicities
     # for conservation sum(flow*q)==0: block (q,q) needs right to have
     # charge q with the same multiplicity.
     charges_r = np.array([0, 0, 0, 1, 1, 1, -1, -1], dtype=np.int32)
-    idx_r = TensorIndex(sym, charges_r, OUT, label="r")
+    idx_r = TensorIndex.from_charges(sym, charges_r, OUT, label="r")
     rng = np.random.default_rng(42)
     blocks = {
         (0, 0): jnp.array(rng.standard_normal((3, 3))),

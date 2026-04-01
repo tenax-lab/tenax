@@ -22,9 +22,9 @@ Quick start::
 
     A = SymmetricTensor.random_normal(
         indices=(
-            TensorIndex(u1, np.array([-1, 1], dtype=np.int32), FlowDirection.IN,  label="phys"),
-            TensorIndex(u1, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.IN,  label="left"),
-            TensorIndex(u1, np.array([1, 0, -1], dtype=np.int32), FlowDirection.OUT, label="bond"),
+            TensorIndex.from_charges(u1, np.array([-1, 1], dtype=np.int32), FlowDirection.IN,  label="phys"),
+            TensorIndex.from_charges(u1, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.IN,  label="left"),
+            TensorIndex.from_charges(u1, np.array([1, 0, -1], dtype=np.int32), FlowDirection.OUT, label="bond"),
         ),
         key=key,
     )

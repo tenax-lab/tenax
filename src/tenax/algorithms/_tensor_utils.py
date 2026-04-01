@@ -159,7 +159,7 @@ def _fuse_indices_dense(
     # Build fused index
     idx_a, idx_b = indices_perm[a], indices_perm[a + 1]
     fused_charges = _compute_fused_charges(idx_a, idx_b, fused_flow, idx_a.symmetry)
-    fused_idx = TensorIndex(
+    fused_idx = TensorIndex.from_charges(
         idx_a.symmetry, fused_charges, fused_flow, label=fused_label
     )
     new_indices = tuple(indices_perm[:a]) + (fused_idx,) + tuple(indices_perm[a + 2 :])
@@ -226,7 +226,9 @@ def _fuse_indices_symmetric(
 
     # Build fused TensorIndex
     fused_charges = _compute_fused_charges(idx_a, idx_b, fused_flow, sym)
-    fused_idx = TensorIndex(sym, fused_charges, fused_flow, label=fused_label)
+    fused_idx = TensorIndex.from_charges(
+        sym, fused_charges, fused_flow, label=fused_label
+    )
 
     # Compute where each (i, j) element lands in the fused block.
     #
@@ -276,7 +278,9 @@ def _fuse_indices_symmetric(
     for q_f, pairs in fused_groups.items():
         # Collect all (i*db + j) positions for this q_f, along with which
         # (qa, qb) pair and local index each belongs to.
-        all_positions: list[tuple[int, int, int, int]] = []  # (flat_pos, qa, qb, local_idx)
+        all_positions: list[
+            tuple[int, int, int, int]
+        ] = []  # (flat_pos, qa, qb, local_idx)
         for qa, qb in pairs:
             local_idx = 0
             for i in positions_a[qa]:
@@ -290,7 +294,9 @@ def _fuse_indices_symmetric(
 
         # Build scatter arrays: for each (qa, qb) pair, scatter_map[(qa, qb)][local]
         # = target offset in the fused block
-        tmp: dict[tuple[int, int], list[tuple[int, int]]] = {}  # (qa,qb) -> [(local, target)]
+        tmp: dict[
+            tuple[int, int], list[tuple[int, int]]
+        ] = {}  # (qa,qb) -> [(local, target)]
         for target_offset, (_, qa, qb, local_idx) in enumerate(all_positions):
             tmp.setdefault((qa, qb), []).append((local_idx, target_offset))
 
@@ -298,7 +304,9 @@ def _fuse_indices_symmetric(
             if (qa, qb) in tmp:
                 entries = tmp[(qa, qb)]
                 entries.sort(key=lambda x: x[0])  # sort by local_idx
-                scatter_map[(qa, qb)] = np.array([t for _, t in entries], dtype=np.int64)
+                scatter_map[(qa, qb)] = np.array(
+                    [t for _, t in entries], dtype=np.int64
+                )
             else:
                 scatter_map[(qa, qb)] = np.array([], dtype=np.int64)
 
@@ -394,10 +402,10 @@ def _double_layer_dense(A: DenseTensor) -> DenseTensor:
     sym = A.indices[0].symmetry
     fused_charges = np.zeros(D * D, dtype=np.int32)
     indices = (
-        TensorIndex(sym, fused_charges, FlowDirection.IN, label="up"),
-        TensorIndex(sym, fused_charges, FlowDirection.OUT, label="down"),
-        TensorIndex(sym, fused_charges, FlowDirection.IN, label="left"),
-        TensorIndex(sym, fused_charges, FlowDirection.OUT, label="right"),
+        TensorIndex.from_charges(sym, fused_charges, FlowDirection.IN, label="up"),
+        TensorIndex.from_charges(sym, fused_charges, FlowDirection.OUT, label="down"),
+        TensorIndex.from_charges(sym, fused_charges, FlowDirection.IN, label="left"),
+        TensorIndex.from_charges(sym, fused_charges, FlowDirection.OUT, label="right"),
     )
     return DenseTensor(dl_fused, indices)
 
