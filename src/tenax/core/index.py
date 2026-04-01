@@ -40,6 +40,22 @@ class FlowDirection(IntEnum):
     OUT = -1
 
 
+@dataclass(frozen=True)
+class FuseInfo:
+    """Records parent indices of a fused leg for split_index.
+
+    When two legs are merged via ``fuse_indices``, the resulting fused leg
+    stores a ``FuseInfo`` so that ``split_index`` can reverse the operation.
+    Recursive: parents may themselves have ``fuse_info`` (e.g. ``((a,b), c)``).
+
+    Attributes:
+        parent_indices: The two TensorIndex objects that were fused to
+                        produce this leg, in the order (axis_a, axis_b).
+    """
+
+    parent_indices: tuple[TensorIndex, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class TensorIndex:
     """Metadata for one leg (index) of a symmetric tensor.
@@ -75,6 +91,35 @@ class TensorIndex:
         # Coerce to int32 if needed (use object.__setattr__ since frozen)
         if self.charges.dtype != np.int32:
             object.__setattr__(self, "charges", self.charges.astype(np.int32))
+
+    @classmethod
+    def from_charges(
+        cls,
+        symmetry: BaseSymmetry,
+        charges: np.ndarray,
+        flow: FlowDirection,
+        label: Label = "",
+    ) -> TensorIndex:
+        """Construct a TensorIndex from a dense charges array.
+
+        This is the backward-compatible construction API. Internally converts
+        the charges array to the canonical form expected by the constructor.
+
+        Args:
+            symmetry: Symmetry group for this leg.
+            charges:  1-D integer array of charge per basis state.
+            flow:     Flow direction (IN or OUT).
+            label:    Leg label for contraction matching.
+
+        Returns:
+            New TensorIndex.
+        """
+        return cls(
+            symmetry=symmetry,
+            charges=np.asarray(charges, dtype=np.int32),
+            flow=flow,
+            label=label,
+        )
 
     @property
     def dim(self) -> int:

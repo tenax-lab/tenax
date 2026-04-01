@@ -29,6 +29,14 @@ class TestTensorIndexCreation:
         assert idx.flow == FlowDirection.IN
         assert idx.label == "test"
 
+    def test_from_charges(self, u1):
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        idx = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="test")
+        assert idx.dim == 3
+        assert idx.flow == FlowDirection.IN
+        assert idx.label == "test"
+        np.testing.assert_array_equal(idx.charges, charges)
+
     def test_default_label(self, u1):
         charges = np.array([0, 1], dtype=np.int32)
         idx = TensorIndex(u1, charges, FlowDirection.IN)
