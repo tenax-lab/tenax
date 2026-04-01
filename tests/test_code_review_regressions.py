@@ -449,7 +449,7 @@ class TestSymmetricTensorAddChargeValidation:
         )
         A = SymmetricTensor.random_normal(idx_a, jax.random.PRNGKey(0))
         B = SymmetricTensor.random_normal(idx_b, jax.random.PRNGKey(1))
-        with pytest.raises(ValueError, match="charge array mismatch"):
+        with pytest.raises(ValueError, match="sector/multiplicity mismatch"):
             A + B
 
     def test_sub_different_charges_raises(self):
@@ -475,7 +475,7 @@ class TestSymmetricTensorAddChargeValidation:
         )
         A = SymmetricTensor.random_normal(idx_a, jax.random.PRNGKey(0))
         B = SymmetricTensor.random_normal(idx_b, jax.random.PRNGKey(1))
-        with pytest.raises(ValueError, match="charge array mismatch"):
+        with pytest.raises(ValueError, match="sector/multiplicity mismatch"):
             A - B
 
     def test_add_different_symmetry_raises(self):

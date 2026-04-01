@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import warnings
 from abc import ABC, abstractmethod
-from collections import Counter
 from typing import Any
 
 import jax
@@ -32,10 +31,9 @@ from tenax.core.index import FlowDirection, Label, TensorIndex
 BlockKey = tuple[int, ...]
 
 
-def _charge_summary(charges: np.ndarray) -> str:
-    """Format charge array as ``{charge: count, ...}``."""
-    counts = Counter(int(q) for q in charges)
-    parts = [f"{q}:{n}" for q, n in sorted(counts.items())]
+def _charge_summary(idx: TensorIndex) -> str:
+    """Format index sectors as ``{charge: count, ...}``."""
+    parts = [f"{int(q)}:{int(m)}" for q, m in zip(idx.sectors, idx.multiplicities)]
     return "{" + ", ".join(parts) + "}"
 
 
@@ -150,10 +148,14 @@ def _check_add_indices(a: tuple[TensorIndex, ...], b: tuple[TensorIndex, ...]) -
                 f"Index {i} ({ai.label!r}) symmetry mismatch: "
                 f"{ai.symmetry!r} vs {bi.symmetry!r}."
             )
-        if not np.array_equal(ai.charges, bi.charges):
+        if not (
+            np.array_equal(ai.sectors, bi.sectors)
+            and np.array_equal(ai.multiplicities, bi.multiplicities)
+        ):
             raise ValueError(
-                f"Index {i} ({ai.label!r}) charge array mismatch: "
-                f"{ai.charges} vs {bi.charges}."
+                f"Index {i} ({ai.label!r}) sector/multiplicity mismatch: "
+                f"sectors {ai.sectors} vs {bi.sectors}, "
+                f"mults {ai.multiplicities} vs {bi.multiplicities}."
             )
 
 
@@ -186,8 +188,8 @@ def _compute_valid_blocks(
     sym = indices[0].symmetry
     effective_target = target if target is not None else sym.identity()
 
-    # Collect unique charge values per leg (sorted for determinism)
-    unique_charges_per_leg = [sorted(set(idx.charges.tolist())) for idx in indices]
+    # Collect unique charge values per leg (sectors are already sorted and unique)
+    unique_charges_per_leg = [idx.sectors.tolist() for idx in indices]
 
     n_legs = len(indices)
 
@@ -1211,9 +1213,7 @@ class SymmetricTensor(Tensor):
             sym_label = sym_name
 
         # Build charge summary lines
-        charge_parts = [
-            f"{idx.label}{_charge_summary(idx.charges)}" for idx in self._indices
-        ]
+        charge_parts = [f"{idx.label}{_charge_summary(idx)}" for idx in self._indices]
         # Group into lines of roughly 50 chars
         charge_lines = []
         current = ""
