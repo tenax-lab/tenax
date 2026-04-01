@@ -505,6 +505,70 @@ def _transfer_op_R(
     return np.einsum("dpa,pq,aqf->df", A_R, op, tmp)
 
 
+def _solve_left_env_fixedpoint_dense(
+    A_L: np.ndarray,
+    W: np.ndarray,
+    tol: float = 1e-12,
+) -> np.ndarray:
+    """Solve for the fixed-point left environment channel by channel.
+
+    Exploits the upper-triangular structure of the MPO W-matrix:
+    W[b,p,q,e] is non-zero only for b >= e (lower-triangular in b,e).
+
+    Channels are solved from vacuum (D_w-1) down to done (0):
+      - vacuum: T_I fixed point = I  (left-isometric A_L)
+      - intermediate k: l_k = Σ_{j>k} T^L_{W[j,:,:,k]}(l_j)
+      - done: set to 0  (energy shift, doesn't affect eigenvector)
+
+    For intermediate channels with self-loops (W[k,:,:,k] ≠ 0, rare for
+    standard MPOs), falls back to scipy GMRES.
+
+    Args:
+        A_L: Left-isometric MPS tensor, shape (chi, d, chi).
+        W: MPO tensor, shape (D_w, d, d, D_w).
+        tol: GMRES tolerance for channels with self-loops.
+
+    Returns:
+        L_env of shape (chi, D_w, chi).
+    """
+    chi = A_L.shape[2]
+    D_w = W.shape[0]
+    L_env = np.zeros((chi, D_w, chi), dtype=A_L.dtype)
+
+    # Vacuum channel: identity
+    L_env[:, D_w - 1, :] = np.eye(chi, dtype=A_L.dtype)
+
+    # Intermediate channels: solve from D_w-2 down to 1
+    for k in range(D_w - 2, 0, -1):
+        source = np.zeros((chi, chi), dtype=A_L.dtype)
+        for j in range(k + 1, D_w):
+            O_jk = W[j, :, :, k]
+            if np.linalg.norm(O_jk) > 1e-15:
+                source += _transfer_op_L(A_L, O_jk, L_env[:, j, :])
+
+        # Check for self-loop
+        O_kk = W[k, :, :, k]
+        if np.linalg.norm(O_kk) > 1e-15:
+            from scipy.sparse.linalg import LinearOperator, gmres
+
+            n = chi * chi
+
+            def matvec(x_flat, _A=A_L, _O=O_kk):
+                x = x_flat.reshape(chi, chi)
+                return (x - _transfer_op_L(_A, _O, x)).ravel()
+
+            op = LinearOperator((n, n), matvec=matvec, dtype=A_L.dtype)
+            l_flat, info = gmres(op, source.ravel(), atol=tol, restart=min(n, 50))
+            L_env[:, k, :] = l_flat.reshape(chi, chi)
+        else:
+            L_env[:, k, :] = source
+
+    # Done channel: set to 0 (constant energy shift)
+    # L_env[:, 0, :] already zero from initialization
+
+    return L_env
+
+
 # ---------------------------------------------------------------------------
 # Symmetric helpers
 # ---------------------------------------------------------------------------

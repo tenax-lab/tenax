@@ -9,6 +9,7 @@ import pytest
 
 from tenax.algorithms.idmrg import (
     _orthogonalize_unit_cell_dense,
+    _solve_left_env_fixedpoint_dense,
     _transfer_op_L,
     _transfer_op_R,
     build_bulk_mpo_heisenberg,
@@ -636,3 +637,63 @@ class TestTransferMatrixPrimitives:
         result = _transfer_op_R(A_R, op, x)
         expected = np.einsum("dpa,pq,ac,fqc->df", A_R, op, x, np.conj(A_R))
         np.testing.assert_allclose(result, expected, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# TestSolveLeftEnvFixedpoint
+# ---------------------------------------------------------------------------
+
+
+class TestSolveLeftEnvFixedpoint:
+    def test_fixedpoint_satisfies_update_equation(self):
+        """L_env from solver should satisfy L_env = T^W(L_env) up to done channel."""
+        W_tensor = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+        W = np.array(W_tensor.todense())
+        D_w = W.shape[0]
+
+        # Run a few iDMRG steps to get a reasonable A_L
+        cfg = iDMRGConfig(max_bond_dim=16, max_iterations=30, lanczos_max_iter=20)
+        result = idmrg(W_tensor, cfg, dtype=jnp.float64)
+        A_L = np.array(result.mps.tensors[0].todense())
+
+        L_env = _solve_left_env_fixedpoint_dense(A_L, W)
+
+        # Check: for each non-done, non-vacuum channel, the fixed-point
+        # equation should hold: l_k = Σ_{j>k} T_{W[j,:,:,k]}(l_j)
+        for k in range(1, D_w - 1):
+            expected = np.zeros_like(L_env[:, k, :])
+            for j in range(k + 1, D_w):
+                O_jk = W[j, :, :, k]
+                if np.linalg.norm(O_jk) > 1e-15:
+                    expected += _transfer_op_L(A_L, O_jk, L_env[:, j, :])
+            np.testing.assert_allclose(
+                L_env[:, k, :],
+                expected,
+                atol=1e-10,
+                err_msg=f"Left env channel {k} not at fixed point",
+            )
+
+    def test_vacuum_channel_is_identity(self):
+        """The vacuum channel should be the identity."""
+        W_tensor = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+        W = np.array(W_tensor.todense())
+        cfg = iDMRGConfig(max_bond_dim=8, max_iterations=20, lanczos_max_iter=15)
+        result = idmrg(W_tensor, cfg, dtype=jnp.float64)
+        A_L = np.array(result.mps.tensors[0].todense())
+        L_env = _solve_left_env_fixedpoint_dense(A_L, W)
+        chi = A_L.shape[2]
+        np.testing.assert_allclose(
+            L_env[:, W.shape[0] - 1, :],
+            np.eye(chi),
+            atol=1e-12,
+        )
+
+    def test_done_channel_is_zero(self):
+        """The done channel should be zero (constant shift skipped)."""
+        W_tensor = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+        W = np.array(W_tensor.todense())
+        cfg = iDMRGConfig(max_bond_dim=8, max_iterations=20, lanczos_max_iter=15)
+        result = idmrg(W_tensor, cfg, dtype=jnp.float64)
+        A_L = np.array(result.mps.tensors[0].todense())
+        L_env = _solve_left_env_fixedpoint_dense(A_L, W)
+        np.testing.assert_allclose(L_env[:, 0, :], 0.0, atol=1e-15)
