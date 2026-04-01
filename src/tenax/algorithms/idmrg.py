@@ -1603,12 +1603,9 @@ def _idmrg_sweep_symmetric(
             )
 
         # ---- Check convergence ----
-        n_e = len(energies_per_step)
-        if n_e >= 4:
-            n_half = min(n_e // 2, 5)
-            avg_recent = sum(energies_per_step[-n_half:]) / n_half
-            avg_prev = sum(energies_per_step[-2 * n_half : -n_half]) / n_half
-            if abs(avg_recent - avg_prev) < config.convergence_tol:
+        if len(energies_per_step) >= 2:
+            de = abs(energies_per_step[-1] - energies_per_step[-2])
+            if de < config.convergence_tol:
                 converged = True
                 if config.verbose:
                     print(f"Converged at sweep {sweep + 1}", flush=True)
@@ -1616,8 +1613,7 @@ def _idmrg_sweep_symmetric(
 
         E_prev = E_total
 
-    n_avg = max(len(energies_per_step) // 2, 1)
-    e_per_site_avg = sum(energies_per_step[-n_avg:]) / n_avg
+    e_per_site_avg = energies_per_step[-1] if energies_per_step else 0.0
 
     return iDMRGResult(
         energy_per_site=e_per_site_avg,
