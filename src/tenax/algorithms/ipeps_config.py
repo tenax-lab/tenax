@@ -13,12 +13,16 @@ class CTMConfig:
     """Configuration for CTM environment computation.
 
     Attributes:
-        chi:          Bond dimension of CTM environment tensors.
-        max_iter:     Maximum CTM iterations before declaring convergence.
-        conv_tol:     Convergence tolerance (based on singular value change
-                      between CTM iterations).
-        renormalize:  Whether to renormalize environment tensors at each step
-                      to prevent exponential growth (always recommended).
+        chi:                Bond dimension of CTM environment tensors.
+        max_iter:           Maximum CTM iterations before declaring convergence.
+        conv_tol:           Convergence tolerance (based on singular value change
+                            between CTM iterations).
+        renormalize:        Whether to renormalize environment tensors at each step
+                            to prevent exponential growth (always recommended).
+        ad_regularize_svd:  Use Lorentzian-regularized SVD backward pass in AD
+                            optimization.  When True, the SVD custom VJP uses
+                            broadening to prevent NaN from degenerate singular
+                            values (Francuz et al., PRR 7, 013237).
     """
 
     chi: int = 20
@@ -29,6 +33,7 @@ class CTMConfig:
     min_iter: int = 10  # minimum CTM sweeps before checking convergence
     qr_warmup_steps: int = 3  # eigh warm-up iterations before QR kicks in
     chi_I: int | None = None  # interlayer bond dim for split-CTMRG; None => chi_I = chi
+    ad_regularize_svd: bool = True  # use Lorentzian-regularized SVD backward in AD
 
 
 @dataclass
