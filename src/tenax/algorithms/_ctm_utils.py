@@ -33,8 +33,12 @@ def _make_dense_corner(
     C_pad = jnp.zeros((chi, chi), dtype=dtype)
     C_pad = C_pad.at[: C.shape[0], : C.shape[1]].set(C)
     sym = _trivial_symmetry()
-    idx_a = TensorIndex(sym, np.zeros(chi, dtype=np.int32), flow_a, label=label_a)
-    idx_b = TensorIndex(sym, np.zeros(chi, dtype=np.int32), flow_b, label=label_b)
+    idx_a = TensorIndex.from_charges(
+        sym, np.zeros(chi, dtype=np.int32), flow_a, label=label_a
+    )
+    idx_b = TensorIndex.from_charges(
+        sym, np.zeros(chi, dtype=np.int32), flow_b, label=label_b
+    )
     return DenseTensor(C_pad, (idx_a, idx_b))
 
 

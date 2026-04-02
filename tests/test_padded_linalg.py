@@ -28,8 +28,10 @@ def _make_symmetric_matrix(seed=42, chi=8):
     charges = np.array([-1] * half + [0] * mid + [1] * half, dtype=np.int32)
 
     indices = (
-        TensorIndex(sym, charges, FlowDirection.IN, label="row"),
-        TensorIndex(sym, sym.dual(charges), FlowDirection.OUT, label="col"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="row"),
+        TensorIndex.from_charges(
+            sym, sym.dual(charges), FlowDirection.OUT, label="col"
+        ),
     )
     key = jax.random.PRNGKey(seed)
     return SymmetricTensor.random_normal(indices, key)

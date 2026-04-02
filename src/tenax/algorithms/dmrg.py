@@ -301,7 +301,7 @@ def dmrg(
                 else:
                     new_charges = np.zeros(padded_dim, dtype=np.int32)
                     new_indices.append(
-                        TensorIndex(
+                        TensorIndex.from_charges(
                             sym,
                             new_charges,
                             orig_idx.flow,
@@ -469,7 +469,7 @@ def dmrg(
                     else:
                         new_charges = np.zeros(padded_dim, dtype=np.int32)
                         new_indices.append(
-                            TensorIndex(
+                            TensorIndex.from_charges(
                                 sym,
                                 new_charges,
                                 orig_idx.flow,
@@ -885,7 +885,7 @@ def _rebuild_dense_tensor(
     if old_idx.dim == new_dim:
         return DenseTensor(data, old_indices)
 
-    new_bond_idx = TensorIndex(
+    new_bond_idx = TensorIndex.from_charges(
         symmetry=old_idx.symmetry,
         charges=np.zeros(new_dim, dtype=np.int32),
         flow=old_idx.flow,
@@ -964,9 +964,9 @@ def _build_trivial_left_env(dtype=None) -> DenseTensor:
     sym = U1Symmetry()
     bond = np.zeros(1, dtype=np.int32)
     indices = (
-        TensorIndex(sym, bond, FlowDirection.IN, label="env_mps_l"),
-        TensorIndex(sym, bond, FlowDirection.IN, label="env_mpo_l"),
-        TensorIndex(sym, bond, FlowDirection.OUT, label="env_mps_conj_l"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.IN, label="env_mps_l"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.IN, label="env_mpo_l"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.OUT, label="env_mps_conj_l"),
     )
     return DenseTensor(jnp.ones((1, 1, 1), dtype=dtype), indices)
 
@@ -978,9 +978,9 @@ def _build_trivial_right_env(dtype=None) -> DenseTensor:
     sym = U1Symmetry()
     bond = np.zeros(1, dtype=np.int32)
     indices = (
-        TensorIndex(sym, bond, FlowDirection.OUT, label="env_mps_r"),
-        TensorIndex(sym, bond, FlowDirection.OUT, label="env_mpo_r"),
-        TensorIndex(sym, bond, FlowDirection.IN, label="env_mps_conj_r"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.OUT, label="env_mps_r"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.OUT, label="env_mpo_r"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.IN, label="env_mps_conj_r"),
     )
     return DenseTensor(jnp.ones((1, 1, 1), dtype=dtype), indices)
 
@@ -1026,9 +1026,11 @@ def _update_left_env(
     bond_r = np.zeros(new_L.shape[0], dtype=np.int32)
     bond_w = np.zeros(new_L.shape[1], dtype=np.int32)
     indices = (
-        TensorIndex(sym, bond_r, FlowDirection.IN, label="env_mps_l"),
-        TensorIndex(sym, bond_w, FlowDirection.IN, label="env_mpo_l"),
-        TensorIndex(sym, bond_r, FlowDirection.OUT, label="env_mps_conj_l"),
+        TensorIndex.from_charges(sym, bond_r, FlowDirection.IN, label="env_mps_l"),
+        TensorIndex.from_charges(sym, bond_w, FlowDirection.IN, label="env_mpo_l"),
+        TensorIndex.from_charges(
+            sym, bond_r, FlowDirection.OUT, label="env_mps_conj_l"
+        ),
     )
     return DenseTensor(new_L, indices)
 
@@ -1062,9 +1064,9 @@ def _update_right_env(
     bond_l = np.zeros(new_R.shape[0], dtype=np.int32)
     bond_w = np.zeros(new_R.shape[1], dtype=np.int32)
     indices = (
-        TensorIndex(sym, bond_l, FlowDirection.OUT, label="env_mps_r"),
-        TensorIndex(sym, bond_w, FlowDirection.OUT, label="env_mpo_r"),
-        TensorIndex(sym, bond_l, FlowDirection.IN, label="env_mps_conj_r"),
+        TensorIndex.from_charges(sym, bond_l, FlowDirection.OUT, label="env_mps_r"),
+        TensorIndex.from_charges(sym, bond_w, FlowDirection.OUT, label="env_mpo_r"),
+        TensorIndex.from_charges(sym, bond_l, FlowDirection.IN, label="env_mps_conj_r"),
     )
     return DenseTensor(new_R, indices)
 
@@ -1492,9 +1494,9 @@ def _build_trivial_left_env_symmetric(dtype=None) -> SymmetricTensor:
     sym = U1Symmetry()
     bond = np.zeros(1, dtype=np.int32)
     indices = (
-        TensorIndex(sym, bond, FlowDirection.IN, label="env_mps_l"),
-        TensorIndex(sym, bond, FlowDirection.IN, label="env_mpo_l"),
-        TensorIndex(sym, bond, FlowDirection.OUT, label="env_mps_conj_l"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.IN, label="env_mps_l"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.IN, label="env_mpo_l"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.OUT, label="env_mps_conj_l"),
     )
     blocks: dict[tuple[int, ...], jax.Array] = {
         (0, 0, 0): jnp.ones((1, 1, 1), dtype=dtype)
@@ -1509,9 +1511,9 @@ def _build_trivial_right_env_symmetric(dtype=None) -> SymmetricTensor:
     sym = U1Symmetry()
     bond = np.zeros(1, dtype=np.int32)
     indices = (
-        TensorIndex(sym, bond, FlowDirection.OUT, label="env_mps_r"),
-        TensorIndex(sym, bond, FlowDirection.OUT, label="env_mpo_r"),
-        TensorIndex(sym, bond, FlowDirection.IN, label="env_mps_conj_r"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.OUT, label="env_mps_r"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.OUT, label="env_mpo_r"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.IN, label="env_mps_conj_r"),
     )
     blocks: dict[tuple[int, ...], jax.Array] = {
         (0, 0, 0): jnp.ones((1, 1, 1), dtype=dtype)
@@ -2953,18 +2955,26 @@ def build_random_symmetric_mps(
             # Single-site: (trivial_IN, phys_IN, trivial_OUT)
             # target=target_charge enforces the sector; right bond carries charge 0.
             indices: tuple[TensorIndex, ...] = (
-                TensorIndex(sym, trivial_zero, FlowDirection.IN, label="v_-1_0"),
-                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, trivial_zero, FlowDirection.IN, label="v_-1_0"
+                ),
+                TensorIndex.from_charges(
+                    sym, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     sym, trivial_zero, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         elif i == 0:
             # Left boundary: (trivial_IN, phys_IN, virt_right_OUT)
             indices = (
-                TensorIndex(sym, trivial_zero, FlowDirection.IN, label="v_-1_0"),
-                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, trivial_zero, FlowDirection.IN, label="v_-1_0"
+                ),
+                TensorIndex.from_charges(
+                    sym, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     sym, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
@@ -2972,18 +2982,26 @@ def build_random_symmetric_mps(
             # Right boundary: (virt_left_IN, phys_IN, trivial_OUT)
             # target=target_charge enforces the sector; right bond carries charge 0.
             indices = (
-                TensorIndex(sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"),
-                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"
+                ),
+                TensorIndex.from_charges(
+                    sym, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     sym, trivial_zero, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         else:
             # Middle: (virt_left_IN, phys_IN, virt_right_OUT)
             indices = (
-                TensorIndex(sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"),
-                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"
+                ),
+                TensorIndex.from_charges(
+                    sym, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     sym, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
@@ -3115,34 +3133,46 @@ def build_random_mps(
             # Single-site MPS: (1, d, 1) with trivial bonds on both sides.
             shape = (1, physical_dim, 1)
             indices = (
-                TensorIndex(sym, bond_trivial, FlowDirection.IN, label="v_-1_0"),
-                TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, bond_trivial, FlowDirection.IN, label="v_-1_0"
+                ),
+                TensorIndex.from_charges(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex.from_charges(
                     sym, bond_trivial, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         elif i == 0:
             shape = (1, physical_dim, bond_dim)
             indices = (
-                TensorIndex(sym, bond_trivial, FlowDirection.IN, label="v_-1_0"),
-                TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(sym, bond_chi, FlowDirection.OUT, label=f"v{i}_{i + 1}"),
+                TensorIndex.from_charges(
+                    sym, bond_trivial, FlowDirection.IN, label="v_-1_0"
+                ),
+                TensorIndex.from_charges(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex.from_charges(
+                    sym, bond_chi, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
             )
         elif i == L - 1:
             shape = (bond_dim, physical_dim, 1)
             indices = (
-                TensorIndex(sym, bond_chi, FlowDirection.IN, label=f"v{i - 1}_{i}"),
-                TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, bond_chi, FlowDirection.IN, label=f"v{i - 1}_{i}"
+                ),
+                TensorIndex.from_charges(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex.from_charges(
                     sym, bond_trivial, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         else:
             shape = (bond_dim, physical_dim, bond_dim)
             indices = (
-                TensorIndex(sym, bond_chi, FlowDirection.IN, label=f"v{i - 1}_{i}"),
-                TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(sym, bond_chi, FlowDirection.OUT, label=f"v{i}_{i + 1}"),
+                TensorIndex.from_charges(
+                    sym, bond_chi, FlowDirection.IN, label=f"v{i - 1}_{i}"
+                ),
+                TensorIndex.from_charges(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex.from_charges(
+                    sym, bond_chi, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
             )
 
         data = jax.random.normal(key, shape, dtype=dtype)

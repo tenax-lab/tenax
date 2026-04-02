@@ -157,16 +157,16 @@ def _make_site_tensor(
     right_label = f"v{site_idx}_{site_idx + 1}"
 
     indices = (
-        TensorIndex(
+        TensorIndex.from_charges(
             sym,
             np.zeros(chi_l, dtype=np.int32),
             FlowDirection.IN,
             label=left_label,
         ),
-        TensorIndex(
+        TensorIndex.from_charges(
             sym, np.zeros(d, dtype=np.int32), FlowDirection.IN, label=f"p{site_idx}"
         ),
-        TensorIndex(
+        TensorIndex.from_charges(
             sym,
             np.zeros(chi_r, dtype=np.int32),
             FlowDirection.OUT,
@@ -276,7 +276,7 @@ def _identity_mpo_site(mps_site: Tensor) -> DenseTensor:
     bond_d = np.zeros(d, dtype=np.int32)
 
     indices = (
-        TensorIndex(
+        TensorIndex.from_charges(
             sym,
             bond_w,
             FlowDirection.IN,
@@ -284,9 +284,13 @@ def _identity_mpo_site(mps_site: Tensor) -> DenseTensor:
             if site_idx > 0
             else f"w_left_{site_idx}",
         ),
-        TensorIndex(sym, bond_d, FlowDirection.IN, label=f"mpo_top_{site_idx}"),
-        TensorIndex(sym, bond_d, FlowDirection.OUT, label=f"mpo_bot_{site_idx}"),
-        TensorIndex(
+        TensorIndex.from_charges(
+            sym, bond_d, FlowDirection.IN, label=f"mpo_top_{site_idx}"
+        ),
+        TensorIndex.from_charges(
+            sym, bond_d, FlowDirection.OUT, label=f"mpo_bot_{site_idx}"
+        ),
+        TensorIndex.from_charges(
             sym, bond_w, FlowDirection.OUT, label=f"w{site_idx}_{site_idx + 1}"
         ),
     )

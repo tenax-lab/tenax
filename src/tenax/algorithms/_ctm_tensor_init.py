@@ -193,11 +193,13 @@ def _make_dense_standard_edge(
     return DenseTensor(
         T,
         (
-            TensorIndex(
+            TensorIndex.from_charges(
                 sym, np.zeros(chi, dtype=np.int32), flow_chi1, label=label_chi1
             ),
-            TensorIndex(sym, np.zeros(D2, dtype=np.int32), flow_D2, label=label_D2),
-            TensorIndex(
+            TensorIndex.from_charges(
+                sym, np.zeros(D2, dtype=np.int32), flow_D2, label=label_D2
+            ),
+            TensorIndex.from_charges(
                 sym, np.zeros(chi, dtype=np.int32), flow_chi2, label=label_chi2
             ),
         ),
@@ -248,9 +250,9 @@ def _init_symmetric_standard_edge(
     idx_bra = idx_ket.flip_flow()  # bar() flips flow
     D2_charges = _compute_fused_charges(idx_ket, idx_bra, flow_D2, sym)
 
-    idx_chi1 = TensorIndex(sym, chi1_charges, flow_chi1, label=label_chi1)
-    idx_D2 = TensorIndex(sym, D2_charges, flow_D2, label=label_D2)
-    idx_chi2 = TensorIndex(sym, chi2_charges, flow_chi2, label=label_chi2)
+    idx_chi1 = TensorIndex.from_charges(sym, chi1_charges, flow_chi1, label=label_chi1)
+    idx_D2 = TensorIndex.from_charges(sym, D2_charges, flow_D2, label=label_D2)
+    idx_chi2 = TensorIndex.from_charges(sym, chi2_charges, flow_chi2, label=label_chi2)
 
     T = jnp.zeros((chi, D2, chi), dtype=A.dtype)
     T_chi = min(chi, D2)
@@ -290,8 +292,8 @@ def _init_symmetric_standard_corner(
         reps = chi // len(base_D2_charges) + 1
         chi_charges = np.asarray(np.tile(base_D2_charges, reps)[:chi], dtype=np.int32)
 
-    idx_a = TensorIndex(sym, chi_charges.copy(), flow_a, label=label_a)
-    idx_b = TensorIndex(sym, chi_charges.copy(), flow_b, label=label_b)
+    idx_a = TensorIndex.from_charges(sym, chi_charges.copy(), flow_a, label=label_a)
+    idx_b = TensorIndex.from_charges(sym, chi_charges.copy(), flow_b, label=label_b)
     return SymmetricTensor.from_dense(
         jnp.eye(chi, dtype=A.dtype),
         (idx_a, idx_b),

@@ -201,11 +201,13 @@ def _make_random_dense_site_tensor(key, D=2, d=2):
     charges = np.zeros(D, dtype=np.int32)
     phys_charges = np.zeros(d, dtype=np.int32)
     indices = (
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="u"),
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="d"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="l"),
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="r"),
-        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="u"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="d"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="l"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
     )
     data = jax.random.normal(key, shape=(D, D, D, D, d))
     return DenseTensor(data, indices)

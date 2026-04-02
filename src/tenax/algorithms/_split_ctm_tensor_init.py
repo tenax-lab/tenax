@@ -82,9 +82,15 @@ def _make_dense_edge_ket(
     return DenseTensor(
         T,
         (
-            TensorIndex(sym, np.zeros(chi, dtype=np.int32), flow_chi, label=label_chi),
-            TensorIndex(sym, np.zeros(D, dtype=np.int32), flow_D, label=label_D),
-            TensorIndex(sym, np.zeros(chi_I, dtype=np.int32), flow_I, label=label_I),
+            TensorIndex.from_charges(
+                sym, np.zeros(chi, dtype=np.int32), flow_chi, label=label_chi
+            ),
+            TensorIndex.from_charges(
+                sym, np.zeros(D, dtype=np.int32), flow_D, label=label_D
+            ),
+            TensorIndex.from_charges(
+                sym, np.zeros(chi_I, dtype=np.int32), flow_I, label=label_I
+            ),
         ),
     )
 
@@ -111,9 +117,15 @@ def _make_dense_edge_bra(
     return DenseTensor(
         T,
         (
-            TensorIndex(sym, np.zeros(chi_I, dtype=np.int32), flow_I, label=label_I),
-            TensorIndex(sym, np.zeros(D, dtype=np.int32), flow_D, label=label_D),
-            TensorIndex(sym, np.zeros(chi, dtype=np.int32), flow_chi, label=label_chi),
+            TensorIndex.from_charges(
+                sym, np.zeros(chi_I, dtype=np.int32), flow_I, label=label_I
+            ),
+            TensorIndex.from_charges(
+                sym, np.zeros(D, dtype=np.int32), flow_D, label=label_D
+            ),
+            TensorIndex.from_charges(
+                sym, np.zeros(chi, dtype=np.int32), flow_chi, label=label_chi
+            ),
         ),
     )
 
@@ -140,8 +152,8 @@ def _init_symmetric_corner(
         charges = np.tile(base_charges, reps)[:chi]
     charges = np.asarray(charges, dtype=np.int32)
 
-    idx_a = TensorIndex(sym, charges.copy(), flow_a, label=label_a)
-    idx_b = TensorIndex(sym, charges.copy(), flow_b, label=label_b)
+    idx_a = TensorIndex.from_charges(sym, charges.copy(), flow_a, label=label_a)
+    idx_b = TensorIndex.from_charges(sym, charges.copy(), flow_b, label=label_b)
     # Match dense reference: eye(min(chi, D)) padded to chi,
     # which initializes fewer diagonal entries when chi > D.
     D = A.indices[ref_axis].dim
@@ -202,9 +214,9 @@ def _init_symmetric_edge_ket(
         reps = chi_I // len(base_I) + 1
         I_charges_arr = np.array((base_I * reps)[:chi_I], dtype=np.int32)
 
-    idx_chi = TensorIndex(sym, chi_charges, flow_chi, label=label_chi)
-    idx_D = TensorIndex(sym, D_charges, flow_D, label=label_D)
-    idx_I = TensorIndex(sym, I_charges_arr, flow_I, label=label_I)
+    idx_chi = TensorIndex.from_charges(sym, chi_charges, flow_chi, label=label_chi)
+    idx_D = TensorIndex.from_charges(sym, D_charges, flow_D, label=label_D)
+    idx_I = TensorIndex.from_charges(sym, I_charges_arr, flow_I, label=label_I)
 
     # Build conservation-compatible init matching dense reference pattern
     # T[i, :, i] = ones(D) for i in range(min(chi_D, chi_I_D)).
@@ -270,9 +282,9 @@ def _init_symmetric_edge_bra(
         reps = chi_I // len(base_I) + 1
         I_charges_arr = np.array((base_I * reps)[:chi_I], dtype=np.int32)
 
-    idx_I = TensorIndex(sym, I_charges_arr, flow_I, label=label_I)
-    idx_D = TensorIndex(sym, D_charges, flow_D, label=label_D)
-    idx_chi = TensorIndex(sym, chi_charges, flow_chi, label=label_chi)
+    idx_I = TensorIndex.from_charges(sym, I_charges_arr, flow_I, label=label_I)
+    idx_D = TensorIndex.from_charges(sym, D_charges, flow_D, label=label_D)
+    idx_chi = TensorIndex.from_charges(sym, chi_charges, flow_chi, label=label_chi)
 
     # Conservation-compatible init matching dense reference pattern
     # T_bra[i, :, i] = ones(D) for i in range(min(chi_I_D, chi_D)).

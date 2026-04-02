@@ -225,10 +225,16 @@ def ctm_tensor(
     if isinstance(A, SymmetricTensor):
         import numpy as _np
 
-        virtual_charges = [_np.sort(A.indices[i].charges) for i in range(4)]
-        has_nontrivial = any(not _np.all(vc == 0) for vc in virtual_charges)
+        virtual_indices = [A.indices[i] for i in range(4)]
+        has_nontrivial = any(
+            not (_np.array_equal(vi.sectors, [0]) and vi.n_sectors == 1)
+            for vi in virtual_indices
+        )
+        idx0 = virtual_indices[0]
         all_same = all(
-            _np.array_equal(virtual_charges[0], virtual_charges[i]) for i in range(1, 4)
+            _np.array_equal(idx0.sectors, virtual_indices[i].sectors)
+            and _np.array_equal(idx0.multiplicities, virtual_indices[i].multiplicities)
+            for i in range(1, 4)
         )
         if has_nontrivial and all_same:
             use_paired = True

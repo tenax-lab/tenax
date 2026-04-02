@@ -30,11 +30,13 @@ def _wrap_as_dense_tensor(arr: jax.Array) -> DenseTensor:
     charges = np.zeros(D, dtype=np.int32)
     phys_charges = np.zeros(d, dtype=np.int32)
     indices = (
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
     )
     return DenseTensor(arr, indices)
 
