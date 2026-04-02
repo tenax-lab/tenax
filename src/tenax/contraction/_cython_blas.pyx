@@ -1749,6 +1749,16 @@ cdef class DMRGMatvec2Site(MatvecOp):
         return self.apply(theta_blocks)
 
 
+cdef class DMRGMatvec1Site(DMRGMatvec2Site):
+    """C-level 1-site DMRG matvec operator.
+
+    Identical to DMRGMatvec2Site -- combo descriptor format is the same
+    for both 2-site and 1-site subscripts. Separate class for clarity
+    at the call site in dmrg.py.
+    """
+    pass
+
+
 # ------------------------------------------------------------------ #
 # cython_lanczos_reorth: fused full reorthogonalization                #
 # ------------------------------------------------------------------ #

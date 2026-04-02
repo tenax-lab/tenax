@@ -913,3 +913,120 @@ class TestCythonMatvecOp:
 
         for key in result_1:
             assert not np.allclose(result_1[key], result_2[key])
+
+
+# ------------------------------------------------------------------ #
+# DMRGMatvec1Site cdef class tests                                     #
+# ------------------------------------------------------------------ #
+
+
+class TestCythonMatvecOp1Site:
+    """Test DMRGMatvec1Site matches _execute_matvec_combos for 1-site."""
+
+    @pytest.fixture(autouse=True)
+    def require_cython(self):
+        try:
+            from tenax.contraction._cython_blas import DMRGMatvec1Site  # noqa: F401
+        except (ImportError, ModuleNotFoundError):
+            pytest.skip("Cython DMRGMatvec1Site not available")
+
+    def test_1site_matches_reference(self):
+        """Multiple combos with realistic 1-site DMRG block shapes."""
+        from tenax.contraction._cython_blas import DMRGMatvec1Site
+
+        from tenax.algorithms.dmrg import (
+            _execute_matvec_combos,
+            _precompute_matvec_combos,
+        )
+
+        rng = np.random.default_rng(123)
+        subs = ONE_SITE_SUBSCRIPTS
+        theta_buf_idx = 1
+
+        # 1-site shapes: (left_env=abc, site=apd, mpo=bpxe, right_env=def)
+        shapes = [
+            ((4, 5, 4), (4, 2, 4), (5, 2, 2, 5), (4, 5, 4)),
+            ((3, 3, 3), (3, 2, 3), (3, 2, 2, 3), (3, 3, 3)),
+            ((2, 3, 4), (2, 2, 5), (3, 2, 2, 6), (5, 6, 4)),
+        ]
+
+        block_plan, np_blocks_list = (
+            TestPreTransposedMatvecCombos._build_block_plan_and_blocks(
+                subs, shapes, theta_buf_idx, rng
+            )
+        )
+
+        combos, out_keys, out_shapes = _precompute_matvec_combos(
+            block_plan, subs, np_blocks_list, theta_buf_idx
+        )
+
+        theta_blocks = {}
+        for combo_keys, _ in block_plan:
+            theta_key = combo_keys[theta_buf_idx]
+            theta_blocks[theta_key] = np_blocks_list[theta_buf_idx][theta_key]
+
+        # Python reference
+        result_python = _execute_matvec_combos(
+            combos, theta_blocks, theta_buf_idx, out_keys, out_shapes, ()
+        )
+
+        # DMRGMatvec1Site path
+        op = DMRGMatvec1Site(combos, out_keys, out_shapes, theta_buf_idx)
+        result_cdef = op.py_apply(theta_blocks)
+
+        assert set(result_cdef.keys()) == set(result_python.blocks.keys())
+        for key in result_python.blocks:
+            np.testing.assert_allclose(
+                result_cdef[key],
+                result_python.blocks[key],
+                rtol=1e-12,
+                atol=1e-14,
+                err_msg=f"Mismatch at key {key}",
+            )
+
+    def test_1site_single_combo(self):
+        """Single combo, 1-site DMRG pattern."""
+        from tenax.contraction._cython_blas import DMRGMatvec1Site
+
+        from tenax.algorithms.dmrg import (
+            _execute_matvec_combos,
+            _precompute_matvec_combos,
+        )
+
+        rng = np.random.default_rng(42)
+        subs = ONE_SITE_SUBSCRIPTS
+        theta_buf_idx = 1
+        shapes = [
+            ((4, 5, 4), (4, 2, 4), (5, 2, 2, 5), (4, 5, 4)),
+        ]
+
+        block_plan, np_blocks_list = (
+            TestPreTransposedMatvecCombos._build_block_plan_and_blocks(
+                subs, shapes, theta_buf_idx, rng
+            )
+        )
+
+        combos, out_keys, out_shapes = _precompute_matvec_combos(
+            block_plan, subs, np_blocks_list, theta_buf_idx
+        )
+
+        theta_blocks = {}
+        for combo_keys, _ in block_plan:
+            theta_key = combo_keys[theta_buf_idx]
+            theta_blocks[theta_key] = np_blocks_list[theta_buf_idx][theta_key]
+
+        result_python = _execute_matvec_combos(
+            combos, theta_blocks, theta_buf_idx, out_keys, out_shapes, ()
+        )
+
+        op = DMRGMatvec1Site(combos, out_keys, out_shapes, theta_buf_idx)
+        result_cdef = op.py_apply(theta_blocks)
+
+        assert set(result_cdef.keys()) == set(result_python.blocks.keys())
+        for key in result_python.blocks:
+            np.testing.assert_allclose(
+                result_cdef[key],
+                result_python.blocks[key],
+                rtol=1e-12,
+                atol=1e-14,
+            )
