@@ -482,3 +482,33 @@ class TestComplexLanczosReorth:
         cython_lanczos_reorth([q], wc)
         overlap = np.vdot(q0, wc[(0,)])
         assert abs(overlap) < 1e-14, f"Overlap after reorth: {overlap}"
+
+
+class TestNonContiguousBLAS:
+    """Regression tests for in-place BLAS on non-C-contiguous arrays (issue #216 bug 3)."""
+
+    def test_scale_inplace_fortran_order(self):
+        from tenax.contraction._cython_blas import cython_ba_scale_inplace
+
+        A = np.asfortranarray(np.arange(6.0).reshape(2, 3))
+        blocks = {(0,): A.copy(order="F")}
+        cython_ba_scale_inplace(blocks, 2.0)
+        np.testing.assert_allclose(blocks[(0,)], A * 2)
+
+    def test_axpy_fortran_order(self):
+        from tenax.contraction._cython_blas import cython_ba_axpy
+
+        A = np.asfortranarray(np.arange(6.0).reshape(2, 3))
+        y = {(0,): A.copy(order="F")}
+        x = {(0,): np.ones((2, 3))}
+        cython_ba_axpy(x, y, 3.0)
+        np.testing.assert_allclose(y[(0,)], A + 3)
+
+    def test_sub_scaled_fortran_order(self):
+        from tenax.contraction._cython_blas import cython_ba_sub_scaled_inplace
+
+        A = np.asfortranarray(np.arange(6.0).reshape(2, 3))
+        w = {(0,): A.copy(order="F")}
+        q = {(0,): np.ones((2, 3))}
+        cython_ba_sub_scaled_inplace(w, q, 1.0)
+        np.testing.assert_allclose(w[(0,)], A - 1)

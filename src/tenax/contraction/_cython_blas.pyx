@@ -1095,6 +1095,9 @@ def cython_ba_axpy(dict blocks_x, dict blocks_y, double alpha):
                 if not x_arr.flags.writeable:
                     x_arr = x_arr.copy()
                 x_flat_d = np.ascontiguousarray(x_arr).ravel()
+                if not yk.flags.c_contiguous or not yk.flags.writeable:
+                    yk = np.ascontiguousarray(yk).copy()
+                    blocks_y[k] = yk
                 y_flat_d = yk.ravel()
                 n = x_flat_d.shape[0]
                 with nogil:
@@ -1108,6 +1111,9 @@ def cython_ba_axpy(dict blocks_x, dict blocks_y, double alpha):
                 if not x_arr.flags.writeable:
                     x_arr = x_arr.copy()
                 x_flat_z = np.ascontiguousarray(x_arr).ravel()
+                if not yk.flags.c_contiguous or not yk.flags.writeable:
+                    yk = np.ascontiguousarray(yk).copy()
+                    blocks_y[k] = yk
                 y_flat_z = yk.ravel()
                 n = x_flat_z.shape[0]
                 with nogil:
@@ -1121,6 +1127,9 @@ def cython_ba_axpy(dict blocks_x, dict blocks_y, double alpha):
                 if not x_arr.flags.writeable:
                     x_arr = x_arr.copy()
                 x_flat_c = np.ascontiguousarray(x_arr).ravel()
+                if not yk.flags.c_contiguous or not yk.flags.writeable:
+                    yk = np.ascontiguousarray(yk).copy()
+                    blocks_y[k] = yk
                 y_flat_c = yk.ravel()
                 n = x_flat_c.shape[0]
                 with nogil:
@@ -1156,19 +1165,31 @@ def cython_ba_scale_inplace(dict blocks, double scalar):
 
     if dtype_code == 0:
         for k in blocks:
-            flat_d = blocks[k].ravel()
+            bk = blocks[k]
+            if not bk.flags.c_contiguous or not bk.flags.writeable:
+                bk = np.ascontiguousarray(bk).copy()
+                blocks[k] = bk
+            flat_d = bk.ravel()
             n = flat_d.shape[0]
             with nogil:
                 _dscal(&n, &s_d, &flat_d[0], &inc)
     elif dtype_code == 1:
         for k in blocks:
-            flat_z = blocks[k].ravel()
+            bk = blocks[k]
+            if not bk.flags.c_contiguous or not bk.flags.writeable:
+                bk = np.ascontiguousarray(bk).copy()
+                blocks[k] = bk
+            flat_z = bk.ravel()
             n = flat_z.shape[0]
             with nogil:
                 _zscal(&n, &s_z, &flat_z[0], &inc)
     elif dtype_code == 2:
         for k in blocks:
-            flat_c = blocks[k].ravel()
+            bk = blocks[k]
+            if not bk.flags.c_contiguous or not bk.flags.writeable:
+                bk = np.ascontiguousarray(bk).copy()
+                blocks[k] = bk
+            flat_c = bk.ravel()
             n = flat_c.shape[0]
             with nogil:
                 _cscal(&n, &s_c, &flat_c[0], &inc)
@@ -1485,8 +1506,8 @@ def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
                 if wk is None:
                     continue
                 qk = q_blocks[k]
-                if not wk.flags.writeable:
-                    wk = wk.copy()
+                if not wk.flags.c_contiguous or not wk.flags.writeable:
+                    wk = np.ascontiguousarray(wk).copy()
                     w_blocks[k] = wk
                 w_arr = <cnp.ndarray>np.ascontiguousarray(np.asarray(wk).ravel())
                 q_arr = <cnp.ndarray>np.ascontiguousarray(np.asarray(qk).ravel())
@@ -1528,8 +1549,8 @@ def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
                 if wk is None:
                     continue
                 qk = q_blocks[k]
-                if not wk.flags.writeable:
-                    wk = wk.copy()
+                if not wk.flags.c_contiguous or not wk.flags.writeable:
+                    wk = np.ascontiguousarray(wk).copy()
                     w_blocks[k] = wk
                 w_flat_z2 = np.ascontiguousarray(np.asarray(wk, dtype=np.complex128)).ravel()
                 q_flat_z2 = np.ascontiguousarray(np.asarray(qk, dtype=np.complex128)).ravel()
@@ -1571,8 +1592,8 @@ def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
                 if wk is None:
                     continue
                 qk = q_blocks[k]
-                if not wk.flags.writeable:
-                    wk = wk.copy()
+                if not wk.flags.c_contiguous or not wk.flags.writeable:
+                    wk = np.ascontiguousarray(wk).copy()
                     w_blocks[k] = wk
                 w_flat_c2 = np.ascontiguousarray(np.asarray(wk, dtype=np.complex64)).ravel()
                 q_flat_c2 = np.ascontiguousarray(np.asarray(qk, dtype=np.complex64)).ravel()
@@ -1636,8 +1657,8 @@ def cython_ba_sub_scaled_inplace(dict w_blocks, dict q_blocks, double scalar):
             wk = w_blocks.get(k)
             if wk is not None:
                 qk = q_blocks[k]
-                if not wk.flags.writeable:
-                    wk = wk.copy()
+                if not wk.flags.c_contiguous or not wk.flags.writeable:
+                    wk = np.ascontiguousarray(wk).copy()
                     w_blocks[k] = wk
                 w_flat_d = wk.ravel()
                 q_flat_d = np.ascontiguousarray(qk).ravel()
@@ -1649,8 +1670,8 @@ def cython_ba_sub_scaled_inplace(dict w_blocks, dict q_blocks, double scalar):
             wk = w_blocks.get(k)
             if wk is not None:
                 qk = q_blocks[k]
-                if not wk.flags.writeable:
-                    wk = wk.copy()
+                if not wk.flags.c_contiguous or not wk.flags.writeable:
+                    wk = np.ascontiguousarray(wk).copy()
                     w_blocks[k] = wk
                 w_flat_z = wk.ravel()
                 q_arr = np.asarray(qk, dtype=np.complex128)
@@ -1665,8 +1686,8 @@ def cython_ba_sub_scaled_inplace(dict w_blocks, dict q_blocks, double scalar):
             wk = w_blocks.get(k)
             if wk is not None:
                 qk = q_blocks[k]
-                if not wk.flags.writeable:
-                    wk = wk.copy()
+                if not wk.flags.c_contiguous or not wk.flags.writeable:
+                    wk = np.ascontiguousarray(wk).copy()
                     w_blocks[k] = wk
                 w_flat_c = wk.ravel()
                 q_arr = np.asarray(qk, dtype=np.complex64)
