@@ -1793,7 +1793,7 @@ def cython_lanczos_ground(MatvecOp mv, dict v0_blocks, int max_iter, double tol)
     # Normalize v0
     v = _ba_copy(v0_blocks)
     norm_val = _ba_norm_impl(v)
-    if norm_val == 0.0:
+    if norm_val < 1e-15:
         return (0.0, v)
     inv_norm = 1.0 / norm_val
     _ba_scale_impl(v, inv_norm)
@@ -1861,9 +1861,8 @@ def cython_lanczos_ground(MatvecOp mv, dict v0_blocks, int max_iter, double tol)
 
     # Normalize eigenvector
     norm_val = _ba_norm_impl(result)
-    if norm_val > 0.0:
-        inv_norm = 1.0 / norm_val
-        _ba_scale_impl(result, inv_norm)
+    inv_norm = 1.0 / (norm_val + 1e-15)
+    _ba_scale_impl(result, inv_norm)
 
     return (eigenvalue, result)
 
