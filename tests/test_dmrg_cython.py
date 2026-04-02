@@ -260,6 +260,15 @@ class TestCrossValidation:
 class TestCythonLanczosReorth:
     """Verify fused reorthogonalization matches sequential approach."""
 
+    @pytest.fixture(autouse=True)
+    def require_cython(self):
+        try:
+            from tenax.contraction._cython_blas import (
+                cython_lanczos_reorth,  # noqa: F401
+            )
+        except ImportError:
+            pytest.skip("Cython BA extension not available")
+
     @staticmethod
     def _sequential_reorth(basis_blocks_list, w_blocks):
         """Reference implementation: sequential inner + axpy per basis vector."""
