@@ -1,7 +1,7 @@
 # Cython Fused Lanczos + Matvec Dispatch
 
 **Date:** 2026-04-02
-**Status:** Approved
+**Status:** Implemented (PR #226)
 
 ## Goal
 
@@ -78,11 +78,17 @@ def cython_lanczos_ground(MatvecOp mv, dict v0_blocks, int max_iter,
 
 ### Expected impact
 
-At chi=32: per-combo dispatch drops from ~26μs to ~3-5μs (BLAS call + dict
-lookup). Closes the 2.2x gap to ~1.1-1.2x.
+**Actual results (measured 2026-04-02):**
 
-At chi=128: dispatch overhead is smaller fraction but still helps. Expect
-improvement from 1.7x to ~1.3-1.4x (remaining gap is SVD, out of scope).
+| Case | TeNPy | Tenax | Tenax/TeNPy |
+|------|-------|-------|-------------|
+| L=20 chi=32 10sw | 1.22s | 0.45s | 0.37x (2.7x faster) |
+| L=40 chi=64 5sw | 3.29s | 0.74s | 0.23x (4.4x faster) |
+| L=40 chi=128 5sw | 4.07s | 0.77s | 0.19x (5.3x faster) |
+| L=80 chi=128 5sw | 10.70s | 2.26s | 0.21x (4.7x faster) |
+
+Far exceeded the original target of matching TeNPy — Tenax is now 2.7-5.3x
+faster across all tested configurations.
 
 ## Integration
 
