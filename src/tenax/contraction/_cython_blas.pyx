@@ -1816,7 +1816,7 @@ def cython_lanczos_ground(MatvecOp mv, dict v0_blocks, int max_iter, double tol)
             _ba_sub_scaled_impl(w, <dict>basis[step - 1], beta_val)
 
         # Full reorthogonalization
-        cython_lanczos_reorth(basis, w)
+        _lanczos_reorth_impl(basis, w)
 
         # beta = ||w||
         beta_val = _ba_norm_impl(w)
@@ -1872,16 +1872,8 @@ def cython_lanczos_ground(MatvecOp mv, dict v0_blocks, int max_iter, double tol)
 # ------------------------------------------------------------------ #
 
 
-def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
-    """Fused full reorthogonalization: for each q in basis, w -= <q|w> * q.
-
-    In-place modification of w_blocks.
-    basis_blocks_list: list of dicts, each mapping charge key -> numpy array
-    w_blocks: dict mapping charge key -> numpy array (modified in-place)
-
-    Fuses what was 2*k Python->Cython calls (one ba_inner + one
-    ba_sub_scaled_inplace per basis vector) into a single call.
-    """
+cdef void _lanczos_reorth_impl(list basis_blocks_list, dict w_blocks):
+    """C-level full reorthogonalization -- called from cython_lanczos_ground."""
     cdef int n_basis = len(basis_blocks_list)
     cdef int i, n, inc
     cdef double coeff, alpha_neg
@@ -2052,6 +2044,11 @@ def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
                 wk = w_blocks.get(k)
                 if wk is not None:
                     w_blocks[k] = wk - fb_coeff * q_blocks[k]
+
+
+def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
+    """Public wrapper for full reorthogonalization."""
+    _lanczos_reorth_impl(basis_blocks_list, w_blocks)
 
 
 # ------------------------------------------------------------------ #
