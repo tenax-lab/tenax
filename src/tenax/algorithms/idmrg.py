@@ -516,6 +516,18 @@ def _solve_left_env_fixedpoint_dense(
 
             op = LinearOperator((n, n), matvec=matvec, dtype=A_L.dtype)
             l_flat, info = gmres(op, source.ravel(), atol=tol, restart=min(n, 50))
+            if info != 0:
+                if info > 0:
+                    msg = (
+                        "GMRES did not converge in left environment fixed-point solve: "
+                        f"channel={k}, info={info}, chi={chi}, tol={tol}"
+                    )
+                else:
+                    msg = (
+                        "GMRES failed in left environment fixed-point solve: "
+                        f"channel={k}, info={info}, chi={chi}, tol={tol}"
+                    )
+                raise RuntimeError(msg)
             L_env[:, k, :] = l_flat.reshape(chi, chi)
         else:
             L_env[:, k, :] = source
@@ -574,6 +586,18 @@ def _solve_right_env_fixedpoint_dense(
 
             op_lin = LinearOperator((n, n), matvec=matvec, dtype=A_R.dtype)
             r_flat, info = gmres(op_lin, source.ravel(), atol=tol, restart=min(n, 50))
+            if info != 0:
+                if info > 0:
+                    msg = (
+                        "GMRES did not converge in right environment fixed-point solve: "
+                        f"channel={k}, info={info}, chi={chi}, tol={tol}"
+                    )
+                else:
+                    msg = (
+                        "GMRES failed in right environment fixed-point solve: "
+                        f"channel={k}, info={info}, chi={chi}, tol={tol}"
+                    )
+                raise RuntimeError(msg)
             R_env[:, k, :] = r_flat.reshape(chi, chi)
         else:
             R_env[:, k, :] = source
@@ -974,6 +998,16 @@ def _idmrg_sweep(
             mask = cumul_sq > (config.svd_trunc_err**2 * total_sq)
             n_by_err = max(int(jnp.sum(mask)), 1)
             n_keep = min(n_keep, n_by_err)
+
+        # Dense 2-site sweep assumes square outer bonds in phase 3.
+        # If truncation shrinks n_keep below current outer dimensions,
+        # the next Lanczos matvec becomes shape-inconsistent.
+        if n_keep != chi_l or n_keep != chi_r:
+            raise ValueError(
+                "Dense 2-site iDMRG does not support phase-3 bond shrink from "
+                f"svd_trunc_err yet: got chi_l={chi_l}, chi_r={chi_r}, n_keep={n_keep}. "
+                "Use a smaller svd_trunc_err, disable svd_trunc_err, or use the 1-site/symmetric path."
+            )
 
         U = U[:, :n_keep]
         s_center = s_full[:n_keep]

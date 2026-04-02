@@ -145,6 +145,18 @@ class TestiDMRGRun:
         result = idmrg(W, cfg)
         assert isinstance(result, iDMRGResult)
 
+    def test_dense_two_site_raises_clear_error_on_bond_shrink(self):
+        """Aggressive svd_trunc_err should raise a clear validation error."""
+        W = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+        cfg = iDMRGConfig(
+            max_bond_dim=32,
+            max_iterations=5,
+            lanczos_max_iter=5,
+            svd_trunc_err=0.9,
+        )
+        with pytest.raises(ValueError, match="phase-3 bond shrink"):
+            idmrg(W, cfg, dtype=jnp.float64)
+
     def test_energy_is_finite(self):
         W = build_bulk_mpo_heisenberg()
         cfg = iDMRGConfig(max_bond_dim=8, max_iterations=10, lanczos_max_iter=10)
@@ -701,6 +713,26 @@ class TestSolveLeftEnvFixedpoint:
         L_env = _solve_left_env_fixedpoint_dense(A_L, W)
         np.testing.assert_allclose(L_env[:, 0, :], 0.0, atol=1e-15)
 
+    def test_raises_when_gmres_fails(self, monkeypatch):
+        """Non-converged GMRES should raise with channel context."""
+        chi, d, D_w = 2, 2, 3
+        A_L = np.zeros((chi, d, chi), dtype=np.float64)
+        A_L[0, 0, 0] = 1.0
+        A_L[1, 1, 1] = 1.0
+
+        W = np.zeros((D_w, d, d, D_w), dtype=np.float64)
+        eye = np.eye(d, dtype=np.float64)
+        W[2, :, :, 2] = eye  # vacuum identity
+        W[2, :, :, 1] = eye  # source term into channel k=1
+        W[1, :, :, 1] = 0.5 * eye  # self-loop forces GMRES branch
+
+        def _fake_gmres(op, b, atol=None, restart=None):
+            return np.zeros_like(b), 1
+
+        monkeypatch.setattr("scipy.sparse.linalg.gmres", _fake_gmres)
+        with pytest.raises(RuntimeError, match="left environment fixed-point solve"):
+            _solve_left_env_fixedpoint_dense(A_L, W)
+
 
 # ---------------------------------------------------------------------------
 # TestSolveRightEnvFixedpoint
@@ -762,6 +794,25 @@ class TestSolveRightEnvFixedpoint:
         R_env = _solve_right_env_fixedpoint_dense(A_R, W)
         D_w = W.shape[0]
         np.testing.assert_allclose(R_env[:, D_w - 1, :], 0.0, atol=1e-15)
+
+    def test_raises_when_gmres_fails(self, monkeypatch):
+        """Non-converged GMRES should raise with channel context."""
+        chi, d, D_w = 2, 2, 3
+        A_R = np.zeros((chi, d, chi), dtype=np.float64)
+        A_R[0, 0, 0] = 1.0
+        A_R[1, 1, 1] = 1.0
+
+        W = np.zeros((D_w, d, d, D_w), dtype=np.float64)
+        eye = np.eye(d, dtype=np.float64)
+        W[1, :, :, 0] = eye  # source term from done channel j=0
+        W[1, :, :, 1] = 0.5 * eye  # self-loop forces GMRES branch
+
+        def _fake_gmres(op, b, atol=None, restart=None):
+            return np.zeros_like(b), 1
+
+        monkeypatch.setattr("scipy.sparse.linalg.gmres", _fake_gmres)
+        with pytest.raises(RuntimeError, match="right environment fixed-point solve"):
+            _solve_right_env_fixedpoint_dense(A_R, W)
 
 
 # ---------------------------------------------------------------------------
