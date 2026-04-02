@@ -154,7 +154,7 @@ def test_cython_lanczos_faster_than_python():
         f"\n  Cython Lanczos: {t_cython_total:.3f}s"
         f"\n  Speedup: {speedup:.2f}x"
     )
-    assert speedup >= 1.05, (
-        f"Cython Lanczos only {speedup:.2f}x faster (need >= 1.05x). "
+    assert speedup >= 1.3, (
+        f"Cython Lanczos only {speedup:.2f}x faster (need >= 1.3x). "
         f"Python={t_python_total:.3f}s, Cython={t_cython_total:.3f}s"
     )
