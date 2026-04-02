@@ -573,17 +573,22 @@ cdef void _execute_group_pretransposed(
 
     for s in range(n_steps - 1):
         step = steps[s]
-        next_step = steps[s + 1]
         work_gemm.append(np.empty((step.m, step.n), dtype=dtype))
 
-        # Determine perm for this intermediate when used by next step
+        # Find the step that actually consumes this intermediate
         oi = step.out_idx
-        if next_step.left_idx == oi:
-            p = next_step.left_perm
-            sh = (next_step.m, next_step.k)
+        consumer = None
+        for ss in range(s + 1, n_steps):
+            if steps[ss].left_idx == oi or steps[ss].right_idx == oi:
+                consumer = steps[ss]
+                break
+
+        if consumer.left_idx == oi:
+            p = consumer.left_perm
+            sh = (consumer.m, consumer.k)
         else:
-            p = next_step.right_perm
-            sh = (next_step.k, next_step.n)
+            p = consumer.right_perm
+            sh = (consumer.k, consumer.n)
         int_perm.append(p)
         int_2d.append(sh)
         if p:
@@ -637,7 +642,7 @@ cdef void _combo_loop_f64(
     list int_perm, list int_2d,
 ):
     """Tight combo loop with raw BLAS for float64."""
-    cdef int i, s, d
+    cdef int i, s, d, producer
     cdef int M, N, K
     cdef double alpha = 1.0
     cdef double beta_0 = 0.0
@@ -650,6 +655,13 @@ cdef void _combo_loop_f64(
     cdef int perm_arr[MAX_NDIM]
     cdef int ndim, total_size
 
+    # Build buffer_idx -> step_idx mapping for intermediate recovery
+    cdef dict buf_to_step = {}
+    for s in range(n_steps):
+        step = steps[s]
+        if step.out_idx >= n_inputs:
+            buf_to_step[step.out_idx] = s
+
     for i in range(n_combos):
         # Execute GEMM chain
         for s in range(n_steps - 1):
@@ -660,20 +672,22 @@ cdef void _combo_loop_f64(
             if step.left_idx < n_inputs:
                 left_v = pool_list[combo_table[i, step.left_idx]]
             else:
-                # Intermediate from previous step — already transposed to 2D
-                if int_perm[s - 1]:
-                    left_v = work_trans[s - 1]
+                # Intermediate from a previous step — already transposed to 2D
+                producer = buf_to_step[step.left_idx]
+                if int_perm[producer]:
+                    left_v = work_trans[producer]
                 else:
-                    left_v = (<cnp.ndarray>work_gemm[s - 1]).reshape(int_2d[s - 1])
+                    left_v = (<cnp.ndarray>work_gemm[producer]).reshape(int_2d[producer])
 
             # Get right operand
             if step.right_idx < n_inputs:
                 right_v = pool_list[combo_table[i, step.right_idx]]
             else:
-                if int_perm[s - 1]:
-                    right_v = work_trans[s - 1]
+                producer = buf_to_step[step.right_idx]
+                if int_perm[producer]:
+                    right_v = work_trans[producer]
                 else:
-                    right_v = (<cnp.ndarray>work_gemm[s - 1]).reshape(int_2d[s - 1])
+                    right_v = (<cnp.ndarray>work_gemm[producer]).reshape(int_2d[producer])
 
             out_v = work_gemm[s]
 
@@ -705,20 +719,20 @@ cdef void _combo_loop_f64(
         if step.left_idx < n_inputs:
             left_v = pool_list[combo_table[i, step.left_idx]]
         else:
-            s = n_steps - 2
-            if int_perm[s]:
-                left_v = work_trans[s]
+            producer = buf_to_step[step.left_idx]
+            if int_perm[producer]:
+                left_v = work_trans[producer]
             else:
-                left_v = (<cnp.ndarray>work_gemm[s]).reshape(int_2d[s])
+                left_v = (<cnp.ndarray>work_gemm[producer]).reshape(int_2d[producer])
 
         if step.right_idx < n_inputs:
             right_v = pool_list[combo_table[i, step.right_idx]]
         else:
-            s = n_steps - 2
-            if int_perm[s]:
-                right_v = work_trans[s]
+            producer = buf_to_step[step.right_idx]
+            if int_perm[producer]:
+                right_v = work_trans[producer]
             else:
-                right_v = (<cnp.ndarray>work_gemm[s]).reshape(int_2d[s])
+                right_v = (<cnp.ndarray>work_gemm[producer]).reshape(int_2d[producer])
 
         out_v = out_bufs[combo_out[i]]
         with nogil:
@@ -734,7 +748,7 @@ cdef void _combo_loop_z128(
     list int_perm, list int_2d,
 ):
     """Tight combo loop with raw BLAS for complex128."""
-    cdef int i, s, d
+    cdef int i, s, d, producer
     cdef int M, N, K
     cdef double complex alpha = 1.0 + 0j
     cdef double complex beta_0 = 0.0 + 0j
@@ -747,6 +761,13 @@ cdef void _combo_loop_z128(
     cdef int perm_arr[MAX_NDIM]
     cdef int ndim, total_size
 
+    # Build buffer_idx -> step_idx mapping for intermediate recovery
+    cdef dict buf_to_step = {}
+    for s in range(n_steps):
+        step = steps[s]
+        if step.out_idx >= n_inputs:
+            buf_to_step[step.out_idx] = s
+
     for i in range(n_combos):
         # Execute GEMM chain
         for s in range(n_steps - 1):
@@ -757,20 +778,22 @@ cdef void _combo_loop_z128(
             if step.left_idx < n_inputs:
                 left_v = pool_list[combo_table[i, step.left_idx]]
             else:
-                # Intermediate from previous step — already transposed to 2D
-                if int_perm[s - 1]:
-                    left_v = work_trans[s - 1]
+                # Intermediate from a previous step — already transposed to 2D
+                producer = buf_to_step[step.left_idx]
+                if int_perm[producer]:
+                    left_v = work_trans[producer]
                 else:
-                    left_v = (<cnp.ndarray>work_gemm[s - 1]).reshape(int_2d[s - 1])
+                    left_v = (<cnp.ndarray>work_gemm[producer]).reshape(int_2d[producer])
 
             # Get right operand
             if step.right_idx < n_inputs:
                 right_v = pool_list[combo_table[i, step.right_idx]]
             else:
-                if int_perm[s - 1]:
-                    right_v = work_trans[s - 1]
+                producer = buf_to_step[step.right_idx]
+                if int_perm[producer]:
+                    right_v = work_trans[producer]
                 else:
-                    right_v = (<cnp.ndarray>work_gemm[s - 1]).reshape(int_2d[s - 1])
+                    right_v = (<cnp.ndarray>work_gemm[producer]).reshape(int_2d[producer])
 
             out_v = work_gemm[s]
 
@@ -802,20 +825,20 @@ cdef void _combo_loop_z128(
         if step.left_idx < n_inputs:
             left_v = pool_list[combo_table[i, step.left_idx]]
         else:
-            s = n_steps - 2
-            if int_perm[s]:
-                left_v = work_trans[s]
+            producer = buf_to_step[step.left_idx]
+            if int_perm[producer]:
+                left_v = work_trans[producer]
             else:
-                left_v = (<cnp.ndarray>work_gemm[s]).reshape(int_2d[s])
+                left_v = (<cnp.ndarray>work_gemm[producer]).reshape(int_2d[producer])
 
         if step.right_idx < n_inputs:
             right_v = pool_list[combo_table[i, step.right_idx]]
         else:
-            s = n_steps - 2
-            if int_perm[s]:
-                right_v = work_trans[s]
+            producer = buf_to_step[step.right_idx]
+            if int_perm[producer]:
+                right_v = work_trans[producer]
             else:
-                right_v = (<cnp.ndarray>work_gemm[s]).reshape(int_2d[s])
+                right_v = (<cnp.ndarray>work_gemm[producer]).reshape(int_2d[producer])
 
         out_v = out_bufs[combo_out[i]]
         with nogil:
@@ -832,25 +855,33 @@ cdef void _combo_loop_fallback(
 ):
     """Fallback combo loop using scipy BLAS for non-float64."""
     cdef int i, s
+
+    # Build buffer_idx -> step_idx mapping for intermediate recovery
+    cdef dict buf_to_step = {}
+    for s in range(n_steps):
+        step = steps[s]
+        if step.out_idx >= n_inputs:
+            buf_to_step[step.out_idx] = s
+
     for i in range(n_combos):
         for s in range(n_steps - 1):
             step = steps[s]
             if step.left_idx < n_inputs:
                 left = pool_list[combo_table[i, step.left_idx]]
             else:
-                prev_s = s - 1
-                if int_perm[prev_s]:
-                    left = work_trans[prev_s]
+                producer = buf_to_step[step.left_idx]
+                if int_perm[producer]:
+                    left = work_trans[producer]
                 else:
-                    left = work_gemm[prev_s].reshape(int_2d[prev_s])
+                    left = work_gemm[producer].reshape(int_2d[producer])
             if step.right_idx < n_inputs:
                 right = pool_list[combo_table[i, step.right_idx]]
             else:
-                prev_s = s - 1
-                if int_perm[prev_s]:
-                    right = work_trans[prev_s]
+                producer = buf_to_step[step.right_idx]
+                if int_perm[producer]:
+                    right = work_trans[producer]
                 else:
-                    right = work_gemm[prev_s].reshape(int_2d[prev_s])
+                    right = work_gemm[producer].reshape(int_2d[producer])
 
             out = work_gemm[s]
             out[:] = left @ right
@@ -868,13 +899,13 @@ cdef void _combo_loop_fallback(
         if step.left_idx < n_inputs:
             left = pool_list[combo_table[i, step.left_idx]]
         else:
-            prev_s = n_steps - 2
-            left = work_trans[prev_s] if int_perm[prev_s] else work_gemm[prev_s].reshape(int_2d[prev_s])
+            producer = buf_to_step[step.left_idx]
+            left = work_trans[producer] if int_perm[producer] else work_gemm[producer].reshape(int_2d[producer])
         if step.right_idx < n_inputs:
             right = pool_list[combo_table[i, step.right_idx]]
         else:
-            prev_s = n_steps - 2
-            right = work_trans[prev_s] if int_perm[prev_s] else work_gemm[prev_s].reshape(int_2d[prev_s])
+            producer = buf_to_step[step.right_idx]
+            right = work_trans[producer] if int_perm[producer] else work_gemm[producer].reshape(int_2d[producer])
         out_bufs[combo_out[i]] += left @ right
 
 
