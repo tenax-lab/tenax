@@ -1050,7 +1050,12 @@ cdef double _ba_norm_impl(dict blocks):
 
 
 cdef void _ba_axpy_impl(dict blocks_x, dict blocks_y, double alpha):
-    """y[k] += alpha * x[k] for all shared keys, in-place via BLAS."""
+    """y[k] += alpha * x[k] for shared keys only, in-place via BLAS.
+
+    Keys in blocks_x but not blocks_y are skipped.  This is safe for the
+    Lanczos use-case: H_eff is block-diagonal in charge sectors, so matvec
+    never introduces keys absent from the initial vector.
+    """
     cdef int n, inc = 1
     cdef double a_d = alpha
     cdef double complex a_z = alpha
@@ -1799,6 +1804,11 @@ def cython_lanczos_ground(MatvecOp mv, dict v0_blocks, int max_iter, double tol)
     _ba_scale_impl(v, inv_norm)
     basis.append(v)
 
+    cdef int _EVAL_CHECK_INTERVAL = 10
+    cdef double _prev_eval = 0.0
+    cdef double _cur_eval
+    cdef bint _has_prev_eval = False
+
     for step in range(max_iter):
         # w = mv.apply(basis[step])
         w = mv.apply(<dict>basis[step])
@@ -1824,6 +1834,18 @@ def cython_lanczos_ground(MatvecOp mv, dict v0_blocks, int max_iter, double tol)
 
         if beta_val < tol:
             break
+
+        # Eigenvalue convergence check every _EVAL_CHECK_INTERVAL steps.
+        # First check after 3 intervals to avoid false convergence in small
+        # Krylov subspaces.
+        if (step + 1) % _EVAL_CHECK_INTERVAL == 0 and step >= 3 * _EVAL_CHECK_INTERVAL - 1:
+            _n = len(alphas)
+            _T = np.diag(alphas) + np.diag(betas[1:_n], k=1) + np.diag(betas[1:_n], k=-1)
+            _cur_eval = float(np.linalg.eigvalsh(_T)[0])
+            if _has_prev_eval and abs(_cur_eval - _prev_eval) < tol:
+                break
+            _prev_eval = _cur_eval
+            _has_prev_eval = True
 
         # basis.append(w / beta)
         inv_norm = 1.0 / beta_val
