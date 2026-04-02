@@ -22,10 +22,10 @@ def _make_dense_tensor(arr: np.ndarray) -> DenseTensor:
     d = arr.shape[0]
     charges = np.zeros(d, dtype=np.int32)
     indices = (
-        TensorIndex(sym, charges, FlowDirection.IN, label="up"),
-        TensorIndex(sym, charges, FlowDirection.OUT, label="down"),
-        TensorIndex(sym, charges, FlowDirection.IN, label="left"),
-        TensorIndex(sym, charges, FlowDirection.OUT, label="right"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="up"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="down"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="left"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="right"),
     )
     return DenseTensor(jnp.array(arr), indices)
 
@@ -335,10 +335,10 @@ def _compute_ising_tensor_fermionic(beta: float, J: float = 1.0) -> SymmetricTen
     sym = FermionParity()
     charges = np.array([0, 1], dtype=np.int32)
     indices = (
-        TensorIndex(sym, charges, FlowDirection.IN, label="up"),
-        TensorIndex(sym, charges, FlowDirection.OUT, label="down"),
-        TensorIndex(sym, charges, FlowDirection.IN, label="left"),
-        TensorIndex(sym, charges, FlowDirection.OUT, label="right"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="up"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="down"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="left"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="right"),
     )
     return SymmetricTensor.from_dense(T_z2, indices)
 

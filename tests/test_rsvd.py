@@ -32,8 +32,8 @@ def _make_low_rank_dense(u1, key, m=20, n=15, true_rank=5):
     charges_m = np.zeros(m, dtype=np.int32)
     charges_n = np.zeros(n, dtype=np.int32)
     indices = (
-        TensorIndex(u1, charges_m, FlowDirection.IN, label="left"),
-        TensorIndex(u1, charges_n, FlowDirection.OUT, label="right"),
+        TensorIndex.from_charges(u1, charges_m, FlowDirection.IN, label="left"),
+        TensorIndex.from_charges(u1, charges_n, FlowDirection.OUT, label="right"),
     )
     return DenseTensor(data, indices)
 
@@ -92,10 +92,18 @@ def test_rsvd_multidimensional(u1, key):
     d1, d2, d3, d4 = 4, 5, 3, 6
     data = jax.random.normal(key, (d1, d2, d3, d4))
     indices = (
-        TensorIndex(u1, np.zeros(d1, dtype=np.int32), FlowDirection.IN, label="a"),
-        TensorIndex(u1, np.zeros(d2, dtype=np.int32), FlowDirection.IN, label="b"),
-        TensorIndex(u1, np.zeros(d3, dtype=np.int32), FlowDirection.OUT, label="c"),
-        TensorIndex(u1, np.zeros(d4, dtype=np.int32), FlowDirection.OUT, label="d"),
+        TensorIndex.from_charges(
+            u1, np.zeros(d1, dtype=np.int32), FlowDirection.IN, label="a"
+        ),
+        TensorIndex.from_charges(
+            u1, np.zeros(d2, dtype=np.int32), FlowDirection.IN, label="b"
+        ),
+        TensorIndex.from_charges(
+            u1, np.zeros(d3, dtype=np.int32), FlowDirection.OUT, label="c"
+        ),
+        TensorIndex.from_charges(
+            u1, np.zeros(d4, dtype=np.int32), FlowDirection.OUT, label="d"
+        ),
     )
     tensor = DenseTensor(data, indices)
     rank = 7
@@ -109,8 +117,10 @@ def test_rsvd_symmetric_runs(u1, key):
     """U(1) SymmetricTensor rsvd should not crash."""
     charges = np.array([-1, 0, 1], dtype=np.int32)
     indices = (
-        TensorIndex(u1, charges, FlowDirection.IN, label="left"),
-        TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="right"),
+        TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="left"),
+        TensorIndex.from_charges(
+            u1, u1.dual(charges), FlowDirection.OUT, label="right"
+        ),
     )
     tensor = SymmetricTensor.random_normal(indices, key)
     U, s, Vh = rsvd(tensor, ["left"], ["right"], rank=3, key=key)
@@ -124,8 +134,10 @@ def test_rsvd_symmetric_matches_dense(u1, key):
     """Symmetric rsvd singular values should roughly match dense rsvd."""
     charges = np.array([-2, -1, 0, 1, 2], dtype=np.int32)
     indices = (
-        TensorIndex(u1, charges, FlowDirection.IN, label="left"),
-        TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="right"),
+        TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="left"),
+        TensorIndex.from_charges(
+            u1, u1.dual(charges), FlowDirection.OUT, label="right"
+        ),
     )
     tensor = SymmetricTensor.random_normal(indices, key)
     rank = 3
@@ -136,8 +148,10 @@ def test_rsvd_symmetric_matches_dense(u1, key):
     # Dense path: convert to DenseTensor
     dense_data = tensor.todense()
     dense_indices = (
-        TensorIndex(u1, charges, FlowDirection.IN, label="left"),
-        TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="right"),
+        TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="left"),
+        TensorIndex.from_charges(
+            u1, u1.dual(charges), FlowDirection.OUT, label="right"
+        ),
     )
     dense_tensor = DenseTensor(dense_data, dense_indices)
     _, s_dense, _ = rsvd(dense_tensor, ["left"], ["right"], rank=rank, key=key)

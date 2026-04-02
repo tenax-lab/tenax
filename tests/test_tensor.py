@@ -20,8 +20,8 @@ class TestDenseTensor:
     def test_creation(self, u1, u1_charges_3, rng):
         data = jax.random.normal(rng, (3, 3))
         indices = (
-            TensorIndex(u1, u1_charges_3, FlowDirection.IN, label="row"),
-            TensorIndex(u1, u1_charges_3, FlowDirection.OUT, label="col"),
+            TensorIndex.from_charges(u1, u1_charges_3, FlowDirection.IN, label="row"),
+            TensorIndex.from_charges(u1, u1_charges_3, FlowDirection.OUT, label="col"),
         )
         t = DenseTensor(data, indices)
         assert t.ndim == 2
@@ -30,8 +30,8 @@ class TestDenseTensor:
     def test_wrong_ndim_raises(self, u1, u1_charges_3):
         data = jnp.ones((3,))
         indices = (
-            TensorIndex(u1, u1_charges_3, FlowDirection.IN, label="a"),
-            TensorIndex(u1, u1_charges_3, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(u1, u1_charges_3, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, u1_charges_3, FlowDirection.IN, label="b"),
         )
         with pytest.raises(ValueError, match="dims"):
             DenseTensor(data, indices)
@@ -39,8 +39,8 @@ class TestDenseTensor:
     def test_wrong_shape_raises(self, u1, u1_charges_3):
         data = jnp.ones((4, 3))  # first dim wrong
         indices = (
-            TensorIndex(u1, u1_charges_3, FlowDirection.IN, label="row"),
-            TensorIndex(u1, u1_charges_3, FlowDirection.OUT, label="col"),
+            TensorIndex.from_charges(u1, u1_charges_3, FlowDirection.IN, label="row"),
+            TensorIndex.from_charges(u1, u1_charges_3, FlowDirection.OUT, label="col"),
         )
         with pytest.raises(ValueError):
             DenseTensor(data, indices)
@@ -58,8 +58,8 @@ class TestDenseTensor:
         data = jax.random.normal(rng, (2, 2)) + 1j * jax.random.normal(rng, (2, 2))
         data = data.astype(jnp.complex64)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
         )
         t = DenseTensor(data, indices)
         tc = t.conj()
@@ -98,7 +98,7 @@ class TestDenseTensor:
 
     def test_grad_compatible(self, u1, u1_charges_3, rng):
         data = jax.random.normal(rng, (3,))
-        idx = TensorIndex(u1, u1_charges_3, FlowDirection.IN, label="v")
+        idx = TensorIndex.from_charges(u1, u1_charges_3, FlowDirection.IN, label="v")
         t = DenseTensor(data, (idx,))
 
         def loss(tensor):
@@ -113,7 +113,7 @@ class TestDenseTensor:
         charges = u1_charges_3
 
         def process_row(row):
-            idx = TensorIndex(u1, charges, FlowDirection.IN, label="v")
+            idx = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="v")
             t = DenseTensor(row, (idx,))
             return t.norm()
 
@@ -127,7 +127,7 @@ class TestDenseTensor:
 
     def test_dtype(self, u1, u1_charges_3, rng):
         data = jax.random.normal(rng, (3,), dtype=jnp.float64)
-        idx = TensorIndex(u1, u1_charges_3, FlowDirection.IN, label="v")
+        idx = TensorIndex.from_charges(u1, u1_charges_3, FlowDirection.IN, label="v")
         # float64 may be promoted to float32 by default JAX config
         t = DenseTensor(data, (idx,))
         assert t.dtype is not None
@@ -137,8 +137,10 @@ class TestComputeValidBlocks:
     def test_u1_2leg(self, u1):
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="b"
+            ),
         )
         keys = _compute_valid_blocks(indices)
         # For 2-leg U(1): charge_in + (-charge_out) = 0 => charge_in = charge_out
@@ -154,9 +156,11 @@ class TestComputeValidBlocks:
     def test_z2_3leg(self, z2):
         charges = np.array([0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(z2, charges, FlowDirection.IN, label="a"),
-            TensorIndex(z2, charges, FlowDirection.IN, label="b"),
-            TensorIndex(z2, z2.dual(charges), FlowDirection.OUT, label="c"),
+            TensorIndex.from_charges(z2, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(z2, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(
+                z2, z2.dual(charges), FlowDirection.OUT, label="c"
+            ),
         )
         keys = _compute_valid_blocks(indices)
         for key in keys:
@@ -167,8 +171,10 @@ class TestComputeValidBlocks:
 class TestSymmetricTensorCreation:
     def test_zeros_factory(self, u1, u1_charges_3):
         indices = (
-            TensorIndex(u1, u1_charges_3, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(u1_charges_3), FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, u1_charges_3, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(
+                u1, u1.dual(u1_charges_3), FlowDirection.OUT, label="out"
+            ),
         )
         t = SymmetricTensor.zeros(indices)
         assert t.ndim == 2
@@ -182,8 +188,10 @@ class TestSymmetricTensorCreation:
 
     def test_conservation_law_satisfied(self, u1, u1_charges_3, rng):
         indices = (
-            TensorIndex(u1, u1_charges_3, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(u1_charges_3), FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, u1_charges_3, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(
+                u1, u1.dual(u1_charges_3), FlowDirection.OUT, label="out"
+            ),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         for key in t.blocks:
@@ -193,8 +201,10 @@ class TestSymmetricTensorCreation:
     def test_invalid_block_raises(self, u1):
         charges = np.array([0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(u1, charges, FlowDirection.OUT, label="b"),  # not dual
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(
+                u1, charges, FlowDirection.OUT, label="b"
+            ),  # not dual
         )
         # Block (1, 1) has net = 1 + (-1)*1 = 0 which is valid
         # Block (0, 1) has net = 0 + (-1)*1 = -1 which is invalid
@@ -205,8 +215,10 @@ class TestSymmetricTensorCreation:
     def test_from_dense_roundtrip(self, u1, u1_charges_3, rng):
         """from_dense(todense(T)) should recover T block-by-block."""
         indices = (
-            TensorIndex(u1, u1_charges_3, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(u1_charges_3), FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, u1_charges_3, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(
+                u1, u1.dual(u1_charges_3), FlowDirection.OUT, label="out"
+            ),
         )
         t_orig = SymmetricTensor.random_normal(indices, rng)
         dense = t_orig.todense()
@@ -219,8 +231,10 @@ class TestSymmetricTensorCreation:
 
     def test_from_dense_rejects_non_zero_outside_blocks(self, u1, u1_charges_3):
         indices = (
-            TensorIndex(u1, u1_charges_3, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(u1_charges_3), FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, u1_charges_3, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(
+                u1, u1.dual(u1_charges_3), FlowDirection.OUT, label="out"
+            ),
         )
         # Dense tensor with non-zero element outside valid sectors
         dense = jnp.ones((3, 3))
@@ -332,8 +346,10 @@ class TestDenseSymmetricParity:
     def test_u1_2leg(self, u1, u1_charges_3, rng):
         """U(1) 2-leg: sym.todense() matches the source dense array."""
         indices = (
-            TensorIndex(u1, u1_charges_3, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(u1_charges_3), FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, u1_charges_3, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(
+                u1, u1.dual(u1_charges_3), FlowDirection.OUT, label="out"
+            ),
         )
         sym = SymmetricTensor.random_normal(indices, rng)
         dense_data = sym.todense()
@@ -352,8 +368,10 @@ class TestDenseSymmetricParity:
         """Z2 2-leg: sym.todense() matches source dense array."""
         charges = np.array([0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(z2, charges, FlowDirection.IN, label="in"),
-            TensorIndex(z2, z2.dual(charges), FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(z2, charges, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(
+                z2, z2.dual(charges), FlowDirection.OUT, label="out"
+            ),
         )
         sym = SymmetricTensor.random_normal(indices, rng)
         dense_data = sym.todense()
@@ -364,9 +382,11 @@ class TestDenseSymmetricParity:
         """Z2 3-leg (two IN, one OUT): sym.todense() matches source dense array."""
         charges = np.array([0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(z2, charges, FlowDirection.IN, label="a"),
-            TensorIndex(z2, charges, FlowDirection.IN, label="b"),
-            TensorIndex(z2, z2.dual(charges), FlowDirection.OUT, label="c"),
+            TensorIndex.from_charges(z2, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(z2, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(
+                z2, z2.dual(charges), FlowDirection.OUT, label="c"
+            ),
         )
         sym = SymmetricTensor.random_normal(indices, rng)
         dense_data = sym.todense()
@@ -376,8 +396,10 @@ class TestDenseSymmetricParity:
     def test_from_dense_parity_u1(self, u1, u1_charges_3, rng):
         """from_dense then todense recovers the original dense array for U(1)."""
         indices = (
-            TensorIndex(u1, u1_charges_3, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(u1_charges_3), FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, u1_charges_3, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(
+                u1, u1.dual(u1_charges_3), FlowDirection.OUT, label="out"
+            ),
         )
         sym = SymmetricTensor.random_normal(indices, rng)
         dense_data = sym.todense()
@@ -388,9 +410,11 @@ class TestDenseSymmetricParity:
         """from_dense then todense recovers the original dense array for Z2."""
         charges = np.array([0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(z2, charges, FlowDirection.IN, label="a"),
-            TensorIndex(z2, charges, FlowDirection.IN, label="b"),
-            TensorIndex(z2, z2.dual(charges), FlowDirection.OUT, label="c"),
+            TensorIndex.from_charges(z2, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(z2, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(
+                z2, z2.dual(charges), FlowDirection.OUT, label="c"
+            ),
         )
         sym = SymmetricTensor.random_normal(indices, rng)
         dense_data = sym.todense()
@@ -449,22 +473,22 @@ class TestDenseTensorArithmetic:
 
     def test_add_mismatched_labels_raises(self, u1):
         charges = np.array([0, 1], dtype=np.int32)
-        idx_a = TensorIndex(u1, charges, FlowDirection.IN, label="a")
-        idx_b = TensorIndex(u1, charges, FlowDirection.OUT, label="b")
-        idx_c = TensorIndex(u1, charges, FlowDirection.OUT, label="c")
+        idx_a = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a")
+        idx_b = TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b")
+        idx_c = TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="c")
         t1 = DenseTensor(jnp.ones((2, 2)), (idx_a, idx_b))
         t2 = DenseTensor(jnp.ones((2, 2)), (idx_a, idx_c))
         with pytest.raises(ValueError, match="label mismatch"):
             t1 + t2
 
     def test_add_mismatched_dim_raises(self, u1):
-        idx_a = TensorIndex(
+        idx_a = TensorIndex.from_charges(
             u1, np.array([0, 1], dtype=np.int32), FlowDirection.IN, label="a"
         )
-        idx_b2 = TensorIndex(
+        idx_b2 = TensorIndex.from_charges(
             u1, np.array([0, 1], dtype=np.int32), FlowDirection.OUT, label="b"
         )
-        idx_b3 = TensorIndex(
+        idx_b3 = TensorIndex.from_charges(
             u1, np.array([0, 1, 2], dtype=np.int32), FlowDirection.OUT, label="b"
         )
         t1 = DenseTensor(jnp.ones((2, 2)), (idx_a, idx_b2))
@@ -474,9 +498,9 @@ class TestDenseTensorArithmetic:
 
     def test_add_mismatched_flow_raises(self, u1):
         charges = np.array([0, 1], dtype=np.int32)
-        idx_a = TensorIndex(u1, charges, FlowDirection.IN, label="a")
-        idx_b_out = TensorIndex(u1, charges, FlowDirection.OUT, label="b")
-        idx_b_in = TensorIndex(u1, charges, FlowDirection.IN, label="b")
+        idx_a = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a")
+        idx_b_out = TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b")
+        idx_b_in = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="b")
         t1 = DenseTensor(jnp.ones((2, 2)), (idx_a, idx_b_out))
         t2 = DenseTensor(jnp.ones((2, 2)), (idx_a, idx_b_in))
         with pytest.raises(ValueError, match="flow mismatch"):
@@ -484,9 +508,9 @@ class TestDenseTensorArithmetic:
 
     def test_sub_mismatched_labels_raises(self, u1):
         charges = np.array([0, 1], dtype=np.int32)
-        idx_a = TensorIndex(u1, charges, FlowDirection.IN, label="a")
-        idx_b = TensorIndex(u1, charges, FlowDirection.OUT, label="b")
-        idx_c = TensorIndex(u1, charges, FlowDirection.OUT, label="c")
+        idx_a = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a")
+        idx_b = TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b")
+        idx_c = TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="c")
         t1 = DenseTensor(jnp.ones((2, 2)), (idx_a, idx_b))
         t2 = DenseTensor(jnp.ones((2, 2)), (idx_a, idx_c))
         with pytest.raises(ValueError, match="label mismatch"):
@@ -529,8 +553,8 @@ class TestSymmetricTensorArithmetic:
         """max_abs on a tensor with no blocks returns 0."""
         charges = np.array([0], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(
                 u1, np.array([1], dtype=np.int32), FlowDirection.OUT, label="b"
             ),
         )
@@ -545,15 +569,15 @@ class TestSymmetricTensorArithmetic:
         charges = np.array([-1, 0, 1], dtype=np.int32)
         t1 = SymmetricTensor.random_normal(
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
             ),
             key=jax.random.PRNGKey(0),
         )
         t2 = SymmetricTensor.random_normal(
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="c"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="c"),
             ),
             key=jax.random.PRNGKey(1),
         )
@@ -564,15 +588,15 @@ class TestSymmetricTensorArithmetic:
         charges = np.array([-1, 0, 1], dtype=np.int32)
         t1 = SymmetricTensor.random_normal(
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
             ),
             key=jax.random.PRNGKey(0),
         )
         t2 = SymmetricTensor.random_normal(
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="c"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="c"),
             ),
             key=jax.random.PRNGKey(1),
         )
@@ -598,8 +622,8 @@ class TestBar:
         data = jax.random.normal(rng, (2, 2)) + 1j * jax.random.normal(rng, (2, 2))
         data = data.astype(jnp.complex64)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
         )
         t = DenseTensor(data, indices)
         tb = t.bar()
@@ -610,8 +634,8 @@ class TestBar:
         charges = np.array([-1, 0, 1], dtype=np.int32)
         data = jax.random.normal(rng, (3, 3))
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
         )
         t = DenseTensor(data, indices)
         tb = t.bar()
@@ -644,8 +668,8 @@ class TestBar:
         charges = np.zeros(3, dtype=np.int32)
         data = jax.random.normal(rng, (3, 3))
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
         )
         t = DenseTensor(data, indices)
         np.testing.assert_allclose(t.bar().todense(), t.dagger().todense())
@@ -657,8 +681,8 @@ class TestBar:
         sym = FermionParity()
         charges = np.array([0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(sym, charges, FlowDirection.IN, label="a"),
-            TensorIndex(sym, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="b"),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         tb = t.bar()
@@ -671,9 +695,9 @@ class TestBar:
         sym = FermionParity()
         charges = np.array([0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(sym, charges, FlowDirection.IN, label="a"),
-            TensorIndex(sym, charges, FlowDirection.IN, label="b"),
-            TensorIndex(sym, charges, FlowDirection.OUT, label="c"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="c"),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         tb = t.bar()
@@ -692,8 +716,8 @@ class TestBar:
         sym = FermionicU1()
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(sym, charges, FlowDirection.IN, label="a"),
-            TensorIndex(sym, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="b"),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         tb = t.bar()
@@ -729,8 +753,10 @@ class TestInner:
         """inner(dense, symmetric) falls back to dense contraction."""
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="out"
+            ),
         )
         sym = SymmetricTensor.random_normal(indices, rng)
         dense = DenseTensor(sym.todense(), indices)

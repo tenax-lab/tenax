@@ -11,6 +11,7 @@ from tenax.algorithms._tensor_utils import (
     fuse_indices,
     max_abs_normalize,
     scale_bond_axis,
+    split_index,
 )
 from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core.index import FlowDirection, TensorIndex
@@ -22,8 +23,8 @@ class TestScaleBondAxis:
     def test_dense_basic(self, u1, rng):
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="row"),
-            TensorIndex(u1, charges, FlowDirection.OUT, label="col"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="row"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="col"),
         )
         data = jax.random.normal(rng, (3, 3))
         T = DenseTensor(data, indices)
@@ -37,8 +38,8 @@ class TestScaleBondAxis:
     def test_dense_preserves_labels(self, u1, rng):
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="row"),
-            TensorIndex(u1, charges, FlowDirection.OUT, label="col"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="row"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="col"),
         )
         data = jax.random.normal(rng, (3, 3))
         T = DenseTensor(data, indices)
@@ -51,8 +52,10 @@ class TestScaleBondAxis:
         scaling the dense version directly."""
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="out"
+            ),
         )
         T = SymmetricTensor.random_normal(indices, rng)
         scale = jnp.array([2.0, 3.0, 4.0])
@@ -70,8 +73,10 @@ class TestScaleBondAxis:
     def test_symmetric_preserves_type(self, u1, rng):
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="out"
+            ),
         )
         T = SymmetricTensor.random_normal(indices, rng)
         scale = jnp.array([1.0, 2.0, 3.0])
@@ -83,8 +88,8 @@ class TestMaxAbsNormalize:
     def test_dense_normalized(self, u1, rng):
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="row"),
-            TensorIndex(u1, charges, FlowDirection.OUT, label="col"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="row"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="col"),
         )
         data = jax.random.normal(rng, (3, 3)) * 10.0
         T = DenseTensor(data, indices)
@@ -95,8 +100,10 @@ class TestMaxAbsNormalize:
     def test_symmetric_normalized(self, u1, rng):
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="out"
+            ),
         )
         T = SymmetricTensor.random_normal(indices, rng) * 5.0
 
@@ -106,8 +113,8 @@ class TestMaxAbsNormalize:
     def test_log_norm_value(self, u1, rng):
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="row"),
-            TensorIndex(u1, charges, FlowDirection.OUT, label="col"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="row"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="col"),
         )
         data = jax.random.normal(rng, (3, 3)) * 10.0
         T = DenseTensor(data, indices)
@@ -123,8 +130,8 @@ class TestAbsorbSqrtSingularValues:
         """F_left @ F_right should approximately reconstruct U @ diag(s) @ Vh."""
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="row"),
-            TensorIndex(u1, charges, FlowDirection.OUT, label="col"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="row"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="col"),
         )
         data = jax.random.normal(rng, (3, 3))
         T = DenseTensor(data, indices)
@@ -147,8 +154,10 @@ class TestAbsorbSqrtSingularValues:
         """Symmetric version: F_left @ F_right reconstructs U @ diag(s) @ Vh."""
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="in"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="in"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="out"
+            ),
         )
         T = SymmetricTensor.random_normal(indices, rng)
 
@@ -181,7 +190,8 @@ class TestFuseIndices:
         ]
         charges = [np.zeros(s, dtype=np.int32) for s in shapes]
         indices = tuple(
-            TensorIndex(u1, charges[i], flows[i], label=labels[i]) for i in range(4)
+            TensorIndex.from_charges(u1, charges[i], flows[i], label=labels[i])
+            for i in range(4)
         )
         data = jax.random.normal(rng, tuple(shapes))
         return DenseTensor(data, indices)
@@ -206,9 +216,9 @@ class TestFuseIndices:
         """Fused DenseTensor has the same elements as manual reshape."""
         charges = np.zeros(2, dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
-            TensorIndex(u1, charges, FlowDirection.IN, label="c"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
         )
         data = jax.random.normal(rng, (2, 2, 2))
         T = DenseTensor(data, indices)
@@ -222,10 +232,14 @@ class TestFuseIndices:
         """Fusing a SymmetricTensor matches fusing its dense representation."""
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="b"),
-            TensorIndex(u1, charges, FlowDirection.IN, label="c"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="d"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="b"
+            ),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="d"
+            ),
         )
         T_sym = SymmetricTensor.random_normal(indices, rng)
         T_dense = DenseTensor(T_sym.todense(), T_sym.indices)
@@ -244,9 +258,11 @@ class TestFuseIndices:
         """fuse_indices on SymmetricTensor returns SymmetricTensor."""
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="b"),
-            TensorIndex(u1, charges, FlowDirection.IN, label="c"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="b"
+            ),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
         )
         T = SymmetricTensor.random_normal(indices, rng)
         result = fuse_indices(T, 0, 1, "ab", FlowDirection.IN)
@@ -257,6 +273,169 @@ class TestFuseIndices:
         T = self._make_dense_4leg(u1, rng)
         result = fuse_indices(T, 1, 3, "dr", FlowDirection.OUT)
         assert result.ndim == 3
+
+    def test_dense_fuse_populates_fuse_info(self, u1, rng):
+        """Fused DenseTensor leg should have FuseInfo with parent indices."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
+        )
+        data = jax.random.normal(rng, (3, 3, 3))
+        T = DenseTensor(data, indices)
+        result = fuse_indices(T, 0, 1, "ab", FlowDirection.IN)
+
+        fused_idx = result.indices[0]
+        assert fused_idx.fuse_info is not None
+        assert len(fused_idx.fuse_info.parent_indices) == 2
+        assert fused_idx.fuse_info.parent_indices[0].label == "a"
+        assert fused_idx.fuse_info.parent_indices[1].label == "b"
+
+    def test_symmetric_fuse_populates_fuse_info(self, u1, rng):
+        """Fused SymmetricTensor leg should have FuseInfo with parent indices."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="b"
+            ),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
+        )
+        T = SymmetricTensor.random_normal(indices, rng)
+        result = fuse_indices(T, 0, 1, "ab", FlowDirection.IN)
+
+        fused_idx = result.indices[0]
+        assert fused_idx.fuse_info is not None
+        assert len(fused_idx.fuse_info.parent_indices) == 2
+        assert fused_idx.fuse_info.parent_indices[0].label == "a"
+        assert fused_idx.fuse_info.parent_indices[1].label == "b"
+
+    def test_fuse_sectors_computation(self, u1):
+        """_compute_fused_sectors gives correct sectors and total dim."""
+        from tenax.algorithms._tensor_utils import _compute_fused_sectors
+
+        charges_a = np.array([-1, 0, 1], dtype=np.int32)
+        idx_a = TensorIndex.from_charges(u1, charges_a, FlowDirection.IN, label="a")
+        idx_b = TensorIndex.from_charges(
+            u1, u1.dual(charges_a), FlowDirection.OUT, label="b"
+        )
+
+        sectors, mults = _compute_fused_sectors(idx_a, idx_b, FlowDirection.IN, u1)
+
+        assert len(sectors) == len(mults)
+        assert int(np.sum(mults)) == 9  # 3 * 3
+        # sectors should be sorted
+        np.testing.assert_array_equal(sectors, np.sort(sectors))
+
+
+class TestSplitIndex:
+    """Tests for split_index — inverse of fuse_indices."""
+
+    def test_dense_fuse_split_roundtrip(self, u1, rng):
+        """Fuse then split should recover the original DenseTensor."""
+        charges = np.zeros(3, dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
+        )
+        data = jax.random.normal(rng, (3, 3, 3))
+        T = DenseTensor(data, indices)
+
+        fused = fuse_indices(T, 0, 1, "ab", FlowDirection.IN)
+        recovered = split_index(fused, 0)
+
+        np.testing.assert_allclose(recovered.todense(), T.todense(), rtol=1e-6)
+        assert recovered.labels() == T.labels()
+
+    def test_dense_nontrivial_charges_roundtrip(self, u1, rng):
+        """Fuse-split roundtrip with nontrivial U(1) charges."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
+        )
+        data = jax.random.normal(rng, (3, 3, 3))
+        T = DenseTensor(data, indices)
+
+        fused = fuse_indices(T, 0, 1, "ab", FlowDirection.IN)
+        recovered = split_index(fused, 0)
+
+        np.testing.assert_allclose(recovered.todense(), T.todense(), rtol=1e-6)
+
+    def test_split_no_fuse_info_raises(self, u1, rng):
+        """split_index on unfused leg should raise ValueError."""
+        charges = np.zeros(2, dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
+        )
+        T = DenseTensor(jax.random.normal(rng, (2, 2)), indices)
+        with pytest.raises(ValueError, match="fuse_info"):
+            split_index(T, 0)
+
+    def test_symmetric_fuse_split_roundtrip(self, u1, rng):
+        """Fuse then split on SymmetricTensor recovers original."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="b"
+            ),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="d"
+            ),
+        )
+        T = SymmetricTensor.random_normal(indices, rng)
+
+        fused = fuse_indices(T, 0, 1, "ab", FlowDirection.IN)
+        recovered = split_index(fused, 0)
+
+        np.testing.assert_allclose(recovered.todense(), T.todense(), rtol=1e-5)
+
+    def test_split_matches_dense(self, u1, rng):
+        """Symmetric split_index matches dense split_index."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="b"
+            ),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
+        )
+        T_sym = SymmetricTensor.random_normal(indices, rng)
+        T_dense = DenseTensor(T_sym.todense(), T_sym.indices)
+
+        fused_sym = fuse_indices(T_sym, 0, 1, "ab", FlowDirection.IN)
+        fused_dense = fuse_indices(T_dense, 0, 1, "ab", FlowDirection.IN)
+
+        split_sym = split_index(fused_sym, 0)
+        split_dense = split_index(fused_dense, 0)
+
+        np.testing.assert_allclose(
+            split_sym.todense(), split_dense.todense(), rtol=1e-5
+        )
+
+    def test_non_adjacent_fuse_split_roundtrip(self, u1, rng):
+        """Fuse-split roundtrip for non-adjacent axes."""
+        charges = np.zeros(2, dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="c"),
+        )
+        data = jax.random.normal(rng, (2, 2, 2))
+        T = DenseTensor(data, indices)
+
+        fused = fuse_indices(T, 0, 2, "ac", FlowDirection.IN)
+        recovered = split_index(fused, 0)
+
+        # After fuse(0,2) and split, we get axes (a, c, b) — not (a, b, c)
+        # because fuse transposes non-adjacent axes to be adjacent first
+        assert recovered.ndim == 3
 
 
 class TestDoubleLayerTensor:
@@ -275,7 +454,8 @@ class TestDoubleLayerTensor:
         shapes = [D, D, D, D, d]
         charges = [np.zeros(s, dtype=np.int32) for s in shapes]
         indices = tuple(
-            TensorIndex(u1, charges[i], flows[i], label=labels[i]) for i in range(5)
+            TensorIndex.from_charges(u1, charges[i], flows[i], label=labels[i])
+            for i in range(5)
         )
         data = jax.random.normal(rng, tuple(shapes))
         return DenseTensor(data, indices)
@@ -311,11 +491,15 @@ class TestDoubleLayerTensor:
         charges = np.array([-1, 0, 1], dtype=np.int32)
         phys_charges = np.array([-1, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="up"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="down"),
-            TensorIndex(u1, charges, FlowDirection.IN, label="left"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="right"),
-            TensorIndex(u1, phys_charges, FlowDirection.IN, label="phys"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="up"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="down"
+            ),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="left"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="right"
+            ),
+            TensorIndex.from_charges(u1, phys_charges, FlowDirection.IN, label="phys"),
         )
         A_sym = SymmetricTensor.random_normal(indices, rng)
         A_dense = DenseTensor(A_sym.todense(), A_sym.indices)

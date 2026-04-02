@@ -99,10 +99,10 @@ def spinless_fermion_gate(config: FPEPSConfig) -> SymmetricTensor:
     charges = np.array([0, 1], dtype=np.int32)
 
     indices = (
-        TensorIndex(sym, charges, FlowDirection.IN, label="si"),
-        TensorIndex(sym, charges, FlowDirection.IN, label="sj"),
-        TensorIndex(sym, charges, FlowDirection.OUT, label="si_out"),
-        TensorIndex(sym, charges, FlowDirection.OUT, label="sj_out"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="si"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="sj"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="si_out"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="sj_out"),
     )
 
     return SymmetricTensor.from_dense(jnp.array(H_4leg), indices)
@@ -170,11 +170,11 @@ def _build_initial_fpeps_tensor(
     phys_charges = np.array([0, 1], dtype=np.int32)
 
     indices = (
-        TensorIndex(sym, virt_charges, FlowDirection.OUT, label="u"),
-        TensorIndex(sym, virt_charges, FlowDirection.IN, label="d"),
-        TensorIndex(sym, virt_charges, FlowDirection.OUT, label="l"),
-        TensorIndex(sym, virt_charges, FlowDirection.IN, label="r"),
-        TensorIndex(sym, phys_charges, FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(sym, virt_charges, FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, virt_charges, FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, virt_charges, FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, virt_charges, FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="phys"),
     )
 
     return SymmetricTensor.random_normal(indices, key)

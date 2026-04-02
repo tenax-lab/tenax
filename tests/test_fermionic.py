@@ -381,9 +381,11 @@ class TestFermionicTranspose:
         """transpose(perm).transpose(inv_perm) recovers original."""
         charges = np.array([0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="a"),
-            TensorIndex(fp, charges, FlowDirection.IN, label="b"),
-            TensorIndex(fp, fp.dual(charges), FlowDirection.OUT, label="c"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(
+                fp, fp.dual(charges), FlowDirection.OUT, label="c"
+            ),
         )
         t = SymmetricTensor.random_normal(indices, rng)
 
@@ -402,9 +404,11 @@ class TestFermionicTranspose:
         """transpose roundtrip with FermionicU1."""
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(fu1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(fu1, charges, FlowDirection.IN, label="b"),
-            TensorIndex(fu1, fu1.dual(charges), FlowDirection.OUT, label="c"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(
+                fu1, fu1.dual(charges), FlowDirection.OUT, label="c"
+            ),
         )
         t = SymmetricTensor.random_normal(indices, rng)
 
@@ -424,9 +428,11 @@ class TestFermionicTranspose:
         u1 = U1Symmetry()
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(u1, charges, FlowDirection.IN, label="b"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="c"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="c"
+            ),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         perm = (2, 0, 1)
@@ -452,12 +458,12 @@ class TestFermionicContraction:
         """contract(A, B) should give consistent results for FermionParity."""
         charges = np.array([0, 1], dtype=np.int32)
         indices_A = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="p0"),
-            TensorIndex(fp, charges, FlowDirection.OUT, label="bond"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="p0"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.OUT, label="bond"),
         )
         indices_B = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="bond"),
-            TensorIndex(fp, charges, FlowDirection.IN, label="p1"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="bond"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="p1"),
         )
         A = SymmetricTensor.random_normal(indices_A, rng)
         B = SymmetricTensor.random_normal(indices_B, rng2)
@@ -473,12 +479,12 @@ class TestFermionicContraction:
         """contract(A, B) with FermionicU1 should produce valid result."""
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices_A = (
-            TensorIndex(fu1, charges, FlowDirection.IN, label="p0"),
-            TensorIndex(fu1, charges, FlowDirection.OUT, label="bond"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="p0"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.OUT, label="bond"),
         )
         indices_B = (
-            TensorIndex(fu1, charges, FlowDirection.IN, label="bond"),
-            TensorIndex(fu1, charges, FlowDirection.IN, label="p1"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="bond"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="p1"),
         )
         A = SymmetricTensor.random_normal(indices_A, rng)
         B = SymmetricTensor.random_normal(indices_B, rng2)
@@ -501,8 +507,10 @@ class TestFermionicSVD:
         """SVD and reconstruction should preserve fermionic tensor data."""
         charges = np.array([0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="row"),
-            TensorIndex(fp, fp.dual(charges), FlowDirection.OUT, label="col"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="row"),
+            TensorIndex.from_charges(
+                fp, fp.dual(charges), FlowDirection.OUT, label="col"
+            ),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         original_dense = t.todense()
@@ -518,8 +526,10 @@ class TestFermionicSVD:
         """SVD roundtrip with FermionicU1."""
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(fu1, charges, FlowDirection.IN, label="row"),
-            TensorIndex(fu1, fu1.dual(charges), FlowDirection.OUT, label="col"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="row"),
+            TensorIndex.from_charges(
+                fu1, fu1.dual(charges), FlowDirection.OUT, label="col"
+            ),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         original_dense = t.todense()
@@ -536,9 +546,11 @@ class TestFermionicSVD:
         phys_c = np.array([-1, 0, 1], dtype=np.int32)
         virt_c = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(fu1, phys_c, FlowDirection.IN, label="phys"),
-            TensorIndex(fu1, virt_c, FlowDirection.IN, label="left"),
-            TensorIndex(fu1, fu1.dual(virt_c), FlowDirection.OUT, label="right"),
+            TensorIndex.from_charges(fu1, phys_c, FlowDirection.IN, label="phys"),
+            TensorIndex.from_charges(fu1, virt_c, FlowDirection.IN, label="left"),
+            TensorIndex.from_charges(
+                fu1, fu1.dual(virt_c), FlowDirection.OUT, label="right"
+            ),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         original_dense = t.todense()
@@ -559,8 +571,10 @@ class TestFermionicSVD:
     def test_svd_returns_symmetric(self, fu1, rng):
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(fu1, charges, FlowDirection.IN, label="row"),
-            TensorIndex(fu1, fu1.dual(charges), FlowDirection.OUT, label="col"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="row"),
+            TensorIndex.from_charges(
+                fu1, fu1.dual(charges), FlowDirection.OUT, label="col"
+            ),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         U, s, Vh, _ = truncated_svd(
@@ -580,8 +594,10 @@ class TestFermionicQR:
         """QR roundtrip with FermionicU1."""
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(fu1, charges, FlowDirection.IN, label="row"),
-            TensorIndex(fu1, fu1.dual(charges), FlowDirection.OUT, label="col"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="row"),
+            TensorIndex.from_charges(
+                fu1, fu1.dual(charges), FlowDirection.OUT, label="col"
+            ),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         original_dense = t.todense()
@@ -596,8 +612,10 @@ class TestFermionicQR:
     def test_qr_returns_symmetric(self, fu1, rng):
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(fu1, charges, FlowDirection.IN, label="row"),
-            TensorIndex(fu1, fu1.dual(charges), FlowDirection.OUT, label="col"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="row"),
+            TensorIndex.from_charges(
+                fu1, fu1.dual(charges), FlowDirection.OUT, label="col"
+            ),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         Q, R = qr_decompose(
@@ -618,8 +636,10 @@ class TestDagger:
         u1 = U1Symmetry()
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(
+                u1, u1.dual(charges), FlowDirection.OUT, label="b"
+            ),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         td = t.dagger()
@@ -640,8 +660,10 @@ class TestDagger:
         """For fermionic tensors, dagger should apply twist phases."""
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(fu1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(fu1, fu1.dual(charges), FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(
+                fu1, fu1.dual(charges), FlowDirection.OUT, label="b"
+            ),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         td = t.dagger()
@@ -653,8 +675,10 @@ class TestDagger:
     def test_dagger_indices_are_dual(self, fp, rng):
         charges = np.array([0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="a"),
-            TensorIndex(fp, fp.dual(charges), FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(
+                fp, fp.dual(charges), FlowDirection.OUT, label="b"
+            ),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         td = t.dagger()
@@ -832,8 +856,8 @@ class TestDaggerTwistPhaseCorrectness:
         """dagger(dagger(T)) == T for FermionParity."""
         charges = np.array([0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="a"),
-            TensorIndex(fp, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.OUT, label="b"),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         t_dd = t.dagger().dagger()
@@ -850,8 +874,10 @@ class TestDaggerTwistPhaseCorrectness:
         """dagger(dagger(T)) == T for FermionicU1."""
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(fu1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(fu1, fu1.dual(charges), FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(
+                fu1, fu1.dual(charges), FlowDirection.OUT, label="b"
+            ),
         )
         t = SymmetricTensor.random_normal(indices, rng)
         t_dd = t.dagger().dagger()
@@ -872,14 +898,14 @@ class TestFermionicContractionCrossValidation:
         charges = np.array([0, 1], dtype=np.int32)
         # A: (a, b, c) with c=OUT contracted with B: (c, d, e)
         idx_A = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="a"),
-            TensorIndex(fp, charges, FlowDirection.IN, label="b"),
-            TensorIndex(fp, charges, FlowDirection.OUT, label="c"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.OUT, label="c"),
         )
         idx_B = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="c"),
-            TensorIndex(fp, charges, FlowDirection.IN, label="d"),
-            TensorIndex(fp, charges, FlowDirection.OUT, label="e"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="c"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.OUT, label="e"),
         )
         A = SymmetricTensor.random_normal(idx_A, rng)
         B = SymmetricTensor.random_normal(idx_B, rng2)
@@ -906,12 +932,12 @@ class TestFermionicContractionCrossValidation:
         # Shared bond "b": same charge array in both tensors so
         # todense() positions align for dense einsum cross-check.
         idx_A = (
-            TensorIndex(fu1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(fu1, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.OUT, label="b"),
         )
         idx_B = (
-            TensorIndex(fu1, charges, FlowDirection.IN, label="b"),
-            TensorIndex(fu1, dual_charges, FlowDirection.OUT, label="c"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(fu1, dual_charges, FlowDirection.OUT, label="c"),
         )
         A = SymmetricTensor.random_normal(idx_A, rng)
         B = SymmetricTensor.random_normal(idx_B, rng2)
@@ -940,12 +966,12 @@ class TestFermionicContractionCrossValidation:
         dual_charges = sym.dual(charges)
 
         idx_A = (
-            TensorIndex(sym, charges, FlowDirection.IN, label="a"),
-            TensorIndex(sym, dual_charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(sym, dual_charges, FlowDirection.OUT, label="b"),
         )
         idx_B = (
-            TensorIndex(sym, charges, FlowDirection.IN, label="b"),
-            TensorIndex(sym, dual_charges, FlowDirection.OUT, label="c"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(sym, dual_charges, FlowDirection.OUT, label="c"),
         )
         A = SymmetricTensor.random_normal(idx_A, rng)
         B = SymmetricTensor.random_normal(idx_B, rng2)
@@ -976,14 +1002,14 @@ class TestFermionicContractionHypothesis:
         fp = FermionParity()
         charges = np.array([0, 1], dtype=np.int32)
         indices_A = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="a"),
-            TensorIndex(fp, charges, FlowDirection.IN, label="b"),
-            TensorIndex(fp, charges, FlowDirection.OUT, label="c"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.OUT, label="c"),
         )
         indices_B = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="c"),
-            TensorIndex(fp, charges, FlowDirection.IN, label="d"),
-            TensorIndex(fp, charges, FlowDirection.OUT, label="e"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="c"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.OUT, label="e"),
         )
         key = jax.random.PRNGKey(seed)
         k1, k2 = jax.random.split(key)
@@ -1007,16 +1033,16 @@ class TestFermionicContractionHypothesis:
         fp = FermionParity()
         charges = np.array([0, 1], dtype=np.int32)
         indices_A = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="a"),
-            TensorIndex(fp, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.OUT, label="b"),
         )
         indices_B = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="b"),
-            TensorIndex(fp, charges, FlowDirection.OUT, label="c"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.OUT, label="c"),
         )
         indices_C = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="c"),
-            TensorIndex(fp, charges, FlowDirection.OUT, label="d"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="c"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.OUT, label="d"),
         )
         key = jax.random.PRNGKey(seed)
         k1, k2, k3 = jax.random.split(key, 3)
@@ -1046,12 +1072,12 @@ class TestFermionicContractionHypothesis:
         fp = FermionParity()
         charges = np.array([0, 1], dtype=np.int32)
         indices_A = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="a"),
-            TensorIndex(fp, charges, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.OUT, label="b"),
         )
         indices_B = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="b"),
-            TensorIndex(fp, charges, FlowDirection.OUT, label="c"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.OUT, label="c"),
         )
         key = jax.random.PRNGKey(seed)
         k1, k2 = jax.random.split(key)
@@ -1085,14 +1111,14 @@ class TestFermionicContractionHypothesis:
         fu1 = FermionicU1()
         charges = np.array([-1, 0, 1], dtype=np.int32)
         indices_A = (
-            TensorIndex(fu1, charges, FlowDirection.IN, label="a"),
-            TensorIndex(fu1, charges, FlowDirection.IN, label="b"),
-            TensorIndex(fu1, charges, FlowDirection.OUT, label="c"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.OUT, label="c"),
         )
         indices_B = (
-            TensorIndex(fu1, charges, FlowDirection.IN, label="c"),
-            TensorIndex(fu1, charges, FlowDirection.IN, label="d"),
-            TensorIndex(fu1, charges, FlowDirection.OUT, label="e"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="c"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(fu1, charges, FlowDirection.OUT, label="e"),
         )
         key = jax.random.PRNGKey(seed)
         k1, k2 = jax.random.split(key)

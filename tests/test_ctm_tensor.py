@@ -48,11 +48,13 @@ def small_peps_dense():
     charges = np.zeros(D, dtype=np.int32)
     phys_charges = np.zeros(d, dtype=np.int32)
     indices = (
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
     )
     return DenseTensor(data, indices)
 
@@ -65,11 +67,13 @@ def small_peps_symmetric():
     charges = np.zeros(D, dtype=np.int32)
     phys_charges = np.zeros(d, dtype=np.int32)
     indices = (
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
     )
     rng = np.random.RandomState(99)
     data = jnp.array(rng.standard_normal((D, D, D, D, d)))
@@ -84,11 +88,17 @@ def fpeps_tensor():
     virt_charges = np.array([0, 1], dtype=np.int32)
     phys_charges = np.array([0, 1], dtype=np.int32)
     indices = (
-        TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="u"),
-        TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="d"),
-        TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="l"),
-        TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="r"),
-        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(
+            sym, virt_charges.copy(), FlowDirection.OUT, label="u"
+        ),
+        TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(
+            sym, virt_charges.copy(), FlowDirection.OUT, label="l"
+        ),
+        TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
     )
     return SymmetricTensor.random_normal(indices, key)
 
@@ -366,11 +376,13 @@ def small_peps_pair_dense():
         data = jnp.array(rng.standard_normal((D, D, D, D, d)))
         data = data / (jnp.linalg.norm(data) + 1e-10)
         indices = (
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex.from_charges(
+                sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+            ),
         )
         return DenseTensor(data, indices)
 
@@ -389,11 +401,13 @@ def small_peps_pair_symmetric():
         rng = np.random.RandomState(seed)
         data = jnp.array(rng.standard_normal((D, D, D, D, d)))
         indices = (
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex.from_charges(
+                sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+            ),
         )
         return SymmetricTensor.from_dense(data, indices)
 
@@ -707,11 +721,13 @@ class TestStandardCTMArchitectureGuards:
         charges = np.zeros(D, dtype=np.int32)
         phys_charges = np.zeros(d, dtype=np.int32)
         indices = (
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex.from_charges(
+                sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+            ),
         )
         A = DenseTensor(data, indices)
 

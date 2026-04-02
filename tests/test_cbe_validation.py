@@ -111,11 +111,13 @@ class TestCBEValidation:
             return DenseTensor(
                 data,
                 (
-                    TensorIndex(
+                    TensorIndex.from_charges(
                         sym, np.zeros(s[0], np.int32), FlowDirection.IN, f"{prefix}l"
                     ),
-                    TensorIndex(sym, np.zeros(s[1], np.int32), FlowDirection.IN, "p"),
-                    TensorIndex(
+                    TensorIndex.from_charges(
+                        sym, np.zeros(s[1], np.int32), FlowDirection.IN, "p"
+                    ),
+                    TensorIndex.from_charges(
                         sym, np.zeros(s[2], np.int32), FlowDirection.OUT, f"{prefix}r"
                     ),
                 ),

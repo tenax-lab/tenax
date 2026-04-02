@@ -634,36 +634,52 @@ def _build_random_dense_tensors(
         if L == 1:
             shape = (1, d, 1)
             indices: tuple[TensorIndex, ...] = (
-                TensorIndex(sym, trivial_charges, FlowDirection.IN, label="v_-1_0"),
-                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, trivial_charges, FlowDirection.IN, label="v_-1_0"
+                ),
+                TensorIndex.from_charges(
+                    sym, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     sym, trivial_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         elif i == 0:
             shape = (1, d, chi)
             indices = (
-                TensorIndex(sym, trivial_charges, FlowDirection.IN, label="v_-1_0"),
-                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, trivial_charges, FlowDirection.IN, label="v_-1_0"
+                ),
+                TensorIndex.from_charges(
+                    sym, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     sym, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         elif i == L - 1:
             shape = (chi, d, 1)
             indices = (
-                TensorIndex(sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"),
-                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"
+                ),
+                TensorIndex.from_charges(
+                    sym, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     sym, trivial_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         else:
             shape = (chi, d, chi)
             indices = (
-                TensorIndex(sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"),
-                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"
+                ),
+                TensorIndex.from_charges(
+                    sym, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     sym, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
@@ -718,38 +734,50 @@ def _build_random_symmetric_tensors(
         if L == 1:
             trivial_target = np.array([0], dtype=np.int32)
             indices: tuple[TensorIndex, ...] = (
-                TensorIndex(symmetry, trivial_zero, FlowDirection.IN, label="v_-1_0"),
-                TensorIndex(symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    symmetry, trivial_zero, FlowDirection.IN, label="v_-1_0"
+                ),
+                TensorIndex.from_charges(
+                    symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     symmetry, trivial_target, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         elif i == 0:
             indices = (
-                TensorIndex(symmetry, trivial_zero, FlowDirection.IN, label="v_-1_0"),
-                TensorIndex(symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    symmetry, trivial_zero, FlowDirection.IN, label="v_-1_0"
+                ),
+                TensorIndex.from_charges(
+                    symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     symmetry, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         elif i == L - 1:
             trivial_target = np.array([0], dtype=np.int32)
             indices = (
-                TensorIndex(
+                TensorIndex.from_charges(
                     symmetry, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"
                 ),
-                TensorIndex(symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     symmetry, trivial_target, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         else:
             indices = (
-                TensorIndex(
+                TensorIndex.from_charges(
                     symmetry, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"
                 ),
-                TensorIndex(symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    symmetry, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     symmetry, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )

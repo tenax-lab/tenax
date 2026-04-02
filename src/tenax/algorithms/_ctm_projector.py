@@ -24,9 +24,7 @@ OUT = FlowDirection.OUT
 # ------------------------------------------------------------------ #
 
 
-def _build_unified_fused_idx(
-    idx1: TensorIndex, idx2: TensorIndex
-) -> TensorIndex:
+def _build_unified_fused_idx(idx1: TensorIndex, idx2: TensorIndex) -> TensorIndex:
     """Build a fused TensorIndex covering all charge sectors from both inputs.
 
     For each unique charge, allocates ``max(count_in_idx1, count_in_idx2)``
@@ -39,13 +37,12 @@ def _build_unified_fused_idx(
     for q in all_charges:
         count = max(int(np.sum(c1 == q)), int(np.sum(c2 == q)))
         unified.extend([q] * count)
-    return TensorIndex(
+    return TensorIndex.from_charges(
         idx1.symmetry,
         np.array(unified, dtype=np.int32),
         idx1.flow,
         label=idx1.label,
     )
-
 
 
 def _build_symmetric_projector(
@@ -66,7 +63,7 @@ def _build_symmetric_projector(
         SymmetricTensor with indices ``(fused_idx, chi_new_idx)``.
     """
     sym = fused_idx.symmetry
-    chi_new_idx = TensorIndex(
+    chi_new_idx = TensorIndex.from_charges(
         sym, np.array(chi_new_charges, dtype=np.int32), OUT, label="chi_new"
     )
     obj = object.__new__(SymmetricTensor)
@@ -92,9 +89,7 @@ def _build_symmetric_projector(
     return obj
 
 
-def _infer_eigvec_charges(
-    P: np.ndarray, fused_charges: np.ndarray
-) -> np.ndarray:
+def _infer_eigvec_charges(P: np.ndarray, fused_charges: np.ndarray) -> np.ndarray:
     """Infer the charge of each eigenvector column from its non-zero rows.
 
     For a block-diagonal rho (arising from symmetric tensors), each
@@ -119,9 +114,7 @@ def _infer_eigvec_charges(
     return chi_new_charges
 
 
-def _unified_fused_index(
-    idx_a: TensorIndex, idx_b: TensorIndex
-) -> TensorIndex:
+def _unified_fused_index(idx_a: TensorIndex, idx_b: TensorIndex) -> TensorIndex:
     """Build a fused index whose charge array is the union of two indices.
 
     When two grown corners are fused along different edges, their fused
@@ -139,15 +132,15 @@ def _unified_fused_index(
     # *maximum* multiplicity seen in either index so the projector's
     # fused dimension is large enough for both corners' blocks.
     unique_charges = sorted(
-        set(int(c) for c in idx_a.charges) | set(int(c) for c in idx_b.charges)
+        set(int(c) for c in idx_a.sectors) | set(int(c) for c in idx_b.sectors)
     )
     charges_list: list[int] = []
     for q in unique_charges:
-        n_a = int(np.sum(idx_a.charges == q))
-        n_b = int(np.sum(idx_b.charges == q))
+        n_a = idx_a.multiplicity(q)
+        n_b = idx_b.multiplicity(q)
         charges_list.extend([q] * max(n_a, n_b))
 
-    return TensorIndex(
+    return TensorIndex.from_charges(
         idx_a.symmetry,
         np.array(charges_list, dtype=np.int32),
         idx_a.flow,
@@ -207,7 +200,6 @@ def _reembed_fused(
     obj._indices = new_indices
     obj._init_flat_buffer(new_blocks)
     return obj
-
 
 
 def _eigh_projector_symmetric(
@@ -325,6 +317,7 @@ def _eigh_projector_symmetric(
         # This prevents cascading charge-sector loss across CTM sweeps
         # by ensuring every charge from A's bond is represented.
         from tenax.algorithms._ctm_utils import _derive_charges
+
         target_charges = _derive_charges(base_charges, n_keep)
         target_count: dict[int, int] = {}
         for q in target_charges:
@@ -580,10 +573,11 @@ def _compute_projector_tensor(
         fused_idx = C1g.indices[C1g.labels().index("fused")]
         if base_charges is not None:
             from tenax.algorithms._ctm_utils import _derive_charges
+
             chi_charges_qr = _derive_charges(base_charges, k)
         else:
             chi_charges_qr = np.zeros(k, dtype=np.int32)
-        chi_new_idx = TensorIndex(
+        chi_new_idx = TensorIndex.from_charges(
             fused_idx.symmetry,
             chi_charges_qr,
             OUT,
@@ -620,7 +614,10 @@ def _compute_projector_tensor(
             C1g_re = _reembed_fused(C1g, unified_fused_idx)
             C4g_re = _reembed_fused(C4g, unified_fused_idx)
             return _eigh_projector_symmetric(
-                C1g_re, C4g_re, chi, fused_idx=unified_fused_idx,
+                C1g_re,
+                C4g_re,
+                chi,
+                fused_idx=unified_fused_idx,
                 base_charges=base_charges,
             )
 
@@ -640,10 +637,11 @@ def _compute_projector_tensor(
 
     if base_charges is not None:
         from tenax.algorithms._ctm_utils import _derive_charges
+
         chi_charges = _derive_charges(base_charges, k)
     else:
         chi_charges = np.zeros(k, dtype=np.int32)
-    chi_new_idx = TensorIndex(
+    chi_new_idx = TensorIndex.from_charges(
         fused_idx.symmetry,
         chi_charges,
         OUT,
