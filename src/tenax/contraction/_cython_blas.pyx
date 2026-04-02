@@ -1050,7 +1050,12 @@ cdef double _ba_norm_impl(dict blocks):
 
 
 cdef void _ba_axpy_impl(dict blocks_x, dict blocks_y, double alpha):
-    """y[k] += alpha * x[k] for all shared keys, in-place via BLAS."""
+    """y[k] += alpha * x[k] for shared keys only, in-place via BLAS.
+
+    Keys in blocks_x but not blocks_y are skipped.  This is safe for the
+    Lanczos use-case: H_eff is block-diagonal in charge sectors, so matvec
+    never introduces keys absent from the initial vector.
+    """
     cdef int n, inc = 1
     cdef double a_d = alpha
     cdef double complex a_z = alpha
