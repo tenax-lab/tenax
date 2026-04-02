@@ -43,7 +43,7 @@ class TestiDMRGConfig:
         assert cfg.max_bond_dim == 100
         assert cfg.max_iterations == 200
         assert cfg.convergence_tol == 1e-8
-        assert cfg.lanczos_max_iter == 50
+        assert cfg.lanczos_max_iter == 100
         assert cfg.lanczos_tol == 1e-12
         assert cfg.svd_trunc_err is None
         assert cfg.verbose is False

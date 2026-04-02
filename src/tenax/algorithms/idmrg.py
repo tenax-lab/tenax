@@ -28,12 +28,27 @@ import numpy as np
 
 from tenax.algorithms.dmrg import (
     _blockwise_contract,
+    _execute_matvec_combos,
     _lanczos_solve,
     _lanczos_solve_tensor,
     _precompute_block_plan,
+    _precompute_matvec_combos,
     _update_left_env_symmetric,
     _update_right_env_symmetric,
 )
+
+# Optional Cython BLAS acceleration for hot loops.
+try:
+    from tenax.contraction._cython_blas import (
+        DMRGMatvec2Site as _DMRGMatvec2Site,
+    )
+    from tenax.contraction._cython_blas import (
+        cython_lanczos_ground as _cython_lanczos_ground,
+    )
+
+    _USE_CYTHON_LANCZOS = True
+except (ImportError, ModuleNotFoundError):
+    _USE_CYTHON_LANCZOS = False
 from tenax.contraction.contractor import truncated_svd
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.mps import InfiniteMPS
@@ -70,7 +85,7 @@ class iDMRGConfig:
     max_bond_dim: int = 100
     max_iterations: int = 200
     convergence_tol: float = 1e-8
-    lanczos_max_iter: int = 50
+    lanczos_max_iter: int = 100
     lanczos_tol: float = 1e-12
     svd_trunc_err: float | None = None
     verbose: bool = False
@@ -1172,6 +1187,13 @@ def _idmrg_sweep_symmetric(
     A_R_tensor: Tensor | None = None
     s_vals = jnp.ones(1, dtype=dtype)
 
+    # Warm-start cache: charge sectors alternate even/odd every sweep,
+    # so we store the optimised theta from 2 sweeps ago (same parity).
+    # Key = virt_charges tuple; value = theta SymmetricTensor.
+    _warm_start: dict[
+        int, tuple[tuple, SymmetricTensor]
+    ] = {}  # parity -> (charges_key, theta)
+
     for sweep in range(config.max_iterations):
         # ---- Build initial theta ----
         theta_indices = (
@@ -1180,22 +1202,23 @@ def _idmrg_sweep_symmetric(
             TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="p_r"),
             TensorIndex.from_charges(sym, virt_charges, FlowDirection.OUT, label="v_r"),
         )
-        # Use numpy random instead of JAX to avoid compilation overhead.
-        # iDMRG charge sectors alternate (even/odd) each sweep, so
-        # warm-starting from the previous theta is not possible.
-        _rng = np.random.RandomState(sweep)
-        theta = SymmetricTensor.random_normal_np(theta_indices, _rng, dtype=dtype)
+
+        # Warm-start from 2 sweeps ago if charge structure matches.
+        parity = sweep % 2
+        _charges_key = tuple(virt_charges.tolist())
+        _cached = _warm_start.get(parity)
+        if _cached is not None and _cached[0] == _charges_key:
+            theta = _cached[1]
+        else:
+            _rng = np.random.RandomState(sweep)
+            theta = SymmetricTensor.random_normal_np(theta_indices, _rng, dtype=dtype)
 
         theta_norm = theta.norm()
         if theta_norm > 1e-15:
             theta = theta * (1.0 / theta_norm)
 
-        # Shared cache for opt_einsum contraction expressions
-        _matvec_cache: dict = {}
-
-        # Precompute block plan once — reused across all Lanczos iterations
         _subs = "abc,apqd,bpse,eqtf,dfg->cstg"
-        _plan = _precompute_block_plan([L_env, theta, W_sym, W_sym, R_env], _subs)
+        _theta_buf_idx = 1  # theta is the 2nd tensor (index 1)
 
         if config.numpy_blockwise:
             from tenax.algorithms._block_array import (
@@ -1203,38 +1226,103 @@ def _idmrg_sweep_symmetric(
                 ba_to_symmetric,
                 symmetric_to_ba,
             )
-            from tenax.algorithms.dmrg import _lanczos_solve_np, _to_np_blocks
+            from tenax.algorithms.dmrg import _lanczos_solve_np
             from tenax.linalg import _truncated_svd_symmetric_np
 
-            # Pre-convert env blocks to NumPy once
+            # Convert envs to BlockArray BEFORE plan — avoids JAX _get_block
+            L_env_ba = symmetric_to_ba(L_env)
+            R_env_ba = symmetric_to_ba(R_env)
+            W_sym_ba = symmetric_to_ba(W_sym)
+            theta_ba = symmetric_to_ba(theta)
+
+            # Precompute block plan on numpy-backed BlockArrays (cheap iteration)
+            _plan = _precompute_block_plan(
+                [L_env_ba, theta_ba, W_sym_ba, W_sym_ba, R_env_ba], _subs
+            )
+
+            # Pre-convert env blocks to NumPy dicts
             _env_np = [
-                _to_np_blocks(L_env),
+                L_env_ba.blocks,
                 None,  # v -- converted fresh each call
-                _to_np_blocks(W_sym),
-                _to_np_blocks(W_sym),
-                _to_np_blocks(R_env),
+                W_sym_ba.blocks,
+                W_sym_ba.blocks,
+                R_env_ba.blocks,
             ]
 
-            theta_ba = symmetric_to_ba(theta)
             _out_indices = theta_ba.indices
 
-            def matvec_np(v_ba: BlockArray) -> BlockArray:
-                _env_np[1] = v_ba.blocks
-                return _blockwise_contract(
-                    [L_env, theta, W_sym, W_sym, R_env],
+            # Use precomputed combo path for chi <= 128
+            _use_precomputed = config.max_bond_dim <= 128
+
+            if _use_precomputed:
+                _env_np[_theta_buf_idx] = theta_ba.blocks
+                _combo_descs, _out_keys, _out_shapes = _precompute_matvec_combos(
+                    _plan,
                     _subs,
-                    output_indices=_out_indices,
-                    expr_cache=_matvec_cache,
-                    block_plan=_plan,
-                    np_blocks_cache=_env_np,
-                    return_ba=True,
+                    _env_np,
+                    _theta_buf_idx,
+                )
+                _env_np[_theta_buf_idx] = None
+
+                if _USE_CYTHON_LANCZOS:
+                    mv = _DMRGMatvec2Site(
+                        _combo_descs, _out_keys, _out_shapes, _theta_buf_idx
+                    )
+                    E_total_val, theta_opt_blocks = _cython_lanczos_ground(
+                        mv,
+                        theta_ba.blocks,
+                        config.lanczos_max_iter,
+                        config.lanczos_tol,
+                    )
+                    theta_opt_ba = BlockArray(
+                        blocks=theta_opt_blocks, indices=_out_indices
+                    )
+                else:
+
+                    def matvec_np(v_ba: BlockArray) -> BlockArray:
+                        return _execute_matvec_combos(
+                            _combo_descs,
+                            v_ba.blocks,
+                            _theta_buf_idx,
+                            _out_keys,
+                            _out_shapes,
+                            _out_indices,
+                        )
+
+                    E_total_val, theta_opt_ba = _lanczos_solve_np(
+                        matvec_np,
+                        theta_ba,
+                        config.lanczos_max_iter,
+                        config.lanczos_tol,
+                    )
+            else:
+                _cache: dict = {}
+
+                def matvec_np(v_ba: BlockArray) -> BlockArray:
+                    _env_np[_theta_buf_idx] = v_ba.blocks
+                    return _blockwise_contract(
+                        [L_env_ba, theta_ba, W_sym_ba, W_sym_ba, R_env_ba],
+                        _subs,
+                        output_indices=_out_indices,
+                        expr_cache=_cache,
+                        block_plan=_plan,
+                        np_blocks_cache=_env_np,
+                        return_ba=True,
+                    )
+
+                E_total_val, theta_opt_ba = _lanczos_solve_np(
+                    matvec_np,
+                    theta_ba,
+                    config.lanczos_max_iter,
+                    config.lanczos_tol,
                 )
 
-            E_total_val, theta_opt_ba = _lanczos_solve_np(
-                matvec_np, theta_ba, config.lanczos_max_iter, config.lanczos_tol
-            )
             theta_opt = ba_to_symmetric(theta_opt_ba)
         else:
+            # Shared cache for opt_einsum contraction expressions
+            _matvec_cache: dict = {}
+
+            _plan = _precompute_block_plan([L_env, theta, W_sym, W_sym, R_env], _subs)
 
             def matvec(v: Tensor) -> Tensor:
                 return _blockwise_contract(
@@ -1250,6 +1338,9 @@ def _idmrg_sweep_symmetric(
             )
 
         E_total = float(E_total_val)
+
+        # Store optimised theta for warm-starting 2 sweeps later (same parity).
+        _warm_start[parity] = (_charges_key, theta_opt)
 
         # ---- SVD and truncate ----
         if config.numpy_blockwise:
