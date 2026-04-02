@@ -137,8 +137,11 @@ def _trotter_gate(H: SymmetricTensor, dt: float) -> SymmetricTensor:
     return SymmetricTensor.from_dense(jnp.array(gate_4leg), H.indices)
 
 
-def _initialize_fpeps(config: FPEPSConfig, key: jax.Array) -> SymmetricTensor:
-    """Create a random fPEPS site tensor A[u, d, l, r, phys].
+def _build_initial_fpeps_tensor(
+    config: FPEPSConfig,
+    key: jax.Array | None = None,
+) -> SymmetricTensor:
+    """Build a random initial fPEPS site tensor with FermionParity symmetry.
 
     The tensor has FermionParity symmetry on all legs. Virtual bond
     charges alternate 0, 1, 0, 1, ... for bond dimension D.
@@ -149,11 +152,14 @@ def _initialize_fpeps(config: FPEPSConfig, key: jax.Array) -> SymmetricTensor:
 
     Args:
         config: FPEPSConfig with bond dimension D.
-        key:    JAX random key.
+        key:    JAX random key. If None, uses PRNGKey(0).
 
     Returns:
         SymmetricTensor with 5 legs (u, d, l, r, phys).
     """
+    if key is None:
+        key = jax.random.PRNGKey(0)
+
     D = config.D
     sym = FermionParity()
 
@@ -172,6 +178,22 @@ def _initialize_fpeps(config: FPEPSConfig, key: jax.Array) -> SymmetricTensor:
     )
 
     return SymmetricTensor.random_normal(indices, key)
+
+
+def _initialize_fpeps(config: FPEPSConfig, key: jax.Array) -> SymmetricTensor:
+    """Create a random fPEPS site tensor A[u, d, l, r, phys].
+
+    Thin wrapper around :func:`_build_initial_fpeps_tensor` for
+    backward compatibility.
+
+    Args:
+        config: FPEPSConfig with bond dimension D.
+        key:    JAX random key.
+
+    Returns:
+        SymmetricTensor with 5 legs (u, d, l, r, phys).
+    """
+    return _build_initial_fpeps_tensor(config, key)
 
 
 def _normalize_tensor(T: SymmetricTensor) -> SymmetricTensor:

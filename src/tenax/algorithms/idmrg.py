@@ -475,6 +475,162 @@ def _update_right_env_dense(
     return jnp.einsum("abc,dpa,epxb,fxc->def", R_env, B, W, jnp.conj(B))
 
 
+def _transfer_op_L(
+    A_L: np.ndarray,
+    op: np.ndarray,
+    x: np.ndarray,
+) -> np.ndarray:
+    """Apply left transfer matrix with operator op.
+
+    T^L_op(x)[d,f] = Σ_{a,c,p,q} A_L[a,p,d] · op[p,q] · conj(A_L[c,q,f]) · x[a,c]
+
+    Two-step contraction for O(d² χ³) cost:
+      1. tmp[a,q,f] = x[a,c] · conj(A_L[c,q,f])
+      2. result[d,f] = A_L[a,p,d] · op[p,q] · tmp[a,q,f]
+    """
+    tmp = np.einsum("ac,cqf->aqf", x, np.conj(A_L))
+    return np.einsum("apd,pq,aqf->df", A_L, op, tmp)
+
+
+def _transfer_op_R(
+    A_R: np.ndarray,
+    op: np.ndarray,
+    x: np.ndarray,
+) -> np.ndarray:
+    """Apply right transfer matrix with operator op.
+
+    T^R_op(x)[d,f] = Σ_{a,c,p,q} A_R[d,p,a] · op[p,q] · conj(A_R[f,q,c]) · x[a,c]
+
+    Two-step contraction for O(d² χ³) cost:
+      1. tmp[a,q,f] = x[a,c] · conj(A_R[f,q,c])
+      2. result[d,f] = A_R[d,p,a] · op[p,q] · tmp[a,q,f]
+    """
+    tmp = np.einsum("ac,fqc->aqf", x, np.conj(A_R))
+    return np.einsum("dpa,pq,aqf->df", A_R, op, tmp)
+
+
+def _solve_left_env_fixedpoint_dense(
+    A_L: np.ndarray,
+    W: np.ndarray,
+    tol: float = 1e-12,
+) -> np.ndarray:
+    """Solve for the fixed-point left environment channel by channel.
+
+    Exploits the upper-triangular structure of the MPO W-matrix:
+    W[b,p,q,e] is non-zero only for b >= e (lower-triangular in b,e).
+
+    Channels are solved from vacuum (D_w-1) down to done (0):
+      - vacuum: T_I fixed point = I  (left-isometric A_L)
+      - intermediate k: l_k = Σ_{j>k} T^L_{W[j,:,:,k]}(l_j)
+      - done: set to 0  (energy shift, doesn't affect eigenvector)
+
+    For intermediate channels with self-loops (W[k,:,:,k] ≠ 0, rare for
+    standard MPOs), falls back to scipy GMRES.
+
+    Args:
+        A_L: Left-isometric MPS tensor, shape (chi, d, chi).
+        W: MPO tensor, shape (D_w, d, d, D_w).
+        tol: GMRES tolerance for channels with self-loops.
+
+    Returns:
+        L_env of shape (chi, D_w, chi).
+    """
+    chi = A_L.shape[2]
+    D_w = W.shape[0]
+    L_env = np.zeros((chi, D_w, chi), dtype=A_L.dtype)
+
+    # Vacuum channel: identity
+    L_env[:, D_w - 1, :] = np.eye(chi, dtype=A_L.dtype)
+
+    # Intermediate channels: solve from D_w-2 down to 1
+    for k in range(D_w - 2, 0, -1):
+        source = np.zeros((chi, chi), dtype=A_L.dtype)
+        for j in range(k + 1, D_w):
+            O_jk = W[j, :, :, k]
+            if np.linalg.norm(O_jk) > 1e-15:
+                source += _transfer_op_L(A_L, O_jk, L_env[:, j, :])
+
+        # Check for self-loop
+        O_kk = W[k, :, :, k]
+        if np.linalg.norm(O_kk) > 1e-15:
+            from scipy.sparse.linalg import LinearOperator, gmres
+
+            n = chi * chi
+
+            def matvec(x_flat, _A=A_L, _O=O_kk):
+                x = x_flat.reshape(chi, chi)
+                return (x - _transfer_op_L(_A, _O, x)).ravel()
+
+            op = LinearOperator((n, n), matvec=matvec, dtype=A_L.dtype)
+            l_flat, info = gmres(op, source.ravel(), atol=tol, restart=min(n, 50))
+            L_env[:, k, :] = l_flat.reshape(chi, chi)
+        else:
+            L_env[:, k, :] = source
+
+    # Done channel: set to 0 (constant energy shift)
+    # L_env[:, 0, :] already zero from initialization
+
+    return L_env
+
+
+def _solve_right_env_fixedpoint_dense(
+    A_R: np.ndarray,
+    W: np.ndarray,
+    tol: float = 1e-12,
+) -> np.ndarray:
+    """Solve for the fixed-point right environment channel by channel.
+
+    Mirrors ``_solve_left_env_fixedpoint_dense`` but from the done end:
+      - done (0): T_I fixed point = I  (right-isometric A_R)
+      - intermediate k: r_k = Σ_{j<k} T^R_{W[k,:,:,j]}(r_j)
+      - vacuum (D_w-1): set to 0
+
+    Args:
+        A_R: Right-isometric MPS tensor, shape (chi, d, chi).
+        W: MPO tensor, shape (D_w, d, d, D_w).
+        tol: GMRES tolerance for channels with self-loops.
+
+    Returns:
+        R_env of shape (chi, D_w, chi).
+    """
+    chi = A_R.shape[0]
+    D_w = W.shape[0]
+    R_env = np.zeros((chi, D_w, chi), dtype=A_R.dtype)
+
+    # Done channel: identity
+    R_env[:, 0, :] = np.eye(chi, dtype=A_R.dtype)
+
+    # Intermediate channels: solve from 1 up to D_w-2
+    for k in range(1, D_w - 1):
+        source = np.zeros((chi, chi), dtype=A_R.dtype)
+        for j in range(0, k):
+            O_kj = W[k, :, :, j]
+            if np.linalg.norm(O_kj) > 1e-15:
+                source += _transfer_op_R(A_R, O_kj, R_env[:, j, :])
+
+        # Check for self-loop
+        O_kk = W[k, :, :, k]
+        if np.linalg.norm(O_kk) > 1e-15:
+            from scipy.sparse.linalg import LinearOperator, gmres
+
+            n = chi * chi
+
+            def matvec(x_flat, _A=A_R, _O=O_kk):
+                x = x_flat.reshape(chi, chi)
+                return (x - _transfer_op_R(_A, _O, x)).ravel()
+
+            op_lin = LinearOperator((n, n), matvec=matvec, dtype=A_R.dtype)
+            r_flat, info = gmres(op_lin, source.ravel(), atol=tol, restart=min(n, 50))
+            R_env[:, k, :] = r_flat.reshape(chi, chi)
+        else:
+            R_env[:, k, :] = source
+
+    # Vacuum channel: set to 0
+    # R_env[:, D_w-1, :] already zero from initialization
+
+    return R_env
+
+
 # ---------------------------------------------------------------------------
 # Symmetric helpers
 # ---------------------------------------------------------------------------
@@ -523,6 +679,81 @@ def _trivial_right_env_symmetric(
     data = jnp.zeros((1, D_w, 1), dtype=dtype)
     data = data.at[0, 0, 0].set(1.0)
     return SymmetricTensor.from_dense(data, indices)
+
+
+def _solve_left_env_fixedpoint_symmetric(
+    A_L: SymmetricTensor,
+    W: SymmetricTensor,
+) -> SymmetricTensor:
+    """Solve for the fixed-point left environment (symmetric path).
+
+    V1 implementation: todense round-trip through the dense solver.
+    Pure block-sparse version can follow if profiling shows this is a bottleneck.
+
+    Args:
+        A_L: Left-isometric MPS tensor (chi_l, d, chi_r) as SymmetricTensor.
+        W: Full MPO tensor (D_w, d, d, D_w) as SymmetricTensor.
+
+    Returns:
+        SymmetricTensor L_env of shape (chi, D_w, chi) with correct indices.
+    """
+    sym = A_L.indices[0].symmetry
+    chi_charges = A_L.indices[2].charges
+    mpo_charges = W.indices[0].charges
+
+    A_L_dense = np.array(A_L.todense())
+    W_dense = np.array(W.todense())
+    L_env_dense = _solve_left_env_fixedpoint_dense(A_L_dense, W_dense)
+
+    L_indices = (
+        TensorIndex(sym, np.array(chi_charges), FlowDirection.IN, label="env_mps_l"),
+        TensorIndex(sym, np.array(mpo_charges), FlowDirection.IN, label="env_mpo_l"),
+        TensorIndex(
+            sym, np.array(chi_charges), FlowDirection.OUT, label="env_mps_conj_l"
+        ),
+    )
+    # The dense solver may populate entries outside symmetry-allowed sectors;
+    # use tol=inf to extract only the valid blocks (the physical solution
+    # respects the symmetry, so discarded entries are numerical noise).
+    return SymmetricTensor.from_dense(
+        jnp.array(L_env_dense), L_indices, tol=float("inf")
+    )
+
+
+def _solve_right_env_fixedpoint_symmetric(
+    A_R: SymmetricTensor,
+    W: SymmetricTensor,
+) -> SymmetricTensor:
+    """Solve for the fixed-point right environment (symmetric path).
+
+    V1 implementation: todense round-trip through the dense solver.
+
+    Args:
+        A_R: Right-isometric MPS tensor (chi_l, d, chi_r) as SymmetricTensor.
+        W: Full MPO tensor (D_w, d, d, D_w) as SymmetricTensor.
+
+    Returns:
+        SymmetricTensor R_env of shape (chi, D_w, chi) with correct indices.
+    """
+    sym = A_R.indices[0].symmetry
+    chi_charges = A_R.indices[0].charges
+    mpo_charges = W.indices[3].charges
+
+    A_R_dense = np.array(A_R.todense())
+    W_dense = np.array(W.todense())
+    R_env_dense = _solve_right_env_fixedpoint_dense(A_R_dense, W_dense)
+
+    R_indices = (
+        TensorIndex(sym, np.array(chi_charges), FlowDirection.OUT, label="env_mps_r"),
+        TensorIndex(sym, np.array(mpo_charges), FlowDirection.OUT, label="env_mpo_r"),
+        TensorIndex(
+            sym, np.array(chi_charges), FlowDirection.IN, label="env_mps_conj_r"
+        ),
+    )
+    # See comment in _solve_left_env_fixedpoint_symmetric.
+    return SymmetricTensor.from_dense(
+        jnp.array(R_env_dense), R_indices, tol=float("inf")
+    )
 
 
 def _idmrg_growing_chain_symmetric(
@@ -1050,17 +1281,12 @@ def _idmrg_sweep(
     R_env = _update_right_env_dense(R_env, A_R, W)
     chi_env = n_keep
 
-    # Environment warmup: contract A_L/A_R through environments repeatedly
-    # to build self-consistent infinite environments before optimization.
-    n_env_warmup = 10
-    for warmup in range(n_env_warmup):
-        L_env = _update_left_env_dense(L_env, A_L, W)
-        R_env = _update_right_env_dense(R_env, A_R, W)
-        if config.verbose:
-            print(
-                f"  Env warmup {warmup + 1}/{n_env_warmup}: L_env shape={L_env.shape}",
-                flush=True,
-            )
+    # ---- Compute fixed-point environments ----
+    L_env = jnp.array(_solve_left_env_fixedpoint_dense(np.array(A_L), np.array(W)))
+    R_env = jnp.array(_solve_right_env_fixedpoint_dense(np.array(A_R), np.array(W)))
+
+    if config.verbose:
+        print("  Computed fixed-point environments", flush=True)
 
     # ---- Phase 3: Self-consistent optimization sweeps ----
     energies_per_step: list[float] = []
@@ -1113,20 +1339,17 @@ def _idmrg_sweep(
         A_L = U.reshape(chi_l, d, n_keep)
         A_R = Vt.reshape(n_keep, d, chi_r)
 
-        # ---- Update both environments with optimized tensors ----
+        # ---- Update environments with optimized tensors ----
         L_env = _update_left_env_dense(L_env, A_L, W)
         R_env = _update_right_env_dense(R_env, A_R, W)
 
         # ---- Energy per site via energy difference ----
-        # Each sweep adds 2 sites to the effective chain via environment updates,
-        # so the energy per site is the change in total energy divided by 2.
         if E_prev is not None:
             e_per_site = (E_total - E_prev) / 2.0
         else:
             e_per_site = E_total / 2.0
         energies_per_step.append(e_per_site)
 
-        # ---- Prepare for next sweep ----
         E_prev = E_total
         chi_env = n_keep
 
@@ -1138,12 +1361,9 @@ def _idmrg_sweep(
             )
 
         # ---- Check convergence ----
-        n_e = len(energies_per_step)
-        if n_e >= 4:
-            n_half = min(n_e // 2, 5)
-            avg_recent = sum(energies_per_step[-n_half:]) / n_half
-            avg_prev = sum(energies_per_step[-2 * n_half : -n_half]) / n_half
-            if abs(avg_recent - avg_prev) < config.convergence_tol:
+        if len(energies_per_step) >= 2:
+            de = abs(energies_per_step[-1] - energies_per_step[-2])
+            if de < config.convergence_tol:
                 converged = True
                 if config.verbose:
                     print(f"Converged at sweep {sweep + 1}", flush=True)
@@ -1188,8 +1408,7 @@ def _idmrg_sweep(
     A_R_sv = jnp.einsum("a,apb->apb", s_center, A_R)
     A_R_tensor = _wrap_mps(A_R_sv, ("v_c", "p_r", "v_r"))
 
-    n_avg = max(len(energies_per_step) // 2, 1)
-    e_per_site_avg = sum(energies_per_step[-n_avg:]) / n_avg
+    e_per_site_avg = energies_per_step[-1] if energies_per_step else 0.0
 
     return iDMRGResult(
         energy_per_site=e_per_site_avg,
@@ -1377,12 +1596,9 @@ def _idmrg_sweep_symmetric(
             )
 
         # ---- Check convergence ----
-        n_e = len(energies_per_step)
-        if n_e >= 4:
-            n_half = min(n_e // 2, 5)
-            avg_recent = sum(energies_per_step[-n_half:]) / n_half
-            avg_prev = sum(energies_per_step[-2 * n_half : -n_half]) / n_half
-            if abs(avg_recent - avg_prev) < config.convergence_tol:
+        if len(energies_per_step) >= 2:
+            de = abs(energies_per_step[-1] - energies_per_step[-2])
+            if de < config.convergence_tol:
                 converged = True
                 if config.verbose:
                     print(f"Converged at sweep {sweep + 1}", flush=True)
@@ -1390,8 +1606,7 @@ def _idmrg_sweep_symmetric(
 
         E_prev = E_total
 
-    n_avg = max(len(energies_per_step) // 2, 1)
-    e_per_site_avg = sum(energies_per_step[-n_avg:]) / n_avg
+    e_per_site_avg = energies_per_step[-1] if energies_per_step else 0.0
 
     return iDMRGResult(
         energy_per_site=e_per_site_avg,
@@ -1571,7 +1786,6 @@ def _idmrg_1site_sweep(
             e_per_site = E_total / 2.0
         energies_per_step.append(e_per_site)
 
-        # ---- Prepare for next sweep ----
         E_prev = E_total
         theta_prev = theta_opt
         chi_env = n_keep
@@ -1584,12 +1798,9 @@ def _idmrg_1site_sweep(
             )
 
         # ---- Check convergence ----
-        n_e = len(energies_per_step)
-        if n_e >= 4:
-            n_half = min(n_e // 2, 5)
-            avg_recent = sum(energies_per_step[-n_half:]) / n_half
-            avg_prev = sum(energies_per_step[-2 * n_half : -n_half]) / n_half
-            if abs(avg_recent - avg_prev) < config.convergence_tol:
+        if len(energies_per_step) >= 2:
+            de = abs(energies_per_step[-1] - energies_per_step[-2])
+            if de < config.convergence_tol:
                 converged = True
                 if config.verbose:
                     print(f"Converged at sweep {sweep + 1}", flush=True)
@@ -1633,8 +1844,7 @@ def _idmrg_1site_sweep(
     A_R_sv = jnp.einsum("a,apb->apb", s_center, A_R)
     A_R_tensor = _wrap_mps(A_R_sv, ("v_c", "p_r", "v_r"))
 
-    n_avg = max(len(energies_per_step) // 2, 1)
-    e_per_site_avg = sum(energies_per_step[-n_avg:]) / n_avg
+    e_per_site_avg = energies_per_step[-1] if energies_per_step else 0.0
 
     return iDMRGResult(
         energy_per_site=e_per_site_avg,

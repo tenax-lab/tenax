@@ -378,6 +378,48 @@ class TestPrepareKernelData:
 
 
 @pytest.mark.skipif(not CYTHON_BLAS_AVAILABLE, reason="Cython not compiled")
+class TestV3BranchedPlan:
+    """Regression tests for execute_all_combos_v3 with non-linear plans."""
+
+    def test_v3_branched_matches_einsum(self):
+        """V3 should handle branched contraction trees (issue #216 bug 1)."""
+        from tenax.contraction._cython_blas import execute_all_combos_v3
+
+        from tenax.contraction._blas_plan import build_blas_plan
+
+        subs = "ab,cd,be,df->acef"
+        shapes = [(2, 3), (4, 5), (3, 6), (5, 7)]
+        rng = np.random.default_rng(0)
+        arrays = [rng.standard_normal(s) for s in shapes]
+        expected = np.einsum(subs, *arrays)
+        np_blocks = [{(0,): a} for a in arrays]
+        block_plan = [([(0,)] * 4, (0,))]
+
+        plan = build_blas_plan(subs, shapes)
+        assert len(plan.steps) >= 3
+
+        res_v3 = execute_all_combos_v3(subs, block_plan, np_blocks, {})[(0,)]
+        np.testing.assert_allclose(res_v3, expected, atol=1e-12)
+
+    def test_v3_branched_complex128(self):
+        """V3 branched plan should also work for complex128."""
+        from tenax.contraction._cython_blas import execute_all_combos_v3
+
+        from tenax.contraction._blas_plan import build_blas_plan
+
+        subs = "ab,cd,be,df->acef"
+        shapes = [(2, 3), (4, 5), (3, 6), (5, 7)]
+        rng = np.random.default_rng(42)
+        arrays = [rng.standard_normal(s) + 1j * rng.standard_normal(s) for s in shapes]
+        expected = np.einsum(subs, *arrays)
+        np_blocks = [{(0,): a} for a in arrays]
+        block_plan = [([(0,)] * 4, (0,))]
+
+        res = execute_all_combos_v3(subs, block_plan, np_blocks, {})[(0,)]
+        np.testing.assert_allclose(res, expected, atol=1e-10)
+
+
+@pytest.mark.skipif(not CYTHON_BLAS_AVAILABLE, reason="Cython not compiled")
 class TestV3KernelComplex:
     """Test V3 kernel with complex dtypes."""
 
@@ -508,3 +550,24 @@ class TestCythonKernelV2:
 
         result = kdata.output_buffers[0]
         np.testing.assert_allclose(result, expected, rtol=1e-10)
+
+
+@pytest.mark.skipif(not CYTHON_BLAS_AVAILABLE, reason="Cython BLAS not built")
+class TestV3HighRank:
+    """Regression test for MAX_NDIM guard in V3 combo loops (issue #216 bug 4)."""
+
+    def test_v3_high_rank_no_crash(self):
+        """V3 should not crash on intermediates with >8 dimensions."""
+        from tenax.contraction._cython_blas import execute_all_combos_v3
+
+        # This contraction produces a high-rank intermediate
+        subs = "abcde,efghi->abcdfghi"
+        shapes = [(2,) * 5, (2,) * 5]
+        rng = np.random.default_rng(99)
+        arrays = [rng.standard_normal(s) for s in shapes]
+        expected = np.einsum(subs, *arrays)
+        np_blocks = [{(0,): a} for a in arrays]
+        block_plan = [([(0,)] * 2, (0,))]
+
+        res = execute_all_combos_v3(subs, block_plan, np_blocks, {})[(0,)]
+        np.testing.assert_allclose(res, expected, atol=1e-12)
