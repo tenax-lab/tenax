@@ -456,6 +456,13 @@ class TestCythonComplexBa:
 class TestComplexLanczosReorth:
     """Regression tests for complex reorthogonalization (issue #216 bug 2)."""
 
+    @pytest.fixture(autouse=True)
+    def require_cython(self):
+        try:
+            from tenax.contraction._cython_blas import cython_ba_inner  # noqa: F401
+        except ImportError:
+            pytest.skip("Cython BA extension not available")
+
     def test_complex_inner_preserves_imaginary(self):
         """ba_inner must return complex for complex inputs, not just real part."""
         from tenax.contraction._cython_blas import cython_ba_inner
@@ -486,6 +493,15 @@ class TestComplexLanczosReorth:
 
 class TestNonContiguousBLAS:
     """Regression tests for in-place BLAS on non-C-contiguous arrays (issue #216 bug 3)."""
+
+    @pytest.fixture(autouse=True)
+    def require_cython(self):
+        try:
+            from tenax.contraction._cython_blas import (
+                cython_ba_scale_inplace,  # noqa: F401
+            )
+        except ImportError:
+            pytest.skip("Cython BA extension not available")
 
     def test_scale_inplace_fortran_order(self):
         from tenax.contraction._cython_blas import cython_ba_scale_inplace
