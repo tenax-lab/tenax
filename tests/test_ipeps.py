@@ -684,9 +684,6 @@ class TestOptimizeGsAd2Site:
         assert np.isfinite(E_gs)
 
     @pytest.mark.slow
-    @pytest.mark.xfail(
-        reason="AD can exploit underconverged CTM, giving unphysically low energy"
-    )
     def test_2site_heisenberg_ad_energy_benchmark(self, heisenberg_gate):
         """SU + AD at D=2, chi=16 should be physical and improve over SU init.
 
@@ -706,7 +703,7 @@ class TestOptimizeGsAd2Site:
             max_bond_dim=2,
             num_imaginary_steps=100,
             dt=0.3,
-            ctm=CTMConfig(chi=16, max_iter=60),
+            ctm=CTMConfig(chi=16, max_iter=60, min_iter=30),
             unit_cell="2site",
         )
         E_su, (A_su, B_su), _ = ipeps(heisenberg_gate, None, su_config)
@@ -715,7 +712,7 @@ class TestOptimizeGsAd2Site:
             max_bond_dim=2,
             num_imaginary_steps=100,
             dt=0.3,
-            ctm=CTMConfig(chi=16, max_iter=60),
+            ctm=CTMConfig(chi=16, max_iter=60, min_iter=30),
             gs_num_steps=50,
             gs_learning_rate=5e-3,
             unit_cell="2site",
@@ -777,9 +774,6 @@ class TestHeisenbergBenchmark:
         assert E > -0.80, f"SU D=2 E/site={E:.6f}, unphysically low"
 
     @pytest.mark.slow
-    @pytest.mark.xfail(
-        reason="AD can exploit underconverged CTM at small chi, giving misleadingly good energy"
-    )
     def test_ad_d2_energy(self, heisenberg_gate):
         """AD optimization at D=2, chi=16 should give E/site < -0.648.
 
@@ -790,14 +784,14 @@ class TestHeisenbergBenchmark:
             max_bond_dim=2,
             num_imaginary_steps=200,
             dt=0.05,
-            ctm=CTMConfig(chi=16, max_iter=60),
+            ctm=CTMConfig(chi=16, max_iter=60, min_iter=30),
             unit_cell="2site",
         )
         _, (A_su, B_su), _ = ipeps(heisenberg_gate, None, su_config)
 
         ad_config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=16, max_iter=60),
+            ctm=CTMConfig(chi=16, max_iter=60, min_iter=30),
             gs_num_steps=50,
             gs_learning_rate=5e-3,
             unit_cell="2site",
@@ -1002,9 +996,6 @@ class TestADSymmetric:
         assert isinstance(A_opt, Tensor)
         assert np.isfinite(E_gs)
 
-    @pytest.mark.xfail(
-        reason="Symmetric AD energy decrease not reliable at chi=4, max_iter=10"
-    )
     def test_optimize_gs_ad_symmetric_energy_decreases(self):
         """AD optimization with SymmetricTensor decreases energy."""
         gate = self._heisenberg_gate()
@@ -1012,7 +1003,7 @@ class TestADSymmetric:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            ctm=CTMConfig(chi=4, max_iter=20, min_iter=10),
             gs_num_steps=5,
             gs_learning_rate=0.01,
         )
@@ -1024,7 +1015,7 @@ class TestADSymmetric:
         )
 
         A_norm = A_sym * (1.0 / (A_sym.norm() + 1e-10))
-        env0 = ctm_tensor(A_norm, chi=4, max_iter=10)
+        env0 = ctm_tensor(A_norm, chi=4, max_iter=20)
         E_init = float(compute_energy_ctm_tensor(A_norm, env0, gate))
 
         A_opt, env, E_gs = optimize_gs_ad(gate, A_sym, config)
