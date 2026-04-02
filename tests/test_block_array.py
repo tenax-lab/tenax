@@ -460,8 +460,8 @@ class TestComplexLanczosReorth:
     def require_cython(self):
         try:
             from tenax.contraction._cython_blas import cython_ba_inner  # noqa: F401
-        except ModuleNotFoundError:
-            pytest.skip("Cython BA extension not compiled")
+        except ImportError:
+            pytest.skip("Cython BA extension not available")
 
     def test_complex_inner_preserves_imaginary(self):
         """ba_inner must return complex for complex inputs, not just real part."""
@@ -500,8 +500,8 @@ class TestNonContiguousBLAS:
             from tenax.contraction._cython_blas import (
                 cython_ba_scale_inplace,  # noqa: F401
             )
-        except ModuleNotFoundError:
-            pytest.skip("Cython BA extension not compiled")
+        except ImportError:
+            pytest.skip("Cython BA extension not available")
 
     def test_scale_inplace_fortran_order(self):
         from tenax.contraction._cython_blas import cython_ba_scale_inplace

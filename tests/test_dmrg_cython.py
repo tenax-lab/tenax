@@ -266,8 +266,8 @@ class TestCythonLanczosReorth:
             from tenax.contraction._cython_blas import (
                 cython_lanczos_reorth,  # noqa: F401
             )
-        except ModuleNotFoundError:
-            pytest.skip("Cython BA extension not compiled")
+        except ImportError:
+            pytest.skip("Cython BA extension not available")
 
     @staticmethod
     def _sequential_reorth(basis_blocks_list, w_blocks):
