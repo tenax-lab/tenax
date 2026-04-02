@@ -963,11 +963,13 @@ cdef cnp.ndarray _c_transpose(cnp.ndarray arr, tuple perm, int dtype_code):
 def cython_ba_inner(dict blocks_a, dict blocks_b):
     """Fast Hermitian inner product for block dicts using BLAS dot/dotc.
 
-    Computes Re(sum_k vdot(a[k], b[k])) over shared keys.
+    Computes sum_k vdot(a[k], b[k]) over shared keys.
+    Returns float for real inputs, complex for complex inputs.
     For real: ddot.  For complex128: zdotc.  For complex64: cdotc.
     Handles read-only arrays (e.g. from JAX) by copying when necessary.
     """
     cdef double total = 0.0
+    cdef double complex z_total = 0.0
     cdef int n, inc = 1
     cdef double[::1] a_flat_d, b_flat_d
     cdef double complex[::1] a_flat_z, b_flat_z
@@ -1023,7 +1025,7 @@ def cython_ba_inner(dict blocks_a, dict blocks_b):
                 n = a_flat_z.shape[0]
                 with nogil:
                     z_result = _zdotc(&n, &a_flat_z[0], &inc, &b_flat_z[0], &inc)
-                total += z_result.real
+                z_total += z_result
     elif dtype_code == 2:
         # complex64 path: cdotc
         for k in blocks_a:
@@ -1041,14 +1043,18 @@ def cython_ba_inner(dict blocks_a, dict blocks_b):
                 n = a_flat_c.shape[0]
                 with nogil:
                     c_result = _cdotc(&n, &a_flat_c[0], &inc, &b_flat_c[0], &inc)
-                total += c_result.real
+                z_total += <double complex>c_result
     else:
         # fallback: numpy vdot
         for k in blocks_a:
             bk = blocks_b.get(k)
             if bk is not None:
-                total += np.vdot(blocks_a[k], bk).real
-    return total
+                z_total += np.vdot(blocks_a[k], bk)
+        return complex(z_total.real, z_total.imag)
+
+    if dtype_code == 0:
+        return total
+    return complex(z_total.real, z_total.imag)
 
 
 def cython_ba_axpy(dict blocks_x, dict blocks_y, double alpha):
@@ -1426,10 +1432,10 @@ def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
     cdef double* wp
     cdef double* qp
     cdef cnp.ndarray w_arr, q_arr
-    cdef double complex z_coeff, z_alpha_neg
+    cdef double complex z_coeff, z_alpha_neg, z_coeff_accum
     cdef double complex* wp_z
     cdef double complex* qp_z
-    cdef float complex c_coeff_val, c_alpha_neg
+    cdef float complex c_coeff_val, c_alpha_neg, c_coeff_accum
     cdef float complex* wp_c
     cdef float complex* qp_c
     cdef int dtype_code = -1  # 0=f64, 1=z128, 2=c64
@@ -1491,8 +1497,8 @@ def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
                     _daxpy(&n, &alpha_neg, qp, &inc, wp, &inc)
 
         elif dtype_code == 1:
-            # Phase 1: coeff = Re(<q|w>) via zdotc
-            coeff = 0.0
+            # Phase 1: coeff = <q|w> via zdotc (full complex)
+            z_coeff_accum = 0.0
             for k in q_blocks:
                 wk = w_blocks.get(k)
                 if wk is None:
@@ -1511,12 +1517,12 @@ def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
                 qp_z = <double complex*>cnp.PyArray_DATA(<cnp.ndarray>q_flat_z)
                 with nogil:
                     z_coeff = _zdotc(&n, qp_z, &inc, wp_z, &inc)
-                coeff += z_coeff.real
+                z_coeff_accum += z_coeff
 
             # Phase 2: w -= coeff * q via zaxpy
-            if coeff == 0.0:
+            if z_coeff_accum == 0.0:
                 continue
-            z_alpha_neg = -coeff
+            z_alpha_neg = -z_coeff_accum
             for k in q_blocks:
                 wk = w_blocks.get(k)
                 if wk is None:
@@ -1534,8 +1540,8 @@ def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
                     _zaxpy(&n, &z_alpha_neg, qp_z, &inc, wp_z, &inc)
 
         elif dtype_code == 2:
-            # Phase 1: coeff = Re(<q|w>) via cdotc
-            coeff = 0.0
+            # Phase 1: coeff = <q|w> via cdotc (full complex)
+            c_coeff_accum = 0.0
             for k in q_blocks:
                 wk = w_blocks.get(k)
                 if wk is None:
@@ -1554,12 +1560,12 @@ def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
                 qp_c = <float complex*>cnp.PyArray_DATA(<cnp.ndarray>q_flat_c)
                 with nogil:
                     c_coeff_val = _cdotc(&n, qp_c, &inc, wp_c, &inc)
-                coeff += c_coeff_val.real
+                c_coeff_accum += c_coeff_val
 
             # Phase 2: w -= coeff * q via caxpy
-            if coeff == 0.0:
+            if c_coeff_accum == 0.0:
                 continue
-            c_alpha_neg = <float complex>(-coeff)
+            c_alpha_neg = -c_coeff_accum
             for k in q_blocks:
                 wk = w_blocks.get(k)
                 if wk is None:
@@ -1577,19 +1583,19 @@ def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
                     _caxpy(&n, &c_alpha_neg, qp_c, &inc, wp_c, &inc)
 
         else:
-            # Fallback: numpy
-            coeff = 0.0
+            # Fallback: numpy (full complex overlap)
+            fb_coeff = 0.0 + 0.0j
             for k in q_blocks:
                 wk = w_blocks.get(k)
                 if wk is None:
                     continue
-                coeff += np.vdot(q_blocks[k], wk).real
-            if coeff == 0.0:
+                fb_coeff += np.vdot(q_blocks[k], wk)
+            if fb_coeff == 0.0:
                 continue
             for k in q_blocks:
                 wk = w_blocks.get(k)
                 if wk is not None:
-                    w_blocks[k] = wk - coeff * q_blocks[k]
+                    w_blocks[k] = wk - fb_coeff * q_blocks[k]
 
 
 # ------------------------------------------------------------------ #
