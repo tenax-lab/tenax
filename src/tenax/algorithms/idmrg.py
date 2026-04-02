@@ -28,7 +28,7 @@ import numpy as np
 
 from tenax.algorithms.dmrg import (
     _blockwise_contract,
-    _lanczos_solve_jit,
+    _lanczos_solve,
     _lanczos_solve_tensor,
     _precompute_block_plan,
     _update_left_env_symmetric,
@@ -872,8 +872,8 @@ def _idmrg_sweep(
         def matvec(v: jax.Array) -> jax.Array:
             return _idmrg_matvec_jit(v, _ts, _le, W, W, _re)
 
-        E_total, theta_opt_flat = _lanczos_solve_jit(
-            matvec, theta_flat, config.lanczos_max_iter
+        E_total, theta_opt_flat = _lanczos_solve(
+            matvec, theta_flat, config.lanczos_max_iter, config.lanczos_tol
         )
         E_total = float(E_total)
         theta_opt = theta_opt_flat.reshape(theta_shape)
@@ -930,8 +930,8 @@ def _idmrg_sweep(
     def _matvec_init(v: jax.Array) -> jax.Array:
         return _idmrg_matvec_jit(v, _ts, _le, W, W, _re)
 
-    E_total, theta_opt_flat = _lanczos_solve_jit(
-        _matvec_init, theta.ravel(), config.lanczos_max_iter
+    E_total, theta_opt_flat = _lanczos_solve(
+        _matvec_init, theta.ravel(), config.lanczos_max_iter, config.lanczos_tol
     )
     E_total = float(E_total)
     theta_opt = theta_opt_flat.reshape(theta_shape)
@@ -980,8 +980,8 @@ def _idmrg_sweep(
         def matvec(v: jax.Array) -> jax.Array:
             return _idmrg_matvec_jit(v, _ts, _le, W, W, _re)
 
-        E_total, theta_opt_flat = _lanczos_solve_jit(
-            matvec, theta_flat, config.lanczos_max_iter
+        E_total, theta_opt_flat = _lanczos_solve(
+            matvec, theta_flat, config.lanczos_max_iter, config.lanczos_tol
         )
         E_total = float(E_total)
         theta_opt = theta_opt_flat.reshape(theta_shape)
@@ -1040,6 +1040,35 @@ def _idmrg_sweep(
                 f"e/site={e_per_site:.10f}, chi={n_keep}",
                 flush=True,
             )
+
+        # ---- Periodic orthogonalization (configurable interval) ----
+        if (
+            config.orthogonalize_interval > 0
+            and (sweep + 1) % config.orthogonalize_interval == 0
+            and chi_env > 1
+            and A_L.shape[0] == A_L.shape[2]
+        ):
+            A_L_np, A_R_np, s_np = _orthogonalize_unit_cell_dense(
+                np.array(A_L),
+                np.array(A_R),
+                np.array(s_center),
+                tol=config.arnoldi_tol,
+            )
+            A_L = jnp.array(A_L_np)
+            A_R = jnp.array(A_R_np)
+            s_center = jnp.array(s_np)
+            L_env = jnp.array(
+                _solve_left_env_fixedpoint_dense(np.array(A_L), np.array(W))
+            )
+            R_env = jnp.array(
+                _solve_right_env_fixedpoint_dense(np.array(A_R), np.array(W))
+            )
+
+            if config.verbose:
+                print(
+                    f"  Applied periodic orthogonalization at sweep {sweep + 1}",
+                    flush=True,
+                )
 
         # ---- Check convergence ----
         if len(energies_per_step) >= 2:
@@ -1397,8 +1426,8 @@ def _idmrg_1site_sweep(
         def matvec_2site(v: jax.Array) -> jax.Array:
             return _idmrg_matvec_jit(v, _ts, _le, W, W, _re)
 
-        E_total, theta_opt_flat = _lanczos_solve_jit(
-            matvec_2site, theta_flat, config.lanczos_max_iter
+        E_total, theta_opt_flat = _lanczos_solve(
+            matvec_2site, theta_flat, config.lanczos_max_iter, config.lanczos_tol
         )
         E_total = float(E_total)
         theta_opt = theta_opt_flat.reshape(theta_shape)
@@ -1477,6 +1506,35 @@ def _idmrg_1site_sweep(
                 f"e/site={e_per_site:.10f}, chi={n_keep}",
                 flush=True,
             )
+
+        # ---- Periodic orthogonalization (configurable interval) ----
+        if (
+            config.orthogonalize_interval > 0
+            and (sweep + 1) % config.orthogonalize_interval == 0
+            and chi_env > 1
+            and A_L.shape[0] == A_L.shape[2]
+        ):
+            A_L_np, A_R_np, s_np = _orthogonalize_unit_cell_dense(
+                np.array(A_L),
+                np.array(A_R),
+                np.array(s_center),
+                tol=config.arnoldi_tol,
+            )
+            A_L = jnp.array(A_L_np)
+            A_R = jnp.array(A_R_np)
+            s_center = jnp.array(s_np)
+            L_env = jnp.array(
+                _solve_left_env_fixedpoint_dense(np.array(A_L), np.array(W))
+            )
+            R_env = jnp.array(
+                _solve_right_env_fixedpoint_dense(np.array(A_R), np.array(W))
+            )
+
+            if config.verbose:
+                print(
+                    f"  Applied periodic orthogonalization at sweep {sweep + 1}",
+                    flush=True,
+                )
 
         # ---- Check convergence ----
         if len(energies_per_step) >= 2:
