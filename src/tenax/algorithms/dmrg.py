@@ -1630,7 +1630,8 @@ def _lanczos_solve_np(
 
     for step in range(num_steps):
         w = matvec(basis[-1])
-        alpha_val = ba_inner(basis[-1], w)
+        # alpha = <v|H|v> is real for Hermitian H; extract .real for BLAS
+        alpha_val = float(ba_inner(basis[-1], w).real)
         alphas.append(alpha_val)
 
         # w = w - alpha * v_k  (fused, no intermediate dict)
@@ -1651,7 +1652,7 @@ def _lanczos_solve_np(
             for q in basis:
                 coeff = ba_inner(q, w)
                 if _USE_CYTHON_SUB:
-                    _cython_ba_sub_scaled_inplace(w.blocks, q.blocks, coeff)
+                    _cython_ba_sub_scaled_inplace(w.blocks, q.blocks, float(coeff.real))
                 else:
                     w = ba_sub_scaled(w, q, coeff)
 

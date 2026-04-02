@@ -259,20 +259,21 @@ class TestComplexBlockArray:
     """Tests for BlockArray operations with complex128 data."""
 
     def test_inner_hermitian(self, complex_ba, another_complex_ba):
-        """ba_inner must compute Hermitian inner product: sum conj(a)*b."""
+        """ba_inner must compute full Hermitian inner product: sum conj(a)*b."""
         result = ba_inner(complex_ba, another_complex_ba)
         # Reference: np.vdot flattens and computes sum(conj(a)*b)
         expected = sum(
             np.vdot(complex_ba.blocks[k], another_complex_ba.blocks[k])
             for k in complex_ba.blocks
         )
-        np.testing.assert_allclose(result, expected.real, rtol=1e-12)
+        np.testing.assert_allclose(result, expected, rtol=1e-12)
 
     def test_inner_self_is_real(self, complex_ba):
         """<v|v> must be real and positive for complex vectors."""
         result = ba_inner(complex_ba, complex_ba)
-        assert isinstance(result, (float, np.floating))
-        assert result > 0
+        # result may be complex type but imaginary part must be ~0
+        assert abs(complex(result).imag) < 1e-12
+        assert float(complex(result).real) > 0
 
     def test_norm_complex(self, complex_ba):
         """Norm of complex BlockArray = sqrt(<v|v>)."""
@@ -402,15 +403,17 @@ class TestCythonComplexBa:
             np.vdot(complex_blocks[k], complex_blocks_b[k]) for k in complex_blocks
         )
         result = cython_ba_inner(complex_blocks, complex_blocks_b)
-        np.testing.assert_allclose(result, expected.real, rtol=1e-12)
+        np.testing.assert_allclose(result, expected, rtol=1e-12)
 
     def test_cython_inner_self_real(self, require_cython, complex_blocks):
         from tenax.contraction._cython_blas import cython_ba_inner
 
         result = cython_ba_inner(complex_blocks, complex_blocks)
-        assert result > 0
+        # <v|v> is always real; imaginary part must be ~0
+        assert abs(complex(result).imag) < 1e-12
+        assert float(complex(result).real) > 0
         expected = sum(np.vdot(v, v).real for v in complex_blocks.values())
-        np.testing.assert_allclose(result, expected, rtol=1e-12)
+        np.testing.assert_allclose(complex(result).real, expected, rtol=1e-12)
 
     def test_cython_axpy_complex128(
         self, require_cython, complex_blocks, complex_blocks_b
@@ -448,3 +451,64 @@ class TestCythonComplexBa:
         cython_ba_sub_scaled_inplace(w, complex_blocks_b, scalar)
         for k in expected:
             np.testing.assert_allclose(w[k], expected[k], rtol=1e-12)
+
+
+class TestComplexLanczosReorth:
+    """Regression tests for complex reorthogonalization (issue #216 bug 2)."""
+
+    def test_complex_inner_preserves_imaginary(self):
+        """ba_inner must return complex for complex inputs, not just real part."""
+        from tenax.contraction._cython_blas import cython_ba_inner
+
+        rng = np.random.default_rng(0)
+        a = {(0,): rng.standard_normal(8) + 1j * rng.standard_normal(8)}
+        b = {(0,): rng.standard_normal(8) + 1j * rng.standard_normal(8)}
+        result = cython_ba_inner(a, b)
+        expected = np.vdot(a[(0,)], b[(0,)])
+        # Must match full complex value, not just real part
+        np.testing.assert_allclose(result, expected, atol=1e-14)
+
+    def test_complex_reorth_removes_full_overlap(self):
+        """After reorth, overlap <q|w> must be ~0 including imaginary part."""
+        from tenax.contraction._cython_blas import cython_lanczos_reorth
+
+        rng = np.random.default_rng(0)
+        q0 = rng.standard_normal(8) + 1j * rng.standard_normal(8)
+        q0 = q0 / np.linalg.norm(q0)
+        q = {(0,): q0}
+        w = {(0,): rng.standard_normal(8) + 1j * rng.standard_normal(8)}
+
+        wc = {k: v.copy() for k, v in w.items()}
+        cython_lanczos_reorth([q], wc)
+        overlap = np.vdot(q0, wc[(0,)])
+        assert abs(overlap) < 1e-14, f"Overlap after reorth: {overlap}"
+
+
+class TestNonContiguousBLAS:
+    """Regression tests for in-place BLAS on non-C-contiguous arrays (issue #216 bug 3)."""
+
+    def test_scale_inplace_fortran_order(self):
+        from tenax.contraction._cython_blas import cython_ba_scale_inplace
+
+        A = np.asfortranarray(np.arange(6.0).reshape(2, 3))
+        blocks = {(0,): A.copy(order="F")}
+        cython_ba_scale_inplace(blocks, 2.0)
+        np.testing.assert_allclose(blocks[(0,)], A * 2)
+
+    def test_axpy_fortran_order(self):
+        from tenax.contraction._cython_blas import cython_ba_axpy
+
+        A = np.asfortranarray(np.arange(6.0).reshape(2, 3))
+        y = {(0,): A.copy(order="F")}
+        x = {(0,): np.ones((2, 3))}
+        cython_ba_axpy(x, y, 3.0)
+        np.testing.assert_allclose(y[(0,)], A + 3)
+
+    def test_sub_scaled_fortran_order(self):
+        from tenax.contraction._cython_blas import cython_ba_sub_scaled_inplace
+
+        A = np.asfortranarray(np.arange(6.0).reshape(2, 3))
+        w = {(0,): A.copy(order="F")}
+        q = {(0,): np.ones((2, 3))}
+        cython_ba_sub_scaled_inplace(w, q, 1.0)
+        np.testing.assert_allclose(w[(0,)], A - 1)
