@@ -1,6 +1,7 @@
 # cython: language_level=3, boundscheck=False, wraparound=False
 """Cython BLAS kernel for block-sparse tensor contractions."""
 
+from libc.math cimport sqrt
 from libc.string cimport memcpy, memset
 
 import numpy as np
@@ -968,6 +969,206 @@ cdef cnp.ndarray _c_transpose(cnp.ndarray arr, tuple perm, int dtype_code):
             return out
 
     return np.ascontiguousarray(np.transpose(arr, perm))
+
+
+# ------------------------------------------------------------------ #
+# cdef BlockArray BLAS helpers (C-level, no Python dispatch)          #
+# ------------------------------------------------------------------ #
+
+cdef double complex _ba_inner_impl(dict blocks_a, dict blocks_b):
+    """Hermitian inner product sum_k vdot(a[k], b[k]) via BLAS.
+
+    Returns double complex; for real inputs the imaginary part is 0.
+    """
+    cdef double total_d = 0.0
+    cdef double complex total_z = 0.0
+    cdef int n, inc = 1
+    cdef double[::1] a_flat_d, b_flat_d
+    cdef double complex[::1] a_flat_z, b_flat_z
+    cdef double complex z_result
+    cdef int dtype_code = -1  # 0=f64, 1=z128, -1=unknown
+
+    # Detect dtype from first shared block
+    for k in blocks_a:
+        bk = blocks_b.get(k)
+        if bk is not None:
+            dt = blocks_a[k].dtype
+            if dt == np.float64:
+                dtype_code = 0
+            elif dt == np.complex128:
+                dtype_code = 1
+            break
+
+    if dtype_code == 0:
+        for k in blocks_a:
+            bk = blocks_b.get(k)
+            if bk is not None:
+                ak = blocks_a[k]
+                a_arr = np.asarray(ak, dtype=np.float64)
+                if not a_arr.flags.writeable:
+                    a_arr = a_arr.copy()
+                a_flat_d = np.ascontiguousarray(a_arr).ravel()
+                b_arr = np.asarray(bk, dtype=np.float64)
+                if not b_arr.flags.writeable:
+                    b_arr = b_arr.copy()
+                b_flat_d = np.ascontiguousarray(b_arr).ravel()
+                n = a_flat_d.shape[0]
+                with nogil:
+                    total_d += _ddot(&n, &a_flat_d[0], &inc, &b_flat_d[0], &inc)
+        return <double complex>total_d
+    elif dtype_code == 1:
+        for k in blocks_a:
+            bk = blocks_b.get(k)
+            if bk is not None:
+                ak = blocks_a[k]
+                a_arr = np.asarray(ak, dtype=np.complex128)
+                if not a_arr.flags.writeable:
+                    a_arr = a_arr.copy()
+                a_flat_z = np.ascontiguousarray(a_arr).ravel()
+                b_arr = np.asarray(bk, dtype=np.complex128)
+                if not b_arr.flags.writeable:
+                    b_arr = b_arr.copy()
+                b_flat_z = np.ascontiguousarray(b_arr).ravel()
+                n = a_flat_z.shape[0]
+                with nogil:
+                    z_result = _zdotc(&n, &a_flat_z[0], &inc, &b_flat_z[0], &inc)
+                total_z += z_result
+        return total_z
+    else:
+        # fallback: numpy vdot
+        for k in blocks_a:
+            bk = blocks_b.get(k)
+            if bk is not None:
+                total_z += np.vdot(blocks_a[k], bk)
+        return total_z
+
+
+cdef double _ba_norm_impl(dict blocks):
+    """||blocks|| via BLAS ddot/zdotc, returns sqrt of sum of squared norms."""
+    cdef double complex ip = _ba_inner_impl(blocks, blocks)
+    return sqrt(ip.real)
+
+
+cdef void _ba_axpy_impl(dict blocks_x, dict blocks_y, double alpha):
+    """y[k] += alpha * x[k] for all shared keys, in-place via BLAS."""
+    cdef int n, inc = 1
+    cdef double a_d = alpha
+    cdef double complex a_z = alpha
+    cdef double[::1] x_flat_d, y_flat_d
+    cdef double complex[::1] x_flat_z, y_flat_z
+    cdef int dtype_code = -1
+
+    for k in blocks_x:
+        yk = blocks_y.get(k)
+        if yk is not None:
+            dt = blocks_x[k].dtype
+            if dt == np.float64:
+                dtype_code = 0
+            elif dt == np.complex128:
+                dtype_code = 1
+            break
+
+    if dtype_code == 0:
+        for k in blocks_x:
+            yk = blocks_y.get(k)
+            if yk is not None:
+                xk = blocks_x[k]
+                x_arr = np.asarray(xk, dtype=np.float64)
+                if not x_arr.flags.writeable:
+                    x_arr = x_arr.copy()
+                x_flat_d = np.ascontiguousarray(x_arr).ravel()
+                if not yk.flags.c_contiguous or not yk.flags.writeable:
+                    yk = np.ascontiguousarray(yk).copy()
+                    blocks_y[k] = yk
+                y_flat_d = yk.ravel()
+                n = x_flat_d.shape[0]
+                with nogil:
+                    _daxpy(&n, &a_d, &x_flat_d[0], &inc, &y_flat_d[0], &inc)
+    elif dtype_code == 1:
+        for k in blocks_x:
+            yk = blocks_y.get(k)
+            if yk is not None:
+                xk = blocks_x[k]
+                x_arr = np.asarray(xk, dtype=np.complex128)
+                if not x_arr.flags.writeable:
+                    x_arr = x_arr.copy()
+                x_flat_z = np.ascontiguousarray(x_arr).ravel()
+                if not yk.flags.c_contiguous or not yk.flags.writeable:
+                    yk = np.ascontiguousarray(yk).copy()
+                    blocks_y[k] = yk
+                y_flat_z = yk.ravel()
+                n = x_flat_z.shape[0]
+                with nogil:
+                    _zaxpy(&n, &a_z, &x_flat_z[0], &inc, &y_flat_z[0], &inc)
+    else:
+        for k in blocks_x:
+            yk = blocks_y.get(k)
+            if yk is not None:
+                blocks_y[k] = yk + alpha * blocks_x[k]
+
+
+cdef void _ba_sub_scaled_impl(dict w_blocks, dict q_blocks, double scalar):
+    """w -= scalar * q (calls _ba_axpy_impl with -scalar)."""
+    _ba_axpy_impl(q_blocks, w_blocks, -scalar)
+
+
+cdef void _ba_scale_impl(dict blocks, double scalar):
+    """Scale all blocks in-place by scalar using BLAS dscal/zscal."""
+    cdef int n, inc = 1
+    cdef double s_d = scalar
+    cdef double complex s_z = scalar
+    cdef double[::1] flat_d
+    cdef double complex[::1] flat_z
+    cdef int dtype_code = -1
+
+    for k in blocks:
+        dt = blocks[k].dtype
+        if dt == np.float64:
+            dtype_code = 0
+        elif dt == np.complex128:
+            dtype_code = 1
+        break
+
+    if dtype_code == 0:
+        for k in blocks:
+            bk = blocks[k]
+            if not bk.flags.c_contiguous or not bk.flags.writeable:
+                bk = np.ascontiguousarray(bk).copy()
+                blocks[k] = bk
+            flat_d = bk.ravel()
+            n = flat_d.shape[0]
+            with nogil:
+                _dscal(&n, &s_d, &flat_d[0], &inc)
+    elif dtype_code == 1:
+        for k in blocks:
+            bk = blocks[k]
+            if not bk.flags.c_contiguous or not bk.flags.writeable:
+                bk = np.ascontiguousarray(bk).copy()
+                blocks[k] = bk
+            flat_z = bk.ravel()
+            n = flat_z.shape[0]
+            with nogil:
+                _zscal(&n, &s_z, &flat_z[0], &inc)
+    else:
+        for k in blocks:
+            blocks[k] = blocks[k] * scalar
+
+
+cdef dict _ba_scale_new(dict blocks, double scalar):
+    """Return new dict with all blocks scaled by scalar."""
+    cdef dict result = {}
+    for k in blocks:
+        result[k] = blocks[k].copy()
+    _ba_scale_impl(result, scalar)
+    return result
+
+
+cdef dict _ba_copy(dict blocks):
+    """Deep copy a block dict (each array is copied)."""
+    cdef dict result = {}
+    for k in blocks:
+        result[k] = blocks[k].copy()
+    return result
 
 
 # ------------------------------------------------------------------ #
