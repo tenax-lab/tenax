@@ -220,6 +220,36 @@ class TestDMRGRun:
             assert final <= initial + 0.5, "Energy should not increase significantly"
 
 
+class TestDMRGUnsupportedOptions:
+    def test_num_states_gt_one_raises(self):
+        """num_states>1 is public but currently unsupported."""
+        L = 4
+        mpo = _densify_tensor_network(build_mpo_heisenberg(L))
+        mps = build_random_mps(L, physical_dim=2, bond_dim=4, seed=0)
+        config = DMRGConfig(
+            max_bond_dim=4,
+            num_sweeps=1,
+            lanczos_max_iter=5,
+            num_states=2,
+        )
+        with pytest.raises(NotImplementedError, match="num_states"):
+            dmrg(mpo, mps, config)
+
+    def test_noise_nonzero_raises(self):
+        """noise is public but currently unsupported."""
+        L = 4
+        mpo = _densify_tensor_network(build_mpo_heisenberg(L))
+        mps = build_random_mps(L, physical_dim=2, bond_dim=4, seed=0)
+        config = DMRGConfig(
+            max_bond_dim=4,
+            num_sweeps=1,
+            lanczos_max_iter=5,
+            noise=1e-3,
+        )
+        with pytest.raises(NotImplementedError, match="noise"):
+            dmrg(mpo, mps, config)
+
+
 def _build_heisenberg_matrix(L: int, Jz: float = 1.0, Jxy: float = 1.0) -> np.ndarray:
     """Build the L-site Heisenberg Hamiltonian matrix (OBC) using Kronecker products.
 

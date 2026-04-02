@@ -236,6 +236,16 @@ def dmrg(
             "subspace_expansion=True requires two_site=False. "
             "DMRG3S enrichment is a 1-site algorithm."
         )
+    if config.num_states != 1:
+        raise NotImplementedError(
+            "DMRGConfig.num_states>1 is not implemented yet. "
+            "Only single-state (ground-state) targeting is currently supported."
+        )
+    if config.noise != 0.0:
+        raise NotImplementedError(
+            "DMRGConfig.noise is not implemented yet. Set noise=0.0."
+        )
+
     L = hamiltonian.n_nodes()
     if L < 2:
         raise ValueError(

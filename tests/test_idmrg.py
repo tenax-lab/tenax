@@ -1,5 +1,6 @@
 """Tests for the iDMRG algorithm."""
 
+import importlib
 import math
 
 import jax
@@ -144,6 +145,50 @@ class TestiDMRGRun:
         cfg = iDMRGConfig(max_bond_dim=8, max_iterations=5, lanczos_max_iter=10)
         result = idmrg(W, cfg)
         assert isinstance(result, iDMRGResult)
+
+    def test_dense_two_site_uses_tolerance_aware_lanczos(self, monkeypatch):
+        """Dense 2-site path should route through tol-aware Lanczos."""
+        idmrg_mod = importlib.import_module("tenax.algorithms.idmrg")
+
+        W = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+        cfg = iDMRGConfig(
+            max_bond_dim=4,
+            max_iterations=2,
+            lanczos_max_iter=6,
+            lanczos_tol=1e-5,
+            convergence_tol=0.0,
+        )
+
+        seen_tols: list[float] = []
+        orig_lanczos = idmrg_mod._lanczos_solve
+
+        def _record_lanczos(matvec, initial_vector, num_steps, tol):
+            seen_tols.append(float(tol))
+            return orig_lanczos(matvec, initial_vector, num_steps, tol)
+
+        def _forbid_jit(*args, **kwargs):
+            raise AssertionError("dense iDMRG should not call _lanczos_solve_jit")
+
+        monkeypatch.setattr(idmrg_mod, "_lanczos_solve", _record_lanczos)
+        if hasattr(idmrg_mod, "_lanczos_solve_jit"):
+            monkeypatch.setattr(idmrg_mod, "_lanczos_solve_jit", _forbid_jit)
+
+        result = idmrg(W, cfg, dtype=jnp.float64)
+        assert np.isfinite(result.energy_per_site)
+        assert seen_tols
+        assert all(np.isclose(tol, cfg.lanczos_tol) for tol in seen_tols)
+
+    def test_dense_two_site_raises_clear_error_on_bond_shrink(self):
+        """Aggressive svd_trunc_err should raise a clear validation error."""
+        W = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+        cfg = iDMRGConfig(
+            max_bond_dim=32,
+            max_iterations=5,
+            lanczos_max_iter=5,
+            svd_trunc_err=0.9,
+        )
+        with pytest.raises(ValueError, match="phase-3 bond shrink"):
+            idmrg(W, cfg, dtype=jnp.float64)
 
     def test_energy_is_finite(self):
         W = build_bulk_mpo_heisenberg()
@@ -522,6 +567,30 @@ class TestOrthogonalization:
             TL_I, np.eye(chi), atol=1e-6, err_msg="T_L(I) != I after orthogonalization"
         )
 
+    def test_orthogonalize_interval_applies_periodically_two_site(self, monkeypatch):
+        """orthogonalize_interval should trigger multiple in-loop calls."""
+        idmrg_mod = importlib.import_module("tenax.algorithms.idmrg")
+        W = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+        call_count = 0
+
+        def _count_only(A_L, A_R, s_vals, tol=1e-12):
+            nonlocal call_count
+            call_count += 1
+            return A_L, A_R, s_vals
+
+        monkeypatch.setattr(idmrg_mod, "_orthogonalize_unit_cell_dense", _count_only)
+
+        cfg = iDMRGConfig(
+            max_bond_dim=8,
+            max_iterations=5,
+            lanczos_max_iter=8,
+            convergence_tol=0.0,
+            orthogonalize_interval=2,
+        )
+        result = idmrg(W, cfg, dtype=jnp.float64)
+        assert np.isfinite(result.energy_per_site)
+        assert call_count >= 2
+
 
 # ---------------------------------------------------------------------------
 # 1-site iDMRG with DMRG3S
@@ -589,6 +658,64 @@ class TestiDMRG1Site:
         # Default
         cfg2 = iDMRGConfig()
         assert cfg2.mixing_factor == 0.05
+
+    def test_1site_uses_tolerance_aware_lanczos(self, monkeypatch):
+        """Dense 1-site path should route through tol-aware Lanczos."""
+        idmrg_mod = importlib.import_module("tenax.algorithms.idmrg")
+
+        W = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+        cfg = iDMRGConfig(
+            max_bond_dim=4,
+            max_iterations=2,
+            two_site=False,
+            lanczos_max_iter=6,
+            lanczos_tol=1e-6,
+            convergence_tol=0.0,
+        )
+
+        seen_tols: list[float] = []
+        orig_lanczos = idmrg_mod._lanczos_solve
+
+        def _record_lanczos(matvec, initial_vector, num_steps, tol):
+            seen_tols.append(float(tol))
+            return orig_lanczos(matvec, initial_vector, num_steps, tol)
+
+        def _forbid_jit(*args, **kwargs):
+            raise AssertionError("dense iDMRG should not call _lanczos_solve_jit")
+
+        monkeypatch.setattr(idmrg_mod, "_lanczos_solve", _record_lanczos)
+        if hasattr(idmrg_mod, "_lanczos_solve_jit"):
+            monkeypatch.setattr(idmrg_mod, "_lanczos_solve_jit", _forbid_jit)
+
+        result = idmrg(W, cfg, dtype=jnp.float64)
+        assert np.isfinite(result.energy_per_site)
+        assert seen_tols
+        assert all(np.isclose(tol, cfg.lanczos_tol) for tol in seen_tols)
+
+    def test_orthogonalize_interval_applies_periodically_one_site(self, monkeypatch):
+        """1-site orthogonalize_interval should trigger in-loop orthogonalization."""
+        idmrg_mod = importlib.import_module("tenax.algorithms.idmrg")
+        W = build_bulk_mpo_heisenberg(dtype=jnp.float64)
+        call_count = 0
+
+        def _count_only(A_L, A_R, s_vals, tol=1e-12):
+            nonlocal call_count
+            call_count += 1
+            return A_L, A_R, s_vals
+
+        monkeypatch.setattr(idmrg_mod, "_orthogonalize_unit_cell_dense", _count_only)
+
+        cfg = iDMRGConfig(
+            max_bond_dim=8,
+            max_iterations=5,
+            two_site=False,
+            lanczos_max_iter=8,
+            convergence_tol=0.0,
+            orthogonalize_interval=2,
+        )
+        result = idmrg(W, cfg, dtype=jnp.float64)
+        assert np.isfinite(result.energy_per_site)
+        assert call_count >= 2
 
 
 # ---------------------------------------------------------------------------
@@ -701,6 +828,26 @@ class TestSolveLeftEnvFixedpoint:
         L_env = _solve_left_env_fixedpoint_dense(A_L, W)
         np.testing.assert_allclose(L_env[:, 0, :], 0.0, atol=1e-15)
 
+    def test_raises_when_gmres_fails(self, monkeypatch):
+        """Non-converged GMRES should raise with channel context."""
+        chi, d, D_w = 2, 2, 3
+        A_L = np.zeros((chi, d, chi), dtype=np.float64)
+        A_L[0, 0, 0] = 1.0
+        A_L[1, 1, 1] = 1.0
+
+        W = np.zeros((D_w, d, d, D_w), dtype=np.float64)
+        eye = np.eye(d, dtype=np.float64)
+        W[2, :, :, 2] = eye  # vacuum identity
+        W[2, :, :, 1] = eye  # source term into channel k=1
+        W[1, :, :, 1] = 0.5 * eye  # self-loop forces GMRES branch
+
+        def _fake_gmres(op, b, atol=None, restart=None):
+            return np.zeros_like(b), 1
+
+        monkeypatch.setattr("scipy.sparse.linalg.gmres", _fake_gmres)
+        with pytest.raises(RuntimeError, match="left environment fixed-point solve"):
+            _solve_left_env_fixedpoint_dense(A_L, W)
+
 
 # ---------------------------------------------------------------------------
 # TestSolveRightEnvFixedpoint
@@ -762,6 +909,25 @@ class TestSolveRightEnvFixedpoint:
         R_env = _solve_right_env_fixedpoint_dense(A_R, W)
         D_w = W.shape[0]
         np.testing.assert_allclose(R_env[:, D_w - 1, :], 0.0, atol=1e-15)
+
+    def test_raises_when_gmres_fails(self, monkeypatch):
+        """Non-converged GMRES should raise with channel context."""
+        chi, d, D_w = 2, 2, 3
+        A_R = np.zeros((chi, d, chi), dtype=np.float64)
+        A_R[0, 0, 0] = 1.0
+        A_R[1, 1, 1] = 1.0
+
+        W = np.zeros((D_w, d, d, D_w), dtype=np.float64)
+        eye = np.eye(d, dtype=np.float64)
+        W[1, :, :, 0] = eye  # source term from done channel j=0
+        W[1, :, :, 1] = 0.5 * eye  # self-loop forces GMRES branch
+
+        def _fake_gmres(op, b, atol=None, restart=None):
+            return np.zeros_like(b), 1
+
+        monkeypatch.setattr("scipy.sparse.linalg.gmres", _fake_gmres)
+        with pytest.raises(RuntimeError, match="right environment fixed-point solve"):
+            _solve_right_env_fixedpoint_dense(A_R, W)
 
 
 # ---------------------------------------------------------------------------
