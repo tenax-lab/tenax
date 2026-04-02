@@ -1511,34 +1511,17 @@ def cython_execute_plan(
 # ------------------------------------------------------------------ #
 
 
-def cython_matvec_combos(
+cdef void _cython_matvec_combos_impl(
     list combo_descriptors,
     dict theta_2d_cache,
     int theta_buf_idx,
     list output_buffers,
     list output_buf_shapes,
 ):
-    """Execute ALL block combos for one matvec call in a single C loop.
+    """C-level implementation of matvec combo execution.
 
-    All input blocks (env and theta) are **pre-transposed** to their
-    GEMM-ready 2D C-contiguous layout before this function is called.
-    Only intermediate buffers (from multi-step plans) need transposing
-    inside the loop.
-
-    Each combo descriptor is a tuple:
-        (step_params, n_inputs, n_buffers, output_perm,
-         env_blocks_2d,       # list of pre-transposed 2D numpy arrays
-         theta_key,           # block key into theta_blocks dict
-         theta_perm,          # transpose perm for theta (used as cache key)
-         theta_shape_2d,      # (M, K) or (K, N) for theta (used as cache key)
-         output_slot,         # int index into output_buffers
-        )
-
-    ``theta_2d_cache`` maps ``(theta_key, theta_perm, theta_shape_2d)``
-    to the pre-transposed 2D theta block.
-
-    ``output_buffers`` is a list of pre-allocated numpy arrays (zeroed),
-    one per unique output key. Results are accumulated in-place via +=.
+    Factored out so it can be called from both the Python-level
+    ``cython_matvec_combos`` wrapper and from ``DMRGMatvec2Site.apply()``.
     """
     cdef int n_combos = len(combo_descriptors)
     cdef int c, s, n_steps, n_elem, inc
@@ -1645,6 +1628,125 @@ def cython_matvec_combos(
                     _zaxpy(&n_elem, &alpha_z, left_p_z, &inc, out_p_z, &inc)
             else:
                 output_buffers[output_slot] = ob + result
+
+
+def cython_matvec_combos(
+    list combo_descriptors,
+    dict theta_2d_cache,
+    int theta_buf_idx,
+    list output_buffers,
+    list output_buf_shapes,
+):
+    """Execute ALL block combos for one matvec call in a single C loop.
+
+    All input blocks (env and theta) are **pre-transposed** to their
+    GEMM-ready 2D C-contiguous layout before this function is called.
+    Only intermediate buffers (from multi-step plans) need transposing
+    inside the loop.
+
+    Each combo descriptor is a tuple:
+        (step_params, n_inputs, n_buffers, output_perm,
+         env_blocks_2d,       # list of pre-transposed 2D numpy arrays
+         theta_key,           # block key into theta_blocks dict
+         theta_perm,          # transpose perm for theta (used as cache key)
+         theta_shape_2d,      # (M, K) or (K, N) for theta (used as cache key)
+         output_slot,         # int index into output_buffers
+        )
+
+    ``theta_2d_cache`` maps ``(theta_key, theta_perm, theta_shape_2d)``
+    to the pre-transposed 2D theta block.
+
+    ``output_buffers`` is a list of pre-allocated numpy arrays (zeroed),
+    one per unique output key. Results are accumulated in-place via +=.
+    """
+    _cython_matvec_combos_impl(
+        combo_descriptors, theta_2d_cache, theta_buf_idx,
+        output_buffers, output_buf_shapes,
+    )
+
+
+# ------------------------------------------------------------------ #
+# MatvecOp base class and DMRGMatvec2Site subclass                     #
+# ------------------------------------------------------------------ #
+
+
+cdef class MatvecOp:
+    """Base class for C-level matvec operators."""
+
+    cdef dict apply(self, dict theta_blocks):
+        """Apply the operator to theta blocks and return output blocks dict."""
+        raise NotImplementedError
+
+    def py_apply(self, dict theta_blocks):
+        """Python-callable wrapper for testing."""
+        return self.apply(theta_blocks)
+
+
+cdef class DMRGMatvec2Site(MatvecOp):
+    """C-level 2-site DMRG matvec operator.
+
+    Stores pre-computed combo descriptors and output metadata so that
+    repeated matvec calls only need to supply new theta blocks.
+    """
+    cdef list combo_descriptors
+    cdef list output_keys
+    cdef list output_shapes
+    cdef int theta_buf_idx
+
+    def __init__(
+        self,
+        list combo_descriptors,
+        list output_keys,
+        list output_shapes,
+        int theta_buf_idx,
+    ):
+        self.combo_descriptors = combo_descriptors
+        self.output_keys = output_keys
+        self.output_shapes = output_shapes
+        self.theta_buf_idx = theta_buf_idx
+
+    cdef dict apply(self, dict theta_blocks):
+        """Apply matvec: pre-transpose theta, run GEMM combos, return dict."""
+        cdef int n_slots = len(self.output_keys)
+        cdef dict theta_2d_cache = {}
+
+        # Pre-transpose theta blocks once
+        for desc in self.combo_descriptors:
+            theta_key = desc[5]
+            theta_perm = desc[6]
+            theta_shape_2d = desc[7]
+            cache_key = (theta_key, theta_perm, theta_shape_2d)
+            if cache_key not in theta_2d_cache:
+                arr = theta_blocks[theta_key]
+                if theta_shape_2d is not None:
+                    if theta_perm:
+                        arr = np.transpose(arr, theta_perm)
+                    arr = np.ascontiguousarray(arr.reshape(theta_shape_2d))
+                else:
+                    arr = np.ascontiguousarray(arr)
+                theta_2d_cache[cache_key] = arr
+
+        # Execute all combos
+        cdef list output_buffers = [None] * n_slots
+        _cython_matvec_combos_impl(
+            self.combo_descriptors,
+            theta_2d_cache,
+            self.theta_buf_idx,
+            output_buffers,
+            self.output_shapes,
+        )
+
+        # Assemble output dict
+        cdef dict output_blocks = {}
+        cdef int slot
+        for slot in range(n_slots):
+            if output_buffers[slot] is not None:
+                output_blocks[self.output_keys[slot]] = output_buffers[slot]
+        return output_blocks
+
+    def py_apply(self, dict theta_blocks):
+        """Python-callable wrapper for testing."""
+        return self.apply(theta_blocks)
 
 
 # ------------------------------------------------------------------ #

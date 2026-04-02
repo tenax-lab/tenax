@@ -613,6 +613,47 @@ class TestPreTransposedMatvecCombos:
             atol=1e-14,
         )
 
+    def test_cython_matvec_combos_wrapper(self):
+        """Verify refactored cython_matvec_combos wrapper still works."""
+        try:
+            from tenax.contraction._cython_blas import cython_matvec_combos
+        except ModuleNotFoundError:
+            pytest.skip("Cython BA extension not available")
+
+        from tenax.algorithms.dmrg import (
+            _execute_matvec_combos,
+            _precompute_matvec_combos,
+        )
+
+        rng = np.random.default_rng(42)
+        subs = TWO_SITE_SUBSCRIPTS
+        theta_buf_idx = 1
+        shapes = [
+            ((4, 5, 4), (4, 2, 2, 4), (5, 2, 2, 5), (5, 2, 2, 5), (4, 5, 4)),
+        ]
+        block_plan, np_blocks_list = self._build_block_plan_and_blocks(
+            subs, shapes, theta_buf_idx, rng
+        )
+        expected = self._einsum_reference(subs, block_plan, np_blocks_list)
+
+        combos, out_keys, out_shapes = _precompute_matvec_combos(
+            block_plan, subs, np_blocks_list, theta_buf_idx
+        )
+
+        theta_blocks = {}
+        for combo_keys, _ in block_plan:
+            theta_key = combo_keys[theta_buf_idx]
+            theta_blocks[theta_key] = np_blocks_list[theta_buf_idx][theta_key]
+
+        result_ba = _execute_matvec_combos(
+            combos, theta_blocks, theta_buf_idx, out_keys, out_shapes, ()
+        )
+
+        for key, exp_arr in expected.items():
+            np.testing.assert_allclose(
+                result_ba.blocks[key], exp_arr, rtol=1e-12, atol=1e-14
+            )
+
     def test_changed_theta_gives_different_result(self):
         """Re-running with different theta blocks gives different output."""
         from tenax.algorithms.dmrg import (
@@ -658,3 +699,217 @@ class TestPreTransposedMatvecCombos:
         # Results should differ
         for key in result_1.blocks:
             assert not np.allclose(result_1.blocks[key], result_2.blocks[key])
+
+
+# ------------------------------------------------------------------ #
+# DMRGMatvec2Site cdef class tests                                     #
+# ------------------------------------------------------------------ #
+
+
+class TestCythonMatvecOp:
+    """Verify DMRGMatvec2Site.apply() matches _execute_matvec_combos."""
+
+    @pytest.fixture(autouse=True)
+    def require_cython(self):
+        try:
+            from tenax.contraction._cython_blas import DMRGMatvec2Site  # noqa: F401
+        except ModuleNotFoundError:
+            pytest.skip("Cython DMRGMatvec2Site not available")
+
+    def test_matches_execute_matvec_combos_realistic_shapes(self):
+        """Multiple combos with realistic DMRG-like block shapes."""
+        from tenax.contraction._cython_blas import DMRGMatvec2Site
+
+        from tenax.algorithms.dmrg import (
+            _execute_matvec_combos,
+            _precompute_matvec_combos,
+        )
+
+        rng = np.random.default_rng(123)
+        _subs = TWO_SITE_SUBSCRIPTS
+        theta_buf_idx = 1
+
+        # Multiple combos mimicking a U(1)-symmetric Heisenberg block structure
+        shapes = [
+            ((4, 5, 4), (4, 2, 2, 4), (5, 2, 2, 5), (5, 2, 2, 5), (4, 5, 4)),
+            ((3, 3, 3), (3, 2, 2, 3), (3, 2, 2, 3), (3, 2, 2, 3), (3, 3, 3)),
+            ((2, 3, 4), (2, 2, 2, 5), (3, 2, 2, 3), (3, 2, 2, 6), (5, 6, 4)),
+            ((1, 1, 1), (1, 2, 2, 1), (1, 2, 2, 1), (1, 2, 2, 1), (1, 1, 1)),
+        ]
+        block_plan, np_blocks_list = (
+            TestPreTransposedMatvecCombos._build_block_plan_and_blocks(
+                _subs, shapes, theta_buf_idx, rng
+            )
+        )
+
+        combos, out_keys, out_shapes = _precompute_matvec_combos(
+            block_plan, _subs, np_blocks_list, theta_buf_idx
+        )
+
+        theta_blocks = {}
+        for combo_keys, _ in block_plan:
+            theta_key = combo_keys[theta_buf_idx]
+            theta_blocks[theta_key] = np_blocks_list[theta_buf_idx][theta_key]
+
+        # Python/Cython reference
+        result_python = _execute_matvec_combos(
+            combos, theta_blocks, theta_buf_idx, out_keys, out_shapes, ()
+        )
+
+        # DMRGMatvec2Site path
+        op = DMRGMatvec2Site(combos, out_keys, out_shapes, theta_buf_idx)
+        result_cdef = op.py_apply(theta_blocks)
+
+        assert set(result_cdef.keys()) == set(result_python.blocks.keys())
+        for key in result_python.blocks:
+            np.testing.assert_allclose(
+                result_cdef[key],
+                result_python.blocks[key],
+                rtol=1e-12,
+                atol=1e-14,
+                err_msg=f"Mismatch at key {key}",
+            )
+
+    def test_synthetic_two_site(self):
+        """Synthetic test with random blocks (no DMRG needed)."""
+        from tenax.contraction._cython_blas import DMRGMatvec2Site
+
+        from tenax.algorithms.dmrg import (
+            _execute_matvec_combos,
+            _precompute_matvec_combos,
+        )
+
+        rng = np.random.default_rng(42)
+        subs = TWO_SITE_SUBSCRIPTS
+        theta_buf_idx = 1
+        shapes = [
+            ((4, 5, 4), (4, 2, 2, 4), (5, 2, 2, 5), (5, 2, 2, 5), (4, 5, 4)),
+            ((3, 5, 6), (3, 2, 2, 7), (5, 2, 3, 4), (4, 2, 3, 8), (7, 8, 6)),
+            ((1, 1, 1), (1, 2, 2, 1), (1, 2, 2, 1), (1, 2, 2, 1), (1, 1, 1)),
+        ]
+
+        block_plan, np_blocks_list = (
+            TestPreTransposedMatvecCombos._build_block_plan_and_blocks(
+                subs, shapes, theta_buf_idx, rng
+            )
+        )
+
+        combos, out_keys, out_shapes = _precompute_matvec_combos(
+            block_plan, subs, np_blocks_list, theta_buf_idx
+        )
+
+        theta_blocks = {}
+        for combo_keys, _ in block_plan:
+            theta_key = combo_keys[theta_buf_idx]
+            theta_blocks[theta_key] = np_blocks_list[theta_buf_idx][theta_key]
+
+        # Python path
+        result_python = _execute_matvec_combos(
+            combos, theta_blocks, theta_buf_idx, out_keys, out_shapes, ()
+        )
+
+        # DMRGMatvec2Site path
+        op = DMRGMatvec2Site(combos, out_keys, out_shapes, theta_buf_idx)
+        result_cdef = op.py_apply(theta_blocks)
+
+        assert set(result_cdef.keys()) == set(result_python.blocks.keys())
+        for key in result_python.blocks:
+            np.testing.assert_allclose(
+                result_cdef[key],
+                result_python.blocks[key],
+                rtol=1e-12,
+                atol=1e-14,
+            )
+
+    def test_accumulation_same_output_key(self):
+        """Multiple combos accumulating into same output slot."""
+        from tenax.contraction._cython_blas import DMRGMatvec2Site
+
+        from tenax.algorithms.dmrg import (
+            _execute_matvec_combos,
+            _precompute_matvec_combos,
+        )
+
+        rng = np.random.default_rng(777)
+        subs = TWO_SITE_SUBSCRIPTS
+        theta_buf_idx = 1
+        shapes = ((4, 5, 4), (4, 2, 2, 4), (5, 2, 2, 5), (5, 2, 2, 5), (4, 5, 4))
+
+        n_tensors = len(shapes)
+        np_blocks_list = [{} for _ in range(n_tensors)]
+        block_plan = []
+        shared_output_key = (99,)
+
+        for combo_idx in range(3):
+            combo_keys = []
+            for t_idx, shape in enumerate(shapes):
+                key = (combo_idx, t_idx)
+                np_blocks_list[t_idx][key] = rng.standard_normal(shape)
+                combo_keys.append(key)
+            block_plan.append((combo_keys, shared_output_key))
+
+        combos, out_keys, out_shapes = _precompute_matvec_combos(
+            block_plan, subs, np_blocks_list, theta_buf_idx
+        )
+
+        theta_blocks = {}
+        for combo_keys, _ in block_plan:
+            theta_key = combo_keys[theta_buf_idx]
+            theta_blocks[theta_key] = np_blocks_list[theta_buf_idx][theta_key]
+
+        result_python = _execute_matvec_combos(
+            combos, theta_blocks, theta_buf_idx, out_keys, out_shapes, ()
+        )
+
+        op = DMRGMatvec2Site(combos, out_keys, out_shapes, theta_buf_idx)
+        result_cdef = op.py_apply(theta_blocks)
+
+        np.testing.assert_allclose(
+            result_cdef[shared_output_key],
+            result_python.blocks[shared_output_key],
+            rtol=1e-12,
+            atol=1e-14,
+        )
+
+    def test_different_theta_gives_different_result(self):
+        """Re-running with different theta gives different output."""
+        from tenax.contraction._cython_blas import DMRGMatvec2Site
+
+        from tenax.algorithms.dmrg import _precompute_matvec_combos
+
+        rng = np.random.default_rng(42)
+        subs = TWO_SITE_SUBSCRIPTS
+        theta_buf_idx = 1
+        shapes = [
+            ((4, 5, 4), (4, 2, 2, 4), (5, 2, 2, 5), (5, 2, 2, 5), (4, 5, 4)),
+        ]
+
+        block_plan, np_blocks_list = (
+            TestPreTransposedMatvecCombos._build_block_plan_and_blocks(
+                subs, shapes, theta_buf_idx, rng
+            )
+        )
+
+        combos, out_keys, out_shapes = _precompute_matvec_combos(
+            block_plan, subs, np_blocks_list, theta_buf_idx
+        )
+
+        op = DMRGMatvec2Site(combos, out_keys, out_shapes, theta_buf_idx)
+
+        theta_blocks_1 = {}
+        for combo_keys, _ in block_plan:
+            theta_key = combo_keys[theta_buf_idx]
+            theta_blocks_1[theta_key] = np_blocks_list[theta_buf_idx][theta_key]
+
+        result_1 = op.py_apply(theta_blocks_1)
+
+        theta_blocks_2 = {}
+        for combo_keys, _ in block_plan:
+            theta_key = combo_keys[theta_buf_idx]
+            shape = np_blocks_list[theta_buf_idx][theta_key].shape
+            theta_blocks_2[theta_key] = rng.standard_normal(shape)
+
+        result_2 = op.py_apply(theta_blocks_2)
+
+        for key in result_1:
+            assert not np.allclose(result_1[key], result_2[key])
