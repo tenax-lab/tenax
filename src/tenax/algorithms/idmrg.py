@@ -85,7 +85,7 @@ class iDMRGConfig:
     max_bond_dim: int = 100
     max_iterations: int = 200
     convergence_tol: float = 1e-8
-    lanczos_max_iter: int = 50
+    lanczos_max_iter: int = 100
     lanczos_tol: float = 1e-12
     svd_trunc_err: float | None = None
     verbose: bool = False
@@ -1124,6 +1124,13 @@ def _idmrg_sweep_symmetric(
     A_R_tensor: Tensor | None = None
     s_vals = jnp.ones(1, dtype=dtype)
 
+    # Warm-start cache: charge sectors alternate even/odd every sweep,
+    # so we store the optimised theta from 2 sweeps ago (same parity).
+    # Key = virt_charges tuple; value = theta SymmetricTensor.
+    _warm_start: dict[
+        int, tuple[tuple, SymmetricTensor]
+    ] = {}  # parity -> (charges_key, theta)
+
     for sweep in range(config.max_iterations):
         # ---- Build initial theta ----
         theta_indices = (
@@ -1132,11 +1139,16 @@ def _idmrg_sweep_symmetric(
             TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="p_r"),
             TensorIndex.from_charges(sym, virt_charges, FlowDirection.OUT, label="v_r"),
         )
-        # Use numpy random instead of JAX to avoid compilation overhead.
-        # iDMRG charge sectors alternate (even/odd) each sweep, so
-        # warm-starting from the previous theta is not possible.
-        _rng = np.random.RandomState(sweep)
-        theta = SymmetricTensor.random_normal_np(theta_indices, _rng, dtype=dtype)
+
+        # Warm-start from 2 sweeps ago if charge structure matches.
+        parity = sweep % 2
+        _charges_key = tuple(virt_charges.tolist())
+        _cached = _warm_start.get(parity)
+        if _cached is not None and _cached[0] == _charges_key:
+            theta = _cached[1]
+        else:
+            _rng = np.random.RandomState(sweep)
+            theta = SymmetricTensor.random_normal_np(theta_indices, _rng, dtype=dtype)
 
         theta_norm = theta.norm()
         if theta_norm > 1e-15:
@@ -1263,6 +1275,9 @@ def _idmrg_sweep_symmetric(
             )
 
         E_total = float(E_total_val)
+
+        # Store optimised theta for warm-starting 2 sweeps later (same parity).
+        _warm_start[parity] = (_charges_key, theta_opt)
 
         # ---- SVD and truncate ----
         if config.numpy_blockwise:

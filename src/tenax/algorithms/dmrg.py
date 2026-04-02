@@ -1645,6 +1645,9 @@ def _lanczos_solve_np(
     alphas = []
     betas = [0.0]
 
+    _EVAL_CHECK_INTERVAL = 10  # check eigenvalue convergence every N steps
+    _prev_eval = None
+
     for step in range(num_steps):
         w = matvec(basis[-1])
         # alpha = <v|H|v> is real for Hermitian H; extract .real for BLAS
@@ -1678,6 +1681,21 @@ def _lanczos_solve_np(
 
         if beta_val < tol:
             break
+
+        # Eigenvalue convergence check every _EVAL_CHECK_INTERVAL steps.
+        # First check after 3 intervals to avoid false convergence in small
+        # Krylov subspaces (e.g. L=4 DMRG where dim is tiny).
+        if (
+            step + 1
+        ) % _EVAL_CHECK_INTERVAL == 0 and step >= 3 * _EVAL_CHECK_INTERVAL - 1:
+            _n = len(alphas)
+            _T = (
+                np.diag(alphas) + np.diag(betas[1:_n], k=1) + np.diag(betas[1:_n], k=-1)
+            )
+            _cur_eval = float(np.linalg.eigvalsh(_T)[0])
+            if _prev_eval is not None and abs(_cur_eval - _prev_eval) < tol:
+                break
+            _prev_eval = _cur_eval
 
         basis.append(ba_scale(w, 1.0 / beta_val))
 
