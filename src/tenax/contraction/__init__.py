@@ -49,6 +49,19 @@ if os.environ.get("TENAX_DISABLE_CYTHON_BLAS", "0") != "1":
     except ImportError:
         pass
 
+CYTHON_LANCZOS_AVAILABLE = False
+if os.environ.get("TENAX_DISABLE_CYTHON_BLAS", "0") != "1":
+    try:
+        from tenax.contraction._cython_blas import (  # noqa: F401
+            DMRGMatvec1Site,
+            DMRGMatvec2Site,
+            cython_lanczos_ground,
+        )
+
+        CYTHON_LANCZOS_AVAILABLE = True
+    except ImportError:
+        pass
+
 __all__ = [
     "contract",
     "contract_with_subscripts",
@@ -58,4 +71,5 @@ __all__ = [
     "CYTHON_BLAS_V2_AVAILABLE",
     "CYTHON_BLAS_V3_AVAILABLE",
     "CYTHON_BA_AVAILABLE",
+    "CYTHON_LANCZOS_AVAILABLE",
 ]

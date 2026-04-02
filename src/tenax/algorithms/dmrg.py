@@ -83,6 +83,21 @@ try:
 except ImportError:
     _USE_CYTHON_REORTH = False
 
+try:
+    from tenax.contraction._cython_blas import (
+        DMRGMatvec1Site as _DMRGMatvec1Site,
+    )
+    from tenax.contraction._cython_blas import (
+        DMRGMatvec2Site as _DMRGMatvec2Site,
+    )
+    from tenax.contraction._cython_blas import (
+        cython_lanczos_ground as _cython_lanczos_ground,
+    )
+
+    _USE_CYTHON_LANCZOS = True
+except (ImportError, ModuleNotFoundError):
+    _USE_CYTHON_LANCZOS = False
+
 
 @dataclass
 class DMRGConfig:
@@ -2601,14 +2616,26 @@ def _two_site_update_symmetric_np(
         )
         _env_np[_theta_buf_idx] = None
 
-        def matvec(v_ba: BlockArray) -> BlockArray:
-            return _execute_matvec_combos(
-                _combo_descs,
-                v_ba.blocks,
-                _theta_buf_idx,
-                _out_keys,
-                _out_shapes,
-                _out_indices,
+        if _USE_CYTHON_LANCZOS:
+            mv = _DMRGMatvec2Site(_combo_descs, _out_keys, _out_shapes, _theta_buf_idx)
+            energy, theta_opt_blocks = _cython_lanczos_ground(
+                mv, theta_ba.blocks, config.lanczos_max_iter, config.lanczos_tol
+            )
+            theta_opt_ba = BlockArray(blocks=theta_opt_blocks, indices=_out_indices)
+        else:
+
+            def matvec(v_ba: BlockArray) -> BlockArray:
+                return _execute_matvec_combos(
+                    _combo_descs,
+                    v_ba.blocks,
+                    _theta_buf_idx,
+                    _out_keys,
+                    _out_shapes,
+                    _out_indices,
+                )
+
+            energy, theta_opt_ba = _lanczos_solve_np(
+                matvec, theta_ba, config.lanczos_max_iter, config.lanczos_tol
             )
     else:
         _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
@@ -2625,9 +2652,9 @@ def _two_site_update_symmetric_np(
                 return_ba=True,
             )
 
-    energy, theta_opt_ba = _lanczos_solve_np(
-        matvec, theta_ba, config.lanczos_max_iter, config.lanczos_tol
-    )
+        energy, theta_opt_ba = _lanczos_solve_np(
+            matvec, theta_ba, config.lanczos_max_iter, config.lanczos_tol
+        )
 
     # Return BlockArray directly — stays as numpy through sweep loop.
     # Converted to SymmetricTensor only at the end of dmrg().
@@ -2697,14 +2724,26 @@ def _one_site_update_symmetric_np(
         )
         _env_np[_theta_buf_idx] = None
 
-        def matvec(v_ba: BlockArray) -> BlockArray:
-            return _execute_matvec_combos(
-                _combo_descs,
-                v_ba.blocks,
-                _theta_buf_idx,
-                _out_keys,
-                _out_shapes,
-                _out_indices,
+        if _USE_CYTHON_LANCZOS:
+            mv = _DMRGMatvec1Site(_combo_descs, _out_keys, _out_shapes, _theta_buf_idx)
+            energy, site_opt_blocks = _cython_lanczos_ground(
+                mv, site_ba.blocks, config.lanczos_max_iter, config.lanczos_tol
+            )
+            site_opt_ba = BlockArray(blocks=site_opt_blocks, indices=_out_indices)
+        else:
+
+            def matvec(v_ba: BlockArray) -> BlockArray:
+                return _execute_matvec_combos(
+                    _combo_descs,
+                    v_ba.blocks,
+                    _theta_buf_idx,
+                    _out_keys,
+                    _out_shapes,
+                    _out_indices,
+                )
+
+            energy, site_opt_ba = _lanczos_solve_np(
+                matvec, site_ba, config.lanczos_max_iter, config.lanczos_tol
             )
     else:
         _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
@@ -2721,9 +2760,9 @@ def _one_site_update_symmetric_np(
                 return_ba=True,
             )
 
-    energy, site_opt_ba = _lanczos_solve_np(
-        matvec, site_ba, config.lanczos_max_iter, config.lanczos_tol
-    )
+        energy, site_opt_ba = _lanczos_solve_np(
+            matvec, site_ba, config.lanczos_max_iter, config.lanczos_tol
+        )
 
     # 1-site mode needs SymmetricTensor for QR/relabel in sweep loop
     return ba_to_symmetric(site_opt_ba), energy

@@ -1,6 +1,7 @@
 # cython: language_level=3, boundscheck=False, wraparound=False
 """Cython BLAS kernel for block-sparse tensor contractions."""
 
+from libc.math cimport sqrt
 from libc.string cimport memcpy, memset
 
 import numpy as np
@@ -971,6 +972,206 @@ cdef cnp.ndarray _c_transpose(cnp.ndarray arr, tuple perm, int dtype_code):
 
 
 # ------------------------------------------------------------------ #
+# cdef BlockArray BLAS helpers (C-level, no Python dispatch)          #
+# ------------------------------------------------------------------ #
+
+cdef double complex _ba_inner_impl(dict blocks_a, dict blocks_b):
+    """Hermitian inner product sum_k vdot(a[k], b[k]) via BLAS.
+
+    Returns double complex; for real inputs the imaginary part is 0.
+    """
+    cdef double total_d = 0.0
+    cdef double complex total_z = 0.0
+    cdef int n, inc = 1
+    cdef double[::1] a_flat_d, b_flat_d
+    cdef double complex[::1] a_flat_z, b_flat_z
+    cdef double complex z_result
+    cdef int dtype_code = -1  # 0=f64, 1=z128, -1=unknown
+
+    # Detect dtype from first shared block
+    for k in blocks_a:
+        bk = blocks_b.get(k)
+        if bk is not None:
+            dt = blocks_a[k].dtype
+            if dt == np.float64:
+                dtype_code = 0
+            elif dt == np.complex128:
+                dtype_code = 1
+            break
+
+    if dtype_code == 0:
+        for k in blocks_a:
+            bk = blocks_b.get(k)
+            if bk is not None:
+                ak = blocks_a[k]
+                a_arr = np.asarray(ak, dtype=np.float64)
+                if not a_arr.flags.writeable:
+                    a_arr = a_arr.copy()
+                a_flat_d = np.ascontiguousarray(a_arr).ravel()
+                b_arr = np.asarray(bk, dtype=np.float64)
+                if not b_arr.flags.writeable:
+                    b_arr = b_arr.copy()
+                b_flat_d = np.ascontiguousarray(b_arr).ravel()
+                n = a_flat_d.shape[0]
+                with nogil:
+                    total_d += _ddot(&n, &a_flat_d[0], &inc, &b_flat_d[0], &inc)
+        return <double complex>total_d
+    elif dtype_code == 1:
+        for k in blocks_a:
+            bk = blocks_b.get(k)
+            if bk is not None:
+                ak = blocks_a[k]
+                a_arr = np.asarray(ak, dtype=np.complex128)
+                if not a_arr.flags.writeable:
+                    a_arr = a_arr.copy()
+                a_flat_z = np.ascontiguousarray(a_arr).ravel()
+                b_arr = np.asarray(bk, dtype=np.complex128)
+                if not b_arr.flags.writeable:
+                    b_arr = b_arr.copy()
+                b_flat_z = np.ascontiguousarray(b_arr).ravel()
+                n = a_flat_z.shape[0]
+                with nogil:
+                    z_result = _zdotc(&n, &a_flat_z[0], &inc, &b_flat_z[0], &inc)
+                total_z += z_result
+        return total_z
+    else:
+        # fallback: numpy vdot
+        for k in blocks_a:
+            bk = blocks_b.get(k)
+            if bk is not None:
+                total_z += np.vdot(blocks_a[k], bk)
+        return total_z
+
+
+cdef double _ba_norm_impl(dict blocks):
+    """||blocks|| via BLAS ddot/zdotc, returns sqrt of sum of squared norms."""
+    cdef double complex ip = _ba_inner_impl(blocks, blocks)
+    return sqrt(ip.real)
+
+
+cdef void _ba_axpy_impl(dict blocks_x, dict blocks_y, double alpha):
+    """y[k] += alpha * x[k] for all shared keys, in-place via BLAS."""
+    cdef int n, inc = 1
+    cdef double a_d = alpha
+    cdef double complex a_z = alpha
+    cdef double[::1] x_flat_d, y_flat_d
+    cdef double complex[::1] x_flat_z, y_flat_z
+    cdef int dtype_code = -1
+
+    for k in blocks_x:
+        yk = blocks_y.get(k)
+        if yk is not None:
+            dt = blocks_x[k].dtype
+            if dt == np.float64:
+                dtype_code = 0
+            elif dt == np.complex128:
+                dtype_code = 1
+            break
+
+    if dtype_code == 0:
+        for k in blocks_x:
+            yk = blocks_y.get(k)
+            if yk is not None:
+                xk = blocks_x[k]
+                x_arr = np.asarray(xk, dtype=np.float64)
+                if not x_arr.flags.writeable:
+                    x_arr = x_arr.copy()
+                x_flat_d = np.ascontiguousarray(x_arr).ravel()
+                if not yk.flags.c_contiguous or not yk.flags.writeable:
+                    yk = np.ascontiguousarray(yk).copy()
+                    blocks_y[k] = yk
+                y_flat_d = yk.ravel()
+                n = x_flat_d.shape[0]
+                with nogil:
+                    _daxpy(&n, &a_d, &x_flat_d[0], &inc, &y_flat_d[0], &inc)
+    elif dtype_code == 1:
+        for k in blocks_x:
+            yk = blocks_y.get(k)
+            if yk is not None:
+                xk = blocks_x[k]
+                x_arr = np.asarray(xk, dtype=np.complex128)
+                if not x_arr.flags.writeable:
+                    x_arr = x_arr.copy()
+                x_flat_z = np.ascontiguousarray(x_arr).ravel()
+                if not yk.flags.c_contiguous or not yk.flags.writeable:
+                    yk = np.ascontiguousarray(yk).copy()
+                    blocks_y[k] = yk
+                y_flat_z = yk.ravel()
+                n = x_flat_z.shape[0]
+                with nogil:
+                    _zaxpy(&n, &a_z, &x_flat_z[0], &inc, &y_flat_z[0], &inc)
+    else:
+        for k in blocks_x:
+            yk = blocks_y.get(k)
+            if yk is not None:
+                blocks_y[k] = yk + alpha * blocks_x[k]
+
+
+cdef void _ba_sub_scaled_impl(dict w_blocks, dict q_blocks, double scalar):
+    """w -= scalar * q (calls _ba_axpy_impl with -scalar)."""
+    _ba_axpy_impl(q_blocks, w_blocks, -scalar)
+
+
+cdef void _ba_scale_impl(dict blocks, double scalar):
+    """Scale all blocks in-place by scalar using BLAS dscal/zscal."""
+    cdef int n, inc = 1
+    cdef double s_d = scalar
+    cdef double complex s_z = scalar
+    cdef double[::1] flat_d
+    cdef double complex[::1] flat_z
+    cdef int dtype_code = -1
+
+    for k in blocks:
+        dt = blocks[k].dtype
+        if dt == np.float64:
+            dtype_code = 0
+        elif dt == np.complex128:
+            dtype_code = 1
+        break
+
+    if dtype_code == 0:
+        for k in blocks:
+            bk = blocks[k]
+            if not bk.flags.c_contiguous or not bk.flags.writeable:
+                bk = np.ascontiguousarray(bk).copy()
+                blocks[k] = bk
+            flat_d = bk.ravel()
+            n = flat_d.shape[0]
+            with nogil:
+                _dscal(&n, &s_d, &flat_d[0], &inc)
+    elif dtype_code == 1:
+        for k in blocks:
+            bk = blocks[k]
+            if not bk.flags.c_contiguous or not bk.flags.writeable:
+                bk = np.ascontiguousarray(bk).copy()
+                blocks[k] = bk
+            flat_z = bk.ravel()
+            n = flat_z.shape[0]
+            with nogil:
+                _zscal(&n, &s_z, &flat_z[0], &inc)
+    else:
+        for k in blocks:
+            blocks[k] = blocks[k] * scalar
+
+
+cdef dict _ba_scale_new(dict blocks, double scalar):
+    """Return new dict with all blocks scaled by scalar."""
+    cdef dict result = {}
+    for k in blocks:
+        result[k] = blocks[k].copy()
+    _ba_scale_impl(result, scalar)
+    return result
+
+
+cdef dict _ba_copy(dict blocks):
+    """Deep copy a block dict (each array is copied)."""
+    cdef dict result = {}
+    for k in blocks:
+        result[k] = blocks[k].copy()
+    return result
+
+
+# ------------------------------------------------------------------ #
 # BlockArray arithmetic: BLAS-accelerated inner, axpy, scale          #
 # ------------------------------------------------------------------ #
 
@@ -1310,34 +1511,17 @@ def cython_execute_plan(
 # ------------------------------------------------------------------ #
 
 
-def cython_matvec_combos(
+cdef void _cython_matvec_combos_impl(
     list combo_descriptors,
     dict theta_2d_cache,
     int theta_buf_idx,
     list output_buffers,
     list output_buf_shapes,
 ):
-    """Execute ALL block combos for one matvec call in a single C loop.
+    """C-level implementation of matvec combo execution.
 
-    All input blocks (env and theta) are **pre-transposed** to their
-    GEMM-ready 2D C-contiguous layout before this function is called.
-    Only intermediate buffers (from multi-step plans) need transposing
-    inside the loop.
-
-    Each combo descriptor is a tuple:
-        (step_params, n_inputs, n_buffers, output_perm,
-         env_blocks_2d,       # list of pre-transposed 2D numpy arrays
-         theta_key,           # block key into theta_blocks dict
-         theta_perm,          # transpose perm for theta (used as cache key)
-         theta_shape_2d,      # (M, K) or (K, N) for theta (used as cache key)
-         output_slot,         # int index into output_buffers
-        )
-
-    ``theta_2d_cache`` maps ``(theta_key, theta_perm, theta_shape_2d)``
-    to the pre-transposed 2D theta block.
-
-    ``output_buffers`` is a list of pre-allocated numpy arrays (zeroed),
-    one per unique output key. Results are accumulated in-place via +=.
+    Factored out so it can be called from both the Python-level
+    ``cython_matvec_combos`` wrapper and from ``DMRGMatvec2Site.apply()``.
     """
     cdef int n_combos = len(combo_descriptors)
     cdef int c, s, n_steps, n_elem, inc
@@ -1446,21 +1630,250 @@ def cython_matvec_combos(
                 output_buffers[output_slot] = ob + result
 
 
+def cython_matvec_combos(
+    list combo_descriptors,
+    dict theta_2d_cache,
+    int theta_buf_idx,
+    list output_buffers,
+    list output_buf_shapes,
+):
+    """Execute ALL block combos for one matvec call in a single C loop.
+
+    All input blocks (env and theta) are **pre-transposed** to their
+    GEMM-ready 2D C-contiguous layout before this function is called.
+    Only intermediate buffers (from multi-step plans) need transposing
+    inside the loop.
+
+    Each combo descriptor is a tuple:
+        (step_params, n_inputs, n_buffers, output_perm,
+         env_blocks_2d,       # list of pre-transposed 2D numpy arrays
+         theta_key,           # block key into theta_blocks dict
+         theta_perm,          # transpose perm for theta (used as cache key)
+         theta_shape_2d,      # (M, K) or (K, N) for theta (used as cache key)
+         output_slot,         # int index into output_buffers
+        )
+
+    ``theta_2d_cache`` maps ``(theta_key, theta_perm, theta_shape_2d)``
+    to the pre-transposed 2D theta block.
+
+    ``output_buffers`` is a list of pre-allocated numpy arrays (zeroed),
+    one per unique output key. Results are accumulated in-place via +=.
+    """
+    _cython_matvec_combos_impl(
+        combo_descriptors, theta_2d_cache, theta_buf_idx,
+        output_buffers, output_buf_shapes,
+    )
+
+
+# ------------------------------------------------------------------ #
+# MatvecOp base class and DMRGMatvec2Site subclass                     #
+# ------------------------------------------------------------------ #
+
+
+cdef class MatvecOp:
+    """Base class for C-level matvec operators."""
+
+    cdef dict apply(self, dict theta_blocks):
+        """Apply the operator to theta blocks and return output blocks dict."""
+        raise NotImplementedError
+
+    def py_apply(self, dict theta_blocks):
+        """Python-callable wrapper for testing."""
+        return self.apply(theta_blocks)
+
+
+cdef class DMRGMatvec2Site(MatvecOp):
+    """C-level 2-site DMRG matvec operator.
+
+    Stores pre-computed combo descriptors and output metadata so that
+    repeated matvec calls only need to supply new theta blocks.
+    """
+    cdef list combo_descriptors
+    cdef list output_keys
+    cdef list output_shapes
+    cdef int theta_buf_idx
+
+    def __init__(
+        self,
+        list combo_descriptors,
+        list output_keys,
+        list output_shapes,
+        int theta_buf_idx,
+    ):
+        self.combo_descriptors = combo_descriptors
+        self.output_keys = output_keys
+        self.output_shapes = output_shapes
+        self.theta_buf_idx = theta_buf_idx
+
+    cdef dict apply(self, dict theta_blocks):
+        """Apply matvec: pre-transpose theta, run GEMM combos, return dict."""
+        cdef int n_slots = len(self.output_keys)
+        cdef dict theta_2d_cache = {}
+
+        # Pre-transpose theta blocks once
+        for desc in self.combo_descriptors:
+            theta_key = desc[5]
+            theta_perm = desc[6]
+            theta_shape_2d = desc[7]
+            cache_key = (theta_key, theta_perm, theta_shape_2d)
+            if cache_key not in theta_2d_cache:
+                arr = theta_blocks[theta_key]
+                if theta_shape_2d is not None:
+                    if theta_perm:
+                        arr = np.transpose(arr, theta_perm)
+                    arr = np.ascontiguousarray(arr.reshape(theta_shape_2d))
+                else:
+                    arr = np.ascontiguousarray(arr)
+                theta_2d_cache[cache_key] = arr
+
+        # Execute all combos
+        cdef list output_buffers = [None] * n_slots
+        _cython_matvec_combos_impl(
+            self.combo_descriptors,
+            theta_2d_cache,
+            self.theta_buf_idx,
+            output_buffers,
+            self.output_shapes,
+        )
+
+        # Assemble output dict
+        cdef dict output_blocks = {}
+        cdef int slot
+        for slot in range(n_slots):
+            if output_buffers[slot] is not None:
+                output_blocks[self.output_keys[slot]] = output_buffers[slot]
+        return output_blocks
+
+    def py_apply(self, dict theta_blocks):
+        """Python-callable wrapper for testing."""
+        return self.apply(theta_blocks)
+
+
+cdef class DMRGMatvec1Site(DMRGMatvec2Site):
+    """C-level 1-site DMRG matvec operator.
+
+    Identical to DMRGMatvec2Site -- combo descriptor format is the same
+    for both 2-site and 1-site subscripts. Separate class for clarity
+    at the call site in dmrg.py.
+    """
+    pass
+
+
+# ------------------------------------------------------------------ #
+# cython_lanczos_ground: fused Lanczos eigensolver                     #
+# ------------------------------------------------------------------ #
+
+
+def cython_lanczos_ground(MatvecOp mv, dict v0_blocks, int max_iter, double tol):
+    """Fused Lanczos ground-state eigensolver running entirely in Cython.
+
+    Parameters
+    ----------
+    mv : MatvecOp
+        C-level matvec operator (DMRGMatvec2Site or DMRGMatvec1Site).
+    v0_blocks : dict
+        Initial vector as block dict (charge key -> numpy array).
+    max_iter : int
+        Maximum number of Lanczos iterations.
+    tol : double
+        Convergence tolerance on the beta (off-diagonal) element.
+
+    Returns
+    -------
+    tuple
+        (eigenvalue: float, eigenvector_blocks: dict)
+    """
+    cdef int step, n_steps, k
+    cdef double alpha_val, beta_val, norm_val, inv_norm
+    cdef dict v, w
+    cdef list basis = []
+    cdef list alphas = []
+    cdef list betas = [0.0]
+
+    # Normalize v0
+    v = _ba_copy(v0_blocks)
+    norm_val = _ba_norm_impl(v)
+    if norm_val < 1e-15:
+        return (0.0, v)
+    inv_norm = 1.0 / norm_val
+    _ba_scale_impl(v, inv_norm)
+    basis.append(v)
+
+    for step in range(max_iter):
+        # w = mv.apply(basis[step])
+        w = mv.apply(<dict>basis[step])
+
+        # alpha = <basis[step] | w>.real
+        alpha_val = _ba_inner_impl(<dict>basis[step], w).real
+        alphas.append(alpha_val)
+
+        # w -= alpha * basis[step]
+        _ba_sub_scaled_impl(w, <dict>basis[step], alpha_val)
+
+        # w -= betas[step] * basis[step-1]  (if step > 0)
+        if step > 0:
+            beta_val = <double>betas[step]
+            _ba_sub_scaled_impl(w, <dict>basis[step - 1], beta_val)
+
+        # Full reorthogonalization
+        _lanczos_reorth_impl(basis, w)
+
+        # beta = ||w||
+        beta_val = _ba_norm_impl(w)
+        betas.append(beta_val)
+
+        if beta_val < tol:
+            break
+
+        # basis.append(w / beta)
+        inv_norm = 1.0 / beta_val
+        _ba_scale_impl(w, inv_norm)
+        basis.append(w)
+
+    # Number of Lanczos steps completed
+    n_steps = len(alphas)
+
+    # Edge cases
+    if n_steps == 0:
+        return (0.0, _ba_copy(v0_blocks))
+    if n_steps == 1:
+        return (<double>alphas[0], _ba_copy(<dict>basis[0]))
+
+    # Build tridiagonal matrix T
+    T = np.zeros((n_steps, n_steps), dtype=np.float64)
+    for k in range(n_steps):
+        T[k, k] = <double>alphas[k]
+    for k in range(n_steps - 1):
+        T[k, k + 1] = <double>betas[k + 1]
+        T[k + 1, k] = <double>betas[k + 1]
+
+    # Diagonalize T
+    eigvals, eigvecs = np.linalg.eigh(T)
+    idx = np.argmin(eigvals)
+    eigenvalue = float(eigvals[idx])
+    coeffs = eigvecs[:, idx]
+
+    # Reconstruct eigenvector: result = sum_k coeffs[k] * basis[k]
+    cdef dict result = _ba_copy(<dict>basis[0])
+    _ba_scale_impl(result, <double>coeffs[0])
+    for k in range(1, n_steps):
+        _ba_axpy_impl(<dict>basis[k], result, <double>coeffs[k])
+
+    # Normalize eigenvector
+    norm_val = _ba_norm_impl(result)
+    inv_norm = 1.0 / (norm_val + 1e-15)
+    _ba_scale_impl(result, inv_norm)
+
+    return (eigenvalue, result)
+
+
 # ------------------------------------------------------------------ #
 # cython_lanczos_reorth: fused full reorthogonalization                #
 # ------------------------------------------------------------------ #
 
 
-def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
-    """Fused full reorthogonalization: for each q in basis, w -= <q|w> * q.
-
-    In-place modification of w_blocks.
-    basis_blocks_list: list of dicts, each mapping charge key -> numpy array
-    w_blocks: dict mapping charge key -> numpy array (modified in-place)
-
-    Fuses what was 2*k Python->Cython calls (one ba_inner + one
-    ba_sub_scaled_inplace per basis vector) into a single call.
-    """
+cdef void _lanczos_reorth_impl(list basis_blocks_list, dict w_blocks):
+    """C-level full reorthogonalization -- called from cython_lanczos_ground."""
     cdef int n_basis = len(basis_blocks_list)
     cdef int i, n, inc
     cdef double coeff, alpha_neg
@@ -1631,6 +2044,11 @@ def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
                 wk = w_blocks.get(k)
                 if wk is not None:
                     w_blocks[k] = wk - fb_coeff * q_blocks[k]
+
+
+def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
+    """Public wrapper for full reorthogonalization."""
+    _lanczos_reorth_impl(basis_blocks_list, w_blocks)
 
 
 # ------------------------------------------------------------------ #
