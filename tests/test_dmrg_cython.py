@@ -1030,3 +1030,215 @@ class TestCythonMatvecOp1Site:
                 rtol=1e-12,
                 atol=1e-14,
             )
+
+
+# ------------------------------------------------------------------ #
+# TestCythonLanczosGround                                              #
+# ------------------------------------------------------------------ #
+
+
+class TestCythonLanczosGround:
+    """Test cython_lanczos_ground matches _lanczos_solve_np."""
+
+    @pytest.fixture(autouse=True)
+    def require_cython(self):
+        try:
+            from tenax.contraction._cython_blas import (
+                DMRGMatvec2Site,  # noqa: F401
+                cython_lanczos_ground,  # noqa: F401
+            )
+        except (ImportError, ModuleNotFoundError):
+            pytest.skip("Cython Lanczos not available")
+
+    @staticmethod
+    def _build_lanczos_block_plan(subscripts, shapes_list, theta_buf_idx, rng):
+        """Build block plan where theta keys == output keys (Lanczos-safe).
+
+        In a real DMRG block plan, each combo maps theta_key -> same output_key.
+        Multiple combos may share the same theta (and output) key.
+        This builder ensures that property holds, which is necessary for
+        Lanczos iteration (the output of matvec has the same block structure
+        as the input).
+        """
+        n_tensors = len(shapes_list[0])
+        np_blocks_list = [{} for _ in range(n_tensors)]
+        block_plan = []
+
+        for combo_idx, shapes in enumerate(shapes_list):
+            combo_keys = []
+            for t_idx, shape in enumerate(shapes):
+                if t_idx == theta_buf_idx:
+                    # Use combo_idx as the charge key for theta AND output
+                    key = (combo_idx,)
+                else:
+                    key = (combo_idx, t_idx)
+                np_blocks_list[t_idx][key] = rng.standard_normal(shape)
+                combo_keys.append(key)
+            output_key = (combo_idx,)  # Same as theta key
+            block_plan.append((combo_keys, output_key))
+
+        return block_plan, np_blocks_list
+
+    def test_eigenvalue_matches_python_lanczos(self):
+        """Fused Cython Lanczos eigenvalue must match Python _lanczos_solve_np."""
+        from tenax.contraction._cython_blas import (
+            DMRGMatvec2Site,
+            cython_lanczos_ground,
+        )
+
+        from tenax.algorithms._block_array import BlockArray
+        from tenax.algorithms.dmrg import (
+            _execute_matvec_combos,
+            _lanczos_solve_np,
+            _precompute_matvec_combos,
+        )
+
+        rng = np.random.default_rng(42)
+        subs = TWO_SITE_SUBSCRIPTS
+        theta_buf_idx = 1
+
+        # Build synthetic multi-combo block plan (theta keys == output keys)
+        shapes = [
+            ((4, 5, 4), (4, 2, 2, 4), (5, 2, 2, 5), (5, 2, 2, 5), (4, 5, 4)),
+            ((3, 3, 3), (3, 2, 2, 3), (3, 2, 2, 3), (3, 2, 2, 3), (3, 3, 3)),
+        ]
+        block_plan, np_blocks_list = self._build_lanczos_block_plan(
+            subs, shapes, theta_buf_idx, rng
+        )
+
+        combos, out_keys, out_shapes = _precompute_matvec_combos(
+            block_plan, subs, np_blocks_list, theta_buf_idx
+        )
+
+        # Extract theta blocks
+        theta_blocks = {}
+        for combo_keys, _ in block_plan:
+            theta_key = combo_keys[theta_buf_idx]
+            theta_blocks[theta_key] = np_blocks_list[theta_buf_idx][theta_key]
+
+        # Build BlockArray for the Python path
+        theta_ba = BlockArray(theta_blocks, ())
+
+        # Python reference path
+        def matvec_py(v_ba):
+            return _execute_matvec_combos(
+                combos,
+                v_ba.blocks,
+                theta_buf_idx,
+                out_keys,
+                out_shapes,
+                (),
+            )
+
+        energy_py, vec_py = _lanczos_solve_np(matvec_py, theta_ba, 30, 1e-14)
+
+        # Cython fused path
+        mv = DMRGMatvec2Site(combos, out_keys, out_shapes, theta_buf_idx)
+        energy_cy, vec_cy_blocks = cython_lanczos_ground(mv, theta_blocks, 30, 1e-14)
+
+        # Eigenvalue must match
+        np.testing.assert_allclose(energy_cy, energy_py, atol=1e-10)
+
+        # Eigenvector overlap (up to global phase)
+        overlap = 0.0
+        for k in vec_py.blocks:
+            if k in vec_cy_blocks:
+                overlap += float(np.vdot(vec_py.blocks[k], vec_cy_blocks[k]).real)
+        assert abs(abs(overlap) - 1.0) < 1e-8, f"Overlap: {overlap}"
+
+    def test_single_combo(self):
+        """Single-combo Lanczos should produce finite eigenvalue."""
+        from tenax.contraction._cython_blas import (
+            DMRGMatvec2Site,
+            cython_lanczos_ground,
+        )
+
+        from tenax.algorithms.dmrg import _precompute_matvec_combos
+
+        rng = np.random.default_rng(123)
+        subs = TWO_SITE_SUBSCRIPTS
+        theta_buf_idx = 1
+
+        shapes = [
+            ((3, 3, 3), (3, 2, 2, 3), (3, 2, 2, 3), (3, 2, 2, 3), (3, 3, 3)),
+        ]
+        block_plan, np_blocks_list = self._build_lanczos_block_plan(
+            subs, shapes, theta_buf_idx, rng
+        )
+
+        combos, out_keys, out_shapes = _precompute_matvec_combos(
+            block_plan, subs, np_blocks_list, theta_buf_idx
+        )
+
+        theta_blocks = {}
+        for combo_keys, _ in block_plan:
+            theta_key = combo_keys[theta_buf_idx]
+            theta_blocks[theta_key] = np_blocks_list[theta_buf_idx][theta_key]
+
+        mv = DMRGMatvec2Site(combos, out_keys, out_shapes, theta_buf_idx)
+        energy, vec_blocks = cython_lanczos_ground(mv, theta_blocks, 20, 1e-12)
+
+        assert np.isfinite(energy)
+        # Eigenvector should be normalized
+        norm_sq = sum(float(np.vdot(v, v).real) for v in vec_blocks.values())
+        np.testing.assert_allclose(norm_sq, 1.0, atol=1e-10)
+
+    def test_multiple_combos_consistent_shapes(self):
+        """Multiple combos with consistent shapes, verifies Cython vs Python."""
+        from tenax.contraction._cython_blas import (
+            DMRGMatvec2Site,
+            cython_lanczos_ground,
+        )
+
+        from tenax.algorithms._block_array import BlockArray
+        from tenax.algorithms.dmrg import (
+            _execute_matvec_combos,
+            _lanczos_solve_np,
+            _precompute_matvec_combos,
+        )
+
+        rng = np.random.default_rng(999)
+        subs = TWO_SITE_SUBSCRIPTS
+        theta_buf_idx = 1
+
+        # For Lanczos to iterate, output shape must match theta shape.
+        # With subs "abc,apqd,bpse,eqtf,dfg->cstg", output is (c,s,t,g)
+        # and theta is (a,p,q,d). For them to match we need c=a, s=p, t=q, g=d
+        # which means L=(c,b,c), theta=(c,s,t,g), W1=(b,s,s,b), W2=(b,t,t,b), R=(g,b,g)
+        # i.e. L is (chi,w,chi), theta is (chi,d,d,chi), W is (w,d,d,w), R=(chi,w,chi)
+        shapes = [
+            ((4, 5, 4), (4, 2, 2, 4), (5, 2, 2, 5), (5, 2, 2, 5), (4, 5, 4)),
+            ((3, 3, 3), (3, 2, 2, 3), (3, 2, 2, 3), (3, 2, 2, 3), (3, 3, 3)),
+            ((1, 1, 1), (1, 2, 2, 1), (1, 2, 2, 1), (1, 2, 2, 1), (1, 1, 1)),
+        ]
+        block_plan, np_blocks_list = self._build_lanczos_block_plan(
+            subs, shapes, theta_buf_idx, rng
+        )
+
+        combos, out_keys, out_shapes = _precompute_matvec_combos(
+            block_plan, subs, np_blocks_list, theta_buf_idx
+        )
+
+        theta_blocks = {}
+        for combo_keys, _ in block_plan:
+            theta_key = combo_keys[theta_buf_idx]
+            theta_blocks[theta_key] = np_blocks_list[theta_buf_idx][theta_key]
+
+        theta_ba = BlockArray(theta_blocks, ())
+
+        def matvec_py(v_ba):
+            return _execute_matvec_combos(
+                combos,
+                v_ba.blocks,
+                theta_buf_idx,
+                out_keys,
+                out_shapes,
+                (),
+            )
+
+        energy_py, _ = _lanczos_solve_np(matvec_py, theta_ba, 30, 1e-14)
+
+        mv = DMRGMatvec2Site(combos, out_keys, out_shapes, theta_buf_idx)
+        energy_cy, _ = cython_lanczos_ground(mv, theta_blocks, 30, 1e-14)
+
+        np.testing.assert_allclose(energy_cy, energy_py, atol=1e-10)

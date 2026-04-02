@@ -1760,6 +1760,115 @@ cdef class DMRGMatvec1Site(DMRGMatvec2Site):
 
 
 # ------------------------------------------------------------------ #
+# cython_lanczos_ground: fused Lanczos eigensolver                     #
+# ------------------------------------------------------------------ #
+
+
+def cython_lanczos_ground(MatvecOp mv, dict v0_blocks, int max_iter, double tol):
+    """Fused Lanczos ground-state eigensolver running entirely in Cython.
+
+    Parameters
+    ----------
+    mv : MatvecOp
+        C-level matvec operator (DMRGMatvec2Site or DMRGMatvec1Site).
+    v0_blocks : dict
+        Initial vector as block dict (charge key -> numpy array).
+    max_iter : int
+        Maximum number of Lanczos iterations.
+    tol : double
+        Convergence tolerance on the beta (off-diagonal) element.
+
+    Returns
+    -------
+    tuple
+        (eigenvalue: float, eigenvector_blocks: dict)
+    """
+    cdef int step, n_steps, k
+    cdef double alpha_val, beta_val, norm_val, inv_norm
+    cdef dict v, w
+    cdef list basis = []
+    cdef list alphas = []
+    cdef list betas = [0.0]
+
+    # Normalize v0
+    v = _ba_copy(v0_blocks)
+    norm_val = _ba_norm_impl(v)
+    if norm_val == 0.0:
+        return (0.0, v)
+    inv_norm = 1.0 / norm_val
+    _ba_scale_impl(v, inv_norm)
+    basis.append(v)
+
+    for step in range(max_iter):
+        # w = mv.apply(basis[step])
+        w = mv.apply(<dict>basis[step])
+
+        # alpha = <basis[step] | w>.real
+        alpha_val = _ba_inner_impl(<dict>basis[step], w).real
+        alphas.append(alpha_val)
+
+        # w -= alpha * basis[step]
+        _ba_sub_scaled_impl(w, <dict>basis[step], alpha_val)
+
+        # w -= betas[step] * basis[step-1]  (if step > 0)
+        if step > 0:
+            beta_val = <double>betas[step]
+            _ba_sub_scaled_impl(w, <dict>basis[step - 1], beta_val)
+
+        # Full reorthogonalization
+        cython_lanczos_reorth(basis, w)
+
+        # beta = ||w||
+        beta_val = _ba_norm_impl(w)
+        betas.append(beta_val)
+
+        if beta_val < tol:
+            break
+
+        # basis.append(w / beta)
+        inv_norm = 1.0 / beta_val
+        _ba_scale_impl(w, inv_norm)
+        basis.append(w)
+
+    # Number of Lanczos steps completed
+    n_steps = len(alphas)
+
+    # Edge cases
+    if n_steps == 0:
+        return (0.0, _ba_copy(v0_blocks))
+    if n_steps == 1:
+        return (<double>alphas[0], _ba_copy(<dict>basis[0]))
+
+    # Build tridiagonal matrix T
+    T = np.zeros((n_steps, n_steps), dtype=np.float64)
+    for k in range(n_steps):
+        T[k, k] = <double>alphas[k]
+    for k in range(n_steps - 1):
+        T[k, k + 1] = <double>betas[k + 1]
+        T[k + 1, k] = <double>betas[k + 1]
+
+    # Diagonalize T
+    eigvals, eigvecs = np.linalg.eigh(T)
+    idx = np.argmin(eigvals)
+    eigenvalue = float(eigvals[idx])
+    coeffs = eigvecs[:, idx]
+
+    # Reconstruct eigenvector: result = sum_k coeffs[k] * basis[k]
+    cdef dict result = _ba_copy(<dict>basis[0])
+    _ba_scale_impl(result, <double>coeffs[0])
+    for k in range(1, n_steps):
+        _ba_axpy_impl(<dict>basis[k], result, <double>coeffs[k])
+
+    # Normalize eigenvector
+    norm_val = _ba_norm_impl(result)
+    if norm_val > 0.0:
+        inv_norm = 1.0 / norm_val
+        _ba_scale_impl(result, inv_norm)
+
+    return (eigenvalue, result)
+
+
+# ------------------------------------------------------------------ #
 # cython_lanczos_reorth: fused full reorthogonalization                #
 # ------------------------------------------------------------------ #
 
