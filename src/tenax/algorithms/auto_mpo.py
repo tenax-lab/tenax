@@ -387,10 +387,18 @@ def _w_matrices_to_symmetric_mpo(
         right_label = "w_right" if i == L - 1 else f"w{i}_{i + 1}"
 
         indices = (
-            TensorIndex(sym, left_charges, FlowDirection.IN, label=left_label),
-            TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"mpo_top_{i}"),
-            TensorIndex(sym, phys_charges, FlowDirection.OUT, label=f"mpo_bot_{i}"),
-            TensorIndex(sym, right_charges, FlowDirection.OUT, label=right_label),
+            TensorIndex.from_charges(
+                sym, left_charges, FlowDirection.IN, label=left_label
+            ),
+            TensorIndex.from_charges(
+                sym, phys_charges, FlowDirection.IN, label=f"mpo_top_{i}"
+            ),
+            TensorIndex.from_charges(
+                sym, phys_charges, FlowDirection.OUT, label=f"mpo_bot_{i}"
+            ),
+            TensorIndex.from_charges(
+                sym, right_charges, FlowDirection.OUT, label=right_label
+            ),
         )
         tensor = SymmetricTensor.from_dense(W, indices)
         mpo.add_node(i, tensor)
@@ -447,10 +455,14 @@ def _w_matrices_to_mpo(
         right_label = "w_right" if i == L - 1 else f"w{i}_{i + 1}"
 
         indices = (
-            TensorIndex(sym, bond_l, FlowDirection.IN, label=left_label),
-            TensorIndex(sym, bond_d, FlowDirection.IN, label=f"mpo_top_{i}"),
-            TensorIndex(sym, bond_d, FlowDirection.OUT, label=f"mpo_bot_{i}"),
-            TensorIndex(sym, bond_r, FlowDirection.OUT, label=right_label),
+            TensorIndex.from_charges(sym, bond_l, FlowDirection.IN, label=left_label),
+            TensorIndex.from_charges(
+                sym, bond_d, FlowDirection.IN, label=f"mpo_top_{i}"
+            ),
+            TensorIndex.from_charges(
+                sym, bond_d, FlowDirection.OUT, label=f"mpo_bot_{i}"
+            ),
+            TensorIndex.from_charges(sym, bond_r, FlowDirection.OUT, label=right_label),
         )
         mpo.add_node(i, DenseTensor(W, indices))
 

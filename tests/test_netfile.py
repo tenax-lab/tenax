@@ -30,7 +30,9 @@ def _make_dense(
     rng = np.random.RandomState(seed)
     data = jnp.array(rng.randn(*shape), dtype=jnp.float32)
     indices = tuple(
-        TensorIndex(u1, np.zeros(dim, dtype=np.int32), FlowDirection.IN, label=lbl)
+        TensorIndex.from_charges(
+            u1, np.zeros(dim, dtype=np.int32), FlowDirection.IN, label=lbl
+        )
         for dim, lbl in zip(shape, labels)
     )
     return DenseTensor(data, indices)
@@ -444,10 +446,10 @@ class TestToTensorNetwork:
         A = DenseTensor(
             data_a,
             (
-                TensorIndex(
+                TensorIndex.from_charges(
                     u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="i"
                 ),
-                TensorIndex(
+                TensorIndex.from_charges(
                     u1, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="j"
                 ),
             ),
@@ -455,10 +457,10 @@ class TestToTensorNetwork:
         B = DenseTensor(
             data_b,
             (
-                TensorIndex(
+                TensorIndex.from_charges(
                     u1, np.zeros(4, dtype=np.int32), FlowDirection.IN, label="j"
                 ),
-                TensorIndex(
+                TensorIndex.from_charges(
                     u1, np.zeros(5, dtype=np.int32), FlowDirection.IN, label="k"
                 ),
             ),

@@ -149,7 +149,7 @@ def _apply_projector_with_reembed(
             return T
         from tenax.core.index import TensorIndex
 
-        target_idx = TensorIndex(
+        target_idx = TensorIndex.from_charges(
             p_fused_idx.symmetry,
             p_fused_idx.charges.copy(),
             current_idx.flow,

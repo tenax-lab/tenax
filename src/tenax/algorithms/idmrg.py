@@ -150,10 +150,10 @@ def build_bulk_mpo_heisenberg(
     bond_d = np.zeros(d, dtype=np.int32)
 
     indices = (
-        TensorIndex(sym, bond_dw, FlowDirection.IN, label="w_l"),
-        TensorIndex(sym, bond_d, FlowDirection.IN, label="mpo_top"),
-        TensorIndex(sym, bond_d, FlowDirection.OUT, label="mpo_bot"),
-        TensorIndex(sym, bond_dw, FlowDirection.OUT, label="w_r"),
+        TensorIndex.from_charges(sym, bond_dw, FlowDirection.IN, label="w_l"),
+        TensorIndex.from_charges(sym, bond_d, FlowDirection.IN, label="mpo_top"),
+        TensorIndex.from_charges(sym, bond_d, FlowDirection.OUT, label="mpo_bot"),
+        TensorIndex.from_charges(sym, bond_dw, FlowDirection.OUT, label="w_r"),
     )
     return DenseTensor(W, indices)
 
@@ -262,10 +262,10 @@ def build_bulk_mpo_heisenberg_cylinder(
     bond_d = np.zeros(d, dtype=np.int32)
 
     indices = (
-        TensorIndex(sym, bond_dw, FlowDirection.IN, label="w_l"),
-        TensorIndex(sym, bond_d, FlowDirection.IN, label="mpo_top"),
-        TensorIndex(sym, bond_d, FlowDirection.OUT, label="mpo_bot"),
-        TensorIndex(sym, bond_dw, FlowDirection.OUT, label="w_r"),
+        TensorIndex.from_charges(sym, bond_dw, FlowDirection.IN, label="w_l"),
+        TensorIndex.from_charges(sym, bond_d, FlowDirection.IN, label="mpo_top"),
+        TensorIndex.from_charges(sym, bond_d, FlowDirection.OUT, label="mpo_bot"),
+        TensorIndex.from_charges(sym, bond_dw, FlowDirection.OUT, label="w_r"),
     )
     return DenseTensor(W, indices)
 
@@ -324,10 +324,10 @@ def build_bulk_mpo_heisenberg_symmetric(
     mpo_bond_charges = np.array([0, -2, 2, 0, 0], dtype=np.int32)
     phys_charges = np.array([1, -1], dtype=np.int32)
     indices = (
-        TensorIndex(sym, mpo_bond_charges, FlowDirection.IN, label="w_l"),
-        TensorIndex(sym, phys_charges, FlowDirection.IN, label="mpo_top"),
-        TensorIndex(sym, phys_charges, FlowDirection.OUT, label="mpo_bot"),
-        TensorIndex(sym, mpo_bond_charges, FlowDirection.OUT, label="w_r"),
+        TensorIndex.from_charges(sym, mpo_bond_charges, FlowDirection.IN, label="w_l"),
+        TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="mpo_top"),
+        TensorIndex.from_charges(sym, phys_charges, FlowDirection.OUT, label="mpo_bot"),
+        TensorIndex.from_charges(sym, mpo_bond_charges, FlowDirection.OUT, label="w_r"),
     )
     return SymmetricTensor.from_dense(W, indices)
 
@@ -347,9 +347,11 @@ def _trivial_left_env(D_w: int, dtype: Any = jnp.float64) -> DenseTensor:
     # In the standard MPO convention, the vacuum state is the last row.
     data = data.at[0, D_w - 1, 0].set(1.0)
     indices = (
-        TensorIndex(sym, bond_mps, FlowDirection.IN, label="env_mps_l"),
-        TensorIndex(sym, bond_mpo, FlowDirection.IN, label="env_mpo_l"),
-        TensorIndex(sym, bond_mps, FlowDirection.OUT, label="env_mps_conj_l"),
+        TensorIndex.from_charges(sym, bond_mps, FlowDirection.IN, label="env_mps_l"),
+        TensorIndex.from_charges(sym, bond_mpo, FlowDirection.IN, label="env_mpo_l"),
+        TensorIndex.from_charges(
+            sym, bond_mps, FlowDirection.OUT, label="env_mps_conj_l"
+        ),
     )
     return DenseTensor(data, indices)
 
@@ -363,9 +365,11 @@ def _trivial_right_env(D_w: int, dtype: Any = jnp.float64) -> DenseTensor:
     # Only the "done" row (index 0) is 1.
     data = data.at[0, 0, 0].set(1.0)
     indices = (
-        TensorIndex(sym, bond_mps, FlowDirection.OUT, label="env_mps_r"),
-        TensorIndex(sym, bond_mpo, FlowDirection.OUT, label="env_mpo_r"),
-        TensorIndex(sym, bond_mps, FlowDirection.IN, label="env_mps_conj_r"),
+        TensorIndex.from_charges(sym, bond_mps, FlowDirection.OUT, label="env_mps_r"),
+        TensorIndex.from_charges(sym, bond_mpo, FlowDirection.OUT, label="env_mpo_r"),
+        TensorIndex.from_charges(
+            sym, bond_mps, FlowDirection.IN, label="env_mps_conj_r"
+        ),
     )
     return DenseTensor(data, indices)
 
@@ -392,53 +396,6 @@ def _idmrg_matvec(
 
 
 _idmrg_matvec_jit = jax.jit(_idmrg_matvec, static_argnums=(1,))
-
-
-def _compute_local_energy(
-    theta: jax.Array,
-    W_bulk: jax.Array,
-    d: int,
-) -> float:
-    """Compute the energy per site from the 2-site wavefunction.
-
-    Evaluates ``<theta|H_bond|theta>`` where ``H_bond`` is the nearest-
-    neighbour Hamiltonian extracted from the bulk MPO's vacuum→done
-    transition.  For translationally invariant nearest-neighbour models,
-    this equals the energy per bond = energy per site.
-
-    Args:
-        theta: Optimised 2-site wavefunction, shape (chi_l, d, d, chi_r).
-        W_bulk: Bulk MPO tensor, shape (D_w, d, d, D_w).
-        d: Physical dimension.
-
-    Returns:
-        Energy per site (float).
-    """
-    # Build 2-site Hamiltonian from the MPO: H[p,q,p',q'] = sum_e W[D-1,p,p',e] * W[e,q,q',0]
-    # (vacuum row of left site → done column of right site).
-    D_w = W_bulk.shape[0]
-    W_left = W_bulk[D_w - 1, :, :, :]  # (d, d, D_w) — vacuum row
-    W_right = W_bulk[:, :, :, 0]  # (D_w, d, d) — done column
-    # H_2site[p, p', q, q'] = sum_e W_left[p, p', e] * W_right[e, q, q']
-    H_2site = jnp.einsum("abe,ecd->abcd", W_left, W_right)
-    # Contract indices: H_2site[p_top, p_bot, q_top, q_bot]
-
-    # <theta|H_2site|theta> with theta[a, p, q, b]:
-    # = sum_{a,b} sum_{p,q,p',q'} conj(theta[a,p',q',b]) * H[p',p,q',q] * theta[a,p,q,b]
-    # Wait, let me be careful with bra vs ket indices.
-    # H acts as: H|p,q> = sum_{p',q'} H[p',q',p,q] |p',q'>
-    # <theta|H|theta> = sum_{a,b,p,q,p',q'} conj(theta[a,p',q',b]) * H[p',q',p,q] * theta[a,p,q,b]
-    # H_2site[p_top, p_bot, q_top, q_bot]:
-    #   p_top, q_top = bra (output) physical indices
-    #   p_bot, q_bot = ket (input) physical indices
-    energy = jnp.einsum(
-        "asrb,PsQr,aPQb->",
-        jnp.conj(theta),
-        H_2site,
-        theta,
-    )
-    norm = jnp.einsum("apqb,apqb->", jnp.conj(theta), theta)
-    return float(energy / norm)
 
 
 def _update_left_env_dense(
@@ -640,9 +597,11 @@ def _trivial_left_env_symmetric(
     bond_mps = np.zeros(1, dtype=np.int32)
     mpo_charges = mpo.indices[0].charges  # w_l charges
     indices = (
-        TensorIndex(sym, bond_mps, FlowDirection.IN, label="env_mps_l"),
-        TensorIndex(sym, mpo_charges, FlowDirection.IN, label="env_mpo_l"),
-        TensorIndex(sym, bond_mps, FlowDirection.OUT, label="env_mps_conj_l"),
+        TensorIndex.from_charges(sym, bond_mps, FlowDirection.IN, label="env_mps_l"),
+        TensorIndex.from_charges(sym, mpo_charges, FlowDirection.IN, label="env_mpo_l"),
+        TensorIndex.from_charges(
+            sym, bond_mps, FlowDirection.OUT, label="env_mps_conj_l"
+        ),
     )
     # Only the vacuum row (last MPO state) is non-zero.
     # For Heisenberg: vacuum = state D_w-1, charge = 0.
@@ -660,9 +619,13 @@ def _trivial_right_env_symmetric(
     bond_mps = np.zeros(1, dtype=np.int32)
     mpo_charges = mpo.indices[3].charges  # w_r charges
     indices = (
-        TensorIndex(sym, bond_mps, FlowDirection.OUT, label="env_mps_r"),
-        TensorIndex(sym, mpo_charges, FlowDirection.OUT, label="env_mpo_r"),
-        TensorIndex(sym, bond_mps, FlowDirection.IN, label="env_mps_conj_r"),
+        TensorIndex.from_charges(sym, bond_mps, FlowDirection.OUT, label="env_mps_r"),
+        TensorIndex.from_charges(
+            sym, mpo_charges, FlowDirection.OUT, label="env_mpo_r"
+        ),
+        TensorIndex.from_charges(
+            sym, bond_mps, FlowDirection.IN, label="env_mps_conj_r"
+        ),
     )
     # Only the "done" row (index 0) is non-zero.
     D_w = len(mpo_charges)
@@ -696,9 +659,13 @@ def _solve_left_env_fixedpoint_symmetric(
     L_env_dense = _solve_left_env_fixedpoint_dense(A_L_dense, W_dense)
 
     L_indices = (
-        TensorIndex(sym, np.array(chi_charges), FlowDirection.IN, label="env_mps_l"),
-        TensorIndex(sym, np.array(mpo_charges), FlowDirection.IN, label="env_mpo_l"),
-        TensorIndex(
+        TensorIndex.from_charges(
+            sym, np.array(chi_charges), FlowDirection.IN, label="env_mps_l"
+        ),
+        TensorIndex.from_charges(
+            sym, np.array(mpo_charges), FlowDirection.IN, label="env_mpo_l"
+        ),
+        TensorIndex.from_charges(
             sym, np.array(chi_charges), FlowDirection.OUT, label="env_mps_conj_l"
         ),
     )
@@ -734,338 +701,19 @@ def _solve_right_env_fixedpoint_symmetric(
     R_env_dense = _solve_right_env_fixedpoint_dense(A_R_dense, W_dense)
 
     R_indices = (
-        TensorIndex(sym, np.array(chi_charges), FlowDirection.OUT, label="env_mps_r"),
-        TensorIndex(sym, np.array(mpo_charges), FlowDirection.OUT, label="env_mpo_r"),
-        TensorIndex(
+        TensorIndex.from_charges(
+            sym, np.array(chi_charges), FlowDirection.OUT, label="env_mps_r"
+        ),
+        TensorIndex.from_charges(
+            sym, np.array(mpo_charges), FlowDirection.OUT, label="env_mpo_r"
+        ),
+        TensorIndex.from_charges(
             sym, np.array(chi_charges), FlowDirection.IN, label="env_mps_conj_r"
         ),
     )
     # See comment in _solve_left_env_fixedpoint_symmetric.
     return SymmetricTensor.from_dense(
         jnp.array(R_env_dense), R_indices, tol=float("inf")
-    )
-
-
-def _idmrg_growing_chain_symmetric(
-    bulk_mpo: SymmetricTensor,
-    config: iDMRGConfig,
-    d: int,
-    dtype: Any,
-) -> iDMRGResult:
-    """Symmetric (block-sparse) growing-chain iDMRG implementation.
-
-    Uses the same Lanczos + SVD + environment update approach as the dense
-    path, but operates on SymmetricTensors throughout.  The block-sparse
-    structure reduces computational cost when exploiting U(1) symmetry.
-    """
-    W_sym = bulk_mpo
-    sym = W_sym.indices[0].symmetry
-    phys_charges = np.array(W_sym.indices[1].charges)
-
-    L_env: Tensor = _trivial_left_env_symmetric(W_sym, dtype=dtype)
-    R_env: Tensor = _trivial_right_env_symmetric(W_sym, dtype=dtype)
-
-    energies_per_step: list[float] = []
-    converged = False
-    key = jax.random.PRNGKey(0)
-    E_prev: float | None = None
-
-    # Virtual bond starts trivial: single charge-0 state.
-    virt_charges = np.zeros(1, dtype=np.int32)
-
-    # Store MPS tensors and previous theta for warm start
-    A_L_tensor: Tensor | None = None
-    A_R_tensor: Tensor | None = None
-    s_vals = jnp.ones(1, dtype=dtype)
-    theta_prev: Tensor | None = None
-
-    for step in range(config.max_iterations):
-        # ---- Build initial theta ----
-        theta_indices = (
-            TensorIndex(sym, virt_charges, FlowDirection.IN, label="v_l"),
-            TensorIndex(sym, phys_charges, FlowDirection.IN, label="p_l"),
-            TensorIndex(sym, phys_charges, FlowDirection.IN, label="p_r"),
-            TensorIndex(sym, virt_charges, FlowDirection.OUT, label="v_r"),
-        )
-
-        if theta_prev is not None and np.array_equal(
-            np.array(theta_prev.indices[0].charges), virt_charges
-        ):
-            # Warm start: reuse previous theta when charges match
-            theta = theta_prev
-        else:
-            # Cold start: random init when bond dimension changed
-            key, subkey = jax.random.split(key)
-            theta = SymmetricTensor.random_normal(theta_indices, subkey, dtype=dtype)
-
-        theta_norm = theta.norm()
-        if theta_norm > 1e-15:
-            theta = theta * (1.0 / theta_norm)
-
-        # Shared cache for opt_einsum contraction expressions
-        _matvec_cache: dict = {}
-
-        # Precompute block plan once — reused across all Lanczos iterations
-        _subs = "abc,apqd,bpse,eqtf,dfg->cstg"
-        _plan = _precompute_block_plan([L_env, theta, W_sym, W_sym, R_env], _subs)
-
-        def matvec(v: Tensor) -> Tensor:
-            return _blockwise_contract(
-                [L_env, v, W_sym, W_sym, R_env],
-                _subs,
-                output_indices=v.indices,
-                expr_cache=_matvec_cache,
-                block_plan=_plan,
-            )
-
-        E_total_val, theta_opt = _lanczos_solve_tensor(
-            matvec, theta, config.lanczos_max_iter, config.lanczos_tol
-        )
-        E_total = float(E_total_val)
-        theta_prev = theta_opt
-
-        # ---- SVD and truncate ----
-        U_t, s_full, Vh_t, _ = truncated_svd(
-            theta_opt,
-            left_labels=["v_l", "p_l"],
-            right_labels=["p_r", "v_r"],
-            new_bond_label="v_c",
-            max_singular_values=config.max_bond_dim,
-            max_truncation_err=config.svd_trunc_err,
-        )
-        # U_t: (v_l, p_l, v_c),  Vh_t: (v_c, p_r, v_r)
-        s_vals = s_full
-        s_norm = float(jnp.linalg.norm(s_vals))
-        if s_norm > 1e-15:
-            s_vals = s_vals / s_norm
-
-        # A_L = U (left-isometric), A_R = Vh (right-isometric)
-        A_L_tensor = U_t
-        A_R_tensor = Vh_t
-
-        # ---- Update environments ----
-        L_env = _update_left_env_symmetric(L_env, A_L_tensor, W_sym)
-        R_env = _update_right_env_symmetric(R_env, A_R_tensor, W_sym)
-
-        # Update virtual charges for next step from the SVD bond
-        virt_charges = np.array(A_L_tensor.indices[2].charges)
-
-        # ---- Compute energy per site ----
-        if E_prev is not None:
-            e_per_site = (E_total - E_prev) / 2.0
-        else:
-            e_per_site = E_total / 2.0
-        energies_per_step.append(e_per_site)
-
-        if config.verbose:
-            n_keep = len(s_vals)
-            print(
-                f"iDMRG step {step + 1}: E_total={E_total:.10f}, "
-                f"e/site={e_per_site:.10f}, chi={n_keep}",
-                flush=True,
-            )
-
-        # ---- Check convergence ----
-        n_e = len(energies_per_step)
-        if n_e >= 4:
-            n_half = min(n_e // 2, 5)
-            avg_recent = sum(energies_per_step[-n_half:]) / n_half
-            avg_prev = sum(energies_per_step[-2 * n_half : -n_half]) / n_half
-            if abs(avg_recent - avg_prev) < config.convergence_tol:
-                converged = True
-                if config.verbose:
-                    print(f"Converged at step {step + 1}", flush=True)
-                break
-
-        E_prev = E_total
-
-    n_avg = max(len(energies_per_step) // 2, 1)
-    e_per_site_avg = sum(energies_per_step[-n_avg:]) / n_avg
-
-    return iDMRGResult(
-        energy_per_site=e_per_site_avg,
-        energies_per_step=energies_per_step,
-        mps=InfiniteMPS.from_tensors(
-            [A_L_tensor, A_R_tensor],
-            [s_vals, s_vals, s_vals],  # L+1 = 3 bonds for 2-site cell
-        ),
-        converged=converged,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Main algorithm
-# ---------------------------------------------------------------------------
-
-
-def _idmrg_growing_chain(
-    bulk_mpo_dense: jax.Array,
-    config: iDMRGConfig,
-    d: int,
-    dtype: Any,
-) -> iDMRGResult:
-    """Dense growing-chain iDMRG implementation.
-
-    Grows the chain by two sites per iteration, optimising a two-site
-    wavefunction via Lanczos and updating environments incrementally.
-
-    Args:
-        bulk_mpo_dense: Raw dense MPO array, shape (D_w, d, d, D_w).
-        config: iDMRG configuration.
-        d: Physical dimension.
-        dtype: JAX dtype for computation.
-
-    Returns:
-        ``iDMRGResult`` with energy per site and diagnostic information.
-    """
-    W = bulk_mpo_dense
-    D_w = W.shape[0]
-
-    # ---- Initialise environments ----
-    L_env = _trivial_left_env(D_w, dtype=dtype).todense()  # (1, D_w, 1)
-    R_env = _trivial_right_env(D_w, dtype=dtype).todense()  # (1, D_w, 1)
-
-    energies_per_step: list[float] = []
-    e_per_site = 0.0
-    converged = False
-    chi_env = 1
-    key = jax.random.PRNGKey(0)
-    s_vals = jnp.ones(1, dtype=dtype)
-    theta_prev: jax.Array | None = None
-    E_prev: float | None = None  # previous Lanczos eigenvalue
-
-    for step in range(config.max_iterations):
-        # ---- Form initial two-site wavefunction theta ----
-        if theta_prev is not None and theta_prev.shape == (chi_env, d, d, chi_env):
-            theta = theta_prev
-        elif theta_prev is not None:
-            old_chi = theta_prev.shape[0]
-            theta = jnp.zeros((chi_env, d, d, chi_env), dtype=dtype)
-            theta = theta.at[:old_chi, :, :, :old_chi].set(theta_prev)
-            key, subkey = jax.random.split(key)
-            noise = 1e-3 * jax.random.normal(
-                subkey, (chi_env, d, d, chi_env), dtype=dtype
-            )
-            theta = theta + noise
-        else:
-            key, subkey = jax.random.split(key)
-            theta = jax.random.normal(subkey, (chi_env, d, d, chi_env), dtype=dtype)
-        theta = theta / jnp.linalg.norm(theta)
-
-        theta_shape = theta.shape
-        theta_flat = theta.ravel()
-
-        # ---- Solve eigenvalue problem via Lanczos ----
-        _ts = theta_shape
-        _le = L_env
-        _re = R_env
-
-        def matvec(v: jax.Array) -> jax.Array:
-            return _idmrg_matvec_jit(v, _ts, _le, W, W, _re)
-
-        E_total, theta_opt_flat = _lanczos_solve_jit(
-            matvec, theta_flat, config.lanczos_max_iter
-        )
-        E_total = float(E_total)
-
-        theta_opt = theta_opt_flat.reshape(theta_shape)
-
-        # ---- SVD and truncate ----
-        chi_l, d_l, d_r, chi_r = theta_shape
-        matrix = theta_opt.reshape(chi_l * d_l, d_r * chi_r)
-        U, s_full, Vt = jnp.linalg.svd(matrix, full_matrices=False)
-
-        n_keep = min(config.max_bond_dim, len(s_full))
-        if config.svd_trunc_err is not None:
-            total_sq = jnp.sum(s_full**2)
-            cumul_sq = jnp.cumsum(s_full[::-1] ** 2)[::-1]
-            mask = cumul_sq > (config.svd_trunc_err**2 * total_sq)
-            n_by_err = max(int(jnp.sum(mask)), 1)
-            n_keep = min(n_keep, n_by_err)
-
-        U = U[:, :n_keep]
-        s_vals = s_full[:n_keep]
-        Vt = Vt[:n_keep, :]
-
-        # Normalise singular values
-        s_norm = jnp.linalg.norm(s_vals)
-        if s_norm > 1e-15:
-            s_vals = s_vals / s_norm
-
-        # A_L: left-isometric (from U columns)
-        A_L = U.reshape(chi_l, d_l, n_keep)
-        # A_R_iso: right-isometric (from Vt rows, no singular values)
-        A_R_iso = Vt.reshape(n_keep, d_r, chi_r)
-
-        # ---- Update environments with isometric tensors ----
-        L_env_new = _update_left_env_dense(L_env, A_L, W)
-        R_env_new = _update_right_env_dense(R_env, A_R_iso, W)
-
-        # ---- Compute energy per site via energy difference ----
-        if E_prev is not None:
-            e_per_site = (E_total - E_prev) / 2.0
-        else:
-            e_per_site = E_total / 2.0
-        energies_per_step.append(e_per_site)
-
-        if config.verbose:
-            print(
-                f"iDMRG step {step + 1}: E_total={E_total:.10f}, "
-                f"e/site={e_per_site:.10f}, chi={n_keep}",
-                flush=True,
-            )
-
-        # ---- Check convergence (rolling average to handle oscillation) ----
-        n_e = len(energies_per_step)
-        if n_e >= 4:
-            n_half = min(n_e // 2, 5)
-            avg_recent = sum(energies_per_step[-n_half:]) / n_half
-            avg_prev = sum(energies_per_step[-2 * n_half : -n_half]) / n_half
-            if abs(avg_recent - avg_prev) < config.convergence_tol:
-                converged = True
-                if config.verbose:
-                    print(f"Converged at step {step + 1}", flush=True)
-                break
-
-        # ---- Prepare for next iteration ----
-        E_prev = E_total
-        theta_prev = theta_opt
-        chi_env = n_keep
-        L_env = L_env_new
-        R_env = R_env_new
-
-    # ---- Wrap final MPS tensors ----
-    sym = U1Symmetry()
-
-    def _wrap_mps(data: jax.Array, labels: tuple[str, ...]) -> DenseTensor:
-        indices = tuple(
-            TensorIndex(
-                sym,
-                np.zeros(data.shape[k], dtype=np.int32),
-                FlowDirection.IN if k < data.ndim - 1 else FlowDirection.OUT,
-                label=labels[k],
-            )
-            for k in range(data.ndim)
-        )
-        return DenseTensor(data, indices)
-
-    A_L_tensor = _wrap_mps(A_L, ("v_l", "p_l", "v_c"))
-    # Return A_R with singular values absorbed for a complete MPS
-    A_R_sv = (jnp.diag(s_vals) @ Vt).reshape(n_keep, d, chi_r)
-    A_R_tensor = _wrap_mps(A_R_sv, ("v_c", "p_r", "v_r"))
-
-    # Report energy as average of last half of steps to smooth oscillation
-    n_avg = max(len(energies_per_step) // 2, 1)
-    e_per_site_avg = sum(energies_per_step[-n_avg:]) / n_avg
-
-    return iDMRGResult(
-        energy_per_site=e_per_site_avg,
-        energies_per_step=energies_per_step,
-        mps=InfiniteMPS.from_tensors(
-            [A_L_tensor, A_R_tensor],
-            [s_vals, s_vals, s_vals],  # L+1 = 3 bonds for 2-site cell
-        ),
-        converged=converged,
     )
 
 
@@ -1392,7 +1040,7 @@ def _idmrg_sweep(
 
     def _wrap_mps(data: jax.Array, labels: tuple[str, ...]) -> DenseTensor:
         indices = tuple(
-            TensorIndex(
+            TensorIndex.from_charges(
                 sym,
                 np.zeros(data.shape[k], dtype=np.int32),
                 FlowDirection.IN if k < data.ndim - 1 else FlowDirection.OUT,
@@ -1451,36 +1099,29 @@ def _idmrg_sweep_symmetric(
 
     energies_per_step: list[float] = []
     converged = False
-    key = jax.random.PRNGKey(0)
     E_prev: float | None = None
 
     # Virtual bond starts trivial: single charge-0 state.
     virt_charges = np.zeros(1, dtype=np.int32)
 
-    # Store MPS tensors and previous theta for warm start
+    # Store MPS tensors
     A_L_tensor: Tensor | None = None
     A_R_tensor: Tensor | None = None
     s_vals = jnp.ones(1, dtype=dtype)
-    theta_prev: Tensor | None = None
 
     for sweep in range(config.max_iterations):
         # ---- Build initial theta ----
         theta_indices = (
-            TensorIndex(sym, virt_charges, FlowDirection.IN, label="v_l"),
-            TensorIndex(sym, phys_charges, FlowDirection.IN, label="p_l"),
-            TensorIndex(sym, phys_charges, FlowDirection.IN, label="p_r"),
-            TensorIndex(sym, virt_charges, FlowDirection.OUT, label="v_r"),
+            TensorIndex.from_charges(sym, virt_charges, FlowDirection.IN, label="v_l"),
+            TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="p_l"),
+            TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="p_r"),
+            TensorIndex.from_charges(sym, virt_charges, FlowDirection.OUT, label="v_r"),
         )
-
-        if theta_prev is not None and np.array_equal(
-            np.array(theta_prev.indices[0].charges), virt_charges
-        ):
-            # Warm start: reuse previous theta when charges match
-            theta = theta_prev
-        else:
-            # Cold start: random init when bond dimension changed
-            key, subkey = jax.random.split(key)
-            theta = SymmetricTensor.random_normal(theta_indices, subkey, dtype=dtype)
+        # Use numpy random instead of JAX to avoid compilation overhead.
+        # iDMRG charge sectors alternate (even/odd) each sweep, so
+        # warm-starting from the previous theta is not possible.
+        _rng = np.random.RandomState(sweep)
+        theta = SymmetricTensor.random_normal_np(theta_indices, _rng, dtype=dtype)
 
         theta_norm = theta.norm()
         if theta_norm > 1e-15:
@@ -1546,7 +1187,6 @@ def _idmrg_sweep_symmetric(
             )
 
         E_total = float(E_total_val)
-        theta_prev = theta_opt
 
         # ---- SVD and truncate ----
         if config.numpy_blockwise:
@@ -1837,7 +1477,7 @@ def _idmrg_1site_sweep(
 
     def _wrap_mps(data: jax.Array, labels: tuple[str, ...]) -> DenseTensor:
         indices = tuple(
-            TensorIndex(
+            TensorIndex.from_charges(
                 sym,
                 np.zeros(data.shape[k], dtype=np.int32),
                 FlowDirection.IN if k < data.ndim - 1 else FlowDirection.OUT,

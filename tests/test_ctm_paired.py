@@ -45,11 +45,13 @@ def small_peps_dense():
     charges = np.zeros(D, dtype=np.int32)
     phys_charges = np.zeros(d, dtype=np.int32)
     indices = (
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
     )
     return DenseTensor(data, indices)
 
@@ -62,11 +64,11 @@ def small_peps_fermionic():
     vc = np.array([0, 1], dtype=np.int32)
     pc = np.array([0, 1], dtype=np.int32)
     indices = (
-        TensorIndex(sym, vc.copy(), FlowDirection.OUT, label="u"),
-        TensorIndex(sym, vc.copy(), FlowDirection.IN, label="d"),
-        TensorIndex(sym, vc.copy(), FlowDirection.OUT, label="l"),
-        TensorIndex(sym, vc.copy(), FlowDirection.IN, label="r"),
-        TensorIndex(sym, pc.copy(), FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(sym, vc.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, vc.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, vc.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, vc.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(sym, pc.copy(), FlowDirection.IN, label="phys"),
     )
     return SymmetricTensor.random_normal(indices, key)
 
@@ -79,11 +81,11 @@ def small_peps_u1():
     vc = np.array([-1, 1], dtype=np.int32)
     pc = np.array([-1, 1], dtype=np.int32)
     indices = (
-        TensorIndex(sym, vc.copy(), FlowDirection.OUT, label="u"),
-        TensorIndex(sym, vc.copy(), FlowDirection.IN, label="d"),
-        TensorIndex(sym, vc.copy(), FlowDirection.OUT, label="l"),
-        TensorIndex(sym, vc.copy(), FlowDirection.IN, label="r"),
-        TensorIndex(sym, pc.copy(), FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(sym, vc.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, vc.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, vc.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, vc.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(sym, pc.copy(), FlowDirection.IN, label="phys"),
     )
     return SymmetricTensor.random_normal(indices, key)
 
@@ -167,11 +169,11 @@ class TestPairedSweepFermionic:
         data = data + 0.05 * jax.random.normal(jax.random.PRNGKey(7), (D, D, D, D, d))
         data = data / jnp.linalg.norm(data)
         indices = (
-            TensorIndex(sym, vc.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, vc.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, vc.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, vc.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, pc.copy(), FlowDirection.IN, label="phys"),
+            TensorIndex.from_charges(sym, vc.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex.from_charges(sym, vc.copy(), FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(sym, vc.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex.from_charges(sym, vc.copy(), FlowDirection.IN, label="r"),
+            TensorIndex.from_charges(sym, pc.copy(), FlowDirection.IN, label="phys"),
         )
         A = SymmetricTensor.from_dense(data, indices, tol=float("inf"))
 

@@ -224,20 +224,20 @@ def compute_ising_tensor(
         sym = ZnSymmetry(2)
         charges = np.array([0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(sym, charges, FlowDirection.IN, label="up"),
-            TensorIndex(sym, charges, FlowDirection.OUT, label="down"),
-            TensorIndex(sym, charges, FlowDirection.IN, label="left"),
-            TensorIndex(sym, charges, FlowDirection.OUT, label="right"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="up"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="down"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="left"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="right"),
         )
         return SymmetricTensor.from_dense(T_z2, indices)
 
     sym = U1Symmetry()
     bond_2 = np.zeros(2, dtype=np.int32)
     indices = (
-        TensorIndex(sym, bond_2, FlowDirection.IN, label="up"),
-        TensorIndex(sym, bond_2, FlowDirection.OUT, label="down"),
-        TensorIndex(sym, bond_2, FlowDirection.IN, label="left"),
-        TensorIndex(sym, bond_2, FlowDirection.OUT, label="right"),
+        TensorIndex.from_charges(sym, bond_2, FlowDirection.IN, label="up"),
+        TensorIndex.from_charges(sym, bond_2, FlowDirection.OUT, label="down"),
+        TensorIndex.from_charges(sym, bond_2, FlowDirection.IN, label="left"),
+        TensorIndex.from_charges(sym, bond_2, FlowDirection.OUT, label="right"),
     )
     return DenseTensor(T, indices)
 
@@ -333,10 +333,10 @@ def compute_free_wilson_fermion_tensor(
     sym = FermionParity()
     charges = np.array([0, 1, 1, 0], dtype=np.int32)
     indices = (
-        TensorIndex(sym, charges, FlowDirection.IN, label="right"),
-        TensorIndex(sym, charges, FlowDirection.IN, label="up"),
-        TensorIndex(sym, charges, FlowDirection.OUT, label="left"),
-        TensorIndex(sym, charges, FlowDirection.OUT, label="down"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="right"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="up"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="left"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="down"),
     )
     return SymmetricTensor.from_dense(T4, indices)
 

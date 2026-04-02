@@ -29,7 +29,7 @@ def make_dense(u1, shape, labels, flows, rng, charges_per_leg=None):
     if charges_per_leg is not None:
         charges = charges_per_leg
     indices = tuple(
-        TensorIndex(u1, charges[i], flows[i], label=labels[i])
+        TensorIndex.from_charges(u1, charges[i], flows[i], label=labels[i])
         for i in range(len(shape))
     )
     return DenseTensor(data, indices)
@@ -44,10 +44,12 @@ class TestLabelsToSubscripts:
     def test_two_tensor_contraction(self, u1, rng):
         """Two tensors sharing one label → subscript contracts that label."""
         charges = np.zeros(3, dtype=np.int32)
-        idx_i = TensorIndex(u1, charges, FlowDirection.IN, label="i")
-        idx_j_in = TensorIndex(u1, charges, FlowDirection.IN, label="j")
-        idx_j_out = TensorIndex(u1, charges, FlowDirection.OUT, label="j")  # shared
-        idx_k = TensorIndex(u1, charges, FlowDirection.OUT, label="k")
+        idx_i = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="i")
+        idx_j_in = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="j")
+        idx_j_out = TensorIndex.from_charges(
+            u1, charges, FlowDirection.OUT, label="j"
+        )  # shared
+        idx_k = TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="k")
 
         A = DenseTensor(jnp.ones((3, 3)), (idx_i, idx_j_out))
         B = DenseTensor(jnp.ones((3, 3)), (idx_j_in, idx_k))
@@ -68,7 +70,7 @@ class TestLabelsToSubscripts:
     def test_triple_label_raises(self, u1, rng):
         """Label appearing 3 times should raise."""
         charges = np.zeros(2, dtype=np.int32)
-        idx = TensorIndex(u1, charges, FlowDirection.IN, label="shared")
+        idx = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="shared")
         A = DenseTensor(jnp.ones((2,)), (idx,))
         B = DenseTensor(jnp.ones((2,)), (idx,))
         C = DenseTensor(jnp.ones((2,)), (idx,))
@@ -78,8 +80,8 @@ class TestLabelsToSubscripts:
     def test_output_labels_respected(self, u1, rng):
         """output_labels should control ordering of free legs."""
         charges = np.zeros(2, dtype=np.int32)
-        idx_a = TensorIndex(u1, charges, FlowDirection.IN, label="a")
-        idx_b = TensorIndex(u1, charges, FlowDirection.IN, label="b")
+        idx_a = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a")
+        idx_b = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="b")
         A = DenseTensor(jnp.ones((2, 2)), (idx_a, idx_b))
         # No shared labels — both a, b are free
         subs, out_indices = _labels_to_subscripts([A], output_labels=["b", "a"])
@@ -97,9 +99,9 @@ class TestContractDense:
         """contract(M, v) where shared label 'j' gives M @ v."""
         n = 4
         charges = np.zeros(n, dtype=np.int32)
-        idx_i = TensorIndex(u1, charges, FlowDirection.IN, label="i")
-        idx_j_out = TensorIndex(u1, charges, FlowDirection.OUT, label="j")
-        idx_j_in = TensorIndex(u1, charges, FlowDirection.IN, label="j")
+        idx_i = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="i")
+        idx_j_out = TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="j")
+        idx_j_in = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="j")
 
         M_data = jax.random.normal(rng, (n, n))
         v_data = jax.random.normal(jax.random.PRNGKey(1), (n,))
@@ -122,15 +124,15 @@ class TestContractDense:
         A = DenseTensor(
             A_data,
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="i"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="j"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="i"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="j"),
             ),
         )
         B = DenseTensor(
             B_data,
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="j"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="k"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="j"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="k"),
             ),
         )
 
@@ -148,8 +150,10 @@ class TestContractDense:
         M = DenseTensor(
             M_data,
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="i"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="i"),  # same label!
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="i"),
+                TensorIndex.from_charges(
+                    u1, charges, FlowDirection.OUT, label="i"
+                ),  # same label!
             ),
         )
 
@@ -165,10 +169,12 @@ class TestContractDense:
         b_data = jax.random.normal(jax.random.PRNGKey(7), (n,))
 
         a = DenseTensor(
-            a_data, (TensorIndex(u1, charges, FlowDirection.IN, label="i"),)
+            a_data,
+            (TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="i"),),
         )
         b = DenseTensor(
-            b_data, (TensorIndex(u1, charges, FlowDirection.IN, label="j"),)
+            b_data,
+            (TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="j"),),
         )
 
         result = contract(a, b)
@@ -184,10 +190,12 @@ class TestContractDense:
         b_data = jax.random.normal(jax.random.PRNGKey(8), (n,))
 
         a = DenseTensor(
-            a_data, (TensorIndex(u1, charges, FlowDirection.IN, label="i"),)
+            a_data,
+            (TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="i"),),
         )
         b = DenseTensor(
-            b_data, (TensorIndex(u1, charges, FlowDirection.IN, label="j"),)
+            b_data,
+            (TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="j"),),
         )
 
         result_ij = contract(a, b, output_labels=["i", "j"])
@@ -207,7 +215,8 @@ class TestContractDense:
     def test_mixed_types_raises(self, u1, rng, u1_sym_tensor_2leg):
         charges = np.zeros(3, dtype=np.int32)
         dense = DenseTensor(
-            jnp.ones((3,)), (TensorIndex(u1, charges, FlowDirection.IN, label="x"),)
+            jnp.ones((3,)),
+            (TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="x"),),
         )
         with pytest.raises(TypeError, match="mix"):
             contract(dense, u1_sym_tensor_2leg)
@@ -235,13 +244,14 @@ class TestContractDense:
         A = DenseTensor(
             A_data,
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="i"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="j"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="i"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="j"),
             ),
         )
         B_data = jax.random.normal(jax.random.PRNGKey(2), (n,))
         B = DenseTensor(
-            B_data, (TensorIndex(u1, charges, FlowDirection.IN, label="j"),)
+            B_data,
+            (TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="j"),),
         )
 
         contract(A, B)
@@ -257,13 +267,14 @@ class TestContractDense:
         A = DenseTensor(
             A_data,
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="i"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="j"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="i"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="j"),
             ),
         )
         B_data = jax.random.normal(jax.random.PRNGKey(99), (n,))
         B = DenseTensor(
-            B_data, (TensorIndex(u1, charges, FlowDirection.IN, label="j"),)
+            B_data,
+            (TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="j"),),
         )
 
         contract(A, B)
@@ -274,13 +285,14 @@ class TestContractDense:
         A2 = DenseTensor(
             A2_data,
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="i"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="j"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="i"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="j"),
             ),
         )
         B2_data = jax.random.normal(jax.random.PRNGKey(101), (n,))
         B2 = DenseTensor(
-            B2_data, (TensorIndex(u1, charges, FlowDirection.IN, label="j"),)
+            B2_data,
+            (TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="j"),),
         )
 
         contract(A2, B2)
@@ -300,15 +312,15 @@ class TestContractDense:
         A = DenseTensor(
             A_data,
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="i"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="j"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="i"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="j"),
             ),
         )
         B = DenseTensor(
             B_data,
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="j"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="k"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="j"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="k"),
             ),
         )
 
@@ -378,8 +390,8 @@ class TestTruncatedSVD:
         t = DenseTensor(
             data,
             (
-                TensorIndex(u1, charges_n, FlowDirection.IN, label="row"),
-                TensorIndex(u1, charges_m, FlowDirection.OUT, label="col"),
+                TensorIndex.from_charges(u1, charges_n, FlowDirection.IN, label="row"),
+                TensorIndex.from_charges(u1, charges_m, FlowDirection.OUT, label="col"),
             ),
         )
 
@@ -399,8 +411,8 @@ class TestTruncatedSVD:
         t = DenseTensor(
             data,
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="left"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="right"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="left"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="right"),
             ),
         )
 
@@ -423,8 +435,8 @@ class TestTruncatedSVD:
         t = DenseTensor(
             data,
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
             ),
         )
         _, s, _, _ = truncated_svd(
@@ -460,8 +472,8 @@ class TestTruncatedSVD:
         t = DenseTensor(
             data,
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="left"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="right"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="left"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="right"),
             ),
         )
 
@@ -480,8 +492,8 @@ class TestTruncatedSVD:
         t = DenseTensor(
             data,
             (
-                TensorIndex(u1, charges_n, FlowDirection.IN, label="row"),
-                TensorIndex(u1, charges_m, FlowDirection.OUT, label="col"),
+                TensorIndex.from_charges(u1, charges_n, FlowDirection.IN, label="row"),
+                TensorIndex.from_charges(u1, charges_m, FlowDirection.OUT, label="col"),
             ),
         )
 
@@ -520,8 +532,8 @@ class TestTruncatedSVD:
         t = DenseTensor(
             data,
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
             ),
         )
 
@@ -550,8 +562,8 @@ class TestQRDecompose:
         t = DenseTensor(
             data,
             (
-                TensorIndex(u1, charges_n, FlowDirection.IN, label="row"),
-                TensorIndex(u1, charges_m, FlowDirection.OUT, label="col"),
+                TensorIndex.from_charges(u1, charges_n, FlowDirection.IN, label="row"),
+                TensorIndex.from_charges(u1, charges_m, FlowDirection.OUT, label="col"),
             ),
         )
 
@@ -570,8 +582,8 @@ class TestQRDecompose:
         t = DenseTensor(
             data,
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
             ),
         )
 
@@ -589,8 +601,8 @@ class TestQRDecompose:
         t = DenseTensor(
             data,
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="x"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="y"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="x"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="y"),
             ),
         )
         Q, R = qr_decompose(
@@ -608,8 +620,10 @@ class TestQRDecompose:
 def _make_symmetric_2leg(u1, rng, left_charges, right_charges, left_label, right_label):
     """Helper: build a 2-leg U(1)-symmetric tensor with given charges."""
     indices = (
-        TensorIndex(u1, left_charges, FlowDirection.IN, label=left_label),
-        TensorIndex(u1, u1.dual(left_charges), FlowDirection.OUT, label=right_label),
+        TensorIndex.from_charges(u1, left_charges, FlowDirection.IN, label=left_label),
+        TensorIndex.from_charges(
+            u1, u1.dual(left_charges), FlowDirection.OUT, label=right_label
+        ),
     )
     return SymmetricTensor.random_normal(indices, rng)
 
@@ -619,9 +633,9 @@ def _make_symmetric_3leg(u1, rng):
     phys_c = np.array([-1, 0, 1], dtype=np.int32)
     virt_c = np.array([-1, 0, 1], dtype=np.int32)
     indices = (
-        TensorIndex(u1, phys_c, FlowDirection.IN, label="phys"),
-        TensorIndex(u1, virt_c, FlowDirection.IN, label="left"),
-        TensorIndex(u1, u1.dual(virt_c), FlowDirection.OUT, label="right"),
+        TensorIndex.from_charges(u1, phys_c, FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(u1, virt_c, FlowDirection.IN, label="left"),
+        TensorIndex.from_charges(u1, u1.dual(virt_c), FlowDirection.OUT, label="right"),
     )
     return SymmetricTensor.random_normal(indices, rng)
 

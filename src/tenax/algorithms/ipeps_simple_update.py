@@ -269,10 +269,14 @@ def _make_trotter_gate_tensor(
         charges = np.zeros(d, dtype=np.int32)
 
     indices = (
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="si"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="sj"),
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="si_out"),
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="sj_out"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="si"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="sj"),
+        TensorIndex.from_charges(
+            sym, charges.copy(), FlowDirection.OUT, label="si_out"
+        ),
+        TensorIndex.from_charges(
+            sym, charges.copy(), FlowDirection.OUT, label="sj_out"
+        ),
     )
 
     if isinstance(site_tensor, SymmetricTensor):

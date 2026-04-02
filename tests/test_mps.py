@@ -25,31 +25,39 @@ def _make_dense_mps(L=4, d=2, chi=3, key=None):
         if i == 0:
             shape = (1, d, chi)
             indices = (
-                TensorIndex(u1, np.zeros(1, dtype=np.int32), IN, label="v_-1_0"),
-                TensorIndex(u1, np.zeros(d, dtype=np.int32), IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    u1, np.zeros(1, dtype=np.int32), IN, label="v_-1_0"
+                ),
+                TensorIndex.from_charges(
+                    u1, np.zeros(d, dtype=np.int32), IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     u1, np.zeros(chi, dtype=np.int32), OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         elif i == L - 1:
             shape = (chi, d, 1)
             indices = (
-                TensorIndex(
+                TensorIndex.from_charges(
                     u1, np.zeros(chi, dtype=np.int32), IN, label=f"v{i - 1}_{i}"
                 ),
-                TensorIndex(u1, np.zeros(d, dtype=np.int32), IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    u1, np.zeros(d, dtype=np.int32), IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     u1, np.zeros(1, dtype=np.int32), OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         else:
             shape = (chi, d, chi)
             indices = (
-                TensorIndex(
+                TensorIndex.from_charges(
                     u1, np.zeros(chi, dtype=np.int32), IN, label=f"v{i - 1}_{i}"
                 ),
-                TensorIndex(u1, np.zeros(d, dtype=np.int32), IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    u1, np.zeros(d, dtype=np.int32), IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     u1, np.zeros(chi, dtype=np.int32), OUT, label=f"v{i}_{i + 1}"
                 ),
             )
@@ -83,21 +91,21 @@ def _make_symmetric_mps(L=4, d=2, chi=4, key=None):
         key, subkey = jax.random.split(key)
         if i == 0:
             indices = (
-                TensorIndex(sym, trivial_zero, IN, label="v_-1_0"),
-                TensorIndex(sym, phys_charges, IN, label=f"p{i}"),
-                TensorIndex(sym, virt_charges, OUT, label=f"v{i}_{i + 1}"),
+                TensorIndex.from_charges(sym, trivial_zero, IN, label="v_-1_0"),
+                TensorIndex.from_charges(sym, phys_charges, IN, label=f"p{i}"),
+                TensorIndex.from_charges(sym, virt_charges, OUT, label=f"v{i}_{i + 1}"),
             )
         elif i == L - 1:
             indices = (
-                TensorIndex(sym, virt_charges, IN, label=f"v{i - 1}_{i}"),
-                TensorIndex(sym, phys_charges, IN, label=f"p{i}"),
-                TensorIndex(sym, trivial_zero, OUT, label=f"v{i}_{i + 1}"),
+                TensorIndex.from_charges(sym, virt_charges, IN, label=f"v{i - 1}_{i}"),
+                TensorIndex.from_charges(sym, phys_charges, IN, label=f"p{i}"),
+                TensorIndex.from_charges(sym, trivial_zero, OUT, label=f"v{i}_{i + 1}"),
             )
         else:
             indices = (
-                TensorIndex(sym, virt_charges, IN, label=f"v{i - 1}_{i}"),
-                TensorIndex(sym, phys_charges, IN, label=f"p{i}"),
-                TensorIndex(sym, virt_charges, OUT, label=f"v{i}_{i + 1}"),
+                TensorIndex.from_charges(sym, virt_charges, IN, label=f"v{i - 1}_{i}"),
+                TensorIndex.from_charges(sym, phys_charges, IN, label=f"p{i}"),
+                TensorIndex.from_charges(sym, virt_charges, OUT, label=f"v{i}_{i + 1}"),
             )
         tensors.append(SymmetricTensor.random_normal(indices, subkey))
     return tensors
@@ -313,16 +321,16 @@ class TestFiniteMPSEntanglement:
             data = np.array([1.0, 0.0])  # |up>
             if i == 0:
                 indices = (
-                    TensorIndex(
+                    TensorIndex.from_charges(
                         U1Symmetry(),
                         np.zeros(1, dtype=np.int32),
                         IN,
                         label="v_-1_0",
                     ),
-                    TensorIndex(
+                    TensorIndex.from_charges(
                         U1Symmetry(), np.zeros(2, dtype=np.int32), IN, label=f"p{i}"
                     ),
-                    TensorIndex(
+                    TensorIndex.from_charges(
                         U1Symmetry(),
                         np.zeros(1, dtype=np.int32),
                         OUT,
@@ -332,16 +340,16 @@ class TestFiniteMPSEntanglement:
                 data = data.reshape(1, 2, 1)
             elif i == 3:
                 indices = (
-                    TensorIndex(
+                    TensorIndex.from_charges(
                         U1Symmetry(),
                         np.zeros(1, dtype=np.int32),
                         IN,
                         label=f"v{i - 1}_{i}",
                     ),
-                    TensorIndex(
+                    TensorIndex.from_charges(
                         U1Symmetry(), np.zeros(2, dtype=np.int32), IN, label=f"p{i}"
                     ),
-                    TensorIndex(
+                    TensorIndex.from_charges(
                         U1Symmetry(),
                         np.zeros(1, dtype=np.int32),
                         OUT,
@@ -351,16 +359,16 @@ class TestFiniteMPSEntanglement:
                 data = data.reshape(1, 2, 1)
             else:
                 indices = (
-                    TensorIndex(
+                    TensorIndex.from_charges(
                         U1Symmetry(),
                         np.zeros(1, dtype=np.int32),
                         IN,
                         label=f"v{i - 1}_{i}",
                     ),
-                    TensorIndex(
+                    TensorIndex.from_charges(
                         U1Symmetry(), np.zeros(2, dtype=np.int32), IN, label=f"p{i}"
                     ),
-                    TensorIndex(
+                    TensorIndex.from_charges(
                         U1Symmetry(),
                         np.zeros(1, dtype=np.int32),
                         OUT,
@@ -382,14 +390,22 @@ class TestFiniteMPSEntanglement:
         A1 = jnp.array([[[1.0], [0.0]], [[0.0], [1.0]]])  # (chi=2, d=2, 1)
         sym = U1Symmetry()
         idx0 = (
-            TensorIndex(sym, np.zeros(1, dtype=np.int32), IN, label="v_-1_0"),
-            TensorIndex(sym, np.zeros(2, dtype=np.int32), IN, label="p0"),
-            TensorIndex(sym, np.zeros(2, dtype=np.int32), OUT, label="v0_1"),
+            TensorIndex.from_charges(
+                sym, np.zeros(1, dtype=np.int32), IN, label="v_-1_0"
+            ),
+            TensorIndex.from_charges(sym, np.zeros(2, dtype=np.int32), IN, label="p0"),
+            TensorIndex.from_charges(
+                sym, np.zeros(2, dtype=np.int32), OUT, label="v0_1"
+            ),
         )
         idx1 = (
-            TensorIndex(sym, np.zeros(2, dtype=np.int32), IN, label="v0_1"),
-            TensorIndex(sym, np.zeros(2, dtype=np.int32), IN, label="p1"),
-            TensorIndex(sym, np.zeros(1, dtype=np.int32), OUT, label="v1_2"),
+            TensorIndex.from_charges(
+                sym, np.zeros(2, dtype=np.int32), IN, label="v0_1"
+            ),
+            TensorIndex.from_charges(sym, np.zeros(2, dtype=np.int32), IN, label="p1"),
+            TensorIndex.from_charges(
+                sym, np.zeros(1, dtype=np.int32), OUT, label="v1_2"
+            ),
         )
         tensors = [DenseTensor(A0, idx0), DenseTensor(A1, idx1)]
         mps = FiniteMPS.from_tensors(tensors).canonicalize(center=0)
@@ -480,14 +496,14 @@ class TestInfiniteMPS:
         k1, k2 = jax.random.split(key)
 
         idx_AL = (
-            TensorIndex(sym, virt_charges, IN, label="v_l"),
-            TensorIndex(sym, phys_charges, IN, label="p_l"),
-            TensorIndex(sym, virt_charges, OUT, label="v_c"),
+            TensorIndex.from_charges(sym, virt_charges, IN, label="v_l"),
+            TensorIndex.from_charges(sym, phys_charges, IN, label="p_l"),
+            TensorIndex.from_charges(sym, virt_charges, OUT, label="v_c"),
         )
         idx_AR = (
-            TensorIndex(sym, virt_charges, IN, label="v_c"),
-            TensorIndex(sym, phys_charges, IN, label="p_r"),
-            TensorIndex(sym, virt_charges, OUT, label="v_r"),
+            TensorIndex.from_charges(sym, virt_charges, IN, label="v_c"),
+            TensorIndex.from_charges(sym, phys_charges, IN, label="p_r"),
+            TensorIndex.from_charges(sym, virt_charges, OUT, label="v_r"),
         )
         A_L = SymmetricTensor.random_normal(idx_AL, k1)
         A_R = SymmetricTensor.random_normal(idx_AR, k2)
@@ -523,14 +539,14 @@ class TestInfiniteMPS:
         sym = U1Symmetry()
         charges = np.zeros(2, dtype=np.int32)
         idx0 = (
-            TensorIndex(sym, charges, IN, label="v_l"),
-            TensorIndex(sym, charges, IN, label="p_l"),
-            TensorIndex(sym, charges, OUT, label="v_c"),
+            TensorIndex.from_charges(sym, charges, IN, label="v_l"),
+            TensorIndex.from_charges(sym, charges, IN, label="p_l"),
+            TensorIndex.from_charges(sym, charges, OUT, label="v_c"),
         )
         idx1 = (
-            TensorIndex(sym, charges, IN, label="v_c"),
-            TensorIndex(sym, charges, IN, label="p_r"),
-            TensorIndex(sym, charges, OUT, label="v_r"),
+            TensorIndex.from_charges(sym, charges, IN, label="v_c"),
+            TensorIndex.from_charges(sym, charges, IN, label="p_r"),
+            TensorIndex.from_charges(sym, charges, OUT, label="v_r"),
         )
         A = DenseTensor(jnp.ones((2, 2, 2)), idx0)
         B = DenseTensor(jnp.ones((2, 2, 2)), idx1)
@@ -556,14 +572,14 @@ class TestInfiniteMPS:
         sym = U1Symmetry()
         charges = np.zeros(2, dtype=np.int32)
         idx0 = (
-            TensorIndex(sym, charges, IN, label="v_l"),
-            TensorIndex(sym, charges, IN, label="p_l"),
-            TensorIndex(sym, charges, OUT, label="v_c"),
+            TensorIndex.from_charges(sym, charges, IN, label="v_l"),
+            TensorIndex.from_charges(sym, charges, IN, label="p_l"),
+            TensorIndex.from_charges(sym, charges, OUT, label="v_c"),
         )
         idx1 = (
-            TensorIndex(sym, charges, IN, label="v_c"),
-            TensorIndex(sym, charges, IN, label="p_r"),
-            TensorIndex(sym, charges, OUT, label="v_r"),
+            TensorIndex.from_charges(sym, charges, IN, label="v_c"),
+            TensorIndex.from_charges(sym, charges, IN, label="p_r"),
+            TensorIndex.from_charges(sym, charges, OUT, label="v_r"),
         )
         A = DenseTensor(jnp.ones((2, 2, 2)), idx0)
         B = DenseTensor(jnp.ones((2, 2, 2)), idx1)

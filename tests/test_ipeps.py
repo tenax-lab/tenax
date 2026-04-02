@@ -630,11 +630,13 @@ class TestOptimizeGsAd2Site:
         charges = np.zeros(D, dtype=np.int32)
         phys_charges = np.zeros(d, dtype=np.int32)
         indices = (
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex.from_charges(
+                sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+            ),
         )
         A_tensor = DenseTensor(
             jax.random.normal(jax.random.PRNGKey(0), (D, D, D, D, d)),
@@ -883,11 +885,13 @@ class TestOptimizeGsAdDenseOnly:
         charges = np.zeros(2, dtype=np.int32)
         phys_charges = np.zeros(2, dtype=np.int32)
         indices = (
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex.from_charges(
+                sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+            ),
         )
         key = jax.random.PRNGKey(0)
         k1, k2 = jax.random.split(key)
@@ -926,11 +930,13 @@ class TestADSymmetric:
         charges = np.zeros(D, dtype=np.int32)
         phys_charges = np.zeros(d, dtype=np.int32)
         indices = (
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex.from_charges(
+                sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+            ),
         )
         return SymmetricTensor.random_normal(indices, key)
 
@@ -1056,11 +1062,13 @@ class TestTensor2SiteSimpleUpdate:
         data = jax.random.normal(key, (D, D, D, D, d))
         data = data / (jnp.linalg.norm(data) + 1e-10)
         indices = (
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex.from_charges(
+                sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+            ),
         )
         return DenseTensor(data, indices)
 
@@ -1075,11 +1083,13 @@ class TestTensor2SiteSimpleUpdate:
         charges = np.zeros(D, dtype=np.int32)
         phys_charges = np.zeros(d, dtype=np.int32)
         indices = (
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex.from_charges(
+                sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+            ),
         )
         return SymmetricTensor.random_normal(indices, key)
 
