@@ -700,17 +700,24 @@ cdef void _combo_loop_f64(
             perm = int_perm[s]
             if perm:
                 ndim = len(step.out_shape)
-                for d in range(ndim):
-                    shape_arr[d] = step.out_shape[d]
-                    perm_arr[d] = perm[d]
-                total_size = M * N
+                if ndim <= MAX_NDIM:
+                    for d in range(ndim):
+                        shape_arr[d] = step.out_shape[d]
+                        perm_arr[d] = perm[d]
+                    total_size = M * N
 
-                trans_v = work_trans[s]
-                src_p = &out_v[0, 0]
-                dst_p = &trans_v[0, 0]
-                with nogil:
-                    _transpose_nd_f64(src_p, dst_p, ndim, shape_arr,
-                                      perm_arr, total_size)
+                    trans_v = work_trans[s]
+                    src_p = &out_v[0, 0]
+                    dst_p = &trans_v[0, 0]
+                    with nogil:
+                        _transpose_nd_f64(src_p, dst_p, ndim, shape_arr,
+                                          perm_arr, total_size)
+                else:
+                    # Fall back to NumPy for high-rank tensors
+                    tmp_arr = np.asarray(work_gemm[s]).reshape(step.out_shape)
+                    work_trans[s] = np.ascontiguousarray(
+                        tmp_arr.transpose(perm)
+                    ).reshape(int_2d[s])
 
         # Last step: accumulate into output buffer
         step = steps[n_steps - 1]
@@ -806,17 +813,24 @@ cdef void _combo_loop_z128(
             perm = int_perm[s]
             if perm:
                 ndim = len(step.out_shape)
-                for d in range(ndim):
-                    shape_arr[d] = step.out_shape[d]
-                    perm_arr[d] = perm[d]
-                total_size = M * N
+                if ndim <= MAX_NDIM:
+                    for d in range(ndim):
+                        shape_arr[d] = step.out_shape[d]
+                        perm_arr[d] = perm[d]
+                    total_size = M * N
 
-                trans_v = work_trans[s]
-                src_p = &out_v[0, 0]
-                dst_p = &trans_v[0, 0]
-                with nogil:
-                    _transpose_nd_z128(src_p, dst_p, ndim, shape_arr,
-                                       perm_arr, total_size)
+                    trans_v = work_trans[s]
+                    src_p = &out_v[0, 0]
+                    dst_p = &trans_v[0, 0]
+                    with nogil:
+                        _transpose_nd_z128(src_p, dst_p, ndim, shape_arr,
+                                           perm_arr, total_size)
+                else:
+                    # Fall back to NumPy for high-rank tensors
+                    tmp_arr = np.asarray(work_gemm[s]).reshape(step.out_shape)
+                    work_trans[s] = np.ascontiguousarray(
+                        tmp_arr.transpose(perm)
+                    ).reshape(int_2d[s])
 
         # Last step: accumulate into output buffer
         step = steps[n_steps - 1]

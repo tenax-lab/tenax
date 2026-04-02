@@ -550,3 +550,24 @@ class TestCythonKernelV2:
 
         result = kdata.output_buffers[0]
         np.testing.assert_allclose(result, expected, rtol=1e-10)
+
+
+@pytest.mark.skipif(not CYTHON_BLAS_AVAILABLE, reason="Cython BLAS not built")
+class TestV3HighRank:
+    """Regression test for MAX_NDIM guard in V3 combo loops (issue #216 bug 4)."""
+
+    def test_v3_high_rank_no_crash(self):
+        """V3 should not crash on intermediates with >8 dimensions."""
+        from tenax.contraction._cython_blas import execute_all_combos_v3
+
+        # This contraction produces a high-rank intermediate
+        subs = "abcde,efghi->abcdfghi"
+        shapes = [(2,) * 5, (2,) * 5]
+        rng = np.random.default_rng(99)
+        arrays = [rng.standard_normal(s) for s in shapes]
+        expected = np.einsum(subs, *arrays)
+        np_blocks = [{(0,): a} for a in arrays]
+        block_plan = [([(0,)] * 2, (0,))]
+
+        res = execute_all_combos_v3(subs, block_plan, np_blocks, {})[(0,)]
+        np.testing.assert_allclose(res, expected, atol=1e-12)
