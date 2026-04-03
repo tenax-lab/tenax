@@ -292,6 +292,7 @@ def _config_to_tuple(config) -> tuple:
         _PM_STR_TO_INT.get(config.projector_method, 0),
         config.min_iter,
         int(getattr(config, "ad_regularize_svd", True)),
+        int(getattr(config, "gmres_precondition", True)),
     )
 
 
@@ -300,6 +301,7 @@ def _config_from_tuple(config_tuple: tuple):
     pm_int = config_tuple[4] if len(config_tuple) > 4 else 0
     min_iter = config_tuple[5] if len(config_tuple) > 5 else 10
     ad_regularize_svd = bool(config_tuple[6]) if len(config_tuple) > 6 else True
+    gmres_precondition = bool(config_tuple[7]) if len(config_tuple) > 7 else True
     return CTMConfig(
         chi=config_tuple[0],
         max_iter=config_tuple[1],
@@ -308,6 +310,7 @@ def _config_from_tuple(config_tuple: tuple):
         projector_method=_PM_INT_TO_STR.get(pm_int, "eigh"),
         min_iter=min_iter,
         ad_regularize_svd=ad_regularize_svd,
+        gmres_precondition=gmres_precondition,
     )
 
 
@@ -553,10 +556,26 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
             n_env_per_site,
         )
 
+    # Hoist VJP: compute forward residuals once, reuse for operator
+    _, vjp_fn = jax.vjp(lambda e: step_fn(site_leaves, e), env_leaves)
+
     def apply_I_minus_Jt(v):
-        _, vjp_fn = jax.vjp(lambda e: step_fn(site_leaves, e), env_leaves)
         Jt_v = vjp_fn(v)[0]
         return tuple(vi - ji for vi, ji in zip(v, Jt_v))
+
+    # Diagonal scaling preconditioner: normalize by env tensor norms so that
+    # corners (chi×chi) and edges (chi×D²×chi) are on comparable scales.
+    # Nearly free to apply (element-wise multiply, no VJP needed).
+    precond = None
+    if config.gmres_precondition:
+        inv_norms = tuple(
+            1.0 / jnp.maximum(jnp.sqrt(jnp.sum(e**2)), 1e-12) for e in env_leaves
+        )
+
+        def apply_diag_precond(v):
+            return tuple(vi * si for vi, si in zip(v, inv_norms))
+
+        precond = apply_diag_precond
 
     max_fp_iter = min(config.max_iter, 50)
     lam, info = jax_gmres(
@@ -565,6 +584,7 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
         x0=g,
         tol=config.conv_tol,
         maxiter=max_fp_iter,
+        M=precond,
     )
 
     # VJP w.r.t. site_leaves

@@ -332,6 +332,79 @@ class TestGMRESBackward:
             f"{float(jnp.max(jnp.abs(grad1.todense() - grad2.todense())))}"
         )
 
+    def test_gmres_neumann_preconditioner_finite(self):
+        """Neumann-preconditioned GMRES produces finite, nonzero gradients."""
+        A = _make_dense_tensor(jax.random.PRNGKey(200))
+        config = CTMConfig(chi=4, max_iter=10, conv_tol=1e-6, gmres_precondition=True)
+        config_tuple = _config_to_tuple(config)
+        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
+
+        def energy_fn(A_in):
+            A_norm = A_in * (1.0 / (A_in.norm() + 1e-10))
+            env_leaves = ctm_tensor_converge(
+                {(0, 0): A_norm}, None, SINGLE_SITE_NEIGHBORS, config_tuple
+            )
+            env = jax.tree.unflatten(
+                jax.tree.structure(initialize_ctm_tensor_env(A_in, 4)),
+                list(env_leaves),
+            )
+            return compute_energy_ctm_tensor(A_norm, env, gate)
+
+        grad = jax.grad(energy_fn)(A)
+        assert jnp.all(jnp.isfinite(grad.todense())), "Preconditioned GMRES: NaN/Inf"
+        assert grad.norm() > 1e-15, "Preconditioned GMRES: gradient is all zeros"
+
+    def test_gmres_preconditioned_matches_unpreconditioned(self):
+        """Preconditioned and unpreconditioned GMRES must agree on gradients."""
+        A = _make_dense_tensor(jax.random.PRNGKey(55))
+        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
+
+        def _grad_with(precond: bool):
+            config = CTMConfig(
+                chi=4, max_iter=10, conv_tol=1e-6, gmres_precondition=precond
+            )
+            config_tuple = _config_to_tuple(config)
+
+            def energy_fn(A_in):
+                A_norm = A_in * (1.0 / (A_in.norm() + 1e-10))
+                env_leaves = ctm_tensor_converge(
+                    {(0, 0): A_norm}, None, SINGLE_SITE_NEIGHBORS, config_tuple
+                )
+                env = jax.tree.unflatten(
+                    jax.tree.structure(initialize_ctm_tensor_env(A_in, 4)),
+                    list(env_leaves),
+                )
+                return compute_energy_ctm_tensor(A_norm, env, gate)
+
+            return jax.grad(energy_fn)(A)
+
+        grad_on = _grad_with(True)
+        grad_off = _grad_with(False)
+        diff = float(jnp.max(jnp.abs(grad_on.todense() - grad_off.todense())))
+        assert diff < 1e-4, f"Preconditioned vs unpreconditioned gradient diff = {diff}"
+
+    def test_gmres_no_preconditioner_still_works(self):
+        """Setting gmres_precondition=False must still produce finite gradients."""
+        A = _make_dense_tensor(jax.random.PRNGKey(99))
+        config = CTMConfig(chi=4, max_iter=10, conv_tol=1e-6, gmres_precondition=False)
+        config_tuple = _config_to_tuple(config)
+        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
+
+        def energy_fn(A_in):
+            A_norm = A_in * (1.0 / (A_in.norm() + 1e-10))
+            env_leaves = ctm_tensor_converge(
+                {(0, 0): A_norm}, None, SINGLE_SITE_NEIGHBORS, config_tuple
+            )
+            env = jax.tree.unflatten(
+                jax.tree.structure(initialize_ctm_tensor_env(A_in, 4)),
+                list(env_leaves),
+            )
+            return compute_energy_ctm_tensor(A_norm, env, gate)
+
+        grad = jax.grad(energy_fn)(A)
+        assert jnp.all(jnp.isfinite(grad.todense())), "No-precond GMRES: NaN/Inf"
+        assert grad.norm() > 1e-15, "No-precond GMRES: gradient is all zeros"
+
 
 class TestSvdSectorBackward:
     """Tests for the factored _svd_sector_backward function."""
