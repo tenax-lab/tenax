@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.1 (2026-04-04)
+
+### Improvements
+
+- **GMRES diagonal scaling preconditioner** for faster implicit diff backward
+  pass in iPEPS AD optimization (#231)
+- **Fix TensorIndex API calls** for sector-based refactor (#234)
+- **Remove xfail** from `test_ad_d2_chi_scaling` — chi-scaling now works
+  correctly with L-BFGS optimizer and fresh CTM line search
+
 ## v0.4.0 (2026-04-03)
 
 ### New Features
