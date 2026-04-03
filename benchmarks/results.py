@@ -10,7 +10,9 @@ from dataclasses import asdict
 from benchmarks.runner import BenchmarkResult
 
 
-def save_results_json(results: list[BenchmarkResult], path: str, *, quiet: bool = False) -> None:
+def save_results_json(
+    results: list[BenchmarkResult], path: str, *, quiet: bool = False
+) -> None:
     """Save benchmark results to a timestamped JSON file."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     data = [asdict(r) for r in results]

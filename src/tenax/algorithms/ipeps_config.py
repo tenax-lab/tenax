@@ -65,13 +65,19 @@ class iPEPSConfig:
     gate_order: str = "sequential"
     unit_cell: str = "1x1"  # "1x1" or "2site"
     # AD ground-state optimization settings
-    gs_optimizer: str = "adam"
+    gs_optimizer: str = "adam"  # "adam", "lbfgs", or "cg"
     gs_learning_rate: float = 1e-3
     gs_num_steps: int = 200
     gs_conv_tol: float = 1e-8
     gs_verbose: bool = False
     gs_log_interval: int = 10
     gs_max_grad_norm: float = 1.0  # gradient clipping (max global norm)
+    gs_line_search: bool | None = None  # None = auto (True for lbfgs/cg)
+    gs_line_search_max_steps: int = 8
+    gs_explicit_ad: bool = False  # explicit diff through unrolled CTM
+    gs_explicit_ad_steps: int | None = (
+        None  # CTM steps for explicit AD (None = max_iter)
+    )
     su_init: bool = False
 
     def __post_init__(self):

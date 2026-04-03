@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.4.0 (2026-04-03)
+
+### New Features
+
+- **L-BFGS and CG optimizers** for iPEPS AD with Armijo backtracking line
+  search (`gs_optimizer="lbfgs"` or `"cg"`). Line search runs fresh CTM
+  convergence for each trial step to avoid stale-environment artifacts (#235)
+- **Explicit CTM differentiation** (experimental) — backprop through unrolled
+  CTM iterations via `gs_explicit_ad=True`, as an alternative to implicit
+  differentiation (#235)
+- **Cosine learning rate decay** for Adam iPEPS optimizer — lr decays to lr/10
+  over the optimization when `gs_num_steps > 20` (#235)
+- **GPU/TPU-accelerated DMRG** — JIT-compiled sweeps via `jax.lax.scan` for
+  dense tensors and per-operation JIT for block-sparse symmetric tensors;
+  multi-GPU sharding via GSPMD (`DMRGConfig(accelerator="jit"|"sharded")`) (#209)
+- **cuTENSOR block-sparse contractions** for `SymmetricTensor` on GPU (#203)
+- **cuTensorNet backend** for dense GPU contractions (#202)
+- **Symmetric iPEPS simple update** with non-trivial U(1) charges (#206)
+- **Sector-based TensorIndex** — legs store sorted charge sectors and
+  multiplicities for O(n_sectors) lookups; `FuseInfo` tracks parent legs so
+  `split_index` can reverse `fuse_indices` (#213)
+- **AD-based fermionic iPEPS** (fPEPS) optimization (#214)
+- **iDMRG transfer matrix** fixed-point environments for self-consistent
+  infinite boundary conditions (#215, #217)
+- **Fused Cython Lanczos** + matvec dispatch — single Cython call for the
+  entire Lanczos solve, eliminating Python loop overhead (#226)
+
+### Performance
+
+- **Cython BLAS acceleration** for block-sparse contractions — NumPy BLAS
+  calls from Cython with zero Python reentry (#205, #207, #212)
+- **Finite DMRG 2.7–5.3x faster than TeNPy** on CPU with Cython pipeline (#226)
+- **iDMRG 3–4.5x speedup** + fix chi>=96 divergence (#229)
+- **Cython pipeline optimizations** — fused matvec, precomputed block plans,
+  reduced dispatch overhead (#212)
+
+### Bug Fixes
+
+- Fix post-#226 solver/config bugs (#228)
+- Fix 4 correctness bugs in Cython BLAS path (#218)
+- Add Cython availability guards to BLAS regression tests (#224)
+- Fix Codecov v5 coverage input key (#227)
+- Mark `test_ad_d2_energy` as xfail for underconverged CTM (#210)
+- Resolve full test suite CI failures (#201, #208)
+
 ## v0.3.0 (2026-03-27)
 
 ### Breaking Changes
