@@ -18,13 +18,15 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), TRG, HOTRG, iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), fermionic iPEPS (fPEPS), quasiparticle excitations
 - **GPU/TPU-accelerated DMRG** — JIT-compiled sweeps via `jax.lax.scan` for dense tensors and per-operation JIT for block-sparse symmetric tensors; automatic warmup-to-JIT transition when bond dimensions are growing; multi-GPU sharding via GSPMD for large bond dimensions (`DMRGConfig(accelerator="jit"|"sharded")`)
 - **AutoMPO** — build Hamiltonian MPOs from symbolic operator descriptions (custom couplings, NNN, arbitrary spin); supports `symmetric=True` for U(1) block-sparse MPOs
-- **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237)
+- **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237); Adam (with cosine lr decay), L-BFGS, and conjugate gradient optimizers with Armijo backtracking line search; experimental explicit differentiation through unrolled CTM iterations
 - **QR-based CTMRG projectors** — optional QR projectors for faster CTM convergence (replaces expensive `eigh`)
 - **Split-CTMRG** — ket/bra-separated CTM environment tensors for O(χ³D³) projector cost instead of O(χ³D⁶); works with both `DenseTensor` and `SymmetricTensor` via the Tensor protocol (Naumann et al., arXiv:2502.10298)
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary Brillouin-zone momenta (Ponsioen et al. 2022)
 - **Polymorphic tensor arithmetic** — `+`, `-`, `*`, `-T`, `max_abs`, `inner()`, `conj()`, `dagger()`, `bar()` work identically on `DenseTensor` and `SymmetricTensor`, enabling algorithm code that is agnostic to the underlying storage
 - **Block-sparse SVD, QR, and eigh** — native symmetry-aware decompositions in `tenax.linalg` for `SymmetricTensor`
 - **Sector-based TensorIndex** — legs store sorted charge sectors and multiplicities for O(n_sectors) lookups; `FuseInfo` tracks parent legs so `split_index` can reverse `fuse_indices`
+- **Cython BLAS fast path** — fused Cython Lanczos solver and block-sparse contractions via direct BLAS calls with zero Python reentry for high-performance CPU DMRG
+- **iDMRG transfer matrix environments** — fixed-point environment computation for self-consistent infinite boundary conditions
 - **Extensible symmetry system** — non-Abelian symmetry interface for future SU(2) support
 - **Benchmark suite** — CLI-driven performance benchmarks for all algorithms across CPU, CUDA, TPU, and Metal backends
 
@@ -136,7 +138,7 @@ result2 = bp.launch()
 
 ## DMRG Example
 
-> **Performance note:** Tenax's DMRG is functional and correct but not yet optimized for maximum throughput — the block-sparse contraction engine dispatches to BLAS from Python, which adds overhead at large bond dimensions. Tenax's strengths lie in JAX-based AD optimization (iPEPS), GPU/TPU acceleration (TRG, HOTRG), and as an educational platform.
+> **Performance note:** Tenax's DMRG uses a fused Cython BLAS pipeline on CPU for high-throughput block-sparse contractions. GPU/TPU acceleration is available via `DMRGConfig(accelerator="jit")` for dense tensors and `accelerator="sharded"` for multi-GPU runs.
 
 ```python
 from tenax.algorithms.dmrg import dmrg, build_mpo_heisenberg, DMRGConfig
@@ -309,9 +311,11 @@ gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) \
 
 # AD ground-state optimization (Francuz et al. PRR 7, 013237)
 # su_init=True runs simple update first for a better starting tensor
+# gs_optimizer: "adam" (default, cosine lr decay), "lbfgs", or "cg"
 config = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(chi=16, max_iter=50),
+    gs_optimizer="adam",       # or "lbfgs" / "cg"
     gs_num_steps=200,
     gs_learning_rate=1e-3,
     su_init=True,

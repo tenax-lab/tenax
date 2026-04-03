@@ -217,6 +217,57 @@ A_opt, env, E_gs = optimize_gs_ad(H_bond, A_init=None, config=config)
 
 When ``A_init`` is provided explicitly, ``su_init`` is ignored.
 
+#### Optimizer selection
+
+The AD optimizer is chosen via ``gs_optimizer`` in ``iPEPSConfig``:
+
+| Optimizer | Setting | Best for |
+|-----------|---------|----------|
+| Adam | ``gs_optimizer="adam"`` (default) | Stable convergence, noisy gradients |
+| L-BFGS | ``gs_optimizer="lbfgs"`` | Fast convergence near minimum |
+| Conjugate gradient | ``gs_optimizer="cg"`` | Memory-efficient alternative to L-BFGS |
+
+L-BFGS and CG use **Armijo backtracking line search** by default
+(``gs_line_search=True``). Each trial step runs a fresh CTM convergence
+to evaluate the energy, avoiding stale-environment artifacts.
+
+```python
+config = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(chi=16, max_iter=50),
+    gs_optimizer="lbfgs",
+    gs_num_steps=30,
+    gs_line_search_max_steps=8,
+    su_init=True,
+)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
+```
+
+For Adam, a **cosine learning rate schedule** (lr → lr/10) is automatically
+applied when ``gs_num_steps > 20``.
+
+#### Explicit CTM differentiation (experimental)
+
+Set ``gs_explicit_ad=True`` to backpropagate through unrolled CTM iterations
+instead of using implicit differentiation:
+
+```python
+config = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(chi=8, max_iter=20),
+    gs_explicit_ad=True,
+    gs_explicit_ad_steps=15,
+    gs_learning_rate=1e-3,
+    gs_num_steps=50,
+)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
+```
+
+```{warning}
+Explicit AD is experimental. NaN gradients may occur at large chi or many
+CTM steps due to the ``eigh`` backward pass in projectors.
+```
+
 For AD-based excitation spectra on top of an optimised iPEPS, see
 {doc}`ad_excitations`.
 
