@@ -703,7 +703,7 @@ class TestOptimizeGsAd2Site:
             max_bond_dim=2,
             num_imaginary_steps=100,
             dt=0.3,
-            ctm=CTMConfig(chi=16, max_iter=60, min_iter=30),
+            ctm=CTMConfig(chi=16, max_iter=100, min_iter=50),
             unit_cell="2site",
         )
         E_su, (A_su, B_su), _ = ipeps(heisenberg_gate, None, su_config)
@@ -712,7 +712,7 @@ class TestOptimizeGsAd2Site:
             max_bond_dim=2,
             num_imaginary_steps=100,
             dt=0.3,
-            ctm=CTMConfig(chi=16, max_iter=60, min_iter=30),
+            ctm=CTMConfig(chi=16, max_iter=100, min_iter=50),
             gs_num_steps=50,
             gs_learning_rate=5e-3,
             unit_cell="2site",
@@ -784,14 +784,14 @@ class TestHeisenbergBenchmark:
             max_bond_dim=2,
             num_imaginary_steps=200,
             dt=0.05,
-            ctm=CTMConfig(chi=16, max_iter=60, min_iter=30),
+            ctm=CTMConfig(chi=16, max_iter=100, min_iter=50),
             unit_cell="2site",
         )
         _, (A_su, B_su), _ = ipeps(heisenberg_gate, None, su_config)
 
         ad_config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=16, max_iter=60, min_iter=30),
+            ctm=CTMConfig(chi=16, max_iter=100, min_iter=50),
             gs_num_steps=50,
             gs_learning_rate=5e-3,
             unit_cell="2site",
@@ -1003,7 +1003,7 @@ class TestADSymmetric:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=20, min_iter=10),
+            ctm=CTMConfig(chi=4, max_iter=30, min_iter=15),
             gs_num_steps=5,
             gs_learning_rate=0.01,
         )
@@ -1015,7 +1015,7 @@ class TestADSymmetric:
         )
 
         A_norm = A_sym * (1.0 / (A_sym.norm() + 1e-10))
-        env0 = ctm_tensor(A_norm, chi=4, max_iter=20)
+        env0 = ctm_tensor(A_norm, chi=4, max_iter=30)
         E_init = float(compute_energy_ctm_tensor(A_norm, env0, gate))
 
         A_opt, env, E_gs = optimize_gs_ad(gate, A_sym, config)
