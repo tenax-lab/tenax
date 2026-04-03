@@ -17,6 +17,134 @@ from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 
+def _build_optimizer(config: iPEPSConfig):
+    """Build optax optimizer from config."""
+    import optax
+
+    name = config.gs_optimizer.lower()
+    if name == "adam":
+        lr = config.gs_learning_rate
+        if config.gs_num_steps > 20:
+            # Cosine decay from lr to lr/10 over the optimization
+            schedule = optax.cosine_decay_schedule(
+                init_value=lr,
+                decay_steps=config.gs_num_steps,
+                alpha=0.1,
+            )
+        else:
+            schedule = lr
+        return optax.chain(
+            optax.clip_by_global_norm(config.gs_max_grad_norm),
+            optax.adam(schedule),
+        )
+    elif name == "lbfgs":
+        return optax.chain(
+            optax.clip_by_global_norm(config.gs_max_grad_norm),
+            optax.scale_by_lbfgs(memory_size=10),
+            optax.scale(-1.0),
+        )
+    elif name == "cg":
+        # CG direction is computed manually; optax just provides identity.
+        return None
+    else:
+        raise ValueError(
+            f"Unknown gs_optimizer {config.gs_optimizer!r}, "
+            "expected 'adam', 'lbfgs', or 'cg'"
+        )
+
+
+def _use_line_search(config: iPEPSConfig) -> bool:
+    """Whether to use backtracking line search."""
+    if config.gs_line_search is not None:
+        return config.gs_line_search
+    return config.gs_optimizer.lower() in ("lbfgs", "cg")
+
+
+def _tree_dot(a, b) -> float:
+    """Compute dot product between two pytrees of arrays."""
+    leaves_a = jax.tree.leaves(a)
+    leaves_b = jax.tree.leaves(b)
+    return float(sum(jnp.sum(la * lb) for la, lb in zip(leaves_a, leaves_b)))
+
+
+def _tree_scale(tree, alpha: float):
+    """Scale all leaves in a pytree by a scalar."""
+    return jax.tree.map(lambda x: x * alpha, tree)
+
+
+def _tree_add(a, b):
+    """Add two pytrees element-wise."""
+    return jax.tree.map(lambda x, y: x + y, a, b)
+
+
+def _normalize_params(params):
+    """Normalize iPEPS site tensor(s)."""
+    if isinstance(params, tuple):
+        return tuple(p * (1.0 / (p.norm() + 1e-10)) for p in params)
+    return params * (1.0 / (params.norm() + 1e-10))
+
+
+def _backtracking_line_search(
+    params,
+    direction,
+    grad,
+    energy,
+    loss_fn_fwd,
+    c1=1e-4,
+    rho=0.5,
+    max_steps=8,
+):
+    """Armijo backtracking line search (Python-level, not JIT-traced).
+
+    Args:
+        params: current parameters (pytree)
+        direction: search direction (pytree, same structure as params)
+        grad: gradient at current params (pytree)
+        energy: loss value at current params
+        loss_fn_fwd: forward-only loss function params -> scalar
+        c1: sufficient decrease parameter
+        rho: backtracking factor
+        max_steps: maximum number of backtracks
+
+    Returns:
+        (new_params, new_energy, step_size)
+    """
+    slope = _tree_dot(grad, direction)
+    if slope >= 0:
+        # Direction is not a descent direction; fall back to negative gradient
+        direction = jax.tree.map(lambda g: -g, grad)
+        slope = -_tree_dot(grad, grad)
+
+    # Scale initial step so ||alpha * d|| ~ 0.1 * ||params||
+    dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
+    param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
+    alpha = min(1.0, 0.1 * param_norm / dir_norm)
+
+    best_trial, best_f, best_alpha = params, energy, 0.0
+    for _ in range(max_steps):
+        trial = _normalize_params(_tree_add(params, _tree_scale(direction, alpha)))
+        f_trial = loss_fn_fwd(trial)
+        if f_trial < best_f:
+            best_trial, best_f, best_alpha = trial, f_trial, alpha
+        if f_trial <= energy + c1 * alpha * slope:
+            return trial, f_trial, alpha
+        alpha *= rho
+
+    # Return best trial seen (stays at current params if nothing improved)
+    return best_trial, best_f, best_alpha
+
+
+def _cg_beta_pr(grad_new, grad_old):
+    """Polak-Ribiere+ beta for conjugate gradient."""
+    # beta = max(0, g_new . (g_new - g_old) / (g_old . g_old))
+    diff = jax.tree.map(lambda gn, go: gn - go, grad_new, grad_old)
+    num = _tree_dot(grad_new, diff)
+    den = _tree_dot(grad_old, grad_old)
+    if den < 1e-30:
+        return 0.0
+    return max(0.0, num / den)
+
+
 def _wrap_as_dense_tensor(arr: jax.Array) -> DenseTensor:
     """Wrap a raw ``jax.Array`` iPEPS site tensor as a ``DenseTensor``.
 
@@ -178,16 +306,33 @@ def _optimize_gs_ad_tensor(
         energy = compute_energy_ctm_tensor(A_norm, env, gate, d_phys)
         return energy, env_leaves
 
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(config.gs_max_grad_norm),
-        optax.adam(config.gs_learning_rate),
-    )
-    opt_state = optimizer.init(A)
+    optimizer = _build_optimizer(config)
+    opt_state = optimizer.init(A) if optimizer is not None else None
+    use_ls = _use_line_search(config)
+    is_cg = config.gs_optimizer.lower() == "cg"
 
     best_energy = float("inf")
     best_A = A
     prev_energy = float("inf")
+    prev_grad = None
+    cg_direction = None
     log_interval = config.gs_log_interval
+
+    # Forward-only loss for line search — fresh CTM (no warm-start)
+    from tenax.algorithms.ad_utils import (
+        _config_from_tuple,
+        _ctm_tensor_multisite_fixed_point,
+        _flatten_envs,
+    )
+
+    def loss_fn_fwd(A_param):
+        A_norm = A_param * (1.0 / (A_param.norm() + 1e-10))
+        st = {(0, 0): A_norm}
+        config_obj = _config_from_tuple(config_tuple)
+        envs = _ctm_tensor_multisite_fixed_point(st, SINGLE_SITE_NEIGHBORS, config_obj)
+        flat = _flatten_envs(envs)
+        env_ = jax.tree.unflatten(env_treedef, flat)
+        return float(compute_energy_ctm_tensor(A_norm, env_, gate, d_phys))
 
     for step in range(config.gs_num_steps):
         (energy_val, env_leaves), grads = jax.value_and_grad(
@@ -232,9 +377,34 @@ def _optimize_gs_ad_tensor(
         prev_energy = energy_float
         prev_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
 
-        updates, opt_state = optimizer.update(grads, opt_state, A)
-        A = optax.apply_updates(A, updates)
-        A = A * (1.0 / (A.norm() + 1e-10))
+        # Compute search direction
+        if is_cg:
+            neg_grad = jax.tree.map(lambda g: -g, grads)
+            if prev_grad is not None and cg_direction is not None:
+                beta = _cg_beta_pr(grads, prev_grad)
+                cg_direction = _tree_add(neg_grad, _tree_scale(cg_direction, beta))
+            else:
+                cg_direction = neg_grad
+            prev_grad = grads
+            direction = cg_direction
+        elif optimizer is not None:
+            updates, opt_state = optimizer.update(grads, opt_state, A)
+            direction = updates
+        else:
+            direction = jax.tree.map(lambda g: -g, grads)
+
+        if use_ls:
+            A, _, _ = _backtracking_line_search(
+                A,
+                direction,
+                grads,
+                energy_float,
+                loss_fn_fwd,
+                max_steps=config.gs_line_search_max_steps,
+            )
+        else:
+            A = optax.apply_updates(A, direction)
+            A = A * (1.0 / (A.norm() + 1e-10))
 
     A_final = best_A * (1.0 / (best_A.norm() + 1e-10))
     env_leaves = ctm_tensor_converge(
@@ -329,7 +499,14 @@ def _optimize_gs_ad_tensor_2site(
         initialize_ctm_tensor_env,
     )
     from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
-    from tenax.algorithms.ad_utils import _config_to_tuple, ctm_tensor_converge
+    from tenax.algorithms.ad_utils import (
+        _config_from_tuple,
+        _config_to_tuple,
+        _ctm_tensor_multisite_fixed_point,
+        _flatten_envs,
+        ctm_tensor_converge,
+        ctm_tensor_converge_explicit,
+    )
 
     gate = (
         hamiltonian_gate.todense()
@@ -343,6 +520,8 @@ def _optimize_gs_ad_tensor_2site(
     B = B * (1.0 / (B.norm() + 1e-10))
 
     config_tuple = _config_to_tuple(config.ctm)
+    use_explicit = config.gs_explicit_ad
+    explicit_steps = config.gs_explicit_ad_steps
 
     # Get env treedef from a template
     _env_template = initialize_ctm_tensor_env(A, config.ctm.chi)
@@ -353,14 +532,27 @@ def _optimize_gs_ad_tensor_2site(
         jax.tree.leaves(_env_template_B)
     )
 
+    _ctm_converge = (
+        ctm_tensor_converge_explicit if use_explicit else ctm_tensor_converge
+    )
+
     def loss_fn(params, env_init_leaves):
         A_p, B_p = params
         A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
         B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
         site_tensors = {(0, 0): A_norm, (1, 0): B_norm}
-        env_leaves = ctm_tensor_converge(
-            site_tensors, env_init_leaves, CHECKERBOARD_NEIGHBORS, config_tuple
-        )
+        if use_explicit:
+            env_leaves = _ctm_converge(
+                site_tensors,
+                env_init_leaves,
+                CHECKERBOARD_NEIGHBORS,
+                config_tuple,
+                explicit_steps,
+            )
+        else:
+            env_leaves = _ctm_converge(
+                site_tensors, env_init_leaves, CHECKERBOARD_NEIGHBORS, config_tuple
+            )
         env_A = jax.tree.unflatten(env_treedef, env_leaves[:n_env_leaves])
         env_B = jax.tree.unflatten(env_treedef, env_leaves[n_env_leaves:])
         energy = compute_energy_ctm_tensor_2site(
@@ -369,26 +561,54 @@ def _optimize_gs_ad_tensor_2site(
         return energy, env_leaves
 
     params = (A, B)
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(config.gs_max_grad_norm),
-        optax.adam(config.gs_learning_rate),
-    )
-    opt_state = optimizer.init(params)
+    optimizer = _build_optimizer(config)
+    opt_state = optimizer.init(params) if optimizer is not None else None
+    use_ls = _use_line_search(config)
+    is_cg = config.gs_optimizer.lower() == "cg"
 
-    last_energy = float("inf")
-    last_params = params
-    last_env_leaves = None
+    best_energy = float("inf")
+    best_params = params
+    best_env_leaves = None
     prev_energy = float("inf")
+    prev_grad = None
+    cg_direction = None
     log_interval = config.gs_log_interval
+
+    # Forward-only loss for line search — uses fresh CTM (no warm-start)
+    # to avoid accepting steps that look good only with stale environments
+
+    def loss_fn_fwd(params_):
+        A_p, B_p = params_
+        A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
+        B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
+        st = {(0, 0): A_norm, (1, 0): B_norm}
+        config_obj = _config_from_tuple(config_tuple)
+        envs = _ctm_tensor_multisite_fixed_point(st, CHECKERBOARD_NEIGHBORS, config_obj)
+        flat = _flatten_envs(envs)
+        env_A_ = jax.tree.unflatten(env_treedef, flat[:n_env_leaves])
+        env_B_ = jax.tree.unflatten(env_treedef, flat[n_env_leaves:])
+        return float(
+            compute_energy_ctm_tensor_2site(
+                A_norm,
+                B_norm,
+                env_A_,
+                env_B_,
+                gate,
+                d_phys,
+            )
+        )
 
     for step in range(config.gs_num_steps):
         (energy_val, env_leaves), grads = jax.value_and_grad(
             loss_fn, argnums=0, has_aux=True
         )(params, prev_env_leaves)
         energy_float = float(energy_val)
-        last_energy = energy_float
-        last_params = params
-        last_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
+        env_leaves_sg = jax.tree.map(jax.lax.stop_gradient, env_leaves)
+
+        if energy_float < best_energy:
+            best_energy = energy_float
+            best_params = params
+            best_env_leaves = env_leaves_sg
 
         delta_energy = abs(energy_float - prev_energy)
         logged = False
@@ -401,7 +621,7 @@ def _optimize_gs_ad_tensor_2site(
                 config.gs_num_steps,
                 energy_float,
                 delta_energy,
-                energy_float,
+                best_energy,
             )
             logged = True
 
@@ -414,36 +634,65 @@ def _optimize_gs_ad_tensor_2site(
                         config.gs_num_steps,
                         energy_float,
                         delta_energy,
-                        energy_float,
+                        best_energy,
                     )
                 _log_ad_converged(
                     "2site-tensor", step, delta_energy, config.gs_conv_tol
                 )
             break
         prev_energy = energy_float
-        prev_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
+        prev_env_leaves = env_leaves_sg
 
-        updates, opt_state = optimizer.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
-        A_p, B_p = params
-        params = (
-            A_p * (1.0 / (A_p.norm() + 1e-10)),
-            B_p * (1.0 / (B_p.norm() + 1e-10)),
+        # Compute search direction
+        if is_cg:
+            neg_grad = jax.tree.map(lambda g: -g, grads)
+            if prev_grad is not None and cg_direction is not None:
+                beta = _cg_beta_pr(grads, prev_grad)
+                cg_direction = _tree_add(neg_grad, _tree_scale(cg_direction, beta))
+            else:
+                cg_direction = neg_grad
+            prev_grad = grads
+            direction = cg_direction
+        elif optimizer is not None:
+            updates, opt_state = optimizer.update(grads, opt_state, params)
+            direction = updates
+        else:
+            direction = jax.tree.map(lambda g: -g, grads)
+
+        if use_ls:
+            params, _, _ = _backtracking_line_search(
+                params,
+                direction,
+                grads,
+                energy_float,
+                loss_fn_fwd,
+                max_steps=config.gs_line_search_max_steps,
+            )
+        else:
+            params = optax.apply_updates(params, direction)
+            params = _normalize_params(params)
+
+    # Re-evaluate best params with fresh CTM to get accurate energy
+    A_final, B_final = _normalize_params(best_params)
+    site_tensors = {(0, 0): A_final, (1, 0): B_final}
+    fresh_env_leaves = ctm_tensor_converge(
+        site_tensors,
+        best_env_leaves or prev_env_leaves,
+        CHECKERBOARD_NEIGHBORS,
+        config_tuple,
+    )
+    env_A = jax.tree.unflatten(env_treedef, fresh_env_leaves[:n_env_leaves])
+    env_B = jax.tree.unflatten(env_treedef, fresh_env_leaves[n_env_leaves:])
+    E_gs = float(
+        compute_energy_ctm_tensor_2site(
+            A_final,
+            B_final,
+            env_A,
+            env_B,
+            gate,
+            d_phys,
         )
-
-    if last_env_leaves is None:
-        energy_val, env_leaves = loss_fn(params, prev_env_leaves)
-        last_energy = float(energy_val)
-        last_params = params
-        last_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
-
-    # Use last evaluated params and environment
-    A_final, B_final = last_params
-    A_final = A_final * (1.0 / (A_final.norm() + 1e-10))
-    B_final = B_final * (1.0 / (B_final.norm() + 1e-10))
-    env_A = jax.tree.unflatten(env_treedef, last_env_leaves[:n_env_leaves])
-    env_B = jax.tree.unflatten(env_treedef, last_env_leaves[n_env_leaves:])
-    E_gs = last_energy
+    )
     if config.gs_verbose:
         print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}", flush=True)
 
