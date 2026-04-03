@@ -29,6 +29,7 @@ _FILE_MARKERS = {
     "test_auto_mpo.py": "algorithm",
     "test_ad_utils.py": "algorithm",
     "test_fermionic_ipeps.py": "algorithm",
+    "test_fpeps_ad.py": "algorithm",
     "test_ipeps_excitations.py": "algorithm",
     "test_code_review_regressions.py": "core",
     "test_tensor_utils.py": "core",
@@ -117,7 +118,7 @@ def u1_charges_2(u1):
 @pytest.fixture
 def idx_in_3(u1, u1_charges_3):
     """U(1) IN index with charges [-1, 0, 1], label='left'."""
-    return TensorIndex(u1, u1_charges_3, FlowDirection.IN, label="left")
+    return TensorIndex.from_charges(u1, u1_charges_3, FlowDirection.IN, label="left")
 
 
 @pytest.fixture
@@ -125,7 +126,9 @@ def idx_out_3(u1, u1_charges_3):
     """U(1) OUT index with dual charges [1, 0, -1], label='right'.
     This is the proper dual of idx_in_3.
     """
-    return TensorIndex(u1, u1.dual(u1_charges_3), FlowDirection.OUT, label="right")
+    return TensorIndex.from_charges(
+        u1, u1.dual(u1_charges_3), FlowDirection.OUT, label="right"
+    )
 
 
 @pytest.fixture
@@ -145,8 +148,8 @@ def small_dense_matrix(u1, rng):
     charges = np.array([-1, 0, 1], dtype=np.int32)
     data = jax.random.normal(rng, (3, 3))
     indices = (
-        TensorIndex(u1, charges, FlowDirection.IN, label="row"),
-        TensorIndex(u1, charges, FlowDirection.OUT, label="col"),
+        TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="row"),
+        TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="col"),
     )
     return DenseTensor(data, indices)
 
@@ -156,7 +159,7 @@ def dense_vector(u1, rng):
     """A 3-element DenseTensor (vector) with U(1) index."""
     charges = np.array([-1, 0, 1], dtype=np.int32)
     data = jax.random.normal(rng, (3,))
-    idx = TensorIndex(u1, charges, FlowDirection.IN, label="vec")
+    idx = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="vec")
     return DenseTensor(data, (idx,))
 
 
@@ -170,8 +173,8 @@ def u1_sym_tensor_2leg(u1, rng):
     """2-leg U(1)-symmetric tensor: IN x OUT, charges [-1, 0, 1]."""
     charges = np.array([-1, 0, 1], dtype=np.int32)
     indices = (
-        TensorIndex(u1, charges, FlowDirection.IN, label="in"),
-        TensorIndex(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
+        TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="in"),
+        TensorIndex.from_charges(u1, u1.dual(charges), FlowDirection.OUT, label="out"),
     )
     return SymmetricTensor.random_normal(indices, rng)
 
@@ -182,9 +185,9 @@ def u1_sym_tensor_3leg(u1, rng):
     phys_c = np.array([-1, 1], dtype=np.int32)
     virt_c = np.array([-1, 0, 1], dtype=np.int32)
     indices = (
-        TensorIndex(u1, phys_c, FlowDirection.IN, label="phys"),
-        TensorIndex(u1, virt_c, FlowDirection.IN, label="left"),
-        TensorIndex(u1, u1.dual(virt_c), FlowDirection.OUT, label="right"),
+        TensorIndex.from_charges(u1, phys_c, FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(u1, virt_c, FlowDirection.IN, label="left"),
+        TensorIndex.from_charges(u1, u1.dual(virt_c), FlowDirection.OUT, label="right"),
     )
     return SymmetricTensor.random_normal(indices, rng)
 
@@ -204,18 +207,18 @@ def u1_sym_tensor_pair(u1, rng, rng2):
     )  # same charges for both ends of shared bond
 
     indices_A = (
-        TensorIndex(u1, phys_c, FlowDirection.IN, label="p0"),
-        TensorIndex(u1, bond_c, FlowDirection.IN, label="bond_left"),
-        TensorIndex(
+        TensorIndex.from_charges(u1, phys_c, FlowDirection.IN, label="p0"),
+        TensorIndex.from_charges(u1, bond_c, FlowDirection.IN, label="bond_left"),
+        TensorIndex.from_charges(
             u1, bond_c, FlowDirection.OUT, label="bond"
         ),  # OUT end of shared bond
     )
     indices_B = (
-        TensorIndex(u1, phys_c, FlowDirection.IN, label="p1"),
-        TensorIndex(
+        TensorIndex.from_charges(u1, phys_c, FlowDirection.IN, label="p1"),
+        TensorIndex.from_charges(
             u1, bond_c, FlowDirection.IN, label="bond"
         ),  # IN end of shared bond (same charges)
-        TensorIndex(u1, bond_c, FlowDirection.OUT, label="bond_right"),
+        TensorIndex.from_charges(u1, bond_c, FlowDirection.OUT, label="bond_right"),
     )
     A = SymmetricTensor.random_normal(indices_A, rng)
     B = SymmetricTensor.random_normal(indices_B, rng2)

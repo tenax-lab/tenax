@@ -22,9 +22,9 @@ Quick start::
 
     A = SymmetricTensor.random_normal(
         indices=(
-            TensorIndex(u1, np.array([-1, 1], dtype=np.int32), FlowDirection.IN,  label="phys"),
-            TensorIndex(u1, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.IN,  label="left"),
-            TensorIndex(u1, np.array([1, 0, -1], dtype=np.int32), FlowDirection.OUT, label="bond"),
+            TensorIndex.from_charges(u1, np.array([-1, 1], dtype=np.int32), FlowDirection.IN,  label="phys"),
+            TensorIndex.from_charges(u1, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.IN,  label="left"),
+            TensorIndex.from_charges(u1, np.array([1, 0, -1], dtype=np.int32), FlowDirection.OUT, label="bond"),
         ),
         key=key,
     )
@@ -52,6 +52,7 @@ from tenax.algorithms._split_ctm_tensor import (
     compute_energy_split_ctm_tensor,
     ctm_split_tensor,
 )
+from tenax.algorithms._tensor_utils import fuse_indices, split_index
 from tenax.algorithms.auto_mpo import (
     AutoMPO,
     HamiltonianTerm,
@@ -98,7 +99,7 @@ from tenax.algorithms.ipeps_excitations import (
     compute_excitations,
     make_momentum_path,
 )
-from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+from tenax.algorithms.ipeps_optimize import optimize_fpeps_ad, optimize_gs_ad
 from tenax.algorithms.ipeps_rdm import (
     compute_energy_ctm_2site,
     compute_energy_split_ctm,
@@ -128,7 +129,7 @@ from tenax.contraction.contractor import (
     qr_decompose,
     truncated_svd,
 )
-from tenax.core.index import FlowDirection, Label, TensorIndex
+from tenax.core.index import FlowDirection, FuseInfo, Label, TensorIndex
 from tenax.core.lattice import (
     Bond,
     Lattice,
@@ -170,6 +171,7 @@ __all__ = [
     "ProductSymmetry",
     # Index
     "FlowDirection",
+    "FuseInfo",
     "Label",
     "TensorIndex",
     # MPS
@@ -181,6 +183,9 @@ __all__ = [
     "SymmetricTensor",
     "BlockKey",
     "inner",
+    # Tensor utilities
+    "fuse_indices",
+    "split_index",
     # Contraction
     "contract",
     "contract_with_subscripts",
@@ -263,6 +268,7 @@ __all__ = [
     # fPEPS (fermionic iPEPS)
     "FPEPSConfig",
     "fpeps",
+    "optimize_fpeps_ad",
     "spinless_fermion_gate",
     # iPEPS Excitations
     "ExcitationConfig",

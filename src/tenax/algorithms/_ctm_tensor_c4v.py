@@ -90,10 +90,10 @@ def _c4v_sweep(
     # Build corner indices with the same charge distribution as the
     # projector's chi_new leg, ensuring compatibility with the edges.
     chi_new_idx = P.indices[P.labels().index("chi_new")]
-    c_a_idx = TensorIndex(
+    c_a_idx = TensorIndex.from_charges(
         chi_new_idx.symmetry, chi_new_idx.charges.copy(), IN, label="c_a"
     )
-    c_b_idx = TensorIndex(
+    c_b_idx = TensorIndex.from_charges(
         chi_new_idx.symmetry, chi_new_idx.charges.copy(), OUT, label="c_b"
     )
     if isinstance(Cg, SymmetricTensor):

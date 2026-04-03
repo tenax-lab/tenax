@@ -23,7 +23,7 @@ def _make_tensor(shape, labels, flows=None, seed=0):
         flows = [FlowDirection.IN] * len(shape)
     charges = [np.zeros(s, dtype=np.int32) for s in shape]
     indices = tuple(
-        TensorIndex(u1, charges[i], flows[i], label=labels[i])
+        TensorIndex.from_charges(u1, charges[i], flows[i], label=labels[i])
         for i in range(len(shape))
     )
     data = jax.random.normal(jax.random.PRNGKey(seed), shape)
@@ -161,7 +161,7 @@ class TestConnectRelabelCollision:
         # A is a 1D vector with leg 'a'
         A = DenseTensor(
             jnp.array([1.0, 2.0, 3.0]),
-            (TensorIndex(u1, charges, FlowDirection.IN, label="a"),),
+            (TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),),
         )
         # B is a 2D matrix with legs ('a', 'u') — note 'a' already exists!
         # B has asymmetric data so contracting over 'a' vs 'u' gives
@@ -169,8 +169,8 @@ class TestConnectRelabelCollision:
         B = DenseTensor(
             jnp.array([[10.0, 20.0, 30.0], [40.0, 50.0, 60.0], [70.0, 80.0, 90.0]]),
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="u"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="u"),
             ),
         )
 
@@ -211,15 +211,15 @@ class TestConnectRelabelCollision:
         A = DenseTensor(
             jnp.array([[1.0, 2.0], [3.0, 4.0]]),
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
             ),
         )
         B = DenseTensor(
             jnp.array([[5.0, 6.0], [7.0, 8.0]]),
             (
-                TensorIndex(u1, charges, FlowDirection.IN, label="a"),
-                TensorIndex(u1, charges, FlowDirection.OUT, label="b"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+                TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
             ),
         )
 
@@ -323,8 +323,10 @@ class TestTruncatedSvdOffByOne:
         tensor = DenseTensor(
             jnp.array(M),
             (
-                TensorIndex(u1, charges_4, FlowDirection.IN, label="left"),
-                TensorIndex(u1, charges_4, FlowDirection.OUT, label="right"),
+                TensorIndex.from_charges(u1, charges_4, FlowDirection.IN, label="left"),
+                TensorIndex.from_charges(
+                    u1, charges_4, FlowDirection.OUT, label="right"
+                ),
             ),
         )
 
@@ -351,8 +353,10 @@ class TestTruncatedSvdOffByOne:
         tensor = DenseTensor(
             M,
             (
-                TensorIndex(u1, charges_3, FlowDirection.IN, label="left"),
-                TensorIndex(u1, charges_3, FlowDirection.OUT, label="right"),
+                TensorIndex.from_charges(u1, charges_3, FlowDirection.IN, label="left"),
+                TensorIndex.from_charges(
+                    u1, charges_3, FlowDirection.OUT, label="right"
+                ),
             ),
         )
 
@@ -390,10 +394,18 @@ class TestDMRGSiteLabelCeiling:
         theta = DenseTensor(
             theta_data,
             (
-                TensorIndex(u1, charges_chi, FlowDirection.IN, label="v999_1000"),
-                TensorIndex(u1, charges_d, FlowDirection.IN, label="p1000"),
-                TensorIndex(u1, charges_d, FlowDirection.IN, label="p1001"),
-                TensorIndex(u1, charges_chi, FlowDirection.OUT, label="v1001_1002"),
+                TensorIndex.from_charges(
+                    u1, charges_chi, FlowDirection.IN, label="v999_1000"
+                ),
+                TensorIndex.from_charges(
+                    u1, charges_d, FlowDirection.IN, label="p1000"
+                ),
+                TensorIndex.from_charges(
+                    u1, charges_d, FlowDirection.IN, label="p1001"
+                ),
+                TensorIndex.from_charges(
+                    u1, charges_chi, FlowDirection.OUT, label="v1001_1002"
+                ),
             ),
         )
 
@@ -420,16 +432,24 @@ class TestSymmetricTensorAddChargeValidation:
 
         u1 = U1Symmetry()
         idx_a = (
-            TensorIndex(u1, np.array([0, 1], dtype=np.int32), FlowDirection.IN, label="x"),
-            TensorIndex(u1, np.array([0, -1], dtype=np.int32), FlowDirection.OUT, label="y"),
+            TensorIndex.from_charges(
+                u1, np.array([0, 1], dtype=np.int32), FlowDirection.IN, label="x"
+            ),
+            TensorIndex.from_charges(
+                u1, np.array([0, -1], dtype=np.int32), FlowDirection.OUT, label="y"
+            ),
         )
         idx_b = (
-            TensorIndex(u1, np.array([0, 2], dtype=np.int32), FlowDirection.IN, label="x"),
-            TensorIndex(u1, np.array([0, -2], dtype=np.int32), FlowDirection.OUT, label="y"),
+            TensorIndex.from_charges(
+                u1, np.array([0, 2], dtype=np.int32), FlowDirection.IN, label="x"
+            ),
+            TensorIndex.from_charges(
+                u1, np.array([0, -2], dtype=np.int32), FlowDirection.OUT, label="y"
+            ),
         )
         A = SymmetricTensor.random_normal(idx_a, jax.random.PRNGKey(0))
         B = SymmetricTensor.random_normal(idx_b, jax.random.PRNGKey(1))
-        with pytest.raises(ValueError, match="charge array mismatch"):
+        with pytest.raises(ValueError, match="sector/multiplicity mismatch"):
             A + B
 
     def test_sub_different_charges_raises(self):
@@ -438,16 +458,24 @@ class TestSymmetricTensorAddChargeValidation:
 
         u1 = U1Symmetry()
         idx_a = (
-            TensorIndex(u1, np.array([0, 1], dtype=np.int32), FlowDirection.IN, label="x"),
-            TensorIndex(u1, np.array([0, -1], dtype=np.int32), FlowDirection.OUT, label="y"),
+            TensorIndex.from_charges(
+                u1, np.array([0, 1], dtype=np.int32), FlowDirection.IN, label="x"
+            ),
+            TensorIndex.from_charges(
+                u1, np.array([0, -1], dtype=np.int32), FlowDirection.OUT, label="y"
+            ),
         )
         idx_b = (
-            TensorIndex(u1, np.array([0, 2], dtype=np.int32), FlowDirection.IN, label="x"),
-            TensorIndex(u1, np.array([0, -2], dtype=np.int32), FlowDirection.OUT, label="y"),
+            TensorIndex.from_charges(
+                u1, np.array([0, 2], dtype=np.int32), FlowDirection.IN, label="x"
+            ),
+            TensorIndex.from_charges(
+                u1, np.array([0, -2], dtype=np.int32), FlowDirection.OUT, label="y"
+            ),
         )
         A = SymmetricTensor.random_normal(idx_a, jax.random.PRNGKey(0))
         B = SymmetricTensor.random_normal(idx_b, jax.random.PRNGKey(1))
-        with pytest.raises(ValueError, match="charge array mismatch"):
+        with pytest.raises(ValueError, match="sector/multiplicity mismatch"):
             A - B
 
     def test_add_different_symmetry_raises(self):
@@ -458,12 +486,12 @@ class TestSymmetricTensorAddChargeValidation:
         z2 = ZnSymmetry(2)
         charges = np.array([0, 1], dtype=np.int32)
         idx_a = (
-            TensorIndex(fp, charges, FlowDirection.IN, label="x"),
-            TensorIndex(fp, charges, FlowDirection.OUT, label="y"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="x"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.OUT, label="y"),
         )
         idx_b = (
-            TensorIndex(z2, charges, FlowDirection.IN, label="x"),
-            TensorIndex(z2, charges, FlowDirection.OUT, label="y"),
+            TensorIndex.from_charges(z2, charges, FlowDirection.IN, label="x"),
+            TensorIndex.from_charges(z2, charges, FlowDirection.OUT, label="y"),
         )
         A = SymmetricTensor.random_normal(idx_a, jax.random.PRNGKey(0))
         B = SymmetricTensor.random_normal(idx_b, jax.random.PRNGKey(1))
@@ -526,15 +554,23 @@ class TestReplaceTensorValidation:
         T1 = DenseTensor(
             jnp.ones((3, 4)),
             (
-                TensorIndex(u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="a"),
-                TensorIndex(u1, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="b"),
+                TensorIndex.from_charges(
+                    u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="a"
+                ),
+                TensorIndex.from_charges(
+                    u1, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="b"
+                ),
             ),
         )
         T2_peer = DenseTensor(
             jnp.ones((4, 5)),
             (
-                TensorIndex(u1, np.zeros(4, dtype=np.int32), FlowDirection.IN, label="b"),
-                TensorIndex(u1, np.zeros(5, dtype=np.int32), FlowDirection.OUT, label="c"),
+                TensorIndex.from_charges(
+                    u1, np.zeros(4, dtype=np.int32), FlowDirection.IN, label="b"
+                ),
+                TensorIndex.from_charges(
+                    u1, np.zeros(5, dtype=np.int32), FlowDirection.OUT, label="c"
+                ),
             ),
         )
         tn = TensorNetwork()
@@ -546,8 +582,12 @@ class TestReplaceTensorValidation:
         T1_bad = DenseTensor(
             jnp.ones((3, 7)),
             (
-                TensorIndex(u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="a"),
-                TensorIndex(u1, np.zeros(7, dtype=np.int32), FlowDirection.OUT, label="b"),
+                TensorIndex.from_charges(
+                    u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="a"
+                ),
+                TensorIndex.from_charges(
+                    u1, np.zeros(7, dtype=np.int32), FlowDirection.OUT, label="b"
+                ),
             ),
         )
         with pytest.raises(ValueError, match="dimension"):
@@ -558,15 +598,23 @@ class TestReplaceTensorValidation:
         T1 = DenseTensor(
             jnp.ones((3, 4)),
             (
-                TensorIndex(u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="a"),
-                TensorIndex(u1, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="b"),
+                TensorIndex.from_charges(
+                    u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="a"
+                ),
+                TensorIndex.from_charges(
+                    u1, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="b"
+                ),
             ),
         )
         T2_peer = DenseTensor(
             jnp.ones((4, 5)),
             (
-                TensorIndex(u1, np.zeros(4, dtype=np.int32), FlowDirection.IN, label="b"),
-                TensorIndex(u1, np.zeros(5, dtype=np.int32), FlowDirection.OUT, label="c"),
+                TensorIndex.from_charges(
+                    u1, np.zeros(4, dtype=np.int32), FlowDirection.IN, label="b"
+                ),
+                TensorIndex.from_charges(
+                    u1, np.zeros(5, dtype=np.int32), FlowDirection.OUT, label="c"
+                ),
             ),
         )
         tn = TensorNetwork()
@@ -577,8 +625,12 @@ class TestReplaceTensorValidation:
         T1_bad = DenseTensor(
             jnp.ones((3, 4)),
             (
-                TensorIndex(u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="a"),
-                TensorIndex(u1, np.zeros(4, dtype=np.int32), FlowDirection.IN, label="b"),
+                TensorIndex.from_charges(
+                    u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="a"
+                ),
+                TensorIndex.from_charges(
+                    u1, np.zeros(4, dtype=np.int32), FlowDirection.IN, label="b"
+                ),
             ),
         )
         with pytest.raises(ValueError, match="flow"):
@@ -601,15 +653,23 @@ class TestConnectBySharedLabelAtomicity:
         T1 = DenseTensor(
             jnp.ones((3, 4)),
             (
-                TensorIndex(u1, np.zeros(3, dtype=np.int32), FlowDirection.OUT, label="a"),
-                TensorIndex(u1, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="b"),
+                TensorIndex.from_charges(
+                    u1, np.zeros(3, dtype=np.int32), FlowDirection.OUT, label="a"
+                ),
+                TensorIndex.from_charges(
+                    u1, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="b"
+                ),
             ),
         )
         T2 = DenseTensor(
             jnp.ones((3, 5)),
             (
-                TensorIndex(u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="a"),
-                TensorIndex(u1, np.zeros(5, dtype=np.int32), FlowDirection.IN, label="b"),
+                TensorIndex.from_charges(
+                    u1, np.zeros(3, dtype=np.int32), FlowDirection.IN, label="a"
+                ),
+                TensorIndex.from_charges(
+                    u1, np.zeros(5, dtype=np.int32), FlowDirection.IN, label="b"
+                ),
             ),
         )
         tn = TensorNetwork()
@@ -635,7 +695,11 @@ class TestBuildPepsValidation:
         u1 = U1Symmetry()
         return DenseTensor(
             jnp.ones((2,)),
-            (TensorIndex(u1, np.zeros(2, dtype=np.int32), FlowDirection.IN, label="p"),),
+            (
+                TensorIndex.from_charges(
+                    u1, np.zeros(2, dtype=np.int32), FlowDirection.IN, label="p"
+                ),
+            ),
         )
 
     def test_too_few_rows_raises(self):
@@ -675,15 +739,23 @@ class TestBuildersPropagateBondErrors:
         A = DenseTensor(
             jnp.ones((2, 4)),
             (
-                TensorIndex(u1, np.zeros(2, dtype=np.int32), FlowDirection.IN, label="p0"),
-                TensorIndex(u1, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="v"),
+                TensorIndex.from_charges(
+                    u1, np.zeros(2, dtype=np.int32), FlowDirection.IN, label="p0"
+                ),
+                TensorIndex.from_charges(
+                    u1, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="v"
+                ),
             ),
         )
         B = DenseTensor(
             jnp.ones((5, 2)),
             (
-                TensorIndex(u1, np.zeros(5, dtype=np.int32), FlowDirection.OUT, label="v"),
-                TensorIndex(u1, np.zeros(2, dtype=np.int32), FlowDirection.IN, label="p1"),
+                TensorIndex.from_charges(
+                    u1, np.zeros(5, dtype=np.int32), FlowDirection.OUT, label="v"
+                ),
+                TensorIndex.from_charges(
+                    u1, np.zeros(2, dtype=np.int32), FlowDirection.IN, label="p1"
+                ),
             ),
         )
         # "v" is shared but dims 4 vs 5 are incompatible — must raise.

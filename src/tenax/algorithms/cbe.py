@@ -277,7 +277,7 @@ def expand_bond_symmetric(
             np.array(all_new_charges, dtype=np.int32),
         ]
     )
-    new_right_idx = TensorIndex(
+    new_right_idx = TensorIndex.from_charges(
         symmetry=right_idx.symmetry,
         charges=new_charges,
         flow=right_idx.flow,
@@ -332,7 +332,7 @@ def _build_expanded_tensor(
     new_charges = np.zeros(chi_r + k, dtype=np.int32)
     new_charges[:chi_r] = right_idx.charges
 
-    new_right_idx = TensorIndex(
+    new_right_idx = TensorIndex.from_charges(
         symmetry=right_idx.symmetry,
         charges=new_charges,
         flow=right_idx.flow,

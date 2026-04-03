@@ -73,6 +73,87 @@ def _truncated_svd_ad_fwd(
     return (U, s, Vh), residuals
 
 
+def _svd_sector_backward(
+    U: jax.Array,
+    s: jax.Array,
+    Vh: jax.Array,
+    dU: jax.Array,
+    ds: jax.Array,
+    dVh: jax.Array,
+    eps: float = 1e-12,
+) -> jax.Array:
+    """Lorentzian-regularized SVD backward for one dense matrix sector.
+
+    Computes the gradient of the input matrix from the gradients of the
+    truncated SVD factors, using the Lorentzian broadening from Francuz
+    et al., PRR 7, 013237 to regularize degenerate singular values.
+
+    *U*, *s*, *Vh* are the **full** (untruncated) SVD factors of the
+    sector matrix.  *dU*, *ds*, *dVh* are the incoming gradients,
+    which may be truncated to *k* values (``k <= len(s)``).
+
+    Args:
+        U:   Left singular vectors, shape ``(m, p)`` where ``p = min(m, n)``.
+        s:   Singular values, shape ``(p,)``.
+        Vh:  Right singular vectors, shape ``(p, n)``.
+        dU:  Gradient w.r.t. truncated U, shape ``(m, k)``.
+        ds:  Gradient w.r.t. truncated s, shape ``(k,)``.
+        dVh: Gradient w.r.t. truncated Vh, shape ``(k, n)``.
+        eps: Lorentzian broadening parameter.
+
+    Returns:
+        dM: Gradient w.r.t. the input matrix, shape ``(m, n)``.
+    """
+    k = ds.shape[0]
+    m = U.shape[0]
+    n = Vh.shape[1]
+
+    # Kept subspace
+    U_k = U[:, :k]
+    s_k = s[:k]
+    V_k = Vh[:k, :].conj().T  # (n, k)
+
+    # --- Lorentzian-regularized F-matrix ---
+    s2 = s_k**2
+    diff = s2[:, None] - s2[None, :]
+    F = diff / (diff**2 + eps**2)
+    F = F - jnp.diag(jnp.diag(F))
+
+    # Antisymmetric parts of projected cotangents
+    UtdU = U_k.conj().T @ dU  # (k, k)
+    VtdV = V_k.conj().T @ dVh.conj().T  # (k, k)
+    UtdU_anti = 0.5 * (UtdU - UtdU.conj().T)
+    VtdV_anti = 0.5 * (VtdV - VtdV.conj().T)
+
+    # Inverse singular values (safe)
+    s_inv = jnp.where(s_k > eps, 1.0 / s_k, 0.0)
+
+    # Projectors onto complements of kept subspaces
+    proj_U_perp = jnp.eye(m) - U_k @ U_k.conj().T
+    proj_V_perp = jnp.eye(n) - V_k @ V_k.conj().T
+
+    # Assemble gradient (Wan & Narayanan 2023 / Francuz et al.):
+    Vh_k = Vh[:k, :]
+    dM = jnp.zeros((m, n), dtype=U.dtype)
+
+    # 1. Diagonal part from ds
+    dM = dM + U_k @ jnp.diag(ds) @ Vh_k
+
+    # 2. Off-diagonal from dU (within kept subspace)
+    dM = dM + U_k @ (F * UtdU_anti) @ jnp.diag(s_k) @ Vh_k
+
+    # 3. Off-diagonal from dVh (within kept subspace)
+    dM = dM + U_k @ jnp.diag(s_k) @ (F * VtdV_anti) @ Vh_k
+
+    # 4. Truncation correction from dU (kept-truncated coupling)
+    dM = dM + proj_U_perp @ dU @ jnp.diag(s_inv) @ Vh_k
+
+    # 5. Truncation correction from dVh (kept-truncated coupling)
+    dM = dM + U_k @ jnp.diag(s_inv) @ dVh @ proj_V_perp
+
+    return dM
+
+
 def _truncated_svd_ad_bwd(
     chi: int,
     residuals: tuple,
@@ -89,58 +170,103 @@ def _truncated_svd_ad_bwd(
     """
     U_full, s_full, Vh_full, M, k = residuals
     dU, ds, dVh = g
-
-    eps = 1e-12  # Lorentzian broadening parameter
-
-    # Kept subspace
-    U = U_full[:, :k]
-    s = s_full[:k]
-    V = Vh_full[:k, :].conj().T  # (n, k)
-
-    # --- Lorentzian-regularized F-matrix ---
-    # F_ij = (s_i^2 - s_j^2) / ((s_i^2 - s_j^2)^2 + eps^2)
-    # Prevents divergences from degenerate singular values.
-    s2 = s**2
-    diff = s2[:, None] - s2[None, :]
-    F = diff / (diff**2 + eps**2)
-    # Zero diagonal (gauge freedom)
-    F = F - jnp.diag(jnp.diag(F))
-
-    # Antisymmetric parts of projected cotangents
-    UtdU = U.conj().T @ dU  # (k, k)
-    VtdV = V.conj().T @ dVh.conj().T  # (k, k)
-    UtdU_anti = 0.5 * (UtdU - UtdU.conj().T)
-    VtdV_anti = 0.5 * (VtdV - VtdV.conj().T)
-
-    # Inverse singular values (safe)
-    s_inv = jnp.where(s > eps, 1.0 / s, 0.0)
-
-    # Projectors onto complements of kept subspaces
-    proj_U_perp = jnp.eye(M.shape[0]) - U @ U.conj().T
-    proj_V_perp = jnp.eye(M.shape[1]) - V @ V.conj().T
-
-    # Assemble gradient (Wan & Narayanan 2023 / Francuz et al.):
-    dM = jnp.zeros_like(M)
-
-    # 1. Diagonal part from ds
-    dM = dM + U @ jnp.diag(ds) @ Vh_full[:k, :]
-
-    # 2. Off-diagonal from dU (within kept subspace)
-    dM = dM + U @ (F * UtdU_anti) @ jnp.diag(s) @ Vh_full[:k, :]
-
-    # 3. Off-diagonal from dVh (within kept subspace)
-    dM = dM + U @ jnp.diag(s) @ (F * VtdV_anti) @ Vh_full[:k, :]
-
-    # 4. Truncation correction from dU (kept-truncated coupling)
-    dM = dM + proj_U_perp @ dU @ jnp.diag(s_inv) @ Vh_full[:k, :]
-
-    # 5. Truncation correction from dVh (kept-truncated coupling)
-    dM = dM + U @ jnp.diag(s_inv) @ dVh @ proj_V_perp
-
+    dM = _svd_sector_backward(U_full, s_full, Vh_full, dU, ds, dVh)
     return (dM,)
 
 
 truncated_svd_ad.defvjp(_truncated_svd_ad_fwd, _truncated_svd_ad_bwd)
+
+
+# ---------------------------------------------------------------------------
+# 1b. Truncated SVD with stable backward for SymmetricTensor
+# ---------------------------------------------------------------------------
+
+
+def truncated_svd_symmetric_ad(
+    M,
+    left_labels,
+    right_labels,
+    chi: int,
+    new_bond_label: str = "bond",
+):
+    """Truncated SVD of a SymmetricTensor with Lorentzian-regularized backward.
+
+    This is a convenience wrapper that densifies the SymmetricTensor, applies
+    :func:`truncated_svd_ad` on the dense matrix, and reconstructs the result
+    as a ``DenseTensor``.  The Lorentzian regularization from Francuz et al.
+    (PRR 7, 013237) prevents NaN gradients from degenerate singular values
+    within charge sectors.
+
+    While a native per-sector custom_vjp would be more efficient (avoiding
+    the dense round-trip), this implementation is correct and much simpler.
+    The round-trip cost is acceptable for the moderate tensor sizes used in
+    current AD iPEPS calculations.
+
+    Args:
+        M:               SymmetricTensor (or DenseTensor) to decompose.
+        left_labels:     Labels forming the left (U) factor.
+        right_labels:    Labels forming the right (Vh) factor.
+        chi:             Number of singular values to keep.
+        new_bond_label:  Label for the new virtual bond.
+
+    Returns:
+        ``(U, s, Vh)`` where U and Vh are ``DenseTensor`` objects and
+        s is a 1-D ``jax.Array`` of length ``min(chi, min(m, n))``.
+    """
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.tensor import DenseTensor
+
+    # Resolve label ordering: left_labels then right_labels
+    all_labels = list(left_labels) + list(right_labels)
+    all_indices = []
+    perm = []
+    current_labels = M.labels()
+    for lbl in all_labels:
+        ax = current_labels.index(lbl)
+        perm.append(ax)
+        all_indices.append(M.indices[ax])
+
+    # Densify and permute to (left_labels..., right_labels...)
+    dense = M.todense()
+    dense = jnp.transpose(dense, perm)
+
+    # Reshape to matrix
+    left_shape = tuple(dense.shape[i] for i in range(len(left_labels)))
+    right_shape = tuple(
+        dense.shape[i] for i in range(len(left_labels), len(all_labels))
+    )
+    m = 1
+    for s in left_shape:
+        m *= s
+    n = 1
+    for s in right_shape:
+        n *= s
+    matrix = dense.reshape(m, n)
+
+    # Apply regularized SVD
+    U_mat, s_vals, Vh_mat = truncated_svd_ad(matrix, chi)
+    k = s_vals.shape[0]
+
+    # Reshape back to tensor form
+    U_data = U_mat.reshape(left_shape + (k,))
+    Vh_data = Vh_mat.reshape((k,) + right_shape)
+
+    # Build indices for the output tensors
+    left_indices = tuple(all_indices[i] for i in range(len(left_labels)))
+    right_indices = tuple(
+        all_indices[i] for i in range(len(left_labels), len(all_labels))
+    )
+
+    # Determine symmetry from input (if available)
+    sym = M.indices[0].symmetry
+    bond_charges = jnp.zeros(k, dtype=jnp.int32)
+    bond_out = TensorIndex(sym, bond_charges, FlowDirection.OUT, label=new_bond_label)
+    bond_in = TensorIndex(sym, bond_charges, FlowDirection.IN, label=new_bond_label)
+
+    U_tensor = DenseTensor(U_data, left_indices + (bond_out,))
+    Vh_tensor = DenseTensor(Vh_data, (bond_in,) + right_indices)
+
+    return U_tensor, s_vals, Vh_tensor
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +287,7 @@ def _config_to_tuple(config) -> tuple:
         int(config.renormalize),
         _PM_STR_TO_INT.get(config.projector_method, 0),
         config.min_iter,
+        int(getattr(config, "ad_regularize_svd", True)),
     )
 
 
@@ -168,6 +295,7 @@ def _config_from_tuple(config_tuple: tuple):
     """Reconstruct CTMConfig from a packed tuple."""
     pm_int = config_tuple[4] if len(config_tuple) > 4 else 0
     min_iter = config_tuple[5] if len(config_tuple) > 5 else 10
+    ad_regularize_svd = bool(config_tuple[6]) if len(config_tuple) > 6 else True
     return CTMConfig(
         chi=config_tuple[0],
         max_iter=config_tuple[1],
@@ -175,6 +303,7 @@ def _config_from_tuple(config_tuple: tuple):
         renormalize=bool(config_tuple[3]),
         projector_method=_PM_INT_TO_STR.get(pm_int, "eigh"),
         min_iter=min_iter,
+        ad_regularize_svd=ad_regularize_svd,
     )
 
 

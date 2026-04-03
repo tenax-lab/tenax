@@ -36,11 +36,13 @@ def small_peps_dense():
     charges = np.zeros(D, dtype=np.int32)
     phys_charges = np.zeros(d, dtype=np.int32)
     indices = (
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
     )
     return DenseTensor(data, indices)
 
@@ -54,11 +56,13 @@ def small_peps_symmetric():
     charges = np.zeros(D, dtype=np.int32)
     phys_charges = np.zeros(d, dtype=np.int32)
     indices = (
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
     )
     data = jax.random.normal(key, (D, D, D, D, d))
     return SymmetricTensor.from_dense(data, indices)
@@ -218,7 +222,9 @@ class TestSplitCTMTensorEnergy:
 
         # Manually convert and compute
         std_env = _split_env_to_tensor_standard(env)
-        E_from_std = compute_energy_ctm_tensor(small_peps_dense, std_env, heisenberg_gate, d)
+        E_from_std = compute_energy_ctm_tensor(
+            small_peps_dense, std_env, heisenberg_gate, d
+        )
 
         assert jnp.abs(E_split - E_from_std) < 1e-12, (
             f"Roundtrip mismatch: split={float(E_split)}, from_std={float(E_from_std)}"
@@ -254,16 +260,20 @@ class TestSplitCTMTensorEnergy:
         T4g_old = jnp.einsum("alg,udlr->augdr", T4_full, a)
         T4g_old = T4g_old.transpose(0, 1, 4, 2, 3).reshape(chi * D**2, D**2, chi * D**2)
 
-        T4g_new = _grow_edge_no_double_layer(
-            env_t.T4_ket,
-            env_t.T4_bra,
-            small_peps_dense,
-            A_bar,
-            "l",
-            "t4k_I",
-            "t4b_I",
-            ("t4k_d", "u", "U", "r", "R", "t4b_u", "d", "D"),
-        ).todense().reshape(chi * D * D, D * D, chi * D * D)
+        T4g_new = (
+            _grow_edge_no_double_layer(
+                env_t.T4_ket,
+                env_t.T4_bra,
+                small_peps_dense,
+                A_bar,
+                "l",
+                "t4k_I",
+                "t4b_I",
+                ("t4k_d", "u", "U", "r", "R", "t4b_u", "d", "D"),
+            )
+            .todense()
+            .reshape(chi * D * D, D * D, chi * D * D)
+        )
         assert jnp.allclose(T4g_old, T4g_new, atol=1e-12), "T4 (left) growth mismatch"
 
         # --- Right move: T2 growth ---
@@ -272,16 +282,20 @@ class TestSplitCTMTensorEnergy:
         T2g_old = jnp.einsum("erm,udlr->eumdl", T2_full, a)
         T2g_old = T2g_old.transpose(0, 1, 4, 2, 3).reshape(chi * D**2, D**2, chi * D**2)
 
-        T2g_new = _grow_edge_no_double_layer(
-            env_t.T2_ket,
-            env_t.T2_bra,
-            small_peps_dense,
-            A_bar,
-            "r",
-            "t2k_I",
-            "t2b_I",
-            ("t2k_u", "u", "U", "l", "L", "t2b_d", "d", "D"),
-        ).todense().reshape(chi * D * D, D * D, chi * D * D)
+        T2g_new = (
+            _grow_edge_no_double_layer(
+                env_t.T2_ket,
+                env_t.T2_bra,
+                small_peps_dense,
+                A_bar,
+                "r",
+                "t2k_I",
+                "t2b_I",
+                ("t2k_u", "u", "U", "l", "L", "t2b_d", "d", "D"),
+            )
+            .todense()
+            .reshape(chi * D * D, D * D, chi * D * D)
+        )
         assert jnp.allclose(T2g_old, T2g_new, atol=1e-12), "T2 (right) growth mismatch"
 
         # --- Top move: T1 growth ---
@@ -290,16 +304,20 @@ class TestSplitCTMTensorEnergy:
         T1g_old = jnp.einsum("buc,udlr->bcdlr", T1_full, a)
         T1g_old = T1g_old.transpose(0, 3, 2, 1, 4).reshape(chi * D**2, D**2, chi * D**2)
 
-        T1g_new = _grow_edge_no_double_layer(
-            env_t.T1_ket,
-            env_t.T1_bra,
-            small_peps_dense,
-            A_bar,
-            "u",
-            "t1k_I",
-            "t1b_I",
-            ("t1k_l", "l", "L", "d", "D", "t1b_r", "r", "R"),
-        ).todense().reshape(chi * D * D, D * D, chi * D * D)
+        T1g_new = (
+            _grow_edge_no_double_layer(
+                env_t.T1_ket,
+                env_t.T1_bra,
+                small_peps_dense,
+                A_bar,
+                "u",
+                "t1k_I",
+                "t1b_I",
+                ("t1k_l", "l", "L", "d", "D", "t1b_r", "r", "R"),
+            )
+            .todense()
+            .reshape(chi * D * D, D * D, chi * D * D)
+        )
         assert jnp.allclose(T1g_old, T1g_new, atol=1e-12), "T1 (top) growth mismatch"
 
         # --- Bottom move: T3 growth ---
@@ -308,16 +326,20 @@ class TestSplitCTMTensorEnergy:
         T3g_old = jnp.einsum("hdi,udlr->hiulr", T3_full, a)
         T3g_old = T3g_old.transpose(0, 3, 2, 1, 4).reshape(chi * D**2, D**2, chi * D**2)
 
-        T3g_new = _grow_edge_no_double_layer(
-            env_t.T3_ket,
-            env_t.T3_bra,
-            small_peps_dense,
-            A_bar,
-            "d",
-            "t3k_I",
-            "t3b_I",
-            ("t3k_r", "l", "L", "u", "U", "t3b_l", "r", "R"),
-        ).todense().reshape(chi * D * D, D * D, chi * D * D)
+        T3g_new = (
+            _grow_edge_no_double_layer(
+                env_t.T3_ket,
+                env_t.T3_bra,
+                small_peps_dense,
+                A_bar,
+                "d",
+                "t3k_I",
+                "t3b_I",
+                ("t3k_r", "l", "L", "u", "U", "t3b_l", "r", "R"),
+            )
+            .todense()
+            .reshape(chi * D * D, D * D, chi * D * D)
+        )
         assert jnp.allclose(T3g_old, T3g_new, atol=1e-12), "T3 (bottom) growth mismatch"
 
 
@@ -353,11 +375,21 @@ class TestSplitCTMSymmetric:
         virt_charges = np.array([0, 1], dtype=np.int32)
         phys_charges = np.array([0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+            TensorIndex.from_charges(
+                sym, virt_charges.copy(), FlowDirection.OUT, label="u"
+            ),
+            TensorIndex.from_charges(
+                sym, virt_charges.copy(), FlowDirection.IN, label="d"
+            ),
+            TensorIndex.from_charges(
+                sym, virt_charges.copy(), FlowDirection.OUT, label="l"
+            ),
+            TensorIndex.from_charges(
+                sym, virt_charges.copy(), FlowDirection.IN, label="r"
+            ),
+            TensorIndex.from_charges(
+                sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+            ),
         )
         A = SymmetricTensor.random_normal(indices, key)
         chi, chi_I = 4, 2
@@ -412,11 +444,21 @@ class TestSplitCTMSymmetric:
         virt_charges = np.array([0, 1], dtype=np.int32)
         phys_charges = np.array([0, 1], dtype=np.int32)
         indices = (
-            TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="u"),
-            TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="d"),
-            TensorIndex(sym, virt_charges.copy(), FlowDirection.OUT, label="l"),
-            TensorIndex(sym, virt_charges.copy(), FlowDirection.IN, label="r"),
-            TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+            TensorIndex.from_charges(
+                sym, virt_charges.copy(), FlowDirection.OUT, label="u"
+            ),
+            TensorIndex.from_charges(
+                sym, virt_charges.copy(), FlowDirection.IN, label="d"
+            ),
+            TensorIndex.from_charges(
+                sym, virt_charges.copy(), FlowDirection.OUT, label="l"
+            ),
+            TensorIndex.from_charges(
+                sym, virt_charges.copy(), FlowDirection.IN, label="r"
+            ),
+            TensorIndex.from_charges(
+                sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+            ),
         )
         A = SymmetricTensor.random_normal(indices, key)
         chi, chi_I = 4, 2

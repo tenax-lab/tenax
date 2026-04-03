@@ -14,7 +14,7 @@ import numpy as np
 from tenax.algorithms.ipeps_config import iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor, Tensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 
 def _wrap_as_dense_tensor(arr: jax.Array) -> DenseTensor:
@@ -30,11 +30,13 @@ def _wrap_as_dense_tensor(arr: jax.Array) -> DenseTensor:
     charges = np.zeros(D, dtype=np.int32)
     phys_charges = np.zeros(d, dtype=np.int32)
     indices = (
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="u"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="d"),
-        TensorIndex(sym, charges.copy(), FlowDirection.OUT, label="l"),
-        TensorIndex(sym, charges.copy(), FlowDirection.IN, label="r"),
-        TensorIndex(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
     )
     return DenseTensor(arr, indices)
 
@@ -446,3 +448,61 @@ def _optimize_gs_ad_tensor_2site(
         print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}", flush=True)
 
     return (A_final, B_final), (env_A, env_B), E_gs
+
+
+def optimize_fpeps_ad(
+    hamiltonian_gate: Tensor,
+    A_init: Tensor | None,
+    config: iPEPSConfig,
+    fpeps_config=None,
+) -> tuple:
+    """AD-based ground state optimization of fermionic iPEPS.
+
+    Uses automatic differentiation through the CTM fixed-point equation
+    to compute exact gradients of the energy with respect to the
+    fermionic site tensor, then optimizes with optax.
+
+    The AD backward pass (GMRES implicit differentiation) currently
+    requires ``DenseTensor`` leaves for stable gradients, so input
+    ``SymmetricTensor`` tensors are automatically wrapped as
+    ``DenseTensor`` (preserving the index structure including
+    ``FermionParity`` symmetry charges and flow directions).  The
+    returned ``A_opt`` is a ``DenseTensor`` with the same index
+    metadata.
+
+    Args:
+        hamiltonian_gate: 2-site Hamiltonian as a ``Tensor`` (typically
+            a ``SymmetricTensor`` with ``FermionParity`` symmetry),
+            shape ``(d, d, d, d)``.
+        A_init:           Initial fPEPS site tensor ``(D, D, D, D, d)``
+            with labels ``(u, d, l, r, phys)``.  If ``None``, a random
+            tensor with ``FermionParity`` is created using
+            *fpeps_config*.
+        config:           ``iPEPSConfig`` with AD optimization settings
+            (learning rate, number of steps, CTM config, etc.).
+        fpeps_config:     ``FPEPSConfig`` used only when ``A_init`` is
+            ``None`` to build the initial tensor (bond dimension D,
+            physical dimension d=2, FermionParity charges).
+
+    Returns:
+        ``(A_opt, env, E_gs)`` where ``A_opt`` is the optimized
+        ``DenseTensor``, ``env`` is a ``CTMTensorEnv``, and ``E_gs``
+        is the ground-state energy per site.
+    """
+    if A_init is None:
+        if fpeps_config is None:
+            raise ValueError(
+                "fpeps_config is required when A_init is None "
+                "(needed to build the initial fPEPS tensor)."
+            )
+        from tenax.algorithms.fermionic_ipeps import _build_initial_fpeps_tensor
+
+        A_init = _build_initial_fpeps_tensor(fpeps_config)
+
+    # Wrap SymmetricTensor as DenseTensor for stable AD backward pass.
+    # The DenseTensor retains the original index metadata (symmetry,
+    # charges, flows) so the CTM pipeline uses the correct labels.
+    if isinstance(A_init, SymmetricTensor):
+        A_init = DenseTensor(A_init.todense(), A_init.indices)
+
+    return _optimize_gs_ad_tensor(hamiltonian_gate, A_init, config)

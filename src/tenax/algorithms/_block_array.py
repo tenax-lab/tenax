@@ -107,19 +107,25 @@ def ba_sub_scaled(a: BlockArray, b: BlockArray, scalar: float) -> BlockArray:
     return BlockArray(blocks=result, indices=a.indices)
 
 
-def ba_inner(a: BlockArray, b: BlockArray) -> float:
+def ba_inner(a: BlockArray, b: BlockArray) -> float | complex:
     """Hermitian inner product: sum conj(a)*b over shared blocks.
 
     Uses ``np.vdot`` which conjugates the first argument, giving the correct
     Hermitian inner product for complex data and equivalent behavior for real.
+
+    Returns float for real inputs, complex for complex inputs.
     """
     if _HAS_CYTHON_BA and a.blocks:
         return _c_inner(a.blocks, b.blocks)
-    total = 0.0
+    total: float | complex = 0.0
+    is_complex = False
     for k in a.blocks:
         bk = b.blocks.get(k)
         if bk is not None:
-            total += np.vdot(a.blocks[k], bk).real
+            if not is_complex and np.iscomplexobj(a.blocks[k]):
+                is_complex = True
+                total = complex(total)
+            total += np.vdot(a.blocks[k], bk)
     return total
 
 
@@ -149,7 +155,8 @@ def ba_scale_inplace(ba: BlockArray, scalar: float) -> None:
 
 def ba_norm(ba: BlockArray) -> float:
     """Frobenius norm: sqrt(inner(ba, ba))."""
-    return math.sqrt(ba_inner(ba, ba))
+    # <v|v> is always real; extract .real for complex return values.
+    return math.sqrt(float(ba_inner(ba, ba).real))
 
 
 def ba_conj(ba: BlockArray) -> BlockArray:

@@ -31,9 +31,9 @@ def _make_left_canonical_site(chi_l, d, chi_r, key, dtype=jnp.float64):
     data_lc = q.reshape(chi_l, d, chi_r)
 
     indices = (
-        TensorIndex(sym, charges_l, FlowDirection.IN, label="left"),
-        TensorIndex(sym, charges_d, FlowDirection.IN, label="phys"),
-        TensorIndex(sym, charges_r, FlowDirection.OUT, label="right"),
+        TensorIndex.from_charges(sym, charges_l, FlowDirection.IN, label="left"),
+        TensorIndex.from_charges(sym, charges_d, FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(sym, charges_r, FlowDirection.OUT, label="right"),
     )
     return DenseTensor(data_lc, indices)
 
@@ -48,9 +48,9 @@ def _make_right_tensor(chi_r, d2, chi_rr, key, dtype=jnp.float64):
     data = jax.random.normal(key, (chi_r, d2, chi_rr), dtype=dtype)
 
     indices = (
-        TensorIndex(sym, charges_r, FlowDirection.IN, label="right"),
-        TensorIndex(sym, charges_d2, FlowDirection.IN, label="phys2"),
-        TensorIndex(sym, charges_rr, FlowDirection.OUT, label="right2"),
+        TensorIndex.from_charges(sym, charges_r, FlowDirection.IN, label="right"),
+        TensorIndex.from_charges(sym, charges_d2, FlowDirection.IN, label="phys2"),
+        TensorIndex.from_charges(sym, charges_rr, FlowDirection.OUT, label="right2"),
     )
     return DenseTensor(data, indices)
 
@@ -172,9 +172,9 @@ class TestComplexTensors:
         data_lc = q.reshape(chi_l, d, chi_r)
 
         indices = (
-            TensorIndex(sym, charges_l, FlowDirection.IN, label="left"),
-            TensorIndex(sym, charges_d, FlowDirection.IN, label="phys"),
-            TensorIndex(sym, charges_r, FlowDirection.OUT, label="right"),
+            TensorIndex.from_charges(sym, charges_l, FlowDirection.IN, label="left"),
+            TensorIndex.from_charges(sym, charges_d, FlowDirection.IN, label="phys"),
+            TensorIndex.from_charges(sym, charges_r, FlowDirection.OUT, label="right"),
         )
         site = DenseTensor(data_lc, indices)
         right = _make_right_tensor(chi_r, d2, chi_rr, k3, dtype=jnp.complex128)

@@ -83,6 +83,21 @@ try:
 except ImportError:
     _USE_CYTHON_REORTH = False
 
+try:
+    from tenax.contraction._cython_blas import (
+        DMRGMatvec1Site as _DMRGMatvec1Site,
+    )
+    from tenax.contraction._cython_blas import (
+        DMRGMatvec2Site as _DMRGMatvec2Site,
+    )
+    from tenax.contraction._cython_blas import (
+        cython_lanczos_ground as _cython_lanczos_ground,
+    )
+
+    _USE_CYTHON_LANCZOS = True
+except (ImportError, ModuleNotFoundError):
+    _USE_CYTHON_LANCZOS = False
+
 
 @dataclass
 class DMRGConfig:
@@ -221,6 +236,16 @@ def dmrg(
             "subspace_expansion=True requires two_site=False. "
             "DMRG3S enrichment is a 1-site algorithm."
         )
+    if config.num_states != 1:
+        raise NotImplementedError(
+            "DMRGConfig.num_states>1 is not implemented yet. "
+            "Only single-state (ground-state) targeting is currently supported."
+        )
+    if config.noise != 0.0:
+        raise NotImplementedError(
+            "DMRGConfig.noise is not implemented yet. Set noise=0.0."
+        )
+
     L = hamiltonian.n_nodes()
     if L < 2:
         raise ValueError(
@@ -301,7 +326,7 @@ def dmrg(
                 else:
                     new_charges = np.zeros(padded_dim, dtype=np.int32)
                     new_indices.append(
-                        TensorIndex(
+                        TensorIndex.from_charges(
                             sym,
                             new_charges,
                             orig_idx.flow,
@@ -469,7 +494,7 @@ def dmrg(
                     else:
                         new_charges = np.zeros(padded_dim, dtype=np.int32)
                         new_indices.append(
-                            TensorIndex(
+                            TensorIndex.from_charges(
                                 sym,
                                 new_charges,
                                 orig_idx.flow,
@@ -885,7 +910,7 @@ def _rebuild_dense_tensor(
     if old_idx.dim == new_dim:
         return DenseTensor(data, old_indices)
 
-    new_bond_idx = TensorIndex(
+    new_bond_idx = TensorIndex.from_charges(
         symmetry=old_idx.symmetry,
         charges=np.zeros(new_dim, dtype=np.int32),
         flow=old_idx.flow,
@@ -964,9 +989,9 @@ def _build_trivial_left_env(dtype=None) -> DenseTensor:
     sym = U1Symmetry()
     bond = np.zeros(1, dtype=np.int32)
     indices = (
-        TensorIndex(sym, bond, FlowDirection.IN, label="env_mps_l"),
-        TensorIndex(sym, bond, FlowDirection.IN, label="env_mpo_l"),
-        TensorIndex(sym, bond, FlowDirection.OUT, label="env_mps_conj_l"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.IN, label="env_mps_l"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.IN, label="env_mpo_l"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.OUT, label="env_mps_conj_l"),
     )
     return DenseTensor(jnp.ones((1, 1, 1), dtype=dtype), indices)
 
@@ -978,9 +1003,9 @@ def _build_trivial_right_env(dtype=None) -> DenseTensor:
     sym = U1Symmetry()
     bond = np.zeros(1, dtype=np.int32)
     indices = (
-        TensorIndex(sym, bond, FlowDirection.OUT, label="env_mps_r"),
-        TensorIndex(sym, bond, FlowDirection.OUT, label="env_mpo_r"),
-        TensorIndex(sym, bond, FlowDirection.IN, label="env_mps_conj_r"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.OUT, label="env_mps_r"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.OUT, label="env_mpo_r"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.IN, label="env_mps_conj_r"),
     )
     return DenseTensor(jnp.ones((1, 1, 1), dtype=dtype), indices)
 
@@ -1026,9 +1051,11 @@ def _update_left_env(
     bond_r = np.zeros(new_L.shape[0], dtype=np.int32)
     bond_w = np.zeros(new_L.shape[1], dtype=np.int32)
     indices = (
-        TensorIndex(sym, bond_r, FlowDirection.IN, label="env_mps_l"),
-        TensorIndex(sym, bond_w, FlowDirection.IN, label="env_mpo_l"),
-        TensorIndex(sym, bond_r, FlowDirection.OUT, label="env_mps_conj_l"),
+        TensorIndex.from_charges(sym, bond_r, FlowDirection.IN, label="env_mps_l"),
+        TensorIndex.from_charges(sym, bond_w, FlowDirection.IN, label="env_mpo_l"),
+        TensorIndex.from_charges(
+            sym, bond_r, FlowDirection.OUT, label="env_mps_conj_l"
+        ),
     )
     return DenseTensor(new_L, indices)
 
@@ -1062,9 +1089,9 @@ def _update_right_env(
     bond_l = np.zeros(new_R.shape[0], dtype=np.int32)
     bond_w = np.zeros(new_R.shape[1], dtype=np.int32)
     indices = (
-        TensorIndex(sym, bond_l, FlowDirection.OUT, label="env_mps_r"),
-        TensorIndex(sym, bond_w, FlowDirection.OUT, label="env_mpo_r"),
-        TensorIndex(sym, bond_l, FlowDirection.IN, label="env_mps_conj_r"),
+        TensorIndex.from_charges(sym, bond_l, FlowDirection.OUT, label="env_mps_r"),
+        TensorIndex.from_charges(sym, bond_w, FlowDirection.OUT, label="env_mpo_r"),
+        TensorIndex.from_charges(sym, bond_l, FlowDirection.IN, label="env_mps_conj_r"),
     )
     return DenseTensor(new_R, indices)
 
@@ -1492,9 +1519,9 @@ def _build_trivial_left_env_symmetric(dtype=None) -> SymmetricTensor:
     sym = U1Symmetry()
     bond = np.zeros(1, dtype=np.int32)
     indices = (
-        TensorIndex(sym, bond, FlowDirection.IN, label="env_mps_l"),
-        TensorIndex(sym, bond, FlowDirection.IN, label="env_mpo_l"),
-        TensorIndex(sym, bond, FlowDirection.OUT, label="env_mps_conj_l"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.IN, label="env_mps_l"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.IN, label="env_mpo_l"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.OUT, label="env_mps_conj_l"),
     )
     blocks: dict[tuple[int, ...], jax.Array] = {
         (0, 0, 0): jnp.ones((1, 1, 1), dtype=dtype)
@@ -1509,9 +1536,9 @@ def _build_trivial_right_env_symmetric(dtype=None) -> SymmetricTensor:
     sym = U1Symmetry()
     bond = np.zeros(1, dtype=np.int32)
     indices = (
-        TensorIndex(sym, bond, FlowDirection.OUT, label="env_mps_r"),
-        TensorIndex(sym, bond, FlowDirection.OUT, label="env_mpo_r"),
-        TensorIndex(sym, bond, FlowDirection.IN, label="env_mps_conj_r"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.OUT, label="env_mps_r"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.OUT, label="env_mpo_r"),
+        TensorIndex.from_charges(sym, bond, FlowDirection.IN, label="env_mps_conj_r"),
     )
     blocks: dict[tuple[int, ...], jax.Array] = {
         (0, 0, 0): jnp.ones((1, 1, 1), dtype=dtype)
@@ -1628,9 +1655,13 @@ def _lanczos_solve_np(
     alphas = []
     betas = [0.0]
 
+    _EVAL_CHECK_INTERVAL = 10  # check eigenvalue convergence every N steps
+    _prev_eval = None
+
     for step in range(num_steps):
         w = matvec(basis[-1])
-        alpha_val = ba_inner(basis[-1], w)
+        # alpha = <v|H|v> is real for Hermitian H; extract .real for BLAS
+        alpha_val = float(ba_inner(basis[-1], w).real)
         alphas.append(alpha_val)
 
         # w = w - alpha * v_k  (fused, no intermediate dict)
@@ -1651,7 +1682,7 @@ def _lanczos_solve_np(
             for q in basis:
                 coeff = ba_inner(q, w)
                 if _USE_CYTHON_SUB:
-                    _cython_ba_sub_scaled_inplace(w.blocks, q.blocks, coeff)
+                    _cython_ba_sub_scaled_inplace(w.blocks, q.blocks, float(coeff.real))
                 else:
                     w = ba_sub_scaled(w, q, coeff)
 
@@ -1660,6 +1691,21 @@ def _lanczos_solve_np(
 
         if beta_val < tol:
             break
+
+        # Eigenvalue convergence check every _EVAL_CHECK_INTERVAL steps.
+        # First check after 3 intervals to avoid false convergence in small
+        # Krylov subspaces (e.g. L=4 DMRG where dim is tiny).
+        if (
+            step + 1
+        ) % _EVAL_CHECK_INTERVAL == 0 and step >= 3 * _EVAL_CHECK_INTERVAL - 1:
+            _n = len(alphas)
+            _T = (
+                np.diag(alphas) + np.diag(betas[1:_n], k=1) + np.diag(betas[1:_n], k=-1)
+            )
+            _cur_eval = float(np.linalg.eigvalsh(_T)[0])
+            if _prev_eval is not None and abs(_cur_eval - _prev_eval) < tol:
+                break
+            _prev_eval = _cur_eval
 
         basis.append(ba_scale(w, 1.0 / beta_val))
 
@@ -2598,14 +2644,26 @@ def _two_site_update_symmetric_np(
         )
         _env_np[_theta_buf_idx] = None
 
-        def matvec(v_ba: BlockArray) -> BlockArray:
-            return _execute_matvec_combos(
-                _combo_descs,
-                v_ba.blocks,
-                _theta_buf_idx,
-                _out_keys,
-                _out_shapes,
-                _out_indices,
+        if _USE_CYTHON_LANCZOS:
+            mv = _DMRGMatvec2Site(_combo_descs, _out_keys, _out_shapes, _theta_buf_idx)
+            energy, theta_opt_blocks = _cython_lanczos_ground(
+                mv, theta_ba.blocks, config.lanczos_max_iter, config.lanczos_tol
+            )
+            theta_opt_ba = BlockArray(blocks=theta_opt_blocks, indices=_out_indices)
+        else:
+
+            def matvec(v_ba: BlockArray) -> BlockArray:
+                return _execute_matvec_combos(
+                    _combo_descs,
+                    v_ba.blocks,
+                    _theta_buf_idx,
+                    _out_keys,
+                    _out_shapes,
+                    _out_indices,
+                )
+
+            energy, theta_opt_ba = _lanczos_solve_np(
+                matvec, theta_ba, config.lanczos_max_iter, config.lanczos_tol
             )
     else:
         _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
@@ -2622,9 +2680,9 @@ def _two_site_update_symmetric_np(
                 return_ba=True,
             )
 
-    energy, theta_opt_ba = _lanczos_solve_np(
-        matvec, theta_ba, config.lanczos_max_iter, config.lanczos_tol
-    )
+        energy, theta_opt_ba = _lanczos_solve_np(
+            matvec, theta_ba, config.lanczos_max_iter, config.lanczos_tol
+        )
 
     # Return BlockArray directly — stays as numpy through sweep loop.
     # Converted to SymmetricTensor only at the end of dmrg().
@@ -2694,14 +2752,26 @@ def _one_site_update_symmetric_np(
         )
         _env_np[_theta_buf_idx] = None
 
-        def matvec(v_ba: BlockArray) -> BlockArray:
-            return _execute_matvec_combos(
-                _combo_descs,
-                v_ba.blocks,
-                _theta_buf_idx,
-                _out_keys,
-                _out_shapes,
-                _out_indices,
+        if _USE_CYTHON_LANCZOS:
+            mv = _DMRGMatvec1Site(_combo_descs, _out_keys, _out_shapes, _theta_buf_idx)
+            energy, site_opt_blocks = _cython_lanczos_ground(
+                mv, site_ba.blocks, config.lanczos_max_iter, config.lanczos_tol
+            )
+            site_opt_ba = BlockArray(blocks=site_opt_blocks, indices=_out_indices)
+        else:
+
+            def matvec(v_ba: BlockArray) -> BlockArray:
+                return _execute_matvec_combos(
+                    _combo_descs,
+                    v_ba.blocks,
+                    _theta_buf_idx,
+                    _out_keys,
+                    _out_shapes,
+                    _out_indices,
+                )
+
+            energy, site_opt_ba = _lanczos_solve_np(
+                matvec, site_ba, config.lanczos_max_iter, config.lanczos_tol
             )
     else:
         _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
@@ -2718,9 +2788,9 @@ def _one_site_update_symmetric_np(
                 return_ba=True,
             )
 
-    energy, site_opt_ba = _lanczos_solve_np(
-        matvec, site_ba, config.lanczos_max_iter, config.lanczos_tol
-    )
+        energy, site_opt_ba = _lanczos_solve_np(
+            matvec, site_ba, config.lanczos_max_iter, config.lanczos_tol
+        )
 
     # 1-site mode needs SymmetricTensor for QR/relabel in sweep loop
     return ba_to_symmetric(site_opt_ba), energy
@@ -2952,18 +3022,26 @@ def build_random_symmetric_mps(
             # Single-site: (trivial_IN, phys_IN, trivial_OUT)
             # target=target_charge enforces the sector; right bond carries charge 0.
             indices: tuple[TensorIndex, ...] = (
-                TensorIndex(sym, trivial_zero, FlowDirection.IN, label="v_-1_0"),
-                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, trivial_zero, FlowDirection.IN, label="v_-1_0"
+                ),
+                TensorIndex.from_charges(
+                    sym, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     sym, trivial_zero, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         elif i == 0:
             # Left boundary: (trivial_IN, phys_IN, virt_right_OUT)
             indices = (
-                TensorIndex(sym, trivial_zero, FlowDirection.IN, label="v_-1_0"),
-                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, trivial_zero, FlowDirection.IN, label="v_-1_0"
+                ),
+                TensorIndex.from_charges(
+                    sym, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     sym, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
@@ -2971,18 +3049,26 @@ def build_random_symmetric_mps(
             # Right boundary: (virt_left_IN, phys_IN, trivial_OUT)
             # target=target_charge enforces the sector; right bond carries charge 0.
             indices = (
-                TensorIndex(sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"),
-                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"
+                ),
+                TensorIndex.from_charges(
+                    sym, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     sym, trivial_zero, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         else:
             # Middle: (virt_left_IN, phys_IN, virt_right_OUT)
             indices = (
-                TensorIndex(sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"),
-                TensorIndex(sym, phys_charges, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, virt_charges, FlowDirection.IN, label=f"v{i - 1}_{i}"
+                ),
+                TensorIndex.from_charges(
+                    sym, phys_charges, FlowDirection.IN, label=f"p{i}"
+                ),
+                TensorIndex.from_charges(
                     sym, virt_charges, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
@@ -3114,34 +3200,46 @@ def build_random_mps(
             # Single-site MPS: (1, d, 1) with trivial bonds on both sides.
             shape = (1, physical_dim, 1)
             indices = (
-                TensorIndex(sym, bond_trivial, FlowDirection.IN, label="v_-1_0"),
-                TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, bond_trivial, FlowDirection.IN, label="v_-1_0"
+                ),
+                TensorIndex.from_charges(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex.from_charges(
                     sym, bond_trivial, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         elif i == 0:
             shape = (1, physical_dim, bond_dim)
             indices = (
-                TensorIndex(sym, bond_trivial, FlowDirection.IN, label="v_-1_0"),
-                TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(sym, bond_chi, FlowDirection.OUT, label=f"v{i}_{i + 1}"),
+                TensorIndex.from_charges(
+                    sym, bond_trivial, FlowDirection.IN, label="v_-1_0"
+                ),
+                TensorIndex.from_charges(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex.from_charges(
+                    sym, bond_chi, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
             )
         elif i == L - 1:
             shape = (bond_dim, physical_dim, 1)
             indices = (
-                TensorIndex(sym, bond_chi, FlowDirection.IN, label=f"v{i - 1}_{i}"),
-                TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(
+                TensorIndex.from_charges(
+                    sym, bond_chi, FlowDirection.IN, label=f"v{i - 1}_{i}"
+                ),
+                TensorIndex.from_charges(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex.from_charges(
                     sym, bond_trivial, FlowDirection.OUT, label=f"v{i}_{i + 1}"
                 ),
             )
         else:
             shape = (bond_dim, physical_dim, bond_dim)
             indices = (
-                TensorIndex(sym, bond_chi, FlowDirection.IN, label=f"v{i - 1}_{i}"),
-                TensorIndex(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
-                TensorIndex(sym, bond_chi, FlowDirection.OUT, label=f"v{i}_{i + 1}"),
+                TensorIndex.from_charges(
+                    sym, bond_chi, FlowDirection.IN, label=f"v{i - 1}_{i}"
+                ),
+                TensorIndex.from_charges(sym, bond_d, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex.from_charges(
+                    sym, bond_chi, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
             )
 
         data = jax.random.normal(key, shape, dtype=dtype)
