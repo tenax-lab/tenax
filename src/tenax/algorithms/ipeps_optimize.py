@@ -17,6 +17,124 @@ from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 
+def _build_optimizer(config: iPEPSConfig):
+    """Build optax optimizer from config."""
+    import optax
+
+    name = config.gs_optimizer.lower()
+    if name == "adam":
+        return optax.chain(
+            optax.clip_by_global_norm(config.gs_max_grad_norm),
+            optax.adam(config.gs_learning_rate),
+        )
+    elif name == "lbfgs":
+        return optax.chain(
+            optax.clip_by_global_norm(config.gs_max_grad_norm),
+            optax.scale_by_lbfgs(memory_size=10),
+            optax.scale(-1.0),
+        )
+    elif name == "cg":
+        # CG direction is computed manually; optax just provides identity.
+        return None
+    else:
+        raise ValueError(
+            f"Unknown gs_optimizer {config.gs_optimizer!r}, "
+            "expected 'adam', 'lbfgs', or 'cg'"
+        )
+
+
+def _use_line_search(config: iPEPSConfig) -> bool:
+    """Whether to use backtracking line search."""
+    if config.gs_line_search is not None:
+        return config.gs_line_search
+    return config.gs_optimizer.lower() in ("lbfgs", "cg")
+
+
+def _tree_dot(a, b) -> float:
+    """Compute dot product between two pytrees of arrays."""
+    leaves_a = jax.tree.leaves(a)
+    leaves_b = jax.tree.leaves(b)
+    return float(sum(jnp.sum(la * lb) for la, lb in zip(leaves_a, leaves_b)))
+
+
+def _tree_scale(tree, alpha: float):
+    """Scale all leaves in a pytree by a scalar."""
+    return jax.tree.map(lambda x: x * alpha, tree)
+
+
+def _tree_add(a, b):
+    """Add two pytrees element-wise."""
+    return jax.tree.map(lambda x, y: x + y, a, b)
+
+
+def _normalize_params(params):
+    """Normalize iPEPS site tensor(s)."""
+    if isinstance(params, tuple):
+        return tuple(p * (1.0 / (p.norm() + 1e-10)) for p in params)
+    return params * (1.0 / (params.norm() + 1e-10))
+
+
+def _backtracking_line_search(
+    params,
+    direction,
+    grad,
+    energy,
+    loss_fn_fwd,
+    c1=1e-4,
+    rho=0.5,
+    max_steps=8,
+):
+    """Armijo backtracking line search (Python-level, not JIT-traced).
+
+    Args:
+        params: current parameters (pytree)
+        direction: search direction (pytree, same structure as params)
+        grad: gradient at current params (pytree)
+        energy: loss value at current params
+        loss_fn_fwd: forward-only loss function params -> scalar
+        c1: sufficient decrease parameter
+        rho: backtracking factor
+        max_steps: maximum number of backtracks
+
+    Returns:
+        (new_params, new_energy, step_size)
+    """
+    slope = _tree_dot(grad, direction)
+    if slope >= 0:
+        # Direction is not a descent direction; fall back to negative gradient
+        direction = jax.tree.map(lambda g: -g, grad)
+        slope = -_tree_dot(grad, grad)
+
+    # Scale initial step so ||alpha * d|| ~ 0.1 * ||params||
+    dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
+    param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
+    alpha = min(1.0, 0.1 * param_norm / dir_norm)
+
+    best_trial, best_f, best_alpha = params, energy, 0.0
+    for _ in range(max_steps):
+        trial = _normalize_params(_tree_add(params, _tree_scale(direction, alpha)))
+        f_trial = loss_fn_fwd(trial)
+        if f_trial < best_f:
+            best_trial, best_f, best_alpha = trial, f_trial, alpha
+        if f_trial <= energy + c1 * alpha * slope:
+            return trial, f_trial, alpha
+        alpha *= rho
+
+    # Return best trial seen (stays at current params if nothing improved)
+    return best_trial, best_f, best_alpha
+
+
+def _cg_beta_pr(grad_new, grad_old):
+    """Polak-Ribiere+ beta for conjugate gradient."""
+    # beta = max(0, g_new . (g_new - g_old) / (g_old . g_old))
+    diff = jax.tree.map(lambda gn, go: gn - go, grad_new, grad_old)
+    num = _tree_dot(grad_new, diff)
+    den = _tree_dot(grad_old, grad_old)
+    if den < 1e-30:
+        return 0.0
+    return max(0.0, num / den)
+
+
 def _wrap_as_dense_tensor(arr: jax.Array) -> DenseTensor:
     """Wrap a raw ``jax.Array`` iPEPS site tensor as a ``DenseTensor``.
 
@@ -178,16 +296,21 @@ def _optimize_gs_ad_tensor(
         energy = compute_energy_ctm_tensor(A_norm, env, gate, d_phys)
         return energy, env_leaves
 
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(config.gs_max_grad_norm),
-        optax.adam(config.gs_learning_rate),
-    )
-    opt_state = optimizer.init(A)
+    optimizer = _build_optimizer(config)
+    opt_state = optimizer.init(A) if optimizer is not None else None
+    use_ls = _use_line_search(config)
+    is_cg = config.gs_optimizer.lower() == "cg"
 
     best_energy = float("inf")
     best_A = A
     prev_energy = float("inf")
+    prev_grad = None
+    cg_direction = None
     log_interval = config.gs_log_interval
+
+    # Forward-only loss for line search (no backward/GMRES)
+    def loss_fn_fwd(A_param):
+        return float(loss_fn(A_param, prev_env_leaves)[0])
 
     for step in range(config.gs_num_steps):
         (energy_val, env_leaves), grads = jax.value_and_grad(
@@ -232,9 +355,34 @@ def _optimize_gs_ad_tensor(
         prev_energy = energy_float
         prev_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
 
-        updates, opt_state = optimizer.update(grads, opt_state, A)
-        A = optax.apply_updates(A, updates)
-        A = A * (1.0 / (A.norm() + 1e-10))
+        # Compute search direction
+        if is_cg:
+            neg_grad = jax.tree.map(lambda g: -g, grads)
+            if prev_grad is not None and cg_direction is not None:
+                beta = _cg_beta_pr(grads, prev_grad)
+                cg_direction = _tree_add(neg_grad, _tree_scale(cg_direction, beta))
+            else:
+                cg_direction = neg_grad
+            prev_grad = grads
+            direction = cg_direction
+        elif optimizer is not None:
+            updates, opt_state = optimizer.update(grads, opt_state, A)
+            direction = updates
+        else:
+            direction = jax.tree.map(lambda g: -g, grads)
+
+        if use_ls:
+            A, _, _ = _backtracking_line_search(
+                A,
+                direction,
+                grads,
+                energy_float,
+                loss_fn_fwd,
+                max_steps=config.gs_line_search_max_steps,
+            )
+        else:
+            A = optax.apply_updates(A, direction)
+            A = A * (1.0 / (A.norm() + 1e-10))
 
     A_final = best_A * (1.0 / (best_A.norm() + 1e-10))
     env_leaves = ctm_tensor_converge(
@@ -369,17 +517,22 @@ def _optimize_gs_ad_tensor_2site(
         return energy, env_leaves
 
     params = (A, B)
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(config.gs_max_grad_norm),
-        optax.adam(config.gs_learning_rate),
-    )
-    opt_state = optimizer.init(params)
+    optimizer = _build_optimizer(config)
+    opt_state = optimizer.init(params) if optimizer is not None else None
+    use_ls = _use_line_search(config)
+    is_cg = config.gs_optimizer.lower() == "cg"
 
     last_energy = float("inf")
     last_params = params
     last_env_leaves = None
     prev_energy = float("inf")
+    prev_grad = None
+    cg_direction = None
     log_interval = config.gs_log_interval
+
+    # Forward-only loss for line search
+    def loss_fn_fwd(params_):
+        return float(loss_fn(params_, prev_env_leaves)[0])
 
     for step in range(config.gs_num_steps):
         (energy_val, env_leaves), grads = jax.value_and_grad(
@@ -423,13 +576,34 @@ def _optimize_gs_ad_tensor_2site(
         prev_energy = energy_float
         prev_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
 
-        updates, opt_state = optimizer.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
-        A_p, B_p = params
-        params = (
-            A_p * (1.0 / (A_p.norm() + 1e-10)),
-            B_p * (1.0 / (B_p.norm() + 1e-10)),
-        )
+        # Compute search direction
+        if is_cg:
+            neg_grad = jax.tree.map(lambda g: -g, grads)
+            if prev_grad is not None and cg_direction is not None:
+                beta = _cg_beta_pr(grads, prev_grad)
+                cg_direction = _tree_add(neg_grad, _tree_scale(cg_direction, beta))
+            else:
+                cg_direction = neg_grad
+            prev_grad = grads
+            direction = cg_direction
+        elif optimizer is not None:
+            updates, opt_state = optimizer.update(grads, opt_state, params)
+            direction = updates
+        else:
+            direction = jax.tree.map(lambda g: -g, grads)
+
+        if use_ls:
+            params, _, _ = _backtracking_line_search(
+                params,
+                direction,
+                grads,
+                energy_float,
+                loss_fn_fwd,
+                max_steps=config.gs_line_search_max_steps,
+            )
+        else:
+            params = optax.apply_updates(params, direction)
+            params = _normalize_params(params)
 
     if last_env_leaves is None:
         energy_val, env_leaves = loss_fn(params, prev_env_leaves)
