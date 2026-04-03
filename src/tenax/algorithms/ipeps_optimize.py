@@ -608,16 +608,27 @@ def _optimize_gs_ad_tensor_2site(
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)
 
-    # Use best params found during optimization
-    if best_env_leaves is None:
-        energy_val, env_leaves = loss_fn(best_params, prev_env_leaves)
-        best_energy = float(energy_val)
-        best_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
-
+    # Re-evaluate best params with fresh CTM to get accurate energy
     A_final, B_final = _normalize_params(best_params)
-    env_A = jax.tree.unflatten(env_treedef, best_env_leaves[:n_env_leaves])
-    env_B = jax.tree.unflatten(env_treedef, best_env_leaves[n_env_leaves:])
-    E_gs = best_energy
+    site_tensors = {(0, 0): A_final, (1, 0): B_final}
+    fresh_env_leaves = ctm_tensor_converge(
+        site_tensors,
+        best_env_leaves or prev_env_leaves,
+        CHECKERBOARD_NEIGHBORS,
+        config_tuple,
+    )
+    env_A = jax.tree.unflatten(env_treedef, fresh_env_leaves[:n_env_leaves])
+    env_B = jax.tree.unflatten(env_treedef, fresh_env_leaves[n_env_leaves:])
+    E_gs = float(
+        compute_energy_ctm_tensor_2site(
+            A_final,
+            B_final,
+            env_A,
+            env_B,
+            gate,
+            d_phys,
+        )
+    )
     if config.gs_verbose:
         print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}", flush=True)
 
