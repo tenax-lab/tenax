@@ -288,6 +288,7 @@ def _config_to_tuple(config) -> tuple:
         _PM_STR_TO_INT.get(config.projector_method, 0),
         config.min_iter,
         int(getattr(config, "ad_regularize_svd", True)),
+        int(getattr(config, "gmres_precondition", True)),
     )
 
 
@@ -296,6 +297,7 @@ def _config_from_tuple(config_tuple: tuple):
     pm_int = config_tuple[4] if len(config_tuple) > 4 else 0
     min_iter = config_tuple[5] if len(config_tuple) > 5 else 10
     ad_regularize_svd = bool(config_tuple[6]) if len(config_tuple) > 6 else True
+    gmres_precondition = bool(config_tuple[7]) if len(config_tuple) > 7 else True
     return CTMConfig(
         chi=config_tuple[0],
         max_iter=config_tuple[1],
@@ -304,6 +306,7 @@ def _config_from_tuple(config_tuple: tuple):
         projector_method=_PM_INT_TO_STR.get(pm_int, "eigh"),
         min_iter=min_iter,
         ad_regularize_svd=ad_regularize_svd,
+        gmres_precondition=gmres_precondition,
     )
 
 
