@@ -260,8 +260,12 @@ def truncated_svd_symmetric_ad(
     # Determine symmetry from input (if available)
     sym = M.indices[0].symmetry
     bond_charges = jnp.zeros(k, dtype=jnp.int32)
-    bond_out = TensorIndex(sym, bond_charges, FlowDirection.OUT, label=new_bond_label)
-    bond_in = TensorIndex(sym, bond_charges, FlowDirection.IN, label=new_bond_label)
+    bond_out = TensorIndex.from_charges(
+        sym, bond_charges, FlowDirection.OUT, label=new_bond_label
+    )
+    bond_in = TensorIndex.from_charges(
+        sym, bond_charges, FlowDirection.IN, label=new_bond_label
+    )
 
     U_tensor = DenseTensor(U_data, left_indices + (bond_out,))
     Vh_tensor = DenseTensor(Vh_data, (bond_in,) + right_indices)
