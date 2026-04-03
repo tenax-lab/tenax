@@ -308,9 +308,21 @@ def _optimize_gs_ad_tensor(
     cg_direction = None
     log_interval = config.gs_log_interval
 
-    # Forward-only loss for line search (no backward/GMRES)
+    # Forward-only loss for line search — fresh CTM (no warm-start)
+    from tenax.algorithms.ad_utils import (
+        _config_from_tuple,
+        _ctm_tensor_multisite_fixed_point,
+        _flatten_envs,
+    )
+
     def loss_fn_fwd(A_param):
-        return float(loss_fn(A_param, prev_env_leaves)[0])
+        A_norm = A_param * (1.0 / (A_param.norm() + 1e-10))
+        st = {(0, 0): A_norm}
+        config_obj = _config_from_tuple(config_tuple)
+        envs = _ctm_tensor_multisite_fixed_point(st, SINGLE_SITE_NEIGHBORS, config_obj)
+        flat = _flatten_envs(envs)
+        env_ = jax.tree.unflatten(env_treedef, flat)
+        return float(compute_energy_ctm_tensor(A_norm, env_, gate, d_phys))
 
     for step in range(config.gs_num_steps):
         (energy_val, env_leaves), grads = jax.value_and_grad(
@@ -477,7 +489,11 @@ def _optimize_gs_ad_tensor_2site(
         initialize_ctm_tensor_env,
     )
     from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
-    from tenax.algorithms.ad_utils import _config_to_tuple, ctm_tensor_converge
+    from tenax.algorithms.ad_utils import (
+        _config_from_tuple,
+        _config_to_tuple,
+        ctm_tensor_converge,
+    )
 
     gate = (
         hamiltonian_gate.todense()
@@ -530,9 +546,33 @@ def _optimize_gs_ad_tensor_2site(
     cg_direction = None
     log_interval = config.gs_log_interval
 
-    # Forward-only loss for line search
+    # Forward-only loss for line search — uses fresh CTM (no warm-start)
+    # to avoid accepting steps that look good only with stale environments
+    from tenax.algorithms.ad_utils import (
+        _ctm_tensor_multisite_fixed_point,
+        _flatten_envs,
+    )
+
     def loss_fn_fwd(params_):
-        return float(loss_fn(params_, prev_env_leaves)[0])
+        A_p, B_p = params_
+        A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
+        B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
+        st = {(0, 0): A_norm, (1, 0): B_norm}
+        config_obj = _config_from_tuple(config_tuple)
+        envs = _ctm_tensor_multisite_fixed_point(st, CHECKERBOARD_NEIGHBORS, config_obj)
+        flat = _flatten_envs(envs)
+        env_A_ = jax.tree.unflatten(env_treedef, flat[:n_env_leaves])
+        env_B_ = jax.tree.unflatten(env_treedef, flat[n_env_leaves:])
+        return float(
+            compute_energy_ctm_tensor_2site(
+                A_norm,
+                B_norm,
+                env_A_,
+                env_B_,
+                gate,
+                d_phys,
+            )
+        )
 
     for step in range(config.gs_num_steps):
         (energy_val, env_leaves), grads = jax.value_and_grad(
