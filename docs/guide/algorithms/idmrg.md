@@ -13,11 +13,14 @@ environment builds up around the unit cell.
 
 Key properties of the Tenax implementation:
 
-- **2-site growth** algorithm: two sites are added per iteration.
+- **Sweep-based algorithm** with environment warmup for self-consistent
+  infinite boundary conditions.
+- **Transfer matrix fixed-point environments** — computes the dominant
+  eigenvector of the MPS transfer matrix for converged left/right
+  environments, replacing the growing-chain approach.
 - The bulk Hamiltonian is specified as a single repeated MPO tensor
   $W[w_l, \text{ket}, \text{bra}, w_r]$.
-- Outer growth loop is a Python for-loop; the Lanczos matvec is
-  `@jax.jit` compiled.
+- Cython BLAS fast path for block-sparse contractions when available.
 - Built-in MPO constructors for the Heisenberg chain and cylinder.
 
 ## Configuration
