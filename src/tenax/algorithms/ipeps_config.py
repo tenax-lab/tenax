@@ -34,7 +34,9 @@ class CTMConfig:
     qr_warmup_steps: int = 3  # eigh warm-up iterations before QR kicks in
     chi_I: int | None = None  # interlayer bond dim for split-CTMRG; None => chi_I = chi
     ad_regularize_svd: bool = True  # use Lorentzian-regularized SVD backward in AD
-    gmres_precondition: bool = True  # Neumann preconditioner for GMRES backward
+    gmres_precondition: bool = (
+        True  # diagonal scaling preconditioner for GMRES backward
+    )
 
 
 @dataclass
