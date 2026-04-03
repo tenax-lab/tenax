@@ -23,9 +23,19 @@ def _build_optimizer(config: iPEPSConfig):
 
     name = config.gs_optimizer.lower()
     if name == "adam":
+        lr = config.gs_learning_rate
+        if config.gs_num_steps > 20:
+            # Cosine decay from lr to lr/10 over the optimization
+            schedule = optax.cosine_decay_schedule(
+                init_value=lr,
+                decay_steps=config.gs_num_steps,
+                alpha=0.1,
+            )
+        else:
+            schedule = lr
         return optax.chain(
             optax.clip_by_global_norm(config.gs_max_grad_norm),
-            optax.adam(config.gs_learning_rate),
+            optax.adam(schedule),
         )
     elif name == "lbfgs":
         return optax.chain(
@@ -492,7 +502,10 @@ def _optimize_gs_ad_tensor_2site(
     from tenax.algorithms.ad_utils import (
         _config_from_tuple,
         _config_to_tuple,
+        _ctm_tensor_multisite_fixed_point,
+        _flatten_envs,
         ctm_tensor_converge,
+        ctm_tensor_converge_explicit,
     )
 
     gate = (
@@ -507,6 +520,8 @@ def _optimize_gs_ad_tensor_2site(
     B = B * (1.0 / (B.norm() + 1e-10))
 
     config_tuple = _config_to_tuple(config.ctm)
+    use_explicit = config.gs_explicit_ad
+    explicit_steps = config.gs_explicit_ad_steps
 
     # Get env treedef from a template
     _env_template = initialize_ctm_tensor_env(A, config.ctm.chi)
@@ -517,14 +532,27 @@ def _optimize_gs_ad_tensor_2site(
         jax.tree.leaves(_env_template_B)
     )
 
+    _ctm_converge = (
+        ctm_tensor_converge_explicit if use_explicit else ctm_tensor_converge
+    )
+
     def loss_fn(params, env_init_leaves):
         A_p, B_p = params
         A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
         B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
         site_tensors = {(0, 0): A_norm, (1, 0): B_norm}
-        env_leaves = ctm_tensor_converge(
-            site_tensors, env_init_leaves, CHECKERBOARD_NEIGHBORS, config_tuple
-        )
+        if use_explicit:
+            env_leaves = _ctm_converge(
+                site_tensors,
+                env_init_leaves,
+                CHECKERBOARD_NEIGHBORS,
+                config_tuple,
+                explicit_steps,
+            )
+        else:
+            env_leaves = _ctm_converge(
+                site_tensors, env_init_leaves, CHECKERBOARD_NEIGHBORS, config_tuple
+            )
         env_A = jax.tree.unflatten(env_treedef, env_leaves[:n_env_leaves])
         env_B = jax.tree.unflatten(env_treedef, env_leaves[n_env_leaves:])
         energy = compute_energy_ctm_tensor_2site(
@@ -548,10 +576,6 @@ def _optimize_gs_ad_tensor_2site(
 
     # Forward-only loss for line search — uses fresh CTM (no warm-start)
     # to avoid accepting steps that look good only with stale environments
-    from tenax.algorithms.ad_utils import (
-        _ctm_tensor_multisite_fixed_point,
-        _flatten_envs,
-    )
 
     def loss_fn_fwd(params_):
         A_p, B_p = params_

@@ -74,6 +74,10 @@ class iPEPSConfig:
     gs_max_grad_norm: float = 1.0  # gradient clipping (max global norm)
     gs_line_search: bool | None = None  # None = auto (True for lbfgs/cg)
     gs_line_search_max_steps: int = 8
+    gs_explicit_ad: bool = False  # explicit diff through unrolled CTM
+    gs_explicit_ad_steps: int | None = (
+        None  # CTM steps for explicit AD (None = max_iter)
+    )
     su_init: bool = False
 
     def __post_init__(self):
