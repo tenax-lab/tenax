@@ -522,9 +522,9 @@ def _optimize_gs_ad_tensor_2site(
     use_ls = _use_line_search(config)
     is_cg = config.gs_optimizer.lower() == "cg"
 
-    last_energy = float("inf")
-    last_params = params
-    last_env_leaves = None
+    best_energy = float("inf")
+    best_params = params
+    best_env_leaves = None
     prev_energy = float("inf")
     prev_grad = None
     cg_direction = None
@@ -539,9 +539,12 @@ def _optimize_gs_ad_tensor_2site(
             loss_fn, argnums=0, has_aux=True
         )(params, prev_env_leaves)
         energy_float = float(energy_val)
-        last_energy = energy_float
-        last_params = params
-        last_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
+        env_leaves_sg = jax.tree.map(jax.lax.stop_gradient, env_leaves)
+
+        if energy_float < best_energy:
+            best_energy = energy_float
+            best_params = params
+            best_env_leaves = env_leaves_sg
 
         delta_energy = abs(energy_float - prev_energy)
         logged = False
@@ -554,7 +557,7 @@ def _optimize_gs_ad_tensor_2site(
                 config.gs_num_steps,
                 energy_float,
                 delta_energy,
-                energy_float,
+                best_energy,
             )
             logged = True
 
@@ -567,14 +570,14 @@ def _optimize_gs_ad_tensor_2site(
                         config.gs_num_steps,
                         energy_float,
                         delta_energy,
-                        energy_float,
+                        best_energy,
                     )
                 _log_ad_converged(
                     "2site-tensor", step, delta_energy, config.gs_conv_tol
                 )
             break
         prev_energy = energy_float
-        prev_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
+        prev_env_leaves = env_leaves_sg
 
         # Compute search direction
         if is_cg:
@@ -605,19 +608,16 @@ def _optimize_gs_ad_tensor_2site(
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)
 
-    if last_env_leaves is None:
-        energy_val, env_leaves = loss_fn(params, prev_env_leaves)
-        last_energy = float(energy_val)
-        last_params = params
-        last_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
+    # Use best params found during optimization
+    if best_env_leaves is None:
+        energy_val, env_leaves = loss_fn(best_params, prev_env_leaves)
+        best_energy = float(energy_val)
+        best_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
 
-    # Use last evaluated params and environment
-    A_final, B_final = last_params
-    A_final = A_final * (1.0 / (A_final.norm() + 1e-10))
-    B_final = B_final * (1.0 / (B_final.norm() + 1e-10))
-    env_A = jax.tree.unflatten(env_treedef, last_env_leaves[:n_env_leaves])
-    env_B = jax.tree.unflatten(env_treedef, last_env_leaves[n_env_leaves:])
-    E_gs = last_energy
+    A_final, B_final = _normalize_params(best_params)
+    env_A = jax.tree.unflatten(env_treedef, best_env_leaves[:n_env_leaves])
+    env_B = jax.tree.unflatten(env_treedef, best_env_leaves[n_env_leaves:])
+    E_gs = best_energy
     if config.gs_verbose:
         print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}", flush=True)
 
