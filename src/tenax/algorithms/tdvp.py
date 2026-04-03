@@ -17,8 +17,6 @@ import numpy as np
 
 from tenax.algorithms._krylov import krylov_expm
 from tenax.algorithms.dmrg import (
-    _build_trivial_left_env,
-    _build_trivial_right_env,
     _matvec_jit,
     _update_left_env,
     _update_right_env,
@@ -238,7 +236,13 @@ def _compute_energy(
 ) -> float:
     """Compute <psi|H|psi> by contracting environments left to right."""
     L = len(mps_tensors)
-    left_env = _build_trivial_left_env()
+    first_mps = mps_tensors[0].todense()
+    first_mpo = mpo_tensors[0].todense()
+    left_env = _build_boundary_left_env(
+        chi_mps=first_mps.shape[0],
+        chi_mpo=first_mpo.shape[0],
+        dtype=first_mps.dtype,
+    )
 
     for i in range(L):
         left_env = _update_left_env(left_env, mps_tensors[i], mpo_tensors[i])
@@ -250,7 +254,13 @@ def _compute_norm_sq(mps_tensors: list[Tensor]) -> float:
     """Compute <psi|psi> using identity MPO."""
     L = len(mps_tensors)
     # Build identity MPO tensors on the fly
-    left_env = _build_trivial_left_env()
+    first_mps = mps_tensors[0].todense()
+    first_id = _identity_mpo_site(mps_tensors[0]).todense()
+    left_env = _build_boundary_left_env(
+        chi_mps=first_mps.shape[0],
+        chi_mpo=first_id.shape[0],
+        dtype=first_mps.dtype,
+    )
 
     for i in range(L):
         id_mpo = _identity_mpo_site(mps_tensors[i])
@@ -297,6 +307,50 @@ def _identity_mpo_site(mps_site: Tensor) -> DenseTensor:
     return DenseTensor(eye, indices)
 
 
+def _build_boundary_left_env(
+    chi_mps: int,
+    chi_mpo: int,
+    dtype: jnp.dtype,
+) -> DenseTensor:
+    """Build left boundary environment with explicit MPS/MPO boundary dims."""
+    env = jnp.zeros((chi_mps, chi_mpo, chi_mps), dtype=dtype)
+    env = env.at[:, 0, :].set(jnp.eye(chi_mps, dtype=dtype))
+
+    sym = U1Symmetry()
+    mps_bond = np.zeros(chi_mps, dtype=np.int32)
+    mpo_bond = np.zeros(chi_mpo, dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, mps_bond, FlowDirection.IN, label="env_mps_l"),
+        TensorIndex.from_charges(sym, mpo_bond, FlowDirection.IN, label="env_mpo_l"),
+        TensorIndex.from_charges(
+            sym, mps_bond, FlowDirection.OUT, label="env_mps_conj_l"
+        ),
+    )
+    return DenseTensor(env, indices)
+
+
+def _build_boundary_right_env(
+    chi_mps: int,
+    chi_mpo: int,
+    dtype: jnp.dtype,
+) -> DenseTensor:
+    """Build right boundary environment with explicit MPS/MPO boundary dims."""
+    env = jnp.zeros((chi_mps, chi_mpo, chi_mps), dtype=dtype)
+    env = env.at[:, 0, :].set(jnp.eye(chi_mps, dtype=dtype))
+
+    sym = U1Symmetry()
+    mps_bond = np.zeros(chi_mps, dtype=np.int32)
+    mpo_bond = np.zeros(chi_mpo, dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, mps_bond, FlowDirection.OUT, label="env_mps_r"),
+        TensorIndex.from_charges(sym, mpo_bond, FlowDirection.OUT, label="env_mpo_r"),
+        TensorIndex.from_charges(
+            sym, mps_bond, FlowDirection.IN, label="env_mps_conj_r"
+        ),
+    )
+    return DenseTensor(env, indices)
+
+
 # ------------------------------------------------------------------ #
 # Build environments from 3D arrays                                    #
 # ------------------------------------------------------------------ #
@@ -307,7 +361,12 @@ def _build_right_envs(
 ) -> list:
     """Build right environment DenseTensors from 3D MPS arrays."""
     envs: list[Tensor | None] = [None] * (L + 1)
-    envs[L] = _build_trivial_right_env()
+    last_mpo = mpo_tensors[L - 1].todense()
+    envs[L] = _build_boundary_right_env(
+        chi_mps=tensors_3d[L - 1].shape[2],
+        chi_mpo=last_mpo.shape[3],
+        dtype=tensors_3d[L - 1].dtype,
+    )
 
     for i in range(L - 1, 0, -1):
         # Wrap the 3D array as a DenseTensor for _update_right_env
@@ -322,7 +381,12 @@ def _build_left_envs_up_to(
 ) -> list:
     """Build left environments from site 0 up to site up_to."""
     envs: list[Tensor | None] = [None] * (L + 1)
-    envs[0] = _build_trivial_left_env()
+    first_mpo = mpo_tensors[0].todense()
+    envs[0] = _build_boundary_left_env(
+        chi_mps=tensors_3d[0].shape[0],
+        chi_mpo=first_mpo.shape[0],
+        dtype=tensors_3d[0].dtype,
+    )
     for i in range(min(up_to, L)):
         site_tensor = _make_site_tensor(tensors_3d[i], i, L)
         envs[i + 1] = _update_left_env(envs[i], site_tensor, mpo_tensors[i])
@@ -366,7 +430,12 @@ def _tdvp_step_1site(
 
     # Initialize left environments
     L_envs: list[Tensor | None] = [None] * (L + 1)
-    L_envs[0] = _build_trivial_left_env()
+    first_mpo = mpo_tensors[0].todense()
+    L_envs[0] = _build_boundary_left_env(
+        chi_mps=tensors_3d[0].shape[0],
+        chi_mpo=first_mpo.shape[0],
+        dtype=tensors_3d[0].dtype,
+    )
 
     # ---- Left-to-right sweep: sites 0 to L-2 ----
     for i in range(L - 1):
@@ -459,7 +528,12 @@ def _tdvp_step_1site(
 
     # ---- Right-to-left sweep: sites L-1 to 1 ----
     R_envs_new: list[Tensor | None] = [None] * (L + 1)
-    R_envs_new[L] = _build_trivial_right_env()
+    last_mpo = mpo_tensors[L - 1].todense()
+    R_envs_new[L] = _build_boundary_right_env(
+        chi_mps=tensors_3d[L - 1].shape[2],
+        chi_mpo=last_mpo.shape[3],
+        dtype=tensors_3d[L - 1].dtype,
+    )
 
     for i in range(L - 1, 0, -1):
         l_env = L_envs[i]
@@ -588,15 +662,25 @@ def _tdvp_step_2site(
     R_envs = _build_right_envs(tensors_3d, mpo_tensors, L)
 
     L_envs: list[Tensor | None] = [None] * (L + 1)
-    L_envs[0] = _build_trivial_left_env()
+    first_mpo = mpo_tensors[0].todense()
+    L_envs[0] = _build_boundary_left_env(
+        chi_mps=tensors_3d[0].shape[0],
+        chi_mpo=first_mpo.shape[0],
+        dtype=tensors_3d[0].dtype,
+    )
 
     # ---- Left-to-right sweep ----
     for i in range(L - 1):
         l_env = L_envs[i]
         assert l_env is not None
-        r_env = (
-            R_envs[i + 2] if R_envs[i + 2] is not None else _build_trivial_right_env()
-        )
+        r_env = R_envs[i + 2]
+        if r_env is None:
+            right_mpo = mpo_tensors[i + 1].todense()
+            r_env = _build_boundary_right_env(
+                chi_mps=tensors_3d[i + 1].shape[2],
+                chi_mpo=right_mpo.shape[3],
+                dtype=tensors_3d[i + 1].dtype,
+            )
 
         # Form 2-site tensor: theta[chi_l, d_l, d_r, chi_r]
         chi_l, d_l, chi_m = tensors_3d[i].shape
@@ -654,16 +738,24 @@ def _tdvp_step_2site(
 
     # ---- Right-to-left sweep ----
     R_envs_new: list[Tensor | None] = [None] * (L + 1)
-    R_envs_new[L] = _build_trivial_right_env()
+    last_mpo = mpo_tensors[L - 1].todense()
+    R_envs_new[L] = _build_boundary_right_env(
+        chi_mps=tensors_3d[L - 1].shape[2],
+        chi_mpo=last_mpo.shape[3],
+        dtype=tensors_3d[L - 1].dtype,
+    )
 
     for i in range(L - 2, -1, -1):
         l_env = L_envs[i]
         assert l_env is not None
-        r_env = (
-            R_envs_new[i + 2]
-            if R_envs_new[i + 2] is not None
-            else _build_trivial_right_env()
-        )
+        r_env = R_envs_new[i + 2]
+        if r_env is None:
+            right_mpo = mpo_tensors[i + 1].todense()
+            r_env = _build_boundary_right_env(
+                chi_mps=tensors_3d[i + 1].shape[2],
+                chi_mpo=right_mpo.shape[3],
+                dtype=tensors_3d[i + 1].dtype,
+            )
 
         chi_l, d_l, chi_m = tensors_3d[i].shape
         chi_m2, d_r, chi_r = tensors_3d[i + 1].shape
