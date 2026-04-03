@@ -260,8 +260,12 @@ def truncated_svd_symmetric_ad(
     # Determine symmetry from input (if available)
     sym = M.indices[0].symmetry
     bond_charges = jnp.zeros(k, dtype=jnp.int32)
-    bond_out = TensorIndex(sym, bond_charges, FlowDirection.OUT, label=new_bond_label)
-    bond_in = TensorIndex(sym, bond_charges, FlowDirection.IN, label=new_bond_label)
+    bond_out = TensorIndex.from_charges(
+        sym, bond_charges, FlowDirection.OUT, label=new_bond_label
+    )
+    bond_in = TensorIndex.from_charges(
+        sym, bond_charges, FlowDirection.IN, label=new_bond_label
+    )
 
     U_tensor = DenseTensor(U_data, left_indices + (bond_out,))
     Vh_tensor = DenseTensor(Vh_data, (bond_in,) + right_indices)
@@ -653,6 +657,66 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
             break
 
     return envs
+
+
+# ---------------------------------------------------------------------------
+# 4b. Explicit differentiation CTM (backprop through unrolled iterations)
+# ---------------------------------------------------------------------------
+
+
+def ctm_tensor_converge_explicit(
+    site_tensors,
+    env_init_leaves,
+    neighbors,
+    config_tuple: tuple,
+    num_steps: int | None = None,
+) -> tuple[jax.Array, ...]:
+    """CTM convergence with explicit (unrolled) autodiff.
+
+    Unlike ``ctm_tensor_converge`` which uses implicit differentiation
+    at the fixed point, this function lets JAX backpropagate through
+    each CTM iteration.  This gives exact gradients for the computation
+    performed, at the cost of higher memory (stores all intermediates).
+
+    Note: projectors still use ``stop_gradient`` — removing this requires
+    a regularized eigh backward which is a separate concern.
+
+    Args:
+        site_tensors:    Dict ``{Coord: Tensor}`` of iPEPS site tensors.
+        env_init_leaves: Flat tuple of env leaf arrays for warm-start, or None.
+        neighbors:       Neighbor map.
+        config_tuple:    CTMConfig fields packed as tuple.
+        num_steps:       Fixed number of CTM iterations.  If None, uses
+                         ``config.max_iter``.
+
+    Returns:
+        Flat tuple of environment pytree leaf arrays.
+    """
+    config = _config_from_tuple(config_tuple)
+    envs_init = _unflatten_envs_init(env_init_leaves, site_tensors, config.chi)
+
+    double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
+    envs = (
+        envs_init
+        if envs_init is not None
+        else {
+            c: initialize_ctm_tensor_env(A, config.chi) for c, A in site_tensors.items()
+        }
+    )
+
+    n = num_steps if num_steps is not None else config.max_iter
+    for _ in range(n):
+        envs = _ctm_tensor_sweep_multisite(
+            envs,
+            double_layers,
+            neighbors,
+            config.chi,
+            config.renormalize,
+            config.projector_method,
+        )
+        envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
+
+    return _flatten_envs(envs)
 
 
 # ---------------------------------------------------------------------------

@@ -14,10 +14,14 @@ dimension.
 Key properties of the Tenax implementation:
 
 - **2-site and 1-site** variants (`DMRGConfig.two_site`).
+- **Cython BLAS fast path** — fused Lanczos solver and block-sparse
+  contractions via direct BLAS calls with zero Python reentry. When Cython
+  extensions are available, the entire Lanczos solve runs in a single Cython
+  call, eliminating Python loop overhead.
+- **GPU/TPU acceleration** — `DMRGConfig(accelerator="jit")` for JIT-compiled
+  sweeps on GPU/TPU; `accelerator="sharded"` for multi-GPU runs via GSPMD.
 - Outer sweep loop is a Python for-loop (bond dimensions change dynamically).
 - The effective Hamiltonian matvec is `@jax.jit` compiled.
-- Lanczos eigensolver uses a simple Python loop (suitable for moderate
-  iteration counts).
 
 ## Configuration
 
