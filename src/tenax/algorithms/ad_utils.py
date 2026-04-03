@@ -552,10 +552,25 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
             n_env_per_site,
         )
 
+    # Hoist VJP: compute forward residuals once, reuse for operator + preconditioner
+    _, vjp_fn = jax.vjp(lambda e: step_fn(site_leaves, e), env_leaves)
+
+    def apply_Jt(v):
+        return vjp_fn(v)[0]
+
     def apply_I_minus_Jt(v):
-        _, vjp_fn = jax.vjp(lambda e: step_fn(site_leaves, e), env_leaves)
-        Jt_v = vjp_fn(v)[0]
+        Jt_v = apply_Jt(v)
         return tuple(vi - ji for vi, ji in zip(v, Jt_v))
+
+    # Neumann preconditioner: M^{-1} v = v + J^T v ≈ (I - J^T)^{-1} v
+    precond = None
+    if config.gmres_precondition:
+
+        def apply_precond(v):
+            Jt_v = apply_Jt(v)
+            return tuple(vi + ji for vi, ji in zip(v, Jt_v))
+
+        precond = apply_precond
 
     max_fp_iter = min(config.max_iter, 50)
     lam, info = jax_gmres(
@@ -564,6 +579,7 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
         x0=g,
         tol=config.conv_tol,
         maxiter=max_fp_iter,
+        M=precond,
     )
 
     # VJP w.r.t. site_leaves
