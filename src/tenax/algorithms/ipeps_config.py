@@ -83,6 +83,10 @@ class iPEPSConfig:
         None  # CTM steps for explicit AD (None = max_iter)
     )
     su_init: bool = False
+    # Metric preconditioning (natural gradient, Rader et al. arXiv:2511.09546)
+    gs_metric_precond: bool = False  # enable metric preconditioning for CG/L-BFGS
+    metric_gmres_maxiter: int = 30  # Krylov dimension for metric inversion
+    metric_gmres_tol: float = 1e-2  # GMRES tolerance (loose is fine)
 
     def __post_init__(self):
         valid_unit_cells = {"1x1", "2site"}
