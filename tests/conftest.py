@@ -53,6 +53,9 @@ _FILE_MARKERS = {
     "test_jit_sweep.py": "core",
     "test_padded_linalg.py": "core",
     "test_lanczos_np.py": "algorithm",
+    "test_block_array.py": "core",
+    "test_dmrg3s.py": "algorithm",
+    "test_dmrg_cython.py": "algorithm",
 }
 
 
