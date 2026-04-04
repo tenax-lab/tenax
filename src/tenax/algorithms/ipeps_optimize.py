@@ -308,17 +308,32 @@ def _optimize_gs_ad_tensor(
         energy = compute_energy_ctm_tensor(A_norm, env, gate, d_phys)
         return energy, env_leaves
 
-    optimizer = _build_optimizer(config)
-    opt_state = optimizer.init(A) if optimizer is not None else None
-    use_ls = _use_line_search(config)
     is_cg = config.gs_optimizer.lower() == "cg"
+    is_metric_lbfgs = (
+        config.gs_metric_precond and config.gs_optimizer.lower() == "lbfgs"
+    )
+
+    if is_metric_lbfgs:
+        optimizer = None
+        opt_state = None
+    else:
+        optimizer = _build_optimizer(config)
+        opt_state = optimizer.init(A) if optimizer is not None else None
+    use_ls = _use_line_search(config)
 
     best_energy = float("inf")
     best_A = A
     prev_energy = float("inf")
     prev_grad = None
     cg_direction = None
+    prev_precond_grad = None
     log_interval = config.gs_log_interval
+
+    # Metric L-BFGS state
+    lbfgs_history: list = []
+    lbfgs_memory_size = 10
+    prev_A_flat = None
+    prev_grad_flat = None
 
     # Forward-only loss for line search — fresh CTM (no warm-start)
     from tenax.algorithms.ad_utils import (
@@ -381,14 +396,80 @@ def _optimize_gs_ad_tensor(
 
         # Compute search direction
         if is_cg:
-            neg_grad = jax.tree.map(lambda g: -g, grads)
-            if prev_grad is not None and cg_direction is not None:
-                beta = _cg_beta_pr(grads, prev_grad)
-                cg_direction = _tree_add(neg_grad, _tree_scale(cg_direction, beta))
+            if config.gs_metric_precond:
+                from tenax.algorithms._metric_precond import precondition_gradient
+
+                env_for_metric = jax.tree.unflatten(env_treedef, env_leaves)
+                delta_metric = (
+                    delta_energy if step > 0 else float(jnp.sum(grads.todense() ** 2))
+                )
+                z_dense = precondition_gradient(
+                    A, env_for_metric, grads.todense(), delta_metric, config
+                )
+                z = DenseTensor(z_dense, A.indices)
+                neg_z = jax.tree.map(lambda g: -g, z)
+                if prev_precond_grad is not None and cg_direction is not None:
+                    # Preconditioned PR+ beta: g_new . (z_new - z_old) / (g_old . z_old)
+                    z_diff = jax.tree.map(lambda zn, zo: zn - zo, z, prev_precond_grad)
+                    num = _tree_dot(grads, z_diff)
+                    den = _tree_dot(prev_grad, prev_precond_grad)
+                    beta = max(0.0, num / den) if abs(den) > 1e-30 else 0.0
+                    cg_direction = _tree_add(neg_z, _tree_scale(cg_direction, beta))
+                else:
+                    cg_direction = neg_z
+                prev_precond_grad = z
             else:
-                cg_direction = neg_grad
+                neg_grad = jax.tree.map(lambda g: -g, grads)
+                if prev_grad is not None and cg_direction is not None:
+                    beta = _cg_beta_pr(grads, prev_grad)
+                    cg_direction = _tree_add(neg_grad, _tree_scale(cg_direction, beta))
+                else:
+                    cg_direction = neg_grad
             prev_grad = grads
             direction = cg_direction
+        elif is_metric_lbfgs:
+            from tenax.algorithms._metric_precond import (
+                lbfgs_two_loop,
+                precondition_gradient,
+            )
+
+            g_dense = grads.todense()
+            g_flat = g_dense.reshape(-1)
+            A_flat = A.todense().reshape(-1)
+
+            # Update L-BFGS history
+            if prev_A_flat is not None:
+                s = A_flat - prev_A_flat
+                y = g_flat - prev_grad_flat
+                sy = float(jnp.dot(s, y))
+                if sy > 1e-10:
+                    rho = 1.0 / sy
+                    lbfgs_history.append((s, y, rho))
+                    if len(lbfgs_history) > lbfgs_memory_size:
+                        lbfgs_history.pop(0)
+            prev_A_flat = A_flat
+            prev_grad_flat = g_flat
+
+            # H0 = metric-preconditioned inverse Hessian
+            env_for_metric = jax.tree.unflatten(env_treedef, env_leaves)
+            delta_metric = delta_energy if step > 0 else float(jnp.sum(g_dense**2))
+            D_bond = A.indices[0].dim
+            d_phys_metric = g_dense.shape[-1]
+
+            def h0_matvec(v):
+                return precondition_gradient(
+                    A,
+                    env_for_metric,
+                    v.reshape(D_bond, D_bond, D_bond, D_bond, d_phys_metric),
+                    delta_metric,
+                    config,
+                ).reshape(-1)
+
+            direction_flat = lbfgs_two_loop(g_flat, lbfgs_history, h0_matvec)
+            direction_dense = -direction_flat.reshape(
+                D_bond, D_bond, D_bond, D_bond, d_phys_metric
+            )
+            direction = DenseTensor(direction_dense, A.indices)
         elif optimizer is not None:
             updates, opt_state = optimizer.update(grads, opt_state, A)
             direction = updates

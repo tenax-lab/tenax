@@ -222,3 +222,58 @@ class TestLBFGSTwoLoop:
 
         result = lbfgs_two_loop(grad, history, h0_matvec)
         assert jnp.all(jnp.isfinite(result))
+
+
+# ------------------------------------------------------------------ #
+# Integration tests: optimizer wiring                                  #
+# ------------------------------------------------------------------ #
+
+
+class TestIntegration:
+    @staticmethod
+    def _heisenberg_gate():
+        """Build the 2-site Heisenberg gate (d=2)."""
+        d = 2
+        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+        return H.reshape(d, d, d, d)
+
+    @pytest.mark.algorithm
+    def test_preconditioned_cg_converges(self):
+        """Preconditioned CG should converge on 2D Heisenberg."""
+        from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+        from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+        gate = self._heisenberg_gate()
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=8, max_iter=50),
+            gs_optimizer="cg",
+            gs_num_steps=30,
+            gs_metric_precond=True,
+            gs_line_search=True,
+            gs_verbose=True,
+        )
+        _, _, E = optimize_gs_ad(gate, None, config=config)
+        assert E < -0.55, f"Energy {E} too high"
+
+    @pytest.mark.algorithm
+    def test_preconditioned_lbfgs_converges(self):
+        """Preconditioned L-BFGS should converge on 2D Heisenberg."""
+        from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+        from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+        gate = self._heisenberg_gate()
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=8, max_iter=50),
+            gs_optimizer="lbfgs",
+            gs_num_steps=30,
+            gs_metric_precond=True,
+            gs_line_search=True,
+            gs_verbose=True,
+        )
+        _, _, E = optimize_gs_ad(gate, None, config=config)
+        assert E < -0.55, f"Energy {E} too high"
