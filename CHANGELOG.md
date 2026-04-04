@@ -9,6 +9,8 @@
 - **Fix TensorIndex API calls** for sector-based refactor (#234)
 - **Remove xfail** from `test_ad_d2_chi_scaling` — chi-scaling now works
   correctly with L-BFGS optimizer and fresh CTM line search
+- **Iterative VJP backward** for CTM implicit differentiation — replaces
+  GMRES as default; robust to gauge instability that caused NaN (#240)
 
 ## v0.4.0 (2026-04-03)
 
