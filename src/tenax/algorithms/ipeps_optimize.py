@@ -39,8 +39,8 @@ def _build_optimizer(config: iPEPSConfig):
         )
     elif name == "lbfgs":
         return optax.chain(
-            optax.clip_by_global_norm(config.gs_max_grad_norm),
             optax.scale_by_lbfgs(memory_size=10),
+            optax.clip_by_global_norm(config.gs_max_grad_norm),
             optax.scale(-1.0),
         )
     elif name == "cg":

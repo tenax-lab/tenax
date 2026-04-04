@@ -314,7 +314,7 @@ def _build_boundary_left_env(
 ) -> DenseTensor:
     """Build left boundary environment with explicit MPS/MPO boundary dims."""
     env = jnp.zeros((chi_mps, chi_mpo, chi_mps), dtype=dtype)
-    env = env.at[:, 0, :].set(jnp.eye(chi_mps, dtype=dtype))
+    env = env.at[:, -1, :].set(jnp.eye(chi_mps, dtype=dtype))
 
     sym = U1Symmetry()
     mps_bond = np.zeros(chi_mps, dtype=np.int32)
