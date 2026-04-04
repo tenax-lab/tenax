@@ -563,19 +563,12 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
         Jt_v = vjp_fn(v)[0]
         return tuple(vi - ji for vi, ji in zip(v, Jt_v))
 
-    # Diagonal scaling preconditioner: normalize by env tensor norms so that
-    # corners (chi×chi) and edges (chi×D²×chi) are on comparable scales.
-    # Nearly free to apply (element-wise multiply, no VJP needed).
+    # Preconditioner slot for GMRES.  The diagonal scaling approach
+    # (env norms) used wrong space — env_leaves are forward tensors while
+    # the GMRES vectors live in cotangent space.  Neumann series (I + J^T)
+    # also diverges with truncated GMRES.  Left as None until a proper
+    # approximation of (I - J^T)^{-1} is implemented.
     precond = None
-    if config.gmres_precondition:
-        inv_norms = tuple(
-            1.0 / jnp.maximum(jnp.sqrt(jnp.sum(e**2)), 1e-12) for e in env_leaves
-        )
-
-        def apply_diag_precond(v):
-            return tuple(vi * si for vi, si in zip(v, inv_norms))
-
-        precond = apply_diag_precond
 
     max_fp_iter = min(config.max_iter, 50)
     lam, info = jax_gmres(

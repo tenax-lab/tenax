@@ -240,7 +240,7 @@ config = iPEPSConfig(
     gs_line_search_max_steps=8,
     su_init=True,
 )
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
+A_opt, env, E_gs = optimize_gs_ad(H_bond, None, config)
 ```
 
 For Adam, a **cosine learning rate schedule** (lr → lr/10) is automatically
@@ -260,7 +260,7 @@ config = iPEPSConfig(
     gs_learning_rate=1e-3,
     gs_num_steps=50,
 )
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
+A_opt, env, E_gs = optimize_gs_ad(H_bond, None, config)
 ```
 
 ```{warning}

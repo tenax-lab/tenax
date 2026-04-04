@@ -61,10 +61,12 @@ def _use_line_search(config: iPEPSConfig) -> bool:
 
 
 def _tree_dot(a, b) -> float:
-    """Compute dot product between two pytrees of arrays."""
+    """Compute real dot product between two pytrees of arrays."""
     leaves_a = jax.tree.leaves(a)
     leaves_b = jax.tree.leaves(b)
-    return float(sum(jnp.sum(la * lb) for la, lb in zip(leaves_a, leaves_b)))
+    return float(
+        jnp.real(sum(jnp.sum(jnp.conj(la) * lb) for la, lb in zip(leaves_a, leaves_b)))
+    )
 
 
 def _tree_scale(tree, alpha: float):
