@@ -11,6 +11,7 @@ __all__ = [
     "_contract_single_site_environment",
     "norm_environment_matvec",
     "precondition_gradient",
+    "precondition_gradient_multisite",
     "lbfgs_two_loop",
 ]
 
@@ -148,6 +149,36 @@ def precondition_gradient(
         maxiter=config.metric_gmres_maxiter,
     )
     return g_precond_flat.reshape(shape)
+
+
+def precondition_gradient_multisite(
+    site_tensors: dict,
+    envs: dict,
+    grads: dict,
+    delta: float,
+    config: iPEPSConfig,
+) -> dict:
+    """Apply metric preconditioning independently per site.
+
+    The local metric is block-diagonal in site index, so each site's
+    gradient is preconditioned using only its own environment.
+
+    Args:
+        site_tensors: ``{(r, c): Tensor}`` current site tensors.
+        envs: ``{(r, c): CTMTensorEnv}`` converged environments.
+        grads: ``{(r, c): jax.Array}`` dense gradients per site.
+        delta: Regularization parameter.
+        config: iPEPS config with GMRES settings.
+
+    Returns:
+        ``{(r, c): jax.Array}`` preconditioned gradients per site.
+    """
+    return {
+        key: precondition_gradient(
+            site_tensors[key], envs[key], grads[key], delta, config
+        )
+        for key in grads
+    }
 
 
 def lbfgs_two_loop(

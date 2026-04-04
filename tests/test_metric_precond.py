@@ -18,6 +18,7 @@ from tenax.algorithms._metric_precond import (
     lbfgs_two_loop,
     norm_environment_matvec,
     precondition_gradient,
+    precondition_gradient_multisite,
 )
 from tenax.algorithms.ipeps_config import iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
@@ -227,6 +228,32 @@ class TestLBFGSTwoLoop:
 # ------------------------------------------------------------------ #
 # Integration tests: optimizer wiring                                  #
 # ------------------------------------------------------------------ #
+
+
+class TestMultisite:
+    """Tests for multisite metric preconditioning."""
+
+    def test_precondition_gradient_multisite(self):
+        """Per-site preconditioning should produce finite results."""
+        D, d = 2, 2
+        A0 = _make_random_ipeps_tensor(D=D, d=d, seed=0)
+        A1 = _make_random_ipeps_tensor(D=D, d=d, seed=10)
+        env0 = _converge_ctm(A0)
+        env1 = _converge_ctm(A1)
+        site_tensors = {(0, 0): A0, (0, 1): A1}
+        envs = {(0, 0): env0, (0, 1): env1}
+        grads = {
+            (0, 0): jax.random.normal(jax.random.PRNGKey(50), (D, D, D, D, d)),
+            (0, 1): jax.random.normal(jax.random.PRNGKey(51), (D, D, D, D, d)),
+        }
+        config = iPEPSConfig(gs_metric_precond=True)
+        result = precondition_gradient_multisite(
+            site_tensors, envs, grads, delta=0.01, config=config
+        )
+        assert set(result.keys()) == {(0, 0), (0, 1)}
+        for key in result:
+            assert result[key].shape == (D, D, D, D, d)
+            assert jnp.all(jnp.isfinite(result[key]))
 
 
 class TestIntegration:
