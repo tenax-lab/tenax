@@ -35,7 +35,7 @@ class CTMConfig:
     chi_I: int | None = None  # interlayer bond dim for split-CTMRG; None => chi_I = chi
     ad_regularize_svd: bool = True  # use Lorentzian-regularized SVD backward in AD
     gmres_precondition: bool = (
-        True  # diagonal scaling preconditioner for GMRES backward
+        False  # diagonal scaling preconditioner for GMRES backward (experimental)
     )
 
 
