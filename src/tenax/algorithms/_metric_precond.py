@@ -10,14 +10,23 @@ from __future__ import annotations
 __all__ = [
     "_contract_single_site_environment",
     "norm_environment_matvec",
+    "precondition_gradient",
+    "lbfgs_two_loop",
 ]
+
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.sparse.linalg as jax_sparse
 
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 from tenax.contraction.contractor import contract
 from tenax.core.tensor import Tensor
+
+if TYPE_CHECKING:
+    from tenax.algorithms.ipeps_config import iPEPSConfig
 
 
 def _contract_single_site_environment(env: CTMTensorEnv) -> jax.Array:
@@ -92,3 +101,91 @@ def norm_environment_matvec(
     # E8 indices: u_ket(a), u_bra(A), d_ket(b), d_bra(B), l_ket(c), l_bra(C), r_ket(d), r_bra(D)
     # v indices:  u_ket(a), d_ket(b), l_ket(c), r_ket(d), phys(s)
     return jnp.einsum("aAbBcCdD,abcds->ABCDs", E8, v)
+
+
+def precondition_gradient(
+    A: Tensor,
+    env: CTMTensorEnv,
+    grad: jax.Array,
+    delta: float,
+    config: iPEPSConfig,
+) -> jax.Array:
+    """Precondition the energy gradient using the norm environment metric.
+
+    Solves ``(N + delta * I) g' = g`` via GMRES, where N is the norm
+    environment (metric) and delta is a regularization parameter.
+
+    Args:
+        A:      iPEPS site tensor (used to infer D).
+        env:    Converged CTM environment.
+        grad:   Energy gradient, dense array of shape ``(D, D, D, D, d)``.
+        delta:  Regularization parameter (positive scalar).
+        config: iPEPS config with ``metric_gmres_tol`` and
+                ``metric_gmres_maxiter``.
+
+    Returns:
+        Preconditioned gradient, dense array of shape ``(D, D, D, D, d)``.
+    """
+    D = A.indices[0].dim
+    shape = grad.shape
+
+    # Contract environment once and unfuse for reuse in the closure
+    E = _contract_single_site_environment(env)
+    E8 = E.reshape(D, D, D, D, D, D, D, D)
+
+    g_flat = grad.ravel()
+
+    def matvec(v_flat: jax.Array) -> jax.Array:
+        v = v_flat.reshape(shape)
+        Nv = jnp.einsum("aAbBcCdD,abcds->ABCDs", E8, v)
+        return Nv.ravel() + delta * v_flat
+
+    g_precond_flat, _ = jax_sparse.gmres(
+        matvec,
+        g_flat,
+        x0=g_flat,
+        tol=config.metric_gmres_tol,
+        maxiter=config.metric_gmres_maxiter,
+    )
+    return g_precond_flat.reshape(shape)
+
+
+def lbfgs_two_loop(
+    grad: jax.Array,
+    history: list[tuple[jax.Array, jax.Array, float]],
+    h0_matvec: Callable[[jax.Array], jax.Array],
+) -> jax.Array:
+    """L-BFGS two-loop recursion (Nocedal Algorithm 7.4).
+
+    Computes the L-BFGS search direction ``H_k @ grad`` using the stored
+    history of ``(s_k, y_k, rho_k)`` pairs and an initial inverse-Hessian
+    approximation ``h0_matvec``.
+
+    Args:
+        grad:       Flat 1-D gradient vector.
+        history:    List of ``(s_k, y_k, rho_k)`` tuples, oldest first.
+        h0_matvec:  Callable that applies the initial inverse Hessian H0
+                    to a flat vector.
+
+    Returns:
+        The L-BFGS direction ``H_k @ grad`` (flat 1-D array).
+    """
+    q = grad  # JAX arrays are immutable, no copy needed
+    alphas = []
+
+    # First loop: newest to oldest
+    for s, y, rho in reversed(history):
+        alpha = rho * jnp.dot(s, q)
+        q = q - alpha * y
+        alphas.append(alpha)
+    alphas.reverse()
+
+    # Apply initial inverse Hessian
+    r = h0_matvec(q)
+
+    # Second loop: oldest to newest
+    for i, (s, y, rho) in enumerate(history):
+        beta = rho * jnp.dot(y, r)
+        r = r + s * (alphas[i] - beta)
+
+    return r

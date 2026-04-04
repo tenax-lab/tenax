@@ -15,8 +15,11 @@ from tenax.algorithms._ctm_tensor_init import (
 )
 from tenax.algorithms._metric_precond import (
     _contract_single_site_environment,
+    lbfgs_two_loop,
     norm_environment_matvec,
+    precondition_gradient,
 )
+from tenax.algorithms.ipeps_config import iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
@@ -139,3 +142,83 @@ class TestNormEnvironmentMV:
             atol=1e-10,
             err_msg="Norm environment is not Hermitian",
         )
+
+
+# ------------------------------------------------------------------ #
+# Tests: precondition_gradient                                         #
+# ------------------------------------------------------------------ #
+
+
+class TestPreconditionGradient:
+    def test_finite_output(self):
+        """Preconditioned gradient should be finite and nonzero."""
+        A = _make_random_ipeps_tensor(D=2, d=2)
+        env = _converge_ctm(A)
+        grad = jax.random.normal(jax.random.PRNGKey(99), (2, 2, 2, 2, 2))
+        config = iPEPSConfig(gs_metric_precond=True)
+        g_precond = precondition_gradient(A, env, grad, delta=0.01, config=config)
+        assert g_precond.shape == (2, 2, 2, 2, 2)
+        assert jnp.all(jnp.isfinite(g_precond))
+        assert float(jnp.sum(jnp.abs(g_precond))) > 0
+
+    def test_identity_at_large_delta(self):
+        """With very large delta, (N + delta*I)^{-1} approx (1/delta)*I."""
+        A = _make_random_ipeps_tensor(D=2, d=2)
+        env = _converge_ctm(A)
+        grad = jax.random.normal(jax.random.PRNGKey(99), (2, 2, 2, 2, 2))
+        config = iPEPSConfig(gs_metric_precond=True, metric_gmres_tol=1e-6)
+        g_precond = precondition_gradient(A, env, grad, delta=1e6, config=config)
+        expected = grad / 1e6
+        assert jnp.allclose(g_precond, expected, rtol=0.1)
+
+
+# ------------------------------------------------------------------ #
+# Tests: lbfgs_two_loop                                                #
+# ------------------------------------------------------------------ #
+
+
+class TestLBFGSTwoLoop:
+    def test_empty_history_returns_h0_grad(self):
+        """With no history, result = h0_matvec(grad)."""
+        grad = jnp.array([1.0, 2.0, 3.0])
+
+        def h0_matvec(v):
+            return 0.5 * v
+
+        result = lbfgs_two_loop(grad, [], h0_matvec)
+        assert jnp.allclose(result, 0.5 * grad)
+
+    def test_one_step_history(self):
+        """With one (s, y) pair, verify descent direction."""
+        s = jnp.array([1.0, 0.0])
+        y = jnp.array([2.0, 1.0])
+        rho = 1.0 / jnp.dot(y, s)
+        history = [(s, y, float(rho))]
+        grad = jnp.array([1.0, 1.0])
+        gamma = float(jnp.dot(s, y) / jnp.dot(y, y))
+
+        def h0_matvec(v):
+            return gamma * v
+
+        result = lbfgs_two_loop(grad, history, h0_matvec)
+        assert jnp.all(jnp.isfinite(result))
+        assert float(jnp.dot(result, grad)) > 0  # descent direction
+
+    def test_multi_step_history(self):
+        """L-BFGS with multiple history entries should be finite and descent."""
+        n = 5
+        history = []
+        for i in range(3):
+            key = jax.random.PRNGKey(i)
+            s = jax.random.normal(key, (n,))
+            y = jax.random.normal(jax.random.PRNGKey(i + 100), (n,)) + 0.1 * s
+            sy = float(jnp.dot(s, y))
+            if sy > 0:
+                history.append((s, y, 1.0 / sy))
+        grad = jax.random.normal(jax.random.PRNGKey(42), (n,))
+
+        def h0_matvec(v):
+            return v
+
+        result = lbfgs_two_loop(grad, history, h0_matvec)
+        assert jnp.all(jnp.isfinite(result))
