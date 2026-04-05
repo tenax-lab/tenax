@@ -913,6 +913,42 @@ class TestOptimizeGsAdDenseOnly:
         assert np.isfinite(E_gs)
 
 
+class TestOptimizeGsAdOptimizers:
+    """Verify L-BFGS and CG optimizer paths run correctly."""
+
+    @pytest.fixture
+    def heisenberg_gate(self):
+        d = 2
+        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+        return H.reshape(d, d, d, d)
+
+    def test_lbfgs_optimizer_runs(self, heisenberg_gate):
+        """L-BFGS optimizer with line search should produce finite energy."""
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=5),
+            gs_optimizer="lbfgs",
+            gs_num_steps=3,
+            gs_line_search=True,
+        )
+        _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
+        assert np.isfinite(E_gs)
+
+    def test_cg_optimizer_runs(self, heisenberg_gate):
+        """CG optimizer should produce finite energy (covers PR beta path)."""
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=5),
+            gs_optimizer="cg",
+            gs_num_steps=3,
+        )
+        _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
+        assert np.isfinite(E_gs)
+
+
 class TestADSymmetric:
     """Tests for full block-sparse AD pipeline with SymmetricTensor."""
 

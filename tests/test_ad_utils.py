@@ -406,6 +406,63 @@ class TestGMRESBackward:
         assert grad.norm() > 1e-15, "No-precond GMRES: gradient is all zeros"
 
 
+class TestGMRESBackwardPath:
+    """Verify the GMRES backward branch (ad_backward_method='gmres') is exercised."""
+
+    def test_gmres_path_finite_gradient(self):
+        """GMRES backward path should produce finite, nonzero gradients."""
+        A = _make_dense_tensor(jax.random.PRNGKey(42))
+        config = CTMConfig(
+            chi=4, max_iter=10, conv_tol=1e-6, ad_backward_method="gmres"
+        )
+        config_tuple = _config_to_tuple(config)
+        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
+
+        def energy_fn(A_in):
+            A_norm = A_in * (1.0 / (A_in.norm() + 1e-10))
+            env_leaves = ctm_tensor_converge(
+                {(0, 0): A_norm}, None, SINGLE_SITE_NEIGHBORS, config_tuple
+            )
+            env = jax.tree.unflatten(
+                jax.tree.structure(initialize_ctm_tensor_env(A_in, 4)),
+                list(env_leaves),
+            )
+            return compute_energy_ctm_tensor(A_norm, env, gate)
+
+        grad = jax.grad(energy_fn)(A)
+        assert jnp.all(jnp.isfinite(grad.todense())), "GMRES path: NaN/Inf"
+        assert grad.norm() > 1e-15, "GMRES path: gradient is all zeros"
+
+    def test_gmres_path_agrees_with_vjp(self):
+        """GMRES and VJP backward paths should produce similar gradients."""
+        A = _make_dense_tensor(jax.random.PRNGKey(55))
+        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
+
+        def _grad_with(method: str):
+            config = CTMConfig(
+                chi=4, max_iter=10, conv_tol=1e-6, ad_backward_method=method
+            )
+            ct = _config_to_tuple(config)
+
+            def energy_fn(A_in):
+                A_norm = A_in * (1.0 / (A_in.norm() + 1e-10))
+                env_leaves = ctm_tensor_converge(
+                    {(0, 0): A_norm}, None, SINGLE_SITE_NEIGHBORS, ct
+                )
+                env = jax.tree.unflatten(
+                    jax.tree.structure(initialize_ctm_tensor_env(A_in, 4)),
+                    list(env_leaves),
+                )
+                return compute_energy_ctm_tensor(A_norm, env, gate)
+
+            return jax.grad(energy_fn)(A)
+
+        grad_gmres = _grad_with("gmres")
+        grad_vjp = _grad_with("vjp")
+        diff = float(jnp.max(jnp.abs(grad_gmres.todense() - grad_vjp.todense())))
+        assert diff < 5e-2, f"GMRES vs VJP gradient diff = {diff}"
+
+
 class TestSvdSectorBackward:
     """Tests for the factored _svd_sector_backward function."""
 

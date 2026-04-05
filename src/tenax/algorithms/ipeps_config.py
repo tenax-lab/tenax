@@ -37,6 +37,7 @@ class CTMConfig:
     gmres_precondition: bool = (
         False  # diagonal scaling preconditioner for GMRES backward (experimental)
     )
+    ad_backward_method: str = "vjp"  # "vjp" (iterative VJP) or "gmres"
 
 
 @dataclass
