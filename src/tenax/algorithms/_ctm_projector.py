@@ -534,7 +534,8 @@ def _compute_projector_tensor(
 
     Returns:
         Projector ``P`` with labels ``(fused, chi_new)``,
-        flows ``(IN, OUT)``.  Wrapped in ``stop_gradient``.
+        flows ``(IN, OUT)``.  Differentiable in dense fallback paths
+        (AD-traced inputs use regularized SVD).
 
     Raises:
         ValueError: If ``projector_method`` is not ``"eigh"`` or ``"qr"``.
@@ -554,21 +555,17 @@ def _compute_projector_tensor(
             if not has_tracers and C1g.n_blocks > 0 and C4g.n_blocks > 0:
                 return _qr_projector_symmetric(C1g, C4g, chi)
 
-        # Dense QR fallback
+        # Dense QR fallback — differentiable via regularized SVD
         C1g_dense = C1g.todense()
         C4g_dense = C4g.todense()
 
         M = jnp.concatenate([C1g_dense, C4g_dense], axis=1)
         Q, R = jnp.linalg.qr(M)
+        from tenax.algorithms.ad_utils import regularized_svd as _reg_svd
 
-        rho_small = R @ R.conj().T
-        rho_small = 0.5 * (rho_small + rho_small.conj().T)
-        eigvals, eigvecs = jnp.linalg.eigh(rho_small)
-
-        k = min(chi, len(eigvals))
-        V = eigvecs[:, -k:][:, ::-1]
-        P_dense = Q @ V
-        P_dense = jax.lax.stop_gradient(P_dense)
+        U_R, S_R, _Vh_R = _reg_svd(R)
+        k = min(chi, len(S_R))
+        P_dense = Q @ U_R[:, :k]
 
         fused_idx = C1g.indices[C1g.labels().index("fused")]
         if base_charges is not None:
@@ -630,10 +627,11 @@ def _compute_projector_tensor(
 
     rho = C1g_dense @ C1g_dense.conj().T + C4g_dense @ C4g_dense.conj().T
     rho = 0.5 * (rho + rho.conj().T)
-    eigvals, eigvecs = jnp.linalg.eigh(rho)
+    from tenax.algorithms.ad_utils import regularized_eigh as _reg_eigh
+
+    eigvals, eigvecs = _reg_eigh(rho)
     k = min(chi, len(eigvals))
     P_dense = eigvecs[:, -k:][:, ::-1]
-    P_dense = jax.lax.stop_gradient(P_dense)
 
     if base_charges is not None:
         from tenax.algorithms._ctm_utils import _derive_charges

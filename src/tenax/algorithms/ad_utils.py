@@ -179,6 +179,89 @@ truncated_svd_ad.defvjp(_truncated_svd_ad_fwd, _truncated_svd_ad_bwd)
 
 
 # ---------------------------------------------------------------------------
+# 1a. Full SVD with Lorentzian-regularized backward (non-truncated)
+# ---------------------------------------------------------------------------
+
+
+@partial(jax.custom_vjp, nondiff_argnums=())
+def regularized_svd(M: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Full SVD with Lorentzian-regularized backward pass.
+
+    Forward: standard ``jnp.linalg.svd(M, full_matrices=False)``.
+    Backward: Lorentzian broadening on the F-matrix prevents NaN
+    gradients from degenerate singular values.
+
+    Used by CTM projectors during direct AD to make truncation
+    differentiable.
+    """
+    return jnp.linalg.svd(M, full_matrices=False)
+
+
+def _regularized_svd_fwd(M):
+    U, s, Vh = jnp.linalg.svd(M, full_matrices=False)
+    return (U, s, Vh), (U, s, Vh, M)
+
+
+def _regularized_svd_bwd(residuals, g):
+    U, s, Vh, M = residuals
+    dU, ds, dVh = g
+    dM = _svd_sector_backward(U, s, Vh, dU, ds, dVh)
+    return (dM,)
+
+
+regularized_svd.defvjp(_regularized_svd_fwd, _regularized_svd_bwd)
+
+
+@partial(jax.custom_vjp, nondiff_argnums=())
+def regularized_eigh(M: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """Eigendecomposition of a Hermitian matrix with regularized backward.
+
+    Forward: standard ``jnp.linalg.eigh(M)`` (ascending eigenvalues).
+    Backward: uses Lorentzian-regularized SVD backward to prevent NaN
+    gradients from degenerate eigenvalues.
+
+    For a Hermitian PSD matrix, this gives the same forward result as
+    ``jnp.linalg.eigh`` (deterministic eigenvector ordering) while
+    providing stable gradients via the SVD backward path.
+    """
+    return jnp.linalg.eigh(M)
+
+
+def _regularized_eigh_fwd(M):
+    eigvals, eigvecs = jnp.linalg.eigh(M)
+    return (eigvals, eigvecs), (eigvals, eigvecs, M)
+
+
+def _regularized_eigh_bwd(residuals, g):
+    eigvals, eigvecs, M = residuals
+    d_eigvals, d_eigvecs = g
+
+    # Map eigh result to SVD convention: M = U @ diag(s) @ Vh
+    # For Hermitian M with eigh: M = eigvecs @ diag(eigvals) @ eigvecs^H
+    # SVD equivalent: U = eigvecs, s = |eigvals|, Vh = sign(eigvals) * eigvecs^H
+    # For PSD M, sign(eigvals) = 1, so Vh = eigvecs^H.
+    # For general Hermitian, we need to handle negative eigenvalues.
+    signs = jnp.sign(eigvals)
+    signs = jnp.where(signs == 0, 1.0, signs)
+    s = jnp.abs(eigvals)
+    U = eigvecs * signs[None, :]  # absorb sign into U
+    Vh = eigvecs.conj().T
+
+    # Map eigh gradients to SVD gradients
+    # d_eigvals -> ds (but need to account for |.|)
+    ds = d_eigvals * signs
+    # d_eigvecs -> dU (with sign adjustment)
+    dU = d_eigvecs * signs[None, :]
+    dVh = jnp.zeros_like(Vh)
+
+    dM = _svd_sector_backward(U, s, Vh, dU, ds, dVh)
+    return (dM,)
+
+
+regularized_eigh.defvjp(_regularized_eigh_fwd, _regularized_eigh_bwd)
+
+
+# ---------------------------------------------------------------------------
 # 1b. Truncated SVD with stable backward for SymmetricTensor
 # ---------------------------------------------------------------------------
 
