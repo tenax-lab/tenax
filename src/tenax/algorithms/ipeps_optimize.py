@@ -408,12 +408,27 @@ def _optimize_gs_ad_tensor(
             A = optax.apply_updates(A, direction)
             A = A * (1.0 / (A.norm() + 1e-10))
 
-    A_final = best_A * (1.0 / (best_A.norm() + 1e-10))
-    env_leaves = ctm_tensor_converge(
-        {(0, 0): A_final}, prev_env_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
+    # Check if the final post-update A is better than best_A (the last
+    # iteration's line-search result is not evaluated inside the loop).
+    A_norm = A * (1.0 / (A.norm() + 1e-10))
+    env_leaves_final = ctm_tensor_converge(
+        {(0, 0): A_norm}, prev_env_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
     )
-    env = jax.tree.unflatten(env_treedef, env_leaves)
-    E_gs = float(compute_energy_ctm_tensor(A_final, env, gate, d_phys))
+    env_final = jax.tree.unflatten(env_treedef, env_leaves_final)
+    E_final = float(compute_energy_ctm_tensor(A_norm, env_final, gate, d_phys))
+    if E_final < best_energy:
+        best_A = A
+        best_energy = E_final
+
+    A_final = best_A * (1.0 / (best_A.norm() + 1e-10))
+    if best_A is A:
+        env, E_gs = env_final, E_final
+    else:
+        env_leaves = ctm_tensor_converge(
+            {(0, 0): A_final}, prev_env_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
+        )
+        env = jax.tree.unflatten(env_treedef, env_leaves)
+        E_gs = float(compute_energy_ctm_tensor(A_final, env, gate, d_phys))
     if config.gs_verbose:
         print(f"[iPEPS-AD:1site-tensor] final E={E_gs:.10f}", flush=True)
 
@@ -674,27 +689,56 @@ def _optimize_gs_ad_tensor_2site(
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)
 
-    # Re-evaluate best params with fresh CTM to get accurate energy
-    A_final, B_final = _normalize_params(best_params)
-    site_tensors = {(0, 0): A_final, (1, 0): B_final}
-    fresh_env_leaves = ctm_tensor_converge(
-        site_tensors,
-        best_env_leaves or prev_env_leaves,
+    # Check if the final post-update params are better than best_params
+    # (the last iteration's line-search result is not evaluated inside the loop).
+    A_last, B_last = _normalize_params(params)
+    site_last = {(0, 0): A_last, (1, 0): B_last}
+    last_env_leaves = ctm_tensor_converge(
+        site_last,
+        prev_env_leaves,
         CHECKERBOARD_NEIGHBORS,
         config_tuple,
     )
-    env_A = jax.tree.unflatten(env_treedef, fresh_env_leaves[:n_env_leaves])
-    env_B = jax.tree.unflatten(env_treedef, fresh_env_leaves[n_env_leaves:])
-    E_gs = float(
+    env_A_last = jax.tree.unflatten(env_treedef, last_env_leaves[:n_env_leaves])
+    env_B_last = jax.tree.unflatten(env_treedef, last_env_leaves[n_env_leaves:])
+    E_last = float(
         compute_energy_ctm_tensor_2site(
-            A_final,
-            B_final,
-            env_A,
-            env_B,
+            A_last,
+            B_last,
+            env_A_last,
+            env_B_last,
             gate,
             d_phys,
         )
     )
+    if E_last < best_energy:
+        best_params = params
+        best_env_leaves = last_env_leaves
+
+    # Re-evaluate best params with fresh CTM to get accurate energy
+    A_final, B_final = _normalize_params(best_params)
+    if best_params is params:
+        env_A, env_B, E_gs = env_A_last, env_B_last, E_last
+    else:
+        site_tensors = {(0, 0): A_final, (1, 0): B_final}
+        fresh_env_leaves = ctm_tensor_converge(
+            site_tensors,
+            best_env_leaves or prev_env_leaves,
+            CHECKERBOARD_NEIGHBORS,
+            config_tuple,
+        )
+        env_A = jax.tree.unflatten(env_treedef, fresh_env_leaves[:n_env_leaves])
+        env_B = jax.tree.unflatten(env_treedef, fresh_env_leaves[n_env_leaves:])
+        E_gs = float(
+            compute_energy_ctm_tensor_2site(
+                A_final,
+                B_final,
+                env_A,
+                env_B,
+                gate,
+                d_phys,
+            )
+        )
     if config.gs_verbose:
         print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}", flush=True)
 
