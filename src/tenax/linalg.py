@@ -1226,23 +1226,31 @@ def svd(
     s_full = s
 
     # Determine truncation cutoff
-    s_np = np.array(s)
-    n_keep = len(s_np)
+    # Under JAX tracing (e.g. jax.grad through explicit AD), singular values
+    # are abstract tracers and cannot be converted to numpy.  In that case
+    # only static rank truncation (max_singular_values) is supported.
+    _is_traced = isinstance(s, jax.core.Tracer)
 
-    if max_truncation_err is not None:
-        # Keep singular values until truncation error <= max_truncation_err
-        total_sq = float(np.sum(s_np**2))
-        trunc_sq = 0.0
-        for i in range(len(s_np) - 1, -1, -1):
-            trunc_sq += float(s_np[i] ** 2)
-            if trunc_sq / total_sq > max_truncation_err**2:
-                n_keep = i + 1
-                break
-        else:
-            n_keep = len(s_np)
+    if _is_traced:
+        n_keep = max_singular_values if max_singular_values is not None else s.shape[0]
+    else:
+        s_np = np.array(s)
+        n_keep = len(s_np)
 
-    if max_singular_values is not None:
-        n_keep = min(n_keep, max_singular_values)
+        if max_truncation_err is not None:
+            # Keep singular values until truncation error <= max_truncation_err
+            total_sq = float(np.sum(s_np**2))
+            trunc_sq = 0.0
+            for i in range(len(s_np) - 1, -1, -1):
+                trunc_sq += float(s_np[i] ** 2)
+                if trunc_sq / total_sq > max_truncation_err**2:
+                    n_keep = i + 1
+                    break
+            else:
+                n_keep = len(s_np)
+
+        if max_singular_values is not None:
+            n_keep = min(n_keep, max_singular_values)
 
     n_keep = max(1, n_keep)  # always keep at least one
 

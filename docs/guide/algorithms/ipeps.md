@@ -268,6 +268,19 @@ Explicit AD is experimental. NaN gradients may occur at large chi or many
 CTM steps due to the ``eigh`` backward pass in projectors.
 ```
 
+#### Backward method selection
+
+The backward pass for CTM implicit differentiation can use two methods:
+
+| Method | Setting | Description |
+|--------|---------|-------------|
+| Iterative VJP | ``ad_backward_method="vjp"`` (default) | Neumann series accumulation of VJP; robust to CTM gauge instability |
+| GMRES | ``ad_backward_method="gmres"`` | Direct linear solve of ``(I - J^T)λ = g``; can diverge if CTM SVs don't converge |
+
+The VJP method is recommended for most cases. It matches the approach used by
+YASTN (Francuz et al.) and avoids the ill-conditioned linear solve that causes
+GMRES to produce NaN when the CTM iteration has gauge instability.
+
 For AD-based excitation spectra on top of an optimised iPEPS, see
 {doc}`ad_excitations`.
 

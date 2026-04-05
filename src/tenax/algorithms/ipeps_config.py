@@ -79,9 +79,8 @@ class iPEPSConfig:
     gs_line_search: bool | None = None  # None = auto (True for lbfgs/cg)
     gs_line_search_max_steps: int = 8
     gs_explicit_ad: bool = False  # explicit diff through unrolled CTM
-    gs_explicit_ad_steps: int | None = (
-        None  # CTM steps for explicit AD (None = max_iter)
-    )
+    gs_explicit_ad_steps: int = 20  # CTM steps for explicit AD backprop phase
+    gs_explicit_ad_warmup: int = 3  # warmup CTM steps (no gradient tracking)
     su_init: bool = False
 
     def __post_init__(self):

@@ -539,6 +539,7 @@ def _optimize_gs_ad_tensor_2site(
     config_tuple = _config_to_tuple(config.ctm)
     use_explicit = config.gs_explicit_ad
     explicit_steps = config.gs_explicit_ad_steps
+    explicit_warmup = config.gs_explicit_ad_warmup
 
     # Get env treedef from a template
     _env_template = initialize_ctm_tensor_env(A, config.ctm.chi)
@@ -565,6 +566,7 @@ def _optimize_gs_ad_tensor_2site(
                 CHECKERBOARD_NEIGHBORS,
                 config_tuple,
                 explicit_steps,
+                explicit_warmup,
             )
         else:
             env_leaves = _ctm_converge(
