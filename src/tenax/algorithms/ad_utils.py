@@ -179,6 +179,40 @@ truncated_svd_ad.defvjp(_truncated_svd_ad_fwd, _truncated_svd_ad_bwd)
 
 
 # ---------------------------------------------------------------------------
+# 1a. Full (non-truncated) SVD with stable backward pass
+# ---------------------------------------------------------------------------
+
+
+@partial(jax.custom_vjp, nondiff_argnums=())
+def regularized_svd(M: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Full SVD with Lorentzian-regularized backward pass.
+
+    Forward: standard ``jnp.linalg.svd(M, full_matrices=False)``.
+    Backward: Lorentzian broadening on the F-matrix prevents NaN
+    gradients from degenerate singular values.
+
+    Used by CTM projectors during direct AD to make truncation
+    differentiable.
+    """
+    return jnp.linalg.svd(M, full_matrices=False)
+
+
+def _regularized_svd_fwd(M):
+    U, s, Vh = jnp.linalg.svd(M, full_matrices=False)
+    return (U, s, Vh), (U, s, Vh)
+
+
+def _regularized_svd_bwd(residuals, g):
+    U, s, Vh = residuals
+    dU, ds, dVh = g
+    dM = _svd_sector_backward(U, s, Vh, dU, ds, dVh)
+    return (dM,)
+
+
+regularized_svd.defvjp(_regularized_svd_fwd, _regularized_svd_bwd)
+
+
+# ---------------------------------------------------------------------------
 # 1b. Truncated SVD with stable backward for SymmetricTensor
 # ---------------------------------------------------------------------------
 
