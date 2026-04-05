@@ -979,6 +979,11 @@ def _eigh_symmetric(
 
     grouped = _group_blocks_by_bond_charge(tensor, left_axes, right_axes)
 
+    # Check if fermionic signs are needed for leg reordering
+    sym = tensor.indices[0].symmetry
+    is_fermionic = sym.is_fermionic
+    decomp_perm = tuple(left_axes + right_axes)
+
     # Per-sector eigh results: (eigvecs, eigvals, left_subkeys, left_row_sizes)
     sector_results: dict[
         int,
@@ -1027,6 +1032,20 @@ def _eigh_symmetric(
             row_start = sum(left_row_sizes[:li])
             col_start = sum(right_col_sizes[:ri])
             flat_block = block.reshape(left_row_sizes[li], right_col_sizes[ri])
+            # Apply Koszul sign for leg reordering (original -> left+right)
+            if is_fermionic:
+                full_key = [0] * len(tensor.indices)
+                for ax, ch in zip(left_axes, lk):
+                    full_key[ax] = ch
+                for ax, ch in zip(right_axes, rk):
+                    full_key[ax] = ch
+                parities = tuple(
+                    int(sym.parity(np.array([full_key[i]]))[0])
+                    for i in range(len(full_key))
+                )
+                ksign = _koszul_sign(parities, decomp_perm)
+                if ksign < 0:
+                    flat_block = -flat_block
             matrix = matrix.at[
                 row_start : row_start + left_row_sizes[li],
                 col_start : col_start + right_col_sizes[ri],

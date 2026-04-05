@@ -16,6 +16,7 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.scipy.sparse.linalg import gmres as jax_gmres
 
 from tenax.algorithms._ctm_tensor import (
@@ -295,7 +296,7 @@ def truncated_svd_symmetric_ad(
 
     # Determine symmetry from input (if available)
     sym = M.indices[0].symmetry
-    bond_charges = jnp.zeros(k, dtype=jnp.int32)
+    bond_charges = np.zeros(k, dtype=np.int32)
     bond_out = TensorIndex.from_charges(
         sym, bond_charges, FlowDirection.OUT, label=new_bond_label
     )
@@ -338,7 +339,7 @@ def _config_from_tuple(config_tuple: tuple):
     pm_int = config_tuple[4] if len(config_tuple) > 4 else 0
     min_iter = config_tuple[5] if len(config_tuple) > 5 else 10
     ad_regularize_svd = bool(config_tuple[6]) if len(config_tuple) > 6 else True
-    gmres_precondition = bool(config_tuple[7]) if len(config_tuple) > 7 else True
+    gmres_precondition = bool(config_tuple[7]) if len(config_tuple) > 7 else False
     ad_bwd_int = config_tuple[8] if len(config_tuple) > 8 else 0
     ad_backward_method = {0: "vjp", 1: "gmres"}.get(ad_bwd_int, "vjp")
     return CTMConfig(
@@ -644,14 +645,14 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
         lam = g
 
         for _ in range(max_fp_iter):
+            lam_prev = lam
             Jt_lam = vjp_env_fn(lam)[0]
             lam = tuple(ji + gi for ji, gi in zip(Jt_lam, g))
 
             # Check if lam is diverging — stop early if so
             lam_norm = sum(float(jnp.sum(li**2)) for li in lam) ** 0.5
             if not math.isfinite(lam_norm) or lam_norm > 1e15:
-                # Revert to last good lam
-                lam = tuple(li - ji for li, ji in zip(lam, Jt_lam))
+                lam = lam_prev
                 break
 
             # Check convergence: |J^T lam| should decrease
@@ -718,8 +719,6 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
             if c in prev_svs:
                 if float(_ctm_sv_diff_local(sv, prev_svs[c])) >= config.conv_tol:
                     converged = False
-                    prev_svs[c] = sv
-                    break
             else:
                 converged = False
             prev_svs[c] = sv

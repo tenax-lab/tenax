@@ -1582,8 +1582,10 @@ def _lanczos_solve_tensor(
             w = w - basis[-2] * betas[-1]
 
         # Full reorthogonalization against all previous basis vectors.
+        # inner(q, w) = <q|w> is real for Hermitian operators; take .real
+        # to avoid imaginary-part noise corrupting the reorthogonalization.
         for q in basis:
-            w = w - q * float(inner(q, w))
+            w = w - q * float(inner(q, w).real)
 
         beta_val = float(w.norm())
         betas.append(beta_val)

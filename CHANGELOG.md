@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.2 (2026-04-05)
+
+### Improvements
+
+- **Fix PyPI publish workflow** — add attestation permissions and update
+  GitHub Actions to Node.js 24 (#258)
+
 ## v0.4.1 (2026-04-04)
 
 ### Improvements
