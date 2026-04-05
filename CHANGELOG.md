@@ -1,11 +1,12 @@
 # Changelog
 
-## v0.4.2 (2026-04-05)
+## v0.4.3 (2026-04-05)
 
 ### Improvements
 
-- **Fix PyPI publish workflow** — add attestation permissions and update
-  GitHub Actions to Node.js 24 (#258)
+- **Fix PyPI publish** — build sdist only (Cython wheel is platform-specific
+  and rejected by PyPI); add attestation permissions; update Actions to
+  Node.js 24 (#258, #260)
 
 ## v0.4.1 (2026-04-04)
 
