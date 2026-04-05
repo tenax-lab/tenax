@@ -271,7 +271,8 @@ def _optimize_gs_ad_tensor(
     """AD-based ground state optimization for Tensor-protocol iPEPS (1-site).
 
     Uses ``ctm_tensor_converge`` with implicit differentiation through
-    the standard Tensor-protocol CTM.
+    the standard Tensor-protocol CTM, or ``ctm_tensor_converge_explicit``
+    when ``config.gs_explicit_ad`` is ``True``.
     """
     import optax
 
@@ -280,7 +281,11 @@ def _optimize_gs_ad_tensor(
         initialize_ctm_tensor_env,
     )
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
-    from tenax.algorithms.ad_utils import _config_to_tuple, ctm_tensor_converge
+    from tenax.algorithms.ad_utils import (
+        _config_to_tuple,
+        ctm_tensor_converge,
+        ctm_tensor_converge_explicit,
+    )
 
     gate = (
         hamiltonian_gate.todense()
@@ -293,6 +298,8 @@ def _optimize_gs_ad_tensor(
     A = A * (1.0 / (A.norm() + 1e-10))
 
     config_tuple = _config_to_tuple(config.ctm)
+    use_explicit = config.gs_explicit_ad
+    explicit_steps = config.gs_explicit_ad_steps
 
     _env_template = initialize_ctm_tensor_env(A, config.ctm.chi)
     env_treedef = jax.tree.structure(_env_template)
@@ -301,9 +308,19 @@ def _optimize_gs_ad_tensor(
     def loss_fn(A_param, env_init_leaves):
         A_norm = A_param * (1.0 / (A_param.norm() + 1e-10))
         site_tensors = {(0, 0): A_norm}
-        env_leaves = ctm_tensor_converge(
-            site_tensors, env_init_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
-        )
+        if use_explicit:
+            env_leaves = ctm_tensor_converge_explicit(
+                site_tensors,
+                env_init_leaves,
+                SINGLE_SITE_NEIGHBORS,
+                config_tuple,
+                explicit_steps,
+                config.gs_explicit_ad_warmup,
+            )
+        else:
+            env_leaves = ctm_tensor_converge(
+                site_tensors, env_init_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
+            )
         env = jax.tree.unflatten(env_treedef, env_leaves)
         energy = compute_energy_ctm_tensor(A_norm, env, gate, d_phys)
         return energy, env_leaves

@@ -240,6 +240,34 @@ class TestExplicitADWarmup:
         assert float(jnp.sum(jnp.abs(grad))) > 0
 
 
+class TestExplicitADOptimization:
+    @pytest.mark.algorithm
+    def test_explicit_ad_heisenberg_converges(self):
+        """Full iPEPS optimization with explicit AD should converge on Heisenberg."""
+        from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+        from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+        d = 2
+        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+        gate = H.reshape(d, d, d, d)
+
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=8, max_iter=50),
+            gs_optimizer="adam",
+            gs_num_steps=30,
+            gs_explicit_ad=True,
+            gs_explicit_ad_steps=10,
+            gs_explicit_ad_warmup=3,
+            gs_verbose=True,
+        )
+        _, _, E = optimize_gs_ad(gate, None, config)
+        assert E < -0.50, f"Energy {E} too high for explicit AD"
+
+
 class TestSplitCTMExplicitAD:
     def test_split_ctm_explicit_runs(self):
         """Split CTM explicit AD should run without error."""
