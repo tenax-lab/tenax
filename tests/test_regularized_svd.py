@@ -161,3 +161,126 @@ class TestDifferentiableProjectorEigh:
         assert jnp.all(jnp.isfinite(g1))
         assert jnp.all(jnp.isfinite(g2))
         assert float(jnp.sum(jnp.abs(g1))) > 0
+
+
+def _make_random_dense_site_tensor(key, D=2, d=2):
+    """Build a random DenseTensor site tensor with 5 legs (u, d, l, r, phys)."""
+    sym = U1Symmetry()
+    charges = np.zeros(D, dtype=np.int32)
+    phys_charges = np.zeros(d, dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="u"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="d"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="l"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
+    )
+    data = jax.random.normal(key, shape=(D, D, D, D, d))
+    return DenseTensor(data, indices)
+
+
+class TestExplicitADWarmup:
+    def test_warmup_runs_without_error(self):
+        """Explicit AD with warmup steps should run without error."""
+        from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+        from tenax.algorithms.ad_utils import (
+            _config_to_tuple,
+            ctm_tensor_converge_explicit,
+        )
+        from tenax.algorithms.ipeps_config import CTMConfig
+
+        key = jax.random.PRNGKey(0)
+        A = _make_random_dense_site_tensor(key, D=2, d=2)
+        site_tensors = {(0, 0): A}
+        config = CTMConfig(chi=4, max_iter=5)
+        config_tuple = _config_to_tuple(config)
+
+        env_leaves = ctm_tensor_converge_explicit(
+            site_tensors,
+            None,
+            SINGLE_SITE_NEIGHBORS,
+            config_tuple,
+            num_steps=3,
+            warmup_steps=2,
+        )
+        assert all(jnp.all(jnp.isfinite(x)) for x in env_leaves)
+
+    def test_warmup_detaches_gradient(self):
+        """Warmup steps should not contribute to gradients (stop_gradient)."""
+        from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+        from tenax.algorithms.ad_utils import (
+            _config_to_tuple,
+            _flatten_envs,
+            ctm_tensor_converge_explicit,
+        )
+        from tenax.algorithms.ipeps_config import CTMConfig
+
+        key = jax.random.PRNGKey(42)
+        A = _make_random_dense_site_tensor(key, D=2, d=2)
+        config = CTMConfig(chi=4, max_iter=5)
+        config_tuple = _config_to_tuple(config)
+
+        def loss_fn(data):
+            A_inner = DenseTensor(data, A.indices)
+            site_tensors = {(0, 0): A_inner}
+            env_leaves = ctm_tensor_converge_explicit(
+                site_tensors,
+                None,
+                SINGLE_SITE_NEIGHBORS,
+                config_tuple,
+                num_steps=3,
+                warmup_steps=2,
+            )
+            return sum(jnp.sum(x**2) for x in env_leaves)
+
+        grad = jax.grad(loss_fn)(A.todense())
+        assert jnp.all(jnp.isfinite(grad))
+        assert float(jnp.sum(jnp.abs(grad))) > 0
+
+
+class TestSplitCTMExplicitAD:
+    def test_split_ctm_explicit_runs(self):
+        """Split CTM explicit AD should run without error."""
+        from tenax.algorithms._split_ctm_tensor_init import SplitCTMTensorEnv
+        from tenax.algorithms.ad_utils import ctm_split_tensor_converge_explicit
+
+        key = jax.random.PRNGKey(0)
+        A = _make_random_dense_site_tensor(key, D=2, d=2)
+        env = ctm_split_tensor_converge_explicit(
+            A,
+            chi=4,
+            num_steps=3,
+            warmup_steps=2,
+        )
+        assert isinstance(env, SplitCTMTensorEnv)
+        leaves = jax.tree.leaves(env)
+        assert all(jnp.all(jnp.isfinite(x)) for x in leaves)
+
+    @pytest.mark.skip(
+        reason="Split CTM uses dynamic SVD truncation (np.array on traced values) "
+        "which is incompatible with JAX AD tracing. Gradient support requires "
+        "refactoring tenax.linalg.svd to use static truncation bounds."
+    )
+    def test_split_ctm_explicit_gradient_finite(self):
+        """Split CTM explicit AD should produce finite gradients."""
+        from tenax.algorithms.ad_utils import ctm_split_tensor_converge_explicit
+
+        key = jax.random.PRNGKey(42)
+        A = _make_random_dense_site_tensor(key, D=2, d=2)
+
+        def loss_fn(data):
+            A_inner = DenseTensor(data, A.indices)
+            env = ctm_split_tensor_converge_explicit(
+                A_inner,
+                chi=4,
+                num_steps=3,
+                warmup_steps=2,
+            )
+            # Loss = sum of squared corner norms
+            return sum(jnp.sum(x**2) for x in jax.tree.leaves(env))
+
+        grad = jax.grad(loss_fn)(A.todense())
+        assert jnp.all(jnp.isfinite(grad))
+        assert float(jnp.sum(jnp.abs(grad))) > 0

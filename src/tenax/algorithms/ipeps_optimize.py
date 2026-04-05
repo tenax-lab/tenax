@@ -550,6 +550,7 @@ def _optimize_gs_ad_tensor_2site(
                 CHECKERBOARD_NEIGHBORS,
                 config_tuple,
                 explicit_steps,
+                config.gs_explicit_ad_warmup,
             )
         else:
             env_leaves = _ctm_converge(

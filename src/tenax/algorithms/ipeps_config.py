@@ -82,6 +82,7 @@ class iPEPSConfig:
     gs_explicit_ad_steps: int | None = (
         None  # CTM steps for explicit AD (None = max_iter)
     )
+    gs_explicit_ad_warmup: int = 3  # warmup CTM steps (no gradient tracking)
     su_init: bool = False
 
     def __post_init__(self):
