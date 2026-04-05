@@ -534,7 +534,8 @@ def _compute_projector_tensor(
 
     Returns:
         Projector ``P`` with labels ``(fused, chi_new)``,
-        flows ``(IN, OUT)``.  Wrapped in ``stop_gradient``.
+        flows ``(IN, OUT)``.  Differentiable in dense fallback paths
+        (AD-traced inputs).
 
     Raises:
         ValueError: If ``projector_method`` is not ``"eigh"`` or ``"qr"``.
@@ -554,21 +555,30 @@ def _compute_projector_tensor(
             if not has_tracers and C1g.n_blocks > 0 and C4g.n_blocks > 0:
                 return _qr_projector_symmetric(C1g, C4g, chi)
 
-        # Dense QR fallback
+        # Dense QR fallback — differentiable via regularized SVD when
+        # AD-traced; standard eigh otherwise (preserves sign convention).
         C1g_dense = C1g.todense()
         C4g_dense = C4g.todense()
+        _has_tracers = isinstance(C1g_dense, jax.core.Tracer) or isinstance(
+            C4g_dense, jax.core.Tracer
+        )
 
         M = jnp.concatenate([C1g_dense, C4g_dense], axis=1)
         Q, R = jnp.linalg.qr(M)
+        if _has_tracers:
+            from tenax.algorithms.ad_utils import regularized_svd
 
-        rho_small = R @ R.conj().T
-        rho_small = 0.5 * (rho_small + rho_small.conj().T)
-        eigvals, eigvecs = jnp.linalg.eigh(rho_small)
-
-        k = min(chi, len(eigvals))
-        V = eigvecs[:, -k:][:, ::-1]
-        P_dense = Q @ V
-        P_dense = jax.lax.stop_gradient(P_dense)
+            U_R, S_R, _Vh_R = regularized_svd(R)
+            k = min(chi, len(S_R))
+            P_dense = Q @ U_R[:, :k]
+        else:
+            rho_small = R @ R.conj().T
+            rho_small = 0.5 * (rho_small + rho_small.conj().T)
+            eigvals, eigvecs = jnp.linalg.eigh(rho_small)
+            k = min(chi, len(eigvals))
+            V = eigvecs[:, -k:][:, ::-1]
+            P_dense = Q @ V
+            P_dense = jax.lax.stop_gradient(P_dense)
 
         fused_idx = C1g.indices[C1g.labels().index("fused")]
         if base_charges is not None:
@@ -621,19 +631,30 @@ def _compute_projector_tensor(
                 base_charges=base_charges,
             )
 
-    # Dense fallback — used for DenseTensor inputs or JAX tracer context.
+    # Dense fallback — differentiable via regularized SVD when AD-traced;
+    # standard eigh otherwise (preserves sign convention).
     fused_pos = C1g.labels().index("fused")
     fused_idx = C1g.indices[fused_pos]
 
     C1g_dense = C1g.todense()
     C4g_dense = C4g.todense()
+    _has_tracers = isinstance(C1g_dense, jax.core.Tracer) or isinstance(
+        C4g_dense, jax.core.Tracer
+    )
 
     rho = C1g_dense @ C1g_dense.conj().T + C4g_dense @ C4g_dense.conj().T
     rho = 0.5 * (rho + rho.conj().T)
-    eigvals, eigvecs = jnp.linalg.eigh(rho)
-    k = min(chi, len(eigvals))
-    P_dense = eigvecs[:, -k:][:, ::-1]
-    P_dense = jax.lax.stop_gradient(P_dense)
+    if _has_tracers:
+        from tenax.algorithms.ad_utils import regularized_svd
+
+        U_rho, S_rho, _Vh_rho = regularized_svd(rho)
+        k = min(chi, len(S_rho))
+        P_dense = U_rho[:, :k]
+    else:
+        eigvals, eigvecs = jnp.linalg.eigh(rho)
+        k = min(chi, len(eigvals))
+        P_dense = eigvecs[:, -k:][:, ::-1]
+        P_dense = jax.lax.stop_gradient(P_dense)
 
     if base_charges is not None:
         from tenax.algorithms._ctm_utils import _derive_charges
