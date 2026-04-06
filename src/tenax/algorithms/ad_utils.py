@@ -191,12 +191,16 @@ def regularized_svd(M: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
     Same as ``jnp.linalg.svd(M, full_matrices=False)`` but the VJP uses
     the Lorentzian-regularized F-matrix to prevent NaN gradients from
     degenerate singular values.
+
+    Returns a plain ``(U, s, Vh)`` tuple (not ``SVDResult``).
     """
-    return jnp.linalg.svd(M, full_matrices=False)
+    result = jnp.linalg.svd(M, full_matrices=False)
+    return result.U, result.S, result.Vh
 
 
 def _regularized_svd_fwd(M):
-    U, s, Vh = jnp.linalg.svd(M, full_matrices=False)
+    result = jnp.linalg.svd(M, full_matrices=False)
+    U, s, Vh = result.U, result.S, result.Vh
     return (U, s, Vh), (U, s, Vh)
 
 
@@ -735,24 +739,22 @@ def ctm_tensor_converge_explicit(
     neighbors,
     config_tuple: tuple,
     num_steps: int | None = None,
+    warmup_steps: int = 0,
 ) -> tuple[jax.Array, ...]:
     """CTM convergence with explicit (unrolled) autodiff.
 
-    Unlike ``ctm_tensor_converge`` which uses implicit differentiation
-    at the fixed point, this function lets JAX backpropagate through
-    each CTM iteration.  This gives exact gradients for the computation
-    performed, at the cost of higher memory (stores all intermediates).
-
-    Note: projectors still use ``stop_gradient`` — removing this requires
-    a regularized eigh backward which is a separate concern.
+    Runs *warmup_steps* iterations without gradient tracking, then
+    *num_steps* fully differentiable iterations (including through
+    projectors via regularized SVD).  Each backprop step is wrapped
+    in ``jax.checkpoint`` to trade memory for recomputation.
 
     Args:
         site_tensors:    Dict ``{Coord: Tensor}`` of iPEPS site tensors.
         env_init_leaves: Flat tuple of env leaf arrays for warm-start, or None.
         neighbors:       Neighbor map.
         config_tuple:    CTMConfig fields packed as tuple.
-        num_steps:       Fixed number of CTM iterations.  If None, uses
-                         ``config.max_iter``.
+        num_steps:       Backprop CTM iterations (default: config.max_iter).
+        warmup_steps:    Warmup iterations with stop_gradient (default: 0).
 
     Returns:
         Flat tuple of environment pytree leaf arrays.
@@ -769,18 +771,8 @@ def ctm_tensor_converge_explicit(
         }
     )
 
-    n = num_steps if num_steps is not None else config.max_iter
-
-    # Detect whether we're inside a JAX trace (e.g. value_and_grad).
-    # If so, we cannot use Python-level convergence checks on traced values,
-    # so we just run all n iterations.  When called outside a trace (e.g.
-    # forward-only evaluation), we check convergence and exit early.
-    _site_leaves = jax.tree.leaves(next(iter(site_tensors.values())))
-    _is_traced = any(isinstance(leaf, jax.core.Tracer) for leaf in _site_leaves)
-    check_convergence = num_steps is None and not _is_traced
-
-    prev_svs: dict = {}
-    for i in range(n):
+    # Phase 1: Warmup — no gradient tracking
+    for _ in range(warmup_steps):
         envs = _ctm_tensor_sweep_multisite(
             envs,
             double_layers,
@@ -790,21 +782,32 @@ def ctm_tensor_converge_explicit(
             config.projector_method,
         )
         envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
+    if warmup_steps > 0:
+        envs = jax.tree.map(jax.lax.stop_gradient, envs)
 
-        if check_convergence and i + 1 >= config.min_iter:
-            converged = True
-            for c in sorted(envs):
-                sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
-                if c in prev_svs:
-                    if float(_ctm_sv_diff_local(sv, prev_svs[c])) >= config.conv_tol:
-                        converged = False
-                else:
-                    converged = False
-                prev_svs[c] = sv
-            if converged:
-                break
+    # Phase 2: Backprop — fully differentiable with checkpointing
+    n = num_steps if num_steps is not None else config.max_iter
+    env_treedef = jax.tree.structure(envs)
 
-    return _flatten_envs(envs)
+    @jax.checkpoint
+    def _one_sweep(env_leaves_flat):
+        envs_inner = jax.tree.unflatten(env_treedef, env_leaves_flat)
+        envs_inner = _ctm_tensor_sweep_multisite(
+            envs_inner,
+            double_layers,
+            neighbors,
+            config.chi,
+            config.renormalize,
+            config.projector_method,
+        )
+        envs_inner = {c: _gauge_fix_ctm_tensor(e) for c, e in envs_inner.items()}
+        return tuple(jax.tree.leaves(envs_inner))
+
+    env_leaves_flat = tuple(jax.tree.leaves(envs))
+    for _ in range(n):
+        env_leaves_flat = _one_sweep(env_leaves_flat)
+
+    return _flatten_envs(jax.tree.unflatten(env_treedef, env_leaves_flat))
 
 
 # ---------------------------------------------------------------------------

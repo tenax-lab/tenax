@@ -119,6 +119,32 @@ def _wrap_as_dense_tensor(arr: jax.Array) -> DenseTensor:
     return DenseTensor(arr, indices)
 
 
+def neel_init(D: int, d: int = 2, seed: int = 0) -> tuple[jax.Array, jax.Array]:
+    """Create Néel product state tensors for 2-site iPEPS.
+
+    Sublattice A is initialized to spin-up and sublattice B to spin-down,
+    with small random noise to break exact symmetry for simple update.
+
+    Args:
+        D: Bond dimension.
+        d: Physical dimension (default 2 for spin-1/2).
+        seed: Random seed for noise.
+
+    Returns:
+        ``(A, B)`` raw JAX arrays of shape ``(D, D, D, D, d)``.
+    """
+    key_A, key_B = jax.random.split(jax.random.PRNGKey(seed))
+    noise = 0.01
+
+    A = noise * jax.random.normal(key_A, (D, D, D, D, d))
+    A = A.at[0, 0, 0, 0, 0].set(1.0)  # spin-up
+
+    B = noise * jax.random.normal(key_B, (D, D, D, D, d))
+    B = B.at[0, 0, 0, 0, 1].set(1.0)  # spin-down
+
+    return A, B
+
+
 def ipeps(
     hamiltonian_gate: Tensor | jax.Array,
     initial_peps: tuple[Tensor, Tensor] | tuple[jax.Array, jax.Array] | None,
@@ -163,15 +189,15 @@ def ipeps(
     d = gate_dense.shape[0]
     D = config.max_bond_dim
 
-    # Initialize A and B tensors
+    # Initialize A and B tensors — default is Néel product state
     if initial_peps is not None:
         A_raw, B_raw = initial_peps
         A = A_raw if isinstance(A_raw, Tensor) else _wrap_as_dense_tensor(A_raw)
         B = B_raw if isinstance(B_raw, Tensor) else _wrap_as_dense_tensor(B_raw)
     else:
-        key_A, key_B = jax.random.split(jax.random.PRNGKey(0))
-        A = _wrap_as_dense_tensor(jax.random.normal(key_A, (D, D, D, D, d)))
-        B = _wrap_as_dense_tensor(jax.random.normal(key_B, (D, D, D, D, d)))
+        A_data, B_data = neel_init(D, d)
+        A = _wrap_as_dense_tensor(A_data)
+        B = _wrap_as_dense_tensor(B_data)
 
     # Normalize
     norm_A = float(A.norm())
