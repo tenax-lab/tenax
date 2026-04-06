@@ -78,10 +78,10 @@ class iPEPSConfig:
     gs_max_grad_norm: float = 1.0  # gradient clipping (max global norm)
     gs_line_search: bool | None = None  # None = auto (True for lbfgs/cg)
     gs_line_search_max_steps: int = 8
-    gs_explicit_ad: bool = False  # explicit diff through unrolled CTM
+    gs_explicit_ad: bool = True  # explicit diff through unrolled CTM
     gs_explicit_ad_steps: int = 20  # CTM steps for explicit AD backprop phase
     gs_explicit_ad_warmup: int = 3  # warmup CTM steps (no gradient tracking)
-    su_init: bool = False
+    su_init: bool = True  # initialize via simple update before AD
     # Metric preconditioning (natural gradient, Rader et al. arXiv:2511.09546)
     gs_metric_precond: bool = True  # metric preconditioning for CG/L-BFGS
     metric_gmres_maxiter: int = 30  # Krylov dimension for metric inversion

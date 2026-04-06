@@ -567,9 +567,12 @@ def _optimize_gs_ad_2site(
             _, (A_su, B_su), _ = ipeps(gate, None, su_config)
             AB_init = (A_su, B_su)
         else:
-            key_A, key_B = jax.random.split(jax.random.PRNGKey(0))
-            A = _wrap_as_dense_tensor(jax.random.normal(key_A, (D, D, D, D, d_phys)))
-            B = _wrap_as_dense_tensor(jax.random.normal(key_B, (D, D, D, D, d_phys)))
+            # Néel product state — much better than random for AFM models
+            from tenax.algorithms.ipeps import neel_init
+
+            A_data, B_data = neel_init(D, d_phys)
+            A = _wrap_as_dense_tensor(A_data)
+            B = _wrap_as_dense_tensor(B_data)
             AB_init = (A, B)
 
     return _optimize_gs_ad_tensor_2site(hamiltonian_gate, AB_init, config)
