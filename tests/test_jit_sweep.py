@@ -1143,7 +1143,7 @@ class TestBlockSparseJITSweep:
 
         L = 6
         chi = 8
-        num_sweeps = 4
+        num_sweeps = 10
 
         mpo_net = _build_symmetric_heisenberg_mpo(L)
         mps = FiniteMPS.random(
