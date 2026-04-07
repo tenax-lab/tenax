@@ -96,3 +96,14 @@ ignore = ["E501"]
 python_version = "3.11"
 ignore_missing_imports = true
 strict = false
+
+[tool.cibuildwheel]
+build = ["cp311-*", "cp312-*"]
+skip = ["pp*", "*-win*", "*-musllinux*", "*i686*", "*-manylinux_aarch64*"]
+test-command = "python -c \"from tenax.contraction._cython_blas import execute_block_plan; print('OK')\""
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]
+
+[tool.cibuildwheel.macos]
+archs = ["arm64"]
