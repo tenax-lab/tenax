@@ -50,13 +50,17 @@ jobs:
           fail_ci_if_error: false
 
   test-full:
-    name: Full tests (Python ${{ matrix.python-version }})
+    name: Full tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
     if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'run-full-tests')
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12"]
+        include:
+          - os: macos-latest
+            python-version: "3.12"
 
     steps:
       - uses: actions/checkout@v4
@@ -140,34 +144,6 @@ jobs:
           JAX_PLATFORMS: cpu
         run: |
           uv run pytest tests/ -m "core" \
-            --cov=tenax \
-            --cov-report=term-missing \
-            -v
-
-  test-full-macos:
-    name: Full tests (macOS, Python 3.12)
-    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'run-full-tests')
-    runs-on: macos-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          version: "latest"
-
-      - name: Set up Python 3.12
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --extra dev
-
-      - name: Run all tests
-        env:
-          JAX_PLATFORMS: cpu
-        run: |
-          uv run pytest tests/ \
             --cov=tenax \
             --cov-report=term-missing \
             -v
