@@ -83,7 +83,10 @@ def _normalize_params(params):
     """Normalize iPEPS site tensor(s)."""
     if isinstance(params, tuple):
         return tuple(p * (1.0 / (p.norm() + 1e-10)) for p in params)
-    return params * (1.0 / (params.norm() + 1e-10))
+    if hasattr(params, "norm"):
+        return params * (1.0 / (params.norm() + 1e-10))
+    # Plain JAX array (e.g. C4v coefficients) — use jnp.linalg.norm
+    return params / (jnp.linalg.norm(params) + 1e-10)
 
 
 def _backtracking_line_search(
@@ -353,25 +356,36 @@ def _optimize_gs_ad_tensor(
 
     use_c4v = config.gs_c4v
     if use_c4v:
-        from tenax.algorithms.ipeps import symmetrize_c4v
-    else:
-        symmetrize_c4v = None  # type: ignore[assignment]
+        from tenax.algorithms.ipeps import (
+            build_c4v_basis,
+            c4v_coeffs_from_tensor,
+            c4v_tensor_from_coeffs,
+        )
 
-    # If C4v, symmetrize the initial tensor
-    if use_c4v:
-        A_sym_data = symmetrize_c4v(A.todense())
+        D_bond = A.todense().shape[0]
+        d_loc = A.todense().shape[-1]
+        tensor_shape = (D_bond, D_bond, D_bond, D_bond, d_loc)
+        c4v_basis = jnp.array(build_c4v_basis(D_bond, d_loc))
+        # Project initial tensor into C4v subspace
+        c4v_coeffs = c4v_coeffs_from_tensor(A.todense(), c4v_basis)
+        A_sym_data = c4v_tensor_from_coeffs(c4v_coeffs, c4v_basis, tensor_shape)
         A = DenseTensor(A_sym_data, A.indices)
+    else:
+        c4v_basis = None
+        c4v_coeffs = None
+        tensor_shape = None
 
     _env_template = initialize_ctm_tensor_env(A, config.ctm.chi)
     env_treedef = jax.tree.structure(_env_template)
     prev_env_leaves = tuple(jax.tree.leaves(_env_template))
 
-    def loss_fn(A_param, env_init_leaves):
-        A_data = A_param.todense()
+    def loss_fn(params, env_init_leaves):
         if use_c4v:
-            A_data = symmetrize_c4v(A_data)
+            A_data = c4v_tensor_from_coeffs(params, c4v_basis, tensor_shape)
+        else:
+            A_data = params.todense()
         A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-        A_norm = DenseTensor(A_norm_data, A_param.indices)
+        A_norm = DenseTensor(A_norm_data, A.indices)
         site_tensors = {(0, 0): A_norm}
         env_leaves = ctm_tensor_converge(
             site_tensors, env_init_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
@@ -383,13 +397,14 @@ def _optimize_gs_ad_tensor(
     is_metric_lbfgs = (
         config.gs_metric_precond and config.gs_optimizer.lower() == "lbfgs"
     )
+    params = c4v_coeffs if use_c4v else A
     optimizer = None if is_metric_lbfgs else _build_optimizer(config)
-    opt_state = optimizer.init(A) if optimizer is not None else None
+    opt_state = optimizer.init(params) if optimizer is not None else None
     use_ls = _use_line_search(config)
     is_cg = config.gs_optimizer.lower() == "cg"
 
     best_energy = float("inf")
-    best_A = A
+    best_params = params
     prev_energy = float("inf")
     prev_grad = None
     cg_direction = None
@@ -406,13 +421,14 @@ def _optimize_gs_ad_tensor(
         _ctm_tensor_multisite_fixed_point,
     )
 
-    def loss_fn_fwd(A_param):
+    def loss_fn_fwd(p):
         """Forward-only loss for line search — warm-starts CTM from prev_env_leaves."""
-        A_data = A_param.todense()
         if use_c4v:
-            A_data = symmetrize_c4v(A_data)
+            A_data = c4v_tensor_from_coeffs(p, c4v_basis, tensor_shape)
+        else:
+            A_data = p.todense()
         A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-        A_norm = DenseTensor(A_norm_data, A_param.indices)
+        A_norm = DenseTensor(A_norm_data, A.indices)
         site_tensors = {(0, 0): A_norm}
         env_leaves = ctm_tensor_converge(
             site_tensors, prev_env_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
@@ -423,12 +439,12 @@ def _optimize_gs_ad_tensor(
     for step in range(config.gs_num_steps):
         (energy_val, env_leaves), grads = jax.value_and_grad(
             loss_fn, argnums=0, has_aux=True
-        )(A, prev_env_leaves)
+        )(params, prev_env_leaves)
         energy_float = float(energy_val)
 
         if energy_float < best_energy:
             best_energy = energy_float
-            best_A = A
+            best_params = params
 
         delta_energy = abs(energy_float - prev_energy)
         logged = False
@@ -465,7 +481,7 @@ def _optimize_gs_ad_tensor(
 
         # Compute search direction
         if is_cg:
-            if config.gs_metric_precond:
+            if config.gs_metric_precond and not use_c4v:
                 from tenax.algorithms._metric_precond import precondition_gradient
 
                 env_for_metric = jax.tree.unflatten(env_treedef, env_leaves)
@@ -494,17 +510,19 @@ def _optimize_gs_ad_tensor(
             prev_grad = grads
             direction = cg_direction
         elif is_metric_lbfgs:
-            from tenax.algorithms._metric_precond import (
-                lbfgs_two_loop,
-                precondition_gradient,
-            )
+            from tenax.algorithms._metric_precond import lbfgs_two_loop
 
-            g_flat = grads.todense().reshape(-1)
-            A_flat = A.todense().reshape(-1)
+            if use_c4v:
+                # Plain L-BFGS in coefficient space (already reduced)
+                g_flat = grads
+                p_flat = params
+            else:
+                g_flat = grads.todense().reshape(-1)
+                p_flat = A.todense().reshape(-1)
 
             # Update L-BFGS history
             if prev_A_flat is not None:
-                s = A_flat - prev_A_flat
+                s = p_flat - prev_A_flat
                 y = g_flat - prev_grad_flat
                 sy = float(jnp.dot(s, y))
                 if sy > 1e-10:
@@ -512,37 +530,45 @@ def _optimize_gs_ad_tensor(
                     lbfgs_history.append((s, y, rho))
                     if len(lbfgs_history) > 10:
                         lbfgs_history.pop(0)
-            prev_A_flat = A_flat
+            prev_A_flat = p_flat
             prev_grad_flat = g_flat
 
-            env_for_metric = jax.tree.unflatten(env_treedef, env_leaves)
-            delta_metric = delta_energy if step > 0 else float(jnp.dot(g_flat, g_flat))
-            D_bond = A.todense().shape[0]
-            d_loc = A.todense().shape[-1]
+            if use_c4v:
+                # Identity H0 in coefficient space (no metric preconditioning)
+                direction = -lbfgs_two_loop(g_flat, lbfgs_history, lambda v: v)
+            else:
+                from tenax.algorithms._metric_precond import precondition_gradient
 
-            def h0_matvec(v):
-                v_tensor = type(A)(
-                    v.reshape(D_bond, D_bond, D_bond, D_bond, d_loc), A.indices
+                env_for_metric = jax.tree.unflatten(env_treedef, env_leaves)
+                delta_metric = (
+                    delta_energy if step > 0 else float(jnp.dot(g_flat, g_flat))
                 )
-                result = precondition_gradient(
-                    A, env_for_metric, v_tensor, delta_metric, config
-                )
-                return result.reshape(-1)
+                D_bond = A.todense().shape[0]
+                d_loc = A.todense().shape[-1]
 
-            direction_flat = lbfgs_two_loop(g_flat, lbfgs_history, h0_matvec)
-            direction_dense = -direction_flat.reshape(
-                D_bond, D_bond, D_bond, D_bond, d_loc
-            )
-            direction = type(A)(direction_dense, A.indices)
+                def h0_matvec(v):
+                    v_tensor = type(A)(
+                        v.reshape(D_bond, D_bond, D_bond, D_bond, d_loc), A.indices
+                    )
+                    result = precondition_gradient(
+                        A, env_for_metric, v_tensor, delta_metric, config
+                    )
+                    return result.reshape(-1)
+
+                direction_flat = lbfgs_two_loop(g_flat, lbfgs_history, h0_matvec)
+                direction_dense = -direction_flat.reshape(
+                    D_bond, D_bond, D_bond, D_bond, d_loc
+                )
+                direction = type(A)(direction_dense, A.indices)
         elif optimizer is not None:
-            updates, opt_state = optimizer.update(grads, opt_state, A)
+            updates, opt_state = optimizer.update(grads, opt_state, params)
             direction = updates
         else:
             direction = jax.tree.map(lambda g: -g, grads)
 
         if use_ls:
-            A, _, _ = _backtracking_line_search(
-                A,
+            params, _, _ = _backtracking_line_search(
+                params,
                 direction,
                 grads,
                 energy_float,
@@ -550,8 +576,9 @@ def _optimize_gs_ad_tensor(
                 max_steps=config.gs_line_search_max_steps,
             )
         else:
-            A = optax.apply_updates(A, direction)
-            A = A * (1.0 / (A.norm() + 1e-10))
+            params = optax.apply_updates(params, direction)
+            if not use_c4v:
+                params = params * (1.0 / (params.norm() + 1e-10))
 
     # Re-evaluate both final A and best_A with fully converged fresh CTM.
     # In-loop energies use warm-started CTM that can produce unphysical values
@@ -564,13 +591,14 @@ def _optimize_gs_ad_tensor(
         min_iter=max(_base_cfg.min_iter, 30),
     )
 
-    def _eval_fresh(A_tensor):
+    def _eval_fresh(p):
         """Evaluate energy with fully converged fresh CTM."""
-        A_data = A_tensor.todense()
         if use_c4v:
-            A_data = symmetrize_c4v(A_data)
+            A_data = c4v_tensor_from_coeffs(p, c4v_basis, tensor_shape)
+        else:
+            A_data = p.todense()
         A_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-        A_t = DenseTensor(A_data, A_tensor.indices)
+        A_t = DenseTensor(A_data, A.indices)
         envs = _ctm_tensor_multisite_fixed_point(
             {(0, 0): A_t}, SINGLE_SITE_NEIGHBORS, eval_config
         )
@@ -578,17 +606,17 @@ def _optimize_gs_ad_tensor(
         E_ = float(compute_energy_ctm_tensor(A_t, env_, gate, d_phys))
         return A_t, env_, E_
 
-    A_final, env_final, E_final = _eval_fresh(A)
+    A_final, env_final, E_final = _eval_fresh(params)
 
-    if best_A is not A:
-        _, env_best, E_best_fresh = _eval_fresh(best_A)
+    if best_params is not params:
+        _, env_best, E_best_fresh = _eval_fresh(best_params)
     else:
         E_best_fresh = E_final
 
     if E_final <= E_best_fresh:
         env, E_gs = env_final, E_final
     else:
-        A_final, _, _ = _eval_fresh(best_A)
+        A_final, _, _ = _eval_fresh(best_params)
         env, E_gs = env_best, E_best_fresh
     if config.gs_verbose:
         print(f"[iPEPS-AD:1site-tensor] final E={E_gs:.10f}", flush=True)
