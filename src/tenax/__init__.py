@@ -86,6 +86,9 @@ from tenax.algorithms.idmrg import (
     iDMRGResult,
 )
 from tenax.algorithms.ipeps import (
+    build_c4v_basis,
+    c4v_coeffs_from_tensor,
+    c4v_tensor_from_coeffs,
     heisenberg_gate,
     ipeps,
     sublattice_rotate_gate,
@@ -258,6 +261,9 @@ __all__ = [
     "ipeps",
     "sublattice_rotate_gate",
     "symmetrize_c4v",
+    "build_c4v_basis",
+    "c4v_coeffs_from_tensor",
+    "c4v_tensor_from_coeffs",
     "xxz_gate",
     "ctm",
     "ctm_2site",
