@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms.ipeps_config import iPEPSConfig
+from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
@@ -294,12 +294,27 @@ def _optimize_gs_ad_tensor(
 
     config_tuple = _config_to_tuple(config.ctm)
 
+    use_c4v = config.gs_c4v
+    if use_c4v:
+        from tenax.algorithms.ipeps import symmetrize_c4v
+    else:
+        symmetrize_c4v = None  # type: ignore[assignment]
+
+    # If C4v, symmetrize the initial tensor
+    if use_c4v:
+        A_sym_data = symmetrize_c4v(A.todense())
+        A = DenseTensor(A_sym_data, A.indices)
+
     _env_template = initialize_ctm_tensor_env(A, config.ctm.chi)
     env_treedef = jax.tree.structure(_env_template)
     prev_env_leaves = tuple(jax.tree.leaves(_env_template))
 
     def loss_fn(A_param, env_init_leaves):
-        A_norm = A_param * (1.0 / (A_param.norm() + 1e-10))
+        A_data = A_param.todense()
+        if use_c4v:
+            A_data = symmetrize_c4v(A_data)
+        A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
+        A_norm = DenseTensor(A_norm_data, A_param.indices)
         site_tensors = {(0, 0): A_norm}
         env_leaves = ctm_tensor_converge(
             site_tensors, env_init_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
@@ -308,7 +323,10 @@ def _optimize_gs_ad_tensor(
         energy = compute_energy_ctm_tensor(A_norm, env, gate, d_phys)
         return energy, env_leaves
 
-    optimizer = _build_optimizer(config)
+    is_metric_lbfgs = (
+        config.gs_metric_precond and config.gs_optimizer.lower() == "lbfgs"
+    )
+    optimizer = None if is_metric_lbfgs else _build_optimizer(config)
     opt_state = optimizer.init(A) if optimizer is not None else None
     use_ls = _use_line_search(config)
     is_cg = config.gs_optimizer.lower() == "cg"
@@ -318,7 +336,12 @@ def _optimize_gs_ad_tensor(
     prev_energy = float("inf")
     prev_grad = None
     cg_direction = None
+    prev_precond_grad = None  # for preconditioned CG beta
     log_interval = config.gs_log_interval
+    # L-BFGS history for metric-preconditioned path
+    lbfgs_history: list = []
+    prev_A_flat: jnp.ndarray | None = None
+    prev_grad_flat: jnp.ndarray | None = None
 
     # Forward-only loss for line search — fresh CTM (no warm-start)
     from tenax.algorithms.ad_utils import (
@@ -328,7 +351,11 @@ def _optimize_gs_ad_tensor(
     )
 
     def loss_fn_fwd(A_param):
-        A_norm = A_param * (1.0 / (A_param.norm() + 1e-10))
+        A_data = A_param.todense()
+        if use_c4v:
+            A_data = symmetrize_c4v(A_data)
+        A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
+        A_norm = DenseTensor(A_norm_data, A_param.indices)
         st = {(0, 0): A_norm}
         config_obj = _config_from_tuple(config_tuple)
         envs = _ctm_tensor_multisite_fixed_point(st, SINGLE_SITE_NEIGHBORS, config_obj)
@@ -381,14 +408,75 @@ def _optimize_gs_ad_tensor(
 
         # Compute search direction
         if is_cg:
-            neg_grad = jax.tree.map(lambda g: -g, grads)
-            if prev_grad is not None and cg_direction is not None:
-                beta = _cg_beta_pr(grads, prev_grad)
-                cg_direction = _tree_add(neg_grad, _tree_scale(cg_direction, beta))
+            if config.gs_metric_precond:
+                from tenax.algorithms._metric_precond import precondition_gradient
+
+                env_for_metric = jax.tree.unflatten(env_treedef, env_leaves)
+                delta_metric = delta_energy if step > 0 else _tree_dot(grads, grads)
+                z_dense = precondition_gradient(
+                    A, env_for_metric, grads, delta_metric, config
+                )
+                z = type(grads)(z_dense, grads.indices)
+                neg_z = jax.tree.map(lambda g: -g, z)
+                if prev_precond_grad is not None and cg_direction is not None:
+                    z_diff = jax.tree.map(lambda a, b: a - b, z, prev_precond_grad)
+                    num = _tree_dot(grads, z_diff)
+                    den = _tree_dot(prev_grad, prev_precond_grad)
+                    beta = max(0.0, num / den) if den > 1e-30 else 0.0
+                    cg_direction = _tree_add(neg_z, _tree_scale(cg_direction, beta))
+                else:
+                    cg_direction = neg_z
+                prev_precond_grad = z
             else:
-                cg_direction = neg_grad
+                neg_grad = jax.tree.map(lambda g: -g, grads)
+                if prev_grad is not None and cg_direction is not None:
+                    beta = _cg_beta_pr(grads, prev_grad)
+                    cg_direction = _tree_add(neg_grad, _tree_scale(cg_direction, beta))
+                else:
+                    cg_direction = neg_grad
             prev_grad = grads
             direction = cg_direction
+        elif is_metric_lbfgs:
+            from tenax.algorithms._metric_precond import (
+                lbfgs_two_loop,
+                precondition_gradient,
+            )
+
+            g_flat = grads.todense().reshape(-1)
+            A_flat = A.todense().reshape(-1)
+
+            # Update L-BFGS history
+            if prev_A_flat is not None:
+                s = A_flat - prev_A_flat
+                y = g_flat - prev_grad_flat
+                sy = float(jnp.dot(s, y))
+                if sy > 1e-10:
+                    rho = 1.0 / sy
+                    lbfgs_history.append((s, y, rho))
+                    if len(lbfgs_history) > 10:
+                        lbfgs_history.pop(0)
+            prev_A_flat = A_flat
+            prev_grad_flat = g_flat
+
+            env_for_metric = jax.tree.unflatten(env_treedef, env_leaves)
+            delta_metric = delta_energy if step > 0 else float(jnp.dot(g_flat, g_flat))
+            D_bond = A.todense().shape[0]
+            d_loc = A.todense().shape[-1]
+
+            def h0_matvec(v):
+                v_tensor = type(A)(
+                    v.reshape(D_bond, D_bond, D_bond, D_bond, d_loc), A.indices
+                )
+                result = precondition_gradient(
+                    A, env_for_metric, v_tensor, delta_metric, config
+                )
+                return result.reshape(-1)
+
+            direction_flat = lbfgs_two_loop(g_flat, lbfgs_history, h0_matvec)
+            direction_dense = -direction_flat.reshape(
+                D_bond, D_bond, D_bond, D_bond, d_loc
+            )
+            direction = type(A)(direction_dense, A.indices)
         elif optimizer is not None:
             updates, opt_state = optimizer.update(grads, opt_state, A)
             direction = updates
@@ -408,27 +496,43 @@ def _optimize_gs_ad_tensor(
             A = optax.apply_updates(A, direction)
             A = A * (1.0 / (A.norm() + 1e-10))
 
-    # Check if the final post-update A is better than best_A (the last
-    # iteration's line-search result is not evaluated inside the loop).
-    A_norm = A * (1.0 / (A.norm() + 1e-10))
-    env_leaves_final = ctm_tensor_converge(
-        {(0, 0): A_norm}, prev_env_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
+    # Re-evaluate both final A and best_A with fully converged fresh CTM.
+    # In-loop energies use warm-started CTM that can produce unphysical values
+    # (non-variational at finite chi), so we compare fresh evaluations only.
+    _base_cfg = _config_from_tuple(config_tuple)
+    eval_config = CTMConfig(
+        chi=_base_cfg.chi,
+        max_iter=max(_base_cfg.max_iter, 200),
+        conv_tol=min(_base_cfg.conv_tol, 1e-10),
+        min_iter=max(_base_cfg.min_iter, 30),
     )
-    env_final = jax.tree.unflatten(env_treedef, env_leaves_final)
-    E_final = float(compute_energy_ctm_tensor(A_norm, env_final, gate, d_phys))
-    if E_final < best_energy:
-        best_A = A
-        best_energy = E_final
 
-    A_final = best_A * (1.0 / (best_A.norm() + 1e-10))
-    if best_A is A:
+    def _eval_fresh(A_tensor):
+        """Evaluate energy with fully converged fresh CTM."""
+        A_data = A_tensor.todense()
+        if use_c4v:
+            A_data = symmetrize_c4v(A_data)
+        A_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
+        A_t = DenseTensor(A_data, A_tensor.indices)
+        envs = _ctm_tensor_multisite_fixed_point(
+            {(0, 0): A_t}, SINGLE_SITE_NEIGHBORS, eval_config
+        )
+        env_ = envs[(0, 0)]
+        E_ = float(compute_energy_ctm_tensor(A_t, env_, gate, d_phys))
+        return A_t, env_, E_
+
+    A_final, env_final, E_final = _eval_fresh(A)
+
+    if best_A is not A:
+        _, env_best, E_best_fresh = _eval_fresh(best_A)
+    else:
+        E_best_fresh = E_final
+
+    if E_final <= E_best_fresh:
         env, E_gs = env_final, E_final
     else:
-        env_leaves = ctm_tensor_converge(
-            {(0, 0): A_final}, prev_env_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
-        )
-        env = jax.tree.unflatten(env_treedef, env_leaves)
-        E_gs = float(compute_energy_ctm_tensor(A_final, env, gate, d_phys))
+        A_final, _, _ = _eval_fresh(best_A)
+        env, E_gs = env_best, E_best_fresh
     if config.gs_verbose:
         print(f"[iPEPS-AD:1site-tensor] final E={E_gs:.10f}", flush=True)
 
@@ -491,9 +595,12 @@ def _optimize_gs_ad_2site(
             _, (A_su, B_su), _ = ipeps(gate, None, su_config)
             AB_init = (A_su, B_su)
         else:
+            # Random initialization for 2-site AD
             key_A, key_B = jax.random.split(jax.random.PRNGKey(0))
-            A = _wrap_as_dense_tensor(jax.random.normal(key_A, (D, D, D, D, d_phys)))
-            B = _wrap_as_dense_tensor(jax.random.normal(key_B, (D, D, D, D, d_phys)))
+            A_data = jax.random.normal(key_A, (D, D, D, D, d_phys))
+            B_data = jax.random.normal(key_B, (D, D, D, D, d_phys))
+            A = _wrap_as_dense_tensor(A_data)
+            B = _wrap_as_dense_tensor(B_data)
             AB_init = (A, B)
 
     return _optimize_gs_ad_tensor_2site(hamiltonian_gate, AB_init, config)
@@ -580,18 +687,24 @@ def _optimize_gs_ad_tensor_2site(
         return energy, env_leaves
 
     params = (A, B)
-    optimizer = _build_optimizer(config)
+    is_metric_lbfgs = (
+        config.gs_metric_precond and config.gs_optimizer.lower() == "lbfgs"
+    )
+    optimizer = None if is_metric_lbfgs else _build_optimizer(config)
     opt_state = optimizer.init(params) if optimizer is not None else None
     use_ls = _use_line_search(config)
     is_cg = config.gs_optimizer.lower() == "cg"
 
     best_energy = float("inf")
     best_params = params
-    best_env_leaves = None
     prev_energy = float("inf")
     prev_grad = None
     cg_direction = None
+    prev_precond_grad = None
     log_interval = config.gs_log_interval
+    lbfgs_history: list = []
+    prev_params_flat: jnp.ndarray | None = None
+    prev_grad_flat: jnp.ndarray | None = None
 
     # Forward-only loss for line search — uses fresh CTM (no warm-start)
     # to avoid accepting steps that look good only with stale environments
@@ -627,7 +740,6 @@ def _optimize_gs_ad_tensor_2site(
         if energy_float < best_energy:
             best_energy = energy_float
             best_params = params
-            best_env_leaves = env_leaves_sg
 
         delta_energy = abs(energy_float - prev_energy)
         logged = False
@@ -664,14 +776,107 @@ def _optimize_gs_ad_tensor_2site(
 
         # Compute search direction
         if is_cg:
-            neg_grad = jax.tree.map(lambda g: -g, grads)
-            if prev_grad is not None and cg_direction is not None:
-                beta = _cg_beta_pr(grads, prev_grad)
-                cg_direction = _tree_add(neg_grad, _tree_scale(cg_direction, beta))
+            if config.gs_metric_precond:
+                from tenax.algorithms._metric_precond import (
+                    precondition_gradient_multisite,
+                )
+
+                env_A_m = jax.tree.unflatten(env_treedef, env_leaves_sg[:n_env_leaves])
+                env_B_m = jax.tree.unflatten(env_treedef, env_leaves_sg[n_env_leaves:])
+                A_g, B_g = grads
+                envs_m = {(0, 0): env_A_m, (1, 0): env_B_m}
+                sites_m = {(0, 0): params[0], (1, 0): params[1]}
+                grads_m = {(0, 0): A_g, (1, 0): B_g}
+                delta_metric = delta_energy if step > 0 else _tree_dot(grads, grads)
+                z_dict = precondition_gradient_multisite(
+                    sites_m, envs_m, grads_m, delta_metric, config
+                )
+                z = (
+                    type(A_g)(z_dict[(0, 0)], A_g.indices),
+                    type(B_g)(z_dict[(1, 0)], B_g.indices),
+                )
+                neg_z = jax.tree.map(lambda g: -g, z)
+                if prev_precond_grad is not None and cg_direction is not None:
+                    z_diff = jax.tree.map(lambda a, b: a - b, z, prev_precond_grad)
+                    num = _tree_dot(grads, z_diff)
+                    den = _tree_dot(prev_grad, prev_precond_grad)
+                    beta = max(0.0, num / den) if den > 1e-30 else 0.0
+                    cg_direction = _tree_add(neg_z, _tree_scale(cg_direction, beta))
+                else:
+                    cg_direction = neg_z
+                prev_precond_grad = z
             else:
-                cg_direction = neg_grad
+                neg_grad = jax.tree.map(lambda g: -g, grads)
+                if prev_grad is not None and cg_direction is not None:
+                    beta = _cg_beta_pr(grads, prev_grad)
+                    cg_direction = _tree_add(neg_grad, _tree_scale(cg_direction, beta))
+                else:
+                    cg_direction = neg_grad
             prev_grad = grads
             direction = cg_direction
+        elif is_metric_lbfgs:
+            from tenax.algorithms._metric_precond import (
+                lbfgs_two_loop,
+                precondition_gradient_multisite,
+            )
+
+            A_cur, B_cur = params
+            A_g, B_g = grads
+            p_flat = jnp.concatenate(
+                [A_cur.todense().reshape(-1), B_cur.todense().reshape(-1)]
+            )
+            g_flat = jnp.concatenate(
+                [A_g.todense().reshape(-1), B_g.todense().reshape(-1)]
+            )
+
+            if prev_params_flat is not None:
+                s = p_flat - prev_params_flat
+                y = g_flat - prev_grad_flat
+                sy = float(jnp.dot(s, y))
+                if sy > 1e-10:
+                    rho = 1.0 / sy
+                    lbfgs_history.append((s, y, rho))
+                    if len(lbfgs_history) > 10:
+                        lbfgs_history.pop(0)
+            prev_params_flat = p_flat
+            prev_grad_flat = g_flat
+
+            env_A_m = jax.tree.unflatten(env_treedef, env_leaves_sg[:n_env_leaves])
+            env_B_m = jax.tree.unflatten(env_treedef, env_leaves_sg[n_env_leaves:])
+            envs_m = {(0, 0): env_A_m, (1, 0): env_B_m}
+            sites_m = {(0, 0): A_cur, (1, 0): B_cur}
+            delta_metric = delta_energy if step > 0 else float(jnp.dot(g_flat, g_flat))
+            n_A = A_cur.todense().size
+
+            def h0_matvec(v):
+                v_A = v[:n_A]
+                v_B = v[n_A:]
+                D_b = A_cur.todense().shape[0]
+                d_l = A_cur.todense().shape[-1]
+                grads_v = {
+                    (0, 0): type(A_cur)(
+                        v_A.reshape(D_b, D_b, D_b, D_b, d_l), A_cur.indices
+                    ),
+                    (1, 0): type(B_cur)(
+                        v_B.reshape(D_b, D_b, D_b, D_b, d_l), B_cur.indices
+                    ),
+                }
+                z_dict = precondition_gradient_multisite(
+                    sites_m, envs_m, grads_v, delta_metric, config
+                )
+                return jnp.concatenate(
+                    [z_dict[(0, 0)].reshape(-1), z_dict[(1, 0)].reshape(-1)]
+                )
+
+            direction_flat = lbfgs_two_loop(g_flat, lbfgs_history, h0_matvec)
+            D_b = A_cur.todense().shape[0]
+            d_l = A_cur.todense().shape[-1]
+            dir_A = -direction_flat[:n_A].reshape(D_b, D_b, D_b, D_b, d_l)
+            dir_B = -direction_flat[n_A:].reshape(D_b, D_b, D_b, D_b, d_l)
+            direction = (
+                type(A_cur)(dir_A, A_cur.indices),
+                type(B_cur)(dir_B, B_cur.indices),
+            )
         elif optimizer is not None:
             updates, opt_state = optimizer.update(grads, opt_state, params)
             direction = updates
@@ -691,56 +896,47 @@ def _optimize_gs_ad_tensor_2site(
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)
 
-    # Check if the final post-update params are better than best_params
-    # (the last iteration's line-search result is not evaluated inside the loop).
-    A_last, B_last = _normalize_params(params)
-    site_last = {(0, 0): A_last, (1, 0): B_last}
-    last_env_leaves = ctm_tensor_converge(
-        site_last,
-        prev_env_leaves,
-        CHECKERBOARD_NEIGHBORS,
-        config_tuple,
+    # Re-evaluate both final params and best_params with fully converged
+    # fresh CTM.  In-loop energies use warm-started CTM that can produce
+    # unphysical values, so we compare fresh evaluations only.
+    _base_cfg2 = _config_from_tuple(config_tuple)
+    eval_config2 = CTMConfig(
+        chi=_base_cfg2.chi,
+        max_iter=max(_base_cfg2.max_iter, 200),
+        conv_tol=min(_base_cfg2.conv_tol, 1e-10),
+        min_iter=max(_base_cfg2.min_iter, 30),
     )
-    env_A_last = jax.tree.unflatten(env_treedef, last_env_leaves[:n_env_leaves])
-    env_B_last = jax.tree.unflatten(env_treedef, last_env_leaves[n_env_leaves:])
-    E_last = float(
-        compute_energy_ctm_tensor_2site(
-            A_last,
-            B_last,
-            env_A_last,
-            env_B_last,
-            gate,
-            d_phys,
-        )
-    )
-    if E_last < best_energy:
-        best_params = params
-        best_env_leaves = last_env_leaves
 
-    # Re-evaluate best params with fresh CTM to get accurate energy
-    A_final, B_final = _normalize_params(best_params)
-    if best_params is params:
-        env_A, env_B, E_gs = env_A_last, env_B_last, E_last
-    else:
-        site_tensors = {(0, 0): A_final, (1, 0): B_final}
-        fresh_env_leaves = ctm_tensor_converge(
-            site_tensors,
-            best_env_leaves or prev_env_leaves,
-            CHECKERBOARD_NEIGHBORS,
-            config_tuple,
+    def _eval_fresh_2site(p):
+        A_t, B_t = _normalize_params(p)
+        st = {(0, 0): A_t, (1, 0): B_t}
+        envs = _ctm_tensor_multisite_fixed_point(
+            st, CHECKERBOARD_NEIGHBORS, eval_config2
         )
-        env_A = jax.tree.unflatten(env_treedef, fresh_env_leaves[:n_env_leaves])
-        env_B = jax.tree.unflatten(env_treedef, fresh_env_leaves[n_env_leaves:])
-        E_gs = float(
+        E_ = float(
             compute_energy_ctm_tensor_2site(
-                A_final,
-                B_final,
-                env_A,
-                env_B,
-                gate,
-                d_phys,
+                A_t, B_t, envs[(0, 0)], envs[(1, 0)], gate, d_phys
             )
         )
+        return A_t, B_t, envs, E_
+
+    A_last, B_last, envs_last, E_last = _eval_fresh_2site(params)
+    env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
+
+    if best_params is not params:
+        _, _, envs_best, E_best_fresh = _eval_fresh_2site(best_params)
+        env_A_best = envs_best[(0, 0)]
+        env_B_best = envs_best[(1, 0)]
+    else:
+        E_best_fresh = E_last
+
+    # Pick whichever fresh evaluation is lower
+    if E_last <= E_best_fresh:
+        A_final, B_final = A_last, B_last
+        env_A, env_B, E_gs = env_A_last, env_B_last, E_last
+    else:
+        A_final, B_final = _normalize_params(best_params)
+        env_A, env_B, E_gs = env_A_best, env_B_best, E_best_fresh
     if config.gs_verbose:
         print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}", flush=True)
 

@@ -180,27 +180,27 @@ truncated_svd_ad.defvjp(_truncated_svd_ad_fwd, _truncated_svd_ad_bwd)
 
 
 # ---------------------------------------------------------------------------
-# 1a. Full (non-truncated) SVD with stable backward pass
+# 1a-bis. Full SVD with regularized backward (used by QR projectors)
 # ---------------------------------------------------------------------------
 
 
-@partial(jax.custom_vjp, nondiff_argnums=())
+@partial(jax.custom_vjp)
 def regularized_svd(M: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Full SVD with Lorentzian-regularized backward pass.
 
-    Forward: standard ``jnp.linalg.svd(M, full_matrices=False)``.
-    Backward: Lorentzian broadening on the F-matrix prevents NaN
-    gradients from degenerate singular values.
+    Same as ``jnp.linalg.svd(M, full_matrices=False)`` but the VJP uses
+    the Lorentzian-regularized F-matrix to prevent NaN gradients from
+    degenerate singular values.
 
-    Used by CTM projectors during direct AD to make truncation
-    differentiable.
+    Returns a plain ``(U, s, Vh)`` tuple (not ``SVDResult``).
     """
-    U, s, Vh = jnp.linalg.svd(M, full_matrices=False)
-    return U, s, Vh
+    result = jnp.linalg.svd(M, full_matrices=False)
+    return result.U, result.S, result.Vh
 
 
 def _regularized_svd_fwd(M):
-    U, s, Vh = jnp.linalg.svd(M, full_matrices=False)
+    result = jnp.linalg.svd(M, full_matrices=False)
+    U, s, Vh = result.U, result.S, result.Vh
     return (U, s, Vh), (U, s, Vh)
 
 
@@ -866,53 +866,3 @@ def ctm_split_tensor_fixed_point(
         Converged SplitCTMTensorEnv.
     """
     return ctm_split_tensor(A, chi, max_iter, conv_tol, chi_I, renormalize)
-
-
-def ctm_split_tensor_converge_explicit(
-    A,
-    chi: int,
-    max_iter: int = 100,
-    chi_I: int | None = None,
-    renormalize: bool = True,
-    num_steps: int | None = None,
-    warmup_steps: int = 0,
-):
-    """Split-CTM with explicit (unrolled) autodiff.
-
-    Same warmup/backprop/checkpoint structure as
-    ``ctm_tensor_converge_explicit`` but for split-CTM.
-
-    Args:
-        A:              iPEPS site tensor.
-        chi:            Environment bond dimension.
-        max_iter:       Default backprop steps if num_steps is None.
-        chi_I:          Interlayer bond dimension (default: chi).
-        renormalize:    Renormalize environment at each step.
-        num_steps:      Backprop iterations (overrides max_iter).
-        warmup_steps:   Warmup iterations with stop_gradient.
-
-    Returns:
-        Converged SplitCTMTensorEnv.
-    """
-    from tenax.algorithms._split_ctm_tensor_init import (
-        initialize_split_ctm_tensor_env,
-    )
-
-    if chi_I is None:
-        chi_I = chi
-
-    env = initialize_split_ctm_tensor_env(A, chi, chi_I)
-
-    # Phase 1: Warmup
-    for _ in range(warmup_steps):
-        env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
-    if warmup_steps > 0:
-        env = jax.tree.map(jax.lax.stop_gradient, env)
-
-    # Phase 2: Backprop — fully differentiable (no jax.checkpoint since
-    # split CTM uses tenax.linalg.svd which is not abstractly traceable)
-    n = num_steps if num_steps is not None else max_iter
-    for _ in range(n):
-        env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
-
-    return env

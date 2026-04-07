@@ -69,7 +69,7 @@ class iPEPSConfig:
     gate_order: str = "sequential"
     unit_cell: str = "1x1"  # "1x1" or "2site"
     # AD ground-state optimization settings
-    gs_optimizer: str = "adam"  # "adam", "lbfgs", or "cg"
+    gs_optimizer: str = "cg"  # "cg", "adam", or "lbfgs"
     gs_learning_rate: float = 1e-3
     gs_num_steps: int = 200
     gs_conv_tol: float = 1e-8
@@ -78,10 +78,15 @@ class iPEPSConfig:
     gs_max_grad_norm: float = 1.0  # gradient clipping (max global norm)
     gs_line_search: bool | None = None  # None = auto (True for lbfgs/cg)
     gs_line_search_max_steps: int = 8
-    gs_explicit_ad: bool = False  # explicit diff through unrolled CTM
+    gs_explicit_ad: bool = True  # explicit diff through unrolled CTM
     gs_explicit_ad_steps: int = 20  # CTM steps for explicit AD backprop phase
     gs_explicit_ad_warmup: int = 3  # warmup CTM steps (no gradient tracking)
-    su_init: bool = False
+    su_init: bool = True  # initialize via simple update before AD
+    gs_c4v: bool = False  # enforce C4v symmetry on site tensor during AD
+    # Metric preconditioning (natural gradient, Rader et al. arXiv:2511.09546)
+    gs_metric_precond: bool = True  # metric preconditioning for CG/L-BFGS
+    metric_gmres_maxiter: int = 30  # Krylov dimension for metric inversion
+    metric_gmres_tol: float = 1e-2  # GMRES tolerance (loose is fine)
 
     def __post_init__(self):
         valid_unit_cells = {"1x1", "2site"}
