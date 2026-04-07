@@ -62,7 +62,7 @@ Issues = "https://github.com/tenax-lab/tenax/issues"
 dev = ["tenax-tn[dev]"]
 
 [tool.hatch.build.hooks.cython]
-src = "src"
+src = "tenax"
 # Required by scipy cython_blas for zdotc/cdotc/zdotu/cdotu return values.
 # Without this, complex dot products use wrong calling convention on some BLAS.
 define_macros = [["CYTHON_CCOMPLEX", "0"]]
