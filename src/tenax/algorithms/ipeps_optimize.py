@@ -201,6 +201,63 @@ def _log_ad_converged(backend: str, step: int, delta_energy: float, tol: float) 
     )
 
 
+def optimize_gs_ad_chi_schedule(
+    hamiltonian_gate: jax.Array | Tensor,
+    A_init: jax.Array | Tensor | tuple | None,
+    config: iPEPSConfig,
+    chi_schedule: list[tuple[int, int]],
+):
+    """AD optimization with chi-ramping schedule.
+
+    Runs ``optimize_gs_ad`` at each chi level in sequence, using the
+    optimized tensor from the previous level as initialization for the
+    next.  This avoids cold-starting at large chi and gives much better
+    convergence.
+
+    Reference: Zhang, Yang & Corboz, arXiv:2505.00494 (2025).
+
+    Args:
+        hamiltonian_gate: 2-site Hamiltonian of shape ``(d, d, d, d)``.
+        A_init:           Initial site tensor(s) or ``None``.
+        config:           Base iPEPSConfig (chi and gs_num_steps will be
+                          overridden per schedule entry).
+        chi_schedule:     List of ``(chi, num_steps)`` pairs, e.g.
+                          ``[(8, 100), (16, 50), (32, 30)]``.
+
+    Returns:
+        Same as ``optimize_gs_ad`` at the final chi level.
+    """
+    from dataclasses import replace
+
+    result = None
+    current_init = A_init
+
+    for chi, num_steps in chi_schedule:
+        ctm_cfg = replace(config.ctm, chi=chi)
+        step_cfg = replace(config, ctm=ctm_cfg, gs_num_steps=num_steps)
+
+        if config.gs_verbose:
+            print(
+                f"[chi-ramp] chi={chi}, {num_steps} steps",
+                flush=True,
+            )
+
+        result = optimize_gs_ad(hamiltonian_gate, current_init, step_cfg)
+
+        # Extract optimized tensor for next level
+        if config.unit_cell == "2site":
+            (A_opt, B_opt), _, E = result
+            current_init = (A_opt, B_opt)
+        else:
+            A_opt, _, E = result
+            current_init = A_opt
+
+        if config.gs_verbose:
+            print(f"[chi-ramp] chi={chi} done, E={E:.10f}", flush=True)
+
+    return result
+
+
 def optimize_gs_ad(
     hamiltonian_gate: jax.Array | Tensor,
     A_init: jax.Array | Tensor | tuple | None,
