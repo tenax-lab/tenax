@@ -105,7 +105,11 @@ from tenax.algorithms.ipeps_excitations import (
     compute_excitations,
     make_momentum_path,
 )
-from tenax.algorithms.ipeps_optimize import optimize_fpeps_ad, optimize_gs_ad
+from tenax.algorithms.ipeps_optimize import (
+    optimize_fpeps_ad,
+    optimize_gs_ad,
+    optimize_gs_ad_chi_schedule,
+)
 from tenax.algorithms.ipeps_rdm import (
     compute_energy_ctm_2site,
     compute_energy_split_ctm,
@@ -261,6 +265,7 @@ __all__ = [
     "compute_energy_ctm_2site",
     "compute_energy_split_ctm",
     "optimize_gs_ad",
+    "optimize_gs_ad_chi_schedule",
     # Standard CTM (Tensor protocol)
     "CTMTensorEnv",
     "ctm_tensor",
