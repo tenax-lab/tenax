@@ -132,6 +132,73 @@ def symmetrize_c4v(A: jax.Array) -> jax.Array:
     return (a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7) / 8.0
 
 
+def build_c4v_basis(D: int, d: int = 2) -> np.ndarray:
+    """Build orthonormal basis for the C₄ᵥ-invariant subspace.
+
+    Constructs basis by symmetrizing each canonical basis vector of
+    ℝ^{dD⁴} and orthonormalizing via QR decomposition.
+
+    Called once at optimizer initialization (not JIT-traced).
+
+    Args:
+        D: Bond dimension.
+        d: Physical dimension (default 2).
+
+    Returns:
+        NumPy array of shape ``(n, D⁴d)`` where
+        ``n = d(D⁴ + 2D³ + 3D² + 2D) / 8``.
+    """
+    total = D**4 * d
+    shape = (D, D, D, D, d)
+    sym_vecs = []
+    for i in range(total):
+        e = np.zeros(total)
+        e[i] = 1.0
+        e_sym = np.asarray(symmetrize_c4v(jnp.array(e.reshape(shape)))).reshape(-1)
+        if np.linalg.norm(e_sym) > 1e-14:
+            sym_vecs.append(e_sym)
+    if not sym_vecs:
+        return np.zeros((0, total))
+    mat = np.stack(sym_vecs, axis=0)  # (k, total)
+    # SVD to get orthonormal basis for the column space (= C4v subspace)
+    U, S, _ = np.linalg.svd(mat.T, full_matrices=False)
+    rank = np.sum(S > 1e-12)
+    basis = U[:, :rank].T  # (rank, total)
+    return basis
+
+
+def c4v_coeffs_from_tensor(A: jax.Array, basis: jax.Array | np.ndarray) -> jax.Array:
+    """Project an iPEPS tensor onto the C₄ᵥ basis.
+
+    Args:
+        A: Tensor of shape ``(D, D, D, D, d)``.
+        basis: Orthonormal basis of shape ``(n, D⁴d)`` from
+            :func:`build_c4v_basis`.
+
+    Returns:
+        Coefficient vector of shape ``(n,)``.
+    """
+    return jnp.array(basis) @ A.reshape(-1)
+
+
+def c4v_tensor_from_coeffs(
+    coeffs: jax.Array,
+    basis: jax.Array | np.ndarray,
+    shape: tuple[int, ...],
+) -> jax.Array:
+    """Reconstruct a C₄ᵥ-symmetric tensor from coefficients.
+
+    Args:
+        coeffs: Coefficient vector of shape ``(n,)``.
+        basis: Orthonormal basis of shape ``(n, D⁴d)``.
+        shape: Target tensor shape, e.g. ``(D, D, D, D, d)``.
+
+    Returns:
+        Tensor of shape *shape*, guaranteed C₄ᵥ-symmetric.
+    """
+    return (jnp.array(basis).T @ coeffs).reshape(shape)
+
+
 def sublattice_rotate_gate(gate: Tensor | jax.Array, d: int = 2) -> Tensor | jax.Array:
     """Apply sublattice rotation to a 2-site Hamiltonian gate.
 

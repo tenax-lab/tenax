@@ -226,17 +226,140 @@ class TestSymmetrizeC4v:
         assert rank == expected, f"C4v subspace rank {rank}, expected {expected}"
 
 
+class TestC4vBasis:
+    """Tests for explicit C4v basis parameterization."""
+
+    def test_basis_dimension(self):
+        """Basis should have n(D) = d(D^4+2D^3+3D^2+2D)/8 vectors."""
+        from tenax.algorithms.ipeps import build_c4v_basis
+
+        for D in [2, 3, 4]:
+            d = 2
+            basis = build_c4v_basis(D, d)
+            expected_n = d * (D**4 + 2 * D**3 + 3 * D**2 + 2 * D) // 8
+            assert basis.shape == (expected_n, D**4 * d), (
+                f"D={D}: basis shape {basis.shape}, expected ({expected_n}, {D**4 * d})"
+            )
+
+    def test_basis_orthonormal(self):
+        """Basis vectors should be orthonormal."""
+        from tenax.algorithms.ipeps import build_c4v_basis
+
+        basis = build_c4v_basis(2, 2)
+        gram = basis @ basis.T
+        np.testing.assert_allclose(gram, np.eye(len(basis)), atol=1e-12)
+
+    def test_basis_vectors_are_c4v_symmetric(self):
+        """Each basis vector should be C4v-symmetric."""
+        from tenax.algorithms.ipeps import build_c4v_basis
+
+        D, d = 2, 2
+        basis = build_c4v_basis(D, d)
+        for i in range(len(basis)):
+            vec = basis[i].reshape(D, D, D, D, d)
+            vec_sym = symmetrize_c4v(jnp.array(vec))
+            np.testing.assert_allclose(
+                vec, vec_sym, atol=1e-12, err_msg=f"Basis vector {i} not C4v-symmetric"
+            )
+
+    def test_roundtrip_coeffs(self):
+        """coeffs_from_tensor -> tensor_from_coeffs should recover C4v tensor."""
+        from tenax.algorithms.ipeps import (
+            build_c4v_basis,
+            c4v_coeffs_from_tensor,
+            c4v_tensor_from_coeffs,
+        )
+
+        D, d = 3, 2
+        key = jax.random.PRNGKey(42)
+        A = jax.random.normal(key, (D, D, D, D, d))
+        A_sym = symmetrize_c4v(A)
+
+        basis = build_c4v_basis(D, d)
+        coeffs = c4v_coeffs_from_tensor(A_sym, basis)
+        A_reconstructed = c4v_tensor_from_coeffs(coeffs, basis, (D, D, D, D, d))
+        np.testing.assert_allclose(A_sym, A_reconstructed, atol=1e-12)
+
+    def test_coeffs_dimension(self):
+        """Coefficient vector should have n(D) entries."""
+        from tenax.algorithms.ipeps import (
+            build_c4v_basis,
+            c4v_coeffs_from_tensor,
+        )
+
+        D, d = 2, 2
+        key = jax.random.PRNGKey(0)
+        A = jax.random.normal(key, (D, D, D, D, d))
+        basis = build_c4v_basis(D, d)
+        coeffs = c4v_coeffs_from_tensor(A, basis)
+        expected_n = d * (D**4 + 2 * D**3 + 3 * D**2 + 2 * D) // 8
+        assert coeffs.shape == (expected_n,)
+
+    def test_tensor_from_coeffs_is_c4v(self):
+        """Any coefficient vector should produce a C4v-symmetric tensor."""
+        from tenax.algorithms.ipeps import (
+            build_c4v_basis,
+            c4v_tensor_from_coeffs,
+        )
+
+        D, d = 2, 2
+        basis = build_c4v_basis(D, d)
+        n = len(basis)
+        key = jax.random.PRNGKey(7)
+        coeffs = jax.random.normal(key, (n,))
+        A = c4v_tensor_from_coeffs(coeffs, basis, (D, D, D, D, d))
+        A_sym = symmetrize_c4v(A)
+        np.testing.assert_allclose(A, A_sym, atol=1e-12)
+
+    def test_jax_differentiable(self):
+        """tensor_from_coeffs should be differentiable."""
+        from tenax.algorithms.ipeps import (
+            build_c4v_basis,
+            c4v_tensor_from_coeffs,
+        )
+
+        D, d = 2, 2
+        basis = jnp.array(build_c4v_basis(D, d))
+        n = len(basis)
+        key = jax.random.PRNGKey(3)
+        coeffs = jax.random.normal(key, (n,))
+
+        def loss(c):
+            A = c4v_tensor_from_coeffs(c, basis, (D, D, D, D, d))
+            return jnp.sum(A**2)
+
+        grad = jax.grad(loss)(coeffs)
+        assert grad.shape == (n,)
+        assert jnp.all(jnp.isfinite(grad))
+
+    def test_nonsymmetric_tensor_projects(self):
+        """coeffs_from_tensor on a non-symmetric tensor should give the C4v component."""
+        from tenax.algorithms.ipeps import (
+            build_c4v_basis,
+            c4v_coeffs_from_tensor,
+            c4v_tensor_from_coeffs,
+        )
+
+        D, d = 2, 2
+        key = jax.random.PRNGKey(99)
+        A = jax.random.normal(key, (D, D, D, D, d))
+        basis = build_c4v_basis(D, d)
+        coeffs = c4v_coeffs_from_tensor(A, basis)
+        A_proj = c4v_tensor_from_coeffs(coeffs, basis, (D, D, D, D, d))
+        A_sym = symmetrize_c4v(A)
+        np.testing.assert_allclose(A_proj, A_sym, atol=1e-12)
+
+
 class TestC4vOptimization:
-    """Test C4v symmetrization + sublattice rotation in AD optimization."""
+    """Test C4v parameterization in AD optimization."""
 
     def test_c4v_ad_heisenberg_d2(self):
-        """C4v + sublattice rotation + AD should give physical energy."""
+        """C4v parameterization + L-BFGS should give physical energy."""
         from tenax import iPEPSConfig, optimize_gs_ad
 
         gate = heisenberg_gate()
         gate_rot = sublattice_rotate_gate(gate)
 
-        # Random init (C4v symmetrization applied inside optimizer)
         D, d = 2, 2
         key = jax.random.PRNGKey(42)
         A_init = jax.random.normal(key, (D, D, D, D, d))
@@ -248,11 +371,11 @@ class TestC4vOptimization:
         config = iPEPSConfig(
             max_bond_dim=D,
             ctm=CTMConfig(chi=8, max_iter=50, min_iter=10),
-            gs_optimizer="adam",
-            gs_learning_rate=5e-3,
+            gs_optimizer="lbfgs",
+            gs_learning_rate=1e-3,
             gs_num_steps=30,
             gs_metric_precond=False,
-            gs_line_search=False,
+            gs_line_search=True,
             gs_verbose=False,
             unit_cell="1x1",
             gs_explicit_ad=True,
@@ -265,7 +388,39 @@ class TestC4vOptimization:
         E_val = float(E)
 
         assert np.isfinite(E_val), f"Energy is not finite: {E_val}"
-        # Should be better than classical Ising (-0.5) since C4v
-        # allows quantum fluctuations
-        assert E_val < -0.50, f"C4v AD energy {E_val:.6f} not below -0.50 (classical)"
+        assert E_val < -0.50, f"C4v AD energy {E_val:.6f} not below -0.50"
         assert E_val > -1.0, f"Energy {E_val} unphysically low"
+
+    def test_c4v_returns_symmetric_tensor(self):
+        """Optimized tensor should be C4v-symmetric."""
+        from tenax import iPEPSConfig, optimize_gs_ad
+
+        gate = heisenberg_gate()
+        gate_rot = sublattice_rotate_gate(gate)
+
+        D, d = 2, 2
+        key = jax.random.PRNGKey(42)
+        A_init = jax.random.normal(key, (D, D, D, D, d))
+
+        from tenax.algorithms.ipeps import _wrap_as_dense_tensor
+
+        A_tensor = _wrap_as_dense_tensor(A_init)
+
+        config = iPEPSConfig(
+            max_bond_dim=D,
+            ctm=CTMConfig(chi=8, max_iter=50, min_iter=10),
+            gs_optimizer="lbfgs",
+            gs_num_steps=5,
+            gs_metric_precond=False,
+            gs_verbose=False,
+            unit_cell="1x1",
+            gs_explicit_ad=True,
+            gs_explicit_ad_steps=10,
+            gs_explicit_ad_warmup=2,
+            su_init=False,
+            gs_c4v=True,
+        )
+        A_opt, _, _ = optimize_gs_ad(gate_rot, A_tensor, config)
+        A_data = A_opt.todense()
+        A_sym = symmetrize_c4v(A_data)
+        np.testing.assert_allclose(A_data, A_sym, atol=1e-12)
