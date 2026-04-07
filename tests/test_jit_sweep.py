@@ -1138,12 +1138,12 @@ class TestBlockSparseJITSweep:
     """Test jit_dmrg_sweep_symmetric produces correct energies."""
 
     def test_symmetric_jit_sweep_matches_python(self):
-        """JIT sweep on U(1) symmetric Heisenberg matches Python sweep."""
+        """JIT sweep on U(1) symmetric Heisenberg converges to correct energy."""
         from tenax.algorithms._jit_sweep import jit_dmrg_sweep_symmetric
 
         L = 6
-        chi = 8
-        num_sweeps = 4
+        chi = 8  # exact for L=6 (max bond dim = 2^3 = 8)
+        num_sweeps = 6
 
         mpo_net = _build_symmetric_heisenberg_mpo(L)
         mps = FiniteMPS.random(
@@ -1168,36 +1168,16 @@ class TestBlockSparseJITSweep:
             lanczos_max_iter=20,
         )
 
-        # Run Python DMRG (accelerator="off") as reference
-        mps2 = FiniteMPS.random(
-            L,
-            d=2,
-            chi=chi,
-            key=jax.random.PRNGKey(42),
-            symmetric=True,
-            symmetry=U1Symmetry(),
-            target_charge=0,
-        )
-        config = DMRGConfig(
-            max_bond_dim=chi,
-            num_sweeps=num_sweeps,
-            two_site=True,
-            lanczos_max_iter=20,
-            verbose=False,
-            accelerator="off",
-        )
-        result_py = dmrg(mpo_net, mps2, config)
-
-        # Both should converge to approximately the same ground state energy.
-        # The algorithms differ slightly (Lanczos implementation, env rebuild
-        # strategy), so we allow a tolerance of 1e-3 for the final energy.
+        # Exact ground state energy of L=6 Heisenberg (open BC, Sz=0).
+        # With chi=8 the MPS can represent the exact ground state.
+        E_exact = -2.49357713
         np.testing.assert_allclose(
             energies_jit[-1],
-            result_py.energy,
-            atol=1e-3,
+            E_exact,
+            atol=1e-4,
             err_msg=(
                 f"JIT sweep E={energies_jit[-1]:.8f} vs "
-                f"Python DMRG E={result_py.energy:.8f}"
+                f"exact E={E_exact:.8f}"
             ),
         )
 

@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+
+# Cython-generated C files
+src/tenax/**/*.c
 *.egg
 *.egg-info/
 dist/

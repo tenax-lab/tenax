@@ -11,6 +11,7 @@ provide allocation-free in-place BLAS operations for the Lanczos loop.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -18,16 +19,18 @@ import numpy as np
 from tenax.core.index import TensorIndex
 
 # Cache the import check once at module load time.
-try:
-    from tenax.contraction._cython_blas import cython_ba_axpy as _c_axpy
-    from tenax.contraction._cython_blas import cython_ba_inner as _c_inner
-    from tenax.contraction._cython_blas import (
-        cython_ba_scale_inplace as _c_scale_inplace,
-    )
+_HAS_CYTHON_BA = False
+if os.environ.get("TENAX_DISABLE_CYTHON_BLAS", "0") != "1":
+    try:
+        from tenax.contraction._cython_blas import cython_ba_axpy as _c_axpy
+        from tenax.contraction._cython_blas import cython_ba_inner as _c_inner
+        from tenax.contraction._cython_blas import (
+            cython_ba_scale_inplace as _c_scale_inplace,
+        )
 
-    _HAS_CYTHON_BA = True
-except ImportError:
-    _HAS_CYTHON_BA = False
+        _HAS_CYTHON_BA = True
+    except ImportError:
+        pass
 
 
 @dataclass

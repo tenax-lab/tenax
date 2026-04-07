@@ -19,6 +19,7 @@ Architecture decisions mirror ``dmrg.py``:
 
 from __future__ import annotations
 
+import os as _os
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
@@ -36,24 +37,27 @@ from tenax.algorithms.dmrg import (
     _update_left_env_symmetric,
     _update_right_env_symmetric,
 )
-
-# Optional Cython BLAS acceleration for hot loops.
-try:
-    from tenax.contraction._cython_blas import (
-        DMRGMatvec2Site as _DMRGMatvec2Site,
-    )
-    from tenax.contraction._cython_blas import (
-        cython_lanczos_ground as _cython_lanczos_ground,
-    )
-
-    _USE_CYTHON_LANCZOS = True
-except (ImportError, ModuleNotFoundError):
-    _USE_CYTHON_LANCZOS = False
 from tenax.contraction.contractor import truncated_svd
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.mps import InfiniteMPS
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+
+# Optional Cython BLAS acceleration for hot loops.
+# Respect TENAX_DISABLE_CYTHON_BLAS env var consistently.
+_USE_CYTHON_LANCZOS = False
+if _os.environ.get("TENAX_DISABLE_CYTHON_BLAS", "0") != "1":
+    try:
+        from tenax.contraction._cython_blas import (
+            DMRGMatvec2Site as _DMRGMatvec2Site,
+        )
+        from tenax.contraction._cython_blas import (
+            cython_lanczos_ground as _cython_lanczos_ground,
+        )
+
+        _USE_CYTHON_LANCZOS = True
+    except (ImportError, ModuleNotFoundError):
+        pass
 
 # ---------------------------------------------------------------------------
 # Config & Result

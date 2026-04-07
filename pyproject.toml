@@ -61,14 +61,21 @@ Issues = "https://github.com/tenax-lab/tenax/issues"
 [dependency-groups]
 dev = ["tenax-tn[dev]"]
 
-[tool.hatch.build.hooks.cython]
-src = "tenax"
+[tool.hatch.build.targets.wheel]
+packages = ["src/tenax"]
+
+[tool.hatch.build.targets.wheel.hooks.cython]
 # Required by scipy cython_blas for zdotc/cdotc/zdotu/cdotu return values.
 # Without this, complex dot products use wrong calling convention on some BLAS.
 define_macros = [["CYTHON_CCOMPLEX", "0"]]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/tenax"]
+[tool.hatch.build.targets.wheel.hooks.cython.options]
+# Package directory name differs from project name (tenax vs tenax-tn)
+src = "tenax"
+# Only compile .pyx files, not .py files
+compile_py = false
+# Add numpy include path for numpy/arrayobject.h
+include_numpy = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
