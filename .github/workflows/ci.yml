@@ -49,9 +49,31 @@ jobs:
           files: ./coverage.xml
           fail_ci_if_error: false
 
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+      - id: filter
+        run: |
+          if git diff --name-only HEAD~1 HEAD | grep -qE '^(src/|tests/|pyproject\.toml)'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   test-full:
     name: Full tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
-    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'run-full-tests')
+    needs: [changes]
+    if: |
+      always() &&
+      ((github.event_name == 'push' && needs.changes.outputs.code == 'true') ||
+       contains(github.event.pull_request.labels.*.name, 'run-full-tests'))
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
