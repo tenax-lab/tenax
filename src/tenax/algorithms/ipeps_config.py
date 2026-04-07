@@ -82,6 +82,7 @@ class iPEPSConfig:
     gs_explicit_ad_steps: int = 20  # CTM steps for explicit AD backprop phase
     gs_explicit_ad_warmup: int = 3  # warmup CTM steps (no gradient tracking)
     su_init: bool = True  # initialize via simple update before AD
+    gs_c4v: bool = False  # enforce C4v symmetry on site tensor during AD
     # Metric preconditioning (natural gradient, Rader et al. arXiv:2511.09546)
     gs_metric_precond: bool = True  # metric preconditioning for CG/L-BFGS
     metric_gmres_maxiter: int = 30  # Krylov dimension for metric inversion

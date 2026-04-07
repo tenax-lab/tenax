@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms.ipeps_config import iPEPSConfig
+from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
@@ -294,12 +294,27 @@ def _optimize_gs_ad_tensor(
 
     config_tuple = _config_to_tuple(config.ctm)
 
+    use_c4v = config.gs_c4v
+    if use_c4v:
+        from tenax.algorithms.ipeps import symmetrize_c4v
+    else:
+        symmetrize_c4v = None  # type: ignore[assignment]
+
+    # If C4v, symmetrize the initial tensor
+    if use_c4v:
+        A_sym_data = symmetrize_c4v(A.todense())
+        A = DenseTensor(A_sym_data, A.indices)
+
     _env_template = initialize_ctm_tensor_env(A, config.ctm.chi)
     env_treedef = jax.tree.structure(_env_template)
     prev_env_leaves = tuple(jax.tree.leaves(_env_template))
 
     def loss_fn(A_param, env_init_leaves):
-        A_norm = A_param * (1.0 / (A_param.norm() + 1e-10))
+        A_data = A_param.todense()
+        if use_c4v:
+            A_data = symmetrize_c4v(A_data)
+        A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
+        A_norm = DenseTensor(A_norm_data, A_param.indices)
         site_tensors = {(0, 0): A_norm}
         env_leaves = ctm_tensor_converge(
             site_tensors, env_init_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
@@ -336,7 +351,11 @@ def _optimize_gs_ad_tensor(
     )
 
     def loss_fn_fwd(A_param):
-        A_norm = A_param * (1.0 / (A_param.norm() + 1e-10))
+        A_data = A_param.todense()
+        if use_c4v:
+            A_data = symmetrize_c4v(A_data)
+        A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
+        A_norm = DenseTensor(A_norm_data, A_param.indices)
         st = {(0, 0): A_norm}
         config_obj = _config_from_tuple(config_tuple)
         envs = _ctm_tensor_multisite_fixed_point(st, SINGLE_SITE_NEIGHBORS, config_obj)
@@ -477,33 +496,42 @@ def _optimize_gs_ad_tensor(
             A = optax.apply_updates(A, direction)
             A = A * (1.0 / (A.norm() + 1e-10))
 
-    # Re-evaluate both final A and best_A with fresh CTM, pick the lower
-    # properly converged energy.  In-loop energies use warm-started CTM that
-    # can produce unphysical values, so we compare fresh evaluations only.
-    A_norm = A * (1.0 / (A.norm() + 1e-10))
-    env_leaves_final = ctm_tensor_converge(
-        {(0, 0): A_norm}, prev_env_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
+    # Re-evaluate both final A and best_A with fully converged fresh CTM.
+    # In-loop energies use warm-started CTM that can produce unphysical values
+    # (non-variational at finite chi), so we compare fresh evaluations only.
+    _base_cfg = _config_from_tuple(config_tuple)
+    eval_config = CTMConfig(
+        chi=_base_cfg.chi,
+        max_iter=max(_base_cfg.max_iter, 200),
+        conv_tol=min(_base_cfg.conv_tol, 1e-10),
+        min_iter=max(_base_cfg.min_iter, 30),
     )
-    env_final = jax.tree.unflatten(env_treedef, env_leaves_final)
-    E_final = float(compute_energy_ctm_tensor(A_norm, env_final, gate, d_phys))
+
+    def _eval_fresh(A_tensor):
+        """Evaluate energy with fully converged fresh CTM."""
+        A_data = A_tensor.todense()
+        if use_c4v:
+            A_data = symmetrize_c4v(A_data)
+        A_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
+        A_t = DenseTensor(A_data, A_tensor.indices)
+        envs = _ctm_tensor_multisite_fixed_point(
+            {(0, 0): A_t}, SINGLE_SITE_NEIGHBORS, eval_config
+        )
+        env_ = envs[(0, 0)]
+        E_ = float(compute_energy_ctm_tensor(A_t, env_, gate, d_phys))
+        return A_t, env_, E_
+
+    A_final, env_final, E_final = _eval_fresh(A)
 
     if best_A is not A:
-        A_best_norm = best_A * (1.0 / (best_A.norm() + 1e-10))
-        env_leaves_best = ctm_tensor_converge(
-            {(0, 0): A_best_norm}, prev_env_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
-        )
-        env_best = jax.tree.unflatten(env_treedef, env_leaves_best)
-        E_best_fresh = float(
-            compute_energy_ctm_tensor(A_best_norm, env_best, gate, d_phys)
-        )
+        _, env_best, E_best_fresh = _eval_fresh(best_A)
     else:
         E_best_fresh = E_final
 
     if E_final <= E_best_fresh:
-        A_final = A_norm
         env, E_gs = env_final, E_final
     else:
-        A_final = best_A * (1.0 / (best_A.norm() + 1e-10))
+        A_final, _, _ = _eval_fresh(best_A)
         env, E_gs = env_best, E_best_fresh
     if config.gs_verbose:
         print(f"[iPEPS-AD:1site-tensor] final E={E_gs:.10f}", flush=True)
@@ -567,10 +595,10 @@ def _optimize_gs_ad_2site(
             _, (A_su, B_su), _ = ipeps(gate, None, su_config)
             AB_init = (A_su, B_su)
         else:
-            # Néel product state — much better than random for AFM models
-            from tenax.algorithms.ipeps import neel_init
-
-            A_data, B_data = neel_init(D, d_phys)
+            # Random initialization for 2-site AD
+            key_A, key_B = jax.random.split(jax.random.PRNGKey(0))
+            A_data = jax.random.normal(key_A, (D, D, D, D, d_phys))
+            B_data = jax.random.normal(key_B, (D, D, D, D, d_phys))
             A = _wrap_as_dense_tensor(A_data)
             B = _wrap_as_dense_tensor(B_data)
             AB_init = (A, B)
@@ -669,7 +697,6 @@ def _optimize_gs_ad_tensor_2site(
 
     best_energy = float("inf")
     best_params = params
-    best_env_leaves = None
     prev_energy = float("inf")
     prev_grad = None
     cg_direction = None
@@ -713,7 +740,6 @@ def _optimize_gs_ad_tensor_2site(
         if energy_float < best_energy:
             best_energy = energy_float
             best_params = params
-            best_env_leaves = env_leaves_sg
 
         delta_energy = abs(energy_float - prev_energy)
         logged = False
@@ -870,53 +896,37 @@ def _optimize_gs_ad_tensor_2site(
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)
 
-    # Re-evaluate both final params and best_params with fresh CTM,
-    # then pick whichever gives the lower *properly converged* energy.
-    # (In-loop energies use warm-started CTM that can be far from converged,
-    # producing unphysical values — so we must compare fresh evaluations.)
-    A_last, B_last = _normalize_params(params)
-    site_last = {(0, 0): A_last, (1, 0): B_last}
-    last_env_leaves = ctm_tensor_converge(
-        site_last,
-        prev_env_leaves,
-        CHECKERBOARD_NEIGHBORS,
-        config_tuple,
-    )
-    env_A_last = jax.tree.unflatten(env_treedef, last_env_leaves[:n_env_leaves])
-    env_B_last = jax.tree.unflatten(env_treedef, last_env_leaves[n_env_leaves:])
-    E_last = float(
-        compute_energy_ctm_tensor_2site(
-            A_last,
-            B_last,
-            env_A_last,
-            env_B_last,
-            gate,
-            d_phys,
-        )
+    # Re-evaluate both final params and best_params with fully converged
+    # fresh CTM.  In-loop energies use warm-started CTM that can produce
+    # unphysical values, so we compare fresh evaluations only.
+    _base_cfg2 = _config_from_tuple(config_tuple)
+    eval_config2 = CTMConfig(
+        chi=_base_cfg2.chi,
+        max_iter=max(_base_cfg2.max_iter, 200),
+        conv_tol=min(_base_cfg2.conv_tol, 1e-10),
+        min_iter=max(_base_cfg2.min_iter, 30),
     )
 
-    # Fresh evaluation of best_params (if different from final)
-    if best_params is not params:
-        A_best, B_best = _normalize_params(best_params)
-        site_best = {(0, 0): A_best, (1, 0): B_best}
-        best_fresh_leaves = ctm_tensor_converge(
-            site_best,
-            best_env_leaves or prev_env_leaves,
-            CHECKERBOARD_NEIGHBORS,
-            config_tuple,
+    def _eval_fresh_2site(p):
+        A_t, B_t = _normalize_params(p)
+        st = {(0, 0): A_t, (1, 0): B_t}
+        envs = _ctm_tensor_multisite_fixed_point(
+            st, CHECKERBOARD_NEIGHBORS, eval_config2
         )
-        env_A_best = jax.tree.unflatten(env_treedef, best_fresh_leaves[:n_env_leaves])
-        env_B_best = jax.tree.unflatten(env_treedef, best_fresh_leaves[n_env_leaves:])
-        E_best_fresh = float(
+        E_ = float(
             compute_energy_ctm_tensor_2site(
-                A_best,
-                B_best,
-                env_A_best,
-                env_B_best,
-                gate,
-                d_phys,
+                A_t, B_t, envs[(0, 0)], envs[(1, 0)], gate, d_phys
             )
         )
+        return A_t, B_t, envs, E_
+
+    A_last, B_last, envs_last, E_last = _eval_fresh_2site(params)
+    env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
+
+    if best_params is not params:
+        _, _, envs_best, E_best_fresh = _eval_fresh_2site(best_params)
+        env_A_best = envs_best[(0, 0)]
+        env_B_best = envs_best[(1, 0)]
     else:
         E_best_fresh = E_last
 

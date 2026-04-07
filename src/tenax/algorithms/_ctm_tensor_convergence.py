@@ -143,6 +143,30 @@ def _get_base_charges(a: Tensor):
     return charges
 
 
+def _sort_coords_for_direction(coords: list[Coord], direction: str) -> list[Coord]:
+    """Sort coordinates for correct cascading order in a CTM direction move.
+
+    Following Corboz et al. PRB 84, 041108(R) (2011):
+    - Left move absorbs from the left, so process columns left-to-right
+      (increasing x) so updated environments cascade rightward.
+    - Right move: process right-to-left (decreasing x).
+    - Top move: process top-to-bottom (increasing y).
+    - Bottom move: process bottom-to-top (decreasing y).
+
+    Within each column/row, the perpendicular coordinate is sorted in
+    natural order.
+    """
+    if direction == "left":
+        return sorted(coords, key=lambda c: (c[0], c[1]))
+    elif direction == "right":
+        return sorted(coords, key=lambda c: (-c[0], c[1]))
+    elif direction == "top":
+        return sorted(coords, key=lambda c: (c[1], c[0]))
+    elif direction == "bottom":
+        return sorted(coords, key=lambda c: (-c[1], c[0]))
+    return sorted(coords)
+
+
 def _ctm_tensor_sweep_multisite(
     envs: dict[Coord, CTMTensorEnv],
     double_layers: dict[Coord, Tensor],
@@ -159,8 +183,9 @@ def _ctm_tensor_sweep_multisite(
         if base_charges is not None:
             break
 
+    all_coords = list(envs.keys())
     for direction, move_fn in _DIRECTION_MOVES:
-        for coord in sorted(envs.keys()):
+        for coord in _sort_coords_for_direction(all_coords, direction):
             nb = neighbors[coord][direction]
             envs[coord] = move_fn(
                 envs[coord],

@@ -95,6 +95,95 @@ def xxz_gate(delta: float = 1.0, dtype=jnp.float64) -> DenseTensor:
     return DenseTensor(H.reshape(2, 2, 2, 2), indices)
 
 
+def symmetrize_c4v(A: jax.Array) -> jax.Array:
+    """Project an iPEPS tensor onto the C₄ᵥ-invariant subspace.
+
+    Averages over the 8 elements of the C₄ᵥ point group (4 rotations
+    + 4 reflections) acting on the virtual indices ``(u, d, l, r)``.
+    The physical index is left unchanged.
+
+    This is the standard symmetrization projector::
+
+        A_sym = (1/8) Σ_{g ∈ C₄ᵥ} g(A)
+
+    When used inside an AD loss function, JAX differentiates through
+    the linear projection, effectively constraining the gradient to
+    the symmetric subspace.
+
+    Args:
+        A: iPEPS site tensor of shape ``(D, D, D, D, d)`` with
+           legs ``(u, d, l, r, phys)``.
+
+    Returns:
+        Symmetrized tensor of the same shape.
+
+    Reference: Corboz, PRB 94, 035133 (2016), Sec. II.
+    """
+    # C₄ rotations: E, C₄, C₂, C₄⁻¹
+    a0 = A  # E:    (u, d, l, r, s)
+    a1 = jnp.transpose(A, (3, 2, 0, 1, 4))  # C₄:   (r, l, u, d, s)
+    a2 = jnp.transpose(A, (1, 0, 3, 2, 4))  # C₂:   (d, u, r, l, s)
+    a3 = jnp.transpose(A, (2, 3, 1, 0, 4))  # C₄⁻¹: (l, r, d, u, s)
+    # Reflections: σ_v, σ_h, σ_d, σ_d'
+    a4 = jnp.transpose(A, (0, 1, 3, 2, 4))  # σ_v:  (u, d, r, l, s)
+    a5 = jnp.transpose(A, (1, 0, 2, 3, 4))  # σ_h:  (d, u, l, r, s)
+    a6 = jnp.transpose(A, (3, 2, 1, 0, 4))  # σ_d:  (r, l, d, u, s)
+    a7 = jnp.transpose(A, (2, 3, 0, 1, 4))  # σ_d': (l, r, u, d, s)
+    return (a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7) / 8.0
+
+
+def sublattice_rotate_gate(gate: Tensor | jax.Array, d: int = 2) -> Tensor | jax.Array:
+    """Apply sublattice rotation to a 2-site Hamiltonian gate.
+
+    Performs ``H → (I ⊗ U†) H (I ⊗ U)`` where ``U = e^{iπσ^y/2}``
+    is the spin-π rotation around the y-axis on the second site.
+    This maps an antiferromagnetic Hamiltonian to a ferromagnetic one,
+    so the Néel ground state becomes a uniform state representable by
+    a single C₄ᵥ-symmetric iPEPS tensor.
+
+    For the spin-1/2 Heisenberg model:
+        ``S·S → -(S^x S^x - S^y S^y + S^z S^z)``
+
+    Reference: Corboz, PRB 94, 035133 (2016).
+
+    Args:
+        gate: 2-site gate with shape ``(d, d, d, d)`` as a
+              :class:`DenseTensor` (labels ``si, sj, si_out, sj_out``)
+              or raw JAX array.
+        d: Physical dimension (default 2 for spin-1/2).
+
+    Returns:
+        Rotated gate in the same format as input.
+
+    Example::
+
+        gate = heisenberg_gate()
+        gate_rot = sublattice_rotate_gate(gate)
+        # Now use single-site C4v CTM:
+        env = ctm_tensor_c4v(A, chi=20)
+        E = compute_energy_ctm_tensor(A, env, gate_rot)
+    """
+    if d != 2:
+        raise NotImplementedError(
+            f"sublattice rotation currently supports d=2 only, got d={d}"
+        )
+
+    is_tensor = isinstance(gate, Tensor)
+    gate_arr = gate.todense() if is_tensor else jnp.asarray(gate)
+    gate_arr = gate_arr.reshape(d, d, d, d)
+
+    # U = e^{iπ σ^y / 2} = iσ^y = [[0, 1], [-1, 0]]
+    U = jnp.array([[0.0, 1.0], [-1.0, 0.0]], dtype=gate_arr.dtype)
+    U_dag = jnp.conj(U).T
+
+    # H_rot[i,j,k,s] = U†[j,a] H[i,a,k,b] U[b,s]
+    gate_rot = jnp.einsum("ja,iakb,bs->ijks", U_dag, gate_arr, U)
+
+    if is_tensor:
+        return DenseTensor(gate_rot, gate.indices)
+    return gate_rot
+
+
 def _wrap_as_dense_tensor(arr: jax.Array) -> DenseTensor:
     """Wrap a raw ``jax.Array`` iPEPS site tensor as a ``DenseTensor``.
 
@@ -117,32 +206,6 @@ def _wrap_as_dense_tensor(arr: jax.Array) -> DenseTensor:
         ),
     )
     return DenseTensor(arr, indices)
-
-
-def neel_init(D: int, d: int = 2, seed: int = 0) -> tuple[jax.Array, jax.Array]:
-    """Create Néel product state tensors for 2-site iPEPS.
-
-    Sublattice A is initialized to spin-up and sublattice B to spin-down,
-    with small random noise to break exact symmetry for simple update.
-
-    Args:
-        D: Bond dimension.
-        d: Physical dimension (default 2 for spin-1/2).
-        seed: Random seed for noise.
-
-    Returns:
-        ``(A, B)`` raw JAX arrays of shape ``(D, D, D, D, d)``.
-    """
-    key_A, key_B = jax.random.split(jax.random.PRNGKey(seed))
-    noise = 0.01
-
-    A = noise * jax.random.normal(key_A, (D, D, D, D, d))
-    A = A.at[0, 0, 0, 0, 0].set(1.0)  # spin-up
-
-    B = noise * jax.random.normal(key_B, (D, D, D, D, d))
-    B = B.at[0, 0, 0, 0, 1].set(1.0)  # spin-down
-
-    return A, B
 
 
 def ipeps(
@@ -189,13 +252,15 @@ def ipeps(
     d = gate_dense.shape[0]
     D = config.max_bond_dim
 
-    # Initialize A and B tensors — default is Néel product state
+    # Initialize A and B tensors — default is random
     if initial_peps is not None:
         A_raw, B_raw = initial_peps
         A = A_raw if isinstance(A_raw, Tensor) else _wrap_as_dense_tensor(A_raw)
         B = B_raw if isinstance(B_raw, Tensor) else _wrap_as_dense_tensor(B_raw)
     else:
-        A_data, B_data = neel_init(D, d)
+        key_A, key_B = jax.random.split(jax.random.PRNGKey(0))
+        A_data = jax.random.normal(key_A, (D, D, D, D, d))
+        B_data = jax.random.normal(key_B, (D, D, D, D, d))
         A = _wrap_as_dense_tensor(A_data)
         B = _wrap_as_dense_tensor(B_data)
 
