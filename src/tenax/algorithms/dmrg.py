@@ -24,6 +24,7 @@ Label conventions::
 
 from __future__ import annotations
 
+import os as _os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -47,56 +48,65 @@ from tenax.linalg import qr as _linalg_qr
 from tenax.network.network import TensorNetwork
 
 # Optional Cython BLAS acceleration for hot loops.
-try:
-    from tenax.contraction._cython_blas import (
-        cython_execute_plan as _cython_execute_plan,
-    )
+# Respect TENAX_DISABLE_CYTHON_BLAS env var consistently.
 
-    _USE_CYTHON_PLAN = True
-except ImportError:
-    _USE_CYTHON_PLAN = False
+_USE_CYTHON_PLAN = False
+_USE_CYTHON_SUB = False
+_USE_CYTHON_MATVEC = False
+_USE_CYTHON_REORTH = False
+_USE_CYTHON_LANCZOS = False
 
-try:
-    from tenax.contraction._cython_blas import (
-        cython_ba_sub_scaled_inplace as _cython_ba_sub_scaled_inplace,
-    )
+if _os.environ.get("TENAX_DISABLE_CYTHON_BLAS", "0") != "1":
+    try:
+        from tenax.contraction._cython_blas import (
+            cython_execute_plan as _cython_execute_plan,
+        )
 
-    _USE_CYTHON_SUB = True
-except ImportError:
-    _USE_CYTHON_SUB = False
+        _USE_CYTHON_PLAN = True
+    except ImportError:
+        pass
 
-try:
-    from tenax.contraction._cython_blas import (
-        cython_matvec_combos as _cython_matvec_combos,
-    )
+    try:
+        from tenax.contraction._cython_blas import (
+            cython_ba_sub_scaled_inplace as _cython_ba_sub_scaled_inplace,
+        )
 
-    _USE_CYTHON_MATVEC = True
-except ImportError:
-    _USE_CYTHON_MATVEC = False
+        _USE_CYTHON_SUB = True
+    except ImportError:
+        pass
 
-try:
-    from tenax.contraction._cython_blas import (
-        cython_lanczos_reorth as _cython_lanczos_reorth,
-    )
+    try:
+        from tenax.contraction._cython_blas import (
+            cython_matvec_combos as _cython_matvec_combos,
+        )
 
-    _USE_CYTHON_REORTH = True
-except ImportError:
-    _USE_CYTHON_REORTH = False
+        _USE_CYTHON_MATVEC = True
+    except ImportError:
+        pass
 
-try:
-    from tenax.contraction._cython_blas import (
-        DMRGMatvec1Site as _DMRGMatvec1Site,
-    )
-    from tenax.contraction._cython_blas import (
-        DMRGMatvec2Site as _DMRGMatvec2Site,
-    )
-    from tenax.contraction._cython_blas import (
-        cython_lanczos_ground as _cython_lanczos_ground,
-    )
+    try:
+        from tenax.contraction._cython_blas import (
+            cython_lanczos_reorth as _cython_lanczos_reorth,
+        )
 
-    _USE_CYTHON_LANCZOS = True
-except (ImportError, ModuleNotFoundError):
-    _USE_CYTHON_LANCZOS = False
+        _USE_CYTHON_REORTH = True
+    except ImportError:
+        pass
+
+    try:
+        from tenax.contraction._cython_blas import (
+            DMRGMatvec1Site as _DMRGMatvec1Site,
+        )
+        from tenax.contraction._cython_blas import (
+            DMRGMatvec2Site as _DMRGMatvec2Site,
+        )
+        from tenax.contraction._cython_blas import (
+            cython_lanczos_ground as _cython_lanczos_ground,
+        )
+
+        _USE_CYTHON_LANCZOS = True
+    except (ImportError, ModuleNotFoundError):
+        pass
 
 
 @dataclass
