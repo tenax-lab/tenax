@@ -72,6 +72,10 @@ define_macros = [["CYTHON_CCOMPLEX", "0"]]
 [tool.hatch.build.targets.wheel.hooks.cython.options]
 # Package directory name differs from project name (tenax vs tenax-tn)
 src = "tenax"
+# Only compile .pyx files, not .py files
+compile_py = false
+# Add numpy include path for numpy/arrayobject.h
+include_numpy = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
