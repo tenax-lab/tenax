@@ -1946,25 +1946,10 @@ cdef void _lanczos_reorth_impl(list basis_blocks_list, dict w_blocks):
                 with nogil:
                     coeff += _ddot(&n, qp, &inc, wp, &inc)
 
-            # Phase 2: w -= coeff * q via daxpy
+            # Phase 2: w -= coeff * q via _ba_axpy_impl (safe in-place update)
             if coeff == 0.0:
                 continue
-            alpha_neg = -coeff
-            for k in q_blocks:
-                wk = w_blocks.get(k)
-                if wk is None:
-                    continue
-                qk = q_blocks[k]
-                if not wk.flags.c_contiguous or not wk.flags.writeable:
-                    wk = np.ascontiguousarray(wk).copy()
-                    w_blocks[k] = wk
-                w_arr = <cnp.ndarray>np.ascontiguousarray(np.asarray(wk).ravel())
-                q_arr = <cnp.ndarray>np.ascontiguousarray(np.asarray(qk).ravel())
-                n = w_arr.size
-                wp = <double*>cnp.PyArray_DATA(w_arr)
-                qp = <double*>cnp.PyArray_DATA(q_arr)
-                with nogil:
-                    _daxpy(&n, &alpha_neg, qp, &inc, wp, &inc)
+            _ba_axpy_impl(q_blocks, w_blocks, -coeff)
 
         elif dtype_code == 1:
             # Phase 1: coeff = <q|w> via zdotc (full complex)
@@ -1989,25 +1974,14 @@ cdef void _lanczos_reorth_impl(list basis_blocks_list, dict w_blocks):
                     z_coeff = _zdotc(&n, qp_z, &inc, wp_z, &inc)
                 z_coeff_accum += z_coeff
 
-            # Phase 2: w -= coeff * q via zaxpy
+            # Phase 2: w -= coeff * q via _ba_axpy_impl (safe in-place update)
             if z_coeff_accum == 0.0:
                 continue
-            z_alpha_neg = -z_coeff_accum
+            # _ba_axpy_impl only takes double alpha; for complex we fall back
             for k in q_blocks:
                 wk = w_blocks.get(k)
-                if wk is None:
-                    continue
-                qk = q_blocks[k]
-                if not wk.flags.c_contiguous or not wk.flags.writeable:
-                    wk = np.ascontiguousarray(wk).copy()
-                    w_blocks[k] = wk
-                w_flat_z2 = np.ascontiguousarray(np.asarray(wk, dtype=np.complex128)).ravel()
-                q_flat_z2 = np.ascontiguousarray(np.asarray(qk, dtype=np.complex128)).ravel()
-                n = w_flat_z2.shape[0]
-                wp_z = <double complex*>cnp.PyArray_DATA(<cnp.ndarray>w_flat_z2)
-                qp_z = <double complex*>cnp.PyArray_DATA(<cnp.ndarray>q_flat_z2)
-                with nogil:
-                    _zaxpy(&n, &z_alpha_neg, qp_z, &inc, wp_z, &inc)
+                if wk is not None:
+                    w_blocks[k] = wk - z_coeff_accum * q_blocks[k]
 
         elif dtype_code == 2:
             # Phase 1: coeff = <q|w> via cdotc (full complex)
@@ -2032,25 +2006,13 @@ cdef void _lanczos_reorth_impl(list basis_blocks_list, dict w_blocks):
                     c_coeff_val = _cdotc(&n, qp_c, &inc, wp_c, &inc)
                 c_coeff_accum += c_coeff_val
 
-            # Phase 2: w -= coeff * q via caxpy
+            # Phase 2: w -= coeff * q (safe in-place via NumPy)
             if c_coeff_accum == 0.0:
                 continue
-            c_alpha_neg = -c_coeff_accum
             for k in q_blocks:
                 wk = w_blocks.get(k)
-                if wk is None:
-                    continue
-                qk = q_blocks[k]
-                if not wk.flags.c_contiguous or not wk.flags.writeable:
-                    wk = np.ascontiguousarray(wk).copy()
-                    w_blocks[k] = wk
-                w_flat_c2 = np.ascontiguousarray(np.asarray(wk, dtype=np.complex64)).ravel()
-                q_flat_c2 = np.ascontiguousarray(np.asarray(qk, dtype=np.complex64)).ravel()
-                n = w_flat_c2.shape[0]
-                wp_c = <float complex*>cnp.PyArray_DATA(<cnp.ndarray>w_flat_c2)
-                qp_c = <float complex*>cnp.PyArray_DATA(<cnp.ndarray>q_flat_c2)
-                with nogil:
-                    _caxpy(&n, &c_alpha_neg, qp_c, &inc, wp_c, &inc)
+                if wk is not None:
+                    w_blocks[k] = wk - c_coeff_accum * q_blocks[k]
 
         else:
             # Fallback: numpy (full complex overlap)
