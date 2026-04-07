@@ -1,0 +1,111 @@
+name: Nightly Build
+
+on:
+  schedule:
+    - cron: "0 6 * * *"  # 06:00 UTC daily
+  workflow_dispatch:      # manual trigger
+
+jobs:
+  set-version:
+    name: Compute nightly version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - id: ver
+        run: |
+          BASE=$(grep '^version' pyproject.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          # Bump patch: 0.4.2 -> 0.4.3, then append .devYYYYMMDD
+          IFS='.' read -r major minor patch <<< "$BASE"
+          DEV="${major}.${minor}.$((patch + 1)).dev$(date -u +%Y%m%d)"
+          echo "version=$DEV" >> "$GITHUB_OUTPUT"
+          echo "Nightly version: $DEV"
+
+  build-sdist:
+    name: Build sdist
+    needs: [set-version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Patch version
+        run: sed -i "s/^version = .*/version = \"${{ needs.set-version.outputs.version }}\"/" pyproject.toml
+
+      - name: Build sdist
+        run: uv build --sdist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-sdist
+          path: dist/*.tar.gz
+
+  build-wheels-linux:
+    name: Build Linux wheels
+    needs: [set-version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Patch version
+        run: sed -i "s/^version = .*/version = \"${{ needs.set-version.outputs.version }}\"/" pyproject.toml
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v3.4
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-wheels-linux
+          path: wheelhouse/*.whl
+
+  build-wheels-macos:
+    name: Build macOS wheels
+    needs: [set-version]
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Patch version
+        run: sed -i '' "s/^version = .*/version = \"${{ needs.set-version.outputs.version }}\"/" pyproject.toml
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v3.4
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-wheels-macos
+          path: wheelhouse/*.whl
+
+  publish:
+    name: Publish nightly to PyPI
+    needs: [build-sdist, build-wheels-linux, build-wheels-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tenax-tn
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
