@@ -347,20 +347,20 @@ def _optimize_gs_ad_tensor(
     from tenax.algorithms.ad_utils import (
         _config_from_tuple,
         _ctm_tensor_multisite_fixed_point,
-        _flatten_envs,
     )
 
     def loss_fn_fwd(A_param):
+        """Forward-only loss for line search — warm-starts CTM from prev_env_leaves."""
         A_data = A_param.todense()
         if use_c4v:
             A_data = symmetrize_c4v(A_data)
         A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
         A_norm = DenseTensor(A_norm_data, A_param.indices)
-        st = {(0, 0): A_norm}
-        config_obj = _config_from_tuple(config_tuple)
-        envs = _ctm_tensor_multisite_fixed_point(st, SINGLE_SITE_NEIGHBORS, config_obj)
-        flat = _flatten_envs(envs)
-        env_ = jax.tree.unflatten(env_treedef, flat)
+        site_tensors = {(0, 0): A_norm}
+        env_leaves = ctm_tensor_converge(
+            site_tensors, prev_env_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
+        )
+        env_ = jax.tree.unflatten(env_treedef, env_leaves)
         return float(compute_energy_ctm_tensor(A_norm, env_, gate, d_phys))
 
     for step in range(config.gs_num_steps):
@@ -627,7 +627,6 @@ def _optimize_gs_ad_tensor_2site(
         _config_from_tuple,
         _config_to_tuple,
         _ctm_tensor_multisite_fixed_point,
-        _flatten_envs,
         ctm_tensor_converge,
         ctm_tensor_converge_explicit,
     )
@@ -706,19 +705,18 @@ def _optimize_gs_ad_tensor_2site(
     prev_params_flat: jnp.ndarray | None = None
     prev_grad_flat: jnp.ndarray | None = None
 
-    # Forward-only loss for line search — uses fresh CTM (no warm-start)
-    # to avoid accepting steps that look good only with stale environments
+    # Forward-only loss for line search — warm-starts CTM from prev_env_leaves
 
     def loss_fn_fwd(params_):
         A_p, B_p = params_
         A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
         B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
-        st = {(0, 0): A_norm, (1, 0): B_norm}
-        config_obj = _config_from_tuple(config_tuple)
-        envs = _ctm_tensor_multisite_fixed_point(st, CHECKERBOARD_NEIGHBORS, config_obj)
-        flat = _flatten_envs(envs)
-        env_A_ = jax.tree.unflatten(env_treedef, flat[:n_env_leaves])
-        env_B_ = jax.tree.unflatten(env_treedef, flat[n_env_leaves:])
+        site_tensors = {(0, 0): A_norm, (1, 0): B_norm}
+        env_leaves = ctm_tensor_converge(
+            site_tensors, prev_env_leaves, CHECKERBOARD_NEIGHBORS, config_tuple
+        )
+        env_A_ = jax.tree.unflatten(env_treedef, env_leaves[:n_env_leaves])
+        env_B_ = jax.tree.unflatten(env_treedef, env_leaves[n_env_leaves:])
         return float(
             compute_energy_ctm_tensor_2site(
                 A_norm,
