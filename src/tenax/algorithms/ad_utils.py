@@ -446,6 +446,7 @@ def _config_to_tuple(config) -> tuple:
         int(getattr(config, "gmres_precondition", True)),
         {"vjp": 0, "gmres": 1}.get(getattr(config, "ad_backward_method", "vjp"), 0),
         _CONV_METHOD_STR_TO_INT.get(getattr(config, "ctm_conv_method", "sv"), 0),
+        int(getattr(config, "jit_ctm", False)),
     )
 
 
@@ -459,6 +460,7 @@ def _config_from_tuple(config_tuple: tuple):
     ad_backward_method = {0: "vjp", 1: "gmres"}.get(ad_bwd_int, "vjp")
     conv_method_int = config_tuple[9] if len(config_tuple) > 9 else 0
     ctm_conv_method = _CONV_METHOD_INT_TO_STR.get(conv_method_int, "sv")
+    jit_ctm = bool(config_tuple[10]) if len(config_tuple) > 10 else False
     return CTMConfig(
         chi=config_tuple[0],
         max_iter=config_tuple[1],
@@ -470,6 +472,7 @@ def _config_from_tuple(config_tuple: tuple):
         gmres_precondition=gmres_precondition,
         ad_backward_method=ad_backward_method,
         ctm_conv_method=ctm_conv_method,
+        jit_ctm=jit_ctm,
     )
 
 
@@ -846,9 +849,12 @@ def ctm_tensor_converge(
     """
     config = _config_from_tuple(config_tuple)
     envs_init = _unflatten_envs_init(env_init_leaves, site_tensors, config.chi)
-    envs = _ctm_tensor_multisite_fixed_point(
-        site_tensors, neighbors, config, envs_init=envs_init
+    _fp_fn = (
+        _ctm_tensor_multisite_fixed_point_jit
+        if config.jit_ctm
+        else _ctm_tensor_multisite_fixed_point
     )
+    envs = _fp_fn(site_tensors, neighbors, config, envs_init=envs_init)
     return _flatten_envs(envs)
 
 
@@ -856,9 +862,12 @@ def _ctm_tensor_converge_fwd(site_tensors, env_init_leaves, neighbors, config_tu
     """Forward pass -- run multisite Tensor CTM, cache tensors and envs."""
     config = _config_from_tuple(config_tuple)
     envs_init = _unflatten_envs_init(env_init_leaves, site_tensors, config.chi)
-    envs = _ctm_tensor_multisite_fixed_point(
-        site_tensors, neighbors, config, envs_init=envs_init
+    _fp_fn = (
+        _ctm_tensor_multisite_fixed_point_jit
+        if config.jit_ctm
+        else _ctm_tensor_multisite_fixed_point
     )
+    envs = _fp_fn(site_tensors, neighbors, config, envs_init=envs_init)
     out = _flatten_envs(envs)
     residuals = (site_tensors, envs, env_init_leaves)
     return out, residuals
