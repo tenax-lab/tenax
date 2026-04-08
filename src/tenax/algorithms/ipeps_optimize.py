@@ -598,12 +598,18 @@ def _optimize_gs_ad_tensor(
                     )
                     return _tree_dot(g, direction)
 
+                dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
+                param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
+                alpha0 = min(1.0, 0.1 * param_norm / dir_norm)
+
                 alpha, f_alpha, converged = hager_zhang_line_search(
                     _phi,
                     _dphi,
                     energy_float,
                     slope,
-                    alpha_init=1.0,
+                    alpha_init=alpha0,
+                    max_step=2.0 * alpha0,
+                    energy_bound=max(10.0, 10.0 * abs(energy_float)),
                 )
                 if f_alpha < energy_float:
                     params = _normalize_params(
@@ -1076,12 +1082,18 @@ def _optimize_gs_ad_tensor_2site(
                     )
                     return _tree_dot(g, direction)
 
+                dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
+                param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
+                alpha0 = min(1.0, 0.1 * param_norm / dir_norm)
+
                 alpha, f_alpha, converged = hager_zhang_line_search(
                     _phi,
                     _dphi,
                     energy_float,
                     slope,
-                    alpha_init=1.0,
+                    alpha_init=alpha0,
+                    max_step=2.0 * alpha0,
+                    energy_bound=max(10.0, 10.0 * abs(energy_float)),
                 )
                 if f_alpha < energy_float:
                     params = _normalize_params(

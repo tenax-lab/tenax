@@ -22,6 +22,8 @@ def hager_zhang_line_search(
     gamma: float = 0.66,
     rho: float = 5.0,
     max_iter: int = 40,
+    max_step: float | None = None,
+    energy_bound: float | None = None,
 ) -> tuple[float, float, bool]:
     """Hager-Zhang line search with approximate Wolfe conditions.
 
@@ -38,6 +40,8 @@ def hager_zhang_line_search(
         gamma: Interval shrinkage parameter.
         rho: Expansion factor for initial bracketing.
         max_iter: Maximum number of iterations.
+        max_step: Maximum allowed step size. If set, alpha is clipped to this.
+        energy_bound: Reject trial points where ``|phi(alpha)| > energy_bound``.
 
     Returns:
         (alpha, phi_alpha, converged) where converged is True if Wolfe
@@ -61,7 +65,11 @@ def hager_zhang_line_search(
             val = float(phi(alpha))
         except Exception:
             return float("inf")
-        return val if _is_finite(val) else float("inf")
+        if not _is_finite(val):
+            return float("inf")
+        if energy_bound is not None and abs(val) > energy_bound:
+            return float("inf")
+        return val
 
     def _safe_dphi(alpha: float) -> float:
         try:
@@ -157,6 +165,8 @@ def hager_zhang_line_search(
     f_prev = phi0
     d_prev = dphi0
     c = alpha_init
+    if max_step is not None:
+        c = min(c, max_step)
 
     for it in range(max_iter):
         fc = _safe_phi(c)
@@ -191,6 +201,14 @@ def hager_zhang_line_search(
         # Expand
         c_prev, f_prev, d_prev = c, fc, dc
         c = rho * c
+        if max_step is not None:
+            c = min(c, max_step)
+            if c <= c_prev:
+                # Hit max_step — bracket with what we have
+                a, fa, da = c_prev, f_prev, d_prev
+                b, fb, db = c, _safe_phi(c), 0.0
+                _update_best(c, fb)
+                break
     else:
         # Exhausted iterations in bracket phase
         return best_alpha, best_phi, False
