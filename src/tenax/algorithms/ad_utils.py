@@ -1335,21 +1335,31 @@ def _ctm_tensor_multisite_fixed_point_jit(
             )
         )
 
-    def _compute_sv(e_leaves):
-        """Compute normalized corner SVs for all sites, concatenated."""
-        svs = []
-        for s in range(n_sites):
-            c1_dense = e_leaves[s * n_env_per_site]  # C1 is leaf 0
-            sv = jnp.linalg.svd(c1_dense, compute_uv=False)
-            sv = sv / (jnp.sum(sv) + 1e-15)
-            svs.append(sv)
-        return jnp.concatenate(svs)
+    use_elementwise = getattr(config, "ctm_conv_method", "sv") == "elementwise"
 
-    # Initial SVs (zeros — forces at least one iteration)
-    init_sv = jnp.zeros(n_sites * chi)
+    if use_elementwise:
+        # Elementwise convergence: compare all env arrays between sweeps
+        def _compute_conv_ref(e_leaves):
+            """Concatenate all env leaf arrays for elementwise comparison."""
+            return jnp.concatenate([x.ravel() for x in e_leaves])
 
-    # State: (env_leaves, prev_sv, iteration, converged)
-    init_state = (env_leaves, init_sv, jnp.int32(0), jnp.bool_(False))
+        init_ref = jnp.zeros(sum(x.size for x in env_leaves))
+    else:
+        # SV convergence: compare normalized corner singular values
+        def _compute_conv_ref(e_leaves):
+            """Compute normalized corner SVs for all sites, concatenated."""
+            svs = []
+            for s in range(n_sites):
+                c1_dense = e_leaves[s * n_env_per_site]  # C1 is leaf 0
+                sv = jnp.linalg.svd(c1_dense, compute_uv=False)
+                sv = sv / (jnp.sum(sv) + 1e-15)
+                svs.append(sv)
+            return jnp.concatenate(svs)
+
+        init_ref = jnp.zeros(n_sites * chi)
+
+    # State: (env_leaves, prev_ref, iteration, converged)
+    init_state = (env_leaves, init_ref, jnp.int32(0), jnp.bool_(False))
 
     @jax.jit
     def _run_while_loop(state):
@@ -1358,16 +1368,27 @@ def _ctm_tensor_multisite_fixed_point_jit(
             return (~converged) & (i < max_iter)
 
         def body_fn(state):
-            e_leaves, prev_sv, i, _ = state
+            e_leaves, prev_ref, i, _ = state
             new_e_leaves = _one_sweep(e_leaves)
-            new_sv = _compute_sv(new_e_leaves)
-            diff = jnp.max(jnp.abs(new_sv - prev_sv))
+            new_ref = _compute_conv_ref(new_e_leaves)
+            diff = jnp.max(jnp.abs(new_ref - prev_ref))
             converged = (i + 1 >= min_iter) & (diff < conv_tol)
-            return (new_e_leaves, new_sv, i + 1, converged)
+            return (new_e_leaves, new_ref, i + 1, converged)
 
         return jax.lax.while_loop(cond_fn, body_fn, state)
 
-    final_env_leaves, _, _, _ = _run_while_loop(init_state)
+    final_env_leaves, _, n_iters, converged = _run_while_loop(init_state)
+    n_iters = int(n_iters)
+    converged = bool(converged)
+
+    if not converged:
+        import warnings
+
+        warnings.warn(
+            f"JIT CTM did not converge in {n_iters} iterations "
+            f"(max_iter={max_iter}, conv_tol={conv_tol})",
+            stacklevel=2,
+        )
 
     # Unflatten final result
     envs = {}
