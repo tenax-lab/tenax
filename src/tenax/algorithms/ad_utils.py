@@ -35,6 +35,30 @@ from tenax.algorithms._split_ctm_tensor import (
 from tenax.algorithms.ipeps_config import CTMConfig
 
 # ---------------------------------------------------------------------------
+# 0. SVD sign-fixing helper
+# ---------------------------------------------------------------------------
+
+
+def _fix_svd_signs(
+    U: jax.Array, s: jax.Array, Vh: jax.Array
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Fix SVD gauge: rotate each singular vector so max-|U| element is real-positive.
+
+    For each column j of U, find the row with the largest absolute value and
+    multiply both U[:, j] and Vh[j, :] by the sign (or phase for complex)
+    that makes that element real-positive.
+
+    Reference: YASTN fix_svd_signs, variPEPS gauge_fixed_svd.
+    """
+    max_idx = jnp.argmax(jnp.abs(U), axis=0)  # shape (k,)
+    signs = U[max_idx, jnp.arange(U.shape[1])]
+    phases = jnp.where(jnp.abs(signs) > 0, signs / jnp.abs(signs), 1.0)
+    U = U * jnp.conj(phases)[None, :]
+    Vh = Vh * jnp.conj(phases)[:, None]
+    return U, s, Vh
+
+
+# ---------------------------------------------------------------------------
 # 1. Truncated SVD with stable backward pass
 # ---------------------------------------------------------------------------
 
@@ -57,6 +81,7 @@ def truncated_svd_ad(
         ``(U, s, Vh)`` truncated to *chi*.
     """
     U, s, Vh = jnp.linalg.svd(M, full_matrices=False)
+    U, s, Vh = _fix_svd_signs(U, s, Vh)
     k = min(chi, s.shape[0])
     return U[:, :k], s[:k], Vh[:k, :]
 
@@ -67,6 +92,7 @@ def _truncated_svd_ad_fwd(
 ) -> tuple[tuple[jax.Array, jax.Array, jax.Array], tuple]:
     """Forward pass — store full SVD for backward."""
     U_full, s_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
+    U_full, s_full, Vh_full = _fix_svd_signs(U_full, s_full, Vh_full)
     k = min(chi, s_full.shape[0])
     U = U_full[:, :k]
     s = s_full[:k]
@@ -195,12 +221,12 @@ def regularized_svd(M: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
     Returns a plain ``(U, s, Vh)`` tuple (not ``SVDResult``).
     """
     result = jnp.linalg.svd(M, full_matrices=False)
-    return result.U, result.S, result.Vh
+    return _fix_svd_signs(result.U, result.S, result.Vh)
 
 
 def _regularized_svd_fwd(M):
     result = jnp.linalg.svd(M, full_matrices=False)
-    U, s, Vh = result.U, result.S, result.Vh
+    U, s, Vh = _fix_svd_signs(result.U, result.S, result.Vh)
     return (U, s, Vh), (U, s, Vh)
 
 

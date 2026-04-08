@@ -27,6 +27,7 @@ from tenax.algorithms.ad_utils import (
     _gauge_fix_ctm_tensor,
     _svd_sector_backward,
     ctm_tensor_converge,
+    regularized_svd,
     truncated_svd_ad,
     truncated_svd_symmetric_ad,
 )
@@ -650,3 +651,60 @@ class TestSymmetricSvdAdMatchesDense:
 
         grad = jax.grad(loss)(A)
         assert jnp.all(jnp.isfinite(grad.todense())), "Gradient contains NaN/Inf"
+
+
+class TestSVDSignFixing:
+    """Tests for SVD sign-fixing gauge convention."""
+
+    def test_sign_convention_truncated(self):
+        """Max-abs element of each U column should be real-positive after truncated_svd_ad."""
+        key = jax.random.PRNGKey(0)
+        M = jax.random.normal(key, (6, 4))
+        chi = 3
+        U, s, Vh = truncated_svd_ad(M, chi)
+        for j in range(U.shape[1]):
+            col = U[:, j]
+            max_elem = col[jnp.argmax(jnp.abs(col))]
+            assert float(jnp.real(max_elem)) > 0, (
+                f"Column {j}: max-abs element {float(max_elem)} is not real-positive"
+            )
+
+    def test_sign_convention_regularized(self):
+        """Max-abs element of each U column should be real-positive after regularized_svd."""
+        key = jax.random.PRNGKey(1)
+        M = jax.random.normal(key, (5, 4))
+        U, s, Vh = regularized_svd(M)
+        for j in range(U.shape[1]):
+            col = U[:, j]
+            max_elem = col[jnp.argmax(jnp.abs(col))]
+            assert float(jnp.real(max_elem)) > 0, (
+                f"Column {j}: max-abs element {float(max_elem)} is not real-positive"
+            )
+
+    def test_sign_fix_preserves_reconstruction(self):
+        """U @ diag(s) @ Vh should still reconstruct the original matrix."""
+        key = jax.random.PRNGKey(2)
+        M = jax.random.normal(key, (6, 4))
+        chi = 3
+        U, s, Vh = truncated_svd_ad(M, chi)
+        recon = U * s[None, :] @ Vh
+
+        # Compare against standard SVD truncated reconstruction
+        U_ref, s_ref, Vh_ref = jnp.linalg.svd(M, full_matrices=False)
+        recon_ref = U_ref[:, :chi] * s_ref[:chi][None, :] @ Vh_ref[:chi, :]
+        assert jnp.allclose(recon, recon_ref, atol=1e-12), (
+            f"Reconstruction mismatch: {float(jnp.max(jnp.abs(recon - recon_ref)))}"
+        )
+
+    def test_sign_fix_gradient_finite(self):
+        """Gradient through sign-fixed SVD should be finite."""
+        key = jax.random.PRNGKey(3)
+        M = jax.random.normal(key, (5, 4))
+        chi = 3
+
+        def loss(M_in):
+            U, s, Vh = truncated_svd_ad(M_in, chi)
+            return jnp.sum(U**2) + jnp.sum(s) + jnp.sum(Vh**2)
+
+        grad = jax.grad(loss)(M)
+        assert jnp.all(jnp.isfinite(grad)), f"NaN/Inf in gradient: {grad}"
