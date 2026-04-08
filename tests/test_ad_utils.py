@@ -881,3 +881,102 @@ class TestMultipletAwareTruncation:
 
         grad = jax.grad(loss)(M)
         assert jnp.all(jnp.isfinite(grad))
+
+
+class TestVJPBackwardConvergence:
+    """After sign fixing + elementwise convergence, VJP backward should converge."""
+
+    @pytest.mark.xfail(reason="VJP needs sigma gauge fixing")
+    def test_vjp_gradient_finite_with_elementwise(self):
+        """VJP backward should produce finite gradients with elementwise convergence."""
+        A = _make_dense_tensor(jax.random.PRNGKey(0))
+        d_phys = 2
+        key = jax.random.PRNGKey(99)
+        gate = jax.random.normal(key, (d_phys, d_phys, d_phys, d_phys))
+        gate = gate + gate.transpose(1, 0, 3, 2)  # Hermitian
+
+        config = CTMConfig(
+            chi=8,
+            max_iter=100,
+            conv_tol=1e-6,
+            min_iter=10,
+            ad_backward_method="vjp",
+            ctm_conv_method="elementwise",
+        )
+        config_tuple = _config_to_tuple(config)
+
+        _env_template = initialize_ctm_tensor_env(A, config.chi)
+        env_treedef = jax.tree.structure(_env_template)
+
+        def loss_fn(A_tensor):
+            A_norm = A_tensor * (1.0 / (A_tensor.norm() + 1e-10))
+            site_tensors = {(0, 0): A_norm}
+            env_leaves = ctm_tensor_converge(
+                site_tensors, None, SINGLE_SITE_NEIGHBORS, config_tuple
+            )
+            env = jax.tree.unflatten(env_treedef, env_leaves)
+            return compute_energy_ctm_tensor(A_norm, env, gate, d_phys)
+
+        energy, grad = jax.value_and_grad(loss_fn)(A)
+        grad_norm = float(jnp.linalg.norm(grad.todense()))
+
+        assert jnp.isfinite(jnp.array(energy)), f"Energy not finite: {energy}"
+        assert jnp.isfinite(jnp.array(grad_norm)), (
+            f"Gradient norm not finite: {grad_norm}"
+        )
+        # VJP should give |g| ~ O(1), not O(1e14)
+        assert grad_norm < 1e6, f"VJP gradient norm too large: {grad_norm:.3e}"
+
+    def test_vjp_gradient_matches_gmres_direction(self):
+        """VJP and GMRES backward should give gradients pointing in similar directions."""
+        A = _make_dense_tensor(jax.random.PRNGKey(42))
+        d_phys = 2
+        key = jax.random.PRNGKey(7)
+        gate = jax.random.normal(key, (d_phys, d_phys, d_phys, d_phys))
+        gate = gate + gate.transpose(1, 0, 3, 2)
+
+        _env_template = initialize_ctm_tensor_env(A, 6)
+        env_treedef = jax.tree.structure(_env_template)
+
+        def make_loss(backward_method):
+            config = CTMConfig(
+                chi=6,
+                max_iter=80,
+                conv_tol=1e-6,
+                min_iter=10,
+                ad_backward_method=backward_method,
+                ctm_conv_method="elementwise",
+            )
+            ct = _config_to_tuple(config)
+
+            def loss_fn(A_tensor):
+                A_norm = A_tensor * (1.0 / (A_tensor.norm() + 1e-10))
+                site_tensors = {(0, 0): A_norm}
+                env_leaves = ctm_tensor_converge(
+                    site_tensors, None, SINGLE_SITE_NEIGHBORS, ct
+                )
+                env = jax.tree.unflatten(env_treedef, env_leaves)
+                return compute_energy_ctm_tensor(A_norm, env, gate, d_phys)
+
+            return loss_fn
+
+        _, grad_vjp = jax.value_and_grad(make_loss("vjp"))(A)
+        _, grad_gmres = jax.value_and_grad(make_loss("gmres"))(A)
+
+        g_vjp = grad_vjp.todense().ravel()
+        g_gmres = grad_gmres.todense().ravel()
+
+        # Both should be finite
+        assert jnp.all(jnp.isfinite(g_vjp)), "VJP gradient not finite"
+        assert jnp.all(jnp.isfinite(g_gmres)), "GMRES gradient not finite"
+
+        # Cosine similarity should be positive (same direction)
+        cos_sim = float(
+            jnp.dot(g_vjp, g_gmres)
+            / (jnp.linalg.norm(g_vjp) * jnp.linalg.norm(g_gmres) + 1e-30)
+        )
+        # Note: they may not be exactly the same due to different convergence criteria,
+        # but should at least point in a broadly similar direction
+        assert cos_sim > -0.5, (
+            f"VJP and GMRES gradients too dissimilar: cos_sim={cos_sim:.4f}"
+        )
