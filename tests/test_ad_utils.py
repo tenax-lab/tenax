@@ -761,3 +761,66 @@ class TestElementWiseCTMConvergence:
 
         grad = jax.grad(loss)(M)
         assert jnp.all(jnp.isfinite(grad)), f"NaN/Inf in gradient: {grad}"
+
+
+class TestRegularizedEigh:
+    """regularized_eigh should handle degenerate eigenvalues without NaN."""
+
+    def test_forward_matches_jnp_eigh(self):
+        from tenax.algorithms.ad_utils import regularized_eigh
+
+        key = jax.random.PRNGKey(7)
+        M = jax.random.normal(key, (4, 4))
+        M = M + M.T
+
+        w, v = regularized_eigh(M)
+        w_ref, v_ref = jnp.linalg.eigh(M)
+        assert jnp.allclose(w, w_ref, atol=1e-10)
+        recon = v @ jnp.diag(w) @ v.T
+        recon_ref = v_ref @ jnp.diag(w_ref) @ v_ref.T
+        assert jnp.allclose(recon, recon_ref, atol=1e-10)
+
+    def test_gradient_finite_nondegenerate(self):
+        from tenax.algorithms.ad_utils import regularized_eigh
+
+        key = jax.random.PRNGKey(0)
+        M = jax.random.normal(key, (5, 5))
+        M = M + M.T
+
+        def loss(M_in):
+            w, v = regularized_eigh(M_in)
+            return jnp.sum(w**2)
+
+        grad = jax.grad(loss)(M)
+        assert jnp.all(jnp.isfinite(grad))
+
+    def test_gradient_finite_degenerate(self):
+        from tenax.algorithms.ad_utils import regularized_eigh
+
+        key = jax.random.PRNGKey(42)
+        Q, _ = jnp.linalg.qr(jax.random.normal(key, (5, 5)))
+        eigvals = jnp.array([3.0, 3.0, 2.0, 2.0, 1.0])
+        M = Q @ jnp.diag(eigvals) @ Q.T
+        M = 0.5 * (M + M.T)
+
+        def loss(M_in):
+            w, v = regularized_eigh(M_in)
+            return jnp.sum(w**2)
+
+        grad = jax.grad(loss)(M)
+        assert jnp.all(jnp.isfinite(grad))
+        assert float(jnp.sum(jnp.abs(grad))) > 0
+
+    def test_gradient_through_eigenvectors(self):
+        from tenax.algorithms.ad_utils import regularized_eigh
+
+        key = jax.random.PRNGKey(99)
+        M = jax.random.normal(key, (4, 4))
+        M = M + M.T
+
+        def loss(M_in):
+            w, v = regularized_eigh(M_in)
+            return jnp.sum(v[:, -1] ** 2)  # depends on eigenvectors
+
+        grad = jax.grad(loss)(M)
+        assert jnp.all(jnp.isfinite(grad))

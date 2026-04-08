@@ -241,6 +241,60 @@ regularized_svd.defvjp(_regularized_svd_fwd, _regularized_svd_bwd)
 
 
 # ---------------------------------------------------------------------------
+# 1a-ter. Symmetric eigendecomposition with regularized backward pass
+# ---------------------------------------------------------------------------
+
+_EIGH_LORENTZ_EPS = 1e-12
+
+
+@partial(jax.custom_vjp)
+def regularized_eigh(M: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """Symmetric eigendecomposition with Lorentzian-regularized backward.
+
+    Same as ``jnp.linalg.eigh(M)`` but the VJP uses Lorentzian broadening
+    to prevent NaN gradients from degenerate eigenvalues.
+
+    Returns:
+        ``(eigenvalues, eigenvectors)`` sorted ascending.
+    """
+    w, v = jnp.linalg.eigh(M)
+    return w, v
+
+
+def _regularized_eigh_fwd(M):
+    w, v = jnp.linalg.eigh(M)
+    return (w, v), (w, v)
+
+
+def _regularized_eigh_bwd(residuals, g):
+    """Lorentzian-regularized eigh backward.
+
+    Standard eigh backward: F_ij = 1/(lambda_i - lambda_j) diverges for
+    degenerate eigenvalues.
+    Regularized: F_ij = (lambda_i - lambda_j) / ((lambda_i - lambda_j)^2 + eps^2)
+    """
+    w, v = residuals
+    dw, dv = g
+    eps = _EIGH_LORENTZ_EPS
+
+    # Lorentzian-regularized F-matrix
+    diff = w[:, None] - w[None, :]
+    F = diff / (diff**2 + eps**2)
+    F = F - jnp.diag(jnp.diag(F))  # zero diagonal
+
+    # Backward: dM = V (diag(dw) + F * (V^T dV)) V^T
+    inner = v.conj().T @ dv
+    dM = v @ (jnp.diag(dw) + F * inner) @ v.conj().T
+
+    # Symmetrize output (input was symmetric)
+    dM = 0.5 * (dM + dM.conj().T)
+    return (dM,)
+
+
+regularized_eigh.defvjp(_regularized_eigh_fwd, _regularized_eigh_bwd)
+
+
+# ---------------------------------------------------------------------------
 # 1b. Truncated SVD with stable backward for SymmetricTensor
 # ---------------------------------------------------------------------------
 
