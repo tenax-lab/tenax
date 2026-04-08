@@ -352,7 +352,13 @@ def _optimize_gs_ad_tensor(
     A = A_init
     A = A * (1.0 / (A.norm() + 1e-10))
 
-    config_tuple = _config_to_tuple(config.ctm)
+    # Override projector method for AD if gs_projector_method is set
+    ctm_cfg = config.ctm
+    if config.gs_projector_method is not None:
+        from dataclasses import replace as _replace
+
+        ctm_cfg = _replace(ctm_cfg, projector_method=config.gs_projector_method)
+    config_tuple = _config_to_tuple(ctm_cfg)
 
     use_c4v = config.gs_c4v
     if use_c4v:
@@ -801,7 +807,12 @@ def _optimize_gs_ad_tensor_2site(
     A = A * (1.0 / (A.norm() + 1e-10))
     B = B * (1.0 / (B.norm() + 1e-10))
 
-    config_tuple = _config_to_tuple(config.ctm)
+    ctm_cfg_2s = config.ctm
+    if config.gs_projector_method is not None:
+        from dataclasses import replace as _replace
+
+        ctm_cfg_2s = _replace(ctm_cfg_2s, projector_method=config.gs_projector_method)
+    config_tuple = _config_to_tuple(ctm_cfg_2s)
     use_explicit = config.gs_explicit_ad
     explicit_steps = config.gs_explicit_ad_steps
     explicit_warmup = config.gs_explicit_ad_warmup

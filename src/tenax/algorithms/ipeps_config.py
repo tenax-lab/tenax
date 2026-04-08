@@ -29,7 +29,7 @@ class CTMConfig:
     max_iter: int = 100
     conv_tol: float = 1e-8
     renormalize: bool = True
-    projector_method: str = "eigh"  # "eigh" or "qr"
+    projector_method: str = "eigh"  # "eigh", "qr", or "svd" (Fishman)
     min_iter: int = 10  # minimum CTM sweeps before checking convergence
     qr_warmup_steps: int = 3  # eigh warm-up iterations before QR kicks in
     chi_I: int | None = None  # interlayer bond dim for split-CTMRG; None => chi_I = chi
@@ -87,6 +87,9 @@ class iPEPSConfig:
     gs_explicit_ad_warmup: int = 3  # warmup CTM steps (no gradient tracking)
     su_init: bool = True  # initialize via simple update before AD
     gs_c4v: bool = False  # enforce C4v symmetry on site tensor during AD
+    gs_projector_method: str | None = (
+        None  # projector override for AD; None => use ctm.projector_method
+    )
     # Metric preconditioning (natural gradient, Rader et al. arXiv:2511.09546)
     gs_metric_precond: bool = True  # metric preconditioning for CG/L-BFGS
     metric_gmres_maxiter: int = 30  # Krylov dimension for metric inversion
