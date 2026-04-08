@@ -645,11 +645,11 @@ def _compute_projector_tensor(
     rho = C1g_dense @ C1g_dense.conj().T + C4g_dense @ C4g_dense.conj().T
     rho = 0.5 * (rho + rho.conj().T)
     if _has_tracers:
-        from tenax.algorithms.ad_utils import regularized_svd
+        from tenax.algorithms.ad_utils import regularized_eigh
 
-        U_rho, S_rho, _Vh_rho = regularized_svd(rho)
-        k = min(chi, len(S_rho))
-        P_dense = U_rho[:, :k]
+        eigvals, eigvecs = regularized_eigh(rho)
+        k = min(chi, len(eigvals))
+        P_dense = eigvecs[:, -k:][:, ::-1]
     else:
         eigvals, eigvecs = jnp.linalg.eigh(rho)
         k = min(chi, len(eigvals))

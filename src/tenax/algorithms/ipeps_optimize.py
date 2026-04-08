@@ -567,14 +567,86 @@ def _optimize_gs_ad_tensor(
             direction = jax.tree.map(lambda g: -g, grads)
 
         if use_ls:
-            params, _, _ = _backtracking_line_search(
-                params,
-                direction,
-                grads,
-                energy_float,
-                loss_fn_fwd,
-                max_steps=config.gs_line_search_max_steps,
-            )
+            if config.gs_line_search_method == "hager_zhang":
+                from tenax.algorithms._line_search import hager_zhang_line_search
+
+                slope = _tree_dot(grads, direction)
+                if slope >= 0:
+                    direction = jax.tree.map(lambda g: -g, grads)
+                    slope = -_tree_dot(grads, grads)
+
+                def _phi(alpha):
+                    trial = _normalize_params(
+                        _tree_add(params, _tree_scale(direction, alpha))
+                    )
+                    return loss_fn_fwd(trial)
+
+                def _dphi(alpha):
+                    trial = _normalize_params(
+                        _tree_add(params, _tree_scale(direction, alpha))
+                    )
+                    (_, _aux), g = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
+                        trial, prev_env_leaves
+                    )
+                    return _tree_dot(g, direction)
+
+                alpha, f_alpha, converged = hager_zhang_line_search(
+                    _phi,
+                    _dphi,
+                    energy_float,
+                    slope,
+                    alpha_init=1.0,
+                )
+                if f_alpha < energy_float:
+                    params = _normalize_params(
+                        _tree_add(params, _tree_scale(direction, alpha))
+                    )
+                    stall_count = 0
+                else:
+                    stall_count += 1
+            else:
+                params, new_energy, step_size = _backtracking_line_search(
+                    params,
+                    direction,
+                    grads,
+                    energy_float,
+                    loss_fn_fwd,
+                    max_steps=config.gs_line_search_max_steps,
+                )
+                if new_energy < energy_float:
+                    stall_count = 0
+                else:
+                    stall_count += 1
+
+            # Noise recovery on persistent stall
+            if stall_count > 0 and stall_count <= config.gs_noise_recovery_retries:
+                noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
+                if use_c4v:
+                    noise = config.gs_noise_amplitude * jax.random.normal(
+                        noise_key, params.shape
+                    )
+                    params = params + noise * jnp.linalg.norm(params)
+                    params = params / (jnp.linalg.norm(params) + 1e-10)
+                else:
+                    data = params.todense()
+                    noise = config.gs_noise_amplitude * jax.random.normal(
+                        noise_key, data.shape
+                    )
+                    noisy = data + noise * jnp.linalg.norm(data)
+                    params = type(params)(
+                        noisy / (jnp.linalg.norm(noisy) + 1e-10), params.indices
+                    )
+                if config.gs_verbose:
+                    print(f"[iPEPS-AD] stall #{stall_count}, adding noise", flush=True)
+                # Reset optimizer state
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_A_flat = None
+                    prev_grad_flat = None
         else:
             params = optax.apply_updates(params, direction)
             if not use_c4v:
@@ -789,6 +861,7 @@ def _optimize_gs_ad_tensor_2site(
     lbfgs_history: list = []
     prev_params_flat: jnp.ndarray | None = None
     prev_grad_flat: jnp.ndarray | None = None
+    stall_count = 0  # noise recovery: consecutive line search failures
 
     # Forward-only loss for line search — warm-starts CTM from prev_env_leaves
 
@@ -967,14 +1040,81 @@ def _optimize_gs_ad_tensor_2site(
             direction = jax.tree.map(lambda g: -g, grads)
 
         if use_ls:
-            params, _, _ = _backtracking_line_search(
-                params,
-                direction,
-                grads,
-                energy_float,
-                loss_fn_fwd,
-                max_steps=config.gs_line_search_max_steps,
-            )
+            if config.gs_line_search_method == "hager_zhang":
+                from tenax.algorithms._line_search import hager_zhang_line_search
+
+                slope = _tree_dot(grads, direction)
+                if slope >= 0:
+                    direction = jax.tree.map(lambda g: -g, grads)
+                    slope = -_tree_dot(grads, grads)
+
+                def _phi(alpha):
+                    trial = _normalize_params(
+                        _tree_add(params, _tree_scale(direction, alpha))
+                    )
+                    return loss_fn_fwd(trial)
+
+                def _dphi(alpha):
+                    trial = _normalize_params(
+                        _tree_add(params, _tree_scale(direction, alpha))
+                    )
+                    (_, _aux), g = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
+                        trial, prev_env_leaves
+                    )
+                    return _tree_dot(g, direction)
+
+                alpha, f_alpha, converged = hager_zhang_line_search(
+                    _phi,
+                    _dphi,
+                    energy_float,
+                    slope,
+                    alpha_init=1.0,
+                )
+                if f_alpha < energy_float:
+                    params = _normalize_params(
+                        _tree_add(params, _tree_scale(direction, alpha))
+                    )
+                    stall_count = 0
+                else:
+                    stall_count += 1
+            else:
+                params, new_energy, step_size = _backtracking_line_search(
+                    params,
+                    direction,
+                    grads,
+                    energy_float,
+                    loss_fn_fwd,
+                    max_steps=config.gs_line_search_max_steps,
+                )
+                if new_energy < energy_float:
+                    stall_count = 0
+                else:
+                    stall_count += 1
+
+            # Noise recovery on persistent stall
+            if stall_count > 0 and stall_count <= config.gs_noise_recovery_retries:
+                noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
+                noisy_params = []
+                for i, p in enumerate(params):
+                    k = jax.random.fold_in(noise_key, i)
+                    data = p.todense()
+                    noise = config.gs_noise_amplitude * jax.random.normal(k, data.shape)
+                    noisy = data + noise * jnp.linalg.norm(data)
+                    noisy_params.append(
+                        type(p)(noisy / (jnp.linalg.norm(noisy) + 1e-10), p.indices)
+                    )
+                params = tuple(noisy_params)
+                if config.gs_verbose:
+                    print(f"[iPEPS-AD] stall #{stall_count}, adding noise", flush=True)
+                # Reset optimizer state
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_params_flat = None
+                    prev_grad_flat = None
         else:
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)

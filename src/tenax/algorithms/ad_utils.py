@@ -35,6 +35,30 @@ from tenax.algorithms._split_ctm_tensor import (
 from tenax.algorithms.ipeps_config import CTMConfig
 
 # ---------------------------------------------------------------------------
+# 0. SVD sign-fixing helper
+# ---------------------------------------------------------------------------
+
+
+def _fix_svd_signs(
+    U: jax.Array, s: jax.Array, Vh: jax.Array
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Fix SVD gauge: rotate each singular vector so max-|U| element is real-positive.
+
+    For each column j of U, find the row with the largest absolute value and
+    multiply both U[:, j] and Vh[j, :] by the sign (or phase for complex)
+    that makes that element real-positive.
+
+    Reference: YASTN fix_svd_signs, variPEPS gauge_fixed_svd.
+    """
+    max_idx = jnp.argmax(jnp.abs(U), axis=0)  # shape (k,)
+    signs = U[max_idx, jnp.arange(U.shape[1])]
+    phases = jnp.where(jnp.abs(signs) > 0, signs / jnp.abs(signs), 1.0)
+    U = U * jnp.conj(phases)[None, :]
+    Vh = Vh * jnp.conj(phases)[:, None]
+    return U, s, Vh
+
+
+# ---------------------------------------------------------------------------
 # 1. Truncated SVD with stable backward pass
 # ---------------------------------------------------------------------------
 
@@ -56,9 +80,27 @@ def truncated_svd_ad(
     Returns:
         ``(U, s, Vh)`` truncated to *chi*.
     """
-    U, s, Vh = jnp.linalg.svd(M, full_matrices=False)
-    k = min(chi, s.shape[0])
-    return U[:, :k], s[:k], Vh[:k, :]
+    U, s_full, Vh = jnp.linalg.svd(M, full_matrices=False)
+    k = min(chi, s_full.shape[0])
+    s_trunc = s_full[:k]
+
+    # Multiplet-aware truncation: if we cut through a degenerate group,
+    # zero out the partial members to keep the projector smooth.
+    if k < s_full.shape[0]:
+        boundary_val = s_full[k - 1]
+        next_val = s_full[k]
+        gap = boundary_val - next_val
+        threshold = 1e-6 * (s_full[0] + 1e-30)
+        # If the gap at the truncation point is too small, zero out
+        # all SVs matching the boundary value
+        is_in_split_multiplet = (gap < threshold) & (
+            jnp.abs(s_trunc - boundary_val) < threshold
+        )
+        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+
+    U, s_trunc, Vh = U[:, :k], s_trunc, Vh[:k, :]
+    U, s_trunc, Vh = _fix_svd_signs(U, s_trunc, Vh)
+    return U, s_trunc, Vh
 
 
 def _truncated_svd_ad_fwd(
@@ -67,12 +109,26 @@ def _truncated_svd_ad_fwd(
 ) -> tuple[tuple[jax.Array, jax.Array, jax.Array], tuple]:
     """Forward pass — store full SVD for backward."""
     U_full, s_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
+    U_full, s_full, Vh_full = _fix_svd_signs(U_full, s_full, Vh_full)
     k = min(chi, s_full.shape[0])
+    s_trunc = s_full[:k]
+
+    # Multiplet-aware truncation: zero out partial members of split multiplets
+    if k < s_full.shape[0]:
+        boundary_val = s_full[k - 1]
+        next_val = s_full[k]
+        gap = boundary_val - next_val
+        threshold = 1e-6 * (s_full[0] + 1e-30)
+        is_in_split_multiplet = (gap < threshold) & (
+            jnp.abs(s_trunc - boundary_val) < threshold
+        )
+        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+
     U = U_full[:, :k]
-    s = s_full[:k]
     Vh = Vh_full[:k, :]
+    # Store the *unmodified* full SVD in residuals for the backward pass
     residuals = (U_full, s_full, Vh_full, M, k)
-    return (U, s, Vh), residuals
+    return (U, s_trunc, Vh), residuals
 
 
 def _svd_sector_backward(
@@ -195,12 +251,12 @@ def regularized_svd(M: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
     Returns a plain ``(U, s, Vh)`` tuple (not ``SVDResult``).
     """
     result = jnp.linalg.svd(M, full_matrices=False)
-    return result.U, result.S, result.Vh
+    return _fix_svd_signs(result.U, result.S, result.Vh)
 
 
 def _regularized_svd_fwd(M):
     result = jnp.linalg.svd(M, full_matrices=False)
-    U, s, Vh = result.U, result.S, result.Vh
+    U, s, Vh = _fix_svd_signs(result.U, result.S, result.Vh)
     return (U, s, Vh), (U, s, Vh)
 
 
@@ -212,6 +268,60 @@ def _regularized_svd_bwd(residuals, g):
 
 
 regularized_svd.defvjp(_regularized_svd_fwd, _regularized_svd_bwd)
+
+
+# ---------------------------------------------------------------------------
+# 1a-ter. Symmetric eigendecomposition with regularized backward pass
+# ---------------------------------------------------------------------------
+
+_EIGH_LORENTZ_EPS = 1e-12
+
+
+@partial(jax.custom_vjp)
+def regularized_eigh(M: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """Symmetric eigendecomposition with Lorentzian-regularized backward.
+
+    Same as ``jnp.linalg.eigh(M)`` but the VJP uses Lorentzian broadening
+    to prevent NaN gradients from degenerate eigenvalues.
+
+    Returns:
+        ``(eigenvalues, eigenvectors)`` sorted ascending.
+    """
+    w, v = jnp.linalg.eigh(M)
+    return w, v
+
+
+def _regularized_eigh_fwd(M):
+    w, v = jnp.linalg.eigh(M)
+    return (w, v), (w, v)
+
+
+def _regularized_eigh_bwd(residuals, g):
+    """Lorentzian-regularized eigh backward.
+
+    Standard eigh backward: F_ij = 1/(lambda_i - lambda_j) diverges for
+    degenerate eigenvalues.
+    Regularized: F_ij = (lambda_i - lambda_j) / ((lambda_i - lambda_j)^2 + eps^2)
+    """
+    w, v = residuals
+    dw, dv = g
+    eps = _EIGH_LORENTZ_EPS
+
+    # Lorentzian-regularized F-matrix
+    diff = w[:, None] - w[None, :]
+    F = diff / (diff**2 + eps**2)
+    F = F - jnp.diag(jnp.diag(F))  # zero diagonal
+
+    # Backward: dM = V (diag(dw) + F * (V^T dV)) V^T
+    inner = v.conj().T @ dv
+    dM = v @ (jnp.diag(dw) + F * inner) @ v.conj().T
+
+    # Symmetrize output (input was symmetric)
+    dM = 0.5 * (dM + dM.conj().T)
+    return (dM,)
+
+
+regularized_eigh.defvjp(_regularized_eigh_fwd, _regularized_eigh_bwd)
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +429,10 @@ _PM_STR_TO_INT = {"eigh": 0, "qr": 1}
 _PM_INT_TO_STR = {0: "eigh", 1: "qr"}
 
 
+_CONV_METHOD_STR_TO_INT = {"sv": 0, "elementwise": 1}
+_CONV_METHOD_INT_TO_STR = {0: "sv", 1: "elementwise"}
+
+
 def _config_to_tuple(config) -> tuple:
     """Pack CTMConfig into a hashable tuple for JAX tracing."""
     return (
@@ -331,6 +445,7 @@ def _config_to_tuple(config) -> tuple:
         int(getattr(config, "ad_regularize_svd", True)),
         int(getattr(config, "gmres_precondition", True)),
         {"vjp": 0, "gmres": 1}.get(getattr(config, "ad_backward_method", "vjp"), 0),
+        _CONV_METHOD_STR_TO_INT.get(getattr(config, "ctm_conv_method", "sv"), 0),
     )
 
 
@@ -342,6 +457,8 @@ def _config_from_tuple(config_tuple: tuple):
     gmres_precondition = bool(config_tuple[7]) if len(config_tuple) > 7 else False
     ad_bwd_int = config_tuple[8] if len(config_tuple) > 8 else 0
     ad_backward_method = {0: "vjp", 1: "gmres"}.get(ad_bwd_int, "vjp")
+    conv_method_int = config_tuple[9] if len(config_tuple) > 9 else 0
+    ctm_conv_method = _CONV_METHOD_INT_TO_STR.get(conv_method_int, "sv")
     return CTMConfig(
         chi=config_tuple[0],
         max_iter=config_tuple[1],
@@ -352,6 +469,7 @@ def _config_from_tuple(config_tuple: tuple):
         ad_regularize_svd=ad_regularize_svd,
         gmres_precondition=gmres_precondition,
         ad_backward_method=ad_backward_method,
+        ctm_conv_method=ctm_conv_method,
     )
 
 
@@ -698,7 +816,10 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
         }
     )
 
+    use_elementwise = getattr(config, "ctm_conv_method", "sv") == "elementwise"
     prev_svs = {}
+    prev_env_arrays = {}
+
     for i in range(config.max_iter):
         envs = _ctm_tensor_sweep_multisite(
             envs,
@@ -714,14 +835,41 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
             continue
 
         converged = True
-        for c in sorted(envs):
-            sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
-            if c in prev_svs:
-                if float(_ctm_sv_diff_local(sv, prev_svs[c])) >= config.conv_tol:
+        if use_elementwise:
+            for c in sorted(envs):
+                env_arrays = tuple(
+                    t.todense()
+                    for t in (
+                        envs[c].C1,
+                        envs[c].C2,
+                        envs[c].C3,
+                        envs[c].C4,
+                        envs[c].T1,
+                        envs[c].T2,
+                        envs[c].T3,
+                        envs[c].T4,
+                    )
+                )
+                if c in prev_env_arrays:
+                    for curr, prev in zip(env_arrays, prev_env_arrays[c]):
+                        diff = float(jnp.max(jnp.abs(curr - prev)))
+                        if diff >= config.conv_tol:
+                            converged = False
+                            break
+                    if not converged:
+                        break
+                else:
                     converged = False
-            else:
-                converged = False
-            prev_svs[c] = sv
+                prev_env_arrays[c] = env_arrays
+        else:
+            for c in sorted(envs):
+                sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
+                if c in prev_svs:
+                    if float(_ctm_sv_diff_local(sv, prev_svs[c])) >= config.conv_tol:
+                        converged = False
+                else:
+                    converged = False
+                prev_svs[c] = sv
         if converged:
             break
 
