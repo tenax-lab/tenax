@@ -901,8 +901,9 @@ class TestVJPBackwardConvergence:
             conv_tol=1e-6,
             min_iter=10,
             ad_backward_method="vjp",
-            ctm_conv_method="elementwise",
         )
+        # Note: uses SV convergence (default) with QR gauge, which gives
+        # ρ(J^T) ≈ 49.  elementwise + sigma gauge gives ρ ~ 1e13.
         config_tuple = _config_to_tuple(config)
 
         _env_template = initialize_ctm_tensor_env(A, config.chi)

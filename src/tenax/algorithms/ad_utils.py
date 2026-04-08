@@ -1122,7 +1122,6 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
     prev_env_arrays = {}
 
     for i in range(config.max_iter):
-        envs_prev = envs
         envs = _ctm_tensor_sweep_multisite(
             envs,
             double_layers,
@@ -1131,11 +1130,9 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
             config.renormalize,
             config.projector_method,
         )
-        if use_elementwise and i >= 1:
-            # Sigma gauge: align new env with previous to enable elementwise conv
-            envs = {c: _sigma_gauge_fix_ctm_tensor(envs[c], envs_prev[c]) for c in envs}
-        else:
-            envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
+        # Always use QR gauge in forward — sigma gauge in the forward loop
+        # produces poorly conditioned environments (ρ(J^T) ~ 1e13 vs ~49).
+        envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
 
         if i + 1 < config.min_iter:
             continue
