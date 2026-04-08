@@ -1345,18 +1345,20 @@ def _ctm_tensor_multisite_fixed_point_jit(
 
         init_ref = jnp.zeros(sum(x.size for x in env_leaves))
     else:
-        # SV convergence: compare normalized corner singular values
+        # SV convergence: all 4 corners, raw SVs, Frobenius norm
+        # (matches variPEPS: jnp.linalg.norm(corner_svd - old_corner))
+        # Corners are leaves 0,1,2,3 per site (C1,C2,C3,C4)
         def _compute_conv_ref(e_leaves):
-            """Compute normalized corner SVs for all sites, concatenated."""
+            """Compute raw corner SVs for all sites and corners."""
             svs = []
             for s in range(n_sites):
-                c1_dense = e_leaves[s * n_env_per_site]  # C1 is leaf 0
-                sv = jnp.linalg.svd(c1_dense, compute_uv=False)
-                sv = sv / (jnp.sum(sv) + 1e-15)
-                svs.append(sv)
+                base = s * n_env_per_site
+                for c in range(4):  # C1, C2, C3, C4
+                    sv = jnp.linalg.svd(e_leaves[base + c], compute_uv=False)
+                    svs.append(sv)
             return jnp.concatenate(svs)
 
-        init_ref = jnp.zeros(n_sites * chi)
+        init_ref = jnp.zeros(n_sites * 4 * chi)
 
     # State: (env_leaves, prev_ref, iteration, converged)
     init_state = (env_leaves, init_ref, jnp.int32(0), jnp.bool_(False))
@@ -1371,7 +1373,7 @@ def _ctm_tensor_multisite_fixed_point_jit(
             e_leaves, prev_ref, i, _ = state
             new_e_leaves = _one_sweep(e_leaves)
             new_ref = _compute_conv_ref(new_e_leaves)
-            diff = jnp.max(jnp.abs(new_ref - prev_ref))
+            diff = jnp.linalg.norm(new_ref - prev_ref)
             converged = (i + 1 >= min_iter) & (diff < conv_tol)
             return (new_e_leaves, new_ref, i + 1, converged)
 
