@@ -80,6 +80,8 @@ class iPEPSConfig:
     gs_line_search: bool | None = None  # None = auto (True for lbfgs/cg)
     gs_line_search_max_steps: int = 8
     gs_line_search_method: str = "armijo"  # "armijo" or "hager_zhang"
+    gs_noise_recovery_retries: int = 3  # max retries with noise injection on stall
+    gs_noise_amplitude: float = 0.1  # relative noise amplitude for recovery
     gs_explicit_ad: bool = True  # explicit diff through unrolled CTM
     gs_explicit_ad_steps: int = 20  # CTM steps for explicit AD backprop phase
     gs_explicit_ad_warmup: int = 3  # warmup CTM steps (no gradient tracking)

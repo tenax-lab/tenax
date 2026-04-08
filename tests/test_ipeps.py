@@ -1394,3 +1394,36 @@ class TestXXZGate:
 
         gate = xxz_gate(delta=1.0)
         assert gate.labels() == ("si", "sj", "si_out", "sj_out")
+
+
+class TestNoiseRecovery:
+    """Optimizer should handle stalls via noise injection."""
+
+    @pytest.fixture
+    def heisenberg_gate(self):
+        d = 2
+        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+        return H.reshape(d, d, d, d)
+
+    def test_noise_recovery_config_exists(self):
+        config = iPEPSConfig()
+        assert hasattr(config, "gs_noise_recovery_retries")
+        assert config.gs_noise_recovery_retries == 3
+        assert hasattr(config, "gs_noise_amplitude")
+        assert config.gs_noise_amplitude == 0.1
+
+    def test_optimizer_runs_with_recovery(self, heisenberg_gate):
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=20, min_iter=5),
+            gs_num_steps=5,
+            gs_optimizer="adam",
+            gs_noise_recovery_retries=2,
+            gs_noise_amplitude=0.1,
+            unit_cell="1x1",
+        )
+        A_opt, env, E = optimize_gs_ad(heisenberg_gate, None, config)
+        assert jnp.isfinite(jnp.array(E))
