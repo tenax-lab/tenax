@@ -495,27 +495,28 @@ def _transfer_matrix_leading_eigvec(T_dense: jax.Array) -> jax.Array:
 
         rho' = sum_k T[:, k, :] @ rho @ T[:, k, :]^H
 
-    We use power iteration (50 steps) to find the dominant eigenvector
-    rho of this chi^2-dimensional operator, returned as a (chi, chi) matrix.
+    Builds the full chi^2 × chi^2 transfer matrix and finds the leading
+    eigenvector via eigendecomposition.  For typical chi (4-32), the
+    chi^2 × chi^2 matrix is small enough for direct diagonalization.
 
-    Uses the identity matrix as starting point (natural for positive TM).
+    Returns: leading eigenvector reshaped to (chi, chi).
     """
     chi = T_dense.shape[0]
     D2 = T_dense.shape[1]
 
-    # Start from identity — natural for positive-definite transfer matrices
-    rho = jnp.eye(chi, dtype=T_dense.dtype)
+    # Build the full transfer matrix: TM[i*chi+i', j*chi+j'] = sum_k T[i,k,j] * conj(T[i',k,j'])
+    # TM = sum_k (T_k ⊗ conj(T_k))
+    TM = jnp.zeros((chi * chi, chi * chi), dtype=T_dense.dtype)
+    for k in range(D2):
+        Tk = T_dense[:, k, :]  # (chi, chi)
+        TM = TM + jnp.kron(Tk, Tk.conj())
 
-    for _ in range(50):
-        rho_new = jnp.zeros_like(rho)
-        for k in range(D2):
-            Tk = T_dense[:, k, :]  # (chi, chi)
-            rho_new = rho_new + Tk @ rho @ Tk.conj().T
-        # Normalize by Frobenius norm
-        norm = jnp.linalg.norm(rho_new)
-        rho = rho_new / (norm + 1e-30)
-
-    return rho
+    # Eigendecompose — leading eigenvalue has largest magnitude
+    eigvals, eigvecs = jnp.linalg.eig(TM)
+    # Find the index of the eigenvalue with largest magnitude
+    idx = jnp.argmax(jnp.abs(eigvals))
+    leading = eigvecs[:, idx].real  # should be real for physical TM
+    return leading.reshape(chi, chi)
 
 
 def _sigma_gauge_fix_ctm_tensor(env_new, env_old):
@@ -858,6 +859,80 @@ def _ctm_tensor_converge_fwd(site_tensors, env_init_leaves, neighbors, config_tu
     return out, residuals
 
 
+def _precompute_sigma_matrices(envs):
+    """Precompute sigma Q matrices from converged environment (constants).
+
+    For each edge direction, compute the leading eigenvector of the
+    double-layer transfer matrix and return its QR factor Q.
+
+    Returns: ``{coord: (Q_T1, Q_T2, Q_T3, Q_T4)}`` where each Q is chi×chi.
+    """
+    result = {}
+    for c in sorted(envs):
+        env = envs[c]
+        Qs = []
+        for T in (env.T1, env.T2, env.T3, env.T4):
+            rho = _transfer_matrix_leading_eigvec(T.todense())
+            Q, R = jnp.linalg.qr(rho)
+            signs = jnp.sign(jnp.diag(R))
+            signs = jnp.where(signs == 0, 1.0, signs)
+            Q = Q * signs[None, :]
+            Qs.append(Q)
+        result[c] = tuple(Qs)
+    return result
+
+
+def _apply_sigma_to_env_leaves(
+    env_leaves, sigma_Qs, env_treedef, n_env_per_site, coords
+):
+    """Apply precomputed sigma gauge to env leaves (differentiable).
+
+    The sigma Q matrices are stop_gradient constants; the application
+    (matrix multiplications) is fully JAX-differentiable.
+    """
+    new_leaves = []
+    offset = 0
+    for c in coords:
+        env = jax.tree.unflatten(
+            env_treedef, list(env_leaves[offset : offset + n_env_per_site])
+        )
+        Q_T1, Q_T2, Q_T3, Q_T4 = sigma_Qs[c]
+        Q_T1 = jax.lax.stop_gradient(Q_T1)
+        Q_T2 = jax.lax.stop_gradient(Q_T2)
+        Q_T3 = jax.lax.stop_gradient(Q_T3)
+        Q_T4 = jax.lax.stop_gradient(Q_T4)
+
+        C1, C2, C3, C4 = (x.todense() for x in (env.C1, env.C2, env.C3, env.C4))
+        T1, T2, T3, T4 = (x.todense() for x in (env.T1, env.T2, env.T3, env.T4))
+
+        # Corners: Q_row† @ C @ Q_col
+        C1_f = Q_T4.conj().T @ C1 @ Q_T1
+        C2_f = Q_T1.conj().T @ C2 @ Q_T2
+        C3_f = Q_T2.conj().T @ C3 @ Q_T3
+        C4_f = Q_T3.conj().T @ C4 @ Q_T4
+
+        # Edges: Q† @ T @ Q (same bond on both sides for single-site)
+        T1_f = jnp.einsum("ab,bdc,ce->ade", Q_T1.conj().T, T1, Q_T1)
+        T2_f = jnp.einsum("ab,bdc,ce->ade", Q_T2.conj().T, T2, Q_T2)
+        T3_f = jnp.einsum("ab,bdc,ce->ade", Q_T3.conj().T, T3, Q_T3)
+        T4_f = jnp.einsum("ab,bdc,ce->ade", Q_T4.conj().T, T4, Q_T4)
+
+        env_fixed = CTMTensorEnv(
+            C1=_wrap_tensor(C1_f, env.C1),
+            C2=_wrap_tensor(C2_f, env.C2),
+            C3=_wrap_tensor(C3_f, env.C3),
+            C4=_wrap_tensor(C4_f, env.C4),
+            T1=_wrap_tensor(T1_f, env.T1),
+            T2=_wrap_tensor(T2_f, env.T2),
+            T3=_wrap_tensor(T3_f, env.T3),
+            T4=_wrap_tensor(T4_f, env.T4),
+        )
+        new_leaves.extend(jax.tree.leaves(env_fixed))
+        offset += n_env_per_site
+
+    return tuple(new_leaves)
+
+
 def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
     """Backward pass via implicit differentiation of multisite CTM fixed point."""
     site_tensors, envs, env_init_leaves = residuals
@@ -878,24 +953,58 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
         site_leaves = site_leaves + tuple(jax.tree.leaves(site_tensors[c]))
     env_leaves = _flatten_envs(envs)
 
-    # Backward step always uses QR gauge (sigma gauge is for forward only —
-    # the power iteration in sigma gauge is not suitable for VJP tracing).
-    def step_fn(s_leaves, e_leaves):
-        return _ctm_tensor_step_multisite(
-            s_leaves,
-            e_leaves,
-            neighbors,
-            config.chi,
-            config.renormalize,
-            config.projector_method,
-            site_treedefs,
-            env_treedef,
-            n_env_per_site,
-        )
+    use_sigma = getattr(config, "ctm_conv_method", "sv") == "elementwise"
 
-    # Hoist VJP functions for env and site
-    _, vjp_env_fn = jax.vjp(lambda e: step_fn(site_leaves, e), env_leaves)
-    _, vjp_site_fn = jax.vjp(lambda s: step_fn(s, env_leaves), site_leaves)
+    if use_sigma:
+        # --- YASTN-style backward: sigma-gauged step function ---
+        #
+        # The step function for the backward is:
+        #   g(A, env) = apply_sigma(CTM_step(A, env))
+        #
+        # where sigma matrices are CONSTANTS precomputed from the converged
+        # env.  The sigma application (matrix mults) is JAX-differentiable.
+        # The CTM_step here uses QR gauge internally (inside _ctm_tensor_step_multisite).
+        # Then sigma is applied on top to align the output with the fixed point.
+        #
+        # Reference: YASTN fixed_pt.py FixedPoint.fixed_point_iter (arxiv:2311.11894)
+        sigma_Qs = _precompute_sigma_matrices(envs)
+
+        def step_fn_sigma(s_leaves, e_leaves):
+            """One CTM sweep + sigma gauge application."""
+            swept = _ctm_tensor_step_multisite(
+                s_leaves,
+                e_leaves,
+                neighbors,
+                config.chi,
+                config.renormalize,
+                config.projector_method,
+                site_treedefs,
+                env_treedef,
+                n_env_per_site,
+            )
+            return _apply_sigma_to_env_leaves(
+                swept, sigma_Qs, env_treedef, n_env_per_site, coords
+            )
+
+        _, vjp_env_fn = jax.vjp(lambda e: step_fn_sigma(site_leaves, e), env_leaves)
+        _, vjp_site_fn = jax.vjp(lambda s: step_fn_sigma(s, env_leaves), site_leaves)
+    else:
+
+        def step_fn(s_leaves, e_leaves):
+            return _ctm_tensor_step_multisite(
+                s_leaves,
+                e_leaves,
+                neighbors,
+                config.chi,
+                config.renormalize,
+                config.projector_method,
+                site_treedefs,
+                env_treedef,
+                n_env_per_site,
+            )
+
+        _, vjp_env_fn = jax.vjp(lambda e: step_fn(site_leaves, e), env_leaves)
+        _, vjp_site_fn = jax.vjp(lambda s: step_fn(s, env_leaves), site_leaves)
 
     max_fp_iter = min(config.max_iter, 50)
 
@@ -916,36 +1025,58 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
         )
         d_site_leaves = vjp_site_fn(lam)[0]
     else:
-        # --- Iterative VJP path: accumulate site gradients directly ---
+        # --- YASTN-style iterative VJP (Neumann series) ---
         #
-        # The implicit diff solution is:
-        #   dE/dA = sum_{n=0}^{inf} (dstep/dA)^T @ (J^T_env)^n @ g
+        # Accumulate lam = sum_{n=0}^{inf} (J^T_env)^n @ g in env space,
+        # then project to site space once: d_site = (dstep/dA)^T @ lam.
         #
-        # We iterate v_{n+1} = J^T_env @ v_n  (with v_0 = g) and
-        # accumulate d_site += (dstep/dA)^T @ v_n at each step.
+        # With sigma gauge in the step function, J^T should have
+        # spectral radius < 1 in the physical subspace.
         #
-        # The projection (dstep/dA)^T kills gauge components, so d_site
-        # converges even if v_n grows in gauge directions.  We check
-        # convergence of the per-step site gradient contribution.
-        lam = g
+        # Convergence is checked via the projected site gradient (EMA),
+        # following YASTN fixed_pt.py (arxiv:2311.11894).
+        grads = g
+        lam = g  # accumulated Neumann sum
 
-        for _ in range(max_fp_iter):
-            lam_prev = lam
-            Jt_lam = vjp_env_fn(lam)[0]
-            lam = tuple(ji + gi for ji, gi in zip(Jt_lam, g))
+        prev_site_grad = None
+        diff_ema = None
+        alpha_ema = 0.4
 
-            # Check if lam is diverging — stop early if so
-            lam_norm = sum(float(jnp.sum(li**2)) for li in lam) ** 0.5
-            if not math.isfinite(lam_norm) or lam_norm > 1e15:
-                lam = lam_prev
+        for it in range(max_fp_iter):
+            grads = vjp_env_fn(grads)[0]  # grads = J^T @ grads
+
+            # Check if all cotangents are small (converged in env space)
+            grads_inf = max(float(jnp.max(jnp.abs(gi))) for gi in grads)
+            if grads_inf < config.conv_tol:
                 break
 
-            # Check convergence: |lam - lam_prev| should decrease
-            diff_norm = (
-                sum(float(jnp.sum((li - pi) ** 2)) for li, pi in zip(lam, lam_prev))
-                ** 0.5
-            )
-            if diff_norm < config.conv_tol * (lam_norm + 1e-30):
+            # Accumulate Neumann sum
+            lam = tuple(li + gi for li, gi in zip(lam, grads))
+
+            # Check convergence via projected site gradient (every 10 steps)
+            if (it + 1) % 10 == 0 or it == max_fp_iter - 1:
+                site_grad = vjp_site_fn(lam)[0]
+                site_grad_flat = jnp.concatenate(
+                    [si.ravel() for si in jax.tree.leaves(site_grad)]
+                )
+                if prev_site_grad is not None:
+                    grad_diff = float(jnp.linalg.norm(site_grad_flat - prev_site_grad))
+                    if grad_diff < config.conv_tol:
+                        break
+                    # EMA-based divergence detection
+                    if diff_ema is not None and grad_diff > 2 * diff_ema:
+                        break
+                    diff_ema = (
+                        alpha_ema * grad_diff + (1 - alpha_ema) * diff_ema
+                        if diff_ema is not None
+                        else grad_diff
+                    )
+                prev_site_grad = site_grad_flat
+
+            # Safety: stop if lam is diverging
+            lam_norm = sum(float(jnp.sum(li**2)) for li in lam) ** 0.5
+            if not math.isfinite(lam_norm) or lam_norm > 1e15:
+                lam = tuple(li - gi for li, gi in zip(lam, grads))  # undo last
                 break
 
         d_site_leaves = vjp_site_fn(lam)[0]
