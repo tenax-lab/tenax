@@ -1309,6 +1309,22 @@ def _ctm_tensor_multisite_fixed_point_jit(
         c: _build_double_layer_tensor(A) for c, A in site_tensors.items()
     }
 
+    # Warmup: run a few eigh sweeps to escape the trivial identity fixed point.
+    # The SVD (Fishman) projector has a trivial fixed point at identity corners;
+    # eigh projectors break this symmetry via the density matrix eigenvectors.
+    qr_warmup = getattr(config, "qr_warmup_steps", 3)
+    if config.projector_method in ("svd", "qr") and qr_warmup > 0:
+        for _ in range(qr_warmup):
+            envs = _ctm_tensor_sweep_multisite(
+                envs,
+                double_layers_cached,
+                neighbors,
+                config.chi,
+                config.renormalize,
+                "eigh",
+            )
+            envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
+
     env_leaves = tuple(_flatten_envs(envs))
     chi = config.chi
     conv_tol = config.conv_tol
