@@ -236,6 +236,75 @@ truncated_svd_ad.defvjp(_truncated_svd_ad_fwd, _truncated_svd_ad_bwd)
 
 
 # ---------------------------------------------------------------------------
+# 1a-half. Half-SVD: only S and Vh (no U), saves memory in backward
+# ---------------------------------------------------------------------------
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(1,))
+def truncated_svd_ad_vh_only(
+    M: jax.Array,
+    chi: int,
+) -> tuple[jax.Array, jax.Array]:
+    """Truncated SVD returning only ``(s, Vh)`` — U is discarded.
+
+    Uses the same Lorentzian-regularized backward as ``truncated_svd_ad``
+    but with ``dU=0``, saving memory by not storing U in residuals.
+    """
+    U, s_full, Vh = jnp.linalg.svd(M, full_matrices=False)
+    k = min(chi, s_full.shape[0])
+    s_trunc = s_full[:k]
+
+    if k < s_full.shape[0]:
+        boundary_val = s_full[k - 1]
+        next_val = s_full[k]
+        gap = boundary_val - next_val
+        threshold = 1e-6 * (s_full[0] + 1e-30)
+        is_in_split_multiplet = (gap < threshold) & (
+            jnp.abs(s_trunc - boundary_val) < threshold
+        )
+        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+
+    _, s_trunc, Vh = _fix_svd_signs(U[:, :k], s_trunc, Vh[:k, :])
+    return s_trunc, Vh
+
+
+def _truncated_svd_ad_vh_only_fwd(M, chi):
+    """Forward pass — store full SVD for backward but return only (s, Vh)."""
+    U_full, s_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
+    U_full, s_full, Vh_full = _fix_svd_signs(U_full, s_full, Vh_full)
+    k = min(chi, s_full.shape[0])
+    s_trunc = s_full[:k]
+
+    if k < s_full.shape[0]:
+        boundary_val = s_full[k - 1]
+        next_val = s_full[k]
+        gap = boundary_val - next_val
+        threshold = 1e-6 * (s_full[0] + 1e-30)
+        is_in_split_multiplet = (gap < threshold) & (
+            jnp.abs(s_trunc - boundary_val) < threshold
+        )
+        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+
+    Vh = Vh_full[:k, :]
+    residuals = (U_full, s_full, Vh_full, M, k)
+    return (s_trunc, Vh), residuals
+
+
+def _truncated_svd_ad_vh_only_bwd(chi, residuals, g):
+    """Backward pass with dU=0 (U was not used)."""
+    U_full, s_full, Vh_full, M, k = residuals
+    ds, dVh = g
+    dU = jnp.zeros((M.shape[0], k), dtype=M.dtype)
+    dM = _svd_sector_backward(U_full, s_full, Vh_full, dU, ds, dVh)
+    return (dM,)
+
+
+truncated_svd_ad_vh_only.defvjp(
+    _truncated_svd_ad_vh_only_fwd, _truncated_svd_ad_vh_only_bwd
+)
+
+
+# ---------------------------------------------------------------------------
 # 1a-bis. Full SVD with regularized backward (used by QR projectors)
 # ---------------------------------------------------------------------------
 

@@ -575,9 +575,9 @@ def _compute_projector_tensor(
         M = C1g_dense.conj().T @ C4g_dense
 
         if _has_tracers:
-            from tenax.algorithms.ad_utils import truncated_svd_ad
+            from tenax.algorithms.ad_utils import truncated_svd_ad_vh_only
 
-            _U_M, S_M, Vh_M = truncated_svd_ad(M, chi)
+            S_M, Vh_M = truncated_svd_ad_vh_only(M, chi)
         else:
             _U_full, S_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
             k = min(chi, S_full.shape[0])
