@@ -425,6 +425,13 @@ def _optimize_gs_ad_tensor(
     from tenax.algorithms.ad_utils import (
         _config_from_tuple,
         _ctm_tensor_multisite_fixed_point,
+        _ctm_tensor_multisite_fixed_point_jit,
+    )
+
+    _fp_fn = (
+        _ctm_tensor_multisite_fixed_point_jit
+        if getattr(config.ctm, "jit_ctm", False)
+        else _ctm_tensor_multisite_fixed_point
     )
 
     def loss_fn_fwd(p):
@@ -598,12 +605,19 @@ def _optimize_gs_ad_tensor(
                     )
                     return _tree_dot(g, direction)
 
+                dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
+                param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
+                alpha0 = min(1.0, 0.1 * param_norm / dir_norm)
+
                 alpha, f_alpha, converged = hager_zhang_line_search(
                     _phi,
                     _dphi,
                     energy_float,
                     slope,
-                    alpha_init=1.0,
+                    alpha_init=alpha0,
+                    rho=1.5,
+                    max_step=2.0 * alpha0,
+                    energy_bound=max(2.0, 2.0 * abs(best_energy)),
                 )
                 if f_alpha < energy_float:
                     params = _normalize_params(
@@ -679,9 +693,7 @@ def _optimize_gs_ad_tensor(
             A_data = p.todense()
         A_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
         A_t = DenseTensor(A_data, A.indices)
-        envs = _ctm_tensor_multisite_fixed_point(
-            {(0, 0): A_t}, SINGLE_SITE_NEIGHBORS, eval_config
-        )
+        envs = _fp_fn({(0, 0): A_t}, SINGLE_SITE_NEIGHBORS, eval_config)
         env_ = envs[(0, 0)]
         E_ = float(compute_energy_ctm_tensor(A_t, env_, gate, d_phys))
         return A_t, env_, E_
@@ -792,8 +804,15 @@ def _optimize_gs_ad_tensor_2site(
         _config_from_tuple,
         _config_to_tuple,
         _ctm_tensor_multisite_fixed_point,
+        _ctm_tensor_multisite_fixed_point_jit,
         ctm_tensor_converge,
         ctm_tensor_converge_explicit,
+    )
+
+    _fp_fn_2site = (
+        _ctm_tensor_multisite_fixed_point_jit
+        if getattr(config.ctm, "jit_ctm", False)
+        else _ctm_tensor_multisite_fixed_point
     )
 
     gate = (
@@ -1076,12 +1095,19 @@ def _optimize_gs_ad_tensor_2site(
                     )
                     return _tree_dot(g, direction)
 
+                dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
+                param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
+                alpha0 = min(1.0, 0.1 * param_norm / dir_norm)
+
                 alpha, f_alpha, converged = hager_zhang_line_search(
                     _phi,
                     _dphi,
                     energy_float,
                     slope,
-                    alpha_init=1.0,
+                    alpha_init=alpha0,
+                    rho=1.5,
+                    max_step=2.0 * alpha0,
+                    energy_bound=max(2.0, 2.0 * abs(best_energy)),
                 )
                 if f_alpha < energy_float:
                     params = _normalize_params(
@@ -1146,9 +1172,7 @@ def _optimize_gs_ad_tensor_2site(
     def _eval_fresh_2site(p):
         A_t, B_t = _normalize_params(p)
         st = {(0, 0): A_t, (1, 0): B_t}
-        envs = _ctm_tensor_multisite_fixed_point(
-            st, CHECKERBOARD_NEIGHBORS, eval_config2
-        )
+        envs = _fp_fn_2site(st, CHECKERBOARD_NEIGHBORS, eval_config2)
         E_ = float(
             compute_energy_ctm_tensor_2site(
                 A_t, B_t, envs[(0, 0)], envs[(1, 0)], gate, d_phys

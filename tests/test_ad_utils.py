@@ -980,3 +980,91 @@ class TestVJPBackwardConvergence:
         assert cos_sim > -0.5, (
             f"VJP and GMRES gradients too dissimilar: cos_sim={cos_sim:.4f}"
         )
+
+
+class TestHalfSVD:
+    """truncated_svd_ad_vh_only returns correct S and Vh with working gradients."""
+
+    def test_forward_matches_full_svd(self):
+        """Vh-only forward should match full truncated_svd_ad."""
+        from tenax.algorithms.ad_utils import truncated_svd_ad_vh_only
+
+        key = jax.random.PRNGKey(0)
+        M = jax.random.normal(key, (6, 4))
+        chi = 3
+
+        s_half, Vh_half = truncated_svd_ad_vh_only(M, chi)
+        _, s_full, Vh_full = truncated_svd_ad(M, chi)
+
+        assert jnp.allclose(s_half, s_full, atol=1e-12)
+        # Vh can differ by sign per row — compare via reconstruction
+        recon_half = jnp.diag(s_half) @ Vh_half
+        recon_full = jnp.diag(s_full) @ Vh_full
+        assert jnp.allclose(recon_half, recon_full, atol=1e-12)
+
+    def test_gradient_finite(self):
+        """Gradient through Vh-only SVD should be finite."""
+        from tenax.algorithms.ad_utils import truncated_svd_ad_vh_only
+
+        key = jax.random.PRNGKey(1)
+        M = jax.random.normal(key, (6, 4))
+        chi = 3
+
+        def loss(M_in):
+            s, Vh = truncated_svd_ad_vh_only(M_in, chi)
+            return jnp.sum(s**2) + jnp.sum(Vh**2)
+
+        grad = jax.grad(loss)(M)
+        assert jnp.all(jnp.isfinite(grad)), "Gradient not finite"
+
+    def test_gradient_matches_full_svd(self):
+        """Gradient through Vh-only SVD should match full SVD with dU=0."""
+        from tenax.algorithms.ad_utils import truncated_svd_ad_vh_only
+
+        key = jax.random.PRNGKey(2)
+        M = jax.random.normal(key, (6, 4))
+        chi = 3
+
+        def loss_half(M_in):
+            s, Vh = truncated_svd_ad_vh_only(M_in, chi)
+            return jnp.sum(s**2) + jnp.sum(Vh**2)
+
+        def loss_full(M_in):
+            _U, s, Vh = truncated_svd_ad(M_in, chi)
+            # Only use s and Vh (matching half-SVD usage)
+            return jnp.sum(s**2) + jnp.sum(Vh**2)
+
+        grad_half = jax.grad(loss_half)(M)
+        grad_full = jax.grad(loss_full)(M)
+        assert jnp.allclose(grad_half, grad_full, atol=1e-10), (
+            f"Max diff: {float(jnp.max(jnp.abs(grad_half - grad_full)))}"
+        )
+
+
+class TestJITCTMConvergence:
+    """JIT CTM convergence via fori_loop matches Python loop."""
+
+    def test_jit_ctm_matches_python_loop(self):
+        """JIT CTM convergence should give same corner SVs as Python loop."""
+        from tenax.algorithms.ad_utils import (
+            _ctm_tensor_multisite_fixed_point_jit,
+        )
+
+        A = _make_dense_tensor(jax.random.PRNGKey(42))
+        config = CTMConfig(chi=4, max_iter=30, conv_tol=1e-6, min_iter=5)
+
+        envs_py = _ctm_tensor_multisite_fixed_point(
+            {(0, 0): A}, SINGLE_SITE_NEIGHBORS, config
+        )
+        envs_jit = _ctm_tensor_multisite_fixed_point_jit(
+            {(0, 0): A}, SINGLE_SITE_NEIGHBORS, config
+        )
+
+        # Compare corner SVs (gauge-invariant)
+        sv_py = jnp.linalg.svd(envs_py[(0, 0)].C1.todense(), compute_uv=False)
+        sv_jit = jnp.linalg.svd(envs_jit[(0, 0)].C1.todense(), compute_uv=False)
+        sv_py = sv_py / (jnp.sum(sv_py) + 1e-15)
+        sv_jit = sv_jit / (jnp.sum(sv_jit) + 1e-15)
+        assert jnp.allclose(sv_py, sv_jit, atol=1e-4), (
+            f"Corner SV mismatch: max diff = {float(jnp.max(jnp.abs(sv_py - sv_jit)))}"
+        )

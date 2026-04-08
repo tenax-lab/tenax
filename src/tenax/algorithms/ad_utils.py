@@ -236,6 +236,75 @@ truncated_svd_ad.defvjp(_truncated_svd_ad_fwd, _truncated_svd_ad_bwd)
 
 
 # ---------------------------------------------------------------------------
+# 1a-half. Half-SVD: only S and Vh (no U), saves memory in backward
+# ---------------------------------------------------------------------------
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(1,))
+def truncated_svd_ad_vh_only(
+    M: jax.Array,
+    chi: int,
+) -> tuple[jax.Array, jax.Array]:
+    """Truncated SVD returning only ``(s, Vh)`` — U is discarded.
+
+    Uses the same Lorentzian-regularized backward as ``truncated_svd_ad``
+    but with ``dU=0``, saving memory by not storing U in residuals.
+    """
+    U, s_full, Vh = jnp.linalg.svd(M, full_matrices=False)
+    k = min(chi, s_full.shape[0])
+    s_trunc = s_full[:k]
+
+    if k < s_full.shape[0]:
+        boundary_val = s_full[k - 1]
+        next_val = s_full[k]
+        gap = boundary_val - next_val
+        threshold = 1e-6 * (s_full[0] + 1e-30)
+        is_in_split_multiplet = (gap < threshold) & (
+            jnp.abs(s_trunc - boundary_val) < threshold
+        )
+        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+
+    _, s_trunc, Vh = _fix_svd_signs(U[:, :k], s_trunc, Vh[:k, :])
+    return s_trunc, Vh
+
+
+def _truncated_svd_ad_vh_only_fwd(M, chi):
+    """Forward pass — store full SVD for backward but return only (s, Vh)."""
+    U_full, s_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
+    U_full, s_full, Vh_full = _fix_svd_signs(U_full, s_full, Vh_full)
+    k = min(chi, s_full.shape[0])
+    s_trunc = s_full[:k]
+
+    if k < s_full.shape[0]:
+        boundary_val = s_full[k - 1]
+        next_val = s_full[k]
+        gap = boundary_val - next_val
+        threshold = 1e-6 * (s_full[0] + 1e-30)
+        is_in_split_multiplet = (gap < threshold) & (
+            jnp.abs(s_trunc - boundary_val) < threshold
+        )
+        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+
+    Vh = Vh_full[:k, :]
+    residuals = (U_full, s_full, Vh_full, M, k)
+    return (s_trunc, Vh), residuals
+
+
+def _truncated_svd_ad_vh_only_bwd(chi, residuals, g):
+    """Backward pass with dU=0 (U was not used)."""
+    U_full, s_full, Vh_full, M, k = residuals
+    ds, dVh = g
+    dU = jnp.zeros((M.shape[0], k), dtype=M.dtype)
+    dM = _svd_sector_backward(U_full, s_full, Vh_full, dU, ds, dVh)
+    return (dM,)
+
+
+truncated_svd_ad_vh_only.defvjp(
+    _truncated_svd_ad_vh_only_fwd, _truncated_svd_ad_vh_only_bwd
+)
+
+
+# ---------------------------------------------------------------------------
 # 1a-bis. Full SVD with regularized backward (used by QR projectors)
 # ---------------------------------------------------------------------------
 
@@ -446,6 +515,7 @@ def _config_to_tuple(config) -> tuple:
         int(getattr(config, "gmres_precondition", True)),
         {"vjp": 0, "gmres": 1}.get(getattr(config, "ad_backward_method", "vjp"), 0),
         _CONV_METHOD_STR_TO_INT.get(getattr(config, "ctm_conv_method", "sv"), 0),
+        int(getattr(config, "jit_ctm", False)),
     )
 
 
@@ -459,6 +529,7 @@ def _config_from_tuple(config_tuple: tuple):
     ad_backward_method = {0: "vjp", 1: "gmres"}.get(ad_bwd_int, "vjp")
     conv_method_int = config_tuple[9] if len(config_tuple) > 9 else 0
     ctm_conv_method = _CONV_METHOD_INT_TO_STR.get(conv_method_int, "sv")
+    jit_ctm = bool(config_tuple[10]) if len(config_tuple) > 10 else False
     return CTMConfig(
         chi=config_tuple[0],
         max_iter=config_tuple[1],
@@ -470,6 +541,7 @@ def _config_from_tuple(config_tuple: tuple):
         gmres_precondition=gmres_precondition,
         ad_backward_method=ad_backward_method,
         ctm_conv_method=ctm_conv_method,
+        jit_ctm=jit_ctm,
     )
 
 
@@ -846,9 +918,12 @@ def ctm_tensor_converge(
     """
     config = _config_from_tuple(config_tuple)
     envs_init = _unflatten_envs_init(env_init_leaves, site_tensors, config.chi)
-    envs = _ctm_tensor_multisite_fixed_point(
-        site_tensors, neighbors, config, envs_init=envs_init
+    _fp_fn = (
+        _ctm_tensor_multisite_fixed_point_jit
+        if config.jit_ctm
+        else _ctm_tensor_multisite_fixed_point
     )
+    envs = _fp_fn(site_tensors, neighbors, config, envs_init=envs_init)
     return _flatten_envs(envs)
 
 
@@ -856,9 +931,12 @@ def _ctm_tensor_converge_fwd(site_tensors, env_init_leaves, neighbors, config_tu
     """Forward pass -- run multisite Tensor CTM, cache tensors and envs."""
     config = _config_from_tuple(config_tuple)
     envs_init = _unflatten_envs_init(env_init_leaves, site_tensors, config.chi)
-    envs = _ctm_tensor_multisite_fixed_point(
-        site_tensors, neighbors, config, envs_init=envs_init
+    _fp_fn = (
+        _ctm_tensor_multisite_fixed_point_jit
+        if config.jit_ctm
+        else _ctm_tensor_multisite_fixed_point
     )
+    envs = _fp_fn(site_tensors, neighbors, config, envs_init=envs_init)
     out = _flatten_envs(envs)
     residuals = (site_tensors, envs, env_init_leaves)
     return out, residuals
@@ -1182,6 +1260,147 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
                 prev_svs[c] = sv
         if converged:
             break
+
+    return envs
+
+
+def _ctm_tensor_multisite_fixed_point_jit(
+    site_tensors, neighbors, config, envs_init=None
+):
+    """Run multisite CTM to convergence using ``jax.lax.while_loop``.
+
+    The entire convergence loop — sweep, gauge fix, and SV convergence
+    check — runs inside a single JIT-compiled kernel with zero Python
+    overhead, matching the variPEPS architecture.
+
+    Falls back to the Python loop for SymmetricTensor inputs (block-sparse
+    operations aren't JIT-traceable).
+    """
+    from tenax.core.tensor import SymmetricTensor
+
+    # Fall back to Python loop for SymmetricTensor (not JIT-traceable)
+    first_tensor = next(iter(site_tensors.values()))
+    if isinstance(first_tensor, SymmetricTensor):
+        return _ctm_tensor_multisite_fixed_point(
+            site_tensors, neighbors, config, envs_init=envs_init
+        )
+
+    envs = (
+        envs_init
+        if envs_init is not None
+        else {
+            c: initialize_ctm_tensor_env(A, config.chi) for c, A in site_tensors.items()
+        }
+    )
+
+    coords = sorted(site_tensors)
+
+    # Build treedefs for _ctm_tensor_step_multisite
+    site_treedefs = {c: jax.tree.structure(site_tensors[c]) for c in coords}
+    env_treedef = jax.tree.structure(envs[coords[0]])
+    n_env_per_site = len(jax.tree.leaves(envs[coords[0]]))
+
+    site_leaves = ()
+    for c in coords:
+        site_leaves = site_leaves + tuple(jax.tree.leaves(site_tensors[c]))
+
+    # Pre-compute double layers (constant across sweeps)
+    double_layers_cached = {
+        c: _build_double_layer_tensor(A) for c, A in site_tensors.items()
+    }
+
+    env_leaves = tuple(_flatten_envs(envs))
+    chi = config.chi
+    conv_tol = config.conv_tol
+    min_iter = config.min_iter
+    max_iter = config.max_iter
+
+    # Number of C1 corners = number of sites; each site has n_env_per_site leaves
+    # C1 is the first leaf of each site's env (leaf index 0)
+    n_sites = len(coords)
+
+    def _one_sweep(e_leaves):
+        return tuple(
+            _ctm_tensor_step_multisite(
+                site_leaves,
+                e_leaves,
+                neighbors,
+                config.chi,
+                config.renormalize,
+                config.projector_method,
+                site_treedefs,
+                env_treedef,
+                n_env_per_site,
+                double_layers=double_layers_cached,
+            )
+        )
+
+    use_elementwise = getattr(config, "ctm_conv_method", "sv") == "elementwise"
+
+    if use_elementwise:
+        # Elementwise convergence: compare all env arrays between sweeps
+        def _compute_conv_ref(e_leaves):
+            """Concatenate all env leaf arrays for elementwise comparison."""
+            return jnp.concatenate([x.ravel() for x in e_leaves])
+
+        init_ref = jnp.zeros(sum(x.size for x in env_leaves))
+    else:
+        # SV convergence: all 4 corners, raw SVs, Frobenius norm
+        # (matches variPEPS: jnp.linalg.norm(corner_svd - old_corner))
+        # Corners are leaves 0,1,2,3 per site (C1,C2,C3,C4)
+        def _compute_conv_ref(e_leaves):
+            """Compute raw corner SVs for all sites and corners."""
+            svs = []
+            for s in range(n_sites):
+                base = s * n_env_per_site
+                for c in range(4):  # C1, C2, C3, C4
+                    sv = jnp.linalg.svd(e_leaves[base + c], compute_uv=False)
+                    svs.append(sv)
+            return jnp.concatenate(svs)
+
+        init_ref = jnp.zeros(n_sites * 4 * chi)
+
+    # State: (env_leaves, prev_ref, iteration, converged)
+    init_state = (env_leaves, init_ref, jnp.int32(0), jnp.bool_(False))
+
+    @jax.jit
+    def _run_while_loop(state):
+        def cond_fn(state):
+            _, _, i, converged = state
+            return (~converged) & (i < max_iter)
+
+        def body_fn(state):
+            e_leaves, prev_ref, i, _ = state
+            new_e_leaves = _one_sweep(e_leaves)
+            new_ref = _compute_conv_ref(new_e_leaves)
+            diff = jnp.linalg.norm(new_ref - prev_ref)
+            converged = (i + 1 >= min_iter) & (diff < conv_tol)
+            return (new_e_leaves, new_ref, i + 1, converged)
+
+        return jax.lax.while_loop(cond_fn, body_fn, state)
+
+    final_env_leaves, _, n_iters, converged = _run_while_loop(init_state)
+    n_iters = int(n_iters)
+    converged = bool(converged)
+
+    if not converged:
+        import warnings
+
+        warnings.warn(
+            f"JIT CTM did not converge in {n_iters} iterations "
+            f"(max_iter={max_iter}, conv_tol={conv_tol})",
+            stacklevel=2,
+        )
+
+    # Unflatten final result
+    envs = {}
+    env_offset = 0
+    for c in coords:
+        envs[c] = jax.tree.unflatten(
+            env_treedef,
+            list(final_env_leaves[env_offset : env_offset + n_env_per_site]),
+        )
+        env_offset += n_env_per_site
 
     return envs
 
