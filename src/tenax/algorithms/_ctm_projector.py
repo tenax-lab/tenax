@@ -540,10 +540,67 @@ def _compute_projector_tensor(
     Raises:
         ValueError: If ``projector_method`` is not ``"eigh"`` or ``"qr"``.
     """
-    if projector_method not in ("eigh", "qr"):
+    if projector_method not in ("eigh", "qr", "svd"):
         raise ValueError(
-            f"Unknown projector_method={projector_method!r}; expected 'eigh' or 'qr'."
+            f"Unknown projector_method={projector_method!r}; expected 'eigh', 'qr', or 'svd'."
         )
+
+    # --- SVD path (YASTN-style half-corner cross-product) ---
+    # Forms M = C1g^H @ C4g (cross-product of half-corners), SVD(M),
+    # then projector = left singular vectors of M (= right singular
+    # vectors of the cross product in the fused space).
+    #
+    # This is different from the density matrix approach:
+    # - eigh: ρ = C1g C1g† + C4g C4g†, P = eigvecs(ρ)
+    # - svd:  M = C1g† C4g, P = left singular vecs of [C1g; C4g] via M
+    #
+    # YASTN uses this approach in proj_corners.
+    if projector_method == "svd":
+        C1g_dense = C1g.todense()
+        C4g_dense = C4g.todense()
+
+        # Concatenate half-corners and QR to reduce dimension
+        R = jnp.concatenate([C1g_dense, C4g_dense], axis=1)  # (fused, col1+col2)
+
+        _has_tracers = isinstance(C1g_dense, jax.core.Tracer) or isinstance(
+            C4g_dense, jax.core.Tracer
+        )
+
+        if _has_tracers:
+            from tenax.algorithms.ad_utils import truncated_svd_ad
+
+            U, S, Vh = truncated_svd_ad(R, chi)
+            P_dense = U  # left singular vectors of [C1g; C4g]
+        else:
+            U_full, S_full, _Vh_full = jnp.linalg.svd(R, full_matrices=False)
+            k = min(chi, S_full.shape[0])
+            from tenax.algorithms.ad_utils import _fix_svd_signs
+
+            U_full, S_full, _Vh_full = _fix_svd_signs(U_full, S_full, _Vh_full)
+            P_dense = U_full[:, :k]
+            P_dense = jax.lax.stop_gradient(P_dense)
+
+        k = P_dense.shape[1]
+        fused_pos = C1g.labels().index("fused")
+        fused_idx = C1g.indices[fused_pos]
+
+        if base_charges is not None:
+            from tenax.algorithms._ctm_utils import _derive_charges
+
+            chi_charges = _derive_charges(base_charges, k)
+        else:
+            chi_charges = np.zeros(k, dtype=np.int32)
+        chi_new_idx = TensorIndex.from_charges(
+            fused_idx.symmetry,
+            chi_charges,
+            OUT,
+            label="chi_new",
+        )
+        if isinstance(C1g, SymmetricTensor):
+            return SymmetricTensor.from_dense(
+                P_dense, (fused_idx, chi_new_idx), tol=float("inf")
+            )
+        return DenseTensor(P_dense, (fused_idx, chi_new_idx))
 
     # --- QR path ---
     if projector_method == "qr":
