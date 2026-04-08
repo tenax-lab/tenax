@@ -683,6 +683,10 @@ def _optimize_gs_ad_tensor(
         max_iter=max(_base_cfg.max_iter, 200),
         conv_tol=min(_base_cfg.conv_tol, 1e-10),
         min_iter=max(_base_cfg.min_iter, 30),
+        renormalize=_base_cfg.renormalize,
+        projector_method=_base_cfg.projector_method,
+        jit_ctm=_base_cfg.jit_ctm,
+        ctm_conv_method=_base_cfg.ctm_conv_method,
     )
 
     def _eval_fresh(p):
@@ -1167,6 +1171,10 @@ def _optimize_gs_ad_tensor_2site(
         max_iter=max(_base_cfg2.max_iter, 200),
         conv_tol=min(_base_cfg2.conv_tol, 1e-10),
         min_iter=max(_base_cfg2.min_iter, 30),
+        renormalize=_base_cfg2.renormalize,
+        projector_method=_base_cfg2.projector_method,
+        jit_ctm=_base_cfg2.jit_ctm,
+        ctm_conv_method=_base_cfg2.ctm_conv_method,
     )
 
     def _eval_fresh_2site(p):
