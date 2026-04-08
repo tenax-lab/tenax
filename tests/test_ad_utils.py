@@ -945,7 +945,6 @@ class TestVJPBackwardConvergence:
                 conv_tol=1e-6,
                 min_iter=10,
                 ad_backward_method=backward_method,
-                ctm_conv_method="elementwise",
             )
             ct = _config_to_tuple(config)
 
