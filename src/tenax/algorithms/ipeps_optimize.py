@@ -567,14 +567,50 @@ def _optimize_gs_ad_tensor(
             direction = jax.tree.map(lambda g: -g, grads)
 
         if use_ls:
-            params, _, _ = _backtracking_line_search(
-                params,
-                direction,
-                grads,
-                energy_float,
-                loss_fn_fwd,
-                max_steps=config.gs_line_search_max_steps,
-            )
+            if config.gs_line_search_method == "hager_zhang":
+                from tenax.algorithms._line_search import hager_zhang_line_search
+
+                slope = _tree_dot(grads, direction)
+                if slope >= 0:
+                    direction = jax.tree.map(lambda g: -g, grads)
+                    slope = -_tree_dot(grads, grads)
+
+                def _phi(alpha):
+                    trial = _normalize_params(
+                        _tree_add(params, _tree_scale(direction, alpha))
+                    )
+                    return loss_fn_fwd(trial)
+
+                def _dphi(alpha):
+                    trial = _normalize_params(
+                        _tree_add(params, _tree_scale(direction, alpha))
+                    )
+                    (_, _aux), g = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
+                        trial, prev_env_leaves
+                    )
+                    return _tree_dot(g, direction)
+
+                alpha, f_alpha, converged = hager_zhang_line_search(
+                    _phi,
+                    _dphi,
+                    energy_float,
+                    slope,
+                    alpha_init=1.0,
+                )
+                if f_alpha < energy_float:
+                    params = _normalize_params(
+                        _tree_add(params, _tree_scale(direction, alpha))
+                    )
+                # else: keep current params (line search didn't improve)
+            else:
+                params, _, _ = _backtracking_line_search(
+                    params,
+                    direction,
+                    grads,
+                    energy_float,
+                    loss_fn_fwd,
+                    max_steps=config.gs_line_search_max_steps,
+                )
         else:
             params = optax.apply_updates(params, direction)
             if not use_c4v:
@@ -967,14 +1003,50 @@ def _optimize_gs_ad_tensor_2site(
             direction = jax.tree.map(lambda g: -g, grads)
 
         if use_ls:
-            params, _, _ = _backtracking_line_search(
-                params,
-                direction,
-                grads,
-                energy_float,
-                loss_fn_fwd,
-                max_steps=config.gs_line_search_max_steps,
-            )
+            if config.gs_line_search_method == "hager_zhang":
+                from tenax.algorithms._line_search import hager_zhang_line_search
+
+                slope = _tree_dot(grads, direction)
+                if slope >= 0:
+                    direction = jax.tree.map(lambda g: -g, grads)
+                    slope = -_tree_dot(grads, grads)
+
+                def _phi(alpha):
+                    trial = _normalize_params(
+                        _tree_add(params, _tree_scale(direction, alpha))
+                    )
+                    return loss_fn_fwd(trial)
+
+                def _dphi(alpha):
+                    trial = _normalize_params(
+                        _tree_add(params, _tree_scale(direction, alpha))
+                    )
+                    (_, _aux), g = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
+                        trial, prev_env_leaves
+                    )
+                    return _tree_dot(g, direction)
+
+                alpha, f_alpha, converged = hager_zhang_line_search(
+                    _phi,
+                    _dphi,
+                    energy_float,
+                    slope,
+                    alpha_init=1.0,
+                )
+                if f_alpha < energy_float:
+                    params = _normalize_params(
+                        _tree_add(params, _tree_scale(direction, alpha))
+                    )
+                # else: keep current params (line search didn't improve)
+            else:
+                params, _, _ = _backtracking_line_search(
+                    params,
+                    direction,
+                    grads,
+                    energy_float,
+                    loss_fn_fwd,
+                    max_steps=config.gs_line_search_max_steps,
+                )
         else:
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)
