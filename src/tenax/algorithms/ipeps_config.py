@@ -38,6 +38,7 @@ class CTMConfig:
         False  # diagonal scaling preconditioner for GMRES backward (experimental)
     )
     ad_backward_method: str = "vjp"  # "vjp" (iterative VJP) or "gmres"
+    ctm_conv_method: str = "sv"  # "sv" (singular value) or "elementwise"
 
 
 @dataclass

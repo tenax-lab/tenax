@@ -345,6 +345,10 @@ _PM_STR_TO_INT = {"eigh": 0, "qr": 1}
 _PM_INT_TO_STR = {0: "eigh", 1: "qr"}
 
 
+_CONV_METHOD_STR_TO_INT = {"sv": 0, "elementwise": 1}
+_CONV_METHOD_INT_TO_STR = {0: "sv", 1: "elementwise"}
+
+
 def _config_to_tuple(config) -> tuple:
     """Pack CTMConfig into a hashable tuple for JAX tracing."""
     return (
@@ -357,6 +361,7 @@ def _config_to_tuple(config) -> tuple:
         int(getattr(config, "ad_regularize_svd", True)),
         int(getattr(config, "gmres_precondition", True)),
         {"vjp": 0, "gmres": 1}.get(getattr(config, "ad_backward_method", "vjp"), 0),
+        _CONV_METHOD_STR_TO_INT.get(getattr(config, "ctm_conv_method", "sv"), 0),
     )
 
 
@@ -368,6 +373,8 @@ def _config_from_tuple(config_tuple: tuple):
     gmres_precondition = bool(config_tuple[7]) if len(config_tuple) > 7 else False
     ad_bwd_int = config_tuple[8] if len(config_tuple) > 8 else 0
     ad_backward_method = {0: "vjp", 1: "gmres"}.get(ad_bwd_int, "vjp")
+    conv_method_int = config_tuple[9] if len(config_tuple) > 9 else 0
+    ctm_conv_method = _CONV_METHOD_INT_TO_STR.get(conv_method_int, "sv")
     return CTMConfig(
         chi=config_tuple[0],
         max_iter=config_tuple[1],
@@ -378,6 +385,7 @@ def _config_from_tuple(config_tuple: tuple):
         ad_regularize_svd=ad_regularize_svd,
         gmres_precondition=gmres_precondition,
         ad_backward_method=ad_backward_method,
+        ctm_conv_method=ctm_conv_method,
     )
 
 
@@ -724,7 +732,10 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
         }
     )
 
+    use_elementwise = getattr(config, "ctm_conv_method", "sv") == "elementwise"
     prev_svs = {}
+    prev_env_arrays = {}
+
     for i in range(config.max_iter):
         envs = _ctm_tensor_sweep_multisite(
             envs,
@@ -740,14 +751,41 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
             continue
 
         converged = True
-        for c in sorted(envs):
-            sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
-            if c in prev_svs:
-                if float(_ctm_sv_diff_local(sv, prev_svs[c])) >= config.conv_tol:
+        if use_elementwise:
+            for c in sorted(envs):
+                env_arrays = tuple(
+                    t.todense()
+                    for t in (
+                        envs[c].C1,
+                        envs[c].C2,
+                        envs[c].C3,
+                        envs[c].C4,
+                        envs[c].T1,
+                        envs[c].T2,
+                        envs[c].T3,
+                        envs[c].T4,
+                    )
+                )
+                if c in prev_env_arrays:
+                    for curr, prev in zip(env_arrays, prev_env_arrays[c]):
+                        diff = float(jnp.max(jnp.abs(curr - prev)))
+                        if diff >= config.conv_tol:
+                            converged = False
+                            break
+                    if not converged:
+                        break
+                else:
                     converged = False
-            else:
-                converged = False
-            prev_svs[c] = sv
+                prev_env_arrays[c] = env_arrays
+        else:
+            for c in sorted(envs):
+                sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
+                if c in prev_svs:
+                    if float(_ctm_sv_diff_local(sv, prev_svs[c])) >= config.conv_tol:
+                        converged = False
+                else:
+                    converged = False
+                prev_svs[c] = sv
         if converged:
             break
 

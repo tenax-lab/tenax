@@ -23,7 +23,9 @@ from tenax.algorithms._ctm_tensor import (
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms.ad_utils import (
+    _config_from_tuple,
     _config_to_tuple,
+    _ctm_tensor_multisite_fixed_point,
     _gauge_fix_ctm_tensor,
     _svd_sector_backward,
     ctm_tensor_converge,
@@ -695,6 +697,57 @@ class TestSVDSignFixing:
         assert jnp.allclose(recon, recon_ref, atol=1e-12), (
             f"Reconstruction mismatch: {float(jnp.max(jnp.abs(recon - recon_ref)))}"
         )
+
+
+class TestElementWiseCTMConvergence:
+    """Element-wise CTM convergence should be available and work correctly."""
+
+    def test_elementwise_converges(self):
+        """CTM with element-wise convergence should reach convergence."""
+        A = _make_dense_tensor(jax.random.PRNGKey(0))
+        config = CTMConfig(
+            chi=8,
+            max_iter=200,
+            conv_tol=1e-6,
+            min_iter=10,
+            ctm_conv_method="elementwise",
+        )
+        envs = _ctm_tensor_multisite_fixed_point(
+            {(0, 0): A}, SINGLE_SITE_NEIGHBORS, config
+        )
+        assert envs is not None
+        # Check that env tensors are non-trivial
+        c1_norm = float(jnp.linalg.norm(envs[(0, 0)].C1.todense()))
+        assert c1_norm > 0
+
+    def test_sv_still_works(self):
+        """Singular-value convergence should still work."""
+        A = _make_dense_tensor(jax.random.PRNGKey(0))
+        config = CTMConfig(chi=8, max_iter=200, conv_tol=1e-6, min_iter=10)
+        envs = _ctm_tensor_multisite_fixed_point(
+            {(0, 0): A}, SINGLE_SITE_NEIGHBORS, config
+        )
+        assert envs is not None
+
+    def test_config_field_exists(self):
+        """CTMConfig should have ctm_conv_method field."""
+        config = CTMConfig()
+        assert hasattr(config, "ctm_conv_method")
+        assert config.ctm_conv_method == "sv"
+
+    def test_config_roundtrip(self):
+        """ctm_conv_method should survive serialization round-trip."""
+        config = CTMConfig(ctm_conv_method="elementwise")
+        t = _config_to_tuple(config)
+        config2 = _config_from_tuple(t)
+        assert config2.ctm_conv_method == "elementwise"
+
+    def test_config_roundtrip_sv(self):
+        """Default sv method should survive serialization round-trip."""
+        config = CTMConfig(ctm_conv_method="sv")
+        t = _config_to_tuple(config)
+        config2 = _config_from_tuple(t)
+        assert config2.ctm_conv_method == "sv"
 
     def test_sign_fix_gradient_finite(self):
         """Gradient through sign-fixed SVD should be finite."""
