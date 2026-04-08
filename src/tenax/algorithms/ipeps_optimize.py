@@ -615,6 +615,7 @@ def _optimize_gs_ad_tensor(
                     energy_float,
                     slope,
                     alpha_init=alpha0,
+                    rho=1.5,
                     max_step=2.0 * alpha0,
                     energy_bound=max(2.0, 2.0 * abs(energy_float)),
                 )
@@ -1104,6 +1105,7 @@ def _optimize_gs_ad_tensor_2site(
                     energy_float,
                     slope,
                     alpha_init=alpha0,
+                    rho=1.5,
                     max_step=2.0 * alpha0,
                     energy_bound=max(2.0, 2.0 * abs(energy_float)),
                 )
