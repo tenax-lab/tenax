@@ -498,9 +498,9 @@ class TestQRProjectors:
         return H.reshape(d, d, d, d)
 
     def test_qr_backward_compat(self):
-        """CTMConfig() still defaults to eigh."""
+        """CTMConfig() defaults to svd (Fishman projector)."""
         cfg = CTMConfig()
-        assert cfg.projector_method == "eigh"
+        assert cfg.projector_method == "svd"
         assert cfg.qr_warmup_steps == 3
 
     def test_qr_ctm_converges(self):
