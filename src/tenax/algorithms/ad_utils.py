@@ -758,6 +758,7 @@ def _ctm_tensor_step_multisite(
     n_env_per_site,
     double_layers=None,
     sigma_gauge_ref_leaves=None,
+    skip_gauge=False,
 ):
     """One multisite CTM sweep + gauge fix, flat leaves to flat leaves.
 
@@ -768,7 +769,9 @@ def _ctm_tensor_step_multisite(
 
     If *sigma_gauge_ref_leaves* is provided, uses sigma gauge fixing
     (aligning output to the reference environment) instead of QR gauge.
-    This is needed for the VJP backward to converge.
+
+    If *skip_gauge* is True, no gauge fix is applied (used in backward
+    to avoid QR NaN on rank-deficient corners where D² < chi).
     """
     # Unflatten site tensors
     coords = sorted(site_treedefs)
@@ -812,6 +815,8 @@ def _ctm_tensor_step_multisite(
             )
             ref_offset += n_env_per_site
         envs = {c: _sigma_gauge_fix_ctm_tensor(envs[c], ref_envs[c]) for c in envs}
+    elif skip_gauge:
+        pass  # no gauge fix — used in backward to avoid QR NaN on rank-deficient corners
     else:
         envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
 
@@ -989,7 +994,8 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
         _, vjp_env_fn = jax.vjp(lambda e: step_fn_sigma(site_leaves, e), env_leaves)
         _, vjp_site_fn = jax.vjp(lambda s: step_fn_sigma(s, env_leaves), site_leaves)
     else:
-
+        # Skip gauge fix in backward step to avoid QR NaN on rank-deficient
+        # corners (D² < chi).  At the fixed point the gauge is already fixed.
         def step_fn(s_leaves, e_leaves):
             return _ctm_tensor_step_multisite(
                 s_leaves,
@@ -1001,6 +1007,7 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
                 site_treedefs,
                 env_treedef,
                 n_env_per_site,
+                skip_gauge=True,
             )
 
         _, vjp_env_fn = jax.vjp(lambda e: step_fn(site_leaves, e), env_leaves)

@@ -545,42 +545,60 @@ def _compute_projector_tensor(
             f"Unknown projector_method={projector_method!r}; expected 'eigh', 'qr', or 'svd'."
         )
 
-    # --- SVD path (YASTN-style half-corner cross-product) ---
-    # Forms M = C1g^H @ C4g (cross-product of half-corners), SVD(M),
-    # then projector = left singular vectors of M (= right singular
-    # vectors of the cross product in the fused space).
+    # --- SVD path (Fishman projector, standard CTMRG) ---
     #
-    # This is different from the density matrix approach:
-    # - eigh: ρ = C1g C1g† + C4g C4g†, P = eigvecs(ρ)
-    # - svd:  M = C1g† C4g, P = left singular vecs of [C1g; C4g] via M
+    # Forms the half-corner cross-product M = C1g^T @ C4g (col1 × col2),
+    # SVD(M) = U S V†, then constructs the isometric projector as:
     #
-    # YASTN uses this approach in proj_corners.
+    #   P = C4g @ V @ S^{-1/2}      (fused_dim × chi)
+    #
+    # This is the standard CTMRG projector used by YASTN (`proj_corners`)
+    # and variPEPS (Fishman method).  It's equivalent to the eigh approach
+    # for the symmetric density matrix, but uses the cross-product SVD
+    # which has different numerical properties.
+    #
+    # For improved conditioning, we first QR-factor each half-corner to
+    # reduce to a small (col × col) SVD, then reconstruct.
+    #
+    # Reference: Fishman et al., PRB 98, 235148 (2018);
+    #            YASTN proj_corners + regularize_1site_corners.
     if projector_method == "svd":
         C1g_dense = C1g.todense()
         C4g_dense = C4g.todense()
-
-        # Concatenate half-corners and QR to reduce dimension
-        R = jnp.concatenate([C1g_dense, C4g_dense], axis=1)  # (fused, col1+col2)
 
         _has_tracers = isinstance(C1g_dense, jax.core.Tracer) or isinstance(
             C4g_dense, jax.core.Tracer
         )
 
+        # Direct cross-product: M = C1g^H @ C4g  (col1 × col2)
+        # No QR pre-factoring — QR backward is unstable for rank-deficient matrices.
+        M = C1g_dense.conj().T @ C4g_dense
+
         if _has_tracers:
             from tenax.algorithms.ad_utils import truncated_svd_ad
 
-            U, S, Vh = truncated_svd_ad(R, chi)
-            P_dense = U  # left singular vectors of [C1g; C4g]
+            _U_M, S_M, Vh_M = truncated_svd_ad(M, chi)
         else:
-            U_full, S_full, _Vh_full = jnp.linalg.svd(R, full_matrices=False)
+            _U_full, S_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
             k = min(chi, S_full.shape[0])
             from tenax.algorithms.ad_utils import _fix_svd_signs
 
-            U_full, S_full, _Vh_full = _fix_svd_signs(U_full, S_full, _Vh_full)
-            P_dense = U_full[:, :k]
-            P_dense = jax.lax.stop_gradient(P_dense)
+            _U_full, S_full, Vh_full = _fix_svd_signs(_U_full, S_full, Vh_full)
+            S_M, Vh_M = S_full[:k], Vh_full[:k, :]
 
-        k = P_dense.shape[1]
+        k = S_M.shape[0]
+        V_M = Vh_M.conj().T  # (col2, k)
+
+        # S^{-1/2} weighting with stop_gradient: at the fixed point the
+        # singular values are constants, so the derivative through S^{-1/2}
+        # (which is -0.5 * S^{-3/2}) is not needed and causes NaN.
+        _cutoff = 1e-14 * (S_M[0] + 1e-30)
+        S_rsqrt = jnp.where(S_M > _cutoff, 1.0 / jnp.sqrt(S_M), 0.0)
+        S_rsqrt = jax.lax.stop_gradient(S_rsqrt)
+
+        # Fishman projector: P = C4g @ V @ S^{-1/2}
+        P_dense = C4g_dense @ (V_M * S_rsqrt[None, :])  # (fused_dim, k)
+
         fused_pos = C1g.labels().index("fused")
         fused_idx = C1g.indices[fused_pos]
 
