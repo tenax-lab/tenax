@@ -80,10 +80,27 @@ def truncated_svd_ad(
     Returns:
         ``(U, s, Vh)`` truncated to *chi*.
     """
-    U, s, Vh = jnp.linalg.svd(M, full_matrices=False)
-    U, s, Vh = _fix_svd_signs(U, s, Vh)
-    k = min(chi, s.shape[0])
-    return U[:, :k], s[:k], Vh[:k, :]
+    U, s_full, Vh = jnp.linalg.svd(M, full_matrices=False)
+    k = min(chi, s_full.shape[0])
+    s_trunc = s_full[:k]
+
+    # Multiplet-aware truncation: if we cut through a degenerate group,
+    # zero out the partial members to keep the projector smooth.
+    if k < s_full.shape[0]:
+        boundary_val = s_full[k - 1]
+        next_val = s_full[k]
+        gap = boundary_val - next_val
+        threshold = 1e-6 * (s_full[0] + 1e-30)
+        # If the gap at the truncation point is too small, zero out
+        # all SVs matching the boundary value
+        is_in_split_multiplet = (gap < threshold) & (
+            jnp.abs(s_trunc - boundary_val) < threshold
+        )
+        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+
+    U, s_trunc, Vh = U[:, :k], s_trunc, Vh[:k, :]
+    U, s_trunc, Vh = _fix_svd_signs(U, s_trunc, Vh)
+    return U, s_trunc, Vh
 
 
 def _truncated_svd_ad_fwd(
@@ -94,11 +111,24 @@ def _truncated_svd_ad_fwd(
     U_full, s_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
     U_full, s_full, Vh_full = _fix_svd_signs(U_full, s_full, Vh_full)
     k = min(chi, s_full.shape[0])
+    s_trunc = s_full[:k]
+
+    # Multiplet-aware truncation: zero out partial members of split multiplets
+    if k < s_full.shape[0]:
+        boundary_val = s_full[k - 1]
+        next_val = s_full[k]
+        gap = boundary_val - next_val
+        threshold = 1e-6 * (s_full[0] + 1e-30)
+        is_in_split_multiplet = (gap < threshold) & (
+            jnp.abs(s_trunc - boundary_val) < threshold
+        )
+        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+
     U = U_full[:, :k]
-    s = s_full[:k]
     Vh = Vh_full[:k, :]
+    # Store the *unmodified* full SVD in residuals for the backward pass
     residuals = (U_full, s_full, Vh_full, M, k)
-    return (U, s, Vh), residuals
+    return (U, s_trunc, Vh), residuals
 
 
 def _svd_sector_backward(

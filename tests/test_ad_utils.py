@@ -824,3 +824,60 @@ class TestRegularizedEigh:
 
         grad = jax.grad(loss)(M)
         assert jnp.all(jnp.isfinite(grad))
+
+
+class TestMultipletAwareTruncation:
+    """SVD truncation should handle degenerate singular values at boundary."""
+
+    def test_no_split_at_clean_gap(self):
+        """When truncation falls at a clean gap, all SVs should be nonzero."""
+        key = jax.random.PRNGKey(42)
+        Q1, _ = jnp.linalg.qr(jax.random.normal(key, (6, 6)))
+        key2 = jax.random.PRNGKey(7)
+        Q2, _ = jnp.linalg.qr(jax.random.normal(key2, (4, 4)))
+        s_exact = jnp.array([3.0, 2.0, 1.5, 0.5])
+        M = Q1[:, :4] @ jnp.diag(s_exact) @ Q2
+
+        U, s, Vh = truncated_svd_ad(M, 3)
+        # Clean gap between 1.5 and 0.5 — all 3 kept SVs should be nonzero
+        assert jnp.all(s > 0.1), f"Expected all nonzero SVs but got {s}"
+
+    def test_zeros_split_multiplet(self):
+        """When chi cuts through degenerate group, partial members should be zeroed."""
+        key = jax.random.PRNGKey(42)
+        Q1, _ = jnp.linalg.qr(jax.random.normal(key, (6, 6)))
+        key2 = jax.random.PRNGKey(7)
+        Q2, _ = jnp.linalg.qr(jax.random.normal(key2, (4, 4)))
+        # SVs: [3.0, 2.0, 2.0, 1.0] — chi=2 splits the (2,2) pair
+        s_exact = jnp.array([3.0, 2.0, 2.0, 1.0])
+        M = Q1[:, :4] @ jnp.diag(s_exact) @ Q2
+
+        U, s, Vh = truncated_svd_ad(M, 2)
+        # chi=2 cuts between 2.0 and 2.0 — should zero the boundary multiplet
+        nonzero = int(jnp.sum(s > 0.1))
+        assert nonzero == 1, f"Expected 1 nonzero SV (3.0 only) but got {nonzero}: {s}"
+
+    def test_keeps_full_multiplet(self):
+        """When chi includes the full multiplet, all should be kept."""
+        key = jax.random.PRNGKey(42)
+        Q1, _ = jnp.linalg.qr(jax.random.normal(key, (6, 6)))
+        key2 = jax.random.PRNGKey(7)
+        Q2, _ = jnp.linalg.qr(jax.random.normal(key2, (4, 4)))
+        s_exact = jnp.array([3.0, 2.0, 2.0, 1.0])
+        M = Q1[:, :4] @ jnp.diag(s_exact) @ Q2
+
+        U, s, Vh = truncated_svd_ad(M, 3)
+        # chi=3 keeps [3, 2, 2] — no split, all should be nonzero
+        assert jnp.all(s > 0.1), f"Expected all nonzero but got {s}"
+
+    def test_gradient_still_finite(self):
+        """Gradient through multiplet-aware truncation should be finite."""
+        key = jax.random.PRNGKey(42)
+        M = jax.random.normal(key, (6, 4))
+
+        def loss(M_in):
+            U, s, Vh = truncated_svd_ad(M_in, 3)
+            return jnp.sum(s**2)
+
+        grad = jax.grad(loss)(M)
+        assert jnp.all(jnp.isfinite(grad))
