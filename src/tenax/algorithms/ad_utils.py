@@ -1186,6 +1186,124 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
     return envs
 
 
+def _ctm_tensor_multisite_fixed_point_jit(
+    site_tensors, neighbors, config, envs_init=None
+):
+    """Run multisite CTM to convergence using JIT-compiled batched sweeps.
+
+    Uses ``jax.lax.fori_loop`` to fuse multiple CTM sweeps into a single
+    GPU kernel, eliminating per-sweep Python overhead.  Convergence is
+    checked in Python between batches.
+
+    Falls back to the Python loop for SymmetricTensor inputs (block-sparse
+    operations aren't JIT-traceable).
+    """
+    from tenax.core.tensor import SymmetricTensor
+
+    # Fall back to Python loop for SymmetricTensor (not JIT-traceable)
+    first_tensor = next(iter(site_tensors.values()))
+    if isinstance(first_tensor, SymmetricTensor):
+        return _ctm_tensor_multisite_fixed_point(
+            site_tensors, neighbors, config, envs_init=envs_init
+        )
+
+    envs = (
+        envs_init
+        if envs_init is not None
+        else {
+            c: initialize_ctm_tensor_env(A, config.chi) for c, A in site_tensors.items()
+        }
+    )
+
+    coords = sorted(site_tensors)
+
+    # Build treedefs for _ctm_tensor_step_multisite
+    site_treedefs = {c: jax.tree.structure(site_tensors[c]) for c in coords}
+    env_treedef = jax.tree.structure(envs[coords[0]])
+    n_env_per_site = len(jax.tree.leaves(envs[coords[0]]))
+
+    site_leaves = ()
+    for c in coords:
+        site_leaves = site_leaves + tuple(jax.tree.leaves(site_tensors[c]))
+
+    # Pre-compute double layers (constant across sweeps)
+    double_layers_cached = {
+        c: _build_double_layer_tensor(A) for c, A in site_tensors.items()
+    }
+
+    env_leaves = _flatten_envs(envs)
+
+    # Define one sweep as flat-leaves → flat-leaves
+    @jax.jit
+    def _batched_sweeps(env_leaves_tuple, n_sweeps):
+        def body_fn(_i, e_leaves):
+            return tuple(
+                _ctm_tensor_step_multisite(
+                    site_leaves,
+                    e_leaves,
+                    neighbors,
+                    config.chi,
+                    config.renormalize,
+                    config.projector_method,
+                    site_treedefs,
+                    env_treedef,
+                    n_env_per_site,
+                    double_layers=double_layers_cached,
+                )
+            )
+
+        return jax.lax.fori_loop(0, n_sweeps, body_fn, env_leaves_tuple)
+
+    # Run min_iter sweeps first (no convergence check)
+    batch_size = max(config.min_iter, 5)
+    if config.min_iter > 0:
+        env_leaves = _batched_sweeps(tuple(env_leaves), batch_size)
+
+    # Then run in batches, checking convergence between batches
+    remaining = config.max_iter - batch_size
+    sweep_batch = 5
+    prev_svs = {}
+
+    for _ in range(remaining // sweep_batch + 1):
+        if remaining <= 0:
+            break
+        n = min(sweep_batch, remaining)
+        env_leaves = _batched_sweeps(tuple(env_leaves), n)
+        remaining -= n
+
+        # Python-level convergence check on corner SVs
+        envs_check = {}
+        env_offset = 0
+        for c in coords:
+            envs_check[c] = jax.tree.unflatten(
+                env_treedef, list(env_leaves[env_offset : env_offset + n_env_per_site])
+            )
+            env_offset += n_env_per_site
+
+        converged = True
+        for c in coords:
+            sv = jnp.linalg.svd(envs_check[c].C1.todense(), compute_uv=False)
+            if c in prev_svs:
+                if float(_ctm_sv_diff_local(sv, prev_svs[c])) >= config.conv_tol:
+                    converged = False
+            else:
+                converged = False
+            prev_svs[c] = sv
+        if converged:
+            break
+
+    # Unflatten final result
+    envs = {}
+    env_offset = 0
+    for c in coords:
+        envs[c] = jax.tree.unflatten(
+            env_treedef, list(env_leaves[env_offset : env_offset + n_env_per_site])
+        )
+        env_offset += n_env_per_site
+
+    return envs
+
+
 # ---------------------------------------------------------------------------
 # 4b. Explicit differentiation CTM (backprop through unrolled iterations)
 # ---------------------------------------------------------------------------
