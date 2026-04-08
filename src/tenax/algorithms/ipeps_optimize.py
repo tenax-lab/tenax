@@ -436,6 +436,8 @@ def _optimize_gs_ad_tensor(
         env_ = jax.tree.unflatten(env_treedef, env_leaves)
         return float(compute_energy_ctm_tensor(A_norm, env_, gate, d_phys))
 
+    stall_count = 0  # noise recovery: consecutive line search failures
+
     for step in range(config.gs_num_steps):
         (energy_val, env_leaves), grads = jax.value_and_grad(
             loss_fn, argnums=0, has_aux=True
