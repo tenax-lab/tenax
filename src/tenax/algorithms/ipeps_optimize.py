@@ -617,7 +617,7 @@ def _optimize_gs_ad_tensor(
                     alpha_init=alpha0,
                     rho=1.5,
                     max_step=2.0 * alpha0,
-                    energy_bound=max(2.0, 2.0 * abs(energy_float)),
+                    energy_bound=max(2.0, 2.0 * abs(best_energy)),
                 )
                 if f_alpha < energy_float:
                     params = _normalize_params(
@@ -1107,7 +1107,7 @@ def _optimize_gs_ad_tensor_2site(
                     alpha_init=alpha0,
                     rho=1.5,
                     max_step=2.0 * alpha0,
-                    energy_bound=max(2.0, 2.0 * abs(energy_float)),
+                    energy_bound=max(2.0, 2.0 * abs(best_energy)),
                 )
                 if f_alpha < energy_float:
                     params = _normalize_params(
