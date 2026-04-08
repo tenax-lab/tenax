@@ -26,7 +26,11 @@ from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     _fuse_pair_by_label,
 )
-from tenax.algorithms._ctm_tensor_moves import _apply_projector_tensor, _flip_leg_flow
+from tenax.algorithms._ctm_tensor_moves import (
+    _apply_projector_tensor,
+    _flip_leg_flow,
+    _normalize_tensor,
+)
 from tenax.contraction.contractor import contract
 from tenax.core.tensor import SymmetricTensor, Tensor
 
@@ -189,15 +193,16 @@ def _ctm_tensor_move_horizontal(
     T2_new = T2_new.relabels({"chi_new": "t2_u", "chi_new_r": "t2_d", "l2": "r2"})
     T2_new = _flip_leg_flow(T2_new, "r2")
 
+    # Per-absorption normalization (matches YASTN)
     return CTMTensorEnv(
-        C1=C1_new,
-        C2=C2_new,
-        C3=C3_new,
-        C4=C4_new,
+        C1=_normalize_tensor(C1_new),
+        C2=_normalize_tensor(C2_new),
+        C3=_normalize_tensor(C3_new),
+        C4=_normalize_tensor(C4_new),
         T1=env_self.T1,
-        T2=T2_new,
+        T2=_normalize_tensor(T2_new),
         T3=env_self.T3,
-        T4=T4_new,
+        T4=_normalize_tensor(T4_new),
     )
 
 
@@ -285,13 +290,14 @@ def _ctm_tensor_move_vertical(
     T3_new = T3_new.relabels({"chi_new": "t3_r", "chi_new_r": "t3_l", "u2": "d2"})
     T3_new = _flip_leg_flow(T3_new, "d2")
 
+    # Per-absorption normalization (matches YASTN)
     return CTMTensorEnv(
-        C1=C1_new,
-        C2=C2_new,
-        C3=C3_new,
-        C4=C4_new,
-        T1=T1_new,
+        C1=_normalize_tensor(C1_new),
+        C2=_normalize_tensor(C2_new),
+        C3=_normalize_tensor(C3_new),
+        C4=_normalize_tensor(C4_new),
+        T1=_normalize_tensor(T1_new),
         T2=env_self.T2,
-        T3=T3_new,
+        T3=_normalize_tensor(T3_new),
         T4=env_self.T4,
     )
