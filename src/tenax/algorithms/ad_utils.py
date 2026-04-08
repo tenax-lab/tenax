@@ -1267,11 +1267,11 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
 def _ctm_tensor_multisite_fixed_point_jit(
     site_tensors, neighbors, config, envs_init=None
 ):
-    """Run multisite CTM to convergence using JIT-compiled batched sweeps.
+    """Run multisite CTM to convergence using ``jax.lax.while_loop``.
 
-    Uses ``jax.lax.fori_loop`` to fuse multiple CTM sweeps into a single
-    GPU kernel, eliminating per-sweep Python overhead.  Convergence is
-    checked in Python between batches.
+    The entire convergence loop — sweep, gauge fix, and SV convergence
+    check — runs inside a single JIT-compiled kernel with zero Python
+    overhead, matching the variPEPS architecture.
 
     Falls back to the Python loop for SymmetricTensor inputs (block-sparse
     operations aren't JIT-traceable).
@@ -1309,73 +1309,73 @@ def _ctm_tensor_multisite_fixed_point_jit(
         c: _build_double_layer_tensor(A) for c, A in site_tensors.items()
     }
 
-    env_leaves = _flatten_envs(envs)
+    env_leaves = tuple(_flatten_envs(envs))
+    chi = config.chi
+    conv_tol = config.conv_tol
+    min_iter = config.min_iter
+    max_iter = config.max_iter
 
-    # Define one sweep as flat-leaves → flat-leaves
+    # Number of C1 corners = number of sites; each site has n_env_per_site leaves
+    # C1 is the first leaf of each site's env (leaf index 0)
+    n_sites = len(coords)
+
+    def _one_sweep(e_leaves):
+        return tuple(
+            _ctm_tensor_step_multisite(
+                site_leaves,
+                e_leaves,
+                neighbors,
+                config.chi,
+                config.renormalize,
+                config.projector_method,
+                site_treedefs,
+                env_treedef,
+                n_env_per_site,
+                double_layers=double_layers_cached,
+            )
+        )
+
+    def _compute_sv(e_leaves):
+        """Compute normalized corner SVs for all sites, concatenated."""
+        svs = []
+        for s in range(n_sites):
+            c1_dense = e_leaves[s * n_env_per_site]  # C1 is leaf 0
+            sv = jnp.linalg.svd(c1_dense, compute_uv=False)
+            sv = sv / (jnp.sum(sv) + 1e-15)
+            svs.append(sv)
+        return jnp.concatenate(svs)
+
+    # Initial SVs (zeros — forces at least one iteration)
+    init_sv = jnp.zeros(n_sites * chi)
+
+    # State: (env_leaves, prev_sv, iteration, converged)
+    init_state = (env_leaves, init_sv, jnp.int32(0), jnp.bool_(False))
+
     @jax.jit
-    def _batched_sweeps(env_leaves_tuple, n_sweeps):
-        def body_fn(_i, e_leaves):
-            return tuple(
-                _ctm_tensor_step_multisite(
-                    site_leaves,
-                    e_leaves,
-                    neighbors,
-                    config.chi,
-                    config.renormalize,
-                    config.projector_method,
-                    site_treedefs,
-                    env_treedef,
-                    n_env_per_site,
-                    double_layers=double_layers_cached,
-                )
-            )
+    def _run_while_loop(state):
+        def cond_fn(state):
+            _, _, i, converged = state
+            return (~converged) & (i < max_iter)
 
-        return jax.lax.fori_loop(0, n_sweeps, body_fn, env_leaves_tuple)
+        def body_fn(state):
+            e_leaves, prev_sv, i, _ = state
+            new_e_leaves = _one_sweep(e_leaves)
+            new_sv = _compute_sv(new_e_leaves)
+            diff = jnp.max(jnp.abs(new_sv - prev_sv))
+            converged = (i + 1 >= min_iter) & (diff < conv_tol)
+            return (new_e_leaves, new_sv, i + 1, converged)
 
-    # Run min_iter sweeps first (no convergence check)
-    batch_size = max(config.min_iter, 5)
-    if config.min_iter > 0:
-        env_leaves = _batched_sweeps(tuple(env_leaves), batch_size)
+        return jax.lax.while_loop(cond_fn, body_fn, state)
 
-    # Then run in batches, checking convergence between batches
-    remaining = config.max_iter - batch_size
-    sweep_batch = 5
-    prev_svs = {}
-
-    for _ in range(remaining // sweep_batch + 1):
-        if remaining <= 0:
-            break
-        n = min(sweep_batch, remaining)
-        env_leaves = _batched_sweeps(tuple(env_leaves), n)
-        remaining -= n
-
-        # Python-level convergence check on corner SVs
-        envs_check = {}
-        env_offset = 0
-        for c in coords:
-            envs_check[c] = jax.tree.unflatten(
-                env_treedef, list(env_leaves[env_offset : env_offset + n_env_per_site])
-            )
-            env_offset += n_env_per_site
-
-        converged = True
-        for c in coords:
-            sv = jnp.linalg.svd(envs_check[c].C1.todense(), compute_uv=False)
-            if c in prev_svs:
-                if float(_ctm_sv_diff_local(sv, prev_svs[c])) >= config.conv_tol:
-                    converged = False
-            else:
-                converged = False
-            prev_svs[c] = sv
-        if converged:
-            break
+    final_env_leaves, _, _, _ = _run_while_loop(init_state)
 
     # Unflatten final result
     envs = {}
     env_offset = 0
     for c in coords:
         envs[c] = jax.tree.unflatten(
-            env_treedef, list(env_leaves[env_offset : env_offset + n_env_per_site])
+            env_treedef,
+            list(final_env_leaves[env_offset : env_offset + n_env_per_site]),
         )
         env_offset += n_env_per_site
 
