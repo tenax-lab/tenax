@@ -5,6 +5,34 @@ from two grown corner tensors, with block-sparse support for SymmetricTensor.
 
 Shared by both the standard CTM (``_ctm_tensor.py``) and the split CTM
 (``_split_ctm_tensor.py``).
+
+Dense fallback audit (issue #282)
+----------------------------------
+This module contains ``todense()`` calls in the projector computation.
+
+**Block-sparse paths (no todense):**
+
+- ``_eigh_projector_symmetric``: Fully block-sparse per-sector density
+  matrix eigh with global eigenvalue truncation.
+
+- ``_qr_projector_symmetric``: Fully block-sparse per-sector QR + small
+  eigh.
+
+**Dense fallback paths (used during AD tracing or for DenseTensor):**
+
+- SVD path (``projector_method="svd"``): Always densifies both grown
+  corners.  The cross-product SVD is on a chi x chi matrix.  A
+  block-sparse Fishman projector is a future optimization target.
+
+- QR path (``projector_method="qr"``): Falls back to dense only when
+  SymmetricTensor blocks contain JAX tracers (AD) or for DenseTensor.
+
+- eigh path (``projector_method="eigh"``): Falls back to dense only when
+  SymmetricTensor blocks contain JAX tracers (AD) or for DenseTensor.
+
+During AD, projectors are evaluated with JAX tracers, forcing the dense
+fallback.  However, projectors at the fixed point are ``stop_gradient``
+constants, so the dense path affects only the backward step function.
 """
 
 from __future__ import annotations
@@ -563,6 +591,10 @@ def _compute_projector_tensor(
     # Reference: Fishman et al., PRB 98, 235148 (2018);
     #            YASTN proj_corners + regularize_1site_corners.
     if projector_method == "svd":
+        # Dense fallback: always densifies grown corners for Fishman SVD
+        # projector.  Grown corners are (chi*D^2, chi); the cross-product
+        # M = C1g^H @ C4g is chi x chi.  Block-sparse Fishman projector
+        # is a future optimization target.  (issue #282)
         C1g_dense = C1g.todense()
         C4g_dense = C4g.todense()
 
@@ -631,7 +663,10 @@ def _compute_projector_tensor(
                 return _qr_projector_symmetric(C1g, C4g, chi)
 
         # Dense QR fallback — differentiable via regularized SVD when
-        # AD-traced; standard eigh otherwise (preserves sign convention).
+        # Dense QR fallback — only reached when blocks contain JAX tracers
+        # (AD backward) or for DenseTensor inputs.  Block-sparse
+        # _qr_projector_symmetric handles the non-tracer case above.
+        # (issue #282)
         C1g_dense = C1g.todense()
         C4g_dense = C4g.todense()
         _has_tracers = isinstance(C1g_dense, jax.core.Tracer) or isinstance(
@@ -706,8 +741,11 @@ def _compute_projector_tensor(
                 base_charges=base_charges,
             )
 
-    # Dense fallback — differentiable via regularized SVD when AD-traced;
-    # standard eigh otherwise (preserves sign convention).
+    # Dense eigh fallback — only reached when SymmetricTensor blocks contain
+    # JAX tracers (AD backward) or for DenseTensor inputs.  Block-sparse
+    # _eigh_projector_symmetric handles the non-tracer case above.
+    # Uses regularized_eigh when AD-traced for stable backward.
+    # (issue #282)
     fused_pos = C1g.labels().index("fused")
     fused_idx = C1g.indices[fused_pos]
 
