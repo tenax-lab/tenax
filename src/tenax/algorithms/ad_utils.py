@@ -1363,6 +1363,7 @@ def _ctm_tensor_multisite_fixed_point_jit(
         )
         envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
         max_iter = max(max_iter - 1, 1)
+        min_iter = max(min_iter - 1, 0)
 
     env_leaves = tuple(_flatten_envs(envs))
 
