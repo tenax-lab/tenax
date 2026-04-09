@@ -10,8 +10,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms._tensor_utils import scale_bond_axis
 from tenax.contraction.contractor import contract
+from tenax.core._tensor_utils import scale_bond_axis
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 from tenax.linalg import qr, svd
