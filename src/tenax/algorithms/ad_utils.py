@@ -1339,7 +1339,6 @@ def _ctm_tensor_multisite_fixed_point_jit(
             )
             envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
 
-    env_leaves = tuple(_flatten_envs(envs))
     chi = config.chi
     conv_tol = config.conv_tol
     min_iter = config.min_iter
@@ -1350,6 +1349,23 @@ def _ctm_tensor_multisite_fixed_point_jit(
     n_sites = len(coords)
 
     use_sigma = getattr(config, "forward_gauge", "qr") == "sigma"
+
+    # Match Python loop: first sweep uses QR gauge to establish a clean
+    # starting point before sigma gauge takes over.
+    if use_sigma:
+        envs = _ctm_tensor_sweep_multisite(
+            envs,
+            double_layers_cached,
+            neighbors,
+            chi,
+            config.renormalize,
+            config.projector_method,
+        )
+        envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
+        max_iter = max(max_iter - 1, 1)
+        min_iter = max(min_iter - 1, 0)
+
+    env_leaves = tuple(_flatten_envs(envs))
 
     def _one_sweep(e_leaves, sigma_ref=None):
         return tuple(
@@ -1394,33 +1410,29 @@ def _ctm_tensor_multisite_fixed_point_jit(
         init_ref = jnp.zeros(n_sites * chi)
 
     if use_sigma:
-        # Sigma gauge: state carries previous env for alignment reference
-        # State: (env_leaves, prev_env_leaves, prev_ref, iteration, converged)
-        init_state = (
-            env_leaves,
-            env_leaves,
-            init_ref,
-            jnp.int32(0),
-            jnp.bool_(False),
-        )
+        # Sigma gauge: reference is always the current input (pre-sweep env),
+        # matching the Python loop where envs_old = envs before each sweep.
+        # No extra state needed — sigma_ref = e_leaves inside body_fn.
+        # State: (env_leaves, prev_ref, iteration, converged)
+        init_state = (env_leaves, init_ref, jnp.int32(0), jnp.bool_(False))
 
         @jax.jit
         def _run_while_loop(state):
             def cond_fn(state):
-                _, _, _, i, converged = state
+                _, _, i, converged = state
                 return (~converged) & (i < max_iter)
 
             def body_fn(state):
-                e_leaves, prev_e, prev_ref, i, _ = state
-                new_e_leaves = _one_sweep(e_leaves, sigma_ref=prev_e)
+                e_leaves, prev_ref, i, _ = state
+                new_e_leaves = _one_sweep(e_leaves, sigma_ref=e_leaves)
                 new_ref = _compute_conv_ref(new_e_leaves)
                 diff = jnp.max(jnp.abs(new_ref - prev_ref))
                 converged = (i + 1 >= min_iter) & (diff < conv_tol)
-                return (new_e_leaves, e_leaves, new_ref, i + 1, converged)
+                return (new_e_leaves, new_ref, i + 1, converged)
 
             return jax.lax.while_loop(cond_fn, body_fn, state)
 
-        final_env_leaves, _, _, n_iters, converged = _run_while_loop(init_state)
+        final_env_leaves, _, n_iters, converged = _run_while_loop(init_state)
     else:
         # QR gauge: standard 4-element state
         # State: (env_leaves, prev_ref, iteration, converged)
