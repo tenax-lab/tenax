@@ -9,7 +9,8 @@ __all__ = [
 
 import jax
 
-from tenax.algorithms._ctm_tensor import CTMTensorEnv, compute_energy_ctm_tensor
+from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 from tenax.algorithms._split_ctm_tensor_init import SplitCTMTensorEnv
 from tenax.algorithms._tensor_utils import fuse_indices
 from tenax.contraction.contractor import contract

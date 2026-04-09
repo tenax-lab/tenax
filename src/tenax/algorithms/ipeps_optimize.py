@@ -335,16 +335,10 @@ def _optimize_gs_ad_tensor(
     """
     import optax
 
-    from tenax.algorithms._ctm_tensor import (
-        compute_energy_ctm_tensor,
-        initialize_ctm_tensor_env,
-    )
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
-    from tenax.algorithms.ad_utils import (
-        _config_to_tuple,
-        ctm_tensor_converge,
-        ctm_tensor_converge_explicit,
-    )
+    from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+    from tenax.algorithms.ad_utils import _config_to_tuple, ctm_tensor_converge
 
     gate = (
         hamiltonian_gate.todense()
@@ -389,13 +383,6 @@ def _optimize_gs_ad_tensor(
     env_treedef = jax.tree.structure(_env_template)
     prev_env_leaves = tuple(jax.tree.leaves(_env_template))
 
-    use_explicit = config.gs_explicit_ad
-    explicit_steps = config.gs_explicit_ad_steps
-    explicit_warmup = config.gs_explicit_ad_warmup
-    _ctm_converge = (
-        ctm_tensor_converge_explicit if use_explicit else ctm_tensor_converge
-    )
-
     def loss_fn(params, env_init_leaves):
         if use_c4v:
             A_data = c4v_tensor_from_coeffs(params, c4v_basis, tensor_shape)
@@ -404,19 +391,9 @@ def _optimize_gs_ad_tensor(
         A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
         A_norm = DenseTensor(A_norm_data, A.indices)
         site_tensors = {(0, 0): A_norm}
-        if use_explicit:
-            env_leaves = _ctm_converge(
-                site_tensors,
-                env_init_leaves,
-                SINGLE_SITE_NEIGHBORS,
-                config_tuple,
-                explicit_steps,
-                explicit_warmup,
-            )
-        else:
-            env_leaves = _ctm_converge(
-                site_tensors, env_init_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
-            )
+        env_leaves = ctm_tensor_converge(
+            site_tensors, env_init_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
+        )
         env = jax.tree.unflatten(env_treedef, env_leaves)
         energy = compute_energy_ctm_tensor(A_norm, env, gate, d_phys)
         return energy, env_leaves
@@ -708,7 +685,6 @@ def _optimize_gs_ad_tensor(
         projector_method=_base_cfg.projector_method,
         jit_ctm=_base_cfg.jit_ctm,
         ctm_conv_method=_base_cfg.ctm_conv_method,
-        forward_gauge=_base_cfg.forward_gauge,
     )
 
     def _eval_fresh(p):
@@ -821,11 +797,9 @@ def _optimize_gs_ad_tensor_2site(
     """
     import optax
 
-    from tenax.algorithms._ctm_tensor import (
-        compute_energy_ctm_tensor_2site,
-        initialize_ctm_tensor_env,
-    )
     from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
+    from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
     from tenax.algorithms.ad_utils import (
         _config_from_tuple,
         _config_to_tuple,
@@ -1197,7 +1171,6 @@ def _optimize_gs_ad_tensor_2site(
         projector_method=_base_cfg2.projector_method,
         jit_ctm=_base_cfg2.jit_ctm,
         ctm_conv_method=_base_cfg2.ctm_conv_method,
-        forward_gauge=_base_cfg2.forward_gauge,
     )
 
     def _eval_fresh_2site(p):

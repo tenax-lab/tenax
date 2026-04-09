@@ -19,14 +19,16 @@ import jax.numpy as jnp
 import numpy as np
 from jax.scipy.sparse.linalg import gmres as jax_gmres
 
-from tenax.algorithms._ctm_tensor import (
+from tenax.algorithms._ctm_tensor_convergence import (
+    _ctm_sv_diff as _ctm_sv_diff_tensor,
+)
+from tenax.algorithms._ctm_tensor_convergence import (
+    _ctm_tensor_sweep_multisite,
+)
+from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     _build_double_layer_tensor,
-    _ctm_tensor_sweep_multisite,
     initialize_ctm_tensor_env,
-)
-from tenax.algorithms._ctm_tensor import (
-    _ctm_sv_diff as _ctm_sv_diff_tensor,
 )
 from tenax.algorithms._split_ctm_tensor import (
     _split_ctm_tensor_sweep,
