@@ -445,7 +445,7 @@ def fermionic_ctm(A, config):
         Converged ``CTMTensorEnv`` (if Tensor input) or ``CTMEnvironment``.
     """
     if isinstance(A, Tensor):
-        from tenax.algorithms._ctm_tensor import ctm_tensor
+        from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
 
         return ctm_tensor(
             A,
@@ -455,7 +455,7 @@ def fermionic_ctm(A, config):
         )
 
     from tenax.algorithms.ipeps_config import CTMConfig
-    from tenax.algorithms.ipeps_ctm import ctm
+    from tenax.algorithms.ipeps_ctm_convergence import ctm
 
     ctm_cfg = CTMConfig(
         chi=config.ctm_chi,
@@ -479,7 +479,8 @@ def compute_energy_fermionic_ctm(A, env, hamiltonian_gate):
     Returns:
         Energy per site (float).
     """
-    from tenax.algorithms._ctm_tensor import CTMTensorEnv, compute_energy_ctm_tensor
+    from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+    from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 
     if isinstance(env, CTMTensorEnv):
         # If env tensors are DenseTensor (fermionic fallback), densify A and gate
