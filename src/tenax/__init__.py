@@ -8,6 +8,11 @@ Label-based contraction (Cytnx-style):
     Importing ``tenax`` enables JAX 64-bit mode (``jax_enable_x64``).
     All tensors and algorithms default to ``float64``.
 
+    Algorithm modules (dmrg, ipeps, trg, etc.) are loaded lazily on first
+    access to keep ``import tenax`` fast.  Core data structures (Tensor,
+    TensorIndex, symmetry types, MPS, contraction, linalg, lattice, network)
+    are imported eagerly.
+
 Quick start::
 
     import jax
@@ -35,107 +40,14 @@ Quick start::
 
 import jax
 
+# Enable 64-bit mode globally so all Tenax tensors default to float64.
+# This must run at import time before any JAX computation is triggered.
 jax.config.update("jax_enable_x64", True)
 
-from tenax.algorithms._ctm_tensor import (
-    CTMTensorEnv,
-    compute_energy_ctm_tensor,
-    compute_energy_ctm_tensor_2site,
-    ctm_tensor,
-    ctm_tensor_2site,
-    ctm_tensor_c4v,
-)
-from tenax.algorithms._ctm_tensor_convergence import ctm_multisite
-from tenax.algorithms._krylov import krylov_expm
-from tenax.algorithms._split_ctm_tensor import (
-    SplitCTMTensorEnv,
-    compute_energy_split_ctm_tensor,
-    ctm_split_tensor,
-)
-from tenax.algorithms._tensor_utils import fuse_indices, split_index
-from tenax.algorithms.auto_mpo import (
-    AutoMPO,
-    HamiltonianTerm,
-    build_auto_mpo,
-    fermion_site_ops,
-    spin_half_ops,
-    spin_one_ops,
-)
-from tenax.algorithms.dmrg import (
-    DMRGConfig,
-    DMRGResult,
-    build_mpo_heisenberg,
-    build_random_mps,
-    build_random_symmetric_mps,
-    compute_mps_sector,
-    dmrg,
-    validate_mps_sector,
-)
-from tenax.algorithms.fermionic_ipeps import (
-    FPEPSConfig,
-    fpeps,
-    spinless_fermion_gate,
-)
-from tenax.algorithms.hotrg import HOTRGConfig, hotrg
-from tenax.algorithms.idmrg import (
-    build_bulk_mpo_heisenberg,
-    build_bulk_mpo_heisenberg_cylinder,
-    build_bulk_mpo_heisenberg_symmetric,
-    idmrg,
-    iDMRGConfig,
-    iDMRGResult,
-)
-from tenax.algorithms.ipeps import (
-    build_c4v_basis,
-    c4v_coeffs_from_tensor,
-    c4v_tensor_from_coeffs,
-    heisenberg_gate,
-    ipeps,
-    sublattice_rotate_gate,
-    symmetrize_c4v,
-    xxz_gate,
-)
-from tenax.algorithms.ipeps_config import (
-    CTMConfig,
-    CTMEnvironment,
-    SplitCTMEnvironment,
-    iPEPSConfig,
-)
-from tenax.algorithms.ipeps_ctm import ctm, ctm_2site, ctm_split
-from tenax.algorithms.ipeps_excitations import (
-    ExcitationConfig,
-    ExcitationResult,
-    compute_excitations,
-    make_momentum_path,
-)
-from tenax.algorithms.ipeps_optimize import (
-    optimize_fpeps_ad,
-    optimize_gs_ad,
-    optimize_gs_ad_chi_schedule,
-)
-from tenax.algorithms.ipeps_rdm import (
-    compute_energy_ctm_2site,
-    compute_energy_split_ctm,
-)
-from tenax.algorithms.observables import (
-    correlation,
-    expectation_value,
-    operator_charge,
-)
-from tenax.algorithms.tdvp import (
-    TDVPConfig,
-    TDVPResult,
-    tdvp,
-    tdvp_step,
-)
-from tenax.algorithms.trg import (
-    TRGConfig,
-    compute_free_wilson_fermion_tensor,
-    compute_ising_tensor,
-    ising_free_energy_exact,
-    trg,
-    wilson_fermion_free_energy_exact,
-)
+# ---------------------------------------------------------------------------
+# Eager imports: core data structures, contraction, linalg, lattice, network
+# ---------------------------------------------------------------------------
+
 from tenax.contraction.contractor import (
     contract,
     contract_with_subscripts,
@@ -169,6 +81,168 @@ from tenax.network.netfile import NetworkBlueprint, from_netfile
 from tenax.network.network import TensorNetwork, build_mps, build_peps
 
 __version__ = "0.4.2"
+
+# ---------------------------------------------------------------------------
+# Lazy imports: algorithm modules are loaded on first access
+# ---------------------------------------------------------------------------
+
+# Maps attribute name -> (module_path, attribute_name_in_module)
+_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+    # _ctm_tensor
+    "CTMTensorEnv": ("tenax.algorithms._ctm_tensor", "CTMTensorEnv"),
+    "compute_energy_ctm_tensor": (
+        "tenax.algorithms._ctm_tensor",
+        "compute_energy_ctm_tensor",
+    ),
+    "compute_energy_ctm_tensor_2site": (
+        "tenax.algorithms._ctm_tensor",
+        "compute_energy_ctm_tensor_2site",
+    ),
+    "ctm_tensor": ("tenax.algorithms._ctm_tensor", "ctm_tensor"),
+    "ctm_tensor_2site": ("tenax.algorithms._ctm_tensor", "ctm_tensor_2site"),
+    "ctm_tensor_c4v": ("tenax.algorithms._ctm_tensor", "ctm_tensor_c4v"),
+    # _ctm_tensor_convergence
+    "ctm_multisite": ("tenax.algorithms._ctm_tensor_convergence", "ctm_multisite"),
+    # _krylov
+    "krylov_expm": ("tenax.algorithms._krylov", "krylov_expm"),
+    # _split_ctm_tensor
+    "SplitCTMTensorEnv": ("tenax.algorithms._split_ctm_tensor", "SplitCTMTensorEnv"),
+    "compute_energy_split_ctm_tensor": (
+        "tenax.algorithms._split_ctm_tensor",
+        "compute_energy_split_ctm_tensor",
+    ),
+    "ctm_split_tensor": ("tenax.algorithms._split_ctm_tensor", "ctm_split_tensor"),
+    # _tensor_utils
+    "fuse_indices": ("tenax.algorithms._tensor_utils", "fuse_indices"),
+    "split_index": ("tenax.algorithms._tensor_utils", "split_index"),
+    # auto_mpo
+    "AutoMPO": ("tenax.algorithms.auto_mpo", "AutoMPO"),
+    "HamiltonianTerm": ("tenax.algorithms.auto_mpo", "HamiltonianTerm"),
+    "build_auto_mpo": ("tenax.algorithms.auto_mpo", "build_auto_mpo"),
+    "fermion_site_ops": ("tenax.algorithms.auto_mpo", "fermion_site_ops"),
+    "spin_half_ops": ("tenax.algorithms.auto_mpo", "spin_half_ops"),
+    "spin_one_ops": ("tenax.algorithms.auto_mpo", "spin_one_ops"),
+    # dmrg
+    "DMRGConfig": ("tenax.algorithms.dmrg", "DMRGConfig"),
+    "DMRGResult": ("tenax.algorithms.dmrg", "DMRGResult"),
+    "build_mpo_heisenberg": ("tenax.algorithms.dmrg", "build_mpo_heisenberg"),
+    "build_random_mps": ("tenax.algorithms.dmrg", "build_random_mps"),
+    "build_random_symmetric_mps": (
+        "tenax.algorithms.dmrg",
+        "build_random_symmetric_mps",
+    ),
+    "compute_mps_sector": ("tenax.algorithms.dmrg", "compute_mps_sector"),
+    "dmrg": ("tenax.algorithms.dmrg", "dmrg"),
+    "validate_mps_sector": ("tenax.algorithms.dmrg", "validate_mps_sector"),
+    # fermionic_ipeps
+    "FPEPSConfig": ("tenax.algorithms.fermionic_ipeps", "FPEPSConfig"),
+    "fpeps": ("tenax.algorithms.fermionic_ipeps", "fpeps"),
+    "spinless_fermion_gate": (
+        "tenax.algorithms.fermionic_ipeps",
+        "spinless_fermion_gate",
+    ),
+    # hotrg
+    "HOTRGConfig": ("tenax.algorithms.hotrg", "HOTRGConfig"),
+    "hotrg": ("tenax.algorithms.hotrg", "hotrg"),
+    # idmrg
+    "build_bulk_mpo_heisenberg": (
+        "tenax.algorithms.idmrg",
+        "build_bulk_mpo_heisenberg",
+    ),
+    "build_bulk_mpo_heisenberg_cylinder": (
+        "tenax.algorithms.idmrg",
+        "build_bulk_mpo_heisenberg_cylinder",
+    ),
+    "build_bulk_mpo_heisenberg_symmetric": (
+        "tenax.algorithms.idmrg",
+        "build_bulk_mpo_heisenberg_symmetric",
+    ),
+    "idmrg": ("tenax.algorithms.idmrg", "idmrg"),
+    "iDMRGConfig": ("tenax.algorithms.idmrg", "iDMRGConfig"),
+    "iDMRGResult": ("tenax.algorithms.idmrg", "iDMRGResult"),
+    # ipeps
+    "build_c4v_basis": ("tenax.algorithms.ipeps", "build_c4v_basis"),
+    "c4v_coeffs_from_tensor": ("tenax.algorithms.ipeps", "c4v_coeffs_from_tensor"),
+    "c4v_tensor_from_coeffs": ("tenax.algorithms.ipeps", "c4v_tensor_from_coeffs"),
+    "heisenberg_gate": ("tenax.algorithms.ipeps", "heisenberg_gate"),
+    "ipeps": ("tenax.algorithms.ipeps", "ipeps"),
+    "sublattice_rotate_gate": ("tenax.algorithms.ipeps", "sublattice_rotate_gate"),
+    "symmetrize_c4v": ("tenax.algorithms.ipeps", "symmetrize_c4v"),
+    "xxz_gate": ("tenax.algorithms.ipeps", "xxz_gate"),
+    # ipeps_config
+    "CTMConfig": ("tenax.algorithms.ipeps_config", "CTMConfig"),
+    "CTMEnvironment": ("tenax.algorithms.ipeps_config", "CTMEnvironment"),
+    "SplitCTMEnvironment": ("tenax.algorithms.ipeps_config", "SplitCTMEnvironment"),
+    "iPEPSConfig": ("tenax.algorithms.ipeps_config", "iPEPSConfig"),
+    # ipeps_ctm
+    "ctm": ("tenax.algorithms.ipeps_ctm", "ctm"),
+    "ctm_2site": ("tenax.algorithms.ipeps_ctm", "ctm_2site"),
+    "ctm_split": ("tenax.algorithms.ipeps_ctm", "ctm_split"),
+    # ipeps_excitations
+    "ExcitationConfig": ("tenax.algorithms.ipeps_excitations", "ExcitationConfig"),
+    "ExcitationResult": ("tenax.algorithms.ipeps_excitations", "ExcitationResult"),
+    "compute_excitations": (
+        "tenax.algorithms.ipeps_excitations",
+        "compute_excitations",
+    ),
+    "make_momentum_path": ("tenax.algorithms.ipeps_excitations", "make_momentum_path"),
+    # ipeps_optimize
+    "optimize_fpeps_ad": ("tenax.algorithms.ipeps_optimize", "optimize_fpeps_ad"),
+    "optimize_gs_ad": ("tenax.algorithms.ipeps_optimize", "optimize_gs_ad"),
+    "optimize_gs_ad_chi_schedule": (
+        "tenax.algorithms.ipeps_optimize",
+        "optimize_gs_ad_chi_schedule",
+    ),
+    # ipeps_rdm
+    "compute_energy_ctm_2site": (
+        "tenax.algorithms.ipeps_rdm",
+        "compute_energy_ctm_2site",
+    ),
+    "compute_energy_split_ctm": (
+        "tenax.algorithms.ipeps_rdm",
+        "compute_energy_split_ctm",
+    ),
+    # observables
+    "correlation": ("tenax.algorithms.observables", "correlation"),
+    "expectation_value": ("tenax.algorithms.observables", "expectation_value"),
+    "operator_charge": ("tenax.algorithms.observables", "operator_charge"),
+    # tdvp
+    "TDVPConfig": ("tenax.algorithms.tdvp", "TDVPConfig"),
+    "TDVPResult": ("tenax.algorithms.tdvp", "TDVPResult"),
+    "tdvp": ("tenax.algorithms.tdvp", "tdvp"),
+    "tdvp_step": ("tenax.algorithms.tdvp", "tdvp_step"),
+    # trg
+    "TRGConfig": ("tenax.algorithms.trg", "TRGConfig"),
+    "compute_free_wilson_fermion_tensor": (
+        "tenax.algorithms.trg",
+        "compute_free_wilson_fermion_tensor",
+    ),
+    "compute_ising_tensor": ("tenax.algorithms.trg", "compute_ising_tensor"),
+    "ising_free_energy_exact": ("tenax.algorithms.trg", "ising_free_energy_exact"),
+    "trg": ("tenax.algorithms.trg", "trg"),
+    "wilson_fermion_free_energy_exact": (
+        "tenax.algorithms.trg",
+        "wilson_fermion_free_energy_exact",
+    ),
+}
+
+
+def __getattr__(name: str):
+    if name in _LAZY_IMPORTS:
+        module_path, attr_name = _LAZY_IMPORTS[name]
+        import importlib
+
+        module = importlib.import_module(module_path)
+        value = getattr(module, attr_name)
+        # Cache in module namespace so __getattr__ is not called again
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module 'tenax' has no attribute {name!r}")
+
+
+def __dir__():
+    return list(__all__)
+
 
 __all__ = [
     # Version
