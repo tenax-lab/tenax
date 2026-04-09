@@ -50,6 +50,7 @@ guide/algorithms/tdvp
 guide/algorithms/trg
 guide/algorithms/hotrg
 guide/algorithms/ipeps
+guide/algorithms/ipeps_ad_paths
 guide/algorithms/ctm
 guide/algorithms/fpeps
 guide/algorithms/ad_excitations
