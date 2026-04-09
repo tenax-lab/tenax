@@ -563,7 +563,7 @@ def _wrap_tensor(data, original):
     return type(original)(data, original.indices)
 
 
-def _transfer_matrix_leading_eigvec(T_dense: jax.Array) -> jax.Array:
+def _transfer_matrix_leading_eigvec(T_dense: jax.Array, n_iter: int = 30) -> jax.Array:
     """Compute leading right eigenvector of the double-layer transfer matrix.
 
     For a 3-leg edge tensor T of shape ``(chi, D2, chi)`` (left, phys, right),
@@ -571,28 +571,27 @@ def _transfer_matrix_leading_eigvec(T_dense: jax.Array) -> jax.Array:
 
         rho' = sum_k T[:, k, :] @ rho @ T[:, k, :]^H
 
-    Builds the full chi^2 × chi^2 transfer matrix and finds the leading
-    eigenvector via eigendecomposition.  For typical chi (4-32), the
-    chi^2 × chi^2 matrix is small enough for direct diagonalization.
+    Uses power iteration (matrix-free) which is fully JAX-differentiable,
+    enabling sigma gauge to work with explicit AD backprop.
 
     Returns: leading eigenvector reshaped to (chi, chi).
     """
     chi = T_dense.shape[0]
-    D2 = T_dense.shape[1]
 
-    # Build the full transfer matrix: TM[i*chi+i', j*chi+j'] = sum_k T[i,k,j] * conj(T[i',k,j'])
-    # TM = sum_k (T_k ⊗ conj(T_k))
-    TM = jnp.zeros((chi * chi, chi * chi), dtype=T_dense.dtype)
-    for k in range(D2):
-        Tk = T_dense[:, k, :]  # (chi, chi)
-        TM = TM + jnp.kron(Tk, Tk.conj())
+    def _apply_tm(v_flat):
+        """Apply transfer matrix TM @ v without building the full matrix."""
+        rho = v_flat.reshape(chi, chi)
+        # rho'[a,c] = sum_{k,b,d} T[a,k,b] * rho[b,d] * conj(T[c,k,d])
+        rho_new = jnp.einsum("akb,bd,ckd->ac", T_dense, rho, T_dense.conj())
+        return rho_new.reshape(-1)
 
-    # Eigendecompose — leading eigenvalue has largest magnitude
-    eigvals, eigvecs = jnp.linalg.eig(TM)
-    # Find the index of the eigenvalue with largest magnitude
-    idx = jnp.argmax(jnp.abs(eigvals))
-    leading = eigvecs[:, idx].real  # should be real for physical TM
-    return leading.reshape(chi, chi)
+    # Power iteration: start from uniform vector, converge to leading eigvec
+    v = jnp.ones(chi * chi, dtype=T_dense.dtype) / chi
+    for _ in range(n_iter):
+        v = _apply_tm(v)
+        v = v / (jnp.linalg.norm(v) + 1e-30)
+
+    return v.real.reshape(chi, chi)
 
 
 def _sigma_gauge_fix_ctm_tensor(env_new, env_old):
@@ -1512,13 +1511,11 @@ def ctm_tensor_converge_explicit(
         }
     )
 
-    # Explicit AD is traced by jax.value_and_grad, so sigma gauge (which uses
-    # jnp.linalg.eig, not differentiable) cannot be used here. Always use QR
-    # gauge. Sigma gauge benefits come from the warm-started env passed via
-    # env_init_leaves from the implicit-AD convergence path in the optimizer.
+    use_sigma = getattr(config, "forward_gauge", "qr") == "sigma"
 
-    # Phase 1: Warmup with QR gauge — no gradient tracking
-    for _ in range(warmup_steps):
+    # Phase 1: Warmup — no gradient tracking
+    for wi in range(warmup_steps):
+        envs_old = envs if use_sigma else None
         envs = _ctm_tensor_sweep_multisite(
             envs,
             double_layers,
@@ -1527,32 +1524,60 @@ def ctm_tensor_converge_explicit(
             config.renormalize,
             config.projector_method,
         )
-        envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
+        if use_sigma and wi > 0:
+            envs = {c: _sigma_gauge_fix_ctm_tensor(envs[c], envs_old[c]) for c in envs}
+        else:
+            envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
     if warmup_steps > 0:
         envs = jax.tree.map(jax.lax.stop_gradient, envs)
 
-    # Phase 2: Backprop — fully differentiable with QR gauge + checkpointing
+    # Phase 2: Backprop — fully differentiable with checkpointing
+    # Sigma gauge is now differentiable (power iteration replaces eig).
     n = num_steps if num_steps is not None else config.max_iter
     env_treedef = jax.tree.structure(envs)
 
-    # Backprop phase uses QR gauge (differentiable)
-    @jax.checkpoint
-    def _one_sweep(env_leaves_flat):
-        envs_inner = jax.tree.unflatten(env_treedef, env_leaves_flat)
-        envs_inner = _ctm_tensor_sweep_multisite(
-            envs_inner,
-            double_layers,
-            neighbors,
-            config.chi,
-            config.renormalize,
-            config.projector_method,
-        )
-        envs_inner = {c: _gauge_fix_ctm_tensor(e) for c, e in envs_inner.items()}
-        return tuple(jax.tree.leaves(envs_inner))
+    if use_sigma:
 
-    env_leaves_flat = tuple(jax.tree.leaves(envs))
-    for _ in range(n):
-        env_leaves_flat = _one_sweep(env_leaves_flat)
+        @jax.checkpoint
+        def _one_sweep_sigma(env_leaves_flat):
+            envs_inner = jax.tree.unflatten(env_treedef, env_leaves_flat)
+            envs_prev = jax.tree.map(jax.lax.stop_gradient, envs_inner)
+            envs_inner = _ctm_tensor_sweep_multisite(
+                envs_inner,
+                double_layers,
+                neighbors,
+                config.chi,
+                config.renormalize,
+                config.projector_method,
+            )
+            envs_inner = {
+                c: _sigma_gauge_fix_ctm_tensor(envs_inner[c], envs_prev[c])
+                for c in envs_inner
+            }
+            return tuple(jax.tree.leaves(envs_inner))
+
+        env_leaves_flat = tuple(jax.tree.leaves(envs))
+        for _ in range(n):
+            env_leaves_flat = _one_sweep_sigma(env_leaves_flat)
+    else:
+
+        @jax.checkpoint
+        def _one_sweep(env_leaves_flat):
+            envs_inner = jax.tree.unflatten(env_treedef, env_leaves_flat)
+            envs_inner = _ctm_tensor_sweep_multisite(
+                envs_inner,
+                double_layers,
+                neighbors,
+                config.chi,
+                config.renormalize,
+                config.projector_method,
+            )
+            envs_inner = {c: _gauge_fix_ctm_tensor(e) for c, e in envs_inner.items()}
+            return tuple(jax.tree.leaves(envs_inner))
+
+        env_leaves_flat = tuple(jax.tree.leaves(envs))
+        for _ in range(n):
+            env_leaves_flat = _one_sweep(env_leaves_flat)
 
     return _flatten_envs(jax.tree.unflatten(env_treedef, env_leaves_flat))
 
