@@ -18,8 +18,8 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), TRG, HOTRG, iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), fermionic iPEPS (fPEPS), quasiparticle excitations
 - **GPU/TPU-accelerated DMRG** — JIT-compiled sweeps via `jax.lax.scan` for dense tensors and per-operation JIT for block-sparse symmetric tensors; automatic warmup-to-JIT transition when bond dimensions are growing; multi-GPU sharding via GSPMD for large bond dimensions (`DMRGConfig(accelerator="jit"|"sharded")`)
 - **AutoMPO** — build Hamiltonian MPOs from symbolic operator descriptions (custom couplings, NNN, arbitrary spin); supports `symmetric=True` for U(1) block-sparse MPOs
-- **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237); Adam (with cosine lr decay), L-BFGS, and conjugate gradient optimizers with Armijo backtracking line search; iterative VJP backward (default) for robust implicit differentiation through CTM fixed point; experimental explicit differentiation through unrolled CTM iterations
-- **QR-based CTMRG projectors** — optional QR projectors for faster CTM convergence (replaces expensive `eigh`)
+- **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237); L-BFGS with Hager-Zhang line search and metric preconditioning (Rader et al.), Adam (with cosine lr decay), and conjugate gradient optimizers; implicit AD via GMRES backward (recommended) for robust differentiation through CTM fixed point; explicit AD through unrolled CTM iterations for 1-site C4v path; sigma gauge fixing (`forward_gauge="sigma"`) for stable elementwise CTM convergence; C4v symmetry enforcement via explicit basis parameterization; chi-ramping schedule (`optimize_gs_ad_chi_schedule`) for progressive refinement; JIT CTM via `jax.lax.while_loop` for GPU kernel fusion (`jit_ctm=True`)
+- **SVD and QR CTMRG projectors** — SVD (Fishman) projectors (`projector_method="svd"`) and QR projectors for faster CTM convergence alongside the default `eigh`
 - **Split-CTMRG** — ket/bra-separated CTM environment tensors for O(χ³D³) projector cost instead of O(χ³D⁶); works with both `DenseTensor` and `SymmetricTensor` via the Tensor protocol (Naumann et al., arXiv:2502.10298)
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary Brillouin-zone momenta (Ponsioen et al. 2022)
 - **Polymorphic tensor arithmetic** — `+`, `-`, `*`, `-T`, `max_abs`, `inner()`, `conj()`, `dagger()`, `bar()` work identically on `DenseTensor` and `SymmetricTensor`, enabling algorithm code that is agnostic to the underlying storage
@@ -297,7 +297,7 @@ See `examples/heisenberg_ipeps_su.py` for 1-site and 2-site unit cell examples.
 ```python
 import jax.numpy as jnp
 from tenax import (
-    iPEPSConfig, CTMConfig, optimize_gs_ad,
+    iPEPSConfig, CTMConfig, optimize_gs_ad, optimize_gs_ad_chi_schedule,
     ExcitationConfig, compute_excitations, make_momentum_path,
 )
 
@@ -309,24 +309,34 @@ gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) \
      + 0.5 * (jnp.einsum("ij,kl->ikjl", Sp, Sm)
              + jnp.einsum("ij,kl->ikjl", Sm, Sp))
 
-# AD ground-state optimization (Francuz et al. PRR 7, 013237)
-# su_init=True runs simple update first for a better starting tensor
-# gs_optimizer: "adam" (default, cosine lr decay), "lbfgs", or "cg"
+# Recommended AD configuration: L-BFGS + sigma gauge + GMRES backward
+# Reaches E=-0.6601 at D=2, chi=8 (literature: -0.6625)
 config = iPEPSConfig(
     max_bond_dim=2,
-    ctm=CTMConfig(chi=16, max_iter=50),
-    gs_optimizer="adam",       # or "lbfgs" / "cg"
-    gs_num_steps=200,
-    gs_learning_rate=1e-3,
+    ctm=CTMConfig(
+        chi=8,
+        projector_method="eigh",
+        forward_gauge="sigma",        # sigma gauge fixing for stable CTM convergence
+        ad_backward_method="gmres",   # implicit AD via GMRES (recommended)
+    ),
+    gs_optimizer="lbfgs",             # L-BFGS with Hager-Zhang line search
+    gs_line_search_method="hager_zhang",
+    gs_metric_precond=True,           # metric preconditioning (Rader et al.)
+    gs_c4v=True,                      # C4v basis parameterization
     su_init=True,
 )
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
 print(f"Ground-state energy: {E_gs:.6f}")
 
-# 2-site AD optimization for antiferromagnets (Néel order)
+# Chi-ramping schedule: progressively increase chi for faster convergence
+chi_schedule = [4, 8, 16]
+A_opt, env, E_gs = optimize_gs_ad_chi_schedule(gate, None, config, chi_schedule)
+
+# 2-site AD optimization for antiferromagnets (Neel order)
 config_2site = iPEPSConfig(
     max_bond_dim=2,
-    ctm=CTMConfig(chi=16, max_iter=50),
+    ctm=CTMConfig(chi=16, max_iter=50, forward_gauge="sigma",
+                  ad_backward_method="gmres"),
     gs_num_steps=200,
     gs_learning_rate=1e-3,
     unit_cell="2site",
@@ -334,14 +344,24 @@ config_2site = iPEPSConfig(
 )
 (A_opt, B_opt), (env_A, env_B), E_gs = optimize_gs_ad(gate, None, config_2site)
 
-# Use QR projectors for faster CTM convergence
-config_qr = iPEPSConfig(
+# SVD (Fishman) projectors — alternative to eigh and QR
+config_svd = iPEPSConfig(
     max_bond_dim=2,
-    ctm=CTMConfig(chi=16, max_iter=50, projector_method="qr"),
+    ctm=CTMConfig(chi=16, max_iter=50, projector_method="svd",
+                  forward_gauge="sigma"),
     gs_num_steps=200,
-    gs_learning_rate=1e-3,
+    gs_optimizer="lbfgs",
+    gs_line_search_method="hager_zhang",
 )
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config_qr)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config_svd)
+
+# JIT CTM for GPU kernel fusion
+config_jit = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(chi=16, max_iter=50, jit_ctm=True),
+    gs_num_steps=200,
+)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config_jit)
 
 # Quasiparticle excitations (Ponsioen et al. 2022)
 momenta = make_momentum_path("brillouin", num_points=20)
@@ -515,6 +535,7 @@ The generated HTML is in `docs/_build/html/`.
 
 - H.-J. Liao, J.-G. Liu, L. Wang, T. Xiang, *Phys. Rev. X* **9**, 031041 (2019) — AD-based iPEPS ground-state optimization
 - A. Francuz, N. Schuch, B. Vanhecke, *PRR* **7**, 013237 (2025) — Stable AD through CTM (SVD regularization, truncation correction, implicit differentiation)
+- M. Rader, L. Gresista, C. Hubig, S. Montangero, A. Weichselbaum, J. von Delft, arXiv:2511.09546 (2025) — Metric preconditioning and Hager-Zhang line search for iPEPS optimization
 - L. Ponsioen, F. F. Assaad, P. Corboz, *SciPost Phys.* **12**, 006 (2022) — Quasiparticle excitations for iPEPS
 - J. Naumann, E. L. Weerda, J. Eisert, M. Rizzi, P. Schmoll, arXiv:2502.10298 (2025) — Split-CTMRG with factored projectors for efficient iPEPS environments
 

@@ -19,16 +19,14 @@ import jax.numpy as jnp
 import numpy as np
 from jax.scipy.sparse.linalg import gmres as jax_gmres
 
-from tenax.algorithms._ctm_tensor_convergence import (
-    _ctm_sv_diff as _ctm_sv_diff_tensor,
-)
-from tenax.algorithms._ctm_tensor_convergence import (
-    _ctm_tensor_sweep_multisite,
-)
-from tenax.algorithms._ctm_tensor_init import (
+from tenax.algorithms._ctm_tensor import (
     CTMTensorEnv,
     _build_double_layer_tensor,
+    _ctm_tensor_sweep_multisite,
     initialize_ctm_tensor_env,
+)
+from tenax.algorithms._ctm_tensor import (
+    _ctm_sv_diff as _ctm_sv_diff_tensor,
 )
 from tenax.algorithms._split_ctm_tensor import (
     _split_ctm_tensor_sweep,
@@ -583,9 +581,9 @@ def _transfer_matrix_leading_eigvec(T_dense: jax.Array, n_iter: int = 30) -> jax
     def _apply_tm(v_flat):
         """Apply transfer matrix TM @ v without building the full matrix."""
         rho = v_flat.reshape(chi, chi)
-        # rho' = sum_k T[:, k, :] @ rho @ T[:, k, :]^H
-        rho_new = jnp.einsum("akb,cd,dke->ace", T_dense, rho, T_dense.conj())
-        return rho_new.reshape(chi, chi).reshape(-1)
+        # rho'[a,c] = sum_{k,b,d} T[a,k,b] * rho[b,d] * conj(T[c,k,d])
+        rho_new = jnp.einsum("akb,bd,ckd->ac", T_dense, rho, T_dense.conj())
+        return rho_new.reshape(-1)
 
     # Power iteration: start from uniform vector, converge to leading eigvec
     v = jnp.ones(chi * chi, dtype=T_dense.dtype) / chi
@@ -1534,7 +1532,7 @@ def ctm_tensor_converge_explicit(
         envs = jax.tree.map(jax.lax.stop_gradient, envs)
 
     # Phase 2: Backprop — fully differentiable with checkpointing
-    # Sigma gauge is now differentiable (power iteration, no eig).
+    # Sigma gauge is now differentiable (power iteration replaces eig).
     n = num_steps if num_steps is not None else config.max_iter
     env_treedef = jax.tree.structure(envs)
 

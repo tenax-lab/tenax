@@ -85,14 +85,19 @@ $$
 \bar{A} = \frac{\partial f}{\partial A}^T \lambda
 $$
 
-### 3. Gauge fixing (`_gauge_fix_ctm_tensor`)
+### 3. Gauge fixing
 
 CTM environments have a gauge ambiguity -- the fixed point is only unique
 up to invertible transformations on bond indices. Without fixing this,
 element-wise convergence fails and the implicit differentiation equation is
 ill-defined.
 
-The fix applies **QR decomposition** (via ``tenax.linalg.qr``, block-sparse
+Tenax provides two gauge-fixing strategies, selected via
+``CTMConfig.forward_gauge``:
+
+#### QR gauge (``forward_gauge="qr"``, default)
+
+Applies **QR decomposition** (via ``tenax.linalg.qr``, block-sparse
 for ``SymmetricTensor``) to each corner after every CTM step:
 
 $$
@@ -105,6 +110,84 @@ giving a unique fixed point. Using block-sparse QR directly on ``Tensor``
 objects avoids ``todense()``/``from_dense()`` round-trips, giving cleaner
 gradients during AD.
 
+#### Sigma gauge (``forward_gauge="sigma"``)
+
+The sigma gauge aligns the CTM environment to the *previous iteration's*
+environment using the leading eigenvector of each edge's double-layer
+transfer matrix. The algorithm:
+
+1. For each edge direction, compute the leading eigenvector $\rho$ of the
+   transfer matrix $T_{\text{old}}$ and $T_{\text{new}}$ via **power
+   iteration** (matrix-free, fully JAX-differentiable).
+2. QR-factorize each $\rho$ to get orthogonal bases $Q_{\text{old}}$ and
+   $Q_{\text{new}}$.
+3. Compute the gauge transformation
+   $\sigma = Q_{\text{new}} Q_{\text{old}}^\dagger$ and apply it to corners
+   and edges.
+
+This ensures that the environment converges **element-wise**, not just
+spectrally. Element-wise convergence is critical for two reasons:
+
+- The implicit differentiation equation $(I - J_x^T)\lambda = \bar{x}$
+  requires a well-defined fixed point in the full tensor space, not just
+  the singular-value subspace.
+- Without sigma gauge, the ``eigh`` projector CTM exhibits chaotic
+  gauge wandering: corner singular values converge but the environments
+  themselves do not, causing GMRES to diverge and VJP to accumulate noise.
+
+**Recommended for all AD optimization** (both implicit and explicit).
+
+### 4. Backward methods for implicit differentiation
+
+The implicit differentiation backward pass solves
+$(I - J_x^T)\lambda = \bar{x}$ using one of two methods:
+
+#### Iterative VJP (``ad_backward_method="vjp"``, default)
+
+Neumann series accumulation matching YASTN's approach
+(Francuz et al., arXiv:2311.11894):
+
+$$
+\lambda_{n+1} = \bar{x} + J_x^T \lambda_n
+$$
+
+Each iteration uses a single ``jax.vjp`` call. With sigma gauge in the
+step function, the spectral radius of $J_x^T$ is less than 1 in the
+physical subspace, ensuring convergence. However, convergence can be slow
+(many VJP iterations).
+
+#### GMRES (``ad_backward_method="gmres"``)
+
+Direct Krylov solve of the linear system. Converges much faster than
+iterative VJP when the system is well-conditioned. **Recommended** when
+``forward_gauge="sigma"`` is enabled.
+
+Without sigma gauge, GMRES can diverge because the linear system is
+ill-conditioned (the fixed point is not unique element-wise).
+
+### 5. Explicit AD (``gs_explicit_ad=True``)
+
+Instead of implicit differentiation, explicit AD backpropagates through the
+unrolled CTM iteration graph. This is now the **default** mode
+(``gs_explicit_ad=True``).
+
+The forward pass has two phases:
+
+1. **Warmup** (``gs_explicit_ad_warmup`` steps): CTM sweeps with
+   ``stop_gradient`` -- no gradient tracking, just environment warm-up.
+2. **Tracked** (``gs_explicit_ad_steps`` steps): CTM sweeps with full
+   gradient tracking through the JAX computation graph.
+
+Sigma gauge is applied at every sweep (both warmup and tracked phases) to
+maintain element-wise stability. The power iteration for the transfer-matrix
+eigenvector is fully differentiable, so sigma gauge works seamlessly with
+explicit AD.
+
+Explicit AD works well for the **1-site C4v path** (``gs_c4v=True``), where
+each CTM sweep is a single directional move, keeping the unrolled graph
+compact. It is generally slower than implicit GMRES but avoids linear-solve
+convergence issues entirely.
+
 ## AD Ground State Optimization
 
 `optimize_gs_ad` uses the stable AD pipeline to compute exact energy
@@ -115,11 +198,17 @@ from tenax import iPEPSConfig, CTMConfig, optimize_gs_ad
 
 config = iPEPSConfig(
     max_bond_dim=2,
-    ctm=CTMConfig(chi=16, max_iter=50),
-    gs_num_steps=200,
-    gs_learning_rate=1e-3,
+    ctm=CTMConfig(
+        chi=16,
+        max_iter=100,
+        forward_gauge="sigma",       # stabilize element-wise convergence
+        ad_backward_method="gmres",  # recommended backward method
+    ),
+    gs_optimizer="cg",
+    gs_num_steps=100,
     gs_verbose=True,
     gs_log_interval=10,
+    su_init=True,
 )
 A_opt, env, E_gs = optimize_gs_ad(H_bond, A_init=None, config=config)
 ```
@@ -127,6 +216,26 @@ A_opt, env, E_gs = optimize_gs_ad(H_bond, A_init=None, config=config)
 The gradient flows through the full CTM + energy pipeline: the
 `ctm_tensor_converge` custom VJP handles implicit differentiation, and
 `truncated_svd_ad` handles SVD stability.
+
+### Chi-ramping schedule
+
+For production runs, use ``optimize_gs_ad_chi_schedule`` to ramp the
+environment bond dimension progressively. Each stage uses the optimized
+tensor from the previous stage as initialization:
+
+```python
+from tenax import optimize_gs_ad_chi_schedule
+
+A_opt, env, E_gs = optimize_gs_ad_chi_schedule(
+    H_bond, None, config, [(8, 30), (16, 20)]
+)
+```
+
+The ``chi_schedule`` argument is a list of ``(chi, num_steps)`` tuples.
+The base config provides all other settings; only ``chi`` and
+``gs_num_steps`` are overridden per stage. This avoids cold-starting at
+large chi, which can be slow and prone to local minima
+(Zhang, Yang & Corboz, arXiv:2505.00494).
 
 ## Excitation Spectrum
 
@@ -189,3 +298,7 @@ Each RDM variant specifies which tensor appears in the ket and bra layers:
   AD excitations method
 - Francuz et al., *Phys. Rev. Research* **7**, 013237 (2025) --
   Stable AD of CTM (custom SVD VJP, implicit differentiation, gauge fixing)
+- Rader et al., arXiv:2511.09546 --
+  Metric preconditioning (natural gradient) for iPEPS optimization
+- Zhang, Yang & Corboz, arXiv:2505.00494 --
+  Chi-ramping schedule for stable convergence at large bond dimensions
