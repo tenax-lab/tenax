@@ -335,11 +335,9 @@ def _optimize_gs_ad_tensor(
     """
     import optax
 
-    from tenax.algorithms._ctm_tensor import (
-        compute_energy_ctm_tensor,
-        initialize_ctm_tensor_env,
-    )
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+    from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
     from tenax.algorithms.ad_utils import _config_to_tuple, ctm_tensor_converge
 
     gate = (
@@ -799,11 +797,9 @@ def _optimize_gs_ad_tensor_2site(
     """
     import optax
 
-    from tenax.algorithms._ctm_tensor import (
-        compute_energy_ctm_tensor_2site,
-        initialize_ctm_tensor_env,
-    )
     from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
+    from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
     from tenax.algorithms.ad_utils import (
         _config_from_tuple,
         _config_to_tuple,

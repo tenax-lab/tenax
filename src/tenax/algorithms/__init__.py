@@ -35,7 +35,7 @@ from tenax.algorithms.ipeps_config import (
     SplitCTMEnvironment,
     iPEPSConfig,
 )
-from tenax.algorithms.ipeps_ctm import ctm, ctm_2site, ctm_split
+from tenax.algorithms.ipeps_ctm_convergence import ctm, ctm_2site, ctm_split
 from tenax.algorithms.ipeps_excitations import (
     ExcitationConfig,
     ExcitationResult,

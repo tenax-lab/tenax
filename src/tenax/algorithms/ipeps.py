@@ -25,7 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms.ipeps_config import CTMEnvironment, iPEPSConfig
-from tenax.algorithms.ipeps_ctm import ctm_2site
+from tenax.algorithms.ipeps_ctm_convergence import ctm_2site
 from tenax.algorithms.ipeps_rdm import compute_energy_ctm_2site
 from tenax.algorithms.ipeps_simple_update import (
     _make_trotter_gate_tensor,

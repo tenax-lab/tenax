@@ -13,7 +13,7 @@ from tenax.algorithms.ipeps_config import (
     CTMEnvironment,
     SplitCTMEnvironment,
 )
-from tenax.algorithms.ipeps_ctm import (
+from tenax.algorithms.ipeps_ctm_convergence import (
     _split_env_to_standard,
 )
 
