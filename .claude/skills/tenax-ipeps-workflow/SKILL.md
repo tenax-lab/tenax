@@ -151,20 +151,69 @@ differentiation (AD) to variationally optimize the iPEPS tensors directly.
 Tenax implements the method of Francuz et al. (PRR 7, 013237): gradient
 optimization via implicit differentiation through the CTM fixed point.
 
+### Recommended AD configuration (sigma gauge)
+
 ```python
 from tenax import iPEPSConfig, CTMConfig, optimize_gs_ad
 
 config = iPEPSConfig(
     max_bond_dim=2,
-    ctm=CTMConfig(chi=16, max_iter=50),  # Higher χ for AD
-    gs_num_steps=200,                     # Optimization steps
-    gs_learning_rate=1e-3,                # Adam learning rate
+    ctm=CTMConfig(
+        chi=8,
+        projector_method="eigh",
+        forward_gauge="sigma",
+        ad_backward_method="gmres",
+    ),
+    gs_optimizer="lbfgs",
+    gs_line_search_method="hager_zhang",
+    gs_metric_precond=True,
+    gs_c4v=True,
+    su_init=True,
 )
 
 # Can start from scratch or from simple-update result
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
 print(f"Ground-state energy: {E_gs:.6f}")
 ```
+
+### Chi-ramping schedule
+
+For production calculations, ramp chi from small to large. Each level
+warm-starts from the previous optimized tensor, avoiding cold starts at
+large chi (Zhang, Yang & Corboz, arXiv:2505.00494):
+
+```python
+from tenax import optimize_gs_ad_chi_schedule
+
+chi_schedule = [(8, 30), (16, 20), (32, 15)]
+result = optimize_gs_ad_chi_schedule(gate, None, config, chi_schedule)
+```
+
+Each tuple is `(chi, num_optimization_steps)`. The schedule overrides
+`config.ctm.chi` and `config.gs_num_steps` at each level.
+
+### Key AD tips
+
+- **Always use `forward_gauge="sigma"` for AD.** The sigma gauge aligns CTM
+  environments to the previous iteration, making the CTM fixed point smooth
+  as a function of the site tensor. QR gauge is chaotic with the eigh
+  projector and causes gradient noise.
+- **Use `ad_backward_method="gmres"` for implicit differentiation.**
+  The iterative VJP method (`"vjp"`) diverges without sigma gauge. GMRES
+  is more robust and typically faster for large chi.
+- **`gs_explicit_ad=True` works but is slower than implicit GMRES.**
+  Explicit AD backpropagates through unrolled CTM steps. It is simpler but
+  uses more memory and wall time than implicit diff with GMRES. Use it only
+  if GMRES fails to converge.
+- **Start with SU init (`su_init=True`).** The simple update provides a good
+  starting tensor that avoids bad local minima. Without it, random
+  initialization often converges to excited states.
+- **Use L-BFGS with Hager-Zhang line search** (`gs_optimizer="lbfgs"`,
+  `gs_line_search_method="hager_zhang"`) for best convergence. CG also
+  works but requires more steps.
+- **Metric preconditioning (`gs_metric_precond=True`)** applies the
+  natural gradient (Rader et al., arXiv:2511.09546), which dramatically
+  improves convergence for L-BFGS and CG.
 
 ### Key differences from simple update
 
@@ -319,9 +368,16 @@ Guide students through systematic convergence checks:
 for D in [2, 3, 4, 5]:
     config = iPEPSConfig(
         max_bond_dim=D,
-        ctm=CTMConfig(chi=D**2 + 4, max_iter=60),
-        gs_num_steps=300,
-        gs_learning_rate=1e-3,
+        ctm=CTMConfig(
+            chi=D**2 + 4, max_iter=60,
+            projector_method="eigh", forward_gauge="sigma",
+            ad_backward_method="gmres",
+        ),
+        gs_optimizer="lbfgs",
+        gs_line_search_method="hager_zhang",
+        gs_metric_precond=True,
+        gs_c4v=True,
+        su_init=True,
     )
     A, env, E = optimize_gs_ad(gate, None, config)
     print(f"D={D}: E/site = {E:.8f}")
@@ -329,20 +385,28 @@ for D in [2, 3, 4, 5]:
 
 Rule of thumb: CTM χ should be at least D² for reliable results.
 
-### χ-scaling (CTM environment)
+### χ-scaling via chi-ramping
 
-Fix D and vary χ to check CTM convergence:
+Fix D and ramp χ to check CTM convergence:
 ```python
+from tenax import optimize_gs_ad_chi_schedule
+
 D = 3
-for chi in [10, 20, 40, 60]:
-    config = iPEPSConfig(
-        max_bond_dim=D,
-        ctm=CTMConfig(chi=chi, max_iter=80),
-        gs_num_steps=200,
-        gs_learning_rate=1e-3,
-    )
-    A, env, E = optimize_gs_ad(gate, None, config)
-    print(f"χ={chi}: E/site = {E:.8f}")
+config = iPEPSConfig(
+    max_bond_dim=D,
+    ctm=CTMConfig(
+        projector_method="eigh", forward_gauge="sigma",
+        ad_backward_method="gmres",
+    ),
+    gs_optimizer="lbfgs",
+    gs_line_search_method="hager_zhang",
+    gs_metric_precond=True,
+    gs_c4v=True,
+    su_init=True,
+)
+chi_schedule = [(10, 30), (20, 20), (40, 15), (60, 10)]
+result = optimize_gs_ad_chi_schedule(gate, None, config, chi_schedule)
+print(f"Final energy: {result.energy:.8f}")
 ```
 
 ---
@@ -362,6 +426,9 @@ for chi in [10, 20, 40, 60]:
 |---------|-------|-----|
 | Energy much too high | D or χ too small | Increase both |
 | AD optimization diverges | Learning rate too high | Reduce `gs_learning_rate` |
+| AD gradients noisy/chaotic | QR gauge with eigh projector | Switch to `forward_gauge="sigma"` |
+| VJP backward diverges | Unstable CTM fixed point | Use `ad_backward_method="gmres"` with sigma gauge |
+| NaN at large chi (chi>16) | eigh backward without regularization | Ensure `ad_regularize_svd=True` (default) and use sigma gauge |
 | CTM not converging | χ too small or max_iter too low | Increase both |
 | Wrong symmetry breaking | Wrong unit cell | Try "2site" for AFM order |
 | NaN in gradients | SVD degeneracy | Reduce learning rate, check gate is Hermitian |

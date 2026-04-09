@@ -49,9 +49,47 @@ via function arguments:
 from tenax import CTMConfig
 
 ctm_cfg = CTMConfig(
-    chi=32,            # environment bond dimension
-    max_iter=100,      # maximum CTM iterations
-    conv_tol=1e-10,    # convergence tolerance on corner singular values
+    chi=32,                      # environment bond dimension
+    max_iter=100,                # maximum CTM iterations
+    conv_tol=1e-10,              # convergence tolerance on corner singular values
+    forward_gauge="qr",         # "qr" (default) or "sigma"
+    projector_method="eigh",    # "eigh" (default), "qr", or "svd" (Fishman)
+    ad_backward_method="vjp",   # "vjp" (default) or "gmres"
+)
+```
+
+### Forward gauge
+
+The ``forward_gauge`` parameter controls how gauge ambiguity is resolved
+after each CTM sweep:
+
+| Value | Description |
+|-------|-------------|
+| ``"qr"`` | QR decomposition on corners; fast, default for simple update. |
+| ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Ensures element-wise convergence. **Required for stable AD optimization.** |
+
+Without sigma gauge, the ``eigh`` projector CTM converges spectrally
+(corner singular values stabilize) but is chaotic element-wise -- the
+individual tensor entries keep fluctuating between iterations. This
+makes implicit differentiation ill-conditioned and causes GMRES to
+diverge. Setting ``forward_gauge="sigma"`` fixes this.
+
+### AD backward method
+
+| Value | Description |
+|-------|-------------|
+| ``"vjp"`` (default) | Iterative VJP (Neumann series). Safer without sigma gauge. |
+| ``"gmres"`` | Direct Krylov solve. Faster and recommended with ``forward_gauge="sigma"``. |
+
+### Recommended AD configuration
+
+```python
+ctm_cfg = CTMConfig(
+    chi=16,
+    max_iter=100,
+    conv_tol=1e-10,
+    forward_gauge="sigma",
+    ad_backward_method="gmres",
 )
 ```
 
@@ -100,5 +138,7 @@ Edges carry the fused double-layer (dimension D²). Corners are χ × χ.
 
 ## References
 
-- Nishino & Okunishi, *J. Phys. Soc. Jpn.* **65**, 891 (1996) — CTM method.
-- Corboz et al., *Phys. Rev. B* **90**, 195114 (2014) — CTM for iPEPS.
+- Nishino & Okunishi, *J. Phys. Soc. Jpn.* **65**, 891 (1996) -- CTM method.
+- Corboz et al., *Phys. Rev. B* **90**, 195114 (2014) -- CTM for iPEPS.
+- Francuz et al., *Phys. Rev. Research* **7**, 013237 (2025) --
+  Stable AD of CTM (sigma gauge, custom SVD VJP, implicit differentiation).
