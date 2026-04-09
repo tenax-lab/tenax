@@ -1214,7 +1214,9 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
     )
 
     use_elementwise = getattr(config, "ctm_conv_method", "sv") == "elementwise"
-    use_sigma = getattr(config, "forward_gauge", "qr") == "sigma"
+    gauge_mode = getattr(config, "forward_gauge", "qr")
+    use_sigma = gauge_mode == "sigma"
+    use_none = gauge_mode == "none"
     prev_svs = {}
     prev_env_arrays = {}
 
@@ -1228,7 +1230,9 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
             config.renormalize,
             config.projector_method,
         )
-        if use_sigma and i > 0:
+        if use_none:
+            pass  # no gauge fix — rely on projector stability
+        elif use_sigma and i > 0:
             envs = {c: _sigma_gauge_fix_ctm_tensor(envs[c], envs_old[c]) for c in envs}
         else:
             envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
@@ -1523,7 +1527,8 @@ def ctm_tensor_converge_explicit(
         }
     )
 
-    use_sigma = getattr(config, "forward_gauge", "qr") == "sigma"
+    gauge_mode = getattr(config, "forward_gauge", "qr")
+    use_sigma = gauge_mode == "sigma"
 
     # Phase 1: Warmup — no gradient tracking
     for wi in range(warmup_steps):
@@ -1543,8 +1548,10 @@ def ctm_tensor_converge_explicit(
     if warmup_steps > 0:
         envs = jax.tree.map(jax.lax.stop_gradient, envs)
 
-    # Phase 2: Backprop — fully differentiable with checkpointing
-    # Sigma gauge is now differentiable (power iteration replaces eig).
+    # Phase 2: Backprop — fully differentiable with checkpointing.
+    # Sigma gauge aligns each sweep's output to its stop_gradient input,
+    # stabilizing the backward graph.  The stop_gradient copy ensures
+    # sigma compares post-sweep vs pre-sweep (not self vs self).
     n = num_steps if num_steps is not None else config.max_iter
     env_treedef = jax.tree.structure(envs)
 

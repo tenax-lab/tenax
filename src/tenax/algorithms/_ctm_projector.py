@@ -621,12 +621,13 @@ def _compute_projector_tensor(
         k = S_M.shape[0]
         V_M = Vh_M.conj().T  # (col2, k)
 
-        # S^{-1/2} weighting with stop_gradient: at the fixed point the
-        # singular values are constants, so the derivative through S^{-1/2}
-        # (which is -0.5 * S^{-3/2}) is not needed and causes NaN.
+        # S^{-1/2} weighting: differentiable so the optimizer sees the
+        # full gradient through the Fishman projector (VariPEPS-like).
+        # The cutoff prevents NaN from near-zero singular values;
+        # the SVD backward already uses Lorentzian regularization for
+        # degenerate s_i ≈ s_j.
         _cutoff = 1e-14 * (S_M[0] + 1e-30)
         S_rsqrt = jnp.where(S_M > _cutoff, 1.0 / jnp.sqrt(S_M), 0.0)
-        S_rsqrt = jax.lax.stop_gradient(S_rsqrt)
 
         # Fishman projector: P = C4g @ V @ S^{-1/2}
         P_dense = C4g_dense @ (V_M * S_rsqrt[None, :])  # (fused_dim, k)
