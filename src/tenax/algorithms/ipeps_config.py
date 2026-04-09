@@ -39,7 +39,8 @@ class CTMConfig:
     )
     ad_backward_method: str = "vjp"  # "vjp" (iterative VJP) or "gmres"
     ctm_conv_method: str = "sv"  # "sv" (singular value) or "elementwise"
-    jit_ctm: bool = False  # use jax.lax.fori_loop for GPU kernel fusion
+    forward_gauge: str = "qr"  # "qr" or "sigma" (sigma aligns to previous env)
+    jit_ctm: bool = False  # use jax.lax.while_loop for GPU kernel fusion
 
 
 @dataclass
