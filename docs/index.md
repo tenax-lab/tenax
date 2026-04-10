@@ -92,4 +92,5 @@ guide/contributing
 :caption: Notes
 
 contraction_semantics
+ipeps-code-paths
 ```

@@ -52,46 +52,41 @@ ctm_cfg = CTMConfig(
     chi=32,                      # environment bond dimension
     max_iter=100,                # maximum CTM iterations
     conv_tol=1e-10,              # convergence tolerance on corner singular values
-    forward_gauge="qr",         # "qr" (default) or "sigma"
+    forward_gauge="qr",         # "qr" (default), "sigma", "phase", or "none"
     projector_method="eigh",    # "eigh" (default), "qr", or "svd" (Fishman)
-    ad_backward_method="vjp",   # "vjp" (default) or "gmres"
+    ad_backward_method="vjp",   # "vjp" (default) or "gmres" (experimental)
 )
 ```
 
 ### Forward gauge
 
 The ``forward_gauge`` parameter controls how gauge ambiguity is resolved
-after each CTM sweep:
+after each CTM sweep. Four modes are supported:
 
 | Value | Description |
 |-------|-------------|
-| ``"qr"`` | QR decomposition on corners; fast, default for simple update. |
-| ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Ensures element-wise convergence. **Required for stable AD optimization.** |
+| ``"qr"`` (default) | QR decomposition on corners with sign-fixed diagonal. Fast and stable for simple update and forward-only CTM. |
+| ``"phase"`` | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix that still stabilizes unrolled AD. **Recommended for explicit AD** and auto-enabled by ``optimize_gs_ad`` when ``gs_explicit_ad=True`` and the user leaves ``forward_gauge="qr"``. |
+| ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Required for the implicit-diff / GMRES backward path where element-wise CTM convergence is needed. |
+| ``"none"`` | No gauge fix. Diagnostic / benchmark mode only — isolates the cost of gauge fixing from the rest of the sweep. Not recommended for production runs. |
 
-Without sigma gauge, the ``eigh`` projector CTM converges spectrally
-(corner singular values stabilize) but is chaotic element-wise -- the
-individual tensor entries keep fluctuating between iterations. This
-makes implicit differentiation ill-conditioned and causes GMRES to
-diverge. Setting ``forward_gauge="sigma"`` fixes this.
+Without a gauge fix, the ``eigh`` projector CTM converges spectrally (corner
+singular values stabilize) but is chaotic element-wise — the individual
+tensor entries keep fluctuating between iterations, which makes implicit
+differentiation ill-conditioned. ``forward_gauge="phase"`` fixes this with
+negligible overhead for explicit AD, while ``forward_gauge="sigma"`` is the
+historical choice that remains appropriate for the implicit-diff path.
 
 ### AD backward method
 
 | Value | Description |
 |-------|-------------|
-| ``"vjp"`` (default) | Iterative VJP (Neumann series). Safer without sigma gauge. |
-| ``"gmres"`` | Direct Krylov solve. Faster and recommended with ``forward_gauge="sigma"``. |
+| ``"vjp"`` (default) | Iterative VJP (Neumann series). Robust; the only implicit-diff backward that is currently regression-covered end-to-end. |
+| ``"gmres"`` | Direct Krylov solve of ``(I - J^T) λ = g``. **Experimental / documented unstable** — the GMRES backward is tracked as an open gap (see issue #292) and its regression test is currently marked ``xfail``. |
 
-### Recommended AD configuration
-
-```python
-ctm_cfg = CTMConfig(
-    chi=16,
-    max_iter=100,
-    conv_tol=1e-10,
-    forward_gauge="sigma",
-    ad_backward_method="gmres",
-)
-```
+For new code prefer the explicit-AD path (``gs_explicit_ad=True``), which
+does not exercise the implicit backward at all and does not require GMRES.
+See {doc}`ipeps_ad_paths` for the complete recommended configuration.
 
 ## Example — standalone CTM
 

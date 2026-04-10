@@ -48,7 +48,7 @@ ctm_config = CTMConfig(
     max_iter=100,        # maximum CTM iterations
     conv_tol=1e-8,       # convergence tolerance on corner singular values
     renormalize=True,
-    forward_gauge="qr",  # "qr" (default) or "sigma"
+    forward_gauge="qr",  # "qr" (default), "sigma", "phase", or "none"
 )
 
 config = iPEPSConfig(
@@ -63,31 +63,27 @@ config = iPEPSConfig(
 ### Forward gauge
 
 The ``forward_gauge`` option in ``CTMConfig`` controls how gauge ambiguity is
-fixed after each CTM sweep during the forward pass:
+fixed after each CTM sweep during the forward pass. Four modes are supported:
 
 | Value | Description |
 |-------|-------------|
-| ``"qr"`` (default) | QR decomposition on each corner; R has a unique sign convention (positive diagonal). Fast and stable for simple update. |
-| ``"sigma"`` | Sigma gauge fixing via transfer-matrix eigenvector alignment. Computes the leading eigenvector of each edge's transfer matrix by power iteration, then applies a unitary rotation to align the current environment with the previous iteration's environment. |
+| ``"qr"`` (default) | QR decomposition on each corner with sign-fixed diagonal. Fast and stable for simple update and forward-only CTM. |
+| ``"phase"`` | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix that still stabilizes unrolled AD. **Recommended for explicit AD**. |
+| ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Historical choice — kept for the implicit-diff / GMRES backward path where element-wise convergence is needed. |
+| ``"none"`` | No gauge fix. Diagnostic / benchmark mode only. |
 
-**When to use ``forward_gauge="sigma"``**: The ``eigh`` projector method
-(default) is sensitive to the gauge of CTM environment tensors. Without sigma
-gauge, the CTM iteration can be chaotic -- corner singular values converge
-but the individual tensor elements do not, which makes implicit
-differentiation ill-conditioned. Setting ``forward_gauge="sigma"`` stabilizes
-element-wise convergence and is **required** for reliable AD optimization
-with the ``eigh`` projector.
+**Auto-promotion for explicit AD**: when you call ``optimize_gs_ad`` with
+``gs_explicit_ad=True`` (the default) and leave ``forward_gauge`` at its
+conservative default ``"qr"``, the optimizer transparently promotes the
+forward gauge to ``"phase"`` for the run. The static default is kept at
+``"qr"`` so that callers who construct a ``CTMConfig`` directly (for
+forward-only CTM, diagnostics, notebooks) see predictable behavior. If you
+explicitly set ``forward_gauge="sigma"`` or ``"none"``, the optimizer
+respects that choice without auto-promotion.
 
-```python
-# Recommended CTM config for AD optimization
-ctm_config = CTMConfig(
-    chi=16,
-    max_iter=100,
-    conv_tol=1e-10,
-    forward_gauge="sigma",       # stabilize element-wise convergence
-    ad_backward_method="gmres",  # recommended for AD
-)
-```
+See {doc}`ipeps_ad_paths` for the complete post-PR-#291 recommended
+configuration, benchmark results, and the split between the explicit-AD
+and implicit-diff paths.
 
 ### Choosing `dt`
 
@@ -286,27 +282,51 @@ tracking, then ``gs_explicit_ad_steps`` sweeps with full backpropagation.
 ```python
 config = iPEPSConfig(
     max_bond_dim=2,
-    ctm=CTMConfig(chi=16, max_iter=50, forward_gauge="sigma"),
+    ctm=CTMConfig(chi=16, max_iter=50, projector_method="qr"),
     gs_explicit_ad=True,       # default
     gs_explicit_ad_steps=20,   # CTM steps with gradient tracking
     gs_explicit_ad_warmup=3,   # warmup steps (no gradient)
-    gs_optimizer="cg",
+    gs_projector_method="qr",  # QR projectors scale cleanly to chi >= 16
+    gs_optimizer="lbfgs",
+    gs_line_search_method="hager_zhang",
     gs_num_steps=50,
 )
 A_opt, env, E_gs = optimize_gs_ad(H_bond, None, config)
 ```
 
-Explicit AD works well for the 1-site C4v path (``gs_c4v=True``) where each
-CTM sweep is a single move, keeping the unrolled graph manageable. It is
-generally slower than implicit differentiation with GMRES but avoids the
-linear-solve convergence issues entirely.
+Explicit AD is the **recommended** AD path on the 1-site C4v workflow
+(``gs_c4v=True``). Each CTM sweep is a single move, the unrolled graph stays
+manageable, and the backward pass avoids the implicit-diff linear solve
+entirely.
 
 ```{note}
-Sigma gauge (``forward_gauge="sigma"``) is used during the unrolled CTM
-sweeps to ensure stable element-wise convergence across the backpropagation
-chain. The power iteration for the transfer-matrix eigenvector is fully
-JAX-differentiable.
+With ``gs_explicit_ad=True`` and the default ``forward_gauge="qr"``, the
+optimizer auto-promotes the forward gauge to ``"phase"``  for the
+unrolled CTM sweeps. Phase gauge is 6–9× faster than sigma gauge with
+equal or better energy and is the post-PR-#291 recommended gauge for
+explicit AD. See {doc}`ipeps_ad_paths` for the full benchmark table.
 ```
+
+#### CTM convergence tolerance schedule
+
+``iPEPSConfig.gs_ctm_conv_tol_schedule`` ramps the CTM convergence tolerance
+from loose to tight across the AD optimization. It accepts a list of
+``(step_fraction, conv_tol)`` pairs: at each AD step the optimizer looks up
+the tolerance corresponding to the current ``step_index / gs_num_steps``
+fraction and rebuilds the CTM config accordingly.
+
+```python
+config = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(chi=16, max_iter=80, conv_tol=1e-7),
+    gs_explicit_ad=True,
+    gs_num_steps=50,
+    gs_ctm_conv_tol_schedule=[(0.0, 1e-5), (0.5, 1e-6), (0.8, 1e-7)],
+)
+```
+
+This is an advanced tuning knob — leaving it at ``None`` (the default) uses
+``ctm.conv_tol`` throughout, which is fine for most runs.
 
 #### Chi-ramping schedule
 
@@ -320,8 +340,12 @@ from tenax import optimize_gs_ad_chi_schedule, iPEPSConfig, CTMConfig
 
 config = iPEPSConfig(
     max_bond_dim=2,
-    ctm=CTMConfig(chi=8, forward_gauge="sigma", ad_backward_method="gmres"),
-    gs_optimizer="cg",
+    ctm=CTMConfig(chi=8, projector_method="qr"),
+    gs_explicit_ad=True,
+    gs_projector_method="qr",
+    gs_optimizer="lbfgs",
+    gs_line_search_method="hager_zhang",
+    gs_c4v=True,
     su_init=True,
 )
 
@@ -338,37 +362,41 @@ per stage.
 
 #### Backward method selection
 
-The backward pass for CTM implicit differentiation can use two methods:
+The backward pass for CTM implicit differentiation (``gs_explicit_ad=False``)
+has two options:
 
 | Method | Setting | Description |
 |--------|---------|-------------|
-| Iterative VJP | ``ad_backward_method="vjp"`` (default) | Neumann series accumulation of VJP (YASTN-style) |
-| GMRES | ``ad_backward_method="gmres"`` | Direct linear solve of ``(I - J^T)lambda = g`` |
+| Iterative VJP | ``ad_backward_method="vjp"`` (default) | Neumann series accumulation of VJP (YASTN-style). The regression-covered backward for the implicit path. |
+| GMRES | ``ad_backward_method="gmres"`` | Direct linear solve of ``(I - J^T) λ = g``. **Experimental / documented unstable** — the GMRES backward is currently tracked as an open gap and its regression test is marked ``xfail`` (see issue #292). |
 
-**Recommended: ``ad_backward_method="gmres"``** with ``forward_gauge="sigma"``.
-GMRES solves the implicit differentiation equation directly and converges
-faster than the iterative VJP. Without sigma gauge, VJP is safer because GMRES
-can diverge when element-wise CTM convergence fails. With sigma gauge enabled,
-GMRES is the preferred method.
+**Recommended path**: set ``gs_explicit_ad=True`` (the default) so neither
+implicit backward runs. Explicit AD does not use the ``(I - J^T)`` solve at
+all and is the fastest path on the 1-site C4v workflow. If you still need
+implicit differentiation (for example, for fermionic models where the
+explicit graph is too deep), prefer ``ad_backward_method="vjp"`` until the
+GMRES backward is stabilized.
 
 ```python
-# Recommended AD configuration
+# Recommended AD configuration — explicit AD + QR projectors + auto phase gauge
 config = iPEPSConfig(
     max_bond_dim=2,
-    ctm=CTMConfig(
-        chi=16,
-        max_iter=100,
-        forward_gauge="sigma",
-        ad_backward_method="gmres",
-    ),
-    gs_optimizer="cg",
+    ctm=CTMConfig(chi=16, max_iter=100, projector_method="qr"),
+    gs_explicit_ad=True,
+    gs_projector_method="qr",
+    gs_optimizer="lbfgs",
+    gs_line_search_method="hager_zhang",
+    gs_metric_precond=True,
+    gs_c4v=True,
     gs_num_steps=100,
     su_init=True,
 )
 ```
 
 For AD-based excitation spectra on top of an optimised iPEPS, see
-{doc}`ad_excitations`.
+{doc}`ad_excitations`. For the full benchmarked recommendation (including
+when to reach for ``forward_gauge="sigma"``, ``forward_gauge="none"``, or
+the ``gs_ctm_conv_tol_schedule`` knob) see {doc}`ipeps_ad_paths`.
 
 ## Split-CTMRG with Tensor protocol
 

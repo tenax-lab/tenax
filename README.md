@@ -309,16 +309,19 @@ gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) \
      + 0.5 * (jnp.einsum("ij,kl->ikjl", Sp, Sm)
              + jnp.einsum("ij,kl->ikjl", Sm, Sp))
 
-# Recommended AD configuration: L-BFGS + sigma gauge + GMRES backward
-# Reaches E=-0.6601 at D=2, chi=8 (literature: -0.6625)
+# Recommended AD configuration: L-BFGS + explicit AD + QR projectors.
+# The optimizer auto-promotes forward_gauge="qr" to "phase" for the
+# unrolled CTM sweeps (variPEPS-style Frobenius + phase fix). Reaches
+# E=-0.6628 at D=2, chi=16 (literature: -0.6548 at D=2).
 config = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(
-        chi=8,
-        projector_method="eigh",
-        forward_gauge="sigma",        # sigma gauge fixing for stable CTM convergence
-        ad_backward_method="gmres",   # implicit AD via GMRES (recommended)
+        chi=16,
+        max_iter=80,
+        projector_method="qr",        # recommended projector for explicit AD
     ),
+    gs_explicit_ad=True,              # default; unrolled + checkpointed CTM
+    gs_projector_method="qr",
     gs_optimizer="lbfgs",             # L-BFGS with Hager-Zhang line search
     gs_line_search_method="hager_zhang",
     gs_metric_precond=True,           # metric preconditioning (Rader et al.)
@@ -335,10 +338,9 @@ A_opt, env, E_gs = optimize_gs_ad_chi_schedule(gate, None, config, chi_schedule)
 # 2-site AD optimization for antiferromagnets (Neel order)
 config_2site = iPEPSConfig(
     max_bond_dim=2,
-    ctm=CTMConfig(chi=16, max_iter=50, forward_gauge="sigma",
-                  ad_backward_method="gmres"),
+    ctm=CTMConfig(chi=16, max_iter=50, projector_method="qr"),
+    gs_explicit_ad=True,
     gs_num_steps=200,
-    gs_learning_rate=1e-3,
     unit_cell="2site",
     su_init=True,
 )
@@ -347,8 +349,8 @@ config_2site = iPEPSConfig(
 # SVD (Fishman) projectors — alternative to eigh and QR
 config_svd = iPEPSConfig(
     max_bond_dim=2,
-    ctm=CTMConfig(chi=16, max_iter=50, projector_method="svd",
-                  forward_gauge="sigma"),
+    ctm=CTMConfig(chi=16, max_iter=50, projector_method="svd"),
+    gs_explicit_ad=True,
     gs_num_steps=200,
     gs_optimizer="lbfgs",
     gs_line_search_method="hager_zhang",

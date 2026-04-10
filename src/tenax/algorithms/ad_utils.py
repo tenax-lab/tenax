@@ -516,7 +516,7 @@ def _config_to_tuple(config) -> tuple:
         {"vjp": 0, "gmres": 1}.get(getattr(config, "ad_backward_method", "vjp"), 0),
         _CONV_METHOD_STR_TO_INT.get(getattr(config, "ctm_conv_method", "sv"), 0),
         int(getattr(config, "jit_ctm", False)),
-        {"qr": 0, "sigma": 1, "phase": 2}.get(
+        {"qr": 0, "sigma": 1, "phase": 2, "none": 3}.get(
             getattr(config, "forward_gauge", "qr"), 0
         ),
     )
@@ -534,7 +534,9 @@ def _config_from_tuple(config_tuple: tuple):
     ctm_conv_method = _CONV_METHOD_INT_TO_STR.get(conv_method_int, "sv")
     jit_ctm = bool(config_tuple[10]) if len(config_tuple) > 10 else False
     forward_gauge_int = config_tuple[11] if len(config_tuple) > 11 else 0
-    forward_gauge = {0: "qr", 1: "sigma", 2: "phase"}.get(forward_gauge_int, "qr")
+    forward_gauge = {0: "qr", 1: "sigma", 2: "phase", 3: "none"}.get(
+        forward_gauge_int, "qr"
+    )
     return CTMConfig(
         chi=config_tuple[0],
         max_iter=config_tuple[1],
@@ -1613,7 +1615,13 @@ def ctm_tensor_converge_explicit(
     gauge_mode = getattr(config, "forward_gauge", "qr")
     use_sigma = gauge_mode == "sigma"
     use_phase = gauge_mode == "phase"
-    _gauge_fn = _phase_fix_ctm_tensor if use_phase else _gauge_fix_ctm_tensor
+    use_none = gauge_mode == "none"
+    if use_phase:
+        _gauge_fn = _phase_fix_ctm_tensor
+    elif use_none:
+        _gauge_fn = lambda e: e  # noqa: E731 — diagnostic: no gauge fix
+    else:
+        _gauge_fn = _gauge_fix_ctm_tensor
 
     # Phase 1: Warmup — no gradient tracking
     for wi in range(warmup_steps):
