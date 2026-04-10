@@ -87,67 +87,76 @@ def _flip_leg_flow(tensor: Tensor, label: str) -> Tensor:
 
 
 def _apply_projector_tensor(
-    P: Tensor,
+    P_1: Tensor,
+    P_2: Tensor,
     C1g: Tensor,
     C4g: Tensor,
     Tg: Tensor,
     fused_l: str,
     fused_r: str,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    r"""Apply projector to grown corners and edge using Tensor contraction.
+    r"""Apply projector pair to grown corners and edge.
 
-    Computes :math:`P^\dagger C_{1g}`, :math:`P^\dagger C_{4g}`,
-    and the sandwich :math:`P^\dagger T_g P`.
+    Uses the two-projector formulation (arXiv:2502.10298 Eq. 10):
 
-    Uses ``P.bar()`` (= :math:`P^\dagger` for real isometries) on the left
-    and ``P`` on the right of the edge sandwich.
+    .. math::
+        C_1' = P_1^\dagger C_{1g}, \quad
+        C_4' = P_2^\dagger C_{4g}, \quad
+        T'   = P_1^\dagger T_g P_2
+
+    ``P_1`` acts on the C1g side (fused_l of the edge), ``P_2`` on the
+    C4g side (fused_r).  For isometric projectors (eigh/qr), ``P_1 = P_2``
+    and this reduces to the standard single-projector formulation.
 
     Args:
-        P:       Projector with labels ``(fused, chi_new)``.
+        P_1:     Projector for C1g side, labels ``(fused, chi_new)``.
+        P_2:     Projector for C4g side, labels ``(fused, chi_new)``.
         C1g:     Grown corner ``(fused, col1)``.
         C4g:     Grown corner ``(fused, col2)``.
         Tg:      Grown edge ``(fused_l, D2_label, fused_r)``.
-        fused_l: Label of Tg's left fused leg.
-        fused_r: Label of Tg's right fused leg.
+        fused_l: Label of Tg's left fused leg (C1g side).
+        fused_r: Label of Tg's right fused leg (C4g side).
 
     Returns:
         ``(C1_new, C4_new, T_new)`` as Tensor objects.
     """
-    P_bar = P.bar()  # (fused_OUT, chi_new_IN) — contracts on "fused"
+    P1_bar = P_1.bar()  # (fused_OUT, chi_new_IN) — contracts on "fused"
+    P2_bar = P_2.bar()
 
-    C1_new = contract(P_bar, C1g)  # (chi_new, col1)
-    C4_new = contract(P_bar, C4g)  # (chi_new, col2)
+    C1_new = contract(P1_bar, C1g)  # (chi_new, col1)
+    C4_new = contract(P2_bar, C4g)  # (chi_new, col2)
 
-    # Sandwich: P^bar @ Tg @ P  (left fused, then right fused)
-    P_left = P_bar.relabel("fused", fused_l)
+    # Sandwich: P_1^bar @ Tg @ P_2  (left fused, then right fused)
+    P_left = P1_bar.relabel("fused", fused_l)
     step = contract(P_left, Tg)  # (chi_new, D2, fused_r)
 
-    P_right = P.relabels({"fused": fused_r, "chi_new": "chi_new_r"})
+    P_right = P_2.relabels({"fused": fused_r, "chi_new": "chi_new_r"})
     T_new = contract(step, P_right)  # (chi_new, D2, chi_new_r)
 
     return C1_new, C4_new, T_new
 
 
 def _apply_projector_with_reembed(
-    P: Tensor,
+    P_1: Tensor,
+    P_2: Tensor,
     C1g: Tensor,
     C4g: Tensor,
     Tg: Tensor,
     fused_l: str,
     fused_r: str,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """Apply projector with automatic re-embedding for mismatched fused indices.
+    """Apply projector pair with automatic re-embedding for mismatched fused indices.
 
-    When the projector has a unified fused index (from combining two corners
+    When the projectors have a unified fused index (from combining two corners
     with different charge distributions), re-embeds the grown corners and
-    edge to match the projector's fused dimension before applying.
+    edge to match the projectors' fused dimension before applying.
 
     For DenseTensor inputs, delegates directly to ``_apply_projector_tensor``.
     """
-    if not isinstance(P, SymmetricTensor):
-        return _apply_projector_tensor(P, C1g, C4g, Tg, fused_l, fused_r)
+    if not isinstance(P_1, SymmetricTensor):
+        return _apply_projector_tensor(P_1, P_2, C1g, C4g, Tg, fused_l, fused_r)
 
-    p_fused_idx = P.indices[P.labels().index("fused")]
+    p_fused_idx = P_1.indices[P_1.labels().index("fused")]
 
     def _maybe_reembed(T: SymmetricTensor, fused_label: str) -> SymmetricTensor:
         fused_pos = T.labels().index(fused_label)
@@ -173,7 +182,7 @@ def _apply_projector_with_reembed(
         Tg = _maybe_reembed(Tg, fused_l)
         Tg = _maybe_reembed(Tg, fused_r)
 
-    return _apply_projector_tensor(P, C1g, C4g, Tg, fused_l, fused_r)
+    return _apply_projector_tensor(P_1, P_2, C1g, C4g, Tg, fused_l, fused_r)
 
 
 def _ctm_tensor_move_left(
@@ -210,8 +219,10 @@ def _ctm_tensor_move_left(
     T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", OUT)
 
     # Native projector
-    P = _compute_projector_tensor(C1g, C4g, chi, projector_method, base_charges)
-    C1_new, C4_new, T4_new = _apply_projector_with_reembed(P, C1g, C4g, T4g, "fl", "fr")
+    P_1, P_2 = _compute_projector_tensor(C1g, C4g, chi, projector_method, base_charges)
+    C1_new, C4_new, T4_new = _apply_projector_with_reembed(
+        P_1, P_2, C1g, C4g, T4g, "fl", "fr"
+    )
 
     # Relabel to expected output labels
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t1_r": "c1_r"})
@@ -260,8 +271,10 @@ def _ctm_tensor_move_right(
     T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", OUT)
 
     # Native projector
-    P = _compute_projector_tensor(C2g, C3g, chi, projector_method, base_charges)
-    C2_new, C3_new, T2_new = _apply_projector_with_reembed(P, C2g, C3g, T2g, "fl", "fr")
+    P_1, P_2 = _compute_projector_tensor(C2g, C3g, chi, projector_method, base_charges)
+    C2_new, C3_new, T2_new = _apply_projector_with_reembed(
+        P_1, P_2, C2g, C3g, T2g, "fl", "fr"
+    )
 
     # Relabel to expected output labels
     C2_new = C2_new.relabels({"chi_new": "c2_l", "t1_l": "c2_d"})
@@ -309,8 +322,10 @@ def _ctm_tensor_move_top(
     T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", OUT)
 
     # Native projector
-    P = _compute_projector_tensor(C1g, C2g, chi, projector_method, base_charges)
-    C1_new, C2_new, T1_new = _apply_projector_with_reembed(P, C1g, C2g, T1g, "fl", "fr")
+    P_1, P_2 = _compute_projector_tensor(C1g, C2g, chi, projector_method, base_charges)
+    C1_new, C2_new, T1_new = _apply_projector_with_reembed(
+        P_1, P_2, C1g, C2g, T1g, "fl", "fr"
+    )
 
     # Relabel to expected output labels
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t4_u": "c1_r"})
@@ -358,8 +373,10 @@ def _ctm_tensor_move_bottom(
     T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", OUT)
 
     # Native projector
-    P = _compute_projector_tensor(C4g, C3g, chi, projector_method, base_charges)
-    C4_new, C3_new, T3_new = _apply_projector_with_reembed(P, C4g, C3g, T3g, "fl", "fr")
+    P_1, P_2 = _compute_projector_tensor(C4g, C3g, chi, projector_method, base_charges)
+    C4_new, C3_new, T3_new = _apply_projector_with_reembed(
+        P_1, P_2, C4g, C3g, T3g, "fl", "fr"
+    )
 
     # Relabel to expected output labels
     C4_new = C4_new.relabels({"chi_new": "c4_r", "t4_d": "c4_u"})

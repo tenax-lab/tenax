@@ -47,11 +47,10 @@ A_opt, env, E = optimize_gs_ad_chi_schedule(H_rot, None, config, chi_schedule)
 
 | Path | Best E | Time | Notes |
 |------|--------|------|-------|
-| **eigh + sigma (explicit AD)** | **-0.6670** | 1184s | Best energy |
+| **eigh + sigma (explicit AD)** | **-0.6601** | 1234s | Best energy |
 | eigh + sigma (GMRES implicit) | -0.6601 | — | Fast convergence |
-| svd + sigma (explicit AD) | -0.6624 | 1315s | SVD projector works with sigma |
-| svd + none (differentiable S) | -0.6265 | 472s | Partial: needs sigma |
-| svd + none (stop_gradient S) | -0.5266 | 483s | Fails |
+| svd + sigma (two-proj, explicit AD) | **-0.6623** | 1124s | Matches eigh |
+| svd + none (two-proj) | -0.5389 | 505s | Fails: needs sigma |
 | eigh + none / eigh + qr | ~-0.537 | ~580s | Fails |
 | Literature (chi=8) | -0.6625 | — | — |
 | Exact (QMC, chi→∞) | -0.6694 | — | — |
@@ -133,20 +132,24 @@ Works with sigma gauge (E=-0.6624). The S^{-1/2} weighting is differentiable
 
 **qr**: QR-factored small eigenproblem. Fails for AD without sigma gauge.
 
-### 3. SVD Projector: Single vs Two-Projector
+### 3. SVD Projector: Two-Projector Fishman
 
-The standard Fishman formulation uses a single projector P = C4g·V·S^{-1/2}
-applied as P† on both sides. This means only V (not U) from the SVD gets
-gradients.
+The two-projector Fishman formulation (arXiv:2502.10298) computes a
+bi-orthogonal pair:
 
-The full two-projector formulation (P_up = C1g·U·S^{-1/2}, P_down = C4g·V·S^{-1/2})
-gives gradients through all SVD factors. However, individual projectors are
-NOT isometric (P†P ≠ I) — only the cross-product P_up†·P_down = I holds.
-Implementing this requires restructuring CTM absorption to always use
-projector pairs, as in arXiv:2502.10298 (Naumann et al.).
+- P_1 = C4g·V·S^{-1/2} (applied to C1g side)
+- P_2 = C1g·U·S^{-1/2} (applied to C4g side)
 
-**Status**: Single-projector SVD with differentiable S works. Two-projector
-requires CTM move refactoring (planned).
+satisfying P_1†·P_2 = I. Both corners get clean projections (S^{1/2}·U†
+and S^{1/2}·V†), and gradients flow through all SVD factors (U, S, V).
+
+For eigh/qr projectors, P_1 = P_2 = P (standard isometric projector).
+
+This matches the variPEPS and YASTN implementations. The remaining
+differences are in numerical conditioning: variPEPS uses 2×2 enlarged
+corners with Fishman low-rank pre-truncation; YASTN uses QR pre-factoring
+of half-corners; Tenax uses neither (QR backward is unstable for
+rank-deficient matrices during AD).
 
 ### 4. L-BFGS + Hager-Zhang Line Search
 

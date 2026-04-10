@@ -54,26 +54,27 @@ def _get_base_charges(a: Tensor) -> np.ndarray | None:
 
 
 def _apply_projector_with_reembed(
-    P: Tensor,
+    P_1: Tensor,
+    P_2: Tensor,
     C1g: Tensor,
     C4g: Tensor,
     Tg: Tensor,
     fused_l: str,
     fused_r: str,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """Apply projector with automatic re-embedding for mismatched fused indices.
+    """Apply projector pair with automatic re-embedding for mismatched fused indices.
 
-    When the projector has a unified fused index (from combining two corners
+    When the projectors have a unified fused index (from combining two corners
     with different charge distributions), re-embeds the grown corners and
-    edge to match the projector's fused dimension before applying.
+    edge to match the projectors' fused dimension before applying.
 
     For DenseTensor inputs, delegates directly to ``_apply_projector_tensor``.
     """
-    if not isinstance(P, SymmetricTensor):
-        return _apply_projector_tensor(P, C1g, C4g, Tg, fused_l, fused_r)
+    if not isinstance(P_1, SymmetricTensor):
+        return _apply_projector_tensor(P_1, P_2, C1g, C4g, Tg, fused_l, fused_r)
 
     # Check if re-embedding is needed
-    p_fused_idx = P.indices[P.labels().index("fused")]
+    p_fused_idx = P_1.indices[P_1.labels().index("fused")]
 
     def _maybe_reembed(T: SymmetricTensor, fused_label: str) -> SymmetricTensor:
         fused_pos = T.labels().index(fused_label)
@@ -102,7 +103,7 @@ def _apply_projector_with_reembed(
         Tg = _maybe_reembed(Tg, fused_l)
         Tg = _maybe_reembed(Tg, fused_r)
 
-    return _apply_projector_tensor(P, C1g, C4g, Tg, fused_l, fused_r)
+    return _apply_projector_tensor(P_1, P_2, C1g, C4g, Tg, fused_l, fused_r)
 
 
 # ------------------------------------------------------------------ #
@@ -153,9 +154,11 @@ def _ctm_tensor_move_horizontal(
     T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", OUT)
 
     # Projector with charge stabilization
-    P_L = _compute_projector_tensor(C1g_L, C4g_L, chi, projector_method, base_charges)
+    P_L1, P_L2 = _compute_projector_tensor(
+        C1g_L, C4g_L, chi, projector_method, base_charges
+    )
     C1_new, C4_new, T4_new = _apply_projector_with_reembed(
-        P_L, C1g_L, C4g_L, T4g, "fl", "fr"
+        P_L1, P_L2, C1g_L, C4g_L, T4g, "fl", "fr"
     )
 
     # Relabel left outputs
@@ -182,9 +185,11 @@ def _ctm_tensor_move_horizontal(
     T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", OUT)
 
     # Projector with charge stabilization
-    P_R = _compute_projector_tensor(C2g_R, C3g_R, chi, projector_method, base_charges)
+    P_R1, P_R2 = _compute_projector_tensor(
+        C2g_R, C3g_R, chi, projector_method, base_charges
+    )
     C2_new, C3_new, T2_new = _apply_projector_with_reembed(
-        P_R, C2g_R, C3g_R, T2g, "fl", "fr"
+        P_R1, P_R2, C2g_R, C3g_R, T2g, "fl", "fr"
     )
 
     # Relabel right outputs
@@ -250,9 +255,11 @@ def _ctm_tensor_move_vertical(
     T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", OUT)
 
     # Projector with charge stabilization
-    P_T = _compute_projector_tensor(C1g, C2g, chi, projector_method, base_charges)
+    P_T1, P_T2 = _compute_projector_tensor(
+        C1g, C2g, chi, projector_method, base_charges
+    )
     C1_new, C2_new, T1_new = _apply_projector_with_reembed(
-        P_T, C1g, C2g, T1g, "fl", "fr"
+        P_T1, P_T2, C1g, C2g, T1g, "fl", "fr"
     )
 
     # Relabel top outputs
@@ -279,9 +286,11 @@ def _ctm_tensor_move_vertical(
     T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", OUT)
 
     # Projector with charge stabilization
-    P_B = _compute_projector_tensor(C4g, C3g, chi, projector_method, base_charges)
+    P_B1, P_B2 = _compute_projector_tensor(
+        C4g, C3g, chi, projector_method, base_charges
+    )
     C4_new, C3_new, T3_new = _apply_projector_with_reembed(
-        P_B, C4g, C3g, T3g, "fl", "fr"
+        P_B1, P_B2, C4g, C3g, T3g, "fl", "fr"
     )
 
     # Relabel bottom outputs

@@ -540,33 +540,36 @@ def _compute_projector_tensor(
     chi: int,
     projector_method: str = "eigh",
     base_charges: np.ndarray | None = None,
-) -> Tensor:
-    r"""Compute isometric projector P as a Tensor.
+) -> tuple[Tensor, Tensor]:
+    r"""Compute projector pair (P_1, P_2) as Tensors.
 
-    When ``projector_method == "eigh"``, forms the full density matrix
-    :math:`\rho = C_{1g} C_{1g}^\dagger + C_{4g} C_{4g}^\dagger`,
-    eigendecomposes, then wraps the top-k eigenvectors as a Tensor.
+    Returns a pair of projectors satisfying :math:`P_1^\dagger P_2 = I`
+    (bi-orthogonality).  For ``"eigh"`` and ``"qr"`` methods, both
+    projectors are identical isometries :math:`P_1 = P_2 = P`.  For
+    ``"svd"`` (Fishman), they are distinct cross-projectors:
 
-    When ``projector_method == "qr"``, QR-factors the concatenated corners
-    ``[C1g, C4g]`` to reduce to a small ``(2*col, 2*col)`` eigenproblem,
-    following the approach in arXiv:2505.00494.
+    .. math::
+        P_1 = C_{4g} V S^{-1/2}, \quad P_2 = C_{1g} U S^{-1/2}
 
-    For SymmetricTensor inputs (both ``"eigh"`` and ``"qr"``), uses
-    per-charge-sector decomposition to avoid dense round-trip.
+    where :math:`M = C_{1g}^\dagger C_{4g} = U S V^\dagger`.
+
+    ``P_1`` is applied to the C1g side (first corner, left/top of edge)
+    and ``P_2`` to the C4g side (second corner, right/bottom of edge).
+    See arXiv:2502.10298 Eq. 10 for the two-projector formulation.
 
     Args:
         C1g: Grown corner with labels ``(fused, <col1>)``.
         C4g: Grown corner with labels ``(fused, <col2>)``.
         chi: Target bond dimension.
-        projector_method: ``"eigh"`` or ``"qr"``.
+        projector_method: ``"eigh"``, ``"qr"``, or ``"svd"``.
+        base_charges: Bond charges for per-sector allocation.
 
     Returns:
-        Projector ``P`` with labels ``(fused, chi_new)``,
-        flows ``(IN, OUT)``.  Differentiable in dense fallback paths
-        (AD-traced inputs).
+        ``(P_1, P_2)`` each with labels ``(fused, chi_new)``,
+        flows ``(IN, OUT)``.  For eigh/qr, ``P_1 is P_2``.
 
     Raises:
-        ValueError: If ``projector_method`` is not ``"eigh"`` or ``"qr"``.
+        ValueError: If ``projector_method`` is not ``"eigh"``, ``"qr"``, or ``"svd"``.
     """
     if projector_method not in ("eigh", "qr", "svd"):
         raise ValueError(
@@ -607,16 +610,18 @@ def _compute_projector_tensor(
         M = C1g_dense.conj().T @ C4g_dense
 
         if _has_tracers:
-            from tenax.algorithms.ad_utils import truncated_svd_ad_vh_only
+            from tenax.algorithms.ad_utils import truncated_svd_ad
 
-            S_M, Vh_M = truncated_svd_ad_vh_only(M, chi)
+            U_M, S_M, Vh_M = truncated_svd_ad(M, chi)
         else:
-            _U_full, S_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
+            U_M_full, S_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
             k = min(chi, S_full.shape[0])
             from tenax.algorithms.ad_utils import _fix_svd_signs
 
-            _U_full, S_full, Vh_full = _fix_svd_signs(_U_full, S_full, Vh_full)
-            S_M, Vh_M = S_full[:k], Vh_full[:k, :]
+            U_M_full, S_full, Vh_full = _fix_svd_signs(U_M_full, S_full, Vh_full)
+            S_M = S_full[:k]
+            U_M = U_M_full[:, :k]
+            Vh_M = Vh_full[:k, :]
 
         k = S_M.shape[0]
         V_M = Vh_M.conj().T  # (col2, k)
@@ -629,8 +634,12 @@ def _compute_projector_tensor(
         _cutoff = 1e-14 * (S_M[0] + 1e-30)
         S_rsqrt = jnp.where(S_M > _cutoff, 1.0 / jnp.sqrt(S_M), 0.0)
 
-        # Fishman projector: P = C4g @ V @ S^{-1/2}
-        P_dense = C4g_dense @ (V_M * S_rsqrt[None, :])  # (fused_dim, k)
+        # Two-projector Fishman (arXiv:2502.10298 Eq. 10):
+        #   P_1 = C4g @ V @ S^{-1/2}  (applied to C1g side)
+        #   P_2 = C1g @ U @ S^{-1/2}  (applied to C4g side)
+        # Bi-orthogonality: P_1† @ P_2 = I
+        P1_dense = C4g_dense @ (V_M * S_rsqrt[None, :])  # (fused_dim, k)
+        P2_dense = C1g_dense @ (U_M * S_rsqrt[None, :])  # (fused_dim, k)
 
         fused_pos = C1g.labels().index("fused")
         fused_idx = C1g.indices[fused_pos]
@@ -648,10 +657,17 @@ def _compute_projector_tensor(
             label="chi_new",
         )
         if isinstance(C1g, SymmetricTensor):
-            return SymmetricTensor.from_dense(
-                P_dense, (fused_idx, chi_new_idx), tol=float("inf")
+            P1 = SymmetricTensor.from_dense(
+                P1_dense, (fused_idx, chi_new_idx), tol=float("inf")
             )
-        return DenseTensor(P_dense, (fused_idx, chi_new_idx))
+            P2 = SymmetricTensor.from_dense(
+                P2_dense, (fused_idx, chi_new_idx), tol=float("inf")
+            )
+            return P1, P2
+        return (
+            DenseTensor(P1_dense, (fused_idx, chi_new_idx)),
+            DenseTensor(P2_dense, (fused_idx, chi_new_idx)),
+        )
 
     # --- QR path ---
     if projector_method == "qr":
@@ -661,7 +677,8 @@ def _compute_projector_tensor(
                 C4g._data, jax.core.Tracer
             )
             if not has_tracers and C1g.n_blocks > 0 and C4g.n_blocks > 0:
-                return _qr_projector_symmetric(C1g, C4g, chi)
+                P = _qr_projector_symmetric(C1g, C4g, chi)
+                return P, P
 
         # Dense QR fallback — differentiable via regularized SVD when
         # Dense QR fallback — only reached when blocks contain JAX tracers
@@ -705,10 +722,12 @@ def _compute_projector_tensor(
             label="chi_new",
         )
         if isinstance(C1g, SymmetricTensor):
-            return SymmetricTensor.from_dense(
+            P = SymmetricTensor.from_dense(
                 P_dense, (fused_idx, chi_new_idx), tol=float("inf")
             )
-        return DenseTensor(P_dense, (fused_idx, chi_new_idx))
+            return P, P
+        P = DenseTensor(P_dense, (fused_idx, chi_new_idx))
+        return P, P
 
     # --- eigh path ---
     # Use block-sparse path for SymmetricTensor unless blocks contain
@@ -723,9 +742,8 @@ def _compute_projector_tensor(
             c1_charges = C1g.indices[fused_pos].charges
             c4_charges = C4g.indices[fused_pos].charges
             if np.array_equal(c1_charges, c4_charges):
-                return _eigh_projector_symmetric(
-                    C1g, C4g, chi, base_charges=base_charges
-                )
+                P = _eigh_projector_symmetric(C1g, C4g, chi, base_charges=base_charges)
+                return P, P
             # Mismatched fused charges (e.g. split CTM with different
             # D-leg flows): build a unified fused index covering both
             # corners' charge sectors, re-embed, and use block-sparse eigh.
@@ -734,13 +752,14 @@ def _compute_projector_tensor(
             )
             C1g_re = _reembed_fused(C1g, unified_fused_idx)
             C4g_re = _reembed_fused(C4g, unified_fused_idx)
-            return _eigh_projector_symmetric(
+            P = _eigh_projector_symmetric(
                 C1g_re,
                 C4g_re,
                 chi,
                 fused_idx=unified_fused_idx,
                 base_charges=base_charges,
             )
+            return P, P
 
     # Dense eigh fallback — only reached when SymmetricTensor blocks contain
     # JAX tracers (AD backward) or for DenseTensor inputs.  Block-sparse
@@ -783,7 +802,9 @@ def _compute_projector_tensor(
         label="chi_new",
     )
     if isinstance(C1g, SymmetricTensor):
-        return SymmetricTensor.from_dense(
+        P = SymmetricTensor.from_dense(
             P_dense, (fused_idx, chi_new_idx), tol=float("inf")
         )
-    return DenseTensor(P_dense, (fused_idx, chi_new_idx))
+        return P, P
+    P = DenseTensor(P_dense, (fused_idx, chi_new_idx))
+    return P, P
