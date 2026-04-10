@@ -29,6 +29,12 @@ env/
 # uv cache
 .uv/
 
+# uv lock file — Tenax is a library (published to PyPI), so downstream
+# consumers resolve their own deps. Tracking uv.lock only creates merge
+# friction from the editable self-version bump on each release without
+# any reproducibility benefit (CI runs plain `uv sync`, not `--frozen`).
+uv.lock
+
 # Testing
 .pytest_cache/
 .coverage
