@@ -39,7 +39,7 @@ class CTMConfig:
     )
     ad_backward_method: str = "vjp"  # "vjp" (iterative VJP) or "gmres"
     ctm_conv_method: str = "sv"  # "sv" (singular value) or "elementwise"
-    forward_gauge: str = "qr"  # "qr", "sigma", or "none"
+    forward_gauge: str = "qr"  # "qr", "sigma", "phase", or "none"
     jit_ctm: bool = False  # use jax.lax.while_loop for GPU kernel fusion
 
 
@@ -92,6 +92,11 @@ class iPEPSConfig:
     gs_projector_method: str | None = (
         None  # projector override for AD; None => use ctm.projector_method
     )
+    # CTM convergence tolerance schedule: list of (step_fraction, conv_tol) pairs.
+    # Ramps conv_tol from loose (early) to tight (late) during AD optimization.
+    # Example: [(0.0, 1e-5), (0.5, 1e-6), (0.8, 1e-7)]
+    # None = use config.ctm.conv_tol throughout.
+    gs_ctm_conv_tol_schedule: list[tuple[float, float]] | None = None
     # Metric preconditioning (natural gradient, Rader et al. arXiv:2511.09546)
     gs_metric_precond: bool = True  # metric preconditioning for CG/L-BFGS
     metric_gmres_maxiter: int = 30  # Krylov dimension for metric inversion
