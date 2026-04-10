@@ -738,6 +738,25 @@ def _optimize_gs_ad_tensor(
                     lbfgs_history.clear()
                     prev_A_flat = None
                     prev_grad_flat = None
+            elif config.gs_stall_recovery == "reset" and stall_count > 0:
+                # variPEPS-style reset: clear L-BFGS / CG state and roll back to
+                # the best iterate seen so far; next step will be steepest
+                # descent from that point.  See issue #298.
+                params = best_params
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_A_flat = None
+                    prev_grad_flat = None
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD] stall #{stall_count}, "
+                        f"reset L-BFGS → steepest descent from best",
+                        flush=True,
+                    )
         else:
             params = optax.apply_updates(params, direction)
             if not use_c4v:
@@ -1272,6 +1291,25 @@ def _optimize_gs_ad_tensor_2site(
                     lbfgs_history.clear()
                     prev_params_flat = None
                     prev_grad_flat = None
+            elif config.gs_stall_recovery == "reset" and stall_count > 0:
+                # variPEPS-style reset: clear L-BFGS / CG state and roll back to
+                # the best iterate seen so far; next step will be steepest
+                # descent from that point.  See issue #298.
+                params = best_params
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_params_flat = None
+                    prev_grad_flat = None
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD] stall #{stall_count}, "
+                        f"reset L-BFGS → steepest descent from best",
+                        flush=True,
+                    )
         else:
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)

@@ -810,9 +810,62 @@ class TestHeisenbergBenchmark:
         _, _, E_gs = optimize_gs_ad(
             heisenberg_gate, (A_su.todense(), B_su.todense()), ad_config
         )
-        assert E_gs < -0.648, (
-            f"AD D=2 chi=16 E/site={E_gs:.6f}, expected < -0.648 "
-            "(literature D=2 ≈ -0.6548)"
+        # Relaxed threshold after issue #298 — this test uses CG+armijo
+        # (default optimizer/line search) which cannot reach literature
+        # without the legacy random noise kick that was removed in #298.
+        # See test_ad_d2_energy_lbfgs_hagerzhang_reset for the tight
+        # regression bound using L-BFGS + Hager-Zhang + reset recovery.
+        assert E_gs < -0.57, (
+            f"AD D=2 chi=16 CG+armijo E/site={E_gs:.6f}, expected < -0.57 "
+            "(legacy test, see test_ad_d2_energy_lbfgs_hagerzhang_reset)"
+        )
+        assert E_gs > -0.80, f"AD D=2 E/site={E_gs:.6f}, unphysically low"
+
+    @pytest.mark.slow
+    def test_ad_d2_energy_lbfgs_hagerzhang_reset(self, heisenberg_gate):
+        """Issue #298 acceptance test: 2-site AD with L-BFGS + Hager-Zhang +
+        metric precond + SU init + reset stall recovery should converge to
+        within 0.01 of the literature Heisenberg D=2 value (-0.6548) without
+        noise injection.
+
+        Trajectory study in issue #298 showed this config reaches -0.65
+        monotonically in 20 steps at chi=8.  Our reset stall-recovery branch
+        (the 2-site default after this PR) should keep it working even when
+        line search stalls.
+        """
+        D, d = 2, 2
+        key_A, key_B = jax.random.split(jax.random.PRNGKey(42))
+        A_neel = 0.01 * jax.random.normal(key_A, (D, D, D, D, d))
+        A_neel = A_neel.at[0, 0, 0, 0, 0].set(1.0)
+        B_neel = 0.01 * jax.random.normal(key_B, (D, D, D, D, d))
+        B_neel = B_neel.at[0, 0, 0, 0, 1].set(1.0)
+
+        su_config = iPEPSConfig(
+            max_bond_dim=2,
+            num_imaginary_steps=200,
+            dt=0.05,
+            ctm=CTMConfig(chi=8, max_iter=100, min_iter=50),
+            unit_cell="2site",
+        )
+        _, (A_su, B_su), _ = ipeps(heisenberg_gate, (A_neel, B_neel), su_config)
+
+        ad_config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=8, max_iter=100, min_iter=50),
+            gs_num_steps=20,
+            gs_optimizer="lbfgs",
+            gs_line_search=True,
+            gs_line_search_method="hager_zhang",
+            gs_metric_precond=True,
+            unit_cell="2site",
+            # gs_stall_recovery=None -> auto-defaults to "reset" for 2-site.
+        )
+        _, _, E_gs = optimize_gs_ad(
+            heisenberg_gate, (A_su.todense(), B_su.todense()), ad_config
+        )
+        assert E_gs < -0.64, (
+            f"AD D=2 chi=8 L-BFGS+Hager-Zhang+reset E/site={E_gs:.6f}, "
+            "expected < -0.64 (literature D=2 ≈ -0.6548)"
         )
         assert E_gs > -0.80, f"AD D=2 E/site={E_gs:.6f}, unphysically low"
 
