@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import jax
 
@@ -125,6 +125,19 @@ class iPEPSConfig:
     gs_line_search_method: str = "armijo"  # "armijo" or "hager_zhang"
     gs_noise_recovery_retries: int = 3  # max retries with noise injection on stall
     gs_noise_amplitude: float = 0.1  # relative noise amplitude for recovery
+    # Stall recovery mode for L-BFGS / CG line search failures.
+    #   "noise"  -> inject gs_noise_amplitude Frobenius perturbation (legacy,
+    #               required for 1-site C4v production path to break out of the
+    #               SU-init plateau at step 0).
+    #   "reset"  -> clear L-BFGS (s, y) history, roll back params to best_params,
+    #               force steepest descent on next step.  Matches variPEPS.
+    #   None     -> auto-default per dispatcher: "noise" for 1-site, "reset" for
+    #               2-site.  Set by optimize_gs_ad at entry.
+    gs_stall_recovery: Literal["noise", "reset"] | None = None
+    # Optional variational sanity floor on in-loop best-state tracking.  Any
+    # candidate energy strictly below this value is rejected as a non-
+    # variational CTM artifact (see issue #298).  None disables the check.
+    gs_energy_floor: float | None = None
     gs_explicit_ad: bool = True  # explicit diff through unrolled CTM
     gs_explicit_ad_steps: int = 20  # CTM steps for explicit AD backprop phase
     gs_explicit_ad_warmup: int = 3  # warmup CTM steps (no gradient tracking)
