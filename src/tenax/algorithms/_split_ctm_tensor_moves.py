@@ -446,7 +446,7 @@ def _split_ctm_move_left(
     C4g_ket_fused = fuse_indices(C4g_ket, 0, 1, "fused", FlowDirection.IN)
 
     # Ket projector
-    P_ket = _compute_projector_tensor(
+    P_ket, _ = _compute_projector_tensor(
         C1g_ket_fused, C4g_ket_fused, chi, base_charges=base_charges
     )
 
@@ -462,7 +462,7 @@ def _split_ctm_move_left(
     C4g_bra_fused = fuse_indices(C4g_bra, 0, 1, "fused", FlowDirection.IN)
 
     # Bra projector
-    P_bra = _compute_projector_tensor(
+    P_bra, _ = _compute_projector_tensor(
         C1g_bra_fused, C4g_bra_fused, chi, base_charges=base_charges
     )
 
@@ -542,7 +542,7 @@ def _split_ctm_move_right(
     C3g_bra_fused = fuse_indices(C3g_bra, 0, 2, "fused", FlowDirection.IN)
 
     # Bra projector
-    P_bra = _compute_projector_tensor(
+    P_bra, _ = _compute_projector_tensor(
         C2g_bra_fused, C3g_bra_fused, chi, base_charges=base_charges
     )
 
@@ -558,7 +558,7 @@ def _split_ctm_move_right(
     C3g_ket_fused = fuse_indices(C3g_ket, 0, 2, "fused", FlowDirection.IN)
 
     # Ket projector
-    P_ket = _compute_projector_tensor(
+    P_ket, _ = _compute_projector_tensor(
         C2g_ket_fused, C3g_ket_fused, chi, base_charges=base_charges
     )
 
@@ -637,7 +637,7 @@ def _split_ctm_move_top(
     C2g_ket_fused = fuse_indices(C2g_ket, 0, 1, "fused", FlowDirection.IN)
 
     # Ket projector
-    P_ket = _compute_projector_tensor(
+    P_ket, _ = _compute_projector_tensor(
         C1g_ket_fused, C2g_ket_fused, chi, base_charges=base_charges
     )
 
@@ -653,7 +653,7 @@ def _split_ctm_move_top(
     C2g_bra_fused = fuse_indices(C2g_bra, 0, 1, "fused", FlowDirection.IN)
 
     # Bra projector
-    P_bra = _compute_projector_tensor(
+    P_bra, _ = _compute_projector_tensor(
         C1g_bra_fused, C2g_bra_fused, chi, base_charges=base_charges
     )
 
@@ -732,7 +732,7 @@ def _split_ctm_move_bottom(
     C3g_bra_fused = fuse_indices(C3g_bra, 0, 2, "fused", FlowDirection.IN)
 
     # Bra projector
-    P_bra = _compute_projector_tensor(
+    P_bra, _ = _compute_projector_tensor(
         C4g_bra_fused, C3g_bra_fused, chi, base_charges=base_charges
     )
 
@@ -748,7 +748,7 @@ def _split_ctm_move_bottom(
     C3g_ket_fused = fuse_indices(C3g_ket, 0, 2, "fused", FlowDirection.IN)
 
     # Ket projector
-    P_ket = _compute_projector_tensor(
+    P_ket, _ = _compute_projector_tensor(
         C4g_ket_fused, C3g_ket_fused, chi, base_charges=base_charges
     )
 

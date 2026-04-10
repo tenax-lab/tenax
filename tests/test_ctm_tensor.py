@@ -595,7 +595,7 @@ class TestProjectorSymmetric:
         C1g, C4g = self._build_grown_corners(A, chi)
 
         # Compute projector via symmetric path
-        P_sym = _compute_projector_tensor(C1g, C4g, chi, projector_method="eigh")
+        P_sym, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="eigh")
 
         # Dense reference
         C1g_d = C1g.todense()
@@ -620,8 +620,8 @@ class TestProjectorSymmetric:
 
         C1g, C4g = self._build_grown_corners(A, chi)
 
-        P_eigh = _compute_projector_tensor(C1g, C4g, chi, projector_method="eigh")
-        P_qr = _compute_projector_tensor(C1g, C4g, chi, projector_method="qr")
+        P_eigh, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="eigh")
+        P_qr, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="qr")
 
         # Both should be SymmetricTensor
         assert isinstance(P_eigh, SymmetricTensor)

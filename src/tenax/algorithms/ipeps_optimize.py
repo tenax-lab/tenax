@@ -356,12 +356,17 @@ def _optimize_gs_ad_tensor(
     A = A_init
     A = A * (1.0 / (A.norm() + 1e-10))
 
-    # Override projector method for AD if gs_projector_method is set
+    # Override CTM config fields for AD optimization
     ctm_cfg = config.ctm
-    if config.gs_projector_method is not None:
-        from dataclasses import replace as _replace
+    from dataclasses import replace as _replace
 
+    if config.gs_projector_method is not None:
         ctm_cfg = _replace(ctm_cfg, projector_method=config.gs_projector_method)
+    # Phase gauge is 6-9x faster than sigma/QR for explicit AD with equal
+    # energy (variPEPS-style Frobenius norm + phase fixing).  Auto-enable
+    # when the user hasn't explicitly set a gauge.
+    if config.gs_explicit_ad and ctm_cfg.forward_gauge == "qr":
+        ctm_cfg = _replace(ctm_cfg, forward_gauge="phase")
     config_tuple = _config_to_tuple(ctm_cfg)
 
     use_c4v = config.gs_c4v
@@ -472,7 +477,29 @@ def _optimize_gs_ad_tensor(
 
     stall_count = 0  # noise recovery: consecutive line search failures
 
+    # CTM conv_tol schedule: rebuild config_tuple when tolerance changes
+    _conv_tol_schedule = config.gs_ctm_conv_tol_schedule
+    _current_conv_tol = ctm_cfg.conv_tol
+
+    def _get_scheduled_conv_tol(step_idx, num_steps):
+        """Look up conv_tol from schedule based on step fraction."""
+        if _conv_tol_schedule is None:
+            return _current_conv_tol
+        frac = step_idx / max(num_steps, 1)
+        tol = _conv_tol_schedule[0][1]  # default to first entry
+        for threshold, t in _conv_tol_schedule:
+            if frac >= threshold:
+                tol = t
+        return tol
+
     for step in range(config.gs_num_steps):
+        # Update conv_tol if schedule is active
+        if _conv_tol_schedule is not None:
+            new_tol = _get_scheduled_conv_tol(step, config.gs_num_steps)
+            if new_tol != _current_conv_tol:
+                _current_conv_tol = new_tol
+                ctm_cfg = _replace(ctm_cfg, conv_tol=new_tol)
+                config_tuple = _config_to_tuple(ctm_cfg)
         (energy_val, env_leaves), grads = jax.value_and_grad(
             loss_fn, argnums=0, has_aux=True
         )(params, prev_env_leaves)
@@ -818,7 +845,22 @@ def _optimize_gs_ad_tensor_2site(
 
     Uses ``ctm_tensor_converge`` with implicit differentiation through
     the 2-site Tensor-protocol CTM.
+
+    .. warning::
+
+        **Experimental / unsupported.**  The 2-site AD optimizer is
+        unstable and produces unphysical energies.  For antiferromagnetic
+        models, prefer 1-site optimization with
+        ``sublattice_rotate_gate()`` + ``gs_c4v=True``, which is faster
+        and well-tested.
     """
+    import warnings
+
+    warnings.warn(
+        "2-site AD optimizer is experimental and may diverge. "
+        "Prefer 1-site with sublattice_rotate_gate() + gs_c4v=True.",
+        stacklevel=2,
+    )
     import optax
 
     from tenax.algorithms._ctm_tensor import (
@@ -852,11 +894,13 @@ def _optimize_gs_ad_tensor_2site(
     A = A * (1.0 / (A.norm() + 1e-10))
     B = B * (1.0 / (B.norm() + 1e-10))
 
+    from dataclasses import replace as _replace
+
     ctm_cfg_2s = config.ctm
     if config.gs_projector_method is not None:
-        from dataclasses import replace as _replace
-
         ctm_cfg_2s = _replace(ctm_cfg_2s, projector_method=config.gs_projector_method)
+    if config.gs_explicit_ad and ctm_cfg_2s.forward_gauge == "qr":
+        ctm_cfg_2s = _replace(ctm_cfg_2s, forward_gauge="phase")
     config_tuple = _config_to_tuple(ctm_cfg_2s)
     use_explicit = config.gs_explicit_ad
     explicit_steps = config.gs_explicit_ad_steps
@@ -921,6 +965,20 @@ def _optimize_gs_ad_tensor_2site(
     prev_grad_flat: jnp.ndarray | None = None
     stall_count = 0  # noise recovery: consecutive line search failures
 
+    # CTM conv_tol schedule (shared helper with 1-site optimizer)
+    _conv_tol_schedule_2s = config.gs_ctm_conv_tol_schedule
+    _current_conv_tol_2s = ctm_cfg_2s.conv_tol
+
+    def _get_scheduled_conv_tol_2s(step_idx, num_steps):
+        if _conv_tol_schedule_2s is None:
+            return _current_conv_tol_2s
+        frac = step_idx / max(num_steps, 1)
+        tol = _conv_tol_schedule_2s[0][1]
+        for threshold, t in _conv_tol_schedule_2s:
+            if frac >= threshold:
+                tol = t
+        return tol
+
     # Forward-only loss for line search — warm-starts CTM from prev_env_leaves
 
     def loss_fn_fwd(params_):
@@ -945,6 +1003,14 @@ def _optimize_gs_ad_tensor_2site(
         )
 
     for step in range(config.gs_num_steps):
+        # Update conv_tol if schedule is active
+        if _conv_tol_schedule_2s is not None:
+            new_tol = _get_scheduled_conv_tol_2s(step, config.gs_num_steps)
+            if new_tol != _current_conv_tol_2s:
+                _current_conv_tol_2s = new_tol
+                ctm_cfg_2s = _replace(ctm_cfg_2s, conv_tol=new_tol)
+                config_tuple = _config_to_tuple(ctm_cfg_2s)
+
         (energy_val, env_leaves), grads = jax.value_and_grad(
             loss_fn, argnums=0, has_aux=True
         )(params, prev_env_leaves)

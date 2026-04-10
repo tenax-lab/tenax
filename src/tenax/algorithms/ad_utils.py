@@ -516,7 +516,9 @@ def _config_to_tuple(config) -> tuple:
         {"vjp": 0, "gmres": 1}.get(getattr(config, "ad_backward_method", "vjp"), 0),
         _CONV_METHOD_STR_TO_INT.get(getattr(config, "ctm_conv_method", "sv"), 0),
         int(getattr(config, "jit_ctm", False)),
-        {"qr": 0, "sigma": 1}.get(getattr(config, "forward_gauge", "qr"), 0),
+        {"qr": 0, "sigma": 1, "phase": 2}.get(
+            getattr(config, "forward_gauge", "qr"), 0
+        ),
     )
 
 
@@ -532,7 +534,7 @@ def _config_from_tuple(config_tuple: tuple):
     ctm_conv_method = _CONV_METHOD_INT_TO_STR.get(conv_method_int, "sv")
     jit_ctm = bool(config_tuple[10]) if len(config_tuple) > 10 else False
     forward_gauge_int = config_tuple[11] if len(config_tuple) > 11 else 0
-    forward_gauge = {0: "qr", 1: "sigma"}.get(forward_gauge_int, "qr")
+    forward_gauge = {0: "qr", 1: "sigma", 2: "phase"}.get(forward_gauge_int, "qr")
     return CTMConfig(
         chi=config_tuple[0],
         max_iter=config_tuple[1],
@@ -781,6 +783,57 @@ def _gauge_fix_ctm_tensor(env):
     )
 
 
+def _phase_fix_ctm_tensor(env):
+    """Fix gauge of CTMTensorEnv via Frobenius normalization + phase fixing.
+
+    For each corner and edge tensor:
+    1. Normalize by Frobenius norm (differentiable).
+    2. Fix the global U(1) phase by making the first large element
+       real-positive (variPEPS ``_post_process_CTM_tensors`` approach).
+
+    This is simpler than sigma gauge (no transfer matrix eigenvector
+    computation) and works identically in Python loops and JIT while_loop.
+    """
+    EPS_PHASE = 0.1  # threshold fraction for "large" element (variPEPS default)
+
+    def _frob_phase_fix(arr):
+        """Frobenius-normalize and fix phase of a dense array."""
+        norm = jnp.linalg.norm(arr)
+        arr = arr / (norm + 1e-30)
+        # Find first element with |x| >= EPS_PHASE * max(|arr|)
+        flat = arr.ravel()
+        abs_flat = jnp.abs(flat)
+        abs_max = jnp.max(abs_flat)
+        threshold = EPS_PHASE * abs_max
+        # Use argmax on a mask to find the first qualifying element
+        mask = abs_flat >= threshold
+        # jnp.argmax returns first True in the mask
+        idx = jnp.argmax(mask)
+        val = flat[idx]
+        phase = val / (jnp.abs(val) + 1e-30)
+        return arr * jnp.conj(phase)
+
+    C1 = _frob_phase_fix(env.C1.todense())
+    C2 = _frob_phase_fix(env.C2.todense())
+    C3 = _frob_phase_fix(env.C3.todense())
+    C4 = _frob_phase_fix(env.C4.todense())
+    T1 = _frob_phase_fix(env.T1.todense())
+    T2 = _frob_phase_fix(env.T2.todense())
+    T3 = _frob_phase_fix(env.T3.todense())
+    T4 = _frob_phase_fix(env.T4.todense())
+
+    return CTMTensorEnv(
+        C1=_wrap_tensor(C1, env.C1),
+        C2=_wrap_tensor(C2, env.C2),
+        C3=_wrap_tensor(C3, env.C3),
+        C4=_wrap_tensor(C4, env.C4),
+        T1=_wrap_tensor(T1, env.T1),
+        T2=_wrap_tensor(T2, env.T2),
+        T3=_wrap_tensor(T3, env.T3),
+        T4=_wrap_tensor(T4, env.T4),
+    )
+
+
 def _needs_paired_sweep(A) -> bool:
     """Check if A is a SymmetricTensor with non-trivial virtual charges."""
     from tenax.core.tensor import SymmetricTensor
@@ -842,6 +895,7 @@ def _ctm_tensor_step_multisite(
     double_layers=None,
     sigma_gauge_ref_leaves=None,
     skip_gauge=False,
+    gauge_mode="qr",
 ):
     """One multisite CTM sweep + gauge fix, flat leaves to flat leaves.
 
@@ -855,6 +909,10 @@ def _ctm_tensor_step_multisite(
 
     If *skip_gauge* is True, no gauge fix is applied (used in backward
     to avoid QR NaN on rank-deficient corners where D² < chi).
+
+    *gauge_mode* selects the gauge fix when sigma_gauge_ref_leaves is None
+    and skip_gauge is False: ``"qr"`` (default) or ``"phase"``
+    (Frobenius normalization + phase fixing, variPEPS-style).
     """
     # Unflatten site tensors
     coords = sorted(site_treedefs)
@@ -900,6 +958,8 @@ def _ctm_tensor_step_multisite(
         envs = {c: _sigma_gauge_fix_ctm_tensor(envs[c], ref_envs[c]) for c in envs}
     elif skip_gauge:
         pass  # no gauge fix — used in backward to avoid QR NaN on rank-deficient corners
+    elif gauge_mode == "phase":
+        envs = {c: _phase_fix_ctm_tensor(e) for c, e in envs.items()}
     else:
         envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
 
@@ -1214,7 +1274,10 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
     )
 
     use_elementwise = getattr(config, "ctm_conv_method", "sv") == "elementwise"
-    use_sigma = getattr(config, "forward_gauge", "qr") == "sigma"
+    gauge_mode = getattr(config, "forward_gauge", "qr")
+    use_sigma = gauge_mode == "sigma"
+    use_none = gauge_mode == "none"
+    use_phase = gauge_mode == "phase"
     prev_svs = {}
     prev_env_arrays = {}
 
@@ -1228,7 +1291,11 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
             config.renormalize,
             config.projector_method,
         )
-        if use_sigma and i > 0:
+        if use_none:
+            pass  # no gauge fix — rely on projector stability
+        elif use_phase:
+            envs = {c: _phase_fix_ctm_tensor(e) for c, e in envs.items()}
+        elif use_sigma and i > 0:
             envs = {c: _sigma_gauge_fix_ctm_tensor(envs[c], envs_old[c]) for c in envs}
         else:
             envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
@@ -1348,7 +1415,26 @@ def _ctm_tensor_multisite_fixed_point_jit(
     # C1 is the first leaf of each site's env (leaf index 0)
     n_sites = len(coords)
 
-    use_sigma = getattr(config, "forward_gauge", "qr") == "sigma"
+    _gauge_mode = getattr(config, "forward_gauge", "qr")
+    use_sigma = _gauge_mode == "sigma"
+    use_phase = _gauge_mode == "phase"
+
+    # Match Python loop: first sweep uses QR gauge to establish a clean
+    # starting point before sigma gauge takes over.
+    if use_sigma:
+        envs = _ctm_tensor_sweep_multisite(
+            envs,
+            double_layers_cached,
+            neighbors,
+            chi,
+            config.renormalize,
+            config.projector_method,
+        )
+        envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
+        max_iter = max(max_iter - 1, 1)
+        min_iter = max(min_iter - 1, 0)
+
+    env_leaves = tuple(_flatten_envs(envs))
 
     # Match Python loop: first sweep uses QR gauge to establish a clean
     # starting point before sigma gauge takes over.
@@ -1381,6 +1467,7 @@ def _ctm_tensor_multisite_fixed_point_jit(
                 n_env_per_site,
                 double_layers=double_layers_cached,
                 sigma_gauge_ref_leaves=sigma_ref,
+                gauge_mode="phase" if use_phase else "qr",
             )
         )
 
@@ -1523,7 +1610,10 @@ def ctm_tensor_converge_explicit(
         }
     )
 
-    use_sigma = getattr(config, "forward_gauge", "qr") == "sigma"
+    gauge_mode = getattr(config, "forward_gauge", "qr")
+    use_sigma = gauge_mode == "sigma"
+    use_phase = gauge_mode == "phase"
+    _gauge_fn = _phase_fix_ctm_tensor if use_phase else _gauge_fix_ctm_tensor
 
     # Phase 1: Warmup — no gradient tracking
     for wi in range(warmup_steps):
@@ -1539,12 +1629,14 @@ def ctm_tensor_converge_explicit(
         if use_sigma and wi > 0:
             envs = {c: _sigma_gauge_fix_ctm_tensor(envs[c], envs_old[c]) for c in envs}
         else:
-            envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
+            envs = {c: _gauge_fn(e) for c, e in envs.items()}
     if warmup_steps > 0:
         envs = jax.tree.map(jax.lax.stop_gradient, envs)
 
-    # Phase 2: Backprop — fully differentiable with checkpointing
-    # Sigma gauge is now differentiable (power iteration replaces eig).
+    # Phase 2: Backprop — fully differentiable with checkpointing.
+    # Sigma gauge aligns each sweep's output to its stop_gradient input,
+    # stabilizing the backward graph.  The stop_gradient copy ensures
+    # sigma compares post-sweep vs pre-sweep (not self vs self).
     n = num_steps if num_steps is not None else config.max_iter
     env_treedef = jax.tree.structure(envs)
 
@@ -1584,7 +1676,7 @@ def ctm_tensor_converge_explicit(
                 config.renormalize,
                 config.projector_method,
             )
-            envs_inner = {c: _gauge_fix_ctm_tensor(e) for c, e in envs_inner.items()}
+            envs_inner = {c: _gauge_fn(e) for c, e in envs_inner.items()}
             return tuple(jax.tree.leaves(envs_inner))
 
         env_leaves_flat = tuple(jax.tree.leaves(envs))

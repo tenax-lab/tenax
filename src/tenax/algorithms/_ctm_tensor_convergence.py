@@ -183,6 +183,11 @@ def _ctm_tensor_sweep_multisite(
         if base_charges is not None:
             break
 
+    # Shallow-copy so callers that saved a reference to the input dict
+    # (e.g. ``envs_old = envs`` for sigma gauge) still see the pre-sweep
+    # environments.  Only the dict is copied; env objects are not cloned.
+    envs = dict(envs)
+
     all_coords = list(envs.keys())
     for direction, move_fn in _DIRECTION_MOVES:
         for coord in _sort_coords_for_direction(all_coords, direction):
