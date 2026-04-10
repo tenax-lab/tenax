@@ -1707,3 +1707,26 @@ class TestPostPR291ADBaseline:
             f"tightest observed conv_tol {min(distinct)} does not match "
             f"the 1e-6 tier from the schedule"
         )
+
+
+def test_stall_recovery_auto_defaults():
+    """1-site -> 'noise', 2-site -> 'reset' when user leaves gs_stall_recovery=None.
+
+    See issue #298.
+    """
+    from tenax.algorithms.ipeps_config import iPEPSConfig
+    from tenax.algorithms.ipeps_optimize import _normalize_stall_recovery
+
+    cfg_1s = _normalize_stall_recovery(iPEPSConfig(unit_cell="1x1"), unit_cell="1x1")
+    assert cfg_1s.gs_stall_recovery == "noise"
+
+    cfg_2s = _normalize_stall_recovery(
+        iPEPSConfig(unit_cell="2site"), unit_cell="2site"
+    )
+    assert cfg_2s.gs_stall_recovery == "reset"
+
+    cfg_user = _normalize_stall_recovery(
+        iPEPSConfig(unit_cell="2site", gs_stall_recovery="noise"),
+        unit_cell="2site",
+    )
+    assert cfg_user.gs_stall_recovery == "noise", "explicit user setting must win"

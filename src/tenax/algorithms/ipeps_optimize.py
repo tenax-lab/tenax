@@ -17,6 +17,22 @@ from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 
+def _normalize_stall_recovery(config, *, unit_cell: str):
+    """Auto-default ``gs_stall_recovery`` based on unit cell when unset.
+
+    The 1-site C4v production path requires the noise kick to break out of the
+    SU-init plateau (gradient norms ~1e-10 trip ``gs_conv_tol`` before the first
+    real step).  The 2-site path's larger parameter space interacts
+    pathologically with non-variational CTM regions under noise; see issue #298.
+    """
+    from dataclasses import replace
+
+    if config.gs_stall_recovery is not None:
+        return config
+    default = "noise" if unit_cell == "1x1" else "reset"
+    return replace(config, gs_stall_recovery=default)
+
+
 def _build_optimizer(config: iPEPSConfig):
     """Build optax optimizer from config."""
     import optax
@@ -333,6 +349,7 @@ def _optimize_gs_ad_tensor(
     Uses ``ctm_tensor_converge`` with implicit differentiation through
     the standard Tensor-protocol CTM.
     """
+    config = _normalize_stall_recovery(config, unit_cell="1x1")
     import optax
 
     from tenax.algorithms._ctm_tensor import (
@@ -854,6 +871,7 @@ def _optimize_gs_ad_tensor_2site(
         ``sublattice_rotate_gate()`` + ``gs_c4v=True``, which is faster
         and well-tested.
     """
+    config = _normalize_stall_recovery(config, unit_cell="2site")
     import warnings
 
     warnings.warn(
