@@ -94,11 +94,28 @@ def norm_environment_matvec(
     E = _contract_single_site_environment(env)
     v_dense = v.todense()
     D = v_dense.shape[0]
-    # Unfuse D² → (ket, bra) per leg
-    E8 = E.reshape(D, D, D, D, D, D, D, D)
-    # Contract ket indices with v, leave bra indices as output
-    # Indices: a,b,c,d = ket(u,d,l,r);  A,B,C,D_out = bra(u',d',l',r')
-    return jnp.einsum("aAbBcCdD,abcds->ABCDs", E8, v_dense)
+    d = v_dense.shape[-1]
+    # Nv[A,B,C,D,s] = sum_{a,b,c,d} E[aA, bB, cC, dD] * v[a,b,c,d,s]
+    #
+    # Reshape E from (D², D², D², D²) to (D^4, D^4) matrix mapping
+    # ket indices to bra indices, then apply as matmul.  This avoids
+    # 8-dim einsum which crashes XLA autotuning on GPU for small D.
+    #
+    # E[i,j,k,l] with i=a*D+A (ket-slow fusing).  We need:
+    #   E_mat[A*D³+B*D²+C*D+D_, a*D³+b*D²+c*D+d_]
+    # = E[a*D+A, b*D+B, c*D+C, d_*D+D_]
+    #
+    # Reshape to (D,D, D,D, D,D, D,D), transpose bra indices out,
+    # then flatten.  The 8-dim intermediate is fine as a reshape+transpose
+    # (no einsum/fusion needed — XLA handles permutations natively).
+    E_mat = (
+        E.reshape(D, D, D, D, D, D, D, D)
+        .transpose(1, 3, 5, 7, 0, 2, 4, 6)
+        .reshape(D**4, D**4)
+    )
+    v_mat = v_dense.reshape(D**4, d)
+    Nv_mat = E_mat @ v_mat  # (D^4, d)
+    return Nv_mat.reshape(D, D, D, D, d)
 
 
 # ---------------------------------------------------------------------------
@@ -131,12 +148,18 @@ def precondition_gradient(
     d = g_dense.shape[-1]
     g_flat = g_dense.reshape(-1)
 
-    E8 = E.reshape(D, D, D, D, D, D, D, D)
+    # Build (D^4, D^4) metric matrix, avoiding 8-dim einsum that crashes
+    # XLA autotuning on GPU.  Reshape+transpose is handled natively by XLA.
+    E_mat = (
+        E.reshape(D, D, D, D, D, D, D, D)
+        .transpose(1, 3, 5, 7, 0, 2, 4, 6)
+        .reshape(D**4, D**4)
+    )
 
     def matvec(v_flat):
-        v = v_flat.reshape(D, D, D, D, d)
-        Nv = jnp.einsum("aAbBcCdD,abcds->ABCDs", E8, v)
-        return Nv.reshape(-1) + delta * v_flat
+        v_mat = v_flat.reshape(D**4, d)
+        Nv_mat = E_mat @ v_mat
+        return Nv_mat.reshape(-1) + delta * v_flat
 
     g_precond, _ = jax_gmres(
         matvec,

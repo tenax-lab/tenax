@@ -930,19 +930,9 @@ def _optimize_gs_ad_tensor_2site(
         return energy, env_leaves
 
     params = (A, B)
-    # Metric preconditioning is not yet supported for 2-site (GMRES on the
-    # multi-site metric tensor causes XLA autotuning failures on GPU).
-    _metric_precond_2s = False
-    if config.gs_metric_precond:
-        import warnings
-
-        warnings.warn(
-            "gs_metric_precond=True is not supported for 2-site optimization "
-            "(XLA autotuning fails on multi-site metric tensor). "
-            "Falling back to standard L-BFGS.",
-            stacklevel=2,
-        )
-    is_metric_lbfgs = _metric_precond_2s and config.gs_optimizer.lower() == "lbfgs"
+    is_metric_lbfgs = (
+        config.gs_metric_precond and config.gs_optimizer.lower() == "lbfgs"
+    )
     optimizer = None if is_metric_lbfgs else _build_optimizer(config)
     opt_state = optimizer.init(params) if optimizer is not None else None
     use_ls = _use_line_search(config)
@@ -1051,7 +1041,7 @@ def _optimize_gs_ad_tensor_2site(
 
         # Compute search direction
         if is_cg:
-            if _metric_precond_2s:
+            if config.gs_metric_precond:
                 from tenax.algorithms._metric_precond import (
                     precondition_gradient_multisite,
                 )
