@@ -1,5 +1,7 @@
 """Tests for the iPEPS and CTM algorithms."""
 
+import contextlib
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -1427,3 +1429,281 @@ class TestNoiseRecovery:
         )
         A_opt, env, E = optimize_gs_ad(heisenberg_gate, None, config)
         assert jnp.isfinite(jnp.array(E))
+
+
+class TestPostPR291ADBaseline:
+    """Regression tests locking down the post-PR-#291 iPEPS AD baseline
+    (issue #292).
+
+    After PR #291 the explicit-AD path supports an expanded set of
+    ``forward_gauge`` modes (``qr``, ``sigma``, ``phase``, ``none``) and
+    ``iPEPSConfig`` exposes a new ``gs_ctm_conv_tol_schedule`` knob. The
+    optimizer auto-promotes the conservative default ``forward_gauge="qr"``
+    to ``"phase"`` when ``gs_explicit_ad=True`` and the user has not
+    explicitly opted into a different gauge. These tests pin that behavior
+    so future refactors cannot silently drift off the documented baseline.
+    """
+
+    @pytest.fixture
+    def heisenberg_gate(self):
+        d = 2
+        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+        return H.reshape(d, d, d, d)
+
+    def test_forward_gauge_accepts_expanded_mode_set(self):
+        """CTMConfig.forward_gauge accepts the four post-PR-#291 modes."""
+        for mode in ("qr", "sigma", "phase", "none"):
+            cfg = CTMConfig(forward_gauge=mode)
+            assert cfg.forward_gauge == mode
+
+    def test_forward_gauge_default_is_conservative_qr(self):
+        """Config default stays ``qr``; auto-phase promotion is runtime-only.
+
+        Keeping the static default conservative avoids silently changing
+        behavior for callers that construct a ``CTMConfig`` directly (e.g.
+        implicit-diff paths, diagnostics, or notebooks).
+        """
+        assert CTMConfig().forward_gauge == "qr"
+
+    def test_gs_ctm_conv_tol_schedule_is_configurable(self):
+        """New iPEPSConfig knob from PR #291 is exposed and round-trips."""
+        schedule = [(0.0, 1e-5), (0.5, 1e-6), (0.8, 1e-7)]
+        cfg = iPEPSConfig(gs_ctm_conv_tol_schedule=schedule)
+        assert cfg.gs_ctm_conv_tol_schedule == schedule
+
+    def test_gs_ctm_conv_tol_schedule_default_is_none(self):
+        assert iPEPSConfig().gs_ctm_conv_tol_schedule is None
+
+    def test_recommended_c4v_explicit_config_is_constructible(self):
+        """The post-PR-#291 recommended C4v + explicit-AD config constructs
+        without raising. This is the configuration documented in
+        ``docs/guide/algorithms/ipeps_ad_paths.md``."""
+        cfg = iPEPSConfig(
+            unit_cell="1x1",
+            gs_c4v=True,
+            gs_optimizer="lbfgs",
+            gs_explicit_ad=True,
+            gs_explicit_ad_steps=20,
+            gs_explicit_ad_warmup=2,
+            gs_projector_method="qr",
+            ctm=CTMConfig(chi=16, projector_method="qr", forward_gauge="qr"),
+        )
+        assert cfg.gs_c4v is True
+        assert cfg.gs_explicit_ad is True
+        assert cfg.ctm.projector_method == "qr"
+        assert cfg.gs_projector_method == "qr"
+        # Config default stays 'qr' — optimizer auto-promotes to 'phase'.
+        assert cfg.ctm.forward_gauge == "qr"
+
+    def test_forward_gauge_round_trips_through_config_tuple(self):
+        """All four modes must round-trip through the explicit-AD config
+        serialization.  Before the issue-#292 fix, ``"none"`` silently
+        collapsed to ``"qr"`` because the tuple encoding only recognized
+        three modes, making ``forward_gauge="none"`` unreachable from
+        ``ctm_tensor_converge_explicit``.
+        """
+        from tenax.algorithms.ad_utils import _config_from_tuple, _config_to_tuple
+
+        for mode in ("qr", "sigma", "phase", "none"):
+            tup = _config_to_tuple(CTMConfig(forward_gauge=mode))
+            assert _config_from_tuple(tup).forward_gauge == mode
+
+    def _capture_explicit_ad_gauge(self, monkeypatch):
+        """Install a spy on ``ctm_tensor_converge_explicit`` that records the
+        decoded ``forward_gauge`` on first call and aborts the optimizer via
+        a sentinel exception. Returns the captured dict."""
+        captured: dict = {}
+
+        from tenax.algorithms import ad_utils as _ad_utils
+
+        class _StopOptimizer(Exception):
+            pass
+
+        real = _ad_utils.ctm_tensor_converge_explicit
+
+        def spy(site_tensors, env_init_leaves, neighbors, config_tuple, *a, **kw):
+            captured["forward_gauge"] = _ad_utils._config_from_tuple(
+                config_tuple
+            ).forward_gauge
+            captured["projector_method"] = _ad_utils._config_from_tuple(
+                config_tuple
+            ).projector_method
+            raise _StopOptimizer
+
+        monkeypatch.setattr(_ad_utils, "ctm_tensor_converge_explicit", spy)
+        captured["_sentinel"] = _StopOptimizer
+        captured["_real"] = real
+        return captured
+
+    def test_explicit_ad_auto_promotes_qr_gauge_to_phase(
+        self, monkeypatch, heisenberg_gate
+    ):
+        """``optimize_gs_ad`` auto-switches ``forward_gauge='qr'`` to
+        ``'phase'`` when ``gs_explicit_ad=True`` and the user has not
+        explicitly opted into a non-qr gauge (post-PR-#291 runtime behavior)."""
+        captured = self._capture_explicit_ad_gauge(monkeypatch)
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10, min_iter=3, forward_gauge="qr"),
+            gs_num_steps=1,
+            gs_explicit_ad=True,
+            gs_explicit_ad_steps=3,
+            gs_explicit_ad_warmup=1,
+            unit_cell="1x1",
+            su_init=False,
+        )
+        with pytest.raises(captured["_sentinel"]):
+            optimize_gs_ad(heisenberg_gate, None, config)
+        assert captured["forward_gauge"] == "phase"
+
+    def test_explicit_ad_respects_explicit_sigma_gauge(
+        self, monkeypatch, heisenberg_gate
+    ):
+        """When the user explicitly sets ``forward_gauge='sigma'``, the
+        auto-phase promotion must not fire: sigma is the documented choice
+        for the implicit/GMRES path and the historical sigma-gauge
+        explicit-AD workflow, and overriding it would be a silent regression.
+        """
+        captured = self._capture_explicit_ad_gauge(monkeypatch)
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10, min_iter=3, forward_gauge="sigma"),
+            gs_num_steps=1,
+            gs_explicit_ad=True,
+            gs_explicit_ad_steps=3,
+            gs_explicit_ad_warmup=1,
+            unit_cell="1x1",
+            su_init=False,
+        )
+        with pytest.raises(captured["_sentinel"]):
+            optimize_gs_ad(heisenberg_gate, None, config)
+        assert captured["forward_gauge"] == "sigma"
+
+    def test_explicit_ad_respects_explicit_none_gauge(
+        self, monkeypatch, heisenberg_gate
+    ):
+        """``forward_gauge='none'`` is the post-PR-#291 diagnostic / benchmark
+        mode. It must reach ``ctm_tensor_converge_explicit`` unchanged so
+        benchmarks can isolate gauge-fixing cost from projector cost."""
+        captured = self._capture_explicit_ad_gauge(monkeypatch)
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10, min_iter=3, forward_gauge="none"),
+            gs_num_steps=1,
+            gs_explicit_ad=True,
+            gs_explicit_ad_steps=3,
+            gs_explicit_ad_warmup=1,
+            unit_cell="1x1",
+            su_init=False,
+        )
+        with pytest.raises(captured["_sentinel"]):
+            optimize_gs_ad(heisenberg_gate, None, config)
+        assert captured["forward_gauge"] == "none"
+
+    def test_implicit_ad_does_not_auto_promote_gauge(
+        self, monkeypatch, heisenberg_gate
+    ):
+        """The auto-phase path is gated on ``gs_explicit_ad=True``.  For the
+        implicit-diff path we keep the user's (or default) gauge untouched,
+        because the implicit/GMRES backward is documented to require sigma
+        gauge for stability."""
+        from tenax.algorithms import ad_utils as _ad_utils
+
+        captured: dict = {}
+
+        class _StopOptimizer(Exception):
+            pass
+
+        def spy(site_tensors, env_init_leaves, neighbors, config_tuple):
+            captured["forward_gauge"] = _ad_utils._config_from_tuple(
+                config_tuple
+            ).forward_gauge
+            raise _StopOptimizer
+
+        monkeypatch.setattr(_ad_utils, "ctm_tensor_converge", spy)
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10, min_iter=3, forward_gauge="qr"),
+            gs_num_steps=1,
+            gs_explicit_ad=False,
+            unit_cell="1x1",
+            su_init=False,
+        )
+        with pytest.raises(_StopOptimizer):
+            optimize_gs_ad(heisenberg_gate, None, config)
+        # Implicit path keeps whatever the user configured.
+        assert captured["forward_gauge"] == "qr"
+
+    @pytest.mark.xfail(
+        reason=(
+            "GMRES implicit AD is documented unstable in "
+            "docs/guide/algorithms/ipeps_ad_paths.md (spectral radius > 1 "
+            "without sigma gauge); this xfail locks the doc status. Remove "
+            "only when the GMRES path has been stabilized end-to-end."
+        ),
+        strict=False,
+        run=False,
+    )
+    def test_gmres_implicit_ad_is_stable(self):
+        """Placeholder regression: GMRES implicit AD must produce a
+        physical energy. Kept ``xfail`` so the issue stays visible in the
+        test log without blocking CI."""
+        raise AssertionError("gmres implicit AD path not stable — see issue #292")
+
+    def test_gs_ctm_conv_tol_schedule_is_applied_across_steps(
+        self, monkeypatch, heisenberg_gate
+    ):
+        """The ``gs_ctm_conv_tol_schedule`` knob must actually reach the
+        CTM convergence call — not just sit in the config.  We monkeypatch
+        ``ctm_tensor_converge_explicit``, record the ``conv_tol`` decoded
+        from the config tuple on every call, and assert that a schedule
+        with two distinct tolerance tiers produces at least two distinct
+        ``conv_tol`` values across the optimization loop."""
+        from tenax.algorithms import ad_utils as _ad_utils
+
+        seen_conv_tols: list[float] = []
+
+        def spy(site_tensors, env_init_leaves, neighbors, config_tuple, *a, **kw):
+            cfg = _ad_utils._config_from_tuple(config_tuple)
+            seen_conv_tols.append(float(cfg.conv_tol))
+            # Return the warm-start env untouched so the optimizer can
+            # continue through its loop without crashing.
+            return env_init_leaves
+
+        monkeypatch.setattr(_ad_utils, "ctm_tensor_converge_explicit", spy)
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(
+                chi=4, max_iter=5, min_iter=2, conv_tol=1e-4, forward_gauge="qr"
+            ),
+            gs_num_steps=6,
+            gs_explicit_ad=True,
+            gs_explicit_ad_steps=2,
+            gs_explicit_ad_warmup=0,
+            gs_ctm_conv_tol_schedule=[(0.0, 1e-3), (0.5, 1e-6)],
+            unit_cell="1x1",
+            su_init=False,
+        )
+        # The monkeypatched spy returns a warm-start env of the wrong
+        # shape for real energy/grad computation, so the optimizer may
+        # raise partway through its first backward pass. We only need to
+        # observe that the schedule took effect before that point.
+        with contextlib.suppress(Exception):
+            optimize_gs_ad(heisenberg_gate, None, config)
+        assert len(seen_conv_tols) >= 1, (
+            "ctm_tensor_converge_explicit spy was never called — the "
+            "optimizer likely short-circuited before reaching the CTM."
+        )
+        distinct = sorted(set(seen_conv_tols))
+        assert len(distinct) >= 2, (
+            f"gs_ctm_conv_tol_schedule did not change conv_tol across "
+            f"optimization steps; observed only {distinct!r}"
+        )
+        # Final tier tolerance must be the tighter 1e-6.
+        assert min(distinct) == pytest.approx(1e-6), (
+            f"tightest observed conv_tol {min(distinct)} does not match "
+            f"the 1e-6 tier from the schedule"
+        )

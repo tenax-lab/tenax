@@ -23,6 +23,24 @@ class CTMConfig:
                             optimization.  When True, the SVD custom VJP uses
                             broadening to prevent NaN from degenerate singular
                             values (Francuz et al., PRR 7, 013237).
+        forward_gauge:      Gauge fix applied after each CTM sweep.  One of
+                            ``"qr"`` (default), ``"phase"``, ``"sigma"``, or
+                            ``"none"``.  The static default stays ``"qr"``
+                            for forward-only CTM, diagnostics, and notebooks.
+                            ``optimize_gs_ad`` auto-promotes ``"qr"`` to
+                            ``"phase"`` when ``gs_explicit_ad=True`` and the
+                            user has not opted into a different gauge — see
+                            ``docs/guide/algorithms/ipeps_ad_paths.md`` for
+                            the full mode matrix and benchmarks.
+        ad_backward_method: Backward method for the implicit-diff path.
+                            ``"vjp"`` (default) is the regression-covered
+                            Neumann-series backward.  ``"gmres"`` is
+                            currently documented unstable (spectral radius
+                            > 1 without tight sigma-gauge alignment) and
+                            its regression test is marked ``xfail`` —
+                            tracked by issue #292.  Prefer the explicit-AD
+                            path (``iPEPSConfig.gs_explicit_ad=True``)
+                            until GMRES is stabilized.
     """
 
     chi: int = 20
@@ -37,9 +55,12 @@ class CTMConfig:
     gmres_precondition: bool = (
         False  # diagonal scaling preconditioner for GMRES backward (experimental)
     )
-    ad_backward_method: str = "vjp"  # "vjp" (iterative VJP) or "gmres"
+    ad_backward_method: str = "vjp"  # "vjp" (iterative VJP) or "gmres" (xfail — #292)
     ctm_conv_method: str = "sv"  # "sv" (singular value) or "elementwise"
-    forward_gauge: str = "qr"  # "qr", "sigma", "phase", or "none"
+    # forward_gauge: "qr" (default, auto-promoted to "phase" by optimize_gs_ad
+    # when gs_explicit_ad=True), "phase" (explicit-AD default after promotion),
+    # "sigma" (implicit-diff path), or "none" (diagnostic).  See ipeps_ad_paths.md.
+    forward_gauge: str = "qr"
     jit_ctm: bool = False  # use jax.lax.while_loop for GPU kernel fusion
 
 
@@ -62,6 +83,26 @@ class iPEPSConfig:
         gs_log_interval:       Print every N AD steps when ``gs_verbose`` is
                                enabled. The first and final steps are always
                                logged.
+        gs_explicit_ad:        Differentiate through unrolled CTM sweeps
+                               instead of using implicit differentiation.
+                               ``True`` by default and the recommended AD
+                               path post-PR-#291.  When ``True`` and
+                               ``ctm.forward_gauge == "qr"`` (the static
+                               default), ``optimize_gs_ad`` transparently
+                               promotes the forward gauge to ``"phase"`` for
+                               the unrolled CTM sweeps — see
+                               ``docs/guide/algorithms/ipeps_ad_paths.md``.
+        gs_ctm_conv_tol_schedule:
+                               Optional ramp for the CTM convergence
+                               tolerance across AD optimization steps. A list
+                               of ``(step_fraction, conv_tol)`` pairs: at each
+                               AD step the optimizer looks up the tolerance
+                               corresponding to ``step_idx / gs_num_steps``
+                               and rebuilds the CTM config accordingly.
+                               ``None`` (default) uses ``ctm.conv_tol``
+                               throughout.  This is an advanced tuning knob
+                               for large-chi runs where an initially loose
+                               CTM is enough to start moving.
     """
 
     max_bond_dim: int = 2
