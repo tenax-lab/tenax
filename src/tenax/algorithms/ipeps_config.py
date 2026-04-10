@@ -103,6 +103,19 @@ class iPEPSConfig:
                                throughout.  This is an advanced tuning knob
                                for large-chi runs where an initially loose
                                CTM is enough to start moving.
+        gs_stall_recovery:     Stall-recovery mode for line-search failures
+                               (issue #298).  ``"noise"`` injects a Frobenius
+                               perturbation (legacy 1-site C4v path);
+                               ``"reset"`` clears L-BFGS ``(s, y)`` history
+                               and rolls back to ``best_params`` (variPEPS
+                               style).  ``None`` (default) lets
+                               ``optimize_gs_ad`` pick per dispatcher:
+                               ``"noise"`` for 1-site, ``"reset"`` for 2-site.
+        gs_energy_floor:       Optional variational sanity floor on in-loop
+                               best-state tracking (issue #298).  Candidate
+                               energies strictly below this value are
+                               rejected as non-variational CTM artifacts.
+                               ``None`` (default) disables the check.
     """
 
     max_bond_dim: int = 2
@@ -161,6 +174,12 @@ class iPEPSConfig:
         if self.unit_cell not in valid_unit_cells:
             raise ValueError(
                 f"unit_cell must be one of {valid_unit_cells}, got {self.unit_cell!r}"
+            )
+        valid_stall_recovery = {None, "noise", "reset"}
+        if self.gs_stall_recovery not in valid_stall_recovery:
+            raise ValueError(
+                f"gs_stall_recovery must be one of {valid_stall_recovery}, "
+                f"got {self.gs_stall_recovery!r}"
             )
 
 
