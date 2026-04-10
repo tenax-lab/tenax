@@ -705,8 +705,12 @@ def _optimize_gs_ad_tensor(
                 else:
                     stall_count += 1
 
-            # Noise recovery on persistent stall
-            if stall_count > 0 and stall_count <= config.gs_noise_recovery_retries:
+            # Noise recovery on persistent stall (legacy; see issue #298).
+            if (
+                config.gs_stall_recovery == "noise"
+                and stall_count > 0
+                and stall_count <= config.gs_noise_recovery_retries
+            ):
                 noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
                 if use_c4v:
                     noise = config.gs_noise_amplitude * jax.random.normal(
@@ -1240,8 +1244,12 @@ def _optimize_gs_ad_tensor_2site(
                 else:
                     stall_count += 1
 
-            # Noise recovery on persistent stall
-            if stall_count > 0 and stall_count <= config.gs_noise_recovery_retries:
+            # Noise recovery on persistent stall (legacy; see issue #298).
+            if (
+                config.gs_stall_recovery == "noise"
+                and stall_count > 0
+                and stall_count <= config.gs_noise_recovery_retries
+            ):
                 noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
                 noisy_params = []
                 for i, p in enumerate(params):
