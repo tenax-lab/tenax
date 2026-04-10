@@ -845,7 +845,22 @@ def _optimize_gs_ad_tensor_2site(
 
     Uses ``ctm_tensor_converge`` with implicit differentiation through
     the 2-site Tensor-protocol CTM.
+
+    .. warning::
+
+        **Experimental / unsupported.**  The 2-site AD optimizer is
+        unstable and produces unphysical energies.  For antiferromagnetic
+        models, prefer 1-site optimization with
+        ``sublattice_rotate_gate()`` + ``gs_c4v=True``, which is faster
+        and well-tested.
     """
+    import warnings
+
+    warnings.warn(
+        "2-site AD optimizer is experimental and may diverge. "
+        "Prefer 1-site with sublattice_rotate_gate() + gs_c4v=True.",
+        stacklevel=2,
+    )
     import optax
 
     from tenax.algorithms._ctm_tensor import (
