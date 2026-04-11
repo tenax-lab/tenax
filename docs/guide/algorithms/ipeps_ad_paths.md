@@ -279,6 +279,46 @@ optimization stability and speed.
    Phase gauge is the recommended replacement for explicit AD; reserve
    sigma gauge for the implicit-diff path.
 
+## Stall recovery (`gs_stall_recovery`)
+
+When the L-BFGS / CG line search fails to make progress, the optimizer
+runs a stall-recovery routine. Two modes are supported:
+
+- ``"noise"`` — inject a ``gs_noise_amplitude`` (default 10 %) Frobenius
+  perturbation on the current params and reset the L-BFGS history.
+  **Required for the 1-site C4v production path**, which sits on an
+  SU-init plateau with gradient norms around ``1e-10`` that would
+  otherwise trip ``gs_conv_tol`` before the first real step.
+- ``"reset"`` — clear the L-BFGS ``(s, y)`` history and the CG beta
+  state so the next iteration is a plain (preconditioned) steepest
+  descent step from the current iterate. No rollback, no randomness.
+  **Default for the 2-site path** because the 10 % noise kick in the
+  ~32-dimensional D=2 parameter space lands in non-variational CTM
+  regions and drives the optimizer into unphysical "best" energies
+  (see issue #298).
+
+Leaving ``gs_stall_recovery=None`` (the default) auto-selects the
+right mode for the unit cell at dispatch time. An explicit user
+setting is never overridden.
+
+For extra safety on 2-site runs, set ``gs_energy_floor`` to a value a
+bit below the expected variational minimum (e.g. ``2 * E_literature``).
+Any in-loop candidate energy at or below the floor is rejected as a
+non-variational CTM artifact — this catches pathological "best"
+states arising from the ``_rdm2x1_tensor_2site`` trace-normalization
+at near-zero trace. The check is off by default
+(``gs_energy_floor=None``).
+
+## Known open problems
+
+- **2-site L-BFGS convergence gap at χ=8** — The 2-site AD path with
+  L-BFGS + Hager-Zhang + metric precond + SU init reaches only
+  ``E/site ≈ -0.56`` at D=2 χ=8 in 20 steps, vs. the ≈-0.65 literature
+  value documented in issue #298's trajectory study. The gap is not
+  a stall-recovery problem (the reset branch never fires on this
+  trajectory); root cause is under investigation. Tracked by issue
+  #299.
+
 ## References
 
 - Francuz, Schuch, Vanhecke, *PRR* **7**, 013237 (2025) — Stable AD through CTM
