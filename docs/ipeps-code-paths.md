@@ -169,6 +169,34 @@ See [`docs/guide/algorithms/ipeps_ad_paths.md`](guide/algorithms/ipeps_ad_paths.
 for the full benchmark table, the forward-gauge mode matrix, and the
 ``gs_ctm_conv_tol_schedule`` tuning knob.
 
+## Stall Recovery (issue #298)
+
+When the L-BFGS / CG line search cannot make progress the optimizer runs
+``gs_stall_recovery``. The knob is auto-defaulted per unit cell at
+dispatch time:
+
+- **1-site** (``_optimize_gs_ad_tensor``) → ``"noise"``: inject a
+  ``gs_noise_amplitude`` Frobenius perturbation and reset the L-BFGS
+  history. Required for the C4v production path to break out of the
+  SU-init plateau, where gradient norms ≈ ``1e-10`` would otherwise
+  trip ``gs_conv_tol``.
+- **2-site** (``_optimize_gs_ad_tensor_2site``) → ``"reset"``: clear
+  the L-BFGS ``(s, y)`` history and CG beta state so the next step is
+  a plain (preconditioned) steepest descent step from the current
+  iterate. No randomness, no rollback. Needed because the 10 % noise
+  kick in the 32-dim D=2 space teleports the state into non-variational
+  CTM regions and produces unphysical "best" energies.
+
+An explicit ``gs_stall_recovery`` setting is never overridden by the
+dispatcher. For extra safety on 2-site runs, set ``gs_energy_floor`` to
+a value below the expected variational minimum — any in-loop candidate
+energy at or below the floor is rejected as a non-variational CTM
+artifact. Both knobs are off / auto by default.
+
+The 2-site L-BFGS path still has a separate convergence gap at
+χ=8 (reaches only ``E ≈ -0.558`` vs literature ``-0.6548``) that is
+**not** a stall-recovery problem — tracked by issue #299.
+
 ## Status Summary
 
 | Path                              | Status           | Notes                                                              |
@@ -184,6 +212,9 @@ for the full benchmark table, the forward-gauge mode matrix, and the
 | ``forward_gauge="none"`` on JIT   | **EXPERIMENTAL** | JIT ``while_loop`` kernel falls back to ``"qr"``; known limitation.|
 | ``gs_ctm_conv_tol_schedule``      | **Working**      | Loose-to-tight CTM tolerance ramp; optional tuning knob.           |
 | Metric preconditioning            | **Working**      | Natural-gradient preconditioner for CG / L-BFGS.                   |
+| Stall recovery (1-site)           | **Working**      | ``gs_stall_recovery="noise"`` auto-default; required by C4v path.  |
+| Stall recovery (2-site)           | **Working**      | ``gs_stall_recovery="reset"`` auto-default since #298.             |
+| 2-site L-BFGS at χ=8              | **EXPERIMENTAL** | Converges only to ``E ≈ -0.558`` at D=2; gap tracked by #299.      |
 | Split CTM forward (SU)            | **Working**      | Used by simple update.                                             |
 | Split CTM + implicit diff         | **BROKEN**       | Not wired into optimizer.                                          |
 | Split CTM + explicit diff         | **Working**      | No ``jax.checkpoint``, high memory.                                |
@@ -217,6 +248,8 @@ for the full benchmark table and the projector × gauge comparison matrix.
 | Forward gauge         | ``forward_gauge``           | ``"qr"``         | ``"phase"`` / ``"sigma"`` / ``"none"`` |
 | Conv tol schedule     | ``gs_ctm_conv_tol_schedule``| ``None``         | ``[(frac, tol), ...]``               |
 | Metric precond        | ``gs_metric_precond``       | ``True``         | ``False`` = standard grad            |
+| Stall recovery        | ``gs_stall_recovery``       | ``None``         | ``"noise"`` / ``"reset"`` (auto)     |
+| Energy floor          | ``gs_energy_floor``         | ``None``         | ``float`` = reject below as non-variational |
 | CTM variant           | (function choice)           | standard         | split, C4v                           |
 
 The static default ``forward_gauge="qr"`` is kept conservative so that
