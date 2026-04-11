@@ -739,10 +739,12 @@ def _optimize_gs_ad_tensor(
                     prev_A_flat = None
                     prev_grad_flat = None
             elif config.gs_stall_recovery == "reset" and stall_count > 0:
-                # variPEPS-style reset: clear L-BFGS / CG state and roll back to
-                # the best iterate seen so far; next step will be steepest
-                # descent from that point.  See issue #298.
-                params = best_params
+                # variPEPS-style reset: clear L-BFGS / CG state so the next
+                # step is plain steepest descent (or preconditioned steepest
+                # descent) from the CURRENT iterate.  Do NOT roll back
+                # params — issue #298's trajectory study shows "do nothing
+                # and continue" is strictly better than rollback for the
+                # L-BFGS + Hager-Zhang + metric-precond path.
                 if is_cg:
                     cg_direction = None
                     prev_grad = None
@@ -754,7 +756,7 @@ def _optimize_gs_ad_tensor(
                 if config.gs_verbose:
                     print(
                         f"[iPEPS-AD] stall #{stall_count}, "
-                        f"reset L-BFGS → steepest descent from best",
+                        f"reset L-BFGS history (no rollback)",
                         flush=True,
                     )
         else:
@@ -1292,10 +1294,10 @@ def _optimize_gs_ad_tensor_2site(
                     prev_params_flat = None
                     prev_grad_flat = None
             elif config.gs_stall_recovery == "reset" and stall_count > 0:
-                # variPEPS-style reset: clear L-BFGS / CG state and roll back to
-                # the best iterate seen so far; next step will be steepest
-                # descent from that point.  See issue #298.
-                params = best_params
+                # variPEPS-style reset: clear L-BFGS / CG state so the next
+                # step is plain (preconditioned) steepest descent from the
+                # CURRENT iterate.  Do NOT roll back params — see 1-site
+                # branch comment and issue #298 trajectory study.
                 if is_cg:
                     cg_direction = None
                     prev_grad = None
@@ -1307,7 +1309,7 @@ def _optimize_gs_ad_tensor_2site(
                 if config.gs_verbose:
                     print(
                         f"[iPEPS-AD] stall #{stall_count}, "
-                        f"reset L-BFGS → steepest descent from best",
+                        f"reset L-BFGS history (no rollback)",
                         flush=True,
                     )
         else:
