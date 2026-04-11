@@ -41,10 +41,13 @@ def _should_accept_best(
 ) -> bool:
     """Return True iff ``candidate`` should overwrite ``best_energy``.
 
-    Rejects candidates whose energy is strictly at or below ``floor``
-    (treated as a non-variational CTM artifact per issue #298).  A
-    ``None`` floor disables the check.
+    Rejects non-finite (NaN/inf) candidates, candidates not strictly
+    below ``current_best``, and candidates at or below ``floor``
+    (treated as non-variational CTM artifacts per issue #298).  A
+    ``None`` floor disables the floor check.
     """
+    if not math.isfinite(candidate):
+        return False
     if candidate >= current_best:
         return False
     if floor is not None and candidate <= floor:
@@ -783,6 +786,11 @@ def _optimize_gs_ad_tensor(
                     lbfgs_history.clear()
                     prev_A_flat = None
                     prev_grad_flat = None
+                # Optax-backed L-BFGS stores curvature history in opt_state,
+                # not in lbfgs_history.  Reinitialize it so the next step
+                # really is steepest descent (reviewer feedback on #298).
+                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                    opt_state = optimizer.init(params)
                 if config.gs_verbose:
                     print(
                         f"[iPEPS-AD] stall #{stall_count}, "
@@ -1347,6 +1355,11 @@ def _optimize_gs_ad_tensor_2site(
                     lbfgs_history.clear()
                     prev_params_flat = None
                     prev_grad_flat = None
+                # Optax-backed L-BFGS stores curvature history in opt_state,
+                # not in lbfgs_history.  Reinitialize it so the next step
+                # really is steepest descent (reviewer feedback on #298).
+                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                    opt_state = optimizer.init(params)
                 if config.gs_verbose:
                     print(
                         f"[iPEPS-AD] stall #{stall_count}, "
