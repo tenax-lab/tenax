@@ -677,6 +677,8 @@ def _optimize_gs_ad_tensor(
                 if slope >= 0:
                     direction = jax.tree.map(lambda g: -g, grads)
                     slope = -_tree_dot(grads, grads)
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
 
                 def _phi(alpha):
                     trial = _normalize_params(
@@ -715,6 +717,11 @@ def _optimize_gs_ad_tensor(
                 else:
                     stall_count += 1
             else:
+                slope_bt = _tree_dot(grads, direction)
+                if slope_bt >= 0:
+                    direction = jax.tree.map(lambda g: -g, grads)
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
                 params, new_energy, step_size = _backtracking_line_search(
                     params,
                     direction,
@@ -1241,6 +1248,8 @@ def _optimize_gs_ad_tensor_2site(
                 if slope >= 0:
                     direction = jax.tree.map(lambda g: -g, grads)
                     slope = -_tree_dot(grads, grads)
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
 
                 def _phi(alpha):
                     trial = _normalize_params(
@@ -1279,6 +1288,11 @@ def _optimize_gs_ad_tensor_2site(
                 else:
                     stall_count += 1
             else:
+                slope_bt = _tree_dot(grads, direction)
+                if slope_bt >= 0:
+                    direction = jax.tree.map(lambda g: -g, grads)
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
                 params, new_energy, step_size = _backtracking_line_search(
                     params,
                     direction,
