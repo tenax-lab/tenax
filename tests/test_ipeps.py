@@ -1790,3 +1790,22 @@ def test_stall_recovery_auto_defaults():
         unit_cell="2site",
     )
     assert cfg_user.gs_stall_recovery == "noise", "explicit user setting must win"
+
+
+def test_should_accept_best_respects_energy_floor():
+    """Issue #298: gs_energy_floor rejects non-variational best-state candidates."""
+    from tenax.algorithms.ipeps_optimize import _should_accept_best
+
+    # No floor: any improvement is accepted.
+    assert _should_accept_best(current_best=0.0, candidate=-0.5, floor=None) is True
+    # No floor, worse candidate: rejected.
+    assert _should_accept_best(current_best=-0.5, candidate=-0.3, floor=None) is False
+    # Floor set, legitimate improvement: accepted.
+    assert _should_accept_best(current_best=-0.5, candidate=-0.6, floor=-1.0) is True
+    # Floor set, candidate strictly below floor: rejected even though it's
+    # an improvement over current best.
+    assert _should_accept_best(current_best=-0.5, candidate=-2.0, floor=-1.0) is False
+    # Candidate equal to floor: rejected (strict inequality).
+    assert _should_accept_best(current_best=0.0, candidate=-1.0, floor=-1.0) is False
+    # Candidate just above floor: accepted.
+    assert _should_accept_best(current_best=0.0, candidate=-0.99, floor=-1.0) is True

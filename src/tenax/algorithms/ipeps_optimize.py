@@ -33,6 +33,25 @@ def _normalize_stall_recovery(config, *, unit_cell: str):
     return replace(config, gs_stall_recovery=default)
 
 
+def _should_accept_best(
+    *,
+    current_best: float,
+    candidate: float,
+    floor: float | None,
+) -> bool:
+    """Return True iff ``candidate`` should overwrite ``best_energy``.
+
+    Rejects candidates whose energy is strictly at or below ``floor``
+    (treated as a non-variational CTM artifact per issue #298).  A
+    ``None`` floor disables the check.
+    """
+    if candidate >= current_best:
+        return False
+    if floor is not None and candidate <= floor:
+        return False
+    return True
+
+
 def _build_optimizer(config: iPEPSConfig):
     """Build optax optimizer from config."""
     import optax
@@ -522,7 +541,11 @@ def _optimize_gs_ad_tensor(
         )(params, prev_env_leaves)
         energy_float = float(energy_val)
 
-        if energy_float < best_energy:
+        if _should_accept_best(
+            current_best=best_energy,
+            candidate=energy_float,
+            floor=config.gs_energy_floor,
+        ):
             best_energy = energy_float
             best_params = params
 
@@ -1060,7 +1083,11 @@ def _optimize_gs_ad_tensor_2site(
         energy_float = float(energy_val)
         env_leaves_sg = jax.tree.map(jax.lax.stop_gradient, env_leaves)
 
-        if energy_float < best_energy:
+        if _should_accept_best(
+            current_best=best_energy,
+            candidate=energy_float,
+            floor=config.gs_energy_floor,
+        ):
             best_energy = energy_float
             best_params = params
 
