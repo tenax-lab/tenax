@@ -685,9 +685,64 @@ class TestOptimizeGsAd2Site:
         assert E_gs > -0.9, f"E/site={E_gs:.6f} unphysically low"
         assert np.isfinite(E_gs)
 
+    def test_2site_ad_c4v_runs(self, heisenberg_gate):
+        """2-site AD with C4v parameterization should run and give finite energy."""
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=3,
+            gs_learning_rate=1e-3,
+            unit_cell="2site",
+            gs_c4v=True,
+        )
+        result = optimize_gs_ad(heisenberg_gate, None, config)
+        (A_opt, B_opt), (env_A, env_B), E_gs = result
+        assert A_opt.todense().shape == (2, 2, 2, 2, 2)
+        assert B_opt.todense().shape == (2, 2, 2, 2, 2)
+        assert np.isfinite(E_gs)
+
+    def test_2site_ad_c4v_shared_tensor(self, heisenberg_gate):
+        """With gs_c4v=True, B should be the sublattice rotation of A."""
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=3,
+            gs_learning_rate=1e-3,
+            unit_cell="2site",
+            gs_c4v=True,
+        )
+        (A_opt, B_opt), _, _ = optimize_gs_ad(heisenberg_gate, None, config)
+        U = np.array([[0.0, 1.0], [-1.0, 0.0]])
+        B_expected = np.einsum("luRDs,sS->luRDS", A_opt.todense(), U)
+        np.testing.assert_allclose(B_opt.todense(), B_expected, atol=1e-12)
+
+    def test_2site_ad_c4v_energy_physical(self, heisenberg_gate):
+        """2-site C4v AD should produce a physical energy for Heisenberg."""
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=8, max_iter=50, min_iter=10),
+            gs_optimizer="lbfgs",
+            gs_num_steps=20,
+            gs_metric_precond=False,
+            gs_line_search=True,
+            gs_verbose=False,
+            unit_cell="2site",
+            gs_explicit_ad=True,
+            gs_explicit_ad_steps=10,
+            gs_explicit_ad_warmup=2,
+            su_init=True,
+            num_imaginary_steps=50,
+            dt=0.1,
+            gs_c4v=True,
+        )
+        _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
+        assert np.isfinite(E_gs), f"Energy is not finite: {E_gs}"
+        assert E_gs > -0.9, f"E/site={E_gs:.6f} unphysically low"
+        assert E_gs < -0.50, f"C4v 2-site AD energy {E_gs:.6f} not below -0.50"
+
     @pytest.mark.slow
     def test_2site_heisenberg_ad_energy_benchmark(self, heisenberg_gate):
-        """SU + AD at D=2, chi=16 should give a physical energy.
+        """SU + C4v AD at D=2, chi=16 should give a physical energy.
 
         The exact 2D Heisenberg square-lattice ground-state energy is
         E/site = -0.6694 (Sandvik, PRB 56, 11678, 1997).  At finite CTM
@@ -697,35 +752,23 @@ class TestOptimizeGsAd2Site:
         1. E > -0.9: catches unphysical results from numerical failures.
         2. E < -0.60: confirms AD produces a reasonable energy.
         """
-        # Néel product state init for AFM Heisenberg
-        D, d = 2, 2
-        key_A, key_B = jax.random.split(jax.random.PRNGKey(42))
-        A_neel = 0.01 * jax.random.normal(key_A, (D, D, D, D, d))
-        A_neel = A_neel.at[0, 0, 0, 0, 0].set(1.0)
-        B_neel = 0.01 * jax.random.normal(key_B, (D, D, D, D, d))
-        B_neel = B_neel.at[0, 0, 0, 0, 1].set(1.0)
-
-        su_config = iPEPSConfig(
+        config = iPEPSConfig(
             max_bond_dim=2,
-            num_imaginary_steps=100,
-            dt=0.3,
             ctm=CTMConfig(chi=16, max_iter=100, min_iter=50),
-            unit_cell="2site",
-        )
-        E_su, (A_su, B_su), _ = ipeps(heisenberg_gate, (A_neel, B_neel), su_config)
-
-        ad_config = iPEPSConfig(
-            max_bond_dim=2,
-            num_imaginary_steps=100,
-            dt=0.3,
-            ctm=CTMConfig(chi=16, max_iter=100, min_iter=50),
+            gs_optimizer="lbfgs",
             gs_num_steps=50,
-            gs_learning_rate=5e-3,
+            gs_metric_precond=False,
+            gs_line_search=True,
+            gs_explicit_ad=True,
+            gs_explicit_ad_steps=10,
+            gs_explicit_ad_warmup=2,
+            su_init=True,
+            num_imaginary_steps=100,
+            dt=0.3,
             unit_cell="2site",
+            gs_c4v=True,
         )
-        _, _, E_gs = optimize_gs_ad(
-            heisenberg_gate, (A_su.todense(), B_su.todense()), ad_config
-        )
+        _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
         assert E_gs > -0.9, (
             f"E/site = {E_gs:.6f} is unphysically low — possible numerical failure"
         )

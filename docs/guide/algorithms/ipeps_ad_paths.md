@@ -147,6 +147,40 @@ This is the YASTN approach (arXiv:2311.11894), adapted for JAX. For new
 code prefer Path 1 — the explicit-AD path does not exercise the implicit
 backward at all.
 
+### Path 3: Paper-Faithful Dense C4v (Appendix C-F, Opt-In)
+
+This opt-in path follows the fixed-point differentiation structure in
+YASTN (arXiv:2311.11894, App. C-F) for **dense 1-site C4v** runs:
+
+```
+Forward:  A (C4v-projected) -> dense C4v CTM fixed point (single C/T representation)
+Backward: Appendix-C eigendifferential + Appendix-F implicit solve
+          (I - J^T) lambda = g via bicgstab with gmres fallback
+```
+
+**Enable it with:**
+
+```python
+config = iPEPSConfig(
+    gs_explicit_ad=False,
+    gs_c4v=True,
+    unit_cell="1x1",
+    ctm=CTMConfig(
+        chi=16,
+        paper_ctm_ad="c4v_appendix_cf",
+        paper_krylov_solver="bicgstab",  # or "gmres"
+        paper_krylov_maxiter=50,
+        paper_krylov_tol=1e-8,
+    ),
+)
+```
+
+**Current scope and constraints:**
+- dense tensors only (no SymmetricTensor path yet),
+- strict gate: `unit_cell="1x1"`, `gs_c4v=True`, `gs_explicit_ad=False`,
+  `ctm.paper_ctm_ad="c4v_appendix_cf"`,
+- supports `gs_num_steps>0` optimization with implicit gradients.
+
 ## Forward Gauge Mode Matrix
 
 Post-PR-#291 Tenax supports four ``forward_gauge`` modes. Their intended
