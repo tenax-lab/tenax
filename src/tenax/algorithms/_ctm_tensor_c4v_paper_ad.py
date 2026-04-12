@@ -248,6 +248,7 @@ def _solve_linear_adjoint_paper(
             residual = _residual_norm(lam)
             used_fallback = True
 
+    converged = _is_success(lam, info, residual, solver=solver_used)
     meta = {
         "solver_requested": requested,
         "solver_used": solver_used,
@@ -256,7 +257,15 @@ def _solve_linear_adjoint_paper(
         "tol": tol,
         "maxiter": maxiter,
         "info": None if info is None else int(info),
+        "converged": bool(converged),
     }
+    if not converged:
+        raise RuntimeError(
+            f"Paper-mode Krylov adjoint solver ({solver_used}) failed to "
+            f"converge: residual={float(residual):.3e}, target<={residual_target:.3e}, "
+            f"info={meta['info']}. Using a non-solution would corrupt gradients. "
+            f"Increase paper_krylov_maxiter or loosen paper_krylov_tol."
+        )
     return lam, meta
 
 

@@ -1150,6 +1150,20 @@ def _optimize_gs_ad_tensor_2site(
 
         D_bond = A.todense().shape[0]
         d_loc = A.todense().shape[-1]
+        if d_loc != 2:
+            raise ValueError(
+                "2-site C4v shared-tensor path requires physical dimension "
+                f"d=2 (spin-1/2), got d={d_loc}. The sublattice rotation "
+                "U = e^{i π σ^y/2} is spin-1/2 specific; higher-spin models "
+                "need a model-specific sublattice rotation."
+            )
+        if config.gs_stall_recovery == "noise":
+            raise ValueError(
+                "gs_stall_recovery='noise' is incompatible with "
+                "gs_c4v=True on the 2-site path (noise recovery assumes "
+                "tuple-of-DenseTensor params, not a C4v coefficient vector). "
+                "Use gs_stall_recovery='reset' instead."
+            )
         tensor_shape = (D_bond, D_bond, D_bond, D_bond, d_loc)
         c4v_basis = jnp.array(build_c4v_basis(D_bond, d_loc))
         c4v_coeffs = c4v_coeffs_from_tensor(A.todense(), c4v_basis)
