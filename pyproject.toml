@@ -85,6 +85,13 @@ markers = [
     "algorithm: full algorithm runs (DMRG, TRG, HOTRG, iPEPS)",
     "slow: expensive tests (excitations, large convergence)",
 ]
+filterwarnings = [
+    # optax 0.2.8 still imports `optax.contrib._complex_valued`, which on
+    # import calls ``jax.config.update('jax_pmap_shmap_merge', False)`` —
+    # deprecated in JAX v0.9.0.  Already removed on optax ``main``; remove
+    # this filter once a post-0.2.8 optax release lands.
+    "ignore:Setting `jax_pmap_shmap_merge` is deprecated:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 88
