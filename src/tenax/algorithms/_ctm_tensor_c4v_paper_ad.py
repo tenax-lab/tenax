@@ -7,8 +7,10 @@ separately.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._ctm_tensor_c4v import _c4v_sweep, _c4v_to_full_env
@@ -20,7 +22,80 @@ from tenax.algorithms._ctm_tensor_init import (
 from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
-__all__ = ["ctm_tensor_c4v_paper_fixed_point"]
+__all__ = [
+    "_appendix_c_truncated_eigh_backward",
+    "ctm_tensor_c4v_paper_fixed_point",
+    "truncated_eigh_appendix_c",
+]
+
+
+def _appendix_c_truncated_eigh_backward(
+    w_full: jax.Array,
+    v_full: jax.Array,
+    dw_k: jax.Array,
+    dV_k: jax.Array,
+    *,
+    k: int,
+    eps: float = 1e-12,
+) -> jax.Array:
+    """Appendix-C-style truncated eigendecomposition backward.
+
+    Uses a Lorentzian-regularized eigen-gap inverse for both kept-kept and
+    kept-discarded couplings. The kept-discarded term is the critical
+    truncation correction missing in naive truncated-eigh adjoints.
+    """
+    n = int(w_full.shape[0])
+    k = min(int(k), n)
+    v_h = jnp.conj(v_full).T
+    dtype = jnp.result_type(v_full.dtype, dV_k.dtype, dw_k.dtype)
+
+    dw_full = jnp.concatenate([dw_k.astype(dtype), jnp.zeros((n - k,), dtype=dtype)])
+
+    # Differential coefficients K_{j,i} = <v_j, dV_i> / (w_i - w_j), i in kept.
+    # Symmetrizing this n x n matrix recovers both the kept-kept anti-gauge term
+    # and the kept-discarded truncation correction from Appendix C.
+    inner = v_h @ dV_k.astype(dtype)  # (n, k)
+    denom = w_full[:k][None, :] - w_full[:, None]  # (n, k): w_i - w_j
+    inv_gap = denom / (denom**2 + eps**2)
+    K = inner * inv_gap
+    if k > 0:
+        idx = jnp.arange(k)
+        K = K.at[idx, idx].set(0.0)
+
+    K_full = jnp.zeros((n, n), dtype=dtype).at[:, :k].set(K)
+    C = jnp.diag(dw_full) + 0.5 * (K_full + jnp.conj(K_full).T)
+    dM = v_full @ C @ v_h
+    return 0.5 * (dM + jnp.conj(dM).T)
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(1,))
+def truncated_eigh_appendix_c(
+    M: jax.Array,
+    chi: int,
+) -> tuple[jax.Array, jax.Array]:
+    """Truncated symmetric eigendecomposition with Appendix-C-style VJP."""
+    w, v = jnp.linalg.eigh(M)
+    k = min(int(chi), int(w.shape[0]))
+    return w[:k], v[:, :k]
+
+
+def _truncated_eigh_appendix_c_fwd(M: jax.Array, chi: int):
+    M_h = 0.5 * (M + jnp.conj(M).T)
+    w, v = jnp.linalg.eigh(M_h)
+    k = min(int(chi), int(w.shape[0]))
+    return (w[:k], v[:, :k]), (w, v, k)
+
+
+def _truncated_eigh_appendix_c_bwd(chi: int, residuals, g):
+    w, v, k = residuals
+    dw_k, dV_k = g
+    dM = _appendix_c_truncated_eigh_backward(w, v, dw_k, dV_k, k=k)
+    return (dM,)
+
+
+truncated_eigh_appendix_c.defvjp(
+    _truncated_eigh_appendix_c_fwd, _truncated_eigh_appendix_c_bwd
+)
 
 
 def ctm_tensor_c4v_paper_fixed_point(
