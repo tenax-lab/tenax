@@ -1447,23 +1447,6 @@ def _ctm_tensor_multisite_fixed_point_jit(
 
     env_leaves = tuple(_flatten_envs(envs))
 
-    # Match Python loop: first sweep uses QR gauge to establish a clean
-    # starting point before sigma gauge takes over.
-    if use_sigma:
-        envs = _ctm_tensor_sweep_multisite(
-            envs,
-            double_layers_cached,
-            neighbors,
-            chi,
-            config.renormalize,
-            config.projector_method,
-        )
-        envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
-        max_iter = max(max_iter - 1, 1)
-        min_iter = max(min_iter - 1, 0)
-
-    env_leaves = tuple(_flatten_envs(envs))
-
     def _one_sweep(e_leaves, sigma_ref=None):
         return tuple(
             _ctm_tensor_step_multisite(
