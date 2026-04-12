@@ -17,6 +17,44 @@ from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 
+def _normalize_stall_recovery(config, *, unit_cell: str):
+    """Auto-default ``gs_stall_recovery`` based on unit cell when unset.
+
+    The 1-site C4v production path requires the noise kick to break out of the
+    SU-init plateau (gradient norms ~1e-10 trip ``gs_conv_tol`` before the first
+    real step).  The 2-site path's larger parameter space interacts
+    pathologically with non-variational CTM regions under noise; see issue #298.
+    """
+    from dataclasses import replace
+
+    if config.gs_stall_recovery is not None:
+        return config
+    default = "noise" if unit_cell == "1x1" else "reset"
+    return replace(config, gs_stall_recovery=default)
+
+
+def _should_accept_best(
+    *,
+    current_best: float,
+    candidate: float,
+    floor: float | None,
+) -> bool:
+    """Return True iff ``candidate`` should overwrite ``best_energy``.
+
+    Rejects non-finite (NaN/inf) candidates, candidates not strictly
+    below ``current_best``, and candidates at or below ``floor``
+    (treated as non-variational CTM artifacts per issue #298).  A
+    ``None`` floor disables the floor check.
+    """
+    if not math.isfinite(candidate):
+        return False
+    if candidate >= current_best:
+        return False
+    if floor is not None and candidate <= floor:
+        return False
+    return True
+
+
 def _build_optimizer(config: iPEPSConfig):
     """Build optax optimizer from config."""
     import optax
@@ -333,6 +371,7 @@ def _optimize_gs_ad_tensor(
     Uses ``ctm_tensor_converge`` with implicit differentiation through
     the standard Tensor-protocol CTM.
     """
+    config = _normalize_stall_recovery(config, unit_cell="1x1")
     import optax
 
     from tenax.algorithms._ctm_tensor import (
@@ -520,7 +559,11 @@ def _optimize_gs_ad_tensor(
         )(params, prev_env_leaves)
         energy_float = float(energy_val)
 
-        if energy_float < best_energy:
+        if _should_accept_best(
+            current_best=best_energy,
+            candidate=energy_float,
+            floor=config.gs_energy_floor,
+        ):
             best_energy = energy_float
             best_params = params
 
@@ -652,6 +695,8 @@ def _optimize_gs_ad_tensor(
                 if slope >= 0:
                     direction = jax.tree.map(lambda g: -g, grads)
                     slope = -_tree_dot(grads, grads)
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
 
                 def _phi(alpha):
                     trial = _normalize_params(
@@ -690,6 +735,11 @@ def _optimize_gs_ad_tensor(
                 else:
                     stall_count += 1
             else:
+                slope_bt = _tree_dot(grads, direction)
+                if slope_bt >= 0:
+                    direction = jax.tree.map(lambda g: -g, grads)
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
                 params, new_energy, step_size = _backtracking_line_search(
                     params,
                     direction,
@@ -703,8 +753,12 @@ def _optimize_gs_ad_tensor(
                 else:
                     stall_count += 1
 
-            # Noise recovery on persistent stall
-            if stall_count > 0 and stall_count <= config.gs_noise_recovery_retries:
+            # Noise recovery on persistent stall (legacy; see issue #298).
+            if (
+                config.gs_stall_recovery == "noise"
+                and stall_count > 0
+                and stall_count <= config.gs_noise_recovery_retries
+            ):
                 noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
                 if use_c4v:
                     noise = config.gs_noise_amplitude * jax.random.normal(
@@ -732,6 +786,32 @@ def _optimize_gs_ad_tensor(
                     lbfgs_history.clear()
                     prev_A_flat = None
                     prev_grad_flat = None
+            elif config.gs_stall_recovery == "reset" and stall_count > 0:
+                # variPEPS-style reset: clear L-BFGS / CG state so the next
+                # step is plain steepest descent (or preconditioned steepest
+                # descent) from the CURRENT iterate.  Do NOT roll back
+                # params — issue #298's trajectory study shows "do nothing
+                # and continue" is strictly better than rollback for the
+                # L-BFGS + Hager-Zhang + metric-precond path.
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_A_flat = None
+                    prev_grad_flat = None
+                # Optax-backed L-BFGS stores curvature history in opt_state,
+                # not in lbfgs_history.  Reinitialize it so the next step
+                # really is steepest descent (reviewer feedback on #298).
+                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                    opt_state = optimizer.init(params)
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD] stall #{stall_count}, "
+                        f"reset L-BFGS history (no rollback)",
+                        flush=True,
+                    )
         else:
             params = optax.apply_updates(params, direction)
             if not use_c4v:
@@ -869,6 +949,7 @@ def _optimize_gs_ad_tensor_2site(
         ``sublattice_rotate_gate()`` + ``gs_c4v=True``, which is faster
         and well-tested.
     """
+    config = _normalize_stall_recovery(config, unit_cell="2site")
     import warnings
 
     warnings.warn(
@@ -1046,7 +1127,11 @@ def _optimize_gs_ad_tensor_2site(
         energy_float = float(energy_val)
         env_leaves_sg = jax.tree.map(jax.lax.stop_gradient, env_leaves)
 
-        if energy_float < best_energy:
+        if _should_accept_best(
+            current_best=best_energy,
+            candidate=energy_float,
+            floor=config.gs_energy_floor,
+        ):
             best_energy = energy_float
             best_params = params
 
@@ -1200,6 +1285,8 @@ def _optimize_gs_ad_tensor_2site(
                 if slope >= 0:
                     direction = jax.tree.map(lambda g: -g, grads)
                     slope = -_tree_dot(grads, grads)
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
 
                 def _phi(alpha):
                     trial = _normalize_params(
@@ -1238,6 +1325,11 @@ def _optimize_gs_ad_tensor_2site(
                 else:
                     stall_count += 1
             else:
+                slope_bt = _tree_dot(grads, direction)
+                if slope_bt >= 0:
+                    direction = jax.tree.map(lambda g: -g, grads)
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
                 params, new_energy, step_size = _backtracking_line_search(
                     params,
                     direction,
@@ -1251,8 +1343,12 @@ def _optimize_gs_ad_tensor_2site(
                 else:
                     stall_count += 1
 
-            # Noise recovery on persistent stall
-            if stall_count > 0 and stall_count <= config.gs_noise_recovery_retries:
+            # Noise recovery on persistent stall (legacy; see issue #298).
+            if (
+                config.gs_stall_recovery == "noise"
+                and stall_count > 0
+                and stall_count <= config.gs_noise_recovery_retries
+            ):
                 noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
                 noisy_params = []
                 for i, p in enumerate(params):
@@ -1275,6 +1371,30 @@ def _optimize_gs_ad_tensor_2site(
                     lbfgs_history.clear()
                     prev_params_flat = None
                     prev_grad_flat = None
+            elif config.gs_stall_recovery == "reset" and stall_count > 0:
+                # variPEPS-style reset: clear L-BFGS / CG state so the next
+                # step is plain (preconditioned) steepest descent from the
+                # CURRENT iterate.  Do NOT roll back params — see 1-site
+                # branch comment and issue #298 trajectory study.
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_params_flat = None
+                    prev_grad_flat = None
+                # Optax-backed L-BFGS stores curvature history in opt_state,
+                # not in lbfgs_history.  Reinitialize it so the next step
+                # really is steepest descent (reviewer feedback on #298).
+                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                    opt_state = optimizer.init(params)
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD] stall #{stall_count}, "
+                        f"reset L-BFGS history (no rollback)",
+                        flush=True,
+                    )
         else:
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)

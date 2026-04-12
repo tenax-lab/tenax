@@ -344,6 +344,9 @@ regularized_svd.defvjp(_regularized_svd_fwd, _regularized_svd_bwd)
 # ---------------------------------------------------------------------------
 
 _EIGH_LORENTZ_EPS = 1e-12
+_EIGH_LORENTZ_REL = (
+    1e-7  # relative broadening: eps = max(_EIGH_LORENTZ_EPS, _REL * max|w|)
+)
 
 
 @partial(jax.custom_vjp)
@@ -374,7 +377,13 @@ def _regularized_eigh_bwd(residuals, g):
     """
     w, v = residuals
     dw, dv = g
-    eps = _EIGH_LORENTZ_EPS
+    # Adaptive Lorentzian broadening: scale with largest |w| to cap F at ~1/eps.
+    # Hardcoded eps=1e-12 broadcast gradient spikes to O(1e12) when two
+    # eigenvalues of the projector density matrix were numerically degenerate;
+    # scaling eps with max|w| caps F at O(_EIGH_LORENTZ_REL^-1) and preserves
+    # directional information for non-degenerate modes (issue #299).
+    w_scale = jnp.maximum(jnp.max(jnp.abs(w)), _EIGH_LORENTZ_EPS)
+    eps = jnp.maximum(_EIGH_LORENTZ_EPS, _EIGH_LORENTZ_REL * w_scale)
 
     # Lorentzian-regularized F-matrix
     diff = w[:, None] - w[None, :]
