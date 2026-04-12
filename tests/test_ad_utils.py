@@ -15,6 +15,7 @@ def _enable_x64():
     jax.config.update("jax_enable_x64", prev)
 
 
+from tenax.algorithms._ctm_projector import _compute_projector_tensor
 from tenax.algorithms._ctm_tensor import (
     CTMTensorEnv,
     _build_double_layer_tensor,
@@ -205,6 +206,149 @@ class TestTruncatedSVDADMissingTerm:
 
         max_diff = float(jnp.max(jnp.abs(grad_ad - grad_fd)))
         assert max_diff < 1e-3, f"Gradient error too large: {max_diff}"
+
+    def test_disabling_truncation_correction_worsens_fd_error(self, monkeypatch):
+        """Naive backward without kept-discarded corrections is less accurate."""
+        key = jax.random.PRNGKey(123)
+        U0, _ = jnp.linalg.qr(jax.random.normal(key, (6, 6)))
+        V0, _ = jnp.linalg.qr(jax.random.normal(jax.random.PRNGKey(124), (5, 5)))
+        svals = jnp.array([4.0, 2.0, 1.999, 0.8, 0.2])
+        M = U0[:, :5] @ jnp.diag(svals) @ V0.T
+        chi = 2
+
+        Wu_r = jax.random.normal(jax.random.PRNGKey(125), (6, 6))
+        Wu = 0.5 * (Wu_r + Wu_r.T)
+        Wv_r = jax.random.normal(jax.random.PRNGKey(126), (5, 5))
+        Wv = 0.5 * (Wv_r + Wv_r.T)
+
+        def loss(M_in):
+            U, s, Vh = truncated_svd_ad(M_in, chi)
+            proj_u = U @ U.T
+            proj_v = Vh.T @ Vh
+            return (
+                jnp.sum(s**2)
+                + 0.31 * jnp.trace(proj_u @ Wu)
+                + 0.23 * jnp.trace(proj_v @ Wv)
+            )
+
+        def finite_diff_grad(M_in, eps=2e-5):
+            M_np = np.array(M_in)
+            g_fd = np.zeros_like(M_np)
+            for i in range(M_np.shape[0]):
+                for j in range(M_np.shape[1]):
+                    d = np.zeros_like(M_np)
+                    d[i, j] = eps
+                    g_fd[i, j] = (
+                        float(loss(jnp.array(M_np + d)))
+                        - float(loss(jnp.array(M_np - d)))
+                    ) / (2 * eps)
+            return jnp.array(g_fd)
+
+        grad_ref = jax.grad(loss)(M)
+
+        def _naive_sector_backward(U, s, Vh, dU, ds, dVh, eps=1e-12):
+            k = ds.shape[0]
+            U_k = U[:, :k]
+            s_k = s[:k]
+            Vh_k = Vh[:k, :]
+            V_k = Vh_k.conj().T
+            s2 = s_k**2
+            diff = s2[:, None] - s2[None, :]
+            F = diff / (diff**2 + eps**2)
+            F = F - jnp.diag(jnp.diag(F))
+            UtdU = U_k.conj().T @ dU
+            VtdV = V_k.conj().T @ dVh.conj().T
+            UtdU_anti = 0.5 * (UtdU - UtdU.conj().T)
+            VtdV_anti = 0.5 * (VtdV - VtdV.conj().T)
+            dM = U_k @ jnp.diag(ds) @ Vh_k
+            dM = dM + U_k @ (F * UtdU_anti) @ jnp.diag(s_k) @ Vh_k
+            dM = dM + U_k @ jnp.diag(s_k) @ (F * VtdV_anti) @ Vh_k
+            return dM
+
+        monkeypatch.setattr(
+            "tenax.algorithms.ad_utils._svd_sector_backward",
+            _naive_sector_backward,
+        )
+        grad_naive = jax.grad(loss)(M)
+
+        grad_fd = finite_diff_grad(M)
+        err_ref = float(jnp.linalg.norm(grad_ref - grad_fd))
+        err_naive = float(jnp.linalg.norm(grad_naive - grad_fd))
+        assert err_ref <= err_naive + 1e-10, (
+            f"Expected corrected backward to beat/equal naive: "
+            f"err_ref={err_ref}, err_naive={err_naive}"
+        )
+
+
+class TestProjectorADAudit:
+    """Audit projector AD routes use stabilized SVD routines under tracing."""
+
+    @staticmethod
+    def _make_grown_corners_dense(key1, key2, fused_dim=10, col1=6, col2=5):
+        sym = U1Symmetry()
+        C1g_data = jax.random.normal(key1, (fused_dim, col1))
+        C4g_data = jax.random.normal(key2, (fused_dim, col2))
+        fused_idx = TensorIndex.from_charges(
+            sym,
+            np.zeros(fused_dim, dtype=np.int32),
+            FlowDirection.IN,
+            label="fused",
+        )
+        c1_idx = TensorIndex.from_charges(
+            sym, np.zeros(col1, dtype=np.int32), FlowDirection.OUT, label="c1"
+        )
+        c4_idx = TensorIndex.from_charges(
+            sym, np.zeros(col2, dtype=np.int32), FlowDirection.OUT, label="c4"
+        )
+        C1g = DenseTensor(C1g_data, (fused_idx, c1_idx))
+        C4g = DenseTensor(C4g_data, (fused_idx, c4_idx))
+        return C1g, C4g
+
+    def test_svd_projector_traced_path_calls_truncated_svd_ad(self, monkeypatch):
+        import tenax.algorithms.ad_utils as ad_utils_mod
+
+        C1g_base, C4g_base = self._make_grown_corners_dense(
+            jax.random.PRNGKey(210), jax.random.PRNGKey(211)
+        )
+        calls = {"n": 0}
+        orig = ad_utils_mod.truncated_svd_ad
+
+        def _spy_truncated_svd_ad(M, chi):
+            calls["n"] += 1
+            return orig(M, chi)
+
+        monkeypatch.setattr(ad_utils_mod, "truncated_svd_ad", _spy_truncated_svd_ad)
+
+        def traced_eval(alpha):
+            C1g = DenseTensor(alpha * C1g_base.todense(), C1g_base.indices)
+            P1, P2 = _compute_projector_tensor(C1g, C4g_base, 4, projector_method="svd")
+            return jnp.sum(P1.todense() ** 2) + jnp.sum(P2.todense() ** 2)
+
+        _ = jax.jit(traced_eval)(1.0)
+        assert calls["n"] >= 1, "Expected traced SVD projector to call truncated_svd_ad"
+
+    def test_qr_projector_traced_path_calls_regularized_svd(self, monkeypatch):
+        import tenax.algorithms.ad_utils as ad_utils_mod
+
+        C1g_base, C4g_base = self._make_grown_corners_dense(
+            jax.random.PRNGKey(220), jax.random.PRNGKey(221)
+        )
+        calls = {"n": 0}
+        orig = ad_utils_mod.regularized_svd
+
+        def _spy_regularized_svd(M):
+            calls["n"] += 1
+            return orig(M)
+
+        monkeypatch.setattr(ad_utils_mod, "regularized_svd", _spy_regularized_svd)
+
+        def traced_eval(alpha):
+            C1g = DenseTensor(alpha * C1g_base.todense(), C1g_base.indices)
+            P, _ = _compute_projector_tensor(C1g, C4g_base, 4, projector_method="qr")
+            return jnp.sum(P.todense() ** 2)
+
+        _ = jax.jit(traced_eval)(1.0)
+        assert calls["n"] >= 1, "Expected traced QR projector to call regularized_svd"
 
 
 def _make_dense_tensor(key, D=2, d=2):
