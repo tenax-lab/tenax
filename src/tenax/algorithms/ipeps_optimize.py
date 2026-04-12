@@ -529,6 +529,21 @@ def _optimize_gs_ad_tensor(
     A = A_init
     A = A * (1.0 / (A.norm() + 1e-10))
 
+    # The 1-site optimizer operates on a dense view of ``A`` throughout:
+    # ``loss_fn`` dense-wraps ``A`` via ``A.todense()`` for the CTM forward
+    # pass, the env template's pytree structure must match that dense view,
+    # the metric-preconditioned CG / L-BFGS direction is rebuilt as
+    # ``type(A)(dense_array, A.indices)`` (which only works for
+    # ``DenseTensor``), and the final ``_eval_fresh`` already returns a
+    # ``DenseTensor``.  Dense-wrap ``A`` once here so the optimizer state
+    # is internally consistent for both ``DenseTensor`` and
+    # ``SymmetricTensor`` inputs — otherwise the symmetric path hits a
+    # mismatched pytree structure in ``_unflatten_envs_init`` (see
+    # issue #294) or a ``SymmetricTensor(dense_array, ...)`` constructor
+    # failure in the metric-precond branch.
+    if not isinstance(A, DenseTensor):
+        A = DenseTensor(A.todense(), A.indices)
+
     # Override CTM config fields for AD optimization
     ctm_cfg = config.ctm
     from dataclasses import replace as _replace
@@ -1115,6 +1130,20 @@ def _optimize_gs_ad_tensor_2site(
     A, B = AB_init
     A = A * (1.0 / (A.norm() + 1e-10))
     B = B * (1.0 / (B.norm() + 1e-10))
+
+    # Same rationale as ``_optimize_gs_ad_tensor``: the 2-site metric
+    # preconditioning branch rebuilds ``type(A_g)(dense_array, indices)``
+    # from the preconditioner output, which only works for ``DenseTensor``.
+    # Dense-wrap upfront so the rest of the optimizer is internally
+    # consistent.  The 2-site AD optimizer is already labeled experimental
+    # (see ``UserWarning`` in ``_optimize_gs_ad_2site``), so losing the
+    # block-sparse forward pass on SymmetricTensor inputs is acceptable
+    # here until the metric-precond path is made symmetry-aware (tracked
+    # by issue #294 follow-ups).
+    if not isinstance(A, DenseTensor):
+        A = DenseTensor(A.todense(), A.indices)
+    if not isinstance(B, DenseTensor):
+        B = DenseTensor(B.todense(), B.indices)
 
     from dataclasses import replace as _replace
 
