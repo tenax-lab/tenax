@@ -7,8 +7,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
+from tenax.algorithms._ctm_tensor_c4v import _c4v_to_full_env
 from tenax.algorithms._ctm_tensor_c4v_paper_ad import (
     _appendix_c_truncated_eigh_backward,
+    _solve_linear_adjoint_paper,
+    ctm_tensor_c4v_paper_backward,
+    ctm_tensor_c4v_paper_converge_reduced,
     ctm_tensor_c4v_paper_fixed_point,
     truncated_eigh_appendix_c,
 )
@@ -131,7 +136,7 @@ def test_optimize_gs_ad_paper_mode_zero_steps_runs(heisenberg_gate):
     assert np.isfinite(E)
 
 
-def test_optimize_gs_ad_paper_mode_nonzero_steps_not_implemented(heisenberg_gate):
+def test_optimize_gs_ad_paper_mode_nonzero_steps_runs(heisenberg_gate):
     A0 = jax.random.normal(jax.random.PRNGKey(2), (2, 2, 2, 2, 2))
     config = iPEPSConfig(
         max_bond_dim=2,
@@ -142,8 +147,10 @@ def test_optimize_gs_ad_paper_mode_nonzero_steps_not_implemented(heisenberg_gate
         unit_cell="1x1",
         su_init=False,
     )
-    with pytest.raises(NotImplementedError, match="gs_num_steps>0"):
-        optimize_gs_ad(heisenberg_gate, A0, config)
+    A_opt, env, E = optimize_gs_ad(heisenberg_gate, A0, config)
+    assert isinstance(A_opt, DenseTensor)
+    assert np.isfinite(env.C1.todense()).all()
+    assert np.isfinite(E)
 
 
 def test_truncated_eigh_appendix_c_gradient_finite_degenerate():
@@ -239,3 +246,79 @@ def test_appendix_c_truncation_correction_improves_fd_error():
         f"Expected corrected Appendix-C backward to beat/equal naive: "
         f"err_ref={err_ref}, err_naive={err_naive}"
     )
+
+
+def test_paper_mode_backward_gradient_is_finite_and_deterministic(heisenberg_gate):
+    cfg = CTMConfig(
+        chi=4,
+        max_iter=8,
+        min_iter=2,
+        conv_tol=1e-8,
+        projector_method="eigh",
+        paper_ctm_ad="c4v_appendix_cf",
+    )
+    A0 = jax.random.normal(jax.random.PRNGKey(321), (2, 2, 2, 2, 2))
+
+    def loss(A_data):
+        A = _wrap_as_dense_tensor(A_data)
+        A = A * (1.0 / (A.norm() + 1e-10))
+        C, T = ctm_tensor_c4v_paper_converge_reduced(A, cfg)
+        env = _c4v_to_full_env(C, T)
+        return compute_energy_ctm_tensor(A, env, heisenberg_gate, 2)
+
+    g1 = jax.grad(loss)(A0)
+    g2 = jax.grad(loss)(A0)
+    assert jnp.all(jnp.isfinite(g1))
+    assert jnp.all(jnp.isfinite(g2))
+    assert jnp.allclose(g1, g2, rtol=1e-10, atol=1e-10)
+
+
+def test_paper_mode_krylov_backward_residual_below_threshold():
+    cfg = CTMConfig(
+        chi=4,
+        max_iter=8,
+        min_iter=2,
+        conv_tol=1e-8,
+        projector_method="eigh",
+        paper_ctm_ad="c4v_appendix_cf",
+        paper_krylov_solver="bicgstab",
+        paper_krylov_maxiter=30,
+        paper_krylov_tol=1e-8,
+    )
+    A = _wrap_as_dense_tensor(
+        jax.random.normal(jax.random.PRNGKey(404), (2, 2, 2, 2, 2))
+    )
+    A = A * (1.0 / (A.norm() + 1e-10))
+    C, T = ctm_tensor_c4v_paper_converge_reduced(A, cfg)
+    g_c = C * 0.1
+    g_t = T * 0.1
+    dA, meta = ctm_tensor_c4v_paper_backward(A, C, T, g_c, g_t, cfg)
+    assert isinstance(dA, DenseTensor)
+    assert jnp.all(jnp.isfinite(dA.todense()))
+    assert meta["residual"] <= max(cfg.paper_krylov_tol * 10.0, 1e-12)
+
+
+def test_paper_mode_krylov_fallback_to_gmres(monkeypatch):
+    import tenax.algorithms._ctm_tensor_c4v_paper_ad as paper
+
+    cfg = CTMConfig(
+        paper_ctm_ad="c4v_appendix_cf",
+        paper_krylov_solver="bicgstab",
+        paper_krylov_maxiter=20,
+        paper_krylov_tol=1e-8,
+    )
+
+    def _apply(v):
+        return v
+
+    rhs = (jnp.array([1.0, -2.0, 3.0]),)
+
+    def _bad_bicg(*_args, **_kwargs):
+        bad = (jnp.array([100.0, 100.0, 100.0]),)
+        return bad, None
+
+    monkeypatch.setattr(paper, "_krylov_bicgstab", _bad_bicg)
+    _lam, meta = _solve_linear_adjoint_paper(_apply, rhs, cfg)
+    assert meta["used_fallback"] is True
+    assert meta["solver_used"] == "gmres"
+    assert meta["residual"] <= max(cfg.paper_krylov_tol * 10.0, 1e-12)

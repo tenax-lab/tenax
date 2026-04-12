@@ -378,16 +378,13 @@ def _optimize_gs_ad_tensor_paper_c4v(
     A_init: jax.Array | Tensor | None,
     config: iPEPSConfig,
 ):
-    """Forward-only paper-mode dense C4v path.
+    """Paper-mode dense C4v path with implicit-AD CTM backward."""
+    import optax
 
-    Current scope:
-    - Runs the dedicated dense C4v forward fixed-point map.
-    - Returns a finite energy/environment for ``gs_num_steps == 0``.
-
-    Backward/optimization for ``gs_num_steps > 0`` is added separately.
-    """
     from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
+    from tenax.algorithms._ctm_tensor_c4v import _c4v_to_full_env
     from tenax.algorithms._ctm_tensor_c4v_paper_ad import (
+        ctm_tensor_c4v_paper_converge_reduced,
         ctm_tensor_c4v_paper_fixed_point,
     )
     from tenax.algorithms.ipeps import (
@@ -441,16 +438,61 @@ def _optimize_gs_ad_tensor_paper_c4v(
     if config.gs_projector_method is not None:
         ctm_cfg = _replace(ctm_cfg, projector_method=config.gs_projector_method)
 
-    env, _meta = ctm_tensor_c4v_paper_fixed_point(A, ctm_cfg)
-    E0 = float(compute_energy_ctm_tensor(A, env, gate, d_phys))
+    if config.gs_num_steps == 0:
+        env, _meta = ctm_tensor_c4v_paper_fixed_point(A, ctm_cfg)
+        E0 = float(compute_energy_ctm_tensor(A, env, gate, d_phys))
+        return A, env, E0
 
-    if config.gs_num_steps > 0:
-        raise NotImplementedError(
-            "paper_ctm_ad='c4v_appendix_cf' forward path is implemented, "
-            "but optimization/backward for gs_num_steps>0 is not yet available."
-        )
+    optimizer = _build_optimizer(config)
+    use_cg = optimizer is None
+    params = A.todense()
+    opt_state = None if optimizer is None else optimizer.init(params)
+    best_energy = float("inf")
+    best_params = params
 
-    return A, env, E0
+    def _project_c4v_and_normalize(A_data: jax.Array) -> jax.Array:
+        coeffs = c4v_coeffs_from_tensor(A_data, c4v_basis)
+        A_proj = c4v_tensor_from_coeffs(coeffs, c4v_basis, tensor_shape)
+        return A_proj / (jnp.linalg.norm(A_proj) + 1e-10)
+
+    def _loss_fn(A_data):
+        A_proj = _project_c4v_and_normalize(A_data)
+        A_tensor = DenseTensor(A_proj, A.indices)
+        C, T = ctm_tensor_c4v_paper_converge_reduced(A_tensor, ctm_cfg)
+        env = _c4v_to_full_env(C, T)
+        energy = compute_energy_ctm_tensor(A_tensor, env, gate, d_phys)
+        return energy, (env, A_tensor)
+
+    for _step in range(config.gs_num_steps):
+        (energy_val, _aux), grads = jax.value_and_grad(_loss_fn, has_aux=True)(params)
+        grads = jnp.where(jnp.isfinite(grads), grads, 0.0)
+        if use_cg:
+            params = _normalize_params(params - config.gs_learning_rate * grads)
+        else:
+            assert optimizer is not None
+            if config.gs_optimizer.lower() == "lbfgs":
+                updates, opt_state = optimizer.update(
+                    grads,
+                    opt_state,
+                    params,
+                    value=energy_val,
+                    grad=grads,
+                    value_fn=lambda p: _loss_fn(p)[0],
+                )
+            else:
+                updates, opt_state = optimizer.update(grads, opt_state, params)
+            params = _normalize_params(optax.apply_updates(params, updates))
+        E = float(energy_val)
+        if _should_accept_best(
+            current_best=best_energy,
+            candidate=E,
+            floor=getattr(config, "gs_energy_floor", None),
+        ):
+            best_energy = E
+            best_params = params
+
+    final_energy, (final_env, final_A) = _loss_fn(best_params)
+    return final_A, final_env, float(final_energy)
 
 
 def _optimize_gs_ad_tensor(
