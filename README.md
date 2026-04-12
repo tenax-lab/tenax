@@ -18,7 +18,7 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), TRG, HOTRG, iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), fermionic iPEPS (fPEPS), quasiparticle excitations
 - **GPU/TPU-accelerated DMRG** — JIT-compiled sweeps via `jax.lax.scan` for dense tensors and per-operation JIT for block-sparse symmetric tensors; automatic warmup-to-JIT transition when bond dimensions are growing; multi-GPU sharding via GSPMD for large bond dimensions (`DMRGConfig(accelerator="jit"|"sharded")`)
 - **AutoMPO** — build Hamiltonian MPOs from symbolic operator descriptions (custom couplings, NNN, arbitrary spin); supports `symmetric=True` for U(1) block-sparse MPOs
-- **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237); L-BFGS with Hager-Zhang line search and metric preconditioning (Rader et al.), Adam (with cosine lr decay), and conjugate gradient optimizers; implicit AD via GMRES backward (recommended) for robust differentiation through CTM fixed point; explicit AD through unrolled CTM iterations for 1-site C4v path; sigma gauge fixing (`forward_gauge="sigma"`) for stable elementwise CTM convergence; C4v symmetry enforcement via explicit basis parameterization; chi-ramping schedule (`optimize_gs_ad_chi_schedule`) for progressive refinement; JIT CTM via `jax.lax.while_loop` for GPU kernel fusion (`jit_ctm=True`)
+- **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237); L-BFGS with Hager-Zhang line search and metric preconditioning (Rader et al.), Adam (with cosine lr decay), and conjugate gradient optimizers; implicit AD via iterative VJP (default) and optional GMRES route; explicit AD through unrolled CTM iterations for 1-site C4v path; opt-in paper-faithful dense C4v Appendix C-F mode (`paper_ctm_ad="c4v_appendix_cf"`) with Krylov implicit backward (`bicgstab` + `gmres` fallback); sigma gauge fixing (`forward_gauge="sigma"`) for stable elementwise CTM convergence; C4v symmetry enforcement via explicit basis parameterization; chi-ramping schedule (`optimize_gs_ad_chi_schedule`) for progressive refinement; JIT CTM via `jax.lax.while_loop` for GPU kernel fusion (`jit_ctm=True`)
 - **SVD and QR CTMRG projectors** — SVD (Fishman) projectors (`projector_method="svd"`) and QR projectors for faster CTM convergence alongside the default `eigh`
 - **Split-CTMRG** — ket/bra-separated CTM environment tensors for O(χ³D³) projector cost instead of O(χ³D⁶); works with both `DenseTensor` and `SymmetricTensor` via the Tensor protocol (Naumann et al., arXiv:2502.10298)
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary Brillouin-zone momenta (Ponsioen et al. 2022)
@@ -364,6 +364,26 @@ config_jit = iPEPSConfig(
     gs_num_steps=200,
 )
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config_jit)
+
+# Opt-in paper-faithful dense C4v mode (App. C-F)
+config_paper = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(
+        chi=16,
+        max_iter=80,
+        projector_method="eigh",
+        paper_ctm_ad="c4v_appendix_cf",
+        paper_krylov_solver="bicgstab",
+        paper_krylov_maxiter=50,
+        paper_krylov_tol=1e-8,
+    ),
+    gs_explicit_ad=False,
+    gs_c4v=True,
+    unit_cell="1x1",
+    gs_num_steps=100,
+    gs_optimizer="adam",
+)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config_paper)
 
 # Quasiparticle excitations (Ponsioen et al. 2022)
 momenta = make_momentum_path("brillouin", num_points=20)
