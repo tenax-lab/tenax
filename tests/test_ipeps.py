@@ -685,6 +685,61 @@ class TestOptimizeGsAd2Site:
         assert E_gs > -0.9, f"E/site={E_gs:.6f} unphysically low"
         assert np.isfinite(E_gs)
 
+    def test_2site_ad_c4v_runs(self, heisenberg_gate):
+        """2-site AD with C4v parameterization should run and give finite energy."""
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=3,
+            gs_learning_rate=1e-3,
+            unit_cell="2site",
+            gs_c4v=True,
+        )
+        result = optimize_gs_ad(heisenberg_gate, None, config)
+        (A_opt, B_opt), (env_A, env_B), E_gs = result
+        assert A_opt.todense().shape == (2, 2, 2, 2, 2)
+        assert B_opt.todense().shape == (2, 2, 2, 2, 2)
+        assert np.isfinite(E_gs)
+
+    def test_2site_ad_c4v_shared_tensor(self, heisenberg_gate):
+        """With gs_c4v=True, B should be the sublattice rotation of A."""
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=3,
+            gs_learning_rate=1e-3,
+            unit_cell="2site",
+            gs_c4v=True,
+        )
+        (A_opt, B_opt), _, _ = optimize_gs_ad(heisenberg_gate, None, config)
+        U = np.array([[0.0, 1.0], [-1.0, 0.0]])
+        B_expected = np.einsum("luRDs,sS->luRDS", A_opt.todense(), U)
+        np.testing.assert_allclose(B_opt.todense(), B_expected, atol=1e-12)
+
+    def test_2site_ad_c4v_energy_physical(self, heisenberg_gate):
+        """2-site C4v AD should produce a physical energy for Heisenberg."""
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=8, max_iter=50, min_iter=10),
+            gs_optimizer="lbfgs",
+            gs_num_steps=20,
+            gs_metric_precond=False,
+            gs_line_search=True,
+            gs_verbose=False,
+            unit_cell="2site",
+            gs_explicit_ad=True,
+            gs_explicit_ad_steps=10,
+            gs_explicit_ad_warmup=2,
+            su_init=True,
+            num_imaginary_steps=50,
+            dt=0.1,
+            gs_c4v=True,
+        )
+        _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
+        assert np.isfinite(E_gs), f"Energy is not finite: {E_gs}"
+        assert E_gs > -0.9, f"E/site={E_gs:.6f} unphysically low"
+        assert E_gs < -0.50, f"C4v 2-site AD energy {E_gs:.6f} not below -0.50"
+
     @pytest.mark.slow
     def test_2site_heisenberg_ad_energy_benchmark(self, heisenberg_gate):
         """SU + AD at D=2, chi=16 should give a physical energy.

@@ -120,7 +120,7 @@ def _tree_add(a, b):
 def _normalize_params(params):
     """Normalize iPEPS site tensor(s)."""
     if isinstance(params, tuple):
-        return tuple(p * (1.0 / (p.norm() + 1e-10)) for p in params)
+        return tuple(_normalize_params(p) for p in params)
     if hasattr(params, "norm"):
         return params * (1.0 / (params.norm() + 1e-10))
     # Plain JAX array (e.g. C4v coefficients) — use jnp.linalg.norm
@@ -926,22 +926,29 @@ def _optimize_gs_ad_tensor_2site(
     Uses ``ctm_tensor_converge`` with implicit differentiation through
     the 2-site Tensor-protocol CTM.
 
+    With ``gs_c4v=True`` (recommended), optimizes a single C4v coefficient
+    vector and derives B from A via sublattice rotation on the physical leg.
+    This enforces A and B to be related by a spin-π rotation, preventing
+    the A/B drift that plagues independent 2-site optimization.
+
     .. warning::
 
-        **Experimental / unsupported.**  The 2-site AD optimizer is
+        Without ``gs_c4v=True``, the 2-site AD optimizer is
         unstable and produces unphysical energies.  For antiferromagnetic
-        models, prefer 1-site optimization with
-        ``sublattice_rotate_gate()`` + ``gs_c4v=True``, which is faster
-        and well-tested.
+        models, prefer ``gs_c4v=True`` or 1-site optimization with
+        ``sublattice_rotate_gate()`` + ``gs_c4v=True``.
     """
     config = _normalize_stall_recovery(config, unit_cell="2site")
-    import warnings
+    use_c4v = config.gs_c4v
+    if not use_c4v:
+        import warnings
 
-    warnings.warn(
-        "2-site AD optimizer is experimental and may diverge. "
-        "Prefer 1-site with sublattice_rotate_gate() + gs_c4v=True.",
-        stacklevel=2,
-    )
+        warnings.warn(
+            "2-site AD optimizer is experimental and may diverge. "
+            "Prefer 1-site with sublattice_rotate_gate() + gs_c4v=True, "
+            "or enable gs_c4v=True for 2-site.",
+            stacklevel=2,
+        )
     import optax
 
     from tenax.algorithms._ctm_tensor import (
@@ -1000,10 +1007,41 @@ def _optimize_gs_ad_tensor_2site(
         ctm_tensor_converge_explicit if use_explicit else ctm_tensor_converge
     )
 
+    if use_c4v:
+        from tenax.algorithms.ipeps import (
+            build_c4v_basis,
+            c4v_coeffs_from_tensor,
+            c4v_tensor_from_coeffs,
+        )
+
+        D_bond = A.todense().shape[0]
+        d_loc = A.todense().shape[-1]
+        tensor_shape = (D_bond, D_bond, D_bond, D_bond, d_loc)
+        c4v_basis = jnp.array(build_c4v_basis(D_bond, d_loc))
+        c4v_coeffs = c4v_coeffs_from_tensor(A.todense(), c4v_basis)
+        A_indices = A.indices
+        # Sublattice rotation: B = A with physical leg rotated by U = e^{iπ σ^y/2}
+        _U_sub = jnp.array([[0.0, 1.0], [-1.0, 0.0]], dtype=A.todense().dtype)
+    else:
+        c4v_basis = None
+        tensor_shape = None
+        A_indices = None
+        _U_sub = None
+
+    def _c4v_AB(coeffs_):
+        """Build normalized (A, B) DenseTensors from a single C4v coeff vector."""
+        A_data = c4v_tensor_from_coeffs(coeffs_, c4v_basis, tensor_shape)
+        A_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
+        B_data = jnp.einsum("luRDs,sS->luRDS", A_data, _U_sub)
+        return DenseTensor(A_data, A_indices), DenseTensor(B_data, A_indices)
+
     def loss_fn(params, env_init_leaves):
-        A_p, B_p = params
-        A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
-        B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
+        if use_c4v:
+            A_norm, B_norm = _c4v_AB(params)
+        else:
+            A_p, B_p = params
+            A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
+            B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
         site_tensors = {(0, 0): A_norm, (1, 0): B_norm}
         if use_explicit:
             env_leaves = _ctm_converge(
@@ -1025,7 +1063,7 @@ def _optimize_gs_ad_tensor_2site(
         )
         return energy, env_leaves
 
-    params = (A, B)
+    params = c4v_coeffs if use_c4v else (A, B)
     is_metric_lbfgs = (
         config.gs_metric_precond and config.gs_optimizer.lower() == "lbfgs"
     )
@@ -1063,9 +1101,12 @@ def _optimize_gs_ad_tensor_2site(
     # Forward-only loss for line search — warm-starts CTM from prev_env_leaves
 
     def loss_fn_fwd(params_):
-        A_p, B_p = params_
-        A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
-        B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
+        if use_c4v:
+            A_norm, B_norm = _c4v_AB(params_)
+        else:
+            A_p, B_p = params_
+            A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
+            B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
         site_tensors = {(0, 0): A_norm, (1, 0): B_norm}
         env_leaves = ctm_tensor_converge(
             site_tensors, prev_env_leaves, CHECKERBOARD_NEIGHBORS, config_tuple
@@ -1141,7 +1182,7 @@ def _optimize_gs_ad_tensor_2site(
 
         # Compute search direction
         if is_cg:
-            if config.gs_metric_precond:
+            if config.gs_metric_precond and not use_c4v:
                 from tenax.algorithms._metric_precond import (
                     precondition_gradient_multisite,
                 )
@@ -1180,19 +1221,24 @@ def _optimize_gs_ad_tensor_2site(
             prev_grad = grads
             direction = cg_direction
         elif is_metric_lbfgs:
-            from tenax.algorithms._metric_precond import (
-                lbfgs_two_loop,
-                precondition_gradient_multisite,
-            )
+            from tenax.algorithms._metric_precond import lbfgs_two_loop
 
-            A_cur, B_cur = params
-            A_g, B_g = grads
-            p_flat = jnp.concatenate(
-                [A_cur.todense().reshape(-1), B_cur.todense().reshape(-1)]
-            )
-            g_flat = jnp.concatenate(
-                [A_g.todense().reshape(-1), B_g.todense().reshape(-1)]
-            )
+            if use_c4v:
+                p_flat = params
+                g_flat = grads
+            else:
+                from tenax.algorithms._metric_precond import (
+                    precondition_gradient_multisite,
+                )
+
+                A_cur, B_cur = params
+                A_g, B_g = grads
+                p_flat = jnp.concatenate(
+                    [A_cur.todense().reshape(-1), B_cur.todense().reshape(-1)]
+                )
+                g_flat = jnp.concatenate(
+                    [A_g.todense().reshape(-1), B_g.todense().reshape(-1)]
+                )
 
             if prev_params_flat is not None:
                 s = p_flat - prev_params_flat
@@ -1206,42 +1252,48 @@ def _optimize_gs_ad_tensor_2site(
             prev_params_flat = p_flat
             prev_grad_flat = g_flat
 
-            env_A_m = jax.tree.unflatten(env_treedef, env_leaves_sg[:n_env_leaves])
-            env_B_m = jax.tree.unflatten(env_treedef, env_leaves_sg[n_env_leaves:])
-            envs_m = {(0, 0): env_A_m, (1, 0): env_B_m}
-            sites_m = {(0, 0): A_cur, (1, 0): B_cur}
-            delta_metric = delta_energy if step > 0 else float(jnp.dot(g_flat, g_flat))
-            n_A = A_cur.todense().size
+            if use_c4v:
+                direction_flat = lbfgs_two_loop(g_flat, lbfgs_history, lambda v: v)
+                direction = -direction_flat
+            else:
+                env_A_m = jax.tree.unflatten(env_treedef, env_leaves_sg[:n_env_leaves])
+                env_B_m = jax.tree.unflatten(env_treedef, env_leaves_sg[n_env_leaves:])
+                envs_m = {(0, 0): env_A_m, (1, 0): env_B_m}
+                sites_m = {(0, 0): A_cur, (1, 0): B_cur}
+                delta_metric = (
+                    delta_energy if step > 0 else float(jnp.dot(g_flat, g_flat))
+                )
+                n_A = A_cur.todense().size
 
-            def h0_matvec(v):
-                v_A = v[:n_A]
-                v_B = v[n_A:]
+                def h0_matvec(v):
+                    v_A = v[:n_A]
+                    v_B = v[n_A:]
+                    D_b = A_cur.todense().shape[0]
+                    d_l = A_cur.todense().shape[-1]
+                    grads_v = {
+                        (0, 0): type(A_cur)(
+                            v_A.reshape(D_b, D_b, D_b, D_b, d_l), A_cur.indices
+                        ),
+                        (1, 0): type(B_cur)(
+                            v_B.reshape(D_b, D_b, D_b, D_b, d_l), B_cur.indices
+                        ),
+                    }
+                    z_dict = precondition_gradient_multisite(
+                        sites_m, envs_m, grads_v, delta_metric, config
+                    )
+                    return jnp.concatenate(
+                        [z_dict[(0, 0)].reshape(-1), z_dict[(1, 0)].reshape(-1)]
+                    )
+
+                direction_flat = lbfgs_two_loop(g_flat, lbfgs_history, h0_matvec)
                 D_b = A_cur.todense().shape[0]
                 d_l = A_cur.todense().shape[-1]
-                grads_v = {
-                    (0, 0): type(A_cur)(
-                        v_A.reshape(D_b, D_b, D_b, D_b, d_l), A_cur.indices
-                    ),
-                    (1, 0): type(B_cur)(
-                        v_B.reshape(D_b, D_b, D_b, D_b, d_l), B_cur.indices
-                    ),
-                }
-                z_dict = precondition_gradient_multisite(
-                    sites_m, envs_m, grads_v, delta_metric, config
+                dir_A = -direction_flat[:n_A].reshape(D_b, D_b, D_b, D_b, d_l)
+                dir_B = -direction_flat[n_A:].reshape(D_b, D_b, D_b, D_b, d_l)
+                direction = (
+                    type(A_cur)(dir_A, A_cur.indices),
+                    type(B_cur)(dir_B, B_cur.indices),
                 )
-                return jnp.concatenate(
-                    [z_dict[(0, 0)].reshape(-1), z_dict[(1, 0)].reshape(-1)]
-                )
-
-            direction_flat = lbfgs_two_loop(g_flat, lbfgs_history, h0_matvec)
-            D_b = A_cur.todense().shape[0]
-            d_l = A_cur.todense().shape[-1]
-            dir_A = -direction_flat[:n_A].reshape(D_b, D_b, D_b, D_b, d_l)
-            dir_B = -direction_flat[n_A:].reshape(D_b, D_b, D_b, D_b, d_l)
-            direction = (
-                type(A_cur)(dir_A, A_cur.indices),
-                type(B_cur)(dir_B, B_cur.indices),
-            )
         elif optimizer is not None:
             updates, opt_state = optimizer.update(grads, opt_state, params)
             direction = updates
@@ -1315,6 +1367,7 @@ def _optimize_gs_ad_tensor_2site(
                     stall_count += 1
 
             # Noise recovery on persistent stall (legacy; see issue #298).
+            # Only used by the non-C4v path; C4v defaults to "reset".
             if (
                 config.gs_stall_recovery == "noise"
                 and stall_count > 0
@@ -1387,7 +1440,10 @@ def _optimize_gs_ad_tensor_2site(
     )
 
     def _eval_fresh_2site(p):
-        A_t, B_t = _normalize_params(p)
+        if use_c4v:
+            A_t, B_t = _c4v_AB(p)
+        else:
+            A_t, B_t = _normalize_params(p)
         st = {(0, 0): A_t, (1, 0): B_t}
         envs = _fp_fn_2site(st, CHECKERBOARD_NEIGHBORS, eval_config2)
         E_ = float(
@@ -1401,7 +1457,7 @@ def _optimize_gs_ad_tensor_2site(
     env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
 
     if best_params is not params:
-        _, _, envs_best, E_best_fresh = _eval_fresh_2site(best_params)
+        A_best, B_best, envs_best, E_best_fresh = _eval_fresh_2site(best_params)
         env_A_best = envs_best[(0, 0)]
         env_B_best = envs_best[(1, 0)]
     else:
@@ -1412,7 +1468,7 @@ def _optimize_gs_ad_tensor_2site(
         A_final, B_final = A_last, B_last
         env_A, env_B, E_gs = env_A_last, env_B_last, E_last
     else:
-        A_final, B_final = _normalize_params(best_params)
+        A_final, B_final = A_best, B_best
         env_A, env_B, E_gs = env_A_best, env_B_best, E_best_fresh
     if config.gs_verbose:
         print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}", flush=True)
