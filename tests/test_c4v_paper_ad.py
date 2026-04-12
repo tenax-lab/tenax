@@ -322,3 +322,40 @@ def test_paper_mode_krylov_fallback_to_gmres(monkeypatch):
     assert meta["used_fallback"] is True
     assert meta["solver_used"] == "gmres"
     assert meta["residual"] <= max(cfg.paper_krylov_tol * 10.0, 1e-12)
+
+
+def test_appendix_e_complex_gradient_is_hermitian():
+    key_r = jax.random.PRNGKey(2001)
+    key_i = jax.random.PRNGKey(2002)
+    X = jax.random.normal(key_r, (5, 5)) + 1j * jax.random.normal(key_i, (5, 5))
+    M = 0.5 * (X + jnp.conj(X).T)
+    key_wr = jax.random.PRNGKey(2003)
+    key_wi = jax.random.PRNGKey(2004)
+    W = jax.random.normal(key_wr, (5, 5)) + 1j * jax.random.normal(key_wi, (5, 5))
+    W = 0.5 * (W + jnp.conj(W).T)
+
+    def loss(M_in):
+        vals, vecs = truncated_eigh_appendix_c(M_in, 3)
+        P = vecs @ jnp.conj(vecs).T
+        return jnp.real(jnp.sum(vals**2) + 0.15 * jnp.trace(P @ W))
+
+    grad = jax.grad(loss)(M)
+    assert jnp.all(jnp.isfinite(grad))
+    assert jnp.max(jnp.abs(grad - jnp.conj(grad).T)) < 1e-10
+
+
+def test_appendix_e_complex_backward_output_is_hermitian():
+    key = jax.random.PRNGKey(2010)
+    X = jax.random.normal(key, (4, 4)) + 1j * jax.random.normal(
+        jax.random.PRNGKey(2011), (4, 4)
+    )
+    M = 0.5 * (X + jnp.conj(X).T)
+    w, v = jnp.linalg.eigh(M)
+    k = 2
+    dw = jax.random.normal(jax.random.PRNGKey(2012), (k,))
+    dV = jax.random.normal(jax.random.PRNGKey(2013), (4, k)) + 1j * jax.random.normal(
+        jax.random.PRNGKey(2014), (4, k)
+    )
+    dM = _appendix_c_truncated_eigh_backward(w, v, dw, dV, k=k)
+    assert jnp.all(jnp.isfinite(dM))
+    assert jnp.max(jnp.abs(dM - jnp.conj(dM).T)) < 1e-10
