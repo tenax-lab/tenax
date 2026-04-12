@@ -62,6 +62,27 @@ class CTMConfig:
     # "sigma" (implicit-diff path), or "none" (diagnostic).  See ipeps_ad_paths.md.
     forward_gauge: str = "qr"
     jit_ctm: bool = False  # use jax.lax.while_loop for GPU kernel fusion
+    # Optional paper-faithful implicit AD mode (App. C-F) for dense 1-site C4v.
+    paper_ctm_ad: str | None = None  # None or "c4v_appendix_cf"
+    paper_krylov_solver: str = "bicgstab"  # "bicgstab" or "gmres"
+    paper_krylov_maxiter: int = 50
+    paper_krylov_tol: float = 1e-8
+    paper_degen_tol: float = 1e-10
+    paper_diag_shift: float = 1e-12
+
+    def __post_init__(self):
+        valid_paper_modes = {None, "c4v_appendix_cf"}
+        if self.paper_ctm_ad not in valid_paper_modes:
+            raise ValueError(
+                f"paper_ctm_ad must be one of {valid_paper_modes}, "
+                f"got {self.paper_ctm_ad!r}"
+            )
+        valid_paper_solvers = {"bicgstab", "gmres"}
+        if self.paper_krylov_solver not in valid_paper_solvers:
+            raise ValueError(
+                f"paper_krylov_solver must be one of {valid_paper_solvers}, "
+                f"got {self.paper_krylov_solver!r}"
+            )
 
 
 @dataclass

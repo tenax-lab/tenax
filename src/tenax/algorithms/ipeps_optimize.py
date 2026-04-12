@@ -335,6 +335,8 @@ def optimize_gs_ad(
 
     if config.unit_cell == "2site":
         return _optimize_gs_ad_2site(hamiltonian_gate, A_init, config)
+    if _use_paper_c4v_path(config):
+        return _optimize_gs_ad_tensor_paper_c4v(hamiltonian_gate, A_init, config)
 
     # Wrap raw jax.Array as DenseTensor so we always use the Tensor-protocol path.
     if A_init is not None and not isinstance(A_init, Tensor):
@@ -359,6 +361,96 @@ def optimize_gs_ad(
             A_init = _wrap_as_dense_tensor(jax.random.normal(key, (D, D, D, D, d_phys)))
 
     return _optimize_gs_ad_tensor(hamiltonian_gate, A_init, config)
+
+
+def _use_paper_c4v_path(config: iPEPSConfig) -> bool:
+    """Return True when the strict paper-mode gate is satisfied."""
+    return (
+        config.unit_cell == "1x1"
+        and config.gs_c4v
+        and not config.gs_explicit_ad
+        and getattr(config.ctm, "paper_ctm_ad", None) == "c4v_appendix_cf"
+    )
+
+
+def _optimize_gs_ad_tensor_paper_c4v(
+    hamiltonian_gate: jax.Array | Tensor,
+    A_init: jax.Array | Tensor | None,
+    config: iPEPSConfig,
+):
+    """Forward-only paper-mode dense C4v path.
+
+    Current scope:
+    - Runs the dedicated dense C4v forward fixed-point map.
+    - Returns a finite energy/environment for ``gs_num_steps == 0``.
+
+    Backward/optimization for ``gs_num_steps > 0`` is added separately.
+    """
+    from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
+    from tenax.algorithms._ctm_tensor_c4v_paper_ad import (
+        ctm_tensor_c4v_paper_fixed_point,
+    )
+    from tenax.algorithms.ipeps import (
+        build_c4v_basis,
+        c4v_coeffs_from_tensor,
+        c4v_tensor_from_coeffs,
+        ipeps,
+    )
+
+    gate = (
+        hamiltonian_gate.todense()
+        if isinstance(hamiltonian_gate, Tensor)
+        else jnp.array(hamiltonian_gate)
+    )
+    d_phys = gate.shape[0]
+    D = config.max_bond_dim
+
+    if A_init is not None and not isinstance(A_init, Tensor):
+        A = _wrap_as_dense_tensor(A_init)
+    elif A_init is None:
+        if config.su_init:
+            _, (A_su, _), _ = ipeps(gate, None, config)
+            A = A_su
+        else:
+            key = jax.random.PRNGKey(0)
+            A = _wrap_as_dense_tensor(jax.random.normal(key, (D, D, D, D, d_phys)))
+    else:
+        A = A_init
+
+    if not isinstance(A, DenseTensor):
+        raise TypeError(
+            "paper_ctm_ad='c4v_appendix_cf' currently supports DenseTensor inputs only."
+        )
+
+    A = A * (1.0 / (A.norm() + 1e-10))
+    # Enforce C4v by projecting to the C4v basis and reconstructing.
+    D_bond = A.todense().shape[0]
+    d_loc = A.todense().shape[-1]
+    tensor_shape = (D_bond, D_bond, D_bond, D_bond, d_loc)
+    c4v_basis = jnp.array(build_c4v_basis(D_bond, d_loc))
+    coeffs = c4v_coeffs_from_tensor(A.todense(), c4v_basis)
+    A_c4v = c4v_tensor_from_coeffs(coeffs, c4v_basis, tensor_shape)
+    A = DenseTensor(
+        A_c4v / (jnp.linalg.norm(A_c4v) + 1e-10),
+        A.indices,
+    )
+
+    from dataclasses import replace as _replace
+
+    ctm_cfg = config.ctm
+    if config.gs_projector_method is not None:
+        ctm_cfg = _replace(ctm_cfg, projector_method=config.gs_projector_method)
+
+    env, _meta = ctm_tensor_c4v_paper_fixed_point(A, ctm_cfg)
+    E0 = float(compute_energy_ctm_tensor(A, env, gate, d_phys))
+
+    if config.gs_num_steps > 0:
+        raise NotImplementedError(
+            "paper_ctm_ad='c4v_appendix_cf' forward path is implemented, "
+            "but optimization/backward for gs_num_steps>0 is not yet available."
+        )
+
+    return A, env, E0
 
 
 def _optimize_gs_ad_tensor(
