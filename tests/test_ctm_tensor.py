@@ -254,42 +254,14 @@ class TestConvergence:
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
 
+    @pytest.mark.skip(
+        reason="Tensor CTM path diverged from legacy _ctm_sweep in PR #291 "
+        "(differentiable Fishman SVD projector + per-absorption normalization). "
+        "The legacy path is retained only for 2-site SU and is not expected "
+        "to match the tensor path sweep-for-sweep."
+    )
     def test_ctm_tensor_dense_matches_ctm(self, small_peps_dense):
-        """DenseTensor CTM single sweep matches legacy dense CTM sweep.
-
-        Compares corner singular values (gauge-invariant) because ``eigh``
-        eigenvector ordering within degenerate subspaces can differ across
-        platforms (macOS vs Linux), making raw tensor or energy comparisons
-        gauge-dependent after a single sweep.
-        """
-        chi = 6
-        A_raw = small_peps_dense.todense()
-        a_raw = _build_double_layer(A_raw)
-        D = A_raw.shape[0]
-        D2 = D * D
-        a_raw = a_raw.reshape(D2, D2, D2, D2)
-
-        # Legacy: init + one sweep
-        env_legacy = _initialize_ctm_env(a_raw, chi)
-        env_legacy = _ctm_sweep(env_legacy, a_raw, chi, renormalize=True)
-
-        # Tensor-protocol: init + one sweep
-        a_tensor = _build_double_layer_tensor(small_peps_dense)
-        env_tensor = initialize_ctm_tensor_env(small_peps_dense, chi)
-        env_tensor = _ctm_tensor_sweep(env_tensor, a_tensor, chi, renormalize=True)
-
-        # Compare corner singular values (gauge-invariant)
-        for name in ("C1", "C2", "C3", "C4"):
-            sv_leg = jnp.linalg.svd(getattr(env_legacy, name), compute_uv=False)
-            sv_ten = jnp.linalg.svd(
-                getattr(env_tensor, name).todense(), compute_uv=False
-            )
-            np.testing.assert_allclose(
-                jnp.sort(sv_ten),
-                jnp.sort(sv_leg),
-                atol=1e-10,
-                err_msg=f"{name} singular values mismatch",
-            )
+        """Obsolete: legacy CTM sweep no longer matches tensor path."""
 
     def test_ctm_tensor_symmetric_converges(self, small_peps_symmetric):
         """SymmetricTensor CTM converges (trivial charges)."""
@@ -424,64 +396,14 @@ class TestTwoSiteCTM:
         for field in env_B:
             assert jnp.all(jnp.isfinite(field.todense()))
 
+    @pytest.mark.skip(
+        reason="Tensor CTM path diverged from legacy _ctm_2site_sweep in "
+        "PR #291 (differentiable Fishman SVD projector + per-absorption "
+        "normalization). Each path is exercised in its own tests; cross-path "
+        "equivalence after a single sweep is no longer a design goal."
+    )
     def test_2site_dense_matches_legacy(self, small_peps_pair_dense):
-        """2-site DenseTensor CTM single sweep matches legacy 2-site CTM sweep.
-
-        Compares corner singular values (gauge-invariant) because ``eigh``
-        eigenvector ordering within degenerate subspaces can differ across
-        platforms (macOS vs Linux).
-        """
-        A, B = small_peps_pair_dense
-        chi = 6
-
-        # Legacy: build double-layers, init, one sweep
-        A_raw, B_raw = A.todense(), B.todense()
-        a_A = _build_double_layer(A_raw)
-        a_B = _build_double_layer(B_raw)
-        D_A, D_B = A_raw.shape[0], B_raw.shape[0]
-        a_A = a_A.reshape(D_A**2, D_A**2, D_A**2, D_A**2)
-        a_B = a_B.reshape(D_B**2, D_B**2, D_B**2, D_B**2)
-        env_A_leg = _initialize_ctm_env(a_A, chi)
-        env_B_leg = _initialize_ctm_env(a_B, chi)
-        env_A_leg, env_B_leg = _ctm_2site_sweep(
-            env_A_leg,
-            env_B_leg,
-            a_A,
-            a_B,
-            chi,
-            renormalize=True,
-        )
-
-        # Tensor-protocol: init, one sweep
-        dl = {
-            (0, 0): _build_double_layer_tensor(A),
-            (1, 0): _build_double_layer_tensor(B),
-        }
-        envs = {
-            (0, 0): initialize_ctm_tensor_env(A, chi),
-            (1, 0): initialize_ctm_tensor_env(B, chi),
-        }
-        envs = _ctm_tensor_sweep_multisite(
-            envs, dl, CHECKERBOARD_NEIGHBORS, chi, renormalize=True
-        )
-
-        # Compare corner singular values (gauge-invariant)
-        for sublattice, legacy_env, coord in [
-            ("A", env_A_leg, (0, 0)),
-            ("B", env_B_leg, (1, 0)),
-        ]:
-            tensor_env = envs[coord]
-            for name in ("C1", "C2", "C3", "C4"):
-                sv_leg = jnp.linalg.svd(getattr(legacy_env, name), compute_uv=False)
-                sv_ten = jnp.linalg.svd(
-                    getattr(tensor_env, name).todense(), compute_uv=False
-                )
-                np.testing.assert_allclose(
-                    jnp.sort(sv_ten),
-                    jnp.sort(sv_leg),
-                    atol=1e-10,
-                    err_msg=f"{sublattice}.{name} singular values mismatch",
-                )
+        """Obsolete: legacy 2-site CTM sweep no longer matches tensor path."""
 
     def test_2site_symmetric_converges(self, small_peps_pair_symmetric):
         """2-site SymmetricTensor CTM converges."""
