@@ -80,7 +80,7 @@ from tenax.linalg import eigh, qr, rsvd, svd
 from tenax.network.netfile import NetworkBlueprint, from_netfile
 from tenax.network.network import TensorNetwork, build_mps, build_peps
 
-__version__ = "0.4.2"
+__version__ = "0.5.0"
 
 # ---------------------------------------------------------------------------
 # Lazy imports: algorithm modules are loaded on first access
