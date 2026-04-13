@@ -94,4 +94,5 @@ guide/contributing
 
 contraction_semantics
 ipeps-code-paths
+dmrg-code-paths
 ```
