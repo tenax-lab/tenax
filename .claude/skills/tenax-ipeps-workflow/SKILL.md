@@ -122,6 +122,15 @@ energy, peps, (env_A, env_B) = ipeps(gate, None, config)
 print(f"Energy per site: {energy:.6f}")  # ≈ -0.65 for Heisenberg
 ```
 
+**AD stage: prefer the shared-tensor C4v path for spin-1/2 AFMs.**
+Under AD (Stage 3), the unconstrained 2-site optimizer is known to drift
+and produce unphysical energies. For Heisenberg-like models, add
+`gs_c4v=True` to the 2-site config: Tenax optimizes a single
+C4v-parameterized tensor `A` and derives `B` from `A` by sublattice
+rotation (`B = e^{i π σ^y/2}` on the physical leg). This is stable across
+χ=8–24 at D=2 Heisenberg and is the recommended 2-site path. It requires
+physical dimension d=2.
+
 ### Key parameters
 
 | Parameter | Role | Guidance |
