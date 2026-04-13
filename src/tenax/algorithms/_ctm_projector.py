@@ -693,6 +693,19 @@ def _compute_projector_tensor(
 
         M = jnp.concatenate([C1g_dense, C4g_dense], axis=1)
         Q, R = jnp.linalg.qr(M)
+        # QR sign-fix: force diag(R) >= 0 so the factorization is unique.
+        # Without this, JAX's QR makes a sign choice that depends on the
+        # specific values in M, and tiny perturbations of M can flip the
+        # sign — making the projector forward non-smooth and the AD
+        # gradient correspond to the wrong branch.  The product Q @ U
+        # below is mathematically invariant under simultaneous sign flips
+        # of (Q, R), so applying this fix has no effect on the forward
+        # output but makes the autodiff gradient consistent across
+        # arbitrarily small perturbations of M.
+        diag_R = jnp.diag(R)
+        signs = jnp.where(diag_R >= 0, 1.0, -1.0).astype(R.dtype)
+        Q = Q * signs[None, :]
+        R = R * signs[:, None]
         if _has_tracers:
             from tenax.algorithms.ad_utils import regularized_svd
 

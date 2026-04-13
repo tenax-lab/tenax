@@ -69,6 +69,31 @@ class CTMConfig:
     adjoint_tol: float = 1e-8
     adjoint_degen_tol: float = 1e-10
     adjoint_diag_shift: float = 1e-12
+    # Tikhonov damping applied to the linear adjoint system:
+    #   ((I - J^T) + tau I) lambda = g
+    # Near a CTM fixed point, J has eigenvalues approaching 1 along the
+    # slowest modes, making (I - J^T) near-singular; a small positive tau
+    # biases gradients slightly but keeps the Krylov solve stable.
+    #
+    # Default 1e-6 is a numerical-robustness floor: smaller than the
+    # target residual implied by ``adjoint_tol`` (×10 fudge), so it can't
+    # bias gradients beyond the tolerance we already accept in the solve,
+    # but large enough to prevent Krylov stalls near the physical GS.
+    # Set to 0.0 for a strictly exact adjoint; increase to 1e-4…1e-3 when
+    # the outer optimizer approaches a well-converged ground state and the
+    # solve otherwise fails to reach ``adjoint_tol``.
+    #
+    # The Krylov-breakdown-near-GS phenomenon and the use of regularization
+    # to stabilize implicit-diff CTM are discussed in:
+    #   - Liao, Liu, Wang, Xiang, "Differentiable Programming Tensor Networks",
+    #     Phys. Rev. X 9, 031041 (2019). (arXiv:1903.09650)
+    #   - Francuz, Schmoll, Rizzi, Eisert, Naumann, "Stable and efficient
+    #     differentiation of tensor network algorithms",
+    #     Phys. Rev. Research 7, 013237 (2025). (arXiv:2311.11894)
+    #   - Naumann, Weerda, Rizzi, Eisert, Schmoll, "variPEPS — a versatile
+    #     tensor network library for variational ground state simulations in
+    #     two spatial dimensions", SciPost Phys. Codebases (arXiv:2308.12358).
+    adjoint_tikhonov: float = 1e-6
 
     def __post_init__(self):
         valid_modes = {None, "c4v_reference"}

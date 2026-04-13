@@ -60,6 +60,10 @@ def test_ctmconfig_reference_mode_defaults():
     assert cfg.adjoint_tol == 1e-8
     assert cfg.adjoint_degen_tol == 1e-10
     assert cfg.adjoint_diag_shift == 1e-12
+    # Non-zero Tikhonov floor — keeps the adjoint Krylov solve from stalling
+    # when (I - J^T) is near-singular (see adjoint_tikhonov docstring).
+    assert cfg.adjoint_tikhonov == 1e-6
+    assert cfg.adjoint_tikhonov > 0.0
 
 
 def test_invalid_ctm_ad_mode_raises():
@@ -359,3 +363,171 @@ def test_complex_adjoint_backward_output_is_hermitian():
     dM = _truncated_eigh_lorentzian_backward(w, v, dw, dV, k=k)
     assert jnp.all(jnp.isfinite(dM))
     assert jnp.max(jnp.abs(dM - jnp.conj(dM).T)) < 1e-10
+
+
+# ---------------------------------------------------------------------------
+# Tikhonov damping on the linear adjoint system
+# ---------------------------------------------------------------------------
+
+
+def _reference_backward_on_random_A(cfg: CTMConfig, seed: int = 512):
+    """Run one reference-mode adjoint backward on a normalized random A."""
+    A = _wrap_as_dense_tensor(
+        jax.random.normal(jax.random.PRNGKey(seed), (2, 2, 2, 2, 2))
+    )
+    A = A * (1.0 / (A.norm() + 1e-10))
+    C, T = ctm_tensor_c4v_reference_converge_reduced(A, cfg)
+    g_c = C * 0.1
+    g_t = T * 0.1
+    dA, meta = ctm_tensor_c4v_reference_backward(A, C, T, g_c, g_t, cfg)
+    return dA, meta
+
+
+def _make_reference_cfg(**overrides) -> CTMConfig:
+    base = dict(
+        chi=4,
+        max_iter=8,
+        min_iter=2,
+        conv_tol=1e-8,
+        projector_method="eigh",
+        ctm_ad_mode="c4v_reference",
+        adjoint_solver="bicgstab",
+        adjoint_maxiter=30,
+        adjoint_tol=1e-8,
+    )
+    base.update(overrides)
+    return CTMConfig(**base)
+
+
+def test_adjoint_tikhonov_is_surfaced_in_meta():
+    """Backward meta should report the tau value actually used."""
+    cfg = _make_reference_cfg(adjoint_tikhonov=2.5e-4)
+    _dA, meta = _reference_backward_on_random_A(cfg)
+    assert meta["tikhonov"] == pytest.approx(2.5e-4)
+
+
+def test_adjoint_tikhonov_zero_meta_reflects_zero():
+    cfg = _make_reference_cfg(adjoint_tikhonov=0.0)
+    _dA, meta = _reference_backward_on_random_A(cfg)
+    assert meta["tikhonov"] == 0.0
+
+
+def test_adjoint_tikhonov_changes_gradient():
+    """Non-zero tau must visibly change ``dA`` compared to tau=0.
+
+    This is the wiring check: if the Tikhonov branch were ever
+    accidentally dropped, the gradient would be identical across any
+    choice of tau and this test would fail.
+    """
+    cfg_zero = _make_reference_cfg(adjoint_tikhonov=0.0)
+    cfg_damped = _make_reference_cfg(adjoint_tikhonov=1e-2)
+
+    dA_zero, _ = _reference_backward_on_random_A(cfg_zero)
+    dA_damped, _ = _reference_backward_on_random_A(cfg_damped)
+
+    assert jnp.all(jnp.isfinite(dA_zero.todense()))
+    assert jnp.all(jnp.isfinite(dA_damped.todense()))
+
+    diff_norm = float(jnp.linalg.norm(dA_zero.todense() - dA_damped.todense()))
+    zero_norm = float(jnp.linalg.norm(dA_zero.todense()))
+    # 1e-2 is a large tau — the gradient should differ well above
+    # floating-point noise but not be degenerate (still similar order).
+    assert diff_norm > 1e-6 * max(zero_norm, 1.0), (
+        f"Gradients look identical across tau=0 and tau=1e-2 "
+        f"(diff_norm={diff_norm:.3e}); the Tikhonov branch may have "
+        f"regressed."
+    )
+
+
+def test_adjoint_tikhonov_damped_system_converges_to_biased_solution():
+    """Hand-crafted near-singular ``(I - J^T)``: verify Tikhonov math.
+
+    Bypasses the full CTM backward and calls ``_solve_linear_adjoint``
+    directly with a diagonal matvec whose spectrum has one ~zero
+    eigenvalue. Wrapping the matvec with ``+ tau * I`` makes the system
+    well-conditioned; the resulting solution is the Tikhonov-biased
+    ``lam_i = rhs_i / (spec_i + tau)``.
+
+    This documents the mathematical principle the integration tests
+    above depend on.
+    """
+    spec = jnp.array([1e-10, 0.5, 1.0, 1.5, 2.0])
+    rhs = (jnp.ones(5),)
+
+    def apply_raw(v):
+        return (v[0] * spec,)
+
+    tau = 1e-3
+
+    def apply_damped(v):
+        base = apply_raw(v)
+        return (base[0] + tau * v[0],)
+
+    cfg_damped = _make_reference_cfg(
+        adjoint_solver="bicgstab",
+        adjoint_maxiter=20,
+        adjoint_tol=1e-10,
+        adjoint_tikhonov=tau,
+    )
+    lam, meta = _solve_linear_adjoint(apply_damped, rhs, cfg_damped)
+    assert meta["converged"] is True
+    # Tikhonov-biased solution: lam_i = rhs_i / (spec_i + tau).
+    expected = rhs[0] / (spec + tau)
+    assert jnp.allclose(lam[0], expected, atol=1e-6)
+    # Sanity check the shift: for the near-null mode, damped solution is
+    # ~1/tau, not ~1/spec, because tau dominates.
+    assert jnp.abs(lam[0][0] - 1.0 / tau) < 1e-3
+
+
+# ---------------------------------------------------------------------------
+# SU-init plateau regression
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.algorithm
+def test_random_init_escapes_su_plateau_with_tikhonov(heisenberg_gate):
+    """Reference-mode C4v with random init + Tikhonov must break past E=-0.5.
+
+    Regression for the bug that motivated ``adjoint_tikhonov``. The
+    sublattice-rotated Heisenberg Hamiltonian has the |↑↑⟩ product
+    state as a gradient-zero saddle at exactly E = -0.5 per site.
+    Simple-update init converges to that saddle, so L-BFGS cannot
+    escape; random init + small Tikhonov damping must.
+    """
+    from tenax import sublattice_rotate_gate
+
+    gate = sublattice_rotate_gate(heisenberg_gate)
+    # Fixed seed so the first-step adjoint system is deterministic.
+    A_init = jax.random.normal(jax.random.PRNGKey(2024), (2, 2, 2, 2, 2))
+    cfg = iPEPSConfig(
+        max_bond_dim=2,
+        ctm=CTMConfig(
+            chi=8,
+            max_iter=100,
+            min_iter=2,
+            ctm_ad_mode="c4v_reference",
+            adjoint_solver="bicgstab",
+            adjoint_maxiter=200,
+            # Loose tolerances — this test is about *escape*, not about
+            # gradient accuracy. A larger Tikhonov shift keeps the adjoint
+            # solve stable across the first few steps where the outer
+            # optimizer is still far from any fixed point.
+            adjoint_tol=1e-3,
+            adjoint_tikhonov=1e-2,
+        ),
+        gs_optimizer="lbfgs",
+        gs_num_steps=3,
+        gs_explicit_ad=False,
+        gs_c4v=True,
+        unit_cell="1x1",
+        su_init=False,
+    )
+    _A_opt, _env, E_final = optimize_gs_ad(gate, A_init, cfg)
+    assert np.isfinite(E_final)
+    # Classical |↑↑⟩ gives E=-0.5 exactly; any genuine progress off the
+    # plateau must land strictly below.
+    assert float(E_final) < -0.5 - 1e-3, (
+        f"E_final={float(E_final):.6f} is not below the product-state "
+        f"plateau at E=-0.5 — random init may be failing to break the "
+        f"saddle, or the Tikhonov-damped adjoint may have regressed."
+    )
