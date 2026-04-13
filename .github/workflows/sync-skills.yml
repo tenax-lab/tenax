@@ -41,6 +41,6 @@ jobs:
             --title "chore: sync skills from tenax" \
             --body "Auto-synced from [tenax main](https://github.com/tenax-lab/tenax)." \
             --repo tenax-lab/tenax-toolkit)
-          gh pr merge "$PR_URL" --squash --auto --delete-branch
+          gh pr merge "$PR_URL" --squash --delete-branch
         env:
           GH_TOKEN: ${{ secrets.PLUGIN_REPO_TOKEN }}
