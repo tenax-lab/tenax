@@ -503,8 +503,8 @@ def truncated_svd_symmetric_ad(
 # ---------------------------------------------------------------------------
 
 
-_PM_STR_TO_INT = {"eigh": 0, "qr": 1}
-_PM_INT_TO_STR = {0: "eigh", 1: "qr"}
+_PM_STR_TO_INT = {"eigh": 0, "qr": 1, "svd": 2}
+_PM_INT_TO_STR = {0: "eigh", 1: "qr", 2: "svd"}
 
 
 _CONV_METHOD_STR_TO_INT = {"sv": 0, "elementwise": 1}
