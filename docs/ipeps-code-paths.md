@@ -13,16 +13,16 @@ Paths marked **BROKEN** are known non-functional. Paths marked
 
 ```
                          ┌─────────────────────┐
-                         │  optimize_gs_ad()    │
-                         │  ipeps_optimize.py   │
+                         │  optimize_gs_ad()   │
+                         │  ipeps_optimize.py  │
                          └─────────┬───────────┘
                                    │
                 ┌──────────────────┼──────────────────┐
                 │                  │                   │
           ┌─────▼─────┐    ┌──────▼──────┐    ┌──────▼──────┐
-          │ su_init    │    │  random     │    │ A_init /    │
-          │ (SU→AD)    │    │ (fallback)  │    │ AB_init     │
-          │ (default)  │    │             │    │ (explicit)  │
+          │ su_init   │    │  random     │    │ A_init /    │
+          │ (SU→AD)   │    │ (fallback)  │    │ AB_init     │
+          │ (default) │    │             │    │ (explicit)  │
           └─────┬─────┘    └──────┬──────┘    └──────┬──────┘
                 └──────────────────┼──────────────────┘
                                    │
@@ -32,22 +32,25 @@ Paths marked **BROKEN** are known non-functional. Paths marked
        │ unit_cell="1x1" │                 │ unit_cell="2site"   │
        │ SINGLE_SITE     │                 │ CHECKERBOARD        │
        │                 │                 │                     │
-       │ gs_c4v=True:    │                 │ Neel init for       │
-       │  symmetrize_c4v │                 │ AFM (user provides) │
-       │  + sublattice   │                 │                     │
-       │  rotation       │                 │                     │
+       │ gs_c4v=True:    │                 │ gs_c4v=True:        │
+       │  symmetrize_c4v │                 │  shared-tensor C4v  │
+       │  + sublattice   │                 │  B = σ^y · A        │
+       │  rotation       │                 │  (spin-1/2 only)    │
+       │                 │                 │ gs_c4v=False:       │
+       │                 │                 │  independent A,B    │
+       │                 │                 │  (EXPERIMENTAL)     │
        └────────┬────────┘                 └──────────┬──────────┘
                 └──────────────────┬──────────────────┘
                                    │
               ┌────────────────────┼────────────────────┐
               │                                         │
      ┌────────▼──────────┐                  ┌───────────▼───────────┐
-     │ gs_optimizer       │                  │ gs_optimizer          │
-     │ = "lbfgs"          │                  │ = "cg" (default)     │
-     │ + hager_zhang LS   │                  │ Polak-Ribiere+       │
-     │ + metric_precond   │                  │ + metric_precond     │
-     │                    │                  │   (natural gradient) │
-     │ (recommended)      │                  │                      │
+     │ gs_optimizer      │                  │ gs_optimizer          │
+     │ = "lbfgs"         │                  │ = "cg" (default)      │
+     │ + hager_zhang LS  │                  │ Polak-Ribiere+        │
+     │ + metric_precond  │                  │ + metric_precond      │
+     │                   │                  │   (natural gradient)  │
+     │ (recommended)     │                  │                       │
      └────────┬──────────┘                  └───────────┬───────────┘
               └────────────────────┬────────────────────┘
                                    │
@@ -60,25 +63,30 @@ Paths marked **BROKEN** are known non-functional. Paths marked
           ┌────────────────────────┼────────────────────────┐
           │                                                 │
  gs_explicit_ad=True                           gs_explicit_ad=False
- (default, RECOMMENDED)                        (implicit, EXPERIMENTAL)
+ (default, RECOMMENDED)                        (implicit)
           │                                                 │
- ┌────────▼─────────────────────┐                ┌──────────▼─────────┐
- │ ctm_tensor_converge_explicit  │                │ ctm_tensor_        │
- │ (ad_utils.py)                 │                │ converge()         │
- │                               │                │ custom_vjp         │
- │ warmup (stop_gradient)        │                │                    │
- │ ──── W steps ────              │                └──────────┬─────────┘
- │                               │                           │
- │ auto-phase gauge promotion:   │                   ┌───────┼───────┐
- │  qr → phase when user left    │                   │               │
- │  forward_gauge="qr"           │                   ▼               ▼
- │                               │                 "vjp"        xxxxxxxxxxx
- │ backprop (jax.checkpoint)     │                 (supported)  x "gmres" x
- │ ──── B steps ────              │                               x BROKEN x
- │                               │                               x issue  x
- │ gauge modes honored:          │                               x #292   x
- │   qr / phase / sigma / none   │                               xxxxxxxxxxx
- └────────┬──────────────────────┘
+ ┌────────▼─────────────────────┐                ┌──────────▼───────────────┐
+ │ ctm_tensor_converge_explicit │                │ ctm_ad_mode selects      │
+ │ (ad_utils.py)                │                │ the backward path:       │
+ │                              │                └──────────┬───────────────┘
+ │ warmup (stop_gradient)       │                           │
+ │ ──── W steps ────            │                ┌──────────┴─────────┐
+ │                              │                │                    │
+ │ auto-phase gauge promotion:  │                ▼                    ▼
+ │  qr → phase when user left   │         ctm_ad_mode=None      ctm_ad_mode=
+ │  forward_gauge="qr"          │         (custom_vjp           "c4v_reference"
+ │                              │          ctm_tensor_converge) (Francuz et al.,
+ │ backprop (jax.checkpoint)    │                               dense 1-site
+ │ ──── B steps ────            │          ┌───────┼───────┐    C4v, opt-in)
+ │                              │          │               │
+ │ gauge modes honored:         │          ▼               ▼    adjoint_solver:
+ │   qr / phase / sigma / none  │        "vjp"        xxxxxxxxxxx  bicgstab /
+ │                              │        (supported)  x "gmres" x  gmres
+ │                              │                     x BROKEN  x
+ │                              │                     x issue   x
+ │                              │                     x #292    x
+ │                              │                     xxxxxxxxxxx
+ └────────┬─────────────────────┘
           │
           │ (both paths share the forward CTM stack below)
           │
@@ -90,8 +98,8 @@ Paths marked **BROKEN** are known non-functional. Paths marked
      │ O(chi^3 D^6)    │
      └────────┬────────┘
               │
-     ┌────────┼──────────────────────┐
-     │        │                      │
+     ┌────────┼─────────────────────┐
+     │        │                     │
  ┌───▼──────────────┐  ┌────────────▼─────────────────┐
  │ Standard CTM     │  │ C4v CTM                      │
  │ 4 moves/sweep    │  │ 1 move/sweep                 │
@@ -169,6 +177,60 @@ See [`docs/guide/algorithms/ipeps_ad_paths.md`](guide/algorithms/ipeps_ad_paths.
 for the full benchmark table, the forward-gauge mode matrix, and the
 ``gs_ctm_conv_tol_schedule`` tuning knob.
 
+## 2-site Shared-Tensor C4v (PR #304)
+
+For AFM checkerboard unit cells the 2-site optimizer supports a
+**shared-tensor C4v** mode, enabled by ``unit_cell="2site"`` together
+with ``gs_c4v=True``. A single C4v-parameterized tensor ``A`` is
+optimized and the second sublattice is derived as
+``B = einsum("luRDs,sS->luRDS", A, U_sub)`` with ``U_sub = e^{iπσ^y/2}``.
+This ties the two sublattices together and avoids the drift into
+non-variational CTM artifacts that affects the unconstrained 2-site
+path (issue #299).
+
+Constraints:
+
+- spin-1/2 only (physical dim ``d=2``); other dims raise ``ValueError``;
+- ``gs_stall_recovery="noise"`` is rejected (the noise branch requires
+  an ``(A, B)`` tuple — use ``"reset"`` or leave the default auto);
+- metric preconditioning is skipped because ``params`` is a flat
+  coefficient vector, not an ``(A, B)`` DenseTensor pair.
+
+The unconstrained 2-site path (``gs_c4v=False``) still exists for
+diagnostics but emits an ``experimental`` warning on entry; prefer the
+shared-tensor path for AFM models.
+
+## Reference-Mode C4v AD (PR #304, renamed in #306)
+
+A reference implicit-AD path that follows the stable
+fixed-point-differentiation construction of Francuz, Schuch, Vanhecke,
+*PRR* **7**, 013237 (2025) — stable truncated-eigh backward plus an
+implicit linear solve at the CTM fixed point. It is available for
+**dense 1-site C4v** runs only, lives in
+``src/tenax/algorithms/_ctm_tensor_c4v_reference_ad.py``, and is opt-in
+via ``CTMConfig(ctm_ad_mode="c4v_reference")``.
+
+```
+Forward:  A (C4v-projected) → dense C4v CTM fixed point (single C/T)
+Backward: stable truncated-eigh backward
+        + implicit solve  (I - J^T) λ = g
+          via bicgstab with gmres fallback
+```
+
+Strict gate — all of the following must hold, or the optimizer falls
+back to the standard path:
+
+- ``unit_cell="1x1"``,
+- ``gs_c4v=True``,
+- ``gs_explicit_ad=False``,
+- ``ctm.ctm_ad_mode="c4v_reference"``.
+
+Additional knobs on ``CTMConfig``: ``adjoint_solver`` (``"bicgstab"`` or
+``"gmres"``), ``adjoint_maxiter``, ``adjoint_tol``. On solver failure
+the Krylov adjoint raises rather than silently returning a
+non-solution, and records a ``converged`` flag in the backward meta
+dict. Dense tensors only for now — no SymmetricTensor path yet.
+
 ## Stall Recovery (issue #298)
 
 When the L-BFGS / CG line search cannot make progress the optimizer runs
@@ -205,6 +267,9 @@ The 2-site L-BFGS path still has a separate convergence gap at
 | Implicit diff + VJP backward      | **Working**      | Regression-covered; use with ``forward_gauge="sigma"``.            |
 | Implicit diff + GMRES backward    | **BROKEN**       | Spectral radius > 1; ``xfail`` regression. Tracked by issue #292.  |
 | C4v + sublattice rotation         | **Working**      | Recommended Zhang/Corboz-style path.                               |
+| 2-site shared-tensor C4v          | **Working**      | ``unit_cell="2site"`` + ``gs_c4v=True``; spin-1/2 only (PR #304).  |
+| 2-site independent A/B            | **EXPERIMENTAL** | Unconstrained 2-site AD; drifts to unphysical energies (issue #299).|
+| Reference-mode C4v AD             | **Working**      | ``ctm_ad_mode="c4v_reference"``; dense 1-site C4v only (PR #304).  |
 | QR-CTMRG (C4v)                    | **Working**      | Best-scaling projector at D=2; recommended for chi ≥ 16.           |
 | Phase gauge (``forward_gauge``)   | **Working**      | variPEPS-style Frobenius + phase fix; default for explicit AD.     |
 | Sigma gauge (``forward_gauge``)   | **Working**      | Historical; still required for the implicit-diff path.             |
@@ -240,6 +305,10 @@ for the full benchmark table and the projector × gauge comparison matrix.
 | Optimizer             | ``gs_optimizer``            | ``"cg"``         | ``"lbfgs"`` (recommended for AD)     |
 | C4v symmetry          | ``gs_c4v``                  | ``False``        | ``True`` = enforce C4v               |
 | AD method             | ``gs_explicit_ad``          | ``True``         | ``False`` = implicit diff            |
+| Implicit AD mode      | ``ctm_ad_mode``             | ``None``         | ``"c4v_reference"`` (Francuz et al., 1-site C4v) |
+| Implicit adjoint      | ``adjoint_solver``          | ``"bicgstab"``   | ``"gmres"`` (reference-mode only)    |
+| Adjoint max iters     | ``adjoint_maxiter``         | ``50``           | reference-mode only                  |
+| Adjoint tol           | ``adjoint_tol``             | ``1e-8``         | reference-mode only                  |
 | Warmup steps          | ``gs_explicit_ad_warmup``   | ``3``            | stop_gradient CTM steps              |
 | Backprop steps        | ``gs_explicit_ad_steps``    | ``20``           | differentiable CTM steps             |
 | AD projector override | ``gs_projector_method``     | ``None``         | ``"qr"`` (recommended)               |
@@ -268,6 +337,7 @@ the user has not opted into a different gauge.
 | CTM fixed-point AD (implicit/explicit)  | ``src/tenax/algorithms/ad_utils.py``          |
 | Standard CTM (Tensor protocol)          | ``src/tenax/algorithms/_ctm_tensor*.py``      |
 | C4v CTM + QR-CTMRG                     | ``src/tenax/algorithms/_ctm_tensor_c4v.py``   |
+| Reference-mode C4v AD (Francuz et al.)  | ``src/tenax/algorithms/_ctm_tensor_c4v_reference_ad.py`` |
 | Split CTM (Tensor protocol)             | ``src/tenax/algorithms/_split_ctm_tensor*.py``|
 | CTM projectors (eigh/QR/SVD)            | ``src/tenax/algorithms/_ctm_projector.py``    |
 | Metric preconditioning                  | ``src/tenax/algorithms/_metric_precond.py``   |

@@ -202,15 +202,16 @@ separately), the shared-tensor approach is stable across chi=8/16/20/24 at
 D=2 Heisenberg, while the independent path diverges to unphysical
 energies at chi>16.
 
-### Path 4: Paper-Faithful Dense C4v (Appendix C-F, Opt-In)
+### Path 4: Reference-Mode Dense C4v (Opt-In)
 
-This opt-in path follows the fixed-point differentiation structure in
-YASTN (arXiv:2311.11894, App. C-F) for **dense 1-site C4v** runs:
+This opt-in path follows the stable fixed-point differentiation
+construction of Francuz, Schuch, Vanhecke, *PRR* **7**, 013237 (2025)
+for **dense 1-site C4v** runs:
 
 ```
 Forward:  A (C4v-projected) -> dense C4v CTM fixed point (single C/T representation)
-Backward: Appendix-C eigendifferential + Appendix-F implicit solve
-          (I - J^T) lambda = g via bicgstab with gmres fallback
+Backward: stable truncated-eigh backward + implicit solve
+          (I - J^T) lambda = g  via bicgstab with gmres fallback
 ```
 
 **Enable it with:**
