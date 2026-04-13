@@ -3,6 +3,22 @@
 This module provides the forward fixed-point map used by the opt-in
 reference-mode iPEPS AD path. Backward/implicit differentiation is added
 separately.
+
+References
+----------
+- Liao, Liu, Wang, Xiang, "Differentiable Programming Tensor Networks",
+  Phys. Rev. X 9, 031041 (2019). arXiv:1903.09650.
+  Original implicit-diff CTM recipe; notes the near-singular ``(I - J^T)``
+  adjoint system and the need for regularization.
+- Francuz, Schmoll, Rizzi, Eisert, Naumann, "Stable and efficient
+  differentiation of tensor network algorithms",
+  Phys. Rev. Research 7, 013237 (2025). arXiv:2311.11894.
+  The paper this reference-mode C4v path implements (dense C4v fixed-point
+  backward, truncated-eigh Lorentzian VJP).
+- Naumann, Weerda, Rizzi, Eisert, Schmoll, "variPEPS — a versatile tensor
+  network library for variational ground state simulations in two spatial
+  dimensions", SciPost Phys. Codebases (arXiv:2308.12358). Similar Krylov
+  adjoint with diagonal scaling; we mirror its damping strategy.
 """
 
 from __future__ import annotations
@@ -293,9 +309,26 @@ def _ctm_tensor_c4v_reference_implicit_backward(
 
     _, vjp_site_fn = jax.vjp(_step_site, A)
 
-    def _apply_i_minus_jt(v):
-        jtv = vjp_env_fn(v)[0]
-        return _tree_sub(v, jtv)
+    # Tikhonov-damped adjoint matvec. Near a CTM fixed point, ``J`` has
+    # eigenvalues approaching 1 along the slowest-decaying modes, so
+    # ``(I - J^T)`` is near-singular and Krylov solvers stall. Adding
+    # ``tau * I`` shifts every eigenvalue by ``+tau``, bounding the condition
+    # number at ``(sigma_max + tau) / tau`` at the cost of an O(tau) bias in
+    # the gradient along the near-null directions. See the module docstring
+    # for references (Liao et al. 2019; Francuz et al. 2025; variPEPS).
+    tikhonov = float(getattr(config, "adjoint_tikhonov", 0.0) or 0.0)
+
+    if tikhonov > 0.0:
+
+        def _apply_i_minus_jt(v):
+            jtv = vjp_env_fn(v)[0]
+            base = _tree_sub(v, jtv)
+            return jax.tree.map(lambda b, w: b + tikhonov * w, base, v)
+    else:
+
+        def _apply_i_minus_jt(v):
+            jtv = vjp_env_fn(v)[0]
+            return _tree_sub(v, jtv)
 
     precond = _build_env_diag_preconditioner(
         C, T, float(getattr(config, "adjoint_diag_shift", 1e-12))
@@ -306,6 +339,7 @@ def _ctm_tensor_c4v_reference_implicit_backward(
         config,
         preconditioner=precond,
     )
+    solve_meta["tikhonov"] = tikhonov
     dA = vjp_site_fn(lam)[0]
     return dA, solve_meta
 
