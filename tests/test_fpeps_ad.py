@@ -44,6 +44,7 @@ def ipeps_config_medium():
         ctm=CTMConfig(chi=4, max_iter=15, conv_tol=1e-4),
         gs_num_steps=10,
         gs_learning_rate=1e-2,
+        gs_optimizer="adam",
         gs_verbose=False,
     )
 
@@ -217,13 +218,16 @@ class TestTodenseGradientFlow:
         assert float(jnp.linalg.norm(grad_data)) > 0, "DenseTensor gradient is zero"
 
     @pytest.mark.algorithm
-    def test_symmetric_nontrivial_gradient_nan(self):
-        """Document: SymmetricTensor with non-trivial charges produces NaN gradient.
+    def test_symmetric_nontrivial_gradient_finite(self):
+        """SymmetricTensor with non-trivial charges now produces finite gradients.
 
-        This is a known limitation. The gauge-fixing step calls
-        ``SymmetricTensor.from_dense(..., tol=inf)`` which breaks gradient
-        flow for non-trivial charge sectors.  The workaround is to convert
-        to DenseTensor before the AD loop (as ``optimize_fpeps_ad`` does).
+        Previously the gauge-fixing step called
+        ``SymmetricTensor.from_dense(..., tol=inf)`` which broke gradient
+        flow for non-trivial charge sectors, forcing ``optimize_fpeps_ad``
+        to convert to DenseTensor before the AD loop.  The NaN has since
+        been fixed, but ``optimize_fpeps_ad`` still wraps as DenseTensor
+        for other stability reasons; this test now asserts the fixed
+        behavior instead of documenting the old limitation.
         """
         from tenax.algorithms._ctm_tensor import initialize_ctm_tensor_env
         from tenax.algorithms.ad_utils import _config_to_tuple
@@ -251,12 +255,9 @@ class TestTodenseGradientFlow:
 
         energy, grads = jax.value_and_grad(loss_fn)(A_sym)
 
-        # Energy forward pass may be finite
-        # but the gradient is expected to contain NaN
+        assert np.isfinite(float(energy)), f"Energy is not finite: {energy}"
         grad_leaves = jax.tree.leaves(grads)
-        has_nan = any(bool(jnp.any(jnp.isnan(leaf))) for leaf in grad_leaves)
-        assert has_nan, (
-            "Expected NaN in SymmetricTensor gradient (non-trivial charges), "
-            "but all gradients are finite. If this passes, the NaN issue may "
-            "have been fixed -- consider removing the DenseTensor workaround."
+        assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in grad_leaves), (
+            "SymmetricTensor gradient contains NaN/inf — the gauge-fix "
+            "round-trip may have regressed."
         )
