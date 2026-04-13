@@ -18,7 +18,7 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), TRG, HOTRG, iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), fermionic iPEPS (fPEPS), quasiparticle excitations
 - **GPU/TPU-accelerated DMRG** — JIT-compiled sweeps via `jax.lax.scan` for dense tensors and per-operation JIT for block-sparse symmetric tensors; automatic warmup-to-JIT transition when bond dimensions are growing; multi-GPU sharding via GSPMD for large bond dimensions (`DMRGConfig(accelerator="jit"|"sharded")`)
 - **AutoMPO** — build Hamiltonian MPOs from symbolic operator descriptions (custom couplings, NNN, arbitrary spin); supports `symmetric=True` for U(1) block-sparse MPOs
-- **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237); L-BFGS with Hager-Zhang line search and metric preconditioning (Rader et al.), Adam (with cosine lr decay), and conjugate gradient optimizers; implicit AD via iterative VJP (default) and optional GMRES route; explicit AD through unrolled CTM iterations for 1-site C4v path; opt-in paper-faithful dense C4v Appendix C-F mode (`paper_ctm_ad="c4v_appendix_cf"`) with Krylov implicit backward (`bicgstab` + `gmres` fallback); sigma gauge fixing (`forward_gauge="sigma"`) for stable elementwise CTM convergence; C4v symmetry enforcement via explicit basis parameterization; chi-ramping schedule (`optimize_gs_ad_chi_schedule`) for progressive refinement; JIT CTM via `jax.lax.while_loop` for GPU kernel fusion (`jit_ctm=True`)
+- **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237); L-BFGS with Hager-Zhang line search and metric preconditioning (Rader et al.), Adam (with cosine lr decay), and conjugate gradient optimizers; implicit AD via iterative VJP (default) and optional GMRES route; explicit AD through unrolled CTM iterations for 1-site C4v path; **2-site shared-tensor C4v path** (`unit_cell="2site"` + `gs_c4v=True`) where a single C4v tensor is optimized and the second sublattice is derived by spin-π rotation, stable across χ=8–24 for spin-1/2 AFMs; opt-in reference-mode dense C4v Appendix C-F mode (`ctm_ad_mode="c4v_reference"`) with Krylov implicit backward (`bicgstab` + `gmres` fallback); sigma gauge fixing (`forward_gauge="sigma"`) for stable elementwise CTM convergence; C4v symmetry enforcement via explicit basis parameterization; chi-ramping schedule (`optimize_gs_ad_chi_schedule`) for progressive refinement; JIT CTM via `jax.lax.while_loop` for GPU kernel fusion (`jit_ctm=True`)
 - **SVD and QR CTMRG projectors** — SVD (Fishman) projectors (`projector_method="svd"`) and QR projectors for faster CTM convergence alongside the default `eigh`
 - **Split-CTMRG** — ket/bra-separated CTM environment tensors for O(χ³D³) projector cost instead of O(χ³D⁶); works with both `DenseTensor` and `SymmetricTensor` via the Tensor protocol (Naumann et al., arXiv:2502.10298)
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary Brillouin-zone momenta (Ponsioen et al. 2022)
@@ -73,8 +73,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tenax import (
-    U1Symmetry, TensorIndex, FlowDirection,
-    SymmetricTensor, TensorNetwork, contract
+    U1Symmetry,
+    TensorIndex,
+    FlowDirection,
+    SymmetricTensor,
+    TensorNetwork,
+    contract,
 )
 
 # Define U(1) symmetric tensor indices with named legs
@@ -85,16 +89,16 @@ key = jax.random.PRNGKey(0)
 
 A = SymmetricTensor.random_normal(
     indices=(
-        TensorIndex(u1, phys_charges, FlowDirection.IN,  label="p0"),
-        TensorIndex(u1, bond_charges, FlowDirection.IN,  label="left"),
+        TensorIndex(u1, phys_charges, FlowDirection.IN, label="p0"),
+        TensorIndex(u1, bond_charges, FlowDirection.IN, label="left"),
         TensorIndex(u1, bond_charges, FlowDirection.OUT, label="bond"),
     ),
     key=key,
 )
 B = SymmetricTensor.random_normal(
     indices=(
-        TensorIndex(u1, phys_charges, FlowDirection.IN,  label="p1"),
-        TensorIndex(u1, bond_charges, FlowDirection.IN,  label="bond"),  # shared label
+        TensorIndex(u1, phys_charges, FlowDirection.IN, label="p1"),
+        TensorIndex(u1, bond_charges, FlowDirection.IN, label="bond"),  # shared label
         TensorIndex(u1, bond_charges, FlowDirection.OUT, label="right"),
     ),
     key=jax.random.PRNGKey(1),
@@ -167,9 +171,9 @@ for x in range(Lx):
     for y in range(Ly):
         # Within-ring bond (periodic y)
         i, j = x * Ly + y, x * Ly + (y + 1) % Ly
-        auto += (1.0, "Sz", min(i,j), "Sz", max(i,j))
-        auto += (0.5, "Sp", min(i,j), "Sm", max(i,j))
-        auto += (0.5, "Sm", min(i,j), "Sp", max(i,j))
+        auto += (1.0, "Sz", min(i, j), "Sz", max(i, j))
+        auto += (0.5, "Sp", min(i, j), "Sm", max(i, j))
+        auto += (0.5, "Sm", min(i, j), "Sp", max(i, j))
         # Between-ring bond (open x)
         if x < Lx - 1:
             i, j = x * Ly + y, (x + 1) * Ly + y
@@ -251,6 +255,7 @@ mpo = auto.to_mpo()
 
 # Or use the functional interface with custom operators
 import numpy as np
+
 custom_ops = {
     "X": np.array([[0.0, 1.0], [1.0, 0.0]]),
     "Z": np.array([[1.0, 0.0], [0.0, -1.0]]),
@@ -274,9 +279,9 @@ from tenax import iPEPSConfig, CTMConfig, ipeps
 Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
 Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
 Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
-gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) \
-     + 0.5 * (jnp.einsum("ij,kl->ikjl", Sp, Sm)
-             + jnp.einsum("ij,kl->ikjl", Sm, Sp))
+gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) + 0.5 * (
+    jnp.einsum("ij,kl->ikjl", Sp, Sm) + jnp.einsum("ij,kl->ikjl", Sm, Sp)
+)
 
 # 2-site checkerboard iPEPS — captures Neel order
 config = iPEPSConfig(
@@ -297,17 +302,22 @@ See `examples/heisenberg_ipeps_su.py` for 1-site and 2-site unit cell examples.
 ```python
 import jax.numpy as jnp
 from tenax import (
-    iPEPSConfig, CTMConfig, optimize_gs_ad, optimize_gs_ad_chi_schedule,
-    ExcitationConfig, compute_excitations, make_momentum_path,
+    iPEPSConfig,
+    CTMConfig,
+    optimize_gs_ad,
+    optimize_gs_ad_chi_schedule,
+    ExcitationConfig,
+    compute_excitations,
+    make_momentum_path,
 )
 
 # Build a 2-site Heisenberg gate
 Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
 Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
 Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
-gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) \
-     + 0.5 * (jnp.einsum("ij,kl->ikjl", Sp, Sm)
-             + jnp.einsum("ij,kl->ikjl", Sm, Sp))
+gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) + 0.5 * (
+    jnp.einsum("ij,kl->ikjl", Sp, Sm) + jnp.einsum("ij,kl->ikjl", Sm, Sp)
+)
 
 # Recommended AD configuration: L-BFGS + explicit AD + QR projectors.
 # The optimizer auto-promotes forward_gauge="qr" to "phase" for the
@@ -318,14 +328,14 @@ config = iPEPSConfig(
     ctm=CTMConfig(
         chi=16,
         max_iter=80,
-        projector_method="qr",        # recommended projector for explicit AD
+        projector_method="qr",  # recommended projector for explicit AD
     ),
-    gs_explicit_ad=True,              # default; unrolled + checkpointed CTM
+    gs_explicit_ad=True,  # default; unrolled + checkpointed CTM
     gs_projector_method="qr",
-    gs_optimizer="lbfgs",             # L-BFGS with Hager-Zhang line search
+    gs_optimizer="lbfgs",  # L-BFGS with Hager-Zhang line search
     gs_line_search_method="hager_zhang",
-    gs_metric_precond=True,           # metric preconditioning (Rader et al.)
-    gs_c4v=True,                      # C4v basis parameterization
+    gs_metric_precond=True,  # metric preconditioning (Rader et al.)
+    gs_c4v=True,  # C4v basis parameterization
     su_init=True,
 )
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
@@ -335,14 +345,25 @@ print(f"Ground-state energy: {E_gs:.6f}")
 chi_schedule = [4, 8, 16]
 A_opt, env, E_gs = optimize_gs_ad_chi_schedule(gate, None, config, chi_schedule)
 
-# 2-site AD optimization for antiferromagnets (Neel order)
+# 2-site shared-tensor C4v AD for antiferromagnets (Neel order)
+# A single C4v-parameterized tensor is optimized; B is derived from A via
+# sublattice rotation B = e^{i pi sigma^y/2} on the physical leg.  This
+# ties the two sublattices together and avoids the A/B drift that makes
+# the unconstrained 2-site AD path unstable.  Spin-1/2 (d=2) only.
 config_2site = iPEPSConfig(
     max_bond_dim=2,
-    ctm=CTMConfig(chi=16, max_iter=50, projector_method="qr"),
+    ctm=CTMConfig(chi=16, max_iter=100, min_iter=50),
+    gs_optimizer="lbfgs",
     gs_explicit_ad=True,
-    gs_num_steps=200,
+    gs_explicit_ad_steps=10,
+    gs_explicit_ad_warmup=2,
+    gs_num_steps=50,
+    gs_line_search=True,
     unit_cell="2site",
+    gs_c4v=True,
     su_init=True,
+    num_imaginary_steps=100,
+    dt=0.3,
 )
 (A_opt, B_opt), (env_A, env_B), E_gs = optimize_gs_ad(gate, None, config_2site)
 
@@ -365,17 +386,17 @@ config_jit = iPEPSConfig(
 )
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config_jit)
 
-# Opt-in paper-faithful dense C4v mode (App. C-F)
-config_paper = iPEPSConfig(
+# Opt-in reference-mode dense C4v mode (Francuz et al., App. C-F)
+config_reference = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(
         chi=16,
         max_iter=80,
         projector_method="eigh",
-        paper_ctm_ad="c4v_appendix_cf",
-        paper_krylov_solver="bicgstab",
-        paper_krylov_maxiter=50,
-        paper_krylov_tol=1e-8,
+        ctm_ad_mode="c4v_reference",
+        adjoint_solver="bicgstab",
+        adjoint_maxiter=50,
+        adjoint_tol=1e-8,
     ),
     gs_explicit_ad=False,
     gs_c4v=True,
@@ -383,7 +404,7 @@ config_paper = iPEPSConfig(
     gs_num_steps=100,
     gs_optimizer="adam",
 )
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config_paper)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config_reference)
 
 # Quasiparticle excitations (Ponsioen et al. 2022)
 momenta = make_momentum_path("brillouin", num_points=20)
@@ -439,12 +460,13 @@ import numpy as np
 u1 = U1Symmetry()
 charges = np.array([-1, 0, 1], dtype=np.int32)
 print(u1.fuse(charges, charges))  # [-2, 0, 2]
-print(u1.dual(charges))           # [1, 0, -1]
+print(u1.dual(charges))  # [1, 0, -1]
 
 # Z_3: charges mod 3
 z3 = ZnSymmetry(3)
-print(z3.fuse(np.array([1, 2], dtype=np.int32),
-              np.array([2, 2], dtype=np.int32)))  # [0, 1]
+print(
+    z3.fuse(np.array([1, 2], dtype=np.int32), np.array([2, 2], dtype=np.int32))
+)  # [0, 1]
 
 # Product symmetry: combine two symmetries (e.g., charge × S_z)
 sym = ProductSymmetry(U1Symmetry(), U1Symmetry())
@@ -471,6 +493,7 @@ enable x64 manually:
 
 ```python
 import jax
+
 jax.config.update("jax_enable_x64", True)
 
 import tenax

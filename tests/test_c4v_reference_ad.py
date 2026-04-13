@@ -1,4 +1,4 @@
-"""Tests for the dense C4v paper-mode forward path (Appendix C-F roadmap)."""
+"""Tests for the dense C4v reference-mode path."""
 
 import itertools
 
@@ -9,13 +9,13 @@ import pytest
 
 from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_c4v import _c4v_to_full_env
-from tenax.algorithms._ctm_tensor_c4v_paper_ad import (
-    _appendix_c_truncated_eigh_backward,
-    _solve_linear_adjoint_paper,
-    ctm_tensor_c4v_paper_backward,
-    ctm_tensor_c4v_paper_converge_reduced,
-    ctm_tensor_c4v_paper_fixed_point,
-    truncated_eigh_appendix_c,
+from tenax.algorithms._ctm_tensor_c4v_reference_ad import (
+    _solve_linear_adjoint,
+    _truncated_eigh_lorentzian_backward,
+    ctm_tensor_c4v_reference_backward,
+    ctm_tensor_c4v_reference_converge_reduced,
+    ctm_tensor_c4v_reference_fixed_point,
+    truncated_eigh_regularized,
 )
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor, optimize_gs_ad
@@ -32,7 +32,7 @@ def heisenberg_gate():
     return H.reshape(d, d, d, d)
 
 
-def test_c4v_paper_fixed_point_returns_meta():
+def test_c4v_reference_fixed_point_returns_meta():
     A = _wrap_as_dense_tensor(jax.random.normal(jax.random.PRNGKey(0), (2, 2, 2, 2, 2)))
     cfg = CTMConfig(
         chi=4,
@@ -40,9 +40,9 @@ def test_c4v_paper_fixed_point_returns_meta():
         min_iter=2,
         conv_tol=1e-8,
         projector_method="eigh",
-        paper_ctm_ad="c4v_appendix_cf",
+        ctm_ad_mode="c4v_reference",
     )
-    env, meta = ctm_tensor_c4v_paper_fixed_point(A, cfg)
+    env, meta = ctm_tensor_c4v_reference_fixed_point(A, cfg)
 
     assert np.isfinite(env.C1.todense()).all()
     assert np.isfinite(env.T1.todense()).all()
@@ -52,62 +52,62 @@ def test_c4v_paper_fixed_point_returns_meta():
     assert np.isfinite(meta["residual"]) or np.isinf(meta["residual"])
 
 
-def test_ctmconfig_paper_mode_defaults():
+def test_ctmconfig_reference_mode_defaults():
     cfg = CTMConfig()
-    assert cfg.paper_ctm_ad is None
-    assert cfg.paper_krylov_solver == "bicgstab"
-    assert cfg.paper_krylov_maxiter == 50
-    assert cfg.paper_krylov_tol == 1e-8
-    assert cfg.paper_degen_tol == 1e-10
-    assert cfg.paper_diag_shift == 1e-12
+    assert cfg.ctm_ad_mode is None
+    assert cfg.adjoint_solver == "bicgstab"
+    assert cfg.adjoint_maxiter == 50
+    assert cfg.adjoint_tol == 1e-8
+    assert cfg.adjoint_degen_tol == 1e-10
+    assert cfg.adjoint_diag_shift == 1e-12
 
 
-def test_invalid_paper_ctm_ad_raises():
-    with pytest.raises(ValueError, match="paper_ctm_ad"):
-        CTMConfig(paper_ctm_ad="bad_mode")
+def test_invalid_ctm_ad_mode_raises():
+    with pytest.raises(ValueError, match="ctm_ad_mode"):
+        CTMConfig(ctm_ad_mode="bad_mode")
 
 
-def test_invalid_paper_krylov_solver_raises():
-    with pytest.raises(ValueError, match="paper_krylov_solver"):
-        CTMConfig(paper_krylov_solver="bad_solver")
+def test_invalid_adjoint_solver_raises():
+    with pytest.raises(ValueError, match="adjoint_solver"):
+        CTMConfig(adjoint_solver="bad_solver")
 
 
-def test_paper_mode_dispatch_is_strictly_gated(heisenberg_gate, monkeypatch):
-    """Paper path dispatch should trigger only for the strict mode gate."""
+def test_reference_mode_dispatch_is_strictly_gated(heisenberg_gate, monkeypatch):
+    """Reference path dispatch should trigger only for the strict mode gate."""
     import tenax.algorithms.ipeps_optimize as _opt
 
-    class _PaperCalled(Exception):
+    class _ReferenceCalled(Exception):
         pass
 
     class _DefaultCalled(Exception):
         pass
 
-    def _paper_spy(*_args, **_kwargs):
-        raise _PaperCalled
+    def _reference_spy(*_args, **_kwargs):
+        raise _ReferenceCalled
 
     def _default_spy(*_args, **_kwargs):
         raise _DefaultCalled
 
-    monkeypatch.setattr(_opt, "_optimize_gs_ad_tensor_paper_c4v", _paper_spy)
+    monkeypatch.setattr(_opt, "_optimize_gs_ad_tensor_reference_c4v", _reference_spy)
     monkeypatch.setattr(_opt, "_optimize_gs_ad_tensor", _default_spy)
 
     A0 = jax.random.normal(jax.random.PRNGKey(123), (2, 2, 2, 2, 2))
 
-    cfg_paper = iPEPSConfig(
+    cfg_reference = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=3, paper_ctm_ad="c4v_appendix_cf"),
+        ctm=CTMConfig(chi=4, max_iter=3, ctm_ad_mode="c4v_reference"),
         gs_num_steps=0,
         gs_explicit_ad=False,
         gs_c4v=True,
         unit_cell="1x1",
         su_init=False,
     )
-    with pytest.raises(_PaperCalled):
-        optimize_gs_ad(heisenberg_gate, A0, cfg_paper)
+    with pytest.raises(_ReferenceCalled):
+        optimize_gs_ad(heisenberg_gate, A0, cfg_reference)
 
-    cfg_not_paper = iPEPSConfig(
+    cfg_not_reference = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=3, paper_ctm_ad="c4v_appendix_cf"),
+        ctm=CTMConfig(chi=4, max_iter=3, ctm_ad_mode="c4v_reference"),
         gs_num_steps=0,
         gs_explicit_ad=False,
         gs_c4v=False,
@@ -115,14 +115,14 @@ def test_paper_mode_dispatch_is_strictly_gated(heisenberg_gate, monkeypatch):
         su_init=False,
     )
     with pytest.raises(_DefaultCalled):
-        optimize_gs_ad(heisenberg_gate, A0, cfg_not_paper)
+        optimize_gs_ad(heisenberg_gate, A0, cfg_not_reference)
 
 
-def test_optimize_gs_ad_paper_mode_zero_steps_runs(heisenberg_gate):
+def test_optimize_gs_ad_reference_mode_zero_steps_runs(heisenberg_gate):
     A0 = jax.random.normal(jax.random.PRNGKey(1), (2, 2, 2, 2, 2))
     config = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=10, min_iter=2, paper_ctm_ad="c4v_appendix_cf"),
+        ctm=CTMConfig(chi=4, max_iter=10, min_iter=2, ctm_ad_mode="c4v_reference"),
         gs_num_steps=0,
         gs_explicit_ad=False,
         gs_c4v=True,
@@ -136,11 +136,11 @@ def test_optimize_gs_ad_paper_mode_zero_steps_runs(heisenberg_gate):
     assert np.isfinite(E)
 
 
-def test_optimize_gs_ad_paper_mode_nonzero_steps_runs(heisenberg_gate):
+def test_optimize_gs_ad_reference_mode_nonzero_steps_runs(heisenberg_gate):
     A0 = jax.random.normal(jax.random.PRNGKey(2), (2, 2, 2, 2, 2))
     config = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=10, min_iter=2, paper_ctm_ad="c4v_appendix_cf"),
+        ctm=CTMConfig(chi=4, max_iter=10, min_iter=2, ctm_ad_mode="c4v_reference"),
         gs_num_steps=1,
         gs_explicit_ad=False,
         gs_c4v=True,
@@ -153,7 +153,7 @@ def test_optimize_gs_ad_paper_mode_nonzero_steps_runs(heisenberg_gate):
     assert np.isfinite(E)
 
 
-def test_truncated_eigh_appendix_c_gradient_finite_degenerate():
+def test_truncated_eigh_regularized_gradient_finite_degenerate():
     key = jax.random.PRNGKey(77)
     Q, _ = jnp.linalg.qr(jax.random.normal(key, (6, 6)))
     w = jnp.array([3.0, 3.0, 2.0, 2.0, 1.0, 0.5])
@@ -161,7 +161,7 @@ def test_truncated_eigh_appendix_c_gradient_finite_degenerate():
     M = 0.5 * (M + M.T)
 
     def loss(M_in):
-        vals, vecs = truncated_eigh_appendix_c(M_in, 3)
+        vals, vecs = truncated_eigh_regularized(M_in, 3)
         return jnp.sum(vals**2) + jnp.sum(vecs[:, 0] ** 2)
 
     grad = jax.grad(loss)(M)
@@ -182,7 +182,7 @@ def _finite_difference_grad(loss_fn, M, eps=1e-5):
     return grad
 
 
-def test_truncated_eigh_appendix_c_finite_difference_agreement():
+def test_truncated_eigh_regularized_finite_difference_agreement():
     key = jax.random.PRNGKey(1234)
     M0 = jax.random.normal(key, (5, 5))
     M0 = 0.5 * (M0 + M0.T)
@@ -191,7 +191,7 @@ def test_truncated_eigh_appendix_c_finite_difference_agreement():
     W = 0.5 * (W + W.T)
 
     def loss(M_in):
-        vals, vecs = truncated_eigh_appendix_c(M_in, 3)
+        vals, vecs = truncated_eigh_regularized(M_in, 3)
         P = vecs @ vecs.T
         return jnp.sum(vals**2) + 0.2 * jnp.trace(P @ W)
 
@@ -199,11 +199,11 @@ def test_truncated_eigh_appendix_c_finite_difference_agreement():
     g_fd = _finite_difference_grad(loss, M0)
     max_diff = float(jnp.max(jnp.abs(g_ad - g_fd)))
     assert max_diff < 1.5e-1, (
-        f"Appendix-C truncated eigh FD mismatch too large: {max_diff}"
+        f"Regularized truncated eigh FD mismatch too large: {max_diff}"
     )
 
 
-def test_appendix_c_truncation_correction_improves_fd_error():
+def test_regularized_truncation_correction_improves_fd_error():
     key = jax.random.PRNGKey(999)
     Q, _ = jnp.linalg.qr(jax.random.normal(key, (6, 6)))
     # Near-degenerate boundary between kept/discarded sectors for k=3.
@@ -217,15 +217,15 @@ def test_appendix_c_truncation_correction_improves_fd_error():
     k = 3
 
     def loss(M_in):
-        vals, vecs = truncated_eigh_appendix_c(M_in, k)
+        vals, vecs = truncated_eigh_regularized(M_in, k)
         P = vecs @ vecs.T
         return jnp.sum(vals**2) + 0.3 * jnp.trace(P @ W)
 
     g_fd = _finite_difference_grad(loss, M)
-    vals, vecs = truncated_eigh_appendix_c(M, k)
+    vals, vecs = truncated_eigh_regularized(M, k)
     dvals = 2.0 * vals
     dvecs = 0.6 * (W @ vecs)
-    g_ref = _appendix_c_truncated_eigh_backward(w, v, dvals, dvecs, k=k)
+    g_ref = _truncated_eigh_lorentzian_backward(w, v, dvals, dvecs, k=k)
 
     # Naive backward: keep-kept only (omit kept-discarded correction)
     V_k = v[:, :k]
@@ -243,26 +243,26 @@ def test_appendix_c_truncation_correction_improves_fd_error():
     err_ref = float(jnp.linalg.norm(g_ref - g_fd))
     err_naive = float(jnp.linalg.norm(g_naive - g_fd))
     assert err_ref <= err_naive + 1e-8, (
-        f"Expected corrected Appendix-C backward to beat/equal naive: "
+        f"Expected corrected regularized backward to beat/equal naive: "
         f"err_ref={err_ref}, err_naive={err_naive}"
     )
 
 
-def test_paper_mode_backward_gradient_is_finite_and_deterministic(heisenberg_gate):
+def test_reference_mode_backward_gradient_is_finite_and_deterministic(heisenberg_gate):
     cfg = CTMConfig(
         chi=4,
         max_iter=8,
         min_iter=2,
         conv_tol=1e-8,
         projector_method="eigh",
-        paper_ctm_ad="c4v_appendix_cf",
+        ctm_ad_mode="c4v_reference",
     )
     A0 = jax.random.normal(jax.random.PRNGKey(321), (2, 2, 2, 2, 2))
 
     def loss(A_data):
         A = _wrap_as_dense_tensor(A_data)
         A = A * (1.0 / (A.norm() + 1e-10))
-        C, T = ctm_tensor_c4v_paper_converge_reduced(A, cfg)
+        C, T = ctm_tensor_c4v_reference_converge_reduced(A, cfg)
         env = _c4v_to_full_env(C, T)
         return compute_energy_ctm_tensor(A, env, heisenberg_gate, 2)
 
@@ -273,39 +273,39 @@ def test_paper_mode_backward_gradient_is_finite_and_deterministic(heisenberg_gat
     assert jnp.allclose(g1, g2, rtol=1e-10, atol=1e-10)
 
 
-def test_paper_mode_krylov_backward_residual_below_threshold():
+def test_reference_mode_krylov_backward_residual_below_threshold():
     cfg = CTMConfig(
         chi=4,
         max_iter=8,
         min_iter=2,
         conv_tol=1e-8,
         projector_method="eigh",
-        paper_ctm_ad="c4v_appendix_cf",
-        paper_krylov_solver="bicgstab",
-        paper_krylov_maxiter=30,
-        paper_krylov_tol=1e-8,
+        ctm_ad_mode="c4v_reference",
+        adjoint_solver="bicgstab",
+        adjoint_maxiter=30,
+        adjoint_tol=1e-8,
     )
     A = _wrap_as_dense_tensor(
         jax.random.normal(jax.random.PRNGKey(404), (2, 2, 2, 2, 2))
     )
     A = A * (1.0 / (A.norm() + 1e-10))
-    C, T = ctm_tensor_c4v_paper_converge_reduced(A, cfg)
+    C, T = ctm_tensor_c4v_reference_converge_reduced(A, cfg)
     g_c = C * 0.1
     g_t = T * 0.1
-    dA, meta = ctm_tensor_c4v_paper_backward(A, C, T, g_c, g_t, cfg)
+    dA, meta = ctm_tensor_c4v_reference_backward(A, C, T, g_c, g_t, cfg)
     assert isinstance(dA, DenseTensor)
     assert jnp.all(jnp.isfinite(dA.todense()))
-    assert meta["residual"] <= max(cfg.paper_krylov_tol * 10.0, 1e-12)
+    assert meta["residual"] <= max(cfg.adjoint_tol * 10.0, 1e-12)
 
 
-def test_paper_mode_krylov_fallback_to_gmres(monkeypatch):
-    import tenax.algorithms._ctm_tensor_c4v_paper_ad as paper
+def test_reference_mode_krylov_fallback_to_gmres(monkeypatch):
+    import tenax.algorithms._ctm_tensor_c4v_reference_ad as reference_mod
 
     cfg = CTMConfig(
-        paper_ctm_ad="c4v_appendix_cf",
-        paper_krylov_solver="bicgstab",
-        paper_krylov_maxiter=20,
-        paper_krylov_tol=1e-8,
+        ctm_ad_mode="c4v_reference",
+        adjoint_solver="bicgstab",
+        adjoint_maxiter=20,
+        adjoint_tol=1e-8,
     )
 
     def _apply(v):
@@ -317,14 +317,14 @@ def test_paper_mode_krylov_fallback_to_gmres(monkeypatch):
         bad = (jnp.array([100.0, 100.0, 100.0]),)
         return bad, None
 
-    monkeypatch.setattr(paper, "_krylov_bicgstab", _bad_bicg)
-    _lam, meta = _solve_linear_adjoint_paper(_apply, rhs, cfg)
+    monkeypatch.setattr(reference_mod, "_krylov_bicgstab", _bad_bicg)
+    _lam, meta = _solve_linear_adjoint(_apply, rhs, cfg)
     assert meta["used_fallback"] is True
     assert meta["solver_used"] == "gmres"
-    assert meta["residual"] <= max(cfg.paper_krylov_tol * 10.0, 1e-12)
+    assert meta["residual"] <= max(cfg.adjoint_tol * 10.0, 1e-12)
 
 
-def test_appendix_e_complex_gradient_is_hermitian():
+def test_complex_adjoint_gradient_is_hermitian():
     key_r = jax.random.PRNGKey(2001)
     key_i = jax.random.PRNGKey(2002)
     X = jax.random.normal(key_r, (5, 5)) + 1j * jax.random.normal(key_i, (5, 5))
@@ -335,7 +335,7 @@ def test_appendix_e_complex_gradient_is_hermitian():
     W = 0.5 * (W + jnp.conj(W).T)
 
     def loss(M_in):
-        vals, vecs = truncated_eigh_appendix_c(M_in, 3)
+        vals, vecs = truncated_eigh_regularized(M_in, 3)
         P = vecs @ jnp.conj(vecs).T
         return jnp.real(jnp.sum(vals**2) + 0.15 * jnp.trace(P @ W))
 
@@ -344,7 +344,7 @@ def test_appendix_e_complex_gradient_is_hermitian():
     assert jnp.max(jnp.abs(grad - jnp.conj(grad).T)) < 1e-10
 
 
-def test_appendix_e_complex_backward_output_is_hermitian():
+def test_complex_adjoint_backward_output_is_hermitian():
     key = jax.random.PRNGKey(2010)
     X = jax.random.normal(key, (4, 4)) + 1j * jax.random.normal(
         jax.random.PRNGKey(2011), (4, 4)
@@ -356,6 +356,6 @@ def test_appendix_e_complex_backward_output_is_hermitian():
     dV = jax.random.normal(jax.random.PRNGKey(2013), (4, k)) + 1j * jax.random.normal(
         jax.random.PRNGKey(2014), (4, k)
     )
-    dM = _appendix_c_truncated_eigh_backward(w, v, dw, dV, k=k)
+    dM = _truncated_eigh_lorentzian_backward(w, v, dw, dV, k=k)
     assert jnp.all(jnp.isfinite(dM))
     assert jnp.max(jnp.abs(dM - jnp.conj(dM).T)) < 1e-10
