@@ -335,8 +335,8 @@ def optimize_gs_ad(
 
     if config.unit_cell == "2site":
         return _optimize_gs_ad_2site(hamiltonian_gate, A_init, config)
-    if _use_paper_c4v_path(config):
-        return _optimize_gs_ad_tensor_paper_c4v(hamiltonian_gate, A_init, config)
+    if _use_reference_c4v_path(config):
+        return _optimize_gs_ad_tensor_reference_c4v(hamiltonian_gate, A_init, config)
 
     # Wrap raw jax.Array as DenseTensor so we always use the Tensor-protocol path.
     if A_init is not None and not isinstance(A_init, Tensor):
@@ -363,29 +363,29 @@ def optimize_gs_ad(
     return _optimize_gs_ad_tensor(hamiltonian_gate, A_init, config)
 
 
-def _use_paper_c4v_path(config: iPEPSConfig) -> bool:
-    """Return True when the strict paper-mode gate is satisfied."""
+def _use_reference_c4v_path(config: iPEPSConfig) -> bool:
+    """Return True when the strict reference-mode gate is satisfied."""
     return (
         config.unit_cell == "1x1"
         and config.gs_c4v
         and not config.gs_explicit_ad
-        and getattr(config.ctm, "paper_ctm_ad", None) == "c4v_appendix_cf"
+        and getattr(config.ctm, "ctm_ad_mode", None) == "c4v_reference"
     )
 
 
-def _optimize_gs_ad_tensor_paper_c4v(
+def _optimize_gs_ad_tensor_reference_c4v(
     hamiltonian_gate: jax.Array | Tensor,
     A_init: jax.Array | Tensor | None,
     config: iPEPSConfig,
 ):
-    """Paper-mode dense C4v path with implicit-AD CTM backward."""
+    """Reference-mode dense C4v path with implicit-AD CTM backward."""
     import optax
 
     from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
     from tenax.algorithms._ctm_tensor_c4v import _c4v_to_full_env
-    from tenax.algorithms._ctm_tensor_c4v_paper_ad import (
-        ctm_tensor_c4v_paper_converge_reduced,
-        ctm_tensor_c4v_paper_fixed_point,
+    from tenax.algorithms._ctm_tensor_c4v_reference_ad import (
+        ctm_tensor_c4v_reference_converge_reduced,
+        ctm_tensor_c4v_reference_fixed_point,
     )
     from tenax.algorithms.ipeps import (
         build_c4v_basis,
@@ -416,7 +416,7 @@ def _optimize_gs_ad_tensor_paper_c4v(
 
     if not isinstance(A, DenseTensor):
         raise TypeError(
-            "paper_ctm_ad='c4v_appendix_cf' currently supports DenseTensor inputs only."
+            "ctm_ad_mode='c4v_reference' currently supports DenseTensor inputs only."
         )
 
     A = A * (1.0 / (A.norm() + 1e-10))
@@ -439,7 +439,7 @@ def _optimize_gs_ad_tensor_paper_c4v(
         ctm_cfg = _replace(ctm_cfg, projector_method=config.gs_projector_method)
 
     if config.gs_num_steps == 0:
-        env, _meta = ctm_tensor_c4v_paper_fixed_point(A, ctm_cfg)
+        env, _meta = ctm_tensor_c4v_reference_fixed_point(A, ctm_cfg)
         E0 = float(compute_energy_ctm_tensor(A, env, gate, d_phys))
         return A, env, E0
 
@@ -458,7 +458,7 @@ def _optimize_gs_ad_tensor_paper_c4v(
     def _loss_fn(A_data):
         A_proj = _project_c4v_and_normalize(A_data)
         A_tensor = DenseTensor(A_proj, A.indices)
-        C, T = ctm_tensor_c4v_paper_converge_reduced(A_tensor, ctm_cfg)
+        C, T = ctm_tensor_c4v_reference_converge_reduced(A_tensor, ctm_cfg)
         env = _c4v_to_full_env(C, T)
         energy = compute_energy_ctm_tensor(A_tensor, env, gate, d_phys)
         return energy, (env, A_tensor)
@@ -1411,10 +1411,16 @@ def _optimize_gs_ad_tensor_2site(
                 A_cur, B_cur = params
                 A_g, B_g = grads
                 p_flat = jnp.concatenate(
-                    [A_cur.todense().reshape(-1), B_cur.todense().reshape(-1)]
+                    [
+                        A_cur.todense().reshape(-1),
+                        B_cur.todense().reshape(-1),
+                    ]
                 )
                 g_flat = jnp.concatenate(
-                    [A_g.todense().reshape(-1), B_g.todense().reshape(-1)]
+                    [
+                        A_g.todense().reshape(-1),
+                        B_g.todense().reshape(-1),
+                    ]
                 )
 
             if prev_params_flat is not None:
@@ -1459,7 +1465,10 @@ def _optimize_gs_ad_tensor_2site(
                         sites_m, envs_m, grads_v, delta_metric, config
                     )
                     return jnp.concatenate(
-                        [z_dict[(0, 0)].reshape(-1), z_dict[(1, 0)].reshape(-1)]
+                        [
+                            z_dict[(0, 0)].reshape(-1),
+                            z_dict[(1, 0)].reshape(-1),
+                        ]
                     )
 
                 direction_flat = lbfgs_two_loop(g_flat, lbfgs_history, h0_matvec)

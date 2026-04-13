@@ -8,8 +8,11 @@ against the AFM Heisenberg model on the square lattice.
 
 ```python
 from tenax import (
-    CTMConfig, iPEPSConfig, heisenberg_gate,
-    optimize_gs_ad, optimize_gs_ad_chi_schedule,
+    CTMConfig,
+    iPEPSConfig,
+    heisenberg_gate,
+    optimize_gs_ad,
+    optimize_gs_ad_chi_schedule,
     sublattice_rotate_gate,
 )
 
@@ -23,7 +26,7 @@ config = iPEPSConfig(
         chi=16,
         max_iter=80,
         conv_tol=1e-8,
-        projector_method="qr",        # fastest, best energy, scales to chi=64+
+        projector_method="qr",  # fastest, best energy, scales to chi=64+
         # forward_gauge auto-set to "phase" for explicit AD
     ),
     gs_explicit_ad=True,
@@ -147,7 +150,59 @@ This is the YASTN approach (arXiv:2311.11894), adapted for JAX. For new
 code prefer Path 1 — the explicit-AD path does not exercise the implicit
 backward at all.
 
-### Path 3: Paper-Faithful Dense C4v (Appendix C-F, Opt-In)
+### Path 3: 2-site Shared-Tensor C4v (Checkerboard AFM)
+
+For antiferromagnetic models on the square lattice where the Néel order is
+explicit in the unit cell, the 2-site shared-tensor C4v path optimizes a
+**single** C4v-parameterized tensor ``A`` and derives ``B`` from ``A`` via
+sublattice rotation on the physical leg:
+
+```
+B = einsum("luRDs,sS->luRDS", A, U_sub)     U_sub = e^{i π σ^y / 2}
+```
+
+This ties the two sublattices together, eliminating the A/B drift that
+causes the unconstrained 2-site AD path to collapse into non-variational
+CTM artifacts. The rotation is spin-1/2 specific — the path raises
+``ValueError`` for physical dimension ``d ≠ 2``.
+
+**Enable it with:**
+
+```python
+config = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(chi=16, max_iter=100, min_iter=50),
+    gs_optimizer="lbfgs",
+    gs_num_steps=50,
+    gs_line_search=True,
+    gs_explicit_ad=True,
+    gs_explicit_ad_steps=10,
+    gs_explicit_ad_warmup=2,
+    su_init=True,
+    num_imaginary_steps=100,
+    dt=0.3,
+    unit_cell="2site",
+    gs_c4v=True,
+)
+_, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
+```
+
+**Constraints:**
+
+- spin-1/2 only (``d=2``) — the physical-leg rotation is hard-coded
+  to ``e^{i π σ^y/2}``,
+- ``gs_stall_recovery="noise"`` is rejected with a clear error (the noise
+  branch requires ``(A, B)`` tuple params; use the ``"reset"`` default or
+  the ``"reset"`` auto-default for 2-site),
+- metric preconditioning is skipped on this path because ``params`` is
+  a flat coefficient vector rather than a ``(A, B)`` DenseTensor pair.
+
+Compared to the legacy independent 2-site path (each sublattice parameterized
+separately), the shared-tensor approach is stable across chi=8/16/20/24 at
+D=2 Heisenberg, while the independent path diverges to unphysical
+energies at chi>16.
+
+### Path 4: Paper-Faithful Dense C4v (Appendix C-F, Opt-In)
 
 This opt-in path follows the fixed-point differentiation structure in
 YASTN (arXiv:2311.11894, App. C-F) for **dense 1-site C4v** runs:
@@ -167,10 +222,10 @@ config = iPEPSConfig(
     unit_cell="1x1",
     ctm=CTMConfig(
         chi=16,
-        paper_ctm_ad="c4v_appendix_cf",
-        paper_krylov_solver="bicgstab",  # or "gmres"
-        paper_krylov_maxiter=50,
-        paper_krylov_tol=1e-8,
+        ctm_ad_mode="c4v_reference",
+        adjoint_solver="bicgstab",  # or "gmres"
+        adjoint_maxiter=50,
+        adjoint_tol=1e-8,
     ),
 )
 ```
@@ -178,7 +233,7 @@ config = iPEPSConfig(
 **Current scope and constraints:**
 - dense tensors only (no SymmetricTensor path yet),
 - strict gate: `unit_cell="1x1"`, `gs_c4v=True`, `gs_explicit_ad=False`,
-  `ctm.paper_ctm_ad="c4v_appendix_cf"`,
+  `ctm.ctm_ad_mode="c4v_reference"`,
 - supports `gs_num_steps>0` optimization with implicit gradients.
 
 ## Forward Gauge Mode Matrix
@@ -301,9 +356,11 @@ optimization stability and speed.
    diagnostic mode.
 
 3. **2-site explicit AD**: The 2-site optimizer supports the same
-   auto-phase promotion as the 1-site C4v path, but its convergence has
-   not been benchmarked as thoroughly as the 1-site C4v workflow. Treat
-   the 2-site explicit-AD path as experimental for now.
+   auto-phase promotion as the 1-site C4v path. For antiferromagnetic
+   models, prefer the 2-site **shared-tensor C4v path** (Path 3) over
+   the unconstrained 2-site optimizer, which is known to drift apart
+   and produce unphysical energies. The unconstrained path emits an
+   ``experimental`` warning on entry.
 
 4. **SymmetricTensor**: Block-sparse tensors fall back to the Python loop
    (not JIT-traceable). Both phase and sigma gauge work on this path, but

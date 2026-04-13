@@ -1,7 +1,7 @@
-"""Paper-mode dense C4v CTM forward fixed-point utilities.
+"""Reference-mode dense C4v CTM forward fixed-point utilities.
 
 This module provides the forward fixed-point map used by the opt-in
-paper-faithful iPEPS AD path. Backward/implicit differentiation is added
+reference-mode iPEPS AD path. Backward/implicit differentiation is added
 separately.
 """
 
@@ -25,16 +25,16 @@ from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 __all__ = [
-    "_appendix_c_truncated_eigh_backward",
-    "_solve_linear_adjoint_paper",
-    "ctm_tensor_c4v_paper_backward",
-    "ctm_tensor_c4v_paper_converge_reduced",
-    "ctm_tensor_c4v_paper_fixed_point",
-    "truncated_eigh_appendix_c",
+    "_truncated_eigh_lorentzian_backward",
+    "_solve_linear_adjoint",
+    "ctm_tensor_c4v_reference_backward",
+    "ctm_tensor_c4v_reference_converge_reduced",
+    "ctm_tensor_c4v_reference_fixed_point",
+    "truncated_eigh_regularized",
 ]
 
 
-def _appendix_c_truncated_eigh_backward(
+def _truncated_eigh_lorentzian_backward(
     w_full: jax.Array,
     v_full: jax.Array,
     dw_k: jax.Array,
@@ -43,7 +43,7 @@ def _appendix_c_truncated_eigh_backward(
     k: int,
     eps: float = 1e-12,
 ) -> jax.Array:
-    """Appendix-C-style truncated eigendecomposition backward.
+    """Regularized truncated eigendecomposition backward.
 
     Uses a Lorentzian-regularized eigen-gap inverse for both kept-kept and
     kept-discarded couplings. The kept-discarded term is the critical
@@ -58,7 +58,8 @@ def _appendix_c_truncated_eigh_backward(
 
     # Differential coefficients K_{j,i} = <v_j, dV_i> / (w_i - w_j), i in kept.
     # Symmetrizing this n x n matrix recovers both the kept-kept anti-gauge term
-    # and the kept-discarded truncation correction from Appendix C.
+    # and the kept-discarded truncation correction from the Francuz et al.
+    # regularized differential.
     inner = v_h @ dV_k.astype(dtype)  # (n, k)
     denom = w_full[:k][None, :] - w_full[:, None]  # (n, k): w_i - w_j
     inv_gap = denom / (denom**2 + eps**2)
@@ -74,32 +75,32 @@ def _appendix_c_truncated_eigh_backward(
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(1,))
-def truncated_eigh_appendix_c(
+def truncated_eigh_regularized(
     M: jax.Array,
     chi: int,
 ) -> tuple[jax.Array, jax.Array]:
-    """Truncated symmetric eigendecomposition with Appendix-C-style VJP."""
+    """Truncated symmetric eigendecomposition with a regularized VJP."""
     w, v = jnp.linalg.eigh(M)
     k = min(int(chi), int(w.shape[0]))
     return w[:k], v[:, :k]
 
 
-def _truncated_eigh_appendix_c_fwd(M: jax.Array, chi: int):
+def _truncated_eigh_regularized_fwd(M: jax.Array, chi: int):
     M_h = 0.5 * (M + jnp.conj(M).T)
     w, v = jnp.linalg.eigh(M_h)
     k = min(int(chi), int(w.shape[0]))
     return (w[:k], v[:, :k]), (w, v, k)
 
 
-def _truncated_eigh_appendix_c_bwd(chi: int, residuals, g):
+def _truncated_eigh_regularized_bwd(chi: int, residuals, g):
     w, v, k = residuals
     dw_k, dV_k = g
-    dM = _appendix_c_truncated_eigh_backward(w, v, dw_k, dV_k, k=k)
+    dM = _truncated_eigh_lorentzian_backward(w, v, dw_k, dV_k, k=k)
     return (dM,)
 
 
-truncated_eigh_appendix_c.defvjp(
-    _truncated_eigh_appendix_c_fwd, _truncated_eigh_appendix_c_bwd
+truncated_eigh_regularized.defvjp(
+    _truncated_eigh_regularized_fwd, _truncated_eigh_regularized_bwd
 )
 
 
@@ -120,18 +121,18 @@ def _tree_all_finite(tree) -> bool:
     return all(bool(jnp.all(jnp.isfinite(x))) for x in leaves)
 
 
-def _ctm_tensor_c4v_paper_fixed_point_reduced(
+def _ctm_tensor_c4v_reference_fixed_point_reduced(
     A: Tensor,
     config: CTMConfig,
 ) -> tuple[Tensor, Tensor, dict[str, Any]]:
     """Run dense C4v CTM to a fixed point (reduced C/T representation)."""
     if isinstance(A, SymmetricTensor):
         raise TypeError(
-            "paper_ctm_ad='c4v_appendix_cf' currently supports dense tensors only."
+            "ctm_ad_mode='c4v_reference' currently supports dense tensors only."
         )
     if not isinstance(A, DenseTensor):
         raise TypeError(
-            f"Expected DenseTensor for paper C4v mode, got {type(A).__name__}."
+            f"Expected DenseTensor for reference C4v mode, got {type(A).__name__}."
         )
 
     a = _build_double_layer_tensor(A)
@@ -162,12 +163,12 @@ def _ctm_tensor_c4v_paper_fixed_point_reduced(
     return C, T, meta
 
 
-def ctm_tensor_c4v_paper_fixed_point(
+def ctm_tensor_c4v_reference_fixed_point(
     A: Tensor,
     config: CTMConfig,
 ) -> tuple[Any, dict[str, Any]]:
     """Run dense C4v CTM to a fixed point and return diagnostics."""
-    C, T, meta = _ctm_tensor_c4v_paper_fixed_point_reduced(A, config)
+    C, T, meta = _ctm_tensor_c4v_reference_fixed_point_reduced(A, config)
     env_full = _c4v_to_full_env(C, T)
     return env_full, meta
 
@@ -187,17 +188,17 @@ def _build_env_diag_preconditioner(
     return precondition
 
 
-def _solve_linear_adjoint_paper(
+def _solve_linear_adjoint(
     apply_i_minus_jt,
     rhs,
     config: CTMConfig,
     *,
     preconditioner=None,
 ) -> tuple[Any, dict[str, Any]]:
-    """Solve ``(I - J^T) lambda = rhs`` with paper-mode Krylov policy."""
-    maxiter = int(config.paper_krylov_maxiter)
-    tol = float(config.paper_krylov_tol)
-    requested = str(config.paper_krylov_solver)
+    """Solve ``(I - J^T) lambda = rhs`` with reference-mode Krylov policy."""
+    maxiter = int(config.adjoint_maxiter)
+    tol = float(config.adjoint_tol)
+    requested = str(config.adjoint_solver)
     residual_target = max(tol * 10.0, 1e-12)
 
     def _solve_bicg(x0):
@@ -261,22 +262,22 @@ def _solve_linear_adjoint_paper(
     }
     if not converged:
         raise RuntimeError(
-            f"Paper-mode Krylov adjoint solver ({solver_used}) failed to "
+            f"Reference-mode Krylov adjoint solver ({solver_used}) failed to "
             f"converge: residual={float(residual):.3e}, target<={residual_target:.3e}, "
             f"info={meta['info']}. Using a non-solution would corrupt gradients. "
-            f"Increase paper_krylov_maxiter or loosen paper_krylov_tol."
+            f"Increase adjoint_maxiter or loosen adjoint_tol."
         )
     return lam, meta
 
 
-def _ctm_tensor_c4v_paper_implicit_backward(
+def _ctm_tensor_c4v_reference_implicit_backward(
     A: DenseTensor,
     C: Tensor,
     T: Tensor,
     g: tuple[Tensor, Tensor],
     config: CTMConfig,
 ) -> tuple[DenseTensor, dict[str, Any]]:
-    """Appendix-F matrix-free implicit backward for paper-mode C4v CTM."""
+    """Matrix-free implicit backward for reference-mode C4v CTM."""
     a = _build_double_layer_tensor(A)
     g_c, g_t = g
 
@@ -297,9 +298,9 @@ def _ctm_tensor_c4v_paper_implicit_backward(
         return _tree_sub(v, jtv)
 
     precond = _build_env_diag_preconditioner(
-        C, T, float(getattr(config, "paper_diag_shift", 1e-12))
+        C, T, float(getattr(config, "adjoint_diag_shift", 1e-12))
     )
-    lam, solve_meta = _solve_linear_adjoint_paper(
+    lam, solve_meta = _solve_linear_adjoint(
         _apply_i_minus_jt,
         (g_c, g_t),
         config,
@@ -309,7 +310,7 @@ def _ctm_tensor_c4v_paper_implicit_backward(
     return dA, solve_meta
 
 
-def ctm_tensor_c4v_paper_backward(
+def ctm_tensor_c4v_reference_backward(
     A: DenseTensor,
     C: Tensor,
     T: Tensor,
@@ -318,38 +319,38 @@ def ctm_tensor_c4v_paper_backward(
     config: CTMConfig,
 ) -> tuple[DenseTensor, dict[str, Any]]:
     """Run one implicit-adjoint solve for diagnostics/testing."""
-    return _ctm_tensor_c4v_paper_implicit_backward(A, C, T, (g_c, g_t), config)
+    return _ctm_tensor_c4v_reference_implicit_backward(A, C, T, (g_c, g_t), config)
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(1,))
-def ctm_tensor_c4v_paper_converge_reduced(
+def ctm_tensor_c4v_reference_converge_reduced(
     A: DenseTensor,
     config: CTMConfig,
 ) -> tuple[Tensor, Tensor]:
     """Fixed-point converger returning reduced C4v env ``(C, T)``."""
-    C, T, _meta = _ctm_tensor_c4v_paper_fixed_point_reduced(A, config)
+    C, T, _meta = _ctm_tensor_c4v_reference_fixed_point_reduced(A, config)
     return C, T
 
 
-def _ctm_tensor_c4v_paper_converge_reduced_fwd(A: DenseTensor, config: CTMConfig):
-    C, T, _meta = _ctm_tensor_c4v_paper_fixed_point_reduced(A, config)
+def _ctm_tensor_c4v_reference_converge_reduced_fwd(A: DenseTensor, config: CTMConfig):
+    C, T, _meta = _ctm_tensor_c4v_reference_fixed_point_reduced(A, config)
     return (C, T), (A, C, T)
 
 
-def _ctm_tensor_c4v_paper_converge_reduced_bwd(
+def _ctm_tensor_c4v_reference_converge_reduced_bwd(
     config: CTMConfig,
     residuals,
     g,
 ):
     A, C, T = residuals
     g_c, g_t = g
-    dA, _solve_meta = _ctm_tensor_c4v_paper_implicit_backward(
+    dA, _solve_meta = _ctm_tensor_c4v_reference_implicit_backward(
         A, C, T, (g_c, g_t), config
     )
     return (dA,)
 
 
-ctm_tensor_c4v_paper_converge_reduced.defvjp(
-    _ctm_tensor_c4v_paper_converge_reduced_fwd,
-    _ctm_tensor_c4v_paper_converge_reduced_bwd,
+ctm_tensor_c4v_reference_converge_reduced.defvjp(
+    _ctm_tensor_c4v_reference_converge_reduced_fwd,
+    _ctm_tensor_c4v_reference_converge_reduced_bwd,
 )
