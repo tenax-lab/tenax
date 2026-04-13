@@ -1742,3 +1742,51 @@ def ctm_split_tensor_fixed_point(
         Converged SplitCTMTensorEnv.
     """
     return ctm_split_tensor(A, chi, max_iter, conv_tol, chi_I, renormalize)
+
+
+def ctm_split_tensor_converge_explicit(
+    A,
+    chi: int,
+    max_iter: int = 100,
+    chi_I: int | None = None,
+    renormalize: bool = True,
+    num_steps: int | None = None,
+    warmup_steps: int = 0,
+):
+    """Split-CTM with explicit (unrolled) autodiff.
+
+    Same warmup/backprop structure as ``ctm_tensor_converge_explicit`` but
+    for the split-CTM (Tensor) path: runs *warmup_steps* sweeps under
+    ``stop_gradient``, then *num_steps* fully differentiable sweeps.
+
+    Args:
+        A:              iPEPS site tensor.
+        chi:            Environment bond dimension.
+        max_iter:       Default backprop steps if ``num_steps`` is None.
+        chi_I:          Interlayer bond dimension (default: ``chi``).
+        renormalize:    Renormalize environment at each step.
+        num_steps:      Backprop iterations (overrides ``max_iter``).
+        warmup_steps:   Warmup iterations wrapped in ``stop_gradient``.
+
+    Returns:
+        Converged SplitCTMTensorEnv.
+    """
+    from tenax.algorithms._split_ctm_tensor_init import (
+        initialize_split_ctm_tensor_env,
+    )
+
+    if chi_I is None:
+        chi_I = chi
+
+    env = initialize_split_ctm_tensor_env(A, chi, chi_I)
+
+    for _ in range(warmup_steps):
+        env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
+    if warmup_steps > 0:
+        env = jax.tree.map(jax.lax.stop_gradient, env)
+
+    n = num_steps if num_steps is not None else max_iter
+    for _ in range(n):
+        env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
+
+    return env
