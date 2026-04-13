@@ -36,6 +36,7 @@ guide/core_concepts
 guide/contraction
 guide/tensor_networks
 guide/gotchas
+guide/tuning
 ```
 
 ## Algorithm Tutorials

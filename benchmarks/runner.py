@@ -55,7 +55,7 @@ def _extract_result(algorithm: str, raw: Any) -> dict:
     if algo == "ipeps":
         energy, _peps, _env = raw
         return {"energy_per_site": float(energy)}
-    if algo == "ipeps_ad":
+    if algo in ("ipeps_ad", "ipeps_ad_c4v_reference"):
         _A, _env, energy = raw
         return {"energy_per_site": float(energy)}
     return {}
