@@ -114,18 +114,18 @@ require them to be uniform, and route to `_dense_ops()` or
 | Controlled Bond Expansion (CBE)        | **Working**      | McCulloch–Osborne, arXiv:2403.00562; dense + symmetric.            |
 | iDMRG 2-site (dense)                   | **Working**      | Default; 2-site unit cell only.                                    |
 | iDMRG 2-site (symmetric)               | **Working**      | Block-sparse fixed-point solve.                                    |
-| iDMRG 1-site (dense)                   | **Working**      | DMRG3S not wired in iDMRG path.                                    |
+| iDMRG 1-site (dense)                   | **Working**      | DMRG3S wired via `_idmrg_1site_sweep` + `expand_and_truncate_dense`.|
 | iDMRG 1-site (symmetric)               | **BROKEN**       | Raises `NotImplementedError`.                                      |
 | iDMRG `unit_cell_size > 2`             | **BROKEN**       | Raises `NotImplementedError`; 2-site cell hard-coded.              |
-| TDVP 1-site                            | **Working**      | Real + imaginary time via `krylov_expm`; not in `__all__` yet.     |
+| TDVP 1-site                            | **Working**      | Real + imaginary time via `krylov_expm`; exported in `__all__`.    |
 | TDVP 2-site                            | **Working**      | Allows bond growth via SVD truncation.                             |
 | JIT sweeps (dense, GPU/TPU)            | **Working**      | `accelerator="jit"`; PR #209.                                      |
 | Sharded DMRG (multi-device)            | **Working**      | `accelerator="sharded"`; dense 2-site only.                        |
-| Cython fused Lanczos (CPU)             | **Working**      | Opt-in; disable via `TENAX_DISABLE_CYTHON_BLAS=1`; PR #226.        |
-| Fermionic DMRG                         | **ABSENT**       | No dedicated path; build fermionic MPO on `SymmetricTensor` by hand.|
+| Cython fused Lanczos (CPU)             | **Working**      | On by default when extension imports; opt-out via `TENAX_DISABLE_CYTHON_BLAS=1`; PR #226. |
+| Fermionic DMRG                         | **Working**      | `AutoMPO(..., fermionic_ops=...)` + `fermion_site_ops`; see `tests/test_fermionic.py`. |
 | TEBD                                   | **ABSENT**       | Not implemented; use TDVP or iPEPS simple update.                  |
-| Multi-state targeting (`num_states>1`) | **ABSENT**       | Raises `NotImplementedError`.                                      |
-| Perturbative noise (`noise != 0`)      | **ABSENT**       | Raises `NotImplementedError`; use DMRG3S or CBE instead.           |
+| Multi-state targeting (`num_states>1`) | **BROKEN**       | `dmrg()` raises `NotImplementedError` at entry.                    |
+| Perturbative noise (`noise != 0`)      | **BROKEN**       | `dmrg()` raises `NotImplementedError` at entry; use DMRG3S or CBE. |
 
 ## Config Cheat Sheet
 

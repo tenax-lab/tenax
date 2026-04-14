@@ -50,7 +50,13 @@ def _resolve_projector_backward(config: iPEPSConfig) -> iPEPSConfig:
     if not config.gs_explicit_ad:
         return config
     ctm_cfg = config.ctm
-    if ctm_cfg.projector_method != "eigh":
+    # Match against the *effective* projector: ``gs_projector_method``
+    # overrides ``ctm.projector_method`` in the optimizer body, so inspect
+    # the override first. Without this the AD path ends up on ``eigh``
+    # while ``projector_backward`` stays on the legacy regularized_eigh
+    # branch (#318 review).
+    effective_projector = config.gs_projector_method or ctm_cfg.projector_method
+    if effective_projector != "eigh":
         return config
     if ctm_cfg.projector_backward != "auto":
         return config
@@ -770,6 +776,12 @@ def _optimize_gs_ad_tensor(
             )
             logged = True
 
+        # Refresh warm-start state before the early-exit check so the
+        # post-loop fresh re-eval sees the current converged env, not the
+        # previous iterate (#320 review).
+        prev_energy = energy_float
+        prev_env_leaves = env_leaves_sg
+
         if delta_energy < config.gs_conv_tol:
             if config.gs_verbose:
                 if not logged:
@@ -785,8 +797,6 @@ def _optimize_gs_ad_tensor(
                     "1site-tensor", step, delta_energy, config.gs_conv_tol
                 )
             break
-        prev_energy = energy_float
-        prev_env_leaves = env_leaves_sg
 
         # Compute search direction
         if is_cg:
@@ -1421,6 +1431,12 @@ def _optimize_gs_ad_tensor_2site(
             )
             logged = True
 
+        # Refresh warm-start state before the early-exit check so the
+        # post-loop fresh re-eval sees the current converged env, not the
+        # previous iterate (#320 review).
+        prev_energy = energy_float
+        prev_env_leaves = env_leaves_sg
+
         if delta_energy < config.gs_conv_tol:
             if config.gs_verbose:
                 if not logged:
@@ -1436,8 +1452,6 @@ def _optimize_gs_ad_tensor_2site(
                     "2site-tensor", step, delta_energy, config.gs_conv_tol
                 )
             break
-        prev_energy = energy_float
-        prev_env_leaves = env_leaves_sg
 
         # Compute search direction
         if is_cg:

@@ -703,10 +703,20 @@ def _compute_projector_tensor(
         # of (Q, R), so applying this fix has no effect on the forward
         # output but makes the autodiff gradient consistent across
         # arbitrarily small perturbations of M.
+        # For complex matrices, `diag_R >= 0` is undefined; rotate by the
+        # phase of diag(R) so diag(R) becomes real and non-negative. This
+        # reduces to the ±1 sign convention in the real case. When a
+        # diagonal entry is exactly zero the gauge is unconstrained, so
+        # use phase=1 (leave the column/row untouched) rather than
+        # phase=0 which would zero out that column of Q and row of R.
         diag_R = jnp.diag(R)
-        signs = jnp.where(diag_R >= 0, 1.0, -1.0).astype(R.dtype)
-        Q = Q * signs[None, :]
-        R = R * signs[:, None]
+        abs_diag = jnp.abs(diag_R)
+        unit = jnp.ones_like(diag_R)
+        phase = jnp.where(
+            abs_diag > 0, diag_R / jnp.where(abs_diag > 0, abs_diag, 1.0), unit
+        ).astype(R.dtype)
+        Q = Q * phase[None, :]
+        R = R * jnp.conj(phase)[:, None]
         if _has_tracers:
             from tenax.algorithms.ad_utils import regularized_svd
 
