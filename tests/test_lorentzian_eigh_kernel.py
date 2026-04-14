@@ -26,8 +26,8 @@ def test_lorentzian_dense_matches_fd_on_symmetric_matrix():
     chi = 4
 
     def loss(mat):
-        _, U = truncated_eigh_regularized(mat, chi)
-        return jnp.sum(U**2)
+        w, U = truncated_eigh_regularized(mat, chi)
+        return jnp.sum(jnp.sin(U)) + jnp.sum(w**2)
 
     grad_ad = jax.grad(loss)(A)
 
@@ -39,4 +39,4 @@ def test_lorentzian_dense_matches_fd_on_symmetric_matrix():
             Am = A.at[i, j].add(-eps)
             grad_fd = grad_fd.at[i, j].set((loss(Ap) - loss(Am)) / (2 * eps))
 
-    assert jnp.allclose(grad_ad, grad_fd, atol=1e-5)
+    assert jnp.allclose(grad_ad, grad_fd, atol=1e-7)
