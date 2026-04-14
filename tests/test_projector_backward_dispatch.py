@@ -29,7 +29,11 @@ import pytest
 
 from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
 from tenax.algorithms._lorentzian_eigh import truncated_eigh_regularized
-from tenax.algorithms.ad_utils import regularized_eigh
+from tenax.algorithms.ad_utils import (
+    _config_from_tuple,
+    _config_to_tuple,
+    regularized_eigh,
+)
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.algorithms.ipeps_optimize import (
     _resolve_projector_backward,
@@ -166,3 +170,33 @@ def test_auto_promotion_is_logged(caplog):
     with caplog.at_level(logging.INFO, logger="tenax.algorithms.ipeps_optimize"):
         _resolve_projector_backward(config)
     assert any("lorentzian" in rec.message.lower() for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Task 8 Part B — ad_utils config tuple must carry projector_backward
+# ---------------------------------------------------------------------------
+
+
+def test_config_tuple_round_trips_projector_backward():
+    """``_config_to_tuple`` / ``_config_from_tuple`` must preserve
+    ``projector_backward`` across the JIT boundary, otherwise the
+    Task 7 plumbing is silently reset in the explicit-AD path.
+    """
+    ctm = CTMConfig(chi=8, projector_method="eigh", projector_backward="lorentzian")
+    t = _config_to_tuple(ctm)
+    ctm2 = _config_from_tuple(t)
+    assert ctm2.projector_backward == "lorentzian"
+
+
+def test_config_tuple_round_trips_projector_backward_standard():
+    ctm = CTMConfig(chi=8, projector_method="eigh", projector_backward="standard")
+    t = _config_to_tuple(ctm)
+    ctm2 = _config_from_tuple(t)
+    assert ctm2.projector_backward == "standard"
+
+
+def test_config_tuple_default_projector_backward_is_auto():
+    ctm = CTMConfig(chi=8, projector_method="eigh")
+    t = _config_to_tuple(ctm)
+    ctm2 = _config_from_tuple(t)
+    assert ctm2.projector_backward == "auto"

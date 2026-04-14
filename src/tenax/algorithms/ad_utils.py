@@ -511,6 +511,10 @@ _CONV_METHOD_STR_TO_INT = {"sv": 0, "elementwise": 1}
 _CONV_METHOD_INT_TO_STR = {0: "sv", 1: "elementwise"}
 
 
+_PB_STR_TO_INT = {"auto": 0, "standard": 1, "lorentzian": 2}
+_PB_INT_TO_STR = {0: "auto", 1: "standard", 2: "lorentzian"}
+
+
 def _config_to_tuple(config) -> tuple:
     """Pack CTMConfig into a hashable tuple for JAX tracing."""
     return (
@@ -528,6 +532,7 @@ def _config_to_tuple(config) -> tuple:
         {"qr": 0, "sigma": 1, "phase": 2, "none": 3}.get(
             getattr(config, "forward_gauge", "qr"), 0
         ),
+        _PB_STR_TO_INT.get(getattr(config, "projector_backward", "auto"), 0),
     )
 
 
@@ -546,6 +551,8 @@ def _config_from_tuple(config_tuple: tuple):
     forward_gauge = {0: "qr", 1: "sigma", 2: "phase", 3: "none"}.get(
         forward_gauge_int, "qr"
     )
+    pb_int = config_tuple[12] if len(config_tuple) > 12 else 0
+    projector_backward = _PB_INT_TO_STR.get(pb_int, "auto")
     return CTMConfig(
         chi=config_tuple[0],
         max_iter=config_tuple[1],
@@ -559,6 +566,7 @@ def _config_from_tuple(config_tuple: tuple):
         ctm_conv_method=ctm_conv_method,
         jit_ctm=jit_ctm,
         forward_gauge=forward_gauge,
+        projector_backward=projector_backward,
     )
 
 
@@ -907,6 +915,7 @@ def _ctm_tensor_step_multisite(
     sigma_gauge_ref_leaves=None,
     skip_gauge=False,
     gauge_mode="qr",
+    projector_backward="auto",
 ):
     """One multisite CTM sweep + gauge fix, flat leaves to flat leaves.
 
@@ -953,7 +962,13 @@ def _ctm_tensor_step_multisite(
         }
 
     envs = _ctm_tensor_sweep_multisite(
-        envs, double_layers, neighbors, chi, renormalize, projector_method
+        envs,
+        double_layers,
+        neighbors,
+        chi,
+        renormalize,
+        projector_method,
+        projector_backward=projector_backward,
     )
 
     if sigma_gauge_ref_leaves is not None:
@@ -1146,6 +1161,7 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
                 site_treedefs,
                 env_treedef,
                 n_env_per_site,
+                projector_backward=getattr(config, "projector_backward", "auto"),
             )
             return _apply_sigma_to_env_leaves(
                 swept, sigma_Qs, env_treedef, n_env_per_site, coords
@@ -1168,6 +1184,7 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
                 env_treedef,
                 n_env_per_site,
                 skip_gauge=True,
+                projector_backward=getattr(config, "projector_backward", "auto"),
             )
 
         _, vjp_env_fn = jax.vjp(lambda e: step_fn(site_leaves, e), env_leaves)
@@ -1301,6 +1318,7 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
             config.chi,
             config.renormalize,
             config.projector_method,
+            projector_backward=getattr(config, "projector_backward", "auto"),
         )
         if use_none:
             pass  # no gauge fix — rely on projector stability
@@ -1440,6 +1458,7 @@ def _ctm_tensor_multisite_fixed_point_jit(
             chi,
             config.renormalize,
             config.projector_method,
+            projector_backward=getattr(config, "projector_backward", "auto"),
         )
         envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
         max_iter = max(max_iter - 1, 1)
@@ -1462,6 +1481,7 @@ def _ctm_tensor_multisite_fixed_point_jit(
                 double_layers=double_layers_cached,
                 sigma_gauge_ref_leaves=sigma_ref,
                 gauge_mode="phase" if use_phase else "qr",
+                projector_backward=getattr(config, "projector_backward", "auto"),
             )
         )
 
@@ -1625,6 +1645,7 @@ def ctm_tensor_converge_explicit(
             config.chi,
             config.renormalize,
             config.projector_method,
+            projector_backward=getattr(config, "projector_backward", "auto"),
         )
         if use_sigma and wi > 0:
             envs = {c: _sigma_gauge_fix_ctm_tensor(envs[c], envs_old[c]) for c in envs}
@@ -1653,6 +1674,7 @@ def ctm_tensor_converge_explicit(
                 config.chi,
                 config.renormalize,
                 config.projector_method,
+                projector_backward=getattr(config, "projector_backward", "auto"),
             )
             envs_inner = {
                 c: _sigma_gauge_fix_ctm_tensor(envs_inner[c], envs_prev[c])
@@ -1675,6 +1697,7 @@ def ctm_tensor_converge_explicit(
                 config.chi,
                 config.renormalize,
                 config.projector_method,
+                projector_backward=getattr(config, "projector_backward", "auto"),
             )
             envs_inner = {c: _gauge_fn(e) for c, e in envs_inner.items()}
             return tuple(jax.tree.leaves(envs_inner))
