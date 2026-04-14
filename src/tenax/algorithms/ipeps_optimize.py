@@ -676,6 +676,7 @@ def _optimize_gs_ad_tensor(
 
     best_energy = float("inf")
     best_params = params
+    best_env_leaves = prev_env_leaves  # tracked for fresh-CTM warm-start (#317)
     prev_energy = float("inf")
     prev_grad = None
     cg_direction = None
@@ -743,6 +744,7 @@ def _optimize_gs_ad_tensor(
             loss_fn, argnums=0, has_aux=True
         )(params, prev_env_leaves)
         energy_float = float(energy_val)
+        env_leaves_sg = jax.tree.map(jax.lax.stop_gradient, env_leaves)
 
         if _should_accept_best(
             current_best=best_energy,
@@ -751,6 +753,7 @@ def _optimize_gs_ad_tensor(
         ):
             best_energy = energy_float
             best_params = params
+            best_env_leaves = env_leaves_sg  # paired with best_params (#317)
 
         delta_energy = abs(energy_float - prev_energy)
         logged = False
@@ -783,7 +786,7 @@ def _optimize_gs_ad_tensor(
                 )
             break
         prev_energy = energy_float
-        prev_env_leaves = jax.tree.map(jax.lax.stop_gradient, env_leaves)
+        prev_env_leaves = env_leaves_sg
 
         # Compute search direction
         if is_cg:
@@ -1006,11 +1009,16 @@ def _optimize_gs_ad_tensor(
     # In-loop energies use warm-started CTM that can produce unphysical values
     # (non-variational at finite chi), so we compare fresh evaluations only.
     _base_cfg = _config_from_tuple(config_tuple)
+    # Match in-loop CTM tolerances (#317): tightening max_iter/conv_tol here
+    # lets the fresh re-eval drift to a different fixed point than the in-loop
+    # run, producing a final E that doesn't match the best E tracked during
+    # optimization. Reuse _base_cfg directly so warm-started re-eval reproduces
+    # the in-loop CTM.
     eval_config = CTMConfig(
         chi=_base_cfg.chi,
-        max_iter=max(_base_cfg.max_iter, 200),
-        conv_tol=min(_base_cfg.conv_tol, 1e-10),
-        min_iter=max(_base_cfg.min_iter, 30),
+        max_iter=_base_cfg.max_iter,
+        conv_tol=_base_cfg.conv_tol,
+        min_iter=_base_cfg.min_iter,
         renormalize=_base_cfg.renormalize,
         projector_method=_base_cfg.projector_method,
         projector_backward=_base_cfg.projector_backward,
@@ -1019,30 +1027,50 @@ def _optimize_gs_ad_tensor(
         forward_gauge=_base_cfg.forward_gauge,
     )
 
-    def _eval_fresh(p):
-        """Evaluate energy with fully converged fresh CTM."""
+    def _unflatten_env_single(leaves):
+        """Unflatten a flat 1-site env leaf tuple into a ``{(0,0): env}`` dict."""
+        return {(0, 0): jax.tree.unflatten(env_treedef, list(leaves))}
+
+    def _eval_fresh(p, envs_init_leaves=None):
+        """Evaluate energy with fully converged fresh CTM.
+
+        When ``envs_init_leaves`` is provided, warm-start the CTM from those
+        leaves instead of a random initialization — this avoids drift to a
+        nearby (non-physical) fixed point when the fresh CTM converges with
+        tighter tolerances than the in-loop run (#317).
+        """
         if use_c4v:
             A_data = c4v_tensor_from_coeffs(p, c4v_basis, tensor_shape)
         else:
             A_data = p.todense()
         A_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
         A_t = DenseTensor(A_data, A.indices)
-        envs = _fp_fn({(0, 0): A_t}, SINGLE_SITE_NEIGHBORS, eval_config)
+        envs_init = (
+            _unflatten_env_single(envs_init_leaves)
+            if envs_init_leaves is not None
+            else None
+        )
+        envs = _fp_fn(
+            {(0, 0): A_t},
+            SINGLE_SITE_NEIGHBORS,
+            eval_config,
+            envs_init=envs_init,
+        )
         env_ = envs[(0, 0)]
         E_ = float(compute_energy_ctm_tensor(A_t, env_, gate, d_phys))
         return A_t, env_, E_
 
-    A_final, env_final, E_final = _eval_fresh(params)
+    A_final, env_final, E_final = _eval_fresh(params, prev_env_leaves)
 
     if best_params is not params:
-        _, env_best, E_best_fresh = _eval_fresh(best_params)
+        _, env_best, E_best_fresh = _eval_fresh(best_params, best_env_leaves)
     else:
         E_best_fresh = E_final
 
     if E_final <= E_best_fresh:
         env, E_gs = env_final, E_final
     else:
-        A_final, _, _ = _eval_fresh(best_params)
+        A_final, _, _ = _eval_fresh(best_params, best_env_leaves)
         env, E_gs = env_best, E_best_fresh
     if config.gs_verbose:
         print(f"[iPEPS-AD:1site-tensor] final E={E_gs:.10f}", flush=True)
@@ -1303,6 +1331,7 @@ def _optimize_gs_ad_tensor_2site(
 
     best_energy = float("inf")
     best_params = params
+    best_env_leaves = prev_env_leaves  # tracked for fresh-CTM warm-start (#317)
     prev_energy = float("inf")
     prev_grad = None
     cg_direction = None
@@ -1375,6 +1404,7 @@ def _optimize_gs_ad_tensor_2site(
         ):
             best_energy = energy_float
             best_params = params
+            best_env_leaves = env_leaves_sg  # paired with best_params (#317)
 
         delta_energy = abs(energy_float - prev_energy)
         logged = False
@@ -1665,11 +1695,12 @@ def _optimize_gs_ad_tensor_2site(
     # fresh CTM.  In-loop energies use warm-started CTM that can produce
     # unphysical values, so we compare fresh evaluations only.
     _base_cfg2 = _config_from_tuple(config_tuple)
+    # Match in-loop CTM tolerances (#317); see comment on ``eval_config`` above.
     eval_config2 = CTMConfig(
         chi=_base_cfg2.chi,
-        max_iter=max(_base_cfg2.max_iter, 200),
-        conv_tol=min(_base_cfg2.conv_tol, 1e-10),
-        min_iter=max(_base_cfg2.min_iter, 30),
+        max_iter=_base_cfg2.max_iter,
+        conv_tol=_base_cfg2.conv_tol,
+        min_iter=_base_cfg2.min_iter,
         renormalize=_base_cfg2.renormalize,
         projector_method=_base_cfg2.projector_method,
         projector_backward=_base_cfg2.projector_backward,
@@ -1678,13 +1709,36 @@ def _optimize_gs_ad_tensor_2site(
         forward_gauge=_base_cfg2.forward_gauge,
     )
 
-    def _eval_fresh_2site(p):
+    def _unflatten_env_pair(leaves):
+        """Unflatten a flat 2-site env leaf tuple into ``{(0,0): ..., (1,0): ...}``."""
+        env_A = jax.tree.unflatten(env_treedef, list(leaves[:n_env_leaves]))
+        env_B = jax.tree.unflatten(env_treedef, list(leaves[n_env_leaves:]))
+        return {(0, 0): env_A, (1, 0): env_B}
+
+    def _eval_fresh_2site(p, envs_init_leaves=None):
+        """Evaluate energy with fully converged fresh CTM.
+
+        When ``envs_init_leaves`` is provided, warm-start the CTM from those
+        leaves instead of a random initialization. Avoids drift to a nearby
+        (non-physical) fixed point when the fresh CTM converges with tighter
+        tolerances than the in-loop run (#317).
+        """
         if use_c4v:
             A_t, B_t = _c4v_AB(p)
         else:
             A_t, B_t = _normalize_params(p)
         st = {(0, 0): A_t, (1, 0): B_t}
-        envs = _fp_fn_2site(st, CHECKERBOARD_NEIGHBORS, eval_config2)
+        envs_init = (
+            _unflatten_env_pair(envs_init_leaves)
+            if envs_init_leaves is not None
+            else None
+        )
+        envs = _fp_fn_2site(
+            st,
+            CHECKERBOARD_NEIGHBORS,
+            eval_config2,
+            envs_init=envs_init,
+        )
         E_ = float(
             compute_energy_ctm_tensor_2site(
                 A_t, B_t, envs[(0, 0)], envs[(1, 0)], gate, d_phys
@@ -1692,11 +1746,13 @@ def _optimize_gs_ad_tensor_2site(
         )
         return A_t, B_t, envs, E_
 
-    A_last, B_last, envs_last, E_last = _eval_fresh_2site(params)
+    A_last, B_last, envs_last, E_last = _eval_fresh_2site(params, prev_env_leaves)
     env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
 
     if best_params is not params:
-        A_best, B_best, envs_best, E_best_fresh = _eval_fresh_2site(best_params)
+        A_best, B_best, envs_best, E_best_fresh = _eval_fresh_2site(
+            best_params, best_env_leaves
+        )
         env_A_best = envs_best[(0, 0)]
         env_B_best = envs_best[(1, 0)]
     else:
