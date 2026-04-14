@@ -48,6 +48,19 @@ class CTMConfig:
     conv_tol: float = 1e-8
     renormalize: bool = True
     projector_method: str = "eigh"  # "eigh", "qr", or "svd" (Fishman)
+    # Backward pass used for the eigh projector inside AD.
+    #   "auto"       -> default; ``optimize_gs_ad`` promotes to "lorentzian"
+    #                   when ``gs_explicit_ad=True`` and ``projector_method``
+    #                   is "eigh", otherwise the effective value is "standard".
+    #                   Mirrors the ``forward_gauge`` auto-promotion pattern.
+    #   "standard"   -> force the existing ``regularized_eigh`` backward.
+    #                   Never auto-promoted away from this value.
+    #   "lorentzian" -> force the truncated-eigh Lorentzian backward from
+    #                   ``_lorentzian_eigh.py`` (plan PR #315, Task 2).
+    #                   Honored even when ``projector_method != "eigh"``, in
+    #                   which case the forward doesn't use eigh at all and
+    #                   the flag is a no-op.
+    projector_backward: Literal["auto", "standard", "lorentzian"] = "auto"
     min_iter: int = 10  # minimum CTM sweeps before checking convergence
     qr_warmup_steps: int = 3  # eigh warm-up iterations before QR kicks in
     chi_I: int | None = None  # interlayer bond dim for split-CTMRG; None => chi_I = chi
@@ -106,6 +119,12 @@ class CTMConfig:
             raise ValueError(
                 f"adjoint_solver must be one of {valid_solvers}, "
                 f"got {self.adjoint_solver!r}"
+            )
+        valid_projector_backward = {"auto", "standard", "lorentzian"}
+        if self.projector_backward not in valid_projector_backward:
+            raise ValueError(
+                f"projector_backward must be one of {valid_projector_backward}, "
+                f"got {self.projector_backward!r}"
             )
 
 
