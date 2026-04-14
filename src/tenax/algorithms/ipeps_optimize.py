@@ -770,6 +770,12 @@ def _optimize_gs_ad_tensor(
             )
             logged = True
 
+        # Refresh warm-start state before the early-exit check so the
+        # post-loop fresh re-eval sees the current converged env, not the
+        # previous iterate (#320 review).
+        prev_energy = energy_float
+        prev_env_leaves = env_leaves_sg
+
         if delta_energy < config.gs_conv_tol:
             if config.gs_verbose:
                 if not logged:
@@ -785,8 +791,6 @@ def _optimize_gs_ad_tensor(
                     "1site-tensor", step, delta_energy, config.gs_conv_tol
                 )
             break
-        prev_energy = energy_float
-        prev_env_leaves = env_leaves_sg
 
         # Compute search direction
         if is_cg:
@@ -1421,6 +1425,12 @@ def _optimize_gs_ad_tensor_2site(
             )
             logged = True
 
+        # Refresh warm-start state before the early-exit check so the
+        # post-loop fresh re-eval sees the current converged env, not the
+        # previous iterate (#320 review).
+        prev_energy = energy_float
+        prev_env_leaves = env_leaves_sg
+
         if delta_energy < config.gs_conv_tol:
             if config.gs_verbose:
                 if not logged:
@@ -1436,8 +1446,6 @@ def _optimize_gs_ad_tensor_2site(
                     "2site-tensor", step, delta_energy, config.gs_conv_tol
                 )
             break
-        prev_energy = energy_float
-        prev_env_leaves = env_leaves_sg
 
         # Compute search direction
         if is_cg:
