@@ -439,7 +439,9 @@ _register(
         hint=TuningHint(
             scale=Scale.LOG10,
             sensitivity=Sensitivity.MEDIUM,
-            range=(0.0, 1e-2),
+            # Strictly positive lower bound so LOG10 sampling is well-defined;
+            # pass 0.0 explicitly for a strictly exact adjoint outside tuning.
+            range=(1e-10, 1e-2),
             applies_when={"CTMConfig.ctm_ad_mode": "c4v_reference"},
             cost=CostModel(
                 runtime="neutral (improves convergence = fewer iters)",

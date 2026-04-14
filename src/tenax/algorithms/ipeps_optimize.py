@@ -50,7 +50,13 @@ def _resolve_projector_backward(config: iPEPSConfig) -> iPEPSConfig:
     if not config.gs_explicit_ad:
         return config
     ctm_cfg = config.ctm
-    if ctm_cfg.projector_method != "eigh":
+    # Match against the *effective* projector: ``gs_projector_method``
+    # overrides ``ctm.projector_method`` in the optimizer body, so inspect
+    # the override first. Without this the AD path ends up on ``eigh``
+    # while ``projector_backward`` stays on the legacy regularized_eigh
+    # branch (#318 review).
+    effective_projector = config.gs_projector_method or ctm_cfg.projector_method
+    if effective_projector != "eigh":
         return config
     if ctm_cfg.projector_backward != "auto":
         return config
