@@ -726,6 +726,399 @@ _register(
 )
 
 
+# --- CTMConfig: AD backward & stability knobs -------------------------------
+
+_register(
+    ParamSpec(
+        name="min_iter",
+        dataclass_name="CTMConfig",
+        type_str="int",
+        default=10,
+        category=TuningCategory.STABILITY,
+        description=(
+            "Minimum CTM sweeps before the convergence check kicks in. "
+            "Prevents early exits when the initial SV spectrum happens "
+            "to be near-stationary for the first few iterates."
+        ),
+        hint=TuningHint(
+            scale=Scale.LINEAR,
+            sensitivity=Sensitivity.LOW,
+            range=(1, 100),
+            cost=CostModel(runtime="linear", memory="none"),
+        ),
+        when_to_tune=(
+            "Raise to 30–50 if CTM appears to converge prematurely on "
+            "the first few sweeps, especially near criticality."
+        ),
+    )
+)
+
+_register(
+    ParamSpec(
+        name="projector_backward",
+        dataclass_name="CTMConfig",
+        type_str="str",
+        default="auto",
+        category=TuningCategory.METHOD_SELECTION,
+        description=(
+            "Backward pass used for the eigh projector inside explicit AD. "
+            "'auto' promotes to 'lorentzian' when gs_explicit_ad=True and "
+            "the effective projector is 'eigh'. 'standard' forces the "
+            "legacy regularized_eigh backward; 'lorentzian' forces the "
+            "Francuz-Schmoll truncated-eigh Lorentzian backward."
+        ),
+        hint=TuningHint(
+            scale=Scale.CATEGORICAL,
+            sensitivity=Sensitivity.HIGH,
+            values=("auto", "standard", "lorentzian"),
+            cost=CostModel(
+                runtime="lorentzian slightly slower per backward",
+                accuracy="lorentzian stabilizes chi>=16",
+            ),
+        ),
+        when_to_tune=(
+            "Force 'lorentzian' if the default 'auto' promotion is bypassed "
+            "by a non-eigh projector_method. Leave as 'auto' otherwise."
+        ),
+        references=("arXiv:2311.11894",),
+    )
+)
+
+_register(
+    ParamSpec(
+        name="ad_regularize_svd",
+        dataclass_name="CTMConfig",
+        type_str="bool",
+        default=True,
+        category=TuningCategory.STABILITY,
+        description=(
+            "Use Lorentzian-regularized SVD backward in AD. Stabilizes "
+            "gradients through SVD projectors at near-degenerate spectra."
+        ),
+        hint=TuningHint(
+            scale=Scale.BOOLEAN,
+            sensitivity=Sensitivity.HIGH,
+            cost=CostModel(runtime="neutral", accuracy="stabilizes backward"),
+        ),
+        when_to_tune=(
+            "Disable only for diagnostic comparisons against unregularized "
+            "SVD backward."
+        ),
+    )
+)
+
+_register(
+    ParamSpec(
+        name="ad_backward_method",
+        dataclass_name="CTMConfig",
+        type_str="str",
+        default="vjp",
+        category=TuningCategory.METHOD_SELECTION,
+        description=(
+            "Backward solver for the multisite implicit-diff path "
+            "(ctm_tensor_converge custom_vjp). 'vjp' runs the iterative "
+            "Neumann-series backward (YASTN-style); 'gmres' solves "
+            "(I - J^T) lambda = g directly. GMRES is currently xfail "
+            "(issue #292) without tight sigma-gauge alignment."
+        ),
+        hint=TuningHint(
+            scale=Scale.CATEGORICAL,
+            sensitivity=Sensitivity.HIGH,
+            values=("vjp", "gmres"),
+            cost=CostModel(
+                runtime="gmres fewer backward iters when converged",
+                accuracy="vjp more robust today",
+            ),
+        ),
+        when_to_tune=(
+            "Prefer 'vjp' until issue #292 lands and GMRES is stabilized "
+            "with forward_gauge='sigma' and adjoint Tikhonov."
+        ),
+        references=("arXiv:2311.11894",),
+    )
+)
+
+_register(
+    ParamSpec(
+        name="gmres_precondition",
+        dataclass_name="CTMConfig",
+        type_str="bool",
+        default=False,
+        category=TuningCategory.PERFORMANCE,
+        description=(
+            "Enable a diagonal scaling preconditioner for the GMRES "
+            "backward solver. Only meaningful when "
+            "ad_backward_method='gmres'."
+        ),
+        hint=TuningHint(
+            scale=Scale.BOOLEAN,
+            sensitivity=Sensitivity.MEDIUM,
+            applies_when={"CTMConfig.ad_backward_method": "gmres"},
+            cost=CostModel(runtime="fewer GMRES iters", memory="O(chi^2)"),
+        ),
+        when_to_tune=(
+            "Enable once the GMRES backward is stabilized (#292); "
+            "experimental until then."
+        ),
+    )
+)
+
+_register(
+    ParamSpec(
+        name="ctm_conv_method",
+        dataclass_name="CTMConfig",
+        type_str="str",
+        default="sv",
+        category=TuningCategory.METHOD_SELECTION,
+        description=(
+            "Convergence check for the CTM fixed-point loop. 'sv' compares "
+            "corner singular values across sweeps (fast, gauge-insensitive); "
+            "'elementwise' compares raw environment tensors."
+        ),
+        hint=TuningHint(
+            scale=Scale.CATEGORICAL,
+            sensitivity=Sensitivity.LOW,
+            values=("sv", "elementwise"),
+        ),
+        when_to_tune=(
+            "'elementwise' only for diagnostic comparisons; 'sv' is almost "
+            "always the right choice."
+        ),
+    )
+)
+
+
+# --- iPEPSConfig: explicit-AD budget ----------------------------------------
+
+_register(
+    ParamSpec(
+        name="gs_explicit_ad_steps",
+        dataclass_name="iPEPSConfig",
+        type_str="int",
+        default=20,
+        category=TuningCategory.ACCURACY,
+        description=(
+            "Number of CTM sweeps differentiated through when "
+            "gs_explicit_ad=True. The final K sweeps carry gradients; "
+            "earlier sweeps run under stop_gradient as warmup."
+        ),
+        hint=TuningHint(
+            scale=Scale.LINEAR,
+            sensitivity=Sensitivity.HIGH,
+            range=(5, 50),
+            applies_when={"iPEPSConfig.gs_explicit_ad": True},
+            cost=CostModel(
+                runtime="linear in K", memory="linear in K (saved activations)"
+            ),
+        ),
+        when_to_tune=(
+            "Increase when gradients look truncated (energy plateau with "
+            "small residual); decrease to save memory at large chi."
+        ),
+        references=("arXiv:2511.09546",),  # Rader et al. use 3+20
+    )
+)
+
+_register(
+    ParamSpec(
+        name="gs_explicit_ad_warmup",
+        dataclass_name="iPEPSConfig",
+        type_str="int",
+        default=3,
+        category=TuningCategory.PERFORMANCE,
+        description=(
+            "Non-differentiated CTM warmup sweeps before the "
+            "gs_explicit_ad_steps differentiated sweeps. Lets the "
+            "environment pre-converge cheaply."
+        ),
+        hint=TuningHint(
+            scale=Scale.LINEAR,
+            sensitivity=Sensitivity.MEDIUM,
+            range=(0, 30),
+            applies_when={"iPEPSConfig.gs_explicit_ad": True},
+            cost=CostModel(runtime="linear", memory="constant"),
+        ),
+        when_to_tune=(
+            "Raise when the warm-started env is far from the fixed point "
+            "(e.g. after a large L-BFGS step)."
+        ),
+        references=("arXiv:2511.09546",),
+    )
+)
+
+_register(
+    ParamSpec(
+        name="metric_gmres_maxiter",
+        dataclass_name="iPEPSConfig",
+        type_str="int",
+        default=30,
+        category=TuningCategory.PERFORMANCE,
+        description=(
+            "Maximum GMRES iterations when solving the metric "
+            "(quantum-geometric-tensor) preconditioner system "
+            "N g' = g. Only active when gs_metric_precond=True."
+        ),
+        hint=TuningHint(
+            scale=Scale.LINEAR,
+            sensitivity=Sensitivity.MEDIUM,
+            range=(5, 100),
+            applies_when={"iPEPSConfig.gs_metric_precond": True},
+            cost=CostModel(runtime="linear per precondition call"),
+        ),
+        when_to_tune=(
+            "Raise when metric_gmres_tol is not reached; lower to save "
+            "time when the outer optimizer is still far from GS."
+        ),
+        references=("arXiv:2511.09546",),
+    )
+)
+
+_register(
+    ParamSpec(
+        name="metric_gmres_tol",
+        dataclass_name="iPEPSConfig",
+        type_str="float",
+        default=1e-2,
+        category=TuningCategory.ACCURACY,
+        description=(
+            "Relative residual tolerance for the metric preconditioner GMRES solve."
+        ),
+        hint=TuningHint(
+            scale=Scale.LOG10,
+            sensitivity=Sensitivity.MEDIUM,
+            range=(1e-6, 1e-1),
+            applies_when={"iPEPSConfig.gs_metric_precond": True},
+            cost=CostModel(runtime="tighter = more GMRES iters"),
+        ),
+        when_to_tune=(
+            "Tighten to 1e-3–1e-4 near the GS for accurate natural "
+            "gradient; 1e-2 is fine early."
+        ),
+        references=("arXiv:2511.09546",),
+    )
+)
+
+_register(
+    ParamSpec(
+        name="gs_conv_tol",
+        dataclass_name="iPEPSConfig",
+        type_str="float",
+        default=1e-8,
+        category=TuningCategory.ACCURACY,
+        description=(
+            "Energy-change convergence tolerance for the outer L-BFGS/CG "
+            "ground-state optimizer. Loop exits early when "
+            "|E_k - E_{k-1}| < gs_conv_tol."
+        ),
+        hint=TuningHint(
+            scale=Scale.LOG10,
+            sensitivity=Sensitivity.MEDIUM,
+            range=(1e-12, 1e-4),
+            cost=CostModel(accuracy="lower = tighter ground state"),
+        ),
+        when_to_tune=(
+            "Loosen to 1e-6 for fast exploratory runs; tighten to 1e-10 for production."
+        ),
+    )
+)
+
+_register(
+    ParamSpec(
+        name="gs_max_grad_norm",
+        dataclass_name="iPEPSConfig",
+        type_str="float",
+        default=1.0,
+        category=TuningCategory.STABILITY,
+        description=(
+            "Clip the L-BFGS/CG gradient norm before the search direction "
+            "is built. Protects against spurious large gradients from "
+            "CTM near-degeneracies."
+        ),
+        hint=TuningHint(
+            scale=Scale.LOG10,
+            sensitivity=Sensitivity.MEDIUM,
+            range=(1e-2, 1e2),
+            cost=CostModel(accuracy="clip biases update direction"),
+        ),
+        when_to_tune=(
+            "Lower to 0.1 when the optimizer takes large rejected steps; "
+            "raise to 10 if the clip cuts healthy gradients."
+        ),
+    )
+)
+
+_register(
+    ParamSpec(
+        name="gs_line_search",
+        dataclass_name="iPEPSConfig",
+        type_str="bool | None",
+        default=None,
+        category=TuningCategory.OPTIMIZER,
+        description=(
+            "Enable line search for the outer optimizer. None = auto "
+            "(on for L-BFGS, off for plain gradient descent)."
+        ),
+        hint=TuningHint(
+            scale=Scale.BOOLEAN,
+            sensitivity=Sensitivity.HIGH,
+            cost=CostModel(runtime="2–5x more energy evals per step"),
+        ),
+        when_to_tune=(
+            "Disable only for diagnostic comparisons; line search is "
+            "almost always worth its cost on noisy gradients."
+        ),
+    )
+)
+
+_register(
+    ParamSpec(
+        name="gs_line_search_max_steps",
+        dataclass_name="iPEPSConfig",
+        type_str="int",
+        default=8,
+        category=TuningCategory.OPTIMIZER,
+        description=(
+            "Maximum backtracking steps for the line search (both Armijo "
+            "and Hager-Zhang)."
+        ),
+        hint=TuningHint(
+            scale=Scale.LINEAR,
+            sensitivity=Sensitivity.LOW,
+            range=(3, 20),
+            cost=CostModel(runtime="linear in budget"),
+        ),
+        when_to_tune=(
+            "Raise to 16 when line search frequently hits the cap without "
+            "accepting; lower to save time on cheap-to-eval loss."
+        ),
+    )
+)
+
+_register(
+    ParamSpec(
+        name="gs_projector_method",
+        dataclass_name="iPEPSConfig",
+        type_str="str | None",
+        default=None,
+        category=TuningCategory.METHOD_SELECTION,
+        description=(
+            "Override CTMConfig.projector_method for the AD path without "
+            "affecting CTM calls outside the optimizer. None inherits "
+            "from ctm.projector_method."
+        ),
+        hint=TuningHint(
+            scale=Scale.CATEGORICAL,
+            sensitivity=Sensitivity.MEDIUM,
+            values=(None, "eigh", "qr", "svd"),
+        ),
+        when_to_tune=(
+            "Set to 'eigh' to force the AD-friendly projector while "
+            "letting the rest of the pipeline use 'qr' or 'svd'."
+        ),
+    )
+)
+
+
 # ---------------------------------------------------------------------------
 # Query API
 # ---------------------------------------------------------------------------
