@@ -192,6 +192,7 @@ def _ctm_tensor_move_left(
     chi: int,
     projector_method: str = "eigh",
     base_charges: np.ndarray | None = None,
+    projector_backward: str = "auto",
 ) -> CTMTensorEnv:
     """Left move: updates C1, T4, C4.
 
@@ -219,7 +220,9 @@ def _ctm_tensor_move_left(
     T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", OUT)
 
     # Native projector
-    P_1, P_2 = _compute_projector_tensor(C1g, C4g, chi, projector_method, base_charges)
+    P_1, P_2 = _compute_projector_tensor(
+        C1g, C4g, chi, projector_method, base_charges, projector_backward
+    )
     C1_new, C4_new, T4_new = _apply_projector_with_reembed(
         P_1, P_2, C1g, C4g, T4g, "fl", "fr"
     )
@@ -244,6 +247,7 @@ def _ctm_tensor_move_right(
     chi: int,
     projector_method: str = "eigh",
     base_charges: np.ndarray | None = None,
+    projector_backward: str = "auto",
 ) -> CTMTensorEnv:
     """Right move: updates C2, T2, C3.
 
@@ -271,7 +275,9 @@ def _ctm_tensor_move_right(
     T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", OUT)
 
     # Native projector
-    P_1, P_2 = _compute_projector_tensor(C2g, C3g, chi, projector_method, base_charges)
+    P_1, P_2 = _compute_projector_tensor(
+        C2g, C3g, chi, projector_method, base_charges, projector_backward
+    )
     C2_new, C3_new, T2_new = _apply_projector_with_reembed(
         P_1, P_2, C2g, C3g, T2g, "fl", "fr"
     )
@@ -295,6 +301,7 @@ def _ctm_tensor_move_top(
     chi: int,
     projector_method: str = "eigh",
     base_charges: np.ndarray | None = None,
+    projector_backward: str = "auto",
 ) -> CTMTensorEnv:
     """Top move: updates C1, T1, C2.
 
@@ -322,7 +329,9 @@ def _ctm_tensor_move_top(
     T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", OUT)
 
     # Native projector
-    P_1, P_2 = _compute_projector_tensor(C1g, C2g, chi, projector_method, base_charges)
+    P_1, P_2 = _compute_projector_tensor(
+        C1g, C2g, chi, projector_method, base_charges, projector_backward
+    )
     C1_new, C2_new, T1_new = _apply_projector_with_reembed(
         P_1, P_2, C1g, C2g, T1g, "fl", "fr"
     )
@@ -346,6 +355,7 @@ def _ctm_tensor_move_bottom(
     chi: int,
     projector_method: str = "eigh",
     base_charges: np.ndarray | None = None,
+    projector_backward: str = "auto",
 ) -> CTMTensorEnv:
     """Bottom move: updates C4, T3, C3.
 
@@ -373,7 +383,9 @@ def _ctm_tensor_move_bottom(
     T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", OUT)
 
     # Native projector
-    P_1, P_2 = _compute_projector_tensor(C4g, C3g, chi, projector_method, base_charges)
+    P_1, P_2 = _compute_projector_tensor(
+        C4g, C3g, chi, projector_method, base_charges, projector_backward
+    )
     C4_new, C3_new, T3_new = _apply_projector_with_reembed(
         P_1, P_2, C4g, C3g, T3g, "fl", "fr"
     )

@@ -5,6 +5,7 @@ Extracts optimize_gs_ad and related helpers from ipeps.py.
 
 from __future__ import annotations
 
+import logging
 import math
 
 import jax
@@ -15,6 +16,50 @@ from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+
+_logger = logging.getLogger(__name__)
+
+
+def _resolve_projector_backward(config: iPEPSConfig) -> iPEPSConfig:
+    """Auto-promote ``ctm.projector_backward`` for explicit-AD eigh paths.
+
+    Mirrors the ``forward_gauge`` ``"qr"`` → ``"phase"`` auto-promotion
+    pattern a few blocks below: when the user is on the explicit-AD path
+    (``gs_explicit_ad=True``) and the CTM projector uses ``eigh``, the
+    Lorentzian-regularized eigh backward from ``_lorentzian_eigh.py`` is
+    the recommended backward (Francuz et al., PRR 7, 013237; see the
+    Task 8 section of
+    ``docs/plans/2026-04-13-multisite-c4v-reference-ad-plan.md``).  The
+    implicit-diff path has its own ``ctm_ad_mode`` story and is never
+    promoted here.
+
+    Semantics:
+      * ``gs_explicit_ad`` must be True.
+      * ``ctm.projector_method`` must be ``"eigh"`` (``"qr"`` / ``"svd"``
+        don't use the eigh backward and can't be Lorentzianised).
+      * ``ctm.projector_backward`` must be ``"auto"`` — a user who
+        explicitly set ``"standard"`` or ``"lorentzian"`` is never
+        overridden in either direction.
+
+    When all three hold, returns a new config with
+    ``ctm.projector_backward`` replaced by ``"lorentzian"`` and emits an
+    ``info`` log line.  Otherwise the config is returned unchanged.
+    """
+    from dataclasses import replace as _replace
+
+    if not config.gs_explicit_ad:
+        return config
+    ctm_cfg = config.ctm
+    if ctm_cfg.projector_method != "eigh":
+        return config
+    if ctm_cfg.projector_backward != "auto":
+        return config
+    new_ctm = _replace(ctm_cfg, projector_backward="lorentzian")
+    _logger.info(
+        "projector_backward auto-promoted: auto -> lorentzian "
+        "(explicit AD + projector_method=eigh)"
+    )
+    return _replace(config, ctm=new_ctm)
 
 
 def _normalize_stall_recovery(config, *, unit_cell: str):
@@ -332,6 +377,12 @@ def optimize_gs_ad(
         raise ValueError(f"gs_log_interval must be >= 1, got {config.gs_log_interval}")
     if config.gs_num_steps < 0:
         raise ValueError(f"gs_num_steps must be >= 0, got {config.gs_num_steps}")
+
+    # Auto-promote projector_backward before dispatch so every downstream
+    # helper (1-site, 2-site, reference-C4v) sees the same CTM config.
+    # Mirrors the forward_gauge "qr" -> "phase" promotion further below.
+    # See docs/plans/2026-04-13-multisite-c4v-reference-ad-plan.md Task 8.
+    config = _resolve_projector_backward(config)
 
     if config.unit_cell == "2site":
         return _optimize_gs_ad_2site(hamiltonian_gate, A_init, config)
@@ -962,6 +1013,7 @@ def _optimize_gs_ad_tensor(
         min_iter=max(_base_cfg.min_iter, 30),
         renormalize=_base_cfg.renormalize,
         projector_method=_base_cfg.projector_method,
+        projector_backward=_base_cfg.projector_backward,
         jit_ctm=_base_cfg.jit_ctm,
         ctm_conv_method=_base_cfg.ctm_conv_method,
         forward_gauge=_base_cfg.forward_gauge,
@@ -1620,6 +1672,7 @@ def _optimize_gs_ad_tensor_2site(
         min_iter=max(_base_cfg2.min_iter, 30),
         renormalize=_base_cfg2.renormalize,
         projector_method=_base_cfg2.projector_method,
+        projector_backward=_base_cfg2.projector_backward,
         jit_ctm=_base_cfg2.jit_ctm,
         ctm_conv_method=_base_cfg2.ctm_conv_method,
         forward_gauge=_base_cfg2.forward_gauge,

@@ -76,12 +76,21 @@ def _ctm_tensor_sweep(
     chi: int,
     renormalize: bool,
     projector_method: str = "eigh",
+    projector_backward: str = "auto",
 ) -> CTMTensorEnv:
     """One full CTM sweep: left, right, top, bottom + optional renormalize."""
-    env = _ctm_tensor_move_left(env, env, a, chi, projector_method)
-    env = _ctm_tensor_move_right(env, env, a, chi, projector_method)
-    env = _ctm_tensor_move_top(env, env, a, chi, projector_method)
-    env = _ctm_tensor_move_bottom(env, env, a, chi, projector_method)
+    env = _ctm_tensor_move_left(
+        env, env, a, chi, projector_method, projector_backward=projector_backward
+    )
+    env = _ctm_tensor_move_right(
+        env, env, a, chi, projector_method, projector_backward=projector_backward
+    )
+    env = _ctm_tensor_move_top(
+        env, env, a, chi, projector_method, projector_backward=projector_backward
+    )
+    env = _ctm_tensor_move_bottom(
+        env, env, a, chi, projector_method, projector_backward=projector_backward
+    )
     if renormalize:
         env = _renormalize_tensor_env(env)
     return env
@@ -93,6 +102,7 @@ def _ctm_tensor_sweep_paired(
     chi: int,
     renormalize: bool,
     projector_method: str = "eigh",
+    projector_backward: str = "auto",
 ) -> CTMTensorEnv:
     """One full CTM sweep using paired moves: horizontal then vertical.
 
@@ -100,8 +110,12 @@ def _ctm_tensor_sweep_paired(
     consistent charge-sector distributions across sweeps for
     SymmetricTensor inputs.
     """
-    env = _ctm_tensor_move_horizontal(env, env, a, chi, projector_method)
-    env = _ctm_tensor_move_vertical(env, env, a, chi, projector_method)
+    env = _ctm_tensor_move_horizontal(
+        env, env, a, chi, projector_method, projector_backward=projector_backward
+    )
+    env = _ctm_tensor_move_vertical(
+        env, env, a, chi, projector_method, projector_backward=projector_backward
+    )
     if renormalize:
         env = _renormalize_tensor_env(env)
     return env
@@ -174,6 +188,7 @@ def _ctm_tensor_sweep_multisite(
     chi: int,
     renormalize: bool,
     projector_method: str = "eigh",
+    projector_backward: str = "auto",
 ) -> dict[Coord, CTMTensorEnv]:
     """One full multisite CTM sweep over all sites and directions."""
     # Extract base charges from any double-layer tensor for projector stabilization
@@ -199,6 +214,7 @@ def _ctm_tensor_sweep_multisite(
                 chi,
                 projector_method,
                 base_charges=base_charges,
+                projector_backward=projector_backward,
             )
     if renormalize:
         envs = {c: _renormalize_tensor_env(e) for c, e in envs.items()}
@@ -225,6 +241,7 @@ def ctm_tensor(
     renormalize: bool = True,
     projector_method: str = "eigh",
     qr_warmup_steps: int = 3,
+    projector_backward: str = "auto",
 ) -> CTMTensorEnv:
     """Run standard CTM to convergence using the Tensor protocol.
 
@@ -281,12 +298,21 @@ def ctm_tensor(
     if projector_method == "qr" and qr_warmup_steps > 0:
         warmup = min(qr_warmup_steps, max_iter)
         for _ in range(warmup):
-            env = sweep_fn(env, a, chi, renormalize, "eigh")
+            env = sweep_fn(
+                env, a, chi, renormalize, "eigh", projector_backward=projector_backward
+            )
         max_iter = max_iter - warmup
 
     prev_sv = None
     for _ in range(max_iter):
-        env = sweep_fn(env, a, chi, renormalize, projector_method)
+        env = sweep_fn(
+            env,
+            a,
+            chi,
+            renormalize,
+            projector_method,
+            projector_backward=projector_backward,
+        )
 
         current_sv = jnp.linalg.svd(env.C1.todense(), compute_uv=False)
         if prev_sv is not None:
@@ -307,6 +333,7 @@ def _ctm_tensor_multisite(
     renormalize: bool = True,
     projector_method: str = "eigh",
     qr_warmup_steps: int = 3,
+    projector_backward: str = "auto",
 ) -> dict[Coord, CTMTensorEnv]:
     """Run multisite CTM to convergence using the Tensor protocol.
 
@@ -331,14 +358,26 @@ def _ctm_tensor_multisite(
         warmup = min(qr_warmup_steps, max_iter)
         for _ in range(warmup):
             envs = _ctm_tensor_sweep_multisite(
-                envs, double_layers, neighbors, chi, renormalize, "eigh"
+                envs,
+                double_layers,
+                neighbors,
+                chi,
+                renormalize,
+                "eigh",
+                projector_backward=projector_backward,
             )
         max_iter = max_iter - warmup
 
     prev_svs: dict[Coord, jax.Array] = {}
     for _ in range(max_iter):
         envs = _ctm_tensor_sweep_multisite(
-            envs, double_layers, neighbors, chi, renormalize, projector_method
+            envs,
+            double_layers,
+            neighbors,
+            chi,
+            renormalize,
+            projector_method,
+            projector_backward=projector_backward,
         )
         converged = True
         for c in sorted(envs):
@@ -364,6 +403,7 @@ def ctm_tensor_2site(
     renormalize: bool = True,
     projector_method: str = "eigh",
     qr_warmup_steps: int = 3,
+    projector_backward: str = "auto",
 ) -> tuple[CTMTensorEnv, CTMTensorEnv]:
     """Run 2-site checkerboard CTM to convergence using the Tensor protocol.
 
@@ -390,6 +430,7 @@ def ctm_tensor_2site(
         renormalize,
         projector_method,
         qr_warmup_steps,
+        projector_backward=projector_backward,
     )
     return envs[(0, 0)], envs[(1, 0)]
 
@@ -403,6 +444,7 @@ def ctm_multisite(
     renormalize: bool = True,
     projector_method: str = "eigh",
     qr_warmup_steps: int = 3,
+    projector_backward: str = "auto",
 ) -> dict[str, CTMTensorEnv]:
     """Run multisite CTM to convergence for an arbitrary lattice.
 
@@ -502,6 +544,7 @@ def ctm_multisite(
         renormalize,
         projector_method,
         qr_warmup_steps,
+        projector_backward=projector_backward,
     )
 
     # Map results back to site names

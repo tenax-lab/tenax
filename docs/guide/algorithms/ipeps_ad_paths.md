@@ -101,6 +101,16 @@ gauge for equal or better energy.
   `"phase"` at runtime when `gs_explicit_ad=True`. Users can override with
   `forward_gauge="sigma"` (historical path) or `forward_gauge="none"`
   (diagnostic); see the mode table below.
+- `projector_backward="auto"` (config default) — when `projector_method="eigh"`
+  and `gs_explicit_ad=True`, `optimize_gs_ad` auto-promotes to `"lorentzian"`,
+  routing the projector VJP through the Francuz–Schuch–Vanhecke
+  truncated-eigh kernel (`_lorentzian_eigh.py`) instead of the legacy
+  `regularized_eigh` path. This closes the 2-site χ=8 convergence gap
+  tracked in issue #299 (E_best improves from ≈ −0.558 to ≈ −0.6602 at
+  D=2, χ=8). Set to `"standard"` to force the legacy backward, or
+  `"lorentzian"` to opt in even when using `projector_method="qr"/"svd"`
+  (the flag is a no-op on non-eigh projectors). Currently dense-only;
+  U(1) `SymmetricTensor` support is deferred to Approach B of the plan.
 - `gs_explicit_ad_steps=30` — number of backprop CTM sweeps.
 - `gs_explicit_ad_warmup=10` — warmup sweeps (stop_gradient).
 
