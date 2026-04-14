@@ -279,7 +279,8 @@ The 2-site L-BFGS path still has a separate convergence gap at
 | Metric preconditioning            | **Working**      | Natural-gradient preconditioner for CG / L-BFGS.                   |
 | Stall recovery (1-site)           | **Working**      | ``gs_stall_recovery="noise"`` auto-default; required by C4v path.  |
 | Stall recovery (2-site)           | **Working**      | ``gs_stall_recovery="reset"`` auto-default since #298.             |
-| 2-site L-BFGS at χ=8              | **EXPERIMENTAL** | Converges only to ``E ≈ -0.558`` at D=2; gap tracked by #299.      |
+| 2-site L-BFGS at χ=8              | **Working**      | ``E_best ≈ -0.6602`` at D=2 with Lorentzian projector backward (issue #299 closed; post-convergence re-eval tracked separately by #317). |
+| Lorentzian projector backward     | **Working**      | Auto-default when ``gs_explicit_ad=True`` + ``projector_method="eigh"``; 1-site + 2-site, dense only (SymmetricTensor deferred to Approach B). |
 | Split CTM forward (SU)            | **Working**      | Used by simple update.                                             |
 | Split CTM + implicit diff         | **BROKEN**       | Not wired into optimizer.                                          |
 | Split CTM + explicit diff         | **Working**      | No ``jax.checkpoint``, high memory.                                |
@@ -291,6 +292,7 @@ The 2-site L-BFGS path still has a separate convergence gap at
 |---|-----|------------------------------|------------|--------------------|
 | 2 | 16  | qr + phase + explicit AD     | -0.6628    | -0.6548 (Corboz D=2)|
 | 2 | 8   | qr + phase + explicit AD     | -0.6610    | —                  |
+| 2 | 8   | eigh + phase + lorentzian + 2-site C4v | -0.6602 | -0.6548 (Corboz D=2 χ=16) |
 | — | —   | QMC exact                    | -0.66944   | Sandvik, PRB 56, 11678 (1997) |
 
 See [`docs/guide/algorithms/ipeps_ad_paths.md`](guide/algorithms/ipeps_ad_paths.md)
@@ -314,6 +316,7 @@ for the full benchmark table and the projector × gauge comparison matrix.
 | AD projector override | ``gs_projector_method``     | ``None``         | ``"qr"`` (recommended)               |
 | Backward              | ``ad_backward_method``      | ``"vjp"``        | ``"gmres"`` (BROKEN — issue #292)    |
 | Projector             | ``projector_method``        | ``"eigh"``       | ``"qr"`` (recommended) / ``"svd"``   |
+| Projector backward    | ``projector_backward``      | ``"auto"``       | ``"standard"`` / ``"lorentzian"`` (auto-promoted to lorentzian when ``gs_explicit_ad=True`` and ``projector_method="eigh"``) |
 | Forward gauge         | ``forward_gauge``           | ``"qr"``         | ``"phase"`` / ``"sigma"`` / ``"none"`` |
 | Conv tol schedule     | ``gs_ctm_conv_tol_schedule``| ``None``         | ``[(frac, tol), ...]``               |
 | Metric precond        | ``gs_metric_precond``       | ``True``         | ``False`` = standard grad            |

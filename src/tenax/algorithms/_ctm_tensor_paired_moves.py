@@ -117,6 +117,7 @@ def _ctm_tensor_move_horizontal(
     a: Tensor,
     chi: int,
     projector_method: str = "eigh",
+    projector_backward: str = "auto",
 ) -> CTMTensorEnv:
     """Combined left+right CTM move with charge-stabilized projectors.
 
@@ -155,7 +156,7 @@ def _ctm_tensor_move_horizontal(
 
     # Projector with charge stabilization
     P_L1, P_L2 = _compute_projector_tensor(
-        C1g_L, C4g_L, chi, projector_method, base_charges
+        C1g_L, C4g_L, chi, projector_method, base_charges, projector_backward
     )
     C1_new, C4_new, T4_new = _apply_projector_with_reembed(
         P_L1, P_L2, C1g_L, C4g_L, T4g, "fl", "fr"
@@ -186,7 +187,7 @@ def _ctm_tensor_move_horizontal(
 
     # Projector with charge stabilization
     P_R1, P_R2 = _compute_projector_tensor(
-        C2g_R, C3g_R, chi, projector_method, base_charges
+        C2g_R, C3g_R, chi, projector_method, base_charges, projector_backward
     )
     C2_new, C3_new, T2_new = _apply_projector_with_reembed(
         P_R1, P_R2, C2g_R, C3g_R, T2g, "fl", "fr"
@@ -222,6 +223,7 @@ def _ctm_tensor_move_vertical(
     a: Tensor,
     chi: int,
     projector_method: str = "eigh",
+    projector_backward: str = "auto",
 ) -> CTMTensorEnv:
     """Combined top+bottom CTM move with charge-stabilized projectors.
 
@@ -256,7 +258,7 @@ def _ctm_tensor_move_vertical(
 
     # Projector with charge stabilization
     P_T1, P_T2 = _compute_projector_tensor(
-        C1g, C2g, chi, projector_method, base_charges
+        C1g, C2g, chi, projector_method, base_charges, projector_backward
     )
     C1_new, C2_new, T1_new = _apply_projector_with_reembed(
         P_T1, P_T2, C1g, C2g, T1g, "fl", "fr"
@@ -287,7 +289,7 @@ def _ctm_tensor_move_vertical(
 
     # Projector with charge stabilization
     P_B1, P_B2 = _compute_projector_tensor(
-        C4g, C3g, chi, projector_method, base_charges
+        C4g, C3g, chi, projector_method, base_charges, projector_backward
     )
     C4_new, C3_new, T3_new = _apply_projector_with_reembed(
         P_B1, P_B2, C4g, C3g, T3g, "fl", "fr"

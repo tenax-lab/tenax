@@ -540,6 +540,7 @@ def _compute_projector_tensor(
     chi: int,
     projector_method: str = "eigh",
     base_charges: np.ndarray | None = None,
+    projector_backward: str = "auto",
 ) -> tuple[Tensor, Tensor]:
     r"""Compute projector pair (P_1, P_2) as Tensors.
 
@@ -791,11 +792,29 @@ def _compute_projector_tensor(
     rho = C1g_dense @ C1g_dense.conj().T + C4g_dense @ C4g_dense.conj().T
     rho = 0.5 * (rho + rho.conj().T)
     if _has_tracers:
-        from tenax.algorithms.ad_utils import regularized_eigh
+        if projector_backward == "lorentzian":
+            # Lorentzian-regularized truncated-eigh backward (Francuz et al.
+            # 2023, Phys. Rev. Research 7, 013237).  Using the kernel as
+            # ``truncated_eigh_regularized(-rho, k)`` turns "smallest of -ρ"
+            # into "largest of ρ" and returns the top-k eigenvectors in
+            # descending eigenvalue order — matching the baseline column
+            # order produced by ``eigvecs[:, -k:][:, ::-1]``.
+            from tenax.algorithms._lorentzian_eigh import (
+                truncated_eigh_regularized,
+            )
 
-        eigvals, eigvecs = regularized_eigh(rho)
-        k = min(chi, len(eigvals))
-        P_dense = eigvecs[:, -k:][:, ::-1]
+            k = min(chi, rho.shape[0])
+            _, P_dense = truncated_eigh_regularized(-rho, k)
+        else:
+            # projector_backward in {"auto", "standard"} — fall through to the
+            # existing regularized_eigh backward.  Task 8 will resolve "auto"
+            # to "standard" or "lorentzian" at the optimizer layer before it
+            # reaches the projector; for Task 7, both map to "standard" here.
+            from tenax.algorithms.ad_utils import regularized_eigh
+
+            eigvals, eigvecs = regularized_eigh(rho)
+            k = min(chi, len(eigvals))
+            P_dense = eigvecs[:, -k:][:, ::-1]
     else:
         eigvals, eigvecs = jnp.linalg.eigh(rho)
         k = min(chi, len(eigvals))
