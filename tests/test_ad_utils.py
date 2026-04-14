@@ -1277,6 +1277,47 @@ class TestRegularizedEigh:
         grad = jax.grad(loss)(M)
         assert jnp.all(jnp.isfinite(grad))
 
+    def test_structured_projector_loss_matches_fd(self):
+        """Regression for issue #316: sign of the F-matrix contraction.
+
+        ``sum(w**2)`` / ``sum(v[:, -1] ** 2)`` are insensitive to the sign
+        of the F-matrix term because they only touch the ``dw`` path or are
+        gauge-trivial (unit-norm eigenvector). A proper test must use a
+        gauge-invariant loss that is quadratic in the eigenvectors, such as
+        ``tr(P^T M P)`` with ``P`` the top-k projector. Finite differences
+        and AD must agree in sign and magnitude.
+        """
+        from tenax.algorithms.ad_utils import regularized_eigh
+
+        key = jax.random.PRNGKey(2024)
+        key_rho, key_obs, key_h = jax.random.split(key, 3)
+        C = jax.random.normal(key_rho, (6, 6))
+        rho = C @ C.T
+        rho = 0.5 * (rho + rho.T)
+        M_obs = jax.random.normal(key_obs, (6, 6))
+        M_obs = 0.5 * (M_obs + M_obs.T)
+
+        def loss(r):
+            _, v = regularized_eigh(r)
+            P = v[:, -3:][:, ::-1]
+            return jnp.trace(P.T @ M_obs @ P)
+
+        # Directional derivative along a symmetric perturbation h.
+        h = jax.random.normal(key_h, (6, 6))
+        h = 0.5 * (h + h.T)
+        eps = 1e-5
+        fd = float(loss(rho + eps * h) - loss(rho - eps * h)) / (2 * eps)
+        grad = jax.grad(loss)(rho)
+        ad = float(jnp.sum(grad * h))
+
+        assert jnp.isfinite(ad)
+        assert jnp.isfinite(fd)
+        assert abs(ad - fd) < 1e-4, (
+            f"regularized_eigh AD disagrees with FD on gauge-invariant "
+            f"projector loss: ad={ad:+.10f} fd={fd:+.10f} "
+            f"(sign bug in F contraction — issue #316)"
+        )
+
 
 class TestMultipletAwareTruncation:
     """SVD truncation should handle degenerate singular values at boundary."""

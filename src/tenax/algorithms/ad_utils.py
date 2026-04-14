@@ -385,8 +385,12 @@ def _regularized_eigh_bwd(residuals, g):
     w_scale = jnp.maximum(jnp.max(jnp.abs(w)), _EIGH_LORENTZ_EPS)
     eps = jnp.maximum(_EIGH_LORENTZ_EPS, _EIGH_LORENTZ_REL * w_scale)
 
-    # Lorentzian-regularized F-matrix
-    diff = w[:, None] - w[None, :]
+    # Lorentzian-regularized F-matrix.
+    # JAX reverse-mode convention for symmetric eigh wants
+    #   F_ij = 1 / (w_j - w_i)
+    # so ``diff[i, j] = w_j - w_i``.  The previous formulation used
+    # ``w_i - w_j`` which flipped the sign of the backward (issue #316).
+    diff = w[None, :] - w[:, None]
     F = diff / (diff**2 + eps**2)
     F = F - jnp.diag(jnp.diag(F))  # zero diagonal
 
