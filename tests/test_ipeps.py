@@ -1270,6 +1270,46 @@ class TestADSymmetric:
         assert np.isfinite(E_sym)
         assert np.isfinite(E_dense)
 
+    def test_optimize_gs_ad_nontrivial_u1_preserves_symmetric_type(self):
+        """Regression for #297: optimizer shell must accept a SymmetricTensor
+        with *non-trivial* U(1) charges and return a SymmetricTensor (not
+        silently downgrade to DenseTensor via a .todense() band-aid)."""
+        from tenax.core.index import FlowDirection, TensorIndex
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.core.tensor import SymmetricTensor
+
+        sym = U1Symmetry()
+        # Non-trivial U(1) charges [0, 1] on every leg.  Flow directions
+        # sum to zero (per-charge) so at least the all-zero block exists
+        # and the CTM pipeline can proceed.
+        virt = np.array([0, 1], dtype=np.int32)
+        phys = np.array([0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex.from_charges(sym, virt.copy(), FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex.from_charges(sym, virt.copy(), FlowDirection.IN, label="r"),
+            TensorIndex.from_charges(sym, phys.copy(), FlowDirection.IN, label="phys"),
+        )
+        A_sym = SymmetricTensor.random_normal(indices, jax.random.PRNGKey(0))
+
+        gate = self._heisenberg_gate()
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=1,
+            gs_learning_rate=0.01,
+        )
+        A_opt, _env, E_gs = optimize_gs_ad(gate, A_sym, config)
+
+        # Core assertion: the optimizer shell did not silently downgrade
+        # the SymmetricTensor input to a DenseTensor.  Prior to #297 this
+        # would fail because the shell dense-wrapped A upfront.
+        assert isinstance(A_opt, SymmetricTensor), (
+            f"expected SymmetricTensor, got {type(A_opt).__name__}"
+        )
+        assert np.isfinite(E_gs)
+
 
 class TestTensor2SiteSimpleUpdate:
     """Tests for the 2-site Tensor-protocol simple update."""
