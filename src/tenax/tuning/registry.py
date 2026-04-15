@@ -1059,13 +1059,16 @@ _register(
             "(on for L-BFGS, off for plain gradient descent)."
         ),
         hint=TuningHint(
-            scale=Scale.BOOLEAN,
+            scale=Scale.CATEGORICAL,
             sensitivity=Sensitivity.HIGH,
+            values=(None, True, False),
             cost=CostModel(runtime="2–5x more energy evals per step"),
         ),
         when_to_tune=(
             "Disable only for diagnostic comparisons; line search is "
-            "almost always worth its cost on noisy gradients."
+            "almost always worth its cost on noisy gradients. ``None`` "
+            "(auto) is the baseline; override only to force a specific "
+            "behavior."
         ),
     )
 )
