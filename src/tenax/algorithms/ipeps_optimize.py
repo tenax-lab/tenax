@@ -200,11 +200,16 @@ def _tangent_project_unit(direction, params):
     if hasattr(params, "todense"):
         p_flat = params.todense().reshape(-1)
         d_flat = direction.todense().reshape(-1)
-        p_norm_sq = jnp.dot(p_flat, p_flat) + 1e-30
-        coef = jnp.dot(p_flat, d_flat) / p_norm_sq
+        # Use ``vdot`` (Hermitian inner product ``p^H v``) rather than
+        # ``dot`` (bilinear ``p^T v``) so the projection works correctly
+        # for complex-valued iPEPS site tensors — matches the optimizer's
+        # ``_tree_dot`` convention elsewhere.  For real tensors this is
+        # equivalent to ``jnp.dot``.
+        p_norm_sq = jnp.vdot(p_flat, p_flat).real + 1e-30
+        coef = jnp.vdot(p_flat, d_flat) / p_norm_sq
         return direction - params * coef
-    p_norm_sq = jnp.dot(params, params) + 1e-30
-    coef = jnp.dot(params, direction) / p_norm_sq
+    p_norm_sq = jnp.vdot(params, params).real + 1e-30
+    coef = jnp.vdot(params, direction) / p_norm_sq
     return direction - coef * params
 
 
