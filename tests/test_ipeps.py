@@ -740,6 +740,55 @@ class TestOptimizeGsAd2Site:
         assert E_gs > -0.9, f"E/site={E_gs:.6f} unphysically low"
         assert E_gs < -0.50, f"C4v 2-site AD energy {E_gs:.6f} not below -0.50"
 
+    def test_2site_noc4v_ad_stays_variational_issue_328(self, heisenberg_gate):
+        """Regression for #328: 2-site AD with gs_c4v=False must not drift
+        into non-variational CTM territory.
+
+        The issue observed E_best = -33.85 (!!) for gs_c4v=False implicit AD
+        on the same Heisenberg gate at chi=16.  The tangent-space projection
+        of the L-BFGS/CG direction (Option A in the issue) kills the
+        off-manifold chord that pushed the line search into a CTM fixed
+        point where the finite-chi energy is unphysically low.
+
+        This test only asserts E_gs > -2.0 (very loose) — even with the fix
+        there's no finite-chi variational guarantee; what the fix prevents
+        is order-of-magnitude drift.
+        """
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=5,
+            gs_learning_rate=1e-2,
+            unit_cell="2site",
+            gs_c4v=False,
+        )
+        _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
+        assert np.isfinite(E_gs), f"non-finite E_gs = {E_gs}"
+        assert E_gs > -2.0, (
+            f"E/site = {E_gs:.6f} is wildly unphysical — tangent projection "
+            f"likely broken (#328 regression)"
+        )
+
+    def test_2site_noc4v_ad_norms_stay_unit(self, heisenberg_gate):
+        """Regression for #328: ||A|| and ||B|| must stay ~1 throughout
+        gs_c4v=False 2-site AD.  _normalize_params retracts to unit norm
+        at each step and tangent projection keeps the chord on-manifold,
+        so the returned A_opt / B_opt should have unit norm to high
+        precision."""
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=5,
+            gs_learning_rate=1e-2,
+            unit_cell="2site",
+            gs_c4v=False,
+        )
+        (A_opt, B_opt), _, _ = optimize_gs_ad(heisenberg_gate, None, config)
+        A_norm = float(jnp.linalg.norm(A_opt.todense().reshape(-1)))
+        B_norm = float(jnp.linalg.norm(B_opt.todense().reshape(-1)))
+        assert abs(A_norm - 1.0) < 1e-4, f"||A_opt|| = {A_norm}, expected ~1.0"
+        assert abs(B_norm - 1.0) < 1e-4, f"||B_opt|| = {B_norm}, expected ~1.0"
+
     @pytest.mark.slow
     def test_2site_heisenberg_ad_energy_benchmark(self, heisenberg_gate):
         """SU + C4v AD at D=2, chi=16 should give a physical energy.
