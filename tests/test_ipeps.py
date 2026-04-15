@@ -849,6 +849,12 @@ class TestHeisenbergBenchmark:
             gs_num_steps=50,
             gs_learning_rate=5e-3,
             unit_cell="2site",
+            # gs_c4v=True is required for 2-site stability — without the
+            # shared-tensor C4v constraint the optimizer drifts into non-
+            # variational CTM regions and energy walks below the QMC
+            # ground state.  See issue #325 and the warning in
+            # ``_optimize_gs_ad_tensor_2site``.
+            gs_c4v=True,
         )
         _, _, E_gs = optimize_gs_ad(
             heisenberg_gate, (A_su.todense(), B_su.todense()), ad_config
