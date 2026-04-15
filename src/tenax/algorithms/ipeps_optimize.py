@@ -178,6 +178,36 @@ def _normalize_params(params):
     return params / (jnp.linalg.norm(params) + 1e-10)
 
 
+def _tangent_project_unit(direction, params):
+    """Project ``direction`` onto the tangent space of the unit-norm
+    constraint ``||p|| = 1`` at ``params``.
+
+    For a constraint ``||p|| = 1``, the tangent space at ``p`` is
+    ``{v : <p, v> = 0}`` and the orthogonal projection of ``v`` is
+    ``v - (<p, v> / <p, p>) p``.  Applied element-wise for tuple
+    parameter trees.
+
+    Used by the 2-site iPEPS AD optimizer to kill the radial component
+    of the search direction before the line search (issue #328).
+    Without this, the Euclidean L-BFGS direction can have a large
+    component along ``A`` (or ``B``) that takes the line search on a
+    long chord into a non-variational CTM region before
+    ``_normalize_params`` retracts the iterate back.  Stale curvature
+    pairs computed on that chord then corrupt subsequent L-BFGS steps.
+    """
+    if isinstance(params, tuple):
+        return tuple(_tangent_project_unit(d, p) for d, p in zip(direction, params))
+    if hasattr(params, "todense"):
+        p_flat = params.todense().reshape(-1)
+        d_flat = direction.todense().reshape(-1)
+        p_norm_sq = jnp.dot(p_flat, p_flat) + 1e-30
+        coef = jnp.dot(p_flat, d_flat) / p_norm_sq
+        return direction - params * coef
+    p_norm_sq = jnp.dot(params, params) + 1e-30
+    coef = jnp.dot(params, direction) / p_norm_sq
+    return direction - coef * params
+
+
 def _backtracking_line_search(
     params,
     direction,
@@ -1554,6 +1584,18 @@ def _optimize_gs_ad_tensor_2site(
         else:
             direction = jax.tree.map(lambda g: -g, grads)
 
+        # Issue #328: kill the radial component of the search direction
+        # so the line-search chord stays on-manifold to first order.
+        # ``_normalize_params`` projects the final iterate back to unit
+        # norm, but the intermediate chord ``params + alpha * direction``
+        # drifts off the sphere proportional to ``alpha * <params, dir>``
+        # — for a Euclidean L-BFGS direction this can be large and push
+        # the line search into non-variational CTM regions before
+        # retraction.  Stale curvature pairs accumulated on that chord
+        # then corrupt subsequent L-BFGS steps.
+        if not use_c4v:
+            direction = _tangent_project_unit(direction, params)
+
         if use_ls:
             if config.gs_line_search_method == "hager_zhang":
                 from tenax.algorithms._line_search import hager_zhang_line_search
@@ -1561,7 +1603,9 @@ def _optimize_gs_ad_tensor_2site(
                 slope = _tree_dot(grads, direction)
                 if slope >= 0:
                     direction = jax.tree.map(lambda g: -g, grads)
-                    slope = -_tree_dot(grads, grads)
+                    if not use_c4v:
+                        direction = _tangent_project_unit(direction, params)
+                    slope = _tree_dot(grads, direction)
                     if is_metric_lbfgs:
                         lbfgs_history.clear()
 
@@ -1605,6 +1649,8 @@ def _optimize_gs_ad_tensor_2site(
                 slope_bt = _tree_dot(grads, direction)
                 if slope_bt >= 0:
                     direction = jax.tree.map(lambda g: -g, grads)
+                    if not use_c4v:
+                        direction = _tangent_project_unit(direction, params)
                     if is_metric_lbfgs:
                         lbfgs_history.clear()
                 params, new_energy, step_size = _backtracking_line_search(
