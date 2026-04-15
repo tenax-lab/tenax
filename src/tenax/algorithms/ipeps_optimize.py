@@ -1202,12 +1202,38 @@ def _optimize_gs_ad_tensor_2site(
     if not use_c4v:
         import warnings
 
-        warnings.warn(
-            "2-site AD optimizer is experimental and may diverge. "
-            "Prefer 1-site with sublattice_rotate_gate() + gs_c4v=True, "
-            "or enable gs_c4v=True for 2-site.",
-            stacklevel=2,
-        )
+        if config.gs_explicit_ad:
+            # Issue #328: non-C4v 2-site *explicit* AD is non-variational at
+            # finite chi for general models.  The forward-mode AD chain
+            # through the finite-sweep CTM reliably finds unphysical
+            # minima of <H>_ctm/<psi|psi>_ctm where the surrogate energy
+            # falls well below the true ground state.  Bench evidence
+            # (D=2 Heisenberg, chi=16, 30 AD steps, Armijo L-BFGS):
+            #   gs_explicit_ad_steps=10 -> E = -0.06  (stuck)
+            #   gs_explicit_ad_steps=30 -> E = -0.26  (descending, non-var)
+            #   gs_explicit_ad_steps=60 -> E = -1.18  (below physical)
+            # vs physical ground state E/site = -0.6694.  Implicit AD
+            # (gs_explicit_ad=False) lands at E = -0.566 for the same
+            # config — variational and close to physical.
+            warnings.warn(
+                "Non-C4v 2-site *explicit* AD (gs_c4v=False, "
+                "gs_explicit_ad=True) is known to be non-variational at "
+                "finite chi: the optimizer drifts below the physical "
+                "ground state (see issue #328). Set gs_explicit_ad=False "
+                "to use the implicit-AD path, which is variational at "
+                "chi >= 16 for 2-site Heisenberg. For antiferromagnetic "
+                "bipartite models, gs_c4v=True is also a stable option.",
+                stacklevel=2,
+            )
+        else:
+            warnings.warn(
+                "2-site AD with gs_c4v=False uses the implicit-AD path. "
+                "This is variational at chi >= 16 for generic models but "
+                "can be slower than C4v or 1-site optimization. For "
+                "antiferromagnetic bipartite models, consider gs_c4v=True "
+                "or 1-site with sublattice_rotate_gate().",
+                stacklevel=2,
+            )
     import optax
 
     from tenax.algorithms._ctm_tensor import (
