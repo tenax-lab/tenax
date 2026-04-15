@@ -15,7 +15,7 @@ import numpy as np
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.core.tensor import DenseTensor, Tensor
 
 _logger = logging.getLogger(__name__)
 
@@ -586,21 +586,6 @@ def _optimize_gs_ad_tensor(
     A = A_init
     A = A * (1.0 / (A.norm() + 1e-10))
 
-    # The 1-site optimizer operates on a dense view of ``A`` throughout:
-    # ``loss_fn`` dense-wraps ``A`` via ``A.todense()`` for the CTM forward
-    # pass, the env template's pytree structure must match that dense view,
-    # the metric-preconditioned CG / L-BFGS direction is rebuilt as
-    # ``type(A)(dense_array, A.indices)`` (which only works for
-    # ``DenseTensor``), and the final ``_eval_fresh`` already returns a
-    # ``DenseTensor``.  Dense-wrap ``A`` once here so the optimizer state
-    # is internally consistent for both ``DenseTensor`` and
-    # ``SymmetricTensor`` inputs — otherwise the symmetric path hits a
-    # mismatched pytree structure in ``_unflatten_envs_init`` (see
-    # issue #294) or a ``SymmetricTensor(dense_array, ...)`` constructor
-    # failure in the metric-precond branch.
-    if not isinstance(A, DenseTensor):
-        A = DenseTensor(A.todense(), A.indices)
-
     # Override CTM config fields for AD optimization
     ctm_cfg = config.ctm
     from dataclasses import replace as _replace
@@ -649,10 +634,10 @@ def _optimize_gs_ad_tensor(
     def loss_fn(params, env_init_leaves):
         if use_c4v:
             A_data = c4v_tensor_from_coeffs(params, c4v_basis, tensor_shape)
+            A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
+            A_norm = DenseTensor(A_norm_data, A.indices)
         else:
-            A_data = params.todense()
-        A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-        A_norm = DenseTensor(A_norm_data, A.indices)
+            A_norm = params * (1.0 / (params.norm() + 1e-10))
         site_tensors = {(0, 0): A_norm}
         if use_explicit:
             env_leaves = _ctm_converge(
@@ -698,6 +683,7 @@ def _optimize_gs_ad_tensor(
         _config_from_tuple,
         _ctm_tensor_multisite_fixed_point,
         _ctm_tensor_multisite_fixed_point_jit,
+        _wrap_tensor,
     )
 
     _fp_fn = (
@@ -710,10 +696,10 @@ def _optimize_gs_ad_tensor(
         """Forward-only loss for line search — warm-starts CTM from prev_env_leaves."""
         if use_c4v:
             A_data = c4v_tensor_from_coeffs(p, c4v_basis, tensor_shape)
+            A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
+            A_norm = DenseTensor(A_norm_data, A.indices)
         else:
-            A_data = p.todense()
-        A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-        A_norm = DenseTensor(A_norm_data, A.indices)
+            A_norm = p * (1.0 / (p.norm() + 1e-10))
         site_tensors = {(0, 0): A_norm}
         env_leaves = ctm_tensor_converge(
             site_tensors, prev_env_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
@@ -808,7 +794,7 @@ def _optimize_gs_ad_tensor(
                 z_dense = precondition_gradient(
                     A, env_for_metric, grads, delta_metric, config
                 )
-                z = type(grads)(z_dense, grads.indices)
+                z = _wrap_tensor(z_dense, grads)
                 neg_z = jax.tree.map(lambda g: -g, z)
                 if prev_precond_grad is not None and cg_direction is not None:
                     z_diff = jax.tree.map(lambda a, b: a - b, z, prev_precond_grad)
@@ -866,8 +852,8 @@ def _optimize_gs_ad_tensor(
                 d_loc = A.todense().shape[-1]
 
                 def h0_matvec(v):
-                    v_tensor = type(A)(
-                        v.reshape(D_bond, D_bond, D_bond, D_bond, d_loc), A.indices
+                    v_tensor = _wrap_tensor(
+                        v.reshape(D_bond, D_bond, D_bond, D_bond, d_loc), A
                     )
                     result = precondition_gradient(
                         A, env_for_metric, v_tensor, delta_metric, config
@@ -878,7 +864,7 @@ def _optimize_gs_ad_tensor(
                 direction_dense = -direction_flat.reshape(
                     D_bond, D_bond, D_bond, D_bond, d_loc
                 )
-                direction = type(A)(direction_dense, A.indices)
+                direction = _wrap_tensor(direction_dense, A)
         elif optimizer is not None:
             updates, opt_state = optimizer.update(grads, opt_state, params)
             direction = updates
@@ -970,9 +956,8 @@ def _optimize_gs_ad_tensor(
                         noise_key, data.shape
                     )
                     noisy = data + noise * jnp.linalg.norm(data)
-                    params = type(params)(
-                        noisy / (jnp.linalg.norm(noisy) + 1e-10), params.indices
-                    )
+                    noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
+                    params = _wrap_tensor(noisy, params)
                 if config.gs_verbose:
                     print(f"[iPEPS-AD] stall #{stall_count}, adding noise", flush=True)
                 # Reset optimizer state
@@ -1051,10 +1036,10 @@ def _optimize_gs_ad_tensor(
         """
         if use_c4v:
             A_data = c4v_tensor_from_coeffs(p, c4v_basis, tensor_shape)
+            A_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
+            A_t = DenseTensor(A_data, A.indices)
         else:
-            A_data = p.todense()
-        A_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-        A_t = DenseTensor(A_data, A.indices)
+            A_t = p * (1.0 / (p.norm() + 1e-10))
         envs_init = (
             _unflatten_env_single(envs_init_leaves)
             if envs_init_leaves is not None
@@ -1200,6 +1185,7 @@ def _optimize_gs_ad_tensor_2site(
         _config_to_tuple,
         _ctm_tensor_multisite_fixed_point,
         _ctm_tensor_multisite_fixed_point_jit,
+        _wrap_tensor,
         ctm_tensor_converge,
         ctm_tensor_converge_explicit,
     )
@@ -1220,20 +1206,6 @@ def _optimize_gs_ad_tensor_2site(
     A, B = AB_init
     A = A * (1.0 / (A.norm() + 1e-10))
     B = B * (1.0 / (B.norm() + 1e-10))
-
-    # Same rationale as ``_optimize_gs_ad_tensor``: the 2-site metric
-    # preconditioning branch rebuilds ``type(A_g)(dense_array, indices)``
-    # from the preconditioner output, which only works for ``DenseTensor``.
-    # Dense-wrap upfront so the rest of the optimizer is internally
-    # consistent.  The 2-site AD optimizer is already labeled experimental
-    # (see ``UserWarning`` in ``_optimize_gs_ad_2site``), so losing the
-    # block-sparse forward pass on SymmetricTensor inputs is acceptable
-    # here until the metric-precond path is made symmetry-aware (tracked
-    # by issue #294 follow-ups).
-    if not isinstance(A, DenseTensor):
-        A = DenseTensor(A.todense(), A.indices)
-    if not isinstance(B, DenseTensor):
-        B = DenseTensor(B.todense(), B.indices)
 
     from dataclasses import replace as _replace
 
@@ -1471,8 +1443,8 @@ def _optimize_gs_ad_tensor_2site(
                     sites_m, envs_m, grads_m, delta_metric, config
                 )
                 z = (
-                    type(A_g)(z_dict[(0, 0)], A_g.indices),
-                    type(B_g)(z_dict[(1, 0)], B_g.indices),
+                    _wrap_tensor(z_dict[(0, 0)], A_g),
+                    _wrap_tensor(z_dict[(1, 0)], B_g),
                 )
                 neg_z = jax.tree.map(lambda g: -g, z)
                 if prev_precond_grad is not None and cg_direction is not None:
@@ -1550,11 +1522,11 @@ def _optimize_gs_ad_tensor_2site(
                     D_b = A_cur.todense().shape[0]
                     d_l = A_cur.todense().shape[-1]
                     grads_v = {
-                        (0, 0): type(A_cur)(
-                            v_A.reshape(D_b, D_b, D_b, D_b, d_l), A_cur.indices
+                        (0, 0): _wrap_tensor(
+                            v_A.reshape(D_b, D_b, D_b, D_b, d_l), A_cur
                         ),
-                        (1, 0): type(B_cur)(
-                            v_B.reshape(D_b, D_b, D_b, D_b, d_l), B_cur.indices
+                        (1, 0): _wrap_tensor(
+                            v_B.reshape(D_b, D_b, D_b, D_b, d_l), B_cur
                         ),
                     }
                     z_dict = precondition_gradient_multisite(
@@ -1573,8 +1545,8 @@ def _optimize_gs_ad_tensor_2site(
                 dir_A = -direction_flat[:n_A].reshape(D_b, D_b, D_b, D_b, d_l)
                 dir_B = -direction_flat[n_A:].reshape(D_b, D_b, D_b, D_b, d_l)
                 direction = (
-                    type(A_cur)(dir_A, A_cur.indices),
-                    type(B_cur)(dir_B, B_cur.indices),
+                    _wrap_tensor(dir_A, A_cur),
+                    _wrap_tensor(dir_B, B_cur),
                 )
         elif optimizer is not None:
             updates, opt_state = optimizer.update(grads, opt_state, params)
@@ -1662,9 +1634,8 @@ def _optimize_gs_ad_tensor_2site(
                     data = p.todense()
                     noise = config.gs_noise_amplitude * jax.random.normal(k, data.shape)
                     noisy = data + noise * jnp.linalg.norm(data)
-                    noisy_params.append(
-                        type(p)(noisy / (jnp.linalg.norm(noisy) + 1e-10), p.indices)
-                    )
+                    noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
+                    noisy_params.append(_wrap_tensor(noisy, p))
                 params = tuple(noisy_params)
                 if config.gs_verbose:
                     print(f"[iPEPS-AD] stall #{stall_count}, adding noise", flush=True)
@@ -1797,13 +1768,10 @@ def optimize_fpeps_ad(
     to compute exact gradients of the energy with respect to the
     fermionic site tensor, then optimizes with optax.
 
-    The AD backward pass (GMRES implicit differentiation) currently
-    requires ``DenseTensor`` leaves for stable gradients, so input
-    ``SymmetricTensor`` tensors are automatically wrapped as
-    ``DenseTensor`` (preserving the index structure including
-    ``FermionParity`` symmetry charges and flow directions).  The
-    returned ``A_opt`` is a ``DenseTensor`` with the same index
-    metadata.
+    Accepts either ``DenseTensor`` or ``SymmetricTensor`` (e.g.
+    ``FermionParity`` symmetry) inputs — the optimizer shell is
+    polymorphic over the Tensor protocol (#297) and returns a tensor
+    of the same type as the input, preserving charges and flows.
 
     Args:
         hamiltonian_gate: 2-site Hamiltonian as a ``Tensor`` (typically
@@ -1820,9 +1788,9 @@ def optimize_fpeps_ad(
             physical dimension d=2, FermionParity charges).
 
     Returns:
-        ``(A_opt, env, E_gs)`` where ``A_opt`` is the optimized
-        ``DenseTensor``, ``env`` is a ``CTMTensorEnv``, and ``E_gs``
-        is the ground-state energy per site.
+        ``(A_opt, env, E_gs)`` where ``A_opt`` is the optimized site
+        tensor (same type as ``A_init``), ``env`` is a ``CTMTensorEnv``,
+        and ``E_gs`` is the ground-state energy per site.
     """
     if A_init is None:
         if fpeps_config is None:
@@ -1833,11 +1801,5 @@ def optimize_fpeps_ad(
         from tenax.algorithms.fermionic_ipeps import _build_initial_fpeps_tensor
 
         A_init = _build_initial_fpeps_tensor(fpeps_config)
-
-    # Wrap SymmetricTensor as DenseTensor for stable AD backward pass.
-    # The DenseTensor retains the original index metadata (symmetry,
-    # charges, flows) so the CTM pipeline uses the correct labels.
-    if isinstance(A_init, SymmetricTensor):
-        A_init = DenseTensor(A_init.todense(), A_init.indices)
 
     return _optimize_gs_ad_tensor(hamiltonian_gate, A_init, config)
