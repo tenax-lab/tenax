@@ -789,6 +789,48 @@ class TestOptimizeGsAd2Site:
         assert abs(A_norm - 1.0) < 1e-4, f"||A_opt|| = {A_norm}, expected ~1.0"
         assert abs(B_norm - 1.0) < 1e-4, f"||B_opt|| = {B_norm}, expected ~1.0"
 
+    def test_tangent_project_unit_complex_is_hermitian(self):
+        """Regression for PR #330 review: _tangent_project_unit must use
+        the Hermitian inner product (vdot) so complex-valued tensors get
+        their true radial component removed.  With the bilinear jnp.dot
+        from the original PR, ``Re <p, v - coef*p>`` is non-zero for
+        complex inputs and the projection leaks radial drift."""
+        from tenax.algorithms.ipeps_optimize import _tangent_project_unit
+        from tenax.core import DenseTensor, FlowDirection, TensorIndex, U1Symmetry
+
+        sym = U1Symmetry()
+        D, d = 2, 2
+        charges = np.zeros(D, dtype=np.int32)
+        phys = np.zeros(d, dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+            TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+            TensorIndex.from_charges(sym, phys.copy(), FlowDirection.IN, label="phys"),
+        )
+        key_p, key_v = jax.random.split(jax.random.PRNGKey(7))
+        # Complex params and complex direction with non-trivial imaginary parts
+        p_real = jax.random.normal(key_p, (D, D, D, D, d))
+        p_imag = jax.random.normal(jax.random.fold_in(key_p, 1), (D, D, D, D, d))
+        v_real = jax.random.normal(key_v, (D, D, D, D, d))
+        v_imag = jax.random.normal(jax.random.fold_in(key_v, 1), (D, D, D, D, d))
+        p_data = (p_real + 1j * p_imag).astype(jnp.complex128)
+        v_data = (v_real + 1j * v_imag).astype(jnp.complex128)
+        p = DenseTensor(p_data / (jnp.linalg.norm(p_data.reshape(-1)) + 1e-10), indices)
+        v = DenseTensor(v_data, indices)
+
+        v_proj = _tangent_project_unit(v, p)
+
+        # The projected direction must be Hermitian-orthogonal to p:
+        # Re(<p, v_proj>_H) ≈ 0 (and ideally also Im ≈ 0 for consistency).
+        p_flat = p.todense().reshape(-1)
+        vproj_flat = v_proj.todense().reshape(-1)
+        inner = jnp.vdot(p_flat, vproj_flat)
+        assert float(jnp.abs(inner.real)) < 1e-10, (
+            f"Re <p, P_T(v)>_H = {inner.real}, expected ~0"
+        )
+
     @pytest.mark.slow
     def test_2site_heisenberg_ad_energy_benchmark(self, heisenberg_gate):
         """SU + C4v AD at D=2, chi=16 should give a physical energy.
