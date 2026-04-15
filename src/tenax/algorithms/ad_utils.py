@@ -1137,7 +1137,7 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
         site_leaves = site_leaves + tuple(jax.tree.leaves(site_tensors[c]))
     env_leaves = _flatten_envs(envs)
 
-    use_sigma = getattr(config, "ctm_conv_method", "sv") == "elementwise"
+    use_sigma = getattr(config, "forward_gauge", "qr") == "sigma"
 
     if use_sigma:
         # --- YASTN-style backward: sigma-gauged step function ---
