@@ -1139,6 +1139,9 @@ class TestCythonLanczosGround:
         # Eigenvalue must match
         np.testing.assert_allclose(energy_cy, energy_py, atol=1e-10)
 
+        # Eigenvector must preserve the full block support.
+        assert set(vec_cy_blocks.keys()) == set(vec_py.blocks.keys())
+
         # Eigenvector overlap (up to global phase)
         overlap = 0.0
         for k in vec_py.blocks:

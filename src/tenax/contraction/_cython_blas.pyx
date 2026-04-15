@@ -1112,6 +1112,19 @@ cdef void _ba_axpy_impl(dict blocks_x, dict blocks_y, double alpha):
                 blocks_y[k] = yk + alpha * blocks_x[k]
 
 
+cdef void _ba_axpy_union_impl(dict blocks_x, dict blocks_y, double alpha):
+    """y += alpha * x with union-of-keys semantics.
+
+    Unlike ``_ba_axpy_impl`` (shared keys only), this routine also inserts
+    keys that exist only in ``blocks_x``. This matches ``ba_add`` behavior
+    used by the Python Lanczos path when reconstructing the final eigenvector.
+    """
+    _ba_axpy_impl(blocks_x, blocks_y, alpha)
+    for k in blocks_x:
+        if blocks_y.get(k) is None:
+            blocks_y[k] = alpha * blocks_x[k]
+
+
 cdef void _ba_sub_scaled_impl(dict w_blocks, dict q_blocks, double scalar):
     """w -= scalar * q (calls _ba_axpy_impl with -scalar)."""
     _ba_axpy_impl(q_blocks, w_blocks, -scalar)
@@ -1876,10 +1889,12 @@ def cython_lanczos_ground(MatvecOp mv, dict v0_blocks, int max_iter, double tol)
     coeffs = eigvecs[:, idx]
 
     # Reconstruct eigenvector: result = sum_k coeffs[k] * basis[k]
+    # Must use union-of-keys accumulation so charge sectors that are absent
+    # in basis[0] but present in later Krylov vectors are preserved.
     cdef dict result = _ba_copy(<dict>basis[0])
     _ba_scale_impl(result, <double>coeffs[0])
     for k in range(1, n_steps):
-        _ba_axpy_impl(<dict>basis[k], result, <double>coeffs[k])
+        _ba_axpy_union_impl(<dict>basis[k], result, <double>coeffs[k])
 
     # Normalize eigenvector
     norm_val = _ba_norm_impl(result)

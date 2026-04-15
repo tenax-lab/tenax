@@ -93,9 +93,20 @@ if _os.environ.get("TENAX_DISABLE_CYTHON_BLAS", "0") != "1":
     except ImportError:
         pass
 
-    # NOTE(issue-324): Keep this disabled on the symmetric numpy_blockwise
-    # path until the Cython Lanczos backend produces the same singular-value
-    # spectrum and energy as the reference Python BlockArray solver.
+    try:
+        from tenax.contraction._cython_blas import (
+            DMRGMatvec1Site as _DMRGMatvec1Site,
+        )
+        from tenax.contraction._cython_blas import (
+            DMRGMatvec2Site as _DMRGMatvec2Site,
+        )
+        from tenax.contraction._cython_blas import (
+            cython_lanczos_ground as _cython_lanczos_ground,
+        )
+
+        _USE_CYTHON_LANCZOS = True
+    except (ImportError, ModuleNotFoundError):
+        pass
 
 
 @dataclass
@@ -2645,24 +2656,27 @@ def _two_site_update_symmetric_np(
         )
         _env_np[_theta_buf_idx] = None
 
-        # NOTE(issue-324): The Cython Lanczos backend produces incorrect
-        # singular-value spectra on the symmetric numpy_blockwise DMRG path,
-        # causing a persistent energy bias (~8.5e-2 on L=4 Heisenberg).
-        # Keep Cython matvec/sub/reorth accelerators, but always use the
-        # stable Python BlockArray Lanczos solver here.
-        def matvec(v_ba: BlockArray) -> BlockArray:
-            return _execute_matvec_combos(
-                _combo_descs,
-                v_ba.blocks,
-                _theta_buf_idx,
-                _out_keys,
-                _out_shapes,
-                _out_indices,
+        if _USE_CYTHON_LANCZOS:
+            mv = _DMRGMatvec2Site(_combo_descs, _out_keys, _out_shapes, _theta_buf_idx)
+            energy, theta_opt_blocks = _cython_lanczos_ground(
+                mv, theta_ba.blocks, config.lanczos_max_iter, config.lanczos_tol
             )
+            theta_opt_ba = BlockArray(blocks=theta_opt_blocks, indices=_out_indices)
+        else:
 
-        energy, theta_opt_ba = _lanczos_solve_np(
-            matvec, theta_ba, config.lanczos_max_iter, config.lanczos_tol
-        )
+            def matvec(v_ba: BlockArray) -> BlockArray:
+                return _execute_matvec_combos(
+                    _combo_descs,
+                    v_ba.blocks,
+                    _theta_buf_idx,
+                    _out_keys,
+                    _out_shapes,
+                    _out_indices,
+                )
+
+            energy, theta_opt_ba = _lanczos_solve_np(
+                matvec, theta_ba, config.lanczos_max_iter, config.lanczos_tol
+            )
     else:
         _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
 
@@ -2750,22 +2764,27 @@ def _one_site_update_symmetric_np(
         )
         _env_np[_theta_buf_idx] = None
 
-        # NOTE(issue-324): See _two_site_update_symmetric_np. We avoid the
-        # Cython Lanczos backend on the symmetric numpy_blockwise path until
-        # its truncation-spectrum mismatch is fixed.
-        def matvec(v_ba: BlockArray) -> BlockArray:
-            return _execute_matvec_combos(
-                _combo_descs,
-                v_ba.blocks,
-                _theta_buf_idx,
-                _out_keys,
-                _out_shapes,
-                _out_indices,
+        if _USE_CYTHON_LANCZOS:
+            mv = _DMRGMatvec1Site(_combo_descs, _out_keys, _out_shapes, _theta_buf_idx)
+            energy, site_opt_blocks = _cython_lanczos_ground(
+                mv, site_ba.blocks, config.lanczos_max_iter, config.lanczos_tol
             )
+            site_opt_ba = BlockArray(blocks=site_opt_blocks, indices=_out_indices)
+        else:
 
-        energy, site_opt_ba = _lanczos_solve_np(
-            matvec, site_ba, config.lanczos_max_iter, config.lanczos_tol
-        )
+            def matvec(v_ba: BlockArray) -> BlockArray:
+                return _execute_matvec_combos(
+                    _combo_descs,
+                    v_ba.blocks,
+                    _theta_buf_idx,
+                    _out_keys,
+                    _out_shapes,
+                    _out_indices,
+                )
+
+            energy, site_opt_ba = _lanczos_solve_np(
+                matvec, site_ba, config.lanczos_max_iter, config.lanczos_tol
+            )
     else:
         _cache: dict[tuple[tuple[int, ...], ...], Any] = {}
 
