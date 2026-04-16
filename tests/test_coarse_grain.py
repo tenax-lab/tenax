@@ -176,3 +176,41 @@ class TestComputeEnergyCG:
         gates = honeycomb_cg_gates()
         E = compute_energy_cg(A, env, gates, d_eff=4)
         np.testing.assert_allclose(float(E), 0.375, atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# AD optimization integration test
+# ---------------------------------------------------------------------------
+
+
+class TestHoneycombAD:
+    @pytest.mark.slow
+    def test_honeycomb_d2_energy_is_physical(self):
+        """Honeycomb D=2 AD optimization must produce finite negative E/site."""
+        from tenax.algorithms.coarse_grain import honeycomb_cg_gates
+        from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+        from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+        gates = honeycomb_cg_gates()
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=8, max_iter=20, min_iter=5),
+            gs_num_steps=10,
+            gs_learning_rate=1e-2,
+            gs_optimizer="lbfgs",
+            gs_line_search=True,
+            gs_line_search_method="armijo",
+            gs_c4v=True,
+            gs_explicit_ad=True,
+            gs_explicit_ad_steps=10,
+            gs_explicit_ad_warmup=3,
+            gs_metric_precond=False,
+            gs_verbose=False,
+            su_init=False,
+            cg_gates=gates,
+        )
+        # Pass a dummy gate with correct d_eff shape for the Hamiltonian placeholder
+        dummy_gate = jnp.zeros((4, 4, 4, 4))
+        _, _, E_gs = optimize_gs_ad(dummy_gate, None, config)
+        assert np.isfinite(E_gs), f"E_gs = {E_gs} is not finite"
+        assert E_gs < 0.0, f"E_gs = {E_gs} should be negative"

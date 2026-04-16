@@ -443,6 +443,9 @@ def optimize_gs_ad(
             else jnp.array(hamiltonian_gate)
         )
         d_phys = gate.shape[0]
+        # For coarse-grained iPEPS, d_phys comes from the CG gate structure
+        if config.cg_gates is not None:
+            d_phys = 2**config.cg_gates.n_sites  # spin-1/2: honeycomb=4, kagome=8
         D = config.max_bond_dim
 
         if config.su_init:
@@ -622,6 +625,12 @@ def _optimize_gs_ad_tensor(
         compute_energy_ctm_tensor,
         initialize_ctm_tensor_env,
     )
+
+    cg_gates = config.cg_gates
+    if cg_gates is not None:
+        from tenax.algorithms.coarse_grain import compute_energy_cg as _cg_energy_fn
+    else:
+        _cg_energy_fn = None
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
     from tenax.algorithms.ad_utils import (
         CTMRGGradientError,
@@ -707,7 +716,10 @@ def _optimize_gs_ad_tensor(
                 site_tensors, env_init_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
             )
         env = jax.tree.unflatten(env_treedef, env_leaves)
-        energy = compute_energy_ctm_tensor(A_norm, env, gate, d_phys)
+        if _cg_energy_fn is not None:
+            energy = _cg_energy_fn(A_norm, env, cg_gates, d_phys)
+        else:
+            energy = compute_energy_ctm_tensor(A_norm, env, gate, d_phys)
         return energy, env_leaves
 
     is_metric_lbfgs = (
@@ -759,6 +771,8 @@ def _optimize_gs_ad_tensor(
             site_tensors, prev_env_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
         )
         env_ = jax.tree.unflatten(env_treedef, env_leaves)
+        if _cg_energy_fn is not None:
+            return float(_cg_energy_fn(A_norm, env_, cg_gates, d_phys))
         return float(compute_energy_ctm_tensor(A_norm, env_, gate, d_phys))
 
     stall_count = 0  # noise recovery: consecutive line search failures
@@ -1160,7 +1174,10 @@ def _optimize_gs_ad_tensor(
             envs_init=envs_init,
         )
         env_ = envs[(0, 0)]
-        E_ = float(compute_energy_ctm_tensor(A_t, env_, gate, d_phys))
+        if _cg_energy_fn is not None:
+            E_ = float(_cg_energy_fn(A_t, env_, cg_gates, d_phys))
+        else:
+            E_ = float(compute_energy_ctm_tensor(A_t, env_, gate, d_phys))
         return A_t, env_, E_
 
     A_final, env_final, E_final = _eval_fresh(params, prev_env_leaves)

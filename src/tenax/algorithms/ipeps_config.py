@@ -236,6 +236,9 @@ class iPEPSConfig:
     gs_metric_precond: bool = True  # metric preconditioning for CG/L-BFGS
     metric_gmres_maxiter: int = 30  # Krylov dimension for metric inversion
     metric_gmres_tol: float = 1e-2  # GMRES tolerance (loose is fine)
+    # Coarse-grained iPEPS: when set, optimize_gs_ad uses compute_energy_cg
+    # instead of compute_energy_ctm_tensor.  Only valid with unit_cell="1x1".
+    cg_gates: object | None = None
 
     def __post_init__(self):
         valid_unit_cells = {"1x1", "2site"}
