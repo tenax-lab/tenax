@@ -9,7 +9,7 @@ from tenax.algorithms._ctm_tensor import initialize_ctm_tensor_env
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
 from tenax.algorithms._ctm_tensor_energy import _rdm_1site_tensor
 from tenax.algorithms.ad_utils import _config_to_tuple, ctm_tensor_converge
-from tenax.algorithms.coarse_grain import CGGates, honeycomb_cg_gates
+from tenax.algorithms.coarse_grain import CGGates, compute_energy_cg, honeycomb_cg_gates
 from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
@@ -141,3 +141,38 @@ class TestRDM1Site:
         energy = jnp.trace(rdm @ h_intra).real
         # |up,down> -> Sz.Sz = (1/2)(-1/2) = -1/4, Sp.Sm + Sm.Sp = 0
         np.testing.assert_allclose(energy, -0.25, atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# compute_energy_cg tests
+# ---------------------------------------------------------------------------
+
+
+class TestComputeEnergyCG:
+    def test_honeycomb_neel_product_state(self):
+        """Honeycomb Neel |up,down>: E/site = -3/8.
+
+        3 bonds (x, y, z) per unit cell of 2 sites.
+        For Neel |up,down> state, every bond has S.S = -1/4.
+        E/site = 3 * (-1/4) / 2 = -3/8 = -0.375.
+        """
+        up = np.array([1.0, 0.0])
+        down = np.array([0.0, 1.0])
+        A = _make_product_state_cg_tensor(up, down)
+        env = _converge_ctm_env(A, chi=4, max_iter=20)
+        gates = honeycomb_cg_gates()
+        E = compute_energy_cg(A, env, gates, d_eff=4)
+        np.testing.assert_allclose(float(E), -0.375, atol=1e-4)
+
+    def test_honeycomb_ferro_product_state(self):
+        """Honeycomb ferro |up,up>: E/site = +3/8.
+
+        For |up,up> state, every bond has Sz.Sz = +1/4, S+S-=S-S+=0.
+        E/site = 3 * (1/4) / 2 = 3/8 = 0.375.
+        """
+        up = np.array([1.0, 0.0])
+        A = _make_product_state_cg_tensor(up, up)
+        env = _converge_ctm_env(A, chi=4, max_iter=20)
+        gates = honeycomb_cg_gates()
+        E = compute_energy_cg(A, env, gates, d_eff=4)
+        np.testing.assert_allclose(float(E), 0.375, atol=1e-4)

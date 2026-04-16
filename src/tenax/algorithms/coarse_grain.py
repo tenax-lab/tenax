@@ -7,9 +7,20 @@ coarse-grained tensor with effective physical dimension d_eff.
 
 from __future__ import annotations
 
+__all__ = ["CGGates", "honeycomb_cg_gates", "compute_energy_cg"]
+
 from dataclasses import dataclass
 
+import jax
 import jax.numpy as jnp
+
+from tenax.algorithms._ctm_tensor_energy import (
+    _rdm1x2_tensor,
+    _rdm2x1_tensor,
+    _rdm_1site_tensor,
+)
+from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
+from tenax.core.tensor import Tensor
 
 
 @dataclass(frozen=True)
@@ -88,7 +99,7 @@ def honeycomb_cg_gates(J: float = 1.0, dtype=jnp.float64) -> CGGates:
     # y-link ("v"): S_{b1} . S_{a2}  --  I_{a1} x H_{b1,a2} x I_{b2}
     # 8-leg tensor: h_v[a1, b1, a2, b2, a1', b1', a2', b2']
     #   = eye[a1,a1'] * ss_2x2[b1,a2,b1',a2'] * eye[b2,b2']
-    h_v_8leg = jnp.einsum("ae,bfcg,dh->abcdefgh", eye, ss_2x2, eye)
+    h_v_8leg = jnp.einsum("ae,bcfg,dh->abcdefgh", eye, ss_2x2, eye)
     h_v_gate = J * h_v_8leg.reshape(4, 4, 4, 4)
 
     # z-link ("h"): S_{a1} . S_{b2}  --  H_{a1,b2} x I_{b1} x I_{a2}
@@ -99,3 +110,55 @@ def honeycomb_cg_gates(J: float = 1.0, dtype=jnp.float64) -> CGGates:
 
     h_inter = {"v": h_v_gate, "h": h_h_gate}
     return CGGates(h_intra=h_intra, h_inter=h_inter, n_sites=2)
+
+
+# Maps direction keys to the RDM function that produces the corresponding
+# 2-site reduced density matrix.
+_RDM_DISPATCH: dict[str, object] = {
+    "h": _rdm2x1_tensor,
+    "v": _rdm1x2_tensor,
+}
+
+
+def compute_energy_cg(
+    A: Tensor,
+    env: CTMTensorEnv,
+    gates: CGGates,
+    d_eff: int,
+) -> jax.Array:
+    """Energy per microscopic site for a coarse-grained 1-site iPEPS.
+
+    Combines the intra-cell (1-site RDM) and inter-cell (2-site RDM) energy
+    contributions and divides by the number of physical sites per
+    coarse-grained tensor.
+
+    Args:
+        A:      The coarse-grained iPEPS tensor (physical dim = *d_eff*).
+        env:    Converged CTM environment for *A*.
+        gates:  Coarse-grained Hamiltonian gates (:class:`CGGates`).
+        d_eff:  Effective physical dimension (``d ** n_sites``).
+
+    Returns:
+        Scalar real energy per microscopic site.
+    """
+    # --- intra-cell energy from 1-site RDM ---
+    rdm_1 = _rdm_1site_tensor(A, env)  # (d_eff, d_eff)
+    e_intra = jnp.einsum("ij,ij->", rdm_1, gates.h_intra)
+
+    # --- inter-cell energies from 2-site RDMs ---
+    e_inter = jnp.zeros((), dtype=rdm_1.dtype)
+    for direction, gate in gates.h_inter.items():
+        if direction in _RDM_DISPATCH:
+            rdm_fn = _RDM_DISPATCH[direction]
+        elif direction == "diag":
+            # Diagonal RDM will be implemented in Task 6; lazy import to
+            # avoid a hard dependency until then.
+            from tenax.algorithms._ctm_tensor_energy import _rdm_diagonal_tensor
+
+            rdm_fn = _rdm_diagonal_tensor
+        else:
+            raise ValueError(f"Unknown inter-cell direction: {direction!r}")
+        rdm = rdm_fn(A, env)  # (d_eff, d_eff, d_eff, d_eff)
+        e_inter = e_inter + jnp.einsum("ijkl,ijkl->", rdm, gate)
+
+    return ((e_intra + e_inter) / gates.n_sites).real
