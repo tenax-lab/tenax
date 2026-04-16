@@ -24,11 +24,13 @@ from tenax.algorithms._ctm_tensor import (
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms.ad_utils import (
+    CTMRGGradientError,
     _config_from_tuple,
     _config_to_tuple,
     _ctm_tensor_multisite_fixed_point,
     _gauge_fix_ctm_tensor,
     _svd_sector_backward,
+    arnoldi_spectral_radius,
     ctm_tensor_converge,
     ctm_tensor_converge_explicit,
     regularized_svd,
@@ -1561,3 +1563,48 @@ class TestJITCTMConvergence:
         assert jnp.allclose(sv_py, sv_jit, atol=1e-4), (
             f"Corner SV mismatch: max diff = {float(jnp.max(jnp.abs(sv_py - sv_jit)))}"
         )
+
+
+class TestArnoldiSpectralRadius:
+    def test_identity_has_spectral_radius_one(self):
+        v0 = jnp.ones(10)
+        rho = arnoldi_spectral_radius(lambda v: v, v0, n_iter=10)
+        assert abs(rho - 1.0) < 1e-6
+
+    def test_contraction_has_spectral_radius_below_one(self):
+        v0 = jnp.ones(10)
+        rho = arnoldi_spectral_radius(lambda v: 0.5 * v, v0, n_iter=10)
+        assert abs(rho - 0.5) < 1e-6
+
+    def test_expansion_detected(self):
+        v0 = jnp.ones(10)
+        rho = arnoldi_spectral_radius(lambda v: 2.0 * v, v0, n_iter=10)
+        assert abs(rho - 2.0) < 1e-6
+
+    def test_nonsymmetric_matrix(self):
+        key = jax.random.PRNGKey(42)
+        M = jax.random.normal(key, (8, 8)) * 0.3
+        v0 = jnp.ones(8)
+        rho = arnoldi_spectral_radius(lambda v: M @ v, v0, n_iter=8)
+        rho_exact = float(jnp.max(jnp.abs(jnp.linalg.eigvals(M))))
+        assert abs(rho - rho_exact) < 0.1
+
+
+class TestCTMRGGradientError:
+    def test_exception_carries_spectral_radius(self):
+        err = CTMRGGradientError(spectral_radius=2.5)
+        assert err.spectral_radius == 2.5
+        assert "2.5" in str(err)
+
+
+class TestArnoldiConfig:
+    def test_arnoldi_precheck_default_true(self):
+        config = CTMConfig()
+        assert config.adjoint_arnoldi_precheck is True
+
+    def test_arnoldi_precheck_round_trips(self):
+        for val in (True, False):
+            config = CTMConfig(adjoint_arnoldi_precheck=val)
+            t = _config_to_tuple(config)
+            config2 = _config_from_tuple(t)
+            assert config2.adjoint_arnoldi_precheck == val

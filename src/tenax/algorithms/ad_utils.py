@@ -12,6 +12,7 @@ Implements the solutions from Francuz et al., Phys. Rev. Research 7, 013237
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from functools import partial
 
 import jax
@@ -33,6 +34,17 @@ from tenax.algorithms._split_ctm_tensor import (
     ctm_split_tensor,
 )
 from tenax.algorithms.ipeps_config import CTMConfig
+
+
+class CTMRGGradientError(RuntimeError):
+    """Raised when the CTM adjoint system is non-contractive (rho(J^T) >= 1)."""
+
+    def __init__(self, spectral_radius: float):
+        self.spectral_radius = spectral_radius
+        super().__init__(
+            f"CTM adjoint non-contractive: spectral radius {spectral_radius:.4f} >= 1.0"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 0. SVD sign-fixing helper
@@ -537,6 +549,7 @@ def _config_to_tuple(config) -> tuple:
             getattr(config, "forward_gauge", "qr"), 0
         ),
         _PB_STR_TO_INT.get(getattr(config, "projector_backward", "auto"), 0),
+        int(getattr(config, "adjoint_arnoldi_precheck", True)),
     )
 
 
@@ -557,6 +570,9 @@ def _config_from_tuple(config_tuple: tuple):
     )
     pb_int = config_tuple[12] if len(config_tuple) > 12 else 0
     projector_backward = _PB_INT_TO_STR.get(pb_int, "auto")
+    adjoint_arnoldi_precheck = (
+        bool(config_tuple[13]) if len(config_tuple) > 13 else True
+    )
     return CTMConfig(
         chi=config_tuple[0],
         max_iter=config_tuple[1],
@@ -571,6 +587,7 @@ def _config_from_tuple(config_tuple: tuple):
         jit_ctm=jit_ctm,
         forward_gauge=forward_gauge,
         projector_backward=projector_backward,
+        adjoint_arnoldi_precheck=adjoint_arnoldi_precheck,
     )
 
 
@@ -617,6 +634,52 @@ def _transfer_matrix_leading_eigvec(T_dense: jax.Array, n_iter: int = 30) -> jax
         v = v / (jnp.linalg.norm(v) + 1e-30)
 
     return v.real.reshape(chi, chi)
+
+
+def arnoldi_spectral_radius(
+    matvec: Callable[[jnp.ndarray], jnp.ndarray],
+    v0: jnp.ndarray,
+    n_iter: int = 20,
+) -> float:
+    """Estimate the spectral radius of a linear operator via Arnoldi iteration.
+
+    Builds an (n_iter x n_iter) upper Hessenberg matrix H from the Krylov
+    subspace {v0, A v0, A^2 v0, ...} using Modified Gram-Schmidt, then
+    returns max |eigenvalue(H)| as an approximation to rho(A).
+
+    Args:
+        matvec: Function applying the operator (e.g. J^T) to a flat vector.
+        v0: Initial vector (typically the gradient g, flattened).
+        n_iter: Number of Arnoldi iterations (default 20).
+
+    Returns:
+        Estimated spectral radius rho(A).
+    """
+    n = v0.shape[0]
+    k = min(n_iter, n)
+    Q = jnp.zeros((n, k + 1))
+    H = jnp.zeros((k + 1, k))
+
+    q = v0 / (jnp.linalg.norm(v0) + 1e-30)
+    Q = Q.at[:, 0].set(q)
+
+    actual_k = k
+    for j in range(k):
+        v = matvec(Q[:, j])
+        for i in range(j + 1):
+            h = jnp.dot(Q[:, i], v)
+            H = H.at[i, j].set(h)
+            v = v - h * Q[:, i]
+        h_next = jnp.linalg.norm(v)
+        H = H.at[j + 1, j].set(h_next)
+        if h_next < 1e-14:
+            actual_k = j + 1
+            break
+        Q = Q.at[:, j + 1].set(v / h_next)
+
+    H_k = H[:actual_k, :actual_k]
+    eigenvalues = jnp.linalg.eigvals(H_k)
+    return float(jnp.max(jnp.abs(eigenvalues)))
 
 
 def _sigma_gauge_fix_ctm_tensor(env_new, env_old):
