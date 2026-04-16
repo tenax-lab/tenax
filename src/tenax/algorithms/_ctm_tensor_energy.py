@@ -4,6 +4,7 @@ from __future__ import annotations
 
 __all__ = [
     "_rdm_1site_tensor",
+    "_rdm_diagonal_tensor",
     "_rdm1x2_tensor",
     "_rdm1x2_tensor_2site",
     "_rdm2x1_tensor",
@@ -18,6 +19,7 @@ import jax.numpy as jnp
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     _build_double_layer_open_tensor,
+    _build_double_layer_tensor,
 )
 from tenax.contraction.contractor import contract
 from tenax.core import EPS
@@ -84,6 +86,151 @@ def _rdm_1site_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     rdm = 0.5 * (rdm + rdm.conj().T)
     rdm = rdm / (jnp.trace(rdm) + EPS)
     return rdm
+
+
+def _rdm_diagonal_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
+    r"""Diagonal (NNN) 2-site RDM from a 2×2 plaquette contraction.
+
+    Contracts the network::
+
+        C1 — T1_L — T1_R — C2
+        |      |       |      |
+        T4_T  ao_TL   ac_TR  T2_T
+        |      |       |      |
+        T4_B  ac_BL   ao_BR  T2_B
+        |      |       |      |
+        C4 — T3_L — T3_R — C3
+
+    Top-left (TL) and bottom-right (BR) sites have physical legs open;
+    top-right (TR) and bottom-left (BL) have physical legs traced (closed).
+
+    Returns dense RDM of shape ``(d, d, d, d)`` in
+    ``(s1_ket, s2_ket, s1_bra, s2_bra)`` convention (TL=s1, BR=s2),
+    symmetrised and trace-normalised.
+    """
+    ao = _build_double_layer_open_tensor(A)  # (u2, d2, l2, r2, phys, phys_bra)
+    ac = _build_double_layer_tensor(A)  # (u2, d2, l2, r2)
+
+    # --- Right-column copies (suffix R) ---
+    T1_R = env.T1.relabels({"t1_l": "t1_lR", "u2": "u2R", "t1_r": "t1_rR"})
+    T3_R = env.T3.relabels({"t3_r": "t3_rR", "d2": "d2R", "t3_l": "t3_lR"})
+
+    # --- Bottom-row copies (suffix B) ---
+    T4_B = env.T4.relabels({"t4_d": "t4_dB", "l2": "l2B", "t4_u": "t4_uB"})
+    T2_B = env.T2.relabels({"t2_u": "t2_uB", "r2": "r2B", "t2_d": "t2_dB"})
+
+    # --- Site tensors ---
+    # ao_TL: top-left, open.  Keep default labels (u2, d2, l2, r2, phys, phys_bra)
+    # ac_TR: top-right, closed.  Suffix R on virtual labels.
+    ac_TR = ac.relabels({"u2": "u2R", "d2": "d2_TR", "l2": "l2_TR", "r2": "r2R"})
+    # ac_BL: bottom-left, closed.  Suffix B on vertical, _BL on horizontal.
+    ac_BL = ac.relabels({"u2": "u2_BL", "d2": "d2B_BL", "l2": "l2B", "r2": "r2_BL"})
+    # ao_BR: bottom-right, open.  Suffix BR on virtual, distinct phys labels.
+    ao_BR = ao.relabels(
+        {
+            "u2": "u2_BR",
+            "d2": "d2R",
+            "l2": "l2_BR",
+            "r2": "r2B",
+            "phys": "phys_BR",
+            "phys_bra": "phys_bra_BR",
+        }
+    )
+
+    # ===============================================================
+    # Left half: C1 · T1_L · T4_T · ao_TL · T4_B · ac_BL · C4 · T3_L
+    # ===============================================================
+
+    # Step 1: top-left corner: C1 · T1_L
+    C1 = env.C1.relabel("c1_r", "t1_l")
+    C1_T1L = contract(C1, env.T1)  # (c1_d, u2, t1_r)
+
+    # Step 2: add T4_T (connects c1_d ↔ t4_d)
+    T4_T = env.T4.relabels({"t4_d": "c1_d"})
+    left_top = contract(C1_T1L, T4_T)  # (u2, t1_r, l2, t4_u)
+
+    # Step 3: contract with ao_TL (shared: u2, l2)
+    left_top_ao = contract(left_top, ao)
+    # (t1_r, t4_u, d2, r2, phys, phys_bra)
+
+    # Step 4: add T4_B (connects t4_u ↔ t4_dB)
+    T4_B = T4_B.relabel("t4_dB", "t4_u")
+    left_mid = contract(left_top_ao, T4_B)
+    # (t1_r, d2, r2, phys, phys_bra, l2B, t4_uB)
+
+    # Step 5: contract with ac_BL (shared: d2 ↔ u2_BL, l2B)
+    ac_BL = ac_BL.relabel("u2_BL", "d2")
+    left_site = contract(left_mid, ac_BL)
+    # (t1_r, r2, phys, phys_bra, t4_uB, d2B_BL, r2_BL)
+
+    # Step 6: bottom-left corner: C4 · T3_L
+    C4 = env.C4.relabel("c4_u", "t3_r")
+    C4_T3L = contract(C4, env.T3)  # (c4_r, d2, t3_l)
+    # Connect: t4_uB ↔ c4_r, d2B_BL ↔ d2
+    C4_T3L = C4_T3L.relabels({"c4_r": "t4_uB", "d2": "d2B_BL"})
+    left_half = contract(left_site, C4_T3L)
+    # (t1_r, r2, phys, phys_bra, r2_BL, t3_l)
+
+    # ===============================================================
+    # Right half: C2 · T1_R · T2_T · ac_TR · T2_B · ao_BR · C3 · T3_R
+    # ===============================================================
+
+    # Step 7: top-right corner: T1_R · C2
+    C2 = env.C2.relabel("c2_l", "t1_rR")
+    T1R_C2 = contract(T1_R, C2)  # (t1_lR, u2R, c2_d)
+
+    # Step 8: add T2_T (connects c2_d ↔ t2_u)
+    T2_T = env.T2.relabels({"t2_u": "c2_d"})
+    right_top = contract(T1R_C2, T2_T)  # (t1_lR, u2R, r2, t2_d)
+
+    # Step 9: contract with ac_TR (shared: u2R, r2R→r2 already named r2R in ac_TR)
+    # ac_TR has labels (u2R, d2_TR, l2_TR, r2R). right_top has r2 (not r2R).
+    # Relabel ac_TR's r2R to match right_top's r2:
+    ac_TR = ac_TR.relabel("r2R", "r2")
+    right_top_ac = contract(right_top, ac_TR)
+    # (t1_lR, t2_d, d2_TR, l2_TR)
+
+    # Step 10: add T2_B (connects t2_d ↔ t2_uB)
+    T2_B = T2_B.relabel("t2_uB", "t2_d")
+    right_mid = contract(right_top_ac, T2_B)
+    # (t1_lR, d2_TR, l2_TR, r2B, t2_dB)
+
+    # Step 11: contract with ao_BR (shared: d2_TR ↔ u2_BR, r2B)
+    ao_BR = ao_BR.relabel("u2_BR", "d2_TR")
+    right_site = contract(right_mid, ao_BR)
+    # (t1_lR, l2_TR, t2_dB, d2R, l2_BR, phys_BR, phys_bra_BR)
+
+    # Step 12: bottom-right corner: T3_R · C3
+    C3 = env.C3.relabel("c3_l", "t3_lR")
+    T3R_C3 = contract(T3_R, C3)  # (t3_rR, d2R, c3_u)
+    # Connect: t2_dB ↔ c3_u, d2R shared
+    T3R_C3 = T3R_C3.relabel("c3_u", "t2_dB")
+    right_half = contract(right_site, T3R_C3)
+    # (t1_lR, l2_TR, l2_BR, phys_BR, phys_bra_BR, t3_rR)
+
+    # ===============================================================
+    # Combine left and right halves
+    # ===============================================================
+    # Match bonds between left and right:
+    #   t1_r ↔ t1_lR  (top chi bond between columns)
+    #   r2 ↔ l2_TR    (TL-to-TR virtual bond)
+    #   r2_BL ↔ l2_BR (BL-to-BR virtual bond)
+    #   t3_l ↔ t3_rR  (bottom chi bond between columns)
+    right_half = right_half.relabels(
+        {"t1_lR": "t1_r", "l2_TR": "r2", "l2_BR": "r2_BL", "t3_rR": "t3_l"}
+    )
+    rdm_t = contract(
+        left_half,
+        right_half,
+        output_labels=["phys", "phys_BR", "phys_bra", "phys_bra_BR"],
+    )
+
+    rdm = rdm_t.todense()
+    d = rdm.shape[0]
+    rdm_mat = rdm.reshape(d * d, d * d)
+    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
+    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    return rdm_mat.reshape(d, d, d, d)
 
 
 def _rdm2x1_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:

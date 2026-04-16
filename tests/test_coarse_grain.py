@@ -7,7 +7,7 @@ import pytest
 
 from tenax.algorithms._ctm_tensor import initialize_ctm_tensor_env
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
-from tenax.algorithms._ctm_tensor_energy import _rdm_1site_tensor
+from tenax.algorithms._ctm_tensor_energy import _rdm_1site_tensor, _rdm_diagonal_tensor
 from tenax.algorithms.ad_utils import _config_to_tuple, ctm_tensor_converge
 from tenax.algorithms.coarse_grain import (
     CGGates,
@@ -260,3 +260,71 @@ class TestKagomeCGGates:
         for key in ("h", "v", "diag"):
             H = np.array(gates.h_inter[key]).reshape(64, 64)
             np.testing.assert_allclose(H, H.conj().T, atol=1e-14)
+
+
+# ---------------------------------------------------------------------------
+# Diagonal (NNN) RDM tests
+# ---------------------------------------------------------------------------
+
+
+def _make_product_state_cg_tensor_3site(s_u, s_v, s_w, D=1):
+    """Build a D=1 CG tensor |s_u>x|s_v>x|s_w> as a DenseTensor.
+
+    The effective physical dimension is d_eff = 2^3 = 8 for spin-1/2.
+    Virtual indices are trivial (D=1, charge=0).
+    """
+    phys = np.kron(np.kron(s_u, s_v), s_w)
+    d_eff = len(phys)
+    data = np.zeros((D, D, D, D, d_eff))
+    data[0, 0, 0, 0, :] = phys
+
+    sym = U1Symmetry()
+    charges_D = np.zeros(D, dtype=np.int32)
+    charges_phys = np.zeros(d_eff, dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, charges_D.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, charges_D.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, charges_D.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, charges_D.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, charges_phys.copy(), FlowDirection.IN, label="phys"
+        ),
+    )
+    return DenseTensor(jnp.array(data), indices)
+
+
+class TestRDMDiagonal:
+    """Tests for the diagonal (NNN) reduced density matrix."""
+
+    def test_product_state_trace_and_factorization(self):
+        """D=1 product state: diagonal RDM should factorize as rho_A x rho_B."""
+        up = np.array([1.0, 0.0])
+        A = _make_product_state_cg_tensor_3site(up, up, up)
+
+        env = _converge_ctm_env(A, chi=4, max_iter=20)
+        rdm = _rdm_diagonal_tensor(A, env)
+
+        assert rdm.shape == (8, 8, 8, 8)
+
+        rdm_mat = rdm.reshape(64, 64)
+        # Trace should be 1
+        np.testing.assert_allclose(jnp.trace(rdm_mat), 1.0, atol=1e-10)
+
+        # For a product state, rho_{TL,BR} = rho_TL x rho_BR
+        rdm_1 = _rdm_1site_tensor(A, env)
+        expected = np.einsum("ij,kl->ikjl", rdm_1, rdm_1)
+        np.testing.assert_allclose(rdm, expected, atol=1e-6)
+
+    def test_product_state_pure_state(self):
+        """D=1 product state: diagonal RDM reshaped is a projector (rho^2=rho)."""
+        up = np.array([1.0, 0.0])
+        down = np.array([0.0, 1.0])
+        A = _make_product_state_cg_tensor_3site(up, down, up)
+
+        env = _converge_ctm_env(A, chi=4, max_iter=20)
+        rdm = _rdm_diagonal_tensor(A, env)
+        rdm_mat = rdm.reshape(64, 64)
+
+        # Pure state: rho^2 = rho
+        rdm2 = rdm_mat @ rdm_mat
+        np.testing.assert_allclose(rdm2, rdm_mat, atol=1e-10)
