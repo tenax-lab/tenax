@@ -1,6 +1,7 @@
 """Tests for the iPEPS and CTM algorithms."""
 
 import contextlib
+import math
 
 import jax
 import jax.numpy as jnp
@@ -2198,3 +2199,32 @@ def test_stall_reset_reinits_optax_lbfgs_state(monkeypatch):
         ">= 2 (setup + at least one stall-reset). The reset branch is "
         "not reinitializing the Optax L-BFGS state."
     )
+
+
+class TestArnoldiOptimizerRecovery:
+    def test_optimizer_survives_gradient_error(self):
+        """optimize_gs_ad catches CTMRGGradientError and continues."""
+        from tenax.algorithms.ipeps import heisenberg_gate
+        from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+        from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+        gate = heisenberg_gate()
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            num_imaginary_steps=5,
+            dt=0.01,
+            ctm=CTMConfig(
+                chi=4,
+                max_iter=10,
+                conv_tol=1e-6,
+                forward_gauge="qr",
+                adjoint_arnoldi_precheck=True,
+            ),
+            gs_explicit_ad=False,
+            gs_num_steps=3,
+            gs_optimizer="lbfgs",
+            gs_c4v=True,
+            su_init=True,
+        )
+        A, env, E = optimize_gs_ad(gate, None, config)
+        assert math.isfinite(E)
