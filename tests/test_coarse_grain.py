@@ -9,7 +9,12 @@ from tenax.algorithms._ctm_tensor import initialize_ctm_tensor_env
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
 from tenax.algorithms._ctm_tensor_energy import _rdm_1site_tensor
 from tenax.algorithms.ad_utils import _config_to_tuple, ctm_tensor_converge
-from tenax.algorithms.coarse_grain import CGGates, compute_energy_cg, honeycomb_cg_gates
+from tenax.algorithms.coarse_grain import (
+    CGGates,
+    compute_energy_cg,
+    honeycomb_cg_gates,
+    kagome_cg_gates,
+)
 from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
@@ -214,3 +219,44 @@ class TestHoneycombAD:
         _, _, E_gs = optimize_gs_ad(dummy_gate, None, config)
         assert np.isfinite(E_gs), f"E_gs = {E_gs} is not finite"
         assert E_gs < 0.0, f"E_gs = {E_gs} should be negative"
+
+
+# ---------------------------------------------------------------------------
+# Kagome coarse-grained gate tests
+# ---------------------------------------------------------------------------
+
+
+class TestKagomeCGGates:
+    def test_returns_cg_gates(self):
+        gates = kagome_cg_gates()
+        assert isinstance(gates, CGGates)
+        assert gates.n_sites == 3
+
+    def test_h_intra_shape_and_hermiticity(self):
+        gates = kagome_cg_gates()
+        assert gates.h_intra.shape == (8, 8)
+        np.testing.assert_allclose(gates.h_intra, gates.h_intra.conj().T, atol=1e-14)
+
+    def test_h_intra_eigenvalues(self):
+        """H_tri = S_u.S_v + S_u.S_w + S_v.S_w.
+
+        S_total(S_total+1)/2 - 3*s(s+1)/2 gives:
+          S_total=3/2 (quadruplet): (15/4 - 9/4)/2 = 3/4
+          S_total=1/2 (two doublets): (3/4 - 9/4)/2 = -3/4
+        """
+        gates = kagome_cg_gates()
+        eigvals = np.sort(np.linalg.eigvalsh(np.array(gates.h_intra)))
+        expected = np.array([-0.75, -0.75, -0.75, -0.75, 0.75, 0.75, 0.75, 0.75])
+        np.testing.assert_allclose(eigvals, expected, atol=1e-12)
+
+    def test_h_inter_keys_and_shapes(self):
+        gates = kagome_cg_gates()
+        assert set(gates.h_inter.keys()) == {"h", "v", "diag"}
+        for key in ("h", "v", "diag"):
+            assert gates.h_inter[key].shape == (8, 8, 8, 8)
+
+    def test_h_inter_hermiticity(self):
+        gates = kagome_cg_gates()
+        for key in ("h", "v", "diag"):
+            H = np.array(gates.h_inter[key]).reshape(64, 64)
+            np.testing.assert_allclose(H, H.conj().T, atol=1e-14)

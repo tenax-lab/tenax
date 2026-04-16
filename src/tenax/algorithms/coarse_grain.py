@@ -7,7 +7,7 @@ coarse-grained tensor with effective physical dimension d_eff.
 
 from __future__ import annotations
 
-__all__ = ["CGGates", "honeycomb_cg_gates", "compute_energy_cg"]
+__all__ = ["CGGates", "honeycomb_cg_gates", "kagome_cg_gates", "compute_energy_cg"]
 
 from dataclasses import dataclass
 
@@ -110,6 +110,93 @@ def honeycomb_cg_gates(J: float = 1.0, dtype=jnp.float64) -> CGGates:
 
     h_inter = {"v": h_v_gate, "h": h_h_gate}
     return CGGates(h_intra=h_intra, h_inter=h_inter, n_sites=2)
+
+
+def _embed_inter(site_1: int, site_2: int, d: int = 2, n_sites: int = 3):
+    """Embed S*S between sub-site *site_1* of CG tensor 1 and *site_2* of CG tensor 2.
+
+    Returns a rank-4 tensor of shape ``(d_eff, d_eff, d_eff, d_eff)`` where
+    ``d_eff = d ** n_sites``.  Legs are ``(cg1_out, cg2_out, cg1_in, cg2_in)``.
+    """
+    import numpy as np
+
+    d_eff = d**n_sites
+    Sz = np.array([[0.5, 0], [0, -0.5]])
+    Sp = np.array([[0, 1.0], [0, 0]])
+    Sm = np.array([[0, 0], [1.0, 0]])
+    eye = np.eye(d)
+    result = np.zeros((d_eff, d_eff, d_eff, d_eff))
+    for Sa, Sb in [(Sz, Sz), (0.5 * Sp, Sm), (0.5 * Sm, Sp)]:
+        # Build operator for CG tensor 1: identity on all sub-sites except site_1
+        op1 = [eye.copy() for _ in range(n_sites)]
+        op1[site_1] = Sa
+        kron1 = op1[0]
+        for o in op1[1:]:
+            kron1 = np.kron(kron1, o)
+        # Build operator for CG tensor 2: identity on all sub-sites except site_2
+        op2 = [eye.copy() for _ in range(n_sites)]
+        op2[site_2] = Sb
+        kron2 = op2[0]
+        for o in op2[1:]:
+            kron2 = np.kron(kron2, o)
+        # Outer product: result[i,j,k,l] += kron1[i,k] * kron2[j,l]
+        result += np.einsum("ik,jl->ijkl", kron1, kron2)
+    return result
+
+
+def kagome_cg_gates(J: float = 1.0, dtype=jnp.float64) -> CGGates:
+    """Build coarse-grained Hamiltonian gates for the kagome lattice.
+
+    Three kagome sub-sites (u, v, w) in an up-triangle fuse into one
+    coarse-grained tensor with ``d_eff = 2**3 = 8``.  Physical index
+    ordering: ``|phys_u, phys_v, phys_w>``.
+
+    Intra-cell interaction:
+        ``H_tri = S_u . S_v + S_u . S_w + S_v . S_w``
+
+    Inter-cell links (between neighbouring CG tensors):
+        - horizontal (``"h"``): w of left CG <-> v of right CG
+        - vertical (``"v"``): v of top CG <-> u of bottom CG
+        - diagonal (``"diag"``): w of top CG <-> u of bottom-right CG
+
+    Args:
+        J:      Coupling constant (default 1.0).
+        dtype:  Data type for the arrays.
+
+    Returns:
+        A :class:`CGGates` instance with ``n_sites=3``.
+    """
+    import numpy as np
+
+    d = 2
+    eye = np.eye(d)
+    ss = np.array(_ss_2site(dtype))  # (4, 4)
+    ss4 = ss.reshape(d, d, d, d)  # [s1_ket, s2_ket, s1_bra, s2_bra]
+
+    # --- intra-cell: 3 pair interactions on the up-triangle ---
+    # 6-index tensor layout: [u_ket, v_ket, w_ket, u_bra, v_bra, w_bra]
+
+    # H_uv: ss4 acts on (u, v), identity on w
+    # Result[u, v, w, u', v', w'] = ss4[u, v, u', v'] * eye[w, w']
+    h_uv = np.einsum("ijkl,mn->ijmkln", ss4, eye).reshape(8, 8)
+
+    # H_uw: ss4 acts on (u, w), identity on v
+    # Result[u, v, w, u', v', w'] = ss4[u, w, u', w'] * eye[v, v']
+    h_uw = np.einsum("ijkl,mn->imjknl", ss4, eye).reshape(8, 8)
+
+    # H_vw: ss4 acts on (v, w), identity on u
+    # Result[u, v, w, u', v', w'] = eye[u, u'] * ss4[v, w, v', w']
+    h_vw = np.einsum("mn,ijkl->mijnkl", eye, ss4).reshape(8, 8)
+
+    h_intra = jnp.array(J * (h_uv + h_uw + h_vw), dtype=dtype)
+
+    # --- inter-cell gates ---
+    h_inter = {
+        "h": jnp.array(J * _embed_inter(2, 1), dtype=dtype),  # w1 <-> v2
+        "v": jnp.array(J * _embed_inter(1, 0), dtype=dtype),  # v1 <-> u2
+        "diag": jnp.array(J * _embed_inter(2, 0), dtype=dtype),  # w1 <-> u2
+    }
+    return CGGates(h_intra=h_intra, h_inter=h_inter, n_sites=3)
 
 
 # Maps direction keys to the RDM function that produces the corresponding
