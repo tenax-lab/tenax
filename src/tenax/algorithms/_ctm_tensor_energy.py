@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 __all__ = [
+    "_rdm_1site_tensor",
     "_rdm1x2_tensor",
     "_rdm1x2_tensor_2site",
     "_rdm2x1_tensor",
@@ -21,6 +22,68 @@ from tenax.algorithms._ctm_tensor_init import (
 from tenax.contraction.contractor import contract
 from tenax.core import EPS
 from tenax.core.tensor import Tensor
+
+
+def _rdm_1site_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
+    """Single-site RDM using label-based Tensor contractions.
+
+    Contracts the network::
+
+        C1 — T1 — C2
+        |      |      |
+        T4   ao     T2
+        |      |      |
+        C4 — T3 — C3
+
+    Where ``ao = _build_double_layer_open_tensor(A)`` has labels
+    ``(u2, d2, l2, r2, phys, phys_bra)``.
+
+    Returns dense RDM of shape ``(d, d)`` in ``(phys, phys_bra)`` convention,
+    symmetrised and trace-normalised.
+
+    Bond connectivity (same as 2x1/1x2 conventions):
+        C1[0]=c1_d ↔ T4[0]=t4_d,  C1[1]=c1_r ↔ T1[0]=t1_l
+        T1[2]=t1_r ↔ C2[0]=c2_l,  C2[1]=c2_d ↔ T2[0]=t2_u
+        C4[1]=c4_u ↔ T3[0]=t3_r,  C4[0]=c4_r ↔ T4[2]=t4_u
+        T3[2]=t3_l ↔ C3[1]=c3_l,  T2[2]=t2_d ↔ C3[0]=c3_u
+    """
+    ao = _build_double_layer_open_tensor(A)  # (u2, d2, l2, r2, phys, phys_bra)
+
+    # Step 1: top row = C1 · T1 · C2
+    C1 = env.C1.relabel("c1_r", "t1_l")
+    C2 = env.C2.relabel("c2_l", "t1_r")
+    C1_T1 = contract(C1, env.T1)  # (c1_d, u2, t1_r)
+    top_row = contract(C1_T1, C2)  # (c1_d, u2, c2_d)
+
+    # Step 2: bottom row = C4 · T3 · C3
+    C4 = env.C4.relabel("c4_u", "t3_r")
+    C3 = env.C3.relabel("c3_l", "t3_l")
+    C4_T3 = contract(C4, env.T3)  # (c4_r, d2, t3_l)
+    bot_row = contract(C4_T3, C3)  # (c4_r, d2, c3_u)
+
+    # Step 3: add T4 — connects c1_d ↔ t4_d, t4_u ↔ c4_r
+    T4 = env.T4.relabels({"t4_d": "c1_d", "t4_u": "c4_r"})
+    top_T4 = contract(top_row, T4)  # (u2, c2_d, l2, c4_r)
+
+    # Step 4: add T2 — connects c2_d ↔ t2_u, t2_d ↔ c3_u
+    T2 = env.T2.relabels({"t2_u": "c2_d", "t2_d": "c3_u"})
+    top_T4_T2 = contract(top_T4, T2)  # (u2, l2, c4_r, r2, c3_u)
+
+    # Step 5: contract with bottom row (shared: c4_r, c3_u; also d2)
+    env_full = contract(top_T4_T2, bot_row)  # (u2, l2, r2, d2)
+
+    # Step 6: contract full environment with ao (shared: u2, d2, l2, r2)
+    rdm_t = contract(
+        env_full,
+        ao,
+        output_labels=["phys", "phys_bra"],
+    )
+
+    # Step 7: symmetrise and trace-normalise
+    rdm = rdm_t.todense()
+    rdm = 0.5 * (rdm + rdm.conj().T)
+    rdm = rdm / (jnp.trace(rdm) + EPS)
+    return rdm
 
 
 def _rdm2x1_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
