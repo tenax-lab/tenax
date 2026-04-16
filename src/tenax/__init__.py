@@ -115,6 +115,11 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # _tensor_utils
     "fuse_indices": ("tenax.algorithms._tensor_utils", "fuse_indices"),
     "split_index": ("tenax.algorithms._tensor_utils", "split_index"),
+    # coarse_grain
+    "CGGates": ("tenax.algorithms.coarse_grain", "CGGates"),
+    "honeycomb_cg_gates": ("tenax.algorithms.coarse_grain", "honeycomb_cg_gates"),
+    "kagome_cg_gates": ("tenax.algorithms.coarse_grain", "kagome_cg_gates"),
+    "compute_energy_cg": ("tenax.algorithms.coarse_grain", "compute_energy_cg"),
     # auto_mpo
     "AutoMPO": ("tenax.algorithms.auto_mpo", "AutoMPO"),
     "HamiltonianTerm": ("tenax.algorithms.auto_mpo", "HamiltonianTerm"),
@@ -346,6 +351,11 @@ __all__ = [
     "compute_energy_split_ctm",
     "optimize_gs_ad",
     "optimize_gs_ad_chi_schedule",
+    # Coarse-grained iPEPS
+    "CGGates",
+    "honeycomb_cg_gates",
+    "kagome_cg_gates",
+    "compute_energy_cg",
     # Standard CTM (Tensor protocol)
     "CTMTensorEnv",
     "ctm_tensor",

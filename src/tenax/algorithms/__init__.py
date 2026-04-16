@@ -5,6 +5,10 @@ Algorithm modules are loaded lazily on first access.
 
 # Mapping from public name to (module, attribute)
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+    "CGGates": ("tenax.algorithms.coarse_grain", "CGGates"),
+    "honeycomb_cg_gates": ("tenax.algorithms.coarse_grain", "honeycomb_cg_gates"),
+    "kagome_cg_gates": ("tenax.algorithms.coarse_grain", "kagome_cg_gates"),
+    "compute_energy_cg": ("tenax.algorithms.coarse_grain", "compute_energy_cg"),
     "ctm_multisite": ("tenax.algorithms._ctm_tensor_convergence", "ctm_multisite"),
     "AutoMPO": ("tenax.algorithms.auto_mpo", "AutoMPO"),
     "HamiltonianTerm": ("tenax.algorithms.auto_mpo", "HamiltonianTerm"),
@@ -85,6 +89,11 @@ def __dir__():
 
 
 __all__ = [
+    # Coarse-grained iPEPS
+    "CGGates",
+    "honeycomb_cg_gates",
+    "kagome_cg_gates",
+    "compute_energy_cg",
     # AutoMPO
     "AutoMPO",
     "HamiltonianTerm",
