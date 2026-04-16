@@ -1206,21 +1206,24 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
     use_sigma = getattr(config, "forward_gauge", "qr") == "sigma"
 
     if use_sigma:
-        # --- YASTN-style backward: sigma-gauged step function ---
+        # --- YASTN-style backward: relative sigma-gauged step function ---
         #
-        # The step function for the backward is:
-        #   g(A, env) = apply_sigma(CTM_step(A, env))
+        # The step function for the backward computes:
+        #   g(A, env) = sigma_fix(CTM_step(A, env), stop_gradient(env))
         #
-        # where sigma matrices are CONSTANTS precomputed from the converged
-        # env.  The sigma application (matrix mults) is JAX-differentiable.
-        # The CTM_step here uses QR gauge internally (inside _ctm_tensor_step_multisite).
-        # Then sigma is applied on top to align the output with the fixed point.
+        # where sigma_fix aligns the sweep output to the (detached) input
+        # via relative transfer-matrix eigenvector alignment.  This mirrors
+        # the forward's _sigma_gauge_fix_ctm_tensor(env_new, env_old) and
+        # the explicit-AD path's _one_sweep_sigma pattern (line ~1756).
+        #
+        # The stop_gradient on the reference ensures gradients flow only
+        # through the forward map, not through the alignment target.
         #
         # Reference: YASTN fixed_pt.py FixedPoint.fixed_point_iter (arxiv:2311.11894)
-        sigma_Qs = _precompute_sigma_matrices(envs)
 
         def step_fn_sigma(s_leaves, e_leaves):
-            """One CTM sweep + sigma gauge application."""
+            """One CTM sweep + relative sigma gauge alignment."""
+            e_ref = tuple(jax.lax.stop_gradient(x) for x in e_leaves)
             swept = _ctm_tensor_step_multisite(
                 s_leaves,
                 e_leaves,
@@ -1231,11 +1234,10 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
                 site_treedefs,
                 env_treedef,
                 n_env_per_site,
+                sigma_gauge_ref_leaves=e_ref,
                 projector_backward=getattr(config, "projector_backward", "auto"),
             )
-            return _apply_sigma_to_env_leaves(
-                swept, sigma_Qs, env_treedef, n_env_per_site, coords
-            )
+            return swept
 
         _, vjp_env_fn = jax.vjp(lambda e: step_fn_sigma(site_leaves, e), env_leaves)
         _, vjp_site_fn = jax.vjp(lambda s: step_fn_sigma(s, env_leaves), site_leaves)
