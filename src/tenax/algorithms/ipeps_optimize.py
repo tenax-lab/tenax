@@ -479,6 +479,7 @@ def _optimize_gs_ad_tensor_reference_c4v(
         ctm_tensor_c4v_reference_converge_reduced,
         ctm_tensor_c4v_reference_fixed_point,
     )
+    from tenax.algorithms.ad_utils import CTMRGGradientError
     from tenax.algorithms.ipeps import (
         build_c4v_basis,
         c4v_coeffs_from_tensor,
@@ -556,7 +557,24 @@ def _optimize_gs_ad_tensor_reference_c4v(
         return energy, (env, A_tensor)
 
     for _step in range(config.gs_num_steps):
-        (energy_val, _aux), grads = jax.value_and_grad(_loss_fn, has_aux=True)(params)
+        try:
+            (energy_val, _aux), grads = jax.value_and_grad(_loss_fn, has_aux=True)(
+                params
+            )
+        except CTMRGGradientError as exc:
+            _logger.warning(
+                "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
+                "skipping step (c4v_reference)",
+                exc.spectral_radius,
+                _step,
+            )
+            if config.gs_verbose:
+                print(
+                    f"[iPEPS-AD:c4v_reference] step {_step + 1}/{config.gs_num_steps} "
+                    f"rho(J^T)={exc.spectral_radius:.4f} — skipping",
+                    flush=True,
+                )
+            continue
         grads = jnp.where(jnp.isfinite(grads), grads, 0.0)
         if use_cg:
             params = _normalize_params(params - config.gs_learning_rate * grads)
@@ -606,6 +624,7 @@ def _optimize_gs_ad_tensor(
     )
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
     from tenax.algorithms.ad_utils import (
+        CTMRGGradientError,
         _config_to_tuple,
         ctm_tensor_converge,
         ctm_tensor_converge_explicit,
@@ -767,9 +786,63 @@ def _optimize_gs_ad_tensor(
                 _current_conv_tol = new_tol
                 ctm_cfg = _replace(ctm_cfg, conv_tol=new_tol)
                 config_tuple = _config_to_tuple(ctm_cfg)
-        (energy_val, env_leaves), grads = jax.value_and_grad(
-            loss_fn, argnums=0, has_aux=True
-        )(params, prev_env_leaves)
+        try:
+            (energy_val, env_leaves), grads = jax.value_and_grad(
+                loss_fn, argnums=0, has_aux=True
+            )(params, prev_env_leaves)
+        except CTMRGGradientError as exc:
+            _logger.warning(
+                "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
+                "skipping, triggering stall recovery",
+                exc.spectral_radius,
+                step,
+            )
+            if config.gs_verbose:
+                print(
+                    f"[iPEPS-AD:1site-tensor] step {step + 1}/{config.gs_num_steps} "
+                    f"rho(J^T)={exc.spectral_radius:.4f} — stall recovery",
+                    flush=True,
+                )
+            stall_count += 1
+            if (
+                config.gs_stall_recovery == "noise"
+                and stall_count <= config.gs_noise_recovery_retries
+            ):
+                noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
+                if use_c4v:
+                    noise = config.gs_noise_amplitude * jax.random.normal(
+                        noise_key, params.shape
+                    )
+                    params = params + noise * jnp.linalg.norm(params)
+                    params = params / (jnp.linalg.norm(params) + 1e-10)
+                else:
+                    data = params.todense()
+                    noise = config.gs_noise_amplitude * jax.random.normal(
+                        noise_key, data.shape
+                    )
+                    noisy = data + noise * jnp.linalg.norm(data)
+                    noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
+                    params = _wrap_tensor(noisy, params)
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_A_flat = None
+                    prev_grad_flat = None
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+            elif config.gs_stall_recovery == "reset":
+                params = best_params
+                prev_env_leaves = best_env_leaves
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_A_flat = None
+                    prev_grad_flat = None
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+            continue
         energy_float = float(energy_val)
         env_leaves_sg = jax.tree.map(jax.lax.stop_gradient, env_leaves)
 
@@ -1242,6 +1315,7 @@ def _optimize_gs_ad_tensor_2site(
     )
     from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
     from tenax.algorithms.ad_utils import (
+        CTMRGGradientError,
         _config_from_tuple,
         _config_to_tuple,
         _ctm_tensor_multisite_fixed_point,
@@ -1434,9 +1508,69 @@ def _optimize_gs_ad_tensor_2site(
                 ctm_cfg_2s = _replace(ctm_cfg_2s, conv_tol=new_tol)
                 config_tuple = _config_to_tuple(ctm_cfg_2s)
 
-        (energy_val, env_leaves), grads = jax.value_and_grad(
-            loss_fn, argnums=0, has_aux=True
-        )(params, prev_env_leaves)
+        try:
+            (energy_val, env_leaves), grads = jax.value_and_grad(
+                loss_fn, argnums=0, has_aux=True
+            )(params, prev_env_leaves)
+        except CTMRGGradientError as exc:
+            _logger.warning(
+                "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
+                "skipping, triggering stall recovery",
+                exc.spectral_radius,
+                step,
+            )
+            if config.gs_verbose:
+                print(
+                    f"[iPEPS-AD:2site-tensor] step {step + 1}/{config.gs_num_steps} "
+                    f"rho(J^T)={exc.spectral_radius:.4f} — stall recovery",
+                    flush=True,
+                )
+            stall_count += 1
+            if (
+                config.gs_stall_recovery == "noise"
+                and stall_count <= config.gs_noise_recovery_retries
+            ):
+                noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
+                if use_c4v:
+                    noise = config.gs_noise_amplitude * jax.random.normal(
+                        noise_key, params.shape
+                    )
+                    params = params + noise * jnp.linalg.norm(params)
+                    params = params / (jnp.linalg.norm(params) + 1e-10)
+                else:
+                    noisy_params = []
+                    for i, p in enumerate(params):
+                        k = jax.random.fold_in(noise_key, i)
+                        data = p.todense()
+                        noise = config.gs_noise_amplitude * jax.random.normal(
+                            k, data.shape
+                        )
+                        noisy = data + noise * jnp.linalg.norm(data)
+                        noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
+                        noisy_params.append(_wrap_tensor(noisy, p))
+                    params = tuple(noisy_params)
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_params_flat = None
+                    prev_grad_flat = None
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+            elif config.gs_stall_recovery == "reset":
+                params = best_params
+                prev_env_leaves = best_env_leaves
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_params_flat = None
+                    prev_grad_flat = None
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                    opt_state = optimizer.init(params)
+            continue
         energy_float = float(energy_val)
         env_leaves_sg = jax.tree.map(jax.lax.stop_gradient, env_leaves)
 

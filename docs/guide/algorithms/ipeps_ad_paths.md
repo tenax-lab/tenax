@@ -156,6 +156,19 @@ graph in memory).
 - `ad_backward_method="vjp"` — the supported implicit backward.
 - `gs_explicit_ad=False` — use implicit differentiation.
 
+**Arnoldi spectral-radius precheck** (enabled by default):
+
+When `adjoint_arnoldi_precheck=True` (default), the backward pass runs 20
+Arnoldi iterations on J^T before solving the adjoint system.  If ρ(J^T) ≥ 1,
+a `CTMRGGradientError` is raised and the optimizer triggers stall recovery
+(noise kick or L-BFGS reset).  This prevents wasting iterations on a
+divergent Neumann/GMRES solve.
+
+Inspired by variPEPS (Naumann et al., arXiv:2308.12358) which uses the same
+Arnoldi precheck → GMRES fallback pattern.  Set
+`adjoint_arnoldi_precheck=False` to disable (e.g. for benchmarking the raw
+solver).
+
 This is the YASTN approach (arXiv:2311.11894), adapted for JAX. For new
 code prefer Path 1 — the explicit-AD path does not exercise the implicit
 backward at all.

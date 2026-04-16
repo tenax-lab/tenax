@@ -24,11 +24,13 @@ from tenax.algorithms._ctm_tensor import (
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms.ad_utils import (
+    CTMRGGradientError,
     _config_from_tuple,
     _config_to_tuple,
     _ctm_tensor_multisite_fixed_point,
     _gauge_fix_ctm_tensor,
     _svd_sector_backward,
+    arnoldi_spectral_radius,
     ctm_tensor_converge,
     ctm_tensor_converge_explicit,
     regularized_svd,
@@ -377,7 +379,9 @@ class TestCTMFixedPointGradient:
     def test_gradient_exists_and_finite(self):
         """Gradient of energy through ctm_tensor_converge should be finite."""
         A = _make_dense_tensor(jax.random.PRNGKey(42))
-        config = CTMConfig(chi=4, max_iter=5, conv_tol=1e-6)
+        config = CTMConfig(
+            chi=4, max_iter=5, conv_tol=1e-6, adjoint_arnoldi_precheck=False
+        )
         config_tuple = _config_to_tuple(config)
         gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
 
@@ -532,6 +536,7 @@ class TestCTMFixedPointGradientFiniteDifference:
             **self._SMALL_CONFIG,
             projector_method=projector_method,
             forward_gauge="phase",
+            adjoint_arnoldi_precheck=False,
         )
         gate = _heisenberg_gate_real()
         A = _make_dense_tensor(jax.random.PRNGKey(1234))
@@ -573,6 +578,7 @@ class TestCTMFixedPointGradientFiniteDifference:
             **self._SMALL_CONFIG,
             projector_method="qr",
             forward_gauge="phase",
+            adjoint_arnoldi_precheck=False,
         )
         gate = _heisenberg_gate_real()
         A = _make_dense_tensor(jax.random.PRNGKey(1234))
@@ -651,7 +657,12 @@ class TestCTMADPathConsistency:
         including the SU-plateau bug (gradient ~= 0 on a product state).
         """
         cfg = CTMConfig(
-            chi=4, max_iter=20, conv_tol=1e-10, min_iter=4, forward_gauge="phase"
+            chi=4,
+            max_iter=20,
+            conv_tol=1e-10,
+            min_iter=4,
+            forward_gauge="phase",
+            adjoint_arnoldi_precheck=False,
         )
         gate = _heisenberg_gate_real()
         A = _make_dense_tensor(jax.random.PRNGKey(271828))
@@ -730,7 +741,9 @@ class TestGMRESBackward:
     def test_gmres_backward_finite_gradient(self):
         """GMRES backward pass should produce finite, nonzero gradients."""
         A = _make_dense_tensor(jax.random.PRNGKey(123))
-        config = CTMConfig(chi=4, max_iter=10, conv_tol=1e-6)
+        config = CTMConfig(
+            chi=4, max_iter=10, conv_tol=1e-6, adjoint_arnoldi_precheck=False
+        )
         config_tuple = _config_to_tuple(config)
         gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
 
@@ -754,7 +767,9 @@ class TestGMRESBackward:
     def test_gmres_backward_deterministic(self):
         """GMRES backward pass should be deterministic across calls."""
         A = _make_dense_tensor(jax.random.PRNGKey(77))
-        config = CTMConfig(chi=4, max_iter=10, conv_tol=1e-6)
+        config = CTMConfig(
+            chi=4, max_iter=10, conv_tol=1e-6, adjoint_arnoldi_precheck=False
+        )
         config_tuple = _config_to_tuple(config)
         gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
 
@@ -781,7 +796,13 @@ class TestGMRESBackward:
     def test_gmres_neumann_preconditioner_finite(self):
         """Neumann-preconditioned GMRES produces finite, nonzero gradients."""
         A = _make_dense_tensor(jax.random.PRNGKey(200))
-        config = CTMConfig(chi=4, max_iter=10, conv_tol=1e-6, gmres_precondition=True)
+        config = CTMConfig(
+            chi=4,
+            max_iter=10,
+            conv_tol=1e-6,
+            gmres_precondition=True,
+            adjoint_arnoldi_precheck=False,
+        )
         config_tuple = _config_to_tuple(config)
         gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
 
@@ -807,7 +828,11 @@ class TestGMRESBackward:
 
         def _grad_with(precond: bool):
             config = CTMConfig(
-                chi=4, max_iter=10, conv_tol=1e-6, gmres_precondition=precond
+                chi=4,
+                max_iter=10,
+                conv_tol=1e-6,
+                gmres_precondition=precond,
+                adjoint_arnoldi_precheck=False,
             )
             config_tuple = _config_to_tuple(config)
 
@@ -832,7 +857,13 @@ class TestGMRESBackward:
     def test_gmres_no_preconditioner_still_works(self):
         """Setting gmres_precondition=False must still produce finite gradients."""
         A = _make_dense_tensor(jax.random.PRNGKey(99))
-        config = CTMConfig(chi=4, max_iter=10, conv_tol=1e-6, gmres_precondition=False)
+        config = CTMConfig(
+            chi=4,
+            max_iter=10,
+            conv_tol=1e-6,
+            gmres_precondition=False,
+            adjoint_arnoldi_precheck=False,
+        )
         config_tuple = _config_to_tuple(config)
         gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
 
@@ -859,7 +890,11 @@ class TestGMRESBackwardPath:
         """GMRES backward path should produce finite, nonzero gradients."""
         A = _make_dense_tensor(jax.random.PRNGKey(42))
         config = CTMConfig(
-            chi=4, max_iter=10, conv_tol=1e-6, ad_backward_method="gmres"
+            chi=4,
+            max_iter=10,
+            conv_tol=1e-6,
+            ad_backward_method="gmres",
+            adjoint_arnoldi_precheck=False,
         )
         config_tuple = _config_to_tuple(config)
         gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
@@ -1439,6 +1474,7 @@ class TestVJPBackwardConvergence:
                 conv_tol=1e-6,
                 min_iter=10,
                 ad_backward_method=backward_method,
+                adjoint_arnoldi_precheck=False,
             )
             ct = _config_to_tuple(config)
 
@@ -1561,3 +1597,110 @@ class TestJITCTMConvergence:
         assert jnp.allclose(sv_py, sv_jit, atol=1e-4), (
             f"Corner SV mismatch: max diff = {float(jnp.max(jnp.abs(sv_py - sv_jit)))}"
         )
+
+
+class TestArnoldiSpectralRadius:
+    def test_identity_has_spectral_radius_one(self):
+        v0 = jnp.ones(10)
+        rho = arnoldi_spectral_radius(lambda v: v, v0, n_iter=10)
+        assert abs(rho - 1.0) < 1e-6
+
+    def test_contraction_has_spectral_radius_below_one(self):
+        v0 = jnp.ones(10)
+        rho = arnoldi_spectral_radius(lambda v: 0.5 * v, v0, n_iter=10)
+        assert abs(rho - 0.5) < 1e-6
+
+    def test_expansion_detected(self):
+        v0 = jnp.ones(10)
+        rho = arnoldi_spectral_radius(lambda v: 2.0 * v, v0, n_iter=10)
+        assert abs(rho - 2.0) < 1e-6
+
+    def test_nonsymmetric_matrix(self):
+        key = jax.random.PRNGKey(42)
+        M = jax.random.normal(key, (8, 8)) * 0.3
+        v0 = jnp.ones(8)
+        rho = arnoldi_spectral_radius(lambda v: M @ v, v0, n_iter=8)
+        rho_exact = float(jnp.max(jnp.abs(jnp.linalg.eigvals(M))))
+        assert abs(rho - rho_exact) < 0.1
+
+
+class TestCTMRGGradientError:
+    def test_exception_carries_spectral_radius(self):
+        err = CTMRGGradientError(spectral_radius=2.5)
+        assert err.spectral_radius == 2.5
+        assert "2.5" in str(err)
+
+
+class TestArnoldiConfig:
+    def test_arnoldi_precheck_default_true(self):
+        config = CTMConfig()
+        assert config.adjoint_arnoldi_precheck is True
+
+    def test_arnoldi_precheck_round_trips(self):
+        for val in (True, False):
+            config = CTMConfig(adjoint_arnoldi_precheck=val)
+            t = _config_to_tuple(config)
+            config2 = _config_from_tuple(t)
+            assert config2.adjoint_arnoldi_precheck == val
+
+
+class TestArnoldiPrecheckIntegration:
+    def test_raises_on_non_contractive_backward(self):
+        """Implicit AD backward raises CTMRGGradientError when rho(J^T) >= 1 (QR gauge)."""
+        from tenax.algorithms.ad_utils import CTMRGGradientError
+
+        A = _make_dense_tensor(jax.random.PRNGKey(42))
+        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
+        config = CTMConfig(
+            chi=4,
+            max_iter=10,
+            conv_tol=1e-6,
+            forward_gauge="qr",
+            adjoint_arnoldi_precheck=True,
+        )
+
+        def _energy(A_tensor):
+            config_tuple = _config_to_tuple(config)
+            env_leaves = ctm_tensor_converge(
+                {(0, 0): A_tensor},
+                None,
+                SINGLE_SITE_NEIGHBORS,
+                config_tuple,
+            )
+            env_template = initialize_ctm_tensor_env(A_tensor, config.chi)
+            env_treedef = jax.tree.structure(env_template)
+            env = jax.tree.unflatten(env_treedef, env_leaves)
+            return compute_energy_ctm_tensor(A_tensor, env, gate)
+
+        with pytest.raises(CTMRGGradientError):
+            jax.grad(_energy)(A)
+
+    def test_no_raise_when_disabled(self):
+        """With adjoint_arnoldi_precheck=False, backward completes without raising."""
+        A = _make_dense_tensor(jax.random.PRNGKey(42))
+        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
+        config = CTMConfig(
+            chi=4,
+            max_iter=10,
+            conv_tol=1e-6,
+            forward_gauge="qr",
+            adjoint_arnoldi_precheck=False,
+        )
+
+        def _energy(A_tensor):
+            config_tuple = _config_to_tuple(config)
+            env_leaves = ctm_tensor_converge(
+                {(0, 0): A_tensor},
+                None,
+                SINGLE_SITE_NEIGHBORS,
+                config_tuple,
+            )
+            env_template = initialize_ctm_tensor_env(A_tensor, config.chi)
+            env_treedef = jax.tree.structure(env_template)
+            env = jax.tree.unflatten(env_treedef, env_leaves)
+            return compute_energy_ctm_tensor(A_tensor, env, gate)
+
+        # Should not raise — precheck disabled
+        g = jax.grad(_energy)(A)
+        # Just verify we got a gradient (may be garbage, but no exception)
+        assert g is not None

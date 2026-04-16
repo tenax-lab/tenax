@@ -11,7 +11,9 @@ Implements the solutions from Francuz et al., Phys. Rev. Research 7, 013237
 
 from __future__ import annotations
 
+import logging
 import math
+from collections.abc import Callable
 from functools import partial
 
 import jax
@@ -33,6 +35,19 @@ from tenax.algorithms._split_ctm_tensor import (
     ctm_split_tensor,
 )
 from tenax.algorithms.ipeps_config import CTMConfig
+
+_logger = logging.getLogger(__name__)
+
+
+class CTMRGGradientError(RuntimeError):
+    """Raised when the CTM adjoint system is non-contractive (rho(J^T) >= 1)."""
+
+    def __init__(self, spectral_radius: float):
+        self.spectral_radius = spectral_radius
+        super().__init__(
+            f"CTM adjoint non-contractive: spectral radius {spectral_radius:.4f} >= 1.0"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 0. SVD sign-fixing helper
@@ -537,6 +552,7 @@ def _config_to_tuple(config) -> tuple:
             getattr(config, "forward_gauge", "qr"), 0
         ),
         _PB_STR_TO_INT.get(getattr(config, "projector_backward", "auto"), 0),
+        int(getattr(config, "adjoint_arnoldi_precheck", True)),
     )
 
 
@@ -557,6 +573,9 @@ def _config_from_tuple(config_tuple: tuple):
     )
     pb_int = config_tuple[12] if len(config_tuple) > 12 else 0
     projector_backward = _PB_INT_TO_STR.get(pb_int, "auto")
+    adjoint_arnoldi_precheck = (
+        bool(config_tuple[13]) if len(config_tuple) > 13 else True
+    )
     return CTMConfig(
         chi=config_tuple[0],
         max_iter=config_tuple[1],
@@ -571,6 +590,7 @@ def _config_from_tuple(config_tuple: tuple):
         jit_ctm=jit_ctm,
         forward_gauge=forward_gauge,
         projector_backward=projector_backward,
+        adjoint_arnoldi_precheck=adjoint_arnoldi_precheck,
     )
 
 
@@ -617,6 +637,52 @@ def _transfer_matrix_leading_eigvec(T_dense: jax.Array, n_iter: int = 30) -> jax
         v = v / (jnp.linalg.norm(v) + 1e-30)
 
     return v.real.reshape(chi, chi)
+
+
+def arnoldi_spectral_radius(
+    matvec: Callable[[jnp.ndarray], jnp.ndarray],
+    v0: jnp.ndarray,
+    n_iter: int = 20,
+) -> float:
+    """Estimate the spectral radius of a linear operator via Arnoldi iteration.
+
+    Builds an (n_iter x n_iter) upper Hessenberg matrix H from the Krylov
+    subspace {v0, A v0, A^2 v0, ...} using Modified Gram-Schmidt, then
+    returns max |eigenvalue(H)| as an approximation to rho(A).
+
+    Args:
+        matvec: Function applying the operator (e.g. J^T) to a flat vector.
+        v0: Initial vector (typically the gradient g, flattened).
+        n_iter: Number of Arnoldi iterations (default 20).
+
+    Returns:
+        Estimated spectral radius rho(A).
+    """
+    n = v0.shape[0]
+    k = min(n_iter, n)
+    Q = jnp.zeros((n, k + 1))
+    H = jnp.zeros((k + 1, k))
+
+    q = v0 / (jnp.linalg.norm(v0) + 1e-30)
+    Q = Q.at[:, 0].set(q)
+
+    actual_k = k
+    for j in range(k):
+        v = matvec(Q[:, j])
+        for i in range(j + 1):
+            h = jnp.dot(Q[:, i], v)
+            H = H.at[i, j].set(h)
+            v = v - h * Q[:, i]
+        h_next = jnp.linalg.norm(v)
+        H = H.at[j + 1, j].set(h_next)
+        if h_next < 1e-14:
+            actual_k = j + 1
+            break
+        Q = Q.at[:, j + 1].set(v / h_next)
+
+    H_k = H[:actual_k, :actual_k]
+    eigenvalues = jnp.linalg.eigvals(H_k)
+    return float(jnp.max(jnp.abs(eigenvalues)))
 
 
 def _sigma_gauge_fix_ctm_tensor(env_new, env_old):
@@ -671,10 +737,10 @@ def _sigma_gauge_fix_ctm_tensor(env_new, env_old):
     # T2 connects c2_d <-> c3_u (right bond)
     # T3 connects c4_r <-> c3_l (bottom bond)
     # T4 connects c1_d <-> c4_u (left bond)
-    sigma_top = _compute_sigma(T1_n, T1_o)  # acts on T1's chi bonds
-    sigma_right = _compute_sigma(T2_n, T2_o)  # acts on T2's chi bonds
-    sigma_bottom = _compute_sigma(T3_n, T3_o)  # acts on T3's chi bonds
-    sigma_left = _compute_sigma(T4_n, T4_o)  # acts on T4's chi bonds
+    sigma_top = jax.lax.stop_gradient(_compute_sigma(T1_n, T1_o))
+    sigma_right = jax.lax.stop_gradient(_compute_sigma(T2_n, T2_o))
+    sigma_bottom = jax.lax.stop_gradient(_compute_sigma(T3_n, T3_o))
+    sigma_left = jax.lax.stop_gradient(_compute_sigma(T4_n, T4_o))
 
     # Apply sigma to env_new:
     # Corner: C(row_bond, col_bond) -> sigma_row^H @ C @ sigma_col
@@ -1140,21 +1206,24 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
     use_sigma = getattr(config, "forward_gauge", "qr") == "sigma"
 
     if use_sigma:
-        # --- YASTN-style backward: sigma-gauged step function ---
+        # --- YASTN-style backward: relative sigma-gauged step function ---
         #
-        # The step function for the backward is:
-        #   g(A, env) = apply_sigma(CTM_step(A, env))
+        # The step function for the backward computes:
+        #   g(A, env) = sigma_fix(CTM_step(A, env), stop_gradient(env))
         #
-        # where sigma matrices are CONSTANTS precomputed from the converged
-        # env.  The sigma application (matrix mults) is JAX-differentiable.
-        # The CTM_step here uses QR gauge internally (inside _ctm_tensor_step_multisite).
-        # Then sigma is applied on top to align the output with the fixed point.
+        # where sigma_fix aligns the sweep output to the (detached) input
+        # via relative transfer-matrix eigenvector alignment.  This mirrors
+        # the forward's _sigma_gauge_fix_ctm_tensor(env_new, env_old) and
+        # the explicit-AD path's _one_sweep_sigma pattern (line ~1756).
+        #
+        # The stop_gradient on the reference ensures gradients flow only
+        # through the forward map, not through the alignment target.
         #
         # Reference: YASTN fixed_pt.py FixedPoint.fixed_point_iter (arxiv:2311.11894)
-        sigma_Qs = _precompute_sigma_matrices(envs)
 
         def step_fn_sigma(s_leaves, e_leaves):
-            """One CTM sweep + sigma gauge application."""
+            """One CTM sweep + relative sigma gauge alignment."""
+            e_ref = tuple(jax.lax.stop_gradient(x) for x in e_leaves)
             swept = _ctm_tensor_step_multisite(
                 s_leaves,
                 e_leaves,
@@ -1165,11 +1234,10 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
                 site_treedefs,
                 env_treedef,
                 n_env_per_site,
+                sigma_gauge_ref_leaves=e_ref,
                 projector_backward=getattr(config, "projector_backward", "auto"),
             )
-            return _apply_sigma_to_env_leaves(
-                swept, sigma_Qs, env_treedef, n_env_per_site, coords
-            )
+            return swept
 
         _, vjp_env_fn = jax.vjp(lambda e: step_fn_sigma(site_leaves, e), env_leaves)
         _, vjp_site_fn = jax.vjp(lambda s: step_fn_sigma(s, env_leaves), site_leaves)
@@ -1195,6 +1263,26 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
         _, vjp_site_fn = jax.vjp(lambda s: step_fn(s, env_leaves), site_leaves)
 
     max_fp_iter = min(config.max_iter, 50)
+
+    # --- Arnoldi spectral-radius precheck ---
+    if getattr(config, "adjoint_arnoldi_precheck", True):
+        g_flat = jnp.concatenate([gi.ravel() for gi in g])
+        shapes = [gi.shape for gi in g]
+        sizes = [gi.size for gi in g]
+        splits = jnp.cumsum(jnp.array(sizes[:-1]))
+
+        def _flat_matvec(v_flat):
+            chunks = jnp.split(v_flat, splits)
+            v_tuple = tuple(c.reshape(s) for c, s in zip(chunks, shapes))
+            jt_v = vjp_env_fn(v_tuple)[0]
+            return jnp.concatenate([ji.ravel() for ji in jt_v])
+
+        rho = arnoldi_spectral_radius(_flat_matvec, g_flat, n_iter=20)
+        _logger.info("Arnoldi precheck: rho(J^T) = %.4f", rho)
+
+        arnoldi_threshold = getattr(config, "adjoint_arnoldi_threshold", 5.0)
+        if rho >= arnoldi_threshold:
+            raise CTMRGGradientError(spectral_radius=rho)
 
     if config.ad_backward_method == "gmres":
         # --- GMRES path: solve (I - J^T) lam = g directly ---
