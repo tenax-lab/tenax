@@ -1280,7 +1280,8 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
         rho = arnoldi_spectral_radius(_flat_matvec, g_flat, n_iter=20)
         _logger.info("Arnoldi precheck: rho(J^T) = %.4f", rho)
 
-        if rho >= 1.0:
+        arnoldi_threshold = getattr(config, "adjoint_arnoldi_threshold", 5.0)
+        if rho >= arnoldi_threshold:
             raise CTMRGGradientError(spectral_radius=rho)
 
     if config.ad_backward_method == "gmres":

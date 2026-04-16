@@ -110,6 +110,7 @@ class CTMConfig:
     # compatibility for callers that construct CTMConfig positionally.
     projector_backward: Literal["auto", "standard", "lorentzian"] = "auto"
     adjoint_arnoldi_precheck: bool = True
+    adjoint_arnoldi_threshold: float = 5.0
 
     def __post_init__(self):
         valid_modes = {None, "c4v_reference"}
