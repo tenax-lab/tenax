@@ -379,7 +379,9 @@ class TestCTMFixedPointGradient:
     def test_gradient_exists_and_finite(self):
         """Gradient of energy through ctm_tensor_converge should be finite."""
         A = _make_dense_tensor(jax.random.PRNGKey(42))
-        config = CTMConfig(chi=4, max_iter=5, conv_tol=1e-6)
+        config = CTMConfig(
+            chi=4, max_iter=5, conv_tol=1e-6, adjoint_arnoldi_precheck=False
+        )
         config_tuple = _config_to_tuple(config)
         gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
 
@@ -534,6 +536,7 @@ class TestCTMFixedPointGradientFiniteDifference:
             **self._SMALL_CONFIG,
             projector_method=projector_method,
             forward_gauge="phase",
+            adjoint_arnoldi_precheck=False,
         )
         gate = _heisenberg_gate_real()
         A = _make_dense_tensor(jax.random.PRNGKey(1234))
@@ -575,6 +578,7 @@ class TestCTMFixedPointGradientFiniteDifference:
             **self._SMALL_CONFIG,
             projector_method="qr",
             forward_gauge="phase",
+            adjoint_arnoldi_precheck=False,
         )
         gate = _heisenberg_gate_real()
         A = _make_dense_tensor(jax.random.PRNGKey(1234))
@@ -653,7 +657,12 @@ class TestCTMADPathConsistency:
         including the SU-plateau bug (gradient ~= 0 on a product state).
         """
         cfg = CTMConfig(
-            chi=4, max_iter=20, conv_tol=1e-10, min_iter=4, forward_gauge="phase"
+            chi=4,
+            max_iter=20,
+            conv_tol=1e-10,
+            min_iter=4,
+            forward_gauge="phase",
+            adjoint_arnoldi_precheck=False,
         )
         gate = _heisenberg_gate_real()
         A = _make_dense_tensor(jax.random.PRNGKey(271828))
@@ -732,7 +741,9 @@ class TestGMRESBackward:
     def test_gmres_backward_finite_gradient(self):
         """GMRES backward pass should produce finite, nonzero gradients."""
         A = _make_dense_tensor(jax.random.PRNGKey(123))
-        config = CTMConfig(chi=4, max_iter=10, conv_tol=1e-6)
+        config = CTMConfig(
+            chi=4, max_iter=10, conv_tol=1e-6, adjoint_arnoldi_precheck=False
+        )
         config_tuple = _config_to_tuple(config)
         gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
 
@@ -756,7 +767,9 @@ class TestGMRESBackward:
     def test_gmres_backward_deterministic(self):
         """GMRES backward pass should be deterministic across calls."""
         A = _make_dense_tensor(jax.random.PRNGKey(77))
-        config = CTMConfig(chi=4, max_iter=10, conv_tol=1e-6)
+        config = CTMConfig(
+            chi=4, max_iter=10, conv_tol=1e-6, adjoint_arnoldi_precheck=False
+        )
         config_tuple = _config_to_tuple(config)
         gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
 
@@ -783,7 +796,13 @@ class TestGMRESBackward:
     def test_gmres_neumann_preconditioner_finite(self):
         """Neumann-preconditioned GMRES produces finite, nonzero gradients."""
         A = _make_dense_tensor(jax.random.PRNGKey(200))
-        config = CTMConfig(chi=4, max_iter=10, conv_tol=1e-6, gmres_precondition=True)
+        config = CTMConfig(
+            chi=4,
+            max_iter=10,
+            conv_tol=1e-6,
+            gmres_precondition=True,
+            adjoint_arnoldi_precheck=False,
+        )
         config_tuple = _config_to_tuple(config)
         gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
 
@@ -809,7 +828,11 @@ class TestGMRESBackward:
 
         def _grad_with(precond: bool):
             config = CTMConfig(
-                chi=4, max_iter=10, conv_tol=1e-6, gmres_precondition=precond
+                chi=4,
+                max_iter=10,
+                conv_tol=1e-6,
+                gmres_precondition=precond,
+                adjoint_arnoldi_precheck=False,
             )
             config_tuple = _config_to_tuple(config)
 
@@ -834,7 +857,13 @@ class TestGMRESBackward:
     def test_gmres_no_preconditioner_still_works(self):
         """Setting gmres_precondition=False must still produce finite gradients."""
         A = _make_dense_tensor(jax.random.PRNGKey(99))
-        config = CTMConfig(chi=4, max_iter=10, conv_tol=1e-6, gmres_precondition=False)
+        config = CTMConfig(
+            chi=4,
+            max_iter=10,
+            conv_tol=1e-6,
+            gmres_precondition=False,
+            adjoint_arnoldi_precheck=False,
+        )
         config_tuple = _config_to_tuple(config)
         gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
 
@@ -861,7 +890,11 @@ class TestGMRESBackwardPath:
         """GMRES backward path should produce finite, nonzero gradients."""
         A = _make_dense_tensor(jax.random.PRNGKey(42))
         config = CTMConfig(
-            chi=4, max_iter=10, conv_tol=1e-6, ad_backward_method="gmres"
+            chi=4,
+            max_iter=10,
+            conv_tol=1e-6,
+            ad_backward_method="gmres",
+            adjoint_arnoldi_precheck=False,
         )
         config_tuple = _config_to_tuple(config)
         gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
@@ -1441,6 +1474,7 @@ class TestVJPBackwardConvergence:
                 conv_tol=1e-6,
                 min_iter=10,
                 ad_backward_method=backward_method,
+                adjoint_arnoldi_precheck=False,
             )
             ct = _config_to_tuple(config)
 
