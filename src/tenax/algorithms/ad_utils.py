@@ -737,10 +737,10 @@ def _sigma_gauge_fix_ctm_tensor(env_new, env_old):
     # T2 connects c2_d <-> c3_u (right bond)
     # T3 connects c4_r <-> c3_l (bottom bond)
     # T4 connects c1_d <-> c4_u (left bond)
-    sigma_top = _compute_sigma(T1_n, T1_o)  # acts on T1's chi bonds
-    sigma_right = _compute_sigma(T2_n, T2_o)  # acts on T2's chi bonds
-    sigma_bottom = _compute_sigma(T3_n, T3_o)  # acts on T3's chi bonds
-    sigma_left = _compute_sigma(T4_n, T4_o)  # acts on T4's chi bonds
+    sigma_top = jax.lax.stop_gradient(_compute_sigma(T1_n, T1_o))
+    sigma_right = jax.lax.stop_gradient(_compute_sigma(T2_n, T2_o))
+    sigma_bottom = jax.lax.stop_gradient(_compute_sigma(T3_n, T3_o))
+    sigma_left = jax.lax.stop_gradient(_compute_sigma(T4_n, T4_o))
 
     # Apply sigma to env_new:
     # Corner: C(row_bond, col_bond) -> sigma_row^H @ C @ sigma_col
