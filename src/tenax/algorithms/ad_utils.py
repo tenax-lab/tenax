@@ -11,6 +11,7 @@ Implements the solutions from Francuz et al., Phys. Rev. Research 7, 013237
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Callable
 from functools import partial
@@ -34,6 +35,8 @@ from tenax.algorithms._split_ctm_tensor import (
     ctm_split_tensor,
 )
 from tenax.algorithms.ipeps_config import CTMConfig
+
+_logger = logging.getLogger(__name__)
 
 
 class CTMRGGradientError(RuntimeError):
@@ -1258,6 +1261,25 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
         _, vjp_site_fn = jax.vjp(lambda s: step_fn(s, env_leaves), site_leaves)
 
     max_fp_iter = min(config.max_iter, 50)
+
+    # --- Arnoldi spectral-radius precheck ---
+    if getattr(config, "adjoint_arnoldi_precheck", True):
+        g_flat = jnp.concatenate([gi.ravel() for gi in g])
+        shapes = [gi.shape for gi in g]
+        sizes = [gi.size for gi in g]
+        splits = jnp.cumsum(jnp.array(sizes[:-1]))
+
+        def _flat_matvec(v_flat):
+            chunks = jnp.split(v_flat, splits)
+            v_tuple = tuple(c.reshape(s) for c, s in zip(chunks, shapes))
+            jt_v = vjp_env_fn(v_tuple)[0]
+            return jnp.concatenate([ji.ravel() for ji in jt_v])
+
+        rho = arnoldi_spectral_radius(_flat_matvec, g_flat, n_iter=20)
+        _logger.info("Arnoldi precheck: rho(J^T) = %.4f", rho)
+
+        if rho >= 1.0:
+            raise CTMRGGradientError(spectral_radius=rho)
 
     if config.ad_backward_method == "gmres":
         # --- GMRES path: solve (I - J^T) lam = g directly ---

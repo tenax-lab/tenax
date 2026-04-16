@@ -1608,3 +1608,65 @@ class TestArnoldiConfig:
             t = _config_to_tuple(config)
             config2 = _config_from_tuple(t)
             assert config2.adjoint_arnoldi_precheck == val
+
+
+class TestArnoldiPrecheckIntegration:
+    def test_raises_on_non_contractive_backward(self):
+        """Implicit AD backward raises CTMRGGradientError when rho(J^T) >= 1 (QR gauge)."""
+        from tenax.algorithms.ad_utils import CTMRGGradientError
+
+        A = _make_dense_tensor(jax.random.PRNGKey(42))
+        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
+        config = CTMConfig(
+            chi=4,
+            max_iter=10,
+            conv_tol=1e-6,
+            forward_gauge="qr",
+            adjoint_arnoldi_precheck=True,
+        )
+
+        def _energy(A_tensor):
+            config_tuple = _config_to_tuple(config)
+            env_leaves = ctm_tensor_converge(
+                {(0, 0): A_tensor},
+                None,
+                SINGLE_SITE_NEIGHBORS,
+                config_tuple,
+            )
+            env_template = initialize_ctm_tensor_env(A_tensor, config.chi)
+            env_treedef = jax.tree.structure(env_template)
+            env = jax.tree.unflatten(env_treedef, env_leaves)
+            return compute_energy_ctm_tensor(A_tensor, env, gate)
+
+        with pytest.raises(CTMRGGradientError):
+            jax.grad(_energy)(A)
+
+    def test_no_raise_when_disabled(self):
+        """With adjoint_arnoldi_precheck=False, backward completes without raising."""
+        A = _make_dense_tensor(jax.random.PRNGKey(42))
+        gate = jnp.diag(jnp.array([0.25, -0.25, -0.25, 0.25])).reshape(2, 2, 2, 2)
+        config = CTMConfig(
+            chi=4,
+            max_iter=10,
+            conv_tol=1e-6,
+            forward_gauge="qr",
+            adjoint_arnoldi_precheck=False,
+        )
+
+        def _energy(A_tensor):
+            config_tuple = _config_to_tuple(config)
+            env_leaves = ctm_tensor_converge(
+                {(0, 0): A_tensor},
+                None,
+                SINGLE_SITE_NEIGHBORS,
+                config_tuple,
+            )
+            env_template = initialize_ctm_tensor_env(A_tensor, config.chi)
+            env_treedef = jax.tree.structure(env_template)
+            env = jax.tree.unflatten(env_treedef, env_leaves)
+            return compute_energy_ctm_tensor(A_tensor, env, gate)
+
+        # Should not raise — precheck disabled
+        g = jax.grad(_energy)(A)
+        # Just verify we got a gradient (may be garbage, but no exception)
+        assert g is not None
