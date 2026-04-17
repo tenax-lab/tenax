@@ -1379,6 +1379,12 @@ ctm_tensor_converge.defvjp(_ctm_tensor_converge_fwd, _ctm_tensor_converge_bwd)
 # ---------------------------------------------------------------------------
 
 
+def _env_chi(envs):
+    """Infer chi from the first corner of the first site's environment."""
+    first_env = next(iter(envs.values()))
+    return first_env.C1.todense().shape[0]
+
+
 def _ctm_tensor_multisite_fixed_point_chi_ramp(
     site_tensors, neighbors, config, envs_init=None
 ):
@@ -1387,7 +1393,7 @@ def _ctm_tensor_multisite_fixed_point_chi_ramp(
 
     chi_ramp = config.chi_ramp
     envs = envs_init
-    prev_chi = None
+    prev_chi = _env_chi(envs) if envs is not None else None
 
     for stage_idx, (stage_chi, stage_sweeps) in enumerate(chi_ramp):
         is_last = stage_idx == len(chi_ramp) - 1
@@ -1400,11 +1406,10 @@ def _ctm_tensor_multisite_fixed_point_chi_ramp(
         elif is_last and stage_sweeps is not None:
             stage_config = _replace(stage_config, max_iter=stage_sweeps)
 
-        # Re-initialize when chi changes: zero-padding the old environment
-        # biases the CTM toward a suboptimal fixed point (the extra
-        # dimensions start at zero and the projector cannot populate them).
-        # Identity initialization at the new chi converges to the correct
-        # fixed point.  Warm-start is only safe when chi stays the same.
+        # Re-initialize when chi changes (including envs_init from a
+        # previous optimizer step at a different chi).  Zero-padding the
+        # old environment biases CTM toward a suboptimal fixed point;
+        # identity initialization at the new chi converges correctly.
         if prev_chi is not None and stage_chi != prev_chi:
             envs = None
 
