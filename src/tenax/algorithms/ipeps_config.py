@@ -246,6 +246,15 @@ class iPEPSConfig:
             raise ValueError(
                 f"unit_cell must be one of {valid_unit_cells}, got {self.unit_cell!r}"
             )
+        if self.cg_gates is not None and self.unit_cell != "1x1":
+            raise ValueError(
+                f"cg_gates requires unit_cell='1x1', got {self.unit_cell!r}"
+            )
+        if self.cg_gates is not None and self.su_init:
+            raise ValueError(
+                "cg_gates is incompatible with su_init=True "
+                "(simple update uses the microscopic gate, not the CG gates)"
+            )
         valid_stall_recovery = {None, "noise", "reset"}
         if self.gs_stall_recovery not in valid_stall_recovery:
             raise ValueError(

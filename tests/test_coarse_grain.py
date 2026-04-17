@@ -328,3 +328,19 @@ class TestRDMDiagonal:
         # Pure state: rho^2 = rho
         rdm2 = rdm_mat @ rdm_mat
         np.testing.assert_allclose(rdm2, rdm_mat, atol=1e-10)
+
+
+class TestCGGatesValidation:
+    def test_cg_gates_requires_1x1_unit_cell(self):
+        from tenax.algorithms.ipeps_config import iPEPSConfig
+
+        gates = honeycomb_cg_gates()
+        with pytest.raises(ValueError, match="cg_gates requires unit_cell='1x1'"):
+            iPEPSConfig(unit_cell="2site", cg_gates=gates)
+
+    def test_cg_gates_rejects_su_init(self):
+        from tenax.algorithms.ipeps_config import iPEPSConfig
+
+        gates = honeycomb_cg_gates()
+        with pytest.raises(ValueError, match="incompatible with su_init=True"):
+            iPEPSConfig(cg_gates=gates, su_init=True)
