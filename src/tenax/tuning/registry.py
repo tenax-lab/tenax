@@ -289,32 +289,6 @@ _register(
     )
 )
 
-_register(
-    ParamSpec(
-        name="jit_ctm",
-        dataclass_name="CTMConfig",
-        type_str="bool",
-        default=False,
-        category=TuningCategory.PERFORMANCE,
-        description=(
-            "Use jax.lax.while_loop to fuse the entire CTM convergence "
-            "loop into a single compiled kernel (matches variPEPS)."
-        ),
-        hint=TuningHint(
-            scale=Scale.BOOLEAN,
-            sensitivity=Sensitivity.MEDIUM,
-            cost=CostModel(
-                runtime="5–30x speedup on GPU for large chi",
-                memory="slightly higher (traced residuals)",
-            ),
-        ),
-        when_to_tune="Turn on for GPU forward-only runs with chi>=16.",
-        when_not_to_tune=(
-            "Falls back to Python loop for SymmetricTensor (block-sparse "
-            "not JIT-traceable)."
-        ),
-    )
-)
 
 # --- CTMConfig: implicit-diff adjoint knobs ---------------------------------
 

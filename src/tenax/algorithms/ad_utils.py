@@ -547,7 +547,6 @@ def _config_to_tuple(config) -> tuple:
         int(getattr(config, "gmres_precondition", True)),
         {"vjp": 0, "gmres": 1}.get(getattr(config, "ad_backward_method", "vjp"), 0),
         _CONV_METHOD_STR_TO_INT.get(getattr(config, "ctm_conv_method", "sv"), 0),
-        int(getattr(config, "jit_ctm", False)),
         {"qr": 0, "sigma": 1, "phase": 2, "none": 3}.get(
             getattr(config, "forward_gauge", "qr"), 0
         ),
@@ -566,15 +565,14 @@ def _config_from_tuple(config_tuple: tuple):
     ad_backward_method = {0: "vjp", 1: "gmres"}.get(ad_bwd_int, "vjp")
     conv_method_int = config_tuple[9] if len(config_tuple) > 9 else 0
     ctm_conv_method = _CONV_METHOD_INT_TO_STR.get(conv_method_int, "sv")
-    jit_ctm = bool(config_tuple[10]) if len(config_tuple) > 10 else False
-    forward_gauge_int = config_tuple[11] if len(config_tuple) > 11 else 0
+    forward_gauge_int = config_tuple[10] if len(config_tuple) > 10 else 0
     forward_gauge = {0: "qr", 1: "sigma", 2: "phase", 3: "none"}.get(
         forward_gauge_int, "qr"
     )
-    pb_int = config_tuple[12] if len(config_tuple) > 12 else 0
+    pb_int = config_tuple[11] if len(config_tuple) > 11 else 0
     projector_backward = _PB_INT_TO_STR.get(pb_int, "auto")
     adjoint_arnoldi_precheck = (
-        bool(config_tuple[13]) if len(config_tuple) > 13 else True
+        bool(config_tuple[12]) if len(config_tuple) > 12 else True
     )
     return CTMConfig(
         chi=config_tuple[0],
@@ -587,7 +585,6 @@ def _config_from_tuple(config_tuple: tuple):
         gmres_precondition=gmres_precondition,
         ad_backward_method=ad_backward_method,
         ctm_conv_method=ctm_conv_method,
-        jit_ctm=jit_ctm,
         forward_gauge=forward_gauge,
         projector_backward=projector_backward,
         adjoint_arnoldi_precheck=adjoint_arnoldi_precheck,
@@ -1085,12 +1082,9 @@ def ctm_tensor_converge(
     """
     config = _config_from_tuple(config_tuple)
     envs_init = _unflatten_envs_init(env_init_leaves, site_tensors, config.chi)
-    _fp_fn = (
-        _ctm_tensor_multisite_fixed_point_jit
-        if config.jit_ctm
-        else _ctm_tensor_multisite_fixed_point
+    envs = _ctm_tensor_multisite_fixed_point(
+        site_tensors, neighbors, config, envs_init=envs_init
     )
-    envs = _fp_fn(site_tensors, neighbors, config, envs_init=envs_init)
     return _flatten_envs(envs)
 
 
@@ -1098,12 +1092,9 @@ def _ctm_tensor_converge_fwd(site_tensors, env_init_leaves, neighbors, config_tu
     """Forward pass -- run multisite Tensor CTM, cache tensors and envs."""
     config = _config_from_tuple(config_tuple)
     envs_init = _unflatten_envs_init(env_init_leaves, site_tensors, config.chi)
-    _fp_fn = (
-        _ctm_tensor_multisite_fixed_point_jit
-        if config.jit_ctm
-        else _ctm_tensor_multisite_fixed_point
+    envs = _ctm_tensor_multisite_fixed_point(
+        site_tensors, neighbors, config, envs_init=envs_init
     )
-    envs = _fp_fn(site_tensors, neighbors, config, envs_init=envs_init)
     out = _flatten_envs(envs)
     residuals = (site_tensors, envs, env_init_leaves)
     return out, residuals
@@ -1462,213 +1453,6 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
                 prev_svs[c] = sv
         if converged:
             break
-
-    return envs
-
-
-def _ctm_tensor_multisite_fixed_point_jit(
-    site_tensors, neighbors, config, envs_init=None
-):
-    """Run multisite CTM to convergence using ``jax.lax.while_loop``.
-
-    The entire convergence loop — sweep, gauge fix, and SV convergence
-    check — runs inside a single JIT-compiled kernel with zero Python
-    overhead, matching the variPEPS architecture.
-
-    Falls back to the Python loop for SymmetricTensor inputs (block-sparse
-    operations aren't JIT-traceable).
-    """
-    from tenax.core.tensor import SymmetricTensor
-
-    # Fall back to Python loop for SymmetricTensor (not JIT-traceable)
-    first_tensor = next(iter(site_tensors.values()))
-    if isinstance(first_tensor, SymmetricTensor):
-        return _ctm_tensor_multisite_fixed_point(
-            site_tensors, neighbors, config, envs_init=envs_init
-        )
-
-    envs = (
-        envs_init
-        if envs_init is not None
-        else {
-            c: initialize_ctm_tensor_env(A, config.chi) for c, A in site_tensors.items()
-        }
-    )
-
-    coords = sorted(site_tensors)
-
-    # Build treedefs for _ctm_tensor_step_multisite
-    site_treedefs = {c: jax.tree.structure(site_tensors[c]) for c in coords}
-    env_treedef = jax.tree.structure(envs[coords[0]])
-    n_env_per_site = len(jax.tree.leaves(envs[coords[0]]))
-
-    site_leaves = ()
-    for c in coords:
-        site_leaves = site_leaves + tuple(jax.tree.leaves(site_tensors[c]))
-
-    # Pre-compute double layers (constant across sweeps)
-    double_layers_cached = {
-        c: _build_double_layer_tensor(A) for c, A in site_tensors.items()
-    }
-
-    # Warmup: run a few eigh sweeps to escape the trivial identity fixed point.
-    # The SVD (Fishman) projector has a trivial fixed point at identity corners;
-    # eigh projectors break this symmetry via the density matrix eigenvectors.
-    qr_warmup = getattr(config, "qr_warmup_steps", 3)
-    if config.projector_method in ("svd", "qr") and qr_warmup > 0:
-        for _ in range(qr_warmup):
-            envs = _ctm_tensor_sweep_multisite(
-                envs,
-                double_layers_cached,
-                neighbors,
-                config.chi,
-                config.renormalize,
-                "eigh",
-            )
-            envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
-
-    chi = config.chi
-    conv_tol = config.conv_tol
-    min_iter = config.min_iter
-    max_iter = config.max_iter
-
-    # Number of C1 corners = number of sites; each site has n_env_per_site leaves
-    # C1 is the first leaf of each site's env (leaf index 0)
-    n_sites = len(coords)
-
-    _gauge_mode = getattr(config, "forward_gauge", "qr")
-    use_sigma = _gauge_mode == "sigma"
-    use_phase = _gauge_mode == "phase"
-
-    # Match Python loop: first sweep uses QR gauge to establish a clean
-    # starting point before sigma gauge takes over.
-    if use_sigma:
-        envs = _ctm_tensor_sweep_multisite(
-            envs,
-            double_layers_cached,
-            neighbors,
-            chi,
-            config.renormalize,
-            config.projector_method,
-            projector_backward=getattr(config, "projector_backward", "auto"),
-        )
-        envs = {c: _gauge_fix_ctm_tensor(e) for c, e in envs.items()}
-        max_iter = max(max_iter - 1, 1)
-        min_iter = max(min_iter - 1, 0)
-
-    env_leaves = tuple(_flatten_envs(envs))
-
-    def _one_sweep(e_leaves, sigma_ref=None):
-        return tuple(
-            _ctm_tensor_step_multisite(
-                site_leaves,
-                e_leaves,
-                neighbors,
-                config.chi,
-                config.renormalize,
-                config.projector_method,
-                site_treedefs,
-                env_treedef,
-                n_env_per_site,
-                double_layers=double_layers_cached,
-                sigma_gauge_ref_leaves=sigma_ref,
-                gauge_mode="phase" if use_phase else "qr",
-                projector_backward=getattr(config, "projector_backward", "auto"),
-            )
-        )
-
-    use_elementwise = getattr(config, "ctm_conv_method", "sv") == "elementwise"
-
-    if use_elementwise:
-        # Elementwise convergence: compare all env arrays between sweeps
-        def _compute_conv_ref(e_leaves):
-            """Concatenate all env leaf arrays for elementwise comparison."""
-            return jnp.concatenate([x.ravel() for x in e_leaves])
-
-        init_ref = jnp.zeros(sum(x.size for x in env_leaves))
-    else:
-        # SV convergence: normalized C1 SVs per site, max-abs diff
-        # (matches Python loop: _ctm_sv_diff on C1.todense() SVs)
-        # Corners are leaves 0,1,2,3 per site (C1,C2,C3,C4); use C1 only
-        def _compute_conv_ref(e_leaves):
-            """Compute normalized C1 SVs for all sites."""
-            svs = []
-            for s in range(n_sites):
-                base = s * n_env_per_site
-                sv = jnp.linalg.svd(e_leaves[base], compute_uv=False)  # C1
-                sv_norm = sv / (jnp.sum(sv) + 1e-15)
-                svs.append(sv_norm)
-            return jnp.concatenate(svs)
-
-        init_ref = jnp.zeros(n_sites * chi)
-
-    if use_sigma:
-        # Sigma gauge: reference is always the current input (pre-sweep env),
-        # matching the Python loop where envs_old = envs before each sweep.
-        # No extra state needed — sigma_ref = e_leaves inside body_fn.
-        # State: (env_leaves, prev_ref, iteration, converged)
-        init_state = (env_leaves, init_ref, jnp.int32(0), jnp.bool_(False))
-
-        @jax.jit
-        def _run_while_loop(state):
-            def cond_fn(state):
-                _, _, i, converged = state
-                return (~converged) & (i < max_iter)
-
-            def body_fn(state):
-                e_leaves, prev_ref, i, _ = state
-                new_e_leaves = _one_sweep(e_leaves, sigma_ref=e_leaves)
-                new_ref = _compute_conv_ref(new_e_leaves)
-                diff = jnp.max(jnp.abs(new_ref - prev_ref))
-                converged = (i + 1 >= min_iter) & (diff < conv_tol)
-                return (new_e_leaves, new_ref, i + 1, converged)
-
-            return jax.lax.while_loop(cond_fn, body_fn, state)
-
-        final_env_leaves, _, n_iters, converged = _run_while_loop(init_state)
-    else:
-        # QR gauge: standard 4-element state
-        # State: (env_leaves, prev_ref, iteration, converged)
-        init_state = (env_leaves, init_ref, jnp.int32(0), jnp.bool_(False))
-
-        @jax.jit
-        def _run_while_loop(state):
-            def cond_fn(state):
-                _, _, i, converged = state
-                return (~converged) & (i < max_iter)
-
-            def body_fn(state):
-                e_leaves, prev_ref, i, _ = state
-                new_e_leaves = _one_sweep(e_leaves)
-                new_ref = _compute_conv_ref(new_e_leaves)
-                diff = jnp.max(jnp.abs(new_ref - prev_ref))
-                converged = (i + 1 >= min_iter) & (diff < conv_tol)
-                return (new_e_leaves, new_ref, i + 1, converged)
-
-            return jax.lax.while_loop(cond_fn, body_fn, state)
-
-        final_env_leaves, _, n_iters, converged = _run_while_loop(init_state)
-    n_iters = int(n_iters)
-    converged = bool(converged)
-
-    if not converged:
-        import warnings
-
-        warnings.warn(
-            f"JIT CTM did not converge in {n_iters} iterations "
-            f"(max_iter={max_iter}, conv_tol={conv_tol})",
-            stacklevel=2,
-        )
-
-    # Unflatten final result
-    envs = {}
-    env_offset = 0
-    for c in coords:
-        envs[c] = jax.tree.unflatten(
-            env_treedef,
-            list(final_env_leaves[env_offset : env_offset + n_env_per_site]),
-        )
-        env_offset += n_env_per_site
 
     return envs
 

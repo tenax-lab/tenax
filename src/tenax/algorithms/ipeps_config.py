@@ -61,7 +61,6 @@ class CTMConfig:
     # when gs_explicit_ad=True), "phase" (explicit-AD default after promotion),
     # "sigma" (implicit-diff path), or "none" (diagnostic).  See ipeps_ad_paths.md.
     forward_gauge: str = "qr"
-    jit_ctm: bool = False  # use jax.lax.while_loop for GPU kernel fusion
     # Optional reference-mode implicit AD mode (App. C-F) for dense 1-site C4v.
     ctm_ad_mode: str | None = None  # None or "c4v_reference"
     adjoint_solver: str = "bicgstab"  # "bicgstab" or "gmres"

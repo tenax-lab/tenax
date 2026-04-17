@@ -1570,35 +1570,6 @@ class TestHalfSVD:
         )
 
 
-class TestJITCTMConvergence:
-    """JIT CTM convergence via fori_loop matches Python loop."""
-
-    def test_jit_ctm_matches_python_loop(self):
-        """JIT CTM convergence should give same corner SVs as Python loop."""
-        from tenax.algorithms.ad_utils import (
-            _ctm_tensor_multisite_fixed_point_jit,
-        )
-
-        A = _make_dense_tensor(jax.random.PRNGKey(42))
-        config = CTMConfig(chi=4, max_iter=30, conv_tol=1e-6, min_iter=5)
-
-        envs_py = _ctm_tensor_multisite_fixed_point(
-            {(0, 0): A}, SINGLE_SITE_NEIGHBORS, config
-        )
-        envs_jit = _ctm_tensor_multisite_fixed_point_jit(
-            {(0, 0): A}, SINGLE_SITE_NEIGHBORS, config
-        )
-
-        # Compare corner SVs (gauge-invariant)
-        sv_py = jnp.linalg.svd(envs_py[(0, 0)].C1.todense(), compute_uv=False)
-        sv_jit = jnp.linalg.svd(envs_jit[(0, 0)].C1.todense(), compute_uv=False)
-        sv_py = sv_py / (jnp.sum(sv_py) + 1e-15)
-        sv_jit = sv_jit / (jnp.sum(sv_jit) + 1e-15)
-        assert jnp.allclose(sv_py, sv_jit, atol=1e-4), (
-            f"Corner SV mismatch: max diff = {float(jnp.max(jnp.abs(sv_py - sv_jit)))}"
-        )
-
-
 class TestArnoldiSpectralRadius:
     def test_identity_has_spectral_radius_one(self):
         v0 = jnp.ones(10)
