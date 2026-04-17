@@ -703,8 +703,7 @@ def _optimize_gs_ad_tensor(
     def _params_to_A(params):
         """Convert optimizer parameters to a normalized DenseTensor."""
         if _cg_map_fn is not None:
-            normed = tuple(p / (jnp.linalg.norm(p) + 1e-10) for p in params)
-            cg_data = _cg_map_fn(*normed)
+            cg_data = _cg_map_fn(*params)
             return DenseTensor(cg_data, A.indices)
         if use_c4v:
             A_data = c4v_tensor_from_coeffs(params, c4v_basis, tensor_shape)
@@ -806,6 +805,8 @@ def _optimize_gs_ad_tensor(
                 tol = t
         return tol
 
+    _value_and_grad_fn = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)
+
     for step in range(config.gs_num_steps):
         # Update conv_tol if schedule is active
         if _conv_tol_schedule is not None:
@@ -815,9 +816,9 @@ def _optimize_gs_ad_tensor(
                 ctm_cfg = _replace(ctm_cfg, conv_tol=new_tol)
                 config_tuple = _config_to_tuple(ctm_cfg)
         try:
-            (energy_val, env_leaves), grads = jax.value_and_grad(
-                loss_fn, argnums=0, has_aux=True
-            )(params, prev_env_leaves)
+            (energy_val, env_leaves), grads = _value_and_grad_fn(
+                params, prev_env_leaves
+            )
         except CTMRGGradientError as exc:
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -1037,9 +1038,7 @@ def _optimize_gs_ad_tensor(
                     trial = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
-                    (_, _aux), g = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
-                        trial, prev_env_leaves
-                    )
+                    (_, _aux), g = _value_and_grad_fn(trial, prev_env_leaves)
                     return _tree_dot(g, direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
@@ -1151,8 +1150,10 @@ def _optimize_gs_ad_tensor(
                     )
         else:
             params = optax.apply_updates(params, direction)
-            if not use_c4v:
-                params = params * (1.0 / (params.norm() + 1e-10))
+            if _cg_map_fn is not None:
+                pass  # unconstrained: RDM trace normalization handles scale
+            elif not use_c4v:
+                params = _normalize_params(params)
 
     # Re-evaluate both final A and best_A with fully converged fresh CTM.
     # In-loop energies use warm-started CTM that can produce unphysical values
