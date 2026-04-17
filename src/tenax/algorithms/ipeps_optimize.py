@@ -7,11 +7,17 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import replace as _replace
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms.ipeps_ad_policy import (
+    build_ad_ctm_config,
+    resolve_projector_backward,
+    use_reference_c4v_path,
+)
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
@@ -21,51 +27,8 @@ _logger = logging.getLogger(__name__)
 
 
 def _resolve_projector_backward(config: iPEPSConfig) -> iPEPSConfig:
-    """Auto-promote ``ctm.projector_backward`` for explicit-AD eigh paths.
-
-    Mirrors the ``forward_gauge`` ``"qr"`` → ``"phase"`` auto-promotion
-    pattern a few blocks below: when the user is on the explicit-AD path
-    (``gs_explicit_ad=True``) and the CTM projector uses ``eigh``, the
-    Lorentzian-regularized eigh backward from ``_lorentzian_eigh.py`` is
-    the recommended backward (Francuz et al., PRR 7, 013237; see the
-    Task 8 section of
-    ``docs/plans/2026-04-13-multisite-c4v-reference-ad-plan.md``).  The
-    implicit-diff path has its own ``ctm_ad_mode`` story and is never
-    promoted here.
-
-    Semantics:
-      * ``gs_explicit_ad`` must be True.
-      * ``ctm.projector_method`` must be ``"eigh"`` (``"qr"`` / ``"svd"``
-        don't use the eigh backward and can't be Lorentzianised).
-      * ``ctm.projector_backward`` must be ``"auto"`` — a user who
-        explicitly set ``"standard"`` or ``"lorentzian"`` is never
-        overridden in either direction.
-
-    When all three hold, returns a new config with
-    ``ctm.projector_backward`` replaced by ``"lorentzian"`` and emits an
-    ``info`` log line.  Otherwise the config is returned unchanged.
-    """
-    from dataclasses import replace as _replace
-
-    if not config.gs_explicit_ad:
-        return config
-    ctm_cfg = config.ctm
-    # Match against the *effective* projector: ``gs_projector_method``
-    # overrides ``ctm.projector_method`` in the optimizer body, so inspect
-    # the override first. Without this the AD path ends up on ``eigh``
-    # while ``projector_backward`` stays on the legacy regularized_eigh
-    # branch (#318 review).
-    effective_projector = config.gs_projector_method or ctm_cfg.projector_method
-    if effective_projector != "eigh":
-        return config
-    if ctm_cfg.projector_backward != "auto":
-        return config
-    new_ctm = _replace(ctm_cfg, projector_backward="lorentzian")
-    _logger.info(
-        "projector_backward auto-promoted: auto -> lorentzian "
-        "(explicit AD + projector_method=eigh)"
-    )
-    return _replace(config, ctm=new_ctm)
+    """Compatibility wrapper around the shared AD policy helper."""
+    return resolve_projector_backward(config, logger=_logger)
 
 
 def _normalize_stall_recovery(config, *, unit_cell: str):
@@ -456,13 +419,8 @@ def optimize_gs_ad(
 
 
 def _use_reference_c4v_path(config: iPEPSConfig) -> bool:
-    """Return True when the strict reference-mode gate is satisfied."""
-    return (
-        config.unit_cell == "1x1"
-        and config.gs_c4v
-        and not config.gs_explicit_ad
-        and getattr(config.ctm, "ctm_ad_mode", None) == "c4v_reference"
-    )
+    """Compatibility wrapper around the shared AD policy helper."""
+    return use_reference_c4v_path(config)
 
 
 def _optimize_gs_ad_tensor_reference_c4v(
@@ -640,17 +598,9 @@ def _optimize_gs_ad_tensor(
     A = A_init
     A = A * (1.0 / (A.norm() + 1e-10))
 
-    # Override CTM config fields for AD optimization
-    ctm_cfg = config.ctm
-    from dataclasses import replace as _replace
-
-    if config.gs_projector_method is not None:
-        ctm_cfg = _replace(ctm_cfg, projector_method=config.gs_projector_method)
-    # Phase gauge is 6-9x faster than sigma/QR for explicit AD with equal
-    # energy (variPEPS-style Frobenius norm + phase fixing).  Auto-enable
-    # when the user hasn't explicitly set a gauge.
-    if config.gs_explicit_ad and ctm_cfg.forward_gauge == "qr":
-        ctm_cfg = _replace(ctm_cfg, forward_gauge="phase")
+    # Apply AD policy overrides (projector method + explicit-AD gauge promotion)
+    # in one place so 1-site and 2-site paths stay consistent.
+    ctm_cfg = build_ad_ctm_config(config)
     config_tuple = _config_to_tuple(ctm_cfg)
 
     use_c4v = config.gs_c4v
@@ -1342,13 +1292,7 @@ def _optimize_gs_ad_tensor_2site(
     A = A * (1.0 / (A.norm() + 1e-10))
     B = B * (1.0 / (B.norm() + 1e-10))
 
-    from dataclasses import replace as _replace
-
-    ctm_cfg_2s = config.ctm
-    if config.gs_projector_method is not None:
-        ctm_cfg_2s = _replace(ctm_cfg_2s, projector_method=config.gs_projector_method)
-    if config.gs_explicit_ad and ctm_cfg_2s.forward_gauge == "qr":
-        ctm_cfg_2s = _replace(ctm_cfg_2s, forward_gauge="phase")
+    ctm_cfg_2s = build_ad_ctm_config(config)
     config_tuple = _config_to_tuple(ctm_cfg_2s)
     use_explicit = config.gs_explicit_ad
     explicit_steps = config.gs_explicit_ad_steps
