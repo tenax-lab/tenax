@@ -44,6 +44,7 @@ class CTMConfig:
     """
 
     chi: int = 20
+    chi_ramp: list[tuple[int, int | None]] | None = None
     max_iter: int = 100
     conv_tol: float = 1e-8
     renormalize: bool = True

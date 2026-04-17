@@ -552,6 +552,9 @@ def _config_to_tuple(config) -> tuple:
         ),
         _PB_STR_TO_INT.get(getattr(config, "projector_backward", "auto"), 0),
         int(getattr(config, "adjoint_arnoldi_precheck", True)),
+        tuple(tuple(x) for x in config.chi_ramp)
+        if getattr(config, "chi_ramp", None)
+        else (),
     )
 
 
@@ -574,6 +577,8 @@ def _config_from_tuple(config_tuple: tuple):
     adjoint_arnoldi_precheck = (
         bool(config_tuple[12]) if len(config_tuple) > 12 else True
     )
+    chi_ramp_encoded = config_tuple[13] if len(config_tuple) > 13 else ()
+    chi_ramp = [tuple(x) for x in chi_ramp_encoded] if chi_ramp_encoded else None
     return CTMConfig(
         chi=config_tuple[0],
         max_iter=config_tuple[1],
@@ -588,6 +593,7 @@ def _config_from_tuple(config_tuple: tuple):
         forward_gauge=forward_gauge,
         projector_backward=projector_backward,
         adjoint_arnoldi_precheck=adjoint_arnoldi_precheck,
+        chi_ramp=chi_ramp,
     )
 
 
@@ -1373,8 +1379,51 @@ ctm_tensor_converge.defvjp(_ctm_tensor_converge_fwd, _ctm_tensor_converge_bwd)
 # ---------------------------------------------------------------------------
 
 
+def _ctm_tensor_multisite_fixed_point_chi_ramp(
+    site_tensors, neighbors, config, envs_init=None
+):
+    """Run multisite CTM with chi-ramp schedule (warmup at small chi)."""
+    from dataclasses import replace as _replace
+
+    chi_ramp = config.chi_ramp
+    envs = envs_init
+    prev_chi = None
+
+    for stage_idx, (stage_chi, stage_sweeps) in enumerate(chi_ramp):
+        is_last = stage_idx == len(chi_ramp) - 1
+        stage_config = _replace(config, chi=stage_chi, chi_ramp=None)
+
+        if not is_last and stage_sweeps is not None:
+            stage_config = _replace(
+                stage_config, max_iter=stage_sweeps, min_iter=0, conv_tol=0.0
+            )
+        elif is_last and stage_sweeps is not None:
+            stage_config = _replace(stage_config, max_iter=stage_sweeps)
+
+        # When chi changes between stages, re-initialize environments from
+        # scratch: within a single CTM sweep, partially-updated tensors at
+        # chi_new would be contracted with not-yet-updated tensors at
+        # chi_old, causing a dimension mismatch.  Warm-start is only safe
+        # when the bond dimension stays the same.
+        if prev_chi is not None and stage_chi != prev_chi:
+            envs = None
+
+        envs = _ctm_tensor_multisite_fixed_point(
+            site_tensors, neighbors, stage_config, envs_init=envs
+        )
+        prev_chi = stage_chi
+
+    return envs
+
+
 def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init=None):
     """Run multisite Tensor-protocol CTM to convergence with gauge fixing."""
+    chi_ramp = getattr(config, "chi_ramp", None)
+    if chi_ramp is not None:
+        return _ctm_tensor_multisite_fixed_point_chi_ramp(
+            site_tensors, neighbors, config, envs_init=envs_init
+        )
+
     double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
     envs = (
         envs_init
