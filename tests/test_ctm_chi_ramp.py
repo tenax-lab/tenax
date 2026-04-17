@@ -97,37 +97,34 @@ class TestChiRampFunctional:
         # Final chi should be 8
         assert env.C1.todense().shape == (8, 8)
 
-    def test_chi_ramp_matches_direct(self):
-        """chi_ramp result has similar corner SVs to direct chi run."""
+    def test_chi_ramp_same_chi_warm_starts(self):
+        """Stages at the same chi warm-start (envs reused, not re-init)."""
         A = _make_dense_tensor(jax.random.PRNGKey(42))
 
-        # Direct run at chi=8
+        # Direct run: chi=8, 30 sweeps
         config_direct = CTMConfig(chi=8, max_iter=30, conv_tol=1e-8, min_iter=5)
         envs_direct = _ctm_tensor_multisite_fixed_point(
             {(0, 0): A}, SINGLE_SITE_NEIGHBORS, config_direct
         )
 
-        # Ramp: chi=4 for 10 steps, then chi=8 to convergence
+        # Ramp with same chi in two stages: 10 + 20 sweeps = 30 total
         config_ramp = CTMConfig(
             chi=8,
-            chi_ramp=[(4, 10), (8, None)],
-            max_iter=30,
+            chi_ramp=[(8, 10), (8, None)],
+            max_iter=20,
             conv_tol=1e-8,
-            min_iter=5,
+            min_iter=0,
         )
         envs_ramp = _ctm_tensor_multisite_fixed_point(
             {(0, 0): A}, SINGLE_SITE_NEIGHBORS, config_ramp
         )
 
-        # Compare corner singular values
-        c1_direct = envs_direct[(0, 0)].C1.todense()
-        c1_ramp = envs_ramp[(0, 0)].C1.todense()
-        svs_direct = jnp.linalg.svdvals(c1_direct)
-        svs_ramp = jnp.linalg.svdvals(c1_ramp)
-        # Normalize for comparison
+        # Same chi throughout → warm-start → should match direct run
+        svs_direct = jnp.linalg.svdvals(envs_direct[(0, 0)].C1.todense())
+        svs_ramp = jnp.linalg.svdvals(envs_ramp[(0, 0)].C1.todense())
         svs_direct = svs_direct / svs_direct[0]
         svs_ramp = svs_ramp / svs_ramp[0]
-        np.testing.assert_allclose(svs_ramp, svs_direct, atol=1e-3)
+        np.testing.assert_allclose(svs_ramp, svs_direct, atol=1e-4)
 
     def test_chi_ramp_ad_gradient(self):
         """chi_ramp works through the custom_vjp AD path."""

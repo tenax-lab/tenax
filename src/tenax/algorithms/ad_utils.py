@@ -1400,11 +1400,11 @@ def _ctm_tensor_multisite_fixed_point_chi_ramp(
         elif is_last and stage_sweeps is not None:
             stage_config = _replace(stage_config, max_iter=stage_sweeps)
 
-        # When chi changes between stages, re-initialize environments from
-        # scratch: within a single CTM sweep, partially-updated tensors at
-        # chi_new would be contracted with not-yet-updated tensors at
-        # chi_old, causing a dimension mismatch.  Warm-start is only safe
-        # when the bond dimension stays the same.
+        # Re-initialize when chi changes: zero-padding the old environment
+        # biases the CTM toward a suboptimal fixed point (the extra
+        # dimensions start at zero and the projector cannot populate them).
+        # Identity initialization at the new chi converges to the correct
+        # fixed point.  Warm-start is only safe when chi stays the same.
         if prev_chi is not None and stage_chi != prev_chi:
             envs = None
 
