@@ -686,14 +686,7 @@ def _optimize_gs_ad_tensor(
     from tenax.algorithms.ad_utils import (
         _config_from_tuple,
         _ctm_tensor_multisite_fixed_point,
-        _ctm_tensor_multisite_fixed_point_jit,
         _wrap_tensor,
-    )
-
-    _fp_fn = (
-        _ctm_tensor_multisite_fixed_point_jit
-        if getattr(config.ctm, "jit_ctm", False)
-        else _ctm_tensor_multisite_fixed_point
     )
 
     def loss_fn_fwd(p):
@@ -1075,7 +1068,6 @@ def _optimize_gs_ad_tensor(
         renormalize=_base_cfg.renormalize,
         projector_method=_base_cfg.projector_method,
         projector_backward=_base_cfg.projector_backward,
-        jit_ctm=_base_cfg.jit_ctm,
         ctm_conv_method=_base_cfg.ctm_conv_method,
         forward_gauge=_base_cfg.forward_gauge,
     )
@@ -1103,7 +1095,7 @@ def _optimize_gs_ad_tensor(
             if envs_init_leaves is not None
             else None
         )
-        envs = _fp_fn(
+        envs = _ctm_tensor_multisite_fixed_point(
             {(0, 0): A_t},
             SINGLE_SITE_NEIGHBORS,
             eval_config,
@@ -1269,16 +1261,9 @@ def _optimize_gs_ad_tensor_2site(
         _config_from_tuple,
         _config_to_tuple,
         _ctm_tensor_multisite_fixed_point,
-        _ctm_tensor_multisite_fixed_point_jit,
         _wrap_tensor,
         ctm_tensor_converge,
         ctm_tensor_converge_explicit,
-    )
-
-    _fp_fn_2site = (
-        _ctm_tensor_multisite_fixed_point_jit
-        if getattr(config.ctm, "jit_ctm", False)
-        else _ctm_tensor_multisite_fixed_point
     )
 
     gate = (
@@ -1844,7 +1829,6 @@ def _optimize_gs_ad_tensor_2site(
         renormalize=_base_cfg2.renormalize,
         projector_method=_base_cfg2.projector_method,
         projector_backward=_base_cfg2.projector_backward,
-        jit_ctm=_base_cfg2.jit_ctm,
         ctm_conv_method=_base_cfg2.ctm_conv_method,
         forward_gauge=_base_cfg2.forward_gauge,
     )
@@ -1873,7 +1857,7 @@ def _optimize_gs_ad_tensor_2site(
             if envs_init_leaves is not None
             else None
         )
-        envs = _fp_fn_2site(
+        envs = _ctm_tensor_multisite_fixed_point(
             st,
             CHECKERBOARD_NEIGHBORS,
             eval_config2,

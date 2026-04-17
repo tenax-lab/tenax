@@ -372,12 +372,9 @@ optimization stability and speed.
    Tracked by issue #292. Prefer the explicit-AD path (Path 1) or
    ``ad_backward_method="vjp"`` until the GMRES path is stabilized.
 
-2. **``forward_gauge="none"`` on the JIT CTM path**: The JIT
-   ``jax.lax.while_loop`` CTM kernel only dispatches on ``"phase"`` /
-   ``"qr"`` / ``"sigma"``; ``"none"`` falls through to the qr gauge on the
-   JIT path. For the Python-loop CTM (``jit_ctm=False``) and the explicit-AD
-   unrolled path, ``"none"`` is honored end-to-end as a benchmark /
-   diagnostic mode.
+2. **``forward_gauge="none"``**: The ``"none"`` gauge is honored
+   end-to-end as a benchmark / diagnostic mode. It skips all gauge
+   fixing in the CTM loop.
 
 3. **2-site explicit AD**: The 2-site optimizer supports the same
    auto-phase promotion as the 1-site C4v path. For antiferromagnetic

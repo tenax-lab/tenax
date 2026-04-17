@@ -28,7 +28,7 @@ for p in params_by_category(TuningCategory.ACCURACY):
 | Goal | First knob | Then | Last resort |
 |---|---|---|---|
 | Energy not converging | `CTMConfig.chi` ↑ | `iPEPSConfig.gs_num_steps` ↑ | `gs_optimizer` → `lbfgs` |
-| AD forward is slow | `CTMConfig.jit_ctm=True` | loosen `conv_tol` | reduce `chi` |
+| AD forward is slow | loosen `conv_tol` | reduce `chi` | `gs_explicit_ad=True` (1-site) |
 | AD backward `Krylov failed to converge` | `adjoint_tikhonov` → `1e-4` | `adjoint_maxiter` ↑ | loosen `adjoint_tol` |
 | L-BFGS stalls at a plateau | `gs_stall_recovery="reset"` | `su_init=False` | `gs_metric_precond=False` |
 | NaN during optimization | `ad_regularize_svd=True` (default) | `forward_gauge="phase"` | check for degenerate singular values |
@@ -249,13 +249,6 @@ Reference: Fishman et al., arXiv:1711.01288.
 ## Performance-only knobs
 
 These don't change numerics (within tolerance) but speed things up.
-
-### `CTMConfig.jit_ctm` (default `False`)
-
-Fuse the entire CTM convergence loop into a single `jax.lax.while_loop`
-kernel. 5–30× speedup on GPU for `chi ≥ 16`. Falls back to the Python
-loop for `SymmetricTensor` inputs (block-sparse ops aren't
-JIT-traceable).
 
 ### `CTMConfig.gmres_precondition` (experimental, default `False`)
 
