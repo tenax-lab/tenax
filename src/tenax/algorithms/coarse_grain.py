@@ -9,6 +9,7 @@ from __future__ import annotations
 
 __all__ = ["CGGates", "honeycomb_cg_gates", "kagome_cg_gates", "compute_energy_cg"]
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import jax
@@ -25,7 +26,7 @@ from tenax.core.tensor import Tensor
 
 @dataclass(frozen=True)
 class CGGates:
-    """Coarse-grained Hamiltonian gates.
+    """Coarse-grained Hamiltonian gates and parameterization.
 
     Attributes:
         h_intra:  Intra-cell interaction, shape ``(d_eff, d_eff)``
@@ -34,11 +35,20 @@ class CGGates:
                   (e.g. ``"h"``, ``"v"``) to rank-4 tensors of shape
                   ``(d_eff, d_eff, d_eff, d_eff)``.
         n_sites:  Number of physical sites per coarse-grained tensor.
+        map_fn:   Callable that contracts raw site tensors into a CG tensor.
+                  Signature: ``map_fn(*params) -> jnp.ndarray`` of shape
+                  ``(D, D, D, D, d_eff)``.  When ``None``, the optimizer
+                  treats the CG tensor itself as the variational parameter.
+        init_fn:  Callable that creates initial site tensors.
+                  Signature: ``init_fn(D, key) -> tuple[jnp.ndarray, ...]``.
+                  When ``None``, a random CG tensor is used directly.
     """
 
     h_intra: jnp.ndarray
     h_inter: dict[str, jnp.ndarray]
     n_sites: int
+    map_fn: Callable | None = None
+    init_fn: Callable | None = None
 
 
 def _ss_2site(dtype=jnp.float64) -> jnp.ndarray:
@@ -109,7 +119,37 @@ def honeycomb_cg_gates(J: float = 1.0, dtype=jnp.float64) -> CGGates:
     h_h_gate = J * h_h_8leg.reshape(4, 4, 4, 4)
 
     h_inter = {"v": h_v_gate, "h": h_h_gate}
-    return CGGates(h_intra=h_intra, h_inter=h_inter, n_sites=2)
+
+    def _honeycomb_map(t1: jnp.ndarray, t2: jnp.ndarray) -> jnp.ndarray:
+        """Contract two honeycomb site tensors into a CG square-lattice tensor.
+
+        t1: (D, D, d, D_x) — legs [left, down, phys_a, x_right]
+        t2: (D_x, d, D, D) — legs [x_left, phys_b, right, up]
+        Result: (D, D, d*d, D, D) reshaped to (left, down, d_eff, right, up)
+                then transposed to (up, down, left, right, d_eff).
+        """
+        # Contract over x-link: t1 axis 3 with t2 axis 0
+        cg = jnp.tensordot(t1, t2, ((3,), (0,)))
+        # cg shape: (D_l, D_d, d_a, d_b, D_r, D_u) = (l, d, sa, sb, r, u)
+        D_l, D_d, d_a, d_b, D_r, D_u = cg.shape
+        # Fuse physical dims, reorder to (u, d, l, r, phys)
+        cg = cg.reshape(D_l, D_d, d_a * d_b, D_r, D_u)
+        return cg.transpose(4, 1, 0, 3, 2)  # (u, d, l, r, phys)
+
+    def _honeycomb_init(D: int, key: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Random initialization for two honeycomb site tensors."""
+        k1, k2 = jax.random.split(key)
+        t1 = jax.random.normal(k1, (D, D, d, D))  # (l, d, phys_a, x)
+        t2 = jax.random.normal(k2, (D, d, D, D))  # (x, phys_b, r, u)
+        return (t1, t2)
+
+    return CGGates(
+        h_intra=h_intra,
+        h_inter=h_inter,
+        n_sites=2,
+        map_fn=_honeycomb_map,
+        init_fn=_honeycomb_init,
+    )
 
 
 def _embed_inter(site_1: int, site_2: int, d: int = 2, n_sites: int = 3):

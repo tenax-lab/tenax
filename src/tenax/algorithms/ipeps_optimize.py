@@ -451,6 +451,11 @@ def optimize_gs_ad(
         if config.su_init:
             _, (A_su, _B_su), _ = ipeps(gate, None, config)
             A_init = A_su
+        elif config.cg_gates is not None and config.cg_gates.init_fn is not None:
+            key = jax.random.PRNGKey(0)
+            raw_params = config.cg_gates.init_fn(D, key)
+            cg_data = config.cg_gates.map_fn(*raw_params)
+            A_init = _wrap_as_dense_tensor(cg_data)
         else:
             key = jax.random.PRNGKey(0)
             A_init = _wrap_as_dense_tensor(jax.random.normal(key, (D, D, D, D, d_phys)))
@@ -631,6 +636,7 @@ def _optimize_gs_ad_tensor(
         from tenax.algorithms.coarse_grain import compute_energy_cg as _cg_energy_fn
     else:
         _cg_energy_fn = None
+    _cg_map_fn = cg_gates.map_fn if cg_gates is not None else None
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
     from tenax.algorithms.ad_utils import (
         CTMRGGradientError,
@@ -694,13 +700,20 @@ def _optimize_gs_ad_tensor(
         ctm_tensor_converge_explicit if use_explicit else ctm_tensor_converge
     )
 
-    def loss_fn(params, env_init_leaves):
+    def _params_to_A(params):
+        """Convert optimizer parameters to a normalized DenseTensor."""
+        if _cg_map_fn is not None:
+            normed = tuple(p / (jnp.linalg.norm(p) + 1e-10) for p in params)
+            cg_data = _cg_map_fn(*normed)
+            return DenseTensor(cg_data, A.indices)
         if use_c4v:
             A_data = c4v_tensor_from_coeffs(params, c4v_basis, tensor_shape)
             A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-            A_norm = DenseTensor(A_norm_data, A.indices)
-        else:
-            A_norm = params * (1.0 / (params.norm() + 1e-10))
+            return DenseTensor(A_norm_data, A.indices)
+        return params * (1.0 / (params.norm() + 1e-10))
+
+    def loss_fn(params, env_init_leaves):
+        A_norm = _params_to_A(params)
         site_tensors = {(0, 0): A_norm}
         if use_explicit:
             env_leaves = _ctm_converge(
@@ -725,7 +738,13 @@ def _optimize_gs_ad_tensor(
     is_metric_lbfgs = (
         config.gs_metric_precond and config.gs_optimizer.lower() == "lbfgs"
     )
-    params = c4v_coeffs if use_c4v else A
+    if _cg_map_fn is not None:
+        key = jax.random.PRNGKey(0)
+        params = cg_gates.init_fn(config.max_bond_dim, key)
+    elif use_c4v:
+        params = c4v_coeffs
+    else:
+        params = A
     optimizer = None if is_metric_lbfgs else _build_optimizer(config)
     opt_state = optimizer.init(params) if optimizer is not None else None
     use_ls = _use_line_search(config)
@@ -760,12 +779,7 @@ def _optimize_gs_ad_tensor(
 
     def loss_fn_fwd(p):
         """Forward-only loss for line search — warm-starts CTM from prev_env_leaves."""
-        if use_c4v:
-            A_data = c4v_tensor_from_coeffs(p, c4v_basis, tensor_shape)
-            A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-            A_norm = DenseTensor(A_norm_data, A.indices)
-        else:
-            A_norm = p * (1.0 / (p.norm() + 1e-10))
+        A_norm = _params_to_A(p)
         site_tensors = {(0, 0): A_norm}
         env_leaves = ctm_tensor_converge(
             site_tensors, prev_env_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
@@ -823,7 +837,16 @@ def _optimize_gs_ad_tensor(
                 and stall_count <= config.gs_noise_recovery_retries
             ):
                 noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
-                if use_c4v:
+                if _cg_map_fn is not None:
+                    keys = jax.random.split(noise_key, len(params))
+                    params = tuple(
+                        p
+                        + config.gs_noise_amplitude
+                        * jax.random.normal(k, p.shape)
+                        * jnp.linalg.norm(p)
+                        for p, k in zip(params, keys)
+                    )
+                elif use_c4v:
                     noise = config.gs_noise_amplitude * jax.random.normal(
                         noise_key, params.shape
                     )
@@ -1066,7 +1089,16 @@ def _optimize_gs_ad_tensor(
                 and stall_count <= config.gs_noise_recovery_retries
             ):
                 noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
-                if use_c4v:
+                if _cg_map_fn is not None:
+                    keys = jax.random.split(noise_key, len(params))
+                    params = tuple(
+                        p
+                        + config.gs_noise_amplitude
+                        * jax.random.normal(k, p.shape)
+                        * jnp.linalg.norm(p)
+                        for p, k in zip(params, keys)
+                    )
+                elif use_c4v:
                     noise = config.gs_noise_amplitude * jax.random.normal(
                         noise_key, params.shape
                     )
@@ -1156,12 +1188,7 @@ def _optimize_gs_ad_tensor(
         nearby (non-physical) fixed point when the fresh CTM converges with
         tighter tolerances than the in-loop run (#317).
         """
-        if use_c4v:
-            A_data = c4v_tensor_from_coeffs(p, c4v_basis, tensor_shape)
-            A_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-            A_t = DenseTensor(A_data, A.indices)
-        else:
-            A_t = p * (1.0 / (p.norm() + 1e-10))
+        A_t = _params_to_A(p)
         envs_init = (
             _unflatten_env_single(envs_init_leaves)
             if envs_init_leaves is not None
