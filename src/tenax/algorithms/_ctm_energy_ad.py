@@ -18,6 +18,7 @@ from tenax.algorithms._ctm_tensor_init import (
     initialize_ctm_tensor_env,
 )
 from tenax.algorithms._gmres_lax import gmres_pytree
+from tenax.algorithms.ad_utils import _phase_fix_ctm_tensor
 
 
 def ctm_energy_explicit(
@@ -306,7 +307,6 @@ def _sigma_gauged_ctm_converge(
 
     prev_svs = {}
     for i in range(max_iter - warmup):
-        envs_old = envs
         envs_new = jit_step(
             site_tensors,
             envs,
@@ -315,8 +315,9 @@ def _sigma_gauged_ctm_converge(
             renormalize=renormalize,
             projector_backward=projector_backward,
         )
-        # Apply sigma gauge: align new env to old env
-        envs = {c: _sigma_gauge_fix_env(envs_new[c], envs_old[c]) for c in envs_new}
+        # Phase fix: Frobenius normalize + first-large-element phase convention
+        # (variPEPS _post_process_CTM_tensors approach)
+        envs = {c: _phase_fix_ctm_tensor(envs_new[c]) for c in envs_new}
 
         # Check convergence via corner singular values
         converged = True
@@ -512,10 +513,9 @@ def _make_implicit_vjp_fn(
         _, vjp_energy_env = jax.vjp(energy_from_env, env_leaves)
         dE_denv = vjp_energy_env(jnp.ones(()))[0]
 
-        # --- Step 2: Sigma-gauged sweep VJP ---
-        def sigma_gauged_sweep_from_env(env_leaves_flat):
+        # --- Step 2: Phase-fixed sweep VJP ---
+        def phase_fixed_sweep_from_env(env_leaves_flat):
             e = jax.tree.unflatten(env_treedef, env_leaves_flat)
-            e_ref = jax.tree.map(jax.lax.stop_gradient, e)
             e_out = jit_step_bwd(
                 site_tensors,
                 e,
@@ -524,10 +524,10 @@ def _make_implicit_vjp_fn(
                 renormalize=renormalize,
                 projector_backward=projector_backward,
             )
-            e_fixed = {c: _sigma_gauge_fix_env(e_out[c], e_ref[c]) for c in coords}
+            e_fixed = {c: _phase_fix_ctm_tensor(e_out[c]) for c in coords}
             return tuple(jax.tree.leaves(e_fixed))
 
-        _, vjp_sweep_env = jax.vjp(sigma_gauged_sweep_from_env, env_leaves)
+        _, vjp_sweep_env = jax.vjp(phase_fixed_sweep_from_env, env_leaves)
 
         def apply_I_minus_Jt(v):
             jt_v = vjp_sweep_env(v)[0]
@@ -556,10 +556,9 @@ def _make_implicit_vjp_fn(
         direct = vjp_energy_params(jnp.ones(()))[0]
 
         # Indirect: J_params^T @ lam
-        def sigma_gauged_sweep_from_params(p_tuple):
+        def phase_fixed_sweep_from_params(p_tuple):
             pd = list(p_tuple)
             st = _reconstruct_site_tensors(pd, coords, templates)
-            e_ref = jax.tree.map(jax.lax.stop_gradient, envs)
             e_out = jit_step_bwd(
                 st,
                 envs,
@@ -568,10 +567,10 @@ def _make_implicit_vjp_fn(
                 renormalize=renormalize,
                 projector_backward=projector_backward,
             )
-            e_fixed = {c: _sigma_gauge_fix_env(e_out[c], e_ref[c]) for c in coords}
+            e_fixed = {c: _phase_fix_ctm_tensor(e_out[c]) for c in coords}
             return tuple(jax.tree.leaves(e_fixed))
 
-        _, vjp_sweep_params = jax.vjp(sigma_gauged_sweep_from_params, params_data_tuple)
+        _, vjp_sweep_params = jax.vjp(phase_fixed_sweep_from_params, params_data_tuple)
         indirect = vjp_sweep_params(lam)[0]
 
         # Total: g * (direct + indirect)
