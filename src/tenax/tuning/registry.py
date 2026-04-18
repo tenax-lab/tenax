@@ -528,7 +528,7 @@ _register(
         name="gs_line_search_method",
         dataclass_name="iPEPSConfig",
         type_str="str",
-        default="armijo",
+        default="hager_zhang",
         category=TuningCategory.METHOD_SELECTION,
         description="Line-search algorithm used by CG/L-BFGS.",
         hint=TuningHint(
@@ -537,8 +537,8 @@ _register(
             values=("armijo", "hager_zhang"),
         ),
         when_to_tune=(
-            "Hager-Zhang is stronger and matches variPEPS; Armijo is "
-            "cheaper per step and the current default."
+            "Hager-Zhang (default) is stronger and matches variPEPS; "
+            "Armijo is cheaper per step."
         ),
         references=("doi:10.1137/030601880",),  # Hager-Zhang 2005
     )

@@ -175,11 +175,11 @@ Reference: Rader et al., arXiv:2511.09546.
 
 ### `iPEPSConfig.gs_line_search_method`
 
-Values: `"armijo"` (default), `"hager_zhang"`
+Values: `"armijo"`, `"hager_zhang"` (default)
 
-Armijo is cheap and usually enough. Hager-Zhang is stronger and matches
-variPEPS — try it when Armijo is rejecting too many steps or when you
-want publication-quality step selection.
+Hager-Zhang is stronger and matches variPEPS; it is the default because
+Python-loop CTM forward makes each energy evaluation cheap.  Armijo is
+cheaper per step — use it when evaluation cost dominates.
 
 Reference: Hager & Zhang, SIAM J. Optim. 16(1):170–192 (2005).
 
