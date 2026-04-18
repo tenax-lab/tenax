@@ -196,3 +196,48 @@ def gmres_lax(
     info = jnp.where(converged, 0, 1)
 
     return x_final, info
+
+
+def gmres_pytree(
+    matvec,
+    b_tree,
+    x0_tree=None,
+    *,
+    tol: float = 1e-6,
+    maxiter: int = 200,
+    restart: int = 30,
+) -> tuple:
+    """GMRES(m) for pytree-valued linear systems.
+
+    Flattens the pytree to a single vector, solves, then unflattens.
+    ``matvec`` operates on pytrees: matvec(tree) -> tree.
+    """
+    b_leaves, treedef = jax.tree.flatten(b_tree)
+    shapes = [leaf.shape for leaf in b_leaves]
+    sizes = [leaf.size for leaf in b_leaves]
+    # Use Python ints for split indices so they stay concrete under JIT.
+    offsets = []
+    acc = 0
+    for sz in sizes[:-1]:
+        acc += sz
+        offsets.append(acc)
+
+    def flatten(tree):
+        return jnp.concatenate([leaf.ravel() for leaf in jax.tree.leaves(tree)])
+
+    def unflatten(vec):
+        parts = jnp.split(vec, offsets)
+        return jax.tree.unflatten(
+            treedef, [p.reshape(s) for p, s in zip(parts, shapes)]
+        )
+
+    def flat_matvec(v):
+        return flatten(matvec(unflatten(v)))
+
+    b_flat = flatten(b_tree)
+    x0_flat = flatten(x0_tree) if x0_tree is not None else None
+
+    x_flat, info = gmres_lax(
+        flat_matvec, b_flat, x0_flat, tol=tol, maxiter=maxiter, restart=restart
+    )
+    return unflatten(x_flat), info
