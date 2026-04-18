@@ -15,6 +15,7 @@ __all__ = [
     "_normalize_tensor",
     "_renormalize_tensor_env",
     "ctm_multisite",
+    "make_neighbors",
     "ctm_tensor",
     "ctm_tensor_2site",
 ]
@@ -135,6 +136,24 @@ CHECKERBOARD_NEIGHBORS: dict[Coord, dict[str, Coord]] = {
     (0, 0): {"left": (1, 0), "right": (1, 0), "top": (1, 0), "bottom": (1, 0)},
     (1, 0): {"left": (0, 0), "right": (0, 0), "top": (0, 0), "bottom": (0, 0)},
 }
+
+
+def make_neighbors(nx: int, ny: int) -> dict[Coord, dict[str, Coord]]:
+    """Build periodic neighbor map for an nx * ny unit cell.
+
+    Coordinates are (x, y) with periodic boundary conditions.
+    """
+    neighbors: dict[Coord, dict[str, Coord]] = {}
+    for x in range(nx):
+        for y in range(ny):
+            neighbors[(x, y)] = {
+                "left": ((x - 1) % nx, y),
+                "right": ((x + 1) % nx, y),
+                "top": (x, (y - 1) % ny),
+                "bottom": (x, (y + 1) % ny),
+            }
+    return neighbors
+
 
 _DIRECTION_MOVES = [
     ("left", _ctm_tensor_move_left),
