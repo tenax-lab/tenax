@@ -201,6 +201,20 @@ result = optimize_gs_ad_chi_schedule(gate, None, config, chi_schedule)
 Each tuple is `(chi, num_optimization_steps)`. The schedule overrides
 `config.ctm.chi` and `config.gs_num_steps` at each level.
 
+For finer-grained control, ``CTMConfig.chi_ramp`` ramps chi *within*
+each CTM convergence call (1.2–2.1× speedup on GPU):
+
+```python
+config = iPEPSConfig(
+    max_bond_dim=D,
+    ctm=CTMConfig(
+        chi=32,
+        chi_ramp=[(8, 10), (16, 10), (32, None)],
+    ),
+    gs_num_steps=100,
+)
+```
+
 ### Key AD tips
 
 - **Always use `forward_gauge="sigma"` for AD.** The sigma gauge aligns CTM
