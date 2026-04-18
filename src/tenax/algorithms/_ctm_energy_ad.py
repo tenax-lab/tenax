@@ -175,9 +175,9 @@ def ctm_energy_implicit(
     chi: int = 20,
     max_iter: int = 100,
     conv_tol: float = 1e-8,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     renormalize: bool = True,
-    projector_backward: str = "auto",
+    projector_backward: str = "lorentzian",
     qr_warmup_steps: int = 3,
     chi_ramp=None,
     env_init=None,
@@ -197,6 +197,11 @@ def ctm_energy_implicit(
     element-wise fixed point.  The backward VJP is taken through the sigma-
     gauged step function, so ``(I - J_env^T)`` is well-conditioned.
 
+    Uses SVD projectors with Lorentzian-regularized backward by default.
+    SVD projectors achieve element-wise CTM convergence (no eigh sign
+    ambiguity), and Lorentzian regularization provides correct truncation
+    gradients through the fixed point (Francuz et al., PRR 7, 013237).
+
     Args:
         site_tensors:      Map from coordinate to iPEPS site tensor (Tensor).
         neighbors:         Map from coordinate to direction->neighbor coordinate.
@@ -204,9 +209,9 @@ def ctm_energy_implicit(
         chi:               Environment bond dimension.
         max_iter:          Maximum CTM iterations.
         conv_tol:          Convergence tolerance on corner singular values.
-        projector_method:  ``"eigh"`` or ``"qr"``.
+        projector_method:  ``"svd"`` (default), ``"eigh"``, or ``"qr"``.
         renormalize:       Renormalize environments after each sweep.
-        projector_backward: Backward mode for projector.
+        projector_backward: ``"lorentzian"`` (default) or ``"standard"``.
         qr_warmup_steps:   Number of eigh warm-up sweeps before QR kicks in.
         chi_ramp:          Optional chi-ramp schedule.
         env_init:          Optional initial environments.
