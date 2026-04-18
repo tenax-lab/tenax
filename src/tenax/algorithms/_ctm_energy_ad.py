@@ -481,150 +481,102 @@ def _make_implicit_vjp_fn(
         residuals = (params_data_tuple, env_leaves)
         return energy, residuals
 
-    def f_bwd(residuals, g):
-        """GMRES-based implicit differentiation backward pass."""
-        params_data_tuple, env_leaves = residuals
+    # Build the JIT-fused backward. All non-diff args (coords, templates,
+    # neighbors, gate, chi, ...) are captured in the closure so XLA sees a
+    # single compiled program — one CUDA graph instead of 30+.
+    jit_step_bwd = _make_jit_ctm_step(neighbors)
+    coord0 = coords[0]
+
+    @jax.jit
+    def _jit_backward(params_data_tuple, env_leaves, g_scalar):
+        """JIT-fused GMRES backward: one XLA program, one CUDA graph."""
+        params_data = list(params_data_tuple)
+        site_tensors = _reconstruct_site_tensors(params_data, coords, templates)
         env_treedef = _cached["env_treedef"]
-        return _implicit_bwd_gmres(
-            params_data_tuple,
-            env_leaves,
-            env_treedef,
-            g,
-            coords=coords,
-            templates=templates,
-            neighbors=neighbors,
-            gate=gate,
-            chi=chi,
-            projector_method=projector_method,
-            renormalize=renormalize,
-            projector_backward=projector_backward,
-            energy_fn=energy_fn,
-            gmres_tol=gmres_tol,
-            gmres_maxiter=gmres_maxiter,
-            gmres_restart=gmres_restart,
+
+        # Reconstruct converged envs from cached leaves
+        envs = jax.tree.unflatten(env_treedef, env_leaves)
+
+        # --- Step 1: dE/denv (GMRES RHS) ---
+        def energy_from_env(env_leaves_flat):
+            e = jax.tree.unflatten(env_treedef, env_leaves_flat)
+            if energy_fn is not None:
+                return energy_fn(site_tensors, e, gate)
+            return compute_energy_ctm_tensor(site_tensors[coord0], e[coord0], gate)
+
+        _, vjp_energy_env = jax.vjp(energy_from_env, env_leaves)
+        dE_denv = vjp_energy_env(jnp.ones(()))[0]
+
+        # --- Step 2: Sigma-gauged sweep VJP ---
+        def sigma_gauged_sweep_from_env(env_leaves_flat):
+            e = jax.tree.unflatten(env_treedef, env_leaves_flat)
+            e_ref = jax.tree.map(jax.lax.stop_gradient, e)
+            e_out = jit_step_bwd(
+                site_tensors,
+                e,
+                chi=chi,
+                projector_method=projector_method,
+                renormalize=renormalize,
+                projector_backward=projector_backward,
+            )
+            e_fixed = {c: _sigma_gauge_fix_env(e_out[c], e_ref[c]) for c in coords}
+            return tuple(jax.tree.leaves(e_fixed))
+
+        _, vjp_sweep_env = jax.vjp(sigma_gauged_sweep_from_env, env_leaves)
+
+        def apply_I_minus_Jt(v):
+            jt_v = vjp_sweep_env(v)[0]
+            return tuple(vi - ji for vi, ji in zip(v, jt_v))
+
+        # --- Step 3: GMRES solve ---
+        lam, _info = gmres_pytree(
+            apply_I_minus_Jt,
+            dE_denv,
+            dE_denv,
+            tol=gmres_tol,
+            maxiter=gmres_maxiter,
+            restart=gmres_restart,
         )
+
+        # --- Step 4: Chain rule ---
+        # Direct: dE/dparams at fixed env
+        def energy_from_params(p_tuple):
+            pd = list(p_tuple)
+            st = _reconstruct_site_tensors(pd, coords, templates)
+            if energy_fn is not None:
+                return energy_fn(st, envs, gate)
+            return compute_energy_ctm_tensor(st[coord0], envs[coord0], gate)
+
+        _, vjp_energy_params = jax.vjp(energy_from_params, params_data_tuple)
+        direct = vjp_energy_params(jnp.ones(()))[0]
+
+        # Indirect: J_params^T @ lam
+        def sigma_gauged_sweep_from_params(p_tuple):
+            pd = list(p_tuple)
+            st = _reconstruct_site_tensors(pd, coords, templates)
+            e_ref = jax.tree.map(jax.lax.stop_gradient, envs)
+            e_out = jit_step_bwd(
+                st,
+                envs,
+                chi=chi,
+                projector_method=projector_method,
+                renormalize=renormalize,
+                projector_backward=projector_backward,
+            )
+            e_fixed = {c: _sigma_gauge_fix_env(e_out[c], e_ref[c]) for c in coords}
+            return tuple(jax.tree.leaves(e_fixed))
+
+        _, vjp_sweep_params = jax.vjp(sigma_gauged_sweep_from_params, params_data_tuple)
+        indirect = vjp_sweep_params(lam)[0]
+
+        # Total: g * (direct + indirect)
+        total = tuple(g_scalar * (d + ind) for d, ind in zip(direct, indirect))
+        return (total,)
+
+    def f_bwd(residuals, g):
+        """Dispatch to JIT-fused GMRES backward."""
+        params_data_tuple, env_leaves = residuals
+        return _jit_backward(params_data_tuple, env_leaves, g)
 
     f.defvjp(f_fwd, f_bwd)
     return f
-
-
-def _implicit_bwd_gmres(
-    params_data_tuple,
-    env_leaves,
-    env_treedef,
-    g_scalar,
-    *,
-    coords,
-    templates,
-    neighbors,
-    gate,
-    chi,
-    projector_method,
-    renormalize,
-    projector_backward,
-    energy_fn,
-    gmres_tol,
-    gmres_maxiter,
-    gmres_restart,
-):
-    """GMRES backward: solve (I - J_env^T) lam = dE/denv, then chain rule.
-
-    The VJP is taken through a sigma-gauged step function:
-        gauged_step(A, env) = sigma_fix(raw_step(A, env), stop_gradient(env))
-    where sigma_fix aligns the sweep output to the (detached) reference env.
-    This ensures the converged env IS a fixed point of the gauged step.
-    """
-    params_data = list(params_data_tuple)
-    site_tensors = _reconstruct_site_tensors(params_data, coords, templates)
-    coord0 = coords[0]
-
-    # Reconstruct converged envs from cached leaves
-    envs = jax.tree.unflatten(env_treedef, env_leaves)
-
-    # Build JIT step function
-    jit_step = _make_jit_ctm_step(neighbors)
-
-    all_env_leaves = tuple(env_leaves)
-
-    # --- Step 1: dE/denv ---
-    def energy_from_env(env_leaves_flat):
-        e = jax.tree.unflatten(env_treedef, env_leaves_flat)
-        if energy_fn is not None:
-            return energy_fn(site_tensors, e, gate)
-        return compute_energy_ctm_tensor(site_tensors[coord0], e[coord0], gate)
-
-    _, vjp_energy_env = jax.vjp(energy_from_env, all_env_leaves)
-    dE_denv = vjp_energy_env(jnp.ones(()))[0]
-
-    # --- Step 2: Sigma-gauged sweep VJP ---
-    # The gauged step: sweep + sigma alignment to the (detached) reference.
-    # The stop_gradient on the reference ensures gradients only flow through
-    # the forward map, not through the alignment target.
-    def sigma_gauged_sweep_from_env(env_leaves_flat):
-        """One CTM sweep + sigma gauge fix, as function of env leaves."""
-        e = jax.tree.unflatten(env_treedef, env_leaves_flat)
-        # Reference for sigma alignment: detach from gradient graph
-        e_ref = jax.tree.map(jax.lax.stop_gradient, e)
-        # Raw sweep
-        e_out = jit_step(
-            site_tensors,
-            e,
-            chi=chi,
-            projector_method=projector_method,
-            renormalize=renormalize,
-            projector_backward=projector_backward,
-        )
-        # Sigma gauge alignment
-        e_fixed = {c: _sigma_gauge_fix_env(e_out[c], e_ref[c]) for c in coords}
-        return tuple(jax.tree.leaves(e_fixed))
-
-    _, vjp_sweep_env = jax.vjp(sigma_gauged_sweep_from_env, all_env_leaves)
-
-    def apply_I_minus_Jt(v):
-        jt_v = vjp_sweep_env(v)[0]
-        return tuple(vi - ji for vi, ji in zip(v, jt_v))
-
-    # --- Step 3: GMRES solve ---
-    lam, _info = gmres_pytree(
-        apply_I_minus_Jt,
-        dE_denv,
-        dE_denv,
-        tol=gmres_tol,
-        maxiter=gmres_maxiter,
-        restart=gmres_restart,
-    )
-
-    # --- Step 4: Chain rule ---
-    # Direct term: dE/dparams at fixed env
-    def energy_from_params(p_tuple):
-        pd = list(p_tuple)
-        st = _reconstruct_site_tensors(pd, coords, templates)
-        if energy_fn is not None:
-            return energy_fn(st, envs, gate)
-        return compute_energy_ctm_tensor(st[coord0], envs[coord0], gate)
-
-    _, vjp_energy_params = jax.vjp(energy_from_params, params_data_tuple)
-    direct = vjp_energy_params(jnp.ones(()))[0]
-
-    # Indirect term: J_params^T @ lam
-    def sigma_gauged_sweep_from_params(p_tuple):
-        pd = list(p_tuple)
-        st = _reconstruct_site_tensors(pd, coords, templates)
-        e_ref = jax.tree.map(jax.lax.stop_gradient, envs)
-        e_out = jit_step(
-            st,
-            envs,
-            chi=chi,
-            projector_method=projector_method,
-            renormalize=renormalize,
-            projector_backward=projector_backward,
-        )
-        e_fixed = {c: _sigma_gauge_fix_env(e_out[c], e_ref[c]) for c in coords}
-        return tuple(jax.tree.leaves(e_fixed))
-
-    _, vjp_sweep_params = jax.vjp(sigma_gauged_sweep_from_params, params_data_tuple)
-    indirect = vjp_sweep_params(lam)[0]
-
-    # Total: g * (direct + indirect)
-    total = tuple(g_scalar * (d + ind) for d, ind in zip(direct, indirect))
-    return (total,)
