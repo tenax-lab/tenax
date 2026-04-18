@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
+import warnings
 from collections.abc import Callable
 from functools import partial
 
@@ -1086,6 +1087,12 @@ def ctm_tensor_converge(
     Returns:
         Flat tuple of environment pytree leaf arrays (all sites, coord-sorted).
     """
+    warnings.warn(
+        "ctm_tensor_converge is deprecated. Use ctm_energy_implicit from "
+        "tenax.algorithms._ctm_energy_ad instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     config = _config_from_tuple(config_tuple)
     envs_init = _unflatten_envs_init(env_init_leaves, site_tensors, config.chi)
     envs = _ctm_tensor_multisite_fixed_point(
@@ -1542,6 +1549,12 @@ def ctm_tensor_converge_explicit(
     Returns:
         Flat tuple of environment pytree leaf arrays.
     """
+    warnings.warn(
+        "ctm_tensor_converge_explicit is deprecated. Use ctm_energy_explicit "
+        "from tenax.algorithms._ctm_energy_ad instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     config = _config_from_tuple(config_tuple)
     envs_init = _unflatten_envs_init(env_init_leaves, site_tensors, config.chi)
 
