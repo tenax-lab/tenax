@@ -103,6 +103,7 @@ def python_loop_ctm_converge(
     projector_backward: str = "auto",
     chi_ramp: list[tuple[int, int | None]] | None = None,
     env_init: dict[Coord, CTMTensorEnv] | None = None,
+    gauge_fix_fn=None,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM to convergence using a Python for-loop over JIT'd sweeps.
 
@@ -142,6 +143,7 @@ def python_loop_ctm_converge(
             projector_backward=projector_backward,
             chi_ramp=chi_ramp,
             env_init=env_init,
+            gauge_fix_fn=gauge_fix_fn,
         )
 
     # Build the JIT'd step function (captures neighbors in closure)
@@ -181,6 +183,10 @@ def python_loop_ctm_converge(
             renormalize=renormalize,
             projector_backward=projector_backward,
         )
+
+        # Apply gauge fix if provided (e.g., phase fix for element-wise convergence)
+        if gauge_fix_fn is not None:
+            envs = {c: gauge_fix_fn(envs[c]) for c in envs}
 
         # Check convergence via corner singular values
         converged = True
@@ -224,6 +230,7 @@ def _python_loop_chi_ramp(
     projector_backward: str,
     chi_ramp: list[tuple[int, int | None]],
     env_init: dict[Coord, CTMTensorEnv] | None,
+    gauge_fix_fn=None,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM with chi-ramp schedule."""
     envs = env_init
@@ -258,6 +265,7 @@ def _python_loop_chi_ramp(
             projector_backward=projector_backward,
             chi_ramp=None,
             env_init=envs,
+            gauge_fix_fn=gauge_fix_fn,
         )
         prev_chi = stage_chi
 

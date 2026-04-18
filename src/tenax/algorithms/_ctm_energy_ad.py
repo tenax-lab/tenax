@@ -422,6 +422,7 @@ def _make_implicit_vjp_fn(
                 projector_backward=projector_backward,
                 chi_ramp=chi_ramp,
                 env_init=env_init,
+                gauge_fix_fn=_phase_fix_ctm_tensor,
             )
         else:
             envs = _sigma_gauged_ctm_converge(
@@ -461,6 +462,7 @@ def _make_implicit_vjp_fn(
                 projector_backward=projector_backward,
                 chi_ramp=chi_ramp,
                 env_init=env_init,
+                gauge_fix_fn=_phase_fix_ctm_tensor,
             )
         else:
             envs = _sigma_gauged_ctm_converge(
