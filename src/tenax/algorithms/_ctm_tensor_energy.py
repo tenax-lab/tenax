@@ -9,6 +9,7 @@ __all__ = [
     "_rdm2x1_tensor_2site",
     "compute_energy_ctm_tensor",
     "compute_energy_ctm_tensor_2site",
+    "compute_energy_ctm_tensor_multisite",
 ]
 
 import jax
@@ -423,3 +424,78 @@ def compute_energy_ctm_tensor_2site(
     E_h = jnp.einsum("ijkl,ijkl->", rdm_h, H)
     E_v = jnp.einsum("ijkl,ijkl->", rdm_v, H)
     return (E_h + E_v).real
+
+
+def compute_energy_ctm_tensor_multisite(
+    site_tensors: dict,
+    envs: dict,
+    neighbors: dict,
+    gate: Tensor | jax.Array,
+    d: int | None = None,
+) -> jax.Array:
+    """Compute energy per site summed over all NN bonds in a multi-site unit cell.
+
+    Each bond is counted once. Energy is normalized by the number of sites.
+
+    Args:
+        site_tensors: ``{coord: Tensor}`` mapping coordinates to iPEPS site tensors.
+        envs:         ``{coord: CTMTensorEnv}`` converged environments per site.
+        neighbors:    ``{coord: {"left": coord, "right": coord, "top": coord,
+                      "bottom": coord}}`` neighbor map defining the unit cell topology.
+        gate:         2-site Hamiltonian gate (dense array or Tensor).
+        d:            Physical dimension (inferred from first site tensor if None).
+
+    Returns:
+        Scalar energy per site.
+    """
+    # Infer physical dimension
+    if d is None:
+        first_A = next(iter(site_tensors.values()))
+        phys_idx = [i for i in first_A.indices if i.label == "phys"]
+        d = phys_idx[0].dim if phys_idx else first_A.indices[-1].dim
+
+    # Prepare gate as dense (d, d, d, d) array
+    if isinstance(gate, Tensor):
+        H = gate.todense().reshape(d, d, d, d)
+    else:
+        H = gate.reshape(d, d, d, d)
+
+    n_sites = len(site_tensors)
+    total_energy = jnp.array(0.0)
+    counted_bonds: set = set()
+
+    for coord, A in site_tensors.items():
+        env_A = envs[coord]
+        for direction in ("right", "bottom"):
+            nb_coord = neighbors[coord][direction]
+
+            # Build a canonical bond identifier to avoid double-counting.
+            # A bond from coord→right is the same as nb_coord→left.
+            reverse_dir = "left" if direction == "right" else "top"
+            reverse_bond = (nb_coord, reverse_dir)
+            bond = (coord, direction)
+            # Use frozenset so {(A,right), (B,left)} == {(B,left), (A,right)}
+            bond_id = frozenset([bond, reverse_bond])
+            if bond_id in counted_bonds:
+                continue
+            counted_bonds.add(bond_id)
+
+            B = site_tensors[nb_coord]
+            env_B = envs[nb_coord]
+
+            # When a site is its own neighbor, use the single-site RDM functions
+            if coord == nb_coord:
+                if direction == "right":
+                    rdm = _rdm2x1_tensor(A, env_A)
+                else:
+                    rdm = _rdm1x2_tensor(A, env_A)
+            else:
+                if direction == "right":
+                    rdm = _rdm2x1_tensor_2site(A, B, env_A, env_B)
+                else:
+                    rdm = _rdm1x2_tensor_2site(A, B, env_A, env_B)
+
+            bond_energy = jnp.einsum("ijkl,ijkl->", rdm, H)
+            total_energy = total_energy + bond_energy
+
+    return total_energy.real / n_sites

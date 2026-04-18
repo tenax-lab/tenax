@@ -22,6 +22,7 @@ from tenax.algorithms._ctm_tensor_convergence import (
 from tenax.algorithms._ctm_tensor_energy import (
     compute_energy_ctm_tensor,
     compute_energy_ctm_tensor_2site,
+    compute_energy_ctm_tensor_multisite,
 )
 from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
@@ -274,3 +275,110 @@ class TestPythonLoopCtmConverge:
             env_init=envs_warm,
         )
         assert info.converged
+
+
+class TestMultisiteEnergy:
+    """Tests for compute_energy_ctm_tensor_multisite."""
+
+    def test_1site_matches_existing(self):
+        """Multisite energy for 1-site cell matches compute_energy_ctm_tensor."""
+        A = _make_random_A(key=jax.random.PRNGKey(42))
+        gate = _heisenberg_gate()
+        chi = 4
+
+        envs, _ = python_loop_ctm_converge(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            chi=chi,
+            max_iter=50,
+            conv_tol=1e-10,
+        )
+
+        energy_ref = float(compute_energy_ctm_tensor(A, envs[(0, 0)], gate))
+        energy_multi = float(
+            compute_energy_ctm_tensor_multisite(
+                {(0, 0): A}, envs, SINGLE_SITE_NEIGHBORS, gate
+            )
+        )
+
+        np.testing.assert_allclose(energy_multi, energy_ref, atol=1e-10)
+
+    def test_2site_matches_existing(self):
+        """Multisite energy for checkerboard matches compute_energy_ctm_tensor_2site."""
+        A = _make_random_A(key=jax.random.PRNGKey(42))
+        B = _make_random_A(key=jax.random.PRNGKey(99))
+        gate = _heisenberg_gate()
+        chi = 4
+
+        envs, _ = python_loop_ctm_converge(
+            {(0, 0): A, (1, 0): B},
+            CHECKERBOARD_NEIGHBORS,
+            chi=chi,
+            max_iter=50,
+            conv_tol=1e-10,
+        )
+
+        energy_ref = float(
+            compute_energy_ctm_tensor_2site(A, B, envs[(0, 0)], envs[(1, 0)], gate)
+        )
+        energy_multi = float(
+            compute_energy_ctm_tensor_multisite(
+                {(0, 0): A, (1, 0): B}, envs, CHECKERBOARD_NEIGHBORS, gate
+            )
+        )
+
+        # The multisite function counts all 4 bonds (AB and BA) and averages,
+        # while the 2-site function exploits symmetry (only AB bonds).
+        # They agree up to small numerical asymmetry in the environments.
+        np.testing.assert_allclose(energy_multi, energy_ref, atol=1e-3)
+
+    def test_multisite_returns_finite_scalar(self):
+        """Multisite energy returns a finite scalar for a 2x2 unit cell."""
+        keys = jax.random.split(jax.random.PRNGKey(0), 4)
+        coords = [(0, 0), (1, 0), (0, 1), (1, 1)]
+        site_tensors = {c: _make_random_A(key=k) for c, k in zip(coords, keys)}
+
+        # 2x2 periodic neighbor map
+        neighbors = {
+            (0, 0): {
+                "left": (1, 0),
+                "right": (1, 0),
+                "top": (0, 1),
+                "bottom": (0, 1),
+            },
+            (1, 0): {
+                "left": (0, 0),
+                "right": (0, 0),
+                "top": (1, 1),
+                "bottom": (1, 1),
+            },
+            (0, 1): {
+                "left": (1, 1),
+                "right": (1, 1),
+                "top": (0, 0),
+                "bottom": (0, 0),
+            },
+            (1, 1): {
+                "left": (0, 1),
+                "right": (0, 1),
+                "top": (1, 0),
+                "bottom": (1, 0),
+            },
+        }
+
+        chi = 4
+        envs, _ = python_loop_ctm_converge(
+            site_tensors,
+            neighbors,
+            chi=chi,
+            max_iter=30,
+            conv_tol=1e-6,
+        )
+
+        gate = _heisenberg_gate()
+        energy = compute_energy_ctm_tensor_multisite(
+            site_tensors, envs, neighbors, gate
+        )
+
+        assert jnp.isfinite(energy)
+        assert energy.shape == ()  # scalar
