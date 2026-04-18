@@ -73,12 +73,10 @@ def ctm_energy_explicit(
             )
         )(site_tensors, envs)
 
-    coord = next(iter(envs))
-    env = envs[coord]
-    A = site_tensors[coord]
     if energy_fn is not None:
-        return energy_fn(A, env, gate)
-    return compute_energy_ctm_tensor(A, env, gate)
+        return energy_fn(site_tensors, envs, gate)
+    coord = next(iter(envs))
+    return compute_energy_ctm_tensor(site_tensors[coord], envs[coord], gate)
 
 
 # ---------------------------------------------------------------------------
@@ -248,10 +246,18 @@ def ctm_energy_implicit(
 
 def _reconstruct_site_tensors(params_data, coords, templates):
     """Reconstruct site_tensors dict from raw data arrays + templates."""
-    return {
-        c: templates[c].__class__(params_data[i], templates[c].indices)
-        for i, c in enumerate(coords)
-    }
+    from tenax.core.tensor import SymmetricTensor
+
+    result = {}
+    for i, c in enumerate(coords):
+        tmpl = templates[c]
+        if isinstance(tmpl, SymmetricTensor):
+            result[c] = SymmetricTensor.from_dense(
+                params_data[i], tmpl.indices, tol=float("inf")
+            )
+        else:
+            result[c] = tmpl.__class__(params_data[i], tmpl.indices)
+    return result
 
 
 def _sigma_gauged_ctm_converge(
@@ -425,10 +431,10 @@ def _make_implicit_vjp_fn(
                 env_init=env_init,
             )
 
-        coord0 = coords[0]
         if energy_fn is not None:
-            energy = energy_fn(site_tensors[coord0], envs[coord0], gate)
+            energy = energy_fn(site_tensors, envs, gate)
         else:
+            coord0 = coords[0]
             energy = compute_energy_ctm_tensor(site_tensors[coord0], envs[coord0], gate)
         return energy
 
@@ -464,10 +470,10 @@ def _make_implicit_vjp_fn(
                 env_init=env_init,
             )
 
-        coord0 = coords[0]
         if energy_fn is not None:
-            energy = energy_fn(site_tensors[coord0], envs[coord0], gate)
+            energy = energy_fn(site_tensors, envs, gate)
         else:
+            coord0 = coords[0]
             energy = compute_energy_ctm_tensor(site_tensors[coord0], envs[coord0], gate)
 
         _cached["env_treedef"] = jax.tree.structure(envs)
@@ -543,10 +549,9 @@ def _implicit_bwd_gmres(
     # --- Step 1: dE/denv ---
     def energy_from_env(env_leaves_flat):
         e = jax.tree.unflatten(env_treedef, env_leaves_flat)
-        A = site_tensors[coord0]
         if energy_fn is not None:
-            return energy_fn(A, e[coord0], gate)
-        return compute_energy_ctm_tensor(A, e[coord0], gate)
+            return energy_fn(site_tensors, e, gate)
+        return compute_energy_ctm_tensor(site_tensors[coord0], e[coord0], gate)
 
     _, vjp_energy_env = jax.vjp(energy_from_env, all_env_leaves)
     dE_denv = vjp_energy_env(jnp.ones(()))[0]
@@ -594,10 +599,9 @@ def _implicit_bwd_gmres(
     def energy_from_params(p_tuple):
         pd = list(p_tuple)
         st = _reconstruct_site_tensors(pd, coords, templates)
-        A = st[coord0]
         if energy_fn is not None:
-            return energy_fn(A, envs[coord0], gate)
-        return compute_energy_ctm_tensor(A, envs[coord0], gate)
+            return energy_fn(st, envs, gate)
+        return compute_energy_ctm_tensor(st[coord0], envs[coord0], gate)
 
     _, vjp_energy_params = jax.vjp(energy_from_params, params_data_tuple)
     direct = vjp_energy_params(jnp.ones(()))[0]
