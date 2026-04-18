@@ -145,6 +145,22 @@ python -m benchmarks.run -b cpu -a dmrg ipeps -s medium -n 3 --csv 2d_comparison
 Cylinder DMRG is more accurate per compute dollar for small Ly; iPEPS wins
 for truly 2D problems in the thermodynamic limit.
 
+## iPEPS Performance Tuning
+
+### Chi ramping
+
+Use `CTMConfig.chi_ramp` to warm up CTM convergence at small chi before
+the target chi. Typical speedup: 1.2–2.1× on GPU. Example:
+
+```python
+ctm=CTMConfig(chi=32, chi_ramp=[(8, 10), (16, 10), (32, None)])
+```
+
+Each tuple is `(chi_value, max_steps)`: run up to `max_steps` CTM steps at
+that chi, then move to the next. The final entry with `None` runs until
+convergence at the target chi. This avoids wasting iterations at full chi
+when the environment is far from converged.
+
 ## Pedagogical Notes
 
 - Benchmarking teaches students that algorithmic complexity (O-notation) is
