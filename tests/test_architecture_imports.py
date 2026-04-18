@@ -27,11 +27,6 @@ ALLOWED_CYCLIC_GROUPS = [
         "tenax.algorithms._split_ctm_tensor_moves",
         "tenax.algorithms.ad_utils",
     },
-    {
-        "tenax.algorithms._jit_sweep",
-        "tenax.algorithms.dmrg",
-        "tenax.algorithms.dmrg3s",
-    },
 ]
 
 
@@ -161,4 +156,23 @@ def test_algorithm_import_cycles_are_allowlisted_only():
     assert not unexpected, (
         "Detected new import cycles outside allowlisted legacy SCCs:\n"
         + "\n".join(" - " + ", ".join(sorted(component)) for component in unexpected)
+    )
+
+
+def test_dmrg_modules_are_not_in_same_import_cycle():
+    graph = _build_import_graph()
+    cyclic_components = [
+        component
+        for component in _strongly_connected_components(graph)
+        if len(component) > 1
+    ]
+    forbidden = {
+        "tenax.algorithms.dmrg",
+        "tenax.algorithms.dmrg3s",
+        "tenax.algorithms._jit_sweep",
+    }
+    offenders = [component for component in cyclic_components if component & forbidden]
+    assert not offenders, (
+        "DMRG modules must not participate in import cycles:\n"
+        + "\n".join(" - " + ", ".join(sorted(component)) for component in offenders)
     )
