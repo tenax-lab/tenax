@@ -73,7 +73,7 @@ fixed after each CTM sweep during the forward pass. Four modes are supported:
 | ``"none"`` | No gauge fix. Diagnostic / benchmark mode only. |
 
 **Auto-promotion for explicit AD**: when you call ``optimize_gs_ad`` with
-``gs_explicit_ad=True`` (the default) and leave ``forward_gauge`` at its
+``gs_implicit_ad=False`` (the default) and leave ``forward_gauge`` at its
 conservative default ``"qr"``, the optimizer transparently promotes the
 forward gauge to ``"phase"`` for the run. The static default is kept at
 ``"qr"`` so that callers who construct a ``CTMConfig`` directly (for
@@ -274,7 +274,7 @@ applied when ``gs_num_steps > 20``.
 
 #### Explicit CTM differentiation
 
-Set ``gs_explicit_ad=True`` (now the default) to backpropagate through
+Set ``gs_implicit_ad=False`` (the default) to backpropagate through
 unrolled CTM iterations instead of using implicit differentiation. The
 forward pass runs ``gs_explicit_ad_warmup`` CTM sweeps without gradient
 tracking, then ``gs_explicit_ad_steps`` sweeps with full backpropagation.
@@ -283,7 +283,7 @@ tracking, then ``gs_explicit_ad_steps`` sweeps with full backpropagation.
 config = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(chi=16, max_iter=50, projector_method="qr"),
-    gs_explicit_ad=True,       # default
+    # gs_implicit_ad=False is the default (explicit AD)
     gs_explicit_ad_steps=20,   # CTM steps with gradient tracking
     gs_explicit_ad_warmup=3,   # warmup steps (no gradient)
     gs_projector_method="qr",  # QR projectors scale cleanly to chi >= 16
@@ -300,7 +300,7 @@ manageable, and the backward pass avoids the implicit-diff linear solve
 entirely.
 
 ```{note}
-With ``gs_explicit_ad=True`` and the default ``forward_gauge="qr"``, the
+With ``gs_implicit_ad=False`` and the default ``forward_gauge="qr"``, the
 optimizer auto-promotes the forward gauge to ``"phase"``  for the
 unrolled CTM sweeps. Phase gauge is 6–9× faster than sigma gauge with
 equal or better energy and is the post-PR-#291 recommended gauge for
@@ -319,7 +319,6 @@ fraction and rebuilds the CTM config accordingly.
 config = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(chi=16, max_iter=80, conv_tol=1e-7),
-    gs_explicit_ad=True,
     gs_num_steps=50,
     gs_ctm_conv_tol_schedule=[(0.0, 1e-5), (0.5, 1e-6), (0.8, 1e-7)],
 )
@@ -341,7 +340,6 @@ from tenax import optimize_gs_ad_chi_schedule, iPEPSConfig, CTMConfig
 config = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(chi=8, projector_method="qr"),
-    gs_explicit_ad=True,
     gs_projector_method="qr",
     gs_optimizer="lbfgs",
     gs_line_search_method="hager_zhang",
@@ -362,7 +360,7 @@ per stage.
 
 #### Backward method selection
 
-The backward pass for CTM implicit differentiation (``gs_explicit_ad=False``)
+The backward pass for CTM implicit differentiation (``gs_implicit_ad=True``)
 has two options:
 
 | Method | Setting | Description |
@@ -370,7 +368,7 @@ has two options:
 | Iterative VJP | ``ad_backward_method="vjp"`` (default) | Neumann series accumulation of VJP (YASTN-style). The regression-covered backward for the implicit path. |
 | GMRES | ``ad_backward_method="gmres"`` | Direct linear solve of ``(I - J^T) λ = g``. **Experimental / documented unstable** — the GMRES backward is currently tracked as an open gap and its regression test is marked ``xfail`` (see issue #292). |
 
-**Recommended path**: set ``gs_explicit_ad=True`` (the default) so neither
+**Recommended path**: set ``gs_implicit_ad=False`` (the default) so neither
 implicit backward runs. Explicit AD does not use the ``(I - J^T)`` solve at
 all and is the fastest path on the 1-site C4v workflow. If you still need
 implicit differentiation (for example, for fermionic models where the
@@ -382,7 +380,6 @@ GMRES backward is stabilized.
 config = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(chi=16, max_iter=100, projector_method="qr"),
-    gs_explicit_ad=True,
     gs_projector_method="qr",
     gs_optimizer="lbfgs",
     gs_line_search_method="hager_zhang",

@@ -12,7 +12,7 @@ def test_build_ad_ctm_config_applies_projector_override_without_mutation():
     config = iPEPSConfig(
         ctm=CTMConfig(chi=8, projector_method="svd", forward_gauge="sigma"),
         gs_projector_method="eigh",
-        gs_explicit_ad=False,
+        gs_implicit_ad=True,
     )
 
     updated = build_ad_ctm_config(config)
@@ -25,7 +25,7 @@ def test_build_ad_ctm_config_applies_projector_override_without_mutation():
 def test_build_ad_ctm_config_auto_promotes_qr_to_phase_for_explicit_ad():
     config = iPEPSConfig(
         ctm=CTMConfig(chi=8, projector_method="eigh", forward_gauge="qr"),
-        gs_explicit_ad=True,
+        gs_implicit_ad=False,
     )
 
     updated = build_ad_ctm_config(config)
@@ -38,7 +38,7 @@ def test_use_reference_c4v_path_requires_all_conditions():
     cfg_ok = iPEPSConfig(
         unit_cell="1x1",
         gs_c4v=True,
-        gs_explicit_ad=False,
+        gs_implicit_ad=True,
         ctm=CTMConfig(chi=8, ctm_ad_mode="c4v_reference"),
     )
     assert use_reference_c4v_path(cfg_ok)
@@ -49,7 +49,7 @@ def test_use_reference_c4v_path_requires_all_conditions():
 
 def test_resolve_projector_backward_promotes_only_auto_explicit_eigh():
     promoted = resolve_projector_backward(
-        iPEPSConfig(ctm=CTMConfig(chi=8, projector_method="eigh"), gs_explicit_ad=True)
+        iPEPSConfig(ctm=CTMConfig(chi=8, projector_method="eigh"), gs_implicit_ad=False)
     )
     assert promoted.ctm.projector_backward == "lorentzian"
 
@@ -60,7 +60,7 @@ def test_resolve_projector_backward_promotes_only_auto_explicit_eigh():
                 projector_method="eigh",
                 projector_backward="standard",
             ),
-            gs_explicit_ad=True,
+            gs_implicit_ad=False,
         )
     )
     assert unchanged.ctm.projector_backward == "standard"

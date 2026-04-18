@@ -728,7 +728,7 @@ class TestOptimizeGsAd2Site:
             gs_line_search=True,
             gs_verbose=False,
             unit_cell="2site",
-            gs_explicit_ad=True,
+            gs_implicit_ad=False,
             gs_explicit_ad_steps=10,
             gs_explicit_ad_warmup=2,
             su_init=True,
@@ -841,7 +841,7 @@ class TestOptimizeGsAd2Site:
                 gs_learning_rate=1e-2,
                 unit_cell="2site",
                 gs_c4v=False,
-                gs_explicit_ad=False,  # implicit AD is the most stable path
+                gs_implicit_ad=True,  # implicit AD is the most stable path
                 gs_explicit_ad_steps=0,
                 gs_explicit_ad_warmup=0,
                 gs_optimizer="lbfgs",
@@ -928,7 +928,7 @@ class TestOptimizeGsAd2Site:
             gs_num_steps=50,
             gs_metric_precond=False,
             gs_line_search=True,
-            gs_explicit_ad=True,
+            gs_implicit_ad=False,
             gs_explicit_ad_steps=10,
             gs_explicit_ad_warmup=2,
             su_init=True,
@@ -1780,7 +1780,7 @@ class TestPostPR291ADBaseline:
     ``forward_gauge`` modes (``qr``, ``sigma``, ``phase``, ``none``) and
     ``iPEPSConfig`` exposes a new ``gs_ctm_conv_tol_schedule`` knob. The
     optimizer auto-promotes the conservative default ``forward_gauge="qr"``
-    to ``"phase"`` when ``gs_explicit_ad=True`` and the user has not
+    to ``"phase"`` when ``gs_implicit_ad=False`` and the user has not
     explicitly opted into a different gauge. These tests pin that behavior
     so future refactors cannot silently drift off the documented baseline.
     """
@@ -1826,14 +1826,14 @@ class TestPostPR291ADBaseline:
             unit_cell="1x1",
             gs_c4v=True,
             gs_optimizer="lbfgs",
-            gs_explicit_ad=True,
+            gs_implicit_ad=False,
             gs_explicit_ad_steps=20,
             gs_explicit_ad_warmup=2,
             gs_projector_method="qr",
             ctm=CTMConfig(chi=16, projector_method="qr", forward_gauge="qr"),
         )
         assert cfg.gs_c4v is True
-        assert cfg.gs_explicit_ad is True
+        assert cfg.gs_implicit_ad is False
         assert cfg.ctm.projector_method == "qr"
         assert cfg.gs_projector_method == "qr"
         # Config default stays 'qr' — optimizer auto-promotes to 'phase'.
@@ -1883,14 +1883,14 @@ class TestPostPR291ADBaseline:
         self, monkeypatch, heisenberg_gate
     ):
         """``optimize_gs_ad`` auto-switches ``forward_gauge='qr'`` to
-        ``'phase'`` when ``gs_explicit_ad=True`` and the user has not
+        ``'phase'`` when ``gs_implicit_ad=False`` and the user has not
         explicitly opted into a non-qr gauge (post-PR-#291 runtime behavior)."""
         captured = self._capture_explicit_ad_gauge(monkeypatch)
         config = iPEPSConfig(
             max_bond_dim=2,
             ctm=CTMConfig(chi=4, max_iter=10, min_iter=3, forward_gauge="qr"),
             gs_num_steps=1,
-            gs_explicit_ad=True,
+            gs_implicit_ad=False,
             gs_explicit_ad_steps=3,
             gs_explicit_ad_warmup=1,
             unit_cell="1x1",
@@ -1913,7 +1913,7 @@ class TestPostPR291ADBaseline:
             max_bond_dim=2,
             ctm=CTMConfig(chi=4, max_iter=10, min_iter=3, forward_gauge="sigma"),
             gs_num_steps=1,
-            gs_explicit_ad=True,
+            gs_implicit_ad=False,
             gs_explicit_ad_steps=3,
             gs_explicit_ad_warmup=1,
             unit_cell="1x1",
@@ -1934,7 +1934,7 @@ class TestPostPR291ADBaseline:
             max_bond_dim=2,
             ctm=CTMConfig(chi=4, max_iter=10, min_iter=3, forward_gauge="none"),
             gs_num_steps=1,
-            gs_explicit_ad=True,
+            gs_implicit_ad=False,
             gs_explicit_ad_steps=3,
             gs_explicit_ad_warmup=1,
             unit_cell="1x1",
@@ -1947,10 +1947,9 @@ class TestPostPR291ADBaseline:
     def test_implicit_ad_does_not_auto_promote_gauge(
         self, monkeypatch, heisenberg_gate
     ):
-        """The auto-phase path is gated on ``gs_explicit_ad=True``.  For the
-        implicit-diff path we keep the user's (or default) gauge untouched,
-        because the implicit/GMRES backward is documented to require sigma
-        gauge for stability."""
+        """The implicit-diff path auto-promotes ``forward_gauge='qr'`` to
+        ``'sigma'`` for stable element-wise CTM convergence, which is
+        required by the VJP backward."""
         from tenax.algorithms import ad_utils as _ad_utils
 
         captured: dict = {}
@@ -1969,14 +1968,14 @@ class TestPostPR291ADBaseline:
             max_bond_dim=2,
             ctm=CTMConfig(chi=4, max_iter=10, min_iter=3, forward_gauge="qr"),
             gs_num_steps=1,
-            gs_explicit_ad=False,
+            gs_implicit_ad=True,
             unit_cell="1x1",
             su_init=False,
         )
         with pytest.raises(_StopOptimizer):
             optimize_gs_ad(heisenberg_gate, None, config)
-        # Implicit path keeps whatever the user configured.
-        assert captured["forward_gauge"] == "qr"
+        # Implicit path auto-promotes "qr" to "sigma".
+        assert captured["forward_gauge"] == "sigma"
 
     @pytest.mark.xfail(
         reason=(
@@ -2021,7 +2020,7 @@ class TestPostPR291ADBaseline:
                 chi=4, max_iter=5, min_iter=2, conv_tol=1e-4, forward_gauge="qr"
             ),
             gs_num_steps=6,
-            gs_explicit_ad=True,
+            gs_implicit_ad=False,
             gs_explicit_ad_steps=2,
             gs_explicit_ad_warmup=0,
             gs_ctm_conv_tol_schedule=[(0.0, 1e-3), (0.5, 1e-6)],
@@ -2220,7 +2219,7 @@ class TestArnoldiOptimizerRecovery:
                 forward_gauge="qr",
                 adjoint_arnoldi_precheck=True,
             ),
-            gs_explicit_ad=False,
+            gs_implicit_ad=True,
             gs_num_steps=3,
             gs_optimizer="lbfgs",
             gs_c4v=True,

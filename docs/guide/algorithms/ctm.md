@@ -84,7 +84,7 @@ after each CTM sweep. Four modes are supported:
 | Value | Description |
 |-------|-------------|
 | ``"qr"`` (default) | QR decomposition on corners with sign-fixed diagonal. Fast and stable for simple update and forward-only CTM. |
-| ``"phase"`` | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix that still stabilizes unrolled AD. **Recommended for explicit AD** and auto-enabled by ``optimize_gs_ad`` when ``gs_explicit_ad=True`` and the user leaves ``forward_gauge="qr"``. |
+| ``"phase"`` | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix that still stabilizes unrolled AD. **Recommended for explicit AD** and auto-enabled by ``optimize_gs_ad`` when ``gs_implicit_ad=False`` and the user leaves ``forward_gauge="qr"``. |
 | ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Required for the implicit-diff / GMRES backward path where element-wise CTM convergence is needed. |
 | ``"none"`` | No gauge fix. Diagnostic / benchmark mode only — isolates the cost of gauge fixing from the rest of the sweep. Not recommended for production runs. |
 
@@ -102,7 +102,7 @@ historical choice that remains appropriate for the implicit-diff path.
 | ``"vjp"`` (default) | Iterative VJP (Neumann series). Robust; the only implicit-diff backward that is currently regression-covered end-to-end. |
 | ``"gmres"`` | Direct Krylov solve of ``(I - J^T) λ = g``. **Experimental / documented unstable** — the GMRES backward is tracked as an open gap (see issue #292) and its regression test is currently marked ``xfail``. |
 
-For new code prefer the explicit-AD path (``gs_explicit_ad=True``), which
+For new code prefer the explicit-AD path (``gs_implicit_ad=False``), which
 does not exercise the implicit backward at all and does not require GMRES.
 See {doc}`ipeps_ad_paths` for the complete recommended configuration.
 

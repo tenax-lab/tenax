@@ -1,5 +1,7 @@
 # iPEPS AD Optimizer: CG/L-BFGS with Python Backtracking Line Search
 
+**Status:** COMPLETED — L-BFGS + Hager-Zhang line search + metric preconditioning all merged. CG also available.
+
 ## Problem
 
 The CTM fixed-point iteration uses Python-level convergence checks (`float()`),

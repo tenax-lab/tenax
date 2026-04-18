@@ -1,7 +1,7 @@
 # NumPy-Only DMRG/iDMRG Fast Path
 
 **Date:** 2026-03-29
-**Status:** Approved
+**Status:** COMPLETED (PR #226) — NumPy fast path merged as part of fused Cython Lanczos
 
 ## Problem
 

@@ -1,6 +1,7 @@
 # Multi-GPU Sharded DMRG Design
 
 **Date:** 2026-03-31
+**Status:** COMPLETED (PR #209) — multi-GPU sharding merged
 **Branch:** `feat/tpu-gpu-dmrg`
 **Prerequisite:** Tasks 1-11 (JIT-compiled DMRG sweep) — completed
 

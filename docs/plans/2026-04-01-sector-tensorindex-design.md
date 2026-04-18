@@ -1,6 +1,7 @@
 # Sector-based TensorIndex with fuse/unfuse
 
 **Date:** 2026-04-01
+**Status:** COMPLETED (PR #213) — sector-based TensorIndex with fuse/unfuse
 **Goal:** Change TensorIndex from dense charges array to sector-based `{charge: multiplicity}` representation, and add `split_index` as the inverse of `fuse_indices`. This lays the foundation for non-abelian symmetries.
 
 ## Design

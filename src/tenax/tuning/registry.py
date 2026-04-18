@@ -311,8 +311,8 @@ _register(
         ),
         dependencies=(
             Dependency(
-                name="iPEPSConfig.gs_explicit_ad",
-                relation="'c4v_reference' requires gs_explicit_ad=False",
+                name="iPEPSConfig.gs_implicit_ad",
+                relation="'c4v_reference' requires gs_implicit_ad=True",
             ),
             Dependency(
                 name="iPEPSConfig.gs_c4v",
@@ -594,32 +594,32 @@ _register(
 
 _register(
     ParamSpec(
-        name="gs_explicit_ad",
+        name="gs_implicit_ad",
         dataclass_name="iPEPSConfig",
         type_str="bool",
         default=True,
         category=TuningCategory.METHOD_SELECTION,
         description=(
-            "Differentiate through unrolled CTM sweeps (True) instead of "
-            "using implicit differentiation (False). Explicit is the "
-            "recommended path post PR #291."
+            "Use implicit differentiation through the CTM fixed-point "
+            "equation (True) instead of differentiating through unrolled "
+            "CTM sweeps (False). Implicit is the recommended path."
         ),
         hint=TuningHint(
             scale=Scale.BOOLEAN,
             sensitivity=Sensitivity.HIGH,
             cost=CostModel(
-                runtime="explicit = ~gs_explicit_ad_steps x forward cost",
-                memory="explicit = higher (retained activations)",
+                runtime="explicit (implicit_ad=False) = ~gs_explicit_ad_steps x forward cost",
+                memory="explicit (implicit_ad=False) = higher (retained activations)",
             ),
         ),
         dependencies=(
             Dependency(
                 name="CTMConfig.forward_gauge",
-                relation="auto-promotes qr -> phase when explicit=True",
+                relation="auto-promotes qr -> phase when implicit_ad=False",
             ),
             Dependency(
                 name="CTMConfig.ctm_ad_mode",
-                relation="implicit c4v_reference path requires explicit=False",
+                relation="c4v_reference path requires gs_implicit_ad=True",
             ),
         ),
     )
@@ -736,7 +736,7 @@ _register(
         category=TuningCategory.METHOD_SELECTION,
         description=(
             "Backward pass used for the eigh projector inside explicit AD. "
-            "'auto' promotes to 'lorentzian' when gs_explicit_ad=True and "
+            "'auto' promotes to 'lorentzian' when gs_implicit_ad=False and "
             "the effective projector is 'eigh'. 'standard' forces the "
             "legacy regularized_eigh backward; 'lorentzian' forces the "
             "Francuz-Schmoll truncated-eigh Lorentzian backward."
@@ -873,14 +873,14 @@ _register(
         category=TuningCategory.ACCURACY,
         description=(
             "Number of CTM sweeps differentiated through when "
-            "gs_explicit_ad=True. The final K sweeps carry gradients; "
+            "gs_implicit_ad=False. The final K sweeps carry gradients; "
             "earlier sweeps run under stop_gradient as warmup."
         ),
         hint=TuningHint(
             scale=Scale.LINEAR,
             sensitivity=Sensitivity.HIGH,
             range=(5, 50),
-            applies_when={"iPEPSConfig.gs_explicit_ad": True},
+            applies_when={"iPEPSConfig.gs_implicit_ad": False},
             cost=CostModel(
                 runtime="linear in K", memory="linear in K (saved activations)"
             ),
@@ -902,14 +902,14 @@ _register(
         category=TuningCategory.PERFORMANCE,
         description=(
             "Non-differentiated CTM warmup sweeps before the "
-            "gs_explicit_ad_steps differentiated sweeps. Lets the "
+            "gs_explicit_ad_steps differentiated sweeps (when gs_implicit_ad=False). Lets the "
             "environment pre-converge cheaply."
         ),
         hint=TuningHint(
             scale=Scale.LINEAR,
             sensitivity=Sensitivity.MEDIUM,
             range=(0, 30),
-            applies_when={"iPEPSConfig.gs_explicit_ad": True},
+            applies_when={"iPEPSConfig.gs_implicit_ad": False},
             cost=CostModel(runtime="linear", memory="constant"),
         ),
         when_to_tune=(

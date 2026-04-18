@@ -27,7 +27,7 @@
   search (`gs_optimizer="lbfgs"` or `"cg"`). Line search runs fresh CTM
   convergence for each trial step to avoid stale-environment artifacts (#235)
 - **Explicit CTM differentiation** (experimental) — backprop through unrolled
-  CTM iterations via `gs_explicit_ad=True`, as an alternative to implicit
+  CTM iterations via `gs_implicit_ad=False`, as an alternative to implicit
   differentiation (#235)
 - **Cosine learning rate decay** for Adam iPEPS optimizer — lr decays to lr/10
   over the optimization when `gs_num_steps > 20` (#235)

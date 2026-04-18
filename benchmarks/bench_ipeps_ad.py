@@ -13,7 +13,7 @@ _SIZES = {
 }
 
 # Reference-mode (Francuz et al. PRR 7, 013237) implicit-AD path requires
-# unit_cell="1x1" + gs_c4v=True + gs_explicit_ad=False + the dense C4v CTM
+# unit_cell="1x1" + gs_c4v=True + gs_implicit_ad=True + the dense C4v CTM
 # fixed-point backward.  Smaller sweep budget since each step pays the
 # Krylov adjoint cost.
 _REFERENCE_SIZES = {
@@ -83,7 +83,7 @@ def get_benchmarks(dtype=jnp.float64) -> list[dict]:
                     ),
                     gs_optimizer="lbfgs",
                     gs_num_steps=p["gs_steps"],
-                    gs_explicit_ad=False,
+                    gs_implicit_ad=True,
                     gs_c4v=True,
                     # su_init=False: SU converges to the |↑↑⟩ product state of
                     # the sublattice-rotated gate, which is a gradient-zero

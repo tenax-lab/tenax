@@ -1,6 +1,8 @@
 # Chi-Ramp Benchmark Results (2026-04-17)
 
-All benchmarks: C4v 1-site Heisenberg, implicit AD (`gs_explicit_ad=False`), `conv_tol=1e-8`.
+> **Status:** COMPLETED — chi_ramp merged in PR #337. 1.2–2.1× GPU speedup confirmed.
+
+All benchmarks: C4v 1-site Heisenberg, implicit AD (`gs_implicit_ad=True`), `conv_tol=1e-8`.
 
 ## GPU (cuda:0)
 

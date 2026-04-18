@@ -129,35 +129,35 @@ def test_ctm_tensor_accepts_projector_backward_lorentzian():
 
 def test_auto_promotes_when_explicit_ad_and_eigh():
     ctm = CTMConfig(chi=8, projector_method="eigh")
-    config = iPEPSConfig(ctm=ctm, gs_explicit_ad=True)
+    config = iPEPSConfig(ctm=ctm, gs_implicit_ad=False)
     resolved = _resolve_projector_backward(config)
     assert resolved.ctm.projector_backward == "lorentzian"
 
 
 def test_respects_explicit_user_standard():
     ctm = CTMConfig(chi=8, projector_method="eigh", projector_backward="standard")
-    config = iPEPSConfig(ctm=ctm, gs_explicit_ad=True)
+    config = iPEPSConfig(ctm=ctm, gs_implicit_ad=False)
     resolved = _resolve_projector_backward(config)
     assert resolved.ctm.projector_backward == "standard"
 
 
 def test_respects_explicit_user_lorentzian():
     ctm = CTMConfig(chi=8, projector_method="eigh", projector_backward="lorentzian")
-    config = iPEPSConfig(ctm=ctm, gs_explicit_ad=True)
+    config = iPEPSConfig(ctm=ctm, gs_implicit_ad=False)
     resolved = _resolve_projector_backward(config)
     assert resolved.ctm.projector_backward == "lorentzian"
 
 
 def test_does_not_promote_when_projector_method_is_qr():
     ctm = CTMConfig(chi=8, projector_method="qr")
-    config = iPEPSConfig(ctm=ctm, gs_explicit_ad=True)
+    config = iPEPSConfig(ctm=ctm, gs_implicit_ad=False)
     resolved = _resolve_projector_backward(config)
     assert resolved.ctm.projector_backward == "auto"
 
 
 def test_does_not_promote_when_not_explicit_ad():
     ctm = CTMConfig(chi=8, projector_method="eigh")
-    config = iPEPSConfig(ctm=ctm, gs_explicit_ad=False)
+    config = iPEPSConfig(ctm=ctm, gs_implicit_ad=True)
     resolved = _resolve_projector_backward(config)
     assert resolved.ctm.projector_backward == "auto"
 
@@ -166,7 +166,7 @@ def test_auto_promotion_is_logged(caplog):
     import logging
 
     ctm = CTMConfig(chi=8, projector_method="eigh")
-    config = iPEPSConfig(ctm=ctm, gs_explicit_ad=True)
+    config = iPEPSConfig(ctm=ctm, gs_implicit_ad=False)
     with caplog.at_level(logging.INFO, logger="tenax.algorithms.ipeps_optimize"):
         _resolve_projector_backward(config)
     assert any("lorentzian" in rec.message.lower() for rec in caplog.records)

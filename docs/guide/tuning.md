@@ -87,7 +87,7 @@ which AD path pairs with which gauge.
 Values: `"qr"` (default), `"phase"`, `"sigma"`, `"none"`
 
 - `"qr"`: forward-only CTM, notebooks, diagnostics. `optimize_gs_ad`
-  auto-promotes this to `"phase"` when `gs_explicit_ad=True`.
+  auto-promotes this to `"phase"` when `gs_implicit_ad=False`.
 - `"phase"`: explicit-AD default after promotion. Numerically stable
   for unrolled backprop.
 - `"sigma"`: required for the implicit-diff path at D ≥ 2. Aligns each
@@ -215,14 +215,14 @@ informative start.
 
 ## Method selection
 
-### `iPEPSConfig.gs_explicit_ad` (default `True`)
+### `iPEPSConfig.gs_implicit_ad` (default `True`)
 
-- **`True`** (explicit) — differentiate through unrolled CTM sweeps via
-  `jax.checkpoint`. Recommended path post PR #291. Memory scales with
-  `gs_explicit_ad_steps`.
-- **`False`** (implicit) — solve the fixed-point adjoint equation.
+- **`True`** (implicit) — solve the fixed-point adjoint equation.
   Required by the `ctm_ad_mode="c4v_reference"` path (Francuz et al.
   App. C–F). Lower memory but needs `adjoint_tikhonov > 0` near the GS.
+- **`False`** (explicit) — differentiate through unrolled CTM sweeps via
+  `jax.checkpoint`. Recommended path post PR #291. Memory scales with
+  `gs_explicit_ad_steps`.
 
 ### `iPEPSConfig.gs_c4v` (default `False`)
 
