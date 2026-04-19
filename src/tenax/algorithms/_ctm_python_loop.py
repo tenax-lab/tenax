@@ -96,7 +96,9 @@ def python_loop_ctm_converge(
     *,
     chi: int,
     max_iter: int = 100,
+    min_iter: int = 10,
     conv_tol: float = 1e-8,
+    conv_method: str = "sv",
     renormalize: bool = True,
     projector_method: str = "eigh",
     qr_warmup_steps: int = 3,
@@ -116,7 +118,11 @@ def python_loop_ctm_converge(
         neighbors:         Map from coordinate to direction->neighbor coordinate.
         chi:               Final environment bond dimension.
         max_iter:          Maximum CTM iterations (per chi-ramp stage).
+        min_iter:          Minimum iterations before checking convergence.
         conv_tol:          Convergence tolerance on corner singular values.
+        conv_method:       Convergence method: ``"sv"`` (corner singular
+                           values) or ``"elementwise"`` (max element-wise
+                           difference across all env tensors).
         renormalize:       Renormalize environments after each sweep.
         projector_method:  ``"eigh"`` or ``"qr"``.
         qr_warmup_steps:   Number of eigh warm-up sweeps before QR kicks in.
@@ -136,7 +142,9 @@ def python_loop_ctm_converge(
             neighbors,
             chi=chi,
             max_iter=max_iter,
+            min_iter=min_iter,
             conv_tol=conv_tol,
+            conv_method=conv_method,
             renormalize=renormalize,
             projector_method=projector_method,
             qr_warmup_steps=qr_warmup_steps,
@@ -172,6 +180,7 @@ def python_loop_ctm_converge(
 
     remaining = max_iter - warmup
     prev_svs: dict[Coord, jax.Array] = {}
+    prev_envs: dict[Coord, CTMTensorEnv] | None = None
     final_diff = float("inf")
 
     for i in range(remaining):
@@ -188,25 +197,54 @@ def python_loop_ctm_converge(
         if gauge_fix_fn is not None:
             envs = {c: gauge_fix_fn(envs[c]) for c in envs}
 
-        # Check convergence via corner singular values
-        converged = True
-        max_diff = 0.0
-        for c in sorted(envs):
-            sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
-            if c in prev_svs:
-                diff = float(_ctm_sv_diff(sv, prev_svs[c]))
-                max_diff = max(max_diff, diff)
-                if diff >= conv_tol:
-                    converged = False
+        # Only check convergence after min_iter total iterations
+        total_iter = warmup + i + 1
+        if total_iter < min_iter:
+            # Still track SVs / prev_envs for the first convergence check
+            if conv_method == "sv":
+                for c in sorted(envs):
+                    prev_svs[c] = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
             else:
-                converged = False
-            prev_svs[c] = sv
+                prev_envs = {c: envs[c] for c in envs}
+            continue
 
-        final_diff = max_diff
+        if conv_method == "elementwise":
+            # Element-wise convergence: max absolute difference across all
+            # env tensor leaves.
+            if prev_envs is None:
+                prev_envs = {c: envs[c] for c in envs}
+                continue
+            max_diff = 0.0
+            for c in sorted(envs):
+                for told, tnew in zip(
+                    jax.tree.leaves(prev_envs[c]),
+                    jax.tree.leaves(envs[c]),
+                ):
+                    diff = float(jnp.max(jnp.abs(tnew.todense() - told.todense())))
+                    max_diff = max(max_diff, diff)
+            converged = max_diff < conv_tol
+            final_diff = max_diff
+            prev_envs = {c: envs[c] for c in envs}
+        else:
+            # SV convergence (default): corner singular value difference
+            converged = True
+            max_diff = 0.0
+            for c in sorted(envs):
+                sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
+                if c in prev_svs:
+                    diff = float(_ctm_sv_diff(sv, prev_svs[c]))
+                    max_diff = max(max_diff, diff)
+                    if diff >= conv_tol:
+                        converged = False
+                else:
+                    converged = False
+                prev_svs[c] = sv
+            final_diff = max_diff
+
         if converged:
             return envs, CTMConvergeInfo(
                 converged=True,
-                iterations=warmup + i + 1,
+                iterations=total_iter,
                 sv_diff=final_diff,
             )
 
@@ -223,7 +261,9 @@ def _python_loop_chi_ramp(
     *,
     chi: int,
     max_iter: int,
+    min_iter: int,
     conv_tol: float,
+    conv_method: str,
     renormalize: bool,
     projector_method: str,
     qr_warmup_steps: int,
@@ -258,7 +298,9 @@ def _python_loop_chi_ramp(
             neighbors,
             chi=stage_chi,
             max_iter=stage_max,
+            min_iter=min_iter,
             conv_tol=stage_tol,
+            conv_method=conv_method,
             renormalize=renormalize,
             projector_method=projector_method,
             qr_warmup_steps=qr_warmup_steps if stage_idx == 0 else 0,

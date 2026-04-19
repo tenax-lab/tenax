@@ -123,12 +123,13 @@ class TestPythonLoopCtmConverge:
         env_ref = ctm_tensor(A, chi, max_iter=50, conv_tol=1e-10)
         energy_ref = float(compute_energy_ctm_tensor(A, env_ref, gate))
 
-        # Python loop
+        # Python loop (min_iter=1 to match reference which has no min_iter gate)
         envs, info = python_loop_ctm_converge(
             {(0, 0): A},
             SINGLE_SITE_NEIGHBORS,
             chi=chi,
             max_iter=50,
+            min_iter=1,
             conv_tol=1e-10,
         )
         energy_loop = float(compute_energy_ctm_tensor(A, envs[(0, 0)], gate))
@@ -162,12 +163,13 @@ class TestPythonLoopCtmConverge:
             compute_energy_ctm_tensor_2site(A, B, env_A_ref, env_B_ref, gate)
         )
 
-        # Python loop
+        # Python loop (min_iter=1 to match reference which has no min_iter gate)
         envs, info = python_loop_ctm_converge(
             {(0, 0): A, (1, 0): B},
             CHECKERBOARD_NEIGHBORS,
             chi=chi,
             max_iter=50,
+            min_iter=1,
             conv_tol=1e-10,
         )
         energy_loop = float(
