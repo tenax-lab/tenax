@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
+import warnings
 from collections.abc import Callable
 from functools import partial
 
@@ -198,8 +199,10 @@ def _svd_sector_backward(
     UtdU_anti = 0.5 * (UtdU - UtdU.conj().T)
     VtdV_anti = 0.5 * (VtdV - VtdV.conj().T)
 
-    # Inverse singular values (safe)
-    s_inv = jnp.where(s_k > eps, 1.0 / s_k, 0.0)
+    # Inverse singular values — sanitize input so JAX backward never
+    # evaluates 1/0 (jnp.where evaluates both branches during AD).
+    s_safe = jnp.where(s_k > eps, s_k, 1.0)
+    s_inv = jnp.where(s_k > eps, 1.0 / s_safe, 0.0)
 
     # Projectors onto complements of kept subspaces
     proj_U_perp = jnp.eye(m) - U_k @ U_k.conj().T
@@ -1086,6 +1089,12 @@ def ctm_tensor_converge(
     Returns:
         Flat tuple of environment pytree leaf arrays (all sites, coord-sorted).
     """
+    warnings.warn(
+        "ctm_tensor_converge is deprecated. Use ctm_energy_implicit from "
+        "tenax.algorithms._ctm_energy_ad instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     config = _config_from_tuple(config_tuple)
     envs_init = _unflatten_envs_init(env_init_leaves, site_tensors, config.chi)
     envs = _ctm_tensor_multisite_fixed_point(
@@ -1542,6 +1551,12 @@ def ctm_tensor_converge_explicit(
     Returns:
         Flat tuple of environment pytree leaf arrays.
     """
+    warnings.warn(
+        "ctm_tensor_converge_explicit is deprecated. Use ctm_energy_explicit "
+        "from tenax.algorithms._ctm_energy_ad instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     config = _config_from_tuple(config_tuple)
     envs_init = _unflatten_envs_init(env_init_leaves, site_tensors, config.chi)
 

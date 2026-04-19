@@ -57,6 +57,8 @@ class CTMConfig:
         False  # diagonal scaling preconditioner for GMRES backward (experimental)
     )
     ad_backward_method: str = "vjp"  # "vjp" (iterative VJP) or "gmres" (xfail — #292)
+    gmres_tol: float = 1e-6  # tolerance for GMRES backward solve
+    gmres_restart: int = 30  # restart dimension for GMRES
     ctm_conv_method: str = "sv"  # "sv" (singular value) or "elementwise"
     # forward_gauge: "qr" (default, auto-promoted to "sigma" by optimize_gs_ad
     # when gs_implicit_ad=True, or to "phase" when gs_implicit_ad=False),
@@ -208,7 +210,7 @@ class iPEPSConfig:
     gs_max_grad_norm: float = 1.0  # gradient clipping (max global norm)
     gs_line_search: bool | None = None  # None = auto (True for lbfgs/cg)
     gs_line_search_max_steps: int = 8
-    gs_line_search_method: str = "armijo"  # "armijo" or "hager_zhang"
+    gs_line_search_method: str = "hager_zhang"  # "armijo" or "hager_zhang"
     gs_noise_recovery_retries: int = 3  # max retries with noise injection on stall
     gs_noise_amplitude: float = 0.1  # relative noise amplitude for recovery
     # Stall recovery mode for L-BFGS / CG line search failures.

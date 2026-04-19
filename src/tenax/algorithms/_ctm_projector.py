@@ -629,11 +629,12 @@ def _compute_projector_tensor(
 
         # S^{-1/2} weighting: differentiable so the optimizer sees the
         # full gradient through the Fishman projector (VariPEPS-like).
-        # The cutoff prevents NaN from near-zero singular values;
-        # the SVD backward already uses Lorentzian regularization for
-        # degenerate s_i ≈ s_j.
+        # Sanitize input before division so JAX backward never evaluates
+        # 1/sqrt(0) (jnp.where evaluates both branches during AD).
         _cutoff = 1e-14 * (S_M[0] + 1e-30)
-        S_rsqrt = jnp.where(S_M > _cutoff, 1.0 / jnp.sqrt(S_M), 0.0)
+        _mask = S_M > _cutoff
+        S_safe = jnp.where(_mask, S_M, 1.0)
+        S_rsqrt = jnp.where(_mask, 1.0 / jnp.sqrt(S_safe), 0.0)
 
         # Two-projector Fishman (arXiv:2502.10298 Eq. 10):
         #   P_1 = C4g @ V @ S^{-1/2}  (applied to C1g side)
