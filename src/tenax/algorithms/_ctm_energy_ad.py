@@ -12,13 +12,25 @@ from tenax.algorithms._ctm_python_loop import (
     _make_jit_ctm_step,
     python_loop_ctm_converge,
 )
-from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+from tenax.algorithms._ctm_tensor_energy import (
+    compute_energy_ctm_tensor,
+    compute_energy_ctm_tensor_multisite,
+)
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     initialize_ctm_tensor_env,
 )
 from tenax.algorithms._gmres_lax import gmres_pytree
 from tenax.algorithms.ad_utils import _phase_fix_ctm_tensor
+
+
+def _default_energy(site_tensors, envs, gate, coords, neighbors):
+    """Compute default energy: single-site or multisite depending on unit cell."""
+    if len(coords) == 1:
+        coord0 = coords[0]
+        return compute_energy_ctm_tensor(site_tensors[coord0], envs[coord0], gate)
+    else:
+        return compute_energy_ctm_tensor_multisite(site_tensors, envs, neighbors, gate)
 
 
 def ctm_energy_explicit(
@@ -76,8 +88,8 @@ def ctm_energy_explicit(
 
     if energy_fn is not None:
         return energy_fn(site_tensors, envs, gate)
-    coord = next(iter(envs))
-    return compute_energy_ctm_tensor(site_tensors[coord], envs[coord], gate)
+    coords = sorted(site_tensors.keys())
+    return _default_energy(site_tensors, envs, gate, coords, neighbors)
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +194,7 @@ def ctm_energy_implicit(
     qr_warmup_steps: int = 3,
     chi_ramp=None,
     env_init=None,
+    forward_gauge: str = "phase",
     gmres_tol: float = 1e-6,
     gmres_maxiter: int = 200,
     gmres_restart: int = 30,
@@ -219,12 +232,18 @@ def ctm_energy_implicit(
         gmres_tol:         GMRES relative tolerance.
         gmres_maxiter:     GMRES maximum iterations.
         gmres_restart:     GMRES restart parameter.
+        forward_gauge:     Gauge fixing in forward/backward: ``"phase"`` (default),
+                           ``"sigma"`` (transfer-matrix eigenvector alignment), or
+                           ``"none"`` (no gauge fixing).
         energy_fn:         Optional custom energy function ``(A, env, gate) -> scalar``.
 
     Returns:
         Scalar energy per site.
     """
     coords = sorted(site_tensors.keys())
+    # Extract dense data for custom_vjp (JAX requires array leaves).
+    # For SymmetricTensor inputs this densifies, which is necessary
+    # because jax.custom_vjp cannot differentiate through block-sparse ops.
     params_data = [site_tensors[c].todense() for c in coords]
     templates = {c: site_tensors[c] for c in coords}
 
@@ -243,6 +262,7 @@ def ctm_energy_implicit(
         qr_warmup_steps,
         chi_ramp,
         env_init,
+        forward_gauge,
         gmres_tol,
         gmres_maxiter,
         gmres_restart,
@@ -278,6 +298,7 @@ def _sigma_gauged_ctm_converge(
     projector_backward,
     qr_warmup_steps,
     env_init,
+    forward_gauge="phase",
 ):
     """CTM convergence with sigma gauge fixing for element-wise fixed point.
 
@@ -293,8 +314,12 @@ def _sigma_gauged_ctm_converge(
         else {c: initialize_ctm_tensor_env(A, chi) for c, A in site_tensors.items()}
     )
 
-    # QR warm-up before sigma gauge kicks in
-    warmup = min(qr_warmup_steps, max_iter) if qr_warmup_steps > 0 else 0
+    # QR warm-up: only needed when projector_method == "qr"
+    warmup = (
+        min(qr_warmup_steps, max_iter)
+        if projector_method == "qr" and qr_warmup_steps > 0
+        else 0
+    )
     for _ in range(warmup):
         envs = jit_step(
             site_tensors,
@@ -315,9 +340,14 @@ def _sigma_gauged_ctm_converge(
             renormalize=renormalize,
             projector_backward=projector_backward,
         )
-        # Phase fix: Frobenius normalize + first-large-element phase convention
-        # (variPEPS _post_process_CTM_tensors approach)
-        envs = {c: _phase_fix_ctm_tensor(envs_new[c]) for c in envs_new}
+        # Gauge fix: apply selected convention for element-wise convergence
+        if forward_gauge == "phase":
+            envs = {c: _phase_fix_ctm_tensor(envs_new[c]) for c in envs_new}
+        elif forward_gauge == "sigma":
+            envs = {c: _sigma_gauge_fix_env(envs_new[c], envs[c]) for c in envs_new}
+        else:
+            # forward_gauge == "none": no gauge fixing
+            envs = envs_new
 
         # Check convergence via corner singular values
         converged = True
@@ -352,6 +382,7 @@ def _ctm_energy_implicit_dispatch(
     qr_warmup_steps,
     chi_ramp,
     env_init,
+    forward_gauge,
     gmres_tol,
     gmres_maxiter,
     gmres_restart,
@@ -372,6 +403,7 @@ def _ctm_energy_implicit_dispatch(
         qr_warmup_steps=qr_warmup_steps,
         chi_ramp=chi_ramp,
         env_init=env_init,
+        forward_gauge=forward_gauge,
         gmres_tol=gmres_tol,
         gmres_maxiter=gmres_maxiter,
         gmres_restart=gmres_restart,
@@ -394,12 +426,25 @@ def _make_implicit_vjp_fn(
     qr_warmup_steps,
     chi_ramp,
     env_init,
+    forward_gauge,
     gmres_tol,
     gmres_maxiter,
     gmres_restart,
     energy_fn,
 ):
     """Build a custom_vjp-decorated function closed over all non-diff args."""
+
+    # Select gauge-fix function based on forward_gauge parameter.
+    if forward_gauge == "phase":
+        _gauge_fix_fn = _phase_fix_ctm_tensor
+    elif forward_gauge == "sigma":
+        _gauge_fix_fn = None  # sigma gauge handled by _sigma_gauge_fix_env (pair)
+    elif forward_gauge == "none":
+        _gauge_fix_fn = None
+    else:
+        raise ValueError(
+            f"Unknown forward_gauge={forward_gauge!r}; use 'phase', 'sigma', or 'none'"
+        )
 
     # Mutable cache for treedef from forward (needed in backward).
     _cached = {}
@@ -409,6 +454,10 @@ def _make_implicit_vjp_fn(
         params_data = list(params_data_tuple)
         site_tensors = _reconstruct_site_tensors(params_data, coords, templates)
 
+        # Note: both chi_ramp and non-chi_ramp paths use the same
+        # _gauge_fix_fn (selected by forward_gauge). The backward VJP
+        # (_apply_gauge_fix) also uses forward_gauge, ensuring
+        # forward/backward gauge consistency regardless of chi_ramp.
         if chi_ramp is not None:
             envs, _ = python_loop_ctm_converge(
                 site_tensors,
@@ -422,7 +471,7 @@ def _make_implicit_vjp_fn(
                 projector_backward=projector_backward,
                 chi_ramp=chi_ramp,
                 env_init=env_init,
-                gauge_fix_fn=_phase_fix_ctm_tensor,
+                gauge_fix_fn=_gauge_fix_fn,
             )
         else:
             envs = _sigma_gauged_ctm_converge(
@@ -436,13 +485,13 @@ def _make_implicit_vjp_fn(
                 projector_backward=projector_backward,
                 qr_warmup_steps=qr_warmup_steps,
                 env_init=env_init,
+                forward_gauge=forward_gauge,
             )
 
         if energy_fn is not None:
             energy = energy_fn(site_tensors, envs, gate)
         else:
-            coord0 = coords[0]
-            energy = compute_energy_ctm_tensor(site_tensors[coord0], envs[coord0], gate)
+            energy = _default_energy(site_tensors, envs, gate, coords, neighbors)
         return energy
 
     def f_fwd(params_data_tuple):
@@ -462,7 +511,7 @@ def _make_implicit_vjp_fn(
                 projector_backward=projector_backward,
                 chi_ramp=chi_ramp,
                 env_init=env_init,
-                gauge_fix_fn=_phase_fix_ctm_tensor,
+                gauge_fix_fn=_gauge_fix_fn,
             )
         else:
             envs = _sigma_gauged_ctm_converge(
@@ -476,13 +525,13 @@ def _make_implicit_vjp_fn(
                 projector_backward=projector_backward,
                 qr_warmup_steps=qr_warmup_steps,
                 env_init=env_init,
+                forward_gauge=forward_gauge,
             )
 
         if energy_fn is not None:
             energy = energy_fn(site_tensors, envs, gate)
         else:
-            coord0 = coords[0]
-            energy = compute_energy_ctm_tensor(site_tensors[coord0], envs[coord0], gate)
+            energy = _default_energy(site_tensors, envs, gate, coords, neighbors)
 
         _cached["env_treedef"] = jax.tree.structure(envs)
         env_leaves = tuple(jax.tree.leaves(envs))
@@ -493,7 +542,6 @@ def _make_implicit_vjp_fn(
     # neighbors, gate, chi, ...) are captured in the closure so XLA sees a
     # single compiled program — one CUDA graph instead of 30+.
     jit_step_bwd = _make_jit_ctm_step(neighbors)
-    coord0 = coords[0]
 
     @jax.jit
     def _jit_backward(params_data_tuple, env_leaves, g_scalar):
@@ -510,13 +558,22 @@ def _make_implicit_vjp_fn(
             e = jax.tree.unflatten(env_treedef, env_leaves_flat)
             if energy_fn is not None:
                 return energy_fn(site_tensors, e, gate)
-            return compute_energy_ctm_tensor(site_tensors[coord0], e[coord0], gate)
+            return _default_energy(site_tensors, e, gate, coords, neighbors)
 
         _, vjp_energy_env = jax.vjp(energy_from_env, env_leaves)
         dE_denv = vjp_energy_env(jnp.ones(()))[0]
 
-        # --- Step 2: Phase-fixed sweep VJP ---
-        def phase_fixed_sweep_from_env(env_leaves_flat):
+        # --- Step 2: Gauge-fixed sweep VJP (must match forward gauge) ---
+        def _apply_gauge_fix(e_out, e_in):
+            """Apply the same gauge fix used in the forward pass."""
+            if forward_gauge == "phase":
+                return {c: _phase_fix_ctm_tensor(e_out[c]) for c in coords}
+            elif forward_gauge == "sigma":
+                return {c: _sigma_gauge_fix_env(e_out[c], e_in[c]) for c in coords}
+            else:
+                return e_out
+
+        def gauge_fixed_sweep_from_env(env_leaves_flat):
             e = jax.tree.unflatten(env_treedef, env_leaves_flat)
             e_out = jit_step_bwd(
                 site_tensors,
@@ -526,10 +583,10 @@ def _make_implicit_vjp_fn(
                 renormalize=renormalize,
                 projector_backward=projector_backward,
             )
-            e_fixed = {c: _phase_fix_ctm_tensor(e_out[c]) for c in coords}
+            e_fixed = _apply_gauge_fix(e_out, e)
             return tuple(jax.tree.leaves(e_fixed))
 
-        _, vjp_sweep_env = jax.vjp(phase_fixed_sweep_from_env, env_leaves)
+        _, vjp_sweep_env = jax.vjp(gauge_fixed_sweep_from_env, env_leaves)
 
         def apply_I_minus_Jt(v):
             jt_v = vjp_sweep_env(v)[0]
@@ -552,13 +609,13 @@ def _make_implicit_vjp_fn(
             st = _reconstruct_site_tensors(pd, coords, templates)
             if energy_fn is not None:
                 return energy_fn(st, envs, gate)
-            return compute_energy_ctm_tensor(st[coord0], envs[coord0], gate)
+            return _default_energy(st, envs, gate, coords, neighbors)
 
         _, vjp_energy_params = jax.vjp(energy_from_params, params_data_tuple)
         direct = vjp_energy_params(jnp.ones(()))[0]
 
         # Indirect: J_params^T @ lam
-        def phase_fixed_sweep_from_params(p_tuple):
+        def gauge_fixed_sweep_from_params(p_tuple):
             pd = list(p_tuple)
             st = _reconstruct_site_tensors(pd, coords, templates)
             e_out = jit_step_bwd(
@@ -569,10 +626,10 @@ def _make_implicit_vjp_fn(
                 renormalize=renormalize,
                 projector_backward=projector_backward,
             )
-            e_fixed = {c: _phase_fix_ctm_tensor(e_out[c]) for c in coords}
+            e_fixed = _apply_gauge_fix(e_out, envs)
             return tuple(jax.tree.leaves(e_fixed))
 
-        _, vjp_sweep_params = jax.vjp(phase_fixed_sweep_from_params, params_data_tuple)
+        _, vjp_sweep_params = jax.vjp(gauge_fixed_sweep_from_params, params_data_tuple)
         indirect = vjp_sweep_params(lam)[0]
 
         # Total: g * (direct + indirect)
