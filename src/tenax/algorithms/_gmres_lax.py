@@ -241,3 +241,57 @@ def gmres_pytree(
         flat_matvec, b_flat, x0_flat, tol=tol, maxiter=maxiter, restart=restart
     )
     return unflatten(x_flat), info
+
+
+def gmres_pytree_jax(
+    matvec,
+    b_tree,
+    x0_tree=None,
+    *,
+    tol: float = 1e-7,
+    solve_method: str | None = None,
+) -> tuple:
+    """GMRES for pytree-valued linear systems using JAX's built-in solver.
+
+    Uses ``jax.scipy.sparse.linalg.gmres`` — the same solver variPEPS uses.
+    No iteration cap (runs until ``tol`` is met).
+
+    Args:
+        matvec: Pytree-valued linear operator.
+        b_tree: Right-hand side pytree.
+        x0_tree: Initial guess (optional).
+        tol: Absolute tolerance.
+        solve_method: ``"batched"`` (GPU) or ``"incremental"`` (CPU).
+    """
+    from jax.scipy.sparse.linalg import gmres as jax_gmres
+
+    b_leaves, treedef = jax.tree.flatten(b_tree)
+    shapes = [leaf.shape for leaf in b_leaves]
+    sizes = [leaf.size for leaf in b_leaves]
+    offsets = []
+    acc = 0
+    for sz in sizes[:-1]:
+        acc += sz
+        offsets.append(acc)
+
+    def flatten(tree):
+        return jnp.concatenate([leaf.ravel() for leaf in jax.tree.leaves(tree)])
+
+    def unflatten(vec):
+        parts = jnp.split(vec, offsets)
+        return jax.tree.unflatten(
+            treedef, [p.reshape(s) for p, s in zip(parts, shapes)]
+        )
+
+    def flat_matvec(v):
+        return flatten(matvec(unflatten(v)))
+
+    b_flat = flatten(b_tree)
+    x0_flat = flatten(x0_tree) if x0_tree is not None else b_flat
+
+    kwargs = {"atol": tol}
+    if solve_method is not None:
+        kwargs["solve_method"] = solve_method
+
+    x_flat, info = jax_gmres(flat_matvec, b_flat, x0_flat, **kwargs)
+    return unflatten(x_flat), info
