@@ -398,8 +398,10 @@ def _ctm_energy_implicit_dispatch(
     optimizer loops reuse the compiled backward across steps.
     """
     # Build a hashable key from the static configuration.
-    # Mutable/non-hashable args (templates, gate, env_init, chi_ramp,
-    # energy_fn) are excluded — they are set on the cached object each call.
+    # Templates and env_init change per call (updated tensors/envs) but
+    # have the same structure, so the JIT backward compiles once and
+    # reuses. Gate and energy_fn must be in the key because the JIT
+    # backward captures them at trace time as compile-time constants.
     cache_key = (
         tuple(coords),
         chi,
@@ -414,6 +416,8 @@ def _ctm_energy_implicit_dispatch(
         gmres_maxiter,
         gmres_restart,
         id(neighbors),  # same dict object across optimizer steps
+        id(gate),  # different Hamiltonian → different backward
+        id(energy_fn),  # different energy callback → different backward
     )
 
     entry = _VJP_CACHE.get(cache_key)

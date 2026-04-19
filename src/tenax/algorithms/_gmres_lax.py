@@ -81,8 +81,11 @@ def gmres_lax(
         g = jnp.zeros(m + 1, dtype=b.dtype)
         g = g.at[0].set(r_norm)
 
+        # Short-circuit when initial residual is already zero (exact solution).
+        already_converged = r_norm / bnorm_safe < tol
+
         # Inner state: (j, V, H, cs, sn, g, converged, total_iters)
-        inner_state0 = (0, V, H, cs, sn, g, False, total_iters)
+        inner_state0 = (0, V, H, cs, sn, g, already_converged, total_iters)
 
         def _inner_cond(state):
             j, _V, _H, _cs, _sn, g, converged, t_iters = state
