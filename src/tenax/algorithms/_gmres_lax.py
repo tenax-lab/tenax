@@ -113,9 +113,10 @@ def gmres_lax(
             H = H.at[j + 1, j].set(h_jp1_j)
             V = V.at[j + 1].set(w / h_jp1_j_safe)
 
-            # Apply previous Givens rotations to column j of H
+            # Apply previous Givens rotations to column j of H.
+            # Complex-safe form: [c̄  s̄; -s  c] zeroes the lower entry.
             def _apply_prev_givens(i, H_col):
-                temp = cs[i] * H_col[i] + sn[i] * H_col[i + 1]
+                temp = jnp.conj(cs[i]) * H_col[i] + jnp.conj(sn[i]) * H_col[i + 1]
                 H_col = H_col.at[i + 1].set(-sn[i] * H_col[i] + cs[i] * H_col[i + 1])
                 H_col = H_col.at[i].set(temp)
                 return H_col
@@ -124,23 +125,24 @@ def gmres_lax(
             h_col = lax.fori_loop(0, j, _apply_prev_givens, h_col)
             H = H.at[:, j].set(h_col)
 
-            # Compute new Givens rotation for row (j, j+1)
+            # Compute new Givens rotation for row (j, j+1).
+            # Complex-safe: denom = sqrt(|a|² + |b|²), c = a/r, s = b/r.
             a_ = H[j, j]
             b_ = H[j + 1, j]
-            denom = jnp.sqrt(a_**2 + b_**2)
+            denom = jnp.sqrt(jnp.abs(a_) ** 2 + jnp.abs(b_) ** 2)
             denom_safe = jnp.where(denom > 0.0, denom, 1.0)
             cs_j = a_ / denom_safe
             sn_j = b_ / denom_safe
             cs = cs.at[j].set(cs_j)
             sn = sn.at[j].set(sn_j)
 
-            # Apply to H
-            H = H.at[j, j].set(cs_j * a_ + sn_j * b_)
+            # Apply to H: [c̄  s̄; -s  c] @ [a; b] = [r; 0]
+            H = H.at[j, j].set(jnp.conj(cs_j) * a_ + jnp.conj(sn_j) * b_)
             H = H.at[j + 1, j].set(0.0)
 
             # Apply to g
             g_j = g[j]
-            g = g.at[j].set(cs_j * g_j)
+            g = g.at[j].set(jnp.conj(cs_j) * g_j)
             g = g.at[j + 1].set(-sn_j * g_j)
 
             # Check convergence

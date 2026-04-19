@@ -220,7 +220,9 @@ def python_loop_ctm_converge(
                     jax.tree.leaves(prev_envs[c]),
                     jax.tree.leaves(envs[c]),
                 ):
-                    diff = float(jnp.max(jnp.abs(tnew.todense() - told.todense())))
+                    a = told.todense() if hasattr(told, "todense") else told
+                    b = tnew.todense() if hasattr(tnew, "todense") else tnew
+                    diff = float(jnp.max(jnp.abs(b - a)))
                     max_diff = max(max_diff, diff)
             converged = max_diff < conv_tol
             final_diff = max_diff

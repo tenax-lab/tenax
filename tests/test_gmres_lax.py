@@ -113,6 +113,42 @@ def test_gmres_pytree_dict():
     assert res_norm / b_norm < 1e-6
 
 
+def test_gmres_solves_complex_system():
+    """GMRES should solve Ax=b with complex-valued A and b."""
+    key = jax.random.PRNGKey(42)
+    n = 15
+    M_re = jax.random.normal(key, (n, n))
+    M_im = jax.random.normal(jax.random.PRNGKey(43), (n, n))
+    M = M_re + 1j * M_im
+    A = jnp.eye(n, dtype=jnp.complex64) + 0.3 * M / jnp.linalg.norm(M, ord=2)
+    b = jax.random.normal(jax.random.PRNGKey(1), (n,)) + 1j * jax.random.normal(
+        jax.random.PRNGKey(2), (n,)
+    )
+    x, info = gmres_lax(_matvec_from_matrix(A), b, tol=1e-5, maxiter=100)
+    x_ref = jnp.linalg.solve(A, b)
+    assert jnp.allclose(x, x_ref, atol=1e-3), (
+        f"max error = {float(jnp.max(jnp.abs(x - x_ref))):.2e}"
+    )
+
+
+def test_gmres_complex_with_restart():
+    """Complex GMRES(m) with restart should converge."""
+    key = jax.random.PRNGKey(7)
+    n = 30
+    M_re = jax.random.normal(key, (n, n))
+    M_im = jax.random.normal(jax.random.PRNGKey(8), (n, n))
+    M = M_re + 1j * M_im
+    A = jnp.eye(n, dtype=jnp.complex64) + 0.2 * M / jnp.linalg.norm(M, ord=2)
+    b = jax.random.normal(jax.random.PRNGKey(1), (n,)) + 1j * jax.random.normal(
+        jax.random.PRNGKey(2), (n,)
+    )
+    x, info = gmres_lax(_matvec_from_matrix(A), b, tol=1e-5, maxiter=200, restart=10)
+    x_ref = jnp.linalg.solve(A, b)
+    assert jnp.allclose(x, x_ref, atol=1e-3), (
+        f"max error = {float(jnp.max(jnp.abs(x - x_ref))):.2e}"
+    )
+
+
 def test_gmres_pytree_jit_compatible():
     """gmres_pytree must work inside jax.jit."""
     tree = {"a": jnp.ones(5), "b": jnp.ones(3)}

@@ -195,6 +195,8 @@ def ctm_energy_implicit(
     chi_ramp=None,
     env_init=None,
     forward_gauge: str = "phase",
+    conv_method: str = "sv",
+    min_iter: int = 4,
     gmres_tol: float = 1e-6,
     gmres_maxiter: int = 200,
     gmres_restart: int = 30,
@@ -235,6 +237,10 @@ def ctm_energy_implicit(
         forward_gauge:     Gauge fixing in forward/backward: ``"phase"`` (default),
                            ``"sigma"`` (transfer-matrix eigenvector alignment), or
                            ``"none"`` (no gauge fixing).
+        conv_method:       Convergence criterion: ``"sv"`` (corner singular
+                           values, default) or ``"elementwise"`` (max element-wise
+                           difference across all env tensors).
+        min_iter:          Minimum iterations before checking convergence.
         energy_fn:         Optional custom energy function ``(A, env, gate) -> scalar``.
 
     Returns:
@@ -263,6 +269,8 @@ def ctm_energy_implicit(
         chi_ramp,
         env_init,
         forward_gauge,
+        conv_method,
+        min_iter,
         gmres_tol,
         gmres_maxiter,
         gmres_restart,
@@ -299,6 +307,8 @@ def _sigma_gauged_ctm_converge(
     qr_warmup_steps,
     env_init,
     forward_gauge="phase",
+    conv_method="sv",
+    min_iter=4,
 ):
     """CTM convergence with sigma gauge fixing for element-wise fixed point.
 
@@ -330,7 +340,8 @@ def _sigma_gauged_ctm_converge(
             projector_backward=projector_backward,
         )
 
-    prev_svs = {}
+    prev_svs: dict = {}
+    prev_envs: dict | None = None
     for i in range(max_iter - warmup):
         envs_new = jit_step(
             site_tensors,
@@ -349,17 +360,45 @@ def _sigma_gauged_ctm_converge(
             # forward_gauge == "none": no gauge fixing
             envs = envs_new
 
-        # Check convergence via corner singular values
-        converged = True
-        for c in sorted(envs):
-            sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
-            if c in prev_svs:
-                diff = float(_ctm_sv_diff(sv, prev_svs[c]))
-                if diff >= conv_tol:
-                    converged = False
+        # Skip convergence check until min_iter
+        total_iter = warmup + i + 1
+        if total_iter < min_iter:
+            if conv_method == "sv":
+                for c in sorted(envs):
+                    prev_svs[c] = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
             else:
-                converged = False
-            prev_svs[c] = sv
+                prev_envs = {c: envs[c] for c in envs}
+            continue
+
+        if conv_method == "elementwise":
+            # Element-wise: max absolute difference across all env tensor leaves
+            if prev_envs is None:
+                prev_envs = {c: envs[c] for c in envs}
+                continue
+            max_diff = 0.0
+            for c in sorted(envs):
+                for told, tnew in zip(
+                    jax.tree.leaves(prev_envs[c]),
+                    jax.tree.leaves(envs[c]),
+                ):
+                    a = told.todense() if hasattr(told, "todense") else told
+                    b = tnew.todense() if hasattr(tnew, "todense") else tnew
+                    diff = float(jnp.max(jnp.abs(b - a)))
+                    max_diff = max(max_diff, diff)
+            converged = max_diff < conv_tol
+            prev_envs = {c: envs[c] for c in envs}
+        else:
+            # SV convergence (default): corner singular value difference
+            converged = True
+            for c in sorted(envs):
+                sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
+                if c in prev_svs:
+                    diff = float(_ctm_sv_diff(sv, prev_svs[c]))
+                    if diff >= conv_tol:
+                        converged = False
+                else:
+                    converged = False
+                prev_svs[c] = sv
 
         if converged:
             break
@@ -386,6 +425,8 @@ def _ctm_energy_implicit_dispatch(
     chi_ramp,
     env_init,
     forward_gauge,
+    conv_method,
+    min_iter,
     gmres_tol,
     gmres_maxiter,
     gmres_restart,
@@ -412,6 +453,8 @@ def _ctm_energy_implicit_dispatch(
         projector_backward,
         qr_warmup_steps,
         forward_gauge,
+        conv_method,
+        min_iter,
         gmres_tol,
         gmres_maxiter,
         gmres_restart,
@@ -451,6 +494,8 @@ def _ctm_energy_implicit_dispatch(
         projector_backward=projector_backward,
         qr_warmup_steps=qr_warmup_steps,
         forward_gauge=forward_gauge,
+        conv_method=conv_method,
+        min_iter=min_iter,
         gmres_tol=gmres_tol,
         gmres_maxiter=gmres_maxiter,
         gmres_restart=gmres_restart,
@@ -471,6 +516,8 @@ def _make_implicit_vjp_fn(
     projector_backward,
     qr_warmup_steps,
     forward_gauge,
+    conv_method,
+    min_iter,
     gmres_tol,
     gmres_maxiter,
     gmres_restart,
@@ -508,7 +555,9 @@ def _make_implicit_vjp_fn(
                 neighbors,
                 chi=chi,
                 max_iter=max_iter,
+                min_iter=min_iter,
                 conv_tol=conv_tol,
+                conv_method=conv_method,
                 renormalize=renormalize,
                 projector_method=projector_method,
                 qr_warmup_steps=qr_warmup_steps,
@@ -530,6 +579,8 @@ def _make_implicit_vjp_fn(
                 qr_warmup_steps=qr_warmup_steps,
                 env_init=env_init,
                 forward_gauge=forward_gauge,
+                conv_method=conv_method,
+                min_iter=min_iter,
             )
         return envs
 
