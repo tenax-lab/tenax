@@ -28,7 +28,7 @@ class CTMConfig:
                             ``"none"``.  The static default stays ``"qr"``
                             for forward-only CTM, diagnostics, and notebooks.
                             ``optimize_gs_ad`` auto-promotes ``"qr"`` to
-                            ``"phase"`` when ``gs_explicit_ad=True`` and the
+                            ``"phase"`` when ``gs_implicit_ad=False`` and the
                             user has not opted into a different gauge — see
                             ``docs/guide/algorithms/ipeps_ad_paths.md`` for
                             the full mode matrix and benchmarks.
@@ -38,8 +38,8 @@ class CTMConfig:
                             currently documented unstable (spectral radius
                             > 1 without tight sigma-gauge alignment) and
                             its regression test is marked ``xfail`` —
-                            tracked by issue #292.  Prefer the explicit-AD
-                            path (``iPEPSConfig.gs_explicit_ad=True``)
+                            tracked by issue #292.  Prefer
+                            ``ad_backward_method="vjp"`` (the default)
                             until GMRES is stabilized.
     """
 
@@ -58,9 +58,10 @@ class CTMConfig:
     )
     ad_backward_method: str = "vjp"  # "vjp" (iterative VJP) or "gmres" (xfail — #292)
     ctm_conv_method: str = "sv"  # "sv" (singular value) or "elementwise"
-    # forward_gauge: "qr" (default, auto-promoted to "phase" by optimize_gs_ad
-    # when gs_explicit_ad=True), "phase" (explicit-AD default after promotion),
-    # "sigma" (implicit-diff path), or "none" (diagnostic).  See ipeps_ad_paths.md.
+    # forward_gauge: "qr" (default, auto-promoted to "sigma" by optimize_gs_ad
+    # when gs_implicit_ad=True, or to "phase" when gs_implicit_ad=False),
+    # "sigma" (implicit-diff path), "phase" (explicit-AD path),
+    # or "none" (diagnostic).  See ipeps_ad_paths.md.
     forward_gauge: str = "qr"
     # Optional reference-mode implicit AD mode (App. C-F) for dense 1-site C4v.
     ctm_ad_mode: str | None = None  # None or "c4v_reference"
@@ -96,8 +97,8 @@ class CTMConfig:
     adjoint_tikhonov: float = 1e-6
     # Backward pass used for the eigh projector inside AD.
     #   "auto"       -> default; ``optimize_gs_ad`` promotes to "lorentzian"
-    #                   when ``gs_explicit_ad=True`` and the effective
-    #                   projector is "eigh", otherwise the effective value is
+    #                   when ``gs_implicit_ad=False`` and the effective
+    #                   projector is "eigh"; otherwise the effective value is
     #                   "standard".  Mirrors the ``forward_gauge`` pattern.
     #   "standard"   -> force the existing ``regularized_eigh`` backward.
     #                   Never auto-promoted away from this value.
@@ -151,14 +152,18 @@ class iPEPSConfig:
         gs_log_interval:       Print every N AD steps when ``gs_verbose`` is
                                enabled. The first and final steps are always
                                logged.
-        gs_explicit_ad:        Differentiate through unrolled CTM sweeps
-                               instead of using implicit differentiation.
-                               ``True`` by default and the recommended AD
-                               path post-PR-#291.  When ``True`` and
+        gs_implicit_ad:        Use implicit differentiation through the
+                               CTM fixed-point equation instead of
+                               differentiating through unrolled CTM sweeps.
+                               ``True`` by default: the implicit-diff path
+                               (VJP backward with sigma gauge) is the
+                               recommended AD path.  When ``True`` and
                                ``ctm.forward_gauge == "qr"`` (the static
                                default), ``optimize_gs_ad`` transparently
-                               promotes the forward gauge to ``"phase"`` for
-                               the unrolled CTM sweeps — see
+                               promotes the forward gauge to ``"sigma"``
+                               for stable element-wise CTM convergence.
+                               When ``False``, it promotes to ``"phase"``
+                               instead — see
                                ``docs/guide/algorithms/ipeps_ad_paths.md``.
         gs_ctm_conv_tol_schedule:
                                Optional ramp for the CTM convergence
@@ -219,7 +224,10 @@ class iPEPSConfig:
     # candidate energy strictly below this value is rejected as a non-
     # variational CTM artifact (see issue #298).  None disables the check.
     gs_energy_floor: float | None = None
-    gs_explicit_ad: bool = True  # explicit diff through unrolled CTM
+    gs_implicit_ad: bool = True  # implicit diff (VJP + sigma gauge)
+    # Deprecated alias — use gs_implicit_ad instead.  Accepted for backwards
+    # compatibility; mapped to gs_implicit_ad in __post_init__.
+    gs_explicit_ad: bool | None = None
     gs_explicit_ad_steps: int = 20  # CTM steps for explicit AD backprop phase
     gs_explicit_ad_warmup: int = 3  # warmup CTM steps (no gradient tracking)
     su_init: bool = True  # initialize via simple update before AD
@@ -238,6 +246,19 @@ class iPEPSConfig:
     metric_gmres_tol: float = 1e-2  # GMRES tolerance (loose is fine)
 
     def __post_init__(self):
+        import warnings
+
+        if self.gs_explicit_ad is not None:
+            warnings.warn(
+                "gs_explicit_ad is deprecated; use gs_implicit_ad instead "
+                "(gs_implicit_ad=True is the new default, equivalent to "
+                "gs_explicit_ad=False).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            object.__setattr__(self, "gs_implicit_ad", not self.gs_explicit_ad)
+        object.__setattr__(self, "gs_explicit_ad", None)
+
         valid_unit_cells = {"1x1", "2site"}
         if self.unit_cell not in valid_unit_cells:
             raise ValueError(

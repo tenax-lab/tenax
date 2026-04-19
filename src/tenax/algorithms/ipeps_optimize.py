@@ -628,7 +628,7 @@ def _optimize_gs_ad_tensor(
     env_treedef = jax.tree.structure(_env_template)
     prev_env_leaves = tuple(jax.tree.leaves(_env_template))
 
-    use_explicit = config.gs_explicit_ad
+    use_explicit = not config.gs_implicit_ad
     explicit_steps = config.gs_explicit_ad_steps
     explicit_warmup = config.gs_explicit_ad_warmup
     _ctm_converge = (
@@ -1217,7 +1217,7 @@ def _optimize_gs_ad_tensor_2site(
     if not use_c4v:
         import warnings
 
-        if config.gs_explicit_ad:
+        if not config.gs_implicit_ad:
             # Issue #328: non-C4v 2-site *explicit* AD is non-variational at
             # finite chi for general models.  The forward-mode AD chain
             # through the finite-sweep CTM reliably finds unphysical
@@ -1228,13 +1228,13 @@ def _optimize_gs_ad_tensor_2site(
             #   gs_explicit_ad_steps=30 -> E = -0.26  (descending, non-var)
             #   gs_explicit_ad_steps=60 -> E = -1.18  (below physical)
             # vs physical ground state E/site = -0.6694.  Implicit AD
-            # (gs_explicit_ad=False) lands at E = -0.566 for the same
+            # (gs_implicit_ad=True) lands at E = -0.566 for the same
             # config — variational and close to physical.
             warnings.warn(
                 "Non-C4v 2-site *explicit* AD (gs_c4v=False, "
-                "gs_explicit_ad=True) is known to be non-variational at "
+                "gs_implicit_ad=False) is known to be non-variational at "
                 "finite chi: the optimizer drifts below the physical "
-                "ground state (see issue #328). Set gs_explicit_ad=False "
+                "ground state (see issue #328). Set gs_implicit_ad=True "
                 "to use the implicit-AD path, which is variational at "
                 "chi >= 16 for 2-site Heisenberg. For antiferromagnetic "
                 "bipartite models, gs_c4v=True is also a stable option.",
@@ -1279,7 +1279,7 @@ def _optimize_gs_ad_tensor_2site(
 
     ctm_cfg_2s = build_ad_ctm_config(config)
     config_tuple = _config_to_tuple(ctm_cfg_2s)
-    use_explicit = config.gs_explicit_ad
+    use_explicit = not config.gs_implicit_ad
     explicit_steps = config.gs_explicit_ad_steps
     explicit_warmup = config.gs_explicit_ad_warmup
 

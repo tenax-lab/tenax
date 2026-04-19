@@ -28,7 +28,7 @@ for p in params_by_category(TuningCategory.ACCURACY):
 | Goal | First knob | Then | Last resort |
 |---|---|---|---|
 | Energy not converging | `CTMConfig.chi` ↑ | `iPEPSConfig.gs_num_steps` ↑ | `gs_optimizer` → `lbfgs` |
-| AD forward is slow | loosen `conv_tol` | reduce `chi` | `gs_explicit_ad=True` (1-site) |
+| AD forward is slow | `CTMConfig.chi_ramp` | loosen `conv_tol` | reduce `chi` |
 | AD backward `Krylov failed to converge` | `adjoint_tikhonov` → `1e-4` | `adjoint_maxiter` ↑ | loosen `adjoint_tol` |
 | L-BFGS stalls at a plateau | `gs_stall_recovery="reset"` | `su_init=False` | `gs_metric_precond=False` |
 | NaN during optimization | `ad_regularize_svd=True` (default) | `forward_gauge="phase"` | check for degenerate singular values |
@@ -87,7 +87,7 @@ which AD path pairs with which gauge.
 Values: `"qr"` (default), `"phase"`, `"sigma"`, `"none"`
 
 - `"qr"`: forward-only CTM, notebooks, diagnostics. `optimize_gs_ad`
-  auto-promotes this to `"phase"` when `gs_explicit_ad=True`.
+  auto-promotes this to `"phase"` when `gs_implicit_ad=False`.
 - `"phase"`: explicit-AD default after promotion. Numerically stable
   for unrolled backprop.
 - `"sigma"`: required for the implicit-diff path at D ≥ 2. Aligns each
@@ -215,14 +215,14 @@ informative start.
 
 ## Method selection
 
-### `iPEPSConfig.gs_explicit_ad` (default `True`)
+### `iPEPSConfig.gs_implicit_ad` (default `True`)
 
-- **`True`** (explicit) — differentiate through unrolled CTM sweeps via
-  `jax.checkpoint`. Recommended path post PR #291. Memory scales with
-  `gs_explicit_ad_steps`.
-- **`False`** (implicit) — solve the fixed-point adjoint equation.
+- **`True`** (implicit) — solve the fixed-point adjoint equation.
   Required by the `ctm_ad_mode="c4v_reference"` path (Francuz et al.
   App. C–F). Lower memory but needs `adjoint_tikhonov > 0` near the GS.
+- **`False`** (explicit) — differentiate through unrolled CTM sweeps via
+  `jax.checkpoint`. Recommended path post PR #291. Memory scales with
+  `gs_explicit_ad_steps`.
 
 ### `iPEPSConfig.gs_c4v` (default `False`)
 
@@ -254,6 +254,14 @@ These don't change numerics (within tolerance) but speed things up.
 
 Diagonal scaling preconditioner for the GMRES implicit-diff backward.
 Currently experimental — do not turn on for production.
+
+### `CTMConfig.chi_ramp` (default `None`)
+
+Run CTM convergence in stages at increasing chi.  Each stage does a
+fixed number of sweeps at a small chi before the final stage converges
+at the target chi.  Example: ``chi_ramp=[(8, 10), (16, 10), (32, None)]``
+does 10 sweeps at chi=8, 10 at chi=16, then converges at chi=32.
+Benchmarks show 1.2–2.1× GPU speedup with identical energies.
 
 ---
 

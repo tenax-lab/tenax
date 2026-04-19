@@ -18,7 +18,7 @@ def resolve_projector_backward(
     logger: logging.Logger | None = None,
 ) -> iPEPSConfig:
     """Auto-promote ``ctm.projector_backward`` for explicit-AD eigh paths."""
-    if not config.gs_explicit_ad:
+    if config.gs_implicit_ad:
         return config
     ctm_cfg = config.ctm
     effective_projector = config.gs_projector_method or ctm_cfg.projector_method
@@ -41,7 +41,7 @@ def use_reference_c4v_path(config: iPEPSConfig) -> bool:
     return (
         config.unit_cell == "1x1"
         and config.gs_c4v
-        and not config.gs_explicit_ad
+        and config.gs_implicit_ad
         and getattr(config.ctm, "ctm_ad_mode", None) == "c4v_reference"
     )
 
@@ -54,6 +54,9 @@ def build_ad_ctm_config(config: iPEPSConfig) -> CTMConfig:
     ctm_cfg = config.ctm
     if config.gs_projector_method is not None:
         ctm_cfg = replace(ctm_cfg, projector_method=config.gs_projector_method)
-    if config.gs_explicit_ad and ctm_cfg.forward_gauge == "qr":
-        ctm_cfg = replace(ctm_cfg, forward_gauge="phase")
+    if ctm_cfg.forward_gauge == "qr":
+        if config.gs_implicit_ad:
+            ctm_cfg = replace(ctm_cfg, forward_gauge="sigma")
+        else:
+            ctm_cfg = replace(ctm_cfg, forward_gauge="phase")
     return ctm_cfg

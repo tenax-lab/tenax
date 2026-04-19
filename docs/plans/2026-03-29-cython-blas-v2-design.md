@@ -1,7 +1,7 @@
 # Cython BLAS v2: Zero-Python-Reentry Kernel for DMRG
 
 **Date:** 2026-03-29
-**Status:** Approved
+**Status:** COMPLETED (PR #226) — superseded by Cython fused Lanczos approach; 2.7–5.3× faster than TeNPy
 
 ## Problem
 

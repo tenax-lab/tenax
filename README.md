@@ -329,7 +329,7 @@ config = iPEPSConfig(
         max_iter=80,
         projector_method="qr",  # recommended projector for explicit AD
     ),
-    gs_explicit_ad=True,  # default; unrolled + checkpointed CTM
+    # gs_implicit_ad=False is the default (explicit AD)
     gs_projector_method="qr",
     gs_optimizer="lbfgs",  # L-BFGS with Hager-Zhang line search
     gs_line_search_method="hager_zhang",
@@ -353,7 +353,6 @@ config_2site = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(chi=16, max_iter=100, min_iter=50),
     gs_optimizer="lbfgs",
-    gs_explicit_ad=True,
     gs_explicit_ad_steps=10,
     gs_explicit_ad_warmup=2,
     gs_num_steps=50,
@@ -370,7 +369,6 @@ config_2site = iPEPSConfig(
 config_svd = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(chi=16, max_iter=50, projector_method="svd"),
-    gs_explicit_ad=True,
     gs_num_steps=200,
     gs_optimizer="lbfgs",
     gs_line_search_method="hager_zhang",
@@ -389,7 +387,7 @@ config_reference = iPEPSConfig(
         adjoint_maxiter=50,
         adjoint_tol=1e-8,
     ),
-    gs_explicit_ad=False,
+    gs_implicit_ad=True,
     gs_c4v=True,
     unit_cell="1x1",
     gs_num_steps=100,

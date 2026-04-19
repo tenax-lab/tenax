@@ -62,7 +62,7 @@ Paths marked **BROKEN** are known non-functional. Paths marked
                                    │
           ┌────────────────────────┼────────────────────────┐
           │                                                 │
- gs_explicit_ad=True                           gs_explicit_ad=False
+ gs_implicit_ad=False                           gs_implicit_ad=True
  (default, RECOMMENDED)                        (implicit)
           │                                                 │
  ┌────────▼─────────────────────┐                ┌──────────▼───────────────┐
@@ -162,7 +162,7 @@ config = iPEPSConfig(
     gs_optimizer="lbfgs",                # L-BFGS + Hager-Zhang line search
     gs_line_search_method="hager_zhang",
     gs_metric_precond=True,
-    gs_explicit_ad=True,                 # default; unrolled + checkpointed
+    # gs_implicit_ad=False is the default (explicit AD, recommended)
     gs_explicit_ad_steps=20,
     gs_explicit_ad_warmup=2,
     gs_projector_method="qr",
@@ -222,7 +222,7 @@ back to the standard path:
 
 - ``unit_cell="1x1"``,
 - ``gs_c4v=True``,
-- ``gs_explicit_ad=False``,
+- ``gs_implicit_ad=True``,
 - ``ctm.ctm_ad_mode="c4v_reference"``.
 
 Additional knobs on ``CTMConfig``: ``adjoint_solver`` (``"bicgstab"`` or
@@ -280,7 +280,7 @@ The 2-site L-BFGS path still has a separate convergence gap at
 | Stall recovery (1-site)           | **Working**      | ``gs_stall_recovery="noise"`` auto-default; required by C4v path.  |
 | Stall recovery (2-site)           | **Working**      | ``gs_stall_recovery="reset"`` auto-default since #298.             |
 | 2-site L-BFGS at χ=8              | **Working**      | ``E_best ≈ -0.6602`` at D=2 with Lorentzian projector backward (issue #299 closed; post-convergence re-eval tracked separately by #317). |
-| Lorentzian projector backward     | **Working**      | Auto-default when ``gs_explicit_ad=True`` + ``projector_method="eigh"``; 1-site + 2-site, dense only (SymmetricTensor deferred to Approach B). |
+| Lorentzian projector backward     | **Working**      | Auto-default when ``gs_implicit_ad=False`` + ``projector_method="eigh"``; 1-site + 2-site, dense only (SymmetricTensor deferred to Approach B). |
 | Split CTM forward (SU)            | **Working**      | Used by simple update.                                             |
 | Split CTM + implicit diff         | **BROKEN**       | Not wired into optimizer.                                          |
 | Split CTM + explicit diff         | **Working**      | No ``jax.checkpoint``, high memory.                                |
@@ -306,7 +306,7 @@ for the full benchmark table and the projector × gauge comparison matrix.
 | Unit cell             | ``unit_cell``               | ``"1x1"``        | ``"2site"`` = checkerboard           |
 | Optimizer             | ``gs_optimizer``            | ``"cg"``         | ``"lbfgs"`` (recommended for AD)     |
 | C4v symmetry          | ``gs_c4v``                  | ``False``        | ``True`` = enforce C4v               |
-| AD method             | ``gs_explicit_ad``          | ``True``         | ``False`` = implicit diff            |
+| AD method             | ``gs_implicit_ad``          | ``True``         | ``False`` = explicit AD (recommended) |
 | Implicit AD mode      | ``ctm_ad_mode``             | ``None``         | ``"c4v_reference"`` (Francuz et al., 1-site C4v) |
 | Implicit adjoint      | ``adjoint_solver``          | ``"bicgstab"``   | ``"gmres"`` (reference-mode only)    |
 | Adjoint max iters     | ``adjoint_maxiter``         | ``50``           | reference-mode only                  |
@@ -316,7 +316,7 @@ for the full benchmark table and the projector × gauge comparison matrix.
 | AD projector override | ``gs_projector_method``     | ``None``         | ``"qr"`` (recommended)               |
 | Backward              | ``ad_backward_method``      | ``"vjp"``        | ``"gmres"`` (BROKEN — issue #292)    |
 | Projector             | ``projector_method``        | ``"eigh"``       | ``"qr"`` (recommended) / ``"svd"``   |
-| Projector backward    | ``projector_backward``      | ``"auto"``       | ``"standard"`` / ``"lorentzian"`` (auto-promoted to lorentzian when ``gs_explicit_ad=True`` and ``projector_method="eigh"``) |
+| Projector backward    | ``projector_backward``      | ``"auto"``       | ``"standard"`` / ``"lorentzian"`` (auto-promoted to lorentzian when ``gs_implicit_ad=False`` and ``projector_method="eigh"``) |
 | Forward gauge         | ``forward_gauge``           | ``"qr"``         | ``"phase"`` / ``"sigma"`` / ``"none"`` |
 | Conv tol schedule     | ``gs_ctm_conv_tol_schedule``| ``None``         | ``[(frac, tol), ...]``               |
 | Metric precond        | ``gs_metric_precond``       | ``True``         | ``False`` = standard grad            |
@@ -327,7 +327,7 @@ for the full benchmark table and the projector × gauge comparison matrix.
 The static default ``forward_gauge="qr"`` is kept conservative so that
 callers who construct a ``CTMConfig`` directly (forward-only CTM,
 notebooks, diagnostics) see predictable behavior.  ``optimize_gs_ad``
-auto-promotes to ``"phase"`` at runtime when ``gs_explicit_ad=True`` and
+auto-promotes to ``"phase"`` at runtime when ``gs_implicit_ad=False`` and
 the user has not opted into a different gauge.
 
 ## Key Files
