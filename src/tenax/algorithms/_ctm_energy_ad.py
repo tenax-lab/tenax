@@ -367,6 +367,9 @@ def _sigma_gauged_ctm_converge(
     return envs
 
 
+_VJP_CACHE: dict = {}
+
+
 def _ctm_energy_implicit_dispatch(
     params_data_tuple,
     coords,
@@ -388,12 +391,54 @@ def _ctm_energy_implicit_dispatch(
     gmres_restart,
     energy_fn,
 ):
-    """Dispatch to custom_vjp-decorated function."""
+    """Dispatch to custom_vjp-decorated function with caching.
+
+    The ``custom_vjp`` + ``@jax.jit`` backward is expensive to rebuild.
+    We cache it on a key derived from the static configuration so that
+    optimizer loops reuse the compiled backward across steps.
+    """
+    # Build a hashable key from the static configuration.
+    # Mutable/non-hashable args (templates, gate, env_init, chi_ramp,
+    # energy_fn) are excluded — they are set on the cached object each call.
+    cache_key = (
+        tuple(coords),
+        chi,
+        max_iter,
+        conv_tol,
+        projector_method,
+        renormalize,
+        projector_backward,
+        qr_warmup_steps,
+        forward_gauge,
+        gmres_tol,
+        gmres_maxiter,
+        gmres_restart,
+        id(neighbors),  # same dict object across optimizer steps
+    )
+
+    entry = _VJP_CACHE.get(cache_key)
+    if entry is not None:
+        f, mutables = entry
+        # Update per-call mutable state
+        mutables["templates"] = templates
+        mutables["gate"] = gate
+        mutables["chi_ramp"] = chi_ramp
+        mutables["env_init"] = env_init
+        mutables["energy_fn"] = energy_fn
+        return f(params_data_tuple)
+
+    # First call with this config — build and cache
+    mutables = {
+        "templates": templates,
+        "gate": gate,
+        "chi_ramp": chi_ramp,
+        "env_init": env_init,
+        "energy_fn": energy_fn,
+    }
     f = _make_implicit_vjp_fn(
         coords=coords,
-        templates=templates,
+        mutables=mutables,
         neighbors=neighbors,
-        gate=gate,
         chi=chi,
         max_iter=max_iter,
         conv_tol=conv_tol,
@@ -401,22 +446,19 @@ def _ctm_energy_implicit_dispatch(
         renormalize=renormalize,
         projector_backward=projector_backward,
         qr_warmup_steps=qr_warmup_steps,
-        chi_ramp=chi_ramp,
-        env_init=env_init,
         forward_gauge=forward_gauge,
         gmres_tol=gmres_tol,
         gmres_maxiter=gmres_maxiter,
         gmres_restart=gmres_restart,
-        energy_fn=energy_fn,
     )
+    _VJP_CACHE[cache_key] = (f, mutables)
     return f(params_data_tuple)
 
 
 def _make_implicit_vjp_fn(
     coords,
-    templates,
+    mutables,
     neighbors,
-    gate,
     chi,
     max_iter,
     conv_tol,
@@ -424,15 +466,18 @@ def _make_implicit_vjp_fn(
     renormalize,
     projector_backward,
     qr_warmup_steps,
-    chi_ramp,
-    env_init,
     forward_gauge,
     gmres_tol,
     gmres_maxiter,
     gmres_restart,
-    energy_fn,
 ):
-    """Build a custom_vjp-decorated function closed over all non-diff args."""
+    """Build a custom_vjp-decorated function closed over static config.
+
+    Per-call mutable state (templates, gate, chi_ramp, env_init, energy_fn)
+    is read from the ``mutables`` dict, which is updated by the dispatch
+    function before each call. This allows the compiled ``@jax.jit``
+    backward to be reused across optimizer steps.
+    """
 
     # Select gauge-fix function based on forward_gauge parameter.
     if forward_gauge == "phase":
@@ -449,89 +494,63 @@ def _make_implicit_vjp_fn(
     # Mutable cache for treedef from forward (needed in backward).
     _cached = {}
 
+    def _run_forward(params_data, site_tensors):
+        """Run CTM convergence (shared by f and f_fwd)."""
+        chi_ramp = mutables["chi_ramp"]
+        env_init = mutables["env_init"]
+        if chi_ramp is not None:
+            envs, _ = python_loop_ctm_converge(
+                site_tensors,
+                neighbors,
+                chi=chi,
+                max_iter=max_iter,
+                conv_tol=conv_tol,
+                renormalize=renormalize,
+                projector_method=projector_method,
+                qr_warmup_steps=qr_warmup_steps,
+                projector_backward=projector_backward,
+                chi_ramp=chi_ramp,
+                env_init=env_init,
+                gauge_fix_fn=_gauge_fix_fn,
+            )
+        else:
+            envs = _sigma_gauged_ctm_converge(
+                site_tensors,
+                neighbors,
+                chi=chi,
+                max_iter=max_iter,
+                conv_tol=conv_tol,
+                projector_method=projector_method,
+                renormalize=renormalize,
+                projector_backward=projector_backward,
+                qr_warmup_steps=qr_warmup_steps,
+                env_init=env_init,
+                forward_gauge=forward_gauge,
+            )
+        return envs
+
+    def _compute_energy(site_tensors, envs):
+        """Compute energy using energy_fn or default."""
+        gate = mutables["gate"]
+        energy_fn = mutables["energy_fn"]
+        if energy_fn is not None:
+            return energy_fn(site_tensors, envs, gate)
+        return _default_energy(site_tensors, envs, gate, coords, neighbors)
+
     @jax.custom_vjp
     def f(params_data_tuple):
         params_data = list(params_data_tuple)
+        templates = mutables["templates"]
         site_tensors = _reconstruct_site_tensors(params_data, coords, templates)
-
-        # Note: both chi_ramp and non-chi_ramp paths use the same
-        # _gauge_fix_fn (selected by forward_gauge). The backward VJP
-        # (_apply_gauge_fix) also uses forward_gauge, ensuring
-        # forward/backward gauge consistency regardless of chi_ramp.
-        if chi_ramp is not None:
-            envs, _ = python_loop_ctm_converge(
-                site_tensors,
-                neighbors,
-                chi=chi,
-                max_iter=max_iter,
-                conv_tol=conv_tol,
-                renormalize=renormalize,
-                projector_method=projector_method,
-                qr_warmup_steps=qr_warmup_steps,
-                projector_backward=projector_backward,
-                chi_ramp=chi_ramp,
-                env_init=env_init,
-                gauge_fix_fn=_gauge_fix_fn,
-            )
-        else:
-            envs = _sigma_gauged_ctm_converge(
-                site_tensors,
-                neighbors,
-                chi=chi,
-                max_iter=max_iter,
-                conv_tol=conv_tol,
-                projector_method=projector_method,
-                renormalize=renormalize,
-                projector_backward=projector_backward,
-                qr_warmup_steps=qr_warmup_steps,
-                env_init=env_init,
-                forward_gauge=forward_gauge,
-            )
-
-        if energy_fn is not None:
-            energy = energy_fn(site_tensors, envs, gate)
-        else:
-            energy = _default_energy(site_tensors, envs, gate, coords, neighbors)
-        return energy
+        envs = _run_forward(params_data, site_tensors)
+        return _compute_energy(site_tensors, envs)
 
     def f_fwd(params_data_tuple):
         params_data = list(params_data_tuple)
+        templates = mutables["templates"]
         site_tensors = _reconstruct_site_tensors(params_data, coords, templates)
-
-        if chi_ramp is not None:
-            envs, _ = python_loop_ctm_converge(
-                site_tensors,
-                neighbors,
-                chi=chi,
-                max_iter=max_iter,
-                conv_tol=conv_tol,
-                renormalize=renormalize,
-                projector_method=projector_method,
-                qr_warmup_steps=qr_warmup_steps,
-                projector_backward=projector_backward,
-                chi_ramp=chi_ramp,
-                env_init=env_init,
-                gauge_fix_fn=_gauge_fix_fn,
-            )
-        else:
-            envs = _sigma_gauged_ctm_converge(
-                site_tensors,
-                neighbors,
-                chi=chi,
-                max_iter=max_iter,
-                conv_tol=conv_tol,
-                projector_method=projector_method,
-                renormalize=renormalize,
-                projector_backward=projector_backward,
-                qr_warmup_steps=qr_warmup_steps,
-                env_init=env_init,
-                forward_gauge=forward_gauge,
-            )
-
-        if energy_fn is not None:
-            energy = energy_fn(site_tensors, envs, gate)
-        else:
-            energy = _default_energy(site_tensors, envs, gate, coords, neighbors)
+        envs = _run_forward(params_data, site_tensors)
+        energy = _compute_energy(site_tensors, envs)
 
         _cached["env_treedef"] = jax.tree.structure(envs)
         env_leaves = tuple(jax.tree.leaves(envs))
@@ -547,7 +566,11 @@ def _make_implicit_vjp_fn(
     def _jit_backward(params_data_tuple, env_leaves, g_scalar):
         """JIT-fused GMRES backward: one XLA program, one CUDA graph."""
         params_data = list(params_data_tuple)
-        site_tensors = _reconstruct_site_tensors(params_data, coords, templates)
+        # Read per-call state from mutables (set before each call by dispatch).
+        templates_ = mutables["templates"]
+        gate_ = mutables["gate"]
+        energy_fn_ = mutables["energy_fn"]
+        site_tensors = _reconstruct_site_tensors(params_data, coords, templates_)
         env_treedef = _cached["env_treedef"]
 
         # Reconstruct converged envs from cached leaves
@@ -556,9 +579,9 @@ def _make_implicit_vjp_fn(
         # --- Step 1: dE/denv (GMRES RHS) ---
         def energy_from_env(env_leaves_flat):
             e = jax.tree.unflatten(env_treedef, env_leaves_flat)
-            if energy_fn is not None:
-                return energy_fn(site_tensors, e, gate)
-            return _default_energy(site_tensors, e, gate, coords, neighbors)
+            if energy_fn_ is not None:
+                return energy_fn_(site_tensors, e, gate_)
+            return _default_energy(site_tensors, e, gate_, coords, neighbors)
 
         _, vjp_energy_env = jax.vjp(energy_from_env, env_leaves)
         dE_denv = vjp_energy_env(jnp.ones(()))[0]
@@ -606,10 +629,10 @@ def _make_implicit_vjp_fn(
         # Direct: dE/dparams at fixed env
         def energy_from_params(p_tuple):
             pd = list(p_tuple)
-            st = _reconstruct_site_tensors(pd, coords, templates)
-            if energy_fn is not None:
-                return energy_fn(st, envs, gate)
-            return _default_energy(st, envs, gate, coords, neighbors)
+            st = _reconstruct_site_tensors(pd, coords, templates_)
+            if energy_fn_ is not None:
+                return energy_fn_(st, envs, gate_)
+            return _default_energy(st, envs, gate_, coords, neighbors)
 
         _, vjp_energy_params = jax.vjp(energy_from_params, params_data_tuple)
         direct = vjp_energy_params(jnp.ones(()))[0]
@@ -617,7 +640,7 @@ def _make_implicit_vjp_fn(
         # Indirect: J_params^T @ lam
         def gauge_fixed_sweep_from_params(p_tuple):
             pd = list(p_tuple)
-            st = _reconstruct_site_tensors(pd, coords, templates)
+            st = _reconstruct_site_tensors(pd, coords, templates_)
             e_out = jit_step_bwd(
                 st,
                 envs,
