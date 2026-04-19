@@ -199,8 +199,10 @@ def _svd_sector_backward(
     UtdU_anti = 0.5 * (UtdU - UtdU.conj().T)
     VtdV_anti = 0.5 * (VtdV - VtdV.conj().T)
 
-    # Inverse singular values (safe)
-    s_inv = jnp.where(s_k > eps, 1.0 / s_k, 0.0)
+    # Inverse singular values — sanitize input so JAX backward never
+    # evaluates 1/0 (jnp.where evaluates both branches during AD).
+    s_safe = jnp.where(s_k > eps, s_k, 1.0)
+    s_inv = jnp.where(s_k > eps, 1.0 / s_safe, 0.0)
 
     # Projectors onto complements of kept subspaces
     proj_U_perp = jnp.eye(m) - U_k @ U_k.conj().T
