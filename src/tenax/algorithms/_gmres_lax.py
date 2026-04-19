@@ -69,16 +69,16 @@ def gmres_lax(
         r_norm_safe = jnp.where(r_norm > 0.0, r_norm, 1.0)
 
         # Arnoldi basis V: (m+1, n), upper Hessenberg H: (m+1, m)
-        V = jnp.zeros((m + 1, n))
+        V = jnp.zeros((m + 1, n), dtype=b.dtype)
         V = V.at[0].set(r / r_norm_safe)
-        H = jnp.zeros((m + 1, m))
+        H = jnp.zeros((m + 1, m), dtype=b.dtype)
 
         # Givens rotation coefficients
-        cs = jnp.zeros(m)
-        sn = jnp.zeros(m)
+        cs = jnp.zeros(m, dtype=b.dtype)
+        sn = jnp.zeros(m, dtype=b.dtype)
 
         # Right-hand side of the least-squares problem
-        g = jnp.zeros(m + 1)
+        g = jnp.zeros(m + 1, dtype=b.dtype)
         g = g.at[0].set(r_norm)
 
         # Inner state: (j, V, H, cs, sn, g, converged, total_iters)
@@ -98,7 +98,7 @@ def gmres_lax(
             # Modified Gram-Schmidt via fori_loop
             def _orth_body(i, carry):
                 w_, H_ = carry
-                h_ij = jnp.dot(V[i], w_)
+                h_ij = jnp.vdot(V[i], w_)
                 H_ = H_.at[i, j].set(h_ij)
                 w_ = w_ - h_ij * V[i]
                 return (w_, H_)
