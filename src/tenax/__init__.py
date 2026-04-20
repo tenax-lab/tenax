@@ -44,6 +44,16 @@ import jax
 # This must run at import time before any JAX computation is triggered.
 jax.config.update("jax_enable_x64", True)
 
+# Enable persistent compilation cache so recompilation across runs is free.
+# The cache directory can be overridden via JAX_COMPILATION_CACHE_DIR env var.
+import os as _os
+
+_cache_dir = _os.environ.get("JAX_COMPILATION_CACHE_DIR", "")
+if not _cache_dir:
+    _cache_dir = _os.path.join(_os.path.expanduser("~"), ".cache", "jax")
+    jax.config.update("jax_compilation_cache_dir", _cache_dir)
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 1)
+
 # ---------------------------------------------------------------------------
 # Eager imports: core data structures, contraction, linalg, lattice, network
 # ---------------------------------------------------------------------------

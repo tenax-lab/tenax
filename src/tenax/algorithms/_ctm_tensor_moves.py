@@ -33,6 +33,27 @@ def _normalize_tensor(T: Tensor) -> Tensor:
     return T * (1.0 / (norm + EPS))
 
 
+def _phase_fix_normalize_tensor(T: Tensor) -> Tensor:
+    """Frobenius-normalize + phase-fix a single C or T tensor.
+
+    Matches variPEPS ``_post_process_CTM_tensors``: normalize by Frobenius
+    norm, then fix the global U(1) phase by making the largest element
+    real-positive.  This pins the sign/phase of each tensor so that
+    consecutive CTM sweeps see a sign-stable fixed point, which
+    regularizes the Jacobian ``J^T`` in implicit AD.
+    """
+    import jax.numpy as jnp
+
+    arr = T.todense()
+    norm = jnp.linalg.norm(arr)
+    arr = arr / (norm + 1e-30)
+    flat = arr.ravel()
+    idx = jnp.argmax(jnp.abs(flat))
+    phase = flat[idx] / (jnp.abs(flat[idx]) + 1e-30)
+    arr = arr * jnp.conj(phase)
+    return DenseTensor(arr, T.indices)
+
+
 def _flip_leg_flow(tensor: Tensor, label: str) -> Tensor:
     """Flip the FlowDirection of a single leg identified by label.
 
@@ -233,10 +254,10 @@ def _ctm_tensor_move_left(
     T4_new = T4_new.relabels({"chi_new": "t4_d", "chi_new_r": "t4_u", "r2": "l2"})
     T4_new = _flip_leg_flow(T4_new, "l2")  # r2(OUT) -> l2 needs IN
 
-    # Per-absorption normalization (matches YASTN, prevents Jacobian blowup)
-    C1_new = _normalize_tensor(C1_new)
-    C4_new = _normalize_tensor(C4_new)
-    T4_new = _normalize_tensor(T4_new)
+    # Per-absorption normalization + phase fix (matches variPEPS, stabilizes J^T)
+    C1_new = _phase_fix_normalize_tensor(C1_new)
+    C4_new = _phase_fix_normalize_tensor(C4_new)
+    T4_new = _phase_fix_normalize_tensor(T4_new)
     return env_self._replace(C1=C1_new, C4=C4_new, T4=T4_new)
 
 
@@ -288,9 +309,9 @@ def _ctm_tensor_move_right(
     T2_new = T2_new.relabels({"chi_new": "t2_u", "chi_new_r": "t2_d", "l2": "r2"})
     T2_new = _flip_leg_flow(T2_new, "r2")  # l2(IN) -> r2 needs OUT
 
-    C2_new = _normalize_tensor(C2_new)
-    C3_new = _normalize_tensor(C3_new)
-    T2_new = _normalize_tensor(T2_new)
+    C2_new = _phase_fix_normalize_tensor(C2_new)
+    C3_new = _phase_fix_normalize_tensor(C3_new)
+    T2_new = _phase_fix_normalize_tensor(T2_new)
     return env_self._replace(C2=C2_new, C3=C3_new, T2=T2_new)
 
 
@@ -342,9 +363,9 @@ def _ctm_tensor_move_top(
     T1_new = T1_new.relabels({"chi_new": "t1_l", "chi_new_r": "t1_r", "d2": "u2"})
     T1_new = _flip_leg_flow(T1_new, "u2")  # d2(OUT) -> u2 needs IN
 
-    C1_new = _normalize_tensor(C1_new)
-    C2_new = _normalize_tensor(C2_new)
-    T1_new = _normalize_tensor(T1_new)
+    C1_new = _phase_fix_normalize_tensor(C1_new)
+    C2_new = _phase_fix_normalize_tensor(C2_new)
+    T1_new = _phase_fix_normalize_tensor(T1_new)
     return env_self._replace(C1=C1_new, C2=C2_new, T1=T1_new)
 
 
@@ -396,7 +417,7 @@ def _ctm_tensor_move_bottom(
     T3_new = T3_new.relabels({"chi_new": "t3_r", "chi_new_r": "t3_l", "u2": "d2"})
     T3_new = _flip_leg_flow(T3_new, "d2")  # u2(IN) -> d2 needs OUT
 
-    C4_new = _normalize_tensor(C4_new)
-    C3_new = _normalize_tensor(C3_new)
-    T3_new = _normalize_tensor(T3_new)
+    C4_new = _phase_fix_normalize_tensor(C4_new)
+    C3_new = _phase_fix_normalize_tensor(C3_new)
+    T3_new = _phase_fix_normalize_tensor(T3_new)
     return env_self._replace(C4=C4_new, C3=C3_new, T3=T3_new)

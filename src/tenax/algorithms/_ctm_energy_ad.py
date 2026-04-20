@@ -20,7 +20,7 @@ from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     initialize_ctm_tensor_env,
 )
-from tenax.algorithms._gmres_lax import gmres_pytree
+from tenax.algorithms._gmres_lax import gmres_pytree_jax
 from tenax.algorithms.ad_utils import _phase_fix_ctm_tensor
 
 
@@ -612,44 +612,48 @@ def _make_implicit_vjp_fn(
         residuals = (params_data_tuple, env_leaves)
         return energy, residuals
 
-    # Build the JIT-fused backward. All non-diff args (coords, templates,
-    # neighbors, gate, chi, ...) are captured in the closure so XLA sees a
-    # single compiled program — one CUDA graph instead of 30+.
+    # Build JIT'd sweep step for backward (same as forward).
     jit_step_bwd = _make_jit_ctm_step(neighbors)
 
+    # --- JIT'd building blocks for the backward ---
+    # Each is a small, fast-compiling JIT program. The GMRES loop runs in
+    # Python, calling the JIT'd matvec — no nested while_loop compilation.
+
+    def _apply_gauge_fix(e_out, e_in):
+        """Apply the same gauge fix used in the forward pass."""
+        if forward_gauge == "phase":
+            return {c: _phase_fix_ctm_tensor(e_out[c]) for c in coords}
+        elif forward_gauge == "sigma":
+            return {c: _sigma_gauge_fix_env(e_out[c], e_in[c]) for c in coords}
+        else:
+            return e_out
+
     @jax.jit
-    def _jit_backward(params_data_tuple, env_leaves, g_scalar):
-        """JIT-fused GMRES backward: one XLA program, one CUDA graph."""
+    def _jit_dE_denv(params_data_tuple, env_leaves):
+        """Step 1: compute dE/denv (GMRES RHS)."""
         params_data = list(params_data_tuple)
-        # Read per-call state from mutables (set before each call by dispatch).
         templates_ = mutables["templates"]
         gate_ = mutables["gate"]
         energy_fn_ = mutables["energy_fn"]
         site_tensors = _reconstruct_site_tensors(params_data, coords, templates_)
         env_treedef = _cached["env_treedef"]
 
-        # Reconstruct converged envs from cached leaves
-        envs = jax.tree.unflatten(env_treedef, env_leaves)
-
-        # --- Step 1: dE/denv (GMRES RHS) ---
         def energy_from_env(env_leaves_flat):
             e = jax.tree.unflatten(env_treedef, env_leaves_flat)
             if energy_fn_ is not None:
                 return energy_fn_(site_tensors, e, gate_)
             return _default_energy(site_tensors, e, gate_, coords, neighbors)
 
-        _, vjp_energy_env = jax.vjp(energy_from_env, env_leaves)
-        dE_denv = vjp_energy_env(jnp.ones(()))[0]
+        _, vjp_fn = jax.vjp(energy_from_env, env_leaves)
+        return vjp_fn(jnp.ones(()))[0]
 
-        # --- Step 2: Gauge-fixed sweep VJP (must match forward gauge) ---
-        def _apply_gauge_fix(e_out, e_in):
-            """Apply the same gauge fix used in the forward pass."""
-            if forward_gauge == "phase":
-                return {c: _phase_fix_ctm_tensor(e_out[c]) for c in coords}
-            elif forward_gauge == "sigma":
-                return {c: _sigma_gauge_fix_env(e_out[c], e_in[c]) for c in coords}
-            else:
-                return e_out
+    @jax.jit
+    def _jit_apply_Jt(params_data_tuple, env_leaves, v):
+        """Step 2: one J^T application (GMRES matvec)."""
+        params_data = list(params_data_tuple)
+        templates_ = mutables["templates"]
+        site_tensors = _reconstruct_site_tensors(params_data, coords, templates_)
+        env_treedef = _cached["env_treedef"]
 
         def gauge_fixed_sweep_from_env(env_leaves_flat):
             e = jax.tree.unflatten(env_treedef, env_leaves_flat)
@@ -664,23 +668,19 @@ def _make_implicit_vjp_fn(
             e_fixed = _apply_gauge_fix(e_out, e)
             return tuple(jax.tree.leaves(e_fixed))
 
-        _, vjp_sweep_env = jax.vjp(gauge_fixed_sweep_from_env, env_leaves)
+        _, vjp_fn = jax.vjp(gauge_fixed_sweep_from_env, env_leaves)
+        jt_v = vjp_fn(v)[0]
+        return tuple(vi - ji for vi, ji in zip(v, jt_v))
 
-        def apply_I_minus_Jt(v):
-            jt_v = vjp_sweep_env(v)[0]
-            return tuple(vi - ji for vi, ji in zip(v, jt_v))
+    @jax.jit
+    def _jit_chain_rule(params_data_tuple, env_leaves, lam, g_scalar):
+        """Steps 3-4: direct gradient + indirect (J_params^T @ lam)."""
+        templates_ = mutables["templates"]
+        gate_ = mutables["gate"]
+        energy_fn_ = mutables["energy_fn"]
+        env_treedef = _cached["env_treedef"]
+        envs = jax.tree.unflatten(env_treedef, env_leaves)
 
-        # --- Step 3: GMRES solve ---
-        lam, _info = gmres_pytree(
-            apply_I_minus_Jt,
-            dE_denv,
-            dE_denv,
-            tol=gmres_tol,
-            maxiter=gmres_maxiter,
-            restart=gmres_restart,
-        )
-
-        # --- Step 4: Chain rule ---
         # Direct: dE/dparams at fixed env
         def energy_from_params(p_tuple):
             pd = list(p_tuple)
@@ -710,14 +710,30 @@ def _make_implicit_vjp_fn(
         _, vjp_sweep_params = jax.vjp(gauge_fixed_sweep_from_params, params_data_tuple)
         indirect = vjp_sweep_params(lam)[0]
 
-        # Total: g * (direct + indirect)
         total = tuple(g_scalar * (d + ind) for d, ind in zip(direct, indirect))
         return (total,)
 
     def f_bwd(residuals, g):
-        """Dispatch to JIT-fused GMRES backward."""
+        """Python-loop backward: JIT'd VJPs + eager GMRES."""
         params_data_tuple, env_leaves = residuals
-        return _jit_backward(params_data_tuple, env_leaves, g)
+
+        # Step 1: dE/denv
+        dE_denv = _jit_dE_denv(params_data_tuple, env_leaves)
+
+        # Step 2: GMRES solve (I - J^T) lam = dE/denv
+        # GMRES runs in Python; each matvec is a JIT'd call.
+        def apply_I_minus_Jt(v):
+            return _jit_apply_Jt(params_data_tuple, env_leaves, v)
+
+        lam, _info = gmres_pytree_jax(
+            apply_I_minus_Jt,
+            dE_denv,
+            dE_denv,
+            tol=gmres_tol,
+        )
+
+        # Steps 3-4: chain rule
+        return _jit_chain_rule(params_data_tuple, env_leaves, lam, g)
 
     f.defvjp(f_fwd, f_bwd)
     return f
