@@ -63,9 +63,13 @@ def arnoldi_spectral_radius(matvec, v0, n_iter: int = 20) -> float:
             safe_h = jnp.where(h_next > 1e-14, h_next, 1.0)
             Q = Q.at[:, j + 1].set(w / safe_h)
 
-    # Spectral radius from eigenvalues of H
-    eigs = jnp.linalg.eigvals(H[:n_iter, :n_iter])
-    rho = float(jnp.max(jnp.abs(eigs)))
+    # Spectral radius from eigenvalues of H.
+    # Force eigvals to CPU — cuSOLVER geev can fail on small complex matrices.
+    import numpy as np
+
+    H_np = np.asarray(H[:n_iter, :n_iter])
+    eigs = np.linalg.eigvals(H_np)
+    rho = float(np.max(np.abs(eigs)))
     return rho
 
 
