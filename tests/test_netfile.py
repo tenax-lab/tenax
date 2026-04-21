@@ -418,6 +418,101 @@ class TestOrderConsistency:
 
 
 # ===================================================================
+# launch_raw tests
+# ===================================================================
+
+
+class TestLaunchRaw:
+    def test_matrix_multiply(self):
+        """launch_raw should produce same result as launch on raw arrays."""
+        bp = NetworkBlueprint("A: i, j\nB: j, k\nTOUT: i, k")
+        A = _make_dense((3, 4), ("i", "j"), seed=0)
+        B = _make_dense((4, 5), ("j", "k"), seed=1)
+        bp.put_tensors({"A": A, "B": B})
+
+        result_tensor = bp.launch()
+        result_raw = bp.launch_raw(A.todense(), B.todense())
+
+        np.testing.assert_allclose(result_tensor.todense(), result_raw, atol=1e-6)
+
+    def test_trace_scalar(self):
+        """launch_raw should handle scalar output (empty TOUT)."""
+        bp = NetworkBlueprint("A: i, j\nB: j, i\nTOUT:")
+        A = _make_dense((3, 4), ("i", "j"), seed=20)
+        B = _make_dense((4, 3), ("j", "i"), seed=21)
+        bp.put_tensors({"A": A, "B": B})
+
+        result_tensor = bp.launch()
+        result_raw = bp.launch_raw(A.todense(), B.todense())
+
+        np.testing.assert_allclose(result_tensor.todense(), result_raw, atol=1e-5)
+
+    def test_three_tensor_chain(self):
+        """launch_raw works with 3+ tensors."""
+        bp = NetworkBlueprint("A: i, j\nB: j, k\nC: k, l\nTOUT: i, l")
+        A = _make_dense((2, 3), ("i", "j"), seed=30)
+        B = _make_dense((3, 4), ("j", "k"), seed=31)
+        C = _make_dense((4, 5), ("k", "l"), seed=32)
+
+        result_raw = bp.launch_raw(A.todense(), B.todense(), C.todense())
+        expected = jnp.einsum("ij,jk,kl->il", A.todense(), B.todense(), C.todense())
+
+        np.testing.assert_allclose(result_raw, expected, atol=1e-5)
+
+    def test_wrong_number_of_arrays(self):
+        """launch_raw should raise on wrong number of arrays."""
+        bp = NetworkBlueprint("A: i, j\nB: j, k")
+        A_arr = jnp.ones((3, 4))
+        with pytest.raises(ValueError, match="Expected 2 arrays"):
+            bp.launch_raw(A_arr)
+
+    def test_dmrg_style(self):
+        """launch_raw on a 5-tensor DMRG-style contraction."""
+        bp = NetworkBlueprint("""
+        L: a, b, c
+        M1: a, p, q, d
+        A: b, p, s, e
+        M2: e, q, t, f
+        R: d, f, g
+        TOUT: c, s, t, g
+        """)
+        L = _make_dense((2, 2, 2), ("a", "b", "c"), seed=40)
+        M1 = _make_dense((2, 2, 2, 2), ("a", "p", "q", "d"), seed=41)
+        A = _make_dense((2, 2, 2, 2), ("b", "p", "s", "e"), seed=42)
+        M2 = _make_dense((2, 2, 2, 2), ("e", "q", "t", "f"), seed=43)
+        R = _make_dense((2, 2, 2), ("d", "f", "g"), seed=44)
+
+        result_raw = bp.launch_raw(
+            L.todense(), M1.todense(), A.todense(), M2.todense(), R.todense()
+        )
+        expected = jnp.einsum(
+            "abc,apqd,bpse,eqtf,dfg->cstg",
+            L.todense(),
+            M1.todense(),
+            A.todense(),
+            M2.todense(),
+            R.todense(),
+        )
+        np.testing.assert_allclose(result_raw, expected, atol=1e-4)
+
+    def test_jit_compatible(self):
+        """launch_raw should be JIT-traceable."""
+        import jax
+
+        bp = NetworkBlueprint("A: i, j\nB: j, k\nTOUT: i, k")
+        A_arr = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+        B_arr = jnp.array([[5.0, 6.0], [7.0, 8.0]])
+
+        @jax.jit
+        def f(a, b):
+            return bp.launch_raw(a, b)
+
+        result = f(A_arr, B_arr)
+        expected = A_arr @ B_arr
+        np.testing.assert_allclose(result, expected, atol=1e-6)
+
+
+# ===================================================================
 # Convenience function
 # ===================================================================
 
