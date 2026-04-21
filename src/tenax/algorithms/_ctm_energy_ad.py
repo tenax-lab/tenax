@@ -752,6 +752,8 @@ def _make_implicit_vjp_fn(
             dE_denv,
             dE_denv,
             tol=gmres_tol,
+            maxiter=gmres_maxiter,
+            restart=gmres_restart,
         )
 
         # Steps 3-4: chain rule

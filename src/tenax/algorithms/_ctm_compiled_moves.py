@@ -233,12 +233,8 @@ def _compiled_move_right(
     # In raw: C3[c3_u→t3_l, c3_l] axes=(0=t3_l,1=c3_l)
     # T3_nb[t3_r, d2, t3_l] axes=(0=t3_r, 1=d2, 2=t3_l)
     # Contract axis 0 of C3 with axis 2 of T3_nb
-    # C3[i,j] · T3_nb[k,l,i] -> result[j,k,l] = (c3_l, t3_r, d2)
-    C3g = jnp.einsum("ij,klj->iklj", C3, T3_nb)
-    # Oops, that's wrong. Let me redo.
-    # C3[i=c3_u=t3_l, j=c3_l], T3_nb[k=t3_r, l=d2, m=t3_l]
-    # Shared: t3_l (C3 axis 0, T3 axis 2)
-    # C3[i,j] · T3_nb[k,l,i] -> [j,k,l]
+    # C3[i=c3_u=t3_l, j=c3_l], T3_nb[k=t3_r, l=d2, i=t3_l]
+    # C3[i,j] · T3_nb[k,l,i] -> [j,k,l] = (c3_l, t3_r, d2)
     C3g = jnp.einsum("ij,kli->jkl", C3, T3_nb)  # (c3_l, t3_r, d2)
     # Fuse (c3_l=0, d2=2): transpose [0,2,1], reshape
     C3g = C3g.transpose(0, 2, 1)  # (c3_l, d2, t3_r)
