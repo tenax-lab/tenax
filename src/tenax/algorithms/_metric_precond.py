@@ -233,7 +233,7 @@ def lbfgs_two_loop(
 
     # First loop: newest to oldest
     for s, y, rho in reversed(history):
-        alpha = rho * jnp.dot(s, q)
+        alpha = rho * jnp.vdot(s, q)
         q = q - alpha * y
         alphas.append(alpha)
     alphas.reverse()
@@ -243,7 +243,7 @@ def lbfgs_two_loop(
 
     # Second loop: oldest to newest
     for i, (s, y, rho) in enumerate(history):
-        beta = rho * jnp.dot(y, r)
+        beta = rho * jnp.vdot(y, r)
         r = r + s * (alphas[i] - beta)
 
     return r

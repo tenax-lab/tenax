@@ -131,6 +131,14 @@ def _tree_add(a, b):
     return jax.tree.map(lambda x, y: x + y, a, b)
 
 
+def _random_noise(key, shape, dtype):
+    """Generate noise matching the dtype of the parameter (real or complex)."""
+    if jnp.issubdtype(dtype, jnp.complexfloating):
+        k1, k2 = jax.random.split(key)
+        return jax.random.normal(k1, shape) + 1j * jax.random.normal(k2, shape)
+    return jax.random.normal(key, shape)
+
+
 def _normalize_params(params):
     """Normalize iPEPS site tensor(s)."""
     if isinstance(params, tuple):
@@ -413,7 +421,11 @@ def optimize_gs_ad(
             A_init = A_su
         else:
             key = jax.random.PRNGKey(0)
-            A_init = _wrap_as_dense_tensor(jax.random.normal(key, (D, D, D, D, d_phys)))
+            k1, k2 = jax.random.split(key)
+            A_data = jax.random.normal(
+                k1, (D, D, D, D, d_phys)
+            ) + 1j * jax.random.normal(k2, (D, D, D, D, d_phys))
+            A_init = _wrap_as_dense_tensor(A_data)
 
     return _optimize_gs_ad_tensor(hamiltonian_gate, A_init, config)
 
@@ -461,7 +473,11 @@ def _optimize_gs_ad_tensor_reference_c4v(
             A = A_su
         else:
             key = jax.random.PRNGKey(0)
-            A = _wrap_as_dense_tensor(jax.random.normal(key, (D, D, D, D, d_phys)))
+            k1, k2 = jax.random.split(key)
+            A_data = jax.random.normal(
+                k1, (D, D, D, D, d_phys)
+            ) + 1j * jax.random.normal(k2, (D, D, D, D, d_phys))
+            A = _wrap_as_dense_tensor(A_data)
     else:
         A = A_init
 
@@ -793,15 +809,15 @@ def _optimize_gs_ad_tensor(
             ):
                 noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
                 if use_c4v:
-                    noise = config.gs_noise_amplitude * jax.random.normal(
-                        noise_key, params.shape
+                    noise = config.gs_noise_amplitude * _random_noise(
+                        noise_key, params.shape, params.dtype
                     )
                     params = params + noise * jnp.linalg.norm(params)
                     params = params / (jnp.linalg.norm(params) + 1e-10)
                 else:
                     data = params.todense()
-                    noise = config.gs_noise_amplitude * jax.random.normal(
-                        noise_key, data.shape
+                    noise = config.gs_noise_amplitude * _random_noise(
+                        noise_key, data.shape, data.dtype
                     )
                     noisy = data + noise * jnp.linalg.norm(data)
                     noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
@@ -918,7 +934,7 @@ def _optimize_gs_ad_tensor(
             if prev_A_flat is not None:
                 s = p_flat - prev_A_flat
                 y = g_flat - prev_grad_flat
-                sy = float(jnp.dot(s, y))
+                sy = float(jnp.real(jnp.vdot(s, y)))
                 if sy > 1e-10:
                     rho = 1.0 / sy
                     lbfgs_history.append((s, y, rho))
@@ -935,7 +951,9 @@ def _optimize_gs_ad_tensor(
 
                 env_for_metric = _env_cache["envs"][(0, 0)]
                 delta_metric = (
-                    delta_energy if step > 0 else float(jnp.dot(g_flat, g_flat))
+                    delta_energy
+                    if step > 0
+                    else float(jnp.real(jnp.vdot(g_flat, g_flat)))
                 )
                 D_bond = A.todense().shape[0]
                 d_loc = A.todense().shape[-1]
@@ -1032,15 +1050,15 @@ def _optimize_gs_ad_tensor(
             ):
                 noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
                 if use_c4v:
-                    noise = config.gs_noise_amplitude * jax.random.normal(
-                        noise_key, params.shape
+                    noise = config.gs_noise_amplitude * _random_noise(
+                        noise_key, params.shape, params.dtype
                     )
                     params = params + noise * jnp.linalg.norm(params)
                     params = params / (jnp.linalg.norm(params) + 1e-10)
                 else:
                     data = params.todense()
-                    noise = config.gs_noise_amplitude * jax.random.normal(
-                        noise_key, data.shape
+                    noise = config.gs_noise_amplitude * _random_noise(
+                        noise_key, data.shape, data.dtype
                     )
                     noisy = data + noise * jnp.linalg.norm(data)
                     noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
@@ -1193,10 +1211,16 @@ def _optimize_gs_ad_2site(
             _, (A_su, B_su), _ = ipeps(gate, None, su_config)
             AB_init = (A_su, B_su)
         else:
-            # Random initialization for 2-site AD
+            # Random complex128 initialization for 2-site AD (matches variPEPS)
             key_A, key_B = jax.random.split(jax.random.PRNGKey(0))
-            A_data = jax.random.normal(key_A, (D, D, D, D, d_phys))
-            B_data = jax.random.normal(key_B, (D, D, D, D, d_phys))
+            kA1, kA2 = jax.random.split(key_A)
+            kB1, kB2 = jax.random.split(key_B)
+            A_data = jax.random.normal(
+                kA1, (D, D, D, D, d_phys)
+            ) + 1j * jax.random.normal(kA2, (D, D, D, D, d_phys))
+            B_data = jax.random.normal(
+                kB1, (D, D, D, D, d_phys)
+            ) + 1j * jax.random.normal(kB2, (D, D, D, D, d_phys))
             A = _wrap_as_dense_tensor(A_data)
             B = _wrap_as_dense_tensor(B_data)
             AB_init = (A, B)
@@ -1522,8 +1546,8 @@ def _optimize_gs_ad_tensor_2site(
             ):
                 noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
                 if use_c4v:
-                    noise = config.gs_noise_amplitude * jax.random.normal(
-                        noise_key, params.shape
+                    noise = config.gs_noise_amplitude * _random_noise(
+                        noise_key, params.shape, params.dtype
                     )
                     params = params + noise * jnp.linalg.norm(params)
                     params = params / (jnp.linalg.norm(params) + 1e-10)
@@ -1532,8 +1556,8 @@ def _optimize_gs_ad_tensor_2site(
                     for i, p in enumerate(params):
                         k = jax.random.fold_in(noise_key, i)
                         data = p.todense()
-                        noise = config.gs_noise_amplitude * jax.random.normal(
-                            k, data.shape
+                        noise = config.gs_noise_amplitude * _random_noise(
+                            k, data.shape, data.dtype
                         )
                         noisy = data + noise * jnp.linalg.norm(data)
                         noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
@@ -1676,7 +1700,7 @@ def _optimize_gs_ad_tensor_2site(
             if prev_params_flat is not None:
                 s = p_flat - prev_params_flat
                 y = g_flat - prev_grad_flat
-                sy = float(jnp.dot(s, y))
+                sy = float(jnp.real(jnp.vdot(s, y)))
                 if sy > 1e-10:
                     rho = 1.0 / sy
                     lbfgs_history.append((s, y, rho))
@@ -1693,7 +1717,9 @@ def _optimize_gs_ad_tensor_2site(
                 envs_m = {(0, 0): envs_cached[(0, 0)], (1, 0): envs_cached[(1, 0)]}
                 sites_m = {(0, 0): A_cur, (1, 0): B_cur}
                 delta_metric = (
-                    delta_energy if step > 0 else float(jnp.dot(g_flat, g_flat))
+                    delta_energy
+                    if step > 0
+                    else float(jnp.real(jnp.vdot(g_flat, g_flat)))
                 )
                 n_A = A_cur.todense().size
 
@@ -1827,7 +1853,9 @@ def _optimize_gs_ad_tensor_2site(
                 for i, p in enumerate(params):
                     k = jax.random.fold_in(noise_key, i)
                     data = p.todense()
-                    noise = config.gs_noise_amplitude * jax.random.normal(k, data.shape)
+                    noise = config.gs_noise_amplitude * _random_noise(
+                        k, data.shape, data.dtype
+                    )
                     noisy = data + noise * jnp.linalg.norm(data)
                     noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
                     noisy_params.append(_wrap_tensor(noisy, p))
