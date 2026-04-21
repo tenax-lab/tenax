@@ -728,8 +728,7 @@ def _make_implicit_vjp_fn(
             return tuple(vi - ri for vi, ri in zip(v, i_minus_jt_v))
 
         rho = arnoldi_spectral_radius_pytree(apply_Jt_only, dE_denv, n_iter=20)
-        # Tolerance margin accounts for finite Arnoldi iteration error.
-        if rho >= 1.05:
+        if rho >= 1.0:
             raise CTMRGGradientError(rho)
 
         # Step 2: GMRES solve (I - J^T) lam = dE/denv
