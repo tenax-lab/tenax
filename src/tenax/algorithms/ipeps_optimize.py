@@ -676,6 +676,7 @@ def _optimize_gs_ad_tensor(
                 gmres_tol=ctm_cfg.gmres_tol,
                 gmres_maxiter=ctm_cfg.gmres_restart * 10,
                 gmres_restart=ctm_cfg.gmres_restart,
+                arnoldi_precheck=True,
             )
 
     def loss_fn(params):
@@ -1410,6 +1411,7 @@ def _optimize_gs_ad_tensor_2site(
                 gmres_maxiter=ctm_cfg_2s.gmres_restart * 10,
                 gmres_restart=ctm_cfg_2s.gmres_restart,
                 energy_fn=_energy_fn_2site,
+                arnoldi_precheck=True,
             )
 
     def loss_fn(params):

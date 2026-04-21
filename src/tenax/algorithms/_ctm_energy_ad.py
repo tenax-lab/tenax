@@ -202,6 +202,7 @@ def ctm_energy_implicit(
     gmres_maxiter: int = 200,
     gmres_restart: int = 30,
     energy_fn=None,
+    arnoldi_precheck: bool = False,
 ) -> jnp.ndarray:
     """Compute iPEPS energy with implicit-differentiation backward (GMRES).
 
@@ -243,6 +244,9 @@ def ctm_energy_implicit(
                            difference across all env tensors).
         min_iter:          Minimum iterations before checking convergence.
         energy_fn:         Optional custom energy function ``(A, env, gate) -> scalar``.
+        arnoldi_precheck:  If True, run 20-step Arnoldi to estimate rho(J^T)
+                           before GMRES. Raises ``CTMRGGradientError`` if
+                           rho >= 1. Enable when the caller has recovery logic.
 
     Returns:
         Scalar energy per site.
@@ -276,6 +280,7 @@ def ctm_energy_implicit(
         gmres_maxiter,
         gmres_restart,
         energy_fn,
+        arnoldi_precheck,
     )
 
 
@@ -432,6 +437,7 @@ def _ctm_energy_implicit_dispatch(
     gmres_maxiter,
     gmres_restart,
     energy_fn,
+    arnoldi_precheck,
 ):
     """Dispatch to custom_vjp-decorated function with caching.
 
@@ -462,6 +468,7 @@ def _ctm_energy_implicit_dispatch(
         id(neighbors),  # same dict object across optimizer steps
         id(gate),  # different Hamiltonian → different backward
         id(energy_fn),  # different energy callback → different backward
+        arnoldi_precheck,
     )
 
     entry = _VJP_CACHE.get(cache_key)
@@ -500,6 +507,7 @@ def _ctm_energy_implicit_dispatch(
         gmres_tol=gmres_tol,
         gmres_maxiter=gmres_maxiter,
         gmres_restart=gmres_restart,
+        arnoldi_precheck=arnoldi_precheck,
     )
     _VJP_CACHE[cache_key] = (f, mutables)
     return f(params_data_tuple)
@@ -522,6 +530,7 @@ def _make_implicit_vjp_fn(
     gmres_tol,
     gmres_maxiter,
     gmres_restart,
+    arnoldi_precheck=False,
 ):
     """Build a custom_vjp-decorated function closed over static config.
 
@@ -722,14 +731,16 @@ def _make_implicit_vjp_fn(
         dE_denv = _jit_dE_denv(params_data_tuple, env_leaves)
 
         # Step 1.5: Arnoldi precheck — estimate spectral radius of J^T
-        def apply_Jt_only(v):
-            """Apply J^T (not I - J^T)."""
-            i_minus_jt_v = _jit_apply_Jt(params_data_tuple, env_leaves, v)
-            return tuple(vi - ri for vi, ri in zip(v, i_minus_jt_v))
+        if arnoldi_precheck:
 
-        rho = arnoldi_spectral_radius_pytree(apply_Jt_only, dE_denv, n_iter=20)
-        if rho >= 1.0:
-            raise CTMRGGradientError(rho)
+            def apply_Jt_only(v):
+                """Apply J^T (not I - J^T)."""
+                i_minus_jt_v = _jit_apply_Jt(params_data_tuple, env_leaves, v)
+                return tuple(vi - ri for vi, ri in zip(v, i_minus_jt_v))
+
+            rho = arnoldi_spectral_radius_pytree(apply_Jt_only, dE_denv, n_iter=20)
+            if rho >= 1.0:
+                raise CTMRGGradientError(rho)
 
         # Step 2: GMRES solve (I - J^T) lam = dE/denv
         # GMRES runs in Python; each matvec is a JIT'd call.
