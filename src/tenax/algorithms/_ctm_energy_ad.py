@@ -7,6 +7,7 @@ __all__ = ["ctm_energy_explicit", "ctm_energy_implicit"]
 import jax
 import jax.numpy as jnp
 
+from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
 from tenax.algorithms._ctm_python_loop import (
     Coord,
     _make_jit_ctm_step,
@@ -21,7 +22,7 @@ from tenax.algorithms._ctm_tensor_init import (
     initialize_ctm_tensor_env,
 )
 from tenax.algorithms._gmres_lax import gmres_pytree_jax
-from tenax.algorithms.ad_utils import _phase_fix_ctm_tensor
+from tenax.algorithms.ad_utils import CTMRGGradientError, _phase_fix_ctm_tensor
 
 
 def _default_energy(site_tensors, envs, gate, coords, neighbors):
@@ -719,6 +720,17 @@ def _make_implicit_vjp_fn(
 
         # Step 1: dE/denv
         dE_denv = _jit_dE_denv(params_data_tuple, env_leaves)
+
+        # Step 1.5: Arnoldi precheck — estimate spectral radius of J^T
+        def apply_Jt_only(v):
+            """Apply J^T (not I - J^T)."""
+            i_minus_jt_v = _jit_apply_Jt(params_data_tuple, env_leaves, v)
+            return tuple(vi - ri for vi, ri in zip(v, i_minus_jt_v))
+
+        rho = arnoldi_spectral_radius_pytree(apply_Jt_only, dE_denv, n_iter=20)
+        # Tolerance margin accounts for finite Arnoldi iteration error.
+        if rho >= 1.05:
+            raise CTMRGGradientError(rho)
 
         # Step 2: GMRES solve (I - J^T) lam = dE/denv
         # GMRES runs in Python; each matvec is a JIT'd call.
