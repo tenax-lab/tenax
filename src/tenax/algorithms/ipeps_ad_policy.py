@@ -55,8 +55,5 @@ def build_ad_ctm_config(config: iPEPSConfig) -> CTMConfig:
     if config.gs_projector_method is not None:
         ctm_cfg = replace(ctm_cfg, projector_method=config.gs_projector_method)
     if ctm_cfg.forward_gauge == "qr":
-        if config.gs_implicit_ad:
-            ctm_cfg = replace(ctm_cfg, forward_gauge="sigma")
-        else:
-            ctm_cfg = replace(ctm_cfg, forward_gauge="phase")
+        ctm_cfg = replace(ctm_cfg, forward_gauge="phase")
     return ctm_cfg
