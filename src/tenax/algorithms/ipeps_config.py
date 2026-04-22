@@ -201,7 +201,7 @@ class iPEPSConfig:
     gate_order: str = "sequential"
     unit_cell: str = "1x1"  # "1x1" or "2site"
     # AD ground-state optimization settings
-    gs_optimizer: str = "cg"  # "cg", "adam", or "lbfgs"
+    gs_optimizer: str = "lbfgs"  # "lbfgs", "cg", or "adam"
     gs_learning_rate: float = 1e-3
     gs_num_steps: int = 200
     gs_conv_tol: float = 1e-8
