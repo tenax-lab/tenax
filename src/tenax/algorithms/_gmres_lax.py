@@ -297,7 +297,7 @@ def gmres_pytree_jax(
     b_flat = flatten(b_tree)
     x0_flat = flatten(x0_tree) if x0_tree is not None else b_flat
 
-    kwargs = {"atol": tol}
+    kwargs = {"tol": tol, "atol": tol}
     if maxiter is not None:
         kwargs["maxiter"] = maxiter
     if restart is not None:
