@@ -21,7 +21,7 @@ from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     initialize_ctm_tensor_env,
 )
-from tenax.algorithms._gmres_lax import gmres_pytree_jax
+from tenax.algorithms._gmres_lax import gmres_pytree
 from tenax.algorithms.ad_utils import CTMRGGradientError, _phase_fix_ctm_tensor
 
 
@@ -152,10 +152,15 @@ def _sigma_gauge_fix_env(env_new, env_old):
         Q_old = Q_old * signs_old[None, :]
         return Q_new @ Q_old.conj().T
 
-    s1 = _compute_sigma(T1_n, T1_o)
-    s2 = _compute_sigma(T2_n, T2_o)
-    s3 = _compute_sigma(T3_n, T3_o)
-    s4 = _compute_sigma(T4_n, T4_o)
+    # stop_gradient on the sigmas: at the converged fixed point sigma = I,
+    # so its derivative w.r.t. the environment is not needed for implicit
+    # differentiation — only the CTM step Jacobian matters.  Without this,
+    # the QR inside _compute_sigma produces NaN VJPs when the transfer-matrix
+    # eigenvector density matrix is rank-deficient (chi > D^2).
+    s1 = jax.lax.stop_gradient(_compute_sigma(T1_n, T1_o))
+    s2 = jax.lax.stop_gradient(_compute_sigma(T2_n, T2_o))
+    s3 = jax.lax.stop_gradient(_compute_sigma(T3_n, T3_o))
+    s4 = jax.lax.stop_gradient(_compute_sigma(T4_n, T4_o))
 
     # Apply sigma to corners: s_row^H @ C @ s_col
     C1_f = s4.conj().T @ C1_n @ s1
@@ -626,8 +631,9 @@ def _make_implicit_vjp_fn(
     jit_step_bwd = _make_jit_ctm_step(neighbors)
 
     # --- JIT'd building blocks for the backward ---
-    # Each is a small, fast-compiling JIT program. The GMRES loop runs in
-    # Python, calling the JIT'd matvec — no nested while_loop compilation.
+    # dE/denv and chain_rule are small JIT programs. The GMRES solve is
+    # fully JIT-fused: the while_loop + all matvec VJPs compile into one
+    # XLA program, eliminating Python-loop overhead.
 
     def _apply_gauge_fix(e_out, e_in):
         """Apply the same gauge fix used in the forward pass."""
@@ -667,6 +673,13 @@ def _make_implicit_vjp_fn(
 
         def gauge_fixed_sweep_from_env(env_leaves_flat):
             e = jax.tree.unflatten(env_treedef, env_leaves_flat)
+            # stop_gradient on the reference ensures gradients flow only
+            # through the forward map, not through the alignment target.
+            # Without this, the sigma gauge Jacobian includes reference-path
+            # derivatives that push eigenvalues toward 1, making (I - J^T)
+            # near-singular and GMRES returns near-zero lambda.
+            # Cf. ad_utils.py step_fn_sigma (line ~1232).
+            e_ref = jax.tree.map(jax.lax.stop_gradient, e)
             e_out = jit_step_bwd(
                 site_tensors,
                 e,
@@ -675,7 +688,7 @@ def _make_implicit_vjp_fn(
                 renormalize=renormalize,
                 projector_backward=projector_backward,
             )
-            e_fixed = _apply_gauge_fix(e_out, e)
+            e_fixed = _apply_gauge_fix(e_out, e_ref)
             return tuple(jax.tree.leaves(e_fixed))
 
         _, vjp_fn = jax.vjp(gauge_fixed_sweep_from_env, env_leaves)
@@ -723,14 +736,57 @@ def _make_implicit_vjp_fn(
         total = tuple(g_scalar * (d + ind) for d, ind in zip(direct, indirect))
         return (total,)
 
+    @jax.jit
+    def _jit_gmres_solve(params_data_tuple, env_leaves, rhs):
+        """GMRES solve compiled into a single XLA program.
+
+        Fuses the entire (I - J^T) solve into one XLA computation.
+        All GMRES iterations run on-device with zero Python overhead.
+        """
+        params_data = list(params_data_tuple)
+        templates_ = mutables["templates"]
+        site_tensors = _reconstruct_site_tensors(params_data, coords, templates_)
+        env_treedef = _cached["env_treedef"]
+
+        def apply_I_minus_Jt(v):
+            """(I - J^T) matvec — inlined for JIT fusion."""
+
+            def gauge_fixed_sweep_from_env(env_leaves_flat):
+                e = jax.tree.unflatten(env_treedef, env_leaves_flat)
+                e_ref = jax.tree.map(jax.lax.stop_gradient, e)
+                e_out = jit_step_bwd(
+                    site_tensors,
+                    e,
+                    chi=chi,
+                    projector_method=projector_method,
+                    renormalize=renormalize,
+                    projector_backward=projector_backward,
+                )
+                e_fixed = _apply_gauge_fix(e_out, e_ref)
+                return tuple(jax.tree.leaves(e_fixed))
+
+            _, vjp_fn = jax.vjp(gauge_fixed_sweep_from_env, env_leaves)
+            jt_v = vjp_fn(v)[0]
+            return tuple(vi - ji for vi, ji in zip(v, jt_v))
+
+        lam, info = gmres_pytree(
+            apply_I_minus_Jt,
+            rhs,
+            rhs,
+            tol=gmres_tol,
+            maxiter=gmres_maxiter,
+            restart=gmres_restart,
+        )
+        return tuple(jax.tree.leaves(lam)), info
+
     def f_bwd(residuals, g):
-        """Python-loop backward: JIT'd VJPs + eager GMRES."""
+        """Backward: JIT-fused GMRES solve + JIT'd chain rule."""
         params_data_tuple, env_leaves = residuals
 
         # Step 1: dE/denv
         dE_denv = _jit_dE_denv(params_data_tuple, env_leaves)
 
-        # Step 1.5: Arnoldi precheck — estimate spectral radius of J^T
+        # Step 1.5: Arnoldi precheck (optional, uses eager matvec)
         if arnoldi_precheck:
 
             def apply_Jt_only(v):
@@ -742,22 +798,12 @@ def _make_implicit_vjp_fn(
             if rho >= 1.0:
                 raise CTMRGGradientError(rho)
 
-        # Step 2: GMRES solve (I - J^T) lam = dE/denv
-        # GMRES runs in Python; each matvec is a JIT'd call.
-        def apply_I_minus_Jt(v):
-            return _jit_apply_Jt(params_data_tuple, env_leaves, v)
-
-        lam, _info = gmres_pytree_jax(
-            apply_I_minus_Jt,
-            dE_denv,
-            dE_denv,
-            tol=gmres_tol,
-            maxiter=gmres_maxiter,
-            restart=gmres_restart,
-        )
+        # Step 2: GMRES solve — fully compiled into one XLA program.
+        # All GMRES iterations run on-device with zero Python overhead.
+        lam_leaves, _info = _jit_gmres_solve(params_data_tuple, env_leaves, dE_denv)
 
         # Steps 3-4: chain rule
-        return _jit_chain_rule(params_data_tuple, env_leaves, lam, g)
+        return _jit_chain_rule(params_data_tuple, env_leaves, lam_leaves, g)
 
     f.defvjp(f_fwd, f_bwd)
     return f
