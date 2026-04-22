@@ -674,7 +674,7 @@ def _optimize_gs_ad_tensor(
                 conv_method=ctm_cfg.ctm_conv_method,
                 min_iter=ctm_cfg.min_iter,
                 gmres_tol=ctm_cfg.gmres_tol,
-                gmres_maxiter=ctm_cfg.gmres_restart * 10,
+                gmres_maxiter=ctm_cfg.gmres_restart,
                 gmres_restart=ctm_cfg.gmres_restart,
                 arnoldi_precheck=False,
             )
@@ -1408,7 +1408,7 @@ def _optimize_gs_ad_tensor_2site(
                 conv_method=ctm_cfg_2s.ctm_conv_method,
                 min_iter=ctm_cfg_2s.min_iter,
                 gmres_tol=ctm_cfg_2s.gmres_tol,
-                gmres_maxiter=ctm_cfg_2s.gmres_restart * 10,
+                gmres_maxiter=ctm_cfg_2s.gmres_restart,
                 gmres_restart=ctm_cfg_2s.gmres_restart,
                 energy_fn=_energy_fn_2site,
                 arnoldi_precheck=False,

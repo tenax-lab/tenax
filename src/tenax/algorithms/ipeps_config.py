@@ -58,7 +58,7 @@ class CTMConfig:
     )
     ad_backward_method: str = "vjp"  # "vjp" (iterative VJP) or "gmres" (xfail — #292)
     gmres_tol: float = 1e-6  # tolerance for GMRES backward solve
-    gmres_restart: int = 30  # restart dimension for GMRES
+    gmres_restart: int = 20  # Krylov dimension for GMRES (no outer restarts)
     ctm_conv_method: str = "sv"  # "sv" (singular value) or "elementwise"
     # forward_gauge: "qr" (default, auto-promoted to "sigma" by optimize_gs_ad
     # when gs_implicit_ad=True, or to "phase" when gs_implicit_ad=False),
