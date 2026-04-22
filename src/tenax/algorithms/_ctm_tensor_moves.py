@@ -37,10 +37,11 @@ def _phase_fix_normalize_tensor(T: Tensor) -> Tensor:
     """Frobenius-normalize + phase-fix a single C or T tensor.
 
     Matches variPEPS ``_post_process_CTM_tensors``: normalize by Frobenius
-    norm, then fix the global U(1) phase by making the largest element
-    real-positive.  This pins the sign/phase of each tensor so that
-    consecutive CTM sweeps see a sign-stable fixed point, which
-    regularizes the Jacobian ``J^T`` in implicit AD.
+    norm, then fix the global U(1) phase by making the first element
+    with ``|x| >= 0.1 * max(|arr|)`` real-positive.  This pins the
+    sign/phase of each tensor so that consecutive CTM sweeps see a
+    sign-stable fixed point, which regularizes the Jacobian ``J^T``
+    in implicit AD.
     """
     import jax.numpy as jnp
 
@@ -48,7 +49,9 @@ def _phase_fix_normalize_tensor(T: Tensor) -> Tensor:
     norm = jnp.linalg.norm(arr)
     arr = arr / (norm + 1e-30)
     flat = arr.ravel()
-    idx = jnp.argmax(jnp.abs(flat))
+    abs_flat = jnp.abs(flat)
+    threshold = 0.1 * jnp.max(abs_flat)
+    idx = jnp.argmax(abs_flat >= threshold)  # first element above threshold
     phase = flat[idx] / (jnp.abs(flat[idx]) + 1e-30)
     arr = arr * jnp.conj(phase)
     return DenseTensor(arr, T.indices)
