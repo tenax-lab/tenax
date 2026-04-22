@@ -21,7 +21,7 @@ from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     initialize_ctm_tensor_env,
 )
-from tenax.algorithms._gmres_lax import gmres_pytree
+from tenax.algorithms._gmres_lax import gmres_pytree, gmres_pytree_jax
 from tenax.algorithms.ad_utils import CTMRGGradientError, _phase_fix_ctm_tensor
 
 
@@ -798,9 +798,21 @@ def _make_implicit_vjp_fn(
             if rho >= 1.0:
                 raise CTMRGGradientError(rho)
 
-        # Step 2: GMRES solve — fully compiled into one XLA program.
-        # All GMRES iterations run on-device with zero Python overhead.
-        lam_leaves, _info = _jit_gmres_solve(params_data_tuple, env_leaves, dE_denv)
+        # Step 2: GMRES solve via JAX's built-in solver (eager, not JIT-fused).
+        # Uses jax.scipy.sparse.linalg.gmres which converges reliably at
+        # large chi where the custom gmres_lax can produce wrong gradients.
+        def _eager_apply_I_minus_Jt(v):
+            return _jit_apply_Jt(params_data_tuple, env_leaves, v)
+
+        lam, _info = gmres_pytree_jax(
+            _eager_apply_I_minus_Jt,
+            dE_denv,
+            dE_denv,
+            tol=gmres_tol,
+            maxiter=gmres_maxiter,
+            restart=gmres_restart,
+        )
+        lam_leaves = tuple(jax.tree.leaves(lam))
 
         # Steps 3-4: chain rule
         return _jit_chain_rule(params_data_tuple, env_leaves, lam_leaves, g)
