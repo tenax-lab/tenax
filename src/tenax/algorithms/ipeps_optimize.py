@@ -2298,7 +2298,9 @@ def _optimize_gs_ad_multisite(
 
         prev_energy = energy_float
 
-        if delta_energy < config.gs_conv_tol:
+        # Skip convergence check on early steps and right after a stall
+        # (stall resets prev_energy ≈ current, giving false dE ≈ 0).
+        if delta_energy < config.gs_conv_tol and step > 5 and stall_count == 0:
             if config.gs_verbose:
                 if not logged:
                     _log_ad_step(
