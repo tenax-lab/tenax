@@ -7,6 +7,8 @@ from typing import Literal, NamedTuple
 
 import jax
 
+from tenax.core.lattice import Lattice
+
 
 @dataclass
 class CTMConfig:
@@ -200,7 +202,7 @@ class iPEPSConfig:
     ctm: CTMConfig = field(default_factory=CTMConfig)
     svd_trunc_err: float | None = None
     gate_order: str = "sequential"
-    unit_cell: str = "1x1"  # "1x1" or "2site"
+    unit_cell: str | Lattice = "1x1"  # "1x1", "2site", or Lattice(...)
     # AD ground-state optimization settings
     gs_optimizer: str = "lbfgs"  # "lbfgs", "cg", or "adam"
     gs_learning_rate: float = 1e-3
@@ -263,9 +265,13 @@ class iPEPSConfig:
         object.__setattr__(self, "gs_explicit_ad", None)
 
         valid_unit_cells = {"1x1", "2site"}
-        if self.unit_cell not in valid_unit_cells:
+        if (
+            not isinstance(self.unit_cell, Lattice)
+            and self.unit_cell not in valid_unit_cells
+        ):
             raise ValueError(
-                f"unit_cell must be one of {valid_unit_cells}, got {self.unit_cell!r}"
+                f"unit_cell must be one of {valid_unit_cells} or a Lattice, "
+                f"got {self.unit_cell!r}"
             )
         valid_stall_recovery = {None, "noise", "reset"}
         if self.gs_stall_recovery not in valid_stall_recovery:
