@@ -260,13 +260,11 @@ def ctm_energy_implicit(
     # Pass Tensor objects directly through custom_vjp boundary.
     # Both DenseTensor and SymmetricTensor are registered JAX pytrees,
     # so JAX can differentiate through them without densifying.
-    params_data = [site_tensors[c] for c in coords]
-    templates = {c: site_tensors[c] for c in coords}
+    params_data = tuple(site_tensors[c] for c in coords)
 
     return _ctm_energy_implicit_dispatch(
-        tuple(params_data),
+        params_data,
         coords,
-        templates,
         neighbors,
         gate,
         chi,
@@ -287,22 +285,6 @@ def ctm_energy_implicit(
         energy_fn,
         arnoldi_precheck,
     )
-
-
-def _reconstruct_site_tensors(params_data, coords, templates):
-    """Reconstruct site_tensors dict from raw data arrays + templates."""
-    from tenax.core.tensor import SymmetricTensor
-
-    result = {}
-    for i, c in enumerate(coords):
-        tmpl = templates[c]
-        if isinstance(tmpl, SymmetricTensor):
-            result[c] = SymmetricTensor.from_dense(
-                params_data[i], tmpl.indices, tol=float("inf")
-            )
-        else:
-            result[c] = tmpl.__class__(params_data[i], tmpl.indices)
-    return result
 
 
 def _sigma_gauged_ctm_converge(
@@ -423,7 +405,6 @@ _VJP_CACHE: dict = {}
 def _ctm_energy_implicit_dispatch(
     params_data_tuple,
     coords,
-    templates,
     neighbors,
     gate,
     chi,
@@ -451,10 +432,8 @@ def _ctm_energy_implicit_dispatch(
     optimizer loops reuse the compiled backward across steps.
     """
     # Build a hashable key from the static configuration.
-    # Templates and env_init change per call (updated tensors/envs) but
-    # have the same structure, so the JIT backward compiles once and
-    # reuses. Gate and energy_fn must be in the key because the JIT
-    # backward captures them at trace time as compile-time constants.
+    # Gate and energy_fn must be in the key because the JIT backward
+    # captures them at trace time as compile-time constants.
     cache_key = (
         tuple(coords),
         chi,
@@ -480,7 +459,6 @@ def _ctm_energy_implicit_dispatch(
     if entry is not None:
         f, mutables = entry
         # Update per-call mutable state
-        mutables["templates"] = templates
         mutables["gate"] = gate
         mutables["chi_ramp"] = chi_ramp
         mutables["env_init"] = env_init
@@ -489,7 +467,6 @@ def _ctm_energy_implicit_dispatch(
 
     # First call with this config — build and cache
     mutables = {
-        "templates": templates,
         "gate": gate,
         "chi_ramp": chi_ramp,
         "env_init": env_init,
@@ -539,7 +516,7 @@ def _make_implicit_vjp_fn(
 ):
     """Build a custom_vjp-decorated function closed over static config.
 
-    Per-call mutable state (templates, gate, chi_ramp, env_init, energy_fn)
+    Per-call mutable state (gate, chi_ramp, env_init, energy_fn)
     is read from the ``mutables`` dict, which is updated by the dispatch
     function before each call. This allows the compiled ``@jax.jit``
     backward to be reused across optimizer steps.
