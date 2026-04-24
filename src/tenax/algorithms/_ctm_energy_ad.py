@@ -377,8 +377,8 @@ def _sigma_gauged_ctm_converge(
     from tenax.algorithms._ctm_tensor_convergence import (
         _corner_singular_values,
         _ctm_sv_diff,
+        _max_env_leaf_diff,
     )
-    from tenax.core.tensor import SymmetricTensor as _SymmetricTensor
 
     jit_step = _make_jit_ctm_step(neighbors)
     envs = (
@@ -440,19 +440,7 @@ def _sigma_gauged_ctm_converge(
                 continue
             max_diff = 0.0
             for c in sorted(envs):
-                for told, tnew in zip(
-                    jax.tree.leaves(prev_envs[c]),
-                    jax.tree.leaves(envs[c]),
-                ):
-                    # For SymmetricTensor, compare flat block data directly
-                    # to avoid allocating a full dense chi x chi matrix.
-                    if isinstance(told, _SymmetricTensor):
-                        a, b = told._data, tnew._data
-                    else:
-                        a = told.todense() if hasattr(told, "todense") else told
-                        b = tnew.todense() if hasattr(tnew, "todense") else tnew
-                    diff = float(jnp.max(jnp.abs(b - a)))
-                    max_diff = max(max_diff, diff)
+                max_diff = max(max_diff, _max_env_leaf_diff(prev_envs[c], envs[c]))
             converged = max_diff < conv_tol
             prev_envs = {c: envs[c] for c in envs}
         else:
