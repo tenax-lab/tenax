@@ -7,6 +7,7 @@ __all__ = [
     "Coord",
     "SINGLE_SITE_NEIGHBORS",
     "_DIRECTION_MOVES",
+    "_corner_singular_values",
     "_ctm_sv_diff",
     "_ctm_tensor_multisite",
     "_ctm_tensor_sweep",
@@ -252,6 +253,28 @@ def _ctm_sv_diff(sv_new: jax.Array, sv_old: jax.Array) -> jax.Array:
     return jnp.max(jnp.abs(sv1 - sv2))
 
 
+def _corner_singular_values(C):  # noqa: N802
+    """Extract sorted singular values from a 2-leg corner tensor.
+
+    For SymmetricTensor: per-sector SVD, concatenate, sort descending.
+    This avoids allocating a full dense chi x chi matrix.
+    For DenseTensor / dense array: standard dense SVD.
+    """
+    if isinstance(C, SymmetricTensor):
+        svs = []
+        for key in C._block_keys:
+            block = C.blocks[key]
+            s = jnp.linalg.svd(block, compute_uv=False)
+            svs.append(s)
+        if svs:
+            all_svs = jnp.concatenate(svs)
+            return jnp.sort(all_svs)[::-1]
+        return jnp.zeros(0)
+    # DenseTensor or raw array
+    data = C.todense() if hasattr(C, "todense") else C
+    return jnp.linalg.svd(data, compute_uv=False)
+
+
 def ctm_tensor(
     A: Tensor,
     chi: int,
@@ -333,7 +356,7 @@ def ctm_tensor(
             projector_backward=projector_backward,
         )
 
-        current_sv = jnp.linalg.svd(env.C1.todense(), compute_uv=False)
+        current_sv = _corner_singular_values(env.C1)
         if prev_sv is not None:
             diff = _ctm_sv_diff(current_sv, prev_sv)
             if float(diff) < conv_tol:
@@ -400,7 +423,7 @@ def _ctm_tensor_multisite(
         )
         converged = True
         for c in sorted(envs):
-            sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
+            sv = _corner_singular_values(envs[c].C1)
             if c in prev_svs:
                 if float(_ctm_sv_diff(sv, prev_svs[c])) >= conv_tol:
                     converged = False

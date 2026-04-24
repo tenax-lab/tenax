@@ -308,7 +308,11 @@ def _sigma_gauged_ctm_converge(
     Runs CTM sweeps with sigma gauge alignment at each step, ensuring
     the converged environment is a literal fixed point of the gauged step.
     """
-    from tenax.algorithms._ctm_tensor_convergence import _ctm_sv_diff
+    from tenax.algorithms._ctm_tensor_convergence import (
+        _corner_singular_values,
+        _ctm_sv_diff,
+    )
+    from tenax.core.tensor import SymmetricTensor as _SymmetricTensor
 
     jit_step = _make_jit_ctm_step(neighbors)
     envs = (
@@ -358,7 +362,7 @@ def _sigma_gauged_ctm_converge(
         if total_iter < min_iter:
             if conv_method == "sv":
                 for c in sorted(envs):
-                    prev_svs[c] = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
+                    prev_svs[c] = _corner_singular_values(envs[c].C1)
             else:
                 prev_envs = {c: envs[c] for c in envs}
             continue
@@ -374,8 +378,13 @@ def _sigma_gauged_ctm_converge(
                     jax.tree.leaves(prev_envs[c]),
                     jax.tree.leaves(envs[c]),
                 ):
-                    a = told.todense() if hasattr(told, "todense") else told
-                    b = tnew.todense() if hasattr(tnew, "todense") else tnew
+                    # For SymmetricTensor, compare flat block data directly
+                    # to avoid allocating a full dense chi x chi matrix.
+                    if isinstance(told, _SymmetricTensor):
+                        a, b = told._data, tnew._data
+                    else:
+                        a = told.todense() if hasattr(told, "todense") else told
+                        b = tnew.todense() if hasattr(tnew, "todense") else tnew
                     diff = float(jnp.max(jnp.abs(b - a)))
                     max_diff = max(max_diff, diff)
             converged = max_diff < conv_tol
@@ -384,7 +393,7 @@ def _sigma_gauged_ctm_converge(
             # SV convergence (default): corner singular value difference
             converged = True
             for c in sorted(envs):
-                sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
+                sv = _corner_singular_values(envs[c].C1)
                 if c in prev_svs:
                     diff = float(_ctm_sv_diff(sv, prev_svs[c]))
                     if diff >= conv_tol:
