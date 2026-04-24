@@ -1318,29 +1318,6 @@ class TestADSymmetric:
         assert isinstance(A_opt, Tensor)
         assert np.isfinite(E_gs)
 
-    @pytest.mark.xfail(
-        reason=(
-            "Pre-existing flakiness, unrelated to the shape-bug fix in "
-            "issue #294. This test compares two energies computed from "
-            "different CTM code paths: E_init via legacy ``ctm_tensor`` "
-            "(single-site sweep, no gauge fix) lands on a fixed point "
-            "near -0.154 at chi=4 for this random-init tensor, while "
-            "``optimize_gs_ad``'s internal ``_eval_fresh`` uses the "
-            "multisite fixed-point CTM with the auto-promoted phase gauge, "
-            "which converges to a different gauge fixed point — and at "
-            "chi=4 with a random-init tensor the phase gauge is degenerate "
-            "(E=0.0 on the initial tensor). The resulting E_gs after 5 AD "
-            "steps lands around -0.119, making the comparison meaningless. "
-            "Fixing this requires either (a) aligning the two CTM code "
-            "paths on a common fixed point, or (b) rewriting the test's "
-            "E_init computation to use the same ``_ctm_tensor_multisite_"
-            "fixed_point`` path that ``_eval_fresh`` uses internally with "
-            "a gauge that doesn't degenerate at random init. Both are out "
-            "of scope for issue #294 (the shape-bug fix); tracked as a "
-            "follow-up."
-        ),
-        strict=False,
-    )
     def test_optimize_gs_ad_symmetric_energy_decreases(self):
         """AD optimization with SymmetricTensor decreases energy."""
         gate = self._heisenberg_gate()
@@ -1852,130 +1829,49 @@ class TestPostPR291ADBaseline:
             tup = _config_to_tuple(CTMConfig(forward_gauge=mode))
             assert _config_from_tuple(tup).forward_gauge == mode
 
-    def _capture_explicit_ad_gauge(self, monkeypatch):
-        """Install a spy on ``ctm_tensor_converge_explicit`` that records the
-        decoded ``forward_gauge`` on first call and aborts the optimizer via
-        a sentinel exception. Returns the captured dict."""
+    def _capture_implicit_ad_forward_gauge(self, monkeypatch):
+        """Install a spy on ``ctm_energy_implicit`` that records the
+        ``forward_gauge`` kwarg on first call and aborts the optimizer via
+        a sentinel exception.  Patches at the module attribute; the
+        optimizer imports ``ctm_energy_implicit`` locally inside the
+        optimize function body, so each call re-fetches the patched
+        attribute.  Returns the captured dict."""
         captured: dict = {}
 
-        from tenax.algorithms import ad_utils as _ad_utils
+        from tenax.algorithms import _ctm_energy_ad as _ctm_ad
 
         class _StopOptimizer(Exception):
             pass
 
-        real = _ad_utils.ctm_tensor_converge_explicit
-
-        def spy(site_tensors, env_init_leaves, neighbors, config_tuple, *a, **kw):
-            captured["forward_gauge"] = _ad_utils._config_from_tuple(
-                config_tuple
-            ).forward_gauge
-            captured["projector_method"] = _ad_utils._config_from_tuple(
-                config_tuple
-            ).projector_method
+        def spy(site_tensors, neighbors, gate, **kw):
+            captured["forward_gauge"] = kw.get("forward_gauge")
+            captured["projector_method"] = kw.get("projector_method")
             raise _StopOptimizer
 
-        monkeypatch.setattr(_ad_utils, "ctm_tensor_converge_explicit", spy)
+        monkeypatch.setattr(_ctm_ad, "ctm_energy_implicit", spy)
         captured["_sentinel"] = _StopOptimizer
-        captured["_real"] = real
         return captured
 
-    def test_explicit_ad_preserves_explicit_qr_gauge(
-        self, monkeypatch, heisenberg_gate
+    @pytest.mark.parametrize("mode", ["qr", "sigma", "phase", "none"])
+    def test_implicit_ad_preserves_explicit_forward_gauge(
+        self, monkeypatch, heisenberg_gate, mode
     ):
-        """``optimize_gs_ad`` preserves explicit ``forward_gauge='qr'`` — no
-        silent promotion.  The default is now ``"phase"``; a user who opts
-        into ``"qr"`` explicitly gets ``"qr"``."""
-        captured = self._capture_explicit_ad_gauge(monkeypatch)
+        """Post-PR-#343 policy: ``optimize_gs_ad`` preserves the user's
+        explicit ``forward_gauge`` choice — no silent promotion.  The
+        implicit path passes the configured gauge through to
+        ``ctm_energy_implicit`` unchanged."""
+        captured = self._capture_implicit_ad_forward_gauge(monkeypatch)
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10, min_iter=3, forward_gauge="qr"),
-            gs_num_steps=1,
-            gs_implicit_ad=False,
-            gs_explicit_ad_steps=3,
-            gs_explicit_ad_warmup=1,
-            unit_cell="1x1",
-            su_init=False,
-        )
-        with pytest.raises(captured["_sentinel"]):
-            optimize_gs_ad(heisenberg_gate, None, config)
-        assert captured["forward_gauge"] == "qr"
-
-    def test_explicit_ad_respects_explicit_sigma_gauge(
-        self, monkeypatch, heisenberg_gate
-    ):
-        """When the user explicitly sets ``forward_gauge='sigma'``, the
-        auto-phase promotion must not fire: sigma is the documented choice
-        for the implicit/GMRES path and the historical sigma-gauge
-        explicit-AD workflow, and overriding it would be a silent regression.
-        """
-        captured = self._capture_explicit_ad_gauge(monkeypatch)
-        config = iPEPSConfig(
-            max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10, min_iter=3, forward_gauge="sigma"),
-            gs_num_steps=1,
-            gs_implicit_ad=False,
-            gs_explicit_ad_steps=3,
-            gs_explicit_ad_warmup=1,
-            unit_cell="1x1",
-            su_init=False,
-        )
-        with pytest.raises(captured["_sentinel"]):
-            optimize_gs_ad(heisenberg_gate, None, config)
-        assert captured["forward_gauge"] == "sigma"
-
-    def test_explicit_ad_respects_explicit_none_gauge(
-        self, monkeypatch, heisenberg_gate
-    ):
-        """``forward_gauge='none'`` is the post-PR-#291 diagnostic / benchmark
-        mode. It must reach ``ctm_tensor_converge_explicit`` unchanged so
-        benchmarks can isolate gauge-fixing cost from projector cost."""
-        captured = self._capture_explicit_ad_gauge(monkeypatch)
-        config = iPEPSConfig(
-            max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10, min_iter=3, forward_gauge="none"),
-            gs_num_steps=1,
-            gs_implicit_ad=False,
-            gs_explicit_ad_steps=3,
-            gs_explicit_ad_warmup=1,
-            unit_cell="1x1",
-            su_init=False,
-        )
-        with pytest.raises(captured["_sentinel"]):
-            optimize_gs_ad(heisenberg_gate, None, config)
-        assert captured["forward_gauge"] == "none"
-
-    def test_implicit_ad_does_not_auto_promote_gauge(
-        self, monkeypatch, heisenberg_gate
-    ):
-        """The implicit-diff path auto-promotes ``forward_gauge='qr'`` to
-        ``'sigma'`` for stable element-wise CTM convergence, which is
-        required by the VJP backward."""
-        from tenax.algorithms import ad_utils as _ad_utils
-
-        captured: dict = {}
-
-        class _StopOptimizer(Exception):
-            pass
-
-        def spy(site_tensors, env_init_leaves, neighbors, config_tuple):
-            captured["forward_gauge"] = _ad_utils._config_from_tuple(
-                config_tuple
-            ).forward_gauge
-            raise _StopOptimizer
-
-        monkeypatch.setattr(_ad_utils, "ctm_tensor_converge", spy)
-        config = iPEPSConfig(
-            max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10, min_iter=3, forward_gauge="qr"),
+            ctm=CTMConfig(chi=4, max_iter=10, min_iter=3, forward_gauge=mode),
             gs_num_steps=1,
             gs_implicit_ad=True,
             unit_cell="1x1",
             su_init=False,
         )
-        with pytest.raises(_StopOptimizer):
+        with pytest.raises(captured["_sentinel"]):
             optimize_gs_ad(heisenberg_gate, None, config)
-        # Implicit path auto-promotes "qr" to "sigma".
-        assert captured["forward_gauge"] == "sigma"
+        assert captured["forward_gauge"] == mode
 
     @pytest.mark.xfail(
         reason=(
@@ -1998,44 +1894,49 @@ class TestPostPR291ADBaseline:
     ):
         """The ``gs_ctm_conv_tol_schedule`` knob must actually reach the
         CTM convergence call — not just sit in the config.  We monkeypatch
-        ``ctm_tensor_converge_explicit``, record the ``conv_tol`` decoded
-        from the config tuple on every call, and assert that a schedule
-        with two distinct tolerance tiers produces at least two distinct
-        ``conv_tol`` values across the optimization loop."""
-        from tenax.algorithms import ad_utils as _ad_utils
+        ``ctm_energy_implicit``, record the ``conv_tol`` kwarg on every
+        call, and assert that a schedule with two distinct tolerance tiers
+        produces at least two distinct ``conv_tol`` values across the
+        optimization loop."""
+        from tenax.algorithms import _ctm_energy_ad as _ctm_ad
 
         seen_conv_tols: list[float] = []
 
-        def spy(site_tensors, env_init_leaves, neighbors, config_tuple, *a, **kw):
-            cfg = _ad_utils._config_from_tuple(config_tuple)
-            seen_conv_tols.append(float(cfg.conv_tol))
-            # Return the warm-start env untouched so the optimizer can
-            # continue through its loop without crashing.
-            return env_init_leaves
+        def spy(site_tensors, neighbors, gate, **kw):
+            seen_conv_tols.append(float(kw.get("conv_tol")))
+            # Return a real differentiable scalar tied to the site tensors
+            # so the outer optimizer can take a step and call us again
+            # with the advanced schedule tier.
+            A = next(iter(site_tensors.values()))
+            data = A._data if hasattr(A, "_data") else A
+            return jnp.sum(jnp.abs(data) ** 2).real
 
-        monkeypatch.setattr(_ad_utils, "ctm_tensor_converge_explicit", spy)
+        monkeypatch.setattr(_ctm_ad, "ctm_energy_implicit", spy)
         config = iPEPSConfig(
             max_bond_dim=2,
             ctm=CTMConfig(
-                chi=4, max_iter=5, min_iter=2, conv_tol=1e-4, forward_gauge="qr"
+                chi=4, max_iter=5, min_iter=2, conv_tol=1e-4, forward_gauge="phase"
             ),
             gs_num_steps=6,
-            gs_implicit_ad=False,
-            gs_explicit_ad_steps=2,
-            gs_explicit_ad_warmup=0,
-            gs_ctm_conv_tol_schedule=[(0.0, 1e-3), (0.5, 1e-6)],
+            gs_implicit_ad=True,
+            # Schedule: tighter tolerance from step 1 onward.  The spy's
+            # surrogate energy is flat, so the optimizer converges quickly;
+            # putting the tier switch at fraction 0.1 ensures it kicks in
+            # before the optimizer declares convergence.
+            gs_ctm_conv_tol_schedule=[(0.0, 1e-3), (0.1, 1e-6)],
+            # Disable outer-loop convergence so the schedule has room to
+            # advance even when the surrogate energy is flat.
+            gs_conv_tol=-1.0,
             unit_cell="1x1",
             su_init=False,
         )
-        # The monkeypatched spy returns a warm-start env of the wrong
-        # shape for real energy/grad computation, so the optimizer may
-        # raise partway through its first backward pass. We only need to
+        # The spy raises, so the optimizer may terminate; we only need to
         # observe that the schedule took effect before that point.
         with contextlib.suppress(Exception):
             optimize_gs_ad(heisenberg_gate, None, config)
         assert len(seen_conv_tols) >= 1, (
-            "ctm_tensor_converge_explicit spy was never called — the "
-            "optimizer likely short-circuited before reaching the CTM."
+            "ctm_energy_implicit spy was never called — the optimizer "
+            "likely short-circuited before reaching the CTM."
         )
         distinct = sorted(set(seen_conv_tols))
         assert len(distinct) >= 2, (
