@@ -54,6 +54,8 @@ def _phase_fix_normalize_tensor(T: Tensor) -> Tensor:
     idx = jnp.argmax(abs_flat >= threshold)  # first element above threshold
     phase = flat[idx] / (jnp.abs(flat[idx]) + 1e-30)
     arr = arr * jnp.conj(phase)
+    if isinstance(T, SymmetricTensor):
+        return SymmetricTensor.from_dense(arr, T.indices, tol=float("inf"))
     return DenseTensor(arr, T.indices)
 
 
