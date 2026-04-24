@@ -6,7 +6,7 @@ to optimize a 3-site unit cell iPEPS on the Kagome lattice.
 
 The Kagome Heisenberg model has frustration and no simple Néel order:
   E/site ≈ -0.4386 (DMRG, Yan-Huse-White, Science 2011)
-  E/site ≈ -0.4332 (iPEPS D=13, Liao et al., PRB 2017)
+  E/site ≈ -0.4332 (iPESS D=13, Liao et al., PRL 118, 137202, 2017)
 
 Usage::
 
@@ -45,10 +45,12 @@ def run_benchmark(D: int, chi: int, num_steps: int, label: str):
         unit_cell=kagome(),
         gs_optimizer="lbfgs",
         gs_line_search_method="hager_zhang",
-        gs_metric_precond=True,
+        gs_metric_precond=False,
+        gs_stall_recovery="noise",
+        gs_noise_amplitude=0.5,
         gs_num_steps=num_steps,
         gs_verbose=True,
-        gs_log_interval=5,
+        gs_log_interval=1,
     )
 
     print(f"\n{'=' * 60}")
@@ -65,7 +67,7 @@ def run_benchmark(D: int, chi: int, num_steps: int, label: str):
     print(f"\n  E/site  = {E_gs:.8f}")
     print(f"  Time    = {dt:.1f}s ({dt / num_steps:.1f}s/step)")
     print("  DMRG ref = -0.4386 (Yan-Huse-White, Science 2011)")
-    print("  iPEPS ref = -0.4332 (D=13, Liao et al., PRB 2017)")
+    print("  iPESS ref = -0.4332 (D=13, Liao et al., PRL 2017)")
     return E_gs, dt
 
 
@@ -93,7 +95,7 @@ def main():
             f"{r['time']:7.1f}s  {r['time'] / steps:7.1f}s"
         )
     print("\n  DMRG reference: -0.4386 (Yan-Huse-White)")
-    print("  iPEPS reference (D=13): -0.4332 (Liao et al.)")
+    print("  iPESS reference (D=13): -0.4332 (Liao et al.)")
 
 
 if __name__ == "__main__":
