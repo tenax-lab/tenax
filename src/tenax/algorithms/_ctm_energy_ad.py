@@ -23,6 +23,7 @@ from tenax.algorithms._ctm_tensor_init import (
 )
 from tenax.algorithms._gmres_lax import gmres_pytree, gmres_pytree_jax
 from tenax.algorithms.ad_utils import CTMRGGradientError, _phase_fix_ctm_tensor
+from tenax.contraction.contractor import contract
 
 
 def _default_energy(site_tensors, envs, gate, coords, neighbors):
@@ -98,15 +99,6 @@ def ctm_energy_explicit(
 # ---------------------------------------------------------------------------
 
 
-def _wrap_tensor(data, original):
-    """Wrap dense data back into a Tensor preserving original index structure."""
-    from tenax.core.tensor import SymmetricTensor
-
-    if isinstance(original, SymmetricTensor):
-        return SymmetricTensor.from_dense(data, original.indices, tol=float("inf"))
-    return type(original)(data, original.indices)
-
-
 def _transfer_matrix_leading_eigvec(T_dense, n_iter=30):
     """Compute leading right eigenvector of the double-layer transfer matrix.
 
@@ -122,21 +114,94 @@ def _transfer_matrix_leading_eigvec(T_dense, n_iter=30):
     return rho
 
 
+def _wrap_sigma(sigma_data, contract_idx, output_idx, env_tensor):
+    """Wrap a dense sigma matrix as a Tensor matching *env_tensor*'s type.
+
+    The sigma is a chi x chi gauge transform.  ``contract_idx`` is the
+    TensorIndex of the env leg that sigma contracts with; ``output_idx`` is
+    the TensorIndex for the resulting (free) leg.
+
+    For DenseTensor envs this creates a DenseTensor.
+    For SymmetricTensor envs this creates a SymmetricTensor via from_dense,
+    preserving block-sparse structure (sigma is block-diagonal when the
+    transfer matrix respects the symmetry, which it does by construction).
+    """
+    from tenax.core.tensor import DenseTensor, SymmetricTensor
+
+    indices = (output_idx, contract_idx)
+    if isinstance(env_tensor, SymmetricTensor):
+        return SymmetricTensor.from_dense(sigma_data, indices, tol=float("inf"))
+    return DenseTensor(sigma_data, indices)
+
+
+def _apply_sigma_to_corner(corner, s_left_data, s_right_data):
+    """Apply sigma gauge to a corner: s_left^H @ corner @ s_right.
+
+    corner is a 2-leg Tensor with indices (idx0, idx1).
+    s_left^H contracts with idx0, s_right contracts with idx1.
+    """
+    idx0, idx1 = corner.indices
+    # Temporary output labels — must not collide with existing labels
+    tmp0 = ("_sigma_out", idx0.label)
+    tmp1 = ("_sigma_out", idx1.label)
+
+    # s_left^H: conjugate transpose. Row index = output (tmp0), col = idx0 (contracts).
+    s_left_dag = _wrap_sigma(s_left_data.conj().T, idx0, idx0.relabel(tmp0), corner)
+    # s_right: row index = idx1 (contracts), col = output (tmp1).
+    # Sigma has shape (chi, chi) with layout (output, contract) — but here
+    # we need (contract, output) so transpose the data.
+    s_right = _wrap_sigma(s_right_data.T, idx1, idx1.relabel(tmp1), corner)
+    # Contract: s_left_dag @ corner @ s_right
+    # s_left_dag has labels (tmp0, idx0.label), corner has (idx0.label, idx1.label)
+    # -> intermediate has (tmp0, idx1.label)
+    # s_right has labels (tmp1, idx1.label) -> result has (tmp0, tmp1)
+    result = contract(s_left_dag, corner, s_right)
+    return result.relabel(tmp0, idx0.label).relabel(tmp1, idx1.label)
+
+
+def _apply_sigma_to_edge(edge, s_data):
+    """Apply sigma gauge to an edge: s^H @ edge @ s.
+
+    edge is a 3-leg Tensor with indices (chi_left, phys, chi_right).
+    The same sigma acts on both chi legs.
+    """
+    idx_l, idx_p, idx_r = edge.indices
+    tmp_l = ("_sigma_out", idx_l.label)
+    tmp_r = ("_sigma_out", idx_r.label)
+
+    # s^H on the left chi leg: (tmp_l, idx_l.label)
+    s_dag = _wrap_sigma(s_data.conj().T, idx_l, idx_l.relabel(tmp_l), edge)
+    # s on the right chi leg: (tmp_r, idx_r.label) with transposed data
+    s_right = _wrap_sigma(s_data.T, idx_r, idx_r.relabel(tmp_r), edge)
+    result = contract(s_dag, edge, s_right)
+    return result.relabel(tmp_l, idx_l.label).relabel(tmp_r, idx_r.label)
+
+
 def _sigma_gauge_fix_env(env_new, env_old):
     """Fix gauge via transfer-matrix eigenvector alignment (sigma gauge).
 
     Aligns env_new to env_old so that the environment converges element-wise
     (not just spectrally). Based on arxiv:2311.11894.
+
+    Sigma computation densifies edge tensors (chi x D^2 x chi) for the
+    power-method transfer-matrix eigenvector — this is acceptable because
+    the edge tensor size is at most chi x D^2 x chi (e.g. 16 x 9 x 16 =
+    2304 elements at chi=16, D=3), which is always small.
+
+    Sigma application uses label-based Tensor contractions, preserving
+    SymmetricTensor type when the environment carries one.  The sigma
+    matrix itself is chi x chi (small), wrapped as the same Tensor type
+    as the environment.
     """
-    C1_n, C2_n, C3_n, C4_n = (
-        c.todense() for c in (env_new.C1, env_new.C2, env_new.C3, env_new.C4)
-    )
-    T1_n, T2_n, T3_n, T4_n = (
-        t.todense() for t in (env_new.T1, env_new.T2, env_new.T3, env_new.T4)
-    )
-    T1_o, T2_o, T3_o, T4_o = (
-        t.todense() for t in (env_old.T1, env_old.T2, env_old.T3, env_old.T4)
-    )
+    # Densify edge tensors for sigma computation (small: chi x D^2 x chi).
+    T1_n_d = env_new.T1.todense()
+    T2_n_d = env_new.T2.todense()
+    T3_n_d = env_new.T3.todense()
+    T4_n_d = env_new.T4.todense()
+    T1_o_d = env_old.T1.todense()
+    T2_o_d = env_old.T2.todense()
+    T3_o_d = env_old.T3.todense()
+    T4_o_d = env_old.T4.todense()
 
     def _compute_sigma(T_new, T_old):
         """Compute sigma = Q_new @ Q_old^H from transfer matrix eigenvectors."""
@@ -157,32 +222,33 @@ def _sigma_gauge_fix_env(env_new, env_old):
     # differentiation — only the CTM step Jacobian matters.  Without this,
     # the QR inside _compute_sigma produces NaN VJPs when the transfer-matrix
     # eigenvector density matrix is rank-deficient (chi > D^2).
-    s1 = jax.lax.stop_gradient(_compute_sigma(T1_n, T1_o))
-    s2 = jax.lax.stop_gradient(_compute_sigma(T2_n, T2_o))
-    s3 = jax.lax.stop_gradient(_compute_sigma(T3_n, T3_o))
-    s4 = jax.lax.stop_gradient(_compute_sigma(T4_n, T4_o))
+    s1 = jax.lax.stop_gradient(_compute_sigma(T1_n_d, T1_o_d))
+    s2 = jax.lax.stop_gradient(_compute_sigma(T2_n_d, T2_o_d))
+    s3 = jax.lax.stop_gradient(_compute_sigma(T3_n_d, T3_o_d))
+    s4 = jax.lax.stop_gradient(_compute_sigma(T4_n_d, T4_o_d))
 
     # Apply sigma to corners: s_row^H @ C @ s_col
-    C1_f = s4.conj().T @ C1_n @ s1
-    C2_f = s1.conj().T @ C2_n @ s2
-    C3_f = s2.conj().T @ C3_n @ s3
-    C4_f = s3.conj().T @ C4_n @ s4
+    # Preserves SymmetricTensor type via label-based contraction.
+    C1_f = _apply_sigma_to_corner(env_new.C1, s4, s1)
+    C2_f = _apply_sigma_to_corner(env_new.C2, s1, s2)
+    C3_f = _apply_sigma_to_corner(env_new.C3, s2, s3)
+    C4_f = _apply_sigma_to_corner(env_new.C4, s3, s4)
 
     # Apply sigma to edges: s^H @ T @ s
-    T1_f = jnp.einsum("ab,bdc,ce->ade", s1.conj().T, T1_n, s1)
-    T2_f = jnp.einsum("ab,bdc,ce->ade", s2.conj().T, T2_n, s2)
-    T3_f = jnp.einsum("ab,bdc,ce->ade", s3.conj().T, T3_n, s3)
-    T4_f = jnp.einsum("ab,bdc,ce->ade", s4.conj().T, T4_n, s4)
+    T1_f = _apply_sigma_to_edge(env_new.T1, s1)
+    T2_f = _apply_sigma_to_edge(env_new.T2, s2)
+    T3_f = _apply_sigma_to_edge(env_new.T3, s3)
+    T4_f = _apply_sigma_to_edge(env_new.T4, s4)
 
     return CTMTensorEnv(
-        C1=_wrap_tensor(C1_f, env_new.C1),
-        C2=_wrap_tensor(C2_f, env_new.C2),
-        C3=_wrap_tensor(C3_f, env_new.C3),
-        C4=_wrap_tensor(C4_f, env_new.C4),
-        T1=_wrap_tensor(T1_f, env_new.T1),
-        T2=_wrap_tensor(T2_f, env_new.T2),
-        T3=_wrap_tensor(T3_f, env_new.T3),
-        T4=_wrap_tensor(T4_f, env_new.T4),
+        C1=C1_f,
+        C2=C2_f,
+        C3=C3_f,
+        C4=C4_f,
+        T1=T1_f,
+        T2=T2_f,
+        T3=T3_f,
+        T4=T4_f,
     )
 
 
