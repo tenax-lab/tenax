@@ -18,11 +18,13 @@ This module contains ``todense()`` calls in the projector computation.
 - ``_qr_projector_symmetric``: Fully block-sparse per-sector QR + small
   eigh.
 
+- ``_svd_projector_symmetric``: Fully block-sparse per-sector Fishman
+  two-projector SVD with global singular value truncation.
+
 **Dense fallback paths (used during AD tracing or for DenseTensor):**
 
-- SVD path (``projector_method="svd"``): Always densifies both grown
-  corners.  The cross-product SVD is on a chi x chi matrix.  A
-  block-sparse Fishman projector is a future optimization target.
+- SVD path (``projector_method="svd"``): Falls back to dense only when
+  SymmetricTensor blocks contain JAX tracers (AD) or for DenseTensor.
 
 - QR path (``projector_method="qr"``): Falls back to dense only when
   SymmetricTensor blocks contain JAX tracers (AD) or for DenseTensor.
@@ -529,6 +531,194 @@ def _qr_projector_symmetric(
     )
 
 
+def _svd_projector_symmetric(
+    C1g: SymmetricTensor,
+    C4g: SymmetricTensor,
+    chi: int,
+    fused_idx: TensorIndex | None = None,
+    base_charges: np.ndarray | None = None,
+) -> tuple[SymmetricTensor, SymmetricTensor]:
+    r"""Block-sparse two-projector Fishman SVD for SymmetricTensor.
+
+    For each charge sector *q* of the ``fused`` leg, forms the
+    cross-product :math:`M_q = C_{1g,q}^\dagger C_{4g,q}`, then
+    SVD-decomposes :math:`M_q = U_q S_q V_q^\dagger`.  Two projectors
+    are built:
+
+    .. math::
+
+        P_{1,q} = C_{4g,q} V_q S_q^{-1/2}, \quad
+        P_{2,q} = C_{1g,q} U_q S_q^{-1/2}
+
+    Singular values are merged across sectors and globally truncated
+    to *chi*.
+
+    Args:
+        C1g: Grown corner SymmetricTensor ``(fused, col1)``.
+        C4g: Grown corner SymmetricTensor ``(fused, col2)``.
+        chi: Target bond dimension.
+        fused_idx: Optional unified fused TensorIndex.
+        base_charges: Bond charges for per-sector allocation.
+
+    Returns:
+        ``(P1, P2)`` each with labels ``(fused, chi_new)``.
+    """
+    from tenax.algorithms.ad_utils import _fix_svd_signs
+
+    fused_pos = C1g.labels().index("fused")
+    col_pos = 1 - fused_pos
+    if fused_idx is None:
+        fused_idx = C1g.indices[fused_pos]
+
+    # Group blocks by fused charge
+    def _group_by_fused(
+        Cg: SymmetricTensor,
+    ) -> dict[int, list[tuple[int, jax.Array]]]:
+        grouped: dict[int, list[tuple[int, jax.Array]]] = {}
+        for key, block in Cg.blocks.items():
+            fq = int(key[fused_pos])
+            cq = int(key[col_pos])
+            grouped.setdefault(fq, []).append((cq, block))
+        return grouped
+
+    c1_groups = _group_by_fused(C1g)
+    c4_groups = _group_by_fused(C4g)
+    all_fused_charges = sorted(set(c1_groups.keys()) | set(c4_groups.keys()))
+
+    charges_arr = np.asarray(fused_idx.charges)
+    charge_dim: dict[int, int] = {}
+    for fq in set(int(q) for q in charges_arr):
+        charge_dim[fq] = int(np.sum(charges_arr == fq))
+
+    # Per-sector SVD results:
+    #   fq -> (U_M, S_M, V_M, C1g_mat, C4g_mat)
+    sector_results: dict[
+        int, tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]
+    ] = {}
+
+    for fq in all_fused_charges:
+        fused_dim = charge_dim.get(fq, 0)
+        if fused_dim == 0:
+            continue
+
+        # Collect column blocks for each corner
+        def _collect_cols(
+            Cg: SymmetricTensor,
+            entries: list[tuple[int, jax.Array]],
+            fd: int,
+        ) -> jax.Array:
+            cols: list[jax.Array] = []
+            cg_fused_charges = np.asarray(Cg.indices[fused_pos].charges)
+            cg_fused_dim = int(np.sum(cg_fused_charges == fq))
+            for _cq, block in entries:
+                if fused_pos == 0:
+                    M = block.reshape(cg_fused_dim, -1)
+                else:
+                    M = block.reshape(-1, cg_fused_dim).T
+                if cg_fused_dim < fd:
+                    M = jnp.pad(M, ((0, fd - cg_fused_dim), (0, 0)))
+                cols.append(M)
+            if not cols:
+                return jnp.zeros((fd, 0), dtype=Cg.dtype)
+            return jnp.concatenate(cols, axis=1)
+
+        C1g_mat = _collect_cols(C1g, c1_groups.get(fq, []), fused_dim)
+        C4g_mat = _collect_cols(C4g, c4_groups.get(fq, []), fused_dim)
+
+        # Cross-product: M_q = C1g_q^H @ C4g_q  (ncol1 x ncol2)
+        M_q = C1g_mat.conj().T @ C4g_mat
+
+        if M_q.size == 0:
+            continue
+
+        U_M, S_M, Vh_M = jnp.linalg.svd(M_q, full_matrices=False)
+        U_M, S_M, Vh_M = _fix_svd_signs(U_M, S_M, Vh_M)
+        V_M = Vh_M.conj().T
+
+        sector_results[fq] = (U_M, S_M, V_M, C1g_mat, C4g_mat)
+
+    # Global truncation: collect singular values across sectors
+    all_sv_pairs: list[tuple[float, int, int]] = []
+    for fq, (_, S_M, _, _, _) in sector_results.items():
+        for i, val in enumerate(np.array(S_M)):
+            all_sv_pairs.append((float(val), fq, i))
+
+    all_sv_pairs.sort(key=lambda x: (-x[0], -x[2]))
+    n_keep = min(chi, len(all_sv_pairs))
+
+    sector_keep: dict[int, list[int]] = {}
+
+    if base_charges is not None:
+        from tenax.algorithms._ctm_utils import _derive_charges
+
+        target_charges = _derive_charges(base_charges, n_keep)
+        target_count: dict[int, int] = {}
+        for q in target_charges:
+            target_count[int(q)] = target_count.get(int(q), 0) + 1
+
+        for fq in sorted(target_count.keys()):
+            n_want = target_count[fq]
+            if fq in sector_results:
+                sv_arr = np.array(sector_results[fq][1])
+                n_avail = len(sv_arr)
+                n_take = min(n_want, n_avail)
+                top_indices = list(np.argsort(sv_arr)[-n_take:][::-1])
+                sector_keep[fq] = top_indices
+
+        used = sum(len(v) for v in sector_keep.values())
+        remaining = n_keep - used
+        if remaining > 0:
+            reserved = {(fq, idx) for fq, idxs in sector_keep.items() for idx in idxs}
+            for _, fq, idx in all_sv_pairs:
+                if remaining <= 0:
+                    break
+                if (fq, idx) not in reserved:
+                    sector_keep.setdefault(fq, []).append(idx)
+                    reserved.add((fq, idx))
+                    remaining -= 1
+    else:
+        for _, fq, idx in all_sv_pairs[:n_keep]:
+            sector_keep.setdefault(fq, []).append(idx)
+
+    # Build both projector block dicts
+    chi_new_charges: list[int] = []
+    p1_blocks: dict[tuple[int, ...], jax.Array] = {}
+    p2_blocks: dict[tuple[int, ...], jax.Array] = {}
+
+    for fq in sorted(sector_keep.keys()):
+        keep_indices = sorted(sector_keep[fq], reverse=True)
+        n_q = len(keep_indices)
+        chi_new_charges.extend([fq] * n_q)
+
+        U_M, S_M, V_M, C1g_mat, C4g_mat = sector_results[fq]
+
+        # Safe S^{-1/2}
+        ki = jnp.array(keep_indices)
+        S_k = S_M[ki]
+        _cutoff = 1e-14 * (S_M[0] + 1e-30)
+        _mask = S_k > _cutoff
+        S_safe = jnp.where(_mask, S_k, 1.0)
+        S_rsqrt = jnp.where(_mask, 1.0 / jnp.sqrt(S_safe), 0.0)
+
+        U_k = U_M[:, ki]  # (ncol1, n_q)
+        V_k = V_M[:, ki]  # (ncol2, n_q)
+
+        # P1 = C4g @ V @ S^{-1/2}  (fused_dim, n_q)
+        P1_q = C4g_mat @ (V_k * S_rsqrt[None, :])
+        # P2 = C1g @ U @ S^{-1/2}  (fused_dim, n_q)
+        P2_q = C1g_mat @ (U_k * S_rsqrt[None, :])
+
+        P1_q = jax.lax.stop_gradient(P1_q)
+        P2_q = jax.lax.stop_gradient(P2_q)
+
+        p1_blocks[(fq, fq)] = P1_q
+        p2_blocks[(fq, fq)] = P2_q
+
+    P1 = _build_symmetric_projector(p1_blocks, chi_new_charges, fused_idx, C1g.dtype)
+    P2 = _build_symmetric_projector(p2_blocks, chi_new_charges, fused_idx, C1g.dtype)
+    return P1, P2
+
+
 # ------------------------------------------------------------------ #
 # Main projector entry point                                           #
 # ------------------------------------------------------------------ #
@@ -595,10 +785,36 @@ def _compute_projector_tensor(
     # Reference: Fishman et al., PRB 98, 235148 (2018);
     #            YASTN proj_corners + regularize_1site_corners.
     if projector_method == "svd":
-        # Dense fallback: always densifies grown corners for Fishman SVD
-        # projector.  Grown corners are (chi*D^2, chi); the cross-product
-        # M = C1g^H @ C4g is chi x chi.  Block-sparse Fishman projector
-        # is a future optimization target.  (issue #282)
+        # Block-sparse SVD for SymmetricTensor (non-tracer)
+        if isinstance(C1g, SymmetricTensor) and isinstance(C4g, SymmetricTensor):
+            has_tracers = isinstance(C1g._data, jax.core.Tracer) or isinstance(
+                C4g._data, jax.core.Tracer
+            )
+            if not has_tracers and C1g.n_blocks > 0 and C4g.n_blocks > 0:
+                fused_pos_chk = C1g.labels().index("fused")
+                c1_charges = C1g.indices[fused_pos_chk].charges
+                c4_charges = C4g.indices[fused_pos_chk].charges
+                if np.array_equal(c1_charges, c4_charges):
+                    return _svd_projector_symmetric(
+                        C1g, C4g, chi, base_charges=base_charges
+                    )
+                # Mismatched fused charges: build unified fused index
+                unified_fused_idx = _build_unified_fused_idx(
+                    C1g.indices[fused_pos_chk], C4g.indices[fused_pos_chk]
+                )
+                C1g_re = _reembed_fused(C1g, unified_fused_idx)
+                C4g_re = _reembed_fused(C4g, unified_fused_idx)
+                return _svd_projector_symmetric(
+                    C1g_re,
+                    C4g_re,
+                    chi,
+                    fused_idx=unified_fused_idx,
+                    base_charges=base_charges,
+                )
+
+        # Dense fallback: densifies grown corners for Fishman SVD
+        # projector.  Only reached for DenseTensor inputs or when
+        # SymmetricTensor blocks contain JAX tracers (AD backward).
         C1g_dense = C1g.todense()
         C4g_dense = C4g.todense()
 
