@@ -105,6 +105,7 @@ def _rdm2x1_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     )
     # → (s1_ket, s2_ket, s1_bra, s2_bra)
 
+    # RDM is d^2 x d^2 (physical dimension) — always small, todense OK.
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
@@ -192,6 +193,7 @@ def _rdm1x2_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
         output_labels=["phys", "phys_B", "phys_bra", "phys_braB"],
     )
 
+    # RDM is d^2 x d^2 (physical dimension) — always small, todense OK.
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
@@ -297,6 +299,7 @@ def _rdm2x1_tensor_2site(
         output_labels=["phys", "phys_R", "phys_bra", "phys_braR"],
     )
 
+    # RDM is d^2 x d^2 (physical dimension) — always small, todense OK.
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
@@ -378,6 +381,7 @@ def _rdm1x2_tensor_2site(
         output_labels=["phys", "phys_B", "phys_bra", "phys_braB"],
     )
 
+    # RDM is d^2 x d^2 (physical dimension) — always small, todense OK.
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
