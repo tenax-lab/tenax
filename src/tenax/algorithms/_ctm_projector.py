@@ -812,9 +812,23 @@ def _compute_projector_tensor(
                     base_charges=base_charges,
                 )
 
-        # Dense fallback: densifies grown corners for Fishman SVD
-        # projector.  Only reached for DenseTensor inputs or when
-        # SymmetricTensor blocks contain JAX tracers (AD backward).
+        # Dense fallback for SVD projector.  Reached in two cases:
+        #   1. DenseTensor inputs (no block-sparse structure).
+        #   2. SymmetricTensor blocks contain JAX tracers (AD backward).
+        #
+        # Design decision (Task 2.2): We intentionally keep the dense
+        # fallback for the AD-traced path rather than implementing a
+        # block-sparse AD-traced SVD.  Rationale:
+        #   - The forward CTM sweep uses a Python loop (not JIT'd), so
+        #     _svd_projector_symmetric handles it block-sparse already.
+        #   - The backward pass (JIT'd GMRES via _jit_apply_Jt /
+        #     _jit_gmres_solve) traces through the projector; JAX
+        #     tracing requires static shapes per sector (k_q must be a
+        #     Python int), making per-sector truncated_svd_ad complex.
+        #   - The backward runs the projector only once per GMRES matvec,
+        #     so the performance impact of densifying is small compared
+        #     to the forward sweep which runs many CTM iterations.
+        #   - The dense path is well-tested and numerically validated.
         C1g_dense = C1g.todense()
         C4g_dense = C4g.todense()
 

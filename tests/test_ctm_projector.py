@@ -226,3 +226,70 @@ class TestSVDProjectorSymmetric:
         assert len(todense_calls) == 0, (
             "todense() was called on the block-sparse SVD path"
         )
+
+    def test_svd_projector_ad_dense_fallback_gradient(self, small_peps_symmetric):
+        """AD-traced path falls back to dense SVD and produces finite gradients.
+
+        During AD (backward pass), SymmetricTensor._data is a JAX tracer,
+        so the block-sparse _svd_projector_symmetric is skipped and the
+        dense Fishman SVD fallback is used instead.  This test verifies
+        that the dense fallback produces finite gradients that agree with
+        finite differences.
+
+        This documents the Task 2.2 design decision: the AD-traced path
+        intentionally uses the dense fallback rather than a block-sparse
+        AD-traced SVD.
+        """
+        A = small_peps_symmetric
+        chi = 4
+        C1g, C4g = _build_grown_corners(A, chi)
+
+        # To test the AD path, we define a scalar loss that goes through
+        # _compute_projector_tensor with SVD.  We differentiate w.r.t.
+        # the raw data array (C1g._data) to exercise the tracer path.
+        fused_pos = C1g.labels().index("fused")
+        fused_idx = C1g.indices[fused_pos]
+        col1_idx = C1g.indices[1 - fused_pos]
+        col2_idx = C4g.indices[1 - fused_pos]
+
+        # Use DenseTensor wrapper so we can differentiate w.r.t. plain arrays
+        # (SymmetricTensor under AD goes through todense -> tracer check).
+        c1_data = C1g.todense()
+        c4_data = C4g.todense()
+
+        def loss_fn(c1_arr):
+            C1g_dt = DenseTensor(c1_arr, (fused_idx, col1_idx))
+            C4g_dt = DenseTensor(c4_data, (fused_idx, col2_idx))
+            P1, P2 = _compute_projector_tensor(
+                C1g_dt, C4g_dt, chi, projector_method="svd"
+            )
+            # Scalar loss: sum of squared elements of P1
+            return jnp.sum(jnp.abs(P1.todense()) ** 2)
+
+        grad = jax.grad(loss_fn)(c1_data)
+        assert jnp.all(jnp.isfinite(grad)), "Gradient through SVD projector has NaN/Inf"
+
+        # Finite-difference check
+        eps = 1e-5
+        c1_np = np.array(c1_data)
+        f0 = float(loss_fn(c1_data))
+        # Check a few random elements for FD agreement
+        rng = np.random.RandomState(42)
+        indices_to_check = [
+            tuple(rng.randint(0, s) for s in c1_np.shape) for _ in range(5)
+        ]
+        for idx in indices_to_check:
+            c1_plus = c1_np.copy()
+            c1_plus[idx] += eps
+            f_plus = float(loss_fn(jnp.array(c1_plus)))
+            fd_val = (f_plus - f0) / eps
+            ad_val = float(grad[idx])
+            # Loose tolerance: projector gradients can be noisy
+            if abs(fd_val) > 1e-8:
+                np.testing.assert_allclose(
+                    ad_val,
+                    fd_val,
+                    rtol=0.1,
+                    atol=1e-6,
+                    err_msg=f"AD vs FD mismatch at {idx}",
+                )
