@@ -49,6 +49,71 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 OUT = FlowDirection.OUT
 
 
+def _tensor_matrix_data(t: Tensor | jax.Array) -> jax.Array:
+    """Return matrix data for dense-fallback projector math."""
+    if isinstance(t, DenseTensor):
+        return t._data
+    if isinstance(t, SymmetricTensor):
+        return t.todense()
+    return t.todense() if hasattr(t, "todense") else t
+
+
+def _make_chi_new_index(
+    fused_idx: TensorIndex,
+    k: int,
+    base_charges: np.ndarray | None = None,
+) -> TensorIndex:
+    """Build ``chi_new`` index for dense-fallback projector outputs."""
+    if base_charges is not None:
+        from tenax.algorithms._ctm_utils import _derive_charges
+
+        chi_charges = _derive_charges(base_charges, k)
+    else:
+        chi_charges = np.zeros(k, dtype=np.int32)
+    return TensorIndex.from_charges(
+        fused_idx.symmetry,
+        chi_charges,
+        OUT,
+        label="chi_new",
+    )
+
+
+def _wrap_dense_projector(
+    P_dense: jax.Array,
+    fused_idx: TensorIndex,
+    chi_new_idx: TensorIndex,
+    as_symmetric: bool,
+) -> Tensor:
+    """Wrap dense projector matrix as DenseTensor or SymmetricTensor."""
+    if as_symmetric:
+        return SymmetricTensor.from_dense(
+            P_dense, (fused_idx, chi_new_idx), tol=float("inf")
+        )
+    return DenseTensor(P_dense, (fused_idx, chi_new_idx))
+
+
+def _wrap_dense_projector_pair(
+    P1_dense: jax.Array,
+    P2_dense: jax.Array,
+    fused_idx: TensorIndex,
+    chi_new_idx: TensorIndex,
+    as_symmetric: bool,
+) -> tuple[Tensor, Tensor]:
+    """Wrap dense Fishman projector pair as DenseTensor/SymmetricTensor."""
+    if as_symmetric:
+        P1 = SymmetricTensor.from_dense(
+            P1_dense, (fused_idx, chi_new_idx), tol=float("inf")
+        )
+        P2 = SymmetricTensor.from_dense(
+            P2_dense, (fused_idx, chi_new_idx), tol=float("inf")
+        )
+        return P1, P2
+    return (
+        DenseTensor(P1_dense, (fused_idx, chi_new_idx)),
+        DenseTensor(P2_dense, (fused_idx, chi_new_idx)),
+    )
+
+
 # ------------------------------------------------------------------ #
 # Block-sparse projector helpers                                       #
 # ------------------------------------------------------------------ #
@@ -142,40 +207,6 @@ def _infer_eigvec_charges(P: np.ndarray, fused_charges: np.ndarray) -> np.ndarra
         max_row = int(np.argmax(col))
         chi_new_charges[j] = fused_charges[max_row]
     return chi_new_charges
-
-
-def _unified_fused_index(idx_a: TensorIndex, idx_b: TensorIndex) -> TensorIndex:
-    """Build a fused index whose charge array is the union of two indices.
-
-    When two grown corners are fused along different edges, their fused
-    indices may contain different charge sectors.  The unified index has
-    enough room for every sector that appears in *either* corner so that
-    the projector can act on both.
-
-    If the two indices already have the same charges array, returns *idx_a*
-    unchanged (fast path).
-    """
-    if np.array_equal(idx_a.charges, idx_b.charges):
-        return idx_a
-
-    # Collect sector sizes from both: for each unique charge keep the
-    # *maximum* multiplicity seen in either index so the projector's
-    # fused dimension is large enough for both corners' blocks.
-    unique_charges = sorted(
-        set(int(c) for c in idx_a.sectors) | set(int(c) for c in idx_b.sectors)
-    )
-    charges_list: list[int] = []
-    for q in unique_charges:
-        n_a = idx_a.multiplicity(q)
-        n_b = idx_b.multiplicity(q)
-        charges_list.extend([q] * max(n_a, n_b))
-
-    return TensorIndex.from_charges(
-        idx_a.symmetry,
-        np.array(charges_list, dtype=np.int32),
-        idx_a.flow,
-        label=idx_a.label,
-    )
 
 
 def _reembed_fused(
@@ -829,8 +860,8 @@ def _compute_projector_tensor(
         #     so the performance impact of densifying is small compared
         #     to the forward sweep which runs many CTM iterations.
         #   - The dense path is well-tested and numerically validated.
-        C1g_dense = C1g.todense()
-        C4g_dense = C4g.todense()
+        C1g_dense = _tensor_matrix_data(C1g)
+        C4g_dense = _tensor_matrix_data(C4g)
 
         _has_tracers = isinstance(C1g_dense, jax.core.Tracer) or isinstance(
             C4g_dense, jax.core.Tracer
@@ -876,29 +907,13 @@ def _compute_projector_tensor(
         fused_pos = C1g.labels().index("fused")
         fused_idx = C1g.indices[fused_pos]
 
-        if base_charges is not None:
-            from tenax.algorithms._ctm_utils import _derive_charges
-
-            chi_charges = _derive_charges(base_charges, k)
-        else:
-            chi_charges = np.zeros(k, dtype=np.int32)
-        chi_new_idx = TensorIndex.from_charges(
-            fused_idx.symmetry,
-            chi_charges,
-            OUT,
-            label="chi_new",
-        )
-        if isinstance(C1g, SymmetricTensor):
-            P1 = SymmetricTensor.from_dense(
-                P1_dense, (fused_idx, chi_new_idx), tol=float("inf")
-            )
-            P2 = SymmetricTensor.from_dense(
-                P2_dense, (fused_idx, chi_new_idx), tol=float("inf")
-            )
-            return P1, P2
-        return (
-            DenseTensor(P1_dense, (fused_idx, chi_new_idx)),
-            DenseTensor(P2_dense, (fused_idx, chi_new_idx)),
+        chi_new_idx = _make_chi_new_index(fused_idx, k, base_charges)
+        return _wrap_dense_projector_pair(
+            P1_dense,
+            P2_dense,
+            fused_idx,
+            chi_new_idx,
+            as_symmetric=isinstance(C1g, SymmetricTensor),
         )
 
     # --- QR path ---
@@ -917,8 +932,8 @@ def _compute_projector_tensor(
         # (AD backward) or for DenseTensor inputs.  Block-sparse
         # _qr_projector_symmetric handles the non-tracer case above.
         # (issue #282)
-        C1g_dense = C1g.todense()
-        C4g_dense = C4g.todense()
+        C1g_dense = _tensor_matrix_data(C1g)
+        C4g_dense = _tensor_matrix_data(C4g)
         _has_tracers = isinstance(C1g_dense, jax.core.Tracer) or isinstance(
             C4g_dense, jax.core.Tracer
         )
@@ -964,24 +979,13 @@ def _compute_projector_tensor(
             P_dense = jax.lax.stop_gradient(P_dense)
 
         fused_idx = C1g.indices[C1g.labels().index("fused")]
-        if base_charges is not None:
-            from tenax.algorithms._ctm_utils import _derive_charges
-
-            chi_charges_qr = _derive_charges(base_charges, k)
-        else:
-            chi_charges_qr = np.zeros(k, dtype=np.int32)
-        chi_new_idx = TensorIndex.from_charges(
-            fused_idx.symmetry,
-            chi_charges_qr,
-            OUT,
-            label="chi_new",
+        chi_new_idx = _make_chi_new_index(fused_idx, k, base_charges)
+        P = _wrap_dense_projector(
+            P_dense,
+            fused_idx,
+            chi_new_idx,
+            as_symmetric=isinstance(C1g, SymmetricTensor),
         )
-        if isinstance(C1g, SymmetricTensor):
-            P = SymmetricTensor.from_dense(
-                P_dense, (fused_idx, chi_new_idx), tol=float("inf")
-            )
-            return P, P
-        P = DenseTensor(P_dense, (fused_idx, chi_new_idx))
         return P, P
 
     # --- eigh path ---
@@ -1024,8 +1028,8 @@ def _compute_projector_tensor(
     fused_pos = C1g.labels().index("fused")
     fused_idx = C1g.indices[fused_pos]
 
-    C1g_dense = C1g.todense()
-    C4g_dense = C4g.todense()
+    C1g_dense = _tensor_matrix_data(C1g)
+    C4g_dense = _tensor_matrix_data(C4g)
     _has_tracers = isinstance(C1g_dense, jax.core.Tracer) or isinstance(
         C4g_dense, jax.core.Tracer
     )
@@ -1062,22 +1066,11 @@ def _compute_projector_tensor(
         P_dense = eigvecs[:, -k:][:, ::-1]
         P_dense = jax.lax.stop_gradient(P_dense)
 
-    if base_charges is not None:
-        from tenax.algorithms._ctm_utils import _derive_charges
-
-        chi_charges = _derive_charges(base_charges, k)
-    else:
-        chi_charges = np.zeros(k, dtype=np.int32)
-    chi_new_idx = TensorIndex.from_charges(
-        fused_idx.symmetry,
-        chi_charges,
-        OUT,
-        label="chi_new",
+    chi_new_idx = _make_chi_new_index(fused_idx, k, base_charges)
+    P = _wrap_dense_projector(
+        P_dense,
+        fused_idx,
+        chi_new_idx,
+        as_symmetric=isinstance(C1g, SymmetricTensor),
     )
-    if isinstance(C1g, SymmetricTensor):
-        P = SymmetricTensor.from_dense(
-            P_dense, (fused_idx, chi_new_idx), tol=float("inf")
-        )
-        return P, P
-    P = DenseTensor(P_dense, (fused_idx, chi_new_idx))
     return P, P
