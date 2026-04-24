@@ -253,6 +253,28 @@ def _ctm_sv_diff(sv_new: jax.Array, sv_old: jax.Array) -> jax.Array:
     return jnp.max(jnp.abs(sv1 - sv2))
 
 
+def _tensor_leaf_data(leaf):
+    """Return numeric buffer for a CTM pytree leaf.
+
+    For ``DenseTensor`` and ``SymmetricTensor``, uses the internal ``_data``
+    buffer to avoid dense materialization in elementwise convergence checks.
+    """
+    if isinstance(leaf, (DenseTensor, SymmetricTensor)):
+        return leaf._data
+    return leaf.todense() if hasattr(leaf, "todense") else leaf
+
+
+def _max_env_leaf_diff(env_old: CTMTensorEnv, env_new: CTMTensorEnv) -> float:
+    """Maximum absolute element-wise difference across environment leaves."""
+    max_diff = 0.0
+    for told, tnew in zip(jax.tree.leaves(env_old), jax.tree.leaves(env_new)):
+        a = _tensor_leaf_data(told)
+        b = _tensor_leaf_data(tnew)
+        diff = float(jnp.max(jnp.abs(b - a)))
+        max_diff = max(max_diff, diff)
+    return max_diff
+
+
 def _corner_singular_values(C):  # noqa: N802
     """Extract sorted singular values from a 2-leg corner tensor.
 
@@ -271,7 +293,7 @@ def _corner_singular_values(C):  # noqa: N802
             return jnp.sort(all_svs)[::-1]
         return jnp.zeros(0)
     # DenseTensor or raw array
-    data = C.todense() if hasattr(C, "todense") else C
+    data = _tensor_leaf_data(C)
     return jnp.linalg.svd(data, compute_uv=False)
 
 

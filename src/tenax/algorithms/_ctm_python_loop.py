@@ -18,20 +18,20 @@ from functools import partial
 from typing import NamedTuple
 
 import jax
-import jax.numpy as jnp
 
 from tenax.algorithms._ctm_tensor_convergence import (
     Coord,
     _corner_singular_values,
     _ctm_sv_diff,
     _ctm_tensor_sweep_multisite,
+    _max_env_leaf_diff,
 )
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
 )
-from tenax.core.tensor import SymmetricTensor, Tensor
+from tenax.core.tensor import Tensor
 
 
 class CTMConvergeInfo(NamedTuple):
@@ -217,19 +217,7 @@ def python_loop_ctm_converge(
                 continue
             max_diff = 0.0
             for c in sorted(envs):
-                for told, tnew in zip(
-                    jax.tree.leaves(prev_envs[c]),
-                    jax.tree.leaves(envs[c]),
-                ):
-                    # For SymmetricTensor, compare flat block data directly
-                    # to avoid allocating a full dense chi x chi matrix.
-                    if isinstance(told, SymmetricTensor):
-                        a, b = told._data, tnew._data
-                    else:
-                        a = told.todense() if hasattr(told, "todense") else told
-                        b = tnew.todense() if hasattr(tnew, "todense") else tnew
-                    diff = float(jnp.max(jnp.abs(b - a)))
-                    max_diff = max(max_diff, diff)
+                max_diff = max(max_diff, _max_env_leaf_diff(prev_envs[c], envs[c]))
             converged = max_diff < conv_tol
             final_diff = max_diff
             prev_envs = {c: envs[c] for c in envs}
