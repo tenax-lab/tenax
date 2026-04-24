@@ -888,6 +888,11 @@ def _phase_fix_ctm_tensor(env):
 
     This is simpler than sigma gauge (no transfer matrix eigenvector
     computation) and works identically in Python loops and JIT while_loop.
+
+    Uses todense/from_dense round-trip.  Environment tensors are small
+    (chi x chi corners, chi x D^2 x chi edges), so this is acceptable.
+    The from_dense re-projection into block structure is needed for
+    numerical stability over many CTM sweeps.
     """
     EPS_PHASE = 0.1  # threshold fraction for "large" element (variPEPS default)
 

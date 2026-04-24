@@ -22,6 +22,7 @@ import jax.numpy as jnp
 
 from tenax.algorithms._ctm_tensor_convergence import (
     Coord,
+    _corner_singular_values,
     _ctm_sv_diff,
     _ctm_tensor_sweep_multisite,
 )
@@ -30,7 +31,7 @@ from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
 )
-from tenax.core.tensor import Tensor
+from tenax.core.tensor import SymmetricTensor, Tensor
 
 
 class CTMConvergeInfo(NamedTuple):
@@ -203,7 +204,7 @@ def python_loop_ctm_converge(
             # Still track SVs / prev_envs for the first convergence check
             if conv_method == "sv":
                 for c in sorted(envs):
-                    prev_svs[c] = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
+                    prev_svs[c] = _corner_singular_values(envs[c].C1)
             else:
                 prev_envs = {c: envs[c] for c in envs}
             continue
@@ -220,8 +221,13 @@ def python_loop_ctm_converge(
                     jax.tree.leaves(prev_envs[c]),
                     jax.tree.leaves(envs[c]),
                 ):
-                    a = told.todense() if hasattr(told, "todense") else told
-                    b = tnew.todense() if hasattr(tnew, "todense") else tnew
+                    # For SymmetricTensor, compare flat block data directly
+                    # to avoid allocating a full dense chi x chi matrix.
+                    if isinstance(told, SymmetricTensor):
+                        a, b = told._data, tnew._data
+                    else:
+                        a = told.todense() if hasattr(told, "todense") else told
+                        b = tnew.todense() if hasattr(tnew, "todense") else tnew
                     diff = float(jnp.max(jnp.abs(b - a)))
                     max_diff = max(max_diff, diff)
             converged = max_diff < conv_tol
@@ -232,7 +238,7 @@ def python_loop_ctm_converge(
             converged = True
             max_diff = 0.0
             for c in sorted(envs):
-                sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
+                sv = _corner_singular_values(envs[c].C1)
                 if c in prev_svs:
                     diff = float(_ctm_sv_diff(sv, prev_svs[c]))
                     max_diff = max(max_diff, diff)

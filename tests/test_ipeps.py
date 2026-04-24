@@ -501,9 +501,9 @@ class TestQRProjectors:
         return H.reshape(d, d, d, d)
 
     def test_qr_backward_compat(self):
-        """CTMConfig() still defaults to eigh."""
+        """CTMConfig() defaults to svd (Fishman)."""
         cfg = CTMConfig()
-        assert cfg.projector_method == "eigh"
+        assert cfg.projector_method == "svd"
         assert cfg.qr_warmup_steps == 3
 
     def test_qr_ctm_converges(self):
@@ -2227,3 +2227,51 @@ class TestArnoldiOptimizerRecovery:
         )
         A, env, E = optimize_gs_ad(gate, None, config)
         assert math.isfinite(E)
+
+
+def test_lattice_to_neighbors_kagome():
+    from tenax import kagome
+    from tenax.algorithms.ipeps_optimize import _lattice_to_neighbors
+
+    lat = kagome()
+    neighbors, name_to_coord, coord_to_name = _lattice_to_neighbors(lat)
+
+    assert len(neighbors) == 3
+    assert len(name_to_coord) == 3
+    for c, dirs in neighbors.items():
+        assert set(dirs.keys()) == {"left", "right", "top", "bottom"}
+        for nb in dirs.values():
+            assert nb in neighbors
+    for name, coord in name_to_coord.items():
+        assert coord_to_name[coord] == name
+
+
+class TestOptimizeGsAdMultisite:
+    """Tests for multisite optimize_gs_ad with Lattice unit cells."""
+
+    @pytest.fixture
+    def heisenberg_gate(self):
+        from tenax import heisenberg_gate
+
+        return heisenberg_gate()
+
+    def test_multisite_ad_runs_kagome(self, heisenberg_gate):
+        """Multisite AD with kagome lattice should run without crashing."""
+        from tenax import kagome
+
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=2,
+            unit_cell=kagome(),
+            gs_metric_precond=False,
+        )
+        site_tensors, envs, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
+
+        assert isinstance(site_tensors, dict)
+        assert set(site_tensors.keys()) == {"u", "v", "w"}
+        assert isinstance(envs, dict)
+        assert set(envs.keys()) == {"u", "v", "w"}
+        for name in ("u", "v", "w"):
+            assert site_tensors[name].todense().shape == (2, 2, 2, 2, 2)
+        assert np.isfinite(E_gs)

@@ -7,6 +7,8 @@ from typing import Literal, NamedTuple
 
 import jax
 
+from tenax.core.lattice import Lattice
+
 
 @dataclass
 class CTMConfig:
@@ -48,7 +50,7 @@ class CTMConfig:
     max_iter: int = 100
     conv_tol: float = 1e-8
     renormalize: bool = True
-    projector_method: str = "eigh"  # "eigh", "qr", or "svd" (Fishman)
+    projector_method: str = "svd"  # "svd" (Fishman, default), "eigh", or "qr"
     min_iter: int = 10  # minimum CTM sweeps before checking convergence
     qr_warmup_steps: int = 3  # eigh warm-up iterations before QR kicks in
     chi_I: int | None = None  # interlayer bond dim for split-CTMRG; None => chi_I = chi
@@ -58,13 +60,14 @@ class CTMConfig:
     )
     ad_backward_method: str = "vjp"  # "vjp" (iterative VJP) or "gmres" (xfail — #292)
     gmres_tol: float = 1e-6  # tolerance for GMRES backward solve
-    gmres_restart: int = 30  # restart dimension for GMRES
-    ctm_conv_method: str = "sv"  # "sv" (singular value) or "elementwise"
-    # forward_gauge: "qr" (default, auto-promoted to "sigma" by optimize_gs_ad
-    # when gs_implicit_ad=True, or to "phase" when gs_implicit_ad=False),
-    # "sigma" (implicit-diff path), "phase" (explicit-AD path),
-    # or "none" (diagnostic).  See ipeps_ad_paths.md.
-    forward_gauge: str = "qr"
+    gmres_restart: int = 20  # Krylov dimension for GMRES (no outer restarts)
+    ctm_conv_method: str = "elementwise"  # "elementwise" or "sv" (singular value)
+    # forward_gauge: "phase" (default — Frobenius-norm phase fix per CTM
+    # absorption; works for both implicit and explicit AD, 1-site and
+    # 2-site).  "sigma" (transfer-matrix eigenvector alignment, 1-site
+    # only), "qr" (legacy, auto-promoted to "phase"), or "none"
+    # (diagnostic).  See ipeps_ad_paths.md.
+    forward_gauge: str = "phase"
     # Optional reference-mode implicit AD mode (App. C-F) for dense 1-site C4v.
     ctm_ad_mode: str | None = None  # None or "c4v_reference"
     adjoint_solver: str = "bicgstab"  # "bicgstab" or "gmres"
@@ -199,9 +202,9 @@ class iPEPSConfig:
     ctm: CTMConfig = field(default_factory=CTMConfig)
     svd_trunc_err: float | None = None
     gate_order: str = "sequential"
-    unit_cell: str = "1x1"  # "1x1" or "2site"
+    unit_cell: str | Lattice = "1x1"  # "1x1", "2site", or Lattice(...)
     # AD ground-state optimization settings
-    gs_optimizer: str = "cg"  # "cg", "adam", or "lbfgs"
+    gs_optimizer: str = "lbfgs"  # "lbfgs", "cg", or "adam"
     gs_learning_rate: float = 1e-3
     gs_num_steps: int = 200
     gs_conv_tol: float = 1e-8
@@ -262,9 +265,13 @@ class iPEPSConfig:
         object.__setattr__(self, "gs_explicit_ad", None)
 
         valid_unit_cells = {"1x1", "2site"}
-        if self.unit_cell not in valid_unit_cells:
+        if (
+            not isinstance(self.unit_cell, Lattice)
+            and self.unit_cell not in valid_unit_cells
+        ):
             raise ValueError(
-                f"unit_cell must be one of {valid_unit_cells}, got {self.unit_cell!r}"
+                f"unit_cell must be one of {valid_unit_cells} or a Lattice, "
+                f"got {self.unit_cell!r}"
             )
         valid_stall_recovery = {None, "noise", "reset"}
         if self.gs_stall_recovery not in valid_stall_recovery:

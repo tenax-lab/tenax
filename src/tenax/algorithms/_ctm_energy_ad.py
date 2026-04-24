@@ -7,6 +7,7 @@ __all__ = ["ctm_energy_explicit", "ctm_energy_implicit"]
 import jax
 import jax.numpy as jnp
 
+from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
 from tenax.algorithms._ctm_python_loop import (
     Coord,
     _make_jit_ctm_step,
@@ -20,8 +21,9 @@ from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     initialize_ctm_tensor_env,
 )
-from tenax.algorithms._gmres_lax import gmres_pytree
-from tenax.algorithms.ad_utils import _phase_fix_ctm_tensor
+from tenax.algorithms._gmres_lax import gmres_pytree, gmres_pytree_jax
+from tenax.algorithms.ad_utils import CTMRGGradientError, _phase_fix_ctm_tensor
+from tenax.contraction.contractor import contract
 
 
 def _default_energy(site_tensors, envs, gate, coords, neighbors):
@@ -97,15 +99,6 @@ def ctm_energy_explicit(
 # ---------------------------------------------------------------------------
 
 
-def _wrap_tensor(data, original):
-    """Wrap dense data back into a Tensor preserving original index structure."""
-    from tenax.core.tensor import SymmetricTensor
-
-    if isinstance(original, SymmetricTensor):
-        return SymmetricTensor.from_dense(data, original.indices, tol=float("inf"))
-    return type(original)(data, original.indices)
-
-
 def _transfer_matrix_leading_eigvec(T_dense, n_iter=30):
     """Compute leading right eigenvector of the double-layer transfer matrix.
 
@@ -121,21 +114,94 @@ def _transfer_matrix_leading_eigvec(T_dense, n_iter=30):
     return rho
 
 
+def _wrap_sigma(sigma_data, contract_idx, output_idx, env_tensor):
+    """Wrap a dense sigma matrix as a Tensor matching *env_tensor*'s type.
+
+    The sigma is a chi x chi gauge transform.  ``contract_idx`` is the
+    TensorIndex of the env leg that sigma contracts with; ``output_idx`` is
+    the TensorIndex for the resulting (free) leg.
+
+    For DenseTensor envs this creates a DenseTensor.
+    For SymmetricTensor envs this creates a SymmetricTensor via from_dense,
+    preserving block-sparse structure (sigma is block-diagonal when the
+    transfer matrix respects the symmetry, which it does by construction).
+    """
+    from tenax.core.tensor import DenseTensor, SymmetricTensor
+
+    indices = (output_idx, contract_idx)
+    if isinstance(env_tensor, SymmetricTensor):
+        return SymmetricTensor.from_dense(sigma_data, indices, tol=float("inf"))
+    return DenseTensor(sigma_data, indices)
+
+
+def _apply_sigma_to_corner(corner, s_left_data, s_right_data):
+    """Apply sigma gauge to a corner: s_left^H @ corner @ s_right.
+
+    corner is a 2-leg Tensor with indices (idx0, idx1).
+    s_left^H contracts with idx0, s_right contracts with idx1.
+    """
+    idx0, idx1 = corner.indices
+    # Temporary output labels — must not collide with existing labels
+    tmp0 = ("_sigma_out", idx0.label)
+    tmp1 = ("_sigma_out", idx1.label)
+
+    # s_left^H: conjugate transpose. Row index = output (tmp0), col = idx0 (contracts).
+    s_left_dag = _wrap_sigma(s_left_data.conj().T, idx0, idx0.relabel(tmp0), corner)
+    # s_right: row index = idx1 (contracts), col = output (tmp1).
+    # Sigma has shape (chi, chi) with layout (output, contract) — but here
+    # we need (contract, output) so transpose the data.
+    s_right = _wrap_sigma(s_right_data.T, idx1, idx1.relabel(tmp1), corner)
+    # Contract: s_left_dag @ corner @ s_right
+    # s_left_dag has labels (tmp0, idx0.label), corner has (idx0.label, idx1.label)
+    # -> intermediate has (tmp0, idx1.label)
+    # s_right has labels (tmp1, idx1.label) -> result has (tmp0, tmp1)
+    result = contract(s_left_dag, corner, s_right)
+    return result.relabel(tmp0, idx0.label).relabel(tmp1, idx1.label)
+
+
+def _apply_sigma_to_edge(edge, s_data):
+    """Apply sigma gauge to an edge: s^H @ edge @ s.
+
+    edge is a 3-leg Tensor with indices (chi_left, phys, chi_right).
+    The same sigma acts on both chi legs.
+    """
+    idx_l, idx_p, idx_r = edge.indices
+    tmp_l = ("_sigma_out", idx_l.label)
+    tmp_r = ("_sigma_out", idx_r.label)
+
+    # s^H on the left chi leg: (tmp_l, idx_l.label)
+    s_dag = _wrap_sigma(s_data.conj().T, idx_l, idx_l.relabel(tmp_l), edge)
+    # s on the right chi leg: (tmp_r, idx_r.label) with transposed data
+    s_right = _wrap_sigma(s_data.T, idx_r, idx_r.relabel(tmp_r), edge)
+    result = contract(s_dag, edge, s_right)
+    return result.relabel(tmp_l, idx_l.label).relabel(tmp_r, idx_r.label)
+
+
 def _sigma_gauge_fix_env(env_new, env_old):
     """Fix gauge via transfer-matrix eigenvector alignment (sigma gauge).
 
     Aligns env_new to env_old so that the environment converges element-wise
     (not just spectrally). Based on arxiv:2311.11894.
+
+    Sigma computation densifies edge tensors (chi x D^2 x chi) for the
+    power-method transfer-matrix eigenvector — this is acceptable because
+    the edge tensor size is at most chi x D^2 x chi (e.g. 16 x 9 x 16 =
+    2304 elements at chi=16, D=3), which is always small.
+
+    Sigma application uses label-based Tensor contractions, preserving
+    SymmetricTensor type when the environment carries one.  The sigma
+    matrix itself is chi x chi (small), wrapped as the same Tensor type
+    as the environment.
     """
-    C1_n, C2_n, C3_n, C4_n = (
-        c.todense() for c in (env_new.C1, env_new.C2, env_new.C3, env_new.C4)
-    )
-    T1_n, T2_n, T3_n, T4_n = (
-        t.todense() for t in (env_new.T1, env_new.T2, env_new.T3, env_new.T4)
-    )
-    T1_o, T2_o, T3_o, T4_o = (
-        t.todense() for t in (env_old.T1, env_old.T2, env_old.T3, env_old.T4)
-    )
+    # Densify edge tensors for sigma computation (small: chi x D^2 x chi).
+    T1_n_d = env_new.T1.todense()
+    T2_n_d = env_new.T2.todense()
+    T3_n_d = env_new.T3.todense()
+    T4_n_d = env_new.T4.todense()
+    T1_o_d = env_old.T1.todense()
+    T2_o_d = env_old.T2.todense()
+    T3_o_d = env_old.T3.todense()
+    T4_o_d = env_old.T4.todense()
 
     def _compute_sigma(T_new, T_old):
         """Compute sigma = Q_new @ Q_old^H from transfer matrix eigenvectors."""
@@ -151,32 +217,38 @@ def _sigma_gauge_fix_env(env_new, env_old):
         Q_old = Q_old * signs_old[None, :]
         return Q_new @ Q_old.conj().T
 
-    s1 = _compute_sigma(T1_n, T1_o)
-    s2 = _compute_sigma(T2_n, T2_o)
-    s3 = _compute_sigma(T3_n, T3_o)
-    s4 = _compute_sigma(T4_n, T4_o)
+    # stop_gradient on the sigmas: at the converged fixed point sigma = I,
+    # so its derivative w.r.t. the environment is not needed for implicit
+    # differentiation — only the CTM step Jacobian matters.  Without this,
+    # the QR inside _compute_sigma produces NaN VJPs when the transfer-matrix
+    # eigenvector density matrix is rank-deficient (chi > D^2).
+    s1 = jax.lax.stop_gradient(_compute_sigma(T1_n_d, T1_o_d))
+    s2 = jax.lax.stop_gradient(_compute_sigma(T2_n_d, T2_o_d))
+    s3 = jax.lax.stop_gradient(_compute_sigma(T3_n_d, T3_o_d))
+    s4 = jax.lax.stop_gradient(_compute_sigma(T4_n_d, T4_o_d))
 
     # Apply sigma to corners: s_row^H @ C @ s_col
-    C1_f = s4.conj().T @ C1_n @ s1
-    C2_f = s1.conj().T @ C2_n @ s2
-    C3_f = s2.conj().T @ C3_n @ s3
-    C4_f = s3.conj().T @ C4_n @ s4
+    # Preserves SymmetricTensor type via label-based contraction.
+    C1_f = _apply_sigma_to_corner(env_new.C1, s4, s1)
+    C2_f = _apply_sigma_to_corner(env_new.C2, s1, s2)
+    C3_f = _apply_sigma_to_corner(env_new.C3, s2, s3)
+    C4_f = _apply_sigma_to_corner(env_new.C4, s3, s4)
 
     # Apply sigma to edges: s^H @ T @ s
-    T1_f = jnp.einsum("ab,bdc,ce->ade", s1.conj().T, T1_n, s1)
-    T2_f = jnp.einsum("ab,bdc,ce->ade", s2.conj().T, T2_n, s2)
-    T3_f = jnp.einsum("ab,bdc,ce->ade", s3.conj().T, T3_n, s3)
-    T4_f = jnp.einsum("ab,bdc,ce->ade", s4.conj().T, T4_n, s4)
+    T1_f = _apply_sigma_to_edge(env_new.T1, s1)
+    T2_f = _apply_sigma_to_edge(env_new.T2, s2)
+    T3_f = _apply_sigma_to_edge(env_new.T3, s3)
+    T4_f = _apply_sigma_to_edge(env_new.T4, s4)
 
     return CTMTensorEnv(
-        C1=_wrap_tensor(C1_f, env_new.C1),
-        C2=_wrap_tensor(C2_f, env_new.C2),
-        C3=_wrap_tensor(C3_f, env_new.C3),
-        C4=_wrap_tensor(C4_f, env_new.C4),
-        T1=_wrap_tensor(T1_f, env_new.T1),
-        T2=_wrap_tensor(T2_f, env_new.T2),
-        T3=_wrap_tensor(T3_f, env_new.T3),
-        T4=_wrap_tensor(T4_f, env_new.T4),
+        C1=C1_f,
+        C2=C2_f,
+        C3=C3_f,
+        C4=C4_f,
+        T1=T1_f,
+        T2=T2_f,
+        T3=T3_f,
+        T4=T4_f,
     )
 
 
@@ -201,6 +273,7 @@ def ctm_energy_implicit(
     gmres_maxiter: int = 200,
     gmres_restart: int = 30,
     energy_fn=None,
+    arnoldi_precheck: bool = False,
 ) -> jnp.ndarray:
     """Compute iPEPS energy with implicit-differentiation backward (GMRES).
 
@@ -242,21 +315,22 @@ def ctm_energy_implicit(
                            difference across all env tensors).
         min_iter:          Minimum iterations before checking convergence.
         energy_fn:         Optional custom energy function ``(A, env, gate) -> scalar``.
+        arnoldi_precheck:  If True, run 20-step Arnoldi to estimate rho(J^T)
+                           before GMRES. Raises ``CTMRGGradientError`` if
+                           rho >= 1. Enable when the caller has recovery logic.
 
     Returns:
         Scalar energy per site.
     """
     coords = sorted(site_tensors.keys())
-    # Extract dense data for custom_vjp (JAX requires array leaves).
-    # For SymmetricTensor inputs this densifies, which is necessary
-    # because jax.custom_vjp cannot differentiate through block-sparse ops.
-    params_data = [site_tensors[c].todense() for c in coords]
-    templates = {c: site_tensors[c] for c in coords}
+    # Pass Tensor objects directly through custom_vjp boundary.
+    # Both DenseTensor and SymmetricTensor are registered JAX pytrees,
+    # so JAX can differentiate through them without densifying.
+    params_data = tuple(site_tensors[c] for c in coords)
 
     return _ctm_energy_implicit_dispatch(
-        tuple(params_data),
+        params_data,
         coords,
-        templates,
         neighbors,
         gate,
         chi,
@@ -275,23 +349,8 @@ def ctm_energy_implicit(
         gmres_maxiter,
         gmres_restart,
         energy_fn,
+        arnoldi_precheck,
     )
-
-
-def _reconstruct_site_tensors(params_data, coords, templates):
-    """Reconstruct site_tensors dict from raw data arrays + templates."""
-    from tenax.core.tensor import SymmetricTensor
-
-    result = {}
-    for i, c in enumerate(coords):
-        tmpl = templates[c]
-        if isinstance(tmpl, SymmetricTensor):
-            result[c] = SymmetricTensor.from_dense(
-                params_data[i], tmpl.indices, tol=float("inf")
-            )
-        else:
-            result[c] = tmpl.__class__(params_data[i], tmpl.indices)
-    return result
 
 
 def _sigma_gauged_ctm_converge(
@@ -315,7 +374,11 @@ def _sigma_gauged_ctm_converge(
     Runs CTM sweeps with sigma gauge alignment at each step, ensuring
     the converged environment is a literal fixed point of the gauged step.
     """
-    from tenax.algorithms._ctm_tensor_convergence import _ctm_sv_diff
+    from tenax.algorithms._ctm_tensor_convergence import (
+        _corner_singular_values,
+        _ctm_sv_diff,
+    )
+    from tenax.core.tensor import SymmetricTensor as _SymmetricTensor
 
     jit_step = _make_jit_ctm_step(neighbors)
     envs = (
@@ -365,7 +428,7 @@ def _sigma_gauged_ctm_converge(
         if total_iter < min_iter:
             if conv_method == "sv":
                 for c in sorted(envs):
-                    prev_svs[c] = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
+                    prev_svs[c] = _corner_singular_values(envs[c].C1)
             else:
                 prev_envs = {c: envs[c] for c in envs}
             continue
@@ -381,8 +444,13 @@ def _sigma_gauged_ctm_converge(
                     jax.tree.leaves(prev_envs[c]),
                     jax.tree.leaves(envs[c]),
                 ):
-                    a = told.todense() if hasattr(told, "todense") else told
-                    b = tnew.todense() if hasattr(tnew, "todense") else tnew
+                    # For SymmetricTensor, compare flat block data directly
+                    # to avoid allocating a full dense chi x chi matrix.
+                    if isinstance(told, _SymmetricTensor):
+                        a, b = told._data, tnew._data
+                    else:
+                        a = told.todense() if hasattr(told, "todense") else told
+                        b = tnew.todense() if hasattr(tnew, "todense") else tnew
                     diff = float(jnp.max(jnp.abs(b - a)))
                     max_diff = max(max_diff, diff)
             converged = max_diff < conv_tol
@@ -391,7 +459,7 @@ def _sigma_gauged_ctm_converge(
             # SV convergence (default): corner singular value difference
             converged = True
             for c in sorted(envs):
-                sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
+                sv = _corner_singular_values(envs[c].C1)
                 if c in prev_svs:
                     diff = float(_ctm_sv_diff(sv, prev_svs[c]))
                     if diff >= conv_tol:
@@ -412,7 +480,6 @@ _VJP_CACHE: dict = {}
 def _ctm_energy_implicit_dispatch(
     params_data_tuple,
     coords,
-    templates,
     neighbors,
     gate,
     chi,
@@ -431,6 +498,7 @@ def _ctm_energy_implicit_dispatch(
     gmres_maxiter,
     gmres_restart,
     energy_fn,
+    arnoldi_precheck,
 ):
     """Dispatch to custom_vjp-decorated function with caching.
 
@@ -439,10 +507,8 @@ def _ctm_energy_implicit_dispatch(
     optimizer loops reuse the compiled backward across steps.
     """
     # Build a hashable key from the static configuration.
-    # Templates and env_init change per call (updated tensors/envs) but
-    # have the same structure, so the JIT backward compiles once and
-    # reuses. Gate and energy_fn must be in the key because the JIT
-    # backward captures them at trace time as compile-time constants.
+    # Gate and energy_fn must be in the key because the JIT backward
+    # captures them at trace time as compile-time constants.
     cache_key = (
         tuple(coords),
         chi,
@@ -461,13 +527,13 @@ def _ctm_energy_implicit_dispatch(
         id(neighbors),  # same dict object across optimizer steps
         id(gate),  # different Hamiltonian → different backward
         id(energy_fn),  # different energy callback → different backward
+        arnoldi_precheck,
     )
 
     entry = _VJP_CACHE.get(cache_key)
     if entry is not None:
         f, mutables = entry
         # Update per-call mutable state
-        mutables["templates"] = templates
         mutables["gate"] = gate
         mutables["chi_ramp"] = chi_ramp
         mutables["env_init"] = env_init
@@ -476,7 +542,6 @@ def _ctm_energy_implicit_dispatch(
 
     # First call with this config — build and cache
     mutables = {
-        "templates": templates,
         "gate": gate,
         "chi_ramp": chi_ramp,
         "env_init": env_init,
@@ -499,6 +564,7 @@ def _ctm_energy_implicit_dispatch(
         gmres_tol=gmres_tol,
         gmres_maxiter=gmres_maxiter,
         gmres_restart=gmres_restart,
+        arnoldi_precheck=arnoldi_precheck,
     )
     _VJP_CACHE[cache_key] = (f, mutables)
     return f(params_data_tuple)
@@ -521,10 +587,11 @@ def _make_implicit_vjp_fn(
     gmres_tol,
     gmres_maxiter,
     gmres_restart,
+    arnoldi_precheck=False,
 ):
     """Build a custom_vjp-decorated function closed over static config.
 
-    Per-call mutable state (templates, gate, chi_ramp, env_init, energy_fn)
+    Per-call mutable state (gate, chi_ramp, env_init, energy_fn)
     is read from the ``mutables`` dict, which is updated by the dispatch
     function before each call. This allows the compiled ``@jax.jit``
     backward to be reused across optimizer steps.
@@ -545,7 +612,7 @@ def _make_implicit_vjp_fn(
     # Mutable cache for treedef from forward (needed in backward).
     _cached = {}
 
-    def _run_forward(params_data, site_tensors):
+    def _run_forward(site_tensors):
         """Run CTM convergence (shared by f and f_fwd)."""
         chi_ramp = mutables["chi_ramp"]
         env_init = mutables["env_init"]
@@ -594,17 +661,13 @@ def _make_implicit_vjp_fn(
 
     @jax.custom_vjp
     def f(params_data_tuple):
-        params_data = list(params_data_tuple)
-        templates = mutables["templates"]
-        site_tensors = _reconstruct_site_tensors(params_data, coords, templates)
-        envs = _run_forward(params_data, site_tensors)
+        site_tensors = dict(zip(coords, params_data_tuple))
+        envs = _run_forward(site_tensors)
         return _compute_energy(site_tensors, envs)
 
     def f_fwd(params_data_tuple):
-        params_data = list(params_data_tuple)
-        templates = mutables["templates"]
-        site_tensors = _reconstruct_site_tensors(params_data, coords, templates)
-        envs = _run_forward(params_data, site_tensors)
+        site_tensors = dict(zip(coords, params_data_tuple))
+        envs = _run_forward(site_tensors)
         energy = _compute_energy(site_tensors, envs)
 
         _cached["env_treedef"] = jax.tree.structure(envs)
@@ -612,47 +675,55 @@ def _make_implicit_vjp_fn(
         residuals = (params_data_tuple, env_leaves)
         return energy, residuals
 
-    # Build the JIT-fused backward. All non-diff args (coords, templates,
-    # neighbors, gate, chi, ...) are captured in the closure so XLA sees a
-    # single compiled program — one CUDA graph instead of 30+.
+    # Build JIT'd sweep step for backward (same as forward).
     jit_step_bwd = _make_jit_ctm_step(neighbors)
 
+    # --- JIT'd building blocks for the backward ---
+    # dE/denv and chain_rule are small JIT programs. The GMRES solve is
+    # fully JIT-fused: the while_loop + all matvec VJPs compile into one
+    # XLA program, eliminating Python-loop overhead.
+
+    def _apply_gauge_fix(e_out, e_in):
+        """Apply the same gauge fix used in the forward pass."""
+        if forward_gauge == "phase":
+            return {c: _phase_fix_ctm_tensor(e_out[c]) for c in coords}
+        elif forward_gauge == "sigma":
+            return {c: _sigma_gauge_fix_env(e_out[c], e_in[c]) for c in coords}
+        else:
+            return e_out
+
     @jax.jit
-    def _jit_backward(params_data_tuple, env_leaves, g_scalar):
-        """JIT-fused GMRES backward: one XLA program, one CUDA graph."""
-        params_data = list(params_data_tuple)
-        # Read per-call state from mutables (set before each call by dispatch).
-        templates_ = mutables["templates"]
+    def _jit_dE_denv(params_data_tuple, env_leaves):
+        """Step 1: compute dE/denv (GMRES RHS)."""
         gate_ = mutables["gate"]
         energy_fn_ = mutables["energy_fn"]
-        site_tensors = _reconstruct_site_tensors(params_data, coords, templates_)
+        site_tensors = dict(zip(coords, params_data_tuple))
         env_treedef = _cached["env_treedef"]
 
-        # Reconstruct converged envs from cached leaves
-        envs = jax.tree.unflatten(env_treedef, env_leaves)
-
-        # --- Step 1: dE/denv (GMRES RHS) ---
         def energy_from_env(env_leaves_flat):
             e = jax.tree.unflatten(env_treedef, env_leaves_flat)
             if energy_fn_ is not None:
                 return energy_fn_(site_tensors, e, gate_)
             return _default_energy(site_tensors, e, gate_, coords, neighbors)
 
-        _, vjp_energy_env = jax.vjp(energy_from_env, env_leaves)
-        dE_denv = vjp_energy_env(jnp.ones(()))[0]
+        _, vjp_fn = jax.vjp(energy_from_env, env_leaves)
+        return vjp_fn(jnp.ones(()))[0]
 
-        # --- Step 2: Gauge-fixed sweep VJP (must match forward gauge) ---
-        def _apply_gauge_fix(e_out, e_in):
-            """Apply the same gauge fix used in the forward pass."""
-            if forward_gauge == "phase":
-                return {c: _phase_fix_ctm_tensor(e_out[c]) for c in coords}
-            elif forward_gauge == "sigma":
-                return {c: _sigma_gauge_fix_env(e_out[c], e_in[c]) for c in coords}
-            else:
-                return e_out
+    @jax.jit
+    def _jit_apply_Jt(params_data_tuple, env_leaves, v):
+        """Step 2: one J^T application (GMRES matvec)."""
+        site_tensors = dict(zip(coords, params_data_tuple))
+        env_treedef = _cached["env_treedef"]
 
         def gauge_fixed_sweep_from_env(env_leaves_flat):
             e = jax.tree.unflatten(env_treedef, env_leaves_flat)
+            # stop_gradient on the reference ensures gradients flow only
+            # through the forward map, not through the alignment target.
+            # Without this, the sigma gauge Jacobian includes reference-path
+            # derivatives that push eigenvalues toward 1, making (I - J^T)
+            # near-singular and GMRES returns near-zero lambda.
+            # Cf. ad_utils.py step_fn_sigma (line ~1232).
+            e_ref = jax.tree.map(jax.lax.stop_gradient, e)
             e_out = jit_step_bwd(
                 site_tensors,
                 e,
@@ -661,30 +732,24 @@ def _make_implicit_vjp_fn(
                 renormalize=renormalize,
                 projector_backward=projector_backward,
             )
-            e_fixed = _apply_gauge_fix(e_out, e)
+            e_fixed = _apply_gauge_fix(e_out, e_ref)
             return tuple(jax.tree.leaves(e_fixed))
 
-        _, vjp_sweep_env = jax.vjp(gauge_fixed_sweep_from_env, env_leaves)
+        _, vjp_fn = jax.vjp(gauge_fixed_sweep_from_env, env_leaves)
+        jt_v = vjp_fn(v)[0]
+        return tuple(vi - ji for vi, ji in zip(v, jt_v))
 
-        def apply_I_minus_Jt(v):
-            jt_v = vjp_sweep_env(v)[0]
-            return tuple(vi - ji for vi, ji in zip(v, jt_v))
+    @jax.jit
+    def _jit_chain_rule(params_data_tuple, env_leaves, lam, g_scalar):
+        """Steps 3-4: direct gradient + indirect (J_params^T @ lam)."""
+        gate_ = mutables["gate"]
+        energy_fn_ = mutables["energy_fn"]
+        env_treedef = _cached["env_treedef"]
+        envs = jax.tree.unflatten(env_treedef, env_leaves)
 
-        # --- Step 3: GMRES solve ---
-        lam, _info = gmres_pytree(
-            apply_I_minus_Jt,
-            dE_denv,
-            dE_denv,
-            tol=gmres_tol,
-            maxiter=gmres_maxiter,
-            restart=gmres_restart,
-        )
-
-        # --- Step 4: Chain rule ---
         # Direct: dE/dparams at fixed env
         def energy_from_params(p_tuple):
-            pd = list(p_tuple)
-            st = _reconstruct_site_tensors(pd, coords, templates_)
+            st = dict(zip(coords, p_tuple))
             if energy_fn_ is not None:
                 return energy_fn_(st, envs, gate_)
             return _default_energy(st, envs, gate_, coords, neighbors)
@@ -694,8 +759,7 @@ def _make_implicit_vjp_fn(
 
         # Indirect: J_params^T @ lam
         def gauge_fixed_sweep_from_params(p_tuple):
-            pd = list(p_tuple)
-            st = _reconstruct_site_tensors(pd, coords, templates_)
+            st = dict(zip(coords, p_tuple))
             e_out = jit_step_bwd(
                 st,
                 envs,
@@ -710,14 +774,87 @@ def _make_implicit_vjp_fn(
         _, vjp_sweep_params = jax.vjp(gauge_fixed_sweep_from_params, params_data_tuple)
         indirect = vjp_sweep_params(lam)[0]
 
-        # Total: g * (direct + indirect)
-        total = tuple(g_scalar * (d + ind) for d, ind in zip(direct, indirect))
+        total = jax.tree.map(lambda d, ind: g_scalar * (d + ind), direct, indirect)
         return (total,)
 
+    @jax.jit
+    def _jit_gmres_solve(params_data_tuple, env_leaves, rhs):
+        """GMRES solve compiled into a single XLA program.
+
+        Fuses the entire (I - J^T) solve into one XLA computation.
+        All GMRES iterations run on-device with zero Python overhead.
+        """
+        site_tensors = dict(zip(coords, params_data_tuple))
+        env_treedef = _cached["env_treedef"]
+
+        def apply_I_minus_Jt(v):
+            """(I - J^T) matvec — inlined for JIT fusion."""
+
+            def gauge_fixed_sweep_from_env(env_leaves_flat):
+                e = jax.tree.unflatten(env_treedef, env_leaves_flat)
+                e_ref = jax.tree.map(jax.lax.stop_gradient, e)
+                e_out = jit_step_bwd(
+                    site_tensors,
+                    e,
+                    chi=chi,
+                    projector_method=projector_method,
+                    renormalize=renormalize,
+                    projector_backward=projector_backward,
+                )
+                e_fixed = _apply_gauge_fix(e_out, e_ref)
+                return tuple(jax.tree.leaves(e_fixed))
+
+            _, vjp_fn = jax.vjp(gauge_fixed_sweep_from_env, env_leaves)
+            jt_v = vjp_fn(v)[0]
+            return tuple(vi - ji for vi, ji in zip(v, jt_v))
+
+        lam, info = gmres_pytree(
+            apply_I_minus_Jt,
+            rhs,
+            rhs,
+            tol=gmres_tol,
+            maxiter=gmres_maxiter,
+            restart=gmres_restart,
+        )
+        return tuple(jax.tree.leaves(lam)), info
+
     def f_bwd(residuals, g):
-        """Dispatch to JIT-fused GMRES backward."""
+        """Backward: JIT-fused GMRES solve + JIT'd chain rule."""
         params_data_tuple, env_leaves = residuals
-        return _jit_backward(params_data_tuple, env_leaves, g)
+
+        # Step 1: dE/denv
+        dE_denv = _jit_dE_denv(params_data_tuple, env_leaves)
+
+        # Step 1.5: Arnoldi precheck (optional, uses eager matvec)
+        if arnoldi_precheck:
+
+            def apply_Jt_only(v):
+                """Apply J^T (not I - J^T)."""
+                i_minus_jt_v = _jit_apply_Jt(params_data_tuple, env_leaves, v)
+                return tuple(vi - ri for vi, ri in zip(v, i_minus_jt_v))
+
+            rho = arnoldi_spectral_radius_pytree(apply_Jt_only, dE_denv, n_iter=20)
+            if rho >= 1.0:
+                raise CTMRGGradientError(rho)
+
+        # Step 2: GMRES solve via JAX's built-in solver (eager, not JIT-fused).
+        # Uses jax.scipy.sparse.linalg.gmres which converges reliably at
+        # large chi where the custom gmres_lax can produce wrong gradients.
+        def _eager_apply_I_minus_Jt(v):
+            return _jit_apply_Jt(params_data_tuple, env_leaves, v)
+
+        lam, _info = gmres_pytree_jax(
+            _eager_apply_I_minus_Jt,
+            dE_denv,
+            dE_denv,
+            tol=gmres_tol,
+            maxiter=gmres_maxiter,
+            restart=gmres_restart,
+        )
+        lam_leaves = tuple(jax.tree.leaves(lam))
+
+        # Steps 3-4: chain rule
+        return _jit_chain_rule(params_data_tuple, env_leaves, lam_leaves, g)
 
     f.defvjp(f_fwd, f_bwd)
     return f

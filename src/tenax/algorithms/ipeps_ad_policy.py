@@ -17,23 +17,14 @@ def resolve_projector_backward(
     *,
     logger: logging.Logger | None = None,
 ) -> iPEPSConfig:
-    """Auto-promote ``ctm.projector_backward`` for explicit-AD eigh paths."""
-    if config.gs_implicit_ad:
-        return config
-    ctm_cfg = config.ctm
-    effective_projector = config.gs_projector_method or ctm_cfg.projector_method
-    if effective_projector != "eigh":
-        return config
-    if ctm_cfg.projector_backward != "auto":
-        return config
+    """No-op — kept for backward compatibility.
 
-    new_ctm = replace(ctm_cfg, projector_backward="lorentzian")
-    if logger is not None:
-        logger.info(
-            "projector_backward auto-promoted: auto -> lorentzian "
-            "(explicit AD + projector_method=eigh)"
-        )
-    return replace(config, ctm=new_ctm)
+    Previously auto-promoted projector settings; now the defaults
+    (``projector_method="svd"``, ``forward_gauge="phase"``) are correct
+    for all AD paths.  Users who explicitly set ``projector_method="eigh"``
+    get eigh without silent overrides.
+    """
+    return config
 
 
 def use_reference_c4v_path(config: iPEPSConfig) -> bool:
@@ -55,8 +46,5 @@ def build_ad_ctm_config(config: iPEPSConfig) -> CTMConfig:
     if config.gs_projector_method is not None:
         ctm_cfg = replace(ctm_cfg, projector_method=config.gs_projector_method)
     if ctm_cfg.forward_gauge == "qr":
-        if config.gs_implicit_ad:
-            ctm_cfg = replace(ctm_cfg, forward_gauge="sigma")
-        else:
-            ctm_cfg = replace(ctm_cfg, forward_gauge="phase")
+        ctm_cfg = replace(ctm_cfg, forward_gauge="phase")
     return ctm_cfg

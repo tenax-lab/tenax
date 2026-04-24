@@ -123,53 +123,25 @@ def test_ctm_tensor_accepts_projector_backward_lorentzian():
 
 
 # ---------------------------------------------------------------------------
-# Task 8 Part A — auto-promotion in ipeps_optimize._resolve_projector_backward
+# Task 8 Part A — resolve_projector_backward is a no-op (no auto-promotion)
 # ---------------------------------------------------------------------------
 
 
-def test_auto_promotes_when_explicit_ad_and_eigh():
+def test_resolve_is_noop_for_eigh():
+    """User settings pass through unchanged — no silent overrides."""
     ctm = CTMConfig(chi=8, projector_method="eigh")
     config = iPEPSConfig(ctm=ctm, gs_implicit_ad=False)
     resolved = _resolve_projector_backward(config)
-    assert resolved.ctm.projector_backward == "lorentzian"
-
-
-def test_respects_explicit_user_standard():
-    ctm = CTMConfig(chi=8, projector_method="eigh", projector_backward="standard")
-    config = iPEPSConfig(ctm=ctm, gs_implicit_ad=False)
-    resolved = _resolve_projector_backward(config)
-    assert resolved.ctm.projector_backward == "standard"
-
-
-def test_respects_explicit_user_lorentzian():
-    ctm = CTMConfig(chi=8, projector_method="eigh", projector_backward="lorentzian")
-    config = iPEPSConfig(ctm=ctm, gs_implicit_ad=False)
-    resolved = _resolve_projector_backward(config)
-    assert resolved.ctm.projector_backward == "lorentzian"
-
-
-def test_does_not_promote_when_projector_method_is_qr():
-    ctm = CTMConfig(chi=8, projector_method="qr")
-    config = iPEPSConfig(ctm=ctm, gs_implicit_ad=False)
-    resolved = _resolve_projector_backward(config)
     assert resolved.ctm.projector_backward == "auto"
+    assert resolved.ctm.projector_method == "eigh"
 
 
-def test_does_not_promote_when_not_explicit_ad():
+def test_resolve_is_noop_for_implicit_ad():
     ctm = CTMConfig(chi=8, projector_method="eigh")
     config = iPEPSConfig(ctm=ctm, gs_implicit_ad=True)
     resolved = _resolve_projector_backward(config)
     assert resolved.ctm.projector_backward == "auto"
-
-
-def test_auto_promotion_is_logged(caplog):
-    import logging
-
-    ctm = CTMConfig(chi=8, projector_method="eigh")
-    config = iPEPSConfig(ctm=ctm, gs_implicit_ad=False)
-    with caplog.at_level(logging.INFO, logger="tenax.algorithms.ipeps_optimize"):
-        _resolve_projector_backward(config)
-    assert any("lorentzian" in rec.message.lower() for rec in caplog.records)
+    assert resolved.ctm.projector_method == "eigh"
 
 
 # ---------------------------------------------------------------------------

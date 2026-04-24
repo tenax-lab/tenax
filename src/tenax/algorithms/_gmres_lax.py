@@ -254,18 +254,21 @@ def gmres_pytree_jax(
     x0_tree=None,
     *,
     tol: float = 1e-7,
+    maxiter: int | None = None,
+    restart: int | None = None,
     solve_method: str | None = None,
 ) -> tuple:
     """GMRES for pytree-valued linear systems using JAX's built-in solver.
 
     Uses ``jax.scipy.sparse.linalg.gmres`` — the same solver variPEPS uses.
-    No iteration cap (runs until ``tol`` is met).
 
     Args:
         matvec: Pytree-valued linear operator.
         b_tree: Right-hand side pytree.
         x0_tree: Initial guess (optional).
         tol: Absolute tolerance.
+        maxiter: Maximum GMRES iterations (outer restarts).
+        restart: Inner Krylov dimension before restart.
         solve_method: ``"batched"`` (GPU) or ``"incremental"`` (CPU).
     """
     from jax.scipy.sparse.linalg import gmres as jax_gmres
@@ -294,7 +297,11 @@ def gmres_pytree_jax(
     b_flat = flatten(b_tree)
     x0_flat = flatten(x0_tree) if x0_tree is not None else b_flat
 
-    kwargs = {"atol": tol}
+    kwargs = {"tol": tol, "atol": tol}
+    if maxiter is not None:
+        kwargs["maxiter"] = maxiter
+    if restart is not None:
+        kwargs["restart"] = restart
     if solve_method is not None:
         kwargs["solve_method"] = solve_method
 
