@@ -416,9 +416,9 @@ def optimize_gs_ad(
     if config.gs_num_steps < 0:
         raise ValueError(f"gs_num_steps must be >= 0, got {config.gs_num_steps}")
 
-    # Auto-promote projector_backward before dispatch so every downstream
-    # helper (1-site, 2-site, reference-C4v) sees the same CTM config.
-    # Mirrors the forward_gauge "qr" -> "phase" promotion further below.
+    # Resolve projector_backward policy before dispatch so every downstream
+    # helper (1-site, 2-site, reference-C4v) sees the same CTM config.  No
+    # silent gauge promotion — explicit user choices are preserved.
     # See docs/plans/2026-04-13-multisite-c4v-reference-ad-plan.md Task 8.
     config = _resolve_projector_backward(config)
 
@@ -703,7 +703,7 @@ def _optimize_gs_ad_tensor(
                 conv_method=ctm_cfg.ctm_conv_method,
                 min_iter=ctm_cfg.min_iter,
                 gmres_tol=ctm_cfg.gmres_tol,
-                gmres_maxiter=ctm_cfg.gmres_restart,
+                gmres_maxiter=ctm_cfg.gmres_maxiter,
                 gmres_restart=ctm_cfg.gmres_restart,
                 arnoldi_precheck=False,
             )
@@ -1439,7 +1439,7 @@ def _optimize_gs_ad_tensor_2site(
                 conv_method=ctm_cfg_2s.ctm_conv_method,
                 min_iter=ctm_cfg_2s.min_iter,
                 gmres_tol=ctm_cfg_2s.gmres_tol,
-                gmres_maxiter=ctm_cfg_2s.gmres_restart,
+                gmres_maxiter=ctm_cfg_2s.gmres_maxiter,
                 gmres_restart=ctm_cfg_2s.gmres_restart,
                 energy_fn=_energy_fn_2site,
                 arnoldi_precheck=False,
@@ -2107,7 +2107,7 @@ def _optimize_gs_ad_multisite(
                 conv_method=ctm_cfg.ctm_conv_method,
                 min_iter=ctm_cfg.min_iter,
                 gmres_tol=ctm_cfg.gmres_tol,
-                gmres_maxiter=ctm_cfg.gmres_restart,
+                gmres_maxiter=ctm_cfg.gmres_maxiter,
                 gmres_restart=ctm_cfg.gmres_restart,
                 energy_fn=_energy_fn,
                 arnoldi_precheck=False,

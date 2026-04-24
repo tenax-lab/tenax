@@ -61,12 +61,13 @@ class CTMConfig:
     ad_backward_method: str = "vjp"  # "vjp" (iterative VJP) or "gmres" (xfail — #292)
     gmres_tol: float = 1e-6  # tolerance for GMRES backward solve
     gmres_restart: int = 20  # Krylov dimension for GMRES (no outer restarts)
+    gmres_maxiter: int = 200  # max total GMRES iterations (outer budget)
     ctm_conv_method: str = "elementwise"  # "elementwise" or "sv" (singular value)
     # forward_gauge: "phase" (default — Frobenius-norm phase fix per CTM
     # absorption; works for both implicit and explicit AD, 1-site and
     # 2-site).  "sigma" (transfer-matrix eigenvector alignment, 1-site
-    # only), "qr" (legacy, auto-promoted to "phase"), or "none"
-    # (diagnostic).  See ipeps_ad_paths.md.
+    # only), "qr" (legacy), or "none" (diagnostic).  No silent promotion
+    # — explicit user choice is preserved.  See ipeps_ad_paths.md.
     forward_gauge: str = "phase"
     # Optional reference-mode implicit AD mode (App. C-F) for dense 1-site C4v.
     ctm_ad_mode: str | None = None  # None or "c4v_reference"

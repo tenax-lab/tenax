@@ -1773,16 +1773,16 @@ class TestNoiseRecovery:
 
 
 class TestPostPR291ADBaseline:
-    """Regression tests locking down the post-PR-#291 iPEPS AD baseline
-    (issue #292).
+    """Regression tests locking down the post-PR-#341 iPEPS AD baseline.
 
-    After PR #291 the explicit-AD path supports an expanded set of
-    ``forward_gauge`` modes (``qr``, ``sigma``, ``phase``, ``none``) and
-    ``iPEPSConfig`` exposes a new ``gs_ctm_conv_tol_schedule`` knob. The
-    optimizer auto-promotes the conservative default ``forward_gauge="qr"``
-    to ``"phase"`` when ``gs_implicit_ad=False`` and the user has not
-    explicitly opted into a different gauge. These tests pin that behavior
-    so future refactors cannot silently drift off the documented baseline.
+    ``CTMConfig.forward_gauge`` accepts four modes (``qr``, ``sigma``,
+    ``phase``, ``none``) and defaults to ``"phase"`` — the value that is
+    correct for both implicit and explicit AD (1-site and 2-site).  No
+    silent promotion: explicit user choice is preserved by the AD config
+    builder (see ``tests/test_ipeps_ad_policy.py``).  ``iPEPSConfig``
+    exposes a ``gs_ctm_conv_tol_schedule`` knob.  These tests pin that
+    behavior so future refactors cannot silently drift off the documented
+    baseline.
     """
 
     @pytest.fixture
@@ -1800,14 +1800,14 @@ class TestPostPR291ADBaseline:
             cfg = CTMConfig(forward_gauge=mode)
             assert cfg.forward_gauge == mode
 
-    def test_forward_gauge_default_is_conservative_qr(self):
-        """Config default stays ``qr``; auto-phase promotion is runtime-only.
+    def test_forward_gauge_default_is_phase(self):
+        """Config default is ``phase`` — the AD-correct choice.
 
-        Keeping the static default conservative avoids silently changing
-        behavior for callers that construct a ``CTMConfig`` directly (e.g.
-        implicit-diff paths, diagnostics, or notebooks).
+        ``"phase"`` is the correct default for both implicit and explicit
+        AD (1-site and 2-site).  No silent promotion: direct ``CTMConfig()``
+        users get the same behavior the AD optimizer uses.
         """
-        assert CTMConfig().forward_gauge == "qr"
+        assert CTMConfig().forward_gauge == "phase"
 
     def test_gs_ctm_conv_tol_schedule_is_configurable(self):
         """New iPEPSConfig knob from PR #291 is exposed and round-trips."""
@@ -1879,12 +1879,12 @@ class TestPostPR291ADBaseline:
         captured["_real"] = real
         return captured
 
-    def test_explicit_ad_auto_promotes_qr_gauge_to_phase(
+    def test_explicit_ad_preserves_explicit_qr_gauge(
         self, monkeypatch, heisenberg_gate
     ):
-        """``optimize_gs_ad`` auto-switches ``forward_gauge='qr'`` to
-        ``'phase'`` when ``gs_implicit_ad=False`` and the user has not
-        explicitly opted into a non-qr gauge (post-PR-#291 runtime behavior)."""
+        """``optimize_gs_ad`` preserves explicit ``forward_gauge='qr'`` — no
+        silent promotion.  The default is now ``"phase"``; a user who opts
+        into ``"qr"`` explicitly gets ``"qr"``."""
         captured = self._capture_explicit_ad_gauge(monkeypatch)
         config = iPEPSConfig(
             max_bond_dim=2,
@@ -1898,7 +1898,7 @@ class TestPostPR291ADBaseline:
         )
         with pytest.raises(captured["_sentinel"]):
             optimize_gs_ad(heisenberg_gate, None, config)
-        assert captured["forward_gauge"] == "phase"
+        assert captured["forward_gauge"] == "qr"
 
     def test_explicit_ad_respects_explicit_sigma_gauge(
         self, monkeypatch, heisenberg_gate
