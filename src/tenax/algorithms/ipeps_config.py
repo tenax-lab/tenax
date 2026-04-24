@@ -26,12 +26,9 @@ class CTMConfig:
                             broadening to prevent NaN from degenerate singular
                             values (Francuz et al., PRR 7, 013237).
         forward_gauge:      Gauge fix applied after each CTM sweep.  One of
-                            ``"qr"`` (default), ``"phase"``, ``"sigma"``, or
-                            ``"none"``.  The static default stays ``"qr"``
-                            for forward-only CTM, diagnostics, and notebooks.
-                            ``optimize_gs_ad`` auto-promotes ``"qr"`` to
-                            ``"phase"`` when ``gs_implicit_ad=False`` and the
-                            user has not opted into a different gauge — see
+                            ``"phase"`` (default), ``"qr"``, ``"sigma"``, or
+                            ``"none"``.  Explicit user choice is preserved —
+                            no silent promotion in AD paths.  See
                             ``docs/guide/algorithms/ipeps_ad_paths.md`` for
                             the full mode matrix and benchmarks.
         ad_backward_method: Backward method for the implicit-diff path.

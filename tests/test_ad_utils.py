@@ -1414,7 +1414,6 @@ class TestMultipletAwareTruncation:
 class TestVJPBackwardConvergence:
     """After sign fixing + elementwise convergence, VJP backward should converge."""
 
-    @pytest.mark.xfail(reason="VJP needs sigma gauge fixing")
     def test_vjp_gradient_finite_with_elementwise(self):
         """VJP backward should produce finite gradients with elementwise convergence."""
         A = _make_dense_tensor(jax.random.PRNGKey(0))
