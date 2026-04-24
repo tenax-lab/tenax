@@ -22,14 +22,15 @@ def test_build_ad_ctm_config_applies_projector_override_without_mutation():
     assert config.ctm.projector_method == "svd"
 
 
-def test_build_ad_ctm_config_promotes_qr_to_phase():
+def test_build_ad_ctm_config_preserves_explicit_qr_no_silent_promotion():
+    """Explicit user choice of ``forward_gauge="qr"`` is preserved — no silent override."""
     config = iPEPSConfig(
         ctm=CTMConfig(chi=8, forward_gauge="qr"),
     )
 
     updated = build_ad_ctm_config(config)
 
-    assert updated.forward_gauge == "phase"
+    assert updated.forward_gauge == "qr"
     assert config.ctm.forward_gauge == "qr"
 
 

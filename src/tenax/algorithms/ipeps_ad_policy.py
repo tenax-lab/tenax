@@ -41,10 +41,11 @@ def build_ad_ctm_config(config: iPEPSConfig) -> CTMConfig:
     """Return the effective CTMConfig used by iPEPS AD optimizers.
 
     Applies AD-only policy overrides while leaving ``config.ctm`` unchanged.
+    No silent gauge promotion: explicit user choices are preserved.  The
+    defaults (``projector_method="svd"``, ``forward_gauge="phase"``) are
+    already correct for AD paths.
     """
     ctm_cfg = config.ctm
     if config.gs_projector_method is not None:
         ctm_cfg = replace(ctm_cfg, projector_method=config.gs_projector_method)
-    if ctm_cfg.forward_gauge == "qr":
-        ctm_cfg = replace(ctm_cfg, forward_gauge="phase")
     return ctm_cfg
