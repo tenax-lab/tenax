@@ -98,11 +98,15 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      - name: Run all tests
+      - name: Run non-core tests (algorithm + slow + integration)
+        # Skip ``-m core`` since the required ``test`` job already covers it.
+        # Running everything-not-core here avoids duplicating the core suite
+        # (which was contributing to OOM / runner-lost-communication flakes
+        # when the full suite ran end-to-end).
         env:
           JAX_PLATFORMS: cpu
         run: |
-          uv run pytest tests/ \
+          uv run pytest tests/ -m "not core" \
             --cov=tenax \
             --cov-report=xml \
             --cov-report=term-missing \
