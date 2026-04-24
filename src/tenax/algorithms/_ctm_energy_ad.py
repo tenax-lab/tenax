@@ -257,10 +257,10 @@ def ctm_energy_implicit(
         Scalar energy per site.
     """
     coords = sorted(site_tensors.keys())
-    # Extract dense data for custom_vjp (JAX requires array leaves).
-    # For SymmetricTensor inputs this densifies, which is necessary
-    # because jax.custom_vjp cannot differentiate through block-sparse ops.
-    params_data = [site_tensors[c].todense() for c in coords]
+    # Pass Tensor objects directly through custom_vjp boundary.
+    # Both DenseTensor and SymmetricTensor are registered JAX pytrees,
+    # so JAX can differentiate through them without densifying.
+    params_data = [site_tensors[c] for c in coords]
     templates = {c: site_tensors[c] for c in coords}
 
     return _ctm_energy_implicit_dispatch(
@@ -560,7 +560,7 @@ def _make_implicit_vjp_fn(
     # Mutable cache for treedef from forward (needed in backward).
     _cached = {}
 
-    def _run_forward(params_data, site_tensors):
+    def _run_forward(site_tensors):
         """Run CTM convergence (shared by f and f_fwd)."""
         chi_ramp = mutables["chi_ramp"]
         env_init = mutables["env_init"]
@@ -609,17 +609,13 @@ def _make_implicit_vjp_fn(
 
     @jax.custom_vjp
     def f(params_data_tuple):
-        params_data = list(params_data_tuple)
-        templates = mutables["templates"]
-        site_tensors = _reconstruct_site_tensors(params_data, coords, templates)
-        envs = _run_forward(params_data, site_tensors)
+        site_tensors = dict(zip(coords, params_data_tuple))
+        envs = _run_forward(site_tensors)
         return _compute_energy(site_tensors, envs)
 
     def f_fwd(params_data_tuple):
-        params_data = list(params_data_tuple)
-        templates = mutables["templates"]
-        site_tensors = _reconstruct_site_tensors(params_data, coords, templates)
-        envs = _run_forward(params_data, site_tensors)
+        site_tensors = dict(zip(coords, params_data_tuple))
+        envs = _run_forward(site_tensors)
         energy = _compute_energy(site_tensors, envs)
 
         _cached["env_treedef"] = jax.tree.structure(envs)
@@ -647,11 +643,9 @@ def _make_implicit_vjp_fn(
     @jax.jit
     def _jit_dE_denv(params_data_tuple, env_leaves):
         """Step 1: compute dE/denv (GMRES RHS)."""
-        params_data = list(params_data_tuple)
-        templates_ = mutables["templates"]
         gate_ = mutables["gate"]
         energy_fn_ = mutables["energy_fn"]
-        site_tensors = _reconstruct_site_tensors(params_data, coords, templates_)
+        site_tensors = dict(zip(coords, params_data_tuple))
         env_treedef = _cached["env_treedef"]
 
         def energy_from_env(env_leaves_flat):
@@ -666,9 +660,7 @@ def _make_implicit_vjp_fn(
     @jax.jit
     def _jit_apply_Jt(params_data_tuple, env_leaves, v):
         """Step 2: one J^T application (GMRES matvec)."""
-        params_data = list(params_data_tuple)
-        templates_ = mutables["templates"]
-        site_tensors = _reconstruct_site_tensors(params_data, coords, templates_)
+        site_tensors = dict(zip(coords, params_data_tuple))
         env_treedef = _cached["env_treedef"]
 
         def gauge_fixed_sweep_from_env(env_leaves_flat):
@@ -698,7 +690,6 @@ def _make_implicit_vjp_fn(
     @jax.jit
     def _jit_chain_rule(params_data_tuple, env_leaves, lam, g_scalar):
         """Steps 3-4: direct gradient + indirect (J_params^T @ lam)."""
-        templates_ = mutables["templates"]
         gate_ = mutables["gate"]
         energy_fn_ = mutables["energy_fn"]
         env_treedef = _cached["env_treedef"]
@@ -706,8 +697,7 @@ def _make_implicit_vjp_fn(
 
         # Direct: dE/dparams at fixed env
         def energy_from_params(p_tuple):
-            pd = list(p_tuple)
-            st = _reconstruct_site_tensors(pd, coords, templates_)
+            st = dict(zip(coords, p_tuple))
             if energy_fn_ is not None:
                 return energy_fn_(st, envs, gate_)
             return _default_energy(st, envs, gate_, coords, neighbors)
@@ -717,8 +707,7 @@ def _make_implicit_vjp_fn(
 
         # Indirect: J_params^T @ lam
         def gauge_fixed_sweep_from_params(p_tuple):
-            pd = list(p_tuple)
-            st = _reconstruct_site_tensors(pd, coords, templates_)
+            st = dict(zip(coords, p_tuple))
             e_out = jit_step_bwd(
                 st,
                 envs,
@@ -733,7 +722,7 @@ def _make_implicit_vjp_fn(
         _, vjp_sweep_params = jax.vjp(gauge_fixed_sweep_from_params, params_data_tuple)
         indirect = vjp_sweep_params(lam)[0]
 
-        total = tuple(g_scalar * (d + ind) for d, ind in zip(direct, indirect))
+        total = jax.tree.map(lambda d, ind: g_scalar * (d + ind), direct, indirect)
         return (total,)
 
     @jax.jit
@@ -743,9 +732,7 @@ def _make_implicit_vjp_fn(
         Fuses the entire (I - J^T) solve into one XLA computation.
         All GMRES iterations run on-device with zero Python overhead.
         """
-        params_data = list(params_data_tuple)
-        templates_ = mutables["templates"]
-        site_tensors = _reconstruct_site_tensors(params_data, coords, templates_)
+        site_tensors = dict(zip(coords, params_data_tuple))
         env_treedef = _cached["env_treedef"]
 
         def apply_I_minus_Jt(v):
