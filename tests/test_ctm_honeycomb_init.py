@@ -53,3 +53,30 @@ def test_double_layer_finite_under_random_contraction():
         e.append(v.astype(jnp.complex128))
     val = jnp.einsum("ijk,i,j,k->", T.todense(), e[0], e[1], e[2])
     assert jnp.isfinite(val.real) and jnp.isfinite(val.imag)
+
+
+def test_double_layer_trace_equals_frobenius_norm():
+    """Tr_{e0,e1,e2}[T] = Σ_{e0,e1,e2,s} |A[e0,e1,e2,s]|² (iPEPS norm identity).
+
+    For the rank-3 double-layer T = Σ_s A^s ⊗ Ā^s, summing the diagonal
+    over each fused leg recovers the Frobenius norm of A. A wrong fuse
+    pairing (e.g. fusing e0 with E1) would still produce a finite tensor
+    but would fail this identity.
+    """
+    D, d = 3, 2
+    A = _make_random_honeycomb_site(D=D, d=d, key=jax.random.PRNGKey(11))
+    T = _double_layer_honeycomb(A)
+
+    # T is rank-3 with each leg of dim D**2; the fused index is (e_ket, e_bra)
+    # with axis_a (ket) slow-varying — diagonal entries i*D+i for i in 0..D-1.
+    T_dense = T.todense()
+    # Reshape (D², D², D²) → (D, D, D, D, D, D) with order (e0_ket, e0_bra, ...)
+    T6 = T_dense.reshape(D, D, D, D, D, D)
+    trace = jnp.einsum("iijjkk->", T6)
+
+    A_dense = A.todense()
+    expected = jnp.sum(jnp.abs(A_dense) ** 2)
+
+    assert jnp.allclose(trace, expected, rtol=1e-10), (
+        f"trace {trace} != Frobenius² {expected}"
+    )
