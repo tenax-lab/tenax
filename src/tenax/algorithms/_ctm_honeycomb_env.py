@@ -19,12 +19,23 @@ __all__ = ["HoneycombCTMEnv"]
 
 
 class HoneycombCTMEnv(NamedTuple):
-    C0: Tensor
-    C1: Tensor
-    C2: Tensor
-    L0: Tensor
-    L1: Tensor
-    L2: Tensor
-    R0: Tensor
-    R1: Tensor
-    R2: Tensor
+    """Per-sublattice honeycomb CTM environment.
+
+    Index ``α ∈ {0, 1, 2}`` selects the honeycomb edge direction (NOT
+    a corner number). Three corners and three left/right column tensors
+    per sublattice.
+
+    Corner ``C_α`` is a 2-leg tensor ``(chi, chi)``; column tensors
+    ``L_α`` and ``R_α`` are 3-leg tensors ``(chi, D**2, chi)`` carrying
+    the fused double-layer bond.
+    """
+
+    C0: Tensor  # (chi_in_0, chi_out_0)         flows: (IN, OUT)
+    C1: Tensor  # (chi_in_1, chi_out_1)         flows: (IN, OUT)
+    C2: Tensor  # (chi_in_2, chi_out_2)         flows: (IN, OUT)
+    L0: Tensor  # (chi_in_0, e_0_d2, chi_out_0)  flows: (IN, ?, OUT)
+    L1: Tensor  # (chi_in_1, e_1_d2, chi_out_1)  flows: (IN, ?, OUT)
+    L2: Tensor  # (chi_in_2, e_2_d2, chi_out_2)  flows: (IN, ?, OUT)
+    R0: Tensor  # (chi_in_0, e_0_d2, chi_out_0)  flows: (IN, ?, OUT)
+    R1: Tensor  # (chi_in_1, e_1_d2, chi_out_1)  flows: (IN, ?, OUT)
+    R2: Tensor  # (chi_in_2, e_2_d2, chi_out_2)  flows: (IN, ?, OUT)

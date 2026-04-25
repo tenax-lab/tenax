@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import pytest
 
 from tenax.algorithms._ctm_honeycomb_env import HoneycombCTMEnv
-from tenax.core.tensor import DenseTensor
 
 
 def _dummy_tensor(shape):
@@ -39,5 +37,5 @@ def test_env_is_pytree():
     )
     leaves = jax.tree_util.tree_leaves(env)
     assert len(leaves) == 9
-    doubled = jax.tree_util.tree_map(lambda x: x + 1.0, env)
-    assert jnp.all(doubled.C0 == 1.0)
+    incremented = jax.tree_util.tree_map(lambda x: x + 1.0, env)
+    assert jnp.all(incremented.C0 == 1.0)
