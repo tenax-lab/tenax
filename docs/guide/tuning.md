@@ -84,15 +84,19 @@ which AD path pairs with which gauge.
 
 ### `CTMConfig.forward_gauge`
 
-Values: `"qr"` (default), `"phase"`, `"sigma"`, `"none"`
+Values: `"phase"` (default), `"qr"`, `"sigma"`, `"none"`
 
-- `"qr"`: forward-only CTM, notebooks, diagnostics. `optimize_gs_ad`
-  auto-promotes this to `"phase"` when `gs_implicit_ad=False`.
-- `"phase"`: explicit-AD default after promotion. Numerically stable
-  for unrolled backprop.
-- `"sigma"`: required for the implicit-diff path at D ≥ 2. Aligns each
-  sweep's output to the previous sweep's input, stabilizing the VJP.
-- `"none"`: diagnostic only. Expect instabilities.
+- `"phase"`: AD-correct default. variPEPS-style Frobenius normalization
+  + phase fix per absorption.  Stable for both implicit and explicit
+  AD (1-site and 2-site).
+- `"qr"`: legacy QR gauge.  Forward-only CTM, notebooks, diagnostics.
+  Explicit user choice is preserved — no silent promotion.
+- `"sigma"`: transfer-matrix eigenvector alignment, required for
+  element-wise CTM convergence at large chi.  1-site path only.
+- `"none"`: diagnostic only.  Expect instabilities.
+
+**No silent gauge promotion** in AD paths: if you pass `"qr"` you get
+`"qr"`.  Set `forward_gauge` explicitly to override the default.
 
 ### `CTMConfig.ad_regularize_svd` (default `True`)
 
@@ -254,6 +258,22 @@ These don't change numerics (within tolerance) but speed things up.
 
 Diagonal scaling preconditioner for the GMRES implicit-diff backward.
 Currently experimental — do not turn on for production.
+
+### `CTMConfig.gmres_maxiter` (default `200`)
+
+Maximum total GMRES iterations for the implicit-AD backward solve.
+The Krylov restart size is set by `gmres_restart` (default 20); the
+outer iteration budget is `gmres_maxiter`.  Increase when difficult
+CTM fixed points (large chi, near-critical) need more iterations to
+satisfy `gmres_tol`; decrease to bound runtime when accepting a
+looser solve.
+
+### `CTMConfig.gmres_restart` (default `20`)
+
+Krylov dimension between restarts in GMRES.  Larger restart values
+give better convergence per outer iteration but use more memory
+(quadratic in `gmres_restart`).  Default 20 balances memory and
+convergence for typical iPEPS adjoint systems.
 
 ### `CTMConfig.chi_ramp` (default `None`)
 

@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased
+
+### New Features
+
+- **Python-loop CTM AD with JIT-fused GMRES backward** — explicit and
+  implicit AD share a Python-loop CTM forward; backward solves
+  `(I − J^T)λ = ∂E/∂env` via JIT-fused GMRES (#340, #341)
+- **Block-sparse CTM/AD** for `SymmetricTensor` iPEPS — `SymmetricTensor`
+  passes through `jax.custom_vjp` as a pytree leaf without `todense()`
+  round-trip; block-sparse Fishman SVD projector (`_svd_projector_symmetric`);
+  sigma gauge fixing and convergence checks preserve `SymmetricTensor`
+  type (#341)
+- **`CTMConfig.gmres_maxiter`** — separate knob for the outer GMRES
+  iteration budget (was wired to `gmres_restart`, capping the adjoint
+  solve at the restart size) (#343)
+
+### Behavior Changes
+
+- **`CTMConfig.forward_gauge` default changed from `"qr"` to `"phase"`** —
+  the AD-correct choice for both implicit and explicit AD (1-site and
+  2-site).  No silent gauge promotion in `optimize_gs_ad`: an explicit
+  user choice is preserved (was previously promoted `"qr"` → `"phase"`
+  for AD paths) (#343)
+- **`build_ad_ctm_config`** no longer promotes `forward_gauge="qr"` to
+  `"phase"`.  Direct `CTMConfig()` users now see the same gauge the
+  optimizer uses (#343)
+
+### Bug Fixes
+
+- Fix `_phase_fix_normalize_tensor` returning `DenseTensor` regardless of
+  input type — `SymmetricTensor` environments are now preserved across
+  CTM sweeps (#341)
+
+### Tests
+
+- Unblock 2 xfail tests now passing: `test_vjp_gradient_finite_with_elementwise`,
+  `test_optimize_gs_ad_symmetric_energy_decreases` (#344)
+- Migrate baseline gauge-policy tests to spy on `ctm_energy_implicit`
+  (the legacy `ctm_tensor_converge_explicit` is no longer routed
+  through by the optimizer) (#344)
+
+### CI
+
+- `test-full` matrix now runs only `-m "not core"` to avoid duplicating
+  the 731 core tests already covered by required jobs.  Eliminates OOM
+  / "runner lost communication" flakes on push to main (#345)
+
 ## v0.4.2 (2026-04-05)
 
 ### Improvements
