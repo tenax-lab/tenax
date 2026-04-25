@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from tenax.algorithms.pess import IPESSState, kagome_triangle_xxz_hamiltonian
 
@@ -37,3 +38,25 @@ def test_triangle_hamiltonian_xy_isotropic():
     diff = H1 - H0
     # Difference should be only the Sz Sz couplings
     assert np.linalg.norm(diff) > 0
+
+
+def test_trotter_gate_unitarity_real_time():
+    from tenax.algorithms.pess import make_triangle_gate
+
+    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=3)
+    gate = make_triangle_gate(H, dt=1j * 0.05, d=3)  # real time
+    G = np.asarray(gate).reshape(27, 27)
+    np.testing.assert_allclose(G @ G.conj().T, np.eye(27), atol=1e-10)
+
+
+def test_trotter_gate_imag_time_decreases_norm_on_excited_state():
+    from tenax.algorithms.pess import make_triangle_gate
+
+    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=3)
+    gate = make_triangle_gate(H, dt=0.1, d=3)
+    G = np.asarray(gate).reshape(27, 27)
+    eigvals = np.linalg.eigvalsh(H)
+    # Largest singular value of e^{-dt H} = e^{-dt * lambda_min}
+    assert np.max(np.linalg.svd(G, compute_uv=False)) == pytest.approx(
+        np.exp(-0.1 * eigvals[0]), rel=1e-8
+    )

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 import numpy as np
+from scipy.linalg import expm
 
 from tenax.algorithms.auto_mpo import spin_half_ops, spin_one_ops
 
@@ -58,6 +59,24 @@ def kagome_triangle_xxz_hamiltonian(
     )
 
     return h12 + h23 + h31
+
+
+def make_triangle_gate(
+    H: np.ndarray, dt: complex, d: int = D_PHYS_DEFAULT
+) -> np.ndarray:
+    """Compute ``exp(-dt * H)`` and reshape to a 3-site Trotter gate.
+
+    Args:
+        H: ``(d**3, d**3)`` Hamiltonian matrix.
+        dt: Time step. Real positive ``dt`` gives imaginary-time evolution;
+            imaginary ``dt`` (e.g. ``1j * t``) gives real-time evolution.
+        d: Physical dimension per site.
+
+    Returns:
+        ``(d, d, d, d, d, d)`` complex128 array — the 3-site Trotter gate.
+    """
+    gate = expm(-dt * H)
+    return gate.reshape(d, d, d, d, d, d).astype(np.complex128)
 
 
 @dataclass(frozen=True)
