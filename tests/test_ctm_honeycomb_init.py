@@ -55,6 +55,25 @@ def test_double_layer_finite_under_random_contraction():
     assert jnp.isfinite(val.real) and jnp.isfinite(val.imag)
 
 
+def test_initialize_env_returns_two_sublattices():
+    from tenax.algorithms._ctm_honeycomb_init import initialize_honeycomb_env
+
+    A = _make_random_honeycomb_site(D=3, d=2, key=jax.random.PRNGKey(3))
+    B = _make_random_honeycomb_site(D=3, d=2, key=jax.random.PRNGKey(4))
+    sites = {(0, 0): A, (1, 0): B}
+    envs = initialize_honeycomb_env(sites, chi_init=4)
+    assert set(envs.keys()) == {(0, 0), (1, 0)}
+    for coord, env in envs.items():
+        # Corners shape (chi, chi); columns shape (chi, D**2, chi); D=3 so D**2=9
+        # Use TensorIndex.dim since the Tensor protocol has no .shape:
+        for c_field in ("C0", "C1", "C2"):
+            T = getattr(env, c_field)
+            assert tuple(idx.dim for idx in T.indices) == (4, 4)
+        for col_field in ("L0", "L1", "L2", "R0", "R1", "R2"):
+            T = getattr(env, col_field)
+            assert tuple(idx.dim for idx in T.indices) == (4, 9, 4)
+
+
 def test_double_layer_trace_equals_frobenius_norm():
     """Tr_{e0,e1,e2}[T] = Σ_{e0,e1,e2,s} |A[e0,e1,e2,s]|² (iPEPS norm identity).
 
