@@ -160,14 +160,18 @@ differentiation (AD) to variationally optimize the iPEPS tensors directly.
 Tenax supports two AD paths:
 
 1. **Implicit AD** (default, recommended): differentiates through the CTM
-   fixed point via VJP iteration (Francuz et al., PRR 7, 013237). Uses
-   sigma gauge (auto-promoted from QR at runtime). Memory-efficient and
-   variational.
-2. **Explicit AD**: backpropagates through unrolled CTM steps. Uses QR
-   projectors with phase gauge. Faster per step but uses more memory.
-   Set `gs_implicit_ad=False` to enable.
+   fixed point via VJP iteration (Francuz et al., PRR 7, 013237).  Uses
+   the AD-correct ``forward_gauge="phase"`` default.  Memory-efficient
+   and variational.
+2. **Explicit AD**: backpropagates through unrolled CTM steps.  Uses QR
+   projectors with the same ``"phase"`` gauge.  Faster per step but
+   uses more memory.  Set `gs_implicit_ad=False` to enable.
 
-### Recommended AD configuration (implicit, sigma gauge)
+No silent gauge promotion in either path — the user's
+``ctm.forward_gauge`` choice (``"phase"``, ``"qr"``, ``"sigma"``,
+``"none"``) is preserved as-is.
+
+### Recommended AD configuration
 
 ```python
 from tenax import iPEPSConfig, CTMConfig, optimize_gs_ad
@@ -177,9 +181,10 @@ config = iPEPSConfig(
     ctm=CTMConfig(
         chi=16,
         max_iter=60,
+        # forward_gauge="phase" is the default — AD-correct for both
+        # implicit and explicit, 1-site and 2-site.
     ),
     # gs_implicit_ad=True is the default (implicit diff + VJP backward)
-    # forward_gauge="qr" is auto-promoted to "sigma" for implicit AD
     gs_optimizer="lbfgs",
     gs_line_search_method="hager_zhang",
     gs_metric_precond=True,
@@ -248,13 +253,15 @@ config = iPEPSConfig(
 
 ### Key AD tips
 
-- **Implicit AD with sigma gauge is the default and recommended path.**
-  The optimizer auto-promotes `forward_gauge="qr"` to `"sigma"` at
-  runtime. Sigma gauge aligns CTM environments via power iteration,
-  making the fixed-point smooth for implicit differentiation.
-- **Explicit AD (`gs_implicit_ad=False`) uses phase gauge.** When set,
-  the optimizer auto-promotes to `"phase"` instead. Use
-  `projector_method="qr"` for best performance with explicit AD.
+- **Default `forward_gauge="phase"` works for both implicit and explicit
+  AD.** variPEPS-style Frobenius normalization + phase fix.  Stable
+  for 1-site and 2-site at chi up to 32+.  No silent promotion: the
+  user's explicit choice is preserved.
+- **Sigma gauge (`forward_gauge="sigma"`)** is required for strict
+  element-wise convergence at large chi (1-site path).  Aligns CTM
+  environments via power iteration of the transfer matrix.
+- **Explicit AD (`gs_implicit_ad=False`)** uses the same `"phase"` gauge.
+  Use `projector_method="qr"` for best performance with explicit AD.
 - **Start with SU init (`su_init=True`).** The simple update provides a good
   starting tensor that avoids bad local minima. Without it, random
   initialization often converges to excited states.

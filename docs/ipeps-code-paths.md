@@ -72,9 +72,9 @@ Paths marked **BROKEN** are known non-functional. Paths marked
  │ warmup (stop_gradient)       │                           │
  │ ──── W steps ────            │                ┌──────────┴─────────┐
  │                              │                │                    │
- │ auto-phase gauge promotion:  │                ▼                    ▼
- │  qr → phase when user left   │         ctm_ad_mode=None      ctm_ad_mode=
- │  forward_gauge="qr"          │         (custom_vjp           "c4v_reference"
+ │ forward_gauge: passed         │                ▼                    ▼
+ │   through unchanged           │         ctm_ad_mode=None      ctm_ad_mode=
+ │   (no silent promotion)       │         (custom_vjp           "c4v_reference"
  │                              │          ctm_tensor_converge) (Francuz et al.,
  │ backprop (jax.checkpoint)    │                               dense 1-site
  │ ──── B steps ────            │          ┌───────┼───────┐    C4v, opt-in)
@@ -142,12 +142,12 @@ Legend:
 
 ## Recommended Path (post-PR-#291)
 
-For AFM models on the square lattice, the post-PR-#291 recommended path is
-sublattice rotation + C4v + explicit AD + QR projectors. The optimizer
-transparently promotes the conservative default ``forward_gauge="qr"`` to
-``"phase"`` (variPEPS-style Frobenius + phase fix) for the unrolled CTM
-sweeps, which is 6–9× faster than the historical sigma gauge with equal or
-better energy.
+For AFM models on the square lattice, the recommended path is
+sublattice rotation + C4v + explicit AD + QR projectors.  The default
+``forward_gauge="phase"`` (variPEPS-style Frobenius + phase fix) is
+used for the unrolled CTM sweeps, which is 6–9× faster than the
+historical sigma gauge with equal or better energy.  Explicit user
+choices for ``forward_gauge`` are preserved without silent promotion.
 
 ```python
 from tenax import (
@@ -317,18 +317,18 @@ for the full benchmark table and the projector × gauge comparison matrix.
 | Backward              | ``ad_backward_method``      | ``"vjp"``        | ``"gmres"`` (BROKEN — issue #292)    |
 | Projector             | ``projector_method``        | ``"eigh"``       | ``"qr"`` (recommended) / ``"svd"``   |
 | Projector backward    | ``projector_backward``      | ``"auto"``       | ``"standard"`` / ``"lorentzian"`` (auto-promoted to lorentzian when ``gs_implicit_ad=False`` and ``projector_method="eigh"``) |
-| Forward gauge         | ``forward_gauge``           | ``"qr"``         | ``"phase"`` / ``"sigma"`` / ``"none"`` |
+| Forward gauge         | ``forward_gauge``           | ``"phase"``      | ``"qr"`` / ``"sigma"`` / ``"none"`` (no silent promotion) |
 | Conv tol schedule     | ``gs_ctm_conv_tol_schedule``| ``None``         | ``[(frac, tol), ...]``               |
 | Metric precond        | ``gs_metric_precond``       | ``True``         | ``False`` = standard grad            |
 | Stall recovery        | ``gs_stall_recovery``       | ``None``         | ``"noise"`` / ``"reset"`` (auto)     |
 | Energy floor          | ``gs_energy_floor``         | ``None``         | ``float`` = reject below as non-variational |
 | CTM variant           | (function choice)           | standard         | split, C4v                           |
 
-The static default ``forward_gauge="qr"`` is kept conservative so that
-callers who construct a ``CTMConfig`` directly (forward-only CTM,
-notebooks, diagnostics) see predictable behavior.  ``optimize_gs_ad``
-auto-promotes to ``"phase"`` at runtime when ``gs_implicit_ad=False`` and
-the user has not opted into a different gauge.
+The static default ``forward_gauge="phase"`` is the AD-correct choice
+for both implicit and explicit AD (1-site and 2-site).  ``optimize_gs_ad``
+passes the user's configured gauge through unchanged — no silent
+promotion of any value.  Direct ``CTMConfig()`` users get the same
+behavior the optimizer uses.
 
 ## Key Files
 

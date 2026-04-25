@@ -319,9 +319,9 @@ gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) + 0.5 * (
 )
 
 # Recommended AD configuration: L-BFGS + explicit AD + QR projectors.
-# The optimizer auto-promotes forward_gauge="qr" to "phase" for the
-# unrolled CTM sweeps (variPEPS-style Frobenius + phase fix). Reaches
-# E=-0.6628 at D=2, chi=16 (literature: -0.6548 at D=2).
+# forward_gauge defaults to "phase" (variPEPS-style Frobenius + phase
+# fix), correct for both implicit and explicit AD. Reaches E=-0.6628
+# at D=2, chi=16 (literature: -0.6548 at D=2).
 config = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(

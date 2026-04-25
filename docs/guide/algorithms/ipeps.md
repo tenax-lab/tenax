@@ -48,7 +48,7 @@ ctm_config = CTMConfig(
     max_iter=100,        # maximum CTM iterations
     conv_tol=1e-8,       # convergence tolerance on corner singular values
     renormalize=True,
-    forward_gauge="qr",  # "qr" (default), "sigma", "phase", or "none"
+    forward_gauge="phase",  # "phase" (default), "qr", "sigma", or "none"
 )
 
 config = iPEPSConfig(
@@ -67,9 +67,9 @@ fixed after each CTM sweep during the forward pass. Four modes are supported:
 
 | Value | Description |
 |-------|-------------|
-| ``"qr"`` (default) | QR decomposition on each corner with sign-fixed diagonal. Fast and stable for simple update and forward-only CTM. |
-| ``"phase"`` | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix that still stabilizes unrolled AD. **Recommended for explicit AD**. |
-| ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Historical choice — kept for the implicit-diff / GMRES backward path where element-wise convergence is needed. |
+| ``"phase"`` (default) | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix that still stabilizes unrolled AD. **Recommended for both implicit and explicit AD** (1-site and 2-site). |
+| ``"qr"`` | Legacy QR decomposition on each corner with sign-fixed diagonal. Fast and stable for simple update and forward-only CTM. |
+| ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Required for element-wise convergence at large chi (1-site path). |
 | ``"none"`` | No gauge fix. Diagnostic / benchmark mode only. |
 
 **Auto-promotion for explicit AD**: when you call ``optimize_gs_ad`` with
