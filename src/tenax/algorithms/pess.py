@@ -6,8 +6,58 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+
+from tenax.algorithms.auto_mpo import spin_half_ops, spin_one_ops
 
 D_PHYS_DEFAULT = 3  # spin-1
+
+
+def _site_ops(d: int) -> dict[str, np.ndarray]:
+    """Return ``{"Sz", "Sp", "Sm", "Id"}`` for physical dimension ``d``."""
+    if d == 2:
+        return spin_half_ops()
+    if d == 3:
+        return spin_one_ops()
+    raise ValueError(f"Unsupported physical dimension d={d}; expected 2 or 3.")
+
+
+def kagome_triangle_xxz_hamiltonian(
+    delta: float, d: int = D_PHYS_DEFAULT
+) -> np.ndarray:
+    """Build the 3-site XXZ Hamiltonian on a kagome triangle.
+
+    H_tri = H_12 + H_23 + H_31 with each pair term
+
+        H_ij = delta * Sz_i Sz_j + 0.5 * (S+_i S-_j + S-_i S+_j).
+
+    Args:
+        delta: Ising anisotropy on the SzSz channel.
+        d: Physical dimension per site (2 for spin-1/2, 3 for spin-1).
+
+    Returns:
+        Hermitian ``(d**3, d**3)`` numpy array.
+    """
+    ops = _site_ops(d)
+    Sz = ops["Sz"]
+    Sp = ops["Sp"]
+    Sm = ops["Sm"]
+    Id = ops["Id"]
+
+    # H_12: acts on sites 1,2; identity on site 3.
+    h12 = delta * np.kron(np.kron(Sz, Sz), Id) + 0.5 * (
+        np.kron(np.kron(Sp, Sm), Id) + np.kron(np.kron(Sm, Sp), Id)
+    )
+    # H_23: identity on site 1; acts on sites 2,3.
+    h23 = delta * np.kron(Id, np.kron(Sz, Sz)) + 0.5 * (
+        np.kron(Id, np.kron(Sp, Sm)) + np.kron(Id, np.kron(Sm, Sp))
+    )
+    # H_31: acts on sites 1,3; identity on site 2.
+    h31 = delta * np.kron(Sz, np.kron(Id, Sz)) + 0.5 * (
+        np.kron(Sp, np.kron(Id, Sm)) + np.kron(Sm, np.kron(Id, Sp))
+    )
+
+    return h12 + h23 + h31
 
 
 @dataclass(frozen=True)
