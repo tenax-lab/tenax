@@ -6,6 +6,11 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._ctm_honeycomb_env import HoneycombCTMEnv
+from tenax.algorithms._ctm_honeycomb_topology import (
+    HONEYCOMB_DIRECTIONS,
+    HONEYCOMB_NEIGHBORS,
+    Coord,
+)
 
 
 def _dummy_tensor(shape):
@@ -39,3 +44,17 @@ def test_env_is_pytree():
     assert len(leaves) == 9
     incremented = jax.tree_util.tree_map(lambda x: x + 1.0, env)
     assert jnp.all(incremented.C0 == 1.0)
+
+
+def test_honeycomb_neighbors_two_sublattice():
+    assert set(HONEYCOMB_NEIGHBORS.keys()) == {(0, 0), (1, 0)}
+    for coord, nbrs in HONEYCOMB_NEIGHBORS.items():
+        assert set(nbrs.keys()) == {"e0", "e1", "e2"}
+        # Every neighbor must point to the *other* sublattice
+        other = (1, 0) if coord == (0, 0) else (0, 0)
+        for direction, target in nbrs.items():
+            assert target == other, f"{coord}.{direction} -> {target} not bipartite"
+
+
+def test_honeycomb_directions_tuple():
+    assert HONEYCOMB_DIRECTIONS == ("e0", "e1", "e2")
