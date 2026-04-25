@@ -4,7 +4,7 @@ from __future__ import annotations
 
 __all__ = ["Coord", "HONEYCOMB_DIRECTIONS", "HONEYCOMB_NEIGHBORS"]
 
-Coord = tuple[int, int]
+from tenax.algorithms._ctm_tensor_convergence import Coord
 
 HONEYCOMB_DIRECTIONS: tuple[str, str, str] = ("e0", "e1", "e2")
 
