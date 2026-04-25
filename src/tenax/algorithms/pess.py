@@ -135,17 +135,16 @@ def hosvd_truncate(
     core = jnp.tensordot(U_c.conj().T, core, axes=([1], [2]))
     core = core.transpose(1, 2, 0)
 
-    # Extract per-bond singular value vectors from the core.
-    _, lam_a, _ = jnp.linalg.svd(
-        core.reshape(D_int_a, D_int_b * D_int_c), full_matrices=False
-    )
-    _, lam_b, _ = jnp.linalg.svd(
+    # Extract per-bond singular value vectors from the core. We only need the
+    # singular values, so skip the U/V allocations via compute_uv=False.
+    lam_a = jnp.linalg.svd(core.reshape(D_int_a, D_int_b * D_int_c), compute_uv=False)
+    lam_b = jnp.linalg.svd(
         core.transpose(1, 0, 2).reshape(D_int_b, D_int_a * D_int_c),
-        full_matrices=False,
+        compute_uv=False,
     )
-    _, lam_c, _ = jnp.linalg.svd(
+    lam_c = jnp.linalg.svd(
         core.transpose(2, 0, 1).reshape(D_int_c, D_int_a * D_int_b),
-        full_matrices=False,
+        compute_uv=False,
     )
 
     lam_a = lam_a / jnp.linalg.norm(lam_a)

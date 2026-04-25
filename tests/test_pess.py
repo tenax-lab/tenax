@@ -77,3 +77,45 @@ def test_hosvd_truncate_idempotent_no_truncation():
     # theta[a,b,c,p_a,p_b,p_c] = sum_{i,j,k} S_a[a,i,p_a] * S_b[b,j,p_b] * S_c[c,k,p_c] * core[i,j,k]
     theta_reco = jnp.einsum("aip,bjq,ckr,ijk->abcpqr", S_a, S_b, S_c, core)
     np.testing.assert_allclose(theta, theta_reco, atol=1e-10)
+
+
+def test_hosvd_truncate_under_truncation():
+    """When D_max < D * d, S_x must be clipped and isometric, and the
+    reconstruction must be a non-trivial approximation (closer to theta
+    than zero)."""
+    from tenax.algorithms.pess import hosvd_truncate
+
+    D, d = 3, 3
+    D_max = 4  # D_int = 4 < D * d = 9 -> truncation actually happens
+    assert D_max < D * d
+    key = jax.random.PRNGKey(11)
+    theta = (
+        jax.random.normal(key, (D, D, D, d, d, d))
+        + 1j * jax.random.normal(jax.random.fold_in(key, 1), (D, D, D, d, d, d))
+    ).astype(jnp.complex128)
+
+    S_a, S_b, S_c, core, lams = hosvd_truncate(theta, D_max=D_max, d=d)
+
+    # 1. Output dimensions are correctly clipped on the internal bond.
+    assert S_a.shape == (D, D_max, d)
+    assert S_b.shape == (D, D_max, d)
+    assert S_c.shape == (D, D_max, d)
+    assert core.shape == (D_max, D_max, D_max)
+    for lam in lams:
+        assert lam.shape == (D_max,)
+
+    # 2. Each S_x is an isometry along the internal bond. S_x has layout
+    # (D_ext, D_int, d); unfolding to (D_ext * d, D_int) and contracting on
+    # the external+physical legs should give the (D_int, D_int) identity.
+    eye = jnp.eye(D_max, dtype=jnp.complex128)
+    for S in (S_a, S_b, S_c):
+        S_unf = S.transpose(0, 2, 1).reshape(D * d, D_max)
+        gram = S_unf.conj().T @ S_unf
+        np.testing.assert_allclose(gram, eye, atol=1e-10)
+
+    # 3. The truncated reconstruction is a non-trivial approximation: it
+    # is closer to theta than the zero tensor would be.
+    theta_reco = jnp.einsum("aip,bjq,ckr,ijk->abcpqr", S_a, S_b, S_c, core)
+    err = jnp.linalg.norm(theta - theta_reco)
+    norm_theta = jnp.linalg.norm(theta)
+    assert float(err) < float(norm_theta)
