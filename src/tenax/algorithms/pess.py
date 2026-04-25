@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import jax
 import jax.numpy as jnp
@@ -202,3 +202,107 @@ class IPESSState:
             T_d=cmplx(keys[4], (D, D, D)),
             lambdas=tuple(jnp.ones(D) for _ in range(6)),
         )
+
+
+def pess_simple_update_triangle(
+    state: IPESSState,
+    gate: jax.Array,
+    triangle: str,
+    D_max: int,
+) -> IPESSState:
+    """One simple-update step on a single kagome triangle.
+
+    Absorbs the triangle's external and internal bond weights into the three
+    site tensors, contracts them with the chosen simplex tensor and the 3-site
+    gate, then HOSVD-truncates the result back into iPESS form.
+
+    Args:
+        state: Input iPESS state.
+        gate: 3-site gate of shape ``(d, d, d, d, d, d)``. Index order matches
+            ``einsum("xyzdfg,DFGdfg->xyzDFG", theta, gate)`` from the example
+            (last 3 axes are ``ket``, first 3 are ``bra``).
+        triangle: ``"up"`` updates ``T_u`` and the up-bond lambdas
+            (indices 0, 1, 2); ``"down"`` updates ``T_d`` and the down-bond
+            lambdas (indices 3, 4, 5).
+        D_max: Maximum internal bond dimension kept by the HOSVD truncation.
+
+    Returns:
+        New :class:`IPESSState` with the updated site tensors, the chosen
+        simplex tensor, and the matching internal lambda triplet replaced;
+        the other simplex and the external lambdas are unchanged.
+
+    Raises:
+        ValueError: If ``triangle`` is not ``"up"`` or ``"down"``.
+    """
+    if triangle == "up":
+        T = state.T_u
+        ext_idx = (3, 4, 5)
+        int_idx = (0, 1, 2)
+    elif triangle == "down":
+        T = state.T_d
+        ext_idx = (0, 1, 2)
+        int_idx = (3, 4, 5)
+    else:
+        raise ValueError(f"triangle must be 'up' or 'down'; got {triangle!r}.")
+
+    lam_ext = (
+        state.lambdas[ext_idx[0]],
+        state.lambdas[ext_idx[1]],
+        state.lambdas[ext_idx[2]],
+    )
+    lam_int = (
+        state.lambdas[int_idx[0]],
+        state.lambdas[int_idx[1]],
+        state.lambdas[int_idx[2]],
+    )
+
+    R_a, R_b, R_c = state.R_a, state.R_b, state.R_c
+    d = R_a.shape[2]
+
+    # Weight site tensors with ext (axis 0) and int (axis 1) lambdas.
+    S_a_w = jnp.einsum("i,ijd,j->ijd", lam_ext[0], R_a, lam_int[0])
+    S_b_w = jnp.einsum("i,ijd,j->ijd", lam_ext[1], R_b, lam_int[1])
+    S_c_w = jnp.einsum("i,ijd,j->ijd", lam_ext[2], R_c, lam_int[2])
+
+    # Contract weighted site tensors with the simplex into theta, apply gate.
+    theta = jnp.einsum("xad,ybf,zcg,abc->xyzdfg", S_a_w, S_b_w, S_c_w, T)
+    theta = jnp.einsum("xyzdfg,DFGdfg->xyzDFG", theta, gate)
+
+    # HOSVD-truncate back to iPESS form.
+    S_a_new, S_b_new, S_c_new, T_new, lambdas_int_new = hosvd_truncate(theta, D_max, d)
+
+    # Strip the external lambdas back off so the returned R tensors are
+    # "ungauged" again. Safe-divide to avoid division by zero.
+    def _safe_inv(lam):
+        return jnp.where(lam > 1e-12, 1.0 / lam, 0.0)
+
+    inv_a = _safe_inv(lam_ext[0])
+    inv_b = _safe_inv(lam_ext[1])
+    inv_c = _safe_inv(lam_ext[2])
+    R_a_new = jnp.einsum("i,ijd->ijd", inv_a, S_a_new)
+    R_b_new = jnp.einsum("i,ijd->ijd", inv_b, S_b_new)
+    R_c_new = jnp.einsum("i,ijd->ijd", inv_c, S_c_new)
+
+    # Build new lambdas tuple with the int triplet replaced.
+    new_lambdas = list(state.lambdas)
+    new_lambdas[int_idx[0]] = lambdas_int_new[0]
+    new_lambdas[int_idx[1]] = lambdas_int_new[1]
+    new_lambdas[int_idx[2]] = lambdas_int_new[2]
+
+    if triangle == "up":
+        return replace(
+            state,
+            R_a=R_a_new,
+            R_b=R_b_new,
+            R_c=R_c_new,
+            T_u=T_new,
+            lambdas=tuple(new_lambdas),
+        )
+    return replace(
+        state,
+        R_a=R_a_new,
+        R_b=R_b_new,
+        R_c=R_c_new,
+        T_d=T_new,
+        lambdas=tuple(new_lambdas),
+    )

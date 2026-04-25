@@ -119,3 +119,90 @@ def test_hosvd_truncate_under_truncation():
     err = jnp.linalg.norm(theta - theta_reco)
     norm_theta = jnp.linalg.norm(theta)
     assert float(err) < float(norm_theta)
+
+
+def _build_theta_full(state, triangle):
+    """Reference: build the gauged theta tensor from an IPESSState.
+
+    Uses the same gauging as ``pess_simple_update_triangle``: external lambdas
+    on axis 0 of each R, internal lambdas on axis 1, contracted with the
+    chosen simplex tensor.
+    """
+    if triangle == "up":
+        T = state.T_u
+        ext = (state.lambdas[3], state.lambdas[4], state.lambdas[5])
+        int_ = (state.lambdas[0], state.lambdas[1], state.lambdas[2])
+    else:
+        T = state.T_d
+        ext = (state.lambdas[0], state.lambdas[1], state.lambdas[2])
+        int_ = (state.lambdas[3], state.lambdas[4], state.lambdas[5])
+    Sa = jnp.einsum("i,ijd,j->ijd", ext[0], state.R_a, int_[0])
+    Sb = jnp.einsum("i,ijd,j->ijd", ext[1], state.R_b, int_[1])
+    Sc = jnp.einsum("i,ijd,j->ijd", ext[2], state.R_c, int_[2])
+    return jnp.einsum("xad,ybf,zcg,abc->xyzdfg", Sa, Sb, Sc, T)
+
+
+def test_su_step_identity_gate_no_truncation_is_identity_up():
+    """With identity gate and D_max >= D*d, the HOSVD-preserved quantity matches.
+
+    The gauged ``theta`` (ext * R_old * int_old contracted with T_old) is
+    bitwise identical (up to numerical tolerance) to the same quantity
+    constructed from the new state with the OLD external lambdas and the OLD
+    internal lambdas absorbed via the HOSVD identity ``S * core == theta``.
+    Concretely: with R_new = lam_ext_inv * S, T_new = core, and lambdas[ext]
+    untouched, we have ``(lam_ext * R_new) * T_new == S * core == theta``.
+    """
+    from tenax.algorithms.pess import pess_simple_update_triangle
+
+    D, d = 2, 3
+    state = IPESSState.random(D=D, d=d, key=jax.random.PRNGKey(0))
+    gate = jnp.eye(d**3, dtype=jnp.complex128).reshape(d, d, d, d, d, d)
+    new_state = pess_simple_update_triangle(state, gate, triangle="up", D_max=D * d)
+
+    theta_orig = _build_theta_full(state, "up")
+
+    # Contract the new state with ONLY external lambdas (no internal) to
+    # recover S * core, which equals the original gauged theta.
+    Sa = jnp.einsum("i,ijd->ijd", new_state.lambdas[3], new_state.R_a)
+    Sb = jnp.einsum("i,ijd->ijd", new_state.lambdas[4], new_state.R_b)
+    Sc = jnp.einsum("i,ijd->ijd", new_state.lambdas[5], new_state.R_c)
+    theta_new = jnp.einsum("xad,ybf,zcg,abc->xyzdfg", Sa, Sb, Sc, new_state.T_u)
+    np.testing.assert_allclose(theta_orig, theta_new, atol=1e-10)
+
+    # Other simplex (T_d) and external lambdas (3,4,5) must be untouched.
+    np.testing.assert_array_equal(state.T_d, new_state.T_d)
+    for i in (3, 4, 5):
+        np.testing.assert_array_equal(state.lambdas[i], new_state.lambdas[i])
+
+
+def test_su_step_identity_gate_no_truncation_is_identity_down():
+    """Same as the 'up' check, but for the down triangle."""
+    from tenax.algorithms.pess import pess_simple_update_triangle
+
+    D, d = 2, 3
+    state = IPESSState.random(D=D, d=d, key=jax.random.PRNGKey(1))
+    gate = jnp.eye(d**3, dtype=jnp.complex128).reshape(d, d, d, d, d, d)
+    new_state = pess_simple_update_triangle(state, gate, triangle="down", D_max=D * d)
+
+    theta_orig = _build_theta_full(state, "down")
+
+    # For "down", external lambdas live at indices (0, 1, 2).
+    Sa = jnp.einsum("i,ijd->ijd", new_state.lambdas[0], new_state.R_a)
+    Sb = jnp.einsum("i,ijd->ijd", new_state.lambdas[1], new_state.R_b)
+    Sc = jnp.einsum("i,ijd->ijd", new_state.lambdas[2], new_state.R_c)
+    theta_new = jnp.einsum("xad,ybf,zcg,abc->xyzdfg", Sa, Sb, Sc, new_state.T_d)
+    np.testing.assert_allclose(theta_orig, theta_new, atol=1e-10)
+
+    # Other simplex (T_u) and external lambdas (0,1,2) must be untouched.
+    np.testing.assert_array_equal(state.T_u, new_state.T_u)
+    for i in (0, 1, 2):
+        np.testing.assert_array_equal(state.lambdas[i], new_state.lambdas[i])
+
+
+def test_su_step_invalid_triangle_raises():
+    from tenax.algorithms.pess import pess_simple_update_triangle
+
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    gate = jnp.eye(27, dtype=jnp.complex128).reshape(3, 3, 3, 3, 3, 3)
+    with pytest.raises(ValueError):
+        pess_simple_update_triangle(state, gate, triangle="sideways", D_max=2)
