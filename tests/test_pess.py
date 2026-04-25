@@ -206,3 +206,46 @@ def test_su_step_invalid_triangle_raises():
     gate = jnp.eye(27, dtype=jnp.complex128).reshape(3, 3, 3, 3, 3, 3)
     with pytest.raises(ValueError):
         pess_simple_update_triangle(state, gate, triangle="sideways", D_max=2)
+
+
+# ---------------------------------------------------------------------------
+# Test helpers for the full SU loop
+# ---------------------------------------------------------------------------
+
+
+def _local_triangle_energy(state, H_tri, triangle="up"):
+    """Environment-free local triangle energy: <psi_tri | H_tri | psi_tri> / <psi_tri | psi_tri>.
+
+    Used as a quick monotonicity check for the SU algorithm — it is NOT the
+    true infinite-system energy, but is monotonically decreasing under SU on
+    the same triangle.
+    """
+    if triangle == "up":
+        T = state.T_u
+        ext = (state.lambdas[3], state.lambdas[4], state.lambdas[5])
+        int_ = (state.lambdas[0], state.lambdas[1], state.lambdas[2])
+    else:
+        T = state.T_d
+        ext = (state.lambdas[0], state.lambdas[1], state.lambdas[2])
+        int_ = (state.lambdas[3], state.lambdas[4], state.lambdas[5])
+    Sa = jnp.einsum("i,ijd,j->ijd", ext[0], state.R_a, int_[0])
+    Sb = jnp.einsum("i,ijd,j->ijd", ext[1], state.R_b, int_[1])
+    Sc = jnp.einsum("i,ijd,j->ijd", ext[2], state.R_c, int_[2])
+    psi_tri = jnp.einsum("xad,ybf,zcg,abc->xyzdfg", Sa, Sb, Sc, T)
+
+    d = state.R_a.shape[2]
+    H_resh = jnp.asarray(H_tri).reshape(d, d, d, d, d, d).astype(jnp.complex128)
+    psi_H_psi = jnp.einsum("xyzdfg,DFGdfg,xyzDFG->", psi_tri.conj(), H_resh, psi_tri)
+    psi_psi = jnp.einsum("xyzdfg,xyzdfg->", psi_tri.conj(), psi_tri)
+    return float(jnp.real(psi_H_psi / psi_psi))
+
+
+def test_su_decreases_energy_d2():
+    from tenax.algorithms.pess import pess_simple_update
+
+    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=3)
+    state0 = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(1))
+    state1 = pess_simple_update(state0, H, dt_schedule=[(0.05, 100)], D_max=2)
+    e0 = _local_triangle_energy(state0, H)
+    e1 = _local_triangle_energy(state1, H)
+    assert e1 < e0

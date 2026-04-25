@@ -306,3 +306,38 @@ def pess_simple_update_triangle(
         T_d=T_new,
         lambdas=tuple(new_lambdas),
     )
+
+
+def pess_simple_update(
+    state: IPESSState,
+    hamiltonian: np.ndarray,
+    dt_schedule: list[tuple[float, int]],
+    D_max: int,
+) -> IPESSState:
+    """Run alternating up/down triangle simple update on a kagome iPESS state.
+
+    For each ``(dt, num_steps)`` segment in ``dt_schedule``, build the 3-site
+    Trotter gate ``exp(-dt * H)`` once and run ``num_steps`` SU iterations.
+    Each iteration performs one up-triangle update followed by one
+    down-triangle update.
+
+    Args:
+        state: Input iPESS state.
+        hamiltonian: ``(d**3, d**3)`` Hermitian Hamiltonian on a triangle
+            (e.g. from :func:`kagome_triangle_xxz_hamiltonian`).
+        dt_schedule: List of ``(dt, num_steps)`` tuples, e.g.
+            ``[(0.1, 200), (0.01, 200), (0.001, 100)]``. Real positive ``dt``
+            performs imaginary-time evolution.
+        D_max: Maximum internal bond dimension preserved by the per-step
+            HOSVD truncation.
+
+    Returns:
+        New :class:`IPESSState` after the full schedule.
+    """
+    d = state.R_a.shape[2]
+    for dt, num_steps in dt_schedule:
+        gate = jnp.asarray(make_triangle_gate(hamiltonian, dt, d))
+        for _ in range(num_steps):
+            state = pess_simple_update_triangle(state, gate, "up", D_max)
+            state = pess_simple_update_triangle(state, gate, "down", D_max)
+    return state
