@@ -60,3 +60,20 @@ def test_trotter_gate_imag_time_decreases_norm_on_excited_state():
     assert np.max(np.linalg.svd(G, compute_uv=False)) == pytest.approx(
         np.exp(-0.1 * eigvals[0]), rel=1e-8
     )
+
+
+def test_hosvd_truncate_idempotent_no_truncation():
+    """If D_max >= input dim, theta should round-trip."""
+    from tenax.algorithms.pess import hosvd_truncate
+
+    D, d = 3, 3
+    key = jax.random.PRNGKey(7)
+    theta = (
+        jax.random.normal(key, (D, D, D, d, d, d))
+        + 1j * jax.random.normal(jax.random.fold_in(key, 1), (D, D, D, d, d, d))
+    ).astype(jnp.complex128)
+    S_a, S_b, S_c, core, lams = hosvd_truncate(theta, D_max=D * d, d=d)
+    # Reconstruct theta:
+    # theta[a,b,c,p_a,p_b,p_c] = sum_{i,j,k} S_a[a,i,p_a] * S_b[b,j,p_b] * S_c[c,k,p_c] * core[i,j,k]
+    theta_reco = jnp.einsum("aip,bjq,ckr,ijk->abcpqr", S_a, S_b, S_c, core)
+    np.testing.assert_allclose(theta, theta_reco, atol=1e-10)

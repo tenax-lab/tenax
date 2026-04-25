@@ -79,6 +79,86 @@ def make_triangle_gate(
     return gate.reshape(d, d, d, d, d, d).astype(np.complex128)
 
 
+def hosvd_truncate(
+    theta: jnp.ndarray, D_max: int, d: int = D_PHYS_DEFAULT
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, list[jnp.ndarray]]:
+    """Truncate a contracted 3-site tensor back into PESS form via HOSVD.
+
+    Args:
+        theta: Rank-6 tensor of shape ``(D_a, D_b, D_c, d, d, d)`` — the
+            external bonds for sites a, b, c followed by their three physical
+            indices, in matching order.
+        D_max: Maximum internal bond dimension to keep on each leg of the
+            truncated core. The actual kept dimension on a leg is
+            ``min(D_max, D_x * d)`` where ``D_x`` is the external bond size.
+        d: Physical dimension per site.
+
+    Returns:
+        A tuple ``(S_a, S_b, S_c, core, [lam_a, lam_b, lam_c])`` where
+        ``S_x`` has shape ``(D_x_ext, D_x_int, d)``, ``core`` has shape
+        ``(D_a_int, D_b_int, D_c_int)``, and each ``lam_x`` is a unit-norm
+        singular-value vector along the corresponding internal bond. The
+        reconstruction ``einsum("aip,bjq,ckr,ijk->abcpqr", S_a, S_b, S_c, core)``
+        equals ``theta`` exactly when ``D_max >= D_x * d`` for every leg.
+    """
+    D_ext_a, D_ext_b, D_ext_c = theta.shape[0], theta.shape[1], theta.shape[2]
+
+    theta_reordered = theta.transpose(0, 3, 1, 4, 2, 5)
+
+    # Site a
+    mat_a = theta_reordered.reshape(D_ext_a * d, D_ext_b * d * D_ext_c * d)
+    U_a, _, _ = jnp.linalg.svd(mat_a, full_matrices=False)
+    D_int_a = min(D_max, U_a.shape[1])
+    U_a = U_a[:, :D_int_a]
+
+    # Site b
+    mat_b = theta_reordered.transpose(2, 3, 0, 1, 4, 5).reshape(
+        D_ext_b * d, D_ext_a * d * D_ext_c * d
+    )
+    U_b, _, _ = jnp.linalg.svd(mat_b, full_matrices=False)
+    D_int_b = min(D_max, U_b.shape[1])
+    U_b = U_b[:, :D_int_b]
+
+    # Site c
+    mat_c = theta_reordered.transpose(4, 5, 0, 1, 2, 3).reshape(
+        D_ext_c * d, D_ext_a * d * D_ext_b * d
+    )
+    U_c, _, _ = jnp.linalg.svd(mat_c, full_matrices=False)
+    D_int_c = min(D_max, U_c.shape[1])
+    U_c = U_c[:, :D_int_c]
+
+    # Project onto truncated basis (complex-safe: use conj().T, not .T).
+    theta_3mode = theta_reordered.reshape(D_ext_a * d, D_ext_b * d, D_ext_c * d)
+    core = jnp.tensordot(U_a.conj().T, theta_3mode, axes=([1], [0]))
+    core = jnp.tensordot(U_b.conj().T, core, axes=([1], [1]))
+    core = core.transpose(1, 0, 2)
+    core = jnp.tensordot(U_c.conj().T, core, axes=([1], [2]))
+    core = core.transpose(1, 2, 0)
+
+    # Extract per-bond singular value vectors from the core.
+    _, lam_a, _ = jnp.linalg.svd(
+        core.reshape(D_int_a, D_int_b * D_int_c), full_matrices=False
+    )
+    _, lam_b, _ = jnp.linalg.svd(
+        core.transpose(1, 0, 2).reshape(D_int_b, D_int_a * D_int_c),
+        full_matrices=False,
+    )
+    _, lam_c, _ = jnp.linalg.svd(
+        core.transpose(2, 0, 1).reshape(D_int_c, D_int_a * D_int_b),
+        full_matrices=False,
+    )
+
+    lam_a = lam_a / jnp.linalg.norm(lam_a)
+    lam_b = lam_b / jnp.linalg.norm(lam_b)
+    lam_c = lam_c / jnp.linalg.norm(lam_c)
+
+    S_a = U_a.reshape(D_ext_a, d, D_int_a).transpose(0, 2, 1)
+    S_b = U_b.reshape(D_ext_b, d, D_int_b).transpose(0, 2, 1)
+    S_c = U_c.reshape(D_ext_c, d, D_int_c).transpose(0, 2, 1)
+
+    return S_a, S_b, S_c, core, [lam_a, lam_b, lam_c]
+
+
 @dataclass(frozen=True)
 class IPESSState:
     """Kagome iPESS parameters.
