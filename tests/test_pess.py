@@ -281,3 +281,4 @@ def test_supersite_grad_flows():
     for arr in (g.R_a, g.R_b, g.R_c, g.T_u, g.T_d):
         assert jnp.all(jnp.isfinite(arr))
         assert jnp.linalg.norm(arr) > 0
+        assert arr.dtype == jnp.complex128
