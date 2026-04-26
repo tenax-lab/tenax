@@ -2,6 +2,22 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+**Status (2026-04-26):** Tasks 1–5 (scaffolding) complete. Task 6 paused — the rank-4 paired CTM move requires Paper 2 (PRE 109, 045305, 2024) §II.C Fig. 10 contraction details that are not derivable from variPEPS' code (which uses brick-wall mapping, not native rank-4) or from the design doc alone. **Open questions blocking Task 6** (G1–G5 below) need to be resolved with the paper figure in hand before resuming.
+
+### G1–G5 — Task 6 paper-blocked questions
+
+- **G1.** Which 6 (or more) tensors form the absorbed boundary block for an α-direction move? Best guess: `(C^A_α, L^A_α, T_A, T_B, R^B_α, C^B_α)` — but corner labels depend on which 60° sector each corner occupies relative to direction α (Fig. 1(a) of Lukin-Sotnikov, PRB 107, 054424). Need exact correspondence.
+- **G2.** Which env fields get *updated* by an α-move? In square CTM, "left move" updates 5 of 8 env tensors. For honeycomb α-move, which subset of the 18 total fields (9 per sublattice × 2 sublattices) gets the new chi_new axis?
+- **G3.** Paired-projector pattern: with our isometric simplification (S3), is there ONE joint A-B projector (computed from the joint A-B boundary, applied symmetrically) or TWO sublattice-separate projectors? Paper 2 §II.C uses biorthogonal joint projectors; the isometric translation isn't 1:1 obvious.
+- **G4.** Per-absorption phase fix: applied once per joint move or once per sublattice update?
+- **G5.** Sigma-gauge wiring: applied to all 6 corners after each α-move, or only to corners updated by that move?
+
+### Resuming the plan
+
+When the paper details land, fill G1–G5 in the design doc's "Open questions" section and update Task 6 below with the explicit contraction in code form. Tasks 7–13 (full step, convergence, RDMs, energy, forward run, implicit AD) build on Task 6 and should be straightforward once G1–G5 are settled. Tasks 14–19 are wiring, regression tests, and PR.
+
+---
+
 **Goal:** Land a native rank-4, 6-corner, 3-direction, 2-sublattice honeycomb iPEPS CTM with implicit AD, exposed as a public Tenax algorithm. Replaces the dummy-bond brick-wall workaround currently used by `pess_optimize.py`.
 
 **Architecture:** Parallel `_ctm_honeycomb_*.py` family alongside the existing checkerboard CTM (`_ctm_tensor_*.py`). Rank-4 honeycomb supersites with leg labels `(e0, e1, e2, phys)`. Per-sublattice `HoneycombCTMEnv` NamedTuple with 3 corners + 3 left + 3 right column tensors. One CTM iteration sweeps 3 honeycomb edge directions with paired moves across the 2 sublattices. Implicit AD via custom VJP + JIT-fused GMRES backward, mirroring `_ctm_energy_ad.py:ctm_energy_implicit`.
