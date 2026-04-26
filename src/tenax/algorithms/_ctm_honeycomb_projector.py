@@ -15,9 +15,12 @@ Patterns mirrored from ``_ctm_projector.py``
       S_safe  = jnp.where(mask, S, 1.0)
       S_rsqrt = jnp.where(mask, 1.0 / jnp.sqrt(S_safe), 0.0)
 
-  The honeycomb v1 isometric variant does **not** apply ``S_rsqrt`` to
-  the projector itself (see "isometric vs. Fishman" below), but the
-  same NaN-safety logic is used to guard the eigh/SVD forward.
+  ``method='eigh'`` returns the plain isometric form and does **not**
+  apply ``S_rsqrt`` to the projector itself, but the same NaN-safety
+  logic is still used to guard the eigh forward.  ``method='svd'``
+  returns the Fishman two-projector form where ``S_rsqrt`` IS load-
+  bearing — both ``P1`` and ``P2`` carry an ``S^{-1/2}`` factor (see
+  "isometric vs. Fishman" below).
 
 * Phase-fix gauge wrapped in :func:`jax.lax.stop_gradient` so the gauge
   factor is treated as a constant by the optimizer.  The phase choice
@@ -60,8 +63,11 @@ the density matrix.
 Output projector pair
 ---------------------
 
-For ``method in ('eigh', 'svd')`` the projector is isometric.  Task 6
-will use ``P`` to absorb on one side and ``P_dagger`` on the other.
+The two return values are ``(P_or_P1, P_dagger_or_P2)``; their meaning
+depends on ``method``.
+
+``method='eigh'`` -- plain isometric pair
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 * ``P``        : labels ``(chi_in_label, e_alpha_d2_label, chi_new_in_label)``
                  flows  ``(IN,             IN,              OUT)``
@@ -72,27 +78,44 @@ will use ``P`` to absorb on one side and ``P_dagger`` on the other.
                  dim    ``(chi_new,           chi_in,       d2)``
 
 where ``chi_new = min(chi, chi_in * d2)``.  Contracting ``P_dagger``
-with ``P`` over the shared ``(chi_in, d2)`` axes (matched by index dim,
-since the labels in ``P_dagger`` are shadow copies with flipped flows)
-gives the identity on the new chi axis::
+with ``P`` over the shared ``(chi_in, d2)`` axes gives the identity on
+the new chi axis::
 
     einsum("kab,abm->km", P_dag.todense(), P.todense()) == eye(chi_new)
+
+``method='svd'`` -- Fishman two-projector pair
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* ``P1`` : labels ``(chi_in_label, e_alpha_d2_label, chi_new_in_label)``
+           flows  ``(IN,             IN,              OUT)``
+           dim    ``(chi_in,         d2,              chi_new)``
+
+* ``P2`` : labels ``(chi_out_label, chi_new_out_label)``
+           flows  ``(IN,            IN)``
+           dim    ``(chi_out,       chi_new)``
+
+P1 and P2 do **not** share their non-truncated legs.  The Fishman
+identity is
+
+    einsum("abk,abc,cm->km", conj(P1), boundary, P2) == eye(chi_new)
+
+i.e. ``P1^dagger @ M @ P2 = I_chi_new`` where ``M`` is the matricised
+boundary.  This matches Tenax's existing convention in
+``_ctm_projector.py:_svd_projector_symmetric`` (P1 carries the left
+singular vectors and S^{-1/2}; P2 carries the right singular vectors
+and S^{-1/2}; both share the truncated ``chi_new`` axis).
 
 Isometric vs. Fishman two-projector
 -----------------------------------
 
-For ``method='eigh'`` and ``method='svd'`` we return the **plain
-isometric form**::
+* ``method='eigh'`` -- plain isometric: ``P = U``, ``P_dagger = U^dagger``
+  with ``P_dagger @ P = I``.  ``S_rsqrt`` is computed but not applied.
 
-    P = U,  P_dagger = U^dagger
-
-where ``U`` is the leading ``chi_new`` left singular vectors of the
-matricised boundary (or the leading ``chi_new`` eigenvectors of
-``M M^dagger``).  This satisfies ``P_dagger @ P = I_{chi_new}``
-exactly.  The Fishman two-projector form (``P1 = C4 V S^{-1/2}`` and
-``P2 = C1 U S^{-1/2}``) is a *different* projection — the biorthogonal
-``P1^dagger P2 = I`` rather than ``P^dagger P = I`` — and is reserved
-for ``method='biorthogonal'`` once that variant is implemented.
+* ``method='svd'`` -- Fishman: ``P1 = U S^{-1/2}``, ``P2 = V S^{-1/2}``
+  with built-in ``S^{-1/2}`` weighting on both sides.  The
+  ``S_safe / S_rsqrt`` clamp is load-bearing for this path (zeroing
+  ``S_rsqrt`` for sub-cutoff singular values is what regularises the
+  projector against rank-deficient boundaries).
 
 Deferred (raises :class:`NotImplementedError`)
 ----------------------------------------------
@@ -126,31 +149,29 @@ _PHASE_EPS = 0.1  # variPEPS first-above-threshold fraction-of-max default
 # ------------------------------------------------------------------ #
 
 
-def _phase_fix_columns(U: jax.Array, eps_frac: float = _PHASE_EPS) -> jax.Array:
-    """Fix per-column U(1) phase via the variPEPS first-above-threshold rule.
+def _column_phase(U: jax.Array, eps_frac: float = _PHASE_EPS) -> jax.Array:
+    """Return the per-column unit-modulus phase used by the gauge fix.
 
     For each column ``U[:, j]``, find the first row ``i`` whose
-    ``|U[i, j]| >= eps_frac * max_i |U[i, j]|`` and divide the column by
-    ``U[i, j] / |U[i, j]|`` — making ``U[i, j]`` real-positive.
-
-    The phase factor is wrapped in :func:`jax.lax.stop_gradient` because
-    it represents a gauge degree of freedom: rotating an isometry's
-    column by a unit-modulus scalar is invariant under the next layer
-    of contractions, so the optimizer should not see it as a continuous
-    parameter (mirrors the ``stop_gradient`` of the QR phase factor at
+    ``|U[i, j]| >= eps_frac * max_i |U[i, j]|`` and return
+    ``U[i, j] / |U[i, j]|``.  The factor is wrapped in
+    :func:`jax.lax.stop_gradient` since it represents a gauge degree of
+    freedom (mirrors the ``stop_gradient`` of the QR phase factor at
     ``_ctm_projector.py:953-964``).
 
     Args:
-        U:        Matrix of shape ``(m, k)`` whose columns to phase-fix.
+        U:        Matrix of shape ``(m, k)``.
         eps_frac: Fraction-of-max threshold for picking the reference
                   row.  Matches ``EPS_PHASE = 0.1`` in
                   :func:`ad_utils._phase_fix_ctm_tensor`.
 
     Returns:
-        ``U`` with per-column phases fixed.
+        Per-column phase array of shape ``(k,)`` with unit modulus
+        (or 1.0 for empty columns).  Apply with ``U * conj(phase)`` to
+        make the reference row real-positive.
     """
     if U.shape[1] == 0:
-        return U
+        return jnp.ones((0,), dtype=U.dtype)
     abs_U = jnp.abs(U)
     abs_max = jnp.max(abs_U, axis=0, keepdims=True)  # (1, k)
     threshold = eps_frac * abs_max
@@ -163,7 +184,20 @@ def _phase_fix_columns(U: jax.Array, eps_frac: float = _PHASE_EPS) -> jax.Array:
         rows / jnp.where(abs_rows > 0, abs_rows, 1.0),
         jnp.ones_like(rows),
     )
-    phase = jax.lax.stop_gradient(phase)
+    return jax.lax.stop_gradient(phase)
+
+
+def _phase_fix_columns(U: jax.Array, eps_frac: float = _PHASE_EPS) -> jax.Array:
+    """Apply the variPEPS first-above-threshold per-column phase fix.
+
+    Convenience wrapper around :func:`_column_phase` that applies the
+    phase to ``U`` directly.  For the SVD path we need the phase
+    separately so it can also be applied to the right singular vectors
+    (preserving the ``M = U S V^dagger`` invariant under the gauge).
+    """
+    if U.shape[1] == 0:
+        return U
+    phase = _column_phase(U, eps_frac=eps_frac)
     return U * jnp.conj(phase)[None, :]
 
 
@@ -197,7 +231,21 @@ def compute_honeycomb_projector(
     chi_new_in_label: str = "chi_new_in",
     chi_new_out_label: str = "chi_new_out",
 ) -> tuple[Tensor, Tensor]:
-    """Isometric projector for honeycomb CTM, ``(chi_in, d2)`` -> ``chi_new``.
+    """Honeycomb CTM projector, ``(chi_in, d2)`` -> ``chi_new``.
+
+    Two output conventions, selected by ``method``:
+
+    * ``method='eigh'`` -- plain isometric pair ``(P, P_dagger)`` where
+      ``P_dagger @ P = I_chi_new`` (contraction over the shared
+      ``(chi_in, d2)`` legs).  ``P = U`` (left singular vectors of the
+      matricised boundary).
+
+    * ``method='svd'`` -- Fishman two-projector pair ``(P1, P2)`` where
+      ``P1^dagger @ M @ P2 = I_chi_new`` with ``M`` the matricised
+      boundary.  ``P1 = U @ diag(S^{-1/2})``, ``P2 = V @ diag(S^{-1/2})``;
+      both projectors carry an ``S^{-1/2}`` factor.  Matches the
+      convention of :func:`_svd_projector_symmetric` in
+      ``_ctm_projector.py``.
 
     Args:
         boundary:           Rank-3 :class:`Tensor` with labels ``(chi_in,
@@ -208,17 +256,21 @@ def compute_honeycomb_projector(
         method:             ``'eigh'`` or ``'svd'``.  ``'biorthogonal'``
                             raises :class:`NotImplementedError`.
         chi:                Target bond dimension for the new chi axis.
-                            Output dim is ``min(chi, chi_in * d2)``.
-        s_safe_eps:         Floor for singular values when forming
-                            ``sqrt(S)`` to avoid NaNs from tiny negative
-                            eigenvalues in the eigh path.
+                            Output dim is ``min(chi, chi_in * d2,
+                            chi_out)`` for ``svd`` (bounded by SVD rank)
+                            and ``min(chi, chi_in * d2)`` for ``eigh``.
+        s_safe_eps:         Floor for singular values used to clamp
+                            ``S_safe`` / ``S_rsqrt`` against NaNs.  For
+                            ``eigh`` this also floors the eigenvalues
+                            before ``sqrt(S)``.
         chi_new_in_label:   Label assigned to the truncated axis on
-                            ``P``.
+                            ``P`` / ``P1``.
         chi_new_out_label:  Label assigned to the truncated axis on
-                            ``P_dagger``.
+                            ``P_dagger`` / ``P2``.
 
     Returns:
-        ``(P, P_dagger)`` — see module docstring for shapes / labels /
+        ``(P, P_dagger)`` for ``method='eigh'`` or ``(P1, P2)`` for
+        ``method='svd'`` -- see module docstring for shapes / labels /
         flows.
 
     Raises:
@@ -242,9 +294,10 @@ def compute_honeycomb_projector(
 
     # Pull index metadata.  The convention is FROZEN: leg order is
     # (chi_in, e_alpha_d2, chi_out) — Task 6 must respect this.
-    chi_in_idx, e_d2_idx, _chi_out_idx = boundary.indices
+    chi_in_idx, e_d2_idx, chi_out_idx = boundary.indices
     chi_in = chi_in_idx.dim
     d2 = e_d2_idx.dim
+    chi_out = chi_out_idx.dim
 
     # ---------------------------------------------------------------- #
     # Build the matrix M : (chi_in * d2, chi_out) by reshaping the      #
@@ -252,15 +305,22 @@ def compute_honeycomb_projector(
     # the new chi axis.                                                  #
     # ---------------------------------------------------------------- #
     boundary_arr = boundary.todense()  # small: (chi, d2, chi)
-    M = boundary_arr.reshape(chi_in * d2, -1)  # (chi_in*d2, chi_out)
+    M = boundary_arr.reshape(chi_in * d2, chi_out)  # (chi_in*d2, chi_out)
 
     if method == "svd":
-        from tenax.algorithms.ad_utils import _fix_svd_signs
-
+        # NOTE: do NOT call ``_fix_svd_signs`` here.  That helper applies
+        # ``conj(phase)`` to BOTH U and Vh per column/row, which preserves
+        # ``M = U S Vh`` only for real matrices (where conj(phase)^2 = 1).
+        # For complex matrices it breaks the SVD identity.  We apply our
+        # own per-column gauge fix below, with the inverse ``phase`` going
+        # to V (so ``M = U_new S V_new^dagger`` is preserved exactly).
         U_full, S_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
-        U_full, S_full, _Vh_full = _fix_svd_signs(U_full, S_full, Vh_full)
+        # SVD truncation is bounded by the matrix rank: min(chi_in*d2, chi_out).
         k = min(chi, S_full.shape[0])
         U_k = U_full[:, :k]
+        # V_k = (V^†)^† has shape (chi_out, k) — these are the right singular
+        # vectors as columns, the natural form for Fishman P2.
+        V_k = jnp.conj(Vh_full[:k, :]).T  # (chi_out, k)
         S_k = S_full[:k]
     else:  # eigh path
         # rho = M M^† has eigenvalues = S^2.  Symmetrise to kill roundoff
@@ -285,32 +345,74 @@ def compute_honeycomb_projector(
     # ---------------------------------------------------------------- #
     # S_safe / S_rsqrt — canonical NaN-safe pattern from                #
     # _ctm_projector.py (lines 727-732, 894-898).                       #
-    # The isometric variant does NOT apply S_rsqrt to the projector     #
-    # itself (see module docstring), so we compute these but reserve    #
-    # them for the deferred biorthogonal variant.  Computing them now   #
-    # also exercises the NaN-safety code path under the same inputs,    #
-    # which keeps Task 15's safeguard tests honest.                     #
+    # For ``method='eigh'`` this is computed but not applied to the     #
+    # projector (the eigh path returns plain isometric ``P = U``).      #
+    # For ``method='svd'`` this IS load-bearing — both ``P1`` and       #
+    # ``P2`` carry the ``S_rsqrt`` factor (Fishman two-projector form). #
     # ---------------------------------------------------------------- #
     if k > 0:
         cutoff = jnp.maximum(s_safe_eps, 1e-14 * (S_k[0] + 1e-30))
         mask = S_k > cutoff
         S_safe = jnp.where(mask, S_k, 1.0)
         S_rsqrt = jnp.where(mask, 1.0 / jnp.sqrt(S_safe), 0.0)
-        # Touch S_rsqrt so JAX doesn't DCE the computation under jit;
-        # this keeps the NaN-safety check live for tracing tools but
-        # adds ~zero work since `_` is never read.
-        _ = S_rsqrt + 0.0
+    else:
+        S_rsqrt = jnp.zeros_like(S_k)
 
     # ---------------------------------------------------------------- #
-    # Phase-fix the columns of U so the output is gauge-deterministic.  #
+    # Phase-fix BEFORE multiplying by S_rsqrt, so the gauge factor is   #
+    # captured cleanly in stop_gradient and not entangled with the      #
+    # data-dependent singular-value scaling.                            #
+    #                                                                    #
+    # For SVD, the SAME per-column phase that we apply to U_k must also #
+    # be applied to V_k (i.e. ``U S V^dagger`` is gauge-invariant only  #
+    # when both U and V absorb the same diagonal phase).  Phase-fixing  #
+    # V_k independently would compute a *different* phase from V_k's    #
+    # entries and break the Fishman identity ``P1^dagger M P2 = I``.     #
     # ---------------------------------------------------------------- #
-    U_k = _phase_fix_columns(U_k)
+    if method == "svd":
+        phase_U = _column_phase(U_k)  # (k,) unit modulus
+        U_k = U_k * jnp.conj(phase_U)[None, :]
+        V_k = V_k * jnp.conj(phase_U)[None, :]
+    else:
+        U_k = _phase_fix_columns(U_k)
+
+    # Build TensorIndex metadata for the new chi axes (shared between
+    # both methods — Task 6 expects identical labels/flows).
+    chi_new_in_idx = _make_chi_new_index(chi_in_idx, k, chi_new_in_label, OUT)
+    chi_new_out_idx = _make_chi_new_index(chi_in_idx, k, chi_new_out_label, IN)
+
+    if method == "svd":
+        # Fishman: P1 = U @ diag(S^{-1/2}), P2 = V @ diag(S^{-1/2}).
+        P1_arr = (U_k * S_rsqrt[None, :]).reshape(chi_in, d2, k)
+        P2_arr = V_k * S_rsqrt[None, :]  # (chi_out, k)
+
+        # Stop-gradient through the projector forward path (see eigh
+        # branch below for rationale).
+        P1_arr = jax.lax.stop_gradient(P1_arr)
+        P2_arr = jax.lax.stop_gradient(P2_arr)
+
+        P1 = DenseTensor(
+            P1_arr,
+            (
+                chi_in_idx,  # IN
+                e_d2_idx,  # IN
+                chi_new_in_idx,  # OUT
+            ),
+        )
+        # P2's chi_out-facing leg has flow IN so that ``boundary @ P2``
+        # contracts the OUT chi_out leg of the boundary against P2's IN.
+        P2 = DenseTensor(
+            P2_arr,
+            (
+                chi_out_idx.flip_flow(),  # IN  (boundary's chi_out is OUT)
+                chi_new_out_idx,  # IN  (matches eigh's P_dagger truncated leg)
+            ),
+        )
+        return P1, P2
 
     # ---------------------------------------------------------------- #
-    # Build P and P_dagger as DenseTensors (the honeycomb env at v1     #
-    # is dense complex128, see initialize_honeycomb_env).                #
+    # eigh: plain isometric form. P = U, P_dagger = U^†; P^† P = I_k.   #
     # ---------------------------------------------------------------- #
-    # Isometric form: P = U, P_dagger = U^†.  P^† P = U^† U = I_k.
     P_arr = U_k.reshape(chi_in, d2, k)
     P_dag_arr = jnp.conj(U_k).T.reshape(k, chi_in, d2)
 
@@ -321,10 +423,6 @@ def compute_honeycomb_projector(
     # separately, so this is the right default.
     P_arr = jax.lax.stop_gradient(P_arr)
     P_dag_arr = jax.lax.stop_gradient(P_dag_arr)
-
-    # Build TensorIndex metadata for the new chi axes.
-    chi_new_in_idx = _make_chi_new_index(chi_in_idx, k, chi_new_in_label, OUT)
-    chi_new_out_idx = _make_chi_new_index(chi_in_idx, k, chi_new_out_label, IN)
 
     P = DenseTensor(
         P_arr,

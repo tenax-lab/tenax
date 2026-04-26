@@ -87,20 +87,43 @@ def test_projector_truncation_dim() -> None:
 
 
 @pytest.mark.parametrize("method", ["eigh", "svd"])
-def test_projector_isometry_via_dense(method: str) -> None:
-    """``P_dagger @ P == I_chi_new`` (within eps)."""
+def test_projector_left_right_identity(method: str) -> None:
+    """eigh: ``P_dagger @ P = I``.  svd (Fishman): ``P1^dagger @ M @ P2 = I``.
+
+    Both forms truncate ``(chi_in, d2)`` -> ``chi_new``, but the identity
+    that holds depends on ``method``:
+
+    * ``method='eigh'`` returns plain isometric ``(P, P_dagger)``; the
+      contraction over the shared ``(chi_in, d2)`` legs gives
+      ``I_chi_new`` directly.
+    * ``method='svd'`` returns Fishman ``(P1, P2)``; both projectors
+      carry an ``S^{-1/2}`` factor and the identity is
+      ``P1^dagger @ boundary @ P2 = I_chi_new``.
+    """
     D, chi_init, alpha = 2, 4, 1
     boundary = _column_boundary(D, chi_init, alpha, jax.random.PRNGKey(7))
     chi = 6  # smaller than chi_in*d2 = 4*4 = 16
 
-    P, P_dag = compute_honeycomb_projector(boundary, method=method, chi=chi)
-    P_arr = P.todense()  # shape (chi_in, d2, chi_new)
-    Pd_arr = P_dag.todense()  # shape (chi_new, chi_in, d2)
-    # P_dag @ P contracts on (chi_in, d2) → (chi_new_out, chi_new_in)
-    eye_check = jnp.einsum("kab,abm->km", Pd_arr, P_arr)
+    P_or_P1, P_dag_or_P2 = compute_honeycomb_projector(boundary, method=method, chi=chi)
+
+    if method == "eigh":
+        # Plain isometric: P_dagger @ P contracts on (chi_in, d2).
+        P_arr = P_or_P1.todense()  # (chi_in, d2, chi_new_in)
+        Pd_arr = P_dag_or_P2.todense()  # (chi_new_out, chi_in, d2)
+        eye_check = jnp.einsum("kab,abm->km", Pd_arr, P_arr)
+    else:
+        # Fishman: P1^dagger @ boundary @ P2.
+        # P1: (chi_in, d2, chi_new_in)         — like eigh's P
+        # P2: (chi_out, chi_new_out)           — Fishman right-side projector
+        # boundary: (chi_in, d2, chi_out)
+        P1_arr = P_or_P1.todense()
+        P2_arr = P_dag_or_P2.todense()
+        b_arr = boundary.todense()
+        eye_check = jnp.einsum("abk,abc,cm->km", jnp.conj(P1_arr), b_arr, P2_arr)
+
     n = eye_check.shape[0]
     assert jnp.allclose(eye_check, jnp.eye(n, dtype=eye_check.dtype), atol=1e-8), (
-        f"isometry failed for method={method!r}: "
+        f"identity failed for method={method!r}: "
         f"max|eye_check - I| = {jnp.max(jnp.abs(eye_check - jnp.eye(n))):.3e}"
     )
 
