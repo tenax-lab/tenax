@@ -15,7 +15,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax.algorithms._ctm_honeycomb_energy import _rdm2_bond
+from tenax.algorithms._ctm_honeycomb_energy import (
+    _rdm1,
+    _rdm2_bond,
+    compute_honeycomb_triangle_energy,
+)
 from tenax.algorithms._ctm_honeycomb_init import initialize_honeycomb_env
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
@@ -124,4 +128,98 @@ def test_bond_rdm_d1_equals_tensor_product_of_1site(alpha: int):
     err = float(jnp.max(jnp.abs(rho - expected)))
     assert err < 1e-10, (
         f"alpha={alpha}: bond RDM differs from ρ_A ⊗ ρ_B by max |Δ| = {err:.3e}"
+    )
+
+
+# ------------------------------------------------------------------ #
+# Task 10: 1-site RDM + triangle-energy helper                         #
+# ------------------------------------------------------------------ #
+
+
+@pytest.mark.parametrize("sublattice", [(0, 0), (1, 0)])
+def test_rdm1_shape_hermitian_trace1(sublattice):
+    """Shape, hermiticity, trace 1 with random env (positivity not asserted)."""
+    d, chi = 2, 4
+    A = _make_random_honeycomb_site(D=2, d=d, key=jax.random.PRNGKey(300))
+    B = _make_random_honeycomb_site(D=2, d=d, key=jax.random.PRNGKey(301))
+    sites = {(0, 0): A, (1, 0): B}
+    envs = initialize_honeycomb_env(sites, chi_init=chi, seed=42)
+
+    rho = _rdm1(sites, envs, sublattice=sublattice)
+    assert rho.shape == (d, d)
+    herm_err = float(jnp.max(jnp.abs(rho - rho.conj().T)))
+    assert herm_err < 1e-10
+    trace_err = float(jnp.abs(jnp.trace(rho) - 1.0))
+    assert trace_err < 1e-10
+
+
+@pytest.mark.parametrize("sublattice", [(0, 0), (1, 0)])
+def test_rdm1_d1_equals_single_site_density(sublattice):
+    """D=1 product state → ρ_s = a_s a_s^† / |a_s|² exactly."""
+    d, chi = 2, 1
+    A = _make_d1_site(d=d, key=jax.random.PRNGKey(50))
+    B = _make_d1_site(d=d, key=jax.random.PRNGKey(51))
+    sites = {(0, 0): A, (1, 0): B}
+    envs = initialize_honeycomb_env(sites, chi_init=chi, seed=42)
+
+    rho = _rdm1(sites, envs, sublattice=sublattice)
+
+    vec = sites[sublattice].todense().reshape(d)
+    expected = jnp.outer(vec, jnp.conj(vec))
+    expected = expected / (jnp.trace(expected) + 1e-30)
+
+    err = float(jnp.max(jnp.abs(rho - expected)))
+    assert err < 1e-10, f"sublattice {sublattice}: max |Δ| = {err:.3e}"
+
+
+def test_triangle_energy_equals_sum_of_traces():
+    """``compute_honeycomb_triangle_energy = Tr(ρ_A H) + Tr(ρ_B H)`` exactly."""
+    d, chi = 2, 4
+    A = _make_random_honeycomb_site(D=2, d=d, key=jax.random.PRNGKey(400))
+    B = _make_random_honeycomb_site(D=2, d=d, key=jax.random.PRNGKey(401))
+    sites = {(0, 0): A, (1, 0): B}
+    envs = initialize_honeycomb_env(sites, chi_init=chi, seed=42)
+
+    # Random Hermitian Hamiltonian.
+    H_re = jax.random.normal(jax.random.PRNGKey(999), (d, d))
+    H_im = jax.random.normal(jax.random.PRNGKey(1000), (d, d))
+    H = H_re + 1j * H_im
+    H = 0.5 * (H + H.conj().T)
+
+    E = compute_honeycomb_triangle_energy(sites, envs, H)
+
+    rho_A = _rdm1(sites, envs, sublattice=(0, 0))
+    rho_B = _rdm1(sites, envs, sublattice=(1, 0))
+    expected = jnp.trace(rho_A @ H) + jnp.trace(rho_B @ H)
+
+    assert jnp.allclose(E, expected, atol=1e-12)
+
+
+def test_triangle_energy_d1_recovers_classical_expectation():
+    """D=1 → triangle_energy = ⟨a|H|a⟩/⟨a|a⟩ + ⟨b|H|b⟩/⟨b|b⟩.
+
+    With trivial virtual bonds the iPEPS state factorizes into a product
+    of single-site states; the triangle energy reduces to the sum of
+    classical 1-site expectation values, which is the cheapest sanity
+    check on the kagome ``energy_fn`` plumbing.
+    """
+    d, chi = 2, 1
+    A = _make_d1_site(d=d, key=jax.random.PRNGKey(500))
+    B = _make_d1_site(d=d, key=jax.random.PRNGKey(501))
+    sites = {(0, 0): A, (1, 0): B}
+    envs = initialize_honeycomb_env(sites, chi_init=chi, seed=42)
+
+    # Pauli-z as the test Hamiltonian.
+    H = jnp.array([[1.0, 0.0], [0.0, -1.0]], dtype=jnp.complex128)
+    E = compute_honeycomb_triangle_energy(sites, envs, H)
+
+    a_vec = A.todense().reshape(d)
+    b_vec = B.todense().reshape(d)
+    a_norm2 = jnp.sum(jnp.abs(a_vec) ** 2)
+    b_norm2 = jnp.sum(jnp.abs(b_vec) ** 2)
+    e_a = jnp.vdot(a_vec, H @ a_vec) / a_norm2
+    e_b = jnp.vdot(b_vec, H @ b_vec) / b_norm2
+
+    assert jnp.allclose(E, e_a + e_b, atol=1e-12), (
+        f"E={complex(E)}, expected={complex(e_a + e_b)}"
     )

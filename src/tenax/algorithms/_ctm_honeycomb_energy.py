@@ -31,7 +31,11 @@ from tenax.contraction.contractor import contract
 from tenax.core import EPS
 from tenax.core.tensor import Tensor
 
-__all__ = ["_rdm2_bond"]
+__all__ = [
+    "_rdm1",
+    "_rdm2_bond",
+    "compute_honeycomb_triangle_energy",
+]
 
 
 def _rdm2_bond(
@@ -198,3 +202,90 @@ def _rdm2_bond(
     rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
     rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
     return rdm_mat
+
+
+# ------------------------------------------------------------------ #
+# 1-site RDM and triangle-energy helper (Task 10)                      #
+# ------------------------------------------------------------------ #
+
+
+def _rdm1(
+    sites: dict[Coord, Tensor],
+    envs: dict[Coord, HoneycombCTMEnv],
+    *,
+    sublattice: Coord,
+) -> jnp.ndarray:
+    """1-site RDM at the given sublattice.
+
+    Topology (Lukin-Sotnikov PRB 107, 054424 Fig. 2(a)): 3 corners +
+    3 column tensors form a closed triangular ring around 1 open
+    impurity site::
+
+            C^s_0 -- L^s_0 -- C^s_1 -- L^s_1 -- C^s_2 -- L^s_2 -- (back to C^s_0)
+                       \\         |          /
+                        +-------- T_open(s) ----------+
+                                  (e0, e1, e2 absorbed; phys + phys_bra free)
+
+    The choice of L over R is arbitrary; for the converged env, both
+    give the same result (Paper 1 Fig 2(c) consistency check).
+
+    Args:
+        sites: ``{(0, 0): A, (1, 0): B}`` rank-4 site tensors.
+        envs: per-sublattice :class:`HoneycombCTMEnv` dict.
+        sublattice: which sublattice to compute the RDM at.
+
+    Returns:
+        ``(d, d)`` complex matrix, Hermitian, trace 1.
+    """
+    A = sites[sublattice]
+    env = envs[sublattice]
+    T_open = _double_layer_honeycomb_open(A)
+
+    # Triangle ring bond labels — one per edge of the closed ring.
+    # Going clockwise: C0 - L0 - C1 - L1 - C2 - L2 - (back to C0).
+    bonds = ["_b_0", "_b_1", "_b_2", "_b_3", "_b_4", "_b_5"]
+
+    C0 = env.C0.relabels({"chi_in_0": bonds[5], "chi_out_0": bonds[0]})
+    L0 = env.L0.relabels({"chi_in_0": bonds[0], "e0_d2": "_e0", "chi_out_0": bonds[1]})
+    C1 = env.C1.relabels({"chi_in_1": bonds[1], "chi_out_1": bonds[2]})
+    L1 = env.L1.relabels({"chi_in_1": bonds[2], "e1_d2": "_e1", "chi_out_1": bonds[3]})
+    C2 = env.C2.relabels({"chi_in_2": bonds[3], "chi_out_2": bonds[4]})
+    L2 = env.L2.relabels({"chi_in_2": bonds[4], "e2_d2": "_e2", "chi_out_2": bonds[5]})
+
+    T_r = T_open.relabels(
+        {
+            "e0_d2": "_e0",
+            "e1_d2": "_e1",
+            "e2_d2": "_e2",
+            "phys": "_phys",
+            "phys_bra": "_phys_bra",
+        }
+    )
+
+    rdm_t = contract(C0, L0, C1, L1, C2, L2, T_r, output_labels=("_phys", "_phys_bra"))
+    rdm = rdm_t.todense()  # (d, d) — ket, bra
+    rdm = 0.5 * (rdm + rdm.conj().T)
+    rdm = rdm / (jnp.trace(rdm) + EPS)
+    return rdm
+
+
+def compute_honeycomb_triangle_energy(
+    sites: dict[Coord, Tensor],
+    envs: dict[Coord, HoneycombCTMEnv],
+    hamiltonian: jnp.ndarray,
+) -> jnp.ndarray:
+    """Energy = ``Tr(ρ_A · H) + Tr(ρ_B · H)`` where each ρ is a 1-site RDM.
+
+    Designed as the ``energy_fn`` override the kagome iPESS path passes in:
+    each "site" of the honeycomb env is a kagome triangle (up or down),
+    and ``hamiltonian`` is the intra-triangle 3-spin operator of shape
+    ``(d^3, d^3)``. The total kagome energy per unit cell sums the
+    up-triangle and down-triangle contributions.
+
+    For non-kagome callers (e.g. a per-site magnetic-field test) the
+    function still works as-is — ``hamiltonian`` must just match the
+    site's physical dimension ``d``.
+    """
+    rho_A = _rdm1(sites, envs, sublattice=(0, 0))
+    rho_B = _rdm1(sites, envs, sublattice=(1, 0))
+    return jnp.trace(rho_A @ hamiltonian) + jnp.trace(rho_B @ hamiltonian)
