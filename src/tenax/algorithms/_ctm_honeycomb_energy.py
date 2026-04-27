@@ -34,6 +34,7 @@ from tenax.core.tensor import Tensor
 __all__ = [
     "_rdm1",
     "_rdm2_bond",
+    "compute_honeycomb_energy",
     "compute_honeycomb_triangle_energy",
 ]
 
@@ -289,3 +290,28 @@ def compute_honeycomb_triangle_energy(
     rho_A = _rdm1(sites, envs, sublattice=(0, 0))
     rho_B = _rdm1(sites, envs, sublattice=(1, 0))
     return jnp.trace(rho_A @ hamiltonian) + jnp.trace(rho_B @ hamiltonian)
+
+
+# ------------------------------------------------------------------ #
+# Default energy: 3-edge NN bond sum (Task 11)                         #
+# ------------------------------------------------------------------ #
+
+
+def compute_honeycomb_energy(
+    sites: dict[Coord, Tensor],
+    envs: dict[Coord, HoneycombCTMEnv],
+    hamiltonian: jnp.ndarray,
+) -> jnp.ndarray:
+    """Energy = ``Σ_{α∈{0,1,2}} Tr(ρ_α · H_bond)`` for the 3 NN edges.
+
+    Default ``energy_fn`` for vanilla honeycomb iPEPS use cases (e.g. the
+    spin-1/2 Heisenberg model). ``hamiltonian`` is the same 2-site bond
+    operator on every α-direction and must have shape ``(d², d²)``, where
+    ``d`` is the site physical dimension. The result is the per-unit-cell
+    energy, summing the contributions of all three NN bonds emanating from
+    sublattice A.
+    """
+    return sum(
+        jnp.trace(_rdm2_bond(sites, envs, alpha=alpha) @ hamiltonian)
+        for alpha in (0, 1, 2)
+    )

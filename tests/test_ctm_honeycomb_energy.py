@@ -18,6 +18,7 @@ import pytest
 from tenax.algorithms._ctm_honeycomb_energy import (
     _rdm1,
     _rdm2_bond,
+    compute_honeycomb_energy,
     compute_honeycomb_triangle_energy,
 )
 from tenax.algorithms._ctm_honeycomb_init import initialize_honeycomb_env
@@ -222,4 +223,62 @@ def test_triangle_energy_d1_recovers_classical_expectation():
 
     assert jnp.allclose(E, e_a + e_b, atol=1e-12), (
         f"E={complex(E)}, expected={complex(e_a + e_b)}"
+    )
+
+
+# ------------------------------------------------------------------ #
+# Task 11: default 3-edge NN bond energy                                #
+# ------------------------------------------------------------------ #
+
+
+def test_default_energy_equals_sum_of_three_bond_traces():
+    """``compute_honeycomb_energy = Σ_α Tr(ρ_α · H_bond)`` exactly."""
+    d, chi = 2, 4
+    A = _make_random_honeycomb_site(D=2, d=d, key=jax.random.PRNGKey(600))
+    B = _make_random_honeycomb_site(D=2, d=d, key=jax.random.PRNGKey(601))
+    sites = {(0, 0): A, (1, 0): B}
+    envs = initialize_honeycomb_env(sites, chi_init=chi, seed=42)
+
+    # Random Hermitian (d², d²) bond Hamiltonian.
+    H_re = jax.random.normal(jax.random.PRNGKey(700), (d * d, d * d))
+    H_im = jax.random.normal(jax.random.PRNGKey(701), (d * d, d * d))
+    H = H_re + 1j * H_im
+    H = 0.5 * (H + H.conj().T)
+
+    E = compute_honeycomb_energy(sites, envs, H)
+
+    expected = 0.0 + 0.0j
+    for alpha in (0, 1, 2):
+        rho = _rdm2_bond(sites, envs, alpha=alpha)
+        expected = expected + jnp.trace(rho @ H)
+
+    assert jnp.allclose(E, expected, atol=1e-12), (
+        f"E={complex(E)}, expected={complex(expected)}"
+    )
+
+
+def test_default_energy_d1_recovers_per_bond_classical_expectation():
+    """D=1 product state → Σ_α ⟨ψ_A ψ_B|H|ψ_A ψ_B⟩ (same on every α)."""
+    d, chi = 2, 1
+    A = _make_d1_site(d=d, key=jax.random.PRNGKey(800))
+    B = _make_d1_site(d=d, key=jax.random.PRNGKey(801))
+    sites = {(0, 0): A, (1, 0): B}
+    envs = initialize_honeycomb_env(sites, chi_init=chi, seed=42)
+
+    # XX coupling: H = sx ⊗ sx for spin-1/2.
+    sx = 0.5 * jnp.array([[0.0, 1.0], [1.0, 0.0]], dtype=jnp.complex128)
+    H = jnp.kron(sx, sx)
+
+    E = compute_honeycomb_energy(sites, envs, H)
+
+    a_vec = A.todense().reshape(d)
+    b_vec = B.todense().reshape(d)
+    a_norm2 = jnp.sum(jnp.abs(a_vec) ** 2)
+    b_norm2 = jnp.sum(jnp.abs(b_vec) ** 2)
+    psi = jnp.kron(a_vec, b_vec) / jnp.sqrt(a_norm2 * b_norm2)
+    e_per_bond = jnp.vdot(psi, H @ psi)
+    expected = 3.0 * e_per_bond
+
+    assert jnp.allclose(E, expected, atol=1e-12), (
+        f"E={complex(E)}, expected={complex(expected)}"
     )
