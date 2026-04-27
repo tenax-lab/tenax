@@ -714,38 +714,43 @@ git commit -m "feat(honeycomb): Corboz biorthogonal projector via QR+SVD on enla
 
 **Behavior:** `move_direction_alpha(envs, sites, *, alpha, chi, projector_method, forward_gauge)` performs a paired update of `(C_α, L_α, R_α)` for both sublattices simultaneously along honeycomb edge direction α per Paper 1 Eqs. 2–4, using the projector pair from Task 5b. Returns updated `dict[Coord, HoneycombCTMEnv]`.
 
-**Update equations (Paper 1, generalized to A ≠ B per Paper 2 §II.C).** For each sublattice s ∈ {A, B}:
+**Update equations (Paper 1, generalized to A ≠ B per Paper 2 §II.C; Path 1 contraction convention, 2026-04-27).** For each sublattice s ∈ {A, B}:
 
 ```
-# Step 1 — absorb bulk into row tensors (Paper 1 Eqs. 3–4):
-L^s_α^new_unproj  =  L^s_α  ⊗  T_s  ⊗  T_(other s)        # rank-3 → rank-3, chi → chi·D²
-R^s_α^new_unproj  =  R^s_α  ⊗  T_s  ⊗  T_(other s)
+# Step 1 — absorb bulk into row tensors (Paper 1 Eqs. 3–4, asymmetric pairing):
+L^s_α^new_unproj  =  L^s_α  ·  T_s              # rank-3 → rank-3, chi → chi·D²
+R^s_α^new_unproj  =  R^s_α  ·  T_(other s)      # rank-3 → rank-3, chi → chi·D²
 
-# Step 2 — absorb bulk and rows into corner (Paper 1 Eq. 2):
-C^s_α^new_unproj  =  L^s_α  ⊗  C^s_α  ⊗  R^s_α  ⊗  T_s  ⊗  T_(other s)   # chi·chi → chi·D²·chi·D²
+# Step 2 — corner enlargement is the natural composition (Paper 1 Eq. 2):
+C^s_α^new_unproj  =  L^s_α^new_unproj · C^s_α · R^s_α^new_unproj
+                  =  L^s_α · C^s_α · R^s_α · T_s · T_(other s)
+#                  shape: (chi·D², chi·D²) when reshaped to a matrix
 
-# Step 3 — build projector pair. For the biorthogonal default (Corboz):
-#   Split the enlarged corner C^s_α^new_unproj into upper-half and lower-half
-#   matrices M_U and M_L, each of shape (chi · D², chi · D²). Natural split:
-#   M_U contains the A-sublattice contribution (L^A_α · C^A_α absorbed against T_A);
-#   M_L contains the B-sublattice contribution (C^B_α · R^B_α absorbed against T_B).
-#   Exact tensor splitting determined during impl from HONEYCOMB_NEIGHBORS conventions.
+# Step 3 — biorthogonal projector pair PER α-MOVE (one pair, shared across A and B).
+#   M_A = full enlarged C^A_α^new_unproj, reshaped to (chi·D², chi·D²) matrix.
+#   M_B = full enlarged C^B_α^new_unproj, reshaped to (chi·D², chi·D²) matrix.
+#   (Paper 2 Fig 10(d): each sublattice's own enlarged corner serves as one input.)
 if projector_method == "biorthogonal":
-    P_L^s_α, P_R^s_α  =  compute_honeycomb_corner_biorthogonal_projector(
-        M_U^s_α, M_L^s_α, chi=chi,
+    P_L_α, P_R_α  =  compute_honeycomb_corner_biorthogonal_projector(
+        M_A, M_B, chi=chi,
     )
 else:  # "eigh" / "svd" — A=B opt-in path on the rank-3 row tensor
-    P^s_α, P_dag^s_α  =  compute_honeycomb_projector(
-        L^s_α, method=projector_method, chi=chi,   # or R^s_α, by symmetry
+    P_α, P_dag_α  =  compute_honeycomb_projector(
+        L^A_α, method=projector_method, chi=chi,   # or any equivalent boundary, by A=B symmetry
     )
 
-# Step 4 — truncate corner and propagate truncation isometries to the rows:
-C^s_α^new  =  P_L^s_α  ·  C^s_α^new_unproj  ·  P_R^s_α                    # back to chi·chi
-L^s_α^new  =  L^s_α^new_unproj  ·  P_R^s_α                                # back to chi·D²·chi
-R^s_α^new  =  P_L^s_α  ·  R^s_α^new_unproj                                # back to chi·D²·chi
+# Step 4 — truncate corners (Paper 2 §II.C: P_L on both legs of A; P_R on both of B):
+C^A_α^new  =  P_L_α  ·  C^A_α^new_unproj  ·  P_L_α^T          # back to chi·chi
+C^B_α^new  =  P_R_α^T  ·  C^B_α^new_unproj  ·  P_R_α          # back to chi·chi
+
+# Step 5 — propagate to row tensors (each grown chi·D² leg gets its sublattice's projector):
+L^A_α^new  =  P_L_α  ·  L^A_α^new_unproj                       # truncate A-side grown chi
+R^A_α^new  =  P_L_α  ·  R^A_α^new_unproj                       # truncate A-side grown chi
+L^B_α^new  =  L^B_α^new_unproj  ·  P_R_α                       # truncate B-side grown chi
+R^B_α^new  =  R^B_α^new_unproj  ·  P_R_α                       # truncate B-side grown chi
 ```
 
-The `T_s · T_(other s)` order encodes the bipartite alternation along honeycomb edge direction α: for sublattice A's corner update, the absorbed pair is `T_A · T_B` (A first, then B); for sublattice B's corner update, it's `T_B · T_A`. The exact order maps to which fused-leg label of `T` is contracted with which leg of `(C, L, R)` — see `HONEYCOMB_NEIGHBORS[(0,0)]["e_α"] = (1,0)` (A → B in direction α).
+The `T_s · T_(other s)` order encodes the bipartite alternation along honeycomb edge direction α: for sublattice A's corner enlargement, T_A enters via L^A and T_B enters via R^A (per Step 1's asymmetric pairing). For B's corner, T_B enters via L^B and T_A via R^B. The exact leg matching uses `HONEYCOMB_NEIGHBORS[(0,0)]["e_α"] = (1,0)` (A → B in direction α).
 
 **Phase fix** is inside `compute_honeycomb_projector` and applies once per sublattice update (twice per α-move).
 

@@ -44,14 +44,16 @@ For each sublattice s ∈ {A, B}, the C-block update (per Paper 1 Eq. 2, extende
 C^s_α ← L^s_α · C^s_α · R^s_α · T^s · T^(other s)
 ```
 
-The two T's come from the bipartite alternation across the absorbed honeycomb edge. The L- and R-block updates absorb 3 tensors each:
+The two T's come from the bipartite alternation across the absorbed honeycomb edge. The L- and R-block updates absorb **one T each** (Path 1 resolution, 2026-04-27):
 
 ```
-L^s_α ← L^s_α · T^s · T^(other s)
-R^s_α ← R^s_α · T^s · T^(other s)
+L^s_α ← L^s_α · T^s             (L absorbs the same-sublattice bulk site)
+R^s_α ← R^s_α · T^(other s)     (R absorbs the bipartite neighbor)
 ```
 
-Total tensors entering per α-move: 5 + 3 + 3 = 11 per sublattice, ×2 sublattices = 22; but the L/R updates share T's with the C update so the unique tensor count is 6 per sublattice (L, C, R, T_A, T_B, plus the projector inputs from the corner block).
+This asymmetric pairing is what gives the 5-tensor corner formula naturally: `C^s^new_unproj = L^s_new · C^s · R^s_new = L^s · C^s · R^s · T^s · T^(other s)` — one T_self from the L side, one T_other from the R side. The L→R chirality is the Lukin-Sotnikov 6-corner convention (Paper 1 Fig. 1(b)).
+
+Total tensors entering per α-move: 5 + 1 + 1 = 7 per sublattice, ×2 sublattices = 14; with sharing, unique tensor count is 5 per sublattice (L, C, R, T_A, T_B).
 
 ### G2. Updated env fields per α-move
 
