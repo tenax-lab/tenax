@@ -1,6 +1,6 @@
 # Native Honeycomb iPEPS CTM with AD — Design
 
-**Status:** Design approved. Ready for implementation plan.
+**Status:** Design approved (2026-04-25). Revised 2026-04-27 after reading Paper 1 (Eqs. 2–4) and Paper 2 §II.C: S3 flipped to biorthogonal-default with isometric A=B opt-in; G1–G5 resolved against the figures. See companion memo `2026-04-27-honeycomb-ctm-G1-G5-synthesis.md` for the full derivation. Ready for Task 5b + Task 6 implementation.
 
 **Branch:** `feat/honeycomb-ctm` (worktree at `.worktrees/honeycomb-ctm`).
 
@@ -19,7 +19,7 @@ Land a native rank-4 honeycomb iPEPS CTM with implicit-AD differentiation, expos
 |---|---|---|
 | **Scope** | A: general-purpose honeycomb infrastructure | Enables direct honeycomb iPEPS, not just kagome iPESS. |
 | **Tensor representation** | X2: rank-4 native (3 virtual + 1 physical) | Matches both reference papers; clean fit for SymmetricTensor; no degenerate projector spectrum. |
-| **Sublattice scope** | S3: 2-sublattice from start, isometric SVD/eigh projectors | 2-sublattice subsumes 1-sublattice via A=B. Isometric projectors are battle-tested in Tenax; biorthogonal (Paper 2 §II.C) is a layered follow-up. |
+| **Sublattice scope** | S3 (revised 2026-04-27): 2-sublattice from start, **biorthogonal projectors default**, isometric SVD/eigh as A=B opt-in | 2-sublattice subsumes 1-sublattice via A=B. Paper 2 §II.C explicitly requires biorthogonal `(P_L, P_R)` with `P_L · P_R = 1` for A ≠ B because the absorbed corner is non-Hermitian — eigh/SVD-isometric truncation shifts the fixed point. Isometric kept as a fast opt-in for the symmetric A=B uniform case. See `2026-04-27-honeycomb-ctm-G1-G5-synthesis.md` for the full G1–G5 resolution against Paper 1 Eqs. 2–4 and Paper 2 Fig. 10. |
 | **Symmetry support** | Y3: Tensor-protocol-generic, dense-tested in v1 | Matches `_ctm_tensor_*.py` style. SymmetricTensor extension does not require a rewrite. |
 | **Module organization** | P1: parallel `_ctm_honeycomb_*.py` family | Avoids destabilizing the existing checkerboard CTM. Consolidation with the square path is a separate post-v1 PR. |
 
@@ -29,7 +29,7 @@ Land a native rank-4 honeycomb iPEPS CTM with implicit-AD differentiation, expos
 
 **Environment.** Six-corner CTMRG (Lukin-Sotnikov). Per sublattice, 3 corner tensors `C^{(s)}_α` (rank-2, χ × χ) and 3 column tensors `L^{(s)}_α, R^{(s)}_α` (rank-3, χ × χ × D²) — one per direction α ∈ {e0, e1, e2}. For 2 sublattices: 6 corners + 12 column tensors total. Reduces to 3+6 in the uniform 1-sublattice case (A=B).
 
-**Move topology.** One CTM iteration sweeps 3 directions. Each direction performs a *paired move* updating both sublattices' (C, L, R) for that direction simultaneously, mirroring the Paper 2 §II.C structure. Per-absorption phase fix (first-above-threshold convention) and `S_safe` NaN protection on the projector — both lifted from the existing `_ctm_projector.py` patterns. Sigma gauge applied per-absorption when `forward_gauge="sigma"`; phase gauge by default (memory: phase gauge is correct default, sigma explodes on 2-site).
+**Move topology.** One CTM iteration sweeps 3 directions. Each direction performs a *paired move* updating both sublattices' (C, L, R) for that direction simultaneously per Paper 1 Eqs. 2–4 (`C ← L · C · R · T_A · T_B`, `L ← L · T_A · T_B`, `R ← R · T_A · T_B`), with the bipartite alternation determining the T-order. Six fields update per α-move (six of 18 total); other directions untouched. Projector pair `(P_L, P_R)` for direction α is constructed via QR + SVD on the enlarged corner — biorthogonal for A ≠ B (paper-faithful), or `eigh`/`svd` isometric for the A=B opt-in. Per-absorption phase fix (first-above-threshold convention) and `S_safe` NaN protection on the projector — both lifted from the existing `_ctm_projector.py` patterns. Sigma gauge is unnecessary in the biorthogonal path (biorthogonalization absorbs the gauge dof); for the isometric A=B opt-in, sigma gauge is applied per-absorption when `forward_gauge="sigma"`; phase gauge default (memory: phase gauge is correct default, sigma explodes on 2-site).
 
 **AD.** Implicit differentiation through the converged CTM fixed point — one fixed-point GMRES backward solve, JIT-fused, custom VJP via `jax.custom_vjp`. Mirrors `_ctm_energy_ad.py:ctm_energy_implicit`. Forward pass is a Python loop with chi ramp, mirroring PR #341. No direct/unrolled AD path in v1.
 
@@ -43,7 +43,7 @@ def honeycomb_ctm_energy_implicit(
     chi: int,
     max_iter: int,
     conv_tol: float,
-    projector_method: str = "eigh",      # "eigh" | "svd" | "biorthogonal" (NotImplementedError stub)
+    projector_method: str = "biorthogonal",  # "biorthogonal" (default, paper-faithful for A≠B) | "eigh" | "svd" (isometric, A=B opt-in)
     forward_gauge: str = "phase",        # "phase" | "sigma"
     chi_ramp: tuple[int, ...] | None = None,
     energy_fn: Callable | None = None,   # default: 3-edge NN bond sum; override for triangle energy
@@ -64,7 +64,7 @@ def honeycomb_ctm_energy_implicit(
 | `src/tenax/algorithms/_ctm_honeycomb_env.py` | `HoneycombCTMEnv` NamedTuple (9 fields: 3 corners + 3 left + 3 right column tensors per sublattice), pytree registration. |
 | `src/tenax/algorithms/_ctm_honeycomb_init.py` | `_double_layer_honeycomb(A)`, `initialize_honeycomb_env(sites, chi_init)`. |
 | `src/tenax/algorithms/_ctm_honeycomb_moves.py` | `move_direction_alpha`, `honeycomb_ctm_step`, `_renormalize_honeycomb_env`, `HONEYCOMB_NEIGHBORS`. |
-| `src/tenax/algorithms/_ctm_honeycomb_projector.py` | `compute_honeycomb_projector(boundary, *, method, chi, S_safe_eps)` — isometric `(P, P†)`. |
+| `src/tenax/algorithms/_ctm_honeycomb_projector.py` | `compute_honeycomb_projector(boundary, *, method, chi, S_safe_eps)` — returns the projector pair: biorthogonal `(P_L, P_R)` with `P_L · P_R = 1` for `method="biorthogonal"` (default), or isometric `(P, P†)` for `method="eigh"`/`"svd"` (A=B opt-in). |
 | `src/tenax/algorithms/_ctm_honeycomb_convergence.py` | `check_honeycomb_convergence(env_old, env_new, *, method, tol)`; element-wise default, SV optional. |
 | `src/tenax/algorithms/_ctm_honeycomb_energy.py` | `_rdm2_bond` (2-vertex bond RDM, per direction), `_rdm1` (1-site RDM), `compute_honeycomb_energy`, `compute_honeycomb_triangle_energy` (kagome helper). |
 | `src/tenax/algorithms/_ctm_honeycomb_ad.py` | `honeycomb_ctm_energy_implicit` with custom VJP and JIT-fused GMRES backward. |
@@ -173,7 +173,7 @@ Required for AD stability — not optional:
 
 **AD policy.** All AD tests use the new `honeycomb_ctm_energy_implicit` (mirrors PR #344 baseline migration). No xfail expected.
 
-**What we deliberately do NOT test in v1.** SymmetricTensor (deferred per Y3); multi-unit-cell beyond 2-sublattice (YAGNI); biorthogonal projector path (one test asserts the stub raises `NotImplementedError`); fermionic.
+**What we deliberately do NOT test in v1.** SymmetricTensor (deferred per Y3); multi-unit-cell beyond 2-sublattice (YAGNI); fermionic.
 
 ## Validation and acceptance criteria
 
@@ -185,9 +185,9 @@ Required for AD stability — not optional:
 
 **Milestone M3 — Performance reasonable (informational).** One JIT-compiled iteration at D=4, χ=16 on GPU completes in <2s. Compared against the dummy-bond hack baseline (~1 min/step backward) — not aiming to beat, just confirming no catastrophic regression.
 
-**Out of scope for v1 acceptance.** Beating variPEPS energies (same ballpark suffices). Lukin-Sotnikov Kitaev (anisotropic, paper notes uniform path doesn't extend). SymmetricTensor U(1) tests. Fermionic. Larger unit cells. Biorthogonal projectors.
+**Out of scope for v1 acceptance.** Beating variPEPS energies (same ballpark suffices). Lukin-Sotnikov Kitaev (anisotropic, paper notes uniform path doesn't extend). SymmetricTensor U(1) tests. Fermionic. Larger unit cells.
 
-**PR boundaries.** This PR introduces the honeycomb CTM v1 only. A **separate, follow-up PR** rewires `pess_optimize.py` to use it and deletes the dummy-bond helpers. Biorthogonal projectors, SymmetricTensor tests, fermionic, larger unit cells — each their own future PR.
+**PR boundaries.** This PR introduces the honeycomb CTM v1 only. A **separate, follow-up PR** rewires `pess_optimize.py` to use it and deletes the dummy-bond helpers. SymmetricTensor tests, fermionic, larger unit cells — each their own future PR.
 
 ## Future consolidation with shared CTM core
 
@@ -212,8 +212,8 @@ If none trigger by ~6 months out, revisit whether consolidation is paying for it
 ## Tradeoffs and risks
 
 - **Why X2 native rank-4 over X1a non-uniform-D rank-5.** The reference papers use rank-4 native. X1a is a different algorithm (square 4-corner CTM with one trivial direction), not a port. X1a was preferred when I mistakenly thought it matched the papers; once verified that Lukin-Sotnikov uses rank-4 with `A^s_{ijk}` and 6-corner topology, X2 became the only faithful choice.
-- **Why isometric projectors over biorthogonal.** Tenax's existing isometric SVD/eigh path with phase gauge + complex128 + `S_safe` is battle-tested at χ=16 in 2-sublattice checkerboard (analogous regime). Biorthogonal projectors are substantial new infrastructure; defer until empirical evidence shows they're needed. Pluggable projector layer keeps the option open.
+- **Why biorthogonal default with isometric A=B fallback (revised 2026-04-27).** The absorbed honeycomb corner is non-Hermitian for A ≠ B (the bipartite alternation `T_A · T_B` vs `T_B · T_A` breaks the conjugation symmetry that makes the uniform A=B corner Hermitian). Eigh on a non-Hermitian C truncates a Hermitianized proxy and shifts the fixed point; SVD-isometric truncates by singular values rather than eigenvalues. Biorthogonal `(P_L, P_R)` with `P_L · P_R = 1` (Paper 2 §II.C, derived from Corboz et al. 2014) is the principled tool — it maintains the fixed-point equation under truncation. We ship biorthogonal as the default and keep `eigh`/`svd` as a fast opt-in for the uniform A=B case where the corner IS Hermitian.
 - **Why dense-only tests in v1 with protocol-generic code.** Y3: pay a small upfront cost (`tensor.contract(...)` over `jnp.einsum(...)`) to get SymmetricTensor "for free" later, without requiring a parallel symmetric-only port.
-- **Risk: 2-sublattice biorthogonality required at high χ.** If isometric projectors prove unstable in the honeycomb 2-sublattice regime in ways they aren't in checkerboard, biorthogonal becomes mandatory. Mitigation: pluggable projector interface; biorthogonal can land in a follow-up PR without rewriting topology.
+- **Risk: biorthogonal projector adds new infrastructure not in the existing CTM path.** QR + SVD on the enlarged corner with the `P_L · P_R = 1` post-condition is new code; bugs in the biorthogonalization could manifest as silent fixed-point drift. Mitigation: TDD with explicit `P_L · P_R = 1` assertion (Task 5b); cross-check against the isometric A=B opt-in in M2a where both should agree. If biorthogonal proves unstable in M1 (FD vs AD), fall back to isometric for v1 and ship biorthogonal in a follow-up PR.
 - **Risk: env tensor convention drift.** With per-sublattice (C, L, R) tuples and per-direction labels (`e0/e1/e2`), the leg-flow conventions differ from the existing checkerboard u/d/l/r. Mitigation: explicit `_HONEYCOMB_EDGE_SPECS` dict with flow conventions, tested against round-trip identities.
 - **Risk: kagome triangle energy semantics.** The triangle Hamiltonian basis (`np.kron(np.kron(s_a, s_b), s_c)`) must match the supersite physical-leg fusion order in `_build_honeycomb_site_tensor`. Mitigation: shared fusion-order constant referenced from both paths; regression test in M2b catches mismatches.

@@ -2,19 +2,19 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Status (2026-04-26):** Tasks 1–5 (scaffolding) complete. Task 6 paused — the rank-4 paired CTM move requires Paper 2 (PRE 109, 045305, 2024) §II.C Fig. 10 contraction details that are not derivable from variPEPS' code (which uses brick-wall mapping, not native rank-4) or from the design doc alone. **Open questions blocking Task 6** (G1–G5 below) need to be resolved with the paper figure in hand before resuming.
+**Status (2026-04-27):** Tasks 1–5 (scaffolding) complete. G1–G5 now resolved against Paper 1 Eqs. 2–4 + Paper 2 §II.C / Fig. 10 — see `2026-04-27-honeycomb-ctm-G1-G5-synthesis.md`. Design's S3 flipped to **biorthogonal default + isometric A=B opt-in** (paper requires biorthogonal `P_L · P_R = 1` for the non-Hermitian A ≠ B corner). New **Task 5b** lands the biorthogonal projector before Task 6.
 
-### G1–G5 — Task 6 paper-blocked questions
+### G1–G5 resolutions (summary)
 
-- **G1.** Which 6 (or more) tensors form the absorbed boundary block for an α-direction move? Best guess: `(C^A_α, L^A_α, T_A, T_B, R^B_α, C^B_α)` — but corner labels depend on which 60° sector each corner occupies relative to direction α (Fig. 1(a) of Lukin-Sotnikov, PRB 107, 054424). Need exact correspondence.
-- **G2.** Which env fields get *updated* by an α-move? In square CTM, "left move" updates 5 of 8 env tensors. For honeycomb α-move, which subset of the 18 total fields (9 per sublattice × 2 sublattices) gets the new chi_new axis?
-- **G3.** Paired-projector pattern: with our isometric simplification (S3), is there ONE joint A-B projector (computed from the joint A-B boundary, applied symmetrically) or TWO sublattice-separate projectors? Paper 2 §II.C uses biorthogonal joint projectors; the isometric translation isn't 1:1 obvious.
-- **G4.** Per-absorption phase fix: applied once per joint move or once per sublattice update?
-- **G5.** Sigma-gauge wiring: applied to all 6 corners after each α-move, or only to corners updated by that move?
+- **G1.** Per sublattice s, the C-block update absorbs 5 tensors: `C^s_α ← L^s_α · C^s_α · R^s_α · T_s · T_(other s)` (Paper 1 Eq. 2). L- and R-block updates absorb 3 tensors each (Eqs. 3–4).
+- **G2.** 6 of 18 env fields update per α-move: `{C, L, R}^A_α ∪ {C, L, R}^B_α`. Other 12 untouched.
+- **G3.** **Two sublattice-separate projectors** `P_L^α` and `P_R^α`, **biorthogonal** (`P_L · P_R = 1`), constructed via QR + SVD on the enlarged corner per Paper 2 Fig. 10(d). Isometric `eigh`/`svd` is an A=B opt-in only.
+- **G4.** Phase fix once per sublattice update (twice per α-move).
+- **G5.** Sigma gauge unnecessary in the biorthogonal path (biorthogonalization absorbs the gauge dof). For the isometric A=B opt-in, sigma gauge applies per-absorption to new corners.
 
 ### Resuming the plan
 
-When the paper details land, fill G1–G5 in the design doc's "Open questions" section and update Task 6 below with the explicit contraction in code form. Tasks 7–13 (full step, convergence, RDMs, energy, forward run, implicit AD) build on Task 6 and should be straightforward once G1–G5 are settled. Tasks 14–19 are wiring, regression tests, and PR.
+Tasks 7–13 (full step, convergence, RDMs, energy, forward run, implicit AD) build on Task 5b + Task 6 and are straightforward now that the projector and move are pinned to the paper. Tasks 14–19 are wiring, regression tests, and PR.
 
 ---
 
@@ -605,22 +605,132 @@ git commit -am "feat(honeycomb): isometric projector with S_safe + phase fix"
 
 ---
 
+## Task 5b: Biorthogonal projector via QR + SVD
+
+**Files:**
+- Modify: `src/tenax/algorithms/_ctm_honeycomb_projector.py`
+- Modify: `tests/test_ctm_honeycomb_projector.py`
+
+**Behavior:** Add `method="biorthogonal"` to `compute_honeycomb_projector` (currently raises `NotImplementedError`). Returns `(P_L, P_R)` with `P_L · P_R = 1` (biorthogonal). The existing `method="eigh"` and `method="svd"` (Task 5) stay as A=B opt-ins. Biorthogonal becomes the **default** in Task 6's `move_direction_alpha`.
+
+**Algorithm (Paper 2 Fig. 10(d), Corboz et al. 2014).** Given the enlarged corner matrix `M` of shape `(chi · D², chi · D²)` (or however the boundary tensor reshapes to 2D for the truncation step):
+
+1. QR decompose the upper-half boundary: `M_upper = Q_U · R_U`.
+2. QR decompose the lower-half boundary: `M_lower = Q_L · R_L` (or LQ depending on convention).
+3. Compute the singular value decomposition of `R_U · R_L^T` (or the appropriate biorthogonalization product): `U · S · V† = R_U · R_L^T`.
+4. Truncate the largest `chi` singular values; let `S_safe = clip(S, eps)` to avoid `1/sqrt(0)`.
+5. Form the biorthogonal pair:
+
+   ```
+   P_L = R_L^T · V · diag(1/sqrt(S_safe))     # (chi_in · D², chi_out)
+   P_R = diag(1/sqrt(S_safe)) · U^T · R_U     # (chi_out, chi_in · D²)
+   ```
+
+6. Verify `P_L · P_R = I_chi_out` to floating-point tolerance.
+
+The `S_safe` clamp + first-above-threshold phase fix from Task 5 carry over (still needed for AD stability). The phase fix is applied once each to `U` (left) and `V` (right) — both within `stop_gradient`.
+
+**Investigation step (do this first):** Read `src/tenax/algorithms/_ctm_projector.py` to confirm the existing two-projector pattern (memory: `project_svd_projector_ad.md` — "Two-projector Fishman DONE; svd+sigma matches eigh+sigma"). The honeycomb biorthogonal API mirrors that structure on the rank-3 honeycomb boundary.
+
+**Step 1: Failing tests** — append to `tests/test_ctm_honeycomb_projector.py`:
+
+```python
+def test_biorthogonal_projector_PL_PR_identity():
+    """Biorthogonal projectors satisfy P_L · P_R = I_chi_out."""
+    chi, d2 = 4, 9
+    boundary = _random_boundary(chi, d2, jax.random.PRNGKey(10))
+    P_L, P_R = compute_honeycomb_projector(boundary, method="biorthogonal", chi=chi)
+    # Contract over the boundary's (chi, d2) legs:
+    identity = jnp.einsum("abc,cab->", P_L, P_R)  # shape consistency check
+    # Full check:
+    prod = jnp.einsum("...c,c...->", P_L, P_R)  # P_L · P_R reduces to (chi_out, chi_out)
+    # ... actual contraction depends on the index conventions chosen in Step 3.
+    # Asserted: prod should equal identity within 1e-6 absolute.
+
+def test_biorthogonal_no_nan_on_degenerate_spectrum():
+    """Rank-deficient boundary should not produce NaN P_L or P_R."""
+    chi, d2 = 4, 9
+    boundary = jnp.zeros((chi, d2, chi), dtype=jnp.complex128)
+    boundary = boundary.at[0, 0, 0].set(1.0)
+    P_L, P_R = compute_honeycomb_projector(boundary, method="biorthogonal", chi=chi)
+    assert jnp.all(jnp.isfinite(P_L))
+    assert jnp.all(jnp.isfinite(P_R))
+
+def test_biorthogonal_reduces_to_isometric_for_hermitian_boundary():
+    """For an A=B-style Hermitian boundary, biorthogonal and isometric should agree
+    on the truncated subspace (energies match within 1e-8 in the move)."""
+    # Generate a boundary that is C^† = C symmetric (uniform A=B regime).
+    # Compare projector spectra and confirm equivalent truncation.
+    ...  # detailed assertion tbd during impl
+```
+
+Drop the existing `test_biorthogonal_method_raises_not_implemented` test (no longer applicable).
+
+**Step 2: Verify failure** — `NotImplementedError` from existing stub.
+
+**Step 3: Implement** — replace the `NotImplementedError` branch in `compute_honeycomb_projector` with the QR + SVD biorthogonalization above. Keep the `S_safe` and `_phase_fix` helpers shared.
+
+**Step 4: Verify pass.** All tests for `eigh`, `svd`, and `biorthogonal` methods pass. The `P_L · P_R = I` identity holds at 1e-6.
+
+**Step 5: Commit**
+
+```bash
+git add src/tenax/algorithms/_ctm_honeycomb_projector.py tests/test_ctm_honeycomb_projector.py
+git commit -m "feat(honeycomb): biorthogonal P_L,P_R projector via QR+SVD"
+```
+
+---
+
 ## Task 6: Single direction move
 
 **Files:**
 - Create: `src/tenax/algorithms/_ctm_honeycomb_moves.py`
 - Create: `tests/test_ctm_honeycomb_moves.py`
 
-**Behavior:** `move_direction_alpha(envs, sites, alpha, *, chi, projector_method, forward_gauge)` performs a paired update of `(C_α, L_α, R_α)` for both sublattices simultaneously along honeycomb edge direction α. Returns updated `dict[Coord, HoneycombCTMEnv]`.
+**Behavior:** `move_direction_alpha(envs, sites, *, alpha, chi, projector_method, forward_gauge)` performs a paired update of `(C_α, L_α, R_α)` for both sublattices simultaneously along honeycomb edge direction α per Paper 1 Eqs. 2–4, using the projector pair from Task 5b. Returns updated `dict[Coord, HoneycombCTMEnv]`.
 
-This is the algorithmic heart of the CTM. The exact contraction pattern follows Paper 2 §II.C Fig. 10 — read those equations carefully before writing the move.
+**Update equations (Paper 1, generalized to A ≠ B per Paper 2 §II.C).** For each sublattice s ∈ {A, B}:
 
-**Investigation step (do this first):** Inspect `src/tenax/algorithms/_ctm_tensor_moves.py` and `_ctm_tensor_paired_moves.py` to understand:
-- How the existing checkerboard move builds the absorbed boundary (4 legs → projector)
-- How `_ctm_tensor_move_horizontal` couples both sublattices in one move
-- How `_renormalize_tensor_env` is called per move
+```
+# Step 1 — absorb bulk into row tensors (Paper 1 Eqs. 3–4):
+L^s_α^new_unproj  =  L^s_α  ⊗  T_s  ⊗  T_(other s)        # rank-3 → rank-3, chi → chi·D²
+R^s_α^new_unproj  =  R^s_α  ⊗  T_s  ⊗  T_(other s)
 
-The honeycomb version is a 3-leg-boundary analog with 3 directions per iteration instead of 4.
+# Step 2 — absorb bulk and rows into corner (Paper 1 Eq. 2):
+C^s_α^new_unproj  =  L^s_α  ⊗  C^s_α  ⊗  R^s_α  ⊗  T_s  ⊗  T_(other s)   # chi·chi → chi·D²·chi·D²
+
+# Step 3 — build projector pair from the enlarged C^s_α^new_unproj:
+P_L^s_α, P_R^s_α  =  compute_honeycomb_projector(
+    C^s_α^new_unproj.reshape((chi*D², chi*D²)),
+    method=projector_method,                                   # "biorthogonal" default
+    chi=chi,
+)
+
+# Step 4 — truncate corner and propagate truncation isometries to the rows:
+C^s_α^new  =  P_L^s_α  ·  C^s_α^new_unproj  ·  P_R^s_α                    # back to chi·chi
+L^s_α^new  =  L^s_α^new_unproj  ·  P_R^s_α                                # back to chi·D²·chi
+R^s_α^new  =  P_L^s_α  ·  R^s_α^new_unproj                                # back to chi·D²·chi
+```
+
+The `T_s · T_(other s)` order encodes the bipartite alternation along honeycomb edge direction α: for sublattice A's corner update, the absorbed pair is `T_A · T_B` (A first, then B); for sublattice B's corner update, it's `T_B · T_A`. The exact order maps to which fused-leg label of `T` is contracted with which leg of `(C, L, R)` — see `HONEYCOMB_NEIGHBORS[(0,0)]["e_α"] = (1,0)` (A → B in direction α).
+
+**Phase fix** is inside `compute_honeycomb_projector` and applies once per sublattice update (twice per α-move).
+
+**`forward_gauge`.** With `projector_method="biorthogonal"` the biorthogonalization handles gauge fixing — `forward_gauge` is ignored (or `forward_gauge="phase"` is no-op). With `projector_method="eigh"`/`"svd"` (A=B opt-in), `forward_gauge="sigma"` applies sigma gauge to the new corners; `forward_gauge="phase"` (default) is the variPEPS first-above-threshold convention.
+
+**Investigation step (do this first):** Inspect:
+- `src/tenax/algorithms/_ctm_tensor_moves.py` and `_ctm_tensor_paired_moves.py` for the existing checkerboard paired-move pattern (how the absorbed boundary is built, how `_renormalize_tensor_env` is called).
+- `src/tenax/algorithms/_ctm_projector.py` for the two-projector convention (label order on `(P_L, P_R)`).
+- The honeycomb version is a 3-leg-boundary analog with 3 directions per iteration instead of 4 horizontal + vertical moves.
+
+**Implementation note:** the move is the algorithmic heart. Build it with sub-steps and a unit test at each stage:
+
+1. Build the rank-3 enlarged `L^s_α^new_unproj` first; unit test on shape and finiteness.
+2. Build the rank-3 enlarged `R^s_α^new_unproj`; unit test similarly.
+3. Build the rank-(2 high-rank) enlarged `C^s_α^new_unproj`; unit test.
+4. Plug into `compute_honeycomb_projector` with `method="biorthogonal"`; unit-test `P_L · P_R = I` end-to-end.
+5. Apply the projector to truncate; unit-test new env shapes match input shapes.
+6. Wrap into `move_direction_alpha`; unit test as below.
 
 **Step 1: Failing test**
 
@@ -1351,7 +1461,6 @@ gh pr merge --squash --delete-branch --auto
 
 ## Open questions to resolve during execution (not blockers)
 
-1. **Lukin-Sotnikov Table I D=2 entry value** (Task 16). Need to look up the published value from PRB 107, 054424 (2023) and substitute in the test. If only χ ≥ 20 entries exist, set test χ accordingly.
-2. **Move's exact contraction pattern** (Task 6). The skeleton in this plan is structural; the actual contraction follows Paper 2 §II.C Fig. 10. If the figure is ambiguous on a contraction order, **stop and ask** rather than guess.
-3. **Phase fix vs sigma gauge equivalence on honeycomb.** Memory `project_phase_gauge_default.md` says phase gauge is the right default; sigma may or may not need adjustments for the 6-corner topology. Test both at low D, χ before deciding which to expose first.
-4. **Biorthogonal projector tests** (followup PR). The stub raises `NotImplementedError` in v1; the followup PR implements it, adds tests against the dummy-bond hack and (if available) variPEPS reference numbers.
+1. **Lukin-Sotnikov Table I D=2 entry value** (Task 16). Need to look up the published value from PRB 107, 054424 (2023) and substitute in the test. The PDF is at `papers/2209.03428_lukin_sotnikov_honeycomb_ctm.pdf` — Table I in §III.A.
+2. **Move contraction order details** (Task 6). The Paper 1 Eqs. 2–4 are written in matrix-product form (`C ← L · C · R · T²`); the exact axis/label correspondence between the rank-3 row tensors and the rank-3 double-layer T (with leg labels `e0_d2/e1_d2/e2_d2`) is determined during impl by the leg-flow conventions established in Tasks 1–4. Sub-step unit tests catch any miswiring.
+3. **`forward_gauge` API surface.** With biorthogonal default, `forward_gauge` is only meaningful for the A=B `eigh`/`svd` opt-ins. Open: drop the parameter from the public API and have it default to "auto" (biorthogonal-aware), or keep it visible and document the no-op behavior. Decide during Task 13 (public entry point).
