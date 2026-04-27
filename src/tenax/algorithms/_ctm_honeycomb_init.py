@@ -14,7 +14,11 @@ from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, Tensor
 
-__all__ = ["_double_layer_honeycomb", "initialize_honeycomb_env"]
+__all__ = [
+    "_double_layer_honeycomb",
+    "_double_layer_honeycomb_open",
+    "initialize_honeycomb_env",
+]
 
 IN = FlowDirection.IN
 OUT = FlowDirection.OUT
@@ -37,6 +41,25 @@ def _double_layer_honeycomb(A: Tensor) -> Tensor:
     A_bra = A.bar().relabels({"e0": "E0", "e1": "E1", "e2": "E2"})
     a6 = contract(A, A_bra)
     result = _fuse_pair_by_label(a6, "e0", "E0", "e0_d2", IN)
+    result = _fuse_pair_by_label(result, "e1", "E1", "e1_d2", IN)
+    result = _fuse_pair_by_label(result, "e2", "E2", "e2_d2", IN)
+    return result
+
+
+def _double_layer_honeycomb_open(A: Tensor) -> Tensor:
+    """Open-physical-leg double-layer for the 2-vertex bond RDM.
+
+    Same as :func:`_double_layer_honeycomb` but with the physical leg of
+    the bra layer relabeled to ``phys_bra`` (instead of being contracted
+    against the ket). The result is a rank-5 tensor with labels
+    ``(e0_d2, e1_d2, e2_d2, phys, phys_bra)``.
+
+    Mirrors :func:`tenax.algorithms._ctm_tensor_init._build_double_layer_open_tensor`
+    (rank-6 square case) but with 3 virtual legs instead of 4.
+    """
+    A_bra = A.bar().relabels({"e0": "E0", "e1": "E1", "e2": "E2", "phys": "phys_bra"})
+    a_open = contract(A, A_bra)
+    result = _fuse_pair_by_label(a_open, "e0", "E0", "e0_d2", IN)
     result = _fuse_pair_by_label(result, "e1", "E1", "e1_d2", IN)
     result = _fuse_pair_by_label(result, "e2", "E2", "e2_d2", IN)
     return result

@@ -1,0 +1,200 @@
+"""Honeycomb CTM observables — 2-vertex bond RDM.
+
+Topology for the bond along honeycomb-edge direction ``α`` (Lukin-Sotnikov
+PRB 107, 054424 (2023), Fig. 2(b)). The bond connects sublattice ``A`` and
+``B`` via their shared ``e_α`` legs, which are left **open** in the RDM.
+The surrounding 6-corner ring closes around the dimer using:
+
+* All 6 corners (``C^A_{0,1,2}`` + ``C^B_{0,1,2}``).
+* 4 of 12 column tensors: from each sublattice, **one R column** from the
+  ``β = (α+1) % 3`` perpendicular direction, and **one L column** from the
+  ``γ = (α+2) % 3`` perpendicular direction.
+
+Going clockwise around the ring: ``C R C C L C R C C L`` — 10 env tensors.
+The two ``C C`` direct closures are inter-sublattice contractions parallel
+to the bond axis, between corners at the same perpendicular direction:
+
+* ``C^A_β`` ↔ ``C^B_β`` along their α-direction chi legs (top of ring).
+* ``C^B_γ`` ↔ ``C^A_γ`` along their α-direction chi legs (bottom of ring).
+
+Used = 10 of 18 env tensors per bond. Symmetric under A↔B + ring flip.
+"""
+
+from __future__ import annotations
+
+import jax.numpy as jnp
+
+from tenax.algorithms._ctm_honeycomb_env import HoneycombCTMEnv
+from tenax.algorithms._ctm_honeycomb_init import _double_layer_honeycomb_open
+from tenax.algorithms._ctm_honeycomb_topology import Coord
+from tenax.contraction.contractor import contract
+from tenax.core import EPS
+from tenax.core.tensor import Tensor
+
+__all__ = ["_rdm2_bond"]
+
+
+def _rdm2_bond(
+    sites: dict[Coord, Tensor],
+    envs: dict[Coord, HoneycombCTMEnv],
+    *,
+    alpha: int,
+) -> jnp.ndarray:
+    """2-vertex reduced density matrix for the honeycomb bond along direction ``α``.
+
+    Args:
+        sites: ``{(0, 0): A, (1, 0): B}`` rank-4 site tensors with labels
+            ``(e0, e1, e2, phys)``.
+        envs: per-sublattice :class:`HoneycombCTMEnv` dict (converged env).
+        alpha: bond direction ``∈ {0, 1, 2}``.
+
+    Returns:
+        ``(d², d²)`` complex matrix, Hermitian, trace 1.
+
+    Topology (10 env + 2 site tensors). For α=0::
+
+        C^A_0 - R^A_1 - C^A_1 == C^B_1 - L^B_1 - C^B_0
+                                                  |
+        L^A_2 - C^A_2 == C^B_2 - R^B_2 ----------+
+
+    where ``==`` is a direct chi-leg contraction parallel to the bond,
+    and the bond ``A.e_α ↔ B.e_α`` is left open in both ket and bra.
+    """
+    beta = (alpha + 1) % 3
+    gamma = (alpha + 2) % 3
+    e_alpha = f"e{alpha}_d2"
+
+    # 1. Open double-layer for both impurity sites (phys + phys_bra free,
+    #    the e_α leg is left open, e_β / e_γ get absorbed by the ring).
+    T_A_open = _double_layer_honeycomb_open(sites[(0, 0)])
+    T_B_open = _double_layer_honeycomb_open(sites[(1, 0)])
+
+    # 2. Pick the participating env tensors per the topology.
+    env_A = envs[(0, 0)]
+    env_B = envs[(1, 0)]
+    C_A_alpha = getattr(env_A, f"C{alpha}")
+    C_A_beta = getattr(env_A, f"C{beta}")
+    C_A_gamma = getattr(env_A, f"C{gamma}")
+    C_B_alpha = getattr(env_B, f"C{alpha}")
+    C_B_beta = getattr(env_B, f"C{beta}")
+    C_B_gamma = getattr(env_B, f"C{gamma}")
+    R_A_beta = getattr(env_A, f"R{beta}")
+    L_A_gamma = getattr(env_A, f"L{gamma}")
+    L_B_beta = getattr(env_B, f"L{beta}")
+    R_B_gamma = getattr(env_B, f"R{gamma}")
+
+    # 3. Distinguish each tensor's chi/D² labels with sublattice + position
+    #    suffixes so contract() picks up only the intended pairings.
+    #    Naming: every leg that should be contracted gets a label of the
+    #    form ``_<bond>_X`` shared between exactly two tensors.
+
+    # Direct corner-to-corner closures (parallel to α):
+    #   pos 3-4: C^A_β.chi_in_β  ↔  C^B_β.chi_in_β  (top)
+    #   pos 8-9: C^A_γ.chi_in_γ  ↔  C^B_γ.chi_in_γ  (bottom)
+    # Both legs get the same sentinel label so contract() auto-pairs them.
+    # The OTHER chi leg of each top/bottom corner connects via a transfer.
+    C_A_beta_r = C_A_beta.relabels(
+        {f"chi_in_{beta}": "_top_close", f"chi_out_{beta}": "_top_A_chi"}
+    )
+    C_B_beta_r = C_B_beta.relabels(
+        {f"chi_in_{beta}": "_top_close", f"chi_out_{beta}": "_top_B_chi"}
+    )
+
+    C_A_gamma_r = C_A_gamma.relabels(
+        {f"chi_in_{gamma}": "_bot_close", f"chi_out_{gamma}": "_bot_A_chi"}
+    )
+    C_B_gamma_r = C_B_gamma.relabels(
+        {f"chi_in_{gamma}": "_bot_close", f"chi_out_{gamma}": "_bot_B_chi"}
+    )
+
+    # Back corners: C^A_α and C^B_α each connect to two transfers via their
+    # chi legs (no involvement in the direct closures since those are at β/γ).
+    C_A_alpha_r = C_A_alpha.relabels(
+        {f"chi_in_{alpha}": "_back_A_in", f"chi_out_{alpha}": "_back_A_out"}
+    )
+    C_B_alpha_r = C_B_alpha.relabels(
+        {f"chi_in_{alpha}": "_back_B_in", f"chi_out_{alpha}": "_back_B_out"}
+    )
+
+    # R^A_β: connects C^A_α (back, "_back_A_out") to C^A_β (top, "_top_A_chi"),
+    # absorbing T_A_open's e_β leg via the ring's bulk side.
+    R_A_beta_r = R_A_beta.relabels(
+        {
+            f"chi_in_{beta}": "_back_A_out",
+            f"e{beta}_d2": "_RA_bulk",
+            f"chi_out_{beta}": "_top_A_chi",
+        }
+    )
+    # L^A_γ: connects C^A_γ (bot, "_bot_A_chi") to C^A_α (back, "_back_A_in"),
+    # absorbing T_A_open's e_γ leg.
+    L_A_gamma_r = L_A_gamma.relabels(
+        {
+            f"chi_in_{gamma}": "_bot_A_chi",
+            f"e{gamma}_d2": "_LA_bulk",
+            f"chi_out_{gamma}": "_back_A_in",
+        }
+    )
+    # L^B_β: connects C^B_β (top, "_top_B_chi") to C^B_α (back, "_back_B_in"),
+    # absorbing T_B_open's e_β leg.
+    L_B_beta_r = L_B_beta.relabels(
+        {
+            f"chi_in_{beta}": "_top_B_chi",
+            f"e{beta}_d2": "_LB_bulk",
+            f"chi_out_{beta}": "_back_B_in",
+        }
+    )
+    # R^B_γ: connects C^B_α (back, "_back_B_out") to C^B_γ (bot, "_bot_B_chi"),
+    # absorbing T_B_open's e_γ leg.
+    R_B_gamma_r = R_B_gamma.relabels(
+        {
+            f"chi_in_{gamma}": "_back_B_out",
+            f"e{gamma}_d2": "_RB_bulk",
+            f"chi_out_{gamma}": "_bot_B_chi",
+        }
+    )
+
+    # T_A_open: rank-5 (e0_d2, e1_d2, e2_d2, phys, phys_bra). Relabel to
+    # match the ring: e_β (R_A side), e_γ (L_A side); leave e_α as the
+    # OPEN bond (renamed so it auto-contracts with T_B's e_α).
+    T_A_r = T_A_open.relabels(
+        {
+            f"e{beta}_d2": "_RA_bulk",
+            f"e{gamma}_d2": "_LA_bulk",
+            e_alpha: "_bond",
+            "phys": "_phys_A",
+            "phys_bra": "_phys_bra_A",
+        }
+    )
+    T_B_r = T_B_open.relabels(
+        {
+            f"e{beta}_d2": "_LB_bulk",
+            f"e{gamma}_d2": "_RB_bulk",
+            e_alpha: "_bond",
+            "phys": "_phys_B",
+            "phys_bra": "_phys_bra_B",
+        }
+    )
+
+    # 4. Single big contract — all shared sentinel labels auto-pair.
+    rdm_t = contract(
+        C_A_alpha_r,
+        C_A_beta_r,
+        C_A_gamma_r,
+        C_B_alpha_r,
+        C_B_beta_r,
+        C_B_gamma_r,
+        R_A_beta_r,
+        L_A_gamma_r,
+        L_B_beta_r,
+        R_B_gamma_r,
+        T_A_r,
+        T_B_r,
+        output_labels=("_phys_A", "_phys_B", "_phys_bra_A", "_phys_bra_B"),
+    )
+
+    rdm = rdm_t.todense()  # (d, d, d, d) — ket_A, ket_B, bra_A, bra_B
+    d = rdm.shape[0]
+    rdm_mat = rdm.reshape(d * d, d * d)
+    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
+    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    return rdm_mat
