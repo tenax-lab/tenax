@@ -289,7 +289,10 @@ def compute_honeycomb_triangle_energy(
     """
     rho_A = _rdm1(sites, envs, sublattice=(0, 0))
     rho_B = _rdm1(sites, envs, sublattice=(1, 0))
-    return jnp.trace(rho_A @ hamiltonian) + jnp.trace(rho_B @ hamiltonian)
+    e = jnp.trace(rho_A @ hamiltonian) + jnp.trace(rho_B @ hamiltonian)
+    # Hermitian H + Hermitian ρ ⇒ real trace; cast away complex noise so the
+    # AD path's cotangent dtype matches the energy dtype.
+    return e.real
 
 
 # ------------------------------------------------------------------ #
@@ -311,7 +314,10 @@ def compute_honeycomb_energy(
     energy, summing the contributions of all three NN bonds emanating from
     sublattice A.
     """
-    return sum(
+    e = sum(
         jnp.trace(_rdm2_bond(sites, envs, alpha=alpha) @ hamiltonian)
         for alpha in (0, 1, 2)
     )
+    # Hermitian H_bond + Hermitian ρ_α ⇒ real trace; cast away complex noise
+    # so jax.grad / custom_vjp consumers see a float scalar.
+    return e.real

@@ -191,7 +191,7 @@ def test_triangle_energy_equals_sum_of_traces():
 
     rho_A = _rdm1(sites, envs, sublattice=(0, 0))
     rho_B = _rdm1(sites, envs, sublattice=(1, 0))
-    expected = jnp.trace(rho_A @ H) + jnp.trace(rho_B @ H)
+    expected = (jnp.trace(rho_A @ H) + jnp.trace(rho_B @ H)).real
 
     assert jnp.allclose(E, expected, atol=1e-12)
 
@@ -220,9 +220,10 @@ def test_triangle_energy_d1_recovers_classical_expectation():
     b_norm2 = jnp.sum(jnp.abs(b_vec) ** 2)
     e_a = jnp.vdot(a_vec, H @ a_vec) / a_norm2
     e_b = jnp.vdot(b_vec, H @ b_vec) / b_norm2
+    expected = (e_a + e_b).real
 
-    assert jnp.allclose(E, e_a + e_b, atol=1e-12), (
-        f"E={complex(E)}, expected={complex(e_a + e_b)}"
+    assert jnp.allclose(E, expected, atol=1e-12), (
+        f"E={float(E)}, expected={float(expected)}"
     )
 
 
@@ -251,9 +252,10 @@ def test_default_energy_equals_sum_of_three_bond_traces():
     for alpha in (0, 1, 2):
         rho = _rdm2_bond(sites, envs, alpha=alpha)
         expected = expected + jnp.trace(rho @ H)
+    expected = expected.real
 
     assert jnp.allclose(E, expected, atol=1e-12), (
-        f"E={complex(E)}, expected={complex(expected)}"
+        f"E={float(E)}, expected={float(expected)}"
     )
 
 
@@ -277,8 +279,8 @@ def test_default_energy_d1_recovers_per_bond_classical_expectation():
     b_norm2 = jnp.sum(jnp.abs(b_vec) ** 2)
     psi = jnp.kron(a_vec, b_vec) / jnp.sqrt(a_norm2 * b_norm2)
     e_per_bond = jnp.vdot(psi, H @ psi)
-    expected = 3.0 * e_per_bond
+    expected = (3.0 * e_per_bond).real
 
     assert jnp.allclose(E, expected, atol=1e-12), (
-        f"E={complex(E)}, expected={complex(expected)}"
+        f"E={float(E)}, expected={float(expected)}"
     )
