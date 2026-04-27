@@ -135,7 +135,10 @@ import numpy as np
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.tensor import DenseTensor, Tensor
 
-__all__ = ["compute_honeycomb_projector"]
+__all__ = [
+    "compute_honeycomb_corner_biorthogonal_projector",
+    "compute_honeycomb_projector",
+]
 
 IN = FlowDirection.IN
 OUT = FlowDirection.OUT
@@ -280,9 +283,12 @@ def compute_honeycomb_projector(
     """
     if method == "biorthogonal":
         raise NotImplementedError(
-            "biorthogonal projectors are deferred for honeycomb CTM v1; "
-            "see docs/plans/2026-04-25-honeycomb-ctm-design.md for the "
-            "design discussion."
+            "Corboz biorthogonal projectors operate on the rank-4 enlarged "
+            "corner, not on a rank-3 row tensor. Use "
+            ":func:`compute_honeycomb_corner_biorthogonal_projector` instead, "
+            "which takes the upper- and lower-half (chi*D², chi*D²) matrices "
+            "of the enlarged corner. See "
+            "docs/plans/2026-04-25-honeycomb-ctm-design.md."
         )
     if method not in ("eigh", "svd"):
         raise ValueError(
@@ -447,3 +453,173 @@ def compute_honeycomb_projector(
     )
 
     return P, P_dag
+
+
+# ====================================================================== #
+# Corboz biorthogonal projector on the rank-4 enlarged corner.            #
+#                                                                         #
+# Paper-faithful for the non-Hermitian A ≠ B honeycomb corner             #
+# (Lukin-Sotnikov PRE 109, 045305 (2024) §II.C, Fig. 10(d); algorithm     #
+# from Corboz et al. PRB 90, 115110 (2014)).                              #
+#                                                                         #
+# Distinct from ``compute_honeycomb_projector`` above:                    #
+#   * Input: TWO matrices M_U and M_L (upper / lower halves of the        #
+#     enlarged corner), not a single rank-3 row tensor.                   #
+#   * Identity satisfied: ``P_L · P_R = I_chi`` directly (no boundary in  #
+#     between), versus Fishman's ``P1^† · M · P2 = I``.                   #
+#                                                                         #
+# Memory: ``feedback_corboz_vs_fishman.md`` records this distinction.     #
+# ====================================================================== #
+
+
+def compute_honeycomb_corner_biorthogonal_projector(
+    upper_half: jax.Array,
+    lower_half: jax.Array,
+    *,
+    chi: int,
+    s_safe_eps: float = _S_SAFE_EPS,
+) -> tuple[jax.Array, jax.Array]:
+    """Corboz biorthogonal projector pair for the honeycomb enlarged corner.
+
+    Returns ``(P_L, P_R)`` satisfying
+
+    .. math:: P_L \\, P_R = I_\\chi
+
+    *directly* (no boundary tensor in between).  This is the defining
+    identity of the Corboz biorthogonalization (Paper 2 §II.C / Corboz
+    et al. 2014), and is the form required for paper-faithful CTMRG on a
+    bipartite honeycomb lattice with non-Hermitian corner.
+
+    The algorithm is QR + QR + truncated SVD on the QR factors:
+
+    1. ``M_U = Q_U · R_U`` — reduced QR of the upper-half matrix.
+    2. ``M_L^T = Q_L · R_L`` — reduced QR of the lower-half matrix
+       transposed (i.e. ``M_L = R_L^T · Q_L^T``).  This is
+       conventionally written ``LQ(M_L)`` and gives the lower half its
+       "L"-side contribution to the projectors.
+    3. ``U_svd, S, Vh = SVD(R_U · R_L^T)`` — truncate to the largest
+       ``chi`` singular values.  ``S_safe`` clamps near-zero singular
+       values for AD stability.
+    4. Construct the pair:
+
+       .. math::
+          P_L &= S^{-1/2} \\, U_{\\chi}^\\dagger \\, R_U \\\\
+          P_R &= R_L^T \\, V_{\\chi} \\, S^{-1/2}
+
+       The biorthogonality identity then follows from
+       ``R_U · R_L^T = U_χ · diag(S_χ) · V_χ^†`` (truncated SVD) and
+       the isometry of ``U_χ`` and ``V_χ``::
+
+           P_L · P_R = S^{-1/2} U_χ^† (R_U R_L^T) V_χ S^{-1/2}
+                     = S^{-1/2} U_χ^† (U_χ S_χ V_χ^†) V_χ S^{-1/2}
+                     = S^{-1/2} S_χ S^{-1/2}
+                     = I_χ.
+
+    The phase-fix gauge from :func:`_column_phase` is applied jointly to
+    ``U_svd`` and ``Vh`` (the same per-column phase factor goes onto both)
+    so that the SVD identity ``U S V^†`` is gauge-invariant under the
+    fix, mirroring the convention used in the SVD branch of
+    :func:`compute_honeycomb_projector`.
+
+    Args:
+        upper_half: Upper half of the enlarged corner, shape
+            ``(chi*D², chi*D²)`` — typically the contraction of
+            ``L_α^A · C_α^A · T_A`` reshaped to a square matrix.  See
+            :func:`tenax.algorithms._ctm_honeycomb_moves.move_direction_alpha`
+            for how Task 6 builds this from the env + bulk tensors.
+        lower_half: Lower half of the enlarged corner, shape
+            ``(chi*D², chi*D²)`` — typically ``T_B · C_α^B · R_α^B``.
+        chi: Target truncation dim for the new chi axis.  Output dim is
+            ``min(chi, upper_half.shape[1])`` (bounded by the SVD rank).
+        s_safe_eps: Floor for singular values used to clamp ``S_safe``
+            against ``1/sqrt(0)`` NaNs.
+
+    Returns:
+        ``(P_L, P_R)`` as raw :class:`jax.Array` matrices.
+
+        * ``P_L`` shape ``(chi_out, n)`` where ``n = upper_half.shape[1]``.
+        * ``P_R`` shape ``(n, chi_out)``.
+        * ``chi_out = min(chi, n)``.
+
+        Identity: ``P_L @ P_R == I_chi_out`` to floating-point tolerance.
+
+    Notes:
+        Returned as plain :class:`jax.Array` (not :class:`Tensor`) because
+        Task 6 needs to absorb them into rank-4 enlarged corners of varying
+        leg-flow conventions; the wrapping into :class:`Tensor` happens at
+        the call site in ``_ctm_honeycomb_moves`` where the per-direction
+        labels are known.
+    """
+    if upper_half.ndim != 2 or lower_half.ndim != 2:
+        raise ValueError(
+            "Corboz biorthogonal halves must be rank-2; got "
+            f"upper_half.ndim={upper_half.ndim}, lower_half.ndim={lower_half.ndim}"
+        )
+    if upper_half.shape[1] != lower_half.shape[1]:
+        raise ValueError(
+            "Corboz biorthogonal: upper_half and lower_half must have matching "
+            f"second axes; got {upper_half.shape} vs {lower_half.shape}"
+        )
+
+    # ------------------------------------------------------------------ #
+    # Step 1 -- QR of the two halves.                                     #
+    # ------------------------------------------------------------------ #
+    _Q_U, R_U = jnp.linalg.qr(upper_half, mode="reduced")
+    _Q_L, R_L = jnp.linalg.qr(lower_half.T, mode="reduced")
+
+    # ------------------------------------------------------------------ #
+    # Step 2 -- SVD of R_U @ R_L^T.                                       #
+    #                                                                     #
+    # The biorthogonality identity follows from this SVD: U_χ · diag(S) · #
+    # V_χ^† == R_U · R_L^T (truncated).                                   #
+    # ------------------------------------------------------------------ #
+    U_svd, S, Vh = jnp.linalg.svd(R_U @ R_L.T, full_matrices=False)
+
+    k = int(min(chi, S.shape[0]))
+    U_k = U_svd[:, :k]  # (n_qr_U, k)
+    Vh_k = Vh[:k, :]  # (k, n_qr_L)
+    S_k = S[:k]
+
+    # ------------------------------------------------------------------ #
+    # Step 3 -- S_safe clamp + inverse-sqrt for the symmetric S^{-1/2}    #
+    # weighting on both projectors. Mirrors the canonical pattern from    #
+    # the SVD branch above.                                               #
+    # ------------------------------------------------------------------ #
+    if k > 0:
+        cutoff = jnp.maximum(s_safe_eps, 1e-14 * (S_k[0] + 1e-30))
+        mask = S_k > cutoff
+        S_safe = jnp.where(mask, S_k, 1.0)
+        S_rsqrt = jnp.where(mask, 1.0 / jnp.sqrt(S_safe), 0.0)
+    else:
+        S_rsqrt = jnp.zeros_like(S_k)
+
+    # ------------------------------------------------------------------ #
+    # Step 4 -- joint phase fix on U_k / Vh_k.                            #
+    #                                                                     #
+    # We apply the same per-column phase factor to U_k and V_k (= Vh_k.T  #
+    # conjugated) so that ``R_U R_L^T = U S V^†`` is preserved exactly    #
+    # under the gauge fix.  Phase-fixing V independently would compute    #
+    # a *different* phase from V's columns and break the identity.        #
+    # ------------------------------------------------------------------ #
+    if k > 0:
+        phase_U = _column_phase(U_k)  # (k,) unit modulus, stop_gradient'd
+        U_k = U_k * jnp.conj(phase_U)[None, :]
+        Vh_k = Vh_k * phase_U[:, None]  # apply same phase to V's columns
+
+    # ------------------------------------------------------------------ #
+    # Step 5 -- assemble the biorthogonal pair.                           #
+    #                                                                     #
+    #   P_L = S^{-1/2} · U_χ^† · R_U          shape (k, n_qr_U)            #
+    #   P_R = R_L^T · V_χ · S^{-1/2}          shape (n_qr_L, k)           #
+    # ------------------------------------------------------------------ #
+    P_L = S_rsqrt[:, None] * (jnp.conj(U_k).T @ R_U)
+    P_R = (R_L.T @ jnp.conj(Vh_k).T) * S_rsqrt[None, :]
+
+    # Stop-gradient through the projector pair in the forward path,
+    # matching the dense-fallback convention at _ctm_projector.py:1067.
+    # The Task 13 implicit-AD wrapper handles the backward through the
+    # CTM fixed point separately.
+    P_L = jax.lax.stop_gradient(P_L)
+    P_R = jax.lax.stop_gradient(P_R)
+
+    return P_L, P_R

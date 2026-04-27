@@ -18,7 +18,10 @@ import numpy as np
 import pytest
 
 from tenax.algorithms._ctm_honeycomb_init import initialize_honeycomb_env
-from tenax.algorithms._ctm_honeycomb_projector import compute_honeycomb_projector
+from tenax.algorithms._ctm_honeycomb_projector import (
+    compute_honeycomb_corner_biorthogonal_projector,
+    compute_honeycomb_projector,
+)
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
@@ -164,8 +167,109 @@ def test_projector_phase_fix_idempotent() -> None:
     assert jnp.array_equal(P1_dag.todense(), P2_dag.todense())
 
 
-def test_biorthogonal_raises_not_implemented() -> None:
-    """``method='biorthogonal'`` raises ``NotImplementedError``."""
+def test_isometric_api_rejects_biorthogonal_method() -> None:
+    """The rank-3-boundary API only supports ``eigh`` and ``svd``.
+
+    For Corboz biorthogonal projectors on the rank-4 enlarged corner, callers
+    must use :func:`compute_honeycomb_corner_biorthogonal_projector` instead.
+    """
     boundary = _column_boundary(2, 4, 0, jax.random.PRNGKey(0))
-    with pytest.raises(NotImplementedError, match="biorthogonal"):
+    with pytest.raises((ValueError, NotImplementedError), match="biorthogonal"):
         compute_honeycomb_projector(boundary, method="biorthogonal", chi=4)
+
+
+# ------------------------------------------------------------------ #
+# Task 5b: Corboz biorthogonal projector on the enlarged corner.       #
+# Differs from compute_honeycomb_projector in:                         #
+#   - Input shape: two (chi*d², chi*d²) halves, not one rank-3 tensor. #
+#   - Identity satisfied: P_L · P_R = I_chi (Corboz), not P1^† M P2.   #
+# Paper-faithful for the non-Hermitian A ≠ B corner; see               #
+# memory: feedback_corboz_vs_fishman.md                                #
+# ------------------------------------------------------------------ #
+
+
+def _random_matrix(shape: tuple[int, ...], key: jax.Array) -> jax.Array:
+    """Random complex128 matrix for Corboz tests."""
+    re = jax.random.normal(key, shape)
+    im = jax.random.normal(jax.random.fold_in(key, 1), shape)
+    return (re + 1j * im).astype(jnp.complex128)
+
+
+def test_corboz_biorthogonal_PL_PR_identity() -> None:
+    """``P_L · P_R = I_chi`` directly (no boundary in between).
+
+    This is the defining identity of the Corboz biorthogonal pair (Paper 2
+    §II.C, Corboz et al. 2014). For non-Hermitian enlarged corners the
+    Fishman ``P1^† M P2 = I`` form does not satisfy this identity; the
+    explicit QR + SVD biorthogonalization does.
+    """
+    chi_in_d2 = 4 * 9  # chi * D² = 36 — typical "enlarged" dim
+    chi_target = 6
+    key = jax.random.PRNGKey(0)
+    M_U = _random_matrix((chi_in_d2, chi_in_d2), key)
+    M_L = _random_matrix((chi_in_d2, chi_in_d2), jax.random.fold_in(key, 100))
+    P_L, P_R = compute_honeycomb_corner_biorthogonal_projector(M_U, M_L, chi=chi_target)
+    # P_L: (chi_target, chi_in_d2)  — projects from chi_in_d2 to chi_target
+    # P_R: (chi_in_d2, chi_target)
+    assert P_L.shape == (chi_target, chi_in_d2)
+    assert P_R.shape == (chi_in_d2, chi_target)
+    prod = P_L @ P_R  # (chi_target, chi_target)
+    assert jnp.allclose(prod, jnp.eye(chi_target, dtype=prod.dtype), atol=1e-6), (
+        f"P_L @ P_R deviates from identity: "
+        f"max|prod - I| = {float(jnp.max(jnp.abs(prod - jnp.eye(chi_target)))):.3e}"
+    )
+
+
+def test_corboz_biorthogonal_no_nan_on_degenerate() -> None:
+    """Rank-deficient halves should not produce NaN P_L or P_R.
+
+    The internal SVD on R_U · R_L^T can have near-zero singular values for
+    rank-deficient inputs; the ``S_safe`` clamp in the implementation must
+    keep the ``1/sqrt(S)`` factor finite.
+    """
+    chi_in_d2 = 4 * 9
+    chi_target = 6
+    M_U = jnp.zeros((chi_in_d2, chi_in_d2), dtype=jnp.complex128)
+    M_U = M_U.at[0, 0].set(1.0)  # rank-1
+    M_L = jnp.eye(chi_in_d2, dtype=jnp.complex128) * 1e-15  # near-zero
+    P_L, P_R = compute_honeycomb_corner_biorthogonal_projector(M_U, M_L, chi=chi_target)
+    assert jnp.all(jnp.isfinite(P_L))
+    assert jnp.all(jnp.isfinite(P_R))
+
+
+def test_corboz_biorthogonal_truncation_dim() -> None:
+    """Output truncation dim equals ``min(chi, rank(R_U @ R_L^T))``."""
+    chi_in_d2 = 16
+    chi_request = 8
+    key = jax.random.PRNGKey(5)
+    M_U = _random_matrix((chi_in_d2, chi_in_d2), key)
+    M_L = _random_matrix((chi_in_d2, chi_in_d2), jax.random.fold_in(key, 1))
+    P_L, P_R = compute_honeycomb_corner_biorthogonal_projector(
+        M_U, M_L, chi=chi_request
+    )
+    # Both halves are full-rank random complex matrices, so the SVD has
+    # 16 nonzero singular values; truncating to chi_request=8 gives output
+    # dim = 8.
+    assert P_L.shape == (chi_request, chi_in_d2)
+    assert P_R.shape == (chi_in_d2, chi_request)
+
+
+def test_corboz_biorthogonal_phase_idempotent() -> None:
+    """Computing twice on the same input returns bit-identical results.
+
+    The phase fix is wrapped in stop_gradient; two calls with the same input
+    must agree element-wise.
+    """
+    chi_in_d2 = 16
+    chi_target = 6
+    key = jax.random.PRNGKey(42)
+    M_U = _random_matrix((chi_in_d2, chi_in_d2), key)
+    M_L = _random_matrix((chi_in_d2, chi_in_d2), jax.random.fold_in(key, 1))
+    P_L_1, P_R_1 = compute_honeycomb_corner_biorthogonal_projector(
+        M_U, M_L, chi=chi_target
+    )
+    P_L_2, P_R_2 = compute_honeycomb_corner_biorthogonal_projector(
+        M_U, M_L, chi=chi_target
+    )
+    assert jnp.array_equal(P_L_1, P_L_2)
+    assert jnp.array_equal(P_R_1, P_R_2)

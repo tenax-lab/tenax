@@ -605,78 +605,103 @@ git commit -am "feat(honeycomb): isometric projector with S_safe + phase fix"
 
 ---
 
-## Task 5b: Biorthogonal projector via QR + SVD
+## Task 5b: Corboz biorthogonal projector on the enlarged corner
 
 **Files:**
 - Modify: `src/tenax/algorithms/_ctm_honeycomb_projector.py`
 - Modify: `tests/test_ctm_honeycomb_projector.py`
 
-**Behavior:** Add `method="biorthogonal"` to `compute_honeycomb_projector` (currently raises `NotImplementedError`). Returns `(P_L, P_R)` with `P_L · P_R = 1` (biorthogonal). The existing `method="eigh"` and `method="svd"` (Task 5) stay as A=B opt-ins. Biorthogonal becomes the **default** in Task 6's `move_direction_alpha`.
+**Behavior:** Add a NEW function `compute_honeycomb_corner_biorthogonal_projector(upper_half, lower_half, *, chi, s_safe_eps)` that takes **two halves** of the rank-4 enlarged corner — one upper-half tensor (containing the C₆,A side) and one lower-half tensor (containing the C₆,B side) — and returns `(P_L, P_R)` satisfying `P_L · P_R = I_chi` directly (Corboz biorthogonality, paper-faithful for the non-Hermitian A ≠ B corner).
 
-**Algorithm (Paper 2 Fig. 10(d), Corboz et al. 2014).** Given the enlarged corner matrix `M` of shape `(chi · D², chi · D²)` (or however the boundary tensor reshapes to 2D for the truncation step):
+The existing `compute_honeycomb_projector` (rank-3 boundary, eigh/svd) stays unchanged as the **A=B opt-in** path (eigh = isometric, svd = Fishman two-projector with `P1^† · M · P2 = I`).
 
-1. QR decompose the upper-half boundary: `M_upper = Q_U · R_U`.
-2. QR decompose the lower-half boundary: `M_lower = Q_L · R_L` (or LQ depending on convention).
-3. Compute the singular value decomposition of `R_U · R_L^T` (or the appropriate biorthogonalization product): `U · S · V† = R_U · R_L^T`.
-4. Truncate the largest `chi` singular values; let `S_safe = clip(S, eps)` to avoid `1/sqrt(0)`.
-5. Form the biorthogonal pair:
+**Why two-input API.** The Corboz biorthogonalization fundamentally needs both halves of the enlarged corner separately (one to QR from above, one from below) — there's no way to recover this information from a single rank-3 boundary. Memory `feedback_corboz_vs_fishman.md` records the distinction. Task 6 builds the two halves from `(L_α, C_α, R_α)` and `(T_A, T_B)` and feeds both to this function.
 
-   ```
-   P_L = R_L^T · V · diag(1/sqrt(S_safe))     # (chi_in · D², chi_out)
-   P_R = diag(1/sqrt(S_safe)) · U^T · R_U     # (chi_out, chi_in · D²)
-   ```
+**Algorithm (Corboz et al. 2014, Paper 2 Fig. 10(d)).** Inputs `M_U` and `M_L` are matrices of shape `(chi · D², chi · D²)` representing the upper and lower halves of the enlarged corner.
 
-6. Verify `P_L · P_R = I_chi_out` to floating-point tolerance.
+```
+Q_U, R_U = jnp.linalg.qr(M_U,        mode="reduced")   # M_U = Q_U R_U
+Q_L, R_L = jnp.linalg.qr(M_L.T,      mode="reduced")   # M_L^T = Q_L R_L  (LQ-like)
+U_svd, S, Vh = jnp.linalg.svd(R_U @ R_L.T, full_matrices=False)
+S_k     = S[:chi]
+S_safe  = jnp.where(S_k > s_safe_eps, S_k, 1.0)
+inv_sq  = jnp.where(S_k > s_safe_eps, 1.0 / jnp.sqrt(S_safe), 0.0)
+P_L     = inv_sq[:, None] * U_svd[:, :chi].conj().T @ R_U      # (chi, chi*D²)
+P_R     = R_L.T @ Vh[:chi, :].conj().T * inv_sq[None, :]        # (chi*D², chi)
+```
 
-The `S_safe` clamp + first-above-threshold phase fix from Task 5 carry over (still needed for AD stability). The phase fix is applied once each to `U` (left) and `V` (right) — both within `stop_gradient`.
+Identity to verify (the test's main assertion):
+```
+P_L @ P_R == I_chi          (after S_safe truncation; tolerance 1e-6 on the eigenvalues that survive the cutoff)
+```
 
-**Investigation step (do this first):** Read `src/tenax/algorithms/_ctm_projector.py` to confirm the existing two-projector pattern (memory: `project_svd_projector_ad.md` — "Two-projector Fishman DONE; svd+sigma matches eigh+sigma"). The honeycomb biorthogonal API mirrors that structure on the rank-3 honeycomb boundary.
+The `S_safe` clamp + first-above-threshold phase fix from Task 5's `_column_phase` helper carry over (apply phase fix to `U_svd[:, :chi]` and `Vh[:chi, :]` consistently to keep `M_U M_L^T = U S V†` invariant). All inside `stop_gradient` since the gauge factor is non-differentiable.
+
+**Investigation step (do this first):** Read `src/tenax/algorithms/_ctm_projector.py` for the existing Fishman two-projector pattern (memory: `project_svd_projector_ad.md`). Note that the honeycomb Corboz form **differs** from the existing Fishman pattern — it satisfies `P_L · P_R = I` directly rather than `P1^† · M · P2 = I`. The two are not interchangeable for non-Hermitian corners (memory: `feedback_corboz_vs_fishman.md`).
 
 **Step 1: Failing tests** — append to `tests/test_ctm_honeycomb_projector.py`:
 
 ```python
-def test_biorthogonal_projector_PL_PR_identity():
-    """Biorthogonal projectors satisfy P_L · P_R = I_chi_out."""
-    chi, d2 = 4, 9
-    boundary = _random_boundary(chi, d2, jax.random.PRNGKey(10))
-    P_L, P_R = compute_honeycomb_projector(boundary, method="biorthogonal", chi=chi)
-    # Contract over the boundary's (chi, d2) legs:
-    identity = jnp.einsum("abc,cab->", P_L, P_R)  # shape consistency check
-    # Full check:
-    prod = jnp.einsum("...c,c...->", P_L, P_R)  # P_L · P_R reduces to (chi_out, chi_out)
-    # ... actual contraction depends on the index conventions chosen in Step 3.
-    # Asserted: prod should equal identity within 1e-6 absolute.
+def test_corboz_biorthogonal_PL_PR_identity():
+    """P_L · P_R = I_chi (Corboz biorthogonality, no boundary in between)."""
+    chi_in_d2 = 4 * 9  # chi*D² = 36
+    chi = 6
+    key = jax.random.PRNGKey(0)
+    M_U = (jax.random.normal(key, (chi_in_d2, chi_in_d2)) +
+           1j * jax.random.normal(jax.random.fold_in(key, 1), (chi_in_d2, chi_in_d2))).astype(jnp.complex128)
+    M_L = (jax.random.normal(jax.random.fold_in(key, 2), (chi_in_d2, chi_in_d2)) +
+           1j * jax.random.normal(jax.random.fold_in(key, 3), (chi_in_d2, chi_in_d2))).astype(jnp.complex128)
+    P_L, P_R = compute_honeycomb_corner_biorthogonal_projector(M_U, M_L, chi=chi)
+    # P_L: (chi, chi_in_d2), P_R: (chi_in_d2, chi)
+    prod = P_L @ P_R   # (chi, chi)
+    assert jnp.allclose(prod, jnp.eye(chi, dtype=prod.dtype), atol=1e-6), (
+        f"max |P_L @ P_R - I| = {jnp.max(jnp.abs(prod - jnp.eye(chi))):.3e}"
+    )
 
-def test_biorthogonal_no_nan_on_degenerate_spectrum():
-    """Rank-deficient boundary should not produce NaN P_L or P_R."""
-    chi, d2 = 4, 9
-    boundary = jnp.zeros((chi, d2, chi), dtype=jnp.complex128)
-    boundary = boundary.at[0, 0, 0].set(1.0)
-    P_L, P_R = compute_honeycomb_projector(boundary, method="biorthogonal", chi=chi)
+def test_corboz_biorthogonal_no_nan_on_degenerate():
+    """Rank-deficient halves should not produce NaN P_L or P_R (S_safe protected)."""
+    chi_in_d2 = 4 * 9
+    chi = 6
+    M_U = jnp.zeros((chi_in_d2, chi_in_d2), dtype=jnp.complex128)
+    M_U = M_U.at[0, 0].set(1.0)   # rank-1
+    M_L = jnp.eye(chi_in_d2, dtype=jnp.complex128) * 1e-15  # near-zero
+    P_L, P_R = compute_honeycomb_corner_biorthogonal_projector(M_U, M_L, chi=chi)
     assert jnp.all(jnp.isfinite(P_L))
     assert jnp.all(jnp.isfinite(P_R))
 
-def test_biorthogonal_reduces_to_isometric_for_hermitian_boundary():
-    """For an A=B-style Hermitian boundary, biorthogonal and isometric should agree
-    on the truncated subspace (energies match within 1e-8 in the move)."""
-    # Generate a boundary that is C^† = C symmetric (uniform A=B regime).
-    # Compare projector spectra and confirm equivalent truncation.
-    ...  # detailed assertion tbd during impl
+def test_corboz_biorthogonal_truncation_dim():
+    """Output truncation dim equals min(chi, rank(R_U @ R_L^T))."""
+    chi_in_d2 = 16
+    chi_request = 8
+    key = jax.random.PRNGKey(5)
+    M_U = jax.random.normal(key, (chi_in_d2, chi_in_d2)).astype(jnp.complex128)
+    M_L = jax.random.normal(jax.random.fold_in(key, 1), (chi_in_d2, chi_in_d2)).astype(jnp.complex128)
+    P_L, P_R = compute_honeycomb_corner_biorthogonal_projector(M_U, M_L, chi=chi_request)
+    assert P_L.shape == (chi_request, chi_in_d2)
+    assert P_R.shape == (chi_in_d2, chi_request)
+
+def test_isometric_api_rejects_biorthogonal_method():
+    """compute_honeycomb_projector (rank-3 boundary) only supports eigh/svd.
+    For Corboz biorthogonal use compute_honeycomb_corner_biorthogonal_projector."""
+    boundary = _column_boundary(2, 4, 0, jax.random.PRNGKey(0))
+    with pytest.raises((ValueError, NotImplementedError),
+                       match="biorthogonal"):
+        compute_honeycomb_projector(boundary, method="biorthogonal", chi=4)
 ```
 
-Drop the existing `test_biorthogonal_method_raises_not_implemented` test (no longer applicable).
+The existing `test_biorthogonal_raises_not_implemented` test is replaced by `test_isometric_api_rejects_biorthogonal_method` (same intent, updated message).
 
-**Step 2: Verify failure** — `NotImplementedError` from existing stub.
+**Step 2: Verify failure** — `ImportError` for `compute_honeycomb_corner_biorthogonal_projector`.
 
-**Step 3: Implement** — replace the `NotImplementedError` branch in `compute_honeycomb_projector` with the QR + SVD biorthogonalization above. Keep the `S_safe` and `_phase_fix` helpers shared.
+**Step 3: Implement** — add `compute_honeycomb_corner_biorthogonal_projector` to `_ctm_honeycomb_projector.py` per the algorithm above. Keep the `_column_phase` / `_phase_fix_columns` / `_S_SAFE_EPS` helpers shared. Update the existing `compute_honeycomb_projector`'s `method="biorthogonal"` branch to point users at the new function (keep raising, but with a clearer error message).
 
-**Step 4: Verify pass.** All tests for `eigh`, `svd`, and `biorthogonal` methods pass. The `P_L · P_R = I` identity holds at 1e-6.
+**Step 4: Verify pass.** All tests for `eigh`, `svd`, and the new Corboz function pass. The `P_L · P_R = I` identity holds at 1e-6.
 
 **Step 5: Commit**
 
 ```bash
 git add src/tenax/algorithms/_ctm_honeycomb_projector.py tests/test_ctm_honeycomb_projector.py
-git commit -m "feat(honeycomb): biorthogonal P_L,P_R projector via QR+SVD"
+git commit -m "feat(honeycomb): Corboz biorthogonal projector via QR+SVD on enlarged corner"
 ```
 
 ---
@@ -699,12 +724,20 @@ R^s_α^new_unproj  =  R^s_α  ⊗  T_s  ⊗  T_(other s)
 # Step 2 — absorb bulk and rows into corner (Paper 1 Eq. 2):
 C^s_α^new_unproj  =  L^s_α  ⊗  C^s_α  ⊗  R^s_α  ⊗  T_s  ⊗  T_(other s)   # chi·chi → chi·D²·chi·D²
 
-# Step 3 — build projector pair from the enlarged C^s_α^new_unproj:
-P_L^s_α, P_R^s_α  =  compute_honeycomb_projector(
-    C^s_α^new_unproj.reshape((chi*D², chi*D²)),
-    method=projector_method,                                   # "biorthogonal" default
-    chi=chi,
-)
+# Step 3 — build projector pair. For the biorthogonal default (Corboz):
+#   Split the enlarged corner C^s_α^new_unproj into upper-half and lower-half
+#   matrices M_U and M_L, each of shape (chi · D², chi · D²). Natural split:
+#   M_U contains the A-sublattice contribution (L^A_α · C^A_α absorbed against T_A);
+#   M_L contains the B-sublattice contribution (C^B_α · R^B_α absorbed against T_B).
+#   Exact tensor splitting determined during impl from HONEYCOMB_NEIGHBORS conventions.
+if projector_method == "biorthogonal":
+    P_L^s_α, P_R^s_α  =  compute_honeycomb_corner_biorthogonal_projector(
+        M_U^s_α, M_L^s_α, chi=chi,
+    )
+else:  # "eigh" / "svd" — A=B opt-in path on the rank-3 row tensor
+    P^s_α, P_dag^s_α  =  compute_honeycomb_projector(
+        L^s_α, method=projector_method, chi=chi,   # or R^s_α, by symmetry
+    )
 
 # Step 4 — truncate corner and propagate truncation isometries to the rows:
 C^s_α^new  =  P_L^s_α  ·  C^s_α^new_unproj  ·  P_R^s_α                    # back to chi·chi
