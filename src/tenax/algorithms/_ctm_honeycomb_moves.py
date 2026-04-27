@@ -31,6 +31,7 @@ from tenax.algorithms._ctm_honeycomb_projector import (
 from tenax.algorithms._ctm_honeycomb_topology import Coord
 from tenax.algorithms._ctm_tensor_init import _fuse_pair_by_label
 from tenax.contraction.contractor import contract
+from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, Tensor
@@ -39,6 +40,8 @@ __all__ = [
     "_enlarged_left_column",
     "_enlarged_right_column",
     "_enlarged_corner_matrix",
+    "_renormalize_honeycomb_env",
+    "honeycomb_ctm_step",
     "move_direction_alpha",
 ]
 
@@ -395,3 +398,48 @@ def move_direction_alpha(
     new_envs[(1, 0)] = new_env_B
     _ = chi_new, forward_gauge  # currently unused; reserved for sigma-gauge follow-up
     return new_envs
+
+
+# ------------------------------------------------------------------ #
+# Task 7: full step (3-direction sweep + per-step renormalization)     #
+# ------------------------------------------------------------------ #
+
+
+def _normalize_tensor(T: Tensor) -> Tensor:
+    """Inf-norm normalize ``T`` to keep the env from blowing up over many sweeps."""
+    return T * (1.0 / (T.max_abs() + EPS))
+
+
+def _renormalize_honeycomb_env(env: HoneycombCTMEnv) -> HoneycombCTMEnv:
+    """Normalize all 9 fields of one sublattice's env by max-abs."""
+    return HoneycombCTMEnv(*[_normalize_tensor(getattr(env, f)) for f in env._fields])
+
+
+def honeycomb_ctm_step(
+    envs: dict[Coord, HoneycombCTMEnv],
+    sites: dict[Coord, Tensor],
+    *,
+    chi: int,
+    projector_method: str = "biorthogonal",
+    forward_gauge: str = "phase",
+    renormalize: bool = True,
+) -> dict[Coord, HoneycombCTMEnv]:
+    """One full CTM iteration: 3 directional moves + optional renorm.
+
+    Sweeps ``α ∈ {0, 1, 2}`` in order, calling :func:`move_direction_alpha`
+    for each direction; after the sweep, optionally renormalizes every env
+    field by max-abs to prevent exponential growth (matches YASTN /
+    variPEPS per-step normalization).
+    """
+    for alpha in (0, 1, 2):
+        envs = move_direction_alpha(
+            envs,
+            sites,
+            alpha=alpha,
+            chi=chi,
+            projector_method=projector_method,
+            forward_gauge=forward_gauge,
+        )
+    if renormalize:
+        envs = {coord: _renormalize_honeycomb_env(env) for coord, env in envs.items()}
+    return envs
