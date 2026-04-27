@@ -86,6 +86,8 @@ def honeycomb_ctm_energy_implicit(
     Returns:
         Scalar energy per honeycomb unit cell (sum over 3 NN bonds by default).
     """
+    _validate_honeycomb_sites(sites)
+
     coords = sorted(sites.keys())
     params_data = tuple(sites[c] for c in coords)
 
@@ -109,6 +111,49 @@ def honeycomb_ctm_energy_implicit(
         gmres_restart,
         arnoldi_precheck,
     )
+
+
+# ---------------------------------------------------------------------------
+# Input validation
+# ---------------------------------------------------------------------------
+
+
+_REQUIRED_LABELS = frozenset({"e0", "e1", "e2", "phys"})
+
+
+def _validate_honeycomb_sites(sites: dict[Coord, Any]) -> None:
+    """Cheap fail-fast checks at the public-API boundary.
+
+    Validates dtype (complex128 required for variational stability — memory
+    ``project_complex_tensors_variational.md``), rank (rank-4 with the
+    canonical ``(e0, e1, e2, phys)`` label set), and inter-site bond-dim
+    consistency. Catches the most common typos before the expensive CTM run.
+    """
+    dims_e0: list[int] = []
+    for coord, A in sites.items():
+        if jnp.dtype(A.dtype) != jnp.complex128:
+            raise ValueError(
+                f"site {coord} has dtype {A.dtype}; complex128 required for "
+                "variational stability (see project_complex_tensors_variational.md)."
+            )
+        labels = A.labels()
+        if len(labels) != 4:
+            raise ValueError(
+                f"site {coord} has rank {len(labels)} with labels {labels}; "
+                "rank-4 expected with labels (e0, e1, e2, phys)."
+            )
+        if set(labels) != _REQUIRED_LABELS:
+            raise ValueError(
+                f"site {coord} has labels {set(labels)}; "
+                f"expected {set(_REQUIRED_LABELS)}."
+            )
+        e0_idx = A.indices[labels.index("e0")]
+        dims_e0.append(e0_idx.dim)
+    if len(set(dims_e0)) > 1:
+        raise ValueError(
+            f"site bond dims (e0) differ across sublattices: {dims_e0}; "
+            "honeycomb iPEPS requires uniform virtual bond dimension D."
+        )
 
 
 # ---------------------------------------------------------------------------
