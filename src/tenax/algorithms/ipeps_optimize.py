@@ -67,7 +67,17 @@ def _normalize_stall_recovery(config, *, unit_cell: str):
 
     if config.gs_stall_recovery is not None:
         return config
-    default = "noise" if unit_cell == "1x1" else "reset"
+    # CG with map_fn optimizes a tuple of raw site tensors; the noise
+    # injection path assumes a single tensor (calls .todense()/jnp.linalg.norm
+    # on params), so default to "reset" for that case.
+    cg_with_map_fn = (
+        config.cg_gates is not None
+        and getattr(config.cg_gates, "map_fn", None) is not None
+    )
+    if cg_with_map_fn:
+        default = "reset"
+    else:
+        default = "noise" if unit_cell == "1x1" else "reset"
     return replace(config, gs_stall_recovery=default)
 
 
@@ -448,6 +458,11 @@ def optimize_gs_ad(
         if config.su_init:
             _, (A_su, _B_su), _ = ipeps(gate, None, config)
             A_init = A_su
+        elif config.cg_gates is not None and config.cg_gates.init_fn is not None:
+            key = jax.random.PRNGKey(0)
+            raw_params = config.cg_gates.init_fn(D, key)
+            cg_data = config.cg_gates.map_fn(*raw_params)
+            A_init = _wrap_as_dense_tensor(cg_data)
         else:
             key = jax.random.PRNGKey(0)
             k1, k2 = jax.random.split(key)
@@ -627,6 +642,20 @@ def _optimize_gs_ad_tensor(
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
     from tenax.algorithms.ad_utils import CTMRGGradientError
 
+    cg_gates = config.cg_gates
+    _use_cg = cg_gates is not None
+    if _use_cg:
+        from tenax.algorithms.coarse_grain import compute_energy_cg
+
+        _cg_d_eff = int(cg_gates.h_intra.shape[0])
+        _cg_map_fn = cg_gates.map_fn
+        _cg_init_fn = cg_gates.init_fn
+    else:
+        compute_energy_cg = None
+        _cg_d_eff = None
+        _cg_map_fn = None
+        _cg_init_fn = None
+
     gate = (
         hamiltonian_gate.todense()
         if isinstance(hamiltonian_gate, Tensor)
@@ -669,6 +698,29 @@ def _optimize_gs_ad_tensor(
     explicit_steps = config.gs_explicit_ad_steps
     explicit_warmup = config.gs_explicit_ad_warmup
 
+    def _params_to_A_norm(params):
+        """Convert raw optimizer params to a normalized DenseTensor."""
+        if _use_cg and _cg_map_fn is not None:
+            cg_data = _cg_map_fn(*params)
+            cg_data = cg_data / (jnp.linalg.norm(cg_data) + 1e-10)
+            return DenseTensor(cg_data, A.indices)
+        if use_c4v:
+            A_data = c4v_tensor_from_coeffs(params, c4v_basis, tensor_shape)
+            A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
+            return DenseTensor(A_norm_data, A.indices)
+        return params * (1.0 / (params.norm() + 1e-10))
+
+    if _use_cg:
+
+        def _cg_energy_callable(site_tensors, envs, _gate):
+            """energy_fn closure for ctm_energy_explicit/implicit (CG path)."""
+            A_norm = site_tensors[(0, 0)]
+            return compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, _cg_d_eff)
+
+        _energy_fn_kw = _cg_energy_callable
+    else:
+        _energy_fn_kw = None
+
     def _ctm_energy_fn(site_tensors):
         """Dispatch to implicit or explicit CTM energy."""
         env_init = _env_cache.get("envs", None)
@@ -684,6 +736,7 @@ def _optimize_gs_ad_tensor(
                 renormalize=ctm_cfg.renormalize,
                 projector_backward=ctm_cfg.projector_backward,
                 env_init=env_init,
+                energy_fn=_energy_fn_kw,
             )
         else:
             return ctm_energy_implicit(
@@ -706,27 +759,18 @@ def _optimize_gs_ad_tensor(
                 gmres_maxiter=ctm_cfg.gmres_maxiter,
                 gmres_restart=ctm_cfg.gmres_restart,
                 arnoldi_precheck=False,
+                energy_fn=_energy_fn_kw,
             )
 
     def loss_fn(params):
-        if use_c4v:
-            A_data = c4v_tensor_from_coeffs(params, c4v_basis, tensor_shape)
-            A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-            A_norm = DenseTensor(A_norm_data, A.indices)
-        else:
-            A_norm = params * (1.0 / (params.norm() + 1e-10))
+        A_norm = _params_to_A_norm(params)
         site_tensors = {(0, 0): A_norm}
         energy = _ctm_energy_fn(site_tensors)
         return energy
 
     def _update_env_cache(params):
         """Re-run forward CTM (no grad) to warm-start next step."""
-        if use_c4v:
-            A_data = c4v_tensor_from_coeffs(params, c4v_basis, tensor_shape)
-            A_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-            A_norm = DenseTensor(A_data, A.indices)
-        else:
-            A_norm = params * (1.0 / (params.norm() + 1e-10))
+        A_norm = _params_to_A_norm(params)
         site_tensors = {(0, 0): A_norm}
         envs, _ = python_loop_ctm_converge(
             site_tensors,
@@ -746,7 +790,14 @@ def _optimize_gs_ad_tensor(
     is_metric_lbfgs = (
         config.gs_metric_precond and config.gs_optimizer.lower() == "lbfgs"
     )
-    params = c4v_coeffs if use_c4v else A
+    if _use_cg and _cg_init_fn is not None:
+        # CG with map_fn: optimize the raw site tensors, contract via map_fn
+        # in _params_to_A_norm at each loss evaluation.
+        params = _cg_init_fn(config.max_bond_dim, jax.random.PRNGKey(0))
+    elif use_c4v:
+        params = c4v_coeffs
+    else:
+        params = A
     optimizer = None if is_metric_lbfgs else _build_optimizer(config)
     opt_state = optimizer.init(params) if optimizer is not None else None
     use_ls = _use_line_search(config)
@@ -771,12 +822,7 @@ def _optimize_gs_ad_tensor(
 
     def loss_fn_fwd(p):
         """Forward-only loss for line search — warm-starts CTM from env cache."""
-        if use_c4v:
-            A_data = c4v_tensor_from_coeffs(p, c4v_basis, tensor_shape)
-            A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-            A_norm = DenseTensor(A_norm_data, A.indices)
-        else:
-            A_norm = p * (1.0 / (p.norm() + 1e-10))
+        A_norm = _params_to_A_norm(p)
         site_tensors = {(0, 0): A_norm}
         envs, _ = python_loop_ctm_converge(
             site_tensors,
@@ -791,6 +837,8 @@ def _optimize_gs_ad_tensor(
             chi_ramp=ctm_cfg.chi_ramp,
             env_init=_env_cache.get("envs", None),
         )
+        if _use_cg:
+            return float(compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, _cg_d_eff))
         return float(compute_energy_ctm_tensor(A_norm, envs[(0, 0)], gate, d_phys))
 
     stall_count = 0  # noise recovery: consecutive line search failures
@@ -1132,7 +1180,7 @@ def _optimize_gs_ad_tensor(
                     )
         else:
             params = optax.apply_updates(params, direction)
-            if not use_c4v:
+            if not use_c4v and not (_use_cg and _cg_map_fn is not None):
                 params = params * (1.0 / (params.norm() + 1e-10))
 
     # Re-evaluate both final A and best_A with fully converged fresh CTM.
@@ -1142,12 +1190,7 @@ def _optimize_gs_ad_tensor(
 
     def _eval_fresh(p, env_init=None):
         """Evaluate energy with fully converged fresh CTM."""
-        if use_c4v:
-            A_data = c4v_tensor_from_coeffs(p, c4v_basis, tensor_shape)
-            A_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-            A_t = DenseTensor(A_data, A.indices)
-        else:
-            A_t = p * (1.0 / (p.norm() + 1e-10))
+        A_t = _params_to_A_norm(p)
         envs, _ = python_loop_ctm_converge(
             {(0, 0): A_t},
             SINGLE_SITE_NEIGHBORS,
@@ -1164,7 +1207,10 @@ def _optimize_gs_ad_tensor(
             env_init=env_init,
         )
         env_ = envs[(0, 0)]
-        E_ = float(compute_energy_ctm_tensor(A_t, env_, gate, d_phys))
+        if _use_cg:
+            E_ = float(compute_energy_cg(A_t, env_, cg_gates, _cg_d_eff))
+        else:
+            E_ = float(compute_energy_ctm_tensor(A_t, env_, gate, d_phys))
         return A_t, env_, E_
 
     A_final, env_final, E_final = _eval_fresh(params, _env_cache.get("envs", None))
