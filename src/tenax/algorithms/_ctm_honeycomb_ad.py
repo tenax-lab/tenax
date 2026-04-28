@@ -3,12 +3,28 @@
 Mirrors :func:`tenax.algorithms._ctm_energy_ad.ctm_energy_implicit` for the
 rank-4, 6-corner, 3-direction, 2-sublattice honeycomb topology. Forward is
 :func:`honeycomb_ctm_run`; backward is implicit differentiation through the
-converged env via JIT-fused GMRES on ``(I - J_env^T) λ = dE/denv``.
+converged env via JIT-fused GMRES on ``(I - J_env^T) λ = dE/denv``, then a
+JIT'd chain rule for ``∂E/∂sites = ∂E/∂sites + J_sites^T · λ``.
 
-The biorthogonal projector path is the default (``projector_method="biorthogonal"``,
-``forward_gauge="phase"``); the per-column phase fix is already applied inside
-the projector build, so the converged env is an element-wise fixed point and
-no extra post-step gauge fix is needed (memory: ``feedback_phase_gauge_default.md``).
+The biorthogonal projector path is the default
+(``projector_method="biorthogonal"``, ``forward_gauge="phase"``). The
+per-column phase fix is applied inside the projector build, so the converged
+env is an element-wise fixed point and no extra post-step gauge fix is
+needed.
+
+References
+----------
+
+* Lukin & Sotnikov, **PRB 107, 054424 (2023)** — 6-corner CTMRG for
+  honeycomb iPEPS, including the corner-block / row-block update rules
+  (Eqs. 2–4) that the rank-4 forward implements directly.
+* Paper 2 (PRE 109, 045305 (2024) §II.C, Fig. 10) — bipartite extension to
+  two sublattices with biorthogonal projectors ``P_L · P_R = 1`` on the
+  enlarged corner.
+
+Design and implementation plan: see
+``docs/plans/2026-04-25-honeycomb-ctm-design.md`` and
+``docs/plans/2026-04-25-honeycomb-ctm-plan.md``.
 """
 
 from __future__ import annotations
