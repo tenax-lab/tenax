@@ -1,5 +1,7 @@
 """Unit tests for iPEPS AD dispatch/config policy helpers."""
 
+import pytest
+
 from tenax.algorithms.ipeps_ad_policy import (
     build_ad_ctm_config,
     resolve_projector_backward,
@@ -57,13 +59,57 @@ def test_use_reference_c4v_path_requires_all_conditions():
     assert not use_reference_c4v_path(iPEPSConfig(unit_cell="1x1", gs_c4v=False))
 
 
-def test_resolve_projector_backward_is_noop():
-    """resolve_projector_backward no longer auto-promotes; defaults are correct."""
+def test_resolve_projector_backward_rejects_implicit_non_svd():
+    """Implicit AD requires SVD projector."""
     config = iPEPSConfig(
         ctm=CTMConfig(chi=8, projector_method="eigh"),
         gs_implicit_ad=True,
     )
-    result = resolve_projector_backward(config)
-    # No silent override — user gets what they asked for
-    assert result.ctm.projector_method == "eigh"
-    assert result.gs_projector_method is None
+    with pytest.raises(ValueError, match="Implicit AD requires CTM settings"):
+        resolve_projector_backward(config)
+
+
+def test_resolve_projector_backward_rejects_implicit_non_phase_gauge():
+    """Implicit AD requires phase gauge."""
+    config = iPEPSConfig(
+        ctm=CTMConfig(chi=8, projector_method="svd", forward_gauge="sigma"),
+        gs_implicit_ad=True,
+    )
+    with pytest.raises(ValueError, match="forward_gauge"):
+        resolve_projector_backward(config)
+
+
+def test_resolve_projector_backward_rejects_implicit_non_elementwise_conv():
+    """Implicit AD requires element-wise convergence check."""
+    config = iPEPSConfig(
+        ctm=CTMConfig(chi=8, projector_method="svd", ctm_conv_method="sv"),
+        gs_implicit_ad=True,
+    )
+    with pytest.raises(ValueError, match="ctm_conv_method"):
+        resolve_projector_backward(config)
+
+
+def test_resolve_projector_backward_rejects_implicit_gs_projector_override():
+    """Implicit AD validates effective projector after gs override."""
+    config = iPEPSConfig(
+        ctm=CTMConfig(chi=8, projector_method="svd"),
+        gs_projector_method="qr",
+        gs_implicit_ad=True,
+    )
+    with pytest.raises(ValueError, match="projector_method='svd'"):
+        resolve_projector_backward(config)
+
+
+def test_resolve_projector_backward_accepts_implicit_stable_combo():
+    """Implicit AD stable combo passes unchanged."""
+    config = iPEPSConfig(
+        ctm=CTMConfig(
+            chi=8,
+            projector_method="svd",
+            forward_gauge="phase",
+            ctm_conv_method="elementwise",
+        ),
+        gs_implicit_ad=True,
+    )
+    out = resolve_projector_backward(config)
+    assert out is config
