@@ -17,13 +17,40 @@ def resolve_projector_backward(
     *,
     logger: logging.Logger | None = None,
 ) -> iPEPSConfig:
-    """No-op — kept for backward compatibility.
+    """Validate AD policy invariants and return ``config`` unchanged.
 
-    Previously auto-promoted projector settings; now the defaults
-    (``projector_method="svd"``, ``forward_gauge="phase"``) are correct
-    for all AD paths.  Users who explicitly set ``projector_method="eigh"``
-    get eigh without silent overrides.
+    No silent promotion is applied. For the implicit-AD path we enforce the
+    empirically stable CTM combination:
+    - ``projector_method == "svd"``
+    - ``forward_gauge == "phase"`` (Frobenius + phase fixing path)
+    - ``ctm_conv_method == "elementwise"``
+
+    Explicit-AD keeps user choices unchanged.
     """
+    if not config.gs_implicit_ad:
+        return config
+
+    ctm_cfg = build_ad_ctm_config(config)
+    errors: list[str] = []
+    if ctm_cfg.projector_method != "svd":
+        errors.append(f"projector_method={ctm_cfg.projector_method!r} (expected 'svd')")
+    if ctm_cfg.forward_gauge != "phase":
+        errors.append(f"forward_gauge={ctm_cfg.forward_gauge!r} (expected 'phase')")
+    if ctm_cfg.ctm_conv_method != "elementwise":
+        errors.append(
+            f"ctm_conv_method={ctm_cfg.ctm_conv_method!r} (expected 'elementwise')"
+        )
+
+    if errors:
+        msg = (
+            "Implicit AD requires CTM settings "
+            "(projector_method='svd', forward_gauge='phase', "
+            "ctm_conv_method='elementwise'). Got: " + ", ".join(errors)
+        )
+        if logger is not None:
+            logger.error(msg)
+        raise ValueError(msg)
+
     return config
 
 

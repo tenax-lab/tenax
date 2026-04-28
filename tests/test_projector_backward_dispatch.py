@@ -136,12 +136,11 @@ def test_resolve_is_noop_for_eigh():
     assert resolved.ctm.projector_method == "eigh"
 
 
-def test_resolve_is_noop_for_implicit_ad():
+def test_resolve_rejects_non_svd_for_implicit_ad():
     ctm = CTMConfig(chi=8, projector_method="eigh")
     config = iPEPSConfig(ctm=ctm, gs_implicit_ad=True)
-    resolved = _resolve_projector_backward(config)
-    assert resolved.ctm.projector_backward == "auto"
-    assert resolved.ctm.projector_method == "eigh"
+    with pytest.raises(ValueError, match="Implicit AD requires CTM settings"):
+        _resolve_projector_backward(config)
 
 
 # ---------------------------------------------------------------------------
