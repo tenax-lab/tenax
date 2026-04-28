@@ -1,42 +1,50 @@
-"""M2b strict regression: kagome iPESS dummy-bond hack vs rank-4 native path.
+"""M2b strict regression: kagome iPESS — CG-iPEPS reference vs rank-4 native path.
 
-Mirrors the kagome iPESS smoke in ``tests/test_pess_ad.py`` (which lives on
-``feat/coarse-grain-ipeps``) against the new
-:func:`honeycomb_ctm_energy_implicit` entry point with
-:func:`compute_honeycomb_triangle_energy` as the ``energy_fn`` override.
-The two paths describe the same physical state, so converged energies at
-fixed seed must agree within ``1e-3``.
+The two-path agreement check this file scaffolds compares converged kagome
+iPESS energies between:
 
-**Status (2026-04-28): SKIPPED until the prerequisites land.** This test
-is intentionally structural-only because PR #347 does not deliver the
-kagome iPESS plumbing it depends on. PR #347 is the rank-4 honeycomb
-CTM port; the kagome iPESS site construction, the dummy-bond brick-wall
-``pess_optimize.py`` hack, and the kagome-specific gate constructor all
-live on ``feat/coarse-grain-ipeps`` (commits ``f05166e``,
-``32070f6``, ``a15c090``, ``6fa7039``).
+* the **CG-iPEPS reference path** — 1-site square iPEPS with
+  ``d_eff = 2**3 = 8`` (one kagome triangle per supersite), driven by
+  :func:`tenax.optimize_gs_ad` with ``cg_gates=tenax.kagome_cg_gates()``;
+* the **rank-4 native honeycomb path** introduced in PR #347 — 2-sublattice
+  honeycomb tensors of shape ``(D, D, D, d_eff=8)``, driven by
+  :func:`honeycomb_ctm_energy_implicit`.
 
-The cross-path smoke in ``tests/test_ctm_honeycomb_cross_path.py``
-(commit ``e879043``) covers the rank-4 CTM topology / RDM gate at the
-honeycomb level (no optimization, ``d=2``, no kagome triangle), so the
-*new* contract Task 17 strictly gates is:
+Both express the same physical state, so converged energies at fixed seed
+must agree within ``1e-3``.
 
-1. The rank-4 path agrees with the *brick-wall dummy-bond hack* (not just
-   with the standard square CTM on a hand-built supersite).
-2. Agreement holds *after* both paths converge under L-BFGS (so any
-   variational-vs-non-variational bias would surface).
-3. Agreement holds at the *kagome iPESS shape* (``D=2, d=3, χ=8``,
-   3-site triangle supersite + intra-triangle 3-spin energy_fn).
+**Status (2026-04-28): SKIPPED — partial unblock only.** PR #352 (merged)
+delivered :func:`tenax.kagome_cg_gates`, :func:`tenax.compute_energy_cg`,
+and the ``cg_gates`` hookpoint in :func:`tenax.optimize_gs_ad`, so the
+*reference* leg is now available on ``main``. The native leg, however,
+is still incomplete: :func:`compute_honeycomb_triangle_energy` only sums
+1-site (intra-triangle) RDMs and does **not** include the 3 inter-triangle
+bond terms (kagome ``h_inter["h" | "v" | "diag"]``). Comparing ground-state
+energies without the inter-triangle terms would only test 1/4 of the
+kagome Hamiltonian.
 
-**To unskip:**
+PR #347's actual correctness contract is covered without M2b by:
 
-(a) Cherry-pick or merge the kagome iPESS site fixture from
-    ``feat/coarse-grain-ipeps`` (the relevant pieces are
-    ``coarse_grain.py:kagome_cg_gates`` and the supersite construction
-    inside ``pess_optimize.py`` / ``tests/test_pess_ad.py``).
-(b) Wire the dummy-bond path's ``optimize_gs_ad`` for the reference
-    converged energy.
-(c) Wire the rank-4 path with ``energy_fn=compute_honeycomb_triangle_energy``
-    and the same kagome-supersite-on-honeycomb-cell ansatz.
+* :mod:`tests.test_ctm_honeycomb_ad` — FD-vs-AD agreement at D=2 (M1 gate);
+* :mod:`tests.test_ctm_honeycomb_cross_path` — rank-4 CTM topology / RDM
+  agreement vs the standard square CTM on a hand-built supersite at
+  ``d=2`` (no optimization, no kagome triangle).
+
+So M2b stays skipped; the missing piece belongs in a follow-up PR.
+
+**To unskip (follow-up PR):**
+
+(a) Extend the rank-4-path energy contract: write a kagome-aware
+    ``energy_fn`` that combines :func:`compute_honeycomb_triangle_energy`
+    (intra) with a 3-bond inter-triangle sum that contracts each of the
+    honeycomb NN edges (``e0``, ``e1``, ``e2``) against the corresponding
+    ``kagome_cg_gates().h_inter`` entry via the appropriate 2-site RDM.
+(b) Wrap ``honeycomb_ctm_energy_implicit`` in an L-BFGS loop (the rank-4
+    path is not currently exposed through ``optimize_gs_ad``).
+(c) Build matching kagome supersite tensors for both paths from a shared
+    seed: random ``(D, D, D, D, 8)`` for the CG path, and the same
+    physical state mapped onto two ``(D, D, D, 8)`` honeycomb sublattice
+    tensors for the rank-4 path.
 (d) Run both at fixed seed, compare converged energies within 1e-3.
 (e) Remove the ``pytest.mark.skip`` decorator.
 """
@@ -91,11 +99,13 @@ def _make_kagome_triangle_supersite(D: int, d: int, key: jax.Array) -> DenseTens
 @pytest.mark.slow
 @pytest.mark.skip(
     reason=(
-        "Requires kagome iPESS site fixture + dummy-bond optimize_gs_ad "
-        "reference, both on feat/coarse-grain-ipeps. See module docstring "
-        "for the unskip checklist. The cross-path RDM smoke in "
-        "test_ctm_honeycomb_cross_path.py covers the topology subset of "
-        "this gate at the honeycomb (d=2) level."
+        "PR #352 unblocks the CG-iPEPS reference leg (kagome_cg_gates + "
+        "optimize_gs_ad), but the rank-4 native leg is still missing the "
+        "inter-triangle energy_fn (compute_honeycomb_triangle_energy "
+        "covers intra only). Belongs in a follow-up PR; see module "
+        "docstring for the unskip checklist. M1 (FD-vs-AD) and the "
+        "cross-path RDM smoke already cover PR #347's correctness "
+        "contract at d=2."
     )
 )
 def test_kagome_ipess_native_matches_dummy_bond_hack():
