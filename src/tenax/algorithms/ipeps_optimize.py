@@ -440,6 +440,31 @@ def optimize_gs_ad(
     if _use_reference_c4v_path(config):
         return _optimize_gs_ad_tensor_reference_c4v(hamiltonian_gate, A_init, config)
 
+    # CG-with-map_fn: optimizer params are a tuple of raw site arrays.
+    # The user can pass that tuple directly as A_init for warm-start /
+    # restart; otherwise we generate it via cg_gates.init_fn here so the
+    # downstream optimizer doesn't have to.  In both cases we also build a
+    # contracted A_init for shape / index inference.
+    cg_raw_params: tuple | None = None
+    cg_with_map_fn = (
+        config.cg_gates is not None
+        and getattr(config.cg_gates, "map_fn", None) is not None
+    )
+    if cg_with_map_fn and isinstance(A_init, tuple):
+        cg_raw_params = A_init
+        cg_data = config.cg_gates.map_fn(*cg_raw_params)
+        A_init = _wrap_as_dense_tensor(cg_data)
+    elif cg_with_map_fn and A_init is not None:
+        # A single Tensor / array is ambiguous: the optimizer would have to
+        # invert map_fn to recover raw params, which isn't generally possible.
+        # Require the user to pass the raw-params tuple instead.
+        raise ValueError(
+            "When cg_gates.map_fn is set, A_init must be either None "
+            "(auto-init via cg_gates.init_fn) or a tuple matching "
+            "cg_gates.init_fn's output (raw site tensors).  Got "
+            f"{type(A_init).__name__}; pass the raw-params tuple."
+        )
+
     # Wrap raw jax.Array as DenseTensor so we always use the Tensor-protocol path.
     if A_init is not None and not isinstance(A_init, Tensor):
         A_init = _wrap_as_dense_tensor(A_init)
@@ -458,10 +483,10 @@ def optimize_gs_ad(
         if config.su_init:
             _, (A_su, _B_su), _ = ipeps(gate, None, config)
             A_init = A_su
-        elif config.cg_gates is not None and config.cg_gates.init_fn is not None:
+        elif cg_with_map_fn and config.cg_gates.init_fn is not None:
             key = jax.random.PRNGKey(0)
-            raw_params = config.cg_gates.init_fn(D, key)
-            cg_data = config.cg_gates.map_fn(*raw_params)
+            cg_raw_params = config.cg_gates.init_fn(D, key)
+            cg_data = config.cg_gates.map_fn(*cg_raw_params)
             A_init = _wrap_as_dense_tensor(cg_data)
         else:
             key = jax.random.PRNGKey(0)
@@ -471,7 +496,9 @@ def optimize_gs_ad(
             ) + 1j * jax.random.normal(k2, (D, D, D, D, d_phys))
             A_init = _wrap_as_dense_tensor(A_data)
 
-    return _optimize_gs_ad_tensor(hamiltonian_gate, A_init, config)
+    return _optimize_gs_ad_tensor(
+        hamiltonian_gate, A_init, config, _cg_raw_params=cg_raw_params
+    )
 
 
 def _use_reference_c4v_path(config: iPEPSConfig) -> bool:
@@ -627,11 +654,19 @@ def _optimize_gs_ad_tensor(
     hamiltonian_gate: jax.Array,
     A_init: Tensor,
     config: iPEPSConfig,
+    *,
+    _cg_raw_params: tuple | None = None,
 ):
     """AD-based ground state optimization for Tensor-protocol iPEPS (1-site).
 
     Uses ``ctm_tensor_converge`` with implicit differentiation through
     the standard Tensor-protocol CTM.
+
+    Private kwargs:
+        _cg_raw_params: Initial raw site-tensor tuple for CG-with-map_fn
+            warm-start.  When provided, used in place of ``cg_gates.init_fn``;
+            ``optimize_gs_ad`` forwards a tuple ``A_init`` (or its own
+            init_fn output) here so the user's starting state is honored.
     """
     config = _normalize_stall_recovery(config, unit_cell="1x1")
     import optax
@@ -787,13 +822,45 @@ def _optimize_gs_ad_tensor(
         )
         _env_cache["envs"] = envs
 
+    # Metric L-BFGS preconditioning calls .todense() on grads/params (see
+    # _metric_precond.py:146 and the metric branch below).  CG with map_fn
+    # parameterizes the optimizer state as a tuple of raw site arrays, so the
+    # metric path crashes with AttributeError.  Disable it for that case and
+    # warn the user once so silent loss-of-preconditioning is visible.
+    _cg_uses_tuple_params = _use_cg and _cg_map_fn is not None
     is_metric_lbfgs = (
-        config.gs_metric_precond and config.gs_optimizer.lower() == "lbfgs"
+        config.gs_metric_precond
+        and config.gs_optimizer.lower() == "lbfgs"
+        and not _cg_uses_tuple_params
     )
-    if _use_cg and _cg_init_fn is not None:
-        # CG with map_fn: optimize the raw site tensors, contract via map_fn
-        # in _params_to_A_norm at each loss evaluation.
-        params = _cg_init_fn(config.max_bond_dim, jax.random.PRNGKey(0))
+    if (
+        _cg_uses_tuple_params
+        and config.gs_metric_precond
+        and config.gs_optimizer.lower() == "lbfgs"
+    ):
+        import warnings
+
+        warnings.warn(
+            "gs_metric_precond=True is incompatible with cg_gates that "
+            "supply a map_fn (params are a tuple of raw site tensors, but "
+            "the metric path expects tensor-like params with .todense()). "
+            "Falling back to non-preconditioned L-BFGS for this run.",
+            stacklevel=3,
+        )
+    if _use_cg and _cg_map_fn is not None:
+        # CG with map_fn: optimize raw site tensors, contract via map_fn in
+        # _params_to_A_norm.  Use caller-supplied raw params when provided
+        # (warm-start / restart); otherwise call init_fn.
+        if _cg_raw_params is not None:
+            params = _cg_raw_params
+        elif _cg_init_fn is not None:
+            params = _cg_init_fn(config.max_bond_dim, jax.random.PRNGKey(0))
+        else:
+            raise ValueError(
+                "cg_gates.map_fn is set but neither cg_gates.init_fn nor a "
+                "raw-params A_init was provided; cannot construct optimizer "
+                "params."
+            )
     elif use_c4v:
         params = c4v_coeffs
     else:
