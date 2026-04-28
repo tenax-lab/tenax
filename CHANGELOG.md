@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.6.0 (2026-04-28)
+
 ### New Features
 
 - **Python-loop CTM AD with JIT-fused GMRES backward** — explicit and
@@ -9,43 +11,132 @@
   `(I − J^T)λ = ∂E/∂env` via JIT-fused GMRES (#340, #341)
 - **Block-sparse CTM/AD** for `SymmetricTensor` iPEPS — `SymmetricTensor`
   passes through `jax.custom_vjp` as a pytree leaf without `todense()`
-  round-trip; block-sparse Fishman SVD projector (`_svd_projector_symmetric`);
-  sigma gauge fixing and convergence checks preserve `SymmetricTensor`
-  type (#341)
+  round-trip; block-sparse Fishman SVD projector
+  (`_svd_projector_symmetric`); sigma gauge fixing and convergence
+  checks preserve `SymmetricTensor` type (#341)
+- **Lorentzian projector backward for explicit AD** (Approach A) (#318)
+- **Polymorphic optimizer shell for `SymmetricTensor` AD** — closes #297
+  by routing the AD optimizer through a single shell that handles both
+  `DenseTensor` and `SymmetricTensor` parameter pytrees (#329)
+- **`adjoint_tikhonov` damping** + FD-AD gradient-correctness tests
+  for the implicit-diff backward (#311)
+- **Tuning surface expanded** — registered AD backward and optimizer
+  knobs grow from 21 → 36 parameters (#323)
 - **`CTMConfig.gmres_maxiter`** — separate knob for the outer GMRES
   iteration budget (was wired to `gmres_restart`, capping the adjoint
   solve at the restart size) (#343)
+- **`chi_ramp`** documentation in guides, tuning, and skills (#339)
 
 ### Behavior Changes
 
 - **`CTMConfig.forward_gauge` default changed from `"qr"` to `"phase"`** —
   the AD-correct choice for both implicit and explicit AD (1-site and
-  2-site).  No silent gauge promotion in `optimize_gs_ad`: an explicit
-  user choice is preserved (was previously promoted `"qr"` → `"phase"`
-  for AD paths) (#343)
+  2-site).  `optimize_gs_ad` no longer silently promotes a user-supplied
+  gauge: an explicit choice is preserved (was previously promoted
+  `"qr"` → `"phase"` for AD paths) (#343)
 - **`build_ad_ctm_config`** no longer promotes `forward_gauge="qr"` to
   `"phase"`.  Direct `CTMConfig()` users now see the same gauge the
   optimizer uses (#343)
+- **Unified Python-loop CTM forward + chi ramp** — single forward path
+  used by both explicit and implicit AD (#337, #339)
+- **Centralized AD policy** with import-cycle guardrails (#338)
 
 ### Bug Fixes
 
-- Fix `_phase_fix_normalize_tensor` returning `DenseTensor` regardless of
-  input type — `SymmetricTensor` environments are now preserved across
-  CTM sweeps (#341)
+- Implicit-diff backward now honors `forward_gauge="sigma"` end-to-end
+  (#322)
+- Tangent-project 2-site AD direction (#330) and Hermitian inner product
+  in `_tangent_project_unit` (#331) — closes #328
+- Arnoldi precheck + sigma gauge fixes for implicit AD (#334)
+- Correct F-matrix sign in `regularized_eigh` backward (#319)
+- Warm-start fresh CTM re-eval to match in-loop best (#320)
+- `_phase_fix_normalize_tensor` no longer downcasts to `DenseTensor` —
+  `SymmetricTensor` environments are preserved across CTM sweeps (#341)
+- Correct symmetric `numpy_blockwise` DMRG energy regression (#326)
+- Refactor to dedupe projector wrapping and env-diff logic (#342)
+- Address P1/P2/P3 review comments from #311, #314, #318, #320 (#321)
+- Document non-C4v 2-site AD instability at finite χ (#328, #332)
 
 ### Tests
 
-- Unblock 2 xfail tests now passing: `test_vjp_gradient_finite_with_elementwise`,
+- Unblock 2 xfail AD tests now passing:
+  `test_vjp_gradient_finite_with_elementwise`,
   `test_optimize_gs_ad_symmetric_energy_decreases` (#344)
 - Migrate baseline gauge-policy tests to spy on `ctm_energy_implicit`
   (the legacy `ctm_tensor_converge_explicit` is no longer routed
   through by the optimizer) (#344)
+- Mirror iPEPS correctness tests into the core CI tier (#312)
+- `test_ad_d2_energy` uses `gs_c4v=True` (#327)
+- Unblock pre-existing CI failures (#309)
 
 ### CI
 
 - `test-full` matrix now runs only `-m "not core"` to avoid duplicating
   the 731 core tests already covered by required jobs.  Eliminates OOM
   / "runner lost communication" flakes on push to main (#345)
+
+### Documentation
+
+- Post-#341 AD policy: guides, skills, and CHANGELOG (#346)
+- Architectural map of DMRG/iDMRG code paths (#314)
+- Design plan for multisite `c4v_reference` AD (#315)
+- Sync `c4v_reference` docs and citations to PR #304/#306 (#310)
+
+## v0.5.0 (2026-04-13)
+
+### New Features
+
+- **C4v shared-tensor path for 2-site AD** and paper-faithful Appendix
+  C–F AD mode following Francuz et al., PRR 7, 013237 (#304, #306)
+- **Differentiable sigma gauge fixing** via power iteration (#289) with
+  variants for stable AD convergence (#284) and elementwise CTM
+  convergence (#275)
+- **Direct AD through CTM projectors** with warmup / checkpoint (#257)
+- **Sublattice rotation, C4v symmetrization, and metric preconditioning**
+  for iPEPS AD (#262)
+- **Fishman SVD projectors**, QR-gauge NaN fix, and per-absorption
+  normalization (#276)
+- **Half-SVD projectors**, JIT CTM, and convergence fix (#277)
+- **Explicit C4v basis parameterization** for stable L-BFGS (#273)
+- **Improved AD convergence** — SVD sign fix, Hager–Zhang line search,
+  regularized `eigh` (#274)
+
+### Behavior Changes
+
+- Lazy-load algorithm modules to reduce import-time overhead (#286)
+- Replace wildcard re-export shims with explicit internal imports (#288)
+- Eval config inherits projector and `jit_ctm` settings (#278)
+- Move `scale_bond_axis` from algorithms to core to fix dependency
+  inversion (#285)
+
+### Bug Fixes
+
+- variPEPS-style stall recovery for 2-site AD (#298, #300)
+- Adaptive Lorentzian broadening in `regularized_eigh` backward (#301)
+- Dense-wrap `SymmetricTensor` inputs in 1-site and 2-site AD (#296)
+- Sweep mutation + differentiable SVD projector (#291)
+- Close JIT `while_loop` sigma-gauge energy gap (#290)
+- Remove duplicated sigma-gauge warmup block in JIT CTM (#302, #303)
+- Cython Lanczos reorthogonalization writing to copy instead of original
+  (#268, #271)
+
+### Performance
+
+- Warm-start CTM in line search from previous boundary tensors (#272)
+
+### Infrastructure / CI
+
+- Use cibuildwheel for manylinux/macOS wheels (#261, #263, #264)
+- Skip full tests for CI-only pushes; add nightly PyPI builds (#265)
+- Fix `hatch-cython` config (#266, #267)
+- Stop tracking `uv.lock` (#295)
+- Drop `--auto` from sync-skills merge (#307)
+- Bump version to 0.5.0 (#308)
+
+### Documentation
+
+- Sync iPEPS AD guidance and tests with post-PR-#291 baseline (#293)
+- Audit dense fallbacks in symmetric CTM AD path (#287)
 
 ## v0.4.2 (2026-04-05)
 
