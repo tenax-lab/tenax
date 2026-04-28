@@ -247,6 +247,9 @@ class iPEPSConfig:
     gs_metric_precond: bool = True  # metric preconditioning for CG/L-BFGS
     metric_gmres_maxiter: int = 30  # Krylov dimension for metric inversion
     metric_gmres_tol: float = 1e-2  # GMRES tolerance (loose is fine)
+    # Coarse-grained iPEPS: when set, optimize_gs_ad uses compute_energy_cg
+    # instead of compute_energy_ctm_tensor.  Only valid with unit_cell="1x1".
+    cg_gates: object | None = None
 
     def __post_init__(self):
         import warnings
@@ -270,6 +273,15 @@ class iPEPSConfig:
             raise ValueError(
                 f"unit_cell must be one of {valid_unit_cells} or a Lattice, "
                 f"got {self.unit_cell!r}"
+            )
+        if self.cg_gates is not None and self.unit_cell != "1x1":
+            raise ValueError(
+                f"cg_gates requires unit_cell='1x1', got {self.unit_cell!r}"
+            )
+        if self.cg_gates is not None and self.su_init:
+            raise ValueError(
+                "cg_gates is incompatible with su_init=True "
+                "(simple update uses the microscopic gate, not the CG gates)"
             )
         valid_stall_recovery = {None, "noise", "reset"}
         if self.gs_stall_recovery not in valid_stall_recovery:
