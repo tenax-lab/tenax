@@ -193,6 +193,43 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "ctm": ("tenax.algorithms.ipeps_ctm", "ctm"),
     "ctm_2site": ("tenax.algorithms.ipeps_ctm", "ctm_2site"),
     "ctm_split": ("tenax.algorithms.ipeps_ctm", "ctm_split"),
+    # honeycomb_ctm (native rank-4, 6-corner, 3-direction, 2-sublattice)
+    "honeycomb_ctm_energy_implicit": (
+        "tenax.algorithms.honeycomb_ctm",
+        "honeycomb_ctm_energy_implicit",
+    ),
+    "honeycomb_ctm_run": (
+        "tenax.algorithms.honeycomb_ctm",
+        "honeycomb_ctm_run",
+    ),
+    "HoneycombCTMEnv": (
+        "tenax.algorithms.honeycomb_ctm",
+        "HoneycombCTMEnv",
+    ),
+    "HoneycombConvergeInfo": (
+        "tenax.algorithms.honeycomb_ctm",
+        "HoneycombConvergeInfo",
+    ),
+    "initialize_honeycomb_env": (
+        "tenax.algorithms.honeycomb_ctm",
+        "initialize_honeycomb_env",
+    ),
+    "compute_honeycomb_energy": (
+        "tenax.algorithms.honeycomb_ctm",
+        "compute_honeycomb_energy",
+    ),
+    "compute_honeycomb_triangle_energy": (
+        "tenax.algorithms.honeycomb_ctm",
+        "compute_honeycomb_triangle_energy",
+    ),
+    "HONEYCOMB_NEIGHBORS": (
+        "tenax.algorithms.honeycomb_ctm",
+        "HONEYCOMB_NEIGHBORS",
+    ),
+    "HONEYCOMB_DIRECTIONS": (
+        "tenax.algorithms.honeycomb_ctm",
+        "HONEYCOMB_DIRECTIONS",
+    ),
     # ipeps_excitations
     "ExcitationConfig": ("tenax.algorithms.ipeps_excitations", "ExcitationConfig"),
     "ExcitationResult": ("tenax.algorithms.ipeps_excitations", "ExcitationResult"),
@@ -366,6 +403,16 @@ __all__ = [
     "compute_energy_cg",
     "honeycomb_cg_gates",
     "kagome_cg_gates",
+    # Honeycomb CTM (native rank-4, 6-corner, 3-direction, 2-sublattice)
+    "honeycomb_ctm_energy_implicit",
+    "honeycomb_ctm_run",
+    "HoneycombCTMEnv",
+    "HoneycombConvergeInfo",
+    "initialize_honeycomb_env",
+    "compute_honeycomb_energy",
+    "compute_honeycomb_triangle_energy",
+    "HONEYCOMB_NEIGHBORS",
+    "HONEYCOMB_DIRECTIONS",
     # Standard CTM (Tensor protocol)
     "CTMTensorEnv",
     "ctm_tensor",

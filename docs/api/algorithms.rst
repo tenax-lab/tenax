@@ -86,6 +86,43 @@ iPEPS
 
 .. autofunction:: tenax.algorithms._ctm_tensor_convergence.ctm_multisite
 
+Honeycomb iPEPS CTM
+-------------------
+
+Native rank-4, 6-corner, 3-direction, 2-sublattice CTMRG for honeycomb
+iPEPS with implicit-AD energy via custom VJP + JIT-fused GMRES backward.
+References: Lukin & Sotnikov, PRB 107, 054424 (2023) for the 6-corner
+CTMRG; PRE 109, 045305 (2024) §II.C for the 2-sublattice extension.
+Design and implementation plan in
+``docs/plans/2026-04-25-honeycomb-ctm-design.md`` and
+``docs/plans/2026-04-25-honeycomb-ctm-plan.md``.
+
+.. autofunction:: tenax.algorithms.honeycomb_ctm.honeycomb_ctm_energy_implicit
+
+.. autofunction:: tenax.algorithms.honeycomb_ctm.honeycomb_ctm_run
+
+.. autoclass:: tenax.algorithms.honeycomb_ctm.HoneycombCTMEnv
+   :members:
+   :no-index:
+
+.. autoclass:: tenax.algorithms.honeycomb_ctm.HoneycombConvergeInfo
+   :members:
+   :no-index:
+
+.. autofunction:: tenax.algorithms.honeycomb_ctm.initialize_honeycomb_env
+
+.. autofunction:: tenax.algorithms.honeycomb_ctm.compute_honeycomb_energy
+
+.. autofunction:: tenax.algorithms.honeycomb_ctm.compute_honeycomb_triangle_energy
+
+In addition, two module-level constants describe the topology and are
+available via the same shim:
+
+* ``tenax.algorithms.honeycomb_ctm.HONEYCOMB_NEIGHBORS`` — bipartite
+  neighbor map ``{coord: {direction: neighbor_coord}}``.
+* ``tenax.algorithms.honeycomb_ctm.HONEYCOMB_DIRECTIONS`` — the canonical
+  direction tuple ``("e0", "e1", "e2")``.
+
 Lattice
 -------
 
