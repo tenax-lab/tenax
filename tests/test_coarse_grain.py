@@ -344,3 +344,111 @@ class TestCGGatesValidation:
         gates = honeycomb_cg_gates()
         with pytest.raises(ValueError, match="incompatible with su_init=True"):
             iPEPSConfig(cg_gates=gates, su_init=True)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for PR #352 review comments (Codex P1)
+# ---------------------------------------------------------------------------
+
+
+class TestCGOptimizerGuards:
+    @pytest.mark.slow
+    def test_default_metric_precond_no_crash(self):
+        """Default iPEPSConfig with cg_gates must not crash on metric L-BFGS.
+
+        ``gs_metric_precond=True`` is the default and the metric path calls
+        ``.todense()`` on grads/params, which fails on tuple params produced
+        by ``cg_gates.map_fn``.  The optimizer must auto-disable metric
+        preconditioning (with a warning) for that case rather than raise
+        ``AttributeError`` on the first step.
+        """
+        from tenax.algorithms.coarse_grain import honeycomb_cg_gates
+        from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+        from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+        gates = honeycomb_cg_gates()
+        # All preconditioning + L-BFGS defaults retained except: short run +
+        # disable c4v + use explicit AD to keep this test fast.
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=8, max_iter=20, min_iter=5),
+            gs_num_steps=3,
+            gs_optimizer="lbfgs",
+            gs_metric_precond=True,  # the bug trigger
+            gs_line_search=True,
+            gs_line_search_method="armijo",
+            gs_implicit_ad=False,
+            gs_explicit_ad_steps=10,
+            gs_explicit_ad_warmup=3,
+            gs_verbose=False,
+            su_init=False,
+            cg_gates=gates,
+        )
+        dummy_gate = jnp.zeros((4, 4, 4, 4))
+        with pytest.warns(UserWarning, match="gs_metric_precond=True is incompatible"):
+            _, _, E_gs = optimize_gs_ad(dummy_gate, None, config)
+        assert np.isfinite(E_gs)
+
+    def test_user_supplied_raw_params_are_respected(self):
+        """A_init as a raw-params tuple must not be overwritten by init_fn.
+
+        Compares two ``gs_num_steps=0`` runs: one with no A_init (uses
+        ``init_fn`` default PRNG seed) and one with raw params from a
+        different PRNG seed.  If the user's params were ignored both runs
+        would produce identical energies; with the fix they must differ.
+        """
+        from tenax.algorithms.coarse_grain import honeycomb_cg_gates
+        from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+        from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+        gates = honeycomb_cg_gates()
+        D = 2
+
+        config = iPEPSConfig(
+            max_bond_dim=D,
+            ctm=CTMConfig(chi=8, max_iter=20, min_iter=5),
+            gs_num_steps=0,  # evaluate-only
+            gs_optimizer="lbfgs",
+            gs_metric_precond=False,
+            gs_implicit_ad=False,
+            gs_explicit_ad_steps=10,
+            gs_explicit_ad_warmup=3,
+            gs_verbose=False,
+            su_init=False,
+            cg_gates=gates,
+        )
+        dummy_gate = jnp.zeros((4, 4, 4, 4))
+
+        # Run 1: A_init=None → init_fn called with default PRNGKey(0).
+        _, _, E_default = optimize_gs_ad(dummy_gate, None, config)
+
+        # Run 2: A_init is a tuple of raw params from a different PRNG key.
+        custom_params = gates.init_fn(D, jax.random.PRNGKey(42))
+        _, _, E_user = optimize_gs_ad(dummy_gate, custom_params, config)
+
+        # Energies must differ — proves user params weren't silently
+        # overwritten with init_fn(PRNGKey(0)).
+        assert not np.isclose(E_default, E_user, atol=1e-8), (
+            f"User-supplied raw params were ignored: E_default={E_default} "
+            f"E_user={E_user} (identical means init_fn override is back)"
+        )
+
+    def test_tensor_a_init_with_map_fn_raises(self):
+        """Single-tensor A_init is ambiguous when CG+map_fn — must raise."""
+        from tenax.algorithms.coarse_grain import honeycomb_cg_gates
+        from tenax.algorithms.ipeps_config import iPEPSConfig
+        from tenax.algorithms.ipeps_optimize import (
+            _wrap_as_dense_tensor,
+            optimize_gs_ad,
+        )
+
+        gates = honeycomb_cg_gates()
+        D = 2
+        bogus_A = _wrap_as_dense_tensor(jnp.zeros((D, D, D, D, 4)))
+        config = iPEPSConfig(
+            max_bond_dim=D,
+            cg_gates=gates,
+            su_init=False,
+        )
+        with pytest.raises(ValueError, match="A_init must be either None"):
+            optimize_gs_ad(jnp.zeros((4, 4, 4, 4)), bogus_A, config)
