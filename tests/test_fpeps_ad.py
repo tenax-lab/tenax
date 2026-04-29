@@ -38,10 +38,18 @@ def ipeps_config_short():
 
 @pytest.fixture
 def ipeps_config_medium():
-    """iPEPSConfig for medium runs (energy decrease test)."""
+    """iPEPSConfig for medium runs (energy decrease test).
+
+    ``chi=8`` is required: at ``chi=4`` the CTM converges to a
+    non-physical metastable fixed point (E ≈ -4.44 vs E ≈ +0.18 at
+    chi=8) and the perturbed-A energy landscape is wildly non-smooth
+    — descent breaks out of that artifact basin and looks like
+    "uphill" optimization. ``chi=8`` lands in the physical basin
+    where the energy varies smoothly and Adam can descend.
+    """
     return iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=15, conv_tol=1e-4),
+        ctm=CTMConfig(chi=8, max_iter=30, conv_tol=1e-4),
         gs_num_steps=10,
         gs_learning_rate=1e-2,
         gs_optimizer="adam",
@@ -112,30 +120,26 @@ class TestOptimizeFpepsAd:
         assert isinstance(A_opt, type(A_init))
         assert np.isfinite(E_gs)
 
-    @pytest.mark.xfail(
-        reason=(
-            "After #361 (Koszul twist) and the divide-by-norm gauge-fix-AD "
-            "fix below, the gradient is now finite (test_symmetric_nontrivial_"
-            "gradient_finite passes) but Adam over 10 steps still moves "
-            "uphill: E_init=-4.44, E_final≈-1.49. The remaining "
-            "wrong-direction component is most likely the argmax-based "
-            "phase pick in the per-absorption gauge fix — unstable for "
-            "SymmetricTensor with non-trivial charges (suspect (A) in #362). "
-            "Tracked as a separate follow-up to #362."
-        ),
-        strict=False,
-    )
     def test_optimize_fpeps_ad_energy_decreases(
         self, fpeps_config, ipeps_config_medium
     ):
-        """10 AD steps: final energy should be lower than the initial energy."""
+        """10 AD steps: final energy should be lower than the initial energy.
+
+        Uses ``chi=8`` (see ``ipeps_config_medium`` fixture); ``chi=4``
+        lands on a non-physical metastable CTM fixed point and the
+        perturbed-A landscape is non-smooth, which made the original
+        version of this test xfail under #362 with the misdiagnosis
+        "wrong-direction gradient". With ``chi=8`` the landscape is
+        smooth and the divide-by-norm gauge-fix-AD fix
+        (PR #363 / ``_phase_fix_normalize_tensor``) is sufficient.
+        """
         H = spinless_fermion_gate(fpeps_config)
         A_init = _build_initial_fpeps_tensor(fpeps_config, jax.random.PRNGKey(0))
 
-        # Compute initial energy via a short 0-step run
+        # Compute initial energy via a short 0-step run with the same chi.
         config_0 = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=15, conv_tol=1e-4),
+            ctm=CTMConfig(chi=8, max_iter=30, conv_tol=1e-4),
             gs_num_steps=0,
             gs_learning_rate=1e-2,
             gs_verbose=False,
