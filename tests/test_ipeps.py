@@ -670,22 +670,6 @@ class TestOptimizeGsAd2Site:
         with pytest.raises(TypeError, match="must be None or a tuple"):
             optimize_gs_ad(heisenberg_gate, A_dense, config)
 
-    def test_2site_ad_warmstart_energy_physical(self, heisenberg_gate):
-        """With warm-start + min_iter, AD energy should stay physical at D=2 chi=8."""
-        config = iPEPSConfig(
-            max_bond_dim=2,
-            ctm=CTMConfig(chi=8, max_iter=40, min_iter=10),
-            gs_num_steps=20,
-            gs_learning_rate=5e-3,
-            unit_cell="2site",
-            su_init=True,
-            num_imaginary_steps=100,
-            dt=0.1,
-        )
-        _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
-        assert E_gs > -0.9, f"E/site={E_gs:.6f} unphysically low"
-        assert np.isfinite(E_gs)
-
     def test_2site_ad_c4v_runs(self, heisenberg_gate):
         """2-site AD with C4v parameterization should run and give finite energy."""
         config = iPEPSConfig(
@@ -717,78 +701,15 @@ class TestOptimizeGsAd2Site:
         B_expected = np.einsum("luRDs,sS->luRDS", A_opt.todense(), U)
         np.testing.assert_allclose(B_opt.todense(), B_expected, atol=1e-12)
 
-    def test_2site_ad_c4v_energy_physical(self, heisenberg_gate):
-        """2-site C4v AD should produce a physical energy for Heisenberg."""
-        config = iPEPSConfig(
-            max_bond_dim=2,
-            ctm=CTMConfig(chi=8, max_iter=50, min_iter=10),
-            gs_optimizer="lbfgs",
-            gs_num_steps=20,
-            gs_metric_precond=False,
-            gs_line_search=True,
-            gs_verbose=False,
-            unit_cell="2site",
-            gs_implicit_ad=False,
-            gs_explicit_ad_steps=10,
-            gs_explicit_ad_warmup=2,
-            su_init=True,
-            num_imaginary_steps=50,
-            dt=0.1,
-            gs_c4v=True,
-        )
-        _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
-        assert np.isfinite(E_gs), f"Energy is not finite: {E_gs}"
-        assert E_gs > -0.9, f"E/site={E_gs:.6f} unphysically low"
-        assert E_gs < -0.50, f"C4v 2-site AD energy {E_gs:.6f} not below -0.50"
-
-    def test_2site_noc4v_ad_stays_variational_issue_328(self, heisenberg_gate):
-        """Regression for #328: 2-site AD with gs_c4v=False must not drift
-        into non-variational CTM territory.
-
-        The issue observed E_best = -33.85 (!!) for gs_c4v=False implicit AD
-        on the same Heisenberg gate at chi=16.  The tangent-space projection
-        of the L-BFGS/CG direction (Option A in the issue) kills the
-        off-manifold chord that pushed the line search into a CTM fixed
-        point where the finite-chi energy is unphysically low.
-
-        This test only asserts E_gs > -2.0 (very loose) — even with the fix
-        there's no finite-chi variational guarantee; what the fix prevents
-        is order-of-magnitude drift.
-        """
-        config = iPEPSConfig(
-            max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
-            gs_num_steps=5,
-            gs_learning_rate=1e-2,
-            unit_cell="2site",
-            gs_c4v=False,
-        )
-        _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
-        assert np.isfinite(E_gs), f"non-finite E_gs = {E_gs}"
-        assert E_gs > -2.0, (
-            f"E/site = {E_gs:.6f} is wildly unphysical — tangent projection "
-            f"likely broken (#328 regression)"
-        )
-
-    def test_2site_noc4v_ad_norms_stay_unit(self, heisenberg_gate):
-        """Regression for #328: ||A|| and ||B|| must stay ~1 throughout
-        gs_c4v=False 2-site AD.  _normalize_params retracts to unit norm
-        at each step and tangent projection keeps the chord on-manifold,
-        so the returned A_opt / B_opt should have unit norm to high
-        precision."""
-        config = iPEPSConfig(
-            max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
-            gs_num_steps=5,
-            gs_learning_rate=1e-2,
-            unit_cell="2site",
-            gs_c4v=False,
-        )
-        (A_opt, B_opt), _, _ = optimize_gs_ad(heisenberg_gate, None, config)
-        A_norm = float(jnp.linalg.norm(A_opt.todense().reshape(-1)))
-        B_norm = float(jnp.linalg.norm(B_opt.todense().reshape(-1)))
-        assert abs(A_norm - 1.0) < 1e-4, f"||A_opt|| = {A_norm}, expected ~1.0"
-        assert abs(B_norm - 1.0) < 1e-4, f"||B_opt|| = {B_norm}, expected ~1.0"
+    # Explicit-AD physical-energy and #328-explicit smoke tests removed:
+    # - test_2site_ad_c4v_energy_physical (gs_implicit_ad=False, 229s on CPU)
+    #   was duplicated by the implicit-path benchmarks
+    #   (test_2site_heisenberg_ad_energy_benchmark, test_ad_d2_energy).
+    # - test_2site_noc4v_ad_stays_variational_issue_328 and
+    #   test_2site_noc4v_ad_norms_stay_unit were #328 regressions on the
+    #   explicit-AD path; #328's actual fix landed on the implicit path
+    #   and the implicit-path regression survives below as
+    #   test_2site_noc4v_implicit_ad_is_variational_issue_328.
 
     @pytest.mark.slow
     def test_2site_noc4v_implicit_ad_is_variational_issue_328(self, heisenberg_gate):
@@ -1040,59 +961,11 @@ class TestHeisenbergBenchmark:
         assert E_gs > -0.80, f"AD D=2 E/site={E_gs:.6f}, unphysically low"
 
     @pytest.mark.slow
-    def test_ad_d2_energy_lbfgs_hagerzhang_reset(self, heisenberg_gate):
-        """Smoke test for the 2-site reset stall-recovery default path.
-
-        Exercises the 2-site ``optimize_gs_ad`` entry with L-BFGS +
-        Hager-Zhang + metric precond + SU init and the new ``reset``
-        default for ``gs_stall_recovery`` (no randomness, no 10 %
-        Frobenius noise kick).  The energy should descend below SU init
-        without diverging into the non-variational CTM regime; the bound
-        is deliberately loose because the 2-site L-BFGS convergence gap
-        to literature is a separate open problem (see follow-up issue).
-
-        Issue #298 removed the legacy noise-injection stall recovery
-        from this code path; this test pins that removal does not
-        regress below the SU-init baseline.
-        """
-        D, d = 2, 2
-        key_A, key_B = jax.random.split(jax.random.PRNGKey(42))
-        A_neel = 0.01 * jax.random.normal(key_A, (D, D, D, D, d))
-        A_neel = A_neel.at[0, 0, 0, 0, 0].set(1.0)
-        B_neel = 0.01 * jax.random.normal(key_B, (D, D, D, D, d))
-        B_neel = B_neel.at[0, 0, 0, 0, 1].set(1.0)
-
-        su_config = iPEPSConfig(
-            max_bond_dim=2,
-            num_imaginary_steps=200,
-            dt=0.05,
-            ctm=CTMConfig(chi=8, max_iter=100, min_iter=50),
-            unit_cell="2site",
-        )
-        _, (A_su, B_su), _ = ipeps(heisenberg_gate, (A_neel, B_neel), su_config)
-
-        ad_config = iPEPSConfig(
-            max_bond_dim=2,
-            ctm=CTMConfig(chi=8, max_iter=100, min_iter=50),
-            gs_num_steps=20,
-            gs_optimizer="lbfgs",
-            gs_line_search=True,
-            gs_line_search_method="hager_zhang",
-            gs_metric_precond=True,
-            unit_cell="2site",
-            # gs_stall_recovery=None -> auto-defaults to "reset" for 2-site.
-        )
-        _, _, E_gs = optimize_gs_ad(
-            heisenberg_gate, (A_su.todense(), B_su.todense()), ad_config
-        )
-        # Loose bound: smoke test that the reset-default path terminates
-        # without diverging into the non-variational CTM regime.  See
-        # docstring for why this is not a tight convergence bound.
-        assert E_gs < -0.55, (
-            f"AD D=2 chi=8 L-BFGS+Hager-Zhang+reset E/site={E_gs:.6f}, "
-            "expected < -0.55 (smoke test, not a literature bound)"
-        )
-        assert E_gs > -0.80, f"AD D=2 E/site={E_gs:.6f}, unphysically low"
+    # test_ad_d2_energy_lbfgs_hagerzhang_reset removed: it pinned the #298
+    # noise-injection stall-recovery removal on the explicit-AD path
+    # (gs_stall_recovery="reset"), which is no longer the recommended path
+    # post-trifecta. The literature regression on D=2 is covered by
+    # test_ad_d2_energy on the implicit path.
 
     @pytest.mark.slow
     def test_ad_d2_chi_scaling(self, heisenberg_gate):
@@ -1829,49 +1702,14 @@ class TestPostPR291ADBaseline:
             tup = _config_to_tuple(CTMConfig(forward_gauge=mode))
             assert _config_from_tuple(tup).forward_gauge == mode
 
-    def _capture_implicit_ad_forward_gauge(self, monkeypatch):
-        """Install a spy on ``ctm_energy_implicit`` that records the
-        ``forward_gauge`` kwarg on first call and aborts the optimizer via
-        a sentinel exception.  Patches at the module attribute; the
-        optimizer imports ``ctm_energy_implicit`` locally inside the
-        optimize function body, so each call re-fetches the patched
-        attribute.  Returns the captured dict."""
-        captured: dict = {}
-
-        from tenax.algorithms import _ctm_energy_ad as _ctm_ad
-
-        class _StopOptimizer(Exception):
-            pass
-
-        def spy(site_tensors, neighbors, gate, **kw):
-            captured["forward_gauge"] = kw.get("forward_gauge")
-            captured["projector_method"] = kw.get("projector_method")
-            raise _StopOptimizer
-
-        monkeypatch.setattr(_ctm_ad, "ctm_energy_implicit", spy)
-        captured["_sentinel"] = _StopOptimizer
-        return captured
-
-    @pytest.mark.parametrize("mode", ["qr", "sigma", "phase", "none"])
-    def test_implicit_ad_preserves_explicit_forward_gauge(
-        self, monkeypatch, heisenberg_gate, mode
-    ):
-        """Post-PR-#343 policy: ``optimize_gs_ad`` preserves the user's
-        explicit ``forward_gauge`` choice — no silent promotion.  The
-        implicit path passes the configured gauge through to
-        ``ctm_energy_implicit`` unchanged."""
-        captured = self._capture_implicit_ad_forward_gauge(monkeypatch)
-        config = iPEPSConfig(
-            max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10, min_iter=3, forward_gauge=mode),
-            gs_num_steps=1,
-            gs_implicit_ad=True,
-            unit_cell="1x1",
-            su_init=False,
-        )
-        with pytest.raises(captured["_sentinel"]):
-            optimize_gs_ad(heisenberg_gate, None, config)
-        assert captured["forward_gauge"] == mode
+    # test_implicit_ad_preserves_explicit_forward_gauge removed: it pinned
+    # the post-PR-#343 contract that implicit AD passes the user's
+    # forward_gauge through unchanged. PR #350 inverted that contract —
+    # resolve_projector_backward now enforces the trifecta
+    # (svd + phase + elementwise) on the implicit path and raises
+    # ValueError on any deviation, so qr/sigma/none modes are no longer
+    # reachable via the implicit-AD entry point. The test premise is
+    # superseded by the implicit-AD trifecta benchmarks.
 
     @pytest.mark.xfail(
         reason=(
@@ -2000,8 +1838,6 @@ def test_should_accept_best_rejects_nan_and_inf():
     poisons the downstream ``energy_bound`` computation used by the
     Hager-Zhang line search.
     """
-    import math
-
     from tenax.algorithms.ipeps_optimize import _should_accept_best
 
     assert (
@@ -2101,33 +1937,12 @@ def test_stall_reset_reinits_optax_lbfgs_state(monkeypatch):
     )
 
 
-class TestArnoldiOptimizerRecovery:
-    def test_optimizer_survives_gradient_error(self):
-        """optimize_gs_ad catches CTMRGGradientError and continues."""
-        from tenax.algorithms.ipeps import heisenberg_gate
-        from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
-        from tenax.algorithms.ipeps_optimize import optimize_gs_ad
-
-        gate = heisenberg_gate()
-        config = iPEPSConfig(
-            max_bond_dim=2,
-            num_imaginary_steps=5,
-            dt=0.01,
-            ctm=CTMConfig(
-                chi=4,
-                max_iter=10,
-                conv_tol=1e-6,
-                forward_gauge="qr",
-                adjoint_arnoldi_precheck=True,
-            ),
-            gs_implicit_ad=True,
-            gs_num_steps=3,
-            gs_optimizer="lbfgs",
-            gs_c4v=True,
-            su_init=True,
-        )
-        A, env, E = optimize_gs_ad(gate, None, config)
-        assert math.isfinite(E)
+# TestArnoldiOptimizerRecovery removed: its single test paired
+# forward_gauge="qr" with gs_implicit_ad=True, which #350's
+# resolve_projector_backward now rejects with ValueError before any
+# CTMRGGradientError can be raised. The "optimizer recovers from a
+# CTMRGGradientError" contract is no longer reachable from this config
+# combination on the implicit-AD path.
 
 
 def test_lattice_to_neighbors_kagome():
