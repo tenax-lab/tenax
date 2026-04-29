@@ -1569,13 +1569,14 @@ class TestArnoldiConfig:
 class TestArnoldiPrecheckIntegration:
     @pytest.mark.skip(
         reason=(
-            "Setup no longer crosses the rho >= 5.0 raise threshold "
-            "(default since #334). The qr-forward, chi=4, max_iter=10 "
-            "config produces a non-contractive (rho >= 1) but "
-            "below-threshold backward, so the precheck logs but does "
-            "not raise. Tracking in #354 — needs either a more "
-            "aggressive non-contractive fixture or a threshold-aware "
-            "rewrite."
+            "The qr-forward, chi=4, max_iter=10 fixture used to be "
+            "non-contractive (rho >= 1) but is now contractive: with "
+            "adjoint_arnoldi_threshold=1.0 the precheck still does not "
+            "raise. Building a deterministic non-contractive fixture is "
+            "more involved than threshold tuning — needs a setup that "
+            "actively exhibits rho >= 1.0 (e.g. larger D, deliberately "
+            "non-converged forward, or a synthetic vjp_env_fn). Tracked "
+            "in #354 bucket B."
         )
     )
     def test_raises_on_non_contractive_backward(self):
@@ -1590,6 +1591,7 @@ class TestArnoldiPrecheckIntegration:
             conv_tol=1e-6,
             forward_gauge="qr",
             adjoint_arnoldi_precheck=True,
+            adjoint_arnoldi_threshold=1.0,
         )
 
         def _energy(A_tensor):
