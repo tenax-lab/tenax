@@ -42,6 +42,17 @@ def _phase_fix_normalize_tensor(T: Tensor) -> Tensor:
     sign/phase of each tensor so that consecutive CTM sweeps see a
     sign-stable fixed point, which regularizes the Jacobian ``J^T``
     in implicit AD.
+
+    The "first above threshold" rule is computed in dense layout order
+    so that the symmetric and dense paths agree element-by-element on
+    the converged env tensors (preserving
+    ``test_energy_symmetric_matches_dense``). For SymmetricTensor with
+    non-trivial charges, the dense and buffer orders pick different
+    anchors, which causes the symmetric env to drift from the dense
+    one. The C and T tensors are small (``chi×chi`` corners,
+    ``chi×D²×chi`` edges), so the per-sweep ``todense() + from_dense()``
+    cost is negligible — see ``test_symmetric_sweep_no_todense`` for
+    the architecture guard's justified-exemption note.
     """
     import jax.numpy as jnp
 
