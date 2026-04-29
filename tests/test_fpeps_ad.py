@@ -114,19 +114,14 @@ class TestOptimizeFpepsAd:
 
     @pytest.mark.xfail(
         reason=(
-            "Pre-#357 this test passed because the broken bar() (no "
-            "Koszul twist on fermionic SymmetricTensor) made the "
-            "fermionic CTM energy collapse to ~0; near-zero energy "
-            "plus near-zero gradient meant L-BFGS took small steps "
-            "that satisfied E_final < E_init by numerical noise. After "
-            "#357 the forward energy is correct (E_init ~ -4.44), but "
-            "the implicit-AD backward through the gauge-fix path still "
-            "produces wrong gradients for SymmetricTensor with "
-            "non-trivial charges (same root cause as "
-            "test_symmetric_nontrivial_gradient_finite below) — the "
-            "optimizer now moves uphill with a correct landscape and a "
-            "broken gradient. Will pass once the gauge-fix-AD issue is "
-            "resolved; that's tracked in #354 bucket E follow-up."
+            "After #361 (Koszul twist) and the divide-by-norm gauge-fix-AD "
+            "fix below, the gradient is now finite (test_symmetric_nontrivial_"
+            "gradient_finite passes) but Adam over 10 steps still moves "
+            "uphill: E_init=-4.44, E_final≈-1.49. The remaining "
+            "wrong-direction component is most likely the argmax-based "
+            "phase pick in the per-absorption gauge fix — unstable for "
+            "SymmetricTensor with non-trivial charges (suspect (A) in #362). "
+            "Tracked as a separate follow-up to #362."
         ),
         strict=False,
     )
@@ -302,26 +297,20 @@ class TestTodenseGradientFlow:
         )
 
     @pytest.mark.algorithm
-    @pytest.mark.xfail(
-        reason=(
-            "Implicit-AD backward through the gauge-fix path "
-            "(_phase_fix_ctm_tensor / _wrap_tensor with "
-            "from_dense(..., tol=inf), or the argmax-based phase pick) "
-            "is not differentiation-safe for SymmetricTensor with "
-            "non-trivial charges. Forward energy is now finite (#357 "
-            "fixed the bar() Koszul twist), but the implicit VJP still "
-            "produces all-NaN gradients on this fixture. Separate from "
-            "#357; tracked in #354 bucket E."
-        ),
-        strict=True,
-    )
     def test_symmetric_nontrivial_gradient_finite(self):
         """SymmetricTensor with non-trivial charges should produce finite gradients.
 
-        The Koszul-twist part of this contract is now covered by
-        ``test_symmetric_nontrivial_energy_finite`` (no xfail). What
-        remains is the implicit-AD backward through the gauge-fix path,
-        which is the bug the xfail marker documents.
+        Regression for the implicit-AD backward through the gauge-fix
+        path (#362): pre-fix, ``jax.value_and_grad`` returned all-NaN
+        gradient leaves on a fermionic ``SymmetricTensor`` with empty
+        charge sectors. Root cause was the differentiable
+        ``arr / (norm + 1e-30)`` step in ``_phase_fix_normalize_tensor``
+        and ``_phase_fix_ctm_tensor`` — JAX evaluated both branches of
+        ``jnp.where`` in the SVD/divide backward, and the dense layout's
+        out-of-block zeros produced a 0/0 NaN at the fixed point. Fixed
+        by wrapping the norm in ``jax.lax.stop_gradient`` (the radial
+        component of the cotangent is discarded by the outer unit-sphere
+        projection anyway).
         """
         from tenax.algorithms._ctm_tensor import initialize_ctm_tensor_env
         from tenax.algorithms.ad_utils import _config_to_tuple
