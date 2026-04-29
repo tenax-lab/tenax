@@ -157,6 +157,12 @@ def _apply_projector_tensor(
     Returns:
         ``(C1_new, C4_new, T_new)`` as Tensor objects.
     """
+    # Projector .bar() (no Koszul): the absorb step P1_bar @ ... @ P_2 is
+    # a paired contraction. Adding the super-algebra twist on each
+    # projector independently breaks pair-cancellation (the missing
+    # twist on one P is compensated by the same missing twist on the
+    # other). The double-layer's bar_super() handles the fermionic sign
+    # for the bra construction; the projectors stay bosonic-bar.
     P1_bar = P_1.bar()  # (fused_OUT, chi_new_IN) — contracts on "fused"
     P2_bar = P_2.bar()
 
