@@ -701,92 +701,22 @@ class TestOptimizeGsAd2Site:
         B_expected = np.einsum("luRDs,sS->luRDS", A_opt.todense(), U)
         np.testing.assert_allclose(B_opt.todense(), B_expected, atol=1e-12)
 
-    # Explicit-AD physical-energy and #328-explicit smoke tests removed:
+    # Explicit-AD #328 smoke tests and the real-init implicit #328 smoke
+    # were removed:
     # - test_2site_ad_c4v_energy_physical (gs_implicit_ad=False, 229s on CPU)
-    #   was duplicated by the implicit-path benchmarks
+    #   was duplicated by the implicit-path literature regressions
     #   (test_2site_heisenberg_ad_energy_benchmark, test_ad_d2_energy).
     # - test_2site_noc4v_ad_stays_variational_issue_328 and
     #   test_2site_noc4v_ad_norms_stay_unit were #328 regressions on the
-    #   explicit-AD path; #328's actual fix landed on the implicit path
-    #   and the implicit-path regression survives below as
-    #   test_2site_noc4v_implicit_ad_is_variational_issue_328.
-
-    @pytest.mark.slow
-    def test_2site_noc4v_implicit_ad_is_variational_issue_328(self, heisenberg_gate):
-        """Regression for #328 option (C): non-C4v 2-site *implicit* AD must
-        land near physical on Heisenberg at chi=16, unlike explicit AD which
-        drifts far below.  Bench config mirrors /tmp/bench_issue_328.py row
-        4 (seed=0 random init, 30 AD steps, Armijo L-BFGS,
-        gs_metric_precond=False).
-
-        Bench matrix that drove this resolution (D=2 Heisenberg, chi=16, CPU;
-        see project_328_explicit_ad_dead_end.md memory):
-
-          explicit, gs_explicit_ad_steps=10 -> E = -1.1625  (drift)
-          explicit, sigma gauge, chi=8      -> E = -2.183   (worse)
-          implicit                          -> E = -0.566   (closest to physical)
-
-        Physical ground state (Sandvik QMC): E/site = -0.6694.
-
-        Implicit AD at finite chi is not strictly variational — it still
-        sits slightly below physical at -0.566 — but it's the most stable
-        path of the tested modes on CPU.  Explicit AD on the same config
-        drifts below -1.0 and is guarded by the warning in
-        ``_optimize_gs_ad_tensor_2site``.
-
-        **Backend note:** this test forces CPU via ``jax.default_device``
-        because the same code on CUDA produces E ~= -7.5 for reasons not
-        yet understood (numerical drift between GPU and CPU at identical
-        float64 precision — separate follow-up investigation, not the
-        subject of #328).  The bench matrix in memory is CPU-only.
-        """
-        from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor
-
-        # Force CPU: GPU produces different numerical results for the CTM
-        # + implicit-AD pipeline, and the documented bench in memory is CPU.
-        cpu_devices = jax.devices("cpu")
-        if not cpu_devices:
-            pytest.skip("CPU backend not available")
-        cpu = cpu_devices[0]
-
-        with jax.default_device(cpu):
-            D, d = 2, 2
-            ka, kb = jax.random.split(jax.random.PRNGKey(0))
-            A_init = _wrap_as_dense_tensor(jax.random.normal(ka, (D, D, D, D, d)))
-            B_init = _wrap_as_dense_tensor(jax.random.normal(kb, (D, D, D, D, d)))
-
-            config = iPEPSConfig(
-                max_bond_dim=D,
-                ctm=CTMConfig(chi=16, max_iter=30, min_iter=10),
-                gs_num_steps=30,
-                gs_learning_rate=1e-2,
-                unit_cell="2site",
-                gs_c4v=False,
-                gs_implicit_ad=True,  # implicit AD is the most stable path
-                gs_explicit_ad_steps=0,
-                gs_explicit_ad_warmup=0,
-                gs_optimizer="lbfgs",
-                gs_line_search=True,
-                gs_line_search_method="armijo",
-                gs_line_search_max_steps=8,
-                gs_metric_precond=False,
-                gs_verbose=False,
-            )
-            _, _, E_gs = optimize_gs_ad(heisenberg_gate, (A_init, B_init), config)
-        assert np.isfinite(E_gs), f"non-finite E_gs = {E_gs}"
-        # Implicit AD must not drift catastrophically.  Bench recorded -0.566;
-        # use a loose upper bound above physical -0.6694 to absorb finite-chi
-        # + JIT noise across runs.  The critical assertion is that E_gs does
-        # not drop toward -1 or -2 like explicit AD does (issue #328).
-        assert E_gs > -0.80, (
-            f"implicit AD E/site = {E_gs:.6f} below guard -0.80 "
-            f"— regression for #328 option (C); explicit AD drifts below "
-            f"-1.0 and implicit should not follow"
-        )
-        assert E_gs < -0.30, (
-            f"implicit AD E/site = {E_gs:.6f} not reasonably optimized "
-            f"(expected ~-0.56 per #328 bench)"
-        )
+    #   explicit-AD path, superseded by the implicit-AD trifecta.
+    # - test_2site_noc4v_implicit_ad_is_variational_issue_328 fed a real
+    #   float64 init via _wrap_as_dense_tensor(jax.random.normal(...));
+    #   the recommended non-C4v 2-site path now defaults to complex128
+    #   random init (ipeps_optimize.py:1359), and real-valued multi-site
+    #   AD without C4v is documented non-variational in
+    #   project_complex_tensors_variational.md. The variational regression
+    #   for the actually-recommended path is owned by tests/test_complex128_ad.py
+    #   (test_complex128_2site_gradient et al.).
 
     def test_tangent_project_unit_complex_is_hermitian(self):
         """Regression for PR #330 review: _tangent_project_unit must use
