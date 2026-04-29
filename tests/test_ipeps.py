@@ -1018,24 +1018,40 @@ class TestOptimizeGsAdOptimizers:
         return H.reshape(d, d, d, d)
 
     def test_lbfgs_optimizer_runs(self, heisenberg_gate):
-        """L-BFGS optimizer with line search should produce finite energy."""
+        """L-BFGS optimizer with line search should produce finite energy.
+
+        Scope kept tight: ``chi=2`` and ``gs_num_steps=1`` so the
+        L-BFGS-with-Hager-Zhang trace fits within the macOS Full-tests
+        runner memory budget. At ``chi=4`` + 3 steps + line search the
+        XLA compile blew out (exit 137) when run late in the
+        ``test_ipeps.py`` session — see CI run 25104994256 (after #360
+        merged to main). The contract being tested is "L-BFGS path
+        compiles and produces finite energy"; even one step exercises
+        that path.
+        """
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=5),
+            ctm=CTMConfig(chi=2, max_iter=3),
             gs_optimizer="lbfgs",
-            gs_num_steps=3,
+            gs_num_steps=1,
             gs_line_search=True,
         )
         _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
         assert np.isfinite(E_gs)
 
     def test_cg_optimizer_runs(self, heisenberg_gate):
-        """CG optimizer should produce finite energy (covers PR beta path)."""
+        """CG optimizer should produce finite energy (covers PR beta path).
+
+        Scope tightened alongside ``test_lbfgs_optimizer_runs`` to keep
+        the optimizer-smoke pair cheap; both tests run late in
+        ``test_ipeps.py`` after long-running benchmarks, so the JAX
+        cache is already heavy.
+        """
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=5),
+            ctm=CTMConfig(chi=2, max_iter=3),
             gs_optimizer="cg",
-            gs_num_steps=3,
+            gs_num_steps=1,
         )
         _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
         assert np.isfinite(E_gs)
