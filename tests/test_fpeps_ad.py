@@ -65,6 +65,7 @@ def ipeps_config_medium():
 class TestOptimizeFpepsAd:
     """Tests for the AD-based fermionic iPEPS optimization entry point."""
 
+    @pytest.mark.slow
     def test_optimize_fpeps_ad_with_explicit_init(
         self, fpeps_config, ipeps_config_short
     ):
@@ -80,6 +81,7 @@ class TestOptimizeFpepsAd:
         assert isinstance(A_opt, type(A_init))
         assert np.isfinite(E_gs)
 
+    @pytest.mark.slow
     def test_optimize_fpeps_ad_energy_decreases(
         self, fpeps_config, ipeps_config_medium
     ):
@@ -159,6 +161,7 @@ class TestTodenseGradientFlow:
         return loss_fn
 
     @pytest.mark.algorithm
+    @pytest.mark.slow
     def test_dense_tensor_gradient_finite(self):
         """DenseTensor (the workaround path) produces finite gradients."""
         from tenax.algorithms._ctm_tensor import initialize_ctm_tensor_env
