@@ -671,11 +671,14 @@ def _optimize_gs_ad_tensor(
     config = _normalize_stall_recovery(config, unit_cell="1x1")
     import optax
 
-    from tenax.algorithms._ctm_energy_ad import ctm_energy_explicit, ctm_energy_implicit
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
     from tenax.algorithms.ad_utils import CTMRGGradientError
+    from tenax.algorithms.ipeps_ad_policy import (
+        ctm_converge_kwargs,
+        make_ctm_energy_fn,
+    )
 
     cg_gates = config.cg_gates
     _use_cg = cg_gates is not None
@@ -756,46 +759,16 @@ def _optimize_gs_ad_tensor(
     else:
         _energy_fn_kw = None
 
-    def _ctm_energy_fn(site_tensors):
-        """Dispatch to implicit or explicit CTM energy."""
-        env_init = _env_cache.get("envs", None)
-        if use_explicit:
-            return ctm_energy_explicit(
-                site_tensors,
-                SINGLE_SITE_NEIGHBORS,
-                gate,
-                chi=ctm_cfg.chi,
-                warmup_steps=explicit_warmup,
-                backprop_steps=explicit_steps,
-                projector_method=ctm_cfg.projector_method,
-                renormalize=ctm_cfg.renormalize,
-                projector_backward=ctm_cfg.projector_backward,
-                env_init=env_init,
-                energy_fn=_energy_fn_kw,
-            )
-        else:
-            return ctm_energy_implicit(
-                site_tensors,
-                SINGLE_SITE_NEIGHBORS,
-                gate,
-                chi=ctm_cfg.chi,
-                max_iter=ctm_cfg.max_iter,
-                conv_tol=ctm_cfg.conv_tol,
-                projector_method=ctm_cfg.projector_method,
-                renormalize=ctm_cfg.renormalize,
-                projector_backward=ctm_cfg.projector_backward,
-                qr_warmup_steps=ctm_cfg.qr_warmup_steps,
-                chi_ramp=ctm_cfg.chi_ramp,
-                env_init=env_init,
-                forward_gauge=ctm_cfg.forward_gauge,
-                conv_method=ctm_cfg.ctm_conv_method,
-                min_iter=ctm_cfg.min_iter,
-                gmres_tol=ctm_cfg.gmres_tol,
-                gmres_maxiter=ctm_cfg.gmres_maxiter,
-                gmres_restart=ctm_cfg.gmres_restart,
-                arnoldi_precheck=False,
-                energy_fn=_energy_fn_kw,
-            )
+    _ctm_energy_fn = make_ctm_energy_fn(
+        neighbors=SINGLE_SITE_NEIGHBORS,
+        gate=gate,
+        ctm_cfg=ctm_cfg,
+        env_cache=_env_cache,
+        use_explicit=use_explicit,
+        explicit_warmup=explicit_warmup,
+        explicit_steps=explicit_steps,
+        energy_fn=_energy_fn_kw,
+    )
 
     def loss_fn(params):
         A_norm = _params_to_A_norm(params)
@@ -810,15 +783,7 @@ def _optimize_gs_ad_tensor(
         envs, _ = python_loop_ctm_converge(
             site_tensors,
             SINGLE_SITE_NEIGHBORS,
-            chi=ctm_cfg.chi,
-            max_iter=ctm_cfg.max_iter,
-            conv_tol=ctm_cfg.conv_tol,
-            renormalize=ctm_cfg.renormalize,
-            projector_method=ctm_cfg.projector_method,
-            qr_warmup_steps=ctm_cfg.qr_warmup_steps,
-            projector_backward=ctm_cfg.projector_backward,
-            chi_ramp=ctm_cfg.chi_ramp,
-            env_init=_env_cache.get("envs", None),
+            **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
         )
         _env_cache["envs"] = envs
 
@@ -894,15 +859,7 @@ def _optimize_gs_ad_tensor(
         envs, _ = python_loop_ctm_converge(
             site_tensors,
             SINGLE_SITE_NEIGHBORS,
-            chi=ctm_cfg.chi,
-            max_iter=ctm_cfg.max_iter,
-            conv_tol=ctm_cfg.conv_tol,
-            renormalize=ctm_cfg.renormalize,
-            projector_method=ctm_cfg.projector_method,
-            qr_warmup_steps=ctm_cfg.qr_warmup_steps,
-            projector_backward=ctm_cfg.projector_backward,
-            chi_ramp=ctm_cfg.chi_ramp,
-            env_init=_env_cache.get("envs", None),
+            **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
         )
         if _use_cg:
             return float(compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, _cg_d_eff))
@@ -1261,17 +1218,7 @@ def _optimize_gs_ad_tensor(
         envs, _ = python_loop_ctm_converge(
             {(0, 0): A_t},
             SINGLE_SITE_NEIGHBORS,
-            chi=ctm_cfg.chi,
-            max_iter=ctm_cfg.max_iter,
-            min_iter=ctm_cfg.min_iter,
-            conv_tol=ctm_cfg.conv_tol,
-            conv_method=ctm_cfg.ctm_conv_method,
-            renormalize=ctm_cfg.renormalize,
-            projector_method=ctm_cfg.projector_method,
-            qr_warmup_steps=ctm_cfg.qr_warmup_steps,
-            projector_backward=ctm_cfg.projector_backward,
-            chi_ramp=ctm_cfg.chi_ramp,
-            env_init=env_init,
+            **ctm_converge_kwargs(ctm_cfg, env_init=env_init),
         )
         env_ = envs[(0, 0)]
         if _use_cg:
@@ -1434,7 +1381,6 @@ def _optimize_gs_ad_tensor_2site(
             )
     import optax
 
-    from tenax.algorithms._ctm_energy_ad import ctm_energy_explicit, ctm_energy_implicit
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor import (
         compute_energy_ctm_tensor_2site,
@@ -1443,6 +1389,10 @@ def _optimize_gs_ad_tensor_2site(
     from tenax.algorithms.ad_utils import (
         CTMRGGradientError,
         _wrap_tensor,
+    )
+    from tenax.algorithms.ipeps_ad_policy import (
+        ctm_converge_kwargs,
+        make_ctm_energy_fn,
     )
 
     gate = (
@@ -1517,46 +1467,16 @@ def _optimize_gs_ad_tensor_2site(
             d_phys,
         )
 
-    def _ctm_energy_fn_2s(site_tensors):
-        """Dispatch to implicit or explicit CTM energy for 2-site."""
-        env_init = _env_cache_2s.get("envs", None)
-        if use_explicit:
-            return ctm_energy_explicit(
-                site_tensors,
-                CHECKERBOARD_NEIGHBORS,
-                gate,
-                chi=ctm_cfg_2s.chi,
-                warmup_steps=explicit_warmup,
-                backprop_steps=explicit_steps,
-                projector_method=ctm_cfg_2s.projector_method,
-                renormalize=ctm_cfg_2s.renormalize,
-                projector_backward=ctm_cfg_2s.projector_backward,
-                env_init=env_init,
-                energy_fn=_energy_fn_2site,
-            )
-        else:
-            return ctm_energy_implicit(
-                site_tensors,
-                CHECKERBOARD_NEIGHBORS,
-                gate,
-                chi=ctm_cfg_2s.chi,
-                max_iter=ctm_cfg_2s.max_iter,
-                conv_tol=ctm_cfg_2s.conv_tol,
-                projector_method=ctm_cfg_2s.projector_method,
-                renormalize=ctm_cfg_2s.renormalize,
-                projector_backward=ctm_cfg_2s.projector_backward,
-                qr_warmup_steps=ctm_cfg_2s.qr_warmup_steps,
-                chi_ramp=ctm_cfg_2s.chi_ramp,
-                env_init=env_init,
-                forward_gauge=ctm_cfg_2s.forward_gauge,
-                conv_method=ctm_cfg_2s.ctm_conv_method,
-                min_iter=ctm_cfg_2s.min_iter,
-                gmres_tol=ctm_cfg_2s.gmres_tol,
-                gmres_maxiter=ctm_cfg_2s.gmres_maxiter,
-                gmres_restart=ctm_cfg_2s.gmres_restart,
-                energy_fn=_energy_fn_2site,
-                arnoldi_precheck=False,
-            )
+    _ctm_energy_fn_2s = make_ctm_energy_fn(
+        neighbors=CHECKERBOARD_NEIGHBORS,
+        gate=gate,
+        ctm_cfg=ctm_cfg_2s,
+        env_cache=_env_cache_2s,
+        use_explicit=use_explicit,
+        explicit_warmup=explicit_warmup,
+        explicit_steps=explicit_steps,
+        energy_fn=_energy_fn_2site,
+    )
 
     def loss_fn(params):
         if use_c4v:
@@ -1581,15 +1501,7 @@ def _optimize_gs_ad_tensor_2site(
         envs, _ = python_loop_ctm_converge(
             site_tensors,
             CHECKERBOARD_NEIGHBORS,
-            chi=ctm_cfg_2s.chi,
-            max_iter=ctm_cfg_2s.max_iter,
-            conv_tol=ctm_cfg_2s.conv_tol,
-            renormalize=ctm_cfg_2s.renormalize,
-            projector_method=ctm_cfg_2s.projector_method,
-            qr_warmup_steps=ctm_cfg_2s.qr_warmup_steps,
-            projector_backward=ctm_cfg_2s.projector_backward,
-            chi_ramp=ctm_cfg_2s.chi_ramp,
-            env_init=_env_cache_2s.get("envs", None),
+            **ctm_converge_kwargs(ctm_cfg_2s, env_init=_env_cache_2s.get("envs", None)),
         )
         _env_cache_2s["envs"] = envs
 
@@ -1641,15 +1553,7 @@ def _optimize_gs_ad_tensor_2site(
         envs, _ = python_loop_ctm_converge(
             site_tensors,
             CHECKERBOARD_NEIGHBORS,
-            chi=ctm_cfg_2s.chi,
-            max_iter=ctm_cfg_2s.max_iter,
-            conv_tol=ctm_cfg_2s.conv_tol,
-            renormalize=ctm_cfg_2s.renormalize,
-            projector_method=ctm_cfg_2s.projector_method,
-            qr_warmup_steps=ctm_cfg_2s.qr_warmup_steps,
-            projector_backward=ctm_cfg_2s.projector_backward,
-            chi_ramp=ctm_cfg_2s.chi_ramp,
-            env_init=_env_cache_2s.get("envs", None),
+            **ctm_converge_kwargs(ctm_cfg_2s, env_init=_env_cache_2s.get("envs", None)),
         )
         return float(
             compute_energy_ctm_tensor_2site(
@@ -2060,17 +1964,7 @@ def _optimize_gs_ad_tensor_2site(
         envs, _ = python_loop_ctm_converge(
             st,
             CHECKERBOARD_NEIGHBORS,
-            chi=ctm_cfg_2s.chi,
-            max_iter=ctm_cfg_2s.max_iter,
-            min_iter=ctm_cfg_2s.min_iter,
-            conv_tol=ctm_cfg_2s.conv_tol,
-            conv_method=ctm_cfg_2s.ctm_conv_method,
-            renormalize=ctm_cfg_2s.renormalize,
-            projector_method=ctm_cfg_2s.projector_method,
-            qr_warmup_steps=ctm_cfg_2s.qr_warmup_steps,
-            projector_backward=ctm_cfg_2s.projector_backward,
-            chi_ramp=ctm_cfg_2s.chi_ramp,
-            env_init=env_init,
+            **ctm_converge_kwargs(ctm_cfg_2s, env_init=env_init),
         )
         E_ = float(
             compute_energy_ctm_tensor_2site(
@@ -2122,7 +2016,6 @@ def _optimize_gs_ad_multisite(
     """
     config = _normalize_stall_recovery(config, unit_cell="multisite")
 
-    from tenax.algorithms._ctm_energy_ad import ctm_energy_explicit, ctm_energy_implicit
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor_energy import (
         compute_energy_ctm_tensor_multisite,
@@ -2130,6 +2023,10 @@ def _optimize_gs_ad_multisite(
     from tenax.algorithms.ad_utils import (
         CTMRGGradientError,
         _wrap_tensor,
+    )
+    from tenax.algorithms.ipeps_ad_policy import (
+        ctm_converge_kwargs,
+        make_ctm_energy_fn,
     )
 
     # ── Lattice → coordinate dicts ──────────────────────────────────────
@@ -2186,45 +2083,16 @@ def _optimize_gs_ad_multisite(
             gate_,
         )
 
-    def _ctm_energy_fn(site_tensors):
-        env_init = _env_cache.get("envs", None)
-        if use_explicit:
-            return ctm_energy_explicit(
-                site_tensors,
-                neighbors,
-                gate,
-                chi=ctm_cfg.chi,
-                warmup_steps=explicit_warmup,
-                backprop_steps=explicit_steps,
-                projector_method=ctm_cfg.projector_method,
-                renormalize=ctm_cfg.renormalize,
-                projector_backward=ctm_cfg.projector_backward,
-                env_init=env_init,
-                energy_fn=_energy_fn,
-            )
-        else:
-            return ctm_energy_implicit(
-                site_tensors,
-                neighbors,
-                gate,
-                chi=ctm_cfg.chi,
-                max_iter=ctm_cfg.max_iter,
-                conv_tol=ctm_cfg.conv_tol,
-                projector_method=ctm_cfg.projector_method,
-                renormalize=ctm_cfg.renormalize,
-                projector_backward=ctm_cfg.projector_backward,
-                qr_warmup_steps=ctm_cfg.qr_warmup_steps,
-                chi_ramp=ctm_cfg.chi_ramp,
-                env_init=env_init,
-                forward_gauge=ctm_cfg.forward_gauge,
-                conv_method=ctm_cfg.ctm_conv_method,
-                min_iter=ctm_cfg.min_iter,
-                gmres_tol=ctm_cfg.gmres_tol,
-                gmres_maxiter=ctm_cfg.gmres_maxiter,
-                gmres_restart=ctm_cfg.gmres_restart,
-                energy_fn=_energy_fn,
-                arnoldi_precheck=False,
-            )
+    _ctm_energy_fn = make_ctm_energy_fn(
+        neighbors=neighbors,
+        gate=gate,
+        ctm_cfg=ctm_cfg,
+        env_cache=_env_cache,
+        use_explicit=use_explicit,
+        explicit_warmup=explicit_warmup,
+        explicit_steps=explicit_steps,
+        energy_fn=_energy_fn,
+    )
 
     def loss_fn(params_):
         site_tensors = {}
@@ -2241,15 +2109,7 @@ def _optimize_gs_ad_multisite(
         envs, _ = python_loop_ctm_converge(
             site_tensors,
             neighbors,
-            chi=ctm_cfg.chi,
-            max_iter=ctm_cfg.max_iter,
-            conv_tol=ctm_cfg.conv_tol,
-            renormalize=ctm_cfg.renormalize,
-            projector_method=ctm_cfg.projector_method,
-            qr_warmup_steps=ctm_cfg.qr_warmup_steps,
-            projector_backward=ctm_cfg.projector_backward,
-            chi_ramp=ctm_cfg.chi_ramp,
-            env_init=_env_cache.get("envs", None),
+            **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
         )
         _env_cache["envs"] = envs
 
@@ -2262,15 +2122,7 @@ def _optimize_gs_ad_multisite(
         envs, _ = python_loop_ctm_converge(
             site_tensors,
             neighbors,
-            chi=ctm_cfg.chi,
-            max_iter=ctm_cfg.max_iter,
-            conv_tol=ctm_cfg.conv_tol,
-            renormalize=ctm_cfg.renormalize,
-            projector_method=ctm_cfg.projector_method,
-            qr_warmup_steps=ctm_cfg.qr_warmup_steps,
-            projector_backward=ctm_cfg.projector_backward,
-            chi_ramp=ctm_cfg.chi_ramp,
-            env_init=_env_cache.get("envs", None),
+            **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
         )
         return float(
             compute_energy_ctm_tensor_multisite(
@@ -2660,17 +2512,7 @@ def _optimize_gs_ad_multisite(
         envs, _ = python_loop_ctm_converge(
             site_tensors,
             neighbors,
-            chi=ctm_cfg.chi,
-            max_iter=ctm_cfg.max_iter,
-            min_iter=ctm_cfg.min_iter,
-            conv_tol=ctm_cfg.conv_tol,
-            conv_method=ctm_cfg.ctm_conv_method,
-            renormalize=ctm_cfg.renormalize,
-            projector_method=ctm_cfg.projector_method,
-            qr_warmup_steps=ctm_cfg.qr_warmup_steps,
-            projector_backward=ctm_cfg.projector_backward,
-            chi_ramp=ctm_cfg.chi_ramp,
-            env_init=env_init,
+            **ctm_converge_kwargs(ctm_cfg, env_init=env_init),
         )
         E_ = float(
             compute_energy_ctm_tensor_multisite(
