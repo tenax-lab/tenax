@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -93,6 +95,11 @@ def test_ctm_energy_explicit_gradient_matches_fd():
         checked += 1
 
     assert checked > 0, "No valid FD gradients computed"
-    assert max_rel_err < 0.05, (
-        f"Gradient relative error {max_rel_err:.4e} > 0.05 ({checked} elements checked)"
+    # Apple's Accelerate eigh backward (explicit-AD projector path on macOS)
+    # drifts ~0.085 vs central-difference FD; OpenBLAS on Linux stays well
+    # under 0.05. Keep the strict bound on Linux so cross-platform gradient
+    # regressions in the 0.05–0.10 band still fail this test. See #369.
+    tol = 0.10 if sys.platform == "darwin" else 0.05
+    assert max_rel_err < tol, (
+        f"Gradient relative error {max_rel_err:.4e} > {tol} ({checked} elements checked)"
     )
