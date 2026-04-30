@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from tenax import U1Symmetry
-from tenax.algorithms._block_array import (
+from tenax.core._block_array import (
     BlockArray,
     ba_add,
     ba_axpy,

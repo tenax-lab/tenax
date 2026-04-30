@@ -1086,12 +1086,12 @@ class TestCythonLanczosGround:
             cython_lanczos_ground,
         )
 
-        from tenax.algorithms._block_array import BlockArray
         from tenax.algorithms.dmrg import (
             _execute_matvec_combos,
             _lanczos_solve_np,
             _precompute_matvec_combos,
         )
+        from tenax.core._block_array import BlockArray
 
         rng = np.random.default_rng(42)
         subs = TWO_SITE_SUBSCRIPTS
@@ -1193,12 +1193,12 @@ class TestCythonLanczosGround:
             cython_lanczos_ground,
         )
 
-        from tenax.algorithms._block_array import BlockArray
         from tenax.algorithms.dmrg import (
             _execute_matvec_combos,
             _lanczos_solve_np,
             _precompute_matvec_combos,
         )
+        from tenax.core._block_array import BlockArray
 
         rng = np.random.default_rng(999)
         subs = TWO_SITE_SUBSCRIPTS

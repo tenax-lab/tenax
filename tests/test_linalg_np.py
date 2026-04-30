@@ -7,9 +7,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax.algorithms._block_array import BlockArray, ba_to_symmetric
 from tenax.algorithms._tensor_utils import scale_bond_axis
 from tenax.contraction.contractor import contract
+from tenax.core._block_array import BlockArray, ba_to_symmetric
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import SymmetricTensor

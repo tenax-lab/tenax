@@ -6,7 +6,6 @@ import jax
 import numpy as np
 import pytest
 
-from tenax.algorithms._block_array import ba_to_symmetric, symmetric_to_ba
 from tenax.algorithms.dmrg import (
     _blockwise_contract,
     _build_trivial_left_env_symmetric,
@@ -19,6 +18,7 @@ from tenax.algorithms.dmrg import (
     build_mpo_heisenberg,
 )
 from tenax.contraction.contractor import contract
+from tenax.core._block_array import ba_to_symmetric, symmetric_to_ba
 from tenax.core.mps import FiniteMPS
 from tenax.core.symmetry import U1Symmetry
 

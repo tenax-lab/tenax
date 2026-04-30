@@ -13,24 +13,43 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
 from tenax.core.index import TensorIndex
 
-# Cache the import check once at module load time.
-_HAS_CYTHON_BA = False
-if os.environ.get("TENAX_DISABLE_CYTHON_BLAS", "0") != "1":
-    try:
-        from tenax.contraction._cython_blas import cython_ba_axpy as _c_axpy
-        from tenax.contraction._cython_blas import cython_ba_inner as _c_inner
-        from tenax.contraction._cython_blas import (
-            cython_ba_scale_inplace as _c_scale_inplace,
-        )
+# Cython BLAS handles are loaded lazily on first use to avoid a static
+# import edge from ``tenax.core`` into ``tenax.contraction`` (which would
+# invert the package layering).
+_HAS_CYTHON_BA: bool | None = None
+_c_axpy: Any = None
+_c_inner: Any = None
+_c_scale_inplace: Any = None
 
-        _HAS_CYTHON_BA = True
+
+def _ensure_cython_ba_loaded() -> bool:
+    """Lazily resolve the Cython BlockArray helpers; returns True if available."""
+    global _HAS_CYTHON_BA, _c_axpy, _c_inner, _c_scale_inplace
+    if _HAS_CYTHON_BA is not None:
+        return _HAS_CYTHON_BA
+    if os.environ.get("TENAX_DISABLE_CYTHON_BLAS", "0") == "1":
+        _HAS_CYTHON_BA = False
+        return False
+    try:
+        from tenax.contraction._cython_blas import (
+            cython_ba_axpy,
+            cython_ba_inner,
+            cython_ba_scale_inplace,
+        )
     except ImportError:
-        pass
+        _HAS_CYTHON_BA = False
+        return False
+    _c_axpy = cython_ba_axpy
+    _c_inner = cython_ba_inner
+    _c_scale_inplace = cython_ba_scale_inplace
+    _HAS_CYTHON_BA = True
+    return True
 
 
 @dataclass
@@ -118,7 +137,7 @@ def ba_inner(a: BlockArray, b: BlockArray) -> float | complex:
 
     Returns float for real inputs, complex for complex inputs.
     """
-    if _HAS_CYTHON_BA and a.blocks:
+    if a.blocks and _ensure_cython_ba_loaded():
         return _c_inner(a.blocks, b.blocks)
     total: float | complex = 0.0
     is_complex = False
@@ -138,7 +157,7 @@ def ba_axpy(x: BlockArray, y: BlockArray, alpha: float) -> None:
     For shared keys only; keys present in x but not y are ignored.
     This is the pattern needed by Lanczos reorthogonalization.
     """
-    if _HAS_CYTHON_BA:
+    if _ensure_cython_ba_loaded():
         _c_axpy(x.blocks, y.blocks, alpha)
     else:
         for k in x.blocks:
@@ -149,7 +168,7 @@ def ba_axpy(x: BlockArray, y: BlockArray, alpha: float) -> None:
 
 def ba_scale_inplace(ba: BlockArray, scalar: float) -> None:
     """Scale all blocks in-place.  Uses BLAS dscal when available."""
-    if _HAS_CYTHON_BA:
+    if _ensure_cython_ba_loaded():
         _c_scale_inplace(ba.blocks, scalar)
     else:
         for v in ba.blocks.values():
