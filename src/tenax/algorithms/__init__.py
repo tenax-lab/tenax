@@ -45,6 +45,43 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "ctm": ("tenax.algorithms.ipeps_ctm", "ctm"),
     "ctm_2site": ("tenax.algorithms.ipeps_ctm", "ctm_2site"),
     "ctm_split": ("tenax.algorithms.ipeps_ctm", "ctm_split"),
+    # Honeycomb CTM (native rank-4, 6-corner, 3-direction, 2-sublattice)
+    "honeycomb_ctm_energy_implicit": (
+        "tenax.algorithms.honeycomb_ctm",
+        "honeycomb_ctm_energy_implicit",
+    ),
+    "honeycomb_ctm_run": (
+        "tenax.algorithms.honeycomb_ctm",
+        "honeycomb_ctm_run",
+    ),
+    "HoneycombCTMEnv": (
+        "tenax.algorithms.honeycomb_ctm",
+        "HoneycombCTMEnv",
+    ),
+    "HoneycombConvergeInfo": (
+        "tenax.algorithms.honeycomb_ctm",
+        "HoneycombConvergeInfo",
+    ),
+    "initialize_honeycomb_env": (
+        "tenax.algorithms.honeycomb_ctm",
+        "initialize_honeycomb_env",
+    ),
+    "compute_honeycomb_energy": (
+        "tenax.algorithms.honeycomb_ctm",
+        "compute_honeycomb_energy",
+    ),
+    "compute_honeycomb_triangle_energy": (
+        "tenax.algorithms.honeycomb_ctm",
+        "compute_honeycomb_triangle_energy",
+    ),
+    "HONEYCOMB_NEIGHBORS": (
+        "tenax.algorithms.honeycomb_ctm",
+        "HONEYCOMB_NEIGHBORS",
+    ),
+    "HONEYCOMB_DIRECTIONS": (
+        "tenax.algorithms.honeycomb_ctm",
+        "HONEYCOMB_DIRECTIONS",
+    ),
     "ExcitationConfig": ("tenax.algorithms.ipeps_excitations", "ExcitationConfig"),
     "ExcitationResult": ("tenax.algorithms.ipeps_excitations", "ExcitationResult"),
     "compute_excitations": (
@@ -127,6 +164,16 @@ __all__ = [
     "optimize_gs_ad",
     # CTM multisite
     "ctm_multisite",
+    # Honeycomb CTM
+    "honeycomb_ctm_energy_implicit",
+    "honeycomb_ctm_run",
+    "HoneycombCTMEnv",
+    "HoneycombConvergeInfo",
+    "initialize_honeycomb_env",
+    "compute_honeycomb_energy",
+    "compute_honeycomb_triangle_energy",
+    "HONEYCOMB_NEIGHBORS",
+    "HONEYCOMB_DIRECTIONS",
     # fPEPS (fermionic iPEPS)
     "FPEPSConfig",
     "fpeps",

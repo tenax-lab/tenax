@@ -365,6 +365,8 @@ def _project_grown_edge_tensor(
     # --- Left side ---
     labels = Tg.labels()
     Tg = fuse_indices(Tg, labels.index(la), labels.index(lb), "fused", FlowDirection.IN)
+    # Projector .bar() (no Koszul) for paired absorb contractions; see
+    # _ctm_tensor_moves note for why this stays bosonic-bar.
     Tg = _reembed_target_for_projector(P_first, Tg)
     Tg = contract(P_first.bar(), Tg)  # "fused" contracted → "chi_new" created
     labels = Tg.labels()
@@ -372,7 +374,7 @@ def _project_grown_edge_tensor(
         Tg, labels.index("chi_new"), labels.index(lc), "fused", FlowDirection.IN
     )
     Tg = _reembed_target_for_projector(P_second, Tg)
-    Tg = contract(P_second.bar(), Tg)  # "fused" contracted → "chi_new" created
+    Tg = contract(P_second.bar(), Tg)
     Tg = Tg.relabel("chi_new", "left_chi")
 
     # --- Right side ---
@@ -414,6 +416,7 @@ def _apply_projector(
     # This zero-pads charge sectors absent from Cg, ensuring the
     # contraction engine sees matching indices on the contracted leg.
     Cg_fused = _reembed_target_for_projector(P, Cg_fused)
+    # Projector .bar() (no Koszul) — see _ctm_tensor_moves note.
     result = contract(P.bar(), Cg_fused)  # contracts over "fused" → (chi_new, ...)
     return result
 

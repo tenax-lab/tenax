@@ -579,31 +579,64 @@ class TestStandardCTMArchitectureGuards:
     """Architecture guards for the standard CTM tensor path."""
 
     def test_symmetric_sweep_no_todense(self, small_peps_symmetric):
-        """CTM sweeps on SymmetricTensor must not call todense() or from_dense().
+        """CTM sweeps on SymmetricTensor must not silently densify large tensors.
 
-        This guards against regressions that silently densify during the
-        standard CTM symmetric path.  Mirrors the equivalent test in
-        TestSplitCTMSymmetric for the split CTM path.
+        Guards against regressions that would call todense()/from_dense()
+        on the bulk of the CTM machinery — that would defeat block-sparsity
+        on the dominant ``chi×D²``-cost contractions.
+
+        ``_phase_fix_normalize_tensor`` is exempt: it densifies each C/T
+        tensor (chi×chi or chi×D²×chi — small) once per sweep to compute
+        the "first dense-order element above threshold" anchor, which is
+        what ``test_energy_symmetric_matches_dense`` relies on for the
+        symmetric and dense paths to agree element-by-element on the
+        converged env. A buffer-order anchor would diverge for tensors
+        with non-trivial charge sectors. Per CLAUDE.md: "Avoid todense()
+        on the symmetric tensor path unless the resulting dense matrix is
+        guaranteed to be small" — the phase-fix path satisfies that
+        carve-out. Any *other* densification call should still fail the
+        guard.
         """
+        import traceback
         from unittest.mock import patch
 
         chi = 4
         a = _build_double_layer_tensor(small_peps_symmetric)
         env = initialize_ctm_tensor_env(small_peps_symmetric, chi)
 
-        todense_calls = []
-        from_dense_calls = []
+        todense_callers: list[str] = []
+        from_dense_callers: list[str] = []
 
         orig_todense = SymmetricTensor.todense
         orig_from_dense = SymmetricTensor.from_dense
 
+        def _caller_function() -> str:
+            """Name of the tenax-side function that invoked the patched op."""
+            stack = traceback.extract_stack()
+            for frame in reversed(stack):
+                if (
+                    "/tenax/" in frame.filename
+                    and "tensor.py" not in frame.filename
+                    and frame.name not in {"tracking_todense", "tracking_from_dense"}
+                ):
+                    return frame.name
+            return "<unknown>"
+
+        # Calls from these helpers are an intentional, narrowly-scoped
+        # exception (see docstring).
+        EXEMPT = {"_phase_fix_normalize_tensor"}
+
         def tracking_todense(self):
-            todense_calls.append(True)
+            caller = _caller_function()
+            if caller not in EXEMPT:
+                todense_callers.append(caller)
             return orig_todense(self)
 
         @classmethod
         def tracking_from_dense(cls, *args, **kwargs):
-            from_dense_calls.append(True)
+            caller = _caller_function()
+            if caller not in EXEMPT:
+                from_dense_callers.append(caller)
             return orig_from_dense(*args, **kwargs)
 
         with (
@@ -612,11 +645,13 @@ class TestStandardCTMArchitectureGuards:
         ):
             _ctm_tensor_sweep(env, a, chi, renormalize=True)
 
-        assert len(todense_calls) == 0, (
-            f"todense() called {len(todense_calls)} times during symmetric sweep"
+        assert not todense_callers, (
+            f"todense() called from non-exempt sites during symmetric sweep: "
+            f"{todense_callers}"
         )
-        assert len(from_dense_calls) == 0, (
-            f"from_dense() called {len(from_dense_calls)} times during symmetric sweep"
+        assert not from_dense_callers, (
+            f"from_dense() called from non-exempt sites during symmetric sweep: "
+            f"{from_dense_callers}"
         )
 
     def test_standard_vs_split_energy_equivalence(self, heisenberg_gate):
