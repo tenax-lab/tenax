@@ -237,7 +237,7 @@ _register(
         name="projector_method",
         dataclass_name="CTMConfig",
         type_str="str",
-        default="eigh",
+        default="svd",
         category=TuningCategory.METHOD_SELECTION,
         description=(
             "Algorithm used to compute CTM projectors: 'eigh' (symmetric "
@@ -254,9 +254,10 @@ _register(
             ),
         ),
         when_to_tune=(
-            "Use 'svd' when differentiating through the CTM sweep "
-            "(Fishman projector); try 'qr' for forward-only runs with "
-            "chi > 32 where eigh becomes a bottleneck."
+            "'svd' (Fishman) is the default and the only fully AD-stable "
+            "choice; switch to 'eigh' for forward-only Hermitian sweeps, or "
+            "'qr' for forward-only runs with chi > 32 where eigh becomes a "
+            "bottleneck."
         ),
         references=("arXiv:1711.01288",),  # Fishman projectors
     )
@@ -267,7 +268,7 @@ _register(
         name="forward_gauge",
         dataclass_name="CTMConfig",
         type_str="str",
-        default="qr",
+        default="phase",
         category=TuningCategory.STABILITY,
         description=(
             "Gauge fix applied to the environment tensors after each CTM "
@@ -281,9 +282,9 @@ _register(
             cost=CostModel(runtime="neutral", memory="none"),
         ),
         when_to_tune=(
-            "'phase' is the default for explicit-AD (auto-promoted from "
-            "'qr'); 'sigma' is required for implicit-diff stability at "
-            "D>=2. 'none' is diagnostic only."
+            "'phase' is the default and required for explicit-AD stability; "
+            "'sigma' is an alternative for implicit-diff at D>=2; 'qr' is "
+            "kept for legacy forward-only sweeps; 'none' is diagnostic only."
         ),
         references=("arXiv:2311.11894",),  # Francuz et al.
     )
@@ -448,7 +449,7 @@ _register(
         name="gs_optimizer",
         dataclass_name="iPEPSConfig",
         type_str="str",
-        default="cg",
+        default="lbfgs",
         category=TuningCategory.METHOD_SELECTION,
         description="Outer-loop optimizer for ground-state AD.",
         hint=TuningHint(
@@ -457,10 +458,10 @@ _register(
             values=("cg", "adam", "lbfgs"),
         ),
         when_to_tune=(
-            "CG is the default and works best with metric preconditioning. "
-            "L-BFGS often reaches lower energies but can stall in bad "
-            "basins. Adam is more robust to noisy gradients but slower to "
-            "converge."
+            "L-BFGS is the default and typically reaches the lowest "
+            "energies; CG is robust with metric preconditioning when L-BFGS "
+            "stalls in bad basins. Adam is more robust to noisy gradients "
+            "but slower to converge."
         ),
         dependencies=(
             Dependency(
@@ -842,7 +843,7 @@ _register(
         name="ctm_conv_method",
         dataclass_name="CTMConfig",
         type_str="str",
-        default="sv",
+        default="elementwise",
         category=TuningCategory.METHOD_SELECTION,
         description=(
             "Convergence check for the CTM fixed-point loop. 'sv' compares "
@@ -855,8 +856,9 @@ _register(
             values=("sv", "elementwise"),
         ),
         when_to_tune=(
-            "'elementwise' only for diagnostic comparisons; 'sv' is almost "
-            "always the right choice."
+            "'elementwise' is the default and works well in practice; "
+            "switch to 'sv' for gauge-insensitive convergence checks or "
+            "fast per-sweep tracking."
         ),
     )
 )
