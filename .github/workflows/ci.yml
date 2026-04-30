@@ -68,7 +68,7 @@ jobs:
           fi
 
   test-full:
-    name: Full tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    name: Full tests (${{ matrix.os }}, Python ${{ matrix.python-version }}, ${{ matrix.bucket }})
     needs: [changes]
     if: |
       always() &&
@@ -80,9 +80,14 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         python-version: ["3.11", "3.12"]
+        bucket: ["fast", "slow"]
         include:
           - os: macos-latest
             python-version: "3.12"
+            bucket: "fast"
+          - os: macos-latest
+            python-version: "3.12"
+            bucket: "slow"
 
     steps:
       - uses: actions/checkout@v6
@@ -98,15 +103,23 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      - name: Run non-core tests (algorithm + slow + integration)
+      - name: Run non-core tests (${{ matrix.bucket }} bucket)
         # Skip ``-m core`` since the required ``test`` job already covers it.
-        # Running everything-not-core here avoids duplicating the core suite
-        # (which was contributing to OOM / runner-lost-communication flakes
-        # when the full suite ran end-to-end).
+        # Split into ``fast`` (algorithm/integration without slow) and
+        # ``slow`` (everything tagged ``@pytest.mark.slow``) buckets so each
+        # job stays under the ~1h GitHub-runner reaper window that was
+        # killing the previous single ``-m "not core"`` invocation
+        # (see #354).
         env:
           JAX_PLATFORMS: cpu
+          BUCKET: ${{ matrix.bucket }}
         run: |
-          uv run pytest tests/ -m "not core" \
+          if [ "$BUCKET" = "slow" ]; then
+            FILTER='slow'
+          else
+            FILTER='not core and not slow'
+          fi
+          uv run pytest tests/ -m "$FILTER" \
             --cov=tenax \
             --cov-report=xml \
             --cov-report=term-missing \
