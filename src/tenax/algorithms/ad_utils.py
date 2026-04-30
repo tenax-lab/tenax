@@ -897,9 +897,15 @@ def _phase_fix_ctm_tensor(env):
     EPS_PHASE = 0.1  # threshold fraction for "large" element (variPEPS default)
 
     def _frob_phase_fix(arr):
-        """Frobenius-normalize and fix phase of a dense array."""
+        """Frobenius-normalize and fix phase of a dense array.
+
+        Norm is wrapped in ``stop_gradient`` so the backward only sees
+        the tangential gradient component. See #362 for why the radial
+        path through divide-by-norm produces NaN on SymmetricTensor
+        with empty charge sectors.
+        """
         norm = jnp.linalg.norm(arr)
-        arr = arr / (norm + 1e-30)
+        arr = arr / jax.lax.stop_gradient(norm + 1e-30)
         # Find first element with |x| >= EPS_PHASE * max(|arr|)
         flat = arr.ravel()
         abs_flat = jnp.abs(flat)

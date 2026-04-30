@@ -723,6 +723,121 @@ class TestBar:
         tb = t.bar()
         np.testing.assert_allclose(tb.todense(), jnp.conj(t.todense()), rtol=1e-6)
 
+    # --- bar_super(): bar() + super-algebra Koszul twist (#357) ---
+
+    def test_bar_super_bosonic_equals_bar(self, u1, rng):
+        """For bosonic (non-fermionic) symmetries, bar_super() == bar()."""
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="c"),
+        )
+        t = SymmetricTensor.random_normal(indices, rng)
+        np.testing.assert_allclose(
+            t.bar_super().todense(), t.bar().todense(), rtol=1e-12
+        )
+        # And both equal conj(todense()) for bosonic.
+        np.testing.assert_allclose(
+            t.bar_super().todense(), jnp.conj(t.todense()), rtol=1e-6
+        )
+
+    def test_bar_super_dense_tensor_equals_bar(self, u1, rng):
+        """DenseTensor.bar_super() falls back to DenseTensor.bar() — no
+        block-level parities are tracked, so no Koszul can be applied.
+        Documented behavior; satisfies the Tensor protocol."""
+        charges = np.zeros(3, dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="b"),
+        )
+        t = DenseTensor(jax.random.normal(rng, (3, 3)), indices)
+        np.testing.assert_allclose(
+            t.bar_super().todense(), t.bar().todense(), rtol=1e-12
+        )
+
+    def test_bar_super_fermion_parity_applies_koszul(self, rng):
+        """FermionParity bar_super() flips signs on odd-parity-product
+        blocks relative to bar()."""
+        from tenax.core.symmetry import FermionParity
+
+        sym = FermionParity()
+        # 3 legs each with charges [0, 1]. Block (1, 1, 0) has parities
+        # (1, 1, 0): n_sign = 1*1 + 1*0 + 1*0 = 1 (odd) → bar_super flips
+        # sign on this block. Block (0, 0, 0) has n_sign = 0 → unchanged.
+        charges = np.array([0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="c"),
+        )
+        t = SymmetricTensor.random_normal(indices, rng)
+        tb = t.bar()
+        ts = t.bar_super()
+
+        # Same block keys (no charge dual).
+        assert set(tb.blocks.keys()) == set(ts.blocks.keys())
+
+        # Per-block: ts == tb on even-parity-product blocks, ts == -tb on odd.
+        for key in tb.blocks:
+            parities = [int(sym.parity(np.array([q]))[0]) for q in key]
+            n_sign = sum(
+                parities[i] * parities[j]
+                for i in range(len(parities))
+                for j in range(i + 1, len(parities))
+            )
+            expected_sign = 1 if n_sign % 2 == 0 else -1
+            np.testing.assert_allclose(
+                ts.blocks[key],
+                expected_sign * tb.blocks[key],
+                rtol=1e-12,
+                err_msg=f"key={key} parities={parities} n_sign={n_sign}",
+            )
+
+    def test_bar_super_fermionic_u1_applies_koszul(self, rng):
+        """FermionicU1 bar_super() shares block keys with bar() (no
+        charge dual) but applies the super-algebra Koszul twist on
+        odd-parity-product blocks, so it generally differs from bar()."""
+        from tenax.core.symmetry import FermionicU1
+
+        sym = FermionicU1()
+        charges = np.array([-1, 0, 1], dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="b"),
+            TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="c"),
+        )
+        t = SymmetricTensor.random_normal(indices, rng)
+        tb = t.bar()
+        ts = t.bar_super()
+
+        # Same block keys — bar_super keeps original charges.
+        assert set(ts.blocks.keys()) == set(tb.blocks.keys())
+
+        # Per-block: bar_super matches bar() on even-parity-product
+        # blocks and equals -bar() on odd-parity-product blocks.
+        saw_odd_block = False
+        for key in tb.blocks:
+            parities = [int(sym.parity(np.array([q]))[0]) for q in key]
+            n_sign = sum(
+                parities[i] * parities[j]
+                for i in range(len(parities))
+                for j in range(i + 1, len(parities))
+            )
+            expected_sign = 1 if n_sign % 2 == 0 else -1
+            if expected_sign == -1:
+                saw_odd_block = True
+            np.testing.assert_allclose(
+                ts.blocks[key],
+                expected_sign * tb.blocks[key],
+                rtol=1e-12,
+                err_msg=f"key={key} parities={parities} n_sign={n_sign}",
+            )
+        assert saw_odd_block, (
+            "fixture had no odd-parity-product blocks; bar_super == bar "
+            "trivially for this case — pick charges that give at least one"
+        )
+
 
 class TestInner:
     def test_dense_self_inner(self, small_dense_matrix):
