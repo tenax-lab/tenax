@@ -30,9 +30,16 @@ from tenax.algorithms.ad_utils import _fix_svd_signs, truncated_svd_ad
 
 
 def _phase_fix_normalize_raw(arr: jnp.ndarray) -> jnp.ndarray:
-    """Frobenius-normalize + phase-fix a raw array (matches variPEPS)."""
+    """Frobenius-normalize + phase-fix a raw array (matches variPEPS).
+
+    Norm is wrapped in ``stop_gradient`` to avoid NaN gradients in the
+    backward pass through divide-by-norm — see ``_phase_fix_normalize_tensor``
+    in ``_ctm_tensor_moves.py`` for the rationale (#362).
+    """
+    import jax
+
     norm = jnp.linalg.norm(arr)
-    arr = arr / (norm + 1e-30)
+    arr = arr / jax.lax.stop_gradient(norm + 1e-30)
     flat = arr.ravel()
     idx = jnp.argmax(jnp.abs(flat))
     phase = flat[idx] / (jnp.abs(flat[idx]) + 1e-30)
@@ -453,9 +460,14 @@ def _frob_phase_fix_raw(arr: jnp.ndarray) -> jnp.ndarray:
     Uses the threshold-based approach from ``_phase_fix_ctm_tensor``
     (first element with |x| >= 0.1 * max), NOT the simpler argmax(abs)
     used in per-absorption normalization.
+
+    Norm is wrapped in ``stop_gradient``; see ``_phase_fix_normalize_tensor``
+    for rationale (#362).
     """
+    import jax
+
     norm = jnp.linalg.norm(arr)
-    arr = arr / (norm + 1e-30)
+    arr = arr / jax.lax.stop_gradient(norm + 1e-30)
     flat = arr.ravel()
     abs_flat = jnp.abs(flat)
     abs_max = jnp.max(abs_flat)

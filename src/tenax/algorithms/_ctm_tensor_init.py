@@ -84,14 +84,15 @@ def _fuse_pair_by_label(
 def _build_double_layer_tensor(A: Tensor) -> Tensor:
     """Build the 4-leg double-layer tensor from iPEPS site tensor A.
 
-    Uses ``A.bar()`` (conjugate + flip flows, no charge dual) as the bra layer.
-    Contracts over the physical index, then fuses ket/bra virtual pairs.
+    Uses ``A.bar_super()`` (conjugate + flip flows + Koszul twist for
+    fermionic symmetries; identical to ``bar()`` for bosonic) as the bra
+    layer. Contracts over the physical index, then fuses ket/bra virtual
+    pairs.
 
     Input:  A with labels (u, d, l, r, phys), 5 legs.
     Output: 4-leg tensor with labels (u2, d2, l2, r2), dimensions D².
     """
-    # Build bra via bar() + relabel virtual legs to uppercase
-    A_bra = A.bar().relabels({"u": "U", "d": "D", "l": "L", "r": "R"})
+    A_bra = A.bar_super().relabels({"u": "U", "d": "D", "l": "L", "r": "R"})
     # Contract over shared "phys" label → 8-leg tensor
     a8 = contract(A, A_bra)
     # Fuse pairs: (u, U) → u2, (d, D) → d2, (l, L) → l2, (r, R) → r2
@@ -111,7 +112,7 @@ def _build_double_layer_open_tensor(A: Tensor) -> Tensor:
 
     Output: 6-leg tensor (u2, d2, l2, r2, phys, phys_bra).
     """
-    A_bra = A.bar().relabels(
+    A_bra = A.bar_super().relabels(
         {"u": "U", "d": "D", "l": "L", "r": "R", "phys": "phys_bra"}
     )
     a_open = contract(A, A_bra)

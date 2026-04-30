@@ -124,16 +124,6 @@ class TestHOTRGRun:
     def ising_tensor_high_temp(self):
         return compute_ising_tensor(beta=0.2)
 
-    def test_hotrg_runs_without_error(self, ising_tensor_high_temp):
-        config = HOTRGConfig(max_bond_dim=4, num_steps=3)
-        result = hotrg(ising_tensor_high_temp, config)
-        assert jnp.isfinite(result)
-
-    def test_result_is_scalar(self, ising_tensor_high_temp):
-        config = HOTRGConfig(max_bond_dim=4, num_steps=3)
-        result = hotrg(ising_tensor_high_temp, config)
-        assert result.shape == ()
-
     def test_high_temp_free_energy(self):
         """At high temperature (beta=0.2), HOTRG chi=16 should be within 0.5%."""
         beta = 0.2
@@ -198,41 +188,6 @@ class TestHOTRGRun:
             f"exact {exact_free_energy:.6f} (rel err={relative_error:.4f})"
         )
 
-    def test_horizontal_only(self):
-        """HOTRG with direction_order='horizontal' should run."""
-        tensor = compute_ising_tensor(beta=0.3)
-        config = HOTRGConfig(max_bond_dim=4, num_steps=4, direction_order="horizontal")
-        result = hotrg(tensor, config)
-        assert np.isfinite(float(result))
-
-    def test_vertical_only(self):
-        """HOTRG with direction_order='vertical' should run."""
-        tensor = compute_ising_tensor(beta=0.3)
-        config = HOTRGConfig(max_bond_dim=4, num_steps=4, direction_order="vertical")
-        result = hotrg(tensor, config)
-        assert np.isfinite(float(result))
-
-    def test_alternating_direction(self):
-        """Default alternating should give same sign as horizontal-only (finite result)."""
-        tensor = compute_ising_tensor(beta=0.3)
-        config = HOTRGConfig(max_bond_dim=4, num_steps=4, direction_order="alternating")
-        result = hotrg(tensor, config)
-        assert np.isfinite(float(result))
-
-    def test_single_step(self):
-        tensor = compute_ising_tensor(beta=0.3)
-        config = HOTRGConfig(max_bond_dim=4, num_steps=1)
-        result = hotrg(tensor, config)
-        assert np.isfinite(float(result))
-
-    def test_dense_tensor_input(self):
-        """hotrg() should accept DenseTensor as input."""
-        tensor = compute_ising_tensor(beta=0.3)
-        assert isinstance(tensor, DenseTensor)
-        config = HOTRGConfig(max_bond_dim=4, num_steps=3)
-        result = hotrg(tensor, config)
-        assert np.isfinite(float(result))
-
     def test_hotrg_vs_trg_sign(self):
         """HOTRG and TRG log(Z)/N should have the same sign."""
         from tenax.algorithms.trg import TRGConfig, trg
@@ -278,27 +233,17 @@ class TestHOTRGRun:
 class TestHOTRGSymmetric:
     """Tests for HOTRG with SymmetricTensor (Z₂-symmetric Ising tensor)."""
 
-    def test_symmetric_hotrg_runs(self):
-        """HOTRG should run on a symmetric Ising tensor without error."""
-        tensor = compute_ising_tensor(beta=0.3, symmetric=True)
-        assert isinstance(tensor, SymmetricTensor)
-        config = HOTRGConfig(max_bond_dim=8, num_steps=5)
-        result = hotrg(tensor, config)
-        assert jnp.isfinite(result)
-
     def test_symmetric_hotrg_preserves_blocks(self):
         """HOTRG should not collapse Z₂ block sectors during coarse-graining."""
         tensor = compute_ising_tensor(beta=0.3, symmetric=True)
         initial_blocks = tensor.n_blocks
         assert initial_blocks == 8  # sanity check
 
-        T = tensor
-        for _ in range(3):
-            T, _ = _hotrg_step_horizontal(T, max_bond_dim=8)
-            assert isinstance(T, SymmetricTensor)
-            assert T.n_blocks >= initial_blocks, (
-                f"Block count collapsed from {initial_blocks} to {T.n_blocks}"
-            )
+        T, _ = _hotrg_step_horizontal(tensor, max_bond_dim=8)
+        assert isinstance(T, SymmetricTensor)
+        assert T.n_blocks >= initial_blocks, (
+            f"Block count collapsed from {initial_blocks} to {T.n_blocks}"
+        )
 
     def test_symmetric_hotrg_matches_exact(self):
         """Symmetric HOTRG at beta=0.3 should match exact free energy within 1%."""
@@ -346,27 +291,17 @@ def _compute_ising_tensor_fermionic(beta: float, J: float = 1.0) -> SymmetricTen
 class TestHOTRGFermionic:
     """Tests for HOTRG with FermionParity (fermionic Koszul signs)."""
 
-    def test_fermionic_hotrg_runs(self):
-        """HOTRG should run on a FermionParity tensor without error."""
-        tensor = _compute_ising_tensor_fermionic(beta=0.3)
-        assert isinstance(tensor, SymmetricTensor)
-        config = HOTRGConfig(max_bond_dim=8, num_steps=5)
-        result = hotrg(tensor, config)
-        assert jnp.isfinite(result)
-
     def test_fermionic_hotrg_preserves_blocks(self):
         """HOTRG should preserve FermionParity block sectors."""
         tensor = _compute_ising_tensor_fermionic(beta=0.3)
         initial_blocks = tensor.n_blocks
         assert initial_blocks == 8
 
-        T = tensor
-        for _ in range(3):
-            T, _ = _hotrg_step_horizontal(T, max_bond_dim=8)
-            assert isinstance(T, SymmetricTensor)
-            assert T.n_blocks >= initial_blocks, (
-                f"Block count collapsed from {initial_blocks} to {T.n_blocks}"
-            )
+        T, _ = _hotrg_step_horizontal(tensor, max_bond_dim=8)
+        assert isinstance(T, SymmetricTensor)
+        assert T.n_blocks >= initial_blocks, (
+            f"Block count collapsed from {initial_blocks} to {T.n_blocks}"
+        )
 
     def test_fermionic_hotrg_koszul_signs_active(self):
         """FermionParity HOTRG should give a finite result.

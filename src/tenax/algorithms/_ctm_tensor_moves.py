@@ -53,12 +53,22 @@ def _phase_fix_normalize_tensor(T: Tensor) -> Tensor:
     ``chi×D²×chi`` edges), so the per-sweep ``todense() + from_dense()``
     cost is negligible — see ``test_symmetric_sweep_no_todense`` for
     the architecture guard's justified-exemption note.
+
+    The Frobenius norm is wrapped in ``stop_gradient`` so the backward
+    sees only the tangential gradient. At the converged fixed point
+    ``||T||=1`` already, so the radial component of the cotangent is
+    discarded by the outer unit-sphere projection anyway. Without this,
+    SymmetricTensor inputs with empty charge sectors (e.g. fermionic
+    fpeps tensors) produce NaN gradients through the implicit-AD
+    backward — the radial-gradient path interacts with the dense
+    layout's out-of-block zeros to create 0/0 leaves. (#362)
     """
+    import jax
     import jax.numpy as jnp
 
     arr = T.todense()
     norm = jnp.linalg.norm(arr)
-    arr = arr / (norm + 1e-30)
+    arr = arr / jax.lax.stop_gradient(norm + 1e-30)
     flat = arr.ravel()
     abs_flat = jnp.abs(flat)
     threshold = 0.1 * jnp.max(abs_flat)
@@ -157,6 +167,12 @@ def _apply_projector_tensor(
     Returns:
         ``(C1_new, C4_new, T_new)`` as Tensor objects.
     """
+    # Projector .bar() (no Koszul): the absorb step P1_bar @ ... @ P_2 is
+    # a paired contraction. Adding the super-algebra twist on each
+    # projector independently breaks pair-cancellation (the missing
+    # twist on one P is compensated by the same missing twist on the
+    # other). The double-layer's bar_super() handles the fermionic sign
+    # for the bra construction; the projectors stay bosonic-bar.
     P1_bar = P_1.bar()  # (fused_OUT, chi_new_IN) — contracts on "fused"
     P2_bar = P_2.bar()
 
