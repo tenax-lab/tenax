@@ -701,22 +701,79 @@ class TestOptimizeGsAd2Site:
         B_expected = np.einsum("luRDs,sS->luRDS", A_opt.todense(), U)
         np.testing.assert_allclose(B_opt.todense(), B_expected, atol=1e-12)
 
-    # Explicit-AD #328 smoke tests and the real-init implicit #328 smoke
-    # were removed:
-    # - test_2site_ad_c4v_energy_physical (gs_implicit_ad=False, 229s on CPU)
-    #   was duplicated by the implicit-path literature regressions
-    #   (test_2site_heisenberg_ad_energy_benchmark, test_ad_d2_energy).
-    # - test_2site_noc4v_ad_stays_variational_issue_328 and
-    #   test_2site_noc4v_ad_norms_stay_unit were #328 regressions on the
-    #   explicit-AD path, superseded by the implicit-AD trifecta.
-    # - test_2site_noc4v_implicit_ad_is_variational_issue_328 fed a real
-    #   float64 init via _wrap_as_dense_tensor(jax.random.normal(...));
-    #   the recommended non-C4v 2-site path now defaults to complex128
-    #   random init (ipeps_optimize.py:1359), and real-valued multi-site
-    #   AD without C4v is documented non-variational in
-    #   project_complex_tensors_variational.md. The variational regression
-    #   for the actually-recommended path is owned by tests/test_complex128_ad.py
-    #   (test_complex128_2site_gradient et al.).
+    # PR #360 deleted three #328-regression tests under the rationale
+    # they exercised the explicit-AD path. Two of those did NOT set
+    # ``gs_implicit_ad=False``, so they were testing the implicit path
+    # all along (PR #360 review feedback). The two are restored below;
+    # the third (``test_2site_noc4v_implicit_ad_is_variational_issue_328``)
+    # is intentionally not restored — it pinned a real-float64 init that
+    # is documented non-variational without C4v
+    # (project_complex_tensors_variational.md), and the variational
+    # contract on the recommended complex128 path is owned by
+    # ``test_complex128_2site_gradient`` in tests/test_complex128_ad.py.
+    #
+    # ``test_2site_ad_c4v_energy_physical`` (explicitly ``gs_implicit_ad=False``)
+    # remains deleted — it was duplicated by the implicit-path literature
+    # regressions (``test_2site_heisenberg_ad_energy_benchmark``,
+    # ``test_ad_d2_energy``).
+
+    def test_2site_noc4v_ad_stays_variational_issue_328(self, heisenberg_gate):
+        """Regression for #328 on the implicit-AD path.
+
+        The issue observed E_best = -33.85 (!!) for ``gs_c4v=False``
+        implicit AD on the same Heisenberg gate at chi=16 — the L-BFGS/CG
+        line search pushed onto an off-manifold chord that landed in a
+        non-variational CTM fixed point with finite-chi energy far below
+        the physical ground state. The tangent-space projection (Option
+        A in #328) kills that drift.
+
+        This test only asserts ``E_gs > -2.0`` (very loose) — there is no
+        finite-chi variational guarantee. What the regression prevents
+        is order-of-magnitude drift below physical (-0.6694).
+
+        Default ``gs_implicit_ad=True`` is intentional: this exercises
+        the implicit path, which is the recommended 2-site default
+        (project_2site_ad_fix_trifecta.md).
+        """
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=5,
+            gs_learning_rate=1e-2,
+            unit_cell="2site",
+            gs_c4v=False,
+        )
+        _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
+        assert np.isfinite(E_gs), f"non-finite E_gs = {E_gs}"
+        assert E_gs > -2.0, (
+            f"E/site = {E_gs:.6f} is wildly unphysical — tangent projection "
+            f"likely broken (#328 regression)"
+        )
+
+    def test_2site_noc4v_ad_norms_stay_unit(self, heisenberg_gate):
+        """Regression for #328 on the implicit-AD path: ``||A||`` and
+        ``||B||`` must stay ~1 throughout ``gs_c4v=False`` 2-site AD.
+
+        ``_normalize_params`` retracts to unit norm at each step and
+        tangent projection keeps the chord on-manifold, so the returned
+        ``A_opt`` / ``B_opt`` should have unit norm to high precision.
+
+        Like ``test_2site_noc4v_ad_stays_variational_issue_328``, runs
+        on the default implicit-AD path (``gs_implicit_ad=True``).
+        """
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=10),
+            gs_num_steps=5,
+            gs_learning_rate=1e-2,
+            unit_cell="2site",
+            gs_c4v=False,
+        )
+        (A_opt, B_opt), _, _ = optimize_gs_ad(heisenberg_gate, None, config)
+        A_norm = float(jnp.linalg.norm(A_opt.todense().reshape(-1)))
+        B_norm = float(jnp.linalg.norm(B_opt.todense().reshape(-1)))
+        assert abs(A_norm - 1.0) < 1e-4, f"||A_opt|| = {A_norm}, expected ~1.0"
+        assert abs(B_norm - 1.0) < 1e-4, f"||B_opt|| = {B_norm}, expected ~1.0"
 
     def test_tangent_project_unit_complex_is_hermitian(self):
         """Regression for PR #330 review: _tangent_project_unit must use
@@ -882,8 +939,9 @@ class TestHeisenbergBenchmark:
         # Relaxed threshold after issue #298 — this test uses CG+armijo
         # (default optimizer/line search) which cannot reach literature
         # without the legacy random noise kick that was removed in #298.
-        # See test_ad_d2_energy_lbfgs_hagerzhang_reset for the tight
-        # regression bound using L-BFGS + Hager-Zhang + reset recovery.
+        # See ``test_ad_d2_energy_lbfgs_hagerzhang_reset`` for the
+        # L-BFGS + Hager-Zhang + reset-recovery smoke (loose-scope to
+        # keep the JIT trace under the macOS memory budget).
         assert E_gs < -0.57, (
             f"AD D=2 chi=16 CG+armijo E/site={E_gs:.6f}, expected < -0.57 "
             "(legacy test, see test_ad_d2_energy_lbfgs_hagerzhang_reset)"
@@ -891,11 +949,64 @@ class TestHeisenbergBenchmark:
         assert E_gs > -0.80, f"AD D=2 E/site={E_gs:.6f}, unphysically low"
 
     @pytest.mark.slow
-    # test_ad_d2_energy_lbfgs_hagerzhang_reset removed: it pinned the #298
-    # noise-injection stall-recovery removal on the explicit-AD path
-    # (gs_stall_recovery="reset"), which is no longer the recommended path
-    # post-trifecta. The literature regression on D=2 is covered by
-    # test_ad_d2_energy on the implicit path.
+    def test_ad_d2_energy_lbfgs_hagerzhang_reset(self, heisenberg_gate):
+        """Smoke test for the 2-site implicit-AD reset stall-recovery default.
+
+        Exercises ``optimize_gs_ad`` with ``unit_cell="2site"`` on the
+        implicit-AD path (``gs_implicit_ad=True`` default) using L-BFGS
+        + Hager-Zhang line search + metric preconditioning + SU init,
+        covering the ``gs_stall_recovery="reset"`` default that was
+        added in #298 (no random noise kick). This is the only end-to-end
+        smoke test for that combination of switches; ``test_ad_d2_energy``
+        uses CG + armijo and does not exercise the reset-recovery path.
+
+        Scope is intentionally tight (chi=4, 2 AD steps, 50 SU steps) to
+        keep the L-BFGS + Hager-Zhang trace within macOS Full-tests
+        memory (see CI run 25104994256 OOM at chi=4 LBFGS+HZ in
+        ``test_lbfgs_optimizer_runs``); the contract being pinned is
+        "reset path terminates with finite physical energy", not a
+        literature-tight bound.
+        """
+        D, d = 2, 2
+        key_A, key_B = jax.random.split(jax.random.PRNGKey(42))
+        A_neel = 0.01 * jax.random.normal(key_A, (D, D, D, D, d))
+        A_neel = A_neel.at[0, 0, 0, 0, 0].set(1.0)
+        B_neel = 0.01 * jax.random.normal(key_B, (D, D, D, D, d))
+        B_neel = B_neel.at[0, 0, 0, 0, 1].set(1.0)
+
+        su_config = iPEPSConfig(
+            max_bond_dim=2,
+            num_imaginary_steps=50,
+            dt=0.1,
+            ctm=CTMConfig(chi=4, max_iter=20),
+            unit_cell="2site",
+        )
+        _, (A_su, B_su), _ = ipeps(heisenberg_gate, (A_neel, B_neel), su_config)
+
+        ad_config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4, max_iter=20),
+            gs_num_steps=2,
+            gs_optimizer="lbfgs",
+            gs_line_search=True,
+            gs_line_search_method="hager_zhang",
+            gs_metric_precond=True,
+            unit_cell="2site",
+            # gs_stall_recovery=None -> auto-defaults to "reset" for 2-site.
+        )
+        _, _, E_gs = optimize_gs_ad(
+            heisenberg_gate, (A_su.todense(), B_su.todense()), ad_config
+        )
+        assert np.isfinite(E_gs), f"non-finite E_gs = {E_gs}"
+        # Loose finite-physical bounds: contract is "reset-recovery path
+        # terminates without diverging into the non-variational CTM
+        # regime", not a literature-tight bound. The chi=4 truncation
+        # accommodates ~-0.81 at this fixture; the original chi=8
+        # version landed at ~-0.65. Lower bound is "no order-of-magnitude
+        # drift" (#328 sentinel), upper bound is "did descend below SU
+        # init noise".
+        assert E_gs < -0.20, f"E/site={E_gs:.6f}, reset path failed to descend"
+        assert E_gs > -1.0, f"E/site={E_gs:.6f}, unphysically low (#328 drift)"
 
     @pytest.mark.slow
     def test_ad_d2_chi_scaling(self, heisenberg_gate):
