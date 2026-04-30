@@ -775,6 +775,7 @@ class TestOptimizeGsAd2Site:
         assert abs(A_norm - 1.0) < 1e-4, f"||A_opt|| = {A_norm}, expected ~1.0"
         assert abs(B_norm - 1.0) < 1e-4, f"||B_opt|| = {B_norm}, expected ~1.0"
 
+    @pytest.mark.slow
     def test_tangent_project_unit_complex_is_hermitian(self):
         """Regression for PR #330 review: _tangent_project_unit must use
         the Hermitian inner product (vdot) so complex-valued tensors get
