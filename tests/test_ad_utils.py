@@ -269,7 +269,7 @@ class TestTruncatedSVDADMissingTerm:
             return dM
 
         monkeypatch.setattr(
-            "tenax.algorithms.ad_utils._svd_sector_backward",
+            "tenax.algorithms._ad_primitives._svd_sector_backward",
             _naive_sector_backward,
         )
         grad_naive = jax.grad(loss)(M)
@@ -308,19 +308,19 @@ class TestProjectorADAudit:
         return C1g, C4g
 
     def test_svd_projector_traced_path_calls_truncated_svd_ad(self, monkeypatch):
-        import tenax.algorithms.ad_utils as ad_utils_mod
+        import tenax.algorithms._ad_primitives as primitives_mod
 
         C1g_base, C4g_base = self._make_grown_corners_dense(
             jax.random.PRNGKey(210), jax.random.PRNGKey(211)
         )
         calls = {"n": 0}
-        orig = ad_utils_mod.truncated_svd_ad
+        orig = primitives_mod.truncated_svd_ad
 
         def _spy_truncated_svd_ad(M, chi):
             calls["n"] += 1
             return orig(M, chi)
 
-        monkeypatch.setattr(ad_utils_mod, "truncated_svd_ad", _spy_truncated_svd_ad)
+        monkeypatch.setattr(primitives_mod, "truncated_svd_ad", _spy_truncated_svd_ad)
 
         def traced_eval(alpha):
             C1g = DenseTensor(alpha * C1g_base.todense(), C1g_base.indices)
@@ -331,19 +331,19 @@ class TestProjectorADAudit:
         assert calls["n"] >= 1, "Expected traced SVD projector to call truncated_svd_ad"
 
     def test_qr_projector_traced_path_calls_regularized_svd(self, monkeypatch):
-        import tenax.algorithms.ad_utils as ad_utils_mod
+        import tenax.algorithms._ad_primitives as primitives_mod
 
         C1g_base, C4g_base = self._make_grown_corners_dense(
             jax.random.PRNGKey(220), jax.random.PRNGKey(221)
         )
         calls = {"n": 0}
-        orig = ad_utils_mod.regularized_svd
+        orig = primitives_mod.regularized_svd
 
         def _spy_regularized_svd(M):
             calls["n"] += 1
             return orig(M)
 
-        monkeypatch.setattr(ad_utils_mod, "regularized_svd", _spy_regularized_svd)
+        monkeypatch.setattr(primitives_mod, "regularized_svd", _spy_regularized_svd)
 
         def traced_eval(alpha):
             C1g = DenseTensor(alpha * C1g_base.todense(), C1g_base.indices)

@@ -14,20 +14,10 @@ from pathlib import Path
 ALGO_ROOT = Path(__file__).resolve().parents[1] / "src" / "tenax" / "algorithms"
 ALGO_PREFIX = "tenax.algorithms"
 
-ALLOWED_CYCLIC_GROUPS = [
-    {
-        "tenax.algorithms._ctm_projector",
-        "tenax.algorithms._ctm_tensor",
-        "tenax.algorithms._ctm_tensor_c4v",
-        "tenax.algorithms._ctm_tensor_convergence",
-        "tenax.algorithms._ctm_tensor_moves",
-        "tenax.algorithms._ctm_tensor_paired_moves",
-        "tenax.algorithms._split_ctm_tensor",
-        "tenax.algorithms._split_ctm_tensor_convergence",
-        "tenax.algorithms._split_ctm_tensor_moves",
-        "tenax.algorithms.ad_utils",
-    },
-]
+# All previously allowlisted import cycles in tenax.algorithms have been
+# resolved (issue #351).  This list is kept empty so that any new cycle
+# introduced into the algorithm package fails the guardrail test below.
+ALLOWED_CYCLIC_GROUPS: list[set[str]] = []
 
 
 def _module_name(path: Path) -> str:
