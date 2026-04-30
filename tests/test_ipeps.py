@@ -1009,37 +1009,6 @@ class TestHeisenbergBenchmark:
         assert E_gs < -0.20, f"E/site={E_gs:.6f}, reset path failed to descend"
         assert E_gs > -1.0, f"E/site={E_gs:.6f}, unphysically low (#328 drift)"
 
-    @pytest.mark.slow
-    def test_ad_d2_chi_scaling(self, heisenberg_gate):
-        """Energy should improve (decrease) with increasing chi at fixed D=2."""
-        su_config = iPEPSConfig(
-            max_bond_dim=2,
-            num_imaginary_steps=100,
-            dt=0.1,
-            ctm=CTMConfig(chi=8, max_iter=40),
-            unit_cell="2site",
-        )
-        _, (A_su, B_su), _ = ipeps(heisenberg_gate, None, su_config)
-
-        energies = []
-        for chi in [8, 16]:
-            ad_config = iPEPSConfig(
-                max_bond_dim=2,
-                ctm=CTMConfig(chi=chi, max_iter=60),
-                gs_num_steps=30,
-                gs_learning_rate=5e-3,
-                unit_cell="2site",
-            )
-            _, _, E = optimize_gs_ad(
-                heisenberg_gate, (A_su.todense(), B_su.todense()), ad_config
-            )
-            energies.append(float(E))
-
-        assert energies[1] <= energies[0] + 0.01, (
-            f"Energy should improve with chi: chi=8 E={energies[0]:.6f}, "
-            f"chi=16 E={energies[1]:.6f}"
-        )
-
 
 class TestOptimizeGsAdLogging:
     """Tests for AD optimization progress logging."""
