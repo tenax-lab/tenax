@@ -261,6 +261,62 @@ the Krylov adjoint raises rather than silently returning a
 non-solution, and records a ``converged`` flag in the backward meta
 dict. Dense tensors only for now — no SymmetricTensor path yet.
 
+## Coarse-Grained iPEPS (PR #352 / #353)
+
+For non-square lattices (honeycomb, kagome) Tenax provides a
+**coarse-grained iPEPS (CG iPEPS)** path that maps the lattice onto the
+1-site square pipeline by grouping a unit cell of physical sites into a
+single tensor with effective physical dimension ``d_eff = d ** n_sites``.
+The optimizer reuses the standard ``optimize_gs_ad`` square machinery —
+no new CTM or AD path — only the gate construction and energy
+contraction differ.
+
+```python
+from tenax import iPEPSConfig, optimize_gs_ad, honeycomb_cg_gates
+
+cg = honeycomb_cg_gates(J=1.0)        # d_eff = 4 (two spin-1/2 sub-sites)
+config = iPEPSConfig(
+    unit_cell="1x1",
+    cg_gates=cg,
+    su_init=False,                     # cg_gates requires random init
+    # Standard implicit-AD trifecta otherwise.
+)
+A_opt, env, E = optimize_gs_ad(None, A_init=None, config=config)
+```
+
+``honeycomb_cg_gates`` builds 2 sub-sites per cell (``d_eff = 4``);
+``kagome_cg_gates`` builds 3 sub-sites per up-triangle (``d_eff = 8``).
+``CGGates.map_fn`` and ``CGGates.init_fn`` let the user parameterize the
+CG tensor as a contraction of raw site tensors (e.g. for variational
+restrictions or staggered initialization); when both are ``None`` the
+optimizer treats the CG tensor itself as the variational parameter.
+
+Constraints (enforced by ``iPEPSConfig.__post_init__``):
+
+- requires ``unit_cell="1x1"``;
+- incompatible with ``su_init=True`` (no SU on coarse-grained tensors).
+
+This is the recommended path for honeycomb/kagome AFM ground states at
+moderate ``D``; for native honeycomb topology see the next section.
+
+## Native Honeycomb CTM (PR #347)
+
+A separate, **native rank-4 honeycomb CTM** lives under
+``src/tenax/algorithms/_ctm_honeycomb_*.py`` (re-exported via
+``tenax.algorithms.honeycomb_ctm``). It works directly with the
+two-sublattice honeycomb topology — 6 corners, 3 directions, 2
+sublattice CTM tensors — rather than fusing the two sites into a CG
+tensor. Public entry points: ``honeycomb_ctm_run`` (forward),
+``honeycomb_ctm_energy_implicit`` (with implicit-AD backward),
+``HoneycombCTMEnv`` (env container), ``compute_honeycomb_energy`` and
+``compute_honeycomb_triangle_energy``.
+
+The native path is more faithful to honeycomb geometry (smaller
+effective bond dimension at the same ``chi``) but does **not** plug into
+``optimize_gs_ad`` directly yet — wire-up is tracked separately. CG
+iPEPS remains the easiest production-AD entry point for honeycomb until
+that lands.
+
 ## Stall Recovery (issue #298)
 
 When the L-BFGS / CG line search cannot make progress the optimizer runs
@@ -317,7 +373,10 @@ The 2-site L-BFGS path still has a separate convergence gap at
 | Split CTM forward (SU)            | **Working**      | Used by simple update.                                             |
 | Split CTM + implicit diff         | **BROKEN**       | Not wired into optimizer.                                          |
 | Split CTM + explicit diff         | **Working**      | No ``jax.checkpoint``, high memory.                                |
-| Fermionic iPEPS AD                | **EXPERIMENTAL** | Wraps ``SymmetricTensor`` as ``DenseTensor``.                      |
+| Fermionic iPEPS AD                | **EXPERIMENTAL** | Wraps ``SymmetricTensor`` as ``DenseTensor``. Fermionic Koszul twist (`bar_super()`) added in PR #361 fixes super-algebra sign issues that previously broke fermionic AD with non-trivial parity sectors. |
+| Coarse-grained iPEPS (honeycomb)  | **Working**      | ``cg_gates=honeycomb_cg_gates()`` + ``unit_cell="1x1"``; reuses square 1-site AD pipeline at ``d_eff=4`` (PR #352 / #353). |
+| Coarse-grained iPEPS (kagome)     | **Working**      | ``cg_gates=kagome_cg_gates()`` + ``unit_cell="1x1"``; reuses square 1-site AD pipeline at ``d_eff=8`` (PR #352 / #353). |
+| Native honeycomb CTM (rank-4)     | **Working** (forward + implicit-AD energy); not yet wired into ``optimize_gs_ad`` | 6-corner / 3-direction / 2-sublattice; ``honeycomb_ctm_run`` + ``honeycomb_ctm_energy_implicit`` (PR #347). |
 
 ### Benchmark highlights (2D Heisenberg AFM)
 
@@ -366,6 +425,7 @@ for the full benchmark table and the projector × gauge comparison matrix.
 | Metric precond        | ``gs_metric_precond``       | ``True``         | ``False`` = standard grad            |
 | Stall recovery        | ``gs_stall_recovery``       | ``None``         | ``"noise"`` / ``"reset"`` (auto)     |
 | Energy floor          | ``gs_energy_floor``         | ``None``         | ``float`` = reject below as non-variational |
+| CG iPEPS gates        | ``cg_gates``                | ``None``         | ``honeycomb_cg_gates()`` / ``kagome_cg_gates()`` / custom ``CGGates`` (requires ``unit_cell="1x1"``, rejects ``su_init=True``) |
 | CTM variant           | (function choice)           | standard         | split, C4v                           |
 
 The static defaults
@@ -398,6 +458,9 @@ the same behavior the optimizer uses.
 | Simple update                           | ``src/tenax/algorithms/ipeps_simple_update.py``, ``ipeps.py`` |
 | Energy computation                      | ``src/tenax/algorithms/_ctm_tensor_energy.py``, ``_split_ctm_tensor_energy.py`` |
 | Fermionic variant                       | ``src/tenax/algorithms/fermionic_ipeps.py``   |
+| Coarse-grained iPEPS (honeycomb/kagome) | ``src/tenax/algorithms/coarse_grain.py``      |
+| Native honeycomb CTM (rank-4)           | ``src/tenax/algorithms/honeycomb_ctm.py``, ``_ctm_honeycomb_*.py`` |
+| Fermionic Koszul twist (super-algebra)  | ``src/tenax/core/tensor.py`` (``bar_super()``, PR #361) |
 
 ## Related Documents
 
