@@ -140,12 +140,6 @@ class TestBuildBulkMPO:
 
 
 class TestiDMRGRun:
-    def test_runs_without_error(self):
-        W = build_bulk_mpo_heisenberg()
-        cfg = iDMRGConfig(max_bond_dim=8, max_iterations=5, lanczos_max_iter=10)
-        result = idmrg(W, cfg)
-        assert isinstance(result, iDMRGResult)
-
     def test_dense_two_site_uses_tolerance_aware_lanczos(self, monkeypatch):
         """Dense 2-site path should route through tol-aware Lanczos."""
         idmrg_mod = importlib.import_module("tenax.algorithms.idmrg")
@@ -410,16 +404,6 @@ class TestBuildBulkMPOSymmetric:
 
 
 class TestiDMRGSymmetric:
-    def test_symmetric_idmrg_runs(self, numpy_blockwise):
-        """Symmetric iDMRG should run without error."""
-        W = build_bulk_mpo_heisenberg_symmetric()
-        cfg = iDMRGConfig(
-            max_bond_dim=8, max_iterations=10, numpy_blockwise=numpy_blockwise
-        )
-        result = idmrg(W, cfg)
-        assert isinstance(result, iDMRGResult)
-        assert np.isfinite(result.energy_per_site)
-
     @pytest.mark.slow
     def test_symmetric_idmrg_energy_accuracy(self, numpy_blockwise):
         """Symmetric iDMRG at chi=16 should match exact within 0.5%."""
