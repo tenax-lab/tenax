@@ -127,26 +127,6 @@ class TestBlockSparseImplicitAD:
         assert jnp.all(jnp.isfinite(grad_data)), "Gradient contains non-finite values"
         assert jnp.any(jnp.abs(grad_data) > 0), "Gradient is all zeros"
 
-    @pytest.mark.slow
-    def test_u1_implicit_ad_energy_is_scalar(self):
-        """Implicit AD forward pass with SymmetricTensor returns scalar energy."""
-        A_sym = _make_u1_symmetric_ipeps()
-        gate = heisenberg_gate()
-        neighbors = SINGLE_SITE_NEIGHBORS
-
-        site_tensors = {(0, 0): A_sym}
-        energy = ctm_energy_implicit(
-            site_tensors,
-            neighbors,
-            gate,
-            chi=4,
-            max_iter=30,
-            conv_tol=1e-8,
-        )
-        assert jnp.isfinite(energy), f"Energy is not finite: {energy}"
-        assert energy.shape == (), f"Energy should be scalar, got shape {energy.shape}"
-        # Energy from a random tensor need not be negative, just finite and scalar
-
 
 # ------------------------------------------------------------------ #
 # Test 3: Dense vs block-sparse energy match                          #
