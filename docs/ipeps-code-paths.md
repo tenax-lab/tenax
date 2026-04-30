@@ -272,6 +272,7 @@ no new CTM or AD path — only the gate construction and energy
 contraction differ.
 
 ```python
+import jax.numpy as jnp
 from tenax import iPEPSConfig, optimize_gs_ad, honeycomb_cg_gates
 
 cg = honeycomb_cg_gates(J=1.0)        # d_eff = 4 (two spin-1/2 sub-sites)
@@ -281,7 +282,11 @@ config = iPEPSConfig(
     su_init=False,                     # cg_gates requires random init
     # Standard implicit-AD trifecta otherwise.
 )
-A_opt, env, E = optimize_gs_ad(None, A_init=None, config=config)
+# The active Hamiltonian lives on cg_gates; optimize_gs_ad still reads
+# gate.shape[0] for its dispatch / random A_init shape, so we pass a
+# d_eff-shaped placeholder of the correct rank.
+dummy_gate = jnp.zeros((4, 4, 4, 4))   # (d_eff, d_eff, d_eff, d_eff)
+A_opt, env, E = optimize_gs_ad(dummy_gate, A_init=None, config=config)
 ```
 
 ``honeycomb_cg_gates`` builds 2 sub-sites per cell (``d_eff = 4``);
