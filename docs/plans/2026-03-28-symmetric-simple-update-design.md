@@ -1,6 +1,7 @@
 # 2-Site Symmetric Simple Update Design
 
 **Date:** 2026-03-28
+**Status:** COMPLETED (PR #206) — 2-site symmetric SU with U(1) charges; 1-site SU removed
 **Branch:** `feat/symmetric-simple-update`
 
 ## Goal

@@ -44,6 +44,16 @@ import jax
 # This must run at import time before any JAX computation is triggered.
 jax.config.update("jax_enable_x64", True)
 
+# Enable persistent compilation cache so recompilation across runs is free.
+# The cache directory can be overridden via JAX_COMPILATION_CACHE_DIR env var.
+import os as _os
+
+_cache_dir = _os.environ.get("JAX_COMPILATION_CACHE_DIR", "")
+if not _cache_dir:
+    _cache_dir = _os.path.join(_os.path.expanduser("~"), ".cache", "jax")
+    jax.config.update("jax_compilation_cache_dir", _cache_dir)
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 1)
+
 # ---------------------------------------------------------------------------
 # Eager imports: core data structures, contraction, linalg, lattice, network
 # ---------------------------------------------------------------------------
@@ -115,6 +125,11 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # _tensor_utils
     "fuse_indices": ("tenax.algorithms._tensor_utils", "fuse_indices"),
     "split_index": ("tenax.algorithms._tensor_utils", "split_index"),
+    # coarse_grain
+    "CGGates": ("tenax.algorithms.coarse_grain", "CGGates"),
+    "compute_energy_cg": ("tenax.algorithms.coarse_grain", "compute_energy_cg"),
+    "honeycomb_cg_gates": ("tenax.algorithms.coarse_grain", "honeycomb_cg_gates"),
+    "kagome_cg_gates": ("tenax.algorithms.coarse_grain", "kagome_cg_gates"),
     # auto_mpo
     "AutoMPO": ("tenax.algorithms.auto_mpo", "AutoMPO"),
     "HamiltonianTerm": ("tenax.algorithms.auto_mpo", "HamiltonianTerm"),
@@ -178,6 +193,43 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "ctm": ("tenax.algorithms.ipeps_ctm", "ctm"),
     "ctm_2site": ("tenax.algorithms.ipeps_ctm", "ctm_2site"),
     "ctm_split": ("tenax.algorithms.ipeps_ctm", "ctm_split"),
+    # honeycomb_ctm (native rank-4, 6-corner, 3-direction, 2-sublattice)
+    "honeycomb_ctm_energy_implicit": (
+        "tenax.algorithms.honeycomb_ctm",
+        "honeycomb_ctm_energy_implicit",
+    ),
+    "honeycomb_ctm_run": (
+        "tenax.algorithms.honeycomb_ctm",
+        "honeycomb_ctm_run",
+    ),
+    "HoneycombCTMEnv": (
+        "tenax.algorithms.honeycomb_ctm",
+        "HoneycombCTMEnv",
+    ),
+    "HoneycombConvergeInfo": (
+        "tenax.algorithms.honeycomb_ctm",
+        "HoneycombConvergeInfo",
+    ),
+    "initialize_honeycomb_env": (
+        "tenax.algorithms.honeycomb_ctm",
+        "initialize_honeycomb_env",
+    ),
+    "compute_honeycomb_energy": (
+        "tenax.algorithms.honeycomb_ctm",
+        "compute_honeycomb_energy",
+    ),
+    "compute_honeycomb_triangle_energy": (
+        "tenax.algorithms.honeycomb_ctm",
+        "compute_honeycomb_triangle_energy",
+    ),
+    "HONEYCOMB_NEIGHBORS": (
+        "tenax.algorithms.honeycomb_ctm",
+        "HONEYCOMB_NEIGHBORS",
+    ),
+    "HONEYCOMB_DIRECTIONS": (
+        "tenax.algorithms.honeycomb_ctm",
+        "HONEYCOMB_DIRECTIONS",
+    ),
     # ipeps_excitations
     "ExcitationConfig": ("tenax.algorithms.ipeps_excitations", "ExcitationConfig"),
     "ExcitationResult": ("tenax.algorithms.ipeps_excitations", "ExcitationResult"),
@@ -346,6 +398,21 @@ __all__ = [
     "compute_energy_split_ctm",
     "optimize_gs_ad",
     "optimize_gs_ad_chi_schedule",
+    # Coarse-grained iPEPS (honeycomb / kagome via 1-site square pipeline)
+    "CGGates",
+    "compute_energy_cg",
+    "honeycomb_cg_gates",
+    "kagome_cg_gates",
+    # Honeycomb CTM (native rank-4, 6-corner, 3-direction, 2-sublattice)
+    "honeycomb_ctm_energy_implicit",
+    "honeycomb_ctm_run",
+    "HoneycombCTMEnv",
+    "HoneycombConvergeInfo",
+    "initialize_honeycomb_env",
+    "compute_honeycomb_energy",
+    "compute_honeycomb_triangle_energy",
+    "HONEYCOMB_NEIGHBORS",
+    "HONEYCOMB_DIRECTIONS",
     # Standard CTM (Tensor protocol)
     "CTMTensorEnv",
     "ctm_tensor",

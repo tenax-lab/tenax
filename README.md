@@ -20,6 +20,7 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **AutoMPO** — build Hamiltonian MPOs from symbolic operator descriptions (custom couplings, NNN, arbitrary spin); supports `symmetric=True` for U(1) block-sparse MPOs
 - **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237); L-BFGS with Hager-Zhang line search and metric preconditioning (Rader et al.), Adam (with cosine lr decay), and conjugate gradient optimizers; implicit AD via iterative VJP (default) and optional GMRES route; explicit AD through unrolled CTM iterations for 1-site C4v path; **2-site shared-tensor C4v path** (`unit_cell="2site"` + `gs_c4v=True`) where a single C4v tensor is optimized and the second sublattice is derived by spin-π rotation, stable across χ=8–24 for spin-1/2 AFMs; opt-in reference-mode dense C4v Appendix C-F mode (`ctm_ad_mode="c4v_reference"`) with Krylov implicit backward (`bicgstab` + `gmres` fallback); sigma gauge fixing (`forward_gauge="sigma"`) for stable elementwise CTM convergence; C4v symmetry enforcement via explicit basis parameterization; chi-ramping schedule (`optimize_gs_ad_chi_schedule`) for progressive refinement- **SVD and QR CTMRG projectors** — SVD (Fishman) projectors (`projector_method="svd"`) and QR projectors for faster CTM convergence alongside the default `eigh`
 - **Split-CTMRG** — ket/bra-separated CTM environment tensors for O(χ³D³) projector cost instead of O(χ³D⁶); works with both `DenseTensor` and `SymmetricTensor` via the Tensor protocol (Naumann et al., arXiv:2502.10298)
+- **Honeycomb iPEPS CTM (native)** — rank-4, 6-corner, 3-direction, 2-sublattice CTMRG for honeycomb iPEPS (replaces the dummy-bond brick-wall workaround). Public entry `honeycomb_ctm_energy_implicit` provides `jax.custom_vjp` with a JIT-fused GMRES backward; default Corboz biorthogonal projector + per-column phase fix; configurable `energy_fn` hook for kagome iPESS triangle energies. References: Lukin & Sotnikov, PRB 107, 054424 (2023) for the 6-corner CTMRG and the bipartite extension in PRE 109, 045305 (2024) §II.C.
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary Brillouin-zone momenta (Ponsioen et al. 2022)
 - **Polymorphic tensor arithmetic** — `+`, `-`, `*`, `-T`, `max_abs`, `inner()`, `conj()`, `dagger()`, `bar()` work identically on `DenseTensor` and `SymmetricTensor`, enabling algorithm code that is agnostic to the underlying storage
 - **Block-sparse SVD, QR, and eigh** — native symmetry-aware decompositions in `tenax.linalg` for `SymmetricTensor`
@@ -319,9 +320,9 @@ gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) + 0.5 * (
 )
 
 # Recommended AD configuration: L-BFGS + explicit AD + QR projectors.
-# The optimizer auto-promotes forward_gauge="qr" to "phase" for the
-# unrolled CTM sweeps (variPEPS-style Frobenius + phase fix). Reaches
-# E=-0.6628 at D=2, chi=16 (literature: -0.6548 at D=2).
+# forward_gauge defaults to "phase" (variPEPS-style Frobenius + phase
+# fix), correct for both implicit and explicit AD. Reaches E=-0.6628
+# at D=2, chi=16 (literature: -0.6548 at D=2).
 config = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(
@@ -329,7 +330,7 @@ config = iPEPSConfig(
         max_iter=80,
         projector_method="qr",  # recommended projector for explicit AD
     ),
-    gs_explicit_ad=True,  # default; unrolled + checkpointed CTM
+    # gs_implicit_ad=False is the default (explicit AD)
     gs_projector_method="qr",
     gs_optimizer="lbfgs",  # L-BFGS with Hager-Zhang line search
     gs_line_search_method="hager_zhang",
@@ -353,7 +354,6 @@ config_2site = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(chi=16, max_iter=100, min_iter=50),
     gs_optimizer="lbfgs",
-    gs_explicit_ad=True,
     gs_explicit_ad_steps=10,
     gs_explicit_ad_warmup=2,
     gs_num_steps=50,
@@ -370,7 +370,6 @@ config_2site = iPEPSConfig(
 config_svd = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(chi=16, max_iter=50, projector_method="svd"),
-    gs_explicit_ad=True,
     gs_num_steps=200,
     gs_optimizer="lbfgs",
     gs_line_search_method="hager_zhang",
@@ -389,7 +388,7 @@ config_reference = iPEPSConfig(
         adjoint_maxiter=50,
         adjoint_tol=1e-8,
     ),
-    gs_explicit_ad=False,
+    gs_implicit_ad=True,
     gs_c4v=True,
     unit_cell="1x1",
     gs_num_steps=100,
@@ -419,6 +418,79 @@ config = CTMConfig(chi=20, max_iter=100, chi_I=10)
 env = ctm_split(A, config)
 E = compute_energy_split_ctm(A, env, gate, d=2)
 ```
+
+## Honeycomb iPEPS CTM (native rank-4)
+
+Native rank-4 CTMRG for honeycomb iPEPS — six corners, three edge
+directions, two sublattices — without the dummy-bond brick-wall hack.
+Custom `jax.custom_vjp` forward with a JIT-fused GMRES backward.
+
+```python
+import jax
+import jax.numpy as jnp
+import numpy as np
+from tenax import (
+    HONEYCOMB_DIRECTIONS,
+    honeycomb_ctm_energy_implicit,
+    honeycomb_ctm_run,
+)
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.symmetry import U1Symmetry
+from tenax.core.tensor import DenseTensor
+
+
+def _make_site(D=2, d=2, key=jax.random.PRNGKey(0)):
+    sym = U1Symmetry()
+    virt = np.zeros(D, dtype=np.int32)
+    phys = np.zeros(d, dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="e0"),
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="e1"),
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="e2"),
+        TensorIndex.from_charges(sym, phys.copy(), FlowDirection.IN, label="phys"),
+    )
+    re = jax.random.normal(key, (D, D, D, d))
+    im = jax.random.normal(jax.random.fold_in(key, 1), (D, D, D, d))
+    return DenseTensor((re + 1j * im).astype(jnp.complex128), indices)
+
+
+# Spin-1/2 Heisenberg bond operator (4×4)
+sx = 0.5 * np.array([[0, 1], [1, 0]], dtype=np.complex128)
+sy = 0.5 * np.array([[0, -1j], [1j, 0]], dtype=np.complex128)
+sz = 0.5 * np.array([[1, 0], [0, -1]], dtype=np.complex128)
+H_bond = jnp.asarray(np.kron(sx, sx) + np.kron(sy, sy) + np.kron(sz, sz))
+
+# Honeycomb iPEPS uses two rank-4 sites at coords (0,0) and (1,0); legs
+# (e0, e1, e2, phys). All virtuals OUT, phys IN.
+A = _make_site(D=2, d=2, key=jax.random.PRNGKey(0))
+B = _make_site(D=2, d=2, key=jax.random.PRNGKey(1))
+sites = {(0, 0): A, (1, 0): B}
+
+# Forward only: returns the converged per-sublattice env dict + info.
+envs, info = honeycomb_ctm_run(
+    sites, chi=8, max_iter=80, conv_tol=1e-8,
+    projector_method="biorthogonal",  # default; eigh/svd are A=B opt-ins
+    forward_gauge="phase",            # default; sigma reserved for A=B opt-in
+)
+
+# Implicit-AD energy: takes jax.grad through the CTM fixed point via
+# JIT-fused GMRES on (I - dF/denv) lambda = dE/denv.
+energy = honeycomb_ctm_energy_implicit(
+    sites, H_bond, chi=8, max_iter=80, conv_tol=1e-8,
+)
+grad_fn = jax.grad(
+    lambda Ad: honeycomb_ctm_energy_implicit(
+        {(0, 0): DenseTensor(Ad, A.indices), (1, 0): B},
+        H_bond, chi=8, max_iter=40,
+    )
+)
+gA = grad_fn(A.todense())
+```
+
+The default energy is the 3-edge nearest-neighbor bond sum
+`Σ_α Tr(ρ_α · H_bond)`. Pass `energy_fn=compute_honeycomb_triangle_energy`
+for the kagome iPESS use case where each site is a 3-spin triangle and
+the Hamiltonian is the intra-triangle 3-spin operator.
 
 ## Examples
 

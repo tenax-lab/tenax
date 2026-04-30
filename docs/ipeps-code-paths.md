@@ -46,11 +46,11 @@ Paths marked **BROKEN** are known non-functional. Paths marked
               │                                         │
      ┌────────▼──────────┐                  ┌───────────▼───────────┐
      │ gs_optimizer      │                  │ gs_optimizer          │
-     │ = "lbfgs"         │                  │ = "cg" (default)      │
-     │ + hager_zhang LS  │                  │ Polak-Ribiere+        │
-     │ + metric_precond  │                  │ + metric_precond      │
-     │                   │                  │   (natural gradient)  │
-     │ (recommended)     │                  │                       │
+     │ = "lbfgs"         │                  │ = "cg"                │
+     │ (default)         │                  │ Polak-Ribiere+        │
+     │ + hager_zhang LS  │                  │ + metric_precond      │
+     │ + metric_precond  │                  │   (natural gradient)  │
+     │                   │                  │                       │
      └────────┬──────────┘                  └───────────┬───────────┘
               └────────────────────┬────────────────────┘
                                    │
@@ -62,8 +62,8 @@ Paths marked **BROKEN** are known non-functional. Paths marked
                                    │
           ┌────────────────────────┼────────────────────────┐
           │                                                 │
- gs_explicit_ad=True                           gs_explicit_ad=False
- (default, RECOMMENDED)                        (implicit)
+ gs_implicit_ad=False                           gs_implicit_ad=True
+ (explicit AD)                                  (default, RECOMMENDED)
           │                                                 │
  ┌────────▼─────────────────────┐                ┌──────────▼───────────────┐
  │ ctm_tensor_converge_explicit │                │ ctm_ad_mode selects      │
@@ -72,20 +72,22 @@ Paths marked **BROKEN** are known non-functional. Paths marked
  │ warmup (stop_gradient)       │                           │
  │ ──── W steps ────            │                ┌──────────┴─────────┐
  │                              │                │                    │
- │ auto-phase gauge promotion:  │                ▼                    ▼
- │  qr → phase when user left   │         ctm_ad_mode=None      ctm_ad_mode=
- │  forward_gauge="qr"          │         (custom_vjp           "c4v_reference"
+ │ forward_gauge: passed         │                ▼                    ▼
+ │   through unchanged           │         ctm_ad_mode=None      ctm_ad_mode=
+ │   (no silent promotion)       │         (custom_vjp           "c4v_reference"
  │                              │          ctm_tensor_converge) (Francuz et al.,
  │ backprop (jax.checkpoint)    │                               dense 1-site
  │ ──── B steps ────            │          ┌───────┼───────┐    C4v, opt-in)
  │                              │          │               │
  │ gauge modes honored:         │          ▼               ▼    adjoint_solver:
  │   qr / phase / sigma / none  │        "vjp"        xxxxxxxxxxx  bicgstab /
- │                              │        (supported)  x "gmres" x  gmres
- │                              │                     x BROKEN  x
- │                              │                     x issue   x
- │                              │                     x #292    x
- │                              │                     xxxxxxxxxxx
+ │                              │        (default,    x "gmres" x  gmres
+ │                              │         w/ phase)   x BROKEN  x
+ │                              │                     x issue   x  resolve_projector
+ │                              │                     x #292    x  _backward
+ │                              │                     xxxxxxxxxxx  enforces
+ │                              │                                  svd + phase +
+ │                              │                                  elementwise
  └────────┬─────────────────────┘
           │
           │ (both paths share the forward CTM stack below)
@@ -140,14 +142,22 @@ Legend:
   xxxxxxxxxxxxxx
 ```
 
-## Recommended Path (post-PR-#291)
+## Recommended Path (post-PR-#341)
 
-For AFM models on the square lattice, the post-PR-#291 recommended path is
-sublattice rotation + C4v + explicit AD + QR projectors. The optimizer
-transparently promotes the conservative default ``forward_gauge="qr"`` to
-``"phase"`` (variPEPS-style Frobenius + phase fix) for the unrolled CTM
-sweeps, which is 6–9× faster than the historical sigma gauge with equal or
-better energy.
+For AFM models on the square lattice, the recommended path is
+**implicit AD with the SVD (Fishman) projector + phase gauge +
+element-wise CTM convergence**, the "trifecta" combination
+empirically validated in PR #341.  ``resolve_projector_backward`` in
+``ipeps_ad_policy.py`` enforces this combination at dispatch time and
+raises ``ValueError`` if any of the three components is set
+otherwise.  Explicit AD with QR projectors remains supported as a
+secondary path (see below).
+
+The defaults already match the recommended combination:
+``gs_implicit_ad=True``, ``ctm.projector_method="svd"``,
+``ctm.forward_gauge="phase"``, ``ctm.ctm_conv_method="elementwise"``,
+``gs_optimizer="lbfgs"``, ``gs_metric_precond=True``.  No silent gauge
+or projector promotion is applied.
 
 ```python
 from tenax import (
@@ -159,18 +169,38 @@ H_rot = sublattice_rotate_gate(H)        # map AFM → ferromagnetic
 config = iPEPSConfig(
     unit_cell="1x1",
     gs_c4v=True,                         # enforce C4v symmetry
-    gs_optimizer="lbfgs",                # L-BFGS + Hager-Zhang line search
-    gs_line_search_method="hager_zhang",
-    gs_metric_precond=True,
-    gs_explicit_ad=True,                 # default; unrolled + checkpointed
+    # Defaults below are already correct for the recommended path:
+    #   gs_implicit_ad=True
+    #   gs_optimizer="lbfgs" + hager_zhang line search
+    #   gs_metric_precond=True
+    ctm=CTMConfig(
+        chi=16,
+        max_iter=80,
+        # All three are defaults — shown here for visibility:
+        projector_method="svd",          # Fishman two-projector
+        forward_gauge="phase",           # Frobenius + first-above-threshold phase fix
+        ctm_conv_method="elementwise",
+    ),
+    su_init=True,
+)
+
+A_opt, env, E = optimize_gs_ad(H_rot, A_init=None, config=config)
+```
+
+For the **explicit-AD + QR-CTMRG** path that was the recommendation
+through PR #291 (best-scaling projector at D=2 for ``chi ≥ 16``):
+
+```python
+config = iPEPSConfig(
+    unit_cell="1x1",
+    gs_c4v=True,
+    gs_implicit_ad=False,                # explicit AD path
     gs_explicit_ad_steps=20,
     gs_explicit_ad_warmup=2,
     gs_projector_method="qr",
     ctm=CTMConfig(chi=16, max_iter=80, projector_method="qr"),
     su_init=True,
 )
-
-A_opt, env, E = optimize_gs_ad(H_rot, A_init=None, config=config)
 ```
 
 See [`docs/guide/algorithms/ipeps_ad_paths.md`](guide/algorithms/ipeps_ad_paths.md)
@@ -222,7 +252,7 @@ back to the standard path:
 
 - ``unit_cell="1x1"``,
 - ``gs_c4v=True``,
-- ``gs_explicit_ad=False``,
+- ``gs_implicit_ad=True``,
 - ``ctm.ctm_ad_mode="c4v_reference"``.
 
 Additional knobs on ``CTMConfig``: ``adjoint_solver`` (``"bicgstab"`` or
@@ -230,6 +260,67 @@ Additional knobs on ``CTMConfig``: ``adjoint_solver`` (``"bicgstab"`` or
 the Krylov adjoint raises rather than silently returning a
 non-solution, and records a ``converged`` flag in the backward meta
 dict. Dense tensors only for now — no SymmetricTensor path yet.
+
+## Coarse-Grained iPEPS (PR #352 / #353)
+
+For non-square lattices (honeycomb, kagome) Tenax provides a
+**coarse-grained iPEPS (CG iPEPS)** path that maps the lattice onto the
+1-site square pipeline by grouping a unit cell of physical sites into a
+single tensor with effective physical dimension ``d_eff = d ** n_sites``.
+The optimizer reuses the standard ``optimize_gs_ad`` square machinery —
+no new CTM or AD path — only the gate construction and energy
+contraction differ.
+
+```python
+import jax.numpy as jnp
+from tenax import iPEPSConfig, optimize_gs_ad, honeycomb_cg_gates
+
+cg = honeycomb_cg_gates(J=1.0)        # d_eff = 4 (two spin-1/2 sub-sites)
+config = iPEPSConfig(
+    unit_cell="1x1",
+    cg_gates=cg,
+    su_init=False,                     # cg_gates requires random init
+    # Standard implicit-AD trifecta otherwise.
+)
+# The active Hamiltonian lives on cg_gates; optimize_gs_ad still reads
+# gate.shape[0] for its dispatch / random A_init shape, so we pass a
+# d_eff-shaped placeholder of the correct rank.
+dummy_gate = jnp.zeros((4, 4, 4, 4))   # (d_eff, d_eff, d_eff, d_eff)
+A_opt, env, E = optimize_gs_ad(dummy_gate, A_init=None, config=config)
+```
+
+``honeycomb_cg_gates`` builds 2 sub-sites per cell (``d_eff = 4``);
+``kagome_cg_gates`` builds 3 sub-sites per up-triangle (``d_eff = 8``).
+``CGGates.map_fn`` and ``CGGates.init_fn`` let the user parameterize the
+CG tensor as a contraction of raw site tensors (e.g. for variational
+restrictions or staggered initialization); when both are ``None`` the
+optimizer treats the CG tensor itself as the variational parameter.
+
+Constraints (enforced by ``iPEPSConfig.__post_init__``):
+
+- requires ``unit_cell="1x1"``;
+- incompatible with ``su_init=True`` (no SU on coarse-grained tensors).
+
+This is the recommended path for honeycomb/kagome AFM ground states at
+moderate ``D``; for native honeycomb topology see the next section.
+
+## Native Honeycomb CTM (PR #347)
+
+A separate, **native rank-4 honeycomb CTM** lives under
+``src/tenax/algorithms/_ctm_honeycomb_*.py`` (re-exported via
+``tenax.algorithms.honeycomb_ctm``). It works directly with the
+two-sublattice honeycomb topology — 6 corners, 3 directions, 2
+sublattice CTM tensors — rather than fusing the two sites into a CG
+tensor. Public entry points: ``honeycomb_ctm_run`` (forward),
+``honeycomb_ctm_energy_implicit`` (with implicit-AD backward),
+``HoneycombCTMEnv`` (env container), ``compute_honeycomb_energy`` and
+``compute_honeycomb_triangle_energy``.
+
+The native path is more faithful to honeycomb geometry (smaller
+effective bond dimension at the same ``chi``) but does **not** plug into
+``optimize_gs_ad`` directly yet — wire-up is tracked separately. CG
+iPEPS remains the easiest production-AD entry point for honeycomb until
+that lands.
 
 ## Stall Recovery (issue #298)
 
@@ -263,16 +354,17 @@ The 2-site L-BFGS path still has a separate convergence gap at
 
 | Path                              | Status           | Notes                                                              |
 |-----------------------------------|------------------|--------------------------------------------------------------------|
-| Explicit AD (standard CTM)        | **Working**      | Default. Warmup + checkpoint, auto-phase gauge for explicit AD.    |
-| Implicit diff + VJP backward      | **Working**      | Regression-covered; use with ``forward_gauge="sigma"``.            |
-| Implicit diff + GMRES backward    | **BROKEN**       | Spectral radius > 1; ``xfail`` regression. Tracked by issue #292.  |
+| Implicit AD (svd + phase + elementwise) | **Working** | **Default and recommended.** Enforced by ``resolve_projector_backward`` (PR #341). |
+| Explicit AD (standard CTM)        | **Working**      | ``gs_implicit_ad=False``. Warmup + checkpoint, ``forward_gauge`` honored as set. |
+| Implicit diff + VJP backward      | **Working**      | Regression-covered. Default ``ad_backward_method``; uses ``forward_gauge="phase"`` (the only value the implicit path accepts). |
+| Implicit diff + GMRES backward    | **BROKEN**       | ``ad_backward_method="gmres"`` user knob still flagged unstable (spectral radius > 1); ``xfail`` regression, issue #292. The internal Python-loop CTM AD calls JAX's ``gmres_pytree_jax`` directly and is *not* gated by this knob. |
 | C4v + sublattice rotation         | **Working**      | Recommended Zhang/Corboz-style path.                               |
 | 2-site shared-tensor C4v          | **Working**      | ``unit_cell="2site"`` + ``gs_c4v=True``; spin-1/2 only (PR #304).  |
-| 2-site independent A/B            | **EXPERIMENTAL** | Unconstrained 2-site AD; drifts to unphysical energies (issue #299).|
+| 2-site independent A/B            | **EXPERIMENTAL** | Unconstrained 2-site AD; needs ``complex128`` site tensors to stay variational (real ``float64`` drifts non-variationally — see ``project_complex_tensors_variational`` notes / PR #341). |
 | Reference-mode C4v AD             | **Working**      | ``ctm_ad_mode="c4v_reference"``; dense 1-site C4v only (PR #304).  |
-| QR-CTMRG (C4v)                    | **Working**      | Best-scaling projector at D=2; recommended for chi ≥ 16.           |
-| Phase gauge (``forward_gauge``)   | **Working**      | variPEPS-style Frobenius + phase fix; default for explicit AD.     |
-| Sigma gauge (``forward_gauge``)   | **Working**      | Historical; still required for the implicit-diff path.             |
+| QR-CTMRG (C4v)                    | **Working**      | Best-scaling projector at D=2 for explicit AD; recommended for ``chi ≥ 16`` on the explicit path. Implicit AD requires ``"svd"``. |
+| Phase gauge (``forward_gauge``)   | **Working**      | variPEPS-style Frobenius + first-above-threshold phase fix per absorption. Default for both implicit and explicit AD. |
+| Sigma gauge (``forward_gauge``)   | **Working**      | Transfer-matrix eigenvector alignment, **1-site only**. Breaks 2-site (inconsistent A/B alignment causes gradient explosion). Not auto-promoted; opt-in for 1-site users mirroring YASTN. |
 | ``forward_gauge="none"``          | **Working**      | Diagnostic / benchmark mode; honored on the explicit-AD path.     |
 | ``forward_gauge="none"`` on JIT   | **EXPERIMENTAL** | JIT ``while_loop`` kernel falls back to ``"qr"``; known limitation.|
 | ``gs_ctm_conv_tol_schedule``      | **Working**      | Loose-to-tight CTM tolerance ramp; optional tuning knob.           |
@@ -280,20 +372,31 @@ The 2-site L-BFGS path still has a separate convergence gap at
 | Stall recovery (1-site)           | **Working**      | ``gs_stall_recovery="noise"`` auto-default; required by C4v path.  |
 | Stall recovery (2-site)           | **Working**      | ``gs_stall_recovery="reset"`` auto-default since #298.             |
 | 2-site L-BFGS at χ=8              | **Working**      | ``E_best ≈ -0.6602`` at D=2 with Lorentzian projector backward (issue #299 closed; post-convergence re-eval tracked separately by #317). |
-| Lorentzian projector backward     | **Working**      | Auto-default when ``gs_explicit_ad=True`` + ``projector_method="eigh"``; 1-site + 2-site, dense only (SymmetricTensor deferred to Approach B). |
+| Lorentzian projector backward     | **Aspirational** | ``CTMConfig`` documents auto-promotion of ``"auto"`` to ``"lorentzian"`` when ``gs_implicit_ad=False`` + ``projector_method="eigh"``, but the ``"auto"`` resolver is **not yet implemented** (see ``_ctm_projector.py`` "Task 8 will resolve 'auto'"); ``"auto"`` currently behaves as ``"standard"``. Setting ``projector_backward="lorentzian"`` explicitly works. |
+| Adjoint Arnoldi precheck          | **Working**      | ``adjoint_arnoldi_precheck=True`` (default) probes ``J^T``'s spectral radius before the Krylov solve; falls back to a regularized solve when ``> adjoint_arnoldi_threshold`` (default 5.0). |
+| Adjoint Tikhonov damping          | **Working**      | ``adjoint_tikhonov`` (default ``1e-6``) adds ``+τI`` to ``(I − J^T)`` to prevent Krylov stalls near a well-converged GS. |
 | Split CTM forward (SU)            | **Working**      | Used by simple update.                                             |
 | Split CTM + implicit diff         | **BROKEN**       | Not wired into optimizer.                                          |
 | Split CTM + explicit diff         | **Working**      | No ``jax.checkpoint``, high memory.                                |
-| Fermionic iPEPS AD                | **EXPERIMENTAL** | Wraps ``SymmetricTensor`` as ``DenseTensor``.                      |
+| Fermionic iPEPS AD                | **EXPERIMENTAL** | Wraps ``SymmetricTensor`` as ``DenseTensor``. Fermionic Koszul twist (`bar_super()`) added in PR #361 fixes super-algebra sign issues that previously broke fermionic AD with non-trivial parity sectors. |
+| Coarse-grained iPEPS (honeycomb)  | **Working**      | ``cg_gates=honeycomb_cg_gates()`` + ``unit_cell="1x1"``; reuses square 1-site AD pipeline at ``d_eff=4`` (PR #352 / #353). |
+| Coarse-grained iPEPS (kagome)     | **Working**      | ``cg_gates=kagome_cg_gates()`` + ``unit_cell="1x1"``; reuses square 1-site AD pipeline at ``d_eff=8`` (PR #352 / #353). |
+| Native honeycomb CTM (rank-4)     | **Working** (forward + implicit-AD energy); not yet wired into ``optimize_gs_ad`` | 6-corner / 3-direction / 2-sublattice; ``honeycomb_ctm_run`` + ``honeycomb_ctm_energy_implicit`` (PR #347). |
 
 ### Benchmark highlights (2D Heisenberg AFM)
 
-| D | chi | Path                         | E (best)   | Literature / exact |
-|---|-----|------------------------------|------------|--------------------|
-| 2 | 16  | qr + phase + explicit AD     | -0.6628    | -0.6548 (Corboz D=2)|
-| 2 | 8   | qr + phase + explicit AD     | -0.6610    | —                  |
-| 2 | 8   | eigh + phase + lorentzian + 2-site C4v | -0.6602 | -0.6548 (Corboz D=2 χ=16) |
-| — | —   | QMC exact                    | -0.66944   | Sandvik, PRB 56, 11678 (1997) |
+| D | chi | Path                                        | E (best)   | Literature / exact |
+|---|-----|---------------------------------------------|------------|--------------------|
+| 2 | 16  | qr + phase + explicit AD (1-site C4v)       | -0.6628    | -0.6548 (Corboz D=2) |
+| 2 | 8   | qr + phase + explicit AD (1-site C4v)       | -0.6610    | —                  |
+| 2 | 8   | svd + phase + implicit AD (2-site C4v)      | -0.6602    | -0.6548 (Corboz D=2 χ=16) |
+| 3 | 16  | svd + phase + implicit AD (2-site C4v)      | -0.6521    | (50 steps, monotonic, 7.9 s/step) |
+| 2 | 16  | svd + phase + implicit AD (2-site, complex128, non-C4v) | -0.6406 | variational; ≈1 min/step on GPU |
+| — | —   | QMC exact                                   | -0.66944   | Sandvik, PRB 56, 11678 (1997) |
+
+The 2-site non-C4v entry requires ``complex128`` site tensors —
+``float64`` drifts non-variationally because the implicit-diff linear
+system ``(I − J^T)λ = g`` is ill-conditioned in the real subspace.
 
 See [`docs/guide/algorithms/ipeps_ad_paths.md`](guide/algorithms/ipeps_ad_paths.md)
 for the full benchmark table and the projector × gauge comparison matrix.
@@ -304,31 +407,43 @@ for the full benchmark table and the projector × gauge comparison matrix.
 |-----------------------|-----------------------------|------------------|--------------------------------------|
 | Init                  | ``su_init``                 | ``True``         | ``False`` = random init              |
 | Unit cell             | ``unit_cell``               | ``"1x1"``        | ``"2site"`` = checkerboard           |
-| Optimizer             | ``gs_optimizer``            | ``"cg"``         | ``"lbfgs"`` (recommended for AD)     |
+| Optimizer             | ``gs_optimizer``            | ``"lbfgs"``      | ``"cg"`` / ``"adam"``                |
+| Line search           | ``gs_line_search_method``   | ``"hager_zhang"``| ``"armijo"``                         |
 | C4v symmetry          | ``gs_c4v``                  | ``False``        | ``True`` = enforce C4v               |
-| AD method             | ``gs_explicit_ad``          | ``True``         | ``False`` = implicit diff            |
+| AD method             | ``gs_implicit_ad``          | ``True``         | ``False`` = explicit AD              |
 | Implicit AD mode      | ``ctm_ad_mode``             | ``None``         | ``"c4v_reference"`` (Francuz et al., 1-site C4v) |
 | Implicit adjoint      | ``adjoint_solver``          | ``"bicgstab"``   | ``"gmres"`` (reference-mode only)    |
 | Adjoint max iters     | ``adjoint_maxiter``         | ``50``           | reference-mode only                  |
 | Adjoint tol           | ``adjoint_tol``             | ``1e-8``         | reference-mode only                  |
-| Warmup steps          | ``gs_explicit_ad_warmup``   | ``3``            | stop_gradient CTM steps              |
-| Backprop steps        | ``gs_explicit_ad_steps``    | ``20``           | differentiable CTM steps             |
-| AD projector override | ``gs_projector_method``     | ``None``         | ``"qr"`` (recommended)               |
+| Adjoint Tikhonov      | ``adjoint_tikhonov``        | ``1e-6``         | ``0.0`` for strictly exact adjoint; raise to 1e-4…1e-3 near a well-converged GS |
+| Adjoint Arnoldi precheck | ``adjoint_arnoldi_precheck`` | ``True``    | spectral-radius probe before Krylov solve |
+| Adjoint Arnoldi threshold | ``adjoint_arnoldi_threshold`` | ``5.0``   | fall back to regularized solve when ρ(J^T) exceeds this |
+| Warmup steps          | ``gs_explicit_ad_warmup``   | ``3``            | stop_gradient CTM steps (explicit AD) |
+| Backprop steps        | ``gs_explicit_ad_steps``    | ``20``           | differentiable CTM steps (explicit AD) |
+| AD projector override | ``gs_projector_method``     | ``None``         | ``"qr"`` (recommended for explicit AD); implicit AD requires ``"svd"`` |
 | Backward              | ``ad_backward_method``      | ``"vjp"``        | ``"gmres"`` (BROKEN — issue #292)    |
-| Projector             | ``projector_method``        | ``"eigh"``       | ``"qr"`` (recommended) / ``"svd"``   |
-| Projector backward    | ``projector_backward``      | ``"auto"``       | ``"standard"`` / ``"lorentzian"`` (auto-promoted to lorentzian when ``gs_explicit_ad=True`` and ``projector_method="eigh"``) |
-| Forward gauge         | ``forward_gauge``           | ``"qr"``         | ``"phase"`` / ``"sigma"`` / ``"none"`` |
+| Projector             | ``projector_method``        | ``"svd"``        | ``"eigh"`` / ``"qr"`` (recommended for explicit AD only)  |
+| Projector backward    | ``projector_backward``      | ``"auto"``       | ``"standard"`` / ``"lorentzian"`` (``"auto"`` resolver not yet implemented; behaves as ``"standard"``) |
+| Forward gauge         | ``forward_gauge``           | ``"phase"``      | ``"qr"`` / ``"sigma"`` / ``"none"`` (no silent promotion; implicit AD requires ``"phase"``) |
+| CTM conv method       | ``ctm_conv_method``         | ``"elementwise"``| ``"sv"`` (singular-value); implicit AD requires ``"elementwise"`` |
 | Conv tol schedule     | ``gs_ctm_conv_tol_schedule``| ``None``         | ``[(frac, tol), ...]``               |
 | Metric precond        | ``gs_metric_precond``       | ``True``         | ``False`` = standard grad            |
 | Stall recovery        | ``gs_stall_recovery``       | ``None``         | ``"noise"`` / ``"reset"`` (auto)     |
 | Energy floor          | ``gs_energy_floor``         | ``None``         | ``float`` = reject below as non-variational |
+| CG iPEPS gates        | ``cg_gates``                | ``None``         | ``honeycomb_cg_gates()`` / ``kagome_cg_gates()`` / custom ``CGGates`` (requires ``unit_cell="1x1"``, rejects ``su_init=True``) |
 | CTM variant           | (function choice)           | standard         | split, C4v                           |
 
-The static default ``forward_gauge="qr"`` is kept conservative so that
-callers who construct a ``CTMConfig`` directly (forward-only CTM,
-notebooks, diagnostics) see predictable behavior.  ``optimize_gs_ad``
-auto-promotes to ``"phase"`` at runtime when ``gs_explicit_ad=True`` and
-the user has not opted into a different gauge.
+The static defaults
+(``projector_method="svd"``, ``forward_gauge="phase"``, ``ctm_conv_method="elementwise"``)
+are the AD-correct choices for both implicit and explicit AD.  For
+the implicit-AD path these three values are *enforced* by
+``resolve_projector_backward`` — any other combination raises
+``ValueError`` at dispatch.  For the explicit-AD path
+``optimize_gs_ad`` passes the user's configured gauge and projector
+through unchanged.  ``build_ad_ctm_config`` performs **no silent
+promotion** of any value: only ``gs_projector_method`` (when set)
+overrides ``ctm.projector_method``.  Direct ``CTMConfig()`` users get
+the same behavior the optimizer uses.
 
 ## Key Files
 
@@ -348,6 +463,9 @@ the user has not opted into a different gauge.
 | Simple update                           | ``src/tenax/algorithms/ipeps_simple_update.py``, ``ipeps.py`` |
 | Energy computation                      | ``src/tenax/algorithms/_ctm_tensor_energy.py``, ``_split_ctm_tensor_energy.py`` |
 | Fermionic variant                       | ``src/tenax/algorithms/fermionic_ipeps.py``   |
+| Coarse-grained iPEPS (honeycomb/kagome) | ``src/tenax/algorithms/coarse_grain.py``      |
+| Native honeycomb CTM (rank-4)           | ``src/tenax/algorithms/honeycomb_ctm.py``, ``_ctm_honeycomb_*.py`` |
+| Fermionic Koszul twist (super-algebra)  | ``src/tenax/core/tensor.py`` (``bar_super()``, PR #361) |
 
 ## Related Documents
 

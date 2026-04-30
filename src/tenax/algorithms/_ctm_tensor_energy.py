@@ -7,8 +7,11 @@ __all__ = [
     "_rdm1x2_tensor_2site",
     "_rdm2x1_tensor",
     "_rdm2x1_tensor_2site",
+    "_rdm_1site_tensor",
+    "_rdm_diagonal_tensor",
     "compute_energy_ctm_tensor",
     "compute_energy_ctm_tensor_2site",
+    "compute_energy_ctm_tensor_multisite",
 ]
 
 import jax
@@ -17,10 +20,150 @@ import jax.numpy as jnp
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     _build_double_layer_open_tensor,
+    _build_double_layer_tensor,
 )
 from tenax.contraction.contractor import contract
 from tenax.core import EPS
 from tenax.core.tensor import Tensor
+
+
+def _rdm_1site_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
+    """Single-site RDM using label-based Tensor contractions.
+
+    Contracts the network::
+
+        C1 — T1 — C2
+        |      |      |
+        T4   ao     T2
+        |      |      |
+        C4 — T3 — C3
+
+    Where ``ao = _build_double_layer_open_tensor(A)`` has labels
+    ``(u2, d2, l2, r2, phys, phys_bra)``.
+
+    Returns dense RDM of shape ``(d, d)`` in ``(phys, phys_bra)`` convention,
+    symmetrised and trace-normalised.
+    """
+    ao = _build_double_layer_open_tensor(A)  # (u2, d2, l2, r2, phys, phys_bra)
+
+    # Step 1: top row = C1 · T1 · C2
+    C1 = env.C1.relabel("c1_r", "t1_l")
+    C2 = env.C2.relabel("c2_l", "t1_r")
+    C1_T1 = contract(C1, env.T1)  # (c1_d, u2, t1_r)
+    top_row = contract(C1_T1, C2)  # (c1_d, u2, c2_d)
+
+    # Step 2: bottom row = C4 · T3 · C3
+    C4 = env.C4.relabel("c4_u", "t3_r")
+    C3 = env.C3.relabel("c3_l", "t3_l")
+    C4_T3 = contract(C4, env.T3)  # (c4_r, d2, t3_l)
+    bot_row = contract(C4_T3, C3)  # (c4_r, d2, c3_u)
+
+    # Step 3: add T4 — connects c1_d ↔ t4_d, t4_u ↔ c4_r
+    T4 = env.T4.relabels({"t4_d": "c1_d", "t4_u": "c4_r"})
+    top_T4 = contract(top_row, T4)  # (u2, c2_d, l2, c4_r)
+
+    # Step 4: add T2 — connects c2_d ↔ t2_u, t2_d ↔ c3_u
+    T2 = env.T2.relabels({"t2_u": "c2_d", "t2_d": "c3_u"})
+    top_T4_T2 = contract(top_T4, T2)  # (u2, l2, c4_r, r2, c3_u)
+
+    # Step 5: contract with bottom row (shared: c4_r, c3_u; also d2)
+    env_full = contract(top_T4_T2, bot_row)  # (u2, l2, r2, d2)
+
+    # Step 6: contract full environment with ao (shared: u2, d2, l2, r2)
+    rdm_t = contract(
+        env_full,
+        ao,
+        output_labels=["phys", "phys_bra"],
+    )
+
+    rdm = rdm_t.todense()
+    rdm = 0.5 * (rdm + rdm.conj().T)
+    rdm = rdm / (jnp.trace(rdm) + EPS)
+    return rdm
+
+
+def _rdm_diagonal_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
+    r"""Diagonal (NNN) 2-site RDM from a 2×2 plaquette contraction.
+
+    Top-left (TL) and bottom-right (BR) sites have physical legs open;
+    top-right (TR) and bottom-left (BL) have physical legs traced (closed).
+
+    Returns dense RDM of shape ``(d, d, d, d)`` in
+    ``(s1_ket, s2_ket, s1_bra, s2_bra)`` convention (TL=s1, BR=s2),
+    symmetrised and trace-normalised.
+    """
+    ao = _build_double_layer_open_tensor(A)  # (u2, d2, l2, r2, phys, phys_bra)
+    ac = _build_double_layer_tensor(A)  # (u2, d2, l2, r2)
+
+    # Right-column copies (suffix R)
+    T1_R = env.T1.relabels({"t1_l": "t1_lR", "u2": "u2R", "t1_r": "t1_rR"})
+    T3_R = env.T3.relabels({"t3_r": "t3_rR", "d2": "d2R", "t3_l": "t3_lR"})
+
+    # Bottom-row copies (suffix B)
+    T4_B = env.T4.relabels({"t4_d": "t4_dB", "l2": "l2B", "t4_u": "t4_uB"})
+    T2_B = env.T2.relabels({"t2_u": "t2_uB", "r2": "r2B", "t2_d": "t2_dB"})
+
+    # Site tensors
+    ac_TR = ac.relabels({"u2": "u2R", "d2": "d2_TR", "l2": "l2_TR", "r2": "r2R"})
+    ac_BL = ac.relabels({"u2": "u2_BL", "d2": "d2B_BL", "l2": "l2B", "r2": "r2_BL"})
+    ao_BR = ao.relabels(
+        {
+            "u2": "u2_BR",
+            "d2": "d2R",
+            "l2": "l2_BR",
+            "r2": "r2B",
+            "phys": "phys_BR",
+            "phys_bra": "phys_bra_BR",
+        }
+    )
+
+    # Left half: C1 · T1_L · T4_T · ao_TL · T4_B · ac_BL · C4 · T3_L
+    C1 = env.C1.relabel("c1_r", "t1_l")
+    C1_T1L = contract(C1, env.T1)
+    T4_T = env.T4.relabels({"t4_d": "c1_d"})
+    left_top = contract(C1_T1L, T4_T)
+    left_top_ao = contract(left_top, ao)
+    T4_B = T4_B.relabel("t4_dB", "t4_u")
+    left_mid = contract(left_top_ao, T4_B)
+    ac_BL = ac_BL.relabel("u2_BL", "d2")
+    left_site = contract(left_mid, ac_BL)
+    C4 = env.C4.relabel("c4_u", "t3_r")
+    C4_T3L = contract(C4, env.T3)
+    C4_T3L = C4_T3L.relabels({"c4_r": "t4_uB", "d2": "d2B_BL"})
+    left_half = contract(left_site, C4_T3L)
+
+    # Right half: C2 · T1_R · T2_T · ac_TR · T2_B · ao_BR · C3 · T3_R
+    C2 = env.C2.relabel("c2_l", "t1_rR")
+    T1R_C2 = contract(T1_R, C2)
+    T2_T = env.T2.relabels({"t2_u": "c2_d"})
+    right_top = contract(T1R_C2, T2_T)
+    ac_TR = ac_TR.relabel("r2R", "r2")
+    right_top_ac = contract(right_top, ac_TR)
+    T2_B = T2_B.relabel("t2_uB", "t2_d")
+    right_mid = contract(right_top_ac, T2_B)
+    ao_BR = ao_BR.relabel("u2_BR", "d2_TR")
+    right_site = contract(right_mid, ao_BR)
+    C3 = env.C3.relabel("c3_l", "t3_lR")
+    T3R_C3 = contract(T3_R, C3)
+    T3R_C3 = T3R_C3.relabel("c3_u", "t2_dB")
+    right_half = contract(right_site, T3R_C3)
+
+    # Combine left and right halves
+    right_half = right_half.relabels(
+        {"t1_lR": "t1_r", "l2_TR": "r2", "l2_BR": "r2_BL", "t3_rR": "t3_l"}
+    )
+    rdm_t = contract(
+        left_half,
+        right_half,
+        output_labels=["phys", "phys_BR", "phys_bra", "phys_bra_BR"],
+    )
+
+    rdm = rdm_t.todense()
+    d = rdm.shape[0]
+    rdm_mat = rdm.reshape(d * d, d * d)
+    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
+    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    return rdm_mat.reshape(d, d, d, d)
 
 
 def _rdm2x1_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
@@ -104,6 +247,7 @@ def _rdm2x1_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     )
     # → (s1_ket, s2_ket, s1_bra, s2_bra)
 
+    # RDM is d^2 x d^2 (physical dimension) — always small, todense OK.
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
@@ -191,6 +335,7 @@ def _rdm1x2_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
         output_labels=["phys", "phys_B", "phys_bra", "phys_braB"],
     )
 
+    # RDM is d^2 x d^2 (physical dimension) — always small, todense OK.
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
@@ -296,6 +441,7 @@ def _rdm2x1_tensor_2site(
         output_labels=["phys", "phys_R", "phys_bra", "phys_braR"],
     )
 
+    # RDM is d^2 x d^2 (physical dimension) — always small, todense OK.
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
@@ -377,6 +523,7 @@ def _rdm1x2_tensor_2site(
         output_labels=["phys", "phys_B", "phys_bra", "phys_braB"],
     )
 
+    # RDM is d^2 x d^2 (physical dimension) — always small, todense OK.
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
@@ -423,3 +570,78 @@ def compute_energy_ctm_tensor_2site(
     E_h = jnp.einsum("ijkl,ijkl->", rdm_h, H)
     E_v = jnp.einsum("ijkl,ijkl->", rdm_v, H)
     return (E_h + E_v).real
+
+
+def compute_energy_ctm_tensor_multisite(
+    site_tensors: dict,
+    envs: dict,
+    neighbors: dict,
+    gate: Tensor | jax.Array,
+    d: int | None = None,
+) -> jax.Array:
+    """Compute energy per site summed over all NN bonds in a multi-site unit cell.
+
+    Each bond is counted once. Energy is normalized by the number of sites.
+
+    Args:
+        site_tensors: ``{coord: Tensor}`` mapping coordinates to iPEPS site tensors.
+        envs:         ``{coord: CTMTensorEnv}`` converged environments per site.
+        neighbors:    ``{coord: {"left": coord, "right": coord, "top": coord,
+                      "bottom": coord}}`` neighbor map defining the unit cell topology.
+        gate:         2-site Hamiltonian gate (dense array or Tensor).
+        d:            Physical dimension (inferred from first site tensor if None).
+
+    Returns:
+        Scalar energy per site.
+    """
+    # Infer physical dimension
+    if d is None:
+        first_A = next(iter(site_tensors.values()))
+        phys_idx = [i for i in first_A.indices if i.label == "phys"]
+        d = phys_idx[0].dim if phys_idx else first_A.indices[-1].dim
+
+    # Prepare gate as dense (d, d, d, d) array
+    if isinstance(gate, Tensor):
+        H = gate.todense().reshape(d, d, d, d)
+    else:
+        H = gate.reshape(d, d, d, d)
+
+    n_sites = len(site_tensors)
+    total_energy = jnp.array(0.0)
+    counted_bonds: set = set()
+
+    for coord, A in site_tensors.items():
+        env_A = envs[coord]
+        for direction in ("right", "bottom"):
+            nb_coord = neighbors[coord][direction]
+
+            # Build a canonical bond identifier to avoid double-counting.
+            # A bond from coord→right is the same as nb_coord→left.
+            reverse_dir = "left" if direction == "right" else "top"
+            reverse_bond = (nb_coord, reverse_dir)
+            bond = (coord, direction)
+            # Use frozenset so {(A,right), (B,left)} == {(B,left), (A,right)}
+            bond_id = frozenset([bond, reverse_bond])
+            if bond_id in counted_bonds:
+                continue
+            counted_bonds.add(bond_id)
+
+            B = site_tensors[nb_coord]
+            env_B = envs[nb_coord]
+
+            # When a site is its own neighbor, use the single-site RDM functions
+            if coord == nb_coord:
+                if direction == "right":
+                    rdm = _rdm2x1_tensor(A, env_A)
+                else:
+                    rdm = _rdm1x2_tensor(A, env_A)
+            else:
+                if direction == "right":
+                    rdm = _rdm2x1_tensor_2site(A, B, env_A, env_B)
+                else:
+                    rdm = _rdm1x2_tensor_2site(A, B, env_A, env_B)
+
+            bond_energy = jnp.einsum("ijkl,ijkl->", rdm, H)
+            total_energy = total_energy + bond_energy
+
+    return total_energy.real / n_sites

@@ -18,12 +18,36 @@ from tenax.algorithms.ipeps_ad_policy import (
     resolve_projector_backward,
     use_reference_c4v_path,
 )
-from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+from tenax.algorithms.ipeps_config import iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.lattice import Lattice
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, Tensor
 
 _logger = logging.getLogger(__name__)
+
+Coord = tuple[int, int]
+
+
+def _lattice_to_neighbors(
+    lattice: Lattice,
+) -> tuple[dict[Coord, dict[str, Coord]], dict[str, Coord], dict[Coord, str]]:
+    """Convert a Lattice neighbor_map to coordinate-keyed dicts.
+
+    Returns (neighbors, name_to_coord, coord_to_name).
+    """
+    name_to_coord: dict[str, Coord] = {
+        name: (i, 0) for i, name in enumerate(lattice.sites)
+    }
+    coord_to_name: dict[Coord, str] = {v: k for k, v in name_to_coord.items()}
+    neighbors: dict[Coord, dict[str, Coord]] = {
+        name_to_coord[name]: {
+            direction: name_to_coord[nb]
+            for direction, nb in lattice.neighbor_map[name].items()
+        }
+        for name in lattice.sites
+    }
+    return neighbors, name_to_coord, coord_to_name
 
 
 def _resolve_projector_backward(config: iPEPSConfig) -> iPEPSConfig:
@@ -43,7 +67,17 @@ def _normalize_stall_recovery(config, *, unit_cell: str):
 
     if config.gs_stall_recovery is not None:
         return config
-    default = "noise" if unit_cell == "1x1" else "reset"
+    # CG with map_fn optimizes a tuple of raw site tensors; the noise
+    # injection path assumes a single tensor (calls .todense()/jnp.linalg.norm
+    # on params), so default to "reset" for that case.
+    cg_with_map_fn = (
+        config.cg_gates is not None
+        and getattr(config.cg_gates, "map_fn", None) is not None
+    )
+    if cg_with_map_fn:
+        default = "reset"
+    else:
+        default = "noise" if unit_cell == "1x1" else "reset"
     return replace(config, gs_stall_recovery=default)
 
 
@@ -129,6 +163,14 @@ def _tree_scale(tree, alpha: float):
 def _tree_add(a, b):
     """Add two pytrees element-wise."""
     return jax.tree.map(lambda x, y: x + y, a, b)
+
+
+def _random_noise(key, shape, dtype):
+    """Generate noise matching the dtype of the parameter (real or complex)."""
+    if jnp.issubdtype(dtype, jnp.complexfloating):
+        k1, k2 = jax.random.split(key)
+        return jax.random.normal(k1, shape) + 1j * jax.random.normal(k2, shape)
+    return jax.random.normal(key, shape)
 
 
 def _normalize_params(params):
@@ -350,7 +392,7 @@ def optimize_gs_ad_chi_schedule(
 
 def optimize_gs_ad(
     hamiltonian_gate: jax.Array | Tensor,
-    A_init: jax.Array | Tensor | tuple | None,
+    A_init: jax.Array | Tensor | tuple | dict | None,
     config: iPEPSConfig,
 ):
     """AD-based ground state optimization of iPEPS.
@@ -359,39 +401,69 @@ def optimize_gs_ad(
     (Francuz et al. PRR 7, 013237) to compute exact gradients of the
     energy with respect to the site tensor(s), then optimizes with optax.
 
-    Supports both 1-site (``unit_cell="1x1"``) and 2-site
-    (``unit_cell="2site"``) unit cells.  Accepts dense ``jax.Array`` or
-    Tensor-protocol objects (``DenseTensor``, ``SymmetricTensor``).
+    Supports 1-site (``unit_cell="1x1"``), 2-site (``unit_cell="2site"``),
+    and multi-site (``unit_cell=Lattice(...)``) unit cells.  Accepts dense
+    ``jax.Array`` or Tensor-protocol objects (``DenseTensor``,
+    ``SymmetricTensor``).
 
     Args:
         hamiltonian_gate: 2-site Hamiltonian of shape ``(d, d, d, d)``.
         A_init:           Initial site tensor ``(D, D, D, D, d)`` for 1-site,
-                          ``(A, B)`` tuple for 2-site, or ``None`` for random
+                          ``(A, B)`` tuple for 2-site, ``dict[str, Tensor]``
+                          for multi-site, or ``None`` for random
                           initialization.  When ``None`` and
                           ``config.su_init`` is ``True``, the tensor(s) are
                           initialized via simple update (``ipeps()``).
         config:           iPEPSConfig with AD optimization settings.
 
     Returns:
-        For 1-site dense:  ``(A_opt, env, E_gs)``
-        For 1-site Tensor: ``(A_opt, env, E_gs)`` where A_opt is Tensor, env is CTMTensorEnv
-        For 2-site: ``((A_opt, B_opt), (env_A, env_B), E_gs)``
+        For 1-site:    ``(A_opt, env, E_gs)``
+        For 2-site:    ``((A_opt, B_opt), (env_A, env_B), E_gs)``
+        For multi-site: ``(dict[str, Tensor], dict[str, CTMTensorEnv], E_gs)``
     """
     if config.gs_log_interval < 1:
         raise ValueError(f"gs_log_interval must be >= 1, got {config.gs_log_interval}")
     if config.gs_num_steps < 0:
         raise ValueError(f"gs_num_steps must be >= 0, got {config.gs_num_steps}")
 
-    # Auto-promote projector_backward before dispatch so every downstream
-    # helper (1-site, 2-site, reference-C4v) sees the same CTM config.
-    # Mirrors the forward_gauge "qr" -> "phase" promotion further below.
+    # Resolve projector_backward policy before dispatch so every downstream
+    # helper (1-site, 2-site, reference-C4v) sees the same CTM config.  No
+    # silent gauge promotion — explicit user choices are preserved.
     # See docs/plans/2026-04-13-multisite-c4v-reference-ad-plan.md Task 8.
     config = _resolve_projector_backward(config)
+
+    if isinstance(config.unit_cell, Lattice):
+        return _optimize_gs_ad_multisite(hamiltonian_gate, A_init, config)
 
     if config.unit_cell == "2site":
         return _optimize_gs_ad_2site(hamiltonian_gate, A_init, config)
     if _use_reference_c4v_path(config):
         return _optimize_gs_ad_tensor_reference_c4v(hamiltonian_gate, A_init, config)
+
+    # CG-with-map_fn: optimizer params are a tuple of raw site arrays.
+    # The user can pass that tuple directly as A_init for warm-start /
+    # restart; otherwise we generate it via cg_gates.init_fn here so the
+    # downstream optimizer doesn't have to.  In both cases we also build a
+    # contracted A_init for shape / index inference.
+    cg_raw_params: tuple | None = None
+    cg_with_map_fn = (
+        config.cg_gates is not None
+        and getattr(config.cg_gates, "map_fn", None) is not None
+    )
+    if cg_with_map_fn and isinstance(A_init, tuple):
+        cg_raw_params = A_init
+        cg_data = config.cg_gates.map_fn(*cg_raw_params)
+        A_init = _wrap_as_dense_tensor(cg_data)
+    elif cg_with_map_fn and A_init is not None:
+        # A single Tensor / array is ambiguous: the optimizer would have to
+        # invert map_fn to recover raw params, which isn't generally possible.
+        # Require the user to pass the raw-params tuple instead.
+        raise ValueError(
+            "When cg_gates.map_fn is set, A_init must be either None "
+            "(auto-init via cg_gates.init_fn) or a tuple matching "
+            "cg_gates.init_fn's output (raw site tensors).  Got "
+            f"{type(A_init).__name__}; pass the raw-params tuple."
+        )
 
     # Wrap raw jax.Array as DenseTensor so we always use the Tensor-protocol path.
     if A_init is not None and not isinstance(A_init, Tensor):
@@ -411,11 +483,22 @@ def optimize_gs_ad(
         if config.su_init:
             _, (A_su, _B_su), _ = ipeps(gate, None, config)
             A_init = A_su
+        elif cg_with_map_fn and config.cg_gates.init_fn is not None:
+            key = jax.random.PRNGKey(0)
+            cg_raw_params = config.cg_gates.init_fn(D, key)
+            cg_data = config.cg_gates.map_fn(*cg_raw_params)
+            A_init = _wrap_as_dense_tensor(cg_data)
         else:
             key = jax.random.PRNGKey(0)
-            A_init = _wrap_as_dense_tensor(jax.random.normal(key, (D, D, D, D, d_phys)))
+            k1, k2 = jax.random.split(key)
+            A_data = jax.random.normal(
+                k1, (D, D, D, D, d_phys)
+            ) + 1j * jax.random.normal(k2, (D, D, D, D, d_phys))
+            A_init = _wrap_as_dense_tensor(A_data)
 
-    return _optimize_gs_ad_tensor(hamiltonian_gate, A_init, config)
+    return _optimize_gs_ad_tensor(
+        hamiltonian_gate, A_init, config, _cg_raw_params=cg_raw_params
+    )
 
 
 def _use_reference_c4v_path(config: iPEPSConfig) -> bool:
@@ -461,7 +544,11 @@ def _optimize_gs_ad_tensor_reference_c4v(
             A = A_su
         else:
             key = jax.random.PRNGKey(0)
-            A = _wrap_as_dense_tensor(jax.random.normal(key, (D, D, D, D, d_phys)))
+            k1, k2 = jax.random.split(key)
+            A_data = jax.random.normal(
+                k1, (D, D, D, D, d_phys)
+            ) + 1j * jax.random.normal(k2, (D, D, D, D, d_phys))
+            A = _wrap_as_dense_tensor(A_data)
     else:
         A = A_init
 
@@ -567,26 +654,42 @@ def _optimize_gs_ad_tensor(
     hamiltonian_gate: jax.Array,
     A_init: Tensor,
     config: iPEPSConfig,
+    *,
+    _cg_raw_params: tuple | None = None,
 ):
     """AD-based ground state optimization for Tensor-protocol iPEPS (1-site).
 
     Uses ``ctm_tensor_converge`` with implicit differentiation through
     the standard Tensor-protocol CTM.
+
+    Private kwargs:
+        _cg_raw_params: Initial raw site-tensor tuple for CG-with-map_fn
+            warm-start.  When provided, used in place of ``cg_gates.init_fn``;
+            ``optimize_gs_ad`` forwards a tuple ``A_init`` (or its own
+            init_fn output) here so the user's starting state is honored.
     """
     config = _normalize_stall_recovery(config, unit_cell="1x1")
     import optax
 
-    from tenax.algorithms._ctm_tensor import (
-        compute_energy_ctm_tensor,
-        initialize_ctm_tensor_env,
-    )
+    from tenax.algorithms._ctm_energy_ad import ctm_energy_explicit, ctm_energy_implicit
+    from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
+    from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
-    from tenax.algorithms.ad_utils import (
-        CTMRGGradientError,
-        _config_to_tuple,
-        ctm_tensor_converge,
-        ctm_tensor_converge_explicit,
-    )
+    from tenax.algorithms.ad_utils import CTMRGGradientError
+
+    cg_gates = config.cg_gates
+    _use_cg = cg_gates is not None
+    if _use_cg:
+        from tenax.algorithms.coarse_grain import compute_energy_cg
+
+        _cg_d_eff = int(cg_gates.h_intra.shape[0])
+        _cg_map_fn = cg_gates.map_fn
+        _cg_init_fn = cg_gates.init_fn
+    else:
+        compute_energy_cg = None
+        _cg_d_eff = None
+        _cg_map_fn = None
+        _cg_init_fn = None
 
     gate = (
         hamiltonian_gate.todense()
@@ -601,7 +704,6 @@ def _optimize_gs_ad_tensor(
     # Apply AD policy overrides (projector method + explicit-AD gauge promotion)
     # in one place so 1-site and 2-site paths stay consistent.
     ctm_cfg = build_ad_ctm_config(config)
-    config_tuple = _config_to_tuple(ctm_cfg)
 
     use_c4v = config.gs_c4v
     if use_c4v:
@@ -624,46 +726,145 @@ def _optimize_gs_ad_tensor(
         c4v_coeffs = None
         tensor_shape = None
 
-    _env_template = initialize_ctm_tensor_env(A, config.ctm.chi)
-    env_treedef = jax.tree.structure(_env_template)
-    prev_env_leaves = tuple(jax.tree.leaves(_env_template))
+    # Env warm-start cache — replaces flat env_leaves threading.
+    _env_cache: dict[str, dict] = {}
 
-    use_explicit = config.gs_explicit_ad
+    use_explicit = not config.gs_implicit_ad
     explicit_steps = config.gs_explicit_ad_steps
     explicit_warmup = config.gs_explicit_ad_warmup
-    _ctm_converge = (
-        ctm_tensor_converge_explicit if use_explicit else ctm_tensor_converge
-    )
 
-    def loss_fn(params, env_init_leaves):
+    def _params_to_A_norm(params):
+        """Convert raw optimizer params to a normalized DenseTensor."""
+        if _use_cg and _cg_map_fn is not None:
+            cg_data = _cg_map_fn(*params)
+            cg_data = cg_data / (jnp.linalg.norm(cg_data) + 1e-10)
+            return DenseTensor(cg_data, A.indices)
         if use_c4v:
             A_data = c4v_tensor_from_coeffs(params, c4v_basis, tensor_shape)
             A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-            A_norm = DenseTensor(A_norm_data, A.indices)
-        else:
-            A_norm = params * (1.0 / (params.norm() + 1e-10))
-        site_tensors = {(0, 0): A_norm}
-        if use_explicit:
-            env_leaves = _ctm_converge(
-                site_tensors,
-                env_init_leaves,
-                SINGLE_SITE_NEIGHBORS,
-                config_tuple,
-                explicit_steps,
-                explicit_warmup,
-            )
-        else:
-            env_leaves = _ctm_converge(
-                site_tensors, env_init_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
-            )
-        env = jax.tree.unflatten(env_treedef, env_leaves)
-        energy = compute_energy_ctm_tensor(A_norm, env, gate, d_phys)
-        return energy, env_leaves
+            return DenseTensor(A_norm_data, A.indices)
+        return params * (1.0 / (params.norm() + 1e-10))
 
+    if _use_cg:
+
+        def _cg_energy_callable(site_tensors, envs, _gate):
+            """energy_fn closure for ctm_energy_explicit/implicit (CG path)."""
+            A_norm = site_tensors[(0, 0)]
+            return compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, _cg_d_eff)
+
+        _energy_fn_kw = _cg_energy_callable
+    else:
+        _energy_fn_kw = None
+
+    def _ctm_energy_fn(site_tensors):
+        """Dispatch to implicit or explicit CTM energy."""
+        env_init = _env_cache.get("envs", None)
+        if use_explicit:
+            return ctm_energy_explicit(
+                site_tensors,
+                SINGLE_SITE_NEIGHBORS,
+                gate,
+                chi=ctm_cfg.chi,
+                warmup_steps=explicit_warmup,
+                backprop_steps=explicit_steps,
+                projector_method=ctm_cfg.projector_method,
+                renormalize=ctm_cfg.renormalize,
+                projector_backward=ctm_cfg.projector_backward,
+                env_init=env_init,
+                energy_fn=_energy_fn_kw,
+            )
+        else:
+            return ctm_energy_implicit(
+                site_tensors,
+                SINGLE_SITE_NEIGHBORS,
+                gate,
+                chi=ctm_cfg.chi,
+                max_iter=ctm_cfg.max_iter,
+                conv_tol=ctm_cfg.conv_tol,
+                projector_method=ctm_cfg.projector_method,
+                renormalize=ctm_cfg.renormalize,
+                projector_backward=ctm_cfg.projector_backward,
+                qr_warmup_steps=ctm_cfg.qr_warmup_steps,
+                chi_ramp=ctm_cfg.chi_ramp,
+                env_init=env_init,
+                forward_gauge=ctm_cfg.forward_gauge,
+                conv_method=ctm_cfg.ctm_conv_method,
+                min_iter=ctm_cfg.min_iter,
+                gmres_tol=ctm_cfg.gmres_tol,
+                gmres_maxiter=ctm_cfg.gmres_maxiter,
+                gmres_restart=ctm_cfg.gmres_restart,
+                arnoldi_precheck=False,
+                energy_fn=_energy_fn_kw,
+            )
+
+    def loss_fn(params):
+        A_norm = _params_to_A_norm(params)
+        site_tensors = {(0, 0): A_norm}
+        energy = _ctm_energy_fn(site_tensors)
+        return energy
+
+    def _update_env_cache(params):
+        """Re-run forward CTM (no grad) to warm-start next step."""
+        A_norm = _params_to_A_norm(params)
+        site_tensors = {(0, 0): A_norm}
+        envs, _ = python_loop_ctm_converge(
+            site_tensors,
+            SINGLE_SITE_NEIGHBORS,
+            chi=ctm_cfg.chi,
+            max_iter=ctm_cfg.max_iter,
+            conv_tol=ctm_cfg.conv_tol,
+            renormalize=ctm_cfg.renormalize,
+            projector_method=ctm_cfg.projector_method,
+            qr_warmup_steps=ctm_cfg.qr_warmup_steps,
+            projector_backward=ctm_cfg.projector_backward,
+            chi_ramp=ctm_cfg.chi_ramp,
+            env_init=_env_cache.get("envs", None),
+        )
+        _env_cache["envs"] = envs
+
+    # Metric L-BFGS preconditioning calls .todense() on grads/params (see
+    # _metric_precond.py:146 and the metric branch below).  CG with map_fn
+    # parameterizes the optimizer state as a tuple of raw site arrays, so the
+    # metric path crashes with AttributeError.  Disable it for that case and
+    # warn the user once so silent loss-of-preconditioning is visible.
+    _cg_uses_tuple_params = _use_cg and _cg_map_fn is not None
     is_metric_lbfgs = (
-        config.gs_metric_precond and config.gs_optimizer.lower() == "lbfgs"
+        config.gs_metric_precond
+        and config.gs_optimizer.lower() == "lbfgs"
+        and not _cg_uses_tuple_params
     )
-    params = c4v_coeffs if use_c4v else A
+    if (
+        _cg_uses_tuple_params
+        and config.gs_metric_precond
+        and config.gs_optimizer.lower() == "lbfgs"
+    ):
+        import warnings
+
+        warnings.warn(
+            "gs_metric_precond=True is incompatible with cg_gates that "
+            "supply a map_fn (params are a tuple of raw site tensors, but "
+            "the metric path expects tensor-like params with .todense()). "
+            "Falling back to non-preconditioned L-BFGS for this run.",
+            stacklevel=3,
+        )
+    if _use_cg and _cg_map_fn is not None:
+        # CG with map_fn: optimize raw site tensors, contract via map_fn in
+        # _params_to_A_norm.  Use caller-supplied raw params when provided
+        # (warm-start / restart); otherwise call init_fn.
+        if _cg_raw_params is not None:
+            params = _cg_raw_params
+        elif _cg_init_fn is not None:
+            params = _cg_init_fn(config.max_bond_dim, jax.random.PRNGKey(0))
+        else:
+            raise ValueError(
+                "cg_gates.map_fn is set but neither cg_gates.init_fn nor a "
+                "raw-params A_init was provided; cannot construct optimizer "
+                "params."
+            )
+    elif use_c4v:
+        params = c4v_coeffs
+    else:
+        params = A
     optimizer = None if is_metric_lbfgs else _build_optimizer(config)
     opt_state = optimizer.init(params) if optimizer is not None else None
     use_ls = _use_line_search(config)
@@ -671,7 +872,7 @@ def _optimize_gs_ad_tensor(
 
     best_energy = float("inf")
     best_params = params
-    best_env_leaves = prev_env_leaves  # tracked for fresh-CTM warm-start (#317)
+    best_env_cache: dict[str, dict] = {}  # tracked for fresh-CTM warm-start (#317)
     prev_energy = float("inf")
     prev_grad = None
     cg_direction = None
@@ -682,31 +883,34 @@ def _optimize_gs_ad_tensor(
     prev_A_flat: jnp.ndarray | None = None
     prev_grad_flat: jnp.ndarray | None = None
 
-    # Forward-only loss for line search — fresh CTM (no warm-start)
     from tenax.algorithms.ad_utils import (
-        _config_from_tuple,
-        _ctm_tensor_multisite_fixed_point,
         _wrap_tensor,
     )
 
     def loss_fn_fwd(p):
-        """Forward-only loss for line search — warm-starts CTM from prev_env_leaves."""
-        if use_c4v:
-            A_data = c4v_tensor_from_coeffs(p, c4v_basis, tensor_shape)
-            A_norm_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-            A_norm = DenseTensor(A_norm_data, A.indices)
-        else:
-            A_norm = p * (1.0 / (p.norm() + 1e-10))
+        """Forward-only loss for line search — warm-starts CTM from env cache."""
+        A_norm = _params_to_A_norm(p)
         site_tensors = {(0, 0): A_norm}
-        env_leaves = ctm_tensor_converge(
-            site_tensors, prev_env_leaves, SINGLE_SITE_NEIGHBORS, config_tuple
+        envs, _ = python_loop_ctm_converge(
+            site_tensors,
+            SINGLE_SITE_NEIGHBORS,
+            chi=ctm_cfg.chi,
+            max_iter=ctm_cfg.max_iter,
+            conv_tol=ctm_cfg.conv_tol,
+            renormalize=ctm_cfg.renormalize,
+            projector_method=ctm_cfg.projector_method,
+            qr_warmup_steps=ctm_cfg.qr_warmup_steps,
+            projector_backward=ctm_cfg.projector_backward,
+            chi_ramp=ctm_cfg.chi_ramp,
+            env_init=_env_cache.get("envs", None),
         )
-        env_ = jax.tree.unflatten(env_treedef, env_leaves)
-        return float(compute_energy_ctm_tensor(A_norm, env_, gate, d_phys))
+        if _use_cg:
+            return float(compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, _cg_d_eff))
+        return float(compute_energy_ctm_tensor(A_norm, envs[(0, 0)], gate, d_phys))
 
     stall_count = 0  # noise recovery: consecutive line search failures
 
-    # CTM conv_tol schedule: rebuild config_tuple when tolerance changes
+    # CTM conv_tol schedule: update ctm_cfg when tolerance changes
     _conv_tol_schedule = config.gs_ctm_conv_tol_schedule
     _current_conv_tol = ctm_cfg.conv_tol
 
@@ -728,11 +932,8 @@ def _optimize_gs_ad_tensor(
             if new_tol != _current_conv_tol:
                 _current_conv_tol = new_tol
                 ctm_cfg = _replace(ctm_cfg, conv_tol=new_tol)
-                config_tuple = _config_to_tuple(ctm_cfg)
         try:
-            (energy_val, env_leaves), grads = jax.value_and_grad(
-                loss_fn, argnums=0, has_aux=True
-            )(params, prev_env_leaves)
+            energy_val, grads = jax.value_and_grad(loss_fn)(params)
         except CTMRGGradientError as exc:
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -753,15 +954,15 @@ def _optimize_gs_ad_tensor(
             ):
                 noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
                 if use_c4v:
-                    noise = config.gs_noise_amplitude * jax.random.normal(
-                        noise_key, params.shape
+                    noise = config.gs_noise_amplitude * _random_noise(
+                        noise_key, params.shape, params.dtype
                     )
                     params = params + noise * jnp.linalg.norm(params)
                     params = params / (jnp.linalg.norm(params) + 1e-10)
                 else:
                     data = params.todense()
-                    noise = config.gs_noise_amplitude * jax.random.normal(
-                        noise_key, data.shape
+                    noise = config.gs_noise_amplitude * _random_noise(
+                        noise_key, data.shape, data.dtype
                     )
                     noisy = data + noise * jnp.linalg.norm(data)
                     noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
@@ -776,7 +977,7 @@ def _optimize_gs_ad_tensor(
                     prev_precond_grad = None
             elif config.gs_stall_recovery == "reset":
                 params = best_params
-                prev_env_leaves = best_env_leaves
+                _env_cache.update(best_env_cache)
                 if is_metric_lbfgs:
                     lbfgs_history.clear()
                     prev_A_flat = None
@@ -787,7 +988,9 @@ def _optimize_gs_ad_tensor(
                     prev_precond_grad = None
             continue
         energy_float = float(energy_val)
-        env_leaves_sg = jax.tree.map(jax.lax.stop_gradient, env_leaves)
+
+        # Update env cache for warm-starting next step
+        _update_env_cache(params)
 
         if _should_accept_best(
             current_best=best_energy,
@@ -796,7 +999,7 @@ def _optimize_gs_ad_tensor(
         ):
             best_energy = energy_float
             best_params = params
-            best_env_leaves = env_leaves_sg  # paired with best_params (#317)
+            best_env_cache = dict(_env_cache)  # snapshot for warm-start (#317)
 
         delta_energy = abs(energy_float - prev_energy)
         logged = False
@@ -813,11 +1016,7 @@ def _optimize_gs_ad_tensor(
             )
             logged = True
 
-        # Refresh warm-start state before the early-exit check so the
-        # post-loop fresh re-eval sees the current converged env, not the
-        # previous iterate (#320 review).
         prev_energy = energy_float
-        prev_env_leaves = env_leaves_sg
 
         if delta_energy < config.gs_conv_tol:
             if config.gs_verbose:
@@ -840,7 +1039,7 @@ def _optimize_gs_ad_tensor(
             if config.gs_metric_precond and not use_c4v:
                 from tenax.algorithms._metric_precond import precondition_gradient
 
-                env_for_metric = jax.tree.unflatten(env_treedef, env_leaves)
+                env_for_metric = _env_cache["envs"][(0, 0)]
                 delta_metric = delta_energy if step > 0 else _tree_dot(grads, grads)
                 z_dense = precondition_gradient(
                     A, env_for_metric, grads, delta_metric, config
@@ -880,7 +1079,7 @@ def _optimize_gs_ad_tensor(
             if prev_A_flat is not None:
                 s = p_flat - prev_A_flat
                 y = g_flat - prev_grad_flat
-                sy = float(jnp.dot(s, y))
+                sy = float(jnp.real(jnp.vdot(s, y)))
                 if sy > 1e-10:
                     rho = 1.0 / sy
                     lbfgs_history.append((s, y, rho))
@@ -895,9 +1094,11 @@ def _optimize_gs_ad_tensor(
             else:
                 from tenax.algorithms._metric_precond import precondition_gradient
 
-                env_for_metric = jax.tree.unflatten(env_treedef, env_leaves)
+                env_for_metric = _env_cache["envs"][(0, 0)]
                 delta_metric = (
-                    delta_energy if step > 0 else float(jnp.dot(g_flat, g_flat))
+                    delta_energy
+                    if step > 0
+                    else float(jnp.real(jnp.vdot(g_flat, g_flat)))
                 )
                 D_bond = A.todense().shape[0]
                 d_loc = A.todense().shape[-1]
@@ -943,9 +1144,7 @@ def _optimize_gs_ad_tensor(
                     trial = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
-                    (_, _aux), g = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
-                        trial, prev_env_leaves
-                    )
+                    _, g = jax.value_and_grad(loss_fn)(trial)
                     return _tree_dot(g, direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
@@ -996,15 +1195,15 @@ def _optimize_gs_ad_tensor(
             ):
                 noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
                 if use_c4v:
-                    noise = config.gs_noise_amplitude * jax.random.normal(
-                        noise_key, params.shape
+                    noise = config.gs_noise_amplitude * _random_noise(
+                        noise_key, params.shape, params.dtype
                     )
                     params = params + noise * jnp.linalg.norm(params)
                     params = params / (jnp.linalg.norm(params) + 1e-10)
                 else:
                     data = params.todense()
-                    noise = config.gs_noise_amplitude * jax.random.normal(
-                        noise_key, data.shape
+                    noise = config.gs_noise_amplitude * _random_noise(
+                        noise_key, data.shape, data.dtype
                     )
                     noisy = data + noise * jnp.linalg.norm(data)
                     noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
@@ -1048,74 +1247,52 @@ def _optimize_gs_ad_tensor(
                     )
         else:
             params = optax.apply_updates(params, direction)
-            if not use_c4v:
+            if not use_c4v and not (_use_cg and _cg_map_fn is not None):
                 params = params * (1.0 / (params.norm() + 1e-10))
 
     # Re-evaluate both final A and best_A with fully converged fresh CTM.
     # In-loop energies use warm-started CTM that can produce unphysical values
     # (non-variational at finite chi), so we compare fresh evaluations only.
-    _base_cfg = _config_from_tuple(config_tuple)
-    # Match in-loop CTM tolerances (#317): tightening max_iter/conv_tol here
-    # lets the fresh re-eval drift to a different fixed point than the in-loop
-    # run, producing a final E that doesn't match the best E tracked during
-    # optimization. Reuse _base_cfg directly so warm-started re-eval reproduces
-    # the in-loop CTM.
-    eval_config = CTMConfig(
-        chi=_base_cfg.chi,
-        max_iter=_base_cfg.max_iter,
-        conv_tol=_base_cfg.conv_tol,
-        min_iter=_base_cfg.min_iter,
-        renormalize=_base_cfg.renormalize,
-        projector_method=_base_cfg.projector_method,
-        projector_backward=_base_cfg.projector_backward,
-        ctm_conv_method=_base_cfg.ctm_conv_method,
-        forward_gauge=_base_cfg.forward_gauge,
-    )
+    # Match in-loop CTM tolerances (#317) by reusing ctm_cfg directly.
 
-    def _unflatten_env_single(leaves):
-        """Unflatten a flat 1-site env leaf tuple into a ``{(0,0): env}`` dict."""
-        return {(0, 0): jax.tree.unflatten(env_treedef, list(leaves))}
-
-    def _eval_fresh(p, envs_init_leaves=None):
-        """Evaluate energy with fully converged fresh CTM.
-
-        When ``envs_init_leaves`` is provided, warm-start the CTM from those
-        leaves instead of a random initialization — this avoids drift to a
-        nearby (non-physical) fixed point when the fresh CTM converges with
-        tighter tolerances than the in-loop run (#317).
-        """
-        if use_c4v:
-            A_data = c4v_tensor_from_coeffs(p, c4v_basis, tensor_shape)
-            A_data = A_data / (jnp.linalg.norm(A_data) + 1e-10)
-            A_t = DenseTensor(A_data, A.indices)
-        else:
-            A_t = p * (1.0 / (p.norm() + 1e-10))
-        envs_init = (
-            _unflatten_env_single(envs_init_leaves)
-            if envs_init_leaves is not None
-            else None
-        )
-        envs = _ctm_tensor_multisite_fixed_point(
+    def _eval_fresh(p, env_init=None):
+        """Evaluate energy with fully converged fresh CTM."""
+        A_t = _params_to_A_norm(p)
+        envs, _ = python_loop_ctm_converge(
             {(0, 0): A_t},
             SINGLE_SITE_NEIGHBORS,
-            eval_config,
-            envs_init=envs_init,
+            chi=ctm_cfg.chi,
+            max_iter=ctm_cfg.max_iter,
+            min_iter=ctm_cfg.min_iter,
+            conv_tol=ctm_cfg.conv_tol,
+            conv_method=ctm_cfg.ctm_conv_method,
+            renormalize=ctm_cfg.renormalize,
+            projector_method=ctm_cfg.projector_method,
+            qr_warmup_steps=ctm_cfg.qr_warmup_steps,
+            projector_backward=ctm_cfg.projector_backward,
+            chi_ramp=ctm_cfg.chi_ramp,
+            env_init=env_init,
         )
         env_ = envs[(0, 0)]
-        E_ = float(compute_energy_ctm_tensor(A_t, env_, gate, d_phys))
+        if _use_cg:
+            E_ = float(compute_energy_cg(A_t, env_, cg_gates, _cg_d_eff))
+        else:
+            E_ = float(compute_energy_ctm_tensor(A_t, env_, gate, d_phys))
         return A_t, env_, E_
 
-    A_final, env_final, E_final = _eval_fresh(params, prev_env_leaves)
+    A_final, env_final, E_final = _eval_fresh(params, _env_cache.get("envs", None))
 
     if best_params is not params:
-        _, env_best, E_best_fresh = _eval_fresh(best_params, best_env_leaves)
+        _, env_best, E_best_fresh = _eval_fresh(
+            best_params, best_env_cache.get("envs", None)
+        )
     else:
         E_best_fresh = E_final
 
     if E_final <= E_best_fresh:
         env, E_gs = env_final, E_final
     else:
-        A_final, _, _ = _eval_fresh(best_params, best_env_leaves)
+        A_final, _, _ = _eval_fresh(best_params, best_env_cache.get("envs", None))
         env, E_gs = env_best, E_best_fresh
     if config.gs_verbose:
         print(f"[iPEPS-AD:1site-tensor] final E={E_gs:.10f}", flush=True)
@@ -1179,10 +1356,16 @@ def _optimize_gs_ad_2site(
             _, (A_su, B_su), _ = ipeps(gate, None, su_config)
             AB_init = (A_su, B_su)
         else:
-            # Random initialization for 2-site AD
+            # Random complex128 initialization for 2-site AD (matches variPEPS)
             key_A, key_B = jax.random.split(jax.random.PRNGKey(0))
-            A_data = jax.random.normal(key_A, (D, D, D, D, d_phys))
-            B_data = jax.random.normal(key_B, (D, D, D, D, d_phys))
+            kA1, kA2 = jax.random.split(key_A)
+            kB1, kB2 = jax.random.split(key_B)
+            A_data = jax.random.normal(
+                kA1, (D, D, D, D, d_phys)
+            ) + 1j * jax.random.normal(kA2, (D, D, D, D, d_phys))
+            B_data = jax.random.normal(
+                kB1, (D, D, D, D, d_phys)
+            ) + 1j * jax.random.normal(kB2, (D, D, D, D, d_phys))
             A = _wrap_as_dense_tensor(A_data)
             B = _wrap_as_dense_tensor(B_data)
             AB_init = (A, B)
@@ -1217,7 +1400,7 @@ def _optimize_gs_ad_tensor_2site(
     if not use_c4v:
         import warnings
 
-        if config.gs_explicit_ad:
+        if not config.gs_implicit_ad:
             # Issue #328: non-C4v 2-site *explicit* AD is non-variational at
             # finite chi for general models.  The forward-mode AD chain
             # through the finite-sweep CTM reliably finds unphysical
@@ -1228,13 +1411,13 @@ def _optimize_gs_ad_tensor_2site(
             #   gs_explicit_ad_steps=30 -> E = -0.26  (descending, non-var)
             #   gs_explicit_ad_steps=60 -> E = -1.18  (below physical)
             # vs physical ground state E/site = -0.6694.  Implicit AD
-            # (gs_explicit_ad=False) lands at E = -0.566 for the same
+            # (gs_implicit_ad=True) lands at E = -0.566 for the same
             # config — variational and close to physical.
             warnings.warn(
                 "Non-C4v 2-site *explicit* AD (gs_c4v=False, "
-                "gs_explicit_ad=True) is known to be non-variational at "
+                "gs_implicit_ad=False) is known to be non-variational at "
                 "finite chi: the optimizer drifts below the physical "
-                "ground state (see issue #328). Set gs_explicit_ad=False "
+                "ground state (see issue #328). Set gs_implicit_ad=True "
                 "to use the implicit-AD path, which is variational at "
                 "chi >= 16 for 2-site Heisenberg. For antiferromagnetic "
                 "bipartite models, gs_c4v=True is also a stable option.",
@@ -1251,19 +1434,15 @@ def _optimize_gs_ad_tensor_2site(
             )
     import optax
 
+    from tenax.algorithms._ctm_energy_ad import ctm_energy_explicit, ctm_energy_implicit
+    from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor import (
         compute_energy_ctm_tensor_2site,
-        initialize_ctm_tensor_env,
     )
     from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
     from tenax.algorithms.ad_utils import (
         CTMRGGradientError,
-        _config_from_tuple,
-        _config_to_tuple,
-        _ctm_tensor_multisite_fixed_point,
         _wrap_tensor,
-        ctm_tensor_converge,
-        ctm_tensor_converge_explicit,
     )
 
     gate = (
@@ -1278,23 +1457,12 @@ def _optimize_gs_ad_tensor_2site(
     B = B * (1.0 / (B.norm() + 1e-10))
 
     ctm_cfg_2s = build_ad_ctm_config(config)
-    config_tuple = _config_to_tuple(ctm_cfg_2s)
-    use_explicit = config.gs_explicit_ad
+    use_explicit = not config.gs_implicit_ad
     explicit_steps = config.gs_explicit_ad_steps
     explicit_warmup = config.gs_explicit_ad_warmup
 
-    # Get env treedef from a template
-    _env_template = initialize_ctm_tensor_env(A, config.ctm.chi)
-    env_treedef = jax.tree.structure(_env_template)
-    n_env_leaves = len(jax.tree.leaves(_env_template))
-    _env_template_B = initialize_ctm_tensor_env(B, config.ctm.chi)
-    prev_env_leaves = tuple(jax.tree.leaves(_env_template)) + tuple(
-        jax.tree.leaves(_env_template_B)
-    )
-
-    _ctm_converge = (
-        ctm_tensor_converge_explicit if use_explicit else ctm_tensor_converge
-    )
+    # Env warm-start cache — replaces flat env_leaves threading.
+    _env_cache_2s: dict[str, dict] = {}
 
     if use_c4v:
         from tenax.algorithms.ipeps import (
@@ -1338,7 +1506,59 @@ def _optimize_gs_ad_tensor_2site(
         B_data = jnp.einsum("luRDs,sS->luRDS", A_data, _U_sub)
         return DenseTensor(A_data, A_indices), DenseTensor(B_data, A_indices)
 
-    def loss_fn(params, env_init_leaves):
+    def _energy_fn_2site(site_tensors, envs, gate_):
+        """2-site energy from site_tensors dict and envs dict."""
+        return compute_energy_ctm_tensor_2site(
+            site_tensors[(0, 0)],
+            site_tensors[(1, 0)],
+            envs[(0, 0)],
+            envs[(1, 0)],
+            gate_,
+            d_phys,
+        )
+
+    def _ctm_energy_fn_2s(site_tensors):
+        """Dispatch to implicit or explicit CTM energy for 2-site."""
+        env_init = _env_cache_2s.get("envs", None)
+        if use_explicit:
+            return ctm_energy_explicit(
+                site_tensors,
+                CHECKERBOARD_NEIGHBORS,
+                gate,
+                chi=ctm_cfg_2s.chi,
+                warmup_steps=explicit_warmup,
+                backprop_steps=explicit_steps,
+                projector_method=ctm_cfg_2s.projector_method,
+                renormalize=ctm_cfg_2s.renormalize,
+                projector_backward=ctm_cfg_2s.projector_backward,
+                env_init=env_init,
+                energy_fn=_energy_fn_2site,
+            )
+        else:
+            return ctm_energy_implicit(
+                site_tensors,
+                CHECKERBOARD_NEIGHBORS,
+                gate,
+                chi=ctm_cfg_2s.chi,
+                max_iter=ctm_cfg_2s.max_iter,
+                conv_tol=ctm_cfg_2s.conv_tol,
+                projector_method=ctm_cfg_2s.projector_method,
+                renormalize=ctm_cfg_2s.renormalize,
+                projector_backward=ctm_cfg_2s.projector_backward,
+                qr_warmup_steps=ctm_cfg_2s.qr_warmup_steps,
+                chi_ramp=ctm_cfg_2s.chi_ramp,
+                env_init=env_init,
+                forward_gauge=ctm_cfg_2s.forward_gauge,
+                conv_method=ctm_cfg_2s.ctm_conv_method,
+                min_iter=ctm_cfg_2s.min_iter,
+                gmres_tol=ctm_cfg_2s.gmres_tol,
+                gmres_maxiter=ctm_cfg_2s.gmres_maxiter,
+                gmres_restart=ctm_cfg_2s.gmres_restart,
+                energy_fn=_energy_fn_2site,
+                arnoldi_precheck=False,
+            )
+
+    def loss_fn(params):
         if use_c4v:
             A_norm, B_norm = _c4v_AB(params)
         else:
@@ -1346,25 +1566,32 @@ def _optimize_gs_ad_tensor_2site(
             A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
             B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
         site_tensors = {(0, 0): A_norm, (1, 0): B_norm}
-        if use_explicit:
-            env_leaves = _ctm_converge(
-                site_tensors,
-                env_init_leaves,
-                CHECKERBOARD_NEIGHBORS,
-                config_tuple,
-                explicit_steps,
-                explicit_warmup,
-            )
+        energy = _ctm_energy_fn_2s(site_tensors)
+        return energy
+
+    def _update_env_cache_2s(params):
+        """Re-run forward CTM (no grad) to warm-start next step."""
+        if use_c4v:
+            A_norm, B_norm = _c4v_AB(params)
         else:
-            env_leaves = _ctm_converge(
-                site_tensors, env_init_leaves, CHECKERBOARD_NEIGHBORS, config_tuple
-            )
-        env_A = jax.tree.unflatten(env_treedef, env_leaves[:n_env_leaves])
-        env_B = jax.tree.unflatten(env_treedef, env_leaves[n_env_leaves:])
-        energy = compute_energy_ctm_tensor_2site(
-            A_norm, B_norm, env_A, env_B, gate, d_phys
+            A_p, B_p = params
+            A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
+            B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
+        site_tensors = {(0, 0): A_norm, (1, 0): B_norm}
+        envs, _ = python_loop_ctm_converge(
+            site_tensors,
+            CHECKERBOARD_NEIGHBORS,
+            chi=ctm_cfg_2s.chi,
+            max_iter=ctm_cfg_2s.max_iter,
+            conv_tol=ctm_cfg_2s.conv_tol,
+            renormalize=ctm_cfg_2s.renormalize,
+            projector_method=ctm_cfg_2s.projector_method,
+            qr_warmup_steps=ctm_cfg_2s.qr_warmup_steps,
+            projector_backward=ctm_cfg_2s.projector_backward,
+            chi_ramp=ctm_cfg_2s.chi_ramp,
+            env_init=_env_cache_2s.get("envs", None),
         )
-        return energy, env_leaves
+        _env_cache_2s["envs"] = envs
 
     params = c4v_coeffs if use_c4v else (A, B)
     is_metric_lbfgs = (
@@ -1377,7 +1604,7 @@ def _optimize_gs_ad_tensor_2site(
 
     best_energy = float("inf")
     best_params = params
-    best_env_leaves = prev_env_leaves  # tracked for fresh-CTM warm-start (#317)
+    best_env_cache_2s: dict[str, dict] = {}  # tracked for fresh-CTM warm-start (#317)
     prev_energy = float("inf")
     prev_grad = None
     cg_direction = None
@@ -1402,9 +1629,8 @@ def _optimize_gs_ad_tensor_2site(
                 tol = t
         return tol
 
-    # Forward-only loss for line search — warm-starts CTM from prev_env_leaves
-
     def loss_fn_fwd(params_):
+        """Forward-only loss for line search — warm-starts CTM from env cache."""
         if use_c4v:
             A_norm, B_norm = _c4v_AB(params_)
         else:
@@ -1412,17 +1638,25 @@ def _optimize_gs_ad_tensor_2site(
             A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
             B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
         site_tensors = {(0, 0): A_norm, (1, 0): B_norm}
-        env_leaves = ctm_tensor_converge(
-            site_tensors, prev_env_leaves, CHECKERBOARD_NEIGHBORS, config_tuple
+        envs, _ = python_loop_ctm_converge(
+            site_tensors,
+            CHECKERBOARD_NEIGHBORS,
+            chi=ctm_cfg_2s.chi,
+            max_iter=ctm_cfg_2s.max_iter,
+            conv_tol=ctm_cfg_2s.conv_tol,
+            renormalize=ctm_cfg_2s.renormalize,
+            projector_method=ctm_cfg_2s.projector_method,
+            qr_warmup_steps=ctm_cfg_2s.qr_warmup_steps,
+            projector_backward=ctm_cfg_2s.projector_backward,
+            chi_ramp=ctm_cfg_2s.chi_ramp,
+            env_init=_env_cache_2s.get("envs", None),
         )
-        env_A_ = jax.tree.unflatten(env_treedef, env_leaves[:n_env_leaves])
-        env_B_ = jax.tree.unflatten(env_treedef, env_leaves[n_env_leaves:])
         return float(
             compute_energy_ctm_tensor_2site(
                 A_norm,
                 B_norm,
-                env_A_,
-                env_B_,
+                envs[(0, 0)],
+                envs[(1, 0)],
                 gate,
                 d_phys,
             )
@@ -1435,12 +1669,9 @@ def _optimize_gs_ad_tensor_2site(
             if new_tol != _current_conv_tol_2s:
                 _current_conv_tol_2s = new_tol
                 ctm_cfg_2s = _replace(ctm_cfg_2s, conv_tol=new_tol)
-                config_tuple = _config_to_tuple(ctm_cfg_2s)
 
         try:
-            (energy_val, env_leaves), grads = jax.value_and_grad(
-                loss_fn, argnums=0, has_aux=True
-            )(params, prev_env_leaves)
+            energy_val, grads = jax.value_and_grad(loss_fn)(params)
         except CTMRGGradientError as exc:
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -1461,8 +1692,8 @@ def _optimize_gs_ad_tensor_2site(
             ):
                 noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
                 if use_c4v:
-                    noise = config.gs_noise_amplitude * jax.random.normal(
-                        noise_key, params.shape
+                    noise = config.gs_noise_amplitude * _random_noise(
+                        noise_key, params.shape, params.dtype
                     )
                     params = params + noise * jnp.linalg.norm(params)
                     params = params / (jnp.linalg.norm(params) + 1e-10)
@@ -1471,8 +1702,8 @@ def _optimize_gs_ad_tensor_2site(
                     for i, p in enumerate(params):
                         k = jax.random.fold_in(noise_key, i)
                         data = p.todense()
-                        noise = config.gs_noise_amplitude * jax.random.normal(
-                            k, data.shape
+                        noise = config.gs_noise_amplitude * _random_noise(
+                            k, data.shape, data.dtype
                         )
                         noisy = data + noise * jnp.linalg.norm(data)
                         noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
@@ -1488,7 +1719,7 @@ def _optimize_gs_ad_tensor_2site(
                     prev_precond_grad = None
             elif config.gs_stall_recovery == "reset":
                 params = best_params
-                prev_env_leaves = best_env_leaves
+                _env_cache_2s.update(best_env_cache_2s)
                 if is_metric_lbfgs:
                     lbfgs_history.clear()
                     prev_params_flat = None
@@ -1501,7 +1732,9 @@ def _optimize_gs_ad_tensor_2site(
                     opt_state = optimizer.init(params)
             continue
         energy_float = float(energy_val)
-        env_leaves_sg = jax.tree.map(jax.lax.stop_gradient, env_leaves)
+
+        # Update env cache for warm-starting next step
+        _update_env_cache_2s(params)
 
         if _should_accept_best(
             current_best=best_energy,
@@ -1510,7 +1743,7 @@ def _optimize_gs_ad_tensor_2site(
         ):
             best_energy = energy_float
             best_params = params
-            best_env_leaves = env_leaves_sg  # paired with best_params (#317)
+            best_env_cache_2s = dict(_env_cache_2s)  # snapshot for warm-start (#317)
 
         delta_energy = abs(energy_float - prev_energy)
         logged = False
@@ -1527,11 +1760,7 @@ def _optimize_gs_ad_tensor_2site(
             )
             logged = True
 
-        # Refresh warm-start state before the early-exit check so the
-        # post-loop fresh re-eval sees the current converged env, not the
-        # previous iterate (#320 review).
         prev_energy = energy_float
-        prev_env_leaves = env_leaves_sg
 
         if delta_energy < config.gs_conv_tol:
             if config.gs_verbose:
@@ -1556,10 +1785,9 @@ def _optimize_gs_ad_tensor_2site(
                     precondition_gradient_multisite,
                 )
 
-                env_A_m = jax.tree.unflatten(env_treedef, env_leaves_sg[:n_env_leaves])
-                env_B_m = jax.tree.unflatten(env_treedef, env_leaves_sg[n_env_leaves:])
+                envs_cached = _env_cache_2s["envs"]
                 A_g, B_g = grads
-                envs_m = {(0, 0): env_A_m, (1, 0): env_B_m}
+                envs_m = {(0, 0): envs_cached[(0, 0)], (1, 0): envs_cached[(1, 0)]}
                 sites_m = {(0, 0): params[0], (1, 0): params[1]}
                 grads_m = {(0, 0): A_g, (1, 0): B_g}
                 delta_metric = delta_energy if step > 0 else _tree_dot(grads, grads)
@@ -1618,7 +1846,7 @@ def _optimize_gs_ad_tensor_2site(
             if prev_params_flat is not None:
                 s = p_flat - prev_params_flat
                 y = g_flat - prev_grad_flat
-                sy = float(jnp.dot(s, y))
+                sy = float(jnp.real(jnp.vdot(s, y)))
                 if sy > 1e-10:
                     rho = 1.0 / sy
                     lbfgs_history.append((s, y, rho))
@@ -1631,12 +1859,13 @@ def _optimize_gs_ad_tensor_2site(
                 direction_flat = lbfgs_two_loop(g_flat, lbfgs_history, lambda v: v)
                 direction = -direction_flat
             else:
-                env_A_m = jax.tree.unflatten(env_treedef, env_leaves_sg[:n_env_leaves])
-                env_B_m = jax.tree.unflatten(env_treedef, env_leaves_sg[n_env_leaves:])
-                envs_m = {(0, 0): env_A_m, (1, 0): env_B_m}
+                envs_cached = _env_cache_2s["envs"]
+                envs_m = {(0, 0): envs_cached[(0, 0)], (1, 0): envs_cached[(1, 0)]}
                 sites_m = {(0, 0): A_cur, (1, 0): B_cur}
                 delta_metric = (
-                    delta_energy if step > 0 else float(jnp.dot(g_flat, g_flat))
+                    delta_energy
+                    if step > 0
+                    else float(jnp.real(jnp.vdot(g_flat, g_flat)))
                 )
                 n_A = A_cur.todense().size
 
@@ -1713,9 +1942,7 @@ def _optimize_gs_ad_tensor_2site(
                     trial = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
-                    (_, _aux), g = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
-                        trial, prev_env_leaves
-                    )
+                    _, g = jax.value_and_grad(loss_fn)(trial)
                     return _tree_dot(g, direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
@@ -1772,7 +1999,9 @@ def _optimize_gs_ad_tensor_2site(
                 for i, p in enumerate(params):
                     k = jax.random.fold_in(noise_key, i)
                     data = p.todense()
-                    noise = config.gs_noise_amplitude * jax.random.normal(k, data.shape)
+                    noise = config.gs_noise_amplitude * _random_noise(
+                        k, data.shape, data.dtype
+                    )
                     noisy = data + noise * jnp.linalg.norm(data)
                     noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
                     noisy_params.append(_wrap_tensor(noisy, p))
@@ -1819,49 +2048,29 @@ def _optimize_gs_ad_tensor_2site(
     # Re-evaluate both final params and best_params with fully converged
     # fresh CTM.  In-loop energies use warm-started CTM that can produce
     # unphysical values, so we compare fresh evaluations only.
-    _base_cfg2 = _config_from_tuple(config_tuple)
-    # Match in-loop CTM tolerances (#317); see comment on ``eval_config`` above.
-    eval_config2 = CTMConfig(
-        chi=_base_cfg2.chi,
-        max_iter=_base_cfg2.max_iter,
-        conv_tol=_base_cfg2.conv_tol,
-        min_iter=_base_cfg2.min_iter,
-        renormalize=_base_cfg2.renormalize,
-        projector_method=_base_cfg2.projector_method,
-        projector_backward=_base_cfg2.projector_backward,
-        ctm_conv_method=_base_cfg2.ctm_conv_method,
-        forward_gauge=_base_cfg2.forward_gauge,
-    )
+    # Match in-loop CTM tolerances (#317) by reusing ctm_cfg_2s directly.
 
-    def _unflatten_env_pair(leaves):
-        """Unflatten a flat 2-site env leaf tuple into ``{(0,0): ..., (1,0): ...}``."""
-        env_A = jax.tree.unflatten(env_treedef, list(leaves[:n_env_leaves]))
-        env_B = jax.tree.unflatten(env_treedef, list(leaves[n_env_leaves:]))
-        return {(0, 0): env_A, (1, 0): env_B}
-
-    def _eval_fresh_2site(p, envs_init_leaves=None):
-        """Evaluate energy with fully converged fresh CTM.
-
-        When ``envs_init_leaves`` is provided, warm-start the CTM from those
-        leaves instead of a random initialization. Avoids drift to a nearby
-        (non-physical) fixed point when the fresh CTM converges with tighter
-        tolerances than the in-loop run (#317).
-        """
+    def _eval_fresh_2site(p, env_init=None):
+        """Evaluate energy with fully converged fresh CTM."""
         if use_c4v:
             A_t, B_t = _c4v_AB(p)
         else:
             A_t, B_t = _normalize_params(p)
         st = {(0, 0): A_t, (1, 0): B_t}
-        envs_init = (
-            _unflatten_env_pair(envs_init_leaves)
-            if envs_init_leaves is not None
-            else None
-        )
-        envs = _ctm_tensor_multisite_fixed_point(
+        envs, _ = python_loop_ctm_converge(
             st,
             CHECKERBOARD_NEIGHBORS,
-            eval_config2,
-            envs_init=envs_init,
+            chi=ctm_cfg_2s.chi,
+            max_iter=ctm_cfg_2s.max_iter,
+            min_iter=ctm_cfg_2s.min_iter,
+            conv_tol=ctm_cfg_2s.conv_tol,
+            conv_method=ctm_cfg_2s.ctm_conv_method,
+            renormalize=ctm_cfg_2s.renormalize,
+            projector_method=ctm_cfg_2s.projector_method,
+            qr_warmup_steps=ctm_cfg_2s.qr_warmup_steps,
+            projector_backward=ctm_cfg_2s.projector_backward,
+            chi_ramp=ctm_cfg_2s.chi_ramp,
+            env_init=env_init,
         )
         E_ = float(
             compute_energy_ctm_tensor_2site(
@@ -1870,12 +2079,14 @@ def _optimize_gs_ad_tensor_2site(
         )
         return A_t, B_t, envs, E_
 
-    A_last, B_last, envs_last, E_last = _eval_fresh_2site(params, prev_env_leaves)
+    A_last, B_last, envs_last, E_last = _eval_fresh_2site(
+        params, _env_cache_2s.get("envs", None)
+    )
     env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
 
     if best_params is not params:
         A_best, B_best, envs_best, E_best_fresh = _eval_fresh_2site(
-            best_params, best_env_leaves
+            best_params, best_env_cache_2s.get("envs", None)
         )
         env_A_best = envs_best[(0, 0)]
         env_B_best = envs_best[(1, 0)]
@@ -1893,6 +2104,606 @@ def _optimize_gs_ad_tensor_2site(
         print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}", flush=True)
 
     return (A_final, B_final), (env_A, env_B), E_gs
+
+
+def _optimize_gs_ad_multisite(
+    hamiltonian_gate: jax.Array | Tensor,
+    A_init: dict[str, Tensor] | None,
+    config: iPEPSConfig,
+):
+    """AD-based ground state optimization for multi-site iPEPS (Lattice unit cell).
+
+    Uses implicit differentiation through the multisite CTM fixed point.
+    Generalizes the 2-site Tensor-protocol optimizer to N sites on an
+    arbitrary ``Lattice``.
+
+    Returns ``(site_tensors_dict, envs_dict, E_gs)`` where the dicts are
+    keyed by site name (e.g. ``"u"``, ``"v"``, ``"w"``).
+    """
+    config = _normalize_stall_recovery(config, unit_cell="multisite")
+
+    from tenax.algorithms._ctm_energy_ad import ctm_energy_explicit, ctm_energy_implicit
+    from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
+    from tenax.algorithms._ctm_tensor_energy import (
+        compute_energy_ctm_tensor_multisite,
+    )
+    from tenax.algorithms.ad_utils import (
+        CTMRGGradientError,
+        _wrap_tensor,
+    )
+
+    # ── Lattice → coordinate dicts ──────────────────────────────────────
+    lattice: Lattice = config.unit_cell  # type: ignore[assignment]
+    neighbors, name_to_coord, coord_to_name = _lattice_to_neighbors(lattice)
+    coords = sorted(neighbors.keys())  # deterministic ordering
+
+    # ── Gate ─────────────────────────────────────────────────────────────
+    gate = (
+        hamiltonian_gate.todense()
+        if isinstance(hamiltonian_gate, Tensor)
+        else jnp.array(hamiltonian_gate)
+    )
+    d_phys = gate.shape[0]
+
+    # ── Initial site tensors ─────────────────────────────────────────────
+    if A_init is not None:
+        # Convert name-keyed dict → coord-keyed, normalize
+        site_tensors_init: dict[Coord, Tensor] = {}
+        for name, tensor in A_init.items():
+            c = name_to_coord[name]
+            site_tensors_init[c] = tensor * (1.0 / (tensor.norm() + 1e-10))
+        # Build ordered tuple for params
+        params: tuple[Tensor, ...] = tuple(site_tensors_init[c] for c in coords)
+    else:
+        # Random complex128 initialization
+        D = config.max_bond_dim
+        tensors = []
+        for i, c in enumerate(coords):
+            key = jax.random.PRNGKey(42 + i)
+            k1, k2 = jax.random.split(key)
+            data = jax.random.normal(k1, (D, D, D, D, d_phys), dtype=jnp.float64) + (
+                1j * jax.random.normal(k2, (D, D, D, D, d_phys), dtype=jnp.float64)
+            )
+            data = data / (jnp.linalg.norm(data) + 1e-10)
+            tensors.append(_wrap_as_dense_tensor(data))
+        params = tuple(tensors)
+
+    # ── CTM config & AD mode ─────────────────────────────────────────────
+    ctm_cfg = build_ad_ctm_config(config)
+    use_explicit = not config.gs_implicit_ad
+    explicit_steps = config.gs_explicit_ad_steps
+    explicit_warmup = config.gs_explicit_ad_warmup
+
+    # Env warm-start cache
+    _env_cache: dict[str, dict] = {}
+
+    # ── Energy function for multisite ────────────────────────────────────
+    def _energy_fn(site_tensors, envs, gate_):
+        return compute_energy_ctm_tensor_multisite(
+            site_tensors,
+            envs,
+            neighbors,
+            gate_,
+        )
+
+    def _ctm_energy_fn(site_tensors):
+        env_init = _env_cache.get("envs", None)
+        if use_explicit:
+            return ctm_energy_explicit(
+                site_tensors,
+                neighbors,
+                gate,
+                chi=ctm_cfg.chi,
+                warmup_steps=explicit_warmup,
+                backprop_steps=explicit_steps,
+                projector_method=ctm_cfg.projector_method,
+                renormalize=ctm_cfg.renormalize,
+                projector_backward=ctm_cfg.projector_backward,
+                env_init=env_init,
+                energy_fn=_energy_fn,
+            )
+        else:
+            return ctm_energy_implicit(
+                site_tensors,
+                neighbors,
+                gate,
+                chi=ctm_cfg.chi,
+                max_iter=ctm_cfg.max_iter,
+                conv_tol=ctm_cfg.conv_tol,
+                projector_method=ctm_cfg.projector_method,
+                renormalize=ctm_cfg.renormalize,
+                projector_backward=ctm_cfg.projector_backward,
+                qr_warmup_steps=ctm_cfg.qr_warmup_steps,
+                chi_ramp=ctm_cfg.chi_ramp,
+                env_init=env_init,
+                forward_gauge=ctm_cfg.forward_gauge,
+                conv_method=ctm_cfg.ctm_conv_method,
+                min_iter=ctm_cfg.min_iter,
+                gmres_tol=ctm_cfg.gmres_tol,
+                gmres_maxiter=ctm_cfg.gmres_maxiter,
+                gmres_restart=ctm_cfg.gmres_restart,
+                energy_fn=_energy_fn,
+                arnoldi_precheck=False,
+            )
+
+    def loss_fn(params_):
+        site_tensors = {}
+        for i, c in enumerate(coords):
+            p = params_[i]
+            site_tensors[c] = p * (1.0 / (p.norm() + 1e-10))
+        return _ctm_energy_fn(site_tensors)
+
+    def _update_env_cache(params_):
+        site_tensors = {}
+        for i, c in enumerate(coords):
+            p = params_[i]
+            site_tensors[c] = p * (1.0 / (p.norm() + 1e-10))
+        envs, _ = python_loop_ctm_converge(
+            site_tensors,
+            neighbors,
+            chi=ctm_cfg.chi,
+            max_iter=ctm_cfg.max_iter,
+            conv_tol=ctm_cfg.conv_tol,
+            renormalize=ctm_cfg.renormalize,
+            projector_method=ctm_cfg.projector_method,
+            qr_warmup_steps=ctm_cfg.qr_warmup_steps,
+            projector_backward=ctm_cfg.projector_backward,
+            chi_ramp=ctm_cfg.chi_ramp,
+            env_init=_env_cache.get("envs", None),
+        )
+        _env_cache["envs"] = envs
+
+    def loss_fn_fwd(params_):
+        """Forward-only loss for line search — warm-starts CTM from env cache."""
+        site_tensors = {}
+        for i, c in enumerate(coords):
+            p = params_[i]
+            site_tensors[c] = p * (1.0 / (p.norm() + 1e-10))
+        envs, _ = python_loop_ctm_converge(
+            site_tensors,
+            neighbors,
+            chi=ctm_cfg.chi,
+            max_iter=ctm_cfg.max_iter,
+            conv_tol=ctm_cfg.conv_tol,
+            renormalize=ctm_cfg.renormalize,
+            projector_method=ctm_cfg.projector_method,
+            qr_warmup_steps=ctm_cfg.qr_warmup_steps,
+            projector_backward=ctm_cfg.projector_backward,
+            chi_ramp=ctm_cfg.chi_ramp,
+            env_init=_env_cache.get("envs", None),
+        )
+        return float(
+            compute_energy_ctm_tensor_multisite(
+                site_tensors,
+                envs,
+                neighbors,
+                gate,
+            )
+        )
+
+    # ── Optimizer setup ──────────────────────────────────────────────────
+    is_metric_lbfgs = (
+        config.gs_metric_precond and config.gs_optimizer.lower() == "lbfgs"
+    )
+    optimizer = None if is_metric_lbfgs else _build_optimizer(config)
+    opt_state = optimizer.init(params) if optimizer is not None else None
+    use_ls = _use_line_search(config)
+    is_cg = config.gs_optimizer.lower() == "cg"
+
+    best_energy = float("inf")
+    best_params = params
+    best_env_cache: dict[str, dict] = {}
+    prev_energy = float("inf")
+    prev_grad = None
+    cg_direction = None
+    prev_precond_grad = None
+    log_interval = config.gs_log_interval
+    lbfgs_history: list = []
+    prev_params_flat: jnp.ndarray | None = None
+    prev_grad_flat: jnp.ndarray | None = None
+    stall_count = 0
+
+    # CTM conv_tol schedule
+    _conv_tol_schedule = config.gs_ctm_conv_tol_schedule
+    _current_conv_tol = ctm_cfg.conv_tol
+
+    def _get_scheduled_conv_tol(step_idx, num_steps):
+        if _conv_tol_schedule is None:
+            return _current_conv_tol
+        frac = step_idx / max(num_steps, 1)
+        tol = _conv_tol_schedule[0][1]
+        for threshold, t in _conv_tol_schedule:
+            if frac >= threshold:
+                tol = t
+        return tol
+
+    # ── Optimization loop ────────────────────────────────────────────────
+    for step in range(config.gs_num_steps):
+        # Update conv_tol if schedule is active
+        if _conv_tol_schedule is not None:
+            new_tol = _get_scheduled_conv_tol(step, config.gs_num_steps)
+            if new_tol != _current_conv_tol:
+                _current_conv_tol = new_tol
+                ctm_cfg = _replace(ctm_cfg, conv_tol=new_tol)
+
+        try:
+            energy_val, grads = jax.value_and_grad(loss_fn)(params)
+        except CTMRGGradientError as exc:
+            _logger.warning(
+                "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
+                "skipping, triggering stall recovery",
+                exc.spectral_radius,
+                step,
+            )
+            if config.gs_verbose:
+                print(
+                    f"[iPEPS-AD:multisite] step {step + 1}/{config.gs_num_steps} "
+                    f"rho(J^T)={exc.spectral_radius:.4f} — stall recovery",
+                    flush=True,
+                )
+            stall_count += 1
+            if config.gs_stall_recovery == "reset":
+                params = best_params
+                _env_cache.update(best_env_cache)
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_params_flat = None
+                    prev_grad_flat = None
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                    opt_state = optimizer.init(params)
+            elif (
+                config.gs_stall_recovery == "noise"
+                and stall_count <= config.gs_noise_recovery_retries
+            ):
+                noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
+                noisy_params = []
+                for i, p in enumerate(params):
+                    k = jax.random.fold_in(noise_key, i)
+                    data = p.todense()
+                    noise = config.gs_noise_amplitude * _random_noise(
+                        k, data.shape, data.dtype
+                    )
+                    noisy = data + noise * jnp.linalg.norm(data)
+                    noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
+                    noisy_params.append(_wrap_tensor(noisy, p))
+                params = tuple(noisy_params)
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_params_flat = None
+                    prev_grad_flat = None
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+            continue
+        energy_float = float(energy_val)
+
+        # Update env cache for warm-starting next step
+        _update_env_cache(params)
+
+        if _should_accept_best(
+            current_best=best_energy,
+            candidate=energy_float,
+            floor=config.gs_energy_floor,
+        ):
+            best_energy = energy_float
+            best_params = params
+            best_env_cache = dict(_env_cache)
+
+        delta_energy = abs(energy_float - prev_energy)
+        logged = False
+        if config.gs_verbose and _should_log_step(
+            step, config.gs_num_steps, log_interval
+        ):
+            _log_ad_step(
+                "multisite",
+                step,
+                config.gs_num_steps,
+                energy_float,
+                delta_energy,
+                best_energy,
+            )
+            logged = True
+
+        prev_energy = energy_float
+
+        # Skip convergence check on early steps and right after a stall
+        # (stall resets prev_energy ≈ current, giving false dE ≈ 0).
+        if delta_energy < config.gs_conv_tol and step > 5 and stall_count == 0:
+            if config.gs_verbose:
+                if not logged:
+                    _log_ad_step(
+                        "multisite",
+                        step,
+                        config.gs_num_steps,
+                        energy_float,
+                        delta_energy,
+                        best_energy,
+                    )
+                _log_ad_converged("multisite", step, delta_energy, config.gs_conv_tol)
+            break
+
+        # ── Search direction ─────────────────────────────────────────────
+        if is_cg:
+            if config.gs_metric_precond:
+                from tenax.algorithms._metric_precond import (
+                    precondition_gradient_multisite,
+                )
+
+                envs_cached = _env_cache["envs"]
+                sites_m = {c: params[i] for i, c in enumerate(coords)}
+                grads_m = {c: grads[i] for i, c in enumerate(coords)}
+                delta_metric = delta_energy if step > 0 else _tree_dot(grads, grads)
+                z_dict = precondition_gradient_multisite(
+                    sites_m, envs_cached, grads_m, delta_metric, config
+                )
+                z = tuple(
+                    _wrap_tensor(z_dict[c], grads[i]) for i, c in enumerate(coords)
+                )
+                neg_z = jax.tree.map(lambda g: -g, z)
+                if prev_precond_grad is not None and cg_direction is not None:
+                    z_diff = jax.tree.map(lambda a, b: a - b, z, prev_precond_grad)
+                    num = _tree_dot(grads, z_diff)
+                    den = _tree_dot(prev_grad, prev_precond_grad)
+                    beta = max(0.0, num / den) if den > 1e-30 else 0.0
+                    cg_direction = _tree_add(neg_z, _tree_scale(cg_direction, beta))
+                else:
+                    cg_direction = neg_z
+                prev_precond_grad = z
+            else:
+                neg_grad = jax.tree.map(lambda g: -g, grads)
+                if prev_grad is not None and cg_direction is not None:
+                    beta = _cg_beta_pr(grads, prev_grad)
+                    cg_direction = _tree_add(neg_grad, _tree_scale(cg_direction, beta))
+                else:
+                    cg_direction = neg_grad
+            prev_grad = grads
+            direction = cg_direction
+        elif is_metric_lbfgs:
+            from tenax.algorithms._metric_precond import (
+                lbfgs_two_loop,
+                precondition_gradient_multisite,
+            )
+
+            # Flatten params and grads for L-BFGS
+            p_flat = jnp.concatenate([p.todense().reshape(-1) for p in params])
+            g_flat = jnp.concatenate([g.todense().reshape(-1) for g in grads])
+
+            if prev_params_flat is not None:
+                s = p_flat - prev_params_flat
+                y = g_flat - prev_grad_flat
+                sy = float(jnp.real(jnp.vdot(s, y)))
+                if sy > 1e-10:
+                    rho = 1.0 / sy
+                    lbfgs_history.append((s, y, rho))
+                    if len(lbfgs_history) > 10:
+                        lbfgs_history.pop(0)
+            prev_params_flat = p_flat
+            prev_grad_flat = g_flat
+
+            envs_cached = _env_cache["envs"]
+            sites_m = {c: params[i] for i, c in enumerate(coords)}
+            delta_metric = (
+                delta_energy if step > 0 else float(jnp.real(jnp.vdot(g_flat, g_flat)))
+            )
+            # Compute per-site sizes for slicing
+            sizes = [params[i].todense().size for i in range(len(coords))]
+            shapes = [params[i].todense().shape for i in range(len(coords))]
+
+            def h0_matvec(v):
+                # Slice flat vector into per-site pieces
+                grads_v = {}
+                offset = 0
+                for idx, c in enumerate(coords):
+                    sz = sizes[idx]
+                    grads_v[c] = _wrap_tensor(
+                        v[offset : offset + sz].reshape(shapes[idx]),
+                        params[idx],
+                    )
+                    offset += sz
+                z_dict = precondition_gradient_multisite(
+                    sites_m, envs_cached, grads_v, delta_metric, config
+                )
+                return jnp.concatenate([z_dict[c].reshape(-1) for c in coords])
+
+            direction_flat = lbfgs_two_loop(g_flat, lbfgs_history, h0_matvec)
+            # Unpack flat direction into per-site Tensors
+            dir_parts = []
+            offset = 0
+            for idx, c in enumerate(coords):
+                sz = sizes[idx]
+                dir_parts.append(
+                    _wrap_tensor(
+                        -direction_flat[offset : offset + sz].reshape(shapes[idx]),
+                        params[idx],
+                    )
+                )
+                offset += sz
+            direction = tuple(dir_parts)
+        elif optimizer is not None:
+            updates, opt_state = optimizer.update(grads, opt_state, params)
+            direction = updates
+        else:
+            direction = jax.tree.map(lambda g: -g, grads)
+
+        # Tangent projection (no C4v for multisite)
+        direction = _tangent_project_unit(direction, params)
+
+        # ── Line search / update ─────────────────────────────────────────
+        if use_ls:
+            if config.gs_line_search_method == "hager_zhang":
+                from tenax.algorithms._line_search import hager_zhang_line_search
+
+                slope = _tree_dot(grads, direction)
+                if slope >= 0:
+                    direction = jax.tree.map(lambda g: -g, grads)
+                    direction = _tangent_project_unit(direction, params)
+                    slope = _tree_dot(grads, direction)
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
+
+                def _phi(alpha):
+                    trial = _normalize_params(
+                        _tree_add(params, _tree_scale(direction, alpha))
+                    )
+                    return loss_fn_fwd(trial)
+
+                def _dphi(alpha):
+                    trial = _normalize_params(
+                        _tree_add(params, _tree_scale(direction, alpha))
+                    )
+                    _, g = jax.value_and_grad(loss_fn)(trial)
+                    return _tree_dot(g, direction)
+
+                dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
+                param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
+                alpha0 = min(1.0, 0.1 * param_norm / dir_norm)
+
+                alpha, f_alpha, converged = hager_zhang_line_search(
+                    _phi,
+                    _dphi,
+                    energy_float,
+                    slope,
+                    alpha_init=alpha0,
+                    rho=1.5,
+                    max_step=2.0 * alpha0,
+                    energy_bound=max(2.0, 2.0 * abs(best_energy)),
+                )
+                if f_alpha < energy_float:
+                    params = _normalize_params(
+                        _tree_add(params, _tree_scale(direction, alpha))
+                    )
+                    stall_count = 0
+                else:
+                    stall_count += 1
+            else:
+                slope_bt = _tree_dot(grads, direction)
+                if slope_bt >= 0:
+                    direction = jax.tree.map(lambda g: -g, grads)
+                    direction = _tangent_project_unit(direction, params)
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
+                params, new_energy, step_size = _backtracking_line_search(
+                    params,
+                    direction,
+                    grads,
+                    energy_float,
+                    loss_fn_fwd,
+                    max_steps=config.gs_line_search_max_steps,
+                )
+                if new_energy < energy_float:
+                    stall_count = 0
+                else:
+                    stall_count += 1
+
+            # Stall recovery
+            if config.gs_stall_recovery == "reset" and stall_count > 0:
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_params_flat = None
+                    prev_grad_flat = None
+                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                    opt_state = optimizer.init(params)
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD] stall #{stall_count}, "
+                        f"reset L-BFGS history (no rollback)",
+                        flush=True,
+                    )
+            elif (
+                config.gs_stall_recovery == "noise"
+                and stall_count > 0
+                and stall_count <= config.gs_noise_recovery_retries
+            ):
+                noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
+                noisy_params = []
+                for i, p in enumerate(params):
+                    k = jax.random.fold_in(noise_key, i)
+                    data = p.todense()
+                    noise = config.gs_noise_amplitude * _random_noise(
+                        k, data.shape, data.dtype
+                    )
+                    noisy = data + noise * jnp.linalg.norm(data)
+                    noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
+                    noisy_params.append(_wrap_tensor(noisy, p))
+                params = tuple(noisy_params)
+                if config.gs_verbose:
+                    print(f"[iPEPS-AD] stall #{stall_count}, adding noise", flush=True)
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_params_flat = None
+                    prev_grad_flat = None
+        else:
+            import optax
+
+            params = optax.apply_updates(params, direction)
+            params = _normalize_params(params)
+
+    # ── Final evaluation ─────────────────────────────────────────────────
+    def _eval_fresh(p, env_init=None):
+        site_tensors = {}
+        p_normed = _normalize_params(p)
+        for i, c in enumerate(coords):
+            site_tensors[c] = p_normed[i]
+        envs, _ = python_loop_ctm_converge(
+            site_tensors,
+            neighbors,
+            chi=ctm_cfg.chi,
+            max_iter=ctm_cfg.max_iter,
+            min_iter=ctm_cfg.min_iter,
+            conv_tol=ctm_cfg.conv_tol,
+            conv_method=ctm_cfg.ctm_conv_method,
+            renormalize=ctm_cfg.renormalize,
+            projector_method=ctm_cfg.projector_method,
+            qr_warmup_steps=ctm_cfg.qr_warmup_steps,
+            projector_backward=ctm_cfg.projector_backward,
+            chi_ramp=ctm_cfg.chi_ramp,
+            env_init=env_init,
+        )
+        E_ = float(
+            compute_energy_ctm_tensor_multisite(
+                site_tensors,
+                envs,
+                neighbors,
+                gate,
+            )
+        )
+        return site_tensors, envs, E_
+
+    sites_last, envs_last, E_last = _eval_fresh(params, _env_cache.get("envs", None))
+
+    if best_params is not params:
+        sites_best, envs_best, E_best_fresh = _eval_fresh(
+            best_params, best_env_cache.get("envs", None)
+        )
+    else:
+        E_best_fresh = E_last
+
+    # Pick whichever fresh evaluation is lower
+    if E_last <= E_best_fresh:
+        out_sites, out_envs, E_gs = sites_last, envs_last, E_last
+    else:
+        out_sites, out_envs, E_gs = sites_best, envs_best, E_best_fresh
+
+    if config.gs_verbose:
+        print(f"[iPEPS-AD:multisite] final E={E_gs:.10f}", flush=True)
+
+    # Map coord keys back to site names
+    out_tensors = {coord_to_name[c]: out_sites[c] for c in coords}
+    out_envs_named = {coord_to_name[c]: out_envs[c] for c in coords}
+    return out_tensors, out_envs_named, E_gs
 
 
 def optimize_fpeps_ad(

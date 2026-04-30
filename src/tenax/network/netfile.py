@@ -38,7 +38,13 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from tenax.contraction.contractor import contract, contract_with_subscripts
+import opt_einsum
+
+from tenax.contraction.contractor import (
+    _cached_contraction_path,
+    contract,
+    contract_with_subscripts,
+)
 from tenax.core.index import Label
 from tenax.core.tensor import Tensor
 
@@ -540,6 +546,34 @@ class NetworkBlueprint:
             pass
 
         return result
+
+    # ---- Raw-array execution ----
+
+    def launch_raw(self, *arrays, optimize: str = "auto"):
+        """Contract using pre-computed subscripts on raw arrays (no Tensor protocol).
+
+        Arrays must be passed in tensor declaration order.  This produces a
+        minimal XLA graph suitable for JIT tracing in AD backward passes.
+
+        Args:
+            *arrays: Raw ``jnp.ndarray`` in declaration order.
+            optimize: opt_einsum path optimizer.
+
+        Returns:
+            Raw ``jnp.ndarray`` result.
+
+        Raises:
+            ValueError: If the number of arrays doesn't match the blueprint.
+        """
+        if len(arrays) != len(self._node_order):
+            raise ValueError(
+                f"Expected {len(self._node_order)} arrays, got {len(arrays)}"
+            )
+        shapes = tuple(a.shape for a in arrays)
+        path = _cached_contraction_path(self._subscripts, shapes, optimize)
+        return opt_einsum.contract(
+            self._subscripts, *arrays, optimize=path, backend="jax"
+        )
 
     # ---- Interop ----
 

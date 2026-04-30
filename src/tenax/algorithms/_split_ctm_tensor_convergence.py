@@ -38,7 +38,7 @@ def _split_ctm_tensor_sweep(
     renormalize: bool,
 ) -> SplitCTMTensorEnv:
     """One full split-CTM sweep: L/R/T/B moves + optional renormalize."""
-    A_bar = A.bar()
+    A_bar = A.bar_super()
     env = _split_ctm_move_left(env, A, A_bar, chi, chi_I)
     env = _split_ctm_move_right(env, A, A_bar, chi, chi_I)
     env = _split_ctm_move_top(env, A, A_bar, chi, chi_I)

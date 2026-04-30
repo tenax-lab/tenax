@@ -68,7 +68,7 @@ jobs:
           fi
 
   test-full:
-    name: Full tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    name: Full tests (${{ matrix.os }}, Python ${{ matrix.python-version }}, ${{ matrix.bucket }})
     needs: [changes]
     if: |
       always() &&
@@ -80,9 +80,14 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         python-version: ["3.11", "3.12"]
+        bucket: ["fast", "slow"]
         include:
           - os: macos-latest
             python-version: "3.12"
+            bucket: "fast"
+          - os: macos-latest
+            python-version: "3.12"
+            bucket: "slow"
 
     steps:
       - uses: actions/checkout@v6
@@ -98,11 +103,27 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      - name: Run all tests
+      - name: Run non-core tests (${{ matrix.bucket }} bucket)
+        # Skip ``-m core`` since the required ``test`` job already covers it.
+        # Split into ``fast`` (algorithm/integration without slow) and
+        # ``slow`` (everything tagged ``@pytest.mark.slow``) buckets for
+        # parallelism, isolation, and per-bucket retry granularity. The
+        # earlier single ``-m "not core"`` invocation occasionally died
+        # ~45–65 min in on Linux 3.11 — initially read as a fixed 1h
+        # GitHub-runner reaper, but the post-#370 verification run
+        # 25152061002 ran ubuntu 3.12 slow for 82 min uninterrupted, so
+        # those kills were one-off long-running tests / runner OOMs,
+        # not a fixed reaper. (see #354 / #370.)
         env:
           JAX_PLATFORMS: cpu
+          BUCKET: ${{ matrix.bucket }}
         run: |
-          uv run pytest tests/ \
+          if [ "$BUCKET" = "slow" ]; then
+            FILTER='slow'
+          else
+            FILTER='not core and not slow'
+          fi
+          uv run pytest tests/ -m "$FILTER" \
             --cov=tenax \
             --cov-report=xml \
             --cov-report=term-missing \

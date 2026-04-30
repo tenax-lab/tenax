@@ -52,11 +52,29 @@ ctm_cfg = CTMConfig(
     chi=32,                      # environment bond dimension
     max_iter=100,                # maximum CTM iterations
     conv_tol=1e-10,              # convergence tolerance on corner singular values
-    forward_gauge="qr",         # "qr" (default), "sigma", "phase", or "none"
+    forward_gauge="phase",      # "phase" (default), "qr", "sigma", or "none"
     projector_method="eigh",    # "eigh" (default), "qr", or "svd" (Fishman)
     ad_backward_method="vjp",   # "vjp" (default) or "gmres" (experimental)
 )
 ```
+
+### Chi ramping
+
+The ``chi_ramp`` field runs CTM convergence in stages at increasing chi,
+reducing total cost by doing cheap sweeps at small chi before the final
+convergence:
+
+```python
+ctm_cfg = CTMConfig(
+    chi=32,
+    chi_ramp=[(8, 10), (16, 10), (32, None)],  # (chi, num_sweeps)
+)
+```
+
+Each tuple is ``(chi, num_sweeps)``. The last entry (or any with
+``num_sweeps=None``) runs to convergence. Environments are
+re-initialized when chi changes between stages. Benchmarks show
+1.2–2.1× speedup on GPU with identical energies.
 
 ### Forward gauge
 
@@ -65,17 +83,21 @@ after each CTM sweep. Four modes are supported:
 
 | Value | Description |
 |-------|-------------|
-| ``"qr"`` (default) | QR decomposition on corners with sign-fixed diagonal. Fast and stable for simple update and forward-only CTM. |
-| ``"phase"`` | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix that still stabilizes unrolled AD. **Recommended for explicit AD** and auto-enabled by ``optimize_gs_ad`` when ``gs_explicit_ad=True`` and the user leaves ``forward_gauge="qr"``. |
-| ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Required for the implicit-diff / GMRES backward path where element-wise CTM convergence is needed. |
+| ``"phase"`` (default) | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix that still stabilizes unrolled AD. **Recommended for both implicit and explicit AD** (1-site and 2-site). |
+| ``"qr"`` | Legacy QR decomposition on corners with sign-fixed diagonal. Fast and stable for simple update and forward-only CTM. |
+| ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Required for element-wise CTM convergence at large chi (1-site path). |
 | ``"none"`` | No gauge fix. Diagnostic / benchmark mode only — isolates the cost of gauge fixing from the rest of the sweep. Not recommended for production runs. |
 
 Without a gauge fix, the ``eigh`` projector CTM converges spectrally (corner
 singular values stabilize) but is chaotic element-wise — the individual
 tensor entries keep fluctuating between iterations, which makes implicit
 differentiation ill-conditioned. ``forward_gauge="phase"`` fixes this with
-negligible overhead for explicit AD, while ``forward_gauge="sigma"`` is the
-historical choice that remains appropriate for the implicit-diff path.
+negligible overhead, while ``forward_gauge="sigma"`` is appropriate when
+strict element-wise convergence is needed at large chi.
+
+**No silent gauge promotion.** ``optimize_gs_ad`` passes the configured
+``forward_gauge`` through unchanged.  Set it explicitly to override the
+``"phase"`` default.
 
 ### AD backward method
 
@@ -84,7 +106,7 @@ historical choice that remains appropriate for the implicit-diff path.
 | ``"vjp"`` (default) | Iterative VJP (Neumann series). Robust; the only implicit-diff backward that is currently regression-covered end-to-end. |
 | ``"gmres"`` | Direct Krylov solve of ``(I - J^T) λ = g``. **Experimental / documented unstable** — the GMRES backward is tracked as an open gap (see issue #292) and its regression test is currently marked ``xfail``. |
 
-For new code prefer the explicit-AD path (``gs_explicit_ad=True``), which
+For new code prefer the explicit-AD path (``gs_implicit_ad=False``), which
 does not exercise the implicit backward at all and does not require GMRES.
 See {doc}`ipeps_ad_paths` for the complete recommended configuration.
 

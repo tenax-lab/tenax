@@ -77,3 +77,6 @@ docs/_build/
 # Worktrees
 .worktrees/
 plugin/
+
+# Local-only paper PDFs (referenced by docs/plans/ but not tracked)
+papers/

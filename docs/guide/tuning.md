@@ -28,7 +28,7 @@ for p in params_by_category(TuningCategory.ACCURACY):
 | Goal | First knob | Then | Last resort |
 |---|---|---|---|
 | Energy not converging | `CTMConfig.chi` ↑ | `iPEPSConfig.gs_num_steps` ↑ | `gs_optimizer` → `lbfgs` |
-| AD forward is slow | loosen `conv_tol` | reduce `chi` | `gs_explicit_ad=True` (1-site) |
+| AD forward is slow | `CTMConfig.chi_ramp` | loosen `conv_tol` | reduce `chi` |
 | AD backward `Krylov failed to converge` | `adjoint_tikhonov` → `1e-4` | `adjoint_maxiter` ↑ | loosen `adjoint_tol` |
 | L-BFGS stalls at a plateau | `gs_stall_recovery="reset"` | `su_init=False` | `gs_metric_precond=False` |
 | NaN during optimization | `ad_regularize_svd=True` (default) | `forward_gauge="phase"` | check for degenerate singular values |
@@ -84,15 +84,19 @@ which AD path pairs with which gauge.
 
 ### `CTMConfig.forward_gauge`
 
-Values: `"qr"` (default), `"phase"`, `"sigma"`, `"none"`
+Values: `"phase"` (default), `"qr"`, `"sigma"`, `"none"`
 
-- `"qr"`: forward-only CTM, notebooks, diagnostics. `optimize_gs_ad`
-  auto-promotes this to `"phase"` when `gs_explicit_ad=True`.
-- `"phase"`: explicit-AD default after promotion. Numerically stable
-  for unrolled backprop.
-- `"sigma"`: required for the implicit-diff path at D ≥ 2. Aligns each
-  sweep's output to the previous sweep's input, stabilizing the VJP.
-- `"none"`: diagnostic only. Expect instabilities.
+- `"phase"`: AD-correct default. variPEPS-style Frobenius normalization
+  + phase fix per absorption.  Stable for both implicit and explicit
+  AD (1-site and 2-site).
+- `"qr"`: legacy QR gauge.  Forward-only CTM, notebooks, diagnostics.
+  Explicit user choice is preserved — no silent promotion.
+- `"sigma"`: transfer-matrix eigenvector alignment, required for
+  element-wise CTM convergence at large chi.  1-site path only.
+- `"none"`: diagnostic only.  Expect instabilities.
+
+**No silent gauge promotion** in AD paths: if you pass `"qr"` you get
+`"qr"`.  Set `forward_gauge` explicitly to override the default.
 
 ### `CTMConfig.ad_regularize_svd` (default `True`)
 
@@ -175,11 +179,11 @@ Reference: Rader et al., arXiv:2511.09546.
 
 ### `iPEPSConfig.gs_line_search_method`
 
-Values: `"armijo"` (default), `"hager_zhang"`
+Values: `"armijo"`, `"hager_zhang"` (default)
 
-Armijo is cheap and usually enough. Hager-Zhang is stronger and matches
-variPEPS — try it when Armijo is rejecting too many steps or when you
-want publication-quality step selection.
+Hager-Zhang is stronger and matches variPEPS; it is the default because
+Python-loop CTM forward makes each energy evaluation cheap.  Armijo is
+cheaper per step — use it when evaluation cost dominates.
 
 Reference: Hager & Zhang, SIAM J. Optim. 16(1):170–192 (2005).
 
@@ -215,14 +219,14 @@ informative start.
 
 ## Method selection
 
-### `iPEPSConfig.gs_explicit_ad` (default `True`)
+### `iPEPSConfig.gs_implicit_ad` (default `True`)
 
-- **`True`** (explicit) — differentiate through unrolled CTM sweeps via
-  `jax.checkpoint`. Recommended path post PR #291. Memory scales with
-  `gs_explicit_ad_steps`.
-- **`False`** (implicit) — solve the fixed-point adjoint equation.
+- **`True`** (implicit) — solve the fixed-point adjoint equation.
   Required by the `ctm_ad_mode="c4v_reference"` path (Francuz et al.
   App. C–F). Lower memory but needs `adjoint_tikhonov > 0` near the GS.
+- **`False`** (explicit) — differentiate through unrolled CTM sweeps via
+  `jax.checkpoint`. Recommended path post PR #291. Memory scales with
+  `gs_explicit_ad_steps`.
 
 ### `iPEPSConfig.gs_c4v` (default `False`)
 
@@ -254,6 +258,30 @@ These don't change numerics (within tolerance) but speed things up.
 
 Diagonal scaling preconditioner for the GMRES implicit-diff backward.
 Currently experimental — do not turn on for production.
+
+### `CTMConfig.gmres_maxiter` (default `200`)
+
+Maximum total GMRES iterations for the implicit-AD backward solve.
+The Krylov restart size is set by `gmres_restart` (default 20); the
+outer iteration budget is `gmres_maxiter`.  Increase when difficult
+CTM fixed points (large chi, near-critical) need more iterations to
+satisfy `gmres_tol`; decrease to bound runtime when accepting a
+looser solve.
+
+### `CTMConfig.gmres_restart` (default `20`)
+
+Krylov dimension between restarts in GMRES.  Larger restart values
+give better convergence per outer iteration but use more memory
+(quadratic in `gmres_restart`).  Default 20 balances memory and
+convergence for typical iPEPS adjoint systems.
+
+### `CTMConfig.chi_ramp` (default `None`)
+
+Run CTM convergence in stages at increasing chi.  Each stage does a
+fixed number of sweeps at a small chi before the final stage converges
+at the target chi.  Example: ``chi_ramp=[(8, 10), (16, 10), (32, None)]``
+does 10 sweeps at chi=8, 10 at chi=16, then converges at chi=32.
+Benchmarks show 1.2–2.1× GPU speedup with identical energies.
 
 ---
 

@@ -51,3 +51,10 @@ def test_projector_backward_explicit_lorentzian_is_honored():
 def test_projector_backward_bogus_value_rejected():
     with pytest.raises((ValueError, TypeError), match="projector_backward"):
         CTMConfig(chi=8, projector_backward="bogus")
+
+
+def test_unit_cell_accepts_lattice():
+    from tenax import kagome
+
+    config = iPEPSConfig(unit_cell=kagome())
+    assert config.unit_cell.sites == ("u", "v", "w")

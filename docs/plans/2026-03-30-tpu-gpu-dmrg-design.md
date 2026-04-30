@@ -1,7 +1,7 @@
 # TPU/GPU Accelerated DMRG — Design Document
 
 **Date**: 2026-03-30
-**Status**: Approved
+**Status**: COMPLETED (PR #209) — JIT DMRG for GPU/TPU + multi-GPU sharding
 **Branch**: TBD
 
 ## Motivation

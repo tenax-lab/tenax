@@ -94,5 +94,6 @@ guide/contributing
 
 contraction_semantics
 ipeps-code-paths
+ctm-gauge-normalization-notes
 dmrg-code-paths
 ```

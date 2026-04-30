@@ -7,6 +7,7 @@ __all__ = [
     "Coord",
     "SINGLE_SITE_NEIGHBORS",
     "_DIRECTION_MOVES",
+    "_corner_singular_values",
     "_ctm_sv_diff",
     "_ctm_tensor_multisite",
     "_ctm_tensor_sweep",
@@ -15,6 +16,7 @@ __all__ = [
     "_normalize_tensor",
     "_renormalize_tensor_env",
     "ctm_multisite",
+    "make_neighbors",
     "ctm_tensor",
     "ctm_tensor_2site",
 ]
@@ -136,6 +138,24 @@ CHECKERBOARD_NEIGHBORS: dict[Coord, dict[str, Coord]] = {
     (1, 0): {"left": (0, 0), "right": (0, 0), "top": (0, 0), "bottom": (0, 0)},
 }
 
+
+def make_neighbors(nx: int, ny: int) -> dict[Coord, dict[str, Coord]]:
+    """Build periodic neighbor map for an nx * ny unit cell.
+
+    Coordinates are (x, y) with periodic boundary conditions.
+    """
+    neighbors: dict[Coord, dict[str, Coord]] = {}
+    for x in range(nx):
+        for y in range(ny):
+            neighbors[(x, y)] = {
+                "left": ((x - 1) % nx, y),
+                "right": ((x + 1) % nx, y),
+                "top": (x, (y - 1) % ny),
+                "bottom": (x, (y + 1) % ny),
+            }
+    return neighbors
+
+
 _DIRECTION_MOVES = [
     ("left", _ctm_tensor_move_left),
     ("right", _ctm_tensor_move_right),
@@ -233,6 +253,50 @@ def _ctm_sv_diff(sv_new: jax.Array, sv_old: jax.Array) -> jax.Array:
     return jnp.max(jnp.abs(sv1 - sv2))
 
 
+def _tensor_leaf_data(leaf):
+    """Return numeric buffer for a CTM pytree leaf.
+
+    For ``DenseTensor`` and ``SymmetricTensor``, uses the internal ``_data``
+    buffer to avoid dense materialization in elementwise convergence checks.
+    """
+    if isinstance(leaf, (DenseTensor, SymmetricTensor)):
+        return leaf._data
+    return leaf.todense() if hasattr(leaf, "todense") else leaf
+
+
+def _max_env_leaf_diff(env_old: CTMTensorEnv, env_new: CTMTensorEnv) -> float:
+    """Maximum absolute element-wise difference across environment leaves."""
+    max_diff = 0.0
+    for told, tnew in zip(jax.tree.leaves(env_old), jax.tree.leaves(env_new)):
+        a = _tensor_leaf_data(told)
+        b = _tensor_leaf_data(tnew)
+        diff = float(jnp.max(jnp.abs(b - a)))
+        max_diff = max(max_diff, diff)
+    return max_diff
+
+
+def _corner_singular_values(C):  # noqa: N802
+    """Extract sorted singular values from a 2-leg corner tensor.
+
+    For SymmetricTensor: per-sector SVD, concatenate, sort descending.
+    This avoids allocating a full dense chi x chi matrix.
+    For DenseTensor / dense array: standard dense SVD.
+    """
+    if isinstance(C, SymmetricTensor):
+        svs = []
+        for key in C._block_keys:
+            block = C.blocks[key]
+            s = jnp.linalg.svd(block, compute_uv=False)
+            svs.append(s)
+        if svs:
+            all_svs = jnp.concatenate(svs)
+            return jnp.sort(all_svs)[::-1]
+        return jnp.zeros(0)
+    # DenseTensor or raw array
+    data = _tensor_leaf_data(C)
+    return jnp.linalg.svd(data, compute_uv=False)
+
+
 def ctm_tensor(
     A: Tensor,
     chi: int,
@@ -314,7 +378,7 @@ def ctm_tensor(
             projector_backward=projector_backward,
         )
 
-        current_sv = jnp.linalg.svd(env.C1.todense(), compute_uv=False)
+        current_sv = _corner_singular_values(env.C1)
         if prev_sv is not None:
             diff = _ctm_sv_diff(current_sv, prev_sv)
             if float(diff) < conv_tol:
@@ -381,7 +445,7 @@ def _ctm_tensor_multisite(
         )
         converged = True
         for c in sorted(envs):
-            sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
+            sv = _corner_singular_values(envs[c].C1)
             if c in prev_svs:
                 if float(_ctm_sv_diff(sv, prev_svs[c])) >= conv_tol:
                     converged = False

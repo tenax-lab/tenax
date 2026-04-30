@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
+import warnings
 from collections.abc import Callable
 from functools import partial
 
@@ -198,8 +199,10 @@ def _svd_sector_backward(
     UtdU_anti = 0.5 * (UtdU - UtdU.conj().T)
     VtdV_anti = 0.5 * (VtdV - VtdV.conj().T)
 
-    # Inverse singular values (safe)
-    s_inv = jnp.where(s_k > eps, 1.0 / s_k, 0.0)
+    # Inverse singular values — sanitize input so JAX backward never
+    # evaluates 1/0 (jnp.where evaluates both branches during AD).
+    s_safe = jnp.where(s_k > eps, s_k, 1.0)
+    s_inv = jnp.where(s_k > eps, 1.0 / s_safe, 0.0)
 
     # Projectors onto complements of kept subspaces
     proj_U_perp = jnp.eye(m) - U_k @ U_k.conj().T
@@ -885,13 +888,24 @@ def _phase_fix_ctm_tensor(env):
 
     This is simpler than sigma gauge (no transfer matrix eigenvector
     computation) and works identically in Python loops and JIT while_loop.
+
+    Uses todense/from_dense round-trip.  Environment tensors are small
+    (chi x chi corners, chi x D^2 x chi edges), so this is acceptable.
+    The from_dense re-projection into block structure is needed for
+    numerical stability over many CTM sweeps.
     """
     EPS_PHASE = 0.1  # threshold fraction for "large" element (variPEPS default)
 
     def _frob_phase_fix(arr):
-        """Frobenius-normalize and fix phase of a dense array."""
+        """Frobenius-normalize and fix phase of a dense array.
+
+        Norm is wrapped in ``stop_gradient`` so the backward only sees
+        the tangential gradient component. See #362 for why the radial
+        path through divide-by-norm produces NaN on SymmetricTensor
+        with empty charge sectors.
+        """
         norm = jnp.linalg.norm(arr)
-        arr = arr / (norm + 1e-30)
+        arr = arr / jax.lax.stop_gradient(norm + 1e-30)
         # Find first element with |x| >= EPS_PHASE * max(|arr|)
         flat = arr.ravel()
         abs_flat = jnp.abs(flat)
@@ -1086,6 +1100,12 @@ def ctm_tensor_converge(
     Returns:
         Flat tuple of environment pytree leaf arrays (all sites, coord-sorted).
     """
+    warnings.warn(
+        "ctm_tensor_converge is deprecated. Use ctm_energy_implicit from "
+        "tenax.algorithms._ctm_energy_ad instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     config = _config_from_tuple(config_tuple)
     envs_init = _unflatten_envs_init(env_init_leaves, site_tensors, config.chi)
     envs = _ctm_tensor_multisite_fixed_point(
@@ -1542,6 +1562,12 @@ def ctm_tensor_converge_explicit(
     Returns:
         Flat tuple of environment pytree leaf arrays.
     """
+    warnings.warn(
+        "ctm_tensor_converge_explicit is deprecated. Use ctm_energy_explicit "
+        "from tenax.algorithms._ctm_energy_ad instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     config = _config_from_tuple(config_tuple)
     envs_init = _unflatten_envs_init(env_init_leaves, site_tensors, config.chi)
 

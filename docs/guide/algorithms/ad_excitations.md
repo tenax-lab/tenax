@@ -95,7 +95,14 @@ ill-defined.
 Tenax provides two gauge-fixing strategies, selected via
 ``CTMConfig.forward_gauge``:
 
-#### QR gauge (``forward_gauge="qr"``, default)
+#### Phase gauge (``forward_gauge="phase"``, default)
+
+Applies **Frobenius normalization + global phase fix** (variPEPS-style)
+to each corner and edge after every CTM step.  Cheapest gauge fix that
+still stabilizes unrolled AD; works for both implicit and explicit AD,
+1-site and 2-site.  See ``docs/guide/algorithms/ctm.md`` for details.
+
+#### QR gauge (``forward_gauge="qr"``)
 
 Applies **QR decomposition** (via ``tenax.linalg.qr``, block-sparse
 for ``SymmetricTensor``) to each corner after every CTM step:
@@ -165,11 +172,11 @@ iterative VJP when the system is well-conditioned. **Recommended** when
 Without sigma gauge, GMRES can diverge because the linear system is
 ill-conditioned (the fixed point is not unique element-wise).
 
-### 5. Explicit AD (``gs_explicit_ad=True``)
+### 5. Explicit AD (``gs_implicit_ad=False``)
 
 Instead of implicit differentiation, explicit AD backpropagates through the
 unrolled CTM iteration graph. This is now the **default** mode
-(``gs_explicit_ad=True``).
+(``gs_implicit_ad=False``).
 
 The forward pass has two phases:
 

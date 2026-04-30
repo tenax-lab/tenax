@@ -1,5 +1,7 @@
 # General Lattice Abstraction — Design
 
+**Status:** COMPLETED — Lattice, Bond, ctm_multisite, and built-in factories (square, checkerboard, honeycomb, triangular, kagome) all merged.
+
 ## Goal
 
 Add a `Lattice` class to `tenax.core` that describes 2D periodic lattice geometries declaratively, with built-in factories for common lattices and a new `ctm_multisite()` entry point for 3+ site unit cells.

@@ -1,7 +1,7 @@
 # 3-Leg Boundary Tensor Refactor
 
 **Date:** 2026-03-20
-**Status:** Approved
+**Status:** COMPLETED (PR #169) — ~270 lines removed
 **Branch:** Fold into FiniteMPS worktree branch (combined PR)
 **Motivation:** Ian McCulloch pointed out that 2-leg boundary tensors can't represent non-zero charge states. 3-leg boundaries with explicit trivial bonds fix this and eliminate ~23 special-case locations across 5 files.
 

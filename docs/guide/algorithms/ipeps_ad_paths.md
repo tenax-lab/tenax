@@ -27,9 +27,9 @@ config = iPEPSConfig(
         max_iter=80,
         conv_tol=1e-8,
         projector_method="qr",  # fastest, best energy, scales to chi=64+
-        # forward_gauge auto-set to "phase" for explicit AD
+        # forward_gauge defaults to "phase" (AD-correct for 1-site and 2-site)
     ),
-    gs_explicit_ad=True,
+    gs_implicit_ad=False,
     gs_explicit_ad_steps=30,
     gs_explicit_ad_warmup=10,
     gs_optimizer="lbfgs",
@@ -95,14 +95,14 @@ scales cleanly to chi=64+, never NaNs, and is 6–9× faster than sigma
 gauge for equal or better energy.
 
 **Configuration**:
-- `gs_explicit_ad=True` — backprop through unrolled steps (default).
+- `gs_implicit_ad=False` — backprop through unrolled steps (explicit AD, default).
 - `gs_projector_method="qr"` — QR projectors (recommended for explicit AD).
-- `forward_gauge="qr"` (config default) — `optimize_gs_ad` auto-promotes to
-  `"phase"` at runtime when `gs_explicit_ad=True`. Users can override with
-  `forward_gauge="sigma"` (historical path) or `forward_gauge="none"`
-  (diagnostic); see the mode table below.
+- `forward_gauge="phase"` (config default, AD-correct).  Users can
+  override with `forward_gauge="sigma"` (historical path), `"qr"`
+  (legacy), or `"none"` (diagnostic); see the mode table below.  No
+  silent promotion — explicit user choice is preserved.
 - `projector_backward="auto"` (config default) — when `projector_method="eigh"`
-  and `gs_explicit_ad=True`, `optimize_gs_ad` auto-promotes to `"lorentzian"`,
+  and `gs_implicit_ad=False`, `optimize_gs_ad` auto-promotes to `"lorentzian"`,
   routing the projector VJP through the Francuz–Schuch–Vanhecke
   truncated-eigh kernel (`_lorentzian_eigh.py`) instead of the legacy
   `regularized_eigh` path. This closes the 2-site χ=8 convergence gap
@@ -154,7 +154,7 @@ graph in memory).
 **Configuration (for the VJP path only)**:
 - `forward_gauge="sigma"` — required for stable element-wise convergence.
 - `ad_backward_method="vjp"` — the supported implicit backward.
-- `gs_explicit_ad=False` — use implicit differentiation.
+- `gs_implicit_ad=True` — use implicit differentiation.
 
 **Arnoldi spectral-radius precheck** (enabled by default):
 
@@ -198,7 +198,6 @@ config = iPEPSConfig(
     gs_optimizer="lbfgs",
     gs_num_steps=50,
     gs_line_search=True,
-    gs_explicit_ad=True,
     gs_explicit_ad_steps=10,
     gs_explicit_ad_warmup=2,
     su_init=True,
@@ -241,7 +240,7 @@ Backward: stable truncated-eigh backward + implicit solve
 
 ```python
 config = iPEPSConfig(
-    gs_explicit_ad=False,
+    gs_implicit_ad=True,
     gs_c4v=True,
     unit_cell="1x1",
     ctm=CTMConfig(
@@ -256,27 +255,28 @@ config = iPEPSConfig(
 
 **Current scope and constraints:**
 - dense tensors only (no SymmetricTensor path yet),
-- strict gate: `unit_cell="1x1"`, `gs_c4v=True`, `gs_explicit_ad=False`,
+- strict gate: `unit_cell="1x1"`, `gs_c4v=True`, `gs_implicit_ad=True`,
   `ctm.ctm_ad_mode="c4v_reference"`,
 - supports `gs_num_steps>0` optimization with implicit gradients.
 
 ## Forward Gauge Mode Matrix
 
-Post-PR-#291 Tenax supports four ``forward_gauge`` modes. Their intended
-use is summarized below:
+Tenax supports four ``forward_gauge`` modes. Their intended use is
+summarized below:
 
 | Mode | Explicit AD (Path 1) | Implicit AD (Path 2, VJP) | Notes |
 |------|----------------------|----------------------------|-------|
-| ``"qr"`` (static default) | Auto-promoted to ``"phase"`` when ``gs_explicit_ad=True`` | Works for simple cases but not preferred | Conservative default for callers that construct ``CTMConfig`` directly. |
-| ``"phase"`` | **Recommended** | Not validated | Cheapest gauge fix; Frobenius + differentiable phase fix. |
-| ``"sigma"`` | Historical — still correct but ~6–9× slower than phase | **Required** for stable element-wise convergence | Power iteration (30 steps) per sweep. |
+| ``"phase"`` (default) | **Recommended** | **Recommended** | Cheapest gauge fix; Frobenius + differentiable phase fix. Works for 1-site and 2-site. |
+| ``"qr"`` | Legacy QR gauge | Works for simple cases but not preferred | Forward-only CTM, notebooks, diagnostics. |
+| ``"sigma"`` | Historical — still correct but ~6–9× slower than phase | Required for element-wise convergence at large chi (1-site only) | Power iteration (30 steps) per sweep. |
 | ``"none"`` | Benchmark / diagnostic only | Unstable | Isolates gauge-fix cost from projector cost. |
 
-The auto-promotion rule lives in ``optimize_gs_ad``: when
-``gs_explicit_ad=True`` and ``ctm.forward_gauge == "qr"`` (the static default),
-the optimizer replaces the forward gauge with ``"phase"`` for the run. If the
-user explicitly sets ``forward_gauge`` to any other value (``"sigma"``,
-``"phase"``, or ``"none"``), that choice is respected without modification.
+**No silent gauge promotion**: ``optimize_gs_ad`` passes
+``ctm.forward_gauge`` through unchanged.  An explicit user choice
+(``"qr"``, ``"sigma"``, ``"phase"``, or ``"none"``) is always
+respected.  This was previously achieved through an auto-promotion of
+``"qr"`` → ``"phase"``; the promotion was removed in PR #343 in favor
+of a sensible static default.
 
 The GMRES backward (``ad_backward_method="gmres"``) is tracked as an open
 gap — see issue #292 and the ``xfail``-marked regression test in

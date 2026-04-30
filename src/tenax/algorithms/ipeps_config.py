@@ -7,6 +7,8 @@ from typing import Literal, NamedTuple
 
 import jax
 
+from tenax.core.lattice import Lattice
+
 
 @dataclass
 class CTMConfig:
@@ -24,12 +26,9 @@ class CTMConfig:
                             broadening to prevent NaN from degenerate singular
                             values (Francuz et al., PRR 7, 013237).
         forward_gauge:      Gauge fix applied after each CTM sweep.  One of
-                            ``"qr"`` (default), ``"phase"``, ``"sigma"``, or
-                            ``"none"``.  The static default stays ``"qr"``
-                            for forward-only CTM, diagnostics, and notebooks.
-                            ``optimize_gs_ad`` auto-promotes ``"qr"`` to
-                            ``"phase"`` when ``gs_explicit_ad=True`` and the
-                            user has not opted into a different gauge — see
+                            ``"phase"`` (default), ``"qr"``, ``"sigma"``, or
+                            ``"none"``.  Explicit user choice is preserved —
+                            no silent promotion in AD paths.  See
                             ``docs/guide/algorithms/ipeps_ad_paths.md`` for
                             the full mode matrix and benchmarks.
         ad_backward_method: Backward method for the implicit-diff path.
@@ -38,8 +37,8 @@ class CTMConfig:
                             currently documented unstable (spectral radius
                             > 1 without tight sigma-gauge alignment) and
                             its regression test is marked ``xfail`` —
-                            tracked by issue #292.  Prefer the explicit-AD
-                            path (``iPEPSConfig.gs_explicit_ad=True``)
+                            tracked by issue #292.  Prefer
+                            ``ad_backward_method="vjp"`` (the default)
                             until GMRES is stabilized.
     """
 
@@ -48,7 +47,7 @@ class CTMConfig:
     max_iter: int = 100
     conv_tol: float = 1e-8
     renormalize: bool = True
-    projector_method: str = "eigh"  # "eigh", "qr", or "svd" (Fishman)
+    projector_method: str = "svd"  # "svd" (Fishman, default), "eigh", or "qr"
     min_iter: int = 10  # minimum CTM sweeps before checking convergence
     qr_warmup_steps: int = 3  # eigh warm-up iterations before QR kicks in
     chi_I: int | None = None  # interlayer bond dim for split-CTMRG; None => chi_I = chi
@@ -57,11 +56,16 @@ class CTMConfig:
         False  # diagonal scaling preconditioner for GMRES backward (experimental)
     )
     ad_backward_method: str = "vjp"  # "vjp" (iterative VJP) or "gmres" (xfail — #292)
-    ctm_conv_method: str = "sv"  # "sv" (singular value) or "elementwise"
-    # forward_gauge: "qr" (default, auto-promoted to "phase" by optimize_gs_ad
-    # when gs_explicit_ad=True), "phase" (explicit-AD default after promotion),
-    # "sigma" (implicit-diff path), or "none" (diagnostic).  See ipeps_ad_paths.md.
-    forward_gauge: str = "qr"
+    gmres_tol: float = 1e-6  # tolerance for GMRES backward solve
+    gmres_restart: int = 20  # Krylov dimension for GMRES (no outer restarts)
+    gmres_maxiter: int = 200  # max total GMRES iterations (outer budget)
+    ctm_conv_method: str = "elementwise"  # "elementwise" or "sv" (singular value)
+    # forward_gauge: "phase" (default — Frobenius-norm phase fix per CTM
+    # absorption; works for both implicit and explicit AD, 1-site and
+    # 2-site).  "sigma" (transfer-matrix eigenvector alignment, 1-site
+    # only), "qr" (legacy), or "none" (diagnostic).  No silent promotion
+    # — explicit user choice is preserved.  See ipeps_ad_paths.md.
+    forward_gauge: str = "phase"
     # Optional reference-mode implicit AD mode (App. C-F) for dense 1-site C4v.
     ctm_ad_mode: str | None = None  # None or "c4v_reference"
     adjoint_solver: str = "bicgstab"  # "bicgstab" or "gmres"
@@ -96,8 +100,8 @@ class CTMConfig:
     adjoint_tikhonov: float = 1e-6
     # Backward pass used for the eigh projector inside AD.
     #   "auto"       -> default; ``optimize_gs_ad`` promotes to "lorentzian"
-    #                   when ``gs_explicit_ad=True`` and the effective
-    #                   projector is "eigh", otherwise the effective value is
+    #                   when ``gs_implicit_ad=False`` and the effective
+    #                   projector is "eigh"; otherwise the effective value is
     #                   "standard".  Mirrors the ``forward_gauge`` pattern.
     #   "standard"   -> force the existing ``regularized_eigh`` backward.
     #                   Never auto-promoted away from this value.
@@ -151,14 +155,18 @@ class iPEPSConfig:
         gs_log_interval:       Print every N AD steps when ``gs_verbose`` is
                                enabled. The first and final steps are always
                                logged.
-        gs_explicit_ad:        Differentiate through unrolled CTM sweeps
-                               instead of using implicit differentiation.
-                               ``True`` by default and the recommended AD
-                               path post-PR-#291.  When ``True`` and
+        gs_implicit_ad:        Use implicit differentiation through the
+                               CTM fixed-point equation instead of
+                               differentiating through unrolled CTM sweeps.
+                               ``True`` by default: the implicit-diff path
+                               (VJP backward with sigma gauge) is the
+                               recommended AD path.  When ``True`` and
                                ``ctm.forward_gauge == "qr"`` (the static
                                default), ``optimize_gs_ad`` transparently
-                               promotes the forward gauge to ``"phase"`` for
-                               the unrolled CTM sweeps — see
+                               promotes the forward gauge to ``"sigma"``
+                               for stable element-wise CTM convergence.
+                               When ``False``, it promotes to ``"phase"``
+                               instead — see
                                ``docs/guide/algorithms/ipeps_ad_paths.md``.
         gs_ctm_conv_tol_schedule:
                                Optional ramp for the CTM convergence
@@ -192,9 +200,9 @@ class iPEPSConfig:
     ctm: CTMConfig = field(default_factory=CTMConfig)
     svd_trunc_err: float | None = None
     gate_order: str = "sequential"
-    unit_cell: str = "1x1"  # "1x1" or "2site"
+    unit_cell: str | Lattice = "1x1"  # "1x1", "2site", or Lattice(...)
     # AD ground-state optimization settings
-    gs_optimizer: str = "cg"  # "cg", "adam", or "lbfgs"
+    gs_optimizer: str = "lbfgs"  # "lbfgs", "cg", or "adam"
     gs_learning_rate: float = 1e-3
     gs_num_steps: int = 200
     gs_conv_tol: float = 1e-8
@@ -203,7 +211,7 @@ class iPEPSConfig:
     gs_max_grad_norm: float = 1.0  # gradient clipping (max global norm)
     gs_line_search: bool | None = None  # None = auto (True for lbfgs/cg)
     gs_line_search_max_steps: int = 8
-    gs_line_search_method: str = "armijo"  # "armijo" or "hager_zhang"
+    gs_line_search_method: str = "hager_zhang"  # "armijo" or "hager_zhang"
     gs_noise_recovery_retries: int = 3  # max retries with noise injection on stall
     gs_noise_amplitude: float = 0.1  # relative noise amplitude for recovery
     # Stall recovery mode for L-BFGS / CG line search failures.
@@ -219,7 +227,10 @@ class iPEPSConfig:
     # candidate energy strictly below this value is rejected as a non-
     # variational CTM artifact (see issue #298).  None disables the check.
     gs_energy_floor: float | None = None
-    gs_explicit_ad: bool = True  # explicit diff through unrolled CTM
+    gs_implicit_ad: bool = True  # implicit diff (VJP + sigma gauge)
+    # Deprecated alias — use gs_implicit_ad instead.  Accepted for backwards
+    # compatibility; mapped to gs_implicit_ad in __post_init__.
+    gs_explicit_ad: bool | None = None
     gs_explicit_ad_steps: int = 20  # CTM steps for explicit AD backprop phase
     gs_explicit_ad_warmup: int = 3  # warmup CTM steps (no gradient tracking)
     su_init: bool = True  # initialize via simple update before AD
@@ -236,12 +247,41 @@ class iPEPSConfig:
     gs_metric_precond: bool = True  # metric preconditioning for CG/L-BFGS
     metric_gmres_maxiter: int = 30  # Krylov dimension for metric inversion
     metric_gmres_tol: float = 1e-2  # GMRES tolerance (loose is fine)
+    # Coarse-grained iPEPS: when set, optimize_gs_ad uses compute_energy_cg
+    # instead of compute_energy_ctm_tensor.  Only valid with unit_cell="1x1".
+    cg_gates: object | None = None
 
     def __post_init__(self):
+        import warnings
+
+        if self.gs_explicit_ad is not None:
+            warnings.warn(
+                "gs_explicit_ad is deprecated; use gs_implicit_ad instead "
+                "(gs_implicit_ad=True is the new default, equivalent to "
+                "gs_explicit_ad=False).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            object.__setattr__(self, "gs_implicit_ad", not self.gs_explicit_ad)
+        object.__setattr__(self, "gs_explicit_ad", None)
+
         valid_unit_cells = {"1x1", "2site"}
-        if self.unit_cell not in valid_unit_cells:
+        if (
+            not isinstance(self.unit_cell, Lattice)
+            and self.unit_cell not in valid_unit_cells
+        ):
             raise ValueError(
-                f"unit_cell must be one of {valid_unit_cells}, got {self.unit_cell!r}"
+                f"unit_cell must be one of {valid_unit_cells} or a Lattice, "
+                f"got {self.unit_cell!r}"
+            )
+        if self.cg_gates is not None and self.unit_cell != "1x1":
+            raise ValueError(
+                f"cg_gates requires unit_cell='1x1', got {self.unit_cell!r}"
+            )
+        if self.cg_gates is not None and self.su_init:
+            raise ValueError(
+                "cg_gates is incompatible with su_init=True "
+                "(simple update uses the microscopic gate, not the CG gates)"
             )
         valid_stall_recovery = {None, "noise", "reset"}
         if self.gs_stall_recovery not in valid_stall_recovery:

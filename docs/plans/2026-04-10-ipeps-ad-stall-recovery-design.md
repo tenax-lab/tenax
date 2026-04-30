@@ -1,6 +1,7 @@
 # iPEPS AD Stall-Recovery Fix (Issue #298) — Design
 
 **Date:** 2026-04-10
+**Status:** COMPLETED (PRs #329, #330, #331, #332) — stall recovery modes, tangent projection, Hermitian inner product, and #328 resolution
 **Issue:** #298 — 2-site (and 1-site non-C4v) AD instability from stall-recovery noise injection interacting with non-variational CTM regions.
 **Scope:** Minimal fix — items 1–4 of the issue's proposed principled fix. Item 5 (migrating 1-site C4v off noise injection) is deferred to a follow-up.
 

@@ -6,19 +6,21 @@ enumerate ``ParamSpec`` entries, and use the metadata to drive search.
 
 Schema design notes
 -------------------
-* **Authoritative defaults live in the dataclasses**, not here. The
-  registry stores semantic metadata (tuning range, cost model,
-  dependencies) that dataclasses can't carry.
-* Entries are declarative — no runtime logic, no imports of algorithm
-  internals. This keeps the registry cheap to import and safe to use
-  from tooling / CI checks.
+* **Authoritative defaults live in the dataclasses**, not here.
+  ``ParamSpec.default`` is a ``@property`` that reads the field default
+  off the underlying dataclass on access — so the registry can never
+  drift out of sync with the algorithm config (see PR #372 for the
+  drift bug this design replaces).
+* The dataclass module is imported lazily inside the lookup helper —
+  not for import-cost reasons (``tenax.__init__`` already pulls in JAX)
+  but to avoid an import cycle with ``tenax.algorithms``.
 * The ``all_params()`` function returns a copy so callers can mutate
   without polluting the module-level catalog.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 from enum import Enum
 from typing import Any
 
@@ -111,14 +113,31 @@ class TuningHint:
     applies_when: dict[str, Any] = field(default_factory=dict)
 
 
+def _resolve_dataclass_default(dataclass_name: str, field_name: str) -> Any:
+    """Look up the current default of ``<dataclass_name>.<field_name>``."""
+    # Local import to avoid an import cycle with ``tenax.algorithms``.
+    from tenax.algorithms import ipeps_config
+
+    cls = getattr(ipeps_config, dataclass_name)
+    for f in fields(cls):
+        if f.name == field_name:
+            if f.default_factory is not MISSING:
+                return f.default_factory()
+            return f.default
+    raise LookupError(f"{dataclass_name} has no field {field_name!r}")
+
+
 @dataclass(frozen=True)
 class ParamSpec:
-    """A single tunable parameter."""
+    """A single tunable parameter.
+
+    The ``default`` attribute is a lazy property that reads the live
+    dataclass default — there is no mirrored copy to keep in sync.
+    """
 
     name: str  # field name on the dataclass
     dataclass_name: str  # e.g. "CTMConfig" or "iPEPSConfig"
     type_str: str  # e.g. "int", "float", "str", "bool"
-    default: Any  # current dataclass default (mirrored — keep in sync!)
     category: TuningCategory
     description: str
     hint: TuningHint
@@ -126,6 +145,11 @@ class ParamSpec:
     when_to_tune: str = ""  # "Increase when energy doesn't converge"
     when_not_to_tune: str = ""  # "Usually the default is fine"
     references: tuple[str, ...] = ()  # paper DOIs / arXiv IDs
+
+    @property
+    def default(self) -> Any:
+        """Current default of the underlying dataclass field."""
+        return _resolve_dataclass_default(self.dataclass_name, self.name)
 
     def fully_qualified_name(self) -> str:
         return f"{self.dataclass_name}.{self.name}"
@@ -149,7 +173,6 @@ _register(
         name="chi",
         dataclass_name="CTMConfig",
         type_str="int",
-        default=20,
         category=TuningCategory.ACCURACY,
         description=(
             "Bond dimension of the CTM environment tensors. The primary "
@@ -182,7 +205,6 @@ _register(
         name="max_iter",
         dataclass_name="CTMConfig",
         type_str="int",
-        default=100,
         category=TuningCategory.ACCURACY,
         description="Maximum CTM sweeps before declaring convergence.",
         hint=TuningHint(
@@ -203,7 +225,6 @@ _register(
         name="conv_tol",
         dataclass_name="CTMConfig",
         type_str="float",
-        default=1e-8,
         category=TuningCategory.ACCURACY,
         description=(
             "CTM convergence tolerance on the singular-value difference "
@@ -237,7 +258,6 @@ _register(
         name="projector_method",
         dataclass_name="CTMConfig",
         type_str="str",
-        default="eigh",
         category=TuningCategory.METHOD_SELECTION,
         description=(
             "Algorithm used to compute CTM projectors: 'eigh' (symmetric "
@@ -267,7 +287,6 @@ _register(
         name="forward_gauge",
         dataclass_name="CTMConfig",
         type_str="str",
-        default="qr",
         category=TuningCategory.STABILITY,
         description=(
             "Gauge fix applied to the environment tensors after each CTM "
@@ -297,7 +316,6 @@ _register(
         name="ctm_ad_mode",
         dataclass_name="CTMConfig",
         type_str="str | None",
-        default=None,
         category=TuningCategory.METHOD_SELECTION,
         description=(
             "Opt-in reference-mode implicit AD path for dense 1-site C4v "
@@ -311,8 +329,8 @@ _register(
         ),
         dependencies=(
             Dependency(
-                name="iPEPSConfig.gs_explicit_ad",
-                relation="'c4v_reference' requires gs_explicit_ad=False",
+                name="iPEPSConfig.gs_implicit_ad",
+                relation="'c4v_reference' requires gs_implicit_ad=True",
             ),
             Dependency(
                 name="iPEPSConfig.gs_c4v",
@@ -332,7 +350,6 @@ _register(
         name="adjoint_solver",
         dataclass_name="CTMConfig",
         type_str="str",
-        default="bicgstab",
         category=TuningCategory.METHOD_SELECTION,
         description=(
             "Krylov solver used for the linear adjoint system "
@@ -356,7 +373,6 @@ _register(
         name="adjoint_tol",
         dataclass_name="CTMConfig",
         type_str="float",
-        default=1e-8,
         category=TuningCategory.ACCURACY,
         description=(
             "Target residual tolerance for the Krylov adjoint solve. The "
@@ -382,7 +398,6 @@ _register(
         name="adjoint_maxiter",
         dataclass_name="CTMConfig",
         type_str="int",
-        default=50,
         category=TuningCategory.ACCURACY,
         description="Maximum Krylov iterations in the adjoint solve.",
         hint=TuningHint(
@@ -403,7 +418,6 @@ _register(
         name="adjoint_tikhonov",
         dataclass_name="CTMConfig",
         type_str="float",
-        default=1e-6,
         category=TuningCategory.STABILITY,
         description=(
             "Tikhonov damping on the linear adjoint system: solve "
@@ -448,7 +462,6 @@ _register(
         name="gs_optimizer",
         dataclass_name="iPEPSConfig",
         type_str="str",
-        default="cg",
         category=TuningCategory.METHOD_SELECTION,
         description="Outer-loop optimizer for ground-state AD.",
         hint=TuningHint(
@@ -480,7 +493,6 @@ _register(
         name="gs_num_steps",
         dataclass_name="iPEPSConfig",
         type_str="int",
-        default=200,
         category=TuningCategory.OPTIMIZER,
         description="Number of AD ground-state optimization steps.",
         hint=TuningHint(
@@ -501,7 +513,6 @@ _register(
         name="gs_learning_rate",
         dataclass_name="iPEPSConfig",
         type_str="float",
-        default=1e-3,
         category=TuningCategory.OPTIMIZER,
         description="Base learning rate / trust-region scale for the optimizer.",
         hint=TuningHint(
@@ -528,7 +539,6 @@ _register(
         name="gs_line_search_method",
         dataclass_name="iPEPSConfig",
         type_str="str",
-        default="armijo",
         category=TuningCategory.METHOD_SELECTION,
         description="Line-search algorithm used by CG/L-BFGS.",
         hint=TuningHint(
@@ -537,8 +547,8 @@ _register(
             values=("armijo", "hager_zhang"),
         ),
         when_to_tune=(
-            "Hager-Zhang is stronger and matches variPEPS; Armijo is "
-            "cheaper per step and the current default."
+            "Hager-Zhang (default) is stronger and matches variPEPS; "
+            "Armijo is cheaper per step."
         ),
         references=("doi:10.1137/030601880",),  # Hager-Zhang 2005
     )
@@ -549,7 +559,6 @@ _register(
         name="gs_stall_recovery",
         dataclass_name="iPEPSConfig",
         type_str="str | None",
-        default=None,
         category=TuningCategory.OPTIMIZER,
         description=(
             "Strategy when the line search stalls: 'noise' injects a "
@@ -574,7 +583,6 @@ _register(
         name="gs_metric_precond",
         dataclass_name="iPEPSConfig",
         type_str="bool",
-        default=True,
         category=TuningCategory.PERFORMANCE,
         description=(
             "Metric preconditioning (natural gradient) using the local "
@@ -594,32 +602,31 @@ _register(
 
 _register(
     ParamSpec(
-        name="gs_explicit_ad",
+        name="gs_implicit_ad",
         dataclass_name="iPEPSConfig",
         type_str="bool",
-        default=True,
         category=TuningCategory.METHOD_SELECTION,
         description=(
-            "Differentiate through unrolled CTM sweeps (True) instead of "
-            "using implicit differentiation (False). Explicit is the "
-            "recommended path post PR #291."
+            "Use implicit differentiation through the CTM fixed-point "
+            "equation (True) instead of differentiating through unrolled "
+            "CTM sweeps (False). Implicit is the recommended path."
         ),
         hint=TuningHint(
             scale=Scale.BOOLEAN,
             sensitivity=Sensitivity.HIGH,
             cost=CostModel(
-                runtime="explicit = ~gs_explicit_ad_steps x forward cost",
-                memory="explicit = higher (retained activations)",
+                runtime="explicit (implicit_ad=False) = ~gs_explicit_ad_steps x forward cost",
+                memory="explicit (implicit_ad=False) = higher (retained activations)",
             ),
         ),
         dependencies=(
             Dependency(
                 name="CTMConfig.forward_gauge",
-                relation="auto-promotes qr -> phase when explicit=True",
+                relation="auto-promotes qr -> phase when implicit_ad=False",
             ),
             Dependency(
                 name="CTMConfig.ctm_ad_mode",
-                relation="implicit c4v_reference path requires explicit=False",
+                relation="c4v_reference path requires gs_implicit_ad=True",
             ),
         ),
     )
@@ -630,7 +637,6 @@ _register(
         name="su_init",
         dataclass_name="iPEPSConfig",
         type_str="bool",
-        default=True,
         category=TuningCategory.INITIALIZATION,
         description=(
             "Initialize the site tensor via simple update before AD "
@@ -654,7 +660,6 @@ _register(
         name="gs_c4v",
         dataclass_name="iPEPSConfig",
         type_str="bool",
-        default=False,
         category=TuningCategory.METHOD_SELECTION,
         description=(
             "Enforce C4v symmetry on the site tensor during AD by "
@@ -678,7 +683,6 @@ _register(
         name="gs_ctm_conv_tol_schedule",
         dataclass_name="iPEPSConfig",
         type_str="list[tuple[float, float]] | None",
-        default=None,
         category=TuningCategory.PERFORMANCE,
         description=(
             "Ramp CTM conv_tol during optimization: list of (step_fraction, "
@@ -707,7 +711,6 @@ _register(
         name="min_iter",
         dataclass_name="CTMConfig",
         type_str="int",
-        default=10,
         category=TuningCategory.STABILITY,
         description=(
             "Minimum CTM sweeps before the convergence check kicks in. "
@@ -732,11 +735,10 @@ _register(
         name="projector_backward",
         dataclass_name="CTMConfig",
         type_str="str",
-        default="auto",
         category=TuningCategory.METHOD_SELECTION,
         description=(
             "Backward pass used for the eigh projector inside explicit AD. "
-            "'auto' promotes to 'lorentzian' when gs_explicit_ad=True and "
+            "'auto' promotes to 'lorentzian' when gs_implicit_ad=False and "
             "the effective projector is 'eigh'. 'standard' forces the "
             "legacy regularized_eigh backward; 'lorentzian' forces the "
             "Francuz-Schmoll truncated-eigh Lorentzian backward."
@@ -763,7 +765,6 @@ _register(
         name="ad_regularize_svd",
         dataclass_name="CTMConfig",
         type_str="bool",
-        default=True,
         category=TuningCategory.STABILITY,
         description=(
             "Use Lorentzian-regularized SVD backward in AD. Stabilizes "
@@ -786,7 +787,6 @@ _register(
         name="ad_backward_method",
         dataclass_name="CTMConfig",
         type_str="str",
-        default="vjp",
         category=TuningCategory.METHOD_SELECTION,
         description=(
             "Backward solver for the multisite implicit-diff path "
@@ -817,7 +817,6 @@ _register(
         name="gmres_precondition",
         dataclass_name="CTMConfig",
         type_str="bool",
-        default=False,
         category=TuningCategory.PERFORMANCE,
         description=(
             "Enable a diagonal scaling preconditioner for the GMRES "
@@ -842,7 +841,6 @@ _register(
         name="ctm_conv_method",
         dataclass_name="CTMConfig",
         type_str="str",
-        default="sv",
         category=TuningCategory.METHOD_SELECTION,
         description=(
             "Convergence check for the CTM fixed-point loop. 'sv' compares "
@@ -869,18 +867,17 @@ _register(
         name="gs_explicit_ad_steps",
         dataclass_name="iPEPSConfig",
         type_str="int",
-        default=20,
         category=TuningCategory.ACCURACY,
         description=(
             "Number of CTM sweeps differentiated through when "
-            "gs_explicit_ad=True. The final K sweeps carry gradients; "
+            "gs_implicit_ad=False. The final K sweeps carry gradients; "
             "earlier sweeps run under stop_gradient as warmup."
         ),
         hint=TuningHint(
             scale=Scale.LINEAR,
             sensitivity=Sensitivity.HIGH,
             range=(5, 50),
-            applies_when={"iPEPSConfig.gs_explicit_ad": True},
+            applies_when={"iPEPSConfig.gs_implicit_ad": False},
             cost=CostModel(
                 runtime="linear in K", memory="linear in K (saved activations)"
             ),
@@ -898,18 +895,17 @@ _register(
         name="gs_explicit_ad_warmup",
         dataclass_name="iPEPSConfig",
         type_str="int",
-        default=3,
         category=TuningCategory.PERFORMANCE,
         description=(
             "Non-differentiated CTM warmup sweeps before the "
-            "gs_explicit_ad_steps differentiated sweeps. Lets the "
+            "gs_explicit_ad_steps differentiated sweeps (when gs_implicit_ad=False). Lets the "
             "environment pre-converge cheaply."
         ),
         hint=TuningHint(
             scale=Scale.LINEAR,
             sensitivity=Sensitivity.MEDIUM,
             range=(0, 30),
-            applies_when={"iPEPSConfig.gs_explicit_ad": True},
+            applies_when={"iPEPSConfig.gs_implicit_ad": False},
             cost=CostModel(runtime="linear", memory="constant"),
         ),
         when_to_tune=(
@@ -925,7 +921,6 @@ _register(
         name="metric_gmres_maxiter",
         dataclass_name="iPEPSConfig",
         type_str="int",
-        default=30,
         category=TuningCategory.PERFORMANCE,
         description=(
             "Maximum GMRES iterations when solving the metric "
@@ -952,7 +947,6 @@ _register(
         name="metric_gmres_tol",
         dataclass_name="iPEPSConfig",
         type_str="float",
-        default=1e-2,
         category=TuningCategory.ACCURACY,
         description=(
             "Relative residual tolerance for the metric preconditioner GMRES solve."
@@ -977,7 +971,6 @@ _register(
         name="gs_conv_tol",
         dataclass_name="iPEPSConfig",
         type_str="float",
-        default=1e-8,
         category=TuningCategory.ACCURACY,
         description=(
             "Energy-change convergence tolerance for the outer L-BFGS/CG "
@@ -1001,7 +994,6 @@ _register(
         name="gs_max_grad_norm",
         dataclass_name="iPEPSConfig",
         type_str="float",
-        default=1.0,
         category=TuningCategory.STABILITY,
         description=(
             "Clip the L-BFGS/CG gradient norm before the search direction "
@@ -1026,7 +1018,6 @@ _register(
         name="gs_line_search",
         dataclass_name="iPEPSConfig",
         type_str="bool | None",
-        default=None,
         category=TuningCategory.OPTIMIZER,
         description=(
             "Enable line search for the outer optimizer. None = auto "
@@ -1052,7 +1043,6 @@ _register(
         name="gs_line_search_max_steps",
         dataclass_name="iPEPSConfig",
         type_str="int",
-        default=8,
         category=TuningCategory.OPTIMIZER,
         description=(
             "Maximum backtracking steps for the line search (both Armijo "
@@ -1076,7 +1066,6 @@ _register(
         name="gs_projector_method",
         dataclass_name="iPEPSConfig",
         type_str="str | None",
-        default=None,
         category=TuningCategory.METHOD_SELECTION,
         description=(
             "Override CTMConfig.projector_method for the AD path without "
