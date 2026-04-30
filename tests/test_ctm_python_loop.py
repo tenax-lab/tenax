@@ -13,6 +13,7 @@ from tenax.algorithms._ctm_python_loop import (
     python_loop_ctm_converge,
 )
 from tenax.algorithms._ctm_tensor_convergence import (
+    CHECKERBOARD_NEIGHBORS,
     SINGLE_SITE_NEIGHBORS,
 )
 from tenax.algorithms._ctm_tensor_energy import (
@@ -96,6 +97,31 @@ class TestPythonLoopCtmConverge:
         assert info.converged
         assert info.sv_diff < 1e-8
         assert info.iterations > 1
+
+    def test_python_loop_2site_checkerboard_converges(self):
+        """Checkerboard topology converges + produces a finite energy.
+
+        Behavioral coverage for the CHECKERBOARD_NEIGHBORS sweep path,
+        which `optimize_gs_ad` for 2-site cells routes through. No
+        atol-tight parity check vs the legacy `ctm_tensor_2site` path
+        (that is brittle on macOS — see #354 bucket E).
+        """
+        A = _make_random_A(key=jax.random.PRNGKey(42))
+        B = _make_random_A(key=jax.random.PRNGKey(99))
+        gate = _heisenberg_gate()
+        envs, info = python_loop_ctm_converge(
+            {(0, 0): A, (1, 0): B},
+            CHECKERBOARD_NEIGHBORS,
+            chi=4,
+            max_iter=50,
+            conv_tol=1e-8,
+        )
+        assert info.converged
+        energy = compute_energy_ctm_tensor_multisite(
+            {(0, 0): A, (1, 0): B}, envs, CHECKERBOARD_NEIGHBORS, gate
+        )
+        assert jnp.isfinite(energy)
+        assert energy.shape == ()
 
     def test_chi_ramp_energy_close_to_direct(self):
         """Chi ramp from chi=4 to chi=8 gives energy close to direct chi=8."""
