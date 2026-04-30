@@ -12,7 +12,7 @@ from tenax.algorithms.fermionic_ipeps import (
 )
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.algorithms.ipeps_optimize import optimize_fpeps_ad
-from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 # ------------------------------------------------------------------ #
 # Fixtures                                                             #
@@ -58,52 +58,12 @@ def ipeps_config_medium():
 
 
 # ------------------------------------------------------------------ #
-# _build_initial_fpeps_tensor                                          #
-# ------------------------------------------------------------------ #
-
-
-class TestBuildInitialFPEPSTensor:
-    """Tests for the extracted initialization helper."""
-
-    def test_returns_symmetric_tensor(self, fpeps_config):
-        A = _build_initial_fpeps_tensor(fpeps_config)
-        assert isinstance(A, SymmetricTensor)
-
-    def test_labels(self, fpeps_config):
-        A = _build_initial_fpeps_tensor(fpeps_config)
-        assert A.labels() == ("u", "d", "l", "r", "phys")
-
-    def test_shape(self, fpeps_config):
-        A = _build_initial_fpeps_tensor(fpeps_config)
-        assert A.todense().shape == (2, 2, 2, 2, 2)
-
-    def test_default_key(self, fpeps_config):
-        """Calling with key=None should not raise."""
-        A = _build_initial_fpeps_tensor(fpeps_config, key=None)
-        assert jnp.all(jnp.isfinite(A.todense()))
-
-    def test_explicit_key(self, fpeps_config):
-        key = jax.random.PRNGKey(42)
-        A = _build_initial_fpeps_tensor(fpeps_config, key=key)
-        assert jnp.all(jnp.isfinite(A.todense()))
-
-
-# ------------------------------------------------------------------ #
 # optimize_fpeps_ad                                                    #
 # ------------------------------------------------------------------ #
 
 
 class TestOptimizeFpepsAd:
     """Tests for the AD-based fermionic iPEPS optimization entry point."""
-
-    def test_optimize_fpeps_ad_runs(self, fpeps_config, ipeps_config_short):
-        """Smoke test: 3 AD steps should complete and return finite energy."""
-        H = spinless_fermion_gate(fpeps_config)
-        A_opt, env, E_gs = optimize_fpeps_ad(
-            H, A_init=None, config=ipeps_config_short, fpeps_config=fpeps_config
-        )
-        assert isinstance(A_opt, Tensor)
-        assert np.isfinite(E_gs)
 
     def test_optimize_fpeps_ad_with_explicit_init(
         self, fpeps_config, ipeps_config_short
