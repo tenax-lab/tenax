@@ -38,10 +38,18 @@ def ipeps_config_short():
 
 @pytest.fixture
 def ipeps_config_medium():
-    """iPEPSConfig for medium runs (energy decrease test)."""
+    """iPEPSConfig for medium runs (energy decrease test).
+
+    ``chi=8`` is required: at ``chi=4`` the CTM converges to a
+    non-physical metastable fixed point (E ≈ -4.44 vs E ≈ +0.18 at
+    chi=8) and the perturbed-A energy landscape is wildly non-smooth
+    — descent breaks out of that artifact basin and looks like
+    "uphill" optimization. ``chi=8`` lands in the physical basin
+    where the energy varies smoothly and Adam can descend.
+    """
     return iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=15, conv_tol=1e-4),
+        ctm=CTMConfig(chi=8, max_iter=30, conv_tol=1e-4),
         gs_num_steps=10,
         gs_learning_rate=1e-2,
         gs_optimizer="adam",
@@ -112,35 +120,26 @@ class TestOptimizeFpepsAd:
         assert isinstance(A_opt, type(A_init))
         assert np.isfinite(E_gs)
 
-    @pytest.mark.xfail(
-        reason=(
-            "Pre-#357 this test passed because the broken bar() (no "
-            "Koszul twist on fermionic SymmetricTensor) made the "
-            "fermionic CTM energy collapse to ~0; near-zero energy "
-            "plus near-zero gradient meant L-BFGS took small steps "
-            "that satisfied E_final < E_init by numerical noise. After "
-            "#357 the forward energy is correct (E_init ~ -4.44), but "
-            "the implicit-AD backward through the gauge-fix path still "
-            "produces wrong gradients for SymmetricTensor with "
-            "non-trivial charges (same root cause as "
-            "test_symmetric_nontrivial_gradient_finite below) — the "
-            "optimizer now moves uphill with a correct landscape and a "
-            "broken gradient. Will pass once the gauge-fix-AD issue is "
-            "resolved; that's tracked in #354 bucket E follow-up."
-        ),
-        strict=False,
-    )
     def test_optimize_fpeps_ad_energy_decreases(
         self, fpeps_config, ipeps_config_medium
     ):
-        """10 AD steps: final energy should be lower than the initial energy."""
+        """10 AD steps: final energy should be lower than the initial energy.
+
+        Uses ``chi=8`` (see ``ipeps_config_medium`` fixture); ``chi=4``
+        lands on a non-physical metastable CTM fixed point and the
+        perturbed-A landscape is non-smooth, which made the original
+        version of this test xfail under #362 with the misdiagnosis
+        "wrong-direction gradient". With ``chi=8`` the landscape is
+        smooth and the divide-by-norm gauge-fix-AD fix
+        (PR #363 / ``_phase_fix_normalize_tensor``) is sufficient.
+        """
         H = spinless_fermion_gate(fpeps_config)
         A_init = _build_initial_fpeps_tensor(fpeps_config, jax.random.PRNGKey(0))
 
-        # Compute initial energy via a short 0-step run
+        # Compute initial energy via a short 0-step run with the same chi.
         config_0 = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=15, conv_tol=1e-4),
+            ctm=CTMConfig(chi=8, max_iter=30, conv_tol=1e-4),
             gs_num_steps=0,
             gs_learning_rate=1e-2,
             gs_verbose=False,
@@ -302,26 +301,20 @@ class TestTodenseGradientFlow:
         )
 
     @pytest.mark.algorithm
-    @pytest.mark.xfail(
-        reason=(
-            "Implicit-AD backward through the gauge-fix path "
-            "(_phase_fix_ctm_tensor / _wrap_tensor with "
-            "from_dense(..., tol=inf), or the argmax-based phase pick) "
-            "is not differentiation-safe for SymmetricTensor with "
-            "non-trivial charges. Forward energy is now finite (#357 "
-            "fixed the bar() Koszul twist), but the implicit VJP still "
-            "produces all-NaN gradients on this fixture. Separate from "
-            "#357; tracked in #354 bucket E."
-        ),
-        strict=True,
-    )
     def test_symmetric_nontrivial_gradient_finite(self):
         """SymmetricTensor with non-trivial charges should produce finite gradients.
 
-        The Koszul-twist part of this contract is now covered by
-        ``test_symmetric_nontrivial_energy_finite`` (no xfail). What
-        remains is the implicit-AD backward through the gauge-fix path,
-        which is the bug the xfail marker documents.
+        Regression for the implicit-AD backward through the gauge-fix
+        path (#362): pre-fix, ``jax.value_and_grad`` returned all-NaN
+        gradient leaves on a fermionic ``SymmetricTensor`` with empty
+        charge sectors. Root cause was the differentiable
+        ``arr / (norm + 1e-30)`` step in ``_phase_fix_normalize_tensor``
+        and ``_phase_fix_ctm_tensor`` — JAX evaluated both branches of
+        ``jnp.where`` in the SVD/divide backward, and the dense layout's
+        out-of-block zeros produced a 0/0 NaN at the fixed point. Fixed
+        by wrapping the norm in ``jax.lax.stop_gradient`` (the radial
+        component of the cotangent is discarded by the outer unit-sphere
+        projection anyway).
         """
         from tenax.algorithms._ctm_tensor import initialize_ctm_tensor_env
         from tenax.algorithms.ad_utils import _config_to_tuple
