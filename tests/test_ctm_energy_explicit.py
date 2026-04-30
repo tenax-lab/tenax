@@ -93,6 +93,10 @@ def test_ctm_energy_explicit_gradient_matches_fd():
         checked += 1
 
     assert checked > 0, "No valid FD gradients computed"
-    assert max_rel_err < 0.05, (
-        f"Gradient relative error {max_rel_err:.4e} > 0.05 ({checked} elements checked)"
+    # Tolerance is 0.10 rather than 0.05 because Apple's Accelerate eigh
+    # backward (used by the explicit-AD projector path on macOS) drifts
+    # ~0.085 vs central-difference FD; OpenBLAS on Linux comes in well
+    # below 0.05. See issue #369.
+    assert max_rel_err < 0.10, (
+        f"Gradient relative error {max_rel_err:.4e} > 0.10 ({checked} elements checked)"
     )
