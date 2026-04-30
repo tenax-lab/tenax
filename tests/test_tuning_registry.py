@@ -1,11 +1,9 @@
 """Sanity checks for the tuning registry.
 
-Ensures the registry entries don't drift out of sync with the
-authoritative dataclass defaults over time, and that the schema
-is internally consistent.
+Verifies the registry's schema invariants — uniqueness, known dataclass
+references, query-API contracts, hint sanity, and that ``ParamSpec.default``
+resolves successfully against the dataclass for every entry.
 """
-
-from dataclasses import fields
 
 import pytest
 
@@ -26,15 +24,6 @@ _DATACLASSES = {
 }
 
 
-def _dataclass_default(cls, field_name):
-    for f in fields(cls):
-        if f.name == field_name:
-            if f.default_factory is not None and callable(f.default_factory):  # type: ignore[misc]
-                return f.default_factory()
-            return f.default
-    raise LookupError(field_name)
-
-
 class TestRegistrySchema:
     def test_all_specs_are_param_spec(self):
         for p in all_params():
@@ -53,17 +42,21 @@ class TestRegistrySchema:
         assert not unknown, f"Unknown dataclass(es) referenced: {unknown}"
 
 
-class TestRegistryDefaultsMatchDataclasses:
+class TestRegistryDefaultResolves:
+    """``ParamSpec.default`` is now lazy-derived from the dataclass.
+
+    The old hand-mirrored ``default=`` literals could drift out of sync;
+    that whole class of bug is gone. We just assert here that every entry
+    can resolve a default — i.e. ``(dataclass_name, name)`` actually
+    matches a real field.
+    """
+
     @pytest.mark.parametrize(
         "spec", all_params(), ids=lambda p: p.fully_qualified_name()
     )
-    def test_default_matches_dataclass(self, spec):
-        cls = _DATACLASSES[spec.dataclass_name]
-        actual = _dataclass_default(cls, spec.name)
-        assert spec.default == actual, (
-            f"{spec.fully_qualified_name()}: registry says {spec.default!r}, "
-            f"dataclass says {actual!r}"
-        )
+    def test_default_resolves(self, spec):
+        # Should not raise; value is whatever the dataclass currently has.
+        spec.default  # noqa: B018  (intentional attribute access)
 
 
 class TestRegistryQueryAPI:
