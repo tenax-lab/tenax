@@ -10,6 +10,8 @@ Reference: Phys. Rev. B 91, 155115 (2015), arXiv:1501.05504
 
 from __future__ import annotations
 
+import importlib
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -416,9 +418,12 @@ def expand_and_truncate_symmetric(
     ``max_bond_dim``), not on environments.
     """
     from tenax.algorithms._tensor_utils import fuse_indices
-    from tenax.algorithms.dmrg import _blockwise_contract
     from tenax.contraction.contractor import contract
     from tenax.linalg import svd as _linalg_svd
+
+    _blockwise_contract = importlib.import_module(
+        "tenax.algorithms.dmrg"
+    )._blockwise_contract
 
     if direction == "left_to_right":
         return _expand_truncate_sym_ltr(
