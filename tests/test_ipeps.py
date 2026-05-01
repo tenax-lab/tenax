@@ -1201,8 +1201,18 @@ class TestADSymmetric:
         assert grad.norm() > 0
 
     def test_optimize_gs_ad_symmetric_runs(self):
-        """optimize_gs_ad accepts SymmetricTensor and returns Tensor."""
-        from tenax.core.tensor import Tensor
+        """optimize_gs_ad accepts SymmetricTensor and returns SymmetricTensor.
+
+        This is the in-loop counterpart to
+        :meth:`test_optimize_gs_ad_nontrivial_u1_preserves_symmetric_type`:
+        2 AD steps actually exercise the in-loop rewrap sites that #329
+        fixed (``loss_fn``, metric-precond, L-BFGS direction, noise
+        recovery), all of which go through ``ad_utils._wrap_tensor``. The
+        helper dispatches on ``isinstance(original, SymmetricTensor)``
+        and is charge-agnostic, so trivial-charge coverage here catches
+        any future in-loop downgrade for non-trivial charges too.
+        """
+        from tenax.core.tensor import SymmetricTensor
 
         gate = self._heisenberg_gate()
         A_sym = self._make_symmetric_ipeps(jax.random.PRNGKey(0))
@@ -1215,7 +1225,9 @@ class TestADSymmetric:
         )
         A_opt, env, E_gs = optimize_gs_ad(gate, A_sym, config)
 
-        assert isinstance(A_opt, Tensor)
+        assert isinstance(A_opt, SymmetricTensor), (
+            f"expected SymmetricTensor, got {type(A_opt).__name__}"
+        )
         assert np.isfinite(E_gs)
 
     def test_optimize_gs_ad_symmetric_energy_decreases(self):
@@ -1243,6 +1255,11 @@ class TestADSymmetric:
         A_opt, env, E_gs = optimize_gs_ad(gate, A_sym, config)
 
         assert E_gs < E_init or abs(E_gs - E_init) < 1e-8
+        from tenax.core.tensor import SymmetricTensor
+
+        assert isinstance(A_opt, SymmetricTensor), (
+            f"expected SymmetricTensor, got {type(A_opt).__name__}"
+        )
 
     def test_optimize_gs_ad_symmetric_matches_dense(self):
         """Symmetric AD gives comparable energy to dense AD."""
@@ -1259,13 +1276,24 @@ class TestADSymmetric:
             gs_learning_rate=0.01,
         )
 
-        _, _, E_sym = optimize_gs_ad(gate, A_sym, config)
-        _, _, E_dense = optimize_gs_ad(gate, A_dense, config)
+        A_sym_opt, _, E_sym = optimize_gs_ad(gate, A_sym, config)
+        A_dense_opt, _, E_dense = optimize_gs_ad(gate, A_dense, config)
 
         # Both should produce finite energies (exact match not expected
         # due to different CTM projector implementations)
         assert np.isfinite(E_sym)
         assert np.isfinite(E_dense)
+        # Type preservation: SymmetricTensor input must round-trip as
+        # SymmetricTensor (the in-loop counterpart to the non-trivial-U(1)
+        # input-side check).
+        from tenax.core.tensor import DenseTensor, SymmetricTensor
+
+        assert isinstance(A_sym_opt, SymmetricTensor), (
+            f"expected SymmetricTensor, got {type(A_sym_opt).__name__}"
+        )
+        assert isinstance(A_dense_opt, DenseTensor), (
+            f"expected DenseTensor, got {type(A_dense_opt).__name__}"
+        )
 
     def test_optimize_gs_ad_nontrivial_u1_preserves_symmetric_type(self):
         """Regression for #297: optimizer shell must accept a SymmetricTensor
@@ -1277,13 +1305,17 @@ class TestADSymmetric:
         ``A = A * (1 / (A.norm() + eps))`` plus the CTM forward and energy
         eval. The in-loop rewrap sites fixed in #329 (``loss_fn``,
         metric-precond, L-BFGS direction, noise recovery) all funnel through
-        ``ad_utils._wrap_tensor`` which is type-symmetric, so trivial-charge
-        coverage in the sibling tests carries over. The L-BFGS+metric-precond
-        compile graph for non-trivial U(1) blocks took ~30 min on Linux GH
-        runners (the slow CPU + 2 vCPU made the JAX/XLA compile graph for
-        the symmetric-block path non-viable in the fast-ipeps bucket budget);
-        ``gs_num_steps=0`` brings it under 2s without losing the input-side
-        regression coverage.
+        ``ad_utils._wrap_tensor``, which dispatches on
+        ``isinstance(original, SymmetricTensor)`` and is otherwise
+        charge-agnostic — so trivial-charge in-loop coverage in
+        :meth:`test_optimize_gs_ad_symmetric_runs` (and its siblings, which
+        also assert ``isinstance(A_opt, SymmetricTensor)`` after several AD
+        steps) catches any future regression in those rewrap sites for
+        non-trivial charges too. The L-BFGS+metric-precond compile graph
+        for non-trivial U(1) blocks took ~30 min on Linux 2-vCPU GH runners
+        (viable on M-series macOS, not on x86 Linux); ``gs_num_steps=0``
+        brings it under 2s without losing the input-side regression
+        coverage.
         """
         from tenax.core.index import FlowDirection, TensorIndex
         from tenax.core.symmetry import U1Symmetry
