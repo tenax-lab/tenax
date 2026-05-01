@@ -1225,12 +1225,12 @@ def _idmrg_sweep_symmetric(
         _theta_buf_idx = 1  # theta is the 2nd tensor (index 1)
 
         if config.numpy_blockwise:
-            from tenax.algorithms._block_array import (
+            from tenax.algorithms.dmrg import _lanczos_solve_np
+            from tenax.core._block_array import (
                 BlockArray,
                 ba_to_symmetric,
                 symmetric_to_ba,
             )
-            from tenax.algorithms.dmrg import _lanczos_solve_np
             from tenax.linalg import _truncated_svd_symmetric_np
 
             # Convert envs to BlockArray BEFORE plan — avoids JAX _get_block
