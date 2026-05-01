@@ -12,15 +12,16 @@ from tenax.algorithms.pess_optimize import build_pess_loss
 
 
 def _make_test_config(chi: int) -> CTMConfig:
-    """Small CTM config for smoke tests: tight iteration budget, eigh projectors."""
+    """Small CTM config for smoke tests: tight iteration budget, biorthogonal
+    projectors (kagome supersites are non-isometric, A_u ≠ A_d)."""
     return CTMConfig(
         chi=chi,
         max_iter=20,
         min_iter=4,
         conv_tol=1e-6,
-        projector_method="eigh",
+        projector_method="biorthogonal",
         forward_gauge="phase",
-        ctm_conv_method="sv",
+        ctm_conv_method="elementwise",
         gmres_tol=1e-4,
         gmres_maxiter=50,
         gmres_restart=20,
