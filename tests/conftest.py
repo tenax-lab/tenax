@@ -87,16 +87,26 @@ def pytest_collection_modifyitems(items):
 # ``tenax/__init__.py``) is preserved, so cross-session reuse still  #
 # works.                                                             #
 #                                                                    #
-# Threshold gating: clearing is only useful once the suite has built #
-# up a sizeable cache. Cheap unit-test buckets (``-m core``) never   #
-# cross 2 GB and don't need it; clearing them anyway adds ~3-4×      #
-# runtime overhead from forced recompiles. Using ``ru_maxrss`` as a  #
-# high-water-mark means once a bucket's peak crosses the threshold   #
-# we clear from then on, but cheap buckets that never cross stay     #
-# fast forever.                                                      #
+# Threshold gating: ``ru_maxrss`` is monotonic, so once a bucket's   #
+# peak crosses the threshold we clear from then on, but cheap        #
+# buckets that never cross stay fast forever.                        #
+#                                                                    #
+# Threshold tuning (measured locally, 735-test ``-m core`` run):     #
+#                                                                    #
+#   threshold     core peak       core time   fast-ipeps?            #
+#   2 GB          3.0 GB          12m51s      OK (cleared)           #
+#   4 GB          4.8 GB           9m15s      OK (cleared)           #
+#   6 GB          5.6 GB           2m53s      OK (cleared @ t#44)    #
+#   ∞ (no clear)  5.6 GB           2m54s      18 GB → OOM            #
+#                                                                    #
+# 6 GB is the sweet spot: above ``-m core`` natural peak (5.6 GB) so #
+# the cheap bucket stays at baseline speed, but below the 7 GB GH    #
+# Linux runner limit so fast-ipeps still engages clearing in time    #
+# (its first AD-heavy test crosses 6 GB at iteration ~44, well       #
+# before the without-clearing snowball reaches 7 GB OOM).            #
 # ------------------------------------------------------------------ #
 
-_RSS_CLEAR_THRESHOLD_MB = 2000
+_RSS_CLEAR_THRESHOLD_MB = 6000
 
 
 def _peak_rss_mb() -> float:
