@@ -80,11 +80,14 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         python-version: ["3.11", "3.12"]
-        bucket: ["fast", "slow"]
+        bucket: ["fast-ipeps", "fast-other", "slow"]
         include:
           - os: macos-latest
             python-version: "3.12"
-            bucket: "fast"
+            bucket: "fast-ipeps"
+          - os: macos-latest
+            python-version: "3.12"
+            bucket: "fast-other"
           - os: macos-latest
             python-version: "3.12"
             bucket: "slow"
@@ -105,25 +108,45 @@ jobs:
 
       - name: Run non-core tests (${{ matrix.bucket }} bucket)
         # Skip ``-m core`` since the required ``test`` job already covers it.
-        # Split into ``fast`` (algorithm/integration without slow) and
-        # ``slow`` (everything tagged ``@pytest.mark.slow``) buckets for
-        # parallelism, isolation, and per-bucket retry granularity. The
-        # earlier single ``-m "not core"`` invocation occasionally died
-        # ~45–65 min in on Linux 3.11 — initially read as a fixed 1h
-        # GitHub-runner reaper, but the post-#370 verification run
-        # 25152061002 ran ubuntu 3.12 slow for 82 min uninterrupted, so
-        # those kills were one-off long-running tests / runner OOMs,
-        # not a fixed reaper. (see #354 / #370.)
+        # Three buckets give parallelism, isolation, and per-bucket retry
+        # granularity:
+        #   - ``fast-ipeps`` runs ``tests/test_ipeps.py`` and
+        #     ``tests/test_fpeps_ad.py``.  These files alone consumed
+        #     ~11+ min of the previous combined ``fast`` bucket (out of
+        #     a ~57min total) because every test runs CTM convergence
+        #     and many run AD optimization.  Isolating them keeps the
+        #     other-bucket runtime under ~25 min on ubuntu.
+        #   - ``fast-other`` runs the rest of the non-core, non-slow
+        #     suite (DMRG / iDMRG / HOTRG / fermionic CTM / ad_utils /
+        #     coarse-grain / etc.).
+        #   - ``slow`` runs everything tagged ``@pytest.mark.slow``.
+        # The earlier single combined ``fast`` bucket got reaped on
+        # Linux ~30–45 min in (see merge run 25197411849, where the
+        # runner died at ~01:45 mid-``test_optimize_gs_ad_symmetric_
+        # energy_decreases``).  The split addresses #354 / #370.
         env:
           JAX_PLATFORMS: cpu
           BUCKET: ${{ matrix.bucket }}
         run: |
-          if [ "$BUCKET" = "slow" ]; then
-            FILTER='slow'
-          else
-            FILTER='not core and not slow'
-          fi
-          uv run pytest tests/ -m "$FILTER" \
+          case "$BUCKET" in
+            slow)
+              FILES="tests/"
+              FILTER='slow'
+              ;;
+            fast-ipeps)
+              FILES="tests/test_ipeps.py tests/test_fpeps_ad.py"
+              FILTER='not core and not slow'
+              ;;
+            fast-other)
+              FILES="tests/ --ignore=tests/test_ipeps.py --ignore=tests/test_fpeps_ad.py"
+              FILTER='not core and not slow'
+              ;;
+            *)
+              echo "Unknown bucket: $BUCKET" >&2
+              exit 1
+              ;;
+          esac
+          uv run pytest $FILES -m "$FILTER" \
             --cov=tenax \
             --cov-report=xml \
             --cov-report=term-missing \
