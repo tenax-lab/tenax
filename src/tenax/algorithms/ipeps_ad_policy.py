@@ -7,6 +7,7 @@ This module centralizes lightweight decision logic used by
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import replace
 
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
@@ -110,7 +111,7 @@ def make_ctm_energy_fn(
     *,
     neighbors,
     gate,
-    ctm_cfg: CTMConfig,
+    get_ctm_cfg: Callable[[], CTMConfig],
     env_cache: dict,
     use_explicit: bool,
     explicit_warmup: int,
@@ -123,10 +124,21 @@ def make_ctm_energy_fn(
     from ``ctm_cfg`` so a policy change touches one place rather than three
     (issue #351, item 4).
 
+    ``get_ctm_cfg`` is a zero-arg callable that resolves the current
+    ``CTMConfig`` at every invocation.  Dispatchers rebind their local
+    ``ctm_cfg`` when ``gs_ctm_conv_tol_schedule`` is active, so the
+    callable must read the live binding (typically ``lambda: ctm_cfg``)
+    rather than capturing a snapshot.  Passing the dataclass directly
+    would freeze ``conv_tol`` on the AD path while the warm-start CTM
+    saw updates — the very kind of split-policy bug #351 set out to
+    eliminate.
+
     Args:
         neighbors:        Coord → direction → coord neighbor graph.
         gate:             Two-site Hamiltonian gate.
-        ctm_cfg:          Effective CTM configuration (from ``build_ad_ctm_config``).
+        get_ctm_cfg:      Zero-arg callable returning the current
+                          effective ``CTMConfig`` (e.g.
+                          ``lambda: ctm_cfg``).
         env_cache:        Dict storing the warm-start envs under key ``"envs"``.
         use_explicit:     True for the explicit-AD path, False for implicit.
         explicit_warmup:  Number of forward-only warmup CTM sweeps (explicit).
@@ -141,6 +153,7 @@ def make_ctm_energy_fn(
     )
 
     def _ctm_energy_fn(site_tensors):
+        ctm_cfg = get_ctm_cfg()
         env_init = env_cache.get("envs", None)
         if use_explicit:
             return ctm_energy_explicit(

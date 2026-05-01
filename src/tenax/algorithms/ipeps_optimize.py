@@ -762,7 +762,9 @@ def _optimize_gs_ad_tensor(
     _ctm_energy_fn = make_ctm_energy_fn(
         neighbors=SINGLE_SITE_NEIGHBORS,
         gate=gate,
-        ctm_cfg=ctm_cfg,
+        # Resolved live so gs_ctm_conv_tol_schedule rebindings of
+        # ``ctm_cfg`` propagate to the AD loss closure (codex P1, #382).
+        get_ctm_cfg=lambda: ctm_cfg,
         env_cache=_env_cache,
         use_explicit=use_explicit,
         explicit_warmup=explicit_warmup,
@@ -1470,7 +1472,7 @@ def _optimize_gs_ad_tensor_2site(
     _ctm_energy_fn_2s = make_ctm_energy_fn(
         neighbors=CHECKERBOARD_NEIGHBORS,
         gate=gate,
-        ctm_cfg=ctm_cfg_2s,
+        get_ctm_cfg=lambda: ctm_cfg_2s,
         env_cache=_env_cache_2s,
         use_explicit=use_explicit,
         explicit_warmup=explicit_warmup,
@@ -2086,7 +2088,7 @@ def _optimize_gs_ad_multisite(
     _ctm_energy_fn = make_ctm_energy_fn(
         neighbors=neighbors,
         gate=gate,
-        ctm_cfg=ctm_cfg,
+        get_ctm_cfg=lambda: ctm_cfg,
         env_cache=_env_cache,
         use_explicit=use_explicit,
         explicit_warmup=explicit_warmup,
