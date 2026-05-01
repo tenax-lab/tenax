@@ -70,6 +70,35 @@ def pytest_collection_modifyitems(items):
 
 
 # ------------------------------------------------------------------ #
+# Cap memory growth across tests by clearing the JAX in-memory       #
+# compile cache after each test.                                      #
+#                                                                    #
+# Why this matters: each AD/CTM test compiles a distinct JAX/XLA     #
+# variant (different chi, charges, optimizer config, ...). The JIT   #
+# cache retains compiled artifacts in memory across tests. With the  #
+# fast-ipeps bucket's ~30+ AD tests this snowballs past 18 GB locally,#
+# OOM-killing GH's 7 GB Linux runners (manifesting as "the runner    #
+# lost communication with the server" mid-bucket).                   #
+#                                                                    #
+# ``jax.clear_caches()`` releases the Python-side cache references   #
+# so XLA can reuse buffer slots; combined with ``gc.collect()`` it   #
+# bounds peak RSS to a single test's working set (~5 GB) instead of  #
+# accumulating. Cost: ~+10% runtime for a recompile on the next test.#
+# The persistent on-disk cache (``~/.cache/jax``, see                #
+# ``tenax/__init__.py``) is preserved, so cross-session reuse still  #
+# works.                                                             #
+# ------------------------------------------------------------------ #
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown(item, nextitem):
+    import gc
+
+    jax.clear_caches()
+    gc.collect()
+
+
+# ------------------------------------------------------------------ #
 # Symmetry fixtures                                                    #
 # ------------------------------------------------------------------ #
 
