@@ -17,6 +17,7 @@ contract is the intra-triangle 1-site sum provided by
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 
 import jax
@@ -33,7 +34,7 @@ from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
 
-__all__ = ["build_pess_loss"]
+__all__ = ["build_pess_loss", "optimize_pess_ad"]
 
 
 def _make_honeycomb_indices(D: int, d_eff: int) -> tuple[TensorIndex, ...]:
@@ -97,6 +98,12 @@ def build_pess_loss(
 
     def loss_fn(state: IPESSState) -> jnp.ndarray:
         A_u_super, A_d_super = pess_to_honeycomb_supersites(state)
+        # iPEPS states are projective — only direction matters. Normalize
+        # so the un-normalized RDM contraction stays well above f64 zero
+        # regardless of how IPESSState was initialized (random init at
+        # scale=0.1 gives a supersite of norm ~1e-2, where Tr(ρ_un) ≈ 0).
+        A_u_super = A_u_super / (jnp.linalg.norm(A_u_super) + 1e-12)
+        A_d_super = A_d_super / (jnp.linalg.norm(A_d_super) + 1e-12)
         D = A_u_super.shape[-1]
         d_eff = A_u_super.shape[0] * A_u_super.shape[1] * A_u_super.shape[2]
 
@@ -126,3 +133,138 @@ def build_pess_loss(
         )
 
     return loss_fn
+
+
+def _tree_real_dot(a, b) -> float:
+    """Real part of the Hermitian inner product over a pytree of arrays."""
+    leaves_a = jax.tree.leaves(a)
+    leaves_b = jax.tree.leaves(b)
+    return float(
+        jnp.real(sum(jnp.sum(jnp.conj(la) * lb) for la, lb in zip(leaves_a, leaves_b)))
+    )
+
+
+def _backtracking_line_search(
+    params: dict,
+    direction: dict,
+    grad: dict,
+    energy: float,
+    loss_fn: Callable[[dict], jnp.ndarray],
+    c1: float = 1e-4,
+    rho: float = 0.5,
+    max_steps: int = 8,
+) -> tuple[dict, float, float]:
+    """Armijo backtracking on the L-BFGS descent direction.
+
+    Run at the Python level — the honeycomb CTM convergence loop has
+    Python control flow that can't be ``jit``-traced, which rules out
+    optax's bundled ``zoom_linesearch``.
+    """
+    slope = _tree_real_dot(grad, direction)
+    if slope >= 0.0:
+        direction = jax.tree.map(lambda g: -g, grad)
+        slope = -_tree_real_dot(grad, grad)
+
+    p_norm = math.sqrt(max(_tree_real_dot(params, params), 1e-30))
+    d_norm = math.sqrt(max(_tree_real_dot(direction, direction), 1e-30))
+    alpha = min(1.0, 0.1 * p_norm / d_norm)
+
+    best_trial, best_f, best_alpha = params, energy, 0.0
+    for _ in range(max_steps):
+        trial = jax.tree.map(lambda p, d: p + alpha * d, params, direction)
+        f_trial = float(loss_fn(trial))
+        if f_trial < best_f:
+            best_trial, best_f, best_alpha = trial, f_trial, alpha
+        if f_trial <= energy + c1 * alpha * slope:
+            return trial, f_trial, alpha
+        alpha *= rho
+
+    return best_trial, best_f, best_alpha
+
+
+def optimize_pess_ad(
+    initial_state: IPESSState,
+    hamiltonian: np.ndarray | jnp.ndarray,
+    config: CTMConfig,
+    *,
+    max_iter: int = 50,
+    verbose: bool = False,
+) -> tuple[IPESSState, float]:
+    """L-BFGS optimization of kagome iPESS via the native rank-4 honeycomb CTM.
+
+    Variational parameters are the 5 PESS primitives ``(R_a, R_b, R_c, T_u,
+    T_d)``. SU ``lambdas`` are passed through unchanged — they are
+    bookkeeping only and don't enter the supersite construction (see
+    :func:`pess_to_honeycomb_supersites`).
+
+    Inner step uses ``optax.scale_by_lbfgs`` (memory-10) to produce the
+    quasi-Newton direction; line search is a Python-level Armijo
+    backtracker since the honeycomb CTM forward pass uses Python control
+    flow that can't be ``jit``-traced through ``optax.lbfgs``'s bundled
+    zoom search.
+
+    Args:
+        initial_state: Starting :class:`IPESSState`. Typically the output of
+            :func:`tenax.algorithms.pess.pess_simple_update`, but a freshly
+            randomized state also works.
+        hamiltonian: ``(d**3, d**3)`` Hermitian triangle Hamiltonian.
+        config: ``CTMConfig`` for the inner CTM. Use
+            ``projector_method="biorthogonal"`` (kagome supersites are
+            non-isometric in general).
+        max_iter: Maximum L-BFGS outer iterations.
+        verbose: Print energy at each step.
+
+    Returns:
+        ``(optimized_state, final_energy)``.
+    """
+    import optax
+
+    loss_fn_state = build_pess_loss(hamiltonian, config)
+    lambdas = initial_state.lambdas
+
+    params = {
+        "R_a": initial_state.R_a,
+        "R_b": initial_state.R_b,
+        "R_c": initial_state.R_c,
+        "T_u": initial_state.T_u,
+        "T_d": initial_state.T_d,
+    }
+
+    def _params_to_state(p: dict) -> IPESSState:
+        return IPESSState(
+            R_a=p["R_a"],
+            R_b=p["R_b"],
+            R_c=p["R_c"],
+            T_u=p["T_u"],
+            T_d=p["T_d"],
+            lambdas=lambdas,
+        )
+
+    def loss(p: dict) -> jnp.ndarray:
+        return loss_fn_state(_params_to_state(p))
+
+    optimizer = optax.chain(
+        optax.scale_by_lbfgs(memory_size=10),
+        optax.scale(-1.0),
+    )
+    opt_state = optimizer.init(params)
+    grad_fn = jax.value_and_grad(loss)
+
+    last_energy = float(loss(params))
+    for step in range(max_iter):
+        e_val, grads = grad_fn(params)
+        last_energy = float(e_val)
+        direction, opt_state = optimizer.update(grads, opt_state, params)
+        params, last_energy, alpha = _backtracking_line_search(
+            params, direction, grads, last_energy, loss
+        )
+        if verbose:
+            print(
+                f"[optimize_pess_ad] step {step + 1}/{max_iter}: "
+                f"e = {last_energy:.10f}  alpha = {alpha:.3e}",
+                flush=True,
+            )
+        if alpha == 0.0:
+            break
+
+    return _params_to_state(params), last_energy

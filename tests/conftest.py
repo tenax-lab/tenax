@@ -59,6 +59,8 @@ _FILE_MARKERS = {
     "test_dmrg3s.py": "algorithm",
     "test_dmrg_cython.py": "algorithm",
     "test_ipeps_config.py": "core",
+    "test_pess.py": "algorithm",
+    "test_pess_ad.py": "algorithm",
 }
 
 

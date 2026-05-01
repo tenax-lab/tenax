@@ -8,7 +8,7 @@ import pytest
 
 from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.algorithms.pess import IPESSState, kagome_triangle_xxz_hamiltonian
-from tenax.algorithms.pess_optimize import build_pess_loss
+from tenax.algorithms.pess_optimize import build_pess_loss, optimize_pess_ad
 
 
 def _make_test_config(chi: int) -> CTMConfig:
@@ -78,3 +78,35 @@ def test_pess_loss_runs_at_multiple_anisotropies(delta: float):
     loss_fn = build_pess_loss(H, config)
     e = loss_fn(state)
     assert jnp.isfinite(e)
+
+
+def test_optimize_pess_ad_decreases_energy():
+    """L-BFGS lowers the triangle energy below the random-init baseline."""
+    state0 = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(2))
+    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=3)
+    config = _make_test_config(chi=8)
+
+    e0 = float(build_pess_loss(H, config)(state0))
+    state_opt, e_opt = optimize_pess_ad(state0, H, config, max_iter=5, verbose=False)
+
+    assert jnp.isfinite(e_opt)
+    assert e_opt < e0, f"L-BFGS did not decrease energy: e0={e0}, e_opt={e_opt}"
+
+
+def test_optimize_pess_ad_preserves_shapes_and_lambdas():
+    """Shapes/dtype preserved; lambdas pass through untouched (frozen during AD)."""
+    state0 = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(3))
+    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=3)
+    config = _make_test_config(chi=8)
+
+    state_opt, _ = optimize_pess_ad(state0, H, config, max_iter=2)
+
+    assert state_opt.R_a.shape == state0.R_a.shape
+    assert state_opt.R_b.shape == state0.R_b.shape
+    assert state_opt.R_c.shape == state0.R_c.shape
+    assert state_opt.T_u.shape == state0.T_u.shape
+    assert state_opt.T_d.shape == state0.T_d.shape
+    assert state_opt.R_a.dtype == jnp.complex128
+    assert state_opt.T_u.dtype == jnp.complex128
+    for la, l0 in zip(state_opt.lambdas, state0.lambdas, strict=True):
+        assert jnp.array_equal(la, l0)
