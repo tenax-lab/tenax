@@ -71,7 +71,7 @@ def pytest_collection_modifyitems(items):
 
 # ------------------------------------------------------------------ #
 # Cap memory growth across tests by clearing the JAX in-memory       #
-# compile cache after each test.                                      #
+# compile cache once peak RSS crosses a threshold.                    #
 #                                                                    #
 # Why this matters: each AD/CTM test compiles a distinct JAX/XLA     #
 # variant (different chi, charges, optimizer config, ...). The JIT   #
@@ -83,15 +83,42 @@ def pytest_collection_modifyitems(items):
 # ``jax.clear_caches()`` releases the Python-side cache references   #
 # so XLA can reuse buffer slots; combined with ``gc.collect()`` it   #
 # bounds peak RSS to a single test's working set (~5 GB) instead of  #
-# accumulating. Cost: ~+10% runtime for a recompile on the next test.#
-# The persistent on-disk cache (``~/.cache/jax``, see                #
+# accumulating. The persistent on-disk cache (``~/.cache/jax``, see  #
 # ``tenax/__init__.py``) is preserved, so cross-session reuse still  #
 # works.                                                             #
+#                                                                    #
+# Threshold gating: clearing is only useful once the suite has built #
+# up a sizeable cache. Cheap unit-test buckets (``-m core``) never   #
+# cross 2 GB and don't need it; clearing them anyway adds ~3-4×      #
+# runtime overhead from forced recompiles. Using ``ru_maxrss`` as a  #
+# high-water-mark means once a bucket's peak crosses the threshold   #
+# we clear from then on, but cheap buckets that never cross stay     #
+# fast forever.                                                      #
 # ------------------------------------------------------------------ #
+
+_RSS_CLEAR_THRESHOLD_MB = 2000
+
+
+def _peak_rss_mb() -> float:
+    """Peak RSS used by this process, in MB.
+
+    ``ru_maxrss`` units differ by platform (BSD convention): macOS reports
+    bytes, Linux reports KB.
+    """
+    import resource
+    import sys
+
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        return rss / (1024 * 1024)
+    return rss / 1024
 
 
 @pytest.hookimpl(trylast=True)
 def pytest_runtest_teardown(item, nextitem):
+    if _peak_rss_mb() < _RSS_CLEAR_THRESHOLD_MB:
+        return
+
     import gc
 
     jax.clear_caches()
