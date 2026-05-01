@@ -372,10 +372,10 @@ def _truncated_svd_symmetric_np(
 
     Same algorithm as ``_truncated_svd_symmetric`` but returns
     ``(U_ba, s_final, Vh_ba, s_full)`` where U_ba and Vh_ba are
-    :class:`~tenax.algorithms._block_array.BlockArray` objects and
+    :class:`~tenax.core._block_array.BlockArray` objects and
     s_final, s_full are ``np.ndarray``.
     """
-    from tenax.algorithms._block_array import BlockArray
+    from tenax.core._block_array import BlockArray
 
     all_labels = tensor.labels()
     label_to_axis = {lbl: i for i, lbl in enumerate(all_labels)}
@@ -601,9 +601,9 @@ def _qr_symmetric_np(
 
     Same algorithm as ``_qr_symmetric`` but returns
     ``(Q_ba, R_ba)`` where Q_ba and R_ba are
-    :class:`~tenax.algorithms._block_array.BlockArray` objects.
+    :class:`~tenax.core._block_array.BlockArray` objects.
     """
-    from tenax.algorithms._block_array import BlockArray
+    from tenax.core._block_array import BlockArray
 
     all_labels = tensor.labels()
     label_to_axis = {lbl: i for i, lbl in enumerate(all_labels)}

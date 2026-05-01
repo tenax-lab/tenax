@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
-    from tenax.algorithms._block_array import BlockArray
+    from tenax.core._block_array import BlockArray
 
 import jax
 import jax.numpy as jnp
@@ -874,7 +874,7 @@ def dmrg(
 
     # Build result MPS as FiniteMPS.
     # Convert any BlockArray tensors back to SymmetricTensor for storage.
-    from tenax.algorithms._block_array import BlockArray, ba_to_symmetric
+    from tenax.core._block_array import BlockArray, ba_to_symmetric
 
     final_tensors = [
         ba_to_symmetric(t) if isinstance(t, BlockArray) else t for t in mps_tensors
@@ -1407,7 +1407,7 @@ def _svd_and_truncate_site(
     Returns:
         (A_tensor, singular_values, B_tensor, truncation_error)
     """
-    from tenax.algorithms._block_array import BlockArray
+    from tenax.core._block_array import BlockArray
 
     if isinstance(theta, BlockArray):
         labels = tuple(idx.label for idx in theta.indices)
@@ -1442,10 +1442,10 @@ def _svd_and_truncate_site(
     # Returns BlockArray directly — avoids JAX array creation in the sweep loop.
     # The sweep loop stores these as BlockArray; env updates accept either type.
     # Only converted to SymmetricTensor at the end of dmrg() for the result.
-    from tenax.algorithms._block_array import BlockArray
+    from tenax.core._block_array import BlockArray
 
     if config.numpy_blockwise and isinstance(theta, (SymmetricTensor, BlockArray)):
-        from tenax.algorithms._block_array import ba_to_symmetric
+        from tenax.core._block_array import ba_to_symmetric
         from tenax.linalg import _truncated_svd_symmetric_np
 
         # _truncated_svd_symmetric_np needs SymmetricTensor for index metadata
@@ -1643,7 +1643,7 @@ def _lanczos_solve_np(
     Returns:
         (eigenvalue, eigenvector) for the ground state as BlockArray.
     """
-    from tenax.algorithms._block_array import (
+    from tenax.core._block_array import (
         ba_add,
         ba_inner,
         ba_norm,
@@ -1960,7 +1960,7 @@ def _blockwise_contract(
         output_blocks[key] = total
 
     if return_ba:
-        from tenax.algorithms._block_array import BlockArray
+        from tenax.core._block_array import BlockArray
 
         return BlockArray(blocks=output_blocks, indices=output_indices)
 
@@ -1974,7 +1974,7 @@ def _blockwise_contract(
 
 def _assert_symmetric(*tensors: Tensor, context: str) -> None:
     """Assert all tensors are SymmetricTensor or BlockArray; raise TypeError otherwise."""
-    from tenax.algorithms._block_array import BlockArray
+    from tenax.core._block_array import BlockArray
 
     for i, t in enumerate(tensors):
         if not isinstance(t, (SymmetricTensor, BlockArray)):
@@ -2184,7 +2184,7 @@ def _scale_bond_axis_ba(ba: BlockArray, bond_label: str, s: np.ndarray) -> Block
     with numpy singular values. Used after SVD to absorb singular values
     into A or B for canonical form.
     """
-    from tenax.algorithms._block_array import BlockArray as _BA
+    from tenax.core._block_array import BlockArray as _BA
 
     bond_axis = None
     for i, idx in enumerate(ba.indices):
@@ -2228,7 +2228,7 @@ def _svd_and_truncate_site_np(
     Returns:
         (A_ba, singular_values, B_ba, truncation_error) -- all numpy.
     """
-    from tenax.algorithms._block_array import ba_to_symmetric
+    from tenax.core._block_array import ba_to_symmetric
     from tenax.linalg import _truncated_svd_symmetric_np
 
     labels = [idx.label for idx in theta_ba.indices]
@@ -2449,7 +2449,7 @@ def _execute_matvec_combos(
     are transposed once per matvec call (outside the combo loop) using the
     ``theta_perm`` / ``theta_shape_2d`` stored in each descriptor.
     """
-    from tenax.algorithms._block_array import BlockArray
+    from tenax.core._block_array import BlockArray
 
     n_slots = len(output_keys)
 
@@ -2556,7 +2556,7 @@ def _two_site_update_symmetric_np(
     signature) and returns SymmetricTensor + float. BlockArray is used
     internally to avoid JAX overhead in the Lanczos iterations.
     """
-    from tenax.algorithms._block_array import (
+    from tenax.core._block_array import (
         BlockArray,
         symmetric_to_ba,
     )
@@ -2705,7 +2705,7 @@ def _one_site_update_symmetric_np(
     signature) and returns SymmetricTensor + float. BlockArray is used
     internally to avoid JAX overhead in the Lanczos iterations.
     """
-    from tenax.algorithms._block_array import (
+    from tenax.core._block_array import (
         BlockArray,
         ba_to_symmetric,
         symmetric_to_ba,
@@ -2805,7 +2805,7 @@ def _update_left_env_np(
     mpo_site: Tensor,
 ) -> SymmetricTensor:
     """Update left environment, accepting BlockArray or SymmetricTensor for MPS site."""
-    from tenax.algorithms._block_array import BlockArray, ba_bar
+    from tenax.core._block_array import BlockArray, ba_bar
 
     if isinstance(mps_site, BlockArray):
         A = mps_site
@@ -2837,7 +2837,7 @@ def _update_right_env_np(
     mpo_site: Tensor,
 ) -> SymmetricTensor:
     """Update right environment, accepting BlockArray or SymmetricTensor for MPS site."""
-    from tenax.algorithms._block_array import BlockArray, ba_bar
+    from tenax.core._block_array import BlockArray, ba_bar
 
     if isinstance(mps_site, BlockArray):
         B = mps_site
@@ -3109,7 +3109,7 @@ def compute_mps_sector(mps_tensors: list[Tensor]) -> int | None:
         The total charge if consistently detectable, or None if the
         MPS is in a mixed sector (or contains no block-sparse tensor).
     """
-    from tenax.algorithms._block_array import BlockArray
+    from tenax.core._block_array import BlockArray
 
     for site in mps_tensors:
         if not isinstance(site, (SymmetricTensor, BlockArray)):
