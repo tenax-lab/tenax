@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
-    from tenax.algorithms._block_array import BlockArray
+    from tenax.core._block_array import BlockArray
 
 import jax
 import jax.numpy as jnp
@@ -222,6 +222,236 @@ def _dense_ops() -> SweepOps:
     )
 
 
+def _resolve_jit_dispatch(config: DMRGConfig, *, use_symmetric: bool) -> bool:
+    """Return whether DMRG should use a JIT executor for this configuration."""
+    if config.accelerator == "jit":
+        return True
+    if config.accelerator != "auto":
+        return False
+    device = jax.devices()[0].platform
+    if device in ("gpu", "tpu"):
+        return True
+    return not use_symmetric
+
+
+def _rebuild_padded_dense_mps(
+    mps_out_raw: list[jax.Array],
+    mps_tensors: list[Tensor],
+) -> list[DenseTensor]:
+    """Wrap padded raw MPS arrays back into ``DenseTensor`` with aligned indices."""
+    sym = U1Symmetry()
+    result_mps_tensors: list[DenseTensor] = []
+    for i, orig_t in enumerate(mps_tensors):
+        new_indices = []
+        for leg_idx, orig_idx in enumerate(orig_t.indices):
+            padded_dim = mps_out_raw[i].shape[leg_idx]
+            if padded_dim == orig_idx.dim:
+                new_indices.append(orig_idx)
+            else:
+                new_charges = np.zeros(padded_dim, dtype=np.int32)
+                new_indices.append(
+                    TensorIndex.from_charges(
+                        sym,
+                        new_charges,
+                        orig_idx.flow,
+                        label=orig_idx.label,
+                    )
+                )
+        result_mps_tensors.append(DenseTensor(mps_out_raw[i], tuple(new_indices)))
+    return result_mps_tensors
+
+
+def _run_sharded_dense_executor(
+    *,
+    mps_tensors: list[Tensor],
+    mpo_tensors: list[Tensor],
+    config: DMRGConfig,
+) -> DMRGResult:
+    """Execute sharded dense 2-site DMRG via `_jit_sweep`."""
+    from tenax.algorithms._jit_sweep import jit_dmrg_sweep_dense_sharded
+
+    raw_mps = [t.todense() for t in mps_tensors]
+    raw_mpo = [t.todense() for t in mpo_tensors]
+    energies, mps_out_raw = jit_dmrg_sweep_dense_sharded(
+        raw_mps,
+        raw_mpo,
+        chi_max=config.max_bond_dim,
+        num_sweeps=config.num_sweeps,
+        lanczos_max_iter=config.lanczos_max_iter,
+    )
+    result_mps = FiniteMPS.from_tensors(
+        _rebuild_padded_dense_mps(mps_out_raw, mps_tensors)
+    )
+    converged = (
+        len(energies) >= 2 and abs(energies[-1] - energies[-2]) < config.convergence_tol
+    )
+    return DMRGResult(
+        energy=energies[-1] if energies else 0.0,
+        energies_per_sweep=energies,
+        mps=result_mps,
+        truncation_errors=[],
+        converged=converged,
+    )
+
+
+def _run_dense_jit_executor(
+    *,
+    mps_tensors: list[Tensor],
+    mpo_tensors: list[Tensor],
+    config: DMRGConfig,
+) -> DMRGResult:
+    """Execute dense 2-site DMRG with warmup-then-JIT dispatch."""
+    from tenax.algorithms._jit_sweep import jit_dmrg_sweep_dense
+
+    L = len(mps_tensors)
+    all_saturated = all(
+        mps_tensors[i].todense().shape[-1] >= config.max_bond_dim for i in range(L - 1)
+    )
+    warmup_energies: list[float] = []
+    warmup_trunc_errs: list[float] = []
+    warmup_sweeps = 0
+    warmup_converged = False
+
+    if not all_saturated:
+        w_ops = _dense_ops()
+        left_envs = _build_left_environments_list(mps_tensors, mpo_tensors, L, w_ops)
+        right_envs = _build_right_environments_list(mps_tensors, mpo_tensors, L, w_ops)
+        energy = 0.0
+
+        for sweep in range(config.num_sweeps):
+            prev_energy = energy
+            if sweep > 0:
+                left_envs = _build_left_environments_list(
+                    mps_tensors, mpo_tensors, L, w_ops
+                )
+
+            for i in range(L - 1):
+                l_env = left_envs[i]
+                assert l_env is not None
+                _r = right_envs[i + 2]
+                r_env = _r if _r is not None else w_ops.build_trivial_right_env()
+                theta, e = w_ops.two_site_update(
+                    mps_tensors[i],
+                    mps_tensors[i + 1],
+                    l_env,
+                    mpo_tensors[i],
+                    mpo_tensors[i + 1],
+                    r_env,
+                    config,
+                )
+                energy = float(e)
+                A, _s, B, trunc_err = _svd_and_truncate_site(theta, i, config)
+                mps_tensors[i] = A
+                mps_tensors[i + 1] = B
+                warmup_trunc_errs.append(float(trunc_err))
+                left_envs[i + 1] = w_ops.update_left_env(l_env, A, mpo_tensors[i])
+
+            right_envs = _build_right_environments_list(
+                mps_tensors, mpo_tensors, L, w_ops
+            )
+            for i in range(L - 2, -1, -1):
+                l_env = left_envs[i]
+                assert l_env is not None
+                _r2 = right_envs[i + 2]
+                r2_env = _r2 if _r2 is not None else w_ops.build_trivial_right_env()
+                theta, e = w_ops.two_site_update(
+                    mps_tensors[i],
+                    mps_tensors[i + 1],
+                    l_env,
+                    mpo_tensors[i],
+                    mpo_tensors[i + 1],
+                    r2_env,
+                    config,
+                )
+                energy = float(e)
+                A, _s, B, trunc_err = _svd_and_truncate_site(
+                    theta, i, config, sweep_right=False
+                )
+                mps_tensors[i] = A
+                mps_tensors[i + 1] = B
+                warmup_trunc_errs.append(float(trunc_err))
+                right_envs[i + 1] = w_ops.update_right_env(
+                    r2_env, B, mpo_tensors[i + 1]
+                )
+
+            warmup_energies.append(energy)
+            warmup_sweeps += 1
+            if config.verbose:
+                print(f"Warmup sweep {sweep + 1}: E = {energy:.10f}")
+            if sweep > 0 and abs(energy - prev_energy) < config.convergence_tol:
+                warmup_converged = True
+                break
+            all_saturated = all(
+                mps_tensors[idx].todense().shape[-1] >= config.max_bond_dim
+                for idx in range(L - 1)
+            )
+            if all_saturated:
+                break
+
+    remaining = config.num_sweeps - warmup_sweeps
+    jit_energies: list[float] = []
+    if remaining > 0 and not warmup_converged:
+        if config.verbose:
+            print(
+                f"Warmup complete after {warmup_sweeps} sweep(s), "
+                f"switching to JIT for {remaining} sweep(s)"
+            )
+        raw_mps = [t.todense() for t in mps_tensors]
+        raw_mpo = [t.todense() for t in mpo_tensors]
+        jit_energies, mps_out_raw = jit_dmrg_sweep_dense(
+            raw_mps,
+            raw_mpo,
+            chi_max=config.max_bond_dim,
+            num_sweeps=remaining,
+            lanczos_max_iter=config.lanczos_max_iter,
+        )
+        mps_tensors = _rebuild_padded_dense_mps(mps_out_raw, mps_tensors)
+
+    all_energies = warmup_energies + jit_energies
+    final_energy = all_energies[-1] if all_energies else 0.0
+    converged = warmup_converged or (
+        len(all_energies) >= 2
+        and abs(all_energies[-1] - all_energies[-2]) < config.convergence_tol
+    )
+    result_mps = FiniteMPS.from_tensors(mps_tensors)
+    return DMRGResult(
+        energy=final_energy,
+        energies_per_sweep=all_energies,
+        mps=result_mps,
+        truncation_errors=warmup_trunc_errs,
+        converged=converged,
+    )
+
+
+def _run_symmetric_jit_executor(
+    *,
+    mps_tensors: list[Tensor],
+    mpo_tensors: list[Tensor],
+    config: DMRGConfig,
+) -> DMRGResult:
+    """Execute symmetric 2-site DMRG via `_jit_sweep`."""
+    from tenax.algorithms._jit_sweep import jit_dmrg_sweep_symmetric
+
+    energies, mps_out = jit_dmrg_sweep_symmetric(
+        list(mps_tensors),
+        list(mpo_tensors),
+        chi_max=config.max_bond_dim,
+        num_sweeps=config.num_sweeps,
+        lanczos_max_iter=config.lanczos_max_iter,
+    )
+    result_mps = FiniteMPS.from_tensors(mps_out)
+    converged = (
+        len(energies) >= 2 and abs(energies[-1] - energies[-2]) < config.convergence_tol
+    )
+    return DMRGResult(
+        energy=energies[-1] if energies else 0.0,
+        energies_per_sweep=energies,
+        mps=result_mps,
+        truncation_errors=[],
+        converged=converged,
+    )
+
+
 def dmrg(
     hamiltonian: TensorNetwork,
     initial_mps: FiniteMPS | TensorNetwork,
@@ -296,264 +526,25 @@ def dmrg(
             f"got {config.accelerator!r}"
         )
 
-    use_jit = False
-    if config.accelerator == "jit":
-        use_jit = True
-    elif config.accelerator == "auto":
-        device = jax.devices()[0].platform
-        if device in ("gpu", "tpu"):
-            use_jit = True
-        elif not use_symmetric:
-            use_jit = True
+    use_jit = _resolve_jit_dispatch(config, use_symmetric=use_symmetric)
 
     if config.accelerator == "sharded" and config.two_site and not use_symmetric:
-        from tenax.algorithms._jit_sweep import jit_dmrg_sweep_dense_sharded
-
-        # Go straight to sharded JIT — no warmup phase.
-        # The sharded path pads small bonds to chi_max (zero-padding
-        # handles bonds < chi_max correctly). Warmup would run on a
-        # single GPU and OOM at large chi, defeating the purpose of
-        # sharding.
-        raw_mps = [t.todense() for t in mps_tensors]
-        raw_mpo = [t.todense() for t in mpo_tensors]
-        energies, mps_out_raw = jit_dmrg_sweep_dense_sharded(
-            raw_mps,
-            raw_mpo,
-            chi_max=config.max_bond_dim,
-            num_sweeps=config.num_sweeps,
-            lanczos_max_iter=config.lanczos_max_iter,
+        return _run_sharded_dense_executor(
+            mps_tensors=mps_tensors,
+            mpo_tensors=mpo_tensors,
+            config=config,
         )
-
-        # Reconstruct DenseTensor wrappers
-        sym = U1Symmetry()
-        result_mps_tensors = []
-        for i, orig_t in enumerate(mps_tensors):
-            new_indices = []
-            for leg_idx, orig_idx in enumerate(orig_t.indices):
-                padded_dim = mps_out_raw[i].shape[leg_idx]
-                if padded_dim == orig_idx.dim:
-                    new_indices.append(orig_idx)
-                else:
-                    new_charges = np.zeros(padded_dim, dtype=np.int32)
-                    new_indices.append(
-                        TensorIndex.from_charges(
-                            sym,
-                            new_charges,
-                            orig_idx.flow,
-                            label=orig_idx.label,
-                        )
-                    )
-            result_mps_tensors.append(DenseTensor(mps_out_raw[i], tuple(new_indices)))
-        result_mps = FiniteMPS.from_tensors(result_mps_tensors)
-
-        converged = (
-            len(energies) >= 2
-            and abs(energies[-1] - energies[-2]) < config.convergence_tol
-        )
-        return DMRGResult(
-            energy=energies[-1] if energies else 0.0,
-            energies_per_sweep=energies,
-            mps=result_mps,
-            truncation_errors=[],
-            converged=converged,
-        )
-
     if use_jit and config.two_site and not use_symmetric:
-        from tenax.algorithms._jit_sweep import jit_dmrg_sweep_dense
-
-        # Check if all bonds are already at chi_max.
-        # When bonds are still growing (e.g. initial chi < chi_max), running
-        # the JIT path wastes compute on padded-to-chi_max tensors.  Instead
-        # we run Python sweeps first (warmup) and switch to JIT once all
-        # bonds have saturated at chi_max.
-        all_saturated = all(
-            mps_tensors[i].todense().shape[-1] >= config.max_bond_dim
-            for i in range(L - 1)
-        )
-
-        warmup_energies: list[float] = []
-        warmup_trunc_errs: list[float] = []
-        warmup_sweeps = 0
-        warmup_converged = False
-
-        if not all_saturated:
-            # Phase 1: Warmup with Python sweeps until chi saturates.
-            w_ops = _dense_ops()
-            left_envs = _build_left_environments_list(
-                mps_tensors, mpo_tensors, L, w_ops
-            )
-            right_envs = _build_right_environments_list(
-                mps_tensors, mpo_tensors, L, w_ops
-            )
-            energy = 0.0
-
-            for sweep in range(config.num_sweeps):
-                prev_energy = energy
-
-                if sweep > 0:
-                    left_envs = _build_left_environments_list(
-                        mps_tensors, mpo_tensors, L, w_ops
-                    )
-
-                # Left-to-right half-sweep
-                for i in range(L - 1):
-                    l_env = left_envs[i]
-                    assert l_env is not None
-                    _r = right_envs[i + 2]
-                    r_env = _r if _r is not None else w_ops.build_trivial_right_env()
-                    theta, e = w_ops.two_site_update(
-                        mps_tensors[i],
-                        mps_tensors[i + 1],
-                        l_env,
-                        mpo_tensors[i],
-                        mpo_tensors[i + 1],
-                        r_env,
-                        config,
-                    )
-                    energy = float(e)
-
-                    A, s, B, trunc_err = _svd_and_truncate_site(theta, i, config)
-                    mps_tensors[i] = A
-                    mps_tensors[i + 1] = B
-                    warmup_trunc_errs.append(float(trunc_err))
-
-                    left_envs[i + 1] = w_ops.update_left_env(l_env, A, mpo_tensors[i])
-
-                # Rebuild right environments before R->L half-sweep
-                right_envs = _build_right_environments_list(
-                    mps_tensors, mpo_tensors, L, w_ops
-                )
-
-                # Right-to-left half-sweep
-                for i in range(L - 2, -1, -1):
-                    l_env = left_envs[i]
-                    assert l_env is not None
-                    _r2 = right_envs[i + 2]
-                    r2_env = _r2 if _r2 is not None else w_ops.build_trivial_right_env()
-                    theta, e = w_ops.two_site_update(
-                        mps_tensors[i],
-                        mps_tensors[i + 1],
-                        l_env,
-                        mpo_tensors[i],
-                        mpo_tensors[i + 1],
-                        r2_env,
-                        config,
-                    )
-                    energy = float(e)
-
-                    A, s, B, trunc_err = _svd_and_truncate_site(
-                        theta, i, config, sweep_right=False
-                    )
-                    mps_tensors[i] = A
-                    mps_tensors[i + 1] = B
-                    warmup_trunc_errs.append(float(trunc_err))
-
-                    right_envs[i + 1] = w_ops.update_right_env(
-                        r2_env, B, mpo_tensors[i + 1]
-                    )
-
-                warmup_energies.append(energy)
-                warmup_sweeps += 1
-                if config.verbose:
-                    print(f"Warmup sweep {sweep + 1}: E = {energy:.10f}")
-
-                # Check convergence during warmup
-                if sweep > 0 and abs(energy - prev_energy) < config.convergence_tol:
-                    warmup_converged = True
-                    break
-
-                # Check if all bonds have reached chi_max
-                all_saturated = all(
-                    mps_tensors[idx].todense().shape[-1] >= config.max_bond_dim
-                    for idx in range(L - 1)
-                )
-                if all_saturated:
-                    break
-
-        # Phase 2: JIT sweeps for remaining budget (if not already converged)
-        remaining = config.num_sweeps - warmup_sweeps
-        jit_energies: list[float] = []
-        if remaining > 0 and not warmup_converged:
-            if config.verbose:
-                print(
-                    f"Warmup complete after {warmup_sweeps} sweep(s), "
-                    f"switching to JIT for {remaining} sweep(s)"
-                )
-            raw_mps = [t.todense() for t in mps_tensors]
-            raw_mpo = [t.todense() for t in mpo_tensors]
-
-            jit_energies, mps_out_raw = jit_dmrg_sweep_dense(
-                raw_mps,
-                raw_mpo,
-                chi_max=config.max_bond_dim,
-                num_sweeps=remaining,
-                lanczos_max_iter=config.lanczos_max_iter,
-            )
-
-            # Reconstruct DenseTensor wrappers from JIT output arrays.
-            # The JIT path pads tensors to (chi_max, d, chi_max). Create new
-            # indices that match the padded shape while preserving labels.
-            sym = U1Symmetry()
-            result_mps_tensors = []
-            for i, orig_t in enumerate(mps_tensors):
-                new_indices = []
-                for leg_idx, orig_idx in enumerate(orig_t.indices):
-                    padded_dim = mps_out_raw[i].shape[leg_idx]
-                    if padded_dim == orig_idx.dim:
-                        new_indices.append(orig_idx)
-                    else:
-                        new_charges = np.zeros(padded_dim, dtype=np.int32)
-                        new_indices.append(
-                            TensorIndex.from_charges(
-                                sym,
-                                new_charges,
-                                orig_idx.flow,
-                                label=orig_idx.label,
-                            )
-                        )
-                result_mps_tensors.append(
-                    DenseTensor(mps_out_raw[i], tuple(new_indices))
-                )
-            mps_tensors = result_mps_tensors
-
-        all_energies = warmup_energies + jit_energies
-        final_energy = all_energies[-1] if all_energies else 0.0
-        converged = warmup_converged or (
-            len(all_energies) >= 2
-            and abs(all_energies[-1] - all_energies[-2]) < config.convergence_tol
-        )
-        result_mps = FiniteMPS.from_tensors(mps_tensors)
-
-        return DMRGResult(
-            energy=final_energy,
-            energies_per_sweep=all_energies,
-            mps=result_mps,
-            truncation_errors=warmup_trunc_errs,
-            converged=converged,
+        return _run_dense_jit_executor(
+            mps_tensors=mps_tensors,
+            mpo_tensors=mpo_tensors,
+            config=config,
         )
     if use_jit and config.two_site and use_symmetric:
-        from tenax.algorithms._jit_sweep import jit_dmrg_sweep_symmetric
-
-        energies, mps_out = jit_dmrg_sweep_symmetric(
-            list(mps_tensors),
-            list(mpo_tensors),
-            chi_max=config.max_bond_dim,
-            num_sweeps=config.num_sweeps,
-            lanczos_max_iter=config.lanczos_max_iter,
-        )
-
-        result_mps = FiniteMPS.from_tensors(mps_out)
-
-        converged = (
-            len(energies) >= 2
-            and abs(energies[-1] - energies[-2]) < config.convergence_tol
-        )
-        return DMRGResult(
-            energy=energies[-1] if energies else 0.0,
-            energies_per_sweep=energies,
-            mps=result_mps,
-            truncation_errors=[],
-            converged=converged,
+        return _run_symmetric_jit_executor(
+            mps_tensors=mps_tensors,
+            mpo_tensors=mpo_tensors,
+            config=config,
         )
 
     # (If use_jit is True but conditions not met, fall through silently
@@ -883,7 +874,7 @@ def dmrg(
 
     # Build result MPS as FiniteMPS.
     # Convert any BlockArray tensors back to SymmetricTensor for storage.
-    from tenax.algorithms._block_array import BlockArray, ba_to_symmetric
+    from tenax.core._block_array import BlockArray, ba_to_symmetric
 
     final_tensors = [
         ba_to_symmetric(t) if isinstance(t, BlockArray) else t for t in mps_tensors
@@ -1416,7 +1407,7 @@ def _svd_and_truncate_site(
     Returns:
         (A_tensor, singular_values, B_tensor, truncation_error)
     """
-    from tenax.algorithms._block_array import BlockArray
+    from tenax.core._block_array import BlockArray
 
     if isinstance(theta, BlockArray):
         labels = tuple(idx.label for idx in theta.indices)
@@ -1451,10 +1442,10 @@ def _svd_and_truncate_site(
     # Returns BlockArray directly — avoids JAX array creation in the sweep loop.
     # The sweep loop stores these as BlockArray; env updates accept either type.
     # Only converted to SymmetricTensor at the end of dmrg() for the result.
-    from tenax.algorithms._block_array import BlockArray
+    from tenax.core._block_array import BlockArray
 
     if config.numpy_blockwise and isinstance(theta, (SymmetricTensor, BlockArray)):
-        from tenax.algorithms._block_array import ba_to_symmetric
+        from tenax.core._block_array import ba_to_symmetric
         from tenax.linalg import _truncated_svd_symmetric_np
 
         # _truncated_svd_symmetric_np needs SymmetricTensor for index metadata
@@ -1652,7 +1643,7 @@ def _lanczos_solve_np(
     Returns:
         (eigenvalue, eigenvector) for the ground state as BlockArray.
     """
-    from tenax.algorithms._block_array import (
+    from tenax.core._block_array import (
         ba_add,
         ba_inner,
         ba_norm,
@@ -1969,7 +1960,7 @@ def _blockwise_contract(
         output_blocks[key] = total
 
     if return_ba:
-        from tenax.algorithms._block_array import BlockArray
+        from tenax.core._block_array import BlockArray
 
         return BlockArray(blocks=output_blocks, indices=output_indices)
 
@@ -1983,7 +1974,7 @@ def _blockwise_contract(
 
 def _assert_symmetric(*tensors: Tensor, context: str) -> None:
     """Assert all tensors are SymmetricTensor or BlockArray; raise TypeError otherwise."""
-    from tenax.algorithms._block_array import BlockArray
+    from tenax.core._block_array import BlockArray
 
     for i, t in enumerate(tensors):
         if not isinstance(t, (SymmetricTensor, BlockArray)):
@@ -2193,7 +2184,7 @@ def _scale_bond_axis_ba(ba: BlockArray, bond_label: str, s: np.ndarray) -> Block
     with numpy singular values. Used after SVD to absorb singular values
     into A or B for canonical form.
     """
-    from tenax.algorithms._block_array import BlockArray as _BA
+    from tenax.core._block_array import BlockArray as _BA
 
     bond_axis = None
     for i, idx in enumerate(ba.indices):
@@ -2237,7 +2228,7 @@ def _svd_and_truncate_site_np(
     Returns:
         (A_ba, singular_values, B_ba, truncation_error) -- all numpy.
     """
-    from tenax.algorithms._block_array import ba_to_symmetric
+    from tenax.core._block_array import ba_to_symmetric
     from tenax.linalg import _truncated_svd_symmetric_np
 
     labels = [idx.label for idx in theta_ba.indices]
@@ -2458,7 +2449,7 @@ def _execute_matvec_combos(
     are transposed once per matvec call (outside the combo loop) using the
     ``theta_perm`` / ``theta_shape_2d`` stored in each descriptor.
     """
-    from tenax.algorithms._block_array import BlockArray
+    from tenax.core._block_array import BlockArray
 
     n_slots = len(output_keys)
 
@@ -2565,7 +2556,7 @@ def _two_site_update_symmetric_np(
     signature) and returns SymmetricTensor + float. BlockArray is used
     internally to avoid JAX overhead in the Lanczos iterations.
     """
-    from tenax.algorithms._block_array import (
+    from tenax.core._block_array import (
         BlockArray,
         symmetric_to_ba,
     )
@@ -2714,7 +2705,7 @@ def _one_site_update_symmetric_np(
     signature) and returns SymmetricTensor + float. BlockArray is used
     internally to avoid JAX overhead in the Lanczos iterations.
     """
-    from tenax.algorithms._block_array import (
+    from tenax.core._block_array import (
         BlockArray,
         ba_to_symmetric,
         symmetric_to_ba,
@@ -2814,7 +2805,7 @@ def _update_left_env_np(
     mpo_site: Tensor,
 ) -> SymmetricTensor:
     """Update left environment, accepting BlockArray or SymmetricTensor for MPS site."""
-    from tenax.algorithms._block_array import BlockArray, ba_bar
+    from tenax.core._block_array import BlockArray, ba_bar
 
     if isinstance(mps_site, BlockArray):
         A = mps_site
@@ -2846,7 +2837,7 @@ def _update_right_env_np(
     mpo_site: Tensor,
 ) -> SymmetricTensor:
     """Update right environment, accepting BlockArray or SymmetricTensor for MPS site."""
-    from tenax.algorithms._block_array import BlockArray, ba_bar
+    from tenax.core._block_array import BlockArray, ba_bar
 
     if isinstance(mps_site, BlockArray):
         B = mps_site
@@ -3118,7 +3109,7 @@ def compute_mps_sector(mps_tensors: list[Tensor]) -> int | None:
         The total charge if consistently detectable, or None if the
         MPS is in a mixed sector (or contains no block-sparse tensor).
     """
-    from tenax.algorithms._block_array import BlockArray
+    from tenax.core._block_array import BlockArray
 
     for site in mps_tensors:
         if not isinstance(site, (SymmetricTensor, BlockArray)):

@@ -18,6 +18,7 @@ Public API:
 from __future__ import annotations
 
 import functools
+import importlib
 from collections.abc import Callable
 
 import jax
@@ -888,10 +889,9 @@ def _build_left_envs_symmetric(mps_tensors, mpo_tensors):
     left_envs[0] is the trivial boundary and left_envs[i] contracts
     sites 0..i-1.
     """
-    from tenax.algorithms.dmrg import (
-        _build_trivial_left_env_symmetric,
-        _update_left_env_symmetric,
-    )
+    dmrg_mod = importlib.import_module("tenax.algorithms.dmrg")
+    _build_trivial_left_env_symmetric = dmrg_mod._build_trivial_left_env_symmetric
+    _update_left_env_symmetric = dmrg_mod._update_left_env_symmetric
 
     L = len(mps_tensors)
     left_envs = [_build_trivial_left_env_symmetric()]
@@ -913,10 +913,9 @@ def _build_right_envs_symmetric(mps_tensors, mpo_tensors):
     right_envs[L] is the trivial boundary and right_envs[i] contracts
     sites i..L-1.
     """
-    from tenax.algorithms.dmrg import (
-        _build_trivial_right_env_symmetric,
-        _update_right_env_symmetric,
-    )
+    dmrg_mod = importlib.import_module("tenax.algorithms.dmrg")
+    _build_trivial_right_env_symmetric = dmrg_mod._build_trivial_right_env_symmetric
+    _update_right_env_symmetric = dmrg_mod._update_right_env_symmetric
 
     L = len(mps_tensors)
     right_envs = [None] * (L + 1)
@@ -962,12 +961,12 @@ def _two_site_update_symmetric_jit(
         Energy (float) from this site update.
     """
     from tenax.algorithms._tensor_utils import scale_bond_axis
-    from tenax.algorithms.dmrg import (
-        _two_site_update_symmetric,
-        _update_left_env_symmetric,
-        _update_right_env_symmetric,
-    )
     from tenax.linalg import svd as truncated_svd
+
+    dmrg_mod = importlib.import_module("tenax.algorithms.dmrg")
+    _two_site_update_symmetric = dmrg_mod._two_site_update_symmetric
+    _update_left_env_symmetric = dmrg_mod._update_left_env_symmetric
+    _update_right_env_symmetric = dmrg_mod._update_right_env_symmetric
 
     l_env = left_envs[i]
     r_env = right_envs[i + 2]
@@ -975,10 +974,14 @@ def _two_site_update_symmetric_jit(
     W_r = mpo_tensors[i + 1]
 
     # --- 1-3. Lanczos optimization using SymmetricTensor path ---
-    # Build a minimal config object for the Lanczos solver
-    from tenax.algorithms.dmrg import DMRGConfig
+    # Build a minimal config-like object for the Lanczos solver.
+    class _LanczosConfig:
+        def __init__(self, max_bond_dim: int, lanczos_max_iter: int):
+            self.max_bond_dim = max_bond_dim
+            self.lanczos_max_iter = lanczos_max_iter
+            self.lanczos_tol = 1e-12
 
-    _config = DMRGConfig(
+    _config = _LanczosConfig(
         max_bond_dim=chi_max,
         lanczos_max_iter=lanczos_max_iter,
     )

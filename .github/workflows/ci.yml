@@ -61,14 +61,18 @@ jobs:
           fetch-depth: 2
       - id: filter
         run: |
-          if git diff --name-only HEAD~1 HEAD | grep -qE '^(src/|tests/|pyproject\.toml)'; then
+          # Workflow edits under ``.github/workflows/`` are included so
+          # CI-config changes (e.g. a new test bucket) are exercised by
+          # the matrix on the merge commit instead of waiting for an
+          # unrelated code push to validate them.
+          if git diff --name-only HEAD~1 HEAD | grep -qE '^(src/|tests/|pyproject\.toml|\.github/workflows/)'; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
 
   test-full:
-    name: Full tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    name: Full tests (${{ matrix.os }}, Python ${{ matrix.python-version }}, ${{ matrix.bucket }})
     needs: [changes]
     if: |
       always() &&
@@ -80,9 +84,17 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         python-version: ["3.11", "3.12"]
+        bucket: ["fast-ipeps", "fast-other", "slow"]
         include:
           - os: macos-latest
             python-version: "3.12"
+            bucket: "fast-ipeps"
+          - os: macos-latest
+            python-version: "3.12"
+            bucket: "fast-other"
+          - os: macos-latest
+            python-version: "3.12"
+            bucket: "slow"
 
     steps:
       - uses: actions/checkout@v6
@@ -98,15 +110,47 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      - name: Run non-core tests (algorithm + slow + integration)
+      - name: Run non-core tests (${{ matrix.bucket }} bucket)
         # Skip ``-m core`` since the required ``test`` job already covers it.
-        # Running everything-not-core here avoids duplicating the core suite
-        # (which was contributing to OOM / runner-lost-communication flakes
-        # when the full suite ran end-to-end).
+        # Three buckets give parallelism, isolation, and per-bucket retry
+        # granularity:
+        #   - ``fast-ipeps`` runs ``tests/test_ipeps.py`` and
+        #     ``tests/test_fpeps_ad.py``.  These files alone consumed
+        #     ~11+ min of the previous combined ``fast`` bucket (out of
+        #     a ~57min total) because every test runs CTM convergence
+        #     and many run AD optimization.  Isolating them keeps the
+        #     other-bucket runtime under ~25 min on ubuntu.
+        #   - ``fast-other`` runs the rest of the non-core, non-slow
+        #     suite (DMRG / iDMRG / HOTRG / fermionic CTM / ad_utils /
+        #     coarse-grain / etc.).
+        #   - ``slow`` runs everything tagged ``@pytest.mark.slow``.
+        # The earlier single combined ``fast`` bucket got reaped on
+        # Linux ~30–45 min in (see merge run 25197411849, where the
+        # runner died at ~01:45 mid-``test_optimize_gs_ad_symmetric_
+        # energy_decreases``).  The split addresses #354 / #370.
         env:
           JAX_PLATFORMS: cpu
+          BUCKET: ${{ matrix.bucket }}
         run: |
-          uv run pytest tests/ -m "not core" \
+          case "$BUCKET" in
+            slow)
+              FILES="tests/"
+              FILTER='slow'
+              ;;
+            fast-ipeps)
+              FILES="tests/test_ipeps.py tests/test_fpeps_ad.py"
+              FILTER='not core and not slow'
+              ;;
+            fast-other)
+              FILES="tests/ --ignore=tests/test_ipeps.py --ignore=tests/test_fpeps_ad.py"
+              FILTER='not core and not slow'
+              ;;
+            *)
+              echo "Unknown bucket: $BUCKET" >&2
+              exit 1
+              ;;
+          esac
+          uv run pytest $FILES -m "$FILTER" \
             --cov=tenax \
             --cov-report=xml \
             --cov-report=term-missing \

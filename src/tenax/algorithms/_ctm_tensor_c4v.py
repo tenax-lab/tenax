@@ -69,7 +69,8 @@ def _c4v_sweep(
     #    charge-sector drift between independent projectors.
     P, _ = _compute_projector_tensor(Cg, Cg, chi, projector_method)
 
-    # 4. Apply projector to edge: T_new = P† · Tg · P
+    # 4. Apply projector to edge: T_new = P† · Tg · P (paired projector
+    # contraction; see _ctm_tensor_moves note for why this stays .bar())
     P_bar = P.bar()
     P_left = P_bar.relabel("fused", "fl")
     step = contract(P_left, Tg)  # (chi_new, d2, fr)
