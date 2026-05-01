@@ -594,7 +594,7 @@ def _svd_projector_symmetric(
     Returns:
         ``(P1, P2)`` each with labels ``(fused, chi_new)``.
     """
-    from tenax.algorithms.ad_utils import _fix_svd_signs
+    from tenax.algorithms._ad_primitives import _fix_svd_signs
 
     fused_pos = C1g.labels().index("fused")
     col_pos = 1 - fused_pos
@@ -872,13 +872,13 @@ def _compute_projector_tensor(
         M = C1g_dense.conj().T @ C4g_dense
 
         if _has_tracers:
-            from tenax.algorithms.ad_utils import truncated_svd_ad
+            from tenax.algorithms._ad_primitives import truncated_svd_ad
 
             U_M, S_M, Vh_M = truncated_svd_ad(M, chi)
         else:
             U_M_full, S_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
             k = min(chi, S_full.shape[0])
-            from tenax.algorithms.ad_utils import _fix_svd_signs
+            from tenax.algorithms._ad_primitives import _fix_svd_signs
 
             U_M_full, S_full, Vh_full = _fix_svd_signs(U_M_full, S_full, Vh_full)
             S_M = S_full[:k]
@@ -964,7 +964,7 @@ def _compute_projector_tensor(
         Q = Q * phase[None, :]
         R = R * jnp.conj(phase)[:, None]
         if _has_tracers:
-            from tenax.algorithms.ad_utils import regularized_svd
+            from tenax.algorithms._ad_primitives import regularized_svd
 
             U_R, S_R, _Vh_R = regularized_svd(R)
             k = min(chi, len(S_R))
@@ -1055,7 +1055,7 @@ def _compute_projector_tensor(
             # existing regularized_eigh backward.  Task 8 will resolve "auto"
             # to "standard" or "lorentzian" at the optimizer layer before it
             # reaches the projector; for Task 7, both map to "standard" here.
-            from tenax.algorithms.ad_utils import regularized_eigh
+            from tenax.algorithms._ad_primitives import regularized_eigh
 
             eigvals, eigvecs = regularized_eigh(rho)
             k = min(chi, len(eigvals))
