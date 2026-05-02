@@ -252,33 +252,36 @@ def test_su_decreases_energy_d2():
 
 
 # ---------------------------------------------------------------------------
-# Honeycomb supersite coarse-graining
+# Square coarse-grained supersite (Convention C)
 # ---------------------------------------------------------------------------
 
 
-def test_supersite_shapes():
-    from tenax.algorithms.pess import pess_to_honeycomb_supersites
+def test_supersite_shape_and_dummy_bond():
+    from tenax.algorithms.pess import pess_to_kagome_supersite
 
     state = IPESSState.random(D=4, d=3, key=jax.random.PRNGKey(0))
-    A_u, A_d = pess_to_honeycomb_supersites(state)
-    assert A_u.shape == (3, 3, 3, 4, 4, 4)
-    assert A_d.shape == (3, 3, 3, 4, 4, 4)
+    A = pess_to_kagome_supersite(
+        state.R_a, state.R_b, state.R_c, state.T_u, state.lambdas
+    )
+    assert A.shape == (4, 4, 4, 4, 27)
+    # Convention C dummy bond: only the [:, :, :, 0, :] slice is non-zero.
+    assert jnp.all(A[:, :, :, 1:, :] == 0)
 
 
 def test_supersite_grad_flows():
-    from tenax.algorithms.pess import pess_to_honeycomb_supersites
+    from tenax.algorithms.pess import pess_to_kagome_supersite
 
     state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
 
     def loss(s):
-        A_u, A_d = pess_to_honeycomb_supersites(s)
-        return jnp.real(jnp.vdot(A_u.ravel(), A_u.ravel())) + jnp.real(
-            jnp.vdot(A_d.ravel(), A_d.ravel())
-        )
+        A = pess_to_kagome_supersite(s.R_a, s.R_b, s.R_c, s.T_u, s.lambdas)
+        return jnp.real(jnp.vdot(A.ravel(), A.ravel()))
 
     g = jax.grad(loss)(state)
-    # All five primitive tensors should receive a finite gradient.
-    for arr in (g.R_a, g.R_b, g.R_c, g.T_u, g.T_d):
+    # Optimization variables must receive a finite, non-zero gradient.
+    for arr in (g.R_a, g.R_b, g.R_c, g.T_u):
         assert jnp.all(jnp.isfinite(arr))
         assert jnp.linalg.norm(arr) > 0
         assert arr.dtype == jnp.complex128
+    for lam_g in g.lambdas:
+        assert jnp.all(jnp.isfinite(lam_g))

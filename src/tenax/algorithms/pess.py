@@ -403,60 +403,6 @@ def pess_to_kagome_supersite(
     return A
 
 
-def pess_to_honeycomb_supersites(
-    state: IPESSState,
-) -> tuple[jax.Array, jax.Array]:
-    """Coarse-grain kagome iPESS into 2-sublattice honeycomb iPEPS supersites.
-
-    Returns ``(A_u, A_d)``, each of shape ``(d, d, d, D, D, D)``, where the
-    physical legs are ``(R_a, R_b, R_c)`` and the virtual legs go to the
-    three neighboring opposite-sublattice supersites.
-
-    A_u is built by contracting the *up*-facing R-tensor leg (axis 0) with
-    ``T_u``, leaving the *down*-facing leg (axis 1) as the virtual leg::
-
-        A_u[p_a, p_b, p_c, l_a, l_b, l_c] =
-            sum_{i,j,k} R_a[i, l_a, p_a]
-                       * R_b[j, l_b, p_b]
-                       * R_c[k, l_c, p_c]
-                       * T_u[i, j, k]
-
-    A_d is the mirror image: contract the *down*-facing R-tensor leg
-    (axis 1) with ``T_d``, leaving axis 0 as the virtual leg::
-
-        A_d[p_a, p_b, p_c, l_a, l_b, l_c] =
-            sum_{i,j,k} R_a[l_a, i, p_a]
-                       * R_b[l_b, j, p_b]
-                       * R_c[l_c, k, p_c]
-                       * T_d[i, j, k]
-
-    Lambdas are NOT applied — they are SU bookkeeping only and are not part of
-    the supersite construction.
-
-    Args:
-        state: Input iPESS state.
-
-    Returns:
-        ``(A_u, A_d)``, each of shape ``(d, d, d, D, D, D)`` in the index
-        order ``(p_a, p_b, p_c, l_a, l_b, l_c)``.
-    """
-    A_u = jnp.einsum(
-        "iLP,jMQ,kNR,ijk->PQRLMN",
-        state.R_a,
-        state.R_b,
-        state.R_c,
-        state.T_u,
-    )
-    A_d = jnp.einsum(
-        "LiP,MjQ,NkR,ijk->PQRLMN",
-        state.R_a,
-        state.R_b,
-        state.R_c,
-        state.T_d,
-    )
-    return A_u, A_d
-
-
 def pess_simple_update_triangle(
     state: IPESSState,
     gate: jax.Array,
