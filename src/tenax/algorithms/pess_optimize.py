@@ -1,18 +1,19 @@
-"""AD loss closure for kagome iPESS via the native rank-4 honeycomb CTM.
+"""AD loss closure for kagome iPESS via the square coarse-grained iPEPS CTM.
 
-This module wires the convention-A kagome iPESS coarse-graining
-(:func:`tenax.algorithms.pess.pess_to_honeycomb_supersites`) into Tenax's
-native rank-4 honeycomb implicit-AD CTM
-(:func:`tenax.algorithms.honeycomb_ctm.honeycomb_ctm_energy_implicit`).
+The kagome iPESS state is coarse-grained to a 1-site square iPEPS supersite
+(Convention C, Liao 2019): one supersite per up-triangle carrying ``T_u``,
+``R_a``, ``R_b``, ``R_c`` and bond gauges that absorb ``T_d``. Phys leg
+``d_eff = d**3`` (3 spins fused). The full kagome Hamiltonian is recovered
+via :class:`tenax.algorithms.coarse_grain.CGGates` with ``h_intra``
+(up-triangle) plus 3 ``h_inter`` bonds (down-triangle), the latter
+evaluated through the existing horizontal / vertical / diagonal 2-site
+RDM helpers in :mod:`tenax.algorithms._ctm_tensor_energy`.
 
-Each sublattice supersite is one kagome triangle (up or down): three
-physical legs and three honeycomb-edge legs. We fuse the three physical
-legs into a single ``d_eff = d**3`` leg and feed
-``sites = {(0, 0): A_u, (1, 0): A_d}`` (rank-4, labels
-``("e0", "e1", "e2", "phys")``) to the native honeycomb path. The kagome
-triangle Hamiltonian lives entirely inside one supersite, so the energy
-contract is the intra-triangle 1-site sum provided by
-:func:`compute_honeycomb_triangle_energy`.
+This was a deliberate pivot away from a 2-sublattice honeycomb supersite
+construction (a.k.a. "Convention A"). The latter required custom
+``across-A_d`` 2-site RDM machinery that does not yet exist in the
+honeycomb CTM (M2b follow-up to PR #347), so we reuse the CG-iPEPS path
+that does ship with full kagome support on ``main``.
 """
 
 from __future__ import annotations
@@ -24,12 +25,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms.honeycomb_ctm import (
-    compute_honeycomb_triangle_energy,
-    honeycomb_ctm_energy_implicit,
-)
+from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
+from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+from tenax.algorithms.coarse_grain import CGGates, compute_energy_cg
 from tenax.algorithms.ipeps_config import CTMConfig
-from tenax.algorithms.pess import IPESSState, pess_to_honeycomb_supersites
+from tenax.algorithms.pess import (
+    IPESSState,
+    pess_to_kagome_supersite,
+)
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
@@ -37,95 +40,77 @@ from tenax.core.tensor import DenseTensor
 __all__ = ["build_pess_loss", "optimize_pess_ad"]
 
 
-def _make_honeycomb_indices(D: int, d_eff: int) -> tuple[TensorIndex, ...]:
-    """Build the rank-4 ``(e0, e1, e2, phys)`` index tuple expected by the
-    native honeycomb CTM. Trivial U(1) charges (single sector at charge 0)."""
+def _make_supersite_indices(D: int, d_eff: int) -> tuple[TensorIndex, ...]:
+    """Square-iPEPS rank-5 ``(u, d, l, r, phys)`` index tuple expected by
+    the standard CTM. Trivial U(1) charges (single sector at charge 0).
+    Flows match the convention used by ``_ctm_tensor_energy``."""
     sym = U1Symmetry()
     virt = np.zeros(D, dtype=np.int32)
     phys = np.zeros(d_eff, dtype=np.int32)
     return (
-        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="e0"),
-        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="e1"),
-        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="e2"),
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.IN, label="r"),
         TensorIndex.from_charges(sym, phys.copy(), FlowDirection.IN, label="phys"),
     )
 
 
-def _supersite_to_honeycomb_tensor(
-    A_super: jax.Array, indices: tuple[TensorIndex, ...]
-) -> DenseTensor:
-    """Reshape a ``(d, d, d, D, D, D)`` supersite into a ``(D, D, D, d^3)``
-    rank-4 honeycomb site tensor.
-
-    The three physical legs ``(p_a, p_b, p_c)`` are fused into the ``phys``
-    leg in row-major (C) order so the basis matches
-    ``np.kron(np.kron(s_a, s_b), s_c)`` used by
-    :func:`kagome_triangle_xxz_hamiltonian`.
-    """
-    d_a, d_b, d_c, D_a, D_b, D_c = A_super.shape
-    if not (D_a == D_b == D_c):
-        raise ValueError(
-            "Supersite virtual legs must all share the same bond dimension D; "
-            f"got shape {A_super.shape}."
-        )
-    d_eff = d_a * d_b * d_c
-    A_fused = A_super.reshape(d_eff, D_a, D_b, D_c)
-    A_rank4 = jnp.moveaxis(A_fused, 0, -1)
-    return DenseTensor(A_rank4, indices)
-
-
 def build_pess_loss(
-    hamiltonian: np.ndarray | jnp.ndarray,
+    cg_gates: CGGates,
     config: CTMConfig,
 ) -> Callable[[IPESSState], jnp.ndarray]:
-    """Build the AD loss closure for kagome iPESS optimization.
+    """Build the AD loss closure for kagome iPESS optimization via the CG path.
 
     Args:
-        hamiltonian: ``(d**3, d**3)`` Hermitian triangle Hamiltonian, e.g.
-            from :func:`tenax.algorithms.pess.kagome_triangle_xxz_hamiltonian`.
-        config: ``CTMConfig`` controlling chi, max_iter, conv_tol, projector
-            method, gauge, and GMRES backward solver. Must use
-            ``projector_method="biorthogonal"`` for the kagome path
-            (A_u ≠ A_d in general; the ``"eigh"``/``"svd"`` projectors are
-            isometric A=B opt-ins).
+        cg_gates: :class:`CGGates` describing the kagome XXZ Hamiltonian
+            on a 1-site square coarse-grained iPEPS, e.g. from
+            :func:`tenax.algorithms.pess.kagome_xxz_pess_cg_gates`.
+        config: CTM convergence settings (``chi``, ``max_iter``,
+            ``conv_tol``, projector method, gauge, GMRES backward).
 
     Returns:
         ``loss_fn(state: IPESSState) -> jnp.ndarray`` returning the real
-        scalar triangle energy per honeycomb unit cell. Differentiable via
-        ``jax.grad`` through the implicit-AD CTM.
+        scalar energy per kagome site. Differentiable via ``jax.grad``
+        through the implicit-AD square CTM.
     """
-    H = jnp.asarray(hamiltonian, dtype=jnp.complex128)
+    d_eff = int(cg_gates.h_intra.shape[0])
+
+    def _energy_fn(site_tensors, envs, _gate):
+        # Custom energy function for ctm_energy_implicit's energy_fn hook.
+        # Drops the 2-site ``gate`` arg (unused) and routes through
+        # compute_energy_cg, which handles intra (1-site RDM × h_intra)
+        # plus 3 inter (h/v/diag 2-site RDM × h_inter) terms.
+        A_norm = site_tensors[(0, 0)]
+        return compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, d_eff)
 
     def loss_fn(state: IPESSState) -> jnp.ndarray:
-        A_u_super, A_d_super = pess_to_honeycomb_supersites(state)
-        # iPEPS states are projective — only direction matters. Normalize
-        # so the un-normalized RDM contraction stays well above f64 zero
-        # regardless of how IPESSState was initialized (random init at
-        # scale=0.1 gives a supersite of norm ~1e-2, where Tr(ρ_un) ≈ 0).
-        A_u_super = A_u_super / (jnp.linalg.norm(A_u_super) + 1e-12)
-        A_d_super = A_d_super / (jnp.linalg.norm(A_d_super) + 1e-12)
-        D = A_u_super.shape[-1]
-        d_eff = A_u_super.shape[0] * A_u_super.shape[1] * A_u_super.shape[2]
+        A_super = pess_to_kagome_supersite(
+            state.R_a, state.R_b, state.R_c, state.T_u, state.lambdas
+        )
+        # Projective gauge: only direction matters for the iPEPS state.
+        # Normalize the supersite so the un-normalized RDM contraction
+        # stays well above f64 zero across random / SU initial conditions.
+        A_super = A_super / (jnp.linalg.norm(A_super) + 1e-12)
+        D = A_super.shape[0]
+        indices = _make_supersite_indices(D, d_eff)
+        A_tensor = DenseTensor(A_super, indices)
+        site_tensors = {(0, 0): A_tensor}
 
-        indices = _make_honeycomb_indices(D, d_eff)
-        sites = {
-            (0, 0): _supersite_to_honeycomb_tensor(A_u_super, indices),
-            (1, 0): _supersite_to_honeycomb_tensor(A_d_super, indices),
-        }
-
-        return honeycomb_ctm_energy_implicit(
-            sites,
-            H,
+        return ctm_energy_implicit(
+            site_tensors,
+            SINGLE_SITE_NEIGHBORS,
+            gate=None,  # ignored; energy_fn takes over
             chi=config.chi,
             max_iter=config.max_iter,
             conv_tol=config.conv_tol,
             projector_method=config.projector_method,
-            forward_gauge=config.forward_gauge,
             renormalize=config.renormalize,
+            forward_gauge=config.forward_gauge,
             conv_method=config.ctm_conv_method,
             min_iter=config.min_iter,
             chi_ramp=config.chi_ramp,
-            energy_fn=compute_honeycomb_triangle_energy,
+            energy_fn=_energy_fn,
             gmres_tol=config.gmres_tol,
             gmres_maxiter=config.gmres_maxiter,
             gmres_restart=config.gmres_restart,
@@ -154,12 +139,7 @@ def _backtracking_line_search(
     rho: float = 0.5,
     max_steps: int = 8,
 ) -> tuple[dict, float, float]:
-    """Armijo backtracking on the L-BFGS descent direction.
-
-    Run at the Python level — the honeycomb CTM convergence loop has
-    Python control flow that can't be ``jit``-traced, which rules out
-    optax's bundled ``zoom_linesearch``.
-    """
+    """Armijo backtracking on the L-BFGS descent direction."""
     slope = _tree_real_dot(grad, direction)
     if slope >= 0.0:
         direction = jax.tree.map(lambda g: -g, grad)
@@ -184,50 +164,51 @@ def _backtracking_line_search(
 
 def optimize_pess_ad(
     initial_state: IPESSState,
-    hamiltonian: np.ndarray | jnp.ndarray,
+    cg_gates: CGGates,
     config: CTMConfig,
     *,
     max_iter: int = 50,
     verbose: bool = False,
 ) -> tuple[IPESSState, float]:
-    """L-BFGS optimization of kagome iPESS via the native rank-4 honeycomb CTM.
+    """L-BFGS optimization of kagome iPESS via the CG-iPEPS square path.
 
-    Variational parameters are the 5 PESS primitives ``(R_a, R_b, R_c, T_u,
-    T_d)``. SU ``lambdas`` are passed through unchanged — they are
-    bookkeeping only and don't enter the supersite construction (see
-    :func:`pess_to_honeycomb_supersites`).
+    Variational parameters are the iPESS primitives ``(R_a, R_b, R_c,
+    T_u, lambdas)``. ``T_d`` is held frozen at its input value: in the
+    CG-iPEPS coarse-graining, ``T_d`` is absorbed into the supersite via
+    the down-bond ``sqrt(λ)`` gauges, and the remaining gauge freedom is
+    spanned by the down-bond ``lambdas[3:6]`` themselves.
 
-    Inner step uses ``optax.scale_by_lbfgs`` (memory-10) to produce the
+    Inner step uses ``optax.scale_by_lbfgs`` (memory 10) for the
     quasi-Newton direction; line search is a Python-level Armijo
-    backtracker since the honeycomb CTM forward pass uses Python control
+    backtracker since the square CTM forward pass uses Python control
     flow that can't be ``jit``-traced through ``optax.lbfgs``'s bundled
     zoom search.
 
     Args:
-        initial_state: Starting :class:`IPESSState`. Typically the output of
-            :func:`tenax.algorithms.pess.pess_simple_update`, but a freshly
-            randomized state also works.
-        hamiltonian: ``(d**3, d**3)`` Hermitian triangle Hamiltonian.
-        config: ``CTMConfig`` for the inner CTM. Use
-            ``projector_method="biorthogonal"`` (kagome supersites are
-            non-isometric in general).
+        initial_state: Starting :class:`IPESSState`. Typically the output
+            of :func:`tenax.algorithms.pess.pess_simple_update`, but a
+            freshly randomized state also works.
+        cg_gates: kagome XXZ CG gates from
+            :func:`kagome_xxz_pess_cg_gates`. Must encode the same
+            ``delta`` and ``d`` as ``initial_state``.
+        config: CTM settings for the inner forward+backward sweeps.
         max_iter: Maximum L-BFGS outer iterations.
         verbose: Print energy at each step.
 
     Returns:
-        ``(optimized_state, final_energy)``.
+        ``(optimized_state, final_energy_per_site)``.
     """
     import optax
 
-    loss_fn_state = build_pess_loss(hamiltonian, config)
-    lambdas = initial_state.lambdas
+    loss_fn_state = build_pess_loss(cg_gates, config)
+    T_d_frozen = initial_state.T_d
 
     params = {
         "R_a": initial_state.R_a,
         "R_b": initial_state.R_b,
         "R_c": initial_state.R_c,
         "T_u": initial_state.T_u,
-        "T_d": initial_state.T_d,
+        "lambdas": tuple(initial_state.lambdas),
     }
 
     def _params_to_state(p: dict) -> IPESSState:
@@ -236,8 +217,8 @@ def optimize_pess_ad(
             R_b=p["R_b"],
             R_c=p["R_c"],
             T_u=p["T_u"],
-            T_d=p["T_d"],
-            lambdas=lambdas,
+            T_d=T_d_frozen,
+            lambdas=tuple(p["lambdas"]),
         )
 
     def loss(p: dict) -> jnp.ndarray:

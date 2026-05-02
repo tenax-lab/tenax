@@ -218,6 +218,191 @@ jax.tree_util.register_pytree_node(
 )
 
 
+def _xxz_embed_inter(
+    delta: float, d: int, site_1: int, site_2: int, n_sites: int = 3
+) -> np.ndarray:
+    """Embed the XXZ pair Hamiltonian on (sub-site ``site_1`` of left
+    supersite, sub-site ``site_2`` of right supersite) into a rank-4
+    ``(d_eff, d_eff, d_eff, d_eff)`` operator.
+
+    Generalizes :func:`tenax.algorithms.coarse_grain._embed_inter` to
+    arbitrary physical dimension and XXZ anisotropy. Acts as identity on
+    every other sub-site of each supersite. Index layout
+    ``(cg1_out, cg2_out, cg1_in, cg2_in)``.
+    """
+    ops = _site_ops(d)
+    Sz = ops["Sz"]
+    Sp = ops["Sp"]
+    Sm = ops["Sm"]
+    Id = ops["Id"]
+    d_eff = d**n_sites
+    result = np.zeros((d_eff, d_eff, d_eff, d_eff), dtype=np.complex128)
+    # XXZ pair = δ Sz Sz + 0.5 (S+ S- + S- S+)
+    for Sa, Sb in [(delta * Sz, Sz), (0.5 * Sp, Sm), (0.5 * Sm, Sp)]:
+        op1 = [Id.copy() for _ in range(n_sites)]
+        op1[site_1] = Sa
+        kron1 = op1[0]
+        for o in op1[1:]:
+            kron1 = np.kron(kron1, o)
+        op2 = [Id.copy() for _ in range(n_sites)]
+        op2[site_2] = Sb
+        kron2 = op2[0]
+        for o in op2[1:]:
+            kron2 = np.kron(kron2, o)
+        result = result + np.einsum("ik,jl->ijkl", kron1, kron2)
+    return result
+
+
+def kagome_xxz_pess_cg_gates(delta: float = 1.0, d: int = D_PHYS_DEFAULT):
+    """Build :class:`tenax.algorithms.coarse_grain.CGGates` for kagome XXZ
+    with an iPESS ``map_fn`` and ``init_fn``.
+
+    The supersite is the up-triangle (Convention C). Phys-sub-leg
+    ordering ``(a, b, c) = (u, v, w)``. Inter-supersite directions match
+    :func:`tenax.algorithms.coarse_grain.kagome_cg_gates`:
+
+    - ``"h"`` (horizontal): ``c`` of left ↔ ``b`` of right (down-tri bond ``b–c``).
+    - ``"v"`` (vertical): ``b`` of top ↔ ``a`` of bottom (down-tri bond ``a–b``).
+    - ``"diag"`` (diagonal): ``c`` of top ↔ ``a`` of bottom-right (down-tri bond ``a–c``).
+
+    Together with ``h_intra`` (the up-triangle XXZ Hamiltonian) this
+    captures all 6 kagome bonds per unit cell.
+
+    Args:
+        delta: XXZ anisotropy (Δ=1 is isotropic Heisenberg).
+        d: Physical dimension per site (2 for spin-½, 3 for spin-1).
+
+    Returns:
+        :class:`CGGates` with ``map_fn = pess_to_kagome_supersite`` and
+        ``init_fn`` returning a tuple
+        ``(R_a, R_b, R_c, T_u, lam0, lam1, lam2, lam3, lam4, lam5)``
+        suitable for :func:`tenax.optimize_gs_ad` warm-start.
+    """
+    from tenax.algorithms.coarse_grain import CGGates
+
+    h_intra = jnp.asarray(
+        kagome_triangle_xxz_hamiltonian(delta, d), dtype=jnp.complex128
+    )
+    h_inter = {
+        "h": jnp.asarray(_xxz_embed_inter(delta, d, 2, 1), dtype=jnp.complex128),
+        "v": jnp.asarray(_xxz_embed_inter(delta, d, 1, 0), dtype=jnp.complex128),
+        "diag": jnp.asarray(_xxz_embed_inter(delta, d, 2, 0), dtype=jnp.complex128),
+    }
+
+    def _flat_map_fn(R_a, R_b, R_c, T_u, lam0, lam1, lam2, lam3, lam4, lam5):
+        return pess_to_kagome_supersite(
+            R_a, R_b, R_c, T_u, (lam0, lam1, lam2, lam3, lam4, lam5)
+        )
+
+    def _flat_init_fn(D: int, key: jax.Array) -> tuple[jax.Array, ...]:
+        state = IPESSState.random(D=D, d=d, key=key)
+        return (
+            state.R_a,
+            state.R_b,
+            state.R_c,
+            state.T_u,
+            *state.lambdas,
+        )
+
+    return CGGates(
+        h_intra=h_intra,
+        h_inter=h_inter,
+        n_sites=3,
+        map_fn=_flat_map_fn,
+        init_fn=_flat_init_fn,
+    )
+
+
+def pess_to_kagome_supersite(
+    R_a: jax.Array,
+    R_b: jax.Array,
+    R_c: jax.Array,
+    T_u: jax.Array,
+    lambdas: tuple[jax.Array, ...] | jax.Array,
+) -> jax.Array:
+    """Build a square-iPEPS coarse-grained supersite from iPESS primitives.
+
+    Implements the standard kagome → square coarse-graining (Liao 2019,
+    "Convention C"): one supersite per up-triangle carrying ``T_u`` and
+    its three ``R`` sites. ``T_d`` is absorbed implicitly via the bond
+    gauges ``lambdas[3:6]`` (down-bond singular values produced by
+    :func:`pess_simple_update`); each down-bond contributes ``sqrt(λ)``
+    to the supersite and ``sqrt(λ)`` to the neighboring supersite.
+
+    The resulting tensor has shape ``(D, D, D, D, d**3)``: 4 virtual legs
+    (left, right, up, down) and a fused physical leg ordering
+    ``(p_a, p_b, p_c)`` row-major. Three of the virtual legs carry the
+    R-sites' down-bonds toward neighboring supersites (after the
+    ``sqrt(λ_down)`` gauge is applied here), and the fourth is the
+    Convention-C dummy: dimension 1 padded to ``D`` so the tensor
+    matches the square-iPEPS rank-5 layout. Only ``A[:, :, :, 0, :]``
+    is non-zero.
+
+    Per the actual SU einsum convention (see
+    :func:`pess_simple_update_triangle`), axis 0 of each ``R`` is the
+    T_d-leg and axis 1 is the T_u-leg. ``T_u`` is contracted against
+    axis 1 of each R; the remaining axis-0 legs become the supersite's
+    three real virtual legs.
+
+    Phys-leg ordering ``(p_a, p_b, p_c)`` matches
+    :func:`kagome_triangle_xxz_hamiltonian` (whose ``np.kron`` order is
+    ``(Sa, Sb, Sc)``), and matches the sub-leg ordering used by
+    :func:`tenax.algorithms.coarse_grain.kagome_cg_gates` (sub-site 0
+    = ``a`` = ``u``, 1 = ``b`` = ``v``, 2 = ``c`` = ``w``).
+
+    Args:
+        R_a, R_b, R_c: iPESS site tensors of shape ``(D, D, d)``,
+            axes ``(T_d-leg, T_u-leg, phys)``.
+        T_u: iPESS up-simplex tensor of shape ``(D, D, D)``, axes
+            ``(R_a-leg, R_b-leg, R_c-leg)``.
+        lambdas: 6 bond singular-value vectors of length ``D``, ordered
+            ``(a-up, b-up, c-up, a-down, b-down, c-down)``. The up-bonds
+            are absorbed fully (they live inside this triangle); the
+            down-bonds enter as ``sqrt(λ)``.
+
+    Returns:
+        Rank-5 supersite of shape ``(D, D, D, D, d**3)``.
+    """
+    D = R_a.shape[0]
+    d = R_a.shape[2]
+    d_eff = d**3
+    dtype = R_a.dtype
+
+    # Up-bond lambdas: absorbed fully (these bonds live inside the up-triangle).
+    lam_a_u = lambdas[0].astype(dtype)
+    lam_b_u = lambdas[1].astype(dtype)
+    lam_c_u = lambdas[2].astype(dtype)
+    # Down-bond lambdas: sqrt-split; the other sqrt goes to the neighboring
+    # supersite via the bond gauge.
+    sqrt_lam_a_d = jnp.sqrt(jnp.maximum(jnp.real(lambdas[3]), 1e-14)).astype(dtype)
+    sqrt_lam_b_d = jnp.sqrt(jnp.maximum(jnp.real(lambdas[4]), 1e-14)).astype(dtype)
+    sqrt_lam_c_d = jnp.sqrt(jnp.maximum(jnp.real(lambdas[5]), 1e-14)).astype(dtype)
+
+    # Gauge each R: axis 0 (T_d-leg) gets sqrt(λ_down), axis 1 (T_u-leg)
+    # gets λ_up.
+    S_a = jnp.einsum("i,ijp,j->ijp", sqrt_lam_a_d, R_a, lam_a_u)
+    S_b = jnp.einsum("i,ijp,j->ijp", sqrt_lam_b_d, R_b, lam_b_u)
+    S_c = jnp.einsum("i,ijp,j->ijp", sqrt_lam_c_d, R_c, lam_c_u)
+
+    # Contract gauged R's with T_u via the T_u-leg (axis 1 of S_x). Leaves
+    # axis 0 (T_d-leg) of each S_x as the supersite's outgoing virtual leg.
+    theta = jnp.einsum("xap,ybq,zcr,abc->xyzpqr", S_a, S_b, S_c, T_u)
+
+    # Fuse the three physical legs into d_eff = d^3 in row-major order so the
+    # basis matches kagome_triangle_xxz_hamiltonian's np.kron(np.kron(Sa, Sb), Sc).
+    theta_phys = theta.reshape(D, D, D, d_eff)
+
+    # Pad onto the square-iPEPS layout (D, D, D, D, d_eff). The 4th virtual
+    # leg is Convention C's "dummy" — dimension 1 padded to D, with non-zero
+    # weight only on the index-0 slice. Mirrors examples/kagome_xxz_pess.py:
+    # the padding lets compute_energy_cg's existing 2-site RDMs (which assume
+    # 4 nontrivial virtual legs) operate on the supersite without the CTM
+    # itself ever touching the dummy index outside slot 0.
+    A = jnp.zeros((D, D, D, D, d_eff), dtype=dtype)
+    A = A.at[:, :, :, 0, :].set(theta_phys)
+    return A
+
+
 def pess_to_honeycomb_supersites(
     state: IPESSState,
 ) -> tuple[jax.Array, jax.Array]:

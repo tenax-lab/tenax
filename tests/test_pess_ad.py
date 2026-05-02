@@ -1,4 +1,4 @@
-"""Smoke tests for the kagome iPESS AD loss closure (Task 8)."""
+"""Smoke tests for the kagome iPESS AD loss closure (CG-iPEPS path)."""
 
 from __future__ import annotations
 
@@ -7,19 +7,19 @@ import jax.numpy as jnp
 import pytest
 
 from tenax.algorithms.ipeps_config import CTMConfig
-from tenax.algorithms.pess import IPESSState, kagome_triangle_xxz_hamiltonian
+from tenax.algorithms.pess import IPESSState, kagome_xxz_pess_cg_gates
 from tenax.algorithms.pess_optimize import build_pess_loss, optimize_pess_ad
 
 
 def _make_test_config(chi: int) -> CTMConfig:
-    """Small CTM config for smoke tests: tight iteration budget, biorthogonal
-    projectors (kagome supersites are non-isometric, A_u ≠ A_d)."""
+    """Small CTM config for smoke tests: tight iteration budget, SVD
+    projectors (the standard square CTM AD default)."""
     return CTMConfig(
         chi=chi,
         max_iter=20,
         min_iter=4,
         conv_tol=1e-6,
-        projector_method="biorthogonal",
+        projector_method="svd",
         forward_gauge="phase",
         ctm_conv_method="elementwise",
         gmres_tol=1e-4,
@@ -32,10 +32,10 @@ def _make_test_config(chi: int) -> CTMConfig:
 def test_pess_loss_returns_finite_real_scalar():
     """The loss closure returns a finite real scalar for a random PESS state."""
     state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
-    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=3)
+    cg_gates = kagome_xxz_pess_cg_gates(delta=1.0, d=3)
     config = _make_test_config(chi=8)
 
-    loss_fn = build_pess_loss(H, config)
+    loss_fn = build_pess_loss(cg_gates, config)
     e0 = loss_fn(state)
 
     assert jnp.shape(e0) == ()
@@ -44,21 +44,22 @@ def test_pess_loss_returns_finite_real_scalar():
 
 
 def test_pess_loss_is_differentiable():
-    """``jax.grad`` of the loss returns finite gradients on all 5 PESS primitives.
+    """``jax.grad`` of the loss returns finite gradients on the iPESS primitives.
 
-    Spec for Task 8: must produce finite gradients on R_a, R_b, R_c, T_u, T_d
-    via implicit-AD CTM through the converged honeycomb environment.
+    The CG-iPEPS path optimizes ``(R_a, R_b, R_c, T_u, lambdas)``; ``T_d``
+    is held frozen (its effect is absorbed via the down-bond ``sqrt(λ)``
+    gauges).
     """
     state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
-    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=3)
+    cg_gates = kagome_xxz_pess_cg_gates(delta=1.0, d=3)
     config = _make_test_config(chi=8)
 
-    loss_fn = build_pess_loss(H, config)
+    loss_fn = build_pess_loss(cg_gates, config)
     e0 = loss_fn(state)
     g = jax.grad(loss_fn)(state)
 
     assert jnp.isfinite(e0)
-    for arr in (g.R_a, g.R_b, g.R_c, g.T_u, g.T_d):
+    for arr in (g.R_a, g.R_b, g.R_c, g.T_u):
         assert jnp.all(jnp.isfinite(arr)), (
             "non-finite values in PESS gradient — implicit-AD CTM backward "
             "produced NaN/Inf on a smoke-test state."
@@ -66,16 +67,18 @@ def test_pess_loss_is_differentiable():
         # IPESSState.random returns complex128 tensors — gradients should
         # match dtype to keep the variational regime intact.
         assert arr.dtype == jnp.complex128
+    for lam_g in g.lambdas:
+        assert jnp.all(jnp.isfinite(lam_g))
 
 
 @pytest.mark.parametrize("delta", [0.5, 1.0, 2.0])
 def test_pess_loss_runs_at_multiple_anisotropies(delta: float):
     """Smoke check: closure runs for a few values of XXZ anisotropy."""
     state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(1))
-    H = kagome_triangle_xxz_hamiltonian(delta=delta, d=3)
+    cg_gates = kagome_xxz_pess_cg_gates(delta=delta, d=3)
     config = _make_test_config(chi=8)
 
-    loss_fn = build_pess_loss(H, config)
+    loss_fn = build_pess_loss(cg_gates, config)
     e = loss_fn(state)
     assert jnp.isfinite(e)
 
@@ -83,23 +86,25 @@ def test_pess_loss_runs_at_multiple_anisotropies(delta: float):
 def test_optimize_pess_ad_decreases_energy():
     """L-BFGS lowers the triangle energy below the random-init baseline."""
     state0 = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(2))
-    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=3)
+    cg_gates = kagome_xxz_pess_cg_gates(delta=1.0, d=3)
     config = _make_test_config(chi=8)
 
-    e0 = float(build_pess_loss(H, config)(state0))
-    state_opt, e_opt = optimize_pess_ad(state0, H, config, max_iter=5, verbose=False)
+    e0 = float(build_pess_loss(cg_gates, config)(state0))
+    state_opt, e_opt = optimize_pess_ad(
+        state0, cg_gates, config, max_iter=5, verbose=False
+    )
 
     assert jnp.isfinite(e_opt)
     assert e_opt < e0, f"L-BFGS did not decrease energy: e0={e0}, e_opt={e_opt}"
 
 
-def test_optimize_pess_ad_preserves_shapes_and_lambdas():
-    """Shapes/dtype preserved; lambdas pass through untouched (frozen during AD)."""
+def test_optimize_pess_ad_preserves_shapes_and_T_d():
+    """Shapes/dtype preserved; T_d frozen unchanged (it's not a CG-path AD variable)."""
     state0 = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(3))
-    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=3)
+    cg_gates = kagome_xxz_pess_cg_gates(delta=1.0, d=3)
     config = _make_test_config(chi=8)
 
-    state_opt, _ = optimize_pess_ad(state0, H, config, max_iter=2)
+    state_opt, _ = optimize_pess_ad(state0, cg_gates, config, max_iter=2)
 
     assert state_opt.R_a.shape == state0.R_a.shape
     assert state_opt.R_b.shape == state0.R_b.shape
@@ -108,5 +113,5 @@ def test_optimize_pess_ad_preserves_shapes_and_lambdas():
     assert state_opt.T_d.shape == state0.T_d.shape
     assert state_opt.R_a.dtype == jnp.complex128
     assert state_opt.T_u.dtype == jnp.complex128
-    for la, l0 in zip(state_opt.lambdas, state0.lambdas, strict=True):
-        assert jnp.array_equal(la, l0)
+    # T_d is not optimized in the CG path — it's preserved bit-exact.
+    assert jnp.array_equal(state_opt.T_d, state0.T_d)
