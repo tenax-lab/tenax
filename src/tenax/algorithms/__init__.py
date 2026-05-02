@@ -102,6 +102,23 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "compute_ising_tensor": ("tenax.algorithms.trg", "compute_ising_tensor"),
     "ising_free_energy_exact": ("tenax.algorithms.trg", "ising_free_energy_exact"),
     "trg": ("tenax.algorithms.trg", "trg"),
+    # pess (kagome iPESS)
+    "IPESSState": ("tenax.algorithms.pess", "IPESSState"),
+    "kagome_triangle_xxz_hamiltonian": (
+        "tenax.algorithms.pess",
+        "kagome_triangle_xxz_hamiltonian",
+    ),
+    "kagome_xxz_pess_cg_gates": (
+        "tenax.algorithms.pess",
+        "kagome_xxz_pess_cg_gates",
+    ),
+    "pess_simple_update": ("tenax.algorithms.pess", "pess_simple_update"),
+    "pess_to_kagome_supersite": (
+        "tenax.algorithms.pess",
+        "pess_to_kagome_supersite",
+    ),
+    "build_pess_loss": ("tenax.algorithms.pess_optimize", "build_pess_loss"),
+    "optimize_pess_ad": ("tenax.algorithms.pess_optimize", "optimize_pess_ad"),
 }
 
 
@@ -183,4 +200,12 @@ __all__ = [
     "ExcitationResult",
     "compute_excitations",
     "make_momentum_path",
+    # pess (kagome iPESS)
+    "IPESSState",
+    "kagome_triangle_xxz_hamiltonian",
+    "kagome_xxz_pess_cg_gates",
+    "pess_simple_update",
+    "pess_to_kagome_supersite",
+    "build_pess_loss",
+    "optimize_pess_ad",
 ]

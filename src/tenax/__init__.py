@@ -130,6 +130,23 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "compute_energy_cg": ("tenax.algorithms.coarse_grain", "compute_energy_cg"),
     "honeycomb_cg_gates": ("tenax.algorithms.coarse_grain", "honeycomb_cg_gates"),
     "kagome_cg_gates": ("tenax.algorithms.coarse_grain", "kagome_cg_gates"),
+    # pess (kagome iPESS)
+    "IPESSState": ("tenax.algorithms.pess", "IPESSState"),
+    "kagome_triangle_xxz_hamiltonian": (
+        "tenax.algorithms.pess",
+        "kagome_triangle_xxz_hamiltonian",
+    ),
+    "kagome_xxz_pess_cg_gates": (
+        "tenax.algorithms.pess",
+        "kagome_xxz_pess_cg_gates",
+    ),
+    "pess_simple_update": ("tenax.algorithms.pess", "pess_simple_update"),
+    "pess_to_kagome_supersite": (
+        "tenax.algorithms.pess",
+        "pess_to_kagome_supersite",
+    ),
+    "build_pess_loss": ("tenax.algorithms.pess_optimize", "build_pess_loss"),
+    "optimize_pess_ad": ("tenax.algorithms.pess_optimize", "optimize_pess_ad"),
     # auto_mpo
     "AutoMPO": ("tenax.algorithms.auto_mpo", "AutoMPO"),
     "HamiltonianTerm": ("tenax.algorithms.auto_mpo", "HamiltonianTerm"),
@@ -403,6 +420,13 @@ __all__ = [
     "compute_energy_cg",
     "honeycomb_cg_gates",
     "kagome_cg_gates",
+    "IPESSState",
+    "kagome_triangle_xxz_hamiltonian",
+    "kagome_xxz_pess_cg_gates",
+    "pess_simple_update",
+    "pess_to_kagome_supersite",
+    "build_pess_loss",
+    "optimize_pess_ad",
     # Honeycomb CTM (native rank-4, 6-corner, 3-direction, 2-sublattice)
     "honeycomb_ctm_energy_implicit",
     "honeycomb_ctm_run",

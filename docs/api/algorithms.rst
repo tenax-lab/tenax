@@ -123,6 +123,31 @@ available via the same shim:
 * ``tenax.algorithms.honeycomb_ctm.HONEYCOMB_DIRECTIONS`` — the canonical
   direction tuple ``("e0", "e1", "e2")``.
 
+Kagome iPESS
+------------
+
+Differentiable iPESS for the kagome lattice (spin-½ and spin-1 XXZ).
+The state is parameterized by two simplex tensors ``T_u``, ``T_d`` and
+three site tensors ``R_a``, ``R_b``, ``R_c``; triangle simple update
+provides a warm start and L-BFGS through the square coarse-grained
+CTM (Convention C, Liao 2019) refines the iPESS primitives.
+
+.. autoclass:: tenax.algorithms.pess.IPESSState
+   :members:
+   :no-index:
+
+.. autofunction:: tenax.algorithms.pess.kagome_triangle_xxz_hamiltonian
+
+.. autofunction:: tenax.algorithms.pess.pess_simple_update
+
+.. autofunction:: tenax.algorithms.pess.pess_to_kagome_supersite
+
+.. autofunction:: tenax.algorithms.pess.kagome_xxz_pess_cg_gates
+
+.. autofunction:: tenax.algorithms.pess_optimize.build_pess_loss
+
+.. autofunction:: tenax.algorithms.pess_optimize.optimize_pess_ad
+
 Lattice
 -------
 
