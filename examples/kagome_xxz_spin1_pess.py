@@ -161,22 +161,32 @@ def hosvd_truncate(
     core = jnp.tensordot(U_c.T, core, axes=([1], [2]))
     core = core.transpose(1, 2, 0)
 
-    # Extract lambda vectors
-    _, lam_a, _ = jnp.linalg.svd(
-        core.reshape(D_int_a, D_int_b * D_int_c), full_matrices=False
-    )
-    _, lam_b, _ = jnp.linalg.svd(
+    # Extract per-bond singular values, then factor them OUT of ``core`` so
+    # the bond spectra live exclusively in the explicit lambdas (avoids
+    # double-counting when ``S_a_w = lam_ext * R * lam_int`` re-applies them
+    # next SU step). See ``src/tenax/algorithms/pess.py:hosvd_truncate``.
+    sig_a = jnp.linalg.svd(core.reshape(D_int_a, D_int_b * D_int_c), compute_uv=False)
+    sig_b = jnp.linalg.svd(
         core.transpose(1, 0, 2).reshape(D_int_b, D_int_a * D_int_c),
-        full_matrices=False,
+        compute_uv=False,
     )
-    _, lam_c, _ = jnp.linalg.svd(
+    sig_c = jnp.linalg.svd(
         core.transpose(2, 0, 1).reshape(D_int_c, D_int_a * D_int_b),
-        full_matrices=False,
+        compute_uv=False,
     )
+    eps = 1e-12
+    inv_a = (sig_a / (sig_a**2 + eps**2)).astype(core.dtype)
+    inv_b = (sig_b / (sig_b**2 + eps**2)).astype(core.dtype)
+    inv_c = (sig_c / (sig_c**2 + eps**2)).astype(core.dtype)
+    norm_a = jnp.linalg.norm(sig_a)
+    norm_b = jnp.linalg.norm(sig_b)
+    norm_c = jnp.linalg.norm(sig_c)
+    K = (norm_a * norm_b * norm_c).astype(core.dtype)
+    core = core * inv_a[:, None, None] * inv_b[None, :, None] * inv_c[None, None, :] * K
 
-    lam_a = lam_a / jnp.linalg.norm(lam_a)
-    lam_b = lam_b / jnp.linalg.norm(lam_b)
-    lam_c = lam_c / jnp.linalg.norm(lam_c)
+    lam_a = sig_a / norm_a
+    lam_b = sig_b / norm_b
+    lam_c = sig_c / norm_c
 
     S_a = U_a.reshape(D_ext_a, d, D_int_a).transpose(0, 2, 1)
     S_b = U_b.reshape(D_ext_b, d, D_int_b).transpose(0, 2, 1)
@@ -243,16 +253,28 @@ def pess_simple_update(
         )
         lambdas[0], lambdas[1], lambdas[2] = lam_int_up
 
-        S_a, S_b, S_c, T_down, lam_int_down = pess_simple_update_triangle(
-            S_a,
-            S_b,
-            S_c,
+        # Down-triangle: transpose S_x around the call so axis 0 of the
+        # passed-in tensor is the T_u-leg (ext side for the down SU).
+        # Without this, ``pess_simple_update_triangle`` would tie T_d to
+        # the T_u-leg of S and the down triangle would not actually evolve
+        # under SU. See library: ``pess_simple_update_triangle`` in
+        # ``src/tenax/algorithms/pess.py`` for the same fix.
+        S_a_T = S_a.transpose(1, 0, 2)
+        S_b_T = S_b.transpose(1, 0, 2)
+        S_c_T = S_c.transpose(1, 0, 2)
+        S_a_T, S_b_T, S_c_T, T_down, lam_int_down = pess_simple_update_triangle(
+            S_a_T,
+            S_b_T,
+            S_c_T,
             T_down,
             lambdas_ext=[lambdas[0], lambdas[1], lambdas[2]],
             lambdas_int=[lambdas[3], lambdas[4], lambdas[5]],
             gate=gate,
             D_max=D_max,
         )
+        S_a = S_a_T.transpose(1, 0, 2)
+        S_b = S_b_T.transpose(1, 0, 2)
+        S_c = S_c_T.transpose(1, 0, 2)
         lambdas[3], lambdas[4], lambdas[5] = lam_int_down
 
         if (step + 1) % max(1, num_steps // 10) == 0 or step == 0:

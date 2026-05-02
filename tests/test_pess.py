@@ -147,7 +147,11 @@ def test_trotter_gate_imag_time_decreases_norm_on_excited_state():
 
 
 def test_hosvd_truncate_idempotent_no_truncation():
-    """If D_max >= input dim, theta should round-trip."""
+    """If D_max >= input dim, theta should round-trip when the explicit
+    lambda gauges are folded back in. The bond spectra are factored out
+    of ``core`` and live in the returned ``lams``; recombining them
+    along each mode reproduces ``theta`` exactly.
+    """
     from tenax.algorithms.pess import hosvd_truncate
 
     D, d = 3, 3
@@ -157,9 +161,20 @@ def test_hosvd_truncate_idempotent_no_truncation():
         + 1j * jax.random.normal(jax.random.fold_in(key, 1), (D, D, D, d, d, d))
     ).astype(jnp.complex128)
     S_a, S_b, S_c, core, lams = hosvd_truncate(theta, D_max=D * d, d=d)
-    # Reconstruct theta:
-    # theta[a,b,c,p_a,p_b,p_c] = sum_{i,j,k} S_a[a,i,p_a] * S_b[b,j,p_b] * S_c[c,k,p_c] * core[i,j,k]
-    theta_reco = jnp.einsum("aip,bjq,ckr,ijk->abcpqr", S_a, S_b, S_c, core)
+    # Reconstruct theta with the explicit bond-gauge lambdas inserted on
+    # each internal bond:
+    # theta[a,b,c,p_a,p_b,p_c]
+    #   = sum_{i,j,k} S_a[a,i,p_a] lam_a[i] S_b[b,j,p_b] lam_b[j] S_c[c,k,p_c] lam_c[k] core[i,j,k]
+    theta_reco = jnp.einsum(
+        "aip,i,bjq,j,ckr,k,ijk->abcpqr",
+        S_a,
+        lams[0].astype(theta.dtype),
+        S_b,
+        lams[1].astype(theta.dtype),
+        S_c,
+        lams[2].astype(theta.dtype),
+        core,
+    )
     np.testing.assert_allclose(theta, theta_reco, atol=1e-10)
 
 
@@ -198,8 +213,19 @@ def test_hosvd_truncate_under_truncation():
         np.testing.assert_allclose(gram, eye, atol=1e-10)
 
     # 3. The truncated reconstruction is a non-trivial approximation: it
-    # is closer to theta than the zero tensor would be.
-    theta_reco = jnp.einsum("aip,bjq,ckr,ijk->abcpqr", S_a, S_b, S_c, core)
+    # is closer to theta than the zero tensor would be. Lambdas live in
+    # the explicit ``lams`` tuple, so they must be folded back in for the
+    # reconstruction to match the un-truncated theta.
+    theta_reco = jnp.einsum(
+        "aip,i,bjq,j,ckr,k,ijk->abcpqr",
+        S_a,
+        lams[0].astype(theta.dtype),
+        S_b,
+        lams[1].astype(theta.dtype),
+        S_c,
+        lams[2].astype(theta.dtype),
+        core,
+    )
     err = jnp.linalg.norm(theta - theta_reco)
     norm_theta = jnp.linalg.norm(theta)
     assert float(err) < float(norm_theta)
@@ -208,33 +234,49 @@ def test_hosvd_truncate_under_truncation():
 def _build_theta_full(state, triangle):
     """Reference: build the gauged theta tensor from an IPESSState.
 
-    Uses the same gauging as ``pess_simple_update_triangle``: external lambdas
-    on axis 0 of each R, internal lambdas on axis 1, contracted with the
-    chosen simplex tensor.
+    Geometrically correct gauging per ``IPESSState`` convention
+    (axis 0 of R = T_d-leg, axis 1 = T_u-leg):
+
+    - ``"up"``: ext (down-bonds) live on axis 0 of R, int (up-bonds) on
+      axis 1. T_u contracts axis 1 of R.
+    - ``"down"``: ext (up-bonds) live on axis 1 of R, int (down-bonds)
+      on axis 0. T_d contracts axis 0 of R.
+
+    The output theta has shape ``(D_ext_a, D_ext_b, D_ext_c, d, d, d)``
+    where ``D_ext`` is the size of the leg the ext lambdas live on.
     """
     if triangle == "up":
         T = state.T_u
-        ext = (state.lambdas[3], state.lambdas[4], state.lambdas[5])
-        int_ = (state.lambdas[0], state.lambdas[1], state.lambdas[2])
-    else:
-        T = state.T_d
-        ext = (state.lambdas[0], state.lambdas[1], state.lambdas[2])
-        int_ = (state.lambdas[3], state.lambdas[4], state.lambdas[5])
-    Sa = jnp.einsum("i,ijd,j->ijd", ext[0], state.R_a, int_[0])
-    Sb = jnp.einsum("i,ijd,j->ijd", ext[1], state.R_b, int_[1])
-    Sc = jnp.einsum("i,ijd,j->ijd", ext[2], state.R_c, int_[2])
-    return jnp.einsum("xad,ybf,zcg,abc->xyzdfg", Sa, Sb, Sc, T)
+        ext = (state.lambdas[3], state.lambdas[4], state.lambdas[5])  # T_d-leg = axis 0
+        int_ = (
+            state.lambdas[0],
+            state.lambdas[1],
+            state.lambdas[2],
+        )  # T_u-leg = axis 1
+        # ext on axis 0 (i), int on axis 1 (j); T_u contracts axis 1.
+        Sa = jnp.einsum("i,ijd,j->ijd", ext[0], state.R_a, int_[0])
+        Sb = jnp.einsum("i,ijd,j->ijd", ext[1], state.R_b, int_[1])
+        Sc = jnp.einsum("i,ijd,j->ijd", ext[2], state.R_c, int_[2])
+        return jnp.einsum("xad,ybf,zcg,abc->xyzdfg", Sa, Sb, Sc, T)
+    T = state.T_d
+    ext = (state.lambdas[0], state.lambdas[1], state.lambdas[2])  # T_u-leg = axis 1
+    int_ = (state.lambdas[3], state.lambdas[4], state.lambdas[5])  # T_d-leg = axis 0
+    # int on axis 0 (i), ext on axis 1 (j); T_d contracts axis 0.
+    Sa = jnp.einsum("i,ijd,j->ijd", int_[0], state.R_a, ext[0])
+    Sb = jnp.einsum("i,ijd,j->ijd", int_[1], state.R_b, ext[1])
+    Sc = jnp.einsum("i,ijd,j->ijd", int_[2], state.R_c, ext[2])
+    return jnp.einsum("axd,byf,czg,abc->xyzdfg", Sa, Sb, Sc, T)
 
 
 def test_su_step_identity_gate_no_truncation_is_identity_up():
-    """With identity gate and D_max >= D*d, the HOSVD-preserved quantity matches.
+    """With identity gate and D_max >= D*d, the gauged ``theta`` is preserved
+    exactly when both external AND internal lambdas are folded back into the
+    R sites.
 
-    The gauged ``theta`` (ext * R_old * int_old contracted with T_old) is
-    bitwise identical (up to numerical tolerance) to the same quantity
-    constructed from the new state with the OLD external lambdas and the OLD
-    internal lambdas absorbed via the HOSVD identity ``S * core == theta``.
-    Concretely: with R_new = lam_ext_inv * S, T_new = core, and lambdas[ext]
-    untouched, we have ``(lam_ext * R_new) * T_new == S * core == theta``.
+    The bond spectra are factored OUT of ``T_new`` (= core) and live in the
+    explicit internal lambdas, so the reconstruction
+    ``(lam_ext * R_new * lam_int) * T_new`` exactly equals
+    ``(lam_ext * R_old * lam_int_old) * T_old``.
     """
     from tenax.algorithms.pess import pess_simple_update_triangle
 
@@ -245,11 +287,15 @@ def test_su_step_identity_gate_no_truncation_is_identity_up():
 
     theta_orig = _build_theta_full(state, "up")
 
-    # Contract the new state with ONLY external lambdas (no internal) to
-    # recover S * core, which equals the original gauged theta.
-    Sa = jnp.einsum("i,ijd->ijd", new_state.lambdas[3], new_state.R_a)
-    Sb = jnp.einsum("i,ijd->ijd", new_state.lambdas[4], new_state.R_b)
-    Sc = jnp.einsum("i,ijd->ijd", new_state.lambdas[5], new_state.R_c)
+    Sa = jnp.einsum(
+        "i,ijd,j->ijd", new_state.lambdas[3], new_state.R_a, new_state.lambdas[0]
+    )
+    Sb = jnp.einsum(
+        "i,ijd,j->ijd", new_state.lambdas[4], new_state.R_b, new_state.lambdas[1]
+    )
+    Sc = jnp.einsum(
+        "i,ijd,j->ijd", new_state.lambdas[5], new_state.R_c, new_state.lambdas[2]
+    )
     theta_new = jnp.einsum("xad,ybf,zcg,abc->xyzdfg", Sa, Sb, Sc, new_state.T_u)
     np.testing.assert_allclose(theta_orig, theta_new, atol=1e-10)
 
@@ -260,7 +306,12 @@ def test_su_step_identity_gate_no_truncation_is_identity_up():
 
 
 def test_su_step_identity_gate_no_truncation_is_identity_down():
-    """Same as the 'up' check, but for the down triangle."""
+    """Same as the 'up' check, but for the down triangle.
+
+    Geometric reconstruction: int (down-bonds, indices 3-5) on axis 0
+    (T_d-leg), ext (up-bonds, indices 0-2) on axis 1 (T_u-leg); T_d
+    contracts axis 0 of R.
+    """
     from tenax.algorithms.pess import pess_simple_update_triangle
 
     D, d = 2, 3
@@ -270,17 +321,59 @@ def test_su_step_identity_gate_no_truncation_is_identity_down():
 
     theta_orig = _build_theta_full(state, "down")
 
-    # For "down", external lambdas live at indices (0, 1, 2).
-    Sa = jnp.einsum("i,ijd->ijd", new_state.lambdas[0], new_state.R_a)
-    Sb = jnp.einsum("i,ijd->ijd", new_state.lambdas[1], new_state.R_b)
-    Sc = jnp.einsum("i,ijd->ijd", new_state.lambdas[2], new_state.R_c)
-    theta_new = jnp.einsum("xad,ybf,zcg,abc->xyzdfg", Sa, Sb, Sc, new_state.T_d)
+    Sa = jnp.einsum(
+        "i,ijd,j->ijd", new_state.lambdas[3], new_state.R_a, new_state.lambdas[0]
+    )
+    Sb = jnp.einsum(
+        "i,ijd,j->ijd", new_state.lambdas[4], new_state.R_b, new_state.lambdas[1]
+    )
+    Sc = jnp.einsum(
+        "i,ijd,j->ijd", new_state.lambdas[5], new_state.R_c, new_state.lambdas[2]
+    )
+    theta_new = jnp.einsum("axd,byf,czg,abc->xyzdfg", Sa, Sb, Sc, new_state.T_d)
     np.testing.assert_allclose(theta_orig, theta_new, atol=1e-10)
 
     # Other simplex (T_u) and external lambdas (0,1,2) must be untouched.
     np.testing.assert_array_equal(state.T_u, new_state.T_u)
     for i in (0, 1, 2):
         np.testing.assert_array_equal(state.lambdas[i], new_state.lambdas[i])
+
+
+def test_su_step_identity_gate_is_stationary_after_one_step():
+    """Identity-gate SU must be a fixed point AFTER one step.
+
+    With the bond spectra factored out of ``core``, applying SU again with
+    an identity gate must reproduce the same lambdas (steady state).
+
+    Regression test: the original ``hosvd_truncate`` left the bond spectra
+    inside ``core`` while ALSO returning explicit normalized lambdas. The
+    next SU step then re-applied those lambdas as gauges, squaring the
+    relative bond spectrum every iteration. After ~10 steps every lambda
+    collapsed to a rank-1 distribution, pinning SU at the classical 120°
+    energy on spin-½ kagome (the bug behind PR #387's stalled E = -0.25).
+    """
+    from tenax.algorithms.pess import pess_simple_update_triangle
+
+    D, d = 4, 2
+    state = IPESSState.random(D=D, d=d, key=jax.random.PRNGKey(0))
+    gate_id = jnp.eye(d**3, dtype=jnp.complex128).reshape(d, d, d, d, d, d)
+
+    state1 = pess_simple_update_triangle(state, gate_id, "up", D_max=D)
+    state2 = pess_simple_update_triangle(state1, gate_id, "up", D_max=D)
+    state3 = pess_simple_update_triangle(state2, gate_id, "up", D_max=D)
+
+    # After the first identity step the lambdas reflect the random
+    # initial state's HOSVD spectrum. Subsequent identity steps must NOT
+    # change them (no spectrum squaring).
+    for i in range(3):
+        np.testing.assert_allclose(state2.lambdas[i], state1.lambdas[i], atol=1e-10)
+        np.testing.assert_allclose(state3.lambdas[i], state1.lambdas[i], atol=1e-10)
+
+    # Same stability test on the down triangle.
+    state1d = pess_simple_update_triangle(state, gate_id, "down", D_max=D)
+    state2d = pess_simple_update_triangle(state1d, gate_id, "down", D_max=D)
+    for i in range(3, 6):
+        np.testing.assert_allclose(state2d.lambdas[i], state1d.lambdas[i], atol=1e-10)
 
 
 def test_su_step_invalid_triangle_raises():
@@ -300,23 +393,12 @@ def test_su_step_invalid_triangle_raises():
 def _local_triangle_energy(state, H_tri, triangle="up"):
     """Environment-free local triangle energy: <psi_tri | H_tri | psi_tri> / <psi_tri | psi_tri>.
 
-    Used as a quick monotonicity check for the SU algorithm — it is NOT the
-    true infinite-system energy, but is monotonically decreasing under SU on
-    the same triangle.
+    Quick monotonicity check for SU. Reuses :func:`_build_theta_full` for
+    the geometric gauging convention (ext on the leg away from the
+    simplex being considered, int on the leg toward it; T contracted on
+    the int-side leg of R).
     """
-    if triangle == "up":
-        T = state.T_u
-        ext = (state.lambdas[3], state.lambdas[4], state.lambdas[5])
-        int_ = (state.lambdas[0], state.lambdas[1], state.lambdas[2])
-    else:
-        T = state.T_d
-        ext = (state.lambdas[0], state.lambdas[1], state.lambdas[2])
-        int_ = (state.lambdas[3], state.lambdas[4], state.lambdas[5])
-    Sa = jnp.einsum("i,ijd,j->ijd", ext[0], state.R_a, int_[0])
-    Sb = jnp.einsum("i,ijd,j->ijd", ext[1], state.R_b, int_[1])
-    Sc = jnp.einsum("i,ijd,j->ijd", ext[2], state.R_c, int_[2])
-    psi_tri = jnp.einsum("xad,ybf,zcg,abc->xyzdfg", Sa, Sb, Sc, T)
-
+    psi_tri = _build_theta_full(state, triangle)
     d = state.R_a.shape[2]
     H_resh = jnp.asarray(H_tri).reshape(d, d, d, d, d, d).astype(jnp.complex128)
     psi_H_psi = jnp.einsum("xyzdfg,DFGdfg,xyzDFG->", psi_tri.conj(), H_resh, psi_tri)
@@ -333,6 +415,40 @@ def test_su_decreases_energy_d2():
     e0 = _local_triangle_energy(state0, H)
     e1 = _local_triangle_energy(state1, H)
     assert e1 < e0
+
+
+def test_su_isotropic_heisenberg_evolves_both_triangles():
+    """For isotropic Heisenberg on kagome (where H_up = H_dn), SU must
+    evolve up and down triangles symmetrically. After a moderate
+    schedule the two local triangle energies must agree to a few
+    percent.
+
+    Regression: the original ``pess_simple_update_triangle`` always
+    contracted the simplex via R's axis 1 regardless of triangle, so
+    the down-triangle gate was tied to the T_u-leg of R rather than
+    the T_d-leg. Result: only the up-triangle actually converged
+    under SU; the down-triangle stayed near its random initial energy
+    (E_dn ≈ 0 while E_up → -0.75 at D=4 spin-½). The fix transposes R
+    around the SU body so T_d contracts axis 0.
+    """
+    from tenax.algorithms.pess import pess_simple_update
+
+    D, d = 4, 2
+    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=d)
+    state = IPESSState.random(D=D, d=d, key=jax.random.PRNGKey(1))
+    state = pess_simple_update(state, H, dt_schedule=[(0.1, 100), (0.01, 200)], D_max=D)
+    e_up = _local_triangle_energy(state, H, "up")
+    e_dn = _local_triangle_energy(state, H, "down")
+    assert abs(e_up - e_dn) < 0.01, (
+        f"Up/down asymmetry: E_up={e_up:.4f}, E_dn={e_dn:.4f} "
+        f"(diff={abs(e_up - e_dn):.4f}). Pre-fix this gap was ~0.7."
+    )
+    # Also: per-site env-free energy must be well below classical 120° (-0.25).
+    e_per_site = (e_up + e_dn) / 3.0
+    assert e_per_site < -0.30, (
+        f"Per-site E={e_per_site:.4f} not below classical -0.25 "
+        "— SU may have collapsed to product state again."
+    )
 
 
 # ---------------------------------------------------------------------------

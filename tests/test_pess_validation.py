@@ -53,13 +53,16 @@ def test_kagome_spin12_d2_smoke():
 
 @pytest.mark.slow
 def test_kagome_spin1_d2_smoke():
-    """Spin-1 kagome Heisenberg at D=2, χ=8: per-site energy in ``[-1.10, -0.90]``.
+    """Spin-1 kagome Heisenberg at D=2, χ=8: per-site energy in ``[-1.20, -1.00]``.
 
-    Picot 2016 large-``D`` target is ``E/site ≈ -1.41``. ``D=2`` lands
-    around ``-1.00``, well below the classical Néel limit ``-3/4`` for
-    spin-1 but above the converged value. The window allows for
-    sweep-to-sweep noise from random init and short SU schedules
-    while excluding any pipeline regression.
+    Picot 2016 large-``D`` target is ``E/site ≈ -1.41``. With the fixed
+    ``hosvd_truncate`` (no SU lambda double-counting) ``D=2`` lands
+    around ``-1.13``, well below the classical Néel limit ``-3/4`` for
+    spin-1 but still above the converged value because the iPESS bond
+    dimension is too small. The window allows for sweep-to-sweep noise
+    from random init and short SU schedules while excluding any
+    pipeline regression. Pre-fix the SU collapsed to a near-classical
+    state and the same call landed near ``-1.0``.
     """
     mod = _import_from_examples("kagome_spin1_pess_ad_benchmark")
     _, e_ad, _ = mod.run_kagome_spin1_benchmark(
@@ -68,4 +71,4 @@ def test_kagome_spin1_d2_smoke():
         max_iter=5,
         su_steps=((0.1, 100), (0.01, 50)),
     )
-    assert -1.10 < e_ad < -0.90, f"E/site={e_ad:.6f} outside [-1.10, -0.90]"
+    assert -1.20 < e_ad < -1.00, f"E/site={e_ad:.6f} outside [-1.20, -1.00]"

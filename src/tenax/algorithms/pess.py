@@ -98,7 +98,10 @@ def hosvd_truncate(
         ``S_x`` has shape ``(D_x_ext, D_x_int, d)``, ``core`` has shape
         ``(D_a_int, D_b_int, D_c_int)``, and each ``lam_x`` is a unit-norm
         singular-value vector along the corresponding internal bond. The
-        reconstruction ``einsum("aip,bjq,ckr,ijk->abcpqr", S_a, S_b, S_c, core)``
+        bond spectra are factored OUT of ``core`` and live exclusively in
+        the explicit ``lam_x`` vectors, so the reconstruction
+        ``einsum("aip,i,bjq,j,ckr,k,ijk->abcpqr",
+                 S_a, lam_a, S_b, lam_b, S_c, lam_c, core)``
         equals ``theta`` exactly when ``D_max >= D_x * d`` for every leg.
     """
     D_ext_a, D_ext_b, D_ext_c = theta.shape[0], theta.shape[1], theta.shape[2]
@@ -137,19 +140,50 @@ def hosvd_truncate(
 
     # Extract per-bond singular value vectors from the core. We only need the
     # singular values, so skip the U/V allocations via compute_uv=False.
-    lam_a = jnp.linalg.svd(core.reshape(D_int_a, D_int_b * D_int_c), compute_uv=False)
-    lam_b = jnp.linalg.svd(
+    sig_a = jnp.linalg.svd(core.reshape(D_int_a, D_int_b * D_int_c), compute_uv=False)
+    sig_b = jnp.linalg.svd(
         core.transpose(1, 0, 2).reshape(D_int_b, D_int_a * D_int_c),
         compute_uv=False,
     )
-    lam_c = jnp.linalg.svd(
+    sig_c = jnp.linalg.svd(
         core.transpose(2, 0, 1).reshape(D_int_c, D_int_a * D_int_b),
         compute_uv=False,
     )
 
-    lam_a = lam_a / jnp.linalg.norm(lam_a)
-    lam_b = lam_b / jnp.linalg.norm(lam_b)
-    lam_c = lam_c / jnp.linalg.norm(lam_c)
+    # Factor the bond spectra OUT of ``core`` so they live exclusively in the
+    # explicit lambda vectors. Without this step, ``core`` carries the spectra
+    # baked into its matricizations AND the same spectra are re-applied as
+    # gauges on the next SU step (via ``pess_simple_update_triangle``'s
+    # ``S_a_w = lam_ext * R * lam_int``), squaring the relative bond spectrum
+    # every iteration. That double-counting drives all six lambdas to a
+    # rank-1 distribution within ~10 SU steps and pins the energy at the
+    # classical 120° value (codex/triage on PR #387).
+    #
+    # Lorentzian-regularized inverse ``σ / (σ² + ε²)`` is smoother than a
+    # hard ``1/σ`` near zero, which matters when ``D_max`` exceeds the rank
+    # of ``mat_x(theta)`` and some kept singular values are numerically
+    # vanishing.
+    eps = 1e-12
+    inv_a = (sig_a / (sig_a**2 + eps**2)).astype(core.dtype)
+    inv_b = (sig_b / (sig_b**2 + eps**2)).astype(core.dtype)
+    inv_c = (sig_c / (sig_c**2 + eps**2)).astype(core.dtype)
+
+    norm_a = jnp.linalg.norm(sig_a)
+    norm_b = jnp.linalg.norm(sig_b)
+    norm_c = jnp.linalg.norm(sig_c)
+    # Per-mode division strips the un-normalized spectrum from ``core``; the
+    # scalar prefactor ``norm_a*norm_b*norm_c`` keeps reconstruction with
+    # NORMALIZED lambdas exact:
+    #   einsum("aip,i,bjq,j,ckr,k,ijk->abcpqr",
+    #          S, lam_a, S, lam_b, S, lam_c, core) == theta
+    # without it, identity-gate SU would still strip an overall scale per
+    # step and the state norm would drift toward zero across many steps.
+    K = (norm_a * norm_b * norm_c).astype(core.dtype)
+    core = core * inv_a[:, None, None] * inv_b[None, :, None] * inv_c[None, None, :] * K
+
+    lam_a = sig_a / norm_a
+    lam_b = sig_b / norm_b
+    lam_c = sig_c / norm_c
 
     S_a = U_a.reshape(D_ext_a, d, D_int_a).transpose(0, 2, 1)
     S_b = U_b.reshape(D_ext_b, d, D_int_b).transpose(0, 2, 1)
@@ -473,10 +507,28 @@ def pess_simple_update_triangle(
         T = state.T_u
         ext_idx = (3, 4, 5)
         int_idx = (0, 1, 2)
+        # ``IPESSState`` convention: R axis 0 = T_d-leg, axis 1 = T_u-leg.
+        # For "up" SU the ext side (away from the simplex being updated) is
+        # the T_d-leg (axis 0) and the int side (toward T_u being updated)
+        # is the T_u-leg (axis 1). The body of this function assumes this
+        # axis layout (ext on axis 0, int on axis 1, simplex contracts
+        # axis 1 of R), so no transpose is needed.
+        R_a, R_b, R_c = state.R_a, state.R_b, state.R_c
     elif triangle == "down":
         T = state.T_d
         ext_idx = (0, 1, 2)
         int_idx = (3, 4, 5)
+        # For "down" SU the ext side is the T_u-leg (axis 1) and the int
+        # side (toward T_d being updated) is the T_d-leg (axis 0).
+        # Transpose axes 0 and 1 so the body sees ext on axis 0 again;
+        # transpose back at the end. Without this, the simplex contraction
+        # (which always contracts R's axis-1 leg via the einsum below)
+        # would tie T_d to the T_u-leg of R, which is geometrically wrong:
+        # the down-triangle gate would not actually evolve the down-bonds
+        # and only the up-triangle would converge under SU.
+        R_a = state.R_a.transpose(1, 0, 2)
+        R_b = state.R_b.transpose(1, 0, 2)
+        R_c = state.R_c.transpose(1, 0, 2)
     else:
         raise ValueError(f"triangle must be 'up' or 'down'; got {triangle!r}.")
 
@@ -491,7 +543,6 @@ def pess_simple_update_triangle(
         state.lambdas[int_idx[2]],
     )
 
-    R_a, R_b, R_c = state.R_a, state.R_b, state.R_c
     d = R_a.shape[2]
 
     # Weight site tensors with ext (axis 0) and int (axis 1) lambdas.
@@ -517,6 +568,14 @@ def pess_simple_update_triangle(
     R_a_new = jnp.einsum("i,ijd->ijd", inv_a, S_a_new)
     R_b_new = jnp.einsum("i,ijd->ijd", inv_b, S_b_new)
     R_c_new = jnp.einsum("i,ijd->ijd", inv_c, S_c_new)
+
+    if triangle == "down":
+        # After the SU body, R_x_new has axis 0 = the un-gauged T_u-leg and
+        # axis 1 = the new T_d-leg from HOSVD. Transpose back so axis 0 =
+        # T_d-leg per IPESSState convention.
+        R_a_new = R_a_new.transpose(1, 0, 2)
+        R_b_new = R_b_new.transpose(1, 0, 2)
+        R_c_new = R_c_new.transpose(1, 0, 2)
 
     # Build new lambdas tuple with the int triplet replaced.
     new_lambdas = list(state.lambdas)
