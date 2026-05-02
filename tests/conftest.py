@@ -61,6 +61,7 @@ _FILE_MARKERS = {
     "test_ipeps_config.py": "core",
     "test_pess.py": "algorithm",
     "test_pess_ad.py": "algorithm",
+    "test_pess_validation.py": "slow",
 }
 
 
