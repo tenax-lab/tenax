@@ -360,6 +360,27 @@ def pess_to_kagome_supersite(
     :func:`tenax.algorithms.coarse_grain.kagome_cg_gates` (sub-site 0
     = ``a`` = ``u``, 1 = ``b`` = ``v``, 2 = ``c`` = ``w``).
 
+    .. warning::
+        **Odd-D AD instability.** The dummy 4th virtual bond contributes
+        ``D − 1`` zero singular values per direction to the square-CTM
+        SVD projector. At even ``D`` (2, 4, 6, …) this stays absorbed
+        and the AD path is numerically clean; at odd ``D`` (especially
+        ``D = 3``) the projector spectrum is sufficiently degenerate
+        that the converged CTM energy can flip between physically
+        sensible values and zero across nearby ``chi`` choices, which
+        cascades into ill-conditioned implicit-AD gradients. Until the
+        AD path is hardened against this (e.g. Lorentzian-regularized
+        eigh projector or QR-warmup → SVD with ``S_safe`` floor), use
+        even ``D`` for any AD-driven optimization.
+
+        This affects **only the AD path** (`build_pess_loss`,
+        `optimize_pess_ad`). The simple-update flow
+        (:func:`pess_simple_update_triangle`,
+        :func:`pess_simple_update`) operates directly on the iPESS
+        primitives via HOSVD truncation and does **not** construct
+        this supersite; SU is unaffected at every ``D``, including
+        odd values.
+
     Args:
         R_a, R_b, R_c: iPESS site tensors of shape ``(D, D, d)``,
             axes ``(T_d-leg, T_u-leg, phys)``.
