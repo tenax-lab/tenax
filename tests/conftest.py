@@ -71,7 +71,7 @@ def pytest_collection_modifyitems(items):
 
 # ------------------------------------------------------------------ #
 # Cap memory growth across tests by clearing the JAX in-memory       #
-# compile cache after each test.                                      #
+# compile cache once peak RSS crosses a threshold.                    #
 #                                                                    #
 # Why this matters: each AD/CTM test compiles a distinct JAX/XLA     #
 # variant (different chi, charges, optimizer config, ...). The JIT   #
@@ -83,15 +83,52 @@ def pytest_collection_modifyitems(items):
 # ``jax.clear_caches()`` releases the Python-side cache references   #
 # so XLA can reuse buffer slots; combined with ``gc.collect()`` it   #
 # bounds peak RSS to a single test's working set (~5 GB) instead of  #
-# accumulating. Cost: ~+10% runtime for a recompile on the next test.#
-# The persistent on-disk cache (``~/.cache/jax``, see                #
+# accumulating. The persistent on-disk cache (``~/.cache/jax``, see  #
 # ``tenax/__init__.py``) is preserved, so cross-session reuse still  #
 # works.                                                             #
+#                                                                    #
+# Threshold gating: ``ru_maxrss`` is monotonic, so once a bucket's   #
+# peak crosses the threshold we clear from then on, but cheap        #
+# buckets that never cross stay fast forever.                        #
+#                                                                    #
+# Threshold tuning (measured locally, 735-test ``-m core`` run):     #
+#                                                                    #
+#   threshold     core peak       core time   fast-ipeps?            #
+#   2 GB          3.0 GB          12m51s      OK (cleared)           #
+#   4 GB          4.8 GB           9m15s      OK (cleared)           #
+#   6 GB          5.6 GB           2m53s      OK (cleared @ t#44)    #
+#   ∞ (no clear)  5.6 GB           2m54s      18 GB → OOM            #
+#                                                                    #
+# 6 GB is the sweet spot: above ``-m core`` natural peak (5.6 GB) so #
+# the cheap bucket stays at baseline speed, but below the 7 GB GH    #
+# Linux runner limit so fast-ipeps still engages clearing in time    #
+# (its first AD-heavy test crosses 6 GB at iteration ~44, well       #
+# before the without-clearing snowball reaches 7 GB OOM).            #
 # ------------------------------------------------------------------ #
+
+_RSS_CLEAR_THRESHOLD_MB = 6000
+
+
+def _peak_rss_mb() -> float:
+    """Peak RSS used by this process, in MB.
+
+    ``ru_maxrss`` units differ by platform (BSD convention): macOS reports
+    bytes, Linux reports KB.
+    """
+    import resource
+    import sys
+
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        return rss / (1024 * 1024)
+    return rss / 1024
 
 
 @pytest.hookimpl(trylast=True)
 def pytest_runtest_teardown(item, nextitem):
+    if _peak_rss_mb() < _RSS_CLEAR_THRESHOLD_MB:
+        return
+
     import gc
 
     jax.clear_caches()
