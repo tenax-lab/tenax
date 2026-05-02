@@ -40,6 +40,90 @@ def test_triangle_hamiltonian_xy_isotropic():
     assert np.linalg.norm(diff) > 0
 
 
+def test_triangle_hamiltonian_ed_spectrum_spin_half():
+    """ED spectrum of the spin-1/2 isotropic triangle.
+
+    For SU(2) Heisenberg on a triangle ``H = J Σ_<ij> S_i·S_j``, the
+    operator identity ``S_tot² = Σ S_i² + 2 Σ S_i·S_j`` gives
+    ``H = (S_tot² - 9/4) / 2``. The spin-1/2 triangle decomposes into
+    two ``S=1/2`` doublets (4 states at ``E=-3/4``) and one ``S=3/2``
+    quartet (4 states at ``E=+3/4``). Verifying the full spectrum
+    catches any sign or normalization regression in
+    :func:`kagome_triangle_xxz_hamiltonian`.
+    """
+    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=2)
+    evals = np.linalg.eigvalsh(H)
+    expected = np.array([-0.75] * 4 + [0.75] * 4)
+    np.testing.assert_allclose(evals, expected, atol=1e-12)
+
+
+def test_triangle_hamiltonian_ed_spectrum_spin_one():
+    """ED spectrum of the spin-1 isotropic triangle.
+
+    Spin-1 Heisenberg triangle: ``H = (S_tot² - 6) / 2``. Total spin
+    decomposes as ``1 ⊗ 1 ⊗ 1 = 0 ⊕ 1⊕3 ⊕ 2⊕2 ⊕ 3``, giving
+    ``S_tot ∈ {0 (×1), 1 (×3), 2 (×2), 3 (×1)}`` with multiplicity
+    ``(2S+1)`` each — total ``1 + 3·3 + 2·5 + 1·7 = 27 = 3³``. The
+    eigenvalues ``(S_tot² - 6) / 2 = (S(S+1) - 6) / 2`` are
+    ``{-3, -2, 0, 3}`` with degeneracies ``{1, 9, 10, 7}``.
+    """
+    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=3)
+    evals = np.linalg.eigvalsh(H)
+    expected = np.concatenate(
+        [
+            np.full(1, -3.0),
+            np.full(9, -2.0),
+            np.full(10, 0.0),
+            np.full(7, 3.0),
+        ]
+    )
+    np.testing.assert_allclose(evals, expected, atol=1e-10)
+
+
+def test_triangle_hamiltonian_ed_xxz_easy_axis_spin_half():
+    """ED ground state in the Ising-anisotropic limit (XXZ Δ=2, spin-1/2).
+
+    At Δ=2 the SzSz term dominates the in-plane coupling. The
+    ground states are still in the ``S^z_total = ±1/2`` sector
+    (frustrated Néel-like configurations like ``|↑↑↓⟩`` with a
+    ferromagnetic-bond penalty). Easy-axis ED gives
+    ``E_gs = (1/4)·Δ·(-1) + 0.5·(spin-flip term...)`` which evaluates
+    numerically to the value below; matching it to 1e-12 is a strong
+    catch for any wiring regression on the XXZ anisotropy parameter.
+    """
+    H = kagome_triangle_xxz_hamiltonian(delta=2.0, d=2)
+    e_gs = float(np.linalg.eigvalsh(H)[0])
+    # Closed form: at Δ=2, H_tri eigenstates split into the same Stot
+    # sectors as the isotropic case but with shifted SzSz weight.
+    # Numerical reference recomputed from the same kron construction.
+    Sz = np.array([[0.5, 0], [0, -0.5]])
+    Sp = np.array([[0, 1.0], [0, 0]])
+    Sm = np.array([[0, 0], [1.0, 0]])
+    I2 = np.eye(2)
+
+    def _bond(A, B, C):
+        return 2.0 * np.kron(np.kron(A, B), C) + 0.5 * (
+            np.kron(np.kron(Sp, Sm), C) + np.kron(np.kron(Sm, Sp), C)
+        )
+
+    # H_12, H_23, H_31 with delta=2 each.
+    h12 = 2.0 * np.kron(np.kron(Sz, Sz), I2) + 0.5 * (
+        np.kron(np.kron(Sp, Sm), I2) + np.kron(np.kron(Sm, Sp), I2)
+    )
+    h23 = 2.0 * np.kron(I2, np.kron(Sz, Sz)) + 0.5 * (
+        np.kron(I2, np.kron(Sp, Sm)) + np.kron(I2, np.kron(Sm, Sp))
+    )
+    h31 = 2.0 * np.kron(Sz, np.kron(I2, Sz)) + 0.5 * (
+        np.kron(Sp, np.kron(I2, Sm)) + np.kron(Sm, np.kron(I2, Sp))
+    )
+    H_ref = h12 + h23 + h31
+    e_ref = float(np.linalg.eigvalsh(H_ref)[0])
+    assert abs(e_gs - e_ref) < 1e-12, (
+        f"ED ground state mismatch vs explicit kron reference: "
+        f"{e_gs:.10f} vs {e_ref:.10f}"
+    )
+
+
 def test_trotter_gate_unitarity_real_time():
     from tenax.algorithms.pess import make_triangle_gate
 
