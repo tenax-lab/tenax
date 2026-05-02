@@ -162,12 +162,22 @@ def hosvd_truncate(
 class IPESSState:
     """Kagome iPESS parameters.
 
-    R_a, R_b, R_c: rank-3 site tensors, shape (D, D, d). Index order is
-        (leg-to-T_u, leg-to-T_d, physical).
-    T_u, T_d: rank-3 simplex tensors, shape (D, D, D). Index order is
-        (leg-to-R_a, leg-to-R_b, leg-to-R_c).
-    lambdas: 6 bond singular-value vectors of length D, ordered
-        (a-up, b-up, c-up, a-down, b-down, c-down).
+    R_a, R_b, R_c: rank-3 site tensors, shape (D, D, d). Axis order is
+        ``(leg-to-T_d, leg-to-T_u, physical)`` — i.e. axis 0 is the
+        bond toward the down-triangle's ``T_d``, axis 1 is the bond
+        toward the up-triangle's ``T_u``. This matches the SU einsum
+        in :func:`pess_simple_update_triangle`: when ``triangle="up"``
+        ``T_u`` contracts axis 1 of each R, and when ``triangle="down"``
+        ``T_d`` contracts axis 0. (The earlier docstring on this class
+        had axis 0 / axis 1 swapped — the implementation has always
+        used the convention documented above; codex P2 review on
+        PR #387.)
+    T_u, T_d: rank-3 simplex tensors, shape (D, D, D). Axis order
+        ``(leg-to-R_a, leg-to-R_b, leg-to-R_c)``.
+    lambdas: 6 bond singular-value vectors of length ``D``, ordered
+        ``(a-up, b-up, c-up, a-down, b-down, c-down)``. The first
+        three weight the R↔T_u bonds, the last three weight the
+        R↔T_d bonds.
     """
 
     R_a: jax.Array
@@ -373,10 +383,15 @@ def pess_to_kagome_supersite(
     lam_b_u = lambdas[1].astype(dtype)
     lam_c_u = lambdas[2].astype(dtype)
     # Down-bond lambdas: sqrt-split; the other sqrt goes to the neighboring
-    # supersite via the bond gauge.
-    sqrt_lam_a_d = jnp.sqrt(jnp.maximum(jnp.real(lambdas[3]), 1e-14)).astype(dtype)
-    sqrt_lam_b_d = jnp.sqrt(jnp.maximum(jnp.real(lambdas[4]), 1e-14)).astype(dtype)
-    sqrt_lam_c_d = jnp.sqrt(jnp.maximum(jnp.real(lambdas[5]), 1e-14)).astype(dtype)
+    # supersite via the bond gauge. Use ``(λ² + 1e-28) ** 0.25`` instead of
+    # ``sqrt(max(λ, 1e-14))`` so the gauge is smooth in the AD parameters.
+    # The hard ``maximum`` would zero out gradients whenever a component
+    # crossed the ``1e-14`` floor during L-BFGS, leaving that bond weight
+    # permanently stuck (codex P1 review on PR #387). The squared form is
+    # |λ|^{1/2} for |λ| ≫ 1e-14 and smoothly regularizes near zero.
+    sqrt_lam_a_d = jnp.power(jnp.real(lambdas[3]) ** 2 + 1e-28, 0.25).astype(dtype)
+    sqrt_lam_b_d = jnp.power(jnp.real(lambdas[4]) ** 2 + 1e-28, 0.25).astype(dtype)
+    sqrt_lam_c_d = jnp.power(jnp.real(lambdas[5]) ** 2 + 1e-28, 0.25).astype(dtype)
 
     # Gauge each R: axis 0 (T_d-leg) gets sqrt(λ_down), axis 1 (T_u-leg)
     # gets λ_up.
