@@ -44,4 +44,9 @@ def test_pess_local_energy_d2_classical_band():
         D_max=2,
     )
     e = float(jnp.real(pess_local_energy(state, h_tri)))
-    assert -0.40 < e < -0.20, f"D=2 SU energy out of band: {e}"
+    # Liao 2017's PR #387 commit-message bench reports E/site = -0.386 at
+    # D=2 via this exact probe (full-λ_ext Husimi-tree). Tight band
+    # ensures the probe has actually escaped the classical 120° limit
+    # (-0.25) — the previous loose band -0.40..-0.20 silently accepted a
+    # mis-gauged earlier implementation that returned -0.240.
+    assert -0.40 < e < -0.30, f"D=2 SU energy out of band: {e}"

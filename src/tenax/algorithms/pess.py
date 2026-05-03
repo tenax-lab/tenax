@@ -642,8 +642,10 @@ def pess_local_energy(state: IPESSState, h_tri: np.ndarray) -> jnp.ndarray:
 
     Computes ``<H_tri>`` on the up-triangle and the down-triangle
     independently, treating the bond-λ singular values on the *external*
-    legs of each triangle as a mean-field environment (sqrt(λ) on each
-    side of the RDM, full λ in the squared amplitude). The two triangle
+    legs of each triangle as a mean-field environment. With Vidal-canonical
+    SU output (Σ λ² = 1), full λ_ext is absorbed on each side of the RDM,
+    yielding λ_ext² weights in the squared amplitude — the canonical
+    on-triangle reduced-density-matrix gauge. The two triangle
     energies are averaged; for an SU-converged state they should agree
     by triangle symmetry. ``E/site = (E_up + E_down) / 3``.
 
@@ -686,20 +688,23 @@ def pess_local_energy(state: IPESSState, h_tri: np.ndarray) -> jnp.ndarray:
         lam_ext_c: jax.Array,
     ) -> jax.Array:
         """One triangle's energy with bond gauges (axis 0 = ext, axis 1 = int)."""
-        # sqrt(λ_ext) on each external leg → λ_ext in the squared amplitude.
-        # Smooth Lorentzian-style floor on |λ_ext|^{1/2} mirrors the precedent
-        # established in pess_to_kagome_supersite (PR #387 codex P1 review): the
-        # hard ``jnp.maximum`` form zeros out gradients whenever a component
-        # crosses the floor during L-BFGS, leaving any future jax.grad caller
-        # with silently frozen bond weights.
-        sqrt_la = jnp.power(jnp.real(lam_ext_a) ** 2 + 1e-28, 0.25).astype(dtype)
-        sqrt_lb = jnp.power(jnp.real(lam_ext_b) ** 2 + 1e-28, 0.25).astype(dtype)
-        sqrt_lc = jnp.power(jnp.real(lam_ext_c) ** 2 + 1e-28, 0.25).astype(dtype)
+        # Full λ_ext on each external leg → λ_ext² in the squared amplitude.
+        # In Vidal canonical form (Σ λ² = 1), the on-triangle RDM carries the
+        # squared singular values on each external bond; absorbing full λ on
+        # both bra and ket reproduces those weights in ⟨ψ|ψ⟩ and ⟨ψ|H|ψ⟩.
+        # (The sqrt-gauge form is the right convention when *combining*
+        # supersites in a 2D iPEPS — see pess_to_kagome_supersite — because
+        # the neighbor contributes the other sqrt(λ). For the isolated-
+        # triangle Husimi probe here, no neighbor is present, so we must put
+        # the full λ on this side.)
+        gauge_a = jnp.real(lam_ext_a).astype(dtype)
+        gauge_b = jnp.real(lam_ext_b).astype(dtype)
+        gauge_c = jnp.real(lam_ext_c).astype(dtype)
 
         # Full λ_int absorbed onto axis 1 of each R (the simplex-side bond).
-        Q_a = jnp.einsum("i,ijp,j->ijp", sqrt_la, Ra, lam_int_a.astype(dtype))
-        Q_b = jnp.einsum("i,ijp,j->ijp", sqrt_lb, Rb, lam_int_b.astype(dtype))
-        Q_c = jnp.einsum("i,ijp,j->ijp", sqrt_lc, Rc, lam_int_c.astype(dtype))
+        Q_a = jnp.einsum("i,ijp,j->ijp", gauge_a, Ra, lam_int_a.astype(dtype))
+        Q_b = jnp.einsum("i,ijp,j->ijp", gauge_b, Rb, lam_int_b.astype(dtype))
+        Q_c = jnp.einsum("i,ijp,j->ijp", gauge_c, Rc, lam_int_c.astype(dtype))
 
         # Triangle ket ψ[A, B, C, p_a, p_b, p_c]
         psi = jnp.einsum("Aap,Bbq,Ccr,abc->ABCpqr", Q_a, Q_b, Q_c, T)
