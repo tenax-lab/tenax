@@ -1,26 +1,31 @@
 """Spin-½ kagome AFM Heisenberg AD-iPESS benchmark.
 
-Reproduces the differentiable-iPESS pipeline of Liao et al., PRX 9, 031041
-(2019) on the spin-½ kagome antiferromagnet at the isotropic point Δ=1.
-For each bond dimension ``D``, run a triangle simple-update warm start
-(:func:`tenax.pess_simple_update`) then optimize ``(R_a, R_b, R_c, T_u,
-lambdas)`` via L-BFGS through the square CG-iPEPS CTM
-(:func:`tenax.optimize_pess_ad`).
+Pipeline:
+  1. Triangle simple update (3-PESS, HOSVD truncation per simplex) —
+     this matches the SU kernel of Liao et al., PRL 118, 137202 (2017),
+     arXiv:1610.04727 ("Gapless spin-liquid ground state in the S=1/2
+     kagome antiferromagnet"). Liao 2017 reports E/site → -0.43752(6)
+     in the large-D limit (Fig 1(b) inset).
+  2. AD optimization through the Tenax square-CG-iPEPS CTM
+     (Convention C: PESS -> 1-site square supersite, chi = 2*D**2).
+     This step is a Tenax extension; Liao 2017 has no AD optimization
+     for kagome PESS. The AD machinery is reused from Liao et al.,
+     PRX 9, 031041 (2019), "Differentiable Programming Tensor
+     Networks", which applies AD to *square-lattice* iPEPS, not
+     kagome PESS.
+
+For an SU-only Liao 2017 replication audit (no AD, two energy probes),
+see ``kagome_spin12_pess_liao2017_replication.py``.
 
 Usage:
     python examples/kagome_spin12_pess_ad_benchmark.py --D 2 --chi 8
     python examples/kagome_spin12_pess_ad_benchmark.py --D 4 --chi 32 --max-iter 80
-    python examples/kagome_spin12_pess_ad_benchmark.py --sweep   # D ∈ {2,4,6}, χ=2D²
+    python examples/kagome_spin12_pess_ad_benchmark.py --sweep   # D in {2,4,6}, chi=2D^2
 
 Output:
     JSON file at ``--output`` (default
     ``examples/kagome_spin12_pess_ad_benchmark.json``) with one entry per
     ``(D, chi)`` pair containing the per-kagome-site SU and AD energies.
-
-Reference (Liao 2019, Table I): E/site → −0.4378 in the large-``D`` limit.
-At very small ``D`` (D=2) the iPESS variational manifold is dominated by
-the classical 120° state at E/site ≈ −0.25; quantum corrections start
-showing up at ``D=4`` and converge from above as ``D`` grows.
 """
 
 from __future__ import annotations
