@@ -141,6 +141,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "kagome_xxz_pess_cg_gates",
     ),
     "pess_simple_update": ("tenax.algorithms.pess", "pess_simple_update"),
+    "pess_local_energy": ("tenax.algorithms.pess", "pess_local_energy"),
     "pess_to_kagome_supersite": (
         "tenax.algorithms.pess",
         "pess_to_kagome_supersite",
@@ -424,6 +425,7 @@ __all__ = [
     "kagome_triangle_xxz_hamiltonian",
     "kagome_xxz_pess_cg_gates",
     "pess_simple_update",
+    "pess_local_energy",
     "pess_to_kagome_supersite",
     "build_pess_loss",
     "optimize_pess_ad",
