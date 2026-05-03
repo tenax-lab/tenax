@@ -687,9 +687,14 @@ def pess_local_energy(state: IPESSState, h_tri: np.ndarray) -> jnp.ndarray:
     ) -> jax.Array:
         """One triangle's energy with bond gauges (axis 0 = ext, axis 1 = int)."""
         # sqrt(λ_ext) on each external leg → λ_ext in the squared amplitude.
-        sqrt_la = jnp.sqrt(jnp.maximum(jnp.real(lam_ext_a), 1e-30)).astype(dtype)
-        sqrt_lb = jnp.sqrt(jnp.maximum(jnp.real(lam_ext_b), 1e-30)).astype(dtype)
-        sqrt_lc = jnp.sqrt(jnp.maximum(jnp.real(lam_ext_c), 1e-30)).astype(dtype)
+        # Smooth Lorentzian-style floor on |λ_ext|^{1/2} mirrors the precedent
+        # established in pess_to_kagome_supersite (PR #387 codex P1 review): the
+        # hard ``jnp.maximum`` form zeros out gradients whenever a component
+        # crosses the floor during L-BFGS, leaving any future jax.grad caller
+        # with silently frozen bond weights.
+        sqrt_la = jnp.power(jnp.real(lam_ext_a) ** 2 + 1e-28, 0.25).astype(dtype)
+        sqrt_lb = jnp.power(jnp.real(lam_ext_b) ** 2 + 1e-28, 0.25).astype(dtype)
+        sqrt_lc = jnp.power(jnp.real(lam_ext_c) ** 2 + 1e-28, 0.25).astype(dtype)
 
         # Full λ_int absorbed onto axis 1 of each R (the simplex-side bond).
         Q_a = jnp.einsum("i,ijp,j->ijp", sqrt_la, Ra, lam_int_a.astype(dtype))
