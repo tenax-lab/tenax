@@ -635,3 +635,106 @@ def pess_simple_update(
             state = pess_simple_update_triangle(state, gate, "up", D_max)
             state = pess_simple_update_triangle(state, gate, "down", D_max)
     return state
+
+
+def pess_local_energy(state: IPESSState, h_tri: np.ndarray) -> jnp.ndarray:
+    """Husimi-tree mean-field energy per kagome site for a 3-PESS state.
+
+    Computes ``<H_tri>`` on the up-triangle and the down-triangle
+    independently, treating the bond-λ singular values on the *external*
+    legs of each triangle as a mean-field environment (sqrt(λ) on each
+    side of the RDM, full λ in the squared amplitude). The two triangle
+    energies are averaged; for an SU-converged state they should agree
+    by triangle symmetry. ``E/site = (E_up + E_down) / 3``.
+
+    This is the cheapest energy estimate consistent with the bond-gauge
+    information SU produces. It does not match Liao 2017's MPS-projection
+    measurement quantitatively (Liao uses ``D_mps ≈ 4·D²`` on a 1D MPS
+    basis, which captures more correlation), but it tracks the
+    SU-correctness of the kernel without going through the
+    Convention-C + CTM measurement that ``build_pess_loss`` uses.
+
+    Args:
+        state: Input :class:`IPESSState`. Typically the output of
+            :func:`pess_simple_update`.
+        h_tri: ``(d**3, d**3)`` Hermitian triangle Hamiltonian in the
+            ``(p_a, p_b, p_c)`` row-major basis (matches
+            :func:`kagome_triangle_xxz_hamiltonian`).
+
+    Returns:
+        Real scalar JAX array — the energy per kagome site.
+    """
+    R_a, R_b, R_c = state.R_a, state.R_b, state.R_c
+    T_u, T_d = state.T_u, state.T_d
+    lam_au, lam_bu, lam_cu = state.lambdas[0:3]
+    lam_ad, lam_bd, lam_cd = state.lambdas[3:6]
+
+    dtype = R_a.dtype
+    d = R_a.shape[2]
+    h_tri_jax = jnp.asarray(h_tri).astype(dtype).reshape(d, d, d, d, d, d)
+
+    def _triangle_energy(
+        Ra: jax.Array,
+        Rb: jax.Array,
+        Rc: jax.Array,
+        T: jax.Array,
+        lam_int_a: jax.Array,
+        lam_int_b: jax.Array,
+        lam_int_c: jax.Array,
+        lam_ext_a: jax.Array,
+        lam_ext_b: jax.Array,
+        lam_ext_c: jax.Array,
+    ) -> jax.Array:
+        """One triangle's energy with bond gauges (axis 0 = ext, axis 1 = int)."""
+        # sqrt(λ_ext) on each external leg → λ_ext in the squared amplitude.
+        sqrt_la = jnp.sqrt(jnp.maximum(jnp.real(lam_ext_a), 1e-30)).astype(dtype)
+        sqrt_lb = jnp.sqrt(jnp.maximum(jnp.real(lam_ext_b), 1e-30)).astype(dtype)
+        sqrt_lc = jnp.sqrt(jnp.maximum(jnp.real(lam_ext_c), 1e-30)).astype(dtype)
+
+        # Full λ_int absorbed onto axis 1 of each R (the simplex-side bond).
+        Q_a = jnp.einsum("i,ijp,j->ijp", sqrt_la, Ra, lam_int_a.astype(dtype))
+        Q_b = jnp.einsum("i,ijp,j->ijp", sqrt_lb, Rb, lam_int_b.astype(dtype))
+        Q_c = jnp.einsum("i,ijp,j->ijp", sqrt_lc, Rc, lam_int_c.astype(dtype))
+
+        # Triangle ket ψ[A, B, C, p_a, p_b, p_c]
+        psi = jnp.einsum("Aap,Bbq,Ccr,abc->ABCpqr", Q_a, Q_b, Q_c, T)
+
+        norm = jnp.einsum("ABCpqr,ABCpqr->", psi.conj(), psi)
+        e_un = jnp.einsum(
+            "ABCpqr,pqrPQR,ABCPQR->",
+            psi.conj(),
+            h_tri_jax,
+            psi,
+        )
+        return jnp.real(e_un / (norm + 1e-30))
+
+    # Up-triangle: int = up-bonds (R axis 1), ext = down-bonds (R axis 0).
+    e_up = _triangle_energy(
+        R_a,
+        R_b,
+        R_c,
+        T_u,
+        lam_au,
+        lam_bu,
+        lam_cu,
+        lam_ad,
+        lam_bd,
+        lam_cd,
+    )
+
+    # Down-triangle: int = down-bonds (axis 0), ext = up-bonds (axis 1).
+    # Swap R axes 0↔1 so the helper's "axis 1 = int" convention holds.
+    e_dn = _triangle_energy(
+        R_a.transpose(1, 0, 2),
+        R_b.transpose(1, 0, 2),
+        R_c.transpose(1, 0, 2),
+        T_d,
+        lam_ad,
+        lam_bd,
+        lam_cd,
+        lam_au,
+        lam_bu,
+        lam_cu,
+    )
+
+    return (e_up + e_dn) / 3.0
