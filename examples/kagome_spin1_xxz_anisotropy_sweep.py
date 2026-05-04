@@ -1,8 +1,14 @@
 """XXZ anisotropy sweep on the spin-1 kagome lattice via AD-iPESS.
 
-Sweeps Δ ∈ {0.0, 0.5, 1.0, 1.5, 2.0} at fixed ``D=3``, ``χ=12`` and
+Sweeps Δ ∈ {0.0, 0.5, 1.0, 1.5, 2.0} at fixed ``D=4``, ``χ=12`` and
 records the optimized energy and per-site ⟨S^z⟩. Smoke check for the
 expected XY-vs-Ising trend across Δ=1.
+
+Bond dimension defaults to ``D=4`` (even) because the AD path's
+SVD-projector spectrum is degenerate at odd ``D`` (especially ``D=3``);
+see the odd-D warning in :func:`tenax.algorithms.pess.pess_to_kagome_supersite`.
+Pass ``--D 3`` to deliberately probe the odd-D regime; long-term fix is
+the split-CTM SVD projector tracked in #388.
 
 Per-site ⟨S^z⟩ is averaged over the three sublattices ``(R_a, R_b,
 R_c)`` of the up-triangle supersite (the iPESS unit cell). At Δ=0 the
@@ -37,7 +43,7 @@ from tenax.algorithms.pess import (
 from tenax.algorithms.pess_optimize import optimize_pess_ad
 
 D_PHYS = 3  # spin-1
-D = 3
+D_DEFAULT = 4  # even by default — odd D destabilises the AD path (see module docstring)
 CHI = 12
 
 
@@ -99,6 +105,7 @@ def _make_ctm_config(chi: int, max_iter: int = 30) -> CTMConfig:
 def run_anisotropy_sweep(
     deltas: list[float],
     *,
+    D: int = D_DEFAULT,
     max_iter: int = 60,
     seed: int = 0,
     verbose: bool = True,
@@ -147,6 +154,15 @@ def main() -> None:
         default=[0.0, 0.5, 1.0, 1.5, 2.0],
         help="XXZ anisotropies to sweep over",
     )
+    parser.add_argument(
+        "--D",
+        type=int,
+        default=D_DEFAULT,
+        help=(
+            f"iPESS bond dimension (default {D_DEFAULT}; odd D is AD-unstable, "
+            "see module docstring)"
+        ),
+    )
     parser.add_argument("--max-iter", type=int, default=60, help="L-BFGS iterations")
     parser.add_argument(
         "--output",
@@ -156,7 +172,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    results = run_anisotropy_sweep(args.deltas, max_iter=args.max_iter, verbose=True)
+    results = run_anisotropy_sweep(
+        args.deltas, D=args.D, max_iter=args.max_iter, verbose=True
+    )
     args.output.write_text(json.dumps(results, indent=2))
     print(f"\nWrote {len(results)} result(s) to {args.output}", flush=True)
 

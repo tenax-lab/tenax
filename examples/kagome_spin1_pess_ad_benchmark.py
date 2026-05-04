@@ -10,10 +10,19 @@ significantly below the classical limit (Néel-like product state energy
 ``D=3`` or ``D=4`` is the cheapest meaningful step toward the published
 target.
 
+The default ``--sweep`` covers ``D ∈ {2, 4}`` (even only): the AD path's
+SVD-projector spectrum is degenerate at odd ``D`` (especially ``D=3``),
+so the converged CTM energy and its gradient are unreliable there — see
+the odd-D warning in :func:`tenax.algorithms.pess.pess_to_kagome_supersite`.
+Pass ``--include-odd-D`` to extend the sweep to ``{2, 3, 4}`` for
+characterising the unstable regime; long-term fix is the split-CTM SVD
+projector tracked in #388.
+
 Usage:
     python examples/kagome_spin1_pess_ad_benchmark.py --D 2 --chi 8
     python examples/kagome_spin1_pess_ad_benchmark.py --D 4 --chi 32 --max-iter 80
-    python examples/kagome_spin1_pess_ad_benchmark.py --sweep    # D ∈ {2,3,4}, χ=2D²
+    python examples/kagome_spin1_pess_ad_benchmark.py --sweep    # D ∈ {2,4}, χ=2D²
+    python examples/kagome_spin1_pess_ad_benchmark.py --sweep --include-odd-D
 """
 
 from __future__ import annotations
@@ -121,7 +130,16 @@ def main() -> None:
     parser.add_argument(
         "--sweep",
         action="store_true",
-        help="Run a default sweep over D ∈ {2, 3, 4}.",
+        help="Run a default sweep over D ∈ {2, 4} (use --include-odd-D for {2,3,4}).",
+    )
+    parser.add_argument(
+        "--include-odd-D",
+        action="store_true",
+        help=(
+            "Include D=3 in the sweep. Odd D is AD-unstable on the iPESS "
+            "supersite path (see pess_to_kagome_supersite docstring); use "
+            "this flag only to deliberately characterise the unstable regime."
+        ),
     )
     parser.add_argument("--max-iter", type=int, default=80, help="L-BFGS iterations")
     parser.add_argument(
@@ -133,7 +151,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.sweep or args.D is None:
-        args.D_list = [2, 3, 4]
+        args.D_list = [2, 3, 4] if args.include_odd_D else [2, 4]
     else:
         args.D_list = [args.D]
 
