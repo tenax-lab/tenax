@@ -30,6 +30,12 @@ from tenax.algorithms._split_ctm_tensor_energy import (
 from tenax.algorithms._split_ctm_tensor_energy import (
     compute_energy_split_ctm_tensor as compute_energy_split_ctm_tensor,
 )
+from tenax.algorithms._split_ctm_tensor_energy import (
+    compute_energy_split_ctm_tensor_2site as compute_energy_split_ctm_tensor_2site,
+)
+from tenax.algorithms._split_ctm_tensor_energy import (
+    compute_energy_split_ctm_tensor_multisite as compute_energy_split_ctm_tensor_multisite,
+)
 from tenax.algorithms._split_ctm_tensor_init import (
     _EDGE_BRA_SPECS as _EDGE_BRA_SPECS,
 )
@@ -132,6 +138,8 @@ __all__ = [
     "_svd_split_edge_tensor",
     "_truncate_svd_per_sector",
     "compute_energy_split_ctm_tensor",
+    "compute_energy_split_ctm_tensor_2site",
+    "compute_energy_split_ctm_tensor_multisite",
     "ctm_split_tensor",
     "initialize_split_ctm_tensor_env",
 ]

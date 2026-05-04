@@ -121,6 +121,14 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "tenax.algorithms._split_ctm_tensor",
         "compute_energy_split_ctm_tensor",
     ),
+    "compute_energy_split_ctm_tensor_2site": (
+        "tenax.algorithms._split_ctm_tensor",
+        "compute_energy_split_ctm_tensor_2site",
+    ),
+    "compute_energy_split_ctm_tensor_multisite": (
+        "tenax.algorithms._split_ctm_tensor",
+        "compute_energy_split_ctm_tensor_multisite",
+    ),
     "ctm_split_tensor": ("tenax.algorithms._split_ctm_tensor", "ctm_split_tensor"),
     # _tensor_utils
     "fuse_indices": ("tenax.algorithms._tensor_utils", "fuse_indices"),
@@ -451,6 +459,8 @@ __all__ = [
     "SplitCTMTensorEnv",
     "ctm_split_tensor",
     "compute_energy_split_ctm_tensor",
+    "compute_energy_split_ctm_tensor_2site",
+    "compute_energy_split_ctm_tensor_multisite",
     # fPEPS (fermionic iPEPS)
     "FPEPSConfig",
     "fpeps",

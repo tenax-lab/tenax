@@ -25,6 +25,61 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor
 # ------------------------------------------------------------------ #
 
 
+def make_random_dense_site(D: int, d: int, seed: int) -> DenseTensor:
+    """Build a random U(1)-trivial DenseTensor iPEPS site for parity tests."""
+    key = jax.random.PRNGKey(seed)
+    data = jax.random.normal(key, (D, D, D, D, d))
+    data = data / jnp.linalg.norm(data)
+    sym = U1Symmetry()
+    z_D = np.zeros(D, dtype=np.int32)
+    z_d = np.zeros(d, dtype=np.int32)
+    return DenseTensor(
+        data,
+        (
+            TensorIndex.from_charges(sym, z_D, FlowDirection.OUT, label="u"),
+            TensorIndex.from_charges(sym, z_D, FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(sym, z_D, FlowDirection.OUT, label="l"),
+            TensorIndex.from_charges(sym, z_D, FlowDirection.IN, label="r"),
+            TensorIndex.from_charges(sym, z_d, FlowDirection.IN, label="phys"),
+        ),
+    )
+
+
+def make_random_fermionic_site(D: int, d: int, seed: int) -> SymmetricTensor:
+    """Build a random FermionParity-symmetric iPEPS site for parity tests.
+
+    Mirrors :func:`tenax.algorithms.fermionic_ipeps._build_initial_fpeps_tensor`:
+    virtual charges alternate 0,1,0,1,... and physical charges are [0, 1]
+    (empty, occupied).  Uses ``random_normal`` to populate every allowed
+    block — strictly safer than ``from_dense`` which would silently drop
+    charge-violating entries.
+    """
+    from tenax.core.symmetry import FermionParity
+
+    sym = FermionParity()
+    virt_charges = np.array([i % 2 for i in range(D)], dtype=np.int32)
+    phys_charges = np.array([0, 1], dtype=np.int32)[:d]
+    indices = (
+        TensorIndex.from_charges(
+            sym, virt_charges.copy(), FlowDirection.OUT, label="u"
+        ),
+        TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(
+            sym, virt_charges.copy(), FlowDirection.OUT, label="l"
+        ),
+        TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
+    )
+    key = jax.random.PRNGKey(seed)
+    A = SymmetricTensor.random_normal(indices, key)
+    norm_val = float(A.norm())
+    if norm_val > 0:
+        A = A * (1.0 / norm_val)
+    return A
+
+
 @pytest.fixture
 def small_peps_dense():
     """Random DenseTensor iPEPS site tensor, D=2, d=2."""
@@ -77,6 +132,19 @@ def heisenberg_gate():
     Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
     H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
     return H.reshape(d, d, d, d)
+
+
+# ------------------------------------------------------------------ #
+# Public API smoke test                                                #
+# ------------------------------------------------------------------ #
+
+
+def test_public_exports_resolve():
+    """Top-level tenax package exposes the new split-CTM energy entry points."""
+    import tenax
+
+    assert hasattr(tenax, "compute_energy_split_ctm_tensor_2site")
+    assert hasattr(tenax, "compute_energy_split_ctm_tensor_multisite")
 
 
 # ------------------------------------------------------------------ #
@@ -517,3 +585,339 @@ class TestSplitCTMSymmetric:
         assert len(from_dense_calls) == 0, (
             f"from_dense() called {len(from_dense_calls)} times during symmetric sweep"
         )
+
+
+class TestSplitEdgeHelper:
+    """Tests for the new _make_split_edge / _make_split_edges helpers."""
+
+    def test_make_split_edge_shape_and_labels(self, small_peps_dense):
+        """_make_split_edge contracts T_ket·T_bra on _I, leaves D-legs unfused."""
+        from tenax.algorithms._split_ctm_tensor_energy import _make_split_edge
+
+        env = initialize_split_ctm_tensor_env(small_peps_dense, chi=4, chi_I=4)
+        T1 = _make_split_edge(
+            env.T1_ket,
+            env.T1_bra,
+            ket_I="t1k_I",
+            bra_I="t1b_I",
+            ket_chi="t1k_l",
+            bra_chi="t1b_r",
+            out_chi_l="t1_l",
+            out_chi_r="t1_r",
+        )
+        labels = T1.labels()
+        # Four legs: chi_l, u_ket, u_bra, chi_r — D-legs unchanged from inputs.
+        assert set(labels) == {"t1_l", "u_ket", "u_bra", "t1_r"}
+        # Dimensions: (chi, D, D, chi). With D=2, chi=4 → (4, 2, 2, 4).
+        dim_by_label = {idx.label: idx.dim for idx in T1.indices}
+        assert dim_by_label["t1_l"] == 4
+        assert dim_by_label["t1_r"] == 4
+        assert dim_by_label["u_ket"] == 2
+        assert dim_by_label["u_bra"] == 2
+
+    def test_make_split_edges_no_label_collisions(self, small_peps_dense):
+        """The four T_split tensors share no D-leg labels; chi labels follow the
+        standard CTM convention (t1_l/t1_r, t2_u/t2_d, t3_l/t3_r, t4_d/t4_u)."""
+        from tenax.algorithms._split_ctm_tensor_energy import _make_split_edges
+
+        env = initialize_split_ctm_tensor_env(small_peps_dense, chi=4, chi_I=4)
+        splits = _make_split_edges(env)
+
+        assert set(splits.keys()) == {"T1", "T2", "T3", "T4"}
+        # D-leg label sets per edge are disjoint:
+        d_labels = {
+            "T1": {"u_ket", "u_bra"},
+            "T2": {"r_ket", "r_bra"},
+            "T3": {"d_ket", "d_bra"},
+            "T4": {"l_ket", "l_bra"},
+        }
+        for name, want in d_labels.items():
+            labs = set(splits[name].labels())
+            assert want.issubset(labs), f"{name} missing {want - labs}"
+        # No D-leg label collides across edges:
+        all_d = set().union(*d_labels.values())
+        assert len(all_d) == 8  # all distinct
+
+
+class TestSplitRDMs:
+    """Parity vs the shim for each split-aware RDM."""
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
+    def test_rdm_1site_matches_shim(self, D, chi):
+        from tenax.algorithms._ctm_tensor_energy import _rdm_1site_tensor
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _rdm_1site_split_tensor,
+            _split_env_to_tensor_standard,
+        )
+
+        A = make_random_dense_site(D, d=2, seed=0)
+        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+
+        rdm_split = _rdm_1site_split_tensor(A, env)
+        rdm_shim = _rdm_1site_tensor(A, _split_env_to_tensor_standard(env))
+        assert jnp.allclose(rdm_split, rdm_shim, atol=1e-10)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12), (4, 16)])
+    def test_rdm1x2_matches_shim(self, D, chi):
+        from tenax.algorithms._ctm_tensor_energy import _rdm1x2_tensor
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _rdm1x2_split_tensor,
+            _split_env_to_tensor_standard,
+        )
+
+        A = make_random_dense_site(D, d=2, seed=1)
+        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+
+        rdm_split = _rdm1x2_split_tensor(A, env)
+        rdm_shim = _rdm1x2_tensor(A, _split_env_to_tensor_standard(env))
+        assert jnp.allclose(rdm_split, rdm_shim, atol=1e-10)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12), (4, 16)])
+    def test_rdm2x1_matches_shim(self, D, chi):
+        from tenax.algorithms._ctm_tensor_energy import _rdm2x1_tensor
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _rdm2x1_split_tensor,
+            _split_env_to_tensor_standard,
+        )
+
+        A = make_random_dense_site(D, d=2, seed=2)
+        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+
+        rdm_split = _rdm2x1_split_tensor(A, env)
+        rdm_shim = _rdm2x1_tensor(A, _split_env_to_tensor_standard(env))
+        assert jnp.allclose(rdm_split, rdm_shim, atol=1e-10)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
+    def test_rdm_diagonal_matches_shim(self, D, chi):
+        from tenax.algorithms._ctm_tensor_energy import _rdm_diagonal_tensor
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _rdm_diagonal_split_tensor,
+            _split_env_to_tensor_standard,
+        )
+
+        A = make_random_dense_site(D, d=2, seed=3)
+        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+
+        rdm_split = _rdm_diagonal_split_tensor(A, env)
+        rdm_shim = _rdm_diagonal_tensor(A, _split_env_to_tensor_standard(env))
+        assert jnp.allclose(rdm_split, rdm_shim, atol=1e-10)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
+    def test_rdm1x2_2site_matches_shim(self, D, chi):
+        from tenax.algorithms._ctm_tensor_energy import _rdm1x2_tensor_2site
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _rdm1x2_split_tensor_2site,
+            _split_env_to_tensor_standard,
+        )
+
+        A = make_random_dense_site(D, d=2, seed=10)
+        B = make_random_dense_site(D, d=2, seed=11)
+        env_A = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+        env_B = ctm_split_tensor(B, chi=chi, max_iter=20, chi_I=chi)
+
+        rdm_split = _rdm1x2_split_tensor_2site(A, B, env_A, env_B)
+        rdm_shim = _rdm1x2_tensor_2site(
+            A,
+            B,
+            _split_env_to_tensor_standard(env_A),
+            _split_env_to_tensor_standard(env_B),
+        )
+        assert jnp.allclose(rdm_split, rdm_shim, atol=1e-10)
+
+        # Distinctness check: mixed-env result must differ from single-env result with A on both sites.
+        from tenax.algorithms._split_ctm_tensor_energy import _rdm1x2_split_tensor
+
+        rdm_single = _rdm1x2_split_tensor(A, env_A)
+        assert not jnp.allclose(rdm_split, rdm_single, atol=1e-6)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
+    def test_rdm2x1_2site_matches_shim(self, D, chi):
+        from tenax.algorithms._ctm_tensor_energy import _rdm2x1_tensor_2site
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _rdm2x1_split_tensor_2site,
+            _split_env_to_tensor_standard,
+        )
+
+        A = make_random_dense_site(D, d=2, seed=20)
+        B = make_random_dense_site(D, d=2, seed=21)
+        env_A = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+        env_B = ctm_split_tensor(B, chi=chi, max_iter=20, chi_I=chi)
+
+        rdm_split = _rdm2x1_split_tensor_2site(A, B, env_A, env_B)
+        rdm_shim = _rdm2x1_tensor_2site(
+            A,
+            B,
+            _split_env_to_tensor_standard(env_A),
+            _split_env_to_tensor_standard(env_B),
+        )
+        assert jnp.allclose(rdm_split, rdm_shim, atol=1e-10)
+
+        # Distinctness check: mixed-env result must differ from single-env result with A on both sites.
+        from tenax.algorithms._split_ctm_tensor_energy import _rdm2x1_split_tensor
+
+        rdm_single = _rdm2x1_split_tensor(A, env_A)
+        assert not jnp.allclose(rdm_split, rdm_single, atol=1e-6)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12), (4, 16)])
+    def test_compute_energy_split_native_matches_shim(self, D, chi, heisenberg_gate):
+        """Split-aware energy must match shim energy at small D."""
+        from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _split_env_to_tensor_standard,
+            compute_energy_split_ctm_tensor,
+        )
+
+        A = make_random_dense_site(D, d=2, seed=30)
+        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+
+        E_split = compute_energy_split_ctm_tensor(A, env, heisenberg_gate, d=2)
+        E_shim = compute_energy_ctm_tensor(
+            A, _split_env_to_tensor_standard(env), heisenberg_gate, d=2
+        )
+        assert jnp.allclose(E_split, E_shim, atol=1e-10)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
+    def test_compute_energy_split_2site_matches_shim(self, D, chi, heisenberg_gate):
+        from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _split_env_to_tensor_standard,
+            compute_energy_split_ctm_tensor_2site,
+        )
+
+        A = make_random_dense_site(D, d=2, seed=40)
+        B = make_random_dense_site(D, d=2, seed=41)
+        env_A = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+        env_B = ctm_split_tensor(B, chi=chi, max_iter=20, chi_I=chi)
+
+        E_split = compute_energy_split_ctm_tensor_2site(
+            A, B, env_A, env_B, heisenberg_gate, d=2
+        )
+        E_shim = compute_energy_ctm_tensor_2site(
+            A,
+            B,
+            _split_env_to_tensor_standard(env_A),
+            _split_env_to_tensor_standard(env_B),
+            heisenberg_gate,
+            d=2,
+        )
+        assert jnp.allclose(E_split, E_shim, atol=1e-10)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
+    def test_compute_energy_split_multisite_matches_shim(self, D, chi, heisenberg_gate):
+        """Split-aware multisite energy must match shim at small D on a Y-shaped 3-site cell."""
+        from tenax.algorithms._ctm_tensor_energy import (
+            compute_energy_ctm_tensor_multisite,
+        )
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _split_env_to_tensor_standard,
+            compute_energy_split_ctm_tensor_multisite,
+        )
+
+        coords = [(0, 0), (1, 0), (0, 1)]
+        site_tensors = {
+            (0, 0): make_random_dense_site(D, d=2, seed=50),
+            (1, 0): make_random_dense_site(D, d=2, seed=51),
+            (0, 1): make_random_dense_site(D, d=2, seed=52),
+        }
+        envs_split = {
+            c: ctm_split_tensor(site_tensors[c], chi=chi, max_iter=20, chi_I=chi)
+            for c in coords
+        }
+        # Y-shaped neighbors: (0,0) connects right→(1,0) and bottom→(0,1).
+        # Other coords loop back to themselves on directions that don't exit the cell.
+        neighbors = {
+            (0, 0): {
+                "right": (1, 0),
+                "bottom": (0, 1),
+                "left": (1, 0),
+                "top": (0, 1),
+            },
+            (1, 0): {
+                "left": (0, 0),
+                "top": (0, 1),
+                "right": (0, 0),
+                "bottom": (0, 1),
+            },
+            (0, 1): {
+                "top": (0, 0),
+                "right": (1, 0),
+                "bottom": (0, 0),
+                "left": (1, 0),
+            },
+        }
+
+        E_split = compute_energy_split_ctm_tensor_multisite(
+            site_tensors, envs_split, neighbors, heisenberg_gate, d=2
+        )
+        envs_std = {c: _split_env_to_tensor_standard(envs_split[c]) for c in coords}
+        E_shim = compute_energy_ctm_tensor_multisite(
+            site_tensors, envs_std, neighbors, heisenberg_gate, d=2
+        )
+        assert jnp.allclose(E_split, E_shim, atol=1e-10)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
+    def test_compute_energy_split_multisite_1site_cell(self, D, chi, heisenberg_gate):
+        """Single-site cell with self-loops exercises coord == nb_coord branch."""
+        from tenax.algorithms._ctm_tensor_energy import (
+            compute_energy_ctm_tensor_multisite,
+        )
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _split_env_to_tensor_standard,
+            compute_energy_split_ctm_tensor_multisite,
+        )
+
+        coord = (0, 0)
+        A = make_random_dense_site(D, d=2, seed=60)
+        site_tensors = {coord: A}
+        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+        envs_split = {coord: env}
+        # All directions self-loop — every bond is single-env (coord == nb_coord).
+        neighbors = {
+            coord: {"right": coord, "bottom": coord, "left": coord, "top": coord}
+        }
+
+        E_split = compute_energy_split_ctm_tensor_multisite(
+            site_tensors, envs_split, neighbors, heisenberg_gate, d=2
+        )
+        envs_std = {coord: _split_env_to_tensor_standard(env)}
+        E_shim = compute_energy_ctm_tensor_multisite(
+            site_tensors, envs_std, neighbors, heisenberg_gate, d=2
+        )
+        assert jnp.allclose(E_split, E_shim, atol=1e-10)
+
+
+@pytest.mark.slow
+class TestSplitRDMsFermionic:
+    """Parity vs shim with FermionParity site tensors (Tier 2).
+
+    Bosonic parity tests don't exercise ``A.bar_super()``'s Koszul-twist /
+    flow-flip handling.  The shim path also routes through ``bar_super()``
+    (inside ``_build_double_layer_open_tensor``); if both paths produce the
+    same energy on a fermionic site, the new path's per-leg twist handling
+    is equivalent to the old path's bake-then-fuse handling.
+
+    Note on chi choice: with ``FermionParity`` virtual charges (alternating
+    0/1), ``ctm_split_tensor`` converges cleanly at chi values that match
+    the natural charge-block decomposition (e.g. chi=6, chi=12).  Some
+    intermediate chi values (e.g. chi=8 at D=2) trip an unrelated
+    fermionic projector charge-balance bug; those are out of scope for
+    this Tier-2 parity test, which targets ``bar_super()`` correctness in
+    the energy path, not CTM convergence at every chi.
+    """
+
+    @pytest.mark.parametrize("D, chi", [(2, 6), (3, 12)])
+    def test_fermionic_energy_matches_shim(self, D, chi, heisenberg_gate):
+        from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _split_env_to_tensor_standard,
+            compute_energy_split_ctm_tensor,
+        )
+
+        A = make_random_fermionic_site(D, d=2, seed=70)
+        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+
+        E_split = compute_energy_split_ctm_tensor(A, env, heisenberg_gate, d=2)
+        E_shim = compute_energy_ctm_tensor(
+            A, _split_env_to_tensor_standard(env), heisenberg_gate, d=2
+        )
+        assert jnp.allclose(E_split, E_shim, atol=1e-10)
