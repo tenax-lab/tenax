@@ -541,6 +541,7 @@ def _rdm_diagonal_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     )
     BL_frame_A = contract(BL_frame, A_BL)
     # open: (d_braB_BL, t3_l, t4_dB, l_braB, u_BL_ket, r_BL_ket, phys) — chi^2 * D^4 * d
+    # phys label NOT relabeled; sharing with A_BL's phys causes the trace.
     A_bra_BL = A.bar_super().relabels(
         {
             "d": "d_braB_BL",
