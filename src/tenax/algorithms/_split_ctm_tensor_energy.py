@@ -6,6 +6,7 @@ __all__ = [
     "_rdm1x2_split_tensor",
     "_rdm2x1_split_tensor",
     "_rdm_1site_split_tensor",
+    "_rdm_diagonal_split_tensor",
     "_split_env_to_tensor_standard",
     "compute_energy_split_ctm_tensor",
 ]
@@ -420,6 +421,229 @@ def _rdm2x1_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
         output_labels=["phys", "phys_R", "phys_bra", "phys_braR"],
     )
     # -> (s1_ket, s2_ket, s1_bra, s2_bra)
+
+    rdm = rdm_t.todense()
+    d = rdm.shape[0]
+    rdm_mat = rdm.reshape(d * d, d * d)
+    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
+    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    return rdm_mat.reshape(d, d, d, d)
+
+
+def _rdm_diagonal_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
+    """Diagonal NNN 2-site RDM via 4-site (2x2) per-site env decomposition.
+
+    Top-left (TL) and bottom-right (BR) carry open phys legs (the diagonal pair
+    we measure); top-right (TR) and bottom-left (BL) are closed (phys traced).
+
+    Each per-site env builds a chi^2 * D^4 frame (corner + 2 split edges), then
+    absorbs A interleaved with A_bra:
+    - Closed sites (TR, BL): A and A_bra share "phys" (traced) -> chi^2 * D^4
+      peak.
+    - Open sites (TL, BR): A_bra has "phys_bra"/"phys_bra_BR" (distinct)
+      -> chi^2 * D^4 * d^2 peak (intrinsic cost of the diagonal RDM; bigger
+      than the chi^2 * D^4 * d of Tasks 4-5).
+
+    Returns dense RDM of shape ``(d, d, d, d)`` in
+    ``(s1_ket, s2_ket, s1_bra, s2_bra)`` (TL=s1, BR=s2),
+    symmetrised and trace-normalised.
+    """
+    splits = _make_split_edges(env)
+    T1, T2, T3, T4 = splits["T1"], splits["T2"], splits["T3"], splits["T4"]
+
+    # ---------- TL site (open) — labels: base ----------
+    # Frame: C1 · T1 · T4_T (top-half of T4, sharing c1_d).
+    C1 = env.C1.relabel("c1_r", "t1_l")
+    C1_T1 = contract(C1, T1)  # (c1_d, u_ket, u_bra, t1_r)
+    T4_T = T4.relabels({"t4_d": "c1_d"})  # (c1_d, l_ket, l_bra, t4_u)
+    TL_frame = contract(C1_T1, T4_T)
+    # TL_frame open: (u_ket, u_bra, t1_r, l_ket, l_bra, t4_u) — chi^2 * D^4
+
+    A_TL = A.relabels({"u": "u_ket", "l": "l_ket"})  # keep d, r, phys open
+    TL_frame_A = contract(TL_frame, A_TL)
+    # open: (u_bra, t1_r, l_bra, t4_u, d, r, phys) — chi^2 * D^4 * d
+    A_bra_TL = A.bar_super().relabels(
+        {
+            "u": "u_bra",
+            "l": "l_bra",
+            "d": "d_bra",
+            "r": "r_bra",
+            "phys": "phys_bra",
+        }
+    )
+    site_env_TL = contract(TL_frame_A, A_bra_TL)
+    # site_env_TL open: (t1_r, t4_u, d, r, phys, d_bra, r_bra, phys_bra)
+    # — chi^2 * D^4 * d^2 (peak)
+
+    # ---------- TR site (closed) — labels: R suffix on top/right; _TR on inner seams ----------
+    T1_R = T1.relabels(
+        {"t1_l": "t1_lR", "u_ket": "u_ketR", "u_bra": "u_braR", "t1_r": "t1_rR"}
+    )
+    C2 = env.C2.relabel("c2_l", "t1_rR")
+    T1R_C2 = contract(T1_R, C2)  # (t1_lR, u_ketR, u_braR, c2_d)
+    T2_T = T2.relabels(
+        {"t2_u": "c2_d", "r_ket": "r_ketR", "r_bra": "r_braR"}
+    )  # (c2_d, r_ketR, r_braR, t2_d)
+    TR_frame = contract(T1R_C2, T2_T)
+    # TR_frame open: (t1_lR, u_ketR, u_braR, r_ketR, r_braR, t2_d) — chi^2 * D^4
+
+    # A_TR has u_ketR (consumed by frame), r_ketR (consumed),
+    # d_TR_ket (open seam to BR), l_TR_ket (open seam to TL), phys (shared with bra → traced).
+    A_TR = A.relabels(
+        {
+            "u": "u_ketR",
+            "r": "r_ketR",
+            "d": "d_TR_ket",
+            "l": "l_TR_ket",
+        }
+    )
+    TR_frame_A = contract(TR_frame, A_TR)
+    # open: (u_braR, t1_lR, r_braR, t2_d, d_TR_ket, l_TR_ket, phys) — chi^2 * D^4 * d
+    A_bra_TR = A.bar_super().relabels(
+        {
+            "u": "u_braR",
+            "r": "r_braR",
+            "d": "d_TR_bra",
+            "l": "l_TR_bra",
+        }
+    )
+    # phys label NOT relabeled; sharing with A_TR's phys causes the trace.
+    site_env_TR = contract(TR_frame_A, A_bra_TR)
+    # site_env_TR open: (t1_lR, t2_d, d_TR_ket, l_TR_ket, d_TR_bra, l_TR_bra)
+    # — chi^2 * D^4
+
+    # ---------- BL site (closed) — labels: B suffix on bot/left; _BL on inner seams ----------
+    T3_BL = T3.relabels(
+        {"d_ket": "d_ketB_BL", "d_bra": "d_braB_BL"}
+    )  # (t3_r, d_ketB_BL, d_braB_BL, t3_l)
+    C4 = env.C4.relabel("c4_u", "t3_r")
+    C4_T3 = contract(C4, T3_BL)  # (c4_r, d_ketB_BL, d_braB_BL, t3_l)
+    T4_B = T4.relabels(
+        {
+            "t4_d": "t4_dB",
+            "l_ket": "l_ketB",
+            "l_bra": "l_braB",
+            "t4_u": "c4_r",
+        }
+    )  # (t4_dB, l_ketB, l_braB, c4_r)
+    BL_frame = contract(C4_T3, T4_B)
+    # BL_frame open: (d_ketB_BL, d_braB_BL, t3_l, t4_dB, l_ketB, l_braB) — chi^2 * D^4
+
+    # A_BL has d → d_ketB_BL (consumed by T3_BL), l → l_ketB (consumed by T4_B),
+    # u → u_BL_ket (open seam to TL), r → r_BL_ket (open seam to BR), phys shared.
+    A_BL = A.relabels(
+        {
+            "d": "d_ketB_BL",
+            "l": "l_ketB",
+            "u": "u_BL_ket",
+            "r": "r_BL_ket",
+        }
+    )
+    BL_frame_A = contract(BL_frame, A_BL)
+    # open: (d_braB_BL, t3_l, t4_dB, l_braB, u_BL_ket, r_BL_ket, phys) — chi^2 * D^4 * d
+    A_bra_BL = A.bar_super().relabels(
+        {
+            "d": "d_braB_BL",
+            "l": "l_braB",
+            "u": "u_BL_bra",
+            "r": "r_BL_bra",
+        }
+    )
+    site_env_BL = contract(BL_frame_A, A_bra_BL)
+    # site_env_BL open: (t3_l, t4_dB, u_BL_ket, r_BL_ket, u_BL_bra, r_BL_bra)
+    # — chi^2 * D^4
+
+    # ---------- BR site (open) — labels: R/B suffixes; _BR on inner seams ----------
+    T3_R = T3.relabels(
+        {"t3_r": "t3_rR", "d_ket": "d_ketR", "d_bra": "d_braR", "t3_l": "t3_lR"}
+    )
+    C3 = env.C3.relabel("c3_l", "t3_lR")
+    T3R_C3 = contract(T3_R, C3)  # (t3_rR, d_ketR, d_braR, c3_u)
+    T2_BR = T2.relabels(
+        {
+            "t2_u": "t2_uB",
+            "r_ket": "r_ketB",
+            "r_bra": "r_braB",
+            "t2_d": "c3_u",
+        }
+    )  # (t2_uB, r_ketB, r_braB, c3_u)
+    BR_frame = contract(T3R_C3, T2_BR)
+    # BR_frame open: (t3_rR, d_ketR, d_braR, t2_uB, r_ketB, r_braB) — chi^2 * D^4
+
+    # A_BR has d → d_ketR (consumed), r → r_ketB (consumed),
+    # u → u_BR_ket (open seam to TR), l → l_BR_ket (open seam to BL), phys → phys_BR.
+    A_BR = A.relabels(
+        {
+            "d": "d_ketR",
+            "r": "r_ketB",
+            "u": "u_BR_ket",
+            "l": "l_BR_ket",
+            "phys": "phys_BR",
+        }
+    )
+    BR_frame_A = contract(BR_frame, A_BR)
+    # open: (d_braR, t3_rR, t2_uB, r_braB, u_BR_ket, l_BR_ket, phys_BR) — chi^2 * D^4 * d
+    A_bra_BR = A.bar_super().relabels(
+        {
+            "d": "d_braR",
+            "r": "r_braB",
+            "u": "u_BR_bra",
+            "l": "l_BR_bra",
+            "phys": "phys_bra_BR",
+        }
+    )
+    site_env_BR = contract(BR_frame_A, A_bra_BR)
+    # site_env_BR open: (t3_rR, t2_uB, u_BR_ket, l_BR_ket, phys_BR,
+    #                    u_BR_bra, l_BR_bra, phys_bra_BR)
+    # — chi^2 * D^4 * d^2 (peak)
+
+    # ---------- Combine columns ----------
+    # left_half = site_env_TL · site_env_BL on:
+    #   chi seam: t4_u <-> t4_dB
+    #   inner-D seams: d <-> u_BL_ket, d_bra <-> u_BL_bra
+    site_env_BL = site_env_BL.relabels(
+        {
+            "t4_dB": "t4_u",
+            "u_BL_ket": "d",
+            "u_BL_bra": "d_bra",
+        }
+    )
+    left_half = contract(site_env_TL, site_env_BL)
+    # left_half open: (t1_r, r, phys, r_bra, phys_bra, t3_l, r_BL_ket, r_BL_bra)
+
+    # right_half = site_env_TR · site_env_BR on:
+    #   chi seam: t2_d <-> t2_uB
+    #   inner-D seams: d_TR_ket <-> u_BR_ket, d_TR_bra <-> u_BR_bra
+    site_env_BR = site_env_BR.relabels(
+        {
+            "t2_uB": "t2_d",
+            "u_BR_ket": "d_TR_ket",
+            "u_BR_bra": "d_TR_bra",
+        }
+    )
+    right_half = contract(site_env_TR, site_env_BR)
+    # right_half open: (t1_lR, l_TR_ket, l_TR_bra, t3_rR, l_BR_ket, l_BR_bra,
+    #                   phys_BR, phys_bra_BR)
+
+    # ---------- Final combine ----------
+    # Match: t1_r<->t1_lR (chi), t3_l<->t3_rR (chi),
+    #        r<->l_TR_ket (top inner-D), r_bra<->l_TR_bra,
+    #        r_BL_ket<->l_BR_ket (bot inner-D), r_BL_bra<->l_BR_bra.
+    right_half = right_half.relabels(
+        {
+            "t1_lR": "t1_r",
+            "t3_rR": "t3_l",
+            "l_TR_ket": "r",
+            "l_TR_bra": "r_bra",
+            "l_BR_ket": "r_BL_ket",
+            "l_BR_bra": "r_BL_bra",
+        }
+    )
+    rdm_t = contract(
+        left_half,
+        right_half,
+        output_labels=["phys", "phys_BR", "phys_bra", "phys_bra_BR"],
+    )
 
     rdm = rdm_t.todense()
     d = rdm.shape[0]
