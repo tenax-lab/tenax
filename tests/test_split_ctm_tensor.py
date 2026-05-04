@@ -675,3 +675,37 @@ class TestSplitRDMs:
             _split_env_to_tensor_standard(env_B),
         )
         assert jnp.allclose(rdm_split, rdm_shim, atol=1e-10)
+
+        # Distinctness check: mixed-env result must differ from single-env result with A on both sites.
+        from tenax.algorithms._split_ctm_tensor_energy import _rdm1x2_split_tensor
+
+        rdm_single = _rdm1x2_split_tensor(A, env_A)
+        assert not jnp.allclose(rdm_split, rdm_single, atol=1e-6)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
+    def test_rdm2x1_2site_matches_shim(self, D, chi):
+        from tenax.algorithms._ctm_tensor_energy import _rdm2x1_tensor_2site
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _rdm2x1_split_tensor_2site,
+            _split_env_to_tensor_standard,
+        )
+
+        A = make_random_dense_site(D, d=2, seed=20)
+        B = make_random_dense_site(D, d=2, seed=21)
+        env_A = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+        env_B = ctm_split_tensor(B, chi=chi, max_iter=20, chi_I=chi)
+
+        rdm_split = _rdm2x1_split_tensor_2site(A, B, env_A, env_B)
+        rdm_shim = _rdm2x1_tensor_2site(
+            A,
+            B,
+            _split_env_to_tensor_standard(env_A),
+            _split_env_to_tensor_standard(env_B),
+        )
+        assert jnp.allclose(rdm_split, rdm_shim, atol=1e-10)
+
+        # Distinctness check: mixed-env result must differ from single-env result with A on both sites.
+        from tenax.algorithms._split_ctm_tensor_energy import _rdm2x1_split_tensor
+
+        rdm_single = _rdm2x1_split_tensor(A, env_A)
+        assert not jnp.allclose(rdm_split, rdm_single, atol=1e-6)

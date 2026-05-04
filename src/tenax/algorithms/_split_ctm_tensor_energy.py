@@ -6,6 +6,7 @@ __all__ = [
     "_rdm1x2_split_tensor",
     "_rdm1x2_split_tensor_2site",
     "_rdm2x1_split_tensor",
+    "_rdm2x1_split_tensor_2site",
     "_rdm_1site_split_tensor",
     "_rdm_diagonal_split_tensor",
     "_split_env_to_tensor_standard",
@@ -793,6 +794,145 @@ def _rdm1x2_split_tensor_2site(
         top_half,
         bot_half,
         output_labels=["phys", "phys_B", "phys_bra", "phys_braB"],
+    )
+    # -> (s1_A_ket, s2_B_ket, s1_A_bra, s2_B_bra)
+
+    rdm = rdm_t.todense()
+    d = rdm.shape[0]
+    rdm_mat = rdm.reshape(d * d, d * d)
+    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
+    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    return rdm_mat.reshape(d, d, d, d)
+
+
+def _rdm2x1_split_tensor_2site(
+    A: Tensor,
+    B: Tensor,
+    env_A: SplitCTMTensorEnv,
+    env_B: SplitCTMTensorEnv,
+) -> jax.Array:
+    """Horizontal 2x1 RDM for checkerboard / mixed-env (A left, B right).
+
+    Mixed environment::
+
+        C1_A — T1_A — T1_B — C2_B
+        |       |       |       |
+        T4_A   ao_A   ao_B    T2_B
+        |       |       |       |
+        C4_A — T3_A — T3_B — C3_B
+
+    Same contraction order and label conventions as ``_rdm2x1_split_tensor``,
+    but C1/C4/T1/T3/T4 come from ``env_A`` (left half) and C2/C3/T1_R/T3_R/T2
+    from ``env_B`` (right half). Bounded peak chi^2 * D^4 per half.
+
+    Returns dense RDM of shape ``(d, d, d, d)`` in
+    ``(s1_A_ket, s2_B_ket, s1_A_bra, s2_B_bra)``,
+    symmetrised and trace-normalised.
+    """
+    splits_A = _make_split_edges(env_A)
+    splits_B = _make_split_edges(env_B)
+    T1, T3, T4 = splits_A["T1"], splits_A["T3"], splits_A["T4"]
+    T1_B_split, T3_B_split, T2_B_split = (
+        splits_B["T1"],
+        splits_B["T3"],
+        splits_B["T2"],
+    )
+
+    A_bra = A.bar_super().relabels(
+        {
+            "u": "u_bra",
+            "d": "d_bra",
+            "l": "l_bra",
+            "r": "r_bra",
+            "phys": "phys_bra",
+        }
+    )
+
+    # ---------- Left half (env_A, A) ----------
+    C1 = env_A.C1.relabel("c1_r", "t1_l")
+    UL = contract(C1, T1)  # (c1_d, u_ket, u_bra, t1_r)
+
+    C4 = env_A.C4.relabel("c4_u", "t3_r")
+    LL = contract(C4, T3)  # (c4_r, d_ket, d_bra, t3_l)
+
+    T4_e = T4.relabels({"t4_d": "c1_d", "t4_u": "c4_r"})  # (c1_d, l_ket, l_bra, c4_r)
+
+    A_left = A.relabels({"u": "u_ket", "d": "d_ket", "l": "l_ket", "r": "r_ket"})
+
+    UL_T4 = contract(UL, T4_e)  # chi^2 * D^4
+    UL_T4_A = contract(UL_T4, A_left)  # chi^2 * D^4 * d (peak)
+    UL_T4_A_LL = contract(UL_T4_A, LL)  # chi^2 * D^3 * d
+    left_half = contract(UL_T4_A_LL, A_bra)  # chi^2 * D^2 * d^2
+    # left_half open: (t1_r, t3_l, r_ket, phys, r_bra, phys_bra)
+
+    # ---------- Right half (env_B, B) ----------
+    # Suffix all right-side labels with "R" so they don't collide with left.
+    T1_R = T1_B_split.relabels(
+        {"t1_l": "t1_lR", "u_ket": "u_ketR", "u_bra": "u_braR", "t1_r": "t1_rR"}
+    )
+    T3_R = T3_B_split.relabels(
+        {"t3_r": "t3_rR", "d_ket": "d_ketR", "d_bra": "d_braR", "t3_l": "t3_lR"}
+    )
+
+    C2 = env_B.C2.relabel("c2_l", "t1_rR")
+    UR = contract(T1_R, C2)  # (t1_lR, u_ketR, u_braR, c2_d)
+
+    C3 = env_B.C3.relabel("c3_l", "t3_lR")
+    LR = contract(T3_R, C3)  # (t3_rR, d_ketR, d_braR, c3_u)
+
+    T2_e = T2_B_split.relabels(
+        {
+            "t2_u": "c2_d",
+            "t2_d": "c3_u",
+            "r_ket": "r_ketR",
+            "r_bra": "r_braR",
+        }
+    )
+
+    B_right = B.relabels(
+        {
+            "u": "u_ketR",
+            "d": "d_ketR",
+            "l": "l_ketR",  # OPEN — becomes seam to left_half's r_ket
+            "r": "r_ketR",
+            "phys": "phys_R",
+        }
+    )
+    B_bra_right = B.bar_super().relabels(
+        {
+            "u": "u_braR",
+            "d": "d_braR",
+            "l": "l_braR",  # OPEN — becomes seam to left_half's r_bra
+            "r": "r_braR",
+            "phys": "phys_braR",
+        }
+    )
+
+    UR_T2 = contract(UR, T2_e)  # chi^2 * D^4
+    UR_T2_A = contract(UR_T2, B_right)  # chi^2 * D^4 * d (peak)
+    UR_T2_A_LR = contract(UR_T2_A, LR)  # chi^2 * D^3 * d
+    right_half = contract(UR_T2_A_LR, B_bra_right)  # chi^2 * D^2 * d^2
+    # right_half open: (t1_lR, t3_rR, l_ketR, phys_R, l_braR, phys_braR)
+
+    # ---------- Combine ----------
+    # Seam labels:
+    #   t1_r   (left T1 chi-right) <-> t1_lR  (right T1 chi-left)
+    #   t3_l   (left T3 chi-left)  <-> t3_rR  (right T3 chi-right)
+    #   r_ket  (left A r-leg)      <-> l_ketR (right B l-leg)
+    #   r_bra  (left A_bra r-leg)  <-> l_braR (right B_bra l-leg)
+    right_half = right_half.relabels(
+        {
+            "t1_lR": "t1_r",
+            "t3_rR": "t3_l",
+            "l_ketR": "r_ket",
+            "l_braR": "r_bra",
+        }
+    )
+
+    rdm_t = contract(
+        left_half,
+        right_half,
+        output_labels=["phys", "phys_R", "phys_bra", "phys_braR"],
     )
     # -> (s1_A_ket, s2_B_ket, s1_A_bra, s2_B_bra)
 
