@@ -25,6 +25,26 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor
 # ------------------------------------------------------------------ #
 
 
+def make_random_dense_site(D: int, d: int, seed: int) -> DenseTensor:
+    """Build a random U(1)-trivial DenseTensor iPEPS site for parity tests."""
+    key = jax.random.PRNGKey(seed)
+    data = jax.random.normal(key, (D, D, D, D, d))
+    data = data / jnp.linalg.norm(data)
+    sym = U1Symmetry()
+    z_D = np.zeros(D, dtype=np.int32)
+    z_d = np.zeros(d, dtype=np.int32)
+    return DenseTensor(
+        data,
+        (
+            TensorIndex.from_charges(sym, z_D, FlowDirection.OUT, label="u"),
+            TensorIndex.from_charges(sym, z_D, FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(sym, z_D, FlowDirection.OUT, label="l"),
+            TensorIndex.from_charges(sym, z_D, FlowDirection.IN, label="r"),
+            TensorIndex.from_charges(sym, z_d, FlowDirection.IN, label="phys"),
+        ),
+    )
+
+
 @pytest.fixture
 def small_peps_dense():
     """Random DenseTensor iPEPS site tensor, D=2, d=2."""
@@ -582,27 +602,24 @@ class TestSplitRDMs:
             _split_env_to_tensor_standard,
         )
 
-        # Build a random site tensor at this size.
-        key = jax.random.PRNGKey(0)
-        d = 2
-        data = jax.random.normal(key, (D, D, D, D, d))
-        data = data / jnp.linalg.norm(data)
-        sym = U1Symmetry()
-        idx = TensorIndex.from_charges
-        z = lambda n: np.zeros(n, dtype=np.int32)  # noqa: E731
-        A = DenseTensor(
-            data,
-            (
-                idx(sym, z(D), FlowDirection.OUT, label="u"),
-                idx(sym, z(D), FlowDirection.IN, label="d"),
-                idx(sym, z(D), FlowDirection.OUT, label="l"),
-                idx(sym, z(D), FlowDirection.IN, label="r"),
-                idx(sym, z(d), FlowDirection.IN, label="phys"),
-            ),
-        )
-
+        A = make_random_dense_site(D, d=2, seed=0)
         env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
 
         rdm_split = _rdm_1site_split_tensor(A, env)
         rdm_shim = _rdm_1site_tensor(A, _split_env_to_tensor_standard(env))
+        assert jnp.allclose(rdm_split, rdm_shim, atol=1e-10)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12), (4, 16)])
+    def test_rdm1x2_matches_shim(self, D, chi):
+        from tenax.algorithms._ctm_tensor_energy import _rdm1x2_tensor
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _rdm1x2_split_tensor,
+            _split_env_to_tensor_standard,
+        )
+
+        A = make_random_dense_site(D, d=2, seed=1)
+        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+
+        rdm_split = _rdm1x2_split_tensor(A, env)
+        rdm_shim = _rdm1x2_tensor(A, _split_env_to_tensor_standard(env))
         assert jnp.allclose(rdm_split, rdm_shim, atol=1e-10)

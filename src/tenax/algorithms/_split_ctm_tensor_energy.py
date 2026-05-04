@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 __all__ = [
+    "_rdm1x2_split_tensor",
     "_rdm_1site_split_tensor",
     "_split_env_to_tensor_standard",
     "compute_energy_split_ctm_tensor",
@@ -162,6 +163,135 @@ def _rdm_1site_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     rdm = 0.5 * (rdm + rdm.conj().T)
     rdm = rdm / (jnp.trace(rdm) + EPS)
     return rdm
+
+
+def _rdm1x2_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
+    """Vertical 1x2 RDM via split-aware contraction. Bounded peak chi^2 * D^4.
+
+    Top half contraction order (mirrored for bottom)::
+
+        top_row     = C1 . T1_split . C2                # chi^2 * D^2
+        top_T4      = top_row . T4_T_split              # chi^2 * D^4   (peak edge stage)
+        top_T4_A    = top_T4 . A_ket                    # chi^2 * D^4 * d (peak overall)
+        top_T4_A_T2 = top_T4_A . T2_T_split             # chi^2 * D^3 * d
+        top_half    = top_T4_A_T2 . A_bra               # chi^2 * D^2 * d^2
+
+    Combine on (t4_u<->t4_uB chi seam, t2_d<->t2_dB chi seam,
+    d_ket<->u_ketB inner-D, d_bra<->u_braB inner-D).
+
+    Returns dense RDM of shape ``(d, d, d, d)`` in
+    ``(s1_ket, s2_ket, s1_bra, s2_bra)``, symmetrised and trace-normalised.
+    """
+    splits = _make_split_edges(env)
+    T1, T2, T3, T4 = splits["T1"], splits["T2"], splits["T3"], splits["T4"]
+
+    A_bra = A.bar_super().relabels(
+        {
+            "u": "u_bra",
+            "d": "d_bra",
+            "l": "l_bra",
+            "r": "r_bra",
+            "phys": "phys_bra",
+        }
+    )
+
+    # ---------- Top half ----------
+    C1 = env.C1.relabel("c1_r", "t1_l")
+    C2 = env.C2.relabel("c2_l", "t1_r")
+    top_row = contract(contract(C1, T1), C2)  # (c1_d, u_ket, u_bra, c2_d)
+
+    T4_T = T4.relabels({"t4_d": "c1_d"})  # (c1_d, l_ket, l_bra, t4_u)
+    T2_T = T2.relabels({"t2_u": "c2_d"})  # (c2_d, r_ket, r_bra, t2_d)
+
+    A_top = A.relabels({"u": "u_ket", "l": "l_ket", "r": "r_ket"})
+
+    top_T4 = contract(top_row, T4_T)  # chi^2 * D^4
+    top_T4_A = contract(top_T4, A_top)  # chi^2 * D^4 * d (peak)
+    top_T4_A_T2 = contract(top_T4_A, T2_T)  # chi^2 * D^3 * d
+    top_half = contract(top_T4_A_T2, A_bra)  # chi^2 * D^2 * d^2
+
+    # ---------- Bottom half ----------
+    # Suffix bottom-site labels with "B" so they don't collide with the top half.
+    bot_row_C4 = env.C4.relabel("c4_u", "t3_r")
+    bot_row_C3 = env.C3.relabel("c3_l", "t3_l")
+    bot_row = contract(contract(bot_row_C4, T3), bot_row_C3)
+    # bot_row: (c4_r, d_ket, d_bra, c3_u) — the d_ket/d_bra here are T3's D-legs,
+    # i.e. the bottom site's *down* legs. Rename to d_ketB/d_braB so they don't
+    # collide with the top-half seam labels (top A's bare ``d`` leg and A_bra's
+    # ``d_bra`` leg are the seam, not the bottom site's down-legs).
+    bot_row = bot_row.relabels({"d_ket": "d_ketB", "d_bra": "d_braB"})
+
+    T4_B = T4.relabels(
+        {
+            "t4_u": "c4_r",  # T4's chi-up matches C4_r at the bottom seam
+            "t4_d": "t4_uB",  # other chi-end becomes the bottom-half top-seam
+            "l_ket": "l_ketB",
+            "l_bra": "l_braB",
+        }
+    )
+    T2_B = T2.relabels(
+        {
+            "t2_d": "c3_u",
+            "t2_u": "t2_dB",
+            "r_ket": "r_ketB",
+            "r_bra": "r_braB",
+        }
+    )
+
+    A_bot = A.relabels(
+        {
+            "u": "u_ketB",  # OPEN — becomes seam to top_half's ``d`` leg
+            "l": "l_ketB",
+            "r": "r_ketB",
+            "d": "d_ketB",  # matches bot_row's d_ketB (T3 inner-D)
+            "phys": "phys_B",
+        }
+    )
+    A_bra_bot = A_bra.relabels(
+        {
+            "u_bra": "u_braB",  # OPEN — becomes seam to top_half's d_bra
+            "l_bra": "l_braB",  # matches T4_B's l_braB
+            "r_bra": "r_braB",  # matches T2_B's r_braB
+            "d_bra": "d_braB",  # matches bot_row's d_braB (T3 inner-D)
+            "phys_bra": "phys_braB",
+        }
+    )
+
+    bot_T4 = contract(bot_row, T4_B)  # chi^2 * D^4
+    bot_T4_A = contract(bot_T4, A_bot)  # chi^2 * D^4 * d (peak)
+    bot_T4_A_T2 = contract(bot_T4_A, T2_B)  # chi^2 * D^3 * d
+    bot_half = contract(bot_T4_A_T2, A_bra_bot)  # chi^2 * D^2 * d^2
+
+    # ---------- Combine ----------
+    # Open labels on top_half:  (t4_u, d, phys, t2_d, d_bra, phys_bra)
+    # Open labels on bot_half:  (t4_uB, u_ketB, phys_B, t2_dB, u_braB, phys_braB)
+    # Seam labels:
+    #   t4_u  (top T4 chi-up)   <-> t4_uB  (bot T4 chi-up)
+    #   t2_d  (top T2 chi-down) <-> t2_dB  (bot T2 chi-down)
+    #   d     (top A d-leg)     <-> u_ketB (bot A u-leg)
+    #   d_bra (top A_bra d-leg) <-> u_braB (bot A_bra u-leg)
+    bot_half = bot_half.relabels(
+        {
+            "t4_uB": "t4_u",
+            "t2_dB": "t2_d",
+            "u_ketB": "d",
+            "u_braB": "d_bra",
+        }
+    )
+
+    rdm_t = contract(
+        top_half,
+        bot_half,
+        output_labels=["phys", "phys_B", "phys_bra", "phys_braB"],
+    )
+    # -> (s1_ket, s2_ket, s1_bra, s2_bra)
+
+    rdm = rdm_t.todense()
+    d = rdm.shape[0]
+    rdm_mat = rdm.reshape(d * d, d * d)
+    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
+    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    return rdm_mat.reshape(d, d, d, d)
 
 
 def _split_env_to_tensor_standard(env: SplitCTMTensorEnv) -> CTMTensorEnv:
