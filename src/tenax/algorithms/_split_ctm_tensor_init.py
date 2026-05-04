@@ -6,6 +6,7 @@ __all__ = [
     "SplitCTMTensorEnv",
     "_EDGE_BRA_SPECS",
     "_EDGE_KET_SPECS",
+    "_canonical_I_charges",
     "_init_symmetric_corner",
     "_init_symmetric_edge_bra",
     "_init_symmetric_edge_ket",
@@ -163,6 +164,73 @@ def _init_symmetric_corner(
     return SymmetricTensor.from_dense(C_pad, (idx_a, idx_b), tol=float("inf"))
 
 
+def _conservation_holds(sym, qc, qd, qI, flow_chi, flow_D, flow_I) -> bool:
+    """Check whether ``flow_chi*qc + flow_D*qd + flow_I*qI = identity`` under
+    the symmetry's group operation.
+
+    For U(1) this matches raw integer arithmetic; for Z₂/FermionParity it
+    reduces mod 2 so that canonical I-charges produced by
+    :func:`_canonical_I_charges` register as conservation-compatible (raw
+    arithmetic would miss e.g. ``1+1-0 = 2`` even though ``2 ≡ 0 mod 2``).
+    """
+    qc_a = np.array([int(qc)], dtype=np.int32)
+    qd_a = np.array([int(qd)], dtype=np.int32)
+    qI_a = np.array([int(qI)], dtype=np.int32)
+    qc_s = sym.dual(qc_a) if int(flow_chi) < 0 else qc_a
+    qd_s = sym.dual(qd_a) if int(flow_D) < 0 else qd_a
+    qI_s = sym.dual(qI_a) if int(flow_I) < 0 else qI_a
+    total = sym.fuse(sym.fuse(qc_s, qd_s), qI_s)
+    return int(total[0]) == sym.identity()
+
+
+def _canonical_I_charges(
+    sym,
+    chi_charges: np.ndarray,
+    D_charges: np.ndarray,
+    flow_chi: FlowDirection,
+    flow_D: FlowDirection,
+    flow_I: FlowDirection,
+    chi_I: int,
+) -> np.ndarray:
+    """Derive interlayer-bond charges via local conservation, then reduce to
+    the symmetry's fundamental domain (mod-n for Zₙ, no-op for U(1)).
+
+    Pre-canonicalisation (raw integer arithmetic) gave ``qI = qc + qd`` for the
+    ket and ``qI = qd − qc`` for the bra under their respective flow specs;
+    although equivalent under Z₂, the raw sequences differed, so the SVD bond
+    came out with mismatched labels and ``_split_ctm_move_left`` could not
+    contract them at certain chi (issue #391).
+
+    The canonicalisation pipeline:
+      1. derive raw I-charges via local conservation (matches pre-fix logic),
+      2. tile to chi_I (preserves per-parity allocation across layers),
+      3. fuse each raw value with the symmetry identity, which reduces it to
+         the fundamental domain for Zₙ and is a no-op for U(1).
+
+    Crucially, the *caller* must invoke this with the same flow tuple for both
+    halves of a split edge (ket and bra), so the resulting charge sequence is
+    identical on both sides of the SVD bond.
+    """
+    fc = int(flow_chi)
+    fd = int(flow_D)
+    fI = int(flow_I)
+    needed_raw: set[int] = set()
+    for qc in sorted({int(c) for c in chi_charges}):
+        for qd in sorted({int(c) for c in D_charges}):
+            qi_needed = -(fc * qc + fd * qd)
+            if fI != 0 and qi_needed % fI == 0:
+                needed_raw.add(qi_needed // fI)
+    base = sorted(needed_raw) or [0]
+    if chi_I <= len(base):
+        raw_arr = np.array(base[:chi_I], dtype=np.int32)
+    else:
+        reps = chi_I // len(base) + 1
+        raw_arr = np.array((base * reps)[:chi_I], dtype=np.int32)
+    # Reduce each raw value to the symmetry's fundamental domain.
+    identity_arr = np.full(len(raw_arr), sym.identity(), dtype=np.int32)
+    return np.asarray(sym.fuse(raw_arr, identity_arr), dtype=np.int32)
+
+
 def _init_symmetric_edge_ket(
     A: SymmetricTensor,
     chi: int,
@@ -176,6 +244,8 @@ def _init_symmetric_edge_ket(
     flow_I: FlowDirection,
     ref_axis_chi: int,
     ref_axis_D: int,
+    *,
+    I_charges_arr: np.ndarray | None = None,
 ) -> SymmetricTensor:
     """Create an identity-like SymmetricTensor ket edge.
 
@@ -190,29 +260,14 @@ def _init_symmetric_edge_ket(
     chi_charges = _derive_charges(A.indices[ref_axis_chi].charges, chi)
     D_charges = np.asarray(A.indices[ref_axis_D].charges.copy(), dtype=np.int32)
 
-    # Derive I-leg charges from the conservation rule so that the
-    # identity-like initialisation has the maximum number of nonzero
-    # blocks.  For each (q_chi, q_D), q_I = -(flow_chi*q_chi + flow_D*q_D) / flow_I.
-    # Collect the set of q_I values needed, then tile to chi_I.
-    fi = int(flow_I)
-    fc = int(flow_chi)
-    fd = int(flow_D)
-    needed_I_charges: set[int] = set()
-    for qc in set(int(c) for c in chi_charges):
-        for qd in set(int(c) for c in D_charges):
-            qi_needed = -(fc * qc + fd * qd)
-            if fi != 0:
-                if qi_needed % fi == 0:
-                    needed_I_charges.add(qi_needed // fi)
-    # Build I charges: start with needed charges, then fill to chi_I
-    base_I = sorted(needed_I_charges)
-    if len(base_I) == 0:
-        base_I = [0]
-    if chi_I <= len(base_I):
-        I_charges_arr = np.array(base_I[:chi_I], dtype=np.int32)
-    else:
-        reps = chi_I // len(base_I) + 1
-        I_charges_arr = np.array((base_I * reps)[:chi_I], dtype=np.int32)
+    # Canonical I-charges via the symmetry's group operation.  Caller may pass
+    # the same I_charges_arr to both ket and bra inits so the SVD bond carries
+    # identical raw charges on both sides under Z₂ (issue #391).  When None,
+    # derive locally from the ket's flow conventions.
+    if I_charges_arr is None:
+        I_charges_arr = _canonical_I_charges(
+            sym, chi_charges, D_charges, flow_chi, flow_D, flow_I, chi_I
+        )
 
     idx_chi = TensorIndex.from_charges(sym, chi_charges, flow_chi, label=label_chi)
     idx_D = TensorIndex.from_charges(sym, D_charges, flow_D, label=label_D)
@@ -220,21 +275,23 @@ def _init_symmetric_edge_ket(
 
     # Build conservation-compatible init matching dense reference pattern
     # T[i, :, i] = ones(D) for i in range(min(chi_D, chi_I_D)).
-    # Only set entries where charge conservation holds.
-    fc = int(flow_chi)
-    fd = int(flow_D)
-    fI = int(flow_I)
+    # Only set entries where charge conservation holds (sym-aware: required
+    # so canonical Z₂ charges in {0,1} register valid sectors that raw
+    # integer arithmetic would miss).
     T = jnp.zeros((chi, D, chi_I), dtype=A.dtype)
     chi_D = min(chi, D)
     chi_I_D = min(chi_I, D)
     for i in range(min(chi_D, chi_I_D)):
         for di in range(D):
-            total_charge = (
-                fc * int(chi_charges[i])
-                + fd * int(D_charges[di])
-                + fI * int(I_charges_arr[i])
-            )
-            if total_charge == 0:
+            if _conservation_holds(
+                sym,
+                chi_charges[i],
+                D_charges[di],
+                I_charges_arr[i],
+                flow_chi,
+                flow_D,
+                flow_I,
+            ):
                 T = T.at[i, di, i].set(1.0)
     return SymmetricTensor.from_dense(T, (idx_chi, idx_D, idx_I), tol=float("inf"))
 
@@ -252,35 +309,27 @@ def _init_symmetric_edge_bra(
     flow_chi: FlowDirection,
     ref_axis_chi: int,
     ref_axis_D: int,
+    *,
+    I_charges_arr: np.ndarray | None = None,
 ) -> SymmetricTensor:
     """Create an identity-like SymmetricTensor bra edge.
 
-    Same conservation-aware charge derivation as the ket edge.
+    Same conservation-aware charge derivation as the ket edge.  Caller may
+    pass an explicit ``I_charges_arr`` so the bra and the matching ket share
+    the same SVD-bond charges (issue #391).
     """
     sym = A.indices[0].symmetry
 
     D_charges = np.asarray(A.indices[ref_axis_D].charges.copy(), dtype=np.int32)
     chi_charges = _derive_charges(A.indices[ref_axis_chi].charges, chi)
 
-    # Derive I-leg charges from the conservation rule
-    fi_val = int(flow_I)
-    fc_val = int(flow_chi)
-    fd_val = int(flow_D)
-    needed_I_charges: set[int] = set()
-    for qc in set(int(c) for c in chi_charges):
-        for qd in set(int(c) for c in D_charges):
-            qi_needed = -(fc_val * qc + fd_val * qd)
-            if fi_val != 0:
-                if qi_needed % fi_val == 0:
-                    needed_I_charges.add(qi_needed // fi_val)
-    base_I = sorted(needed_I_charges)
-    if len(base_I) == 0:
-        base_I = [0]
-    if chi_I <= len(base_I):
-        I_charges_arr = np.array(base_I[:chi_I], dtype=np.int32)
-    else:
-        reps = chi_I // len(base_I) + 1
-        I_charges_arr = np.array((base_I * reps)[:chi_I], dtype=np.int32)
+    # Canonical I-charges (caller-supplied or derived from the bra's local
+    # conservation rule).  Sharing the same array between ket and bra makes
+    # the SVD bond carry identical raw charges on both sides under Z₂.
+    if I_charges_arr is None:
+        I_charges_arr = _canonical_I_charges(
+            sym, chi_charges, D_charges, flow_chi, flow_D, flow_I, chi_I
+        )
 
     idx_I = TensorIndex.from_charges(sym, I_charges_arr, flow_I, label=label_I)
     idx_D = TensorIndex.from_charges(sym, D_charges, flow_D, label=label_D)
@@ -288,21 +337,21 @@ def _init_symmetric_edge_bra(
 
     # Conservation-compatible init matching dense reference pattern
     # T_bra[i, :, i] = ones(D) for i in range(min(chi_I_D, chi_D)).
-    # Only set entries where charge conservation holds.
-    fI = int(flow_I)
-    fd = int(flow_D)
-    fc = int(flow_chi)
+    # Only set entries where charge conservation holds (sym-aware).
     T = jnp.zeros((chi_I, D, chi), dtype=A.dtype)
     chi_D = min(chi, D)
     chi_I_D = min(chi_I, D)
     for i in range(min(chi_I_D, chi_D)):
         for di in range(D):
-            total_charge = (
-                fI * int(I_charges_arr[i])
-                + fd * int(D_charges[di])
-                + fc * int(chi_charges[i])
-            )
-            if total_charge == 0:
+            if _conservation_holds(
+                sym,
+                chi_charges[i],
+                D_charges[di],
+                I_charges_arr[i],
+                flow_chi,
+                flow_D,
+                flow_I,
+            ):
                 T = T.at[i, di, i].set(1.0)
     return SymmetricTensor.from_dense(T, (idx_I, idx_D, idx_chi), tol=float("inf"))
 
@@ -419,16 +468,52 @@ def initialize_split_ctm_tensor_env(
         for name, (la, lb, fa, fb, ref) in _CORNER_SPECS.items():
             corners[name] = _init_symmetric_corner(A, chi, la, lb, fa, fb, ref)
 
+        # Compute I-charges once per edge using the ket's flow conventions
+        # and share with the bra so both halves of the SVD bond carry
+        # identical raw charges (issue #391).
+        sym = A.indices[0].symmetry
+        shared_I_charges: dict[str, np.ndarray] = {}
+        for name, (_, _, _, f1, f2, f3, ref_chi, ref_D) in _EDGE_KET_SPECS.items():
+            chi_charges = _derive_charges(A.indices[ref_chi].charges, chi)
+            D_charges = np.asarray(A.indices[ref_D].charges.copy(), dtype=np.int32)
+            shared_I_charges[name] = _canonical_I_charges(
+                sym, chi_charges, D_charges, f1, f2, f3, chi_I
+            )
+
         ket_edges = {}
         for name, (l1, l2, l3, f1, f2, f3, ref_chi, ref_D) in _EDGE_KET_SPECS.items():
             ket_edges[name] = _init_symmetric_edge_ket(
-                A, chi, D, chi_I, l1, l2, l3, f1, f2, f3, ref_chi, ref_D
+                A,
+                chi,
+                D,
+                chi_I,
+                l1,
+                l2,
+                l3,
+                f1,
+                f2,
+                f3,
+                ref_chi,
+                ref_D,
+                I_charges_arr=shared_I_charges[name],
             )
 
         bra_edges = {}
         for name, (l1, l2, l3, f1, f2, f3, ref_chi, ref_D) in _EDGE_BRA_SPECS.items():
             bra_edges[name] = _init_symmetric_edge_bra(
-                A, chi, D, chi_I, l1, l2, l3, f1, f2, f3, ref_chi, ref_D
+                A,
+                chi,
+                D,
+                chi_I,
+                l1,
+                l2,
+                l3,
+                f1,
+                f2,
+                f3,
+                ref_chi,
+                ref_D,
+                I_charges_arr=shared_I_charges[name],
             )
     else:
         # DenseTensor path
