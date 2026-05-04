@@ -727,3 +727,29 @@ class TestSplitRDMs:
             A, _split_env_to_tensor_standard(env), heisenberg_gate, d=2
         )
         assert jnp.allclose(E_split, E_shim, atol=1e-10)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
+    def test_compute_energy_split_2site_matches_shim(self, D, chi, heisenberg_gate):
+        from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _split_env_to_tensor_standard,
+            compute_energy_split_ctm_tensor_2site,
+        )
+
+        A = make_random_dense_site(D, d=2, seed=40)
+        B = make_random_dense_site(D, d=2, seed=41)
+        env_A = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+        env_B = ctm_split_tensor(B, chi=chi, max_iter=20, chi_I=chi)
+
+        E_split = compute_energy_split_ctm_tensor_2site(
+            A, B, env_A, env_B, heisenberg_gate, d=2
+        )
+        E_shim = compute_energy_ctm_tensor_2site(
+            A,
+            B,
+            _split_env_to_tensor_standard(env_A),
+            _split_env_to_tensor_standard(env_B),
+            heisenberg_gate,
+            d=2,
+        )
+        assert jnp.allclose(E_split, E_shim, atol=1e-10)

@@ -11,6 +11,7 @@ __all__ = [
     "_rdm_diagonal_split_tensor",
     "_split_env_to_tensor_standard",
     "compute_energy_split_ctm_tensor",
+    "compute_energy_split_ctm_tensor_2site",
 ]
 
 import jax
@@ -1083,6 +1084,43 @@ def compute_energy_split_ctm_tensor(
 
     rdm_h = _rdm2x1_split_tensor(A, env)
     rdm_v = _rdm1x2_split_tensor(A, env)
+    E_h = jnp.einsum("ijkl,ijkl->", rdm_h, H)
+    E_v = jnp.einsum("ijkl,ijkl->", rdm_v, H)
+    return (E_h + E_v).real
+
+
+def compute_energy_split_ctm_tensor_2site(
+    A: Tensor,
+    B: Tensor,
+    env_A: SplitCTMTensorEnv,
+    env_B: SplitCTMTensorEnv,
+    hamiltonian_gate: Tensor | jax.Array,
+    d: int | None = None,
+) -> jax.Array:
+    """Compute energy per site for a 2-site checkerboard iPEPS, split-aware.
+
+    Args:
+        A:                Site tensor for sublattice A.
+        B:                Site tensor for sublattice B.
+        env_A:            Converged SplitCTMTensorEnv for sublattice A.
+        env_B:            Converged SplitCTMTensorEnv for sublattice B.
+        hamiltonian_gate: 2-site Hamiltonian gate.
+        d:                Physical dimension (inferred from A if None).
+
+    Returns:
+        Scalar energy per site.
+    """
+    if d is None:
+        phys_idx = [i for i in A.indices if i.label == "phys"]
+        d = phys_idx[0].dim if phys_idx else A.indices[-1].dim
+
+    if isinstance(hamiltonian_gate, Tensor):
+        H = hamiltonian_gate.todense().reshape(d, d, d, d)
+    else:
+        H = hamiltonian_gate.reshape(d, d, d, d)
+
+    rdm_h = _rdm2x1_split_tensor_2site(A, B, env_A, env_B)
+    rdm_v = _rdm1x2_split_tensor_2site(A, B, env_A, env_B)
     E_h = jnp.einsum("ijkl,ijkl->", rdm_h, H)
     E_v = jnp.einsum("ijkl,ijkl->", rdm_v, H)
     return (E_h + E_v).real
