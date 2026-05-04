@@ -45,6 +45,41 @@ def make_random_dense_site(D: int, d: int, seed: int) -> DenseTensor:
     )
 
 
+def make_random_fermionic_site(D: int, d: int, seed: int) -> SymmetricTensor:
+    """Build a random FermionParity-symmetric iPEPS site for parity tests.
+
+    Mirrors :func:`tenax.algorithms.fermionic_ipeps._build_initial_fpeps_tensor`:
+    virtual charges alternate 0,1,0,1,... and physical charges are [0, 1]
+    (empty, occupied).  Uses ``random_normal`` to populate every allowed
+    block — strictly safer than ``from_dense`` which would silently drop
+    charge-violating entries.
+    """
+    from tenax.core.symmetry import FermionParity
+
+    sym = FermionParity()
+    virt_charges = np.array([i % 2 for i in range(D)], dtype=np.int32)
+    phys_charges = np.array([0, 1], dtype=np.int32)[:d]
+    indices = (
+        TensorIndex.from_charges(
+            sym, virt_charges.copy(), FlowDirection.OUT, label="u"
+        ),
+        TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(
+            sym, virt_charges.copy(), FlowDirection.OUT, label="l"
+        ),
+        TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
+    )
+    key = jax.random.PRNGKey(seed)
+    A = SymmetricTensor.random_normal(indices, key)
+    norm_val = float(A.norm())
+    if norm_val > 0:
+        A = A * (1.0 / norm_val)
+    return A
+
+
 @pytest.fixture
 def small_peps_dense():
     """Random DenseTensor iPEPS site tensor, D=2, d=2."""
@@ -847,5 +882,42 @@ class TestSplitRDMs:
         envs_std = {coord: _split_env_to_tensor_standard(env)}
         E_shim = compute_energy_ctm_tensor_multisite(
             site_tensors, envs_std, neighbors, heisenberg_gate, d=2
+        )
+        assert jnp.allclose(E_split, E_shim, atol=1e-10)
+
+
+@pytest.mark.slow
+class TestSplitRDMsFermionic:
+    """Parity vs shim with FermionParity site tensors (Tier 2).
+
+    Bosonic parity tests don't exercise ``A.bar_super()``'s Koszul-twist /
+    flow-flip handling.  The shim path also routes through ``bar_super()``
+    (inside ``_build_double_layer_open_tensor``); if both paths produce the
+    same energy on a fermionic site, the new path's per-leg twist handling
+    is equivalent to the old path's bake-then-fuse handling.
+
+    Note on chi choice: with ``FermionParity`` virtual charges (alternating
+    0/1), ``ctm_split_tensor`` converges cleanly at chi values that match
+    the natural charge-block decomposition (e.g. chi=6, chi=12).  Some
+    intermediate chi values (e.g. chi=8 at D=2) trip an unrelated
+    fermionic projector charge-balance bug; those are out of scope for
+    this Tier-2 parity test, which targets ``bar_super()`` correctness in
+    the energy path, not CTM convergence at every chi.
+    """
+
+    @pytest.mark.parametrize("D, chi", [(2, 6), (3, 12)])
+    def test_fermionic_energy_matches_shim(self, D, chi, heisenberg_gate):
+        from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _split_env_to_tensor_standard,
+            compute_energy_split_ctm_tensor,
+        )
+
+        A = make_random_fermionic_site(D, d=2, seed=70)
+        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+
+        E_split = compute_energy_split_ctm_tensor(A, env, heisenberg_gate, d=2)
+        E_shim = compute_energy_ctm_tensor(
+            A, _split_env_to_tensor_standard(env), heisenberg_gate, d=2
         )
         assert jnp.allclose(E_split, E_shim, atol=1e-10)
