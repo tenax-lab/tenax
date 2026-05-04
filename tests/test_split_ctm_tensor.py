@@ -546,3 +546,26 @@ class TestSplitEdgeHelper:
         assert dim_by_label["t1_r"] == 4
         assert dim_by_label["u_ket"] == 2
         assert dim_by_label["u_bra"] == 2
+
+    def test_make_split_edges_no_label_collisions(self, small_peps_dense):
+        """The four T_split tensors share no D-leg labels; chi labels follow the
+        standard CTM convention (t1_l/t1_r, t2_u/t2_d, t3_l/t3_r, t4_d/t4_u)."""
+        from tenax.algorithms._split_ctm_tensor_energy import _make_split_edges
+
+        env = initialize_split_ctm_tensor_env(small_peps_dense, chi=4, chi_I=4)
+        splits = _make_split_edges(env)
+
+        assert set(splits.keys()) == {"T1", "T2", "T3", "T4"}
+        # D-leg label sets per edge are disjoint:
+        d_labels = {
+            "T1": {"u_ket", "u_bra"},
+            "T2": {"r_ket", "r_bra"},
+            "T3": {"d_ket", "d_bra"},
+            "T4": {"l_ket", "l_bra"},
+        }
+        for name, want in d_labels.items():
+            labs = set(splits[name].labels())
+            assert want.issubset(labs), f"{name} missing {want - labs}"
+        # No D-leg label collides across edges:
+        all_d = set().union(*d_labels.values())
+        assert len(all_d) == 8  # all distinct

@@ -50,6 +50,60 @@ def _make_split_edge(
     return merged.relabels({ket_chi: out_chi_l, bra_chi: out_chi_r})
 
 
+def _make_split_edges(env: SplitCTMTensorEnv) -> dict[str, Tensor]:
+    """Build 4-leg split edges for all four boundary T's.
+
+    Returns a dict keyed ``"T1"``, ``"T2"``, ``"T3"``, ``"T4"`` with each value
+    a 4-leg ``(chi, D_ket, D_bra, chi)`` tensor. D-leg labels are
+    ``{u,r,d,l}_ket`` / ``{u,r,d,l}_bra`` (inherited from inputs and globally
+    unique across the four edges). Chi-leg labels follow the standard
+    ``CTMTensorEnv`` convention: ``t1_l/t1_r``, ``t2_u/t2_d``, ``t3_r/t3_l``,
+    ``t4_d/t4_u``.
+    """
+    return {
+        "T1": _make_split_edge(
+            env.T1_ket,
+            env.T1_bra,
+            ket_I="t1k_I",
+            bra_I="t1b_I",
+            ket_chi="t1k_l",
+            bra_chi="t1b_r",
+            out_chi_l="t1_l",
+            out_chi_r="t1_r",
+        ),
+        "T2": _make_split_edge(
+            env.T2_ket,
+            env.T2_bra,
+            ket_I="t2k_I",
+            bra_I="t2b_I",
+            ket_chi="t2k_u",
+            bra_chi="t2b_d",
+            out_chi_l="t2_u",
+            out_chi_r="t2_d",
+        ),
+        "T3": _make_split_edge(
+            env.T3_ket,
+            env.T3_bra,
+            ket_I="t3k_I",
+            bra_I="t3b_I",
+            ket_chi="t3k_r",
+            bra_chi="t3b_l",
+            out_chi_l="t3_r",
+            out_chi_r="t3_l",
+        ),
+        "T4": _make_split_edge(
+            env.T4_ket,
+            env.T4_bra,
+            ket_I="t4k_I",
+            bra_I="t4b_I",
+            ket_chi="t4k_d",
+            bra_chi="t4b_u",
+            out_chi_l="t4_d",
+            out_chi_r="t4_u",
+        ),
+    }
+
+
 def _split_env_to_tensor_standard(env: SplitCTMTensorEnv) -> CTMTensorEnv:
     """Convert SplitCTMTensorEnv to CTMTensorEnv via Tensor contraction.
 
