@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, replace
 
 import jax
@@ -473,6 +474,7 @@ def pess_to_kagome_supersite(
     return A
 
 
+@functools.partial(jax.jit, static_argnames=("triangle", "D_max"))
 def pess_simple_update_triangle(
     state: IPESSState,
     gate: jax.Array,
