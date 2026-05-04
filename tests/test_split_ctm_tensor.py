@@ -569,3 +569,40 @@ class TestSplitEdgeHelper:
         # No D-leg label collides across edges:
         all_d = set().union(*d_labels.values())
         assert len(all_d) == 8  # all distinct
+
+
+class TestSplitRDMs:
+    """Parity vs the shim for each split-aware RDM."""
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
+    def test_rdm_1site_matches_shim(self, D, chi):
+        from tenax.algorithms._ctm_tensor_energy import _rdm_1site_tensor
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _rdm_1site_split_tensor,
+            _split_env_to_tensor_standard,
+        )
+
+        # Build a random site tensor at this size.
+        key = jax.random.PRNGKey(0)
+        d = 2
+        data = jax.random.normal(key, (D, D, D, D, d))
+        data = data / jnp.linalg.norm(data)
+        sym = U1Symmetry()
+        idx = TensorIndex.from_charges
+        z = lambda n: np.zeros(n, dtype=np.int32)  # noqa: E731
+        A = DenseTensor(
+            data,
+            (
+                idx(sym, z(D), FlowDirection.OUT, label="u"),
+                idx(sym, z(D), FlowDirection.IN, label="d"),
+                idx(sym, z(D), FlowDirection.OUT, label="l"),
+                idx(sym, z(D), FlowDirection.IN, label="r"),
+                idx(sym, z(d), FlowDirection.IN, label="phys"),
+            ),
+        )
+
+        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+
+        rdm_split = _rdm_1site_split_tensor(A, env)
+        rdm_shim = _rdm_1site_tensor(A, _split_env_to_tensor_standard(env))
+        assert jnp.allclose(rdm_split, rdm_shim, atol=1e-10)

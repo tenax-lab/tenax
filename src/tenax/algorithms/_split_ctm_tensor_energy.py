@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 __all__ = [
+    "_rdm_1site_split_tensor",
     "_split_env_to_tensor_standard",
     "compute_energy_split_ctm_tensor",
 ]
 
 import jax
+import jax.numpy as jnp
 
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 from tenax.algorithms._split_ctm_tensor_init import SplitCTMTensorEnv
 from tenax.algorithms._tensor_utils import fuse_indices
 from tenax.contraction.contractor import contract
+from tenax.core import EPS
 from tenax.core.index import FlowDirection
 from tenax.core.tensor import Tensor
 
@@ -102,6 +105,63 @@ def _make_split_edges(env: SplitCTMTensorEnv) -> dict[str, Tensor]:
             out_chi_r="t4_u",
         ),
     }
+
+
+def _rdm_1site_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
+    """Single-site RDM via split-aware contraction.
+
+    Same network topology as ``_rdm_1site_tensor`` but uses 4-leg split edges
+    and keeps ``A`` and ``A.bar_super()`` separate (no double-layer fusion).
+
+    Note: 1-site has an intrinsic chi^2 * D^6 frame stage; the chi^2 * D^4 peak
+    target of the design only applies to the 2x1/1x2/diagonal RDMs (Tasks 4-6).
+    1-site exists for parity testing and small-D probes; energy never uses it
+    for nearest-neighbour bonds.
+    """
+    splits = _make_split_edges(env)
+    T1, T2, T3, T4 = splits["T1"], splits["T2"], splits["T3"], splits["T4"]
+
+    A_ket = A.relabels({"u": "u_ket", "d": "d_ket", "l": "l_ket", "r": "r_ket"})
+    A_bra = A.bar_super().relabels(
+        {
+            "u": "u_bra",
+            "d": "d_bra",
+            "l": "l_bra",
+            "r": "r_bra",
+            "phys": "phys_bra",
+        }
+    )
+
+    # Build the boundary frame: corners + four split T's, all chi-bonds matched.
+    C1 = env.C1.relabel("c1_r", "t1_l")
+    C2 = env.C2.relabel("c2_l", "t1_r")
+    top_row = contract(contract(C1, T1), C2)  # (c1_d, u_ket, u_bra, c2_d)
+
+    C4 = env.C4.relabel("c4_u", "t3_r")
+    C3 = env.C3.relabel("c3_l", "t3_l")
+    bot_row = contract(contract(C4, T3), C3)  # (c4_r, d_ket, d_bra, c3_u)
+
+    T4_e = T4.relabels({"t4_d": "c1_d", "t4_u": "c4_r"})
+    T2_e = T2.relabels({"t2_u": "c2_d", "t2_d": "c3_u"})
+
+    # Frame: top·T4·T2·bot. Pairwise so the 4-leg split edges keep their
+    # D_ket/D_bra structure (no D^2 fuse anywhere).
+    frame_top = contract(top_row, T4_e)
+    frame_full = contract(frame_top, T2_e)
+    frame_full = contract(frame_full, bot_row)
+    # frame_full has 8 D-legs: u_ket, u_bra, l_ket, l_bra, r_ket, r_bra,
+    # d_ket, d_bra.
+
+    # Absorb A then A_bra. A_ket's u/l/r/d match the ket D-legs; A_bra's match bra.
+    rdm_t = contract(frame_full, A_ket)  # consumes u_ket, l_ket, r_ket, d_ket
+    rdm_t = contract(
+        rdm_t, A_bra, output_labels=["phys", "phys_bra"]
+    )  # consumes u_bra, l_bra, r_bra, d_bra
+
+    rdm = rdm_t.todense()
+    rdm = 0.5 * (rdm + rdm.conj().T)
+    rdm = rdm / (jnp.trace(rdm) + EPS)
+    return rdm
 
 
 def _split_env_to_tensor_standard(env: SplitCTMTensorEnv) -> CTMTensorEnv:
