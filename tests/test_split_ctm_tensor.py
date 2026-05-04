@@ -753,3 +753,56 @@ class TestSplitRDMs:
             d=2,
         )
         assert jnp.allclose(E_split, E_shim, atol=1e-10)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
+    def test_compute_energy_split_multisite_matches_shim(self, D, chi, heisenberg_gate):
+        """Split-aware multisite energy must match shim at small D on a Y-shaped 3-site cell."""
+        from tenax.algorithms._ctm_tensor_energy import (
+            compute_energy_ctm_tensor_multisite,
+        )
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _split_env_to_tensor_standard,
+            compute_energy_split_ctm_tensor_multisite,
+        )
+
+        coords = [(0, 0), (1, 0), (0, 1)]
+        site_tensors = {
+            (0, 0): make_random_dense_site(D, d=2, seed=50),
+            (1, 0): make_random_dense_site(D, d=2, seed=51),
+            (0, 1): make_random_dense_site(D, d=2, seed=52),
+        }
+        envs_split = {
+            c: ctm_split_tensor(site_tensors[c], chi=chi, max_iter=20, chi_I=chi)
+            for c in coords
+        }
+        # Y-shaped neighbors: (0,0) connects right→(1,0) and bottom→(0,1).
+        # Other coords loop back to themselves on directions that don't exit the cell.
+        neighbors = {
+            (0, 0): {
+                "right": (1, 0),
+                "bottom": (0, 1),
+                "left": (1, 0),
+                "top": (0, 1),
+            },
+            (1, 0): {
+                "left": (0, 0),
+                "top": (0, 1),
+                "right": (0, 0),
+                "bottom": (0, 1),
+            },
+            (0, 1): {
+                "top": (0, 0),
+                "right": (1, 0),
+                "bottom": (0, 0),
+                "left": (1, 0),
+            },
+        }
+
+        E_split = compute_energy_split_ctm_tensor_multisite(
+            site_tensors, envs_split, neighbors, heisenberg_gate, d=2
+        )
+        envs_std = {c: _split_env_to_tensor_standard(envs_split[c]) for c in coords}
+        E_shim = compute_energy_ctm_tensor_multisite(
+            site_tensors, envs_std, neighbors, heisenberg_gate, d=2
+        )
+        assert jnp.allclose(E_split, E_shim, atol=1e-10)
