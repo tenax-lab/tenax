@@ -24,7 +24,10 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import gc
 import json
+import resource
+import sys
 import time
 from pathlib import Path
 
@@ -48,6 +51,22 @@ DELTA = 1.0
 D_PHYS = 2
 SU_SCHEDULE = [(0.1, 200), (0.01, 200), (0.001, 100)]
 D_LIST_DEFAULT = (4, 6, 8, 10)
+# JAX trace cache snowballs across SU stages with different dt — at D≥6 it
+# OOMs a 256 GB box. Mirror tests/conftest.py: clear caches between stages
+# once peak RSS crosses this threshold.
+_RSS_CLEAR_THRESHOLD_MB = 6000
+
+
+def _peak_rss_mb() -> float:
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
+
+
+def _maybe_clear_jax_caches() -> None:
+    if _peak_rss_mb() < _RSS_CLEAR_THRESHOLD_MB:
+        return
+    jax.clear_caches()
+    gc.collect()
 
 
 def _make_ctm_config(chi: int) -> CTMConfig:
@@ -73,7 +92,9 @@ def run_one(D: int, seed: int = 0, verbose: bool = False) -> dict:
     state = IPESSState.random(D=D, d=D_PHYS, key=jax.random.PRNGKey(seed))
 
     t_su = time.perf_counter()
-    state = pess_simple_update(state, H, dt_schedule=SU_SCHEDULE, D_max=D)
+    for stage in SU_SCHEDULE:
+        state = pess_simple_update(state, H, dt_schedule=[stage], D_max=D)
+        _maybe_clear_jax_caches()
     t_su = time.perf_counter() - t_su
 
     t_p1 = time.perf_counter()
