@@ -653,3 +653,25 @@ class TestSplitRDMs:
         rdm_split = _rdm_diagonal_split_tensor(A, env)
         rdm_shim = _rdm_diagonal_tensor(A, _split_env_to_tensor_standard(env))
         assert jnp.allclose(rdm_split, rdm_shim, atol=1e-10)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
+    def test_rdm1x2_2site_matches_shim(self, D, chi):
+        from tenax.algorithms._ctm_tensor_energy import _rdm1x2_tensor_2site
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _rdm1x2_split_tensor_2site,
+            _split_env_to_tensor_standard,
+        )
+
+        A = make_random_dense_site(D, d=2, seed=10)
+        B = make_random_dense_site(D, d=2, seed=11)
+        env_A = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+        env_B = ctm_split_tensor(B, chi=chi, max_iter=20, chi_I=chi)
+
+        rdm_split = _rdm1x2_split_tensor_2site(A, B, env_A, env_B)
+        rdm_shim = _rdm1x2_tensor_2site(
+            A,
+            B,
+            _split_env_to_tensor_standard(env_A),
+            _split_env_to_tensor_standard(env_B),
+        )
+        assert jnp.allclose(rdm_split, rdm_shim, atol=1e-10)
