@@ -806,3 +806,33 @@ class TestSplitRDMs:
             site_tensors, envs_std, neighbors, heisenberg_gate, d=2
         )
         assert jnp.allclose(E_split, E_shim, atol=1e-10)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
+    def test_compute_energy_split_multisite_1site_cell(self, D, chi, heisenberg_gate):
+        """Single-site cell with self-loops exercises coord == nb_coord branch."""
+        from tenax.algorithms._ctm_tensor_energy import (
+            compute_energy_ctm_tensor_multisite,
+        )
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _split_env_to_tensor_standard,
+            compute_energy_split_ctm_tensor_multisite,
+        )
+
+        coord = (0, 0)
+        A = make_random_dense_site(D, d=2, seed=60)
+        site_tensors = {coord: A}
+        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+        envs_split = {coord: env}
+        # All directions self-loop — every bond is single-env (coord == nb_coord).
+        neighbors = {
+            coord: {"right": coord, "bottom": coord, "left": coord, "top": coord}
+        }
+
+        E_split = compute_energy_split_ctm_tensor_multisite(
+            site_tensors, envs_split, neighbors, heisenberg_gate, d=2
+        )
+        envs_std = {coord: _split_env_to_tensor_standard(env)}
+        E_shim = compute_energy_ctm_tensor_multisite(
+            site_tensors, envs_std, neighbors, heisenberg_gate, d=2
+        )
+        assert jnp.allclose(E_split, E_shim, atol=1e-10)
