@@ -91,6 +91,13 @@ def _rdm_diagonal_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     Returns dense RDM of shape ``(d, d, d, d)`` in
     ``(s1_ket, s2_ket, s1_bra, s2_bra)`` convention (TL=s1, BR=s2),
     symmetrised and trace-normalised.
+
+    Uses a per-site env decomposition: each of the four sites first absorbs
+    its corner-pair, edges, and ``ao``/``ac`` factor independently, then
+    pairs are joined column-wise (TL+BL, TR+BR) and the two halves are
+    combined.  This keeps every intermediate at the irreducible
+    ``chi² · D⁴ · d²`` floor, instead of accumulating an extra ``D²`` from
+    contracting the row edges before consuming ``ao``.
     """
     ao = _build_double_layer_open_tensor(A)  # (u2, d2, l2, r2, phys, phys_bra)
     ac = _build_double_layer_tensor(A)  # (u2, d2, l2, r2)
@@ -103,7 +110,13 @@ def _rdm_diagonal_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     T4_B = env.T4.relabels({"t4_d": "t4_dB", "l2": "l2B", "t4_u": "t4_uB"})
     T2_B = env.T2.relabels({"t2_u": "t2_uB", "r2": "r2B", "t2_d": "t2_dB"})
 
-    # Site tensors
+    # Site-internal labels.  Each ao/ac instance carries a unique label set
+    # so its inner bonds (the ones shared with the diagonal partner site)
+    # are explicit:
+    #   - TL: keeps base names (u2, d2, l2, r2, phys, phys_bra).
+    #   - TR (closed): inner-left bond ↔ TL.r2, inner-down bond ↔ BR.u2_BR.
+    #   - BL (closed): inner-up bond ↔ TL.d2, inner-right bond ↔ BR.l2_BR.
+    #   - BR (open):   inner-left bond ↔ BL.r2_BL, inner-up bond ↔ TR.d2_TR.
     ac_TR = ac.relabels({"u2": "u2R", "d2": "d2_TR", "l2": "l2_TR", "r2": "r2R"})
     ac_BL = ac.relabels({"u2": "u2_BL", "d2": "d2B_BL", "l2": "l2B", "r2": "r2_BL"})
     ao_BR = ao.relabels(
@@ -117,38 +130,49 @@ def _rdm_diagonal_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
         }
     )
 
-    # Left half: C1 · T1_L · T4_T · ao_TL · T4_B · ac_BL · C4 · T3_L
+    # ---------- Per-site envs (one ao/ac per site, contracted in place) ----------
+    # site_env_TL:  C1·T1·T4_T·ao_TL  →  (t1_r, t4_u, d2, r2, phys, phys_bra)
     C1 = env.C1.relabel("c1_r", "t1_l")
-    C1_T1L = contract(C1, env.T1)
-    T4_T = env.T4.relabels({"t4_d": "c1_d"})
-    left_top = contract(C1_T1L, T4_T)
-    left_top_ao = contract(left_top, ao)
-    T4_B = T4_B.relabel("t4_dB", "t4_u")
-    left_mid = contract(left_top_ao, T4_B)
-    ac_BL = ac_BL.relabel("u2_BL", "d2")
-    left_site = contract(left_mid, ac_BL)
-    C4 = env.C4.relabel("c4_u", "t3_r")
-    C4_T3L = contract(C4, env.T3)
-    C4_T3L = C4_T3L.relabels({"c4_r": "t4_uB", "d2": "d2B_BL"})
-    left_half = contract(left_site, C4_T3L)
+    C1_T1 = contract(C1, env.T1)  # (c1_d, u2, t1_r)
+    T4_T = env.T4.relabels({"t4_d": "c1_d"})  # (c1_d, l2, t4_u)
+    TL_env = contract(C1_T1, T4_T)  # (u2, t1_r, l2, t4_u)
+    site_env_TL = contract(TL_env, ao)  # (t1_r, t4_u, d2, r2, phys, phys_bra)
 
-    # Right half: C2 · T1_R · T2_T · ac_TR · T2_B · ao_BR · C3 · T3_R
+    # site_env_TR:  T1_R·C2·T2_T·ac_TR  →  (t1_lR, t2_d, l2_TR, d2_TR)
     C2 = env.C2.relabel("c2_l", "t1_rR")
-    T1R_C2 = contract(T1_R, C2)
-    T2_T = env.T2.relabels({"t2_u": "c2_d"})
-    right_top = contract(T1R_C2, T2_T)
-    ac_TR = ac_TR.relabel("r2R", "r2")
-    right_top_ac = contract(right_top, ac_TR)
-    T2_B = T2_B.relabel("t2_uB", "t2_d")
-    right_mid = contract(right_top_ac, T2_B)
-    ao_BR = ao_BR.relabel("u2_BR", "d2_TR")
-    right_site = contract(right_mid, ao_BR)
-    C3 = env.C3.relabel("c3_l", "t3_lR")
-    T3R_C3 = contract(T3_R, C3)
-    T3R_C3 = T3R_C3.relabel("c3_u", "t2_dB")
-    right_half = contract(right_site, T3R_C3)
+    T1R_C2 = contract(T1_R, C2)  # (t1_lR, u2R, c2_d)
+    T2_T = env.T2.relabels({"t2_u": "c2_d", "r2": "r2R"})  # (c2_d, r2R, t2_d)
+    TR_env = contract(T1R_C2, T2_T)  # (t1_lR, u2R, r2R, t2_d)
+    site_env_TR = contract(TR_env, ac_TR)  # (t1_lR, t2_d, l2_TR, d2_TR)
 
-    # Combine left and right halves
+    # site_env_BL:  C4·T3·T4_B·ac_BL  →  (t3_l, t4_dB, u2_BL, r2_BL)
+    C4 = env.C4.relabel("c4_u", "t3_r")
+    T3_BL = env.T3.relabel("d2", "d2B_BL")  # (t3_r, d2B_BL, t3_l)
+    C4_T3 = contract(C4, T3_BL)  # (c4_r, d2B_BL, t3_l)
+    T4_BL = T4_B.relabel("t4_uB", "c4_r")  # (t4_dB, l2B, c4_r)
+    BL_env = contract(C4_T3, T4_BL)  # (d2B_BL, t3_l, t4_dB, l2B)
+    site_env_BL = contract(BL_env, ac_BL)  # (t3_l, t4_dB, u2_BL, r2_BL)
+
+    # site_env_BR:  T3_R·C3·T2_B·ao_BR  →  (t3_rR, t2_uB, u2_BR, l2_BR, phys_BR, phys_bra_BR)
+    C3 = env.C3.relabel("c3_l", "t3_lR")
+    T3R_C3 = contract(T3_R, C3)  # (t3_rR, d2R, c3_u)
+    T2_BR = T2_B.relabel("t2_dB", "c3_u")  # (t2_uB, r2B, c3_u)
+    BR_env = contract(T3R_C3, T2_BR)  # (t3_rR, d2R, t2_uB, r2B)
+    site_env_BR = contract(BR_env, ao_BR)
+    # (t3_rR, t2_uB, u2_BR, l2_BR, phys_BR, phys_bra_BR)
+
+    # ---------- Combine columns ----------
+    # left_half = site_env_TL · site_env_BL  on (t4_u↔t4_dB, d2↔u2_BL)
+    site_env_BL = site_env_BL.relabels({"t4_dB": "t4_u", "u2_BL": "d2"})
+    left_half = contract(site_env_TL, site_env_BL)
+    # (t1_r, r2, phys, phys_bra, t3_l, r2_BL)
+
+    # right_half = site_env_TR · site_env_BR  on (t2_d↔t2_uB, d2_TR↔u2_BR)
+    site_env_BR = site_env_BR.relabels({"t2_uB": "t2_d", "u2_BR": "d2_TR"})
+    right_half = contract(site_env_TR, site_env_BR)
+    # (t1_lR, l2_TR, t3_rR, l2_BR, phys_BR, phys_bra_BR)
+
+    # Final combine: shared (t1_r↔t1_lR, t3_l↔t3_rR, r2↔l2_TR, r2_BL↔l2_BR)
     right_half = right_half.relabels(
         {"t1_lR": "t1_r", "l2_TR": "r2", "l2_BR": "r2_BL", "t3_rR": "t3_l"}
     )
@@ -271,6 +295,12 @@ def _rdm1x2_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
 
     Returns dense RDM of shape ``(d, d, d, d)`` in
     ``(s1_ket, s2_ket, s1_bra, s2_bra)`` convention.
+
+    Mirrors :func:`_rdm2x1_tensor`'s left/right-halves contraction order
+    (top/bottom halves here): each half consumes its ``ao`` factor while
+    three boundary D² legs are still attached, so the peak intermediate
+    is bounded by ``(chi · chi · D² · d · d)`` instead of the
+    ``(chi² · D⁴ · d²)`` blow-up that an "all-rows-then-ao" path produces.
     """
     ao = _build_double_layer_open_tensor(A)
 
@@ -288,50 +318,45 @@ def _rdm1x2_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
         }
     )
 
-    # Step 1: top_row = C1·T1·C2
+    # ---------- Top half ----------
+    # Step T1: top_row = C1·T1·C2  (chi, D², chi)
     C1 = env.C1.relabel("c1_r", "t1_l")
     C2 = env.C2.relabel("c2_l", "t1_r")
     C1_T1 = contract(C1, env.T1)  # (c1_d, u2, t1_r)
     top_row = contract(C1_T1, C2)  # (c1_d, u2, c2_d)
 
-    # Step 2: env_row1 = top_row·T4_T·T2_T (pairwise)
-    T4_T = env.T4.relabels({"t4_d": "c1_d"})
-    T2_T = env.T2.relabels({"t2_u": "c2_d"})
+    # Step T2: env_top = top_row·T4_T·T2_T
+    T4_T = env.T4.relabels({"t4_d": "c1_d"})  # (c1_d, l2, t4_u)
+    T2_T = env.T2.relabels({"t2_u": "c2_d"})  # (c2_d, r2, t2_d)
     top_T4 = contract(top_row, T4_T)  # (u2, c2_d, l2, t4_u)
-    env_row1 = contract(top_T4, T2_T)  # (u2, l2, t4_u, r2, t2_d)
+    env_top = contract(top_T4, T2_T)  # (u2, l2, t4_u, r2, t2_d)
 
-    # Step 3: site1 = env_row1·ao_T  — shared: u2, l2, r2
-    site1 = contract(env_row1, ao)  # (d2, t4_u, t2_d, phys, phys_bra)
+    # Step T3: top_half = env_top · ao  — consume u2, l2, r2 simultaneously
+    top_half = contract(env_top, ao)  # (t4_u, t2_d, d2, phys, phys_bra)
 
-    # Step 4: T4_ao_B = T4_B·ao_B  — shared: l2B
-    T4_ao_B = contract(T4_B, ao_B)
-    # (t4_dB, t4_uB, u2B, d2B, r2B, phys_B, phys_braB)
-
-    # Step 5: site12 = site1·T4_ao_B
-    #   d2 ↔ u2B (vertical bond), t4_u ↔ t4_dB (T4 chi)
-    T4_ao_B = T4_ao_B.relabels({"u2B": "d2", "t4_dB": "t4_u"})
-    site12 = contract(site1, T4_ao_B)
-    # (t2_d, phys, phys_bra, t4_uB, d2B, r2B, phys_B, phys_braB)
-
-    # Step 6: site12_r = site12·T2_B
-    #   t2_d ↔ t2_uB (T2 chi),  r2B shared
-    T2_B = T2_B.relabel("t2_uB", "t2_d")
-    site12_r = contract(site12, T2_B)
-    # (phys, phys_bra, t4_uB, d2B, phys_B, phys_braB, t2_dB)
-
-    # Step 7: bot_row = C4·T3·C3  — T3.d2 relabeled to d2B for matching
+    # ---------- Bottom half ----------
+    # Step B1: bot_row = C4·T3·C3  (chi, D², chi)
     C4 = env.C4.relabel("c4_u", "t3_r")
-    T3 = env.T3.relabel("d2", "d2B")
+    T3_B = env.T3.relabel("d2", "d2B")
     C3 = env.C3.relabel("c3_l", "t3_l")
-    C4_T3 = contract(C4, T3)  # (c4_r, d2B, t3_l)
+    C4_T3 = contract(C4, T3_B)  # (c4_r, d2B, t3_l)
     bot_row = contract(C4_T3, C3)  # (c4_r, d2B, c3_u)
 
-    # Step 8: rdm = site12_r·bot_row
-    #   t4_uB ↔ c4_r, d2B shared, t2_dB ↔ c3_u
-    bot_row = bot_row.relabels({"c4_r": "t4_uB", "c3_u": "t2_dB"})
+    # Step B2: env_bot = bot_row·T4_B·T2_B
+    T4_B_t = T4_B.relabel("t4_uB", "c4_r")  # (t4_dB, l2B, c4_r)
+    T2_B_t = T2_B.relabel("t2_dB", "c3_u")  # (t2_uB, r2B, c3_u)
+    bot_T4 = contract(bot_row, T4_B_t)  # (d2B, c3_u, t4_dB, l2B)
+    env_bot = contract(bot_T4, T2_B_t)  # (d2B, t4_dB, l2B, r2B, t2_uB)
+
+    # Step B3: bot_half = env_bot · ao_B  — consume d2B, l2B, r2B simultaneously
+    bot_half = contract(env_bot, ao_B)  # (t4_dB, t2_uB, u2B, phys_B, phys_braB)
+
+    # ---------- Combine ----------
+    # Match t4_u ↔ t4_dB (T4 chi), t2_d ↔ t2_uB (T2 chi), d2 ↔ u2B (inner ao bond)
+    bot_half = bot_half.relabels({"t4_dB": "t4_u", "t2_uB": "t2_d", "u2B": "d2"})
     rdm_t = contract(
-        site12_r,
-        bot_row,
+        top_half,
+        bot_half,
         output_labels=["phys", "phys_B", "phys_bra", "phys_braB"],
     )
 
@@ -467,6 +492,11 @@ def _rdm1x2_tensor_2site(
         T4_B   ao_B    T2_B
         |        |       |
         C4_B — T3_B — C3_B
+
+    Mirrors :func:`_rdm2x1_tensor_2site`'s left/right-halves order
+    (top/bottom halves here): each half consumes its ``ao`` factor while
+    three boundary D² legs are still attached, so the peak intermediate
+    is bounded by ``(chi · chi · D² · d · d)``.
     """
     ao_A = _build_double_layer_open_tensor(A)
     ao_B = _build_double_layer_open_tensor(B)
@@ -485,41 +515,39 @@ def _rdm1x2_tensor_2site(
         }
     )
 
-    # Top row from env_A
+    # ---------- Top half (env_A) ----------
     C1 = env_A.C1.relabel("c1_r", "t1_l")
     C2 = env_A.C2.relabel("c2_l", "t1_r")
     C1_T1 = contract(C1, env_A.T1)
-    top_row = contract(C1_T1, C2)
+    top_row = contract(C1_T1, C2)  # (c1_d, u2, c2_d)
 
-    # Top env row from env_A
-    T4_T = env_A.T4.relabels({"t4_d": "c1_d"})
-    T2_T = env_A.T2.relabels({"t2_u": "c2_d"})
-    top_T4 = contract(top_row, T4_T)
-    env_row1 = contract(top_T4, T2_T)
+    T4_T = env_A.T4.relabels({"t4_d": "c1_d"})  # (c1_d, l2, t4_u)
+    T2_T = env_A.T2.relabels({"t2_u": "c2_d"})  # (c2_d, r2, t2_d)
+    top_T4 = contract(top_row, T4_T)  # (u2, c2_d, l2, t4_u)
+    env_top = contract(top_T4, T2_T)  # (u2, l2, t4_u, r2, t2_d)
 
-    # Contract with ao_A (top site)
-    site1 = contract(env_row1, ao_A)
+    top_half = contract(env_top, ao_A)  # (t4_u, t2_d, d2, phys, phys_bra)
 
-    # Bottom: T4_B · ao_B
-    T4_ao_B = contract(T4_B, ao_Br)
-    T4_ao_B = T4_ao_B.relabels({"u2B": "d2", "t4_dB": "t4_u"})
-    site12 = contract(site1, T4_ao_B)
-
-    # T2_B
-    T2_B = T2_B.relabel("t2_uB", "t2_d")
-    site12_r = contract(site12, T2_B)
-
-    # Bottom row from env_B
+    # ---------- Bottom half (env_B) ----------
     C4 = env_B.C4.relabel("c4_u", "t3_r")
-    T3 = env_B.T3.relabel("d2", "d2B")
+    T3_BL = env_B.T3.relabel("d2", "d2B")
     C3 = env_B.C3.relabel("c3_l", "t3_l")
-    C4_T3 = contract(C4, T3)
-    bot_row = contract(C4_T3, C3)
+    C4_T3 = contract(C4, T3_BL)  # (c4_r, d2B, t3_l)
+    bot_row = contract(C4_T3, C3)  # (c4_r, d2B, c3_u)
 
-    bot_row = bot_row.relabels({"c4_r": "t4_uB", "c3_u": "t2_dB"})
+    T4_B_t = T4_B.relabel("t4_uB", "c4_r")  # (t4_dB, l2B, c4_r)
+    T2_B_t = T2_B.relabel("t2_dB", "c3_u")  # (t2_uB, r2B, c3_u)
+    bot_T4 = contract(bot_row, T4_B_t)  # (d2B, c3_u, t4_dB, l2B)
+    env_bot = contract(bot_T4, T2_B_t)  # (d2B, t4_dB, l2B, r2B, t2_uB)
+
+    bot_half = contract(env_bot, ao_Br)
+    # (t4_dB, t2_uB, u2B, phys_B, phys_braB)
+
+    # ---------- Combine ----------
+    bot_half = bot_half.relabels({"t4_dB": "t4_u", "t2_uB": "t2_d", "u2B": "d2"})
     rdm_t = contract(
-        site12_r,
-        bot_row,
+        top_half,
+        bot_half,
         output_labels=["phys", "phys_B", "phys_bra", "phys_braB"],
     )
 
