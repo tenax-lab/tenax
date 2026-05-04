@@ -709,3 +709,21 @@ class TestSplitRDMs:
 
         rdm_single = _rdm2x1_split_tensor(A, env_A)
         assert not jnp.allclose(rdm_split, rdm_single, atol=1e-6)
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12), (4, 16)])
+    def test_compute_energy_split_native_matches_shim(self, D, chi, heisenberg_gate):
+        """Split-aware energy must match shim energy at small D."""
+        from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _split_env_to_tensor_standard,
+            compute_energy_split_ctm_tensor,
+        )
+
+        A = make_random_dense_site(D, d=2, seed=30)
+        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+
+        E_split = compute_energy_split_ctm_tensor(A, env, heisenberg_gate, d=2)
+        E_shim = compute_energy_ctm_tensor(
+            A, _split_env_to_tensor_standard(env), heisenberg_gate, d=2
+        )
+        assert jnp.allclose(E_split, E_shim, atol=1e-10)

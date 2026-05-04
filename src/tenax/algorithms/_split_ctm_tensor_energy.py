@@ -16,7 +16,6 @@ __all__ = [
 import jax
 import jax.numpy as jnp
 
-from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 from tenax.algorithms._split_ctm_tensor_init import SplitCTMTensorEnv
 from tenax.algorithms._tensor_utils import fuse_indices
@@ -1058,14 +1057,14 @@ def compute_energy_split_ctm_tensor(
     hamiltonian_gate: Tensor | jax.Array,
     d: int | None = None,
 ) -> jax.Array:
-    """Compute energy per site using split CTM environment.
+    """Compute energy per site using a split CTM environment, split-aware.
 
-    Converts to standard Tensor-protocol CTM internally and delegates to
-    ``compute_energy_ctm_tensor``. The ket/bra merge over the interlayer
-    bond reconstructs the standard double-layer edges.
+    Builds horizontal and vertical RDMs directly from
+    ``(T_ket, T_bra, A, A.bar_super())``, without merging ket/bra to the
+    standard double-layer env. Bounded peak intermediate ~chi^2 * D^4.
 
     Args:
-        A:                iPEPS site tensor.
+        A:                iPEPS site tensor with labels ``(u, d, l, r, phys)``.
         env:              Converged SplitCTMTensorEnv.
         hamiltonian_gate: 2-site Hamiltonian gate.
         d:                Physical dimension (inferred from A if None).
@@ -1073,5 +1072,17 @@ def compute_energy_split_ctm_tensor(
     Returns:
         Scalar energy per site.
     """
-    std_env = _split_env_to_tensor_standard(env)
-    return compute_energy_ctm_tensor(A, std_env, hamiltonian_gate, d)
+    if d is None:
+        phys_idx = [i for i in A.indices if i.label == "phys"]
+        d = phys_idx[0].dim if phys_idx else A.indices[-1].dim
+
+    if isinstance(hamiltonian_gate, Tensor):
+        H = hamiltonian_gate.todense().reshape(d, d, d, d)
+    else:
+        H = hamiltonian_gate.reshape(d, d, d, d)
+
+    rdm_h = _rdm2x1_split_tensor(A, env)
+    rdm_v = _rdm1x2_split_tensor(A, env)
+    E_h = jnp.einsum("ijkl,ijkl->", rdm_h, H)
+    E_v = jnp.einsum("ijkl,ijkl->", rdm_v, H)
+    return (E_h + E_v).real
