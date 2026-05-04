@@ -22,6 +22,36 @@ from tenax.core.tensor import Tensor
 # ------------------------------------------------------------------ #
 
 
+def _make_split_edge(
+    T_ket: Tensor,
+    T_bra: Tensor,
+    ket_I: str,
+    bra_I: str,
+    out_chi_l: str,
+    out_chi_r: str,
+) -> Tensor:
+    """Contract T_ket·T_bra over the interlayer bond; do NOT fuse the two D-legs.
+
+    Returns a 4-leg tensor with labels (out_chi_l, <ket D-label>, <bra D-label>, out_chi_r).
+    The D-leg labels are inherited from the inputs (e.g. ``u_ket``/``u_bra`` for T1).
+    """
+    k = T_ket.relabel(ket_I, "_I_tmp")
+    b = T_bra.relabel(bra_I, "_I_tmp")
+    merged = contract(k, b)
+    # Find the two chi labels in `merged.labels()`. The ket chi is whichever label
+    # was on T_ket but not in (ket_I, ket_D). Same for bra. We just pass them
+    # through via relabel — caller chose the names.
+    ket_labels = set(T_ket.labels()) - {ket_I}
+    bra_labels = set(T_bra.labels()) - {bra_I}
+    ket_chi = next(
+        lab for lab in ket_labels if lab not in bra_labels and not lab.endswith("_ket")
+    )
+    bra_chi = next(
+        lab for lab in bra_labels if lab not in ket_labels and not lab.endswith("_bra")
+    )
+    return merged.relabels({ket_chi: out_chi_l, bra_chi: out_chi_r})
+
+
 def _split_env_to_tensor_standard(env: SplitCTMTensorEnv) -> CTMTensorEnv:
     """Convert SplitCTMTensorEnv to CTMTensorEnv via Tensor contraction.
 

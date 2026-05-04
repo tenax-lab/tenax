@@ -517,3 +517,30 @@ class TestSplitCTMSymmetric:
         assert len(from_dense_calls) == 0, (
             f"from_dense() called {len(from_dense_calls)} times during symmetric sweep"
         )
+
+
+class TestSplitEdgeHelper:
+    """Tests for the new _make_split_edge / _make_split_edges helpers."""
+
+    def test_make_split_edge_shape_and_labels(self, small_peps_dense):
+        """_make_split_edge contracts T_ket·T_bra on _I, leaves D-legs unfused."""
+        from tenax.algorithms._split_ctm_tensor_energy import _make_split_edge
+
+        env = initialize_split_ctm_tensor_env(small_peps_dense, chi=4, chi_I=4)
+        T1 = _make_split_edge(
+            env.T1_ket,
+            env.T1_bra,
+            ket_I="t1k_I",
+            bra_I="t1b_I",
+            out_chi_l="t1_l",
+            out_chi_r="t1_r",
+        )
+        labels = T1.labels()
+        # Four legs: chi_l, u_ket, u_bra, chi_r — D-legs unchanged from inputs.
+        assert set(labels) == {"t1_l", "u_ket", "u_bra", "t1_r"}
+        # Dimensions: (chi, D, D, chi). With D=2, chi=4 → (4, 2, 2, 4).
+        dim_by_label = {idx.label: idx.dim for idx in T1.indices}
+        assert dim_by_label["t1_l"] == 4
+        assert dim_by_label["t1_r"] == 4
+        assert dim_by_label["u_ket"] == 2
+        assert dim_by_label["u_bra"] == 2
