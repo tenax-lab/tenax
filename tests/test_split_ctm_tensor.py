@@ -100,6 +100,19 @@ def heisenberg_gate():
 
 
 # ------------------------------------------------------------------ #
+# Public API smoke test                                                #
+# ------------------------------------------------------------------ #
+
+
+def test_public_exports_resolve():
+    """Top-level tenax package exposes the new split-CTM energy entry points."""
+    import tenax
+
+    assert hasattr(tenax, "compute_energy_split_ctm_tensor_2site")
+    assert hasattr(tenax, "compute_energy_split_ctm_tensor_multisite")
+
+
+# ------------------------------------------------------------------ #
 # Phase 1: Initialization tests                                        #
 # ------------------------------------------------------------------ #
 
