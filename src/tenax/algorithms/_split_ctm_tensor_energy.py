@@ -27,6 +27,8 @@ def _make_split_edge(
     T_bra: Tensor,
     ket_I: str,
     bra_I: str,
+    ket_chi: str,
+    bra_chi: str,
     out_chi_l: str,
     out_chi_r: str,
 ) -> Tensor:
@@ -34,21 +36,17 @@ def _make_split_edge(
 
     Returns a 4-leg tensor with labels (out_chi_l, <ket D-label>, <bra D-label>, out_chi_r).
     The D-leg labels are inherited from the inputs (e.g. ``u_ket``/``u_bra`` for T1).
+    Leaving the D-legs unfused lets downstream RDM construction contract them
+    directly against the ket/bra layers of A, avoiding the chi^2 * D^4 double-layer
+    peak that the standard shim (``_split_env_to_tensor_standard``) produces.
     """
+    # Use ``_I_tmp`` rather than ``_I`` to avoid label collisions when several
+    # split edges built by this helper are later contracted together in the same
+    # RDM network. The standard shim's ``_merge_edge`` uses ``_I`` because each
+    # call there is contracted in isolation.
     k = T_ket.relabel(ket_I, "_I_tmp")
     b = T_bra.relabel(bra_I, "_I_tmp")
     merged = contract(k, b)
-    # Find the two chi labels in `merged.labels()`. The ket chi is whichever label
-    # was on T_ket but not in (ket_I, ket_D). Same for bra. We just pass them
-    # through via relabel — caller chose the names.
-    ket_labels = set(T_ket.labels()) - {ket_I}
-    bra_labels = set(T_bra.labels()) - {bra_I}
-    ket_chi = next(
-        lab for lab in ket_labels if lab not in bra_labels and not lab.endswith("_ket")
-    )
-    bra_chi = next(
-        lab for lab in bra_labels if lab not in ket_labels and not lab.endswith("_bra")
-    )
     return merged.relabels({ket_chi: out_chi_l, bra_chi: out_chi_r})
 
 

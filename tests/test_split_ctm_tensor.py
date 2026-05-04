@@ -532,6 +532,8 @@ class TestSplitEdgeHelper:
             env.T1_bra,
             ket_I="t1k_I",
             bra_I="t1b_I",
+            ket_chi="t1k_l",
+            bra_chi="t1b_r",
             out_chi_l="t1_l",
             out_chi_r="t1_r",
         )
