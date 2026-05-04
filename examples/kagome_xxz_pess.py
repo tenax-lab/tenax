@@ -230,24 +230,38 @@ def hosvd_truncate(
     # core: (D_int_c, D_int_a, D_int_b) -> transpose to (D_int_a, D_int_b, D_int_c)
     core = core.transpose(1, 2, 0)
 
-    # Extract lambda vectors from the core via SVD along each mode
-    # Lambda_a: SVD of core reshaped as (D_int_a, D_int_b * D_int_c)
-    _, lam_a, _ = jnp.linalg.svd(
-        core.reshape(D_int_a, D_int_b * D_int_c), full_matrices=False
-    )
-    _, lam_b, _ = jnp.linalg.svd(
+    # Extract per-bond singular value vectors from the core via SVD along each mode.
+    sig_a = jnp.linalg.svd(core.reshape(D_int_a, D_int_b * D_int_c), compute_uv=False)
+    sig_b = jnp.linalg.svd(
         core.transpose(1, 0, 2).reshape(D_int_b, D_int_a * D_int_c),
-        full_matrices=False,
+        compute_uv=False,
     )
-    _, lam_c, _ = jnp.linalg.svd(
+    sig_c = jnp.linalg.svd(
         core.transpose(2, 0, 1).reshape(D_int_c, D_int_a * D_int_b),
-        full_matrices=False,
+        compute_uv=False,
     )
 
-    # Normalize lambdas
-    lam_a = lam_a / jnp.linalg.norm(lam_a)
-    lam_b = lam_b / jnp.linalg.norm(lam_b)
-    lam_c = lam_c / jnp.linalg.norm(lam_c)
+    # Factor the bond spectra OUT of ``core`` so they live exclusively in the
+    # explicit lambdas. Without this step ``core`` carries the spectra baked
+    # into its matricizations AND the same spectra are re-applied as gauges
+    # next SU step (via ``S_a_w = lam_ext * R * lam_int``), squaring the
+    # bond spectrum every iteration → rank-1 collapse → energy stuck at the
+    # classical 120° value. Lorentzian-regularized inverse for stability;
+    # scalar prefactor ``K = ||σ_a||·||σ_b||·||σ_c||`` keeps reconstruction
+    # with NORMALIZED lambdas exact.
+    eps = 1e-12
+    inv_a = (sig_a / (sig_a**2 + eps**2)).astype(core.dtype)
+    inv_b = (sig_b / (sig_b**2 + eps**2)).astype(core.dtype)
+    inv_c = (sig_c / (sig_c**2 + eps**2)).astype(core.dtype)
+    norm_a = jnp.linalg.norm(sig_a)
+    norm_b = jnp.linalg.norm(sig_b)
+    norm_c = jnp.linalg.norm(sig_c)
+    K = (norm_a * norm_b * norm_c).astype(core.dtype)
+    core = core * inv_a[:, None, None] * inv_b[None, :, None] * inv_c[None, None, :] * K
+
+    lam_a = sig_a / norm_a
+    lam_b = sig_b / norm_b
+    lam_c = sig_c / norm_c
 
     # Reshape U matrices into site tensors: (D_ext, D_int, d)
     S_a = U_a.reshape(D_ext_a, d, D_int_a).transpose(0, 2, 1)
@@ -390,17 +404,30 @@ def pess_simple_update(
         lambdas[0], lambdas[1], lambdas[2] = lam_int_up
 
         # --- Update down triangle ---
-        # Internal bonds: lambdas[3:6], external bonds: lambdas[0:3]
-        S_a, S_b, S_c, T_down, lam_int_down = pess_simple_update_triangle(
-            S_a,
-            S_b,
-            S_c,
+        # Internal bonds: lambdas[3:6], external bonds: lambdas[0:3].
+        # ``pess_simple_update_triangle`` always applies ext on axis 0 of S
+        # and contracts the simplex via axis 1 of S, but per the iPESS
+        # convention used everywhere else (axis 0 = T_d-leg, axis 1 =
+        # T_u-leg) the down-triangle's ext side (T_u-leg) is axis 1.
+        # Transpose S_x around the call so axis 0 sees the ext side, then
+        # transpose back. Without this, T_d would contract the T_u-leg of S
+        # and the down-triangle would not actually evolve under SU.
+        S_a_T = S_a.transpose(1, 0, 2)
+        S_b_T = S_b.transpose(1, 0, 2)
+        S_c_T = S_c.transpose(1, 0, 2)
+        S_a_T, S_b_T, S_c_T, T_down, lam_int_down = pess_simple_update_triangle(
+            S_a_T,
+            S_b_T,
+            S_c_T,
             T_down,
             lambdas_ext=[lambdas[0], lambdas[1], lambdas[2]],
             lambdas_int=[lambdas[3], lambdas[4], lambdas[5]],
             gate=gate,
             D_max=D_max,
         )
+        S_a = S_a_T.transpose(1, 0, 2)
+        S_b = S_b_T.transpose(1, 0, 2)
+        S_c = S_c_T.transpose(1, 0, 2)
         lambdas[3], lambdas[4], lambdas[5] = lam_int_down
 
         if (step + 1) % max(1, num_steps // 10) == 0 or step == 0:

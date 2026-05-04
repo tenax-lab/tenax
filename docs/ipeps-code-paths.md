@@ -322,6 +322,20 @@ effective bond dimension at the same ``chi``) but does **not** plug into
 iPEPS remains the easiest production-AD entry point for honeycomb until
 that lands.
 
+> **Note (PR #387 — kagome iPESS).** The native honeycomb CTM was
+> originally motivated by serving kagome iPESS via a 2-sublattice
+> honeycomb supersite construction (the design doc's "Convention A"
+> + the M2b across-sublattice 2-site RDM follow-up to PR #347). PR #387
+> instead delivered kagome iPESS through the **CG iPEPS** path
+> (``kagome_cg_gates`` + ``optimize_gs_ad``, "Convention C" — square
+> 1-site supersite with a dummy-bond), reusing the validated
+> 1-site square AD pipeline. The kagome use case therefore no longer
+> depends on the native honeycomb CTM. The native path remains
+> useful for **honeycomb-native lattice models** (honeycomb Heisenberg,
+> Kitaev, Lukin–Sotnikov bipartite) where the dummy-bond detour to a
+> square iPEPS introduces SVD-degenerate-spectrum issues at AD time
+> that the native path avoids by construction.
+
 ## Stall Recovery (issue #298)
 
 When the L-BFGS / CG line search cannot make progress the optimizer runs
@@ -381,7 +395,8 @@ The 2-site L-BFGS path still has a separate convergence gap at
 | Fermionic iPEPS AD                | **EXPERIMENTAL** | Wraps ``SymmetricTensor`` as ``DenseTensor``. Fermionic Koszul twist (`bar_super()`) added in PR #361 fixes super-algebra sign issues that previously broke fermionic AD with non-trivial parity sectors. |
 | Coarse-grained iPEPS (honeycomb)  | **Working**      | ``cg_gates=honeycomb_cg_gates()`` + ``unit_cell="1x1"``; reuses square 1-site AD pipeline at ``d_eff=4`` (PR #352 / #353). |
 | Coarse-grained iPEPS (kagome)     | **Working**      | ``cg_gates=kagome_cg_gates()`` + ``unit_cell="1x1"``; reuses square 1-site AD pipeline at ``d_eff=8`` (PR #352 / #353). |
-| Native honeycomb CTM (rank-4)     | **Working** (forward + implicit-AD energy); not yet wired into ``optimize_gs_ad`` | 6-corner / 3-direction / 2-sublattice; ``honeycomb_ctm_run`` + ``honeycomb_ctm_energy_implicit`` (PR #347). |
+| Kagome iPESS AD (Convention C)    | **Working**      | ``kagome_xxz_pess_cg_gates()`` + ``optimize_pess_ad``; spin-½ and spin-1 XXZ via the same CG iPEPS path (PR #387). Optimizes ``(R_a, R_b, R_c, T_u, lambdas)`` on the dummy-bond square supersite. |
+| Native honeycomb CTM (rank-4)     | **Working** (forward + implicit-AD energy); not wired into ``optimize_gs_ad`` | 6-corner / 3-direction / 2-sublattice (PR #347). Originally motivated by kagome iPESS but the kagome use case ships through the CG path (PR #387) instead; native CTM now applies primarily to honeycomb-native models (Kitaev, hc Heisenberg). |
 
 ### Benchmark highlights (2D Heisenberg AFM)
 
@@ -464,6 +479,7 @@ the same behavior the optimizer uses.
 | Energy computation                      | ``src/tenax/algorithms/_ctm_tensor_energy.py``, ``_split_ctm_tensor_energy.py`` |
 | Fermionic variant                       | ``src/tenax/algorithms/fermionic_ipeps.py``   |
 | Coarse-grained iPEPS (honeycomb/kagome) | ``src/tenax/algorithms/coarse_grain.py``      |
+| Kagome iPESS AD                         | ``src/tenax/algorithms/pess.py``, ``pess_optimize.py`` |
 | Native honeycomb CTM (rank-4)           | ``src/tenax/algorithms/honeycomb_ctm.py``, ``_ctm_honeycomb_*.py`` |
 | Fermionic Koszul twist (super-algebra)  | ``src/tenax/core/tensor.py`` (``bar_super()``, PR #361) |
 

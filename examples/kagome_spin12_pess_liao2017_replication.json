@@ -1,0 +1,63 @@
+{
+  "reference": "Liao et al., PRL 118, 137202 (2017), arXiv:1610.04727",
+  "asymptotic_target_E0": -0.43752,
+  "notes": "P2 (Convention-C + CTM) was run only at D=4 (chi=32, ~34 GB peak RSS). At D>=6 the chi=2D^2 CTM projector SVD allocates >100 GB and OOM-kills a 256 GB box; runs above D=4 use --skip-p2. The D=4 P2 number is sufficient to establish the Convention-C bias for the audit; D-scaling of P2 was not measured.",
+  "results": [
+    {
+      "D": 4,
+      "chi": 32,
+      "seed": 0,
+      "su_schedule": [[0.1, 200], [0.01, 200], [0.001, 100]],
+      "e_p1_husimi": -0.420004211777512,
+      "e_p2_ctm": -0.3471846503279372,
+      "liao2017_target": -0.429,
+      "delta_p1_target": 0.008995788222487977,
+      "delta_p2_target": 0.08181534967206278,
+      "t_su_seconds": 2.54759234841913,
+      "t_p1_seconds": 0.1881152093410492,
+      "t_p2_seconds": 25.756251183338463
+    },
+    {
+      "D": 6,
+      "chi": 72,
+      "seed": 0,
+      "su_schedule": [[0.1, 200], [0.01, 200], [0.001, 100]],
+      "e_p1_husimi": -0.4279956494430843,
+      "e_p2_ctm": null,
+      "liao2017_target": -0.434,
+      "delta_p1_target": 0.006004350556915672,
+      "delta_p2_target": null,
+      "t_su_seconds": 2.474642719142139,
+      "t_p1_seconds": 0.0969683863222599,
+      "t_p2_seconds": 0.0
+    },
+    {
+      "D": 8,
+      "chi": 128,
+      "seed": 0,
+      "su_schedule": [[0.1, 200], [0.01, 200], [0.001, 100]],
+      "e_p1_husimi": -0.4300344176352256,
+      "e_p2_ctm": null,
+      "liao2017_target": -0.436,
+      "delta_p1_target": 0.005965582364774402,
+      "delta_p2_target": null,
+      "t_su_seconds": 2.585269861854613,
+      "t_p1_seconds": 0.10075248498469591,
+      "t_p2_seconds": 0.0
+    },
+    {
+      "D": 10,
+      "chi": 200,
+      "seed": 0,
+      "su_schedule": [[0.1, 200], [0.01, 200], [0.001, 100]],
+      "e_p1_husimi": -0.42978056540556064,
+      "e_p2_ctm": null,
+      "liao2017_target": -0.4365,
+      "delta_p1_target": 0.006719434594439355,
+      "delta_p2_target": null,
+      "t_su_seconds": 5.017281210981309,
+      "t_p1_seconds": 0.10440045315772295,
+      "t_p2_seconds": 0.0
+    }
+  ]
+}

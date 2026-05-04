@@ -493,6 +493,49 @@ The default energy is the 3-edge nearest-neighbor bond sum
 for the kagome iPESS use case where each site is a 3-spin triangle and
 the Hamiltonian is the intra-triangle 3-spin operator.
 
+## Kagome iPESS with AD
+
+Differentiable iPESS pipeline for kagome XXZ ground states (Liao et al.,
+PRX 9, 031041, 2019). Two simplex tensors `T_u`, `T_d` and three site
+tensors `R_a`, `R_b`, `R_c` define the variational state; triangle
+simple update gives the SU warm start, then L-BFGS through the
+square-coarse-grained CTM (Convention C) refines `(R_a, R_b, R_c, T_u,
+lambdas)`. `T_d` is held frozen during AD — its variational role is
+absorbed by the down-bond gauges.
+
+```python
+import jax
+from tenax import (
+    CTMConfig,
+    IPESSState,
+    kagome_triangle_xxz_hamiltonian,
+    kagome_xxz_pess_cg_gates,
+    pess_simple_update,
+    optimize_pess_ad,
+)
+
+D, d = 2, 3  # spin-1
+H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=d)
+cg_gates = kagome_xxz_pess_cg_gates(delta=1.0, d=d)
+
+state = IPESSState.random(D=D, d=d, key=jax.random.PRNGKey(0))
+state = pess_simple_update(state, H,
+                           dt_schedule=[(0.1, 200), (0.01, 200), (0.001, 100)],
+                           D_max=D)
+
+config = CTMConfig(chi=8, max_iter=30, conv_tol=1e-7,
+                   projector_method="svd", forward_gauge="phase",
+                   ctm_conv_method="elementwise")
+state, e_per_site = optimize_pess_ad(state, cg_gates, config, max_iter=30)
+print(f"E/site = {e_per_site:.6f}")  # spin-1 D=2 lands around -1.0
+```
+
+The full kagome Hamiltonian (3 up-triangle bonds + 3 down-triangle
+bonds per unit cell) is reconstructed via `compute_energy_cg`'s
+intra-cell + horizontal/vertical/diagonal inter-cell 2-site RDMs; see
+`examples/kagome_spin12_pess_ad_benchmark.py` and
+`examples/kagome_spin1_pess_ad_benchmark.py` for full sweeps.
+
 ## Examples
 
 Runnable example scripts are in the `examples/` directory:
@@ -507,6 +550,9 @@ Runnable example scripts are in the `examples/` directory:
 | `spinless_fermion_fpeps.py` | fPEPS simple update | Spinless fermions (free and interacting) |
 | `ising_trg.py` | TRG | 2D Ising vs Onsager exact |
 | `ising_hotrg.py` | HOTRG | 2D Ising vs Onsager exact |
+| `kagome_spin12_pess_ad_benchmark.py` | iPESS AD | Spin-½ kagome AFM Heisenberg sweep |
+| `kagome_spin1_pess_ad_benchmark.py` | iPESS AD | Spin-1 kagome Heisenberg sweep |
+| `kagome_spin1_xxz_anisotropy_sweep.py` | iPESS AD | Spin-1 kagome XXZ Δ ∈ {0, 0.5, 1, 1.5, 2} |
 
 Run any example with:
 
