@@ -772,8 +772,79 @@ non-trivial bond legs. **Stop-and-ask if FAIL.** Implemented as
 
 ## Phase C — AD optimization
 
-### Task C.1: `build_pess_loss_3site_multisite` AD loss
-Mirror `build_pess_loss` (currently using supersite). Use
+> ⚠️ **BLOCKED at C.3 (2026-05-05)** — empirical D=4 χ=16 run drove
+> `E_multisite = -0.4766` after 8 L-BFGS steps, which is BELOW Liao 2017's
+> asymptotic ground state -0.43752. Variationally impossible. Root cause is a
+> structural design flaw in **Phase B's `compute_energy_pess_3site_multisite`**
+> (committed at `bd27d8c`). C.1 closure (`build_pess_loss_3site_multisite` +
+> `optimize_pess_3site_multisite_ad`, committed at `ef6ade5`) was reverted
+> at `8a15dbf` because the loss it builds is structurally wrong. Phase C is
+> on hold until **Phase B-revised** (below) lands a corrected energy formula.
+
+### The Phase B energy bug (recorded for the audit)
+
+`compute_energy_pess_3site_multisite` sums per-RDM-normalised energies over
+the 6 multisite NN bonds. But only **4 of those 6** correspond to real
+kagome bonds:
+
+| Multisite NN bond              | Real?           | Kagome bond            |
+|--------------------------------|-----------------|------------------------|
+| `u.right ↔ v.left`             | ✓ full-D        | a-b up-triangle        |
+| `u.bottom ↔ v.top`             | ✓ full-D        | a-b down-triangle      |
+| `u.left  ↔ w.right`            | ✓ full-D        | a-c up-triangle        |
+| `u.top   ↔ w.bottom`           | ✓ full-D        | a-c down-triangle      |
+| **`v.right ↔ w.left`**         | **✗ dim-1**     | **(placeholder)**      |
+| **`v.bottom↔ w.top`**          | **✗ dim-1**     | **(placeholder)**      |
+
+The 2 actual kagome **b-c bonds** (up + down triangle) are encoded as
+**3-body correlations inside `S_u`** (because the encoding absorbs both
+`T_u` and `T_d` into `S_u`). They are not measured by any 2-site NN RDM.
+The 2 dim-1 trivial-bond contributions become per-RDM-normalised mean-field
+terms that **L-BFGS exploits**: pushing `(v, w)` toward a Néel-polarised
+product gives ⟨S_z⟩_v · ⟨S_z⟩_w ≈ −0.25 per trivial bond, dragging the
+total well below the variational ground state.
+
+`B.3a` (wavefunction fidelity = 1 at D=1,2,3) didn't catch this — it
+tested **wavefunction-level** equality of the encoding, not that
+**Hamiltonian expectation values** computed via per-RDM-normalised NN sums
+match the true kagome ⟨H⟩. Different test, different bug class.
+
+## Phase B-revised — fix the energy formula
+
+### Task B.4: 3-site marginalised RDM helper for the b-c bonds
+
+Add a 3-site RDM helper that computes ρ_(uvw) by closing the multisite CTM
+environment around all 3 sites (one row of the multisite cell), then
+marginalise over `u` to get ρ_(vw) on the v and w physical legs only.
+Contract ρ_(vw) with the b-c pair gate. The 4 physical NN bonds keep using
+the existing `_rdm{2x1,1x2}_tensor_2site` primitives.
+
+The 3-site RDM peak intermediate is bounded by `χ²·D⁶` for a single 3-site
+horizontal contraction (similar to the supersite's `χ²·D⁶`). Each energy
+evaluation needs **two** such 3-site RDMs (one for the up-triangle b-c bond
+and one for the down-triangle b-c bond — they share the marginalisation but
+the bond directions differ).
+
+**Files:**
+* `src/tenax/algorithms/_pess_multisite_energy.py` — replace
+  `compute_energy_pess_3site_multisite`'s 6-bond loop with `4 NN + 2
+  marginalised-3-site` energy formula. Add a helper
+  `_rdm_3site_marginal_vw(S_u, S_v, S_w, env_u, env_v, env_w) -> jax.Array`
+  in this file or in `_ctm_tensor_energy.py`.
+* `tests/test_pess_3site_multisite_wavefunction.py` — extend with an
+  energy-level fidelity test on the 1-cell PBC torus: assert
+  `compute_energy_pess_3site_multisite` at large χ matches the
+  wavefunction-direct kagome XXZ energy on the same iPESS state to 1e-8.
+
+**Until B.4 lands:** treat
+`tenax.algorithms._pess_multisite_energy.compute_energy_pess_3site_multisite`
+as **broken**. Do not use it for energy estimation, AD optimisation, or
+benchmarks. The encoding `pess_to_kagome_3site_multisite` itself is
+correct (verified by `B.3a`) and may continue to be used as a parameterisation
+of the iPESS state.
+
+### Task C.1 (resumed): `build_pess_loss_3site_multisite` AD loss
+After B.4. Mirror `build_pess_loss` (currently using supersite). Use
 `pess_to_kagome_3site_multisite` + `ctm_energy_implicit` with the kagome
 Lattice neighbour map. Unlike the supersite loss, **`T_d` is a real
 variational parameter** — the multisite encoding uses it explicitly.
@@ -789,7 +860,7 @@ variational parameter** — the multisite encoding uses it explicitly.
 > right invariant). Tolerance: `E_ms ≤ E_ss + 1e-6`. Implemented in Phase C.
 
 ### Task C.3: D=4 vs Liao 2017
-100 L-BFGS iterations, χ=16/24. Memory peak should drop ~32× vs supersite-AD path (no diagonal-RDM term at all, plus 4× shrink in d_eff).
+100 L-BFGS iterations, χ=16/24. Memory peak should drop ~32× vs supersite-AD path (no diagonal-RDM term at all, plus 4× shrink in d_eff). **Required reading:** the C.3 attempt at `ef6ade5` (reverted at `8a15dbf`) gave −0.4766 — confirm the rebuilt energy formula does NOT reproduce that anomaly before claiming success.
 
 ### Task C.4: D=6, 8 (CPU)
 Push to D=6 and D=8 on the 251 GB CPU box. Compare to `kagome_spin12_pess_liao2017_replication.json`.
@@ -808,6 +879,8 @@ Bond table, supersite-vs-multisite memory comparison at D=4/6/8, energy comparis
 ## Stop-and-ask checkpoints (active)
 
 1. **After Task A.1:** if shapes/dtypes/finite norm fail at any (D, d), stop. The einsum/transpose strings have a bug.
-2. **After Task B.3a:** **THE structural-correctness gate.** If wavefunction fidelity ≠ 1 at any D ∈ {1,2,3} to 1e-12, stop. The encoding's leg-axis mapping or gauge convention is wrong.
-3. **After Task C.2a:** if AD-optimised multisite energy is *worse* than AD-optimised supersite energy at D=2 to 1e-6, stop. Multisite has strictly more parameters so a regression points at an AD-graph bug.
-4. **At Task C.4:** if D=8 OOMs on the 251 GB CPU box, stop and re-profile.
+2. **After Task B.3a:** **encoding structural-correctness gate.** If wavefunction fidelity ≠ 1 at any D ∈ {1,2,3} to 1e-12, stop. The encoding's leg-axis mapping or gauge convention is wrong.
+3. **After Task B.4 (NEW):** **energy structural-correctness gate.** Assert `compute_energy_pess_3site_multisite` at large χ matches a brute-force wavefunction-direct ⟨H_kagome⟩ on a 1-cell PBC torus to 1e-8. If FAIL, the 4-NN-bond + 2-marginalised-3-site decomposition is wrong.
+4. **After Task C.2a:** if AD-optimised multisite energy is *worse* than AD-optimised supersite energy at D=2 to 1e-6, stop. Multisite has strictly more parameters so a regression points at an AD-graph bug.
+5. **At Task C.3:** assert E_multisite ≥ Liao 2017 asymptotic ground state (-0.43752). The reverted C.3 attempt at `ef6ade5` gave -0.4766 — that is the failure signature for the broken energy formula.
+6. **At Task C.4:** if D=8 OOMs on the 251 GB CPU box, stop and re-profile.
