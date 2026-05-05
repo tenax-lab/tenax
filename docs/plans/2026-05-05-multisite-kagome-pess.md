@@ -2,49 +2,64 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Re-encode kagome iPESS as a multisite square-iPEPS with `d=2` per site (instead of the current `d_eff=8` Convention-C supersite) so that the diagonal-RDM cost drops from `χ²·D⁴·d²=χ²·D⁴·64` to `χ²·D⁴·d²=χ²·D⁴·4` — a **16× reduction at the binding-constraint step** — and large-D AD optimization (`D=6,8,10`) becomes feasible on existing CPU/GPU budgets.
+**Goal:** Re-encode kagome iPESS as a 3-site multisite iPEPS with `d=2` per site (instead of the current `d_eff=8` Convention-C supersite) so that **all 6 kagome bonds become NN** on the iPEPS lattice — eliminating the diagonal-RDM `χ²·D⁴·d²` step entirely (vs the supersite's `χ²·D⁴·64` peak) — and large-D AD optimization (`D=6,8,10`) becomes feasible on existing CPU/GPU budgets.
 
-**Architecture:** Add a sibling to `pess_to_kagome_supersite` that emits a *multi-coord* dict of d=2 site tensors, then plug it into Tenax's existing `ctm_multisite` + `compute_energy_ctm_tensor_multisite` (dense path) and the split-aware `compute_energy_split_ctm_tensor_multisite`. Build per-bond gate dispatch (kagome has heterogeneous bond Hamiltonians once the supersite is split), validate against the existing supersite path at D=2, and only then push to D≥4.
+**Architecture:** Add `pess_to_kagome_3site_multisite` that emits a `dict[str, jax.Array]` keyed by `{"u", "v", "w"}` — the 3 sublattice names matching `tenax.core.lattice.kagome()`'s neighbor map. Each sublattice pair is NN in *both* a horizontal AND a vertical direction (6 distinct iPEPS bonds for 6 kagome bonds). Plug it into Tenax's existing `ctm_multisite` (which accepts an arbitrary `Lattice`) + `compute_energy_ctm_tensor_multisite`. Build per-bond gate dispatch and validate against the supersite path at D=2, then push to D≥4.
 
-**Tech Stack:** Python, JAX, Tenax (`ctm_multisite`, `_ctm_tensor_multisite`, `compute_energy_ctm_tensor_multisite`, `compute_energy_split_ctm_tensor_multisite`, `ctm_energy_implicit`, `IPESSState`, `pess_to_kagome_supersite`).
+**Tech Stack:** Python, JAX, Tenax (`ctm_multisite`, `_ctm_tensor_multisite`, `compute_energy_ctm_tensor_multisite`, `compute_energy_split_ctm_tensor_multisite`, `ctm_energy_implicit`, `IPESSState`, `pess_to_kagome_supersite`, `tenax.core.lattice.kagome`).
+
+---
+
+## Critical encoding constraint (read first — REVISED 2026-05-05)
+
+### What we tried first (the 4-site 2×2 encoding) and why it failed
+
+> **Historical note.** The original plan committed at `b92ea54` proposed a 4-site 2×2 multisite cell with 3 active R-sites at d=2 + 1 d=1 dummy. Implementation got as far as Tasks 1.2 / 2.1 / 2.2.a / 2.2.b / 2.2.c (commits `bf5bfcb` through `0327a91`, preserved at tag `wip/4-site-broken`) before empirical evidence — a 7.3×10⁻² parity failure at Task 2.2.c — revealed the encoding was **structurally impossible**. The 2×2 cell has only 5 distinct iPEPS bonds between any 3 active sites (2 NN-h + 2 NN-v + 1 NNN-diag), but kagome has 6 bonds per cell. The 6th bond has nowhere to live; the original bond_gates dict was secretly summing two distinct gates against the same RDM (physically nonsense). This was **not a leg-permutation bug** but a geometric capacity limit. The rotation attempt (`0327a91`) fixed a separate long-range issue but did not add bond multiplicity. A "before" plot (3 broken bonds in red) and a coordinate-by-coordinate breakdown are in conversation history.
+
+### The actual fix (this plan, post-revision)
+
+**Use Tenax's existing `tenax.core.lattice.kagome()` Lattice helper** (defined at `core/lattice.py:116` but currently not consumed anywhere). Its neighbor map gives each pair of sublattices **2 distinct iPEPS bonds — one NN-h and one NN-v** — for a total of **6 NN bonds and zero diagonals** between the 3 active sites:
+
+```
+kagome().neighbor_map = {
+    "u": {"left": "w", "right": "v", "top": "w", "bottom": "v"},
+    "v": {"left": "u", "right": "w", "top": "u", "bottom": "w"},
+    "w": {"left": "v", "right": "u", "top": "v", "bottom": "u"},
+}
+```
+
+Each row makes both `right` and `bottom` point at the same neighbor (e.g. `u.right=v` AND `u.bottom=v`), so the `u-v` pair has both an h-bond (via right/left) and a v-bond (via top/bottom). 3 pairs × 2 bonds = 6 bonds. ✓
+
+**Encoding choice (committed):** 3-site multisite, all sites at d=2, no dummy:
+
+| name | role            | shape         | d |
+|------|------------------|---------------|---|
+| `"u"` | S_u (absorbs T_u and T_d) | `(D, D, D, D, 2)` | 2 |
+| `"v"` | S_v (R_v with sqrt(λ_d), full λ_u gauges) | `(D, D, D, D, 2)` | 2 |
+| `"w"` | S_w (analogous to S_v) | `(D, D, D, D, 2)` | 2 |
+
+The 6 kagome bonds map to the 6 iPEPS bonds of `tenax.kagome()`:
+
+| bond            | iPEPS bond                 | direction on Lattice |
+|-----------------|-----------------------------|----------------------|
+| up-tri u-v       | u.right ↔ v.left            | NN-h                 |
+| up-tri u-w       | u.left ↔ w.right            | NN-h                 |
+| up-tri v-w       | v.right ↔ w.left            | NN-h                 |
+| dn-tri u-v       | u.bottom ↔ v.top            | NN-v                 |
+| dn-tri u-w       | u.top ↔ w.bottom            | NN-v                 |
+| dn-tri v-w       | v.bottom ↔ w.top            | NN-v                 |
+
+Net: **6 NN bonds, 0 diagonals**, all at d=2. Memory peak `χ²·D⁴·d = χ²·D⁴·2` everywhere. **Strictly better than supersite** (`χ²·D⁴·d_eff=8` on NN, `χ²·D⁴·d_eff²=64` on diag): 4× cheaper on NN, infinite cheaper on diag (which doesn't exist).
+
+### Encoding asymmetry (non-bug, but worth knowing)
+
+T_u and T_d are 3-leg simplex tensors. Distributing them into 3 separate iPEPS sites without introducing extra "central" tensors requires absorbing both into **one** of the R-sites (say `S_u`). The other two sites (`S_v`, `S_w`) are just gauged R-tensors with 2 of their 4 virtual legs trivial-padded. The bond between v and w then carries no direct virtual-leg content — its physical content is mediated through u via a 2-hop path. The 2-site v-w RDM still captures this correctly through the iPEPS lattice structure, but the v-w iPEPS bond is effectively dim-1.
+
+This is the same phenomenon as Convention C's "axis-3 dummy" leg in the supersite — a known pattern, not a bug. Validated empirically by Task 2.x.c parity at D=2.
 
 ---
 
-## Critical encoding constraint (read first)
-
-**Geometric fact:** kagome's elementary triangle (3 sites, 3 bonds, complete K₃) cannot be embedded in a square graph with all bonds NN — at least one of the three intra-triangle bonds must be a diagonal. The current Convention-C supersite path makes this explicit: `kagome_xxz_pess_cg_gates` has `h_intra` (3 bonds inside the d_eff=8 supersite) plus three inter-supersite bonds `{"h", "v", "diag"}`, and `"diag"` is the intrinsic NNN bond. Any *square* multisite splitting inherits at least one diagonal bond.
-
-**Implication:** the planned multisite encoding will keep some diagonal bonds, but each diagonal RDM operates at `d=2` instead of `d_eff=8`, giving the 16× memory win. We do **not** try to eliminate diagonal bonds — that would require switching to a honeycomb iPEPS lattice, which is out of scope for this plan.
-
-**Encoding choice (committed):** 2×2 multi-site unit cell with three "active" R-sites at d=2 plus a fourth "dummy" simplex site at d=1 (carries the down-triangle T_d connectivity, no physical leg participation). Concretely:
-
-| coord  | role         | shape (after lambdas absorbed)        | d  |
-|--------|--------------|----------------------------------------|----|
-| (0,0)  | A_a (= R_a · sqrt(λ) gauges)           | (D, D, D, D, 2)  | 2 |
-| (1,0)  | A_b                                    | (D, D, D, D, 2)  | 2 |
-| (0,1)  | A_c                                    | (D, D, D, D, 2)  | 2 |
-| (1,1)  | A_t (= T_u or T_d, d=1 dummy phys)     | (D, D, D, D, 1)  | 1 |
-
-The 6 kagome bonds map to the iPEPS as:
-- Intra-cell up-triangle: a-b (NN-h), a-c (NN-v), b-c (NNN-diag)  ← 1 diag, 2 NN
-- Inter-cell down-triangle: c-of-(0,0)/b-of-(1,0) cell (NN-h via (0,1)→(2,0) wrap), a-of-(0,0)/b-of-(0,1) cell (NN-v wrap), and a-c-of-shifted cell (NN via (1,1) dummy + cell wrap, or one NNN). Exact shifts pinned in **Task 1**.
-
-**Intra-cell connectivity (tensor legs):** since the 4-site square cell cannot host T_u's 3-way junction directly, T_u is contracted into A_a (one site absorbs it via `einsum("xap,abc->xbcp", R_a, T_u)`), giving A_a three non-trivial virtual legs (T_d-side ↑, T_u-to-R_b → right, T_u-to-R_c ↓ bottom) plus one trivial-padded leg. T_d, by contrast, lives at the (1,1) dummy and connects via three of its four virtual legs to neighboring R-sites in adjacent unit cells. The fourth leg of every site is dim-1-padded to `D` to keep the standard rank-5 iPEPS layout.
-
-**Worked-out bond table (to be verified in Task 1):**
-
-| bond name        | coord pair               | direction on iPEPS | gate                            |
-|------------------|--------------------------|--------------------|---------------------------------|
-| up-tri a-b       | (0,0) ↔ (1,0)            | NN-h               | XXZ pair on (a, b)              |
-| up-tri a-c       | (0,0) ↔ (0,1)            | NN-v               | XXZ pair on (a, c)              |
-| up-tri b-c       | (1,0) ↔ (0,1)            | NNN-diag           | XXZ pair on (b, c)              |
-| dn-tri b-c       | (1,0) ↔ next-cell (0,0) (right wrap) → A_b ↔ A_a | NN-h | XXZ pair on (b, c) image        |
-| dn-tri a-b       | (0,1) ↔ next-cell (0,0) (bottom wrap) → A_c ↔ A_a | NN-v | XXZ pair on (a, b) image        |
-| dn-tri a-c       | (1,0) ↔ next-cell (0,1) (right+bottom wrap) | NNN-diag | XXZ pair on (a, c) image  |
-
-Net: **4 NN bonds + 2 diag bonds**, all at d=2. Compare to supersite's **3 NN + 1 diag**, all at d_eff=8. The supersite has fewer bond evaluations but each is much heavier.
-
----
+> ## ⚠️ SUPERSEDED — All "Phase 0/1/2/3/4" sections below describe the original 4-site 2×2 encoding that was empirically falsified at Task 2.2.c. They are kept here as audit trail. **The active task plan is the "Phase A/B/C/D" sections at the bottom of this file** (after the `Phase 4` block), which describes the 3-site multisite encoding using `tenax.kagome()` Lattice.
 
 ## Phase 0 — Set up (one-time)
 
@@ -598,3 +613,170 @@ Merge via `gh pr merge <num> --squash --delete-branch --auto` per CLAUDE.md.
 - **Does not implement a multisite split-aware CTM convergence sweep.** The existing per-site `ctm_split_tensor` runs each env on a 1×1 lattice of that site — for the 4-site cell this is approximate. We rely on the dense `ctm_multisite` for converged multisite envs and only use the split-aware code for the *energy* step. A future PR can add `ctm_split_tensor_multisite` if needed; this is NOT in scope here.
 - **Does not switch to honeycomb iPEPS.** That would side-step the diagonal entirely (kagome is the medial of honeycomb) but is a larger architectural change with separate trade-offs and goes in a different plan.
 - **Does not handle fermions.** All paths route through the bosonic split-aware code via `compute_energy_split_ctm_tensor_multisite`'s fermionic-fallback branch.
+
+---
+
+# ACTIVE PLAN — 3-site multisite using `tenax.kagome()` Lattice
+
+> Active phases: **A** (encoding) → **B** (energy + parity gate) → **C** (AD + Liao 2017) → **D** (docs + PR). This replaces the 4-site Phase 0/1/2/3/4 above.
+
+## Phase A — Encoding map for the 3-site multisite
+
+### Task A.1: Implement `pess_to_kagome_3site_multisite`
+
+**Files:**
+- Modify: `src/tenax/algorithms/pess.py` (add new function next to `pess_to_kagome_supersite`)
+- Create: `tests/test_pess_3site_multisite_encoding.py`
+
+**Function signature:**
+
+```python
+def pess_to_kagome_3site_multisite(
+    R_a: jax.Array, R_b: jax.Array, R_c: jax.Array,
+    T_u: jax.Array, T_d: jax.Array,
+    lambdas: tuple[jax.Array, ...] | jax.Array,
+) -> dict[str, jax.Array]:
+    """Build a 3-site multisite iPEPS keyed by {"u", "v", "w"} matching
+    tenax.core.lattice.kagome()'s neighbor map.
+
+    All 3 sites have d=2. T_u and T_d are absorbed into S_u (the "central"
+    site); S_v and S_w are gauged R-tensors with 2 of 4 virtual legs trivial-
+    padded. All 6 kagome bonds map to NN bonds on the kagome Lattice; no
+    diagonal RDM is needed.
+
+    Gauge convention (mirrors pess_to_kagome_supersite Convention C):
+      - Up-bonds: full λ_x_u absorbed on R-side (axis 1 of R_x).
+      - Down-bonds: sqrt(λ_x_d) on R-side (axis 0 of R_x); the other sqrt is
+        on the next-cell's R-site at the inter-cell boundary.
+      - T_d itself is dropped (absorbed via the down-bond gauges).
+    """
+```
+
+**Encoding strategy (S_u as the "central" site that holds T_u and T_d):**
+
+```python
+S_a = einsum("i,ijp,j->ijp", sqrt(λ_a_d), R_a, λ_a_u)  # axis 0=T_d-side, axis 1=T_u-side, axis 2=phys
+S_b = einsum("i,ijp,j->ijp", sqrt(λ_b_d), R_b, λ_b_u)
+S_c = einsum("i,ijp,j->ijp", sqrt(λ_c_d), R_c, λ_c_u)
+
+# Absorb T_u and T_d into the "u" site (index "a" in iPESS naming):
+# T_u contracted with S_a's T_u-axis (axis 1 of S_a) along T_u's "a"-axis (axis 0):
+M_u = einsum("xap,abc->xbcp", S_a, T_u)  # (D, D, D, d) = (T_d-of-a, T_u-leg-to-b, T_u-leg-to-c, phys)
+# T_d contracted with S_a's T_d-axis: replace axis 0 of M_u (T_d-side of a) with T_d's "a"-axis:
+S_u_core = einsum("xbcp,xyz->ybczp", M_u, T_d)  # (D, D, D, D, d)
+#   axes: (T_d-leg-to-b, T_u-leg-to-b, T_u-leg-to-c, T_d-leg-to-c, phys)
+
+# S_u placement on iPEPS axes (top, bottom, left, right, phys):
+#   right=v: T_u-leg-to-b (b is sublattice "v")  -> axis 1 of S_u_core
+#   bottom=v: T_d-leg-to-b                       -> axis 0 of S_u_core
+#   left=w:  T_u-leg-to-c (c is sublattice "w")  -> axis 2 of S_u_core
+#   top=w:   T_d-leg-to-c                        -> axis 3 of S_u_core
+S_u = jnp.transpose(S_u_core, (3, 0, 2, 1, 4))   # (top, bot, left, right, phys)
+
+# S_v placement (only the T_u and T_d connections to u carry content;
+# bonds to w are dim-1 trivial because v-w connectivity is mediated by u):
+#   left=u:    T_u-side of S_b   -> axis 1 of S_b
+#   top=u:     T_d-side of S_b   -> axis 0 of S_b
+#   right=w:   trivial           -> dim-1
+#   bottom=w:  trivial           -> dim-1
+S_v = jnp.zeros((D, D, D, D, d), dtype=R_b.dtype)
+S_v = S_v.at[:, 0, :, 0, :].set(jnp.transpose(S_b, (1, 0, 2)))  # (top=T_d-side, left=T_u-side, phys)
+
+# S_w placement (analogous to S_v):
+#   right=u:   T_u-side of S_c   -> axis 1 of S_c
+#   bottom=u:  T_d-side of S_c   -> axis 0 of S_c
+#   left=v:    trivial
+#   top=v:     trivial
+S_w = jnp.zeros((D, D, D, D, d), dtype=R_c.dtype)
+S_w = S_w.at[0, :, 0, :, :].set(jnp.transpose(S_c, (1, 0, 2)))
+
+return {"u": S_u, "v": S_v, "w": S_w}
+```
+
+**TDD test (sanity only — value parity is at Task B.3):**
+
+```python
+@pytest.mark.core
+@pytest.mark.parametrize("D, d", [(2, 2), (3, 2), (2, 3)])
+def test_pess_to_kagome_3site_multisite_returns_3_site_dict(D, d):
+    state = IPESSState.random(D=D, d=d, key=jax.random.PRNGKey(0))
+    sites = pess_to_kagome_3site_multisite(
+        state.R_a, state.R_b, state.R_c, state.T_u, state.T_d, state.lambdas
+    )
+    assert set(sites.keys()) == {"u", "v", "w"}
+    for name in ("u", "v", "w"):
+        A = sites[name]
+        assert A.shape == (D, D, D, D, d)
+        assert A.dtype == jnp.complex128
+        assert jnp.all(jnp.isfinite(A))
+        assert float(jnp.linalg.norm(A)) > 0.0
+```
+
+**Verification:** test passes at all 3 parametrized cases. Existing tests stay green.
+
+**Stop-and-ask:** if the einsum/transpose strings produce wrong shapes, stop. The leg-axis mapping is the most error-prone part.
+
+## Phase B — Energy wrapper + parity gate
+
+### Task B.1: Build per-bond gates for the 3-site multisite
+
+**File:** modify `src/tenax/algorithms/_pess_multisite_energy.py` to add `kagome_3site_bond_gates(delta, d) -> dict[frozenset, jax.Array]`. Returns 6 entries keyed by `frozenset({(name_a, dir_a), (name_b, dir_b)})`:
+
+```python
+{
+    frozenset({("u", "right"), ("v", "left")}):  H_pair,  # up-tri u-v NN-h
+    frozenset({("u", "left"),  ("w", "right")}): H_pair,  # up-tri u-w NN-h
+    frozenset({("v", "right"), ("w", "left")}):  H_pair,  # up-tri v-w NN-h
+    frozenset({("u", "bottom"), ("v", "top")}):  H_pair,  # dn-tri u-v NN-v
+    frozenset({("u", "top"),    ("w", "bottom")}): H_pair, # dn-tri u-w NN-v
+    frozenset({("v", "bottom"), ("w", "top")}):  H_pair,  # dn-tri v-w NN-v
+}
+```
+
+All 6 gates are the same XXZ pair Hamiltonian (uniform kagome), but they're keyed differently per the kagome Lattice's neighbor map.
+
+### Task B.2: Build `compute_energy_pess_3site_multisite`
+
+**File:** modify `src/tenax/algorithms/_pess_multisite_energy.py`. The function iterates the 6 NN bonds (no diagonal!) using existing `_rdm{2x1,1x2}_tensor_2site` primitives, dispatched by direction:
+- `dir in {"left", "right"}` → `_rdm2x1_tensor_2site`
+- `dir in {"top", "bottom"}` → `_rdm1x2_tensor_2site`
+
+Returns scalar per-(active-)site energy: `total_energy.real / 3`.
+
+### Task B.3: D=2 energy parity vs supersite (CRITICAL CHECKPOINT)
+
+This task is the structural-correctness gate. Compute supersite energy via the existing `compute_energy_cg` path; compute multisite energy via `compute_energy_pess_3site_multisite` using `_ctm_tensor_multisite` with `tenax.kagome()`'s neighbor map. Assert agreement to **1e-6** at D=2, χ=8, on a single random `IPESSState`.
+
+If FAIL, stop. The encoding's gauge convention or T_u/T_d absorption is wrong.
+
+## Phase C — AD optimization
+
+### Task C.1: `build_pess_loss_3site_multisite` AD loss
+Mirror `build_pess_loss` (currently using supersite). Use `pess_to_kagome_3site_multisite` + `ctm_energy_implicit` with the kagome Lattice neighbor map.
+
+### Task C.2: D=2 end-to-end optimization parity
+30 L-BFGS iterations, χ=8, multisite vs supersite must agree within 1e-6.
+
+### Task C.3: D=4 vs Liao 2017
+100 L-BFGS iterations, χ=16/24. Memory peak should drop ~32× vs supersite-AD path (no diagonal-RDM term at all, plus 4× shrink in d_eff).
+
+### Task C.4: D=6, 8 (CPU)
+Push to D=6 and D=8 on the 251 GB CPU box. Compare to `kagome_spin12_pess_liao2017_replication.json`.
+
+## Phase D — Documentation + merge
+
+### Task D.1: Update `__init__.py` and `README.md`
+Export `pess_to_kagome_3site_multisite`, `compute_energy_pess_3site_multisite`, `build_pess_loss_3site_multisite`.
+
+### Task D.2: Update memory file
+Edit `~/.claude/projects/-home-yjkao-tenax/memory/project_kagome_multisite_ipeps_plan.md` to mark this PR as the resolution and document the 6-NN-bonds cost profile.
+
+### Task D.3: Open the PR
+Bond table, supersite-vs-multisite memory comparison at D=4/6/8, energy comparison vs Liao 2017 P2, narrative of the 4-site → 3-site pivot.
+
+## Stop-and-ask checkpoints (active)
+
+1. **After Task A.1:** if shapes/dtypes/finite norm fail at any (D, d), stop. The einsum/transpose strings have a bug.
+2. **After Task B.3:** **THE structural-correctness gate.** If multisite energy ≠ supersite energy at D=2 to 1e-6, stop. The encoding's gauge convention or T_u/T_d absorption is wrong.
+3. **After Task C.2:** if AD-optimized multisite energy ≠ AD-optimized supersite energy at D=2 to 1e-6, stop. Likely an AD-graph difference.
+4. **At Task C.4:** if D=8 OOMs on the 251 GB CPU box, stop and re-profile.
