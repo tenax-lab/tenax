@@ -7,7 +7,13 @@ coarse-grained tensor with effective physical dimension d_eff.
 
 from __future__ import annotations
 
-__all__ = ["CGGates", "honeycomb_cg_gates", "kagome_cg_gates", "compute_energy_cg"]
+__all__ = [
+    "CGGates",
+    "honeycomb_cg_gates",
+    "kagome_cg_gates",
+    "compute_energy_cg",
+    "compute_energy_cg_split",
+]
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -286,6 +292,68 @@ def compute_energy_cg(
         else:
             raise ValueError(f"Unknown inter-cell direction: {direction!r}")
         rdm = rdm_fn(A, env)  # (d_eff, d_eff, d_eff, d_eff)
+        e_inter = e_inter + jnp.einsum("ijkl,ijkl->", rdm, gate)
+
+    return ((e_intra + e_inter) / gates.n_sites).real
+
+
+# Maps direction keys to the split-aware RDM function.  Same shape as
+# ``_RDM_DISPATCH`` but routes through the split-aware path that peaks
+# at ``chi^2 * D^4 * d`` (vs the std path's ``chi^2 * D^6``).  Diagonal
+# is lazy-imported to mirror the std dispatcher.
+def _split_rdm_dispatch():
+    from tenax.algorithms._split_ctm_tensor_energy import (
+        _rdm1x2_split_tensor,
+        _rdm2x1_split_tensor,
+        _rdm_diagonal_split_tensor,
+    )
+
+    return {
+        "h": _rdm2x1_split_tensor,
+        "v": _rdm1x2_split_tensor,
+        "diag": _rdm_diagonal_split_tensor,
+    }
+
+
+def compute_energy_cg_split(
+    A: Tensor,
+    env,
+    gates: CGGates,
+    d_eff: int,
+) -> jax.Array:
+    """Energy per microscopic site for a coarse-grained 1-site iPEPS, split-aware.
+
+    Mirror of :func:`compute_energy_cg` that routes every RDM through the
+    split-aware path (``_rdm_*_split_tensor``).  Bounded peak intermediate
+    ``chi^2 * D^4 * d`` (vs ``chi^2 * D^6`` for the std path); the diagonal
+    RDM intrinsically peaks at ``chi^2 * D^4 * d^2`` per the design in
+    :pr:`#389`/`#390`.
+
+    For fermionic site tensors the underlying split-aware RDMs fall back
+    to the shim path internally (see issue #392 and
+    :func:`compute_energy_split_ctm_tensor`).  Bosonic sites get the full
+    benefit.
+
+    Args:
+        A:      Coarse-grained iPEPS tensor (physical dim = ``d_eff``).
+        env:    Converged ``SplitCTMTensorEnv`` for *A*.
+        gates:  Coarse-grained Hamiltonian gates.
+        d_eff:  Effective physical dimension (``d ** n_sites``).
+
+    Returns:
+        Scalar real energy per microscopic site.
+    """
+    from tenax.algorithms._split_ctm_tensor_energy import _rdm_1site_split_tensor
+
+    rdm_1 = _rdm_1site_split_tensor(A, env)
+    e_intra = jnp.einsum("ij,ij->", rdm_1, gates.h_intra)
+
+    dispatch = _split_rdm_dispatch()
+    e_inter = jnp.zeros((), dtype=rdm_1.dtype)
+    for direction, gate in gates.h_inter.items():
+        if direction not in dispatch:
+            raise ValueError(f"Unknown inter-cell direction: {direction!r}")
+        rdm = dispatch[direction](A, env)
         e_inter = e_inter + jnp.einsum("ijkl,ijkl->", rdm, gate)
 
     return ((e_intra + e_inter) / gates.n_sites).real

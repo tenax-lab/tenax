@@ -183,6 +183,56 @@ class TestComputeEnergyCG:
         np.testing.assert_allclose(float(E), 0.375, atol=1e-4)
 
 
+class TestComputeEnergyCGSplit:
+    """``compute_energy_cg_split`` must match ``compute_energy_cg`` for bosonic A."""
+
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
+    def test_kagome_split_matches_std_at_small_D(self, D, chi):
+        """Split-aware kagome CG energy == std-path energy on the same env.
+
+        Drives ``ctm_split_tensor`` to convergence on a random U(1)-trivial
+        kagome supersite, computes the energy via the split-aware CG path,
+        and compares against the std-path energy on the shim-converted env.
+        Both paths share the same converged env data — the test isolates
+        the energy-RDM dispatch.
+        """
+        from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _split_env_to_tensor_standard,
+        )
+        from tenax.algorithms.coarse_grain import compute_energy_cg_split
+        from tenax.algorithms.pess import kagome_xxz_pess_cg_gates
+
+        d_eff = 8  # spin-1/2 kagome 3-PESS supersite
+        gates = kagome_xxz_pess_cg_gates(delta=1.0, d=2)
+
+        rng = np.random.default_rng(seed=0)
+        data = rng.normal(size=(D, D, D, D, d_eff))
+        data /= np.linalg.norm(data)
+        sym = U1Symmetry()
+        zD = np.zeros(D, dtype=np.int32)
+        zd = np.zeros(d_eff, dtype=np.int32)
+        A = DenseTensor(
+            jnp.asarray(data),
+            (
+                TensorIndex.from_charges(sym, zD.copy(), FlowDirection.OUT, label="u"),
+                TensorIndex.from_charges(sym, zD.copy(), FlowDirection.IN, label="d"),
+                TensorIndex.from_charges(sym, zD.copy(), FlowDirection.OUT, label="l"),
+                TensorIndex.from_charges(sym, zD.copy(), FlowDirection.IN, label="r"),
+                TensorIndex.from_charges(
+                    sym, zd.copy(), FlowDirection.IN, label="phys"
+                ),
+            ),
+        )
+
+        split_env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+        std_env = _split_env_to_tensor_standard(split_env)
+
+        E_split = compute_energy_cg_split(A, split_env, gates, d_eff)
+        E_std = compute_energy_cg(A, std_env, gates, d_eff)
+        np.testing.assert_allclose(float(E_split), float(E_std), atol=1e-10)
+
+
 # ---------------------------------------------------------------------------
 # AD optimization integration test
 # ---------------------------------------------------------------------------
