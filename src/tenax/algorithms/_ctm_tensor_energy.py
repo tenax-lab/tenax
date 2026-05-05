@@ -9,6 +9,7 @@ __all__ = [
     "_rdm2x1_tensor_2site",
     "_rdm_1site_tensor",
     "_rdm_diagonal_tensor",
+    "_rdm_diagonal_tensor_4site",
     "compute_energy_ctm_tensor",
     "compute_energy_ctm_tensor_2site",
     "compute_energy_ctm_tensor_multisite",
@@ -155,6 +156,128 @@ def _rdm_diagonal_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
 
     # site_env_BR:  T3_R·C3·T2_B·ao_BR  →  (t3_rR, t2_uB, u2_BR, l2_BR, phys_BR, phys_bra_BR)
     C3 = env.C3.relabel("c3_l", "t3_lR")
+    T3R_C3 = contract(T3_R, C3)  # (t3_rR, d2R, c3_u)
+    T2_BR = T2_B.relabel("t2_dB", "c3_u")  # (t2_uB, r2B, c3_u)
+    BR_env = contract(T3R_C3, T2_BR)  # (t3_rR, d2R, t2_uB, r2B)
+    site_env_BR = contract(BR_env, ao_BR)
+    # (t3_rR, t2_uB, u2_BR, l2_BR, phys_BR, phys_bra_BR)
+
+    # ---------- Combine columns ----------
+    # left_half = site_env_TL · site_env_BL  on (t4_u↔t4_dB, d2↔u2_BL)
+    site_env_BL = site_env_BL.relabels({"t4_dB": "t4_u", "u2_BL": "d2"})
+    left_half = contract(site_env_TL, site_env_BL)
+    # (t1_r, r2, phys, phys_bra, t3_l, r2_BL)
+
+    # right_half = site_env_TR · site_env_BR  on (t2_d↔t2_uB, d2_TR↔u2_BR)
+    site_env_BR = site_env_BR.relabels({"t2_uB": "t2_d", "u2_BR": "d2_TR"})
+    right_half = contract(site_env_TR, site_env_BR)
+    # (t1_lR, l2_TR, t3_rR, l2_BR, phys_BR, phys_bra_BR)
+
+    # Final combine: shared (t1_r↔t1_lR, t3_l↔t3_rR, r2↔l2_TR, r2_BL↔l2_BR)
+    right_half = right_half.relabels(
+        {"t1_lR": "t1_r", "l2_TR": "r2", "l2_BR": "r2_BL", "t3_rR": "t3_l"}
+    )
+    rdm_t = contract(
+        left_half,
+        right_half,
+        output_labels=["phys", "phys_BR", "phys_bra", "phys_bra_BR"],
+    )
+
+    rdm = rdm_t.todense()
+    d = rdm.shape[0]
+    rdm_mat = rdm.reshape(d * d, d * d)
+    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
+    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    return rdm_mat.reshape(d, d, d, d)
+
+
+def _rdm_diagonal_tensor_4site(
+    A_TL: Tensor,
+    A_TR: Tensor,
+    A_BL: Tensor,
+    A_BR: Tensor,
+    env_TL: CTMTensorEnv,
+    env_TR: CTMTensorEnv,
+    env_BL: CTMTensorEnv,
+    env_BR: CTMTensorEnv,
+) -> jax.Array:
+    r"""Diagonal (NNN) 2-site RDM from a 2×2 multisite plaquette contraction.
+
+    Generalizes :func:`_rdm_diagonal_tensor` to four distinct
+    ``(site_tensor, env)`` pairs at the four plaquette corners.
+
+    TL and BR sites have physical legs open; TR and BL are traced (closed).
+    Returns dense RDM of shape ``(d, d, d, d)`` in
+    ``(s_TL_ket, s_BR_ket, s_TL_bra, s_BR_bra)`` convention,
+    symmetrised and trace-normalised.
+
+    For the single-site case (all four arguments identical), this function
+    returns the same result as :func:`_rdm_diagonal_tensor`.
+    """
+    # Open double-layer tensors for the corners with open phys legs (TL, BR).
+    ao_TL = _build_double_layer_open_tensor(A_TL)
+    ao_BR_base = _build_double_layer_open_tensor(A_BR)
+    # Closed double-layer tensors for the traced corners (TR, BL).
+    ac_TR_base = _build_double_layer_tensor(A_TR)
+    ac_BL_base = _build_double_layer_tensor(A_BL)
+
+    # Right-column copies (suffix R) of the right-column edges.
+    T1_R = env_TR.T1.relabels({"t1_l": "t1_lR", "u2": "u2R", "t1_r": "t1_rR"})
+    T3_R = env_BR.T3.relabels({"t3_r": "t3_rR", "d2": "d2R", "t3_l": "t3_lR"})
+
+    # Bottom-row copies (suffix B) of the bottom-row edges.
+    T4_B = env_BL.T4.relabels({"t4_d": "t4_dB", "l2": "l2B", "t4_u": "t4_uB"})
+    T2_B = env_BR.T2.relabels({"t2_u": "t2_uB", "r2": "r2B", "t2_d": "t2_dB"})
+
+    # Site-internal labels (positional, identical to the single-site version
+    # — applied to the per-position ao/ac built from the per-position A).
+    #   - TL: keeps base names (u2, d2, l2, r2, phys, phys_bra).
+    #   - TR (closed): inner-left bond ↔ TL.r2, inner-down bond ↔ BR.u2_BR.
+    #   - BL (closed): inner-up bond ↔ TL.d2, inner-right bond ↔ BR.l2_BR.
+    #   - BR (open):   inner-left bond ↔ BL.r2_BL, inner-up bond ↔ TR.d2_TR.
+    ac_TR = ac_TR_base.relabels(
+        {"u2": "u2R", "d2": "d2_TR", "l2": "l2_TR", "r2": "r2R"}
+    )
+    ac_BL = ac_BL_base.relabels(
+        {"u2": "u2_BL", "d2": "d2B_BL", "l2": "l2B", "r2": "r2_BL"}
+    )
+    ao_BR = ao_BR_base.relabels(
+        {
+            "u2": "u2_BR",
+            "d2": "d2R",
+            "l2": "l2_BR",
+            "r2": "r2B",
+            "phys": "phys_BR",
+            "phys_bra": "phys_bra_BR",
+        }
+    )
+
+    # ---------- Per-site envs (one ao/ac per site, contracted in place) ----------
+    # site_env_TL:  C1·T1·T4_T·ao_TL  →  (t1_r, t4_u, d2, r2, phys, phys_bra)
+    C1 = env_TL.C1.relabel("c1_r", "t1_l")
+    C1_T1 = contract(C1, env_TL.T1)  # (c1_d, u2, t1_r)
+    T4_T = env_TL.T4.relabels({"t4_d": "c1_d"})  # (c1_d, l2, t4_u)
+    TL_env = contract(C1_T1, T4_T)  # (u2, t1_r, l2, t4_u)
+    site_env_TL = contract(TL_env, ao_TL)  # (t1_r, t4_u, d2, r2, phys, phys_bra)
+
+    # site_env_TR:  T1_R·C2·T2_T·ac_TR  →  (t1_lR, t2_d, l2_TR, d2_TR)
+    C2 = env_TR.C2.relabel("c2_l", "t1_rR")
+    T1R_C2 = contract(T1_R, C2)  # (t1_lR, u2R, c2_d)
+    T2_T = env_TR.T2.relabels({"t2_u": "c2_d", "r2": "r2R"})  # (c2_d, r2R, t2_d)
+    TR_env = contract(T1R_C2, T2_T)  # (t1_lR, u2R, r2R, t2_d)
+    site_env_TR = contract(TR_env, ac_TR)  # (t1_lR, t2_d, l2_TR, d2_TR)
+
+    # site_env_BL:  C4·T3·T4_B·ac_BL  →  (t3_l, t4_dB, u2_BL, r2_BL)
+    C4 = env_BL.C4.relabel("c4_u", "t3_r")
+    T3_BL = env_BL.T3.relabel("d2", "d2B_BL")  # (t3_r, d2B_BL, t3_l)
+    C4_T3 = contract(C4, T3_BL)  # (c4_r, d2B_BL, t3_l)
+    T4_BL = T4_B.relabel("t4_uB", "c4_r")  # (t4_dB, l2B, c4_r)
+    BL_env = contract(C4_T3, T4_BL)  # (d2B_BL, t3_l, t4_dB, l2B)
+    site_env_BL = contract(BL_env, ac_BL)  # (t3_l, t4_dB, u2_BL, r2_BL)
+
+    # site_env_BR:  T3_R·C3·T2_B·ao_BR
+    #   →  (t3_rR, t2_uB, u2_BR, l2_BR, phys_BR, phys_bra_BR)
+    C3 = env_BR.C3.relabel("c3_l", "t3_lR")
     T3R_C3 = contract(T3_R, C3)  # (t3_rR, d2R, c3_u)
     T2_BR = T2_B.relabel("t2_dB", "c3_u")  # (t2_uB, r2B, c3_u)
     BR_env = contract(T3R_C3, T2_BR)  # (t3_rR, d2R, t2_uB, r2B)
