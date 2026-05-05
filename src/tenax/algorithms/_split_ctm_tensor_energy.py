@@ -34,7 +34,8 @@ def _is_fermionic_site(A: Tensor) -> bool:
     energy path would carry a stale ``A.bar_super()`` Koszul phase that the
     standard double-layer path's ``fuse_indices`` would otherwise cancel (see
     issue #392).  In that regime we fall back to the shim path, accepting the
-    chi²·D⁸ peak in exchange for a fermion-correct result.
+    standard ``chi²·D⁶`` peak (vs the split-aware ``chi²·D⁴·d`` floor) in
+    exchange for a fermion-correct result.
     """
     if not isinstance(A, SymmetricTensor):
         return False
@@ -1085,8 +1086,8 @@ def compute_energy_split_ctm_tensor(
     Koszul phase that ``fuse_indices`` would otherwise cancel; until that
     convention mismatch is resolved (issue #392) the function falls back to
     the shim path, which routes ``compute_energy_ctm_tensor`` through
-    ``_split_env_to_tensor_standard``.  The shim peaks at chi²·D⁸ but is
-    fermion-correct.
+    ``_split_env_to_tensor_standard``.  The shim peaks at the standard
+    ``chi²·D⁶`` (vs the split-aware ``chi²·D⁴·d`` floor) but is fermion-correct.
 
     Args:
         A:                iPEPS site tensor with labels ``(u, d, l, r, phys)``.
