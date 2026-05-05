@@ -743,19 +743,50 @@ All 6 gates are the same XXZ pair Hamiltonian (uniform kagome), but they're keye
 
 Returns scalar per-(active-)site energy: `total_energy.real / 3`.
 
-### Task B.3: D=2 energy parity vs supersite (CRITICAL CHECKPOINT)
+### Task B.3: ~~D=2 energy parity vs supersite~~ — SUPERSEDED by B.3a (2026-05-05)
 
-This task is the structural-correctness gate. Compute supersite energy via the existing `compute_energy_cg` path; compute multisite energy via `compute_energy_pess_3site_multisite` using `_ctm_tensor_multisite` with `tenax.kagome()`'s neighbor map. Assert agreement to **1e-6** at D=2, χ=8, on a single random `IPESSState`.
+> ⚠️ **Original B.3 invalidated.** Empirical diagnosis showed the parity premise
+> is structurally wrong, not just numerically tight. `pess_to_kagome_supersite`
+> doesn't take `T_d` as an argument and `tests/test_pess_ad.py:116` documents
+> "T_d is not optimized in the CG path — it's preserved bit-exact". The
+> supersite CG path lives on a manifold that ignores `T_d`; the 3-site
+> multisite path lives on the full iPESS manifold. They cannot agree on an
+> arbitrary `IPESSState`.
 
-If FAIL, stop. The encoding's gauge convention or T_u/T_d absorption is wrong.
+### Task B.3a: Wavefunction fidelity on 1-cell 3-cycle PBC torus (CRITICAL CHECKPOINT)
+
+CTM-free, AD-free, χ-free structural-correctness gate. Contract the iPESS
+state directly on a 1-unit-cell PBC kagome torus (close all 6 R-T bonds inside
+the cell), and contract the 3-site multisite tensors on a 1-cell 3-cycle PBC
+multisite torus (close the kagome neighbour map cyclically among the 3
+sublattice tensors). Both contractions live in the same `(d, d, d)` Hilbert
+space. Assert
+```
+fidelity = |<ψ_iPESS | ψ_multisite>|^2 / (||ψ_iPESS||^2 * ||ψ_multisite||^2) == 1
+```
+to **1e-12** at D ∈ {1, 2, 3} for d=2.
+
+Failure at D≥2 with success at D=1 localises the bug to the encoding of
+non-trivial bond legs. **Stop-and-ask if FAIL.** Implemented as
+`tests/test_pess_3site_multisite_wavefunction.py`.
 
 ## Phase C — AD optimization
 
 ### Task C.1: `build_pess_loss_3site_multisite` AD loss
-Mirror `build_pess_loss` (currently using supersite). Use `pess_to_kagome_3site_multisite` + `ctm_energy_implicit` with the kagome Lattice neighbor map.
+Mirror `build_pess_loss` (currently using supersite). Use
+`pess_to_kagome_3site_multisite` + `ctm_energy_implicit` with the kagome
+Lattice neighbour map. Unlike the supersite loss, **`T_d` is a real
+variational parameter** — the multisite encoding uses it explicitly.
 
-### Task C.2: D=2 end-to-end optimization parity
-30 L-BFGS iterations, χ=8, multisite vs supersite must agree within 1e-6.
+### Task C.2: ~~D=2 optimization parity vs supersite~~ — SUPERSEDED (2026-05-05)
+
+> ⚠️ Same structural issue as B.3: the supersite manifold drops `T_d` while
+> multisite optimises it. AD-converged energies differ for the genuine reason
+> that the variational manifolds differ — not because of an AD-graph bug.
+> Replaced by **C.2a**: D=2 optimised multisite energy must reach or beat the
+> AD-optimised supersite energy at the same χ on the same Hamiltonian
+> (multisite has strictly more parameters, so monotone improvement is the
+> right invariant). Tolerance: `E_ms ≤ E_ss + 1e-6`. Implemented in Phase C.
 
 ### Task C.3: D=4 vs Liao 2017
 100 L-BFGS iterations, χ=16/24. Memory peak should drop ~32× vs supersite-AD path (no diagonal-RDM term at all, plus 4× shrink in d_eff).
@@ -777,6 +808,6 @@ Bond table, supersite-vs-multisite memory comparison at D=4/6/8, energy comparis
 ## Stop-and-ask checkpoints (active)
 
 1. **After Task A.1:** if shapes/dtypes/finite norm fail at any (D, d), stop. The einsum/transpose strings have a bug.
-2. **After Task B.3:** **THE structural-correctness gate.** If multisite energy ≠ supersite energy at D=2 to 1e-6, stop. The encoding's gauge convention or T_u/T_d absorption is wrong.
-3. **After Task C.2:** if AD-optimized multisite energy ≠ AD-optimized supersite energy at D=2 to 1e-6, stop. Likely an AD-graph difference.
+2. **After Task B.3a:** **THE structural-correctness gate.** If wavefunction fidelity ≠ 1 at any D ∈ {1,2,3} to 1e-12, stop. The encoding's leg-axis mapping or gauge convention is wrong.
+3. **After Task C.2a:** if AD-optimised multisite energy is *worse* than AD-optimised supersite energy at D=2 to 1e-6, stop. Multisite has strictly more parameters so a regression points at an AD-graph bug.
 4. **At Task C.4:** if D=8 OOMs on the 251 GB CPU box, stop and re-profile.
