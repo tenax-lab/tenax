@@ -942,30 +942,22 @@ class TestSplitRDMsFermionic:
     """Parity vs shim with FermionParity site tensors (Tier 2).
 
     Bosonic parity tests don't exercise ``A.bar_super()``'s Koszul-twist /
-    flow-flip handling.  The shim path also routes through ``bar_super()``
-    (inside ``_build_double_layer_open_tensor``); if both paths produce the
-    same energy on a fermionic site, the new path's per-leg twist handling
-    is equivalent to the old path's bake-then-fuse handling.
+    flow-flip handling.  The split-aware path's per-leg ``A.bar_super()``
+    absorption carries a stale Koszul phase that ``_build_double_layer_open_tensor``'s
+    raw ``fuse_indices`` would otherwise cancel; until the convention mismatch
+    in the split-aware RDM functions is resolved (issue #392),
+    ``compute_energy_split_ctm_tensor`` falls back to the shim path
+    automatically when the site is fermionic.  This parity test verifies
+    that the fall-back is wired up correctly: split-CTM-on-fermionic must
+    return the shim's energy to machine precision.
 
     Note on chi choice: with ``FermionParity`` virtual charges (alternating
     0/1), ``ctm_split_tensor`` converges cleanly at every chi after the
     fix for issue #391 (canonical SVD-bond charges shared between ket and
     bra).  Pre-fix this test only exercised chi=6 and chi=12 because
     intermediate chi values crashed in the projector path.
-
-    Status (2026-05-05): the assertion is currently expected to fail —
-    once the bra populates with non-trivial blocks (after issue #391),
-    ``compute_energy_split_ctm_tensor`` and the shim+standard path
-    disagree.  Pre-#391 they agreed only because the misaligned SVD bond
-    left the bra at exactly zero, so both energies were 0.0.  See
-    issue #392 for the energy-path discrepancy investigation.
     """
 
-    @pytest.mark.xfail(
-        reason="Issue #392: split vs shim energies disagree once #391 lets "
-        "the bra populate with non-trivial blocks; pre-#391 both were 0.0.",
-        strict=True,
-    )
     @pytest.mark.parametrize("D, chi", [(2, 6), (3, 12)])
     def test_fermionic_energy_matches_shim(self, D, chi, heisenberg_gate):
         from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
