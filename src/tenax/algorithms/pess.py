@@ -473,6 +473,144 @@ def pess_to_kagome_supersite(
     return A
 
 
+def pess_to_kagome_3site_multisite(
+    R_a: jax.Array,
+    R_b: jax.Array,
+    R_c: jax.Array,
+    T_u: jax.Array,
+    T_d: jax.Array,
+    lambdas: tuple[jax.Array, ...] | jax.Array,
+) -> dict[str, jax.Array]:
+    """Build a 3-site multisite iPEPS keyed by ``{"u", "v", "w"}`` matching
+    :func:`tenax.core.lattice.kagome` 's neighbor map.
+
+    Each kagome sublattice becomes one ``d=2`` (or ``d=3``) site of a 3-site
+    multisite iPEPS. All 6 kagome bonds map to NN bonds on the kagome
+    Lattice (3 NN-h for the up-triangle bonds, 3 NN-v for the down-triangle
+    bonds — see plan ``docs/plans/2026-05-05-multisite-kagome-pess.md``
+    "Phase A" section). No diagonal RDM is needed.
+
+    *Mapping convention*:
+
+    - iPESS sublattice ``a`` → multisite name ``"u"`` (and absorbs ``T_u``
+      *and* ``T_d``).
+    - iPESS sublattice ``b`` → multisite name ``"v"``.
+    - iPESS sublattice ``c`` → multisite name ``"w"``.
+
+    *Gauge convention* (mirrors :func:`pess_to_kagome_supersite` Convention C):
+
+    - Up-bonds: full ``λ_x_u`` absorbed on the R-side (axis 1 of ``R_x``).
+    - Down-bonds: ``sqrt(λ_x_d)`` on the R-side (axis 0 of ``R_x``); the
+      other ``sqrt`` is on the next-cell's R-site at the inter-cell
+      boundary.
+    - ``T_d`` itself is contracted into ``S_u`` together with ``T_u`` (so
+      it is "absorbed" into the central site rather than dropped — the
+      down-bond ``sqrt(λ)`` gauges still appear on each ``S_x``).
+
+    *Encoding asymmetry* (non-bug, but worth knowing): ``T_u`` and ``T_d``
+    are 3-leg simplex tensors. Distributing them into 3 separate iPEPS
+    sites without introducing extra "central" tensors requires absorbing
+    both into **one** of the R-sites (``S_u``). The other two sites
+    (``S_v``, ``S_w``) are gauged R-tensors with 2 of their 4 virtual legs
+    trivial-padded (the v-w iPEPS bond is dim-1; v-w correlations are
+    mediated through u via a 2-hop path). This is the same pattern as
+    Convention C's "axis-3 dummy" leg in the supersite — a known iPEPS
+    encoding pattern, not a bug. Validated empirically by Task B.3 D=2
+    energy parity.
+
+    Args:
+        R_a, R_b, R_c: iPESS site tensors of shape ``(D, D, d)``, axes
+            ``(T_d-leg, T_u-leg, phys)``.
+        T_u: iPESS up-simplex tensor of shape ``(D, D, D)``, axes
+            ``(R_a-leg, R_b-leg, R_c-leg)``.
+        T_d: iPESS down-simplex tensor of shape ``(D, D, D)``, same axis
+            convention. Contracted into ``S_u`` together with ``T_u``.
+        lambdas: 6 bond singular-value vectors of length ``D``, ordered
+            ``(a-up, b-up, c-up, a-down, b-down, c-down)`` per the
+            :class:`IPESSState` convention.
+
+    Returns:
+        ``{"u": S_u, "v": S_v, "w": S_w}`` — dict keyed by sublattice
+        name matching :func:`tenax.core.lattice.kagome` 's neighbor map.
+        Each tensor has shape ``(D, D, D, D, d)`` with iPEPS axis order
+        ``(top, bottom, left, right, phys)``.
+    """
+    if isinstance(lambdas, jax.Array):
+        lam_a_u = lambdas[0]
+        lam_b_u = lambdas[1]
+        lam_c_u = lambdas[2]
+        lam_a_d = lambdas[3]
+        lam_b_d = lambdas[4]
+        lam_c_d = lambdas[5]
+    else:
+        (lam_a_u, lam_b_u, lam_c_u, lam_a_d, lam_b_d, lam_c_d) = lambdas
+
+    D = R_a.shape[0]
+    d = R_a.shape[2]
+    dtype = R_a.dtype
+
+    lam_a_u = lam_a_u.astype(dtype)
+    lam_b_u = lam_b_u.astype(dtype)
+    lam_c_u = lam_c_u.astype(dtype)
+    # Smooth ``sqrt`` mirrors :func:`pess_to_kagome_supersite` (codex P1
+    # review on PR #387): keeps gradients well-defined near zero.
+    sqrt_lam_a_d = jnp.power(jnp.real(lam_a_d) ** 2 + 1e-28, 0.25).astype(dtype)
+    sqrt_lam_b_d = jnp.power(jnp.real(lam_b_d) ** 2 + 1e-28, 0.25).astype(dtype)
+    sqrt_lam_c_d = jnp.power(jnp.real(lam_c_d) ** 2 + 1e-28, 0.25).astype(dtype)
+
+    # Gauge each R: axis 0 (T_d-leg) gets ``sqrt(λ_down)``, axis 1
+    # (T_u-leg) gets full ``λ_up``. Same as :func:`pess_to_kagome_supersite`
+    # except S_b/S_c here keep the full λ_up (the supersite version uses
+    # full λ_up too — they agree).
+    S_a = jnp.einsum("i,ijp,j->ijp", sqrt_lam_a_d, R_a, lam_a_u)
+    S_b = jnp.einsum("i,ijp,j->ijp", sqrt_lam_b_d, R_b, lam_b_u)
+    S_c = jnp.einsum("i,ijp,j->ijp", sqrt_lam_c_d, R_c, lam_c_u)
+
+    # Build S_u by absorbing T_u and T_d into S_a's two virtual axes.
+    # T_u contracted with S_a's T_u-axis (axis 1 of S_a) along T_u's
+    # R_a-axis (axis 0 of T_u):
+    #   M_u indices: (T_d-side of S_a, T_u-leg-to-R_b, T_u-leg-to-R_c, phys).
+    M_u = jnp.einsum("xap,abc->xbcp", S_a, T_u)
+    # T_d contracted with M_u's T_d-side (axis 0 of M_u) along T_d's
+    # R_a-axis (axis 0 of T_d):
+    #   S_u_core indices: (T_d-leg-to-R_b, T_u-leg-to-R_b,
+    #                      T_u-leg-to-R_c, T_d-leg-to-R_c, phys).
+    S_u_core = jnp.einsum("xbcp,xyz->ybczp", M_u, T_d)
+
+    # Map S_u_core's axes to iPEPS layout (top, bottom, left, right, phys)
+    # using :func:`tenax.core.lattice.kagome` 's neighbor map for "u":
+    #   u.top    = w  ← S_u_core axis 3 (T_d-leg-to-R_c).
+    #   u.bottom = v  ← S_u_core axis 0 (T_d-leg-to-R_b).
+    #   u.left   = w  ← S_u_core axis 2 (T_u-leg-to-R_c).
+    #   u.right  = v  ← S_u_core axis 1 (T_u-leg-to-R_b).
+    #   phys           ← S_u_core axis 4.
+    S_u = jnp.transpose(S_u_core, (3, 0, 2, 1, 4))
+
+    # S_v: only the two virtual legs pointing at "u" carry content; the
+    # legs pointing at "w" are dim-1 trivial (v-w correlations propagate
+    # through u via a 2-hop path).
+    #   v.top    = u  ← S_b axis 0 (T_d-side).
+    #   v.left   = u  ← S_b axis 1 (T_u-side).
+    #   v.right  = w  → trivial slot 0.
+    #   v.bottom = w  → trivial slot 0.
+    # Slice ``[:, 0, :, 0, :]`` exposes (top, left, phys) which is exactly
+    # ``S_b``'s ``(T_d-side, T_u-side, phys)`` axis order — no transpose.
+    S_v = jnp.zeros((D, D, D, D, d), dtype=dtype)
+    S_v = S_v.at[:, 0, :, 0, :].set(S_b)
+
+    # S_w: mirror of S_v (kagome neighbor map for "w" is the reverse of "v").
+    #   w.bottom = u  ← S_c axis 0 (T_d-side).
+    #   w.right  = u  ← S_c axis 1 (T_u-side).
+    #   w.left   = v  → trivial slot 0.
+    #   w.top    = v  → trivial slot 0.
+    # Slice ``[0, :, 0, :, :]`` exposes (bottom, right, phys), matching
+    # ``S_c``'s axis order.
+    S_w = jnp.zeros((D, D, D, D, d), dtype=dtype)
+    S_w = S_w.at[0, :, 0, :, :].set(S_c)
+
+    return {"u": S_u, "v": S_v, "w": S_w}
+
+
 def pess_simple_update_triangle(
     state: IPESSState,
     gate: jax.Array,
