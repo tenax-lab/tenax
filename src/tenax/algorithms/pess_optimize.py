@@ -27,17 +27,27 @@ import numpy as np
 
 from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+from tenax.algorithms._pess_multisite_energy import (
+    compute_energy_pess_3site_multisite,
+)
 from tenax.algorithms.coarse_grain import CGGates, compute_energy_cg
 from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.algorithms.pess import (
     IPESSState,
+    pess_to_kagome_3site_multisite,
     pess_to_kagome_supersite,
 )
 from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.lattice import kagome
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
 
-__all__ = ["build_pess_loss", "optimize_pess_ad"]
+__all__ = [
+    "build_pess_loss",
+    "build_pess_loss_3site_multisite",
+    "optimize_pess_3site_multisite_ad",
+    "optimize_pess_ad",
+]
 
 
 def _make_supersite_indices(D: int, d_eff: int) -> tuple[TensorIndex, ...]:
@@ -242,6 +252,221 @@ def optimize_pess_ad(
         if verbose:
             print(
                 f"[optimize_pess_ad] step {step + 1}/{max_iter}: "
+                f"e = {last_energy:.10f}  alpha = {alpha:.3e}",
+                flush=True,
+            )
+        if alpha == 0.0:
+            break
+
+    return _params_to_state(params), last_energy
+
+
+# ---------------------------------------------------------------------------
+# 3-site multisite AD path
+# ---------------------------------------------------------------------------
+#
+# Mirrors the supersite path above but routes through the 3-site multisite
+# encoding (:func:`tenax.algorithms.pess.pess_to_kagome_3site_multisite`) and
+# the per-bond energy iterator
+# (:func:`tenax.algorithms._pess_multisite_energy.compute_energy_pess_3site_multisite`).
+#
+# Differences from the supersite path:
+#   1. ``T_d`` is a real variational parameter (the multisite encoding uses
+#      it explicitly, unlike the CG path which freezes it bit-exact).
+#   2. Three site tensors per unit cell instead of one supersite — the CTM
+#      runs as a 3-site multisite using the kagome neighbour map.
+#   3. Energy peak intermediate is bounded by ``χ²·D⁴·d`` everywhere with no
+#      diagonal-RDM term (vs supersite ``χ²·D⁶`` plus the diagonal at
+#      ``χ²·D⁴·d²·d_eff²``).
+
+# Static layout used by the multisite path: 3 sublattices placed in a 3-cell
+# strip so the multisite CTM's ``_sort_coords_for_direction`` (which indexes
+# coords as ``c[0]``/``c[1]``) operates on tuples.  Topology is governed by
+# the kagome neighbour map below, not by these labels.
+_MULTISITE_NAME_TO_COORD: dict[str, tuple[int, int]] = {
+    "u": (0, 0),
+    "v": (1, 0),
+    "w": (2, 0),
+}
+_MULTISITE_COORD_TO_NAME: dict[tuple[int, int], str] = {
+    c: n for n, c in _MULTISITE_NAME_TO_COORD.items()
+}
+_MULTISITE_LATTICE = kagome()
+_MULTISITE_COORD_NEIGHBORS: dict[tuple[int, int], dict[str, tuple[int, int]]] = {
+    _MULTISITE_NAME_TO_COORD[n]: {
+        direction: _MULTISITE_NAME_TO_COORD[
+            _MULTISITE_LATTICE.neighbor_map[n][direction]
+        ]
+        for direction in ("left", "right", "top", "bottom")
+    }
+    for n in _MULTISITE_LATTICE.sites
+}
+
+
+def _make_multisite_indices(D: int, d: int) -> tuple[TensorIndex, ...]:
+    """Square-iPEPS rank-5 ``(u, d, l, r, phys)`` index tuple for a multisite
+    site tensor.  Trivial U(1) charges (single sector at charge 0); flows
+    match the convention used by ``_ctm_tensor_energy``."""
+    sym = U1Symmetry()
+    virt = np.zeros(D, dtype=np.int32)
+    phys = np.zeros(d, dtype=np.int32)
+    return (
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(sym, phys.copy(), FlowDirection.IN, label="phys"),
+    )
+
+
+def build_pess_loss_3site_multisite(
+    bond_gates: dict,
+    config: CTMConfig,
+) -> Callable[[IPESSState], jnp.ndarray]:
+    """Build the AD loss closure for kagome iPESS via the 3-site multisite path.
+
+    Args:
+        bond_gates: Per-bond Hamiltonian dict from
+            :func:`tenax.algorithms._pess_multisite_energy.kagome_3site_bond_gates`.
+            6 entries keyed by ``frozenset({(name, dir), (nb_name, rev_dir)})``.
+        config: CTM convergence settings (``chi``, ``max_iter``, ``conv_tol``,
+            projector method, gauge, GMRES backward).
+
+    Returns:
+        ``loss_fn(state: IPESSState) -> jnp.ndarray`` returning real scalar
+        energy per microscopic kagome site.  Differentiable via ``jax.grad``
+        through the implicit-AD multisite CTM; ``T_d`` participates in the
+        gradient.
+    """
+    # Infer physical dimension from any bond gate (each is shape (d,d,d,d)).
+    d = int(next(iter(bond_gates.values())).shape[0])
+
+    def _energy_fn(site_tensors_coord, envs_coord, _gate):
+        site_tensors_name = {
+            _MULTISITE_COORD_TO_NAME[c]: A for c, A in site_tensors_coord.items()
+        }
+        envs_name = {_MULTISITE_COORD_TO_NAME[c]: e for c, e in envs_coord.items()}
+        return compute_energy_pess_3site_multisite(
+            site_tensors_name,
+            envs_name,
+            _MULTISITE_LATTICE.neighbor_map,
+            bond_gates,
+            d=d,
+        )
+
+    def loss_fn(state: IPESSState) -> jnp.ndarray:
+        sites = pess_to_kagome_3site_multisite(
+            state.R_a,
+            state.R_b,
+            state.R_c,
+            state.T_u,
+            state.T_d,
+            state.lambdas,
+        )
+        D = sites["u"].shape[0]
+        indices = _make_multisite_indices(D, d)
+        # Per-site projective normalisation (same rationale as the supersite
+        # path's single-tensor normalisation).  Each S_x scaling is absorbed
+        # into a global wavefunction prefactor that drops out of the energy
+        # ratio E = <ψ|H|ψ>/<ψ|ψ>; per-site bounding keeps CTM numerics
+        # stable across random / SU initial conditions.
+        site_tensors = {}
+        for name, A in sites.items():
+            A_norm = A / (jnp.linalg.norm(A) + 1e-12)
+            site_tensors[_MULTISITE_NAME_TO_COORD[name]] = DenseTensor(A_norm, indices)
+
+        return ctm_energy_implicit(
+            site_tensors,
+            _MULTISITE_COORD_NEIGHBORS,
+            gate=None,  # ignored; energy_fn takes over
+            chi=config.chi,
+            max_iter=config.max_iter,
+            conv_tol=config.conv_tol,
+            projector_method=config.projector_method,
+            renormalize=config.renormalize,
+            forward_gauge=config.forward_gauge,
+            conv_method=config.ctm_conv_method,
+            min_iter=config.min_iter,
+            chi_ramp=config.chi_ramp,
+            energy_fn=_energy_fn,
+            gmres_tol=config.gmres_tol,
+            gmres_maxiter=config.gmres_maxiter,
+            gmres_restart=config.gmres_restart,
+            arnoldi_precheck=False,
+        )
+
+    return loss_fn
+
+
+def optimize_pess_3site_multisite_ad(
+    initial_state: IPESSState,
+    bond_gates: dict,
+    config: CTMConfig,
+    *,
+    max_iter: int = 50,
+    verbose: bool = False,
+) -> tuple[IPESSState, float]:
+    """L-BFGS optimisation of kagome iPESS via the 3-site multisite path.
+
+    Variational parameters: all 5 iPESS primitives plus the lambdas —
+    ``(R_a, R_b, R_c, T_u, T_d, lambdas)``.  ``T_d`` is a real variable
+    here (in contrast to :func:`optimize_pess_ad`, which freezes it).
+
+    Args:
+        initial_state: Starting :class:`IPESSState`.
+        bond_gates: Per-bond gate dict from
+            :func:`tenax.algorithms._pess_multisite_energy.kagome_3site_bond_gates`.
+        config: CTM settings for the inner forward+backward sweeps.
+        max_iter: Maximum L-BFGS outer iterations.
+        verbose: Print energy at each step.
+
+    Returns:
+        ``(optimized_state, final_energy_per_site)``.
+    """
+    import optax
+
+    loss_fn_state = build_pess_loss_3site_multisite(bond_gates, config)
+
+    params = {
+        "R_a": initial_state.R_a,
+        "R_b": initial_state.R_b,
+        "R_c": initial_state.R_c,
+        "T_u": initial_state.T_u,
+        "T_d": initial_state.T_d,
+        "lambdas": tuple(initial_state.lambdas),
+    }
+
+    def _params_to_state(p: dict) -> IPESSState:
+        return IPESSState(
+            R_a=p["R_a"],
+            R_b=p["R_b"],
+            R_c=p["R_c"],
+            T_u=p["T_u"],
+            T_d=p["T_d"],
+            lambdas=tuple(p["lambdas"]),
+        )
+
+    def loss(p: dict) -> jnp.ndarray:
+        return loss_fn_state(_params_to_state(p))
+
+    optimizer = optax.chain(
+        optax.scale_by_lbfgs(memory_size=10),
+        optax.scale(-1.0),
+    )
+    opt_state = optimizer.init(params)
+    grad_fn = jax.value_and_grad(loss)
+
+    last_energy = float(loss(params))
+    for step in range(max_iter):
+        e_val, grads = grad_fn(params)
+        last_energy = float(e_val)
+        direction, opt_state = optimizer.update(grads, opt_state, params)
+        params, last_energy, alpha = _backtracking_line_search(
+            params, direction, grads, last_energy, loss
+        )
+        if verbose:
+            print(
+                f"[optimize_pess_3site_multisite_ad] step {step + 1}/{max_iter}: "
                 f"e = {last_energy:.10f}  alpha = {alpha:.3e}",
                 flush=True,
             )
