@@ -139,9 +139,14 @@ def run_one(
             else "(skipped)"
         )
         target_str = f"{target:.6f}" if target is not None else "n/a"
+        d_p1_str = (
+            f"{record['delta_p1_target']:+.4f}"
+            if record["delta_p1_target"] is not None
+            else "n/a"
+        )
         print(
             f"  D={D:2d} χ={chi:3d}  P1={e_p1:.6f}  P2={e_p2_str}  "
-            f"target={target_str}  Δ_P1={record['delta_p1_target']:+.4f}  "
+            f"target={target_str}  Δ_P1={d_p1_str}  "
             f"Δ_P2={d_p2_str}",
             flush=True,
         )
