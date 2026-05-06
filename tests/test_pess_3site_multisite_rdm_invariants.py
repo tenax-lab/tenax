@@ -125,11 +125,7 @@ def _brute_force_rdm_from_torus_psi(
 
 @pytest.mark.core
 @pytest.mark.parametrize("D", [1, 2, 3])
-@pytest.mark.parametrize(
-    "sites_to_keep",
-    [(0, 1), (0, 3), (2, 0), (2, 5), (1, 2), (3, 6)],
-)
-def test_brute_force_rdm_is_physical(D, sites_to_keep):
+def test_brute_force_rdm_is_physical(D):
     """Brute-force RDMs from the 3×3 torus ψ must be Hermitian, trace 1, PSD."""
     state = IPESSState.random(D=D, d=2, key=jax.random.PRNGKey(0))
     sites = pess_to_kagome_3site_multisite(
@@ -141,23 +137,22 @@ def test_brute_force_rdm_is_physical(D, sites_to_keep):
         state.lambdas,
     )
     psi = _contract_multisite_3x3_torus(sites)
-    rho_t = _brute_force_rdm_from_torus_psi(psi, sites_to_keep)
     d = 2
-    k = len(sites_to_keep)
-    rho = jnp.reshape(rho_t, (d**k, d**k))
 
-    # Hermiticity.
-    err_h = float(jnp.linalg.norm(rho - jnp.conj(rho.T)))
-    assert err_h < 1e-10, (
-        f"RDM not Hermitian at D={D} sites={sites_to_keep}: ‖ρ-ρ†‖={err_h:.3e}"
-    )
-    # Trace 1.
-    tr = complex(jnp.trace(rho))
-    assert abs(tr - 1.0) < 1e-10, (
-        f"RDM trace ≠ 1 at D={D} sites={sites_to_keep}: tr={tr}"
-    )
-    # PSD.
-    eig = np.linalg.eigvalsh(np.asarray(rho))
-    assert eig.min() > -1e-10, (
-        f"RDM not PSD at D={D} sites={sites_to_keep}: λ_min={eig.min():.3e}"
-    )
+    failures: list[str] = []
+    for sites_to_keep in [(0, 1), (0, 3), (2, 0), (2, 5), (1, 2), (3, 6)]:
+        rho_t = _brute_force_rdm_from_torus_psi(psi, sites_to_keep)
+        k = len(sites_to_keep)
+        rho = jnp.reshape(rho_t, (d**k, d**k))
+
+        err_h = float(jnp.linalg.norm(rho - jnp.conj(rho.T)))
+        if err_h >= 1e-10:
+            failures.append(f"sites={sites_to_keep}: not Hermitian, ‖ρ-ρ†‖={err_h:.3e}")
+        tr = complex(jnp.trace(rho))
+        if abs(tr - 1.0) >= 1e-10:
+            failures.append(f"sites={sites_to_keep}: trace ≠ 1, tr={tr}")
+        eig = np.linalg.eigvalsh(np.asarray(rho))
+        if eig.min() <= -1e-10:
+            failures.append(f"sites={sites_to_keep}: not PSD, λ_min={eig.min():.3e}")
+
+    assert not failures, f"D={D} failures:\n  " + "\n  ".join(failures)
