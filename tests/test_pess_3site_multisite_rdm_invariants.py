@@ -96,3 +96,68 @@ def test_multisite_3x3_torus_translation_invariant_diagonal(D):
             f"_contract_multisite_3x3_torus is wrong."
         ),
     )
+
+
+def _brute_force_rdm_from_torus_psi(
+    psi: jnp.ndarray, sites_to_keep: tuple[int, ...]
+) -> jnp.ndarray:
+    """Reduce ρ = Tr_{rest}(|ψ⟩⟨ψ|) / ⟨ψ|ψ⟩ on the kept sites.
+
+    Args:
+        psi: rank-9 wavefunction from `_contract_multisite_3x3_torus` or
+             equivalent, indexed by physical legs at row-major positions 0..8.
+        sites_to_keep: ordered tuple of position indices in {0..8}. The
+            returned ρ has axes (s_keep[0], s_keep[1], ..., s_keep[0]', ...).
+
+    Returns:
+        rho with shape `(d,) * (2 * len(sites_to_keep))`. To get the
+        matrix form, reshape to `(d**k, d**k)` where k = len(sites_to_keep).
+    """
+    n = psi.ndim
+    assert n == 9, f"expected rank-9 torus ψ, got rank-{n}"
+    sites_to_trace = tuple(i for i in range(n) if i not in sites_to_keep)
+    # tensordot contracts the traced axes with their conjugates.
+    rho = jnp.tensordot(psi, jnp.conj(psi), axes=(sites_to_trace, sites_to_trace))
+    # Normalise.
+    norm_sq = jnp.tensordot(psi, jnp.conj(psi), axes=(tuple(range(n)), tuple(range(n))))
+    return rho / norm_sq
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("D", [1, 2, 3])
+@pytest.mark.parametrize(
+    "sites_to_keep",
+    [(0, 1), (0, 3), (2, 0), (2, 5), (1, 2), (3, 6)],
+)
+def test_brute_force_rdm_is_physical(D, sites_to_keep):
+    """Brute-force RDMs from the 3×3 torus ψ must be Hermitian, trace 1, PSD."""
+    state = IPESSState.random(D=D, d=2, key=jax.random.PRNGKey(0))
+    sites = pess_to_kagome_3site_multisite(
+        state.R_a,
+        state.R_b,
+        state.R_c,
+        state.T_u,
+        state.T_d,
+        state.lambdas,
+    )
+    psi = _contract_multisite_3x3_torus(sites)
+    rho_t = _brute_force_rdm_from_torus_psi(psi, sites_to_keep)
+    d = 2
+    k = len(sites_to_keep)
+    rho = jnp.reshape(rho_t, (d**k, d**k))
+
+    # Hermiticity.
+    err_h = float(jnp.linalg.norm(rho - jnp.conj(rho.T)))
+    assert err_h < 1e-10, (
+        f"RDM not Hermitian at D={D} sites={sites_to_keep}: ‖ρ-ρ†‖={err_h:.3e}"
+    )
+    # Trace 1.
+    tr = complex(jnp.trace(rho))
+    assert abs(tr - 1.0) < 1e-10, (
+        f"RDM trace ≠ 1 at D={D} sites={sites_to_keep}: tr={tr}"
+    )
+    # PSD.
+    eig = np.linalg.eigvalsh(np.asarray(rho))
+    assert eig.min() > -1e-10, (
+        f"RDM not PSD at D={D} sites={sites_to_keep}: λ_min={eig.min():.3e}"
+    )
