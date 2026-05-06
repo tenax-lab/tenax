@@ -18,6 +18,7 @@ from tenax.algorithms._ctm_tensor_energy import (
 from tenax.algorithms._pess_multisite_energy import (
     _rdm_3site_marginal_vw_col,
     _rdm_3site_marginal_vw_row,
+    kagome_xxz_pair_hamiltonian,
 )
 from tenax.algorithms.pess import (
     IPESSState,
@@ -448,3 +449,36 @@ def test_marginalisation_consistency_at_d2_chi16():
         f"The multisite-CTM envs feed the two RDM paths inconsistently, "
         f"or one of the helpers mishandles the dim-1 v-w iPEPS bond."
     )
+
+
+@pytest.mark.algorithm
+def test_per_bond_energy_in_local_spectrum():
+    """Gate #5: tr(ρ_bond · H_pair) for each of the 6 bonds must lie in
+    [-3/4 - eps, 1/4 + eps]. Outside ⇒ ρ_bond is unphysical at the level
+    of expectation values.
+
+    For spin-½ isotropic XXZ at δ=1: eigvalsh(H_pair) = {-3/4, 1/4×3}.
+    """
+    eps = 1e-8
+    spec_min, spec_max = -0.75, 0.25
+    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=2)
+    H_pair = jnp.asarray(kagome_xxz_pair_hamiltonian(delta=1.0, d=2))  # (d,d,d,d)
+
+    state = IPESSState.random(D=2, d=2, key=jax.random.PRNGKey(0))
+    state = pess_simple_update(
+        state,
+        H,
+        dt_schedule=[(0.1, 100), (0.01, 100)],
+        D_max=2,
+    )
+    rdms_ctm = _collect_ctm_rdms(state, chi=16, max_iter=100, conv_tol=1e-9)
+
+    failures: list[str] = []
+    for name, rdm in rdms_ctm.items():
+        e = complex(jnp.einsum("ijkl,ijkl->", rdm, H_pair))
+        e_real = e.real
+        if not (spec_min - eps <= e_real <= spec_max + eps):
+            failures.append(
+                f"{name}: ⟨H⟩={e_real:+.4e} outside [{spec_min}, {spec_max}]"
+            )
+    assert not failures, "Spectrum-bound violations:\n  " + "\n  ".join(failures)
