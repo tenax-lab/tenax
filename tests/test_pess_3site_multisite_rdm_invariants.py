@@ -318,13 +318,13 @@ def test_d1_brute_force_equals_ctm_rdms():
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "Phase C.3 blocker: multisite-CTM RDMs at D=2 χ=16 are non-PSD "
-        "with O(1) negative eigenvalues (and 5/6 violate trace=1 by "
-        "1e-6 to 1e-3). All 6 RDMs fail equally across both helper "
-        "types (_rdm{2x1,1x2}_tensor_2site and _rdm_3site_marginal_vw_*), "
-        "consistent with a shared upstream multisite-CTM environment "
-        "construction bug rather than a bug confined to one helper. "
-        "To be fixed in a follow-up PR; this test is the regression gate."
+        "Phase C.3 blocker: multisite-CTM RDMs at D=2 χ=16 are non-PSD with O(1) negative eigenvalues "
+        "(Hermiticity holds; helpers symmetrise correctly). Audit at chi∈{8,16} shows the "
+        "brute-force-vs-CTM Frobenius delta is largest on `uv_v` (= 1.87 at chi=16) and grows "
+        "from chi=8→16, the wrong direction for a CTM-truncation artefact — pointing at a "
+        "structural bug in the multisite-CTM environment construction rather than (or in "
+        "addition to) any per-helper issue. To be fixed in a follow-up PR; this test is the "
+        "regression gate."
     ),
 )
 @pytest.mark.algorithm
@@ -369,16 +369,13 @@ def test_ctm_rdms_hermitian_psd_trace1_at_d2_chi16():
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "Phase C.3 blocker: marginalisation-consistency violated at D=2 χ=16 "
-        "by ‖Δ‖_F ≈ 8.878e-01 (post-trace-renormalisation). The two helpers "
-        "(`_rdm_3site_marginal_vw_row` and `_rdm2x1_tensor_2site` across the "
-        "v-w bond) consume the SAME multisite-CTM envs but produce wildly "
-        "different ρ_vw — magnitude indicates per-helper divergence (one of "
-        "the two helpers genuinely mishandles the dim-1 v-w iPEPS bond), not "
-        "merely an upstream-only environment construction inconsistency. "
-        "Raw traces are tr(ρ_A)=1.001, tr(ρ_B)≈1.000 (both close to 1 — "
-        "normalisation alone does not explain the gap). To be fixed in a "
-        "follow-up PR; this test is the regression gate."
+        "Phase C.3 blocker: ρ_vw computed via `_rdm_3site_marginal_vw_row` vs via direct "
+        "`_rdm2x1_tensor_2site(S_v, S_w, env_v, env_w)` from the SAME multisite-CTM envs "
+        "disagree by ‖Δ‖_F ≈ 0.89 — confirms the two helpers process envs differently "
+        "on the dim-1 v-w iPEPS bond. Combined with the broader-than-v-w pattern in the "
+        "audit table (see Task 5 reason), the C.3 root cause likely involves both the env "
+        "construction and at least one v-w bond consumer helper. To be fixed in a follow-up "
+        "PR; this test is the regression gate."
     ),
 )
 @pytest.mark.algorithm
