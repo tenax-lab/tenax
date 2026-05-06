@@ -172,6 +172,90 @@ def _backtracking_line_search(
     return best_trial, best_f, best_alpha
 
 
+def _hager_zhang_line_search_step(
+    params: dict,
+    direction: dict,
+    grad: dict,
+    energy: float,
+    loss_fn: Callable[[dict], jnp.ndarray],
+    grad_fn: Callable[[dict], tuple[jnp.ndarray, dict]],
+) -> tuple[dict, float, float]:
+    """Hager-Zhang line search on the L-BFGS descent direction.
+
+    Mirrors the iPEPS optimizer's HZ wiring (see
+    :mod:`tenax.algorithms.ipeps_optimize`).  Hager-Zhang enforces
+    approximate Wolfe conditions (Hager & Zhang, SIAM J. Optim. 16(1),
+    2005) — both sufficient decrease *and* the curvature condition —
+    which keeps the L-BFGS Hessian approximation positive-definite on
+    plateau regions where pure Armijo backtracking accumulates degenerate
+    ``(s_k, y_k)`` pairs and eventually stalls.
+
+    Returns ``(new_params, new_energy, alpha)``.  ``alpha == 0.0`` means
+    the line search produced no improvement (caller should break).
+    """
+    from tenax.algorithms._line_search import hager_zhang_line_search
+
+    slope = _tree_real_dot(grad, direction)
+    if slope >= 0.0:
+        direction = jax.tree.map(lambda g: -g, grad)
+        slope = -_tree_real_dot(grad, grad)
+
+    p_norm = math.sqrt(max(_tree_real_dot(params, params), 1e-30))
+    d_norm = math.sqrt(max(_tree_real_dot(direction, direction), 1e-30))
+    alpha0 = min(1.0, 0.1 * p_norm / d_norm)
+
+    def _phi(a: float) -> float:
+        trial = jax.tree.map(lambda p, d: p + a * d, params, direction)
+        return float(loss_fn(trial))
+
+    def _dphi(a: float) -> float:
+        trial = jax.tree.map(lambda p, d: p + a * d, params, direction)
+        _, g = grad_fn(trial)
+        return _tree_real_dot(g, direction)
+
+    alpha, f_alpha, _ = hager_zhang_line_search(
+        _phi,
+        _dphi,
+        energy,
+        slope,
+        alpha_init=alpha0,
+        rho=1.5,
+        max_step=2.0 * alpha0,
+        energy_bound=max(2.0, 2.0 * abs(energy)),
+    )
+    if alpha == 0.0 or f_alpha >= energy:
+        return params, energy, 0.0
+    new_params = jax.tree.map(lambda p, d: p + alpha * d, params, direction)
+    return new_params, f_alpha, alpha
+
+
+def _run_line_search(
+    method: str,
+    params: dict,
+    direction: dict,
+    grad: dict,
+    energy: float,
+    loss_fn: Callable[[dict], jnp.ndarray],
+    grad_fn: Callable[[dict], tuple[jnp.ndarray, dict]],
+) -> tuple[dict, float, float]:
+    """Dispatch to the requested line search.
+
+    Args:
+        method: ``"hager_zhang"`` (default — enforces approximate Wolfe
+            conditions, recommended for L-BFGS) or ``"armijo"`` (legacy
+            backtracker, kept for opt-out and reproducibility).
+    """
+    if method == "hager_zhang":
+        return _hager_zhang_line_search_step(
+            params, direction, grad, energy, loss_fn, grad_fn
+        )
+    if method == "armijo":
+        return _backtracking_line_search(params, direction, grad, energy, loss_fn)
+    raise ValueError(
+        f"Unknown line_search_method={method!r}. Expected 'hager_zhang' or 'armijo'."
+    )
+
+
 def optimize_pess_ad(
     initial_state: IPESSState,
     cg_gates: CGGates,
@@ -179,6 +263,7 @@ def optimize_pess_ad(
     *,
     max_iter: int = 50,
     verbose: bool = False,
+    line_search_method: str = "hager_zhang",
 ) -> tuple[IPESSState, float]:
     """L-BFGS optimization of kagome iPESS via the CG-iPEPS square path.
 
@@ -189,10 +274,9 @@ def optimize_pess_ad(
     spanned by the down-bond ``lambdas[3:6]`` themselves.
 
     Inner step uses ``optax.scale_by_lbfgs`` (memory 10) for the
-    quasi-Newton direction; line search is a Python-level Armijo
-    backtracker since the square CTM forward pass uses Python control
-    flow that can't be ``jit``-traced through ``optax.lbfgs``'s bundled
-    zoom search.
+    quasi-Newton direction; line search is a Python-level routine since
+    the square CTM forward pass uses Python control flow that can't be
+    ``jit``-traced through ``optax.lbfgs``'s bundled zoom search.
 
     Args:
         initial_state: Starting :class:`IPESSState`. Typically the output
@@ -204,6 +288,9 @@ def optimize_pess_ad(
         config: CTM settings for the inner forward+backward sweeps.
         max_iter: Maximum L-BFGS outer iterations.
         verbose: Print energy at each step.
+        line_search_method: ``"hager_zhang"`` (default — approximate
+            Wolfe conditions, recommended for L-BFGS) or ``"armijo"``
+            (legacy backtracker; kept for opt-out and reproducibility).
 
     Returns:
         ``(optimized_state, final_energy_per_site)``.
@@ -246,8 +333,8 @@ def optimize_pess_ad(
         e_val, grads = grad_fn(params)
         last_energy = float(e_val)
         direction, opt_state = optimizer.update(grads, opt_state, params)
-        params, last_energy, alpha = _backtracking_line_search(
-            params, direction, grads, last_energy, loss
+        params, last_energy, alpha = _run_line_search(
+            line_search_method, params, direction, grads, last_energy, loss, grad_fn
         )
         if verbose:
             print(
@@ -406,6 +493,7 @@ def optimize_pess_3site_multisite_ad(
     *,
     max_iter: int = 50,
     verbose: bool = False,
+    line_search_method: str = "hager_zhang",
 ) -> tuple[IPESSState, float]:
     """L-BFGS optimisation of kagome iPESS via the 3-site multisite path.
 
@@ -420,6 +508,9 @@ def optimize_pess_3site_multisite_ad(
         config: CTM settings for the inner forward+backward sweeps.
         max_iter: Maximum L-BFGS outer iterations.
         verbose: Print energy at each step.
+        line_search_method: ``"hager_zhang"`` (default — approximate
+            Wolfe conditions, recommended for L-BFGS) or ``"armijo"``
+            (legacy backtracker; kept for opt-out and reproducibility).
 
     Returns:
         ``(optimized_state, final_energy_per_site)``.
@@ -462,8 +553,8 @@ def optimize_pess_3site_multisite_ad(
         e_val, grads = grad_fn(params)
         last_energy = float(e_val)
         direction, opt_state = optimizer.update(grads, opt_state, params)
-        params, last_energy, alpha = _backtracking_line_search(
-            params, direction, grads, last_energy, loss
+        params, last_energy, alpha = _run_line_search(
+            line_search_method, params, direction, grads, last_energy, loss, grad_fn
         )
         if verbose:
             print(
