@@ -124,7 +124,10 @@ def _brute_force_rdm_from_torus_psi(
         psi: rank-9 wavefunction from `_contract_multisite_3x3_torus` or
              equivalent, indexed by physical legs at row-major positions 0..8.
         sites_to_keep: ordered tuple of position indices in {0..8}. The
-            returned ρ has axes (s_keep[0], s_keep[1], ..., s_keep[0]', ...).
+            returned ρ has axes (s_keep[0], s_keep[1], ..., s_keep[0]', ...)
+            — i.e. the kept-axis order matches `sites_to_keep`, not the
+            sorted numerical order that `jnp.tensordot` returns natively.
+            The bra axes mirror the ket order.
 
     Returns:
         rho with shape `(d,) * (2 * len(sites_to_keep))`. To get the
@@ -133,11 +136,21 @@ def _brute_force_rdm_from_torus_psi(
     n = psi.ndim
     assert n == 9, f"expected rank-9 torus ψ, got rank-{n}"
     sites_to_trace = tuple(i for i in range(n) if i not in sites_to_keep)
-    # tensordot contracts the traced axes with their conjugates.
+    # tensordot contracts the traced axes with their conjugates. The output
+    # places the surviving ket axes first (in sorted numerical order),
+    # followed by the surviving bra axes (also in sorted order).
     rho = jnp.tensordot(psi, jnp.conj(psi), axes=(sites_to_trace, sites_to_trace))
     # Normalise.
     norm_sq = jnp.tensordot(psi, jnp.conj(psi), axes=(tuple(range(n)), tuple(range(n))))
-    return rho / norm_sq
+    rho = rho / norm_sq
+
+    # tensordot returns kept axes in sorted numerical order. Permute so
+    # axes match `sites_to_keep`, with bra axes mirroring ket order.
+    sorted_keep = sorted(sites_to_keep)
+    perm_ket = [sorted_keep.index(p) for p in sites_to_keep]
+    k = len(sites_to_keep)
+    perm = tuple(perm_ket) + tuple(p + k for p in perm_ket)
+    return jnp.transpose(rho, perm)
 
 
 @pytest.mark.core
