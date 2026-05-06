@@ -186,5 +186,99 @@
         "energy_delta": 0.17246549539112135
       }
     }
+  },
+  {
+    "D": 3,
+    "chi": 8,
+    "state_kind": "su",
+    "seed": 0,
+    "wall_seconds_state": 4.9949573101475835,
+    "wall_seconds_brute_force": 5.070845204405487,
+    "wall_seconds_ctm": 3.838064587675035,
+    "metrics": {
+      "uv_h": {
+        "frobenius_delta": 0.21231417158746607,
+        "energy_bf": -0.10238814530574677,
+        "energy_ctm": -0.22364679280015098,
+        "energy_delta": -0.12125864749440421
+      },
+      "uv_v": {
+        "frobenius_delta": 0.5394231182920409,
+        "energy_bf": -0.1155227250505037,
+        "energy_ctm": 0.0,
+        "energy_delta": 0.1155227250505037
+      },
+      "wu_h": {
+        "frobenius_delta": 0.533757814659697,
+        "energy_bf": -0.09743559644798656,
+        "energy_ctm": 0.0,
+        "energy_delta": 0.09743559644798656
+      },
+      "wu_v": {
+        "frobenius_delta": 0.28088512040474733,
+        "energy_bf": -0.11666509538326832,
+        "energy_ctm": -0.0628034816860761,
+        "energy_delta": 0.05386161369719221
+      },
+      "vw_row": {
+        "frobenius_delta": 0.5354418896646589,
+        "energy_bf": -0.1017283604707009,
+        "energy_ctm": 0.0,
+        "energy_delta": 0.1017283604707009
+      },
+      "vw_col": {
+        "frobenius_delta": 0.30079729320038634,
+        "energy_bf": -0.115679390110747,
+        "energy_ctm": -0.23928761244696528,
+        "energy_delta": -0.12360822233621828
+      }
+    }
+  },
+  {
+    "D": 3,
+    "chi": 16,
+    "state_kind": "su",
+    "seed": 0,
+    "wall_seconds_state": 3.3235006872564554,
+    "wall_seconds_brute_force": 4.770539012737572,
+    "wall_seconds_ctm": 1050.119511788711,
+    "metrics": {
+      "uv_h": {
+        "frobenius_delta": 4.575173888301567,
+        "energy_bf": -0.10238814530574677,
+        "energy_ctm": -0.8160066368039609,
+        "energy_delta": -0.7136184914982141
+      },
+      "uv_v": {
+        "frobenius_delta": 0.7980709181825201,
+        "energy_bf": -0.1155227250505037,
+        "energy_ctm": -0.2048753335045817,
+        "energy_delta": -0.089352608454078
+      },
+      "wu_h": {
+        "frobenius_delta": 0.8511595558840073,
+        "energy_bf": -0.09743559644798656,
+        "energy_ctm": 0.26757680981163523,
+        "energy_delta": 0.3650124062596218
+      },
+      "wu_v": {
+        "frobenius_delta": 1.893238334661502,
+        "energy_bf": -0.11666509538326832,
+        "energy_ctm": 0.7007142238897768,
+        "energy_delta": 0.8173793192730451
+      },
+      "vw_row": {
+        "frobenius_delta": 1.2817314592414335,
+        "energy_bf": -0.1017283604707009,
+        "energy_ctm": 0.013995261506322479,
+        "energy_delta": 0.11572362197702338
+      },
+      "vw_col": {
+        "frobenius_delta": 4.346891642773421,
+        "energy_bf": -0.115679390110747,
+        "energy_ctm": -0.17226372534661355,
+        "energy_delta": -0.05658433523586655
+      }
+    }
   }
 ]
