@@ -1,0 +1,13 @@
+{
+  "D": 2,
+  "chi": 8,
+  "max_iter": 30,
+  "seed": 0,
+  "e_supersite_su": -0.23562206362409366,
+  "e_multisite_su": -0.09753345810789778,
+  "e_supersite_ad": -0.30787923477410833,
+  "e_multisite_ad": -0.3628365086455528,
+  "delta_ad": -0.054957273871444445,
+  "wall_seconds_supersite": 27.80279115308076,
+  "wall_seconds_multisite": 119.7761922897771
+}
