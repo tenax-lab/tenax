@@ -261,3 +261,54 @@ def test_collect_ctm_rdms_returns_six_physical_rdms():
         # Trace ~1.
         tr = complex(jnp.trace(m))
         assert abs(tr - 1.0) < 1e-6, f"{name}: tr={tr}"
+
+
+# Position-index representatives for the 6 brute-force RDMs (see plan table).
+_BF_BOND_POSITIONS: dict[str, tuple[int, ...]] = {
+    "uv_h": (0, 1),  # (u^(0,0), v^(1,0))
+    "uv_v": (0, 3),  # (u^(0,0), v^(0,1))
+    "wu_h": (2, 0),  # (w^(2,0), u^(0,0))
+    "wu_v": (2, 5),  # (w^(2,0), u^(2,1))
+    "vw_row": (1, 2),  # marginalise (0,1,2) over u → keep (1,2) = (v,w)
+    "vw_col": (3, 6),  # marginalise (0,3,6) over u → keep (3,6) = (v,w)
+}
+
+
+def _brute_force_rdms(state: IPESSState) -> dict[str, jnp.ndarray]:
+    """Compute the 6 brute-force RDMs from the 3×3 torus wavefunction.
+
+    Returns dict with the same keys + axis convention as `_collect_ctm_rdms`.
+    """
+    sites = pess_to_kagome_3site_multisite(
+        state.R_a,
+        state.R_b,
+        state.R_c,
+        state.T_u,
+        state.T_d,
+        state.lambdas,
+    )
+    psi = _contract_multisite_3x3_torus(sites)
+    out = {}
+    for name, sites_to_keep in _BF_BOND_POSITIONS.items():
+        rho = _brute_force_rdm_from_torus_psi(psi, sites_to_keep)
+        # rho axes: (s_keep[0], s_keep[1], s_keep[0]', s_keep[1]') — already
+        # matches the 4-tensor convention of `_collect_ctm_rdms`.
+        out[name] = rho
+    return out
+
+
+@pytest.mark.core
+def test_d1_brute_force_equals_ctm_rdms():
+    """Gate #6: at D=1 the encoded state is a product state, so finite-torus
+    brute-force = infinite-lattice CTM exactly. All 6 RDMs must agree to 1e-10
+    at any χ ≥ 4."""
+    state = IPESSState.random(D=1, d=2, key=jax.random.PRNGKey(0))
+    rdms_bf = _brute_force_rdms(state)
+    rdms_ctm = _collect_ctm_rdms(state, chi=4, max_iter=20, conv_tol=1e-10)
+    for name in rdms_bf:
+        diff = float(jnp.linalg.norm(rdms_bf[name] - rdms_ctm[name]))
+        assert diff < 1e-10, (
+            f"D=1 brute-force ≠ CTM for {name}: ‖Δρ‖_F = {diff:.3e}. "
+            f"Either the multisite encoding has a leg-mapping bug at the "
+            f"product-state level, or the CTM RDM extraction does."
+        )
