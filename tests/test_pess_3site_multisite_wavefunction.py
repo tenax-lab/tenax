@@ -120,7 +120,7 @@ def _contract_multisite_3cycle_pbc(sites: dict[str, jnp.ndarray]) -> jnp.ndarray
 
 
 @pytest.mark.core
-@pytest.mark.parametrize("D", [1, 2, 3])
+@pytest.mark.parametrize("D", [1, 2, 3, 4, 5, 6])
 def test_3site_multisite_wavefunction_matches_ipess_on_1cell_torus(D):
     """Fidelity == 1 on the smallest valid kagome PBC torus.
 
@@ -256,7 +256,7 @@ def _torus_formula_energy(
 
 
 @pytest.mark.core
-@pytest.mark.parametrize("D", [1, 2, 3])
+@pytest.mark.parametrize("D", [1, 2, 3, 4, 5, 6])
 def test_pess_3site_multisite_energy_formula_matches_torus_brute_force(D):
     """Energy formula bond-accounting structural-correctness gate (Task B.4).
 
