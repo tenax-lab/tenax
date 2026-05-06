@@ -10,7 +10,24 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax.algorithms.pess import IPESSState, pess_to_kagome_3site_multisite
+from tenax.algorithms._ctm_tensor_convergence import ctm_multisite
+from tenax.algorithms._ctm_tensor_energy import (
+    _rdm1x2_tensor_2site,
+    _rdm2x1_tensor_2site,
+)
+from tenax.algorithms._pess_multisite_energy import (
+    _rdm_3site_marginal_vw_col,
+    _rdm_3site_marginal_vw_row,
+)
+from tenax.algorithms.pess import (
+    IPESSState,
+    kagome_triangle_xxz_hamiltonian,
+    pess_simple_update,
+    pess_to_kagome_3site_multisite,
+)
+from tenax.algorithms.pess_optimize import _make_multisite_indices
+from tenax.core.lattice import kagome
+from tenax.core.tensor import DenseTensor
 
 # 3×3 PBC torus position → sublattice. See the plan's "Lattice constants".
 _POS_TO_NAME: tuple[str, ...] = (
@@ -156,3 +173,78 @@ def test_brute_force_rdm_is_physical(D):
             failures.append(f"sites={sites_to_keep}: not PSD, λ_min={eig.min():.3e}")
 
     assert not failures, f"D={D} failures:\n  " + "\n  ".join(failures)
+
+
+def _collect_ctm_rdms(
+    state: IPESSState, chi: int, max_iter: int = 100, conv_tol: float = 1e-10
+) -> dict[str, jnp.ndarray]:
+    """Run multisite-CTM on the encoded state and extract the 6 RDMs the
+    energy formula consumes.
+
+    Returns dict with keys {"uv_h", "uv_v", "wu_h", "wu_v", "vw_row", "vw_col"}.
+    Each value has shape (d, d, d, d) in the same axis convention used by
+    `compute_energy_pess_3site_multisite` (i.e. `(s_A, s_B, s_A', s_B')` for
+    2-site bonds; for the marginalised v-w bonds it's `(s_v, s_w, s_v', s_w')`).
+    """
+    d = 2
+    sites = pess_to_kagome_3site_multisite(
+        state.R_a,
+        state.R_b,
+        state.R_c,
+        state.T_u,
+        state.T_d,
+        state.lambdas,
+    )
+    D = sites["u"].shape[0]
+    indices = _make_multisite_indices(D, d)
+    # Per-site projective normalisation (matches `build_pess_loss_3site_multisite`).
+    site_tensors_by_name = {}
+    for name, A in sites.items():
+        A_norm = A / (jnp.linalg.norm(A) + 1e-12)
+        site_tensors_by_name[name] = DenseTensor(A_norm, indices)
+
+    envs_by_name = ctm_multisite(
+        site_tensors_by_name,
+        kagome(),
+        chi=chi,
+        max_iter=max_iter,
+        conv_tol=conv_tol,
+    )
+    S_u = site_tensors_by_name["u"]
+    S_v = site_tensors_by_name["v"]
+    S_w = site_tensors_by_name["w"]
+    env_u = envs_by_name["u"]
+    env_v = envs_by_name["v"]
+    env_w = envs_by_name["w"]
+
+    return {
+        # 4 NN bonds (matching nn_visits order in compute_energy_pess_3site_multisite).
+        "uv_h": _rdm2x1_tensor_2site(S_u, S_v, env_u, env_v),
+        "uv_v": _rdm1x2_tensor_2site(S_u, S_v, env_u, env_v),
+        "wu_h": _rdm2x1_tensor_2site(S_w, S_u, env_w, env_u),
+        "wu_v": _rdm1x2_tensor_2site(S_w, S_u, env_w, env_u),
+        # 2 marginalised-3-site v-w bonds.
+        "vw_row": _rdm_3site_marginal_vw_row(S_u, S_v, S_w, env_u, env_v, env_w),
+        "vw_col": _rdm_3site_marginal_vw_col(S_u, S_v, S_w, env_u, env_v, env_w),
+    }
+
+
+@pytest.mark.algorithm
+def test_collect_ctm_rdms_returns_six_physical_rdms():
+    """Smoke test: at D=2 χ=8 SU-warmstart, all 6 RDMs are 4-tensor (d,d,d,d),
+    each Hermitian when reshaped to (d²,d²) and trace 1."""
+    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=2)
+    state = IPESSState.random(D=2, d=2, key=jax.random.PRNGKey(0))
+    state = pess_simple_update(state, H, dt_schedule=[(0.1, 50)], D_max=2)
+
+    rdms = _collect_ctm_rdms(state, chi=8, max_iter=30, conv_tol=1e-7)
+    assert set(rdms.keys()) == {"uv_h", "uv_v", "wu_h", "wu_v", "vw_row", "vw_col"}
+    for name, rdm in rdms.items():
+        assert rdm.shape == (2, 2, 2, 2), f"{name}: shape={rdm.shape}"
+        m = jnp.reshape(rdm, (4, 4))
+        # Hermitian (loose tol — χ=8 is unconverged at D=2 but should still be ~Herm).
+        err_h = float(jnp.linalg.norm(m - jnp.conj(m.T)))
+        assert err_h < 1e-6, f"{name}: ‖ρ-ρ†‖={err_h:.3e}"
+        # Trace ~1.
+        tr = complex(jnp.trace(m))
+        assert abs(tr - 1.0) < 1e-6, f"{name}: tr={tr}"
