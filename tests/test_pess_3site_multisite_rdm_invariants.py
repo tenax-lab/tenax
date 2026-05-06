@@ -312,3 +312,54 @@ def test_d1_brute_force_equals_ctm_rdms():
             f"Either the multisite encoding has a leg-mapping bug at the "
             f"product-state level, or the CTM RDM extraction does."
         )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Phase C.3 blocker: multisite-CTM RDMs at D=2 χ=16 are non-PSD "
+        "with O(1) negative eigenvalues (and 5/6 violate trace=1 by "
+        "1e-6 to 1e-3). All 6 RDMs fail equally across both helper "
+        "types (_rdm{2x1,1x2}_tensor_2site and _rdm_3site_marginal_vw_*), "
+        "consistent with a shared upstream multisite-CTM environment "
+        "construction bug rather than a bug confined to one helper. "
+        "To be fixed in a follow-up PR; this test is the regression gate."
+    ),
+)
+@pytest.mark.algorithm
+def test_ctm_rdms_hermitian_psd_trace1_at_d2_chi16():
+    """Gates #1-3: the 6 multisite-CTM RDMs at D=2 χ=16 SU-warmstart must be
+    Hermitian (1e-10), PSD (λ_min ≥ -1e-10), and trace 1 (1e-8 — looser to
+    absorb χ-conv noise).
+
+    All gates assert on the same SU state; failure of any gate fires
+    immediately and points at the offending RDM.
+    """
+    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=2)
+    state = IPESSState.random(D=2, d=2, key=jax.random.PRNGKey(0))
+    state = pess_simple_update(
+        state,
+        H,
+        dt_schedule=[(0.1, 100), (0.01, 100)],
+        D_max=2,
+    )
+
+    rdms_ctm = _collect_ctm_rdms(state, chi=16, max_iter=100, conv_tol=1e-9)
+    failures: list[str] = []
+    for name, rdm in rdms_ctm.items():
+        m = jnp.reshape(rdm, (4, 4))
+        # Gate #1: Hermitian.
+        err_h = float(jnp.linalg.norm(m - jnp.conj(m.T)))
+        if err_h > 1e-10:
+            failures.append(f"{name}: ‖ρ-ρ†‖_F={err_h:.3e} > 1e-10")
+        # Gate #2: PSD. Hermitise first (real symmetric eigenvalues are
+        # what physics demands; small Hermiticity violation is OK at χ=16).
+        m_h = 0.5 * (m + jnp.conj(m.T))
+        eig = np.linalg.eigvalsh(np.asarray(m_h))
+        if eig.min() < -1e-10:
+            failures.append(f"{name}: λ_min={eig.min():.3e} < -1e-10 (not PSD)")
+        # Gate #3: trace 1 (looser tol).
+        tr = complex(jnp.trace(m))
+        if abs(tr - 1.0) > 1e-8:
+            failures.append(f"{name}: |tr-1|={abs(tr - 1.0):.3e} > 1e-8")
+    assert not failures, "Structural-invariants violations:\n  " + "\n  ".join(failures)
