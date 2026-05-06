@@ -1,4 +1,13 @@
-"""Smoke tests for the kagome iPESS AD loss closure (CG-iPEPS path)."""
+"""Smoke tests for the kagome iPESS AD loss closures.
+
+Covers both the CG-iPEPS supersite path
+(:func:`tenax.algorithms.pess_optimize.build_pess_loss`) and the 3-site
+multisite path
+(:func:`tenax.algorithms.pess_optimize.build_pess_loss_3site_multisite`).
+The two paths target the same physics but live on different variational
+manifolds (multisite includes ``T_d`` as a real parameter, supersite
+freezes it bit-exact).
+"""
 
 from __future__ import annotations
 
@@ -6,9 +15,15 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from tenax.algorithms._pess_multisite_energy import kagome_3site_bond_gates
 from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.algorithms.pess import IPESSState, kagome_xxz_pess_cg_gates
-from tenax.algorithms.pess_optimize import build_pess_loss, optimize_pess_ad
+from tenax.algorithms.pess_optimize import (
+    build_pess_loss,
+    build_pess_loss_3site_multisite,
+    optimize_pess_3site_multisite_ad,
+    optimize_pess_ad,
+)
 
 
 def _make_test_config(chi: int) -> CTMConfig:
@@ -115,3 +130,92 @@ def test_optimize_pess_ad_preserves_shapes_and_T_d():
     assert state_opt.T_u.dtype == jnp.complex128
     # T_d is not optimized in the CG path — it's preserved bit-exact.
     assert jnp.array_equal(state_opt.T_d, state0.T_d)
+
+
+# ---------------------------------------------------------------------------
+# 3-site multisite AD path smoke tests
+# ---------------------------------------------------------------------------
+
+
+def test_pess_loss_3site_multisite_returns_finite_real_scalar():
+    """Multisite loss closure returns a finite real scalar on a random state."""
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    config = _make_test_config(chi=8)
+
+    loss_fn = build_pess_loss_3site_multisite(bond_gates, config)
+    e0 = loss_fn(state)
+
+    assert jnp.shape(e0) == ()
+    assert jnp.isrealobj(e0) or jnp.allclose(e0.imag, 0.0, atol=1e-10)
+    assert jnp.isfinite(e0)
+
+
+def test_pess_loss_3site_multisite_is_differentiable_through_T_d():
+    """``jax.grad`` of the multisite loss flows through every iPESS primitive
+    *including* ``T_d`` — this is the defining contrast with the supersite
+    path, which freezes ``T_d`` bit-exact."""
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    config = _make_test_config(chi=8)
+
+    loss_fn = build_pess_loss_3site_multisite(bond_gates, config)
+    e0 = loss_fn(state)
+    g = jax.grad(loss_fn)(state)
+
+    assert jnp.isfinite(e0)
+    for arr in (g.R_a, g.R_b, g.R_c, g.T_u, g.T_d):
+        assert jnp.all(jnp.isfinite(arr)), (
+            "non-finite values in multisite gradient — implicit-AD CTM "
+            "backward produced NaN/Inf on a smoke-test state."
+        )
+        assert arr.dtype == jnp.complex128
+    for lam_g in g.lambdas:
+        assert jnp.all(jnp.isfinite(lam_g))
+    # Non-trivial T_d gradient: the multisite encoding actually uses T_d, so
+    # ||g.T_d|| > 0 unless the state happens to land at a critical point.
+    assert float(jnp.linalg.norm(g.T_d)) > 0.0, (
+        "T_d gradient is identically zero — the multisite loss is not "
+        "differentiating through T_d (regression vs supersite path)."
+    )
+
+
+def test_optimize_pess_3site_multisite_ad_decreases_energy():
+    """L-BFGS lowers the multisite energy below the random-init baseline."""
+    state0 = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(2))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    config = _make_test_config(chi=8)
+
+    e0 = float(build_pess_loss_3site_multisite(bond_gates, config)(state0))
+    state_opt, e_opt = optimize_pess_3site_multisite_ad(
+        state0, bond_gates, config, max_iter=5, verbose=False
+    )
+
+    assert jnp.isfinite(e_opt)
+    assert e_opt < e0, (
+        f"multisite L-BFGS did not decrease energy: e0={e0}, e_opt={e_opt}"
+    )
+
+
+def test_optimize_pess_3site_multisite_ad_preserves_shapes_and_optimises_T_d():
+    """Shapes/dtype preserved; ``T_d`` is updated by the multisite optimiser
+    (unlike the CG path)."""
+    state0 = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(3))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    config = _make_test_config(chi=8)
+
+    state_opt, _ = optimize_pess_3site_multisite_ad(
+        state0, bond_gates, config, max_iter=2
+    )
+
+    assert state_opt.R_a.shape == state0.R_a.shape
+    assert state_opt.R_b.shape == state0.R_b.shape
+    assert state_opt.R_c.shape == state0.R_c.shape
+    assert state_opt.T_u.shape == state0.T_u.shape
+    assert state_opt.T_d.shape == state0.T_d.shape
+    assert state_opt.T_d.dtype == jnp.complex128
+    # T_d *is* optimized in the multisite path — must differ from input.
+    assert not jnp.array_equal(state_opt.T_d, state0.T_d), (
+        "T_d unchanged after L-BFGS in the multisite path — the optimiser "
+        "is silently freezing T_d (regression: it should be a live param)."
+    )
