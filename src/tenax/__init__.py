@@ -136,6 +136,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # coarse_grain
     "CGGates": ("tenax.algorithms.coarse_grain", "CGGates"),
     "compute_energy_cg": ("tenax.algorithms.coarse_grain", "compute_energy_cg"),
+    "compute_energy_cg_split": (
+        "tenax.algorithms.coarse_grain",
+        "compute_energy_cg_split",
+    ),
     "honeycomb_cg_gates": ("tenax.algorithms.coarse_grain", "honeycomb_cg_gates"),
     "kagome_cg_gates": ("tenax.algorithms.coarse_grain", "kagome_cg_gates"),
     # pess (kagome iPESS)
@@ -427,6 +431,7 @@ __all__ = [
     # Coarse-grained iPEPS (honeycomb / kagome via 1-site square pipeline)
     "CGGates",
     "compute_energy_cg",
+    "compute_energy_cg_split",
     "honeycomb_cg_gates",
     "kagome_cg_gates",
     "IPESSState",

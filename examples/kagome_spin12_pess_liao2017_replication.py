@@ -74,8 +74,42 @@ def _make_ctm_config(chi: int) -> CTMConfig:
     )
 
 
+def _compute_e_p2_split(state, cg_gates, chi: int, max_iter: int = 30) -> float:
+    """Forward-only P2 probe via split-CTM + ``compute_energy_cg_split``.
+
+    Builds the kagome supersite, drives ``ctm_split_tensor`` to convergence,
+    and evaluates the CG energy through the split-aware RDM dispatcher.
+    Stays at the ``chi^2 * D^4 * d`` peak instead of the std path's
+    ``chi^2 * D^6`` (matters at ``D >= 6`` where ``chi = 2 D^2`` makes the
+    std-path projector SVD allocate >100 GB on a 256 GB box).
+    """
+    import jax.numpy as jnp_local
+
+    from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor
+    from tenax.algorithms.coarse_grain import compute_energy_cg_split
+    from tenax.algorithms.pess import pess_to_kagome_supersite
+    from tenax.algorithms.pess_optimize import _make_supersite_indices
+    from tenax.core.tensor import DenseTensor
+
+    A_super = pess_to_kagome_supersite(
+        state.R_a, state.R_b, state.R_c, state.T_u, state.lambdas
+    )
+    A_super = A_super / (jnp_local.linalg.norm(A_super) + 1e-12)
+    D_super = A_super.shape[0]
+    d_eff = int(cg_gates.h_intra.shape[0])
+    indices = _make_supersite_indices(D_super, d_eff)
+    A_tensor = DenseTensor(A_super, indices)
+
+    env = ctm_split_tensor(A_tensor, chi=chi, max_iter=max_iter, chi_I=chi)
+    return float(compute_energy_cg_split(A_tensor, env, cg_gates, d_eff).real)
+
+
 def run_one(
-    D: int, seed: int = 0, verbose: bool = False, skip_p2: bool = False
+    D: int,
+    seed: int = 0,
+    verbose: bool = False,
+    skip_p2: bool = False,
+    use_split_ctm: bool = False,
 ) -> dict:
     H = kagome_triangle_xxz_hamiltonian(delta=DELTA, d=D_PHYS)
     cg_gates = kagome_xxz_pess_cg_gates(delta=DELTA, d=D_PHYS)
@@ -97,11 +131,27 @@ def run_one(
     )
 
     chi = 2 * D * D
+    p2_path: str | None = None
     if skip_p2:
         e_p2: float | None = None
         t_p2 = 0.0
         print("  [P2 skipped]", flush=True)
+    elif use_split_ctm:
+        p2_path = "split-ctm"
+        print(
+            f"  [P2 split-CTM start] χ={chi} RSS={_peak_rss_gb():.2f} GB",
+            flush=True,
+        )
+        t_p2 = time.perf_counter()
+        e_p2 = _compute_e_p2_split(state, cg_gates, chi=chi)
+        t_p2 = time.perf_counter() - t_p2
+        print(
+            f"  [P2 split-CTM done] t={t_p2:.1f}s e_p2={e_p2:.6f} "
+            f"RSS={_peak_rss_gb():.2f} GB",
+            flush=True,
+        )
     else:
+        p2_path = "std-ctm"
         config = _make_ctm_config(chi=chi)
         loss_fn = build_pess_loss(cg_gates, config)
         print(f"  [P2 start] χ={chi} RSS={_peak_rss_gb():.2f} GB", flush=True)
@@ -122,6 +172,7 @@ def run_one(
         "su_schedule": [list(s) for s in SU_SCHEDULE],
         "e_p1_husimi": e_p1,
         "e_p2_ctm": e_p2,
+        "p2_path": p2_path,
         "liao2017_target": target,
         "delta_p1_target": (e_p1 - target) if target is not None else None,
         "delta_p2_target": (
@@ -173,7 +224,14 @@ def main() -> None:
         "--skip-p2",
         action="store_true",
         help="Skip the Convention-C + CTM probe (P2). Useful at D≥6 where "
-        "the χ=2D² CTM projector SVD allocates >100 GB.",
+        "the std-CTM projector SVD allocates >100 GB at χ=2D².",
+    )
+    p.add_argument(
+        "--use-split-ctm",
+        action="store_true",
+        help="Run P2 via the split-aware CTM forward + compute_energy_cg_split "
+        "(peak ≈ χ²·D⁴·d) instead of the std AD path (peak ≈ χ²·D⁶). "
+        "Forward-only — no AD, no implicit-CTM. Lets D≥6 fit on a 32 GB box.",
     )
     args = p.parse_args()
 
@@ -185,7 +243,13 @@ def main() -> None:
     results = []
     for D in args.D:
         print(f"\n=== D = {D} ===", flush=True)
-        record = run_one(D=D, seed=args.seed, verbose=True, skip_p2=args.skip_p2)
+        record = run_one(
+            D=D,
+            seed=args.seed,
+            verbose=True,
+            skip_p2=args.skip_p2,
+            use_split_ctm=args.use_split_ctm,
+        )
         results.append(record)
 
     payload = {
