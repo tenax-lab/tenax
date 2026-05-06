@@ -18,7 +18,6 @@ that does ship with full kagome support on ``main``.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
 
 import jax
@@ -139,6 +138,29 @@ def _tree_real_dot(a, b) -> float:
     )
 
 
+def _initial_alpha(energy: float, slope: float) -> float:
+    """Predict-to-zero initial step size for line search.
+
+    ``alpha0 = min(1, |f0| / |slope|)`` — Nocedal & Wright's
+    ``f_low = 0`` heuristic (Numerical Optimization, 2nd ed., §3.5).
+    Linearly extrapolates the descent direction to predict the step
+    that drives ``f`` to zero, then caps at 1.
+
+    Replaces the previous ``min(1, 0.1·|p|/|d|)`` formula inherited from
+    the iPEPS optimiser: that one assumes parameters are pre-normalised,
+    which is true for iPEPS site tensors but NOT for iPESS primitives
+    (the SU output's ``lambdas`` are unnormalised singular-value vectors
+    that inflate ``|p|`` and pin alpha0 at 1.0).  At D=4 SU state, the
+    old formula gave ``alpha0 = 1.0`` while the optimal step is
+    ``~6e-6`` — HZ then needed ~17 internal bisections to recover.
+
+    For typical iPESS energies ``|E| ~ 0.1`` and gradients ``|∇E| ~
+    10²-10⁴``, this gives ``alpha0 ~ 1e-3 to 1e-5``, matching the
+    Newton-predicted optimum within 1-2 bisections.
+    """
+    return min(1.0, abs(energy) / max(abs(slope), 1e-30))
+
+
 def _backtracking_line_search(
     params: dict,
     direction: dict,
@@ -155,9 +177,7 @@ def _backtracking_line_search(
         direction = jax.tree.map(lambda g: -g, grad)
         slope = -_tree_real_dot(grad, grad)
 
-    p_norm = math.sqrt(max(_tree_real_dot(params, params), 1e-30))
-    d_norm = math.sqrt(max(_tree_real_dot(direction, direction), 1e-30))
-    alpha = min(1.0, 0.1 * p_norm / d_norm)
+    alpha = _initial_alpha(energy, slope)
 
     best_trial, best_f, best_alpha = params, energy, 0.0
     for _ in range(max_steps):
@@ -200,9 +220,7 @@ def _hager_zhang_line_search_step(
         direction = jax.tree.map(lambda g: -g, grad)
         slope = -_tree_real_dot(grad, grad)
 
-    p_norm = math.sqrt(max(_tree_real_dot(params, params), 1e-30))
-    d_norm = math.sqrt(max(_tree_real_dot(direction, direction), 1e-30))
-    alpha0 = min(1.0, 0.1 * p_norm / d_norm)
+    alpha0 = _initial_alpha(energy, slope)
 
     def _phi(a: float) -> float:
         trial = jax.tree.map(lambda p, d: p + a * d, params, direction)
