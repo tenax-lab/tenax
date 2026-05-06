@@ -1,0 +1,12 @@
+{
+  "D": 4,
+  "chi": 16,
+  "max_iter": 30,
+  "seed": 0,
+  "e_multisite_su": -0.21251653657021816,
+  "e_multisite_ad": -0.444764370577232,
+  "liao_asymptotic": -0.43752,
+  "delta_to_liao": -0.007244370577231984,
+  "wall_seconds_su": 5.359992193989456,
+  "wall_seconds_ad": 381.90926934964955
+}

@@ -18,7 +18,6 @@ that does ship with full kagome support on ``main``.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
 
 import jax
@@ -27,17 +26,27 @@ import numpy as np
 
 from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+from tenax.algorithms._pess_multisite_energy import (
+    compute_energy_pess_3site_multisite,
+)
 from tenax.algorithms.coarse_grain import CGGates, compute_energy_cg
 from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.algorithms.pess import (
     IPESSState,
+    pess_to_kagome_3site_multisite,
     pess_to_kagome_supersite,
 )
 from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.lattice import kagome
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
 
-__all__ = ["build_pess_loss", "optimize_pess_ad"]
+__all__ = [
+    "build_pess_loss",
+    "build_pess_loss_3site_multisite",
+    "optimize_pess_3site_multisite_ad",
+    "optimize_pess_ad",
+]
 
 
 def _make_supersite_indices(D: int, d_eff: int) -> tuple[TensorIndex, ...]:
@@ -129,6 +138,29 @@ def _tree_real_dot(a, b) -> float:
     )
 
 
+def _initial_alpha(energy: float, slope: float) -> float:
+    """Predict-to-zero initial step size for line search.
+
+    ``alpha0 = min(1, |f0| / |slope|)`` — Nocedal & Wright's
+    ``f_low = 0`` heuristic (Numerical Optimization, 2nd ed., §3.5).
+    Linearly extrapolates the descent direction to predict the step
+    that drives ``f`` to zero, then caps at 1.
+
+    Replaces the previous ``min(1, 0.1·|p|/|d|)`` formula inherited from
+    the iPEPS optimiser: that one assumes parameters are pre-normalised,
+    which is true for iPEPS site tensors but NOT for iPESS primitives
+    (the SU output's ``lambdas`` are unnormalised singular-value vectors
+    that inflate ``|p|`` and pin alpha0 at 1.0).  At D=4 SU state, the
+    old formula gave ``alpha0 = 1.0`` while the optimal step is
+    ``~6e-6`` — HZ then needed ~17 internal bisections to recover.
+
+    For typical iPESS energies ``|E| ~ 0.1`` and gradients ``|∇E| ~
+    10²-10⁴``, this gives ``alpha0 ~ 1e-3 to 1e-5``, matching the
+    Newton-predicted optimum within 1-2 bisections.
+    """
+    return min(1.0, abs(energy) / max(abs(slope), 1e-30))
+
+
 def _backtracking_line_search(
     params: dict,
     direction: dict,
@@ -145,9 +177,7 @@ def _backtracking_line_search(
         direction = jax.tree.map(lambda g: -g, grad)
         slope = -_tree_real_dot(grad, grad)
 
-    p_norm = math.sqrt(max(_tree_real_dot(params, params), 1e-30))
-    d_norm = math.sqrt(max(_tree_real_dot(direction, direction), 1e-30))
-    alpha = min(1.0, 0.1 * p_norm / d_norm)
+    alpha = _initial_alpha(energy, slope)
 
     best_trial, best_f, best_alpha = params, energy, 0.0
     for _ in range(max_steps):
@@ -162,6 +192,88 @@ def _backtracking_line_search(
     return best_trial, best_f, best_alpha
 
 
+def _hager_zhang_line_search_step(
+    params: dict,
+    direction: dict,
+    grad: dict,
+    energy: float,
+    loss_fn: Callable[[dict], jnp.ndarray],
+    grad_fn: Callable[[dict], tuple[jnp.ndarray, dict]],
+) -> tuple[dict, float, float]:
+    """Hager-Zhang line search on the L-BFGS descent direction.
+
+    Mirrors the iPEPS optimizer's HZ wiring (see
+    :mod:`tenax.algorithms.ipeps_optimize`).  Hager-Zhang enforces
+    approximate Wolfe conditions (Hager & Zhang, SIAM J. Optim. 16(1),
+    2005) — both sufficient decrease *and* the curvature condition —
+    which keeps the L-BFGS Hessian approximation positive-definite on
+    plateau regions where pure Armijo backtracking accumulates degenerate
+    ``(s_k, y_k)`` pairs and eventually stalls.
+
+    Returns ``(new_params, new_energy, alpha)``.  ``alpha == 0.0`` means
+    the line search produced no improvement (caller should break).
+    """
+    from tenax.algorithms._line_search import hager_zhang_line_search
+
+    slope = _tree_real_dot(grad, direction)
+    if slope >= 0.0:
+        direction = jax.tree.map(lambda g: -g, grad)
+        slope = -_tree_real_dot(grad, grad)
+
+    alpha0 = _initial_alpha(energy, slope)
+
+    def _phi(a: float) -> float:
+        trial = jax.tree.map(lambda p, d: p + a * d, params, direction)
+        return float(loss_fn(trial))
+
+    def _dphi(a: float) -> float:
+        trial = jax.tree.map(lambda p, d: p + a * d, params, direction)
+        _, g = grad_fn(trial)
+        return _tree_real_dot(g, direction)
+
+    alpha, f_alpha, _ = hager_zhang_line_search(
+        _phi,
+        _dphi,
+        energy,
+        slope,
+        alpha_init=alpha0,
+        rho=1.5,
+        max_step=2.0 * alpha0,
+        energy_bound=max(2.0, 2.0 * abs(energy)),
+    )
+    if alpha == 0.0 or f_alpha >= energy:
+        return params, energy, 0.0
+    new_params = jax.tree.map(lambda p, d: p + alpha * d, params, direction)
+    return new_params, f_alpha, alpha
+
+
+def _run_line_search(
+    method: str,
+    params: dict,
+    direction: dict,
+    grad: dict,
+    energy: float,
+    loss_fn: Callable[[dict], jnp.ndarray],
+    grad_fn: Callable[[dict], tuple[jnp.ndarray, dict]],
+) -> tuple[dict, float, float]:
+    """Dispatch to the requested line search.
+
+    Args:
+        method: ``"hager_zhang"`` (default — enforces approximate Wolfe
+            conditions, recommended for L-BFGS) or ``"armijo"`` (legacy
+            backtracker, kept for opt-out and reproducibility).
+    """
+    if method == "hager_zhang":
+        return _hager_zhang_line_search_step(
+            params, direction, grad, energy, loss_fn, grad_fn
+        )
+    if method == "armijo":
+        return _backtracking_line_search(params, direction, grad, energy, loss_fn)
+    raise ValueError(
+        f"Unknown line_search_method={method!r}. Expected 'hager_zhang' or 'armijo'."
+    )
+
+
 def optimize_pess_ad(
     initial_state: IPESSState,
     cg_gates: CGGates,
@@ -169,6 +281,7 @@ def optimize_pess_ad(
     *,
     max_iter: int = 50,
     verbose: bool = False,
+    line_search_method: str = "hager_zhang",
 ) -> tuple[IPESSState, float]:
     """L-BFGS optimization of kagome iPESS via the CG-iPEPS square path.
 
@@ -179,10 +292,9 @@ def optimize_pess_ad(
     spanned by the down-bond ``lambdas[3:6]`` themselves.
 
     Inner step uses ``optax.scale_by_lbfgs`` (memory 10) for the
-    quasi-Newton direction; line search is a Python-level Armijo
-    backtracker since the square CTM forward pass uses Python control
-    flow that can't be ``jit``-traced through ``optax.lbfgs``'s bundled
-    zoom search.
+    quasi-Newton direction; line search is a Python-level routine since
+    the square CTM forward pass uses Python control flow that can't be
+    ``jit``-traced through ``optax.lbfgs``'s bundled zoom search.
 
     Args:
         initial_state: Starting :class:`IPESSState`. Typically the output
@@ -194,6 +306,9 @@ def optimize_pess_ad(
         config: CTM settings for the inner forward+backward sweeps.
         max_iter: Maximum L-BFGS outer iterations.
         verbose: Print energy at each step.
+        line_search_method: ``"hager_zhang"`` (default — approximate
+            Wolfe conditions, recommended for L-BFGS) or ``"armijo"``
+            (legacy backtracker; kept for opt-out and reproducibility).
 
     Returns:
         ``(optimized_state, final_energy_per_site)``.
@@ -236,12 +351,232 @@ def optimize_pess_ad(
         e_val, grads = grad_fn(params)
         last_energy = float(e_val)
         direction, opt_state = optimizer.update(grads, opt_state, params)
-        params, last_energy, alpha = _backtracking_line_search(
-            params, direction, grads, last_energy, loss
+        params, last_energy, alpha = _run_line_search(
+            line_search_method, params, direction, grads, last_energy, loss, grad_fn
         )
         if verbose:
             print(
                 f"[optimize_pess_ad] step {step + 1}/{max_iter}: "
+                f"e = {last_energy:.10f}  alpha = {alpha:.3e}",
+                flush=True,
+            )
+        if alpha == 0.0:
+            break
+
+    return _params_to_state(params), last_energy
+
+
+# ---------------------------------------------------------------------------
+# 3-site multisite AD path
+# ---------------------------------------------------------------------------
+#
+# Mirrors the supersite path above but routes through the 3-site multisite
+# encoding (:func:`tenax.algorithms.pess.pess_to_kagome_3site_multisite`) and
+# the per-bond energy iterator
+# (:func:`tenax.algorithms._pess_multisite_energy.compute_energy_pess_3site_multisite`,
+# the corrected "4 NN + 2 marginalised-3-site" formula).
+#
+# Differences from the supersite path:
+#   1. ``T_d`` is a real variational parameter (the multisite encoding uses
+#      it explicitly, unlike the CG path which freezes it bit-exact).
+#   2. Three site tensors per unit cell instead of one supersite — the CTM
+#      runs as a 3-site multisite using the kagome neighbour map.
+#   3. Energy peak intermediate is bounded by ``χ²·D⁶`` everywhere with no
+#      diagonal-RDM term (vs supersite's ``χ²·D⁶`` plus the diagonal at
+#      ``χ²·D⁴·d²·d_eff²``).
+
+# Static layout used by the multisite path: 3 sublattices placed in a 3-cell
+# strip so the multisite CTM's ``_sort_coords_for_direction`` (which indexes
+# coords as ``c[0]``/``c[1]``) operates on tuples.  Topology is governed by
+# the kagome neighbour map below, not by these labels.
+_MULTISITE_NAME_TO_COORD: dict[str, tuple[int, int]] = {
+    "u": (0, 0),
+    "v": (1, 0),
+    "w": (2, 0),
+}
+_MULTISITE_COORD_TO_NAME: dict[tuple[int, int], str] = {
+    c: n for n, c in _MULTISITE_NAME_TO_COORD.items()
+}
+_MULTISITE_LATTICE = kagome()
+_MULTISITE_COORD_NEIGHBORS: dict[tuple[int, int], dict[str, tuple[int, int]]] = {
+    _MULTISITE_NAME_TO_COORD[n]: {
+        direction: _MULTISITE_NAME_TO_COORD[
+            _MULTISITE_LATTICE.neighbor_map[n][direction]
+        ]
+        for direction in ("left", "right", "top", "bottom")
+    }
+    for n in _MULTISITE_LATTICE.sites
+}
+
+
+def _make_multisite_indices(D: int, d: int) -> tuple[TensorIndex, ...]:
+    """Square-iPEPS rank-5 ``(u, d, l, r, phys)`` index tuple for a multisite
+    site tensor.  Trivial U(1) charges (single sector at charge 0); flows
+    match the convention used by ``_ctm_tensor_energy``."""
+    sym = U1Symmetry()
+    virt = np.zeros(D, dtype=np.int32)
+    phys = np.zeros(d, dtype=np.int32)
+    return (
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(sym, phys.copy(), FlowDirection.IN, label="phys"),
+    )
+
+
+def build_pess_loss_3site_multisite(
+    bond_gates: dict,
+    config: CTMConfig,
+) -> Callable[[IPESSState], jnp.ndarray]:
+    """Build the AD loss closure for kagome iPESS via the 3-site multisite path.
+
+    Args:
+        bond_gates: Per-bond Hamiltonian dict from
+            :func:`tenax.algorithms._pess_multisite_energy.kagome_3site_bond_gates`.
+            6 entries keyed by ``frozenset({(name, dir), (nb_name, rev_dir)})``.
+        config: CTM convergence settings (``chi``, ``max_iter``, ``conv_tol``,
+            projector method, gauge, GMRES backward).
+
+    Returns:
+        ``loss_fn(state: IPESSState) -> jnp.ndarray`` returning real scalar
+        energy per microscopic kagome site.  Differentiable via ``jax.grad``
+        through the implicit-AD multisite CTM; ``T_d`` participates in the
+        gradient.
+    """
+    # Infer physical dimension from any bond gate (each is shape (d,d,d,d)).
+    d = int(next(iter(bond_gates.values())).shape[0])
+
+    def _energy_fn(site_tensors_coord, envs_coord, _gate):
+        site_tensors_name = {
+            _MULTISITE_COORD_TO_NAME[c]: A for c, A in site_tensors_coord.items()
+        }
+        envs_name = {_MULTISITE_COORD_TO_NAME[c]: e for c, e in envs_coord.items()}
+        return compute_energy_pess_3site_multisite(
+            site_tensors_name,
+            envs_name,
+            _MULTISITE_LATTICE.neighbor_map,
+            bond_gates,
+            d=d,
+        )
+
+    def loss_fn(state: IPESSState) -> jnp.ndarray:
+        sites = pess_to_kagome_3site_multisite(
+            state.R_a,
+            state.R_b,
+            state.R_c,
+            state.T_u,
+            state.T_d,
+            state.lambdas,
+        )
+        D = sites["u"].shape[0]
+        indices = _make_multisite_indices(D, d)
+        # Per-site projective normalisation (same rationale as the supersite
+        # path's single-tensor normalisation).  Each S_x scaling is absorbed
+        # into a global wavefunction prefactor that drops out of the energy
+        # ratio E = <ψ|H|ψ>/<ψ|ψ>; per-site bounding keeps CTM numerics
+        # stable across random / SU initial conditions.
+        site_tensors = {}
+        for name, A in sites.items():
+            A_norm = A / (jnp.linalg.norm(A) + 1e-12)
+            site_tensors[_MULTISITE_NAME_TO_COORD[name]] = DenseTensor(A_norm, indices)
+
+        return ctm_energy_implicit(
+            site_tensors,
+            _MULTISITE_COORD_NEIGHBORS,
+            gate=None,  # ignored; energy_fn takes over
+            chi=config.chi,
+            max_iter=config.max_iter,
+            conv_tol=config.conv_tol,
+            projector_method=config.projector_method,
+            renormalize=config.renormalize,
+            forward_gauge=config.forward_gauge,
+            conv_method=config.ctm_conv_method,
+            min_iter=config.min_iter,
+            chi_ramp=config.chi_ramp,
+            energy_fn=_energy_fn,
+            gmres_tol=config.gmres_tol,
+            gmres_maxiter=config.gmres_maxiter,
+            gmres_restart=config.gmres_restart,
+            arnoldi_precheck=False,
+        )
+
+    return loss_fn
+
+
+def optimize_pess_3site_multisite_ad(
+    initial_state: IPESSState,
+    bond_gates: dict,
+    config: CTMConfig,
+    *,
+    max_iter: int = 50,
+    verbose: bool = False,
+    line_search_method: str = "hager_zhang",
+) -> tuple[IPESSState, float]:
+    """L-BFGS optimisation of kagome iPESS via the 3-site multisite path.
+
+    Variational parameters: all 5 iPESS primitives plus the lambdas —
+    ``(R_a, R_b, R_c, T_u, T_d, lambdas)``.  ``T_d`` is a real variable
+    here (in contrast to :func:`optimize_pess_ad`, which freezes it).
+
+    Args:
+        initial_state: Starting :class:`IPESSState`.
+        bond_gates: Per-bond gate dict from
+            :func:`tenax.algorithms._pess_multisite_energy.kagome_3site_bond_gates`.
+        config: CTM settings for the inner forward+backward sweeps.
+        max_iter: Maximum L-BFGS outer iterations.
+        verbose: Print energy at each step.
+        line_search_method: ``"hager_zhang"`` (default — approximate
+            Wolfe conditions, recommended for L-BFGS) or ``"armijo"``
+            (legacy backtracker; kept for opt-out and reproducibility).
+
+    Returns:
+        ``(optimized_state, final_energy_per_site)``.
+    """
+    import optax
+
+    loss_fn_state = build_pess_loss_3site_multisite(bond_gates, config)
+
+    params = {
+        "R_a": initial_state.R_a,
+        "R_b": initial_state.R_b,
+        "R_c": initial_state.R_c,
+        "T_u": initial_state.T_u,
+        "T_d": initial_state.T_d,
+        "lambdas": tuple(initial_state.lambdas),
+    }
+
+    def _params_to_state(p: dict) -> IPESSState:
+        return IPESSState(
+            R_a=p["R_a"],
+            R_b=p["R_b"],
+            R_c=p["R_c"],
+            T_u=p["T_u"],
+            T_d=p["T_d"],
+            lambdas=tuple(p["lambdas"]),
+        )
+
+    def loss(p: dict) -> jnp.ndarray:
+        return loss_fn_state(_params_to_state(p))
+
+    optimizer = optax.chain(
+        optax.scale_by_lbfgs(memory_size=10),
+        optax.scale(-1.0),
+    )
+    opt_state = optimizer.init(params)
+    grad_fn = jax.value_and_grad(loss)
+
+    last_energy = float(loss(params))
+    for step in range(max_iter):
+        e_val, grads = grad_fn(params)
+        last_energy = float(e_val)
+        direction, opt_state = optimizer.update(grads, opt_state, params)
+        params, last_energy, alpha = _run_line_search(
+            line_search_method, params, direction, grads, last_energy, loss, grad_fn
+        )
+        if verbose:
+            print(
+                f"[optimize_pess_3site_multisite_ad] step {step + 1}/{max_iter}: "
                 f"e = {last_energy:.10f}  alpha = {alpha:.3e}",
                 flush=True,
             )

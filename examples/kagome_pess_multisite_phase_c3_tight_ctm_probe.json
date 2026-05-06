@@ -1,0 +1,19 @@
+{
+  "D": 4,
+  "chi": 16,
+  "ad_iter": 30,
+  "seed": 0,
+  "loose_max_iter": 30,
+  "loose_conv_tol": 1e-07,
+  "tight_max_iter": 300,
+  "tight_conv_tol": 1e-12,
+  "e_su_loose": -0.21251653657021816,
+  "e_ad_loose": -0.444764370577232,
+  "e_ad_tight": -0.20136178083191217,
+  "delta_loose_to_tight": 0.24340258974531984,
+  "liao_asymptotic": -0.43752,
+  "delta_tight_to_liao": 0.23615821916808785,
+  "wall_seconds_su": 4.066482163965702,
+  "wall_seconds_ad": 384.3063515732065,
+  "wall_seconds_tight": 5.6583608984947205
+}
