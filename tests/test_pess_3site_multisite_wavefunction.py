@@ -157,3 +157,174 @@ def test_3site_multisite_wavefunction_matches_ipess_on_1cell_torus(D):
             f"state (plan stop-and-ask checkpoint #2)."
         ),
     )
+
+
+def _torus_brute_force_kagome_energy(psi: jnp.ndarray, H_pair: jnp.ndarray) -> float:
+    """Brute-force kagome XXZ energy per microscopic site on the 1-cell torus.
+
+    The 1-cell PBC kagome torus has 3 sites (``u, v, w``) and 6 bonds: 3
+    up-triangle (``u-v, u-w, v-w``) plus 3 down-triangle bonds on the same
+    pairs.  Each pair therefore appears twice, so
+
+        ⟨H_kagome⟩_torus = 2 (⟨H_uv⟩ + ⟨H_uw⟩ + ⟨H_vw⟩) ,
+
+    and per microscopic site = ⟨H_kagome⟩_torus / 3.
+
+    Each ⟨H_xy⟩ is computed from the 2-site marginal of |ψ⟩⟨ψ|, contracted
+    against ``H_pair`` in the ``(s1_ket, s2_ket, s1_bra, s2_bra)``
+    convention used by :func:`tenax.algorithms._ctm_tensor_energy._rdm2x1_tensor_2site`.
+    """
+    psi_c = psi.conj()
+    norm_sq = jnp.real(jnp.einsum("uvw,uvw->", psi_c, psi))
+    rho_uv = jnp.einsum("ijw,klw->ijkl", psi, psi_c) / norm_sq
+    rho_uw = jnp.einsum("ivj,kvl->ijkl", psi, psi_c) / norm_sq
+    rho_vw = jnp.einsum("uij,ukl->ijkl", psi, psi_c) / norm_sq
+    e_uv = jnp.einsum("ijkl,ijkl->", rho_uv, H_pair).real
+    e_uw = jnp.einsum("ijkl,ijkl->", rho_uw, H_pair).real
+    e_vw = jnp.einsum("ijkl,ijkl->", rho_vw, H_pair).real
+    return float(2.0 * (e_uv + e_uw + e_vw) / 3.0)
+
+
+def _torus_formula_energy(
+    psi: jnp.ndarray,
+    bond_gates: dict,
+    neighbors: dict,
+    d: int,
+) -> float:
+    """Wavefunction-direct version of :func:`compute_energy_pess_3site_multisite`.
+
+    Mirrors the dispatcher logic of
+    :func:`tenax.algorithms._pess_multisite_energy.compute_energy_pess_3site_multisite`
+    — same NN visits ``("u","right"), ("u","bottom"), ("w","right"),
+    ("w","bottom")`` plus the 2 marginalised b-c bonds keyed by
+    ``frozenset({("v","right"), ("w","left")})`` (up-triangle, mediated by
+    ``T_u``) and ``frozenset({("v","bottom"), ("w","top")})`` (down-triangle,
+    mediated by ``T_d``) — but builds every RDM by tracing |ψ_torus⟩
+    directly rather than from a CTM environment.
+
+    A correct bond decomposition has
+
+        Σ_{NN bonds} ⟨H_pair · ρ_pair⟩
+        + Σ_{marginalised bonds} ⟨H_pair · ρ_(vw)⟩
+        = ⟨H_kagome⟩_torus
+
+    on the 1-cell PBC kagome torus, divided by ``len(neighbors)`` for the
+    per-microscopic-site normalisation.
+    """
+    psi_c = psi.conj()
+    norm_sq = jnp.real(jnp.einsum("uvw,uvw->", psi_c, psi))
+
+    # 2-site marginals from |ψ_torus⟩ in the same (s_A_ket, s_B_ket, s_A_bra,
+    # s_B_bra) convention as :func:`_rdm2x1_tensor_2site` /
+    # :func:`_rdm1x2_tensor_2site`.  ψ has shape ``(p_u, p_v, p_w)``.
+    rho_uv = jnp.einsum("ijw,klw->ijkl", psi, psi_c) / norm_sq
+    rho_wu = jnp.einsum("jvi,lvk->ijkl", psi, psi_c) / norm_sq
+    rho_vw = jnp.einsum("uij,ukl->ijkl", psi, psi_c) / norm_sq
+
+    def gate(bond_id):
+        H = bond_gates[bond_id]
+        return jnp.asarray(H).reshape(d, d, d, d)
+
+    e = jnp.array(0.0)
+    nn_visits = (
+        ("u", "right"),  # u.right ↔ v.left  (up-triangle a-b)
+        ("u", "bottom"),  # u.bottom ↔ v.top  (down-triangle a-b)
+        ("w", "right"),  # w.right ↔ u.left  (up-triangle a-c, iterated from w)
+        ("w", "bottom"),  # w.bottom ↔ u.top  (down-triangle a-c, iterated from w)
+    )
+    for name, direction in nn_visits:
+        nb = neighbors[name][direction]
+        rev = "left" if direction == "right" else "top"
+        bond_id = frozenset([(name, direction), (nb, rev)])
+        rdm = rho_uv if name == "u" else rho_wu
+        e = e + jnp.einsum("ijkl,ijkl->", rdm, gate(bond_id))
+
+    # 2 marginalised-3-site b-c bonds (row+col share ρ_(vw) on the 1-cell
+    # torus because the marginal over u doesn't depend on row/col direction).
+    e = e + jnp.einsum(
+        "ijkl,ijkl->",
+        rho_vw,
+        gate(frozenset({("v", "right"), ("w", "left")})),
+    )
+    e = e + jnp.einsum(
+        "ijkl,ijkl->",
+        rho_vw,
+        gate(frozenset({("v", "bottom"), ("w", "top")})),
+    )
+
+    return float(e.real / len(neighbors))
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("D", [1, 2, 3])
+def test_pess_3site_multisite_energy_formula_matches_torus_brute_force(D):
+    """Energy formula bond-accounting structural-correctness gate (Task B.4).
+
+    Replays :func:`compute_energy_pess_3site_multisite`'s "4 NN + 2
+    marginalised-3-site" bond decomposition with wavefunction-direct RDMs
+    on the 1-cell PBC kagome torus and asserts equality with the
+    brute-force ``⟨H_kagome⟩``.  CTM-free, AD-free, χ-free.
+
+    What this catches (relative to the buggy 6-NN sum at commit ``bd27d8c``,
+    see ``project_kagome_3site_energy_bug.md``):
+
+    - **Wrong bond inclusion**: a regression that visits the 2 dim-1 v-w
+      NN bonds as physical kagome bonds (instead of routing them through
+      the marginalised-3-site helpers) would land on a different RDM at
+      those bonds and the wf-direct sum would no longer reproduce the
+      brute-force torus energy.
+    - Wrong site pairing in any bond.
+    - Wrong gate orientation / Hermiticity convention.
+    - Missing factor of 2 (up-triangle + down-triangle).
+    - Wrong ``1/n_sites`` normalisation.
+
+    What this deliberately does NOT exercise (covered elsewhere):
+
+    - The CTM-based RDM helpers
+      (:func:`_rdm2x1_tensor_2site`, :func:`_rdm1x2_tensor_2site`,
+      :func:`_rdm_3site_marginal_vw_row`,
+      :func:`_rdm_3site_marginal_vw_col`) — those share contraction
+      patterns with already-tested kin in ``_ctm_tensor_energy.py``.
+    - End-to-end CTM correctness — tracked via Phase C.3 stop-and-ask
+      checkpoint #5: the AD-optimised energy must satisfy
+      ``E_multisite ≥ −0.43752`` (Liao 2017 asymptotic ground state).
+    """
+    from tenax.algorithms._pess_multisite_energy import (
+        kagome_3site_bond_gates,
+        kagome_xxz_pair_hamiltonian,
+    )
+    from tenax.core.lattice import kagome
+
+    d = 2
+    delta = 1.0
+    state = IPESSState.random(D=D, d=d, key=jax.random.PRNGKey(0))
+    sites = pess_to_kagome_3site_multisite(
+        state.R_a,
+        state.R_b,
+        state.R_c,
+        state.T_u,
+        state.T_d,
+        state.lambdas,
+    )
+
+    psi = _contract_multisite_3cycle_pbc(sites)
+    H_pair = jnp.asarray(kagome_xxz_pair_hamiltonian(delta, d))
+    e_brute = _torus_brute_force_kagome_energy(psi, H_pair)
+
+    bond_gates = kagome_3site_bond_gates(delta=delta, d=d)
+    e_formula = _torus_formula_energy(psi, bond_gates, kagome().neighbor_map, d=d)
+
+    np.testing.assert_allclose(
+        e_formula,
+        e_brute,
+        atol=1e-12,
+        err_msg=(
+            f"D={D}: formula's wf-direct E={e_formula:.12f} disagrees with "
+            f"brute-force E={e_brute:.12f} "
+            f"(diff={e_formula - e_brute:.3e}).  "
+            f"compute_energy_pess_3site_multisite's bond decomposition "
+            f"(4 NN + 2 marginalised-3-site) is structurally incorrect; "
+            f"see project_kagome_3site_energy_bug.md and plan "
+            f"stop-and-ask checkpoint #3."
+        ),
+    )
