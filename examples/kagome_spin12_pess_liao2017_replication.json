@@ -1,7 +1,7 @@
 {
   "reference": "Liao et al., PRL 118, 137202 (2017), arXiv:1610.04727",
   "asymptotic_target_E0": -0.43752,
-  "notes": "P2 (Convention-C + CTM) was run only at D=4 (chi=32, ~34 GB peak RSS). At D>=6 the chi=2D^2 CTM projector SVD allocates >100 GB and OOM-kills a 256 GB box; runs above D=4 use --skip-p2. The D=4 P2 number is sufficient to establish the Convention-C bias for the audit; D-scaling of P2 was not measured.",
+  "notes": "P2 (Convention-C + CTM) was run only at D=4 (chi=32, ~34 GB peak RSS) on the original 2026-05-04 sweep. At D>=6 the chi=2D^2 CTM projector SVD allocates >100 GB and OOM-kills a 256 GB box; runs above D=4 use --skip-p2. The D=4 P2 number is sufficient to establish the Convention-C bias for the audit; D-scaling of P2 was not measured. 2026-05-05 update: extended the SU sweep to D=12 and D=14. Husimi-probe (P1) energies saturate around -0.4275..-0.4300 starting at D~=8; D=12/14 do NOT improve over D=10 with the current SU schedule [(0.1,200),(0.01,200),(0.001,100)] -- the (0.001,100) tail is likely too short to converge SU at large D, so the +0.010-0.011 gap at D>=12 should be read as 'SU not converged here' rather than 'Husimi probe ceiling'.",
   "results": [
     {
       "D": 4,
@@ -57,6 +57,34 @@
       "delta_p2_target": null,
       "t_su_seconds": 5.017281210981309,
       "t_p1_seconds": 0.10440045315772295,
+      "t_p2_seconds": 0.0
+    },
+    {
+      "D": 12,
+      "chi": 288,
+      "seed": 0,
+      "su_schedule": [[0.1, 200], [0.01, 200], [0.001, 100]],
+      "e_p1_husimi": -0.42751965958203203,
+      "e_p2_ctm": null,
+      "liao2017_target": null,
+      "delta_p1_target": null,
+      "delta_p2_target": null,
+      "t_su_seconds": 33.54037883132696,
+      "t_p1_seconds": 0.2850807886570692,
+      "t_p2_seconds": 0.0
+    },
+    {
+      "D": 14,
+      "chi": 392,
+      "seed": 0,
+      "su_schedule": [[0.1, 200], [0.01, 200], [0.001, 100]],
+      "e_p1_husimi": -0.42799883545352885,
+      "e_p2_ctm": null,
+      "liao2017_target": null,
+      "delta_p1_target": null,
+      "delta_p2_target": null,
+      "t_su_seconds": 38.91079148836434,
+      "t_p1_seconds": 0.34667867608368397,
       "t_p2_seconds": 0.0
     }
   ]
