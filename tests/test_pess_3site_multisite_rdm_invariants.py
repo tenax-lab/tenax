@@ -363,3 +363,88 @@ def test_ctm_rdms_hermitian_psd_trace1_at_d2_chi16():
         if abs(tr - 1.0) > 1e-8:
             failures.append(f"{name}: |tr-1|={abs(tr - 1.0):.3e} > 1e-8")
     assert not failures, "Structural-invariants violations:\n  " + "\n  ".join(failures)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Phase C.3 blocker: marginalisation-consistency violated at D=2 χ=16 "
+        "by ‖Δ‖_F ≈ 8.878e-01 (post-trace-renormalisation). The two helpers "
+        "(`_rdm_3site_marginal_vw_row` and `_rdm2x1_tensor_2site` across the "
+        "v-w bond) consume the SAME multisite-CTM envs but produce wildly "
+        "different ρ_vw — magnitude indicates per-helper divergence (one of "
+        "the two helpers genuinely mishandles the dim-1 v-w iPEPS bond), not "
+        "merely an upstream-only environment construction inconsistency. "
+        "Raw traces are tr(ρ_A)=1.001, tr(ρ_B)≈1.000 (both close to 1 — "
+        "normalisation alone does not explain the gap). To be fixed in a "
+        "follow-up PR; this test is the regression gate."
+    ),
+)
+@pytest.mark.algorithm
+def test_marginalisation_consistency_at_d2_chi16():
+    """Gate #4: ρ_vw computed two ways from the SAME multisite-CTM envs must
+    agree to 1e-8 on the infinite lattice.
+
+    Path A: `_rdm_3site_marginal_vw_row` (1×3 horizontal block, marginalise u).
+    Path B: `_rdm2x1_tensor_2site(S_v, S_w, env_v, env_w)` directly across the
+            dim-1 v-w iPEPS bond (v.right = w in the kagome neighbour map).
+
+    Disagreement ⇒ either the envs feed the two helpers inconsistently
+    (env-construction bug) or one of the helpers handles the dim-1 v-w bond
+    incorrectly.
+    """
+    d = 2
+    H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=d)
+    state = IPESSState.random(D=2, d=d, key=jax.random.PRNGKey(0))
+    state = pess_simple_update(
+        state,
+        H,
+        dt_schedule=[(0.1, 100), (0.01, 100)],
+        D_max=2,
+    )
+
+    # Re-run CTM here so we control envs + RDM helpers explicitly.
+    sites = pess_to_kagome_3site_multisite(
+        state.R_a,
+        state.R_b,
+        state.R_c,
+        state.T_u,
+        state.T_d,
+        state.lambdas,
+    )
+    D = sites["u"].shape[0]
+    indices = _make_multisite_indices(D, d)
+    site_tensors_by_name = {
+        name: DenseTensor(A / (jnp.linalg.norm(A) + 1e-12), indices)
+        for name, A in sites.items()
+    }
+    envs_by_name = ctm_multisite(
+        site_tensors_by_name,
+        kagome(),
+        chi=16,
+        max_iter=100,
+        conv_tol=1e-9,
+    )
+    S_u = site_tensors_by_name["u"]
+    S_v = site_tensors_by_name["v"]
+    S_w = site_tensors_by_name["w"]
+    env_u = envs_by_name["u"]
+    env_v = envs_by_name["v"]
+    env_w = envs_by_name["w"]
+
+    # Path A: 3-site row-marginal.
+    rho_vw_A = _rdm_3site_marginal_vw_row(S_u, S_v, S_w, env_u, env_v, env_w)
+    # Path B: direct 2-site h-bond across the dim-1 v-w iPEPS bond.
+    rho_vw_B = _rdm2x1_tensor_2site(S_v, S_w, env_v, env_w)
+    # Renormalise both to trace 1 (in case env-only normalisation differs).
+    rho_vw_A_m = jnp.reshape(rho_vw_A, (d * d, d * d))
+    rho_vw_B_m = jnp.reshape(rho_vw_B, (d * d, d * d))
+    rho_vw_A_m = rho_vw_A_m / jnp.trace(rho_vw_A_m)
+    rho_vw_B_m = rho_vw_B_m / jnp.trace(rho_vw_B_m)
+    diff = float(jnp.linalg.norm(rho_vw_A_m - rho_vw_B_m))
+    assert diff < 1e-8, (
+        f"Marginalisation-consistency FAIL at D=2 χ=16: "
+        f"‖ρ_vw_3site_marginal − ρ_vw_2site_direct‖_F = {diff:.3e} > 1e-8. "
+        f"The multisite-CTM envs feed the two RDM paths inconsistently, "
+        f"or one of the helpers mishandles the dim-1 v-w iPEPS bond."
+    )
