@@ -188,27 +188,32 @@ def _svd_sector_backward(
     s_k = s[:k]
     V_k = Vh[:k, :].conj().T  # (n, k)
 
-    # Rank-aware: zero-sigma columns are not really kept. Mask U_k / V_k so
-    # the F-matrix, anti-Hermitian inner products, and perp-projectors all
-    # treat them as part of the discarded subspace (Moore-Penrose convention,
-    # YASTN proj_corners / variPEPS gauge_fixed_svd).
+    # Rank-aware F-matrix mask: zero F[i, j] where either sigma_i or sigma_j
+    # is below the rank threshold. The unregularized F entry for (sigma>0,
+    # sigma=0) pairs evaluates to ~1/sigma^2 — a gauge artifact that pumps
+    # arbitrary upstream cotangent components on the kept-but-zero columns
+    # of U/Vh into the gradient. Masking F drops those contributions while
+    # leaving the well-defined sigma>0 / sigma>0 entries unchanged.
+    #
+    # NOTE: we deliberately do NOT mask U_k, V_k, or proj_U_perp. Doing so
+    # would change the discarded-subspace projector for full-SVD on rank-
+    # deficient inputs (square unitary U has U @ U^T = I → proj_U_perp = 0
+    # natively; masking would make it nonzero and route upstream null-space
+    # dU components through 1/sigma_kept, producing a wrong answer that
+    # disagrees with finite-difference gradients).
     eps_rank = 1e-12 * jnp.maximum(s[0], 1e-30)
     keep_mask = (s_k > eps_rank).astype(s.dtype)  # (k,) -- 1.0 or 0.0
-    U_k_masked = U_k * keep_mask[None, :]
-    V_k_masked = V_k * keep_mask[None, :]
-    Vh_k_masked = V_k_masked.conj().T  # (k, n) -- rows zeroed where sigma=0
 
     # --- Lorentzian-regularized F-matrix ---
     s2 = s_k**2
     diff = s2[:, None] - s2[None, :]
     F = diff / (diff**2 + eps**2)
     F = F - jnp.diag(jnp.diag(F))
-    # Drop F entries where either sigma_i or sigma_j is zero.
     F = F * keep_mask[:, None] * keep_mask[None, :]
 
-    # Antisymmetric parts of projected cotangents (use masked U/V)
-    UtdU = U_k_masked.conj().T @ dU  # (k, k)
-    VtdV = V_k_masked.conj().T @ dVh.conj().T  # (k, k)
+    # Antisymmetric parts of projected cotangents
+    UtdU = U_k.conj().T @ dU  # (k, k)
+    VtdV = V_k.conj().T @ dVh.conj().T  # (k, k)
     UtdU_anti = 0.5 * (UtdU - UtdU.conj().T)
     VtdV_anti = 0.5 * (VtdV - VtdV.conj().T)
 
@@ -217,27 +222,28 @@ def _svd_sector_backward(
     s_safe = jnp.where(s_k > eps, s_k, 1.0)
     s_inv = jnp.where(s_k > eps, 1.0 / s_safe, 0.0)
 
-    # Projectors onto complements of the *true* kept subspace (sigma > 0 only).
-    proj_U_perp = jnp.eye(m) - U_k_masked @ U_k_masked.conj().T
-    proj_V_perp = jnp.eye(n) - V_k_masked @ V_k_masked.conj().T
+    # Projectors onto complements of kept subspaces (UNMASKED — see note above)
+    proj_U_perp = jnp.eye(m) - U_k @ U_k.conj().T
+    proj_V_perp = jnp.eye(n) - V_k @ V_k.conj().T
 
-    # Assemble gradient (Wan & Narayanan 2023 / Francuz et al.) with masked U/V.
+    # Assemble gradient (Wan & Narayanan 2023 / Francuz et al.):
+    Vh_k = Vh[:k, :]
     dM = jnp.zeros((m, n), dtype=U.dtype)
 
-    # 1. Diagonal part from ds (zero-sigma rows of Vh_k_masked zero contribution)
-    dM = dM + U_k_masked @ jnp.diag(ds) @ Vh_k_masked
+    # 1. Diagonal part from ds
+    dM = dM + U_k @ jnp.diag(ds) @ Vh_k
 
     # 2. Off-diagonal from dU (within kept subspace)
-    dM = dM + U_k_masked @ (F * UtdU_anti) @ jnp.diag(s_k) @ Vh_k_masked
+    dM = dM + U_k @ (F * UtdU_anti) @ jnp.diag(s_k) @ Vh_k
 
     # 3. Off-diagonal from dVh (within kept subspace)
-    dM = dM + U_k_masked @ jnp.diag(s_k) @ (F * VtdV_anti) @ Vh_k_masked
+    dM = dM + U_k @ jnp.diag(s_k) @ (F * VtdV_anti) @ Vh_k
 
     # 4. Truncation correction from dU (kept-truncated coupling)
-    dM = dM + proj_U_perp @ dU @ jnp.diag(s_inv) @ Vh_k_masked
+    dM = dM + proj_U_perp @ dU @ jnp.diag(s_inv) @ Vh_k
 
     # 5. Truncation correction from dVh (kept-truncated coupling)
-    dM = dM + U_k_masked @ jnp.diag(s_inv) @ dVh @ proj_V_perp
+    dM = dM + U_k @ jnp.diag(s_inv) @ dVh @ proj_V_perp
 
     return dM
 
