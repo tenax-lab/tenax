@@ -541,3 +541,18 @@ def test_ctm_tensor_move_2x2_one_step_other_directions(direction):
         f"direction={direction}: {C_attr} singular-value spectra disagree: "
         f"max abs diff = {err:.2e}"
     )
+
+
+def test_ctm_multisite_2x2_recipe_runs_to_convergence_on_uniform_state():
+    """ctm_multisite with recipe='2x2' converges to a stable env on a uniform
+    single-site lattice."""
+    D, chi, d = 2, 4, 2
+    A = _dense_tensor_5leg(D, d, seed=4)
+
+    from tenax.algorithms._ctm_tensor_convergence import ctm_multisite
+    from tenax.core.lattice import square
+
+    envs = ctm_multisite({"a": A}, square(), chi=chi, conv_tol=1e-7, recipe="2x2")
+    # Sanity: corners are valid tensors; no NaN.
+    assert envs["a"].C1 is not None
+    assert not jnp.isnan(jnp.sum(jnp.abs(envs["a"].C1.todense())))

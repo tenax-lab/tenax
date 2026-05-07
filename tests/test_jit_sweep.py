@@ -1175,10 +1175,7 @@ class TestBlockSparseJITSweep:
             energies_jit[-1],
             E_exact,
             atol=1e-4,
-            err_msg=(
-                f"JIT sweep E={energies_jit[-1]:.8f} vs "
-                f"exact E={E_exact:.8f}"
-            ),
+            err_msg=(f"JIT sweep E={energies_jit[-1]:.8f} vs exact E={E_exact:.8f}"),
         )
 
         # Verify energy is decreasing across sweeps

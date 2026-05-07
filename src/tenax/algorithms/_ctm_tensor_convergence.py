@@ -7,6 +7,7 @@ __all__ = [
     "Coord",
     "SINGLE_SITE_NEIGHBORS",
     "_DIRECTION_MOVES",
+    "_DIRECTION_MOVES_2X2",
     "_corner_singular_values",
     "_ctm_sv_diff",
     "_ctm_tensor_multisite",
@@ -31,9 +32,13 @@ from tenax.algorithms._ctm_tensor_init import (
 )
 from tenax.algorithms._ctm_tensor_moves import (
     _ctm_tensor_move_bottom,
+    _ctm_tensor_move_bottom_2x2,
     _ctm_tensor_move_left,
+    _ctm_tensor_move_left_2x2,
     _ctm_tensor_move_right,
+    _ctm_tensor_move_right_2x2,
     _ctm_tensor_move_top,
+    _ctm_tensor_move_top_2x2,
 )
 from tenax.algorithms._ctm_tensor_paired_moves import (
     _ctm_tensor_move_horizontal,
@@ -164,6 +169,21 @@ _DIRECTION_MOVES = [
 ]
 
 
+# 2x2 plaquette moves take the same plaquette layout in every direction:
+# (TL=s, TR=s.right, BL=s.bottom, BR=s.right.bottom).  The "direction" is
+# encoded inside the move via :func:`_compute_2x2_projector`, which selects
+# which seam (left/right/top/bottom) the projector pair compresses.  This
+# matches variPEPS's ``do_*_absorption`` workhorses, where each direction's
+# plaquette is anchored at the cell whose env is being updated and uses the
+# 4 sites at offsets {(0,0), (1,0), (0,1), (1,1)} relative to that anchor.
+_DIRECTION_MOVES_2X2 = [
+    ("left", _ctm_tensor_move_left_2x2),
+    ("right", _ctm_tensor_move_right_2x2),
+    ("top", _ctm_tensor_move_top_2x2),
+    ("bottom", _ctm_tensor_move_bottom_2x2),
+]
+
+
 def _get_base_charges(a: Tensor):
     """Extract base charges from a double-layer tensor for projector stabilization."""
     if not isinstance(a, SymmetricTensor):
@@ -209,8 +229,31 @@ def _ctm_tensor_sweep_multisite(
     renormalize: bool,
     projector_method: str = "svd",
     projector_backward: str = "auto",
+    recipe: str = "2x2",
 ) -> dict[Coord, CTMTensorEnv]:
-    """One full multisite CTM sweep over all sites and directions."""
+    """One full multisite CTM sweep over all sites and directions.
+
+    Args:
+        envs:           Per-coord environments to update.
+        double_layers:  Per-coord double-layer tensors.
+        neighbors:      Per-coord direction → neighbor coord map.
+        chi:            Target environment bond dimension.
+        renormalize:    Renormalize env tensors after each sweep.
+        projector_method:  ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
+                        Only consulted on the 1x1 path; the 2x2 path always
+                        uses Fishman SVD via :func:`_compute_2x2_projector`.
+        projector_backward:  Forwarded to the 1x1 move functions; ignored
+                        on the 2x2 path.
+        recipe:         ``"2x2"`` (default) — use the 2x2 plaquette projector
+                        of :func:`_ctm_tensor_move_*_2x2` (matches variPEPS's
+                        ``do_*_absorption`` workhorses).
+                        ``"1x1"`` — use the legacy 1x1 (single-site enlarged
+                        corner) projector pair.  Available for backward
+                        compatibility / regression bisection.
+
+    Returns:
+        Updated per-coord env dict.
+    """
     # Extract base charges from any double-layer tensor for projector stabilization
     base_charges = None
     for a in double_layers.values():
@@ -224,18 +267,45 @@ def _ctm_tensor_sweep_multisite(
     envs = dict(envs)
 
     all_coords = list(envs.keys())
-    for direction, move_fn in _DIRECTION_MOVES:
-        for coord in _sort_coords_for_direction(all_coords, direction):
-            nb = neighbors[coord][direction]
-            envs[coord] = move_fn(
-                envs[coord],
-                envs[nb],
-                double_layers[nb],
-                chi,
-                projector_method,
-                base_charges=base_charges,
-                projector_backward=projector_backward,
-            )
+    if recipe == "1x1":
+        for direction, move_fn in _DIRECTION_MOVES:
+            for coord in _sort_coords_for_direction(all_coords, direction):
+                nb = neighbors[coord][direction]
+                envs[coord] = move_fn(
+                    envs[coord],
+                    envs[nb],
+                    double_layers[nb],
+                    chi,
+                    projector_method,
+                    base_charges=base_charges,
+                    projector_backward=projector_backward,
+                )
+    elif recipe == "2x2":
+        # The 2x2 plaquette is always rooted at the cell ``s`` whose env is
+        # being updated, with neighbors right (TR), bottom (BL) and
+        # right-then-bottom (BR).  This matches variPEPS's ``do_*_absorption``
+        # functions: each direction's projector uses the 4-site plaquette at
+        # offsets {(0,0), (1,0), (0,1), (1,1)} from the anchor cell, and the
+        # ``direction`` argument selects which seam is compressed.
+        for direction, move_fn_2x2 in _DIRECTION_MOVES_2X2:
+            for coord in _sort_coords_for_direction(all_coords, direction):
+                s_TR = neighbors[coord]["right"]
+                s_BL = neighbors[coord]["bottom"]
+                s_BR = neighbors[s_TR]["bottom"]
+                envs[coord] = move_fn_2x2(
+                    envs[coord],
+                    envs[s_TR],
+                    envs[s_BL],
+                    envs[s_BR],
+                    double_layers[coord],
+                    double_layers[s_TR],
+                    double_layers[s_BL],
+                    double_layers[s_BR],
+                    chi,
+                    projector_method,
+                )
+    else:
+        raise ValueError(f"Unknown CTM recipe {recipe!r}: expected '1x1' or '2x2'.")
     if renormalize:
         envs = {c: _renormalize_tensor_env(e) for c, e in envs.items()}
     return envs
@@ -398,6 +468,7 @@ def _ctm_tensor_multisite(
     projector_method: str = "svd",
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
+    recipe: str = "2x2",
 ) -> dict[Coord, CTMTensorEnv]:
     """Run multisite CTM to convergence using the Tensor protocol.
 
@@ -410,6 +481,9 @@ def _ctm_tensor_multisite(
         renormalize:  Renormalize environment at each step.
         projector_method: ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
         qr_warmup_steps:  Number of eigh warm-up sweeps before QR kicks in.
+        recipe:       ``"2x2"`` (default) uses the variPEPS-style 2x2
+                      plaquette projector at every site/direction.  ``"1x1"``
+                      falls back to the legacy single-site projector pair.
 
     Returns:
         Dict mapping coordinates to converged CTMTensorEnv.
@@ -429,6 +503,7 @@ def _ctm_tensor_multisite(
                 renormalize,
                 "eigh",
                 projector_backward=projector_backward,
+                recipe=recipe,
             )
         max_iter = max_iter - warmup
 
@@ -442,6 +517,7 @@ def _ctm_tensor_multisite(
             renormalize,
             projector_method,
             projector_backward=projector_backward,
+            recipe=recipe,
         )
         converged = True
         for c in sorted(envs):
@@ -468,6 +544,7 @@ def ctm_tensor_2site(
     projector_method: str = "svd",
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
+    recipe: str = "2x2",
 ) -> tuple[CTMTensorEnv, CTMTensorEnv]:
     """Run 2-site checkerboard CTM to convergence using the Tensor protocol.
 
@@ -481,6 +558,8 @@ def ctm_tensor_2site(
         renormalize:  Renormalize environment at each step.
         projector_method: ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
         qr_warmup_steps:  Number of eigh warm-up sweeps before QR kicks in.
+        recipe:       ``"2x2"`` (default) or ``"1x1"`` projector recipe;
+                      see :func:`_ctm_tensor_sweep_multisite`.
 
     Returns:
         ``(env_A, env_B)`` — converged CTMTensorEnv for each sublattice.
@@ -495,6 +574,7 @@ def ctm_tensor_2site(
         projector_method,
         qr_warmup_steps,
         projector_backward=projector_backward,
+        recipe=recipe,
     )
     return envs[(0, 0)], envs[(1, 0)]
 
@@ -509,6 +589,7 @@ def ctm_multisite(
     projector_method: str = "svd",
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
+    recipe: str = "2x2",
 ) -> dict[str, CTMTensorEnv]:
     """Run multisite CTM to convergence for an arbitrary lattice.
 
@@ -531,6 +612,9 @@ def ctm_multisite(
         renormalize:       Renormalize environment at each step.
         projector_method:  ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
         qr_warmup_steps:   Number of eigh warm-up sweeps before QR kicks in.
+        recipe:            ``"2x2"`` (default) — variPEPS-style 2x2 plaquette
+                           projector; ``"1x1"`` — legacy single-site projector
+                           pair (for backward-compat / regression bisection).
 
     Returns:
         ``{site_name: CTMTensorEnv}`` — converged environments.
@@ -609,6 +693,7 @@ def ctm_multisite(
         projector_method,
         qr_warmup_steps,
         projector_backward=projector_backward,
+        recipe=recipe,
     )
 
     # Map results back to site names
