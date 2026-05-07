@@ -563,6 +563,18 @@ def optimize_pess_3site_multisite_ad(
     """
     import optax
 
+    # Promote Tensor-valued gates to ndarray once at the optimizer entry
+    # so both the loss closure and the warm-start helper below see a
+    # uniform jax.Array type — issue #402 / PR #405 review.  Without this
+    # hoist, ``_build_site_tensors_for_warm_start`` would do
+    # ``next(iter(bond_gates.values())).shape[0]`` on the un-promoted dict
+    # and crash on Tensor inputs *after* the first loss eval succeeds,
+    # leaving the advertised Tensor-valued multisite path unusable.
+    bond_gates_arr = {
+        k: (g.todense() if isinstance(g, Tensor) else g) for k, g in bond_gates.items()
+    }
+    d = int(next(iter(bond_gates_arr.values())).shape[0])
+
     # Env warm-start cache. Analogous to but simpler than
     # _optimize_gs_ad_multisite — no stall recovery, no best_env_cache
     # snapshot, no fresh-CTM final eval. The env never escapes back to
@@ -570,7 +582,7 @@ def optimize_pess_3site_multisite_ad(
     # currently harmless.
     _env_cache: dict[str, dict] = {}
     loss_fn_state = build_pess_loss_3site_multisite(
-        bond_gates, config, env_cache=_env_cache
+        bond_gates_arr, config, env_cache=_env_cache
     )
 
     params = {
@@ -604,7 +616,6 @@ def optimize_pess_3site_multisite_ad(
             p["lambdas"],
         )
         D = sites["u"].shape[0]
-        d = int(next(iter(bond_gates.values())).shape[0])
         indices = _make_multisite_indices(D, d)
         site_tensors = {}
         for name, A in sites.items():

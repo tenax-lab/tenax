@@ -299,6 +299,35 @@ def test_pess_loss_3site_multisite_accepts_tensor_bond_gates():
     assert jnp.isrealobj(e0) or jnp.allclose(e0.imag, 0.0, atol=1e-10)
 
 
+def test_optimize_pess_3site_multisite_ad_accepts_tensor_bond_gates():
+    """``optimize_pess_3site_multisite_ad`` must work with Tensor gates.
+
+    Regression for issue #402 follow-up (PR #405 review): the loss closure
+    promotes Tensor gates locally, but the optimizer's warm-start helper
+    ``_build_site_tensors_for_warm_start`` separately did
+    ``next(iter(bond_gates.values())).shape[0]`` on the un-promoted dict.
+    The first ``loss(params)`` call succeeds, then the immediate
+    ``_update_env_cache(params)`` raises ``AttributeError`` and the
+    advertised Tensor-valued multisite optimisation path stays unusable.
+
+    One L-BFGS step is enough to drive both the loss path and
+    ``_update_env_cache``; we don't assert on energy descent (covered by
+    ``test_optimize_pess_3site_multisite_ad_decreases_energy`` for arrays).
+    """
+    state0 = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    array_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    bond_gates = {k: _wrap_gate_as_dense_tensor(g) for k, g in array_gates.items()}
+    config = _make_test_config(chi=8)
+
+    state_opt, e_opt = optimize_pess_3site_multisite_ad(
+        state0, bond_gates, config, max_iter=1, verbose=False
+    )
+
+    assert jnp.isfinite(e_opt)
+    assert state_opt.R_a.shape == state0.R_a.shape
+    assert state_opt.T_d.shape == state0.T_d.shape
+
+
 def test_build_pess_loss_3site_multisite_passes_env_init_from_cache():
     """When ``env_cache`` is provided, the loss reads ``envs`` from it and
     forwards them as ``env_init=`` to the CTM AD entry point."""
