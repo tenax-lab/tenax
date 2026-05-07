@@ -452,3 +452,45 @@ def test_build_enlarged_corner_bottom_right_numerical():
     assert np.allclose(Q_dense, Q_ref, atol=1e-10, rtol=1e-10), (
         f"Q_BR mismatch: max abs diff = {np.max(np.abs(Q_dense - Q_ref))}"
     )
+
+
+def test_ctm_tensor_move_left_2x2_uniform_state_one_step():
+    """One step of _ctm_tensor_move_left_2x2 on a uniform-state plaquette
+    (all 4 sites the same A) produces an env with the same singular-value
+    spectrum at C1 as _ctm_tensor_move_left up to chi-truncation tolerance.
+
+    The two recipes agree up to gauge (chi-bond rotation) on uniform states;
+    we compare normalized sorted singular values, not raw tensor values."""
+    D, chi, d = 2, 4, 2
+    A = _dense_tensor_5leg(D, d, seed=2)
+    a = _build_double_layer_tensor(A)
+    env = initialize_ctm_tensor_env(A, chi)
+
+    from tenax.algorithms._ctm_tensor_moves import (
+        _ctm_tensor_move_left,
+        _ctm_tensor_move_left_2x2,
+    )
+
+    env_1x1 = _ctm_tensor_move_left(env, env, a, chi, "svd")
+    env_2x2 = _ctm_tensor_move_left_2x2(
+        env,
+        env,
+        env,
+        env,  # all 4 envs same (uniform state)
+        a,
+        a,
+        a,
+        a,  # all 4 a same (uniform state)
+        chi,
+        "svd",
+    )
+
+    sv_1x1 = jnp.linalg.svd(env_1x1.C1.todense(), compute_uv=False)
+    sv_2x2 = jnp.linalg.svd(env_2x2.C1.todense(), compute_uv=False)
+    sv_1x1 = jnp.sort(sv_1x1)[::-1]
+    sv_1x1 = sv_1x1 / jnp.sum(sv_1x1)
+    sv_2x2 = jnp.sort(sv_2x2)[::-1]
+    sv_2x2 = sv_2x2 / jnp.sum(sv_2x2)
+    # Loose tolerance: recipes differ; on uniform single-step they're close.
+    err = float(jnp.max(jnp.abs(sv_1x1 - sv_2x2)))
+    assert err < 5e-2, f"C1 singular-value spectra disagree: max abs diff = {err:.2e}"
