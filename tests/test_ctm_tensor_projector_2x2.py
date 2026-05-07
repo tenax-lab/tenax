@@ -314,6 +314,40 @@ def test_build_enlarged_corner_bottom_left_numerical():
     )
 
 
+def test_compute_2x2_projector_left_shape_and_isometry():
+    """For a converged-style env, _compute_2x2_projector returns a (P_top, P_bot)
+    pair satisfying P_top^dagger . P_bot ~ I on the chi_new = chi truncated space."""
+    D, chi, d = 2, 4, 2
+    A = _dense_tensor_5leg(D, d, seed=0)
+    a = _build_double_layer_tensor(A)
+    env = initialize_ctm_tensor_env(A, chi)
+
+    Q_TL = _build_enlarged_corner(env.C1, env.T1, env.T4, a, position="top_left")
+    Q_TR = _build_enlarged_corner(env.C2, env.T1, env.T2, a, position="top_right")
+    Q_BL = _build_enlarged_corner(env.C4, env.T3, env.T4, a, position="bottom_left")
+    Q_BR = _build_enlarged_corner(env.C3, env.T3, env.T2, a, position="bottom_right")
+
+    from tenax.algorithms._ctm_tensor_projector_2x2 import _compute_2x2_projector
+
+    P_top, P_bot = _compute_2x2_projector(Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="left")
+
+    # Both projectors should be rank-3 with shared labels chi_outer + fused_D2
+    # and distinct chi_new labels (chi_new_top, chi_new_bot).
+    assert P_top.ndim == 3
+    assert P_bot.ndim == 3
+
+    # Closure: contract P_top with P_bot. Shared labels auto-pair; free legs
+    # are (chi_new_top, chi_new_bot). Result should be ~ identity.
+    from tenax.contraction.contractor import contract
+
+    closure = contract(P_top, P_bot)
+    assert closure.ndim == 2
+    closure_dense = closure.todense()
+    eye = jnp.eye(closure_dense.shape[0], dtype=closure_dense.dtype)
+    err = float(jnp.linalg.norm(closure_dense - eye))
+    assert err < 1e-6, f"P_top . P_bot != I; Frobenius err = {err:.2e}"
+
+
 def test_build_enlarged_corner_bottom_right_numerical():
     """Numerical cross-check for ``position="bottom_right"``.
 
