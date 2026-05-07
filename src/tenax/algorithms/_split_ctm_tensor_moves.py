@@ -38,7 +38,7 @@ from tenax.algorithms._tensor_utils import (
 )
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.tensor import SymmetricTensor, Tensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 from tenax.linalg import svd as tensor_svd
 
 # ------------------------------------------------------------------ #
@@ -128,6 +128,23 @@ def _svd_split_edge_tensor(
         )
         U_t, s, Vh_t = _truncate_svd_per_sector(
             U_t, s, Vh_t, "_svd_bond", chi_I, base_charges
+        )
+    elif isinstance(T, DenseTensor):
+        # Bare jnp.linalg.svd's adjoint NaN's on rank-deficient inputs
+        # (split-CTM at small D after PR #399 flipped the projector default
+        # to "svd"). Route through truncated_svd_symmetric_ad, whose backward
+        # is the Lorentzian-regularized + rank-aware kernel from _ad_primitives.
+        # TODO: add SymmetricTensor block-sparse regularized SVD as a follow-up
+        # so the SymmetricTensor branches below also get a finite adjoint on
+        # rank-deficient blocks.
+        from tenax.algorithms._ad_primitives import truncated_svd_symmetric_ad
+
+        U_t, s, Vh_t = truncated_svd_symmetric_ad(
+            T,
+            left_labels=left_labels,
+            right_labels=right_labels,
+            chi=chi_I,
+            new_bond_label="_svd_bond",
         )
     else:
         U_t, s, Vh_t, _s_full = tensor_svd(
