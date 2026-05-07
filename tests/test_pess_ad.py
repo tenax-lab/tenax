@@ -346,3 +346,30 @@ def test_build_pess_loss_3site_multisite_forwards_projector_backward():
         loss_fn(state)
 
     assert seen.get("projector_backward") == "standard"
+
+
+def test_optimize_pess_3site_multisite_ad_returns_best_seen_energy(capsys):
+    """The returned final energy is the minimum across all L-BFGS steps,
+    not the last iterate. Verified against the verbose log."""
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    config = _make_test_config(chi=4)
+
+    _, e_final = optimize_pess_3site_multisite_ad(
+        state,
+        bond_gates,
+        config,
+        max_iter=3,
+        verbose=True,
+    )
+    captured = capsys.readouterr().out
+    energies: list[float] = []
+    for line in captured.splitlines():
+        if "e =" in line:
+            tok = line.split("e =")[1].split()[0]
+            energies.append(float(tok))
+    assert energies, "verbose run should print per-step energies"
+    assert e_final == pytest.approx(min(energies), rel=1e-9, abs=1e-12), (
+        "returned energy should be the best (lowest) energy seen across "
+        f"the trajectory; got e_final={e_final}, min(energies)={min(energies)}"
+    )

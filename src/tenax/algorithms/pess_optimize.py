@@ -620,6 +620,8 @@ def optimize_pess_3site_multisite_ad(
 
     last_energy = float(loss(params))
     _update_env_cache(params)
+    best_energy = last_energy
+    best_params = params
     for step in range(max_iter):
         e_val, grads = grad_fn(params)
         last_energy = float(e_val)
@@ -628,6 +630,9 @@ def optimize_pess_3site_multisite_ad(
             line_search_method, params, direction, grads, last_energy, loss, grad_fn
         )
         _update_env_cache(params)
+        if last_energy < best_energy:
+            best_energy = last_energy
+            best_params = params
         if verbose:
             print(
                 f"[optimize_pess_3site_multisite_ad] step {step + 1}/{max_iter}: "
@@ -637,4 +642,4 @@ def optimize_pess_3site_multisite_ad(
         if alpha == 0.0:
             break
 
-    return _params_to_state(params), last_energy
+    return _params_to_state(best_params), best_energy
