@@ -164,7 +164,17 @@ def _initial_alpha(energy: float, slope: float) -> float:
     Hager-Zhang accept it as a no-op step.  Floor ``|E|`` at ``1e-12`` so
     we degrade to a small fixed-magnitude step in that degenerate regime
     instead of stalling — see issue #401.
+
+    The floor is gated on a nonzero slope.  When the slope is also
+    essentially zero we are at a true stationary point (zero gradient or
+    a direction orthogonal to it); ``alpha0 = 0`` is the documented
+    "no improvement" signal that ``_backtracking_line_search`` /
+    ``_hager_zhang_line_search_step`` use to break the outer L-BFGS
+    loop.  Returning a positive step there would trap the optimiser in
+    ``max_iter`` no-op CTM evaluations at the same parameters.
     """
+    if abs(slope) < 1e-30:
+        return 0.0
     if abs(energy) < 1e-12:
         return min(1.0, 1e-3 / max(abs(slope), 1.0))
     return min(1.0, abs(energy) / max(abs(slope), 1e-30))

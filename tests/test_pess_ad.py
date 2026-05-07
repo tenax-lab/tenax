@@ -241,6 +241,22 @@ def test_initial_alpha_positive_when_energy_zero():
     assert alpha > 0.0
 
 
+def test_initial_alpha_zero_when_slope_zero():
+    """At a true stationary point (slope == 0) the initial step must stay 0.
+
+    Regression for the PR-#404 review: blanket flooring on ``|energy|`` would
+    return a positive step even when the descent direction is identically
+    zero.  ``trial = params + alpha * 0 == params`` then satisfies the
+    Armijo condition trivially (``f_trial == energy``) so the line search
+    accepts the no-op, ``alpha == 0`` no longer signals "no improvement",
+    and ``optimize_pess_*`` burns ``max_iter`` CTM passes without making
+    progress.  Keep the documented ``alpha == 0`` break-signal contract.
+    """
+    assert _initial_alpha(energy=0.0, slope=0.0) == 0.0
+    # Energy nonzero but slope zero is the same regime — no descent.
+    assert _initial_alpha(energy=0.0, slope=1e-40) == 0.0
+
+
 def test_backtracking_line_search_progresses_with_zero_energy():
     """Backtracking line search descends on a constant-shifted quadratic.
 
