@@ -19,6 +19,8 @@ from tenax.algorithms._pess_multisite_energy import kagome_3site_bond_gates
 from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.algorithms.pess import IPESSState, kagome_xxz_pess_cg_gates
 from tenax.algorithms.pess_optimize import (
+    _backtracking_line_search,
+    _initial_alpha,
     build_pess_loss,
     build_pess_loss_3site_multisite,
     optimize_pess_3site_multisite_ad,
@@ -219,3 +221,56 @@ def test_optimize_pess_3site_multisite_ad_preserves_shapes_and_optimises_T_d():
         "T_d unchanged after L-BFGS in the multisite path — the optimiser "
         "is silently freezing T_d (regression: it should be a live param)."
     )
+
+
+# ---------------------------------------------------------------------------
+# Line search initial-step heuristic (issue #401)
+# ---------------------------------------------------------------------------
+
+
+def test_initial_alpha_positive_when_energy_zero():
+    """``_initial_alpha`` must return a positive step when ``|energy| → 0``.
+
+    Regression for issue #401: the Nocedal & Wright ``f_low = 0`` heuristic
+    ``alpha0 = |E| / |slope|`` collapses to zero whenever the user supplies
+    a constant-shifted Hamiltonian that drives ``f(x0) → 0``, even when the
+    gradient is nonzero.  ``alpha == 0`` then propagates through Armijo /
+    Hager-Zhang as a no-op step and the optimizer stalls without descending.
+    """
+    alpha = _initial_alpha(energy=0.0, slope=1.0)
+    assert alpha > 0.0
+
+
+def test_backtracking_line_search_progresses_with_zero_energy():
+    """Backtracking line search descends on a constant-shifted quadratic.
+
+    Regression for issue #401: with ``f(x0) = 0`` and nonzero gradient, the
+    descent direction is well-defined but ``_initial_alpha`` previously
+    returned 0, so the search returned ``best_alpha = 0`` and the optimizer
+    made no progress.
+    """
+    # Loss f(x) = 0.5 * sum(x**2) - 0.5 * sum(x0**2) — constant-shifted
+    # quadratic.  At x = x0 the loss is exactly 0 but gradient is x0 ≠ 0,
+    # so any positive step in the steepest-descent direction reduces f.
+    x0 = {"w": jnp.array([0.5, -0.25, 0.1])}
+    shift = 0.5 * float(jnp.sum(x0["w"] ** 2))
+
+    def loss_fn(params):
+        return 0.5 * jnp.sum(params["w"] ** 2) - shift
+
+    energy = float(loss_fn(x0))
+    assert abs(energy) < 1e-12
+
+    grad = {"w": x0["w"]}
+    direction = jax.tree.map(lambda g: -g, grad)
+
+    new_params, new_energy, alpha = _backtracking_line_search(
+        x0, direction, grad, energy, loss_fn
+    )
+
+    assert alpha > 0.0, "line search returned zero step on a descending direction"
+    assert new_energy < energy, (
+        f"line search did not decrease energy: {energy} -> {new_energy}"
+    )
+    assert jnp.isfinite(new_energy)
+    assert jnp.all(jnp.isfinite(new_params["w"]))

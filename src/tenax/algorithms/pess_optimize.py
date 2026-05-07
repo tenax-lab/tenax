@@ -157,7 +157,16 @@ def _initial_alpha(energy: float, slope: float) -> float:
     For typical iPESS energies ``|E| ~ 0.1`` and gradients ``|∇E| ~
     10²-10⁴``, this gives ``alpha0 ~ 1e-3 to 1e-5``, matching the
     Newton-predicted optimum within 1-2 bisections.
+
+    A constant shift in the supplied bond gates can drive ``f(x0) → 0``
+    while the gradient remains nonzero (the gradient is shift-invariant);
+    the bare ratio then collapses to ``alpha0 = 0`` and both Armijo and
+    Hager-Zhang accept it as a no-op step.  Floor ``|E|`` at ``1e-12`` so
+    we degrade to a small fixed-magnitude step in that degenerate regime
+    instead of stalling — see issue #401.
     """
+    if abs(energy) < 1e-12:
+        return min(1.0, 1e-3 / max(abs(slope), 1.0))
     return min(1.0, abs(energy) / max(abs(slope), 1e-30))
 
 
