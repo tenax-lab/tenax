@@ -77,7 +77,7 @@ def _ctm_tensor_sweep(
     a: Tensor,
     chi: int,
     renormalize: bool,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     projector_backward: str = "auto",
 ) -> CTMTensorEnv:
     """One full CTM sweep: left, right, top, bottom + optional renormalize."""
@@ -103,7 +103,7 @@ def _ctm_tensor_sweep_paired(
     a: Tensor,
     chi: int,
     renormalize: bool,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     projector_backward: str = "auto",
 ) -> CTMTensorEnv:
     """One full CTM sweep using paired moves: horizontal then vertical.
@@ -207,7 +207,7 @@ def _ctm_tensor_sweep_multisite(
     neighbors: dict[Coord, dict[str, Coord]],
     chi: int,
     renormalize: bool,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     projector_backward: str = "auto",
 ) -> dict[Coord, CTMTensorEnv]:
     """One full multisite CTM sweep over all sites and directions."""
@@ -303,7 +303,7 @@ def ctm_tensor(
     max_iter: int = 100,
     conv_tol: float = 1e-8,
     renormalize: bool = True,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
 ) -> CTMTensorEnv:
@@ -320,7 +320,7 @@ def ctm_tensor(
         max_iter:          Maximum CTM iterations.
         conv_tol:          Convergence tolerance on corner singular values.
         renormalize:       Renormalize environment at each step.
-        projector_method:  ``"eigh"`` or ``"qr"``.
+        projector_method:  ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
         qr_warmup_steps:   Number of eigh warm-up sweeps before QR kicks in.
 
     Returns:
@@ -395,7 +395,7 @@ def _ctm_tensor_multisite(
     max_iter: int = 100,
     conv_tol: float = 1e-8,
     renormalize: bool = True,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
 ) -> dict[Coord, CTMTensorEnv]:
@@ -408,7 +408,7 @@ def _ctm_tensor_multisite(
         max_iter:     Maximum CTM iterations.
         conv_tol:     Convergence tolerance on corner singular values.
         renormalize:  Renormalize environment at each step.
-        projector_method: ``"eigh"`` or ``"qr"``.
+        projector_method: ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
         qr_warmup_steps:  Number of eigh warm-up sweeps before QR kicks in.
 
     Returns:
@@ -465,7 +465,7 @@ def ctm_tensor_2site(
     max_iter: int = 100,
     conv_tol: float = 1e-8,
     renormalize: bool = True,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
 ) -> tuple[CTMTensorEnv, CTMTensorEnv]:
@@ -479,7 +479,7 @@ def ctm_tensor_2site(
         max_iter:     Maximum CTM iterations.
         conv_tol:     Convergence tolerance on corner singular values.
         renormalize:  Renormalize environment at each step.
-        projector_method: ``"eigh"`` or ``"qr"``.
+        projector_method: ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
         qr_warmup_steps:  Number of eigh warm-up sweeps before QR kicks in.
 
     Returns:
@@ -506,7 +506,7 @@ def ctm_multisite(
     max_iter: int = 100,
     conv_tol: float = 1e-8,
     renormalize: bool = True,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
 ) -> dict[str, CTMTensorEnv]:
@@ -529,7 +529,7 @@ def ctm_multisite(
         max_iter:          Maximum CTM iterations.
         conv_tol:          Convergence tolerance on corner singular values.
         renormalize:       Renormalize environment at each step.
-        projector_method:  ``"eigh"`` or ``"qr"``.
+        projector_method:  ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
         qr_warmup_steps:   Number of eigh warm-up sweeps before QR kicks in.
 
     Returns:

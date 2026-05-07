@@ -71,7 +71,7 @@ def _make_jit_ctm_step(
         envs: dict[Coord, CTMTensorEnv],
         *,
         chi: int,
-        projector_method: str = "eigh",
+        projector_method: str = "svd",
         renormalize: bool = True,
         projector_backward: str = "auto",
     ) -> dict[Coord, CTMTensorEnv]:
@@ -101,7 +101,7 @@ def python_loop_ctm_converge(
     conv_tol: float = 1e-8,
     conv_method: str = "sv",
     renormalize: bool = True,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
     chi_ramp: list[tuple[int, int | None]] | None = None,
@@ -125,7 +125,7 @@ def python_loop_ctm_converge(
                            values) or ``"elementwise"`` (max element-wise
                            difference across all env tensors).
         renormalize:       Renormalize environments after each sweep.
-        projector_method:  ``"eigh"`` or ``"qr"``.
+        projector_method:  ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
         qr_warmup_steps:   Number of eigh warm-up sweeps before QR kicks in.
         projector_backward: Backward mode for projector.
         chi_ramp:          Optional chi-ramp schedule as list of

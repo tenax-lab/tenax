@@ -315,18 +315,6 @@ def test_d1_brute_force_equals_ctm_rdms():
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Phase C.3 blocker: multisite-CTM RDMs at D=2 χ=16 are non-PSD with O(1) negative eigenvalues "
-        "(Hermiticity holds; helpers symmetrise correctly). Audit at chi∈{8,16} shows the "
-        "brute-force-vs-CTM Frobenius delta is largest on `uv_v` (= 1.87 at chi=16) and grows "
-        "from chi=8→16, the wrong direction for a CTM-truncation artefact — pointing at a "
-        "structural bug in the multisite-CTM environment construction rather than (or in "
-        "addition to) any per-helper issue. To be fixed in a follow-up PR; this test is the "
-        "regression gate."
-    ),
-)
 @pytest.mark.algorithm
 def test_ctm_rdms_hermitian_psd_trace1_at_d2_chi16():
     """Gates #1-3: the 6 multisite-CTM RDMs at D=2 χ=16 SU-warmstart must be
@@ -369,13 +357,12 @@ def test_ctm_rdms_hermitian_psd_trace1_at_d2_chi16():
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "Phase C.3 blocker: ρ_vw computed via `_rdm_3site_marginal_vw_row` vs via direct "
-        "`_rdm2x1_tensor_2site(S_v, S_w, env_v, env_w)` from the SAME multisite-CTM envs "
-        "disagree by ‖Δ‖_F ≈ 0.89 — confirms the two helpers process envs differently "
-        "on the dim-1 v-w iPEPS bond. Combined with the broader-than-v-w pattern in the "
-        "audit table (see Task 5 reason), the C.3 root cause likely involves both the env "
-        "construction and at least one v-w bond consumer helper. To be fixed in a follow-up "
-        "PR; this test is the regression gate."
+        "Phase C.3 partial: forward-CTM eigh→svd default (this PR) reduces ‖Δ‖_F from "
+        "≈0.89 (eigh) to ≈0.38 (svd) at D=2 χ=16 — env-construction was a real "
+        "contributor — but a residual per-helper disagreement remains on the dim-1 v-w "
+        "iPEPS bond between `_rdm_3site_marginal_vw_row` (Path A, traces u) and "
+        "`_rdm2x1_tensor_2site` (Path B, direct 2-site h-bond). To be fixed in a "
+        "follow-up PR; this test is the regression gate for the residual."
     ),
 )
 @pytest.mark.algorithm

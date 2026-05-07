@@ -116,7 +116,7 @@ def _ctm_tensor_move_horizontal(
     env_nb: CTMTensorEnv,
     a: Tensor,
     chi: int,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     projector_backward: str = "auto",
 ) -> CTMTensorEnv:
     """Combined left+right CTM move with charge-stabilized projectors.
@@ -130,7 +130,7 @@ def _ctm_tensor_move_horizontal(
         env_nb:    Environment for the neighbor site.
         a:         Double-layer tensor from the neighbor site.
         chi:       Target bond dimension.
-        projector_method: ``"eigh"`` or ``"qr"``.
+        projector_method: ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
 
     Returns:
         Updated CTMTensorEnv with all 4 corners and T4, T2 updated.
@@ -222,7 +222,7 @@ def _ctm_tensor_move_vertical(
     env_nb: CTMTensorEnv,
     a: Tensor,
     chi: int,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     projector_backward: str = "auto",
 ) -> CTMTensorEnv:
     """Combined top+bottom CTM move with charge-stabilized projectors.
@@ -232,7 +232,7 @@ def _ctm_tensor_move_vertical(
         env_nb:    Environment for the neighbor site.
         a:         Double-layer tensor from the neighbor site.
         chi:       Target bond dimension.
-        projector_method: ``"eigh"`` or ``"qr"``.
+        projector_method: ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
 
     Returns:
         Updated CTMTensorEnv with all 4 corners and T1, T3 updated.

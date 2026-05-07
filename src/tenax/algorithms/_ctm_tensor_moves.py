@@ -243,7 +243,7 @@ def _ctm_tensor_move_left(
     env_neighbor: CTMTensorEnv,
     a: Tensor,
     chi: int,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
 ) -> CTMTensorEnv:
@@ -298,7 +298,7 @@ def _ctm_tensor_move_right(
     env_neighbor: CTMTensorEnv,
     a: Tensor,
     chi: int,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
 ) -> CTMTensorEnv:
@@ -352,7 +352,7 @@ def _ctm_tensor_move_top(
     env_neighbor: CTMTensorEnv,
     a: Tensor,
     chi: int,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
 ) -> CTMTensorEnv:
@@ -406,7 +406,7 @@ def _ctm_tensor_move_bottom(
     env_neighbor: CTMTensorEnv,
     a: Tensor,
     chi: int,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
 ) -> CTMTensorEnv:
