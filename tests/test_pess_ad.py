@@ -323,3 +323,26 @@ def test_optimize_pess_3site_multisite_ad_warm_starts_envs():
         "subsequent calls should warm-start from env_cache populated by "
         "_update_env_cache"
     )
+
+
+def test_build_pess_loss_3site_multisite_forwards_projector_backward():
+    """`config.projector_backward` must be threaded through to ctm_energy_implicit."""
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    base_config = _make_test_config(chi=4)
+    config = _dc_replace(base_config, projector_backward="standard")
+
+    seen: dict = {}
+
+    def fake_ctm_energy_implicit(*args, **kwargs):
+        seen.update(kwargs)
+        return jnp.array(0.0)
+
+    loss_fn = build_pess_loss_3site_multisite(bond_gates, config)
+    with _mock_patch(
+        "tenax.algorithms.pess_optimize.ctm_energy_implicit",
+        fake_ctm_energy_implicit,
+    ):
+        loss_fn(state)
+
+    assert seen.get("projector_backward") == "standard"

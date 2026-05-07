@@ -507,6 +507,7 @@ def build_pess_loss_3site_multisite(
             conv_tol=config.conv_tol,
             projector_method=config.projector_method,
             renormalize=config.renormalize,
+            projector_backward=config.projector_backward,
             forward_gauge=config.forward_gauge,
             conv_method=config.ctm_conv_method,
             min_iter=config.min_iter,
