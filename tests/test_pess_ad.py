@@ -12,6 +12,7 @@ freezes it bit-exact).
 from __future__ import annotations
 
 from dataclasses import replace as _dc_replace
+from unittest.mock import patch as _mock_patch
 
 import jax
 import jax.numpy as jnp
@@ -235,3 +236,50 @@ def test_optimize_pess_3site_multisite_ad_preserves_shapes_and_optimises_T_d():
         "T_d unchanged after L-BFGS in the multisite path — the optimiser "
         "is silently freezing T_d (regression: it should be a live param)."
     )
+
+
+def test_build_pess_loss_3site_multisite_passes_env_init_from_cache():
+    """When ``env_cache`` is provided, the loss reads ``envs`` from it and
+    forwards them as ``env_init=`` to the CTM AD entry point."""
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    config = _make_test_config(chi=4)
+    SENTINEL = object()
+    env_cache = {"envs": SENTINEL}
+
+    seen: dict = {}
+
+    def fake_ctm_energy_implicit(*args, **kwargs):
+        seen.update(kwargs)
+        return jnp.array(0.0)
+
+    loss_fn = build_pess_loss_3site_multisite(bond_gates, config, env_cache=env_cache)
+    with _mock_patch(
+        "tenax.algorithms.pess_optimize.ctm_energy_implicit",
+        fake_ctm_energy_implicit,
+    ):
+        loss_fn(state)
+
+    assert seen.get("env_init") is SENTINEL
+
+
+def test_build_pess_loss_3site_multisite_default_env_cache_is_none():
+    """No env_cache → env_init=None on every call (existing behavior)."""
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    config = _make_test_config(chi=4)
+
+    seen: dict = {}
+
+    def fake_ctm_energy_implicit(*args, **kwargs):
+        seen.update(kwargs)
+        return jnp.array(0.0)
+
+    loss_fn = build_pess_loss_3site_multisite(bond_gates, config)
+    with _mock_patch(
+        "tenax.algorithms.pess_optimize.ctm_energy_implicit",
+        fake_ctm_energy_implicit,
+    ):
+        loss_fn(state)
+
+    assert seen.get("env_init") is None

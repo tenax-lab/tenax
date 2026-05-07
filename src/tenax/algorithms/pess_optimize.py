@@ -429,6 +429,8 @@ def _make_multisite_indices(D: int, d: int) -> tuple[TensorIndex, ...]:
 def build_pess_loss_3site_multisite(
     bond_gates: dict,
     config: CTMConfig,
+    *,
+    env_cache: dict | None = None,
 ) -> Callable[[IPESSState], jnp.ndarray]:
     """Build the AD loss closure for kagome iPESS via the 3-site multisite path.
 
@@ -438,6 +440,14 @@ def build_pess_loss_3site_multisite(
             6 entries keyed by ``frozenset({(name, dir), (nb_name, rev_dir)})``.
         config: CTM convergence settings (``chi``, ``max_iter``, ``conv_tol``,
             projector method, gauge, GMRES backward).
+        env_cache: Optional mutable dict for CTM env warm-starting across
+            gradient evaluations. When provided, each call reads
+            ``env_cache.get("envs")`` and threads it as ``env_init=`` into
+            the implicit-AD entry. The caller (typically
+            :func:`optimize_pess_3site_multisite_ad`) is responsible for
+            populating this dict after each accepted step via an eager
+            ``python_loop_ctm_converge``. Mirrors the iPEPS AD policy
+            plumbing in :func:`ipeps_ad_policy.make_ctm_energy_fn`.
 
     Returns:
         ``loss_fn(state: IPESSState) -> jnp.ndarray`` returning real scalar
@@ -483,6 +493,7 @@ def build_pess_loss_3site_multisite(
             A_norm = A / (jnp.linalg.norm(A) + 1e-12)
             site_tensors[_MULTISITE_NAME_TO_COORD[name]] = DenseTensor(A_norm, indices)
 
+        env_init = env_cache.get("envs") if env_cache is not None else None
         return ctm_energy_implicit(
             site_tensors,
             _MULTISITE_COORD_NEIGHBORS,
@@ -496,6 +507,7 @@ def build_pess_loss_3site_multisite(
             conv_method=config.ctm_conv_method,
             min_iter=config.min_iter,
             chi_ramp=config.chi_ramp,
+            env_init=env_init,
             energy_fn=_energy_fn,
             gmres_tol=config.gmres_tol,
             gmres_maxiter=config.gmres_maxiter,
