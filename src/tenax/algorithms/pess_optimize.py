@@ -166,9 +166,11 @@ def _initial_alpha(energy: float, slope: float) -> float:
     A constant shift in the supplied bond gates can drive ``f(x0) → 0``
     while the gradient remains nonzero (the gradient is shift-invariant);
     the bare ratio then collapses to ``alpha0 = 0`` and both Armijo and
-    Hager-Zhang accept it as a no-op step.  Floor ``|E|`` at ``1e-12`` so
-    we degrade to a small fixed-magnitude step in that degenerate regime
-    instead of stalling — see issue #401.
+    Hager-Zhang accept it as a no-op step.  Floor the *numerator*
+    ``|E|`` at ``1e-12`` so the heuristic still scales by ``|slope|`` in
+    the low-energy regime — a fixed step would be far too coarse for
+    stiff objectives where the optimal step is ``|E_floor| / |slope|``
+    several orders of magnitude below it (see issue #401, PR #404 review).
 
     The floor is gated on a nonzero slope.  When the slope is also
     essentially zero we are at a true stationary point (zero gradient or
@@ -180,9 +182,7 @@ def _initial_alpha(energy: float, slope: float) -> float:
     """
     if abs(slope) < 1e-30:
         return 0.0
-    if abs(energy) < 1e-12:
-        return min(1.0, 1e-3 / max(abs(slope), 1.0))
-    return min(1.0, abs(energy) / max(abs(slope), 1e-30))
+    return min(1.0, max(abs(energy), 1e-12) / max(abs(slope), 1e-30))
 
 
 def _backtracking_line_search(

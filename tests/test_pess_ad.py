@@ -274,6 +274,35 @@ def test_initial_alpha_zero_when_slope_zero():
     assert _initial_alpha(energy=0.0, slope=1e-40) == 0.0
 
 
+def test_initial_alpha_scales_with_slope_in_low_energy_regime():
+    """``_initial_alpha`` must keep slope-scaling when energy is tiny.
+
+    Regression for the second PR-#404 review: a slope-independent floor
+    (e.g. ``alpha0 = 1e-3`` whenever ``|E| < 1e-12``) is far too coarse
+    for stiff or poorly scaled low-energy objectives.  At
+    ``|E| = 5e-13`` and ``|slope| = 1e-3`` the optimal step is
+    ``|E|/|slope| = 5e-10``; Armijo at most reaches ``1e-3 · 0.5⁷ ≈
+    7.8e-6`` from a ``1e-3`` start, missing it by orders of magnitude.
+
+    Floor the *numerator* ``|E|`` at ``1e-12`` so the heuristic stays
+    ``|E_floor|/|slope|`` and tracks the slope: at ``|slope| = 1e-3``
+    we get ``alpha0 = 1e-9`` (close to the optimum), at
+    ``|slope| = 1e-6`` we get ``alpha0 = 1e-6`` (capped well below 1).
+    """
+    # Stiff low-energy regime: original |E|/|slope| was 5e-10, floor only
+    # bumps it to 1e-9 (still within an Armijo bisection of optimal).
+    alpha = _initial_alpha(energy=5e-13, slope=-1e-3)
+    assert 1e-10 < alpha < 1e-2, (
+        f"alpha0 should track |E_floor|/|slope| ~ 1e-9, got {alpha}"
+    )
+    # Doubling |slope| should roughly halve alpha0 — confirms the heuristic
+    # is still slope-scaled rather than a fixed step.
+    alpha_2x = _initial_alpha(energy=5e-13, slope=-2e-3)
+    assert alpha_2x == pytest.approx(alpha / 2.0, rel=1e-9)
+    # Normal regime (|E| > 1e-12) is unchanged by the floor.
+    assert _initial_alpha(energy=0.1, slope=-100.0) == pytest.approx(1e-3, rel=1e-9)
+
+
 def test_backtracking_line_search_progresses_with_zero_energy():
     """Backtracking line search descends on a constant-shifted quadratic.
 
