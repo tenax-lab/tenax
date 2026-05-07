@@ -281,23 +281,35 @@ def _ctm_tensor_sweep_multisite(
                     projector_backward=projector_backward,
                 )
     elif recipe == "2x2":
-        # The 2x2 plaquette is always rooted at the cell ``s`` whose env is
-        # being updated, with neighbors right (TR), bottom (BL) and
-        # right-then-bottom (BR).  This matches variPEPS's ``do_*_absorption``
-        # functions: each direction's projector uses the 4-site plaquette at
-        # offsets {(0,0), (1,0), (0,1), (1,1)} from the anchor cell, and the
-        # ``direction`` argument selects which seam is compressed.
+        # The 2x2 plaquette is rooted at the cell ``coord`` whose env is
+        # being updated; the plaquette extends to (right, bottom,
+        # right-then-bottom) of ``coord``.  For each direction the projector
+        # truncates the corresponding internal seam of the plaquette and the
+        # updated corners/edges replace ``envs[coord]``'s same-side fields.
+        # This mirrors the variPEPS-style "1x1 with 2x2 projector" absorption
+        # in spirit, using the 4-cell plaquette only for the projector
+        # while keeping the 1x1 absorption topology (anchor cell == target
+        # cell == env being updated).
+        #
+        # Snapshot pre-direction envs so each plaquette in this direction
+        # uses the SAME pre-direction environment, matching variPEPS's
+        # column/row-buffered absorption.  Without the snapshot, processing
+        # cells in sequence on a multisite unitcell would mean later
+        # plaquettes see partially-updated env tensors, which destabilises
+        # convergence.
         for direction, move_fn_2x2 in _DIRECTION_MOVES_2X2:
+            envs_old = dict(envs)
             for coord in _sort_coords_for_direction(all_coords, direction):
-                s_TR = neighbors[coord]["right"]
-                s_BL = neighbors[coord]["bottom"]
+                s_TL = coord
+                s_TR = neighbors[s_TL]["right"]
+                s_BL = neighbors[s_TL]["bottom"]
                 s_BR = neighbors[s_TR]["bottom"]
                 envs[coord] = move_fn_2x2(
-                    envs[coord],
-                    envs[s_TR],
-                    envs[s_BL],
-                    envs[s_BR],
-                    double_layers[coord],
+                    envs_old[s_TL],
+                    envs_old[s_TR],
+                    envs_old[s_BL],
+                    envs_old[s_BR],
+                    double_layers[s_TL],
                     double_layers[s_TR],
                     double_layers[s_BL],
                     double_layers[s_BR],
