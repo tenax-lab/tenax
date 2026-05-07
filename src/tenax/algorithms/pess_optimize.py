@@ -554,7 +554,11 @@ def optimize_pess_3site_multisite_ad(
     """
     import optax
 
-    # Env warm-start cache (mirrors _optimize_gs_ad_multisite #317).
+    # Env warm-start cache. Analogous to but simpler than
+    # _optimize_gs_ad_multisite — no stall recovery, no best_env_cache
+    # snapshot, no fresh-CTM final eval. The env never escapes back to
+    # the caller, so trajectory-end env divergence from best_params is
+    # currently harmless.
     _env_cache: dict[str, dict] = {}
     loss_fn_state = build_pess_loss_3site_multisite(
         bond_gates, config, env_cache=_env_cache
@@ -629,7 +633,11 @@ def optimize_pess_3site_multisite_ad(
         params, last_energy, alpha = _run_line_search(
             line_search_method, params, direction, grads, last_energy, loss, grad_fn
         )
-        _update_env_cache(params)
+        # Skip refresh on rejected steps (alpha == 0): params is unchanged
+        # from the prior iterate so the cache is already current, and the
+        # next line breaks the loop anyway.
+        if alpha != 0.0:
+            _update_env_cache(params)
         if last_energy < best_energy:
             best_energy = last_energy
             best_params = params
