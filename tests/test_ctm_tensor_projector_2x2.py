@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
@@ -153,4 +154,228 @@ def test_build_enlarged_corner_top_left_numerical():
     )
     assert np.allclose(Q_dense, Q_ref, atol=1e-10, rtol=1e-10), (
         f"Q_TL mismatch: max abs diff = {np.max(np.abs(Q_dense - Q_ref))}"
+    )
+
+
+@pytest.mark.parametrize("position", ["top_right", "bottom_left", "bottom_right"])
+def test_build_enlarged_corner_other_positions_shape(position):
+    """Q_TR / Q_BL / Q_BR all rank-4 with appropriate seam labels."""
+    D, chi, d = 2, 4, 2
+    A = _dense_tensor_5leg(D, d, seed=0)
+    a = _build_double_layer_tensor(A)
+    env = initialize_ctm_tensor_env(A, chi)
+
+    if position == "top_right":
+        Q = _build_enlarged_corner(env.C2, env.T1, env.T2, a, position=position)
+        expected = {"chi_L": chi, "l2": D * D, "chi_B": chi, "d2": D * D}
+    elif position == "bottom_left":
+        Q = _build_enlarged_corner(env.C4, env.T3, env.T4, a, position=position)
+        expected = {"chi_R": chi, "r2": D * D, "chi_T": chi, "u2": D * D}
+    elif position == "bottom_right":
+        Q = _build_enlarged_corner(env.C3, env.T3, env.T2, a, position=position)
+        expected = {"chi_L": chi, "l2": D * D, "chi_T": chi, "u2": D * D}
+
+    assert Q.ndim == 4
+    shapes = {ind.label: ind.dim for ind in Q.indices}
+    assert shapes == expected, f"unexpected Q[{position}] shape: {shapes}"
+
+
+def test_build_enlarged_corner_top_right_numerical():
+    """Numerical cross-check for ``position="top_right"``.
+
+    Index labels:
+      C2: (c2_l, c2_d)         T1: (t1_l, u2, t1_r)
+      T2: (t2_u, r2, t2_d)     a:  (u2,   d2, l2,   r2)
+
+    Shared bonds in the contraction:
+      C2.c2_l — T1.t1_r   (chi)
+      C2.c2_d — T2.t2_u   (chi)
+      T1.u2   — a.u2      (D^2)
+      T2.r2   — a.r2      (D^2)
+    Remaining open legs: T1.t1_l (chi_L), T2.t2_d (chi_B), a.l2, a.d2.
+    """
+    D, chi, d = 2, 3, 2
+    A = _dense_tensor_5leg(D, d, seed=42)
+    a = _build_double_layer_tensor(A)  # (u2, d2, l2, r2)
+    a_arr = np.asarray(a.todense())
+
+    env = initialize_ctm_tensor_env(A, chi)
+
+    rng = np.random.default_rng(11)
+
+    def _randc(*shape: int) -> np.ndarray:
+        return rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+
+    C2_arr = _randc(chi, chi).astype(np.complex128)  # (c2_l, c2_d)
+    T1_arr = _randc(chi, D * D, chi).astype(np.complex128)  # (t1_l, u2, t1_r)
+    T2_arr = _randc(chi, D * D, chi).astype(np.complex128)  # (t2_u, r2, t2_d)
+
+    C2 = DenseTensor(jnp.asarray(C2_arr), env.C2.indices)
+    T1 = DenseTensor(jnp.asarray(T1_arr), env.T1.indices)
+    T2 = DenseTensor(jnp.asarray(T2_arr), env.T2.indices)
+
+    Q = _build_enlarged_corner(C2, T1, T2, a, position="top_right")
+    q_labels = [ind.label for ind in Q.indices]
+    assert set(q_labels) == {"chi_L", "l2", "chi_B", "d2"}, (
+        f"unexpected Q label set: {q_labels}"
+    )
+    Q_dense = np.asarray(Q.todense())
+
+    # Index legend:
+    #   a = c2_l / t1_r (chi)             b = c2_d / t2_u (chi)
+    #   c = u2 (D^2)                      e = r2 (D^2)
+    #   f = t1_l (chi_L)                  g = t2_d (chi_B)
+    #   h = l2 (D^2)                      k = d2 (D^2)
+    Q_ref = np.einsum(
+        "ab,fca,beg,ckhe->fghk",
+        C2_arr,
+        T1_arr,
+        T2_arr,
+        a_arr,
+        optimize=True,
+    )
+    # Q_ref axes: (f=chi_L, g=chi_B, h=l2, k=d2)
+    ref_label_to_axis = {"chi_L": 0, "chi_B": 1, "l2": 2, "d2": 3}
+    perm = tuple(ref_label_to_axis[lbl] for lbl in q_labels)
+    Q_ref = np.transpose(Q_ref, perm)
+
+    assert Q_dense.shape == Q_ref.shape, (
+        f"shape mismatch: tenax {Q_dense.shape}, ref {Q_ref.shape}"
+    )
+    assert np.allclose(Q_dense, Q_ref, atol=1e-10, rtol=1e-10), (
+        f"Q_TR mismatch: max abs diff = {np.max(np.abs(Q_dense - Q_ref))}"
+    )
+
+
+def test_build_enlarged_corner_bottom_left_numerical():
+    """Numerical cross-check for ``position="bottom_left"``.
+
+    Index labels:
+      C4: (c4_r, c4_u)         T3: (t3_r, d2, t3_l)
+      T4: (t4_d, l2, t4_u)     a:  (u2,   d2, l2,   r2)
+
+    Shared bonds in the contraction:
+      C4.c4_u — T4.t4_u   (chi)
+      C4.c4_r — T3.t3_r   (chi)
+      T3.d2   — a.d2      (D^2)
+      T4.l2   — a.l2      (D^2)
+    Remaining open legs: T4.t4_d (chi_T), T3.t3_l (chi_R), a.u2, a.r2.
+    """
+    D, chi, d = 2, 3, 2
+    A = _dense_tensor_5leg(D, d, seed=42)
+    a = _build_double_layer_tensor(A)
+    a_arr = np.asarray(a.todense())
+
+    env = initialize_ctm_tensor_env(A, chi)
+
+    rng = np.random.default_rng(13)
+
+    def _randc(*shape: int) -> np.ndarray:
+        return rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+
+    C4_arr = _randc(chi, chi).astype(np.complex128)  # (c4_r, c4_u)
+    T3_arr = _randc(chi, D * D, chi).astype(np.complex128)  # (t3_r, d2, t3_l)
+    T4_arr = _randc(chi, D * D, chi).astype(np.complex128)  # (t4_d, l2, t4_u)
+
+    C4 = DenseTensor(jnp.asarray(C4_arr), env.C4.indices)
+    T3 = DenseTensor(jnp.asarray(T3_arr), env.T3.indices)
+    T4 = DenseTensor(jnp.asarray(T4_arr), env.T4.indices)
+
+    Q = _build_enlarged_corner(C4, T3, T4, a, position="bottom_left")
+    q_labels = [ind.label for ind in Q.indices]
+    assert set(q_labels) == {"chi_R", "r2", "chi_T", "u2"}, (
+        f"unexpected Q label set: {q_labels}"
+    )
+    Q_dense = np.asarray(Q.todense())
+
+    # Index legend:
+    #   a = c4_r / t3_r (chi)             b = c4_u / t4_u (chi)
+    #   c = d2 (D^2)                      e = l2 (D^2)
+    #   f = t4_d (chi_T)                  g = t3_l (chi_R)
+    #   h = u2 (D^2)                      k = r2 (D^2)
+    Q_ref = np.einsum(
+        "ab,acg,feb,hcek->fghk",
+        C4_arr,
+        T3_arr,
+        T4_arr,
+        a_arr,
+        optimize=True,
+    )
+    # Q_ref axes: (f=chi_T, g=chi_R, h=u2, k=r2)
+    ref_label_to_axis = {"chi_T": 0, "chi_R": 1, "u2": 2, "r2": 3}
+    perm = tuple(ref_label_to_axis[lbl] for lbl in q_labels)
+    Q_ref = np.transpose(Q_ref, perm)
+
+    assert Q_dense.shape == Q_ref.shape, (
+        f"shape mismatch: tenax {Q_dense.shape}, ref {Q_ref.shape}"
+    )
+    assert np.allclose(Q_dense, Q_ref, atol=1e-10, rtol=1e-10), (
+        f"Q_BL mismatch: max abs diff = {np.max(np.abs(Q_dense - Q_ref))}"
+    )
+
+
+def test_build_enlarged_corner_bottom_right_numerical():
+    """Numerical cross-check for ``position="bottom_right"``.
+
+    Index labels:
+      C3: (c3_u, c3_l)         T3: (t3_r, d2, t3_l)
+      T2: (t2_u, r2, t2_d)     a:  (u2,   d2, l2,   r2)
+
+    Shared bonds in the contraction:
+      C3.c3_l — T3.t3_l   (chi)
+      C3.c3_u — T2.t2_d   (chi)
+      T3.d2   — a.d2      (D^2)
+      T2.r2   — a.r2      (D^2)
+    Remaining open legs: T3.t3_r (chi_L), T2.t2_u (chi_T), a.l2, a.u2.
+    """
+    D, chi, d = 2, 3, 2
+    A = _dense_tensor_5leg(D, d, seed=42)
+    a = _build_double_layer_tensor(A)
+    a_arr = np.asarray(a.todense())
+
+    env = initialize_ctm_tensor_env(A, chi)
+
+    rng = np.random.default_rng(17)
+
+    def _randc(*shape: int) -> np.ndarray:
+        return rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+
+    C3_arr = _randc(chi, chi).astype(np.complex128)  # (c3_u, c3_l)
+    T3_arr = _randc(chi, D * D, chi).astype(np.complex128)  # (t3_r, d2, t3_l)
+    T2_arr = _randc(chi, D * D, chi).astype(np.complex128)  # (t2_u, r2, t2_d)
+
+    C3 = DenseTensor(jnp.asarray(C3_arr), env.C3.indices)
+    T3 = DenseTensor(jnp.asarray(T3_arr), env.T3.indices)
+    T2 = DenseTensor(jnp.asarray(T2_arr), env.T2.indices)
+
+    Q = _build_enlarged_corner(C3, T3, T2, a, position="bottom_right")
+    q_labels = [ind.label for ind in Q.indices]
+    assert set(q_labels) == {"chi_L", "l2", "chi_T", "u2"}, (
+        f"unexpected Q label set: {q_labels}"
+    )
+    Q_dense = np.asarray(Q.todense())
+
+    # Index legend:
+    #   a = c3_u / t2_d (chi)             b = c3_l / t3_l (chi)
+    #   c = d2 (D^2)                      e = r2 (D^2)
+    #   f = t3_r (chi_L)                  g = t2_u (chi_T)
+    #   h = l2 (D^2)                      k = u2 (D^2)
+    Q_ref = np.einsum(
+        "ab,fcb,gea,kche->fghk",
+        C3_arr,
+        T3_arr,
+        T2_arr,
+        a_arr,
+        optimize=True,
+    )
+    # Q_ref axes: (f=chi_L, g=chi_T, h=l2, k=u2)
+    ref_label_to_axis = {"chi_L": 0, "chi_T": 1, "l2": 2, "u2": 3}
+    perm = tuple(ref_label_to_axis[lbl] for lbl in q_labels)
+    Q_ref = np.transpose(Q_ref, perm)
+
+    assert Q_dense.shape == Q_ref.shape, (
+        f"shape mismatch: tenax {Q_dense.shape}, ref {Q_ref.shape}"
+    )
+    assert np.allclose(Q_dense, Q_ref, atol=1e-10, rtol=1e-10), (
+        f"Q_BR mismatch: max abs diff = {np.max(np.abs(Q_dense - Q_ref))}"
     )

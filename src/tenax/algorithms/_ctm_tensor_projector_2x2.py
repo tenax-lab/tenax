@@ -45,7 +45,25 @@ def _build_enlarged_corner(
       t4_u -> relabel chi_B   (bottom seam to Q_BL)
       d2                       (bottom D^2 seam, original label kept)
 
-    Other positions raise NotImplementedError (Task 3 will add them).
+    Analogous recipes apply for the other three positions:
+
+      ``"top_right"``:
+        C   = C2   (c2_l, c2_d)
+        T_h = T1   (t1_l, u2, t1_r)
+        T_v = T2   (t2_u, r2, t2_d)
+        seams: t1_l -> chi_L, t2_d -> chi_B; l2 / d2 are open D^2 seams.
+
+      ``"bottom_left"``:
+        C   = C4   (c4_r, c4_u)
+        T_h = T3   (t3_r, d2, t3_l)
+        T_v = T4   (t4_d, l2, t4_u)
+        seams: t4_d -> chi_T, t3_l -> chi_R; u2 / r2 are open D^2 seams.
+
+      ``"bottom_right"``:
+        C   = C3   (c3_u, c3_l)
+        T_h = T3   (t3_r, d2, t3_l)
+        T_v = T2   (t2_u, r2, t2_d)
+        seams: t3_r -> chi_L, t2_u -> chi_T; l2 / u2 are open D^2 seams.
     """
     if position == "top_left":
         # C1.c1_r <-> T1.t1_l
@@ -59,4 +77,37 @@ def _build_enlarged_corner(
         # Relabel seams to chi_R, chi_B; r2 / d2 keep original labels.
         return Q.relabels({"t1_r": "chi_R", "t4_u": "chi_B"})
 
-    raise NotImplementedError(f"position={position!r} not implemented yet")
+    if position == "top_right":
+        # C2.c2_l <-> T1.t1_r
+        C_r = C.relabel("c2_l", "t1_r")
+        CT_h = contract(C_r, T_h)  # -> (c2_d, t1_l, u2)
+        # C2.c2_d <-> T2.t2_u
+        T_v_r = T_v.relabel("t2_u", "c2_d")
+        CTT = contract(CT_h, T_v_r)  # -> (t1_l, u2, r2, t2_d)
+        # T1.u2 <-> a.u2 ; T2.r2 <-> a.r2
+        Q = contract(CTT, a)  # -> (t1_l, t2_d, l2, d2) free legs
+        return Q.relabels({"t1_l": "chi_L", "t2_d": "chi_B"})
+
+    if position == "bottom_left":
+        # C4.c4_u <-> T4.t4_u
+        C_r = C.relabel("c4_u", "t4_u")
+        CT_v = contract(C_r, T_v)  # -> (c4_r, t4_d, l2)
+        # C4.c4_r <-> T3.t3_r
+        T_h_r = T_h.relabel("t3_r", "c4_r")
+        CTT = contract(CT_v, T_h_r)  # -> (t4_d, l2, d2, t3_l)
+        # T3.d2 <-> a.d2 ; T4.l2 <-> a.l2
+        Q = contract(CTT, a)  # -> (t4_d, t3_l, u2, r2) free legs
+        return Q.relabels({"t4_d": "chi_T", "t3_l": "chi_R"})
+
+    if position == "bottom_right":
+        # C3.c3_l <-> T3.t3_l
+        C_r = C.relabel("c3_l", "t3_l")
+        CT_h = contract(C_r, T_h)  # -> (c3_u, t3_r, d2)
+        # C3.c3_u <-> T2.t2_d
+        T_v_r = T_v.relabel("t2_d", "c3_u")
+        CTT = contract(CT_h, T_v_r)  # -> (t3_r, d2, t2_u, r2)
+        # T3.d2 <-> a.d2 ; T2.r2 <-> a.r2
+        Q = contract(CTT, a)  # -> (t3_r, t2_u, l2, u2) free legs
+        return Q.relabels({"t3_r": "chi_L", "t2_u": "chi_T"})
+
+    raise ValueError(f"unsupported position={position!r}")
