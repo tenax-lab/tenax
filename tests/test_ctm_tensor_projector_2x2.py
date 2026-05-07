@@ -494,3 +494,50 @@ def test_ctm_tensor_move_left_2x2_uniform_state_one_step():
     # Loose tolerance: recipes differ; on uniform single-step they're close.
     err = float(jnp.max(jnp.abs(sv_1x1 - sv_2x2)))
     assert err < 5e-2, f"C1 singular-value spectra disagree: max abs diff = {err:.2e}"
+
+
+@pytest.mark.parametrize("direction", ["right", "top", "bottom"])
+def test_ctm_tensor_move_2x2_one_step_other_directions(direction):
+    """One-step _ctm_tensor_move_<direction>_2x2 on a uniform state agrees
+    with the 1x1 version on the corresponding C corner's normalized SV spectrum."""
+    D, chi, d = 2, 4, 2
+    A = _dense_tensor_5leg(D, d, seed=2)
+    a = _build_double_layer_tensor(A)
+    env = initialize_ctm_tensor_env(A, chi)
+
+    from tenax.algorithms._ctm_tensor_moves import (
+        _ctm_tensor_move_bottom,
+        _ctm_tensor_move_bottom_2x2,
+        _ctm_tensor_move_right,
+        _ctm_tensor_move_right_2x2,
+        _ctm_tensor_move_top,
+        _ctm_tensor_move_top_2x2,
+    )
+
+    move_1x1 = {
+        "right": _ctm_tensor_move_right,
+        "top": _ctm_tensor_move_top,
+        "bottom": _ctm_tensor_move_bottom,
+    }[direction]
+    move_2x2 = {
+        "right": _ctm_tensor_move_right_2x2,
+        "top": _ctm_tensor_move_top_2x2,
+        "bottom": _ctm_tensor_move_bottom_2x2,
+    }[direction]
+    # The C corner that gets updated by each direction (for the SV check):
+    C_attr = {"right": "C2", "top": "C1", "bottom": "C4"}[direction]
+
+    env_1x1 = move_1x1(env, env, a, chi, "svd")
+    env_2x2 = move_2x2(env, env, env, env, a, a, a, a, chi, "svd")
+
+    sv_1x1 = jnp.linalg.svd(getattr(env_1x1, C_attr).todense(), compute_uv=False)
+    sv_2x2 = jnp.linalg.svd(getattr(env_2x2, C_attr).todense(), compute_uv=False)
+    sv_1x1 = jnp.sort(sv_1x1)[::-1]
+    sv_1x1 = sv_1x1 / jnp.sum(sv_1x1)
+    sv_2x2 = jnp.sort(sv_2x2)[::-1]
+    sv_2x2 = sv_2x2 / jnp.sum(sv_2x2)
+    err = float(jnp.max(jnp.abs(sv_1x1 - sv_2x2)))
+    assert err < 5e-2, (
+        f"direction={direction}: {C_attr} singular-value spectra disagree: "
+        f"max abs diff = {err:.2e}"
+    )

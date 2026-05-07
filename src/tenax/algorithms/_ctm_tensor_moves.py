@@ -5,10 +5,13 @@ from __future__ import annotations
 __all__ = [
     "_apply_projector_tensor",
     "_ctm_tensor_move_bottom",
+    "_ctm_tensor_move_bottom_2x2",
     "_ctm_tensor_move_left",
     "_ctm_tensor_move_left_2x2",
     "_ctm_tensor_move_right",
+    "_ctm_tensor_move_right_2x2",
     "_ctm_tensor_move_top",
+    "_ctm_tensor_move_top_2x2",
 ]
 
 import numpy as np
@@ -569,3 +572,272 @@ def _ctm_tensor_move_left_2x2(
     C4_new = _phase_fix_normalize_tensor(C4_new)
     T4_new = _phase_fix_normalize_tensor(T4_new)
     return env_TL._replace(C1=C1_new, C4=C4_new, T4=T4_new)
+
+
+def _ctm_tensor_move_right_2x2(
+    env_TL: CTMTensorEnv,
+    env_TR: CTMTensorEnv,
+    env_BL: CTMTensorEnv,
+    env_BR: CTMTensorEnv,
+    a_TL: Tensor,
+    a_TR: Tensor,
+    a_BL: Tensor,
+    a_BR: Tensor,
+    chi: int,
+    projector_method: str = "svd",
+) -> CTMTensorEnv:
+    """Right CTM move using 2x2 plaquette projectors. Updates env_TL.{C2,C3,T2}.
+
+    Mirrors :func:`_ctm_tensor_move_left_2x2` with ``direction="right"``: the
+    same four enlarged corners are built from the plaquette ``s_TL ── s_TR /
+    s_BL ── s_BR``, then a Fishman cross-projector pair for ``direction=
+    "right"`` is computed and absorbed into ``env_TL``'s right edge to
+    produce updated ``C2``, ``C3`` and ``T2`` tensors.
+
+    Args:
+        env_TL:   Env at the top-left site of the 2x2 plaquette (whose
+                  corners and edges are being updated).
+        env_TR:   Env at ``neighbors[s_TL]["right"]``.
+        env_BL:   Env at ``neighbors[s_TL]["bottom"]``.
+        env_BR:   Env at ``neighbors[s_TR]["bottom"]``.
+        a_TL ..a_BR:  Double-layer site tensors at the four plaquette sites.
+        chi:      Target bond dimension of the new chi seam.
+        projector_method:  Currently ignored — the 2x2 path uses Fishman
+                  SVD via :func:`_compute_2x2_projector`.  Kept for API
+                  parity with the 1x1 ``_ctm_tensor_move_right``.
+
+    Returns:
+        ``env_TL`` with ``C2``, ``C3`` and ``T2`` replaced by their
+        projected versions.
+    """
+    del projector_method  # 2x2 projector uses Fishman SVD unconditionally
+
+    # ---- Step 1: build the four enlarged corners. ----
+    Q_TL = _build_enlarged_corner(
+        env_TL.C1, env_TL.T1, env_TL.T4, a_TL, position="top_left"
+    )
+    Q_TR = _build_enlarged_corner(
+        env_TR.C2, env_TR.T1, env_TR.T2, a_TR, position="top_right"
+    )
+    Q_BL = _build_enlarged_corner(
+        env_BL.C4, env_BL.T3, env_BL.T4, a_BL, position="bottom_left"
+    )
+    Q_BR = _build_enlarged_corner(
+        env_BR.C3, env_BR.T3, env_BR.T2, a_BR, position="bottom_right"
+    )
+
+    # ---- Step 2: compute the (P_top, P_bot) projector pair. ----
+    P_top, P_bot = _compute_2x2_projector(
+        Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="right"
+    )
+
+    # ---- Step 3: build C2g, C3g, T2g from env_TL. ----
+    # Same C/T fusion structure as the 1x1 ``_ctm_tensor_move_right`` body.
+    C2_l = env_TL.C2.relabel("c2_l", "t1_r")
+    C2g = contract(C2_l, env_TL.T1)  # (c2_d, t1_l, u2)
+    C2g = _fuse_pair_by_label(C2g, "c2_d", "u2", "fused", IN)  # (fused, t1_l)
+
+    C3_u = env_TL.C3.relabel("c3_u", "t3_l")
+    C3g = contract(C3_u, env_TL.T3)  # (c3_l, t3_r, d2)
+    C3g = _fuse_pair_by_label(C3g, "c3_l", "d2", "fused", IN)  # (fused, t3_r)
+
+    T2_with_a = contract(env_TL.T2, a_TL)
+    T2g = _fuse_pair_by_label(T2_with_a, "t2_u", "u2", "fl", IN)
+    T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", OUT)
+
+    # ---- Step 4: convert (P_top, P_bot) to ``(fused, chi_new)`` projectors. ----
+    P_1 = _fuse_pair_by_label(P_top, "chi_outer", "fused_D2", "fused", IN)
+    P_1 = P_1.relabel("chi_new_top", "chi_new")
+    P_2 = _fuse_pair_by_label(P_bot, "chi_outer", "fused_D2", "fused", IN)
+    P_2 = P_2.relabel("chi_new_bot", "chi_new")
+
+    # ---- Step 5: absorb projectors into the env. ----
+    C2_new, C3_new, T2_new = _apply_projector_with_reembed(
+        P_1, P_2, C2g, C3g, T2g, "fl", "fr"
+    )
+
+    # ---- Step 6: relabel + flow-flip to env-standard labels. ----
+    C2_new = C2_new.relabels({"chi_new": "c2_l", "t1_l": "c2_d"})
+    C3_new = C3_new.relabels({"chi_new": "c3_u", "t3_r": "c3_l"})
+    T2_new = T2_new.relabels({"chi_new": "t2_u", "chi_new_r": "t2_d", "l2": "r2"})
+    T2_new = _flip_leg_flow(T2_new, "r2")  # l2(IN) -> r2 needs OUT
+
+    # ---- Step 7: phase-fix + normalize. ----
+    C2_new = _phase_fix_normalize_tensor(C2_new)
+    C3_new = _phase_fix_normalize_tensor(C3_new)
+    T2_new = _phase_fix_normalize_tensor(T2_new)
+    return env_TL._replace(C2=C2_new, C3=C3_new, T2=T2_new)
+
+
+def _ctm_tensor_move_top_2x2(
+    env_TL: CTMTensorEnv,
+    env_TR: CTMTensorEnv,
+    env_BL: CTMTensorEnv,
+    env_BR: CTMTensorEnv,
+    a_TL: Tensor,
+    a_TR: Tensor,
+    a_BL: Tensor,
+    a_BR: Tensor,
+    chi: int,
+    projector_method: str = "svd",
+) -> CTMTensorEnv:
+    """Top CTM move using 2x2 plaquette projectors. Updates env_TL.{C1,C2,T1}.
+
+    Mirrors :func:`_ctm_tensor_move_left_2x2` with ``direction="top"``.
+
+    Args:
+        env_TL:   Env at the top-left site of the 2x2 plaquette (whose
+                  corners and edges are being updated).
+        env_TR:   Env at ``neighbors[s_TL]["right"]``.
+        env_BL:   Env at ``neighbors[s_TL]["bottom"]``.
+        env_BR:   Env at ``neighbors[s_TR]["bottom"]``.
+        a_TL ..a_BR:  Double-layer site tensors at the four plaquette sites.
+        chi:      Target bond dimension of the new chi seam.
+        projector_method:  Ignored; kept for API parity.
+
+    Returns:
+        ``env_TL`` with ``C1``, ``C2`` and ``T1`` replaced.
+    """
+    del projector_method
+
+    # ---- Step 1: build the four enlarged corners. ----
+    Q_TL = _build_enlarged_corner(
+        env_TL.C1, env_TL.T1, env_TL.T4, a_TL, position="top_left"
+    )
+    Q_TR = _build_enlarged_corner(
+        env_TR.C2, env_TR.T1, env_TR.T2, a_TR, position="top_right"
+    )
+    Q_BL = _build_enlarged_corner(
+        env_BL.C4, env_BL.T3, env_BL.T4, a_BL, position="bottom_left"
+    )
+    Q_BR = _build_enlarged_corner(
+        env_BR.C3, env_BR.T3, env_BR.T2, a_BR, position="bottom_right"
+    )
+
+    # ---- Step 2: compute the (P_top, P_bot) projector pair. ----
+    P_top, P_bot = _compute_2x2_projector(Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="top")
+
+    # ---- Step 3: build C1g, C2g, T1g from env_TL. ----
+    # Same C/T fusion structure as the 1x1 ``_ctm_tensor_move_top`` body.
+    C1_d = env_TL.C1.relabel("c1_d", "t4_d")
+    C1g = contract(C1_d, env_TL.T4)  # (c1_r, l2, t4_u)
+    C1g = _fuse_pair_by_label(C1g, "c1_r", "l2", "fused", IN)  # (fused, t4_u)
+
+    C2_d = env_TL.C2.relabel("c2_d", "t2_u")
+    C2g = contract(C2_d, env_TL.T2)  # (c2_l, r2, t2_d)
+    C2g = _fuse_pair_by_label(C2g, "c2_l", "r2", "fused", IN)  # (fused, t2_d)
+
+    T1_with_a = contract(env_TL.T1, a_TL)
+    T1g = _fuse_pair_by_label(T1_with_a, "t1_l", "l2", "fl", IN)
+    T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", OUT)
+
+    # ---- Step 4: convert (P_top, P_bot) to ``(fused, chi_new)`` projectors. ----
+    P_1 = _fuse_pair_by_label(P_top, "chi_outer", "fused_D2", "fused", IN)
+    P_1 = P_1.relabel("chi_new_top", "chi_new")
+    P_2 = _fuse_pair_by_label(P_bot, "chi_outer", "fused_D2", "fused", IN)
+    P_2 = P_2.relabel("chi_new_bot", "chi_new")
+
+    # ---- Step 5: absorb projectors into the env. ----
+    C1_new, C2_new, T1_new = _apply_projector_with_reembed(
+        P_1, P_2, C1g, C2g, T1g, "fl", "fr"
+    )
+
+    # ---- Step 6: relabel + flow-flip to env-standard labels. ----
+    C1_new = C1_new.relabels({"chi_new": "c1_d", "t4_u": "c1_r"})
+    C2_new = C2_new.relabels({"chi_new": "c2_l", "t2_d": "c2_d"})
+    T1_new = T1_new.relabels({"chi_new": "t1_l", "chi_new_r": "t1_r", "d2": "u2"})
+    T1_new = _flip_leg_flow(T1_new, "u2")  # d2(OUT) -> u2 needs IN
+
+    # ---- Step 7: phase-fix + normalize. ----
+    C1_new = _phase_fix_normalize_tensor(C1_new)
+    C2_new = _phase_fix_normalize_tensor(C2_new)
+    T1_new = _phase_fix_normalize_tensor(T1_new)
+    return env_TL._replace(C1=C1_new, C2=C2_new, T1=T1_new)
+
+
+def _ctm_tensor_move_bottom_2x2(
+    env_TL: CTMTensorEnv,
+    env_TR: CTMTensorEnv,
+    env_BL: CTMTensorEnv,
+    env_BR: CTMTensorEnv,
+    a_TL: Tensor,
+    a_TR: Tensor,
+    a_BL: Tensor,
+    a_BR: Tensor,
+    chi: int,
+    projector_method: str = "svd",
+) -> CTMTensorEnv:
+    """Bottom CTM move using 2x2 plaquette projectors. Updates env_TL.{C4,C3,T3}.
+
+    Mirrors :func:`_ctm_tensor_move_left_2x2` with ``direction="bottom"``.
+
+    Args:
+        env_TL:   Env at the top-left site of the 2x2 plaquette (whose
+                  corners and edges are being updated).
+        env_TR:   Env at ``neighbors[s_TL]["right"]``.
+        env_BL:   Env at ``neighbors[s_TL]["bottom"]``.
+        env_BR:   Env at ``neighbors[s_TR]["bottom"]``.
+        a_TL ..a_BR:  Double-layer site tensors at the four plaquette sites.
+        chi:      Target bond dimension of the new chi seam.
+        projector_method:  Ignored; kept for API parity.
+
+    Returns:
+        ``env_TL`` with ``C4``, ``C3`` and ``T3`` replaced.
+    """
+    del projector_method
+
+    # ---- Step 1: build the four enlarged corners. ----
+    Q_TL = _build_enlarged_corner(
+        env_TL.C1, env_TL.T1, env_TL.T4, a_TL, position="top_left"
+    )
+    Q_TR = _build_enlarged_corner(
+        env_TR.C2, env_TR.T1, env_TR.T2, a_TR, position="top_right"
+    )
+    Q_BL = _build_enlarged_corner(
+        env_BL.C4, env_BL.T3, env_BL.T4, a_BL, position="bottom_left"
+    )
+    Q_BR = _build_enlarged_corner(
+        env_BR.C3, env_BR.T3, env_BR.T2, a_BR, position="bottom_right"
+    )
+
+    # ---- Step 2: compute the (P_top, P_bot) projector pair. ----
+    P_top, P_bot = _compute_2x2_projector(
+        Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="bottom"
+    )
+
+    # ---- Step 3: build C4g, C3g, T3g from env_TL. ----
+    # Same C/T fusion structure as the 1x1 ``_ctm_tensor_move_bottom`` body.
+    C4_r = env_TL.C4.relabel("c4_r", "t4_u")
+    C4g = contract(C4_r, env_TL.T4)  # (c4_u, t4_d, l2)
+    C4g = _fuse_pair_by_label(C4g, "c4_u", "l2", "fused", IN)  # (fused, t4_d)
+
+    C3_l = env_TL.C3.relabel("c3_l", "t2_d")
+    C3g = contract(C3_l, env_TL.T2)  # (c3_u, t2_u, r2)
+    C3g = _fuse_pair_by_label(C3g, "c3_u", "r2", "fused", IN)  # (fused, t2_u)
+
+    T3_with_a = contract(env_TL.T3, a_TL)
+    T3g = _fuse_pair_by_label(T3_with_a, "t3_r", "l2", "fl", IN)
+    T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", OUT)
+
+    # ---- Step 4: convert (P_top, P_bot) to ``(fused, chi_new)`` projectors. ----
+    P_1 = _fuse_pair_by_label(P_top, "chi_outer", "fused_D2", "fused", IN)
+    P_1 = P_1.relabel("chi_new_top", "chi_new")
+    P_2 = _fuse_pair_by_label(P_bot, "chi_outer", "fused_D2", "fused", IN)
+    P_2 = P_2.relabel("chi_new_bot", "chi_new")
+
+    # ---- Step 5: absorb projectors into the env. ----
+    C4_new, C3_new, T3_new = _apply_projector_with_reembed(
+        P_1, P_2, C4g, C3g, T3g, "fl", "fr"
+    )
+
+    # ---- Step 6: relabel + flow-flip to env-standard labels. ----
+    C4_new = C4_new.relabels({"chi_new": "c4_r", "t4_d": "c4_u"})
+    C3_new = C3_new.relabels({"chi_new": "c3_u", "t2_u": "c3_l"})
+    T3_new = T3_new.relabels({"chi_new": "t3_r", "chi_new_r": "t3_l", "u2": "d2"})
+    T3_new = _flip_leg_flow(T3_new, "d2")  # u2(IN) -> d2 needs OUT
+
+    # ---- Step 7: phase-fix + normalize. ----
+    C4_new = _phase_fix_normalize_tensor(C4_new)
+    C3_new = _phase_fix_normalize_tensor(C3_new)
+    T3_new = _phase_fix_normalize_tensor(T3_new)
+    return env_TL._replace(C4=C4_new, C3=C3_new, T3=T3_new)
