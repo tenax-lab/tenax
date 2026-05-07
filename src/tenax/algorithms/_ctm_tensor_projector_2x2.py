@@ -11,6 +11,7 @@ Used by ``_ctm_tensor_move_*_2x2`` in ``_ctm_tensor_moves.py``.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -20,6 +21,33 @@ from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, Tensor
 
 __all__ = ["_build_enlarged_corner", "_compute_2x2_projector"]
+
+
+def _gauge_fixed_svd(
+    M: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Reconstruction-preserving gauge-fixed SVD for the 2x2 projector.
+
+    Returns ``(U, s, Vh)`` with each column of ``U`` and matching row of
+    ``Vh`` rephased so the row of largest ``|U|`` is real-positive. Uses the
+    variPEPS / YASTN convention of putting ``conj(phase)`` on ``U`` and the
+    *bare* ``phase`` on ``Vh``, which preserves the SVD reconstruction
+    ``U @ diag(s) @ Vh == M`` even for complex inputs.
+
+    The shared :func:`tenax.algorithms._ad_primitives._fix_svd_signs` puts
+    ``conj(phase)`` on both factors, so ``U @ diag(s) @ Vh`` picks up a
+    ``conj(phase)**2`` factor. That is fine for the 1x1 Fishman closure
+    ``P1^H @ M @ P2 = I`` because the middle ``M`` absorbs the phase
+    mismatch, but it breaks the 2x2 closure ``P_bot @ P_top = I`` which
+    has no intervening matrix.
+    """
+    U, s, Vh = jnp.linalg.svd(M, full_matrices=False)
+    max_idx = jnp.argmax(jnp.abs(U), axis=0)  # (k,)
+    diag = U[max_idx, jnp.arange(U.shape[1])]
+    phases = jnp.where(jnp.abs(diag) > 0, diag / jnp.abs(diag), 1.0)
+    U = U * jnp.conj(phases)[None, :]
+    Vh = Vh * phases[:, None]
+    return U, s, Vh
 
 
 def _build_enlarged_corner(
@@ -177,8 +205,18 @@ def _compute_2x2_projector(
         auto-pairs them to give the closure tensor on the free legs
         ``(chi_new_top, chi_new_bot)``.
 
+    Note:
+        This implementation currently supports trivial-charge tensors only
+        (``DenseTensor`` or ``SymmetricTensor`` whose every leg has a single
+        sector ``[0]``).  The output charge bookkeeping hard-codes zeros, so
+        non-trivial U(1) sectors would silently be discarded.  A runtime
+        guard at function entry raises ``NotImplementedError`` when the
+        inputs carry non-trivial charges; symmetric support is a follow-up.
+        See ``docs/plans/2026-05-07-ctm-multisite-2x2-projector-design.md``.
+
     Raises:
-        NotImplementedError: For ``direction in {"right", "top", "bottom"}``.
+        NotImplementedError: For ``direction in {"right", "top", "bottom"}``,
+            or when any input tensor carries non-trivial charge sectors.
         ValueError: For unrecognized ``direction``.
 
     References:
@@ -190,6 +228,28 @@ def _compute_2x2_projector(
         raise NotImplementedError(f"direction={direction!r} not implemented yet")
     if direction != "left":
         raise ValueError(f"unsupported direction={direction!r}")
+
+    # Trivial-charge guard: this routine wraps the projector outputs with
+    # hard-coded zero-charge TensorIndex objects on the chi_outer / fused_D2
+    # / chi_new legs (see Step 6 below).  If any input tensor carries a
+    # non-trivial U(1) sector structure, that bookkeeping would silently
+    # discard the symmetry information, producing a wrong projector.  Until
+    # symmetric support lands as a follow-up, refuse to run on non-trivial
+    # inputs.
+    for name, tensor in (
+        ("Q_TL", Q_TL),
+        ("Q_TR", Q_TR),
+        ("Q_BL", Q_BL),
+        ("Q_BR", Q_BR),
+    ):
+        for axis, idx in enumerate(tensor.indices):
+            if idx.n_sectors != 1 or int(idx.sectors[0]) != 0:
+                raise NotImplementedError(
+                    "_compute_2x2_projector currently supports trivial-charge "
+                    "tensors only; symmetric support is a follow-up. "
+                    "See docs/plans/2026-05-07-ctm-multisite-2x2-projector-design.md."
+                    f" (Got {name}.indices[{axis}] with sectors={idx.sectors.tolist()}.)"
+                )
 
     # ---- Step 1: form top_M and bot_M (dense). ----
     # Q_TL labels: (chi_R, r2, chi_B, d2). Q_TR labels: (chi_L, l2, chi_B, d2).
@@ -223,10 +283,16 @@ def _compute_2x2_projector(
     bot_M = jnp.asarray(bot_T.todense()).reshape(chi_TR_b * D2_TR_b, chi_TL_b * D2_TL_b)
 
     # ---- Step 2: Fishman SVD on both row matrices. ----
+    # Gauge-fix each SVD via _gauge_fixed_svd: rotates U/Vh columns so the
+    # row of largest |U| is real-positive (variPEPS convention, preserves
+    # reconstruction even for complex inputs).  This is critical for AD —
+    # raw jnp.linalg.svd's gauge has tiny sign flips across iterations
+    # which produce non-smooth gradients (mirrors the 1x1 path in
+    # _ctm_projector.py, which uses _fix_svd_signs there).
     eps = 1e-12
-    top_U, top_S, top_Vh = jnp.linalg.svd(top_M, full_matrices=False)
+    top_U, top_S, top_Vh = _gauge_fixed_svd(top_M)
     top_S = _fishman_truncate_S(top_S, eps)
-    bot_U, bot_S, bot_Vh = jnp.linalg.svd(bot_M, full_matrices=False)
+    bot_U, bot_S, bot_Vh = _gauge_fixed_svd(bot_M)
     bot_S = _fishman_truncate_S(bot_S, eps)
 
     # ---- Step 3: form half-matrices (Fishman recipe). ----
@@ -245,8 +311,10 @@ def _compute_2x2_projector(
     bot_half = bot_half / bot_norm
 
     # ---- Step 4: small SVD of M_prime = bot_half @ top_half. ----
+    # Gauge-fix this SVD too so the truncated U_M / V_M_h are smooth
+    # under AD (see Step 2 comment).
     M_prime = bot_half @ top_half  # (kept_bot, kept_top)
-    U_M, S_M, V_M_h = jnp.linalg.svd(M_prime, full_matrices=False)
+    U_M, S_M, V_M_h = _gauge_fixed_svd(M_prime)
     k = min(chi, S_M.shape[0])
     U_M = U_M[:, :k]
     S_M = S_M[:k]
