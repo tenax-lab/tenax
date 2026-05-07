@@ -283,3 +283,43 @@ def test_build_pess_loss_3site_multisite_default_env_cache_is_none():
         loss_fn(state)
 
     assert seen.get("env_init") is None
+
+
+def test_optimize_pess_3site_multisite_ad_warm_starts_envs():
+    """After the first L-BFGS step, `_update_env_cache` populates the cache,
+    so the SECOND gradient evaluation receives a non-None env_init.
+
+    We monkey-patch ``ctm_energy_implicit`` to capture the ``env_init``
+    kwarg on every call and assert it transitions from None → not-None.
+    """
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    config = _make_test_config(chi=4)
+
+    captured_env_inits: list = []
+
+    # Wrap the real implicit-AD entry so the optimizer can still make progress
+    # but we observe the env_init kwarg on every call.
+    from tenax.algorithms._ctm_energy_ad import (
+        ctm_energy_implicit as real_ctm_energy_implicit,
+    )
+
+    def spy(*args, **kwargs):
+        captured_env_inits.append(kwargs.get("env_init"))
+        return real_ctm_energy_implicit(*args, **kwargs)
+
+    with _mock_patch("tenax.algorithms.pess_optimize.ctm_energy_implicit", spy):
+        optimize_pess_3site_multisite_ad(
+            state,
+            bond_gates,
+            config,
+            max_iter=2,
+            verbose=False,
+        )
+
+    assert len(captured_env_inits) >= 2, "loss must be called at least twice"
+    assert captured_env_inits[0] is None, "first call should be cold-start"
+    assert any(env is not None for env in captured_env_inits[1:]), (
+        "subsequent calls should warm-start from env_cache populated by "
+        "_update_env_cache"
+    )

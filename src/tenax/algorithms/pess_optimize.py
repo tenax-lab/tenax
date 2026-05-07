@@ -25,12 +25,16 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
+from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
 from tenax.algorithms._pess_multisite_energy import (
     compute_energy_pess_3site_multisite,
 )
 from tenax.algorithms.coarse_grain import CGGates, compute_energy_cg
-from tenax.algorithms.ipeps_ad_policy import validate_ctm_for_implicit_ad
+from tenax.algorithms.ipeps_ad_policy import (
+    ctm_converge_kwargs,
+    validate_ctm_for_implicit_ad,
+)
 from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.algorithms.pess import (
     IPESSState,
@@ -549,7 +553,11 @@ def optimize_pess_3site_multisite_ad(
     """
     import optax
 
-    loss_fn_state = build_pess_loss_3site_multisite(bond_gates, config)
+    # Env warm-start cache (mirrors _optimize_gs_ad_multisite #317).
+    _env_cache: dict[str, dict] = {}
+    loss_fn_state = build_pess_loss_3site_multisite(
+        bond_gates, config, env_cache=_env_cache
+    )
 
     params = {
         "R_a": initial_state.R_a,
@@ -570,6 +578,35 @@ def optimize_pess_3site_multisite_ad(
             lambdas=tuple(p["lambdas"]),
         )
 
+    def _build_site_tensors_for_warm_start(p: dict) -> dict:
+        """Eager (no-AD) build of coord-keyed DenseTensors for the warm-start
+        ``python_loop_ctm_converge`` call. Mirrors the loss-internal block."""
+        sites = pess_to_kagome_3site_multisite(
+            p["R_a"],
+            p["R_b"],
+            p["R_c"],
+            p["T_u"],
+            p["T_d"],
+            p["lambdas"],
+        )
+        D = sites["u"].shape[0]
+        d = int(next(iter(bond_gates.values())).shape[0])
+        indices = _make_multisite_indices(D, d)
+        site_tensors = {}
+        for name, A in sites.items():
+            A_norm = A / (jnp.linalg.norm(A) + 1e-12)
+            site_tensors[_MULTISITE_NAME_TO_COORD[name]] = DenseTensor(A_norm, indices)
+        return site_tensors
+
+    def _update_env_cache(p: dict) -> None:
+        site_tensors = _build_site_tensors_for_warm_start(p)
+        envs, _ = python_loop_ctm_converge(
+            site_tensors,
+            _MULTISITE_COORD_NEIGHBORS,
+            **ctm_converge_kwargs(config, env_init=_env_cache.get("envs")),
+        )
+        _env_cache["envs"] = envs
+
     def loss(p: dict) -> jnp.ndarray:
         return loss_fn_state(_params_to_state(p))
 
@@ -581,6 +618,7 @@ def optimize_pess_3site_multisite_ad(
     grad_fn = jax.value_and_grad(loss)
 
     last_energy = float(loss(params))
+    _update_env_cache(params)
     for step in range(max_iter):
         e_val, grads = grad_fn(params)
         last_energy = float(e_val)
@@ -588,6 +626,7 @@ def optimize_pess_3site_multisite_ad(
         params, last_energy, alpha = _run_line_search(
             line_search_method, params, direction, grads, last_energy, loss, grad_fn
         )
+        _update_env_cache(params)
         if verbose:
             print(
                 f"[optimize_pess_3site_multisite_ad] step {step + 1}/{max_iter}: "
