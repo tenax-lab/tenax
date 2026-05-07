@@ -11,6 +11,9 @@ freezes it bit-exact).
 
 from __future__ import annotations
 
+from dataclasses import replace as _dc_replace
+from unittest.mock import patch as _mock_patch
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -42,6 +45,20 @@ def _make_test_config(chi: int) -> CTMConfig:
         gmres_restart=20,
         chi_ramp=None,
     )
+
+
+def test_build_pess_loss_3site_multisite_rejects_non_svd_projector():
+    bad_config = _dc_replace(_make_test_config(chi=4), projector_method="eigh")
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    with pytest.raises(ValueError, match="projector_method"):
+        build_pess_loss_3site_multisite(bond_gates, bad_config)
+
+
+def test_build_pess_loss_3site_multisite_rejects_non_phase_gauge():
+    bad_config = _dc_replace(_make_test_config(chi=4), forward_gauge="sigma")
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    with pytest.raises(ValueError, match="forward_gauge"):
+        build_pess_loss_3site_multisite(bond_gates, bad_config)
 
 
 def test_pess_loss_returns_finite_real_scalar():
@@ -218,4 +235,141 @@ def test_optimize_pess_3site_multisite_ad_preserves_shapes_and_optimises_T_d():
     assert not jnp.array_equal(state_opt.T_d, state0.T_d), (
         "T_d unchanged after L-BFGS in the multisite path — the optimiser "
         "is silently freezing T_d (regression: it should be a live param)."
+    )
+
+
+def test_build_pess_loss_3site_multisite_passes_env_init_from_cache():
+    """When ``env_cache`` is provided, the loss reads ``envs`` from it and
+    forwards them as ``env_init=`` to the CTM AD entry point."""
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    config = _make_test_config(chi=4)
+    SENTINEL = object()
+    env_cache = {"envs": SENTINEL}
+
+    seen: dict = {}
+
+    def fake_ctm_energy_implicit(*args, **kwargs):
+        seen.update(kwargs)
+        return jnp.array(0.0)
+
+    loss_fn = build_pess_loss_3site_multisite(bond_gates, config, env_cache=env_cache)
+    with _mock_patch(
+        "tenax.algorithms.pess_optimize.ctm_energy_implicit",
+        fake_ctm_energy_implicit,
+    ):
+        loss_fn(state)
+
+    assert seen.get("env_init") is SENTINEL
+
+
+def test_build_pess_loss_3site_multisite_default_env_cache_is_none():
+    """No env_cache → env_init=None on every call (existing behavior)."""
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    config = _make_test_config(chi=4)
+
+    seen: dict = {}
+
+    def fake_ctm_energy_implicit(*args, **kwargs):
+        seen.update(kwargs)
+        return jnp.array(0.0)
+
+    loss_fn = build_pess_loss_3site_multisite(bond_gates, config)
+    with _mock_patch(
+        "tenax.algorithms.pess_optimize.ctm_energy_implicit",
+        fake_ctm_energy_implicit,
+    ):
+        loss_fn(state)
+
+    assert seen.get("env_init") is None
+
+
+def test_optimize_pess_3site_multisite_ad_warm_starts_envs():
+    """After the first L-BFGS step, `_update_env_cache` populates the cache,
+    so the SECOND gradient evaluation receives a non-None env_init.
+
+    We monkey-patch ``ctm_energy_implicit`` to capture the ``env_init``
+    kwarg on every call and assert it transitions from None → not-None.
+    """
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    config = _make_test_config(chi=4)
+
+    captured_env_inits: list = []
+
+    # Wrap the real implicit-AD entry so the optimizer can still make progress
+    # but we observe the env_init kwarg on every call.
+    from tenax.algorithms._ctm_energy_ad import (
+        ctm_energy_implicit as real_ctm_energy_implicit,
+    )
+
+    def spy(*args, **kwargs):
+        captured_env_inits.append(kwargs.get("env_init"))
+        return real_ctm_energy_implicit(*args, **kwargs)
+
+    with _mock_patch("tenax.algorithms.pess_optimize.ctm_energy_implicit", spy):
+        optimize_pess_3site_multisite_ad(
+            state,
+            bond_gates,
+            config,
+            max_iter=2,
+            verbose=False,
+        )
+
+    assert len(captured_env_inits) >= 2, "loss must be called at least twice"
+    assert captured_env_inits[0] is None, "first call should be cold-start"
+    assert any(env is not None for env in captured_env_inits[1:]), (
+        "subsequent calls should warm-start from env_cache populated by "
+        "_update_env_cache"
+    )
+
+
+def test_build_pess_loss_3site_multisite_forwards_projector_backward():
+    """`config.projector_backward` must be threaded through to ctm_energy_implicit."""
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    base_config = _make_test_config(chi=4)
+    config = _dc_replace(base_config, projector_backward="standard")
+
+    seen: dict = {}
+
+    def fake_ctm_energy_implicit(*args, **kwargs):
+        seen.update(kwargs)
+        return jnp.array(0.0)
+
+    loss_fn = build_pess_loss_3site_multisite(bond_gates, config)
+    with _mock_patch(
+        "tenax.algorithms.pess_optimize.ctm_energy_implicit",
+        fake_ctm_energy_implicit,
+    ):
+        loss_fn(state)
+
+    assert seen.get("projector_backward") == "standard"
+
+
+def test_optimize_pess_3site_multisite_ad_returns_best_seen_energy(capsys):
+    """The returned final energy is the minimum across all L-BFGS steps,
+    not the last iterate. Verified against the verbose log."""
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    config = _make_test_config(chi=4)
+
+    _, e_final = optimize_pess_3site_multisite_ad(
+        state,
+        bond_gates,
+        config,
+        max_iter=3,
+        verbose=True,
+    )
+    captured = capsys.readouterr().out
+    energies: list[float] = []
+    for line in captured.splitlines():
+        if "e =" in line:
+            tok = line.split("e =")[1].split()[0]
+            energies.append(float(tok))
+    assert energies, "verbose run should print per-step energies"
+    assert e_final == pytest.approx(min(energies), rel=1e-9, abs=1e-12), (
+        "returned energy should be the best (lowest) energy seen across "
+        f"the trajectory; got e_final={e_final}, min(energies)={min(energies)}"
     )

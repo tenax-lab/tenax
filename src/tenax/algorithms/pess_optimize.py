@@ -25,11 +25,16 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
+from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
 from tenax.algorithms._pess_multisite_energy import (
     compute_energy_pess_3site_multisite,
 )
 from tenax.algorithms.coarse_grain import CGGates, compute_energy_cg
+from tenax.algorithms.ipeps_ad_policy import (
+    ctm_converge_kwargs,
+    validate_ctm_for_implicit_ad,
+)
 from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.algorithms.pess import (
     IPESSState,
@@ -428,6 +433,8 @@ def _make_multisite_indices(D: int, d: int) -> tuple[TensorIndex, ...]:
 def build_pess_loss_3site_multisite(
     bond_gates: dict,
     config: CTMConfig,
+    *,
+    env_cache: dict | None = None,
 ) -> Callable[[IPESSState], jnp.ndarray]:
     """Build the AD loss closure for kagome iPESS via the 3-site multisite path.
 
@@ -437,6 +444,14 @@ def build_pess_loss_3site_multisite(
             6 entries keyed by ``frozenset({(name, dir), (nb_name, rev_dir)})``.
         config: CTM convergence settings (``chi``, ``max_iter``, ``conv_tol``,
             projector method, gauge, GMRES backward).
+        env_cache: Optional mutable dict for CTM env warm-starting across
+            gradient evaluations. When provided, each call reads
+            ``env_cache.get("envs")`` and threads it as ``env_init=`` into
+            the implicit-AD entry. The caller (typically
+            :func:`optimize_pess_3site_multisite_ad`) is responsible for
+            populating this dict after each accepted step via an eager
+            ``python_loop_ctm_converge``. Mirrors the iPEPS AD policy
+            plumbing in :func:`ipeps_ad_policy.make_ctm_energy_fn`.
 
     Returns:
         ``loss_fn(state: IPESSState) -> jnp.ndarray`` returning real scalar
@@ -444,6 +459,7 @@ def build_pess_loss_3site_multisite(
         through the implicit-AD multisite CTM; ``T_d`` participates in the
         gradient.
     """
+    validate_ctm_for_implicit_ad(config)
     # Infer physical dimension from any bond gate (each is shape (d,d,d,d)).
     d = int(next(iter(bond_gates.values())).shape[0])
 
@@ -481,6 +497,7 @@ def build_pess_loss_3site_multisite(
             A_norm = A / (jnp.linalg.norm(A) + 1e-12)
             site_tensors[_MULTISITE_NAME_TO_COORD[name]] = DenseTensor(A_norm, indices)
 
+        env_init = env_cache.get("envs") if env_cache is not None else None
         return ctm_energy_implicit(
             site_tensors,
             _MULTISITE_COORD_NEIGHBORS,
@@ -490,10 +507,12 @@ def build_pess_loss_3site_multisite(
             conv_tol=config.conv_tol,
             projector_method=config.projector_method,
             renormalize=config.renormalize,
+            projector_backward=config.projector_backward,
             forward_gauge=config.forward_gauge,
             conv_method=config.ctm_conv_method,
             min_iter=config.min_iter,
             chi_ramp=config.chi_ramp,
+            env_init=env_init,
             energy_fn=_energy_fn,
             gmres_tol=config.gmres_tol,
             gmres_maxiter=config.gmres_maxiter,
@@ -535,7 +554,15 @@ def optimize_pess_3site_multisite_ad(
     """
     import optax
 
-    loss_fn_state = build_pess_loss_3site_multisite(bond_gates, config)
+    # Env warm-start cache. Analogous to but simpler than
+    # _optimize_gs_ad_multisite — no stall recovery, no best_env_cache
+    # snapshot, no fresh-CTM final eval. The env never escapes back to
+    # the caller, so trajectory-end env divergence from best_params is
+    # currently harmless.
+    _env_cache: dict[str, dict] = {}
+    loss_fn_state = build_pess_loss_3site_multisite(
+        bond_gates, config, env_cache=_env_cache
+    )
 
     params = {
         "R_a": initial_state.R_a,
@@ -556,6 +583,35 @@ def optimize_pess_3site_multisite_ad(
             lambdas=tuple(p["lambdas"]),
         )
 
+    def _build_site_tensors_for_warm_start(p: dict) -> dict:
+        """Eager (no-AD) build of coord-keyed DenseTensors for the warm-start
+        ``python_loop_ctm_converge`` call. Mirrors the loss-internal block."""
+        sites = pess_to_kagome_3site_multisite(
+            p["R_a"],
+            p["R_b"],
+            p["R_c"],
+            p["T_u"],
+            p["T_d"],
+            p["lambdas"],
+        )
+        D = sites["u"].shape[0]
+        d = int(next(iter(bond_gates.values())).shape[0])
+        indices = _make_multisite_indices(D, d)
+        site_tensors = {}
+        for name, A in sites.items():
+            A_norm = A / (jnp.linalg.norm(A) + 1e-12)
+            site_tensors[_MULTISITE_NAME_TO_COORD[name]] = DenseTensor(A_norm, indices)
+        return site_tensors
+
+    def _update_env_cache(p: dict) -> None:
+        site_tensors = _build_site_tensors_for_warm_start(p)
+        envs, _ = python_loop_ctm_converge(
+            site_tensors,
+            _MULTISITE_COORD_NEIGHBORS,
+            **ctm_converge_kwargs(config, env_init=_env_cache.get("envs")),
+        )
+        _env_cache["envs"] = envs
+
     def loss(p: dict) -> jnp.ndarray:
         return loss_fn_state(_params_to_state(p))
 
@@ -567,6 +623,9 @@ def optimize_pess_3site_multisite_ad(
     grad_fn = jax.value_and_grad(loss)
 
     last_energy = float(loss(params))
+    _update_env_cache(params)
+    best_energy = last_energy
+    best_params = params
     for step in range(max_iter):
         e_val, grads = grad_fn(params)
         last_energy = float(e_val)
@@ -574,6 +633,14 @@ def optimize_pess_3site_multisite_ad(
         params, last_energy, alpha = _run_line_search(
             line_search_method, params, direction, grads, last_energy, loss, grad_fn
         )
+        # Skip refresh on rejected steps (alpha == 0): params is unchanged
+        # from the prior iterate so the cache is already current, and the
+        # next line breaks the loop anyway.
+        if alpha != 0.0:
+            _update_env_cache(params)
+        if last_energy < best_energy:
+            best_energy = last_energy
+            best_params = params
         if verbose:
             print(
                 f"[optimize_pess_3site_multisite_ad] step {step + 1}/{max_iter}: "
@@ -583,4 +650,4 @@ def optimize_pess_3site_multisite_ad(
         if alpha == 0.0:
             break
 
-    return _params_to_state(params), last_energy
+    return _params_to_state(best_params), best_energy

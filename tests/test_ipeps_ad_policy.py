@@ -194,3 +194,35 @@ def test_make_ctm_energy_fn_resolves_ctm_cfg_at_call_time():
         "make_ctm_energy_fn must observe the rebinding of ctm_cfg "
         f"(saw {seen_conv_tols!r})"
     )
+
+
+from tenax.algorithms.ipeps_ad_policy import validate_ctm_for_implicit_ad
+
+
+def test_validate_ctm_for_implicit_ad_rejects_non_svd():
+    cfg = CTMConfig(chi=8, projector_method="eigh")
+    with pytest.raises(ValueError, match="projector_method"):
+        validate_ctm_for_implicit_ad(cfg)
+
+
+def test_validate_ctm_for_implicit_ad_rejects_non_phase_gauge():
+    cfg = CTMConfig(chi=8, projector_method="svd", forward_gauge="sigma")
+    with pytest.raises(ValueError, match="forward_gauge"):
+        validate_ctm_for_implicit_ad(cfg)
+
+
+def test_validate_ctm_for_implicit_ad_rejects_non_elementwise_conv():
+    cfg = CTMConfig(chi=8, projector_method="svd", ctm_conv_method="sv")
+    with pytest.raises(ValueError, match="ctm_conv_method"):
+        validate_ctm_for_implicit_ad(cfg)
+
+
+def test_validate_ctm_for_implicit_ad_accepts_stable_combo():
+    cfg = CTMConfig(
+        chi=8,
+        projector_method="svd",
+        forward_gauge="phase",
+        ctm_conv_method="elementwise",
+    )
+    # No exception:
+    validate_ctm_for_implicit_ad(cfg)
