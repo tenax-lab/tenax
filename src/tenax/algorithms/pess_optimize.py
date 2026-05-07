@@ -30,6 +30,7 @@ from tenax.algorithms._pess_multisite_energy import (
     compute_energy_pess_3site_multisite,
 )
 from tenax.algorithms.coarse_grain import CGGates, compute_energy_cg
+from tenax.algorithms.ipeps_ad_policy import validate_ctm_for_implicit_ad
 from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.algorithms.pess import (
     IPESSState,
@@ -444,6 +445,7 @@ def build_pess_loss_3site_multisite(
         through the implicit-AD multisite CTM; ``T_d`` participates in the
         gradient.
     """
+    validate_ctm_for_implicit_ad(config)
     # Infer physical dimension from any bond gate (each is shape (d,d,d,d)).
     d = int(next(iter(bond_gates.values())).shape[0])
 

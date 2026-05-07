@@ -11,6 +11,8 @@ freezes it bit-exact).
 
 from __future__ import annotations
 
+from dataclasses import replace as _dc_replace
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -42,6 +44,20 @@ def _make_test_config(chi: int) -> CTMConfig:
         gmres_restart=20,
         chi_ramp=None,
     )
+
+
+def test_build_pess_loss_3site_multisite_rejects_non_svd_projector():
+    bad_config = _dc_replace(_make_test_config(chi=4), projector_method="eigh")
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    with pytest.raises(ValueError, match="projector_method"):
+        build_pess_loss_3site_multisite(bond_gates, bad_config)
+
+
+def test_build_pess_loss_3site_multisite_rejects_non_phase_gauge():
+    bad_config = _dc_replace(_make_test_config(chi=4), forward_gauge="sigma")
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    with pytest.raises(ValueError, match="forward_gauge"):
+        build_pess_loss_3site_multisite(bond_gates, bad_config)
 
 
 def test_pess_loss_returns_finite_real_scalar():
