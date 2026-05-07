@@ -348,6 +348,45 @@ def test_compute_2x2_projector_left_shape_and_isometry():
     assert err < 1e-6, f"P_top . P_bot != I; Frobenius err = {err:.2e}"
 
 
+@pytest.mark.parametrize("direction", ["right", "top", "bottom"])
+def test_compute_2x2_projector_other_directions_isometry(direction):
+    """Fishman cross-projector identity P_top . P_bot ~= I in all 4 directions.
+
+    Parametrised over the three new directions (right / top / bottom) added in
+    Task 7.  The same closure isometry that the existing ``"left"`` test
+    asserts must hold for every direction, independent of which seam is
+    being truncated -- the Fishman cross-projector pair is by construction a
+    partial isometry on the kept ``chi_new`` subspace.
+    """
+    D, chi, d = 2, 4, 2
+    A = _dense_tensor_5leg(D, d, seed=1)
+    a = _build_double_layer_tensor(A)
+    env = initialize_ctm_tensor_env(A, chi)
+
+    Q_TL = _build_enlarged_corner(env.C1, env.T1, env.T4, a, position="top_left")
+    Q_TR = _build_enlarged_corner(env.C2, env.T1, env.T2, a, position="top_right")
+    Q_BL = _build_enlarged_corner(env.C4, env.T3, env.T4, a, position="bottom_left")
+    Q_BR = _build_enlarged_corner(env.C3, env.T3, env.T2, a, position="bottom_right")
+
+    from tenax.algorithms._ctm_tensor_projector_2x2 import _compute_2x2_projector
+
+    P_top, P_bot = _compute_2x2_projector(
+        Q_TL, Q_TR, Q_BL, Q_BR, chi, direction=direction
+    )
+
+    assert P_top.ndim == 3
+    assert P_bot.ndim == 3
+
+    from tenax.contraction.contractor import contract
+
+    closure = contract(P_top, P_bot)
+    assert closure.ndim == 2
+    closure_dense = closure.todense()
+    eye = jnp.eye(closure_dense.shape[0], dtype=closure_dense.dtype)
+    err = float(jnp.linalg.norm(closure_dense - eye))
+    assert err < 1e-6, f"direction={direction}: P_top . P_bot != I; err = {err:.2e}"
+
+
 def test_build_enlarged_corner_bottom_right_numerical():
     """Numerical cross-check for ``position="bottom_right"``.
 

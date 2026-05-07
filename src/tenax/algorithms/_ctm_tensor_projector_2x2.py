@@ -190,8 +190,13 @@ def _compute_2x2_projector(
         Q_BL: Bottom-left enlarged corner (chi_R, r2, chi_T, u2).
         Q_BR: Bottom-right enlarged corner (chi_L, l2, chi_T, u2).
         chi:  Target bond dimension of the new chi_new leg.
-        direction: Only ``"left"`` is implemented.  Other directions are
-            a Task 7 follow-up.
+        direction: One of ``"left"``, ``"right"``, ``"top"``, ``"bottom"``
+            selecting which seam of the 2x2 plaquette is truncated:
+
+            - ``"left"``  truncates the LEFT-column chi seam (T4's chi),
+            - ``"right"`` truncates the RIGHT-column chi seam (T2's chi),
+            - ``"top"``   truncates the TOP-row chi seam (T1's chi),
+            - ``"bottom"`` truncates the BOTTOM-row chi seam (T3's chi).
 
     Returns:
         Pair ``(P_top, P_bot)`` of rank-3 :class:`DenseTensor` projectors:
@@ -203,7 +208,12 @@ def _compute_2x2_projector(
 
         ``chi_outer`` and ``fused_D2`` share names so :func:`contract`
         auto-pairs them to give the closure tensor on the free legs
-        ``(chi_new_top, chi_new_bot)``.
+        ``(chi_new_top, chi_new_bot)``.  For ``direction="top"``/``"bottom"``
+        the same shared label names are reused (the two projectors still
+        truncate to the same chi_new), even though the seam being cut is
+        physically a vertical row rather than a horizontal column.  Callers
+        of :func:`_compute_2x2_projector` are responsible for absorbing the
+        projectors into the appropriate sublattice edges.
 
     Note:
         This implementation currently supports trivial-charge tensors only
@@ -215,8 +225,8 @@ def _compute_2x2_projector(
         See ``docs/plans/2026-05-07-ctm-multisite-2x2-projector-design.md``.
 
     Raises:
-        NotImplementedError: For ``direction in {"right", "top", "bottom"}``,
-            or when any input tensor carries non-trivial charge sectors.
+        NotImplementedError: When any input tensor carries non-trivial
+            charge sectors.
         ValueError: For unrecognized ``direction``.
 
     References:
@@ -224,9 +234,7 @@ def _compute_2x2_projector(
         Corboz, Penc, Mila, Lauchli, PRB 84, 041108(R) (2011).
         variPEPS (Naumann et al.) Fishman two-projector implementation.
     """
-    if direction in ("right", "top", "bottom"):
-        raise NotImplementedError(f"direction={direction!r} not implemented yet")
-    if direction != "left":
+    if direction not in ("left", "right", "top", "bottom"):
         raise ValueError(f"unsupported direction={direction!r}")
 
     # Trivial-charge guard: this routine wraps the projector outputs with
@@ -251,38 +259,87 @@ def _compute_2x2_projector(
                     f" (Got {name}.indices[{axis}] with sectors={idx.sectors.tolist()}.)"
                 )
 
-    # ---- Step 1: form top_M and bot_M (dense). ----
-    # Q_TL labels: (chi_R, r2, chi_B, d2). Q_TR labels: (chi_L, l2, chi_B, d2).
-    # Disambiguate the OUTER bottom seams of Q_TL/Q_TR before contracting.
-    Q_TL_relab = Q_TL.relabels({"chi_B": "chi_B_TL", "d2": "d2_TL"})
-    Q_TR_relab = Q_TR.relabels(
-        {"chi_L": "chi_R", "l2": "r2", "chi_B": "chi_B_TR", "d2": "d2_TR"}
-    )
-    # Auto-pair (chi_R, r2). Free legs: (chi_B_TL, d2_TL, chi_B_TR, d2_TR).
-    top_T = contract(Q_TL_relab, Q_TR_relab)
-    # Order axes so rows = (chi_B_TL, d2_TL), cols = (chi_B_TR, d2_TR).
-    top_order = ("chi_B_TL", "d2_TL", "chi_B_TR", "d2_TR")
-    top_axes = tuple(top_T.labels().index(lbl) for lbl in top_order)
-    top_T = top_T.transpose(top_axes)
-    chi_TL, D2_TL, chi_TR, D2_TR = (idx.dim for idx in top_T.indices)
-    top_M = jnp.asarray(top_T.todense()).reshape(chi_TL * D2_TL, chi_TR * D2_TR)
+    # ---- Step 1: form the two halves (M1, M2) for the chosen direction. ----
+    # Each direction contracts one OUTER seam between two adjacent quarters,
+    # producing a 2D matrix whose rows/cols index the two remaining outer
+    # seams (chi+D^2 each).  The variPEPS analogues are:
+    #   "left"  -> M1=top row (TL.TR), M2=bottom row (BR.BL)
+    #   "right" -> M1=top row (TL.TR), M2=bottom row (BR.BL)  [different SVD halves]
+    #   "top"   -> M1=left  col (BL.TL), M2=right col (TR.BR)
+    #   "bottom"-> M1=left  col (BL.TL), M2=right col (TR.BR) [different SVD halves]
+    if direction in ("left", "right"):
+        # Top row product: Q_TL.right <-> Q_TR.left
+        # rows of M1 = TL.bottom (chi_B_TL, d2_TL); cols = TR.bottom (chi_B_TR, d2_TR).
+        Q_TL_relab = Q_TL.relabels({"chi_B": "chi_B_TL", "d2": "d2_TL"})
+        Q_TR_relab = Q_TR.relabels(
+            {"chi_L": "chi_R", "l2": "r2", "chi_B": "chi_B_TR", "d2": "d2_TR"}
+        )
+        top_T = contract(Q_TL_relab, Q_TR_relab)
+        top_order = ("chi_B_TL", "d2_TL", "chi_B_TR", "d2_TR")
+        top_axes = tuple(top_T.labels().index(lbl) for lbl in top_order)
+        top_T = top_T.transpose(top_axes)
+        chi_M1_row, D2_M1_row, chi_M1_col, D2_M1_col = (
+            idx.dim for idx in top_T.indices
+        )
+        M1 = jnp.asarray(top_T.todense()).reshape(
+            chi_M1_row * D2_M1_row, chi_M1_col * D2_M1_col
+        )
 
-    # Q_BR · Q_BL (note reversed order). Q_BR labels: (chi_L, l2, chi_T, u2).
-    # Q_BL labels: (chi_R, r2, chi_T, u2).
-    # Contract Q_BR.chi_L <-> Q_BL.chi_R and Q_BR.l2 <-> Q_BL.r2.
-    Q_BR_relab = Q_BR.relabels(
-        {"chi_L": "chi_R", "l2": "r2", "chi_T": "chi_T_BR", "u2": "u2_BR"}
-    )
-    Q_BL_relab = Q_BL.relabels({"chi_T": "chi_T_BL", "u2": "u2_BL"})
-    bot_T = contract(Q_BR_relab, Q_BL_relab)
-    # Rows = RIGHT side (Q_BR top seam), cols = LEFT side (Q_BL top seam).
-    bot_order = ("chi_T_BR", "u2_BR", "chi_T_BL", "u2_BL")
-    bot_axes = tuple(bot_T.labels().index(lbl) for lbl in bot_order)
-    bot_T = bot_T.transpose(bot_axes)
-    chi_TR_b, D2_TR_b, chi_TL_b, D2_TL_b = (idx.dim for idx in bot_T.indices)
-    bot_M = jnp.asarray(bot_T.todense()).reshape(chi_TR_b * D2_TR_b, chi_TL_b * D2_TL_b)
+        # Bottom row product: Q_BR.left <-> Q_BL.right (REVERSED ordering).
+        # rows of M2 = BR.top (chi_T_BR, u2_BR); cols = BL.top (chi_T_BL, u2_BL).
+        Q_BR_relab = Q_BR.relabels(
+            {"chi_L": "chi_R", "l2": "r2", "chi_T": "chi_T_BR", "u2": "u2_BR"}
+        )
+        Q_BL_relab = Q_BL.relabels({"chi_T": "chi_T_BL", "u2": "u2_BL"})
+        bot_T = contract(Q_BR_relab, Q_BL_relab)
+        bot_order = ("chi_T_BR", "u2_BR", "chi_T_BL", "u2_BL")
+        bot_axes = tuple(bot_T.labels().index(lbl) for lbl in bot_order)
+        bot_T = bot_T.transpose(bot_axes)
+        chi_M2_row, D2_M2_row, chi_M2_col, D2_M2_col = (
+            idx.dim for idx in bot_T.indices
+        )
+        M2 = jnp.asarray(bot_T.todense()).reshape(
+            chi_M2_row * D2_M2_row, chi_M2_col * D2_M2_col
+        )
+    else:
+        # direction in ("top", "bottom"): vertical cut.
+        # Left column product: Q_BL.top <-> Q_TL.bottom (analogue of variPEPS
+        # left_matrix = bottom_left_matrix @ top_left_matrix).
+        # rows of M1 = BL.right (chi_R_BL, r2_BL); cols = TL.right (chi_R_TL, r2_TL).
+        Q_BL_relab = Q_BL.relabels(
+            {"chi_T": "chi_B", "u2": "d2", "chi_R": "chi_R_BL", "r2": "r2_BL"}
+        )
+        Q_TL_relab = Q_TL.relabels({"chi_R": "chi_R_TL", "r2": "r2_TL"})
+        left_T = contract(Q_BL_relab, Q_TL_relab)
+        left_order = ("chi_R_BL", "r2_BL", "chi_R_TL", "r2_TL")
+        left_axes = tuple(left_T.labels().index(lbl) for lbl in left_order)
+        left_T = left_T.transpose(left_axes)
+        chi_M1_row, D2_M1_row, chi_M1_col, D2_M1_col = (
+            idx.dim for idx in left_T.indices
+        )
+        M1 = jnp.asarray(left_T.todense()).reshape(
+            chi_M1_row * D2_M1_row, chi_M1_col * D2_M1_col
+        )
 
-    # ---- Step 2: Fishman SVD on both row matrices. ----
+        # Right column product: Q_TR.bottom <-> Q_BR.top (analogue of variPEPS
+        # right_matrix = top_right_matrix @ bottom_right_matrix).
+        # rows of M2 = TR.left (chi_L_TR, l2_TR); cols = BR.left (chi_L_BR, l2_BR).
+        Q_TR_relab = Q_TR.relabels(
+            {"chi_B": "chi_T", "d2": "u2", "chi_L": "chi_L_TR", "l2": "l2_TR"}
+        )
+        Q_BR_relab = Q_BR.relabels({"chi_L": "chi_L_BR", "l2": "l2_BR"})
+        right_T = contract(Q_TR_relab, Q_BR_relab)
+        right_order = ("chi_L_TR", "l2_TR", "chi_L_BR", "l2_BR")
+        right_axes = tuple(right_T.labels().index(lbl) for lbl in right_order)
+        right_T = right_T.transpose(right_axes)
+        chi_M2_row, D2_M2_row, chi_M2_col, D2_M2_col = (
+            idx.dim for idx in right_T.indices
+        )
+        M2 = jnp.asarray(right_T.todense()).reshape(
+            chi_M2_row * D2_M2_row, chi_M2_col * D2_M2_col
+        )
+
+    # ---- Step 2: Fishman SVD on both halves. ----
     # Gauge-fix each SVD via _gauge_fixed_svd: rotates U/Vh columns so the
     # row of largest |U| is real-positive (variPEPS convention, preserves
     # reconstruction even for complex inputs).  This is critical for AD —
@@ -290,30 +347,66 @@ def _compute_2x2_projector(
     # which produce non-smooth gradients (mirrors the 1x1 path in
     # _ctm_projector.py, which uses _fix_svd_signs there).
     eps = 1e-12
-    top_U, top_S, top_Vh = _gauge_fixed_svd(top_M)
-    top_S = _fishman_truncate_S(top_S, eps)
-    bot_U, bot_S, bot_Vh = _gauge_fixed_svd(bot_M)
-    bot_S = _fishman_truncate_S(bot_S, eps)
+    M1_U, M1_S, M1_Vh = _gauge_fixed_svd(M1)
+    M1_S = _fishman_truncate_S(M1_S, eps)
+    M2_U, M2_S, M2_Vh = _gauge_fixed_svd(M2)
+    M2_S = _fishman_truncate_S(M2_S, eps)
 
-    # ---- Step 3: form half-matrices (Fishman recipe). ----
-    # top_half rows index the LEFT side of top_M (Q_TL bottom seam,
-    # which is the chi seam of the LEFT column at the top).
-    top_sqrtS = jnp.sqrt(top_S)
-    bot_sqrtS = jnp.sqrt(bot_S)
-    top_half = top_U * top_sqrtS[None, :]  # (chi_TL*D2_TL, kept_top)
-    # bot_half cols index the LEFT side of bot_M (Q_BL top seam).
-    bot_half = bot_sqrtS[:, None] * bot_Vh  # (kept_bot, chi_TL_b*D2_TL_b)
+    # ---- Step 3: pick which side of each Fishman SVD becomes the half. ----
+    # Each direction selects one side of M1 and one side of M2 such that the
+    # contracted axis of M_prime corresponds to the cut seam.
+    #
+    #   direction  | M1 half (rows / cols of M_prime)  | M2 half          | M_prime
+    #   -----------+-----------------------------------+------------------+--------
+    #   left       | M1_U sqrt(S)  rows = TL.bottom    | sqrt(S) M2_Vh    | M2 @ M1
+    #              |   (LEFT-col-top side)             |   cols = BL.top  | (cuts LEFT col)
+    #              |                                   |   (LEFT-col-bot) |
+    #   right      | sqrt(S) M1_Vh cols = TR.bottom    | M2_U sqrt(S)     | M1 @ M2
+    #              |   (RIGHT-col-top side)            |   rows = BR.top  | (cuts RIGHT col)
+    #              |                                   |   (RIGHT-col-bot)|
+    #   top        | sqrt(S) M1_Vh cols = TL.right     | M2_U sqrt(S)     | M1 @ M2
+    #              |   (TOP-row-left side)             |   rows = TR.left | (cuts TOP row)
+    #              |                                   |   (TOP-row-right)|
+    #   bottom     | M1_U sqrt(S)  rows = BL.right     | sqrt(S) M2_Vh    | M2 @ M1
+    #              |   (BOT-row-left side)             |   cols = BR.left | (cuts BOTTOM row)
+    #              |                                   |   (BOT-row-right)|
+    M1_sqrtS = jnp.sqrt(M1_S)
+    M2_sqrtS = jnp.sqrt(M2_S)
+    if direction in ("left", "bottom"):
+        # M_prime = M2 @ M1: P_first from M1's row side, P_second from M2's col side.
+        first_half = M1_U * M1_sqrtS[None, :]  # (rows_M1, k1)
+        second_half = M2_sqrtS[:, None] * M2_Vh  # (k2, cols_M2)
+        first_size = (chi_M1_row, D2_M1_row)
+        second_size = (chi_M2_col, D2_M2_col)
+        prime_order = "second_first"  # M_prime = second_half @ first_half
+    else:
+        # direction in ("right", "top"): M_prime = M1 @ M2.
+        first_half = M1_sqrtS[:, None] * M1_Vh  # (k1, cols_M1)
+        second_half = M2_U * M2_sqrtS[None, :]  # (rows_M2, k2)
+        first_size = (chi_M1_col, D2_M1_col)
+        second_size = (chi_M2_row, D2_M2_row)
+        prime_order = "first_second"  # M_prime = first_half @ second_half
 
     # variPEPS-style normalization for stability.
-    top_norm = jnp.linalg.norm(top_half) + 1e-30
-    bot_norm = jnp.linalg.norm(bot_half) + 1e-30
-    top_half = top_half / top_norm
-    bot_half = bot_half / bot_norm
+    first_norm = jnp.linalg.norm(first_half) + 1e-30
+    second_norm = jnp.linalg.norm(second_half) + 1e-30
+    first_half = first_half / first_norm
+    second_half = second_half / second_norm
 
-    # ---- Step 4: small SVD of M_prime = bot_half @ top_half. ----
+    # ---- Step 4: small SVD of M_prime. ----
     # Gauge-fix this SVD too so the truncated U_M / V_M_h are smooth
     # under AD (see Step 2 comment).
-    M_prime = bot_half @ top_half  # (kept_bot, kept_top)
+    if prime_order == "second_first":
+        # M_prime = second @ first. SVD: M_prime = U_M S_M V_M_h.
+        # P_first  ~ first  @ V_M S^-1/2  (row side -> chi_new)
+        # P_second ~ U_M^H S^-1/2 @ second (chi_new -> col side)
+        M_prime = second_half @ first_half
+    else:
+        # M_prime = first @ second. SVD: M_prime = U_M S_M V_M_h.
+        # P_first  ~ U_M^H S^-1/2 @ first (chi_new -> col side)
+        # P_second ~ second @ V_M S^-1/2 (row side -> chi_new)
+        M_prime = first_half @ second_half
+
     U_M, S_M, V_M_h = _gauge_fixed_svd(M_prime)
     k = min(chi, S_M.shape[0])
     U_M = U_M[:, :k]
@@ -328,17 +421,49 @@ def _compute_2x2_projector(
     S_inv_sqrt = jnp.where(mask, 1.0 / jnp.sqrt(S_safe), 0.0)
 
     # ---- Step 5: form Fishman cross-projectors. ----
-    # P_top = top_half @ V_M @ S_inv_sqrt  shape (chi_TL*D2_TL, k)
-    V_M = V_M_h.conj().T  # (kept_top, k)
-    P_top_dense = top_half @ V_M * S_inv_sqrt[None, :]
-    # P_bot = S_inv_sqrt @ U_M^dagger @ bot_half  shape (k, chi_TL_b*D2_TL_b)
-    P_bot_dense = (S_inv_sqrt[:, None] * U_M.conj().T) @ bot_half
+    if prime_order == "second_first":
+        # P_first ~ first @ V_M S^-1/2 with shape (rows_M1_size, k);
+        # P_second ~ S^-1/2 U_M^H @ second with shape (k, cols_M2_size).
+        V_M = V_M_h.conj().T  # (kept, k)
+        P_first_dense = first_half @ V_M * S_inv_sqrt[None, :]
+        P_second_dense = (S_inv_sqrt[:, None] * U_M.conj().T) @ second_half
+    else:
+        # P_first ~ S^-1/2 U_M^H @ first with shape (k, cols_M1_size);
+        # P_second ~ second @ V_M S^-1/2 with shape (rows_M2_size, k).
+        V_M = V_M_h.conj().T
+        P_first_dense = (S_inv_sqrt[:, None] * U_M.conj().T) @ first_half
+        P_second_dense = second_half @ V_M * S_inv_sqrt[None, :]
 
     # ---- Step 6: reshape and wrap. ----
+    # Per-direction packing: each of (P_first, P_second) corresponds to one
+    # of the two halves of the cut seam.  The labels chi_outer / fused_D2 are
+    # the SAME on both projectors so contract() auto-pairs them in the closure
+    # check.  P_top wraps with leading (chi_outer, fused_D2) and trailing
+    # chi_new_top; P_bot wraps with leading chi_new_bot and trailing
+    # (chi_outer, fused_D2).  Naming is "top"/"bot" regardless of direction
+    # for label uniformity (the closure test only checks ranks + identity).
     chi_new = k
+    if prime_order == "second_first":
+        # P_first has shape (rows_size, k) -- wrap as P_top (legs first).
+        # P_second has shape (k, cols_size) -- wrap as P_bot (k first).
+        P_top_dense = P_first_dense
+        P_bot_dense = P_second_dense
+        chi_top, D2_top = first_size
+        chi_bot, D2_bot = second_size
+    else:
+        # P_first has shape (k, cols_size); P_second has shape (rows_size, k).
+        # We want P_top to lead with (chi_outer, fused_D2) so wrap P_second
+        # there.  P_bot leads with k so wrap P_first there.
+        P_top_dense = P_second_dense  # (rows_size, k)
+        P_bot_dense = P_first_dense  # (k, cols_size)
+        chi_top, D2_top = second_size
+        chi_bot, D2_bot = first_size
+
     sym = U1Symmetry()
-    chi_charges = np.zeros(chi_TL, dtype=np.int32)
-    D2_charges = np.zeros(D2_TL, dtype=np.int32)
+    chi_top_charges = np.zeros(chi_top, dtype=np.int32)
+    D2_top_charges = np.zeros(D2_top, dtype=np.int32)
+    chi_bot_charges = np.zeros(chi_bot, dtype=np.int32)
+    D2_bot_charges = np.zeros(D2_bot, dtype=np.int32)
     new_top_charges = np.zeros(chi_new, dtype=np.int32)
     new_bot_charges = np.zeros(chi_new, dtype=np.int32)
 
@@ -347,29 +472,29 @@ def _compute_2x2_projector(
     # paths.
     P_top_idx = (
         TensorIndex.from_charges(
-            sym, chi_charges.copy(), FlowDirection.IN, label="chi_outer"
+            sym, chi_top_charges, FlowDirection.IN, label="chi_outer"
         ),
         TensorIndex.from_charges(
-            sym, D2_charges.copy(), FlowDirection.IN, label="fused_D2"
+            sym, D2_top_charges, FlowDirection.IN, label="fused_D2"
         ),
         TensorIndex.from_charges(
-            sym, new_top_charges.copy(), FlowDirection.OUT, label="chi_new_top"
+            sym, new_top_charges, FlowDirection.OUT, label="chi_new_top"
         ),
     )
     P_bot_idx = (
         TensorIndex.from_charges(
-            sym, new_bot_charges.copy(), FlowDirection.IN, label="chi_new_bot"
+            sym, new_bot_charges, FlowDirection.IN, label="chi_new_bot"
         ),
         TensorIndex.from_charges(
-            sym, chi_charges.copy(), FlowDirection.OUT, label="chi_outer"
+            sym, chi_bot_charges, FlowDirection.OUT, label="chi_outer"
         ),
         TensorIndex.from_charges(
-            sym, D2_charges.copy(), FlowDirection.OUT, label="fused_D2"
+            sym, D2_bot_charges, FlowDirection.OUT, label="fused_D2"
         ),
     )
 
-    P_top_arr = P_top_dense.reshape(chi_TL, D2_TL, chi_new)
-    P_bot_arr = P_bot_dense.reshape(chi_new, chi_TL_b, D2_TL_b)
+    P_top_arr = P_top_dense.reshape(chi_top, D2_top, chi_new)
+    P_bot_arr = P_bot_dense.reshape(chi_new, chi_bot, D2_bot)
 
     P_top = DenseTensor(P_top_arr, P_top_idx)
     P_bot = DenseTensor(P_bot_arr, P_bot_idx)
