@@ -39,7 +39,7 @@ from tenax.algorithms.pess import (
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.lattice import kagome
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor
+from tenax.core.tensor import DenseTensor, Tensor
 
 __all__ = [
     "build_pess_loss",
@@ -444,8 +444,17 @@ def build_pess_loss_3site_multisite(
         through the implicit-AD multisite CTM; ``T_d`` participates in the
         gradient.
     """
+    # Promote Tensor-valued gates to ndarray at entry so the rest of the
+    # closure (and the .shape inference below) sees a uniform jax.Array
+    # type — issue #402.  ``compute_energy_pess_3site_multisite`` accepts
+    # both, but its ``.shape[0]`` access here would otherwise crash on
+    # symmetry-aware / Tensor-protocol gates before reaching the supported
+    # downstream code path.
+    bond_gates_arr = {
+        k: (g.todense() if isinstance(g, Tensor) else g) for k, g in bond_gates.items()
+    }
     # Infer physical dimension from any bond gate (each is shape (d,d,d,d)).
-    d = int(next(iter(bond_gates.values())).shape[0])
+    d = int(next(iter(bond_gates_arr.values())).shape[0])
 
     def _energy_fn(site_tensors_coord, envs_coord, _gate):
         site_tensors_name = {
@@ -456,7 +465,7 @@ def build_pess_loss_3site_multisite(
             site_tensors_name,
             envs_name,
             _MULTISITE_LATTICE.neighbor_map,
-            bond_gates,
+            bond_gates_arr,
             d=d,
         )
 
