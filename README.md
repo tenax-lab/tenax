@@ -536,6 +536,33 @@ intra-cell + horizontal/vertical/diagonal inter-cell 2-site RDMs; see
 `examples/kagome_spin12_pess_ad_benchmark.py` and
 `examples/kagome_spin1_pess_ad_benchmark.py` for full sweeps.
 
+### Multisite path (3-site kagome on a square unit cell)
+
+For the multisite encoding `pess_to_kagome_3site_multisite`, where the
+kagome unit cell maps to three sites `(u, v, w)` on a square lattice and
+the energy uses 4 NN bonds + 2 marginalised-3-site contributions, use
+`build_pess_loss_3site_multisite` and `optimize_pess_3site_multisite_ad`:
+
+```python
+from tenax import (
+    build_pess_loss_3site_multisite,
+    optimize_pess_3site_multisite_ad,
+    pess_to_kagome_3site_multisite,
+)
+from tenax.algorithms._pess_multisite_energy import kagome_3site_bond_gates
+
+bond_gates = kagome_3site_bond_gates(delta=1.0, d=d)
+state, e_per_site = optimize_pess_3site_multisite_ad(
+    state, bond_gates, config, max_iter=30,
+)
+```
+
+The optimizer warm-starts CTM envs across L-BFGS steps via an internal
+`env_cache`, returns the best-seen energy across the trajectory, and
+gates `CTMConfig` at entry on the implicit-AD invariants
+(`projector_method='svd'`, `forward_gauge='phase'`,
+`ctm_conv_method='elementwise'`).
+
 ## Examples
 
 Runnable example scripts are in the `examples/` directory:
