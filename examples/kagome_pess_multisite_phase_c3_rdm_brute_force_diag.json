@@ -4,9 +4,9 @@
     "chi": 8,
     "state_kind": "su",
     "seed": 0,
-    "wall_seconds_state": 4.743083134293556,
-    "wall_seconds_brute_force": 95.38459700159729,
-    "wall_seconds_ctm": 3.0342430882155895,
+    "wall_seconds_state": 3.810382215306163,
+    "wall_seconds_brute_force": 93.34853639919311,
+    "wall_seconds_ctm": 3.282880896702409,
     "metrics": {
       "uv_h": {
         "frobenius_delta": 1.6773260133929524e-15,
@@ -51,9 +51,9 @@
     "chi": 16,
     "state_kind": "su",
     "seed": 0,
-    "wall_seconds_state": 3.6425449308007956,
-    "wall_seconds_brute_force": 94.88993091322482,
-    "wall_seconds_ctm": 2.591678955592215,
+    "wall_seconds_state": 3.8982267566025257,
+    "wall_seconds_brute_force": 92.91507476102561,
+    "wall_seconds_ctm": 2.7366884779185057,
     "metrics": {
       "uv_h": {
         "frobenius_delta": 1.6773260133929524e-15,
@@ -98,45 +98,45 @@
     "chi": 8,
     "state_kind": "su",
     "seed": 0,
-    "wall_seconds_state": 4.538560044951737,
-    "wall_seconds_brute_force": 12.368762507103384,
-    "wall_seconds_ctm": 6.771215928718448,
+    "wall_seconds_state": 3.5674366150051355,
+    "wall_seconds_brute_force": 11.842253888957202,
+    "wall_seconds_ctm": 2.9863137835636735,
     "metrics": {
       "uv_h": {
-        "frobenius_delta": 0.5529226948249634,
+        "frobenius_delta": 0.24678732009808338,
         "energy_bf": -0.07403136947296157,
-        "energy_ctm": -0.056795614071419094,
-        "energy_delta": 0.017235755401542478
+        "energy_ctm": -0.016478676330217018,
+        "energy_delta": 0.057552693142744554
       },
       "uv_v": {
-        "frobenius_delta": 0.5939273587024207,
+        "frobenius_delta": 0.44303652015155204,
         "energy_bf": -0.16972263004725344,
-        "energy_ctm": -0.20352748803730958,
-        "energy_delta": -0.03380485799005614
+        "energy_ctm": 0.02469259127448785,
+        "energy_delta": 0.19441522132174127
       },
       "wu_h": {
-        "frobenius_delta": 0.7426656214717401,
+        "frobenius_delta": 0.26988496016382985,
         "energy_bf": -0.07403147267823931,
-        "energy_ctm": -0.1650460630076669,
-        "energy_delta": -0.09101459032942757
+        "energy_ctm": -0.0700588698372157,
+        "energy_delta": 0.0039726028410236175
       },
       "wu_v": {
-        "frobenius_delta": 0.5049269432663676,
+        "frobenius_delta": 0.46716775263616084,
         "energy_bf": -0.16972308437503825,
-        "energy_ctm": -0.15350523446954284,
-        "energy_delta": 0.016217849905495407
+        "energy_ctm": -0.20001809690338115,
+        "energy_delta": -0.030295012528342907
       },
       "vw_row": {
-        "frobenius_delta": 0.5184936150743206,
+        "frobenius_delta": 0.3671379572880346,
         "energy_bf": -0.07403142252454518,
-        "energy_ctm": -0.06281929495620853,
-        "energy_delta": 0.011212127568336658
+        "energy_ctm": -0.07092285686716253,
+        "energy_delta": 0.003108565657382656
       },
       "vw_col": {
-        "frobenius_delta": 0.6185708811705556,
+        "frobenius_delta": 0.5870838112969247,
         "energy_bf": -0.16972286358960542,
-        "energy_ctm": -0.11870557521326629,
-        "energy_delta": 0.051017288376339134
+        "energy_ctm": -0.08823096694978251,
+        "energy_delta": 0.08149189663982291
       }
     }
   },
@@ -145,45 +145,45 @@
     "chi": 16,
     "state_kind": "su",
     "seed": 0,
-    "wall_seconds_state": 2.5465811574831605,
-    "wall_seconds_brute_force": 12.24000582844019,
-    "wall_seconds_ctm": 7.377487143501639,
+    "wall_seconds_state": 3.9396814526990056,
+    "wall_seconds_brute_force": 11.820011699572206,
+    "wall_seconds_ctm": 1.9674258548766375,
     "metrics": {
       "uv_h": {
-        "frobenius_delta": 0.10308482843478932,
+        "frobenius_delta": 0.24678732009808338,
         "energy_bf": -0.07403136947296157,
-        "energy_ctm": -0.0498266836802862,
-        "energy_delta": 0.024204685792675373
+        "energy_ctm": -0.016478676330217018,
+        "energy_delta": 0.057552693142744554
       },
       "uv_v": {
-        "frobenius_delta": 1.874296619032664,
+        "frobenius_delta": 0.44303652015155204,
         "energy_bf": -0.16972263004725344,
-        "energy_ctm": 0.067586580896776,
-        "energy_delta": 0.23730921094402943
+        "energy_ctm": 0.02469259127448785,
+        "energy_delta": 0.19441522132174127
       },
       "wu_h": {
-        "frobenius_delta": 0.25071967856337035,
+        "frobenius_delta": 0.26988496016382985,
         "energy_bf": -0.07403147267823931,
-        "energy_ctm": -0.056848694228672086,
-        "energy_delta": 0.017182778449567226
+        "energy_ctm": -0.0700588698372157,
+        "energy_delta": 0.0039726028410236175
       },
       "wu_v": {
-        "frobenius_delta": 0.5359815353832816,
+        "frobenius_delta": 0.46716775263616084,
         "energy_bf": -0.16972308437503825,
-        "energy_ctm": -0.1761008722473864,
-        "energy_delta": -0.006377787872348162
+        "energy_ctm": -0.20001809690338115,
+        "energy_delta": -0.030295012528342907
       },
       "vw_row": {
-        "frobenius_delta": 0.1837029496078711,
+        "frobenius_delta": 0.36713795728803456,
         "energy_bf": -0.07403142252454518,
-        "energy_ctm": -0.03818133665341994,
-        "energy_delta": 0.035850085871125245
+        "energy_ctm": -0.07092285686716253,
+        "energy_delta": 0.003108565657382656
       },
       "vw_col": {
-        "frobenius_delta": 0.5781228419757575,
+        "frobenius_delta": 0.5870838112969247,
         "energy_bf": -0.16972286358960542,
-        "energy_ctm": 0.0027426318015159323,
-        "energy_delta": 0.17246549539112135
+        "energy_ctm": -0.08823096694978251,
+        "energy_delta": 0.08149189663982291
       }
     }
   },
@@ -192,45 +192,45 @@
     "chi": 8,
     "state_kind": "su",
     "seed": 0,
-    "wall_seconds_state": 4.9949573101475835,
-    "wall_seconds_brute_force": 5.070845204405487,
-    "wall_seconds_ctm": 3.838064587675035,
+    "wall_seconds_state": 4.036557552404702,
+    "wall_seconds_brute_force": 4.601749773137271,
+    "wall_seconds_ctm": 3.5274878442287445,
     "metrics": {
       "uv_h": {
-        "frobenius_delta": 0.21231417158746607,
+        "frobenius_delta": 0.1509088121011866,
         "energy_bf": -0.10238814530574677,
-        "energy_ctm": -0.22364679280015098,
-        "energy_delta": -0.12125864749440421
+        "energy_ctm": -0.08657472922115106,
+        "energy_delta": 0.015813416084595716
       },
       "uv_v": {
-        "frobenius_delta": 0.5394231182920409,
+        "frobenius_delta": 0.26890491331445837,
         "energy_bf": -0.1155227250505037,
-        "energy_ctm": 0.0,
-        "energy_delta": 0.1155227250505037
+        "energy_ctm": -0.06506312712527718,
+        "energy_delta": 0.05045959792522653
       },
       "wu_h": {
-        "frobenius_delta": 0.533757814659697,
+        "frobenius_delta": 0.1657010721089514,
         "energy_bf": -0.09743559644798656,
-        "energy_ctm": 0.0,
-        "energy_delta": 0.09743559644798656
+        "energy_ctm": -0.0889048407430297,
+        "energy_delta": 0.008530755704956858
       },
       "wu_v": {
-        "frobenius_delta": 0.28088512040474733,
+        "frobenius_delta": 0.2590553333053473,
         "energy_bf": -0.11666509538326832,
-        "energy_ctm": -0.0628034816860761,
-        "energy_delta": 0.05386161369719221
+        "energy_ctm": -0.08045547972377454,
+        "energy_delta": 0.03620961565949378
       },
       "vw_row": {
-        "frobenius_delta": 0.5354418896646589,
+        "frobenius_delta": 0.13827660327596222,
         "energy_bf": -0.1017283604707009,
-        "energy_ctm": 0.0,
-        "energy_delta": 0.1017283604707009
+        "energy_ctm": -0.06514087763565468,
+        "energy_delta": 0.03658748283504622
       },
       "vw_col": {
-        "frobenius_delta": 0.30079729320038634,
+        "frobenius_delta": 0.22333931432402626,
         "energy_bf": -0.115679390110747,
-        "energy_ctm": -0.23928761244696528,
-        "energy_delta": -0.12360822233621828
+        "energy_ctm": -0.20694047906645202,
+        "energy_delta": -0.09126108895570502
       }
     }
   },
@@ -239,45 +239,45 @@
     "chi": 16,
     "state_kind": "su",
     "seed": 0,
-    "wall_seconds_state": 3.3235006872564554,
-    "wall_seconds_brute_force": 4.770539012737572,
-    "wall_seconds_ctm": 1050.119511788711,
+    "wall_seconds_state": 3.9919390976428986,
+    "wall_seconds_brute_force": 4.347896727733314,
+    "wall_seconds_ctm": 2.232629961334169,
     "metrics": {
       "uv_h": {
-        "frobenius_delta": 4.575173888301567,
+        "frobenius_delta": 0.5357143175054719,
         "energy_bf": -0.10238814530574677,
-        "energy_ctm": -0.8160066368039609,
-        "energy_delta": -0.7136184914982141
+        "energy_ctm": -6.374692398053954e-39,
+        "energy_delta": 0.10238814530574677
       },
       "uv_v": {
-        "frobenius_delta": 0.7980709181825201,
+        "frobenius_delta": 0.5394231182920409,
         "energy_bf": -0.1155227250505037,
-        "energy_ctm": -0.2048753335045817,
-        "energy_delta": -0.089352608454078
+        "energy_ctm": 0.0,
+        "energy_delta": 0.1155227250505037
       },
       "wu_h": {
-        "frobenius_delta": 0.8511595558840073,
+        "frobenius_delta": 0.5348337813067187,
         "energy_bf": -0.09743559644798656,
-        "energy_ctm": 0.26757680981163523,
-        "energy_delta": 0.3650124062596218
+        "energy_ctm": 0.00018141809771438588,
+        "energy_delta": 0.09761701454570094
       },
       "wu_v": {
-        "frobenius_delta": 1.893238334661502,
+        "frobenius_delta": 0.5380907698374018,
         "energy_bf": -0.11666509538326832,
-        "energy_ctm": 0.7007142238897768,
-        "energy_delta": 0.8173793192730451
+        "energy_ctm": 1.341306436971089e-20,
+        "energy_delta": 0.11666509538326832
       },
       "vw_row": {
-        "frobenius_delta": 1.2817314592414335,
+        "frobenius_delta": 0.13827660327595165,
         "energy_bf": -0.1017283604707009,
-        "energy_ctm": 0.013995261506322479,
-        "energy_delta": 0.11572362197702338
+        "energy_ctm": -0.06514087763565003,
+        "energy_delta": 0.036587482835050866
       },
       "vw_col": {
-        "frobenius_delta": 4.346891642773421,
+        "frobenius_delta": 0.5392359046953561,
         "energy_bf": -0.115679390110747,
-        "energy_ctm": -0.17226372534661355,
-        "energy_delta": -0.05658433523586655
+        "energy_ctm": 9.085724180895608e-21,
+        "energy_delta": 0.115679390110747
       }
     }
   }

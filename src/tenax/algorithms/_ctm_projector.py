@@ -759,7 +759,7 @@ def _compute_projector_tensor(
     C1g: Tensor,
     C4g: Tensor,
     chi: int,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
 ) -> tuple[Tensor, Tensor]:
@@ -783,7 +783,7 @@ def _compute_projector_tensor(
         C1g: Grown corner with labels ``(fused, <col1>)``.
         C4g: Grown corner with labels ``(fused, <col2>)``.
         chi: Target bond dimension.
-        projector_method: ``"eigh"``, ``"qr"``, or ``"svd"``.
+        projector_method: ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
         base_charges: Bond charges for per-sector allocation.
 
     Returns:

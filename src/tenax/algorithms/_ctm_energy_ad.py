@@ -43,7 +43,7 @@ def ctm_energy_explicit(
     chi: int = 20,
     warmup_steps: int = 3,
     backprop_steps: int = 20,
-    projector_method: str = "eigh",
+    projector_method: str = "svd",
     renormalize: bool = True,
     projector_backward: str = "auto",
     env_init: dict[Coord, CTMTensorEnv] | None = None,
