@@ -111,3 +111,64 @@ def test_rank_aware_regularized_svd_backward():
 
     g = jax.grad(loss)(M)
     assert jnp.all(jnp.isfinite(g)), "non-finite grad on rank-deficient input"
+
+
+@pytest.mark.algorithm
+def test_ctm_projector_rank_deficient_corner():
+    """_compute_projector_tensor on a rank-deficient corner-cross-product
+    must return finite projectors and a finite gradient through them."""
+    from tenax.algorithms._ctm_projector import _compute_projector_tensor
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import U1Symmetry
+    from tenax.core.tensor import DenseTensor
+
+    # Synthetic corners (D2, col) where the cross-product M = C1g^T @ C4g is
+    # rank-deficient: build C1g, C4g so the dummy last column of each is 0.
+    sym = U1Symmetry()
+    D2 = 8
+    col = 6
+    rank = 4
+
+    fused_idx = TensorIndex.from_charges(
+        sym, np.zeros(D2, dtype=np.int32), FlowDirection.IN, label="fused"
+    )
+    col1_idx = TensorIndex.from_charges(
+        sym, np.zeros(col, dtype=np.int32), FlowDirection.OUT, label="col1"
+    )
+    col2_idx = TensorIndex.from_charges(
+        sym, np.zeros(col, dtype=np.int32), FlowDirection.OUT, label="col2"
+    )
+
+    key = jax.random.PRNGKey(7)
+    k1, k2 = jax.random.split(key)
+    C1_data_full = jax.random.normal(k1, (D2, rank), dtype=jnp.float64)
+    C4_data_full = jax.random.normal(k2, (D2, rank), dtype=jnp.float64)
+    # Pad to (D2, col) with zero columns — makes M = C1g^T @ C4g rank-deficient.
+    C1_data = jnp.concatenate(
+        [C1_data_full, jnp.zeros((D2, col - rank), dtype=jnp.float64)], axis=1
+    )
+    C4_data = jnp.concatenate(
+        [C4_data_full, jnp.zeros((D2, col - rank), dtype=jnp.float64)], axis=1
+    )
+
+    C1g = DenseTensor(C1_data, (fused_idx, col1_idx))
+    C4g = DenseTensor(C4_data, (fused_idx, col2_idx))
+
+    chi = 4
+    P1, P2 = _compute_projector_tensor(C1g, C4g, chi, projector_method="svd")
+
+    P1d = np.asarray(P1.todense())
+    P2d = np.asarray(P2.todense())
+    assert np.all(np.isfinite(P1d)), "P1 contains non-finite entries"
+    assert np.all(np.isfinite(P2d)), "P2 contains non-finite entries"
+
+    # Differentiability: gradient w.r.t. C1g data must be finite.
+    def loss(C1_data_in):
+        C1g_in = DenseTensor(C1_data_in, (fused_idx, col1_idx))
+        P1_in, _ = _compute_projector_tensor(C1g_in, C4g, chi, projector_method="svd")
+        return jnp.sum(P1_in.todense() ** 2)
+
+    g = jax.grad(loss)(C1_data)
+    assert np.all(np.isfinite(g)), (
+        f"non-finite grad through rank-deficient projector: max|g|={float(jnp.max(jnp.abs(g)))}"
+    )
