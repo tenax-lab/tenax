@@ -62,6 +62,42 @@ def _fix_svd_signs(
     return U, s, Vh
 
 
+def _zero_subrank_singular_values(
+    s_trunc: jax.Array,
+    s_full: jax.Array,
+    k: int,
+    rel_tol: float = 1e-12,
+) -> jax.Array:
+    """Zero out singular values below ``rel_tol * s_full[0]`` AND boundary multiplets.
+
+    Combines two pruning rules:
+
+    1. Rank-aware: any ``s_trunc[i]`` with ``s_trunc[i] < rel_tol * s_full[0]``
+       is set to exactly 0. Preserves the static chi output dim (s_trunc.shape
+       stays ``(k,)``) but marks rank-deficient modes for the backward to treat
+       as discarded.
+    2. Multiplet-aware boundary: when ``k < s_full.shape[0]`` and the chi cut
+       lands inside a near-degenerate group, zero out any kept member matching
+       ``s_full[k-1]`` within tolerance. (Original Tenax behaviour, preserved.)
+
+    Returns ``s_trunc`` with the appropriate slots set to 0.
+    """
+    abs_floor = rel_tol * (s_full[0] + 1e-30)
+    s_trunc = jnp.where(s_trunc < abs_floor, 0.0, s_trunc)
+
+    if k < s_full.shape[0]:
+        boundary_val = s_full[k - 1]
+        next_val = s_full[k]
+        gap = boundary_val - next_val
+        mult_threshold = 1e-6 * (s_full[0] + 1e-30)
+        is_in_split_multiplet = (gap < mult_threshold) & (
+            jnp.abs(s_trunc - boundary_val) < mult_threshold
+        )
+        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+
+    return s_trunc
+
+
 # ---------------------------------------------------------------------------
 # 1. Truncated SVD with stable backward pass
 # ---------------------------------------------------------------------------
@@ -87,20 +123,7 @@ def truncated_svd_ad(
     U, s_full, Vh = jnp.linalg.svd(M, full_matrices=False)
     k = min(chi, s_full.shape[0])
     s_trunc = s_full[:k]
-
-    # Multiplet-aware truncation: if we cut through a degenerate group,
-    # zero out the partial members to keep the projector smooth.
-    if k < s_full.shape[0]:
-        boundary_val = s_full[k - 1]
-        next_val = s_full[k]
-        gap = boundary_val - next_val
-        threshold = 1e-6 * (s_full[0] + 1e-30)
-        # If the gap at the truncation point is too small, zero out
-        # all SVs matching the boundary value
-        is_in_split_multiplet = (gap < threshold) & (
-            jnp.abs(s_trunc - boundary_val) < threshold
-        )
-        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+    s_trunc = _zero_subrank_singular_values(s_trunc, s_full, k)
 
     U, s_trunc, Vh = U[:, :k], s_trunc, Vh[:k, :]
     U, s_trunc, Vh = _fix_svd_signs(U, s_trunc, Vh)
@@ -116,17 +139,7 @@ def _truncated_svd_ad_fwd(
     U_full, s_full, Vh_full = _fix_svd_signs(U_full, s_full, Vh_full)
     k = min(chi, s_full.shape[0])
     s_trunc = s_full[:k]
-
-    # Multiplet-aware truncation: zero out partial members of split multiplets
-    if k < s_full.shape[0]:
-        boundary_val = s_full[k - 1]
-        next_val = s_full[k]
-        gap = boundary_val - next_val
-        threshold = 1e-6 * (s_full[0] + 1e-30)
-        is_in_split_multiplet = (gap < threshold) & (
-            jnp.abs(s_trunc - boundary_val) < threshold
-        )
-        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+    s_trunc = _zero_subrank_singular_values(s_trunc, s_full, k)
 
     U = U_full[:, :k]
     Vh = Vh_full[:k, :]
@@ -175,11 +188,28 @@ def _svd_sector_backward(
     s_k = s[:k]
     V_k = Vh[:k, :].conj().T  # (n, k)
 
+    # Rank-aware F-matrix mask: zero F[i, j] where either sigma_i or sigma_j
+    # is below the rank threshold. The unregularized F entry for (sigma>0,
+    # sigma=0) pairs evaluates to ~1/sigma^2 — a gauge artifact that pumps
+    # arbitrary upstream cotangent components on the kept-but-zero columns
+    # of U/Vh into the gradient. Masking F drops those contributions while
+    # leaving the well-defined sigma>0 / sigma>0 entries unchanged.
+    #
+    # NOTE: we deliberately do NOT mask U_k, V_k, or proj_U_perp. Doing so
+    # would change the discarded-subspace projector for full-SVD on rank-
+    # deficient inputs (square unitary U has U @ U^T = I → proj_U_perp = 0
+    # natively; masking would make it nonzero and route upstream null-space
+    # dU components through 1/sigma_kept, producing a wrong answer that
+    # disagrees with finite-difference gradients).
+    eps_rank = 1e-12 * jnp.maximum(s[0], 1e-30)
+    keep_mask = (s_k > eps_rank).astype(s.dtype)  # (k,) -- 1.0 or 0.0
+
     # --- Lorentzian-regularized F-matrix ---
     s2 = s_k**2
     diff = s2[:, None] - s2[None, :]
     F = diff / (diff**2 + eps**2)
     F = F - jnp.diag(jnp.diag(F))
+    F = F * keep_mask[:, None] * keep_mask[None, :]
 
     # Antisymmetric parts of projected cotangents
     UtdU = U_k.conj().T @ dU  # (k, k)
@@ -192,7 +222,7 @@ def _svd_sector_backward(
     s_safe = jnp.where(s_k > eps, s_k, 1.0)
     s_inv = jnp.where(s_k > eps, 1.0 / s_safe, 0.0)
 
-    # Projectors onto complements of kept subspaces
+    # Projectors onto complements of kept subspaces (UNMASKED — see note above)
     proj_U_perp = jnp.eye(m) - U_k @ U_k.conj().T
     proj_V_perp = jnp.eye(n) - V_k @ V_k.conj().T
 
@@ -259,16 +289,7 @@ def truncated_svd_ad_vh_only(
     U, s_full, Vh = jnp.linalg.svd(M, full_matrices=False)
     k = min(chi, s_full.shape[0])
     s_trunc = s_full[:k]
-
-    if k < s_full.shape[0]:
-        boundary_val = s_full[k - 1]
-        next_val = s_full[k]
-        gap = boundary_val - next_val
-        threshold = 1e-6 * (s_full[0] + 1e-30)
-        is_in_split_multiplet = (gap < threshold) & (
-            jnp.abs(s_trunc - boundary_val) < threshold
-        )
-        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+    s_trunc = _zero_subrank_singular_values(s_trunc, s_full, k)
 
     _, s_trunc, Vh = _fix_svd_signs(U[:, :k], s_trunc, Vh[:k, :])
     return s_trunc, Vh
@@ -280,16 +301,7 @@ def _truncated_svd_ad_vh_only_fwd(M, chi):
     U_full, s_full, Vh_full = _fix_svd_signs(U_full, s_full, Vh_full)
     k = min(chi, s_full.shape[0])
     s_trunc = s_full[:k]
-
-    if k < s_full.shape[0]:
-        boundary_val = s_full[k - 1]
-        next_val = s_full[k]
-        gap = boundary_val - next_val
-        threshold = 1e-6 * (s_full[0] + 1e-30)
-        is_in_split_multiplet = (gap < threshold) & (
-            jnp.abs(s_trunc - boundary_val) < threshold
-        )
-        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+    s_trunc = _zero_subrank_singular_values(s_trunc, s_full, k)
 
     Vh = Vh_full[:k, :]
     residuals = (U_full, s_full, Vh_full, M, k)
