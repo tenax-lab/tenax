@@ -13,6 +13,32 @@ from dataclasses import replace
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 
 
+def validate_ctm_for_implicit_ad(ctm_cfg: CTMConfig) -> None:
+    """Raise ``ValueError`` unless ``ctm_cfg`` matches the empirically stable
+    implicit-AD CTM combination: SVD projectors, phase forward-gauge,
+    element-wise convergence check.
+
+    Centralizing this check lets the iPEPS dispatchers (operating on
+    :class:`iPEPSConfig`) and the PESS multisite path (operating on a raw
+    :class:`CTMConfig`) share a single source of truth for the invariant.
+    """
+    errors: list[str] = []
+    if ctm_cfg.projector_method != "svd":
+        errors.append(f"projector_method={ctm_cfg.projector_method!r} (expected 'svd')")
+    if ctm_cfg.forward_gauge != "phase":
+        errors.append(f"forward_gauge={ctm_cfg.forward_gauge!r} (expected 'phase')")
+    if ctm_cfg.ctm_conv_method != "elementwise":
+        errors.append(
+            f"ctm_conv_method={ctm_cfg.ctm_conv_method!r} (expected 'elementwise')"
+        )
+    if errors:
+        raise ValueError(
+            "Implicit AD requires CTM settings "
+            "(projector_method='svd', forward_gauge='phase', "
+            "ctm_conv_method='elementwise'). Got: " + ", ".join(errors)
+        )
+
+
 def resolve_projector_backward(
     config: iPEPSConfig,
     *,
@@ -32,26 +58,12 @@ def resolve_projector_backward(
         return config
 
     ctm_cfg = build_ad_ctm_config(config)
-    errors: list[str] = []
-    if ctm_cfg.projector_method != "svd":
-        errors.append(f"projector_method={ctm_cfg.projector_method!r} (expected 'svd')")
-    if ctm_cfg.forward_gauge != "phase":
-        errors.append(f"forward_gauge={ctm_cfg.forward_gauge!r} (expected 'phase')")
-    if ctm_cfg.ctm_conv_method != "elementwise":
-        errors.append(
-            f"ctm_conv_method={ctm_cfg.ctm_conv_method!r} (expected 'elementwise')"
-        )
-
-    if errors:
-        msg = (
-            "Implicit AD requires CTM settings "
-            "(projector_method='svd', forward_gauge='phase', "
-            "ctm_conv_method='elementwise'). Got: " + ", ".join(errors)
-        )
+    try:
+        validate_ctm_for_implicit_ad(ctm_cfg)
+    except ValueError as exc:
         if logger is not None:
-            logger.error(msg)
-        raise ValueError(msg)
-
+            logger.error(str(exc))
+        raise
     return config
 
 

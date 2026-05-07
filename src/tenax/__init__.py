@@ -158,8 +158,20 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "tenax.algorithms.pess",
         "pess_to_kagome_supersite",
     ),
+    "pess_to_kagome_3site_multisite": (
+        "tenax.algorithms.pess",
+        "pess_to_kagome_3site_multisite",
+    ),
     "build_pess_loss": ("tenax.algorithms.pess_optimize", "build_pess_loss"),
+    "build_pess_loss_3site_multisite": (
+        "tenax.algorithms.pess_optimize",
+        "build_pess_loss_3site_multisite",
+    ),
     "optimize_pess_ad": ("tenax.algorithms.pess_optimize", "optimize_pess_ad"),
+    "optimize_pess_3site_multisite_ad": (
+        "tenax.algorithms.pess_optimize",
+        "optimize_pess_3site_multisite_ad",
+    ),
     # auto_mpo
     "AutoMPO": ("tenax.algorithms.auto_mpo", "AutoMPO"),
     "HamiltonianTerm": ("tenax.algorithms.auto_mpo", "HamiltonianTerm"),
