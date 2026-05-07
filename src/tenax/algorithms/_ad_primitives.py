@@ -283,16 +283,7 @@ def truncated_svd_ad_vh_only(
     U, s_full, Vh = jnp.linalg.svd(M, full_matrices=False)
     k = min(chi, s_full.shape[0])
     s_trunc = s_full[:k]
-
-    if k < s_full.shape[0]:
-        boundary_val = s_full[k - 1]
-        next_val = s_full[k]
-        gap = boundary_val - next_val
-        threshold = 1e-6 * (s_full[0] + 1e-30)
-        is_in_split_multiplet = (gap < threshold) & (
-            jnp.abs(s_trunc - boundary_val) < threshold
-        )
-        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+    s_trunc = _zero_subrank_singular_values(s_trunc, s_full, k)
 
     _, s_trunc, Vh = _fix_svd_signs(U[:, :k], s_trunc, Vh[:k, :])
     return s_trunc, Vh
@@ -304,16 +295,7 @@ def _truncated_svd_ad_vh_only_fwd(M, chi):
     U_full, s_full, Vh_full = _fix_svd_signs(U_full, s_full, Vh_full)
     k = min(chi, s_full.shape[0])
     s_trunc = s_full[:k]
-
-    if k < s_full.shape[0]:
-        boundary_val = s_full[k - 1]
-        next_val = s_full[k]
-        gap = boundary_val - next_val
-        threshold = 1e-6 * (s_full[0] + 1e-30)
-        is_in_split_multiplet = (gap < threshold) & (
-            jnp.abs(s_trunc - boundary_val) < threshold
-        )
-        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+    s_trunc = _zero_subrank_singular_values(s_trunc, s_full, k)
 
     Vh = Vh_full[:k, :]
     residuals = (U_full, s_full, Vh_full, M, k)

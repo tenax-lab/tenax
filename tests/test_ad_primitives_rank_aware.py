@@ -62,3 +62,18 @@ def test_rank_aware_backward_matches_chi_equals_rank():
         atol=1e-10,
         err_msg="rank-aware: chi=rank+slack must give same grad as chi=rank",
     )
+
+
+@pytest.mark.core
+def test_rank_aware_vh_only_zeros_subrank_singular_values():
+    """Same rank-aware contract for the half-SVD vh_only variant."""
+    from tenax.algorithms._ad_primitives import truncated_svd_ad_vh_only
+
+    key = jax.random.PRNGKey(0)
+    A = jax.random.normal(key, (8, 4), dtype=jnp.float64)
+    M = A @ A.T
+
+    s, Vh = truncated_svd_ad_vh_only(M, chi=8)
+    assert s.shape == (8,)
+    assert jnp.all(s[:4] > 1e-6)
+    assert jnp.all(s[4:] == 0.0), f"vh_only zero modes leaked: s[4:] = {s[4:]}"
