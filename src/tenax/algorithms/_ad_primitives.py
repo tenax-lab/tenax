@@ -62,6 +62,42 @@ def _fix_svd_signs(
     return U, s, Vh
 
 
+def _zero_subrank_singular_values(
+    s_trunc: jax.Array,
+    s_full: jax.Array,
+    k: int,
+    rel_tol: float = 1e-12,
+) -> jax.Array:
+    """Zero out singular values below ``rel_tol * s_full[0]`` AND boundary multiplets.
+
+    Combines two pruning rules:
+
+    1. Rank-aware: any ``s_trunc[i]`` with ``s_trunc[i] < rel_tol * s_full[0]``
+       is set to exactly 0. Preserves the static chi output dim (s_trunc.shape
+       stays ``(k,)``) but marks rank-deficient modes for the backward to treat
+       as discarded.
+    2. Multiplet-aware boundary: when ``k < s_full.shape[0]`` and the chi cut
+       lands inside a near-degenerate group, zero out any kept member matching
+       ``s_full[k-1]`` within tolerance. (Original Tenax behaviour, preserved.)
+
+    Returns ``s_trunc`` with the appropriate slots set to 0.
+    """
+    abs_floor = rel_tol * (s_full[0] + 1e-30)
+    s_trunc = jnp.where(s_trunc < abs_floor, 0.0, s_trunc)
+
+    if k < s_full.shape[0]:
+        boundary_val = s_full[k - 1]
+        next_val = s_full[k]
+        gap = boundary_val - next_val
+        mult_threshold = 1e-6 * (s_full[0] + 1e-30)
+        is_in_split_multiplet = (gap < mult_threshold) & (
+            jnp.abs(s_trunc - boundary_val) < mult_threshold
+        )
+        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+
+    return s_trunc
+
+
 # ---------------------------------------------------------------------------
 # 1. Truncated SVD with stable backward pass
 # ---------------------------------------------------------------------------
@@ -87,20 +123,7 @@ def truncated_svd_ad(
     U, s_full, Vh = jnp.linalg.svd(M, full_matrices=False)
     k = min(chi, s_full.shape[0])
     s_trunc = s_full[:k]
-
-    # Multiplet-aware truncation: if we cut through a degenerate group,
-    # zero out the partial members to keep the projector smooth.
-    if k < s_full.shape[0]:
-        boundary_val = s_full[k - 1]
-        next_val = s_full[k]
-        gap = boundary_val - next_val
-        threshold = 1e-6 * (s_full[0] + 1e-30)
-        # If the gap at the truncation point is too small, zero out
-        # all SVs matching the boundary value
-        is_in_split_multiplet = (gap < threshold) & (
-            jnp.abs(s_trunc - boundary_val) < threshold
-        )
-        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+    s_trunc = _zero_subrank_singular_values(s_trunc, s_full, k)
 
     U, s_trunc, Vh = U[:, :k], s_trunc, Vh[:k, :]
     U, s_trunc, Vh = _fix_svd_signs(U, s_trunc, Vh)
@@ -116,17 +139,7 @@ def _truncated_svd_ad_fwd(
     U_full, s_full, Vh_full = _fix_svd_signs(U_full, s_full, Vh_full)
     k = min(chi, s_full.shape[0])
     s_trunc = s_full[:k]
-
-    # Multiplet-aware truncation: zero out partial members of split multiplets
-    if k < s_full.shape[0]:
-        boundary_val = s_full[k - 1]
-        next_val = s_full[k]
-        gap = boundary_val - next_val
-        threshold = 1e-6 * (s_full[0] + 1e-30)
-        is_in_split_multiplet = (gap < threshold) & (
-            jnp.abs(s_trunc - boundary_val) < threshold
-        )
-        s_trunc = jnp.where(is_in_split_multiplet, 0.0, s_trunc)
+    s_trunc = _zero_subrank_singular_values(s_trunc, s_full, k)
 
     U = U_full[:, :k]
     Vh = Vh_full[:k, :]
