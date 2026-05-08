@@ -717,7 +717,13 @@ def _svd_projector_symmetric(
     p2_blocks: dict[tuple[int, ...], jax.Array] = {}
 
     for fq in sorted(sector_keep.keys()):
-        keep_indices = sorted(sector_keep[fq], reverse=True)
+        # SVD returns singular values in descending order, so kept indices
+        # in ascending order = top singular values first. This matches the
+        # dense path's ``[:k]`` convention and keeps the chi_new gauge
+        # consistent across the four corner moves. (Cf. eigh path, which
+        # uses descending-index because jnp.linalg.eigh returns ascending
+        # eigenvalues — the opposite of SVD.)
+        keep_indices = sorted(sector_keep[fq])
         n_q = len(keep_indices)
         chi_new_charges.extend([fq] * n_q)
 
@@ -816,12 +822,23 @@ def _compute_projector_tensor(
     # Reference: Fishman et al., PRB 98, 235148 (2018);
     #            YASTN proj_corners + regularize_1site_corners.
     if projector_method == "svd":
-        # Block-sparse SVD for SymmetricTensor (non-tracer)
+        # Block-sparse SVD for SymmetricTensor (non-tracer).
+        # The dense fallback below is intended only for DenseTensor inputs
+        # and the AD-traced backward path; for any non-traced SymmetricTensor
+        # pair, _svd_projector_symmetric handles per-sector SVD correctly,
+        # *including* the n_blocks==0 case (returns properly-shaped zero
+        # projectors via the M_q.size==0 skip). Earlier this condition was
+        # ``C1g.n_blocks > 0 and C4g.n_blocks > 0``, which dropped into the
+        # dense fallback whenever one corner was zero-truncated. Then
+        # ``C1g.todense() @ C4g.todense()`` could fail shape compatibility
+        # because the fused TensorIndex charges (and therefore dense sizes)
+        # differ between the two corners — producing the ``dot_general
+        # (24,) vs (20,)`` shape error reported in issue #408.
         if isinstance(C1g, SymmetricTensor) and isinstance(C4g, SymmetricTensor):
             has_tracers = isinstance(C1g._data, jax.core.Tracer) or isinstance(
                 C4g._data, jax.core.Tracer
             )
-            if not has_tracers and C1g.n_blocks > 0 and C4g.n_blocks > 0:
+            if not has_tracers:
                 fused_pos_chk = C1g.labels().index("fused")
                 c1_charges = C1g.indices[fused_pos_chk].charges
                 c4_charges = C4g.indices[fused_pos_chk].charges
