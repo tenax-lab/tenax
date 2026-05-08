@@ -658,7 +658,7 @@ def _ctm_tensor_move_left(
     T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", OUT)
 
     # Native projector
-    P_1, P_2 = _compute_projector_tensor(
+    P_1, P_2, _eps_t = _compute_projector_tensor(
         C1g, C4g, chi, projector_method, base_charges, projector_backward
     )
     C1_new, C4_new, T4_new = _apply_projector_with_reembed(
@@ -713,7 +713,7 @@ def _ctm_tensor_move_right(
     T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", OUT)
 
     # Native projector
-    P_1, P_2 = _compute_projector_tensor(
+    P_1, P_2, _eps_t = _compute_projector_tensor(
         C2g, C3g, chi, projector_method, base_charges, projector_backward
     )
     C2_new, C3_new, T2_new = _apply_projector_with_reembed(
@@ -767,7 +767,7 @@ def _ctm_tensor_move_top(
     T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", OUT)
 
     # Native projector
-    P_1, P_2 = _compute_projector_tensor(
+    P_1, P_2, _eps_t = _compute_projector_tensor(
         C1g, C2g, chi, projector_method, base_charges, projector_backward
     )
     C1_new, C2_new, T1_new = _apply_projector_with_reembed(
@@ -821,7 +821,7 @@ def _ctm_tensor_move_bottom(
     T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", OUT)
 
     # Native projector
-    P_1, P_2 = _compute_projector_tensor(
+    P_1, P_2, _eps_t = _compute_projector_tensor(
         C4g, C3g, chi, projector_method, base_charges, projector_backward
     )
     C4_new, C3_new, T3_new = _apply_projector_with_reembed(

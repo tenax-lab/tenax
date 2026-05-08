@@ -43,6 +43,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ctm_truncation_error import compute_truncation_error
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
@@ -762,13 +763,14 @@ def _compute_projector_tensor(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
-) -> tuple[Tensor, Tensor]:
-    r"""Compute projector pair (P_1, P_2) as Tensors.
+) -> tuple[Tensor, Tensor, jax.Array]:
+    r"""Compute projector pair (P_1, P_2) and truncation error ε_T as Tensors.
 
-    Returns a pair of projectors satisfying :math:`P_1^\dagger P_2 = I`
-    (bi-orthogonality).  For ``"eigh"`` and ``"qr"`` methods, both
-    projectors are identical isometries :math:`P_1 = P_2 = P`.  For
-    ``"svd"`` (Fishman), they are distinct cross-projectors:
+    Returns a triple ``(P_1, P_2, eps_T)`` where the projectors satisfy
+    :math:`P_1^\dagger P_2 = I` (bi-orthogonality).  For ``"eigh"`` and
+    ``"qr"`` methods, both projectors are identical isometries
+    :math:`P_1 = P_2 = P`.  For ``"svd"`` (Fishman), they are distinct
+    cross-projectors:
 
     .. math::
         P_1 = C_{4g} V S^{-1/2}, \quad P_2 = C_{1g} U S^{-1/2}
@@ -787,8 +789,22 @@ def _compute_projector_tensor(
         base_charges: Bond charges for per-sector allocation.
 
     Returns:
-        ``(P_1, P_2)`` each with labels ``(fused, chi_new)``,
-        flows ``(IN, OUT)``.  For eigh/qr, ``P_1 is P_2``.
+        ``(P_1, P_2, eps_T)`` where ``P_1``, ``P_2`` each have labels
+        ``(fused, chi_new)``, flows ``(IN, OUT)`` (for eigh/qr, ``P_1 is
+        P_2``), and ``eps_T`` is a scalar JAX array giving the variPEPS
+        §2.8.2 truncation error ``‖S[χ:]‖ / ‖S‖``.
+
+        **ε_T is meaningful only for the dense non-tracer SVD path.**  All
+        other paths return ``jnp.asarray(0.0)`` as a placeholder:
+
+        - *Symmetric-tensor SVD path*: block-sparse per-sector truncation;
+          global ε_T extraction is out of scope for v1 (follow-up issue).
+        - *Dense SVD with JAX tracers*: the AD backward (GMRES matvec) only
+          sees a truncated spectrum via ``truncated_svd_ad``; ε_T is
+          consumed only by the outer-loop auto-bump decision, not AD.
+        - *eigh and qr paths*: truncation-error definition for these methods
+          needs separate design; out of scope for the variPEPS §2.8.2
+          auto-bump in v1.
 
     Raises:
         ValueError: If ``projector_method`` is not ``"eigh"``, ``"qr"``, or ``"svd"``.
@@ -826,22 +842,24 @@ def _compute_projector_tensor(
                 c1_charges = C1g.indices[fused_pos_chk].charges
                 c4_charges = C4g.indices[fused_pos_chk].charges
                 if np.array_equal(c1_charges, c4_charges):
-                    return _svd_projector_symmetric(
+                    P_1, P_2 = _svd_projector_symmetric(
                         C1g, C4g, chi, base_charges=base_charges
                     )
+                    return P_1, P_2, jnp.asarray(0.0)
                 # Mismatched fused charges: build unified fused index
                 unified_fused_idx = _build_unified_fused_idx(
                     C1g.indices[fused_pos_chk], C4g.indices[fused_pos_chk]
                 )
                 C1g_re = _reembed_fused(C1g, unified_fused_idx)
                 C4g_re = _reembed_fused(C4g, unified_fused_idx)
-                return _svd_projector_symmetric(
+                P_1, P_2 = _svd_projector_symmetric(
                     C1g_re,
                     C4g_re,
                     chi,
                     fused_idx=unified_fused_idx,
                     base_charges=base_charges,
                 )
+                return P_1, P_2, jnp.asarray(0.0)
 
         # Dense fallback for SVD projector.  Reached in two cases:
         #   1. DenseTensor inputs (no block-sparse structure).
@@ -875,12 +893,17 @@ def _compute_projector_tensor(
             from tenax.algorithms._ad_primitives import truncated_svd_ad
 
             U_M, S_M, Vh_M = truncated_svd_ad(M, chi)
+            # Tracer path: eps_T is consumed only by outer-loop auto-bump
+            # (not AD); return placeholder so backward stays clean.
+            _eps_T = jnp.asarray(0.0)
         else:
             U_M_full, S_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
             k = min(chi, S_full.shape[0])
             from tenax.algorithms._ad_primitives import _fix_svd_signs
 
             U_M_full, S_full, Vh_full = _fix_svd_signs(U_M_full, S_full, Vh_full)
+            # Compute ε_T from the full spectrum before truncation.
+            _eps_T = compute_truncation_error(S_full, k)
             S_M = S_full[:k]
             U_M = U_M_full[:, :k]
             Vh_M = Vh_full[:k, :]
@@ -908,13 +931,14 @@ def _compute_projector_tensor(
         fused_idx = C1g.indices[fused_pos]
 
         chi_new_idx = _make_chi_new_index(fused_idx, k, base_charges)
-        return _wrap_dense_projector_pair(
+        P_1, P_2 = _wrap_dense_projector_pair(
             P1_dense,
             P2_dense,
             fused_idx,
             chi_new_idx,
             as_symmetric=isinstance(C1g, SymmetricTensor),
         )
+        return P_1, P_2, _eps_T
 
     # --- QR path ---
     if projector_method == "qr":
@@ -925,7 +949,7 @@ def _compute_projector_tensor(
             )
             if not has_tracers and C1g.n_blocks > 0 and C4g.n_blocks > 0:
                 P = _qr_projector_symmetric(C1g, C4g, chi)
-                return P, P
+                return P, P, jnp.asarray(0.0)
 
         # Dense QR fallback — differentiable via regularized SVD when
         # Dense QR fallback — only reached when blocks contain JAX tracers
@@ -986,7 +1010,7 @@ def _compute_projector_tensor(
             chi_new_idx,
             as_symmetric=isinstance(C1g, SymmetricTensor),
         )
-        return P, P
+        return P, P, jnp.asarray(0.0)
 
     # --- eigh path ---
     # Use block-sparse path for SymmetricTensor unless blocks contain
@@ -1002,7 +1026,7 @@ def _compute_projector_tensor(
             c4_charges = C4g.indices[fused_pos].charges
             if np.array_equal(c1_charges, c4_charges):
                 P = _eigh_projector_symmetric(C1g, C4g, chi, base_charges=base_charges)
-                return P, P
+                return P, P, jnp.asarray(0.0)
             # Mismatched fused charges (e.g. split CTM with different
             # D-leg flows): build a unified fused index covering both
             # corners' charge sectors, re-embed, and use block-sparse eigh.
@@ -1018,7 +1042,7 @@ def _compute_projector_tensor(
                 fused_idx=unified_fused_idx,
                 base_charges=base_charges,
             )
-            return P, P
+            return P, P, jnp.asarray(0.0)
 
     # Dense eigh fallback — only reached when SymmetricTensor blocks contain
     # JAX tracers (AD backward) or for DenseTensor inputs.  Block-sparse
@@ -1073,4 +1097,4 @@ def _compute_projector_tensor(
         chi_new_idx,
         as_symmetric=isinstance(C1g, SymmetricTensor),
     )
-    return P, P
+    return P, P, jnp.asarray(0.0)
