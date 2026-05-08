@@ -100,3 +100,95 @@ def test_ctm_config_auto_bump_validates_chi_max_above_chi():
     """chi_max is always validated when set, regardless of chi_auto_bump."""
     with pytest.raises(ValueError, match="chi_max"):
         CTMConfig(chi=4, chi_max=2)
+
+
+def test_maybe_bump_chi_disabled_returns_input_unchanged():
+    """Auto-bump disabled: helper passes through."""
+    from tenax.algorithms.ipeps_optimize import _maybe_bump_chi
+
+    cfg = CTMConfig(chi=4)  # chi_auto_bump=False by default
+    cache = {"envs": "sentinel"}
+    new_cfg, new_cache = _maybe_bump_chi(cfg, cache, last_eps_t=1.0)
+    assert new_cfg is cfg
+    assert new_cache is cache
+
+
+def test_maybe_bump_chi_below_threshold_no_bump():
+    """ε_T below threshold: no change."""
+    from tenax.algorithms.ipeps_optimize import _maybe_bump_chi
+
+    cfg = CTMConfig(chi=4, chi_auto_bump=True, chi_auto_bump_eps=1e-3)
+    cache = {}
+    new_cfg, new_cache = _maybe_bump_chi(cfg, cache, last_eps_t=1e-5)
+    assert new_cfg.chi == 4
+    assert new_cache == cache
+
+
+def test_maybe_bump_chi_above_threshold_bumps_and_pads():
+    """ε_T above threshold: chi rises, env is padded."""
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
+    from tenax.algorithms.ipeps_optimize import _maybe_bump_chi
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import U1Symmetry
+    from tenax.core.tensor import DenseTensor
+
+    sym = U1Symmetry()
+    chi_old, D = 4, 2
+    chi_in = TensorIndex.from_charges(
+        sym, np.zeros(chi_old, dtype=np.int32), FlowDirection.IN, label="chi"
+    )
+    chi_out = TensorIndex.from_charges(
+        sym, np.zeros(chi_old, dtype=np.int32), FlowDirection.OUT, label="chi"
+    )
+    d_idx = TensorIndex.from_charges(
+        sym, np.zeros(D**2, dtype=np.int32), FlowDirection.IN, label="u2"
+    )
+
+    key = jax.random.PRNGKey(0)
+    keys = jax.random.split(key, 8)
+    Csh = (chi_old, chi_old)
+    Tsh = (chi_old, D**2, chi_old)
+
+    def C(k):
+        return DenseTensor(jax.random.normal(k, Csh), (chi_in, chi_out))
+
+    def T(k):
+        return DenseTensor(jax.random.normal(k, Tsh), (chi_in, d_idx, chi_out))
+
+    env = CTMTensorEnv(
+        C1=C(keys[0]),
+        C2=C(keys[1]),
+        C3=C(keys[2]),
+        C4=C(keys[3]),
+        T1=T(keys[4]),
+        T2=T(keys[5]),
+        T3=T(keys[6]),
+        T4=T(keys[7]),
+    )
+    cache = {"envs": {(0, 0): env}}
+    cfg = CTMConfig(
+        chi=4, chi_auto_bump=True, chi_auto_bump_eps=1e-5, chi_auto_bump_step=2
+    )
+    new_cfg, new_cache = _maybe_bump_chi(cfg, cache, last_eps_t=1e-3)
+    assert new_cfg.chi == 6  # 4 + 2
+    assert new_cache["envs"][(0, 0)].C1._data.shape == (6, 6)
+
+
+def test_maybe_bump_chi_respects_chi_max_ceiling():
+    """chi_max ceiling caps the bump."""
+    from tenax.algorithms.ipeps_optimize import _maybe_bump_chi
+
+    cfg = CTMConfig(
+        chi=4,
+        chi_auto_bump=True,
+        chi_auto_bump_eps=1e-5,
+        chi_auto_bump_step=2,
+        chi_max=5,
+    )
+    cache = {}
+    new_cfg, _ = _maybe_bump_chi(cfg, cache, last_eps_t=1e-3)
+    assert new_cfg.chi == 5  # 4+2=6, capped at 5

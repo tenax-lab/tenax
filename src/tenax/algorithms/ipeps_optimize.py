@@ -5,6 +5,7 @@ Extracts optimize_gs_ad and related helpers from ipeps.py.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 from dataclasses import replace as _replace
@@ -13,12 +14,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
 from tenax.algorithms.ipeps_ad_policy import (
     build_ad_ctm_config,
     resolve_projector_backward,
     use_reference_c4v_path,
 )
-from tenax.algorithms.ipeps_config import iPEPSConfig
+from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.lattice import Lattice
 from tenax.core.symmetry import U1Symmetry
@@ -27,6 +29,38 @@ from tenax.core.tensor import DenseTensor, Tensor
 _logger = logging.getLogger(__name__)
 
 Coord = tuple[int, int]
+
+
+def _maybe_bump_chi(
+    ctm_cfg: CTMConfig,
+    env_cache: dict,
+    last_eps_t: float,
+) -> tuple[CTMConfig, dict]:
+    """variPEPS §2.8.2 reactive χ_E bump.
+
+    When ``ctm_cfg.chi_auto_bump`` is enabled and the last CTM sweep's
+    ``ε_T`` exceeds ``ctm_cfg.chi_auto_bump_eps``, return a new
+    ``(ctm_cfg, env_cache)`` pair with χ raised by ``chi_auto_bump_step``
+    (capped at ``chi_max`` if set). The cached env is zero-padded to the
+    new χ. Otherwise the input pair is returned unchanged.
+    """
+    if not ctm_cfg.chi_auto_bump:
+        return ctm_cfg, env_cache
+    if last_eps_t <= ctm_cfg.chi_auto_bump_eps:
+        return ctm_cfg, env_cache
+    chi_new = ctm_cfg.chi + ctm_cfg.chi_auto_bump_step
+    if ctm_cfg.chi_max is not None:
+        chi_new = min(chi_new, ctm_cfg.chi_max)
+    if chi_new <= ctm_cfg.chi:
+        return ctm_cfg, env_cache  # at ceiling
+    new_cfg = dataclasses.replace(ctm_cfg, chi=chi_new)
+    if "envs" in env_cache:
+        new_envs = {
+            c: pad_dense_env_chi(env_cache["envs"][c], chi_new)
+            for c in env_cache["envs"]
+        }
+        env_cache = {**env_cache, "envs": new_envs}
+    return new_cfg, env_cache
 
 
 def _lattice_to_neighbors(
@@ -426,6 +460,16 @@ def optimize_gs_ad(
     if config.gs_num_steps < 0:
         raise ValueError(f"gs_num_steps must be >= 0, got {config.gs_num_steps}")
 
+    # chi_auto_bump is only supported for unit_cell='1x1' (dense AD path).
+    # Multisite and 2-site paths are tracked as follow-up issues (Task 9).
+    if config.ctm.chi_auto_bump and (
+        isinstance(config.unit_cell, Lattice) or config.unit_cell == "2site"
+    ):
+        raise NotImplementedError(
+            "chi_auto_bump is currently supported only for unit_cell='1x1'; "
+            "multisite and 2-site paths are tracked as follow-up issues."
+        )
+
     # Resolve projector_backward policy before dispatch so every downstream
     # helper (1-site, 2-site, reference-C4v) sees the same CTM config.  No
     # silent gauge promotion — explicit user choices are preserved.
@@ -782,12 +826,13 @@ def _optimize_gs_ad_tensor(
         """Re-run forward CTM (no grad) to warm-start next step."""
         A_norm = _params_to_A_norm(params)
         site_tensors = {(0, 0): A_norm}
-        envs, _ = python_loop_ctm_converge(
+        envs, info = python_loop_ctm_converge(
             site_tensors,
             SINGLE_SITE_NEIGHBORS,
             **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
         )
         _env_cache["envs"] = envs
+        _env_cache["max_truncation_error"] = float(info.max_truncation_error)
 
     # Metric L-BFGS preconditioning calls .todense() on grads/params (see
     # _metric_precond.py:146 and the metric branch below).  CG with map_fn
@@ -950,6 +995,10 @@ def _optimize_gs_ad_tensor(
 
         # Update env cache for warm-starting next step
         _update_env_cache(params)
+
+        # variPEPS §2.8.2 auto-χ_E bump (between L-BFGS steps; never mid-step).
+        last_eps_t = float(_env_cache.get("max_truncation_error", 0.0))
+        ctm_cfg, _env_cache = _maybe_bump_chi(ctm_cfg, _env_cache, last_eps_t)
 
         if _should_accept_best(
             current_best=best_energy,
