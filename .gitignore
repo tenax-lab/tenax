@@ -42,6 +42,9 @@ coverage.xml
 htmlcov/
 .hypothesis/
 
+# Test artifacts (generated reference data, not committed)
+tests/_ctm_2x2_reference_data.npz
+
 # Type checking
 .mypy_cache/
 
