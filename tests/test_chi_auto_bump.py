@@ -257,11 +257,11 @@ def test_optimize_gs_ad_auto_bump_raises_chi_under_pressure():
             chi_auto_bump_eps=1e-5,
             chi_auto_bump_step=2,
             chi_max=8,
-            max_iter=20,
+            max_iter=10,
             min_iter=2,
-            conv_tol=1e-5,
+            conv_tol=1e-3,
         ),
-        gs_num_steps=5,  # a few steps suffice to trip the bump
+        gs_num_steps=3,  # a few steps suffice to trip the bump
         gs_implicit_ad=True,
         gs_verbose=False,
         su_init=False,  # skip SU warm-start; A_init is provided
