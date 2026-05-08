@@ -65,6 +65,7 @@ _FILE_MARKERS = {
     "test_pess_validation.py": "slow",
     "test_chi_auto_bump.py": "core",
     "test_ctm_env_pad.py": "core",
+    "test_ipeps_chi_bump_integration.py": "algorithm",
 }
 
 
