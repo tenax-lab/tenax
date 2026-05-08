@@ -44,7 +44,7 @@ from tenax.algorithms.pess import (
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.lattice import kagome
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor
+from tenax.core.tensor import DenseTensor, Tensor
 
 __all__ = [
     "build_pess_loss",
@@ -162,8 +162,27 @@ def _initial_alpha(energy: float, slope: float) -> float:
     For typical iPESS energies ``|E| ~ 0.1`` and gradients ``|∇E| ~
     10²-10⁴``, this gives ``alpha0 ~ 1e-3 to 1e-5``, matching the
     Newton-predicted optimum within 1-2 bisections.
+
+    A constant shift in the supplied bond gates can drive ``f(x0) → 0``
+    while the gradient remains nonzero (the gradient is shift-invariant);
+    the bare ratio then collapses to ``alpha0 = 0`` and both Armijo and
+    Hager-Zhang accept it as a no-op step.  Floor the *numerator*
+    ``|E|`` at ``1e-12`` so the heuristic still scales by ``|slope|`` in
+    the low-energy regime — a fixed step would be far too coarse for
+    stiff objectives where the optimal step is ``|E_floor| / |slope|``
+    several orders of magnitude below it (see issue #401, PR #404 review).
+
+    The floor is gated on a nonzero slope.  When the slope is also
+    essentially zero we are at a true stationary point (zero gradient or
+    a direction orthogonal to it); ``alpha0 = 0`` is the documented
+    "no improvement" signal that ``_backtracking_line_search`` /
+    ``_hager_zhang_line_search_step`` use to break the outer L-BFGS
+    loop.  Returning a positive step there would trap the optimiser in
+    ``max_iter`` no-op CTM evaluations at the same parameters.
     """
-    return min(1.0, abs(energy) / max(abs(slope), 1e-30))
+    if abs(slope) < 1e-30:
+        return 0.0
+    return min(1.0, max(abs(energy), 1e-12) / max(abs(slope), 1e-30))
 
 
 def _backtracking_line_search(
@@ -460,8 +479,17 @@ def build_pess_loss_3site_multisite(
         gradient.
     """
     validate_ctm_for_implicit_ad(config)
+    # Promote Tensor-valued gates to ndarray at entry so the rest of the
+    # closure (and the .shape inference below) sees a uniform jax.Array
+    # type — issue #402.  ``compute_energy_pess_3site_multisite`` accepts
+    # both, but its ``.shape[0]`` access here would otherwise crash on
+    # symmetry-aware / Tensor-protocol gates before reaching the supported
+    # downstream code path.
+    bond_gates_arr = {
+        k: (g.todense() if isinstance(g, Tensor) else g) for k, g in bond_gates.items()
+    }
     # Infer physical dimension from any bond gate (each is shape (d,d,d,d)).
-    d = int(next(iter(bond_gates.values())).shape[0])
+    d = int(next(iter(bond_gates_arr.values())).shape[0])
 
     def _energy_fn(site_tensors_coord, envs_coord, _gate):
         site_tensors_name = {
@@ -472,7 +500,7 @@ def build_pess_loss_3site_multisite(
             site_tensors_name,
             envs_name,
             _MULTISITE_LATTICE.neighbor_map,
-            bond_gates,
+            bond_gates_arr,
             d=d,
         )
 
@@ -554,6 +582,18 @@ def optimize_pess_3site_multisite_ad(
     """
     import optax
 
+    # Promote Tensor-valued gates to ndarray once at the optimizer entry
+    # so both the loss closure and the warm-start helper below see a
+    # uniform jax.Array type — issue #402 / PR #405 review.  Without this
+    # hoist, ``_build_site_tensors_for_warm_start`` would do
+    # ``next(iter(bond_gates.values())).shape[0]`` on the un-promoted dict
+    # and crash on Tensor inputs *after* the first loss eval succeeds,
+    # leaving the advertised Tensor-valued multisite path unusable.
+    bond_gates_arr = {
+        k: (g.todense() if isinstance(g, Tensor) else g) for k, g in bond_gates.items()
+    }
+    d = int(next(iter(bond_gates_arr.values())).shape[0])
+
     # Env warm-start cache. Analogous to but simpler than
     # _optimize_gs_ad_multisite — no stall recovery, no best_env_cache
     # snapshot, no fresh-CTM final eval. The env never escapes back to
@@ -561,7 +601,7 @@ def optimize_pess_3site_multisite_ad(
     # currently harmless.
     _env_cache: dict[str, dict] = {}
     loss_fn_state = build_pess_loss_3site_multisite(
-        bond_gates, config, env_cache=_env_cache
+        bond_gates_arr, config, env_cache=_env_cache
     )
 
     params = {
@@ -595,7 +635,6 @@ def optimize_pess_3site_multisite_ad(
             p["lambdas"],
         )
         D = sites["u"].shape[0]
-        d = int(next(iter(bond_gates.values())).shape[0])
         indices = _make_multisite_indices(D, d)
         site_tensors = {}
         for name, A in sites.items():
