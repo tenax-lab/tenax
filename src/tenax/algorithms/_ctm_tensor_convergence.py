@@ -110,7 +110,7 @@ def _ctm_tensor_sweep(
     )
     if renormalize:
         env = _renormalize_tensor_env(env)
-    max_eps = float(max(eps_left, eps_top, eps_right, eps_bottom))
+    max_eps = max(eps_left, eps_top, eps_right, eps_bottom)
     return env, max_eps
 
 
@@ -140,7 +140,7 @@ def _ctm_tensor_sweep_paired(
     )
     if renormalize:
         env = _renormalize_tensor_env(env)
-    max_eps = float(max(eps_horiz, eps_vert))
+    max_eps = max(eps_horiz, eps_vert)
     return env, max_eps
 
 
@@ -543,6 +543,13 @@ def ctm_tensor(
         (or the last sweep if ``max_iter`` was reached without convergence).
         This is a Python ``float`` suitable for use in the optimizer loop
         (variPEPS §2.8.2 auto-χ trigger).
+
+        **v1 scope caveat:** ``max_truncation_error`` is meaningful only on
+        the dense, non-tracer SVD path.  It is ``0.0`` when
+        ``projector_method`` is ``"eigh"`` or ``"qr"``, when the input is a
+        ``SymmetricTensor`` (block-sparse truncation; global ε_T extraction
+        is a v2 follow-up), or when the SVD runs inside a JAX tracer (AD
+        backward pass).
     """
     # Determine sweep function: use paired moves for SymmetricTensors
     # with non-trivial virtual charges (fixes charge-sector mismatch

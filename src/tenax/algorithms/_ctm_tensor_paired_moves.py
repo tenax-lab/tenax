@@ -211,7 +211,7 @@ def _ctm_tensor_move_horizontal(
         T3=env_self.T3,
         T4=_normalize_tensor(T4_new),
     )
-    max_eps = float(max(float(_eps_t_left), float(_eps_t_right)))
+    max_eps = max(float(_eps_t_left), float(_eps_t_right))
     return env_out, max_eps
 
 
@@ -316,5 +316,5 @@ def _ctm_tensor_move_vertical(
         T3=_normalize_tensor(T3_new),
         T4=env_self.T4,
     )
-    max_eps = float(max(float(_eps_t_top), float(_eps_t_bottom)))
+    max_eps = max(float(_eps_t_top), float(_eps_t_bottom))
     return env_out, max_eps
