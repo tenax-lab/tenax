@@ -23,6 +23,8 @@ from tenax.algorithms._pess_multisite_energy import kagome_3site_bond_gates
 from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.algorithms.pess import IPESSState, kagome_xxz_pess_cg_gates
 from tenax.algorithms.pess_optimize import (
+    _backtracking_line_search,
+    _initial_alpha,
     build_pess_loss,
     build_pess_loss_3site_multisite,
     optimize_pess_3site_multisite_ad,
@@ -240,6 +242,104 @@ def test_optimize_pess_3site_multisite_ad_preserves_shapes_and_optimises_T_d():
         "T_d unchanged after L-BFGS in the multisite path — the optimiser "
         "is silently freezing T_d (regression: it should be a live param)."
     )
+
+
+# ---------------------------------------------------------------------------
+# Line search initial-step heuristic (issue #401)
+# ---------------------------------------------------------------------------
+
+
+def test_initial_alpha_positive_when_energy_zero():
+    """``_initial_alpha`` must return a positive step when ``|energy| → 0``.
+
+    Regression for issue #401: the Nocedal & Wright ``f_low = 0`` heuristic
+    ``alpha0 = |E| / |slope|`` collapses to zero whenever the user supplies
+    a constant-shifted Hamiltonian that drives ``f(x0) → 0``, even when the
+    gradient is nonzero.  ``alpha == 0`` then propagates through Armijo /
+    Hager-Zhang as a no-op step and the optimizer stalls without descending.
+    """
+    alpha = _initial_alpha(energy=0.0, slope=1.0)
+    assert alpha > 0.0
+
+
+def test_initial_alpha_zero_when_slope_zero():
+    """At a true stationary point (slope == 0) the initial step must stay 0.
+
+    Regression for the PR-#404 review: blanket flooring on ``|energy|`` would
+    return a positive step even when the descent direction is identically
+    zero.  ``trial = params + alpha * 0 == params`` then satisfies the
+    Armijo condition trivially (``f_trial == energy``) so the line search
+    accepts the no-op, ``alpha == 0`` no longer signals "no improvement",
+    and ``optimize_pess_*`` burns ``max_iter`` CTM passes without making
+    progress.  Keep the documented ``alpha == 0`` break-signal contract.
+    """
+    assert _initial_alpha(energy=0.0, slope=0.0) == 0.0
+    # Energy nonzero but slope zero is the same regime — no descent.
+    assert _initial_alpha(energy=0.0, slope=1e-40) == 0.0
+
+
+def test_initial_alpha_scales_with_slope_in_low_energy_regime():
+    """``_initial_alpha`` must keep slope-scaling when energy is tiny.
+
+    Regression for the second PR-#404 review: a slope-independent floor
+    (e.g. ``alpha0 = 1e-3`` whenever ``|E| < 1e-12``) is far too coarse
+    for stiff or poorly scaled low-energy objectives.  At
+    ``|E| = 5e-13`` and ``|slope| = 1e-3`` the optimal step is
+    ``|E|/|slope| = 5e-10``; Armijo at most reaches ``1e-3 · 0.5⁷ ≈
+    7.8e-6`` from a ``1e-3`` start, missing it by orders of magnitude.
+
+    Floor the *numerator* ``|E|`` at ``1e-12`` so the heuristic stays
+    ``|E_floor|/|slope|`` and tracks the slope: at ``|slope| = 1e-3``
+    we get ``alpha0 = 1e-9`` (close to the optimum), at
+    ``|slope| = 1e-6`` we get ``alpha0 = 1e-6`` (capped well below 1).
+    """
+    # Stiff low-energy regime: original |E|/|slope| was 5e-10, floor only
+    # bumps it to 1e-9 (still within an Armijo bisection of optimal).
+    alpha = _initial_alpha(energy=5e-13, slope=-1e-3)
+    assert 1e-10 < alpha < 1e-2, (
+        f"alpha0 should track |E_floor|/|slope| ~ 1e-9, got {alpha}"
+    )
+    # Doubling |slope| should roughly halve alpha0 — confirms the heuristic
+    # is still slope-scaled rather than a fixed step.
+    alpha_2x = _initial_alpha(energy=5e-13, slope=-2e-3)
+    assert alpha_2x == pytest.approx(alpha / 2.0, rel=1e-9)
+    # Normal regime (|E| > 1e-12) is unchanged by the floor.
+    assert _initial_alpha(energy=0.1, slope=-100.0) == pytest.approx(1e-3, rel=1e-9)
+
+
+def test_backtracking_line_search_progresses_with_zero_energy():
+    """Backtracking line search descends on a constant-shifted quadratic.
+
+    Regression for issue #401: with ``f(x0) = 0`` and nonzero gradient, the
+    descent direction is well-defined but ``_initial_alpha`` previously
+    returned 0, so the search returned ``best_alpha = 0`` and the optimizer
+    made no progress.
+    """
+    # Loss f(x) = 0.5 * sum(x**2) - 0.5 * sum(x0**2) — constant-shifted
+    # quadratic.  At x = x0 the loss is exactly 0 but gradient is x0 ≠ 0,
+    # so any positive step in the steepest-descent direction reduces f.
+    x0 = {"w": jnp.array([0.5, -0.25, 0.1])}
+    shift = 0.5 * float(jnp.sum(x0["w"] ** 2))
+
+    def loss_fn(params):
+        return 0.5 * jnp.sum(params["w"] ** 2) - shift
+
+    energy = float(loss_fn(x0))
+    assert abs(energy) < 1e-12
+
+    grad = {"w": x0["w"]}
+    direction = jax.tree.map(lambda g: -g, grad)
+
+    new_params, new_energy, alpha = _backtracking_line_search(
+        x0, direction, grad, energy, loss_fn
+    )
+
+    assert alpha > 0.0, "line search returned zero step on a descending direction"
+    assert new_energy < energy, (
+        f"line search did not decrease energy: {energy} -> {new_energy}"
+    )
+    assert jnp.isfinite(new_energy)
+    assert jnp.all(jnp.isfinite(new_params["w"]))
 
 
 # ---------------------------------------------------------------------------
