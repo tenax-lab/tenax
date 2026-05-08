@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Land a small Tenax history-capture hook, then build a subprocess-isolated benchmark harness under `benchmarks/varipeps_compare/` that runs Tenax and variPEPS 1.4.2 on the spin-½ square-lattice Heisenberg AFM with a shared SU init across an 8-point grid (paths × D × χ) and emits a parity report (final E, Δ, num steps, wall-clock, trajectory plot).
+**Goal:** Land a small Tenax history-capture hook, then build a subprocess-isolated benchmark harness under `benchmarks/varipeps_compare/` that runs Tenax and variPEPS 1.4.2 on the spin-½ square-lattice Heisenberg AFM with shared init (random for `single_site`, Tenax SU for `bipartite_2site`) across an 8-point grid (paths × D × χ) and emits a parity report (final E, Δ, num steps, wall-clock, trajectory plot).
 
-**Architecture:** Shared protocol module (`protocol.py`) is single source of truth. Orchestrator (`compare.py`) builds Heisenberg gate, runs Tenax SU once, saves init+gate to `.npz`, spawns one Tenax subprocess and one variPEPS subprocess per grid point with identical CLI args, parses each runner's JSON output (shared schema), merges into `report.json` + `summary.md` + per-point trajectory plots. Process isolation gives fair JIT/cache accounting and prevents variPEPS's import-time `jax.config` writes from polluting Tenax.
+**Architecture:** Shared protocol module (`protocol.py`) is single source of truth. Orchestrator (`compare.py`) builds Heisenberg gate, builds path-dependent init (random for `single_site`; Tenax SU for `bipartite_2site`), saves init+gate to `.npz`, spawns one Tenax subprocess and one variPEPS subprocess per grid point with identical CLI args, parses each runner's JSON output (shared schema), merges into `report.json` + `summary.md` + per-point trajectory plots. Process isolation gives fair JIT/cache accounting and prevents variPEPS's import-time `jax.config` writes from polluting Tenax. **Both libs use unconstrained ansatze on both paths** — Tenax does not enforce C4v on `single_site`, so parameter counts match variPEPS exactly.
 
 **Tech Stack:** Python 3.12, JAX (CPU first, GPU optional), Tenax (this repo), variPEPS 1.4.2 (already installed at `/home/yjkao/miniforge3/lib/python3.12/site-packages/varipeps`), numpy `.npz` for cross-lib payload, matplotlib for plots, pytest for the smoke test.
 
@@ -33,11 +33,13 @@ tests/test_varipeps_compare.py                # CREATE: end-to-end smoke (Task 8
 
 ## Task 1: Add `return_history` flag to `optimize_gs_ad`
 
-**Why:** variPEPS already returns `step_energies` / `step_runtime`; Tenax does not. Without this, trajectory parity is impossible. Strict superset feature (default unchanged), generally useful, ~30 lines across three optimizer paths.
+**Why:** variPEPS already returns `step_energies` / `step_runtime`; Tenax does not. Without this, trajectory parity is impossible. Strict superset feature (default unchanged).
+
+**Scope:** Add the hook to **only the two paths the benchmark uses**: 1-site tensor (`_optimize_gs_ad_tensor`) and 2-site (`_optimize_gs_ad_tensor_2site`). Multisite (`_optimize_gs_ad_multisite`) and the dense C4v reference path (`_optimize_gs_ad_tensor_reference_c4v`) are out of scope — if `return_history=True` is set with those paths, raise `NotImplementedError("return_history not yet supported for unit_cell=Lattice / ctm_ad_mode=c4v_reference")` with a clear message. Future PR can extend.
 
 **Files:**
 - Modify: `src/tenax/algorithms/ipeps_config.py` (add field)
-- Modify: `src/tenax/algorithms/ipeps_optimize.py` (capture in 3 paths: 1-site tensor at line ~888, 2-site at line ~1565, multisite at line ~2192, and `_optimize_gs_ad_tensor_reference_c4v`)
+- Modify: `src/tenax/algorithms/ipeps_optimize.py` (capture in 1-site `_optimize_gs_ad_tensor` ~line 653 and 2-site `_optimize_gs_ad_tensor_2site` ~line 1389; raise in the other two)
 - Modify: `src/tenax/__init__.py` (no change — flag goes through config, not new export)
 - Create: `tests/test_ipeps_ad_history.py`
 
@@ -169,19 +171,23 @@ At the end of the function, before the existing `return ...`:
 
 (Adapt to the actual local variable names — `best_params`/`best_env_cache`/etc. — discovered when reading the function.)
 
-**Step 1.5: Repeat for 2-site path (`_optimize_gs_ad_2site`, ~line 1389)**
+**Step 1.5: Repeat for 2-site path (`_optimize_gs_ad_tensor_2site`, ~line 1389)**
 
 Same pattern. Return shape changes from `((A, B), (env_A, env_B), E_gs)` to `((A, B), (env_A, env_B), E_gs, history)` when flag is set.
 
-**Step 1.6: Repeat for multisite path (`_optimize_gs_ad_multisite`, ~line 2017)**
+**Step 1.6: Guard the unsupported paths**
 
-Same pattern. Return shape: `(dict, dict, E_gs, history)`.
+In `_optimize_gs_ad_multisite` and `_optimize_gs_ad_tensor_reference_c4v`, near the top after the config is normalized, add:
 
-**Step 1.7: Repeat for c4v_reference path (`_optimize_gs_ad_tensor_reference_c4v`)**
+```python
+if config.return_history:
+    raise NotImplementedError(
+        "return_history is currently only supported for unit_cell='1x1' "
+        "(non-C4v-reference) and unit_cell='2site'."
+    )
+```
 
-Same pattern. Find this function in the same file and apply.
-
-**Step 1.8: Run all tests, verify they pass**
+**Step 1.7: Run all tests, verify they pass**
 
 ```bash
 uv run pytest tests/test_ipeps_ad_history.py -v
@@ -190,7 +196,7 @@ uv run pytest -m core -x   # ensure no regression on default-shape callers
 
 Expected: both new tests PASS, core suite PASS.
 
-**Step 1.9: Commit**
+**Step 1.8: Commit**
 
 ```bash
 git add src/tenax/algorithms/ipeps_config.py src/tenax/algorithms/ipeps_optimize.py tests/test_ipeps_ad_history.py
@@ -198,10 +204,11 @@ git commit -m "feat(ipeps-ad): optional return_history flag for trajectory captu
 
 Adds iPEPSConfig.return_history (default False).  When True,
 optimize_gs_ad appends a history dict {energies, step_times,
-jit_compile_time, num_steps, converged} to the return tuple in all
-three paths (1-site tensor, 2-site, multisite, c4v_reference).
-Required by benchmarks/varipeps_compare for trajectory parity with
-variPEPS step_energies/step_runtime.
+jit_compile_time, num_steps, converged} to the return tuple in the
+1-site tensor and 2-site paths.  Multisite and c4v_reference paths
+raise NotImplementedError when the flag is set; they can be extended
+later.  Required by benchmarks/varipeps_compare for trajectory parity
+with variPEPS step_energies/step_runtime.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
@@ -226,7 +233,7 @@ them here.
 """
 from __future__ import annotations
 
-PATHS = ("c4v_1x1", "checkerboard_2x2")
+PATHS = ("single_site", "bipartite_2site")
 D_VALUES = (2, 3)
 CHI_VALUES = (16, 24)
 
@@ -284,7 +291,7 @@ from benchmarks.varipeps_compare.payload import save_payload, load_payload
 def test_payload_roundtrip(tmp_path):
     init = np.random.default_rng(0).standard_normal((2, 2, 2, 2, 2)).astype(np.complex128)
     gate = np.random.default_rng(1).standard_normal((2, 2, 2, 2)).astype(np.complex128)
-    meta = {"path": "c4v_1x1", "D": 2, "chi": 16, "seed": 0}
+    meta = {"path": "single_site", "D": 2, "chi": 16, "seed": 0}
 
     out = tmp_path / "payload.npz"
     save_payload(out, init=init, gate=gate, meta=meta)
@@ -359,7 +366,7 @@ git commit -m "bench(varipeps-compare): payload — .npz init/gate/meta round-tr
 
 ---
 
-## Task 4: `su_init.py` — Heisenberg gate + Tenax SU
+## Task 4: `su_init.py` — gates + init dispatcher (random for `single_site`, SU for `bipartite_2site`)
 
 **Files:**
 - Create: `benchmarks/varipeps_compare/su_init.py`
@@ -369,14 +376,14 @@ git commit -m "bench(varipeps-compare): payload — .npz init/gate/meta round-tr
 
 ```python
 # tests/test_varipeps_compare_su.py
-"""SU init smoke test."""
+"""Init dispatcher smoke test."""
 import numpy as np
 import pytest
 
 from benchmarks.varipeps_compare.su_init import (
     build_heisenberg_gate,
     build_sublattice_rotated_gate,
-    run_su_init,
+    make_init,
 )
 
 
@@ -396,12 +403,25 @@ def test_sublattice_rotated_gate_shape():
     assert g_rot.dtype == np.complex128
 
 
+@pytest.mark.core
+def test_make_init_single_site_random_deterministic():
+    """single_site path: random init, deterministic given seed."""
+    a = make_init(path="single_site", D=2, seed=0)
+    b = make_init(path="single_site", D=2, seed=0)
+    np.testing.assert_array_equal(a, b)
+    assert a.shape == (2, 2, 2, 2, 2)  # (D,D,D,D,d)
+    assert a.dtype == np.complex128
+    # Different seed → different array
+    c = make_init(path="single_site", D=2, seed=1)
+    assert not np.array_equal(a, c)
+
+
 @pytest.mark.algorithm
-def test_run_su_init_c4v_1x1_d2():
-    """Cheap smoke: SU runs, returns numpy array of expected shape."""
-    init = run_su_init(path="c4v_1x1", D=2, num_steps=20, dt=0.1)
+def test_make_init_bipartite_2site_su_d2():
+    """bipartite_2site path: Tenax SU returns stacked (A, B) of shape (2, D, D, D, D, d)."""
+    init = make_init(path="bipartite_2site", D=2, seed=0)
     assert isinstance(init, np.ndarray)
-    assert init.shape == (2, 2, 2, 2, 2)  # (D,D,D,D,d) for 1-site
+    assert init.shape == (2, 2, 2, 2, 2, 2)  # (2, D, D, D, D, d)
     assert init.dtype == np.complex128
 ```
 
@@ -417,7 +437,15 @@ Expected: FAIL — module not found.
 
 ```python
 # benchmarks/varipeps_compare/su_init.py
-"""Heisenberg gate constructors + Tenax simple-update init for the benchmark."""
+"""Heisenberg gate constructors + path-dependent init dispatcher.
+
+For ``single_site`` (1×1 + sublattice-rotated gate, unconstrained tensor):
+    SU on the rotated gate converges to the |↑↑⟩ saddle (E=−0.5/site) which
+    L-BFGS cannot escape (see ``ipeps_optimize.py:1389`` reference-mode
+    comment).  Use random init instead.
+For ``bipartite_2site`` (2-tensor checkerboard + bare gate):
+    Tenax SU on the bare gate finds a Néel-like state.  Use it.
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -425,6 +453,8 @@ import jax
 import jax.numpy as jnp
 
 from tenax import CTMConfig, iPEPSConfig, ipeps, sublattice_rotate_gate
+
+DTYPE_NP = np.complex128
 
 
 def build_heisenberg_gate(dtype=jnp.complex128) -> np.ndarray:
@@ -437,39 +467,48 @@ def build_heisenberg_gate(dtype=jnp.complex128) -> np.ndarray:
 
 
 def build_sublattice_rotated_gate(dtype=jnp.complex128) -> np.ndarray:
-    """C4v 1×1 path gate: bare H rotated by Y on B sublattice."""
+    """``single_site`` path gate: bare H rotated by Y on B sublattice.
+
+    Lets a 1×1 unit cell encode the AFM ground state in the rotated frame.
+    """
     return np.asarray(sublattice_rotate_gate(jnp.asarray(build_heisenberg_gate(dtype))))
 
 
-def run_su_init(*, path: str, D: int, num_steps: int = 100, dt: float = 0.01) -> np.ndarray:
-    """Run Tenax simple update for `num_steps` of size `dt`, return init iPEPS tensor.
+def _random_complex(shape: tuple[int, ...], seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    re = rng.standard_normal(shape)
+    im = rng.standard_normal(shape)
+    return (re + 1j * im).astype(DTYPE_NP)
 
-    For path="c4v_1x1": uses sublattice-rotated gate, returns A only (1-site).
-    For path="checkerboard_2x2": uses bare gate with unit_cell="2site", returns
-    np.stack([A, B]) of shape (2, D, D, D, D, d).
+
+def make_init(*, path: str, D: int, seed: int = 0,
+              su_num_steps: int = 100, su_dt: float = 0.01) -> np.ndarray:
+    """Build the init tensor for the given path.
+
+    Args:
+        path: ``"single_site"`` (random) or ``"bipartite_2site"`` (Tenax SU).
+        D:    iPEPS bond dimension.
+        seed: numpy seed for random init (only used for ``single_site``).
+        su_num_steps / su_dt: SU schedule (only used for ``bipartite_2site``).
+
+    Returns:
+        ``single_site``       → ``(D, D, D, D, d)`` complex128 array.
+        ``bipartite_2site``   → ``(2, D, D, D, D, d)`` stacked (A, B) complex128.
     """
-    if path == "c4v_1x1":
-        gate = jnp.asarray(build_sublattice_rotated_gate())
-        config = iPEPSConfig(
-            max_bond_dim=D,
-            num_imaginary_steps=num_steps,
-            dt=dt,
-            ctm=CTMConfig(chi=4 * D),
-            unit_cell="1x1",
-        )
-        _, (A, _B), _ = ipeps(gate, None, config)
-        return np.asarray(A)
-    elif path == "checkerboard_2x2":
+    d = 2  # spin-½
+    if path == "single_site":
+        return _random_complex((D, D, D, D, d), seed=seed)
+    elif path == "bipartite_2site":
         gate = jnp.asarray(build_heisenberg_gate())
         config = iPEPSConfig(
             max_bond_dim=D,
-            num_imaginary_steps=num_steps,
-            dt=dt,
+            num_imaginary_steps=su_num_steps,
+            dt=su_dt,
             ctm=CTMConfig(chi=4 * D),
             unit_cell="2site",
         )
         _, (A, B), _ = ipeps(gate, None, config)
-        return np.stack([np.asarray(A), np.asarray(B)], axis=0)
+        return np.stack([np.asarray(A), np.asarray(B)], axis=0).astype(DTYPE_NP)
     else:
         raise ValueError(f"unknown path: {path}")
 ```
@@ -486,7 +525,7 @@ Expected: PASS (the SU test is `algorithm`-marked, takes ~30 s).
 
 ```bash
 git add benchmarks/varipeps_compare/su_init.py tests/test_varipeps_compare_su.py
-git commit -m "bench(varipeps-compare): su_init — Heisenberg gate + Tenax SU bootstrap"
+git commit -m "bench(varipeps-compare): su_init — gates + path-dependent init dispatcher"
 ```
 
 ---
@@ -515,21 +554,21 @@ from benchmarks.varipeps_compare.su_init import build_sublattice_rotated_gate
 
 
 @pytest.mark.algorithm
-def test_run_tenax_c4v_1x1_d2_chi8(tmp_path):
-    """Tiny end-to-end: D=2, chi=8, c4v_1x1, MAX_STEPS=5 → JSON with right schema."""
+def test_run_tenax_single_site_d2_chi8(tmp_path):
+    """Tiny end-to-end: D=2, chi=8, single_site, MAX_STEPS=5 → JSON with right schema."""
     gate = build_sublattice_rotated_gate()
     rng = np.random.default_rng(0)
-    init = rng.standard_normal((2, 2, 2, 2, 2)).astype(np.complex128)
-    init += 1j * rng.standard_normal((2, 2, 2, 2, 2)).astype(np.complex128)
+    init = (rng.standard_normal((2, 2, 2, 2, 2))
+            + 1j * rng.standard_normal((2, 2, 2, 2, 2))).astype(np.complex128)
 
     payload = tmp_path / "payload.npz"
-    save_payload(payload, init=init, gate=gate, meta={"path": "c4v_1x1", "D": 2, "chi": 8})
+    save_payload(payload, init=init, gate=gate, meta={"path": "single_site", "D": 2, "chi": 8})
 
     out = tmp_path / "tenax_result.json"
     cmd = [
         sys.executable, "-m", "benchmarks.varipeps_compare.run_tenax",
         "--payload", str(payload),
-        "--path", "c4v_1x1",
+        "--path", "single_site",
         "--D", "2", "--chi", "8",
         "--tol", "1e-4", "--max-steps", "5",
         "--out", str(out),
@@ -541,7 +580,7 @@ def test_run_tenax_c4v_1x1_d2_chi8(tmp_path):
                 "device", "lib_version"):
         assert key in data, f"missing {key}"
     assert data["lib"] == "tenax"
-    assert data["path"] == "c4v_1x1"
+    assert data["path"] == "single_site"
     assert data["D"] == 2 and data["chi"] == 8
     assert len(data["energy_history"]) == data["num_steps"]
     assert data["final_energy"] < 0  # Heisenberg ground state is negative
@@ -563,7 +602,7 @@ Expected: FAIL — module not found.
 
 Usage:
     python -m benchmarks.varipeps_compare.run_tenax \
-        --payload payload.npz --path c4v_1x1 --D 2 --chi 16 \
+        --payload payload.npz --path single_site --D 2 --chi 16 \
         --tol 1e-6 --max-steps 100 --out tenax_<key>.json
 """
 from __future__ import annotations
@@ -608,50 +647,31 @@ def _build_config(*, path: str, D: int, chi: int, tol: float, max_steps: int) ->
         conv_tol=CTM_TOL,
         projector_method="svd",   # Fishman, matches variPEPS default
     )
-    if path == "c4v_1x1":
-        ctm = CTMConfig(
-            chi=chi, max_iter=CTM_MAX_ITER, conv_tol=CTM_TOL,
-            projector_method="svd",
-            ctm_ad_mode="c4v_reference",
-            adjoint_solver="bicgstab",
-            adjoint_maxiter=200,
-            adjoint_tol=1e-5,
-            adjoint_tikhonov=1e-3,
-        )
-        return iPEPSConfig(
-            max_bond_dim=D, ctm=ctm,
-            unit_cell="1x1",
-            gs_optimizer="lbfgs",
-            gs_num_steps=max_steps,
-            gs_conv_tol=tol,
-            gs_implicit_ad=True,
-            gs_c4v=True,
-            su_init=False,
-            return_history=True,
-        )
-    elif path == "checkerboard_2x2":
-        return iPEPSConfig(
-            max_bond_dim=D, ctm=ctm,
-            unit_cell="2site",
-            gs_optimizer="lbfgs",
-            gs_num_steps=max_steps,
-            gs_conv_tol=tol,
-            gs_implicit_ad=True,
-            su_init=False,
-            return_history=True,
-        )
+    common = dict(
+        max_bond_dim=D, ctm=ctm,
+        gs_optimizer="lbfgs",
+        gs_num_steps=max_steps,
+        gs_conv_tol=tol,
+        gs_implicit_ad=True,
+        su_init=False,
+        return_history=True,
+    )
+    if path == "single_site":
+        # Unconstrained 1×1 + sublattice-rotated gate.  No C4v — same ansatz
+        # as variPEPS structure=[[0]] so parameter counts match.
+        return iPEPSConfig(unit_cell="1x1", gs_c4v=False, **common)
+    elif path == "bipartite_2site":
+        return iPEPSConfig(unit_cell="2site", **common)
     else:
         raise ValueError(f"unknown path: {path}")
 
 
 def _load_init(init: np.ndarray, path: str):
-    if path == "c4v_1x1":
+    if path == "single_site":
         return jnp.asarray(init)
-    elif path == "checkerboard_2x2":
+    elif path == "bipartite_2site":
         # init shape: (2, D, D, D, D, d) → (A, B)
-        A = jnp.asarray(init[0])
-        B = jnp.asarray(init[1])
-        return (A, B)
+        return (jnp.asarray(init[0]), jnp.asarray(init[1]))
     else:
         raise ValueError(path)
 
@@ -659,7 +679,7 @@ def _load_init(init: np.ndarray, path: str):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--payload", required=True, type=Path)
-    ap.add_argument("--path", required=True, choices=("c4v_1x1", "checkerboard_2x2"))
+    ap.add_argument("--path", required=True, choices=("single_site", "bipartite_2site"))
     ap.add_argument("--D", required=True, type=int)
     ap.add_argument("--chi", required=True, type=int)
     ap.add_argument("--tol", required=True, type=float)
@@ -753,21 +773,21 @@ _HAVE_VARIPEPS = importlib.util.find_spec("varipeps") is not None
 
 @pytest.mark.algorithm
 @pytest.mark.skipif(not _HAVE_VARIPEPS, reason="varipeps not installed")
-def test_run_varipeps_checkerboard_d2_chi8(tmp_path):
+def test_run_varipeps_bipartite_2site_d2_chi8(tmp_path):
     gate = build_heisenberg_gate()
     rng = np.random.default_rng(0)
-    init = rng.standard_normal((2, 2, 2, 2, 2, 2)).astype(np.complex128)
-    init += 1j * rng.standard_normal((2, 2, 2, 2, 2, 2)).astype(np.complex128)
+    init = (rng.standard_normal((2, 2, 2, 2, 2, 2))
+            + 1j * rng.standard_normal((2, 2, 2, 2, 2, 2))).astype(np.complex128)
 
     payload = tmp_path / "payload.npz"
     save_payload(payload, init=init, gate=gate,
-                 meta={"path": "checkerboard_2x2", "D": 2, "chi": 8})
+                 meta={"path": "bipartite_2site", "D": 2, "chi": 8})
 
     out = tmp_path / "varipeps_result.json"
     cmd = [
         sys.executable, "-m", "benchmarks.varipeps_compare.run_varipeps",
         "--payload", str(payload),
-        "--path", "checkerboard_2x2",
+        "--path", "bipartite_2site",
         "--D", "2", "--chi", "8",
         "--tol", "1e-4", "--max-steps", "5",
         "--out", str(out),
@@ -775,7 +795,7 @@ def test_run_varipeps_checkerboard_d2_chi8(tmp_path):
     subprocess.run(cmd, check=True, timeout=600)
     data = json.loads(out.read_text())
     assert data["lib"] == "varipeps"
-    assert data["path"] == "checkerboard_2x2"
+    assert data["path"] == "bipartite_2site"
     assert data["final_energy"] < 0
 ```
 
@@ -819,34 +839,26 @@ def _peak_rss_mb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 
-def _build_unitcell_2site(init_AB: np.ndarray, D: int, chi_start: int, chi_max: int):
-    """Build a 2x2 checkerboard PEPS_Unit_Cell from a stacked (2, D, D, D, D, d) init.
+def _build_unitcell_bipartite_2site(init_AB: np.ndarray, D: int, chi_start: int, chi_max: int):
+    """Build a 2-tensor checkerboard PEPS_Unit_Cell from stacked (2, D, D, D, D, d) init.
 
-    variPEPS convention: tensors are (D, D, p, D, D) ordering — see
-    `/tmp/varipeps/examples/heisenberg_afm_square.py`.  We accept (D, D, D, D, d)
-    from Tenax SU and transpose to variPEPS layout.
+    variPEPS convention: tensors are (l, t, p, r, b) ordering (see
+    ``/tmp/varipeps/examples/heisenberg_afm_square.py``).  We accept Tenax's
+    (l, t, r, b, p) layout and transpose.
     """
     A = init_AB[0]  # (D, D, D, D, d)
     B = init_AB[1]
-    # Tenax (l, t, r, b, p) → variPEPS (l, t, p, r, b) per inspection of variPEPS init.
     A_v = np.transpose(A, (0, 1, 4, 2, 3))
     B_v = np.transpose(B, (0, 1, 4, 2, 3))
-
-    # Construct unit cell from existing tensors (deterministic init).
     structure = [[0, 1], [1, 0]]
-    unitcell = varipeps.peps.PEPS_Unit_Cell.from_tensor_list(
+    return varipeps.peps.PEPS_Unit_Cell.from_tensor_list(
         [A_v, B_v], structure, chi_start, max_chi=chi_max,
     )
-    return unitcell
 
 
-def _build_unitcell_c4v(init_A: np.ndarray, D: int, chi_start: int, chi_max: int):
-    """Single-tensor C4v 1x1 init, replicated to a 2x2 checkerboard with sublattice rotation
-    handled at the gate level — mirrors Tenax c4v_reference path.
-
-    NOTE: variPEPS does not natively support a "C4v 1x1 + sublattice-rotated gate"
-    mode; we encode it as a 1×1 unit cell with the rotated gate.  See
-    `varipeps.peps.PEPS_Unit_Cell.from_tensor_list([A], [[0]], ...)`.
+def _build_unitcell_single_site(init_A: np.ndarray, D: int, chi_start: int, chi_max: int):
+    """1×1 unconstrained PEPS_Unit_Cell with sublattice-rotated gate handled
+    at the expectation-value level.  Same ansatz as Tenax single_site path.
     """
     A_v = np.transpose(init_A, (0, 1, 4, 2, 3))
     structure = [[0]]
@@ -858,7 +870,7 @@ def _build_unitcell_c4v(init_A: np.ndarray, D: int, chi_start: int, chi_max: int
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--payload", required=True, type=Path)
-    ap.add_argument("--path", required=True, choices=("c4v_1x1", "checkerboard_2x2"))
+    ap.add_argument("--path", required=True, choices=("single_site", "bipartite_2site"))
     ap.add_argument("--D", required=True, type=int)
     ap.add_argument("--chi", required=True, type=int)
     ap.add_argument("--tol", required=True, type=float)
@@ -884,10 +896,10 @@ def main():
     )
 
     chi_start = min(args.D ** 2, args.chi)
-    if args.path == "c4v_1x1":
-        unitcell = _build_unitcell_c4v(init_np, args.D, chi_start, args.chi)
+    if args.path == "single_site":
+        unitcell = _build_unitcell_single_site(init_np, args.D, chi_start, args.chi)
     else:
-        unitcell = _build_unitcell_2site(init_np, args.D, chi_start, args.chi)
+        unitcell = _build_unitcell_bipartite_2site(init_np, args.D, chi_start, args.chi)
 
     autosave = args.out.with_suffix(".hdf5")
     autosave.parent.mkdir(parents=True, exist_ok=True)
@@ -985,7 +997,7 @@ from .protocol import (
     GRID, MAX_STEPS, SUBPROCESS_TIMEOUT_SEC, TOL, grid_key,
 )
 from .su_init import (
-    build_heisenberg_gate, build_sublattice_rotated_gate, run_su_init,
+    build_heisenberg_gate, build_sublattice_rotated_gate, make_init,
 )
 
 
@@ -1022,11 +1034,13 @@ def _build_payload(point: dict, results_dir: Path) -> Path:
     payload = results_dir / f"{key}_payload.npz"
     if payload.exists():
         return payload
-    if point["path"] == "c4v_1x1":
+    if point["path"] == "single_site":
         gate = build_sublattice_rotated_gate()
-    else:
+    elif point["path"] == "bipartite_2site":
         gate = build_heisenberg_gate()
-    init = run_su_init(path=point["path"], D=point["D"])
+    else:
+        raise ValueError(f"unknown path: {point['path']}")
+    init = make_init(path=point["path"], D=point["D"], seed=0)
     save_payload(payload, init=init, gate=gate, meta={**point, "seed": 0})
     return payload
 
@@ -1212,20 +1226,20 @@ import numpy as np
 import pytest
 
 from benchmarks.varipeps_compare.payload import save_payload
-from benchmarks.varipeps_compare.su_init import run_su_init, build_sublattice_rotated_gate
+from benchmarks.varipeps_compare.su_init import make_init, build_sublattice_rotated_gate
 
 _HAVE_VARIPEPS = importlib.util.find_spec("varipeps") is not None
 
 
 @pytest.mark.slow
 @pytest.mark.skipif(not _HAVE_VARIPEPS, reason="varipeps not installed")
-def test_smoke_c4v_1x1_d2_chi8(tmp_path):
-    init = run_su_init(path="c4v_1x1", D=2, num_steps=20, dt=0.1)
+def test_smoke_single_site_d2_chi8(tmp_path):
+    init = make_init(path="single_site", D=2, seed=0)
     gate = build_sublattice_rotated_gate()
     payload = tmp_path / "payload.npz"
-    save_payload(payload, init=init, gate=gate, meta={"path": "c4v_1x1", "D": 2, "chi": 8})
+    save_payload(payload, init=init, gate=gate, meta={"path": "single_site", "D": 2, "chi": 8})
 
-    common = ["--payload", str(payload), "--path", "c4v_1x1",
+    common = ["--payload", str(payload), "--path", "single_site",
               "--D", "2", "--chi", "8", "--tol", "1e-4", "--max-steps", "20"]
     tenax_out = tmp_path / "tenax.json"
     varipeps_out = tmp_path / "varipeps.json"
@@ -1238,12 +1252,14 @@ def test_smoke_c4v_1x1_d2_chi8(tmp_path):
 
     assert t["final_energy"] < 0
     assert v["final_energy"] < 0
-    assert abs(t["final_energy"] - v["final_energy"]) < 1e-3, (
+    # NOTE: at chi=8 + 20 steps from random init, both libs may not yet be
+    # converged.  We assert they agree, not that they're at the reference E.
+    assert abs(t["final_energy"] - v["final_energy"]) < 1e-2, (
         f"libs disagree: tenax={t['final_energy']} varipeps={v['final_energy']}"
     )
-    # Both should be near the D=2 reference E ≈ -0.6614 (loose tol for chi=8 + 20 steps)
-    assert abs(t["final_energy"] - (-0.66)) < 5e-2
-    assert abs(v["final_energy"] - (-0.66)) < 5e-2
+    # Both should at least be below the trivial -0.5 saddle.
+    assert t["final_energy"] < -0.5
+    assert v["final_energy"] < -0.5
 ```
 
 **Step 8.2: Run, verify it passes**
@@ -1258,7 +1274,7 @@ Expected: PASS in ~2–4 minutes. If it doesn't, debug (likely variPEPS init axi
 
 ```bash
 git add tests/test_varipeps_compare.py
-git commit -m "test(varipeps-compare): smoke — both libs land within 1e-3 on C4v D=2 χ=8"
+git commit -m "test(varipeps-compare): smoke — both libs agree within 1e-2 on single_site D=2 χ=8"
 ```
 
 ---
@@ -1370,12 +1386,12 @@ EOF
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| variPEPS `from_tensor_list` API mismatch (1.4.x patch drift) | Medium | Task 6 caveat: verify against installed source; smoke test at Task 8 catches it before full run. |
+| variPEPS `from_tensor_list` API mismatch or axis-ordering drift between 1.4.x patches | Medium | Task 6 caveat: verify against installed source at `/home/yjkao/miniforge3/lib/python3.12/site-packages/varipeps/peps/__init__.py`; smoke test at Task 8 catches it before full run. |
 | OOM at D=3, χ=24 on CPU | Medium | Compare orchestrator marks point error and continues; can rerun on GPU with `--device cuda:0`. |
 | Tenax 2-site path SU returns gauge-different tensors than what variPEPS expects | Medium | Both libs run their own CTM-fixed-point inside the AD step, so a one-step gauge mismatch should wash out in the first sweep. If not, smoke test (Task 8) flags it. |
-| Tenax `c4v_reference` path needs different optimizer setup than 2-site path | Low | Already encoded in `_build_config` (Task 5); cribbed from existing `bench_ipeps_ad.py`. |
+| `single_site` random init from same seed lands at different basins in the two libs (path symmetry breaking) | Medium | The unconstrained 1×1 ansatz with rotated gate has a global minimum continuum (gauge-equivalent solutions). Energies should still match within 1e-3; trajectories may diverge in detail. The smoke test asserts only energy agreement (1e-2). |
 | variPEPS imports auto-mutate `jax.config` and break Tenax precision settings | Low | Subprocess isolation eliminates this entirely. |
-| Smoke test flaky due to L-BFGS line-search non-determinism | Low | Tolerances loose (1e-3 for inter-lib, 5e-2 for absolute). |
+| Smoke test flaky due to L-BFGS line-search non-determinism | Low | Tolerances are loose (1e-2 for inter-lib agreement at the smoke point). |
 
 ---
 

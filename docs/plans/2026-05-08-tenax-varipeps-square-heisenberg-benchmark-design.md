@@ -18,10 +18,12 @@ energy-vs-step trajectory.
 | Axis | Choice | Why |
 |---|---|---|
 | Goal | accuracy + perf + trajectory parity | full apples-to-apples report |
-| Paths | both **C4v 1×1 + sublattice rotation** *and* **2×2 multisite checkerboard** | (a) is unambiguous smoke test; (b) is the headline number |
+| Paths | both **`single_site` (1×1 + sublattice-rotated gate, unconstrained tensor)** *and* **`bipartite_2site` (2-tensor checkerboard + bare gate)** | (a) is the cheap diagnostic; (b) is the headline number |
+| Tenax 1×1 ansatz | `gs_c4v=False, gs_implicit_ad=True, unit_cell="1x1"` | variPEPS has no native C4v constraint, so we drop Tenax's C4v constraint to give both libs the **same** unconstrained ansatz (matched parameter count → trajectory parity meaningful) |
 | Grid | D ∈ {2, 3} × χ ∈ {16, 24} | CPU-tractable, covers regime where AD machinery matters |
 | Stopping | tol 1e-6 with hard cap of 100 AD steps | physical convergence target with bounded wall-clock |
-| Init | shared SU-converged tensor on disk | trajectory parity meaningful from step 0 |
+| Init — `single_site` | shared **random** init (one numpy seed, both libs load same array) | SU on the rotated gate converges to the \|↑↑⟩ saddle (E=−0.5/site), L-BFGS cannot escape it (see `ipeps_optimize.py:1389` reference-mode comment) |
+| Init — `bipartite_2site` | shared **SU-converged** tensor on disk | Tenax SU on the bare gate finds a Néel-like state both libs descend from |
 | dtype | complex128 both libs | variPEPS only runs at complex128 (per 2026-05-08 audit) |
 | Architecture | shared protocol, two subprocess runners, one orchestrator | fair JIT cost; no `jax.config` cross-pollution; runners independently runnable |
 | Location | `benchmarks/varipeps_compare/` | extends benchmarking infra without polluting `bench_ipeps_ad.py` |
@@ -34,7 +36,9 @@ Total grid: 2 paths × 2 D × 2 χ = **8 points**, each run twice (Tenax, variPE
 [orchestrator]                      [disk]                    [tenax subproc]   [varipeps subproc]
      │                                 │                            │                  │
      │  build H gate (path-specific)   │                            │                  │
-     │  Tenax SU init (seed=0)         │                            │                  │
+     │  build init                     │                            │                  │
+     │    single_site → random          │                            │                  │
+     │    bipartite_2site → Tenax SU    │                            │                  │
      │  save payload.npz ────────────► │                            │                  │
      │  spawn run_tenax    ─────────►  │ ─► load payload.npz ────►  │                  │
      │  spawn run_varipeps ──────────────────────────────────────────────────────────► │
@@ -45,9 +49,11 @@ Total grid: 2 paths × 2 D × 2 χ = **8 points**, each run twice (Tenax, variPE
 ```
 
 **Process isolation** is load-bearing: subprocesses give fair JIT/cache accounting and prevent
-variPEPS's import-time `jax.config` writes from polluting Tenax. **Shared SU init on disk** makes
-trajectory parity meaningful. **Single device target** (set by env var before subprocess spawn) keeps
-wall-clocks comparable.
+variPEPS's import-time `jax.config` writes from polluting Tenax. **Shared init on disk** (random for
+`single_site`, SU for `bipartite_2site`) makes trajectory parity meaningful from step 0. **Single
+device target** (set by env var before subprocess spawn) keeps wall-clocks comparable. **Both libs
+use unconstrained ansatze on both paths** — Tenax does not enforce C4v on the 1×1 path, so the
+parameter counts match variPEPS exactly.
 
 ## Components
 
@@ -65,7 +71,7 @@ benchmarks/varipeps_compare/
 `protocol.py` is single source of truth for the grid and shared knobs. Both runners
 and the orchestrator import from it. Knobs:
 
-- `GRID = [(path, D, χ) for path in {"c4v_1x1", "checkerboard_2x2"} for D in {2,3} for χ in {16,24}]`
+- `GRID = [(path, D, χ) for path in {"single_site", "bipartite_2site"} for D in {2,3} for χ in {16,24}]`
 - `TOL = 1e-6`, `MAX_STEPS = 100`, `SEED = 0`, `DTYPE = "complex128"`
 - `LBFGS_HISTORY = 10`, line-search aligned to variPEPS defaults
 - `CTM_TOL = 1e-8`, `CTM_MAX_ITER = 100`
@@ -77,7 +83,7 @@ Both `run_tenax.py` and `run_varipeps.py` emit JSON with this exact schema:
 ```json
 {
   "lib": "tenax" | "varipeps",
-  "path": "c4v_1x1" | "checkerboard_2x2",
+  "path": "single_site" | "bipartite_2site",
   "D": 2|3, "chi": 16|24, "dtype": "complex128", "seed": 0,
   "energy_history": [E_0, E_1, ..., E_n],
   "step_times": [t_0, t_1, ..., t_n],
@@ -115,7 +121,7 @@ Subprocess timeout per point: 30 minutes (D=3 χ=24 budget). Exceeding = hard fa
 ```python
 @pytest.mark.slow
 @pytest.mark.skipif(not _have_varipeps(), reason="varipeps not installed")
-def test_smoke_c4v_1x1_d2_chi8():
+def test_smoke_single_site_d2_chi8():
     # C4v 1x1, D=2, chi=8, MAX_STEPS=20, tol=1e-4
     # assert |E_tenax - E_varipeps| < 1e-3
     # assert both within 5e-2 of E_ref ≈ -0.6614
