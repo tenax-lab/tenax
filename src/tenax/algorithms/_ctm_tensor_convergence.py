@@ -246,7 +246,7 @@ def _ctm_tensor_sweep_multisite(
     projector_method: str = "svd",
     projector_backward: str = "auto",
     recipe: str = "2x2",
-) -> dict[Coord, CTMTensorEnv]:
+) -> tuple[dict[Coord, CTMTensorEnv], jax.Array]:
     """One full multisite CTM sweep over all sites and directions.
 
     Args:
@@ -268,7 +268,9 @@ def _ctm_tensor_sweep_multisite(
                         compatibility / regression bisection.
 
     Returns:
-        Updated per-coord env dict.
+        ``(envs, max_eps)`` — updated per-coord env dict and the max
+        truncation error (JAX scalar) across all moves in this sweep.
+        The 2x2 path returns ``jnp.asarray(0.0)`` as a placeholder.
     """
     # Extract base charges from any double-layer tensor for projector stabilization
     base_charges = None
@@ -283,11 +285,12 @@ def _ctm_tensor_sweep_multisite(
     envs = dict(envs)
 
     all_coords = list(envs.keys())
+    max_eps = jnp.asarray(0.0)
     if recipe == "1x1":
         for direction, move_fn in _DIRECTION_MOVES:
             for coord in _sort_coords_for_direction(all_coords, direction):
                 nb = neighbors[coord][direction]
-                envs[coord], _ = move_fn(
+                envs[coord], eps_t = move_fn(
                     envs[coord],
                     envs[nb],
                     double_layers[nb],
@@ -296,6 +299,7 @@ def _ctm_tensor_sweep_multisite(
                     base_charges=base_charges,
                     projector_backward=projector_backward,
                 )
+                max_eps = jnp.maximum(max_eps, jnp.asarray(eps_t))
     elif recipe == "2x2":
         # variPEPS-style 2-plaquette absorption: for each direction, two
         # phases.
@@ -451,7 +455,7 @@ def _ctm_tensor_sweep_multisite(
         raise ValueError(f"Unknown CTM recipe {recipe!r}: expected '1x1' or '2x2'.")
     if renormalize:
         envs = {c: _renormalize_tensor_env(e) for c, e in envs.items()}
-    return envs
+    return envs, max_eps
 
 
 # ------------------------------------------------------------------ #
@@ -651,7 +655,7 @@ def _ctm_tensor_multisite(
     if projector_method == "qr" and qr_warmup_steps > 0:
         warmup = min(qr_warmup_steps, max_iter)
         for _ in range(warmup):
-            envs = _ctm_tensor_sweep_multisite(
+            envs, _ = _ctm_tensor_sweep_multisite(
                 envs,
                 double_layers,
                 neighbors,
@@ -665,7 +669,7 @@ def _ctm_tensor_multisite(
 
     prev_svs: dict[Coord, jax.Array] = {}
     for _ in range(max_iter):
-        envs = _ctm_tensor_sweep_multisite(
+        envs, _ = _ctm_tensor_sweep_multisite(
             envs,
             double_layers,
             neighbors,
