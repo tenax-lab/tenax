@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
+from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
@@ -70,9 +71,6 @@ class TestCtmTensorReturnsTuple:
         )
 
 
-from tenax.algorithms.ipeps_config import CTMConfig
-
-
 def test_ctm_config_auto_bump_defaults_off():
     """Auto-bump must be opt-in to preserve existing behavior."""
     config = CTMConfig(chi=4)
@@ -93,10 +91,12 @@ def test_ctm_config_auto_bump_rejects_chi_ramp_combo():
 
 
 def test_ctm_config_auto_bump_validates_step_positive():
+    """chi_auto_bump_step <= 0 is rejected when chi_auto_bump=True."""
     with pytest.raises(ValueError, match="chi_auto_bump_step"):
         CTMConfig(chi=4, chi_auto_bump=True, chi_auto_bump_step=0)
 
 
 def test_ctm_config_auto_bump_validates_chi_max_above_chi():
+    """chi_max is always validated when set, regardless of chi_auto_bump."""
     with pytest.raises(ValueError, match="chi_max"):
-        CTMConfig(chi=4, chi_auto_bump=True, chi_max=2)
+        CTMConfig(chi=4, chi_max=2)
