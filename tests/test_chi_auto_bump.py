@@ -59,15 +59,32 @@ class TestCtmTensorReturnsTuple:
         assert math.isfinite(max_eps), f"max_eps must be finite, got {max_eps}"
 
     def test_ctm_tensor_eps_decreases_with_chi(self):
-        """Larger chi should yield smaller or equal truncation error."""
-        A = _make_random_site_tensor(D=2, d=2, seed=2)
-        # D=2 so chi=4 should already be saturating; chi=2 will be tighter
-        _, eps_small = ctm_tensor(A, chi=2, max_iter=20, conv_tol=1e-8)
-        _, eps_large = ctm_tensor(A, chi=4, max_iter=20, conv_tol=1e-8)
-        # chi=4 >= D^2=4 is already exact: eps_large <= eps_small
-        assert eps_large <= eps_small + 1e-10, (
-            f"Larger chi should not yield larger truncation error: "
-            f"chi=2 -> {eps_small}, chi=4 -> {eps_large}"
+        """compute_truncation_error decreases as chi increases on a known spectrum.
+
+        In the CTM SVD projector, M = C1g^H @ C4g is a (chi × chi) matrix so
+        its SVD has at most chi singular values — keeping all chi gives eps=0
+        regardless of D.  The meaningful truncation happens at the level of the
+        singular-value spectrum itself: given a fixed spectrum, keeping more
+        singular values should give a strictly smaller eps_T.
+
+        We test this directly on ``compute_truncation_error`` with a synthetic
+        spectrum that has 9 non-trivial modes (matching D=3, D^2=9).
+        """
+        import jax.numpy as jnp
+
+        from tenax.algorithms._ctm_truncation_error import compute_truncation_error
+
+        # Synthetic spectrum with 9 non-trivial singular values (decaying)
+        # Mimics what the SVD of a chi*D² × chi*D² matrix would look like.
+        s = jnp.array([10.0, 8.0, 6.0, 4.0, 3.0, 2.0, 1.0, 0.5, 0.1])
+        eps_chi4 = float(compute_truncation_error(s, chi=4))
+        eps_chi8 = float(compute_truncation_error(s, chi=8))
+        # chi=8 keeps 8 out of 9 modes; chi=4 keeps only 4 — chi=4 discards more
+        assert eps_chi4 > 0.0, f"chi=4 should discard modes: eps={eps_chi4}"
+        assert eps_chi8 > 0.0, f"chi=8 should still discard 1 mode: eps={eps_chi8}"
+        assert eps_chi8 < eps_chi4, (
+            f"Larger chi should yield strictly smaller truncation error: "
+            f"chi=4 -> {eps_chi4:.6f}, chi=8 -> {eps_chi8:.6f}"
         )
 
 
@@ -175,6 +192,11 @@ def test_maybe_bump_chi_above_threshold_bumps_and_pads():
     )
     new_cfg, new_cache = _maybe_bump_chi(cfg, cache, last_eps_t=1e-3)
     assert new_cfg.chi == 6  # 4 + 2
+    # env_cache dict must be mutated in-place — closures that captured the
+    # original dict (e.g. make_ctm_energy_fn) must see the padded envs.
+    assert new_cache is cache, (
+        "_maybe_bump_chi must mutate env_cache in-place, not create a new dict"
+    )
     assert new_cache["envs"][(0, 0)].C1._data.shape == (6, 6)
 
 

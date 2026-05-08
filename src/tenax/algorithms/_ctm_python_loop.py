@@ -55,7 +55,12 @@ def _make_jit_ctm_step(
         A JIT-compiled function with signature::
 
             step(site_tensors, envs, *, chi, projector_method,
-                 renormalize, projector_backward) -> envs
+                 renormalize, projector_backward)
+                 -> tuple[dict[Coord, CTMTensorEnv], jax.Array]
+
+        The returned tuple is ``(new_envs, max_truncation_error)`` where
+        ``max_truncation_error`` is the largest singular-value truncation
+        error (ε_T) observed across all projector computations in the sweep.
     """
 
     @partial(

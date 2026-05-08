@@ -43,6 +43,12 @@ def _maybe_bump_chi(
     ``(ctm_cfg, env_cache)`` pair with χ raised by ``chi_auto_bump_step``
     (capped at ``chi_max`` if set). The cached env is zero-padded to the
     new χ. Otherwise the input pair is returned unchanged.
+
+    ``env_cache`` is mutated **in-place** (the dict object is reused, only
+    ``env_cache["envs"]`` is overwritten) so that any closure that captured
+    the original dict reference — notably the ``env_cache`` captured by
+    ``make_ctm_energy_fn`` in ``optimize_gs_ad`` — sees the updated envs
+    without rebinding.
     """
     if not ctm_cfg.chi_auto_bump:
         return ctm_cfg, env_cache
@@ -55,11 +61,12 @@ def _maybe_bump_chi(
         return ctm_cfg, env_cache  # at ceiling
     new_cfg = dataclasses.replace(ctm_cfg, chi=chi_new)
     if "envs" in env_cache:
-        new_envs = {
+        # Mutate in-place so closures that captured env_cache by reference
+        # (e.g. make_ctm_energy_fn inside optimize_gs_ad) see the padded envs.
+        env_cache["envs"] = {
             c: pad_dense_env_chi(env_cache["envs"][c], chi_new)
             for c in env_cache["envs"]
         }
-        env_cache = {**env_cache, "envs": new_envs}
     return new_cfg, env_cache
 
 
@@ -460,7 +467,7 @@ def optimize_gs_ad(
     if config.gs_num_steps < 0:
         raise ValueError(f"gs_num_steps must be >= 0, got {config.gs_num_steps}")
 
-    # chi_auto_bump is only supported for unit_cell='1x1' (dense AD path).
+    # chi_auto_bump is only supported for the dense '1x1' AD path.
     # Multisite and 2-site paths are tracked as follow-up issues (Task 9).
     if config.ctm.chi_auto_bump and (
         isinstance(config.unit_cell, Lattice) or config.unit_cell == "2site"
@@ -468,6 +475,13 @@ def optimize_gs_ad(
         raise NotImplementedError(
             "chi_auto_bump is currently supported only for unit_cell='1x1'; "
             "multisite and 2-site paths are tracked as follow-up issues."
+        )
+    # The reference-C4v sub-path has no bump logic; reject early so the user
+    # gets a clear error rather than silent no-op.
+    if config.ctm.chi_auto_bump and _use_reference_c4v_path(config):
+        raise NotImplementedError(
+            "chi_auto_bump is not supported on the reference-C4v AD path; "
+            "tracked as a follow-up issue."
         )
 
     # Resolve projector_backward policy before dispatch so every downstream
