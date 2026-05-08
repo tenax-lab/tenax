@@ -5,10 +5,11 @@ Implements the variPEPS §2.8.2 indicator that gates auto-χ_E bumps.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 
-def compute_truncation_error(s: jnp.ndarray, chi: int) -> jnp.ndarray:
+def compute_truncation_error(s: jax.Array, chi: int) -> jax.Array:
     """Normalized L2 norm of discarded singular values.
 
     ε_T = ‖s[χ:]‖_2 / ‖s‖_2, where s is the full SV vector returned by the

@@ -27,7 +27,7 @@ def test_matches_normalized_l2_of_discarded_tail():
 
 def test_one_when_chi_zero():
     s = jnp.array([1.0, 0.5])
-    assert float(compute_truncation_error(s, chi=0)) == pytest.approx(1.0)
+    assert float(compute_truncation_error(s, chi=0)) == 1.0
 
 
 def test_handles_zero_spectrum_safely():
