@@ -31,6 +31,11 @@ from tenax.algorithms._ctm_tensor_init import (
     initialize_ctm_tensor_env,
 )
 from tenax.algorithms._ctm_tensor_moves import (
+    _compute_plaquette_projector_pair,
+    _ctm_tensor_absorb_bottom_2plaq,
+    _ctm_tensor_absorb_left_2plaq,
+    _ctm_tensor_absorb_right_2plaq,
+    _ctm_tensor_absorb_top_2plaq,
     _ctm_tensor_move_bottom,
     _ctm_tensor_move_bottom_2x2,
     _ctm_tensor_move_left,
@@ -281,41 +286,156 @@ def _ctm_tensor_sweep_multisite(
                     projector_backward=projector_backward,
                 )
     elif recipe == "2x2":
-        # The 2x2 plaquette is rooted at the cell ``coord`` whose env is
-        # being updated; the plaquette extends to (right, bottom,
-        # right-then-bottom) of ``coord``.  For each direction the projector
-        # truncates the corresponding internal seam of the plaquette and the
-        # updated corners/edges replace ``envs[coord]``'s same-side fields.
-        # This mirrors the variPEPS-style "1x1 with 2x2 projector" absorption
-        # in spirit, using the 4-cell plaquette only for the projector
-        # while keeping the 1x1 absorption topology (anchor cell == target
-        # cell == env being updated).
+        # variPEPS-style 2-plaquette absorption: for each direction, two
+        # phases.
         #
-        # Snapshot pre-direction envs so each plaquette in this direction
-        # uses the SAME pre-direction environment, matching variPEPS's
-        # column/row-buffered absorption.  Without the snapshot, processing
-        # cells in sequence on a multisite unitcell would mean later
-        # plaquettes see partially-updated env tensors, which destabilises
-        # convergence.
-        for direction, move_fn_2x2 in _DIRECTION_MOVES_2X2:
+        # Phase 1: compute projector pair (P_top, P_bot) per cell, anchored
+        # at that cell, with direction-specific seam.  Each plaquette is
+        # ``s_anchor, neighbors[s_anchor]["right"],
+        # neighbors[s_anchor]["bottom"],
+        # neighbors[neighbors[s_anchor]["right"]]["bottom"]``.
+        #
+        # Phase 2: for each cell ``s_dst`` whose env is being updated, the
+        # absorption uses TWO plaquettes:
+        #
+        #   - LEFT:  s_src = neighbors[s_dst]["left"];
+        #            "above" plaquette anchored at neighbors[s_src]["top"];
+        #            "current" plaquette anchored at s_src.
+        #   - RIGHT: s_src = neighbors[s_dst]["right"];
+        #            "above" anchored at neighbors[s_above_TL]["top"]
+        #            where the plaquette geometry covers s_src on the
+        #            right column — see _ctm_tensor_absorb_right_2plaq.
+        #   - TOP:   s_src = neighbors[s_dst]["top"];
+        #            "left" plaquette anchored at neighbors[s_src]["left"];
+        #            "current" plaquette anchored at s_src.
+        #   - BOTTOM:s_src = neighbors[s_dst]["bottom"];
+        #            "left" anchored at neighbors[s_src]["left"];
+        #            "current" anchored at s_src.
+        #
+        # Each direction draws projectors from the cell whose env tensors
+        # are being absorbed, so projectors and env tensors come from the
+        # same snapshot of ``envs`` taken at the start of the direction's
+        # phase 1.  Without this snapshot, cells processed later in the
+        # direction would see partially-updated env tensors used to build
+        # the plaquette (a stale-projector vs fresh-absorbed inconsistency
+        # known to destabilise multisite CTM convergence).
+        for direction in ("left", "right", "top", "bottom"):
             envs_old = dict(envs)
-            for coord in _sort_coords_for_direction(all_coords, direction):
-                s_TL = coord
-                s_TR = neighbors[s_TL]["right"]
-                s_BL = neighbors[s_TL]["bottom"]
+            # Phase 1: precompute projector pairs anchored at every cell.
+            projectors: dict[Coord, tuple] = {}
+            for s_anchor in all_coords:
+                s_TR = neighbors[s_anchor]["right"]
+                s_BL = neighbors[s_anchor]["bottom"]
                 s_BR = neighbors[s_TR]["bottom"]
-                envs[coord] = move_fn_2x2(
-                    envs_old[s_TL],
+                projectors[s_anchor] = _compute_plaquette_projector_pair(
+                    envs_old[s_anchor],
                     envs_old[s_TR],
                     envs_old[s_BL],
                     envs_old[s_BR],
-                    double_layers[s_TL],
+                    double_layers[s_anchor],
                     double_layers[s_TR],
                     double_layers[s_BL],
                     double_layers[s_BR],
                     chi,
-                    projector_method,
+                    direction,
                 )
+
+            # Phase 2: absorb per cell using TWO plaquettes' projectors.
+            new_envs: dict[Coord, CTMTensorEnv] = {}
+            for s_dst in _sort_coords_for_direction(all_coords, direction):
+                if direction == "left":
+                    # Source cell whose column is absorbed and projectors
+                    # are sourced from.  variPEPS writes (new C1, T4, C4)
+                    # of cell ``(x, y+1)`` from the absorbed column at
+                    # ``(x, y)``.  In Tenax terms, env at ``s_dst`` has a
+                    # left edge that bounds against ``s_src`` on its left,
+                    # and the pre-projection column is at ``s_src``.
+                    s_src = neighbors[s_dst]["left"]
+                    s_above_anchor = neighbors[s_src]["top"]
+                    P_top_above, P_bot_above = projectors[s_above_anchor]
+                    P_top_curr, P_bot_curr = projectors[s_src]
+                    C1_new, T4_new, C4_new = _ctm_tensor_absorb_left_2plaq(
+                        envs_old[s_src],
+                        double_layers[s_src],
+                        P_top_above,
+                        P_bot_above,
+                        P_top_curr,
+                        P_bot_curr,
+                    )
+                    new_envs[s_dst] = envs_old[s_dst]._replace(
+                        C1=C1_new, T4=T4_new, C4=C4_new
+                    )
+                elif direction == "right":
+                    # Mirror of LEFT: source cell is to the RIGHT of dst.
+                    # Plaquettes that compress the seam between ``s_src``
+                    # and ``s_dst`` are anchored at the cell whose
+                    # plaquette includes both as the LEFT and RIGHT
+                    # columns.  For the RIGHT direction with the same
+                    # plaquette geometry as LEFT (TL=anchor,
+                    # TR=anchor.right, BL=anchor.bottom, BR=TR.bottom),
+                    # the plaquette anchored at ``neighbors[s_dst]["top"]``
+                    # has TR = neighbors[s_dst]["top"].right = s_src.top
+                    # (and we want the RIGHT-column seam of that plaquette,
+                    # which compresses the seam between TR and BR =
+                    # between s_src.top and s_src).  The "current"
+                    # plaquette anchored at ``s_dst`` similarly compresses
+                    # the seam between TR=s_src and BR=s_src.bottom.
+                    s_src = neighbors[s_dst]["right"]
+                    s_above_anchor = neighbors[s_dst]["top"]
+                    P_top_above, P_bot_above = projectors[s_above_anchor]
+                    P_top_curr, P_bot_curr = projectors[s_dst]
+                    C2_new, T2_new, C3_new = _ctm_tensor_absorb_right_2plaq(
+                        envs_old[s_src],
+                        double_layers[s_src],
+                        P_top_above,
+                        P_bot_above,
+                        P_top_curr,
+                        P_bot_curr,
+                    )
+                    new_envs[s_dst] = envs_old[s_dst]._replace(
+                        C2=C2_new, T2=T2_new, C3=C3_new
+                    )
+                elif direction == "top":
+                    s_src = neighbors[s_dst]["top"]
+                    s_left_anchor = neighbors[s_src]["left"]
+                    P_top_left, P_bot_left = projectors[s_left_anchor]
+                    P_top_curr, P_bot_curr = projectors[s_src]
+                    C1_new, T1_new, C2_new = _ctm_tensor_absorb_top_2plaq(
+                        envs_old[s_src],
+                        double_layers[s_src],
+                        P_top_left,
+                        P_bot_left,
+                        P_top_curr,
+                        P_bot_curr,
+                    )
+                    new_envs[s_dst] = envs_old[s_dst]._replace(
+                        C1=C1_new, T1=T1_new, C2=C2_new
+                    )
+                else:  # direction == "bottom"
+                    # Mirror of TOP: same geometry as TOP, but the seam
+                    # being compressed is the BOTTOM row of the plaquette.
+                    # Plaquette anchored at neighbors[s_dst]["left"] has
+                    # BL = s_dst.left.bottom and BR = s_dst.bottom = s_src;
+                    # cutting the BOTTOM row gives the seam between BL and
+                    # BR.  The "current" plaquette anchored at s_dst has
+                    # BL = s_src and BR = s_src.right; cutting BOTTOM row
+                    # gives the seam between s_src and s_src.right.
+                    s_src = neighbors[s_dst]["bottom"]
+                    s_left_anchor = neighbors[s_dst]["left"]
+                    P_top_left, P_bot_left = projectors[s_left_anchor]
+                    P_top_curr, P_bot_curr = projectors[s_dst]
+                    C4_new, T3_new, C3_new = _ctm_tensor_absorb_bottom_2plaq(
+                        envs_old[s_src],
+                        double_layers[s_src],
+                        P_top_left,
+                        P_bot_left,
+                        P_top_curr,
+                        P_bot_curr,
+                    )
+                    new_envs[s_dst] = envs_old[s_dst]._replace(
+                        C4=C4_new, T3=T3_new, C3=C3_new
+                    )
+            envs = new_envs
     else:
         raise ValueError(f"Unknown CTM recipe {recipe!r}: expected '1x1' or '2x2'.")
     if renormalize:
