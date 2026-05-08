@@ -16,6 +16,7 @@ from unittest.mock import patch as _mock_patch
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from tenax.algorithms._pess_multisite_energy import kagome_3site_bond_gates
@@ -29,6 +30,9 @@ from tenax.algorithms.pess_optimize import (
     optimize_pess_3site_multisite_ad,
     optimize_pess_ad,
 )
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.symmetry import U1Symmetry
+from tenax.core.tensor import DenseTensor
 
 
 def _make_test_config(chi: int) -> CTMConfig:
@@ -336,6 +340,92 @@ def test_backtracking_line_search_progresses_with_zero_energy():
     )
     assert jnp.isfinite(new_energy)
     assert jnp.all(jnp.isfinite(new_params["w"]))
+
+
+# ---------------------------------------------------------------------------
+# Tensor-valued bond gates (issue #402)
+# ---------------------------------------------------------------------------
+
+
+def _wrap_gate_as_dense_tensor(H: jnp.ndarray) -> DenseTensor:
+    """Wrap a (d,d,d,d) ndarray gate as a DenseTensor with trivial U(1)
+    charges, mirroring the convention used by ``ipeps.heisenberg_gate`` /
+    ``ipeps.xxz_gate``.
+
+    ``compute_energy_pess_3site_multisite`` accepts ``Tensor`` valued
+    gates and demotes them via ``.todense().reshape(d,d,d,d)``; this
+    helper exists so we can construct that branch's input from the test
+    side without depending on a public wrapper function.
+    """
+    d = int(H.shape[0])
+    sym = U1Symmetry()
+    charges = np.zeros(d, dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="si"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="sj"),
+        TensorIndex.from_charges(
+            sym, charges.copy(), FlowDirection.OUT, label="si_out"
+        ),
+        TensorIndex.from_charges(
+            sym, charges.copy(), FlowDirection.OUT, label="sj_out"
+        ),
+    )
+    return DenseTensor(jnp.asarray(H), indices)
+
+
+def test_pess_loss_3site_multisite_accepts_tensor_bond_gates():
+    """Closure builder accepts DenseTensor-valued gates (issue #402).
+
+    The downstream energy fn ``compute_energy_pess_3site_multisite``
+    already advertises ``jax.Array | Tensor`` and routes Tensor through
+    ``.todense().reshape(d,d,d,d)``.  ``build_pess_loss_3site_multisite``
+    must therefore not reject Tensor inputs at the entry-point
+    ``int(... .shape[0])`` access — that broke symmetry-aware /
+    Tensor-protocol gates before they ever reached the supported code
+    path.  Test feeds a ``DenseTensor``-wrapped gate dict and asserts the
+    loss closure builds and returns a finite real scalar.
+    """
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    array_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    bond_gates = {k: _wrap_gate_as_dense_tensor(g) for k, g in array_gates.items()}
+    assert all(isinstance(g, DenseTensor) for g in bond_gates.values())
+    config = _make_test_config(chi=8)
+
+    loss_fn = build_pess_loss_3site_multisite(bond_gates, config)
+    e0 = loss_fn(state)
+
+    assert jnp.shape(e0) == ()
+    assert jnp.isfinite(e0)
+    assert jnp.isrealobj(e0) or jnp.allclose(e0.imag, 0.0, atol=1e-10)
+
+
+def test_optimize_pess_3site_multisite_ad_accepts_tensor_bond_gates():
+    """``optimize_pess_3site_multisite_ad`` must work with Tensor gates.
+
+    Regression for issue #402 follow-up (PR #405 review): the loss closure
+    promotes Tensor gates locally, but the optimizer's warm-start helper
+    ``_build_site_tensors_for_warm_start`` separately did
+    ``next(iter(bond_gates.values())).shape[0]`` on the un-promoted dict.
+    The first ``loss(params)`` call succeeds, then the immediate
+    ``_update_env_cache(params)`` raises ``AttributeError`` and the
+    advertised Tensor-valued multisite optimisation path stays unusable.
+
+    One L-BFGS step is enough to drive both the loss path and
+    ``_update_env_cache``; we don't assert on energy descent (covered by
+    ``test_optimize_pess_3site_multisite_ad_decreases_energy`` for arrays).
+    """
+    state0 = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    array_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    bond_gates = {k: _wrap_gate_as_dense_tensor(g) for k, g in array_gates.items()}
+    config = _make_test_config(chi=8)
+
+    state_opt, e_opt = optimize_pess_3site_multisite_ad(
+        state0, bond_gates, config, max_iter=1, verbose=False
+    )
+
+    assert jnp.isfinite(e_opt)
+    assert state_opt.R_a.shape == state0.R_a.shape
+    assert state_opt.T_d.shape == state0.T_d.shape
 
 
 def test_build_pess_loss_3site_multisite_passes_env_init_from_cache():
