@@ -73,10 +73,15 @@ def test_compute_projector_tensor_returns_eps_t_dense_svd():
     assert 0.0 <= float(eps_T) <= 1.0
 
 
-def test_compute_projector_tensor_returns_zero_eps_t_for_eigh():
-    """eigh path is out of scope for v1; returns 0.0 placeholder."""
+def test_compute_projector_tensor_returns_eps_t_for_eigh():
+    """Dense non-tracer eigh path computes eps_T from the density-matrix eigenspectrum.
+
+    The density matrix rho = C1g @ C1g^H + C4g @ C4g^H is (chi_in × chi_in).
+    When chi_target < chi_in, the discarded eigenvalues give eps_T > 0.
+    This drives the variPEPS §2.8.2 auto-χ bump decision.
+    """
     key = jax.random.PRNGKey(0)
-    # chi=2 < chi_in=4 forces truncation; eigh path must still return 0.0 placeholder
+    # chi_target=2 < chi_in=4: rho is 4×4, keep top-2 eigenvectors -> eps_T > 0
     chi_in, chi_target = 4, 2
     sym = U1Symmetry()
     charges = np.zeros(chi_in, dtype=np.int32)
@@ -94,4 +99,6 @@ def test_compute_projector_tensor_returns_zero_eps_t_for_eigh():
     out = _compute_projector_tensor(C1g, C4g, chi_target, projector_method="eigh")
     assert len(out) == 3
     _, _, eps_T = out
-    assert float(eps_T) == 0.0
+    # eps_T must be positive: chi_target=2 discards 2 of 4 eigenvalues from rho.
+    assert float(eps_T) > 0.0, f"Expected eps_T > 0 but got {float(eps_T)}"
+    assert float(eps_T) <= 1.0, f"eps_T must be in [0, 1], got {float(eps_T)}"

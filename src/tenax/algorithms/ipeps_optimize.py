@@ -846,7 +846,38 @@ def _optimize_gs_ad_tensor(
             **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
         )
         _env_cache["envs"] = envs
-        _env_cache["max_truncation_error"] = float(info.max_truncation_error)
+        # ``info.max_truncation_error`` comes from the JIT-compiled CTM step,
+        # which sets eps_T = 0.0 for any input that is a JAX tracer during
+        # JIT compilation.  For the auto-bump path we need a real eps_T from
+        # a non-JIT-compiled sweep so we can compare against the threshold.
+        #
+        # We use the ``"eigh"`` projector for this measurement regardless of
+        # the optimizer's configured projector_method: eigh builds the full
+        # density matrix rho = C1g @ C1g^H + C4g @ C4g^H (shape chi*D² × chi*D²)
+        # and discards chi*D² - chi eigenvalues, giving a meaningful eps_T > 0
+        # whenever chi < chi_eff = D² * chi (i.e. always when D > 1).  The
+        # SVD cross-product M = C1g^H @ C4g is chi×chi and retains all chi
+        # singular values, so the SVD-path eps_T is identically 0.
+        #
+        # This measurement is NOT used for the gradient computation — it only
+        # drives the bump decision, so the projector choice here does not
+        # affect optimization accuracy.
+        if ctm_cfg.chi_auto_bump and not _use_cg:
+            from tenax.algorithms._ctm_tensor_convergence import _ctm_tensor_sweep
+            from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
+
+            a_dl = _build_double_layer_tensor(A_norm)
+            _, real_eps_t = _ctm_tensor_sweep(
+                envs[(0, 0)],
+                a_dl,
+                ctm_cfg.chi,
+                ctm_cfg.renormalize,
+                "eigh",  # eigh gives eps_T > 0 for chi < D²*chi; SVD always gives 0
+                projector_backward="auto",
+            )
+            _env_cache["max_truncation_error"] = float(real_eps_t)
+        else:
+            _env_cache["max_truncation_error"] = float(info.max_truncation_error)
 
     # Metric L-BFGS preconditioning calls .todense() on grads/params (see
     # _metric_precond.py:146 and the metric branch below).  CG with map_fn

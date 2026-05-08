@@ -1060,6 +1060,7 @@ def _compute_projector_tensor(
 
     rho = C1g_dense @ C1g_dense.conj().T + C4g_dense @ C4g_dense.conj().T
     rho = 0.5 * (rho + rho.conj().T)
+    _eps_T_eigh = jnp.asarray(0.0)
     if _has_tracers:
         if projector_backward == "lorentzian":
             # Lorentzian-regularized truncated-eigh backward (Francuz et al.
@@ -1089,6 +1090,10 @@ def _compute_projector_tensor(
         k = min(chi, len(eigvals))
         P_dense = eigvecs[:, -k:][:, ::-1]
         P_dense = jax.lax.stop_gradient(P_dense)
+        # Compute ε_T from the eigenvalue spectrum: the discarded eigenvalues
+        # represent information that chi dimensions cannot capture.  This is
+        # the variPEPS §2.8.2 truncation-error indicator (dense non-tracer path).
+        _eps_T_eigh = compute_truncation_error(jnp.flip(jnp.abs(eigvals)), k)
 
     chi_new_idx = _make_chi_new_index(fused_idx, k, base_charges)
     P = _wrap_dense_projector(
@@ -1097,4 +1102,4 @@ def _compute_projector_tensor(
         chi_new_idx,
         as_symmetric=isinstance(C1g, SymmetricTensor),
     )
-    return P, P, jnp.asarray(0.0)
+    return P, P, _eps_T_eigh
