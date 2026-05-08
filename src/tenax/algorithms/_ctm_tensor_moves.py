@@ -631,7 +631,7 @@ def _ctm_tensor_move_left(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
+) -> tuple[CTMTensorEnv, float]:
     """Left move: updates C1, T4, C4.
 
     Corners (C1, C4) from env_self, perpendicular edges (T1, T3) from
@@ -686,7 +686,7 @@ def _ctm_tensor_move_right(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
+) -> tuple[CTMTensorEnv, float]:
     """Right move: updates C2, T2, C3.
 
     Corners (C2, C3) from env_self, perpendicular edges (T1, T3) from
@@ -740,7 +740,7 @@ def _ctm_tensor_move_top(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
+) -> tuple[CTMTensorEnv, float]:
     """Top move: updates C1, T1, C2.
 
     Corners (C1, C2) from env_self, perpendicular edges (T4, T2) from
@@ -794,7 +794,7 @@ def _ctm_tensor_move_bottom(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
+) -> tuple[CTMTensorEnv, float]:
     """Bottom move: updates C4, T3, C3.
 
     Corners (C4, C3) from env_self, perpendicular edges (T4, T2) from
