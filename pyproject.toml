@@ -79,6 +79,7 @@ include_numpy = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "--cov=tenax --cov-report=term-missing --cov-report=xml"
 markers = [
     "core: fast API and infrastructure tests",
