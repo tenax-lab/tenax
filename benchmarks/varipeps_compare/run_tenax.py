@@ -44,22 +44,44 @@ def _tenax_git_sha() -> str:
 def _build_config(
     *, path: str, D: int, chi: int, tol: float, max_steps: int
 ) -> iPEPSConfig:
+    """Build the iPEPSConfig for a benchmark point.
+
+    If ``VARIPEPS_COMPARE_TEST_FAST=1`` is set in the environment, swap the
+    production implicit-AD + L-BFGS path for explicit-AD + Adam with a tiny
+    CTM unroll.  This keeps JIT compile under ~1 min so the smoke test can
+    exercise the runner module end-to-end.  The accumulator code in the
+    history hook is path-agnostic, so the schema contract is still
+    validated.  Production benchmark runs always use the implicit-AD path.
+    """
+    import os
+
+    test_fast = os.environ.get("VARIPEPS_COMPARE_TEST_FAST") == "1"
+
     ctm = CTMConfig(
         chi=chi,
-        max_iter=CTM_MAX_ITER,
+        max_iter=5 if test_fast else CTM_MAX_ITER,
         conv_tol=CTM_TOL,
         projector_method="svd",  # Fishman, matches variPEPS default
     )
-    common = dict(
+    common: dict = dict(
         max_bond_dim=D,
         ctm=ctm,
-        gs_optimizer="lbfgs",
         gs_num_steps=max_steps,
         gs_conv_tol=tol,
-        gs_implicit_ad=True,
         su_init=False,
         return_history=True,
     )
+    if test_fast:
+        common.update(
+            gs_optimizer="adam",
+            gs_implicit_ad=False,
+            gs_explicit_ad_steps=2,
+            gs_explicit_ad_warmup=1,
+            gs_learning_rate=1e-2,
+        )
+    else:
+        common.update(gs_optimizer="lbfgs", gs_implicit_ad=True)
+
     if path == "single_site":
         # Unconstrained 1×1 + sublattice-rotated gate.  No C4v — same ansatz
         # as variPEPS structure=[[0]] so parameter counts match.
