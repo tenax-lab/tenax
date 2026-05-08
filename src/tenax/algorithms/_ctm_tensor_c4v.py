@@ -67,7 +67,9 @@ def _c4v_sweep(
     #    Use Cg for both corner slots — the density matrix is ρ = 2 * Cg · Cg†
     #    No base_charges: the C4v sweep uses a single corner, so there is no
     #    charge-sector drift between independent projectors.
-    P, _ = _compute_projector_tensor(Cg, Cg, chi, projector_method)
+    P, _, _eps_t = _compute_projector_tensor(
+        Cg, Cg, chi, projector_method
+    )  # C4v eigh/qr: P_1 == P_2, second slot intentionally discarded
 
     # 4. Apply projector to edge: T_new = P† · Tg · P (paired projector
     # contraction; see _ctm_tensor_moves note for why this stays .bar())

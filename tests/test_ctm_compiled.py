@@ -101,7 +101,7 @@ class TestCompiledLeftMove:
         dl_nb = _build_double_layer_tensor(A_nb)
 
         # Tensor path
-        env_tensor = _ctm_tensor_move_left(
+        env_tensor, _ = _ctm_tensor_move_left(
             env, env_nb, dl_nb, chi, projector_method="svd"
         )
 

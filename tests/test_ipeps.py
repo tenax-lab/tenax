@@ -1249,7 +1249,7 @@ class TestADSymmetric:
         )
 
         A_norm = A_sym * (1.0 / (A_sym.norm() + 1e-10))
-        env0 = ctm_tensor(A_norm, chi=4, max_iter=30)
+        env0, _ = ctm_tensor(A_norm, chi=4, max_iter=30)
         E_init = float(compute_energy_ctm_tensor(A_norm, env0, gate))
 
         A_opt, env, E_gs = optimize_gs_ad(gate, A_sym, config)

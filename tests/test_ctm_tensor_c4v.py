@@ -91,7 +91,7 @@ class TestC4vCTM:
         chi = 8
 
         # General CTM
-        env_gen = ctm_tensor(small_peps_dense, chi=chi, max_iter=60, conv_tol=1e-10)
+        env_gen, _ = ctm_tensor(small_peps_dense, chi=chi, max_iter=60, conv_tol=1e-10)
         E_gen = float(
             compute_energy_ctm_tensor(small_peps_dense, env_gen, heisenberg_gate, d=2)
         )

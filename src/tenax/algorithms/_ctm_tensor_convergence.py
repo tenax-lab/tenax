@@ -89,23 +89,29 @@ def _ctm_tensor_sweep(
     renormalize: bool,
     projector_method: str = "svd",
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
-    """One full CTM sweep: left, top, right, bottom (variPEPS order) + optional renormalize."""
-    env = _ctm_tensor_move_left(
+) -> tuple[CTMTensorEnv, float]:
+    """One full CTM sweep: left, top, right, bottom (variPEPS order) + optional renormalize.
+
+    Returns:
+        ``(env, max_eps)`` where ``max_eps`` is the maximum per-move truncation
+        error across the four directional moves in this sweep.
+    """
+    env, eps_left = _ctm_tensor_move_left(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
-    env = _ctm_tensor_move_top(
+    env, eps_top = _ctm_tensor_move_top(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
-    env = _ctm_tensor_move_right(
+    env, eps_right = _ctm_tensor_move_right(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
-    env = _ctm_tensor_move_bottom(
+    env, eps_bottom = _ctm_tensor_move_bottom(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
     if renormalize:
         env = _renormalize_tensor_env(env)
-    return env
+    max_eps = max(eps_left, eps_top, eps_right, eps_bottom)
+    return env, max_eps
 
 
 def _ctm_tensor_sweep_paired(
@@ -115,22 +121,27 @@ def _ctm_tensor_sweep_paired(
     renormalize: bool,
     projector_method: str = "svd",
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
+) -> tuple[CTMTensorEnv, float]:
     """One full CTM sweep using paired moves: horizontal then vertical.
 
     Uses 2x2 enlarged corners for projector computation, ensuring
     consistent charge-sector distributions across sweeps for
     SymmetricTensor inputs.
+
+    Returns:
+        ``(env, max_eps)`` where ``max_eps`` is the maximum per-move truncation
+        error across the two paired moves in this sweep.
     """
-    env = _ctm_tensor_move_horizontal(
+    env, eps_horiz = _ctm_tensor_move_horizontal(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
-    env = _ctm_tensor_move_vertical(
+    env, eps_vert = _ctm_tensor_move_vertical(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
     if renormalize:
         env = _renormalize_tensor_env(env)
-    return env
+    max_eps = max(eps_horiz, eps_vert)
+    return env, max_eps
 
 
 # ------------------------------------------------------------------ #
@@ -235,7 +246,7 @@ def _ctm_tensor_sweep_multisite(
     projector_method: str = "svd",
     projector_backward: str = "auto",
     recipe: str = "2x2",
-) -> dict[Coord, CTMTensorEnv]:
+) -> tuple[dict[Coord, CTMTensorEnv], jax.Array]:
     """One full multisite CTM sweep over all sites and directions.
 
     Args:
@@ -257,7 +268,9 @@ def _ctm_tensor_sweep_multisite(
                         compatibility / regression bisection.
 
     Returns:
-        Updated per-coord env dict.
+        ``(envs, max_eps)`` — updated per-coord env dict and the max
+        truncation error (JAX scalar) across all moves in this sweep.
+        The 2x2 path returns ``jnp.asarray(0.0)`` as a placeholder.
     """
     # Extract base charges from any double-layer tensor for projector stabilization
     base_charges = None
@@ -272,11 +285,12 @@ def _ctm_tensor_sweep_multisite(
     envs = dict(envs)
 
     all_coords = list(envs.keys())
+    max_eps = jnp.asarray(0.0)
     if recipe == "1x1":
         for direction, move_fn in _DIRECTION_MOVES:
             for coord in _sort_coords_for_direction(all_coords, direction):
                 nb = neighbors[coord][direction]
-                envs[coord] = move_fn(
+                envs[coord], eps_t = move_fn(
                     envs[coord],
                     envs[nb],
                     double_layers[nb],
@@ -285,6 +299,7 @@ def _ctm_tensor_sweep_multisite(
                     base_charges=base_charges,
                     projector_backward=projector_backward,
                 )
+                max_eps = jnp.maximum(max_eps, jnp.asarray(eps_t))
     elif recipe == "2x2":
         # variPEPS-style 2-plaquette absorption: for each direction, two
         # phases.
@@ -440,7 +455,7 @@ def _ctm_tensor_sweep_multisite(
         raise ValueError(f"Unknown CTM recipe {recipe!r}: expected '1x1' or '2x2'.")
     if renormalize:
         envs = {c: _renormalize_tensor_env(e) for c, e in envs.items()}
-    return envs
+    return envs, max_eps
 
 
 # ------------------------------------------------------------------ #
@@ -508,7 +523,7 @@ def ctm_tensor(
     projector_method: str = "svd",
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
+) -> tuple[CTMTensorEnv, float]:
     """Run standard CTM to convergence using the Tensor protocol.
 
     Builds the full double-layer tensor via ``bar()`` + ``contract()`` +
@@ -526,7 +541,19 @@ def ctm_tensor(
         qr_warmup_steps:   Number of eigh warm-up sweeps before QR kicks in.
 
     Returns:
-        Converged CTMTensorEnv.
+        ``(env, max_truncation_error)`` where ``env`` is the converged
+        CTMTensorEnv and ``max_truncation_error`` is the maximum per-move
+        truncation error ε_T from the **last** sweep before convergence
+        (or the last sweep if ``max_iter`` was reached without convergence).
+        This is a Python ``float`` suitable for use in the optimizer loop
+        (variPEPS §2.8.2 auto-χ trigger).
+
+        **v1 scope caveat:** ``max_truncation_error`` is meaningful only on
+        the dense, non-tracer SVD path.  It is ``0.0`` when
+        ``projector_method`` is ``"eigh"`` or ``"qr"``, when the input is a
+        ``SymmetricTensor`` (block-sparse truncation; global ε_T extraction
+        is a v2 follow-up), or when the SVD runs inside a JAX tracer (AD
+        backward pass).
     """
     # Determine sweep function: use paired moves for SymmetricTensors
     # with non-trivial virtual charges (fixes charge-sector mismatch
@@ -564,14 +591,15 @@ def ctm_tensor(
     if projector_method == "qr" and qr_warmup_steps > 0:
         warmup = min(qr_warmup_steps, max_iter)
         for _ in range(warmup):
-            env = sweep_fn(
+            env, _ = sweep_fn(
                 env, a, chi, renormalize, "eigh", projector_backward=projector_backward
             )
         max_iter = max_iter - warmup
 
+    last_max_eps: float = 0.0
     prev_sv = None
     for _ in range(max_iter):
-        env = sweep_fn(
+        env, last_max_eps = sweep_fn(
             env,
             a,
             chi,
@@ -587,7 +615,7 @@ def ctm_tensor(
                 break
         prev_sv = current_sv
 
-    return env
+    return env, last_max_eps
 
 
 def _ctm_tensor_multisite(
@@ -627,7 +655,7 @@ def _ctm_tensor_multisite(
     if projector_method == "qr" and qr_warmup_steps > 0:
         warmup = min(qr_warmup_steps, max_iter)
         for _ in range(warmup):
-            envs = _ctm_tensor_sweep_multisite(
+            envs, _ = _ctm_tensor_sweep_multisite(
                 envs,
                 double_layers,
                 neighbors,
@@ -641,7 +669,7 @@ def _ctm_tensor_multisite(
 
     prev_svs: dict[Coord, jax.Array] = {}
     for _ in range(max_iter):
-        envs = _ctm_tensor_sweep_multisite(
+        envs, _ = _ctm_tensor_sweep_multisite(
             envs,
             double_layers,
             neighbors,

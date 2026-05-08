@@ -631,7 +631,7 @@ def _ctm_tensor_move_left(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
+) -> tuple[CTMTensorEnv, float]:
     """Left move: updates C1, T4, C4.
 
     Corners (C1, C4) from env_self, perpendicular edges (T1, T3) from
@@ -658,7 +658,7 @@ def _ctm_tensor_move_left(
     T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", OUT)
 
     # Native projector
-    P_1, P_2 = _compute_projector_tensor(
+    P_1, P_2, _eps_t = _compute_projector_tensor(
         C1g, C4g, chi, projector_method, base_charges, projector_backward
     )
     C1_new, C4_new, T4_new = _apply_projector_with_reembed(
@@ -675,7 +675,7 @@ def _ctm_tensor_move_left(
     C1_new = _phase_fix_normalize_tensor(C1_new)
     C4_new = _phase_fix_normalize_tensor(C4_new)
     T4_new = _phase_fix_normalize_tensor(T4_new)
-    return env_self._replace(C1=C1_new, C4=C4_new, T4=T4_new)
+    return env_self._replace(C1=C1_new, C4=C4_new, T4=T4_new), float(_eps_t)
 
 
 def _ctm_tensor_move_right(
@@ -686,7 +686,7 @@ def _ctm_tensor_move_right(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
+) -> tuple[CTMTensorEnv, float]:
     """Right move: updates C2, T2, C3.
 
     Corners (C2, C3) from env_self, perpendicular edges (T1, T3) from
@@ -713,7 +713,7 @@ def _ctm_tensor_move_right(
     T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", OUT)
 
     # Native projector
-    P_1, P_2 = _compute_projector_tensor(
+    P_1, P_2, _eps_t = _compute_projector_tensor(
         C2g, C3g, chi, projector_method, base_charges, projector_backward
     )
     C2_new, C3_new, T2_new = _apply_projector_with_reembed(
@@ -729,7 +729,7 @@ def _ctm_tensor_move_right(
     C2_new = _phase_fix_normalize_tensor(C2_new)
     C3_new = _phase_fix_normalize_tensor(C3_new)
     T2_new = _phase_fix_normalize_tensor(T2_new)
-    return env_self._replace(C2=C2_new, C3=C3_new, T2=T2_new)
+    return env_self._replace(C2=C2_new, C3=C3_new, T2=T2_new), float(_eps_t)
 
 
 def _ctm_tensor_move_top(
@@ -740,7 +740,7 @@ def _ctm_tensor_move_top(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
+) -> tuple[CTMTensorEnv, float]:
     """Top move: updates C1, T1, C2.
 
     Corners (C1, C2) from env_self, perpendicular edges (T4, T2) from
@@ -767,7 +767,7 @@ def _ctm_tensor_move_top(
     T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", OUT)
 
     # Native projector
-    P_1, P_2 = _compute_projector_tensor(
+    P_1, P_2, _eps_t = _compute_projector_tensor(
         C1g, C2g, chi, projector_method, base_charges, projector_backward
     )
     C1_new, C2_new, T1_new = _apply_projector_with_reembed(
@@ -783,7 +783,7 @@ def _ctm_tensor_move_top(
     C1_new = _phase_fix_normalize_tensor(C1_new)
     C2_new = _phase_fix_normalize_tensor(C2_new)
     T1_new = _phase_fix_normalize_tensor(T1_new)
-    return env_self._replace(C1=C1_new, C2=C2_new, T1=T1_new)
+    return env_self._replace(C1=C1_new, C2=C2_new, T1=T1_new), float(_eps_t)
 
 
 def _ctm_tensor_move_bottom(
@@ -794,7 +794,7 @@ def _ctm_tensor_move_bottom(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
+) -> tuple[CTMTensorEnv, float]:
     """Bottom move: updates C4, T3, C3.
 
     Corners (C4, C3) from env_self, perpendicular edges (T4, T2) from
@@ -821,7 +821,7 @@ def _ctm_tensor_move_bottom(
     T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", OUT)
 
     # Native projector
-    P_1, P_2 = _compute_projector_tensor(
+    P_1, P_2, _eps_t = _compute_projector_tensor(
         C4g, C3g, chi, projector_method, base_charges, projector_backward
     )
     C4_new, C3_new, T3_new = _apply_projector_with_reembed(
@@ -837,7 +837,7 @@ def _ctm_tensor_move_bottom(
     C4_new = _phase_fix_normalize_tensor(C4_new)
     C3_new = _phase_fix_normalize_tensor(C3_new)
     T3_new = _phase_fix_normalize_tensor(T3_new)
-    return env_self._replace(C4=C4_new, C3=C3_new, T3=T3_new)
+    return env_self._replace(C4=C4_new, C3=C3_new, T3=T3_new), float(_eps_t)
 
 
 def _ctm_tensor_move_left_2x2(

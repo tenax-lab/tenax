@@ -5,6 +5,7 @@ Extracts optimize_gs_ad and related helpers from ipeps.py.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 from dataclasses import replace as _replace
@@ -13,12 +14,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
 from tenax.algorithms.ipeps_ad_policy import (
     build_ad_ctm_config,
     resolve_projector_backward,
     use_reference_c4v_path,
 )
-from tenax.algorithms.ipeps_config import iPEPSConfig
+from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.lattice import Lattice
 from tenax.core.symmetry import U1Symmetry
@@ -27,6 +29,45 @@ from tenax.core.tensor import DenseTensor, Tensor
 _logger = logging.getLogger(__name__)
 
 Coord = tuple[int, int]
+
+
+def _maybe_bump_chi(
+    ctm_cfg: CTMConfig,
+    env_cache: dict,
+    last_eps_t: float,
+) -> tuple[CTMConfig, dict]:
+    """variPEPS §2.8.2 reactive χ_E bump.
+
+    When ``ctm_cfg.chi_auto_bump`` is enabled and the last CTM sweep's
+    ``ε_T`` exceeds ``ctm_cfg.chi_auto_bump_eps``, return a new
+    ``(ctm_cfg, env_cache)`` pair with χ raised by ``chi_auto_bump_step``
+    (capped at ``chi_max`` if set). The cached env is zero-padded to the
+    new χ. Otherwise the input pair is returned unchanged.
+
+    ``env_cache`` is mutated **in-place** (the dict object is reused, only
+    ``env_cache["envs"]`` is overwritten) so that any closure that captured
+    the original dict reference — notably the ``env_cache`` captured by
+    ``make_ctm_energy_fn`` in ``optimize_gs_ad`` — sees the updated envs
+    without rebinding.
+    """
+    if not ctm_cfg.chi_auto_bump:
+        return ctm_cfg, env_cache
+    if last_eps_t <= ctm_cfg.chi_auto_bump_eps:
+        return ctm_cfg, env_cache
+    chi_new = ctm_cfg.chi + ctm_cfg.chi_auto_bump_step
+    if ctm_cfg.chi_max is not None:
+        chi_new = min(chi_new, ctm_cfg.chi_max)
+    if chi_new <= ctm_cfg.chi:
+        return ctm_cfg, env_cache  # at ceiling
+    new_cfg = dataclasses.replace(ctm_cfg, chi=chi_new)
+    if "envs" in env_cache:
+        # Mutate in-place so closures that captured env_cache by reference
+        # (e.g. make_ctm_energy_fn inside optimize_gs_ad) see the padded envs.
+        env_cache["envs"] = {
+            c: pad_dense_env_chi(env_cache["envs"][c], chi_new)
+            for c in env_cache["envs"]
+        }
+    return new_cfg, env_cache
 
 
 def _lattice_to_neighbors(
@@ -426,6 +467,23 @@ def optimize_gs_ad(
     if config.gs_num_steps < 0:
         raise ValueError(f"gs_num_steps must be >= 0, got {config.gs_num_steps}")
 
+    # chi_auto_bump is only supported for the dense '1x1' AD path.
+    # Multisite and 2-site paths are tracked as follow-up issues (Task 9).
+    if config.ctm.chi_auto_bump and (
+        isinstance(config.unit_cell, Lattice) or config.unit_cell == "2site"
+    ):
+        raise NotImplementedError(
+            "chi_auto_bump is currently supported only for unit_cell='1x1'; "
+            "multisite and 2-site paths are tracked as follow-up issues."
+        )
+    # The reference-C4v sub-path has no bump logic; reject early so the user
+    # gets a clear error rather than silent no-op.
+    if config.ctm.chi_auto_bump and _use_reference_c4v_path(config):
+        raise NotImplementedError(
+            "chi_auto_bump is not supported on the reference-C4v AD path; "
+            "tracked as a follow-up issue."
+        )
+
     # Resolve projector_backward policy before dispatch so every downstream
     # helper (1-site, 2-site, reference-C4v) sees the same CTM config.  No
     # silent gauge promotion — explicit user choices are preserved.
@@ -782,12 +840,44 @@ def _optimize_gs_ad_tensor(
         """Re-run forward CTM (no grad) to warm-start next step."""
         A_norm = _params_to_A_norm(params)
         site_tensors = {(0, 0): A_norm}
-        envs, _ = python_loop_ctm_converge(
+        envs, info = python_loop_ctm_converge(
             site_tensors,
             SINGLE_SITE_NEIGHBORS,
             **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
         )
         _env_cache["envs"] = envs
+        # ``info.max_truncation_error`` comes from the JIT-compiled CTM step,
+        # which sets eps_T = 0.0 for any input that is a JAX tracer during
+        # JIT compilation.  For the auto-bump path we need a real eps_T from
+        # a non-JIT-compiled sweep so we can compare against the threshold.
+        #
+        # We use the ``"eigh"`` projector for this measurement regardless of
+        # the optimizer's configured projector_method: eigh builds the full
+        # density matrix rho = C1g @ C1g^H + C4g @ C4g^H (shape chi*D² × chi*D²)
+        # and discards chi*D² - chi eigenvalues, giving a meaningful eps_T > 0
+        # whenever chi < chi_eff = D² * chi (i.e. always when D > 1).  The
+        # SVD cross-product M = C1g^H @ C4g is chi×chi and retains all chi
+        # singular values, so the SVD-path eps_T is identically 0.
+        #
+        # This measurement is NOT used for the gradient computation — it only
+        # drives the bump decision, so the projector choice here does not
+        # affect optimization accuracy.
+        if ctm_cfg.chi_auto_bump and not _use_cg:
+            from tenax.algorithms._ctm_tensor_convergence import _ctm_tensor_sweep
+            from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
+
+            a_dl = _build_double_layer_tensor(A_norm)
+            _, real_eps_t = _ctm_tensor_sweep(
+                envs[(0, 0)],
+                a_dl,
+                ctm_cfg.chi,
+                ctm_cfg.renormalize,
+                "eigh",  # eigh gives eps_T > 0 for chi < D²*chi; SVD always gives 0
+                projector_backward="auto",
+            )
+            _env_cache["max_truncation_error"] = float(real_eps_t)
+        else:
+            _env_cache["max_truncation_error"] = float(info.max_truncation_error)
 
     # Metric L-BFGS preconditioning calls .todense() on grads/params (see
     # _metric_precond.py:146 and the metric branch below).  CG with map_fn
@@ -950,6 +1040,10 @@ def _optimize_gs_ad_tensor(
 
         # Update env cache for warm-starting next step
         _update_env_cache(params)
+
+        # variPEPS §2.8.2 auto-χ_E bump (between L-BFGS steps; never mid-step).
+        last_eps_t = float(_env_cache.get("max_truncation_error", 0.0))
+        ctm_cfg, _env_cache = _maybe_bump_chi(ctm_cfg, _env_cache, last_eps_t)
 
         if _should_accept_best(
             current_best=best_energy,

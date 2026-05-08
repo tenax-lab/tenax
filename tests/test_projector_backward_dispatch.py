@@ -109,7 +109,7 @@ def test_ctm_tensor_accepts_projector_backward_lorentzian():
     """``ctm_tensor`` must accept ``projector_backward='lorentzian'`` and run."""
     A_raw = jax.random.normal(jax.random.PRNGKey(0), (2, 2, 2, 2, 2))
     A = _wrap_as_dense_tensor(A_raw)
-    env = ctm_tensor(
+    env, _ = ctm_tensor(
         A,
         chi=4,
         max_iter=2,

@@ -40,6 +40,7 @@ _FILE_MARKERS = {
     "test_krylov.py": "core",
     "test_tdvp.py": "algorithm",
     "test_ctm_tensor_c4v.py": "algorithm",
+    "test_ctm_truncation_error.py": "core",
     "test_ctm_paired.py": "algorithm",
     "test_ctm_python_loop.py": "algorithm",
     "test_rsvd.py": "core",
@@ -62,6 +63,9 @@ _FILE_MARKERS = {
     "test_pess.py": "algorithm",
     "test_pess_ad.py": "algorithm",
     "test_pess_validation.py": "slow",
+    "test_chi_auto_bump.py": "core",
+    "test_ctm_env_pad.py": "core",
+    "test_ipeps_chi_bump_integration.py": "algorithm",
 }
 
 

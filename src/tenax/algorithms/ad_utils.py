@@ -591,7 +591,7 @@ def _ctm_tensor_step_multisite(
             c: _build_double_layer_tensor(A) for c, A in site_tensors.items()
         }
 
-    envs = _ctm_tensor_sweep_multisite(
+    envs, _ = _ctm_tensor_sweep_multisite(
         envs,
         double_layers,
         neighbors,
@@ -1011,7 +1011,7 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
 
     for i in range(config.max_iter):
         envs_old = envs if use_sigma else None
-        envs = _ctm_tensor_sweep_multisite(
+        envs, _ = _ctm_tensor_sweep_multisite(
             envs,
             double_layers,
             neighbors,
@@ -1137,7 +1137,7 @@ def ctm_tensor_converge_explicit(
     # Phase 1: Warmup — no gradient tracking
     for wi in range(warmup_steps):
         envs_old = envs if use_sigma else None
-        envs = _ctm_tensor_sweep_multisite(
+        envs, _ = _ctm_tensor_sweep_multisite(
             envs,
             double_layers,
             neighbors,
@@ -1166,7 +1166,7 @@ def ctm_tensor_converge_explicit(
         def _one_sweep_sigma(env_leaves_flat):
             envs_inner = jax.tree.unflatten(env_treedef, env_leaves_flat)
             envs_prev = jax.tree.map(jax.lax.stop_gradient, envs_inner)
-            envs_inner = _ctm_tensor_sweep_multisite(
+            envs_inner, _ = _ctm_tensor_sweep_multisite(
                 envs_inner,
                 double_layers,
                 neighbors,
@@ -1189,7 +1189,7 @@ def ctm_tensor_converge_explicit(
         @jax.checkpoint
         def _one_sweep(env_leaves_flat):
             envs_inner = jax.tree.unflatten(env_treedef, env_leaves_flat)
-            envs_inner = _ctm_tensor_sweep_multisite(
+            envs_inner, _ = _ctm_tensor_sweep_multisite(
                 envs_inner,
                 double_layers,
                 neighbors,

@@ -101,7 +101,7 @@ class TestSVDProjectorSymmetric:
         chi = 4
         C1g, C4g = _build_grown_corners(A, chi)
 
-        P1, P2 = _compute_projector_tensor(C1g, C4g, chi, projector_method="svd")
+        P1, P2, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="svd")
 
         assert isinstance(P1, SymmetricTensor)
         assert isinstance(P2, SymmetricTensor)
@@ -114,7 +114,7 @@ class TestSVDProjectorSymmetric:
         chi = 4
         C1g, C4g = _build_grown_corners(A, chi)
 
-        P1, P2 = _compute_projector_tensor(C1g, C4g, chi, projector_method="svd")
+        P1, P2, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="svd")
 
         P1d = P1.todense()
         P2d = P2.todense()
@@ -128,7 +128,7 @@ class TestSVDProjectorSymmetric:
         C1g, C4g = _build_grown_corners(A, chi)
 
         # Block-sparse path
-        P1_sym, P2_sym = _compute_projector_tensor(
+        P1_sym, P2_sym, _ = _compute_projector_tensor(
             C1g, C4g, chi, projector_method="svd"
         )
 
@@ -140,7 +140,7 @@ class TestSVDProjectorSymmetric:
 
         C1g_dense = DenseTensor(C1g.todense(), (fused_idx, col1_idx))
         C4g_dense = DenseTensor(C4g.todense(), (fused_idx, col2_idx))
-        P1_ref, P2_ref = _compute_projector_tensor(
+        P1_ref, P2_ref, _ = _compute_projector_tensor(
             C1g_dense, C4g_dense, chi, projector_method="svd"
         )
 
@@ -163,7 +163,7 @@ class TestSVDProjectorSymmetric:
         chi = 4
         C1g, C4g = _build_grown_corners(A, chi)
 
-        P1, P2 = _compute_projector_tensor(C1g, C4g, chi, projector_method="svd")
+        P1, P2, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="svd")
 
         assert isinstance(P1, SymmetricTensor)
         assert isinstance(P2, SymmetricTensor)
@@ -181,7 +181,7 @@ class TestSVDProjectorSymmetric:
         C1g, C4g = _build_grown_corners(A, chi)
 
         # Block-sparse
-        P1_sym, P2_sym = _compute_projector_tensor(
+        P1_sym, P2_sym, _ = _compute_projector_tensor(
             C1g, C4g, chi, projector_method="svd"
         )
 
@@ -192,7 +192,7 @@ class TestSVDProjectorSymmetric:
         col2_idx = C4g.indices[1 - fused_pos]
         C1g_dense = DenseTensor(C1g.todense(), (fused_idx, col1_idx))
         C4g_dense = DenseTensor(C4g.todense(), (fused_idx, col2_idx))
-        P1_ref, P2_ref = _compute_projector_tensor(
+        P1_ref, P2_ref, _ = _compute_projector_tensor(
             C1g_dense, C4g_dense, chi, projector_method="svd"
         )
 
@@ -220,7 +220,7 @@ class TestSVDProjectorSymmetric:
             return orig_todense(self)
 
         with patch.object(SymmetricTensor, "todense", tracking_todense):
-            P1, P2 = _compute_projector_tensor(C1g, C4g, chi, projector_method="svd")
+            P1, P2, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="svd")
 
         assert isinstance(P1, SymmetricTensor)
         assert len(todense_calls) == 0, (
@@ -260,7 +260,7 @@ class TestSVDProjectorSymmetric:
         def loss_fn(c1_arr):
             C1g_dt = DenseTensor(c1_arr, (fused_idx, col1_idx))
             C4g_dt = DenseTensor(c4_data, (fused_idx, col2_idx))
-            P1, P2 = _compute_projector_tensor(
+            P1, P2, _ = _compute_projector_tensor(
                 C1g_dt, C4g_dt, chi, projector_method="svd"
             )
             # Scalar loss: sum of squared elements of P1

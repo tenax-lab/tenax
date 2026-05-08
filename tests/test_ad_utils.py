@@ -324,7 +324,9 @@ class TestProjectorADAudit:
 
         def traced_eval(alpha):
             C1g = DenseTensor(alpha * C1g_base.todense(), C1g_base.indices)
-            P1, P2 = _compute_projector_tensor(C1g, C4g_base, 4, projector_method="svd")
+            P1, P2, _ = _compute_projector_tensor(
+                C1g, C4g_base, 4, projector_method="svd"
+            )
             return jnp.sum(P1.todense() ** 2) + jnp.sum(P2.todense() ** 2)
 
         _ = jax.jit(traced_eval)(1.0)
@@ -347,7 +349,7 @@ class TestProjectorADAudit:
 
         def traced_eval(alpha):
             C1g = DenseTensor(alpha * C1g_base.todense(), C1g_base.indices)
-            P, _ = _compute_projector_tensor(C1g, C4g_base, 4, projector_method="qr")
+            P, _, _ = _compute_projector_tensor(C1g, C4g_base, 4, projector_method="qr")
             return jnp.sum(P.todense() ** 2)
 
         _ = jax.jit(traced_eval)(1.0)
