@@ -7,10 +7,16 @@ spectra so behavior is reproducible without a full CTM run.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
+from tenax.algorithms._ctm_projector import _compute_projector_tensor
 from tenax.algorithms._ctm_truncation_error import compute_truncation_error
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.symmetry import U1Symmetry
+from tenax.core.tensor import DenseTensor
 
 
 def test_zero_when_chi_covers_full_spectrum():
@@ -39,14 +45,6 @@ def test_handles_zero_spectrum_safely():
 # ---------------------------------------------------------------------------
 # Task 2: _compute_projector_tensor returns 3-tuple (P_1, P_2, eps_T)
 # ---------------------------------------------------------------------------
-
-import jax
-import numpy as np
-
-from tenax.algorithms._ctm_projector import _compute_projector_tensor
-from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor
 
 
 def test_compute_projector_tensor_returns_eps_t_dense_svd():
@@ -78,7 +76,8 @@ def test_compute_projector_tensor_returns_eps_t_dense_svd():
 def test_compute_projector_tensor_returns_zero_eps_t_for_eigh():
     """eigh path is out of scope for v1; returns 0.0 placeholder."""
     key = jax.random.PRNGKey(0)
-    chi_in, chi_target = 4, 4
+    # chi=2 < chi_in=4 forces truncation; eigh path must still return 0.0 placeholder
+    chi_in, chi_target = 4, 2
     sym = U1Symmetry()
     charges = np.zeros(chi_in, dtype=np.int32)
     fused_idx = TensorIndex.from_charges(
