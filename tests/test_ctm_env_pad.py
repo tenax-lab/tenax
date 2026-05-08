@@ -8,10 +8,10 @@ import numpy as np
 import pytest
 
 from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
-from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
+from tenax.algorithms._ctm_tensor_init import CTMTensorEnv, initialize_ctm_tensor_env
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 
 def _idx(dim: int, label: str, flow: FlowDirection) -> TensorIndex:
@@ -95,3 +95,25 @@ def test_pad_rejects_shrink():
     env_old = _make_dense_env(chi=4, D=2)
     with pytest.raises(ValueError, match="must be >="):
         pad_dense_env_chi(env_old, chi_new=2)
+
+
+def test_pad_raises_for_symmetric_tensor_env():
+    """SymmetricTensor envs are out of scope for v1 — must raise cleanly."""
+    sym = U1Symmetry()
+    charges = np.zeros(2, dtype=np.int32)
+    phys_charges = np.zeros(2, dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
+    )
+    rng = np.random.RandomState(42)
+    data = jnp.array(rng.standard_normal((2, 2, 2, 2, 2)))
+    peps_sym = SymmetricTensor.from_dense(data, indices)
+    env_sym = initialize_ctm_tensor_env(peps_sym, chi=4)
+    with pytest.raises(NotImplementedError, match="v2 follow-up"):
+        pad_dense_env_chi(env_sym, chi_new=6)
