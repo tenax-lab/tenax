@@ -120,12 +120,14 @@ class TestPairedSweepDense:
         # Standard 4-move sweep
         env_std = initialize_ctm_tensor_env(A, chi)
         for _ in range(n_sweeps):
-            env_std = _ctm_tensor_sweep(env_std, a, chi, renormalize=True)
+            env_std, _ = _ctm_tensor_sweep(env_std, a, chi, renormalize=True)
 
         # Paired 2-move sweep
         env_paired = initialize_ctm_tensor_env(A, chi)
         for _ in range(n_sweeps):
-            env_paired = _ctm_tensor_sweep_paired(env_paired, a, chi, renormalize=True)
+            env_paired, _ = _ctm_tensor_sweep_paired(
+                env_paired, a, chi, renormalize=True
+            )
 
         E_std = float(compute_energy_ctm_tensor(A, env_std, heisenberg_gate, d=2))
         E_paired = float(compute_energy_ctm_tensor(A, env_paired, heisenberg_gate, d=2))
@@ -142,7 +144,7 @@ class TestPairedSweepFermionic:
 
         env = initialize_ctm_tensor_env(A, chi)
         for _ in range(15):
-            env = _ctm_tensor_sweep_paired(env, a, chi, renormalize=True)
+            env, _ = _ctm_tensor_sweep_paired(env, a, chi, renormalize=True)
 
         # Check all tensors are finite
         for field in env:
@@ -177,7 +179,7 @@ class TestPairedSweepFermionic:
         )
         A = SymmetricTensor.from_dense(data, indices, tol=float("inf"))
 
-        env = ctm_tensor(A, chi=chi, max_iter=60, conv_tol=1e-10)
+        env, _ = ctm_tensor(A, chi=chi, max_iter=60, conv_tol=1e-10)
         E = float(compute_energy_ctm_tensor(A, env, heisenberg_gate, d=2))
 
         assert jnp.isfinite(E), f"Energy not finite: {E}"
@@ -203,7 +205,7 @@ class TestPairedSweepU1:
 
         env = initialize_ctm_tensor_env(A, chi)
         for _ in range(15):
-            env = _ctm_tensor_sweep_paired(env, a, chi, renormalize=True)
+            env, _ = _ctm_tensor_sweep_paired(env, a, chi, renormalize=True)
 
         # Check all tensors are finite
         for field in env:

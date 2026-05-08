@@ -89,23 +89,29 @@ def _ctm_tensor_sweep(
     renormalize: bool,
     projector_method: str = "svd",
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
-    """One full CTM sweep: left, top, right, bottom (variPEPS order) + optional renormalize."""
-    env = _ctm_tensor_move_left(
+) -> tuple[CTMTensorEnv, float]:
+    """One full CTM sweep: left, top, right, bottom (variPEPS order) + optional renormalize.
+
+    Returns:
+        ``(env, max_eps)`` where ``max_eps`` is the maximum per-move truncation
+        error across the four directional moves in this sweep.
+    """
+    env, eps_left = _ctm_tensor_move_left(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
-    env = _ctm_tensor_move_top(
+    env, eps_top = _ctm_tensor_move_top(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
-    env = _ctm_tensor_move_right(
+    env, eps_right = _ctm_tensor_move_right(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
-    env = _ctm_tensor_move_bottom(
+    env, eps_bottom = _ctm_tensor_move_bottom(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
     if renormalize:
         env = _renormalize_tensor_env(env)
-    return env
+    max_eps = float(max(eps_left, eps_top, eps_right, eps_bottom))
+    return env, max_eps
 
 
 def _ctm_tensor_sweep_paired(
@@ -115,22 +121,27 @@ def _ctm_tensor_sweep_paired(
     renormalize: bool,
     projector_method: str = "svd",
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
+) -> tuple[CTMTensorEnv, float]:
     """One full CTM sweep using paired moves: horizontal then vertical.
 
     Uses 2x2 enlarged corners for projector computation, ensuring
     consistent charge-sector distributions across sweeps for
     SymmetricTensor inputs.
+
+    Returns:
+        ``(env, max_eps)`` where ``max_eps`` is the maximum per-move truncation
+        error across the two paired moves in this sweep.
     """
-    env = _ctm_tensor_move_horizontal(
+    env, eps_horiz = _ctm_tensor_move_horizontal(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
-    env = _ctm_tensor_move_vertical(
+    env, eps_vert = _ctm_tensor_move_vertical(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
     if renormalize:
         env = _renormalize_tensor_env(env)
-    return env
+    max_eps = float(max(eps_horiz, eps_vert))
+    return env, max_eps
 
 
 # ------------------------------------------------------------------ #
@@ -276,7 +287,7 @@ def _ctm_tensor_sweep_multisite(
         for direction, move_fn in _DIRECTION_MOVES:
             for coord in _sort_coords_for_direction(all_coords, direction):
                 nb = neighbors[coord][direction]
-                envs[coord] = move_fn(
+                envs[coord], _ = move_fn(
                     envs[coord],
                     envs[nb],
                     double_layers[nb],
@@ -508,7 +519,7 @@ def ctm_tensor(
     projector_method: str = "svd",
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
+) -> tuple[CTMTensorEnv, float]:
     """Run standard CTM to convergence using the Tensor protocol.
 
     Builds the full double-layer tensor via ``bar()`` + ``contract()`` +
@@ -526,7 +537,12 @@ def ctm_tensor(
         qr_warmup_steps:   Number of eigh warm-up sweeps before QR kicks in.
 
     Returns:
-        Converged CTMTensorEnv.
+        ``(env, max_truncation_error)`` where ``env`` is the converged
+        CTMTensorEnv and ``max_truncation_error`` is the maximum per-move
+        truncation error ε_T from the **last** sweep before convergence
+        (or the last sweep if ``max_iter`` was reached without convergence).
+        This is a Python ``float`` suitable for use in the optimizer loop
+        (variPEPS §2.8.2 auto-χ trigger).
     """
     # Determine sweep function: use paired moves for SymmetricTensors
     # with non-trivial virtual charges (fixes charge-sector mismatch
@@ -564,14 +580,15 @@ def ctm_tensor(
     if projector_method == "qr" and qr_warmup_steps > 0:
         warmup = min(qr_warmup_steps, max_iter)
         for _ in range(warmup):
-            env = sweep_fn(
+            env, _ = sweep_fn(
                 env, a, chi, renormalize, "eigh", projector_backward=projector_backward
             )
         max_iter = max_iter - warmup
 
+    last_max_eps: float = 0.0
     prev_sv = None
     for _ in range(max_iter):
-        env = sweep_fn(
+        env, last_max_eps = sweep_fn(
             env,
             a,
             chi,
@@ -587,7 +604,7 @@ def ctm_tensor(
                 break
         prev_sv = current_sv
 
-    return env
+    return env, last_max_eps
 
 
 def _ctm_tensor_multisite(

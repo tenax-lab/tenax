@@ -63,6 +63,7 @@ _FILE_MARKERS = {
     "test_pess.py": "algorithm",
     "test_pess_ad.py": "algorithm",
     "test_pess_validation.py": "slow",
+    "test_chi_auto_bump.py": "core",
 }
 
 

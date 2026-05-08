@@ -68,7 +68,7 @@ class TestBlockSparseCTMForward:
         A_sym = _make_u1_symmetric_ipeps()
         chi = 4
 
-        env = ctm_tensor(A_sym, chi=chi, max_iter=30, conv_tol=1e-6)
+        env, _ = ctm_tensor(A_sym, chi=chi, max_iter=30, conv_tol=1e-6)
 
         assert isinstance(env, CTMTensorEnv)
         for field in env:
@@ -141,10 +141,10 @@ class TestDenseVsBlockSparseMatch:
         gate = heisenberg_gate()
         chi = 6
 
-        env_sym = ctm_tensor(A_sym, chi=chi, max_iter=40, conv_tol=1e-8)
+        env_sym, _ = ctm_tensor(A_sym, chi=chi, max_iter=40, conv_tol=1e-8)
         E_sym = float(compute_energy_ctm_tensor(A_sym, env_sym, gate, d=2))
 
-        env_dense = ctm_tensor(A_dense, chi=chi, max_iter=40, conv_tol=1e-8)
+        env_dense, _ = ctm_tensor(A_dense, chi=chi, max_iter=40, conv_tol=1e-8)
         E_dense = float(compute_energy_ctm_tensor(A_dense, env_dense, gate, d=2))
 
         np.testing.assert_allclose(

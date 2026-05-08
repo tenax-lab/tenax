@@ -471,7 +471,7 @@ def test_ctm_tensor_move_left_2x2_uniform_state_one_step():
         _ctm_tensor_move_left_2x2,
     )
 
-    env_1x1 = _ctm_tensor_move_left(env, env, a, chi, "svd")
+    env_1x1, _ = _ctm_tensor_move_left(env, env, a, chi, "svd")
     env_2x2 = _ctm_tensor_move_left_2x2(
         env,
         env,
@@ -527,7 +527,7 @@ def test_ctm_tensor_move_2x2_one_step_other_directions(direction):
     # The C corner that gets updated by each direction (for the SV check):
     C_attr = {"right": "C2", "top": "C1", "bottom": "C4"}[direction]
 
-    env_1x1 = move_1x1(env, env, a, chi, "svd")
+    env_1x1, _ = move_1x1(env, env, a, chi, "svd")
     env_2x2 = move_2x2(env, env, env, env, a, a, a, a, chi, "svd")
 
     sv_1x1 = jnp.linalg.svd(getattr(env_1x1, C_attr).todense(), compute_uv=False)

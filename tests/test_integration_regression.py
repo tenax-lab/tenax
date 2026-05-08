@@ -284,10 +284,10 @@ class TestSymmetricMatchesDense:
 
         chi = 6
 
-        env_dense = ctm_tensor(A_dense, chi=chi, max_iter=40, conv_tol=1e-8)
+        env_dense, _ = ctm_tensor(A_dense, chi=chi, max_iter=40, conv_tol=1e-8)
         E_dense = float(compute_energy_ctm_tensor(A_dense, env_dense, gate, d=d))
 
-        env_sym = ctm_tensor(A_sym, chi=chi, max_iter=40, conv_tol=1e-8)
+        env_sym, _ = ctm_tensor(A_sym, chi=chi, max_iter=40, conv_tol=1e-8)
         E_sym = float(compute_energy_ctm_tensor(A_sym, env_sym, gate, d=d))
 
         np.testing.assert_allclose(
