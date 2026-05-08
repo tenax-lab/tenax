@@ -228,6 +228,12 @@ class iPEPSConfig:
     # variational CTM artifact (see issue #298).  None disables the check.
     gs_energy_floor: float | None = None
     gs_implicit_ad: bool = True  # implicit diff (VJP + sigma gauge)
+    # When True, optimize_gs_ad appends a trajectory dict
+    # ``{energies, step_times, jit_compile_time, num_steps, converged}``
+    # to its return tuple.  Default is False so existing callers see the
+    # same return shape.  Currently supported only on the 1-site
+    # (non-C4v-reference) and 2-site Tensor-protocol AD paths.
+    return_history: bool = False
     # Deprecated alias — use gs_implicit_ad instead.  Accepted for backwards
     # compatibility; mapped to gs_implicit_ad in __post_init__.
     gs_explicit_ad: bool | None = None

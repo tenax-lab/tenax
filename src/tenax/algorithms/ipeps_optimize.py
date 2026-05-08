@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time as _time
 from dataclasses import replace as _replace
 
 import jax
@@ -512,6 +513,11 @@ def _optimize_gs_ad_tensor_reference_c4v(
     config: iPEPSConfig,
 ):
     """Reference-mode dense C4v path with implicit-AD CTM backward."""
+    if config.return_history:
+        raise NotImplementedError(
+            "return_history is currently only supported for unit_cell='1x1' "
+            "(non-C4v-reference) and unit_cell='2site'."
+        )
     import optax
 
     from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
@@ -869,6 +875,16 @@ def _optimize_gs_ad_tensor(
 
     stall_count = 0  # noise recovery: consecutive line search failures
 
+    # Optional trajectory capture (config.return_history).  Always allocated
+    # but only populated/returned when the flag is set, so there is no
+    # extra wall-clock cost when the flag is False (only the bool check
+    # below is added per step).
+    _history_energies: list[float] = []
+    _history_step_times: list[float] = []
+    _jit_compile_time: float = 0.0
+    _first_step = True
+    _converged = False
+
     # CTM conv_tol schedule: update ctm_cfg when tolerance changes
     _conv_tol_schedule = config.gs_ctm_conv_tol_schedule
     _current_conv_tol = ctm_cfg.conv_tol
@@ -891,6 +907,8 @@ def _optimize_gs_ad_tensor(
             if new_tol != _current_conv_tol:
                 _current_conv_tol = new_tol
                 ctm_cfg = _replace(ctm_cfg, conv_tol=new_tol)
+        if config.return_history:
+            _step_t0 = _time.perf_counter()
         try:
             energy_val, grads = jax.value_and_grad(loss_fn)(params)
         except CTMRGGradientError as exc:
@@ -948,6 +966,15 @@ def _optimize_gs_ad_tensor(
             continue
         energy_float = float(energy_val)
 
+        if config.return_history:
+            _step_dt = _time.perf_counter() - _step_t0
+            if _first_step:
+                _jit_compile_time = float(_step_dt)
+                _first_step = False
+            else:
+                _history_step_times.append(float(_step_dt))
+            _history_energies.append(energy_float)
+
         # Update env cache for warm-starting next step
         _update_env_cache(params)
 
@@ -991,6 +1018,7 @@ def _optimize_gs_ad_tensor(
                 _log_ad_converged(
                     "1site-tensor", step, delta_energy, config.gs_conv_tol
                 )
+            _converged = True
             break
 
         # Compute search direction
@@ -1246,6 +1274,15 @@ def _optimize_gs_ad_tensor(
     if config.gs_verbose:
         print(f"[iPEPS-AD:1site-tensor] final E={E_gs:.10f}", flush=True)
 
+    if config.return_history:
+        history = {
+            "energies": _history_energies,
+            "step_times": _history_step_times,
+            "jit_compile_time": _jit_compile_time,
+            "num_steps": len(_history_energies),
+            "converged": _converged,
+        }
+        return A_final, env, E_gs, history
     return A_final, env, E_gs
 
 
@@ -1529,6 +1566,14 @@ def _optimize_gs_ad_tensor_2site(
     prev_grad_flat: jnp.ndarray | None = None
     stall_count = 0  # noise recovery: consecutive line search failures
 
+    # Optional trajectory capture (config.return_history).  Always allocated
+    # but only populated/returned when the flag is set.
+    _history_energies: list[float] = []
+    _history_step_times: list[float] = []
+    _jit_compile_time: float = 0.0
+    _first_step = True
+    _converged = False
+
     # CTM conv_tol schedule (shared helper with 1-site optimizer)
     _conv_tol_schedule_2s = config.gs_ctm_conv_tol_schedule
     _current_conv_tol_2s = ctm_cfg_2s.conv_tol
@@ -1576,6 +1621,8 @@ def _optimize_gs_ad_tensor_2site(
                 _current_conv_tol_2s = new_tol
                 ctm_cfg_2s = _replace(ctm_cfg_2s, conv_tol=new_tol)
 
+        if config.return_history:
+            _step_t0 = _time.perf_counter()
         try:
             energy_val, grads = jax.value_and_grad(loss_fn)(params)
         except CTMRGGradientError as exc:
@@ -1639,6 +1686,15 @@ def _optimize_gs_ad_tensor_2site(
             continue
         energy_float = float(energy_val)
 
+        if config.return_history:
+            _step_dt = _time.perf_counter() - _step_t0
+            if _first_step:
+                _jit_compile_time = float(_step_dt)
+                _first_step = False
+            else:
+                _history_step_times.append(float(_step_dt))
+            _history_energies.append(energy_float)
+
         # Update env cache for warm-starting next step
         _update_env_cache_2s(params)
 
@@ -1682,6 +1738,7 @@ def _optimize_gs_ad_tensor_2site(
                 _log_ad_converged(
                     "2site-tensor", step, delta_energy, config.gs_conv_tol
                 )
+            _converged = True
             break
 
         # Compute search direction
@@ -1999,6 +2056,15 @@ def _optimize_gs_ad_tensor_2site(
     if config.gs_verbose:
         print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}", flush=True)
 
+    if config.return_history:
+        history = {
+            "energies": _history_energies,
+            "step_times": _history_step_times,
+            "jit_compile_time": _jit_compile_time,
+            "num_steps": len(_history_energies),
+            "converged": _converged,
+        }
+        return (A_final, B_final), (env_A, env_B), E_gs, history
     return (A_final, B_final), (env_A, env_B), E_gs
 
 
@@ -2017,6 +2083,11 @@ def _optimize_gs_ad_multisite(
     keyed by site name (e.g. ``"u"``, ``"v"``, ``"w"``).
     """
     config = _normalize_stall_recovery(config, unit_cell="multisite")
+    if config.return_history:
+        raise NotImplementedError(
+            "return_history is currently only supported for unit_cell='1x1' "
+            "(non-C4v-reference) and unit_cell='2site'."
+        )
 
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor_energy import (
