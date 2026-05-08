@@ -90,14 +90,14 @@ def _ctm_tensor_sweep(
     projector_method: str = "svd",
     projector_backward: str = "auto",
 ) -> CTMTensorEnv:
-    """One full CTM sweep: left, right, top, bottom + optional renormalize."""
+    """One full CTM sweep: left, top, right, bottom (variPEPS order) + optional renormalize."""
     env = _ctm_tensor_move_left(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
-    env = _ctm_tensor_move_right(
+    env = _ctm_tensor_move_top(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
-    env = _ctm_tensor_move_top(
+    env = _ctm_tensor_move_right(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
     env = _ctm_tensor_move_bottom(
@@ -168,8 +168,8 @@ def make_neighbors(nx: int, ny: int) -> dict[Coord, dict[str, Coord]]:
 
 _DIRECTION_MOVES = [
     ("left", _ctm_tensor_move_left),
-    ("right", _ctm_tensor_move_right),
     ("top", _ctm_tensor_move_top),
+    ("right", _ctm_tensor_move_right),
     ("bottom", _ctm_tensor_move_bottom),
 ]
 
@@ -183,8 +183,8 @@ _DIRECTION_MOVES = [
 # 4 sites at offsets {(0,0), (1,0), (0,1), (1,1)} relative to that anchor.
 _DIRECTION_MOVES_2X2 = [
     ("left", _ctm_tensor_move_left_2x2),
-    ("right", _ctm_tensor_move_right_2x2),
     ("top", _ctm_tensor_move_top_2x2),
+    ("right", _ctm_tensor_move_right_2x2),
     ("bottom", _ctm_tensor_move_bottom_2x2),
 ]
 
@@ -319,7 +319,7 @@ def _ctm_tensor_sweep_multisite(
         # direction would see partially-updated env tensors used to build
         # the plaquette (a stale-projector vs fresh-absorbed inconsistency
         # known to destabilise multisite CTM convergence).
-        for direction in ("left", "right", "top", "bottom"):
+        for direction in ("left", "top", "right", "bottom"):
             envs_old = dict(envs)
             # Phase 1: precompute projector pairs anchored at every cell.
             projectors: dict[Coord, tuple] = {}
