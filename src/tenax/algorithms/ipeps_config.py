@@ -40,6 +40,22 @@ class CTMConfig:
                             tracked by issue #292.  Prefer
                             ``ad_backward_method="vjp"`` (the default)
                             until GMRES is stabilized.
+        chi_auto_bump:      Reactive auto-χ_E bump (variPEPS §2.8.2).  When
+                            ``True``, the optimizer raises ``chi`` by
+                            ``chi_auto_bump_step`` between L-BFGS steps
+                            whenever the CTM truncation error exceeds
+                            ``chi_auto_bump_eps``.  Mutually exclusive with
+                            ``chi_ramp`` (a deterministic schedule).
+                            Off by default.
+        chi_auto_bump_eps:  Truncation-error threshold that triggers an
+                            auto-χ bump.  Default ``1e-5`` follows
+                            variPEPS §2.8.2.
+        chi_auto_bump_step: Additive increment applied to ``chi`` on each
+                            bump event.  Must be a positive integer.
+                            Default ``2``.
+        chi_max:            Hard ceiling on ``chi`` for the auto-bump
+                            mechanism.  ``None`` means unbounded.  When
+                            set, must satisfy ``chi_max >= chi``.
     """
 
     chi: int = 20
@@ -115,6 +131,14 @@ class CTMConfig:
     projector_backward: Literal["auto", "standard", "lorentzian"] = "auto"
     adjoint_arnoldi_precheck: bool = True
     adjoint_arnoldi_threshold: float = 5.0
+    # variPEPS §2.8.2 reactive auto-χ_E bump.  When enabled, the optimizer
+    # raises ``chi`` between L-BFGS steps if the CTM truncation error exceeds
+    # ``chi_auto_bump_eps``.  Mutually exclusive with ``chi_ramp`` (which is
+    # a deterministic schedule).  Off by default.
+    chi_auto_bump: bool = False
+    chi_auto_bump_eps: float = 1e-5
+    chi_auto_bump_step: int = 2
+    chi_max: int | None = None
 
     def __post_init__(self):
         valid_modes = {None, "c4v_reference"}
@@ -134,6 +158,18 @@ class CTMConfig:
                 f"projector_backward must be one of {valid_projector_backward}, "
                 f"got {self.projector_backward!r}"
             )
+        # variPEPS §2.8.2 auto-bump validation.
+        if self.chi_auto_bump and self.chi_ramp is not None:
+            raise ValueError(
+                "chi_auto_bump and chi_ramp are mutually exclusive: "
+                "chi_ramp is a deterministic schedule, chi_auto_bump is reactive"
+            )
+        if self.chi_auto_bump and self.chi_auto_bump_step <= 0:
+            raise ValueError(
+                f"chi_auto_bump_step must be a positive integer, got {self.chi_auto_bump_step}"
+            )
+        if self.chi_max is not None and self.chi_max < self.chi:
+            raise ValueError(f"chi_max ({self.chi_max}) must be >= chi ({self.chi})")
 
 
 @dataclass

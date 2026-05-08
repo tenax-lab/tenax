@@ -68,3 +68,35 @@ class TestCtmTensorReturnsTuple:
             f"Larger chi should not yield larger truncation error: "
             f"chi=2 -> {eps_small}, chi=4 -> {eps_large}"
         )
+
+
+from tenax.algorithms.ipeps_config import CTMConfig
+
+
+def test_ctm_config_auto_bump_defaults_off():
+    """Auto-bump must be opt-in to preserve existing behavior."""
+    config = CTMConfig(chi=4)
+    assert config.chi_auto_bump is False
+    assert config.chi_auto_bump_eps == 1e-5
+    assert config.chi_auto_bump_step == 2
+    assert config.chi_max is None
+
+
+def test_ctm_config_auto_bump_rejects_chi_ramp_combo():
+    """`chi_ramp` is a deterministic schedule; reactive auto-bump conflicts."""
+    with pytest.raises(ValueError, match="chi_ramp"):
+        CTMConfig(
+            chi=4,
+            chi_auto_bump=True,
+            chi_ramp=[(4, 10), (8, None)],
+        )
+
+
+def test_ctm_config_auto_bump_validates_step_positive():
+    with pytest.raises(ValueError, match="chi_auto_bump_step"):
+        CTMConfig(chi=4, chi_auto_bump=True, chi_auto_bump_step=0)
+
+
+def test_ctm_config_auto_bump_validates_chi_max_above_chi():
+    with pytest.raises(ValueError, match="chi_max"):
+        CTMConfig(chi=4, chi_auto_bump=True, chi_max=2)
