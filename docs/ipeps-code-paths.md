@@ -336,6 +336,37 @@ that lands.
 > square iPEPS introduces SVD-degenerate-spectrum issues at AD time
 > that the native path avoids by construction.
 
+## Auto-χ_E Bump (variPEPS §2.8.2)
+
+When the CTM truncation error `ε_T = ‖discarded SVs‖₂ / ‖SVs‖₂` exceeds
+`chi_auto_bump_eps`, `optimize_gs_ad` increases `chi` by `chi_auto_bump_step`
+between L-BFGS steps and zero-pads the cached environment as a warm start.
+Disabled by default (opt-in). Mutually exclusive with `chi_ramp`.
+
+The bump fires *between* optimizer steps — the implicit-AD GMRES linearisation
+sees a fixed χ within each gradient evaluation, so AD correctness is unaffected.
+
+```python
+from tenax import iPEPSConfig, CTMConfig, optimize_gs_ad
+
+config = iPEPSConfig(
+    ctm=CTMConfig(
+        chi=10,
+        chi_auto_bump=True,
+        chi_auto_bump_eps=1e-5,   # variPEPS §2.8.2 default
+        chi_auto_bump_step=2,
+        chi_max=40,               # hard ceiling; None = unbounded
+    ),
+    ...
+)
+A_opt, env, E = optimize_gs_ad(gate, A_init, config)
+```
+
+Reference: Naumann, Weerda, Rizzi, Eisert, Schmoll, *SciPost Phys. Lect. Notes* **86** (2024), §2.8.2.
+
+> **Scope:** dense single-site (`unit_cell="1x1"`) path only.
+> Block-sparse (SymmetricTensor) and multisite paths are tracked as follow-up issues.
+
 ## Stall Recovery (issue #298)
 
 When the L-BFGS / CG line search cannot make progress the optimizer runs
@@ -389,6 +420,7 @@ The 2-site L-BFGS path still has a separate convergence gap at
 | Lorentzian projector backward     | **Aspirational** | ``CTMConfig`` documents auto-promotion of ``"auto"`` to ``"lorentzian"`` when ``gs_implicit_ad=False`` + ``projector_method="eigh"``, but the ``"auto"`` resolver is **not yet implemented** (see ``_ctm_projector.py`` "Task 8 will resolve 'auto'"); ``"auto"`` currently behaves as ``"standard"``. Setting ``projector_backward="lorentzian"`` explicitly works. |
 | Adjoint Arnoldi precheck          | **Working**      | ``adjoint_arnoldi_precheck=True`` (default) probes ``J^T``'s spectral radius before the Krylov solve; falls back to a regularized solve when ``> adjoint_arnoldi_threshold`` (default 5.0). |
 | Adjoint Tikhonov damping          | **Working**      | ``adjoint_tikhonov`` (default ``1e-6``) adds ``+τI`` to ``(I − J^T)`` to prevent Krylov stalls near a well-converged GS. |
+| Auto-χ_E bump (variPEPS §2.8.2)  | **Working**      | ``CTMConfig(chi_auto_bump=True, chi_auto_bump_eps=1e-5, chi_auto_bump_step=2, chi_max=N)``. Dense single-site path only; SymmetricTensor + multisite are follow-up issues. |
 | Split CTM forward (SU)            | **Working**      | Used by simple update.                                             |
 | Split CTM + implicit diff         | **BROKEN**       | Not wired into optimizer.                                          |
 | Split CTM + explicit diff         | **Working**      | No ``jax.checkpoint``, high memory.                                |
@@ -446,7 +478,11 @@ for the full benchmark table and the projector × gauge comparison matrix.
 | Stall recovery        | ``gs_stall_recovery``       | ``None``         | ``"noise"`` / ``"reset"`` (auto)     |
 | Energy floor          | ``gs_energy_floor``         | ``None``         | ``float`` = reject below as non-variational |
 | CG iPEPS gates        | ``cg_gates``                | ``None``         | ``honeycomb_cg_gates()`` / ``kagome_cg_gates()`` / custom ``CGGates`` (requires ``unit_cell="1x1"``, rejects ``su_init=True``) |
-| CTM variant           | (function choice)           | standard         | split, C4v                           |
+| Auto-χ_E bump         | ``chi_auto_bump``           | ``False``        | ``True`` = opt-in (§2.8.2)          |
+| Bump threshold        | ``chi_auto_bump_eps``       | ``1e-5``         | variPEPS §2.8.2 default             |
+| Bump step             | ``chi_auto_bump_step``      | ``2``            | additive increment per trigger      |
+| Max χ ceiling         | ``chi_max``                 | ``None``         | ``int`` = hard cap on bumped χ      |
+| CTM variant           | (function choice)           | standard         | split, C4v                          |
 
 The static defaults
 (``projector_method="svd"``, ``forward_gauge="phase"``, ``ctm_conv_method="elementwise"``)
