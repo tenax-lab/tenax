@@ -42,6 +42,16 @@ class CTMConvergeInfo(NamedTuple):
     sv_diff: float
 
 
+# Process-lifetime cache so repeat calls with the same neighbors dict reuse
+# the same compiled @jit'd ``_step`` function.  Without this, every callsite
+# (forward CTM convergence, implicit-AD f_bwd, line search, etc.) creates a
+# fresh ``_step`` closure with its own JIT cache and pays redundant compile
+# cost.  Diagnosed in docs/plans/2026-05-09-ipeps-ad-jit-cost-diagnosis.md.
+# Keyed by id(neighbors) — safe because neighbors dicts are constructed once
+# per optimizer invocation and stay alive throughout.
+_JIT_STEP_CACHE: dict[int, callable] = {}
+
+
 def _make_jit_ctm_step(
     neighbors: dict[Coord, dict[str, Coord]],
 ):
@@ -50,12 +60,19 @@ def _make_jit_ctm_step(
     The ``neighbors`` dict is captured in the closure so it is not traced
     by JAX (it contains only Python-level coordinate tuples, not arrays).
 
+    Memoised by ``id(neighbors)`` so all callsites in a single optimizer
+    invocation share one ``_step`` function and its JIT cache.
+
     Returns:
         A JIT-compiled function with signature::
 
             step(site_tensors, envs, *, chi, projector_method,
                  renormalize, projector_backward) -> envs
     """
+    cache_key = id(neighbors)
+    cached = _JIT_STEP_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     @partial(
         jax.jit,
@@ -88,6 +105,7 @@ def _make_jit_ctm_step(
             projector_backward=projector_backward,
         )
 
+    _JIT_STEP_CACHE[cache_key] = _step
     return _step
 
 
