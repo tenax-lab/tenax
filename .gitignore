@@ -83,3 +83,6 @@ plugin/
 
 # Local-only paper PDFs (referenced by docs/plans/ but not tracked)
 papers/
+
+# variPEPS compare benchmark outputs
+benchmarks/varipeps_compare/results/
