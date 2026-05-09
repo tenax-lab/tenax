@@ -179,3 +179,75 @@ the intended protocol within a 30-minute subprocess budget. Workarounds:
   — variPEPS only does implicit AD.
 
 None of these are good. F1 is the right unblock.
+
+## Empirical attribution (2026-05-09)
+
+Ran a `jax.log_compiles()` capture on `optimize_gs_ad` at the smallest
+single_site implicit-AD config (D=2, χ=4, max-steps=1) to attribute
+compile time per JIT'd function. Aggregated XLA compile times:
+
+| component | compiles | total | per-compile avg |
+|---|---|---|---|
+| `while_loop` | 11 | 19.7 s | 1.8 s |
+| `_step` (CTM step) | **46** | 13.8 s | 0.3 s |
+| `_jit_apply_Jt` | 2 | 5.1 s | 2.6 s |
+| `_jit_chain_rule` | 1 | 1.7 s | — |
+| `_jit_dE_denv` | 1 | 0.13 s | — |
+
+**The original F1 hypothesis was wrong.** The three backward JITs
+(`_jit_dE_denv`, `_jit_apply_Jt`, `_jit_chain_rule`) together total ~7 s
+and consolidating them into one JIT would not change total compile work
+materially.
+
+**Real cost:** `_make_jit_ctm_step(neighbors)` is a factory that returns
+a fresh `@jit`'d Python function on each call. Every call site (forward
+CTM convergence, implicit-AD `f_bwd`, line search, etc.) constructed a
+new `_step` closure with its own JIT cache. JAX dispatches by Python
+function identity, so 46 calls to `_make_jit_ctm_step` → 46 redundant
+compiles of identical-shape `_step`. The 11 `while_loop` compiles trace
+those `_step` functions and inherit the same redundancy.
+
+### Fix: cache `_step` by `id(neighbors)`
+
+Implemented in commit 11aafd3
+(`src/tenax/algorithms/_ctm_python_loop.py`). Process-lifetime
+`_JIT_STEP_CACHE` keyed by `id(neighbors)`. After-fix attribution at
+the same chi=4 config:
+
+| component | compiles (before → after) | total time (before → after) |
+|---|---|---|
+| `_step` | 46 → **1** | 13.8 s → 0.12 s |
+| `while_loop` | 11 → out of top-10 | 19.7 s → < 1 s |
+
+Saves ~33 s of redundant compile work at chi=4. At chi=16 each
+individual `_step` compile is ~10× larger (chi enters as O(χ³) in the
+projector SVDs); the absolute savings scale accordingly.
+
+Verified by `uv run pytest -m core -x` (765 passed, 0 failed).
+
+### Empirical result on the actual benchmark
+
+Re-ran `compare.py` at the original protocol (TOL=1e-6, MAX_STEPS=100)
+with the cache fix in place. **Tenax at single_site D=2 χ=16 still
+exceeded the 30-min subprocess budget on CPU.** The fix removed the
+redundant-compile tax, but the remaining per-step solve cost (eager
+GMRES adjoint at chi=16, plus L-BFGS line search retries) on CPU is
+genuinely slower than variPEPS's fixed-point adjoint by enough to push
+the run past the 30-min ceiling.
+
+variPEPS on the same protocol: E = −0.66251430 in 23 steps in
+800 s (≈13.3 min, 170 s of which was JIT compile). See
+`benchmarks/varipeps_compare/published_results/STATUS.md`.
+
+### What this changes
+
+- **F1-as-cache-by-id-of-neighbors** is a small win and **shipped** in
+  11aafd3. It makes the benchmark *less wasteful* but not *fast enough*.
+- **F2 (eager-GMRES → fixed-point iteration)** moves up the priority
+  list. variPEPS's empirical convergence in 23 steps with fixed-point
+  iteration is direct evidence the spectral radius of `J^T` is < 1
+  here, which is what fixed-point needs.
+- **Running on GPU** is a separate orthogonal lever — this machine has
+  2× CUDA devices, but compare.py currently forces CPU to keep
+  wall-clocks comparable. Once F2 lands, the remaining gap may close
+  enough that GPU isn't strictly needed.
