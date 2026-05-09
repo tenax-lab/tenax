@@ -155,7 +155,7 @@ def test_ctm_projector_rank_deficient_corner():
     C4g = DenseTensor(C4_data, (fused_idx, col2_idx))
 
     chi = 4
-    P1, P2 = _compute_projector_tensor(C1g, C4g, chi, projector_method="svd")
+    P1, P2, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="svd")
 
     P1d = np.asarray(P1.todense())
     P2d = np.asarray(P2.todense())
@@ -165,7 +165,9 @@ def test_ctm_projector_rank_deficient_corner():
     # Differentiability: gradient w.r.t. C1g data must be finite.
     def loss(C1_data_in):
         C1g_in = DenseTensor(C1_data_in, (fused_idx, col1_idx))
-        P1_in, _ = _compute_projector_tensor(C1g_in, C4g, chi, projector_method="svd")
+        P1_in, _, _ = _compute_projector_tensor(
+            C1g_in, C4g, chi, projector_method="svd"
+        )
         return jnp.sum(P1_in.todense() ** 2)
 
     g = jax.grad(loss)(C1_data)

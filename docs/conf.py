@@ -57,7 +57,7 @@ source_suffix = {
     ".rst": "restructuredtext",
     ".md": "markdown",
 }
-exclude_patterns = ["_build", "plans"]
+exclude_patterns = ["_build", "plans", "superpowers", "superpowers/**"]
 
 # Suppress third-party deprecation warnings during build
 warnings.filterwarnings(

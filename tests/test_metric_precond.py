@@ -34,7 +34,8 @@ def _make_random_ipeps_tensor(D=2, d=2, seed=0):
 
 def _converge_ctm(A, chi=4, max_iter=50):
     """Run CTM to convergence and return the environment."""
-    return ctm_tensor(A, chi=chi, max_iter=max_iter, conv_tol=1e-10)
+    env, _ = ctm_tensor(A, chi=chi, max_iter=max_iter, conv_tol=1e-10)
+    return env
 
 
 class TestContractSingleSiteEnv:

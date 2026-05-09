@@ -250,7 +250,7 @@ class TestSweep:
 class TestConvergence:
     def test_ctm_tensor_dense_converges(self, small_peps_dense):
         """DenseTensor CTM converges (finite env after max_iter)."""
-        env = ctm_tensor(small_peps_dense, chi=4, max_iter=20, conv_tol=1e-6)
+        env, _ = ctm_tensor(small_peps_dense, chi=4, max_iter=20, conv_tol=1e-6)
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
 
@@ -265,7 +265,7 @@ class TestConvergence:
 
     def test_ctm_tensor_symmetric_converges(self, small_peps_symmetric):
         """SymmetricTensor CTM converges (trivial charges)."""
-        env = ctm_tensor(small_peps_symmetric, chi=4, max_iter=20, conv_tol=1e-6)
+        env, _ = ctm_tensor(small_peps_symmetric, chi=4, max_iter=20, conv_tol=1e-6)
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
 
@@ -278,12 +278,14 @@ class TestConvergence:
             small_peps_symmetric.todense(), small_peps_symmetric.indices
         )
 
-        env_dense = ctm_tensor(A_dense, chi=chi, max_iter=40, conv_tol=1e-8)
+        env_dense, _ = ctm_tensor(A_dense, chi=chi, max_iter=40, conv_tol=1e-8)
         E_dense = float(
             compute_energy_ctm_tensor(A_dense, env_dense, heisenberg_gate, d=2)
         )
 
-        env_sym = ctm_tensor(small_peps_symmetric, chi=chi, max_iter=40, conv_tol=1e-8)
+        env_sym, _ = ctm_tensor(
+            small_peps_symmetric, chi=chi, max_iter=40, conv_tol=1e-8
+        )
         E_sym = float(
             compute_energy_ctm_tensor(
                 small_peps_symmetric, env_sym, heisenberg_gate, d=2
@@ -301,7 +303,7 @@ class TestConvergence:
 class TestFermionicIntegration:
     def test_fermionic_ctm_no_densify(self, fpeps_tensor):
         """Fermionic CTM works with SymmetricTensor (no todense)."""
-        env = ctm_tensor(fpeps_tensor, chi=4, max_iter=15, conv_tol=1e-5)
+        env, _ = ctm_tensor(fpeps_tensor, chi=4, max_iter=15, conv_tol=1e-5)
         assert isinstance(env, CTMTensorEnv)
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
@@ -469,7 +471,7 @@ class TestTwoSiteCTM:
 class TestQRProjectorMethod:
     def test_ctm_tensor_qr_converges(self, small_peps_dense):
         """CTM with projector_method='qr' converges to finite env."""
-        env = ctm_tensor(
+        env, _ = ctm_tensor(
             small_peps_dense,
             chi=4,
             max_iter=20,
@@ -482,7 +484,7 @@ class TestQRProjectorMethod:
 
     def test_ctm_tensor_qr_energy_finite(self, small_peps_dense, heisenberg_gate):
         """QR projector method produces a finite energy."""
-        env_qr = ctm_tensor(
+        env_qr, _ = ctm_tensor(
             small_peps_dense,
             chi=6,
             max_iter=40,
@@ -533,7 +535,7 @@ class TestProjectorSymmetric:
         C1g, C4g = self._build_grown_corners(A, chi)
 
         # Compute projector via symmetric path
-        P_sym, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="eigh")
+        P_sym, _, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="eigh")
 
         # Dense reference
         C1g_d = C1g.todense()
@@ -558,8 +560,8 @@ class TestProjectorSymmetric:
 
         C1g, C4g = self._build_grown_corners(A, chi)
 
-        P_eigh, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="eigh")
-        P_qr, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="qr")
+        P_eigh, _, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="eigh")
+        P_qr, _, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="qr")
 
         # Both should be SymmetricTensor
         assert isinstance(P_eigh, SymmetricTensor)
@@ -574,7 +576,7 @@ class TestProjectorSymmetric:
 
     def test_ctm_tensor_qr_symmetric_converges(self, small_peps_symmetric):
         """CTM with QR projector converges for symmetric tensors."""
-        env = ctm_tensor(
+        env, _ = ctm_tensor(
             small_peps_symmetric,
             chi=4,
             max_iter=20,
@@ -708,7 +710,7 @@ class TestStandardCTMArchitectureGuards:
         chi_I = 16  # lossless
 
         # Standard CTM
-        env_std = ctm_tensor(A, chi=chi, max_iter=50, conv_tol=1e-10)
+        env_std, _ = ctm_tensor(A, chi=chi, max_iter=50, conv_tol=1e-10)
         E_std = float(compute_energy_ctm_tensor(A, env_std, heisenberg_gate, d=d))
 
         # Split CTM with lossless chi_I

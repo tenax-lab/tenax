@@ -40,6 +40,7 @@ class CTMConvergeInfo(NamedTuple):
     converged: bool
     iterations: int
     sv_diff: float
+    max_truncation_error: float = 0.0  # variPEPS §2.8.2 indicator (last sweep)
 
 
 # Process-lifetime cache so repeat calls with the same neighbors dict reuse
@@ -67,7 +68,12 @@ def _make_jit_ctm_step(
         A JIT-compiled function with signature::
 
             step(site_tensors, envs, *, chi, projector_method,
-                 renormalize, projector_backward) -> envs
+                 renormalize, projector_backward)
+                 -> tuple[dict[Coord, CTMTensorEnv], jax.Array]
+
+        The returned tuple is ``(new_envs, max_truncation_error)`` where
+        ``max_truncation_error`` is the largest singular-value truncation
+        error (ε_T) observed across all projector computations in the sweep.
     """
     cache_key = id(neighbors)
     cached = _JIT_STEP_CACHE.get(cache_key)
@@ -91,7 +97,7 @@ def _make_jit_ctm_step(
         projector_method: str = "svd",
         renormalize: bool = True,
         projector_backward: str = "auto",
-    ) -> dict[Coord, CTMTensorEnv]:
+    ) -> tuple[dict[Coord, CTMTensorEnv], jax.Array]:
         double_layers = {
             c: _build_double_layer_tensor(A) for c, A in site_tensors.items()
         }
@@ -188,7 +194,7 @@ def python_loop_ctm_converge(
     if projector_method == "qr" and qr_warmup_steps > 0:
         warmup = min(qr_warmup_steps, max_iter)
         for _ in range(warmup):
-            envs = jit_step(
+            envs, _ = jit_step(
                 site_tensors,
                 envs,
                 chi=chi,
@@ -201,9 +207,10 @@ def python_loop_ctm_converge(
     prev_svs: dict[Coord, jax.Array] = {}
     prev_envs: dict[Coord, CTMTensorEnv] | None = None
     final_diff = float("inf")
+    last_max_eps: float = 0.0
 
     for i in range(remaining):
-        envs = jit_step(
+        envs, _max_eps = jit_step(
             site_tensors,
             envs,
             chi=chi,
@@ -211,6 +218,7 @@ def python_loop_ctm_converge(
             renormalize=renormalize,
             projector_backward=projector_backward,
         )
+        last_max_eps = float(_max_eps)
 
         # Apply gauge fix if provided (e.g., phase fix for element-wise convergence)
         if gauge_fix_fn is not None:
@@ -260,12 +268,14 @@ def python_loop_ctm_converge(
                 converged=True,
                 iterations=total_iter,
                 sv_diff=final_diff,
+                max_truncation_error=last_max_eps,
             )
 
     return envs, CTMConvergeInfo(
         converged=False,
         iterations=max_iter,
         sv_diff=final_diff,
+        max_truncation_error=last_max_eps,
     )
 
 
@@ -289,7 +299,9 @@ def _python_loop_chi_ramp(
     """Run CTM with chi-ramp schedule."""
     envs = env_init
     prev_chi: int | None = None
-    info = CTMConvergeInfo(converged=False, iterations=0, sv_diff=float("inf"))
+    info = CTMConvergeInfo(
+        converged=False, iterations=0, sv_diff=float("inf"), max_truncation_error=0.0
+    )
 
     for stage_idx, (stage_chi, stage_sweeps) in enumerate(chi_ramp):
         is_last = stage_idx == len(chi_ramp) - 1

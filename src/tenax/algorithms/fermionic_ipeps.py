@@ -447,12 +447,13 @@ def fermionic_ctm(A, config):
     if isinstance(A, Tensor):
         from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
 
-        return ctm_tensor(
+        env, _ = ctm_tensor(
             A,
             chi=config.ctm_chi,
             max_iter=config.ctm_max_iter,
             conv_tol=config.ctm_conv_tol,
         )
+        return env
 
     from tenax.algorithms.ipeps_config import CTMConfig
     from tenax.algorithms.ipeps_ctm_convergence import ctm

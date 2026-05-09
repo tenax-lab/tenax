@@ -118,7 +118,7 @@ def _ctm_tensor_move_horizontal(
     chi: int,
     projector_method: str = "svd",
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
+) -> tuple[CTMTensorEnv, float]:
     """Combined left+right CTM move with charge-stabilized projectors.
 
     Uses standard 1x1 grown corners (same as individual move_left/move_right)
@@ -133,7 +133,8 @@ def _ctm_tensor_move_horizontal(
         projector_method: ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
 
     Returns:
-        Updated CTMTensorEnv with all 4 corners and T4, T2 updated.
+        ``(env, max_eps)`` — updated CTMTensorEnv with all 4 corners and T4,
+        T2 updated, and max truncation error across left + right projectors.
     """
     base_charges = _get_base_charges(a)
 
@@ -155,7 +156,7 @@ def _ctm_tensor_move_horizontal(
     T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", OUT)
 
     # Projector with charge stabilization
-    P_L1, P_L2 = _compute_projector_tensor(
+    P_L1, P_L2, _eps_t_left = _compute_projector_tensor(
         C1g_L, C4g_L, chi, projector_method, base_charges, projector_backward
     )
     C1_new, C4_new, T4_new = _apply_projector_with_reembed(
@@ -186,7 +187,7 @@ def _ctm_tensor_move_horizontal(
     T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", OUT)
 
     # Projector with charge stabilization
-    P_R1, P_R2 = _compute_projector_tensor(
+    P_R1, P_R2, _eps_t_right = _compute_projector_tensor(
         C2g_R, C3g_R, chi, projector_method, base_charges, projector_backward
     )
     C2_new, C3_new, T2_new = _apply_projector_with_reembed(
@@ -200,7 +201,7 @@ def _ctm_tensor_move_horizontal(
     T2_new = _flip_leg_flow(T2_new, "r2")
 
     # Per-absorption normalization (matches YASTN)
-    return CTMTensorEnv(
+    env_out = CTMTensorEnv(
         C1=_normalize_tensor(C1_new),
         C2=_normalize_tensor(C2_new),
         C3=_normalize_tensor(C3_new),
@@ -210,6 +211,8 @@ def _ctm_tensor_move_horizontal(
         T3=env_self.T3,
         T4=_normalize_tensor(T4_new),
     )
+    max_eps = max(float(_eps_t_left), float(_eps_t_right))
+    return env_out, max_eps
 
 
 # ------------------------------------------------------------------ #
@@ -224,7 +227,7 @@ def _ctm_tensor_move_vertical(
     chi: int,
     projector_method: str = "svd",
     projector_backward: str = "auto",
-) -> CTMTensorEnv:
+) -> tuple[CTMTensorEnv, float]:
     """Combined top+bottom CTM move with charge-stabilized projectors.
 
     Args:
@@ -235,7 +238,8 @@ def _ctm_tensor_move_vertical(
         projector_method: ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
 
     Returns:
-        Updated CTMTensorEnv with all 4 corners and T1, T3 updated.
+        ``(env, max_eps)`` — updated CTMTensorEnv with all 4 corners and T1,
+        T3 updated, and max truncation error across top + bottom projectors.
     """
     base_charges = _get_base_charges(a)
 
@@ -257,7 +261,7 @@ def _ctm_tensor_move_vertical(
     T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", OUT)
 
     # Projector with charge stabilization
-    P_T1, P_T2 = _compute_projector_tensor(
+    P_T1, P_T2, _eps_t_top = _compute_projector_tensor(
         C1g, C2g, chi, projector_method, base_charges, projector_backward
     )
     C1_new, C2_new, T1_new = _apply_projector_with_reembed(
@@ -288,7 +292,7 @@ def _ctm_tensor_move_vertical(
     T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", OUT)
 
     # Projector with charge stabilization
-    P_B1, P_B2 = _compute_projector_tensor(
+    P_B1, P_B2, _eps_t_bottom = _compute_projector_tensor(
         C4g, C3g, chi, projector_method, base_charges, projector_backward
     )
     C4_new, C3_new, T3_new = _apply_projector_with_reembed(
@@ -302,7 +306,7 @@ def _ctm_tensor_move_vertical(
     T3_new = _flip_leg_flow(T3_new, "d2")
 
     # Per-absorption normalization (matches YASTN)
-    return CTMTensorEnv(
+    env_out = CTMTensorEnv(
         C1=_normalize_tensor(C1_new),
         C2=_normalize_tensor(C2_new),
         C3=_normalize_tensor(C3_new),
@@ -312,3 +316,5 @@ def _ctm_tensor_move_vertical(
         T3=_normalize_tensor(T3_new),
         T4=env_self.T4,
     )
+    max_eps = max(float(_eps_t_top), float(_eps_t_bottom))
+    return env_out, max_eps
