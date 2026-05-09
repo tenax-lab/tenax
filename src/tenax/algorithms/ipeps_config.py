@@ -75,6 +75,18 @@ class CTMConfig:
     gmres_tol: float = 1e-6  # tolerance for GMRES backward solve
     gmres_restart: int = 20  # Krylov dimension for GMRES (no outer restarts)
     gmres_maxiter: int = 200  # max total GMRES iterations (outer budget)
+    # Adjoint solver for the implicit-AD CTM backward.
+    #   "fixed_point" (default) — Python-loop ``λ_{k+1} = b + J^T λ_k``.
+    #     Mirrors variPEPS's ``_ctmrg_rev_workhorse``.  Converges
+    #     geometrically when ρ(J^T) < 1, which the Arnoldi precheck
+    #     guarantees.  Each iteration is one cached ``_jit_apply_Jt``
+    #     matvec — no Krylov subspace, no per-iter compile cost.
+    #   "gmres" — eager Krylov solve via ``gmres_pytree_jax``.  Use as a
+    #     safety opt-out when the fixed-point loop diverges.
+    # Both paths reuse ``gmres_tol`` (residual / step tolerance) and
+    # ``gmres_maxiter`` (step cap).  The fixed-point loop additionally
+    # falls back to GMRES in-loop when ``diff > prev_diff`` after step 5.
+    adjoint_method: Literal["fixed_point", "gmres"] = "fixed_point"
     ctm_conv_method: str = "elementwise"  # "elementwise" or "sv" (singular value)
     # forward_gauge: "phase" (default — Frobenius-norm phase fix per CTM
     # absorption; works for both implicit and explicit AD, 1-site and
@@ -157,6 +169,12 @@ class CTMConfig:
             raise ValueError(
                 f"projector_backward must be one of {valid_projector_backward}, "
                 f"got {self.projector_backward!r}"
+            )
+        valid_adjoint_methods = {"fixed_point", "gmres"}
+        if self.adjoint_method not in valid_adjoint_methods:
+            raise ValueError(
+                f"adjoint_method must be one of {valid_adjoint_methods}, "
+                f"got {self.adjoint_method!r}"
             )
         # variPEPS §2.8.2 auto-bump validation.
         if self.chi_auto_bump and self.chi_ramp is not None:

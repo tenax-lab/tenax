@@ -201,6 +201,7 @@ def make_ctm_energy_fn(
             gmres_maxiter=ctm_cfg.gmres_maxiter,
             gmres_restart=ctm_cfg.gmres_restart,
             arnoldi_precheck=False,
+            adjoint_method=ctm_cfg.adjoint_method,
             energy_fn=energy_fn,
         )
 

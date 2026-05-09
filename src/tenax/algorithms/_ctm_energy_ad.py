@@ -276,6 +276,7 @@ def ctm_energy_implicit(
     gmres_restart: int = 30,
     energy_fn=None,
     arnoldi_precheck: bool = False,
+    adjoint_method: str = "fixed_point",
 ) -> jnp.ndarray:
     """Compute iPEPS energy with implicit-differentiation backward (GMRES).
 
@@ -320,6 +321,13 @@ def ctm_energy_implicit(
         arnoldi_precheck:  If True, run 20-step Arnoldi to estimate rho(J^T)
                            before GMRES. Raises ``CTMRGGradientError`` if
                            rho >= 1. Enable when the caller has recovery logic.
+        adjoint_method:    ``"fixed_point"`` (default) runs a Python-loop
+                           Neumann iteration ``λ_{k+1} = b + J^T λ_k``
+                           that mirrors variPEPS's ``_ctmrg_rev_workhorse``
+                           and converges geometrically when ρ(J^T) < 1.
+                           ``"gmres"`` retains the eager Krylov solve as
+                           an opt-out for divergent edge cases.  Both
+                           paths reuse ``gmres_tol`` / ``gmres_maxiter``.
 
     Returns:
         Scalar energy per site.
@@ -352,6 +360,7 @@ def ctm_energy_implicit(
         gmres_restart,
         energy_fn,
         arnoldi_precheck,
+        adjoint_method,
     )
 
 
@@ -489,6 +498,7 @@ def _ctm_energy_implicit_dispatch(
     gmres_restart,
     energy_fn,
     arnoldi_precheck,
+    adjoint_method,
 ):
     """Dispatch to custom_vjp-decorated function with caching.
 
@@ -518,6 +528,7 @@ def _ctm_energy_implicit_dispatch(
         id(gate),  # different Hamiltonian → different backward
         id(energy_fn),  # different energy callback → different backward
         arnoldi_precheck,
+        adjoint_method,
     )
 
     entry = _VJP_CACHE.get(cache_key)
@@ -555,6 +566,7 @@ def _ctm_energy_implicit_dispatch(
         gmres_maxiter=gmres_maxiter,
         gmres_restart=gmres_restart,
         arnoldi_precheck=arnoldi_precheck,
+        adjoint_method=adjoint_method,
     )
     _VJP_CACHE[cache_key] = (f, mutables)
     return f(params_data_tuple)
@@ -578,6 +590,7 @@ def _make_implicit_vjp_fn(
     gmres_maxiter,
     gmres_restart,
     arnoldi_precheck=False,
+    adjoint_method="fixed_point",
 ):
     """Build a custom_vjp-decorated function closed over static config.
 
@@ -809,13 +822,15 @@ def _make_implicit_vjp_fn(
         return tuple(jax.tree.leaves(lam)), info
 
     def f_bwd(residuals, g):
-        """Backward: JIT-fused GMRES solve + JIT'd chain rule."""
+        """Backward: adjoint solve (fixed-point or GMRES) + JIT'd chain rule."""
         params_data_tuple, env_leaves = residuals
 
         # Step 1: dE/denv
         dE_denv = _jit_dE_denv(params_data_tuple, env_leaves)
 
-        # Step 1.5: Arnoldi precheck (optional, uses eager matvec)
+        # Step 1.5: Arnoldi precheck (optional, uses eager matvec).
+        # Load-bearing for the fixed-point path: ρ(J^T) < 1 is what makes
+        # the Neumann iteration converge.
         if arnoldi_precheck:
 
             def apply_Jt_only(v):
@@ -827,20 +842,53 @@ def _make_implicit_vjp_fn(
             if rho >= 1.0:
                 raise CTMRGGradientError(rho)
 
-        # Step 2: GMRES solve via JAX's built-in solver (eager, not JIT-fused).
-        # Uses jax.scipy.sparse.linalg.gmres which converges reliably at
-        # large chi where the custom gmres_lax can produce wrong gradients.
+        # Step 2: solve (I - J^T) λ = dE/denv.  Two paths share the same
+        # cached ``_jit_apply_Jt`` matvec; the choice is a config knob.
         def _eager_apply_I_minus_Jt(v):
             return _jit_apply_Jt(params_data_tuple, env_leaves, v)
 
-        lam, _info = gmres_pytree_jax(
-            _eager_apply_I_minus_Jt,
-            dE_denv,
-            dE_denv,
-            tol=gmres_tol,
-            maxiter=gmres_maxiter,
-            restart=gmres_restart,
-        )
+        if adjoint_method == "fixed_point":
+            # variPEPS-style Neumann iteration: λ_{k+1} = b + J^T λ_k.
+            # Equivalent to solving (I - J^T) λ = b iff ρ(J^T) < 1, which
+            # the Arnoldi precheck above guarantees when enabled.  Each
+            # iter is one cached matvec — no Krylov subspace, no per-iter
+            # compile cost after the first.
+            def _apply_Jt(v):
+                i_minus_jt_v = _jit_apply_Jt(params_data_tuple, env_leaves, v)
+                return tuple(vi - im for vi, im in zip(v, i_minus_jt_v))
+
+            lam = dE_denv  # initialize at b (one matvec saved)
+            prev_diff = float("inf")
+            for k in range(gmres_maxiter):
+                jt_lam = _apply_Jt(lam)
+                new_lam = tuple(b + j for b, j in zip(dE_denv, jt_lam))
+                diff = sum(float(jnp.linalg.norm(n - p)) for n, p in zip(new_lam, lam))
+                lam = new_lam
+                if diff < gmres_tol:
+                    break
+                if diff > prev_diff and k > 5:
+                    # Diverging — fall back to GMRES for safety.
+                    lam, _info = gmres_pytree_jax(
+                        _eager_apply_I_minus_Jt,
+                        dE_denv,
+                        dE_denv,
+                        tol=gmres_tol,
+                        maxiter=gmres_maxiter,
+                        restart=gmres_restart,
+                    )
+                    break
+                prev_diff = diff
+        else:
+            # adjoint_method == "gmres": eager Krylov via JAX's built-in
+            # solver.  Retained as an opt-out for divergent edge cases.
+            lam, _info = gmres_pytree_jax(
+                _eager_apply_I_minus_Jt,
+                dE_denv,
+                dE_denv,
+                tol=gmres_tol,
+                maxiter=gmres_maxiter,
+                restart=gmres_restart,
+            )
         lam_leaves = tuple(jax.tree.leaves(lam))
 
         # Steps 3-4: chain rule
