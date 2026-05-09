@@ -1,6 +1,6 @@
 # Tenax ↔ variPEPS Square Heisenberg Benchmark — Status
 
-**Last update:** 2026-05-09
+**Last update:** 2026-05-10 (F2 fixed-point adjoint landed)
 **Protocol:** TOL=1e-6, MAX_STEPS=100, complex128, single_site path with sublattice-rotated gate, D=2, χ=16. Tenax `gs_implicit_ad=True`, variPEPS native.
 
 ## What's in this directory
@@ -22,20 +22,39 @@ Reference for D=2 chi=16 from the literature: E/site ≈ −0.6614 (variPEPS pap
 
 ## Tenax status
 
-**Single point timed out at 30-min subprocess budget on CPU even after the
-JIT cache fix in commit 11aafd3.** The fix eliminated 45 of 46 redundant
-`_step` compiles (verified at chi=4 attribution), but at chi=16 the
-remaining per-step solve cost on CPU still exceeds the 30-min ceiling.
+**Single point still times out at the 30-min subprocess budget on CPU**
+even after F1 (JIT cache fix, 11aafd3) and F2 (fixed-point adjoint, this
+PR).  F2 reduces backward wall-clock by ~3× as designed — see
+microbenchmark below — but the forward CTM convergence at χ=16 (Python
+loop over a JIT'd `_step` plus repeated L-BFGS line-search forward calls)
+still exceeds the 30-min ceiling on this machine.
 
-Two paths for the next iteration are concrete:
+### F2 microbenchmark (D=2, χ=8, single_site)
 
-- **Run on GPU.** This machine has 2× CUDA devices. Re-run with
-  `--device cuda:0`. The CTM forward + adjoint solve are
-  large-matrix-multiply dominated, which GPUs handle well.
-- **Continue the perf work tracked in
-  `docs/plans/2026-05-09-ipeps-ad-jit-cost-diagnosis.md`** — F2
-  (eager-GMRES → fixed-point iteration, mirroring variPEPS) is the
-  next high-leverage fix.
+Single forward + backward via `ctm_energy_implicit`, CPU, complex128:
+
+| `adjoint_method` | cold (compile + 1 bwd) | warm 1 | warm 2 |
+|---|---|---|---|
+| `"fixed_point"` (new default) | 15.7 s | 1.3 s | 2.1 s |
+| `"gmres"` (legacy)            | 46.7 s | 4.7 s | 5.4 s |
+
+F2 delivers ~3× cold-compile and ~3× warm-call speedup on the backward.
+The plan's expected 3–5× drop is met.
+
+### What's left to fit χ=16 inside 30 min
+
+Two complementary paths, in order of leverage:
+
+- **F3 (variPEPS-style backward fusion)** — fold `_jit_dE_denv`,
+  `_jit_apply_Jt`, and `_jit_chain_rule` into a single `@jax.jit` with
+  `lax.while_loop` for the adjoint iteration.  variPEPS's
+  `_ctmrg_rev_workhorse` shows this lands the entire backward in one
+  graph (~1 trace + 1 compile vs Tenax's 3) and is the reason variPEPS
+  finishes the same problem in ~13 min.  See
+  `docs/plans/2026-05-09-ipeps-ad-jit-cost-diagnosis.md` §F3.
+- **GPU.** This machine has 2× CUDA devices.  Re-run with
+  `--device cuda:0`; the CTM forward + adjoint solve are
+  large-matmul-dominated and benefit directly.
 
 ## How to reproduce
 

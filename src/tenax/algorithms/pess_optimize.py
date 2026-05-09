@@ -129,6 +129,7 @@ def build_pess_loss(
             gmres_maxiter=config.gmres_maxiter,
             gmres_restart=config.gmres_restart,
             arnoldi_precheck=False,
+            adjoint_method=config.adjoint_method,
         )
 
     return loss_fn
@@ -546,6 +547,7 @@ def build_pess_loss_3site_multisite(
             gmres_maxiter=config.gmres_maxiter,
             gmres_restart=config.gmres_restart,
             arnoldi_precheck=False,
+            adjoint_method=config.adjoint_method,
         )
 
     return loss_fn
