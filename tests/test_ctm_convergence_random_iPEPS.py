@@ -5,12 +5,14 @@ fixed point (corner SVs ~ [0.68, 0.68, 0.20, 0.20]) where variPEPS
 converges to the physical [0.95, 0.22, 0.19, 0.13] in ~10 iters.
 
 The post-fix SVs are ``[0.937, 0.302, 0.143, 0.102]`` (non-degenerate,
-hierarchical) — close to the variPEPS reference. A small residual
-oscillation of ``sv_diff ~ 5e-3`` remains (a separate follow-up; see
-``project_ctm_two_init_bugs_found.md``), so this test uses
-``conv_tol=1e-3`` which is reached in ~13 iterations and is more than
-tight enough to *distinguish* the two fixed points (paired-degenerate
-fp plateaus at ``sv_diff ~ 5e-2`` and never converges below ``1e-3``).
+hierarchical) — close to the variPEPS reference. At seed 0 the loop
+converges to ``sv_diff ≈ 9e-4`` in ~13 iterations under
+``conv_tol=1e-3``. The 1e-3 tolerance (vs the design-doc 1e-5) is
+chosen because a residual oscillation noted in
+``project_ctm_two_init_bugs_found.md`` is a separate downstream issue
+not in scope for bug 3a; the smoking-gun goal here is to *distinguish*
+the physical fp from the pre-fix paired-degenerate plateau
+(``sv_diff ~ 5e-2``), which 1e-3 does cleanly.
 
 See ``project_ctm_two_init_bugs_found.md`` and
 ``docs/plans/2026-05-11-ctm-bug-3a-design.md``.
