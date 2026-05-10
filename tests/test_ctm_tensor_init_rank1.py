@@ -112,3 +112,20 @@ def test_initialize_symmetric_corner_rank1(D, chi):
         mask = np.ones_like(arr, dtype=bool)
         mask[0, 0] = False
         assert np.all(arr[mask] == 0)
+
+
+@pytest.mark.parametrize("D, chi", [(2, 4), (2, 16), (3, 9)])
+def test_initialize_symmetric_edge_rank1(D, chi):
+    """Symmetric standard edge: dense view has only D non-zero entries at (0, j*(D+1), 0)."""
+    A = _peps_symmetric(D=D)
+    env = initialize_ctm_tensor_env(A, chi)
+    for T in (env.T1, env.T2, env.T3, env.T4):
+        assert isinstance(T, SymmetricTensor)
+        arr = np.asarray(T.todense())
+        assert arr.shape == (chi, D * D, chi)
+        for j in range(D):
+            assert arr[0, j * (D + 1), 0] == pytest.approx(1.0)
+        mask = np.ones_like(arr, dtype=bool)
+        for j in range(D):
+            mask[0, j * (D + 1), 0] = False
+        assert np.all(arr[mask] == 0)
