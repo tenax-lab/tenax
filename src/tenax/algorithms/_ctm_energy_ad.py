@@ -475,6 +475,11 @@ def _sigma_gauged_ctm_converge(
 
 _VJP_CACHE: dict = {}
 
+# F3 diagnostic: written by f_bwd after each fused-JIT call. Tests can
+# read this to assert the fused fixed-point iteration converged without
+# falling back to eager GMRES. Not part of the public API.
+_F3_LAST_DIAGNOSTICS: dict = {}
+
 
 def _ctm_energy_implicit_dispatch(
     params_data_tuple,
@@ -714,7 +719,13 @@ def _make_implicit_vjp_fn(
 
     @jax.jit
     def _jit_apply_Jt(params_data_tuple, env_leaves, v):
-        """Step 2: one J^T application (GMRES matvec)."""
+        """Apply the GMRES matvec ``(I - J^T) v`` (NOT just ``J^T v``).
+
+        The wrapping makes this the matvec for the linear system
+        ``(I - J^T) λ = b`` that the eager-GMRES adjoint solves.
+        Callers wanting the raw ``J^T v`` should subtract from ``v``,
+        or use ``vjp_env_fn`` directly inside a JIT'd context.
+        """
         site_tensors = dict(zip(coords, params_data_tuple))
         env_treedef = _cached["env_treedef"]
 
@@ -781,6 +792,133 @@ def _make_implicit_vjp_fn(
         return (total,)
 
     @jax.jit
+    def _jit_fused_fixed_point_bwd(
+        params_data_tuple,
+        env_leaves,
+        g_scalar,
+    ):
+        """F3: fused dE/denv + adjoint fixed-point + chain rule.
+
+        One @jax.jit boundary in place of the F2 trio
+        (_jit_dE_denv, _jit_apply_Jt, _jit_chain_rule) + Python adjoint
+        loop. The adjoint runs as lax.while_loop so the loop body and
+        the J^T VJP closure trace once and reuse on every iter.
+
+        Returns
+        -------
+        grads : tuple of pytrees
+            Same shape as ``params_data_tuple``.
+        diverged : bool scalar
+            Set when the in-loop check (diff > prev_diff after step 5)
+            fires. Caller falls back to eager GMRES when True.
+        converged : bool scalar
+            Set when ``diff < gmres_tol``. Diagnostic only.
+        n_iter : int32 scalar
+            Diagnostic only.
+        """
+        gate_ = mutables["gate"]
+        energy_fn_ = mutables["energy_fn"]
+        site_tensors = dict(zip(coords, params_data_tuple))
+        env_treedef = _cached["env_treedef"]
+        envs = jax.tree.unflatten(env_treedef, env_leaves)
+
+        # --- 1. dE/denv via VJP through the energy function ---
+        def energy_from_env(env_leaves_flat):
+            e = jax.tree.unflatten(env_treedef, env_leaves_flat)
+            if energy_fn_ is not None:
+                return energy_fn_(site_tensors, e, gate_)
+            return _default_energy(site_tensors, e, gate_, coords, neighbors)
+
+        _, vjp_energy_env = jax.vjp(energy_from_env, env_leaves)
+        dE_denv = vjp_energy_env(jnp.ones(()))[0]
+
+        # --- 2. Build the J^T matvec closure ONCE inside this JIT ---
+        def gauge_fixed_sweep_from_env(env_leaves_flat):
+            e = jax.tree.unflatten(env_treedef, env_leaves_flat)
+            e_ref = jax.tree.map(jax.lax.stop_gradient, e)
+            e_out, _eps = jit_step_bwd(
+                site_tensors,
+                e,
+                chi=chi,
+                projector_method=projector_method,
+                renormalize=renormalize,
+                projector_backward=projector_backward,
+            )
+            e_fixed = _apply_gauge_fix(e_out, e_ref)
+            return tuple(jax.tree.leaves(e_fixed))
+
+        _, vjp_env_fn = jax.vjp(gauge_fixed_sweep_from_env, env_leaves)
+
+        def apply_Jt(v):
+            # vjp_env_fn(v)[0] is the raw VJP through gauge_fixed_sweep_from_env,
+            # which equals J^T v. Note this differs from the surviving F2
+            # helper _jit_apply_Jt — that one wraps the VJP as (I - J^T) v
+            # because GMRES needs the matvec for (I - J^T)·λ = b. The Neumann
+            # iteration here uses J^T directly: λ_{k+1} = b + J^T λ_k.
+            return vjp_env_fn(v)[0]
+
+        # --- 3. Adjoint fixed-point inside lax.while_loop ---
+        real_dtype = jnp.real(dE_denv[0]).dtype if dE_denv else jnp.float64
+        init_lam = dE_denv  # lambda_0 = b
+        init_diff = jnp.array(jnp.inf, dtype=real_dtype)
+        init_k = jnp.array(0, dtype=jnp.int32)
+        init_diverged = jnp.array(False)
+
+        tol_arr = jnp.array(gmres_tol, dtype=real_dtype)
+        maxiter_arr = jnp.array(gmres_maxiter, dtype=jnp.int32)
+
+        def cond_fn(carry):
+            _lam, prev_diff, k, diverged = carry
+            return (k < maxiter_arr) & (~diverged) & (prev_diff > tol_arr)
+
+        def body_fn(carry):
+            lam, prev_diff, k, _diverged = carry
+            jt_lam = apply_Jt(lam)
+            new_lam = tuple(b + j for b, j in zip(dE_denv, jt_lam))
+            diff = sum(jnp.linalg.norm(n - p) for n, p in zip(new_lam, lam)).astype(
+                real_dtype
+            )
+            # Divergence guard: same trigger as F2 Python loop.
+            new_diverged = (diff > prev_diff) & (k > jnp.array(5, jnp.int32))
+            return (new_lam, diff, k + jnp.array(1, jnp.int32), new_diverged)
+
+        lam_final, final_diff, n_iter, diverged = jax.lax.while_loop(
+            cond_fn,
+            body_fn,
+            (init_lam, init_diff, init_k, init_diverged),
+        )
+        converged = final_diff <= tol_arr
+
+        # --- 4. Chain rule: direct dE/dparams + indirect J_p^T @ lam ---
+        def energy_from_params(p_tuple):
+            st = dict(zip(coords, p_tuple))
+            if energy_fn_ is not None:
+                return energy_fn_(st, envs, gate_)
+            return _default_energy(st, envs, gate_, coords, neighbors)
+
+        _, vjp_energy_params = jax.vjp(energy_from_params, params_data_tuple)
+        direct = vjp_energy_params(jnp.ones(()))[0]
+
+        def gauge_fixed_sweep_from_params(p_tuple):
+            st = dict(zip(coords, p_tuple))
+            e_out, _eps = jit_step_bwd(
+                st,
+                envs,
+                chi=chi,
+                projector_method=projector_method,
+                renormalize=renormalize,
+                projector_backward=projector_backward,
+            )
+            e_fixed = _apply_gauge_fix(e_out, envs)
+            return tuple(jax.tree.leaves(e_fixed))
+
+        _, vjp_sweep_params = jax.vjp(gauge_fixed_sweep_from_params, params_data_tuple)
+        indirect = vjp_sweep_params(lam_final)[0]
+
+        total = jax.tree.map(lambda d, ind: g_scalar * (d + ind), direct, indirect)
+        return (total,), diverged, converged, n_iter
+
+    @jax.jit
     def _jit_gmres_solve(params_data_tuple, env_leaves, rhs):
         """GMRES solve compiled into a single XLA program.
 
@@ -825,12 +963,24 @@ def _make_implicit_vjp_fn(
         """Backward: adjoint solve (fixed-point or GMRES) + JIT'd chain rule."""
         params_data_tuple, env_leaves = residuals
 
-        # Step 1: dE/denv
-        dE_denv = _jit_dE_denv(params_data_tuple, env_leaves)
+        # dE/denv is the RHS for the (I - J^T)·λ = b solve. F3's fused JIT
+        # recomputes it internally, so the eager call is only needed by:
+        # (a) the Arnoldi precheck (uses it as the Krylov seed), or
+        # (b) the eager-GMRES path — either the "gmres" branch below or
+        # the divergence-fallback path inside the "fixed_point" branch.
+        # Compute lazily so the normal F3 success path doesn't pay an
+        # extra _jit_dE_denv trace/dispatch on every backward call.
+        _dE_denv_cached: tuple | None = None
 
-        # Step 1.5: Arnoldi precheck (optional, uses eager matvec).
-        # Load-bearing for the fixed-point path: ρ(J^T) < 1 is what makes
-        # the Neumann iteration converge.
+        def _eager_dE_denv() -> tuple:
+            nonlocal _dE_denv_cached
+            if _dE_denv_cached is None:
+                _dE_denv_cached = _jit_dE_denv(params_data_tuple, env_leaves)
+            return _dE_denv_cached
+
+        # Arnoldi precheck (optional, uses eager matvec). Load-bearing for
+        # the fixed-point path: ρ(J^T) < 1 is what makes the Neumann
+        # iteration converge.
         if arnoldi_precheck:
 
             def apply_Jt_only(v):
@@ -838,61 +988,57 @@ def _make_implicit_vjp_fn(
                 i_minus_jt_v = _jit_apply_Jt(params_data_tuple, env_leaves, v)
                 return tuple(vi - ri for vi, ri in zip(v, i_minus_jt_v))
 
-            rho = arnoldi_spectral_radius_pytree(apply_Jt_only, dE_denv, n_iter=20)
+            rho = arnoldi_spectral_radius_pytree(
+                apply_Jt_only, _eager_dE_denv(), n_iter=20
+            )
             if rho >= 1.0:
                 raise CTMRGGradientError(rho)
 
-        # Step 2: solve (I - J^T) λ = dE/denv.  Two paths share the same
-        # cached ``_jit_apply_Jt`` matvec; the choice is a config knob.
+        # Both eager-GMRES paths (fixed_point divergence fallback + the
+        # "gmres" branch) share the same cached _jit_apply_Jt matvec.
         def _eager_apply_I_minus_Jt(v):
             return _jit_apply_Jt(params_data_tuple, env_leaves, v)
 
         if adjoint_method == "fixed_point":
-            # variPEPS-style Neumann iteration: λ_{k+1} = b + J^T λ_k.
-            # Equivalent to solving (I - J^T) λ = b iff ρ(J^T) < 1, which
-            # the Arnoldi precheck above guarantees when enabled.  Each
-            # iter is one cached matvec — no Krylov subspace, no per-iter
-            # compile cost after the first.
-            def _apply_Jt(v):
-                i_minus_jt_v = _jit_apply_Jt(params_data_tuple, env_leaves, v)
-                return tuple(vi - im for vi, im in zip(v, i_minus_jt_v))
-
-            lam = dE_denv  # initialize at b (one matvec saved)
-            prev_diff = float("inf")
-            for k in range(gmres_maxiter):
-                jt_lam = _apply_Jt(lam)
-                new_lam = tuple(b + j for b, j in zip(dE_denv, jt_lam))
-                diff = sum(float(jnp.linalg.norm(n - p)) for n, p in zip(new_lam, lam))
-                lam = new_lam
-                if diff < gmres_tol:
-                    break
-                if diff > prev_diff and k > 5:
-                    # Diverging — fall back to GMRES for safety.
-                    lam, _info = gmres_pytree_jax(
-                        _eager_apply_I_minus_Jt,
-                        dE_denv,
-                        dE_denv,
-                        tol=gmres_tol,
-                        maxiter=gmres_maxiter,
-                        restart=gmres_restart,
-                    )
-                    break
-                prev_diff = diff
+            # F3 fused JIT: dE/denv + adjoint fixed-point + chain rule
+            # in one trace. Returns final grads directly; if the in-loop
+            # divergence guard fired we fall back to eager GMRES below
+            # (same path as adjoint_method=="gmres").
+            grads_tuple, diverged, _converged, _n_iter = _jit_fused_fixed_point_bwd(
+                params_data_tuple, env_leaves, g
+            )
+            _F3_LAST_DIAGNOSTICS["diverged"] = bool(jax.device_get(diverged))
+            _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
+            _F3_LAST_DIAGNOSTICS["n_iter"] = int(jax.device_get(_n_iter))
+            if _F3_LAST_DIAGNOSTICS["diverged"]:
+                # Diverged inside the JIT loop — fall back to eager GMRES
+                # using the surviving _jit_apply_Jt closure.
+                rhs = _eager_dE_denv()
+                lam, _info = gmres_pytree_jax(
+                    _eager_apply_I_minus_Jt,
+                    rhs,
+                    rhs,
+                    tol=gmres_tol,
+                    maxiter=gmres_maxiter,
+                    restart=gmres_restart,
+                )
+                lam_leaves = tuple(jax.tree.leaves(lam))
+                return _jit_chain_rule(params_data_tuple, env_leaves, lam_leaves, g)
+            return grads_tuple
         else:
             # adjoint_method == "gmres": eager Krylov via JAX's built-in
             # solver.  Retained as an opt-out for divergent edge cases.
+            rhs = _eager_dE_denv()
             lam, _info = gmres_pytree_jax(
                 _eager_apply_I_minus_Jt,
-                dE_denv,
-                dE_denv,
+                rhs,
+                rhs,
                 tol=gmres_tol,
                 maxiter=gmres_maxiter,
                 restart=gmres_restart,
             )
-        lam_leaves = tuple(jax.tree.leaves(lam))
-
-        # Steps 3-4: chain rule
-        return _jit_chain_rule(params_data_tuple, env_leaves, lam_leaves, g)
+            lam_leaves = tuple(jax.tree.leaves(lam))
+            return _jit_chain_rule(params_data_tuple, env_leaves, lam_leaves, g)
 
     f.defvjp(f_fwd, f_bwd)
     return f
