@@ -17,6 +17,9 @@ import jax.numpy as jnp
 os.environ["JAX_PLATFORMS"] = "cpu"
 jax.config.update("jax_enable_x64", True)
 
+# The tenax imports below MUST stay below the JAX env-var setup — moving
+# them to the top of the file would let JAX initialize before
+# ``JAX_PLATFORMS`` takes effect, silently flipping the bench to GPU.
 from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit  # noqa: E402
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS  # noqa: E402
 from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor  # noqa: E402
