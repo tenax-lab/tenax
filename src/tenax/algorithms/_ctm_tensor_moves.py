@@ -47,11 +47,25 @@ def _normalize_tensor(T: Tensor) -> Tensor:
 
 
 def _flow_flip_no_conj(t):
-    """Flip flow direction on every leg WITHOUT conjugating the data."""
+    """Flip flow direction on every leg WITHOUT conjugating the data.
+
+    For ``SymmetricTensor``, flipping every leg's flow preserves the
+    conservation law ``sum(flow_i * charge_i) = 0`` (the sign flips on
+    both sides), so block keys are unchanged.  The flat buffer and
+    block metadata can be reused via ``_raw``, mirroring how
+    :meth:`SymmetricTensor.bar` constructs its result (only the data
+    conjugation is dropped).
+    """
     new_indices = tuple(idx.flip_flow() for idx in t.indices)
     if isinstance(t, DenseTensor):
         return DenseTensor(t._data, new_indices)
-    return SymmetricTensor(t._data, new_indices)
+    return SymmetricTensor._raw(
+        indices=new_indices,
+        data=t._data,
+        block_keys=t._block_keys,
+        block_shapes=t._block_shapes,
+        block_offsets=t._block_offsets,
+    )
 
 
 def _phase_fix_normalize_tensor(T: Tensor) -> Tensor:
