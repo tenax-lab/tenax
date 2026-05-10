@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
@@ -31,7 +30,6 @@ from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
 
 
-@pytest.mark.algorithm
 def test_random_complex_ipeps_converges_to_physical_fp():
     """D=2 chi=4 random complex iPEPS converges to non-degenerate physical fp."""
     D, d, chi = 2, 2, 4
