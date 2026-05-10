@@ -963,12 +963,24 @@ def _make_implicit_vjp_fn(
         """Backward: adjoint solve (fixed-point or GMRES) + JIT'd chain rule."""
         params_data_tuple, env_leaves = residuals
 
-        # Step 1: dE/denv
-        dE_denv = _jit_dE_denv(params_data_tuple, env_leaves)
+        # dE/denv is the RHS for the (I - J^T)·λ = b solve. F3's fused JIT
+        # recomputes it internally, so the eager call is only needed by:
+        # (a) the Arnoldi precheck (uses it as the Krylov seed), or
+        # (b) the eager-GMRES path — either the "gmres" branch below or
+        # the divergence-fallback path inside the "fixed_point" branch.
+        # Compute lazily so the normal F3 success path doesn't pay an
+        # extra _jit_dE_denv trace/dispatch on every backward call.
+        _dE_denv_cached: tuple | None = None
 
-        # Step 1.5: Arnoldi precheck (optional, uses eager matvec).
-        # Load-bearing for the fixed-point path: ρ(J^T) < 1 is what makes
-        # the Neumann iteration converge.
+        def _eager_dE_denv() -> tuple:
+            nonlocal _dE_denv_cached
+            if _dE_denv_cached is None:
+                _dE_denv_cached = _jit_dE_denv(params_data_tuple, env_leaves)
+            return _dE_denv_cached
+
+        # Arnoldi precheck (optional, uses eager matvec). Load-bearing for
+        # the fixed-point path: ρ(J^T) < 1 is what makes the Neumann
+        # iteration converge.
         if arnoldi_precheck:
 
             def apply_Jt_only(v):
@@ -976,12 +988,14 @@ def _make_implicit_vjp_fn(
                 i_minus_jt_v = _jit_apply_Jt(params_data_tuple, env_leaves, v)
                 return tuple(vi - ri for vi, ri in zip(v, i_minus_jt_v))
 
-            rho = arnoldi_spectral_radius_pytree(apply_Jt_only, dE_denv, n_iter=20)
+            rho = arnoldi_spectral_radius_pytree(
+                apply_Jt_only, _eager_dE_denv(), n_iter=20
+            )
             if rho >= 1.0:
                 raise CTMRGGradientError(rho)
 
-        # Step 2: solve (I - J^T) λ = dE/denv.  Two paths share the same
-        # cached ``_jit_apply_Jt`` matvec; the choice is a config knob.
+        # Both eager-GMRES paths (fixed_point divergence fallback + the
+        # "gmres" branch) share the same cached _jit_apply_Jt matvec.
         def _eager_apply_I_minus_Jt(v):
             return _jit_apply_Jt(params_data_tuple, env_leaves, v)
 
@@ -999,10 +1013,11 @@ def _make_implicit_vjp_fn(
             if _F3_LAST_DIAGNOSTICS["diverged"]:
                 # Diverged inside the JIT loop — fall back to eager GMRES
                 # using the surviving _jit_apply_Jt closure.
+                rhs = _eager_dE_denv()
                 lam, _info = gmres_pytree_jax(
                     _eager_apply_I_minus_Jt,
-                    dE_denv,
-                    dE_denv,
+                    rhs,
+                    rhs,
                     tol=gmres_tol,
                     maxiter=gmres_maxiter,
                     restart=gmres_restart,
@@ -1013,10 +1028,11 @@ def _make_implicit_vjp_fn(
         else:
             # adjoint_method == "gmres": eager Krylov via JAX's built-in
             # solver.  Retained as an opt-out for divergent edge cases.
+            rhs = _eager_dE_denv()
             lam, _info = gmres_pytree_jax(
                 _eager_apply_I_minus_Jt,
-                dE_denv,
-                dE_denv,
+                rhs,
+                rhs,
                 tol=gmres_tol,
                 maxiter=gmres_maxiter,
                 restart=gmres_restart,
