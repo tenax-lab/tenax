@@ -343,9 +343,13 @@ def _init_symmetric_standard_corner(
 
     idx_a = TensorIndex.from_charges(sym, chi_charges.copy(), flow_a, label=label_a)
     idx_b = TensorIndex.from_charges(sym, chi_charges.copy(), flow_b, label=label_b)
+    # variPEPS chi_init=1: rank-1 corner — only the leading (0, 0) entry
+    # is non-zero. Subsequent absorptions grow chi via SVD truncation.
+    C_dense = jnp.zeros((chi, chi), dtype=A.dtype).at[0, 0].set(1.0)
     return SymmetricTensor.from_dense(
-        jnp.eye(chi, dtype=A.dtype),
+        C_dense,
         (idx_a, idx_b),
+        tol=float("inf"),
     )
 
 

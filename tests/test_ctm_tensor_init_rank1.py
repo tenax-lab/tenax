@@ -73,3 +73,42 @@ def test_initialize_dense_edge_rank1(D, chi):
         assert np.all(arr[mask] == 0), (
             "edge has non-zero entries outside the rank-1 slot"
         )
+
+
+def _peps_symmetric(D: int = 2, d: int = 2):
+    sym = U1Symmetry()
+    rng = np.random.RandomState(99)
+    data = jnp.array(rng.standard_normal((D, D, D, D, d)))
+    indices = (
+        TensorIndex.from_charges(
+            sym, np.zeros(D, dtype=np.int32), FlowDirection.OUT, label="u"
+        ),
+        TensorIndex.from_charges(
+            sym, np.zeros(D, dtype=np.int32), FlowDirection.IN, label="d"
+        ),
+        TensorIndex.from_charges(
+            sym, np.zeros(D, dtype=np.int32), FlowDirection.OUT, label="l"
+        ),
+        TensorIndex.from_charges(
+            sym, np.zeros(D, dtype=np.int32), FlowDirection.IN, label="r"
+        ),
+        TensorIndex.from_charges(
+            sym, np.zeros(d, dtype=np.int32), FlowDirection.IN, label="phys"
+        ),
+    )
+    return SymmetricTensor.from_dense(data, indices)
+
+
+@pytest.mark.parametrize("D, chi", [(2, 4), (2, 16), (3, 9)])
+def test_initialize_symmetric_corner_rank1(D, chi):
+    """Symmetric standard corner is rank-1: dense view has only (0, 0) = 1."""
+    A = _peps_symmetric(D=D)
+    env = initialize_ctm_tensor_env(A, chi)
+    for C in (env.C1, env.C2, env.C3, env.C4):
+        assert isinstance(C, SymmetricTensor)
+        arr = np.asarray(C.todense())
+        assert arr.shape == (chi, chi)
+        assert arr[0, 0] == pytest.approx(1.0)
+        mask = np.ones_like(arr, dtype=bool)
+        mask[0, 0] = False
+        assert np.all(arr[mask] == 0)
