@@ -225,13 +225,14 @@ def _make_dense_standard_edge(
     # for j ∈ 0..D-1 is non-zero. The previous all-ones init (T[i, :, i] = 1
     # across the full D² axis) implements the wrong boundary (1_ket ⊗ 1_bra
     # instead of δ_{ket=bra}) and traps CTM at a degenerate fixed point.
+    # variPEPS chi_init=1: write the δ_{ket=bra} pattern only on the
+    # leading (i=0) chi slot; subsequent absorptions grow chi via SVD
+    # truncation.  See docs/plans/2026-05-11-ctm-bug-3a-design.md.
     D = int(np.round(np.sqrt(D2)))
     assert D * D == D2, f"D² leg dim {D2} is not a perfect square"
     diag_idx = np.arange(D, dtype=np.int32) * (D + 1)
     T = jnp.zeros((chi, D2, chi), dtype=dtype)
-    T_chi = min(chi, D)
-    for i in range(T_chi):
-        T = T.at[i, diag_idx, i].set(jnp.ones(D, dtype=dtype))
+    T = T.at[0, diag_idx, 0].set(jnp.ones(D, dtype=dtype))
     return DenseTensor(
         T,
         (

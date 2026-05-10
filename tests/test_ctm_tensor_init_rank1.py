@@ -54,3 +54,22 @@ def test_initialize_dense_corner_rank1(D, chi):
         mask = np.ones_like(arr, dtype=bool)
         mask[0, 0] = False
         assert np.all(arr[mask] == 0), "corner has non-zero entries outside (0, 0)"
+
+
+@pytest.mark.parametrize("D, chi", [(2, 4), (2, 16), (3, 9)])
+def test_initialize_dense_edge_rank1(D, chi):
+    """Standard-CTM dense edge has only D non-zero entries at (0, j*(D+1), 0)."""
+    A = _peps_dense(D=D)
+    env = initialize_ctm_tensor_env(A, chi)
+    for T in (env.T1, env.T2, env.T3, env.T4):
+        arr = np.asarray(T._data)
+        assert arr.shape == (chi, D * D, chi)
+        # Expected: T[0, diag_idx, 0] = 1, everything else 0.
+        for j in range(D):
+            assert arr[0, j * (D + 1), 0] == pytest.approx(1.0)
+        mask = np.ones_like(arr, dtype=bool)
+        for j in range(D):
+            mask[0, j * (D + 1), 0] = False
+        assert np.all(arr[mask] == 0), (
+            "edge has non-zero entries outside the rank-1 slot"
+        )
