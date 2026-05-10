@@ -46,6 +46,14 @@ def _normalize_tensor(T: Tensor) -> Tensor:
     return T * (1.0 / (norm + EPS))
 
 
+def _flow_flip_no_conj(t):
+    """Flip flow direction on every leg WITHOUT conjugating the data."""
+    new_indices = tuple(idx.flip_flow() for idx in t.indices)
+    if isinstance(t, DenseTensor):
+        return DenseTensor(t._data, new_indices)
+    return SymmetricTensor(t._data, new_indices)
+
+
 def _phase_fix_normalize_tensor(T: Tensor) -> Tensor:
     """Frobenius-normalize + phase-fix a single C or T tensor.
 
@@ -379,19 +387,19 @@ def _ctm_tensor_absorb_left_2plaq(
     T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", OUT)
 
     # ---- C1: project with P_bot_above only ----
-    P_bot_above_bar = P_bot_above.bar()  # contracts on "fused"
+    P_bot_above_bar = _flow_flip_no_conj(P_bot_above)  # contracts on "fused"
     C1_new = contract(P_bot_above_bar, C1g)  # (chi_new, t1_r)
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t1_r": "c1_r"})
 
     # ---- C4: project with P_top_curr only ----
-    P_top_curr_bar = P_top_curr.bar()
+    P_top_curr_bar = _flow_flip_no_conj(P_top_curr)
     C4_new = contract(P_top_curr_bar, C4g)  # (chi_new, t3_l)
     C4_new = C4_new.relabels({"chi_new": "c4_r", "t3_l": "c4_u"})
 
     # ---- T4: sandwiched by P_top_above (top side, fl) and P_bot_curr (bottom side, fr) ----
     # P_top_above acts on the top face of s_src (fl = t4_d ⊕ u2).
     # P_bot_curr acts on the bottom face of s_src (fr = t4_u ⊕ d2).
-    P_top_above_bar = P_top_above.bar()
+    P_top_above_bar = _flow_flip_no_conj(P_top_above)
     P_left = P_top_above_bar.relabel("fused", "fl")
     step = contract(P_left, T4g)  # (chi_new, fr, r2)
 
@@ -468,18 +476,18 @@ def _ctm_tensor_absorb_right_2plaq(
     T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", OUT)
 
     # ---- C2: project with P_top_above only (≡ variPEPS .bottom of above) ----
-    P_top_above_bar = P_top_above.bar()
+    P_top_above_bar = _flow_flip_no_conj(P_top_above)
     C2_new = contract(P_top_above_bar, C2g)
     C2_new = C2_new.relabels({"chi_new": "c2_l", "t1_l": "c2_d"})
 
     # ---- C3: project with P_bot_curr only (≡ variPEPS .top of curr) ----
-    P_bot_curr_bar = P_bot_curr.bar()
+    P_bot_curr_bar = _flow_flip_no_conj(P_bot_curr)
     C3_new = contract(P_bot_curr_bar, C3g)
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t3_r": "c3_l"})
 
     # ---- T2: sandwiched by P_bot_above (fl side, ≡ variPEPS .top of above)
     #          and P_top_curr (fr side, ≡ variPEPS .bottom of curr) ----
-    P_bot_above_bar = P_bot_above.bar()
+    P_bot_above_bar = _flow_flip_no_conj(P_bot_above)
     P_left = P_bot_above_bar.relabel("fused", "fl")
     step = contract(P_left, T2g)
 
@@ -543,18 +551,18 @@ def _ctm_tensor_absorb_top_2plaq(
     T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", OUT)
 
     # ---- C1: project with P_top_left (≡ variPEPS .right of left-plaq) ----
-    P_top_left_bar = P_top_left.bar()
+    P_top_left_bar = _flow_flip_no_conj(P_top_left)
     C1_new = contract(P_top_left_bar, C1g)
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t4_u": "c1_r"})
 
     # ---- C2: project with P_bot_curr (≡ variPEPS .left of curr) ----
-    P_bot_curr_bar = P_bot_curr.bar()
+    P_bot_curr_bar = _flow_flip_no_conj(P_bot_curr)
     C2_new = contract(P_bot_curr_bar, C2g)
     C2_new = C2_new.relabels({"chi_new": "c2_l", "t2_d": "c2_d"})
 
     # ---- T1: sandwiched by P_bot_left (fl side, ≡ variPEPS .left of left-plaq)
     #          and P_top_curr (fr side, ≡ variPEPS .right of curr) ----
-    P_bot_left_bar = P_bot_left.bar()
+    P_bot_left_bar = _flow_flip_no_conj(P_bot_left)
     P_left = P_bot_left_bar.relabel("fused", "fl")
     step = contract(P_left, T1g)
 
@@ -598,17 +606,17 @@ def _ctm_tensor_absorb_bottom_2plaq(
     T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", OUT)
 
     # ---- C4: project with P_bot_left ----
-    P_bot_left_bar = P_bot_left.bar()
+    P_bot_left_bar = _flow_flip_no_conj(P_bot_left)
     C4_new = contract(P_bot_left_bar, C4g)
     C4_new = C4_new.relabels({"chi_new": "c4_r", "t4_d": "c4_u"})
 
     # ---- C3: project with P_top_curr ----
-    P_top_curr_bar = P_top_curr.bar()
+    P_top_curr_bar = _flow_flip_no_conj(P_top_curr)
     C3_new = contract(P_top_curr_bar, C3g)
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t2_u": "c3_l"})
 
     # ---- T3: sandwiched by P_top_left (fl) + P_bot_curr (fr) ----
-    P_top_left_bar = P_top_left.bar()
+    P_top_left_bar = _flow_flip_no_conj(P_top_left)
     P_left = P_top_left_bar.relabel("fused", "fl")
     step = contract(P_left, T3g)
 
