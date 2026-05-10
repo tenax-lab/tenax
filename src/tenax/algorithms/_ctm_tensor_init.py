@@ -187,10 +187,18 @@ def _make_dense_standard_edge(
     from tenax.core.symmetry import U1Symmetry
 
     sym = U1Symmetry()
-    T_chi = min(chi, D2)
+    # Identity-like edge: T1[i, ket, bra, j] = δ_{i=j} · δ_{ket=bra}.  After
+    # fusing (ket, bra) → fused_idx = ket*D + bra, only fused_idx = j*(D+1)
+    # for j ∈ 0..D-1 is non-zero. The previous all-ones init (T[i, :, i] = 1
+    # across the full D² axis) implements the wrong boundary (1_ket ⊗ 1_bra
+    # instead of δ_{ket=bra}) and traps CTM at a degenerate fixed point.
+    D = int(np.round(np.sqrt(D2)))
+    assert D * D == D2, f"D² leg dim {D2} is not a perfect square"
+    diag_idx = np.arange(D, dtype=np.int32) * (D + 1)
     T = jnp.zeros((chi, D2, chi), dtype=dtype)
-    for i in range(min(T_chi, chi)):
-        T = T.at[i, :, i].add(jnp.ones(D2, dtype=dtype))
+    T_chi = min(chi, D)
+    for i in range(T_chi):
+        T = T.at[i, diag_idx, i].set(jnp.ones(D, dtype=dtype))
     return DenseTensor(
         T,
         (
@@ -255,10 +263,16 @@ def _init_symmetric_standard_edge(
     idx_D2 = TensorIndex.from_charges(sym, D2_charges, flow_D2, label=label_D2)
     idx_chi2 = TensorIndex.from_charges(sym, chi2_charges, flow_chi2, label=label_chi2)
 
+    # Identity-like edge: T[i, ket, bra, j] = δ_{i=j} · δ_{ket=bra}.  After
+    # fusing (ket, bra) → fused = ket*D + bra, only fused = j*(D+1) for
+    # j ∈ 0..D-1 is non-zero. See `_make_dense_standard_edge` for the
+    # rationale (the previous all-ones init traps CTM at a degenerate
+    # fixed point on generic complex iPEPS).
+    diag_idx = np.arange(D, dtype=np.int32) * (D + 1)
     T = jnp.zeros((chi, D2, chi), dtype=A.dtype)
-    T_chi = min(chi, D2)
-    for i in range(min(T_chi, chi)):
-        T = T.at[i, :, i].add(jnp.ones(D2, dtype=A.dtype))
+    T_chi = min(chi, D)
+    for i in range(T_chi):
+        T = T.at[i, diag_idx, i].set(jnp.ones(D, dtype=A.dtype))
     return SymmetricTensor.from_dense(T, (idx_chi1, idx_D2, idx_chi2), tol=float("inf"))
 
 

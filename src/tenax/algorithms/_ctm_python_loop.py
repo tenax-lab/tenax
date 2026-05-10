@@ -95,7 +95,7 @@ def _make_jit_ctm_step(
         *,
         chi: int,
         projector_method: str = "svd",
-        renormalize: bool = True,
+        renormalize: bool = False,
         projector_backward: str = "auto",
     ) -> tuple[dict[Coord, CTMTensorEnv], jax.Array]:
         double_layers = {
@@ -124,7 +124,7 @@ def python_loop_ctm_converge(
     min_iter: int = 10,
     conv_tol: float = 1e-8,
     conv_method: str = "sv",
-    renormalize: bool = True,
+    renormalize: bool = False,
     projector_method: str = "svd",
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
