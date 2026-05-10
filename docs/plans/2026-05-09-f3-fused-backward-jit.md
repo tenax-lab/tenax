@@ -131,6 +131,16 @@ on the next iter. The caller (in `f_bwd` outside the JIT) then runs
 the eager GMRES fallback. Since the JIT returns a scalar bool, this
 is a clean Python branch.
 
+### `apply_Jt` semantic is raw `J^T`, not `(I - J^T)`
+
+The new helper's inner `apply_Jt(v)` must return the **raw** `J^T v`
+(i.e. `vjp_env_fn(v)[0]` directly), not the `(I - J^T) v` wrapping
+that the surviving F2 `_jit_apply_Jt` returns. The Neumann iteration
+`λ_{k+1} = b + J^T λ_k` uses `J^T` directly. A `(I - J^T)` apply_Jt
+here would silently diverge within ~7 steps and rely on the GMRES
+fallback for every backward call — defeating F3's purpose without
+failing any gradient-correctness test.
+
 ### Where the F2-only `_jit_apply_Jt` survives
 
 Keep the standalone `_jit_apply_Jt` definition for two callers:
@@ -477,10 +487,12 @@ def _jit_fused_fixed_point_bwd(
     _, vjp_env_fn = jax.vjp(gauge_fixed_sweep_from_env, env_leaves)
 
     def apply_Jt(v):
-        # _jit_apply_Jt's contract was v - J^T v == (I - J^T) v.
-        # Here we want J^T v alone, which is v minus that.
-        i_minus_jt_v = vjp_env_fn(v)[0]
-        return tuple(vi - im for vi, im in zip(v, i_minus_jt_v))
+        # vjp_env_fn(v)[0] is the raw VJP through gauge_fixed_sweep_from_env,
+        # which equals J^T v. Note this differs from the surviving F2
+        # helper _jit_apply_Jt — that one wraps the VJP as (I - J^T) v
+        # because GMRES needs the matvec for (I - J^T)·λ = b. The Neumann
+        # iteration here uses J^T directly: λ_{k+1} = b + J^T λ_k.
+        return vjp_env_fn(v)[0]
 
     # --- 3. Adjoint fixed-point inside lax.while_loop ---
     real_dtype = jnp.real(dE_denv[0]).dtype if dE_denv else jnp.float64

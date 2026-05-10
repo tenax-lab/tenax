@@ -475,6 +475,11 @@ def _sigma_gauged_ctm_converge(
 
 _VJP_CACHE: dict = {}
 
+# F3 diagnostic: written by f_bwd after each fused-JIT call. Tests can
+# read this to assert the fused fixed-point iteration converged without
+# falling back to eager GMRES. Not part of the public API.
+_F3_LAST_DIAGNOSTICS: dict = {}
+
 
 def _ctm_energy_implicit_dispatch(
     params_data_tuple,
@@ -714,7 +719,13 @@ def _make_implicit_vjp_fn(
 
     @jax.jit
     def _jit_apply_Jt(params_data_tuple, env_leaves, v):
-        """Step 2: one J^T application (GMRES matvec)."""
+        """Apply the GMRES matvec ``(I - J^T) v`` (NOT just ``J^T v``).
+
+        The wrapping makes this the matvec for the linear system
+        ``(I - J^T) λ = b`` that the eager-GMRES adjoint solves.
+        Callers wanting the raw ``J^T v`` should subtract from ``v``,
+        or use ``vjp_env_fn`` directly inside a JIT'd context.
+        """
         site_tensors = dict(zip(coords, params_data_tuple))
         env_treedef = _cached["env_treedef"]
 
@@ -839,10 +850,12 @@ def _make_implicit_vjp_fn(
         _, vjp_env_fn = jax.vjp(gauge_fixed_sweep_from_env, env_leaves)
 
         def apply_Jt(v):
-            # _jit_apply_Jt's contract was v - J^T v == (I - J^T) v.
-            # Here we want J^T v alone, which is v minus that.
-            i_minus_jt_v = vjp_env_fn(v)[0]
-            return tuple(vi - im for vi, im in zip(v, i_minus_jt_v))
+            # vjp_env_fn(v)[0] is the raw VJP through gauge_fixed_sweep_from_env,
+            # which equals J^T v. Note this differs from the surviving F2
+            # helper _jit_apply_Jt — that one wraps the VJP as (I - J^T) v
+            # because GMRES needs the matvec for (I - J^T)·λ = b. The Neumann
+            # iteration here uses J^T directly: λ_{k+1} = b + J^T λ_k.
+            return vjp_env_fn(v)[0]
 
         # --- 3. Adjoint fixed-point inside lax.while_loop ---
         real_dtype = jnp.real(dE_denv[0]).dtype if dE_denv else jnp.float64
@@ -980,7 +993,10 @@ def _make_implicit_vjp_fn(
             grads_tuple, diverged, _converged, _n_iter = _jit_fused_fixed_point_bwd(
                 params_data_tuple, env_leaves, g
             )
-            if bool(jax.device_get(diverged)):
+            _F3_LAST_DIAGNOSTICS["diverged"] = bool(jax.device_get(diverged))
+            _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
+            _F3_LAST_DIAGNOSTICS["n_iter"] = int(jax.device_get(_n_iter))
+            if _F3_LAST_DIAGNOSTICS["diverged"]:
                 # Diverged inside the JIT loop — fall back to eager GMRES
                 # using the surviving _jit_apply_Jt closure.
                 lam, _info = gmres_pytree_jax(

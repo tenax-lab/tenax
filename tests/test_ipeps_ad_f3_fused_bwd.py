@@ -76,3 +76,34 @@ def test_fused_bwd_matches_gmres_at_chi8():
         atol=1e-7,
         err_msg="F3 fused fixed_point and GMRES gradients diverged",
     )
+
+
+@pytest.mark.algorithm
+def test_fused_bwd_converges_without_fallback():
+    """The fused JIT must actually solve the system itself.
+
+    A passing parity test is necessary but not sufficient: if the fused
+    fixed-point iteration silently diverges every call, the in-loop
+    guard fires and the eager-GMRES fallback rescues the gradient,
+    making the parity test green while F3 does strictly more work than
+    F2. This test asserts the fused JIT converges on a well-posed
+    config without invoking the fallback.
+    """
+    from tenax.algorithms._ctm_energy_ad import _F3_LAST_DIAGNOSTICS
+
+    _F3_LAST_DIAGNOSTICS.clear()
+    _ = _grad_for_method("fixed_point")
+
+    assert "diverged" in _F3_LAST_DIAGNOSTICS, (
+        "f_bwd did not record diagnostics — fused-JIT path may not have run"
+    )
+    assert not _F3_LAST_DIAGNOSTICS["diverged"], (
+        f"Fused fixed-point diverged: {_F3_LAST_DIAGNOSTICS}. "
+        "F3 fell back to eager GMRES — the fused JIT is not doing the work."
+    )
+    assert _F3_LAST_DIAGNOSTICS["converged"], (
+        f"Fused fixed-point did not converge: {_F3_LAST_DIAGNOSTICS}"
+    )
+    assert _F3_LAST_DIAGNOSTICS["n_iter"] > 1, (
+        f"Suspicious n_iter (=initial value?): {_F3_LAST_DIAGNOSTICS}"
+    )
