@@ -1,6 +1,6 @@
 # Tenax ↔ variPEPS Square Heisenberg Benchmark — Status
 
-**Last update:** 2026-05-10 (F2 fixed-point adjoint landed)
+**Last update:** 2026-05-10 (F3 fused-backward landed; chi=16 budget still blocked, see profile attribution below)
 **Protocol:** TOL=1e-6, MAX_STEPS=100, complex128, single_site path with sublattice-rotated gate, D=2, χ=16. Tenax `gs_implicit_ad=True`, variPEPS native.
 
 ## What's in this directory
@@ -23,38 +23,68 @@ Reference for D=2 chi=16 from the literature: E/site ≈ −0.6614 (variPEPS pap
 ## Tenax status
 
 **Single point still times out at the 30-min subprocess budget on CPU**
-even after F1 (JIT cache fix, 11aafd3) and F2 (fixed-point adjoint, this
-PR).  F2 reduces backward wall-clock by ~3× as designed — see
-microbenchmark below — but the forward CTM convergence at χ=16 (Python
-loop over a JIT'd `_step` plus repeated L-BFGS line-search forward calls)
-still exceeds the 30-min ceiling on this machine.
+after F1 (JIT cache fix, 11aafd3), F2 (fixed-point adjoint, 032ec80),
+and F3 (fused @jax.jit backward, this PR). F3 lands the entire
+backward in one trace+compile as designed, and the parity test
+wall-clock confirms a real backward speedup (170 s F2 → 108 s F3 for
+the gmres-vs-fixed-point test pair). But the chi=16 single_site
+benchmark still exceeds the 30-min ceiling.
 
-### F2 microbenchmark (D=2, χ=8, single_site)
+### Why — profile attribution under cProfile
 
-Single forward + backward via `ctm_energy_implicit`, CPU, complex128:
+Ran `optimize_gs_ad` for ~10 min at single_site D=2 chi=16 with the
+F3 backward in place. cProfile cumulative-time breakdown:
 
-| `adjoint_method` | cold (compile + 1 bwd) | warm 1 | warm 2 |
-|---|---|---|---|
-| `"fixed_point"` (new default) | 15.7 s | 1.3 s | 2.1 s |
-| `"gmres"` (legacy)            | 46.7 s | 4.7 s | 5.4 s |
+| component | cumtime | share | calls | per-call |
+|---|---|---|---|---|
+| `hager_zhang_line_search` | 396 s | **62%** | — | — |
+| ↳ `_safe_dphi` | 386 s | — | 2 | 193 s |
+| ↳↳ `_dphi` → `_tree_dot` | 362 s | — | 5 | 72 s |
+| ↳↳↳ `numpy.ufuncs.conj` | 362 s tottime | **57%** | 2658 | 136 ms |
+| `value_and_grad_f` (the gradient itself) | 84.9 s | 13% | 3 | 28 s |
+| `backward_pass3` (the actual VJP F3 fused) | 44.8 s | 7% | — | — |
+| XLA `backend_compile_and_load` | 17.2 s tottime | 3% | 197 | — |
 
-F2 delivers ~3× cold-compile and ~3× warm-call speedup on the backward.
-The plan's expected 3–5× drop is met.
+**The chi=16 bottleneck is not the backward.** It is `_tree_dot`
+(`src/tenax/algorithms/ipeps_optimize.py:191`) inside the L-BFGS
+Hager-Zhang line search's `_dphi` evaluator. `_tree_dot` is a
+Python `sum(...)` over `jnp.conj(la) * lb`; cProfile attributes the
+time to `numpy.ufuncs.conj` (2,658 calls × 136 ms each), suggesting
+the gradient pytree leaves materialise to numpy in the line-search
+host code. F3 saves real backward time, but the backward is only
+~13–20% of total wall-clock at chi=16 — not the dominant cost.
+
+### F3 microbenchmark (D=2, χ=8, single_site)
+
+Single forward + backward via `ctm_energy_implicit`, CPU,
+complex128. **chi=8 is small enough that the F3 fused-graph
+overhead exceeds the saved Python-dispatch cost** — F3 underperforms
+F2 here. The chi=8 microbench is **not** the load-bearing test for
+F3; the chi=16 parity wall-clock and per-backward attribution are.
+
+| metric | F2 baseline | F3 (this PR) |
+|---|---|---|
+| cold (compile + 1 bwd) | 62 s | 104 s (worse — fused graph dominates at small chi) |
+| warm 1 | 35 s | 55 s (worse) |
+| warm 2 | 38 s | 46 s (worse) |
+| parity test (fixed_point + gmres, pytest) | 170 s | **108 s (35% faster)** |
+| chi=16 single_site benchmark | 30-min timeout | 30-min timeout (different bottleneck — see profile) |
 
 ### What's left to fit χ=16 inside 30 min
 
-Two complementary paths, in order of leverage:
+In order of leverage based on the profile:
 
-- **F3 (variPEPS-style backward fusion)** — fold `_jit_dE_denv`,
-  `_jit_apply_Jt`, and `_jit_chain_rule` into a single `@jax.jit` with
-  `lax.while_loop` for the adjoint iteration.  variPEPS's
-  `_ctmrg_rev_workhorse` shows this lands the entire backward in one
-  graph (~1 trace + 1 compile vs Tenax's 3) and is the reason variPEPS
-  finishes the same problem in ~13 min.  See
-  `docs/plans/2026-05-09-ipeps-ad-jit-cost-diagnosis.md` §F3.
-- **GPU.** This machine has 2× CUDA devices.  Re-run with
-  `--device cuda:0`; the CTM forward + adjoint solve are
-  large-matmul-dominated and benefit directly.
+- **Fix `_tree_dot` host-numpy materialisation** — keep gradient
+  leaves on-device through the line search. Eliminating the 362 s
+  spent in `numpy.ufuncs.conj` would alone unblock the budget.
+  Highest-leverage and most localized fix. New issue should be
+  opened.
+- **GPU.** This machine has 2× CUDA devices. The CTM forward and
+  the F3 fused backward are large-matmul-dominated and benefit
+  directly. Re-run with `--device cuda:0` once `_tree_dot` is
+  fixed.
+- **F4** (`jax.experimental.implicit_diff.custom_root`) remains
+  out of scope for this benchmark.
 
 ## How to reproduce
 
