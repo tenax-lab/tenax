@@ -1,9 +1,12 @@
 """Tests for the F3 fused-backward refactor of implicit-AD CTM.
 
-The fused JIT must produce element-wise identical gradients to the
-F2 Python-loop fixed-point path within float roundoff.  It must also
-match the GMRES path within the existing solver tolerance, since the
-underlying linear system is the same.
+The ``fixed_point`` and ``gmres`` adjoint methods solve the same
+``(I - J^T) λ = b`` linear system to the same target tolerance, so
+their gradients must agree within the solver tolerance shared by
+both paths.  This test passes today against the F2 Python-loop
+fixed_point implementation; once Task 4 wires the F3 fused JIT into
+the same code path, the same assertion guards against any gradient
+drift introduced by the JIT fusion.
 """
 
 from __future__ import annotations
@@ -48,6 +51,9 @@ def _grad_for_method(method: str):
             forward_gauge="phase",
             gmres_tol=1e-6,
             gmres_maxiter=200,
+            # Parity test: skip the divergence guard so both methods
+            # actually run the solve. The chi=8 phase-gauge config is
+            # well-posed (variPEPS converges here in <30 Neumann iters).
             arnoldi_precheck=False,
             adjoint_method=method,
         )
