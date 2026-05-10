@@ -13,6 +13,7 @@ __all__ = [
     "_init_symmetric_standard_corner",
     "_init_symmetric_standard_edge",
     "_make_dense_standard_edge",
+    "_make_rank1_dense_corner",
     "initialize_ctm_tensor_env",
 ]
 
@@ -23,7 +24,6 @@ import numpy as np
 
 from tenax.algorithms._ctm_utils import (
     _CORNER_SPECS,
-    _make_dense_corner,
 )
 from tenax.algorithms._tensor_utils import fuse_indices
 from tenax.contraction.contractor import contract
@@ -172,6 +172,39 @@ def _std_edge_specs_compat() -> dict:
     }
 
 
+def _make_rank1_dense_corner(
+    chi: int,
+    label_a: Label,
+    label_b: Label,
+    flow_a: FlowDirection,
+    flow_b: FlowDirection,
+    dtype,
+) -> DenseTensor:
+    """Rank-1 identity-like corner for the standard CTM chi_init=1 init.
+
+    Writes only entry ``(0, 0) = 1`` inside the chi-target-shaped buffer.
+    The rest of the (chi, chi) corner stays zero until subsequent CTM
+    absorptions grow chi via SVD truncation.  Mirrors variPEPS's
+    ``chi_init=1`` semantics (rank-1 corner) without breaking the
+    fixed-shape JIT contract.
+    """
+    from tenax.core.symmetry import U1Symmetry
+
+    sym = U1Symmetry()
+    C = jnp.zeros((chi, chi), dtype=dtype).at[0, 0].set(1.0)
+    return DenseTensor(
+        C,
+        (
+            TensorIndex.from_charges(
+                sym, np.zeros(chi, dtype=np.int32), flow_a, label=label_a
+            ),
+            TensorIndex.from_charges(
+                sym, np.zeros(chi, dtype=np.int32), flow_b, label=label_b
+            ),
+        ),
+    )
+
+
 def _make_dense_standard_edge(
     chi: int,
     D2: int,
@@ -192,13 +225,14 @@ def _make_dense_standard_edge(
     # for j ∈ 0..D-1 is non-zero. The previous all-ones init (T[i, :, i] = 1
     # across the full D² axis) implements the wrong boundary (1_ket ⊗ 1_bra
     # instead of δ_{ket=bra}) and traps CTM at a degenerate fixed point.
+    # variPEPS chi_init=1: write the δ_{ket=bra} pattern only on the
+    # leading (i=0) chi slot; subsequent absorptions grow chi via SVD
+    # truncation.  See docs/plans/2026-05-11-ctm-bug-3a-design.md.
     D = int(np.round(np.sqrt(D2)))
     assert D * D == D2, f"D² leg dim {D2} is not a perfect square"
     diag_idx = np.arange(D, dtype=np.int32) * (D + 1)
     T = jnp.zeros((chi, D2, chi), dtype=dtype)
-    T_chi = min(chi, D)
-    for i in range(T_chi):
-        T = T.at[i, diag_idx, i].set(jnp.ones(D, dtype=dtype))
+    T = T.at[0, diag_idx, 0].set(jnp.ones(D, dtype=dtype))
     return DenseTensor(
         T,
         (
@@ -263,16 +297,14 @@ def _init_symmetric_standard_edge(
     idx_D2 = TensorIndex.from_charges(sym, D2_charges, flow_D2, label=label_D2)
     idx_chi2 = TensorIndex.from_charges(sym, chi2_charges, flow_chi2, label=label_chi2)
 
-    # Identity-like edge: T[i, ket, bra, j] = δ_{i=j} · δ_{ket=bra}.  After
-    # fusing (ket, bra) → fused = ket*D + bra, only fused = j*(D+1) for
-    # j ∈ 0..D-1 is non-zero. See `_make_dense_standard_edge` for the
-    # rationale (the previous all-ones init traps CTM at a degenerate
-    # fixed point on generic complex iPEPS).
+    # variPEPS chi_init=1: write the δ_{ket=bra} pattern only on the
+    # leading (i=0) chi slot; subsequent absorptions grow chi via SVD
+    # truncation.  See `_make_dense_standard_edge` for the rationale (the
+    # previous diag-pattern across i ∈ 0..min(chi,D)-1 traps CTM at a
+    # degenerate fixed point on generic complex iPEPS).
     diag_idx = np.arange(D, dtype=np.int32) * (D + 1)
     T = jnp.zeros((chi, D2, chi), dtype=A.dtype)
-    T_chi = min(chi, D)
-    for i in range(T_chi):
-        T = T.at[i, diag_idx, i].set(jnp.ones(D, dtype=A.dtype))
+    T = T.at[0, diag_idx, 0].set(jnp.ones(D, dtype=A.dtype))
     return SymmetricTensor.from_dense(T, (idx_chi1, idx_D2, idx_chi2), tol=float("inf"))
 
 
@@ -309,9 +341,13 @@ def _init_symmetric_standard_corner(
 
     idx_a = TensorIndex.from_charges(sym, chi_charges.copy(), flow_a, label=label_a)
     idx_b = TensorIndex.from_charges(sym, chi_charges.copy(), flow_b, label=label_b)
+    # variPEPS chi_init=1: rank-1 corner — only the leading (0, 0) entry
+    # is non-zero. Subsequent absorptions grow chi via SVD truncation.
+    C_dense = jnp.zeros((chi, chi), dtype=A.dtype).at[0, 0].set(1.0)
     return SymmetricTensor.from_dense(
-        jnp.eye(chi, dtype=A.dtype),
+        C_dense,
         (idx_a, idx_b),
+        tol=float("inf"),
     )
 
 
@@ -356,7 +392,7 @@ def initialize_ctm_tensor_env(
     else:
         corners = {}
         for name, (la, lb, fa, fb, _ref) in _CORNER_SPECS.items():
-            corners[name] = _make_dense_corner(chi, D2, la, lb, fa, fb, dtype)
+            corners[name] = _make_rank1_dense_corner(chi, la, lb, fa, fb, dtype)
 
         edges = {}
         for name, (
