@@ -102,3 +102,109 @@ def test_compute_projector_tensor_returns_eps_t_for_eigh():
     # eps_T must be positive: chi_target=2 discards 2 of 4 eigenvalues from rho.
     assert float(eps_T) > 0.0, f"Expected eps_T > 0 but got {float(eps_T)}"
     assert float(eps_T) <= 1.0, f"eps_T must be in [0, 1], got {float(eps_T)}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #410: ε_T from the SymmetricTensor projector paths.
+#
+# The single-site dense auto-χ_E bump (PR #412) only surfaces ε_T from the
+# dense projector paths.  The SymmetricTensor SVD and eigh paths still
+# return ``jnp.asarray(0.0)`` as a placeholder, which means auto-χ_E bump
+# cannot fire when the optimizer is run with SymmetricTensor inputs.
+#
+# Issue #410 asks for ε_T extraction from the SymmetricTensor SVD path;
+# the eigh case is included here because ``optimize_gs_ad`` measures ε_T
+# via a one-off ``_ctm_tensor_sweep(..., "eigh")`` call (see
+# ``ipeps_optimize.py:881``) — so the eigh symmetric path is *the* path
+# that decides the bump.  The QR symmetric path is not used for the
+# auto-bump decision and is intentionally left as a 0.0 placeholder.
+# ---------------------------------------------------------------------------
+
+
+def _make_symmetric_corner(
+    chi: int,
+    fused_charges: np.ndarray,
+    col_charges: np.ndarray,
+    seed: int,
+):
+    """Build a random-block SymmetricTensor corner with labels ('fused', 'col').
+
+    Random entries are placed in every symmetry-allowed block, so the
+    underlying matrix is block-sparse but generic within each block.
+    """
+    from tenax.core.tensor import SymmetricTensor
+
+    sym = U1Symmetry()
+    fused_idx = TensorIndex.from_charges(
+        sym, fused_charges.astype(np.int32), FlowDirection.IN, label="fused"
+    )
+    col_idx = TensorIndex.from_charges(
+        sym, col_charges.astype(np.int32), FlowDirection.OUT, label="col"
+    )
+    return SymmetricTensor.random_normal((fused_idx, col_idx), jax.random.PRNGKey(seed))
+
+
+def test_compute_projector_tensor_returns_eps_t_symmetric_svd():
+    """SymmetricTensor SVD path must return ε_T from the merged per-sector spectrum.
+
+    Two charge sectors (q=0, q=1) of dim 4 each → 8 singular values total.
+    Truncating to chi_target=4 must discard at least 4 SVs, giving ε_T > 0.
+    """
+    chi_in = 8
+    chi_target = 4
+    # Two-sector charges: half q=0, half q=1.
+    fused_charges = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    col_charges = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    C1g = _make_symmetric_corner(chi_in, fused_charges, col_charges, seed=0)
+    C4g = _make_symmetric_corner(chi_in, fused_charges, col_charges, seed=1)
+
+    P_1, P_2, eps_T = _compute_projector_tensor(
+        C1g, C4g, chi_target, projector_method="svd"
+    )
+    assert eps_T.shape == ()
+    assert 0.0 < float(eps_T) <= 1.0, (
+        f"Expected 0 < ε_T <= 1 from symmetric SVD truncation, got {float(eps_T)}"
+    )
+
+
+def test_compute_projector_tensor_returns_eps_t_symmetric_eigh():
+    """SymmetricTensor eigh path must return ε_T from the merged per-sector spectrum.
+
+    This is the path optimize_gs_ad uses for the auto-bump decision
+    (ipeps_optimize.py:881 calls _ctm_tensor_sweep with projector_method='eigh'
+    purely to measure ε_T).  Without ε_T here, auto-bump can never fire on
+    symmetric inputs.
+    """
+    chi_in = 8
+    chi_target = 4
+    fused_charges = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    col_charges = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    C1g = _make_symmetric_corner(chi_in, fused_charges, col_charges, seed=0)
+    C4g = _make_symmetric_corner(chi_in, fused_charges, col_charges, seed=1)
+
+    _, _, eps_T = _compute_projector_tensor(
+        C1g, C4g, chi_target, projector_method="eigh"
+    )
+    assert eps_T.shape == ()
+    assert 0.0 < float(eps_T) <= 1.0, (
+        f"Expected 0 < ε_T <= 1 from symmetric eigh truncation, got {float(eps_T)}"
+    )
+
+
+def test_compute_projector_tensor_eps_t_symmetric_zero_when_no_truncation():
+    """No truncation (chi >= n_keep) → ε_T = 0 on the symmetric paths too."""
+    chi_in = 4
+    chi_target = 8  # > spectrum length
+    fused_charges = np.array([0, 0, 1, 1])
+    col_charges = np.array([0, 0, 1, 1])
+    C1g = _make_symmetric_corner(chi_in, fused_charges, col_charges, seed=0)
+    C4g = _make_symmetric_corner(chi_in, fused_charges, col_charges, seed=1)
+
+    _, _, eps_T_svd = _compute_projector_tensor(
+        C1g, C4g, chi_target, projector_method="svd"
+    )
+    _, _, eps_T_eigh = _compute_projector_tensor(
+        C1g, C4g, chi_target, projector_method="eigh"
+    )
+    assert float(eps_T_svd) == pytest.approx(0.0, abs=1e-12)
+    assert float(eps_T_eigh) == pytest.approx(0.0, abs=1e-12)

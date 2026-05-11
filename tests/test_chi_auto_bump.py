@@ -200,6 +200,65 @@ def test_maybe_bump_chi_above_threshold_bumps_and_pads():
     assert new_cache["envs"][(0, 0)].C1._data.shape == (6, 6)
 
 
+def test_maybe_bump_chi_above_threshold_bumps_and_pads_symmetric():
+    """variPEPS §2.8.2 auto-bump on SymmetricTensor envs (Issue #410).
+
+    Previously, ``_maybe_bump_chi`` -> ``pad_dense_env_chi`` raised
+    ``NotImplementedError`` for block-sparse envs.  After #410, the
+    symmetric path tiles existing χ-leg charges via ``_derive_charges``
+    and zero-pads each block along its χ axes.
+    """
+    import jax
+    import numpy as np
+
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+    from tenax.algorithms.ipeps_optimize import _maybe_bump_chi
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import U1Symmetry
+    from tenax.core.tensor import SymmetricTensor
+
+    sym = U1Symmetry()
+    bond_charges = np.array([0, 1], dtype=np.int32)
+    phys_charges = np.array([0, 1], dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(
+            sym, bond_charges.copy(), FlowDirection.OUT, label="u"
+        ),
+        TensorIndex.from_charges(sym, bond_charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(
+            sym, bond_charges.copy(), FlowDirection.OUT, label="l"
+        ),
+        TensorIndex.from_charges(sym, bond_charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
+    )
+    A_sym = SymmetricTensor.random_normal(indices, jax.random.PRNGKey(0))
+    env_old = initialize_ctm_tensor_env(A_sym, chi=4)
+
+    cache = {"envs": {(0, 0): env_old}}
+    cfg = CTMConfig(
+        chi=4, chi_auto_bump=True, chi_auto_bump_eps=1e-5, chi_auto_bump_step=2
+    )
+    new_cfg, new_cache = _maybe_bump_chi(cfg, cache, last_eps_t=1e-3)
+    assert new_cfg.chi == 6
+    assert new_cache is cache, (
+        "_maybe_bump_chi must mutate env_cache in-place even on the symmetric path"
+    )
+    env_new = new_cache["envs"][(0, 0)]
+    # χ axes grew to 6; D² leg untouched.
+    assert env_new.C1.indices[0].dim == 6
+    assert env_new.C1.indices[1].dim == 6
+    assert env_new.T1.indices[0].dim == 6
+    assert env_new.T1.indices[2].dim == 6
+    assert env_new.T1.indices[1].dim == env_old.T1.indices[1].dim
+    # Leading χ_old × χ_old block matches the pre-pad corner.
+    chi_old = 4
+    C1_old = env_old.C1.todense()
+    C1_new = env_new.C1.todense()
+    assert np.allclose(np.asarray(C1_new)[:chi_old, :chi_old], np.asarray(C1_old))
+
+
 def test_maybe_bump_chi_respects_chi_max_ceiling():
     """chi_max ceiling caps the bump."""
     from tenax.algorithms.ipeps_optimize import _maybe_bump_chi

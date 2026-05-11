@@ -270,7 +270,7 @@ def _eigh_projector_symmetric(
     chi: int,
     fused_idx: TensorIndex | None = None,
     base_charges: np.ndarray | None = None,
-) -> SymmetricTensor:
+) -> tuple[SymmetricTensor, jax.Array]:
     r"""Block-sparse projector via per-sector density matrix eigh.
 
     For each charge sector *q* of the ``fused`` leg, accumulates
@@ -299,8 +299,14 @@ def _eigh_projector_symmetric(
             of purely global eigenvalue truncation.
 
     Returns:
-        Projector ``P`` with labels ``(fused, chi_new)``, flows ``(IN, OUT)``.
+        ``(P, eps_T)`` where ``P`` has labels ``(fused, chi_new)``, flows
+        ``(IN, OUT)`` and ``eps_T`` is the variPEPS §2.8.2 truncation error
+        ``‖λ[n_keep:]‖ / ‖λ‖`` over the merged per-sector eigenvalue spectrum
+        (matches the dense eigh-path convention in
+        ``_compute_projector_tensor``).
     """
+    from tenax.algorithms._ctm_truncation_error import compute_truncation_error
+
     fused_pos = C1g.labels().index("fused")
     col_pos = 1 - fused_pos  # the other leg
     if fused_idx is None:
@@ -371,6 +377,15 @@ def _eigh_projector_symmetric(
     # among degenerate eigenvalues).
     all_eig_pairs.sort(key=lambda x: (-x[0], -x[2]))
     n_keep = min(chi, len(all_eig_pairs))
+
+    # variPEPS §2.8.2 ε_T from the merged per-sector eigenvalue spectrum.
+    # Matches the dense eigh-path convention in ``_compute_projector_tensor``:
+    # eps_T = ‖λ[n_keep:]‖ / ‖λ‖ over |eigvals| in descending order.
+    if all_eig_pairs:
+        eig_array = jnp.asarray([abs(p[0]) for p in all_eig_pairs], dtype=jnp.float64)
+        eps_T = compute_truncation_error(eig_array, n_keep)
+    else:
+        eps_T = jnp.asarray(0.0)
 
     sector_keep: dict[int, list[int]] = {}
 
@@ -448,9 +463,8 @@ def _eigh_projector_symmetric(
         V_q = jax.lax.stop_gradient(V_q)
         proj_blocks[(fq, fq)] = V_q
 
-    return _build_symmetric_projector(
-        proj_blocks, chi_new_charges, fused_idx, C1g.dtype
-    )
+    P = _build_symmetric_projector(proj_blocks, chi_new_charges, fused_idx, C1g.dtype)
+    return P, eps_T
 
 
 def _qr_projector_symmetric(
@@ -569,7 +583,7 @@ def _svd_projector_symmetric(
     chi: int,
     fused_idx: TensorIndex | None = None,
     base_charges: np.ndarray | None = None,
-) -> tuple[SymmetricTensor, SymmetricTensor]:
+) -> tuple[SymmetricTensor, SymmetricTensor, jax.Array]:
     r"""Block-sparse two-projector Fishman SVD for SymmetricTensor.
 
     For each charge sector *q* of the ``fused`` leg, forms the
@@ -593,9 +607,13 @@ def _svd_projector_symmetric(
         base_charges: Bond charges for per-sector allocation.
 
     Returns:
-        ``(P1, P2)`` each with labels ``(fused, chi_new)``.
+        ``(P1, P2, eps_T)`` where ``P1``, ``P2`` each have labels
+        ``(fused, chi_new)`` and ``eps_T`` is the variPEPS §2.8.2
+        truncation error ``‖S[n_keep:]‖ / ‖S‖`` over the merged
+        per-sector singular-value spectrum.
     """
     from tenax.algorithms._ad_primitives import _fix_svd_signs
+    from tenax.algorithms._ctm_truncation_error import compute_truncation_error
 
     fused_pos = C1g.labels().index("fused")
     col_pos = 1 - fused_pos
@@ -678,6 +696,14 @@ def _svd_projector_symmetric(
     all_sv_pairs.sort(key=lambda x: (-x[0], -x[2]))
     n_keep = min(chi, len(all_sv_pairs))
 
+    # variPEPS §2.8.2 ε_T from the merged per-sector singular-value spectrum.
+    # ε_T = ‖S[n_keep:]‖ / ‖S‖ over the descending global spectrum.
+    if all_sv_pairs:
+        sv_array = jnp.asarray([p[0] for p in all_sv_pairs], dtype=jnp.float64)
+        eps_T = compute_truncation_error(sv_array, n_keep)
+    else:
+        eps_T = jnp.asarray(0.0)
+
     sector_keep: dict[int, list[int]] = {}
 
     if base_charges is not None:
@@ -754,7 +780,7 @@ def _svd_projector_symmetric(
 
     P1 = _build_symmetric_projector(p1_blocks, chi_new_charges, fused_idx, C1g.dtype)
     P2 = _build_symmetric_projector(p2_blocks, chi_new_charges, fused_idx, C1g.dtype)
-    return P1, P2
+    return P1, P2, eps_T
 
 
 # ------------------------------------------------------------------ #
@@ -859,24 +885,24 @@ def _compute_projector_tensor(
                 c1_charges = C1g.indices[fused_pos_chk].charges
                 c4_charges = C4g.indices[fused_pos_chk].charges
                 if np.array_equal(c1_charges, c4_charges):
-                    P_1, P_2 = _svd_projector_symmetric(
+                    P_1, P_2, eps_T = _svd_projector_symmetric(
                         C1g, C4g, chi, base_charges=base_charges
                     )
-                    return P_1, P_2, jnp.asarray(0.0)
+                    return P_1, P_2, eps_T
                 # Mismatched fused charges: build unified fused index
                 unified_fused_idx = _build_unified_fused_idx(
                     C1g.indices[fused_pos_chk], C4g.indices[fused_pos_chk]
                 )
                 C1g_re = _reembed_fused(C1g, unified_fused_idx)
                 C4g_re = _reembed_fused(C4g, unified_fused_idx)
-                P_1, P_2 = _svd_projector_symmetric(
+                P_1, P_2, eps_T = _svd_projector_symmetric(
                     C1g_re,
                     C4g_re,
                     chi,
                     fused_idx=unified_fused_idx,
                     base_charges=base_charges,
                 )
-                return P_1, P_2, jnp.asarray(0.0)
+                return P_1, P_2, eps_T
 
         # Dense fallback for SVD projector.  Reached in two cases:
         #   1. DenseTensor inputs (no block-sparse structure).
@@ -1042,8 +1068,10 @@ def _compute_projector_tensor(
             c1_charges = C1g.indices[fused_pos].charges
             c4_charges = C4g.indices[fused_pos].charges
             if np.array_equal(c1_charges, c4_charges):
-                P = _eigh_projector_symmetric(C1g, C4g, chi, base_charges=base_charges)
-                return P, P, jnp.asarray(0.0)
+                P, eps_T = _eigh_projector_symmetric(
+                    C1g, C4g, chi, base_charges=base_charges
+                )
+                return P, P, eps_T
             # Mismatched fused charges (e.g. split CTM with different
             # D-leg flows): build a unified fused index covering both
             # corners' charge sectors, re-embed, and use block-sparse eigh.
@@ -1052,14 +1080,14 @@ def _compute_projector_tensor(
             )
             C1g_re = _reembed_fused(C1g, unified_fused_idx)
             C4g_re = _reembed_fused(C4g, unified_fused_idx)
-            P = _eigh_projector_symmetric(
+            P, eps_T = _eigh_projector_symmetric(
                 C1g_re,
                 C4g_re,
                 chi,
                 fused_idx=unified_fused_idx,
                 base_charges=base_charges,
             )
-            return P, P, jnp.asarray(0.0)
+            return P, P, eps_T
 
     # Dense eigh fallback — only reached when SymmetricTensor blocks contain
     # JAX tracers (AD backward) or for DenseTensor inputs.  Block-sparse
