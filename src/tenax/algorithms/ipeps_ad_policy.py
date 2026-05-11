@@ -116,6 +116,7 @@ def ctm_converge_kwargs(
         "projector_backward": ctm_cfg.projector_backward,
         "chi_ramp": ctm_cfg.chi_ramp,
         "env_init": env_init,
+        "plateau_patience": ctm_cfg.plateau_patience,
     }
 
 
@@ -203,6 +204,7 @@ def make_ctm_energy_fn(
             arnoldi_precheck=False,
             adjoint_method=ctm_cfg.adjoint_method,
             energy_fn=energy_fn,
+            plateau_patience=ctm_cfg.plateau_patience,
         )
 
     return _ctm_energy_fn

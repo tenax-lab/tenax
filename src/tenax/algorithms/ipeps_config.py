@@ -151,6 +151,17 @@ class CTMConfig:
     chi_auto_bump_eps: float = 1e-5
     chi_auto_bump_step: int = 2
     chi_max: int | None = None
+    # Early-bail when the running minimum of the CTM convergence metric
+    # has not improved for ``plateau_patience`` consecutive iterations.
+    # Default ``20`` is a stop-loss against the known SU/random-init CTM
+    # plateau (issue #425/#426, memory
+    # ``project_tenax_ctm_doesnt_converge_random_init``).  A healthy
+    # converging run never accumulates 20 non-improving iters because
+    # each better ``best_diff`` resets the counter, so the default does
+    # not interfere with normal convergence.  Set to ``None`` to restore
+    # the pre-2026-05-11 "run to ``max_iter``" behavior.  Forwarded to
+    # ``python_loop_ctm_converge`` via ``ctm_converge_kwargs``.
+    plateau_patience: int | None = 20
 
     def __post_init__(self):
         valid_modes = {None, "c4v_reference"}

@@ -308,3 +308,27 @@ class TestPlateauPatience:
         # ``sv_diff`` carries the *best* metric, so it must be finite and
         # not larger than the very first measurement we could have made.
         assert info.sv_diff < float("inf")
+
+    def test_ctm_config_field_forwards_to_python_loop(self):
+        """``CTMConfig.plateau_patience`` reaches ``python_loop_ctm_converge``.
+
+        Regression coverage for PR #439 review: high-level callers that
+        configure CTM only through ``CTMConfig`` (e.g. ``optimize_gs_ad``,
+        PESS) need an end-to-end opt-out path — otherwise the new default
+        cannot be disabled without bypassing the policy layer.
+        """
+        from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
+        from tenax.algorithms.ipeps_config import CTMConfig
+
+        cfg_default = CTMConfig()
+        assert cfg_default.plateau_patience == 20
+        kwargs_default = ctm_converge_kwargs(cfg_default)
+        assert kwargs_default["plateau_patience"] == 20
+
+        cfg_off = CTMConfig(plateau_patience=None)
+        kwargs_off = ctm_converge_kwargs(cfg_off)
+        assert kwargs_off["plateau_patience"] is None
+
+        cfg_custom = CTMConfig(plateau_patience=7)
+        kwargs_custom = ctm_converge_kwargs(cfg_custom)
+        assert kwargs_custom["plateau_patience"] == 7
