@@ -161,6 +161,33 @@ def _fishman_truncate_S(S: jnp.ndarray, eps: float = 1e-12) -> jnp.ndarray:
     return jnp.where(S / (s_max + 1e-30) >= eps, S, 0.0)
 
 
+# ---- Design note: ket/bra fuse convention vs variPEPS ----------------------
+#
+# Tenax uses a UNIFORM (ket, bra) ket-slow fused convention for the virtual
+# D^2 legs of the enlarged corners (`d2 = ket*D + bra` everywhere), threaded
+# through the precomputed double-layer `a` tensor.  variPEPS uses
+# PER-QUADRANT axis ordering on its rank-6 quarter tensors -- e.g.
+# `ctmrg_top_left` outputs (ket_d, bra_d, ..., ket_r, bra_r) while
+# `ctmrg_top_right` outputs (..., bra_d, ket_d) -- so that variPEPS's
+# M_prime row/column bases have *deliberately mismatched* ket-bra orders
+# that align with the natural Z2 of the absorption maps.
+#
+# Tenax's M_prime is related to variPEPS's by a constant permutation.  Same
+# spectrum, identical results outside degenerate subspaces.  But for
+# PAIRED-DEGENERATE singular values the LAPACK SVD picks a basis within the
+# 2D subspace that depends on the matrix entries; the permutation rotates
+# that basis relative to variPEPS's, and the rotation is not a symmetry of
+# the iteration map.  Compounds across iterations and breaks Z2 pairing
+# from rank-D padded-identity init (visible at iter 2).
+#
+# This is documented in issue #425 (closed as known limitation).  The bug
+# only manifests on Z2-symmetric inits; post-bug-3a Tenax's standard init
+# is rank-1, which never triggers it.  Fixing it would require either
+# per-quadrant `a` tensors, a rank-6 "lightly split" rewrite of standard
+# CTM, or pivoting to split-CTM as canonical (#392 first).
+# -----------------------------------------------------------------------------
+
+
 def _compute_2x2_projector(
     Q_TL: Tensor,
     Q_TR: Tensor,
