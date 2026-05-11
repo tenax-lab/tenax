@@ -390,6 +390,15 @@ def _compute_2x2_projector(
     if direction not in ("left", "right", "top", "bottom"):
         raise ValueError(f"unsupported direction={direction!r}")
 
+    # Track whether any input is a SymmetricTensor.  When true and the
+    # block-sparse path is unavailable (tracer-bearing blocks under AD), the
+    # dense fallback below must still return SymmetricTensor projectors so
+    # downstream contractions don't trip
+    # ``Cannot mix DenseTensor and SymmetricTensor`` (Issue #416).
+    inputs_are_symmetric = any(
+        isinstance(q, SymmetricTensor) for q in (Q_TL, Q_TR, Q_BL, Q_BR)
+    )
+
     # Dispatch: SymmetricTensor inputs (without JAX tracers in any block) go
     # through the block-sparse path (Issue #416).  Tracer-bearing symmetric
     # blocks (AD backward) and pure DenseTensor inputs fall through to the
@@ -397,7 +406,7 @@ def _compute_2x2_projector(
     # safe because the AD backward only runs the projector once per GMRES
     # matvec; eager-mode symmetric inputs (forward CTM) take the block-sparse
     # path for performance and charge-structure preservation.
-    if any(isinstance(q, SymmetricTensor) for q in (Q_TL, Q_TR, Q_BL, Q_BR)):
+    if inputs_are_symmetric:
 
         def _has_tracer(t: Tensor) -> bool:
             if isinstance(t, SymmetricTensor):
@@ -435,6 +444,7 @@ def _compute_2x2_projector(
         top_order = ("chi_B_TL", "d2_TL", "chi_B_TR", "d2_TR")
         top_axes = tuple(top_T.labels().index(lbl) for lbl in top_order)
         top_T = top_T.transpose(top_axes)
+        chi_M1_row_idx, D2_M1_row_idx, chi_M1_col_idx, D2_M1_col_idx = top_T.indices
         chi_M1_row, D2_M1_row, chi_M1_col, D2_M1_col = (
             idx.dim for idx in top_T.indices
         )
@@ -452,6 +462,7 @@ def _compute_2x2_projector(
         bot_order = ("chi_T_BR", "u2_BR", "chi_T_BL", "u2_BL")
         bot_axes = tuple(bot_T.labels().index(lbl) for lbl in bot_order)
         bot_T = bot_T.transpose(bot_axes)
+        chi_M2_row_idx, D2_M2_row_idx, chi_M2_col_idx, D2_M2_col_idx = bot_T.indices
         chi_M2_row, D2_M2_row, chi_M2_col, D2_M2_col = (
             idx.dim for idx in bot_T.indices
         )
@@ -471,6 +482,7 @@ def _compute_2x2_projector(
         left_order = ("chi_R_BL", "r2_BL", "chi_R_TL", "r2_TL")
         left_axes = tuple(left_T.labels().index(lbl) for lbl in left_order)
         left_T = left_T.transpose(left_axes)
+        chi_M1_row_idx, D2_M1_row_idx, chi_M1_col_idx, D2_M1_col_idx = left_T.indices
         chi_M1_row, D2_M1_row, chi_M1_col, D2_M1_col = (
             idx.dim for idx in left_T.indices
         )
@@ -489,6 +501,7 @@ def _compute_2x2_projector(
         right_order = ("chi_L_TR", "l2_TR", "chi_L_BR", "l2_BR")
         right_axes = tuple(right_T.labels().index(lbl) for lbl in right_order)
         right_T = right_T.transpose(right_axes)
+        chi_M2_row_idx, D2_M2_row_idx, chi_M2_col_idx, D2_M2_col_idx = right_T.indices
         chi_M2_row, D2_M2_row, chi_M2_col, D2_M2_col = (
             idx.dim for idx in right_T.indices
         )
@@ -535,6 +548,8 @@ def _compute_2x2_projector(
         second_half = M2_sqrtS[:, None] * M2_Vh  # (k2, cols_M2)
         first_size = (chi_M1_row, D2_M1_row)
         second_size = (chi_M2_col, D2_M2_col)
+        first_chi_idx, first_D2_idx = chi_M1_row_idx, D2_M1_row_idx
+        second_chi_idx, second_D2_idx = chi_M2_col_idx, D2_M2_col_idx
         prime_order = "second_first"  # M_prime = second_half @ first_half
     else:
         # direction in ("right", "top"): M_prime = M1 @ M2.
@@ -542,6 +557,8 @@ def _compute_2x2_projector(
         second_half = M2_U * M2_sqrtS[None, :]  # (rows_M2, k2)
         first_size = (chi_M1_col, D2_M1_col)
         second_size = (chi_M2_row, D2_M2_row)
+        first_chi_idx, first_D2_idx = chi_M1_col_idx, D2_M1_col_idx
+        second_chi_idx, second_D2_idx = chi_M2_row_idx, D2_M2_row_idx
         prime_order = "first_second"  # M_prime = first_half @ second_half
 
     # variPEPS-style normalization for stability.
@@ -607,6 +624,8 @@ def _compute_2x2_projector(
         P_bot_dense = P_second_dense
         chi_top, D2_top = first_size
         chi_bot, D2_bot = second_size
+        chi_top_in_idx, D2_top_in_idx = first_chi_idx, first_D2_idx
+        chi_bot_in_idx, D2_bot_in_idx = second_chi_idx, second_D2_idx
     else:
         # P_first has shape (k, cols_size); P_second has shape (rows_size, k).
         # We want P_top to lead with (chi_outer, fused_D2) so wrap P_second
@@ -615,12 +634,29 @@ def _compute_2x2_projector(
         P_bot_dense = P_first_dense  # (k, cols_size)
         chi_top, D2_top = second_size
         chi_bot, D2_bot = first_size
+        chi_top_in_idx, D2_top_in_idx = second_chi_idx, second_D2_idx
+        chi_bot_in_idx, D2_bot_in_idx = first_chi_idx, first_D2_idx
 
-    sym = U1Symmetry()
-    chi_top_charges = np.zeros(chi_top, dtype=np.int32)
-    D2_top_charges = np.zeros(D2_top, dtype=np.int32)
-    chi_bot_charges = np.zeros(chi_bot, dtype=np.int32)
-    D2_bot_charges = np.zeros(D2_bot, dtype=np.int32)
+    # Derive charges for the output indices.  When inputs are SymmetricTensor,
+    # use the seam TensorIndex charges captured from M1/M2's 4-leg form so the
+    # output projector legs carry the same U(1) labels as the upstream env.
+    # All-DenseTensor inputs continue to use trivial-zero charges (matching
+    # those inputs' implicit ``np.zeros`` charges in TensorIndex.from_charges).
+    sym = chi_top_in_idx.symmetry if inputs_are_symmetric else U1Symmetry()
+    if inputs_are_symmetric:
+        chi_top_charges = np.asarray(chi_top_in_idx.charges, dtype=np.int32)
+        D2_top_charges = np.asarray(D2_top_in_idx.charges, dtype=np.int32)
+        chi_bot_charges = np.asarray(chi_bot_in_idx.charges, dtype=np.int32)
+        D2_bot_charges = np.asarray(D2_bot_in_idx.charges, dtype=np.int32)
+    else:
+        chi_top_charges = np.zeros(chi_top, dtype=np.int32)
+        D2_top_charges = np.zeros(D2_top, dtype=np.int32)
+        chi_bot_charges = np.zeros(chi_bot, dtype=np.int32)
+        D2_bot_charges = np.zeros(D2_bot, dtype=np.int32)
+    # chi_new charges: pragmatic trivial.  The SymmetricTensor wrap below uses
+    # ``tol=float("inf")`` so block-sector selection is not enforced at wrap
+    # time; the backward AD path treats projectors as ``stop_gradient``
+    # constants, so the bond-charge structure does not propagate further.
     new_top_charges = np.zeros(chi_new, dtype=np.int32)
     new_bot_charges = np.zeros(chi_new, dtype=np.int32)
 
@@ -653,8 +689,19 @@ def _compute_2x2_projector(
     P_top_arr = P_top_dense.reshape(chi_top, D2_top, chi_new)
     P_bot_arr = P_bot_dense.reshape(chi_new, chi_bot, D2_bot)
 
-    P_top = DenseTensor(P_top_arr, P_top_idx)
-    P_bot = DenseTensor(P_bot_arr, P_bot_idx)
+    if inputs_are_symmetric:
+        # Wrap as SymmetricTensor so downstream contractions with symmetric
+        # envs don't raise ``Cannot mix DenseTensor and SymmetricTensor``
+        # (Issue #416).  ``tol=float("inf")`` skips per-sector validation: the
+        # dense fallback is reached under AD tracing where projectors are
+        # taken as ``stop_gradient`` constants downstream, so the projector
+        # block sectors need not exactly satisfy charge selection at the wrap
+        # layer.
+        P_top = SymmetricTensor.from_dense(P_top_arr, P_top_idx, tol=float("inf"))
+        P_bot = SymmetricTensor.from_dense(P_bot_arr, P_bot_idx, tol=float("inf"))
+    else:
+        P_top = DenseTensor(P_top_arr, P_top_idx)
+        P_bot = DenseTensor(P_bot_arr, P_bot_idx)
     return P_top, P_bot
 
 

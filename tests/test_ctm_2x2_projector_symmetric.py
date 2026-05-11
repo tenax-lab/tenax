@@ -288,3 +288,43 @@ def test_compute_2x2_projector_symmetric_ad_fallback_passes_tracer(symmetric_cor
 
     grad = jax.grad(scalar_of)(1.0)
     assert jnp.isfinite(grad), f"grad must be finite, got {grad}"
+
+
+def test_compute_2x2_projector_dense_fallback_wraps_as_symmetric(symmetric_corners):
+    """Tracer-bearing symmetric inputs go through the dense fallback (Task 4 dispatch).
+
+    Issue #416: the dense fallback must return SymmetricTensor projectors when
+    inputs are SymmetricTensor, so downstream contractions (e.g. with
+    SymmetricTensor envs) don't fail with "Cannot mix DenseTensor and SymmetricTensor".
+    """
+    import jax
+
+    Q_TL, Q_TR, Q_BL, Q_BR = symmetric_corners
+    chi = 4
+
+    def call_projector(t: float):
+        first_key = sorted(Q_TL.blocks.keys())[0]
+        new_block = Q_TL.blocks[first_key] * t
+        new_blocks = {**Q_TL.blocks, first_key: new_block}
+        Q_TL_perturbed = SymmetricTensor._from_blocks_unchecked(
+            new_blocks, Q_TL.indices
+        )
+        P_top, P_bot = _compute_2x2_projector(
+            Q_TL_perturbed, Q_TR, Q_BL, Q_BR, chi=chi, direction="left"
+        )
+        return P_top, P_bot
+
+    # Outside jax.grad: confirm wrap type unchanged (symmetric input → symmetric
+    # output via the block-sparse path).
+    P_top_eager, P_bot_eager = call_projector(1.0)
+    assert isinstance(P_top_eager, SymmetricTensor)
+    assert isinstance(P_bot_eager, SymmetricTensor)
+
+    # Inside jax.grad: tracer-bearing symmetric input → dense fallback → wrap
+    # as SymmetricTensor.
+    def scalar(t):
+        P_top, P_bot = call_projector(t)
+        return jnp.sum(P_top.todense() ** 2) + jnp.sum(P_bot.todense() ** 2)
+
+    grad = jax.grad(scalar)(1.0)
+    assert jnp.isfinite(grad)

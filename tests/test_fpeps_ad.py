@@ -205,14 +205,6 @@ class TestTodenseGradientFlow:
         assert float(jnp.linalg.norm(grad_data)) > 0, "DenseTensor gradient is zero"
 
     @pytest.mark.algorithm
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "_compute_2x2_projector lacks symmetric-tensor support (PR #406, "
-            "design doc docs/plans/2026-05-07-ctm-multisite-2x2-projector-design.md); "
-            "tracked as Issue #416."
-        ),
-    )
     def test_symmetric_nontrivial_energy_finite(self):
         """SymmetricTensor with non-trivial fermionic charges produces a
         finite forward energy through the implicit CTM path.
@@ -272,14 +264,6 @@ class TestTodenseGradientFlow:
         )
 
     @pytest.mark.algorithm
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "_compute_2x2_projector lacks symmetric-tensor support (PR #406, "
-            "design doc docs/plans/2026-05-07-ctm-multisite-2x2-projector-design.md); "
-            "tracked as Issue #416."
-        ),
-    )
     def test_symmetric_nontrivial_gradient_finite(self):
         """SymmetricTensor with non-trivial charges should produce finite gradients.
 
