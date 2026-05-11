@@ -92,21 +92,53 @@ def _ctm_tensor_sweep(
 ) -> tuple[CTMTensorEnv, float]:
     """One full CTM sweep: left, top, right, bottom (variPEPS order) + optional renormalize.
 
+    For SymmetricTensor inputs, derives ``base_charges`` from the double-layer
+    ``a`` and threads them into each projector via the move functions.  This
+    matches the multisite path (``_ctm_tensor_sweep_multisite``) and ensures
+    the ε_T measurement reflects the same per-sector allocation the auto-χ
+    bump will apply when padding the env (PR #433 codex review on
+    ``ipeps_optimize.py:1007``).
+
     Returns:
         ``(env, max_eps)`` where ``max_eps`` is the maximum per-move truncation
         error across the four directional moves in this sweep.
     """
+    base_charges = _get_base_charges(a)
     env, eps_left = _ctm_tensor_move_left(
-        env, env, a, chi, projector_method, projector_backward=projector_backward
+        env,
+        env,
+        a,
+        chi,
+        projector_method,
+        base_charges=base_charges,
+        projector_backward=projector_backward,
     )
     env, eps_top = _ctm_tensor_move_top(
-        env, env, a, chi, projector_method, projector_backward=projector_backward
+        env,
+        env,
+        a,
+        chi,
+        projector_method,
+        base_charges=base_charges,
+        projector_backward=projector_backward,
     )
     env, eps_right = _ctm_tensor_move_right(
-        env, env, a, chi, projector_method, projector_backward=projector_backward
+        env,
+        env,
+        a,
+        chi,
+        projector_method,
+        base_charges=base_charges,
+        projector_backward=projector_backward,
     )
     env, eps_bottom = _ctm_tensor_move_bottom(
-        env, env, a, chi, projector_method, projector_backward=projector_backward
+        env,
+        env,
+        a,
+        chi,
+        projector_method,
+        base_charges=base_charges,
+        projector_backward=projector_backward,
     )
     if renormalize:
         env = _renormalize_tensor_env(env)
