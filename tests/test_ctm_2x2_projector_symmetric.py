@@ -195,3 +195,29 @@ def test_compute_2x2_projector_symmetric_closure_left(symmetric_corners):
     assert chi_new == 4, (
         f"Expected chi_new == 4 after Fishman truncation, got {chi_new}"
     )
+
+
+@pytest.mark.parametrize("direction", ["right", "top", "bottom"])
+def test_compute_2x2_projector_symmetric_closure_other_directions(
+    symmetric_corners, direction
+):
+    """Closure test for direction in {right, top, bottom}."""
+    from tenax.algorithms._ctm_tensor_projector_2x2 import (
+        _compute_2x2_projector_symmetric,
+    )
+    from tenax.contraction.contractor import contract
+
+    Q_TL, Q_TR, Q_BL, Q_BR = symmetric_corners
+    chi = 4
+    P_top, P_bot = _compute_2x2_projector_symmetric(
+        Q_TL, Q_TR, Q_BL, Q_BR, chi=chi, direction=direction
+    )
+    I_tensor = contract(P_bot, P_top)
+    I_dense = np.asarray(I_tensor.todense())
+    chi_new = P_top.indices[2].dim
+    np.testing.assert_allclose(
+        I_dense,
+        np.eye(chi_new),
+        atol=1e-9,
+        err_msg=f"P_bot · P_top must be identity for direction={direction!r}",
+    )
