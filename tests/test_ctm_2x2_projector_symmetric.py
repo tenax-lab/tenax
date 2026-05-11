@@ -257,3 +257,34 @@ def test_compute_2x2_projector_symmetric_base_charges_drive_chi_new(symmetric_co
         f"{P_top.indices[2].dim}); got {actual_chi_new.tolist()} vs "
         f"{expected_chi_new.tolist()}"
     )
+
+
+def test_compute_2x2_projector_symmetric_ad_fallback_passes_tracer(symmetric_corners):
+    """SymmetricTensor inputs under jax.grad must dispatch to the dense fallback.
+
+    Issue #416: the symmetric block-sparse path is eager-only (uses Python-level
+    iteration that can't be JIT-traced).  The Task 4 dispatch detects JAX
+    tracers in any input block and falls through to the dense pipeline.
+    This test confirms `jax.grad` produces a finite gradient via that fallback.
+    """
+    import jax
+
+    Q_TL, Q_TR, Q_BL, Q_BR = symmetric_corners
+    chi = 4
+
+    def scalar_of(t: float) -> jax.Array:
+        # Trivial parameterization: scale the first block of Q_TL by t, then
+        # call the projector and reduce to a scalar via Frobenius norm squared.
+        first_key = sorted(Q_TL.blocks.keys())[0]
+        new_block = Q_TL.blocks[first_key] * t
+        new_blocks = {**Q_TL.blocks, first_key: new_block}
+        Q_TL_perturbed = SymmetricTensor._from_blocks_unchecked(
+            new_blocks, Q_TL.indices
+        )
+        P_top, P_bot = _compute_2x2_projector(
+            Q_TL_perturbed, Q_TR, Q_BL, Q_BR, chi=chi, direction="left"
+        )
+        return jnp.sum(P_top.todense() ** 2) + jnp.sum(P_bot.todense() ** 2)
+
+    grad = jax.grad(scalar_of)(1.0)
+    assert jnp.isfinite(grad), f"grad must be finite, got {grad}"
