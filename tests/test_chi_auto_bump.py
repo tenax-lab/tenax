@@ -216,5 +216,59 @@ def test_maybe_bump_chi_respects_chi_max_ceiling():
     assert new_cfg.chi == 5  # 4+2=6, capped at 5
 
 
+def test_optimize_gs_ad_auto_bump_rejects_symmetric_tensor():
+    """optimize_gs_ad must reject ``chi_auto_bump=True`` + SymmetricTensor.
+
+    Issue #418: the existing early guard in ``optimize_gs_ad`` rejects
+    multisite and 2-site configs with ``chi_auto_bump=True`` but does
+    not check the SymmetricTensor case on the ``"1x1"`` path. Such a
+    run currently proceeds through one full gradient + CTM step before
+    blowing up inside ``pad_dense_env_chi`` with the v2-follow-up
+    NotImplementedError. The user-facing docs already say the feature
+    is dense-only — the guard should match.
+
+    SymmetricTensor support for auto-bump is tracked at #410.
+    """
+    from tenax.algorithms.ipeps import heisenberg_gate
+    from tenax.algorithms.ipeps_config import iPEPSConfig
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+    from tenax.core.tensor import SymmetricTensor
+
+    D = 2
+    d = 2
+    sym = U1Symmetry()
+    charges = np.zeros(D, dtype=np.int32)
+    phys_charges = np.zeros(d, dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
+    )
+    import jax
+
+    A_sym = SymmetricTensor.random_normal(indices, jax.random.PRNGKey(0))
+
+    cfg = iPEPSConfig(
+        max_bond_dim=D,
+        ctm=CTMConfig(
+            chi=4,
+            chi_auto_bump=True,
+            chi_auto_bump_eps=1e-5,
+            chi_auto_bump_step=2,
+            chi_max=8,
+            max_iter=5,
+        ),
+        gs_num_steps=1,
+        su_init=False,
+    )
+
+    with pytest.raises(NotImplementedError, match="SymmetricTensor"):
+        optimize_gs_ad(heisenberg_gate(), A_sym, cfg)
+
+
 # Integration test moved to tests/test_ipeps_chi_bump_integration.py
 # (algorithm-marked, ~3 min runtime; kept out of the core suite).

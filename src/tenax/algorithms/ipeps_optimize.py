@@ -25,7 +25,7 @@ from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.lattice import Lattice
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor, Tensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 _logger = logging.getLogger(__name__)
 
@@ -476,6 +476,15 @@ def optimize_gs_ad(
         raise NotImplementedError(
             "chi_auto_bump is currently supported only for unit_cell='1x1'; "
             "multisite and 2-site paths are tracked as follow-up issues."
+        )
+    # SymmetricTensor envs need the v2 follow-up in pad_dense_env_chi
+    # (#410). Reject up-front so the user gets a clear error rather than
+    # paying for one full gradient + CTM step before crashing inside the
+    # padder. See issue #418.
+    if config.ctm.chi_auto_bump and isinstance(A_init, SymmetricTensor):
+        raise NotImplementedError(
+            "chi_auto_bump does not support SymmetricTensor inputs; "
+            "padding block-sparse envs is a v2 follow-up tracked at #410."
         )
     # The reference-C4v sub-path has no bump logic; reject early so the user
     # gets a clear error rather than silent no-op.
