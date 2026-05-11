@@ -1001,18 +1001,29 @@ def _make_implicit_vjp_fn(
 
         if adjoint_method == "fixed_point":
             # F3 fused JIT: dE/denv + adjoint fixed-point + chain rule
-            # in one trace. Returns final grads directly; if the in-loop
-            # divergence guard fired we fall back to eager GMRES below
-            # (same path as adjoint_method=="gmres").
+            # in one trace. Returns final grads directly; if the fused
+            # loop did not solve the system (diverged or hit
+            # gmres_maxiter without reaching gmres_tol) we fall back
+            # to eager GMRES below (same path as adjoint_method=="gmres").
             grads_tuple, diverged, _converged, _n_iter = _jit_fused_fixed_point_bwd(
                 params_data_tuple, env_leaves, g
             )
             _F3_LAST_DIAGNOSTICS["diverged"] = bool(jax.device_get(diverged))
             _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
             _F3_LAST_DIAGNOSTICS["n_iter"] = int(jax.device_get(_n_iter))
-            if _F3_LAST_DIAGNOSTICS["diverged"]:
-                # Diverged inside the JIT loop — fall back to eager GMRES
-                # using the surviving _jit_apply_Jt closure.
+            if (
+                _F3_LAST_DIAGNOSTICS["diverged"]
+                or not _F3_LAST_DIAGNOSTICS["converged"]
+            ):
+                # Either the in-loop divergence guard fired (diff
+                # increasing past k>5) or the loop ran out of
+                # gmres_maxiter without diff crossing gmres_tol. The
+                # latter is the contractive-but-slow regime — the
+                # in-loop guard cannot detect it because diff stays
+                # monotonically decreasing. Without this branch the
+                # truncated Neumann iterate would be silently consumed
+                # by _jit_chain_rule as if (I - J^T) λ = b had been
+                # solved, biasing the gradient (issue #420).
                 rhs = _eager_dE_denv()
                 lam, _info = gmres_pytree_jax(
                     _eager_apply_I_minus_Jt,
