@@ -45,7 +45,7 @@ matching variPEPS's gate API to 3 decimals.
 * AD path inherits via JAX tracing — same forward primitive, gradient via the existing implicit-AD GMRES infrastructure.
 
 **Out:**
-* SymmetricTensor support for the 2×2 path. The block-sparse plaquette quarters require careful per-block charge tracking — follow-up.
+* ~~SymmetricTensor support for the 2×2 path.~~ Shipped on `feat/2x2-projector-symmetric` (Issue #416). Block-sparse via `tenax.linalg.svd` + per-sector gauge-fix; AD-tracer fallback wraps dense output as SymmetricTensor. See `docs/superpowers/specs/2026-05-11-2x2-projector-symmetric-design.md`.
 * Single-site `_ctm_tensor_sweep` (used by DMRG observables and vanilla iPEPS) keeps the 1×1 recipe.
 * Paired moves, C4v, honeycomb CTM — untouched.
 * Performance optimization beyond a sanity check.
@@ -251,7 +251,7 @@ def test_2x2_multisite_ctm_ad_matches_fd_at_d2():
 * **Performance regression on existing multisite callers.** Some current multisite users (kagome/honeycomb iPEPS in `examples/`) may have their L-BFGS optimizer settle to a slightly different (more accurate) local minimum after the projector switch. They should be re-validated.
 * **AD path stability at D=2 χ small.** The bigger M' SVD has more near-degenerate singular values, which can hurt complex-128 Wirtinger AD. The existing `_truncated_SVD` multiplet handling should help; needs verification at Tier 3.
 * **Reuse of left-SVD for right moves.** Optimization (variPEPS's `partial_unitary_mode`) — explicitly out of scope; first revision computes a fresh SVD per move direction.
-* **Symmetric tensor follow-up.** Block-sparse plaquette projectors require per-charge-sector SVDs of the larger M' matrix; not blocking the multisite kagome 3-site fix.
+* ~~**Symmetric tensor follow-up.**~~ Shipped (Issue #416). Per-charge-sector SVDs of M' via `tenax.linalg.svd`; `_gauge_fix_symmetric_svd` preserves the 2x2 closure convention per sector; AD-tracer fallback wraps the dense projector output as SymmetricTensor.
 
 ## Implementation order (preview)
 
