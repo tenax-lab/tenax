@@ -207,6 +207,71 @@ def test_pad_symmetric_rejects_shrink():
         pad_dense_env_chi(env_old, chi_new=2)
 
 
+def test_pad_symmetric_base_charges_never_shrinks_existing_sector():
+    """Regression for PR #433 codex review: base_charges allocation must
+    not reduce any existing per-sector count.
+
+    ``_svd_projector_symmetric`` redistributes budget to available
+    sectors when requested base sectors have no data (see
+    ``_ctm_projector.py:726-736`` and the eigh analogue), so an env at
+    χ=3 can legitimately carry charges ``[0, 0, 0]`` (sector 0
+    over-allocated by redistribution). Bumping to χ=4 with
+    ``base_charges=[0, 1, 2, 3]`` previously produced ``[0, 1, 2, 3]``,
+    shrinking the q=0 block from size 3 to 1 and causing
+    ``_pad_symmetric_block_along_axes`` to crash with
+    ``ValueError: index can't contain negative values``.
+
+    The fixed policy lower-bounds per-sector counts by the existing
+    counts; the result for this case is ``[0, 0, 0, 1]`` — sector 0
+    preserved, one new slot added to the next-most-wanted sector.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from tenax.algorithms._ctm_env_pad import _pad_chi_index
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import U1Symmetry
+
+    sym = U1Symmetry()
+    existing = TensorIndex.from_charges(
+        sym, np.array([0, 0, 0], dtype=np.int32), FlowDirection.IN, label="chi"
+    )
+
+    # The codex example: chi 3 → 4 with base_charges = [0, 1, 2, 3].
+    base = np.array([0, 1, 2, 3], dtype=np.int32)
+    new_idx = _pad_chi_index(existing, chi_new=4, base_charges=base)
+    assert new_idx.dim == 4
+    assert list(np.asarray(new_idx.charges)) == [0, 0, 0, 1], (
+        f"existing [0,0,0] bumped to χ=4 with base [0,1,2,3] should preserve "
+        f"sector 0 (lower bound) and add one slot to sector 1; got "
+        f"{list(np.asarray(new_idx.charges))}"
+    )
+
+    # And the symmetric end-to-end path (initialize → pad) must not crash.
+    A_sym = _make_u1_peps(D=2, d=2)
+    from tenax.algorithms._ctm_tensor_convergence import _get_base_charges
+    from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
+
+    base_real = _get_base_charges(_build_double_layer_tensor(A_sym))
+    env_old = initialize_ctm_tensor_env(A_sym, chi=4)
+    # Padding must succeed for arbitrary chi_new ≥ chi_old, regardless of
+    # whether base_charges would normally reduce some sector count.
+    env_new = pad_dense_env_chi(env_old, chi_new=8, base_charges=base_real)
+    assert env_new.C1.indices[0].dim == 8
+    # Existing block content is preserved (a sufficient condition: the new
+    # corner densifies to embed the old one in its leading χ_old × χ_old
+    # block — under the same sorted-by-sector layout).
+    C1_old = np.asarray(env_old.C1.todense())
+    C1_new = np.asarray(env_new.C1.todense())
+    # We don't assert exact equality of the leading block here because
+    # the sector ordering may differ between the lower-bounded policy
+    # and a naïve prefix-embed; instead, check that no data was lost
+    # via the L2 norm.
+    assert jnp.allclose(jnp.linalg.norm(C1_new), jnp.linalg.norm(C1_old)), (
+        "padding should preserve existing data (Frobenius norm equal)"
+    )
+
+
 def test_pad_symmetric_uses_base_charges_when_supplied():
     """Regression for PR #430 codex review: when ``base_charges`` is
     supplied, padded χ charges follow ``sorted(_derive_charges(...))``.
