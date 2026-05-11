@@ -1077,10 +1077,7 @@ def _optimize_gs_ad_tensor(
         # Update env cache for warm-starting next step
         _update_env_cache(params)
 
-        # variPEPS §2.8.2 auto-χ_E bump (between L-BFGS steps; never mid-step).
-        last_eps_t = float(_env_cache.get("max_truncation_error", 0.0))
-        ctm_cfg, _env_cache = _maybe_bump_chi(ctm_cfg, _env_cache, last_eps_t)
-
+        _accepted_best_this_iter = False
         if _should_accept_best(
             current_best=best_energy,
             candidate=energy_float,
@@ -1089,6 +1086,7 @@ def _optimize_gs_ad_tensor(
             best_energy = energy_float
             best_params = params
             best_env_cache = dict(_env_cache)  # snapshot for warm-start (#317)
+            _accepted_best_this_iter = True
 
         delta_energy = abs(energy_float - prev_energy)
         logged = False
@@ -1339,6 +1337,24 @@ def _optimize_gs_ad_tensor(
             params = optax.apply_updates(params, direction)
             if not use_c4v and not (_use_cg and _cg_map_fn is not None):
                 params = params * (1.0 / (params.norm() + 1e-10))
+
+        # variPEPS §2.8.2 auto-χ_E bump — must fire AFTER the line search
+        # and parameter update so that ``value_and_grad`` (start of next
+        # iteration), the metric preconditioner (when L-BFGS) and the
+        # Hager-Zhang ``_phi`` / ``_dphi`` closures all evaluate at the
+        # SAME χ. Otherwise the Wolfe sufficient-decrease and curvature
+        # conditions compare ``f(0)`` / ``f'(0)`` at OLD χ against
+        # ``f(α)`` at NEW χ — a valid step gets rejected (or an invalid
+        # one accepted) purely because of the χ-induced discontinuity.
+        # Issue #419.
+        last_eps_t = float(_env_cache.get("max_truncation_error", 0.0))
+        ctm_cfg, _env_cache = _maybe_bump_chi(ctm_cfg, _env_cache, last_eps_t)
+        # If best was accepted at this iter's pre-line-search params, refresh
+        # the snapshot so its env matches the new ctm_cfg.chi. ``_env_cache``
+        # still holds envs for those params (line search updates ``params``
+        # but does not touch ``_env_cache``), padded to the new χ by the bump.
+        if _accepted_best_this_iter:
+            best_env_cache = dict(_env_cache)
 
     # Re-evaluate both final A and best_A with fully converged fresh CTM.
     # In-loop energies use warm-started CTM that can produce unphysical values
