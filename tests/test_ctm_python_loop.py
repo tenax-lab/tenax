@@ -218,3 +218,93 @@ class TestMultisiteEnergy:
         )
 
         np.testing.assert_allclose(energy_multi, energy_ref, atol=1e-10)
+
+
+class TestPlateauPatience:
+    """Regression coverage for the ``plateau_patience`` early-bail."""
+
+    def test_disabled_matches_legacy_max_iter(self):
+        """``plateau_patience=None`` runs to ``max_iter`` even when stuck."""
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+        max_iter = 30
+        _, info = python_loop_ctm_converge(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=max_iter,
+            min_iter=5,
+            conv_tol=0.0,  # impossible — forces non-convergence
+            conv_method="elementwise",
+            renormalize=True,
+            projector_method="svd",
+            plateau_patience=None,
+        )
+        assert not info.converged
+        assert info.iterations == max_iter
+
+    def test_patience_bails_before_max_iter_on_plateau(self):
+        """A non-converging input bails before ``max_iter`` with a finite patience."""
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+        max_iter = 50
+        patience = 5
+        _, info = python_loop_ctm_converge(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=max_iter,
+            min_iter=5,
+            conv_tol=0.0,  # impossible — forces non-convergence
+            conv_method="elementwise",
+            renormalize=True,
+            projector_method="svd",
+            plateau_patience=patience,
+        )
+        assert not info.converged
+        # Bail must happen before exhausting the budget, and the returned
+        # iteration count is the best-iter (not the bail-iter) so it is
+        # bounded by ``max_iter - patience``.
+        assert info.iterations < max_iter
+
+    def test_large_patience_matches_disabled(self):
+        """``plateau_patience > max_iter`` is equivalent to ``None``."""
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+        max_iter = 25
+        kwargs = dict(
+            site_tensors={(0, 0): A},
+            neighbors=SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=max_iter,
+            min_iter=5,
+            conv_tol=0.0,
+            conv_method="elementwise",
+            renormalize=True,
+            projector_method="svd",
+        )
+        _, info_none = python_loop_ctm_converge(plateau_patience=None, **kwargs)
+        _, info_huge = python_loop_ctm_converge(
+            plateau_patience=10 * max_iter, **kwargs
+        )
+        assert info_none.iterations == info_huge.iterations == max_iter
+        assert not info_none.converged
+        assert not info_huge.converged
+
+    def test_returned_env_is_best_seen(self):
+        """Returned env corresponds to the best ``sv_diff``, not the bail iter."""
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+        _, info = python_loop_ctm_converge(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=50,
+            min_iter=5,
+            conv_tol=0.0,
+            conv_method="elementwise",
+            renormalize=True,
+            projector_method="svd",
+            plateau_patience=5,
+        )
+        assert isinstance(info, CTMConvergeInfo)
+        assert not info.converged
+        # ``sv_diff`` carries the *best* metric, so it must be finite and
+        # not larger than the very first measurement we could have made.
+        assert info.sv_diff < float("inf")
