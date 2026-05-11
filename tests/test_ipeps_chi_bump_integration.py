@@ -140,3 +140,61 @@ def test_optimize_gs_ad_auto_bump_fires_after_line_search():
         f"in iteration 1 — the Wolfe line-search invariant requires both to run "
         f"at the same χ. Call order observed: {call_order}. (Issue #419.)"
     )
+
+
+def test_optimize_gs_ad_auto_bump_fires_on_convergence_break():
+    """The end-of-iter bump must also fire on the convergence-break path.
+
+    Without this, an iteration that exits via ``delta_energy < gs_conv_tol``
+    would skip the bump even when ``_update_env_cache`` just measured a
+    large ``max_truncation_error``. A run that energy-stalls at too-small
+    χ would return its final env at the old χ instead of re-evaluating
+    at the requested auto-bump χ — codex P2 review comment on PR #432
+    that was lost in #432's squash and is re-included here.
+
+    Setup: ``gs_conv_tol`` is set very loose (100.0) so iteration 1
+    breaks via the conv check. Iteration 0 runs the full body and
+    bumps via the end-of-iter path. The conv-break in iteration 1
+    must also bump for ``final_chi > chi_after_iter_0`` to hold.
+    Without the fix the conv-break path skipped the bump, so
+    ``final_chi`` stayed at the post-iter-0 value
+    (chi=4 with ``chi_auto_bump_step=2``, ``chi_init=2``).
+    """
+    gate = heisenberg_gate()
+    key = jax.random.PRNGKey(42)
+    k1, k2 = jax.random.split(key)
+    A_init = jax.random.normal(k1, (2, 2, 2, 2, 2)) + 1j * jax.random.normal(
+        k2, (2, 2, 2, 2, 2)
+    )
+
+    cfg = iPEPSConfig(
+        max_bond_dim=2,
+        ctm=CTMConfig(
+            chi=2,
+            chi_auto_bump=True,
+            chi_auto_bump_eps=1e-5,
+            chi_auto_bump_step=2,
+            chi_max=8,
+            max_iter=10,
+            min_iter=2,
+            conv_tol=1e-3,
+        ),
+        gs_num_steps=5,
+        gs_conv_tol=100.0,  # force iter-1 conv break
+        gs_implicit_ad=True,
+        gs_verbose=False,
+        su_init=False,
+    )
+
+    _, env, _ = optimize_gs_ad(gate, A_init, cfg)
+    final_chi = env.C1._data.shape[0]
+
+    # Iter 0 bumps chi 2→4 on the normal-flow path. Iter 1 trips the
+    # conv check and must ALSO bump (chi 4→6) for this assertion to
+    # hold. Without the fix the conv-break path skipped the bump
+    # → final_chi=4.
+    assert final_chi >= 6, (
+        f"conv-break path skipped the auto-χ bump (final_chi={final_chi}); "
+        "expected the bump to also fire when delta_energy < gs_conv_tol "
+        "(PR #432 codex review, lost in #432's squash and re-included)."
+    )

@@ -10,6 +10,9 @@ keeping the χ-bond charge pattern consistent across CTM sweeps).
 
 from __future__ import annotations
 
+import itertools
+from collections import Counter
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -20,18 +23,107 @@ from tenax.core.index import TensorIndex
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 
-def _pad_chi_index(idx: TensorIndex, chi_new: int) -> TensorIndex:
+def _derive_padded_charges_with_lower_bound(
+    existing_charges: np.ndarray,
+    base_charges: np.ndarray,
+    chi_new: int,
+) -> np.ndarray:
+    """Pad χ-leg charges to ``chi_new`` honouring two constraints.
+
+    1. **Never shrink an existing sector.** The projector can
+       legitimately redistribute budget to non-base sectors when some
+       base sectors lack data (``_svd_projector_symmetric`` lines
+       726-736, eigh analogue at 425-434), so an env's χ-leg can carry
+       sector counts that disagree with the base-charge allocation.
+       Padding must preserve every existing block's data, so per-sector
+       counts in the result are lower-bounded by the existing counts.
+
+    2. **Approach the projector's ideal allocation** when budget allows.
+       The projector emits chi_new charges sorted-by-sector with counts
+       matching ``Counter(_derive_charges(base_charges, chi_new))``.
+       Subsequent CTM sweeps allocate against this pattern, so the
+       padded χ-leg should approximate it where the lower bound permits.
+
+    Returns sorted-by-sector charges of length ``chi_new``.
+
+    Codex follow-up on PR #430 / PR #433: the earlier
+    ``sorted(_derive_charges(base_charges, chi_new))`` policy could
+    shrink an existing sector when redistribution had populated it
+    beyond the projector's ideal, causing ``jnp.pad`` to fail with
+    negative widths.
+    """
+    chi_old = int(len(existing_charges))
+    if chi_new < chi_old:
+        raise ValueError(
+            f"chi_new={chi_new} must be >= chi_old={chi_old} (no shrinking)"
+        )
+
+    existing_counter: Counter[int] = Counter(int(q) for q in existing_charges)
+    target_seq = list(map(int, _derive_charges(base_charges, chi_new)))
+    target_counter: Counter[int] = Counter(target_seq)
+
+    # Start from the existing counts (lower bound).
+    counts: dict[int, int] = dict(existing_counter)
+    budget = chi_new - chi_old
+
+    # Pass 1: top up each sector toward its ideal target.
+    # Iterate ``target_seq`` so most-frequent target sectors fill first.
+    for q in target_seq:
+        if budget <= 0:
+            break
+        if counts.get(q, 0) < target_counter[q]:
+            counts[q] = counts.get(q, 0) + 1
+            budget -= 1
+
+    # Pass 2: any remaining budget — distribute via ``base_charges``
+    # round-robin so the over-allocation pattern follows the projector's
+    # natural ordering. Only reachable when every sector already meets
+    # its target (rare; existing >> target case).
+    if budget > 0:
+        base_int = [int(q) for q in base_charges]
+        for q in itertools.cycle(base_int):
+            if budget <= 0:
+                break
+            counts[q] = counts.get(q, 0) + 1
+            budget -= 1
+
+    # Build sorted-by-sector charge list to match the projector layout.
+    result: list[int] = []
+    for q in sorted(counts):
+        result.extend([q] * counts[q])
+    assert len(result) == chi_new, (
+        f"internal: derived {len(result)} charges, expected {chi_new}"
+    )
+    return np.asarray(result, dtype=np.int32)
+
+
+def _pad_chi_index(
+    idx: TensorIndex,
+    chi_new: int,
+    base_charges: np.ndarray | None = None,
+) -> TensorIndex:
     """Return a new TensorIndex with dim grown to ``chi_new``.
 
-    The original charges are preserved in the first ``chi_old`` slots;
-    the new slots are filled by ``_derive_charges`` (a tile of the
-    existing pattern), so each charge sector grows by zero or more slots
-    while preserving every existing sector's position.  For DenseTensor
-    indices (single trivial charge 0), this is equivalent to padding with
-    zeros.
+    Two policies:
+
+    * ``base_charges is None`` (legacy / dense path): the original
+      charges are preserved as a prefix; remaining slots are filled by
+      ``_derive_charges`` of the existing pattern. For ``DenseTensor``
+      indices (single trivial charge 0) this is plain zero-padding.
+    * ``base_charges`` supplied (symmetric path): per-sector counts
+      satisfy two constraints — never shrink an existing sector
+      (``_pad_symmetric_block_along_axes`` would otherwise hit negative
+      pad widths) and approach the projector's ideal allocation when
+      budget allows. See ``_derive_padded_charges_with_lower_bound``.
     """
-    old_charges = np.asarray(idx.charges, dtype=np.int32)
-    new_charges = _derive_charges(old_charges, chi_new)
+    if base_charges is not None:
+        existing_charges = np.asarray(idx.charges, dtype=np.int32)
+        new_charges = _derive_padded_charges_with_lower_bound(
+            existing_charges, base_charges, chi_new
+        )
+    else:
+        old_charges = np.asarray(idx.charges, dtype=np.int32)
+        new_charges = _derive_charges(old_charges, chi_new)
     return TensorIndex.from_charges(
         idx.symmetry, new_charges, idx.flow, label=idx.label
     )
@@ -104,17 +196,25 @@ def _pad_symmetric_tensor_along_chi(
     return SymmetricTensor._from_blocks_unchecked(new_blocks, new_indices)
 
 
-def _pad_symmetric_corner(t: SymmetricTensor, chi_new: int) -> SymmetricTensor:
+def _pad_symmetric_corner(
+    t: SymmetricTensor,
+    chi_new: int,
+    base_charges: np.ndarray | None = None,
+) -> SymmetricTensor:
     """Block-sparse pad of a corner SymmetricTensor along both χ axes."""
-    idx0 = _pad_chi_index(t.indices[0], chi_new)
-    idx1 = _pad_chi_index(t.indices[1], chi_new)
+    idx0 = _pad_chi_index(t.indices[0], chi_new, base_charges=base_charges)
+    idx1 = _pad_chi_index(t.indices[1], chi_new, base_charges=base_charges)
     return _pad_symmetric_tensor_along_chi(t, (idx0, idx1), chi_axes=(0, 1))
 
 
-def _pad_symmetric_edge(t: SymmetricTensor, chi_new: int) -> SymmetricTensor:
+def _pad_symmetric_edge(
+    t: SymmetricTensor,
+    chi_new: int,
+    base_charges: np.ndarray | None = None,
+) -> SymmetricTensor:
     """Block-sparse pad of an edge SymmetricTensor along axes 0 and 2 only."""
-    idx0 = _pad_chi_index(t.indices[0], chi_new)
-    idx2 = _pad_chi_index(t.indices[2], chi_new)
+    idx0 = _pad_chi_index(t.indices[0], chi_new, base_charges=base_charges)
+    idx2 = _pad_chi_index(t.indices[2], chi_new, base_charges=base_charges)
     return _pad_symmetric_tensor_along_chi(
         t, (idx0, t.indices[1], idx2), chi_axes=(0, 2)
     )
@@ -125,24 +225,50 @@ def _current_chi(t: Tensor) -> int:
     return int(t.indices[0].dim)
 
 
-def pad_dense_env_chi(env: CTMTensorEnv, chi_new: int) -> CTMTensorEnv:
+def pad_dense_env_chi(
+    env: CTMTensorEnv,
+    chi_new: int,
+    *,
+    base_charges: np.ndarray | None = None,
+) -> CTMTensorEnv:
     """Zero-pad the χ axes of a CTMTensorEnv from the current χ to ``chi_new``.
 
     Used by the variPEPS §2.8.2 auto-bump warm-start. Corners' both axes
     grow to ``chi_new``; edges' axes 0 and 2 grow (axis 1, the D² fused
-    leg, is untouched).  For SymmetricTensor envs, new χ-leg charges are
-    derived from the existing pattern via ``_derive_charges`` (the same
-    allocator used by the symmetric projectors), and each block is padded
-    along its χ axes; sectors absent from the old blocks stay implicitly
-    zero in the flat-buffer representation.
+    leg, is untouched).
+
+    For ``DenseTensor`` envs the data is zero-padded and the trivial-
+    charge index is extended.
+
+    For ``SymmetricTensor`` envs new χ-leg charges depend on
+    ``base_charges``:
+
+    * ``base_charges is None``: tile the existing post-CTM χ pattern
+      via ``_derive_charges``. This grows only the first sector when
+      the existing pattern is already sorted-by-sector (the standard
+      post-projector layout), starving later sectors so the next
+      projector cannot allocate its ideal per-sector budget.
+    * ``base_charges`` supplied: new χ charges are
+      ``sorted(_derive_charges(base_charges, chi_new))`` — the same
+      sorted-by-sector layout the symmetric projector produces from
+      ``_derive_charges(base_charges, chi_new)``. Use this whenever
+      the caller knows the iPEPS A-tensor bond charges that drive the
+      projector. (Codex review on PR #430.)
+
+    Each block is then padded along its χ axes; sectors absent from
+    the old blocks stay implicitly zero in the flat-buffer
+    representation.
 
     Returns the same env if ``chi_new`` matches the current χ. Raises
     ``ValueError`` if ``chi_new < chi_old``.
 
     Args:
-        env:     CTMTensorEnv whose corners and edges are uniformly either
-                 ``DenseTensor`` or ``SymmetricTensor``.
-        chi_new: Target bond dimension. Must be >= the current χ.
+        env:          CTMTensorEnv whose corners and edges are uniformly
+                      either ``DenseTensor`` or ``SymmetricTensor``.
+        chi_new:      Target bond dimension. Must be ``>= chi_old``.
+        base_charges: Optional A-tensor bond charges (or any analogue of
+                      the projector's ``base_charges``). Ignored for
+                      DenseTensor envs.
 
     Returns:
         New CTMTensorEnv with all χ legs padded to ``chi_new`` with zeros.
@@ -159,14 +285,14 @@ def pad_dense_env_chi(env: CTMTensorEnv, chi_new: int) -> CTMTensorEnv:
 
     if isinstance(env.C1, SymmetricTensor):
         return CTMTensorEnv(
-            C1=_pad_symmetric_corner(env.C1, chi_new),
-            C2=_pad_symmetric_corner(env.C2, chi_new),
-            C3=_pad_symmetric_corner(env.C3, chi_new),
-            C4=_pad_symmetric_corner(env.C4, chi_new),
-            T1=_pad_symmetric_edge(env.T1, chi_new),
-            T2=_pad_symmetric_edge(env.T2, chi_new),
-            T3=_pad_symmetric_edge(env.T3, chi_new),
-            T4=_pad_symmetric_edge(env.T4, chi_new),
+            C1=_pad_symmetric_corner(env.C1, chi_new, base_charges=base_charges),
+            C2=_pad_symmetric_corner(env.C2, chi_new, base_charges=base_charges),
+            C3=_pad_symmetric_corner(env.C3, chi_new, base_charges=base_charges),
+            C4=_pad_symmetric_corner(env.C4, chi_new, base_charges=base_charges),
+            T1=_pad_symmetric_edge(env.T1, chi_new, base_charges=base_charges),
+            T2=_pad_symmetric_edge(env.T2, chi_new, base_charges=base_charges),
+            T3=_pad_symmetric_edge(env.T3, chi_new, base_charges=base_charges),
+            T4=_pad_symmetric_edge(env.T4, chi_new, base_charges=base_charges),
         )
 
     return CTMTensorEnv(
