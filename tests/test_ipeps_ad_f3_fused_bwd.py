@@ -88,11 +88,38 @@ def test_fused_bwd_converges_without_fallback():
     making the parity test green while F3 does strictly more work than
     F2. This test asserts the fused JIT converges on a well-posed
     config without invoking the fallback.
+
+    The probe config (chi=4, seed=0, forward_gauge="phase") is chosen
+    for ρ(J^T) < 1 on the post-#422-#424 CTM iteration: the Neumann
+    loop is contractive and converges in ~13 steps to gmres_tol=1e-6.
+    The parity helper's chi=8 default is more spectral-radius
+    sensitive — currently divergent on this seed — so we use a
+    dedicated config here. If a future CTM-iteration change shifts
+    ρ ≥ 1 on (chi=4, seed=0, phase) too, re-tune via the seed sweep
+    pattern documented in issue #428.
     """
     from tenax.algorithms._ctm_energy_ad import _F3_LAST_DIAGNOSTICS
 
+    H = _heisenberg_gate()
+    A = _wrap_as_dense_tensor(_random_peps(seed=0))
+
+    def loss(A_):
+        return ctm_energy_implicit(
+            {(0, 0): A_},
+            SINGLE_SITE_NEIGHBORS,
+            H,
+            chi=4,
+            max_iter=40,
+            conv_tol=1e-6,
+            forward_gauge="phase",
+            gmres_tol=1e-6,
+            gmres_maxiter=200,
+            arnoldi_precheck=False,
+            adjoint_method="fixed_point",
+        )
+
     _F3_LAST_DIAGNOSTICS.clear()
-    _ = _grad_for_method("fixed_point")
+    _ = jax.grad(loss)(A)
 
     assert "diverged" in _F3_LAST_DIAGNOSTICS, (
         "f_bwd did not record diagnostics — fused-JIT path may not have run"
