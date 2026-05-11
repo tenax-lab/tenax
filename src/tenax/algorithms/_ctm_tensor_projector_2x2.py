@@ -18,7 +18,7 @@ import numpy as np
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor, Tensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 __all__ = ["_build_enlarged_corner", "_compute_2x2_projector"]
 
@@ -48,6 +48,131 @@ def _gauge_fixed_svd(
     U = U * jnp.conj(phases)[None, :]
     Vh = Vh * phases[:, None]
     return U, s, Vh
+
+
+def _gauge_fix_symmetric_svd(
+    U_T: SymmetricTensor, Vh_T: SymmetricTensor
+) -> tuple[SymmetricTensor, SymmetricTensor]:
+    """Per-sector gauge fix for SymmetricTensor SVD outputs.
+
+    Mirrors :func:`_gauge_fixed_svd` (the dense 2x2 gauge convention) at the
+    block level: for each kept singular vector j, finds the entry of largest
+    ``|U[:, j]|`` across all U-blocks that share its bond charge, rotates U's
+    column and Vh's row by ``conj(phase)`` / ``phase`` so that
+    ``U @ diag(s) @ Vh == M`` is preserved.  Critical for the 2x2 closure
+    ``P_bot · P_top = I`` (no intervening matrix to absorb a ``conj(phase)**2``
+    factor — see the docstring of :func:`_gauge_fixed_svd`).
+    """
+    bond_idx = U_T.indices[-1]  # last leg of U is the SVD bond
+    bond_charges = np.asarray(bond_idx.charges, dtype=np.int32)
+
+    # Per global column j, find its (charge, in-sector local index).
+    # The sector ordering matches _truncated_svd_symmetric (bond charges
+    # are listed in descending-SV global order); within a sector, the
+    # local indices are 0..n_q-1 in the order they appear in bond_charges.
+    local_index_of: dict[int, dict[int, int]] = {}  # q -> {global_j: local_idx}
+    counter: dict[int, int] = {}
+    for j, q in enumerate(bond_charges):
+        q_int = int(q)
+        local_index_of.setdefault(q_int, {})[j] = counter.get(q_int, 0)
+        counter[q_int] = counter.get(q_int, 0) + 1
+
+    # Collect U-blocks indexed by bond charge (last key entry).
+    u_blocks_by_q: dict[int, list[tuple[tuple[int, ...], jax.Array]]] = {}
+    for key, block in U_T.blocks.items():
+        q = int(key[-1])
+        u_blocks_by_q.setdefault(q, []).append((key, block))
+
+    # Collect Vh-blocks indexed by bond charge (FIRST key entry).
+    vh_blocks_by_q: dict[int, list[tuple[tuple[int, ...], jax.Array]]] = {}
+    for key, block in Vh_T.blocks.items():
+        q = int(key[0])
+        vh_blocks_by_q.setdefault(q, []).append((key, block))
+
+    new_u_blocks: dict[tuple[int, ...], jax.Array] = {
+        key: block for key, block in U_T.blocks.items()
+    }
+    new_vh_blocks: dict[tuple[int, ...], jax.Array] = {
+        key: block for key, block in Vh_T.blocks.items()
+    }
+
+    # For each global column j, compute its phase and write it back.
+    for j, q in enumerate(bond_charges):
+        q_int = int(q)
+        local = local_index_of[q_int][j]
+        u_entries = u_blocks_by_q.get(q_int, [])
+
+        # Find max-abs entry across all U-blocks' local-column `local`.
+        best_abs = -1.0
+        best_value: complex | float = 1.0
+        for _key, block in u_entries:
+            # block shape: (left_dims..., n_q); take the slice block[..., local]
+            col_slice = block[..., local]
+            col_flat = jnp.reshape(col_slice, (-1,))
+            local_max_idx = int(jnp.argmax(jnp.abs(col_flat)))
+            local_max_val = complex(col_flat[local_max_idx])
+            local_max_abs = abs(local_max_val)
+            if local_max_abs > best_abs:
+                best_abs = local_max_abs
+                best_value = local_max_val
+
+        if best_abs <= 0.0:
+            phase = 1.0 + 0.0j
+        else:
+            phase = best_value / abs(best_value)
+
+        # If the imaginary part is exactly zero (real inputs), keep the phase
+        # as a real scalar so multiplying float64 blocks does not trigger the
+        # JAX complex-to-real cast warning.
+        if phase.imag == 0.0:
+            conj_phase = jnp.asarray(phase.real)
+            bare_phase = jnp.asarray(phase.real)
+        else:
+            conj_phase = jnp.asarray(complex(phase).conjugate())
+            bare_phase = jnp.asarray(complex(phase))
+
+        # Apply conj(phase) to column `local` of every matching U-block.
+        for key, _block in u_entries:
+            new_block = new_u_blocks[key]
+            new_block = new_block.at[..., local].multiply(conj_phase)
+            new_u_blocks[key] = new_block
+
+        # Apply phase to row `local` of every matching Vh-block.
+        for key, _block in vh_blocks_by_q.get(q_int, []):
+            new_block = new_vh_blocks[key]
+            new_block = new_block.at[local, ...].multiply(bare_phase)
+            new_vh_blocks[key] = new_block
+
+    U_out = SymmetricTensor._from_blocks_unchecked(new_u_blocks, U_T.indices)
+    Vh_out = SymmetricTensor._from_blocks_unchecked(new_vh_blocks, Vh_T.indices)
+    return U_out, Vh_out
+
+
+def _scale_bond_by_diag(
+    T: SymmetricTensor, diag: jax.Array, bond_label: str
+) -> SymmetricTensor:
+    """Multiply each block of ``T`` along its ``bond_label`` axis by ``diag``.
+
+    The bond's TensorIndex charges encode each slot's sector; ``diag[j]`` is
+    applied to slot ``j`` of every block whose bond key matches sector
+    ``bond_charges[j]``.
+
+    Used to express ``T @ diag(s)`` (or ``diag(s) @ T``) in the symmetric
+    pipeline without densifying.
+    """
+    bond_axis = T.labels().index(bond_label)
+    bond_idx = T.indices[bond_axis]
+    bond_charges = np.asarray(bond_idx.charges, dtype=np.int32)
+
+    new_blocks: dict[tuple[int, ...], jax.Array] = {}
+    for key, block in T.blocks.items():
+        q = int(key[bond_axis])
+        positions = [j for j, cq in enumerate(bond_charges) if int(cq) == q]
+        diag_slice = jnp.asarray(diag)[jnp.array(positions, dtype=np.int32)]
+        shape = [1] * block.ndim
+        shape[bond_axis] = len(positions)
+        new_blocks[key] = block * diag_slice.reshape(shape)
+    return SymmetricTensor._from_blocks_unchecked(new_blocks, T.indices)
 
 
 def _build_enlarged_corner(
