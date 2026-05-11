@@ -794,7 +794,10 @@ def _compute_2x2_projector_symmetric(
     U_Mp_T, Vh_Mp_T = _gauge_fix_symmetric_svd(U_Mp_T, Vh_Mp_T)
 
     # ---- Stage 5: cross-projectors via bar() for the SVD adjoint. ----
-    s_max = float(jnp.max(S_Mp))
+    # tensor_svd returns S_Mp in global-descending order, so S_Mp[0] is the max
+    # (mirrors the dense path at _compute_2x2_projector). Keeping this as a
+    # traced JAX scalar avoids TracerArrayConversionError under jax.jit.
+    s_max = S_Mp[0]
     cutoff = 1e-12 * (s_max + 1e-30)
     mask = S_Mp > cutoff
     S_safe = jnp.where(mask, S_Mp, 1.0)

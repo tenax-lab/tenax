@@ -191,3 +191,7 @@ def test_compute_2x2_projector_symmetric_closure_left(symmetric_corners):
         atol=1e-9,
         err_msg="P_bot · P_top must be identity on the truncated chi_new bond",
     )
+    # Sanity: with chi=4 and chi*D²=16 of bond room, chi_new should reach 4.
+    assert chi_new == 4, (
+        f"Expected chi_new == 4 after Fishman truncation, got {chi_new}"
+    )
