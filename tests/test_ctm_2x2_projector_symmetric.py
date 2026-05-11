@@ -78,3 +78,116 @@ def test_gauge_fix_symmetric_svd_real_positive_max_row():
         assert entry.real >= 0.0, (
             f"column {j}: max-abs entry should be non-negative, got {entry}"
         )
+
+
+def _make_symmetric_enlarged_corner(
+    chi: int,
+    D: int,
+    chi_label_a: str,
+    chi_label_b: str,
+    D2_label_a: str,
+    D2_label_b: str,
+    flow_chi_a: FlowDirection,
+    flow_chi_b: FlowDirection,
+    flow_D2_a: FlowDirection,
+    flow_D2_b: FlowDirection,
+    seed: int,
+) -> SymmetricTensor:
+    """4-leg enlarged-corner SymmetricTensor with non-trivial U(1) charges."""
+    sym = U1Symmetry()
+    chi_charges = np.arange(chi, dtype=np.int32) % 2
+    D2_charges = np.arange(D**2, dtype=np.int32) % 2
+    indices = (
+        TensorIndex.from_charges(sym, chi_charges, flow_chi_a, label=chi_label_a),
+        TensorIndex.from_charges(sym, D2_charges, flow_D2_a, label=D2_label_a),
+        TensorIndex.from_charges(sym, chi_charges, flow_chi_b, label=chi_label_b),
+        TensorIndex.from_charges(sym, D2_charges, flow_D2_b, label=D2_label_b),
+    )
+    return SymmetricTensor.random_normal(indices, jax.random.PRNGKey(seed))
+
+
+@pytest.fixture
+def symmetric_corners():
+    """Return (Q_TL, Q_TR, Q_BL, Q_BR) — 4-leg SymmetricTensors with non-trivial U(1)."""
+    chi, D = 4, 2
+    Q_TL = _make_symmetric_enlarged_corner(
+        chi,
+        D,
+        chi_label_a="chi_R",
+        chi_label_b="chi_B",
+        D2_label_a="r2",
+        D2_label_b="d2",
+        flow_chi_a=FlowDirection.OUT,
+        flow_chi_b=FlowDirection.OUT,
+        flow_D2_a=FlowDirection.OUT,
+        flow_D2_b=FlowDirection.OUT,
+        seed=0,
+    )
+    Q_TR = _make_symmetric_enlarged_corner(
+        chi,
+        D,
+        chi_label_a="chi_L",
+        chi_label_b="chi_B",
+        D2_label_a="l2",
+        D2_label_b="d2",
+        flow_chi_a=FlowDirection.IN,
+        flow_chi_b=FlowDirection.OUT,
+        flow_D2_a=FlowDirection.IN,
+        flow_D2_b=FlowDirection.OUT,
+        seed=1,
+    )
+    Q_BL = _make_symmetric_enlarged_corner(
+        chi,
+        D,
+        chi_label_a="chi_R",
+        chi_label_b="chi_T",
+        D2_label_a="r2",
+        D2_label_b="u2",
+        flow_chi_a=FlowDirection.OUT,
+        flow_chi_b=FlowDirection.IN,
+        flow_D2_a=FlowDirection.OUT,
+        flow_D2_b=FlowDirection.IN,
+        seed=2,
+    )
+    Q_BR = _make_symmetric_enlarged_corner(
+        chi,
+        D,
+        chi_label_a="chi_L",
+        chi_label_b="chi_T",
+        D2_label_a="l2",
+        D2_label_b="u2",
+        flow_chi_a=FlowDirection.IN,
+        flow_chi_b=FlowDirection.IN,
+        flow_D2_a=FlowDirection.IN,
+        flow_D2_b=FlowDirection.IN,
+        seed=3,
+    )
+    return Q_TL, Q_TR, Q_BL, Q_BR
+
+
+def test_compute_2x2_projector_symmetric_closure_left(symmetric_corners):
+    """Symmetric path: `P_bot · P_top = I_chi_new` (closure check)."""
+    from tenax.algorithms._ctm_tensor_projector_2x2 import (
+        _compute_2x2_projector_symmetric,
+    )
+    from tenax.contraction.contractor import contract
+
+    Q_TL, Q_TR, Q_BL, Q_BR = symmetric_corners
+    chi = 4
+
+    # NOTE: Task 4 will land a dispatch in _compute_2x2_projector that routes
+    # SymmetricTensor inputs to this helper.  Until then, call the helper
+    # directly so the test runs in isolation.
+    P_top, P_bot = _compute_2x2_projector_symmetric(
+        Q_TL, Q_TR, Q_BL, Q_BR, chi=chi, direction="left"
+    )
+    I_tensor = contract(P_bot, P_top)
+    I_dense = np.asarray(I_tensor.todense())
+    chi_new = P_top.indices[2].dim
+    assert I_dense.shape == (chi_new, chi_new)
+    np.testing.assert_allclose(
+        I_dense,
+        np.eye(chi_new),
+        atol=1e-9,
+        err_msg="P_bot · P_top must be identity on the truncated chi_new bond",
+    )

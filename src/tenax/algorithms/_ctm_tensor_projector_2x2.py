@@ -651,3 +651,203 @@ def _compute_2x2_projector(
     P_top = DenseTensor(P_top_arr, P_top_idx)
     P_bot = DenseTensor(P_bot_arr, P_bot_idx)
     return P_top, P_bot
+
+
+def _compute_2x2_projector_symmetric(
+    Q_TL: SymmetricTensor,
+    Q_TR: SymmetricTensor,
+    Q_BL: SymmetricTensor,
+    Q_BR: SymmetricTensor,
+    chi: int,
+    *,
+    direction: str,
+    base_charges: np.ndarray | None = None,
+) -> tuple[SymmetricTensor, SymmetricTensor]:
+    """Block-sparse 2x2 Fishman projector for SymmetricTensor inputs.
+
+    Mirrors the dense pipeline in :func:`_compute_2x2_projector` stage-for-stage
+    via :func:`tenax.linalg.svd` and the per-sector gauge-fix helper
+    :func:`_gauge_fix_symmetric_svd`.
+
+    See ``docs/superpowers/specs/2026-05-11-2x2-projector-symmetric-design.md``
+    for the cut-seam relabel rationale and flow conventions.
+
+    Args:
+        Q_TL, Q_TR, Q_BL, Q_BR: 4-leg enlarged corners.  Must all be SymmetricTensor.
+        chi: Target bond dimension of the new chi_new leg.
+        direction: One of ``"left"``, ``"right"``, ``"top"``, ``"bottom"``.
+        base_charges: Optional 1-D ``np.ndarray`` of charges. When supplied,
+            chi_new is allocated per sector (added in Task 5; ignored in Task 2).
+
+    Returns:
+        ``(P_top, P_bot)`` SymmetricTensor projectors with the same label /
+        flow conventions as the dense path's output.
+    """
+    from tenax.contraction.contractor import contract
+    from tenax.linalg import svd as tensor_svd
+
+    if direction not in ("left", "right", "top", "bottom"):
+        raise ValueError(f"unsupported direction={direction!r}")
+
+    # ---- Stage 1: form M1, M2 as 4-leg SymmetricTensors. ----
+    if direction in ("left", "right"):
+        Q_TL_relab = Q_TL.relabels({"chi_B": "chi_B_TL", "d2": "d2_TL"})
+        Q_TR_relab = Q_TR.relabels(
+            {"chi_L": "chi_R", "l2": "r2", "chi_B": "chi_B_TR", "d2": "d2_TR"}
+        )
+        M1_T = contract(Q_TL_relab, Q_TR_relab)
+        m1_left_labels = ("chi_B_TL", "d2_TL")
+        m1_right_labels = ("chi_B_TR", "d2_TR")
+
+        Q_BR_relab = Q_BR.relabels(
+            {"chi_L": "chi_R", "l2": "r2", "chi_T": "chi_T_BR", "u2": "u2_BR"}
+        )
+        Q_BL_relab = Q_BL.relabels({"chi_T": "chi_T_BL", "u2": "u2_BL"})
+        M2_T = contract(Q_BR_relab, Q_BL_relab)
+        m2_left_labels = ("chi_T_BR", "u2_BR")
+        m2_right_labels = ("chi_T_BL", "u2_BL")
+    else:  # "top", "bottom"
+        Q_BL_relab = Q_BL.relabels(
+            {"chi_T": "chi_B", "u2": "d2", "chi_R": "chi_R_BL", "r2": "r2_BL"}
+        )
+        Q_TL_relab = Q_TL.relabels({"chi_R": "chi_R_TL", "r2": "r2_TL"})
+        M1_T = contract(Q_BL_relab, Q_TL_relab)
+        m1_left_labels = ("chi_R_BL", "r2_BL")
+        m1_right_labels = ("chi_R_TL", "r2_TL")
+
+        Q_TR_relab = Q_TR.relabels(
+            {"chi_B": "chi_T", "d2": "u2", "chi_L": "chi_L_TR", "l2": "l2_TR"}
+        )
+        Q_BR_relab = Q_BR.relabels({"chi_L": "chi_L_BR", "l2": "l2_BR"})
+        M2_T = contract(Q_TR_relab, Q_BR_relab)
+        m2_left_labels = ("chi_L_TR", "l2_TR")
+        m2_right_labels = ("chi_L_BR", "l2_BR")
+
+    # ---- Stage 2: SVDs of M1, M2 with per-sector gauge fix. ----
+    U_M1_T, M1_S, Vh_M1_T, _ = tensor_svd(
+        M1_T,
+        left_labels=m1_left_labels,
+        right_labels=m1_right_labels,
+        new_bond_label="m1_bond",
+        max_singular_values=None,
+    )
+    U_M1_T, Vh_M1_T = _gauge_fix_symmetric_svd(U_M1_T, Vh_M1_T)
+    M1_S = _fishman_truncate_S(M1_S, eps=1e-12)
+
+    U_M2_T, M2_S, Vh_M2_T, _ = tensor_svd(
+        M2_T,
+        left_labels=m2_left_labels,
+        right_labels=m2_right_labels,
+        new_bond_label="m2_bond",
+        max_singular_values=None,
+    )
+    U_M2_T, Vh_M2_T = _gauge_fix_symmetric_svd(U_M2_T, Vh_M2_T)
+    M2_S = _fishman_truncate_S(M2_S, eps=1e-12)
+
+    M1_sqrtS = jnp.sqrt(M1_S)
+    M2_sqrtS = jnp.sqrt(M2_S)
+
+    # ---- Stage 3: form halves, normalize. ----
+    if direction in ("left", "bottom"):
+        first_half = _scale_bond_by_diag(U_M1_T, M1_sqrtS, bond_label="m1_bond")
+        second_half = _scale_bond_by_diag(Vh_M2_T, M2_sqrtS, bond_label="m2_bond")
+        prime_order = "second_first"
+        first_outer_labels = m1_left_labels
+        second_outer_labels = m2_right_labels
+    else:  # "right", "top"
+        first_half = _scale_bond_by_diag(Vh_M1_T, M1_sqrtS, bond_label="m1_bond")
+        second_half = _scale_bond_by_diag(U_M2_T, M2_sqrtS, bond_label="m2_bond")
+        prime_order = "first_second"
+        first_outer_labels = m1_right_labels
+        second_outer_labels = m2_left_labels
+
+    first_norm = jnp.sqrt(jnp.sum(M1_S) + 1e-30)
+    second_norm = jnp.sqrt(jnp.sum(M2_S) + 1e-30)
+    first_half = _scale_bond_by_diag(
+        first_half, jnp.ones_like(M1_S) / first_norm, bond_label="m1_bond"
+    )
+    second_half = _scale_bond_by_diag(
+        second_half, jnp.ones_like(M2_S) / second_norm, bond_label="m2_bond"
+    )
+
+    # ---- Stage 4: form M_prime by renaming cut seam + contract; SVD M_prime. ----
+    if prime_order == "second_first":
+        cut_relabel = dict(zip(m1_left_labels, m2_right_labels))
+        first_half_for_mp = first_half.relabels(cut_relabel)
+        M_prime_T = contract(second_half, first_half_for_mp)
+        mp_left_labels = ("m2_bond",)
+        mp_right_labels = ("m1_bond",)
+    else:
+        cut_relabel = dict(zip(m1_right_labels, m2_left_labels))
+        first_half_for_mp = first_half.relabels(cut_relabel)
+        M_prime_T = contract(first_half_for_mp, second_half)
+        mp_left_labels = ("m1_bond",)
+        mp_right_labels = ("m2_bond",)
+
+    U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
+        M_prime_T,
+        left_labels=mp_left_labels,
+        right_labels=mp_right_labels,
+        new_bond_label="chi_new",
+        max_singular_values=chi,
+    )
+    U_Mp_T, Vh_Mp_T = _gauge_fix_symmetric_svd(U_Mp_T, Vh_Mp_T)
+
+    # ---- Stage 5: cross-projectors via bar() for the SVD adjoint. ----
+    s_max = float(jnp.max(S_Mp))
+    cutoff = 1e-12 * (s_max + 1e-30)
+    mask = S_Mp > cutoff
+    S_safe = jnp.where(mask, S_Mp, 1.0)
+    S_inv_sqrt = jnp.where(mask, 1.0 / jnp.sqrt(S_safe), 0.0)
+
+    if prime_order == "second_first":
+        # P_first  = first_half · V_Mp · S^{-1/2}   = contract(first_half, Vh_Mp.bar())
+        # P_second = S^{-1/2} · U_Mp^† · second_half = contract(U_Mp.bar(), second_half)
+        P_first_unscaled = contract(first_half, Vh_Mp_T.bar())
+        P_second_unscaled = contract(U_Mp_T.bar(), second_half)
+    else:  # "first_second"
+        P_first_unscaled = contract(U_Mp_T.bar(), first_half)
+        P_second_unscaled = contract(second_half, Vh_Mp_T.bar())
+
+    P_first = _scale_bond_by_diag(P_first_unscaled, S_inv_sqrt, bond_label="chi_new")
+    P_second = _scale_bond_by_diag(P_second_unscaled, S_inv_sqrt, bond_label="chi_new")
+
+    # ---- Stage 6: relabel and reorder axes to match the dense path's output. ----
+    if prime_order == "second_first":
+        P_top_unwrapped, top_outer = P_first, first_outer_labels
+        P_bot_unwrapped, bot_outer = P_second, second_outer_labels
+    else:
+        P_top_unwrapped, top_outer = P_second, second_outer_labels
+        P_bot_unwrapped, bot_outer = P_first, first_outer_labels
+
+    chi_lbl_top, D2_lbl_top = top_outer
+    chi_lbl_bot, D2_lbl_bot = bot_outer
+
+    P_top = P_top_unwrapped.relabels(
+        {
+            chi_lbl_top: "chi_outer",
+            D2_lbl_top: "fused_D2",
+            "chi_new": "chi_new_top",
+        }
+    )
+    P_bot = P_bot_unwrapped.relabels(
+        {
+            chi_lbl_bot: "chi_outer",
+            D2_lbl_bot: "fused_D2",
+            "chi_new": "chi_new_bot",
+        }
+    )
+
+    P_top = P_top.transpose(
+        tuple(
+            P_top.labels().index(lbl)
+            for lbl in ("chi_outer", "fused_D2", "chi_new_top")
+        )
+    )
+    P_bot = P_bot.transpose(
+        tuple(
+            P_bot.labels().index(lbl)
+            for lbl in ("chi_new_bot", "chi_outer", "fused_D2")
+        )
+    )
+    return P_top, P_bot
