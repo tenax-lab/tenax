@@ -108,7 +108,18 @@ def _make_symmetric_enlarged_corner(
 
 @pytest.fixture
 def symmetric_corners():
-    """Return (Q_TL, Q_TR, Q_BL, Q_BR) — 4-leg SymmetricTensors with non-trivial U(1)."""
+    """Return (Q_TL, Q_TR, Q_BL, Q_BR) — 4-leg SymmetricTensors with non-trivial U(1).
+
+    Uses MIXED flow conventions (chi seam OUT, D^2 seam IN for Q_TL; mirrored
+    for the other three corners with matching pair-flows for auto-contraction)
+    so each corner has multiple U(1) charge blocks and the resulting M_prime
+    SVD spans more than one bond sector.  Task 5's
+    ``test_..._base_charges_drive_chi_new`` requires M_prime to have charge-1
+    sectors to verify per-sector allocation; the all-OUT-Q_TL/all-IN-Q_BR
+    fixture used in Tasks 2-4 would have collapsed M_prime to a single
+    charge-0 block via U(1) selection rules.  Closure still holds for all
+    four directions under the richer fixture.
+    """
     chi, D = 4, 2
     Q_TL = _make_symmetric_enlarged_corner(
         chi,
@@ -119,8 +130,8 @@ def symmetric_corners():
         D2_label_b="d2",
         flow_chi_a=FlowDirection.OUT,
         flow_chi_b=FlowDirection.OUT,
-        flow_D2_a=FlowDirection.OUT,
-        flow_D2_b=FlowDirection.OUT,
+        flow_D2_a=FlowDirection.IN,
+        flow_D2_b=FlowDirection.IN,
         seed=0,
     )
     Q_TR = _make_symmetric_enlarged_corner(
@@ -132,8 +143,8 @@ def symmetric_corners():
         D2_label_b="d2",
         flow_chi_a=FlowDirection.IN,
         flow_chi_b=FlowDirection.OUT,
-        flow_D2_a=FlowDirection.IN,
-        flow_D2_b=FlowDirection.OUT,
+        flow_D2_a=FlowDirection.OUT,
+        flow_D2_b=FlowDirection.IN,
         seed=1,
     )
     Q_BL = _make_symmetric_enlarged_corner(
@@ -145,8 +156,8 @@ def symmetric_corners():
         D2_label_b="u2",
         flow_chi_a=FlowDirection.OUT,
         flow_chi_b=FlowDirection.IN,
-        flow_D2_a=FlowDirection.OUT,
-        flow_D2_b=FlowDirection.IN,
+        flow_D2_a=FlowDirection.IN,
+        flow_D2_b=FlowDirection.OUT,
         seed=2,
     )
     Q_BR = _make_symmetric_enlarged_corner(
@@ -158,8 +169,8 @@ def symmetric_corners():
         D2_label_b="u2",
         flow_chi_a=FlowDirection.IN,
         flow_chi_b=FlowDirection.IN,
-        flow_D2_a=FlowDirection.IN,
-        flow_D2_b=FlowDirection.IN,
+        flow_D2_a=FlowDirection.OUT,
+        flow_D2_b=FlowDirection.OUT,
         seed=3,
     )
     return Q_TL, Q_TR, Q_BL, Q_BR
@@ -213,4 +224,36 @@ def test_compute_2x2_projector_symmetric_closure_other_directions(
         np.eye(chi_new),
         atol=1e-9,
         err_msg=f"P_bot · P_top must be identity for direction={direction!r}",
+    )
+
+
+def test_compute_2x2_projector_symmetric_base_charges_drive_chi_new(symmetric_corners):
+    """When base_charges is supplied, chi_new charges match _derive_charges(base_charges, chi).
+
+    Multiset (not ordered) comparison: the per-sector allocation in
+    ``_retruncate_by_base_charges`` traverses ``target_count`` in sorted
+    charge order, while ``_derive_charges`` preserves the interleaved
+    ``base_charges`` tile order.  The two agree as multisets — that is
+    the meaningful per-sector-budget invariant — but not element-wise.
+    Aligned with ``_svd_projector_symmetric``'s sorted-charge convention.
+    """
+    from collections import Counter
+
+    from tenax.algorithms._ctm_utils import _derive_charges
+
+    Q_TL, Q_TR, Q_BL, Q_BR = symmetric_corners
+    chi = 4
+    base_charges = np.array([0, 1, 0, 1], dtype=np.int32)
+
+    P_top, P_bot = _compute_2x2_projector(
+        Q_TL, Q_TR, Q_BL, Q_BR, chi=chi, direction="left", base_charges=base_charges
+    )
+    expected_chi_new = _derive_charges(base_charges, P_top.indices[2].dim)
+    actual_chi_new = np.asarray(P_top.indices[2].charges, dtype=np.int32)
+    assert Counter(int(q) for q in actual_chi_new) == Counter(
+        int(q) for q in expected_chi_new
+    ), (
+        f"chi_new charge multiset must match _derive_charges(base_charges, "
+        f"{P_top.indices[2].dim}); got {actual_chi_new.tolist()} vs "
+        f"{expected_chi_new.tolist()}"
     )

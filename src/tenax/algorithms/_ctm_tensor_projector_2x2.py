@@ -321,6 +321,7 @@ def _compute_2x2_projector(
     chi: int,
     *,
     direction: str = "left",
+    base_charges: np.ndarray | None = None,
 ) -> tuple[Tensor, Tensor]:
     r"""Fishman 2x2 plaquette cross-projector for the multisite CTM move.
 
@@ -349,6 +350,9 @@ def _compute_2x2_projector(
             - ``"right"`` truncates the RIGHT-column chi seam (T2's chi),
             - ``"top"``   truncates the TOP-row chi seam (T1's chi),
             - ``"bottom"`` truncates the BOTTOM-row chi seam (T3's chi).
+        base_charges: Optional 1-D ``np.ndarray`` of bond charges driving
+            per-sector ``chi_new`` allocation via ``_derive_charges`` in the
+            symmetric branch.  Ignored on the dense path (no charge sectors).
 
     Returns:
         Pair ``(P_top, P_bot)`` of rank-3 :class:`DenseTensor` projectors:
@@ -402,7 +406,13 @@ def _compute_2x2_projector(
 
         if not any(_has_tracer(q) for q in (Q_TL, Q_TR, Q_BL, Q_BR)):
             return _compute_2x2_projector_symmetric(
-                Q_TL, Q_TR, Q_BL, Q_BR, chi, direction=direction
+                Q_TL,
+                Q_TR,
+                Q_BL,
+                Q_BR,
+                chi,
+                direction=direction,
+                base_charges=base_charges,
             )
         # Tracer-bearing symmetric path falls through to densify-and-dense-pipeline below.
 
@@ -648,6 +658,101 @@ def _compute_2x2_projector(
     return P_top, P_bot
 
 
+def _retruncate_by_base_charges(
+    U_T: SymmetricTensor,
+    S: jax.Array,
+    Vh_T: SymmetricTensor,
+    *,
+    base_charges: np.ndarray,
+    chi: int,
+) -> tuple[SymmetricTensor, jax.Array, SymmetricTensor]:
+    """Re-truncate a full SymmetricTensor SVD to ``chi`` entries with per-sector allocation.
+
+    Allocates target counts via ``_derive_charges(base_charges, chi)``; greedy
+    top-k fills any remaining budget across sectors.  Mirrors the per-sector
+    allocation logic in ``_svd_projector_symmetric`` (``_ctm_projector.py``).
+
+    The returned U/S/Vh are gauge-consistent with the input (same U/Vh slot
+    values, just a subset of bond columns/rows).
+    """
+    from tenax.algorithms._ctm_utils import _derive_charges
+
+    bond_charges_full = np.asarray(U_T.indices[-1].charges, dtype=np.int32)
+    target_charges = _derive_charges(base_charges, chi)
+    target_count: dict[int, int] = {}
+    for q in target_charges:
+        target_count[int(q)] = target_count.get(int(q), 0) + 1
+
+    in_sector_idx_of: dict[int, list[int]] = {}
+    for j, q in enumerate(bond_charges_full):
+        q_int = int(q)
+        in_sector_idx_of.setdefault(q_int, []).append(j)
+
+    keep_global: list[int] = []
+    for q, want in sorted(target_count.items()):
+        slots = in_sector_idx_of.get(q, [])
+        take = min(want, len(slots))
+        keep_global.extend(slots[:take])
+
+    # Fill any remaining budget greedily from any unused entry (global SV order).
+    remaining = chi - len(keep_global)
+    if remaining > 0:
+        used_set = set(keep_global)
+        for j in range(len(bond_charges_full)):
+            if remaining <= 0:
+                break
+            if j not in used_set:
+                keep_global.append(j)
+                used_set.add(j)
+                remaining -= 1
+
+    keep_global.sort()  # ascending order makes downstream rebuilds simpler
+
+    new_bond_charges = bond_charges_full[np.asarray(keep_global, dtype=np.int32)]
+    S_new = jnp.asarray(S)[jnp.asarray(keep_global)]
+
+    sym = U_T.indices[0].symmetry
+    new_bond_out = TensorIndex.from_charges(
+        sym, new_bond_charges, FlowDirection.OUT, label=U_T.indices[-1].label
+    )
+    new_bond_in = TensorIndex.from_charges(
+        sym, new_bond_charges, FlowDirection.IN, label=Vh_T.indices[0].label
+    )
+    new_U_indices = U_T.indices[:-1] + (new_bond_out,)
+    new_Vh_indices = (new_bond_in,) + Vh_T.indices[1:]
+
+    keep_set = set(keep_global)
+    new_U_blocks: dict[tuple[int, ...], jax.Array] = {}
+    for key, block in U_T.blocks.items():
+        q = int(key[-1])
+        in_sector_positions = in_sector_idx_of.get(q, [])
+        kept_within_sector = [
+            pos for pos, j in enumerate(in_sector_positions) if j in keep_set
+        ]
+        if not kept_within_sector:
+            continue
+        idx_arr = jnp.array(kept_within_sector, dtype=np.int32)
+        new_U_blocks[key] = jnp.take(block, idx_arr, axis=-1)
+
+    new_Vh_blocks: dict[tuple[int, ...], jax.Array] = {}
+    for key, block in Vh_T.blocks.items():
+        q = int(key[0])
+        in_sector_positions = in_sector_idx_of.get(q, [])
+        kept_within_sector = [
+            pos for pos, j in enumerate(in_sector_positions) if j in keep_set
+        ]
+        if not kept_within_sector:
+            continue
+        idx_arr = jnp.array(kept_within_sector, dtype=np.int32)
+        new_Vh_blocks[key] = jnp.take(block, idx_arr, axis=0)
+
+    return (
+        SymmetricTensor._from_blocks_unchecked(new_U_blocks, new_U_indices),
+        S_new,
+        SymmetricTensor._from_blocks_unchecked(new_Vh_blocks, new_Vh_indices),
+    )
+
+
 def _compute_2x2_projector_symmetric(
     Q_TL: SymmetricTensor,
     Q_TR: SymmetricTensor,
@@ -779,13 +884,26 @@ def _compute_2x2_projector_symmetric(
         mp_left_labels = ("m1_bond",)
         mp_right_labels = ("m2_bond",)
 
-    U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
-        M_prime_T,
-        left_labels=mp_left_labels,
-        right_labels=mp_right_labels,
-        new_bond_label="chi_new",
-        max_singular_values=chi,
-    )
+    if base_charges is None:
+        U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
+            M_prime_T,
+            left_labels=mp_left_labels,
+            right_labels=mp_right_labels,
+            new_bond_label="chi_new",
+            max_singular_values=chi,
+        )
+    else:
+        # Full-spectrum SVD, then per-sector re-truncation honoring base_charges.
+        U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
+            M_prime_T,
+            left_labels=mp_left_labels,
+            right_labels=mp_right_labels,
+            new_bond_label="chi_new",
+            max_singular_values=None,
+        )
+        U_Mp_T, S_Mp, Vh_Mp_T = _retruncate_by_base_charges(
+            U_Mp_T, S_Mp, Vh_Mp_T, base_charges=base_charges, chi=chi
+        )
     U_Mp_T, Vh_Mp_T = _gauge_fix_symmetric_svd(U_Mp_T, Vh_Mp_T)
 
     # ---- Stage 5: cross-projectors via bar() for the SVD adjoint. ----
