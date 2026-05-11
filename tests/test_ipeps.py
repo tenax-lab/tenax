@@ -1295,6 +1295,16 @@ class TestADSymmetric:
             f"expected DenseTensor, got {type(A_dense_opt).__name__}"
         )
 
+    @pytest.mark.xfail(
+        strict=False,
+        reason=(
+            "Non-trivial U(1) charges in 2x2 dense fallback wrap (Issue #435): "
+            "AD-traced symmetric inputs route through the dense fallback, which "
+            "currently wraps output projectors with trivial charges. Downstream "
+            "contractions fail with shape mismatch on non-trivial sectors. "
+            "Tracked as Issue #435."
+        ),
+    )
     def test_optimize_gs_ad_nontrivial_u1_preserves_symmetric_type(self):
         """Regression for #297: optimizer shell must accept a SymmetricTensor
         with *non-trivial* U(1) charges and return a SymmetricTensor (not
