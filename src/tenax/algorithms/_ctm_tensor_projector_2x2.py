@@ -368,17 +368,14 @@ def _compute_2x2_projector(
         projectors into the appropriate sublattice edges.
 
     Note:
-        This implementation currently supports trivial-charge tensors only
-        (``DenseTensor`` or ``SymmetricTensor`` whose every leg has a single
-        sector ``[0]``).  The output charge bookkeeping hard-codes zeros, so
-        non-trivial U(1) sectors would silently be discarded.  A runtime
-        guard at function entry raises ``NotImplementedError`` when the
-        inputs carry non-trivial charges; symmetric support is a follow-up.
-        See ``docs/plans/2026-05-07-ctm-multisite-2x2-projector-design.md``.
+        ``SymmetricTensor`` inputs whose blocks are eager arrays dispatch to
+        :func:`_compute_2x2_projector_symmetric`, which runs the block-sparse
+        Fishman pipeline per charge sector and preserves U(1) quantum
+        numbers.  ``DenseTensor`` inputs and tracer-bearing symmetric inputs
+        (AD backward through ``custom_vjp`` GMRES) fall through to the dense
+        pipeline below, which densifies symmetric blocks before SVD.
 
     Raises:
-        NotImplementedError: When any input tensor carries non-trivial
-            charge sectors.
         ValueError: For unrecognized ``direction``.
 
     References:
@@ -389,27 +386,25 @@ def _compute_2x2_projector(
     if direction not in ("left", "right", "top", "bottom"):
         raise ValueError(f"unsupported direction={direction!r}")
 
-    # Trivial-charge guard: this routine wraps the projector outputs with
-    # hard-coded zero-charge TensorIndex objects on the chi_outer / fused_D2
-    # / chi_new legs (see Step 6 below).  If any input tensor carries a
-    # non-trivial U(1) sector structure, that bookkeeping would silently
-    # discard the symmetry information, producing a wrong projector.  Until
-    # symmetric support lands as a follow-up, refuse to run on non-trivial
-    # inputs.
-    for name, tensor in (
-        ("Q_TL", Q_TL),
-        ("Q_TR", Q_TR),
-        ("Q_BL", Q_BL),
-        ("Q_BR", Q_BR),
-    ):
-        for axis, idx in enumerate(tensor.indices):
-            if idx.n_sectors != 1 or int(idx.sectors[0]) != 0:
-                raise NotImplementedError(
-                    "_compute_2x2_projector currently supports trivial-charge "
-                    "tensors only; symmetric support is a follow-up. "
-                    "See docs/plans/2026-05-07-ctm-multisite-2x2-projector-design.md."
-                    f" (Got {name}.indices[{axis}] with sectors={idx.sectors.tolist()}.)"
-                )
+    # Dispatch: SymmetricTensor inputs (without JAX tracers in any block) go
+    # through the block-sparse path (Issue #416).  Tracer-bearing symmetric
+    # blocks (AD backward) and pure DenseTensor inputs fall through to the
+    # dense pipeline below.  Densifying tracer-bearing symmetric inputs is
+    # safe because the AD backward only runs the projector once per GMRES
+    # matvec; eager-mode symmetric inputs (forward CTM) take the block-sparse
+    # path for performance and charge-structure preservation.
+    if any(isinstance(q, SymmetricTensor) for q in (Q_TL, Q_TR, Q_BL, Q_BR)):
+
+        def _has_tracer(t: Tensor) -> bool:
+            if isinstance(t, SymmetricTensor):
+                return any(isinstance(b, jax.core.Tracer) for b in t.blocks.values())
+            return isinstance(getattr(t, "_data", None), jax.core.Tracer)
+
+        if not any(_has_tracer(q) for q in (Q_TL, Q_TR, Q_BL, Q_BR)):
+            return _compute_2x2_projector_symmetric(
+                Q_TL, Q_TR, Q_BL, Q_BR, chi, direction=direction
+            )
+        # Tracer-bearing symmetric path falls through to densify-and-dense-pipeline below.
 
     # ---- Step 1: form the two halves (M1, M2) for the chosen direction. ----
     # Each direction contracts one OUTER seam between two adjacent quarters,

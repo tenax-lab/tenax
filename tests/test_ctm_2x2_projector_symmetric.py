@@ -167,18 +167,14 @@ def symmetric_corners():
 
 def test_compute_2x2_projector_symmetric_closure_left(symmetric_corners):
     """Symmetric path: `P_bot · P_top = I_chi_new` (closure check)."""
-    from tenax.algorithms._ctm_tensor_projector_2x2 import (
-        _compute_2x2_projector_symmetric,
-    )
     from tenax.contraction.contractor import contract
 
     Q_TL, Q_TR, Q_BL, Q_BR = symmetric_corners
     chi = 4
 
-    # NOTE: Task 4 will land a dispatch in _compute_2x2_projector that routes
-    # SymmetricTensor inputs to this helper.  Until then, call the helper
-    # directly so the test runs in isolation.
-    P_top, P_bot = _compute_2x2_projector_symmetric(
+    # Task 4 dispatches SymmetricTensor inputs through _compute_2x2_projector
+    # to the block-sparse _compute_2x2_projector_symmetric helper.
+    P_top, P_bot = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi=chi, direction="left"
     )
     I_tensor = contract(P_bot, P_top)
@@ -202,14 +198,11 @@ def test_compute_2x2_projector_symmetric_closure_other_directions(
     symmetric_corners, direction
 ):
     """Closure test for direction in {right, top, bottom}."""
-    from tenax.algorithms._ctm_tensor_projector_2x2 import (
-        _compute_2x2_projector_symmetric,
-    )
     from tenax.contraction.contractor import contract
 
     Q_TL, Q_TR, Q_BL, Q_BR = symmetric_corners
     chi = 4
-    P_top, P_bot = _compute_2x2_projector_symmetric(
+    P_top, P_bot = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi=chi, direction=direction
     )
     I_tensor = contract(P_bot, P_top)
