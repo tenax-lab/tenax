@@ -18,7 +18,7 @@ import numpy as np
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor, Tensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 __all__ = ["_build_enlarged_corner", "_compute_2x2_projector"]
 
@@ -48,6 +48,131 @@ def _gauge_fixed_svd(
     U = U * jnp.conj(phases)[None, :]
     Vh = Vh * phases[:, None]
     return U, s, Vh
+
+
+def _gauge_fix_symmetric_svd(
+    U_T: SymmetricTensor, Vh_T: SymmetricTensor
+) -> tuple[SymmetricTensor, SymmetricTensor]:
+    """Per-sector gauge fix for SymmetricTensor SVD outputs.
+
+    Mirrors :func:`_gauge_fixed_svd` (the dense 2x2 gauge convention) at the
+    block level: for each kept singular vector j, finds the entry of largest
+    ``|U[:, j]|`` across all U-blocks that share its bond charge, rotates U's
+    column and Vh's row by ``conj(phase)`` / ``phase`` so that
+    ``U @ diag(s) @ Vh == M`` is preserved.  Critical for the 2x2 closure
+    ``P_bot · P_top = I`` (no intervening matrix to absorb a ``conj(phase)**2``
+    factor — see the docstring of :func:`_gauge_fixed_svd`).
+    """
+    bond_idx = U_T.indices[-1]  # last leg of U is the SVD bond
+    bond_charges = np.asarray(bond_idx.charges, dtype=np.int32)
+
+    # Per global column j, find its (charge, in-sector local index).
+    # The sector ordering matches _truncated_svd_symmetric (bond charges
+    # are listed in descending-SV global order); within a sector, the
+    # local indices are 0..n_q-1 in the order they appear in bond_charges.
+    local_index_of: dict[int, dict[int, int]] = {}  # q -> {global_j: local_idx}
+    counter: dict[int, int] = {}
+    for j, q in enumerate(bond_charges):
+        q_int = int(q)
+        local_index_of.setdefault(q_int, {})[j] = counter.get(q_int, 0)
+        counter[q_int] = counter.get(q_int, 0) + 1
+
+    # Collect U-blocks indexed by bond charge (last key entry).
+    u_blocks_by_q: dict[int, list[tuple[tuple[int, ...], jax.Array]]] = {}
+    for key, block in U_T.blocks.items():
+        q = int(key[-1])
+        u_blocks_by_q.setdefault(q, []).append((key, block))
+
+    # Collect Vh-blocks indexed by bond charge (FIRST key entry).
+    vh_blocks_by_q: dict[int, list[tuple[tuple[int, ...], jax.Array]]] = {}
+    for key, block in Vh_T.blocks.items():
+        q = int(key[0])
+        vh_blocks_by_q.setdefault(q, []).append((key, block))
+
+    new_u_blocks: dict[tuple[int, ...], jax.Array] = {
+        key: block for key, block in U_T.blocks.items()
+    }
+    new_vh_blocks: dict[tuple[int, ...], jax.Array] = {
+        key: block for key, block in Vh_T.blocks.items()
+    }
+
+    # For each global column j, compute its phase and write it back.
+    for j, q in enumerate(bond_charges):
+        q_int = int(q)
+        local = local_index_of[q_int][j]
+        u_entries = u_blocks_by_q.get(q_int, [])
+
+        # Find max-abs entry across all U-blocks' local-column `local`.
+        best_abs = -1.0
+        best_value: complex | float = 1.0
+        for _key, block in u_entries:
+            # block shape: (left_dims..., n_q); take the slice block[..., local]
+            col_slice = block[..., local]
+            col_flat = jnp.reshape(col_slice, (-1,))
+            local_max_idx = int(jnp.argmax(jnp.abs(col_flat)))
+            local_max_val = complex(col_flat[local_max_idx])
+            local_max_abs = abs(local_max_val)
+            if local_max_abs > best_abs:
+                best_abs = local_max_abs
+                best_value = local_max_val
+
+        if best_abs <= 0.0:
+            phase = 1.0 + 0.0j
+        else:
+            phase = best_value / abs(best_value)
+
+        # If the imaginary part is exactly zero (real inputs), keep the phase
+        # as a real scalar so multiplying float64 blocks does not trigger the
+        # JAX complex-to-real cast warning.
+        if phase.imag == 0.0:
+            conj_phase = jnp.asarray(phase.real)
+            bare_phase = jnp.asarray(phase.real)
+        else:
+            conj_phase = jnp.asarray(complex(phase).conjugate())
+            bare_phase = jnp.asarray(complex(phase))
+
+        # Apply conj(phase) to column `local` of every matching U-block.
+        for key, _block in u_entries:
+            new_block = new_u_blocks[key]
+            new_block = new_block.at[..., local].multiply(conj_phase)
+            new_u_blocks[key] = new_block
+
+        # Apply phase to row `local` of every matching Vh-block.
+        for key, _block in vh_blocks_by_q.get(q_int, []):
+            new_block = new_vh_blocks[key]
+            new_block = new_block.at[local, ...].multiply(bare_phase)
+            new_vh_blocks[key] = new_block
+
+    U_out = SymmetricTensor._from_blocks_unchecked(new_u_blocks, U_T.indices)
+    Vh_out = SymmetricTensor._from_blocks_unchecked(new_vh_blocks, Vh_T.indices)
+    return U_out, Vh_out
+
+
+def _scale_bond_by_diag(
+    T: SymmetricTensor, diag: jax.Array, bond_label: str
+) -> SymmetricTensor:
+    """Multiply each block of ``T`` along its ``bond_label`` axis by ``diag``.
+
+    The bond's TensorIndex charges encode each slot's sector; ``diag[j]`` is
+    applied to slot ``j`` of every block whose bond key matches sector
+    ``bond_charges[j]``.
+
+    Used to express ``T @ diag(s)`` (or ``diag(s) @ T``) in the symmetric
+    pipeline without densifying.
+    """
+    bond_axis = T.labels().index(bond_label)
+    bond_idx = T.indices[bond_axis]
+    bond_charges = np.asarray(bond_idx.charges, dtype=np.int32)
+
+    new_blocks: dict[tuple[int, ...], jax.Array] = {}
+    for key, block in T.blocks.items():
+        q = int(key[bond_axis])
+        positions = [j for j, cq in enumerate(bond_charges) if int(cq) == q]
+        diag_slice = jnp.asarray(diag)[jnp.array(positions, dtype=np.int32)]
+        shape = [1] * block.ndim
+        shape[bond_axis] = len(positions)
+        new_blocks[key] = block * diag_slice.reshape(shape)
+    return SymmetricTensor._from_blocks_unchecked(new_blocks, T.indices)
 
 
 def _build_enlarged_corner(
@@ -196,6 +321,7 @@ def _compute_2x2_projector(
     chi: int,
     *,
     direction: str = "left",
+    base_charges: np.ndarray | None = None,
 ) -> tuple[Tensor, Tensor]:
     r"""Fishman 2x2 plaquette cross-projector for the multisite CTM move.
 
@@ -224,6 +350,9 @@ def _compute_2x2_projector(
             - ``"right"`` truncates the RIGHT-column chi seam (T2's chi),
             - ``"top"``   truncates the TOP-row chi seam (T1's chi),
             - ``"bottom"`` truncates the BOTTOM-row chi seam (T3's chi).
+        base_charges: Optional 1-D ``np.ndarray`` of bond charges driving
+            per-sector ``chi_new`` allocation via ``_derive_charges`` in the
+            symmetric branch.  Ignored on the dense path (no charge sectors).
 
     Returns:
         Pair ``(P_top, P_bot)`` of rank-3 :class:`DenseTensor` projectors:
@@ -243,17 +372,14 @@ def _compute_2x2_projector(
         projectors into the appropriate sublattice edges.
 
     Note:
-        This implementation currently supports trivial-charge tensors only
-        (``DenseTensor`` or ``SymmetricTensor`` whose every leg has a single
-        sector ``[0]``).  The output charge bookkeeping hard-codes zeros, so
-        non-trivial U(1) sectors would silently be discarded.  A runtime
-        guard at function entry raises ``NotImplementedError`` when the
-        inputs carry non-trivial charges; symmetric support is a follow-up.
-        See ``docs/plans/2026-05-07-ctm-multisite-2x2-projector-design.md``.
+        ``SymmetricTensor`` inputs whose blocks are eager arrays dispatch to
+        :func:`_compute_2x2_projector_symmetric`, which runs the block-sparse
+        Fishman pipeline per charge sector and preserves U(1) quantum
+        numbers.  ``DenseTensor`` inputs and tracer-bearing symmetric inputs
+        (AD backward through ``custom_vjp`` GMRES) fall through to the dense
+        pipeline below, which densifies symmetric blocks before SVD.
 
     Raises:
-        NotImplementedError: When any input tensor carries non-trivial
-            charge sectors.
         ValueError: For unrecognized ``direction``.
 
     References:
@@ -264,27 +390,40 @@ def _compute_2x2_projector(
     if direction not in ("left", "right", "top", "bottom"):
         raise ValueError(f"unsupported direction={direction!r}")
 
-    # Trivial-charge guard: this routine wraps the projector outputs with
-    # hard-coded zero-charge TensorIndex objects on the chi_outer / fused_D2
-    # / chi_new legs (see Step 6 below).  If any input tensor carries a
-    # non-trivial U(1) sector structure, that bookkeeping would silently
-    # discard the symmetry information, producing a wrong projector.  Until
-    # symmetric support lands as a follow-up, refuse to run on non-trivial
-    # inputs.
-    for name, tensor in (
-        ("Q_TL", Q_TL),
-        ("Q_TR", Q_TR),
-        ("Q_BL", Q_BL),
-        ("Q_BR", Q_BR),
-    ):
-        for axis, idx in enumerate(tensor.indices):
-            if idx.n_sectors != 1 or int(idx.sectors[0]) != 0:
-                raise NotImplementedError(
-                    "_compute_2x2_projector currently supports trivial-charge "
-                    "tensors only; symmetric support is a follow-up. "
-                    "See docs/plans/2026-05-07-ctm-multisite-2x2-projector-design.md."
-                    f" (Got {name}.indices[{axis}] with sectors={idx.sectors.tolist()}.)"
-                )
+    # Track whether any input is a SymmetricTensor.  When true and the
+    # block-sparse path is unavailable (tracer-bearing blocks under AD), the
+    # dense fallback below must still return SymmetricTensor projectors so
+    # downstream contractions don't trip
+    # ``Cannot mix DenseTensor and SymmetricTensor`` (Issue #416).
+    inputs_are_symmetric = any(
+        isinstance(q, SymmetricTensor) for q in (Q_TL, Q_TR, Q_BL, Q_BR)
+    )
+
+    # Dispatch: SymmetricTensor inputs (without JAX tracers in any block) go
+    # through the block-sparse path (Issue #416).  Tracer-bearing symmetric
+    # blocks (AD backward) and pure DenseTensor inputs fall through to the
+    # dense pipeline below.  Densifying tracer-bearing symmetric inputs is
+    # safe because the AD backward only runs the projector once per GMRES
+    # matvec; eager-mode symmetric inputs (forward CTM) take the block-sparse
+    # path for performance and charge-structure preservation.
+    if inputs_are_symmetric:
+
+        def _has_tracer(t: Tensor) -> bool:
+            if isinstance(t, SymmetricTensor):
+                return any(isinstance(b, jax.core.Tracer) for b in t.blocks.values())
+            return isinstance(getattr(t, "_data", None), jax.core.Tracer)
+
+        if not any(_has_tracer(q) for q in (Q_TL, Q_TR, Q_BL, Q_BR)):
+            return _compute_2x2_projector_symmetric(
+                Q_TL,
+                Q_TR,
+                Q_BL,
+                Q_BR,
+                chi,
+                direction=direction,
+                base_charges=base_charges,
+            )
+        # Tracer-bearing symmetric path falls through to densify-and-dense-pipeline below.
 
     # ---- Step 1: form the two halves (M1, M2) for the chosen direction. ----
     # Each direction contracts one OUTER seam between two adjacent quarters,
@@ -305,6 +444,7 @@ def _compute_2x2_projector(
         top_order = ("chi_B_TL", "d2_TL", "chi_B_TR", "d2_TR")
         top_axes = tuple(top_T.labels().index(lbl) for lbl in top_order)
         top_T = top_T.transpose(top_axes)
+        chi_M1_row_idx, D2_M1_row_idx, chi_M1_col_idx, D2_M1_col_idx = top_T.indices
         chi_M1_row, D2_M1_row, chi_M1_col, D2_M1_col = (
             idx.dim for idx in top_T.indices
         )
@@ -322,6 +462,7 @@ def _compute_2x2_projector(
         bot_order = ("chi_T_BR", "u2_BR", "chi_T_BL", "u2_BL")
         bot_axes = tuple(bot_T.labels().index(lbl) for lbl in bot_order)
         bot_T = bot_T.transpose(bot_axes)
+        chi_M2_row_idx, D2_M2_row_idx, chi_M2_col_idx, D2_M2_col_idx = bot_T.indices
         chi_M2_row, D2_M2_row, chi_M2_col, D2_M2_col = (
             idx.dim for idx in bot_T.indices
         )
@@ -341,6 +482,7 @@ def _compute_2x2_projector(
         left_order = ("chi_R_BL", "r2_BL", "chi_R_TL", "r2_TL")
         left_axes = tuple(left_T.labels().index(lbl) for lbl in left_order)
         left_T = left_T.transpose(left_axes)
+        chi_M1_row_idx, D2_M1_row_idx, chi_M1_col_idx, D2_M1_col_idx = left_T.indices
         chi_M1_row, D2_M1_row, chi_M1_col, D2_M1_col = (
             idx.dim for idx in left_T.indices
         )
@@ -359,6 +501,7 @@ def _compute_2x2_projector(
         right_order = ("chi_L_TR", "l2_TR", "chi_L_BR", "l2_BR")
         right_axes = tuple(right_T.labels().index(lbl) for lbl in right_order)
         right_T = right_T.transpose(right_axes)
+        chi_M2_row_idx, D2_M2_row_idx, chi_M2_col_idx, D2_M2_col_idx = right_T.indices
         chi_M2_row, D2_M2_row, chi_M2_col, D2_M2_col = (
             idx.dim for idx in right_T.indices
         )
@@ -405,6 +548,8 @@ def _compute_2x2_projector(
         second_half = M2_sqrtS[:, None] * M2_Vh  # (k2, cols_M2)
         first_size = (chi_M1_row, D2_M1_row)
         second_size = (chi_M2_col, D2_M2_col)
+        first_chi_idx, first_D2_idx = chi_M1_row_idx, D2_M1_row_idx
+        second_chi_idx, second_D2_idx = chi_M2_col_idx, D2_M2_col_idx
         prime_order = "second_first"  # M_prime = second_half @ first_half
     else:
         # direction in ("right", "top"): M_prime = M1 @ M2.
@@ -412,6 +557,8 @@ def _compute_2x2_projector(
         second_half = M2_U * M2_sqrtS[None, :]  # (rows_M2, k2)
         first_size = (chi_M1_col, D2_M1_col)
         second_size = (chi_M2_row, D2_M2_row)
+        first_chi_idx, first_D2_idx = chi_M1_col_idx, D2_M1_col_idx
+        second_chi_idx, second_D2_idx = chi_M2_row_idx, D2_M2_row_idx
         prime_order = "first_second"  # M_prime = first_half @ second_half
 
     # variPEPS-style normalization for stability.
@@ -477,6 +624,8 @@ def _compute_2x2_projector(
         P_bot_dense = P_second_dense
         chi_top, D2_top = first_size
         chi_bot, D2_bot = second_size
+        chi_top_in_idx, D2_top_in_idx = first_chi_idx, first_D2_idx
+        chi_bot_in_idx, D2_bot_in_idx = second_chi_idx, second_D2_idx
     else:
         # P_first has shape (k, cols_size); P_second has shape (rows_size, k).
         # We want P_top to lead with (chi_outer, fused_D2) so wrap P_second
@@ -485,12 +634,29 @@ def _compute_2x2_projector(
         P_bot_dense = P_first_dense  # (k, cols_size)
         chi_top, D2_top = second_size
         chi_bot, D2_bot = first_size
+        chi_top_in_idx, D2_top_in_idx = second_chi_idx, second_D2_idx
+        chi_bot_in_idx, D2_bot_in_idx = first_chi_idx, first_D2_idx
 
-    sym = U1Symmetry()
-    chi_top_charges = np.zeros(chi_top, dtype=np.int32)
-    D2_top_charges = np.zeros(D2_top, dtype=np.int32)
-    chi_bot_charges = np.zeros(chi_bot, dtype=np.int32)
-    D2_bot_charges = np.zeros(D2_bot, dtype=np.int32)
+    # Derive charges for the output indices.  When inputs are SymmetricTensor,
+    # use the seam TensorIndex charges captured from M1/M2's 4-leg form so the
+    # output projector legs carry the same U(1) labels as the upstream env.
+    # All-DenseTensor inputs continue to use trivial-zero charges (matching
+    # those inputs' implicit ``np.zeros`` charges in TensorIndex.from_charges).
+    sym = chi_top_in_idx.symmetry if inputs_are_symmetric else U1Symmetry()
+    if inputs_are_symmetric:
+        chi_top_charges = np.asarray(chi_top_in_idx.charges, dtype=np.int32)
+        D2_top_charges = np.asarray(D2_top_in_idx.charges, dtype=np.int32)
+        chi_bot_charges = np.asarray(chi_bot_in_idx.charges, dtype=np.int32)
+        D2_bot_charges = np.asarray(D2_bot_in_idx.charges, dtype=np.int32)
+    else:
+        chi_top_charges = np.zeros(chi_top, dtype=np.int32)
+        D2_top_charges = np.zeros(D2_top, dtype=np.int32)
+        chi_bot_charges = np.zeros(chi_bot, dtype=np.int32)
+        D2_bot_charges = np.zeros(D2_bot, dtype=np.int32)
+    # chi_new charges: pragmatic trivial.  The SymmetricTensor wrap below uses
+    # ``tol=float("inf")`` so block-sector selection is not enforced at wrap
+    # time; the backward AD path treats projectors as ``stop_gradient``
+    # constants, so the bond-charge structure does not propagate further.
     new_top_charges = np.zeros(chi_new, dtype=np.int32)
     new_bot_charges = np.zeros(chi_new, dtype=np.int32)
 
@@ -523,6 +689,328 @@ def _compute_2x2_projector(
     P_top_arr = P_top_dense.reshape(chi_top, D2_top, chi_new)
     P_bot_arr = P_bot_dense.reshape(chi_new, chi_bot, D2_bot)
 
-    P_top = DenseTensor(P_top_arr, P_top_idx)
-    P_bot = DenseTensor(P_bot_arr, P_bot_idx)
+    if inputs_are_symmetric:
+        # Wrap as SymmetricTensor so downstream contractions with symmetric
+        # envs don't raise ``Cannot mix DenseTensor and SymmetricTensor``
+        # (Issue #416).  ``tol=float("inf")`` skips per-sector validation: the
+        # dense fallback is reached under AD tracing where projectors are
+        # taken as ``stop_gradient`` constants downstream, so the projector
+        # block sectors need not exactly satisfy charge selection at the wrap
+        # layer.
+        P_top = SymmetricTensor.from_dense(P_top_arr, P_top_idx, tol=float("inf"))
+        P_bot = SymmetricTensor.from_dense(P_bot_arr, P_bot_idx, tol=float("inf"))
+    else:
+        P_top = DenseTensor(P_top_arr, P_top_idx)
+        P_bot = DenseTensor(P_bot_arr, P_bot_idx)
+    return P_top, P_bot
+
+
+def _retruncate_by_base_charges(
+    U_T: SymmetricTensor,
+    S: jax.Array,
+    Vh_T: SymmetricTensor,
+    *,
+    base_charges: np.ndarray,
+    chi: int,
+) -> tuple[SymmetricTensor, jax.Array, SymmetricTensor]:
+    """Re-truncate a full SymmetricTensor SVD to ``chi`` entries with per-sector allocation.
+
+    Allocates target counts via ``_derive_charges(base_charges, chi)``; greedy
+    top-k fills any remaining budget across sectors.  Mirrors the per-sector
+    allocation logic in ``_svd_projector_symmetric`` (``_ctm_projector.py``).
+
+    The returned U/S/Vh are gauge-consistent with the input (same U/Vh slot
+    values, just a subset of bond columns/rows).
+    """
+    from tenax.algorithms._ctm_utils import _derive_charges
+
+    bond_charges_full = np.asarray(U_T.indices[-1].charges, dtype=np.int32)
+    target_charges = _derive_charges(base_charges, chi)
+    target_count: dict[int, int] = {}
+    for q in target_charges:
+        target_count[int(q)] = target_count.get(int(q), 0) + 1
+
+    in_sector_idx_of: dict[int, list[int]] = {}
+    for j, q in enumerate(bond_charges_full):
+        q_int = int(q)
+        in_sector_idx_of.setdefault(q_int, []).append(j)
+
+    keep_global: list[int] = []
+    for q, want in sorted(target_count.items()):
+        slots = in_sector_idx_of.get(q, [])
+        take = min(want, len(slots))
+        keep_global.extend(slots[:take])
+
+    # Fill any remaining budget greedily from any unused entry (global SV order).
+    remaining = chi - len(keep_global)
+    if remaining > 0:
+        used_set = set(keep_global)
+        for j in range(len(bond_charges_full)):
+            if remaining <= 0:
+                break
+            if j not in used_set:
+                keep_global.append(j)
+                used_set.add(j)
+                remaining -= 1
+
+    keep_global.sort()  # ascending order makes downstream rebuilds simpler
+
+    new_bond_charges = bond_charges_full[np.asarray(keep_global, dtype=np.int32)]
+    S_new = jnp.asarray(S)[jnp.asarray(keep_global)]
+
+    sym = U_T.indices[0].symmetry
+    new_bond_out = TensorIndex.from_charges(
+        sym, new_bond_charges, FlowDirection.OUT, label=U_T.indices[-1].label
+    )
+    new_bond_in = TensorIndex.from_charges(
+        sym, new_bond_charges, FlowDirection.IN, label=Vh_T.indices[0].label
+    )
+    new_U_indices = U_T.indices[:-1] + (new_bond_out,)
+    new_Vh_indices = (new_bond_in,) + Vh_T.indices[1:]
+
+    keep_set = set(keep_global)
+    new_U_blocks: dict[tuple[int, ...], jax.Array] = {}
+    for key, block in U_T.blocks.items():
+        q = int(key[-1])
+        in_sector_positions = in_sector_idx_of.get(q, [])
+        kept_within_sector = [
+            pos for pos, j in enumerate(in_sector_positions) if j in keep_set
+        ]
+        if not kept_within_sector:
+            continue
+        idx_arr = jnp.array(kept_within_sector, dtype=np.int32)
+        new_U_blocks[key] = jnp.take(block, idx_arr, axis=-1)
+
+    new_Vh_blocks: dict[tuple[int, ...], jax.Array] = {}
+    for key, block in Vh_T.blocks.items():
+        q = int(key[0])
+        in_sector_positions = in_sector_idx_of.get(q, [])
+        kept_within_sector = [
+            pos for pos, j in enumerate(in_sector_positions) if j in keep_set
+        ]
+        if not kept_within_sector:
+            continue
+        idx_arr = jnp.array(kept_within_sector, dtype=np.int32)
+        new_Vh_blocks[key] = jnp.take(block, idx_arr, axis=0)
+
+    return (
+        SymmetricTensor._from_blocks_unchecked(new_U_blocks, new_U_indices),
+        S_new,
+        SymmetricTensor._from_blocks_unchecked(new_Vh_blocks, new_Vh_indices),
+    )
+
+
+def _compute_2x2_projector_symmetric(
+    Q_TL: SymmetricTensor,
+    Q_TR: SymmetricTensor,
+    Q_BL: SymmetricTensor,
+    Q_BR: SymmetricTensor,
+    chi: int,
+    *,
+    direction: str,
+    base_charges: np.ndarray | None = None,
+) -> tuple[SymmetricTensor, SymmetricTensor]:
+    """Block-sparse 2x2 Fishman projector for SymmetricTensor inputs.
+
+    Mirrors the dense pipeline in :func:`_compute_2x2_projector` stage-for-stage
+    via :func:`tenax.linalg.svd` and the per-sector gauge-fix helper
+    :func:`_gauge_fix_symmetric_svd`.
+
+    See ``docs/superpowers/specs/2026-05-11-2x2-projector-symmetric-design.md``
+    for the cut-seam relabel rationale and flow conventions.
+
+    Args:
+        Q_TL, Q_TR, Q_BL, Q_BR: 4-leg enlarged corners.  Must all be SymmetricTensor.
+        chi: Target bond dimension of the new chi_new leg.
+        direction: One of ``"left"``, ``"right"``, ``"top"``, ``"bottom"``.
+        base_charges: Optional 1-D ``np.ndarray`` of charges. When supplied,
+            chi_new is allocated per sector (added in Task 5; ignored in Task 2).
+
+    Returns:
+        ``(P_top, P_bot)`` SymmetricTensor projectors with the same label /
+        flow conventions as the dense path's output.
+    """
+    from tenax.contraction.contractor import contract
+    from tenax.linalg import svd as tensor_svd
+
+    if direction not in ("left", "right", "top", "bottom"):
+        raise ValueError(f"unsupported direction={direction!r}")
+
+    # ---- Stage 1: form M1, M2 as 4-leg SymmetricTensors. ----
+    if direction in ("left", "right"):
+        Q_TL_relab = Q_TL.relabels({"chi_B": "chi_B_TL", "d2": "d2_TL"})
+        Q_TR_relab = Q_TR.relabels(
+            {"chi_L": "chi_R", "l2": "r2", "chi_B": "chi_B_TR", "d2": "d2_TR"}
+        )
+        M1_T = contract(Q_TL_relab, Q_TR_relab)
+        m1_left_labels = ("chi_B_TL", "d2_TL")
+        m1_right_labels = ("chi_B_TR", "d2_TR")
+
+        Q_BR_relab = Q_BR.relabels(
+            {"chi_L": "chi_R", "l2": "r2", "chi_T": "chi_T_BR", "u2": "u2_BR"}
+        )
+        Q_BL_relab = Q_BL.relabels({"chi_T": "chi_T_BL", "u2": "u2_BL"})
+        M2_T = contract(Q_BR_relab, Q_BL_relab)
+        m2_left_labels = ("chi_T_BR", "u2_BR")
+        m2_right_labels = ("chi_T_BL", "u2_BL")
+    else:  # "top", "bottom"
+        Q_BL_relab = Q_BL.relabels(
+            {"chi_T": "chi_B", "u2": "d2", "chi_R": "chi_R_BL", "r2": "r2_BL"}
+        )
+        Q_TL_relab = Q_TL.relabels({"chi_R": "chi_R_TL", "r2": "r2_TL"})
+        M1_T = contract(Q_BL_relab, Q_TL_relab)
+        m1_left_labels = ("chi_R_BL", "r2_BL")
+        m1_right_labels = ("chi_R_TL", "r2_TL")
+
+        Q_TR_relab = Q_TR.relabels(
+            {"chi_B": "chi_T", "d2": "u2", "chi_L": "chi_L_TR", "l2": "l2_TR"}
+        )
+        Q_BR_relab = Q_BR.relabels({"chi_L": "chi_L_BR", "l2": "l2_BR"})
+        M2_T = contract(Q_TR_relab, Q_BR_relab)
+        m2_left_labels = ("chi_L_TR", "l2_TR")
+        m2_right_labels = ("chi_L_BR", "l2_BR")
+
+    # ---- Stage 2: SVDs of M1, M2 with per-sector gauge fix. ----
+    U_M1_T, M1_S, Vh_M1_T, _ = tensor_svd(
+        M1_T,
+        left_labels=m1_left_labels,
+        right_labels=m1_right_labels,
+        new_bond_label="m1_bond",
+        max_singular_values=None,
+    )
+    U_M1_T, Vh_M1_T = _gauge_fix_symmetric_svd(U_M1_T, Vh_M1_T)
+    M1_S = _fishman_truncate_S(M1_S, eps=1e-12)
+
+    U_M2_T, M2_S, Vh_M2_T, _ = tensor_svd(
+        M2_T,
+        left_labels=m2_left_labels,
+        right_labels=m2_right_labels,
+        new_bond_label="m2_bond",
+        max_singular_values=None,
+    )
+    U_M2_T, Vh_M2_T = _gauge_fix_symmetric_svd(U_M2_T, Vh_M2_T)
+    M2_S = _fishman_truncate_S(M2_S, eps=1e-12)
+
+    M1_sqrtS = jnp.sqrt(M1_S)
+    M2_sqrtS = jnp.sqrt(M2_S)
+
+    # ---- Stage 3: form halves, normalize. ----
+    if direction in ("left", "bottom"):
+        first_half = _scale_bond_by_diag(U_M1_T, M1_sqrtS, bond_label="m1_bond")
+        second_half = _scale_bond_by_diag(Vh_M2_T, M2_sqrtS, bond_label="m2_bond")
+        prime_order = "second_first"
+        first_outer_labels = m1_left_labels
+        second_outer_labels = m2_right_labels
+    else:  # "right", "top"
+        first_half = _scale_bond_by_diag(Vh_M1_T, M1_sqrtS, bond_label="m1_bond")
+        second_half = _scale_bond_by_diag(U_M2_T, M2_sqrtS, bond_label="m2_bond")
+        prime_order = "first_second"
+        first_outer_labels = m1_right_labels
+        second_outer_labels = m2_left_labels
+
+    first_norm = jnp.sqrt(jnp.sum(M1_S) + 1e-30)
+    second_norm = jnp.sqrt(jnp.sum(M2_S) + 1e-30)
+    first_half = _scale_bond_by_diag(
+        first_half, jnp.ones_like(M1_S) / first_norm, bond_label="m1_bond"
+    )
+    second_half = _scale_bond_by_diag(
+        second_half, jnp.ones_like(M2_S) / second_norm, bond_label="m2_bond"
+    )
+
+    # ---- Stage 4: form M_prime by renaming cut seam + contract; SVD M_prime. ----
+    if prime_order == "second_first":
+        cut_relabel = dict(zip(m1_left_labels, m2_right_labels))
+        first_half_for_mp = first_half.relabels(cut_relabel)
+        M_prime_T = contract(second_half, first_half_for_mp)
+        mp_left_labels = ("m2_bond",)
+        mp_right_labels = ("m1_bond",)
+    else:
+        cut_relabel = dict(zip(m1_right_labels, m2_left_labels))
+        first_half_for_mp = first_half.relabels(cut_relabel)
+        M_prime_T = contract(first_half_for_mp, second_half)
+        mp_left_labels = ("m1_bond",)
+        mp_right_labels = ("m2_bond",)
+
+    if base_charges is None:
+        U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
+            M_prime_T,
+            left_labels=mp_left_labels,
+            right_labels=mp_right_labels,
+            new_bond_label="chi_new",
+            max_singular_values=chi,
+        )
+    else:
+        # Full-spectrum SVD, then per-sector re-truncation honoring base_charges.
+        U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
+            M_prime_T,
+            left_labels=mp_left_labels,
+            right_labels=mp_right_labels,
+            new_bond_label="chi_new",
+            max_singular_values=None,
+        )
+        U_Mp_T, S_Mp, Vh_Mp_T = _retruncate_by_base_charges(
+            U_Mp_T, S_Mp, Vh_Mp_T, base_charges=base_charges, chi=chi
+        )
+    U_Mp_T, Vh_Mp_T = _gauge_fix_symmetric_svd(U_Mp_T, Vh_Mp_T)
+
+    # ---- Stage 5: cross-projectors via bar() for the SVD adjoint. ----
+    # tensor_svd returns S_Mp in global-descending order, so S_Mp[0] is the max
+    # (mirrors the dense path at _compute_2x2_projector). Keeping this as a
+    # traced JAX scalar avoids TracerArrayConversionError under jax.jit.
+    s_max = S_Mp[0]
+    cutoff = 1e-12 * (s_max + 1e-30)
+    mask = S_Mp > cutoff
+    S_safe = jnp.where(mask, S_Mp, 1.0)
+    S_inv_sqrt = jnp.where(mask, 1.0 / jnp.sqrt(S_safe), 0.0)
+
+    if prime_order == "second_first":
+        # P_first  = first_half · V_Mp · S^{-1/2}   = contract(first_half, Vh_Mp.bar())
+        # P_second = S^{-1/2} · U_Mp^† · second_half = contract(U_Mp.bar(), second_half)
+        P_first_unscaled = contract(first_half, Vh_Mp_T.bar())
+        P_second_unscaled = contract(U_Mp_T.bar(), second_half)
+    else:  # "first_second"
+        P_first_unscaled = contract(U_Mp_T.bar(), first_half)
+        P_second_unscaled = contract(second_half, Vh_Mp_T.bar())
+
+    P_first = _scale_bond_by_diag(P_first_unscaled, S_inv_sqrt, bond_label="chi_new")
+    P_second = _scale_bond_by_diag(P_second_unscaled, S_inv_sqrt, bond_label="chi_new")
+
+    # ---- Stage 6: relabel and reorder axes to match the dense path's output. ----
+    if prime_order == "second_first":
+        P_top_unwrapped, top_outer = P_first, first_outer_labels
+        P_bot_unwrapped, bot_outer = P_second, second_outer_labels
+    else:
+        P_top_unwrapped, top_outer = P_second, second_outer_labels
+        P_bot_unwrapped, bot_outer = P_first, first_outer_labels
+
+    chi_lbl_top, D2_lbl_top = top_outer
+    chi_lbl_bot, D2_lbl_bot = bot_outer
+
+    P_top = P_top_unwrapped.relabels(
+        {
+            chi_lbl_top: "chi_outer",
+            D2_lbl_top: "fused_D2",
+            "chi_new": "chi_new_top",
+        }
+    )
+    P_bot = P_bot_unwrapped.relabels(
+        {
+            chi_lbl_bot: "chi_outer",
+            D2_lbl_bot: "fused_D2",
+            "chi_new": "chi_new_bot",
+        }
+    )
+
+    P_top = P_top.transpose(
+        tuple(
+            P_top.labels().index(lbl)
+            for lbl in ("chi_outer", "fused_D2", "chi_new_top")
+        )
+    )
+    P_bot = P_bot.transpose(
+        tuple(
+            P_bot.labels().index(lbl)
+            for lbl in ("chi_new_bot", "chi_outer", "fused_D2")
+        )
+    )
     return P_top, P_bot

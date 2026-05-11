@@ -1045,14 +1045,6 @@ class TestOptimizeGsAdLogging:
 class TestOptimizeGsAdDenseOnly:
     """Verify optimize_gs_ad 2-site rejects SymmetricTensor inputs."""
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "_compute_2x2_projector lacks symmetric-tensor support (PR #406, "
-            "design doc docs/plans/2026-05-07-ctm-multisite-2x2-projector-design.md); "
-            "tracked as Issue #416."
-        ),
-    )
     def test_symmetric_tensor_2site_runs(self):
         """2-site AD optimization accepts SymmetricTensor inputs."""
         from tenax.core.index import FlowDirection, TensorIndex
@@ -1208,14 +1200,6 @@ class TestADSymmetric:
         assert isinstance(grad, SymmetricTensor)
         assert grad.norm() > 0
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "_compute_2x2_projector lacks symmetric-tensor support (PR #406, "
-            "design doc docs/plans/2026-05-07-ctm-multisite-2x2-projector-design.md); "
-            "tracked as Issue #416."
-        ),
-    )
     def test_optimize_gs_ad_symmetric_runs(self):
         """optimize_gs_ad accepts SymmetricTensor and returns SymmetricTensor.
 
@@ -1246,14 +1230,6 @@ class TestADSymmetric:
         )
         assert np.isfinite(E_gs)
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "_compute_2x2_projector lacks symmetric-tensor support (PR #406, "
-            "design doc docs/plans/2026-05-07-ctm-multisite-2x2-projector-design.md); "
-            "tracked as Issue #416."
-        ),
-    )
     def test_optimize_gs_ad_symmetric_energy_decreases(self):
         """AD optimization with SymmetricTensor decreases energy."""
         gate = self._heisenberg_gate()
@@ -1285,14 +1261,6 @@ class TestADSymmetric:
             f"expected SymmetricTensor, got {type(A_opt).__name__}"
         )
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "_compute_2x2_projector lacks symmetric-tensor support (PR #406, "
-            "design doc docs/plans/2026-05-07-ctm-multisite-2x2-projector-design.md); "
-            "tracked as Issue #416."
-        ),
-    )
     def test_optimize_gs_ad_symmetric_matches_dense(self):
         """Symmetric AD gives comparable energy to dense AD."""
         gate = self._heisenberg_gate()
@@ -1327,14 +1295,6 @@ class TestADSymmetric:
             f"expected DenseTensor, got {type(A_dense_opt).__name__}"
         )
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "_compute_2x2_projector lacks symmetric-tensor support (PR #406, "
-            "design doc docs/plans/2026-05-07-ctm-multisite-2x2-projector-design.md); "
-            "tracked as Issue #416."
-        ),
-    )
     def test_optimize_gs_ad_nontrivial_u1_preserves_symmetric_type(self):
         """Regression for #297: optimizer shell must accept a SymmetricTensor
         with *non-trivial* U(1) charges and return a SymmetricTensor (not
