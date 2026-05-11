@@ -1320,17 +1320,24 @@ class TestADSymmetric:
         Currently blocked by **Issue #435**: the 2x2 dense-fallback wrap
         emits trivial-charge projectors, so a contraction downstream of
         the optimizer shell raises ``ValueError: Size of label ... does
-        not match previous terms ...``. The narrow ``pytest.raises``
-        matches *only* that exception text so:
+        not match previous terms ...``.
 
-        * any other regression in this path (e.g. silent ``DenseTensor``
-          downgrade, NaN energy, unrelated ``TypeError``) still fails
-          loudly — unlike ``xfail(strict=False)``, which would have
-          swallowed them;
-        * when #435 lands, the absent exception fails the
-          ``pytest.raises`` block — surfacing a green-to-red flip that
-          prompts re-enabling the type-preservation assertions
-          commented out at the end of the body.
+        Test policy chosen to satisfy three constraints together:
+
+        1. **No CI red while #435 is open** — the known shape mismatch
+           is converted to ``pytest.xfail`` inside the except block.
+        2. **A bug fix is not a CI failure** — when #435 lands the
+           except block isn't reached, so the real type-preservation
+           assertions run normally. The test transitions XFAIL → PASS,
+           not green → red.
+        3. **Other regressions still fail loudly** — a different
+           ``ValueError`` text, an unrelated exception type, a silent
+           ``DenseTensor`` downgrade, or a NaN energy all propagate
+           past this guard.
+
+        (Addresses both codex P2 reviews on PR #437 and PR #438: the
+        previous ``xfail(strict=False)`` was too loose; a bare
+        ``pytest.raises`` would have flipped CI on the fix.)
         """
         from tenax.core.index import FlowDirection, TensorIndex
         from tenax.core.symmetry import U1Symmetry
@@ -1358,19 +1365,22 @@ class TestADSymmetric:
             gs_num_steps=0,
             gs_learning_rate=0.01,
         )
-        # Narrow regression hold: catch the specific #435 shape-mismatch
-        # only.  When #435 is fixed, this raises will fail (no exception)
-        # — replace it with the post-#435 assertions commented below.
-        with pytest.raises(ValueError, match=r"Size of label .* does not match"):
-            optimize_gs_ad(gate, A_sym, config)
-
-        # Post-#435 assertions to re-enable once the 2x2 dense-fallback
-        # wrap emits sector-aware charges:
-        # A_opt, _env, E_gs = optimize_gs_ad(gate, A_sym, config)
-        # assert isinstance(A_opt, SymmetricTensor), (
-        #     f"expected SymmetricTensor, got {type(A_opt).__name__}"
-        # )
-        # assert np.isfinite(E_gs)
+        try:
+            A_opt, _env, E_gs = optimize_gs_ad(gate, A_sym, config)
+        except ValueError as exc:
+            # Narrow guard: only swallow the specific #435 shape
+            # mismatch text. Any other ValueError surfaces.
+            msg = str(exc)
+            if "Size of label" not in msg or "does not match" not in msg:
+                raise
+            pytest.xfail(f"Blocked on #435: {exc}")
+        else:
+            # No exception → #435 is fixed (or never triggered for this
+            # config). Run the original type-preservation assertions.
+            assert isinstance(A_opt, SymmetricTensor), (
+                f"expected SymmetricTensor, got {type(A_opt).__name__}"
+            )
+            assert np.isfinite(E_gs)
 
 
 class TestTensor2SiteSimpleUpdate:
