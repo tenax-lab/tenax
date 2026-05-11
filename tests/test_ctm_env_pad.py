@@ -205,3 +205,50 @@ def test_pad_symmetric_rejects_shrink():
     env_old = initialize_ctm_tensor_env(A_sym, chi=4)
     with pytest.raises(ValueError, match="must be >="):
         pad_dense_env_chi(env_old, chi_new=2)
+
+
+def test_pad_symmetric_uses_base_charges_when_supplied():
+    """Regression for PR #430 codex review: when ``base_charges`` is
+    supplied, padded χ charges follow ``sorted(_derive_charges(...))``.
+
+    The legacy policy (no ``base_charges``) tiles the existing χ-leg
+    pattern via ``_derive_charges``. After a CTM sweep the χ-leg is
+    already grouped sector-by-sector (the projector's
+    ``chi_new_charges`` is built as ``[fq] * n_q for fq in sorted``),
+    so tiling that grouped pattern grows only the leading sectors and
+    starves the trailing ones — the next projector then can't allocate
+    its ideal per-sector budget. Deriving the new χ charges from the
+    projector's ``base_charges`` (the u2-fused charges) avoids that.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import _get_base_charges
+    from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
+    from tenax.algorithms._ctm_utils import _derive_charges
+
+    A_sym = _make_u1_peps(D=2, d=2)
+    # Same base_charges the symmetric projector consumes — fused
+    # (ket, bra) charges from the double-layer tensor's u2 leg.
+    base_charges = _get_base_charges(_build_double_layer_tensor(A_sym))
+    assert base_charges is not None, "test premise: non-trivial U(1) charges"
+
+    env_old = initialize_ctm_tensor_env(A_sym, chi=4)
+    env_new_legacy = pad_dense_env_chi(env_old, chi_new=6)
+    env_new_with_base = pad_dense_env_chi(env_old, chi_new=6, base_charges=base_charges)
+
+    expected = np.sort(_derive_charges(base_charges, 6)).astype(np.int32)
+    assert np.array_equal(
+        np.asarray(env_new_with_base.C1.indices[0].charges), expected
+    ), (
+        f"χ-leg charges should be sorted(_derive_charges(base_charges, 6)) = "
+        f"{expected}, got {np.asarray(env_new_with_base.C1.indices[0].charges)}"
+    )
+    # Edges share the same chi-charge allocation.
+    assert np.array_equal(np.asarray(env_new_with_base.T1.indices[0].charges), expected)
+    # The two policies must disagree on this χ-leg pattern — otherwise
+    # the fix is a no-op for this configuration.
+    assert not np.array_equal(
+        np.asarray(env_new_legacy.C1.indices[0].charges),
+        np.asarray(env_new_with_base.C1.indices[0].charges),
+    ), (
+        "Legacy tile policy and base_charges policy must produce different "
+        "χ-charges on D=2 init; otherwise this regression test is vacuous."
+    )

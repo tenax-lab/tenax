@@ -25,7 +25,7 @@ from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.lattice import Lattice
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor, Tensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 _logger = logging.getLogger(__name__)
 
@@ -36,6 +36,8 @@ def _maybe_bump_chi(
     ctm_cfg: CTMConfig,
     env_cache: dict,
     last_eps_t: float,
+    *,
+    base_charges: np.ndarray | None = None,
 ) -> tuple[CTMConfig, dict]:
     """variPEPS §2.8.2 reactive χ_E bump.
 
@@ -50,6 +52,13 @@ def _maybe_bump_chi(
     the original dict reference — notably the ``env_cache`` captured by
     ``make_ctm_energy_fn`` in ``optimize_gs_ad`` — sees the updated envs
     without rebinding.
+
+    For SymmetricTensor envs, ``base_charges`` should be the bond
+    charges of the iPEPS A tensor (the same ``base_charges`` the
+    symmetric projector consumes). Passing it forwards to
+    ``pad_dense_env_chi`` ensures the padded χ-leg charges follow the
+    projector's allocation rather than tiling the already-grouped
+    post-CTM pattern. Ignored on the dense path.
     """
     if not ctm_cfg.chi_auto_bump:
         return ctm_cfg, env_cache
@@ -65,7 +74,9 @@ def _maybe_bump_chi(
         # Mutate in-place so closures that captured env_cache by reference
         # (e.g. make_ctm_energy_fn inside optimize_gs_ad) see the padded envs.
         env_cache["envs"] = {
-            c: pad_dense_env_chi(env_cache["envs"][c], chi_new)
+            c: pad_dense_env_chi(
+                env_cache["envs"][c], chi_new, base_charges=base_charges
+            )
             for c in env_cache["envs"]
         }
     return new_cfg, env_cache
@@ -979,6 +990,22 @@ def _optimize_gs_ad_tensor(
     _conv_tol_schedule = config.gs_ctm_conv_tol_schedule
     _current_conv_tol = ctm_cfg.conv_tol
 
+    # variPEPS §2.8.2 auto-χ_E bump padding policy: for a SymmetricTensor
+    # A, derive the same ``base_charges`` the projector uses so the bump
+    # pads χ-leg charges to match the projector's per-sector allocation
+    # rather than tiling the post-projector grouped pattern. A's bond
+    # charges are fixed across optimization iterations, so we compute
+    # this once outside the loop. (PR #430 codex review on
+    # ``_ctm_env_pad.py``.)
+    _bump_base_charges: np.ndarray | None = None
+    if ctm_cfg.chi_auto_bump:
+        _A_init = _params_to_A_norm(params)
+        if isinstance(_A_init, SymmetricTensor):
+            from tenax.algorithms._ctm_tensor_convergence import _get_base_charges
+            from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
+
+            _bump_base_charges = _get_base_charges(_build_double_layer_tensor(_A_init))
+
     def _get_scheduled_conv_tol(step_idx, num_steps):
         """Look up conv_tol from schedule based on step fraction."""
         if _conv_tol_schedule is None:
@@ -1097,6 +1124,23 @@ def _optimize_gs_ad_tensor(
         prev_energy = energy_float
 
         if delta_energy < config.gs_conv_tol:
+            # Convergence break short-circuits the end-of-iter bump. If
+            # the energy stalled because χ is too small (high eps_T from
+            # _update_env_cache above), the user-requested auto-bump
+            # would silently no-op and the final env would stay at the
+            # old χ. Fire the bump here so the final state matches
+            # ctm_cfg.chi at exit — same behaviour as before the #419
+            # move-to-end refactor. (PR #432 codex review; not picked up
+            # in #432's squash, so re-included here.)
+            last_eps_t = float(_env_cache.get("max_truncation_error", 0.0))
+            ctm_cfg, _env_cache = _maybe_bump_chi(
+                ctm_cfg,
+                _env_cache,
+                last_eps_t,
+                base_charges=_bump_base_charges,
+            )
+            if _accepted_best_this_iter:
+                best_env_cache = dict(_env_cache)
             if config.gs_verbose:
                 if not logged:
                     _log_ad_step(
@@ -1339,7 +1383,12 @@ def _optimize_gs_ad_tensor(
         # one accepted) purely because of the χ-induced discontinuity.
         # Issue #419.
         last_eps_t = float(_env_cache.get("max_truncation_error", 0.0))
-        ctm_cfg, _env_cache = _maybe_bump_chi(ctm_cfg, _env_cache, last_eps_t)
+        ctm_cfg, _env_cache = _maybe_bump_chi(
+            ctm_cfg,
+            _env_cache,
+            last_eps_t,
+            base_charges=_bump_base_charges,
+        )
         # If best was accepted at this iter's pre-line-search params, refresh
         # the snapshot so its env matches the new ctm_cfg.chi. ``_env_cache``
         # still holds envs for those params (line search updates ``params``

@@ -305,7 +305,6 @@ def _eigh_projector_symmetric(
         (matches the dense eigh-path convention in
         ``_compute_projector_tensor``).
     """
-    from tenax.algorithms._ctm_truncation_error import compute_truncation_error
 
     fused_pos = C1g.labels().index("fused")
     col_pos = 1 - fused_pos  # the other leg
@@ -378,15 +377,6 @@ def _eigh_projector_symmetric(
     all_eig_pairs.sort(key=lambda x: (-x[0], -x[2]))
     n_keep = min(chi, len(all_eig_pairs))
 
-    # variPEPS §2.8.2 ε_T from the merged per-sector eigenvalue spectrum.
-    # Matches the dense eigh-path convention in ``_compute_projector_tensor``:
-    # eps_T = ‖λ[n_keep:]‖ / ‖λ‖ over |eigvals| in descending order.
-    if all_eig_pairs:
-        eig_array = jnp.asarray([abs(p[0]) for p in all_eig_pairs], dtype=jnp.float64)
-        eps_T = compute_truncation_error(eig_array, n_keep)
-    else:
-        eps_T = jnp.asarray(0.0)
-
     sector_keep: dict[int, list[int]] = {}
 
     if base_charges is not None:
@@ -446,6 +436,30 @@ def _eigh_projector_symmetric(
         # Pure global truncation (no base_charges)
         for _, fq, idx in all_eig_pairs[:n_keep]:
             sector_keep.setdefault(fq, []).append(idx)
+
+    # variPEPS §2.8.2 ε_T from the merged per-sector spectrum, computed
+    # against the COMPLEMENT of the actually kept (fused_charge, index)
+    # pairs in sector_keep. When base_charges is supplied the kept set is
+    # a per-sector allocation that can differ from the global top-n_keep
+    # — using the global top-n cutoff here would under-report truncation
+    # whenever the forced allocation keeps a small value from a required
+    # sector while discarding a larger value from another sector.
+    # (Codex review on PR #430.)
+    kept_pairs = {
+        (int(fq), int(idx)) for fq, idxs in sector_keep.items() for idx in idxs
+    }
+    discarded_sq = 0.0
+    total_sq = 0.0
+    for fq, (_, eigvals, _) in sector_results.items():
+        for idx, val in enumerate(np.array(eigvals)):
+            v2 = float(val) ** 2
+            total_sq += v2
+            if (int(fq), idx) not in kept_pairs:
+                discarded_sq += v2
+    eps_T = jnp.asarray(
+        np.sqrt(discarded_sq / total_sq) if total_sq > 0.0 else 0.0,
+        dtype=jnp.float64,
+    )
 
     # Build projector blocks directly with correct per-sector charges.
     # Each kept eigenvector from sector fq gets chi_new charge = fq
@@ -613,7 +627,6 @@ def _svd_projector_symmetric(
         per-sector singular-value spectrum.
     """
     from tenax.algorithms._ad_primitives import _fix_svd_signs
-    from tenax.algorithms._ctm_truncation_error import compute_truncation_error
 
     fused_pos = C1g.labels().index("fused")
     col_pos = 1 - fused_pos
@@ -696,14 +709,6 @@ def _svd_projector_symmetric(
     all_sv_pairs.sort(key=lambda x: (-x[0], -x[2]))
     n_keep = min(chi, len(all_sv_pairs))
 
-    # variPEPS §2.8.2 ε_T from the merged per-sector singular-value spectrum.
-    # ε_T = ‖S[n_keep:]‖ / ‖S‖ over the descending global spectrum.
-    if all_sv_pairs:
-        sv_array = jnp.asarray([p[0] for p in all_sv_pairs], dtype=jnp.float64)
-        eps_T = compute_truncation_error(sv_array, n_keep)
-    else:
-        eps_T = jnp.asarray(0.0)
-
     sector_keep: dict[int, list[int]] = {}
 
     if base_charges is not None:
@@ -737,6 +742,30 @@ def _svd_projector_symmetric(
     else:
         for _, fq, idx in all_sv_pairs[:n_keep]:
             sector_keep.setdefault(fq, []).append(idx)
+
+    # variPEPS §2.8.2 ε_T from the merged per-sector singular-value
+    # spectrum, computed against the COMPLEMENT of the actually kept
+    # (fused_charge, index) pairs in sector_keep. When base_charges is
+    # supplied the kept set is a per-sector allocation that can differ
+    # from the global top-n_keep — using the global top-n cutoff here
+    # would under-report truncation whenever the forced allocation keeps
+    # a small singular value from a required sector while discarding a
+    # larger one from another sector. (Codex review on PR #430.)
+    kept_pairs = {
+        (int(fq), int(idx)) for fq, idxs in sector_keep.items() for idx in idxs
+    }
+    discarded_sq = 0.0
+    total_sq = 0.0
+    for fq, (_, S_M, _, _, _) in sector_results.items():
+        for idx, val in enumerate(np.array(S_M)):
+            v2 = float(val) ** 2
+            total_sq += v2
+            if (int(fq), idx) not in kept_pairs:
+                discarded_sq += v2
+    eps_T = jnp.asarray(
+        np.sqrt(discarded_sq / total_sq) if total_sq > 0.0 else 0.0,
+        dtype=jnp.float64,
+    )
 
     # Build both projector block dicts
     chi_new_charges: list[int] = []
