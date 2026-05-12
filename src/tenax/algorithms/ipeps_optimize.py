@@ -200,12 +200,33 @@ def _use_line_search(config: iPEPSConfig) -> bool:
 
 
 def _tree_dot(a, b) -> float:
-    """Compute real dot product between two pytrees of arrays."""
+    """Compute real dot product between two pytrees of arrays.
+
+    Returns ``Re(sum_leaves <conj(a_leaf), b_leaf>)`` as a Python float.
+
+    Implementation note: routes through host NumPy rather than JAX. The
+    function is called by Python-level optimizer plumbing (L-BFGS slope
+    queries, CG beta numerators, Hager-Zhang ``dphi`` callbacks), where
+    every call already terminates in ``float(...)`` and so must materialise
+    to host anyway. The previous JAX path issued ~3 XLA dispatches per
+    leaf plus a ``block_until_ready`` for the final ``float()``; that
+    dispatch overhead (~100-300 µs each on CPU JAX) showed up at 62 % of
+    AD wall-clock in cProfile (``project_f3_landed_line_search_next.md``).
+    Materialising via ``np.asarray`` consolidates the host transfer into
+    a single per-leaf step and lets NumPy do the scalar reduction.
+    """
     leaves_a = jax.tree.leaves(a)
     leaves_b = jax.tree.leaves(b)
-    return float(
-        jnp.real(sum(jnp.sum(jnp.conj(la) * lb) for la, lb in zip(leaves_a, leaves_b)))
-    )
+    if not leaves_a:
+        return 0.0
+    total = 0.0
+    for la, lb in zip(leaves_a, leaves_b):
+        a_np = np.asarray(la).ravel()
+        b_np = np.asarray(lb).ravel()
+        # ``np.vdot`` already takes conj of the first argument and returns
+        # a NumPy scalar; ``.real`` gives the real part as a Python float.
+        total += np.vdot(a_np, b_np).real
+    return float(total)
 
 
 def _tree_scale(tree, alpha: float):
