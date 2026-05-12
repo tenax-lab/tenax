@@ -84,19 +84,6 @@ class TestJitCtmStep:
 class TestPythonLoopCtmConverge:
     """Tests for python_loop_ctm_converge."""
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "CTM plateau on random init (Issues #425, #426): "
-            "`_ctm_tensor_sweep_multisite` plateaus at sv_diff~0.05 on random "
-            "PEPS init at D=2/chi=4 while variPEPS converges in ~9 iters "
-            "(per-quadrant ket/bra ordering mismatch, design note in PR #426). "
-            "PR #439's plateau_patience=20 default deterministically bails "
-            "with converged=False at iter ~28. Fix is M2b honeycomb-native CTM "
-            "(separate work stream); xfail strict=False so tests xpass cleanly "
-            "when the plateau is resolved."
-        ),
-    )
     def test_python_loop_converges(self):
         """Python-loop CTM reaches convergence."""
         A = _make_random_A(key=jax.random.PRNGKey(42))
@@ -107,23 +94,23 @@ class TestPythonLoopCtmConverge:
             max_iter=100,
             conv_tol=1e-8,
         )
-        assert info.converged
+        if not info.converged:
+            # Known limitation (Issues #425, #426): _ctm_tensor_sweep_multisite
+            # plateaus at sv_diff~0.05 on random init at D=2/chi=4 while
+            # variPEPS converges in ~9 iters (per-quadrant ket/bra ordering
+            # mismatch, design note in PR #426). PR #439's plateau_patience=20
+            # default deterministically bails with converged=False at iter ~28.
+            # Narrow guard: only swallow the known non-convergence outcome
+            # (codex P2 on PR #444); any earlier exception (shape/key error
+            # in setup, etc.) still surfaces as a real failure.
+            pytest.xfail(
+                f"CTM plateau on random init (#425/#426): "
+                f"converged={info.converged}, sv_diff={info.sv_diff:.3e}, "
+                f"iter={info.iterations}; M2b honeycomb-native CTM pending."
+            )
         assert info.sv_diff < 1e-8
         assert info.iterations > 1
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "CTM plateau on random init (Issues #425, #426): "
-            "`_ctm_tensor_sweep_multisite` plateaus at sv_diff~0.05 on random "
-            "PEPS init at D=2/chi=4 while variPEPS converges in ~9 iters "
-            "(per-quadrant ket/bra ordering mismatch, design note in PR #426). "
-            "PR #439's plateau_patience=20 default deterministically bails "
-            "with converged=False at iter ~12 on the 2-site checkerboard. "
-            "Fix is M2b honeycomb-native CTM (separate work stream); xfail "
-            "strict=False so tests xpass cleanly when the plateau is resolved."
-        ),
-    )
     def test_python_loop_2site_checkerboard_converges(self):
         """Checkerboard topology converges + produces a finite energy.
 
@@ -142,7 +129,15 @@ class TestPythonLoopCtmConverge:
             max_iter=50,
             conv_tol=1e-8,
         )
-        assert info.converged
+        if not info.converged:
+            # Known limitation (Issues #425, #426): same CTM-iter plateau as
+            # test_python_loop_converges, on the 2-site CHECKERBOARD path.
+            # Narrow guard so other exceptions still surface.
+            pytest.xfail(
+                f"CTM plateau on random init (#425/#426, 2-site checkerboard): "
+                f"converged={info.converged}, sv_diff={info.sv_diff:.3e}, "
+                f"iter={info.iterations}; M2b honeycomb-native CTM pending."
+            )
         energy = compute_energy_ctm_tensor_multisite(
             {(0, 0): A, (1, 0): B}, envs, CHECKERBOARD_NEIGHBORS, gate
         )
@@ -193,20 +188,6 @@ class TestPythonLoopCtmConverge:
         assert info.iterations == 5
         assert info.sv_diff > 0
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "CTM plateau on random init (Issues #425, #426): "
-            "`_ctm_tensor_sweep_multisite` plateaus at sv_diff~0.05 on random "
-            "PEPS init at D=2/chi=4 while variPEPS converges in ~9 iters "
-            "(per-quadrant ket/bra ordering mismatch, design note in PR #426). "
-            "Warm-start from a 10-iter pre-run inherits the same plateau; "
-            "PR #439's plateau_patience=20 default deterministically bails "
-            "with converged=False at iter ~18. Fix is M2b honeycomb-native CTM "
-            "(separate work stream); xfail strict=False so tests xpass cleanly "
-            "when the plateau is resolved."
-        ),
-    )
     def test_env_init_warm_start(self):
         """Passing env_init warm-starts the convergence."""
         A = _make_random_A(key=jax.random.PRNGKey(42))
@@ -230,7 +211,17 @@ class TestPythonLoopCtmConverge:
             conv_tol=1e-10,
             env_init=envs_warm,
         )
-        assert info.converged
+        if not info.converged:
+            # Known limitation (Issues #425, #426): the warm-start path
+            # inherits the same CTM-iter plateau as test_python_loop_converges
+            # since both the pre-run and the continuation use the same
+            # _ctm_tensor_sweep_multisite. Narrow guard so other exceptions
+            # still surface.
+            pytest.xfail(
+                f"CTM plateau on random init (#425/#426, warm-start): "
+                f"converged={info.converged}, sv_diff={info.sv_diff:.3e}, "
+                f"iter={info.iterations}; M2b honeycomb-native CTM pending."
+            )
 
 
 class TestMultisiteEnergy:
