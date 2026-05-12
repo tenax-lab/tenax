@@ -284,14 +284,15 @@ class iPEPSConfig:
     gs_learning_rate: float = 1e-3
     gs_num_steps: int = 200
     gs_conv_tol: float = 1e-8
-    # Outer convergence criterion for ``optimize_gs_ad``. ``"dE"`` (default,
-    # legacy behaviour) exits when ``|E_step - E_step-1| < gs_conv_tol`` —
-    # this is variationally fragile near flat minima or right after a stall
-    # recovery, where ``|dE|`` can underflow ``gs_conv_tol`` while the
-    # gradient is still large. ``"grad_norm"`` matches variPEPS by exiting
-    # when ``||grad E||_2 < gs_grad_norm_tol`` (a true stationarity test).
-    # ``"both"`` requires both to hold simultaneously (most conservative).
-    # See issue #448.
+    # Outer convergence criterion for ``optimize_gs_ad``. ``"dE"`` (current
+    # legacy default, **deprecated** — see ``__post_init__``) exits when
+    # ``|E_step - E_step-1| < gs_conv_tol`` — this is variationally fragile
+    # near flat minima or right after a stall recovery, where ``|dE|`` can
+    # underflow ``gs_conv_tol`` while the gradient is still large.
+    # ``"grad_norm"`` matches variPEPS by exiting when
+    # ``||grad E||_2 < gs_grad_norm_tol`` (a true stationarity test); it
+    # will become the default in a future release. ``"both"`` requires both
+    # to hold simultaneously (most conservative). See issue #448.
     gs_conv_criterion: Literal["dE", "grad_norm", "both"] = "dE"
     # Gradient-norm tolerance used by the ``"grad_norm"`` and ``"both"``
     # criteria. The default ``1e-5`` matches variPEPS
@@ -411,6 +412,17 @@ class iPEPSConfig:
         if self.gs_grad_norm_tol <= 0:
             raise ValueError(
                 f"gs_grad_norm_tol must be positive, got {self.gs_grad_norm_tol}"
+            )
+        if self.gs_conv_criterion == "dE":
+            warnings.warn(
+                "gs_conv_criterion='dE' is deprecated and will be replaced by "
+                "'grad_norm' as the default in a future release (issue #448). "
+                "The dE criterion underflows near flat minima and after stall "
+                "recoveries, causing premature exit. "
+                "Set gs_conv_criterion='grad_norm' to opt in now, or 'both' "
+                "for the most conservative criterion.",
+                DeprecationWarning,
+                stacklevel=2,
             )
 
 

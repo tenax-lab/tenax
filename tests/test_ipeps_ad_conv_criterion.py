@@ -20,6 +20,32 @@ import pytest
 from tenax import CTMConfig, iPEPSConfig, optimize_gs_ad
 from tenax.algorithms.ipeps_optimize import _converged_outer, _grad_l2_norm
 
+# --- unit: deprecation warning for legacy default --------------------------
+
+
+def test_iPEPSConfig_dE_emits_deprecation_warning():
+    """``gs_conv_criterion='dE'`` (current default) emits a DeprecationWarning.
+
+    The warning is suppressed project-wide in ``pyproject.toml`` so the
+    rest of the test suite stays quiet during the transition; this test
+    un-suppresses it via ``pytest.warns`` to confirm it still fires.
+    """
+    with pytest.warns(DeprecationWarning, match="gs_conv_criterion='dE'"):
+        iPEPSConfig()  # default
+    with pytest.warns(DeprecationWarning, match="gs_conv_criterion='dE'"):
+        iPEPSConfig(gs_conv_criterion="dE")  # explicit
+
+
+def test_iPEPSConfig_grad_norm_no_warning():
+    """Opting into ``'grad_norm'`` or ``'both'`` silences the deprecation."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        iPEPSConfig(gs_conv_criterion="grad_norm")
+        iPEPSConfig(gs_conv_criterion="both")
+
+
 # --- unit: _converged_outer ------------------------------------------------
 
 
