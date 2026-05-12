@@ -475,6 +475,37 @@ def test_build_pess_loss_3site_multisite_default_env_cache_is_none():
     assert seen.get("env_init") is None
 
 
+def test_build_pess_loss_3site_multisite_forwards_plateau_patience():
+    """PESS implicit-AD loss must forward ``CTMConfig.plateau_patience``.
+
+    Codex review on PR #439: prior to the fix, the PESS supersite and
+    multisite loss functions called ``ctm_energy_implicit`` without
+    passing ``config.plateau_patience``, so PESS gradient evaluations
+    silently disabled the user-configured plateau stop-loss while
+    warm-starts through ``ctm_converge_kwargs`` did honor it.  This
+    asserts the kwarg now reaches ``ctm_energy_implicit``.
+    """
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    config = _make_test_config(chi=4)
+    config.plateau_patience = 7
+
+    seen: dict = {}
+
+    def fake_ctm_energy_implicit(*args, **kwargs):
+        seen.update(kwargs)
+        return jnp.array(0.0)
+
+    loss_fn = build_pess_loss_3site_multisite(bond_gates, config)
+    with _mock_patch(
+        "tenax.algorithms.pess_optimize.ctm_energy_implicit",
+        fake_ctm_energy_implicit,
+    ):
+        loss_fn(state)
+
+    assert seen.get("plateau_patience") == 7
+
+
 def test_optimize_pess_3site_multisite_ad_warm_starts_envs():
     """After the first L-BFGS step, `_update_env_cache` populates the cache,
     so the SECOND gradient evaluation receives a non-None env_init.
