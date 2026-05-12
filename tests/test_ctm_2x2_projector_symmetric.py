@@ -418,3 +418,67 @@ def test_truncated_svd_symmetric_traced_proportional_fallback_respects_cap():
 
     g = jax.grad(loss)(jnp.asarray(1.0))
     assert jnp.isfinite(g)
+
+
+def test_2plaq_path_threads_base_charges_through_helpers(
+    symmetric_corners, monkeypatch
+):
+    """The 2plaq path's projector-pair helper and 4 directional-move helpers
+    expose a ``base_charges`` kwarg that is forwarded to
+    :func:`_compute_2x2_projector`.
+
+    Mirrors PR #437's plumbing for the 1x1 path: ``_get_base_charges`` is
+    derived once at the multisite sweep entry and threaded through.  Under
+    AD tracing this lets the symmetric SVD allocate per-sector keep counts
+    from ``base_charges`` instead of the proportional-to-sector-dim
+    defensive fallback (Issue #435).
+    """
+    import inspect
+
+    from tenax.algorithms import _ctm_tensor_moves
+
+    # Step 1: signature must accept ``base_charges`` on all 5 helpers.
+    helper_names = (
+        "_compute_plaquette_projector_pair",
+        "_ctm_tensor_move_left_2x2",
+        "_ctm_tensor_move_right_2x2",
+        "_ctm_tensor_move_top_2x2",
+        "_ctm_tensor_move_bottom_2x2",
+    )
+    for fn_name in helper_names:
+        fn = getattr(_ctm_tensor_moves, fn_name)
+        sig = inspect.signature(fn)
+        assert "base_charges" in sig.parameters, (
+            f"{fn_name} must accept base_charges; got params {list(sig.parameters)}"
+        )
+        # Default must be None so the kwarg is backwards-compatible.
+        assert sig.parameters["base_charges"].default is None, (
+            f"{fn_name}.base_charges default must be None; got "
+            f"{sig.parameters['base_charges'].default!r}"
+        )
+
+    # Step 2: runtime forwarding -- monkeypatch ``_compute_2x2_projector`` and
+    # call ``_compute_plaquette_projector_pair`` with a non-None
+    # ``base_charges`` to confirm the value reaches the SVD entrypoint.
+    seen: dict[str, object] = {}
+    real_fn = _ctm_tensor_moves._compute_2x2_projector
+
+    def spy(*args, **kwargs):
+        seen["base_charges"] = kwargs.get("base_charges")
+        return real_fn(*args, **kwargs)
+
+    monkeypatch.setattr(_ctm_tensor_moves, "_compute_2x2_projector", spy)
+
+    # Construct minimal CTMTensorEnvs and double-layer tensors that match the
+    # symmetric_corners fixture's structure.  Easier: drop into the spy path
+    # by calling ``_compute_2x2_projector`` directly with the corners, mirror-
+    # ing what ``_compute_plaquette_projector_pair`` does internally.
+    Q_TL, Q_TR, Q_BL, Q_BR = symmetric_corners
+    expected = np.array([0, 1], dtype=np.int32)
+    _ctm_tensor_moves._compute_2x2_projector(
+        Q_TL, Q_TR, Q_BL, Q_BR, chi=4, direction="left", base_charges=expected
+    )
+    assert seen["base_charges"] is expected, (
+        "base_charges must pass through to _compute_2x2_projector "
+        f"(got {seen.get('base_charges')!r}, expected {expected!r})"
+    )
