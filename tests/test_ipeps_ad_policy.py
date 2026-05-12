@@ -196,18 +196,19 @@ def test_make_ctm_energy_fn_resolves_ctm_cfg_at_call_time():
     )
 
 
-def test_make_ctm_energy_fn_forces_plateau_patience_none_on_implicit_path():
-    """Implicit-AD energy must not early-bail on a CTM plateau.
+def test_make_ctm_energy_fn_forwards_plateau_patience():
+    """``CTMConfig.plateau_patience`` reaches ``ctm_energy_implicit``.
 
-    Codex follow-up review on PR #439: the implicit-AD backward solves
-    ``(I - J^T) λ = ∂L/∂env`` around the returned env, which is only
-    well-defined when env is a fixed point.  If we let
-    ``ctm_cfg.plateau_patience`` propagate into ``ctm_energy_implicit``,
-    a plateau bail returns a best-iter (non-fixed-point) env and the
-    implicit-function-theorem premise breaks → inconsistent gradients.
-    Forcing ``plateau_patience=None`` at the policy layer keeps the AD
-    gradient math correct.  Warm-start CTM calls outside the custom_vjp
-    boundary (``ctm_converge_kwargs``) still honor the field.
+    Design note: the implicit-AD backward solves the fixed-point adjoint
+    around the returned env, which is only strictly correct when env is
+    a true fixed point.  In early AD the CTM plateaus regardless of
+    ``max_iter`` (#425/#426), so gradients are approximate either way —
+    variPEPS exploits the same trade-off via
+    ``optimizer_ctmrg_preconverged_eps=1e-5``.  Keeping
+    ``plateau_patience`` finite during AD matches that pragmatism and
+    is much faster.  Drop to ``None`` at the final chi stage when the
+    CTM actually approaches a fixed point and strict variational
+    gradients matter.
     """
     seen_plateau: list[int | None] = []
 
@@ -215,7 +216,6 @@ def test_make_ctm_energy_fn_forces_plateau_patience_none_on_implicit_path():
         seen_plateau.append(kwargs.get("plateau_patience"))
         return 0.0
 
-    # Even with the most aggressive bail, the implicit path must see None.
     ctm_cfg = CTMConfig(
         chi=8,
         max_iter=10,
@@ -241,12 +241,12 @@ def test_make_ctm_energy_fn_forces_plateau_patience_none_on_implicit_path():
         )
         energy_fn({})
 
-    assert seen_plateau == [None], (
-        "make_ctm_energy_fn must force plateau_patience=None on the "
-        f"implicit-AD path regardless of ctm_cfg (saw {seen_plateau!r})"
+    assert seen_plateau == [3], (
+        "make_ctm_energy_fn must forward ctm_cfg.plateau_patience to the "
+        f"implicit-AD energy (saw {seen_plateau!r})"
     )
 
-    # Warm-start path (ctm_converge_kwargs) still honors the field.
+    # Warm-start path (ctm_converge_kwargs) also honors the field.
     kw = ctm_converge_kwargs(ctm_cfg)
     assert kw["plateau_patience"] == 3
 

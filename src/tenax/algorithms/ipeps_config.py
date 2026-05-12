@@ -159,17 +159,21 @@ class CTMConfig:
     # converging run never accumulates 20 non-improving iters because
     # each better ``best_diff`` resets the counter, so the default does
     # not interfere with normal convergence.  Set to ``None`` to restore
-    # the pre-2026-05-11 "run to ``max_iter``" behavior.  Forwarded to
-    # ``python_loop_ctm_converge`` via ``ctm_converge_kwargs``.
+    # the pre-2026-05-11 "run to ``max_iter``" behavior.
     #
-    # **AD-path note**: this field is intentionally *ignored* by
-    # ``ctm_energy_implicit`` (the implicit-AD energy used by
-    # ``optimize_gs_ad``).  The implicit-AD backward solves the fixed-
-    # point adjoint ``(I - J^T) λ = ∂L/∂env`` around the returned env,
-    # which is only well-defined when env is a true fixed point — bailing
-    # early breaks that premise and yields inconsistent gradients
-    # (codex review on PR #439).  Warm-start CTM calls outside the
-    # custom_vjp boundary still honor the field.
+    # **AD-path note**: the implicit-AD backward solves the fixed-point
+    # adjoint ``(I - J^T) λ = ∂L/∂env`` around the returned env, which is
+    # only well-defined when env is a true fixed point.  In early AD the
+    # CTM plateaus regardless (the env is *not* a fixed point even after
+    # ``max_iter`` sweeps — see #425/#426), so the implicit-function
+    # premise is already broken and gradients are approximate either way.
+    # variPEPS exploits the same trade-off via
+    # ``optimizer_ctmrg_preconverged_eps=1e-5`` (loose CTM during AD)
+    # which is why its AD inner loop is much faster than a tight
+    # fixed-point CTM.  Keeping ``plateau_patience`` finite during AD
+    # matches that pragmatism.  Drop to ``None`` at the final chi stage
+    # (or when the CTM actually converges) for strict variational
+    # gradients.
     plateau_patience: int | None = 20
 
     def __post_init__(self):
