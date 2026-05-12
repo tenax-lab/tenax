@@ -231,6 +231,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "CTMEnvironment": ("tenax.algorithms.ipeps_config", "CTMEnvironment"),
     "SplitCTMEnvironment": ("tenax.algorithms.ipeps_config", "SplitCTMEnvironment"),
     "iPEPSConfig": ("tenax.algorithms.ipeps_config", "iPEPSConfig"),
+    "aligned_ctm_schedules": (
+        "tenax.algorithms.ipeps_config",
+        "aligned_ctm_schedules",
+    ),
     # ipeps_ctm
     "ctm": ("tenax.algorithms.ipeps_ctm", "ctm"),
     "ctm_2site": ("tenax.algorithms.ipeps_ctm", "ctm_2site"),
@@ -425,6 +429,7 @@ __all__ = [
     "CTMConfig",
     "CTMEnvironment",
     "SplitCTMEnvironment",
+    "aligned_ctm_schedules",
     "heisenberg_gate",
     "ipeps",
     "sublattice_rotate_gate",

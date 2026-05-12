@@ -251,6 +251,29 @@ def test_make_ctm_energy_fn_forwards_plateau_patience():
     assert kw["plateau_patience"] == 3
 
 
+def test_aligned_ctm_schedules_helper():
+    """``aligned_ctm_schedules`` produces matched conv_tol + patience ramps."""
+    from tenax.algorithms.ipeps_config import aligned_ctm_schedules
+
+    conv, patience = aligned_ctm_schedules(
+        [(0.0, 1e-5, 20), (0.5, 1e-6, 10), (0.8, 1e-7, None)]
+    )
+    assert conv == [(0.0, 1e-5), (0.5, 1e-6), (0.8, 1e-7)]
+    assert patience == [(0.0, 20), (0.5, 10), (0.8, None)]
+
+
+def test_iPEPSConfig_accepts_independent_patience_schedule():  # noqa: N802
+    """Schedules are independent fields — tuner can set patience without conv_tol."""
+    from tenax.algorithms.ipeps_config import iPEPSConfig
+
+    cfg = iPEPSConfig(
+        max_bond_dim=2,
+        gs_plateau_patience_schedule=[(0.0, 20), (0.7, None)],
+    )
+    assert cfg.gs_ctm_conv_tol_schedule is None
+    assert cfg.gs_plateau_patience_schedule == [(0.0, 20), (0.7, None)]
+
+
 from tenax.algorithms.ipeps_ad_policy import validate_ctm_for_implicit_ad
 
 

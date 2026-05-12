@@ -703,6 +703,69 @@ _register(
     )
 )
 
+_register(
+    ParamSpec(
+        name="plateau_patience",
+        dataclass_name="CTMConfig",
+        type_str="int | None",
+        category=TuningCategory.PERFORMANCE,
+        description=(
+            "Early-bail CTM stop-loss: bail when the convergence metric "
+            "has not improved for N iterations. Default 20 — finite "
+            "patience is the variPEPS-style approximate AD trade-off "
+            "(fast, gradients approximate on the plateau). Set to None "
+            "for strict variational gradients at the final chi stage."
+        ),
+        hint=TuningHint(
+            scale=Scale.LINEAR,
+            sensitivity=Sensitivity.MEDIUM,
+            range=(5, 100),
+            cost=CostModel(
+                runtime="~10× speedup on plateau cases",
+                accuracy="approximate gradients while CTM oscillates",
+            ),
+        ),
+        when_to_tune=(
+            "Lower for max speed during early AD; raise or set to None "
+            "during the final chi stage when the CTM actually approaches "
+            "a fixed point."
+        ),
+        references=("#425", "#426", "#439"),
+    )
+)
+
+_register(
+    ParamSpec(
+        name="gs_plateau_patience_schedule",
+        dataclass_name="iPEPSConfig",
+        type_str="list[tuple[float, int | None]] | None",
+        category=TuningCategory.PERFORMANCE,
+        description=(
+            "Ramp CTM plateau_patience across AD steps: list of "
+            "(step_fraction, plateau_patience) pairs. Mirrors "
+            "gs_ctm_conv_tol_schedule shape; intentionally kept "
+            "independent (own stage fractions, own search space) so "
+            "auto-tuners can sample and ablate it independently of the "
+            "conv_tol ramp. Use aligned_ctm_schedules() when hand-"
+            "writing configs that want the two ramps tied."
+        ),
+        hint=TuningHint(
+            scale=Scale.CATEGORICAL,
+            sensitivity=Sensitivity.MEDIUM,
+            cost=CostModel(
+                runtime="up to ~10× CTM-call speedup early in AD",
+                accuracy="strict at the final stage when patience=None",
+            ),
+        ),
+        when_to_tune=(
+            "Long AD runs with a tight final tolerance: e.g. "
+            "[(0.0, 20), (0.7, None)] — fast plateau-aware CTM early, "
+            "strict fixed-point gradients at the end."
+        ),
+        references=("#439",),
+    )
+)
+
 
 # --- CTMConfig: AD backward & stability knobs -------------------------------
 
