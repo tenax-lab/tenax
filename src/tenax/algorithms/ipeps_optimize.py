@@ -378,12 +378,68 @@ def _log_ad_step(
     )
 
 
-def _log_ad_converged(backend: str, step: int, delta_energy: float, tol: float) -> None:
-    print(
-        f"[iPEPS-AD:{backend}] converged at step {step + 1} "
-        f"(dE={delta_energy:.3e} < tol={tol:.3e})",
-        flush=True,
-    )
+def _log_ad_converged(
+    backend: str,
+    step: int,
+    delta_energy: float,
+    tol: float,
+    *,
+    grad_norm: float | None = None,
+    grad_norm_tol: float | None = None,
+    criterion: str = "dE",
+) -> None:
+    parts = [f"[iPEPS-AD:{backend}] converged at step {step + 1}"]
+    if criterion == "dE":
+        parts.append(f"(dE={delta_energy:.3e} < tol={tol:.3e})")
+    elif criterion == "grad_norm":
+        parts.append(
+            f"(||grad||={grad_norm:.3e} < tol={grad_norm_tol:.3e}, "
+            f"dE={delta_energy:.3e})"
+        )
+    elif criterion == "both":
+        parts.append(
+            f"(dE={delta_energy:.3e} < tol={tol:.3e} AND "
+            f"||grad||={grad_norm:.3e} < tol={grad_norm_tol:.3e})"
+        )
+    else:  # defensive; validated in iPEPSConfig.__post_init__
+        parts.append(f"(dE={delta_energy:.3e} < tol={tol:.3e})")
+    print(" ".join(parts), flush=True)
+
+
+def _converged_outer(
+    config: iPEPSConfig, delta_energy: float, grad_norm: float | None
+) -> bool:
+    """Return True if the outer AD loop should exit at this step.
+
+    Honors ``config.gs_conv_criterion``:
+
+    - ``"dE"`` (default): legacy behaviour — exit on
+      ``|dE| < gs_conv_tol``.
+    - ``"grad_norm"``: exit on ``||grad||_2 < gs_grad_norm_tol``
+      (variPEPS ``optimizer_convergence_eps`` analog, issue #448).
+    - ``"both"``: require both to hold simultaneously.
+
+    A ``None`` ``grad_norm`` defeats any criterion that needs it.
+    """
+    criterion = config.gs_conv_criterion
+    de_ok = delta_energy < config.gs_conv_tol
+    if criterion == "dE":
+        return de_ok
+    if grad_norm is None:
+        return False
+    g_ok = float(grad_norm) < config.gs_grad_norm_tol
+    if criterion == "grad_norm":
+        return g_ok
+    return de_ok and g_ok  # "both"
+
+
+def _grad_l2_norm(grads) -> float:
+    """L2 norm of an optax gradient pytree, returned as a Python float."""
+    leaves = jax.tree_util.tree_leaves(grads)
+    if not leaves:
+        return 0.0
+    sq = sum(jnp.vdot(jnp.ravel(g), jnp.ravel(g)).real for g in leaves)
+    return float(jnp.sqrt(sq))
 
 
 def optimize_gs_ad_chi_schedule(
@@ -1146,7 +1202,12 @@ def _optimize_gs_ad_tensor(
 
         prev_energy = energy_float
 
-        if delta_energy < config.gs_conv_tol:
+        grad_norm_val = (
+            _grad_l2_norm(grads)
+            if config.gs_conv_criterion in ("grad_norm", "both")
+            else None
+        )
+        if _converged_outer(config, delta_energy, grad_norm_val):
             # Convergence break short-circuits the end-of-iter bump. If
             # the energy stalled because χ is too small (high eps_T from
             # _update_env_cache above), the user-requested auto-bump
@@ -1175,7 +1236,13 @@ def _optimize_gs_ad_tensor(
                         best_energy,
                     )
                 _log_ad_converged(
-                    "1site-tensor", step, delta_energy, config.gs_conv_tol
+                    "1site-tensor",
+                    step,
+                    delta_energy,
+                    config.gs_conv_tol,
+                    grad_norm=grad_norm_val,
+                    grad_norm_tol=config.gs_grad_norm_tol,
+                    criterion=config.gs_conv_criterion,
                 )
             _converged = True
             break
@@ -1927,7 +1994,12 @@ def _optimize_gs_ad_tensor_2site(
 
         prev_energy = energy_float
 
-        if delta_energy < config.gs_conv_tol:
+        grad_norm_val = (
+            _grad_l2_norm(grads)
+            if config.gs_conv_criterion in ("grad_norm", "both")
+            else None
+        )
+        if _converged_outer(config, delta_energy, grad_norm_val):
             if config.gs_verbose:
                 if not logged:
                     _log_ad_step(
@@ -1939,7 +2011,13 @@ def _optimize_gs_ad_tensor_2site(
                         best_energy,
                     )
                 _log_ad_converged(
-                    "2site-tensor", step, delta_energy, config.gs_conv_tol
+                    "2site-tensor",
+                    step,
+                    delta_energy,
+                    config.gs_conv_tol,
+                    grad_norm=grad_norm_val,
+                    grad_norm_tol=config.gs_grad_norm_tol,
+                    criterion=config.gs_conv_criterion,
                 )
             _converged = True
             break
@@ -2562,7 +2640,16 @@ def _optimize_gs_ad_multisite(
 
         # Skip convergence check on early steps and right after a stall
         # (stall resets prev_energy ≈ current, giving false dE ≈ 0).
-        if delta_energy < config.gs_conv_tol and step > 5 and stall_count == 0:
+        grad_norm_val = (
+            _grad_l2_norm(grads)
+            if config.gs_conv_criterion in ("grad_norm", "both")
+            else None
+        )
+        if (
+            _converged_outer(config, delta_energy, grad_norm_val)
+            and step > 5
+            and stall_count == 0
+        ):
             if config.gs_verbose:
                 if not logged:
                     _log_ad_step(
@@ -2573,7 +2660,15 @@ def _optimize_gs_ad_multisite(
                         delta_energy,
                         best_energy,
                     )
-                _log_ad_converged("multisite", step, delta_energy, config.gs_conv_tol)
+                _log_ad_converged(
+                    "multisite",
+                    step,
+                    delta_energy,
+                    config.gs_conv_tol,
+                    grad_norm=grad_norm_val,
+                    grad_norm_tol=config.gs_grad_norm_tol,
+                    criterion=config.gs_conv_criterion,
+                )
             break
 
         # ── Search direction ─────────────────────────────────────────────
