@@ -284,6 +284,19 @@ class iPEPSConfig:
     gs_learning_rate: float = 1e-3
     gs_num_steps: int = 200
     gs_conv_tol: float = 1e-8
+    # Outer convergence criterion for ``optimize_gs_ad``. ``"dE"`` (default,
+    # legacy behaviour) exits when ``|E_step - E_step-1| < gs_conv_tol`` —
+    # this is variationally fragile near flat minima or right after a stall
+    # recovery, where ``|dE|`` can underflow ``gs_conv_tol`` while the
+    # gradient is still large. ``"grad_norm"`` matches variPEPS by exiting
+    # when ``||grad E||_2 < gs_grad_norm_tol`` (a true stationarity test).
+    # ``"both"`` requires both to hold simultaneously (most conservative).
+    # See issue #448.
+    gs_conv_criterion: Literal["dE", "grad_norm", "both"] = "dE"
+    # Gradient-norm tolerance used by the ``"grad_norm"`` and ``"both"``
+    # criteria. The default ``1e-5`` matches variPEPS
+    # ``optimizer_convergence_eps``.
+    gs_grad_norm_tol: float = 1e-5
     gs_verbose: bool = False
     gs_log_interval: int = 10
     gs_max_grad_norm: float = 1.0  # gradient clipping (max global norm)
@@ -388,6 +401,16 @@ class iPEPSConfig:
             raise ValueError(
                 f"gs_stall_recovery must be one of {valid_stall_recovery}, "
                 f"got {self.gs_stall_recovery!r}"
+            )
+        valid_conv_criteria = {"dE", "grad_norm", "both"}
+        if self.gs_conv_criterion not in valid_conv_criteria:
+            raise ValueError(
+                f"gs_conv_criterion must be one of {valid_conv_criteria}, "
+                f"got {self.gs_conv_criterion!r}"
+            )
+        if self.gs_grad_norm_tol <= 0:
+            raise ValueError(
+                f"gs_grad_norm_tol must be positive, got {self.gs_grad_norm_tol}"
             )
 
 
