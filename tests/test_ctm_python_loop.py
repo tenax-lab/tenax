@@ -74,7 +74,7 @@ class TestJitCtmStep:
         site_tensors = {(0, 0): A}
         envs = {(0, 0): initialize_ctm_tensor_env(A, chi=4)}
         step = _make_jit_ctm_step(SINGLE_SITE_NEIGHBORS)
-        new_envs = step(site_tensors, envs, chi=4)
+        new_envs, _ = step(site_tensors, envs, chi=4)
         # Environments should differ after a sweep
         old_c1 = envs[(0, 0)].C1.todense()
         new_c1 = new_envs[(0, 0)].C1.todense()

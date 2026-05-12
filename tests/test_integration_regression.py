@@ -165,7 +165,7 @@ class TestBlockPreservation:
         assert init_blocks > 0
 
         for sweep in range(10):
-            env = _ctm_tensor_sweep(env, a, chi, renormalize=True)
+            env, _ = _ctm_tensor_sweep(env, a, chi, renormalize=True)
 
         for t in env:
             assert isinstance(t, SymmetricTensor), (
