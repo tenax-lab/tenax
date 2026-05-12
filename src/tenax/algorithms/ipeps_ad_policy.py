@@ -116,6 +116,7 @@ def ctm_converge_kwargs(
         "projector_backward": ctm_cfg.projector_backward,
         "chi_ramp": ctm_cfg.chi_ramp,
         "env_init": env_init,
+        "plateau_patience": ctm_cfg.plateau_patience,
     }
 
 
@@ -203,6 +204,13 @@ def make_ctm_energy_fn(
             arnoldi_precheck=False,
             adjoint_method=ctm_cfg.adjoint_method,
             energy_fn=energy_fn,
+            # Flows through to the implicit-AD forward CTM.  Default 20
+            # (variPEPS-style approximate AD: cheap on the plateau, the
+            # gradient is wrong either way during early optimization
+            # because the CTM doesn't reach a true fixed point regardless).
+            # Set ``CTMConfig.plateau_patience=None`` at the final chi
+            # stage when strict variational gradients matter.
+            plateau_patience=ctm_cfg.plateau_patience,
         )
 
     return _ctm_energy_fn

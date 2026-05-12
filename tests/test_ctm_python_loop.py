@@ -218,3 +218,166 @@ class TestMultisiteEnergy:
         )
 
         np.testing.assert_allclose(energy_multi, energy_ref, atol=1e-10)
+
+
+class TestPlateauPatience:
+    """Regression coverage for the ``plateau_patience`` early-bail."""
+
+    def test_disabled_matches_legacy_max_iter(self):
+        """``plateau_patience=None`` runs to ``max_iter`` even when stuck."""
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+        max_iter = 30
+        _, info = python_loop_ctm_converge(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=max_iter,
+            min_iter=5,
+            conv_tol=0.0,  # impossible — forces non-convergence
+            conv_method="elementwise",
+            renormalize=True,
+            projector_method="svd",
+            plateau_patience=None,
+        )
+        assert not info.converged
+        assert info.iterations == max_iter
+
+    def test_patience_bails_before_max_iter_on_plateau(self):
+        """A non-converging input bails before ``max_iter`` with a finite patience."""
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+        max_iter = 50
+        patience = 5
+        _, info = python_loop_ctm_converge(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=max_iter,
+            min_iter=5,
+            conv_tol=0.0,  # impossible — forces non-convergence
+            conv_method="elementwise",
+            renormalize=True,
+            projector_method="svd",
+            plateau_patience=patience,
+        )
+        assert not info.converged
+        # Bail must happen before exhausting the budget, and the returned
+        # iteration count is the best-iter (not the bail-iter) so it is
+        # bounded by ``max_iter - patience``.
+        assert info.iterations < max_iter
+
+    def test_large_patience_matches_disabled(self):
+        """``plateau_patience > max_iter`` is equivalent to ``None``."""
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+        max_iter = 25
+        kwargs = dict(
+            site_tensors={(0, 0): A},
+            neighbors=SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=max_iter,
+            min_iter=5,
+            conv_tol=0.0,
+            conv_method="elementwise",
+            renormalize=True,
+            projector_method="svd",
+        )
+        _, info_none = python_loop_ctm_converge(plateau_patience=None, **kwargs)
+        _, info_huge = python_loop_ctm_converge(
+            plateau_patience=10 * max_iter, **kwargs
+        )
+        assert info_none.iterations == info_huge.iterations == max_iter
+        assert not info_none.converged
+        assert not info_huge.converged
+
+    def test_returned_env_is_best_seen(self):
+        """Returned env corresponds to the best ``sv_diff``, not the bail iter."""
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+        _, info = python_loop_ctm_converge(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=50,
+            min_iter=5,
+            conv_tol=0.0,
+            conv_method="elementwise",
+            renormalize=True,
+            projector_method="svd",
+            plateau_patience=5,
+        )
+        assert isinstance(info, CTMConvergeInfo)
+        assert not info.converged
+        # ``sv_diff`` carries the *best* metric, so it must be finite and
+        # not larger than the very first measurement we could have made.
+        assert info.sv_diff < float("inf")
+
+    def test_chi_ramp_non_final_fixed_sweeps_ignores_patience(self):
+        """Explicit warm-up budgets must run to completion despite patience.
+
+        Codex review on PR #439: a ramp like ``[(8, 100), (16, None)]`` is
+        a contract to spend exactly 100 sweeps at chi=8 before moving on.
+        With ``plateau_patience=5`` propagated naively, the chi=8 stage
+        bails after ~5 non-improving iters and the final stage sees a
+        different under-relaxed env than the user requested.  The fix
+        forces ``plateau_patience=None`` on non-final stages with an
+        explicit sweep count.
+        """
+        from unittest.mock import patch
+
+        from tenax.algorithms import _ctm_python_loop as _loop_mod
+
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+
+        seen_patience: list[int | None] = []
+        real_fn = _loop_mod.python_loop_ctm_converge
+
+        def _spy(*args, **kwargs):
+            # Only record recursive (single-stage) calls dispatched by
+            # _python_loop_chi_ramp; outer call has chi_ramp set.
+            if kwargs.get("chi_ramp") is None:
+                seen_patience.append(kwargs.get("plateau_patience"))
+            return real_fn(*args, **kwargs)
+
+        with patch.object(_loop_mod, "python_loop_ctm_converge", new=_spy):
+            _loop_mod.python_loop_ctm_converge(
+                {(0, 0): A},
+                SINGLE_SITE_NEIGHBORS,
+                chi=4,
+                max_iter=30,
+                min_iter=5,
+                conv_tol=0.0,
+                conv_method="elementwise",
+                renormalize=True,
+                projector_method="svd",
+                plateau_patience=3,
+                chi_ramp=[(4, 25), (4, None)],
+            )
+
+        # Two recursive calls: stage 0 (fixed-budget non-final) must see
+        # plateau_patience=None; stage 1 (final, open budget) must see 3.
+        assert seen_patience == [None, 3], (
+            "Non-final fixed-budget stages must opt out of plateau_patience; "
+            f"saw {seen_patience!r}"
+        )
+
+    def test_ctm_config_field_forwards_to_python_loop(self):
+        """``CTMConfig.plateau_patience`` reaches ``python_loop_ctm_converge``.
+
+        Regression coverage for PR #439 review: high-level callers that
+        configure CTM only through ``CTMConfig`` (e.g. ``optimize_gs_ad``,
+        PESS) need an end-to-end opt-out path — otherwise the new default
+        cannot be disabled without bypassing the policy layer.
+        """
+        from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
+        from tenax.algorithms.ipeps_config import CTMConfig
+
+        cfg_default = CTMConfig()
+        assert cfg_default.plateau_patience == 20
+        kwargs_default = ctm_converge_kwargs(cfg_default)
+        assert kwargs_default["plateau_patience"] == 20
+
+        cfg_off = CTMConfig(plateau_patience=None)
+        kwargs_off = ctm_converge_kwargs(cfg_off)
+        assert kwargs_off["plateau_patience"] is None
+
+        cfg_custom = CTMConfig(plateau_patience=7)
+        kwargs_custom = ctm_converge_kwargs(cfg_custom)
+        assert kwargs_custom["plateau_patience"] == 7

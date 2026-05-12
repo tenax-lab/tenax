@@ -131,6 +131,7 @@ def python_loop_ctm_converge(
     chi_ramp: list[tuple[int, int | None]] | None = None,
     env_init: dict[Coord, CTMTensorEnv] | None = None,
     gauge_fix_fn=None,
+    plateau_patience: int | None = 20,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM to convergence using a Python for-loop over JIT'd sweeps.
 
@@ -157,6 +158,23 @@ def python_loop_ctm_converge(
                            stage uses ``max_iter`` if ``max_sweeps is None``.
         env_init:          Optional initial environments.  If ``None``,
                            identity-initialized environments are created.
+        plateau_patience:  Early-bail when the running minimum of the
+                           convergence metric (``sv_diff`` or elementwise
+                           ``max_diff``) has not improved over the last
+                           ``plateau_patience`` iterations.  The loop
+                           returns the env that achieved the best metric
+                           and ``CTMConvergeInfo.converged=False`` — the
+                           bail is a stop-loss, not a fixed point.
+                           Default ``20`` is a sane stop-loss against the
+                           SU/random-init CTM plateau tracked in #425/#426
+                           (memory ``project_tenax_ctm_doesnt_converge_random_init``):
+                           a healthy converging run never accumulates 20
+                           non-improving iterations because each better
+                           ``best_diff`` resets the counter, while a true
+                           plateau bails an order of magnitude faster than
+                           burning the full ``max_iter`` budget.  Set to
+                           ``None`` to restore the pre-2026-05-11 "run to
+                           ``max_iter``" behavior.
 
     Returns:
         ``(envs, CTMConvergeInfo)`` — converged environments and info.
@@ -177,6 +195,7 @@ def python_loop_ctm_converge(
             chi_ramp=chi_ramp,
             env_init=env_init,
             gauge_fix_fn=gauge_fix_fn,
+            plateau_patience=plateau_patience,
         )
 
     # Build the JIT'd step function (captures neighbors in closure)
@@ -208,6 +227,10 @@ def python_loop_ctm_converge(
     prev_envs: dict[Coord, CTMTensorEnv] | None = None
     final_diff = float("inf")
     last_max_eps: float = 0.0
+    best_diff = float("inf")
+    best_envs: dict[Coord, CTMTensorEnv] | None = None
+    best_iter = 0
+    iters_since_best = 0
 
     for i in range(remaining):
         envs, _max_eps = jit_step(
@@ -271,6 +294,22 @@ def python_loop_ctm_converge(
                 max_truncation_error=last_max_eps,
             )
 
+        if plateau_patience is not None:
+            if final_diff < best_diff:
+                best_diff = final_diff
+                best_envs = {c: envs[c] for c in envs}
+                best_iter = total_iter
+                iters_since_best = 0
+            else:
+                iters_since_best += 1
+                if iters_since_best >= plateau_patience:
+                    return best_envs or envs, CTMConvergeInfo(
+                        converged=False,
+                        iterations=best_iter or total_iter,
+                        sv_diff=best_diff,
+                        max_truncation_error=last_max_eps,
+                    )
+
     return envs, CTMConvergeInfo(
         converged=False,
         iterations=max_iter,
@@ -295,6 +334,7 @@ def _python_loop_chi_ramp(
     chi_ramp: list[tuple[int, int | None]],
     env_init: dict[Coord, CTMTensorEnv] | None,
     gauge_fix_fn=None,
+    plateau_patience: int | None = None,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM with chi-ramp schedule."""
     envs = env_init
@@ -319,6 +359,17 @@ def _python_loop_chi_ramp(
         if prev_chi is not None and stage_chi != prev_chi:
             envs = None
 
+        # Disable plateau early-bail when the user pinned an explicit
+        # warm-up budget for a non-final stage: a ramp like
+        # ``[(8, 100), (16, None)]`` is a contract to spend exactly 100
+        # sweeps at chi=8 before moving on, so the next stage sees a
+        # consistent warm-start env regardless of the plateau metric
+        # (codex review on PR #439).  The final stage and any stage with
+        # ``stage_sweeps=None`` still honor ``plateau_patience``.
+        stage_patience = (
+            None if (not is_last and stage_sweeps is not None) else plateau_patience
+        )
+
         envs, info = python_loop_ctm_converge(
             site_tensors,
             neighbors,
@@ -334,6 +385,7 @@ def _python_loop_chi_ramp(
             chi_ramp=None,
             env_init=envs,
             gauge_fix_fn=gauge_fix_fn,
+            plateau_patience=stage_patience,
         )
         prev_chi = stage_chi
 

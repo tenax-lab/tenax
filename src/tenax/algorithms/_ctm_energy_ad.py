@@ -277,6 +277,7 @@ def ctm_energy_implicit(
     energy_fn=None,
     arnoldi_precheck: bool = False,
     adjoint_method: str = "fixed_point",
+    plateau_patience: int | None = None,
 ) -> jnp.ndarray:
     """Compute iPEPS energy with implicit-differentiation backward (GMRES).
 
@@ -361,6 +362,7 @@ def ctm_energy_implicit(
         energy_fn,
         arnoldi_precheck,
         adjoint_method,
+        plateau_patience,
     )
 
 
@@ -379,6 +381,7 @@ def _sigma_gauged_ctm_converge(
     forward_gauge="phase",
     conv_method="sv",
     min_iter=4,
+    plateau_patience: int | None = None,
 ):
     """CTM convergence with sigma gauge fixing for element-wise fixed point.
 
@@ -416,6 +419,9 @@ def _sigma_gauged_ctm_converge(
 
     prev_svs: dict = {}
     prev_envs: dict | None = None
+    best_diff = float("inf")
+    best_envs: dict | None = None
+    iters_since_best = 0
     for i in range(max_iter - warmup):
         envs_new, _eps = jit_step(
             site_tensors,
@@ -454,13 +460,16 @@ def _sigma_gauged_ctm_converge(
                 max_diff = max(max_diff, _max_env_leaf_diff(prev_envs[c], envs[c]))
             converged = max_diff < conv_tol
             prev_envs = {c: envs[c] for c in envs}
+            current_diff = max_diff
         else:
             # SV convergence (default): corner singular value difference
             converged = True
+            current_diff = 0.0
             for c in sorted(envs):
                 sv = _corner_singular_values(envs[c].C1)
                 if c in prev_svs:
                     diff = float(_ctm_sv_diff(sv, prev_svs[c]))
+                    current_diff = max(current_diff, diff)
                     if diff >= conv_tol:
                         converged = False
                 else:
@@ -469,6 +478,16 @@ def _sigma_gauged_ctm_converge(
 
         if converged:
             break
+
+        if plateau_patience is not None:
+            if current_diff < best_diff:
+                best_diff = current_diff
+                best_envs = {c: envs[c] for c in envs}
+                iters_since_best = 0
+            else:
+                iters_since_best += 1
+                if iters_since_best >= plateau_patience:
+                    return best_envs or envs
 
     return envs
 
@@ -504,6 +523,7 @@ def _ctm_energy_implicit_dispatch(
     energy_fn,
     arnoldi_precheck,
     adjoint_method,
+    plateau_patience,
 ):
     """Dispatch to custom_vjp-decorated function with caching.
 
@@ -534,6 +554,7 @@ def _ctm_energy_implicit_dispatch(
         id(energy_fn),  # different energy callback → different backward
         arnoldi_precheck,
         adjoint_method,
+        plateau_patience,
     )
 
     entry = _VJP_CACHE.get(cache_key)
@@ -572,6 +593,7 @@ def _ctm_energy_implicit_dispatch(
         gmres_restart=gmres_restart,
         arnoldi_precheck=arnoldi_precheck,
         adjoint_method=adjoint_method,
+        plateau_patience=plateau_patience,
     )
     _VJP_CACHE[cache_key] = (f, mutables)
     return f(params_data_tuple)
@@ -596,6 +618,7 @@ def _make_implicit_vjp_fn(
     gmres_restart,
     arnoldi_precheck=False,
     adjoint_method="fixed_point",
+    plateau_patience: int | None = None,
 ):
     """Build a custom_vjp-decorated function closed over static config.
 
@@ -640,6 +663,7 @@ def _make_implicit_vjp_fn(
                 chi_ramp=chi_ramp,
                 env_init=env_init,
                 gauge_fix_fn=_gauge_fix_fn,
+                plateau_patience=plateau_patience,
             )
         else:
             envs = _sigma_gauged_ctm_converge(
@@ -656,6 +680,7 @@ def _make_implicit_vjp_fn(
                 forward_gauge=forward_gauge,
                 conv_method=conv_method,
                 min_iter=min_iter,
+                plateau_patience=plateau_patience,
             )
         return envs
 

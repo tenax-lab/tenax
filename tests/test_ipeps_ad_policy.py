@@ -196,6 +196,84 @@ def test_make_ctm_energy_fn_resolves_ctm_cfg_at_call_time():
     )
 
 
+def test_make_ctm_energy_fn_forwards_plateau_patience():
+    """``CTMConfig.plateau_patience`` reaches ``ctm_energy_implicit``.
+
+    Design note: the implicit-AD backward solves the fixed-point adjoint
+    around the returned env, which is only strictly correct when env is
+    a true fixed point.  In early AD the CTM plateaus regardless of
+    ``max_iter`` (#425/#426), so gradients are approximate either way —
+    variPEPS exploits the same trade-off via
+    ``optimizer_ctmrg_preconverged_eps=1e-5``.  Keeping
+    ``plateau_patience`` finite during AD matches that pragmatism and
+    is much faster.  Drop to ``None`` at the final chi stage when the
+    CTM actually approaches a fixed point and strict variational
+    gradients matter.
+    """
+    seen_plateau: list[int | None] = []
+
+    def _fake_ctm_energy_implicit(*_args, **kwargs):
+        seen_plateau.append(kwargs.get("plateau_patience"))
+        return 0.0
+
+    ctm_cfg = CTMConfig(
+        chi=8,
+        max_iter=10,
+        conv_tol=1e-4,
+        projector_method="svd",
+        forward_gauge="phase",
+        ctm_conv_method="elementwise",
+        plateau_patience=3,
+    )
+
+    with patch(
+        "tenax.algorithms._ctm_energy_ad.ctm_energy_implicit",
+        new=_fake_ctm_energy_implicit,
+    ):
+        energy_fn = make_ctm_energy_fn(
+            neighbors={(0, 0): {}},
+            gate=None,
+            get_ctm_cfg=lambda: ctm_cfg,
+            env_cache={},
+            use_explicit=False,
+            explicit_warmup=0,
+            explicit_steps=0,
+        )
+        energy_fn({})
+
+    assert seen_plateau == [3], (
+        "make_ctm_energy_fn must forward ctm_cfg.plateau_patience to the "
+        f"implicit-AD energy (saw {seen_plateau!r})"
+    )
+
+    # Warm-start path (ctm_converge_kwargs) also honors the field.
+    kw = ctm_converge_kwargs(ctm_cfg)
+    assert kw["plateau_patience"] == 3
+
+
+def test_aligned_ctm_schedules_helper():
+    """``aligned_ctm_schedules`` produces matched conv_tol + patience ramps."""
+    from tenax.algorithms.ipeps_config import aligned_ctm_schedules
+
+    conv, patience = aligned_ctm_schedules(
+        [(0.0, 1e-5, 20), (0.5, 1e-6, 10), (0.8, 1e-7, None)]
+    )
+    assert conv == [(0.0, 1e-5), (0.5, 1e-6), (0.8, 1e-7)]
+    assert patience == [(0.0, 20), (0.5, 10), (0.8, None)]
+
+
+def test_iPEPSConfig_accepts_independent_patience_schedule():  # noqa: N802
+    """Schedules are independent fields — tuner can set patience without conv_tol."""
+    from tenax.algorithms.ipeps_config import iPEPSConfig
+
+    cfg = iPEPSConfig(
+        max_bond_dim=2,
+        gs_plateau_patience_schedule=[(0.0, 20), (0.7, None)],
+    )
+    assert cfg.gs_ctm_conv_tol_schedule is None
+    assert cfg.gs_plateau_patience_schedule == [(0.0, 20), (0.7, None)]
+
+
 from tenax.algorithms.ipeps_ad_policy import validate_ctm_for_implicit_ad
 
 

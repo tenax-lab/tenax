@@ -990,6 +990,12 @@ def _optimize_gs_ad_tensor(
     _conv_tol_schedule = config.gs_ctm_conv_tol_schedule
     _current_conv_tol = ctm_cfg.conv_tol
 
+    # CTM plateau-patience schedule: update ctm_cfg when patience changes.
+    # Independent of the conv_tol schedule (intentionally — see
+    # iPEPSConfig.gs_plateau_patience_schedule docstring on auto-tuning).
+    _patience_schedule = config.gs_plateau_patience_schedule
+    _current_patience = ctm_cfg.plateau_patience
+
     # variPEPS §2.8.2 auto-χ_E bump padding policy: for a SymmetricTensor
     # A, derive the same ``base_charges`` the projector uses so the bump
     # pads χ-leg charges to match the projector's per-sector allocation
@@ -1017,6 +1023,17 @@ def _optimize_gs_ad_tensor(
                 tol = t
         return tol
 
+    def _get_scheduled_plateau_patience(step_idx, num_steps):
+        """Look up plateau_patience from schedule based on step fraction."""
+        if _patience_schedule is None:
+            return _current_patience
+        frac = step_idx / max(num_steps, 1)
+        patience = _patience_schedule[0][1]
+        for threshold, p in _patience_schedule:
+            if frac >= threshold:
+                patience = p
+        return patience
+
     for step in range(config.gs_num_steps):
         # Update conv_tol if schedule is active
         if _conv_tol_schedule is not None:
@@ -1024,6 +1041,12 @@ def _optimize_gs_ad_tensor(
             if new_tol != _current_conv_tol:
                 _current_conv_tol = new_tol
                 ctm_cfg = _replace(ctm_cfg, conv_tol=new_tol)
+        # Update plateau_patience if schedule is active
+        if _patience_schedule is not None:
+            new_patience = _get_scheduled_plateau_patience(step, config.gs_num_steps)
+            if new_patience != _current_patience:
+                _current_patience = new_patience
+                ctm_cfg = _replace(ctm_cfg, plateau_patience=new_patience)
         if config.return_history:
             _step_t0 = _time.perf_counter()
         try:
@@ -1737,6 +1760,11 @@ def _optimize_gs_ad_tensor_2site(
     _conv_tol_schedule_2s = config.gs_ctm_conv_tol_schedule
     _current_conv_tol_2s = ctm_cfg_2s.conv_tol
 
+    # CTM plateau-patience schedule (independent of conv_tol — see
+    # iPEPSConfig.gs_plateau_patience_schedule docstring).
+    _patience_schedule_2s = config.gs_plateau_patience_schedule
+    _current_patience_2s = ctm_cfg_2s.plateau_patience
+
     def _get_scheduled_conv_tol_2s(step_idx, num_steps):
         if _conv_tol_schedule_2s is None:
             return _current_conv_tol_2s
@@ -1746,6 +1774,16 @@ def _optimize_gs_ad_tensor_2site(
             if frac >= threshold:
                 tol = t
         return tol
+
+    def _get_scheduled_plateau_patience_2s(step_idx, num_steps):
+        if _patience_schedule_2s is None:
+            return _current_patience_2s
+        frac = step_idx / max(num_steps, 1)
+        patience = _patience_schedule_2s[0][1]
+        for threshold, p in _patience_schedule_2s:
+            if frac >= threshold:
+                patience = p
+        return patience
 
     def loss_fn_fwd(params_):
         """Forward-only loss for line search — warm-starts CTM from env cache."""
@@ -1779,6 +1817,12 @@ def _optimize_gs_ad_tensor_2site(
             if new_tol != _current_conv_tol_2s:
                 _current_conv_tol_2s = new_tol
                 ctm_cfg_2s = _replace(ctm_cfg_2s, conv_tol=new_tol)
+        # Update plateau_patience if schedule is active
+        if _patience_schedule_2s is not None:
+            new_patience = _get_scheduled_plateau_patience_2s(step, config.gs_num_steps)
+            if new_patience != _current_patience_2s:
+                _current_patience_2s = new_patience
+                ctm_cfg_2s = _replace(ctm_cfg_2s, plateau_patience=new_patience)
 
         if config.return_history:
             _step_t0 = _time.perf_counter()
@@ -2391,6 +2435,11 @@ def _optimize_gs_ad_multisite(
     _conv_tol_schedule = config.gs_ctm_conv_tol_schedule
     _current_conv_tol = ctm_cfg.conv_tol
 
+    # CTM plateau-patience schedule (independent of conv_tol — see
+    # iPEPSConfig.gs_plateau_patience_schedule docstring).
+    _patience_schedule = config.gs_plateau_patience_schedule
+    _current_patience = ctm_cfg.plateau_patience
+
     def _get_scheduled_conv_tol(step_idx, num_steps):
         if _conv_tol_schedule is None:
             return _current_conv_tol
@@ -2401,6 +2450,16 @@ def _optimize_gs_ad_multisite(
                 tol = t
         return tol
 
+    def _get_scheduled_plateau_patience(step_idx, num_steps):
+        if _patience_schedule is None:
+            return _current_patience
+        frac = step_idx / max(num_steps, 1)
+        patience = _patience_schedule[0][1]
+        for threshold, p in _patience_schedule:
+            if frac >= threshold:
+                patience = p
+        return patience
+
     # ── Optimization loop ────────────────────────────────────────────────
     for step in range(config.gs_num_steps):
         # Update conv_tol if schedule is active
@@ -2409,6 +2468,12 @@ def _optimize_gs_ad_multisite(
             if new_tol != _current_conv_tol:
                 _current_conv_tol = new_tol
                 ctm_cfg = _replace(ctm_cfg, conv_tol=new_tol)
+        # Update plateau_patience if schedule is active
+        if _patience_schedule is not None:
+            new_patience = _get_scheduled_plateau_patience(step, config.gs_num_steps)
+            if new_patience != _current_patience:
+                _current_patience = new_patience
+                ctm_cfg = _replace(ctm_cfg, plateau_patience=new_patience)
 
         try:
             energy_val, grads = jax.value_and_grad(loss_fn)(params)

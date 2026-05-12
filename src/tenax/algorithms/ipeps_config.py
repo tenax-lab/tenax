@@ -151,6 +151,30 @@ class CTMConfig:
     chi_auto_bump_eps: float = 1e-5
     chi_auto_bump_step: int = 2
     chi_max: int | None = None
+    # Early-bail when the running minimum of the CTM convergence metric
+    # has not improved for ``plateau_patience`` consecutive iterations.
+    # Default ``20`` is a stop-loss against the known SU/random-init CTM
+    # plateau (issue #425/#426, memory
+    # ``project_tenax_ctm_doesnt_converge_random_init``).  A healthy
+    # converging run never accumulates 20 non-improving iters because
+    # each better ``best_diff`` resets the counter, so the default does
+    # not interfere with normal convergence.  Set to ``None`` to restore
+    # the pre-2026-05-11 "run to ``max_iter``" behavior.
+    #
+    # **AD-path note**: the implicit-AD backward solves the fixed-point
+    # adjoint ``(I - J^T) λ = ∂L/∂env`` around the returned env, which is
+    # only well-defined when env is a true fixed point.  In early AD the
+    # CTM plateaus regardless (the env is *not* a fixed point even after
+    # ``max_iter`` sweeps — see #425/#426), so the implicit-function
+    # premise is already broken and gradients are approximate either way.
+    # variPEPS exploits the same trade-off via
+    # ``optimizer_ctmrg_preconverged_eps=1e-5`` (loose CTM during AD)
+    # which is why its AD inner loop is much faster than a tight
+    # fixed-point CTM.  Keeping ``plateau_patience`` finite during AD
+    # matches that pragmatism.  Drop to ``None`` at the final chi stage
+    # (or when the CTM actually converges) for strict variational
+    # gradients.
+    plateau_patience: int | None = 20
 
     def __post_init__(self):
         valid_modes = {None, "c4v_reference"}
@@ -303,6 +327,22 @@ class iPEPSConfig:
     # Example: [(0.0, 1e-5), (0.5, 1e-6), (0.8, 1e-7)]
     # None = use config.ctm.conv_tol throughout.
     gs_ctm_conv_tol_schedule: list[tuple[float, float]] | None = None
+    # CTM plateau-patience schedule: list of (step_fraction, plateau_patience)
+    # pairs.  Ramps the early-bail patience across AD steps so callers can
+    # keep a finite stop-loss while the CTM is plateauing (fast, approximate
+    # gradients à la variPEPS ``optimizer_ctmrg_preconverged_eps``) and drop
+    # to ``None`` at the final stage for strict variational gradients.
+    # Example: ``[(0.0, 20), (0.7, None)]``.  ``None`` (default) uses
+    # ``config.ctm.plateau_patience`` throughout.
+    #
+    # **Design note for auto-tuning frameworks**: kept parallel to
+    # ``gs_ctm_conv_tol_schedule`` rather than bundled into a single rich
+    # schedule so each schedule can be registered, sampled, and ablated
+    # independently in a tuning registry.  Use
+    # ``aligned_ctm_schedules(...)`` (helper in ``ipeps_config``) when
+    # hand-writing configs that want the two ramps to share stage
+    # fractions.
+    gs_plateau_patience_schedule: list[tuple[float, int | None]] | None = None
     # Metric preconditioning (natural gradient, Rader et al. arXiv:2511.09546)
     gs_metric_precond: bool = True  # metric preconditioning for CG/L-BFGS
     metric_gmres_maxiter: int = 30  # Krylov dimension for metric inversion
@@ -349,6 +389,43 @@ class iPEPSConfig:
                 f"gs_stall_recovery must be one of {valid_stall_recovery}, "
                 f"got {self.gs_stall_recovery!r}"
             )
+
+
+def aligned_ctm_schedules(
+    stages: list[tuple[float, float, int | None]],
+) -> tuple[
+    list[tuple[float, float]],
+    list[tuple[float, int | None]],
+]:
+    """Build aligned ``conv_tol`` / ``plateau_patience`` schedules.
+
+    Convenience for the common manual case where both ramps share stage
+    fractions.  Each ``stages`` entry is ``(step_fraction, conv_tol,
+    plateau_patience)``; returns ``(conv_tol_schedule, patience_schedule)``
+    suitable for ``iPEPSConfig.gs_ctm_conv_tol_schedule`` and
+    ``iPEPSConfig.gs_plateau_patience_schedule`` respectively.
+
+    For auto-tuning frameworks: leave the two schedules unbundled at the
+    config layer (so they can be tuned independently) and use this helper
+    only when the user wants a single hand-written spec.
+
+    Example::
+
+        conv, patience = aligned_ctm_schedules(
+            [(0.0, 1e-5, 20), (0.7, 1e-7, None)]
+        )
+        cfg = iPEPSConfig(
+            ...,
+            gs_ctm_conv_tol_schedule=conv,
+            gs_plateau_patience_schedule=patience,
+        )
+    """
+    conv_tol_schedule: list[tuple[float, float]] = []
+    patience_schedule: list[tuple[float, int | None]] = []
+    for frac, conv_tol, patience in stages:
+        conv_tol_schedule.append((float(frac), float(conv_tol)))
+        patience_schedule.append((float(frac), patience))
+    return conv_tol_schedule, patience_schedule
 
 
 class CTMEnvironment(NamedTuple):
