@@ -190,3 +190,71 @@ def test_both_criterion_requires_both_to_pass():
     # Did not converge under "both" because the grad-norm half can't be met.
     assert history["converged"] is False
     assert history["num_steps"] == cfg.gs_num_steps
+
+
+# --- integration: c4v_reference dispatcher honors the criterion ------------
+#
+# Codex review on #449 flagged that ``_optimize_gs_ad_tensor_reference_c4v``
+# had no convergence check at all — even ``gs_conv_tol`` was silently ignored
+# and every run consumed ``gs_num_steps``. These tests pin the fix.
+
+
+def _c4v_reference_cfg(num_steps: int = 6, **overrides) -> iPEPSConfig:
+    # Mirrors tests/test_c4v_reference_ad.py
+    # ::test_optimize_gs_ad_reference_mode_nonzero_steps_runs — only the
+    # default ``projector_method='svd'`` survives the implicit-AD policy
+    # check on this path.
+    base = iPEPSConfig(
+        max_bond_dim=2,
+        ctm=CTMConfig(
+            chi=4,
+            max_iter=8,
+            min_iter=2,
+            ctm_ad_mode="c4v_reference",
+        ),
+        gs_num_steps=num_steps,
+        gs_learning_rate=1e-2,
+        gs_implicit_ad=True,
+        gs_c4v=True,
+        unit_cell="1x1",
+        su_init=False,
+        gs_optimizer="adam",
+        gs_verbose=True,  # so we can grep stdout for the converged-log line.
+    )
+    return replace(base, **overrides)
+
+
+@pytest.mark.algorithm
+def test_c4v_reference_honors_dE_criterion(capsys):
+    """Loose ``gs_conv_tol`` must trigger the dE exit in the C4v-reference
+    dispatcher (issue #448 codex follow-up)."""
+    import jax
+
+    A0 = jax.random.normal(jax.random.PRNGKey(2), (2, 2, 2, 2, 2))
+    cfg = _c4v_reference_cfg(
+        num_steps=5,
+        gs_conv_criterion="dE",
+        gs_conv_tol=1.0,  # loose → fires on first step.
+    )
+    optimize_gs_ad(_heisenberg_gate(), A0, cfg)
+    captured = capsys.readouterr().out
+    assert "[iPEPS-AD:c4v_reference] converged at step" in captured, captured
+
+
+@pytest.mark.algorithm
+def test_c4v_reference_honors_grad_norm_criterion(capsys):
+    """Loose ``gs_grad_norm_tol`` must trigger the grad-norm exit on the
+    C4v-reference path too."""
+    import jax
+
+    A0 = jax.random.normal(jax.random.PRNGKey(3), (2, 2, 2, 2, 2))
+    cfg = _c4v_reference_cfg(
+        num_steps=5,
+        gs_conv_criterion="grad_norm",
+        gs_grad_norm_tol=1e30,  # any finite grad-norm satisfies.
+        gs_conv_tol=1e-30,  # dE can't trip first.
+    )
+    optimize_gs_ad(_heisenberg_gate(), A0, cfg)
+    captured = capsys.readouterr().out
+    assert "[iPEPS-AD:c4v_reference] converged at step" in captured, captured
+    assert "||grad||=" in captured, captured

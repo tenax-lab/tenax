@@ -718,6 +718,7 @@ def _optimize_gs_ad_tensor_reference_c4v(
     opt_state = None if optimizer is None else optimizer.init(params)
     best_energy = float("inf")
     best_params = params
+    prev_energy = float("inf")
 
     def _project_c4v_and_normalize(A_data: jax.Array) -> jax.Array:
         coeffs = c4v_coeffs_from_tensor(A_data, c4v_basis)
@@ -776,6 +777,31 @@ def _optimize_gs_ad_tensor_reference_c4v(
         ):
             best_energy = E
             best_params = params
+
+        # Outer convergence (issue #448).  Mirrors the other dispatchers
+        # so ``gs_conv_criterion`` and ``gs_conv_tol`` are honoured on the
+        # reference-C4v path too — until this commit they were silently
+        # ignored and every run consumed ``gs_num_steps``.  Grad-norm is
+        # computed only when the chosen criterion needs it.
+        delta_energy = abs(E - prev_energy)
+        prev_energy = E
+        grad_norm_val = (
+            _grad_l2_norm(grads)
+            if config.gs_conv_criterion in ("grad_norm", "both")
+            else None
+        )
+        if _converged_outer(config, delta_energy, grad_norm_val):
+            if config.gs_verbose:
+                _log_ad_converged(
+                    "c4v_reference",
+                    _step,
+                    delta_energy,
+                    config.gs_conv_tol,
+                    grad_norm=grad_norm_val,
+                    grad_norm_tol=config.gs_grad_norm_tol,
+                    criterion=config.gs_conv_criterion,
+                )
+            break
 
     final_energy, (final_env, final_A) = _loss_fn(best_params)
     return final_A, final_env, float(final_energy)
