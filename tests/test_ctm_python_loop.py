@@ -309,6 +309,55 @@ class TestPlateauPatience:
         # not larger than the very first measurement we could have made.
         assert info.sv_diff < float("inf")
 
+    def test_chi_ramp_non_final_fixed_sweeps_ignores_patience(self):
+        """Explicit warm-up budgets must run to completion despite patience.
+
+        Codex review on PR #439: a ramp like ``[(8, 100), (16, None)]`` is
+        a contract to spend exactly 100 sweeps at chi=8 before moving on.
+        With ``plateau_patience=5`` propagated naively, the chi=8 stage
+        bails after ~5 non-improving iters and the final stage sees a
+        different under-relaxed env than the user requested.  The fix
+        forces ``plateau_patience=None`` on non-final stages with an
+        explicit sweep count.
+        """
+        from unittest.mock import patch
+
+        from tenax.algorithms import _ctm_python_loop as _loop_mod
+
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+
+        seen_patience: list[int | None] = []
+        real_fn = _loop_mod.python_loop_ctm_converge
+
+        def _spy(*args, **kwargs):
+            # Only record recursive (single-stage) calls dispatched by
+            # _python_loop_chi_ramp; outer call has chi_ramp set.
+            if kwargs.get("chi_ramp") is None:
+                seen_patience.append(kwargs.get("plateau_patience"))
+            return real_fn(*args, **kwargs)
+
+        with patch.object(_loop_mod, "python_loop_ctm_converge", new=_spy):
+            _loop_mod.python_loop_ctm_converge(
+                {(0, 0): A},
+                SINGLE_SITE_NEIGHBORS,
+                chi=4,
+                max_iter=30,
+                min_iter=5,
+                conv_tol=0.0,
+                conv_method="elementwise",
+                renormalize=True,
+                projector_method="svd",
+                plateau_patience=3,
+                chi_ramp=[(4, 25), (4, None)],
+            )
+
+        # Two recursive calls: stage 0 (fixed-budget non-final) must see
+        # plateau_patience=None; stage 1 (final, open budget) must see 3.
+        assert seen_patience == [None, 3], (
+            "Non-final fixed-budget stages must opt out of plateau_patience; "
+            f"saw {seen_patience!r}"
+        )
+
     def test_ctm_config_field_forwards_to_python_loop(self):
         """``CTMConfig.plateau_patience`` reaches ``python_loop_ctm_converge``.
 

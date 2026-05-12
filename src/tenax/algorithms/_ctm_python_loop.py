@@ -359,6 +359,17 @@ def _python_loop_chi_ramp(
         if prev_chi is not None and stage_chi != prev_chi:
             envs = None
 
+        # Disable plateau early-bail when the user pinned an explicit
+        # warm-up budget for a non-final stage: a ramp like
+        # ``[(8, 100), (16, None)]`` is a contract to spend exactly 100
+        # sweeps at chi=8 before moving on, so the next stage sees a
+        # consistent warm-start env regardless of the plateau metric
+        # (codex review on PR #439).  The final stage and any stage with
+        # ``stage_sweeps=None`` still honor ``plateau_patience``.
+        stage_patience = (
+            None if (not is_last and stage_sweeps is not None) else plateau_patience
+        )
+
         envs, info = python_loop_ctm_converge(
             site_tensors,
             neighbors,
@@ -374,7 +385,7 @@ def _python_loop_chi_ramp(
             chi_ramp=None,
             env_init=envs,
             gauge_fix_fn=gauge_fix_fn,
-            plateau_patience=plateau_patience,
+            plateau_patience=stage_patience,
         )
         prev_chi = stage_chi
 
