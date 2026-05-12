@@ -450,6 +450,11 @@ def _sigma_gauged_ctm_converge(
                 prev_envs = {c: envs[c] for c in envs}
             continue
 
+        # ``plateau_metric_valid`` flags whether ``current_diff`` is from
+        # a real baseline this iter — mirrors the python-loop guard added
+        # for the SV ``min_iter <= 1`` case (codex review on PR #439).
+        plateau_metric_valid = False
+
         if conv_method == "elementwise":
             # Element-wise: max absolute difference across all env tensor leaves
             if prev_envs is None:
@@ -461,8 +466,12 @@ def _sigma_gauged_ctm_converge(
             converged = max_diff < conv_tol
             prev_envs = {c: envs[c] for c in envs}
             current_diff = max_diff
+            plateau_metric_valid = True
         else:
-            # SV convergence (default): corner singular value difference
+            # SV convergence (default): corner singular value difference.
+            # First SV check has no baseline (only possible when
+            # ``min_iter <= 1``); skip plateau tracking until next iter.
+            have_prev_svs = bool(prev_svs)
             converged = True
             current_diff = 0.0
             for c in sorted(envs):
@@ -475,11 +484,13 @@ def _sigma_gauged_ctm_converge(
                 else:
                     converged = False
                 prev_svs[c] = sv
+            if have_prev_svs:
+                plateau_metric_valid = True
 
         if converged:
             break
 
-        if plateau_patience is not None:
+        if plateau_patience is not None and plateau_metric_valid:
             if current_diff < best_diff:
                 best_diff = current_diff
                 best_envs = {c: envs[c] for c in envs}
