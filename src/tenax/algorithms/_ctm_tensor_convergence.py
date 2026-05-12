@@ -385,6 +385,7 @@ def _ctm_tensor_sweep_multisite(
                     double_layers[s_BR],
                     chi,
                     direction,
+                    base_charges=base_charges,
                 )
 
             # Phase 2: absorb per cell using TWO plaquettes' projectors.

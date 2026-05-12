@@ -318,6 +318,7 @@ def _compute_plaquette_projector_pair(
     a_BR: Tensor,
     chi: int,
     direction: str,
+    base_charges: np.ndarray | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Compute the (P_top, P_bot) projector pair for a 2x2 plaquette and direction.
 
@@ -353,7 +354,7 @@ def _compute_plaquette_projector_pair(
         env_BR.C3, env_BR.T3, env_BR.T2, a_BR, position="bottom_right"
     )
     P_top_raw, P_bot_raw = _compute_2x2_projector(
-        Q_TL, Q_TR, Q_BL, Q_BR, chi, direction=direction
+        Q_TL, Q_TR, Q_BL, Q_BR, chi, direction=direction, base_charges=base_charges
     )
     return _half_to_chi_new_top(P_top_raw), _half_to_chi_new_bot(P_bot_raw)
 
@@ -873,6 +874,7 @@ def _ctm_tensor_move_left_2x2(
     a_BR: Tensor,
     chi: int,
     projector_method: str = "svd",
+    base_charges: np.ndarray | None = None,
 ) -> CTMTensorEnv:
     """Left CTM move using 2x2 plaquette projectors. Updates env_TL.{C1,C4,T4}.
 
@@ -922,7 +924,9 @@ def _ctm_tensor_move_left_2x2(
     # ---- Step 2: compute the (P_top, P_bot) projector pair. ----
     # P_top:  (chi_outer [IN], fused_D2 [IN], chi_new_top [OUT])
     # P_bot:  (chi_new_bot [IN], chi_outer [OUT], fused_D2 [OUT])
-    P_top, P_bot = _compute_2x2_projector(Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="left")
+    P_top, P_bot = _compute_2x2_projector(
+        Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="left", base_charges=base_charges
+    )
 
     # ---- Step 3: build C1g, C4g, T4g from env_TL. ----
     # Identical structure to the 1x1 ``_ctm_tensor_move_left`` body, with
@@ -984,6 +988,7 @@ def _ctm_tensor_move_right_2x2(
     a_BR: Tensor,
     chi: int,
     projector_method: str = "svd",
+    base_charges: np.ndarray | None = None,
 ) -> CTMTensorEnv:
     """Right CTM move using 2x2 plaquette projectors. Updates env_TL.{C2,C3,T2}.
 
@@ -1027,7 +1032,7 @@ def _ctm_tensor_move_right_2x2(
 
     # ---- Step 2: compute the (P_top, P_bot) projector pair. ----
     P_top, P_bot = _compute_2x2_projector(
-        Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="right"
+        Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="right", base_charges=base_charges
     )
 
     # ---- Step 3: build C2g, C3g, T2g from env_TL. ----
@@ -1079,6 +1084,7 @@ def _ctm_tensor_move_top_2x2(
     a_BR: Tensor,
     chi: int,
     projector_method: str = "svd",
+    base_charges: np.ndarray | None = None,
 ) -> CTMTensorEnv:
     """Top CTM move using 2x2 plaquette projectors. Updates env_TL.{C1,C2,T1}.
 
@@ -1114,7 +1120,9 @@ def _ctm_tensor_move_top_2x2(
     )
 
     # ---- Step 2: compute the (P_top, P_bot) projector pair. ----
-    P_top, P_bot = _compute_2x2_projector(Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="top")
+    P_top, P_bot = _compute_2x2_projector(
+        Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="top", base_charges=base_charges
+    )
 
     # ---- Step 3: build C1g, C2g, T1g from env_TL. ----
     # Same C/T fusion structure as the 1x1 ``_ctm_tensor_move_top`` body.
@@ -1165,6 +1173,7 @@ def _ctm_tensor_move_bottom_2x2(
     a_BR: Tensor,
     chi: int,
     projector_method: str = "svd",
+    base_charges: np.ndarray | None = None,
 ) -> CTMTensorEnv:
     """Bottom CTM move using 2x2 plaquette projectors. Updates env_TL.{C4,C3,T3}.
 
@@ -1201,7 +1210,7 @@ def _ctm_tensor_move_bottom_2x2(
 
     # ---- Step 2: compute the (P_top, P_bot) projector pair. ----
     P_top, P_bot = _compute_2x2_projector(
-        Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="bottom"
+        Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="bottom", base_charges=base_charges
     )
 
     # ---- Step 3: build C4g, C3g, T3g from env_TL. ----
