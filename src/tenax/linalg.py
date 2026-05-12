@@ -96,6 +96,7 @@ def _truncated_svd_symmetric(
     max_truncation_err: float | None,
     new_bond_label: Label,
     normalize: bool,
+    base_charges: np.ndarray | None = None,
 ) -> tuple[SymmetricTensor, jax.Array, SymmetricTensor, jax.Array]:
     """Block-diagonal SVD for SymmetricTensor.
 
@@ -105,6 +106,21 @@ def _truncated_svd_symmetric(
     Returns ``(U, s_truncated, Vh, s_full)`` where *s_full* contains all
     singular values (sorted descending) before truncation.
     """
+    # Tracer-aware dispatch: if any block carries a JAX tracer (AD backward),
+    # the Python-level global SV sort at lines 230-243 cannot run.  Route to
+    # the traced variant that does per-sector static allocation.
+    is_traced = any(isinstance(b, jax.core.Tracer) for b in tensor.blocks.values())
+    if is_traced and tensor.blocks:
+        return _truncated_svd_symmetric_traced(
+            tensor,
+            left_labels,
+            right_labels,
+            max_singular_values,
+            new_bond_label,
+            normalize,
+            base_charges=base_charges,
+        )
+
     all_labels = tensor.labels()
     label_to_axis = {lbl: i for i, lbl in enumerate(all_labels)}
     left_axes = [label_to_axis[lbl] for lbl in left_labels]
@@ -354,6 +370,232 @@ def _truncated_svd_symmetric(
         Vh_tensor = SymmetricTensor(Vh_blocks, Vh_indices)
 
     return U_tensor, s_final, Vh_tensor, s_full
+
+
+# ---------- Tracer-safe block-sparse SVD ----------
+
+
+def _truncated_svd_symmetric_traced(
+    tensor: SymmetricTensor,
+    left_labels: Sequence[Label],
+    right_labels: Sequence[Label],
+    max_singular_values: int | None,
+    new_bond_label: Label,
+    normalize: bool,
+    base_charges: np.ndarray | None = None,
+) -> tuple[SymmetricTensor, jax.Array, SymmetricTensor, jax.Array]:
+    """Tracer-safe block-diagonal SVD for SymmetricTensor.
+
+    Used under JAX tracing (e.g. AD backward through implicit-FP GMRES).  Each
+    charge sector is SVD'd independently via :func:`truncated_svd_ad`, which
+    applies Francuz et al. Lorentzian regularization per block.
+
+    Allocation rule (static, no global SV sort):
+      * If both ``base_charges`` and ``max_singular_values`` are provided:
+        ``k_q = min(target_count[q], available_q)`` where
+        ``target_count[q]`` is the count of ``q`` in
+        ``_derive_charges(base_charges, max_singular_values)``.
+      * If ``max_singular_values`` is None: ``k_q = min(rows_q, cols_q)``
+        (full spectrum per sector).
+      * Else (defensive fallback, base_charges=None and truncating):
+        ``k_q = max(1, round(max_singular_values * available_q / total_available))``,
+        adjusted so totals do not exceed ``max_singular_values``.
+
+    The bond axis emerges in sector-block order, NOT global SV-descending
+    order.  This differs from the eager path's output ordering; tensor
+    contractions match by charge identity per block, so the permutation is
+    safe.  Positional reads of S (e.g. ``S[0]``) should use ``jnp.max(S)``
+    instead — see ``_compute_2x2_projector_symmetric`` line 960.
+
+    Returns ``(U, s_truncated, Vh, s_full)``; under tracing ``s_full = s_truncated``
+    (no pre-truncation spectrum tracked separately).
+    """
+    from tenax.algorithms._ad_primitives import truncated_svd_ad
+    from tenax.algorithms._ctm_utils import _derive_charges
+
+    all_labels = tensor.labels()
+    label_to_axis = {lbl: i for i, lbl in enumerate(all_labels)}
+    left_axes = [label_to_axis[lbl] for lbl in left_labels]
+    right_axes = [label_to_axis[lbl] for lbl in right_labels]
+    left_indices = tuple(tensor.indices[i] for i in left_axes)
+    right_indices = tuple(tensor.indices[i] for i in right_axes)
+
+    grouped = _group_blocks_by_bond_charge(tensor, left_axes, right_axes)
+
+    sym = tensor.indices[0].symmetry
+    is_fermionic = sym.is_fermionic
+    decomp_perm = tuple(left_axes + right_axes)
+
+    # Per-sector results: q -> (matrix, left_subkeys, right_subkeys,
+    # left_row_sizes, right_col_sizes, available_q)
+    sector_results: dict[int, tuple] = {}
+
+    for q, entries in grouped.items():
+        left_subkeys_seen: dict[BlockKey, int] = {}
+        right_subkeys_seen: dict[BlockKey, int] = {}
+        for lk, rk, _ in entries:
+            if lk not in left_subkeys_seen:
+                left_subkeys_seen[lk] = len(left_subkeys_seen)
+            if rk not in right_subkeys_seen:
+                right_subkeys_seen[rk] = len(right_subkeys_seen)
+
+        left_subkeys = list(left_subkeys_seen.keys())
+        right_subkeys = list(right_subkeys_seen.keys())
+
+        left_row_sizes: list[int] = []
+        for lk in left_subkeys:
+            size = 1
+            for leg_pos, charge_val in zip(left_axes, lk):
+                idx = tensor.indices[leg_pos]
+                size *= idx.multiplicity(charge_val)
+            left_row_sizes.append(size)
+
+        right_col_sizes: list[int] = []
+        for rk in right_subkeys:
+            size = 1
+            for leg_pos, charge_val in zip(right_axes, rk):
+                idx = tensor.indices[leg_pos]
+                size *= idx.multiplicity(charge_val)
+            right_col_sizes.append(size)
+
+        total_rows = sum(left_row_sizes)
+        total_cols = sum(right_col_sizes)
+        if total_rows == 0 or total_cols == 0:
+            continue
+
+        # Assemble the per-sector block matrix (traceable)
+        matrix = jnp.zeros((total_rows, total_cols), dtype=tensor.dtype)
+        for lk, rk, block in entries:
+            li = left_subkeys_seen[lk]
+            ri = right_subkeys_seen[rk]
+            row_start = sum(left_row_sizes[:li])
+            col_start = sum(right_col_sizes[:ri])
+            flat_block = block.reshape(left_row_sizes[li], right_col_sizes[ri])
+            if is_fermionic:
+                full_key = [0] * len(tensor.indices)
+                for ax, ch in zip(left_axes, lk):
+                    full_key[ax] = ch
+                for ax, ch in zip(right_axes, rk):
+                    full_key[ax] = ch
+                parities = tuple(
+                    int(sym.parity(np.array([full_key[i]]))[0])
+                    for i in range(len(full_key))
+                )
+                ksign = _koszul_sign(parities, decomp_perm)
+                if ksign < 0:
+                    flat_block = -flat_block
+            matrix = matrix.at[
+                row_start : row_start + left_row_sizes[li],
+                col_start : col_start + right_col_sizes[ri],
+            ].set(flat_block)
+
+        available_q = min(total_rows, total_cols)
+        sector_results[q] = (
+            matrix,
+            left_subkeys,
+            right_subkeys,
+            left_row_sizes,
+            right_col_sizes,
+            available_q,
+        )
+
+    # --- Static per-sector keep allocation ---
+    if max_singular_values is None:
+        k_per_sector: dict[int, int] = {q: r[5] for q, r in sector_results.items()}
+    elif base_charges is not None:
+        target_charges = _derive_charges(base_charges, max_singular_values)
+        target_count: dict[int, int] = {}
+        for tq in target_charges:
+            target_count[int(tq)] = target_count.get(int(tq), 0) + 1
+        k_per_sector = {
+            q: min(target_count.get(q, 0), r[5]) for q, r in sector_results.items()
+        }
+    else:
+        # Defensive fallback: proportional to per-sector available capacity.
+        total_avail = sum(r[5] for r in sector_results.values()) or 1
+        k_per_sector = {
+            q: max(1, round(max_singular_values * r[5] / total_avail))
+            for q, r in sector_results.items()
+        }
+        excess = sum(k_per_sector.values()) - max_singular_values
+        for q in sorted(k_per_sector.keys()):
+            if excess <= 0:
+                break
+            take = min(excess, k_per_sector[q] - 1)
+            if take > 0:
+                k_per_sector[q] -= take
+                excess -= take
+
+    # Floor at >=1 total (mirrors eager n_keep = max(1, n_keep))
+    total_keep = sum(k_per_sector.values())
+    if total_keep == 0 and sector_results:
+        best_q = max(
+            sector_results.keys(),
+            key=lambda q: (sector_results[q][5], -q),
+        )
+        k_per_sector[best_q] = 1
+
+    # --- Per-sector AD-primitive SVD ---
+    sector_svd: dict[int, tuple[jax.Array, jax.Array, jax.Array]] = {}
+    for q, (matrix, _, _, _, _, _) in sector_results.items():
+        k_q = k_per_sector.get(q, 0)
+        if k_q <= 0:
+            continue
+        # truncated_svd_ad takes a jax.Array matrix and chi
+        U_q, s_q, Vh_q = truncated_svd_ad(matrix, k_q)
+        sector_svd[q] = (U_q, s_q, Vh_q)
+
+    # --- Concatenate output in canonical sector-ascending order ---
+    ordered_qs = sorted(sector_svd.keys())
+    bond_charges = np.repeat(
+        np.array(ordered_qs, dtype=np.int32),
+        np.array([sector_svd[q][1].shape[0] for q in ordered_qs], dtype=np.int32),
+    )
+    s_final = jnp.concatenate([sector_svd[q][1] for q in ordered_qs])
+
+    if normalize and s_final.shape[0] > 0:
+        s_final = s_final / jnp.sum(s_final)
+
+    bond_index_out = TensorIndex.from_charges(
+        sym, bond_charges, FlowDirection.OUT, label=new_bond_label
+    )
+    bond_index_in = TensorIndex.from_charges(
+        sym, bond_charges, FlowDirection.IN, label=new_bond_label
+    )
+
+    # --- Reconstruct U / Vh block dicts ---
+    U_blocks: dict[BlockKey, jax.Array] = {}
+    Vh_blocks: dict[BlockKey, jax.Array] = {}
+    for q in ordered_qs:
+        _matrix, left_subkeys, right_subkeys, left_row_sizes, right_col_sizes, _ = (
+            sector_results[q]
+        )
+        U_q, _, Vh_q = sector_svd[q]
+        row_offset = 0
+        for li, lk in enumerate(left_subkeys):
+            n_rows = left_row_sizes[li]
+            block_rows = U_q[row_offset : row_offset + n_rows, :]
+            row_offset += n_rows
+            shape = tuple(
+                tensor.indices[ax].multiplicity(ch) for ax, ch in zip(left_axes, lk)
+            ) + (U_q.shape[1],)
+            U_blocks[lk + (q,)] = block_rows.reshape(shape)
+        col_offset = 0
+        for ri, rk in enumerate(right_subkeys):
+            n_cols = right_col_sizes[ri]
+            block_cols = Vh_q[:, col_offset : col_offset + n_cols]
+            col_offset += n_cols
+            shape = (Vh_q.shape[0],) + tuple(
+                tensor.indices[ax].multiplicity(ch) for ax, ch in zip(right_axes, rk)
+            )
+            Vh_blocks[(q,) + rk] = block_cols.reshape(shape)
+
+    U_indices = left_indices + (bond_index_out,)
+    Vh_indices = (bond_index_in,) + right_indices
+    U_T = SymmetricTensor._from_blocks_unchecked(U_blocks, U_indices)
+    Vh_T = SymmetricTensor._from_blocks_unchecked(Vh_blocks, Vh_indices)
+
+    return U_T, s_final, Vh_T, s_final
 
 
 # ---------- Block-sparse SVD (numpy) ----------
@@ -1133,6 +1375,7 @@ def svd(
     max_singular_values: int | None = None,
     max_truncation_err: float | None = None,
     normalize: bool = False,
+    base_charges: np.ndarray | None = None,
 ) -> tuple[Tensor, jax.Array, Tensor, jax.Array]:
     """Reshape tensor into matrix, compute SVD, truncate, reshape back.
 
@@ -1161,6 +1404,12 @@ def svd(
         max_singular_values:  Hard cap on bond dimension after truncation.
         max_truncation_err:   Truncate until relative truncation error <= this.
         normalize:            Normalize singular values to sum to 1.
+        base_charges:         Optional per-sector charge vector consumed by the
+                              symmetric block-sparse path under JAX tracing.  When
+                              supplied, traced inputs use
+                              ``_derive_charges(base_charges, max_singular_values)``
+                              for static per-sector keep allocation.  Ignored on
+                              the dense path.
 
     Returns:
         ``(U_tensor, singular_values, Vh_tensor, singular_values_full)``
@@ -1200,6 +1449,7 @@ def svd(
             max_truncation_err,
             new_bond_label,
             normalize,
+            base_charges=base_charges,
         )
 
     # Build axis ordering: left labels first, then right labels

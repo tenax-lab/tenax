@@ -355,3 +355,31 @@ def test_gauge_fix_symmetric_svd_tracer_safe():
     grad_fn = jax.grad(loss)
     g = grad_fn(jnp.asarray(1.0))
     assert jnp.isfinite(g), f"gradient through gauge-fixed SVD must be finite, got {g}"
+
+
+def test_truncated_svd_symmetric_traced_preserves_charges():
+    """Tracer-bearing symmetric SVD produces non-trivial bond charges, runs under jax.grad."""
+    from tenax.linalg import svd as tensor_svd
+
+    M_T = _make_test_matrix_tensor(seed=7)
+    base_charges = np.array([0, 1, 0, 1], dtype=np.int32)
+
+    def loss(alpha: jax.Array) -> jax.Array:
+        new_blocks = {k: alpha * b for k, b in M_T.blocks.items()}
+        M_scaled = SymmetricTensor._from_blocks_unchecked(new_blocks, M_T.indices)
+        U_T, s, _, _ = tensor_svd(
+            M_scaled,
+            left_labels=("left",),
+            right_labels=("right",),
+            new_bond_label="bond",
+            max_singular_values=3,
+            base_charges=base_charges,
+        )
+        bond_charges = np.asarray(U_T.indices[-1].charges)
+        assert not np.all(bond_charges == 0), (
+            f"traced symmetric SVD must preserve non-trivial U(1) charges, got {bond_charges}"
+        )
+        return jnp.sum(s)
+
+    g = jax.grad(loss)(jnp.asarray(1.0))
+    assert jnp.isfinite(g), f"gradient must be finite, got {g}"
