@@ -258,6 +258,14 @@ def python_loop_ctm_converge(
                 prev_envs = {c: envs[c] for c in envs}
             continue
 
+        # ``plateau_metric_valid`` flags whether ``final_diff`` was computed
+        # from a real comparison this iter (vs left at the sentinel value
+        # because no baseline was available yet).  Without this guard the
+        # plateau block would treat the SV first-iter sentinel ``0.0`` as
+        # ``best_diff``, then bail because no real positive diff can ever
+        # improve on zero (codex review on PR #439).
+        plateau_metric_valid = False
+
         if conv_method == "elementwise":
             # Element-wise convergence: max absolute difference across all
             # env tensor leaves.
@@ -270,8 +278,13 @@ def python_loop_ctm_converge(
             converged = max_diff < conv_tol
             final_diff = max_diff
             prev_envs = {c: envs[c] for c in envs}
+            plateau_metric_valid = True
         else:
-            # SV convergence (default): corner singular value difference
+            # SV convergence (default): corner singular value difference.
+            # On the very first SV check (no entry in ``prev_svs`` yet —
+            # possible when ``min_iter <= 1``), we have no real baseline,
+            # so the plateau block must skip tracking this iter.
+            have_prev_svs = bool(prev_svs)
             converged = True
             max_diff = 0.0
             for c in sorted(envs):
@@ -284,7 +297,12 @@ def python_loop_ctm_converge(
                 else:
                     converged = False
                 prev_svs[c] = sv
-            final_diff = max_diff
+            if have_prev_svs:
+                final_diff = max_diff
+                plateau_metric_valid = True
+            # else: final_diff retains its previous value (inf on entry),
+            # converged is False (no baseline), and the plateau block
+            # below is skipped via plateau_metric_valid.
 
         if converged:
             return envs, CTMConvergeInfo(
@@ -294,7 +312,7 @@ def python_loop_ctm_converge(
                 max_truncation_error=last_max_eps,
             )
 
-        if plateau_patience is not None:
+        if plateau_patience is not None and plateau_metric_valid:
             if final_diff < best_diff:
                 best_diff = final_diff
                 best_envs = {c: envs[c] for c in envs}
