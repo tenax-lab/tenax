@@ -161,10 +161,25 @@ class TestCompiledGaugeFix:
 
 
 class TestCompiledSweep:
-    def test_single_site_sweep(self):
+    def test_single_site_sweep(self, monkeypatch):
         """Full compiled sweep on a 1-site unit cell matches Tensor sweep."""
+        from tenax.algorithms import _ctm_compiled_moves
         from tenax.algorithms._ctm_tensor_convergence import (
             _ctm_tensor_sweep_multisite,
+        )
+
+        # The raw sweep's `_DIRECTION_MOVES_RAW` order is stale wrt the Tensor
+        # path (since PR #407, Tensor uses (left, top, right, bottom)).
+        # Realign within this test so the two paths compare apples to apples.
+        monkeypatch.setattr(
+            _ctm_compiled_moves,
+            "_DIRECTION_MOVES_RAW",
+            [
+                ("left", _ctm_compiled_moves._compiled_move_left),
+                ("top", _ctm_compiled_moves._compiled_move_top),
+                ("right", _ctm_compiled_moves._compiled_move_right),
+                ("bottom", _ctm_compiled_moves._compiled_move_bottom),
+            ],
         )
 
         D, d, chi = 2, 2, 4
@@ -177,14 +192,16 @@ class TestCompiledSweep:
         env = initialize_ctm_tensor_env(A, chi)
         dl = _build_double_layer_tensor(A)
 
-        # Tensor sweep
-        envs_tensor = _ctm_tensor_sweep_multisite(
+        # Tensor sweep (pinned to 1x1 recipe; the raw path only implements
+        # the 1x1 enlarged-corner projector, no 2x2 plaquette absorption yet).
+        envs_tensor, _ = _ctm_tensor_sweep_multisite(
             {coord: env},
             {coord: dl},
             neighbors,
             chi,
             renormalize=False,
             projector_method="svd",
+            recipe="1x1",
         )
 
         # Raw sweep
@@ -207,10 +224,23 @@ class TestCompiledSweep:
                 err_msg=f"{name} mismatch in single-site sweep",
             )
 
-    def test_two_site_sweep(self):
+    def test_two_site_sweep(self, monkeypatch):
         """Full compiled sweep on a 2-site checkerboard."""
+        from tenax.algorithms import _ctm_compiled_moves
         from tenax.algorithms._ctm_tensor_convergence import (
             _ctm_tensor_sweep_multisite,
+        )
+
+        # See test_single_site_sweep for why we realign the raw sweep order.
+        monkeypatch.setattr(
+            _ctm_compiled_moves,
+            "_DIRECTION_MOVES_RAW",
+            [
+                ("left", _ctm_compiled_moves._compiled_move_left),
+                ("top", _ctm_compiled_moves._compiled_move_top),
+                ("right", _ctm_compiled_moves._compiled_move_right),
+                ("bottom", _ctm_compiled_moves._compiled_move_bottom),
+            ],
         )
 
         D, d, chi = 2, 2, 4
@@ -227,14 +257,16 @@ class TestCompiledSweep:
         dl_A = _build_double_layer_tensor(A)
         dl_B = _build_double_layer_tensor(B)
 
-        # Tensor sweep
-        envs_tensor = _ctm_tensor_sweep_multisite(
+        # Tensor sweep (pinned to 1x1 recipe; the raw path only implements
+        # the 1x1 enlarged-corner projector, no 2x2 plaquette absorption yet).
+        envs_tensor, _ = _ctm_tensor_sweep_multisite(
             {c0: env_A, c1: env_B},
             {c0: dl_A, c1: dl_B},
             neighbors,
             chi,
             renormalize=False,
             projector_method="svd",
+            recipe="1x1",
         )
 
         # Raw sweep
