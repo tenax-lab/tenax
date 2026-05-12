@@ -688,7 +688,15 @@ def _compute_2x2_projector(
     else:
         P_top = DenseTensor(P_top_arr, P_top_idx)
         P_bot = DenseTensor(P_bot_arr, P_bot_idx)
-    return P_top, P_bot
+    # Project as a stop_gradient constant on the backward path: variPEPS
+    # treats CTM projectors as fixed-point constants so the implicit-AD
+    # adjoint solve recovers the env dependence on A without flowing
+    # through jnp.linalg.svd, whose F_ij = 1/(s_i² - s_j²) backward NaN-s
+    # on near-degenerate singular values of M_prime (typical at small D).
+    return (
+        jax.tree.map(jax.lax.stop_gradient, P_top),
+        jax.tree.map(jax.lax.stop_gradient, P_bot),
+    )
 
 
 def _retruncate_by_base_charges(
@@ -1022,4 +1030,9 @@ def _compute_2x2_projector_symmetric(
             for lbl in ("chi_new_bot", "chi_outer", "fused_D2")
         )
     )
-    return P_top, P_bot
+    # Same stop_gradient treatment as the dense path — see the comment at
+    # the end of _compute_2x2_projector.
+    return (
+        jax.tree.map(jax.lax.stop_gradient, P_top),
+        jax.tree.map(jax.lax.stop_gradient, P_bot),
+    )
