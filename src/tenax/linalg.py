@@ -394,7 +394,14 @@ def _truncated_svd_symmetric_traced(
       * If both ``base_charges`` and ``max_singular_values`` are provided:
         ``k_q = min(target_count[q], available_q)`` where
         ``target_count[q]`` is the count of ``q`` in
-        ``_derive_charges(base_charges, max_singular_values)``.
+        ``_derive_charges(base_charges, max_singular_values)``.  When
+        ``target_count`` over-allocates a sector (target exceeds
+        available), the unused budget is greedily redistributed to
+        sectors with remaining capacity, ordered by largest unused
+        capacity first, ties broken by smallest q for determinism.  This
+        matches the eager-path :func:`_retruncate_by_base_charges` so
+        traced bond dimension agrees with the forward (eager) path under
+        AD (codex P2 review on PR #440).
       * If ``max_singular_values`` is None: ``k_q = min(rows_q, cols_q)``
         (full spectrum per sector).
       * Else (defensive fallback, base_charges=None and truncating):
@@ -510,6 +517,29 @@ def _truncated_svd_symmetric_traced(
         k_per_sector = {
             q: min(target_count.get(q, 0), r[5]) for q, r in sector_results.items()
         }
+        # Greedy fill: if base_charges over-allocates a sector (target_count[q]
+        # > available_q), distribute the unused budget to sectors with
+        # remaining capacity. Mirrors _retruncate_by_base_charges in
+        # _ctm_tensor_projector_2x2.py:744-753, so traced bond dim matches the
+        # eager path under AD (codex P2 review on PR #440 / comment 3223755136).
+        # Order: largest unused capacity first, ties broken by smallest q for
+        # determinism.
+        remaining = max_singular_values - sum(k_per_sector.values())
+        if remaining > 0:
+            for q in sorted(
+                sector_results.keys(),
+                key=lambda qq: (
+                    -(sector_results[qq][5] - k_per_sector.get(qq, 0)),
+                    qq,
+                ),
+            ):
+                if remaining <= 0:
+                    break
+                capacity_left = sector_results[q][5] - k_per_sector.get(q, 0)
+                take = min(remaining, capacity_left)
+                if take > 0:
+                    k_per_sector[q] = k_per_sector.get(q, 0) + take
+                    remaining -= take
     else:
         # Defensive fallback: proportional to per-sector available capacity.
         total_avail = sum(r[5] for r in sector_results.values()) or 1

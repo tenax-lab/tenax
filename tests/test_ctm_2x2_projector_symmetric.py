@@ -420,6 +420,55 @@ def test_truncated_svd_symmetric_traced_proportional_fallback_respects_cap():
     assert jnp.isfinite(g)
 
 
+def test_truncated_svd_symmetric_traced_fills_unused_base_charges_budget():
+    """When base_charges over-allocates a sector, the traced path's greedy
+    fill should match eager `_retruncate_by_base_charges` bond dim.
+
+    Codex P2 review on PR #440 flagged the eager-vs-traced divergence: if
+    base_charges=[0,0,0,0] but the tensor has 2 q=0 + 2 q=1 singular vectors,
+    the eager path fills the remaining 2 budget from q=1, returning bond
+    dim 4; the traced path was clamping to dim 2 (no fill), causing
+    forward-vs-backward bond-dim mismatch under AD.
+    """
+    from tenax.linalg import svd as tensor_svd
+
+    sym = U1Symmetry()
+    left_charges = np.array([0, 0, 1, 1], dtype=np.int32)
+    right_charges = np.array([0, 0, 1, 1], dtype=np.int32)
+    left_idx = TensorIndex.from_charges(
+        sym, left_charges, FlowDirection.IN, label="left"
+    )
+    right_idx = TensorIndex.from_charges(
+        sym, right_charges, FlowDirection.OUT, label="right"
+    )
+    M_T = SymmetricTensor.random_normal((left_idx, right_idx), jax.random.PRNGKey(0))
+
+    # target_count = {0: 4} after _derive_charges. Sector 0 has only 2 SVs;
+    # the 2 unused budget slots should fill from sector 1.
+    base_charges = np.array([0, 0, 0, 0], dtype=np.int32)
+
+    def loss(alpha: jax.Array) -> jax.Array:
+        new_blocks = {k: alpha * b for k, b in M_T.blocks.items()}
+        M_scaled = SymmetricTensor._from_blocks_unchecked(new_blocks, M_T.indices)
+        _, s, _, _ = tensor_svd(
+            M_scaled,
+            left_labels=("left",),
+            right_labels=("right",),
+            new_bond_label="bond",
+            max_singular_values=4,
+            base_charges=base_charges,
+        )
+        # Bond dim should be 4 (matching eager), not 2.
+        assert s.shape[0] == 4, (
+            f"greedy-fill should distribute unused budget across sectors, "
+            f"got bond dim {s.shape[0]}"
+        )
+        return jnp.sum(s)
+
+    g = jax.grad(loss)(jnp.asarray(1.0))
+    assert jnp.isfinite(g)
+
+
 def test_2plaq_path_threads_base_charges_through_helpers(
     symmetric_corners, monkeypatch
 ):
