@@ -362,6 +362,45 @@ class TestPlateauPatience:
         # not larger than the very first measurement we could have made.
         assert info.sv_diff < float("inf")
 
+    def test_sv_first_iter_sentinel_does_not_anchor_plateau(self):
+        """SV ``min_iter <= 1`` sentinel ``0.0`` must not become ``best_diff``.
+
+        Codex review on PR #439: with ``conv_method="sv"`` and
+        ``min_iter <= 1``, the first convergence check has no previous
+        singular values, so the SV branch leaves ``final_diff`` at its
+        sentinel value.  Without the ``plateau_metric_valid`` guard, the
+        plateau block would record that sentinel as ``best_diff`` and
+        bail after ``patience`` real measurements because no positive
+        diff can improve on zero.
+        """
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+        # ``min_iter=1`` exercises the no-baseline first iter.  Run long
+        # enough that any sentinel-anchored bail would fire well before
+        # the loop completes.
+        _, info = python_loop_ctm_converge(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=40,
+            min_iter=1,
+            conv_tol=0.0,  # impossible — force non-convergence
+            conv_method="sv",
+            renormalize=True,
+            projector_method="svd",
+            plateau_patience=3,
+        )
+        # If the sentinel had anchored best_diff at 0.0, every subsequent
+        # real positive diff would have incremented iters_since_best and
+        # the loop would have bailed at iter ~5 with sv_diff=0.0.  With
+        # the guard, the first real diff initializes best_diff to a
+        # positive value, and either: (a) some later iter improves on it
+        # (counter resets) → patience hasn't fired, or (b) patience fires
+        # cleanly with the real best_diff and iter count.
+        assert info.sv_diff > 0.0, (
+            "SV plateau sentinel ``0.0`` must not propagate to best_diff; "
+            f"saw info={info!r}"
+        )
+
     def test_chi_ramp_non_final_fixed_sweeps_ignores_patience(self):
         """Explicit warm-up budgets must run to completion despite patience.
 
