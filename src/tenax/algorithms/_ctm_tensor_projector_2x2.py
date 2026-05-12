@@ -396,31 +396,20 @@ def _compute_2x2_projector(
         isinstance(q, SymmetricTensor) for q in (Q_TL, Q_TR, Q_BL, Q_BR)
     )
 
-    # Dispatch: SymmetricTensor inputs (without JAX tracers in any block) go
-    # through the block-sparse path (Issue #416).  Tracer-bearing symmetric
-    # blocks (AD backward) and pure DenseTensor inputs fall through to the
-    # dense pipeline below.  Densifying tracer-bearing symmetric inputs is
-    # safe because the AD backward only runs the projector once per GMRES
-    # matvec; eager-mode symmetric inputs (forward CTM) take the block-sparse
-    # path for performance and charge-structure preservation.
+    # Dispatch: any SymmetricTensor input routes to the block-sparse path,
+    # whether tracer-bearing (AD backward) or eager (forward CTM).  The
+    # symmetric pipeline is tracer-safe end-to-end (Issue #435).  The dense
+    # fallback below is reached only for all-DenseTensor inputs.
     if inputs_are_symmetric:
-
-        def _has_tracer(t: Tensor) -> bool:
-            if isinstance(t, SymmetricTensor):
-                return any(isinstance(b, jax.core.Tracer) for b in t.blocks.values())
-            return isinstance(getattr(t, "_data", None), jax.core.Tracer)
-
-        if not any(_has_tracer(q) for q in (Q_TL, Q_TR, Q_BL, Q_BR)):
-            return _compute_2x2_projector_symmetric(
-                Q_TL,
-                Q_TR,
-                Q_BL,
-                Q_BR,
-                chi,
-                direction=direction,
-                base_charges=base_charges,
-            )
-        # Tracer-bearing symmetric path falls through to densify-and-dense-pipeline below.
+        return _compute_2x2_projector_symmetric(
+            Q_TL,
+            Q_TR,
+            Q_BL,
+            Q_BR,
+            chi,
+            direction=direction,
+            base_charges=base_charges,
+        )
 
     # ---- Step 1: form the two halves (M1, M2) for the chosen direction. ----
     # Each direction contracts one OUTER seam between two adjacent quarters,
@@ -928,6 +917,9 @@ def _compute_2x2_projector_symmetric(
         mp_left_labels = ("m1_bond",)
         mp_right_labels = ("m2_bond",)
 
+    # Pass base_charges through; the linalg.svd dispatcher will route to the
+    # traced path if blocks carry tracers, or the eager+retruncate path
+    # otherwise.
     if base_charges is None:
         U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
             M_prime_T,
@@ -937,24 +929,44 @@ def _compute_2x2_projector_symmetric(
             max_singular_values=chi,
         )
     else:
-        # Full-spectrum SVD, then per-sector re-truncation honoring base_charges.
-        U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
-            M_prime_T,
-            left_labels=mp_left_labels,
-            right_labels=mp_right_labels,
-            new_bond_label="chi_new",
-            max_singular_values=None,
+        # Eager path: full-spectrum SVD then per-sector re-truncation honoring
+        # base_charges (mirrors _retruncate_by_base_charges).  Under tracing,
+        # the dispatcher in _truncated_svd_symmetric routes to the traced
+        # variant which consumes base_charges directly.
+        is_traced_inputs = any(
+            isinstance(b, jax.core.Tracer)
+            for q in (Q_TL, Q_TR, Q_BL, Q_BR)
+            if isinstance(q, SymmetricTensor)
+            for b in q.blocks.values()
         )
-        U_Mp_T, S_Mp, Vh_Mp_T = _retruncate_by_base_charges(
-            U_Mp_T, S_Mp, Vh_Mp_T, base_charges=base_charges, chi=chi
-        )
+        if is_traced_inputs:
+            U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
+                M_prime_T,
+                left_labels=mp_left_labels,
+                right_labels=mp_right_labels,
+                new_bond_label="chi_new",
+                max_singular_values=chi,
+                base_charges=base_charges,
+            )
+        else:
+            U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
+                M_prime_T,
+                left_labels=mp_left_labels,
+                right_labels=mp_right_labels,
+                new_bond_label="chi_new",
+                max_singular_values=None,
+            )
+            U_Mp_T, S_Mp, Vh_Mp_T = _retruncate_by_base_charges(
+                U_Mp_T, S_Mp, Vh_Mp_T, base_charges=base_charges, chi=chi
+            )
     U_Mp_T, Vh_Mp_T = _gauge_fix_symmetric_svd(U_Mp_T, Vh_Mp_T)
 
     # ---- Stage 5: cross-projectors via bar() for the SVD adjoint. ----
-    # tensor_svd returns S_Mp in global-descending order, so S_Mp[0] is the max
+    # Under tracing, the bond axis emerges in sector-block order rather than
+    # global-descending order, so use jnp.max(S_Mp) for the spectrum max
     # (mirrors the dense path at _compute_2x2_projector). Keeping this as a
     # traced JAX scalar avoids TracerArrayConversionError under jax.jit.
-    s_max = S_Mp[0]
+    s_max = jnp.max(S_Mp)
     cutoff = 1e-12 * (s_max + 1e-30)
     mask = S_Mp > cutoff
     S_safe = jnp.where(mask, S_Mp, 1.0)
