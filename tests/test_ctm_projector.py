@@ -9,9 +9,12 @@ import pytest
 
 from tenax.algorithms._ctm_projector import _compute_projector_tensor
 from tenax.algorithms._ctm_tensor import (
+    _build_double_layer_tensor,
+    _ctm_tensor_sweep_multisite,
     _fuse_pair_by_label,
     initialize_ctm_tensor_env,
 )
+from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity, U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
@@ -87,6 +90,45 @@ def _build_grown_corners(A, chi):
     return C1g, C4g
 
 
+def _build_grown_corners_converged(A, chi, n_sweeps=2):
+    """Like :func:`_build_grown_corners` but with ``n_sweeps`` CTM sweeps first.
+
+    PR #422 (c42c60d) + PR #424 (d752077) intentionally made CTM init rank-1
+    (variPEPS-style ``chi_init=1`` + diagonal δ_{ket=bra} edge tensors) to fix
+    random-init convergence. The grown corners ``C·T`` built directly from the
+    cold init are therefore rank-1, so the Fishman SVD projector formula
+    ``P = C·V·S^{-1/2}`` (with the safe ``S^{-1/2}`` mask) correctly produces
+    rank-1 outputs and ``P_L @ P_R = diag(1,0,…,0)`` rather than identity.
+
+    Running a couple of CTM sweeps through the multisite path lifts the env
+    off the rank-1 cold init into the full-rank geometry that real CTM
+    convergence (``python_loop_ctm_converge``, which uses the multisite
+    sweep) sees, which is what biorthogonality tests need.  Note: the
+    single-site ``_ctm_tensor_sweep`` is a fixed point on rank-1 input, so
+    we use ``_ctm_tensor_sweep_multisite`` here even for a single coord —
+    this matches the production CTM driver.
+    """
+    from tenax.contraction.contractor import contract
+
+    envs = {(0, 0): initialize_ctm_tensor_env(A, chi)}
+    double_layers = {(0, 0): _build_double_layer_tensor(A)}
+    for _ in range(n_sweeps):
+        envs, _ = _ctm_tensor_sweep_multisite(
+            envs, double_layers, SINGLE_SITE_NEIGHBORS, chi, True, "svd"
+        )
+    env = envs[(0, 0)]
+
+    C1_r = env.C1.relabel("c1_r", "t1_l")
+    C1g = contract(C1_r, env.T1)
+    C1g = _fuse_pair_by_label(C1g, "c1_d", "u2", "fused", FlowDirection.IN)
+
+    C4_u = env.C4.relabel("c4_u", "t3_r")
+    C4g = contract(C4_u, env.T3)
+    C4g = _fuse_pair_by_label(C4g, "c4_r", "d2", "fused", FlowDirection.IN)
+
+    return C1g, C4g
+
+
 # ------------------------------------------------------------------ #
 # Tests                                                                 #
 # ------------------------------------------------------------------ #
@@ -112,7 +154,11 @@ class TestSVDProjectorSymmetric:
         """P1^H @ P2 should be close to identity."""
         A = small_peps_symmetric
         chi = 4
-        C1g, C4g = _build_grown_corners(A, chi)
+        # Lift the rank-1 cold init (PR #422/#424) into a full-rank env before
+        # testing biorthogonality — the projector formula correctly produces
+        # rank-1 outputs on rank-1 inputs (mathematically), so the assertion
+        # needs full-rank input geometry.
+        C1g, C4g = _build_grown_corners_converged(A, chi)
 
         P1, P2, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="svd")
 
@@ -161,7 +207,11 @@ class TestSVDProjectorSymmetric:
         """SVD projector works with FermionParity (nontrivial charges)."""
         A = fpeps_tensor
         chi = 4
-        C1g, C4g = _build_grown_corners(A, chi)
+        # Lift the rank-1 cold init (PR #422/#424) into a full-rank env before
+        # testing biorthogonality — the projector formula correctly produces
+        # rank-1 outputs on rank-1 inputs (mathematically), so the assertion
+        # needs full-rank input geometry.
+        C1g, C4g = _build_grown_corners_converged(A, chi)
 
         P1, P2, _ = _compute_projector_tensor(C1g, C4g, chi, projector_method="svd")
 
