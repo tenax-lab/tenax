@@ -92,6 +92,14 @@ filterwarnings = [
     # deprecated in JAX v0.9.0.  Already removed on optax ``main``; remove
     # this filter once a post-0.2.8 optax release lands.
     "ignore:Setting `jax_pmap_shmap_merge` is deprecated:DeprecationWarning",
+    # The legacy ``gs_conv_criterion='dE'`` default is deprecated (issue #448)
+    # and will be flipped to ``'grad_norm'`` in a future release.  Until the
+    # flip lands, every iPEPSConfig() default-construction in the test suite
+    # would emit this warning; suppress it here so the noise doesn't drown out
+    # genuine warnings.  The dedicated regression test (tests/test_ipeps_ad_conv_criterion.py
+    # ::test_iPEPSConfig_dE_emits_deprecation_warning) un-suppresses it via
+    # ``pytest.warns`` to verify it still fires.
+    "ignore:gs_conv_criterion='dE' is deprecated:DeprecationWarning",
 ]
 
 [tool.ruff]
