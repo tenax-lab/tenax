@@ -130,6 +130,7 @@ def build_pess_loss(
             gmres_restart=config.gmres_restart,
             arnoldi_precheck=False,
             adjoint_method=config.adjoint_method,
+            plateau_patience=config.plateau_patience,
         )
 
     return loss_fn
@@ -548,6 +549,7 @@ def build_pess_loss_3site_multisite(
             gmres_restart=config.gmres_restart,
             arnoldi_precheck=False,
             adjoint_method=config.adjoint_method,
+            plateau_patience=config.plateau_patience,
         )
 
     return loss_fn
