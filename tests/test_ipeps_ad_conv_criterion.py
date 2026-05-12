@@ -258,3 +258,53 @@ def test_c4v_reference_honors_grad_norm_criterion(capsys):
     captured = capsys.readouterr().out
     assert "[iPEPS-AD:c4v_reference] converged at step" in captured, captured
     assert "||grad||=" in captured, captured
+
+
+# --- multisite dispatcher: warmup gate is criterion-aware ------------------
+#
+# Codex review on #449 flagged that the multisite dispatcher kept the legacy
+# ``step > 5 and stall_count == 0`` warmup unconditionally.  With
+# ``gs_conv_criterion='grad_norm'`` that warmup defeats early-stationarity
+# exits — a user setting a loose ``gs_grad_norm_tol`` to bail out of an
+# already-converged init still pays up to six expensive AD/CTM iterations,
+# and runs with ``gs_num_steps <= 6`` never exit via grad-norm.
+# The fix gates the warmup only for dE-based criteria.
+
+
+def test_multisite_warmup_is_criterion_aware():
+    """The warmup gate in ``_optimize_gs_ad_multisite`` must skip the
+    ``step > 5`` guard under ``gs_conv_criterion='grad_norm'`` and keep
+    it under ``"dE"``/``"both"`` (codex follow-up on #449).
+
+    Source-text pin rather than an end-to-end run because spinning up
+    the multisite optimizer for an inf-dE step-0 case requires a real
+    Lattice + iPEPS env which dominates the test runtime; the helper
+    invariant below (paired with ``_converged_outer`` unit tests above)
+    is enough to lock the behaviour.
+    """
+    import importlib
+
+    mod = importlib.import_module("tenax.algorithms.ipeps_optimize")
+    with open(mod.__file__, encoding="utf-8") as fp:
+        text = fp.read()
+    assert 'needs_warmup = config.gs_conv_criterion in ("dE", "both")' in text
+    assert "(not needs_warmup) or (step > 5 and stall_count == 0)" in text
+
+
+def test_converged_outer_grad_norm_exits_at_step_zero():
+    """Under ``gs_conv_criterion='grad_norm'`` the helper returns True
+    even on step 0 (``prev_energy = inf`` → ``delta_energy = inf``).
+    The multisite warmup gate must respect that invariant."""
+    import math
+
+    cfg = iPEPSConfig(gs_conv_criterion="grad_norm", gs_grad_norm_tol=1e30)
+    assert _converged_outer(cfg, delta_energy=math.inf, grad_norm=1.0) is True
+
+
+def test_converged_outer_dE_still_needs_finite_delta():
+    """Sanity: under ``"dE"`` the step-0 inf dE never converges, so the
+    multisite warmup gate exists for a reason on that path."""
+    import math
+
+    cfg = iPEPSConfig(gs_conv_criterion="dE", gs_conv_tol=1.0)
+    assert _converged_outer(cfg, delta_energy=math.inf, grad_norm=None) is False

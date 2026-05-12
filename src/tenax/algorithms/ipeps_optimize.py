@@ -2664,18 +2664,26 @@ def _optimize_gs_ad_multisite(
 
         prev_energy = energy_float
 
-        # Skip convergence check on early steps and right after a stall
-        # (stall resets prev_energy ≈ current, giving false dE ≈ 0).
+        # Early-step / post-stall warmup gate.  For dE-based criteria the
+        # gate protects against false ``dE ≈ 0`` exits on step 0
+        # (``prev_energy = inf`` → ``delta_energy = inf`` actually fails
+        # the dE check, but a stall reset can leave ``prev_energy ≈
+        # current`` and produce a real false-zero) and right after a
+        # stall recovery.  Grad-norm is variationally meaningful, so if
+        # the user's initial multisite state already satisfies
+        # ``||grad||_2 < tol`` we should respect that and exit on step 0
+        # — gating it would silently force the optimizer through up to
+        # ``gs_num_steps`` even when the user explicitly opted into a
+        # loose ``gs_grad_norm_tol`` for early-stop (codex #449
+        # follow-up).
         grad_norm_val = (
             _grad_l2_norm(grads)
             if config.gs_conv_criterion in ("grad_norm", "both")
             else None
         )
-        if (
-            _converged_outer(config, delta_energy, grad_norm_val)
-            and step > 5
-            and stall_count == 0
-        ):
+        needs_warmup = config.gs_conv_criterion in ("dE", "both")
+        warmup_ok = (not needs_warmup) or (step > 5 and stall_count == 0)
+        if _converged_outer(config, delta_energy, grad_norm_val) and warmup_ok:
             if config.gs_verbose:
                 if not logged:
                     _log_ad_step(
