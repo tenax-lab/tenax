@@ -96,49 +96,46 @@ def _gauge_fix_symmetric_svd(
         key: block for key, block in Vh_T.blocks.items()
     }
 
+    # Detect dtype statically so we don't promote real blocks to complex.
+    sample_block = next(iter(U_T.blocks.values()))
+    is_complex = jnp.issubdtype(sample_block.dtype, jnp.complexfloating)
+
     # For each global column j, compute its phase and write it back.
     for j, q in enumerate(bond_charges):
         q_int = int(q)
         local = local_index_of[q_int][j]
         u_entries = u_blocks_by_q.get(q_int, [])
+        vh_entries = vh_blocks_by_q.get(q_int, [])
 
-        # Find max-abs entry across all U-blocks' local-column `local`.
-        best_abs = -1.0
-        best_value: complex | float = 1.0
-        for _key, block in u_entries:
-            # block shape: (left_dims..., n_q); take the slice block[..., local]
-            col_slice = block[..., local]
-            col_flat = jnp.reshape(col_slice, (-1,))
-            local_max_idx = int(jnp.argmax(jnp.abs(col_flat)))
-            local_max_val = complex(col_flat[local_max_idx])
-            local_max_abs = abs(local_max_val)
-            if local_max_abs > best_abs:
-                best_abs = local_max_abs
-                best_value = local_max_val
+        if not u_entries:
+            continue
 
-        if best_abs <= 0.0:
-            phase = 1.0 + 0.0j
+        candidates = jnp.concatenate(
+            [jnp.reshape(new_u_blocks[key][..., local], (-1,)) for key, _ in u_entries]
+        )
+        max_idx = jnp.argmax(jnp.abs(candidates))
+        best_value = candidates[max_idx]
+        abs_best = jnp.abs(best_value)
+        phase = jnp.where(
+            abs_best > 0,
+            best_value
+            / jnp.maximum(abs_best, jnp.asarray(1e-30, dtype=abs_best.dtype)),
+            jnp.ones_like(best_value),
+        )
+
+        if is_complex:
+            conj_phase = jnp.conj(phase)
+            bare_phase = phase
         else:
-            phase = best_value / abs(best_value)
+            conj_phase = jnp.real(phase)
+            bare_phase = jnp.real(phase)
 
-        # If the imaginary part is exactly zero (real inputs), keep the phase
-        # as a real scalar so multiplying float64 blocks does not trigger the
-        # JAX complex-to-real cast warning.
-        if phase.imag == 0.0:
-            conj_phase = jnp.asarray(phase.real)
-            bare_phase = jnp.asarray(phase.real)
-        else:
-            conj_phase = jnp.asarray(complex(phase).conjugate())
-            bare_phase = jnp.asarray(complex(phase))
-
-        # Apply conj(phase) to column `local` of every matching U-block.
         for key, _block in u_entries:
             new_block = new_u_blocks[key]
             new_block = new_block.at[..., local].multiply(conj_phase)
             new_u_blocks[key] = new_block
 
-        # Apply phase to row `local` of every matching Vh-block.
-        for key, _block in vh_blocks_by_q.get(q_int, []):
+        for key, _block in vh_entries:
             new_block = new_vh_blocks[key]
             new_block = new_block.at[local, ...].multiply(bare_phase)
             new_vh_blocks[key] = new_block

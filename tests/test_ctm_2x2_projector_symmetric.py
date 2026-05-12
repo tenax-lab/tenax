@@ -328,3 +328,30 @@ def test_compute_2x2_projector_dense_fallback_wraps_as_symmetric(symmetric_corne
 
     grad = jax.grad(scalar)(1.0)
     assert jnp.isfinite(grad)
+
+
+def test_gauge_fix_symmetric_svd_tracer_safe():
+    """`_gauge_fix_symmetric_svd` does not raise TracerArrayConversionError under jax.grad."""
+    from tenax.linalg import svd as tensor_svd
+
+    M_T = _make_test_matrix_tensor(seed=42)
+
+    def loss(alpha: jax.Array) -> jax.Array:
+        # Scale blocks by alpha to inject a tracer into block contents
+        new_blocks = {k: alpha * b for k, b in M_T.blocks.items()}
+        M_scaled = SymmetricTensor._from_blocks_unchecked(new_blocks, M_T.indices)
+        U_T, _, Vh_T, _ = tensor_svd(
+            M_scaled,
+            left_labels=("left",),
+            right_labels=("right",),
+            new_bond_label="bond",
+            max_singular_values=None,
+        )
+        U_fixed, _ = _gauge_fix_symmetric_svd(U_T, Vh_T)
+        return jnp.sum(
+            jnp.abs(jnp.concatenate([b.flatten() for b in U_fixed.blocks.values()]))
+        )
+
+    grad_fn = jax.grad(loss)
+    g = grad_fn(jnp.asarray(1.0))
+    assert jnp.isfinite(g), f"gradient through gauge-fixed SVD must be finite, got {g}"
