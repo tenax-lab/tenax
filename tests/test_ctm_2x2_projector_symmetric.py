@@ -383,3 +383,38 @@ def test_truncated_svd_symmetric_traced_preserves_charges():
 
     g = jax.grad(loss)(jnp.asarray(1.0))
     assert jnp.isfinite(g), f"gradient must be finite, got {g}"
+
+
+def test_truncated_svd_symmetric_traced_proportional_fallback_respects_cap():
+    """The base_charges=None proportional fallback must respect max_singular_values cap."""
+    from tenax.linalg import svd as tensor_svd
+
+    # Build a symmetric tensor with 3 sectors each contributing 1 SV when SVD'd.
+    sym = U1Symmetry()
+    left_charges = np.array([0, 1, 2], dtype=np.int32)
+    right_charges = np.array([0, 1, 2], dtype=np.int32)
+    left_idx = TensorIndex.from_charges(
+        sym, left_charges, FlowDirection.IN, label="left"
+    )
+    right_idx = TensorIndex.from_charges(
+        sym, right_charges, FlowDirection.OUT, label="right"
+    )
+    M_T = SymmetricTensor.random_normal((left_idx, right_idx), jax.random.PRNGKey(99))
+
+    def loss(alpha: jax.Array) -> jax.Array:
+        new_blocks = {k: alpha * b for k, b in M_T.blocks.items()}
+        M_scaled = SymmetricTensor._from_blocks_unchecked(new_blocks, M_T.indices)
+        _, s, _, _ = tensor_svd(
+            M_scaled,
+            left_labels=("left",),
+            right_labels=("right",),
+            new_bond_label="bond",
+            max_singular_values=2,
+            base_charges=None,  # forces proportional fallback
+        )
+        # The cap must be respected even when 3 sectors each have 1 unit of capacity
+        assert s.shape[0] <= 2, f"max_singular_values=2 violated, got s.shape={s.shape}"
+        return jnp.sum(s)
+
+    g = jax.grad(loss)(jnp.asarray(1.0))
+    assert jnp.isfinite(g)

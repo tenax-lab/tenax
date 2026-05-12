@@ -518,11 +518,24 @@ def _truncated_svd_symmetric_traced(
             for q, r in sector_results.items()
         }
         excess = sum(k_per_sector.values()) - max_singular_values
+        # First pass: drain but keep each sector >= 1
         for q in sorted(k_per_sector.keys()):
             if excess <= 0:
                 break
             take = min(excess, k_per_sector[q] - 1)
             if take > 0:
+                k_per_sector[q] -= take
+                excess -= take
+        # Second pass: if still over the cap, drain to zero
+        # (least-capacity sector first, then smallest q for determinism)
+        if excess > 0:
+            for q in sorted(
+                k_per_sector.keys(),
+                key=lambda qq: (sector_results[qq][5], qq),
+            ):
+                if excess <= 0:
+                    break
+                take = min(excess, k_per_sector[q])
                 k_per_sector[q] -= take
                 excess -= take
 
