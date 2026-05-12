@@ -178,7 +178,7 @@ class TestCompiledSweep:
         dl = _build_double_layer_tensor(A)
 
         # Tensor sweep
-        envs_tensor = _ctm_tensor_sweep_multisite(
+        envs_tensor, _ = _ctm_tensor_sweep_multisite(
             {coord: env},
             {coord: dl},
             neighbors,
@@ -228,7 +228,7 @@ class TestCompiledSweep:
         dl_B = _build_double_layer_tensor(B)
 
         # Tensor sweep
-        envs_tensor = _ctm_tensor_sweep_multisite(
+        envs_tensor, _ = _ctm_tensor_sweep_multisite(
             {c0: env_A, c1: env_B},
             {c0: dl_A, c1: dl_B},
             neighbors,

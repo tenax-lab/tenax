@@ -219,7 +219,7 @@ class TestSweep:
         chi = 4
         a = _build_double_layer_tensor(small_peps_dense)
         env = initialize_ctm_tensor_env(small_peps_dense, chi)
-        env = _ctm_tensor_sweep(env, a, chi, renormalize=True)
+        env, _ = _ctm_tensor_sweep(env, a, chi, renormalize=True)
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense())), (
                 f"Non-finite values in {field.labels()}"
@@ -229,7 +229,7 @@ class TestSweep:
         chi = 4
         a = _build_double_layer_tensor(small_peps_symmetric)
         env = initialize_ctm_tensor_env(small_peps_symmetric, chi)
-        env = _ctm_tensor_sweep(env, a, chi, renormalize=True)
+        env, _ = _ctm_tensor_sweep(env, a, chi, renormalize=True)
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
 
@@ -237,7 +237,7 @@ class TestSweep:
         chi = 4
         a = _build_double_layer_tensor(fpeps_tensor)
         env = initialize_ctm_tensor_env(fpeps_tensor, chi)
-        env = _ctm_tensor_sweep(env, a, chi, renormalize=True)
+        env, _ = _ctm_tensor_sweep(env, a, chi, renormalize=True)
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
 
