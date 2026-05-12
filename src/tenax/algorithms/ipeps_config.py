@@ -161,6 +161,15 @@ class CTMConfig:
     # not interfere with normal convergence.  Set to ``None`` to restore
     # the pre-2026-05-11 "run to ``max_iter``" behavior.  Forwarded to
     # ``python_loop_ctm_converge`` via ``ctm_converge_kwargs``.
+    #
+    # **AD-path note**: this field is intentionally *ignored* by
+    # ``ctm_energy_implicit`` (the implicit-AD energy used by
+    # ``optimize_gs_ad``).  The implicit-AD backward solves the fixed-
+    # point adjoint ``(I - J^T) λ = ∂L/∂env`` around the returned env,
+    # which is only well-defined when env is a true fixed point — bailing
+    # early breaks that premise and yields inconsistent gradients
+    # (codex review on PR #439).  Warm-start CTM calls outside the
+    # custom_vjp boundary still honor the field.
     plateau_patience: int | None = 20
 
     def __post_init__(self):

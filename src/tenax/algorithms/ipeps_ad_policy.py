@@ -204,7 +204,17 @@ def make_ctm_energy_fn(
             arnoldi_precheck=False,
             adjoint_method=ctm_cfg.adjoint_method,
             energy_fn=energy_fn,
-            plateau_patience=ctm_cfg.plateau_patience,
+            # The implicit-AD backward solves the fixed-point adjoint
+            # ``(I - J^T) λ = ∂L/∂env`` around the returned env.  If the
+            # forward early-bails on a plateau, the returned env is *not* a
+            # fixed point of the gauge-fixed step, so the implicit-function-
+            # theorem premise breaks and the resulting gradient is
+            # inconsistent (codex review on PR #439).  Force
+            # ``plateau_patience=None`` here regardless of
+            # ``ctm_cfg.plateau_patience`` to keep AD gradients correct.
+            # The field still applies to non-AD CTM calls (warm-start in
+            # ``_update_env_cache``, simple update, standalone ``ctm()``).
+            plateau_patience=None,
         )
 
     return _ctm_energy_fn

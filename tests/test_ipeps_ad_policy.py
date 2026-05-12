@@ -196,6 +196,61 @@ def test_make_ctm_energy_fn_resolves_ctm_cfg_at_call_time():
     )
 
 
+def test_make_ctm_energy_fn_forces_plateau_patience_none_on_implicit_path():
+    """Implicit-AD energy must not early-bail on a CTM plateau.
+
+    Codex follow-up review on PR #439: the implicit-AD backward solves
+    ``(I - J^T) λ = ∂L/∂env`` around the returned env, which is only
+    well-defined when env is a fixed point.  If we let
+    ``ctm_cfg.plateau_patience`` propagate into ``ctm_energy_implicit``,
+    a plateau bail returns a best-iter (non-fixed-point) env and the
+    implicit-function-theorem premise breaks → inconsistent gradients.
+    Forcing ``plateau_patience=None`` at the policy layer keeps the AD
+    gradient math correct.  Warm-start CTM calls outside the custom_vjp
+    boundary (``ctm_converge_kwargs``) still honor the field.
+    """
+    seen_plateau: list[int | None] = []
+
+    def _fake_ctm_energy_implicit(*_args, **kwargs):
+        seen_plateau.append(kwargs.get("plateau_patience"))
+        return 0.0
+
+    # Even with the most aggressive bail, the implicit path must see None.
+    ctm_cfg = CTMConfig(
+        chi=8,
+        max_iter=10,
+        conv_tol=1e-4,
+        projector_method="svd",
+        forward_gauge="phase",
+        ctm_conv_method="elementwise",
+        plateau_patience=3,
+    )
+
+    with patch(
+        "tenax.algorithms._ctm_energy_ad.ctm_energy_implicit",
+        new=_fake_ctm_energy_implicit,
+    ):
+        energy_fn = make_ctm_energy_fn(
+            neighbors={(0, 0): {}},
+            gate=None,
+            get_ctm_cfg=lambda: ctm_cfg,
+            env_cache={},
+            use_explicit=False,
+            explicit_warmup=0,
+            explicit_steps=0,
+        )
+        energy_fn({})
+
+    assert seen_plateau == [None], (
+        "make_ctm_energy_fn must force plateau_patience=None on the "
+        f"implicit-AD path regardless of ctm_cfg (saw {seen_plateau!r})"
+    )
+
+    # Warm-start path (ctm_converge_kwargs) still honors the field.
+    kw = ctm_converge_kwargs(ctm_cfg)
+    assert kw["plateau_patience"] == 3
+
+
 from tenax.algorithms.ipeps_ad_policy import validate_ctm_for_implicit_ad
 
 
