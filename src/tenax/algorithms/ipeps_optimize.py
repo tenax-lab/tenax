@@ -753,23 +753,14 @@ def _optimize_gs_ad_tensor_reference_c4v(
                 )
             continue
         grads = jnp.where(jnp.isfinite(grads), grads, 0.0)
-        if use_cg:
-            params = _normalize_params(params - config.gs_learning_rate * grads)
-        else:
-            assert optimizer is not None
-            if config.gs_optimizer.lower() == "lbfgs":
-                updates, opt_state = optimizer.update(
-                    grads,
-                    opt_state,
-                    params,
-                    value=energy_val,
-                    grad=grads,
-                    value_fn=lambda p: _loss_fn(p)[0],
-                )
-            else:
-                updates, opt_state = optimizer.update(grads, opt_state, params)
-            params = _normalize_params(optax.apply_updates(params, updates))
         E = float(energy_val)
+
+        # Score / convergence-check on the *pre-step* params.  ``energy_val``
+        # and ``grads`` describe ``params`` before the optimizer update, so
+        # ``best_params`` and the convergence break must use that snapshot —
+        # not the post-update value.  The 1-site / 2-site / multisite
+        # dispatchers check before stepping for the same reason (codex
+        # follow-up on PR #449 / #451).
         if _should_accept_best(
             current_best=best_energy,
             candidate=E,
@@ -802,6 +793,23 @@ def _optimize_gs_ad_tensor_reference_c4v(
                     criterion=config.gs_conv_criterion,
                 )
             break
+
+        if use_cg:
+            params = _normalize_params(params - config.gs_learning_rate * grads)
+        else:
+            assert optimizer is not None
+            if config.gs_optimizer.lower() == "lbfgs":
+                updates, opt_state = optimizer.update(
+                    grads,
+                    opt_state,
+                    params,
+                    value=energy_val,
+                    grad=grads,
+                    value_fn=lambda p: _loss_fn(p)[0],
+                )
+            else:
+                updates, opt_state = optimizer.update(grads, opt_state, params)
+            params = _normalize_params(optax.apply_updates(params, updates))
 
     final_energy, (final_env, final_A) = _loss_fn(best_params)
     return final_A, final_env, float(final_energy)

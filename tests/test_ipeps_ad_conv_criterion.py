@@ -260,6 +260,63 @@ def test_c4v_reference_honors_grad_norm_criterion(capsys):
     assert "||grad||=" in captured, captured
 
 
+@pytest.mark.algorithm
+def test_c4v_reference_returns_pre_step_best_on_grad_norm_exit():
+    """``best_params`` returned by the C4v-reference dispatcher must be the
+    tensor that satisfied the convergence criterion, not the post-optimizer
+    update (codex P2 on PR #451).
+
+    Sets a deliberately-huge learning rate plus a loose
+    ``gs_grad_norm_tol`` so the criterion fires on step 0; an Adam update at
+    that point would move ``params`` somewhere off the cheap GS line
+    and ``best_params`` would inherit the bad update if the check ran
+    post-step. We verify the returned ``A_opt`` is exactly the C4v
+    projection of ``A0`` (no optimizer step applied).
+    """
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    A0 = jax.random.normal(jax.random.PRNGKey(7), (2, 2, 2, 2, 2))
+    cfg = _c4v_reference_cfg(
+        num_steps=3,
+        gs_conv_criterion="grad_norm",
+        gs_grad_norm_tol=1e30,  # converged on step 0
+        gs_conv_tol=1e-30,
+        gs_learning_rate=10.0,  # a post-step accept would be dramatically off
+    )
+    A_opt, _env, _E = optimize_gs_ad(_heisenberg_gate(), A0, cfg)
+
+    # Expected: A_opt is the C4v projection of A0, normalised — i.e. the
+    # pre-step starting tensor that the conv check actually evaluated.
+    from tenax.algorithms.ipeps import (
+        build_c4v_basis,
+        c4v_coeffs_from_tensor,
+        c4v_tensor_from_coeffs,
+    )
+
+    D_bond, d_loc = 2, 2
+    A0_norm = A0 / (jnp.linalg.norm(A0) + 1e-10)
+    basis = jnp.array(build_c4v_basis(D_bond, d_loc))
+    coeffs = c4v_coeffs_from_tensor(A0_norm, basis)
+    A_expected = c4v_tensor_from_coeffs(
+        coeffs, basis, (D_bond, D_bond, D_bond, D_bond, d_loc)
+    )
+    A_expected = A_expected / (jnp.linalg.norm(A_expected) + 1e-10)
+
+    np.testing.assert_allclose(
+        np.asarray(A_opt.todense()),
+        np.asarray(A_expected),
+        atol=1e-10,
+        rtol=1e-8,
+        err_msg=(
+            "C4v-reference dispatcher returned a post-step tensor on a "
+            "step-0 grad-norm exit; the conv check is firing AFTER the "
+            "optimizer update (codex P2 on PR #451)."
+        ),
+    )
+
+
 # --- multisite dispatcher: warmup gate is criterion-aware ------------------
 #
 # Codex review on #449 flagged that the multisite dispatcher kept the legacy
