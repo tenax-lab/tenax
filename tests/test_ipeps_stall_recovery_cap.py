@@ -29,9 +29,12 @@ def test_reset_loop_exits_after_retry_cap(monkeypatch, capsys):
     rather than the optimizer module.
     """
 
+    calls = {"n": 0}
+
     def _always_fail(_phi, _dphi, phi0, _slope, **_kwargs):
         # f_alpha == phi0 means "no improvement" -> triggers stall_count += 1
         # in the 2-site optimizer.
+        calls["n"] += 1
         return 0.0, phi0, False
 
     monkeypatch.setattr(_ls_mod, "hager_zhang_line_search", _always_fail)
@@ -66,6 +69,12 @@ def test_reset_loop_exits_after_retry_cap(monkeypatch, capsys):
         _opt.optimize_gs_ad(gate, A_init, cfg)
 
     out = capsys.readouterr().out
+    # Sanity probe: catch the silent-no-op case where a future refactor
+    # moves the line-search import out of the loop body and the patch
+    # never reaches the production call site.
+    assert calls["n"] > 0, (
+        "patched line search was never called; monkeypatch target stale"
+    )
     assert "stall budget exhausted" in out, (
         f"missing exhaustion log; last 2000 chars of stdout:\n{out[-2000:]}"
     )
@@ -92,7 +101,11 @@ def _heisenberg_gate(d):
 
 
 def _random_2site_init(d, D, seed):
-    """Random complex (A, B) tuple matching the 2-site AD init convention."""
+    """Random complex (A, B) tuple matching the 2-site AD init convention.
+
+    The 2-site implicit-AD path is complex internally; a real init would
+    be promoted on entry.
+    """
     rng = np.random.default_rng(seed)
     A = jnp.asarray(
         rng.standard_normal((D, D, D, D, d)) + 1j * rng.standard_normal((D, D, D, D, d))
