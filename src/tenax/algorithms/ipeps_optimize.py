@@ -1338,6 +1338,16 @@ def _optimize_gs_ad_tensor(
                 last_eps_t,
                 base_charges=_bump_base_charges,
             )
+            # Scheduled outer-loop χ bump (#453).  Composes with the
+            # reactive bump above; ctm_cfg.chi_max caps both.
+            if config.gs_chi_schedule_steps is not None:
+                ctm_cfg, _env_cache = _maybe_scheduled_bump(
+                    ctm_cfg,
+                    _env_cache,
+                    step + 1,
+                    config.gs_chi_schedule_steps,
+                    base_charges=_bump_base_charges,
+                )
             if _accepted_best_this_iter:
                 best_env_cache = dict(_env_cache)
             if config.gs_verbose:
@@ -1594,6 +1604,16 @@ def _optimize_gs_ad_tensor(
             last_eps_t,
             base_charges=_bump_base_charges,
         )
+        # Scheduled outer-loop χ bump (#453).  Composes with the reactive
+        # bump above; ctm_cfg.chi_max caps both.
+        if config.gs_chi_schedule_steps is not None:
+            ctm_cfg, _env_cache = _maybe_scheduled_bump(
+                ctm_cfg,
+                _env_cache,
+                step + 1,
+                config.gs_chi_schedule_steps,
+                base_charges=_bump_base_charges,
+            )
         # If best was accepted at this iter's pre-line-search params, refresh
         # the snapshot so its env matches the new ctm_cfg.chi. ``_env_cache``
         # still holds envs for those params (line search updates ``params``
@@ -1991,6 +2011,27 @@ def _optimize_gs_ad_tensor_2site(
                 d_phys,
             )
         )
+
+    # Base charges for SymmetricTensor env-padding (#453).  Same shape
+    # infrastructure used by the 1-site auto-bump.  ``A``'s bond charges
+    # are fixed across optimization steps, so compute once outside the
+    # loop.  Only needed when either the reactive auto-bump or the
+    # scheduled-bump (gs_chi_schedule_steps) may fire.  C4v always
+    # works in dense coefficient space, so we only inspect A in the
+    # non-C4v branch.
+    _bump_base_charges_2s: np.ndarray | None = None
+    if (ctm_cfg_2s.chi_auto_bump or config.gs_chi_schedule_steps is not None) and (
+        not use_c4v
+    ):
+        _A_init = A  # 2-site non-C4v: ``A`` (the first tensor); both A and B
+        # share the same bond charges in a uniform iPEPS.
+        if isinstance(_A_init, SymmetricTensor):
+            from tenax.algorithms._ctm_tensor_convergence import _get_base_charges
+            from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
+
+            _bump_base_charges_2s = _get_base_charges(
+                _build_double_layer_tensor(_A_init)
+            )
 
     for step in range(config.gs_num_steps):
         # Update conv_tol if schedule is active
@@ -2404,6 +2445,19 @@ def _optimize_gs_ad_tensor_2site(
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)
 
+        # Scheduled outer-loop χ bump (#453).  No-ops when
+        # ``gs_chi_schedule_steps`` is None.  Fires at the step boundary
+        # so the next iteration's value_and_grad sees the bumped χ — same
+        # invariant as the 1-site path.
+        if config.gs_chi_schedule_steps is not None:
+            ctm_cfg_2s, _env_cache_2s = _maybe_scheduled_bump(
+                ctm_cfg_2s,
+                _env_cache_2s,
+                step + 1,
+                config.gs_chi_schedule_steps,
+                base_charges=_bump_base_charges_2s,
+            )
+
     # Re-evaluate both final params and best_params with fully converged
     # fresh CTM.  In-loop energies use warm-started CTM that can produce
     # unphysical values, so we compare fresh evaluations only.
@@ -2652,6 +2706,20 @@ def _optimize_gs_ad_multisite(
             if frac >= threshold:
                 patience = p
         return patience
+
+    # Base charges for SymmetricTensor env-padding (#453).  Same shape
+    # infrastructure used by the 1-site auto-bump.  All sites in a uniform
+    # iPEPS share the same bond charges; ``params[0]`` is representative.
+    _bump_base_charges_multi: np.ndarray | None = None
+    if ctm_cfg.chi_auto_bump or config.gs_chi_schedule_steps is not None:
+        _A_init = params[0]
+        if isinstance(_A_init, SymmetricTensor):
+            from tenax.algorithms._ctm_tensor_convergence import _get_base_charges
+            from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
+
+            _bump_base_charges_multi = _get_base_charges(
+                _build_double_layer_tensor(_A_init)
+            )
 
     # ── Optimization loop ────────────────────────────────────────────────
     for step in range(config.gs_num_steps):
@@ -3017,6 +3085,19 @@ def _optimize_gs_ad_multisite(
 
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)
+
+        # Scheduled outer-loop χ bump (#453).  No-ops when
+        # ``gs_chi_schedule_steps`` is None.  Fires at the step boundary
+        # so the next iteration's value_and_grad sees the bumped χ — same
+        # invariant as the 1-site path.
+        if config.gs_chi_schedule_steps is not None:
+            ctm_cfg, _env_cache = _maybe_scheduled_bump(
+                ctm_cfg,
+                _env_cache,
+                step + 1,
+                config.gs_chi_schedule_steps,
+                base_charges=_bump_base_charges_multi,
+            )
 
     # ── Final evaluation ─────────────────────────────────────────────────
     def _eval_fresh(p, env_init=None):
