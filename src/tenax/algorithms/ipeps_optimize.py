@@ -1437,16 +1437,24 @@ def _optimize_gs_ad_tensor(
                 last_eps_t,
                 base_charges=_bump_base_charges,
             )
-            # Scheduled outer-loop χ bump (#453).  Composes with the
-            # reactive bump above; ctm_cfg.chi_max caps both.
+            # Scheduled outer-loop χ bump (#453 / #455).  In PR 1
+            # this still only fires on the budget-exhausted path —
+            # PR 2 layers convergence/stall signals on top.
             if config.gs_chi_schedule_steps is not None:
-                ctm_cfg, _env_cache = _maybe_scheduled_bump(
-                    ctm_cfg,
-                    _env_cache,
-                    step + 1,
-                    config.gs_chi_schedule_steps,
-                    base_charges=_bump_base_charges,
+                steps_in_stage = (step + 1) - stage_start_step
+                ctm_cfg, _env_cache, new_stage_idx, _bump_fired, _ = (
+                    _advance_chi_stage_if_due(
+                        ctm_cfg,
+                        _env_cache,
+                        chi_schedule=config.gs_chi_schedule_steps,
+                        current_stage_idx=current_stage_idx,
+                        steps_in_stage=steps_in_stage,
+                        base_charges=_bump_base_charges,
+                    )
                 )
+                if new_stage_idx != current_stage_idx:
+                    current_stage_idx = new_stage_idx
+                    stage_start_step = step + 1
             if ctm_cfg.chi != chi_before_bump:
                 # Reactive or scheduled bump fired — fresh landscape,
                 # fresh stall budget (#464 codex review).
