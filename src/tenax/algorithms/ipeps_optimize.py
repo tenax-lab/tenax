@@ -43,7 +43,7 @@ def _apply_chi_bump(
 
     Used by both the reactive auto-χ_E bump (``_maybe_bump_chi``,
     variPEPS §2.8.2) and the scheduled bump driven by
-    ``gs_chi_schedule_steps`` (``_maybe_scheduled_bump``, issue #453).
+    ``gs_chi_schedule_steps`` (``_advance_chi_stage_if_due``, issue #455).
     No policy here — callers decide *whether* and *to what* to bump.
 
     ``env_cache`` is mutated in-place so closures that captured the
@@ -161,50 +161,6 @@ def _advance_chi_stage_if_due(
         ctm_cfg, env_cache, next_chi, base_charges=base_charges
     )
     return new_ctm_cfg, new_env_cache, current_stage_idx + 1, True, False
-
-
-def _maybe_scheduled_bump(
-    ctm_cfg: CTMConfig,
-    env_cache: dict,
-    step: int,
-    schedule_targets: list[tuple[int, int]] | None,
-    *,
-    base_charges: np.ndarray | None = None,
-) -> tuple[CTMConfig, dict]:
-    """Step-driven χ bump from ``gs_chi_schedule_steps`` (issue #453).
-
-    ``schedule_targets`` is a list of ``(cumulative_step_boundary, target_chi)``
-    pairs.  When ``step`` crosses a boundary and ``target_chi`` exceeds
-    the current ``ctm_cfg.chi``, the logical χ is bumped to that target
-    via ``_apply_chi_bump`` (which also pads cached envs in-place).
-
-    Idempotent: stale boundaries (``target_chi <= current chi``) are
-    no-ops, so the same step can be processed multiple times safely.
-
-    Composes with ``_maybe_bump_chi`` — both can fire at the same step;
-    ``ctm_cfg.chi_max`` caps both.
-
-    For SymmetricTensor envs, ``base_charges`` should be the bond
-    charges of the iPEPS A tensor (the same ``base_charges`` the
-    symmetric projector consumes).  Ignored on the dense path.
-    """
-    if not schedule_targets:
-        return ctm_cfg, env_cache
-
-    target_chi = ctm_cfg.chi
-    for boundary, chi_target in schedule_targets:
-        if step >= boundary and chi_target > target_chi:
-            target_chi = chi_target
-
-    if target_chi <= ctm_cfg.chi:
-        return ctm_cfg, env_cache
-
-    if ctm_cfg.chi_max is not None:
-        target_chi = min(target_chi, ctm_cfg.chi_max)
-        if target_chi <= ctm_cfg.chi:
-            return ctm_cfg, env_cache
-
-    return _apply_chi_bump(ctm_cfg, env_cache, target_chi, base_charges=base_charges)
 
 
 def _lattice_to_neighbors(
@@ -598,7 +554,7 @@ def optimize_gs_ad_chi_schedule(
 
     Runs ``optimize_gs_ad`` ONCE with envs padded to ``max(chi)`` from
     the first iteration; the logical chi is ramped via
-    ``_maybe_scheduled_bump`` at the configured step boundaries.  The
+    ``_advance_chi_stage_if_due`` at each stage's budget boundary.  The
     JIT-compiled CTM / energy / backward kernels therefore see a single
     fixed env shape across the whole run -- no per-stage retraces.
 
@@ -1420,7 +1376,7 @@ def _optimize_gs_ad_tensor(
             # in #432's squash, so re-included here.)
             # Snapshot χ before either bump fires; the reset below triggers
             # on EITHER reactive (_maybe_bump_chi) or scheduled
-            # (_maybe_scheduled_bump) bump changing it — both are landscape
+            # (_advance_chi_stage_if_due) bump changing it — both are landscape
             # transitions (#464 codex review).
             chi_before_bump = ctm_cfg.chi
             last_eps_t = float(_env_cache.get("max_truncation_error", 0.0))
