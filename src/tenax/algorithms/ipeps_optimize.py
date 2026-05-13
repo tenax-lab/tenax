@@ -98,6 +98,50 @@ def _maybe_bump_chi(
     return _apply_chi_bump(ctm_cfg, env_cache, chi_new, base_charges=base_charges)
 
 
+def _maybe_scheduled_bump(
+    ctm_cfg: CTMConfig,
+    env_cache: dict,
+    step: int,
+    schedule_targets: list[tuple[int, int]] | None,
+    *,
+    base_charges: np.ndarray | None = None,
+) -> tuple[CTMConfig, dict]:
+    """Step-driven χ bump from ``gs_chi_schedule_steps`` (issue #453).
+
+    ``schedule_targets`` is a list of ``(cumulative_step_boundary, target_chi)``
+    pairs.  When ``step`` crosses a boundary and ``target_chi`` exceeds
+    the current ``ctm_cfg.chi``, the logical χ is bumped to that target
+    via ``_apply_chi_bump`` (which also pads cached envs in-place).
+
+    Idempotent: stale boundaries (``target_chi <= current chi``) are
+    no-ops, so the same step can be processed multiple times safely.
+
+    Composes with ``_maybe_bump_chi`` — both can fire at the same step;
+    ``ctm_cfg.chi_max`` caps both.
+
+    For SymmetricTensor envs, ``base_charges`` should be the bond
+    charges of the iPEPS A tensor (the same ``base_charges`` the
+    symmetric projector consumes).  Ignored on the dense path.
+    """
+    if not schedule_targets:
+        return ctm_cfg, env_cache
+
+    target_chi = ctm_cfg.chi
+    for boundary, chi_target in schedule_targets:
+        if step >= boundary and chi_target > target_chi:
+            target_chi = chi_target
+
+    if target_chi <= ctm_cfg.chi:
+        return ctm_cfg, env_cache
+
+    if ctm_cfg.chi_max is not None:
+        target_chi = min(target_chi, ctm_cfg.chi_max)
+        if target_chi <= ctm_cfg.chi:
+            return ctm_cfg, env_cache
+
+    return _apply_chi_bump(ctm_cfg, env_cache, target_chi, base_charges=base_charges)
+
+
 def _lattice_to_neighbors(
     lattice: Lattice,
 ) -> tuple[dict[Coord, dict[str, Coord]], dict[str, Coord], dict[Coord, str]]:
