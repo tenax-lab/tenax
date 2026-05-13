@@ -273,7 +273,7 @@ class iPEPSConfig:
                                for the ``"noise"`` path.  Default ``5``
                                matches variPEPS's
                                ``optimizer_random_noise_max_retries``.
-                               (Issue #454.)
+                               (issue #454)
         gs_energy_floor:       Optional variational sanity floor on in-loop
                                best-state tracking (issue #298).  Candidate
                                energies strictly below this value are
