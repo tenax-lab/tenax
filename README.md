@@ -344,8 +344,12 @@ config = iPEPSConfig(
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
 print(f"Ground-state energy: {E_gs:.6f}")
 
-# Chi-ramping schedule: progressively increase chi for faster convergence
-chi_schedule = [4, 8, 16]
+# Chi-ramping schedule: progressively increase chi for faster convergence.
+# Each entry is (chi, num_steps) — run `num_steps` AD steps at logical χ=chi.
+# Internally the schedule runs as a single `optimize_gs_ad` call with envs
+# padded to max(chi) from step 1, so the JIT-compiled CTM / energy / backward
+# kernels never see a shape change (issue #453).
+chi_schedule = [(4, 30), (8, 30), (16, 20)]
 A_opt, env, E_gs = optimize_gs_ad_chi_schedule(gate, None, config, chi_schedule)
 
 # 2-site shared-tensor C4v AD for antiferromagnets (Neel order)
