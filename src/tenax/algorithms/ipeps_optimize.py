@@ -2895,6 +2895,8 @@ def _optimize_gs_ad_multisite(
     prev_params_flat: jnp.ndarray | None = None
     prev_grad_flat: jnp.ndarray | None = None
     stall_count = 0
+    current_stage_idx = 0
+    stage_start_step = 0
 
     # CTM conv_tol schedule
     _conv_tol_schedule = config.gs_ctm_conv_tol_schedule
@@ -3339,19 +3341,28 @@ def _optimize_gs_ad_multisite(
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)
 
-        # Scheduled outer-loop χ bump (#453).  No-ops when
+        # Scheduled outer-loop χ bump (#453 / #455).  No-ops when
         # ``gs_chi_schedule_steps`` is None.  Fires at the step boundary
         # so the next iteration's value_and_grad sees the bumped χ — same
-        # invariant as the 1-site path.
+        # invariant as the 1-site path.  Per-stage state
+        # (current_stage_idx, stage_start_step) drives the new helper;
+        # #455 PR2 will add convergence/stall-cap triggers.
         if config.gs_chi_schedule_steps is not None:
+            steps_in_stage = (step + 1) - stage_start_step
             chi_before = ctm_cfg.chi
-            ctm_cfg, _env_cache = _maybe_scheduled_bump(
-                ctm_cfg,
-                _env_cache,
-                step + 1,
-                config.gs_chi_schedule_steps,
-                base_charges=_bump_base_charges_multi,
+            ctm_cfg, _env_cache, new_stage_idx, _bump_fired, _should_break = (
+                _advance_chi_stage_if_due(
+                    ctm_cfg,
+                    _env_cache,
+                    chi_schedule=config.gs_chi_schedule_steps,
+                    current_stage_idx=current_stage_idx,
+                    steps_in_stage=steps_in_stage,
+                    base_charges=_bump_base_charges_multi,
+                )
             )
+            if new_stage_idx != current_stage_idx:
+                current_stage_idx = new_stage_idx
+                stage_start_step = step + 1
             if ctm_cfg.chi != chi_before:
                 # Bump fired — fresh landscape, fresh stall budget.
                 stall_count = 0
