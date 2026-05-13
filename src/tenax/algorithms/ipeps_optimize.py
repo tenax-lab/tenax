@@ -1183,7 +1183,7 @@ def _optimize_gs_ad_tensor(
     # this once outside the loop. (PR #430 codex review on
     # ``_ctm_env_pad.py``.)
     _bump_base_charges: np.ndarray | None = None
-    if ctm_cfg.chi_auto_bump:
+    if ctm_cfg.chi_auto_bump or config.gs_chi_schedule_steps is not None:
         _A_init = _params_to_A_norm(params)
         if isinstance(_A_init, SymmetricTensor):
             from tenax.algorithms._ctm_tensor_convergence import _get_base_charges
@@ -1272,6 +1272,20 @@ def _optimize_gs_ad_tensor(
                     prev_grad = None
                     prev_precond_grad = None
             elif config.gs_stall_recovery == "reset":
+                # Cap on CTMRGGradientError-driven reset path (#454 follow-up,
+                # codex review on PR #457).  Same retry budget as the
+                # post-line-search reset block; without this, an Arnoldi
+                # precheck failure loop could spin for all gs_num_steps.
+                if stall_count > config.gs_stall_recovery_retries:
+                    n_resets_done = stall_count - 1
+                    if config.gs_verbose:
+                        print(
+                            f"[iPEPS-AD] CTM-error stall budget exhausted after "
+                            f"{n_resets_done} resets, "
+                            f"returning best E={best_energy:.10f}",
+                            flush=True,
+                        )
+                    break
                 params = best_params
                 _env_cache.update(best_env_cache)
                 if is_metric_lbfgs:
@@ -2119,6 +2133,18 @@ def _optimize_gs_ad_tensor_2site(
                     prev_grad = None
                     prev_precond_grad = None
             elif config.gs_stall_recovery == "reset":
+                # Cap on CTMRGGradientError-driven reset path (#454 follow-up,
+                # codex review on PR #457).
+                if stall_count > config.gs_stall_recovery_retries:
+                    n_resets_done = stall_count - 1
+                    if config.gs_verbose:
+                        print(
+                            f"[iPEPS-AD] CTM-error stall budget exhausted after "
+                            f"{n_resets_done} resets, "
+                            f"returning best E={best_energy:.10f}",
+                            flush=True,
+                        )
+                    break
                 params = best_params
                 _env_cache_2s.update(best_env_cache_2s)
                 if is_metric_lbfgs:
@@ -2791,6 +2817,18 @@ def _optimize_gs_ad_multisite(
                 )
             stall_count += 1
             if config.gs_stall_recovery == "reset":
+                # Cap on CTMRGGradientError-driven reset path (#454 follow-up,
+                # codex review on PR #457).
+                if stall_count > config.gs_stall_recovery_retries:
+                    n_resets_done = stall_count - 1
+                    if config.gs_verbose:
+                        print(
+                            f"[iPEPS-AD] CTM-error stall budget exhausted after "
+                            f"{n_resets_done} resets, "
+                            f"returning best E={best_energy:.10f}",
+                            flush=True,
+                        )
+                    break
                 params = best_params
                 _env_cache.update(best_env_cache)
                 if is_metric_lbfgs:
