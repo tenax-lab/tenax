@@ -2110,6 +2110,8 @@ def _optimize_gs_ad_tensor_2site(
     prev_params_flat: jnp.ndarray | None = None
     prev_grad_flat: jnp.ndarray | None = None
     stall_count = 0  # noise recovery: consecutive line search failures
+    current_stage_idx = 0
+    stage_start_step = 0
 
     # Optional trajectory capture (config.return_history).  Always allocated
     # but only populated/returned when the flag is set.
@@ -2634,19 +2636,28 @@ def _optimize_gs_ad_tensor_2site(
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)
 
-        # Scheduled outer-loop χ bump (#453).  No-ops when
+        # Scheduled outer-loop χ bump (#453 / #455).  No-ops when
         # ``gs_chi_schedule_steps`` is None.  Fires at the step boundary
         # so the next iteration's value_and_grad sees the bumped χ — same
-        # invariant as the 1-site path.
+        # invariant as the 1-site path.  Per-stage state
+        # (current_stage_idx, stage_start_step) drives the new helper;
+        # #455 PR2 will add convergence/stall-cap triggers.
         if config.gs_chi_schedule_steps is not None:
+            steps_in_stage = (step + 1) - stage_start_step
             chi_before = ctm_cfg_2s.chi
-            ctm_cfg_2s, _env_cache_2s = _maybe_scheduled_bump(
-                ctm_cfg_2s,
-                _env_cache_2s,
-                step + 1,
-                config.gs_chi_schedule_steps,
-                base_charges=_bump_base_charges_2s,
+            ctm_cfg_2s, _env_cache_2s, new_stage_idx, _bump_fired, _should_break = (
+                _advance_chi_stage_if_due(
+                    ctm_cfg_2s,
+                    _env_cache_2s,
+                    chi_schedule=config.gs_chi_schedule_steps,
+                    current_stage_idx=current_stage_idx,
+                    steps_in_stage=steps_in_stage,
+                    base_charges=_bump_base_charges_2s,
+                )
             )
+            if new_stage_idx != current_stage_idx:
+                current_stage_idx = new_stage_idx
+                stage_start_step = step + 1
             if ctm_cfg_2s.chi != chi_before:
                 # χ bump fired: a new landscape begins.  Reset the stall
                 # counter so the next stage gets a fresh retry budget;
