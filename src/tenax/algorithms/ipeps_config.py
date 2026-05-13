@@ -258,10 +258,13 @@ class iPEPSConfig:
                                for large-chi runs where an initially loose
                                CTM is enough to start moving.
         gs_chi_schedule_steps: Outer-loop χ schedule for
-                               ``optimize_gs_ad_chi_schedule`` (#453).
-                               List of ``(cumulative_step_boundary,
-                               target_chi)`` pairs; ``None`` disables
-                               the schedule mechanism.  Normally set by
+                               ``optimize_gs_ad_chi_schedule`` (#453 / #455).
+                               List of ``(target_chi, max_steps_in_stage)``
+                               pairs; ``None`` disables the schedule.
+                               Each pair is one stage: "run up to
+                               max_steps_in_stage optimizer iterations
+                               at logical chi = target_chi, then advance".
+                               Normally set by
                                ``optimize_gs_ad_chi_schedule`` internally;
                                users should not set it directly.
         gs_stall_recovery:     Stall-recovery mode for line-search failures
@@ -314,18 +317,19 @@ class iPEPSConfig:
     # criteria. The default ``1e-5`` matches variPEPS
     # ``optimizer_convergence_eps``.
     gs_grad_norm_tol: float = 1e-5
-    # Outer-loop χ schedule for ``optimize_gs_ad_chi_schedule`` (#453).
-    # List of ``(cumulative_step_boundary, target_chi)`` pairs.  When
-    # the optimizer's step counter crosses a boundary, the inner CTM
-    # logical χ is bumped to ``target_chi`` via
-    # ``_maybe_scheduled_bump`` (which delegates to ``_apply_chi_bump``).
-    # Envs are padded to ``ctm.chi_max`` from step 1, so the
-    # JIT-compiled kernels never see a shape change.
+    # Outer-loop χ schedule for ``optimize_gs_ad_chi_schedule``
+    # (#453 / #455).  List of ``(target_chi, max_steps_in_stage)``
+    # pairs.  Each pair specifies one stage: at most
+    # ``max_steps_in_stage`` optimizer iterations at logical
+    # chi = ``target_chi``, then advance to the next stage.  Envs
+    # are padded to ``ctm.chi_max`` from step 1, so the JIT-compiled
+    # kernels never see a shape change.
     #
     # ``None`` (default) means the schedule mechanism is disabled and
     # the inner optimizer uses ``ctm.chi`` throughout.
-    # ``optimize_gs_ad_chi_schedule`` sets this field internally when
-    # called with a ``chi_schedule`` argument (issue #453 refactor).
+    # ``optimize_gs_ad_chi_schedule`` sets this field internally
+    # (#455 PR 1: passes ``chi_schedule`` through directly without
+    # cumulative conversion).
     gs_chi_schedule_steps: list[tuple[int, int]] | None = None
     gs_verbose: bool = False
     gs_log_interval: int = 10
