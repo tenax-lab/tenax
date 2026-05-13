@@ -629,29 +629,22 @@ def optimize_gs_ad_chi_schedule(
     chi_max = max(chi for chi, _ in chi_schedule)
     total_steps = sum(n for _, n in chi_schedule)
 
-    # Build (cum_step_boundary, target_chi_to_bump_to) pairs.  Each entry
-    # says: "after this many cumulative steps complete, bump to this chi".
-    # Stage 0 is the initial chi (no bump needed); each subsequent stage
-    # is reached by bumping when the previous stage's cumulative step
-    # boundary is crossed.
-    cum = 0
-    schedule_targets: list[tuple[int, int]] = []
-    for i in range(1, len(chi_schedule)):
-        cum += chi_schedule[i - 1][1]
-        schedule_targets.append((cum, chi_schedule[i][0]))
-
+    # #455 PR 1: pass the per-stage schedule straight through. Each
+    # stage's max_steps is now a per-stage budget (was cumulative).
+    # The optimizer loop tracks current_stage_idx + stage_start_step
+    # and advances via _advance_chi_stage_if_due.
     ctm_cfg = replace(config.ctm, chi=chi_schedule[0][0], chi_max=chi_max)
     step_cfg = replace(
         config,
         ctm=ctm_cfg,
         gs_num_steps=total_steps,
-        gs_chi_schedule_steps=schedule_targets,
+        gs_chi_schedule_steps=list(chi_schedule),
     )
 
     if config.gs_verbose:
         print(
             f"[chi-ramp] unified: chi_max={chi_max}, "
-            f"total_steps={total_steps}, boundaries={schedule_targets}",
+            f"total_steps={total_steps}, stages={list(chi_schedule)}",
             flush=True,
         )
 
