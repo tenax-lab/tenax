@@ -59,10 +59,56 @@ def test_chi_schedule_shim_invokes_optimize_gs_ad_once(monkeypatch):
     assert inner_cfg.gs_num_steps == 10, (
         f"expected gs_num_steps=10 (sum of stage budgets), got {inner_cfg.gs_num_steps}"
     )
-    assert inner_cfg.gs_chi_schedule_steps == [(3, 4), (6, 8), (10, 16)], (
-        f"expected schedule_targets=[(3,4),(6,8),(10,16)], got {inner_cfg.gs_chi_schedule_steps}"
+    # schedule_targets entries are (cumulative_step_boundary, chi_to_bump_TO).
+    # For chi_schedule=[(4, 3), (8, 3), (16, 4)] the intended stages are:
+    #   - steps 1-3 at chi=4 (initial)
+    #   - after step 3 (cum=3), bump to chi=8
+    #   - steps 4-6 at chi=8
+    #   - after step 6 (cum=6), bump to chi=16
+    #   - steps 7-10 at chi=16
+    # So schedule_targets is the (cum, next-stage-chi) pairs for bumps only —
+    # the initial stage has no bump entry.
+    assert inner_cfg.gs_chi_schedule_steps == [(3, 8), (6, 16)], (
+        f"expected schedule_targets=[(3, 8), (6, 16)] (bump-to-next-stage), "
+        f"got {inner_cfg.gs_chi_schedule_steps}"
     )
     assert inner_cfg.ctm.chi == 4, f"expected initial chi=4, got {inner_cfg.ctm.chi}"
     assert inner_cfg.ctm.chi_max == 16, (
         f"expected chi_max=16, got {inner_cfg.ctm.chi_max}"
     )
+
+
+@pytest.mark.core
+def test_chi_schedule_single_stage_has_no_bumps():
+    """A single-stage chi_schedule should produce an empty schedule_targets list:
+    no boundaries, no bumps. The optimizer simply runs gs_num_steps at the
+    initial chi."""
+    captured = []
+
+    def _spy(gate, A_init, cfg):
+        captured.append(cfg)
+        return (A_init, None, 0.0)
+
+    import pytest as _pytest
+
+    base_cfg = iPEPSConfig(
+        unit_cell="1x1",
+        ctm=CTMConfig(chi=8),
+        gs_num_steps=200,
+        su_init=False,
+    )
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_opt, "optimize_gs_ad", _spy)
+        _opt.optimize_gs_ad_chi_schedule(
+            _trivial_gate(),
+            jnp.zeros((2, 2, 2, 2, 2), dtype=jnp.complex128),
+            base_cfg,
+            chi_schedule=[(8, 10)],
+        )
+    assert captured[0].gs_chi_schedule_steps == [], (
+        f"single-stage schedule should produce no bumps, "
+        f"got {captured[0].gs_chi_schedule_steps}"
+    )
+    assert captured[0].gs_num_steps == 10
+    assert captured[0].ctm.chi == 8
+    assert captured[0].ctm.chi_max == 8

@@ -564,11 +564,16 @@ def optimize_gs_ad_chi_schedule(
     chi_max = max(chi for chi, _ in chi_schedule)
     total_steps = sum(n for _, n in chi_schedule)
 
+    # Build (cum_step_boundary, target_chi_to_bump_to) pairs.  Each entry
+    # says: "after this many cumulative steps complete, bump to this chi".
+    # Stage 0 is the initial chi (no bump needed); each subsequent stage
+    # is reached by bumping when the previous stage's cumulative step
+    # boundary is crossed.
     cum = 0
     schedule_targets: list[tuple[int, int]] = []
-    for chi, n in chi_schedule:
-        cum += n
-        schedule_targets.append((cum, chi))
+    for i in range(1, len(chi_schedule)):
+        cum += chi_schedule[i - 1][1]
+        schedule_targets.append((cum, chi_schedule[i][0]))
 
     ctm_cfg = replace(config.ctm, chi=chi_schedule[0][0], chi_max=chi_max)
     step_cfg = replace(
