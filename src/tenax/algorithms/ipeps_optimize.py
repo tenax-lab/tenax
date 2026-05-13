@@ -529,55 +529,63 @@ def optimize_gs_ad_chi_schedule(
     config: iPEPSConfig,
     chi_schedule: list[tuple[int, int]],
 ):
-    """AD optimization with chi-ramping schedule.
+    """AD optimization with chi-ramping schedule (unified -- #453).
 
-    Runs ``optimize_gs_ad`` at each chi level in sequence, using the
-    optimized tensor from the previous level as initialization for the
-    next.  This avoids cold-starting at large chi and gives much better
-    convergence.
+    Runs ``optimize_gs_ad`` ONCE with envs padded to ``max(chi)`` from
+    the first iteration; the logical chi is ramped via
+    ``_maybe_scheduled_bump`` at the configured step boundaries.  The
+    JIT-compiled CTM / energy / backward kernels therefore see a single
+    fixed env shape across the whole run -- no per-stage retraces.
+
+    Trade-off: stages running at logical chi < ``max(chi)`` contract
+    ``max(chi)``-shaped envs (zeros in the unused rows), paying more
+    FLOPs per CTM iteration than a per-stage cold-start would.  The
+    recompile cost this avoids (issue #453) dominates in practice.
 
     Reference: Zhang, Yang & Corboz, arXiv:2505.00494 (2025).
 
     Args:
         hamiltonian_gate: 2-site Hamiltonian of shape ``(d, d, d, d)``.
         A_init:           Initial site tensor(s) or ``None``.
-        config:           Base iPEPSConfig (chi and gs_num_steps will be
-                          overridden per schedule entry).
+        config:           Base ``iPEPSConfig``.  ``ctm.chi``,
+                          ``ctm.chi_max``, ``gs_num_steps``, and
+                          ``gs_chi_schedule_steps`` are overridden by the
+                          shim per the schedule.
         chi_schedule:     List of ``(chi, num_steps)`` pairs, e.g.
-                          ``[(8, 100), (16, 50), (32, 30)]``.
+                          ``[(8, 100), (16, 50), (32, 30)]``.  Each pair
+                          says "run num_steps optimizer steps at logical
+                          chi = chi".  Boundaries are cumulative.
 
     Returns:
         Same as ``optimize_gs_ad`` at the final chi level.
     """
     from dataclasses import replace
 
-    result = None
-    current_init = A_init
+    chi_max = max(chi for chi, _ in chi_schedule)
+    total_steps = sum(n for _, n in chi_schedule)
 
-    for chi, num_steps in chi_schedule:
-        ctm_cfg = replace(config.ctm, chi=chi)
-        step_cfg = replace(config, ctm=ctm_cfg, gs_num_steps=num_steps)
+    cum = 0
+    schedule_targets: list[tuple[int, int]] = []
+    for chi, n in chi_schedule:
+        cum += n
+        schedule_targets.append((cum, chi))
 
-        if config.gs_verbose:
-            print(
-                f"[chi-ramp] chi={chi}, {num_steps} steps",
-                flush=True,
-            )
+    ctm_cfg = replace(config.ctm, chi=chi_schedule[0][0], chi_max=chi_max)
+    step_cfg = replace(
+        config,
+        ctm=ctm_cfg,
+        gs_num_steps=total_steps,
+        gs_chi_schedule_steps=schedule_targets,
+    )
 
-        result = optimize_gs_ad(hamiltonian_gate, current_init, step_cfg)
+    if config.gs_verbose:
+        print(
+            f"[chi-ramp] unified: chi_max={chi_max}, "
+            f"total_steps={total_steps}, boundaries={schedule_targets}",
+            flush=True,
+        )
 
-        # Extract optimized tensor for next level
-        if config.unit_cell == "2site":
-            (A_opt, B_opt), _, E = result
-            current_init = (A_opt, B_opt)
-        else:
-            A_opt, _, E = result
-            current_init = A_opt
-
-        if config.gs_verbose:
-            print(f"[chi-ramp] chi={chi} done, E={E:.10f}", flush=True)
-
-    return result
+    return optimize_gs_ad(hamiltonian_gate, A_init, step_cfg)
 
 
 def optimize_gs_ad(

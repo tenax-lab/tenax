@@ -1,0 +1,68 @@
+"""optimize_gs_ad_chi_schedule is now a thin shim (#453).
+
+Old: calls optimize_gs_ad once per (chi, num_steps) stage, dropping the
+env between stages and forcing per-stage JIT retraces.
+
+New: calls optimize_gs_ad exactly ONCE with envs padded to max(chi)
+from step 1 and gs_chi_schedule_steps stashed on the config so the
+inner loop ramps logical chi via _maybe_scheduled_bump.
+"""
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+import tenax.algorithms.ipeps_optimize as _opt
+from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+
+
+def _trivial_gate():
+    return jnp.zeros((2, 2, 2, 2), dtype=jnp.complex128)
+
+
+@pytest.mark.core
+def test_chi_schedule_shim_invokes_optimize_gs_ad_once(monkeypatch):
+    """The shim should make a SINGLE optimize_gs_ad call with the
+    unified config (chi_max set, gs_chi_schedule_steps set, gs_num_steps
+    = sum of stage budgets)."""
+    captured = []
+
+    def _spy(gate, A_init, cfg):
+        captured.append(cfg)
+        # Return a no-op result of the right shape for the unit-cell.
+        # Don't actually run; this is a contract test on the shim.
+        return (A_init, None, 0.0)
+
+    monkeypatch.setattr(_opt, "optimize_gs_ad", _spy)
+
+    D = 2
+    d = 2
+    rng = np.random.default_rng(0)
+    A = jnp.asarray(rng.standard_normal((D, D, D, D, d)))
+    A = A / jnp.linalg.norm(A)
+
+    base_cfg = iPEPSConfig(
+        unit_cell="1x1",
+        ctm=CTMConfig(chi=4),
+        gs_num_steps=200,  # will be overridden by shim
+        su_init=False,
+    )
+
+    _opt.optimize_gs_ad_chi_schedule(
+        _trivial_gate(), A, base_cfg, chi_schedule=[(4, 3), (8, 3), (16, 4)]
+    )
+
+    assert len(captured) == 1, (
+        f"shim should call optimize_gs_ad once, got {len(captured)}"
+    )
+    inner_cfg = captured[0]
+    assert inner_cfg.gs_num_steps == 10, (
+        f"expected gs_num_steps=10 (sum of stage budgets), got {inner_cfg.gs_num_steps}"
+    )
+    assert inner_cfg.gs_chi_schedule_steps == [(3, 4), (6, 8), (10, 16)], (
+        f"expected schedule_targets=[(3,4),(6,8),(10,16)], got {inner_cfg.gs_chi_schedule_steps}"
+    )
+    assert inner_cfg.ctm.chi == 4, f"expected initial chi=4, got {inner_cfg.ctm.chi}"
+    assert inner_cfg.ctm.chi_max == 16, (
+        f"expected chi_max=16, got {inner_cfg.ctm.chi_max}"
+    )
