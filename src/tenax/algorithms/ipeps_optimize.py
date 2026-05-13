@@ -32,6 +32,39 @@ _logger = logging.getLogger(__name__)
 Coord = tuple[int, int]
 
 
+def _apply_chi_bump(
+    ctm_cfg: CTMConfig,
+    env_cache: dict,
+    chi_new: int,
+    *,
+    base_charges: np.ndarray | None = None,
+) -> tuple[CTMConfig, dict]:
+    """Pure mechanism: bump logical χ and pad cached envs in-place.
+
+    Used by both the reactive auto-χ_E bump (``_maybe_bump_chi``,
+    variPEPS §2.8.2) and the scheduled bump driven by
+    ``gs_chi_schedule_steps`` (``_maybe_scheduled_bump``, issue #453).
+    No policy here — callers decide *whether* and *to what* to bump.
+
+    ``env_cache`` is mutated in-place so closures that captured the
+    dict reference (notably ``env_cache`` inside ``make_ctm_energy_fn``
+    in ``optimize_gs_ad``) see the padded envs without rebinding.
+
+    For SymmetricTensor envs, ``base_charges`` should be the bond
+    charges of the iPEPS A tensor (the same ``base_charges`` the
+    symmetric projector consumes).  Ignored on the dense path.
+    """
+    new_cfg = dataclasses.replace(ctm_cfg, chi=chi_new)
+    if "envs" in env_cache:
+        env_cache["envs"] = {
+            c: pad_dense_env_chi(
+                env_cache["envs"][c], chi_new, base_charges=base_charges
+            )
+            for c in env_cache["envs"]
+        }
+    return new_cfg, env_cache
+
+
 def _maybe_bump_chi(
     ctm_cfg: CTMConfig,
     env_cache: dict,
@@ -44,21 +77,14 @@ def _maybe_bump_chi(
     When ``ctm_cfg.chi_auto_bump`` is enabled and the last CTM sweep's
     ``ε_T`` exceeds ``ctm_cfg.chi_auto_bump_eps``, return a new
     ``(ctm_cfg, env_cache)`` pair with χ raised by ``chi_auto_bump_step``
-    (capped at ``chi_max`` if set). The cached env is zero-padded to the
-    new χ. Otherwise the input pair is returned unchanged.
+    (capped at ``chi_max`` if set).  The cached env is zero-padded to the
+    new χ.  Otherwise the input pair is returned unchanged.
 
-    ``env_cache`` is mutated **in-place** (the dict object is reused, only
-    ``env_cache["envs"]`` is overwritten) so that any closure that captured
-    the original dict reference — notably the ``env_cache`` captured by
-    ``make_ctm_energy_fn`` in ``optimize_gs_ad`` — sees the updated envs
-    without rebinding.
+    See ``_apply_chi_bump`` for the in-place mutation contract.
 
     For SymmetricTensor envs, ``base_charges`` should be the bond
     charges of the iPEPS A tensor (the same ``base_charges`` the
-    symmetric projector consumes). Passing it forwards to
-    ``pad_dense_env_chi`` ensures the padded χ-leg charges follow the
-    projector's allocation rather than tiling the already-grouped
-    post-CTM pattern. Ignored on the dense path.
+    symmetric projector consumes).  Ignored on the dense path.
     """
     if not ctm_cfg.chi_auto_bump:
         return ctm_cfg, env_cache
@@ -69,17 +95,7 @@ def _maybe_bump_chi(
         chi_new = min(chi_new, ctm_cfg.chi_max)
     if chi_new <= ctm_cfg.chi:
         return ctm_cfg, env_cache  # at ceiling
-    new_cfg = dataclasses.replace(ctm_cfg, chi=chi_new)
-    if "envs" in env_cache:
-        # Mutate in-place so closures that captured env_cache by reference
-        # (e.g. make_ctm_energy_fn inside optimize_gs_ad) see the padded envs.
-        env_cache["envs"] = {
-            c: pad_dense_env_chi(
-                env_cache["envs"][c], chi_new, base_charges=base_charges
-            )
-            for c in env_cache["envs"]
-        }
-    return new_cfg, env_cache
+    return _apply_chi_bump(ctm_cfg, env_cache, chi_new, base_charges=base_charges)
 
 
 def _lattice_to_neighbors(
