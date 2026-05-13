@@ -1358,6 +1358,11 @@ def _optimize_gs_ad_tensor(
             # ctm_cfg.chi at exit — same behaviour as before the #419
             # move-to-end refactor. (PR #432 codex review; not picked up
             # in #432's squash, so re-included here.)
+            # Snapshot χ before either bump fires; the reset below triggers
+            # on EITHER reactive (_maybe_bump_chi) or scheduled
+            # (_maybe_scheduled_bump) bump changing it — both are landscape
+            # transitions (#464 codex review).
+            chi_before_bump = ctm_cfg.chi
             last_eps_t = float(_env_cache.get("max_truncation_error", 0.0))
             ctm_cfg, _env_cache = _maybe_bump_chi(
                 ctm_cfg,
@@ -1368,7 +1373,6 @@ def _optimize_gs_ad_tensor(
             # Scheduled outer-loop χ bump (#453).  Composes with the
             # reactive bump above; ctm_cfg.chi_max caps both.
             if config.gs_chi_schedule_steps is not None:
-                chi_before = ctm_cfg.chi
                 ctm_cfg, _env_cache = _maybe_scheduled_bump(
                     ctm_cfg,
                     _env_cache,
@@ -1376,19 +1380,20 @@ def _optimize_gs_ad_tensor(
                     config.gs_chi_schedule_steps,
                     base_charges=_bump_base_charges,
                 )
-                if ctm_cfg.chi != chi_before:
-                    # Bump fired — fresh landscape, fresh stall budget.
-                    stall_count = 0
-                    if is_metric_lbfgs:
-                        lbfgs_history.clear()
-                        prev_A_flat = None
-                        prev_grad_flat = None
-                    if is_cg:
-                        cg_direction = None
-                        prev_grad = None
-                        prev_precond_grad = None
-                    if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
-                        opt_state = optimizer.init(params)
+            if ctm_cfg.chi != chi_before_bump:
+                # Reactive or scheduled bump fired — fresh landscape,
+                # fresh stall budget (#464 codex review).
+                stall_count = 0
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_A_flat = None
+                    prev_grad_flat = None
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                    opt_state = optimizer.init(params)
             if _accepted_best_this_iter:
                 best_env_cache = dict(_env_cache)
             if config.gs_verbose:
@@ -1652,6 +1657,9 @@ def _optimize_gs_ad_tensor(
         # ``f(α)`` at NEW χ — a valid step gets rejected (or an invalid
         # one accepted) purely because of the χ-induced discontinuity.
         # Issue #419.
+        # Snapshot χ before either bump fires; the reset below triggers
+        # on EITHER reactive or scheduled bump changing it (#464 codex review).
+        chi_before_bump = ctm_cfg.chi
         last_eps_t = float(_env_cache.get("max_truncation_error", 0.0))
         ctm_cfg, _env_cache = _maybe_bump_chi(
             ctm_cfg,
@@ -1662,7 +1670,6 @@ def _optimize_gs_ad_tensor(
         # Scheduled outer-loop χ bump (#453).  Composes with the reactive
         # bump above; ctm_cfg.chi_max caps both.
         if config.gs_chi_schedule_steps is not None:
-            chi_before = ctm_cfg.chi
             ctm_cfg, _env_cache = _maybe_scheduled_bump(
                 ctm_cfg,
                 _env_cache,
@@ -1670,19 +1677,20 @@ def _optimize_gs_ad_tensor(
                 config.gs_chi_schedule_steps,
                 base_charges=_bump_base_charges,
             )
-            if ctm_cfg.chi != chi_before:
-                # Bump fired — fresh landscape, fresh stall budget.
-                stall_count = 0
-                if is_metric_lbfgs:
-                    lbfgs_history.clear()
-                    prev_A_flat = None
-                    prev_grad_flat = None
-                if is_cg:
-                    cg_direction = None
-                    prev_grad = None
-                    prev_precond_grad = None
-                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
-                    opt_state = optimizer.init(params)
+        if ctm_cfg.chi != chi_before_bump:
+            # Reactive or scheduled bump fired — fresh landscape, fresh
+            # stall budget (#464 codex review).
+            stall_count = 0
+            if is_metric_lbfgs:
+                lbfgs_history.clear()
+                prev_A_flat = None
+                prev_grad_flat = None
+            if is_cg:
+                cg_direction = None
+                prev_grad = None
+                prev_precond_grad = None
+            if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                opt_state = optimizer.init(params)
         # If best was accepted at this iter's pre-line-search params, refresh
         # the snapshot so its env matches the new ctm_cfg.chi. ``_env_cache``
         # still holds envs for those params (line search updates ``params``
