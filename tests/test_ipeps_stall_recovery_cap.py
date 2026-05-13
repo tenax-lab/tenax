@@ -116,3 +116,59 @@ def _random_2site_init(d, D, seed):
     A = A / jnp.linalg.norm(A)
     B = B / jnp.linalg.norm(B)
     return (A, B)
+
+
+@pytest.mark.core
+def test_reset_loop_exits_after_retry_cap_c4v(monkeypatch, capsys):
+    """Same as 2-site test, but 1-site C4v path."""
+    calls = {"n": 0}
+
+    def _always_fail(_phi, _dphi, phi0, _slope, **_kwargs):
+        calls["n"] += 1
+        return 0.0, phi0, False
+
+    monkeypatch.setattr(_ls_mod, "hager_zhang_line_search", _always_fail)
+
+    d = 2
+    gate = _heisenberg_gate(d)
+    cfg = iPEPSConfig(
+        unit_cell="1x1",
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4),
+        gs_num_steps=10,
+        gs_stall_recovery="reset",  # explicit; default for 1x1 is "noise"
+        gs_stall_recovery_retries=3,
+        gs_verbose=True,
+        su_init=False,
+        gs_c4v=True,
+        gs_conv_criterion="grad_norm",
+    )
+    A_init = _random_1site_init(d, D=2, seed=0)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=UserWarning)
+        _opt.optimize_gs_ad(gate, A_init, cfg)
+
+    out = capsys.readouterr().out
+    assert calls["n"] > 0, (
+        "patched line search was never called; monkeypatch target stale"
+    )
+    assert "stall budget exhausted" in out, (
+        f"missing exhaustion log; last 2000 chars:\n{out[-2000:]}"
+    )
+    stall_lines = [
+        ln for ln in out.splitlines() if "stall #" in ln and "reset L-BFGS" in ln
+    ]
+    assert len(stall_lines) == cfg.gs_stall_recovery_retries, (
+        f"expected {cfg.gs_stall_recovery_retries} reset events, "
+        f"got {len(stall_lines)}: {stall_lines}"
+    )
+
+
+def _random_1site_init(d, D, seed):
+    """Random complex single-tensor init."""
+    rng = np.random.default_rng(seed)
+    A = jnp.asarray(
+        rng.standard_normal((D, D, D, D, d)) + 1j * rng.standard_normal((D, D, D, D, d))
+    )
+    return A / jnp.linalg.norm(A)

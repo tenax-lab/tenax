@@ -1488,12 +1488,25 @@ def _optimize_gs_ad_tensor(
                     prev_A_flat = None
                     prev_grad_flat = None
             elif config.gs_stall_recovery == "reset" and stall_count > 0:
-                # variPEPS-style reset: clear L-BFGS / CG state so the next
-                # step is plain steepest descent (or preconditioned steepest
-                # descent) from the CURRENT iterate.  Do NOT roll back
-                # params — issue #298's trajectory study shows "do nothing
-                # and continue" is strictly better than rollback for the
-                # L-BFGS + Hager-Zhang + metric-precond path.
+                # Rollback to best on reset (#454). The CTM-error reset path
+                # above (around L1206-1207) already does this for the
+                # CTMRGGradientError branch; we extend the same pattern to the
+                # Wolfe-failure path that was missed. #298's anti-rollback
+                # evidence was on a pre-trifecta CTM stack (pre-PR #406 2x2
+                # projector, pre-multisite-CTM rewrite, pre-PR #447 AD
+                # stop_gradient) and no longer applies.
+                if stall_count > config.gs_stall_recovery_retries:
+                    n_resets_done = stall_count - 1
+                    if config.gs_verbose:
+                        print(
+                            f"[iPEPS-AD] stall budget exhausted after "
+                            f"{n_resets_done} resets, "
+                            f"returning best E={best_energy:.10f}",
+                            flush=True,
+                        )
+                    break
+                params = best_params
+                _env_cache.update(best_env_cache)
                 if is_cg:
                     cg_direction = None
                     prev_grad = None
@@ -1503,14 +1516,15 @@ def _optimize_gs_ad_tensor(
                     prev_A_flat = None
                     prev_grad_flat = None
                 # Optax-backed L-BFGS stores curvature history in opt_state,
-                # not in lbfgs_history.  Reinitialize it so the next step
-                # really is steepest descent (reviewer feedback on #298).
+                # not in lbfgs_history.  Reinitialize it on the rolled-back
+                # params so the next step really is steepest descent.
                 if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
                     opt_state = optimizer.init(params)
                 if config.gs_verbose:
                     print(
-                        f"[iPEPS-AD] stall #{stall_count}, "
-                        f"reset L-BFGS history (no rollback)",
+                        f"[iPEPS-AD] stall #{stall_count}, reset L-BFGS history "
+                        f"(rollback to best, retry "
+                        f"{stall_count}/{config.gs_stall_recovery_retries})",
                         flush=True,
                     )
         else:
