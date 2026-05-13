@@ -265,6 +265,15 @@ class iPEPSConfig:
                                style).  ``None`` (default) lets
                                ``optimize_gs_ad`` pick per dispatcher:
                                ``"noise"`` for 1-site, ``"reset"`` for 2-site.
+        gs_stall_recovery_retries:
+                               Maximum consecutive resets allowed on the
+                               ``"reset"`` recovery path before the
+                               optimizer exits with ``best_params``.
+                               Analogous to ``gs_noise_recovery_retries``
+                               for the ``"noise"`` path.  Default ``5``
+                               matches variPEPS's
+                               ``optimizer_random_noise_max_retries``.
+                               (issue #454)
         gs_energy_floor:       Optional variational sanity floor on in-loop
                                best-state tracking (issue #298).  Candidate
                                energies strictly below this value are
@@ -305,6 +314,7 @@ class iPEPSConfig:
     gs_line_search_max_steps: int = 8
     gs_line_search_method: str = "hager_zhang"  # "armijo" or "hager_zhang"
     gs_noise_recovery_retries: int = 3  # max retries with noise injection on stall
+    gs_stall_recovery_retries: int = 5  # max consecutive resets before giving up (#454)
     gs_noise_amplitude: float = 0.1  # relative noise amplitude for recovery
     # Stall recovery mode for L-BFGS / CG line search failures.
     #   "noise"  -> inject gs_noise_amplitude Frobenius perturbation (legacy,
@@ -412,6 +422,11 @@ class iPEPSConfig:
         if self.gs_grad_norm_tol <= 0:
             raise ValueError(
                 f"gs_grad_norm_tol must be positive, got {self.gs_grad_norm_tol}"
+            )
+        if self.gs_stall_recovery_retries < 0:
+            raise ValueError(
+                f"gs_stall_recovery_retries must be non-negative, "
+                f"got {self.gs_stall_recovery_retries}"
             )
         if self.gs_conv_criterion == "dE":
             warnings.warn(
