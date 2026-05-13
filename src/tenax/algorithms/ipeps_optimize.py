@@ -2325,10 +2325,11 @@ def _optimize_gs_ad_tensor_2site(
                 # projector, pre-multisite-CTM rewrite, pre-PR #447 AD
                 # stop_gradient) and no longer applies.
                 if stall_count > config.gs_stall_recovery_retries:
+                    n_resets_done = stall_count - 1
                     if config.gs_verbose:
                         print(
                             f"[iPEPS-AD] stall budget exhausted after "
-                            f"{stall_count - 1} resets, "
+                            f"{n_resets_done} resets, "
                             f"returning best E={best_energy:.10f}",
                             flush=True,
                         )
