@@ -739,6 +739,7 @@ def _optimize_gs_ad_tensor_reference_c4v(
     opt_state = None if optimizer is None else optimizer.init(params)
     best_energy = float("inf")
     best_params = params
+    prev_energy = float("inf")
 
     def _project_c4v_and_normalize(A_data: jax.Array) -> jax.Array:
         coeffs = c4v_coeffs_from_tensor(A_data, c4v_basis)
@@ -773,6 +774,47 @@ def _optimize_gs_ad_tensor_reference_c4v(
                 )
             continue
         grads = jnp.where(jnp.isfinite(grads), grads, 0.0)
+        E = float(energy_val)
+
+        # Score / convergence-check on the *pre-step* params.  ``energy_val``
+        # and ``grads`` describe ``params`` before the optimizer update, so
+        # ``best_params`` and the convergence break must use that snapshot —
+        # not the post-update value.  The 1-site / 2-site / multisite
+        # dispatchers check before stepping for the same reason (codex
+        # follow-up on PR #449 / #451).
+        if _should_accept_best(
+            current_best=best_energy,
+            candidate=E,
+            floor=getattr(config, "gs_energy_floor", None),
+        ):
+            best_energy = E
+            best_params = params
+
+        # Outer convergence (issue #448).  Mirrors the other dispatchers
+        # so ``gs_conv_criterion`` and ``gs_conv_tol`` are honoured on the
+        # reference-C4v path too — until this commit they were silently
+        # ignored and every run consumed ``gs_num_steps``.  Grad-norm is
+        # computed only when the chosen criterion needs it.
+        delta_energy = abs(E - prev_energy)
+        prev_energy = E
+        grad_norm_val = (
+            _grad_l2_norm(grads)
+            if config.gs_conv_criterion in ("grad_norm", "both")
+            else None
+        )
+        if _converged_outer(config, delta_energy, grad_norm_val):
+            if config.gs_verbose:
+                _log_ad_converged(
+                    "c4v_reference",
+                    _step,
+                    delta_energy,
+                    config.gs_conv_tol,
+                    grad_norm=grad_norm_val,
+                    grad_norm_tol=config.gs_grad_norm_tol,
+                    criterion=config.gs_conv_criterion,
+                )
+            break
+
         if use_cg:
             params = _normalize_params(params - config.gs_learning_rate * grads)
         else:
@@ -789,14 +831,6 @@ def _optimize_gs_ad_tensor_reference_c4v(
             else:
                 updates, opt_state = optimizer.update(grads, opt_state, params)
             params = _normalize_params(optax.apply_updates(params, updates))
-        E = float(energy_val)
-        if _should_accept_best(
-            current_best=best_energy,
-            candidate=E,
-            floor=getattr(config, "gs_energy_floor", None),
-        ):
-            best_energy = E
-            best_params = params
 
     final_energy, (final_env, final_A) = _loss_fn(best_params)
     return final_A, final_env, float(final_energy)
@@ -2659,18 +2693,26 @@ def _optimize_gs_ad_multisite(
 
         prev_energy = energy_float
 
-        # Skip convergence check on early steps and right after a stall
-        # (stall resets prev_energy ≈ current, giving false dE ≈ 0).
+        # Early-step / post-stall warmup gate.  For dE-based criteria the
+        # gate protects against false ``dE ≈ 0`` exits on step 0
+        # (``prev_energy = inf`` → ``delta_energy = inf`` actually fails
+        # the dE check, but a stall reset can leave ``prev_energy ≈
+        # current`` and produce a real false-zero) and right after a
+        # stall recovery.  Grad-norm is variationally meaningful, so if
+        # the user's initial multisite state already satisfies
+        # ``||grad||_2 < tol`` we should respect that and exit on step 0
+        # — gating it would silently force the optimizer through up to
+        # ``gs_num_steps`` even when the user explicitly opted into a
+        # loose ``gs_grad_norm_tol`` for early-stop (codex #449
+        # follow-up).
         grad_norm_val = (
             _grad_l2_norm(grads)
             if config.gs_conv_criterion in ("grad_norm", "both")
             else None
         )
-        if (
-            _converged_outer(config, delta_energy, grad_norm_val)
-            and step > 5
-            and stall_count == 0
-        ):
+        needs_warmup = config.gs_conv_criterion in ("dE", "both")
+        warmup_ok = (not needs_warmup) or (step > 5 and stall_count == 0)
+        if _converged_outer(config, delta_energy, grad_norm_val) and warmup_ok:
             if config.gs_verbose:
                 if not logged:
                     _log_ad_step(

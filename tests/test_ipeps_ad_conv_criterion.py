@@ -190,3 +190,178 @@ def test_both_criterion_requires_both_to_pass():
     # Did not converge under "both" because the grad-norm half can't be met.
     assert history["converged"] is False
     assert history["num_steps"] == cfg.gs_num_steps
+
+
+# --- integration: c4v_reference dispatcher honors the criterion ------------
+#
+# Codex review on #449 flagged that ``_optimize_gs_ad_tensor_reference_c4v``
+# had no convergence check at all — even ``gs_conv_tol`` was silently ignored
+# and every run consumed ``gs_num_steps``. These tests pin the fix.
+
+
+def _c4v_reference_cfg(num_steps: int = 6, **overrides) -> iPEPSConfig:
+    # Mirrors tests/test_c4v_reference_ad.py
+    # ::test_optimize_gs_ad_reference_mode_nonzero_steps_runs — only the
+    # default ``projector_method='svd'`` survives the implicit-AD policy
+    # check on this path.
+    base = iPEPSConfig(
+        max_bond_dim=2,
+        ctm=CTMConfig(
+            chi=4,
+            max_iter=8,
+            min_iter=2,
+            ctm_ad_mode="c4v_reference",
+        ),
+        gs_num_steps=num_steps,
+        gs_learning_rate=1e-2,
+        gs_implicit_ad=True,
+        gs_c4v=True,
+        unit_cell="1x1",
+        su_init=False,
+        gs_optimizer="adam",
+        gs_verbose=True,  # so we can grep stdout for the converged-log line.
+    )
+    return replace(base, **overrides)
+
+
+@pytest.mark.algorithm
+def test_c4v_reference_honors_dE_criterion(capsys):
+    """Loose ``gs_conv_tol`` must trigger the dE exit in the C4v-reference
+    dispatcher (issue #448 codex follow-up)."""
+    import jax
+
+    A0 = jax.random.normal(jax.random.PRNGKey(2), (2, 2, 2, 2, 2))
+    cfg = _c4v_reference_cfg(
+        num_steps=5,
+        gs_conv_criterion="dE",
+        gs_conv_tol=1.0,  # loose → fires on first step.
+    )
+    optimize_gs_ad(_heisenberg_gate(), A0, cfg)
+    captured = capsys.readouterr().out
+    assert "[iPEPS-AD:c4v_reference] converged at step" in captured, captured
+
+
+@pytest.mark.algorithm
+def test_c4v_reference_honors_grad_norm_criterion(capsys):
+    """Loose ``gs_grad_norm_tol`` must trigger the grad-norm exit on the
+    C4v-reference path too."""
+    import jax
+
+    A0 = jax.random.normal(jax.random.PRNGKey(3), (2, 2, 2, 2, 2))
+    cfg = _c4v_reference_cfg(
+        num_steps=5,
+        gs_conv_criterion="grad_norm",
+        gs_grad_norm_tol=1e30,  # any finite grad-norm satisfies.
+        gs_conv_tol=1e-30,  # dE can't trip first.
+    )
+    optimize_gs_ad(_heisenberg_gate(), A0, cfg)
+    captured = capsys.readouterr().out
+    assert "[iPEPS-AD:c4v_reference] converged at step" in captured, captured
+    assert "||grad||=" in captured, captured
+
+
+@pytest.mark.algorithm
+def test_c4v_reference_returns_pre_step_best_on_grad_norm_exit():
+    """``best_params`` returned by the C4v-reference dispatcher must be the
+    tensor that satisfied the convergence criterion, not the post-optimizer
+    update (codex P2 on PR #451).
+
+    Sets a deliberately-huge learning rate plus a loose
+    ``gs_grad_norm_tol`` so the criterion fires on step 0; an Adam update at
+    that point would move ``params`` somewhere off the cheap GS line
+    and ``best_params`` would inherit the bad update if the check ran
+    post-step. We verify the returned ``A_opt`` is exactly the C4v
+    projection of ``A0`` (no optimizer step applied).
+    """
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    A0 = jax.random.normal(jax.random.PRNGKey(7), (2, 2, 2, 2, 2))
+    cfg = _c4v_reference_cfg(
+        num_steps=3,
+        gs_conv_criterion="grad_norm",
+        gs_grad_norm_tol=1e30,  # converged on step 0
+        gs_conv_tol=1e-30,
+        gs_learning_rate=10.0,  # a post-step accept would be dramatically off
+    )
+    A_opt, _env, _E = optimize_gs_ad(_heisenberg_gate(), A0, cfg)
+
+    # Expected: A_opt is the C4v projection of A0, normalised — i.e. the
+    # pre-step starting tensor that the conv check actually evaluated.
+    from tenax.algorithms.ipeps import (
+        build_c4v_basis,
+        c4v_coeffs_from_tensor,
+        c4v_tensor_from_coeffs,
+    )
+
+    D_bond, d_loc = 2, 2
+    A0_norm = A0 / (jnp.linalg.norm(A0) + 1e-10)
+    basis = jnp.array(build_c4v_basis(D_bond, d_loc))
+    coeffs = c4v_coeffs_from_tensor(A0_norm, basis)
+    A_expected = c4v_tensor_from_coeffs(
+        coeffs, basis, (D_bond, D_bond, D_bond, D_bond, d_loc)
+    )
+    A_expected = A_expected / (jnp.linalg.norm(A_expected) + 1e-10)
+
+    np.testing.assert_allclose(
+        np.asarray(A_opt.todense()),
+        np.asarray(A_expected),
+        atol=1e-10,
+        rtol=1e-8,
+        err_msg=(
+            "C4v-reference dispatcher returned a post-step tensor on a "
+            "step-0 grad-norm exit; the conv check is firing AFTER the "
+            "optimizer update (codex P2 on PR #451)."
+        ),
+    )
+
+
+# --- multisite dispatcher: warmup gate is criterion-aware ------------------
+#
+# Codex review on #449 flagged that the multisite dispatcher kept the legacy
+# ``step > 5 and stall_count == 0`` warmup unconditionally.  With
+# ``gs_conv_criterion='grad_norm'`` that warmup defeats early-stationarity
+# exits — a user setting a loose ``gs_grad_norm_tol`` to bail out of an
+# already-converged init still pays up to six expensive AD/CTM iterations,
+# and runs with ``gs_num_steps <= 6`` never exit via grad-norm.
+# The fix gates the warmup only for dE-based criteria.
+
+
+def test_multisite_warmup_is_criterion_aware():
+    """The warmup gate in ``_optimize_gs_ad_multisite`` must skip the
+    ``step > 5`` guard under ``gs_conv_criterion='grad_norm'`` and keep
+    it under ``"dE"``/``"both"`` (codex follow-up on #449).
+
+    Source-text pin rather than an end-to-end run because spinning up
+    the multisite optimizer for an inf-dE step-0 case requires a real
+    Lattice + iPEPS env which dominates the test runtime; the helper
+    invariant below (paired with ``_converged_outer`` unit tests above)
+    is enough to lock the behaviour.
+    """
+    import importlib
+
+    mod = importlib.import_module("tenax.algorithms.ipeps_optimize")
+    with open(mod.__file__, encoding="utf-8") as fp:
+        text = fp.read()
+    assert 'needs_warmup = config.gs_conv_criterion in ("dE", "both")' in text
+    assert "(not needs_warmup) or (step > 5 and stall_count == 0)" in text
+
+
+def test_converged_outer_grad_norm_exits_at_step_zero():
+    """Under ``gs_conv_criterion='grad_norm'`` the helper returns True
+    even on step 0 (``prev_energy = inf`` → ``delta_energy = inf``).
+    The multisite warmup gate must respect that invariant."""
+    import math
+
+    cfg = iPEPSConfig(gs_conv_criterion="grad_norm", gs_grad_norm_tol=1e30)
+    assert _converged_outer(cfg, delta_energy=math.inf, grad_norm=1.0) is True
+
+
+def test_converged_outer_dE_still_needs_finite_delta():
+    """Sanity: under ``"dE"`` the step-0 inf dE never converges, so the
+    multisite warmup gate exists for a reason on that path."""
+    import math
+
+    cfg = iPEPSConfig(gs_conv_criterion="dE", gs_conv_tol=1.0)
+    assert _converged_outer(cfg, delta_energy=math.inf, grad_norm=None) is False
