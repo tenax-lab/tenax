@@ -98,6 +98,71 @@ def _maybe_bump_chi(
     return _apply_chi_bump(ctm_cfg, env_cache, chi_new, base_charges=base_charges)
 
 
+def _advance_chi_stage_if_due(
+    ctm_cfg: CTMConfig,
+    env_cache: dict,
+    *,
+    chi_schedule: list[tuple[int, int]] | None,
+    current_stage_idx: int,
+    steps_in_stage: int,
+    base_charges: np.ndarray | None = None,
+) -> tuple[CTMConfig, dict, int, bool, bool]:
+    """Decide whether to advance to the next χ stage and apply it (#455).
+
+    Inputs:
+        ctm_cfg, env_cache: current CTM state.
+        chi_schedule: per-stage list ``[(target_chi, max_steps), ...]``,
+            or ``None`` (no schedule).
+        current_stage_idx: which stage is currently active (0-based).
+        steps_in_stage: number of completed optimizer steps in the
+            current stage (1-based at end-of-step).
+        base_charges: SymmetricTensor base charges (ignored on dense).
+
+    Returns:
+        (new_ctm_cfg, new_env_cache, new_stage_idx, bump_fired, should_break)
+
+    PR 1 trigger: budget-exhausted only
+    (``steps_in_stage >= chi_schedule[current_stage_idx][1]``).
+    PR 2 will extend to convergence + stall-cap.
+
+    Behavior:
+        - No schedule, or not yet at budget: no-op, returns
+          ``(ctm_cfg, env_cache, current_stage_idx, False, False)``.
+        - Budget hit at non-final stage: bump chi to next stage's
+          target via ``_apply_chi_bump``, advance ``current_stage_idx``,
+          return ``bump_fired=True``.
+        - Budget hit at final stage: return
+          ``should_break=True`` (no bump; caller exits the loop).
+    """
+    if not chi_schedule:
+        return ctm_cfg, env_cache, current_stage_idx, False, False
+
+    _, stage_max_steps = chi_schedule[current_stage_idx]
+    budget_exhausted = steps_in_stage >= stage_max_steps
+
+    if not budget_exhausted:
+        return ctm_cfg, env_cache, current_stage_idx, False, False
+
+    has_next = (current_stage_idx + 1) < len(chi_schedule)
+    if not has_next:
+        # Final stage budget exhausted → caller should break out.
+        return ctm_cfg, env_cache, current_stage_idx, False, True
+
+    next_chi, _ = chi_schedule[current_stage_idx + 1]
+    if ctm_cfg.chi_max is not None:
+        next_chi = min(next_chi, ctm_cfg.chi_max)
+
+    if next_chi <= ctm_cfg.chi:
+        # Already at or above the next stage's target — advance index
+        # without re-applying a bump (matches old idempotent semantics).
+        return ctm_cfg, env_cache, current_stage_idx + 1, False, False
+
+    new_ctm_cfg, new_env_cache = _apply_chi_bump(
+        ctm_cfg, env_cache, next_chi, base_charges=base_charges
+    )
+    return new_ctm_cfg, new_env_cache, current_stage_idx + 1, True, False
+
+
 def _maybe_scheduled_bump(
     ctm_cfg: CTMConfig,
     env_cache: dict,
