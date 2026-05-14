@@ -3504,6 +3504,66 @@ def _optimize_gs_ad_multisite(
                 # projector, pre-multisite-CTM rewrite, pre-PR #447 AD
                 # stop_gradient) and no longer applies.
                 if stall_count > config.gs_stall_recovery_retries:
+                    # #455 PR2: at non-final χ stages, treat stall-cap
+                    # exhaustion as a signal to advance the χ schedule
+                    # rather than exit with best_energy.  Mirrors the
+                    # 1-site (07ffe8e) and 2-site (41e590f) intercepts.
+                    if config.gs_chi_schedule_steps is not None:
+                        steps_in_stage = (step + 1) - stage_start_step
+                        _gn_for_bump = (
+                            grad_norm_val
+                            if grad_norm_val is not None
+                            else (
+                                _grad_l2_norm(grads)
+                                if config.gs_conv_criterion != "dE"
+                                else 0.0
+                            )
+                        )
+                        (
+                            ctm_cfg,
+                            _env_cache,
+                            new_stage_idx,
+                            bump_fired,
+                            _,
+                        ) = _advance_chi_stage_if_due(
+                            ctm_cfg,
+                            _env_cache,
+                            chi_schedule=config.gs_chi_schedule_steps,
+                            current_stage_idx=current_stage_idx,
+                            steps_in_stage=steps_in_stage,
+                            config=config,
+                            grad_norm=_gn_for_bump,
+                            delta_energy=delta_energy,
+                            stall_count=stall_count,
+                            base_charges=_bump_base_charges_multi,
+                        )
+                        if bump_fired:
+                            current_stage_idx = new_stage_idx
+                            stage_start_step = step + 1
+                            params = best_params
+                            _env_cache.update(best_env_cache)
+                            stall_count = 0
+                            if is_metric_lbfgs:
+                                lbfgs_history.clear()
+                                prev_params_flat = None
+                                prev_grad_flat = None
+                            if is_cg:
+                                cg_direction = None
+                                prev_grad = None
+                                prev_precond_grad = None
+                            if (
+                                optimizer is not None
+                                and config.gs_optimizer.lower() == "lbfgs"
+                            ):
+                                opt_state = optimizer.init(params)
+                            if config.gs_verbose:
+                                print(
+                                    f"[iPEPS-AD step {step + 1}] stall-cap at "
+                                    f"chi={ctm_cfg.chi} → advancing to next "
+                                    f"stage (#455 PR2)",
+                                    flush=True,
+                                )
+                            continue
                     n_resets_done = stall_count - 1
                     if config.gs_verbose:
                         print(
