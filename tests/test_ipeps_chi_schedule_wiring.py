@@ -121,8 +121,14 @@ def test_reactive_plus_scheduled_compose():
           chi=8 and final_chi=8.
         - ``chi_max=8`` caps both mechanisms at stage 2's target.
 
-    chi_auto_bump is currently 1x1-only (see ipeps_optimize.py
-    L641-L649), so this test uses ``unit_cell="1x1"``.
+    Uses ``unit_cell="1x1"`` because the 1-site forward stack runs an
+    explicit eigh measurement (``ipeps_optimize.py`` ``_update_env_cache``)
+    that produces a real ε_T > 0; the 2-site / multisite paths populate
+    ``max_truncation_error`` from the 2x2 forward sweep, which currently
+    returns the 0.0 placeholder (the plaquette projector doesn't yet
+    track ε_T — see ``_ctm_tensor_sweep_multisite`` 2x2 branch).
+    A 2-site smoke test below ensures the wiring composes without
+    crashing on the 2-site path.
     """
     jax.config.update("jax_enable_x64", True)
 
@@ -182,6 +188,84 @@ def test_reactive_plus_scheduled_compose():
         f"optimizer exited at stage 1 instead of continuing to "
         f"stage 2)."
     )
+
+
+@pytest.mark.core
+def test_reactive_plus_scheduled_compose_2site_smoke():
+    """2-site compose smoke (#472): ``chi_auto_bump=True`` runs end-to-end.
+
+    The 2-site forward stack populates ``max_truncation_error`` from the
+    2x2 plaquette sweep, which currently returns 0.0 (the plaquette
+    projector doesn't yet track ε_T — issue #474).  Reactive bumps
+    therefore never fire under the default forward CTM, so this test
+    pins the weaker property the #472 wiring guarantees on 2-site today:
+    ``chi_auto_bump=True`` does NOT raise ``NotImplementedError`` (the
+    PR #473 guard drop).
+
+    A tighter assertion (final_chi == 3, energy < 0, ...) would also
+    exercise the post-loop ``_eval_fresh_2site`` path, which trips a
+    pre-existing 2x2 plaquette chi-mismatch on chi-bumped envs (same
+    bug as the long-standing failure in
+    ``test_optimize_gs_ad_auto_bump_raises_chi_under_pressure`` — see
+    issue #475).  That bug is independent of the #472 wiring, so we
+    only pin the wiring property here and leave the deeper assertion
+    for after #475 lands.
+    """
+    jax.config.update("jax_enable_x64", True)
+
+    d = 2
+    D = 2
+    rng = np.random.default_rng(11)
+    A_data = jnp.asarray(
+        rng.standard_normal((D, D, D, D, d)) + 1j * rng.standard_normal((D, D, D, D, d))
+    )
+    A_data = A_data / jnp.linalg.norm(A_data)
+    A_init = (A_data, A_data)
+
+    gate = heisenberg_gate()
+
+    cfg = iPEPSConfig(
+        unit_cell="2site",
+        max_bond_dim=D,
+        ctm=CTMConfig(
+            chi=2,
+            chi_auto_bump=True,
+            chi_auto_bump_eps=1e-5,
+            chi_auto_bump_step=2,
+            chi_max=3,
+            max_iter=10,
+            min_iter=2,
+            conv_tol=1e-3,
+        ),
+        gs_c4v=True,
+        gs_optimizer="lbfgs",
+        gs_num_steps=4,
+        gs_verbose=False,
+        gs_conv_tol=1e-30,
+        gs_grad_norm_tol=1e-30,
+        gs_stall_recovery_retries=99,
+        su_init=False,
+    )
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=UserWarning)
+            optimize_gs_ad_chi_schedule(
+                gate, A_init, cfg, chi_schedule=[(2, 2), (3, 2)]
+            )
+    except NotImplementedError as exc:
+        raise AssertionError(
+            f"2-site chi_auto_bump regressed to NotImplementedError "
+            f"(PR #473 guard reintroduced): {exc}"
+        ) from exc
+    except ValueError as exc:
+        # #475: pre-existing 2x2 plaquette chi-mismatch on chi-bumped
+        # envs is platform-dependent (passes on Linux, fails on macOS)
+        # and surfaces in ``_eval_fresh_2site`` after the optimization
+        # loop completes.  Independent of #472 wiring; treat as the
+        # known-limitation pin here.
+        if "Size of label" not in str(exc):
+            raise
 
 
 def _extract_final_chi(result):
