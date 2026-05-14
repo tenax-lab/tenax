@@ -47,6 +47,16 @@ class CTMConfig:
                             ``chi_auto_bump_eps``.  Mutually exclusive with
                             ``chi_ramp`` (a deterministic schedule).
                             Off by default.
+
+                            For new code, prefer ``chi_schedule`` +
+                            ``optimize_gs_ad_chi_schedule`` with
+                            convergence-triggered ramping (#455);
+                            ``chi_auto_bump`` is retained as an
+                            orthogonal CTM-truncation sentinel for the
+                            case where the optimizer is making progress
+                            but ε_T indicates CTM under-resolution.
+                            These two mechanisms compose (reactive fires
+                            first, scheduled second).
         chi_auto_bump_eps:  Truncation-error threshold that triggers an
                             auto-χ bump.  Default ``1e-5`` follows
                             variPEPS §2.8.2.
