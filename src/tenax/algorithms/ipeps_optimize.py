@@ -1395,7 +1395,7 @@ def _optimize_gs_ad_tensor(
                         else 0.0
                     )
                 )
-                ctm_cfg, _env_cache, new_stage_idx, _bump_fired, _ = (
+                ctm_cfg, _env_cache, new_stage_idx, bump_fired, _ = (
                     _advance_chi_stage_if_due(
                         ctm_cfg,
                         _env_cache,
@@ -1412,6 +1412,8 @@ def _optimize_gs_ad_tensor(
                 if new_stage_idx != current_stage_idx:
                     current_stage_idx = new_stage_idx
                     stage_start_step = step + 1
+            else:
+                bump_fired = False
             if ctm_cfg.chi != chi_before_bump:
                 # Reactive or scheduled bump fired — fresh landscape,
                 # fresh stall budget (#464 codex review).
@@ -1428,6 +1430,20 @@ def _optimize_gs_ad_tensor(
                     opt_state = optimizer.init(params)
             if _accepted_best_this_iter:
                 best_env_cache = dict(_env_cache)
+            if bump_fired:
+                # #455 PR2: converged at non-final stage → advance and
+                # continue, NOT break.  The reset block above already
+                # cleared stall_count, L-BFGS history, and opt_state at
+                # the new χ; let the optimizer keep stepping on the
+                # fresh landscape rather than exit prematurely.
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD step {step + 1}] converged at "
+                        f"chi={chi_before_bump} → bumping to "
+                        f"chi={ctm_cfg.chi} (#455 PR2)",
+                        flush=True,
+                    )
+                continue
             if config.gs_verbose:
                 if not logged:
                     _log_ad_step(
