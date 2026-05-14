@@ -1697,11 +1697,11 @@ def _optimize_gs_ad_tensor(
                         if bump_fired:
                             current_stage_idx = new_stage_idx
                             stage_start_step = step + 1
-                            # Rollback to best at the new χ so we keep
-                            # the best params from the previous stage as
-                            # the starting point for this one.
+                            # Rollback params to best from the previous
+                            # stage; _env_cache stays at the freshly
+                            # padded post-bump state (the budget-path
+                            # invariant — see _apply_chi_bump).
                             params = best_params
-                            _env_cache.update(best_env_cache)
                             stall_count = 0
                             if is_metric_lbfgs:
                                 lbfgs_history.clear()
@@ -2739,8 +2739,11 @@ def _optimize_gs_ad_tensor_2site(
                         if bump_fired:
                             current_stage_idx = new_stage_idx
                             stage_start_step = step + 1
+                            # Rollback params to best from the previous
+                            # stage; _env_cache_2s stays at the freshly
+                            # padded post-bump state (the budget-path
+                            # invariant — see _apply_chi_bump).
                             params = best_params
-                            _env_cache_2s.update(best_env_cache_2s)
                             stall_count = 0
                             if is_metric_lbfgs:
                                 lbfgs_history.clear()
@@ -3540,8 +3543,11 @@ def _optimize_gs_ad_multisite(
                         if bump_fired:
                             current_stage_idx = new_stage_idx
                             stage_start_step = step + 1
+                            # Rollback params to best from the previous
+                            # stage; _env_cache stays at the freshly
+                            # padded post-bump state (the budget-path
+                            # invariant — see _apply_chi_bump).
                             params = best_params
-                            _env_cache.update(best_env_cache)
                             stall_count = 0
                             if is_metric_lbfgs:
                                 lbfgs_history.clear()
