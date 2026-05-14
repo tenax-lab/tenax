@@ -1387,7 +1387,13 @@ def _optimize_gs_ad_tensor(
             if config.gs_chi_schedule_steps is not None:
                 steps_in_stage = (step + 1) - stage_start_step
                 _gn_for_bump = (
-                    grad_norm_val if grad_norm_val is not None else _grad_l2_norm(grads)
+                    grad_norm_val
+                    if grad_norm_val is not None
+                    else (
+                        _grad_l2_norm(grads)
+                        if config.gs_conv_criterion != "dE"
+                        else 0.0
+                    )
                 )
                 ctm_cfg, _env_cache, new_stage_idx, _bump_fired, _ = (
                     _advance_chi_stage_if_due(
@@ -1700,7 +1706,9 @@ def _optimize_gs_ad_tensor(
         if config.gs_chi_schedule_steps is not None:
             steps_in_stage = (step + 1) - stage_start_step
             _gn_for_bump = (
-                grad_norm_val if grad_norm_val is not None else _grad_l2_norm(grads)
+                grad_norm_val
+                if grad_norm_val is not None
+                else (_grad_l2_norm(grads) if config.gs_conv_criterion != "dE" else 0.0)
             )
             ctm_cfg, _env_cache, new_stage_idx, _bump_fired, _should_break = (
                 _advance_chi_stage_if_due(
@@ -2604,7 +2612,9 @@ def _optimize_gs_ad_tensor_2site(
             steps_in_stage = (step + 1) - stage_start_step
             chi_before = ctm_cfg_2s.chi
             _gn_for_bump = (
-                grad_norm_val if grad_norm_val is not None else _grad_l2_norm(grads)
+                grad_norm_val
+                if grad_norm_val is not None
+                else (_grad_l2_norm(grads) if config.gs_conv_criterion != "dE" else 0.0)
             )
             ctm_cfg_2s, _env_cache_2s, new_stage_idx, _bump_fired, _should_break = (
                 _advance_chi_stage_if_due(
@@ -3316,7 +3326,9 @@ def _optimize_gs_ad_multisite(
             steps_in_stage = (step + 1) - stage_start_step
             chi_before = ctm_cfg.chi
             _gn_for_bump = (
-                grad_norm_val if grad_norm_val is not None else _grad_l2_norm(grads)
+                grad_norm_val
+                if grad_norm_val is not None
+                else (_grad_l2_norm(grads) if config.gs_conv_criterion != "dE" else 0.0)
             )
             ctm_cfg, _env_cache, new_stage_idx, _bump_fired, _should_break = (
                 _advance_chi_stage_if_due(
