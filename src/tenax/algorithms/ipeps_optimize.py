@@ -567,10 +567,29 @@ def optimize_gs_ad_chi_schedule(
                           ``ctm.chi_max``, ``gs_num_steps``, and
                           ``gs_chi_schedule_steps`` are overridden by the
                           shim per the schedule.
-        chi_schedule:     List of ``(chi, num_steps)`` pairs, e.g.
+        chi_schedule:     List of ``(chi, max_steps)`` pairs, e.g.
                           ``[(8, 100), (16, 50), (32, 30)]``.  Each pair
-                          says "run num_steps optimizer steps at logical
-                          chi = chi".  Boundaries are cumulative.
+                          says "run up to max_steps optimizer iterations
+                          at logical chi = chi, then advance to the next
+                          stage".
+
+                          Three signals advance a stage at non-final
+                          stages (#455):
+                              - the per-stage ``max_steps`` budget is
+                                exhausted;
+                              - the user's ``gs_conv_criterion`` (dE,
+                                grad_norm, or both) is met;
+                              - the L-BFGS reset-recovery stall cap
+                                ``gs_stall_recovery_retries`` is hit.
+                          Unused steps from an early-exiting stage are
+                          discarded (each stage's max_steps is an
+                          upper bound, not a fixed quota).
+
+                          Note: when stall-cap triggers a non-final
+                          advance, the next stage starts from the
+                          rolled-back ``best_params`` — fresh landscape,
+                          fresh retry budget (PR #464's intent
+                          preserved).
 
     Returns:
         Same as ``optimize_gs_ad`` at the final chi level.
