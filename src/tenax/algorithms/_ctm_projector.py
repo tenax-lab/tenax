@@ -15,8 +15,8 @@ This module contains ``todense()`` calls in the projector computation.
 - ``_eigh_projector_symmetric``: Fully block-sparse per-sector density
   matrix eigh with global eigenvalue truncation.
 
-- ``_qr_projector_symmetric``: Fully block-sparse per-sector QR + small
-  eigh.
+- ``_qr_projector_symmetric``: Fully block-sparse per-sector density
+  matrix eigh (identical to eigh path; "qr" label retained for API compat).
 
 - ``_svd_projector_symmetric``: Fully block-sparse per-sector Fishman
   two-projector SVD with global singular value truncation.
