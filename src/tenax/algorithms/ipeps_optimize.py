@@ -2934,23 +2934,29 @@ def _optimize_gs_ad_tensor_2site(
                     )
                 current_stage_idx = new_stage_idx
                 stage_start_step = step + 1
-            if ctm_cfg_2s.chi != chi_before:
-                # χ bump fired: a new landscape begins.  Reset the stall
-                # counter so the next stage gets a fresh retry budget;
-                # also clear L-BFGS curvature history so the first step
-                # at the new χ is plain steepest descent (curvature from
-                # the previous χ landscape isn't valid here).
-                stall_count = 0
-                if is_metric_lbfgs:
-                    lbfgs_history.clear()
-                    prev_params_flat = None
-                    prev_grad_flat = None
-                if is_cg:
-                    cg_direction = None
-                    prev_grad = None
-                    prev_precond_grad = None
-                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
-                    opt_state = optimizer.init(params)
+        # Reset block must live OUTSIDE the schedule-only ``if`` so a
+        # reactive-only bump (``chi_auto_bump=True`` with no schedule)
+        # still clears stall_count, CG state, and L-BFGS history at the
+        # new χ.  Gated solely on ``ctm_cfg_2s.chi != chi_before``, which
+        # is set by EITHER reactive (#472) or scheduled (#455) bumps.
+        # (Codex PR #473 review.)
+        if ctm_cfg_2s.chi != chi_before:
+            # χ bump fired: a new landscape begins.  Reset the stall
+            # counter so the next stage gets a fresh retry budget;
+            # also clear L-BFGS curvature history so the first step
+            # at the new χ is plain steepest descent (curvature from
+            # the previous χ landscape isn't valid here).
+            stall_count = 0
+            if is_metric_lbfgs:
+                lbfgs_history.clear()
+                prev_params_flat = None
+                prev_grad_flat = None
+            if is_cg:
+                cg_direction = None
+                prev_grad = None
+                prev_precond_grad = None
+            if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                opt_state = optimizer.init(params)
 
     # Re-evaluate both final params and best_params with fully converged
     # fresh CTM.  In-loop energies use warm-started CTM that can produce
@@ -3821,19 +3827,23 @@ def _optimize_gs_ad_multisite(
                     )
                 current_stage_idx = new_stage_idx
                 stage_start_step = step + 1
-            if ctm_cfg.chi != chi_before:
-                # Bump fired — fresh landscape, fresh stall budget.
-                stall_count = 0
-                if is_metric_lbfgs:
-                    lbfgs_history.clear()
-                    prev_params_flat = None
-                    prev_grad_flat = None
-                if is_cg:
-                    cg_direction = None
-                    prev_grad = None
-                    prev_precond_grad = None
-                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
-                    opt_state = optimizer.init(params)
+        # Reset block lives OUTSIDE the schedule-only ``if`` so a
+        # reactive-only bump (no schedule) still clears stall_count,
+        # CG state, and L-BFGS history at the new χ.  See the 2-site
+        # twin block — same Codex PR #473 review.
+        if ctm_cfg.chi != chi_before:
+            # Bump fired — fresh landscape, fresh stall budget.
+            stall_count = 0
+            if is_metric_lbfgs:
+                lbfgs_history.clear()
+                prev_params_flat = None
+                prev_grad_flat = None
+            if is_cg:
+                cg_direction = None
+                prev_grad = None
+                prev_precond_grad = None
+            if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                opt_state = optimizer.init(params)
 
     # ── Final evaluation ─────────────────────────────────────────────────
     def _eval_fresh(p, env_init=None):
