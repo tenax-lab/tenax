@@ -486,13 +486,15 @@ def _qr_projector_symmetric(
     C4g: SymmetricTensor,
     chi: int,
 ) -> SymmetricTensor:
-    r"""Block-sparse projector via per-sector QR + small eigh.
+    r"""Block-sparse projector via per-sector density matrix eigh.
 
     For each charge sector *q* of the ``fused`` leg, concatenates the
     column-blocks from both grown corners to form :math:`M_q`, then
-    QR-factors :math:`M_q = Q_q R_q`.  The reduced eigenproblem
-    :math:`R_q R_q^\dagger` is cheaper than the full
-    :math:`\rho_q = M_q M_q^\dagger` when the column dimension is small.
+    eigendecomposes :math:`\rho_q = M_q M_q^\dagger`.
+
+    This matches ``_eigh_projector_symmetric`` exactly, so the
+    ``"qr"`` and ``"eigh"`` projector methods produce identical
+    subspaces.  The ``"qr"`` label is retained for API compatibility.
 
     Eigenvalues are merged across sectors and globally truncated to *chi*.
 
@@ -528,8 +530,10 @@ def _qr_projector_symmetric(
     for fq in all_fused_charges:
         charge_rows[fq] = np.where(charges_arr == fq)[0]
 
-    # Per-sector QR + small eigh
-    sector_results: dict[int, tuple[jax.Array, jax.Array]] = {}  # fq -> (P_q, eigvals)
+    # Per-sector density matrix eigh
+    sector_results: dict[
+        int, tuple[jax.Array, jax.Array]
+    ] = {}  # fq -> (eigvecs, eigvals)
 
     for fq in all_fused_charges:
         fused_dim = int(len(charge_rows.get(fq, [])))
@@ -549,15 +553,21 @@ def _qr_projector_symmetric(
             continue
 
         M_q = jnp.concatenate(col_blocks, axis=1)  # (fused_dim, total_col)
-        Q_q, R_q = jnp.linalg.qr(M_q)
 
-        rho_small = R_q @ R_q.conj().T
-        rho_small = 0.5 * (rho_small + rho_small.conj().T)
-        eigvals, eigvecs = jnp.linalg.eigh(rho_small)
+        # Compute the full density matrix rho_q = M_q M_q^†  so that
+        # the eigenvectors — including those in the null space of M_q —
+        # match exactly what _eigh_projector_symmetric produces.
+        #
+        # The earlier QR trick (rho_small = R_q R_q†, then P_q = Q @ eigvecs)
+        # only spans the column space of M_q, so when chi > rank(M_q) the
+        # zero-eigenvector selections diverge from eigh's ordering.  Using
+        # the same rho_q computation as _eigh_projector_symmetric guarantees
+        # identical truncation at any chi.
+        rho_q = M_q @ M_q.conj().T
+        rho_q = 0.5 * (rho_q + rho_q.conj().T)
+        eigvals, eigvecs = jnp.linalg.eigh(rho_q)
 
-        # P_q = Q @ eigvecs maps from reduced space back to fused space
-        P_q = Q_q @ eigvecs  # (fused_dim, min(fused_dim, total_col))
-        sector_results[fq] = (P_q, eigvals)
+        sector_results[fq] = (eigvecs, eigvals)
 
     # Global truncation across sectors
     all_eig_pairs: list[tuple[float, int, int]] = []
@@ -581,8 +591,8 @@ def _qr_projector_symmetric(
         n_q = len(keep_indices)
         chi_new_charges.extend([fq] * n_q)
 
-        P_q, _ = sector_results[fq]
-        V_q = P_q[:, keep_indices]  # (fused_dim, n_q)
+        eigvecs_q, _ = sector_results[fq]
+        V_q = eigvecs_q[:, keep_indices]  # (fused_dim, n_q)
         V_q = jax.lax.stop_gradient(V_q)
         proj_blocks[(fq, fq)] = V_q
 
