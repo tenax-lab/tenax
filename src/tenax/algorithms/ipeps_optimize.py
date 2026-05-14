@@ -1428,11 +1428,21 @@ def _optimize_gs_ad_tensor(
                         base_charges=_bump_base_charges,
                     )
                 )
-                if new_stage_idx != current_stage_idx:
+                # Codex review (PR #467): the helper's idempotent-advance
+                # branch returns ``bump_fired=False`` AND
+                # ``new_stage_idx > current_stage_idx`` when a reactive
+                # ε_T-bump already raised χ past the next stage's target.
+                # The schedule index must STILL advance, and the
+                # ``continue`` below must STILL fire — otherwise the
+                # optimizer exits at the previous stage's converged
+                # energy.  ``stage_advanced`` decouples the two signals.
+                stage_advanced = new_stage_idx != current_stage_idx
+                if stage_advanced:
                     current_stage_idx = new_stage_idx
                     stage_start_step = step + 1
             else:
                 bump_fired = False
+                stage_advanced = False
             if ctm_cfg.chi != chi_before_bump:
                 # Reactive or scheduled bump fired — fresh landscape,
                 # fresh stall budget (#464 codex review).
@@ -1449,12 +1459,20 @@ def _optimize_gs_ad_tensor(
                     opt_state = optimizer.init(params)
             if _accepted_best_this_iter:
                 best_env_cache = dict(_env_cache)
-            if bump_fired:
+            if bump_fired or stage_advanced:
                 # #455 PR2: converged at non-final stage → advance and
                 # continue, NOT break.  The reset block above already
                 # cleared stall_count, L-BFGS history, and opt_state at
                 # the new χ; let the optimizer keep stepping on the
                 # fresh landscape rather than exit prematurely.
+                #
+                # Codex review (PR #467): ``stage_advanced`` covers the
+                # idempotent-advance branch where the reactive bump
+                # already raised χ past the next stage's target — the
+                # schedule index moved forward but ``bump_fired=False``.
+                # Without the disjunction, we would fall through to
+                # break and exit at stage N's converged energy without
+                # ever running stage N+1.
                 if config.gs_verbose:
                     print(
                         f"[iPEPS-AD step {step + 1}] converged at "
@@ -1713,9 +1731,20 @@ def _optimize_gs_ad_tensor(
                             stall_count=stall_count,
                             base_charges=_bump_base_charges,
                         )
-                        if bump_fired:
+                        # Codex review (PR #467): treat idempotent
+                        # advance (bump_fired=False AND
+                        # new_stage_idx>current_stage_idx) the same as
+                        # a real bump for control-flow purposes —
+                        # otherwise the stall-cap intercept would still
+                        # break.  The reset block (params rollback,
+                        # stall_count=0, L-BFGS clear, opt_state init)
+                        # stays gated on bump_fired because it only
+                        # makes sense when χ actually changed.
+                        stage_advanced = new_stage_idx != current_stage_idx
+                        if stage_advanced:
                             current_stage_idx = new_stage_idx
                             stage_start_step = step + 1
+                        if bump_fired:
                             # Rollback params to best from the previous
                             # stage; _env_cache stays at the freshly
                             # padded post-bump state (the budget-path
@@ -1742,6 +1771,7 @@ def _optimize_gs_ad_tensor(
                                     f"stage (#455 PR2)",
                                     flush=True,
                                 )
+                        if bump_fired or stage_advanced:
                             continue
                     n_resets_done = stall_count - 1
                     if config.gs_verbose:
@@ -2430,9 +2460,17 @@ def _optimize_gs_ad_tensor_2site(
                     stall_count=stall_count,
                     base_charges=_bump_base_charges_2s,
                 )
-                if bump_fired:
+                # Codex review (PR #467): decouple the schedule index
+                # advance from bump_fired so idempotent advances
+                # (bump_fired=False AND new_stage_idx>current_stage_idx)
+                # still continue rather than fall through to break.
+                # The reset block (stall_count, L-BFGS, opt_state)
+                # stays gated on bump_fired (chi actually changed).
+                stage_advanced = new_stage_idx != current_stage_idx
+                if stage_advanced:
                     current_stage_idx = new_stage_idx
                     stage_start_step = step + 1
+                if bump_fired:
                     stall_count = 0
                     if is_metric_lbfgs:
                         lbfgs_history.clear()
@@ -2451,6 +2489,7 @@ def _optimize_gs_ad_tensor_2site(
                             f"chi={ctm_cfg_2s.chi} (#455 PR2)",
                             flush=True,
                         )
+                if bump_fired or stage_advanced:
                     continue
             if config.gs_verbose:
                 if not logged:
@@ -2755,9 +2794,15 @@ def _optimize_gs_ad_tensor_2site(
                             stall_count=stall_count,
                             base_charges=_bump_base_charges_2s,
                         )
-                        if bump_fired:
+                        # Codex review (PR #467): see 1-site stall-cap
+                        # intercept for rationale.  Decouple schedule
+                        # advance from bump_fired; keep reset block
+                        # gated on bump_fired.
+                        stage_advanced = new_stage_idx != current_stage_idx
+                        if stage_advanced:
                             current_stage_idx = new_stage_idx
                             stage_start_step = step + 1
+                        if bump_fired:
                             # Rollback params to best from the previous
                             # stage; _env_cache_2s stays at the freshly
                             # padded post-bump state (the budget-path
@@ -2784,6 +2829,7 @@ def _optimize_gs_ad_tensor_2site(
                                     f"stage (#455 PR2)",
                                     flush=True,
                                 )
+                        if bump_fired or stage_advanced:
                             continue
                     n_resets_done = stall_count - 1
                     if config.gs_verbose:
@@ -3300,9 +3346,15 @@ def _optimize_gs_ad_multisite(
                     stall_count=stall_count,
                     base_charges=_bump_base_charges_multi,
                 )
-                if bump_fired:
+                # Codex review (PR #467): see 1-site / 2-site
+                # convergence intercept for rationale.  Decouple
+                # schedule advance from bump_fired; keep reset block
+                # gated on bump_fired.
+                stage_advanced = new_stage_idx != current_stage_idx
+                if stage_advanced:
                     current_stage_idx = new_stage_idx
                     stage_start_step = step + 1
+                if bump_fired:
                     stall_count = 0
                     if is_metric_lbfgs:
                         lbfgs_history.clear()
@@ -3321,6 +3373,7 @@ def _optimize_gs_ad_multisite(
                             f"chi={ctm_cfg.chi} (#455 PR2)",
                             flush=True,
                         )
+                if bump_fired or stage_advanced:
                     continue
             if config.gs_verbose:
                 if not logged:
@@ -3559,9 +3612,15 @@ def _optimize_gs_ad_multisite(
                             stall_count=stall_count,
                             base_charges=_bump_base_charges_multi,
                         )
-                        if bump_fired:
+                        # Codex review (PR #467): see 1-site stall-cap
+                        # intercept for rationale.  Decouple schedule
+                        # advance from bump_fired; keep reset block
+                        # gated on bump_fired.
+                        stage_advanced = new_stage_idx != current_stage_idx
+                        if stage_advanced:
                             current_stage_idx = new_stage_idx
                             stage_start_step = step + 1
+                        if bump_fired:
                             # Rollback params to best from the previous
                             # stage; _env_cache stays at the freshly
                             # padded post-bump state (the budget-path
@@ -3588,6 +3647,7 @@ def _optimize_gs_ad_multisite(
                                     f"stage (#455 PR2)",
                                     flush=True,
                                 )
+                        if bump_fired or stage_advanced:
                             continue
                     n_resets_done = stall_count - 1
                     if config.gs_verbose:
