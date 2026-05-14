@@ -192,24 +192,21 @@ def test_reactive_plus_scheduled_compose():
 
 @pytest.mark.core
 def test_reactive_plus_scheduled_compose_2site_smoke():
-    """2-site compose smoke (#472): ``chi_auto_bump=True`` runs end-to-end.
+    """2-site compose smoke (#472, #474): reactive bump fires end-to-end.
 
-    The 2-site forward stack populates ``max_truncation_error`` from the
-    2x2 plaquette sweep, which currently returns 0.0 (the plaquette
-    projector doesn't yet track ε_T — issue #474).  Reactive bumps
-    therefore never fire under the default forward CTM, so this test
-    pins the weaker property the #472 wiring guarantees on 2-site today:
-    ``chi_auto_bump=True`` does NOT raise ``NotImplementedError`` (the
-    PR #473 guard drop).
+    With #474 landed, the 2x2 plaquette projector tracks ε_T directly,
+    so reactive bumps fire on the 2-site forward stack with the default
+    recipe.  This test pins:
 
-    A tighter assertion (final_chi == 3, energy < 0, ...) would also
-    exercise the post-loop ``_eval_fresh_2site`` path, which trips a
-    pre-existing 2x2 plaquette chi-mismatch on chi-bumped envs (same
-    bug as the long-standing failure in
-    ``test_optimize_gs_ad_auto_bump_raises_chi_under_pressure`` — see
-    issue #475).  That bug is independent of the #472 wiring, so we
-    only pin the wiring property here and leave the deeper assertion
-    for after #475 lands.
+    - ``chi_auto_bump=True`` does NOT raise ``NotImplementedError`` (the
+      PR #473 guard drop).
+    - The reactive bump actually fires when ``chi_auto_bump_eps`` is
+      tiny — final chi exceeds the starting chi.
+
+    Note: the post-loop ``_eval_fresh_2site`` path can still hit issue
+    #475's pre-existing 2x2 plaquette chi-mismatch on chi-bumped envs
+    (platform-dependent; surfaces on macOS for some configs).  We swallow
+    that specific ValueError as a known-limitation pin until #475 lands.
     """
     jax.config.update("jax_enable_x64", True)
 
@@ -230,9 +227,9 @@ def test_reactive_plus_scheduled_compose_2site_smoke():
         ctm=CTMConfig(
             chi=2,
             chi_auto_bump=True,
-            chi_auto_bump_eps=1e-5,
+            chi_auto_bump_eps=1e-30,  # any positive ε_T fires reactive (#474)
             chi_auto_bump_step=2,
-            chi_max=3,
+            chi_max=4,
             max_iter=10,
             min_iter=2,
             conv_tol=1e-3,
@@ -250,8 +247,8 @@ def test_reactive_plus_scheduled_compose_2site_smoke():
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=UserWarning)
-            optimize_gs_ad_chi_schedule(
-                gate, A_init, cfg, chi_schedule=[(2, 2), (3, 2)]
+            result = optimize_gs_ad_chi_schedule(
+                gate, A_init, cfg, chi_schedule=[(2, 2), (4, 2)]
             )
     except NotImplementedError as exc:
         raise AssertionError(
@@ -262,10 +259,21 @@ def test_reactive_plus_scheduled_compose_2site_smoke():
         # #475: pre-existing 2x2 plaquette chi-mismatch on chi-bumped
         # envs is platform-dependent (passes on Linux, fails on macOS)
         # and surfaces in ``_eval_fresh_2site`` after the optimization
-        # loop completes.  Independent of #472 wiring; treat as the
-        # known-limitation pin here.
+        # loop completes.  Independent of #472/#474 wiring; treat as
+        # the known-limitation pin here.
         if "Size of label" not in str(exc):
             raise
+        return  # known limitation — the wiring itself ran without issue
+
+    final_chi = _extract_final_chi(result)
+    assert final_chi > 2, (
+        f"Expected the reactive bump to raise chi above the starting "
+        f"value of 2 on the 2-site path (chi_auto_bump_eps=1e-30 fires "
+        f"on any positive ε_T from #474's 2x2 plaquette tracking), got "
+        f"final_chi={final_chi}.  Either ε_T came out 0.0 (#474 regression) "
+        f"or the reactive trigger is not wired into the 2-site loop "
+        f"(#472 regression)."
+    )
 
 
 def _extract_final_chi(result):
