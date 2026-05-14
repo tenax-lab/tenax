@@ -84,6 +84,106 @@ def test_chi_schedule_bumps_between_stages():
     )
 
 
+@pytest.mark.core
+def test_reactive_plus_scheduled_compose():
+    """Reactive ε_T-bump + scheduled bump compose without crashing (#455 PR2).
+
+    Pins Risk #1 from the design doc: when ``chi_auto_bump=True``
+    AND a ``chi_schedule`` fire on the same step, the reactive bump
+    runs FIRST and the scheduled advance runs SECOND, both inside
+    the same end-of-step block in ``_optimize_gs_ad_tensor`` (and
+    mirrored in 2-site / multisite).  The helper's
+    ``next_chi <= ctm_cfg.chi`` branch turns the scheduled bump
+    into an idempotent stage-index advance whenever the reactive
+    bump already raised χ past the next stage's target.
+
+    A failing compose would crash with a chi-mismatch (env padded to
+    one χ, ctm_cfg.chi tracking another).  Beyond that, this test
+    also exposes a silent-exit bug in the idempotent-advance path:
+    when ``_advance_chi_stage_if_due`` returns
+    ``bump_fired=False`` AND ``new_stage_idx > current_stage_idx``
+    (because the reactive bump already raised χ past the next
+    stage's target), the convergence intercept must STILL keep
+    optimizing on the new stage, not exit at the previous stage's
+    converged energy.
+
+    Three-stage probe:
+        - ``chi_auto_bump=True`` with ``chi_auto_bump_eps=1e-30``
+          so any positive ε_T fires the reactive bump.
+        - ``chi_schedule=[(2, 2), (4, 2), (8, 2)]`` so stage 0
+          starts at chi=2, stage 1 targets chi=4, stage 2 targets
+          chi=8.
+        - Reactive bump raises χ from 2 to 4; scheduled helper then
+          sees ``next_chi=4 <= ctm_cfg.chi=4`` and advances the
+          stage index idempotently (no chi change, ``bump_fired=False``).
+          If the intercept exits at this point (bug), final_chi=4.
+          If the intercept continues (fix), the next stage bumps to
+          chi=8 and final_chi=8.
+        - ``chi_max=8`` caps both mechanisms at stage 2's target.
+
+    chi_auto_bump is currently 1x1-only (see ipeps_optimize.py
+    L641-L649), so this test uses ``unit_cell="1x1"``.
+    """
+    jax.config.update("jax_enable_x64", True)
+
+    d = 2
+    D = 2
+    key = jax.random.PRNGKey(7)
+    k1, k2 = jax.random.split(key)
+    A_init = jax.random.normal(k1, (D, D, D, D, d)) + 1j * jax.random.normal(
+        k2, (D, D, D, D, d)
+    )
+
+    gate = heisenberg_gate()
+
+    cfg = iPEPSConfig(
+        unit_cell="1x1",
+        max_bond_dim=D,
+        ctm=CTMConfig(
+            chi=2,
+            chi_auto_bump=True,
+            chi_auto_bump_eps=1e-30,  # any positive ε_T fires reactive
+            chi_auto_bump_step=2,
+            chi_max=8,  # cap both mechanisms at final stage target
+            max_iter=10,
+            min_iter=2,
+            conv_tol=1e-3,
+        ),
+        gs_optimizer="lbfgs",
+        gs_implicit_ad=True,
+        gs_verbose=False,
+        # Loose convergence so _converged_outer trips inside the
+        # convergence intercept and exercises the
+        # reactive+idempotent-advance compose (the failure mode).
+        gs_conv_tol=1.0,
+        gs_grad_norm_tol=1.0,
+        gs_stall_recovery_retries=99,  # don't trip stall cap
+        su_init=False,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=UserWarning)
+        result = optimize_gs_ad_chi_schedule(
+            gate, A_init, cfg, chi_schedule=[(2, 2), (4, 2), (8, 2)]
+        )
+
+    final_chi = _extract_final_chi(result)
+    # Structural compose property: stage 0 (chi=2) → reactive bump
+    # to chi=4 → idempotent advance to stage 1 (already at chi=4)
+    # → scheduled bump to chi=8 at stage 2.  A premature exit on
+    # the idempotent-advance branch (bump_fired=False) would leave
+    # final_chi at 4, never reaching stage 2.
+    assert final_chi == 8, (
+        f"Expected final chi=8 after reactive + scheduled compose "
+        f"(3-stage schedule), got chi={final_chi}.  Either the "
+        f"reactive bump did not fire (ε_T below 1e-30) or the "
+        f"idempotent-advance branch dropped the stage advance "
+        f"(bump_fired=False AND new_stage_idx>current_stage_idx → "
+        f"optimizer exited at stage 1 instead of continuing to "
+        f"stage 2)."
+    )
+
+
 def _extract_final_chi(result):
     """Pull final chi out of ``optimize_gs_ad_chi_schedule``'s return value.
 
@@ -107,10 +207,17 @@ def _extract_final_chi(result):
         any_env = next(iter(envs.values()))
         return int(any_env.C1.indices[0].dim)
 
+    # CTMTensorEnv is a NamedTuple, so the 1-site single-env case
+    # ALSO satisfies ``isinstance(envs, tuple)``.  Disambiguate via
+    # ``.C1`` (only the single-env case has it directly).
+    if hasattr(envs, "C1"):
+        # 1-site: single CTMTensorEnv NamedTuple.
+        return int(envs.C1.indices[0].dim)
+
     if isinstance(envs, tuple):
         # 2-site: (env_A, env_B).  Both envs share the same chi.
         env_a = envs[0]
         return int(env_a.C1.indices[0].dim)
 
-    # 1-site: single CTMTensorEnv.
-    return int(envs.C1.indices[0].dim)
+    # Should not happen — defensive.
+    raise AssertionError(f"unrecognised env shape: {type(envs)!r}")

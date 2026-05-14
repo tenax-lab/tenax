@@ -105,34 +105,24 @@ def _advance_chi_stage_if_due(
     chi_schedule: list[tuple[int, int]] | None,
     current_stage_idx: int,
     steps_in_stage: int,
+    config: iPEPSConfig,
+    grad_norm: float,
+    delta_energy: float,
+    stall_count: int,
     base_charges: np.ndarray | None = None,
 ) -> tuple[CTMConfig, dict, int, bool, bool]:
     """Decide whether to advance to the next χ stage and apply it (#455).
 
-    Inputs:
-        ctm_cfg, env_cache: current CTM state.
-        chi_schedule: per-stage list ``[(target_chi, max_steps), ...]``,
-            or ``None`` (no schedule).
-        current_stage_idx: which stage is currently active (0-based).
-        steps_in_stage: number of completed optimizer steps in the
-            current stage (1-based at end-of-step).
-        base_charges: SymmetricTensor base charges (ignored on dense).
+    Three signals trigger an advance at non-final stages:
+        - ``steps_in_stage >= max_steps`` (budget; existing).
+        - ``_converged_outer(config, delta_energy, grad_norm)``
+          (NEW PR 2 — reuses user's gs_conv_criterion).
+        - ``stall_count >= config.gs_stall_recovery_retries`` AND
+          ``config.gs_stall_recovery == "reset"`` (NEW PR 2 —
+          gated to reset path; noise path has its own retries).
 
-    Returns:
-        (new_ctm_cfg, new_env_cache, new_stage_idx, bump_fired, should_break)
-
-    PR 1 trigger: budget-exhausted only
-    (``steps_in_stage >= chi_schedule[current_stage_idx][1]``).
-    PR 2 will extend to convergence + stall-cap.
-
-    Behavior:
-        - No schedule, or not yet at budget: no-op, returns
-          ``(ctm_cfg, env_cache, current_stage_idx, False, False)``.
-        - Budget hit at non-final stage: bump chi to next stage's
-          target via ``_apply_chi_bump``, advance ``current_stage_idx``,
-          return ``bump_fired=True``.
-        - Budget hit at final stage: return
-          ``should_break=True`` (no bump; caller exits the loop).
+    At the final stage all three trigger ``should_break=True`` with
+    no bump (matches existing exit semantics).
     """
     if not chi_schedule:
         return ctm_cfg, env_cache, current_stage_idx, False, False
@@ -140,12 +130,19 @@ def _advance_chi_stage_if_due(
     _, stage_max_steps = chi_schedule[current_stage_idx]
     budget_exhausted = steps_in_stage >= stage_max_steps
 
-    if not budget_exhausted:
+    converged = _converged_outer(config, delta_energy, grad_norm)
+
+    stall_exhausted = (
+        config.gs_stall_recovery == "reset"
+        and stall_count >= config.gs_stall_recovery_retries
+    )
+
+    should_advance = budget_exhausted or converged or stall_exhausted
+    if not should_advance:
         return ctm_cfg, env_cache, current_stage_idx, False, False
 
     has_next = (current_stage_idx + 1) < len(chi_schedule)
     if not has_next:
-        # Final stage budget exhausted → caller should break out.
         return ctm_cfg, env_cache, current_stage_idx, False, True
 
     next_chi, _ = chi_schedule[current_stage_idx + 1]
@@ -153,8 +150,6 @@ def _advance_chi_stage_if_due(
         next_chi = min(next_chi, ctm_cfg.chi_max)
 
     if next_chi <= ctm_cfg.chi:
-        # Already at or above the next stage's target — advance index
-        # without re-applying a bump (matches old idempotent semantics).
         return ctm_cfg, env_cache, current_stage_idx + 1, False, False
 
     new_ctm_cfg, new_env_cache = _apply_chi_bump(
@@ -572,10 +567,29 @@ def optimize_gs_ad_chi_schedule(
                           ``ctm.chi_max``, ``gs_num_steps``, and
                           ``gs_chi_schedule_steps`` are overridden by the
                           shim per the schedule.
-        chi_schedule:     List of ``(chi, num_steps)`` pairs, e.g.
+        chi_schedule:     List of ``(chi, max_steps)`` pairs, e.g.
                           ``[(8, 100), (16, 50), (32, 30)]``.  Each pair
-                          says "run num_steps optimizer steps at logical
-                          chi = chi".  Boundaries are cumulative.
+                          says "run up to max_steps optimizer iterations
+                          at logical chi = chi, then advance to the next
+                          stage".
+
+                          Three signals advance a stage at non-final
+                          stages (#455):
+                              - the per-stage ``max_steps`` budget is
+                                exhausted;
+                              - the user's ``gs_conv_criterion`` (dE,
+                                grad_norm, or both) is met;
+                              - the L-BFGS reset-recovery stall cap
+                                ``gs_stall_recovery_retries`` is hit.
+                          Unused steps from an early-exiting stage are
+                          discarded (each stage's max_steps is an
+                          upper bound, not a fixed quota).
+
+                          Note: when stall-cap triggers a non-final
+                          advance, the next stage starts from the
+                          rolled-back ``best_params`` — fresh landscape,
+                          fresh retry budget (PR #464's intent
+                          preserved).
 
     Returns:
         Same as ``optimize_gs_ad`` at the final chi level.
@@ -1391,19 +1405,44 @@ def _optimize_gs_ad_tensor(
             # PR 2 layers convergence/stall signals on top.
             if config.gs_chi_schedule_steps is not None:
                 steps_in_stage = (step + 1) - stage_start_step
-                ctm_cfg, _env_cache, new_stage_idx, _bump_fired, _ = (
+                _gn_for_bump = (
+                    grad_norm_val
+                    if grad_norm_val is not None
+                    else (
+                        _grad_l2_norm(grads)
+                        if config.gs_conv_criterion != "dE"
+                        else 0.0
+                    )
+                )
+                ctm_cfg, _env_cache, new_stage_idx, bump_fired, _ = (
                     _advance_chi_stage_if_due(
                         ctm_cfg,
                         _env_cache,
                         chi_schedule=config.gs_chi_schedule_steps,
                         current_stage_idx=current_stage_idx,
                         steps_in_stage=steps_in_stage,
+                        config=config,
+                        grad_norm=_gn_for_bump,
+                        delta_energy=delta_energy,
+                        stall_count=stall_count,
                         base_charges=_bump_base_charges,
                     )
                 )
-                if new_stage_idx != current_stage_idx:
+                # Codex review (PR #467): the helper's idempotent-advance
+                # branch returns ``bump_fired=False`` AND
+                # ``new_stage_idx > current_stage_idx`` when a reactive
+                # ε_T-bump already raised χ past the next stage's target.
+                # The schedule index must STILL advance, and the
+                # ``continue`` below must STILL fire — otherwise the
+                # optimizer exits at the previous stage's converged
+                # energy.  ``stage_advanced`` decouples the two signals.
+                stage_advanced = new_stage_idx != current_stage_idx
+                if stage_advanced:
                     current_stage_idx = new_stage_idx
                     stage_start_step = step + 1
+            else:
+                bump_fired = False
+                stage_advanced = False
             if ctm_cfg.chi != chi_before_bump:
                 # Reactive or scheduled bump fired — fresh landscape,
                 # fresh stall budget (#464 codex review).
@@ -1420,6 +1459,28 @@ def _optimize_gs_ad_tensor(
                     opt_state = optimizer.init(params)
             if _accepted_best_this_iter:
                 best_env_cache = dict(_env_cache)
+            if bump_fired or stage_advanced:
+                # #455 PR2: converged at non-final stage → advance and
+                # continue, NOT break.  The reset block above already
+                # cleared stall_count, L-BFGS history, and opt_state at
+                # the new χ; let the optimizer keep stepping on the
+                # fresh landscape rather than exit prematurely.
+                #
+                # Codex review (PR #467): ``stage_advanced`` covers the
+                # idempotent-advance branch where the reactive bump
+                # already raised χ past the next stage's target — the
+                # schedule index moved forward but ``bump_fired=False``.
+                # Without the disjunction, we would fall through to
+                # break and exit at stage N's converged energy without
+                # ever running stage N+1.
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD step {step + 1}] converged at "
+                        f"chi={chi_before_bump} → bumping to "
+                        f"chi={ctm_cfg.chi} (#455 PR2)",
+                        flush=True,
+                    )
+                continue
             if config.gs_verbose:
                 if not logged:
                     _log_ad_step(
@@ -1636,6 +1697,82 @@ def _optimize_gs_ad_tensor(
                 # projector, pre-multisite-CTM rewrite, pre-PR #447 AD
                 # stop_gradient) and no longer applies.
                 if stall_count > config.gs_stall_recovery_retries:
+                    # #455 PR2: at non-final χ stages, the stall-cap hit
+                    # means "this χ is too small to make progress" —
+                    # advance to the next stage and keep optimizing
+                    # instead of returning best_energy.  Final stage
+                    # falls through to the existing break.
+                    if config.gs_chi_schedule_steps is not None:
+                        steps_in_stage = (step + 1) - stage_start_step
+                        _gn_for_bump = (
+                            grad_norm_val
+                            if grad_norm_val is not None
+                            else (
+                                _grad_l2_norm(grads)
+                                if config.gs_conv_criterion != "dE"
+                                else 0.0
+                            )
+                        )
+                        (
+                            ctm_cfg,
+                            _env_cache,
+                            new_stage_idx,
+                            bump_fired,
+                            _,
+                        ) = _advance_chi_stage_if_due(
+                            ctm_cfg,
+                            _env_cache,
+                            chi_schedule=config.gs_chi_schedule_steps,
+                            current_stage_idx=current_stage_idx,
+                            steps_in_stage=steps_in_stage,
+                            config=config,
+                            grad_norm=_gn_for_bump,
+                            delta_energy=delta_energy,
+                            stall_count=stall_count,
+                            base_charges=_bump_base_charges,
+                        )
+                        # Codex review (PR #467): treat idempotent
+                        # advance (bump_fired=False AND
+                        # new_stage_idx>current_stage_idx) the same as
+                        # a real bump for control-flow purposes —
+                        # otherwise the stall-cap intercept would still
+                        # break.  The reset block (params rollback,
+                        # stall_count=0, L-BFGS clear, opt_state init)
+                        # stays gated on bump_fired because it only
+                        # makes sense when χ actually changed.
+                        stage_advanced = new_stage_idx != current_stage_idx
+                        if stage_advanced:
+                            current_stage_idx = new_stage_idx
+                            stage_start_step = step + 1
+                        if bump_fired:
+                            # Rollback params to best from the previous
+                            # stage; _env_cache stays at the freshly
+                            # padded post-bump state (the budget-path
+                            # invariant — see _apply_chi_bump).
+                            params = best_params
+                            stall_count = 0
+                            if is_metric_lbfgs:
+                                lbfgs_history.clear()
+                                prev_A_flat = None
+                                prev_grad_flat = None
+                            if is_cg:
+                                cg_direction = None
+                                prev_grad = None
+                                prev_precond_grad = None
+                            if (
+                                optimizer is not None
+                                and config.gs_optimizer.lower() == "lbfgs"
+                            ):
+                                opt_state = optimizer.init(params)
+                            if config.gs_verbose:
+                                print(
+                                    f"[iPEPS-AD step {step + 1}] stall-cap at "
+                                    f"chi={ctm_cfg.chi} → advancing to next "
+                                    f"stage (#455 PR2)",
+                                    flush=True,
+                                )
+                        if bump_fired or stage_advanced:
+                            continue
                     n_resets_done = stall_count - 1
                     if config.gs_verbose:
                         print(
@@ -1697,6 +1834,11 @@ def _optimize_gs_ad_tensor(
         # helper; #455 PR2 will add convergence/stall-cap triggers.
         if config.gs_chi_schedule_steps is not None:
             steps_in_stage = (step + 1) - stage_start_step
+            _gn_for_bump = (
+                grad_norm_val
+                if grad_norm_val is not None
+                else (_grad_l2_norm(grads) if config.gs_conv_criterion != "dE" else 0.0)
+            )
             ctm_cfg, _env_cache, new_stage_idx, _bump_fired, _should_break = (
                 _advance_chi_stage_if_due(
                     ctm_cfg,
@@ -1704,6 +1846,10 @@ def _optimize_gs_ad_tensor(
                     chi_schedule=config.gs_chi_schedule_steps,
                     current_stage_idx=current_stage_idx,
                     steps_in_stage=steps_in_stage,
+                    config=config,
+                    grad_norm=_gn_for_bump,
+                    delta_energy=delta_energy,
+                    stall_count=stall_count,
                     base_charges=_bump_base_charges,
                 )
             )
@@ -2280,6 +2426,71 @@ def _optimize_gs_ad_tensor_2site(
             else None
         )
         if _converged_outer(config, delta_energy, grad_norm_val):
+            # #455 PR2: at non-final χ stages, treat convergence as a
+            # signal to advance to the next stage rather than exit.
+            # Mirrors the 1-site convergence-block intercept.
+            bump_fired = False
+            if config.gs_chi_schedule_steps is not None:
+                chi_before_bump = ctm_cfg_2s.chi
+                steps_in_stage = (step + 1) - stage_start_step
+                _gn_for_bump = (
+                    grad_norm_val
+                    if grad_norm_val is not None
+                    else (
+                        _grad_l2_norm(grads)
+                        if config.gs_conv_criterion != "dE"
+                        else 0.0
+                    )
+                )
+                (
+                    ctm_cfg_2s,
+                    _env_cache_2s,
+                    new_stage_idx,
+                    bump_fired,
+                    _,
+                ) = _advance_chi_stage_if_due(
+                    ctm_cfg_2s,
+                    _env_cache_2s,
+                    chi_schedule=config.gs_chi_schedule_steps,
+                    current_stage_idx=current_stage_idx,
+                    steps_in_stage=steps_in_stage,
+                    config=config,
+                    grad_norm=_gn_for_bump,
+                    delta_energy=delta_energy,
+                    stall_count=stall_count,
+                    base_charges=_bump_base_charges_2s,
+                )
+                # Codex review (PR #467): decouple the schedule index
+                # advance from bump_fired so idempotent advances
+                # (bump_fired=False AND new_stage_idx>current_stage_idx)
+                # still continue rather than fall through to break.
+                # The reset block (stall_count, L-BFGS, opt_state)
+                # stays gated on bump_fired (chi actually changed).
+                stage_advanced = new_stage_idx != current_stage_idx
+                if stage_advanced:
+                    current_stage_idx = new_stage_idx
+                    stage_start_step = step + 1
+                if bump_fired:
+                    stall_count = 0
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
+                        prev_params_flat = None
+                        prev_grad_flat = None
+                    if is_cg:
+                        cg_direction = None
+                        prev_grad = None
+                        prev_precond_grad = None
+                    if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                        opt_state = optimizer.init(params)
+                    if config.gs_verbose:
+                        print(
+                            f"[iPEPS-AD step {step + 1}] converged at "
+                            f"chi={chi_before_bump} → bumping to "
+                            f"chi={ctm_cfg_2s.chi} (#455 PR2)",
+                            flush=True,
+                        )
+                if bump_fired or stage_advanced:
+                    continue
             if config.gs_verbose:
                 if not logged:
                     _log_ad_step(
@@ -2550,6 +2761,76 @@ def _optimize_gs_ad_tensor_2site(
                 # projector, pre-multisite-CTM rewrite, pre-PR #447 AD
                 # stop_gradient) and no longer applies.
                 if stall_count > config.gs_stall_recovery_retries:
+                    # #455 PR2: at non-final χ stages, treat stall-cap
+                    # exhaustion as a signal to advance the χ schedule
+                    # rather than exit with best_energy.  Mirrors the
+                    # 1-site stall-cap intercept (commit 07ffe8e).
+                    if config.gs_chi_schedule_steps is not None:
+                        steps_in_stage = (step + 1) - stage_start_step
+                        _gn_for_bump = (
+                            grad_norm_val
+                            if grad_norm_val is not None
+                            else (
+                                _grad_l2_norm(grads)
+                                if config.gs_conv_criterion != "dE"
+                                else 0.0
+                            )
+                        )
+                        (
+                            ctm_cfg_2s,
+                            _env_cache_2s,
+                            new_stage_idx,
+                            bump_fired,
+                            _,
+                        ) = _advance_chi_stage_if_due(
+                            ctm_cfg_2s,
+                            _env_cache_2s,
+                            chi_schedule=config.gs_chi_schedule_steps,
+                            current_stage_idx=current_stage_idx,
+                            steps_in_stage=steps_in_stage,
+                            config=config,
+                            grad_norm=_gn_for_bump,
+                            delta_energy=delta_energy,
+                            stall_count=stall_count,
+                            base_charges=_bump_base_charges_2s,
+                        )
+                        # Codex review (PR #467): see 1-site stall-cap
+                        # intercept for rationale.  Decouple schedule
+                        # advance from bump_fired; keep reset block
+                        # gated on bump_fired.
+                        stage_advanced = new_stage_idx != current_stage_idx
+                        if stage_advanced:
+                            current_stage_idx = new_stage_idx
+                            stage_start_step = step + 1
+                        if bump_fired:
+                            # Rollback params to best from the previous
+                            # stage; _env_cache_2s stays at the freshly
+                            # padded post-bump state (the budget-path
+                            # invariant — see _apply_chi_bump).
+                            params = best_params
+                            stall_count = 0
+                            if is_metric_lbfgs:
+                                lbfgs_history.clear()
+                                prev_params_flat = None
+                                prev_grad_flat = None
+                            if is_cg:
+                                cg_direction = None
+                                prev_grad = None
+                                prev_precond_grad = None
+                            if (
+                                optimizer is not None
+                                and config.gs_optimizer.lower() == "lbfgs"
+                            ):
+                                opt_state = optimizer.init(params)
+                            if config.gs_verbose:
+                                print(
+                                    f"[iPEPS-AD step {step + 1}] stall-cap at "
+                                    f"chi={ctm_cfg_2s.chi} → advancing to next "
+                                    f"stage (#455 PR2)",
+                                    flush=True,
+                                )
+                        if bump_fired or stage_advanced:
+                            continue
                     n_resets_done = stall_count - 1
                     if config.gs_verbose:
                         print(
@@ -2594,6 +2875,11 @@ def _optimize_gs_ad_tensor_2site(
         if config.gs_chi_schedule_steps is not None:
             steps_in_stage = (step + 1) - stage_start_step
             chi_before = ctm_cfg_2s.chi
+            _gn_for_bump = (
+                grad_norm_val
+                if grad_norm_val is not None
+                else (_grad_l2_norm(grads) if config.gs_conv_criterion != "dE" else 0.0)
+            )
             ctm_cfg_2s, _env_cache_2s, new_stage_idx, _bump_fired, _should_break = (
                 _advance_chi_stage_if_due(
                     ctm_cfg_2s,
@@ -2601,6 +2887,10 @@ def _optimize_gs_ad_tensor_2site(
                     chi_schedule=config.gs_chi_schedule_steps,
                     current_stage_idx=current_stage_idx,
                     steps_in_stage=steps_in_stage,
+                    config=config,
+                    grad_norm=_gn_for_bump,
+                    delta_energy=delta_energy,
+                    stall_count=stall_count,
                     base_charges=_bump_base_charges_2s,
                 )
             )
@@ -3022,6 +3312,69 @@ def _optimize_gs_ad_multisite(
         needs_warmup = config.gs_conv_criterion in ("dE", "both")
         warmup_ok = (not needs_warmup) or (step > 5 and stall_count == 0)
         if _converged_outer(config, delta_energy, grad_norm_val) and warmup_ok:
+            # #455 PR2: at non-final χ stages, treat convergence as a
+            # signal to advance to the next stage rather than exit.
+            # Mirrors the 1-site / 2-site convergence-block intercepts.
+            bump_fired = False
+            if config.gs_chi_schedule_steps is not None:
+                chi_before_bump = ctm_cfg.chi
+                steps_in_stage = (step + 1) - stage_start_step
+                _gn_for_bump = (
+                    grad_norm_val
+                    if grad_norm_val is not None
+                    else (
+                        _grad_l2_norm(grads)
+                        if config.gs_conv_criterion != "dE"
+                        else 0.0
+                    )
+                )
+                (
+                    ctm_cfg,
+                    _env_cache,
+                    new_stage_idx,
+                    bump_fired,
+                    _,
+                ) = _advance_chi_stage_if_due(
+                    ctm_cfg,
+                    _env_cache,
+                    chi_schedule=config.gs_chi_schedule_steps,
+                    current_stage_idx=current_stage_idx,
+                    steps_in_stage=steps_in_stage,
+                    config=config,
+                    grad_norm=_gn_for_bump,
+                    delta_energy=delta_energy,
+                    stall_count=stall_count,
+                    base_charges=_bump_base_charges_multi,
+                )
+                # Codex review (PR #467): see 1-site / 2-site
+                # convergence intercept for rationale.  Decouple
+                # schedule advance from bump_fired; keep reset block
+                # gated on bump_fired.
+                stage_advanced = new_stage_idx != current_stage_idx
+                if stage_advanced:
+                    current_stage_idx = new_stage_idx
+                    stage_start_step = step + 1
+                if bump_fired:
+                    stall_count = 0
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
+                        prev_params_flat = None
+                        prev_grad_flat = None
+                    if is_cg:
+                        cg_direction = None
+                        prev_grad = None
+                        prev_precond_grad = None
+                    if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                        opt_state = optimizer.init(params)
+                    if config.gs_verbose:
+                        print(
+                            f"[iPEPS-AD step {step + 1}] converged at "
+                            f"chi={chi_before_bump} → bumping to "
+                            f"chi={ctm_cfg.chi} (#455 PR2)",
+                            flush=True,
+                        )
+                if bump_fired or stage_advanced:
+                    continue
             if config.gs_verbose:
                 if not logged:
                     _log_ad_step(
@@ -3226,6 +3579,76 @@ def _optimize_gs_ad_multisite(
                 # projector, pre-multisite-CTM rewrite, pre-PR #447 AD
                 # stop_gradient) and no longer applies.
                 if stall_count > config.gs_stall_recovery_retries:
+                    # #455 PR2: at non-final χ stages, treat stall-cap
+                    # exhaustion as a signal to advance the χ schedule
+                    # rather than exit with best_energy.  Mirrors the
+                    # 1-site (07ffe8e) and 2-site (41e590f) intercepts.
+                    if config.gs_chi_schedule_steps is not None:
+                        steps_in_stage = (step + 1) - stage_start_step
+                        _gn_for_bump = (
+                            grad_norm_val
+                            if grad_norm_val is not None
+                            else (
+                                _grad_l2_norm(grads)
+                                if config.gs_conv_criterion != "dE"
+                                else 0.0
+                            )
+                        )
+                        (
+                            ctm_cfg,
+                            _env_cache,
+                            new_stage_idx,
+                            bump_fired,
+                            _,
+                        ) = _advance_chi_stage_if_due(
+                            ctm_cfg,
+                            _env_cache,
+                            chi_schedule=config.gs_chi_schedule_steps,
+                            current_stage_idx=current_stage_idx,
+                            steps_in_stage=steps_in_stage,
+                            config=config,
+                            grad_norm=_gn_for_bump,
+                            delta_energy=delta_energy,
+                            stall_count=stall_count,
+                            base_charges=_bump_base_charges_multi,
+                        )
+                        # Codex review (PR #467): see 1-site stall-cap
+                        # intercept for rationale.  Decouple schedule
+                        # advance from bump_fired; keep reset block
+                        # gated on bump_fired.
+                        stage_advanced = new_stage_idx != current_stage_idx
+                        if stage_advanced:
+                            current_stage_idx = new_stage_idx
+                            stage_start_step = step + 1
+                        if bump_fired:
+                            # Rollback params to best from the previous
+                            # stage; _env_cache stays at the freshly
+                            # padded post-bump state (the budget-path
+                            # invariant — see _apply_chi_bump).
+                            params = best_params
+                            stall_count = 0
+                            if is_metric_lbfgs:
+                                lbfgs_history.clear()
+                                prev_params_flat = None
+                                prev_grad_flat = None
+                            if is_cg:
+                                cg_direction = None
+                                prev_grad = None
+                                prev_precond_grad = None
+                            if (
+                                optimizer is not None
+                                and config.gs_optimizer.lower() == "lbfgs"
+                            ):
+                                opt_state = optimizer.init(params)
+                            if config.gs_verbose:
+                                print(
+                                    f"[iPEPS-AD step {step + 1}] stall-cap at "
+                                    f"chi={ctm_cfg.chi} → advancing to next "
+                                    f"stage (#455 PR2)",
+                                    flush=True,
+                                )
+                        if bump_fired or stage_advanced:
+                            continue
                     n_resets_done = stall_count - 1
                     if config.gs_verbose:
                         print(
@@ -3299,6 +3722,11 @@ def _optimize_gs_ad_multisite(
         if config.gs_chi_schedule_steps is not None:
             steps_in_stage = (step + 1) - stage_start_step
             chi_before = ctm_cfg.chi
+            _gn_for_bump = (
+                grad_norm_val
+                if grad_norm_val is not None
+                else (_grad_l2_norm(grads) if config.gs_conv_criterion != "dE" else 0.0)
+            )
             ctm_cfg, _env_cache, new_stage_idx, _bump_fired, _should_break = (
                 _advance_chi_stage_if_due(
                     ctm_cfg,
@@ -3306,6 +3734,10 @@ def _optimize_gs_ad_multisite(
                     chi_schedule=config.gs_chi_schedule_steps,
                     current_stage_idx=current_stage_idx,
                     steps_in_stage=steps_in_stage,
+                    config=config,
+                    grad_norm=_gn_for_bump,
+                    delta_energy=delta_energy,
+                    stall_count=stall_count,
                     base_charges=_bump_base_charges_multi,
                 )
             )
