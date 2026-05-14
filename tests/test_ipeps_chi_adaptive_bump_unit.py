@@ -103,7 +103,12 @@ def test_dE_signal_non_final_advances():
 
 @pytest.mark.core
 def test_stall_cap_reset_advances():
-    """Test #4: stall_count ≥ retries with recovery=reset → bump."""
+    """Test #4: stall_count > retries with recovery=reset → bump.
+
+    Codex review (PR #467): mirror the existing reset-budget exit
+    logic — ``retries=3`` allows three rollback retries and only the
+    *fourth* failed attempt (``stall_count=4``) exhausts the budget.
+    """
     ctm = CTMConfig(chi=2, chi_max=8)
     schedule = [(2, 30), (4, 30)]
 
@@ -116,7 +121,7 @@ def test_stall_cap_reset_advances():
         config=_make_config(stall_recovery="reset", stall_retries=3),
         grad_norm=1.0,
         delta_energy=1.0,
-        stall_count=3,
+        stall_count=4,
     )
     assert bump_fired is True
     assert new_idx == 1

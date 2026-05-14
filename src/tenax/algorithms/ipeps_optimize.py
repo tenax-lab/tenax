@@ -117,9 +117,12 @@ def _advance_chi_stage_if_due(
         - ``steps_in_stage >= max_steps`` (budget; existing).
         - ``_converged_outer(config, delta_energy, grad_norm)``
           (NEW PR 2 — reuses user's gs_conv_criterion).
-        - ``stall_count >= config.gs_stall_recovery_retries`` AND
+        - ``stall_count > config.gs_stall_recovery_retries`` AND
           ``config.gs_stall_recovery == "reset"`` (NEW PR 2 —
           gated to reset path; noise path has its own retries).
+          Mirrors the existing reset-budget exit logic (the third
+          retry only counts as exhausted on the *fourth* failed
+          attempt, not the third — codex review #467).
 
     At the final stage all three trigger ``should_break=True`` with
     no bump (matches existing exit semantics).
@@ -134,7 +137,7 @@ def _advance_chi_stage_if_due(
 
     stall_exhausted = (
         config.gs_stall_recovery == "reset"
-        and stall_count >= config.gs_stall_recovery_retries
+        and stall_count > config.gs_stall_recovery_retries
     )
 
     should_advance = budget_exhausted or converged or stall_exhausted
