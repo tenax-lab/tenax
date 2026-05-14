@@ -2443,10 +2443,21 @@ def _optimize_gs_ad_tensor_2site(
         if _converged_outer(config, delta_energy, grad_norm_val):
             # #455 PR2: at non-final χ stages, treat convergence as a
             # signal to advance to the next stage rather than exit.
-            # Mirrors the 1-site convergence-block intercept.
-            bump_fired = False
+            # Mirrors the 1-site convergence-block intercept, including
+            # the reactive ε_T bump (#472 codex review on PR #473):
+            # converged-at-too-small-χ runs must apply the requested
+            # auto-bump before exiting so the final env reflects the
+            # bumped χ, and the bump can also unstick a stalled-at-χ_old
+            # landscape via the ``continue`` below.
+            chi_before_bump = ctm_cfg_2s.chi
+            last_eps_t = float(_env_cache_2s.get("max_truncation_error", 0.0))
+            ctm_cfg_2s, _env_cache_2s = _maybe_bump_chi(
+                ctm_cfg_2s,
+                _env_cache_2s,
+                last_eps_t,
+                base_charges=_bump_base_charges_2s,
+            )
             if config.gs_chi_schedule_steps is not None:
-                chi_before_bump = ctm_cfg_2s.chi
                 steps_in_stage = (step + 1) - stage_start_step
                 _gn_for_bump = (
                     grad_norm_val
@@ -2479,33 +2490,37 @@ def _optimize_gs_ad_tensor_2site(
                 # advance from bump_fired so idempotent advances
                 # (bump_fired=False AND new_stage_idx>current_stage_idx)
                 # still continue rather than fall through to break.
-                # The reset block (stall_count, L-BFGS, opt_state)
-                # stays gated on bump_fired (chi actually changed).
                 stage_advanced = new_stage_idx != current_stage_idx
                 if stage_advanced:
                     current_stage_idx = new_stage_idx
                     stage_start_step = step + 1
-                if bump_fired:
-                    stall_count = 0
-                    if is_metric_lbfgs:
-                        lbfgs_history.clear()
-                        prev_params_flat = None
-                        prev_grad_flat = None
-                    if is_cg:
-                        cg_direction = None
-                        prev_grad = None
-                        prev_precond_grad = None
-                    if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
-                        opt_state = optimizer.init(params)
-                    if config.gs_verbose:
-                        print(
-                            f"[iPEPS-AD step {step + 1}] converged at "
-                            f"chi={chi_before_bump} → bumping to "
-                            f"chi={ctm_cfg_2s.chi} (#455 PR2)",
-                            flush=True,
-                        )
-                if bump_fired or stage_advanced:
-                    continue
+            else:
+                bump_fired = False
+                stage_advanced = False
+            if ctm_cfg_2s.chi != chi_before_bump:
+                # Reactive (#472) or scheduled (#455) bump fired —
+                # fresh landscape, fresh stall budget.  Gated on the
+                # χ delta so a reactive-only bump also clears state.
+                stall_count = 0
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_params_flat = None
+                    prev_grad_flat = None
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                    opt_state = optimizer.init(params)
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD step {step + 1}] converged at "
+                        f"chi={chi_before_bump} → bumping to "
+                        f"chi={ctm_cfg_2s.chi} (#455 PR2 / #472)",
+                        flush=True,
+                    )
+            if bump_fired or stage_advanced:
+                continue
             if config.gs_verbose:
                 if not logged:
                     _log_ad_step(
@@ -3362,10 +3377,20 @@ def _optimize_gs_ad_multisite(
         if _converged_outer(config, delta_energy, grad_norm_val) and warmup_ok:
             # #455 PR2: at non-final χ stages, treat convergence as a
             # signal to advance to the next stage rather than exit.
-            # Mirrors the 1-site / 2-site convergence-block intercepts.
-            bump_fired = False
+            # Mirrors the 1-site / 2-site convergence-block intercepts,
+            # including the reactive ε_T bump (#472 codex review on
+            # PR #473): the reactive trigger must also fire here so a
+            # converged-at-too-small-χ multisite run exits with the
+            # bumped χ rather than the stale one.
+            chi_before_bump = ctm_cfg.chi
+            last_eps_t = float(_env_cache.get("max_truncation_error", 0.0))
+            ctm_cfg, _env_cache = _maybe_bump_chi(
+                ctm_cfg,
+                _env_cache,
+                last_eps_t,
+                base_charges=_bump_base_charges_multi,
+            )
             if config.gs_chi_schedule_steps is not None:
-                chi_before_bump = ctm_cfg.chi
                 steps_in_stage = (step + 1) - stage_start_step
                 _gn_for_bump = (
                     grad_norm_val
@@ -3396,33 +3421,38 @@ def _optimize_gs_ad_multisite(
                 )
                 # Codex review (PR #467): see 1-site / 2-site
                 # convergence intercept for rationale.  Decouple
-                # schedule advance from bump_fired; keep reset block
-                # gated on bump_fired.
+                # schedule advance from bump_fired.
                 stage_advanced = new_stage_idx != current_stage_idx
                 if stage_advanced:
                     current_stage_idx = new_stage_idx
                     stage_start_step = step + 1
-                if bump_fired:
-                    stall_count = 0
-                    if is_metric_lbfgs:
-                        lbfgs_history.clear()
-                        prev_params_flat = None
-                        prev_grad_flat = None
-                    if is_cg:
-                        cg_direction = None
-                        prev_grad = None
-                        prev_precond_grad = None
-                    if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
-                        opt_state = optimizer.init(params)
-                    if config.gs_verbose:
-                        print(
-                            f"[iPEPS-AD step {step + 1}] converged at "
-                            f"chi={chi_before_bump} → bumping to "
-                            f"chi={ctm_cfg.chi} (#455 PR2)",
-                            flush=True,
-                        )
-                if bump_fired or stage_advanced:
-                    continue
+            else:
+                bump_fired = False
+                stage_advanced = False
+            if ctm_cfg.chi != chi_before_bump:
+                # Reactive (#472) or scheduled (#455) bump fired —
+                # fresh landscape, fresh stall budget.  Gated on the
+                # χ delta so a reactive-only bump also clears state.
+                stall_count = 0
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_params_flat = None
+                    prev_grad_flat = None
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                    opt_state = optimizer.init(params)
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD step {step + 1}] converged at "
+                        f"chi={chi_before_bump} → bumping to "
+                        f"chi={ctm_cfg.chi} (#455 PR2 / #472)",
+                        flush=True,
+                    )
+            if bump_fired or stage_advanced:
+                continue
             if config.gs_verbose:
                 if not logged:
                     _log_ad_step(
