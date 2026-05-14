@@ -1842,7 +1842,7 @@ def _optimize_gs_ad_tensor(
                 if grad_norm_val is not None
                 else (_grad_l2_norm(grads) if config.gs_conv_criterion != "dE" else 0.0)
             )
-            ctm_cfg, _env_cache, new_stage_idx, _bump_fired, _should_break = (
+            ctm_cfg, _env_cache, new_stage_idx, bump_fired, _should_break = (
                 _advance_chi_stage_if_due(
                     ctm_cfg,
                     _env_cache,
@@ -1856,7 +1856,15 @@ def _optimize_gs_ad_tensor(
                     base_charges=_bump_base_charges,
                 )
             )
-            if new_stage_idx != current_stage_idx:
+            stage_advanced = new_stage_idx != current_stage_idx
+            if stage_advanced:
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD step {step + 1}] schedule advance: "
+                        f"stage {current_stage_idx} → {new_stage_idx}, "
+                        f"chi {chi_before_bump} → {ctm_cfg.chi} (#455)",
+                        flush=True,
+                    )
                 current_stage_idx = new_stage_idx
                 stage_start_step = step + 1
         if ctm_cfg.chi != chi_before_bump:
@@ -2883,7 +2891,7 @@ def _optimize_gs_ad_tensor_2site(
                 if grad_norm_val is not None
                 else (_grad_l2_norm(grads) if config.gs_conv_criterion != "dE" else 0.0)
             )
-            ctm_cfg_2s, _env_cache_2s, new_stage_idx, _bump_fired, _should_break = (
+            ctm_cfg_2s, _env_cache_2s, new_stage_idx, bump_fired, _should_break = (
                 _advance_chi_stage_if_due(
                     ctm_cfg_2s,
                     _env_cache_2s,
@@ -2897,7 +2905,15 @@ def _optimize_gs_ad_tensor_2site(
                     base_charges=_bump_base_charges_2s,
                 )
             )
-            if new_stage_idx != current_stage_idx:
+            stage_advanced = new_stage_idx != current_stage_idx
+            if stage_advanced:
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD step {step + 1}] schedule advance: "
+                        f"stage {current_stage_idx} → {new_stage_idx}, "
+                        f"chi {chi_before} → {ctm_cfg_2s.chi} (#455)",
+                        flush=True,
+                    )
                 current_stage_idx = new_stage_idx
                 stage_start_step = step + 1
             if ctm_cfg_2s.chi != chi_before:
@@ -3739,7 +3755,7 @@ def _optimize_gs_ad_multisite(
             # ``_advance_chi_stage_if_due`` from firing prematurely.
             # Grad-norm and stall-cap signals are unaffected.
             _dE_for_bump = delta_energy if warmup_ok else float("inf")
-            ctm_cfg, _env_cache, new_stage_idx, _bump_fired, _should_break = (
+            ctm_cfg, _env_cache, new_stage_idx, bump_fired, _should_break = (
                 _advance_chi_stage_if_due(
                     ctm_cfg,
                     _env_cache,
@@ -3753,7 +3769,15 @@ def _optimize_gs_ad_multisite(
                     base_charges=_bump_base_charges_multi,
                 )
             )
-            if new_stage_idx != current_stage_idx:
+            stage_advanced = new_stage_idx != current_stage_idx
+            if stage_advanced:
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD step {step + 1}] schedule advance: "
+                        f"stage {current_stage_idx} → {new_stage_idx}, "
+                        f"chi {chi_before} → {ctm_cfg.chi} (#455)",
+                        flush=True,
+                    )
                 current_stage_idx = new_stage_idx
                 stage_start_step = step + 1
             if ctm_cfg.chi != chi_before:
