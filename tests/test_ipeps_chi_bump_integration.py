@@ -198,3 +198,76 @@ def test_optimize_gs_ad_auto_bump_fires_on_convergence_break():
         "expected the bump to also fire when delta_energy < gs_conv_tol "
         "(PR #432 codex review, lost in #432's squash and re-included)."
     )
+
+
+def test_optimize_gs_ad_auto_bump_runs_on_2site(monkeypatch):
+    """2-site path: ``chi_auto_bump=True`` runs end-to-end and the
+    reactive bump fires when ε_T > threshold (#472).
+
+    Asserts:
+        - ``optimize_gs_ad`` returns the expected 2-site tuple shape
+          with no ``NotImplementedError`` (the guard dropped in #472).
+        - When a non-zero ε_T is injected into the env cache between
+          steps, the reactive ``_maybe_bump_chi`` call lands and the
+          final env's chi exceeds the initial chi=2.
+
+    Why the injection: the 2-site forward CTM uses the 2x2 plaquette
+    recipe, whose ε_T is currently a 0.0 placeholder (the plaquette
+    projector doesn't yet track it).  This test pins the *wiring* —
+    that ``_maybe_bump_chi`` is invoked with the cache's stored ε_T —
+    without depending on the 2x2 ε_T-tracking follow-up.
+    """
+    from tenax.algorithms import ipeps_optimize as opt_mod
+
+    real_bump = opt_mod._maybe_bump_chi
+    bump_calls: list[float] = []
+
+    def spy_bump(ctm_cfg, env_cache, last_eps_t, *args, **kwargs):
+        bump_calls.append(float(last_eps_t))
+        # Override the cache's 0.0 placeholder so the reactive trigger
+        # actually fires on the 2-site path.
+        return real_bump(ctm_cfg, env_cache, 1e-3, *args, **kwargs)
+
+    monkeypatch.setattr(opt_mod, "_maybe_bump_chi", spy_bump)
+
+    gate = heisenberg_gate()
+    key = jax.random.PRNGKey(42)
+    k1, k2, k3, k4 = jax.random.split(key, 4)
+    A_init = jax.random.normal(k1, (2, 2, 2, 2, 2)) + 1j * jax.random.normal(
+        k2, (2, 2, 2, 2, 2)
+    )
+    B_init = jax.random.normal(k3, (2, 2, 2, 2, 2)) + 1j * jax.random.normal(
+        k4, (2, 2, 2, 2, 2)
+    )
+
+    cfg = iPEPSConfig(
+        unit_cell="2site",
+        max_bond_dim=2,
+        ctm=CTMConfig(
+            chi=2,
+            chi_auto_bump=True,
+            chi_auto_bump_eps=1e-5,
+            chi_auto_bump_step=2,
+            chi_max=8,
+            max_iter=10,
+            min_iter=2,
+            conv_tol=1e-3,
+        ),
+        gs_optimizer="lbfgs",
+        gs_num_steps=3,
+        gs_verbose=False,
+        su_init=False,
+    )
+
+    (A_opt, B_opt), envs, e_opt = optimize_gs_ad(gate, (A_init, B_init), cfg)
+
+    final_chi = envs[0].C1._data.shape[0]
+
+    assert bump_calls, "_maybe_bump_chi never ran on the 2-site path"
+    assert final_chi > 2, (
+        f"reactive bump never raised chi on 2-site (final_chi={final_chi}); "
+        f"the wiring added in #472 did not invoke ``_maybe_bump_chi`` in a "
+        f"position where its return value updates ``ctm_cfg_2s``."
+    )
+    assert final_chi <= 8, f"chi exceeded chi_max=8 (final_chi={final_chi})"
+    assert math.isfinite(float(e_opt)), f"final energy is not finite: {e_opt}"

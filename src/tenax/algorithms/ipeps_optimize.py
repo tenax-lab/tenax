@@ -660,15 +660,6 @@ def optimize_gs_ad(
     if config.gs_num_steps < 0:
         raise ValueError(f"gs_num_steps must be >= 0, got {config.gs_num_steps}")
 
-    # chi_auto_bump is only supported for the dense '1x1' AD path.
-    # Multisite and 2-site paths are tracked as follow-up issues (Task 9).
-    if config.ctm.chi_auto_bump and (
-        isinstance(config.unit_cell, Lattice) or config.unit_cell == "2site"
-    ):
-        raise NotImplementedError(
-            "chi_auto_bump is currently supported only for unit_cell='1x1'; "
-            "multisite and 2-site paths are tracked as follow-up issues."
-        )
     # The reference-C4v sub-path has no bump logic; reject early so the user
     # gets a clear error rather than silent no-op.
     if config.ctm.chi_auto_bump and _use_reference_c4v_path(config):
@@ -2188,12 +2179,25 @@ def _optimize_gs_ad_tensor_2site(
             A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
             B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
         site_tensors = {(0, 0): A_norm, (1, 0): B_norm}
-        envs, _ = python_loop_ctm_converge(
+        envs, info = python_loop_ctm_converge(
             site_tensors,
             CHECKERBOARD_NEIGHBORS,
             **ctm_converge_kwargs(ctm_cfg_2s, env_init=_env_cache_2s.get("envs", None)),
         )
         _env_cache_2s["envs"] = envs
+        # Capture ``info.max_truncation_error`` so the end-of-step
+        # ``_maybe_bump_chi`` reactive trigger (#472) has an ε_T to
+        # compare against.  Scope caveat: the default forward stack uses
+        # the 2x2 plaquette recipe, which currently returns ε_T = 0.0
+        # (see ``_ctm_tensor_sweep_multisite`` 2x2 branch — eps_T is a
+        # placeholder until the plaquette projector is extended to track
+        # it).  Reactive bumps therefore only fire on the 2-site path
+        # when the forward CTM uses the 1x1 recipe + eigh projector or
+        # when an external caller writes a non-zero value into the cache.
+        # Wiring is present so #472 lands consistently with the 1-site
+        # surface; meaningful ε_T tracking on the 2x2 path is a separate
+        # follow-up.
+        _env_cache_2s["max_truncation_error"] = float(info.max_truncation_error)
 
     params = c4v_coeffs if use_c4v else (A, B)
     is_metric_lbfgs = (
@@ -2877,6 +2881,21 @@ def _optimize_gs_ad_tensor_2site(
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)
 
+        # Reactive ε_T auto-bump (variPEPS §2.8.2, #472) followed by the
+        # scheduled outer-loop χ bump (#453 / #455).  Compose order
+        # mirrors the 1-site path: reactive first so it can pre-empt the
+        # schedule, scheduled second to advance the stage index even on
+        # idempotent (post-reactive) bumps.  ``chi_before`` is snapshotted
+        # before either fires so the post-bump reset block below catches
+        # either trigger via ``ctm_cfg_2s.chi != chi_before``.
+        chi_before = ctm_cfg_2s.chi
+        last_eps_t = float(_env_cache_2s.get("max_truncation_error", 0.0))
+        ctm_cfg_2s, _env_cache_2s = _maybe_bump_chi(
+            ctm_cfg_2s,
+            _env_cache_2s,
+            last_eps_t,
+            base_charges=_bump_base_charges_2s,
+        )
         # Scheduled outer-loop χ bump (#453 / #455).  No-ops when
         # ``gs_chi_schedule_steps`` is None.  Fires at the step boundary
         # so the next iteration's value_and_grad sees the bumped χ — same
@@ -2885,7 +2904,6 @@ def _optimize_gs_ad_tensor_2site(
         # #455 PR2 will add convergence/stall-cap triggers.
         if config.gs_chi_schedule_steps is not None:
             steps_in_stage = (step + 1) - stage_start_step
-            chi_before = ctm_cfg_2s.chi
             _gn_for_bump = (
                 grad_norm_val
                 if grad_norm_val is not None
@@ -3105,12 +3123,17 @@ def _optimize_gs_ad_multisite(
         for i, c in enumerate(coords):
             p = params_[i]
             site_tensors[c] = p * (1.0 / (p.norm() + 1e-10))
-        envs, _ = python_loop_ctm_converge(
+        envs, info = python_loop_ctm_converge(
             site_tensors,
             neighbors,
             **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
         )
         _env_cache["envs"] = envs
+        # See ``_update_env_cache_2s`` (#472): wire ε_T into the cache so
+        # the end-of-step reactive trigger composes correctly.  ε_T from
+        # the 2x2 forward path is currently a 0.0 placeholder; meaningful
+        # tracking is a separate follow-up.
+        _env_cache["max_truncation_error"] = float(info.max_truncation_error)
 
     def loss_fn_fwd(params_):
         """Forward-only loss for line search — warm-starts CTM from env cache."""
@@ -3732,6 +3755,25 @@ def _optimize_gs_ad_multisite(
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)
 
+        # Reactive ε_T auto-bump (variPEPS §2.8.2, #472) followed by the
+        # scheduled outer-loop χ bump (#453 / #455).  Compose order
+        # mirrors the 1-site / 2-site paths: reactive first so it can
+        # pre-empt the schedule; scheduled second to advance the stage
+        # index even on idempotent (post-reactive) bumps.  The reactive
+        # bump is NOT gated on ``warmup_ok`` — that gate exists to keep
+        # the scheduled ``dE`` trigger from firing on false-convergence
+        # signals early in the run, but reactive is driven by the CTM-side
+        # ε_T which is well-defined from step 1.  ``chi_before`` is
+        # snapshotted before either fires so the post-bump reset block
+        # catches either trigger via ``ctm_cfg.chi != chi_before``.
+        chi_before = ctm_cfg.chi
+        last_eps_t = float(_env_cache.get("max_truncation_error", 0.0))
+        ctm_cfg, _env_cache = _maybe_bump_chi(
+            ctm_cfg,
+            _env_cache,
+            last_eps_t,
+            base_charges=_bump_base_charges_multi,
+        )
         # Scheduled outer-loop χ bump (#453 / #455).  No-ops when
         # ``gs_chi_schedule_steps`` is None.  Fires at the step boundary
         # so the next iteration's value_and_grad sees the bumped χ — same
@@ -3740,7 +3782,6 @@ def _optimize_gs_ad_multisite(
         # #455 PR2 will add convergence/stall-cap triggers.
         if config.gs_chi_schedule_steps is not None:
             steps_in_stage = (step + 1) - stage_start_step
-            chi_before = ctm_cfg.chi
             _gn_for_bump = (
                 grad_norm_val
                 if grad_norm_val is not None
