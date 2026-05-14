@@ -302,7 +302,9 @@ def _ctm_tensor_sweep_multisite(
     Returns:
         ``(envs, max_eps)`` — updated per-coord env dict and the max
         truncation error (JAX scalar) across all moves in this sweep.
-        The 2x2 path returns ``jnp.asarray(0.0)`` as a placeholder.
+        Tracked on both the 1x1 path (per-move eps_T from the SVD/eigh
+        projector) and the 2x2 path (per-plaquette eps_T from the cross-
+        projector SVD; Issue #474).
     """
     # Extract base charges from any double-layer tensor for projector stabilization
     base_charges = None
@@ -369,12 +371,18 @@ def _ctm_tensor_sweep_multisite(
         for direction in ("left", "top", "right", "bottom"):
             envs_old = dict(envs)
             # Phase 1: precompute projector pairs anchored at every cell.
+            # ``_compute_plaquette_projector_pair`` returns
+            # ``(P_top, P_bot, eps_T)`` (Issue #474).  Strip ``eps_T`` here
+            # and track the running max across all (direction × cell)
+            # computations so the 2x2 branch returns a real
+            # ``max_truncation_error`` instead of the historical
+            # 0.0 placeholder.
             projectors: dict[Coord, tuple] = {}
             for s_anchor in all_coords:
                 s_TR = neighbors[s_anchor]["right"]
                 s_BL = neighbors[s_anchor]["bottom"]
                 s_BR = neighbors[s_TR]["bottom"]
-                projectors[s_anchor] = _compute_plaquette_projector_pair(
+                P_top, P_bot, eps_T_plaq = _compute_plaquette_projector_pair(
                     envs_old[s_anchor],
                     envs_old[s_TR],
                     envs_old[s_BL],
@@ -387,6 +395,8 @@ def _ctm_tensor_sweep_multisite(
                     direction,
                     base_charges=base_charges,
                 )
+                projectors[s_anchor] = (P_top, P_bot)
+                max_eps = jnp.maximum(max_eps, jnp.asarray(eps_T_plaq))
 
             # Phase 2: absorb per cell using TWO plaquettes' projectors.
             new_envs: dict[Coord, CTMTensorEnv] = {}
