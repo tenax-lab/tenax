@@ -3730,6 +3730,15 @@ def _optimize_gs_ad_multisite(
                 if grad_norm_val is not None
                 else (_grad_l2_norm(grads) if config.gs_conv_criterion != "dE" else 0.0)
             )
+            # Codex P2 review on PR #467: the convergence-block above
+            # is gated on ``warmup_ok`` to prevent ``dE ≈ 0`` early
+            # steps and post-stall resets from acting on a false
+            # convergence signal.  This end-of-step bump bypasses that
+            # gate, so inject a synthetic large ``delta_energy`` when
+            # ``not warmup_ok`` to keep the dE trigger inside
+            # ``_advance_chi_stage_if_due`` from firing prematurely.
+            # Grad-norm and stall-cap signals are unaffected.
+            _dE_for_bump = delta_energy if warmup_ok else float("inf")
             ctm_cfg, _env_cache, new_stage_idx, _bump_fired, _should_break = (
                 _advance_chi_stage_if_due(
                     ctm_cfg,
@@ -3739,7 +3748,7 @@ def _optimize_gs_ad_multisite(
                     steps_in_stage=steps_in_stage,
                     config=config,
                     grad_norm=_gn_for_bump,
-                    delta_energy=delta_energy,
+                    delta_energy=_dE_for_bump,
                     stall_count=stall_count,
                     base_charges=_bump_base_charges_multi,
                 )
