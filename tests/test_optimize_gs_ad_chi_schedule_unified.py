@@ -23,7 +23,16 @@ def _heisenberg_gate():
 
 @pytest.mark.slow
 def test_1site_chi_schedule_bumps_env_at_boundary():
-    """1-site C4v run with gs_chi_schedule_steps=[(2, 8)] bumps env from chi=4 to chi=8."""
+    """Per-stage chi schedule bumps env between stages (#455).
+
+    Two-stage schedule ``[(4, 1), (8, 1)]`` per #455 semantics means:
+    stage 0 runs at logical chi=4 for 1 step, then the budget is
+    exhausted, ``_advance_chi_stage_if_due`` fires and bumps to chi=8
+    via ``_apply_chi_bump`` (which also pads the cached env in place);
+    stage 1 runs at chi=8 for 1 step.  After 2 total optimizer steps
+    the env corner ``C1`` must be padded to chi=8.  Adam is used (no
+    line-search / L-BFGS rollback to interact with the bump).
+    """
     d = 2
     D = 2
     rng = np.random.default_rng(0)
@@ -37,21 +46,23 @@ def test_1site_chi_schedule_bumps_env_at_boundary():
         unit_cell="1x1",
         gs_c4v=True,
         ctm=CTMConfig(chi=4, chi_max=8),
-        gs_num_steps=3,
-        gs_chi_schedule_steps=[(2, 8)],
-        gs_optimizer="lbfgs",
+        gs_num_steps=2,
+        gs_chi_schedule_steps=[(4, 1), (8, 1)],
+        gs_optimizer="adam",
         gs_verbose=False,
         su_init=False,
         gs_conv_criterion="grad_norm",
+        gs_conv_tol=1e-30,
+        gs_grad_norm_tol=1e-30,
     )
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=UserWarning)
         A_opt, env, E = _opt.optimize_gs_ad(gate, A, cfg)
 
-    # After 3 steps with bump at boundary=2, env should be padded to chi=8.
+    # After stage 0's 1-step budget is exhausted, env should be padded to chi=8.
     assert env.C1._data.shape == (8, 8), (
-        f"expected env padded to chi=8 after schedule boundary, "
+        f"expected env padded to chi=8 after stage-0 budget exhausted, "
         f"got {env.C1._data.shape}"
     )
 

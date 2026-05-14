@@ -43,7 +43,7 @@ def _apply_chi_bump(
 
     Used by both the reactive auto-χ_E bump (``_maybe_bump_chi``,
     variPEPS §2.8.2) and the scheduled bump driven by
-    ``gs_chi_schedule_steps`` (``_maybe_scheduled_bump``, issue #453).
+    ``gs_chi_schedule_steps`` (``_advance_chi_stage_if_due``, issue #455).
     No policy here — callers decide *whether* and *to what* to bump.
 
     ``env_cache`` is mutated in-place so closures that captured the
@@ -98,48 +98,69 @@ def _maybe_bump_chi(
     return _apply_chi_bump(ctm_cfg, env_cache, chi_new, base_charges=base_charges)
 
 
-def _maybe_scheduled_bump(
+def _advance_chi_stage_if_due(
     ctm_cfg: CTMConfig,
     env_cache: dict,
-    step: int,
-    schedule_targets: list[tuple[int, int]] | None,
     *,
+    chi_schedule: list[tuple[int, int]] | None,
+    current_stage_idx: int,
+    steps_in_stage: int,
     base_charges: np.ndarray | None = None,
-) -> tuple[CTMConfig, dict]:
-    """Step-driven χ bump from ``gs_chi_schedule_steps`` (issue #453).
+) -> tuple[CTMConfig, dict, int, bool, bool]:
+    """Decide whether to advance to the next χ stage and apply it (#455).
 
-    ``schedule_targets`` is a list of ``(cumulative_step_boundary, target_chi)``
-    pairs.  When ``step`` crosses a boundary and ``target_chi`` exceeds
-    the current ``ctm_cfg.chi``, the logical χ is bumped to that target
-    via ``_apply_chi_bump`` (which also pads cached envs in-place).
+    Inputs:
+        ctm_cfg, env_cache: current CTM state.
+        chi_schedule: per-stage list ``[(target_chi, max_steps), ...]``,
+            or ``None`` (no schedule).
+        current_stage_idx: which stage is currently active (0-based).
+        steps_in_stage: number of completed optimizer steps in the
+            current stage (1-based at end-of-step).
+        base_charges: SymmetricTensor base charges (ignored on dense).
 
-    Idempotent: stale boundaries (``target_chi <= current chi``) are
-    no-ops, so the same step can be processed multiple times safely.
+    Returns:
+        (new_ctm_cfg, new_env_cache, new_stage_idx, bump_fired, should_break)
 
-    Composes with ``_maybe_bump_chi`` — both can fire at the same step;
-    ``ctm_cfg.chi_max`` caps both.
+    PR 1 trigger: budget-exhausted only
+    (``steps_in_stage >= chi_schedule[current_stage_idx][1]``).
+    PR 2 will extend to convergence + stall-cap.
 
-    For SymmetricTensor envs, ``base_charges`` should be the bond
-    charges of the iPEPS A tensor (the same ``base_charges`` the
-    symmetric projector consumes).  Ignored on the dense path.
+    Behavior:
+        - No schedule, or not yet at budget: no-op, returns
+          ``(ctm_cfg, env_cache, current_stage_idx, False, False)``.
+        - Budget hit at non-final stage: bump chi to next stage's
+          target via ``_apply_chi_bump``, advance ``current_stage_idx``,
+          return ``bump_fired=True``.
+        - Budget hit at final stage: return
+          ``should_break=True`` (no bump; caller exits the loop).
     """
-    if not schedule_targets:
-        return ctm_cfg, env_cache
+    if not chi_schedule:
+        return ctm_cfg, env_cache, current_stage_idx, False, False
 
-    target_chi = ctm_cfg.chi
-    for boundary, chi_target in schedule_targets:
-        if step >= boundary and chi_target > target_chi:
-            target_chi = chi_target
+    _, stage_max_steps = chi_schedule[current_stage_idx]
+    budget_exhausted = steps_in_stage >= stage_max_steps
 
-    if target_chi <= ctm_cfg.chi:
-        return ctm_cfg, env_cache
+    if not budget_exhausted:
+        return ctm_cfg, env_cache, current_stage_idx, False, False
 
+    has_next = (current_stage_idx + 1) < len(chi_schedule)
+    if not has_next:
+        # Final stage budget exhausted → caller should break out.
+        return ctm_cfg, env_cache, current_stage_idx, False, True
+
+    next_chi, _ = chi_schedule[current_stage_idx + 1]
     if ctm_cfg.chi_max is not None:
-        target_chi = min(target_chi, ctm_cfg.chi_max)
-        if target_chi <= ctm_cfg.chi:
-            return ctm_cfg, env_cache
+        next_chi = min(next_chi, ctm_cfg.chi_max)
 
-    return _apply_chi_bump(ctm_cfg, env_cache, target_chi, base_charges=base_charges)
+    if next_chi <= ctm_cfg.chi:
+        # Already at or above the next stage's target — advance index
+        # without re-applying a bump (matches old idempotent semantics).
+        return ctm_cfg, env_cache, current_stage_idx + 1, False, False
+
+    new_ctm_cfg, new_env_cache = _apply_chi_bump(
+        ctm_cfg, env_cache, next_chi, base_charges=base_charges
+    )
+    return new_ctm_cfg, new_env_cache, current_stage_idx + 1, True, False
 
 
 def _lattice_to_neighbors(
@@ -533,7 +554,7 @@ def optimize_gs_ad_chi_schedule(
 
     Runs ``optimize_gs_ad`` ONCE with envs padded to ``max(chi)`` from
     the first iteration; the logical chi is ramped via
-    ``_maybe_scheduled_bump`` at the configured step boundaries.  The
+    ``_advance_chi_stage_if_due`` at each stage's budget boundary.  The
     JIT-compiled CTM / energy / backward kernels therefore see a single
     fixed env shape across the whole run -- no per-stage retraces.
 
@@ -564,29 +585,22 @@ def optimize_gs_ad_chi_schedule(
     chi_max = max(chi for chi, _ in chi_schedule)
     total_steps = sum(n for _, n in chi_schedule)
 
-    # Build (cum_step_boundary, target_chi_to_bump_to) pairs.  Each entry
-    # says: "after this many cumulative steps complete, bump to this chi".
-    # Stage 0 is the initial chi (no bump needed); each subsequent stage
-    # is reached by bumping when the previous stage's cumulative step
-    # boundary is crossed.
-    cum = 0
-    schedule_targets: list[tuple[int, int]] = []
-    for i in range(1, len(chi_schedule)):
-        cum += chi_schedule[i - 1][1]
-        schedule_targets.append((cum, chi_schedule[i][0]))
-
+    # #455 PR 1: pass the per-stage schedule straight through. Each
+    # stage's max_steps is now a per-stage budget (was cumulative).
+    # The optimizer loop tracks current_stage_idx + stage_start_step
+    # and advances via _advance_chi_stage_if_due.
     ctm_cfg = replace(config.ctm, chi=chi_schedule[0][0], chi_max=chi_max)
     step_cfg = replace(
         config,
         ctm=ctm_cfg,
         gs_num_steps=total_steps,
-        gs_chi_schedule_steps=schedule_targets,
+        gs_chi_schedule_steps=list(chi_schedule),
     )
 
     if config.gs_verbose:
         print(
             f"[chi-ramp] unified: chi_max={chi_max}, "
-            f"total_steps={total_steps}, boundaries={schedule_targets}",
+            f"total_steps={total_steps}, stages={list(chi_schedule)}",
             flush=True,
         )
 
@@ -1159,6 +1173,8 @@ def _optimize_gs_ad_tensor(
         return float(compute_energy_ctm_tensor(A_norm, envs[(0, 0)], gate, d_phys))
 
     stall_count = 0  # noise recovery: consecutive line search failures
+    current_stage_idx = 0
+    stage_start_step = 0
 
     # Optional trajectory capture (config.return_history).  Always allocated
     # but only populated/returned when the flag is set, so there is no
@@ -1360,7 +1376,7 @@ def _optimize_gs_ad_tensor(
             # in #432's squash, so re-included here.)
             # Snapshot χ before either bump fires; the reset below triggers
             # on EITHER reactive (_maybe_bump_chi) or scheduled
-            # (_maybe_scheduled_bump) bump changing it — both are landscape
+            # (_advance_chi_stage_if_due) bump changing it — both are landscape
             # transitions (#464 codex review).
             chi_before_bump = ctm_cfg.chi
             last_eps_t = float(_env_cache.get("max_truncation_error", 0.0))
@@ -1370,16 +1386,24 @@ def _optimize_gs_ad_tensor(
                 last_eps_t,
                 base_charges=_bump_base_charges,
             )
-            # Scheduled outer-loop χ bump (#453).  Composes with the
-            # reactive bump above; ctm_cfg.chi_max caps both.
+            # Scheduled outer-loop χ bump (#453 / #455).  In PR 1
+            # this still only fires on the budget-exhausted path —
+            # PR 2 layers convergence/stall signals on top.
             if config.gs_chi_schedule_steps is not None:
-                ctm_cfg, _env_cache = _maybe_scheduled_bump(
-                    ctm_cfg,
-                    _env_cache,
-                    step + 1,
-                    config.gs_chi_schedule_steps,
-                    base_charges=_bump_base_charges,
+                steps_in_stage = (step + 1) - stage_start_step
+                ctm_cfg, _env_cache, new_stage_idx, _bump_fired, _ = (
+                    _advance_chi_stage_if_due(
+                        ctm_cfg,
+                        _env_cache,
+                        chi_schedule=config.gs_chi_schedule_steps,
+                        current_stage_idx=current_stage_idx,
+                        steps_in_stage=steps_in_stage,
+                        base_charges=_bump_base_charges,
+                    )
                 )
+                if new_stage_idx != current_stage_idx:
+                    current_stage_idx = new_stage_idx
+                    stage_start_step = step + 1
             if ctm_cfg.chi != chi_before_bump:
                 # Reactive or scheduled bump fired — fresh landscape,
                 # fresh stall budget (#464 codex review).
@@ -1667,16 +1691,25 @@ def _optimize_gs_ad_tensor(
             last_eps_t,
             base_charges=_bump_base_charges,
         )
-        # Scheduled outer-loop χ bump (#453).  Composes with the reactive
-        # bump above; ctm_cfg.chi_max caps both.
+        # Scheduled outer-loop χ bump (#453 / #455).  Composes with the
+        # reactive bump above; ctm_cfg.chi_max caps both.  Per-stage
+        # state (current_stage_idx, stage_start_step) drives the new
+        # helper; #455 PR2 will add convergence/stall-cap triggers.
         if config.gs_chi_schedule_steps is not None:
-            ctm_cfg, _env_cache = _maybe_scheduled_bump(
-                ctm_cfg,
-                _env_cache,
-                step + 1,
-                config.gs_chi_schedule_steps,
-                base_charges=_bump_base_charges,
+            steps_in_stage = (step + 1) - stage_start_step
+            ctm_cfg, _env_cache, new_stage_idx, _bump_fired, _should_break = (
+                _advance_chi_stage_if_due(
+                    ctm_cfg,
+                    _env_cache,
+                    chi_schedule=config.gs_chi_schedule_steps,
+                    current_stage_idx=current_stage_idx,
+                    steps_in_stage=steps_in_stage,
+                    base_charges=_bump_base_charges,
+                )
             )
+            if new_stage_idx != current_stage_idx:
+                current_stage_idx = new_stage_idx
+                stage_start_step = step + 1
         if ctm_cfg.chi != chi_before_bump:
             # Reactive or scheduled bump fired — fresh landscape, fresh
             # stall budget (#464 codex review).
@@ -2026,6 +2059,8 @@ def _optimize_gs_ad_tensor_2site(
     prev_params_flat: jnp.ndarray | None = None
     prev_grad_flat: jnp.ndarray | None = None
     stall_count = 0  # noise recovery: consecutive line search failures
+    current_stage_idx = 0
+    stage_start_step = 0
 
     # Optional trajectory capture (config.return_history).  Always allocated
     # but only populated/returned when the flag is set.
@@ -2550,19 +2585,28 @@ def _optimize_gs_ad_tensor_2site(
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)
 
-        # Scheduled outer-loop χ bump (#453).  No-ops when
+        # Scheduled outer-loop χ bump (#453 / #455).  No-ops when
         # ``gs_chi_schedule_steps`` is None.  Fires at the step boundary
         # so the next iteration's value_and_grad sees the bumped χ — same
-        # invariant as the 1-site path.
+        # invariant as the 1-site path.  Per-stage state
+        # (current_stage_idx, stage_start_step) drives the new helper;
+        # #455 PR2 will add convergence/stall-cap triggers.
         if config.gs_chi_schedule_steps is not None:
+            steps_in_stage = (step + 1) - stage_start_step
             chi_before = ctm_cfg_2s.chi
-            ctm_cfg_2s, _env_cache_2s = _maybe_scheduled_bump(
-                ctm_cfg_2s,
-                _env_cache_2s,
-                step + 1,
-                config.gs_chi_schedule_steps,
-                base_charges=_bump_base_charges_2s,
+            ctm_cfg_2s, _env_cache_2s, new_stage_idx, _bump_fired, _should_break = (
+                _advance_chi_stage_if_due(
+                    ctm_cfg_2s,
+                    _env_cache_2s,
+                    chi_schedule=config.gs_chi_schedule_steps,
+                    current_stage_idx=current_stage_idx,
+                    steps_in_stage=steps_in_stage,
+                    base_charges=_bump_base_charges_2s,
+                )
             )
+            if new_stage_idx != current_stage_idx:
+                current_stage_idx = new_stage_idx
+                stage_start_step = step + 1
             if ctm_cfg_2s.chi != chi_before:
                 # χ bump fired: a new landscape begins.  Reset the stall
                 # counter so the next stage gets a fresh retry budget;
@@ -2800,6 +2844,8 @@ def _optimize_gs_ad_multisite(
     prev_params_flat: jnp.ndarray | None = None
     prev_grad_flat: jnp.ndarray | None = None
     stall_count = 0
+    current_stage_idx = 0
+    stage_start_step = 0
 
     # CTM conv_tol schedule
     _conv_tol_schedule = config.gs_ctm_conv_tol_schedule
@@ -3244,19 +3290,28 @@ def _optimize_gs_ad_multisite(
             params = optax.apply_updates(params, direction)
             params = _normalize_params(params)
 
-        # Scheduled outer-loop χ bump (#453).  No-ops when
+        # Scheduled outer-loop χ bump (#453 / #455).  No-ops when
         # ``gs_chi_schedule_steps`` is None.  Fires at the step boundary
         # so the next iteration's value_and_grad sees the bumped χ — same
-        # invariant as the 1-site path.
+        # invariant as the 1-site path.  Per-stage state
+        # (current_stage_idx, stage_start_step) drives the new helper;
+        # #455 PR2 will add convergence/stall-cap triggers.
         if config.gs_chi_schedule_steps is not None:
+            steps_in_stage = (step + 1) - stage_start_step
             chi_before = ctm_cfg.chi
-            ctm_cfg, _env_cache = _maybe_scheduled_bump(
-                ctm_cfg,
-                _env_cache,
-                step + 1,
-                config.gs_chi_schedule_steps,
-                base_charges=_bump_base_charges_multi,
+            ctm_cfg, _env_cache, new_stage_idx, _bump_fired, _should_break = (
+                _advance_chi_stage_if_due(
+                    ctm_cfg,
+                    _env_cache,
+                    chi_schedule=config.gs_chi_schedule_steps,
+                    current_stage_idx=current_stage_idx,
+                    steps_in_stage=steps_in_stage,
+                    base_charges=_bump_base_charges_multi,
+                )
             )
+            if new_stage_idx != current_stage_idx:
+                current_stage_idx = new_stage_idx
+                stage_start_step = step + 1
             if ctm_cfg.chi != chi_before:
                 # Bump fired — fresh landscape, fresh stall budget.
                 stall_count = 0
