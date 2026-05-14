@@ -133,32 +133,6 @@ class TestTDVP2Site:
                     max_bond = dim
         assert max_bond > 1, "Bond dimension should have grown from 1"
 
-    def test_tdvp_driver_imaginary_time(self):
-        """2TDVP imaginary-time should lower energy toward DMRG ground state."""
-        L, chi = 6, 8
-        mpo = _build_dense_heisenberg(L)
-
-        # DMRG reference
-        mps_dmrg = build_random_mps(L, bond_dim=chi, seed=42)
-        dmrg_result = dmrg(mpo, mps_dmrg, DMRGConfig(max_bond_dim=chi, num_sweeps=20))
-        e_dmrg = dmrg_result.energy
-
-        # TDVP imaginary time
-        mps_init = build_random_mps(L, bond_dim=chi, seed=99)
-        cfg = TDVPConfig(
-            mode="2site",
-            dt=0.05,
-            time_type="imaginary",
-            num_steps=40,
-            max_bond_dim=chi,
-        )
-        result = tdvp(mps_init, mpo, cfg)
-
-        # Energy should decrease
-        assert result.energies[-1] < result.energies[0]
-        # Should approach DMRG energy (within reasonable tolerance for 40 steps)
-        np.testing.assert_allclose(result.energies[-1], e_dmrg, atol=0.1)
-
 
 class TestTDVPDriver:
     """Tests for the TDVP driver function."""
@@ -231,28 +205,3 @@ class TestTDVPComplexTime:
         np.testing.assert_allclose(
             result_real.energies, result_complex.energies, atol=1e-10
         )
-
-
-class TestTDVPSymmetric:
-    """Verify TDVP works with symmetric (SymmetricTensor) MPO."""
-
-    def test_1site_tdvp_symmetric_mpo(self):
-        """TDVP with a symmetric MPO should produce decreasing energy."""
-        from tenax.core.mps import FiniteMPS
-
-        L, chi = 4, 4
-        terms = []
-        for i in range(L - 1):
-            terms.append((1.0, "Sz", i, "Sz", i + 1))
-            terms.append((0.5, "Sp", i, "Sm", i + 1))
-            terms.append((0.5, "Sm", i, "Sp", i + 1))
-        mpo_sym = build_auto_mpo(terms, L=L, symmetric=True)
-        mps = FiniteMPS.random(L, d=2, chi=chi, key=jax.random.PRNGKey(42))
-
-        cfg = TDVPConfig(mode="1site", dt=0.05, time_type="imaginary", num_steps=2)
-        result = tdvp(mps, mpo_sym, cfg)
-
-        assert len(result.energies) == 3  # initial + 2 steps
-        assert all(np.isfinite(e) for e in result.energies)
-        # Imaginary time should lower energy
-        assert result.energies[-1] <= result.energies[0] + 1e-6

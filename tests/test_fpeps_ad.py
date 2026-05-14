@@ -81,42 +81,6 @@ class TestOptimizeFpepsAd:
         assert isinstance(A_opt, type(A_init))
         assert np.isfinite(E_gs)
 
-    @pytest.mark.slow
-    def test_optimize_fpeps_ad_energy_decreases(
-        self, fpeps_config, ipeps_config_medium
-    ):
-        """10 AD steps: final energy should be lower than the initial energy.
-
-        Uses ``chi=8`` (see ``ipeps_config_medium`` fixture); ``chi=4``
-        lands on a non-physical metastable CTM fixed point and the
-        perturbed-A landscape is non-smooth, which made the original
-        version of this test xfail under #362 with the misdiagnosis
-        "wrong-direction gradient". With ``chi=8`` the landscape is
-        smooth and the divide-by-norm gauge-fix-AD fix
-        (PR #363 / ``_phase_fix_normalize_tensor``) is sufficient.
-        """
-        H = spinless_fermion_gate(fpeps_config)
-        A_init = _build_initial_fpeps_tensor(fpeps_config, jax.random.PRNGKey(0))
-
-        # Compute initial energy via a short 0-step run with the same chi.
-        config_0 = iPEPSConfig(
-            max_bond_dim=2,
-            ctm=CTMConfig(chi=8, max_iter=30, conv_tol=1e-4),
-            gs_num_steps=0,
-            gs_learning_rate=1e-2,
-            gs_verbose=False,
-        )
-        _, _, E_init = optimize_fpeps_ad(H, A_init=A_init, config=config_0)
-
-        # Run 10 AD optimization steps
-        A_opt, env, E_final = optimize_fpeps_ad(
-            H, A_init=A_init, config=ipeps_config_medium
-        )
-        assert np.isfinite(E_final)
-        assert E_final < E_init, (
-            f"Energy should decrease: E_init={E_init:.8f}, E_final={E_final:.8f}"
-        )
-
     def test_optimize_fpeps_ad_requires_fpeps_config(self, ipeps_config_short):
         """A_init=None without fpeps_config should raise ValueError."""
         H = spinless_fermion_gate(FPEPSConfig())

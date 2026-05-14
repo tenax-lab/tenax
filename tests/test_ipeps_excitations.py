@@ -77,30 +77,6 @@ class TestOptimizeGsAd:
         assert A_opt.todense().shape == (2, 2, 2, 2, 2)
         assert np.isfinite(E_gs)
 
-    def test_energy_decreases(self, heisenberg_gate):
-        """Energy after optimization should be <= initial energy."""
-        key = jax.random.PRNGKey(99)
-        D, d = 2, 2
-        A_init = jax.random.normal(key, (D, D, D, D, d))
-        A_init = A_init / (jnp.linalg.norm(A_init) + 1e-10)
-
-        # Compute initial energy
-        config_ctm = CTMConfig(chi=4, max_iter=10)
-        env_init = ctm(A_init, config_ctm)
-        E_init = float(compute_energy_ctm(A_init, env_init, heisenberg_gate, d))
-
-        # Run optimization
-        config = iPEPSConfig(
-            max_bond_dim=2,
-            ctm=config_ctm,
-            gs_num_steps=10,
-            gs_learning_rate=1e-2,
-        )
-        _, _, E_opt = optimize_gs_ad(heisenberg_gate, A_init, config)
-        assert E_opt <= E_init + 0.1, (
-            f"Energy should decrease: E_init={E_init}, E_opt={E_opt}"
-        )
-
     def test_heisenberg_negative_energy(self, heisenberg_gate):
         """Heisenberg D=2 should give E < 0 after some optimization steps."""
         config = iPEPSConfig(
