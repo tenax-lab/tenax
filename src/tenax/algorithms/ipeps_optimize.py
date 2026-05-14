@@ -1901,17 +1901,29 @@ def _optimize_gs_ad_tensor(
 
     A_final, env_final, E_final = _eval_fresh(params, _env_cache.get("envs", None))
 
+    # Pad best_env_cache envs to the current ctm_cfg.chi before use.
+    # best_env_cache is a snapshot taken when best_energy was recorded, so its
+    # env tensors may be at a smaller chi if the reactive auto-bump or the chi
+    # schedule fired after that snapshot.  pad_dense_env_chi is a no-op when
+    # chi_new == chi_old, so this is safe to call unconditionally.  Fixes #469.
+    _best_env_init = best_env_cache.get("envs", None)
+    if _best_env_init is not None:
+        _best_env_init = {
+            c: pad_dense_env_chi(
+                _best_env_init[c], ctm_cfg.chi, base_charges=_bump_base_charges
+            )
+            for c in _best_env_init
+        }
+
     if best_params is not params:
-        _, env_best, E_best_fresh = _eval_fresh(
-            best_params, best_env_cache.get("envs", None)
-        )
+        _, env_best, E_best_fresh = _eval_fresh(best_params, _best_env_init)
     else:
         E_best_fresh = E_final
 
     if E_final <= E_best_fresh:
         env, E_gs = env_final, E_final
     else:
-        A_final, _, _ = _eval_fresh(best_params, best_env_cache.get("envs", None))
+        A_final, _, _ = _eval_fresh(best_params, _best_env_init)
         env, E_gs = env_best, E_best_fresh
     if config.gs_verbose:
         print(f"[iPEPS-AD:1site-tensor] final E={E_gs:.10f}", flush=True)
@@ -3002,9 +3014,22 @@ def _optimize_gs_ad_tensor_2site(
     )
     env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
 
+    # Pad best_env_cache_2s envs to the current ctm_cfg_2s.chi before use.
+    # Mirrors the same fix on the 1-site path — see comment there.  Fixes #469.
+    _best_env_init_2s = best_env_cache_2s.get("envs", None)
+    if _best_env_init_2s is not None:
+        _best_env_init_2s = {
+            c: pad_dense_env_chi(
+                _best_env_init_2s[c],
+                ctm_cfg_2s.chi,
+                base_charges=_bump_base_charges_2s,
+            )
+            for c in _best_env_init_2s
+        }
+
     if best_params is not params:
         A_best, B_best, envs_best, E_best_fresh = _eval_fresh_2site(
-            best_params, best_env_cache_2s.get("envs", None)
+            best_params, _best_env_init_2s
         )
         env_A_best = envs_best[(0, 0)]
         env_B_best = envs_best[(1, 0)]
@@ -3898,9 +3923,23 @@ def _optimize_gs_ad_multisite(
 
     sites_last, envs_last, E_last = _eval_fresh(params, _env_cache.get("envs", None))
 
+    # Pad best_env_cache envs to the current ctm_cfg.chi before use.
+    # Mirrors the same fix on the 1-site and 2-site paths — see comment there.
+    # Fixes #469.
+    _best_env_init_multi = best_env_cache.get("envs", None)
+    if _best_env_init_multi is not None:
+        _best_env_init_multi = {
+            c: pad_dense_env_chi(
+                _best_env_init_multi[c],
+                ctm_cfg.chi,
+                base_charges=_bump_base_charges_multi,
+            )
+            for c in _best_env_init_multi
+        }
+
     if best_params is not params:
         sites_best, envs_best, E_best_fresh = _eval_fresh(
-            best_params, best_env_cache.get("envs", None)
+            best_params, _best_env_init_multi
         )
     else:
         E_best_fresh = E_last
