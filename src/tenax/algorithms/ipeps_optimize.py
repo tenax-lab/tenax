@@ -1906,8 +1906,11 @@ def _optimize_gs_ad_tensor(
     # env tensors may be at a smaller chi if the reactive auto-bump or the chi
     # schedule fired after that snapshot.  pad_dense_env_chi is a no-op when
     # chi_new == chi_old, so this is safe to call unconditionally.  Fixes #469.
+    # NOTE: if a new _eval_fresh(best_params, best_env_cache["envs"]) call site
+    # is added later, it must reapply this padding — there's no producer-side
+    # guarantee that the snapshot is at ctm_cfg.chi.
     _best_env_init = best_env_cache.get("envs", None)
-    if _best_env_init is not None:
+    if _best_env_init:
         _best_env_init = {
             c: pad_dense_env_chi(
                 _best_env_init[c], ctm_cfg.chi, base_charges=_bump_base_charges
@@ -3016,8 +3019,11 @@ def _optimize_gs_ad_tensor_2site(
 
     # Pad best_env_cache_2s envs to the current ctm_cfg_2s.chi before use.
     # Mirrors the same fix on the 1-site path — see comment there.  Fixes #469.
+    # NOTE: if a new _eval_fresh_2site(best_params, best_env_cache_2s["envs"])
+    # call site is added later, it must reapply this padding — there's no
+    # producer-side guarantee that the snapshot is at ctm_cfg_2s.chi.
     _best_env_init_2s = best_env_cache_2s.get("envs", None)
-    if _best_env_init_2s is not None:
+    if _best_env_init_2s:
         _best_env_init_2s = {
             c: pad_dense_env_chi(
                 _best_env_init_2s[c],
@@ -3926,8 +3932,11 @@ def _optimize_gs_ad_multisite(
     # Pad best_env_cache envs to the current ctm_cfg.chi before use.
     # Mirrors the same fix on the 1-site and 2-site paths — see comment there.
     # Fixes #469.
+    # NOTE: if a new _eval_fresh(best_params, best_env_cache["envs"]) call site
+    # is added later, it must reapply this padding — there's no producer-side
+    # guarantee that the snapshot is at ctm_cfg.chi.
     _best_env_init_multi = best_env_cache.get("envs", None)
-    if _best_env_init_multi is not None:
+    if _best_env_init_multi:
         _best_env_init_multi = {
             c: pad_dense_env_chi(
                 _best_env_init_multi[c],
