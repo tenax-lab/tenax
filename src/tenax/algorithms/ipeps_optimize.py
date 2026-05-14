@@ -2377,6 +2377,62 @@ def _optimize_gs_ad_tensor_2site(
             else None
         )
         if _converged_outer(config, delta_energy, grad_norm_val):
+            # #455 PR2: at non-final χ stages, treat convergence as a
+            # signal to advance to the next stage rather than exit.
+            # Mirrors the 1-site convergence-block intercept.
+            bump_fired = False
+            if config.gs_chi_schedule_steps is not None:
+                chi_before_bump = ctm_cfg_2s.chi
+                steps_in_stage = (step + 1) - stage_start_step
+                _gn_for_bump = (
+                    grad_norm_val
+                    if grad_norm_val is not None
+                    else (
+                        _grad_l2_norm(grads)
+                        if config.gs_conv_criterion != "dE"
+                        else 0.0
+                    )
+                )
+                (
+                    ctm_cfg_2s,
+                    _env_cache_2s,
+                    new_stage_idx,
+                    bump_fired,
+                    _,
+                ) = _advance_chi_stage_if_due(
+                    ctm_cfg_2s,
+                    _env_cache_2s,
+                    chi_schedule=config.gs_chi_schedule_steps,
+                    current_stage_idx=current_stage_idx,
+                    steps_in_stage=steps_in_stage,
+                    config=config,
+                    grad_norm=_gn_for_bump,
+                    delta_energy=delta_energy,
+                    stall_count=stall_count,
+                    base_charges=_bump_base_charges_2s,
+                )
+                if bump_fired:
+                    current_stage_idx = new_stage_idx
+                    stage_start_step = step + 1
+                    stall_count = 0
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
+                        prev_params_flat = None
+                        prev_grad_flat = None
+                    if is_cg:
+                        cg_direction = None
+                        prev_grad = None
+                        prev_precond_grad = None
+                    if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                        opt_state = optimizer.init(params)
+                    if config.gs_verbose:
+                        print(
+                            f"[iPEPS-AD step {step + 1}] converged at "
+                            f"chi={chi_before_bump} → bumping to "
+                            f"chi={ctm_cfg_2s.chi} (#455 PR2)",
+                            flush=True,
+                        )
+                    continue
             if config.gs_verbose:
                 if not logged:
                     _log_ad_step(
