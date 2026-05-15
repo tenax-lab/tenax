@@ -932,7 +932,7 @@ def _ctm_tensor_move_left_2x2(
     # ---- Step 2: compute the (P_top, P_bot) projector pair. ----
     # P_top:  (chi_outer [IN], fused_D2 [IN], chi_new_top [OUT])
     # P_bot:  (chi_new_bot [IN], chi_outer [OUT], fused_D2 [OUT])
-    P_top, P_bot = _compute_2x2_projector(
+    P_top, P_bot, _ = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="left", base_charges=base_charges
     )
 
@@ -1039,7 +1039,7 @@ def _ctm_tensor_move_right_2x2(
     )
 
     # ---- Step 2: compute the (P_top, P_bot) projector pair. ----
-    P_top, P_bot = _compute_2x2_projector(
+    P_top, P_bot, _ = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="right", base_charges=base_charges
     )
 
@@ -1128,7 +1128,7 @@ def _ctm_tensor_move_top_2x2(
     )
 
     # ---- Step 2: compute the (P_top, P_bot) projector pair. ----
-    P_top, P_bot = _compute_2x2_projector(
+    P_top, P_bot, _ = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="top", base_charges=base_charges
     )
 
@@ -1217,7 +1217,7 @@ def _ctm_tensor_move_bottom_2x2(
     )
 
     # ---- Step 2: compute the (P_top, P_bot) projector pair. ----
-    P_top, P_bot = _compute_2x2_projector(
+    P_top, P_bot, _ = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="bottom", base_charges=base_charges
     )
 
