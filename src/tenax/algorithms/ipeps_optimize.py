@@ -2202,16 +2202,9 @@ def _optimize_gs_ad_tensor_2site(
         _env_cache_2s["envs"] = envs
         # Capture ``info.max_truncation_error`` so the end-of-step
         # ``_maybe_bump_chi`` reactive trigger (#472) has an ε_T to
-        # compare against.  Scope caveat: the default forward stack uses
-        # the 2x2 plaquette recipe, which currently returns ε_T = 0.0
-        # (see ``_ctm_tensor_sweep_multisite`` 2x2 branch — eps_T is a
-        # placeholder until the plaquette projector is extended to track
-        # it).  Reactive bumps therefore only fire on the 2-site path
-        # when the forward CTM uses the 1x1 recipe + eigh projector or
-        # when an external caller writes a non-zero value into the cache.
-        # Wiring is present so #472 lands consistently with the 1-site
-        # surface; meaningful ε_T tracking on the 2x2 path is a separate
-        # follow-up.
+        # compare against.  As of #474 the 2x2 plaquette projector
+        # returns a real ε_T (previously a 0.0 placeholder), so reactive
+        # bumps fire on the 2-site forward stack with the default recipe.
         _env_cache_2s["max_truncation_error"] = float(info.max_truncation_error)
 
     params = c4v_coeffs if use_c4v else (A, B)
@@ -3181,10 +3174,9 @@ def _optimize_gs_ad_multisite(
             **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
         )
         _env_cache["envs"] = envs
-        # See ``_update_env_cache_2s`` (#472): wire ε_T into the cache so
-        # the end-of-step reactive trigger composes correctly.  ε_T from
-        # the 2x2 forward path is currently a 0.0 placeholder; meaningful
-        # tracking is a separate follow-up.
+        # See ``_update_env_cache_2s`` (#472, #474): the 2x2 plaquette
+        # projector tracks ε_T directly so reactive bumps fire on the
+        # multisite forward stack with the default recipe.
         _env_cache["max_truncation_error"] = float(info.max_truncation_error)
 
     def loss_fn_fwd(params_):

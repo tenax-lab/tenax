@@ -319,7 +319,7 @@ def _compute_2x2_projector(
     *,
     direction: str = "left",
     base_charges: np.ndarray | None = None,
-) -> tuple[Tensor, Tensor]:
+) -> tuple[Tensor, Tensor, jax.Array]:
     r"""Fishman 2x2 plaquette cross-projector for the multisite CTM move.
 
     Implements the two-projector recipe of Corboz, Penc, Mila, Lauchli
@@ -352,12 +352,16 @@ def _compute_2x2_projector(
             symmetric branch.  Ignored on the dense path (no charge sectors).
 
     Returns:
-        Pair ``(P_top, P_bot)`` of rank-3 :class:`DenseTensor` projectors:
+        Triple ``(P_top, P_bot, eps_T)`` of rank-3 :class:`DenseTensor`
+        projectors and the variPEPS §2.8.2 truncation-error scalar:
 
         - ``P_top`` axes ``("chi_outer", "fused_D2", "chi_new_top")``,
           dims ``(chi, D**2, chi_new)``, flows ``(IN, IN, OUT)``.
         - ``P_bot`` axes ``("chi_new_bot", "chi_outer", "fused_D2")``,
           dims ``(chi_new, chi, D**2)``, flows ``(IN, OUT, OUT)``.
+        - ``eps_T`` is the discarded-SV norm fraction from the cross-projector
+          SVD truncation at ``chi``; ``stop_gradient`` applied so it never
+          back-propagates through the SVD F-matrix singularity (Issue #474).
 
         ``chi_outer`` and ``fused_D2`` share names so :func:`contract`
         auto-pairs them to give the closure tensor on the free legs
@@ -569,6 +573,11 @@ def _compute_2x2_projector(
 
     U_M, S_M, V_M_h = _gauge_fixed_svd(M_prime)
     k = min(chi, S_M.shape[0])
+    # ε_T from the FULL spectrum (before truncation) — variPEPS §2.8.2
+    # indicator that drives ``chi_auto_bump``.  Issue #474.
+    from tenax.algorithms._ctm_truncation_error import compute_truncation_error
+
+    eps_T = compute_truncation_error(S_M, k)
     U_M = U_M[:, :k]
     S_M = S_M[:k]
     V_M_h = V_M_h[:k, :]
@@ -693,9 +702,12 @@ def _compute_2x2_projector(
     # adjoint solve recovers the env dependence on A without flowing
     # through jnp.linalg.svd, whose F_ij = 1/(s_i² - s_j²) backward NaN-s
     # on near-degenerate singular values of M_prime (typical at small D).
+    # ``eps_T`` is also stop_gradient'd — it's consumed only by the
+    # outer-loop auto-bump (#474), which is non-AD.
     return (
         jax.tree.map(jax.lax.stop_gradient, P_top),
         jax.tree.map(jax.lax.stop_gradient, P_bot),
+        jax.lax.stop_gradient(eps_T),
     )
 
 
@@ -803,7 +815,7 @@ def _compute_2x2_projector_symmetric(
     *,
     direction: str,
     base_charges: np.ndarray | None = None,
-) -> tuple[SymmetricTensor, SymmetricTensor]:
+) -> tuple[SymmetricTensor, SymmetricTensor, jax.Array]:
     """Block-sparse 2x2 Fishman projector for SymmetricTensor inputs.
 
     Mirrors the dense pipeline in :func:`_compute_2x2_projector` stage-for-stage
@@ -821,8 +833,12 @@ def _compute_2x2_projector_symmetric(
             chi_new is allocated per sector (added in Task 5; ignored in Task 2).
 
     Returns:
-        ``(P_top, P_bot)`` SymmetricTensor projectors with the same label /
-        flow conventions as the dense path's output.
+        ``(P_top, P_bot, eps_T)`` SymmetricTensor projectors with the same
+        label / flow conventions as the dense path's output, plus the
+        variPEPS §2.8.2 truncation-error scalar.  ``eps_T`` uses the
+        Frobenius identity ``‖S_full‖² = ‖M_prime‖_F²`` so the discarded
+        singular values aren't required explicitly — the block-sparse
+        SVD already truncates to ``chi`` (Issue #474).
     """
     from tenax.contraction.contractor import contract
     from tenax.linalg import svd as tensor_svd
@@ -969,6 +985,20 @@ def _compute_2x2_projector_symmetric(
             )
     U_Mp_T, Vh_Mp_T = _gauge_fix_symmetric_svd(U_Mp_T, Vh_Mp_T)
 
+    # ε_T via the Frobenius identity (Issue #474).  Block-sparse SVD
+    # truncates to ``chi`` so the discarded SVs aren't materialised; use
+    # ``‖M_prime‖_F² = ∑ σ²`` and subtract the kept tail.  Same metric as
+    # the dense path's ``compute_truncation_error(S_full, k)``.
+    mp_full_norm_sq = M_prime_T.norm() ** 2
+    kept_norm_sq = jnp.sum(jnp.abs(S_Mp) ** 2)
+    discarded_norm_sq = jnp.maximum(mp_full_norm_sq - kept_norm_sq, 0.0)
+    safe_total = jnp.where(mp_full_norm_sq > 0.0, mp_full_norm_sq, 1.0)
+    eps_T = jnp.where(
+        mp_full_norm_sq > 0.0,
+        jnp.sqrt(discarded_norm_sq / safe_total),
+        jnp.array(0.0, dtype=S_Mp.dtype).real,
+    )
+
     # ---- Stage 5: cross-projectors via bar() for the SVD adjoint. ----
     # Under tracing, the bond axis emerges in sector-block order rather than
     # global-descending order, so use jnp.max(S_Mp) for the spectrum max
@@ -1030,9 +1060,10 @@ def _compute_2x2_projector_symmetric(
             for lbl in ("chi_new_bot", "chi_outer", "fused_D2")
         )
     )
-    # Same stop_gradient treatment as the dense path — see the comment at
-    # the end of _compute_2x2_projector.
+    # Same stop_gradient treatment as the dense path — see the comment
+    # at the end of _compute_2x2_projector.  (#474)
     return (
         jax.tree.map(jax.lax.stop_gradient, P_top),
         jax.tree.map(jax.lax.stop_gradient, P_bot),
+        jax.lax.stop_gradient(eps_T),
     )
