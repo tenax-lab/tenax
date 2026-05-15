@@ -88,13 +88,32 @@ def _maybe_bump_chi(
     """
     if not ctm_cfg.chi_auto_bump:
         return ctm_cfg, env_cache
+    _logger.debug(
+        "_maybe_bump_chi: chi=%d eps_T=%.3e threshold=%.3e",
+        ctm_cfg.chi,
+        last_eps_t,
+        ctm_cfg.chi_auto_bump_eps,
+    )
     if last_eps_t <= ctm_cfg.chi_auto_bump_eps:
         return ctm_cfg, env_cache
     chi_new = ctm_cfg.chi + ctm_cfg.chi_auto_bump_step
     if ctm_cfg.chi_max is not None:
         chi_new = min(chi_new, ctm_cfg.chi_max)
     if chi_new <= ctm_cfg.chi:
+        _logger.info(
+            "_maybe_bump_chi: at chi_max=%d ceiling; eps_T=%.3e exceeded threshold %.3e but no headroom",
+            ctm_cfg.chi,
+            last_eps_t,
+            ctm_cfg.chi_auto_bump_eps,
+        )
         return ctm_cfg, env_cache  # at ceiling
+    _logger.info(
+        "_maybe_bump_chi: reactive bump chi %d -> %d (eps_T=%.3e > threshold=%.3e)",
+        ctm_cfg.chi,
+        chi_new,
+        last_eps_t,
+        ctm_cfg.chi_auto_bump_eps,
+    )
     return _apply_chi_bump(ctm_cfg, env_cache, chi_new, base_charges=base_charges)
 
 
