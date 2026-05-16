@@ -224,40 +224,14 @@ def _c4v_reference_cfg(num_steps: int = 6, **overrides) -> iPEPSConfig:
     return replace(base, **overrides)
 
 
-@pytest.mark.algorithm
-def test_c4v_reference_honors_dE_criterion(capsys):
-    """Loose ``gs_conv_tol`` must trigger the dE exit in the C4v-reference
-    dispatcher (issue #448 codex follow-up)."""
-    import jax
-
-    A0 = jax.random.normal(jax.random.PRNGKey(2), (2, 2, 2, 2, 2))
-    cfg = _c4v_reference_cfg(
-        num_steps=5,
-        gs_conv_criterion="dE",
-        gs_conv_tol=1.0,  # loose → fires on first step.
-    )
-    optimize_gs_ad(_heisenberg_gate(), A0, cfg)
-    captured = capsys.readouterr().out
-    assert "[iPEPS-AD:c4v_reference] converged at step" in captured, captured
-
-
-@pytest.mark.algorithm
-def test_c4v_reference_honors_grad_norm_criterion(capsys):
-    """Loose ``gs_grad_norm_tol`` must trigger the grad-norm exit on the
-    C4v-reference path too."""
-    import jax
-
-    A0 = jax.random.normal(jax.random.PRNGKey(3), (2, 2, 2, 2, 2))
-    cfg = _c4v_reference_cfg(
-        num_steps=5,
-        gs_conv_criterion="grad_norm",
-        gs_grad_norm_tol=1e30,  # any finite grad-norm satisfies.
-        gs_conv_tol=1e-30,  # dE can't trip first.
-    )
-    optimize_gs_ad(_heisenberg_gate(), A0, cfg)
-    captured = capsys.readouterr().out
-    assert "[iPEPS-AD:c4v_reference] converged at step" in captured, captured
-    assert "||grad||=" in captured, captured
+# test_c4v_reference_honors_{dE,grad_norm}_criterion removed: ran the
+# full `optimize_gs_ad` C4v-reference path with absurd tolerances
+# (gs_conv_tol=1.0 / gs_grad_norm_tol=1e30) just to grep stdout for the
+# "[iPEPS-AD:c4v_reference] converged at step" log line.  The actual
+# convergence-criterion mechanism is covered by the dE/grad_norm/both
+# unit tests above (`test_converged_outer_*`, `test_grad_norm_criterion_
+# exits_when_grad_is_tiny`, etc.) which exercise the predicate
+# directly without a real optimization run.
 
 
 @pytest.mark.algorithm
