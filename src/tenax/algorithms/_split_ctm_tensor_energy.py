@@ -956,11 +956,18 @@ def compute_energy_split_ctm_tensor_2site(
     else:
         H = hamiltonian_gate.reshape(d, d, d, d)
 
-    rdm_h = _rdm2x1_split_tensor_2site(A, B, env_A, env_B)
-    rdm_v = _rdm1x2_split_tensor_2site(A, B, env_A, env_B)
-    E_h = jnp.einsum("ijkl,ijkl->", rdm_h, H)
-    E_v = jnp.einsum("ijkl,ijkl->", rdm_v, H)
-    return (E_h + E_v).real
+    rdm_h_AB = _rdm2x1_split_tensor_2site(A, B, env_A, env_B)
+    rdm_h_BA = _rdm2x1_split_tensor_2site(B, A, env_B, env_A)
+    rdm_v_AB = _rdm1x2_split_tensor_2site(A, B, env_A, env_B)
+    rdm_v_BA = _rdm1x2_split_tensor_2site(B, A, env_B, env_A)
+    E = (
+        jnp.einsum("ijkl,ijkl->", rdm_h_AB, H)
+        + jnp.einsum("ijkl,ijkl->", rdm_h_BA, H)
+        + jnp.einsum("ijkl,ijkl->", rdm_v_AB, H)
+        + jnp.einsum("ijkl,ijkl->", rdm_v_BA, H)
+    )
+    # 4 NN bonds (2 A-B + 2 B-A) per [[0,1],[1,0]] unit cell / 2 unique sites.
+    return 0.5 * E.real
 
 
 def compute_energy_split_ctm_tensor_multisite(

@@ -693,6 +693,12 @@ def compute_energy_ctm_tensor_2site(
 ) -> jax.Array:
     """Compute energy per site for a 2-site checkerboard iPEPS.
 
+    For the ``[[0,1],[1,0]]`` checkerboard tiling, the unit cell has 4
+    NN bonds: 2 A-B and 2 B-A.  Sums all four (swapped (A,B) → (B,A) for
+    the B-starting bonds) and divides by the 2 unique tensors per site.
+    Issue #493: counting only A-B bonds drove unphysical drift on
+    \\\`gs_c4v=False\\\` bipartite when A↔B symmetry was broken.
+
     Uses native Tensor contractions for the RDM computation, avoiding
     densification of the chi-dimensional environment.
 
@@ -716,11 +722,18 @@ def compute_energy_ctm_tensor_2site(
     else:
         H = hamiltonian_gate.reshape(d, d, d, d)
 
-    rdm_h = _rdm2x1_tensor_2site(A, B, env_A, env_B)
-    rdm_v = _rdm1x2_tensor_2site(A, B, env_A, env_B)
-    E_h = jnp.einsum("ijkl,ijkl->", rdm_h, H)
-    E_v = jnp.einsum("ijkl,ijkl->", rdm_v, H)
-    return (E_h + E_v).real
+    rdm_h_AB = _rdm2x1_tensor_2site(A, B, env_A, env_B)
+    rdm_h_BA = _rdm2x1_tensor_2site(B, A, env_B, env_A)
+    rdm_v_AB = _rdm1x2_tensor_2site(A, B, env_A, env_B)
+    rdm_v_BA = _rdm1x2_tensor_2site(B, A, env_B, env_A)
+    E = (
+        jnp.einsum("ijkl,ijkl->", rdm_h_AB, H)
+        + jnp.einsum("ijkl,ijkl->", rdm_h_BA, H)
+        + jnp.einsum("ijkl,ijkl->", rdm_v_AB, H)
+        + jnp.einsum("ijkl,ijkl->", rdm_v_BA, H)
+    )
+    # 4 bonds (2 A-B + 2 B-A) / 2 unique sites per unit cell.
+    return 0.5 * E.real
 
 
 def compute_energy_ctm_tensor_multisite(

@@ -427,6 +427,43 @@ class TestTwoSiteCTM:
         for field in env_B:
             assert jnp.all(jnp.isfinite(field.todense()))
 
+    @pytest.mark.core
+    def test_2site_energy_invariant_under_AB_swap(
+        self, small_peps_pair_dense, heisenberg_gate
+    ):
+        """Issue #493: bipartite per-site energy must be symmetric under A↔B.
+
+        For a 2-site bipartite ansatz with the ``[[0,1],[1,0]]`` checkerboard
+        tiling, the unit cell has 4 NN bonds (2 A-B + 2 B-A).  The per-site
+        energy is invariant under swapping which sublattice is labelled A:
+        ``E(A, B, env_A, env_B) == E(B, A, env_B, env_A)``.
+
+        With random asymmetric (A, B), the old single-orientation formula
+        (only A-B bonds) violates this invariance; the fixed formula
+        (4-bond average) restores it.
+        """
+        A, B = small_peps_pair_dense  # seeds 42, 123 — deliberately asymmetric
+        chi = 6
+
+        env_A, env_B = ctm_tensor_2site(
+            A, B, chi=chi, max_iter=40, conv_tol=1e-8, recipe="1x1"
+        )
+        env_A_swap, env_B_swap = ctm_tensor_2site(
+            B, A, chi=chi, max_iter=40, conv_tol=1e-8, recipe="1x1"
+        )
+
+        E_AB = float(
+            compute_energy_ctm_tensor_2site(A, B, env_A, env_B, heisenberg_gate, d=2)
+        )
+        E_BA = float(
+            compute_energy_ctm_tensor_2site(
+                B, A, env_A_swap, env_B_swap, heisenberg_gate, d=2
+            )
+        )
+
+        # The energy must be the same up to CTM convergence noise.
+        np.testing.assert_allclose(E_AB, E_BA, atol=1e-6)
+
     def test_2site_symmetric_energy_matches_dense(
         self, small_peps_pair_symmetric, heisenberg_gate
     ):
