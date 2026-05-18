@@ -1616,13 +1616,17 @@ def _optimize_gs_ad_tensor(
                     if is_metric_lbfgs:
                         lbfgs_history.clear()
 
+                hz_counter = {"phi": 0, "dphi": 0}
+
                 def _phi(alpha):
+                    hz_counter["phi"] += 1
                     trial = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
                     return loss_fn_fwd(trial)
 
                 def _dphi(alpha):
+                    hz_counter["dphi"] += 1
                     trial = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
@@ -1643,6 +1647,13 @@ def _optimize_gs_ad_tensor(
                     max_step=2.0 * alpha0,
                     energy_bound=max(2.0, 2.0 * abs(best_energy)),
                 )
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD:1site-tensor] HZ probes phi={hz_counter['phi']} "
+                        f"dphi={hz_counter['dphi']} alpha={alpha:.3e} "
+                        f"converged={converged}",
+                        flush=True,
+                    )
                 if f_alpha < energy_float:
                     params = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
@@ -2724,13 +2735,17 @@ def _optimize_gs_ad_tensor_2site(
                     if is_metric_lbfgs:
                         lbfgs_history.clear()
 
+                hz_counter = {"phi": 0, "dphi": 0}
+
                 def _phi(alpha):
+                    hz_counter["phi"] += 1
                     trial = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
                     return loss_fn_fwd(trial)
 
                 def _dphi(alpha):
+                    hz_counter["dphi"] += 1
                     trial = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
@@ -2751,6 +2766,13 @@ def _optimize_gs_ad_tensor_2site(
                     max_step=2.0 * alpha0,
                     energy_bound=max(2.0, 2.0 * abs(best_energy)),
                 )
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD:2site-tensor] HZ probes phi={hz_counter['phi']} "
+                        f"dphi={hz_counter['dphi']} alpha={alpha:.3e} "
+                        f"converged={converged}",
+                        flush=True,
+                    )
                 if f_alpha < energy_float:
                     params = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
@@ -3635,13 +3657,17 @@ def _optimize_gs_ad_multisite(
                     if is_metric_lbfgs:
                         lbfgs_history.clear()
 
+                hz_counter = {"phi": 0, "dphi": 0}
+
                 def _phi(alpha):
+                    hz_counter["phi"] += 1
                     trial = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
                     return loss_fn_fwd(trial)
 
                 def _dphi(alpha):
+                    hz_counter["dphi"] += 1
                     trial = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
@@ -3662,6 +3688,13 @@ def _optimize_gs_ad_multisite(
                     max_step=2.0 * alpha0,
                     energy_bound=max(2.0, 2.0 * abs(best_energy)),
                 )
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD:multisite-tensor] HZ probes phi={hz_counter['phi']} "
+                        f"dphi={hz_counter['dphi']} alpha={alpha:.3e} "
+                        f"converged={converged}",
+                        flush=True,
+                    )
                 if f_alpha < energy_float:
                     params = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
