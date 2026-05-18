@@ -488,11 +488,14 @@ def _log_ad_step(
     energy: float,
     delta_energy: float,
     best_energy: float,
+    *,
+    grad_norm: float | None = None,
 ) -> None:
     delta_str = "N/A" if not math.isfinite(delta_energy) else f"{delta_energy:.3e}"
+    grad_str = "" if grad_norm is None else f" |g|={grad_norm:.3e}"
     print(
         f"[iPEPS-AD:{backend}] step {step + 1}/{num_steps} "
-        f"E={energy:.10f} dE={delta_str} E_best={best_energy:.10f}",
+        f"E={energy:.10f} dE={delta_str}{grad_str} E_best={best_energy:.10f}",
         flush=True,
     )
 
@@ -1371,6 +1374,7 @@ def _optimize_gs_ad_tensor(
             _accepted_best_this_iter = True
 
         delta_energy = abs(energy_float - prev_energy)
+        grad_norm_val = _grad_l2_norm(grads)
         logged = False
         if config.gs_verbose and _should_log_step(
             step, config.gs_num_steps, log_interval
@@ -1382,16 +1386,11 @@ def _optimize_gs_ad_tensor(
                 energy_float,
                 delta_energy,
                 best_energy,
+                grad_norm=grad_norm_val,
             )
             logged = True
 
         prev_energy = energy_float
-
-        grad_norm_val = (
-            _grad_l2_norm(grads)
-            if config.gs_conv_criterion in ("grad_norm", "both")
-            else None
-        )
         if _converged_outer(config, delta_energy, grad_norm_val):
             # Convergence break short-circuits the end-of-iter bump. If
             # the energy stalled because χ is too small (high eps_T from
@@ -1503,6 +1502,7 @@ def _optimize_gs_ad_tensor(
                         energy_float,
                         delta_energy,
                         best_energy,
+                        grad_norm=grad_norm_val,
                     )
                 _log_ad_converged(
                     "1site-tensor",
@@ -2457,6 +2457,7 @@ def _optimize_gs_ad_tensor_2site(
             best_env_cache_2s = dict(_env_cache_2s)  # snapshot for warm-start (#317)
 
         delta_energy = abs(energy_float - prev_energy)
+        grad_norm_val = _grad_l2_norm(grads)
         logged = False
         if config.gs_verbose and _should_log_step(
             step, config.gs_num_steps, log_interval
@@ -2468,16 +2469,11 @@ def _optimize_gs_ad_tensor_2site(
                 energy_float,
                 delta_energy,
                 best_energy,
+                grad_norm=grad_norm_val,
             )
             logged = True
 
         prev_energy = energy_float
-
-        grad_norm_val = (
-            _grad_l2_norm(grads)
-            if config.gs_conv_criterion in ("grad_norm", "both")
-            else None
-        )
         if _converged_outer(config, delta_energy, grad_norm_val):
             # #455 PR2: at non-final χ stages, treat convergence as a
             # signal to advance to the next stage rather than exit.
@@ -2568,6 +2564,7 @@ def _optimize_gs_ad_tensor_2site(
                         energy_float,
                         delta_energy,
                         best_energy,
+                        grad_norm=grad_norm_val,
                     )
                 _log_ad_converged(
                     "2site-tensor",
@@ -3403,6 +3400,7 @@ def _optimize_gs_ad_multisite(
             best_env_cache = dict(_env_cache)
 
         delta_energy = abs(energy_float - prev_energy)
+        grad_norm_val = _grad_l2_norm(grads)
         logged = False
         if config.gs_verbose and _should_log_step(
             step, config.gs_num_steps, log_interval
@@ -3414,6 +3412,7 @@ def _optimize_gs_ad_multisite(
                 energy_float,
                 delta_energy,
                 best_energy,
+                grad_norm=grad_norm_val,
             )
             logged = True
 
@@ -3431,11 +3430,6 @@ def _optimize_gs_ad_multisite(
         # ``gs_num_steps`` even when the user explicitly opted into a
         # loose ``gs_grad_norm_tol`` for early-stop (codex #449
         # follow-up).
-        grad_norm_val = (
-            _grad_l2_norm(grads)
-            if config.gs_conv_criterion in ("grad_norm", "both")
-            else None
-        )
         needs_warmup = config.gs_conv_criterion in ("dE", "both")
         warmup_ok = (not needs_warmup) or (step > 5 and stall_count == 0)
         if _converged_outer(config, delta_energy, grad_norm_val) and warmup_ok:
@@ -3526,6 +3520,7 @@ def _optimize_gs_ad_multisite(
                         energy_float,
                         delta_energy,
                         best_energy,
+                        grad_norm=grad_norm_val,
                     )
                 _log_ad_converged(
                     "multisite",
