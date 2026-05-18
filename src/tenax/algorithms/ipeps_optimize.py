@@ -693,6 +693,15 @@ def optimize_gs_ad(
     # See docs/plans/2026-04-13-multisite-c4v-reference-ad-plan.md Task 8.
     config = _resolve_projector_backward(config)
 
+    # Checkpointing is currently wired only for the 2-site path; 1-site
+    # and multisite land in follow-up PRs to feat/ipeps-checkpoint-2site.
+    if config.gs_checkpoint_path is not None and config.unit_cell != "2site":
+        raise NotImplementedError(
+            "iPEPSConfig.gs_checkpoint_path is currently supported only for "
+            "unit_cell='2site'. 1-site and multisite checkpoint wiring land "
+            "in follow-up PRs (see PR #497)."
+        )
+
     if isinstance(config.unit_cell, Lattice):
         return _optimize_gs_ad_multisite(hamiltonian_gate, A_init, config)
 
@@ -2107,6 +2116,13 @@ def _optimize_gs_ad_tensor_2site(
             )
     import optax
 
+    from tenax.algorithms._checkpoint import (
+        _config_to_dict,
+        checkpoint_exists,
+        load_checkpoint,
+        save_checkpoint,
+        validate_config,
+    )
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor import (
         compute_energy_ctm_tensor_2site,
@@ -2344,7 +2360,62 @@ def _optimize_gs_ad_tensor_2site(
                 _build_double_layer_tensor(_A_init)
             )
 
-    for step in range(config.gs_num_steps):
+    # ---- Checkpoint resume ----------------------------------------
+    # When gs_resume=True and a checkpoint exists at gs_checkpoint_path,
+    # restore optimizer state and pick up at step `saved_step + 1`.
+    # All other branches keep the fresh-init values set above.
+    start_step = 0
+    if config.gs_resume and checkpoint_exists(config.gs_checkpoint_path):
+        bundle = load_checkpoint(config.gs_checkpoint_path)
+        validate_config(bundle.get("config", {}), config)
+
+        params = bundle["params"]
+        best_params = bundle["best_params"]
+        best_energy = float(bundle["best_energy"])
+        prev_energy = float(bundle["prev_energy"])
+        _env_cache_2s.clear()
+        _env_cache_2s.update(bundle.get("env_cache", {}))
+        best_env_cache_2s = dict(bundle.get("best_env_cache", {}))
+        stall_count = int(bundle.get("stall_count", 0))
+
+        if optimizer is not None and bundle.get("opt_state") is not None:
+            opt_state = bundle["opt_state"]
+        lbfgs_history = list(bundle.get("lbfgs_history") or [])
+        prev_params_flat = bundle.get("prev_params_flat")
+        prev_grad_flat = bundle.get("prev_grad_flat")
+        cg_direction = bundle.get("cg_direction")
+        prev_grad = bundle.get("prev_grad")
+        prev_precond_grad = bundle.get("prev_precond_grad")
+
+        current_stage_idx = int(bundle.get("current_stage_idx", 0))
+        stage_start_step = int(bundle.get("stage_start_step", 0))
+        saved_chi = bundle.get("ctm_cfg_chi")
+        if saved_chi is not None and int(saved_chi) != ctm_cfg_2s.chi:
+            ctm_cfg_2s = _replace(ctm_cfg_2s, chi=int(saved_chi))
+        saved_conv_tol = bundle.get("current_conv_tol")
+        if saved_conv_tol is not None:
+            _current_conv_tol_2s = float(saved_conv_tol)
+            ctm_cfg_2s = _replace(ctm_cfg_2s, conv_tol=_current_conv_tol_2s)
+        saved_patience = bundle.get("current_patience")
+        if saved_patience is not None:
+            _current_patience_2s = (
+                int(saved_patience) if saved_patience is not None else None
+            )
+            ctm_cfg_2s = _replace(ctm_cfg_2s, plateau_patience=_current_patience_2s)
+
+        start_step = int(bundle["step"]) + 1
+        if config.gs_verbose:
+            print(
+                f"[iPEPS-AD:2site-tensor] resumed from step {start_step} "
+                f"(best E={best_energy:.10f}, chi={ctm_cfg_2s.chi})",
+                flush=True,
+            )
+
+    for step in range(start_step, config.gs_num_steps):
+        # Snapshot for end-of-step checkpoint "is_new_best" detection.
+        # ``best_energy`` only decreases, so a strict < comparison after
+        # the step body identifies a freshly-accepted best.
+        _best_energy_at_step_start = best_energy
         # Update conv_tol if schedule is active
         if _conv_tol_schedule_2s is not None:
             new_tol = _get_scheduled_conv_tol_2s(step, config.gs_num_steps)
@@ -3021,6 +3092,47 @@ def _optimize_gs_ad_tensor_2site(
                 prev_precond_grad = None
             if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
                 opt_state = optimizer.init(params)
+
+        # ---- Checkpoint save -----------------------------------------
+        # Write ``ckpt.last.pkl`` every K steps and at every chi-bump
+        # boundary; write ``ckpt.best.pkl`` whenever this step accepted
+        # a new best energy.  Both files are atomic (tmp + os.replace).
+        if config.gs_checkpoint_path is not None:
+            _chi_changed_this_step = ctm_cfg_2s.chi != chi_before
+            _should_save_last = (
+                step + 1
+            ) % config.gs_checkpoint_every == 0 or _chi_changed_this_step
+            _is_new_best = best_energy < _best_energy_at_step_start
+            if _should_save_last or _is_new_best:
+                _ckpt_state = {
+                    "step": step,
+                    "config": _config_to_dict(config),
+                    "params": params,
+                    "best_params": best_params,
+                    "best_energy": float(best_energy),
+                    "prev_energy": float(prev_energy),
+                    "env_cache": dict(_env_cache_2s),
+                    "best_env_cache": dict(best_env_cache_2s),
+                    "opt_state": opt_state,
+                    "lbfgs_history": list(lbfgs_history),
+                    "prev_params_flat": prev_params_flat,
+                    "prev_grad_flat": prev_grad_flat,
+                    "cg_direction": cg_direction,
+                    "prev_grad": prev_grad,
+                    "prev_precond_grad": prev_precond_grad,
+                    "stall_count": stall_count,
+                    "current_stage_idx": current_stage_idx,
+                    "stage_start_step": stage_start_step,
+                    "ctm_cfg_chi": ctm_cfg_2s.chi,
+                    "current_conv_tol": _current_conv_tol_2s,
+                    "current_patience": _current_patience_2s,
+                }
+                if _should_save_last:
+                    save_checkpoint(_ckpt_state, config.gs_checkpoint_path)
+                if _is_new_best:
+                    save_checkpoint(
+                        _ckpt_state, config.gs_checkpoint_path, is_best=True
+                    )
 
     # Re-evaluate both final params and best_params with fully converged
     # fresh CTM.  In-loop energies use warm-started CTM that can produce
