@@ -125,6 +125,103 @@ def test_resume_no_op_when_already_completed(tmp_path):
     assert abs(E_b - E_a) < 1e-3, f"E_a={E_a!r}, E_b={E_b!r}"
 
 
+@pytest.mark.algorithm
+def test_resume_rejects_different_hamiltonian_gate(tmp_path):
+    """A silent gate swap on resume must be a fatal error.
+
+    Phase A writes a checkpoint optimized against Heisenberg; phase B
+    tries to resume against a different (Ising-like) gate with the
+    same shape.  ``_optimize_gs_ad_tensor_2site`` must raise rather
+    than continue with weights tuned for the wrong Hamiltonian.
+    (Codex P2 review on PR #497.)
+    """
+    heisenberg = _heisenberg_gate()
+    ckpt_path = str(tmp_path / "ckpt")
+
+    cfg_a = _base_cfg(ckpt_path, gs_num_steps=2, gs_resume=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optimize_gs_ad(heisenberg, None, cfg_a)
+
+    # Same shape, different bytes: transverse-field Ising-like (Sx⊗Sx
+    # only).  Same (d,d,d,d) layout, completely different physics.
+    sx = 0.5 * jnp.array([[0.0, 1.0], [1.0, 0.0]])
+    ising = jnp.einsum("ij,kl->ikjl", sx, sx).real
+    assert ising.shape == heisenberg.shape
+
+    cfg_b = _base_cfg(ckpt_path, gs_num_steps=4, gs_resume=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError, match="hamiltonian gate has changed"):
+            optimize_gs_ad(ising, None, cfg_b)
+
+
+@pytest.mark.algorithm
+def test_resume_discards_optimizer_state_on_optimizer_change(tmp_path):
+    """Changing ``gs_optimizer`` across resume warns and starts the
+    new optimizer's history fresh, rather than installing a saved
+    L-BFGS state into Adam (or vice versa) — which would crash on the
+    next ``optimizer.update``.  (Codex P2 review on PR #497.)
+
+    Tests the L-BFGS → Adam transition: a saved Adam ``opt_state``
+    cannot be a valid metric-L-BFGS state, so we must discard it on
+    resume.  The optimizer must complete the resumed step without
+    raising.
+    """
+    gate = _heisenberg_gate()
+    ckpt_path = str(tmp_path / "ckpt")
+
+    # Phase A: write checkpoint with optax-lbfgs (gs_metric_precond=False)
+    cfg_a = iPEPSConfig(
+        unit_cell="2site",
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4),
+        gs_num_steps=2,
+        gs_checkpoint_path=ckpt_path,
+        gs_checkpoint_every=1,
+        gs_optimizer="lbfgs",
+        gs_metric_precond=False,  # optax-backed LBFGS, opt_state populated
+        gs_c4v=True,
+        su_init=False,
+        gs_conv_criterion="grad_norm",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optimize_gs_ad(gate, None, cfg_a)
+
+    saved = load_checkpoint(ckpt_path)
+    assert saved is not None
+    assert saved["opt_state"] is not None, "phase A should have written opt_state"
+
+    # Phase B: resume with metric-LBFGS — different optimizer state layout.
+    cfg_b = iPEPSConfig(
+        unit_cell="2site",
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4),
+        gs_num_steps=4,
+        gs_checkpoint_path=ckpt_path,
+        gs_checkpoint_every=1,
+        gs_resume=True,
+        gs_optimizer="lbfgs",
+        gs_metric_precond=True,  # changed — opt_state becomes None
+        gs_c4v=True,
+        su_init=False,
+        gs_conv_criterion="grad_norm",
+    )
+
+    # Must warn (about discarded optimizer history) but not raise.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        optimize_gs_ad(gate, None, cfg_b)
+    discard_warnings = [
+        w for w in caught if "discarding saved optimizer history" in str(w.message)
+    ]
+    assert discard_warnings, (
+        "expected a warning about discarded optimizer history; "
+        f"got: {[str(w.message) for w in caught]}"
+    )
+
+
 @pytest.mark.core
 def test_checkpoint_path_rejects_non_2site_paths():
     """1-site and multisite paths must raise NotImplementedError when a

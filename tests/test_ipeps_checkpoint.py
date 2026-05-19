@@ -18,6 +18,7 @@ import pytest
 from tenax.algorithms._checkpoint import (
     CHECKPOINT_SCHEMA_VERSION,
     checkpoint_exists,
+    gate_fingerprint,
     load_checkpoint,
     save_checkpoint,
     validate_config,
@@ -158,6 +159,25 @@ def test_validate_config_soft_mismatch_warns():
         warnings.simplefilter("always")
         validate_config(saved, current)
     assert any("gs_num_steps" in str(w.message) for w in caught)
+
+
+@pytest.mark.core
+def test_gate_fingerprint_round_trip_and_changes_with_bytes():
+    """Same bytes → same fingerprint; different bytes → different.
+
+    Also verifies that ``jnp.array`` and ``np.array`` with identical
+    values produce the same fingerprint (both go through
+    ``np.asarray``).
+    """
+    g1 = jnp.array([[1.0, 0.0], [0.0, -1.0]])
+    g2 = jnp.array([[1.0, 0.0], [0.0, -1.0]])  # same bytes
+    g3 = jnp.array([[1.0, 0.0], [0.0, 1.0]])  # different bytes (sign flip)
+    fp1, fp2, fp3 = (gate_fingerprint(g) for g in (g1, g2, g3))
+    assert fp1 == fp2
+    assert fp1 != fp3
+    # Cross-typesystem stability: jnp ↔ np.
+    fp1_np = gate_fingerprint(np.asarray(g1))
+    assert fp1 == fp1_np
 
 
 @pytest.mark.core

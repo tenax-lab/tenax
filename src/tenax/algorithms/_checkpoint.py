@@ -36,6 +36,7 @@ is allowed to differ with a warning.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import pickle
 import subprocess
@@ -44,7 +45,29 @@ from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+import numpy as np
+
 CHECKPOINT_SCHEMA_VERSION = 1
+
+
+def gate_fingerprint(gate: Any) -> tuple[tuple[int, ...], str, str]:
+    """Stable identifier for a Hamiltonian gate.
+
+    Returns ``(shape, dtype_str, sha256_hex)``.  Used to detect a
+    silent gate swap on resume: the checkpoint records the
+    fingerprint of the gate it was optimized against, and
+    ``_optimize_gs_ad_tensor_2site`` refuses to resume if the live
+    gate hashes to a different value.
+
+    Same shape + same bytes is treated as "same gate" even across
+    JAX-vs-NumPy conversions: both go through ``np.asarray`` first.
+    """
+    arr = np.asarray(gate)
+    return (
+        tuple(arr.shape),
+        str(arr.dtype),
+        hashlib.sha256(arr.tobytes()).hexdigest(),
+    )
 
 
 def _tenax_git_sha() -> str | None:
