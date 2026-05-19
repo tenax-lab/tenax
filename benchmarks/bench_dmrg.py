@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from tenax import DMRGConfig, build_mpo_heisenberg, build_random_mps, dmrg
+from tenax import (
+    DMRGConfig,
+    build_mpo_heisenberg,
+    build_random_symmetric_mps,
+    dmrg,
+)
 
 _SIZES = {
     "small": {"L": 20, "chi": 32, "sweeps": 5, "init_bond_dim": 8},
@@ -20,7 +25,11 @@ def get_benchmarks(dtype=jnp.float64) -> list[dict]:
         def _make_fns(p=p, dtype=dtype):
             def setup():
                 mpo = build_mpo_heisenberg(p["L"], dtype=dtype)
-                mps = build_random_mps(p["L"], bond_dim=p["init_bond_dim"], dtype=dtype)
+                # build_mpo_heisenberg returns a symmetric (U(1)) MPO, so the
+                # initial MPS must also be symmetric — dmrg() rejects mixed types.
+                mps = build_random_symmetric_mps(
+                    p["L"], bond_dim=p["init_bond_dim"], dtype=dtype
+                )
                 config = DMRGConfig(
                     max_bond_dim=p["chi"],
                     num_sweeps=p["sweeps"],
