@@ -223,6 +223,22 @@ def test_resume_discards_optimizer_state_on_optimizer_change(tmp_path):
 
 
 @pytest.mark.core
+def test_resume_with_missing_checkpoint_raises(tmp_path):
+    """``gs_resume=True`` with no checkpoint file must raise fast.
+
+    Silent fresh-init on a typo'd / deleted / never-written
+    checkpoint path would discard the user's intended long-run state
+    and start overwriting the wrong directory.  (Codex P2 review on
+    PR #497.)
+    """
+    gate = _heisenberg_gate()
+    missing_path = str(tmp_path / "does_not_exist")
+    cfg = _base_cfg(missing_path, gs_num_steps=2, gs_resume=True)
+    with pytest.raises(FileNotFoundError, match="no checkpoint found"):
+        optimize_gs_ad(gate, None, cfg)
+
+
+@pytest.mark.core
 def test_checkpoint_path_rejects_non_2site_paths():
     """1-site and multisite paths must raise NotImplementedError when a
     checkpoint path is requested (only 2-site is wired in this PR)."""

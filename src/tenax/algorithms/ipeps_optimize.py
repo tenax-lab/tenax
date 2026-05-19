@@ -2367,7 +2367,21 @@ def _optimize_gs_ad_tensor_2site(
     # All other branches keep the fresh-init values set above.
     _gate_fp = gate_fingerprint(gate) if config.gs_checkpoint_path is not None else None
     start_step = 0
-    if config.gs_resume and checkpoint_exists(config.gs_checkpoint_path):
+    if config.gs_resume:
+        # Fail fast on a typo'd / deleted / never-written checkpoint
+        # path rather than silently falling through to fresh init —
+        # the user explicitly asked to resume, and a silent fresh
+        # start would discard their intended long-run state and begin
+        # overwriting checkpoints in the wrong place (Codex P2 review
+        # on PR #497).
+        if not checkpoint_exists(config.gs_checkpoint_path):
+            raise FileNotFoundError(
+                f"gs_resume=True but no checkpoint found at "
+                f"{config.gs_checkpoint_path!r} (looked for "
+                f"'ckpt.last.pkl').  Either point gs_checkpoint_path "
+                f"at the directory of a prior run, or set "
+                f"gs_resume=False to start fresh."
+            )
         bundle = load_checkpoint(config.gs_checkpoint_path)
         validate_config(bundle.get("config", {}), config)
 
