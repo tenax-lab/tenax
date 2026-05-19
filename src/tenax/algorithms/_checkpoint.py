@@ -80,6 +80,28 @@ def _config_to_dict(config: Any) -> dict:
 
     Uses ``dataclasses.asdict`` which recurses into nested dataclasses
     (e.g. ``CTMConfig``) and returns a JSON-pickleable structure.
+
+    Known limitations (unreachable in the 2-site-only scope wired in
+    PR #497; relevant to 1-site / multisite follow-ups):
+
+    * ``unit_cell=Lattice(...)`` — ``Lattice.neighbor_map`` is a
+      ``MappingProxyType`` set in ``Lattice.__post_init__``; ``asdict``
+      deepcopies through it and raises
+      ``TypeError: cannot pickle 'mappingproxy' object``.  Fix when the
+      multisite path is wired: convert ``neighbor_map`` to a plain dict
+      before snapshotting (or store a stable Lattice identifier).
+    * ``cg_gates=CGGates(...)`` — ``CGGates`` is a dataclass with
+      ``jnp.ndarray`` fields; ``asdict`` produces nested arrays and
+      ``validate_config`` below then raises
+      ``ValueError: truth value of an array...`` on dict-eq comparison.
+      Fix when the 1-site cg_gates path is wired: special-case
+      ``cg_gates`` with an array-aware (hash or ``np.array_equal``)
+      comparator.
+
+    Both paths are currently blocked by the dispatch guard at
+    ``optimize_gs_ad`` (``ipeps_optimize.py``), which raises
+    ``NotImplementedError`` if ``gs_checkpoint_path`` is set with a
+    non-``"2site"`` ``unit_cell``.  See PR #497 review threads.
     """
     if is_dataclass(config):
         return asdict(config)
