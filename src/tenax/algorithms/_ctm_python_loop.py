@@ -275,10 +275,13 @@ def python_loop_ctm_converge(
 
         # variPEPS-style in-CTM χ-bump (Issue #492).  If the projector
         # SVD's normalised smallest kept SV is still above threshold, the
-        # truncation cut hasn't reached a clean gap — grow chi and keep
-        # iterating.  ``continue`` skips the convergence check for this
-        # iter since the env was just zero-padded and is no longer
-        # representative of the converged fixed point at the new chi.
+        # truncation cut hasn't reached a clean gap — grow chi, zero-pad
+        # the env to the new shape, and immediately re-sweep at the new
+        # chi so the env we hold is converged-at-current-chi rather than
+        # a half-formed zero-padded one.  Without the post-bump sweep, a
+        # bump on the last iteration (``i == remaining - 1``) would exit
+        # with a zero-padded env that's never been swept at the new chi
+        # (codex review on PR #513).
         if (
             ctmrg_heuristic_increase_chi
             and last_max_smallest_S > ctmrg_heuristic_increase_chi_threshold
@@ -294,6 +297,20 @@ def python_loop_ctm_converge(
                 )
                 for c in envs
             }
+            # Force-sweep once at the new chi so the returned env is
+            # always swept at chi_current, even if this is the last iter.
+            envs, _max_eps, _max_S = jit_step(
+                site_tensors,
+                envs,
+                chi=chi_current,
+                projector_method=projector_method,
+                renormalize=renormalize,
+                projector_backward=projector_backward,
+            )
+            last_max_eps = float(_max_eps)
+            last_max_smallest_S = float(_max_S)
+            if gauge_fix_fn is not None:
+                envs = {c: gauge_fix_fn(envs[c]) for c in envs}
             # Reset plateau tracking — diff metrics across a chi-bump are
             # not meaningful.  Best-tracking restarts at the new chi.
             prev_svs = {}

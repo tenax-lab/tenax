@@ -128,6 +128,43 @@ class TestInCtmChiBumpHook:
             f"final_chi={info.final_chi} must respect chi_max=4 ceiling."
         )
 
+    def test_returned_env_is_post_bump_swept(self):
+        """After an in-CTM bump, the returned env must have been swept
+        at the new chi — not just zero-padded.  Regression for codex
+        review on PR #513.  We exercise the last-iter bump branch by
+        running with ``max_iter=2``, ``min_iter=2`` so a bump on iter 1
+        (the final allowed sweep) must still produce a swept env.
+        """
+        A = _make_random_A(D=2, d=2)
+        site_tensors = {(0, 0): A}
+        envs, info = python_loop_ctm_converge(
+            site_tensors,
+            SINGLE_SITE_NEIGHBORS,
+            chi=2,
+            max_iter=2,
+            min_iter=2,
+            conv_tol=1e-12,  # never converge → bump will fire each iter
+            ctmrg_heuristic_increase_chi=True,
+            ctmrg_heuristic_increase_chi_threshold=1e-9,
+            ctmrg_heuristic_increase_chi_step_size=2,
+            chi_max=4,
+        )
+        # If the env were only zero-padded (no post-bump sweep), the
+        # corner tensors' new χ slots would be zero and the corner
+        # singular values would have at most ``chi_pre_bump`` non-zero
+        # entries.  With the post-bump sweep, all ``chi_current`` slots
+        # carry real spectral weight.
+        from tenax.algorithms._ctm_tensor_convergence import _corner_singular_values
+
+        c1_svs = _corner_singular_values(envs[(0, 0)].C1)
+        nonzero_count = int(jnp.sum(jnp.abs(c1_svs) > 1e-12))
+        assert info.final_chi > 2, "bump must have fired"
+        assert nonzero_count > 2, (
+            f"returned env's C1 has {nonzero_count} non-zero SVs but bump "
+            f"raised chi to {info.final_chi}; this indicates the env was "
+            "returned still zero-padded without a post-bump sweep."
+        )
+
     def test_smallest_S_is_populated(self):
         """info.max_smallest_S returns a finite non-trivial number from the
         JIT'd CTM step (previously 0.0 placeholder).
