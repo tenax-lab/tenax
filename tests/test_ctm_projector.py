@@ -113,7 +113,7 @@ def _build_grown_corners_converged(A, chi, n_sweeps=2):
     envs = {(0, 0): initialize_ctm_tensor_env(A, chi)}
     double_layers = {(0, 0): _build_double_layer_tensor(A)}
     for _ in range(n_sweeps):
-        envs, _ = _ctm_tensor_sweep_multisite(
+        envs, _, _ = _ctm_tensor_sweep_multisite(
             envs, double_layers, SINGLE_SITE_NEIGHBORS, chi, True, "svd"
         )
     env = envs[(0, 0)]

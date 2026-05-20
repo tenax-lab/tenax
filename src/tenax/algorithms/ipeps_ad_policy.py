@@ -117,6 +117,15 @@ def ctm_converge_kwargs(
         "chi_ramp": ctm_cfg.chi_ramp,
         "env_init": env_init,
         "plateau_patience": ctm_cfg.plateau_patience,
+        # In-CTM χ-bump (variPEPS §2.8.2; Issue #492).
+        "ctmrg_heuristic_increase_chi": ctm_cfg.ctmrg_heuristic_increase_chi,
+        "ctmrg_heuristic_increase_chi_threshold": (
+            ctm_cfg.ctmrg_heuristic_increase_chi_threshold
+        ),
+        "ctmrg_heuristic_increase_chi_step_size": (
+            ctm_cfg.ctmrg_heuristic_increase_chi_step_size
+        ),
+        "chi_max": ctm_cfg.chi_max,
     }
 
 

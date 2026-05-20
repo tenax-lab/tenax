@@ -278,7 +278,7 @@ def _ctm_tensor_sweep_multisite(
     projector_method: str = "svd",
     projector_backward: str = "auto",
     recipe: str = "2x2",
-) -> tuple[dict[Coord, CTMTensorEnv], jax.Array]:
+) -> tuple[dict[Coord, CTMTensorEnv], jax.Array, jax.Array]:
     """One full multisite CTM sweep over all sites and directions.
 
     Args:
@@ -300,11 +300,11 @@ def _ctm_tensor_sweep_multisite(
                         compatibility / regression bisection.
 
     Returns:
-        ``(envs, max_eps)`` — updated per-coord env dict and the max
-        truncation error (JAX scalar) across all moves in this sweep.
-        Tracked on both the 1x1 path (per-move eps_T from the SVD/eigh
-        projector) and the 2x2 path (per-plaquette eps_T from the cross-
-        projector SVD; Issue #474).
+        ``(envs, max_eps, max_smallest_S)`` — updated per-coord env dict,
+        the max truncation error across all moves (drives end-of-outer-step
+        ``chi_auto_bump``; Issue #474), and the max ``norm_smallest_S``
+        across all projector SVDs (drives in-CTM χ-bump; Issue #492).
+        ``max_smallest_S`` is 0.0 on the 1x1 path (not yet tracked there).
     """
     # Extract base charges from any double-layer tensor for projector stabilization
     base_charges = None
@@ -320,6 +320,7 @@ def _ctm_tensor_sweep_multisite(
 
     all_coords = list(envs.keys())
     max_eps = jnp.asarray(0.0)
+    max_smallest_S = jnp.asarray(0.0)
     if recipe == "1x1":
         for direction, move_fn in _DIRECTION_MOVES:
             for coord in _sort_coords_for_direction(all_coords, direction):
@@ -372,31 +373,37 @@ def _ctm_tensor_sweep_multisite(
             envs_old = dict(envs)
             # Phase 1: precompute projector pairs anchored at every cell.
             # ``_compute_plaquette_projector_pair`` returns
-            # ``(P_top, P_bot, eps_T)`` (Issue #474).  Strip ``eps_T`` here
-            # and track the running max across all (direction × cell)
-            # computations so the 2x2 branch returns a real
-            # ``max_truncation_error`` instead of the historical
-            # 0.0 placeholder.
+            # ``(P_top, P_bot, eps_T, smallest_S)`` (Issues #474 / #492).
+            # Strip the scalars here and track running aggregates across
+            # all (direction × cell) computations.  ``max_eps`` drives the
+            # end-of-outer-step ``chi_auto_bump``; ``max_smallest_S``
+            # drives the in-CTM χ-bump (bump when ANY direction's normalized
+            # smallest kept SV exceeds the threshold — variPEPS semantics).
             projectors: dict[Coord, tuple] = {}
             for s_anchor in all_coords:
                 s_TR = neighbors[s_anchor]["right"]
                 s_BL = neighbors[s_anchor]["bottom"]
                 s_BR = neighbors[s_TR]["bottom"]
-                P_top, P_bot, eps_T_plaq = _compute_plaquette_projector_pair(
-                    envs_old[s_anchor],
-                    envs_old[s_TR],
-                    envs_old[s_BL],
-                    envs_old[s_BR],
-                    double_layers[s_anchor],
-                    double_layers[s_TR],
-                    double_layers[s_BL],
-                    double_layers[s_BR],
-                    chi,
-                    direction,
-                    base_charges=base_charges,
+                P_top, P_bot, eps_T_plaq, smallest_S_plaq = (
+                    _compute_plaquette_projector_pair(
+                        envs_old[s_anchor],
+                        envs_old[s_TR],
+                        envs_old[s_BL],
+                        envs_old[s_BR],
+                        double_layers[s_anchor],
+                        double_layers[s_TR],
+                        double_layers[s_BL],
+                        double_layers[s_BR],
+                        chi,
+                        direction,
+                        base_charges=base_charges,
+                    )
                 )
                 projectors[s_anchor] = (P_top, P_bot)
                 max_eps = jnp.maximum(max_eps, jnp.asarray(eps_T_plaq))
+                max_smallest_S = jnp.maximum(
+                    max_smallest_S, jnp.asarray(smallest_S_plaq)
+                )
 
             # Phase 2: absorb per cell using TWO plaquettes' projectors.
             new_envs: dict[Coord, CTMTensorEnv] = {}
@@ -498,7 +505,7 @@ def _ctm_tensor_sweep_multisite(
         raise ValueError(f"Unknown CTM recipe {recipe!r}: expected '1x1' or '2x2'.")
     if renormalize:
         envs = {c: _renormalize_tensor_env(e) for c, e in envs.items()}
-    return envs, max_eps
+    return envs, max_eps, max_smallest_S
 
 
 # ------------------------------------------------------------------ #
@@ -698,7 +705,7 @@ def _ctm_tensor_multisite(
     if projector_method == "qr" and qr_warmup_steps > 0:
         warmup = min(qr_warmup_steps, max_iter)
         for _ in range(warmup):
-            envs, _ = _ctm_tensor_sweep_multisite(
+            envs, _, _ = _ctm_tensor_sweep_multisite(
                 envs,
                 double_layers,
                 neighbors,
@@ -712,7 +719,7 @@ def _ctm_tensor_multisite(
 
     prev_svs: dict[Coord, jax.Array] = {}
     for _ in range(max_iter):
-        envs, _ = _ctm_tensor_sweep_multisite(
+        envs, _, _ = _ctm_tensor_sweep_multisite(
             envs,
             double_layers,
             neighbors,

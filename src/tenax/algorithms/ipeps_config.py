@@ -161,6 +161,18 @@ class CTMConfig:
     chi_auto_bump_eps: float = 1e-5
     chi_auto_bump_step: int = 2
     chi_max: int | None = None
+    # variPEPS-style in-CTM χ-bump (Issue #492).  When enabled,
+    # ``python_loop_ctm_converge`` grows ``chi`` *during* CTM convergence
+    # by ``ctmrg_heuristic_increase_chi_step_size`` whenever the running
+    # max ``norm_smallest_S`` (smallest kept SV / largest, per projector
+    # SVD) exceeds ``ctmrg_heuristic_increase_chi_threshold``.  Capped
+    # at ``chi_max``.  Unlike ``chi_auto_bump`` (end-of-outer-step), this
+    # never returns a half-formed env to the AD optimizer — every gradient
+    # is computed at a converged CTM fixed point.  Off by default; mutually
+    # exclusive with ``chi_ramp`` (deterministic schedule).
+    ctmrg_heuristic_increase_chi: bool = False
+    ctmrg_heuristic_increase_chi_threshold: float = 1e-6
+    ctmrg_heuristic_increase_chi_step_size: int = 2
     # Early-bail when the running minimum of the CTM convergence metric
     # has not improved for ``plateau_patience`` consecutive iterations.
     # Default ``20`` is a stop-loss against the known SU/random-init CTM
@@ -222,6 +234,48 @@ class CTMConfig:
             )
         if self.chi_max is not None and self.chi_max < self.chi:
             raise ValueError(f"chi_max ({self.chi_max}) must be >= chi ({self.chi})")
+        # Issue #492 in-CTM χ-bump validation.
+        if self.ctmrg_heuristic_increase_chi and self.chi_ramp is not None:
+            raise ValueError(
+                "ctmrg_heuristic_increase_chi and chi_ramp are mutually exclusive: "
+                "chi_ramp is a deterministic optimizer-side schedule, "
+                "ctmrg_heuristic_increase_chi is reactive inside CTM convergence"
+            )
+        # In-CTM bump and end-of-outer-step chi_auto_bump cannot coexist:
+        # the in-CTM bump can raise chi (e.g. 2→8) inside a single CTM
+        # call, but ``_maybe_bump_chi`` still reads stale ``ctm_cfg.chi``
+        # (still 2) and tries to pad to chi+step (4), which is smaller
+        # than the already-grown 8 → ``pad_dense_env_chi`` raises
+        # ``chi_new < chi_old`` at runtime.  Reject the combination up
+        # front so users get a clear error at config construction.
+        if self.ctmrg_heuristic_increase_chi and self.chi_auto_bump:
+            raise ValueError(
+                "ctmrg_heuristic_increase_chi and chi_auto_bump are mutually "
+                "exclusive: both grow chi, but the in-CTM bump operates "
+                "inside CTM convergence while chi_auto_bump operates between "
+                "L-BFGS steps.  Pick one — typically "
+                "ctmrg_heuristic_increase_chi=True is the recommended path "
+                "(see Issue #492)."
+            )
+        if (
+            self.ctmrg_heuristic_increase_chi
+            and self.ctmrg_heuristic_increase_chi_step_size <= 0
+        ):
+            raise ValueError(
+                "ctmrg_heuristic_increase_chi_step_size must be a positive integer, "
+                f"got {self.ctmrg_heuristic_increase_chi_step_size}"
+            )
+        # ctmrg_heuristic_increase_chi without an explicit chi_max ceiling
+        # would be a silent no-op (chi_max_eff defaults to chi → growth
+        # guard ``chi_current < chi_max_eff`` is always False).  Require
+        # an explicit ceiling so users get a clear error instead.
+        if self.ctmrg_heuristic_increase_chi and self.chi_max is None:
+            raise ValueError(
+                "ctmrg_heuristic_increase_chi=True requires chi_max to be set; "
+                "without an explicit ceiling the in-CTM bump would silently "
+                "no-op (chi can never grow above its initial value). "
+                "Set chi_max to the largest chi you want CTM to grow into."
+            )
 
 
 @dataclass

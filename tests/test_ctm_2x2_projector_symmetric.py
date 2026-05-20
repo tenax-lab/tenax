@@ -185,7 +185,7 @@ def test_compute_2x2_projector_symmetric_closure_left(symmetric_corners):
 
     # Task 4 dispatches SymmetricTensor inputs through _compute_2x2_projector
     # to the block-sparse _compute_2x2_projector_symmetric helper.
-    P_top, P_bot, _ = _compute_2x2_projector(
+    P_top, P_bot, _, _ = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi=chi, direction="left"
     )
     I_tensor = contract(P_bot, P_top)
@@ -213,7 +213,7 @@ def test_compute_2x2_projector_symmetric_closure_other_directions(
 
     Q_TL, Q_TR, Q_BL, Q_BR = symmetric_corners
     chi = 4
-    P_top, P_bot, _ = _compute_2x2_projector(
+    P_top, P_bot, _, _ = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi=chi, direction=direction
     )
     I_tensor = contract(P_bot, P_top)
@@ -245,7 +245,7 @@ def test_compute_2x2_projector_symmetric_base_charges_drive_chi_new(symmetric_co
     chi = 4
     base_charges = np.array([0, 1, 0, 1], dtype=np.int32)
 
-    P_top, P_bot, _ = _compute_2x2_projector(
+    P_top, P_bot, _, _ = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi=chi, direction="left", base_charges=base_charges
     )
     expected_chi_new = _derive_charges(base_charges, P_top.indices[2].dim)
@@ -281,7 +281,7 @@ def test_compute_2x2_projector_symmetric_ad_fallback_passes_tracer(symmetric_cor
         Q_TL_perturbed = SymmetricTensor._from_blocks_unchecked(
             new_blocks, Q_TL.indices
         )
-        P_top, P_bot, _ = _compute_2x2_projector(
+        P_top, P_bot, _, _ = _compute_2x2_projector(
             Q_TL_perturbed, Q_TR, Q_BL, Q_BR, chi=chi, direction="left"
         )
         return jnp.sum(P_top.todense() ** 2) + jnp.sum(P_bot.todense() ** 2)
@@ -309,7 +309,7 @@ def test_compute_2x2_projector_dense_fallback_wraps_as_symmetric(symmetric_corne
         Q_TL_perturbed = SymmetricTensor._from_blocks_unchecked(
             new_blocks, Q_TL.indices
         )
-        P_top, P_bot, _ = _compute_2x2_projector(
+        P_top, P_bot, _, _ = _compute_2x2_projector(
             Q_TL_perturbed, Q_TR, Q_BL, Q_BR, chi=chi, direction="left"
         )
         return P_top, P_bot
@@ -543,7 +543,7 @@ def test_compute_2x2_projector_tracer_safe_under_grad(symmetric_corners):
         Q_TL_traced = SymmetricTensor._from_blocks_unchecked(
             scaled_blocks, Q_TL.indices
         )
-        P_top, _, _ = _compute_2x2_projector(
+        P_top, _, _, _ = _compute_2x2_projector(
             Q_TL_traced,
             Q_TR,
             Q_BL,
@@ -567,7 +567,7 @@ def test_compute_2x2_projector_preserves_non_trivial_charges(symmetric_corners):
     Q_TL, Q_TR, Q_BL, Q_BR = symmetric_corners
     base_charges = np.array([0, 1], dtype=np.int32)
 
-    P_top, P_bot, _ = _compute_2x2_projector(
+    P_top, P_bot, _, _ = _compute_2x2_projector(
         Q_TL,
         Q_TR,
         Q_BL,
@@ -662,12 +662,12 @@ def test_compute_2x2_projector_eager_vs_traced_trivial(symmetric_corners):
     )
     Qs_trivial = [Q_TL_t, Q_TR_t, Q_BL_t, Q_BR_t]
 
-    P_top_eager, _, _ = _compute_2x2_projector(*Qs_trivial, chi=4, direction="left")
+    P_top_eager, _, _, _ = _compute_2x2_projector(*Qs_trivial, chi=4, direction="left")
 
     def get_p_top(alpha):
         scaled = {k: alpha * b for k, b in Qs_trivial[0].blocks.items()}
         Q0 = SymmetricTensor._from_blocks_unchecked(scaled, Qs_trivial[0].indices)
-        P_top, _, _ = _compute_2x2_projector(
+        P_top, _, _, _ = _compute_2x2_projector(
             Q0,
             *Qs_trivial[1:],
             chi=4,
@@ -711,7 +711,7 @@ def test_compute_2x2_projector_grad_matches_finite_difference(symmetric_corners)
         Q_TL_traced = SymmetricTensor._from_blocks_unchecked(
             scaled_blocks, Q_TL.indices
         )
-        P_top, _, _ = _compute_2x2_projector(
+        P_top, _, _, _ = _compute_2x2_projector(
             Q_TL_traced,
             Q_TR,
             Q_BL,
@@ -759,7 +759,7 @@ def test_compute_2x2_projector_closure_under_tracing(symmetric_corners):
     def get_closure(alpha: jax.Array) -> jax.Array:
         scaled = {k: alpha * b for k, b in Q_TL.blocks.items()}
         Q0 = SymmetricTensor._from_blocks_unchecked(scaled, Q_TL.indices)
-        P_top, P_bot, _ = _compute_2x2_projector(
+        P_top, P_bot, _, _ = _compute_2x2_projector(
             Q0,
             Q_TR,
             Q_BL,

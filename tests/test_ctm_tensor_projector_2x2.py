@@ -329,7 +329,7 @@ def test_compute_2x2_projector_left_shape_and_isometry():
 
     from tenax.algorithms._ctm_tensor_projector_2x2 import _compute_2x2_projector
 
-    P_top, P_bot, _ = _compute_2x2_projector(
+    P_top, P_bot, _, _ = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="left"
     )
 
@@ -372,7 +372,7 @@ def test_compute_2x2_projector_other_directions_isometry(direction):
 
     from tenax.algorithms._ctm_tensor_projector_2x2 import _compute_2x2_projector
 
-    P_top, P_bot, _ = _compute_2x2_projector(
+    P_top, P_bot, _, _ = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi, direction=direction
     )
 
