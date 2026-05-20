@@ -163,47 +163,27 @@ def test_implicit_ad_env_init_above_chi_max_raises():
         )
 
 
-def test_implicit_ad_grad_flows_through_bump():
-    """jax.grad through ctm_energy_implicit with bump kwargs returns finite grads.
+def test_implicit_ad_bump_raises_not_implemented():
+    """ctm_energy_implicit + bump=True raises NotImplementedError.
 
-    Verifies the four bump kwargs are plumbed through the implicit-AD path
-    (boundary mutex check → dispatch → VJP cache → _sigma_gauged_ctm_converge)
-    without breaking the forward+backward.
-
-    The threshold is set above 1.0 so the bump *never* fires — the implicit-AD
-    backward closure captures the input ``chi`` and would dim-mismatch if
-    forward bumped to a larger χ.  This intentional limitation (the
-    implicit-AD path has no chi-lock equivalent of the explicit-AD warmup→
-    backprop boundary) is out of scope for this test; we only assert that
-    passing the bump kwargs at all does not break grad flow.
+    The implicit-AD backward closure captures chi at build time, so a
+    forward-side bump would silently truncate gradients.  Until a proper
+    chi-lock lands, bump is blocked at the public API boundary.  Use
+    ctm_energy_explicit for bump-aware AD.
     """
-    rng = np.random.default_rng(0)
-    A_data = jnp.asarray(rng.standard_normal((2, 2, 2, 2, 2)).astype(np.float64))
+    site_tensors = {(0, 0): _build_site_tensor()}
     gate = heisenberg_gate()
 
-    def _loss(params):
-        site_tensors = {(0, 0): _wrap_as_dense_tensor(params)}
-        return ctm_energy_implicit(
+    with pytest.raises(NotImplementedError, match="ctmrg_heuristic_increase_chi"):
+        ctm_energy_implicit(
             site_tensors,
             SINGLE_SITE_NEIGHBORS,
             gate,
             chi=4,
-            max_iter=6,
-            conv_tol=1e-3,
+            max_iter=4,
             ctmrg_heuristic_increase_chi=True,
-            # Threshold > 1.0 means smallest_S (normalised, in [0,1]) never
-            # exceeds it → bump never fires → backward closure's static chi=4
-            # matches the forward env chi.  We're testing kwarg plumbing,
-            # not the (intentionally limited) bump-during-implicit-VJP path.
-            ctmrg_heuristic_increase_chi_threshold=10.0,
-            ctmrg_heuristic_increase_chi_step_size=2,
             chi_max=8,
         )
-
-    grad = jax.grad(_loss)(A_data)
-    assert np.all(np.isfinite(np.asarray(grad))), (
-        "implicit-AD grad through bump-enabled ctm_energy_implicit must be finite"
-    )
 
 
 # ---------------------------------------------------------------------------
