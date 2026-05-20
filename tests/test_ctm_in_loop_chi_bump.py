@@ -312,6 +312,26 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match="requires chi_max"):
             CTMConfig(chi=4, ctmrg_heuristic_increase_chi=True)
 
+    def test_python_loop_rejects_chi_ramp_combination(self):
+        """Defense-in-depth: direct callers combining
+        ``ctmrg_heuristic_increase_chi=True`` with ``chi_ramp`` get a
+        clear error.  Otherwise the chi_ramp early-return would silently
+        ignore the bump knobs (codex review on PR #513).
+        """
+        A = _make_random_A(D=2, d=2)
+        site_tensors = {(0, 0): A}
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            python_loop_ctm_converge(
+                site_tensors,
+                SINGLE_SITE_NEIGHBORS,
+                chi=2,
+                max_iter=3,
+                min_iter=2,
+                ctmrg_heuristic_increase_chi=True,
+                chi_max=4,
+                chi_ramp=[(2, 2), (4, None)],
+            )
+
     def test_python_loop_rejects_non_positive_step_size(self):
         """Defense-in-depth: direct callers passing step_size <= 0 get a
         clear error.  step_size=0 would cause an infinite loop (bump

@@ -188,6 +188,18 @@ def python_loop_ctm_converge(
     Returns:
         ``(envs, CTMConvergeInfo)`` — converged environments and info.
     """
+    # Reject ``ctmrg_heuristic_increase_chi`` + ``chi_ramp`` BEFORE the
+    # chi_ramp early-return, otherwise the bump flag is silently ignored
+    # by ``_python_loop_chi_ramp`` (which doesn't accept the new knobs).
+    # CTMConfig also enforces this; defense-in-depth for direct callers
+    # (codex review on PR #513).
+    if ctmrg_heuristic_increase_chi and chi_ramp is not None:
+        raise ValueError(
+            "ctmrg_heuristic_increase_chi and chi_ramp are mutually "
+            "exclusive: chi_ramp is a deterministic schedule applied "
+            "across stages, while ctmrg_heuristic_increase_chi is reactive "
+            "inside a single CTM convergence call."
+        )
     if chi_ramp is not None:
         return _python_loop_chi_ramp(
             site_tensors,
