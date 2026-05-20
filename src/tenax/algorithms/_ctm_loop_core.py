@@ -84,6 +84,10 @@ def _run_ctm_loop_with_bump(
     for i in range(remaining):
         if i + bump_extra_sweeps >= remaining:
             break
+        # Capture start-of-iter env: sigma-gauge alignment requires the prior
+        # iteration's env as the second arg to gauge_fix_fn (transfer-matrix
+        # eigenvector reference).  Phase gauge ignores the second arg.
+        envs_at_iter_start = envs
         envs_new, _max_eps, _max_S = jit_step(
             site_tensors,
             envs,
@@ -120,7 +124,7 @@ def _run_ctm_loop_with_bump(
             last_max_eps = float(_max_eps)
             last_max_smallest_S = float(_max_S)
             if gauge_fix_fn is not None:
-                envs = gauge_fix_fn(envs, envs_new)
+                envs = gauge_fix_fn(envs, envs_at_iter_start)
             prev_svs = {}
             prev_envs = None
             best_diff = float("inf")
@@ -129,7 +133,7 @@ def _run_ctm_loop_with_bump(
             continue
 
         if gauge_fix_fn is not None:
-            envs = gauge_fix_fn(envs_new, envs)
+            envs = gauge_fix_fn(envs_new, envs_at_iter_start)
         else:
             envs = envs_new
 
