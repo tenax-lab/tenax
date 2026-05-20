@@ -241,6 +241,22 @@ class CTMConfig:
                 "chi_ramp is a deterministic optimizer-side schedule, "
                 "ctmrg_heuristic_increase_chi is reactive inside CTM convergence"
             )
+        # In-CTM bump and end-of-outer-step chi_auto_bump cannot coexist:
+        # the in-CTM bump can raise chi (e.g. 2→8) inside a single CTM
+        # call, but ``_maybe_bump_chi`` still reads stale ``ctm_cfg.chi``
+        # (still 2) and tries to pad to chi+step (4), which is smaller
+        # than the already-grown 8 → ``pad_dense_env_chi`` raises
+        # ``chi_new < chi_old`` at runtime.  Reject the combination up
+        # front so users get a clear error at config construction.
+        if self.ctmrg_heuristic_increase_chi and self.chi_auto_bump:
+            raise ValueError(
+                "ctmrg_heuristic_increase_chi and chi_auto_bump are mutually "
+                "exclusive: both grow chi, but the in-CTM bump operates "
+                "inside CTM convergence while chi_auto_bump operates between "
+                "L-BFGS steps.  Pick one — typically "
+                "ctmrg_heuristic_increase_chi=True is the recommended path "
+                "(see Issue #492)."
+            )
         if (
             self.ctmrg_heuristic_increase_chi
             and self.ctmrg_heuristic_increase_chi_step_size <= 0

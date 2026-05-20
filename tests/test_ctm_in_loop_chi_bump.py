@@ -197,6 +197,20 @@ class TestConfigValidation:
                 chi_ramp=[(2, 5), (4, None)],
             )
 
+    def test_mutex_with_chi_auto_bump(self):
+        """ctmrg_heuristic_increase_chi cannot coexist with chi_auto_bump
+        (both grow chi; together produces runtime pad_dense_env_chi error
+        when the in-loop grow outpaces the outer ``_maybe_bump_chi``).
+        Codex review on PR #513.
+        """
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            CTMConfig(
+                chi=4,
+                chi_max=8,
+                ctmrg_heuristic_increase_chi=True,
+                chi_auto_bump=True,
+            )
+
     def test_positive_step_size(self):
         """step_size must be a positive integer when the flag is on."""
         with pytest.raises(ValueError, match="positive integer"):
