@@ -249,6 +249,17 @@ class CTMConfig:
                 "ctmrg_heuristic_increase_chi_step_size must be a positive integer, "
                 f"got {self.ctmrg_heuristic_increase_chi_step_size}"
             )
+        # ctmrg_heuristic_increase_chi without an explicit chi_max ceiling
+        # would be a silent no-op (chi_max_eff defaults to chi → growth
+        # guard ``chi_current < chi_max_eff`` is always False).  Require
+        # an explicit ceiling so users get a clear error instead.
+        if self.ctmrg_heuristic_increase_chi and self.chi_max is None:
+            raise ValueError(
+                "ctmrg_heuristic_increase_chi=True requires chi_max to be set; "
+                "without an explicit ceiling the in-CTM bump would silently "
+                "no-op (chi can never grow above its initial value). "
+                "Set chi_max to the largest chi you want CTM to grow into."
+            )
 
 
 @dataclass

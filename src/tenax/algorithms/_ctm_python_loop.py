@@ -215,6 +215,18 @@ def python_loop_ctm_converge(
     # is the live value used by JIT'd sweeps; the new chi is static_argname,
     # so each distinct chi value will retrace once on first use.
     chi_current = chi
+    # When the bump is enabled, require an explicit ``chi_max`` ceiling;
+    # otherwise ``chi_max_eff == chi_current`` would make the growth guard
+    # always False and the feature would silently no-op (codex review on
+    # PR #513).  The CTMConfig path catches this at config construction;
+    # this is defense-in-depth for direct callers of
+    # ``python_loop_ctm_converge``.
+    if ctmrg_heuristic_increase_chi and chi_max is None:
+        raise ValueError(
+            "ctmrg_heuristic_increase_chi=True requires chi_max to be set; "
+            "without an explicit ceiling the in-CTM bump would silently "
+            "no-op (chi can never grow above its initial value)."
+        )
     chi_max_eff = chi_max if chi_max is not None else chi_current
 
     # Pre-compute base_charges from any site tensor for the SymmetricTensor

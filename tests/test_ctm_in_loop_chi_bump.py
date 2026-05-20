@@ -212,3 +212,27 @@ class TestConfigValidation:
         assert cfg.ctmrg_heuristic_increase_chi is False
         assert cfg.ctmrg_heuristic_increase_chi_threshold == 1e-6
         assert cfg.ctmrg_heuristic_increase_chi_step_size == 2
+
+    def test_requires_chi_max(self):
+        """Enabling the bump without chi_max is a silent no-op trap; the
+        config must reject it (codex review on PR #513).
+        """
+        with pytest.raises(ValueError, match="requires chi_max"):
+            CTMConfig(chi=4, ctmrg_heuristic_increase_chi=True)
+
+    def test_python_loop_rejects_no_chi_max(self):
+        """Defense-in-depth: direct callers of python_loop_ctm_converge
+        also get a clear error if they enable the bump without chi_max.
+        """
+        A = _make_random_A(D=2, d=2)
+        site_tensors = {(0, 0): A}
+        with pytest.raises(ValueError, match="requires chi_max"):
+            python_loop_ctm_converge(
+                site_tensors,
+                SINGLE_SITE_NEIGHBORS,
+                chi=2,
+                max_iter=3,
+                min_iter=2,
+                ctmrg_heuristic_increase_chi=True,
+                # chi_max omitted → must raise
+            )
