@@ -20,14 +20,11 @@ from typing import NamedTuple
 import jax
 import numpy as np
 
-from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
+from tenax.algorithms._ctm_loop_core import _run_ctm_loop_with_bump
 from tenax.algorithms._ctm_tensor_convergence import (
     Coord,
-    _corner_singular_values,
-    _ctm_sv_diff,
     _ctm_tensor_sweep_multisite,
     _get_base_charges,
-    _max_env_leaf_diff,
 )
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
@@ -295,10 +292,17 @@ def python_loop_ctm_converge(
             "in-CTM bump is enabled) env_init's actual chi; chi_max is "
             "the ceiling and must not be smaller."
         )
-    chi_max_eff = chi_max if chi_max is not None else chi_current
 
-    # Pre-compute base_charges from any site tensor for the SymmetricTensor
-    # env-pad path; on dense envs ``pad_dense_env_chi`` ignores this arg.
+    # Build gauge_fix_fn pair adapter
+    if gauge_fix_fn is not None:
+        _user_gauge = gauge_fix_fn
+
+        def _gauge_pair(envs_new, envs_old):
+            return {c: _user_gauge(envs_new[c]) for c in envs_new}
+    else:
+        _gauge_pair = None
+
+    # Pre-compute bump_base_charges
     bump_base_charges: np.ndarray | None = None
     if ctmrg_heuristic_increase_chi:
         for A in site_tensors.values():
@@ -306,7 +310,7 @@ def python_loop_ctm_converge(
             if bump_base_charges is not None:
                 break
 
-    # Initialize environments
+    # Initialize envs
     envs = (
         env_init
         if env_init is not None
@@ -330,193 +334,35 @@ def python_loop_ctm_converge(
                 projector_backward=projector_backward,
             )
 
-    remaining = max_iter - warmup
-    prev_svs: dict[Coord, jax.Array] = {}
-    prev_envs: dict[Coord, CTMTensorEnv] | None = None
-    final_diff = float("inf")
-    last_max_eps: float = 0.0
-    last_max_smallest_S: float = 0.0
-    best_diff = float("inf")
-    best_envs: dict[Coord, CTMTensorEnv] | None = None
-    best_iter = 0
-    iters_since_best = 0
-    # Count physical sweeps performed by the in-CTM bump's post-pad
-    # re-sweep so they're charged against ``max_iter`` (codex review on
-    # PR #513).  Without this accounting, every bump silently adds one
-    # sweep beyond the documented cap.
-    bump_extra_sweeps = 0
+    # Run the bump-aware loop via shared helper.
+    result = _run_ctm_loop_with_bump(
+        jit_step,
+        site_tensors,
+        envs,
+        chi_current=chi_current,
+        chi_max=chi_max,
+        bump_enabled=ctmrg_heuristic_increase_chi,
+        bump_threshold=ctmrg_heuristic_increase_chi_threshold,
+        bump_step_size=ctmrg_heuristic_increase_chi_step_size,
+        projector_method=projector_method,
+        renormalize=renormalize,
+        projector_backward=projector_backward,
+        gauge_fix_fn=_gauge_pair,
+        max_iter=max_iter - warmup,
+        min_iter=max(0, min_iter - warmup),
+        conv_tol=conv_tol,
+        conv_method=conv_method,
+        plateau_patience=plateau_patience,
+        bump_base_charges=bump_base_charges,
+    )
 
-    for i in range(remaining):
-        # Hard budget guard: account for both the natural iteration
-        # count and any extra sweeps consumed by previous bumps.  When
-        # the budget is exhausted, exit without performing another sweep.
-        if i + bump_extra_sweeps >= remaining:
-            break
-        envs, _max_eps, _max_S = jit_step(
-            site_tensors,
-            envs,
-            chi=chi_current,
-            projector_method=projector_method,
-            renormalize=renormalize,
-            projector_backward=projector_backward,
-        )
-        last_max_eps = float(_max_eps)
-        last_max_smallest_S = float(_max_S)
-
-        # variPEPS-style in-CTM χ-bump (Issue #492).  If the projector
-        # SVD's normalised smallest kept SV is still above threshold, the
-        # truncation cut hasn't reached a clean gap — grow chi, zero-pad
-        # the env to the new shape, and immediately re-sweep at the new
-        # chi so the env we hold is converged-at-current-chi rather than
-        # a half-formed zero-padded one.  Without the post-bump sweep, a
-        # bump on the last iteration (``i == remaining - 1``) would exit
-        # with a zero-padded env that's never been swept at the new chi
-        # (codex review on PR #513).
-        #
-        # Skip the bump when no budget remains for the post-pad sweep:
-        # firing it would either (a) consume a sweep we don't have and
-        # silently exceed ``max_iter``, or (b) leave a zero-padded env
-        # un-swept.  Better to keep the pre-bump chi and exit on budget.
-        bump_would_fire = (
-            ctmrg_heuristic_increase_chi
-            and last_max_smallest_S > ctmrg_heuristic_increase_chi_threshold
-            and chi_current < chi_max_eff
-        )
-        if bump_would_fire and (i + 1 + bump_extra_sweeps < remaining):
-            chi_current = min(
-                chi_current + ctmrg_heuristic_increase_chi_step_size,
-                chi_max_eff,
-            )
-            envs = {
-                c: pad_dense_env_chi(
-                    envs[c], chi_current, base_charges=bump_base_charges
-                )
-                for c in envs
-            }
-            # Force-sweep once at the new chi so the returned env is
-            # always swept at chi_current.  This sweep IS counted against
-            # the budget (bump_extra_sweeps).
-            envs, _max_eps, _max_S = jit_step(
-                site_tensors,
-                envs,
-                chi=chi_current,
-                projector_method=projector_method,
-                renormalize=renormalize,
-                projector_backward=projector_backward,
-            )
-            bump_extra_sweeps += 1
-            last_max_eps = float(_max_eps)
-            last_max_smallest_S = float(_max_S)
-            if gauge_fix_fn is not None:
-                envs = {c: gauge_fix_fn(envs[c]) for c in envs}
-            # Reset plateau tracking — diff metrics across a chi-bump are
-            # not meaningful.  Best-tracking restarts at the new chi.
-            prev_svs = {}
-            prev_envs = None
-            best_diff = float("inf")
-            best_envs = None
-            iters_since_best = 0
-            continue
-
-        # Apply gauge fix if provided (e.g., phase fix for element-wise convergence)
-        if gauge_fix_fn is not None:
-            envs = {c: gauge_fix_fn(envs[c]) for c in envs}
-
-        # Only check convergence after min_iter total iterations
-        # ``total_iter`` is the physical-sweep count including any extra
-        # post-bump sweeps charged against the budget (see
-        # ``bump_extra_sweeps`` above).
-        total_iter = warmup + i + 1 + bump_extra_sweeps
-        if total_iter < min_iter:
-            # Still track SVs / prev_envs for the first convergence check
-            if conv_method == "sv":
-                for c in sorted(envs):
-                    prev_svs[c] = _corner_singular_values(envs[c].C1)
-            else:
-                prev_envs = {c: envs[c] for c in envs}
-            continue
-
-        # ``plateau_metric_valid`` flags whether ``final_diff`` was computed
-        # from a real comparison this iter (vs left at the sentinel value
-        # because no baseline was available yet).  Without this guard the
-        # plateau block would treat the SV first-iter sentinel ``0.0`` as
-        # ``best_diff``, then bail because no real positive diff can ever
-        # improve on zero (codex review on PR #439).
-        plateau_metric_valid = False
-
-        if conv_method == "elementwise":
-            # Element-wise convergence: max absolute difference across all
-            # env tensor leaves.
-            if prev_envs is None:
-                prev_envs = {c: envs[c] for c in envs}
-                continue
-            max_diff = 0.0
-            for c in sorted(envs):
-                max_diff = max(max_diff, _max_env_leaf_diff(prev_envs[c], envs[c]))
-            converged = max_diff < conv_tol
-            final_diff = max_diff
-            prev_envs = {c: envs[c] for c in envs}
-            plateau_metric_valid = True
-        else:
-            # SV convergence (default): corner singular value difference.
-            # On the very first SV check (no entry in ``prev_svs`` yet —
-            # possible when ``min_iter <= 1``), we have no real baseline,
-            # so the plateau block must skip tracking this iter.
-            have_prev_svs = bool(prev_svs)
-            converged = True
-            max_diff = 0.0
-            for c in sorted(envs):
-                sv = _corner_singular_values(envs[c].C1)
-                if c in prev_svs:
-                    diff = float(_ctm_sv_diff(sv, prev_svs[c]))
-                    max_diff = max(max_diff, diff)
-                    if diff >= conv_tol:
-                        converged = False
-                else:
-                    converged = False
-                prev_svs[c] = sv
-            if have_prev_svs:
-                final_diff = max_diff
-                plateau_metric_valid = True
-            # else: final_diff retains its previous value (inf on entry),
-            # converged is False (no baseline), and the plateau block
-            # below is skipped via plateau_metric_valid.
-
-        if converged:
-            return envs, CTMConvergeInfo(
-                converged=True,
-                iterations=total_iter,
-                sv_diff=final_diff,
-                max_truncation_error=last_max_eps,
-                max_smallest_S=last_max_smallest_S,
-                final_chi=chi_current,
-            )
-
-        if plateau_patience is not None and plateau_metric_valid:
-            if final_diff < best_diff:
-                best_diff = final_diff
-                best_envs = {c: envs[c] for c in envs}
-                best_iter = total_iter
-                iters_since_best = 0
-            else:
-                iters_since_best += 1
-                if iters_since_best >= plateau_patience:
-                    return best_envs or envs, CTMConvergeInfo(
-                        converged=False,
-                        iterations=best_iter or total_iter,
-                        sv_diff=best_diff,
-                        max_truncation_error=last_max_eps,
-                        max_smallest_S=last_max_smallest_S,
-                        final_chi=chi_current,
-                    )
-
-    return envs, CTMConvergeInfo(
-        converged=False,
-        iterations=max_iter,
-        sv_diff=final_diff,
-        max_truncation_error=last_max_eps,
-        max_smallest_S=last_max_smallest_S,
-        final_chi=chi_current,
+    return result.envs, CTMConvergeInfo(
+        converged=result.converged,
+        iterations=warmup + result.iterations,
+        sv_diff=result.sv_diff,
+        max_truncation_error=result.max_truncation_error,
+        max_smallest_S=result.max_smallest_S,
+        final_chi=result.final_chi,
     )
 
 
