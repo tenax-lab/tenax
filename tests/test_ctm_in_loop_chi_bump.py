@@ -195,6 +195,27 @@ class TestInCtmChiBumpHook:
             f"got {info.final_chi}.  Indicates a leaked chi-promotion."
         )
 
+    def test_python_loop_rejects_chi_max_below_chi(self):
+        """Defense-in-depth: direct callers passing chi_max < chi get a
+        clear error rather than silently running at chi (violating the
+        documented chi_max cap).  CTMConfig catches this at
+        construction; this is the direct-call guard.  Codex review
+        on PR #513.
+        """
+        A = _make_random_A(D=2, d=2)
+        site_tensors = {(0, 0): A}
+        with pytest.raises(ValueError, match="must be >="):
+            python_loop_ctm_converge(
+                site_tensors,
+                SINGLE_SITE_NEIGHBORS,
+                chi=8,
+                max_iter=3,
+                min_iter=2,
+                ctmrg_heuristic_increase_chi=True,
+                ctmrg_heuristic_increase_chi_step_size=2,
+                chi_max=4,  # < chi=8 → must reject
+            )
+
     def test_warm_start_rejects_env_above_chi_max(self):
         """If env_init's chi exceeds the configured chi_max, raise rather
         than silently letting the warm-start override exceed the cap.

@@ -281,6 +281,20 @@ def python_loop_ctm_converge(
             "ctmrg_heuristic_increase_chi_step_size must be a positive "
             f"integer, got {ctmrg_heuristic_increase_chi_step_size}"
         )
+    # After chi_current is finalised (from ``chi`` and any env_init
+    # override), enforce ``chi_max >= chi_current``.  Direct callers
+    # bypassing CTMConfig could otherwise pass e.g. ``chi=10`` and
+    # ``chi_max=6`` and silently run CTM at chi=10, returning
+    # ``final_chi=10`` and violating the advertised ceiling.  CTMConfig
+    # catches the ``chi_max < chi`` shape at construction (#492 codex
+    # follow-up); this is defense-in-depth for the direct-call path.
+    if chi_max is not None and chi_max < chi_current:
+        raise ValueError(
+            f"chi_max ({chi_max}) must be >= chi_current ({chi_current}). "
+            "chi_current is the max of the input ``chi`` and (when the "
+            "in-CTM bump is enabled) env_init's actual chi; chi_max is "
+            "the ceiling and must not be smaller."
+        )
     chi_max_eff = chi_max if chi_max is not None else chi_current
 
     # Pre-compute base_charges from any site tensor for the SymmetricTensor
