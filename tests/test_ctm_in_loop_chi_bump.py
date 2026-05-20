@@ -220,6 +220,37 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match="requires chi_max"):
             CTMConfig(chi=4, ctmrg_heuristic_increase_chi=True)
 
+    def test_python_loop_rejects_non_positive_step_size(self):
+        """Defense-in-depth: direct callers passing step_size <= 0 get a
+        clear error.  step_size=0 would cause an infinite loop (bump
+        fires every iter, chi never grows); negative would shrink chi.
+        Codex review on PR #513.
+        """
+        A = _make_random_A(D=2, d=2)
+        site_tensors = {(0, 0): A}
+        with pytest.raises(ValueError, match="positive integer"):
+            python_loop_ctm_converge(
+                site_tensors,
+                SINGLE_SITE_NEIGHBORS,
+                chi=2,
+                max_iter=3,
+                min_iter=2,
+                ctmrg_heuristic_increase_chi=True,
+                ctmrg_heuristic_increase_chi_step_size=0,
+                chi_max=4,
+            )
+        with pytest.raises(ValueError, match="positive integer"):
+            python_loop_ctm_converge(
+                site_tensors,
+                SINGLE_SITE_NEIGHBORS,
+                chi=4,
+                max_iter=3,
+                min_iter=2,
+                ctmrg_heuristic_increase_chi=True,
+                ctmrg_heuristic_increase_chi_step_size=-1,
+                chi_max=8,
+            )
+
     def test_python_loop_rejects_no_chi_max(self):
         """Defense-in-depth: direct callers of python_loop_ctm_converge
         also get a clear error if they enable the bump without chi_max.

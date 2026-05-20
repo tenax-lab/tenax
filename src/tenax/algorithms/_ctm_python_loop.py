@@ -227,6 +227,15 @@ def python_loop_ctm_converge(
             "without an explicit ceiling the in-CTM bump would silently "
             "no-op (chi can never grow above its initial value)."
         )
+    # Defense-in-depth for direct callers — CTMConfig also enforces this.
+    # ``step_size <= 0`` would either stall (== 0: bump branch fires every
+    # iter with chi unchanged → infinite loop on a non-converging env) or
+    # attempt an invalid shrink (< 0).
+    if ctmrg_heuristic_increase_chi and ctmrg_heuristic_increase_chi_step_size <= 0:
+        raise ValueError(
+            "ctmrg_heuristic_increase_chi_step_size must be a positive "
+            f"integer, got {ctmrg_heuristic_increase_chi_step_size}"
+        )
     chi_max_eff = chi_max if chi_max is not None else chi_current
 
     # Pre-compute base_charges from any site tensor for the SymmetricTensor
