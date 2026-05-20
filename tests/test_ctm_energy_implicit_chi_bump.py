@@ -82,14 +82,19 @@ def _central_diff(f, x: jnp.ndarray, eps: float = 1e-4) -> jnp.ndarray:
 
 @pytest.mark.slow
 def test_ad_gradient_matches_fd_with_bump():
-    """FD-vs-AD smoke at D=2, chi_initial=4, chi_max=8 with forced bump.
+    """Numerical smoke at D=2 with forced bump: gradient is finite, FD-consistent.
 
-    Tolerance is relaxed (atol=1e-2, rtol=1e-1) because the 2x2 plaquette
-    projector's stop_gradient (PR #447) creates a documented ~25% FD bias
-    at D=2.  This test confirms the chi-lock plumbing doesn't introduce
-    catastrophic gradient errors (e.g. wrong sign, wrong order of
-    magnitude); the strict correctness check is
-    test_ad_gradient_invariance_bump_vs_fixed_chi_max below.
+    Confirms ctm_energy_implicit returns a finite, FD-consistent gradient
+    (no NaNs, correct sign, correct order of magnitude) when the forward
+    CTM grows chi 4 -> 8.  Tolerance is relaxed (atol=1e-2, rtol=1e-1)
+    because the 2x2 plaquette projector's stop_gradient (PR #447) creates
+    a documented ~25% FD bias at D=2.
+
+    This test does NOT verify the chi-lock contract — at the relaxed
+    tolerance a chi=4 backward Jacobian would still pass.  The strict
+    chi-lock check is test_ad_gradient_invariance_bump_vs_fixed_chi_max
+    below, which factors out the D=2 projector bias by comparing the
+    bump-path gradient against a fixed-chi=8 reference.
     """
     A = _build_site_tensor(D=2, d=2, seed=42)
     gate = heisenberg_gate()
@@ -116,10 +121,9 @@ def test_ad_gradient_matches_fd_with_bump():
     grad_ad = jax.grad(loss)(flat_init)
     grad_fd = _central_diff(loss, flat_init, eps=1e-4)
 
-    # Tol: atol=1e-2 / rtol=1e-1 accommodates the documented ~25% FD bias at
-    # D=2 from PR #447's 2x2 plaquette projector stop_gradient (see comment
-    # in test_ctm_energy_implicit.py).  Strict correctness gate is the
-    # invariance test below.
+    # Tol: atol=1e-2 / rtol=1e-1 accommodates the ~25% D=2 FD bias from
+    # PR #447's projector stop_gradient.  The chi-lock contract is checked
+    # in test_ad_gradient_invariance_bump_vs_fixed_chi_max, not here.
     assert jnp.allclose(grad_ad, grad_fd, atol=1e-2, rtol=1e-1), (
         f"AD gradient diverges from FD reference.\n"
         f"max |grad_ad - grad_fd| = {jnp.max(jnp.abs(grad_ad - grad_fd))}\n"
