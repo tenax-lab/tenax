@@ -18,13 +18,14 @@ from functools import partial
 from typing import NamedTuple
 
 import jax
-import numpy as np
 
-from tenax.algorithms._ctm_loop_core import _run_ctm_loop_with_bump
+from tenax.algorithms._ctm_loop_core import (
+    _run_ctm_loop_with_bump,
+    _validate_chi_bump_args,
+)
 from tenax.algorithms._ctm_tensor_convergence import (
     Coord,
     _ctm_tensor_sweep_multisite,
-    _get_base_charges,
 )
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
@@ -223,75 +224,19 @@ def python_loop_ctm_converge(
     # is enabled (variPEPS-style in-CTM bump; Issue #492).  ``chi_current``
     # is the live value used by JIT'd sweeps; the new chi is static_argname,
     # so each distinct chi value will retrace once on first use.
-    chi_current = chi
-    # In-CTM bump can return ``env`` at chi > the configured ``chi`` (e.g.
-    # env_init at chi=8 from a previous call that bumped from 4).  If we
-    # blindly reset ``chi_current = chi``, the next sweep silently down-
-    # truncates the env back to 4, defeating the bump entirely (codex
-    # review on PR #513).  Derive ``chi_current`` from the warm-start
-    # env's actual χ so warm-start round-trips preserve grown chi.
     #
-    # Gated to the bump-enabled path: when the bump is OFF, the historical
-    # contract ("run at the requested ``chi``") is preserved, so callers
-    # that intentionally pass a smaller ``chi`` than env_init's chi (e.g.,
-    # staged runs that step chi down for memory/runtime control) still
-    # see the requested down-truncation behavior.
-    if ctmrg_heuristic_increase_chi and env_init is not None and env_init:
-        try:
-            sample_env = next(iter(env_init.values()))
-            env_chi = int(sample_env.C1.indices[0].dim)
-        except (StopIteration, AttributeError, IndexError):
-            env_chi = None  # malformed env_init; let downstream raise
-        if env_chi is not None:
-            # Reject env_init that exceeds the configured ceiling — the
-            # caller explicitly set chi_max as a memory/runtime budget,
-            # so a warm-start env above it is a misconfiguration.  We
-            # could silently clamp, but that would destroy the
-            # warm-start anyway and hide the inconsistency (codex
-            # review on PR #513).
-            if chi_max is not None and env_chi > chi_max:
-                raise ValueError(
-                    f"env_init has chi={env_chi} which exceeds the "
-                    f"configured chi_max={chi_max}. Either raise chi_max "
-                    "or supply a warm-start env that respects the ceiling."
-                )
-            if env_chi > chi_current:
-                chi_current = env_chi
-    # When the bump is enabled, require an explicit ``chi_max`` ceiling;
-    # otherwise ``chi_max_eff == chi_current`` would make the growth guard
-    # always False and the feature would silently no-op (codex review on
-    # PR #513).  The CTMConfig path catches this at config construction;
-    # this is defense-in-depth for direct callers of
-    # ``python_loop_ctm_converge``.
-    if ctmrg_heuristic_increase_chi and chi_max is None:
-        raise ValueError(
-            "ctmrg_heuristic_increase_chi=True requires chi_max to be set; "
-            "without an explicit ceiling the in-CTM bump would silently "
-            "no-op (chi can never grow above its initial value)."
-        )
-    # Defense-in-depth for direct callers — CTMConfig also enforces this.
-    # ``step_size <= 0`` would either stall (== 0: bump branch fires every
-    # iter with chi unchanged → infinite loop on a non-converging env) or
-    # attempt an invalid shrink (< 0).
-    if ctmrg_heuristic_increase_chi and ctmrg_heuristic_increase_chi_step_size <= 0:
-        raise ValueError(
-            "ctmrg_heuristic_increase_chi_step_size must be a positive "
-            f"integer, got {ctmrg_heuristic_increase_chi_step_size}"
-        )
-    # After chi_current is finalised (from ``chi`` and any env_init
-    # override), enforce ``chi_max >= chi_current``.  Direct callers
-    # bypassing CTMConfig could otherwise pass e.g. ``chi=10`` and
-    # ``chi_max=6`` and silently run CTM at chi=10, returning
-    # ``final_chi=10`` and violating the advertised ceiling.  CTMConfig
-    # catches the ``chi_max < chi`` shape at construction (#492 codex
-    # follow-up); this is defense-in-depth for the direct-call path.
-    if chi_max is not None and chi_max < chi_current:
-        raise ValueError(
-            f"chi_max ({chi_max}) must be >= chi_current ({chi_current}). "
-            "chi_current is the max of the input ``chi`` and (when the "
-            "in-CTM bump is enabled) env_init's actual chi; chi_max is "
-            "the ceiling and must not be smaller."
-        )
+    # Validation (chi_max required, step_size > 0, env_init chi vs chi_max,
+    # chi_max >= chi_current) and env_init-driven chi_current promotion are
+    # centralised in ``_validate_chi_bump_args`` so all three forward-CTM
+    # entry points (this function, _sigma_gauged_ctm_converge, and
+    # ctm_energy_explicit) raise identical errors.
+    chi_current = _validate_chi_bump_args(
+        chi=chi,
+        chi_max=chi_max,
+        env_init=env_init,
+        bump_enabled=ctmrg_heuristic_increase_chi,
+        bump_step_size=ctmrg_heuristic_increase_chi_step_size,
+    )
 
     # Build gauge_fix_fn pair adapter
     if gauge_fix_fn is not None:
@@ -301,14 +246,6 @@ def python_loop_ctm_converge(
             return {c: _user_gauge(envs_new[c]) for c in envs_new}
     else:
         _gauge_pair = None
-
-    # Pre-compute bump_base_charges
-    bump_base_charges: np.ndarray | None = None
-    if ctmrg_heuristic_increase_chi:
-        for A in site_tensors.values():
-            bump_base_charges = _get_base_charges(_build_double_layer_tensor(A))
-            if bump_base_charges is not None:
-                break
 
     # Initialize envs
     envs = (
@@ -353,7 +290,6 @@ def python_loop_ctm_converge(
         conv_tol=conv_tol,
         conv_method=conv_method,
         plateau_patience=plateau_patience,
-        bump_base_charges=bump_base_charges,
     )
 
     return result.envs, CTMConvergeInfo(

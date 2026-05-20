@@ -8,7 +8,11 @@ all three forward CTM paths (#514).
 
 from __future__ import annotations
 
-__all__ = ["CTMLoopResult", "_run_ctm_loop_with_bump"]
+__all__ = [
+    "CTMLoopResult",
+    "_run_ctm_loop_with_bump",
+    "_validate_chi_bump_args",
+]
 
 from typing import NamedTuple
 
@@ -17,9 +21,81 @@ from tenax.algorithms._ctm_tensor_convergence import (
     Coord,
     _corner_singular_values,
     _ctm_sv_diff,
+    _get_base_charges,
     _max_env_leaf_diff,
 )
-from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
+from tenax.algorithms._ctm_tensor_init import (
+    CTMTensorEnv,
+    _build_double_layer_tensor,
+)
+
+
+def _validate_chi_bump_args(
+    *,
+    chi: int,
+    chi_max: int | None,
+    env_init,
+    bump_enabled: bool,
+    bump_step_size: int,
+) -> int:
+    """Validate bump-related args and return the finalized ``chi_current``.
+
+    Centralises the validation that originally lived in three sibling
+    forward-CTM modules (#514 follow-up de-dup).  ``chi_current`` equals
+    ``chi`` by default, but when the in-CTM bump is enabled and
+    ``env_init`` carries a larger χ, it is promoted to that env's χ so a
+    warm-start round-trip does not silently down-truncate the env.
+
+    Raises ``ValueError`` on:
+
+    * ``bump_enabled`` and ``chi_max is None`` — without an explicit
+      ceiling the in-CTM bump would silently no-op (``chi_max_eff``
+      defaults to ``chi_current`` and the growth guard is always False).
+    * ``bump_enabled`` and ``bump_step_size <= 0`` — would either stall
+      (``== 0``: bump fires every iter with chi unchanged → infinite
+      loop) or attempt an invalid shrink (``< 0``).
+    * ``bump_enabled`` and ``env_init`` carrying χ above ``chi_max`` —
+      a warm-start env above the configured ceiling is a
+      misconfiguration; we surface it rather than silently clamp.
+    * ``chi_max < chi_current`` after the env_init finalize — defense in
+      depth for direct callers bypassing :class:`CTMConfig`'s constructor.
+    """
+    if bump_enabled and chi_max is None:
+        raise ValueError(
+            "ctmrg_heuristic_increase_chi=True requires chi_max to be set; "
+            "without an explicit ceiling the in-CTM bump would silently "
+            "no-op (chi can never grow above its initial value)."
+        )
+    if bump_enabled and bump_step_size <= 0:
+        raise ValueError(
+            "ctmrg_heuristic_increase_chi_step_size must be a positive "
+            f"integer, got {bump_step_size}"
+        )
+
+    chi_current = chi
+    if bump_enabled and env_init:
+        try:
+            sample_env = next(iter(env_init.values()))
+            env_chi = int(sample_env.C1.indices[0].dim)
+        except (StopIteration, AttributeError, IndexError):
+            env_chi = None  # malformed env_init; let downstream raise
+        if env_chi is not None:
+            if chi_max is not None and env_chi > chi_max:
+                raise ValueError(
+                    f"env_init has chi={env_chi} which exceeds the "
+                    f"configured chi_max={chi_max}. Either raise chi_max "
+                    "or supply a warm-start env that respects the ceiling."
+                )
+            if env_chi > chi_current:
+                chi_current = env_chi
+    if chi_max is not None and chi_max < chi_current:
+        raise ValueError(
+            f"chi_max ({chi_max}) must be >= chi_current ({chi_current}). "
+            "chi_current is the max of the input ``chi`` and (when the "
+            "in-CTM bump is enabled) env_init's actual chi; chi_max is "
+            "the ceiling and must not be smaller."
+        )
+    return chi_current
 
 
 class CTMLoopResult(NamedTuple):
@@ -54,7 +130,6 @@ def _run_ctm_loop_with_bump(
     conv_tol: float,
     conv_method: str,
     plateau_patience: int | None,
-    bump_base_charges,
 ) -> CTMLoopResult:
     """Run CTM sweeps with optional variPEPS-style in-CTM chi-bump.
 
@@ -66,6 +141,18 @@ def _run_ctm_loop_with_bump(
         Callable (envs_new, envs_old) -> envs, or None.  Phase gauge wraps a
         single-arg phase fix; sigma gauge uses both args.  None disables.
     """
+    # Compute bump_base_charges from the first site tensor that yields a
+    # non-None set.  Owning the computation here keeps callers from
+    # repeating it (#514 follow-up de-dup) — the double-layer cache hit
+    # rate is unaffected because _build_double_layer_tensor is memoised
+    # per site tensor by the JIT below.
+    bump_base_charges = None
+    if bump_enabled:
+        for A in site_tensors.values():
+            bump_base_charges = _get_base_charges(_build_double_layer_tensor(A))
+            if bump_base_charges is not None:
+                break
+
     chi_max_eff = chi_max if chi_max is not None else chi_current
     envs = envs_init
     remaining = max_iter

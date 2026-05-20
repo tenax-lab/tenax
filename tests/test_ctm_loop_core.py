@@ -78,7 +78,6 @@ def test_helper_runs_one_sweep_no_bump():
         conv_tol=1e-12,
         conv_method="sv",
         plateau_patience=None,
-        bump_base_charges=None,
     )
 
     assert result.iterations == 3
@@ -166,7 +165,6 @@ def test_helper_gauge_fn_receives_start_of_iter_as_envs_old_no_bump():
         conv_tol=1e-12,
         conv_method="sv",
         plateau_patience=None,
-        bump_base_charges=None,
     )
 
     # Three iterations, three sweeps, three gauge calls.
@@ -230,7 +228,6 @@ def test_helper_gauge_fn_receives_start_of_iter_as_envs_old_with_bump():
         conv_tol=1e-12,
         conv_method="sv",
         plateau_patience=None,
-        bump_base_charges=None,
     )
 
     # With bump firing, each iteration calls jit_step twice (pre-bump +

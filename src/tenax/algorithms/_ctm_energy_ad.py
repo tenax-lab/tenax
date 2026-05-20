@@ -8,20 +8,21 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
-from tenax.algorithms._ctm_loop_core import _run_ctm_loop_with_bump
+from tenax.algorithms._ctm_loop_core import (
+    _run_ctm_loop_with_bump,
+    _validate_chi_bump_args,
+)
 from tenax.algorithms._ctm_python_loop import (
     Coord,
     _make_jit_ctm_step,
     python_loop_ctm_converge,
 )
-from tenax.algorithms._ctm_tensor_convergence import _get_base_charges
 from tenax.algorithms._ctm_tensor_energy import (
     compute_energy_ctm_tensor,
     compute_energy_ctm_tensor_multisite,
 )
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
-    _build_double_layer_tensor,
     initialize_ctm_tensor_env,
 )
 from tenax.algorithms._gmres_lax import gmres_pytree, gmres_pytree_jax
@@ -73,34 +74,13 @@ def ctm_energy_explicit(
     iterations — bump cannot fire during backprop.
     """
     # ---- validation (mirror ctm_energy_implicit / _sigma_gauged_ctm_converge) ----
-    if ctmrg_heuristic_increase_chi and chi_max is None:
-        raise ValueError(
-            "ctmrg_heuristic_increase_chi=True requires chi_max to be set; "
-            "without an explicit ceiling the in-CTM bump would silently no-op."
-        )
-    if ctmrg_heuristic_increase_chi and ctmrg_heuristic_increase_chi_step_size <= 0:
-        raise ValueError(
-            "ctmrg_heuristic_increase_chi_step_size must be a positive "
-            f"integer, got {ctmrg_heuristic_increase_chi_step_size}"
-        )
-
-    chi_current = chi
-    if ctmrg_heuristic_increase_chi and env_init:
-        try:
-            sample_env = next(iter(env_init.values()))
-            env_chi = int(sample_env.C1.indices[0].dim)
-        except (StopIteration, AttributeError, IndexError):
-            env_chi = None
-        if env_chi is not None:
-            if chi_max is not None and env_chi > chi_max:
-                raise ValueError(
-                    f"env_init has chi={env_chi} which exceeds the "
-                    f"configured chi_max={chi_max}."
-                )
-            if env_chi > chi_current:
-                chi_current = env_chi
-    if chi_max is not None and chi_max < chi_current:
-        raise ValueError(f"chi_max ({chi_max}) must be >= chi_current ({chi_current}).")
+    chi_current = _validate_chi_bump_args(
+        chi=chi,
+        chi_max=chi_max,
+        env_init=env_init,
+        bump_enabled=ctmrg_heuristic_increase_chi,
+        bump_step_size=ctmrg_heuristic_increase_chi_step_size,
+    )
 
     jit_step = _make_jit_ctm_step(neighbors)
     envs = (
@@ -111,13 +91,6 @@ def ctm_energy_explicit(
             for c, A in site_tensors.items()
         }
     )
-
-    bump_base_charges = None
-    if ctmrg_heuristic_increase_chi:
-        for A in site_tensors.values():
-            bump_base_charges = _get_base_charges(_build_double_layer_tensor(A))
-            if bump_base_charges is not None:
-                break
 
     # ---- WARMUP — bump-aware, no-grad ----
     if warmup_steps > 0:
@@ -139,7 +112,6 @@ def ctm_energy_explicit(
             conv_tol=1e30,  # never satisfies
             conv_method="sv",
             plateau_patience=None,
-            bump_base_charges=bump_base_charges,
         )
         envs = jax.tree.map(jax.lax.stop_gradient, warmup_result.envs)
         chi_post_warmup = warmup_result.final_chi
@@ -497,34 +469,13 @@ def _sigma_gauged_ctm_converge(
     bump-off behaviour for existing implicit-AD callers.
     """
     # ---- validation (mirror python_loop_ctm_converge) ----
-    if ctmrg_heuristic_increase_chi and chi_max is None:
-        raise ValueError(
-            "ctmrg_heuristic_increase_chi=True requires chi_max to be set; "
-            "without an explicit ceiling the in-CTM bump would silently no-op."
-        )
-    if ctmrg_heuristic_increase_chi and ctmrg_heuristic_increase_chi_step_size <= 0:
-        raise ValueError(
-            "ctmrg_heuristic_increase_chi_step_size must be a positive "
-            f"integer, got {ctmrg_heuristic_increase_chi_step_size}"
-        )
-
-    chi_current = chi
-    if ctmrg_heuristic_increase_chi and env_init:
-        try:
-            sample_env = next(iter(env_init.values()))
-            env_chi = int(sample_env.C1.indices[0].dim)
-        except (StopIteration, AttributeError, IndexError):
-            env_chi = None
-        if env_chi is not None:
-            if chi_max is not None and env_chi > chi_max:
-                raise ValueError(
-                    f"env_init has chi={env_chi} which exceeds the "
-                    f"configured chi_max={chi_max}."
-                )
-            if env_chi > chi_current:
-                chi_current = env_chi
-    if chi_max is not None and chi_max < chi_current:
-        raise ValueError(f"chi_max ({chi_max}) must be >= chi_current ({chi_current}).")
+    chi_current = _validate_chi_bump_args(
+        chi=chi,
+        chi_max=chi_max,
+        env_init=env_init,
+        bump_enabled=ctmrg_heuristic_increase_chi,
+        bump_step_size=ctmrg_heuristic_increase_chi_step_size,
+    )
 
     jit_step = _make_jit_ctm_step(neighbors)
     envs = (
@@ -566,14 +517,6 @@ def _sigma_gauged_ctm_converge(
     else:
         raise ValueError(f"Unknown forward_gauge={forward_gauge!r}")
 
-    # ---- bump_base_charges ----
-    bump_base_charges = None
-    if ctmrg_heuristic_increase_chi:
-        for A in site_tensors.values():
-            bump_base_charges = _get_base_charges(_build_double_layer_tensor(A))
-            if bump_base_charges is not None:
-                break
-
     # ---- delegate to shared helper ----
     result = _run_ctm_loop_with_bump(
         jit_step,
@@ -593,7 +536,6 @@ def _sigma_gauged_ctm_converge(
         conv_tol=conv_tol,
         conv_method=conv_method,
         plateau_patience=plateau_patience,
-        bump_base_charges=bump_base_charges,
     )
     return result.envs
 

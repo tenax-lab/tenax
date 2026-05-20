@@ -177,6 +177,21 @@ def make_ctm_energy_fn(
     def _ctm_energy_fn(site_tensors):
         ctm_cfg = get_ctm_cfg()
         env_init = env_cache.get("envs", None)
+        # In-CTM χ-bump knobs (variPEPS §2.8.2; Issue #492).  Defaults in
+        # CTMConfig keep the bump off, so this is a no-op for existing
+        # callers; downstream ctm_energy_{explicit,implicit} validate the
+        # combination (chi_max required, step_size > 0, etc.) so we don't
+        # re-check here.
+        bump_kwargs = dict(
+            ctmrg_heuristic_increase_chi=ctm_cfg.ctmrg_heuristic_increase_chi,
+            ctmrg_heuristic_increase_chi_threshold=(
+                ctm_cfg.ctmrg_heuristic_increase_chi_threshold
+            ),
+            ctmrg_heuristic_increase_chi_step_size=(
+                ctm_cfg.ctmrg_heuristic_increase_chi_step_size
+            ),
+            chi_max=ctm_cfg.chi_max,
+        )
         if use_explicit:
             return ctm_energy_explicit(
                 site_tensors,
@@ -190,6 +205,7 @@ def make_ctm_energy_fn(
                 projector_backward=ctm_cfg.projector_backward,
                 env_init=env_init,
                 energy_fn=energy_fn,
+                **bump_kwargs,
             )
         return ctm_energy_implicit(
             site_tensors,
@@ -220,6 +236,7 @@ def make_ctm_energy_fn(
             # Set ``CTMConfig.plateau_patience=None`` at the final chi
             # stage when strict variational gradients matter.
             plateau_patience=ctm_cfg.plateau_patience,
+            **bump_kwargs,
         )
 
     return _ctm_energy_fn
