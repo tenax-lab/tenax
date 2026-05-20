@@ -389,6 +389,15 @@ def ctm_energy_implicit(
                            Requires ``chi_max`` to be set and is mutex
                            with ``chi_ramp``.  Defaults to False
                            (existing behaviour).
+
+                           The backward pass is chi-locked to the
+                           post-bump chi via JAX JIT static_argnames
+                           (see docs/plans/2026-05-20-chi-lock-design.md):
+                           the four backward JIT helpers re-trace one
+                           compiled binary per distinct chi value
+                           visited.  At defaults (chi 9 -> chi_max 24,
+                           step 2) this is ~8 traces per helper,
+                           amortised across the optimizer run.
         ctmrg_heuristic_increase_chi_threshold:
                            Smallest-S threshold that triggers an in-CTM
                            chi bump.  Default ``1e-6``.
@@ -418,11 +427,11 @@ def ctm_energy_implicit(
         )
 
     # Mirror the bump-kwarg validation from ``_sigma_gauged_ctm_converge`` at
-    # the public boundary.  We need these to fire *before* the
-    # NotImplementedError below so that existing kwarg-validation tests
-    # (chi_max=None, step_size<=0, env_init above chi_max) still surface
-    # their specific ValueError rather than the more generic
-    # NotImplementedError defensive raise.
+    # the public boundary so kwarg-validation tests (chi_max=None,
+    # step_size<=0, env_init above chi_max) surface their specific
+    # ValueError at the entry point, before dispatch hands off to the
+    # custom_vjp factory.  Chi-lock (#516) lifted the prior
+    # NotImplementedError raise that this block historically preceded.
     _validate_chi_bump_args(
         chi=chi,
         chi_max=chi_max,
