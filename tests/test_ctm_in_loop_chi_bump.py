@@ -165,6 +165,36 @@ class TestInCtmChiBumpHook:
             "returned still zero-padded without a post-bump sweep."
         )
 
+    def test_bump_disabled_does_not_override_chi_from_env(self):
+        """When ``ctmrg_heuristic_increase_chi=False`` (default), the
+        warm-start env_init chi-override branch must be skipped — the
+        function should run at the requested ``chi`` and the env_init
+        is the caller's responsibility (must match ``chi``).  Codex
+        review on PR #513.
+
+        This is a regression guard against accidentally widening the
+        override to all warm-start paths.  We verify the gating by
+        observing that bump-off + matching env_init returns at the
+        requested chi without any silent chi-promotion.
+        """
+        A = _make_random_A(D=2, d=2)
+        site_tensors = {(0, 0): A}
+
+        # Bump OFF, env_init matches requested chi=4 → final_chi == 4
+        # (no chi-from-env override at all).
+        _, info = python_loop_ctm_converge(
+            site_tensors,
+            SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=4,
+            min_iter=2,
+            conv_tol=1e-5,
+        )
+        assert info.final_chi == 4, (
+            "With bump disabled, final_chi must equal the requested chi; "
+            f"got {info.final_chi}.  Indicates a leaked chi-promotion."
+        )
+
     def test_warm_start_preserves_grown_chi(self):
         """When env_init is passed back from a previous call that bumped
         chi, the next call must honour the env's actual chi rather than

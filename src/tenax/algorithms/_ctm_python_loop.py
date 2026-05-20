@@ -221,7 +221,13 @@ def python_loop_ctm_converge(
     # truncates the env back to 4, defeating the bump entirely (codex
     # review on PR #513).  Derive ``chi_current`` from the warm-start
     # env's actual χ so warm-start round-trips preserve grown chi.
-    if env_init is not None and env_init:
+    #
+    # Gated to the bump-enabled path: when the bump is OFF, the historical
+    # contract ("run at the requested ``chi``") is preserved, so callers
+    # that intentionally pass a smaller ``chi`` than env_init's chi (e.g.,
+    # staged runs that step chi down for memory/runtime control) still
+    # see the requested down-truncation behavior.
+    if ctmrg_heuristic_increase_chi and env_init is not None and env_init:
         try:
             sample_env = next(iter(env_init.values()))
             env_chi = int(sample_env.C1.indices[0].dim)
