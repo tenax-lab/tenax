@@ -4,10 +4,16 @@ from __future__ import annotations
 
 __all__ = ["ctm_energy_explicit", "ctm_energy_implicit"]
 
+import logging
+
 import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
+from tenax.algorithms._ctm_loop_core import (
+    _run_ctm_loop_with_bump,
+    _validate_chi_bump_args,
+)
 from tenax.algorithms._ctm_python_loop import (
     Coord,
     _make_jit_ctm_step,
@@ -24,6 +30,8 @@ from tenax.algorithms._ctm_tensor_init import (
 from tenax.algorithms._gmres_lax import gmres_pytree, gmres_pytree_jax
 from tenax.algorithms.ad_utils import CTMRGGradientError, _phase_fix_ctm_tensor
 from tenax.contraction.contractor import contract
+
+_GMRES_LOGGER = logging.getLogger("tenax.ctm.gmres")
 
 
 def _default_energy(site_tensors, envs, gate, coords, neighbors):
@@ -48,39 +56,78 @@ def ctm_energy_explicit(
     projector_backward: str = "auto",
     env_init: dict[Coord, CTMTensorEnv] | None = None,
     energy_fn=None,
+    # NEW (#514) — in-CTM χ-bump knobs.  Defaults preserve existing
+    # bump-off contract.  When ``ctmrg_heuristic_increase_chi=True``,
+    # the warmup phase honors the bump; the backprop phase always uses
+    # a fixed chi (post-warmup value) for tape integrity.
+    ctmrg_heuristic_increase_chi: bool = False,
+    ctmrg_heuristic_increase_chi_threshold: float = 1e-6,
+    ctmrg_heuristic_increase_chi_step_size: int = 2,
+    chi_max: int | None = None,
 ) -> jnp.ndarray:
     """Compute iPEPS energy with explicit-differentiation backward.
 
-    Forward: warmup (no grad) + checkpointed CTM sweeps.
+    Forward: warmup (no grad, optionally bump-aware) + checkpointed CTM
+    sweeps at fixed chi.
     Backward: standard JAX autodiff through checkpointed sweeps.
-    """
-    jit_step = _make_jit_ctm_step(neighbors)
 
+    When ``ctmrg_heuristic_increase_chi=True`` is passed, the warmup phase
+    grows chi reactively (variPEPS-style; Issue #492) up to ``chi_max``.
+    The backprop phase uses the final post-warmup chi as a Python int so
+    JAX traces the checkpointed sweep once and reuses across all backprop
+    iterations — bump cannot fire during backprop.
+    """
+    # ---- validation (mirror ctm_energy_implicit / _sigma_gauged_ctm_converge) ----
+    chi_current = _validate_chi_bump_args(
+        chi=chi,
+        chi_max=chi_max,
+        env_init=env_init,
+        bump_enabled=ctmrg_heuristic_increase_chi,
+        bump_step_size=ctmrg_heuristic_increase_chi_step_size,
+    )
+
+    jit_step = _make_jit_ctm_step(neighbors)
     envs = (
         env_init
         if env_init is not None
-        else {c: initialize_ctm_tensor_env(A, chi) for c, A in site_tensors.items()}
+        else {
+            c: initialize_ctm_tensor_env(A, chi_current)
+            for c, A in site_tensors.items()
+        }
     )
 
-    # Warmup: no gradient tracking
-    for _ in range(warmup_steps):
-        envs, _eps, _smin = jax.lax.stop_gradient(
-            jit_step(
-                site_tensors,
-                envs,
-                chi=chi,
-                projector_method=projector_method,
-                renormalize=renormalize,
-                projector_backward=projector_backward,
-            )
+    # ---- WARMUP — bump-aware, no-grad ----
+    if warmup_steps > 0:
+        warmup_result = _run_ctm_loop_with_bump(
+            jit_step,
+            site_tensors,
+            envs,
+            chi_current=chi_current,
+            chi_max=chi_max,
+            bump_enabled=ctmrg_heuristic_increase_chi,
+            bump_threshold=ctmrg_heuristic_increase_chi_threshold,
+            bump_step_size=ctmrg_heuristic_increase_chi_step_size,
+            projector_method=projector_method,
+            renormalize=renormalize,
+            projector_backward=projector_backward,
+            gauge_fix_fn=None,  # warmup historically no gauge-fix
+            max_iter=warmup_steps,
+            min_iter=warmup_steps + 1,  # disables early-exit
+            conv_tol=1e30,  # never satisfies
+            conv_method="sv",
+            plateau_patience=None,
         )
+        envs = jax.tree.map(jax.lax.stop_gradient, warmup_result.envs)
+        chi_post_warmup = warmup_result.final_chi
+    else:
+        chi_post_warmup = chi_current
 
-    # Backprop phase: checkpointed sweeps
+    # ---- BACKPROP — fixed chi (tape integrity) ----
     def _step_envs_only(st, e):
         envs_out, _eps, _smin = jit_step(
             st,
             e,
-            chi=chi,
+            chi=chi_post_warmup,
             projector_method=projector_method,
             renormalize=renormalize,
             projector_backward=projector_backward,
@@ -278,6 +325,10 @@ def ctm_energy_implicit(
     arnoldi_precheck: bool = False,
     adjoint_method: str = "fixed_point",
     plateau_patience: int | None = None,
+    ctmrg_heuristic_increase_chi: bool = False,
+    ctmrg_heuristic_increase_chi_threshold: float = 1e-6,
+    ctmrg_heuristic_increase_chi_step_size: int = 2,
+    chi_max: int | None = None,
 ) -> jnp.ndarray:
     """Compute iPEPS energy with implicit-differentiation backward (GMRES).
 
@@ -329,10 +380,75 @@ def ctm_energy_implicit(
                            ``"gmres"`` retains the eager Krylov solve as
                            an opt-out for divergent edge cases.  Both
                            paths reuse ``gmres_tol`` / ``gmres_maxiter``.
+        ctmrg_heuristic_increase_chi:
+                           If True, run variPEPS-style in-CTM chi bumping
+                           toward ``chi_max`` when the smallest retained
+                           singular value drops below
+                           ``ctmrg_heuristic_increase_chi_threshold``.
+                           Requires ``chi_max`` to be set and is mutex
+                           with ``chi_ramp``.  Defaults to False
+                           (existing behaviour).
+        ctmrg_heuristic_increase_chi_threshold:
+                           Smallest-S threshold that triggers an in-CTM
+                           chi bump.  Default ``1e-6``.
+        ctmrg_heuristic_increase_chi_step_size:
+                           Number of additional chi units added per bump.
+                           Default ``2``.
+        chi_max:           Optional ceiling for in-CTM chi bumping.
+                           Required when ``ctmrg_heuristic_increase_chi``
+                           is True.
 
     Returns:
         Scalar energy per site.
     """
+    # Reject ``ctmrg_heuristic_increase_chi`` + ``chi_ramp`` at the
+    # ctm_energy_implicit boundary.  Without this guard, the chi_ramp
+    # branch inside ``_run_forward`` silently drops the bump kwargs
+    # (``_python_loop_chi_ramp`` doesn't accept them), so a caller
+    # passing both would get a bump-off run with no error.  Mirrors
+    # ``python_loop_ctm_converge``'s identical check (#514 Task 5
+    # review follow-up).
+    if ctmrg_heuristic_increase_chi and chi_ramp is not None:
+        raise ValueError(
+            "ctmrg_heuristic_increase_chi and chi_ramp are mutually "
+            "exclusive: chi_ramp is a deterministic schedule applied "
+            "across stages, while ctmrg_heuristic_increase_chi is reactive "
+            "inside a single CTM convergence call."
+        )
+
+    # Mirror the bump-kwarg validation from ``_sigma_gauged_ctm_converge`` at
+    # the public boundary.  We need these to fire *before* the
+    # NotImplementedError below so that existing kwarg-validation tests
+    # (chi_max=None, step_size<=0, env_init above chi_max) still surface
+    # their specific ValueError rather than the more generic
+    # NotImplementedError defensive raise.
+    _validate_chi_bump_args(
+        chi=chi,
+        chi_max=chi_max,
+        env_init=env_init,
+        bump_enabled=ctmrg_heuristic_increase_chi,
+        bump_step_size=ctmrg_heuristic_increase_chi_step_size,
+    )
+
+    # Defensive raise: the implicit-AD backward closure (_jit_fused_fixed_point_bwd,
+    # _jit_apply_Jt, _jit_gmres_solve) captures ``chi`` as a closure constant
+    # at _make_implicit_vjp_fn build time.  If the forward grew chi via the
+    # in-CTM bump, the env_leaves emitted by the forward would have first-dim
+    # ``chi_bumped > chi`` but every backward sweep would call
+    # ``jit_step_bwd(..., chi=chi_original)`` — silently re-truncating
+    # gradients back to the original chi.  Until a proper chi-lock lands
+    # (deferred follow-up), block the broken path at the public boundary.
+    if ctmrg_heuristic_increase_chi:
+        raise NotImplementedError(
+            "ctm_energy_implicit does not yet support "
+            "ctmrg_heuristic_increase_chi: the implicit-AD backward closure "
+            "captures `chi` at build time, so a forward-side bump would "
+            "produce silently-wrong gradients (the backward VJP would "
+            "re-truncate to the original chi).  Use ctm_energy_explicit "
+            "(warmup phase grows chi; backprop is chi-locked) or wait for "
+            "a chi-lock implementation in ctm_energy_implicit."
+        )
+
     coords = sorted(site_tensors.keys())
     # Pass Tensor objects directly through custom_vjp boundary.
     # Both DenseTensor and SymmetricTensor are registered JAX pytrees,
@@ -363,6 +479,10 @@ def ctm_energy_implicit(
         arnoldi_precheck,
         adjoint_method,
         plateau_patience,
+        ctmrg_heuristic_increase_chi,
+        ctmrg_heuristic_increase_chi_threshold,
+        ctmrg_heuristic_increase_chi_step_size,
+        chi_max,
     )
 
 
@@ -382,26 +502,44 @@ def _sigma_gauged_ctm_converge(
     conv_method="sv",
     min_iter=4,
     plateau_patience: int | None = None,
+    # NEW kwargs (#514) — defaults preserve existing callsite contract
+    ctmrg_heuristic_increase_chi: bool = False,
+    ctmrg_heuristic_increase_chi_threshold: float = 1e-6,
+    ctmrg_heuristic_increase_chi_step_size: int = 2,
+    chi_max: int | None = None,
 ):
     """CTM convergence with sigma gauge fixing for element-wise fixed point.
 
     Runs CTM sweeps with sigma gauge alignment at each step, ensuring
     the converged environment is a literal fixed point of the gauged step.
+
+    The bump-aware loop body is shared with python_loop_ctm_converge via
+    _run_ctm_loop_with_bump.  Validation mirrors that function so direct
+    callers get consistent error messages.  When
+    ``ctmrg_heuristic_increase_chi=True`` the loop performs variPEPS-style
+    in-CTM chi bumping toward ``chi_max`` (see #492/#514); defaults keep
+    bump-off behaviour for existing implicit-AD callers.
     """
-    from tenax.algorithms._ctm_tensor_convergence import (
-        _corner_singular_values,
-        _ctm_sv_diff,
-        _max_env_leaf_diff,
+    # ---- validation (mirror python_loop_ctm_converge) ----
+    chi_current = _validate_chi_bump_args(
+        chi=chi,
+        chi_max=chi_max,
+        env_init=env_init,
+        bump_enabled=ctmrg_heuristic_increase_chi,
+        bump_step_size=ctmrg_heuristic_increase_chi_step_size,
     )
 
     jit_step = _make_jit_ctm_step(neighbors)
     envs = (
         env_init
         if env_init is not None
-        else {c: initialize_ctm_tensor_env(A, chi) for c, A in site_tensors.items()}
+        else {
+            c: initialize_ctm_tensor_env(A, chi_current)
+            for c, A in site_tensors.items()
+        }
     )
 
-    # QR warm-up: only needed when projector_method == "qr"
+    # ---- QR warmup (unchanged) ----
     warmup = (
         min(qr_warmup_steps, max_iter)
         if projector_method == "qr" and qr_warmup_steps > 0
@@ -411,96 +549,47 @@ def _sigma_gauged_ctm_converge(
         envs, _eps, _smin = jit_step(
             site_tensors,
             envs,
-            chi=chi,
+            chi=chi_current,
             projector_method="eigh",
             renormalize=renormalize,
             projector_backward=projector_backward,
         )
 
-    prev_svs: dict = {}
-    prev_envs: dict | None = None
-    best_diff = float("inf")
-    best_envs: dict | None = None
-    iters_since_best = 0
-    for i in range(max_iter - warmup):
-        envs_new, _eps, _smin = jit_step(
-            site_tensors,
-            envs,
-            chi=chi,
-            projector_method=projector_method,
-            renormalize=renormalize,
-            projector_backward=projector_backward,
-        )
-        # Gauge fix: apply selected convention for element-wise convergence
-        if forward_gauge == "phase":
-            envs = {c: _phase_fix_ctm_tensor(envs_new[c]) for c in envs_new}
-        elif forward_gauge == "sigma":
-            envs = {c: _sigma_gauge_fix_env(envs_new[c], envs[c]) for c in envs_new}
-        else:
-            # forward_gauge == "none": no gauge fixing
-            envs = envs_new
+    # ---- gauge_fix_fn pair adapter ----
+    if forward_gauge == "phase":
 
-        # Skip convergence check until min_iter
-        total_iter = warmup + i + 1
-        if total_iter < min_iter:
-            if conv_method == "sv":
-                for c in sorted(envs):
-                    prev_svs[c] = _corner_singular_values(envs[c].C1)
-            else:
-                prev_envs = {c: envs[c] for c in envs}
-            continue
+        def _gauge_pair(envs_new, _envs_old):
+            return {c: _phase_fix_ctm_tensor(envs_new[c]) for c in envs_new}
+    elif forward_gauge == "sigma":
 
-        # ``plateau_metric_valid`` flags whether ``current_diff`` is from
-        # a real baseline this iter — mirrors the python-loop guard added
-        # for the SV ``min_iter <= 1`` case (codex review on PR #439).
-        plateau_metric_valid = False
+        def _gauge_pair(envs_new, envs_old):
+            return {c: _sigma_gauge_fix_env(envs_new[c], envs_old[c]) for c in envs_new}
+    elif forward_gauge == "none":
+        _gauge_pair = None
+    else:
+        raise ValueError(f"Unknown forward_gauge={forward_gauge!r}")
 
-        if conv_method == "elementwise":
-            # Element-wise: max absolute difference across all env tensor leaves
-            if prev_envs is None:
-                prev_envs = {c: envs[c] for c in envs}
-                continue
-            max_diff = 0.0
-            for c in sorted(envs):
-                max_diff = max(max_diff, _max_env_leaf_diff(prev_envs[c], envs[c]))
-            converged = max_diff < conv_tol
-            prev_envs = {c: envs[c] for c in envs}
-            current_diff = max_diff
-            plateau_metric_valid = True
-        else:
-            # SV convergence (default): corner singular value difference.
-            # First SV check has no baseline (only possible when
-            # ``min_iter <= 1``); skip plateau tracking until next iter.
-            have_prev_svs = bool(prev_svs)
-            converged = True
-            current_diff = 0.0
-            for c in sorted(envs):
-                sv = _corner_singular_values(envs[c].C1)
-                if c in prev_svs:
-                    diff = float(_ctm_sv_diff(sv, prev_svs[c]))
-                    current_diff = max(current_diff, diff)
-                    if diff >= conv_tol:
-                        converged = False
-                else:
-                    converged = False
-                prev_svs[c] = sv
-            if have_prev_svs:
-                plateau_metric_valid = True
-
-        if converged:
-            break
-
-        if plateau_patience is not None and plateau_metric_valid:
-            if current_diff < best_diff:
-                best_diff = current_diff
-                best_envs = {c: envs[c] for c in envs}
-                iters_since_best = 0
-            else:
-                iters_since_best += 1
-                if iters_since_best >= plateau_patience:
-                    return best_envs or envs
-
-    return envs
+    # ---- delegate to shared helper ----
+    result = _run_ctm_loop_with_bump(
+        jit_step,
+        site_tensors,
+        envs,
+        chi_current=chi_current,
+        chi_max=chi_max,
+        bump_enabled=ctmrg_heuristic_increase_chi,
+        bump_threshold=ctmrg_heuristic_increase_chi_threshold,
+        bump_step_size=ctmrg_heuristic_increase_chi_step_size,
+        projector_method=projector_method,
+        renormalize=renormalize,
+        projector_backward=projector_backward,
+        gauge_fix_fn=_gauge_pair,
+        max_iter=max_iter - warmup,
+        min_iter=max(0, min_iter - warmup),
+        conv_tol=conv_tol,
+        conv_method=conv_method,
+        plateau_patience=plateau_patience,
+    )
+    return result.envs
 
 
 _VJP_CACHE: dict = {}
@@ -535,6 +624,10 @@ def _ctm_energy_implicit_dispatch(
     arnoldi_precheck,
     adjoint_method,
     plateau_patience,
+    ctmrg_heuristic_increase_chi,
+    ctmrg_heuristic_increase_chi_threshold,
+    ctmrg_heuristic_increase_chi_step_size,
+    chi_max,
 ):
     """Dispatch to custom_vjp-decorated function with caching.
 
@@ -566,6 +659,10 @@ def _ctm_energy_implicit_dispatch(
         arnoldi_precheck,
         adjoint_method,
         plateau_patience,
+        ctmrg_heuristic_increase_chi,
+        ctmrg_heuristic_increase_chi_threshold,
+        ctmrg_heuristic_increase_chi_step_size,
+        chi_max,
     )
 
     entry = _VJP_CACHE.get(cache_key)
@@ -605,6 +702,10 @@ def _ctm_energy_implicit_dispatch(
         arnoldi_precheck=arnoldi_precheck,
         adjoint_method=adjoint_method,
         plateau_patience=plateau_patience,
+        ctmrg_heuristic_increase_chi=ctmrg_heuristic_increase_chi,
+        ctmrg_heuristic_increase_chi_threshold=ctmrg_heuristic_increase_chi_threshold,
+        ctmrg_heuristic_increase_chi_step_size=ctmrg_heuristic_increase_chi_step_size,
+        chi_max=chi_max,
     )
     _VJP_CACHE[cache_key] = (f, mutables)
     return f(params_data_tuple)
@@ -630,6 +731,10 @@ def _make_implicit_vjp_fn(
     arnoldi_precheck=False,
     adjoint_method="fixed_point",
     plateau_patience: int | None = None,
+    ctmrg_heuristic_increase_chi: bool = False,
+    ctmrg_heuristic_increase_chi_threshold: float = 1e-6,
+    ctmrg_heuristic_increase_chi_step_size: int = 2,
+    chi_max: int | None = None,
 ):
     """Build a custom_vjp-decorated function closed over static config.
 
@@ -652,7 +757,13 @@ def _make_implicit_vjp_fn(
         )
 
     # Mutable cache for treedef from forward (needed in backward).
-    _cached = {}
+    # ``prev_lam_leaves`` caches the implicit-AD adjoint solution across
+    # consecutive ``f_bwd`` calls.  Consecutive L-BFGS steps usually take small
+    # site-tensor steps, so the adjoint problem ``(I - J^T) λ = b`` is "close"
+    # to the previous one — using the previous ``λ`` as a warm seed for the
+    # Neumann iteration converges in fewer iterations (#501).  Cleared on
+    # divergence/non-convergence so the next call gets a fresh start.
+    _cached = {"prev_lam_leaves": None}
 
     def _run_forward(site_tensors):
         """Run CTM convergence (shared by f and f_fwd)."""
@@ -692,6 +803,10 @@ def _make_implicit_vjp_fn(
                 conv_method=conv_method,
                 min_iter=min_iter,
                 plateau_patience=plateau_patience,
+                ctmrg_heuristic_increase_chi=ctmrg_heuristic_increase_chi,
+                ctmrg_heuristic_increase_chi_threshold=ctmrg_heuristic_increase_chi_threshold,
+                ctmrg_heuristic_increase_chi_step_size=ctmrg_heuristic_increase_chi_step_size,
+                chi_max=chi_max,
             )
         return envs
 
@@ -832,6 +947,7 @@ def _make_implicit_vjp_fn(
         params_data_tuple,
         env_leaves,
         g_scalar,
+        init_lam,
     ):
         """F3: fused dE/denv + adjoint fixed-point + chain rule.
 
@@ -839,6 +955,11 @@ def _make_implicit_vjp_fn(
         (_jit_dE_denv, _jit_apply_Jt, _jit_chain_rule) + Python adjoint
         loop. The adjoint runs as lax.while_loop so the loop body and
         the J^T VJP closure trace once and reuse on every iter.
+
+        ``init_lam`` is the warm-start seed for the Neumann iteration
+        (shape-matched to ``dE_denv``).  Cold start passes ``dE_denv``
+        itself; subsequent calls pass the previous ``lam_final`` so the
+        loop converges in fewer iterations (#501).
 
         Returns
         -------
@@ -851,6 +972,10 @@ def _make_implicit_vjp_fn(
             Set when ``diff < gmres_tol``. Diagnostic only.
         n_iter : int32 scalar
             Diagnostic only.
+        lam_final : tuple of leaves
+            Final adjoint vector, shaped like ``dE_denv``.  Caller caches
+            this and passes it back as ``init_lam`` on the next call to
+            warm-start the Neumann iteration.
         """
         gate_ = mutables["gate"]
         energy_fn_ = mutables["energy_fn"]
@@ -894,8 +1019,12 @@ def _make_implicit_vjp_fn(
             return vjp_env_fn(v)[0]
 
         # --- 3. Adjoint fixed-point inside lax.while_loop ---
+        # ``init_lam`` is the caller-supplied warm-start seed (cold-start
+        # uses ``dE_denv``; warm-start uses the previous ``lam_final``).
+        # The RHS ``b = dE_denv`` of the Neumann step ``λ_{k+1} = b + J^T λ_k``
+        # is unchanged — only the initial guess is seeded from cache.
         real_dtype = jnp.real(dE_denv[0]).dtype if dE_denv else jnp.float64
-        init_lam = dE_denv  # lambda_0 = b
+        init_lam_local = init_lam  # lambda_0 (warm or cold seed)
         init_diff = jnp.array(jnp.inf, dtype=real_dtype)
         init_k = jnp.array(0, dtype=jnp.int32)
         init_diverged = jnp.array(False)
@@ -921,7 +1050,7 @@ def _make_implicit_vjp_fn(
         lam_final, final_diff, n_iter, diverged = jax.lax.while_loop(
             cond_fn,
             body_fn,
-            (init_lam, init_diff, init_k, init_diverged),
+            (init_lam_local, init_diff, init_k, init_diverged),
         )
         converged = final_diff <= tol_arr
 
@@ -952,7 +1081,7 @@ def _make_implicit_vjp_fn(
         indirect = vjp_sweep_params(lam_final)[0]
 
         total = jax.tree.map(lambda d, ind: g_scalar * (d + ind), direct, indirect)
-        return (total,), diverged, converged, n_iter
+        return (total,), diverged, converged, n_iter, lam_final
 
     @jax.jit
     def _jit_gmres_solve(params_data_tuple, env_leaves, rhs):
@@ -1041,12 +1170,49 @@ def _make_implicit_vjp_fn(
             # loop did not solve the system (diverged or hit
             # gmres_maxiter without reaching gmres_tol) we fall back
             # to eager GMRES below (same path as adjoint_method=="gmres").
-            grads_tuple, diverged, _converged, _n_iter = _jit_fused_fixed_point_bwd(
-                params_data_tuple, env_leaves, g
-            )
+            #
+            # Warm-start (#501): the cached ``prev_lam_leaves`` from the
+            # previous successful backward is fed back as the Neumann
+            # initial guess.  Cold start (first call, or after a
+            # divergence reset) seeds from ``dE_denv`` itself —
+            # equivalent to the previous behaviour.
+            prev_lam = _cached.get("prev_lam_leaves")
+            invalidated_by_shape = False
+            if prev_lam is not None:
+                # Validate shapes match current env_leaves.  Without this, a D-sweep
+                # or tensor-representation switch (with cache hit on coords/gate/
+                # neighbors) would feed a stale-shape init_lam into the JIT and
+                # raise a VJP tree/shape mismatch.  Cache structure: prev_lam is a
+                # flat tuple of leaves shaped like env_leaves.
+                if len(prev_lam) != len(env_leaves) or any(
+                    a.shape != b.shape for a, b in zip(prev_lam, env_leaves)
+                ):
+                    _cached["prev_lam_leaves"] = None
+                    invalidated_by_shape = True
+                    prev_lam = None
+            if prev_lam is None:
+                init_lam = _eager_dE_denv()
+            else:
+                init_lam = prev_lam
+
+            (
+                grads_tuple,
+                diverged,
+                _converged,
+                _n_iter,
+                lam_final,
+            ) = _jit_fused_fixed_point_bwd(params_data_tuple, env_leaves, g, init_lam)
             _F3_LAST_DIAGNOSTICS["diverged"] = bool(jax.device_get(diverged))
             _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
             _F3_LAST_DIAGNOSTICS["n_iter"] = int(jax.device_get(_n_iter))
+            _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = invalidated_by_shape
+            _GMRES_LOGGER.debug(
+                "F3 adjoint: n_iter=%d converged=%s diverged=%s tol=%g",
+                _F3_LAST_DIAGNOSTICS["n_iter"],
+                _F3_LAST_DIAGNOSTICS["converged"],
+                _F3_LAST_DIAGNOSTICS["diverged"],
+                gmres_tol,
+            )
             if (
                 _F3_LAST_DIAGNOSTICS["diverged"]
                 or not _F3_LAST_DIAGNOSTICS["converged"]
@@ -1060,7 +1226,19 @@ def _make_implicit_vjp_fn(
                 # truncated Neumann iterate would be silently consumed
                 # by _jit_chain_rule as if (I - J^T) λ = b had been
                 # solved, biasing the gradient (issue #420).
+                #
+                # Invalidate the stale warm-start cache before the
+                # eager fallback fires; the eager GMRES result then
+                # becomes the new seed for the next call.
+                _cached["prev_lam_leaves"] = None
+                _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = True
                 rhs = _eager_dE_denv()
+                _GMRES_LOGGER.debug(
+                    "Eager GMRES: maxiter=%d tol=%g restart=%d",
+                    gmres_maxiter,
+                    gmres_tol,
+                    gmres_restart,
+                )
                 lam, _info = gmres_pytree_jax(
                     _eager_apply_I_minus_Jt,
                     rhs,
@@ -1070,12 +1248,20 @@ def _make_implicit_vjp_fn(
                     restart=gmres_restart,
                 )
                 lam_leaves = tuple(jax.tree.leaves(lam))
+                _cached["prev_lam_leaves"] = lam_leaves
                 return _jit_chain_rule(params_data_tuple, env_leaves, lam_leaves, g)
+            _cached["prev_lam_leaves"] = tuple(jax.tree.leaves(lam_final))
             return grads_tuple
         else:
             # adjoint_method == "gmres": eager Krylov via JAX's built-in
             # solver.  Retained as an opt-out for divergent edge cases.
             rhs = _eager_dE_denv()
+            _GMRES_LOGGER.debug(
+                "Eager GMRES: maxiter=%d tol=%g restart=%d",
+                gmres_maxiter,
+                gmres_tol,
+                gmres_restart,
+            )
             lam, _info = gmres_pytree_jax(
                 _eager_apply_I_minus_Jt,
                 rhs,

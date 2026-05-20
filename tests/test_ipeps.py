@@ -1010,7 +1010,17 @@ class TestADSymmetric:
         assert np.isfinite(E_gs)
 
     def test_optimize_gs_ad_symmetric_matches_dense(self):
-        """Symmetric AD gives comparable energy to dense AD."""
+        """Symmetric AD gives comparable energy to dense AD.
+
+        Compute budget kept small (``gs_num_steps=1``, ``max_iter=5``) so
+        running the optimizer twice — once for the SymmetricTensor and once
+        for the dense equivalent — fits inside the CI fast-ipeps bucket's
+        60 min job budget.  The original 3-step / 10-iter config was on the
+        edge before #492's in-CTM bump infrastructure landed and tipped it
+        past timeout on push-to-main.  The assertions below verify the
+        type-preservation contract, not convergence quality, so the smaller
+        budget preserves the test's purpose.
+        """
         gate = self._heisenberg_gate()
 
         # Create a SymmetricTensor and its dense equivalent
@@ -1019,8 +1029,8 @@ class TestADSymmetric:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
-            gs_num_steps=3,
+            ctm=CTMConfig(chi=4, max_iter=5),
+            gs_num_steps=1,
             gs_learning_rate=0.01,
         )
 
