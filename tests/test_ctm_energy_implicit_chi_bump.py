@@ -262,3 +262,50 @@ def test_chi_bump_does_not_fire_when_below_threshold():
         chi_max=8,
     )
     assert chi_post == 4, f"Expected no bump (chi_post == 4), got chi_post={chi_post}"
+
+
+def test_ad_gradient_equals_fixed_chi_when_no_bump_fires():
+    """With chi_max == chi_initial, gradient is identical to bump=False.
+
+    Verifies the chi-lock plumbing is a no-op when bump can't fire.
+    Detects accidental drift in the chi_initial == chi_post path.
+    """
+    A = _build_site_tensor(D=2, d=2, seed=7)
+    gate = heisenberg_gate()
+    A_data = A.todense()
+    flat_init = A_data.flatten()
+
+    def loss_with_bump(A_flat: jnp.ndarray) -> jnp.ndarray:
+        A_perturbed = DenseTensor(A_flat.reshape(A_data.shape), A.indices)
+        return ctm_energy_implicit(
+            {(0, 0): A_perturbed},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=4,
+            max_iter=6,
+            min_iter=2,
+            ctmrg_heuristic_increase_chi=True,
+            ctmrg_heuristic_increase_chi_threshold=1e-12,
+            ctmrg_heuristic_increase_chi_step_size=2,
+            chi_max=4,  # == chi_initial → no room to bump
+        )
+
+    def loss_no_bump(A_flat: jnp.ndarray) -> jnp.ndarray:
+        A_perturbed = DenseTensor(A_flat.reshape(A_data.shape), A.indices)
+        return ctm_energy_implicit(
+            {(0, 0): A_perturbed},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=4,
+            max_iter=6,
+            min_iter=2,
+            ctmrg_heuristic_increase_chi=False,
+        )
+
+    grad_bump = jax.grad(loss_with_bump)(flat_init)
+    grad_no_bump = jax.grad(loss_no_bump)(flat_init)
+
+    assert jnp.allclose(grad_bump, grad_no_bump, atol=1e-10, rtol=1e-10), (
+        f"chi-lock plumbing leaks when bump can't fire.\n"
+        f"max diff = {jnp.max(jnp.abs(grad_bump - grad_no_bump))}"
+    )
