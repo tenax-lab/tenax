@@ -500,6 +500,9 @@ def _sigma_gauged_ctm_converge(
     ``ctmrg_heuristic_increase_chi=True`` the loop performs variPEPS-style
     in-CTM chi bumping toward ``chi_max`` (see #492/#514); defaults keep
     bump-off behaviour for existing implicit-AD callers.
+
+    Returns ``(envs, final_chi)`` so callers can route the post-bump chi
+    into custom_vjp residuals for the chi-lock backward (#516).
     """
     # ---- validation (mirror python_loop_ctm_converge) ----
     chi_current = _validate_chi_bump_args(
@@ -570,7 +573,7 @@ def _sigma_gauged_ctm_converge(
         conv_method=conv_method,
         plateau_patience=plateau_patience,
     )
-    return result.envs
+    return result.envs, result.final_chi
 
 
 _VJP_CACHE: dict = {}
@@ -747,7 +750,13 @@ def _make_implicit_vjp_fn(
     _cached = {"prev_lam_leaves": None}
 
     def _run_forward(site_tensors):
-        """Run CTM convergence (shared by f and f_fwd)."""
+        """Run CTM convergence (shared by f and f_fwd).
+
+        Returns ``(envs, chi_post)`` where ``chi_post`` is the post-bump
+        chi (== ``chi`` when no bump fires).  ``chi_post`` threads into
+        the custom_vjp residuals so the backward (#516 chi-lock) can
+        dispatch JIT helpers at the actual post-forward chi.
+        """
         chi_ramp = mutables["chi_ramp"]
         env_init = mutables["env_init"]
         if chi_ramp is not None:
@@ -768,8 +777,12 @@ def _make_implicit_vjp_fn(
                 gauge_fix_fn=_gauge_fix_fn,
                 plateau_patience=plateau_patience,
             )
+            # chi_ramp doesn't trigger in-CTM bump (mutex enforced in dispatch);
+            # chi_post is the final ramp stage's chi, which equals ``chi`` for
+            # the implicit-AD entry point that uses ramp only.
+            chi_post = chi
         else:
-            envs = _sigma_gauged_ctm_converge(
+            envs, chi_post = _sigma_gauged_ctm_converge(
                 site_tensors,
                 neighbors,
                 chi=chi,
@@ -789,7 +802,7 @@ def _make_implicit_vjp_fn(
                 ctmrg_heuristic_increase_chi_step_size=ctmrg_heuristic_increase_chi_step_size,
                 chi_max=chi_max,
             )
-        return envs
+        return envs, chi_post
 
     def _compute_energy(site_tensors, envs):
         """Compute energy using energy_fn or default."""
@@ -802,17 +815,17 @@ def _make_implicit_vjp_fn(
     @jax.custom_vjp
     def f(params_data_tuple):
         site_tensors = dict(zip(coords, params_data_tuple))
-        envs = _run_forward(site_tensors)
+        envs, _chi_post = _run_forward(site_tensors)  # chi_post unused outside grad
         return _compute_energy(site_tensors, envs)
 
     def f_fwd(params_data_tuple):
         site_tensors = dict(zip(coords, params_data_tuple))
-        envs = _run_forward(site_tensors)
+        envs, chi_post = _run_forward(site_tensors)
         energy = _compute_energy(site_tensors, envs)
 
         _cached["env_treedef"] = jax.tree.structure(envs)
         env_leaves = tuple(jax.tree.leaves(envs))
-        residuals = (params_data_tuple, env_leaves)
+        residuals = (params_data_tuple, env_leaves, chi_post)  # chi_post NEW
         return energy, residuals
 
     # Build JIT'd sweep step for backward (same as forward).
@@ -1107,7 +1120,7 @@ def _make_implicit_vjp_fn(
 
     def f_bwd(residuals, g):
         """Backward: adjoint solve (fixed-point or GMRES) + JIT'd chain rule."""
-        params_data_tuple, env_leaves = residuals
+        params_data_tuple, env_leaves, chi_post = residuals  # chi_post NEW (unused)
 
         # dE/denv is the RHS for the (I - J^T)·λ = b solve. F3's fused JIT
         # recomputes it internally, so the eager call is only needed by:
