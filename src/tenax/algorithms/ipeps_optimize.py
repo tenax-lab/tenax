@@ -2099,10 +2099,15 @@ def _optimize_gs_ad_tensor_2site(
         else:
             warnings.warn(
                 "2-site AD with gs_c4v=False uses the implicit-AD path. "
-                "This is variational at chi >= 16 for generic models but "
-                "can be slower than C4v or 1-site optimization. For "
-                "antiferromagnetic bipartite models, consider gs_c4v=True "
-                "or 1-site with sublattice_rotate_gate().",
+                "This is variational when the CTM environment is converged "
+                "at the target chi.  Without raising chi manually, chi >= 16 "
+                "is typically needed for generic 2-site Heisenberg.  Note: "
+                "variPEPS-style in-CTM chi-bump (ctmrg_heuristic_increase_chi=True) "
+                "is currently supported only on the explicit-AD path "
+                "(gs_implicit_ad=False); the implicit-AD path raises "
+                "NotImplementedError when ctmrg_heuristic_increase_chi=True "
+                "is passed (see issue #514).  For antiferromagnetic bipartite "
+                "models, consider gs_c4v=True or 1-site with sublattice_rotate_gate().",
                 stacklevel=2,
             )
     import optax
