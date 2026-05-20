@@ -397,6 +397,21 @@ def ctm_energy_implicit(
     Returns:
         Scalar energy per site.
     """
+    # Reject ``ctmrg_heuristic_increase_chi`` + ``chi_ramp`` at the
+    # ctm_energy_implicit boundary.  Without this guard, the chi_ramp
+    # branch inside ``_run_forward`` silently drops the bump kwargs
+    # (``_python_loop_chi_ramp`` doesn't accept them), so a caller
+    # passing both would get a bump-off run with no error.  Mirrors
+    # ``python_loop_ctm_converge``'s identical check (#514 Task 5
+    # review follow-up).
+    if ctmrg_heuristic_increase_chi and chi_ramp is not None:
+        raise ValueError(
+            "ctmrg_heuristic_increase_chi and chi_ramp are mutually "
+            "exclusive: chi_ramp is a deterministic schedule applied "
+            "across stages, while ctmrg_heuristic_increase_chi is reactive "
+            "inside a single CTM convergence call."
+        )
+
     coords = sorted(site_tensors.keys())
     # Pass Tensor objects directly through custom_vjp boundary.
     # Both DenseTensor and SymmetricTensor are registered JAX pytrees,
