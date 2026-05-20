@@ -67,3 +67,55 @@ def test_implicit_ad_no_longer_raises_with_bump():
         chi_max=8,
     )
     assert jnp.isfinite(energy)
+
+
+def _central_diff(f, x: jnp.ndarray, eps: float = 1e-4) -> jnp.ndarray:
+    """Central-difference gradient of scalar f at x (flat vector)."""
+    grad = jnp.zeros_like(x)
+    for i in range(x.shape[0]):
+        ei = jnp.zeros_like(x).at[i].set(eps)
+        f_plus = f(x + ei)
+        f_minus = f(x - ei)
+        grad = grad.at[i].set((f_plus - f_minus) / (2 * eps))
+    return grad
+
+
+def test_ad_gradient_matches_fd_with_bump():
+    """FD-vs-AD parity at D=2, chi_initial=4, chi_max=8 with forced bump.
+
+    The correctness gate for chi-lock: confirms that when the forward CTM
+    grows chi 4 -> 8 via in-CTM bump, the backward operates at chi_post=8
+    (not the closure-captured chi_initial=4) and produces a gradient that
+    matches finite-difference.
+    """
+    A = _build_site_tensor(D=2, d=2, seed=42)
+    gate = heisenberg_gate()
+    A_data = A.todense()
+    flat_init = A_data.flatten()
+
+    def loss(A_flat: jnp.ndarray) -> jnp.ndarray:
+        A_perturbed = DenseTensor(A_flat.reshape(A_data.shape), A.indices)
+        return ctm_energy_implicit(
+            {(0, 0): A_perturbed},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=4,
+            max_iter=6,
+            min_iter=2,
+            ctmrg_heuristic_increase_chi=True,
+            ctmrg_heuristic_increase_chi_threshold=1e-12,  # force bump on iter 1
+            ctmrg_heuristic_increase_chi_step_size=2,
+            chi_max=8,
+        )
+
+    grad_ad = jax.grad(loss)(flat_init)
+    grad_fd = _central_diff(loss, flat_init, eps=1e-4)
+
+    # Tol: 1e-5 abs is the chi-lock design target; rel 1e-3 absorbs FD
+    # truncation error on small-magnitude components.
+    assert jnp.allclose(grad_ad, grad_fd, atol=1e-5, rtol=1e-3), (
+        f"AD gradient diverges from FD reference.\n"
+        f"max |grad_ad - grad_fd| = {jnp.max(jnp.abs(grad_ad - grad_fd))}\n"
+        f"grad_ad[:5] = {grad_ad[:5]}\n"
+        f"grad_fd[:5] = {grad_fd[:5]}"
+    )
