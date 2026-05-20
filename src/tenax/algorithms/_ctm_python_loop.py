@@ -243,10 +243,23 @@ def python_loop_ctm_converge(
         try:
             sample_env = next(iter(env_init.values()))
             env_chi = int(sample_env.C1.indices[0].dim)
+        except (StopIteration, AttributeError, IndexError):
+            env_chi = None  # malformed env_init; let downstream raise
+        if env_chi is not None:
+            # Reject env_init that exceeds the configured ceiling — the
+            # caller explicitly set chi_max as a memory/runtime budget,
+            # so a warm-start env above it is a misconfiguration.  We
+            # could silently clamp, but that would destroy the
+            # warm-start anyway and hide the inconsistency (codex
+            # review on PR #513).
+            if chi_max is not None and env_chi > chi_max:
+                raise ValueError(
+                    f"env_init has chi={env_chi} which exceeds the "
+                    f"configured chi_max={chi_max}. Either raise chi_max "
+                    "or supply a warm-start env that respects the ceiling."
+                )
             if env_chi > chi_current:
                 chi_current = env_chi
-        except (StopIteration, AttributeError, IndexError):
-            pass  # malformed env_init; let downstream raise
     # When the bump is enabled, require an explicit ``chi_max`` ceiling;
     # otherwise ``chi_max_eff == chi_current`` would make the growth guard
     # always False and the feature would silently no-op (codex review on

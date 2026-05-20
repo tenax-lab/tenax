@@ -195,6 +195,47 @@ class TestInCtmChiBumpHook:
             f"got {info.final_chi}.  Indicates a leaked chi-promotion."
         )
 
+    def test_warm_start_rejects_env_above_chi_max(self):
+        """If env_init's chi exceeds the configured chi_max, raise rather
+        than silently letting the warm-start override exceed the cap.
+        The caller explicitly set chi_max as a memory/runtime budget;
+        an env above it indicates a misconfiguration.  Codex review
+        on PR #513.
+        """
+        A = _make_random_A(D=2, d=2)
+        site_tensors = {(0, 0): A}
+
+        # Build an env at chi=6 via a first bump-enabled call.
+        envs1, info1 = python_loop_ctm_converge(
+            site_tensors,
+            SINGLE_SITE_NEIGHBORS,
+            chi=2,
+            max_iter=6,
+            min_iter=2,
+            conv_tol=1e-5,
+            ctmrg_heuristic_increase_chi=True,
+            ctmrg_heuristic_increase_chi_threshold=1e-9,
+            ctmrg_heuristic_increase_chi_step_size=2,
+            chi_max=6,
+        )
+        assert info1.final_chi == 6
+
+        # Second call: env_init at chi=6 but chi_max LOWERED to 4.
+        # The override must refuse, not silently overrule the cap.
+        with pytest.raises(ValueError, match="exceeds the configured chi_max"):
+            python_loop_ctm_converge(
+                site_tensors,
+                SINGLE_SITE_NEIGHBORS,
+                chi=2,
+                max_iter=2,
+                min_iter=2,
+                ctmrg_heuristic_increase_chi=True,
+                ctmrg_heuristic_increase_chi_threshold=1e-9,
+                ctmrg_heuristic_increase_chi_step_size=2,
+                chi_max=4,
+                env_init=envs1,
+            )
+
     def test_warm_start_preserves_grown_chi(self):
         """When env_init is passed back from a previous call that bumped
         chi, the next call must honour the env's actual chi rather than
