@@ -163,29 +163,6 @@ def test_implicit_ad_env_init_above_chi_max_raises():
         )
 
 
-def test_implicit_ad_bump_raises_not_implemented():
-    """ctm_energy_implicit + bump=True raises NotImplementedError.
-
-    The implicit-AD backward closure captures chi at build time, so a
-    forward-side bump would silently truncate gradients.  Until a proper
-    chi-lock lands, bump is blocked at the public API boundary.  Use
-    ctm_energy_explicit for bump-aware AD.
-    """
-    site_tensors = {(0, 0): _build_site_tensor()}
-    gate = heisenberg_gate()
-
-    with pytest.raises(NotImplementedError, match="ctmrg_heuristic_increase_chi"):
-        ctm_energy_implicit(
-            site_tensors,
-            SINGLE_SITE_NEIGHBORS,
-            gate,
-            chi=4,
-            max_iter=4,
-            ctmrg_heuristic_increase_chi=True,
-            chi_max=8,
-        )
-
-
 # ---------------------------------------------------------------------------
 # Explicit-AD bump tests
 # ---------------------------------------------------------------------------

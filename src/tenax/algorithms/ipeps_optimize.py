@@ -2112,11 +2112,10 @@ def _optimize_gs_ad_tensor_2site(
                 "at the target chi.  Without raising chi manually, chi >= 16 "
                 "is typically needed for generic 2-site Heisenberg.  Note: "
                 "variPEPS-style in-CTM chi-bump (ctmrg_heuristic_increase_chi=True) "
-                "is currently supported only on the explicit-AD path "
-                "(gs_implicit_ad=False); the implicit-AD path raises "
-                "NotImplementedError when ctmrg_heuristic_increase_chi=True "
-                "is passed (see issue #514).  For antiferromagnetic bipartite "
-                "models, consider gs_c4v=True or 1-site with sublattice_rotate_gate().",
+                "is supported on both AD paths (chi-locked backward for "
+                "implicit AD via #516; warmup-only bump for explicit AD).  "
+                "For antiferromagnetic bipartite models, consider gs_c4v=True "
+                "or 1-site with sublattice_rotate_gate().",
                 stacklevel=2,
             )
     import optax
