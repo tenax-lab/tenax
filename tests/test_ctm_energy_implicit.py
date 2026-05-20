@@ -6,11 +6,45 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
+from tenax.algorithms._ctm_energy_ad import ctm_energy_explicit, ctm_energy_implicit
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
 from tenax.algorithms.ipeps import heisenberg_gate, ipeps
 from tenax.algorithms.ipeps_config import iPEPSConfig
 from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor
+
+
+def _make_minimal_site_tensors_for_validation(seed: int = 0):
+    """Build a minimal trivial-U(1) (D=2, d=2) site tensor for validation tests.
+
+    Used by validation smoke tests that only need a syntactically valid
+    site_tensors dict — the validation in ctm_energy_{implicit,explicit}
+    fires before any CTM work, so a random tensor is fine.
+    """
+    import numpy as np
+
+    from tenax.core import DenseTensor, FlowDirection, TensorIndex, U1Symmetry
+
+    rng = np.random.default_rng(seed)
+    D, d = 2, 2
+    sym = U1Symmetry()
+    bond_charges = np.zeros(D, dtype=np.int32)
+    phys_charges = np.zeros(d, dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(
+            sym, bond_charges.copy(), FlowDirection.OUT, label="u"
+        ),
+        TensorIndex.from_charges(sym, bond_charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(
+            sym, bond_charges.copy(), FlowDirection.OUT, label="l"
+        ),
+        TensorIndex.from_charges(sym, bond_charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(sym, phys_charges.copy(), FlowDirection.IN, label="p"),
+    )
+    site = DenseTensor(
+        rng.standard_normal((D, D, D, D, d)).astype(np.float64),
+        indices,
+    )
+    return {(0, 0): site}
 
 
 def _make_su_tensor(D=2, d=2):
@@ -99,31 +133,7 @@ def test_ctm_energy_implicit_chi_max_required_when_bump_enabled():
     _sigma_gauged_ctm_converge fires before any CTM work happens, so we
     only need a minimal valid call to confirm the ValueError surfaces.
     """
-    import numpy as np
-
-    from tenax.core import DenseTensor, FlowDirection, TensorIndex, U1Symmetry
-
-    rng = np.random.default_rng(0)
-    D, d = 2, 2
-    sym = U1Symmetry()
-    bond_charges = np.zeros(D, dtype=np.int32)
-    phys_charges = np.zeros(d, dtype=np.int32)
-    indices = (
-        TensorIndex.from_charges(
-            sym, bond_charges.copy(), FlowDirection.OUT, label="u"
-        ),
-        TensorIndex.from_charges(sym, bond_charges.copy(), FlowDirection.IN, label="d"),
-        TensorIndex.from_charges(
-            sym, bond_charges.copy(), FlowDirection.OUT, label="l"
-        ),
-        TensorIndex.from_charges(sym, bond_charges.copy(), FlowDirection.IN, label="r"),
-        TensorIndex.from_charges(sym, phys_charges.copy(), FlowDirection.IN, label="p"),
-    )
-    site = DenseTensor(
-        rng.standard_normal((D, D, D, D, d)).astype(np.float64),
-        indices,
-    )
-    site_tensors = {(0, 0): site}
+    site_tensors = _make_minimal_site_tensors_for_validation()
     gate = heisenberg_gate()
 
     with pytest.raises(ValueError, match="chi_max"):
@@ -133,6 +143,30 @@ def test_ctm_energy_implicit_chi_max_required_when_bump_enabled():
             gate,
             chi=4,
             max_iter=2,
+            ctmrg_heuristic_increase_chi=True,
+            chi_max=None,
+        )
+
+
+def test_ctm_energy_explicit_chi_max_required_when_bump_enabled():
+    """ctm_energy_explicit(..., ctmrg_heuristic_increase_chi=True, chi_max=None) raises.
+
+    Mirrors the implicit-AD validation smoke (Task 5).  The explicit-AD
+    forward (#514 Task 6) plumbs the same four bump kwargs and reuses the
+    same validation contract, so the ValueError must fire before any CTM
+    work happens.
+    """
+    site_tensors = _make_minimal_site_tensors_for_validation()
+    gate = heisenberg_gate()
+
+    with pytest.raises(ValueError, match="chi_max"):
+        ctm_energy_explicit(
+            site_tensors,
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=4,
+            warmup_steps=2,
+            backprop_steps=1,
             ctmrg_heuristic_increase_chi=True,
             chi_max=None,
         )

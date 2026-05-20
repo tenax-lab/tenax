@@ -51,39 +51,107 @@ def ctm_energy_explicit(
     projector_backward: str = "auto",
     env_init: dict[Coord, CTMTensorEnv] | None = None,
     energy_fn=None,
+    # NEW (#514) — in-CTM χ-bump knobs.  Defaults preserve existing
+    # bump-off contract.  When ``ctmrg_heuristic_increase_chi=True``,
+    # the warmup phase honors the bump; the backprop phase always uses
+    # a fixed chi (post-warmup value) for tape integrity.
+    ctmrg_heuristic_increase_chi: bool = False,
+    ctmrg_heuristic_increase_chi_threshold: float = 1e-6,
+    ctmrg_heuristic_increase_chi_step_size: int = 2,
+    chi_max: int | None = None,
 ) -> jnp.ndarray:
     """Compute iPEPS energy with explicit-differentiation backward.
 
-    Forward: warmup (no grad) + checkpointed CTM sweeps.
+    Forward: warmup (no grad, optionally bump-aware) + checkpointed CTM
+    sweeps at fixed chi.
     Backward: standard JAX autodiff through checkpointed sweeps.
-    """
-    jit_step = _make_jit_ctm_step(neighbors)
 
+    When ``ctmrg_heuristic_increase_chi=True`` is passed, the warmup phase
+    grows chi reactively (variPEPS-style; Issue #492) up to ``chi_max``.
+    The backprop phase uses the final post-warmup chi as a Python int so
+    JAX traces the checkpointed sweep once and reuses across all backprop
+    iterations — bump cannot fire during backprop.
+    """
+    # ---- validation (mirror ctm_energy_implicit / _sigma_gauged_ctm_converge) ----
+    if ctmrg_heuristic_increase_chi and chi_max is None:
+        raise ValueError(
+            "ctmrg_heuristic_increase_chi=True requires chi_max to be set; "
+            "without an explicit ceiling the in-CTM bump would silently no-op."
+        )
+    if ctmrg_heuristic_increase_chi and ctmrg_heuristic_increase_chi_step_size <= 0:
+        raise ValueError(
+            "ctmrg_heuristic_increase_chi_step_size must be a positive "
+            f"integer, got {ctmrg_heuristic_increase_chi_step_size}"
+        )
+
+    chi_current = chi
+    if ctmrg_heuristic_increase_chi and env_init:
+        try:
+            sample_env = next(iter(env_init.values()))
+            env_chi = int(sample_env.C1.indices[0].dim)
+        except (StopIteration, AttributeError, IndexError):
+            env_chi = None
+        if env_chi is not None:
+            if chi_max is not None and env_chi > chi_max:
+                raise ValueError(
+                    f"env_init has chi={env_chi} which exceeds the "
+                    f"configured chi_max={chi_max}."
+                )
+            if env_chi > chi_current:
+                chi_current = env_chi
+    if chi_max is not None and chi_max < chi_current:
+        raise ValueError(f"chi_max ({chi_max}) must be >= chi_current ({chi_current}).")
+
+    jit_step = _make_jit_ctm_step(neighbors)
     envs = (
         env_init
         if env_init is not None
-        else {c: initialize_ctm_tensor_env(A, chi) for c, A in site_tensors.items()}
+        else {
+            c: initialize_ctm_tensor_env(A, chi_current)
+            for c, A in site_tensors.items()
+        }
     )
 
-    # Warmup: no gradient tracking
-    for _ in range(warmup_steps):
-        envs, _eps, _smin = jax.lax.stop_gradient(
-            jit_step(
-                site_tensors,
-                envs,
-                chi=chi,
-                projector_method=projector_method,
-                renormalize=renormalize,
-                projector_backward=projector_backward,
-            )
-        )
+    bump_base_charges = None
+    if ctmrg_heuristic_increase_chi:
+        for A in site_tensors.values():
+            bump_base_charges = _get_base_charges(_build_double_layer_tensor(A))
+            if bump_base_charges is not None:
+                break
 
-    # Backprop phase: checkpointed sweeps
+    # ---- WARMUP — bump-aware, no-grad ----
+    if warmup_steps > 0:
+        warmup_result = _run_ctm_loop_with_bump(
+            jit_step,
+            site_tensors,
+            envs,
+            chi_current=chi_current,
+            chi_max=chi_max,
+            bump_enabled=ctmrg_heuristic_increase_chi,
+            bump_threshold=ctmrg_heuristic_increase_chi_threshold,
+            bump_step_size=ctmrg_heuristic_increase_chi_step_size,
+            projector_method=projector_method,
+            renormalize=renormalize,
+            projector_backward=projector_backward,
+            gauge_fix_fn=None,  # warmup historically no gauge-fix
+            max_iter=warmup_steps,
+            min_iter=warmup_steps + 1,  # disables early-exit
+            conv_tol=1e30,  # never satisfies
+            conv_method="sv",
+            plateau_patience=None,
+            bump_base_charges=bump_base_charges,
+        )
+        envs = jax.tree.map(jax.lax.stop_gradient, warmup_result.envs)
+        chi_post_warmup = warmup_result.final_chi
+    else:
+        chi_post_warmup = chi_current
+
+    # ---- BACKPROP — fixed chi (tape integrity) ----
     def _step_envs_only(st, e):
         envs_out, _eps, _smin = jit_step(
             st,
             e,
-            chi=chi,
+            chi=chi_post_warmup,
             projector_method=projector_method,
             renormalize=renormalize,
             projector_backward=projector_backward,
