@@ -825,7 +825,7 @@ def _make_implicit_vjp_fn(
 
         _cached["env_treedef"] = jax.tree.structure(envs)
         env_leaves = tuple(jax.tree.leaves(envs))
-        residuals = (params_data_tuple, env_leaves, chi_post)  # chi_post NEW
+        residuals = (params_data_tuple, env_leaves, chi_post)
         return energy, residuals
 
     # Build JIT'd sweep step for backward (same as forward).
@@ -1119,8 +1119,29 @@ def _make_implicit_vjp_fn(
         return tuple(jax.tree.leaves(lam)), info
 
     def f_bwd(residuals, g):
-        """Backward: adjoint solve (fixed-point or GMRES) + JIT'd chain rule."""
-        params_data_tuple, env_leaves, chi_post = residuals  # chi_post NEW (unused)
+        """Backward: adjoint solve (fixed-point or GMRES) + JIT'd chain rule.
+
+        ``chi_post`` (from residuals) is the post-bump chi reported by the
+        forward CTM.  It is passed to the four JIT'd backward helpers as a
+        ``static_argnames`` parameter so JAX traces one compiled binary
+        per distinct chi value visited (#516 chi-lock).
+        """
+        params_data_tuple, env_leaves, chi_post = residuals
+
+        # Defense-in-depth: a malformed final_chi from a future
+        # _run_ctm_loop_with_bump regression would silently corrupt the
+        # backward.  Bounds-check at the boundary.
+        chi_max_eff = chi_max if chi_max is not None else chi
+        assert chi <= chi_post <= chi_max_eff, (
+            f"chi_post={chi_post} out of bounds "
+            f"[chi_initial={chi}, chi_max={chi_max_eff}]"
+        )
+        if chi_post != chi:
+            _GMRES_LOGGER.debug(
+                "chi-lock: backward at chi_post=%d (chi_initial=%d)",
+                chi_post,
+                chi,
+            )
 
         # dE/denv is the RHS for the (I - J^T)·λ = b solve. F3's fused JIT
         # recomputes it internally, so the eager call is only needed by:
