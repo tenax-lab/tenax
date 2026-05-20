@@ -82,12 +82,14 @@ def _central_diff(f, x: jnp.ndarray, eps: float = 1e-4) -> jnp.ndarray:
 
 @pytest.mark.slow
 def test_ad_gradient_matches_fd_with_bump():
-    """FD-vs-AD parity at D=2, chi_initial=4, chi_max=8 with forced bump.
+    """FD-vs-AD smoke at D=2, chi_initial=4, chi_max=8 with forced bump.
 
-    The correctness gate for chi-lock: confirms that when the forward CTM
-    grows chi 4 -> 8 via in-CTM bump, the backward operates at chi_post=8
-    (not the closure-captured chi_initial=4) and produces a gradient that
-    matches finite-difference.
+    Tolerance is relaxed (atol=1e-2, rtol=1e-1) because the 2x2 plaquette
+    projector's stop_gradient (PR #447) creates a documented ~25% FD bias
+    at D=2.  This test confirms the chi-lock plumbing doesn't introduce
+    catastrophic gradient errors (e.g. wrong sign, wrong order of
+    magnitude); the strict correctness check is
+    test_ad_gradient_invariance_bump_vs_fixed_chi_max below.
     """
     A = _build_site_tensor(D=2, d=2, seed=42)
     gate = heisenberg_gate()
@@ -101,23 +103,99 @@ def test_ad_gradient_matches_fd_with_bump():
             SINGLE_SITE_NEIGHBORS,
             gate,
             chi=4,
-            max_iter=6,
+            max_iter=200,
             min_iter=2,
+            conv_tol=1e-12,
             ctmrg_heuristic_increase_chi=True,
             ctmrg_heuristic_increase_chi_threshold=1e-12,  # force bump on iter 1
             ctmrg_heuristic_increase_chi_step_size=2,
             chi_max=8,
-            gmres_tol=1e-8,  # 100x margin vs atol=1e-5 below
+            gmres_tol=1e-8,
         )
 
     grad_ad = jax.grad(loss)(flat_init)
     grad_fd = _central_diff(loss, flat_init, eps=1e-4)
 
-    # Tol: 1e-5 abs is the chi-lock design target; rel 1e-3 absorbs FD
-    # truncation error on small-magnitude components.
-    assert jnp.allclose(grad_ad, grad_fd, atol=1e-5, rtol=1e-3), (
+    # Tol: atol=1e-2 / rtol=1e-1 accommodates the documented ~25% FD bias at
+    # D=2 from PR #447's 2x2 plaquette projector stop_gradient (see comment
+    # in test_ctm_energy_implicit.py).  Strict correctness gate is the
+    # invariance test below.
+    assert jnp.allclose(grad_ad, grad_fd, atol=1e-2, rtol=1e-1), (
         f"AD gradient diverges from FD reference.\n"
         f"max |grad_ad - grad_fd| = {jnp.max(jnp.abs(grad_ad - grad_fd))}\n"
         f"grad_ad[:5] = {grad_ad[:5]}\n"
         f"grad_fd[:5] = {grad_fd[:5]}"
+    )
+
+
+@pytest.mark.slow
+def test_ad_gradient_invariance_bump_vs_fixed_chi_max():
+    """Bump path's gradient must equal fixed-chi=chi_max path's gradient.
+
+    This is the strict chi-lock correctness gate.  Both calls converge
+    CTM at chi=8: one starts at chi=4 and grows via in-CTM bump, the
+    other starts directly at chi=8 and doesn't bump.  At convergence both
+    reach the same CTM fixed point, so the gradients must agree to
+    floating-point noise.
+
+    Falsification: if the chi-lock were broken (backward still uses
+    closure-captured chi_initial=4 instead of chi_post=8), the bump-path
+    gradient would be computed against a chi=4 truncated Jacobian and
+    would not match the fixed-chi=8 reference.  This test would fail
+    catastrophically (~100% relative error) in that case.
+    """
+    A = _build_site_tensor(D=2, d=2, seed=42)
+    gate = heisenberg_gate()
+    A_data = A.todense()
+    flat_init = A_data.flatten()
+
+    common_kwargs = dict(
+        max_iter=200,
+        min_iter=2,
+        conv_tol=1e-12,
+        gmres_tol=1e-8,
+    )
+
+    def loss_with_bump(A_flat: jnp.ndarray) -> jnp.ndarray:
+        A_perturbed = DenseTensor(A_flat.reshape(A_data.shape), A.indices)
+        return ctm_energy_implicit(
+            {(0, 0): A_perturbed},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=4,
+            ctmrg_heuristic_increase_chi=True,
+            ctmrg_heuristic_increase_chi_threshold=1e-12,
+            ctmrg_heuristic_increase_chi_step_size=2,
+            chi_max=8,
+            **common_kwargs,
+        )
+
+    def loss_fixed_chi_max(A_flat: jnp.ndarray) -> jnp.ndarray:
+        A_perturbed = DenseTensor(A_flat.reshape(A_data.shape), A.indices)
+        return ctm_energy_implicit(
+            {(0, 0): A_perturbed},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=8,
+            ctmrg_heuristic_increase_chi=False,
+            **common_kwargs,
+        )
+
+    grad_bump = jax.grad(loss_with_bump)(flat_init)
+    grad_fixed = jax.grad(loss_fixed_chi_max)(flat_init)
+
+    # Both CTM fixed points are at chi=8, reached via different trajectories.
+    # The fixed point is unique (verified by both losses returning the same
+    # energy to 1e-10); the gradients are therefore equal up to numerical
+    # noise from independent GMRES solves.  atol=1e-6 gives 100x margin
+    # over the chosen gmres_tol=1e-8.
+    assert jnp.allclose(
+        loss_with_bump(flat_init), loss_fixed_chi_max(flat_init), atol=1e-10
+    ), "CTM fixed points disagree — invariance test premise is broken"
+    assert jnp.allclose(grad_bump, grad_fixed, atol=1e-6, rtol=1e-6), (
+        f"chi-lock contract broken: bump gradient at chi_max=8 disagrees with "
+        f"fixed-chi=8 reference.\n"
+        f"max |grad_bump - grad_fixed| = {jnp.max(jnp.abs(grad_bump - grad_fixed))}\n"
+        f"grad_bump[:5] = {grad_bump[:5]}\n"
+        f"grad_fixed[:5] = {grad_fixed[:5]}"
     )
