@@ -8,17 +8,20 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
+from tenax.algorithms._ctm_loop_core import _run_ctm_loop_with_bump
 from tenax.algorithms._ctm_python_loop import (
     Coord,
     _make_jit_ctm_step,
     python_loop_ctm_converge,
 )
+from tenax.algorithms._ctm_tensor_convergence import _get_base_charges
 from tenax.algorithms._ctm_tensor_energy import (
     compute_energy_ctm_tensor,
     compute_energy_ctm_tensor_multisite,
 )
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
+    _build_double_layer_tensor,
     initialize_ctm_tensor_env,
 )
 from tenax.algorithms._gmres_lax import gmres_pytree, gmres_pytree_jax
@@ -382,26 +385,65 @@ def _sigma_gauged_ctm_converge(
     conv_method="sv",
     min_iter=4,
     plateau_patience: int | None = None,
+    # NEW kwargs (#514) — defaults preserve existing callsite contract
+    ctmrg_heuristic_increase_chi: bool = False,
+    ctmrg_heuristic_increase_chi_threshold: float = 1e-6,
+    ctmrg_heuristic_increase_chi_step_size: int = 2,
+    chi_max: int | None = None,
 ):
     """CTM convergence with sigma gauge fixing for element-wise fixed point.
 
     Runs CTM sweeps with sigma gauge alignment at each step, ensuring
     the converged environment is a literal fixed point of the gauged step.
+
+    The bump-aware loop body is shared with python_loop_ctm_converge via
+    _run_ctm_loop_with_bump.  Validation mirrors that function so direct
+    callers get consistent error messages.  When
+    ``ctmrg_heuristic_increase_chi=True`` the loop performs variPEPS-style
+    in-CTM chi bumping toward ``chi_max`` (see #492/#514); defaults keep
+    bump-off behaviour for existing implicit-AD callers.
     """
-    from tenax.algorithms._ctm_tensor_convergence import (
-        _corner_singular_values,
-        _ctm_sv_diff,
-        _max_env_leaf_diff,
-    )
+    # ---- validation (mirror python_loop_ctm_converge) ----
+    if ctmrg_heuristic_increase_chi and chi_max is None:
+        raise ValueError(
+            "ctmrg_heuristic_increase_chi=True requires chi_max to be set; "
+            "without an explicit ceiling the in-CTM bump would silently no-op."
+        )
+    if ctmrg_heuristic_increase_chi and ctmrg_heuristic_increase_chi_step_size <= 0:
+        raise ValueError(
+            "ctmrg_heuristic_increase_chi_step_size must be a positive "
+            f"integer, got {ctmrg_heuristic_increase_chi_step_size}"
+        )
+
+    chi_current = chi
+    if ctmrg_heuristic_increase_chi and env_init:
+        try:
+            sample_env = next(iter(env_init.values()))
+            env_chi = int(sample_env.C1.indices[0].dim)
+        except (StopIteration, AttributeError, IndexError):
+            env_chi = None
+        if env_chi is not None:
+            if chi_max is not None and env_chi > chi_max:
+                raise ValueError(
+                    f"env_init has chi={env_chi} which exceeds the "
+                    f"configured chi_max={chi_max}."
+                )
+            if env_chi > chi_current:
+                chi_current = env_chi
+    if chi_max is not None and chi_max < chi_current:
+        raise ValueError(f"chi_max ({chi_max}) must be >= chi_current ({chi_current}).")
 
     jit_step = _make_jit_ctm_step(neighbors)
     envs = (
         env_init
         if env_init is not None
-        else {c: initialize_ctm_tensor_env(A, chi) for c, A in site_tensors.items()}
+        else {
+            c: initialize_ctm_tensor_env(A, chi_current)
+            for c, A in site_tensors.items()
+        }
     )
 
-    # QR warm-up: only needed when projector_method == "qr"
+    # ---- QR warmup (unchanged) ----
     warmup = (
         min(qr_warmup_steps, max_iter)
         if projector_method == "qr" and qr_warmup_steps > 0
@@ -411,96 +453,56 @@ def _sigma_gauged_ctm_converge(
         envs, _eps, _smin = jit_step(
             site_tensors,
             envs,
-            chi=chi,
+            chi=chi_current,
             projector_method="eigh",
             renormalize=renormalize,
             projector_backward=projector_backward,
         )
 
-    prev_svs: dict = {}
-    prev_envs: dict | None = None
-    best_diff = float("inf")
-    best_envs: dict | None = None
-    iters_since_best = 0
-    for i in range(max_iter - warmup):
-        envs_new, _eps, _smin = jit_step(
-            site_tensors,
-            envs,
-            chi=chi,
-            projector_method=projector_method,
-            renormalize=renormalize,
-            projector_backward=projector_backward,
-        )
-        # Gauge fix: apply selected convention for element-wise convergence
-        if forward_gauge == "phase":
-            envs = {c: _phase_fix_ctm_tensor(envs_new[c]) for c in envs_new}
-        elif forward_gauge == "sigma":
-            envs = {c: _sigma_gauge_fix_env(envs_new[c], envs[c]) for c in envs_new}
-        else:
-            # forward_gauge == "none": no gauge fixing
-            envs = envs_new
+    # ---- gauge_fix_fn pair adapter ----
+    if forward_gauge == "phase":
 
-        # Skip convergence check until min_iter
-        total_iter = warmup + i + 1
-        if total_iter < min_iter:
-            if conv_method == "sv":
-                for c in sorted(envs):
-                    prev_svs[c] = _corner_singular_values(envs[c].C1)
-            else:
-                prev_envs = {c: envs[c] for c in envs}
-            continue
+        def _gauge_pair(envs_new, _envs_old):
+            return {c: _phase_fix_ctm_tensor(envs_new[c]) for c in envs_new}
+    elif forward_gauge == "sigma":
 
-        # ``plateau_metric_valid`` flags whether ``current_diff`` is from
-        # a real baseline this iter — mirrors the python-loop guard added
-        # for the SV ``min_iter <= 1`` case (codex review on PR #439).
-        plateau_metric_valid = False
+        def _gauge_pair(envs_new, envs_old):
+            return {c: _sigma_gauge_fix_env(envs_new[c], envs_old[c]) for c in envs_new}
+    elif forward_gauge == "none":
+        _gauge_pair = None
+    else:
+        raise ValueError(f"Unknown forward_gauge={forward_gauge!r}")
 
-        if conv_method == "elementwise":
-            # Element-wise: max absolute difference across all env tensor leaves
-            if prev_envs is None:
-                prev_envs = {c: envs[c] for c in envs}
-                continue
-            max_diff = 0.0
-            for c in sorted(envs):
-                max_diff = max(max_diff, _max_env_leaf_diff(prev_envs[c], envs[c]))
-            converged = max_diff < conv_tol
-            prev_envs = {c: envs[c] for c in envs}
-            current_diff = max_diff
-            plateau_metric_valid = True
-        else:
-            # SV convergence (default): corner singular value difference.
-            # First SV check has no baseline (only possible when
-            # ``min_iter <= 1``); skip plateau tracking until next iter.
-            have_prev_svs = bool(prev_svs)
-            converged = True
-            current_diff = 0.0
-            for c in sorted(envs):
-                sv = _corner_singular_values(envs[c].C1)
-                if c in prev_svs:
-                    diff = float(_ctm_sv_diff(sv, prev_svs[c]))
-                    current_diff = max(current_diff, diff)
-                    if diff >= conv_tol:
-                        converged = False
-                else:
-                    converged = False
-                prev_svs[c] = sv
-            if have_prev_svs:
-                plateau_metric_valid = True
+    # ---- bump_base_charges ----
+    bump_base_charges = None
+    if ctmrg_heuristic_increase_chi:
+        for A in site_tensors.values():
+            bump_base_charges = _get_base_charges(_build_double_layer_tensor(A))
+            if bump_base_charges is not None:
+                break
 
-        if converged:
-            break
-
-        if plateau_patience is not None and plateau_metric_valid:
-            if current_diff < best_diff:
-                best_diff = current_diff
-                best_envs = {c: envs[c] for c in envs}
-                iters_since_best = 0
-            else:
-                iters_since_best += 1
-                if iters_since_best >= plateau_patience:
-                    return best_envs or envs
-
-    return envs
+    # ---- delegate to shared helper ----
+    result = _run_ctm_loop_with_bump(
+        jit_step,
+        site_tensors,
+        envs,
+        chi_current=chi_current,
+        chi_max=chi_max,
+        bump_enabled=ctmrg_heuristic_increase_chi,
+        bump_threshold=ctmrg_heuristic_increase_chi_threshold,
+        bump_step_size=ctmrg_heuristic_increase_chi_step_size,
+        projector_method=projector_method,
+        renormalize=renormalize,
+        projector_backward=projector_backward,
+        gauge_fix_fn=_gauge_pair,
+        max_iter=max_iter - warmup,
+        min_iter=max(0, min_iter - warmup),
+        conv_tol=conv_tol,
+        conv_method=conv_method,
+        plateau_patience=plateau_patience,
+        bump_base_charges=bump_base_charges,
+    )
+    return result.envs
 
 
 _VJP_CACHE: dict = {}
