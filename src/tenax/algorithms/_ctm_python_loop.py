@@ -340,8 +340,18 @@ def python_loop_ctm_converge(
     best_envs: dict[Coord, CTMTensorEnv] | None = None
     best_iter = 0
     iters_since_best = 0
+    # Count physical sweeps performed by the in-CTM bump's post-pad
+    # re-sweep so they're charged against ``max_iter`` (codex review on
+    # PR #513).  Without this accounting, every bump silently adds one
+    # sweep beyond the documented cap.
+    bump_extra_sweeps = 0
 
     for i in range(remaining):
+        # Hard budget guard: account for both the natural iteration
+        # count and any extra sweeps consumed by previous bumps.  When
+        # the budget is exhausted, exit without performing another sweep.
+        if i + bump_extra_sweeps >= remaining:
+            break
         envs, _max_eps, _max_S = jit_step(
             site_tensors,
             envs,
@@ -362,11 +372,17 @@ def python_loop_ctm_converge(
         # bump on the last iteration (``i == remaining - 1``) would exit
         # with a zero-padded env that's never been swept at the new chi
         # (codex review on PR #513).
-        if (
+        #
+        # Skip the bump when no budget remains for the post-pad sweep:
+        # firing it would either (a) consume a sweep we don't have and
+        # silently exceed ``max_iter``, or (b) leave a zero-padded env
+        # un-swept.  Better to keep the pre-bump chi and exit on budget.
+        bump_would_fire = (
             ctmrg_heuristic_increase_chi
             and last_max_smallest_S > ctmrg_heuristic_increase_chi_threshold
             and chi_current < chi_max_eff
-        ):
+        )
+        if bump_would_fire and (i + 1 + bump_extra_sweeps < remaining):
             chi_current = min(
                 chi_current + ctmrg_heuristic_increase_chi_step_size,
                 chi_max_eff,
@@ -378,7 +394,8 @@ def python_loop_ctm_converge(
                 for c in envs
             }
             # Force-sweep once at the new chi so the returned env is
-            # always swept at chi_current, even if this is the last iter.
+            # always swept at chi_current.  This sweep IS counted against
+            # the budget (bump_extra_sweeps).
             envs, _max_eps, _max_S = jit_step(
                 site_tensors,
                 envs,
@@ -387,6 +404,7 @@ def python_loop_ctm_converge(
                 renormalize=renormalize,
                 projector_backward=projector_backward,
             )
+            bump_extra_sweeps += 1
             last_max_eps = float(_max_eps)
             last_max_smallest_S = float(_max_S)
             if gauge_fix_fn is not None:
@@ -405,7 +423,10 @@ def python_loop_ctm_converge(
             envs = {c: gauge_fix_fn(envs[c]) for c in envs}
 
         # Only check convergence after min_iter total iterations
-        total_iter = warmup + i + 1
+        # ``total_iter`` is the physical-sweep count including any extra
+        # post-bump sweeps charged against the budget (see
+        # ``bump_extra_sweeps`` above).
+        total_iter = warmup + i + 1 + bump_extra_sweeps
         if total_iter < min_iter:
             # Still track SVs / prev_envs for the first convergence check
             if conv_method == "sv":

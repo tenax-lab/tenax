@@ -128,6 +128,36 @@ class TestInCtmChiBumpHook:
             f"final_chi={info.final_chi} must respect chi_max=4 ceiling."
         )
 
+    def test_bump_sweeps_count_against_max_iter(self):
+        """Each in-CTM bump performs a post-pad re-sweep; that sweep
+        must be charged against the ``max_iter`` budget so the total
+        number of physical CTM sweeps never exceeds ``max_iter``.
+        Otherwise multiple bumps silently overshoot the documented cap.
+        Codex review on PR #513.
+
+        We probe this by forcing the bump to fire every iteration
+        (threshold ~ 0) and asserting that ``info.iterations <= max_iter``.
+        """
+        A = _make_random_A(D=2, d=2)
+        site_tensors = {(0, 0): A}
+        budget = 4
+        _, info = python_loop_ctm_converge(
+            site_tensors,
+            SINGLE_SITE_NEIGHBORS,
+            chi=2,
+            max_iter=budget,
+            min_iter=2,
+            conv_tol=1e-12,  # never converge → exhaust budget
+            ctmrg_heuristic_increase_chi=True,
+            ctmrg_heuristic_increase_chi_threshold=1e-12,  # always trigger
+            ctmrg_heuristic_increase_chi_step_size=2,
+            chi_max=10,
+        )
+        assert info.iterations <= budget, (
+            f"total physical sweeps {info.iterations} exceeds max_iter {budget}; "
+            "post-bump sweep is not being charged against the budget."
+        )
+
     def test_returned_env_is_post_bump_swept(self):
         """After an in-CTM bump, the returned env must have been swept
         at the new chi — not just zero-padded.  Regression for codex
