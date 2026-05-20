@@ -203,3 +203,62 @@ def test_ad_gradient_invariance_bump_vs_fixed_chi_max():
         f"grad_bump[:5] = {grad_bump[:5]}\n"
         f"grad_fixed[:5] = {grad_fixed[:5]}"
     )
+
+
+def test_chi_bump_fires_when_smin_above_threshold():
+    """With threshold=1e-12, the in-CTM bump fires on iter 1 → chi grows.
+
+    Asserts the forward CTM grew env first-dim by reading the env-cache
+    final_chi via the same path used internally by f_bwd's bounds check.
+    """
+    from tenax.algorithms._ctm_energy_ad import _sigma_gauged_ctm_converge
+
+    site_tensors = {(0, 0): _build_site_tensor()}
+    envs, chi_post = _sigma_gauged_ctm_converge(
+        site_tensors,
+        SINGLE_SITE_NEIGHBORS,
+        chi=4,
+        max_iter=6,
+        conv_tol=1e-5,
+        projector_method="svd",
+        renormalize=True,
+        projector_backward="auto",
+        qr_warmup_steps=0,
+        env_init=None,
+        forward_gauge="phase",
+        conv_method="sv",
+        min_iter=2,
+        ctmrg_heuristic_increase_chi=True,
+        ctmrg_heuristic_increase_chi_threshold=1e-12,  # force bump
+        ctmrg_heuristic_increase_chi_step_size=2,
+        chi_max=8,
+    )
+    assert chi_post > 4, f"Expected bump fired (chi_post > 4), got chi_post={chi_post}"
+    assert chi_post <= 8, f"chi_post={chi_post} exceeded chi_max=8"
+
+
+def test_chi_bump_does_not_fire_when_below_threshold():
+    """With threshold=1e10 (above any realistic smin), bump quiesces."""
+    from tenax.algorithms._ctm_energy_ad import _sigma_gauged_ctm_converge
+
+    site_tensors = {(0, 0): _build_site_tensor()}
+    envs, chi_post = _sigma_gauged_ctm_converge(
+        site_tensors,
+        SINGLE_SITE_NEIGHBORS,
+        chi=4,
+        max_iter=6,
+        conv_tol=1e-5,
+        projector_method="svd",
+        renormalize=True,
+        projector_backward="auto",
+        qr_warmup_steps=0,
+        env_init=None,
+        forward_gauge="phase",
+        conv_method="sv",
+        min_iter=2,
+        ctmrg_heuristic_increase_chi=True,
+        ctmrg_heuristic_increase_chi_threshold=1e10,  # never fires
+        ctmrg_heuristic_increase_chi_step_size=2,
+        chi_max=8,
+    )
+    assert chi_post == 4, f"Expected no bump (chi_post == 4), got chi_post={chi_post}"
