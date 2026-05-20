@@ -165,6 +165,54 @@ class TestInCtmChiBumpHook:
             "returned still zero-padded without a post-bump sweep."
         )
 
+    def test_warm_start_preserves_grown_chi(self):
+        """When env_init is passed back from a previous call that bumped
+        chi, the next call must honour the env's actual chi rather than
+        the input ``chi`` argument.  Otherwise the bump's progress is
+        silently destroyed every warm-start round-trip.  Codex review
+        on PR #513.
+        """
+        A = _make_random_A(D=2, d=2)
+        site_tensors = {(0, 0): A}
+
+        # First call: chi=2, bump enabled, chi_max=6.  The bump should
+        # raise chi above 2 inside this call.
+        envs1, info1 = python_loop_ctm_converge(
+            site_tensors,
+            SINGLE_SITE_NEIGHBORS,
+            chi=2,
+            max_iter=8,
+            min_iter=2,
+            conv_tol=1e-5,
+            ctmrg_heuristic_increase_chi=True,
+            ctmrg_heuristic_increase_chi_threshold=1e-9,
+            ctmrg_heuristic_increase_chi_step_size=2,
+            chi_max=6,
+        )
+        assert info1.final_chi > 2, "first call must bump chi"
+
+        # Second call: same configured chi=2, but env_init is the
+        # bumped env from call 1.  ``final_chi`` must equal call 1's
+        # final chi (no down-truncation back to 2).
+        envs2, info2 = python_loop_ctm_converge(
+            site_tensors,
+            SINGLE_SITE_NEIGHBORS,
+            chi=2,
+            max_iter=2,
+            min_iter=2,
+            conv_tol=1e-5,
+            ctmrg_heuristic_increase_chi=True,
+            ctmrg_heuristic_increase_chi_threshold=1e-9,
+            ctmrg_heuristic_increase_chi_step_size=2,
+            chi_max=6,
+            env_init=envs1,
+        )
+        assert info2.final_chi >= info1.final_chi, (
+            f"warm-start round-trip lost chi: call 1 ended at "
+            f"chi={info1.final_chi}, call 2 ended at chi={info2.final_chi} "
+            "with configured chi=2 — env_init's chi was silently truncated."
+        )
+
     def test_smallest_S_is_populated(self):
         """info.max_smallest_S returns a finite non-trivial number from the
         JIT'd CTM step (previously 0.0 placeholder).

@@ -215,6 +215,20 @@ def python_loop_ctm_converge(
     # is the live value used by JIT'd sweeps; the new chi is static_argname,
     # so each distinct chi value will retrace once on first use.
     chi_current = chi
+    # In-CTM bump can return ``env`` at chi > the configured ``chi`` (e.g.
+    # env_init at chi=8 from a previous call that bumped from 4).  If we
+    # blindly reset ``chi_current = chi``, the next sweep silently down-
+    # truncates the env back to 4, defeating the bump entirely (codex
+    # review on PR #513).  Derive ``chi_current`` from the warm-start
+    # env's actual χ so warm-start round-trips preserve grown chi.
+    if env_init is not None and env_init:
+        try:
+            sample_env = next(iter(env_init.values()))
+            env_chi = int(sample_env.C1.indices[0].dim)
+            if env_chi > chi_current:
+                chi_current = env_chi
+        except (StopIteration, AttributeError, IndexError):
+            pass  # malformed env_init; let downstream raise
     # When the bump is enabled, require an explicit ``chi_max`` ceiling;
     # otherwise ``chi_max_eff == chi_current`` would make the growth guard
     # always False and the feature would silently no-op (codex review on
