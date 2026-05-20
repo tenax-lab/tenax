@@ -462,6 +462,18 @@ class iPEPSConfig:
     # Coarse-grained iPEPS: when set, optimize_gs_ad uses compute_energy_cg
     # instead of compute_energy_ctm_tensor.  Only valid with unit_cell="1x1".
     cg_gates: object | None = None
+    # Checkpointing for long AD runs (see tenax.algorithms._checkpoint).
+    # When ``gs_checkpoint_path`` is set, the optimizer writes
+    # ``ckpt.last.pkl`` every ``gs_checkpoint_every`` steps and at every
+    # chi-schedule stage boundary, plus a ``ckpt.best.pkl`` snapshot
+    # each time the best-seen energy improves.  ``gs_resume=True``
+    # loads ``ckpt.last.pkl`` at startup, validates config compat, and
+    # resumes from the saved step.  Currently wired for the 2-site
+    # path only (``unit_cell="2site"``); other paths raise
+    # ``NotImplementedError`` if a path is set.
+    gs_checkpoint_path: str | None = None
+    gs_checkpoint_every: int = 10
+    gs_resume: bool = False
 
     def __post_init__(self):
         import warnings
@@ -516,6 +528,12 @@ class iPEPSConfig:
                 f"gs_stall_recovery_retries must be non-negative, "
                 f"got {self.gs_stall_recovery_retries}"
             )
+        if self.gs_checkpoint_every <= 0:
+            raise ValueError(
+                f"gs_checkpoint_every must be positive, got {self.gs_checkpoint_every}"
+            )
+        if self.gs_resume and self.gs_checkpoint_path is None:
+            raise ValueError("gs_resume=True requires gs_checkpoint_path to be set")
         if self.gs_conv_criterion == "dE":
             warnings.warn(
                 "gs_conv_criterion='dE' is deprecated and will be replaced by "
