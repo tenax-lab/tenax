@@ -12,7 +12,13 @@ __all__ = ["CTMLoopResult", "_run_ctm_loop_with_bump"]
 
 from typing import NamedTuple
 
-from tenax.algorithms._ctm_tensor_convergence import Coord
+from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
+from tenax.algorithms._ctm_tensor_convergence import (
+    Coord,
+    _corner_singular_values,
+    _ctm_sv_diff,
+    _max_env_leaf_diff,
+)
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 
 
@@ -29,5 +35,182 @@ class CTMLoopResult(NamedTuple):
     bump_extra_sweeps: int
 
 
-def _run_ctm_loop_with_bump(*args, **kwargs):  # type: ignore[no-untyped-def]
-    raise NotImplementedError  # filled in Task 2
+def _run_ctm_loop_with_bump(
+    jit_step,
+    site_tensors,
+    envs_init,
+    *,
+    chi_current: int,
+    chi_max: int | None,
+    bump_enabled: bool,
+    bump_threshold: float,
+    bump_step_size: int,
+    projector_method: str,
+    renormalize: bool,
+    projector_backward: str,
+    gauge_fix_fn,
+    max_iter: int,
+    min_iter: int,
+    conv_tol: float,
+    conv_method: str,
+    plateau_patience: int | None,
+    bump_base_charges,
+) -> CTMLoopResult:
+    """Run CTM sweeps with optional variPEPS-style in-CTM chi-bump.
+
+    Mirrors the loop in python_loop_ctm_converge (lines 299-519 prior to
+    extraction).  Caller is responsible for warmup, env_init validation,
+    and (chi_max, chi_current) constraints.
+
+    gauge_fix_fn:
+        Callable (envs_new, envs_old) -> envs, or None.  Phase gauge wraps a
+        single-arg phase fix; sigma gauge uses both args.  None disables.
+    """
+    chi_max_eff = chi_max if chi_max is not None else chi_current
+    envs = envs_init
+    remaining = max_iter
+
+    prev_svs: dict = {}
+    prev_envs: dict | None = None
+    final_diff = float("inf")
+    last_max_eps = 0.0
+    last_max_smallest_S = 0.0
+    best_diff = float("inf")
+    best_envs: dict | None = None
+    best_iter = 0
+    iters_since_best = 0
+    bump_extra_sweeps = 0
+
+    for i in range(remaining):
+        if i + bump_extra_sweeps >= remaining:
+            break
+        envs_new, _max_eps, _max_S = jit_step(
+            site_tensors,
+            envs,
+            chi=chi_current,
+            projector_method=projector_method,
+            renormalize=renormalize,
+            projector_backward=projector_backward,
+        )
+        last_max_eps = float(_max_eps)
+        last_max_smallest_S = float(_max_S)
+
+        bump_would_fire = (
+            bump_enabled
+            and last_max_smallest_S > bump_threshold
+            and chi_current < chi_max_eff
+        )
+        if bump_would_fire and (i + 1 + bump_extra_sweeps < remaining):
+            chi_current = min(chi_current + bump_step_size, chi_max_eff)
+            envs = {
+                c: pad_dense_env_chi(
+                    envs_new[c], chi_current, base_charges=bump_base_charges
+                )
+                for c in envs_new
+            }
+            envs, _max_eps, _max_S = jit_step(
+                site_tensors,
+                envs,
+                chi=chi_current,
+                projector_method=projector_method,
+                renormalize=renormalize,
+                projector_backward=projector_backward,
+            )
+            bump_extra_sweeps += 1
+            last_max_eps = float(_max_eps)
+            last_max_smallest_S = float(_max_S)
+            if gauge_fix_fn is not None:
+                envs = gauge_fix_fn(envs, envs_new)
+            prev_svs = {}
+            prev_envs = None
+            best_diff = float("inf")
+            best_envs = None
+            iters_since_best = 0
+            continue
+
+        if gauge_fix_fn is not None:
+            envs = gauge_fix_fn(envs_new, envs)
+        else:
+            envs = envs_new
+
+        total_iter = i + 1 + bump_extra_sweeps
+        if total_iter < min_iter:
+            if conv_method == "sv":
+                for c in sorted(envs):
+                    prev_svs[c] = _corner_singular_values(envs[c].C1)
+            else:
+                prev_envs = {c: envs[c] for c in envs}
+            continue
+
+        plateau_metric_valid = False
+        if conv_method == "elementwise":
+            if prev_envs is None:
+                prev_envs = {c: envs[c] for c in envs}
+                continue
+            max_diff = 0.0
+            for c in sorted(envs):
+                max_diff = max(max_diff, _max_env_leaf_diff(prev_envs[c], envs[c]))
+            converged = max_diff < conv_tol
+            final_diff = max_diff
+            prev_envs = {c: envs[c] for c in envs}
+            plateau_metric_valid = True
+        else:
+            have_prev_svs = bool(prev_svs)
+            converged = True
+            max_diff = 0.0
+            for c in sorted(envs):
+                sv = _corner_singular_values(envs[c].C1)
+                if c in prev_svs:
+                    diff = float(_ctm_sv_diff(sv, prev_svs[c]))
+                    max_diff = max(max_diff, diff)
+                    if diff >= conv_tol:
+                        converged = False
+                else:
+                    converged = False
+                prev_svs[c] = sv
+            if have_prev_svs:
+                final_diff = max_diff
+                plateau_metric_valid = True
+
+        if converged:
+            return CTMLoopResult(
+                envs=envs,
+                converged=True,
+                iterations=total_iter,
+                sv_diff=final_diff,
+                max_truncation_error=last_max_eps,
+                max_smallest_S=last_max_smallest_S,
+                final_chi=chi_current,
+                bump_extra_sweeps=bump_extra_sweeps,
+            )
+
+        if plateau_patience is not None and plateau_metric_valid:
+            if final_diff < best_diff:
+                best_diff = final_diff
+                best_envs = {c: envs[c] for c in envs}
+                best_iter = total_iter
+                iters_since_best = 0
+            else:
+                iters_since_best += 1
+                if iters_since_best >= plateau_patience:
+                    return CTMLoopResult(
+                        envs=best_envs or envs,
+                        converged=False,
+                        iterations=best_iter or total_iter,
+                        sv_diff=best_diff,
+                        max_truncation_error=last_max_eps,
+                        max_smallest_S=last_max_smallest_S,
+                        final_chi=chi_current,
+                        bump_extra_sweeps=bump_extra_sweeps,
+                    )
+
+    return CTMLoopResult(
+        envs=envs,
+        converged=False,
+        iterations=remaining,
+        sv_diff=final_diff,
+        max_truncation_error=last_max_eps,
+        max_smallest_S=last_max_smallest_S,
+        final_chi=chi_current,
+        bump_extra_sweeps=bump_extra_sweeps,
+    )
