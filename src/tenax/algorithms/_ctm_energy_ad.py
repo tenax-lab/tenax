@@ -5,6 +5,7 @@ from __future__ import annotations
 __all__ = ["ctm_energy_explicit", "ctm_energy_implicit"]
 
 import logging
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -862,8 +863,8 @@ def _make_implicit_vjp_fn(
         _, vjp_fn = jax.vjp(energy_from_env, env_leaves)
         return vjp_fn(jnp.ones(()))[0]
 
-    @jax.jit
-    def _jit_apply_Jt(params_data_tuple, env_leaves, v):
+    @partial(jax.jit, static_argnames=("chi",))
+    def _jit_apply_Jt(params_data_tuple, env_leaves, v, *, chi):
         """Apply the GMRES matvec ``(I - J^T) v`` (NOT just ``J^T v``).
 
         The wrapping makes this the matvec for the linear system
@@ -898,8 +899,8 @@ def _make_implicit_vjp_fn(
         jt_v = vjp_fn(v)[0]
         return tuple(vi - ji for vi, ji in zip(v, jt_v))
 
-    @jax.jit
-    def _jit_chain_rule(params_data_tuple, env_leaves, lam, g_scalar):
+    @partial(jax.jit, static_argnames=("chi",))
+    def _jit_chain_rule(params_data_tuple, env_leaves, lam, g_scalar, *, chi):
         """Steps 3-4: direct gradient + indirect (J_params^T @ lam)."""
         gate_ = mutables["gate"]
         energy_fn_ = mutables["energy_fn"]
@@ -936,12 +937,14 @@ def _make_implicit_vjp_fn(
         total = jax.tree.map(lambda d, ind: g_scalar * (d + ind), direct, indirect)
         return (total,)
 
-    @jax.jit
+    @partial(jax.jit, static_argnames=("chi",))
     def _jit_fused_fixed_point_bwd(
         params_data_tuple,
         env_leaves,
         g_scalar,
         init_lam,
+        *,
+        chi,
     ):
         """F3: fused dE/denv + adjoint fixed-point + chain rule.
 
@@ -1077,8 +1080,8 @@ def _make_implicit_vjp_fn(
         total = jax.tree.map(lambda d, ind: g_scalar * (d + ind), direct, indirect)
         return (total,), diverged, converged, n_iter, lam_final
 
-    @jax.jit
-    def _jit_gmres_solve(params_data_tuple, env_leaves, rhs):
+    @partial(jax.jit, static_argnames=("chi",))
+    def _jit_gmres_solve(params_data_tuple, env_leaves, rhs, *, chi):
         """GMRES solve compiled into a single XLA program.
 
         Fuses the entire (I - J^T) solve into one XLA computation.
@@ -1165,7 +1168,9 @@ def _make_implicit_vjp_fn(
 
             def apply_Jt_only(v):
                 """Apply J^T (not I - J^T)."""
-                i_minus_jt_v = _jit_apply_Jt(params_data_tuple, env_leaves, v)
+                i_minus_jt_v = _jit_apply_Jt(
+                    params_data_tuple, env_leaves, v, chi=chi_post
+                )
                 return tuple(vi - ri for vi, ri in zip(v, i_minus_jt_v))
 
             rho = arnoldi_spectral_radius_pytree(
@@ -1177,7 +1182,7 @@ def _make_implicit_vjp_fn(
         # Both eager-GMRES paths (fixed_point divergence fallback + the
         # "gmres" branch) share the same cached _jit_apply_Jt matvec.
         def _eager_apply_I_minus_Jt(v):
-            return _jit_apply_Jt(params_data_tuple, env_leaves, v)
+            return _jit_apply_Jt(params_data_tuple, env_leaves, v, chi=chi_post)
 
         if adjoint_method == "fixed_point":
             # F3 fused JIT: dE/denv + adjoint fixed-point + chain rule
@@ -1216,7 +1221,9 @@ def _make_implicit_vjp_fn(
                 _converged,
                 _n_iter,
                 lam_final,
-            ) = _jit_fused_fixed_point_bwd(params_data_tuple, env_leaves, g, init_lam)
+            ) = _jit_fused_fixed_point_bwd(
+                params_data_tuple, env_leaves, g, init_lam, chi=chi_post
+            )
             _F3_LAST_DIAGNOSTICS["diverged"] = bool(jax.device_get(diverged))
             _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
             _F3_LAST_DIAGNOSTICS["n_iter"] = int(jax.device_get(_n_iter))
@@ -1264,7 +1271,9 @@ def _make_implicit_vjp_fn(
                 )
                 lam_leaves = tuple(jax.tree.leaves(lam))
                 _cached["prev_lam_leaves"] = lam_leaves
-                return _jit_chain_rule(params_data_tuple, env_leaves, lam_leaves, g)
+                return _jit_chain_rule(
+                    params_data_tuple, env_leaves, lam_leaves, g, chi=chi_post
+                )
             _cached["prev_lam_leaves"] = tuple(jax.tree.leaves(lam_final))
             return grads_tuple
         else:
@@ -1286,7 +1295,9 @@ def _make_implicit_vjp_fn(
                 restart=gmres_restart,
             )
             lam_leaves = tuple(jax.tree.leaves(lam))
-            return _jit_chain_rule(params_data_tuple, env_leaves, lam_leaves, g)
+            return _jit_chain_rule(
+                params_data_tuple, env_leaves, lam_leaves, g, chi=chi_post
+            )
 
     f.defvjp(f_fwd, f_bwd)
     return f

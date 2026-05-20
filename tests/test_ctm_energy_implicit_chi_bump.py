@@ -80,6 +80,7 @@ def _central_diff(f, x: jnp.ndarray, eps: float = 1e-4) -> jnp.ndarray:
     return grad
 
 
+@pytest.mark.slow
 def test_ad_gradient_matches_fd_with_bump():
     """FD-vs-AD parity at D=2, chi_initial=4, chi_max=8 with forced bump.
 
@@ -106,6 +107,7 @@ def test_ad_gradient_matches_fd_with_bump():
             ctmrg_heuristic_increase_chi_threshold=1e-12,  # force bump on iter 1
             ctmrg_heuristic_increase_chi_step_size=2,
             chi_max=8,
+            gmres_tol=1e-8,  # 100x margin vs atol=1e-5 below
         )
 
     grad_ad = jax.grad(loss)(flat_init)
