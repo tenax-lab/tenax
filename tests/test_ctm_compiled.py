@@ -194,7 +194,7 @@ class TestCompiledSweep:
 
         # Tensor sweep (pinned to 1x1 recipe; the raw path only implements
         # the 1x1 enlarged-corner projector, no 2x2 plaquette absorption yet).
-        envs_tensor, _ = _ctm_tensor_sweep_multisite(
+        envs_tensor, _, _ = _ctm_tensor_sweep_multisite(
             {coord: env},
             {coord: dl},
             neighbors,
@@ -259,7 +259,7 @@ class TestCompiledSweep:
 
         # Tensor sweep (pinned to 1x1 recipe; the raw path only implements
         # the 1x1 enlarged-corner projector, no 2x2 plaquette absorption yet).
-        envs_tensor, _ = _ctm_tensor_sweep_multisite(
+        envs_tensor, _, _ = _ctm_tensor_sweep_multisite(
             {c0: env_A, c1: env_B},
             {c0: dl_A, c1: dl_B},
             neighbors,

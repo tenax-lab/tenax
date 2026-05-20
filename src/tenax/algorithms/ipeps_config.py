@@ -161,6 +161,18 @@ class CTMConfig:
     chi_auto_bump_eps: float = 1e-5
     chi_auto_bump_step: int = 2
     chi_max: int | None = None
+    # variPEPS-style in-CTM χ-bump (Issue #492).  When enabled,
+    # ``python_loop_ctm_converge`` grows ``chi`` *during* CTM convergence
+    # by ``ctmrg_heuristic_increase_chi_step_size`` whenever the running
+    # max ``norm_smallest_S`` (smallest kept SV / largest, per projector
+    # SVD) exceeds ``ctmrg_heuristic_increase_chi_threshold``.  Capped
+    # at ``chi_max``.  Unlike ``chi_auto_bump`` (end-of-outer-step), this
+    # never returns a half-formed env to the AD optimizer — every gradient
+    # is computed at a converged CTM fixed point.  Off by default; mutually
+    # exclusive with ``chi_ramp`` (deterministic schedule).
+    ctmrg_heuristic_increase_chi: bool = False
+    ctmrg_heuristic_increase_chi_threshold: float = 1e-6
+    ctmrg_heuristic_increase_chi_step_size: int = 2
     # Early-bail when the running minimum of the CTM convergence metric
     # has not improved for ``plateau_patience`` consecutive iterations.
     # Default ``20`` is a stop-loss against the known SU/random-init CTM
@@ -222,6 +234,21 @@ class CTMConfig:
             )
         if self.chi_max is not None and self.chi_max < self.chi:
             raise ValueError(f"chi_max ({self.chi_max}) must be >= chi ({self.chi})")
+        # Issue #492 in-CTM χ-bump validation.
+        if self.ctmrg_heuristic_increase_chi and self.chi_ramp is not None:
+            raise ValueError(
+                "ctmrg_heuristic_increase_chi and chi_ramp are mutually exclusive: "
+                "chi_ramp is a deterministic optimizer-side schedule, "
+                "ctmrg_heuristic_increase_chi is reactive inside CTM convergence"
+            )
+        if (
+            self.ctmrg_heuristic_increase_chi
+            and self.ctmrg_heuristic_increase_chi_step_size <= 0
+        ):
+            raise ValueError(
+                "ctmrg_heuristic_increase_chi_step_size must be a positive integer, "
+                f"got {self.ctmrg_heuristic_increase_chi_step_size}"
+            )
 
 
 @dataclass

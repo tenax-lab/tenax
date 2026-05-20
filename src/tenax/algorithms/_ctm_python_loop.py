@@ -18,12 +18,15 @@ from functools import partial
 from typing import NamedTuple
 
 import jax
+import numpy as np
 
+from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
 from tenax.algorithms._ctm_tensor_convergence import (
     Coord,
     _corner_singular_values,
     _ctm_sv_diff,
     _ctm_tensor_sweep_multisite,
+    _get_base_charges,
     _max_env_leaf_diff,
 )
 from tenax.algorithms._ctm_tensor_init import (
@@ -41,6 +44,8 @@ class CTMConvergeInfo(NamedTuple):
     iterations: int
     sv_diff: float
     max_truncation_error: float = 0.0  # variPEPS §2.8.2 indicator (last sweep)
+    max_smallest_S: float = 0.0  # variPEPS norm_smallest_S indicator (#492)
+    final_chi: int = 0  # final chi after any in-CTM bumps (#492); 0 ⇒ unchanged
 
 
 # Process-lifetime cache so repeat calls with the same neighbors dict reuse
@@ -97,7 +102,7 @@ def _make_jit_ctm_step(
         projector_method: str = "svd",
         renormalize: bool = False,
         projector_backward: str = "auto",
-    ) -> tuple[dict[Coord, CTMTensorEnv], jax.Array]:
+    ) -> tuple[dict[Coord, CTMTensorEnv], jax.Array, jax.Array]:
         double_layers = {
             c: _build_double_layer_tensor(A) for c, A in site_tensors.items()
         }
@@ -132,6 +137,10 @@ def python_loop_ctm_converge(
     env_init: dict[Coord, CTMTensorEnv] | None = None,
     gauge_fix_fn=None,
     plateau_patience: int | None = 20,
+    ctmrg_heuristic_increase_chi: bool = False,
+    ctmrg_heuristic_increase_chi_threshold: float = 1e-6,
+    ctmrg_heuristic_increase_chi_step_size: int = 2,
+    chi_max: int | None = None,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM to convergence using a Python for-loop over JIT'd sweeps.
 
@@ -201,11 +210,30 @@ def python_loop_ctm_converge(
     # Build the JIT'd step function (captures neighbors in closure)
     jit_step = _make_jit_ctm_step(neighbors)
 
+    # chi may grow during the loop when ``ctmrg_heuristic_increase_chi``
+    # is enabled (variPEPS-style in-CTM bump; Issue #492).  ``chi_current``
+    # is the live value used by JIT'd sweeps; the new chi is static_argname,
+    # so each distinct chi value will retrace once on first use.
+    chi_current = chi
+    chi_max_eff = chi_max if chi_max is not None else chi_current
+
+    # Pre-compute base_charges from any site tensor for the SymmetricTensor
+    # env-pad path; on dense envs ``pad_dense_env_chi`` ignores this arg.
+    bump_base_charges: np.ndarray | None = None
+    if ctmrg_heuristic_increase_chi:
+        for A in site_tensors.values():
+            bump_base_charges = _get_base_charges(_build_double_layer_tensor(A))
+            if bump_base_charges is not None:
+                break
+
     # Initialize environments
     envs = (
         env_init
         if env_init is not None
-        else {c: initialize_ctm_tensor_env(A, chi) for c, A in site_tensors.items()}
+        else {
+            c: initialize_ctm_tensor_env(A, chi_current)
+            for c, A in site_tensors.items()
+        }
     )
 
     # QR warm-up: run a few eigh iterations before switching to QR
@@ -213,10 +241,10 @@ def python_loop_ctm_converge(
     if projector_method == "qr" and qr_warmup_steps > 0:
         warmup = min(qr_warmup_steps, max_iter)
         for _ in range(warmup):
-            envs, _ = jit_step(
+            envs, _, _ = jit_step(
                 site_tensors,
                 envs,
-                chi=chi,
+                chi=chi_current,
                 projector_method="eigh",
                 renormalize=renormalize,
                 projector_backward=projector_backward,
@@ -227,21 +255,53 @@ def python_loop_ctm_converge(
     prev_envs: dict[Coord, CTMTensorEnv] | None = None
     final_diff = float("inf")
     last_max_eps: float = 0.0
+    last_max_smallest_S: float = 0.0
     best_diff = float("inf")
     best_envs: dict[Coord, CTMTensorEnv] | None = None
     best_iter = 0
     iters_since_best = 0
 
     for i in range(remaining):
-        envs, _max_eps = jit_step(
+        envs, _max_eps, _max_S = jit_step(
             site_tensors,
             envs,
-            chi=chi,
+            chi=chi_current,
             projector_method=projector_method,
             renormalize=renormalize,
             projector_backward=projector_backward,
         )
         last_max_eps = float(_max_eps)
+        last_max_smallest_S = float(_max_S)
+
+        # variPEPS-style in-CTM χ-bump (Issue #492).  If the projector
+        # SVD's normalised smallest kept SV is still above threshold, the
+        # truncation cut hasn't reached a clean gap — grow chi and keep
+        # iterating.  ``continue`` skips the convergence check for this
+        # iter since the env was just zero-padded and is no longer
+        # representative of the converged fixed point at the new chi.
+        if (
+            ctmrg_heuristic_increase_chi
+            and last_max_smallest_S > ctmrg_heuristic_increase_chi_threshold
+            and chi_current < chi_max_eff
+        ):
+            chi_current = min(
+                chi_current + ctmrg_heuristic_increase_chi_step_size,
+                chi_max_eff,
+            )
+            envs = {
+                c: pad_dense_env_chi(
+                    envs[c], chi_current, base_charges=bump_base_charges
+                )
+                for c in envs
+            }
+            # Reset plateau tracking — diff metrics across a chi-bump are
+            # not meaningful.  Best-tracking restarts at the new chi.
+            prev_svs = {}
+            prev_envs = None
+            best_diff = float("inf")
+            best_envs = None
+            iters_since_best = 0
+            continue
 
         # Apply gauge fix if provided (e.g., phase fix for element-wise convergence)
         if gauge_fix_fn is not None:
@@ -310,6 +370,8 @@ def python_loop_ctm_converge(
                 iterations=total_iter,
                 sv_diff=final_diff,
                 max_truncation_error=last_max_eps,
+                max_smallest_S=last_max_smallest_S,
+                final_chi=chi_current,
             )
 
         if plateau_patience is not None and plateau_metric_valid:
@@ -326,6 +388,8 @@ def python_loop_ctm_converge(
                         iterations=best_iter or total_iter,
                         sv_diff=best_diff,
                         max_truncation_error=last_max_eps,
+                        max_smallest_S=last_max_smallest_S,
+                        final_chi=chi_current,
                     )
 
     return envs, CTMConvergeInfo(
@@ -333,6 +397,8 @@ def python_loop_ctm_converge(
         iterations=max_iter,
         sv_diff=final_diff,
         max_truncation_error=last_max_eps,
+        max_smallest_S=last_max_smallest_S,
+        final_chi=chi_current,
     )
 
 

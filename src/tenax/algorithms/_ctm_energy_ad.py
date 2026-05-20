@@ -64,7 +64,7 @@ def ctm_energy_explicit(
 
     # Warmup: no gradient tracking
     for _ in range(warmup_steps):
-        envs, _eps = jax.lax.stop_gradient(
+        envs, _eps, _smin = jax.lax.stop_gradient(
             jit_step(
                 site_tensors,
                 envs,
@@ -77,7 +77,7 @@ def ctm_energy_explicit(
 
     # Backprop phase: checkpointed sweeps
     def _step_envs_only(st, e):
-        envs_out, _eps = jit_step(
+        envs_out, _eps, _smin = jit_step(
             st,
             e,
             chi=chi,
@@ -408,7 +408,7 @@ def _sigma_gauged_ctm_converge(
         else 0
     )
     for _ in range(warmup):
-        envs, _eps = jit_step(
+        envs, _eps, _smin = jit_step(
             site_tensors,
             envs,
             chi=chi,
@@ -423,7 +423,7 @@ def _sigma_gauged_ctm_converge(
     best_envs: dict | None = None
     iters_since_best = 0
     for i in range(max_iter - warmup):
-        envs_new, _eps = jit_step(
+        envs_new, _eps, _smin = jit_step(
             site_tensors,
             envs,
             chi=chi,
@@ -774,7 +774,7 @@ def _make_implicit_vjp_fn(
             # near-singular and GMRES returns near-zero lambda.
             # Cf. ad_utils.py step_fn_sigma (line ~1232).
             e_ref = jax.tree.map(jax.lax.stop_gradient, e)
-            e_out, _eps = jit_step_bwd(
+            e_out, _eps, _smin = jit_step_bwd(
                 site_tensors,
                 e,
                 chi=chi,
@@ -810,7 +810,7 @@ def _make_implicit_vjp_fn(
         # Indirect: J_params^T @ lam
         def gauge_fixed_sweep_from_params(p_tuple):
             st = dict(zip(coords, p_tuple))
-            e_out, _eps = jit_step_bwd(
+            e_out, _eps, _smin = jit_step_bwd(
                 st,
                 envs,
                 chi=chi,
@@ -872,7 +872,7 @@ def _make_implicit_vjp_fn(
         def gauge_fixed_sweep_from_env(env_leaves_flat):
             e = jax.tree.unflatten(env_treedef, env_leaves_flat)
             e_ref = jax.tree.map(jax.lax.stop_gradient, e)
-            e_out, _eps = jit_step_bwd(
+            e_out, _eps, _smin = jit_step_bwd(
                 site_tensors,
                 e,
                 chi=chi,
@@ -937,7 +937,7 @@ def _make_implicit_vjp_fn(
 
         def gauge_fixed_sweep_from_params(p_tuple):
             st = dict(zip(coords, p_tuple))
-            e_out, _eps = jit_step_bwd(
+            e_out, _eps, _smin = jit_step_bwd(
                 st,
                 envs,
                 chi=chi,
@@ -970,7 +970,7 @@ def _make_implicit_vjp_fn(
             def gauge_fixed_sweep_from_env(env_leaves_flat):
                 e = jax.tree.unflatten(env_treedef, env_leaves_flat)
                 e_ref = jax.tree.map(jax.lax.stop_gradient, e)
-                e_out, _eps = jit_step_bwd(
+                e_out, _eps, _smin = jit_step_bwd(
                     site_tensors,
                     e,
                     chi=chi,

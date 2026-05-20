@@ -320,8 +320,8 @@ def _compute_plaquette_projector_pair(
     chi: int,
     direction: str,
     base_charges: np.ndarray | None = None,
-) -> tuple[Tensor, Tensor, jax.Array]:
-    """Compute the (P_top, P_bot, eps_T) projector triple for a 2x2 plaquette.
+) -> tuple[Tensor, Tensor, jax.Array, jax.Array]:
+    """Compute the (P_top, P_bot, eps_T, smallest_S) projector quad for a 2x2 plaquette.
 
     The plaquette is anchored at TL with TR=neighbors[TL]['right'],
     BL=neighbors[TL]['bottom'], BR=neighbors[TR]['bottom'].
@@ -339,7 +339,9 @@ def _compute_plaquette_projector_pair(
         P_bot labels: ("chi_new", "fused"),   flow IN on "fused"
 
     ``eps_T`` is the variPEPS §2.8.2 truncation-error scalar driving
-    ``chi_auto_bump`` (Issue #474); ``stop_gradient`` applied upstream.
+    end-of-outer-step ``chi_auto_bump`` (Issue #474); ``smallest_S`` is
+    the variPEPS ``norm_smallest_S`` scalar driving in-CTM χ-bump
+    (Issue #492); ``stop_gradient`` applied upstream to both.
 
     For LEFT/RIGHT direction, ``P_top`` projects the BOTTOM face of TL
     (or top face of TR for direction='right') and ``P_bot`` projects the
@@ -357,13 +359,14 @@ def _compute_plaquette_projector_pair(
     Q_BR = _build_enlarged_corner(
         env_BR.C3, env_BR.T3, env_BR.T2, a_BR, position="bottom_right"
     )
-    P_top_raw, P_bot_raw, eps_T = _compute_2x2_projector(
+    P_top_raw, P_bot_raw, eps_T, smallest_S = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi, direction=direction, base_charges=base_charges
     )
     return (
         _half_to_chi_new_top(P_top_raw),
         _half_to_chi_new_bot(P_bot_raw),
         eps_T,
+        smallest_S,
     )
 
 
@@ -932,7 +935,7 @@ def _ctm_tensor_move_left_2x2(
     # ---- Step 2: compute the (P_top, P_bot) projector pair. ----
     # P_top:  (chi_outer [IN], fused_D2 [IN], chi_new_top [OUT])
     # P_bot:  (chi_new_bot [IN], chi_outer [OUT], fused_D2 [OUT])
-    P_top, P_bot, _ = _compute_2x2_projector(
+    P_top, P_bot, _, _ = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="left", base_charges=base_charges
     )
 
@@ -1039,7 +1042,7 @@ def _ctm_tensor_move_right_2x2(
     )
 
     # ---- Step 2: compute the (P_top, P_bot) projector pair. ----
-    P_top, P_bot, _ = _compute_2x2_projector(
+    P_top, P_bot, _, _ = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="right", base_charges=base_charges
     )
 
@@ -1128,7 +1131,7 @@ def _ctm_tensor_move_top_2x2(
     )
 
     # ---- Step 2: compute the (P_top, P_bot) projector pair. ----
-    P_top, P_bot, _ = _compute_2x2_projector(
+    P_top, P_bot, _, _ = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="top", base_charges=base_charges
     )
 
@@ -1217,7 +1220,7 @@ def _ctm_tensor_move_bottom_2x2(
     )
 
     # ---- Step 2: compute the (P_top, P_bot) projector pair. ----
-    P_top, P_bot, _ = _compute_2x2_projector(
+    P_top, P_bot, _, _ = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi, direction="bottom", base_charges=base_charges
     )
 

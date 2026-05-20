@@ -578,6 +578,10 @@ def _compute_2x2_projector(
     from tenax.algorithms._ctm_truncation_error import compute_truncation_error
 
     eps_T = compute_truncation_error(S_M, k)
+    # variPEPS ``norm_smallest_S`` indicator for in-CTM χ-bump (#492):
+    # smallest kept SV normalised by the largest.  Bump when this is
+    # still large (truncation cut hasn't reached a clean gap yet).
+    smallest_S = S_M[k - 1] / (S_M[0] + 1e-30)
     U_M = U_M[:, :k]
     S_M = S_M[:k]
     V_M_h = V_M_h[:k, :]
@@ -702,12 +706,14 @@ def _compute_2x2_projector(
     # adjoint solve recovers the env dependence on A without flowing
     # through jnp.linalg.svd, whose F_ij = 1/(s_i² - s_j²) backward NaN-s
     # on near-degenerate singular values of M_prime (typical at small D).
-    # ``eps_T`` is also stop_gradient'd — it's consumed only by the
-    # outer-loop auto-bump (#474), which is non-AD.
+    # ``eps_T`` and ``smallest_S`` are also stop_gradient'd — both are
+    # consumed only by the CTM convergence loop's chi-bump logic (#474 /
+    # #492), which is non-AD.
     return (
         jax.tree.map(jax.lax.stop_gradient, P_top),
         jax.tree.map(jax.lax.stop_gradient, P_bot),
         jax.lax.stop_gradient(eps_T),
+        jax.lax.stop_gradient(smallest_S),
     )
 
 
@@ -998,6 +1004,11 @@ def _compute_2x2_projector_symmetric(
         jnp.sqrt(discarded_norm_sq / safe_total),
         jnp.array(0.0, dtype=S_Mp.dtype).real,
     )
+    # variPEPS ``norm_smallest_S`` indicator for in-CTM χ-bump (#492).
+    # Block-sparse SVs aren't in global-descending order under tracing,
+    # so use jnp.min / jnp.max of the absolute spectrum.
+    s_abs = jnp.abs(S_Mp)
+    smallest_S = jnp.min(s_abs) / (jnp.max(s_abs) + 1e-30)
 
     # ---- Stage 5: cross-projectors via bar() for the SVD adjoint. ----
     # Under tracing, the bond axis emerges in sector-block order rather than
@@ -1061,9 +1072,10 @@ def _compute_2x2_projector_symmetric(
         )
     )
     # Same stop_gradient treatment as the dense path — see the comment
-    # at the end of _compute_2x2_projector.  (#474)
+    # at the end of _compute_2x2_projector.  (#474 / #492)
     return (
         jax.tree.map(jax.lax.stop_gradient, P_top),
         jax.tree.map(jax.lax.stop_gradient, P_bot),
         jax.lax.stop_gradient(eps_T),
+        jax.lax.stop_gradient(smallest_S),
     )
