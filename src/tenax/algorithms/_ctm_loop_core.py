@@ -95,6 +95,8 @@ def _validate_chi_bump_args(
             "in-CTM bump is enabled) env_init's actual chi; chi_max is "
             "the ceiling and must not be smaller."
         )
+    # chi_current is promoted by env_init when warm-start env exceeded the
+    # requested chi (so warm-start round-trips preserve grown chi).
     return chi_current
 
 
@@ -141,11 +143,10 @@ def _run_ctm_loop_with_bump(
         Callable (envs_new, envs_old) -> envs, or None.  Phase gauge wraps a
         single-arg phase fix; sigma gauge uses both args.  None disables.
     """
-    # Compute bump_base_charges from the first site tensor that yields a
-    # non-None set.  Owning the computation here keeps callers from
-    # repeating it (#514 follow-up de-dup) — the double-layer cache hit
-    # rate is unaffected because _build_double_layer_tensor is memoised
-    # per site tensor by the JIT below.
+    # Compute base_charges for the symmetric env-pad path; ignored by dense
+    # envs.  Cost is one D⁴ contraction per CTM-converge invocation — same
+    # total work as before the helper consolidation (was previously done
+    # once per direct-caller callsite).
     bump_base_charges = None
     if bump_enabled:
         for A in site_tensors.values():
