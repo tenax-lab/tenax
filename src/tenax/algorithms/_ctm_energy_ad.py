@@ -753,7 +753,13 @@ def _make_implicit_vjp_fn(
         )
 
     # Mutable cache for treedef from forward (needed in backward).
-    _cached = {}
+    # ``prev_lam_leaves`` caches the implicit-AD adjoint solution across
+    # consecutive ``f_bwd`` calls.  Consecutive L-BFGS steps usually take small
+    # site-tensor steps, so the adjoint problem ``(I - J^T) λ = b`` is "close"
+    # to the previous one — using the previous ``λ`` as a warm seed for the
+    # Neumann iteration converges in fewer iterations (#501).  Cleared on
+    # divergence/non-convergence so the next call gets a fresh start.
+    _cached = {"prev_lam_leaves": None}
 
     def _run_forward(site_tensors):
         """Run CTM convergence (shared by f and f_fwd)."""
@@ -937,6 +943,7 @@ def _make_implicit_vjp_fn(
         params_data_tuple,
         env_leaves,
         g_scalar,
+        init_lam,
     ):
         """F3: fused dE/denv + adjoint fixed-point + chain rule.
 
@@ -944,6 +951,11 @@ def _make_implicit_vjp_fn(
         (_jit_dE_denv, _jit_apply_Jt, _jit_chain_rule) + Python adjoint
         loop. The adjoint runs as lax.while_loop so the loop body and
         the J^T VJP closure trace once and reuse on every iter.
+
+        ``init_lam`` is the warm-start seed for the Neumann iteration
+        (shape-matched to ``dE_denv``).  Cold start passes ``dE_denv``
+        itself; subsequent calls pass the previous ``lam_final`` so the
+        loop converges in fewer iterations (#501).
 
         Returns
         -------
@@ -956,6 +968,10 @@ def _make_implicit_vjp_fn(
             Set when ``diff < gmres_tol``. Diagnostic only.
         n_iter : int32 scalar
             Diagnostic only.
+        lam_final : tuple of leaves
+            Final adjoint vector, shaped like ``dE_denv``.  Caller caches
+            this and passes it back as ``init_lam`` on the next call to
+            warm-start the Neumann iteration.
         """
         gate_ = mutables["gate"]
         energy_fn_ = mutables["energy_fn"]
@@ -999,8 +1015,12 @@ def _make_implicit_vjp_fn(
             return vjp_env_fn(v)[0]
 
         # --- 3. Adjoint fixed-point inside lax.while_loop ---
+        # ``init_lam`` is the caller-supplied warm-start seed (cold-start
+        # uses ``dE_denv``; warm-start uses the previous ``lam_final``).
+        # The RHS ``b = dE_denv`` of the Neumann step ``λ_{k+1} = b + J^T λ_k``
+        # is unchanged — only the initial guess is seeded from cache.
         real_dtype = jnp.real(dE_denv[0]).dtype if dE_denv else jnp.float64
-        init_lam = dE_denv  # lambda_0 = b
+        init_lam_local = init_lam  # lambda_0 (warm or cold seed)
         init_diff = jnp.array(jnp.inf, dtype=real_dtype)
         init_k = jnp.array(0, dtype=jnp.int32)
         init_diverged = jnp.array(False)
@@ -1026,7 +1046,7 @@ def _make_implicit_vjp_fn(
         lam_final, final_diff, n_iter, diverged = jax.lax.while_loop(
             cond_fn,
             body_fn,
-            (init_lam, init_diff, init_k, init_diverged),
+            (init_lam_local, init_diff, init_k, init_diverged),
         )
         converged = final_diff <= tol_arr
 
@@ -1057,7 +1077,7 @@ def _make_implicit_vjp_fn(
         indirect = vjp_sweep_params(lam_final)[0]
 
         total = jax.tree.map(lambda d, ind: g_scalar * (d + ind), direct, indirect)
-        return (total,), diverged, converged, n_iter
+        return (total,), diverged, converged, n_iter, lam_final
 
     @jax.jit
     def _jit_gmres_solve(params_data_tuple, env_leaves, rhs):
@@ -1146,12 +1166,29 @@ def _make_implicit_vjp_fn(
             # loop did not solve the system (diverged or hit
             # gmres_maxiter without reaching gmres_tol) we fall back
             # to eager GMRES below (same path as adjoint_method=="gmres").
-            grads_tuple, diverged, _converged, _n_iter = _jit_fused_fixed_point_bwd(
-                params_data_tuple, env_leaves, g
-            )
+            #
+            # Warm-start (#501): the cached ``prev_lam_leaves`` from the
+            # previous successful backward is fed back as the Neumann
+            # initial guess.  Cold start (first call, or after a
+            # divergence reset) seeds from ``dE_denv`` itself —
+            # equivalent to the previous behaviour.
+            prev_lam = _cached.get("prev_lam_leaves")
+            if prev_lam is None:
+                init_lam = _eager_dE_denv()
+            else:
+                init_lam = prev_lam
+
+            (
+                grads_tuple,
+                diverged,
+                _converged,
+                _n_iter,
+                lam_final,
+            ) = _jit_fused_fixed_point_bwd(params_data_tuple, env_leaves, g, init_lam)
             _F3_LAST_DIAGNOSTICS["diverged"] = bool(jax.device_get(diverged))
             _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
             _F3_LAST_DIAGNOSTICS["n_iter"] = int(jax.device_get(_n_iter))
+            _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = False
             if (
                 _F3_LAST_DIAGNOSTICS["diverged"]
                 or not _F3_LAST_DIAGNOSTICS["converged"]
@@ -1165,6 +1202,12 @@ def _make_implicit_vjp_fn(
                 # truncated Neumann iterate would be silently consumed
                 # by _jit_chain_rule as if (I - J^T) λ = b had been
                 # solved, biasing the gradient (issue #420).
+                #
+                # Invalidate the stale warm-start cache before the
+                # eager fallback fires; the eager GMRES result then
+                # becomes the new seed for the next call.
+                _cached["prev_lam_leaves"] = None
+                _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = True
                 rhs = _eager_dE_denv()
                 lam, _info = gmres_pytree_jax(
                     _eager_apply_I_minus_Jt,
@@ -1175,7 +1218,9 @@ def _make_implicit_vjp_fn(
                     restart=gmres_restart,
                 )
                 lam_leaves = tuple(jax.tree.leaves(lam))
+                _cached["prev_lam_leaves"] = lam_leaves
                 return _jit_chain_rule(params_data_tuple, env_leaves, lam_leaves, g)
+            _cached["prev_lam_leaves"] = tuple(jax.tree.leaves(lam_final))
             return grads_tuple
         else:
             # adjoint_method == "gmres": eager Krylov via JAX's built-in
