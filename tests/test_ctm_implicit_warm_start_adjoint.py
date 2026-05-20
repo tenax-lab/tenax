@@ -190,6 +190,85 @@ def test_gmres_logger_emits_at_f3_path(caplog):
     ), f"No F3 adjoint log; got {[r.message for r in caplog.records]}"
 
 
+def test_adjoint_warm_start_invalidated_on_shape_mismatch():
+    """Warm-start cache rejects stale lam_leaves with mismatched shapes.
+
+    Regression for PR #515 Codex review: changing site_tensor shape
+    while keeping coords/gate/neighbors constant must invalidate the
+    cached lambda before ``_jit_fused_fixed_point_bwd`` would otherwise
+    raise a VJP tree/shape mismatch.
+
+    The ``_VJP_CACHE`` key derives from (coords, chi, gate id, neighbors
+    id, ...) — it does NOT include ``site_tensor`` shape.  So a D-sweep
+    that keeps coords/gate/neighbors constant hits the SAME cached VJP
+    closure (and the same ``_cached["prev_lam_leaves"]`` dict) with
+    differently-shaped env_leaves.  We simulate this by manually
+    injecting a wrong-shape ``prev_lam_leaves`` into the cached closure
+    and verifying the next ``jax.grad`` call invalidates it (rather than
+    crashing inside the JIT).
+    """
+    from tenax.algorithms._ctm_energy_ad import _VJP_CACHE
+
+    # Clear the shared _VJP_CACHE so the warm-up call below populates a
+    # single, unambiguous entry that we can reflect into.  Previous tests
+    # in this module leave their own cache entries behind (different
+    # gmres_maxiter / etc.) and ``next(iter(_VJP_CACHE.values()))`` would
+    # pick the wrong one.
+    _VJP_CACHE.clear()
+
+    params = _make_su_tensor(D=2, d=2)
+    loss = _make_loss_fn()
+
+    # Step 1: warm-up call populates _cached["prev_lam_leaves"] with
+    # leaves shaped like env_leaves for the current (D, chi) probe.
+    jax.grad(loss)(params)
+
+    # Step 2: locate the live _cached dict via the f.bwd closure of
+    # the cached VJP entry, then inject a deliberately-wrong-shape
+    # prev_lam_leaves entry.  This mimics the D-sweep scenario where
+    # the previous grad call ran at a different shape but the same
+    # cache_key, so the stale lam_leaves carry over.
+    assert len(_VJP_CACHE) == 1, (
+        f"expected exactly one VJP entry after the warm-up call; "
+        f"found {len(_VJP_CACHE)}"
+    )
+    f_cached, _mutables = next(iter(_VJP_CACHE.values()))
+    cached_dict = None
+    for cell in f_cached.bwd.__closure__:
+        try:
+            v = cell.cell_contents
+        except ValueError:
+            continue
+        if isinstance(v, dict) and "prev_lam_leaves" in v:
+            cached_dict = v
+            break
+    assert cached_dict is not None, "could not locate _cached dict in f.bwd closure"
+    assert cached_dict["prev_lam_leaves"] is not None, (
+        "warm-up call did not populate prev_lam_leaves; "
+        "f_bwd may have hit the divergence/fallback path"
+    )
+
+    # Inject a wrong-shape stale entry: same tree length, but one leaf
+    # has the wrong shape (extra dimension).  This is exactly the
+    # shape mismatch a D-sweep would produce.
+    stale = tuple(
+        jnp.zeros(leaf.shape + (1,), dtype=leaf.dtype)
+        for leaf in cached_dict["prev_lam_leaves"]
+    )
+    cached_dict["prev_lam_leaves"] = stale
+
+    # Step 3: second grad call must NOT crash with VJP shape mismatch;
+    # the shape-validation guard must invalidate the cache and
+    # cold-start the Neumann iteration.
+    _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = False
+    g2 = jax.grad(loss)(params)
+    assert np.all(np.isfinite(np.asarray(g2)))
+    assert _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] is True, (
+        "expected warm_start_invalidated=True after stale-shape lam was "
+        "injected into the cache"
+    )
+
+
 def test_gmres_logger_emits_at_eager_fallback(caplog):
     """When F3 diverges (gmres_maxiter=1 forces it), eager-GMRES log fires too.
 

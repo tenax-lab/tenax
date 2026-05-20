@@ -1177,6 +1177,19 @@ def _make_implicit_vjp_fn(
             # divergence reset) seeds from ``dE_denv`` itself —
             # equivalent to the previous behaviour.
             prev_lam = _cached.get("prev_lam_leaves")
+            invalidated_by_shape = False
+            if prev_lam is not None:
+                # Validate shapes match current env_leaves.  Without this, a D-sweep
+                # or tensor-representation switch (with cache hit on coords/gate/
+                # neighbors) would feed a stale-shape init_lam into the JIT and
+                # raise a VJP tree/shape mismatch.  Cache structure: prev_lam is a
+                # flat tuple of leaves shaped like env_leaves.
+                if len(prev_lam) != len(env_leaves) or any(
+                    a.shape != b.shape for a, b in zip(prev_lam, env_leaves)
+                ):
+                    _cached["prev_lam_leaves"] = None
+                    invalidated_by_shape = True
+                    prev_lam = None
             if prev_lam is None:
                 init_lam = _eager_dE_denv()
             else:
@@ -1192,7 +1205,7 @@ def _make_implicit_vjp_fn(
             _F3_LAST_DIAGNOSTICS["diverged"] = bool(jax.device_get(diverged))
             _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
             _F3_LAST_DIAGNOSTICS["n_iter"] = int(jax.device_get(_n_iter))
-            _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = False
+            _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = invalidated_by_shape
             _GMRES_LOGGER.debug(
                 "F3 adjoint: n_iter=%d converged=%s diverged=%s tol=%g",
                 _F3_LAST_DIAGNOSTICS["n_iter"],
