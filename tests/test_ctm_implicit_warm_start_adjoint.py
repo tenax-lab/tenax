@@ -16,6 +16,8 @@ iteration on the next call.  Three contracts:
 
 from __future__ import annotations
 
+import logging
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -164,3 +166,45 @@ def test_adjoint_warm_start_invalidated_on_divergence():
     # fixed point, which varies by problem.  The key invariant is just
     # "no crash + cache lifecycle is sound", which the absence of an
     # exception already verifies.
+
+
+def test_gmres_logger_emits_at_f3_path(caplog):
+    """f_bwd's F3 success path emits a DEBUG record on the tenax.ctm.gmres logger.
+
+    Task 10 (#499): the F3 fused-fixed-point adjoint solve must emit
+    diagnostics (n_iter / converged / diverged / tol) on the
+    ``tenax.ctm.gmres`` logger after each backward.  The log is DEBUG
+    level so it stays silent by default and observable when users opt in.
+    """
+    params = _make_su_tensor(D=2, d=2)
+    loss = _make_loss_fn()
+
+    with caplog.at_level(logging.DEBUG, logger="tenax.ctm.gmres"):
+        jax.grad(loss)(params)
+
+    # At least one DEBUG record matching "F3 adjoint" must appear.
+    assert any(
+        "F3 adjoint" in rec.message
+        for rec in caplog.records
+        if rec.name == "tenax.ctm.gmres" and rec.levelno == logging.DEBUG
+    ), f"No F3 adjoint log; got {[r.message for r in caplog.records]}"
+
+
+def test_gmres_logger_emits_at_eager_fallback(caplog):
+    """When F3 diverges (gmres_maxiter=1 forces it), eager-GMRES log fires too.
+
+    Task 10 (#499): both the F3 success log AND the eager-GMRES log
+    must appear when the fused JIT loop fails to converge and the
+    eager-Krylov fallback runs.
+    """
+    params = _make_su_tensor(D=2, d=2)
+    # gmres_maxiter=1 forces F3 to bail without reaching gmres_tol, so
+    # the eager fallback runs and emits its own log line.
+    loss_capped = _make_loss_fn(gmres_maxiter=1)
+
+    with caplog.at_level(logging.DEBUG, logger="tenax.ctm.gmres"):
+        jax.grad(loss_capped)(params)
+
+    messages = [r.message for r in caplog.records if r.name == "tenax.ctm.gmres"]
+    assert any("F3 adjoint" in m for m in messages), f"missing F3 log: {messages}"
+    assert any("Eager GMRES" in m for m in messages), f"missing eager log: {messages}"

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 __all__ = ["ctm_energy_explicit", "ctm_energy_implicit"]
 
+import logging
+
 import jax
 import jax.numpy as jnp
 
@@ -28,6 +30,8 @@ from tenax.algorithms._ctm_tensor_init import (
 from tenax.algorithms._gmres_lax import gmres_pytree, gmres_pytree_jax
 from tenax.algorithms.ad_utils import CTMRGGradientError, _phase_fix_ctm_tensor
 from tenax.contraction.contractor import contract
+
+_GMRES_LOGGER = logging.getLogger("tenax.ctm.gmres")
 
 
 def _default_energy(site_tensors, envs, gate, coords, neighbors):
@@ -1189,6 +1193,13 @@ def _make_implicit_vjp_fn(
             _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
             _F3_LAST_DIAGNOSTICS["n_iter"] = int(jax.device_get(_n_iter))
             _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = False
+            _GMRES_LOGGER.debug(
+                "F3 adjoint: n_iter=%d converged=%s diverged=%s tol=%g",
+                _F3_LAST_DIAGNOSTICS["n_iter"],
+                _F3_LAST_DIAGNOSTICS["converged"],
+                _F3_LAST_DIAGNOSTICS["diverged"],
+                gmres_tol,
+            )
             if (
                 _F3_LAST_DIAGNOSTICS["diverged"]
                 or not _F3_LAST_DIAGNOSTICS["converged"]
@@ -1209,6 +1220,12 @@ def _make_implicit_vjp_fn(
                 _cached["prev_lam_leaves"] = None
                 _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = True
                 rhs = _eager_dE_denv()
+                _GMRES_LOGGER.debug(
+                    "Eager GMRES: maxiter=%d tol=%g restart=%d",
+                    gmres_maxiter,
+                    gmres_tol,
+                    gmres_restart,
+                )
                 lam, _info = gmres_pytree_jax(
                     _eager_apply_I_minus_Jt,
                     rhs,
@@ -1226,6 +1243,12 @@ def _make_implicit_vjp_fn(
             # adjoint_method == "gmres": eager Krylov via JAX's built-in
             # solver.  Retained as an opt-out for divergent edge cases.
             rhs = _eager_dE_denv()
+            _GMRES_LOGGER.debug(
+                "Eager GMRES: maxiter=%d tol=%g restart=%d",
+                gmres_maxiter,
+                gmres_tol,
+                gmres_restart,
+            )
             lam, _info = gmres_pytree_jax(
                 _eager_apply_I_minus_Jt,
                 rhs,
