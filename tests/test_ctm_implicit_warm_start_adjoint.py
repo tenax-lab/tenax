@@ -114,6 +114,13 @@ def test_adjoint_warm_start_reduces_iters():
         f"warm-start backward did not converge "
         f"(n_iter={n_iter_warm}); fallback path may have masked the effect"
     )
+    # Sanity: cold start must take at least 2 iters, else warm-start is
+    # trivially equal to cold and the test proves nothing.
+    assert n_iter_cold >= 2, (
+        f"cold-start n_iter={n_iter_cold} is too small to demonstrate "
+        "warm-start benefit; tighten the probe (e.g. lower gmres_tol or "
+        "raise chi) so cold-start needs multiple iterations."
+    )
     # The same input twice should give λ_0 ≈ λ_final, so the warm Neumann
     # iteration finishes in (often dramatically) fewer steps.
     assert n_iter_warm <= n_iter_cold, (
