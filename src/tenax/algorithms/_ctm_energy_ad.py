@@ -430,25 +430,6 @@ def ctm_energy_implicit(
         bump_step_size=ctmrg_heuristic_increase_chi_step_size,
     )
 
-    # Defensive raise: the implicit-AD backward closure (_jit_fused_fixed_point_bwd,
-    # _jit_apply_Jt, _jit_gmres_solve) captures ``chi`` as a closure constant
-    # at _make_implicit_vjp_fn build time.  If the forward grew chi via the
-    # in-CTM bump, the env_leaves emitted by the forward would have first-dim
-    # ``chi_bumped > chi`` but every backward sweep would call
-    # ``jit_step_bwd(..., chi=chi_original)`` — silently re-truncating
-    # gradients back to the original chi.  Until a proper chi-lock lands
-    # (deferred follow-up), block the broken path at the public boundary.
-    if ctmrg_heuristic_increase_chi:
-        raise NotImplementedError(
-            "ctm_energy_implicit does not yet support "
-            "ctmrg_heuristic_increase_chi: the implicit-AD backward closure "
-            "captures `chi` at build time, so a forward-side bump would "
-            "produce silently-wrong gradients (the backward VJP would "
-            "re-truncate to the original chi).  Use ctm_energy_explicit "
-            "(warmup phase grows chi; backprop is chi-locked) or wait for "
-            "a chi-lock implementation in ctm_energy_implicit."
-        )
-
     coords = sorted(site_tensors.keys())
     # Pass Tensor objects directly through custom_vjp boundary.
     # Both DenseTensor and SymmetricTensor are registered JAX pytrees,

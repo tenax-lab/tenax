@@ -31,7 +31,9 @@ def _build_site_tensor(D: int = 2, d: int = 2, seed: int = 0) -> DenseTensor:
     bond_charges = np.zeros(D, dtype=np.int32)
     phys_charges = np.zeros(d, dtype=np.int32)
     indices = (
-        TensorIndex.from_charges(sym, phys_charges.copy(), FlowDirection.IN, label="p"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
         TensorIndex.from_charges(
             sym, bond_charges.copy(), FlowDirection.OUT, label="u"
         ),
