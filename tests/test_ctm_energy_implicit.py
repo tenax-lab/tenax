@@ -88,3 +88,51 @@ def test_ctm_energy_implicit_forward_runs():
     )
     assert jnp.isfinite(energy), f"Energy is not finite: {energy}"
     assert energy.shape == (), f"Energy should be scalar, got shape {energy.shape}"
+
+
+def test_ctm_energy_implicit_chi_max_required_when_bump_enabled():
+    """Passing ctmrg_heuristic_increase_chi=True without chi_max must raise.
+
+    Validates that the four bump kwargs are plumbed through
+    ctm_energy_implicit → dispatch → _make_implicit_vjp_fn →
+    _sigma_gauged_ctm_converge.  The validation in
+    _sigma_gauged_ctm_converge fires before any CTM work happens, so we
+    only need a minimal valid call to confirm the ValueError surfaces.
+    """
+    import numpy as np
+
+    from tenax.core import DenseTensor, FlowDirection, TensorIndex, U1Symmetry
+
+    rng = np.random.default_rng(0)
+    D, d = 2, 2
+    sym = U1Symmetry()
+    bond_charges = np.zeros(D, dtype=np.int32)
+    phys_charges = np.zeros(d, dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(
+            sym, bond_charges.copy(), FlowDirection.OUT, label="u"
+        ),
+        TensorIndex.from_charges(sym, bond_charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(
+            sym, bond_charges.copy(), FlowDirection.OUT, label="l"
+        ),
+        TensorIndex.from_charges(sym, bond_charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(sym, phys_charges.copy(), FlowDirection.IN, label="p"),
+    )
+    site = DenseTensor(
+        rng.standard_normal((D, D, D, D, d)).astype(np.float64),
+        indices,
+    )
+    site_tensors = {(0, 0): site}
+    gate = heisenberg_gate()
+
+    with pytest.raises(ValueError, match="chi_max"):
+        ctm_energy_implicit(
+            site_tensors,
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=4,
+            max_iter=2,
+            ctmrg_heuristic_increase_chi=True,
+            chi_max=None,
+        )

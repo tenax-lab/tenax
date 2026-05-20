@@ -281,6 +281,10 @@ def ctm_energy_implicit(
     arnoldi_precheck: bool = False,
     adjoint_method: str = "fixed_point",
     plateau_patience: int | None = None,
+    ctmrg_heuristic_increase_chi: bool = False,
+    ctmrg_heuristic_increase_chi_threshold: float = 1e-6,
+    ctmrg_heuristic_increase_chi_step_size: int = 2,
+    chi_max: int | None = None,
 ) -> jnp.ndarray:
     """Compute iPEPS energy with implicit-differentiation backward (GMRES).
 
@@ -332,6 +336,23 @@ def ctm_energy_implicit(
                            ``"gmres"`` retains the eager Krylov solve as
                            an opt-out for divergent edge cases.  Both
                            paths reuse ``gmres_tol`` / ``gmres_maxiter``.
+        ctmrg_heuristic_increase_chi:
+                           If True, run variPEPS-style in-CTM chi bumping
+                           toward ``chi_max`` when the smallest retained
+                           singular value drops below
+                           ``ctmrg_heuristic_increase_chi_threshold``.
+                           Requires ``chi_max`` to be set and is mutex
+                           with ``chi_ramp``.  Defaults to False
+                           (existing behaviour).
+        ctmrg_heuristic_increase_chi_threshold:
+                           Smallest-S threshold that triggers an in-CTM
+                           chi bump.  Default ``1e-6``.
+        ctmrg_heuristic_increase_chi_step_size:
+                           Number of additional chi units added per bump.
+                           Default ``2``.
+        chi_max:           Optional ceiling for in-CTM chi bumping.
+                           Required when ``ctmrg_heuristic_increase_chi``
+                           is True.
 
     Returns:
         Scalar energy per site.
@@ -366,6 +387,10 @@ def ctm_energy_implicit(
         arnoldi_precheck,
         adjoint_method,
         plateau_patience,
+        ctmrg_heuristic_increase_chi,
+        ctmrg_heuristic_increase_chi_threshold,
+        ctmrg_heuristic_increase_chi_step_size,
+        chi_max,
     )
 
 
@@ -537,6 +562,10 @@ def _ctm_energy_implicit_dispatch(
     arnoldi_precheck,
     adjoint_method,
     plateau_patience,
+    ctmrg_heuristic_increase_chi,
+    ctmrg_heuristic_increase_chi_threshold,
+    ctmrg_heuristic_increase_chi_step_size,
+    chi_max,
 ):
     """Dispatch to custom_vjp-decorated function with caching.
 
@@ -568,6 +597,10 @@ def _ctm_energy_implicit_dispatch(
         arnoldi_precheck,
         adjoint_method,
         plateau_patience,
+        ctmrg_heuristic_increase_chi,
+        ctmrg_heuristic_increase_chi_threshold,
+        ctmrg_heuristic_increase_chi_step_size,
+        chi_max,
     )
 
     entry = _VJP_CACHE.get(cache_key)
@@ -607,6 +640,10 @@ def _ctm_energy_implicit_dispatch(
         arnoldi_precheck=arnoldi_precheck,
         adjoint_method=adjoint_method,
         plateau_patience=plateau_patience,
+        ctmrg_heuristic_increase_chi=ctmrg_heuristic_increase_chi,
+        ctmrg_heuristic_increase_chi_threshold=ctmrg_heuristic_increase_chi_threshold,
+        ctmrg_heuristic_increase_chi_step_size=ctmrg_heuristic_increase_chi_step_size,
+        chi_max=chi_max,
     )
     _VJP_CACHE[cache_key] = (f, mutables)
     return f(params_data_tuple)
@@ -632,6 +669,10 @@ def _make_implicit_vjp_fn(
     arnoldi_precheck=False,
     adjoint_method="fixed_point",
     plateau_patience: int | None = None,
+    ctmrg_heuristic_increase_chi: bool = False,
+    ctmrg_heuristic_increase_chi_threshold: float = 1e-6,
+    ctmrg_heuristic_increase_chi_step_size: int = 2,
+    chi_max: int | None = None,
 ):
     """Build a custom_vjp-decorated function closed over static config.
 
@@ -694,6 +735,10 @@ def _make_implicit_vjp_fn(
                 conv_method=conv_method,
                 min_iter=min_iter,
                 plateau_patience=plateau_patience,
+                ctmrg_heuristic_increase_chi=ctmrg_heuristic_increase_chi,
+                ctmrg_heuristic_increase_chi_threshold=ctmrg_heuristic_increase_chi_threshold,
+                ctmrg_heuristic_increase_chi_step_size=ctmrg_heuristic_increase_chi_step_size,
+                chi_max=chi_max,
             )
         return envs
 
