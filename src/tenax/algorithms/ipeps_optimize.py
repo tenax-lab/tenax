@@ -1347,7 +1347,11 @@ def _optimize_gs_ad_tensor(
                         )
                     break
                 params = best_params
-                _env_cache.update(best_env_cache)
+                # #518: ``best_env_cache`` may be at a stale χ if a
+                # reactive/scheduled bump fired after it was last
+                # snapshotted.  Clear instead of restoring; the next
+                # CTM call cold-starts at the current ctm_cfg.chi.
+                _env_cache.clear()
                 if is_metric_lbfgs:
                     lbfgs_history.clear()
                     prev_A_flat = None
@@ -1816,7 +1820,11 @@ def _optimize_gs_ad_tensor(
                         )
                     break
                 params = best_params
-                _env_cache.update(best_env_cache)
+                # #518: ``best_env_cache`` may be at a stale χ if a
+                # reactive/scheduled bump fired after it was last
+                # snapshotted.  Clear instead of restoring; the next
+                # CTM call cold-starts at the current ctm_cfg.chi.
+                _env_cache.clear()
                 if is_cg:
                     cg_direction = None
                     prev_grad = None
@@ -2112,10 +2120,11 @@ def _optimize_gs_ad_tensor_2site(
                 "at the target chi.  Without raising chi manually, chi >= 16 "
                 "is typically needed for generic 2-site Heisenberg.  Note: "
                 "variPEPS-style in-CTM chi-bump (ctmrg_heuristic_increase_chi=True) "
-                "is supported on both AD paths (chi-locked backward for "
-                "implicit AD via #516; warmup-only bump for explicit AD).  "
-                "For antiferromagnetic bipartite models, consider gs_c4v=True "
-                "or 1-site with sublattice_rotate_gate().",
+                "is currently supported only on the explicit-AD path "
+                "(gs_implicit_ad=False); the implicit-AD path raises "
+                "NotImplementedError when ctmrg_heuristic_increase_chi=True "
+                "is passed (see issue #514).  For antiferromagnetic bipartite "
+                "models, consider gs_c4v=True or 1-site with sublattice_rotate_gate().",
                 stacklevel=2,
             )
     import optax
@@ -2609,7 +2618,11 @@ def _optimize_gs_ad_tensor_2site(
                         )
                     break
                 params = best_params
-                _env_cache_2s.update(best_env_cache_2s)
+                # #518: ``best_env_cache_2s`` may be at a stale χ if a
+                # reactive/scheduled bump fired after it was last
+                # snapshotted.  Clear instead of restoring; the next
+                # CTM call cold-starts at the current ctm_cfg_2s.chi.
+                _env_cache_2s.clear()
                 if is_metric_lbfgs:
                     lbfgs_history.clear()
                     prev_params_flat = None
@@ -3122,7 +3135,11 @@ def _optimize_gs_ad_tensor_2site(
                         )
                     break
                 params = best_params
-                _env_cache_2s.update(best_env_cache_2s)
+                # #518: ``best_env_cache_2s`` may be at a stale χ if a
+                # reactive/scheduled bump fired after it was last
+                # snapshotted.  Clear instead of restoring; the next
+                # CTM call cold-starts at the current ctm_cfg_2s.chi.
+                _env_cache_2s.clear()
                 if is_cg:
                     cg_direction = None
                     prev_grad = None
@@ -3557,7 +3574,11 @@ def _optimize_gs_ad_multisite(
                         )
                     break
                 params = best_params
-                _env_cache.update(best_env_cache)
+                # #518: ``best_env_cache`` may be at a stale χ if a
+                # reactive/scheduled bump fired after it was last
+                # snapshotted.  Clear instead of restoring; the next
+                # CTM call cold-starts at the current ctm_cfg.chi.
+                _env_cache.clear()
                 if is_metric_lbfgs:
                     lbfgs_history.clear()
                     prev_params_flat = None
@@ -4015,7 +4036,11 @@ def _optimize_gs_ad_multisite(
                         )
                     break
                 params = best_params
-                _env_cache.update(best_env_cache)
+                # #518: ``best_env_cache`` may be at a stale χ if a
+                # reactive/scheduled bump fired after it was last
+                # snapshotted.  Clear instead of restoring; the next
+                # CTM call cold-starts at the current ctm_cfg.chi.
+                _env_cache.clear()
                 if is_cg:
                     cg_direction = None
                     prev_grad = None
