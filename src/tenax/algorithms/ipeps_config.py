@@ -398,6 +398,18 @@ class iPEPSConfig:
     gs_verbose: bool = False
     gs_log_interval: int = 10
     gs_max_grad_norm: float = 1.0  # gradient clipping (max global norm)
+    # Reject a step whose new ``||grad||_2`` exceeds
+    # ``gs_grad_spike_ratio * max(median(recent), 1.0)``, where
+    # ``recent`` is the last ``gs_grad_spike_window`` accepted gradient
+    # norms.  A 10x+ jump in gradient magnitude is the cleanest
+    # signature of a non-variational collapse in 2-site implicit-AD
+    # (see project_v9_collapse_findings.md).  On rejection the
+    # optimizer rolls back to ``best_params``, clears L-BFGS history,
+    # and reinits the optimizer state.  ``None`` (default) disables
+    # the guard.  Currently honoured only on the 2-site Tensor AD
+    # path.
+    gs_grad_spike_ratio: float | None = None
+    gs_grad_spike_window: int = 5
     gs_line_search: bool | None = None  # None = auto (True for lbfgs/cg)
     gs_line_search_max_steps: int = 8
     gs_line_search_method: str = "hager_zhang"  # "armijo" or "hager_zhang"
@@ -527,6 +539,16 @@ class iPEPSConfig:
             raise ValueError(
                 f"gs_stall_recovery_retries must be non-negative, "
                 f"got {self.gs_stall_recovery_retries}"
+            )
+        if self.gs_grad_spike_ratio is not None and self.gs_grad_spike_ratio <= 1.0:
+            raise ValueError(
+                "gs_grad_spike_ratio must be > 1.0 (ratio above recent median), "
+                f"got {self.gs_grad_spike_ratio}"
+            )
+        if self.gs_grad_spike_window <= 0:
+            raise ValueError(
+                "gs_grad_spike_window must be positive, "
+                f"got {self.gs_grad_spike_window}"
             )
         if self.gs_checkpoint_every <= 0:
             raise ValueError(

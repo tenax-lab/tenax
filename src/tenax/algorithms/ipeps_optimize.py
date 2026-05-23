@@ -2290,6 +2290,12 @@ def _optimize_gs_ad_tensor_2site(
     stall_count = 0  # noise recovery: consecutive line search failures
     current_stage_idx = 0
     stage_start_step = 0
+    # Rolling buffer of accepted ``||grad||_2`` for the gradient-spike
+    # guard (config.gs_grad_spike_ratio).  Bad implicit-AD steps land in
+    # a region where the gradient explodes by >10x relative to recent
+    # magnitudes; rejecting those steps prevents the v9-style collapse
+    # below the QMC floor.
+    recent_gnorms_2s: list[float] = []
 
     # Optional trajectory capture (config.return_history).  Always allocated
     # but only populated/returned when the flag is set.
@@ -2648,6 +2654,55 @@ def _optimize_gs_ad_tensor_2site(
         # Update env cache for warm-starting next step
         _update_env_cache_2s(params)
 
+        grad_norm_val = _grad_l2_norm(grads)
+
+        # Gradient-spike guard: reject steps whose new ||grad||_2 exceeds
+        # ``gs_grad_spike_ratio * max(median(recent), 1.0)``.  See
+        # project_v9_collapse_findings.md — non-variational drift shows up
+        # as a >10x gradient blowup before the best_energy crosses the QMC
+        # floor.  We check BEFORE updating best so the bad step never gets
+        # accepted as the new best.
+        if (
+            config.gs_grad_spike_ratio is not None
+            and len(recent_gnorms_2s) >= 2
+            and best_energy < float("inf")
+        ):
+            spike_floor = max(float(np.median(recent_gnorms_2s)), 1.0)
+            if grad_norm_val > config.gs_grad_spike_ratio * spike_floor:
+                params = best_params
+                _env_cache_2s.clear()
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_params_flat = None
+                    prev_grad_flat = None
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                    opt_state = optimizer.init(params)
+                _logger.warning(
+                    "[iPEPS-AD:2site-tensor] step %d/%d gradient spike "
+                    "|g|=%.3e > %.1fx median %.3e — rolling back to best",
+                    step + 1,
+                    config.gs_num_steps,
+                    grad_norm_val,
+                    config.gs_grad_spike_ratio,
+                    spike_floor,
+                )
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD:2site-tensor] step {step + 1}/{config.gs_num_steps} "
+                        f"|g|={grad_norm_val:.3e} spike "
+                        f"(>{config.gs_grad_spike_ratio:.1f}x median {spike_floor:.3e}) "
+                        f"— rollback to best, clear L-BFGS history",
+                        flush=True,
+                    )
+                continue
+        recent_gnorms_2s.append(grad_norm_val)
+        if len(recent_gnorms_2s) > config.gs_grad_spike_window:
+            recent_gnorms_2s.pop(0)
+
         if _should_accept_best(
             current_best=best_energy,
             candidate=energy_float,
@@ -2658,7 +2713,6 @@ def _optimize_gs_ad_tensor_2site(
             best_env_cache_2s = dict(_env_cache_2s)  # snapshot for warm-start (#317)
 
         delta_energy = abs(energy_float - prev_energy)
-        grad_norm_val = _grad_l2_norm(grads)
         logged = False
         if config.gs_verbose and _should_log_step(
             step, config.gs_num_steps, log_interval
