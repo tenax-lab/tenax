@@ -413,6 +413,14 @@ class iPEPSConfig:
     gs_line_search: bool | None = None  # None = auto (True for lbfgs/cg)
     gs_line_search_max_steps: int = 8
     gs_line_search_method: str = "hager_zhang"  # "armijo" or "hager_zhang"
+    # Hager-Zhang line search inner iteration cap (bracket + secant loops in
+    # ``_line_search.hager_zhang_line_search``).  Each iteration triggers
+    # one ``value_and_grad`` call, so on chi-saturated 2-site implicit-AD
+    # one runaway probe at the default 40 burns ~10 minutes.  Lowering to
+    # 15-20 caps the worst case at the cost of accepting more
+    # ``converged=False`` line searches.  Honoured on the iPEPS 1-site /
+    # 2-site / multisite Tensor AD paths.
+    gs_hz_max_iter: int = 40
     gs_noise_recovery_retries: int = 3  # max retries with noise injection on stall
     gs_stall_recovery_retries: int = 5  # max consecutive resets before giving up (#454)
     gs_noise_amplitude: float = 0.1  # relative noise amplitude for recovery
@@ -549,6 +557,10 @@ class iPEPSConfig:
             raise ValueError(
                 "gs_grad_spike_window must be positive, "
                 f"got {self.gs_grad_spike_window}"
+            )
+        if self.gs_hz_max_iter <= 0:
+            raise ValueError(
+                f"gs_hz_max_iter must be positive, got {self.gs_hz_max_iter}"
             )
         if self.gs_checkpoint_every <= 0:
             raise ValueError(

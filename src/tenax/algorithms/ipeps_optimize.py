@@ -1659,6 +1659,7 @@ def _optimize_gs_ad_tensor(
                     rho=1.5,
                     max_step=2.0 * alpha0,
                     energy_bound=max(2.0, 2.0 * abs(best_energy)),
+                    max_iter=config.gs_hz_max_iter,
                 )
                 if config.gs_verbose:
                     print(
@@ -3026,6 +3027,7 @@ def _optimize_gs_ad_tensor_2site(
                     rho=1.5,
                     max_step=2.0 * alpha0,
                     energy_bound=max(2.0, 2.0 * abs(best_energy)),
+                    max_iter=config.gs_hz_max_iter,
                 )
                 if config.gs_verbose:
                     print(
@@ -3965,6 +3967,7 @@ def _optimize_gs_ad_multisite(
                     rho=1.5,
                     max_step=2.0 * alpha0,
                     energy_bound=max(2.0, 2.0 * abs(best_energy)),
+                    max_iter=config.gs_hz_max_iter,
                 )
                 if config.gs_verbose:
                     print(
