@@ -2545,6 +2545,19 @@ def _optimize_gs_ad_tensor_2site(
         if is_new_best:
             save_checkpoint(_ckpt_state, config.gs_checkpoint_path, is_best=True)
 
+    # Enable per-backward ``||lam||`` extraction in the implicit-AD F3 path
+    # only when a consumer is reading them (verbose logging in this loop).
+    # Default-off saves one ``jax.device_get`` per env-leaf per gradient
+    # call on production runs (codex PR #524 P2).  Restore on exit.
+    if config.gs_implicit_ad and config.gs_verbose:
+        from tenax.algorithms._ctm_energy_ad import (
+            set_implicit_ad_norm_diagnostics,
+        )
+
+        _prev_norm_diag = set_implicit_ad_norm_diagnostics(True)
+    else:
+        _prev_norm_diag = None
+
     for step in range(start_step, config.gs_num_steps):
         # Snapshots for checkpoint "did chi change / new best" detection.
         # ``best_energy`` only decreases, so a strict < comparison after
@@ -2676,6 +2689,13 @@ def _optimize_gs_ad_tensor_2site(
             if grad_norm_val > config.gs_grad_spike_ratio * spike_floor:
                 params = best_params
                 _env_cache_2s.clear()
+                # Clear the rolling buffer too (codex PR #524 P1): if a chi
+                # bump or stall recovery has shifted the legitimate
+                # gradient scale upward, the stale median would keep
+                # tripping the guard on every subsequent step, locking the
+                # optimizer into perpetual rollback.  Re-seed from the
+                # rolled-back state instead.
+                recent_gnorms_2s.clear()
                 if is_metric_lbfgs:
                     lbfgs_history.clear()
                     prev_params_flat = None
@@ -3436,7 +3456,11 @@ def _optimize_gs_ad_tensor_2site(
             "num_steps": len(_history_energies),
             "converged": _converged,
         }
+        if _prev_norm_diag is not None:
+            set_implicit_ad_norm_diagnostics(_prev_norm_diag)
         return (A_final, B_final), (env_A, env_B), E_gs, history
+    if _prev_norm_diag is not None:
+        set_implicit_ad_norm_diagnostics(_prev_norm_diag)
     return (A_final, B_final), (env_A, env_B), E_gs
 
 

@@ -6,6 +6,7 @@ __all__ = [
     "ctm_energy_explicit",
     "ctm_energy_implicit",
     "get_last_implicit_ad_diagnostics",
+    "set_implicit_ad_norm_diagnostics",
 ]
 
 import logging
@@ -596,6 +597,31 @@ _VJP_CACHE: dict = {}
 # read this to assert the fused fixed-point iteration converged without
 # falling back to eager GMRES. Not part of the public API.
 _F3_LAST_DIAGNOSTICS: dict = {}
+
+# Toggle for the per-leaf ``device_get`` norm extraction in ``f_bwd``.
+# Default False so a production implicit-AD run pays zero extra
+# host-sync cost per backward (codex PR #524 P2).  The 2-site Tensor AD
+# path flips this on at loop entry when both ``gs_implicit_ad`` and
+# ``gs_verbose`` are set, then restores the previous value on exit.
+_F3_DIAG_COMPUTE_NORMS: bool = False
+
+
+def set_implicit_ad_norm_diagnostics(enabled: bool) -> bool:
+    """Enable or disable per-backward ``||lam||`` / ``||init_lam||``
+    extraction in the implicit-AD fused fixed-point backward.
+
+    When disabled (default), ``_F3_LAST_DIAGNOSTICS`` still receives
+    ``converged`` / ``diverged`` / ``n_iter`` (single scalars, one
+    ``device_get`` each), but the per-env-leaf norm reductions are
+    skipped.  Enabling adds one ``device_get`` per env leaf per
+    backward (~ms-scale on GPU at chi~24).
+
+    Returns the previous toggle value so callers can restore it.
+    """
+    global _F3_DIAG_COMPUTE_NORMS
+    prev = _F3_DIAG_COMPUTE_NORMS
+    _F3_DIAG_COMPUTE_NORMS = bool(enabled)
+    return prev
 
 
 def get_last_implicit_ad_diagnostics() -> dict:
@@ -1270,30 +1296,47 @@ def _make_implicit_vjp_fn(
             _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = invalidated_by_shape
             # Adjoint-amplification diagnostic: ||lam_final|| vs ||init_lam||.
             # Large ratios point to (I - J^T) being near-singular (typical at
-            # chi-ceiling with degenerate retained SVs in the frozen projectors).
-            _lam_norm_sq = sum(
-                float(jax.device_get(jnp.sum(jnp.abs(_l) ** 2))) for _l in lam_final
-            )
-            _init_lam_norm_sq = sum(
-                float(jax.device_get(jnp.sum(jnp.abs(_l) ** 2))) for _l in init_lam
-            )
-            _F3_LAST_DIAGNOSTICS["lam_norm"] = _lam_norm_sq**0.5
-            _F3_LAST_DIAGNOSTICS["init_lam_norm"] = _init_lam_norm_sq**0.5
-            _F3_LAST_DIAGNOSTICS["amplification"] = (
-                (_lam_norm_sq / _init_lam_norm_sq) ** 0.5
-                if _init_lam_norm_sq > 0
-                else float("nan")
-            )
-            _GMRES_LOGGER.debug(
-                "F3 adjoint: n_iter=%d converged=%s diverged=%s tol=%g "
-                "||lam||=%.3e amp=%.3e",
-                _F3_LAST_DIAGNOSTICS["n_iter"],
-                _F3_LAST_DIAGNOSTICS["converged"],
-                _F3_LAST_DIAGNOSTICS["diverged"],
-                gmres_tol,
-                _F3_LAST_DIAGNOSTICS["lam_norm"],
-                _F3_LAST_DIAGNOSTICS["amplification"],
-            )
+            # chi-ceiling with degenerate retained SVs in the frozen
+            # projectors).  Gated on ``_F3_DIAG_COMPUTE_NORMS`` so production
+            # implicit-AD runs pay no per-backward host-sync cost when the
+            # diagnostic isn't consumed (codex PR #524 P2).
+            if _F3_DIAG_COMPUTE_NORMS:
+                _lam_norm_sq = sum(
+                    float(jax.device_get(jnp.sum(jnp.abs(_l) ** 2))) for _l in lam_final
+                )
+                _init_lam_norm_sq = sum(
+                    float(jax.device_get(jnp.sum(jnp.abs(_l) ** 2))) for _l in init_lam
+                )
+                _F3_LAST_DIAGNOSTICS["lam_norm"] = _lam_norm_sq**0.5
+                _F3_LAST_DIAGNOSTICS["init_lam_norm"] = _init_lam_norm_sq**0.5
+                _F3_LAST_DIAGNOSTICS["amplification"] = (
+                    (_lam_norm_sq / _init_lam_norm_sq) ** 0.5
+                    if _init_lam_norm_sq > 0
+                    else float("nan")
+                )
+                _GMRES_LOGGER.debug(
+                    "F3 adjoint: n_iter=%d converged=%s diverged=%s tol=%g "
+                    "||lam||=%.3e amp=%.3e",
+                    _F3_LAST_DIAGNOSTICS["n_iter"],
+                    _F3_LAST_DIAGNOSTICS["converged"],
+                    _F3_LAST_DIAGNOSTICS["diverged"],
+                    gmres_tol,
+                    _F3_LAST_DIAGNOSTICS["lam_norm"],
+                    _F3_LAST_DIAGNOSTICS["amplification"],
+                )
+            else:
+                # Clear stale values so the consumer can detect that
+                # the diagnostic wasn't computed on this backward.
+                _F3_LAST_DIAGNOSTICS.pop("lam_norm", None)
+                _F3_LAST_DIAGNOSTICS.pop("init_lam_norm", None)
+                _F3_LAST_DIAGNOSTICS.pop("amplification", None)
+                _GMRES_LOGGER.debug(
+                    "F3 adjoint: n_iter=%d converged=%s diverged=%s tol=%g",
+                    _F3_LAST_DIAGNOSTICS["n_iter"],
+                    _F3_LAST_DIAGNOSTICS["converged"],
+                    _F3_LAST_DIAGNOSTICS["diverged"],
+                    gmres_tol,
+                )
             if (
                 _F3_LAST_DIAGNOSTICS["diverged"]
                 or not _F3_LAST_DIAGNOSTICS["converged"]
