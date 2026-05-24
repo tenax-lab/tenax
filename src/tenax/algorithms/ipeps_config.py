@@ -421,6 +421,16 @@ class iPEPSConfig:
     # ``converged=False`` line searches.  Honoured on the iPEPS 1-site /
     # 2-site / multisite Tensor AD paths.
     gs_hz_max_iter: int = 40
+    # Chi-ceiling bail-out (variPEPS §2.8.2 mechanism).  When > 0 and the
+    # CTM is at ``ctm.chi_max`` AND the bump indicator (``eps_T`` or
+    # ``norm_smallest_S`` per ``chi_auto_bump_metric``) exceeds
+    # ``chi_auto_bump_eps`` for this many consecutive optimizer steps,
+    # the optimizer exits early and returns ``best_params``.  Counters
+    # reset on a chi bump, a step that brings the indicator below
+    # threshold, or stall recovery.  Default 0 disables the check
+    # (existing behaviour).  Currently honoured only on the 2-site
+    # Tensor AD path.
+    gs_chi_ceiling_bailout: int = 0
     gs_noise_recovery_retries: int = 3  # max retries with noise injection on stall
     gs_stall_recovery_retries: int = 5  # max consecutive resets before giving up (#454)
     gs_noise_amplitude: float = 0.1  # relative noise amplitude for recovery
@@ -561,6 +571,11 @@ class iPEPSConfig:
         if self.gs_hz_max_iter <= 0:
             raise ValueError(
                 f"gs_hz_max_iter must be positive, got {self.gs_hz_max_iter}"
+            )
+        if self.gs_chi_ceiling_bailout < 0:
+            raise ValueError(
+                "gs_chi_ceiling_bailout must be >= 0 (0 disables), "
+                f"got {self.gs_chi_ceiling_bailout}"
             )
         if self.gs_checkpoint_every <= 0:
             raise ValueError(

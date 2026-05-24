@@ -2297,6 +2297,10 @@ def _optimize_gs_ad_tensor_2site(
     # magnitudes; rejecting those steps prevents the v9-style collapse
     # below the QMC floor.
     recent_gnorms_2s: list[float] = []
+    # Consecutive "at chi_max with indicator above threshold" counter for
+    # the variPEPS §2.8.2 bail-out (config.gs_chi_ceiling_bailout).  Reset
+    # on chi bump or when the indicator dips below threshold.
+    chi_ceiling_consecutive_2s = 0
 
     # Optional trajectory capture (config.return_history).  Always allocated
     # but only populated/returned when the flag is set.
@@ -3306,6 +3310,7 @@ def _optimize_gs_ad_tensor_2site(
             # at the new χ is plain steepest descent (curvature from
             # the previous χ landscape isn't valid here).
             stall_count = 0
+            chi_ceiling_consecutive_2s = 0
             if is_metric_lbfgs:
                 lbfgs_history.clear()
                 prev_params_flat = None
@@ -3316,6 +3321,45 @@ def _optimize_gs_ad_tensor_2site(
                 prev_precond_grad = None
             if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
                 opt_state = optimizer.init(params)
+
+        # variPEPS §2.8.2 chi-ceiling bail-out.  After the post-step bump
+        # has been attempted, if χ is still at chi_max AND the indicator
+        # remains above threshold for K consecutive steps, exit early and
+        # return ``best_params``.  Counter resets on any bump (handled
+        # above), any successful headroom recovery, or stall recovery.
+        if (
+            config.gs_chi_ceiling_bailout > 0
+            and ctm_cfg_2s.chi_max is not None
+            and ctm_cfg_2s.chi >= ctm_cfg_2s.chi_max
+        ):
+            _bail_metric = ctm_cfg_2s.chi_auto_bump_metric
+            if _bail_metric == "norm_smallest_S":
+                _bail_indicator = float(_env_cache_2s.get("max_smallest_S", 0.0))
+            else:
+                _bail_indicator = float(_env_cache_2s.get("max_truncation_error", 0.0))
+            if _bail_indicator > ctm_cfg_2s.chi_auto_bump_eps:
+                chi_ceiling_consecutive_2s += 1
+                if chi_ceiling_consecutive_2s >= config.gs_chi_ceiling_bailout:
+                    if config.gs_verbose:
+                        print(
+                            f"[iPEPS-AD:2site-tensor] step {step + 1}/"
+                            f"{config.gs_num_steps} chi-ceiling bail-out: "
+                            f"chi={ctm_cfg_2s.chi} at chi_max, "
+                            f"{_bail_metric}={_bail_indicator:.3e} > "
+                            f"{ctm_cfg_2s.chi_auto_bump_eps:.3e} for "
+                            f"{chi_ceiling_consecutive_2s} consecutive steps "
+                            f"— rolling back to best E={best_energy:.10f}",
+                            flush=True,
+                        )
+                    params = best_params
+                    _maybe_save_2s_checkpoint(
+                        step, chi_before, _best_energy_at_step_start
+                    )
+                    break
+            else:
+                chi_ceiling_consecutive_2s = 0
+        else:
+            chi_ceiling_consecutive_2s = 0
 
         # End-of-step save: cadence-based + new-best detection.
         _maybe_save_2s_checkpoint(step, chi_before, _best_energy_at_step_start)
