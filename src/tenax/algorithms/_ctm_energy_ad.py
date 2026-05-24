@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-__all__ = ["ctm_energy_explicit", "ctm_energy_implicit"]
+__all__ = [
+    "ctm_energy_explicit",
+    "ctm_energy_implicit",
+    "get_last_implicit_ad_diagnostics",
+]
 
 import logging
 from functools import partial
@@ -592,6 +596,33 @@ _VJP_CACHE: dict = {}
 # read this to assert the fused fixed-point iteration converged without
 # falling back to eager GMRES. Not part of the public API.
 _F3_LAST_DIAGNOSTICS: dict = {}
+
+
+def get_last_implicit_ad_diagnostics() -> dict:
+    """Snapshot of the most recent implicit-AD adjoint solve diagnostics.
+
+    Populated by the fused fixed-point backward (``adjoint_method="fixed_point"``)
+    after every gradient call.  Keys:
+
+    * ``converged`` -- True if the fixed-point iteration crossed
+      ``gmres_tol`` within ``gmres_maxiter``.
+    * ``diverged`` -- True if the in-loop divergence guard fired
+      (``||lam_{k+1} - lam_k||`` grew past k>5).
+    * ``n_iter`` -- Number of fixed-point iterations consumed.
+    * ``warm_start_invalidated`` -- True if the cached ``prev_lam_leaves``
+      was dropped due to a shape mismatch.
+    * ``lam_norm`` -- ``||lam_final||`` in the env-leaf L2 norm.
+    * ``init_lam_norm`` -- ``||init_lam||`` (warm-start seed or
+      ``dE/dEnv`` on cold start).
+    * ``amplification`` -- ``||lam_final|| / ||init_lam||``.  A large
+      ratio indicates the linear adjoint operator ``(I - J^T)`` is
+      near-singular (e.g. chi-ceiling with degenerate retained SVs in
+      the frozen projectors).
+
+    Returns a shallow copy so the caller cannot mutate internal state.
+    Empty dict if no backward has run yet.
+    """
+    return dict(_F3_LAST_DIAGNOSTICS)
 
 
 def _ctm_energy_implicit_dispatch(
@@ -1237,12 +1268,31 @@ def _make_implicit_vjp_fn(
             _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
             _F3_LAST_DIAGNOSTICS["n_iter"] = int(jax.device_get(_n_iter))
             _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = invalidated_by_shape
+            # Adjoint-amplification diagnostic: ||lam_final|| vs ||init_lam||.
+            # Large ratios point to (I - J^T) being near-singular (typical at
+            # chi-ceiling with degenerate retained SVs in the frozen projectors).
+            _lam_norm_sq = sum(
+                float(jax.device_get(jnp.sum(jnp.abs(_l) ** 2))) for _l in lam_final
+            )
+            _init_lam_norm_sq = sum(
+                float(jax.device_get(jnp.sum(jnp.abs(_l) ** 2))) for _l in init_lam
+            )
+            _F3_LAST_DIAGNOSTICS["lam_norm"] = _lam_norm_sq**0.5
+            _F3_LAST_DIAGNOSTICS["init_lam_norm"] = _init_lam_norm_sq**0.5
+            _F3_LAST_DIAGNOSTICS["amplification"] = (
+                (_lam_norm_sq / _init_lam_norm_sq) ** 0.5
+                if _init_lam_norm_sq > 0
+                else float("nan")
+            )
             _GMRES_LOGGER.debug(
-                "F3 adjoint: n_iter=%d converged=%s diverged=%s tol=%g",
+                "F3 adjoint: n_iter=%d converged=%s diverged=%s tol=%g "
+                "||lam||=%.3e amp=%.3e",
                 _F3_LAST_DIAGNOSTICS["n_iter"],
                 _F3_LAST_DIAGNOSTICS["converged"],
                 _F3_LAST_DIAGNOSTICS["diverged"],
                 gmres_tol,
+                _F3_LAST_DIAGNOSTICS["lam_norm"],
+                _F3_LAST_DIAGNOSTICS["amplification"],
             )
             if (
                 _F3_LAST_DIAGNOSTICS["diverged"]
