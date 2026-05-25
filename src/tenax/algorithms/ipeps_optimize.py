@@ -70,15 +70,23 @@ def _maybe_bump_chi(
     env_cache: dict,
     last_eps_t: float,
     *,
+    last_smallest_S: float | None = None,
     base_charges: np.ndarray | None = None,
 ) -> tuple[CTMConfig, dict]:
     """variPEPS §2.8.2 reactive χ_E bump.
 
-    When ``ctm_cfg.chi_auto_bump`` is enabled and the last CTM sweep's
-    ``ε_T`` exceeds ``ctm_cfg.chi_auto_bump_eps``, return a new
-    ``(ctm_cfg, env_cache)`` pair with χ raised by ``chi_auto_bump_step``
-    (capped at ``chi_max`` if set).  The cached env is zero-padded to the
-    new χ.  Otherwise the input pair is returned unchanged.
+    When ``ctm_cfg.chi_auto_bump`` is enabled and the chosen indicator
+    (``last_eps_t`` or ``last_smallest_S`` per
+    ``ctm_cfg.chi_auto_bump_metric``) exceeds ``ctm_cfg.chi_auto_bump_eps``,
+    return a new ``(ctm_cfg, env_cache)`` pair with χ raised by
+    ``chi_auto_bump_step`` (capped at ``chi_max`` if set).  The cached env
+    is zero-padded to the new χ.  Otherwise the input pair is returned
+    unchanged.
+
+    ``last_smallest_S`` is only consulted when
+    ``ctm_cfg.chi_auto_bump_metric == "norm_smallest_S"`` (Tenax extension
+    matching variPEPS's literal trigger).  ``None`` (default) treats the
+    indicator as 0.0, suppressing the bump on that metric.
 
     See ``_apply_chi_bump`` for the in-place mutation contract.
 
@@ -88,30 +96,40 @@ def _maybe_bump_chi(
     """
     if not ctm_cfg.chi_auto_bump:
         return ctm_cfg, env_cache
+    metric = ctm_cfg.chi_auto_bump_metric
+    if metric == "norm_smallest_S":
+        indicator = float(last_smallest_S) if last_smallest_S is not None else 0.0
+        label = "norm_smallest_S"
+    else:
+        indicator = last_eps_t
+        label = "eps_T"
     _logger.debug(
-        "_maybe_bump_chi: chi=%d eps_T=%.3e threshold=%.3e",
+        "_maybe_bump_chi: chi=%d %s=%.3e threshold=%.3e",
         ctm_cfg.chi,
-        last_eps_t,
+        label,
+        indicator,
         ctm_cfg.chi_auto_bump_eps,
     )
-    if last_eps_t <= ctm_cfg.chi_auto_bump_eps:
+    if indicator <= ctm_cfg.chi_auto_bump_eps:
         return ctm_cfg, env_cache
     chi_new = ctm_cfg.chi + ctm_cfg.chi_auto_bump_step
     if ctm_cfg.chi_max is not None:
         chi_new = min(chi_new, ctm_cfg.chi_max)
     if chi_new <= ctm_cfg.chi:
         _logger.info(
-            "_maybe_bump_chi: at chi_max=%d ceiling; eps_T=%.3e exceeded threshold %.3e but no headroom",
+            "_maybe_bump_chi: at chi_max=%d ceiling; %s=%.3e exceeded threshold %.3e but no headroom",
             ctm_cfg.chi,
-            last_eps_t,
+            label,
+            indicator,
             ctm_cfg.chi_auto_bump_eps,
         )
         return ctm_cfg, env_cache  # at ceiling
     _logger.info(
-        "_maybe_bump_chi: reactive bump chi %d -> %d (eps_T=%.3e > threshold=%.3e)",
+        "_maybe_bump_chi: reactive bump chi %d -> %d (%s=%.3e > threshold=%.3e)",
         ctm_cfg.chi,
         chi_new,
-        last_eps_t,
+        label,
+        indicator,
         ctm_cfg.chi_auto_bump_eps,
     )
     return _apply_chi_bump(ctm_cfg, env_cache, chi_new, base_charges=base_charges)
@@ -2266,6 +2284,10 @@ def _optimize_gs_ad_tensor_2site(
         # returns a real ε_T (previously a 0.0 placeholder), so reactive
         # bumps fire on the 2-site forward stack with the default recipe.
         _env_cache_2s["max_truncation_error"] = float(info.max_truncation_error)
+        # Also capture ``info.max_smallest_S`` (smallest retained SV /
+        # largest, per projector SVD) so ``chi_auto_bump_metric =
+        # "norm_smallest_S"`` can match variPEPS's literal trigger.
+        _env_cache_2s["max_smallest_S"] = float(info.max_smallest_S)
 
     params = c4v_coeffs if use_c4v else (A, B)
     is_metric_lbfgs = (
@@ -2686,10 +2708,12 @@ def _optimize_gs_ad_tensor_2site(
             # landscape via the ``continue`` below.
             chi_before_bump = ctm_cfg_2s.chi
             last_eps_t = float(_env_cache_2s.get("max_truncation_error", 0.0))
+            last_smallest_S = float(_env_cache_2s.get("max_smallest_S", 0.0))
             ctm_cfg_2s, _env_cache_2s = _maybe_bump_chi(
                 ctm_cfg_2s,
                 _env_cache_2s,
                 last_eps_t,
+                last_smallest_S=last_smallest_S,
                 base_charges=_bump_base_charges_2s,
             )
             if config.gs_chi_schedule_steps is not None:
@@ -3173,10 +3197,12 @@ def _optimize_gs_ad_tensor_2site(
         # either trigger via ``ctm_cfg_2s.chi != chi_before``.
         chi_before = ctm_cfg_2s.chi
         last_eps_t = float(_env_cache_2s.get("max_truncation_error", 0.0))
+        last_smallest_S = float(_env_cache_2s.get("max_smallest_S", 0.0))
         ctm_cfg_2s, _env_cache_2s = _maybe_bump_chi(
             ctm_cfg_2s,
             _env_cache_2s,
             last_eps_t,
+            last_smallest_S=last_smallest_S,
             base_charges=_bump_base_charges_2s,
         )
         # Scheduled outer-loop χ bump (#453 / #455).  No-ops when
