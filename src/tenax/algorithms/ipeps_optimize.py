@@ -3374,7 +3374,13 @@ def _optimize_gs_ad_tensor_2site(
                 and ctm_cfg_2s.chi_max is not None
                 and ctm_cfg_2s.chi >= ctm_cfg_2s.chi_max
             ):
-                _bail_metric = ctm_cfg_2s.chi_auto_bump_metric
+                # ``getattr`` fallback (codex PR #524 follow-up): the
+                # ``chi_auto_bump_metric`` field is added by PR #525.  Until
+                # that lands this PR must still resolve to a working
+                # indicator instead of raising ``AttributeError`` when the
+                # bail-out fires.  Default ``"eps_T"`` matches CTMConfig's
+                # eventual default and the existing 2-site bump cadence.
+                _bail_metric = getattr(ctm_cfg_2s, "chi_auto_bump_metric", "eps_T")
                 if _bail_metric == "norm_smallest_S":
                     _bail_indicator = float(_env_cache_2s.get("max_smallest_S", 0.0))
                 else:
