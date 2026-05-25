@@ -2,6 +2,251 @@
 
 ## Unreleased
 
+## v0.7.0 (2026-05-25)
+
+### New Features
+
+- **2-site implicit-AD safety nets** (#524) — three optional
+  `iPEPSConfig` knobs catch the chi-ceiling collapse mode on the 2-site
+  bipartite implicit-AD path:
+  - `gs_chi_ceiling_bailout: int` — exit to `best_params` after K
+    consecutive steps at `chi == chi_max` with the bump indicator
+    above `chi_auto_bump_eps` (variPEPS §2.8.2 mechanism).
+  - `gs_grad_spike_ratio: float | None` + `gs_grad_spike_window: int`
+    — reject any step whose `||grad||₂` exceeds
+    `ratio × max(median, 1.0)`; roll back to `best_params` and clear
+    L-BFGS history.
+  - `gs_hz_max_iter: int` — cap Hager–Zhang inner iterations
+    (default 40; recommend 15 on chi-saturated implicit-AD).
+  - Per-step GMRES amplification diagnostic (`||lam||` /
+    `amp = ||lam|| / ||initial_lam||`) logged at each `gs_log_interval`.
+  - Production recipe lands at E/site ≈ −0.6690 (≈ QMC) for D=3
+    spin-½ Heisenberg in ~1.5 h on a single GPU; see
+    `docs/guide/algorithms/ipeps_ad_paths.md` for the v6–v9
+    benchmark ladder.
+- **`CTMConfig.chi_auto_bump_metric`** (#525) — selects between
+  `"eps_T"` (default, discarded SV tail mass) and `"norm_smallest_S"`
+  (variPEPS-literal trigger `s[χ−1]/s[0]`) for the reactive χ_E bump.
+- **In-CTM χ auto-bump in AD forward loops** (#492, #513, #514, #515,
+  #516, #517) — variPEPS §2.8.2 reactive χ_E bump runs inside
+  `python_loop_ctm_converge` for both explicit and implicit AD
+  forwards.  `CTMConfig.chi_auto_bump`, `chi_auto_bump_eps`,
+  `chi_auto_bump_step` knobs, with `chi_max` ceiling enforcement
+  and zero-padded warm-restart.
+- **Convergence-triggered adaptive χ ramping** (#455, #459, #462,
+  #464, #465, #466, #467) — replaces the fixed-step chi schedule
+  with a unified `_maybe_scheduled_bump` helper that advances stage
+  on convergence + stall criteria; per-stage state tracking; reset
+  of stall_count and L-BFGS history at chi-bump boundaries.
+- **Grad-norm AD outer convergence criterion** (#449) — close on
+  `||grad||_2 < gs_grad_norm_tol` instead of `|dE|`; closes #448.
+- **iPEPS checkpoint primitive** (#497) — long-run AD resume via
+  serialized optimizer state, env cache, and L-BFGS history.
+- **2x2 plaquette CTM projector** (#406, #416, #434, #447) — variPEPS
+  multi-site projector that lifts the kagome 3-site multisite CTM
+  above the spin-½ AFH floor; `SymmetricTensor` support; `stop_gradient`
+  on the projector outputs to break the implicit-AD NaN cluster.
+- **F2/F3 fixed-point and JIT-fused implicit-AD CTM backward** (#415,
+  #421) — restructured backward as `(I − J^T) λ = ∂E/∂env` solved by
+  a single JIT-fused GMRES call.
+- **Warm-start implicit-AD adjoint** (#501) — reuse previous step's
+  λ as initial guess; shape-validated against stale-cache (#515 review).
+- **Coarse-grained iPEPS for honeycomb / kagome** (#352, #353) —
+  CG-iPEPS supersite encoding with split-aware energy at the supersite;
+  closes the gap to variPEPS honeycomb references.
+- **Native rank-4 honeycomb iPEPS CTM with implicit AD** (#347) —
+  6-corner CTMRG for honeycomb with `jax.custom_vjp` and JIT-fused
+  GMRES backward; replaces the brick-wall dummy-bond workaround.
+  Configurable `energy_fn` hook for kagome iPESS triangle energies.
+- **Differentiable iPESS for kagome XXZ** (#387, #398, #403) — kagome
+  iPESS via CG-iPEPS supersite with marginalised-3-site formula;
+  reaches the Liao 2017 PRL 118 137202 reference at D=4 χ=16.
+- **Split-aware CTM energy at large D** (#390, #392, #393, #394, #397)
+  — replace the shim path with native split-CTM energy at the
+  χ²·D⁴·d peak; fits D=8/10 kagome.
+- **Rank-aware SVD truncation** (#400) — prune zero modes from the
+  kept singular-value set so the F-matrix backward stays well-conditioned.
+- **`info.max_truncation_error` and reactive-bump events on the 2x2
+  plaquette path** (#474, #481, #484) — real `ε_T` (was 0.0 stub) +
+  INFO-level logging of every chi-bump event.
+- **HZ probe count + ||grad||_2 in step output** (#495, #498, #500) —
+  visibility into Hager–Zhang inner-iter cost and per-step gradient
+  norm trend.
+- **iPEPS AD benchmark harness + JIT cache fix + history hook** (#414).
+- **iPEPS-AD example series (v6–v9)** — examples covering chi-schedule
+  + reactive bump composition (v6), fixed-χ implicit/explicit AD
+  comparison (v7), chi-ramp on the 4-bond-fixed energy (v8), and
+  safety-net validation across bipartite / C4v + metric variants (v9).
+- **`bar_super()`** with super-algebra Koszul twist for fermionic
+  `SymmetricTensor` (#361).
+
+### Behavior Changes
+
+- **Count all 4 NN bonds in 2-site bipartite energy** (#493, #494) —
+  earlier 2-bond formula under-counted; explains historical
+  `gs_c4v=False` / #328 sub-QMC drift on bipartite paths.
+- **CTM sweep order standardised** to (left, top, right, bottom) (#407).
+- **`chi_auto_bump` end-of-iter** ordering preserves Wolfe invariant
+  in the surrounding line search (#419, #432).
+- **`plateau_patience` early-bail** in `python_loop_ctm_converge`
+  (#439).
+- **L-BFGS stall recovery** — cap on consecutive CTM-error resets to
+  avoid runaway rollback loops (#454, #457).
+- **Stop-gradient on 2x2 plaquette projector outputs** to break the
+  implicit-AD NaN cluster (#447).
+
+### Bug Fixes
+
+- **Stall-rollback env-cache desync** — clear `_env_cache_2s` on
+  best-rollback so the next CTM call cold-starts at the current
+  `ctm_cfg_2s.chi` instead of using a stale-χ snapshot (#518, #519).
+- **`chi_auto_bump_metric` `getattr` fallback** in the chi-ceiling
+  bail-out path so PR #524 stands alone before PR #525 lands (#524
+  follow-up).
+- **Reset `chi_ceiling_consecutive_2s` on CTMRGGradientError
+  recovery** (#524 follow-up) — matches the docstring contract for
+  stall recovery.
+- **`gs_grad_spike_window=1`** honoured (#524 follow-up) — relax
+  `len >= 2` gate to `len >= 1` so the minimal window doesn't
+  silently disable the guard.
+- **Implicit-AD diagnostics toggle** restored via `try/finally`
+  (#524 follow-up) — `_F3_DIAG_COMPUTE_NORMS` no longer leaks `True`
+  if an exception escapes the optimizer loop.
+- **Fall back to `eps_T` when `norm_smallest_S` indicator is missing**
+  (#525 follow-up) — non-2-site callers no longer silently disable
+  reactive bumps when the variPEPS-literal metric is selected.
+- **Three CTM-iteration bugs preventing random-init convergence**
+  (#422, #423, #424).  Closes long-standing issues but per-quadrant
+  ket/bra ordering vs variPEPS rotates SVD basis in degenerate
+  subspaces; documented as known-limitation in #425/#426.
+- **Tracer-safe symmetric 2x2 projector** (#440) — closes #435.
+- **Fill unused base_charges budget in traced symmetric SVD** (#445).
+- **Thread base_charges through `_ctm_tensor_sweep`** for ε_T parity
+  (#437).
+- **Pad stale `best_env_cache` to post-bump χ** (#476) — closes #469
+  warm-start mismatch.
+- **Restore Arnoldi precheck raise on high ρ** (#477) — closes #469.
+- **Match `_qr_projector_symmetric` output to `eigh` path** (#478) —
+  closes #469.
+- **Rebalance vertical/diagonal RDM contractions** to the χ²·D⁴·d²
+  floor for kagome (#389).
+- **Route fermionic energy through the split-CTM shim path** (#392,
+  #394).
+- **Canonicalise SVD-bond charges** so ket and bra agree on the split
+  path (#391, #393).
+- **`_flow_flip_no_conj` works on `SymmetricTensor`** (#423).
+- **`rank-1 chi_init`** for standard CTM (#424).
+- **`stop_gradient` 2x2 projectors** to fix implicit-AD NaN cluster
+  (#447).
+- **PESS-AD `_initial_alpha` floor** when `|energy|` collapses to 0
+  (#401, #404).
+- **PESS-AD accepts `Tensor`-valued bond gates** in 3-site multisite
+  (#405).
+- **SymmetricTensor SVD projector gauge** + `n_blocks==0` fallback
+  (#408, #409).
+- **CTM-AD eager-GMRES fallback** on slow Neumann (#420, #427).
+- **SV-baseline guard** + PESS `plateau_patience` pass-through (#442).
+- **Auto-χ_E bump end-of-iter ordering** (#419, #432).
+- **`split-ctm` `_rdm1x2`/`_rdm2x1` shim delegation** (#479, #485,
+  #486).
+- **Pair symmetric MPO with symmetric MPS** in DMRG benchmarks (#508).
+- **Reset `stall_count` on reactive auto-bump** (#465).
+- **Reset `stall_count` + clear L-BFGS state on chi-schedule bump**
+  (#464).
+- **Chi-schedule shim off-by-one** — bumps were one stage late (#462).
+- **Codex follow-ups on #457 / #459** (#461).
+- **#449 codex follow-ups** (c4v_reference + multisite warmup) (#451).
+
+### Performance
+
+- **`_tree_dot` via host NumPy** — ~143× faster per call (#450).
+- **F2 fixed-point + F3 fused-backward** for implicit-AD CTM (#415,
+  #421).
+- **Split-aware energy at large D** — replaces shim's χ²·D⁶ cost
+  with native χ²·D⁴·d (#390).
+- **Unified χ-schedule via `_maybe_scheduled_bump`**, pad envs to
+  chi_max (#453, #459).
+
+### Refactoring
+
+- **Per-stage state for chi schedule** (#466).
+- **Extract shared CTM-policy helpers** used by AD dispatchers (#382).
+- **Split `ad_utils` into `_ad_primitives`** to break CTM SCC (#381).
+- **Move `BlockArray` to `tenax.core`** to defer Cython import (#380).
+- **Replace wildcard re-exports** in `_split_ctm_tensor` shim (#379).
+- **Split DMRG dispatch executors** to break import cycle (#378).
+- **Derive `ParamSpec.default`** from the dataclass on access (#374).
+- **CTM sweep order** switched to (left, top, right, bottom) (#407).
+
+### Tests / CI
+
+- **Gate JAX cache clear on RSS threshold** — saves ~8 min on
+  required Tests CI (#386).
+- **`merge_group` trigger** so workflows run on queued groups (#452).
+- **Split fast bucket** into `fast-ipeps` and `fast-other` to dodge
+  the GitHub runner reaper (#383).
+- **Split Full tests matrix** into fast + slow buckets (#370).
+- **Include workflow edits in change-detection filter** (#384).
+- Rationale for fast/slow Full-tests bucket split (#375).
+- **Skip AD loop in slow symmetric regression test** (#385) —
+  unblocks `fast-ipeps` bucket.
+- **Drop fragile mechanism/parity tests** (#487, #488).
+- **Drop 13 perf-style unit tests** (timing + convergence-budget)
+  (#468).
+- **Restore stall-cap regression coverage** with behavioural
+  assertion (#489).
+- **Replace strict FD-parity with gradient smoke** (#469, #482).
+- **Pin compiled-sweep parity test to 1x1 recipe** + align sweep
+  order (#446).
+- **Full-rank env in projector biorthogonality tests** (#443).
+- **Re-tune seeds for two AD adjoint tests** (#428, #429).
+- **xfail 7 SymmetricTensor tests** on `_compute_2x2_projector`
+  (#416, #417) — now resolved by #434.
+- **xfail 4 tests** blocked on non-trivial U(1) 2x2 dense fallback
+  wrap (#435, #436).
+- **xfail 3 random-init plateau tests** (#425, #426 known-limitation,
+  #444).
+- **Drop AD smoke tests** that block CI without regression value
+  (#373, #360).
+- **Drop python-loop CTM smoke tests** + fix macOS-only failure
+  (#367).
+- **Restore #328/#298 implicit-AD regression coverage** (#365).
+- **Drop redundant smoke tests** (hotrg/idmrg/block-sparse, fpeps
+  builders) (#366, #368).
+- **Tighten lbfgs/cg optimizer smoke scope** to avoid macOS OOM
+  (#364).
+- **Unblock buckets A/B/F/C/D/E from #354** (#355, #356, #358,
+  #359).
+- **Bump explicit-AD gradient tolerance** to 0.10 (macOS Accelerate
+  bias) (#371).
+- **Delete `test_ctm_energy_explicit_gradient_matches_fd`** (#369,
+  #377).
+- **Reduce compute in `symmetric_matches_dense`** to fit fast-ipeps
+  bucket (Tests required check).
+- **Fix tuple-unpack regressions** in CTM sweep tests (#441).
+
+### Documentation
+
+- **2-site implicit-AD safety nets section** in
+  `docs/guide/algorithms/ipeps_ad_paths.md` with the v6–v9 ladder
+  and production recipe.
+- **Safety-nets subsection** in `.claude/skills/tenax-ipeps-workflow`
+  surface `gs_chi_ceiling_bailout`, `gs_grad_spike_ratio/window`,
+  `gs_hz_max_iter`, and `chi_auto_bump_metric` for agent guidance.
+- **README** bullet for safety nets + new metric in auto-χ_E bump.
+- **Refresh code-paths doc** + add CTM gauge/normalization notes
+  (#350).
+- **Add CG iPEPS, native honeycomb CTM, `bar_super()`** to
+  code-paths (#376).
+- **Pin issue #425 design rationale** on `_compute_2x2_projector`
+  (#426).
+- **Design plans for #454 stall-runaway and #453 χ-ramp recompile**.
+- **Implementation plans for #454 and #453**.
+- **Correct split-CTM shim peak documentation** from χ²·D⁸ to
+  χ²·D⁶ (#395).
+- **2-site warning** updated to reference in-CTM bump + implicit
+  limitation (#511, #514).
+
 ## v0.6.0 (2026-04-28)
 
 ### New Features
