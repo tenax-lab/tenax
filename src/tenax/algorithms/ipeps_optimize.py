@@ -85,8 +85,11 @@ def _maybe_bump_chi(
 
     ``last_smallest_S`` is only consulted when
     ``ctm_cfg.chi_auto_bump_metric == "norm_smallest_S"`` (Tenax extension
-    matching variPEPS's literal trigger).  ``None`` (default) treats the
-    indicator as 0.0, suppressing the bump on that metric.
+    matching variPEPS's literal trigger).  When the metric is selected
+    but the caller has not plumbed the indicator (``last_smallest_S is
+    None``), the bump silently falls back to the ``last_eps_t`` (default
+    ``eps_T``) signal so non-2-site paths still grow χ reactively.  This
+    matches the ``CTMConfig.chi_auto_bump_metric`` docstring contract.
 
     See ``_apply_chi_bump`` for the in-place mutation contract.
 
@@ -97,10 +100,15 @@ def _maybe_bump_chi(
     if not ctm_cfg.chi_auto_bump:
         return ctm_cfg, env_cache
     metric = ctm_cfg.chi_auto_bump_metric
-    if metric == "norm_smallest_S":
-        indicator = float(last_smallest_S) if last_smallest_S is not None else 0.0
+    if metric == "norm_smallest_S" and last_smallest_S is not None:
+        # variPEPS-literal trigger when the caller supplies the indicator.
+        indicator = float(last_smallest_S)
         label = "norm_smallest_S"
     else:
+        # Default ``eps_T`` path and fallback for callers (non-2-site paths)
+        # that have not been plumbed for ``norm_smallest_S`` yet — see the
+        # ``CTMConfig.chi_auto_bump_metric`` doc.  Mapping a missing
+        # indicator to 0.0 would suppress all bumps on unsupported paths.
         indicator = last_eps_t
         label = "eps_T"
     _logger.debug(
