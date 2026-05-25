@@ -2663,6 +2663,14 @@ def _optimize_gs_ad_tensor_2site(
                         prev_precond_grad = None
                     if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
                         opt_state = optimizer.init(params)
+                # Counter-reset contract (codex PR #524 follow-up): the
+                # ``gs_chi_ceiling_bailout`` docstring states the streak
+                # resets on stall recovery.  This branch is the
+                # ``CTMRGGradientError`` recovery path, so clear the
+                # counter before the ``continue`` — otherwise a
+                # recovered CTM-error step would still count toward the
+                # K-consecutive bail-out trigger.
+                chi_ceiling_consecutive_2s = 0
                 continue
             energy_float = float(energy_val)
 
