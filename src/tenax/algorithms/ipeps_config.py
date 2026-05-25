@@ -160,6 +160,14 @@ class CTMConfig:
     chi_auto_bump: bool = False
     chi_auto_bump_eps: float = 1e-5
     chi_auto_bump_step: int = 2
+    # variPEPS §2.8.2 indicator choice (Tenax extension).  ``"eps_T"``
+    # (default, backward-compatible) reads ``info.max_truncation_error``
+    # (discarded SV tail mass).  ``"norm_smallest_S"`` reads
+    # ``info.max_smallest_S`` (smallest *retained* SV / largest), matching
+    # variPEPS's literal trigger.  The two metrics produce different bump
+    # cadences for the same nominal threshold.  Currently honoured on the
+    # 2-site bipartite path; other paths fall back to ``eps_T``.
+    chi_auto_bump_metric: str = "eps_T"
     chi_max: int | None = None
     # variPEPS-style in-CTM χ-bump (Issue #492).  When enabled,
     # ``python_loop_ctm_converge`` grows ``chi`` *during* CTM convergence
@@ -231,6 +239,11 @@ class CTMConfig:
         if self.chi_auto_bump and self.chi_auto_bump_step <= 0:
             raise ValueError(
                 f"chi_auto_bump_step must be a positive integer, got {self.chi_auto_bump_step}"
+            )
+        if self.chi_auto_bump_metric not in ("eps_T", "norm_smallest_S"):
+            raise ValueError(
+                "chi_auto_bump_metric must be 'eps_T' or 'norm_smallest_S', "
+                f"got {self.chi_auto_bump_metric!r}"
             )
         if self.chi_max is not None and self.chi_max < self.chi:
             raise ValueError(f"chi_max ({self.chi_max}) must be >= chi ({self.chi})")
