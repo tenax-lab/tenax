@@ -1685,6 +1685,7 @@ def _optimize_gs_ad_tensor(
                     rho=1.5,
                     max_step=2.0 * alpha0,
                     energy_bound=max(2.0, 2.0 * abs(best_energy)),
+                    max_iter=config.gs_hz_max_iter,
                 )
                 if config.gs_verbose:
                     print(
@@ -2320,6 +2321,16 @@ def _optimize_gs_ad_tensor_2site(
     stall_count = 0  # noise recovery: consecutive line search failures
     current_stage_idx = 0
     stage_start_step = 0
+    # Rolling buffer of accepted ``||grad||_2`` for the gradient-spike
+    # guard (config.gs_grad_spike_ratio).  Bad implicit-AD steps land in
+    # a region where the gradient explodes by >10x relative to recent
+    # magnitudes; rejecting those steps prevents the v9-style collapse
+    # below the QMC floor.
+    recent_gnorms_2s: list[float] = []
+    # Consecutive "at chi_max with indicator above threshold" counter for
+    # the variPEPS §2.8.2 bail-out (config.gs_chi_ceiling_bailout).  Reset
+    # on chi bump or when the indicator dips below threshold.
+    chi_ceiling_consecutive_2s = 0
 
     # Optional trajectory capture (config.return_history).  Always allocated
     # but only populated/returned when the flag is set.
@@ -2564,57 +2575,601 @@ def _optimize_gs_ad_tensor_2site(
         if is_new_best:
             save_checkpoint(_ckpt_state, config.gs_checkpoint_path, is_best=True)
 
-    for step in range(start_step, config.gs_num_steps):
-        # Snapshots for checkpoint "did chi change / new best" detection.
-        # ``best_energy`` only decreases, so a strict < comparison after
-        # the step body identifies a freshly-accepted best.  Both
-        # snapshots are passed to ``_maybe_save_2s_checkpoint`` at every
-        # save call site so the helper can decide what to flush.
-        _best_energy_at_step_start = best_energy
-        _chi_at_step_start = ctm_cfg_2s.chi
-        # Update conv_tol if schedule is active
-        if _conv_tol_schedule_2s is not None:
-            new_tol = _get_scheduled_conv_tol_2s(step, config.gs_num_steps)
-            if new_tol != _current_conv_tol_2s:
-                _current_conv_tol_2s = new_tol
-                ctm_cfg_2s = _replace(ctm_cfg_2s, conv_tol=new_tol)
-        # Update plateau_patience if schedule is active
-        if _patience_schedule_2s is not None:
-            new_patience = _get_scheduled_plateau_patience_2s(step, config.gs_num_steps)
-            if new_patience != _current_patience_2s:
-                _current_patience_2s = new_patience
-                ctm_cfg_2s = _replace(ctm_cfg_2s, plateau_patience=new_patience)
+    # Enable per-backward ``||lam||`` extraction in the implicit-AD F3 path
+    # only when a consumer is reading them (verbose logging in this loop).
+    # Default-off saves one ``jax.device_get`` per env-leaf per gradient
+    # call on production runs (codex PR #524 P2).  Restore via ``finally``
+    # below so an exception in the loop or in the post-loop fresh-CTM eval
+    # does not leak the diagnostics flag (codex PR #524 follow-up).
+    if config.gs_implicit_ad and config.gs_verbose:
+        from tenax.algorithms._ctm_energy_ad import (
+            set_implicit_ad_norm_diagnostics,
+        )
 
-        if config.return_history:
-            _step_t0 = _time.perf_counter()
-        try:
-            energy_val, grads = jax.value_and_grad(loss_fn)(params)
-        except CTMRGGradientError as exc:
-            _logger.warning(
-                "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
-                "skipping, triggering stall recovery",
-                exc.spectral_radius,
-                step,
-            )
-            if config.gs_verbose:
-                print(
-                    f"[iPEPS-AD:2site-tensor] step {step + 1}/{config.gs_num_steps} "
-                    f"rho(J^T)={exc.spectral_radius:.4f} — stall recovery",
-                    flush=True,
+        _prev_norm_diag = set_implicit_ad_norm_diagnostics(True)
+    else:
+        set_implicit_ad_norm_diagnostics = None  # type: ignore[assignment]
+        _prev_norm_diag = None
+
+    try:
+        for step in range(start_step, config.gs_num_steps):
+            # Snapshots for checkpoint "did chi change / new best" detection.
+            # ``best_energy`` only decreases, so a strict < comparison after
+            # the step body identifies a freshly-accepted best.  Both
+            # snapshots are passed to ``_maybe_save_2s_checkpoint`` at every
+            # save call site so the helper can decide what to flush.
+            _best_energy_at_step_start = best_energy
+            _chi_at_step_start = ctm_cfg_2s.chi
+            # Update conv_tol if schedule is active
+            if _conv_tol_schedule_2s is not None:
+                new_tol = _get_scheduled_conv_tol_2s(step, config.gs_num_steps)
+                if new_tol != _current_conv_tol_2s:
+                    _current_conv_tol_2s = new_tol
+                    ctm_cfg_2s = _replace(ctm_cfg_2s, conv_tol=new_tol)
+            # Update plateau_patience if schedule is active
+            if _patience_schedule_2s is not None:
+                new_patience = _get_scheduled_plateau_patience_2s(
+                    step, config.gs_num_steps
                 )
-            stall_count += 1
-            if (
-                config.gs_stall_recovery == "noise"
-                and stall_count <= config.gs_noise_recovery_retries
-            ):
-                noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
-                if use_c4v:
-                    noise = config.gs_noise_amplitude * _random_noise(
-                        noise_key, params.shape, params.dtype
+                if new_patience != _current_patience_2s:
+                    _current_patience_2s = new_patience
+                    ctm_cfg_2s = _replace(ctm_cfg_2s, plateau_patience=new_patience)
+
+            if config.return_history:
+                _step_t0 = _time.perf_counter()
+            try:
+                energy_val, grads = jax.value_and_grad(loss_fn)(params)
+            except CTMRGGradientError as exc:
+                _logger.warning(
+                    "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
+                    "skipping, triggering stall recovery",
+                    exc.spectral_radius,
+                    step,
+                )
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD:2site-tensor] step {step + 1}/{config.gs_num_steps} "
+                        f"rho(J^T)={exc.spectral_radius:.4f} — stall recovery",
+                        flush=True,
                     )
-                    params = params + noise * jnp.linalg.norm(params)
-                    params = params / (jnp.linalg.norm(params) + 1e-10)
+                stall_count += 1
+                if (
+                    config.gs_stall_recovery == "noise"
+                    and stall_count <= config.gs_noise_recovery_retries
+                ):
+                    noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
+                    if use_c4v:
+                        noise = config.gs_noise_amplitude * _random_noise(
+                            noise_key, params.shape, params.dtype
+                        )
+                        params = params + noise * jnp.linalg.norm(params)
+                        params = params / (jnp.linalg.norm(params) + 1e-10)
+                    else:
+                        noisy_params = []
+                        for i, p in enumerate(params):
+                            k = jax.random.fold_in(noise_key, i)
+                            data = p.todense()
+                            noise = config.gs_noise_amplitude * _random_noise(
+                                k, data.shape, data.dtype
+                            )
+                            noisy = data + noise * jnp.linalg.norm(data)
+                            noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
+                            noisy_params.append(_wrap_tensor(noisy, p))
+                        params = tuple(noisy_params)
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
+                        prev_params_flat = None
+                        prev_grad_flat = None
+                    if is_cg:
+                        cg_direction = None
+                        prev_grad = None
+                        prev_precond_grad = None
+                elif config.gs_stall_recovery == "reset":
+                    # Cap on CTMRGGradientError-driven reset path (#454 follow-up,
+                    # codex review on PR #457).
+                    if stall_count > config.gs_stall_recovery_retries:
+                        n_resets_done = stall_count - 1
+                        if config.gs_verbose:
+                            print(
+                                f"[iPEPS-AD] CTM-error stall budget exhausted after "
+                                f"{n_resets_done} resets, "
+                                f"returning best E={best_energy:.10f}",
+                                flush=True,
+                            )
+                        break
+                    params = best_params
+                    # #518: ``best_env_cache_2s`` may be at a stale χ if a
+                    # reactive/scheduled bump fired after it was last
+                    # snapshotted.  Clear instead of restoring; the next
+                    # CTM call cold-starts at the current ctm_cfg_2s.chi.
+                    _env_cache_2s.clear()
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
+                        prev_params_flat = None
+                        prev_grad_flat = None
+                    if is_cg:
+                        cg_direction = None
+                        prev_grad = None
+                        prev_precond_grad = None
+                    if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                        opt_state = optimizer.init(params)
+                # Counter-reset contract (codex PR #524 follow-up): the
+                # ``gs_chi_ceiling_bailout`` docstring states the streak
+                # resets on stall recovery.  This branch is the
+                # ``CTMRGGradientError`` recovery path, so clear the
+                # counter before the ``continue`` — otherwise a
+                # recovered CTM-error step would still count toward the
+                # K-consecutive bail-out trigger.
+                chi_ceiling_consecutive_2s = 0
+                continue
+            energy_float = float(energy_val)
+
+            if config.return_history:
+                _step_dt = _time.perf_counter() - _step_t0
+                if _first_step:
+                    _jit_compile_time = float(_step_dt)
+                    _first_step = False
                 else:
+                    _history_step_times.append(float(_step_dt))
+                _history_energies.append(energy_float)
+
+            # Update env cache for warm-starting next step
+            _update_env_cache_2s(params)
+
+            grad_norm_val = _grad_l2_norm(grads)
+
+            # Gradient-spike guard: reject steps whose new ||grad||_2 exceeds
+            # ``gs_grad_spike_ratio * max(median(recent), 1.0)``.  See
+            # project_v9_collapse_findings.md — non-variational drift shows up
+            # as a >10x gradient blowup before the best_energy crosses the QMC
+            # floor.  We check BEFORE updating best so the bad step never gets
+            # accepted as the new best.
+            if (
+                config.gs_grad_spike_ratio is not None
+                and len(recent_gnorms_2s) >= 1
+                and best_energy < float("inf")
+            ):
+                # ``len >= 1`` (was ``>= 2``, codex PR #524 P2): with
+                # ``gs_grad_spike_window == 1`` the buffer is trimmed back to
+                # length 1 each step, so the previous ``>= 2`` guard silently
+                # disabled the spike check for that valid config.  ``len == 1``
+                # is enough: the median is just the prior step's gradient norm,
+                # which is the right baseline for "is this step a >5x jump?".
+                spike_floor = max(float(np.median(recent_gnorms_2s)), 1.0)
+                if grad_norm_val > config.gs_grad_spike_ratio * spike_floor:
+                    params = best_params
+                    _env_cache_2s.clear()
+                    # Clear the rolling buffer too (codex PR #524 P1): if a chi
+                    # bump or stall recovery has shifted the legitimate
+                    # gradient scale upward, the stale median would keep
+                    # tripping the guard on every subsequent step, locking the
+                    # optimizer into perpetual rollback.  Re-seed from the
+                    # rolled-back state instead.
+                    recent_gnorms_2s.clear()
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
+                        prev_params_flat = None
+                        prev_grad_flat = None
+                    if is_cg:
+                        cg_direction = None
+                        prev_grad = None
+                        prev_precond_grad = None
+                    if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                        opt_state = optimizer.init(params)
+                    _logger.warning(
+                        "[iPEPS-AD:2site-tensor] step %d/%d gradient spike "
+                        "|g|=%.3e > %.1fx median %.3e — rolling back to best",
+                        step + 1,
+                        config.gs_num_steps,
+                        grad_norm_val,
+                        config.gs_grad_spike_ratio,
+                        spike_floor,
+                    )
+                    if config.gs_verbose:
+                        print(
+                            f"[iPEPS-AD:2site-tensor] step {step + 1}/{config.gs_num_steps} "
+                            f"|g|={grad_norm_val:.3e} spike "
+                            f"(>{config.gs_grad_spike_ratio:.1f}x median {spike_floor:.3e}) "
+                            f"— rollback to best, clear L-BFGS history",
+                            flush=True,
+                        )
+                    continue
+            recent_gnorms_2s.append(grad_norm_val)
+            if len(recent_gnorms_2s) > config.gs_grad_spike_window:
+                recent_gnorms_2s.pop(0)
+
+            if _should_accept_best(
+                current_best=best_energy,
+                candidate=energy_float,
+                floor=config.gs_energy_floor,
+            ):
+                best_energy = energy_float
+                best_params = params
+                best_env_cache_2s = dict(
+                    _env_cache_2s
+                )  # snapshot for warm-start (#317)
+
+            delta_energy = abs(energy_float - prev_energy)
+            logged = False
+            if config.gs_verbose and _should_log_step(
+                step, config.gs_num_steps, log_interval
+            ):
+                _log_ad_step(
+                    "2site-tensor",
+                    step,
+                    config.gs_num_steps,
+                    energy_float,
+                    delta_energy,
+                    best_energy,
+                    grad_norm=grad_norm_val,
+                )
+                # Implicit-AD adjoint diagnostics: surface ||lam||/||init_lam||
+                # amplification so chi-ceiling collapse runs (e.g. v9d/v9h)
+                # have a smoking-gun trace.  Populated by the fused fixed-point
+                # backward; empty dict on the explicit-AD path.
+                if config.gs_implicit_ad:
+                    from tenax.algorithms._ctm_energy_ad import (
+                        get_last_implicit_ad_diagnostics,
+                    )
+
+                    _diag = get_last_implicit_ad_diagnostics()
+                    if _diag:
+                        print(
+                            f"[iPEPS-AD:2site-tensor] step {step + 1}/{config.gs_num_steps} "
+                            f"GMRES n_iter={_diag.get('n_iter', '?')} "
+                            f"converged={_diag.get('converged', '?')} "
+                            f"diverged={_diag.get('diverged', '?')} "
+                            f"||lam||={_diag.get('lam_norm', float('nan')):.3e} "
+                            f"amp={_diag.get('amplification', float('nan')):.3e}",
+                            flush=True,
+                        )
+                logged = True
+
+            prev_energy = energy_float
+            if _converged_outer(config, delta_energy, grad_norm_val):
+                # #455 PR2: at non-final χ stages, treat convergence as a
+                # signal to advance to the next stage rather than exit.
+                # Mirrors the 1-site convergence-block intercept, including
+                # the reactive ε_T bump (#472 codex review on PR #473):
+                # converged-at-too-small-χ runs must apply the requested
+                # auto-bump before exiting so the final env reflects the
+                # bumped χ, and the bump can also unstick a stalled-at-χ_old
+                # landscape via the ``continue`` below.
+                chi_before_bump = ctm_cfg_2s.chi
+                last_eps_t = float(_env_cache_2s.get("max_truncation_error", 0.0))
+                ctm_cfg_2s, _env_cache_2s = _maybe_bump_chi(
+                    ctm_cfg_2s,
+                    _env_cache_2s,
+                    last_eps_t,
+                    base_charges=_bump_base_charges_2s,
+                )
+                if config.gs_chi_schedule_steps is not None:
+                    steps_in_stage = (step + 1) - stage_start_step
+                    _gn_for_bump = (
+                        grad_norm_val
+                        if grad_norm_val is not None
+                        else (
+                            _grad_l2_norm(grads)
+                            if config.gs_conv_criterion != "dE"
+                            else 0.0
+                        )
+                    )
+                    (
+                        ctm_cfg_2s,
+                        _env_cache_2s,
+                        new_stage_idx,
+                        bump_fired,
+                        _,
+                    ) = _advance_chi_stage_if_due(
+                        ctm_cfg_2s,
+                        _env_cache_2s,
+                        chi_schedule=config.gs_chi_schedule_steps,
+                        current_stage_idx=current_stage_idx,
+                        steps_in_stage=steps_in_stage,
+                        config=config,
+                        grad_norm=_gn_for_bump,
+                        delta_energy=delta_energy,
+                        stall_count=stall_count,
+                        base_charges=_bump_base_charges_2s,
+                    )
+                    # Codex review (PR #467): decouple the schedule index
+                    # advance from bump_fired so idempotent advances
+                    # (bump_fired=False AND new_stage_idx>current_stage_idx)
+                    # still continue rather than fall through to break.
+                    stage_advanced = new_stage_idx != current_stage_idx
+                    if stage_advanced:
+                        current_stage_idx = new_stage_idx
+                        stage_start_step = step + 1
+                else:
+                    bump_fired = False
+                    stage_advanced = False
+                if ctm_cfg_2s.chi != chi_before_bump:
+                    # Reactive (#472) or scheduled (#455) bump fired —
+                    # fresh landscape, fresh stall budget.  Gated on the
+                    # χ delta so a reactive-only bump also clears state.
+                    stall_count = 0
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
+                        prev_params_flat = None
+                        prev_grad_flat = None
+                    if is_cg:
+                        cg_direction = None
+                        prev_grad = None
+                        prev_precond_grad = None
+                    if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                        opt_state = optimizer.init(params)
+                    if config.gs_verbose:
+                        print(
+                            f"[iPEPS-AD step {step + 1}] converged at "
+                            f"chi={chi_before_bump} → bumping to "
+                            f"chi={ctm_cfg_2s.chi} (#455 PR2 / #472)",
+                            flush=True,
+                        )
+                if bump_fired or stage_advanced:
+                    # Force a checkpoint on stage advance before continuing
+                    # so a crash inside the next stage's first step doesn't
+                    # roll back across the boundary (Codex P2 #497).
+                    _maybe_save_2s_checkpoint(
+                        step,
+                        _chi_at_step_start,
+                        _best_energy_at_step_start,
+                        force_last=True,
+                    )
+                    continue
+                if config.gs_verbose:
+                    if not logged:
+                        _log_ad_step(
+                            "2site-tensor",
+                            step,
+                            config.gs_num_steps,
+                            energy_float,
+                            delta_energy,
+                            best_energy,
+                            grad_norm=grad_norm_val,
+                        )
+                    _log_ad_converged(
+                        "2site-tensor",
+                        step,
+                        delta_energy,
+                        config.gs_conv_tol,
+                        grad_norm=grad_norm_val,
+                        grad_norm_tol=config.gs_grad_norm_tol,
+                        criterion=config.gs_conv_criterion,
+                    )
+                _converged = True
+                break
+
+            # Compute search direction
+            if is_cg:
+                if config.gs_metric_precond and not use_c4v:
+                    from tenax.algorithms._metric_precond import (
+                        precondition_gradient_multisite,
+                    )
+
+                    envs_cached = _env_cache_2s["envs"]
+                    A_g, B_g = grads
+                    envs_m = {(0, 0): envs_cached[(0, 0)], (1, 0): envs_cached[(1, 0)]}
+                    sites_m = {(0, 0): params[0], (1, 0): params[1]}
+                    grads_m = {(0, 0): A_g, (1, 0): B_g}
+                    delta_metric = delta_energy if step > 0 else _tree_dot(grads, grads)
+                    z_dict = precondition_gradient_multisite(
+                        sites_m, envs_m, grads_m, delta_metric, config
+                    )
+                    z = (
+                        _wrap_tensor(z_dict[(0, 0)], A_g),
+                        _wrap_tensor(z_dict[(1, 0)], B_g),
+                    )
+                    neg_z = jax.tree.map(lambda g: -g, z)
+                    if prev_precond_grad is not None and cg_direction is not None:
+                        z_diff = jax.tree.map(lambda a, b: a - b, z, prev_precond_grad)
+                        num = _tree_dot(grads, z_diff)
+                        den = _tree_dot(prev_grad, prev_precond_grad)
+                        beta = max(0.0, num / den) if den > 1e-30 else 0.0
+                        cg_direction = _tree_add(neg_z, _tree_scale(cg_direction, beta))
+                    else:
+                        cg_direction = neg_z
+                    prev_precond_grad = z
+                else:
+                    neg_grad = jax.tree.map(lambda g: -g, grads)
+                    if prev_grad is not None and cg_direction is not None:
+                        beta = _cg_beta_pr(grads, prev_grad)
+                        cg_direction = _tree_add(
+                            neg_grad, _tree_scale(cg_direction, beta)
+                        )
+                    else:
+                        cg_direction = neg_grad
+                prev_grad = grads
+                direction = cg_direction
+            elif is_metric_lbfgs:
+                from tenax.algorithms._metric_precond import lbfgs_two_loop
+
+                if use_c4v:
+                    p_flat = params
+                    g_flat = grads
+                else:
+                    from tenax.algorithms._metric_precond import (
+                        precondition_gradient_multisite,
+                    )
+
+                    A_cur, B_cur = params
+                    A_g, B_g = grads
+                    p_flat = jnp.concatenate(
+                        [
+                            A_cur.todense().reshape(-1),
+                            B_cur.todense().reshape(-1),
+                        ]
+                    )
+                    g_flat = jnp.concatenate(
+                        [
+                            A_g.todense().reshape(-1),
+                            B_g.todense().reshape(-1),
+                        ]
+                    )
+
+                if prev_params_flat is not None:
+                    s = p_flat - prev_params_flat
+                    y = g_flat - prev_grad_flat
+                    sy = float(jnp.real(jnp.vdot(s, y)))
+                    if sy > 1e-10:
+                        rho = 1.0 / sy
+                        lbfgs_history.append((s, y, rho))
+                        if len(lbfgs_history) > 10:
+                            lbfgs_history.pop(0)
+                prev_params_flat = p_flat
+                prev_grad_flat = g_flat
+
+                if use_c4v:
+                    direction_flat = lbfgs_two_loop(g_flat, lbfgs_history, lambda v: v)
+                    direction = -direction_flat
+                else:
+                    envs_cached = _env_cache_2s["envs"]
+                    envs_m = {(0, 0): envs_cached[(0, 0)], (1, 0): envs_cached[(1, 0)]}
+                    sites_m = {(0, 0): A_cur, (1, 0): B_cur}
+                    delta_metric = (
+                        delta_energy
+                        if step > 0
+                        else float(jnp.real(jnp.vdot(g_flat, g_flat)))
+                    )
+                    n_A = A_cur.todense().size
+
+                    def h0_matvec(v):
+                        v_A = v[:n_A]
+                        v_B = v[n_A:]
+                        D_b = A_cur.todense().shape[0]
+                        d_l = A_cur.todense().shape[-1]
+                        grads_v = {
+                            (0, 0): _wrap_tensor(
+                                v_A.reshape(D_b, D_b, D_b, D_b, d_l), A_cur
+                            ),
+                            (1, 0): _wrap_tensor(
+                                v_B.reshape(D_b, D_b, D_b, D_b, d_l), B_cur
+                            ),
+                        }
+                        z_dict = precondition_gradient_multisite(
+                            sites_m, envs_m, grads_v, delta_metric, config
+                        )
+                        return jnp.concatenate(
+                            [
+                                z_dict[(0, 0)].reshape(-1),
+                                z_dict[(1, 0)].reshape(-1),
+                            ]
+                        )
+
+                    direction_flat = lbfgs_two_loop(g_flat, lbfgs_history, h0_matvec)
+                    D_b = A_cur.todense().shape[0]
+                    d_l = A_cur.todense().shape[-1]
+                    dir_A = -direction_flat[:n_A].reshape(D_b, D_b, D_b, D_b, d_l)
+                    dir_B = -direction_flat[n_A:].reshape(D_b, D_b, D_b, D_b, d_l)
+                    direction = (
+                        _wrap_tensor(dir_A, A_cur),
+                        _wrap_tensor(dir_B, B_cur),
+                    )
+            elif optimizer is not None:
+                updates, opt_state = optimizer.update(grads, opt_state, params)
+                direction = updates
+            else:
+                direction = jax.tree.map(lambda g: -g, grads)
+
+            # Issue #328: kill the radial component of the search direction
+            # so the line-search chord stays on-manifold to first order.
+            # ``_normalize_params`` projects the final iterate back to unit
+            # norm, but the intermediate chord ``params + alpha * direction``
+            # drifts off the sphere proportional to ``alpha * <params, dir>``
+            # — for a Euclidean L-BFGS direction this can be large and push
+            # the line search into non-variational CTM regions before
+            # retraction.  Stale curvature pairs accumulated on that chord
+            # then corrupt subsequent L-BFGS steps.
+            if not use_c4v:
+                direction = _tangent_project_unit(direction, params)
+
+            if use_ls:
+                if config.gs_line_search_method == "hager_zhang":
+                    from tenax.algorithms._line_search import hager_zhang_line_search
+
+                    slope = _tree_dot(grads, direction)
+                    if slope >= 0:
+                        direction = jax.tree.map(lambda g: -g, grads)
+                        if not use_c4v:
+                            direction = _tangent_project_unit(direction, params)
+                        slope = _tree_dot(grads, direction)
+                        if is_metric_lbfgs:
+                            lbfgs_history.clear()
+
+                    hz_counter = {"phi": 0, "dphi": 0}
+
+                    def _phi(alpha):
+                        hz_counter["phi"] += 1
+                        trial = _normalize_params(
+                            _tree_add(params, _tree_scale(direction, alpha))
+                        )
+                        return loss_fn_fwd(trial)
+
+                    def _dphi(alpha):
+                        hz_counter["dphi"] += 1
+                        trial = _normalize_params(
+                            _tree_add(params, _tree_scale(direction, alpha))
+                        )
+                        _, g = jax.value_and_grad(loss_fn)(trial)
+                        return _tree_dot(g, direction)
+
+                    dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
+                    param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
+                    alpha0 = min(1.0, 0.1 * param_norm / dir_norm)
+
+                    alpha, f_alpha, converged = hager_zhang_line_search(
+                        _phi,
+                        _dphi,
+                        energy_float,
+                        slope,
+                        alpha_init=alpha0,
+                        rho=1.5,
+                        max_step=2.0 * alpha0,
+                        energy_bound=max(2.0, 2.0 * abs(best_energy)),
+                        max_iter=config.gs_hz_max_iter,
+                    )
+                    if config.gs_verbose:
+                        print(
+                            f"[iPEPS-AD:2site-tensor] HZ probes phi={hz_counter['phi']} "
+                            f"dphi={hz_counter['dphi']} alpha={alpha:.3e} "
+                            f"converged={converged}",
+                            flush=True,
+                        )
+                    if f_alpha < energy_float:
+                        params = _normalize_params(
+                            _tree_add(params, _tree_scale(direction, alpha))
+                        )
+                        stall_count = 0
+                    else:
+                        stall_count += 1
+                else:
+                    slope_bt = _tree_dot(grads, direction)
+                    if slope_bt >= 0:
+                        direction = jax.tree.map(lambda g: -g, grads)
+                        if not use_c4v:
+                            direction = _tangent_project_unit(direction, params)
+                        if is_metric_lbfgs:
+                            lbfgs_history.clear()
+                    params, new_energy, step_size = _backtracking_line_search(
+                        params,
+                        direction,
+                        grads,
+                        energy_float,
+                        loss_fn_fwd,
+                        max_steps=config.gs_line_search_max_steps,
+                    )
+                    if new_energy < energy_float:
+                        stall_count = 0
+                    else:
+                        stall_count += 1
+
+                # Noise recovery on persistent stall (legacy; see issue #298).
+                # Only used by the non-C4v path; C4v defaults to "reset".
+                if (
+                    config.gs_stall_recovery == "noise"
+                    and stall_count > 0
+                    and stall_count <= config.gs_noise_recovery_retries
+                ):
+                    noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
                     noisy_params = []
                     for i, p in enumerate(params):
                         k = jax.random.fold_in(noise_key, i)
@@ -2626,95 +3181,153 @@ def _optimize_gs_ad_tensor_2site(
                         noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
                         noisy_params.append(_wrap_tensor(noisy, p))
                     params = tuple(noisy_params)
-                if is_metric_lbfgs:
-                    lbfgs_history.clear()
-                    prev_params_flat = None
-                    prev_grad_flat = None
-                if is_cg:
-                    cg_direction = None
-                    prev_grad = None
-                    prev_precond_grad = None
-            elif config.gs_stall_recovery == "reset":
-                # Cap on CTMRGGradientError-driven reset path (#454 follow-up,
-                # codex review on PR #457).
-                if stall_count > config.gs_stall_recovery_retries:
-                    n_resets_done = stall_count - 1
                     if config.gs_verbose:
                         print(
-                            f"[iPEPS-AD] CTM-error stall budget exhausted after "
-                            f"{n_resets_done} resets, "
-                            f"returning best E={best_energy:.10f}",
+                            f"[iPEPS-AD] stall #{stall_count}, adding noise", flush=True
+                        )
+                    # Reset optimizer state
+                    if is_cg:
+                        cg_direction = None
+                        prev_grad = None
+                        prev_precond_grad = None
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
+                        prev_params_flat = None
+                        prev_grad_flat = None
+                elif config.gs_stall_recovery == "reset" and stall_count > 0:
+                    # Rollback to best on reset (#454). The CTM-error reset path
+                    # above (around L1998-2002) already does this for the
+                    # CTMRGGradientError branch; we extend the same pattern to the
+                    # Wolfe-failure path that was missed. #298's anti-rollback
+                    # evidence was on a pre-trifecta CTM stack (pre-PR #406 2x2
+                    # projector, pre-multisite-CTM rewrite, pre-PR #447 AD
+                    # stop_gradient) and no longer applies.
+                    if stall_count > config.gs_stall_recovery_retries:
+                        # #455 PR2: at non-final χ stages, treat stall-cap
+                        # exhaustion as a signal to advance the χ schedule
+                        # rather than exit with best_energy.  Mirrors the
+                        # 1-site stall-cap intercept (commit 07ffe8e).
+                        if config.gs_chi_schedule_steps is not None:
+                            steps_in_stage = (step + 1) - stage_start_step
+                            _gn_for_bump = (
+                                grad_norm_val
+                                if grad_norm_val is not None
+                                else (
+                                    _grad_l2_norm(grads)
+                                    if config.gs_conv_criterion != "dE"
+                                    else 0.0
+                                )
+                            )
+                            (
+                                ctm_cfg_2s,
+                                _env_cache_2s,
+                                new_stage_idx,
+                                bump_fired,
+                                _,
+                            ) = _advance_chi_stage_if_due(
+                                ctm_cfg_2s,
+                                _env_cache_2s,
+                                chi_schedule=config.gs_chi_schedule_steps,
+                                current_stage_idx=current_stage_idx,
+                                steps_in_stage=steps_in_stage,
+                                config=config,
+                                grad_norm=_gn_for_bump,
+                                delta_energy=delta_energy,
+                                stall_count=stall_count,
+                                base_charges=_bump_base_charges_2s,
+                            )
+                            # Codex review (PR #467): see 1-site stall-cap
+                            # intercept for rationale.  Decouple schedule
+                            # advance from bump_fired; keep reset block
+                            # gated on bump_fired.
+                            stage_advanced = new_stage_idx != current_stage_idx
+                            if stage_advanced:
+                                current_stage_idx = new_stage_idx
+                                stage_start_step = step + 1
+                            if bump_fired:
+                                # Rollback params to best from the previous
+                                # stage; _env_cache_2s stays at the freshly
+                                # padded post-bump state (the budget-path
+                                # invariant — see _apply_chi_bump).
+                                params = best_params
+                                stall_count = 0
+                                if is_metric_lbfgs:
+                                    lbfgs_history.clear()
+                                    prev_params_flat = None
+                                    prev_grad_flat = None
+                                if is_cg:
+                                    cg_direction = None
+                                    prev_grad = None
+                                    prev_precond_grad = None
+                                if (
+                                    optimizer is not None
+                                    and config.gs_optimizer.lower() == "lbfgs"
+                                ):
+                                    opt_state = optimizer.init(params)
+                                if config.gs_verbose:
+                                    print(
+                                        f"[iPEPS-AD step {step + 1}] stall-cap at "
+                                        f"chi={ctm_cfg_2s.chi} → advancing to next "
+                                        f"stage (#455 PR2)",
+                                        flush=True,
+                                    )
+                            if bump_fired or stage_advanced:
+                                # Force a checkpoint on stall-cap stage
+                                # advance before continuing (Codex P2 #497).
+                                _maybe_save_2s_checkpoint(
+                                    step,
+                                    _chi_at_step_start,
+                                    _best_energy_at_step_start,
+                                    force_last=True,
+                                )
+                                continue
+                        n_resets_done = stall_count - 1
+                        if config.gs_verbose:
+                            print(
+                                f"[iPEPS-AD] stall budget exhausted after "
+                                f"{n_resets_done} resets, "
+                                f"returning best E={best_energy:.10f}",
+                                flush=True,
+                            )
+                        break
+                    params = best_params
+                    # #518: ``best_env_cache_2s`` may be at a stale χ if a
+                    # reactive/scheduled bump fired after it was last
+                    # snapshotted.  Clear instead of restoring; the next
+                    # CTM call cold-starts at the current ctm_cfg_2s.chi.
+                    _env_cache_2s.clear()
+                    if is_cg:
+                        cg_direction = None
+                        prev_grad = None
+                        prev_precond_grad = None
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
+                        prev_params_flat = None
+                        prev_grad_flat = None
+                    # Optax-backed L-BFGS stores curvature history in opt_state,
+                    # not in lbfgs_history.  Reinitialize it on the rolled-back
+                    # params so the next step really is steepest descent.
+                    if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                        opt_state = optimizer.init(params)
+                    if config.gs_verbose:
+                        print(
+                            f"[iPEPS-AD] stall #{stall_count}, reset L-BFGS history "
+                            f"(rollback to best, retry "
+                            f"{stall_count}/{config.gs_stall_recovery_retries})",
                             flush=True,
                         )
-                    break
-                params = best_params
-                # #518: ``best_env_cache_2s`` may be at a stale χ if a
-                # reactive/scheduled bump fired after it was last
-                # snapshotted.  Clear instead of restoring; the next
-                # CTM call cold-starts at the current ctm_cfg_2s.chi.
-                _env_cache_2s.clear()
-                if is_metric_lbfgs:
-                    lbfgs_history.clear()
-                    prev_params_flat = None
-                    prev_grad_flat = None
-                if is_cg:
-                    cg_direction = None
-                    prev_grad = None
-                    prev_precond_grad = None
-                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
-                    opt_state = optimizer.init(params)
-            continue
-        energy_float = float(energy_val)
-
-        if config.return_history:
-            _step_dt = _time.perf_counter() - _step_t0
-            if _first_step:
-                _jit_compile_time = float(_step_dt)
-                _first_step = False
             else:
-                _history_step_times.append(float(_step_dt))
-            _history_energies.append(energy_float)
+                params = optax.apply_updates(params, direction)
+                params = _normalize_params(params)
 
-        # Update env cache for warm-starting next step
-        _update_env_cache_2s(params)
-
-        if _should_accept_best(
-            current_best=best_energy,
-            candidate=energy_float,
-            floor=config.gs_energy_floor,
-        ):
-            best_energy = energy_float
-            best_params = params
-            best_env_cache_2s = dict(_env_cache_2s)  # snapshot for warm-start (#317)
-
-        delta_energy = abs(energy_float - prev_energy)
-        grad_norm_val = _grad_l2_norm(grads)
-        logged = False
-        if config.gs_verbose and _should_log_step(
-            step, config.gs_num_steps, log_interval
-        ):
-            _log_ad_step(
-                "2site-tensor",
-                step,
-                config.gs_num_steps,
-                energy_float,
-                delta_energy,
-                best_energy,
-                grad_norm=grad_norm_val,
-            )
-            logged = True
-
-        prev_energy = energy_float
-        if _converged_outer(config, delta_energy, grad_norm_val):
-            # #455 PR2: at non-final χ stages, treat convergence as a
-            # signal to advance to the next stage rather than exit.
-            # Mirrors the 1-site convergence-block intercept, including
-            # the reactive ε_T bump (#472 codex review on PR #473):
-            # converged-at-too-small-χ runs must apply the requested
-            # auto-bump before exiting so the final env reflects the
-            # bumped χ, and the bump can also unstick a stalled-at-χ_old
-            # landscape via the ``continue`` below.
-            chi_before_bump = ctm_cfg_2s.chi
+            # Reactive ε_T auto-bump (variPEPS §2.8.2, #472) followed by the
+            # scheduled outer-loop χ bump (#453 / #455).  Compose order
+            # mirrors the 1-site path: reactive first so it can pre-empt the
+            # schedule, scheduled second to advance the stage index even on
+            # idempotent (post-reactive) bumps.  ``chi_before`` is snapshotted
+            # before either fires so the post-bump reset block below catches
+            # either trigger via ``ctm_cfg_2s.chi != chi_before``.
+            chi_before = ctm_cfg_2s.chi
             last_eps_t = float(_env_cache_2s.get("max_truncation_error", 0.0))
             last_smallest_S = float(_env_cache_2s.get("max_smallest_S", 0.0))
             ctm_cfg_2s, _env_cache_2s = _maybe_bump_chi(
@@ -2724,6 +3337,12 @@ def _optimize_gs_ad_tensor_2site(
                 last_smallest_S=last_smallest_S,
                 base_charges=_bump_base_charges_2s,
             )
+            # Scheduled outer-loop χ bump (#453 / #455).  No-ops when
+            # ``gs_chi_schedule_steps`` is None.  Fires at the step boundary
+            # so the next iteration's value_and_grad sees the bumped χ — same
+            # invariant as the 1-site path.  Per-stage state
+            # (current_stage_idx, stage_start_step) drives the new helper;
+            # #455 PR2 will add convergence/stall-cap triggers.
             if config.gs_chi_schedule_steps is not None:
                 steps_in_stage = (step + 1) - stage_start_step
                 _gn_for_bump = (
@@ -2735,623 +3354,183 @@ def _optimize_gs_ad_tensor_2site(
                         else 0.0
                     )
                 )
-                (
-                    ctm_cfg_2s,
-                    _env_cache_2s,
-                    new_stage_idx,
-                    bump_fired,
-                    _,
-                ) = _advance_chi_stage_if_due(
-                    ctm_cfg_2s,
-                    _env_cache_2s,
-                    chi_schedule=config.gs_chi_schedule_steps,
-                    current_stage_idx=current_stage_idx,
-                    steps_in_stage=steps_in_stage,
-                    config=config,
-                    grad_norm=_gn_for_bump,
-                    delta_energy=delta_energy,
-                    stall_count=stall_count,
-                    base_charges=_bump_base_charges_2s,
+                ctm_cfg_2s, _env_cache_2s, new_stage_idx, bump_fired, _should_break = (
+                    _advance_chi_stage_if_due(
+                        ctm_cfg_2s,
+                        _env_cache_2s,
+                        chi_schedule=config.gs_chi_schedule_steps,
+                        current_stage_idx=current_stage_idx,
+                        steps_in_stage=steps_in_stage,
+                        config=config,
+                        grad_norm=_gn_for_bump,
+                        delta_energy=delta_energy,
+                        stall_count=stall_count,
+                        base_charges=_bump_base_charges_2s,
+                    )
                 )
-                # Codex review (PR #467): decouple the schedule index
-                # advance from bump_fired so idempotent advances
-                # (bump_fired=False AND new_stage_idx>current_stage_idx)
-                # still continue rather than fall through to break.
                 stage_advanced = new_stage_idx != current_stage_idx
                 if stage_advanced:
-                    current_stage_idx = new_stage_idx
-                    stage_start_step = step + 1
-            else:
-                bump_fired = False
-                stage_advanced = False
-            if ctm_cfg_2s.chi != chi_before_bump:
-                # Reactive (#472) or scheduled (#455) bump fired —
-                # fresh landscape, fresh stall budget.  Gated on the
-                # χ delta so a reactive-only bump also clears state.
-                stall_count = 0
-                if is_metric_lbfgs:
-                    lbfgs_history.clear()
-                    prev_params_flat = None
-                    prev_grad_flat = None
-                if is_cg:
-                    cg_direction = None
-                    prev_grad = None
-                    prev_precond_grad = None
-                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
-                    opt_state = optimizer.init(params)
-                if config.gs_verbose:
-                    print(
-                        f"[iPEPS-AD step {step + 1}] converged at "
-                        f"chi={chi_before_bump} → bumping to "
-                        f"chi={ctm_cfg_2s.chi} (#455 PR2 / #472)",
-                        flush=True,
-                    )
-            if bump_fired or stage_advanced:
-                # Force a checkpoint on stage advance before continuing
-                # so a crash inside the next stage's first step doesn't
-                # roll back across the boundary (Codex P2 #497).
-                _maybe_save_2s_checkpoint(
-                    step,
-                    _chi_at_step_start,
-                    _best_energy_at_step_start,
-                    force_last=True,
-                )
-                continue
-            if config.gs_verbose:
-                if not logged:
-                    _log_ad_step(
-                        "2site-tensor",
-                        step,
-                        config.gs_num_steps,
-                        energy_float,
-                        delta_energy,
-                        best_energy,
-                        grad_norm=grad_norm_val,
-                    )
-                _log_ad_converged(
-                    "2site-tensor",
-                    step,
-                    delta_energy,
-                    config.gs_conv_tol,
-                    grad_norm=grad_norm_val,
-                    grad_norm_tol=config.gs_grad_norm_tol,
-                    criterion=config.gs_conv_criterion,
-                )
-            _converged = True
-            break
-
-        # Compute search direction
-        if is_cg:
-            if config.gs_metric_precond and not use_c4v:
-                from tenax.algorithms._metric_precond import (
-                    precondition_gradient_multisite,
-                )
-
-                envs_cached = _env_cache_2s["envs"]
-                A_g, B_g = grads
-                envs_m = {(0, 0): envs_cached[(0, 0)], (1, 0): envs_cached[(1, 0)]}
-                sites_m = {(0, 0): params[0], (1, 0): params[1]}
-                grads_m = {(0, 0): A_g, (1, 0): B_g}
-                delta_metric = delta_energy if step > 0 else _tree_dot(grads, grads)
-                z_dict = precondition_gradient_multisite(
-                    sites_m, envs_m, grads_m, delta_metric, config
-                )
-                z = (
-                    _wrap_tensor(z_dict[(0, 0)], A_g),
-                    _wrap_tensor(z_dict[(1, 0)], B_g),
-                )
-                neg_z = jax.tree.map(lambda g: -g, z)
-                if prev_precond_grad is not None and cg_direction is not None:
-                    z_diff = jax.tree.map(lambda a, b: a - b, z, prev_precond_grad)
-                    num = _tree_dot(grads, z_diff)
-                    den = _tree_dot(prev_grad, prev_precond_grad)
-                    beta = max(0.0, num / den) if den > 1e-30 else 0.0
-                    cg_direction = _tree_add(neg_z, _tree_scale(cg_direction, beta))
-                else:
-                    cg_direction = neg_z
-                prev_precond_grad = z
-            else:
-                neg_grad = jax.tree.map(lambda g: -g, grads)
-                if prev_grad is not None and cg_direction is not None:
-                    beta = _cg_beta_pr(grads, prev_grad)
-                    cg_direction = _tree_add(neg_grad, _tree_scale(cg_direction, beta))
-                else:
-                    cg_direction = neg_grad
-            prev_grad = grads
-            direction = cg_direction
-        elif is_metric_lbfgs:
-            from tenax.algorithms._metric_precond import lbfgs_two_loop
-
-            if use_c4v:
-                p_flat = params
-                g_flat = grads
-            else:
-                from tenax.algorithms._metric_precond import (
-                    precondition_gradient_multisite,
-                )
-
-                A_cur, B_cur = params
-                A_g, B_g = grads
-                p_flat = jnp.concatenate(
-                    [
-                        A_cur.todense().reshape(-1),
-                        B_cur.todense().reshape(-1),
-                    ]
-                )
-                g_flat = jnp.concatenate(
-                    [
-                        A_g.todense().reshape(-1),
-                        B_g.todense().reshape(-1),
-                    ]
-                )
-
-            if prev_params_flat is not None:
-                s = p_flat - prev_params_flat
-                y = g_flat - prev_grad_flat
-                sy = float(jnp.real(jnp.vdot(s, y)))
-                if sy > 1e-10:
-                    rho = 1.0 / sy
-                    lbfgs_history.append((s, y, rho))
-                    if len(lbfgs_history) > 10:
-                        lbfgs_history.pop(0)
-            prev_params_flat = p_flat
-            prev_grad_flat = g_flat
-
-            if use_c4v:
-                direction_flat = lbfgs_two_loop(g_flat, lbfgs_history, lambda v: v)
-                direction = -direction_flat
-            else:
-                envs_cached = _env_cache_2s["envs"]
-                envs_m = {(0, 0): envs_cached[(0, 0)], (1, 0): envs_cached[(1, 0)]}
-                sites_m = {(0, 0): A_cur, (1, 0): B_cur}
-                delta_metric = (
-                    delta_energy
-                    if step > 0
-                    else float(jnp.real(jnp.vdot(g_flat, g_flat)))
-                )
-                n_A = A_cur.todense().size
-
-                def h0_matvec(v):
-                    v_A = v[:n_A]
-                    v_B = v[n_A:]
-                    D_b = A_cur.todense().shape[0]
-                    d_l = A_cur.todense().shape[-1]
-                    grads_v = {
-                        (0, 0): _wrap_tensor(
-                            v_A.reshape(D_b, D_b, D_b, D_b, d_l), A_cur
-                        ),
-                        (1, 0): _wrap_tensor(
-                            v_B.reshape(D_b, D_b, D_b, D_b, d_l), B_cur
-                        ),
-                    }
-                    z_dict = precondition_gradient_multisite(
-                        sites_m, envs_m, grads_v, delta_metric, config
-                    )
-                    return jnp.concatenate(
-                        [
-                            z_dict[(0, 0)].reshape(-1),
-                            z_dict[(1, 0)].reshape(-1),
-                        ]
-                    )
-
-                direction_flat = lbfgs_two_loop(g_flat, lbfgs_history, h0_matvec)
-                D_b = A_cur.todense().shape[0]
-                d_l = A_cur.todense().shape[-1]
-                dir_A = -direction_flat[:n_A].reshape(D_b, D_b, D_b, D_b, d_l)
-                dir_B = -direction_flat[n_A:].reshape(D_b, D_b, D_b, D_b, d_l)
-                direction = (
-                    _wrap_tensor(dir_A, A_cur),
-                    _wrap_tensor(dir_B, B_cur),
-                )
-        elif optimizer is not None:
-            updates, opt_state = optimizer.update(grads, opt_state, params)
-            direction = updates
-        else:
-            direction = jax.tree.map(lambda g: -g, grads)
-
-        # Issue #328: kill the radial component of the search direction
-        # so the line-search chord stays on-manifold to first order.
-        # ``_normalize_params`` projects the final iterate back to unit
-        # norm, but the intermediate chord ``params + alpha * direction``
-        # drifts off the sphere proportional to ``alpha * <params, dir>``
-        # — for a Euclidean L-BFGS direction this can be large and push
-        # the line search into non-variational CTM regions before
-        # retraction.  Stale curvature pairs accumulated on that chord
-        # then corrupt subsequent L-BFGS steps.
-        if not use_c4v:
-            direction = _tangent_project_unit(direction, params)
-
-        if use_ls:
-            if config.gs_line_search_method == "hager_zhang":
-                from tenax.algorithms._line_search import hager_zhang_line_search
-
-                slope = _tree_dot(grads, direction)
-                if slope >= 0:
-                    direction = jax.tree.map(lambda g: -g, grads)
-                    if not use_c4v:
-                        direction = _tangent_project_unit(direction, params)
-                    slope = _tree_dot(grads, direction)
-                    if is_metric_lbfgs:
-                        lbfgs_history.clear()
-
-                hz_counter = {"phi": 0, "dphi": 0}
-
-                def _phi(alpha):
-                    hz_counter["phi"] += 1
-                    trial = _normalize_params(
-                        _tree_add(params, _tree_scale(direction, alpha))
-                    )
-                    return loss_fn_fwd(trial)
-
-                def _dphi(alpha):
-                    hz_counter["dphi"] += 1
-                    trial = _normalize_params(
-                        _tree_add(params, _tree_scale(direction, alpha))
-                    )
-                    _, g = jax.value_and_grad(loss_fn)(trial)
-                    return _tree_dot(g, direction)
-
-                dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
-                param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
-                alpha0 = min(1.0, 0.1 * param_norm / dir_norm)
-
-                alpha, f_alpha, converged = hager_zhang_line_search(
-                    _phi,
-                    _dphi,
-                    energy_float,
-                    slope,
-                    alpha_init=alpha0,
-                    rho=1.5,
-                    max_step=2.0 * alpha0,
-                    energy_bound=max(2.0, 2.0 * abs(best_energy)),
-                )
-                if config.gs_verbose:
-                    print(
-                        f"[iPEPS-AD:2site-tensor] HZ probes phi={hz_counter['phi']} "
-                        f"dphi={hz_counter['dphi']} alpha={alpha:.3e} "
-                        f"converged={converged}",
-                        flush=True,
-                    )
-                if f_alpha < energy_float:
-                    params = _normalize_params(
-                        _tree_add(params, _tree_scale(direction, alpha))
-                    )
-                    stall_count = 0
-                else:
-                    stall_count += 1
-            else:
-                slope_bt = _tree_dot(grads, direction)
-                if slope_bt >= 0:
-                    direction = jax.tree.map(lambda g: -g, grads)
-                    if not use_c4v:
-                        direction = _tangent_project_unit(direction, params)
-                    if is_metric_lbfgs:
-                        lbfgs_history.clear()
-                params, new_energy, step_size = _backtracking_line_search(
-                    params,
-                    direction,
-                    grads,
-                    energy_float,
-                    loss_fn_fwd,
-                    max_steps=config.gs_line_search_max_steps,
-                )
-                if new_energy < energy_float:
-                    stall_count = 0
-                else:
-                    stall_count += 1
-
-            # Noise recovery on persistent stall (legacy; see issue #298).
-            # Only used by the non-C4v path; C4v defaults to "reset".
-            if (
-                config.gs_stall_recovery == "noise"
-                and stall_count > 0
-                and stall_count <= config.gs_noise_recovery_retries
-            ):
-                noise_key = jax.random.PRNGKey(step * 1000 + stall_count)
-                noisy_params = []
-                for i, p in enumerate(params):
-                    k = jax.random.fold_in(noise_key, i)
-                    data = p.todense()
-                    noise = config.gs_noise_amplitude * _random_noise(
-                        k, data.shape, data.dtype
-                    )
-                    noisy = data + noise * jnp.linalg.norm(data)
-                    noisy = noisy / (jnp.linalg.norm(noisy) + 1e-10)
-                    noisy_params.append(_wrap_tensor(noisy, p))
-                params = tuple(noisy_params)
-                if config.gs_verbose:
-                    print(f"[iPEPS-AD] stall #{stall_count}, adding noise", flush=True)
-                # Reset optimizer state
-                if is_cg:
-                    cg_direction = None
-                    prev_grad = None
-                    prev_precond_grad = None
-                if is_metric_lbfgs:
-                    lbfgs_history.clear()
-                    prev_params_flat = None
-                    prev_grad_flat = None
-            elif config.gs_stall_recovery == "reset" and stall_count > 0:
-                # Rollback to best on reset (#454). The CTM-error reset path
-                # above (around L1998-2002) already does this for the
-                # CTMRGGradientError branch; we extend the same pattern to the
-                # Wolfe-failure path that was missed. #298's anti-rollback
-                # evidence was on a pre-trifecta CTM stack (pre-PR #406 2x2
-                # projector, pre-multisite-CTM rewrite, pre-PR #447 AD
-                # stop_gradient) and no longer applies.
-                if stall_count > config.gs_stall_recovery_retries:
-                    # #455 PR2: at non-final χ stages, treat stall-cap
-                    # exhaustion as a signal to advance the χ schedule
-                    # rather than exit with best_energy.  Mirrors the
-                    # 1-site stall-cap intercept (commit 07ffe8e).
-                    if config.gs_chi_schedule_steps is not None:
-                        steps_in_stage = (step + 1) - stage_start_step
-                        _gn_for_bump = (
-                            grad_norm_val
-                            if grad_norm_val is not None
-                            else (
-                                _grad_l2_norm(grads)
-                                if config.gs_conv_criterion != "dE"
-                                else 0.0
-                            )
-                        )
-                        (
-                            ctm_cfg_2s,
-                            _env_cache_2s,
-                            new_stage_idx,
-                            bump_fired,
-                            _,
-                        ) = _advance_chi_stage_if_due(
-                            ctm_cfg_2s,
-                            _env_cache_2s,
-                            chi_schedule=config.gs_chi_schedule_steps,
-                            current_stage_idx=current_stage_idx,
-                            steps_in_stage=steps_in_stage,
-                            config=config,
-                            grad_norm=_gn_for_bump,
-                            delta_energy=delta_energy,
-                            stall_count=stall_count,
-                            base_charges=_bump_base_charges_2s,
-                        )
-                        # Codex review (PR #467): see 1-site stall-cap
-                        # intercept for rationale.  Decouple schedule
-                        # advance from bump_fired; keep reset block
-                        # gated on bump_fired.
-                        stage_advanced = new_stage_idx != current_stage_idx
-                        if stage_advanced:
-                            current_stage_idx = new_stage_idx
-                            stage_start_step = step + 1
-                        if bump_fired:
-                            # Rollback params to best from the previous
-                            # stage; _env_cache_2s stays at the freshly
-                            # padded post-bump state (the budget-path
-                            # invariant — see _apply_chi_bump).
-                            params = best_params
-                            stall_count = 0
-                            if is_metric_lbfgs:
-                                lbfgs_history.clear()
-                                prev_params_flat = None
-                                prev_grad_flat = None
-                            if is_cg:
-                                cg_direction = None
-                                prev_grad = None
-                                prev_precond_grad = None
-                            if (
-                                optimizer is not None
-                                and config.gs_optimizer.lower() == "lbfgs"
-                            ):
-                                opt_state = optimizer.init(params)
-                            if config.gs_verbose:
-                                print(
-                                    f"[iPEPS-AD step {step + 1}] stall-cap at "
-                                    f"chi={ctm_cfg_2s.chi} → advancing to next "
-                                    f"stage (#455 PR2)",
-                                    flush=True,
-                                )
-                        if bump_fired or stage_advanced:
-                            # Force a checkpoint on stall-cap stage
-                            # advance before continuing (Codex P2 #497).
-                            _maybe_save_2s_checkpoint(
-                                step,
-                                _chi_at_step_start,
-                                _best_energy_at_step_start,
-                                force_last=True,
-                            )
-                            continue
-                    n_resets_done = stall_count - 1
                     if config.gs_verbose:
                         print(
-                            f"[iPEPS-AD] stall budget exhausted after "
-                            f"{n_resets_done} resets, "
-                            f"returning best E={best_energy:.10f}",
+                            f"[iPEPS-AD step {step + 1}] schedule advance: "
+                            f"stage {current_stage_idx} → {new_stage_idx}, "
+                            f"chi {chi_before} → {ctm_cfg_2s.chi} (#455)",
                             flush=True,
                         )
-                    break
-                params = best_params
-                # #518: ``best_env_cache_2s`` may be at a stale χ if a
-                # reactive/scheduled bump fired after it was last
-                # snapshotted.  Clear instead of restoring; the next
-                # CTM call cold-starts at the current ctm_cfg_2s.chi.
-                _env_cache_2s.clear()
-                if is_cg:
-                    cg_direction = None
-                    prev_grad = None
-                    prev_precond_grad = None
+                    current_stage_idx = new_stage_idx
+                    stage_start_step = step + 1
+            # Reset block must live OUTSIDE the schedule-only ``if`` so a
+            # reactive-only bump (``chi_auto_bump=True`` with no schedule)
+            # still clears stall_count, CG state, and L-BFGS history at the
+            # new χ.  Gated solely on ``ctm_cfg_2s.chi != chi_before``, which
+            # is set by EITHER reactive (#472) or scheduled (#455) bumps.
+            # (Codex PR #473 review.)
+            if ctm_cfg_2s.chi != chi_before:
+                # χ bump fired: a new landscape begins.  Reset the stall
+                # counter so the next stage gets a fresh retry budget;
+                # also clear L-BFGS curvature history so the first step
+                # at the new χ is plain steepest descent (curvature from
+                # the previous χ landscape isn't valid here).
+                stall_count = 0
+                chi_ceiling_consecutive_2s = 0
                 if is_metric_lbfgs:
                     lbfgs_history.clear()
                     prev_params_flat = None
                     prev_grad_flat = None
-                # Optax-backed L-BFGS stores curvature history in opt_state,
-                # not in lbfgs_history.  Reinitialize it on the rolled-back
-                # params so the next step really is steepest descent.
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
                 if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
                     opt_state = optimizer.init(params)
-                if config.gs_verbose:
-                    print(
-                        f"[iPEPS-AD] stall #{stall_count}, reset L-BFGS history "
-                        f"(rollback to best, retry "
-                        f"{stall_count}/{config.gs_stall_recovery_retries})",
-                        flush=True,
-                    )
-        else:
-            params = optax.apply_updates(params, direction)
-            params = _normalize_params(params)
 
-        # Reactive ε_T auto-bump (variPEPS §2.8.2, #472) followed by the
-        # scheduled outer-loop χ bump (#453 / #455).  Compose order
-        # mirrors the 1-site path: reactive first so it can pre-empt the
-        # schedule, scheduled second to advance the stage index even on
-        # idempotent (post-reactive) bumps.  ``chi_before`` is snapshotted
-        # before either fires so the post-bump reset block below catches
-        # either trigger via ``ctm_cfg_2s.chi != chi_before``.
-        chi_before = ctm_cfg_2s.chi
-        last_eps_t = float(_env_cache_2s.get("max_truncation_error", 0.0))
-        last_smallest_S = float(_env_cache_2s.get("max_smallest_S", 0.0))
-        ctm_cfg_2s, _env_cache_2s = _maybe_bump_chi(
-            ctm_cfg_2s,
-            _env_cache_2s,
-            last_eps_t,
-            last_smallest_S=last_smallest_S,
-            base_charges=_bump_base_charges_2s,
-        )
-        # Scheduled outer-loop χ bump (#453 / #455).  No-ops when
-        # ``gs_chi_schedule_steps`` is None.  Fires at the step boundary
-        # so the next iteration's value_and_grad sees the bumped χ — same
-        # invariant as the 1-site path.  Per-stage state
-        # (current_stage_idx, stage_start_step) drives the new helper;
-        # #455 PR2 will add convergence/stall-cap triggers.
-        if config.gs_chi_schedule_steps is not None:
-            steps_in_stage = (step + 1) - stage_start_step
-            _gn_for_bump = (
-                grad_norm_val
-                if grad_norm_val is not None
-                else (_grad_l2_norm(grads) if config.gs_conv_criterion != "dE" else 0.0)
+            # variPEPS §2.8.2 chi-ceiling bail-out.  After the post-step bump
+            # has been attempted, if χ is still at chi_max AND the indicator
+            # remains above threshold for K consecutive steps, exit early and
+            # return ``best_params``.  Counter resets on any bump (handled
+            # above), any successful headroom recovery, or stall recovery.
+            if (
+                config.gs_chi_ceiling_bailout > 0
+                and ctm_cfg_2s.chi_max is not None
+                and ctm_cfg_2s.chi >= ctm_cfg_2s.chi_max
+            ):
+                # ``getattr`` fallback (codex PR #524 follow-up): the
+                # ``chi_auto_bump_metric`` field is added by PR #525.  Until
+                # that lands this PR must still resolve to a working
+                # indicator instead of raising ``AttributeError`` when the
+                # bail-out fires.  Default ``"eps_T"`` matches CTMConfig's
+                # eventual default and the existing 2-site bump cadence.
+                _bail_metric = getattr(ctm_cfg_2s, "chi_auto_bump_metric", "eps_T")
+                if _bail_metric == "norm_smallest_S":
+                    _bail_indicator = float(_env_cache_2s.get("max_smallest_S", 0.0))
+                else:
+                    _bail_indicator = float(
+                        _env_cache_2s.get("max_truncation_error", 0.0)
+                    )
+                if _bail_indicator > ctm_cfg_2s.chi_auto_bump_eps:
+                    chi_ceiling_consecutive_2s += 1
+                    if chi_ceiling_consecutive_2s >= config.gs_chi_ceiling_bailout:
+                        if config.gs_verbose:
+                            print(
+                                f"[iPEPS-AD:2site-tensor] step {step + 1}/"
+                                f"{config.gs_num_steps} chi-ceiling bail-out: "
+                                f"chi={ctm_cfg_2s.chi} at chi_max, "
+                                f"{_bail_metric}={_bail_indicator:.3e} > "
+                                f"{ctm_cfg_2s.chi_auto_bump_eps:.3e} for "
+                                f"{chi_ceiling_consecutive_2s} consecutive steps "
+                                f"— rolling back to best E={best_energy:.10f}",
+                                flush=True,
+                            )
+                        params = best_params
+                        _maybe_save_2s_checkpoint(
+                            step, chi_before, _best_energy_at_step_start
+                        )
+                        break
+                else:
+                    chi_ceiling_consecutive_2s = 0
+            else:
+                chi_ceiling_consecutive_2s = 0
+
+            # End-of-step save: cadence-based + new-best detection.
+            _maybe_save_2s_checkpoint(step, chi_before, _best_energy_at_step_start)
+
+        # Re-evaluate both final params and best_params with fully converged
+        # fresh CTM.  In-loop energies use warm-started CTM that can produce
+        # unphysical values, so we compare fresh evaluations only.
+        # Match in-loop CTM tolerances (#317) by reusing ctm_cfg_2s directly.
+
+        def _eval_fresh_2site(p, env_init=None):
+            """Evaluate energy with fully converged fresh CTM."""
+            if use_c4v:
+                A_t, B_t = _c4v_AB(p)
+            else:
+                A_t, B_t = _normalize_params(p)
+            st = {(0, 0): A_t, (1, 0): B_t}
+            envs, _ = python_loop_ctm_converge(
+                st,
+                CHECKERBOARD_NEIGHBORS,
+                **ctm_converge_kwargs(ctm_cfg_2s, env_init=env_init),
             )
-            ctm_cfg_2s, _env_cache_2s, new_stage_idx, bump_fired, _should_break = (
-                _advance_chi_stage_if_due(
-                    ctm_cfg_2s,
-                    _env_cache_2s,
-                    chi_schedule=config.gs_chi_schedule_steps,
-                    current_stage_idx=current_stage_idx,
-                    steps_in_stage=steps_in_stage,
-                    config=config,
-                    grad_norm=_gn_for_bump,
-                    delta_energy=delta_energy,
-                    stall_count=stall_count,
-                    base_charges=_bump_base_charges_2s,
+            E_ = float(
+                compute_energy_ctm_tensor_2site(
+                    A_t, B_t, envs[(0, 0)], envs[(1, 0)], gate, d_phys
                 )
             )
-            stage_advanced = new_stage_idx != current_stage_idx
-            if stage_advanced:
-                if config.gs_verbose:
-                    print(
-                        f"[iPEPS-AD step {step + 1}] schedule advance: "
-                        f"stage {current_stage_idx} → {new_stage_idx}, "
-                        f"chi {chi_before} → {ctm_cfg_2s.chi} (#455)",
-                        flush=True,
-                    )
-                current_stage_idx = new_stage_idx
-                stage_start_step = step + 1
-        # Reset block must live OUTSIDE the schedule-only ``if`` so a
-        # reactive-only bump (``chi_auto_bump=True`` with no schedule)
-        # still clears stall_count, CG state, and L-BFGS history at the
-        # new χ.  Gated solely on ``ctm_cfg_2s.chi != chi_before``, which
-        # is set by EITHER reactive (#472) or scheduled (#455) bumps.
-        # (Codex PR #473 review.)
-        if ctm_cfg_2s.chi != chi_before:
-            # χ bump fired: a new landscape begins.  Reset the stall
-            # counter so the next stage gets a fresh retry budget;
-            # also clear L-BFGS curvature history so the first step
-            # at the new χ is plain steepest descent (curvature from
-            # the previous χ landscape isn't valid here).
-            stall_count = 0
-            if is_metric_lbfgs:
-                lbfgs_history.clear()
-                prev_params_flat = None
-                prev_grad_flat = None
-            if is_cg:
-                cg_direction = None
-                prev_grad = None
-                prev_precond_grad = None
-            if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
-                opt_state = optimizer.init(params)
+            return A_t, B_t, envs, E_
 
-        # End-of-step save: cadence-based + new-best detection.
-        _maybe_save_2s_checkpoint(step, chi_before, _best_energy_at_step_start)
+        A_last, B_last, envs_last, E_last = _eval_fresh_2site(
+            params, _env_cache_2s.get("envs", None)
+        )
+        env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
 
-    # Re-evaluate both final params and best_params with fully converged
-    # fresh CTM.  In-loop energies use warm-started CTM that can produce
-    # unphysical values, so we compare fresh evaluations only.
-    # Match in-loop CTM tolerances (#317) by reusing ctm_cfg_2s directly.
+        # Pad best_env_cache_2s envs to the current ctm_cfg_2s.chi before use.
+        # Mirrors the same fix on the 1-site path — see comment there.  Fixes #469.
+        # NOTE: if a new _eval_fresh_2site(best_params, best_env_cache_2s["envs"])
+        # call site is added later, it must reapply this padding — there's no
+        # producer-side guarantee that the snapshot is at ctm_cfg_2s.chi.
+        _best_env_init_2s = best_env_cache_2s.get("envs", None)
+        if _best_env_init_2s:
+            _best_env_init_2s = {
+                c: pad_dense_env_chi(
+                    _best_env_init_2s[c],
+                    ctm_cfg_2s.chi,
+                    base_charges=_bump_base_charges_2s,
+                )
+                for c in _best_env_init_2s
+            }
 
-    def _eval_fresh_2site(p, env_init=None):
-        """Evaluate energy with fully converged fresh CTM."""
-        if use_c4v:
-            A_t, B_t = _c4v_AB(p)
+        if best_params is not params:
+            A_best, B_best, envs_best, E_best_fresh = _eval_fresh_2site(
+                best_params, _best_env_init_2s
+            )
+            env_A_best = envs_best[(0, 0)]
+            env_B_best = envs_best[(1, 0)]
         else:
-            A_t, B_t = _normalize_params(p)
-        st = {(0, 0): A_t, (1, 0): B_t}
-        envs, _ = python_loop_ctm_converge(
-            st,
-            CHECKERBOARD_NEIGHBORS,
-            **ctm_converge_kwargs(ctm_cfg_2s, env_init=env_init),
-        )
-        E_ = float(
-            compute_energy_ctm_tensor_2site(
-                A_t, B_t, envs[(0, 0)], envs[(1, 0)], gate, d_phys
-            )
-        )
-        return A_t, B_t, envs, E_
+            E_best_fresh = E_last
 
-    A_last, B_last, envs_last, E_last = _eval_fresh_2site(
-        params, _env_cache_2s.get("envs", None)
-    )
-    env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
+        # Pick whichever fresh evaluation is lower
+        if E_last <= E_best_fresh:
+            A_final, B_final = A_last, B_last
+            env_A, env_B, E_gs = env_A_last, env_B_last, E_last
+        else:
+            A_final, B_final = A_best, B_best
+            env_A, env_B, E_gs = env_A_best, env_B_best, E_best_fresh
+        if config.gs_verbose:
+            print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}", flush=True)
 
-    # Pad best_env_cache_2s envs to the current ctm_cfg_2s.chi before use.
-    # Mirrors the same fix on the 1-site path — see comment there.  Fixes #469.
-    # NOTE: if a new _eval_fresh_2site(best_params, best_env_cache_2s["envs"])
-    # call site is added later, it must reapply this padding — there's no
-    # producer-side guarantee that the snapshot is at ctm_cfg_2s.chi.
-    _best_env_init_2s = best_env_cache_2s.get("envs", None)
-    if _best_env_init_2s:
-        _best_env_init_2s = {
-            c: pad_dense_env_chi(
-                _best_env_init_2s[c],
-                ctm_cfg_2s.chi,
-                base_charges=_bump_base_charges_2s,
-            )
-            for c in _best_env_init_2s
-        }
-
-    if best_params is not params:
-        A_best, B_best, envs_best, E_best_fresh = _eval_fresh_2site(
-            best_params, _best_env_init_2s
-        )
-        env_A_best = envs_best[(0, 0)]
-        env_B_best = envs_best[(1, 0)]
-    else:
-        E_best_fresh = E_last
-
-    # Pick whichever fresh evaluation is lower
-    if E_last <= E_best_fresh:
-        A_final, B_final = A_last, B_last
-        env_A, env_B, E_gs = env_A_last, env_B_last, E_last
-    else:
-        A_final, B_final = A_best, B_best
-        env_A, env_B, E_gs = env_A_best, env_B_best, E_best_fresh
-    if config.gs_verbose:
-        print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}", flush=True)
-
-    if config.return_history:
-        history = {
-            "energies": _history_energies,
-            "step_times": _history_step_times,
-            "jit_compile_time": _jit_compile_time,
-            "num_steps": len(_history_energies),
-            "converged": _converged,
-        }
-        return (A_final, B_final), (env_A, env_B), E_gs, history
-    return (A_final, B_final), (env_A, env_B), E_gs
+        if config.return_history:
+            history = {
+                "energies": _history_energies,
+                "step_times": _history_step_times,
+                "jit_compile_time": _jit_compile_time,
+                "num_steps": len(_history_energies),
+                "converged": _converged,
+            }
+            return (A_final, B_final), (env_A, env_B), E_gs, history
+        return (A_final, B_final), (env_A, env_B), E_gs
+    finally:
+        if _prev_norm_diag is not None:
+            set_implicit_ad_norm_diagnostics(_prev_norm_diag)
 
 
 def _optimize_gs_ad_multisite(
@@ -3945,6 +4124,7 @@ def _optimize_gs_ad_multisite(
                     rho=1.5,
                     max_step=2.0 * alpha0,
                     energy_bound=max(2.0, 2.0 * abs(best_energy)),
+                    max_iter=config.gs_hz_max_iter,
                 )
                 if config.gs_verbose:
                     print(
