@@ -2682,9 +2682,15 @@ def _optimize_gs_ad_tensor_2site(
         # accepted as the new best.
         if (
             config.gs_grad_spike_ratio is not None
-            and len(recent_gnorms_2s) >= 2
+            and len(recent_gnorms_2s) >= 1
             and best_energy < float("inf")
         ):
+            # ``len >= 1`` (was ``>= 2``, codex PR #524 P2): with
+            # ``gs_grad_spike_window == 1`` the buffer is trimmed back to
+            # length 1 each step, so the previous ``>= 2`` guard silently
+            # disabled the spike check for that valid config.  ``len == 1``
+            # is enough: the median is just the prior step's gradient norm,
+            # which is the right baseline for "is this step a >5x jump?".
             spike_floor = max(float(np.median(recent_gnorms_2s)), 1.0)
             if grad_norm_val > config.gs_grad_spike_ratio * spike_floor:
                 params = best_params
