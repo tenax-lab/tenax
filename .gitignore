@@ -6,6 +6,9 @@ __pycache__/
 
 # Cython-generated C files
 src/tenax/**/*.c
+
+# hatch-vcs generated version file
+src/tenax/_version.py
 *.egg
 *.egg-info/
 dist/
