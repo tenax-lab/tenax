@@ -258,6 +258,36 @@ def _normalize_stall_recovery(config, *, unit_cell: str):
     return replace(config, gs_stall_recovery=default)
 
 
+_STALL_NOISE_FLOOR: float = 1e-12
+"""Absolute energy decrease below which a step is treated as numerical noise
+rather than real progress.  See ``_is_real_decrease`` and issue #510.
+
+Tied to the J=1 spin-Hamiltonian convention (energies are O(1)) so a 1e-12
+threshold sits 4 orders of magnitude above double-precision round-off on a
+typical -0.6 energy.  Not exposed as config: the existing
+``gs_stall_count_threshold`` / ``gs_stall_recovery_retries`` knobs control
+how the trigger interacts with recovery — the floor itself is a noise level,
+not a tuning parameter.
+"""
+
+
+def _is_real_decrease(
+    new_energy: float, old_energy: float, *, noise: float = _STALL_NOISE_FLOOR
+) -> bool:
+    """Return True iff ``new_energy`` is strictly below ``old_energy`` by more
+    than ``noise``.
+
+    Defends the stall safety-net against α-collapse line searches that
+    return a step at α≈1e-14 with a floating-point-noise energy decrease.
+    Without this guard the strict ``new < old`` comparison would reset
+    ``stall_count`` on jitter alone and the optimizer could grind for
+    hours without real progress (issue #510, v8b evidence).
+    """
+    if not math.isfinite(new_energy) or not math.isfinite(old_energy):
+        return False
+    return new_energy < old_energy - noise
+
+
 def _should_accept_best(
     *,
     current_best: float,
@@ -1694,7 +1724,7 @@ def _optimize_gs_ad_tensor(
                         f"converged={converged}",
                         flush=True,
                     )
-                if f_alpha < energy_float:
+                if _is_real_decrease(f_alpha, energy_float):
                     params = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
@@ -1715,7 +1745,7 @@ def _optimize_gs_ad_tensor(
                     loss_fn_fwd,
                     max_steps=config.gs_line_search_max_steps,
                 )
-                if new_energy < energy_float:
+                if _is_real_decrease(new_energy, energy_float):
                     stall_count = 0
                 else:
                     stall_count += 1
@@ -3134,7 +3164,7 @@ def _optimize_gs_ad_tensor_2site(
                             f"converged={converged}",
                             flush=True,
                         )
-                    if f_alpha < energy_float:
+                    if _is_real_decrease(f_alpha, energy_float):
                         params = _normalize_params(
                             _tree_add(params, _tree_scale(direction, alpha))
                         )
@@ -3157,7 +3187,7 @@ def _optimize_gs_ad_tensor_2site(
                         loss_fn_fwd,
                         max_steps=config.gs_line_search_max_steps,
                     )
-                    if new_energy < energy_float:
+                    if _is_real_decrease(new_energy, energy_float):
                         stall_count = 0
                     else:
                         stall_count += 1
@@ -4133,7 +4163,7 @@ def _optimize_gs_ad_multisite(
                         f"converged={converged}",
                         flush=True,
                     )
-                if f_alpha < energy_float:
+                if _is_real_decrease(f_alpha, energy_float):
                     params = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
@@ -4155,7 +4185,7 @@ def _optimize_gs_ad_multisite(
                     loss_fn_fwd,
                     max_steps=config.gs_line_search_max_steps,
                 )
-                if new_energy < energy_float:
+                if _is_real_decrease(new_energy, energy_float):
                     stall_count = 0
                 else:
                     stall_count += 1

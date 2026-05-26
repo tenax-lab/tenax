@@ -1638,6 +1638,45 @@ def test_stall_recovery_auto_defaults():
     assert cfg_user.gs_stall_recovery == "noise", "explicit user setting must win"
 
 
+def test_is_real_decrease_noise_floor():
+    """Issue #510: stall trigger must distinguish real progress from FP jitter.
+
+    Without the noise floor, ``f_alpha < energy_float`` is satisfied by a
+    1e-14-scale decrease and ``stall_count`` resets to 0 even though the
+    parameter update ``α·direction`` is numerically zero.  v8b evidence
+    (D=3 χ=9 bipartite implicit AD) showed a 5-hour run grinding at
+    α≈1e-14 because the safety net never fired.
+    """
+    from tenax.algorithms.ipeps_optimize import _is_real_decrease
+
+    # Real decrease: clearly above the 1e-12 floor → True.
+    assert _is_real_decrease(-0.700, -0.500) is True
+    assert _is_real_decrease(-0.50001, -0.50000) is True
+
+    # No change: floor blocks the False-positive.
+    assert _is_real_decrease(-0.500, -0.500) is False
+
+    # Noise-floor jitter: 1e-14 decrease is well below 1e-12 → False.
+    assert _is_real_decrease(-0.500_000_000_000_01, -0.500_000_000_000_00) is False
+    # Right at the floor (strict less-than) → False.
+    assert _is_real_decrease(-0.500_000_000_001, -0.500) is False
+    # Just above the floor → True.
+    assert _is_real_decrease(-0.500_000_000_002, -0.500) is True
+
+    # Energy increased: never accepted.
+    assert _is_real_decrease(-0.400, -0.500) is False
+
+    # Non-finite inputs: rejected (NaN/inf must never satisfy the gate).
+    assert _is_real_decrease(float("nan"), -0.500) is False
+    assert _is_real_decrease(-0.500, float("nan")) is False
+    assert _is_real_decrease(float("-inf"), -0.500) is False
+    assert _is_real_decrease(-0.500, float("inf")) is False
+
+    # Custom noise floor: caller can tighten or loosen.
+    assert _is_real_decrease(-0.5001, -0.5000, noise=1e-2) is False
+    assert _is_real_decrease(-0.5001, -0.5000, noise=1e-5) is True
+
+
 def test_should_accept_best_respects_energy_floor():
     """Issue #298: gs_energy_floor rejects non-variational best-state candidates."""
     from tenax.algorithms.ipeps_optimize import _should_accept_best
