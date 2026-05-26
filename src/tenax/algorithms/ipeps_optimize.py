@@ -1386,6 +1386,11 @@ def _optimize_gs_ad_tensor(
     _conv_tol_schedule = config.gs_ctm_conv_tol_schedule
     _current_conv_tol = ctm_cfg.conv_tol
 
+    # CTM max_iter schedule (issue #507): same lookup contract as the
+    # conv_tol schedule but caps the accepted-step CTM converge budget.
+    _max_iter_schedule = config.gs_ctm_max_iter_schedule
+    _current_max_iter = ctm_cfg.max_iter
+
     # CTM plateau-patience schedule: update ctm_cfg when patience changes.
     # Independent of the conv_tol schedule (intentionally — see
     # iPEPSConfig.gs_plateau_patience_schedule docstring on auto-tuning).
@@ -1419,6 +1424,17 @@ def _optimize_gs_ad_tensor(
                 tol = t
         return tol
 
+    def _get_scheduled_max_iter(step_idx, num_steps):
+        """Look up max_iter from schedule based on step fraction (issue #507)."""
+        if _max_iter_schedule is None:
+            return _current_max_iter
+        frac = step_idx / max(num_steps, 1)
+        mi = _max_iter_schedule[0][1]  # default to first entry
+        for threshold, m in _max_iter_schedule:
+            if frac >= threshold:
+                mi = m
+        return mi
+
     def _get_scheduled_plateau_patience(step_idx, num_steps):
         """Look up plateau_patience from schedule based on step fraction."""
         if _patience_schedule is None:
@@ -1437,6 +1453,12 @@ def _optimize_gs_ad_tensor(
             if new_tol != _current_conv_tol:
                 _current_conv_tol = new_tol
                 ctm_cfg = _replace(ctm_cfg, conv_tol=new_tol)
+        # Update max_iter if schedule is active (#507)
+        if _max_iter_schedule is not None:
+            new_max_iter = _get_scheduled_max_iter(step, config.gs_num_steps)
+            if new_max_iter != _current_max_iter:
+                _current_max_iter = new_max_iter
+                ctm_cfg = _replace(ctm_cfg, max_iter=new_max_iter)
         # Update plateau_patience if schedule is active
         if _patience_schedule is not None:
             new_patience = _get_scheduled_plateau_patience(step, config.gs_num_steps)
@@ -2491,6 +2513,10 @@ def _optimize_gs_ad_tensor_2site(
     _conv_tol_schedule_2s = config.gs_ctm_conv_tol_schedule
     _current_conv_tol_2s = ctm_cfg_2s.conv_tol
 
+    # CTM max_iter schedule (#507): same lookup contract as conv_tol.
+    _max_iter_schedule_2s = config.gs_ctm_max_iter_schedule
+    _current_max_iter_2s = ctm_cfg_2s.max_iter
+
     # CTM plateau-patience schedule (independent of conv_tol — see
     # iPEPSConfig.gs_plateau_patience_schedule docstring).
     _patience_schedule_2s = config.gs_plateau_patience_schedule
@@ -2505,6 +2531,17 @@ def _optimize_gs_ad_tensor_2site(
             if frac >= threshold:
                 tol = t
         return tol
+
+    def _get_scheduled_max_iter_2s(step_idx, num_steps):
+        """Look up max_iter from schedule based on step fraction (issue #507)."""
+        if _max_iter_schedule_2s is None:
+            return _current_max_iter_2s
+        frac = step_idx / max(num_steps, 1)
+        mi = _max_iter_schedule_2s[0][1]
+        for threshold, m in _max_iter_schedule_2s:
+            if frac >= threshold:
+                mi = m
+        return mi
 
     def _get_scheduled_plateau_patience_2s(step_idx, num_steps):
         if _patience_schedule_2s is None:
@@ -2759,6 +2796,12 @@ def _optimize_gs_ad_tensor_2site(
                 if new_tol != _current_conv_tol_2s:
                     _current_conv_tol_2s = new_tol
                     ctm_cfg_2s = _replace(ctm_cfg_2s, conv_tol=new_tol)
+            # Update max_iter if schedule is active (#507)
+            if _max_iter_schedule_2s is not None:
+                new_max_iter = _get_scheduled_max_iter_2s(step, config.gs_num_steps)
+                if new_max_iter != _current_max_iter_2s:
+                    _current_max_iter_2s = new_max_iter
+                    ctm_cfg_2s = _replace(ctm_cfg_2s, max_iter=new_max_iter)
             # Update plateau_patience if schedule is active
             if _patience_schedule_2s is not None:
                 new_patience = _get_scheduled_plateau_patience_2s(
@@ -3871,6 +3914,10 @@ def _optimize_gs_ad_multisite(
     _conv_tol_schedule = config.gs_ctm_conv_tol_schedule
     _current_conv_tol = ctm_cfg.conv_tol
 
+    # CTM max_iter schedule (#507): same lookup contract as conv_tol.
+    _max_iter_schedule = config.gs_ctm_max_iter_schedule
+    _current_max_iter = ctm_cfg.max_iter
+
     # CTM plateau-patience schedule (independent of conv_tol — see
     # iPEPSConfig.gs_plateau_patience_schedule docstring).
     _patience_schedule = config.gs_plateau_patience_schedule
@@ -3885,6 +3932,17 @@ def _optimize_gs_ad_multisite(
             if frac >= threshold:
                 tol = t
         return tol
+
+    def _get_scheduled_max_iter(step_idx, num_steps):
+        """Look up max_iter from schedule based on step fraction (issue #507)."""
+        if _max_iter_schedule is None:
+            return _current_max_iter
+        frac = step_idx / max(num_steps, 1)
+        mi = _max_iter_schedule[0][1]
+        for threshold, m in _max_iter_schedule:
+            if frac >= threshold:
+                mi = m
+        return mi
 
     def _get_scheduled_plateau_patience(step_idx, num_steps):
         if _patience_schedule is None:
@@ -3918,6 +3976,12 @@ def _optimize_gs_ad_multisite(
             if new_tol != _current_conv_tol:
                 _current_conv_tol = new_tol
                 ctm_cfg = _replace(ctm_cfg, conv_tol=new_tol)
+        # Update max_iter if schedule is active (#507)
+        if _max_iter_schedule is not None:
+            new_max_iter = _get_scheduled_max_iter(step, config.gs_num_steps)
+            if new_max_iter != _current_max_iter:
+                _current_max_iter = new_max_iter
+                ctm_cfg = _replace(ctm_cfg, max_iter=new_max_iter)
         # Update plateau_patience if schedule is active
         if _patience_schedule is not None:
             new_patience = _get_scheduled_plateau_patience(step, config.gs_num_steps)

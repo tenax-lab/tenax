@@ -355,6 +355,18 @@ class iPEPSConfig:
                                throughout.  This is an advanced tuning knob
                                for large-chi runs where an initially loose
                                CTM is enough to start moving.
+        gs_ctm_max_iter_schedule:
+                               Optional ramp for ``ctm.max_iter`` across
+                               AD optimization steps (issue #507).  Same
+                               ``(step_fraction, value)`` schema as
+                               ``gs_ctm_conv_tol_schedule``.  Caps the
+                               accepted-step CTM converge — late steps
+                               where the env is barely changing finish
+                               in ~10-15 sweeps instead of the
+                               early-descent budget.  Independent of
+                               ``CTMConfig.probe_max_iter`` (issue #503),
+                               which caps HZ probes.  ``None`` (default)
+                               uses ``ctm.max_iter`` throughout.
         gs_chi_schedule_steps: Outer-loop χ schedule for
                                ``optimize_gs_ad_chi_schedule`` (#453 / #455).
                                List of ``(target_chi, max_steps_in_stage)``
@@ -503,6 +515,19 @@ class iPEPSConfig:
     # Example: [(0.0, 1e-5), (0.5, 1e-6), (0.8, 1e-7)]
     # None = use config.ctm.conv_tol throughout.
     gs_ctm_conv_tol_schedule: list[tuple[float, float]] | None = None
+    # CTM max_iter schedule: list of (step_fraction, max_iter) pairs (#507).
+    # Ramps the accepted-step CTM iteration cap across AD progress so late
+    # steps — where the env is barely changing — bail in 10-15 sweeps
+    # instead of the full early-descent budget (typically 75).  Mirrors
+    # the ``gs_ctm_conv_tol_schedule`` lookup contract (largest threshold
+    # ≤ ``step_idx / gs_num_steps`` wins).  ``None`` (default) uses
+    # ``config.ctm.max_iter`` throughout.  Example late-stage cap:
+    #
+    #     gs_ctm_max_iter_schedule=[(0.0, 75), (0.5, 30), (0.8, 15)]
+    #
+    # Independent of ``CTMConfig.probe_max_iter`` (issue #503): that
+    # caps HZ line-search probes; this caps the accepted-step CTM.
+    gs_ctm_max_iter_schedule: list[tuple[float, int]] | None = None
     # CTM plateau-patience schedule: list of (step_fraction, plateau_patience)
     # pairs.  Ramps the early-bail patience across AD steps so callers can
     # keep a finite stop-loss while the CTM is plateauing (fast, approximate
