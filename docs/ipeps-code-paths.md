@@ -344,7 +344,22 @@ between L-BFGS steps and zero-pads the cached environment as a warm start.
 Disabled by default (opt-in). Mutually exclusive with `chi_ramp`.
 
 The bump fires *between* optimizer steps — the implicit-AD GMRES linearisation
-sees a fixed χ within each gradient evaluation, so AD correctness is unaffected.
+sees a fixed χ within each gradient evaluation, so AD correctness within a
+single backward solve is unaffected.
+
+> **Variational caveat (issue #511).** Implicit AD's variational guarantee
+> requires the CTM env to be a *converged* fixed point at the current χ.
+> End-of-outer-step `chi_auto_bump` (and scheduled `chi_ramp`) zero-pads
+> env rows for newly-active χ indices: the first few gradient evaluations
+> after a bump see a non-fixed-point env, during which the optimizer can
+> descend to a non-physical "ghost minimum" below the true variational
+> floor (v8b D=3 bipartite: E_best = −0.844 vs QMC ≈ −0.669).  For
+> χ-grown runs **prefer `ctmrg_heuristic_increase_chi=True`** (in-CTM
+> bump, see #492/#514), which grows χ *during* CTM convergence and
+> never returns a partial env to the optimizer.  The end-of-outer-step
+> `chi_auto_bump` path is retained for explicit-AD runs and for
+> backwards-compatibility; see also memory note
+> `feedback_drop_chi_schedule_protocol.md`.
 
 ```python
 from tenax import iPEPSConfig, CTMConfig, optimize_gs_ad
