@@ -1334,6 +1334,15 @@ def _optimize_gs_ad_tensor(
                 for_probe=True,
             ),
         )
+        # Issue #502: share the just-converged env with the subsequent
+        # ``_dphi(α)`` call (and any nearby ``_phi(α')`` probe).  The
+        # implicit-AD ``loss_fn`` warm-starts from the same ``_env_cache``
+        # dict, so this turns the second CTM converge at the same α into
+        # an effectively-no-op warm restart.  The line-search end-of-step
+        # ``_update_env_cache(params)`` overwrites this with the
+        # accepted-step env, so intermediate writes never persist past
+        # the L-BFGS step boundary.
+        _env_cache["envs"] = envs
         if _use_cg:
             return float(compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, _cg_d_eff))
         return float(compute_energy_ctm_tensor(A_norm, envs[(0, 0)], gate, d_phys))
@@ -2499,6 +2508,8 @@ def _optimize_gs_ad_tensor_2site(
                 for_probe=True,
             ),
         )
+        # Issue #502: see 1-site loss_fn_fwd above for rationale.
+        _env_cache_2s["envs"] = envs
         return float(
             compute_energy_ctm_tensor_2site(
                 A_norm,
@@ -3787,6 +3798,8 @@ def _optimize_gs_ad_multisite(
                 for_probe=True,
             ),
         )
+        # Issue #502: see 1-site loss_fn_fwd above for rationale.
+        _env_cache["envs"] = envs
         return float(
             compute_energy_ctm_tensor_multisite(
                 site_tensors,
