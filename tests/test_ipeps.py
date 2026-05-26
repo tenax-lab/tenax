@@ -1638,6 +1638,76 @@ def test_stall_recovery_auto_defaults():
     assert cfg_user.gs_stall_recovery == "noise", "explicit user setting must win"
 
 
+def test_implicit_ad_variational_caveat_warning():
+    """Issue #511: chi-bump cliff-edge artifact must be warned about.
+
+    The helper fires only when implicit AD is enabled AND a non-in-CTM
+    chi-policy (scheduled chi_ramp or end-of-outer-step chi_auto_bump)
+    is configured.  Fixed-chi runs and ``ctmrg_heuristic_increase_chi``
+    (in-CTM bump, #492/#514) preserve the variational guarantee and must
+    stay silent.
+    """
+    import warnings as _w
+
+    from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+    from tenax.algorithms.ipeps_optimize import (
+        _warn_implicit_ad_variational_caveat,
+    )
+
+    # Fixed chi, implicit AD: silent.
+    cfg = iPEPSConfig(gs_implicit_ad=True, ctm=CTMConfig(chi=10))
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        _warn_implicit_ad_variational_caveat(cfg, path="probe")
+    assert caught == [], "fixed-chi implicit AD must not warn"
+
+    # Explicit AD with chi_auto_bump: silent (warning is implicit-AD-only).
+    cfg = iPEPSConfig(
+        gs_implicit_ad=False,
+        ctm=CTMConfig(chi=10, chi_auto_bump=True, chi_max=20),
+    )
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        _warn_implicit_ad_variational_caveat(cfg, path="probe")
+    assert caught == [], "explicit AD path must not warn from this helper"
+
+    # Implicit AD + chi_auto_bump: must warn and cite #511.
+    cfg = iPEPSConfig(
+        gs_implicit_ad=True,
+        ctm=CTMConfig(chi=10, chi_auto_bump=True, chi_max=20),
+    )
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        _warn_implicit_ad_variational_caveat(cfg, path="probe")
+    assert len(caught) == 1, "chi_auto_bump + implicit AD must warn"
+    msg = str(caught[0].message)
+    assert "#511" in msg and "ghost minimum" in msg
+
+    # Implicit AD + chi_ramp: must warn.
+    cfg = iPEPSConfig(
+        gs_implicit_ad=True,
+        ctm=CTMConfig(chi=8, chi_ramp=[(8, 10), (12, 10), (16, None)]),
+    )
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        _warn_implicit_ad_variational_caveat(cfg, path="probe")
+    assert len(caught) == 1, "chi_ramp + implicit AD must warn"
+    assert "chi_ramp" in str(caught[0].message)
+
+    # Implicit AD + in-CTM bump (preferred): silent.
+    cfg = iPEPSConfig(
+        gs_implicit_ad=True,
+        ctm=CTMConfig(chi=10, ctmrg_heuristic_increase_chi=True, chi_max=20),
+    )
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        _warn_implicit_ad_variational_caveat(cfg, path="probe")
+    assert caught == [], (
+        "ctmrg_heuristic_increase_chi=True preserves the variational "
+        "guarantee and must not warn"
+    )
+
+
 def test_should_accept_best_respects_energy_floor():
     """Issue #298: gs_energy_floor rejects non-variational best-state candidates."""
     from tenax.algorithms.ipeps_optimize import _should_accept_best

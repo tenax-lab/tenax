@@ -232,6 +232,50 @@ def _resolve_projector_backward(config: iPEPSConfig) -> iPEPSConfig:
     return resolve_projector_backward(config, logger=_logger)
 
 
+def _warn_implicit_ad_variational_caveat(config: iPEPSConfig, *, path: str) -> None:
+    """Emit a warning when implicit AD's variational guarantee is at risk.
+
+    Implicit AD through the CTM fixed point is variational *only* when the
+    env passed to the gradient evaluation is a converged fixed point at the
+    current chi.  Scheduled ``chi_ramp`` advances and end-of-outer-step
+    ``chi_auto_bump`` events zero-pad newly-active env rows, which violate
+    that precondition until CTM repopulates them.  See issue #511.
+
+    Args:
+        config: The iPEPSConfig being dispatched.
+        path: Short label for the call site (used in the warning text).
+    """
+    if not config.gs_implicit_ad:
+        return
+    ctm_cfg = config.ctm
+    in_ctm_bump = getattr(ctm_cfg, "ctmrg_heuristic_increase_chi", False)
+    if in_ctm_bump:
+        return
+    chi_ramped = getattr(ctm_cfg, "chi_ramp", None) is not None
+    end_of_step_bump = getattr(ctm_cfg, "chi_auto_bump", False)
+    if not (chi_ramped or end_of_step_bump):
+        return
+    import warnings
+
+    trigger = []
+    if chi_ramped:
+        trigger.append("scheduled chi_ramp")
+    if end_of_step_bump:
+        trigger.append("end-of-outer-step chi_auto_bump")
+    warnings.warn(
+        f"{path} AD with gs_implicit_ad=True is variational **only when "
+        "the CTM environment is a converged fixed point at the current "
+        f"chi**.  The current config enables {' and '.join(trigger)}, "
+        "which zero-pads env rows for newly-active chi indices; several "
+        "gradient evaluations may be required before CTM repopulates them, "
+        "during which the optimizer can descend to a non-physical ghost "
+        "minimum (see issue #511).  Prefer ctmrg_heuristic_increase_chi=True "
+        "(in-CTM bump, #492/#514) to grow chi during CTM convergence and "
+        "preserve the variational guarantee across stages.",
+        stacklevel=3,
+    )
+
+
 def _normalize_stall_recovery(config, *, unit_cell: str):
     """Auto-default ``gs_stall_recovery`` based on unit cell when unset.
 
@@ -816,6 +860,7 @@ def _optimize_gs_ad_tensor_reference_c4v(
             "return_history is currently only supported for unit_cell='1x1' "
             "(non-C4v-reference) and unit_cell='2site'."
         )
+    _warn_implicit_ad_variational_caveat(config, path="1-site dense C4v reference")
     import optax
 
     from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
@@ -1007,6 +1052,7 @@ def _optimize_gs_ad_tensor(
             init_fn output) here so the user's starting state is honored.
     """
     config = _normalize_stall_recovery(config, unit_cell="1x1")
+    _warn_implicit_ad_variational_caveat(config, path="1-site Tensor-protocol")
     import optax
 
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
@@ -2143,15 +2189,26 @@ def _optimize_gs_ad_tensor_2site(
         else:
             warnings.warn(
                 "2-site AD with gs_c4v=False uses the implicit-AD path. "
-                "This is variational when the CTM environment is converged "
-                "at the target chi.  Without raising chi manually, chi >= 16 "
-                "is typically needed for generic 2-site Heisenberg.  Note: "
-                "variPEPS-style in-CTM chi-bump (ctmrg_heuristic_increase_chi=True) "
-                "is currently supported only on the explicit-AD path "
-                "(gs_implicit_ad=False); the implicit-AD path raises "
-                "NotImplementedError when ctmrg_heuristic_increase_chi=True "
-                "is passed (see issue #514).  For antiferromagnetic bipartite "
-                "models, consider gs_c4v=True or 1-site with sublattice_rotate_gate().",
+                "This is variational **only when the CTM environment is a "
+                "converged fixed point at the current chi**.  This condition "
+                "is automatically satisfied for fixed chi (no ramp, no bump) "
+                "and for runs using ctmrg_heuristic_increase_chi=True (in-CTM "
+                "bump, #492/#514).  It is NOT satisfied immediately after a "
+                "scheduled chi_ramp stage advance or an end-of-outer-step "
+                "chi_auto_bump event, where env rows for newly-active chi "
+                "indices are zero-initialized; several gradient evaluations "
+                "may be required before CTM repopulates them, during which "
+                "the optimizer can descend to a non-physical ghost minimum "
+                "(see issue #511).  For chi-ramped runs prefer "
+                "ctmrg_heuristic_increase_chi=True over scheduled chi_ramp "
+                "or end-of-outer-step chi_auto_bump.  Note: the implicit-AD "
+                "path on the 2-site branch currently raises NotImplementedError "
+                "when ctmrg_heuristic_increase_chi=True is passed (issue #514); "
+                "use gs_implicit_ad=False to combine in-CTM bump with 2-site "
+                "explicit AD.  Without raising chi manually, chi >= 16 is "
+                "typically needed for generic 2-site Heisenberg.  For "
+                "antiferromagnetic bipartite models, consider gs_c4v=True or "
+                "1-site with sublattice_rotate_gate().",
                 stacklevel=2,
             )
     import optax
@@ -3548,6 +3605,7 @@ def _optimize_gs_ad_multisite(
     keyed by site name (e.g. ``"u"``, ``"v"``, ``"w"``).
     """
     config = _normalize_stall_recovery(config, unit_cell="multisite")
+    _warn_implicit_ad_variational_caveat(config, path="Multisite Lattice")
     if config.return_history:
         raise NotImplementedError(
             "return_history is currently only supported for unit_cell='1x1' "
