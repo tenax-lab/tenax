@@ -1892,6 +1892,113 @@ def test_loss_fn_fwd_probe_envs_dont_leak_past_line_search():
     assert broken >= 1, f"no line-search-boundary cache restore observed; got {seen}"
 
 
+def test_gs_ctm_max_iter_schedule_caps_late_step_ctm():
+    """Issue #507: ``gs_ctm_max_iter_schedule`` caps accepted-step CTM iter count.
+
+    White-box probe: patch ``python_loop_ctm_converge`` to capture the
+    ``max_iter`` argument it receives per call.  Run a 5-step AD with a
+    schedule that drops ``max_iter`` from 75 → 5 at the halfway point.
+    The recorded ``max_iter`` arg must transition from 75 to 5 across
+    the schedule boundary.
+    """
+    from unittest.mock import patch
+
+    import jax.numpy as jnp
+
+    from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    d = 2
+    Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+    H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+    gate = H.reshape(d, d, d, d)
+
+    seen_max_iter: list[int] = []
+
+    import tenax.algorithms._ctm_python_loop as ctm_mod
+
+    real_converge = ctm_mod.python_loop_ctm_converge
+
+    def _spy(*args, **kwargs):
+        seen_max_iter.append(int(kwargs.get("max_iter", -1)))
+        return real_converge(*args, **kwargs)
+
+    config = iPEPSConfig(
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4, max_iter=75),
+        gs_num_steps=5,
+        gs_optimizer="lbfgs",
+        gs_line_search_method="hager_zhang",
+        unit_cell="1x1",
+        su_init=True,
+        num_imaginary_steps=10,
+        dt=0.3,
+        # Cap at 5 from step 2 onward (fraction 0.4): step 0/1 use 75,
+        # step 2/3/4 use 5.  Tight cap so the transition is unambiguous.
+        gs_ctm_max_iter_schedule=[(0.0, 75), (0.4, 5)],
+    )
+    with patch.object(ctm_mod, "python_loop_ctm_converge", side_effect=_spy):
+        optimize_gs_ad(gate, None, config)
+
+    assert 75 in seen_max_iter, (
+        f"early-stage max_iter=75 never observed; got {seen_max_iter}"
+    )
+    assert 5 in seen_max_iter, (
+        f"late-stage max_iter=5 never observed; got {seen_max_iter}"
+    )
+    first_75 = seen_max_iter.index(75)
+    first_5 = seen_max_iter.index(5)
+    assert first_75 < first_5, (
+        f"schedule must apply 75 before 5; got first_75={first_75} "
+        f"first_5={first_5} in {seen_max_iter}"
+    )
+
+
+def test_gs_ctm_max_iter_schedule_default_none_unchanged():
+    """Default ``None`` schedule leaves ``ctm.max_iter`` untouched."""
+    from unittest.mock import patch
+
+    import jax.numpy as jnp
+
+    from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    d = 2
+    Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+    H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+    gate = H.reshape(d, d, d, d)
+
+    seen_max_iter: list[int] = []
+
+    import tenax.algorithms._ctm_python_loop as ctm_mod
+
+    real_converge = ctm_mod.python_loop_ctm_converge
+
+    def _spy(*args, **kwargs):
+        seen_max_iter.append(int(kwargs.get("max_iter", -1)))
+        return real_converge(*args, **kwargs)
+
+    config = iPEPSConfig(
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4, max_iter=12),
+        gs_num_steps=3,
+        unit_cell="1x1",
+        su_init=True,
+        num_imaginary_steps=10,
+        dt=0.3,
+    )
+    with patch.object(ctm_mod, "python_loop_ctm_converge", side_effect=_spy):
+        optimize_gs_ad(gate, None, config)
+
+    assert set(seen_max_iter) == {12}, (
+        f"unscheduled run must always pass max_iter=12; got {set(seen_max_iter)}"
+    )
+
+
 def test_implicit_ad_variational_caveat_warning():
     """Issue #511: chi-bump cliff-edge artifact must be warned about.
 
