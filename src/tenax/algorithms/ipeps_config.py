@@ -72,6 +72,15 @@ class CTMConfig:
     chi_ramp: list[tuple[int, int | None]] | None = None
     max_iter: int = 100
     conv_tol: float = 1e-8
+    # Issue #503: line-search φ probes don't need a fully converged env.
+    # When set, these override ``max_iter`` / ``conv_tol`` only on the
+    # forward-only ``loss_fn_fwd`` path used by ``hager_zhang_line_search``
+    # and ``_backtracking_line_search``.  variPEPS caps probe sweeps at
+    # 10-15 to bound the worst-case HZ probe cost.  ``None`` (default)
+    # preserves prior behavior — probes use the same ``max_iter`` /
+    # ``conv_tol`` as the accepted-step CTM converge.
+    probe_max_iter: int | None = None
+    probe_conv_tol: float | None = None
     renormalize: bool = True
     projector_method: str = "svd"  # "svd" (Fishman, default), "eigh", or "qr"
     min_iter: int = 10  # minimum CTM sweeps before checking convergence

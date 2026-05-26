@@ -142,6 +142,50 @@ def test_ctm_converge_kwargs_propagates_min_iter_and_conv_method():
     assert kw["env_init"] is None
 
 
+def test_ctm_converge_kwargs_probe_overrides():
+    """Issue #503: ``for_probe=True`` swaps in ``probe_max_iter`` / ``probe_conv_tol``.
+
+    The override is opt-in via two independent CTMConfig fields, so a
+    caller can cap iterations without loosening conv_tol (or vice
+    versa).  Default behavior (both fields ``None``) is preserved.
+    """
+    cfg = CTMConfig(
+        chi=12,
+        max_iter=100,
+        conv_tol=1e-8,
+        probe_max_iter=15,
+        probe_conv_tol=1e-4,
+    )
+
+    # for_probe=False: accepted-step values, overrides ignored.
+    kw = ctm_converge_kwargs(cfg, env_init=None, for_probe=False)
+    assert kw["max_iter"] == 100
+    assert kw["conv_tol"] == 1e-8
+
+    # for_probe=True with overrides set: probe values applied.
+    kw = ctm_converge_kwargs(cfg, env_init=None, for_probe=True)
+    assert kw["max_iter"] == 15
+    assert kw["conv_tol"] == 1e-4
+
+    # for_probe=True but no overrides configured: accepted-step values.
+    cfg_default = CTMConfig(chi=12, max_iter=100, conv_tol=1e-8)
+    kw = ctm_converge_kwargs(cfg_default, env_init=None, for_probe=True)
+    assert kw["max_iter"] == 100
+    assert kw["conv_tol"] == 1e-8
+
+    # Independent fields: ``probe_max_iter`` only.
+    cfg_iter_only = CTMConfig(chi=12, max_iter=100, conv_tol=1e-8, probe_max_iter=15)
+    kw = ctm_converge_kwargs(cfg_iter_only, env_init=None, for_probe=True)
+    assert kw["max_iter"] == 15
+    assert kw["conv_tol"] == 1e-8
+
+    # ``probe_conv_tol`` only.
+    cfg_tol_only = CTMConfig(chi=12, max_iter=100, conv_tol=1e-8, probe_conv_tol=1e-4)
+    kw = ctm_converge_kwargs(cfg_tol_only, env_init=None, for_probe=True)
+    assert kw["max_iter"] == 100
+    assert kw["conv_tol"] == 1e-4
+
+
 def test_make_ctm_energy_fn_resolves_ctm_cfg_at_call_time():
     """``conv_tol`` schedule rebindings must reach the AD loss closure.
 
