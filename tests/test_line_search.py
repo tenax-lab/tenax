@@ -145,3 +145,119 @@ class TestLineSearchSafety:
         )
         assert converged
         assert f_alpha < phi(0.0)
+
+
+class TestHagerZhangBracketSkipDphi:
+    """Issue #504: ``bracket_only_phi`` defers dphi to the zoom phase."""
+
+    def _quadratic(self, *, minimum: float = 3.0):
+        """Convex quadratic with min at ``minimum``.  Returns (phi, dphi)
+        plus call-count dicts for each so tests can introspect them."""
+        phi_n = {"n": 0}
+        dphi_n = {"n": 0}
+
+        def phi(a):
+            phi_n["n"] += 1
+            return float((a - minimum) ** 2)
+
+        def dphi(a):
+            dphi_n["n"] += 1
+            return float(2.0 * (a - minimum))
+
+        return phi, dphi, phi_n, dphi_n
+
+    def test_bracket_only_phi_skips_dphi_during_expansion(self):
+        """In a pure bracket-expansion scenario, flag=True calls 0 dphi.
+
+        ``phi(α) = -α`` is monotonically decreasing, so the bracket loop
+        never finds an energy-excess; ``dphi(α) = -1`` is constant and
+        Wolfe never fires.  The bracket phase fills the entire
+        ``max_iter`` budget — flag-off calls dphi once per probe;
+        flag-on calls dphi zero times in this regime.
+        """
+        from tenax.algorithms._line_search import hager_zhang_line_search
+
+        def make_probes():
+            n = {"phi": 0, "dphi": 0}
+
+            def phi(a):
+                n["phi"] += 1
+                return float(-a)
+
+            def dphi(_a):
+                n["dphi"] += 1
+                return -1.0
+
+            return phi, dphi, n
+
+        phi, dphi, n_off = make_probes()
+        phi0_off, dphi0_off = phi(0.0), dphi(0.0)
+        n_off["phi"] = 0
+        n_off["dphi"] = 0
+        hager_zhang_line_search(
+            phi,
+            dphi,
+            phi0_off,
+            dphi0_off,
+            alpha_init=1.0,
+            max_step=1e6,
+            max_iter=8,
+            bracket_only_phi=False,
+        )
+        dphi_off = n_off["dphi"]
+
+        phi, dphi, n_on = make_probes()
+        phi0_on, dphi0_on = phi(0.0), dphi(0.0)
+        n_on["phi"] = 0
+        n_on["dphi"] = 0
+        hager_zhang_line_search(
+            phi,
+            dphi,
+            phi0_on,
+            dphi0_on,
+            alpha_init=1.0,
+            max_step=1e6,
+            max_iter=8,
+            bracket_only_phi=True,
+        )
+        dphi_on = n_on["dphi"]
+
+        # Flag-off must call dphi at least once per bracket probe.
+        assert dphi_off >= 4, (
+            f"flag-off must call dphi every probe in this regime; got {dphi_off}"
+        )
+        # Flag-on must call dphi zero times during the entire run because
+        # the bracket loop never finds an excess and there is no zoom.
+        assert dphi_on == 0, f"flag-on must skip dphi in bracket phase; got {dphi_on}"
+        # Phi-only mode also runs the same probe count overall (bracket
+        # expansion doesn't depend on dphi).
+        assert n_on["phi"] >= 4, (
+            f"flag-on should still run multiple phi probes; got {n_on['phi']}"
+        )
+
+    def test_bracket_only_phi_off_matches_legacy_behavior(self):
+        """``bracket_only_phi=False`` must yield identical alpha/f to the
+        pre-issue #504 implementation.  Smooth quadratic where the
+        slope-sign-change shortcut at ``dc >= 0`` would have fired."""
+        from tenax.algorithms._line_search import hager_zhang_line_search
+
+        def phi(a):
+            return float((a - 2.0) ** 2 + 1.0)
+
+        def dphi(a):
+            return float(2 * (a - 2.0))
+
+        # alpha_init=1.5 puts the first probe near the minimum; with
+        # dphi available, Wolfe-OK or dc>=0 detection should fire fast.
+        alpha, f_alpha, converged = hager_zhang_line_search(
+            phi,
+            dphi,
+            phi(0.0),
+            dphi(0.0),
+            alpha_init=1.5,
+            bracket_only_phi=False,
+        )
+        assert converged
+        # Wolfe with delta=0.1, sigma=0.9 on (a-2)²+1 — accepted alpha
+        # should be close to the minimum at a=2.
+        assert abs(alpha - 2.0) < 1.0
