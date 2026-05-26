@@ -593,6 +593,39 @@ def _sigma_gauged_ctm_converge(
 
 _VJP_CACHE: dict = {}
 
+
+def invalidate_implicit_ad_warm_start() -> int:
+    """Clear cached Neumann warm-start seeds across the implicit-AD VJP cache.
+
+    The implicit-AD backward (``adjoint_method="fixed_point"`` and the
+    eager-GMRES fallback) caches the final adjoint vector ``λ`` and feeds
+    it back as the initial guess for the next gradient evaluation, which
+    converges in ~3-10 iterations instead of ~20-40 in smooth basins
+    (issue #501).  After events that decouple consecutive iterates --
+    stall recovery rolling ``params`` back to ``best_params``, a scheduled
+    χ-stage advance, or a reactive ``chi_auto_bump`` -- the cached ``λ``
+    is no longer a good seed and the optimizer should drop it.
+
+    Shape mismatches between ``prev_lam`` and the current ``env_leaves``
+    are already auto-invalidated inside ``f_bwd``; this hook covers the
+    parameter-jump case where shapes still line up but the iterate has
+    moved far enough that the cached seed costs more than it saves.
+
+    Returns
+    -------
+    int
+        Number of cache entries whose seed was cleared (one per distinct
+        static-config key currently held in ``_VJP_CACHE``).
+    """
+    n = 0
+    for _f, mutables in _VJP_CACHE.values():
+        cb = mutables.get("_invalidate_warm_start")
+        if cb is not None:
+            cb()
+            n += 1
+    return n
+
+
 # F3 diagnostic: written by f_bwd after each fused-JIT call. Tests can
 # read this to assert the fused fixed-point iteration converged without
 # falling back to eager GMRES. Not part of the public API.
@@ -815,6 +848,21 @@ def _make_implicit_vjp_fn(
     # Neumann iteration converges in fewer iterations (#501).  Cleared on
     # divergence/non-convergence so the next call gets a fresh start.
     _cached = {"prev_lam_leaves": None}
+
+    def _invalidate_warm_start() -> None:
+        """Drop the cached ``prev_lam_leaves`` warm-start seed.
+
+        Called by ``invalidate_implicit_ad_warm_start`` when the optimizer
+        triggers a stall reset (params roll back to ``best_params``), a
+        scheduled chi advance, or a reactive ``chi_auto_bump``.  Without
+        this hook the next backward would seed the Neumann iteration from
+        a λ computed at a now-stale parameter point; correctness is still
+        preserved by the in-loop divergence guard, but convergence costs
+        extra iterations (see issue #501).
+        """
+        _cached["prev_lam_leaves"] = None
+
+    mutables["_invalidate_warm_start"] = _invalidate_warm_start
 
     def _run_forward(site_tensors):
         """Run CTM convergence (shared by f and f_fwd).
@@ -1381,22 +1429,41 @@ def _make_implicit_vjp_fn(
         else:
             # adjoint_method == "gmres": eager Krylov via JAX's built-in
             # solver.  Retained as an opt-out for divergent edge cases.
+            # Warm-start from the cached ``prev_lam_leaves`` when shape-
+            # compatible (issue #501); fall back to ``rhs`` as the cold
+            # x0 otherwise.  The shape check matches the fixed-point
+            # branch above.
             rhs = _eager_dE_denv()
+            prev_lam = _cached.get("prev_lam_leaves")
+            if prev_lam is not None and (
+                len(prev_lam) != len(env_leaves)
+                or any(a.shape != b.shape for a, b in zip(prev_lam, env_leaves))
+            ):
+                _cached["prev_lam_leaves"] = None
+                prev_lam = None
+            if prev_lam is not None:
+                # Unflatten back into the same pytree structure as rhs.
+                rhs_treedef = jax.tree.structure(rhs)
+                x0 = jax.tree.unflatten(rhs_treedef, prev_lam)
+            else:
+                x0 = rhs
             _GMRES_LOGGER.debug(
-                "Eager GMRES: maxiter=%d tol=%g restart=%d",
+                "Eager GMRES: maxiter=%d tol=%g restart=%d warm=%s",
                 gmres_maxiter,
                 gmres_tol,
                 gmres_restart,
+                prev_lam is not None,
             )
             lam, _info = gmres_pytree_jax(
                 _eager_apply_I_minus_Jt,
                 rhs,
-                rhs,
+                x0,
                 tol=gmres_tol,
                 maxiter=gmres_maxiter,
                 restart=gmres_restart,
             )
             lam_leaves = tuple(jax.tree.leaves(lam))
+            _cached["prev_lam_leaves"] = lam_leaves
             return _jit_chain_rule(
                 params_data_tuple, env_leaves, lam_leaves, g, chi=chi_post
             )
