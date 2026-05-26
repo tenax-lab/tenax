@@ -24,6 +24,7 @@ def hager_zhang_line_search(
     max_iter: int = 40,
     max_step: float | None = None,
     energy_bound: float | None = None,
+    bracket_only_phi: bool = True,
 ) -> tuple[float, float, bool]:
     """Hager-Zhang line search with approximate Wolfe conditions.
 
@@ -42,10 +43,14 @@ def hager_zhang_line_search(
         max_iter: Maximum number of iterations.
         max_step: Maximum allowed step size. If set, alpha is clipped to this.
         energy_bound: Reject trial points where ``|phi(alpha)| > energy_bound``.
-
-    Returns:
-        (alpha, phi_alpha, converged) where converged is True if Wolfe
-        conditions are satisfied.
+        bracket_only_phi: When True (default), skip ``dphi`` evaluation
+            during the bracket-expansion phase.  Bracket detection then
+            relies solely on the energy-excess criterion ``phi(c) > phi0
+            + eps``; the slope-sign-change shortcut and the Wolfe-OK
+            early exit are unavailable until the zoom phase.  Saves one
+            implicit-AD backward (Neumann/GMRES adjoint + chain rule)
+            per bracket probe.  Set False to restore the original
+            both-phases-use-dphi behavior (issue #504).
     """
     # Not a descent direction
     if dphi0 >= 0:
@@ -178,18 +183,27 @@ def hager_zhang_line_search(
             b, fb, db = c, fc, 0.0
             break
 
-        dc = _safe_dphi(c)
+        # Issue #504: phi-only bracket skips the per-probe dphi call.
+        # Bracket detection then relies solely on the energy-excess
+        # branch (``fc > phi0 + eps``) below; the slope-sign-change
+        # shortcut and the Wolfe-OK early exit are unavailable until
+        # the zoom phase.  ``d_prev`` is propagated as NaN so the zoom
+        # secant degrades gracefully (``da if finite else 0.0``).
+        if bracket_only_phi:
+            dc = float("nan")
+        else:
+            dc = _safe_dphi(c)
 
-        # Check Wolfe at this point
-        if _wolfe_ok(c, fc, dc):
-            return c, fc, True
+            # Check Wolfe at this point
+            if _wolfe_ok(c, fc, dc):
+                return c, fc, True
 
-        if dc >= 0:
-            # Found bracket: slope changed sign
-            # The bracket is [c_prev, c] but we need dphi(a) < 0
-            a, fa, da = c_prev, f_prev, d_prev
-            b, fb, db = c, fc, dc
-            break
+            if dc >= 0:
+                # Found bracket: slope changed sign
+                # The bracket is [c_prev, c] but we need dphi(a) < 0
+                a, fa, da = c_prev, f_prev, d_prev
+                b, fb, db = c, fc, dc
+                break
 
         if fc > phi0 + eps:
             # phi too high — bracket using bisection from [0, c]
