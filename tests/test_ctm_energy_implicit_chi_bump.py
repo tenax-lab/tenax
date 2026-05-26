@@ -127,6 +127,9 @@ def test_ad_gradient_matches_fd_with_bump():
     grad_fd = _central_diff(loss, flat_init, eps=1e-4)
 
     assert jnp.all(jnp.isfinite(grad_ad)), "AD gradient contains non-finite values"
+    # NaN in grad_fd would silently evade the violation count below
+    # (NaN > x is False under IEEE 754), so it must be a hard failure.
+    assert jnp.all(jnp.isfinite(grad_fd)), "FD gradient contains non-finite values"
 
     # Per-element allclose tolerance (the original strict check).
     atol, rtol = 1e-2, 1e-1
