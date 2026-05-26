@@ -33,6 +33,27 @@ _logger = logging.getLogger(__name__)
 Coord = tuple[int, int]
 
 
+def _restore_env_cache_after_line_search(env_cache: dict, snapshot: tuple) -> None:
+    """Revert ``env_cache["envs"]`` to the pre-line-search snapshot.
+
+    ``loss_fn_fwd`` writes its converged env to ``env_cache["envs"]`` to
+    enable φ/dφ env sharing (#502).  Those writes are visible to nested
+    probes within the line search but must not persist past the block —
+    a rejected last probe (or a probe ending at a different α than the
+    accepted one) would otherwise leak an under-converged env into the
+    next iteration's ``value_and_grad`` warm-start (Codex P1 on PR
+    #538).
+
+    ``snapshot`` is the ``(had_envs, envs)`` pair captured before the
+    line search via ``("envs" in env_cache, env_cache.get("envs"))``.
+    """
+    had_envs, envs = snapshot
+    if had_envs:
+        env_cache["envs"] = envs
+    else:
+        env_cache.pop("envs", None)
+
+
 def _drop_env_cache_for_reset(env_cache: dict) -> None:
     """Clear the env warm-start cache AND the implicit-AD λ warm-start seed.
 
@@ -1755,6 +1776,9 @@ def _optimize_gs_ad_tensor(
             direction = jax.tree.map(lambda g: -g, grads)
 
         if use_ls:
+            # Snapshot for env-cache restore after the line search; see
+            # ``_restore_env_cache_after_line_search`` (#502 Codex P1).
+            _ls_env_snap = ("envs" in _env_cache, _env_cache.get("envs"))
             if config.gs_line_search_method == "hager_zhang":
                 from tenax.algorithms._line_search import hager_zhang_line_search
 
@@ -1829,6 +1853,8 @@ def _optimize_gs_ad_tensor(
                     stall_count = 0
                 else:
                     stall_count += 1
+
+            _restore_env_cache_after_line_search(_env_cache, _ls_env_snap)
 
             # Noise recovery on persistent stall (legacy; see issue #298).
             if (
@@ -3210,6 +3236,12 @@ def _optimize_gs_ad_tensor_2site(
                 direction = _tangent_project_unit(direction, params)
 
             if use_ls:
+                # Snapshot for env-cache restore after the line search; see
+                # ``_restore_env_cache_after_line_search`` (#502 Codex P1).
+                _ls_env_snap = (
+                    "envs" in _env_cache_2s,
+                    _env_cache_2s.get("envs"),
+                )
                 if config.gs_line_search_method == "hager_zhang":
                     from tenax.algorithms._line_search import hager_zhang_line_search
 
@@ -3288,6 +3320,8 @@ def _optimize_gs_ad_tensor_2site(
                         stall_count = 0
                     else:
                         stall_count += 1
+
+                _restore_env_cache_after_line_search(_env_cache_2s, _ls_env_snap)
 
                 # Noise recovery on persistent stall (legacy; see issue #298).
                 # Only used by the non-C4v path; C4v defaults to "reset".
@@ -4217,6 +4251,9 @@ def _optimize_gs_ad_multisite(
 
         # ── Line search / update ─────────────────────────────────────────
         if use_ls:
+            # Snapshot for env-cache restore after the line search; see
+            # ``_restore_env_cache_after_line_search`` (#502 Codex P1).
+            _ls_env_snap = ("envs" in _env_cache, _env_cache.get("envs"))
             if config.gs_line_search_method == "hager_zhang":
                 from tenax.algorithms._line_search import hager_zhang_line_search
 
@@ -4293,6 +4330,8 @@ def _optimize_gs_ad_multisite(
                     stall_count = 0
                 else:
                     stall_count += 1
+
+            _restore_env_cache_after_line_search(_env_cache, _ls_env_snap)
 
             # Stall recovery
             if config.gs_stall_recovery == "reset" and stall_count > 0:
