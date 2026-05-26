@@ -13,11 +13,14 @@ jobs:
       version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # tags required for git describe
 
       - id: ver
         run: |
-          BASE=$(grep '^version' pyproject.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          # Bump patch: 0.4.2 -> 0.4.3, then append .devYYYYMMDD
+          BASE_TAG=$(git describe --tags --abbrev=0)
+          BASE=${BASE_TAG#v}  # strip leading "v" (v0.7.0 -> 0.7.0)
+          # Bump patch: 0.7.0 -> 0.7.1, then append .devYYYYMMDD
           IFS='.' read -r major minor patch <<< "$BASE"
           DEV="${major}.${minor}.$((patch + 1)).dev$(date -u +%Y%m%d)"
           echo "version=$DEV" >> "$GITHUB_OUTPUT"
@@ -29,16 +32,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
 
-      - name: Patch version
-        run: sed -i "s/^version = .*/version = \"${{ needs.set-version.outputs.version }}\"/" pyproject.toml
-
       - name: Build sdist
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.set-version.outputs.version }}
         run: uv build --sdist
 
       - name: Upload sdist
@@ -53,12 +57,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
-      - name: Patch version
-        run: sed -i "s/^version = .*/version = \"${{ needs.set-version.outputs.version }}\"/" pyproject.toml
+        with:
+          fetch-depth: 0
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.4
+        env:
+          CIBW_ENVIRONMENT: SETUPTOOLS_SCM_PRETEND_VERSION=${{ needs.set-version.outputs.version }}
 
       - name: Upload wheels
         uses: actions/upload-artifact@v7
@@ -72,12 +77,13 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v6
-
-      - name: Patch version
-        run: sed -i '' "s/^version = .*/version = \"${{ needs.set-version.outputs.version }}\"/" pyproject.toml
+        with:
+          fetch-depth: 0
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.4
+        env:
+          CIBW_ENVIRONMENT: SETUPTOOLS_SCM_PRETEND_VERSION=${{ needs.set-version.outputs.version }}
 
       - name: Upload wheels
         uses: actions/upload-artifact@v7

@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling", "hatch-cython>=0.5", "cython>=3.0", "numpy>=1.26", "scipy>=1.11"]
+requires = ["hatchling", "hatch-vcs", "hatch-cython>=0.5", "cython>=3.0", "numpy>=1.26", "scipy>=1.11"]
 build-backend = "hatchling.build"
 
 [project]
 name = "tenax-tn"
-version = "0.7.0"
+dynamic = ["version"]
 description = "JAX-based tensor network library with symmetry-aware block-sparse tensors"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -60,6 +60,12 @@ Issues = "https://github.com/tenax-lab/tenax/issues"
 
 [dependency-groups]
 dev = ["tenax-tn[dev]"]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/tenax/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tenax"]
