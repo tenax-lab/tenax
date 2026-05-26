@@ -128,26 +128,25 @@ def test_ad_gradient_matches_fd_with_bump():
 
     assert jnp.all(jnp.isfinite(grad_ad)), "AD gradient contains non-finite values"
 
+    # Per-element allclose tolerance (the original strict check).
+    atol, rtol = 1e-2, 1e-1
     abs_diff = jnp.abs(grad_ad - grad_fd)
-    scale = jnp.max(jnp.abs(grad_fd)) + 1e-12
-    norm_diff = abs_diff / scale
-    p90 = jnp.percentile(norm_diff, 90)
-    max_norm = jnp.max(norm_diff)
+    elem_tol = atol + rtol * jnp.abs(grad_fd)
+    violations = abs_diff > elem_tol
+    n_viol = int(jnp.sum(violations))
 
-    # Bulk: 90% of indices must agree within 15% of the global gradient scale.
-    # On Linux this lands ~6%; the threshold gives 2.5x margin for BLAS drift.
-    assert p90 < 0.15, (
-        f"AD/FD bulk disagreement: 90th pct |Δ|/scale = {float(p90):.3f}\n"
-        f"scale = {float(scale):.4f}, max |Δ|/scale = {float(max_norm):.3f}\n"
-        f"grad_ad[:5] = {grad_ad[:5]}\n"
-        f"grad_fd[:5] = {grad_fd[:5]}"
-    )
-    # Hard cap on the worst index: catches blown-up gradients while
-    # tolerating the occasional FD probe that crosses an SVD near-degeneracy
-    # (observed up to ~1.2x on macOS Accelerate at this seed).
-    assert max_norm < 5.0, (
-        f"AD/FD max disagreement too large: |Δ|/scale = {float(max_norm):.3f}\n"
-        f"scale = {float(scale):.4f}\n"
+    # Allow up to 1 out of 32 indices to exceed the element-wise tolerance.
+    # An FD probe can occasionally cross the 2x2 plaquette projector's
+    # near-degenerate SVD threshold (PR #447) and produce a single-index
+    # discontinuity; macOS Accelerate hit this for 1 index per #529, while
+    # all other 31 indices agreed as tightly as on Linux.  A real AD
+    # regression would corrupt many indices simultaneously and fail this
+    # bound — single-outlier robustness does not cost regression sensitivity.
+    assert n_viol <= 1, (
+        f"AD/FD per-element disagreement: {n_viol} of {abs_diff.size} indices "
+        f"exceed atol={atol} + rtol={rtol}*|grad_fd|.\n"
+        f"per-index abs_diff = {abs_diff}\n"
+        f"per-index elem_tol = {elem_tol}\n"
         f"grad_ad[:5] = {grad_ad[:5]}\n"
         f"grad_fd[:5] = {grad_fd[:5]}"
     )
