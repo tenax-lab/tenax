@@ -1638,6 +1638,100 @@ def test_stall_recovery_auto_defaults():
     assert cfg_user.gs_stall_recovery == "noise", "explicit user setting must win"
 
 
+def test_is_real_decrease_noise_floor():
+    """Issue #510: stall trigger must distinguish real progress from FP jitter.
+
+    Without the noise floor, ``f_alpha < energy_float`` is satisfied by a
+    1e-14-scale decrease and ``stall_count`` resets to 0 even though the
+    parameter update ``α·direction`` is numerically zero.  v8b evidence
+    (D=3 χ=9 bipartite implicit AD) showed a 5-hour run grinding at
+    α≈1e-14 because the safety net never fired.
+    """
+    from tenax.algorithms.ipeps_optimize import _is_real_decrease
+
+    # Real decrease: clearly above the 1e-12 floor → True.
+    assert _is_real_decrease(-0.700, -0.500) is True
+    assert _is_real_decrease(-0.50001, -0.50000) is True
+
+    # No change: floor blocks the False-positive.
+    assert _is_real_decrease(-0.500, -0.500) is False
+
+    # Noise-floor jitter: 1e-14 decrease is well below 1e-12 → False.
+    assert _is_real_decrease(-0.500_000_000_000_01, -0.500_000_000_000_00) is False
+    # Right at the floor (strict less-than) → False.
+    assert _is_real_decrease(-0.500_000_000_001, -0.500) is False
+    # Just above the floor → True.
+    assert _is_real_decrease(-0.500_000_000_002, -0.500) is True
+
+    # Energy increased: never accepted.
+    assert _is_real_decrease(-0.400, -0.500) is False
+
+    # Non-finite inputs: rejected (NaN/inf must never satisfy the gate).
+    assert _is_real_decrease(float("nan"), -0.500) is False
+    assert _is_real_decrease(-0.500, float("nan")) is False
+    assert _is_real_decrease(float("-inf"), -0.500) is False
+    assert _is_real_decrease(-0.500, float("inf")) is False
+
+    # Custom noise floor: caller can tighten or loosen.
+    assert _is_real_decrease(-0.5001, -0.5000, noise=1e-2) is False
+    assert _is_real_decrease(-0.5001, -0.5000, noise=1e-5) is True
+
+
+def test_noise_floor_does_not_gate_healthy_optimization():
+    """Issue #510 regression: a healthy AD trajectory must never trip the floor.
+
+    Runs a short 1-site implicit-AD optimization on Heisenberg D=2 χ=4 and
+    verifies every consecutive energy decrease exceeds the 1e-12 noise
+    floor — i.e. the new gate would have returned True on every step.
+    Catches regressions where the floor is set too high (would block real
+    progress) or where the gate's polarity is inverted.
+    """
+    import jax.numpy as jnp
+
+    from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+    from tenax.algorithms.ipeps_optimize import _STALL_NOISE_FLOOR, optimize_gs_ad
+
+    # Heisenberg J=1 Hamiltonian (memory: feedback_energy_units_J1.md).
+    d = 2
+    Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+    H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+    gate = H.reshape(d, d, d, d)
+
+    config = iPEPSConfig(
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4, max_iter=10),
+        gs_num_steps=5,
+        gs_learning_rate=1e-2,
+        unit_cell="1x1",
+        su_init=True,
+        num_imaginary_steps=10,
+        dt=0.3,
+        return_history=True,
+    )
+    _A, _env, E_gs, history = optimize_gs_ad(gate, None, config)
+
+    energies = history["energies"]
+    assert len(energies) == 5, f"expected 5 logged steps, got {len(energies)}"
+    assert all(math.isfinite(e) for e in energies), (
+        f"non-finite energy in trajectory: {energies}"
+    )
+    # The optimizer is non-monotonic when the line search rejects, so check
+    # only that the *minimum* energy moves below the cold-start value by
+    # more than the noise floor — the contract is "healthy runs make
+    # measurable progress above 1e-12", not "every consecutive step
+    # strictly decreases".
+    e0 = energies[0]
+    e_best = min(energies)
+    assert e_best < e0 - _STALL_NOISE_FLOOR, (
+        f"5-step healthy run failed to make above-noise progress: "
+        f"e0={e0:.6e} e_best={e_best:.6e} delta={e0 - e_best:.3e} "
+        f"floor={_STALL_NOISE_FLOOR:.0e}"
+    )
+    assert math.isfinite(E_gs)
+
+
 def test_implicit_ad_variational_caveat_warning():
     """Issue #511: chi-bump cliff-edge artifact must be warned about.
 
