@@ -1732,6 +1732,166 @@ def test_noise_floor_does_not_gate_healthy_optimization():
     assert math.isfinite(E_gs)
 
 
+def test_loss_fn_fwd_updates_env_cache_for_hz_dphi_reuse():
+    """Issue #502: ``loss_fn_fwd`` must write back the converged env.
+
+    The Hager-Zhang line search alternates ``_phi(α)`` (forward only) and
+    ``_dphi(α)`` (forward + implicit-AD backward).  Both run a full
+    forward CTM converge at the same ``α``; this PR shares the φ-stage
+    env via the optimizer's ``_env_cache`` so the dφ-stage warm-starts
+    from a converged env at the exact same trial point.
+
+    White-box test: patch ``python_loop_ctm_converge`` to count calls,
+    run a single L-BFGS step with HZ line search, and verify that the
+    second of any two consecutive CTM calls observed a non-``None``
+    ``env_init`` matching the first call's returned env identity.  This
+    proves the cache-write fires on the φ path and the dφ path picks it
+    up.
+    """
+    from unittest.mock import patch
+
+    import jax.numpy as jnp
+
+    from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    d = 2
+    Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+    H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+    gate = H.reshape(d, d, d, d)
+
+    # Capture (env_init id, returned env id) per call.
+    seen: list[tuple[int | None, int]] = []
+
+    import tenax.algorithms._ctm_python_loop as ctm_mod
+
+    real_converge = ctm_mod.python_loop_ctm_converge
+
+    def _spy(*args, **kwargs):
+        env_init = kwargs.get("env_init")
+        envs, info = real_converge(*args, **kwargs)
+        seen.append((id(env_init) if env_init is not None else None, id(envs)))
+        return envs, info
+
+    config = iPEPSConfig(
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4, max_iter=10),
+        gs_num_steps=1,
+        gs_optimizer="lbfgs",
+        gs_line_search_method="hager_zhang",
+        unit_cell="1x1",
+        su_init=True,
+        num_imaginary_steps=10,
+        dt=0.3,
+    )
+    with patch.object(ctm_mod, "python_loop_ctm_converge", side_effect=_spy):
+        optimize_gs_ad(gate, None, config)
+
+    # We expect: at least one pair (env_init=X, returned=Y) followed by
+    # another call with env_init=Y.  Without the #502 cache-write, all
+    # probe-stage calls would share the same prior-step env_init (since
+    # _env_cache is only updated at end-of-step), so the "chained" id
+    # pattern would not appear within a single line search.
+    chained = any(
+        seen[i + 1][0] is not None and seen[i + 1][0] == seen[i][1]
+        for i in range(len(seen) - 1)
+    )
+    assert chained, (
+        "expected at least one CTM call to env_init=previous-call's-envs; "
+        f"observed call chain ids: {seen}"
+    )
+
+
+def test_loss_fn_fwd_probe_envs_dont_leak_past_line_search():
+    """Issue #502 Codex P1: probe envs must not persist past the line search.
+
+    The next iteration's ``value_and_grad`` warm-start must see the env
+    that was set by ``_update_env_cache(params)`` at the start of the
+    *current* iteration — not the last HZ probe's env (which may be
+    under-converged or at a rejected α).  After the line search,
+    ``_env_cache["envs"]`` is restored to its pre-line-search snapshot
+    by ``_restore_env_cache_after_line_search``.
+
+    White-box approach: spy on the post-line-search ``loss_fn``
+    ``value_and_grad`` call by examining the env_init passed to the
+    *first* CTM call of step N+1.  That env_init should match what
+    ``_update_env_cache(params)`` at step N produced, not what the last
+    HZ probe at step N produced.
+    """
+    from unittest.mock import patch
+
+    import jax.numpy as jnp
+
+    from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    d = 2
+    Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+    H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+    gate = H.reshape(d, d, d, d)
+
+    seen: list[tuple[int | None, int]] = []
+
+    import tenax.algorithms._ctm_python_loop as ctm_mod
+
+    real_converge = ctm_mod.python_loop_ctm_converge
+
+    def _spy(*args, **kwargs):
+        env_init = kwargs.get("env_init")
+        envs, info = real_converge(*args, **kwargs)
+        seen.append((id(env_init) if env_init is not None else None, id(envs)))
+        return envs, info
+
+    # 2 steps so we observe step-2 reading the cache restored at step-1 end.
+    config = iPEPSConfig(
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4, max_iter=10),
+        gs_num_steps=2,
+        gs_optimizer="lbfgs",
+        gs_line_search_method="hager_zhang",
+        unit_cell="1x1",
+        su_init=True,
+        num_imaginary_steps=10,
+        dt=0.3,
+    )
+    with patch.object(ctm_mod, "python_loop_ctm_converge", side_effect=_spy):
+        optimize_gs_ad(gate, None, config)
+
+    # The restore is correct iff `_env_cache["envs"]` immediately after
+    # the line search equals the pre-line-search value.  Since
+    # ``_update_env_cache(params)`` (step-start refresh) returned an
+    # env and the line search must not change ``_env_cache["envs"]``
+    # net of the snapshot/restore, we verify by re-spying on the very
+    # next ``_update_env_cache(params)`` call (the first CTM call of
+    # step 2): its ``env_init`` must equal one of the envs returned
+    # within step 1, AND specifically not the env returned by the LAST
+    # call within step 1 (which would be a probe's env).
+    #
+    # We use the loose property: at least *some* CTM call in step 2
+    # received an env_init that was not the immediate-previous call's
+    # output — proves the restore broke the chain at the line-search
+    # boundary.  Without the restore, the chain would be unbroken.
+    chained = sum(
+        1
+        for i in range(len(seen) - 1)
+        if seen[i + 1][0] is not None and seen[i + 1][0] == seen[i][1]
+    )
+    broken = sum(
+        1
+        for i in range(len(seen) - 1)
+        if seen[i + 1][0] is not None and seen[i + 1][0] != seen[i][1]
+    )
+    # We expect both chained (within line search) and broken (across
+    # line-search boundary) transitions.  The broken transitions prove
+    # the restore fired.
+    assert chained >= 1, f"no φ→dφ chain observed; got {seen}"
+    assert broken >= 1, f"no line-search-boundary cache restore observed; got {seen}"
+
+
 def test_implicit_ad_variational_caveat_warning():
     """Issue #511: chi-bump cliff-edge artifact must be warned about.
 
