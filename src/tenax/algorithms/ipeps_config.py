@@ -205,6 +205,27 @@ class CTMConfig:
     # (or when the CTM actually converges) for strict variational
     # gradients.
     plateau_patience: int | None = 20
+    # Issue #503: line-search φ probes don't need a fully converged env.
+    # When set, these override ``max_iter`` / ``conv_tol`` only on the
+    # forward-only ``loss_fn_fwd`` path used by ``hager_zhang_line_search``
+    # and ``_backtracking_line_search``.  variPEPS caps probe sweeps at
+    # 10-15 to bound the worst-case HZ probe cost.  ``None`` (default)
+    # preserves prior behavior — probes use the same ``max_iter`` /
+    # ``conv_tol`` as the accepted-step CTM converge.
+    #
+    # **Bias note:** an aggressively-capped probe can produce an
+    # under-converged energy estimate at the trial α.  The optimizer's
+    # ``best_energy`` and ``best_params`` are still maintained from the
+    # full-CTM ``loss_fn`` (the value returned by ``jax.value_and_grad``
+    # on the next iteration), so probe bias never corrupts the rolling
+    # best.  But the per-step accept gate ``_is_real_decrease(f_alpha,
+    # energy_float)`` uses the probe-capped ``f_alpha`` — keep
+    # ``probe_max_iter >= max_iter // 2`` (or set ``probe_conv_tol`` no
+    # looser than ~10 × ``conv_tol``) to keep the bias below the noise
+    # floor.  Appended at the end of the dataclass to preserve positional
+    # CTMConfig ABI.
+    probe_max_iter: int | None = None
+    probe_conv_tol: float | None = None
 
     def __post_init__(self):
         valid_modes = {None, "c4v_reference"}

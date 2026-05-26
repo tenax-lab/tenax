@@ -1328,7 +1328,11 @@ def _optimize_gs_ad_tensor(
         envs, _ = python_loop_ctm_converge(
             site_tensors,
             SINGLE_SITE_NEIGHBORS,
-            **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
+            **ctm_converge_kwargs(
+                ctm_cfg,
+                env_init=_env_cache.get("envs", None),
+                for_probe=True,
+            ),
         )
         if _use_cg:
             return float(compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, _cg_d_eff))
@@ -2489,7 +2493,11 @@ def _optimize_gs_ad_tensor_2site(
         envs, _ = python_loop_ctm_converge(
             site_tensors,
             CHECKERBOARD_NEIGHBORS,
-            **ctm_converge_kwargs(ctm_cfg_2s, env_init=_env_cache_2s.get("envs", None)),
+            **ctm_converge_kwargs(
+                ctm_cfg_2s,
+                env_init=_env_cache_2s.get("envs", None),
+                for_probe=True,
+            ),
         )
         return float(
             compute_energy_ctm_tensor_2site(
@@ -3773,7 +3781,11 @@ def _optimize_gs_ad_multisite(
         envs, _ = python_loop_ctm_converge(
             site_tensors,
             neighbors,
-            **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
+            **ctm_converge_kwargs(
+                ctm_cfg,
+                env_init=_env_cache.get("envs", None),
+                for_probe=True,
+            ),
         )
         return float(
             compute_energy_ctm_tensor_multisite(

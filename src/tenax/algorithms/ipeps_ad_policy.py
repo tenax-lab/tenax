@@ -95,6 +95,7 @@ def ctm_converge_kwargs(
     ctm_cfg: CTMConfig,
     *,
     env_init=None,
+    for_probe: bool = False,
 ) -> dict:
     """Return the policy kwargs forwarded to ``python_loop_ctm_converge``.
 
@@ -103,12 +104,27 @@ def ctm_converge_kwargs(
     historical issue where some warm-start paths silently fell back to
     ``conv_method="sv"`` while the implicit-AD energy used
     ``conv_method="elementwise"`` (#351).
+
+    Set ``for_probe=True`` from forward-only line-search probes
+    (``loss_fn_fwd``).  When ``ctm_cfg.probe_max_iter`` /
+    ``ctm_cfg.probe_conv_tol`` are also set, those override the
+    accepted-step ``max_iter`` / ``conv_tol`` so HZ φ probes bail in
+    ~10-15 sweeps instead of 30-60 (issue #503).  Either probe override
+    may be ``None`` independently — the un-overridden field keeps the
+    accepted-step value.
     """
+    _max_iter = ctm_cfg.max_iter
+    _conv_tol = ctm_cfg.conv_tol
+    if for_probe:
+        if ctm_cfg.probe_max_iter is not None:
+            _max_iter = ctm_cfg.probe_max_iter
+        if ctm_cfg.probe_conv_tol is not None:
+            _conv_tol = ctm_cfg.probe_conv_tol
     return {
         "chi": ctm_cfg.chi,
-        "max_iter": ctm_cfg.max_iter,
+        "max_iter": _max_iter,
         "min_iter": ctm_cfg.min_iter,
-        "conv_tol": ctm_cfg.conv_tol,
+        "conv_tol": _conv_tol,
         "conv_method": ctm_cfg.ctm_conv_method,
         "renormalize": ctm_cfg.renormalize,
         "projector_method": ctm_cfg.projector_method,
