@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ctm_energy_ad import invalidate_implicit_ad_warm_start
 from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
 from tenax.algorithms.ipeps_ad_policy import (
     build_ad_ctm_config,
@@ -30,6 +31,20 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 _logger = logging.getLogger(__name__)
 
 Coord = tuple[int, int]
+
+
+def _drop_env_cache_for_reset(env_cache: dict) -> None:
+    """Clear the env warm-start cache AND the implicit-AD λ warm-start seed.
+
+    Called from stall-recovery rollbacks (``params = best_params`` paths)
+    and checkpoint restore.  After these events the env that the next CTM
+    sweep produces decouples from whatever the implicit-AD backward
+    cached, so the Neumann seed in ``_VJP_CACHE`` is no longer a good
+    initial guess (issue #501).  Bump-driven env shape changes are
+    handled by ``_apply_chi_bump`` directly.
+    """
+    env_cache.clear()
+    invalidate_implicit_ad_warm_start()
 
 
 def _apply_chi_bump(
@@ -62,6 +77,12 @@ def _apply_chi_bump(
             )
             for c in env_cache["envs"]
         }
+    # Issue #501: env shape just changed, so the cached Neumann warm-start
+    # λ lives in the wrong vector space.  The shape-mismatch guard inside
+    # ``f_bwd`` already drops it on the next call, but doing so here is
+    # cheap and defensive (covers symmetric-tensor padding paths whose
+    # leaf shape may not change even though the logical χ did).
+    invalidate_implicit_ad_warm_start()
     return new_cfg, env_cache
 
 
@@ -1377,7 +1398,7 @@ def _optimize_gs_ad_tensor(
                 # reactive/scheduled bump fired after it was last
                 # snapshotted.  Clear instead of restoring; the next
                 # CTM call cold-starts at the current ctm_cfg.chi.
-                _env_cache.clear()
+                _drop_env_cache_for_reset(_env_cache)
                 if is_metric_lbfgs:
                     lbfgs_history.clear()
                     prev_A_flat = None
@@ -1851,7 +1872,7 @@ def _optimize_gs_ad_tensor(
                 # reactive/scheduled bump fired after it was last
                 # snapshotted.  Clear instead of restoring; the next
                 # CTM call cold-starts at the current ctm_cfg.chi.
-                _env_cache.clear()
+                _drop_env_cache_for_reset(_env_cache)
                 if is_cg:
                     cg_direction = None
                     prev_grad = None
@@ -2472,7 +2493,7 @@ def _optimize_gs_ad_tensor_2site(
         best_params = bundle["best_params"]
         best_energy = float(bundle["best_energy"])
         prev_energy = float(bundle["prev_energy"])
-        _env_cache_2s.clear()
+        _drop_env_cache_for_reset(_env_cache_2s)
         _env_cache_2s.update(bundle.get("env_cache", {}))
         best_env_cache_2s = dict(bundle.get("best_env_cache", {}))
         stall_count = int(bundle.get("stall_count", 0))
@@ -2682,7 +2703,7 @@ def _optimize_gs_ad_tensor_2site(
                     # reactive/scheduled bump fired after it was last
                     # snapshotted.  Clear instead of restoring; the next
                     # CTM call cold-starts at the current ctm_cfg_2s.chi.
-                    _env_cache_2s.clear()
+                    _drop_env_cache_for_reset(_env_cache_2s)
                     if is_metric_lbfgs:
                         lbfgs_history.clear()
                         prev_params_flat = None
@@ -2738,7 +2759,7 @@ def _optimize_gs_ad_tensor_2site(
                 spike_floor = max(float(np.median(recent_gnorms_2s)), 1.0)
                 if grad_norm_val > config.gs_grad_spike_ratio * spike_floor:
                     params = best_params
-                    _env_cache_2s.clear()
+                    _drop_env_cache_for_reset(_env_cache_2s)
                     # Clear the rolling buffer too (codex PR #524 P1): if a chi
                     # bump or stall recovery has shifted the legitimate
                     # gradient scale upward, the stale median would keep
@@ -3295,7 +3316,7 @@ def _optimize_gs_ad_tensor_2site(
                     # reactive/scheduled bump fired after it was last
                     # snapshotted.  Clear instead of restoring; the next
                     # CTM call cold-starts at the current ctm_cfg_2s.chi.
-                    _env_cache_2s.clear()
+                    _drop_env_cache_for_reset(_env_cache_2s)
                     if is_cg:
                         cg_direction = None
                         prev_grad = None
@@ -3791,7 +3812,7 @@ def _optimize_gs_ad_multisite(
                 # reactive/scheduled bump fired after it was last
                 # snapshotted.  Clear instead of restoring; the next
                 # CTM call cold-starts at the current ctm_cfg.chi.
-                _env_cache.clear()
+                _drop_env_cache_for_reset(_env_cache)
                 if is_metric_lbfgs:
                     lbfgs_history.clear()
                     prev_params_flat = None
@@ -4254,7 +4275,7 @@ def _optimize_gs_ad_multisite(
                 # reactive/scheduled bump fired after it was last
                 # snapshotted.  Clear instead of restoring; the next
                 # CTM call cold-starts at the current ctm_cfg.chi.
-                _env_cache.clear()
+                _drop_env_cache_for_reset(_env_cache)
                 if is_cg:
                     cg_direction = None
                     prev_grad = None

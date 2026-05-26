@@ -269,6 +269,63 @@ def test_adjoint_warm_start_invalidated_on_shape_mismatch():
     )
 
 
+def test_invalidate_implicit_ad_warm_start_clears_seed():
+    """Public invalidation API drops the cached prev_lam_leaves seed (#501).
+
+    After a stall-recovery rollback (``params = best_params``) the cached
+    λ is no longer a good warm-start seed.  The optimizer side calls
+    ``invalidate_implicit_ad_warm_start`` to drop it without depending on
+    the shape-mismatch heuristic.
+    """
+    from tenax.algorithms._ctm_energy_ad import (
+        _VJP_CACHE,
+        invalidate_implicit_ad_warm_start,
+    )
+
+    _VJP_CACHE.clear()
+    # Empty cache: invalidation is a no-op and reports 0 entries cleared.
+    assert invalidate_implicit_ad_warm_start() == 0
+
+    params = _make_su_tensor(D=2, d=2)
+    loss = _make_loss_fn()
+
+    # Populate cache and confirm the seed is cached.
+    jax.grad(loss)(params)
+    assert len(_VJP_CACHE) == 1
+    f_cached, mutables = next(iter(_VJP_CACHE.values()))
+    assert "_invalidate_warm_start" in mutables, (
+        "make_implicit_vjp_fn must register the warm-start invalidator in mutables"
+    )
+    cached_dict = None
+    for cell in f_cached.bwd.__closure__:
+        try:
+            v = cell.cell_contents
+        except ValueError:
+            continue
+        if isinstance(v, dict) and "prev_lam_leaves" in v:
+            cached_dict = v
+            break
+    assert cached_dict is not None
+    assert cached_dict["prev_lam_leaves"] is not None, (
+        "warm-up call must seed prev_lam_leaves"
+    )
+
+    # Invalidate via the public API and confirm the cell was cleared.
+    n_cleared = invalidate_implicit_ad_warm_start()
+    assert n_cleared == 1, f"expected 1 cache entry cleared, got {n_cleared}"
+    assert cached_dict["prev_lam_leaves"] is None, (
+        "invalidate_implicit_ad_warm_start must clear prev_lam_leaves"
+    )
+
+    # Next grad call cold-starts (init_lam = dE_denv), produces a valid
+    # gradient, and re-populates the seed for subsequent calls.
+    g = jax.grad(loss)(params)
+    assert np.all(np.isfinite(np.asarray(g)))
+    assert cached_dict["prev_lam_leaves"] is not None, (
+        "post-invalidation cold-start should refill prev_lam_leaves"
+    )
+
+
 def test_gmres_logger_emits_at_eager_fallback(caplog):
     """When F3 diverges (gmres_maxiter=1 forces it), eager-GMRES log fires too.
 
