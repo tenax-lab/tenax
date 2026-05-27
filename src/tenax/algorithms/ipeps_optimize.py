@@ -1191,6 +1191,7 @@ def _optimize_gs_ad_tensor(
     use_explicit = not config.gs_implicit_ad
     explicit_steps = config.gs_explicit_ad_steps
     explicit_warmup = config.gs_explicit_ad_warmup
+    explicit_backward_steps = config.gs_explicit_ad_backward_steps
 
     def _params_to_A_norm(params):
         """Convert raw optimizer params to a normalized DenseTensor."""
@@ -1225,6 +1226,7 @@ def _optimize_gs_ad_tensor(
         use_explicit=use_explicit,
         explicit_warmup=explicit_warmup,
         explicit_steps=explicit_steps,
+        explicit_backward_steps=explicit_backward_steps,
         energy_fn=_energy_fn_kw,
     )
 
@@ -2362,6 +2364,7 @@ def _optimize_gs_ad_tensor_2site(
     use_explicit = not config.gs_implicit_ad
     explicit_steps = config.gs_explicit_ad_steps
     explicit_warmup = config.gs_explicit_ad_warmup
+    explicit_backward_steps = config.gs_explicit_ad_backward_steps
 
     # Env warm-start cache — replaces flat env_leaves threading.
     _env_cache_2s: dict[str, dict] = {}
@@ -2427,6 +2430,7 @@ def _optimize_gs_ad_tensor_2site(
         use_explicit=use_explicit,
         explicit_warmup=explicit_warmup,
         explicit_steps=explicit_steps,
+        explicit_backward_steps=explicit_backward_steps,
         energy_fn=_energy_fn_2site,
     )
 
@@ -3813,6 +3817,7 @@ def _optimize_gs_ad_multisite(
     use_explicit = not config.gs_implicit_ad
     explicit_steps = config.gs_explicit_ad_steps
     explicit_warmup = config.gs_explicit_ad_warmup
+    explicit_backward_steps = config.gs_explicit_ad_backward_steps
 
     # Env warm-start cache
     _env_cache: dict[str, dict] = {}
@@ -3834,6 +3839,7 @@ def _optimize_gs_ad_multisite(
         use_explicit=use_explicit,
         explicit_warmup=explicit_warmup,
         explicit_steps=explicit_steps,
+        explicit_backward_steps=explicit_backward_steps,
         energy_fn=_energy_fn,
     )
 
