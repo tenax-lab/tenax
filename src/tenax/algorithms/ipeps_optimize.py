@@ -325,6 +325,14 @@ def _normalize_stall_recovery(config, *, unit_cell: str):
     SU-init plateau (gradient norms ~1e-10 trip ``gs_conv_tol`` before the first
     real step).  The 2-site path's larger parameter space interacts
     pathologically with non-variational CTM regions under noise; see issue #298.
+
+    **Caveat (pre-#494)**: the "noise pathological on 2-site" verdict
+    behind the ``"reset"`` default was reached before PR #494 fixed a
+    4-bond undercount in the 2-site bipartite energy (2026-05-17).  The
+    claim has not been revalidated on the corrected energy landscape;
+    see issue #520 for the re-test and #522 for the default-rationale
+    review.  Until then the ``"reset"`` 2-site default carries an
+    asterisk.
     """
     from dataclasses import replace
 
