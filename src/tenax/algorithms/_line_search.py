@@ -24,7 +24,7 @@ def hager_zhang_line_search(
     max_iter: int = 40,
     max_step: float | None = None,
     energy_bound: float | None = None,
-    bracket_only_phi: bool = True,
+    bracket_only_phi: bool = False,
 ) -> tuple[float, float, bool]:
     """Hager-Zhang line search with approximate Wolfe conditions.
 
@@ -43,14 +43,20 @@ def hager_zhang_line_search(
         max_iter: Maximum number of iterations.
         max_step: Maximum allowed step size. If set, alpha is clipped to this.
         energy_bound: Reject trial points where ``|phi(alpha)| > energy_bound``.
-        bracket_only_phi: When True (default), skip ``dphi`` evaluation
-            during the bracket-expansion phase.  Bracket detection then
-            relies solely on the energy-excess criterion ``phi(c) > phi0
-            + eps``; the slope-sign-change shortcut and the Wolfe-OK
+        bracket_only_phi: When True, skip ``dphi`` evaluation during the
+            bracket-expansion phase.  Bracket detection then relies
+            solely on the energy-excess criterion ``phi(c) > phi0 +
+            eps``; the slope-sign-change shortcut and the Wolfe-OK
             early exit are unavailable until the zoom phase.  Saves one
             implicit-AD backward (Neumann/GMRES adjoint + chain rule)
-            per bracket probe.  Set False to restore the original
-            both-phases-use-dphi behavior (issue #504).
+            per bracket probe.  Default is ``False`` (legacy behavior):
+            monotonically-decreasing ``phi`` (e.g. ``exp(-a) - 1``) can
+            satisfy Wolfe at a small ``alpha`` without ever crossing
+            ``phi0 + eps``, so opt-in on this flag is reserved for
+            callers whose probes are expensive enough to justify the
+            extra zoom-phase iterations.  iPEPS HZ call sites pass
+            ``True`` explicitly to capture the implicit-AD backward
+            savings (issue #504).
     """
     # Not a descent direction
     if dphi0 >= 0:
