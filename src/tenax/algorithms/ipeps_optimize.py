@@ -346,18 +346,26 @@ def _warn_implicit_ad_variational_caveat(config: iPEPSConfig, *, path: str) -> N
 def _normalize_stall_recovery(config, *, unit_cell: str):
     """Auto-default ``gs_stall_recovery`` based on unit cell when unset.
 
-    The 1-site C4v production path requires the noise kick to break out of the
-    SU-init plateau (gradient norms ~1e-10 trip ``gs_conv_tol`` before the first
-    real step).  The 2-site path's larger parameter space interacts
-    pathologically with non-variational CTM regions under noise; see issue #298.
+    The 1-site C4v production path requires the noise kick to break out
+    of the SU-init plateau (gradient norms ~1e-10 trip ``gs_conv_tol``
+    before the first real step), so the 1-site default is ``"noise"``.
 
-    **Caveat (pre-#494)**: the "noise pathological on 2-site" verdict
-    behind the ``"reset"`` default was reached before PR #494 fixed a
-    4-bond undercount in the 2-site bipartite energy (2026-05-17).  The
-    claim has not been revalidated on the corrected energy landscape;
-    see issue #520 for the re-test and #522 for the default-rationale
-    review.  Until then the ``"reset"`` 2-site default carries an
-    asterisk.
+    The 2-site default is ``"reset"`` because best-energy snapshot
+    rollback dominates raw noise injection near convergence on this
+    path.  Empirically verified in #520 (PR #551) on the post-#494
+    corrected energy: under both modes the trajectory stayed above the
+    QMC reference (so the original "non-variational drift" pathology
+    from #298 did **not** reproduce), but a 10%-Frobenius noise kick
+    fired close to a settled energy can perturb the L-BFGS state by
+    enough that re-descent does not recover before ``gs_num_steps``
+    runs out.  Reset's best-snapshot fallback dodges this failure mode
+    by construction, so it wins on this path by ~2.6e-2 in the
+    canonical D=2 χ=8 probe.
+
+    Note: the older justification — "noise interacts pathologically
+    with non-variational CTM regions on 2-site (see #298)" — was made
+    on the pre-#494 broken 2-site bipartite energy and does not hold
+    on the corrected loss landscape.  The default itself is unchanged.
     """
     from dataclasses import replace
 
