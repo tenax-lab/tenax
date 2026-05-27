@@ -261,3 +261,29 @@ class TestHagerZhangBracketSkipDphi:
         # Wolfe with delta=0.1, sigma=0.9 on (a-2)²+1 — accepted alpha
         # should be close to the minimum at a=2.
         assert abs(alpha - 2.0) < 1.0
+
+    def test_default_converges_on_monotone_decreasing_phi(self):
+        """Codex P1 regression on #539: ``phi(a) = exp(-a) - 1`` is
+        monotonically decreasing, so ``phi(c) > phi0 + eps`` never fires.
+        Under the new ``bracket_only_phi=False`` default the Wolfe-OK
+        shortcut at ``α=1`` runs as before and the line search returns
+        ``converged=True``.  If the default ever flipped back to ``True``,
+        this test would fail (bracket exhausts max_iter)."""
+        import math
+
+        from tenax.algorithms._line_search import hager_zhang_line_search
+
+        def phi(a):
+            return float(math.exp(-a) - 1.0)
+
+        def dphi(a):
+            return float(-math.exp(-a))
+
+        alpha, f_alpha, converged = hager_zhang_line_search(
+            phi, dphi, phi(0.0), dphi(0.0), alpha_init=1.0
+        )
+        assert converged, (
+            "default bracket_only_phi must converge on monotone-decreasing "
+            f"phi; got alpha={alpha} f_alpha={f_alpha}"
+        )
+        assert f_alpha < 0.0

@@ -1842,6 +1842,7 @@ def _optimize_gs_ad_tensor(
                     max_step=2.0 * alpha0,
                     energy_bound=max(2.0, 2.0 * abs(best_energy)),
                     max_iter=config.gs_hz_max_iter,
+                    bracket_only_phi=True,  # #504: skip dphi in bracket
                 )
                 if config.gs_verbose:
                     print(
@@ -3328,6 +3329,7 @@ def _optimize_gs_ad_tensor_2site(
                         max_step=2.0 * alpha0,
                         energy_bound=max(2.0, 2.0 * abs(best_energy)),
                         max_iter=config.gs_hz_max_iter,
+                        bracket_only_phi=True,  # #504: skip dphi in bracket
                     )
                     if config.gs_verbose:
                         print(
@@ -4360,6 +4362,7 @@ def _optimize_gs_ad_multisite(
                     max_step=2.0 * alpha0,
                     energy_bound=max(2.0, 2.0 * abs(best_energy)),
                     max_iter=config.gs_hz_max_iter,
+                    bracket_only_phi=True,  # #504: skip dphi in bracket
                 )
                 if config.gs_verbose:
                     print(
