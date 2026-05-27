@@ -251,6 +251,41 @@ class CTMConfig:
                 f"adjoint_method must be one of {valid_adjoint_methods}, "
                 f"got {self.adjoint_method!r}"
             )
+        # Phase-1 deprecation (#512): both the scheduled ``chi_ramp`` and
+        # the end-of-outer-step ``chi_auto_bump`` zero-pad the env between
+        # L-BFGS steps and hand a non-physical partial env back to the
+        # optimizer, which can descend to a ghost minimum below the
+        # variational floor.  ``ctmrg_heuristic_increase_chi`` (variPEPS
+        # §2.8.2; PR #514) grows chi inside CTM convergence so the env is
+        # always converged at the new chi before the optimizer sees it.
+        import warnings
+
+        if self.chi_ramp is not None:
+            warnings.warn(
+                "chi_ramp is deprecated and will be removed in a future "
+                "release. Use ctmrg_heuristic_increase_chi=True with "
+                "chi_max set instead — it grows chi inside CTM "
+                "convergence, avoiding the zero-padded-env cliff-edge "
+                "artifact that chi_ramp introduces between L-BFGS steps. "
+                "Migration: replace chi_ramp=[(9, 20), (12, 20), (16, 20)] "
+                "with chi=9, chi_max=16, ctmrg_heuristic_increase_chi=True. "
+                "See issue #512.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if self.chi_auto_bump:
+            warnings.warn(
+                "chi_auto_bump (end-of-outer-step reactive bump) is "
+                "deprecated and will be removed in a future release. Use "
+                "ctmrg_heuristic_increase_chi=True with chi_max set "
+                "instead — it grows chi inside CTM convergence, avoiding "
+                "the zero-padded-env cliff-edge artifact that the "
+                "end-of-outer-step bump introduces between L-BFGS steps. "
+                "See issue #512.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         # variPEPS §2.8.2 auto-bump validation.
         if self.chi_auto_bump and self.chi_ramp is not None:
             raise ValueError(
