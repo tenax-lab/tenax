@@ -196,11 +196,18 @@ def compare_modes(noise_result: dict, reset_result: dict) -> dict:
 
     The decision rule mirrors #520's acceptance criteria:
 
-    * "noise viable" → noise reached a final energy at least as low as reset,
-      did not drift below QMC, and made <= reset's non-monotonic-step count
-      (the #298 pathology pattern is non-monotonic dives below QMC).
-    * "noise pathological" → noise drifted below QMC, or its final energy was
-      materially worse than reset's.
+    * "noise viable" → noise reached a final energy within 1e-3 of reset's,
+      did not drift below QMC, and produced **no more non-monotonic steps
+      per recorded step** than reset.
+    * "noise pathological" → any of: noise drifted below QMC; final energy
+      materially worse than reset's (gap > 1e-3); or noise's non-monotonic
+      fraction exceeds reset's (the #298 pathology pattern is repeated
+      upward jumps as the optimizer chases a perturbed L-BFGS state).
+
+    The non-monotonic count is normalized to a per-step fraction so the
+    comparison stays apples-to-apples when ``reset`` exits early on its
+    stall budget (32 steps in the canonical probe) while ``noise`` runs
+    the full ``gs_num_steps`` (40 in the canonical probe).
     """
     if noise_result["final_energy"] is None or reset_result["final_energy"] is None:
         return {"verdict": "inconclusive", "reason": "one or both runs failed"}
@@ -215,8 +222,8 @@ def compare_modes(noise_result: dict, reset_result: dict) -> dict:
         }
 
     # "Materially worse" = noise final E is above reset final E by more than
-    # the energy-floor noise threshold (1e-6); below that the difference is
-    # within numerical precision at D=2 χ=8.
+    # 1e-3; below that the gap is within line-search-residual precision at
+    # D=2 χ=8.
     delta = noise_result["final_energy"] - reset_result["final_energy"]
     if delta > 1e-3:
         return {
@@ -227,12 +234,35 @@ def compare_modes(noise_result: dict, reset_result: dict) -> dict:
             ),
         }
 
+    # Codex P2 on PR #551: the docstring contract requires
+    # ``non_monotonic_count`` to enter the viable decision.  Without this
+    # check a trajectory that lands on the same final E but spent many
+    # more steps oscillating upward would slip past as "viable",
+    # invalidating the #520 acceptance criteria.  Compare per-step
+    # fractions so the budget-exit asymmetry doesn't bias the call.
+    noise_frac = noise_result["non_monotonic_count"] / max(1, noise_result["num_steps"])
+    reset_frac = reset_result["non_monotonic_count"] / max(1, reset_result["num_steps"])
+    # A small margin (5 percentage points) absorbs natural line-search
+    # retry noise; only a clear noise-side excess flips the verdict.
+    if noise_frac > reset_frac + 0.05:
+        return {
+            "verdict": "noise pathological",
+            "reason": (
+                f"noise non-monotonic fraction ({noise_frac:.2%}, "
+                f"{noise_result['non_monotonic_count']}/{noise_result['num_steps']}) "
+                f"exceeds reset's ({reset_frac:.2%}, "
+                f"{reset_result['non_monotonic_count']}/{reset_result['num_steps']}) "
+                f"by more than the 5pp tolerance"
+            ),
+        }
+
     return {
         "verdict": "noise viable",
         "reason": (
             f"noise final E ({noise_result['final_energy']:.10f}) within "
             f"{abs(delta):.3e} of reset ({reset_result['final_energy']:.10f}); "
-            f"no drift below QMC"
+            f"no drift below QMC; non-monotonic fractions "
+            f"noise={noise_frac:.2%} vs reset={reset_frac:.2%}"
         ),
     }
 
