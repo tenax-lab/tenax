@@ -96,11 +96,19 @@ def _max_stall_seen(stdout_text: str) -> int:
 
 
 def _summarize_trajectory(energies: list[float]) -> dict:
-    """Compute monotonicity + drift diagnostics on a 2-site energy trajectory."""
+    """Compute monotonicity + drift diagnostics on a 2-site energy trajectory.
+
+    Does not include ``final_energy`` in the returned dict — that field is
+    set from ``optimize_gs_ad()``'s return value, which can differ from
+    ``energies[-1]`` when the optimizer rolls back to a best-energy
+    snapshot on terminal stall.  Returning a ``final_energy`` key here
+    and unpacking via ``**summary`` would overwrite the optimizer's
+    answer with the last recorded trajectory step (Codex P2 on #551).
+    """
     if not energies:
         return {
             "num_steps": 0,
-            "final_energy": None,
+            "last_recorded_energy": None,
             "min_energy": None,
             "non_monotonic_count": 0,
             "max_increase": 0.0,
@@ -114,7 +122,10 @@ def _summarize_trajectory(energies: list[float]) -> dict:
     ]
     return {
         "num_steps": len(energies),
-        "final_energy": float(energies[-1]),
+        # Diagnostic only — kept distinct from ``final_energy`` so a
+        # best-snapshot rollback at terminal stall doesn't silently
+        # overwrite the optimizer's returned answer.
+        "last_recorded_energy": float(energies[-1]),
         "min_energy": float(min(energies)),
         "non_monotonic_count": len(increases),
         "max_increase": float(max(increases)) if increases else 0.0,
@@ -234,25 +245,24 @@ def compare_modes(noise_result: dict, reset_result: dict) -> dict:
             ),
         }
 
-    # Codex P2 on PR #551: the docstring contract requires
-    # ``non_monotonic_count`` to enter the viable decision.  Without this
-    # check a trajectory that lands on the same final E but spent many
-    # more steps oscillating upward would slip past as "viable",
-    # invalidating the #520 acceptance criteria.  Compare per-step
-    # fractions so the budget-exit asymmetry doesn't bias the call.
+    # Codex P2 on PR #551: enforce the docstring's strict
+    # "no more non-monotonic steps per recorded step" rule.  A tolerance
+    # here would hide exactly the near-tie cases the criterion is meant
+    # to decide — for the 40-step probe even one or two extra upward
+    # jumps move noise from "viable" to "pathological".  Per-step
+    # fraction normalisation keeps the comparison apples-to-apples when
+    # ``reset`` exits early on its stall budget while ``noise`` runs the
+    # full ``gs_num_steps``.
     noise_frac = noise_result["non_monotonic_count"] / max(1, noise_result["num_steps"])
     reset_frac = reset_result["non_monotonic_count"] / max(1, reset_result["num_steps"])
-    # A small margin (5 percentage points) absorbs natural line-search
-    # retry noise; only a clear noise-side excess flips the verdict.
-    if noise_frac > reset_frac + 0.05:
+    if noise_frac > reset_frac:
         return {
             "verdict": "noise pathological",
             "reason": (
                 f"noise non-monotonic fraction ({noise_frac:.2%}, "
                 f"{noise_result['non_monotonic_count']}/{noise_result['num_steps']}) "
                 f"exceeds reset's ({reset_frac:.2%}, "
-                f"{reset_result['non_monotonic_count']}/{reset_result['num_steps']}) "
-                f"by more than the 5pp tolerance"
+                f"{reset_result['non_monotonic_count']}/{reset_result['num_steps']})"
             ),
         }
 
