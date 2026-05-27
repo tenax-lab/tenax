@@ -266,6 +266,7 @@ def _hager_zhang_line_search_step(
         rho=1.5,
         max_step=2.0 * alpha0,
         energy_bound=max(2.0, 2.0 * abs(energy)),
+        bracket_only_phi=True,  # #504: skip dphi in bracket (implicit-AD path)
     )
     if alpha == 0.0 or f_alpha >= energy:
         return params, energy, 0.0
