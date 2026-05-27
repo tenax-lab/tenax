@@ -1892,6 +1892,57 @@ def test_loss_fn_fwd_probe_envs_dont_leak_past_line_search():
     assert broken >= 1, f"no line-search-boundary cache restore observed; got {seen}"
 
 
+def test_2site_implicit_ad_ctmrg_heuristic_increase_chi_grows_env():
+    """Issue #514: in-CTM χ-bump on 2-site implicit-AD path grows env without crash.
+
+    Before this fix, the optimizer's final-pad step called
+    ``pad_dense_env_chi(env_at_chi_bumped, ctm_cfg.chi_initial)`` which
+    raised ``ValueError: chi_new=N must be >= chi_old=M`` because the
+    in-CTM bump grew the env above ``ctm_cfg.chi`` but the static config
+    was never synced.  The finalize site now reads the env's actual chi
+    via ``_env_cache_chi`` so the bumped env is preserved.
+
+    Probe: D=2 χ_init=4 χ_max=8, threshold=1e-12 (forces the bump every
+    iter), 2 steps.  Assert (a) no crash, (b) final env chi > χ_init.
+    """
+    import jax.numpy as jnp
+
+    from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    d = 2
+    Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+    H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+    gate = H.reshape(d, d, d, d)
+
+    config = iPEPSConfig(
+        max_bond_dim=2,
+        ctm=CTMConfig(
+            chi=4,
+            max_iter=8,
+            ctmrg_heuristic_increase_chi=True,
+            ctmrg_heuristic_increase_chi_threshold=1e-12,  # force bump every call
+            ctmrg_heuristic_increase_chi_step_size=2,
+            chi_max=8,
+        ),
+        gs_num_steps=2,
+        gs_implicit_ad=True,
+        unit_cell="2site",
+        su_init=True,
+        num_imaginary_steps=10,
+        dt=0.3,
+    )
+    (A_opt, B_opt), (env_A, env_B), E_gs = optimize_gs_ad(gate, None, config)
+    assert math.isfinite(E_gs)
+    final_chi = int(env_A.C1.indices[0].dim)
+    assert final_chi > 4, (
+        f"in-CTM bump must grow env beyond chi_init=4; got final_chi={final_chi}"
+    )
+    assert final_chi <= 8, f"final_chi={final_chi} exceeded chi_max=8"
+
+
 def test_gs_ctm_max_iter_schedule_caps_late_step_ctm():
     """Issue #507: ``gs_ctm_max_iter_schedule`` caps accepted-step CTM iter count.
 
