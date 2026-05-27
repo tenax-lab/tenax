@@ -43,6 +43,19 @@ def _is_fermionic_site(A: Tensor) -> bool:
     return bool(sym is not None and getattr(sym, "is_fermionic", False))
 
 
+# Below this |trace| the unnormalized mixed-env RDM is treated as
+# catastrophically cancelling: dividing by the trace amplifies ~4e-18 rounding
+# noise above the atol=1e-10 parity tolerance against the shim path (issue
+# #479 / #485 / #480).  When the split-aware contraction lands at or below
+# this floor we delegate to ``_split_env_to_tensor_standard`` + the standard
+# RDM routine, which produces a different (and on these random-tensor seeds,
+# atol-safe) cancellation behaviour at the cost of the ``chi²·D⁶`` peak.
+#
+# Real CTM-converged envs land with O(1) traces, so the floor never fires in
+# production and the split-aware ``chi²·D⁴`` memory bound is preserved.
+_MIXED_ENV_RDM_TRACE_FLOOR = 1e-8
+
+
 # ------------------------------------------------------------------ #
 # Energy computation (split, no double-layer)                          #
 # ------------------------------------------------------------------ #
@@ -692,27 +705,150 @@ def _rdm1x2_split_tensor_2site(
         |       |       |
         C4_B — T3_B — C3_B
 
-    Delegates to ``_rdm1x2_tensor_2site`` via ``_split_env_to_tensor_standard``
-    to guarantee bit-for-bit agreement with the shim reference.  The mixed-env
-    (two distinct environments) case can produce a near-zero unnormalized trace
-    due to cancellation between the two chi bases; a separate split-aware path
-    accumulates tiny floating-point discrepancies that are amplified by the
-    division, breaking the atol=1e-10 parity requirement.  Converting to
-    standard CTMTensorEnvs first ensures a single, deterministic contraction
-    sequence.
+    Same contraction order and label conventions as ``_rdm1x2_split_tensor``,
+    but T1/T2_T/T4_T come from ``env_A`` (top half) and T3/T2_B/T4_B from
+    ``env_B`` (bottom half).  Bounded peak ``chi²·D⁴`` per half, vs the
+    standard shim's ``chi²·D⁶``.
+
+    When the unnormalized trace lands below
+    :data:`_MIXED_ENV_RDM_TRACE_FLOOR` the trace-divide amplifies floating-
+    point noise above the atol=1e-10 shim-parity tolerance (issues #479,
+    #485); the call delegates to ``_split_env_to_tensor_standard`` + the
+    standard RDM routine on that adversarial path while keeping the
+    memory-efficient split contraction for the common case (#480).
 
     Returns dense RDM of shape ``(d, d, d, d)`` in
     ``(s1_A_ket, s2_B_ket, s1_A_bra, s2_B_bra)``,
     symmetrised and trace-normalised.
     """
-    from tenax.algorithms._ctm_tensor_energy import _rdm1x2_tensor_2site
+    splits_A = _make_split_edges(env_A)
+    splits_B = _make_split_edges(env_B)
+    T1, T4_A_split, T2_A_split = splits_A["T1"], splits_A["T4"], splits_A["T2"]
+    T3, T4_B_split, T2_B_split = splits_B["T3"], splits_B["T4"], splits_B["T2"]
 
-    return _rdm1x2_tensor_2site(
-        A,
-        B,
-        _split_env_to_tensor_standard(env_A),
-        _split_env_to_tensor_standard(env_B),
+    A_bra = A.bar_super().relabels(
+        {
+            "u": "u_bra",
+            "d": "d_bra",
+            "l": "l_bra",
+            "r": "r_bra",
+            "phys": "phys_bra",
+        }
     )
+
+    # ---------- Top half (env_A, A) ----------
+    C1 = env_A.C1.relabel("c1_r", "t1_l")
+    C2 = env_A.C2.relabel("c2_l", "t1_r")
+    top_row = contract(contract(C1, T1), C2)  # (c1_d, u_ket, u_bra, c2_d)
+
+    T4_T = T4_A_split.relabels({"t4_d": "c1_d"})  # (c1_d, l_ket, l_bra, t4_u)
+    T2_T = T2_A_split.relabels({"t2_u": "c2_d"})  # (c2_d, r_ket, r_bra, t2_d)
+
+    A_top = A.relabels({"u": "u_ket", "l": "l_ket", "r": "r_ket"})
+
+    top_T4 = contract(top_row, T4_T)  # chi^2 * D^4
+    top_T4_A = contract(top_T4, A_top)  # chi^2 * D^4 * d (peak)
+    top_T4_A_T2 = contract(top_T4_A, T2_T)  # chi^2 * D^3 * d
+    top_half = contract(top_T4_A_T2, A_bra)  # chi^2 * D^2 * d^2
+
+    # ---------- Bottom half (env_B, B) ----------
+    # Suffix bottom-site labels with "B" so they don't collide with the top half.
+    B_bra = B.bar_super().relabels(
+        {
+            "u": "u_bra",
+            "d": "d_bra",
+            "l": "l_bra",
+            "r": "r_bra",
+            "phys": "phys_bra",
+        }
+    )
+
+    bot_row_C4 = env_B.C4.relabel("c4_u", "t3_r")
+    bot_row_C3 = env_B.C3.relabel("c3_l", "t3_l")
+    bot_row = contract(contract(bot_row_C4, T3), bot_row_C3)
+    bot_row = bot_row.relabels({"d_ket": "d_ketB", "d_bra": "d_braB"})
+
+    T4_B = T4_B_split.relabels(
+        {
+            "t4_u": "c4_r",
+            "t4_d": "t4_uB",
+            "l_ket": "l_ketB",
+            "l_bra": "l_braB",
+        }
+    )
+    T2_B = T2_B_split.relabels(
+        {
+            "t2_d": "c3_u",
+            "t2_u": "t2_dB",
+            "r_ket": "r_ketB",
+            "r_bra": "r_braB",
+        }
+    )
+
+    B_bot = B.relabels(
+        {
+            "u": "u_ketB",
+            "l": "l_ketB",
+            "r": "r_ketB",
+            "d": "d_ketB",
+            "phys": "phys_B",
+        }
+    )
+    B_bra_bot = B_bra.relabels(
+        {
+            "u_bra": "u_braB",
+            "l_bra": "l_braB",
+            "r_bra": "r_braB",
+            "d_bra": "d_braB",
+            "phys_bra": "phys_braB",
+        }
+    )
+
+    bot_T4 = contract(bot_row, T4_B)  # chi^2 * D^4
+    bot_T4_A = contract(bot_T4, B_bot)  # chi^2 * D^4 * d (peak)
+    bot_T4_A_T2 = contract(bot_T4_A, T2_B)  # chi^2 * D^3 * d
+    bot_half = contract(bot_T4_A_T2, B_bra_bot)  # chi^2 * D^2 * d^2
+
+    # ---------- Combine ----------
+    bot_half = bot_half.relabels(
+        {
+            "t4_uB": "t4_u",
+            "t2_dB": "t2_d",
+            "u_ketB": "d",
+            "u_braB": "d_bra",
+        }
+    )
+
+    rdm_t = contract(
+        top_half,
+        bot_half,
+        output_labels=["phys", "phys_B", "phys_bra", "phys_braB"],
+    )
+    # -> (s1_A_ket, s2_B_ket, s1_A_bra, s2_B_bra)
+
+    rdm = rdm_t.todense()
+    d = rdm.shape[0]
+    rdm_mat = rdm.reshape(d * d, d * d)
+    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
+
+    # Trace-floor guard: if the split contraction's trace lands in the
+    # catastrophic-cancellation regime, fall back to the shim path so the
+    # atol=1e-10 parity tolerance holds.  Eager Python branch — these RDM
+    # routines are not jit-traced anywhere in the codebase (energy probes
+    # only).  ``.item()`` forces a host sync.
+    trace_val = jnp.trace(rdm_mat)
+    if float(jnp.abs(trace_val).item()) < _MIXED_ENV_RDM_TRACE_FLOOR:
+        from tenax.algorithms._ctm_tensor_energy import _rdm1x2_tensor_2site
+
+        return _rdm1x2_tensor_2site(
+            A,
+            B,
+            _split_env_to_tensor_standard(env_A),
+            _split_env_to_tensor_standard(env_B),
+        )
+
+    rdm_mat = rdm_mat / (trace_val + EPS)
+    return rdm_mat.reshape(d, d, d, d)
 
 
 def _rdm2x1_split_tensor_2site(
@@ -731,25 +867,139 @@ def _rdm2x1_split_tensor_2site(
         |       |       |       |
         C4_A — T3_A — T3_B — C3_B
 
-    Delegates to ``_rdm2x1_tensor_2site`` via ``_split_env_to_tensor_standard``
-    for the same reason as :func:`_rdm1x2_split_tensor_2site` (issues #479,
-    #485): the mixed-env path can produce a near-zero unnormalized trace, and
-    a separate split-aware contraction sequence accumulates floating-point
-    discrepancies that are amplified by the division.  Routing through the
-    shim guarantees bit-for-bit agreement with the standard reference.
+    Same contraction order and label conventions as ``_rdm2x1_split_tensor``,
+    but C1/C4/T1/T3/T4 come from ``env_A`` (left half) and C2/C3/T1_R/T3_R/T2
+    from ``env_B`` (right half).  Bounded peak ``chi²·D⁴`` per half, vs the
+    standard shim's ``chi²·D⁶``.
+
+    When the unnormalized trace lands below
+    :data:`_MIXED_ENV_RDM_TRACE_FLOOR` the trace-divide amplifies floating-
+    point noise above the atol=1e-10 shim-parity tolerance (issues #479,
+    #485); the call delegates to ``_split_env_to_tensor_standard`` + the
+    standard RDM routine on that adversarial path while keeping the
+    memory-efficient split contraction for the common case (#480).
 
     Returns dense RDM of shape ``(d, d, d, d)`` in
     ``(s1_A_ket, s2_B_ket, s1_A_bra, s2_B_bra)``,
     symmetrised and trace-normalised.
     """
-    from tenax.algorithms._ctm_tensor_energy import _rdm2x1_tensor_2site
-
-    return _rdm2x1_tensor_2site(
-        A,
-        B,
-        _split_env_to_tensor_standard(env_A),
-        _split_env_to_tensor_standard(env_B),
+    splits_A = _make_split_edges(env_A)
+    splits_B = _make_split_edges(env_B)
+    T1, T3, T4 = splits_A["T1"], splits_A["T3"], splits_A["T4"]
+    T1_B_split, T3_B_split, T2_B_split = (
+        splits_B["T1"],
+        splits_B["T3"],
+        splits_B["T2"],
     )
+
+    A_bra = A.bar_super().relabels(
+        {
+            "u": "u_bra",
+            "d": "d_bra",
+            "l": "l_bra",
+            "r": "r_bra",
+            "phys": "phys_bra",
+        }
+    )
+
+    # ---------- Left half (env_A, A) ----------
+    C1 = env_A.C1.relabel("c1_r", "t1_l")
+    UL = contract(C1, T1)  # (c1_d, u_ket, u_bra, t1_r)
+
+    C4 = env_A.C4.relabel("c4_u", "t3_r")
+    LL = contract(C4, T3)  # (c4_r, d_ket, d_bra, t3_l)
+
+    T4_e = T4.relabels({"t4_d": "c1_d", "t4_u": "c4_r"})
+
+    A_left = A.relabels({"u": "u_ket", "d": "d_ket", "l": "l_ket", "r": "r_ket"})
+
+    UL_T4 = contract(UL, T4_e)  # chi^2 * D^4
+    UL_T4_A = contract(UL_T4, A_left)  # chi^2 * D^4 * d (peak)
+    UL_T4_A_LL = contract(UL_T4_A, LL)  # chi^2 * D^3 * d
+    left_half = contract(UL_T4_A_LL, A_bra)  # chi^2 * D^2 * d^2
+
+    # ---------- Right half (env_B, B) ----------
+    T1_R = T1_B_split.relabels(
+        {"t1_l": "t1_lR", "u_ket": "u_ketR", "u_bra": "u_braR", "t1_r": "t1_rR"}
+    )
+    T3_R = T3_B_split.relabels(
+        {"t3_r": "t3_rR", "d_ket": "d_ketR", "d_bra": "d_braR", "t3_l": "t3_lR"}
+    )
+
+    C2 = env_B.C2.relabel("c2_l", "t1_rR")
+    UR = contract(T1_R, C2)  # (t1_lR, u_ketR, u_braR, c2_d)
+
+    C3 = env_B.C3.relabel("c3_l", "t3_lR")
+    LR = contract(T3_R, C3)  # (t3_rR, d_ketR, d_braR, c3_u)
+
+    T2_e = T2_B_split.relabels(
+        {
+            "t2_u": "c2_d",
+            "t2_d": "c3_u",
+            "r_ket": "r_ketR",
+            "r_bra": "r_braR",
+        }
+    )
+
+    B_right = B.relabels(
+        {
+            "u": "u_ketR",
+            "d": "d_ketR",
+            "l": "l_ketR",
+            "r": "r_ketR",
+            "phys": "phys_R",
+        }
+    )
+    B_bra_right = B.bar_super().relabels(
+        {
+            "u": "u_braR",
+            "d": "d_braR",
+            "l": "l_braR",
+            "r": "r_braR",
+            "phys": "phys_braR",
+        }
+    )
+
+    UR_T2 = contract(UR, T2_e)  # chi^2 * D^4
+    UR_T2_A = contract(UR_T2, B_right)  # chi^2 * D^4 * d (peak)
+    UR_T2_A_LR = contract(UR_T2_A, LR)  # chi^2 * D^3 * d
+    right_half = contract(UR_T2_A_LR, B_bra_right)  # chi^2 * D^2 * d^2
+
+    # ---------- Combine ----------
+    right_half = right_half.relabels(
+        {
+            "t1_lR": "t1_r",
+            "t3_rR": "t3_l",
+            "l_ketR": "r_ket",
+            "l_braR": "r_bra",
+        }
+    )
+
+    rdm_t = contract(
+        left_half,
+        right_half,
+        output_labels=["phys", "phys_R", "phys_bra", "phys_braR"],
+    )
+
+    rdm = rdm_t.todense()
+    d = rdm.shape[0]
+    rdm_mat = rdm.reshape(d * d, d * d)
+    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
+
+    # Trace-floor guard: see :func:`_rdm1x2_split_tensor_2site` for rationale.
+    trace_val = jnp.trace(rdm_mat)
+    if float(jnp.abs(trace_val).item()) < _MIXED_ENV_RDM_TRACE_FLOOR:
+        from tenax.algorithms._ctm_tensor_energy import _rdm2x1_tensor_2site
+
+        return _rdm2x1_tensor_2site(
+            A,
+            B,
+            _split_env_to_tensor_standard(env_A),
+            _split_env_to_tensor_standard(env_B),
+        )
+
+    rdm_mat = rdm_mat / (trace_val + EPS)
+    return rdm_mat.reshape(d, d, d, d)
 
 
 def _split_env_to_tensor_standard(env: SplitCTMTensorEnv) -> CTMTensorEnv:
