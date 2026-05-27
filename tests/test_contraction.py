@@ -374,6 +374,101 @@ class TestContractSymmetric:
             net = sum(int(idx.flow) * int(q) for idx, q in zip(result.indices, key))
             assert net == u1.identity(), f"Block {key} violates conservation"
 
+    def test_multi_input_with_disjoint_contracted_legs(self, u1, rng):
+        """Regression for #553: contract(A, B, C) where A and B share no
+        labels but both share separately with C must agree with pairwise
+        contraction.
+
+        Topology::
+
+            A = (a,)        B = (b,)        C = (a, b)
+
+        Before the fix the multi-input ``_contract_symmetric`` path
+        intersected per-tensor contracted-leg signatures of mismatched
+        lengths (A's 1-tuples vs C's 2-tuples) and silently produced
+        an all-zero output.  Pairwise execution gives the correct
+        scalar.  See GitHub issue tenax-lab/tenax#553 for details.
+        """
+        sym = u1
+        charges = np.zeros(2, dtype=np.int32)
+        A = SymmetricTensor.random_normal(
+            (TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="a"),),
+            rng,
+        )
+        B = SymmetricTensor.random_normal(
+            (TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="b"),),
+            jax.random.split(rng)[0],
+        )
+        C = SymmetricTensor.random_normal(
+            (
+                TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="a"),
+                TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="b"),
+            ),
+            jax.random.split(rng)[1],
+        )
+
+        r3 = float(contract(A, B, C).todense())
+        r_pair_ab = float(contract(contract(A, B), C).todense())
+        r_pair_ac = float(contract(contract(A, C), B).todense())
+
+        # All three orderings should agree (and the pre-fix bug returned 0.0).
+        np.testing.assert_allclose(r3, r_pair_ab, atol=1e-12)
+        np.testing.assert_allclose(r3, r_pair_ac, atol=1e-12)
+        # Cross-check against numpy einsum (no symmetry tracking — for U(1)
+        # trivial charges this gives the same answer).
+        ref = float(
+            np.einsum(
+                "a,b,ab->",
+                np.array(A.todense()),
+                np.array(B.todense()),
+                np.array(C.todense()),
+            )
+        )
+        np.testing.assert_allclose(r3, ref, atol=1e-12)
+
+    def test_multi_input_dmrg_style_three_input(self, u1, rng):
+        """Regression for #553: structurally similar to in-tree call sites
+        like ``contract(s_left_dag, corner, s_right)`` and
+        ``contract(C0, L0, C1, L1, C2, L2, T_r, ...)`` where some pairs
+        of inputs do not share labels directly.
+
+        Topology::
+
+            X = (l, m, p)
+            Y = (m, n)
+            Z = (n, l)
+
+        Each pair shares one label; full contraction → scalar of (p,).
+        """
+        sym = u1
+        charges = np.zeros(2, dtype=np.int32)
+        X = SymmetricTensor.random_normal(
+            (
+                TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="l"),
+                TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="m"),
+                TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="p"),
+            ),
+            rng,
+        )
+        Y = SymmetricTensor.random_normal(
+            (
+                TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="m"),
+                TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="n"),
+            ),
+            jax.random.split(rng)[0],
+        )
+        Z = SymmetricTensor.random_normal(
+            (
+                TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="n"),
+                TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="l"),
+            ),
+            jax.random.split(rng)[1],
+        )
+
+        r3 = np.array(contract(X, Y, Z).todense())
+        r_pair = np.array(contract(contract(X, Y), Z).todense())
+        np.testing.assert_allclose(r3, r_pair, atol=1e-12)
+
 
 # ------------------------------------------------------------------ #
 # Truncated SVD                                                        #

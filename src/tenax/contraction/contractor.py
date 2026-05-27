@@ -436,49 +436,94 @@ def _contract_symmetric(
         inversion_pairs = _contraction_inversion_pairs(input_subs, output_part)
 
     # For each tensor, build an index:
-    #   contracted_charge_sig -> list of (block_key, block_array)
-    # where contracted_charge_sig = tuple of charges on contracted legs
-    # in a canonical order (sorted contracted chars).
+    #   partial_sig -> list of (block_key, block_array)
+    # where partial_sig is the tuple of this tensor's contracted-leg charges
+    # in *canonical order*, restricted to the contracted chars the tensor
+    # carries.  Per-tensor partial sigs allow correct multi-input contraction
+    # even when some pair of inputs shares no contracted labels (issue #553);
+    # the previous full-sig intersection silently dropped to zero whenever
+    # two tensors' sig tuples had different lengths.
     contracted_chars_sorted = sorted(contracted_chars)
+    char_to_canonical_pos = {c: i for i, c in enumerate(contracted_chars_sorted)}
 
-    tensor_indices_by_sig: list[dict[tuple[int, ...], list[tuple[BlockKey, Any]]]] = []
-    for tensor_i, (tensor, subs) in enumerate(zip(tensors, input_subs)):
-        # Find which positions in this tensor's subscript are contracted
-        contracted_positions = [
-            pos for pos, c in enumerate(subs) if c in contracted_chars
-        ]
-        # Map contracted char -> position in contracted_chars_sorted
-        char_to_contracted_pos = {c: i for i, c in enumerate(contracted_chars_sorted)}
-        # For this tensor, map each contracted char to its position in subs
-        contracted_char_positions = [
-            (char_to_contracted_pos[subs[pos]], pos) for pos in contracted_positions
-        ]
-        # Sort by canonical contracted char order
-        contracted_char_positions.sort(key=lambda x: x[0])
+    tensor_partial_indices: list[
+        tuple[list[tuple[int, int]], dict[tuple[int, ...], list[tuple[BlockKey, Any]]]]
+    ] = []
+    for tensor, subs in zip(tensors, input_subs):
+        # For each canonical contracted char that this tensor carries, record
+        # ``(canonical_pos, position_in_subs)`` so we can extract the partial
+        # sig from a block key.  Sorted by canonical order so partial sigs
+        # are comparable across tensors that share the same labels.
+        covered: list[tuple[int, int]] = sorted(
+            (char_to_canonical_pos[c], pos)
+            for pos, c in enumerate(subs)
+            if c in contracted_chars
+        )
 
-        sig_index: dict[tuple[int, ...], list[tuple[BlockKey, Any]]] = {}
+        partial_sig_index: dict[tuple[int, ...], list[tuple[BlockKey, Any]]] = {}
         for key, array in tensor.blocks.items():
-            # Extract charges at contracted leg positions, ordered canonically
-            sig = tuple(int(key[pos]) for _, pos in contracted_char_positions)
-            sig_index.setdefault(sig, []).append((key, array))
-        tensor_indices_by_sig.append(sig_index)
+            partial_sig = tuple(int(key[pos]) for _, pos in covered)
+            partial_sig_index.setdefault(partial_sig, []).append((key, array))
+        tensor_partial_indices.append((covered, partial_sig_index))
 
-    # Find contracted-charge signatures shared across all tensors
-    if tensor_indices_by_sig:
-        common_sigs = set(tensor_indices_by_sig[0].keys())
-        for idx_map in tensor_indices_by_sig[1:]:
+    # Fast path: if every tensor carries every contracted char, partial sigs
+    # equal full sigs and we can iterate via direct set intersection (cheaper
+    # than the cartesian product for the common case where the contraction
+    # graph is "complete").
+    all_complete = all(
+        len(covered) == len(contracted_chars_sorted)
+        for covered, _ in tensor_partial_indices
+    )
+    if all_complete and tensor_partial_indices:
+        common_sigs: set[tuple[int, ...]] = set(tensor_partial_indices[0][1].keys())
+        for _, idx_map in tensor_partial_indices[1:]:
             common_sigs &= set(idx_map.keys())
+        sig_iter = iter(common_sigs)
     else:
-        common_sigs = set()
+        # General path: iterate over the cartesian product of allowed charges
+        # at each canonical position, then look up each tensor's partial sig.
+        # For each canonical contracted position, intersect (over tensors
+        # carrying that label) the set of charges they have on that leg.
+        # Tensors that don't carry the label contribute no constraint (their
+        # blocks tensor-product over it).
+        allowed_per_pos: list[set[int]] = []
+        for pos_idx in range(len(contracted_chars_sorted)):
+            constraint: set[int] | None = None
+            for covered, partial_sig_index in tensor_partial_indices:
+                local_pos = None
+                for ci, (canonical_pos, _tensor_pos) in enumerate(covered):
+                    if canonical_pos == pos_idx:
+                        local_pos = ci
+                        break
+                if local_pos is None:
+                    continue
+                charges_here = {sig[local_pos] for sig in partial_sig_index}
+                constraint = (
+                    charges_here if constraint is None else constraint & charges_here
+                )
+            allowed_per_pos.append(constraint if constraint is not None else {0})
+        sig_iter = itertools.product(*[sorted(s) for s in allowed_per_pos])
 
     # Cache for within-block contraction expressions
     block_expr_cache: dict[tuple[tuple[int, ...], ...], Any] = {}
 
     output_blocks: dict[BlockKey, Any] = {}
 
-    for sig in common_sigs:
-        # Get matching blocks for each tensor
-        matching_lists = [idx_map[sig] for idx_map in tensor_indices_by_sig]
+    for full_sig in sig_iter:
+        # For each tensor, extract its partial sig from full_sig and look up
+        # matching blocks. Missing partial sigs (no blocks for that
+        # assignment) terminate this iteration early.
+        matching_lists: list[list[tuple[BlockKey, Any]]] = []
+        skip = False
+        for covered, partial_sig_index in tensor_partial_indices:
+            partial_sig = tuple(full_sig[canonical_pos] for canonical_pos, _ in covered)
+            matching = partial_sig_index.get(partial_sig)
+            if not matching:
+                skip = True
+                break
+            matching_lists.append(matching)
+        if skip:
+            continue
 
         # Iterate over the product of matching blocks only
         for combo in itertools.product(*matching_lists):
