@@ -458,7 +458,21 @@ class iPEPSConfig:
     gs_grad_spike_window: int = 5
     gs_line_search: bool | None = None  # None = auto (True for lbfgs/cg)
     gs_line_search_max_steps: int = 8
-    gs_line_search_method: str = "hager_zhang"  # "armijo" or "hager_zhang"
+    # Line search method: "armijo", "hager_zhang", or "auto".  "auto" (#509)
+    # picks Armijo backtracking when ``ctm.chi < gs_line_search_hz_chi_threshold``
+    # and Hager-Zhang otherwise.  Rationale: iPEPS-AD's gradient at small chi
+    # carries CTM truncation noise of order ε_T that frequently exceeds HZ's
+    # strong-Wolfe curvature tolerance (σ ≈ 0.9), so HZ wastes
+    # ``value_and_grad`` calls hunting an unachievable Wolfe point and falls
+    # back to a poor α.  Armijo only checks sufficient decrease, dodging the
+    # noise entirely at ~5-10× lower per-probe cost.  Resolved once at
+    # optimizer entry from ``ctm.chi``, not adaptively rebound mid-run.
+    gs_line_search_method: str = "hager_zhang"  # "armijo", "hager_zhang", "auto"
+    # χ threshold under which "auto" picks Armijo; at or above, HZ.
+    # variPEPS notes the 2-site bipartite implicit-AD path is variational only
+    # at χ ≥ 16 (warning at ``ipeps_optimize.py``); below that the gradient is
+    # too noisy for strong Wolfe.  16 mirrors that threshold.
+    gs_line_search_hz_chi_threshold: int = 16
     # Hager-Zhang line search inner iteration cap (bracket + secant loops in
     # ``_line_search.hager_zhang_line_search``).  Each iteration triggers
     # one ``value_and_grad`` call, so on chi-saturated 2-site implicit-AD
@@ -639,6 +653,17 @@ class iPEPSConfig:
         if self.gs_hz_max_iter <= 0:
             raise ValueError(
                 f"gs_hz_max_iter must be positive, got {self.gs_hz_max_iter}"
+            )
+        valid_line_search_methods = {"armijo", "hager_zhang", "auto"}
+        if self.gs_line_search_method not in valid_line_search_methods:
+            raise ValueError(
+                f"gs_line_search_method must be one of {valid_line_search_methods}, "
+                f"got {self.gs_line_search_method!r}"
+            )
+        if self.gs_line_search_hz_chi_threshold <= 0:
+            raise ValueError(
+                "gs_line_search_hz_chi_threshold must be positive, "
+                f"got {self.gs_line_search_hz_chi_threshold}"
             )
         if self.gs_explicit_ad_backward_steps is not None:
             if self.gs_explicit_ad_backward_steps < 1:
