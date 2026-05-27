@@ -154,6 +154,7 @@ def make_ctm_energy_fn(
     use_explicit: bool,
     explicit_warmup: int,
     explicit_steps: int,
+    explicit_backward_steps: int | None = None,
     energy_fn=None,
 ):
     """Build a ``site_tensors → energy`` closure used by every iPEPS AD dispatcher.
@@ -181,6 +182,12 @@ def make_ctm_energy_fn(
         use_explicit:     True for the explicit-AD path, False for implicit.
         explicit_warmup:  Number of forward-only warmup CTM sweeps (explicit).
         explicit_steps:   Number of backprop-tracked CTM sweeps (explicit).
+        explicit_backward_steps:
+                          TBPTT cutoff (#506): when set, only the last K
+                          of ``explicit_steps`` sweeps are differentiated;
+                          the leading ``explicit_steps - K`` sweeps run
+                          under ``jax.lax.stop_gradient``.  ``None``
+                          (default) preserves full backward.
         energy_fn:        Optional energy callback for non-default
                           (e.g. coarse-grain) energy evaluation.
     """
@@ -207,6 +214,7 @@ def make_ctm_energy_fn(
                 chi=ctm_cfg.chi,
                 warmup_steps=explicit_warmup,
                 backprop_steps=explicit_steps,
+                backward_steps=explicit_backward_steps,
                 projector_method=ctm_cfg.projector_method,
                 renormalize=ctm_cfg.renormalize,
                 projector_backward=ctm_cfg.projector_backward,

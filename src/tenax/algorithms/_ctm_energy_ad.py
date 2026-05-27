@@ -57,6 +57,7 @@ def ctm_energy_explicit(
     chi: int = 20,
     warmup_steps: int = 3,
     backprop_steps: int = 20,
+    backward_steps: int | None = None,
     projector_method: str = "svd",
     renormalize: bool = True,
     projector_backward: str = "auto",
@@ -82,7 +83,27 @@ def ctm_energy_explicit(
     The backprop phase uses the final post-warmup chi as a Python int so
     JAX traces the checkpointed sweep once and reuses across all backprop
     iterations — bump cannot fire during backprop.
+
+    When ``backward_steps=K`` is set (TBPTT; #506), only the last ``K`` of
+    the ``backprop_steps`` sweeps are differentiated; the leading
+    ``backprop_steps - K`` sweeps run under ``jax.lax.stop_gradient`` so
+    JAX skips their backward.  CTM converges geometrically, so the early
+    backward contribution is bounded by ``ρ^K × (full contribution)`` —
+    negligible for ρ≲0.5 and K≳10.  ``None`` (default) preserves the
+    full backward.
     """
+    if backward_steps is not None:
+        if backward_steps < 1:
+            raise ValueError(
+                "backward_steps must be >= 1 (or None to disable TBPTT), "
+                f"got {backward_steps}"
+            )
+        if backward_steps > backprop_steps:
+            raise ValueError(
+                f"backward_steps ({backward_steps}) cannot exceed "
+                f"backprop_steps ({backprop_steps}); set to None to "
+                "backprop through all sweeps."
+            )
     # ---- validation (mirror ctm_energy_implicit / _sigma_gauged_ctm_converge) ----
     chi_current = _validate_chi_bump_args(
         chi=chi,
@@ -140,7 +161,13 @@ def ctm_energy_explicit(
         )
         return envs_out
 
-    for _ in range(backprop_steps):
+    # TBPTT split (#506): leading ``truncated`` sweeps stop-gradient, last
+    # ``backward_steps`` sweeps remain differentiated.  When backward_steps
+    # is None we backprop through everything (preserves pre-#506 contract).
+    truncated = 0 if backward_steps is None else max(0, backprop_steps - backward_steps)
+    for _ in range(truncated):
+        envs = jax.lax.stop_gradient(_step_envs_only(site_tensors, envs))
+    for _ in range(backprop_steps - truncated):
         envs = jax.checkpoint(_step_envs_only)(site_tensors, envs)
 
     if energy_fn is not None:

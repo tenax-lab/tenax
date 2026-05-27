@@ -505,6 +505,15 @@ class iPEPSConfig:
     gs_explicit_ad: bool | None = None
     gs_explicit_ad_steps: int = 20  # CTM steps for explicit AD backprop phase
     gs_explicit_ad_warmup: int = 3  # warmup CTM steps (no gradient tracking)
+    # TBPTT cutoff (#506): when set, only the last K of ``gs_explicit_ad_steps``
+    # sweeps are differentiated; the leading ``gs_explicit_ad_steps - K`` sweeps
+    # use ``jax.lax.stop_gradient`` so JAX skips their backward.  CTM converges
+    # geometrically, so the early-iteration backward contribution is bounded by
+    # ``ρ^K × (full contribution)`` — negligible for ρ≲0.5 and K≳10.  ``None``
+    # (default) keeps the full backward; an int 1..gs_explicit_ad_steps enables
+    # truncation.  Composes with the existing per-step ``jax.checkpoint`` wrap
+    # in ``ctm_energy_explicit`` to combine memory and compute savings.
+    gs_explicit_ad_backward_steps: int | None = None
     su_init: bool = True  # initialize via simple update before AD
     gs_c4v: bool = False  # enforce C4v symmetry on site tensor during AD
     gs_projector_method: str | None = (
@@ -631,6 +640,20 @@ class iPEPSConfig:
             raise ValueError(
                 f"gs_hz_max_iter must be positive, got {self.gs_hz_max_iter}"
             )
+        if self.gs_explicit_ad_backward_steps is not None:
+            if self.gs_explicit_ad_backward_steps < 1:
+                raise ValueError(
+                    "gs_explicit_ad_backward_steps must be >= 1 (or None to "
+                    "disable truncation), "
+                    f"got {self.gs_explicit_ad_backward_steps}"
+                )
+            if self.gs_explicit_ad_backward_steps > self.gs_explicit_ad_steps:
+                raise ValueError(
+                    "gs_explicit_ad_backward_steps "
+                    f"({self.gs_explicit_ad_backward_steps}) cannot exceed "
+                    f"gs_explicit_ad_steps ({self.gs_explicit_ad_steps}); "
+                    "set to None to backprop through all sweeps."
+                )
         if self.gs_chi_ceiling_bailout < 0:
             raise ValueError(
                 "gs_chi_ceiling_bailout must be >= 0 (0 disables), "
