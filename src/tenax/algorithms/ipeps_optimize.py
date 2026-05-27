@@ -486,9 +486,15 @@ def _resolve_line_search_method(config: iPEPSConfig, ctm_cfg: CTMConfig) -> str:
       sufficient decrease and dodges this entirely at ~5-10× lower
       per-probe cost.
 
-    Resolved once at optimizer entry from the *initial* ``ctm_cfg.chi``,
-    not rebound mid-run.  Users wanting stage-specific behaviour can wrap
-    ``optimize_gs_ad`` calls per chi stage with an explicit method.
+    Each iPEPS optimizer (1-site / 2-site / multisite) calls this helper
+    exactly once after ``ctm_cfg`` is built and caches the result in
+    ``line_search_method``; the dispatch sites inside the optimizer loop
+    consult the cached value, not this function.  That keeps the method
+    stable when ``ctm_cfg.chi`` shifts mid-run under legacy ``chi_ramp``
+    or ``chi_auto_bump`` paths (both deprecated by #512, but still
+    functional — without caching, an "auto" run could silently flip
+    Armijo↔HZ after a bump).  Users wanting stage-specific behaviour
+    should wrap ``optimize_gs_ad`` per chi stage with an explicit method.
     """
     method = config.gs_line_search_method
     if method == "auto":
@@ -1384,6 +1390,12 @@ def _optimize_gs_ad_tensor(
     optimizer = None if is_metric_lbfgs else _build_optimizer(config)
     opt_state = optimizer.init(params) if optimizer is not None else None
     use_ls = _use_line_search(config)
+    # Resolve ``gs_line_search_method`` once per dispatch (#509 / codex P2 on
+    # #549).  ``ctm_cfg.chi`` can shift mid-run under legacy ``chi_ramp`` /
+    # ``chi_auto_bump`` paths (deprecated by #512 but still functional), so
+    # re-resolving inside the line-search step would silently flip Armijo↔HZ
+    # after a bump.  Cache the initial-chi decision and keep it stable.
+    line_search_method = _resolve_line_search_method(config, ctm_cfg)
     is_cg = config.gs_optimizer.lower() == "cg"
 
     best_energy = float("inf")
@@ -1862,7 +1874,7 @@ def _optimize_gs_ad_tensor(
             # Snapshot for env-cache restore after the line search; see
             # ``_restore_env_cache_after_line_search`` (#502 Codex P1).
             _ls_env_snap = ("envs" in _env_cache, _env_cache.get("envs"))
-            if _resolve_line_search_method(config, ctm_cfg) == "hager_zhang":
+            if line_search_method == "hager_zhang":
                 from tenax.algorithms._line_search import hager_zhang_line_search
 
                 slope = _tree_dot(grads, direction)
@@ -2547,6 +2559,9 @@ def _optimize_gs_ad_tensor_2site(
     optimizer = None if is_metric_lbfgs else _build_optimizer(config)
     opt_state = optimizer.init(params) if optimizer is not None else None
     use_ls = _use_line_search(config)
+    # Resolve ``gs_line_search_method`` once per dispatch (#509 / codex P2 on
+    # #549) — see comment in the 1-site path.  2-site uses ``ctm_cfg_2s``.
+    line_search_method = _resolve_line_search_method(config, ctm_cfg_2s)
     is_cg = config.gs_optimizer.lower() == "cg"
 
     best_energy = float("inf")
@@ -3358,7 +3373,7 @@ def _optimize_gs_ad_tensor_2site(
                     "envs" in _env_cache_2s,
                     _env_cache_2s.get("envs"),
                 )
-                if _resolve_line_search_method(config, ctm_cfg_2s) == "hager_zhang":
+                if line_search_method == "hager_zhang":
                     from tenax.algorithms._line_search import hager_zhang_line_search
 
                     slope = _tree_dot(grads, direction)
@@ -3979,6 +3994,9 @@ def _optimize_gs_ad_multisite(
     optimizer = None if is_metric_lbfgs else _build_optimizer(config)
     opt_state = optimizer.init(params) if optimizer is not None else None
     use_ls = _use_line_search(config)
+    # Resolve ``gs_line_search_method`` once per dispatch (#509 / codex P2 on
+    # #549) — see comment in the 1-site path.
+    line_search_method = _resolve_line_search_method(config, ctm_cfg)
     is_cg = config.gs_optimizer.lower() == "cg"
 
     best_energy = float("inf")
@@ -4404,7 +4422,7 @@ def _optimize_gs_ad_multisite(
             # Snapshot for env-cache restore after the line search; see
             # ``_restore_env_cache_after_line_search`` (#502 Codex P1).
             _ls_env_snap = ("envs" in _env_cache, _env_cache.get("envs"))
-            if _resolve_line_search_method(config, ctm_cfg) == "hager_zhang":
+            if line_search_method == "hager_zhang":
                 from tenax.algorithms._line_search import hager_zhang_line_search
 
                 slope = _tree_dot(grads, direction)

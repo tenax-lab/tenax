@@ -85,3 +85,59 @@ def test_default_method_is_hager_zhang_for_back_compat():
     # ctm.chi value should not matter for the explicit-default branch.
     assert _resolve_line_search_method(config, CTMConfig(chi=4)) == "hager_zhang"
     assert _resolve_line_search_method(config, CTMConfig(chi=32)) == "hager_zhang"
+
+
+def test_resolver_called_once_per_optimizer_dispatch():
+    """Codex P2 on #549: ``_resolve_line_search_method`` must be called
+    exactly once per ``optimize_gs_ad`` dispatch, not per line-search
+    step.  Without caching, ``ctm_cfg.chi`` shifting mid-run under
+    legacy ``chi_ramp`` / ``chi_auto_bump`` paths would silently flip
+    the resolved method between Armijo and HZ — violating the
+    documented "resolved once per dispatch" contract.
+
+    This test patches the resolver, runs a short ``optimize_gs_ad``
+    (1-site, default path), and asserts a single call.  The same
+    invariant applies to the 2-site and multisite dispatchers by
+    construction (all three optimizers now bind the resolver result
+    to ``line_search_method`` before the optimizer loop).
+    """
+    import jax.numpy as jnp
+
+    import tenax.algorithms.ipeps_optimize as opt_mod
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    # Heisenberg gate (small, fast).
+    Sz = jnp.array([[0.5, 0.0], [0.0, -0.5]])
+    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+    gate = (jnp.kron(Sz, Sz) + 0.5 * (jnp.kron(Sp, Sm) + jnp.kron(Sm, Sp))).reshape(
+        2, 2, 2, 2
+    )
+
+    config = iPEPSConfig(
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4),
+        gs_num_steps=2,  # enough to traverse multiple line-search calls
+        gs_line_search_method="auto",
+        gs_implicit_ad=True,
+        gs_optimizer="lbfgs",
+    )
+
+    real_resolver = opt_mod._resolve_line_search_method
+    calls: list[tuple] = []
+
+    def counting_resolver(cfg, ctm_cfg):
+        calls.append((id(cfg), id(ctm_cfg)))
+        return real_resolver(cfg, ctm_cfg)
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(opt_mod, "_resolve_line_search_method", counting_resolver)
+    try:
+        optimize_gs_ad(gate, None, config)
+    finally:
+        monkey.undo()
+
+    # Exactly one call per dispatch, regardless of gs_num_steps / line-search retries.
+    assert len(calls) == 1, (
+        f"expected resolver called once per dispatch, got {len(calls)} calls"
+    )
