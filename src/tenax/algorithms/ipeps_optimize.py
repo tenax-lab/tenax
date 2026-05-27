@@ -33,6 +33,28 @@ _logger = logging.getLogger(__name__)
 Coord = tuple[int, int]
 
 
+def _env_cache_chi(env_cache: dict) -> int | None:
+    """Return the actual chi of the cached env, or ``None`` if unavailable.
+
+    The in-CTM χ-bump (``ctmrg_heuristic_increase_chi=True``, #492/#514)
+    grows chi inside ``python_loop_ctm_converge`` and writes the bumped
+    env to ``env_cache``, but the optimizer's local ``ctm_cfg.chi``
+    stays at the original value — there's no return channel from the
+    AD forward back to the outer dispatcher.  Sites that need the
+    *current* chi (e.g. ``pad_dense_env_chi`` at finalize) read it
+    here from the env's leftmost C1 leg dim rather than trusting
+    ``ctm_cfg.chi``.
+    """
+    envs = env_cache.get("envs")
+    if not envs:
+        return None
+    try:
+        sample = next(iter(envs.values()))
+        return int(sample.C1.indices[0].dim)
+    except (AttributeError, IndexError, StopIteration):
+        return None
+
+
 def _restore_env_cache_after_line_search(env_cache: dict, snapshot: tuple) -> None:
     """Revert ``env_cache["envs"]`` to the pre-line-search snapshot.
 
@@ -2143,9 +2165,14 @@ def _optimize_gs_ad_tensor(
     # guarantee that the snapshot is at ctm_cfg.chi.
     _best_env_init = best_env_cache.get("envs", None)
     if _best_env_init:
+        # Issue #514: ``ctm_cfg.chi`` may be stale if the in-CTM χ-bump fired
+        # during a gradient evaluation.  Pad to the larger of the static
+        # config chi and the env_cache's actual chi so we never try to
+        # shrink a bumped env.
+        _target_chi = max(ctm_cfg.chi, _env_cache_chi(_env_cache) or ctm_cfg.chi)
         _best_env_init = {
             c: pad_dense_env_chi(
-                _best_env_init[c], ctm_cfg.chi, base_charges=_bump_base_charges
+                _best_env_init[c], _target_chi, base_charges=_bump_base_charges
             )
             for c in _best_env_init
         }
@@ -2313,14 +2340,10 @@ def _optimize_gs_ad_tensor_2site(
                 "the optimizer can descend to a non-physical ghost minimum "
                 "(see issue #511).  For chi-ramped runs prefer "
                 "ctmrg_heuristic_increase_chi=True over scheduled chi_ramp "
-                "or end-of-outer-step chi_auto_bump.  Note: the implicit-AD "
-                "path on the 2-site branch currently raises NotImplementedError "
-                "when ctmrg_heuristic_increase_chi=True is passed (issue #514); "
-                "use gs_implicit_ad=False to combine in-CTM bump with 2-site "
-                "explicit AD.  Without raising chi manually, chi >= 16 is "
-                "typically needed for generic 2-site Heisenberg.  For "
-                "antiferromagnetic bipartite models, consider gs_c4v=True or "
-                "1-site with sublattice_rotate_gate().",
+                "or end-of-outer-step chi_auto_bump.  Without raising chi "
+                "manually, chi >= 16 is typically needed for generic 2-site "
+                "Heisenberg.  For antiferromagnetic bipartite models, "
+                "consider gs_c4v=True or 1-site with sublattice_rotate_gate().",
                 stacklevel=2,
             )
     import optax
@@ -3694,10 +3717,16 @@ def _optimize_gs_ad_tensor_2site(
         # producer-side guarantee that the snapshot is at ctm_cfg_2s.chi.
         _best_env_init_2s = best_env_cache_2s.get("envs", None)
         if _best_env_init_2s:
+            # Issue #514: see 1-site finalize.  Pad to the larger of the
+            # static ``ctm_cfg_2s.chi`` and the env_cache's actual chi
+            # so a bumped env is never asked to shrink.
+            _target_chi_2s = max(
+                ctm_cfg_2s.chi, _env_cache_chi(_env_cache_2s) or ctm_cfg_2s.chi
+            )
             _best_env_init_2s = {
                 c: pad_dense_env_chi(
                     _best_env_init_2s[c],
-                    ctm_cfg_2s.chi,
+                    _target_chi_2s,
                     base_charges=_bump_base_charges_2s,
                 )
                 for c in _best_env_init_2s
@@ -4660,10 +4689,13 @@ def _optimize_gs_ad_multisite(
     # guarantee that the snapshot is at ctm_cfg.chi.
     _best_env_init_multi = best_env_cache.get("envs", None)
     if _best_env_init_multi:
+        # Issue #514: see 1-site finalize.  Pad to the larger of the
+        # static ``ctm_cfg.chi`` and the env_cache's actual chi.
+        _target_chi_multi = max(ctm_cfg.chi, _env_cache_chi(_env_cache) or ctm_cfg.chi)
         _best_env_init_multi = {
             c: pad_dense_env_chi(
                 _best_env_init_multi[c],
-                ctm_cfg.chi,
+                _target_chi_multi,
                 base_charges=_bump_base_charges_multi,
             )
             for c in _best_env_init_multi
