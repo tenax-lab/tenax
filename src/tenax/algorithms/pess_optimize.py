@@ -131,6 +131,18 @@ def build_pess_loss(
             arnoldi_precheck=False,
             adjoint_method=config.adjoint_method,
             plateau_patience=config.plateau_patience,
+            # In-CTM χ-bump (variPEPS §2.8.2; Issue #492 / #411).  Defaults
+            # in CTMConfig keep the bump off, so existing PESS callers see
+            # no change; downstream ``ctm_energy_implicit`` validates the
+            # combination (chi_max required, step_size > 0, etc.).
+            ctmrg_heuristic_increase_chi=config.ctmrg_heuristic_increase_chi,
+            ctmrg_heuristic_increase_chi_threshold=(
+                config.ctmrg_heuristic_increase_chi_threshold
+            ),
+            ctmrg_heuristic_increase_chi_step_size=(
+                config.ctmrg_heuristic_increase_chi_step_size
+            ),
+            chi_max=config.chi_max,
         )
 
     return loss_fn
@@ -551,6 +563,17 @@ def build_pess_loss_3site_multisite(
             arnoldi_precheck=False,
             adjoint_method=config.adjoint_method,
             plateau_patience=config.plateau_patience,
+            # In-CTM χ-bump (variPEPS §2.8.2; Issue #492 / #411).  Mirror
+            # the 1-site PESS call above so the AD-traced energy and the
+            # warm-start path share the bump policy.
+            ctmrg_heuristic_increase_chi=config.ctmrg_heuristic_increase_chi,
+            ctmrg_heuristic_increase_chi_threshold=(
+                config.ctmrg_heuristic_increase_chi_threshold
+            ),
+            ctmrg_heuristic_increase_chi_step_size=(
+                config.ctmrg_heuristic_increase_chi_step_size
+            ),
+            chi_max=config.chi_max,
         )
 
     return loss_fn

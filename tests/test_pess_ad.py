@@ -506,6 +506,104 @@ def test_build_pess_loss_3site_multisite_forwards_plateau_patience():
     assert seen.get("plateau_patience") == 7
 
 
+def test_build_pess_loss_3site_multisite_forwards_bump_kwargs():
+    """PESS multisite implicit-AD loss must forward the four
+    ``ctmrg_heuristic_increase_chi*`` / ``chi_max`` kwargs (#411 / #492).
+
+    Mirrors ``test_build_pess_loss_3site_multisite_forwards_plateau_patience``:
+    prior to the fix the PESS loss called ``ctm_energy_implicit`` without
+    the bump kwargs, so PESS gradient evaluations silently no-op'd on the
+    in-CTM bump while ``_update_env_cache`` (warm-start) honored it via
+    ``ctm_converge_kwargs``.  Without this regression coverage the split
+    is invisible.
+    """
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    config = _dc_replace(
+        _make_test_config(chi=4),
+        chi_max=8,
+        ctmrg_heuristic_increase_chi=True,
+        ctmrg_heuristic_increase_chi_threshold=5e-7,
+        ctmrg_heuristic_increase_chi_step_size=3,
+    )
+
+    seen: dict = {}
+
+    def fake_ctm_energy_implicit(*args, **kwargs):
+        seen.update(kwargs)
+        return jnp.array(0.0)
+
+    loss_fn = build_pess_loss_3site_multisite(bond_gates, config)
+    with _mock_patch(
+        "tenax.algorithms.pess_optimize.ctm_energy_implicit",
+        fake_ctm_energy_implicit,
+    ):
+        loss_fn(state)
+
+    assert seen.get("ctmrg_heuristic_increase_chi") is True
+    assert seen.get("ctmrg_heuristic_increase_chi_threshold") == pytest.approx(5e-7)
+    assert seen.get("ctmrg_heuristic_increase_chi_step_size") == 3
+    assert seen.get("chi_max") == 8
+
+
+def test_build_pess_loss_3site_multisite_bump_defaults_off():
+    """The default PESS config keeps the in-CTM bump off — verify the
+    forwarded kwargs reflect the disabled-by-default contract so this
+    PR doesn't silently flip the default for existing callers."""
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    bond_gates = kagome_3site_bond_gates(delta=1.0, d=3)
+    config = _make_test_config(chi=4)
+
+    seen: dict = {}
+
+    def fake_ctm_energy_implicit(*args, **kwargs):
+        seen.update(kwargs)
+        return jnp.array(0.0)
+
+    loss_fn = build_pess_loss_3site_multisite(bond_gates, config)
+    with _mock_patch(
+        "tenax.algorithms.pess_optimize.ctm_energy_implicit",
+        fake_ctm_energy_implicit,
+    ):
+        loss_fn(state)
+
+    assert seen.get("ctmrg_heuristic_increase_chi") is False
+    assert seen.get("chi_max") is None
+
+
+def test_build_pess_loss_forwards_bump_kwargs():
+    """Supersite (1-site CG-iPEPS) PESS loss must forward the bump
+    kwargs as well (#411 / #492)."""
+    cg_gates = kagome_xxz_pess_cg_gates(delta=1.0, d=3)
+    config = _dc_replace(
+        _make_test_config(chi=4),
+        chi_max=8,
+        ctmrg_heuristic_increase_chi=True,
+        ctmrg_heuristic_increase_chi_threshold=2e-6,
+        ctmrg_heuristic_increase_chi_step_size=4,
+    )
+
+    state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+
+    seen: dict = {}
+
+    def fake_ctm_energy_implicit(*args, **kwargs):
+        seen.update(kwargs)
+        return jnp.array(0.0)
+
+    loss_fn = build_pess_loss(cg_gates, config)
+    with _mock_patch(
+        "tenax.algorithms.pess_optimize.ctm_energy_implicit",
+        fake_ctm_energy_implicit,
+    ):
+        loss_fn(state)
+
+    assert seen.get("ctmrg_heuristic_increase_chi") is True
+    assert seen.get("ctmrg_heuristic_increase_chi_threshold") == pytest.approx(2e-6)
+    assert seen.get("ctmrg_heuristic_increase_chi_step_size") == 4
+    assert seen.get("chi_max") == 8
+
+
 def test_optimize_pess_3site_multisite_ad_warm_starts_envs():
     """After the first L-BFGS step, `_update_env_cache` populates the cache,
     so the SECOND gradient evaluation receives a non-None env_init.
