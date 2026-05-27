@@ -106,6 +106,14 @@ filterwarnings = [
     # ::test_iPEPSConfig_dE_emits_deprecation_warning) un-suppresses it via
     # ``pytest.warns`` to verify it still fires.
     "ignore:gs_conv_criterion='dE' is deprecated:DeprecationWarning",
+    # Phase-1 deprecation (issue #512): ``chi_ramp`` and the end-of-outer-step
+    # ``chi_auto_bump`` are deprecated in favor of the in-CTM
+    # ``ctmrg_heuristic_increase_chi`` bump (PR #514).  Suppress the noise in
+    # the test bucket — the dedicated regression tests in
+    # ``tests/test_chi_ramp_chi_auto_bump_deprecation.py`` un-suppress via
+    # ``pytest.warns`` to verify both still fire.
+    "ignore:chi_ramp is deprecated:DeprecationWarning",
+    "ignore:chi_auto_bump .* is deprecated:DeprecationWarning",
 ]
 
 [tool.ruff]
