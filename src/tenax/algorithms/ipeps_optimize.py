@@ -3852,11 +3852,6 @@ def _optimize_gs_ad_multisite(
     """
     config = _normalize_stall_recovery(config, unit_cell="multisite")
     _warn_implicit_ad_variational_caveat(config, path="Multisite Lattice")
-    if config.return_history:
-        raise NotImplementedError(
-            "return_history is currently only supported for unit_cell='1x1' "
-            "(non-C4v-reference) and unit_cell='2site'."
-        )
 
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor_energy import (
@@ -4027,6 +4022,15 @@ def _optimize_gs_ad_multisite(
     _patience_schedule = config.gs_plateau_patience_schedule
     _current_patience = ctm_cfg.plateau_patience
 
+    # Optional trajectory capture (config.return_history).  Always allocated
+    # so the post-loop return doesn't have to special-case the disabled path;
+    # values are only populated under ``if config.return_history`` (#458).
+    _history_energies: list[float] = []
+    _history_step_times: list[float] = []
+    _jit_compile_time: float = 0.0
+    _first_step = True
+    _converged = False
+
     def _get_scheduled_conv_tol(step_idx, num_steps):
         if _conv_tol_schedule is None:
             return _current_conv_tol
@@ -4093,6 +4097,8 @@ def _optimize_gs_ad_multisite(
                 _current_patience = new_patience
                 ctm_cfg = _replace(ctm_cfg, plateau_patience=new_patience)
 
+        if config.return_history:
+            _step_t0 = _time.perf_counter()
         try:
             energy_val, grads = jax.value_and_grad(loss_fn)(params)
         except CTMRGGradientError as exc:
@@ -4164,6 +4170,15 @@ def _optimize_gs_ad_multisite(
                     prev_precond_grad = None
             continue
         energy_float = float(energy_val)
+
+        if config.return_history:
+            _step_dt = _time.perf_counter() - _step_t0
+            if _first_step:
+                _jit_compile_time = float(_step_dt)
+                _first_step = False
+            else:
+                _history_step_times.append(float(_step_dt))
+            _history_energies.append(energy_float)
 
         # Update env cache for warm-starting next step
         _update_env_cache(params)
@@ -4309,6 +4324,7 @@ def _optimize_gs_ad_multisite(
                     grad_norm_tol=config.gs_grad_norm_tol,
                     criterion=config.gs_conv_criterion,
                 )
+            _converged = True
             break
 
         # ── Search direction ─────────────────────────────────────────────
@@ -4802,6 +4818,16 @@ def _optimize_gs_ad_multisite(
     # Map coord keys back to site names
     out_tensors = {coord_to_name[c]: out_sites[c] for c in coords}
     out_envs_named = {coord_to_name[c]: out_envs[c] for c in coords}
+
+    if config.return_history:
+        history = {
+            "energies": _history_energies,
+            "step_times": _history_step_times,
+            "jit_compile_time": _jit_compile_time,
+            "num_steps": len(_history_energies),
+            "converged": _converged,
+        }
+        return out_tensors, out_envs_named, E_gs, history
     return out_tensors, out_envs_named, E_gs
 
 
