@@ -33,19 +33,22 @@ _logger = logging.getLogger(__name__)
 Coord = tuple[int, int]
 
 
-def _env_cache_chi(env_cache: dict) -> int | None:
-    """Return the actual chi of the cached env, or ``None`` if unavailable.
+def _env_dict_chi(envs) -> int | None:
+    """Extract chi from a ``coord -> CTMTensorEnv`` mapping.
 
-    The in-CTM χ-bump (``ctmrg_heuristic_increase_chi=True``, #492/#514)
-    grows chi inside ``python_loop_ctm_converge`` and writes the bumped
-    env to ``env_cache``, but the optimizer's local ``ctm_cfg.chi``
-    stays at the original value — there's no return channel from the
-    AD forward back to the outer dispatcher.  Sites that need the
-    *current* chi (e.g. ``pad_dense_env_chi`` at finalize) read it
-    here from the env's leftmost C1 leg dim rather than trusting
+    Returns ``None`` if the input is falsy or malformed (missing
+    ``C1.indices[0].dim``).  Used by the finalize-pad sites to derive
+    the *actual* chi an env carries — the in-CTM χ-bump
+    (``ctmrg_heuristic_increase_chi=True``, #492/#514) grows chi inside
+    ``python_loop_ctm_converge`` without updating the optimizer's local
     ``ctm_cfg.chi``.
+
+    Accepts the bare env dict (``{coord: CTMTensorEnv}``), not an
+    env_cache wrapper — callers should index ``env_cache["envs"]``
+    themselves so both live cache and snapshot dicts can be queried
+    with the same helper (Codex P2 on PR #542: a cleared live cache
+    must not mask a bumped best-env snapshot).
     """
-    envs = env_cache.get("envs")
     if not envs:
         return None
     try:
@@ -2169,7 +2172,15 @@ def _optimize_gs_ad_tensor(
         # during a gradient evaluation.  Pad to the larger of the static
         # config chi and the env_cache's actual chi so we never try to
         # shrink a bumped env.
-        _target_chi = max(ctm_cfg.chi, _env_cache_chi(_env_cache) or ctm_cfg.chi)
+        # Consult both the live cache *and* the best-env snapshot:
+        # rollback paths may have cleared ``_env_cache`` after the
+        # snapshot was taken, leaving the bumped chi reachable only via
+        # ``_best_env_init`` itself (Codex P2 on PR #542).
+        _target_chi = max(
+            ctm_cfg.chi,
+            _env_dict_chi(_env_cache.get("envs")) or 0,
+            _env_dict_chi(_best_env_init) or 0,
+        )
         _best_env_init = {
             c: pad_dense_env_chi(
                 _best_env_init[c], _target_chi, base_charges=_bump_base_charges
@@ -3720,8 +3731,12 @@ def _optimize_gs_ad_tensor_2site(
             # Issue #514: see 1-site finalize.  Pad to the larger of the
             # static ``ctm_cfg_2s.chi`` and the env_cache's actual chi
             # so a bumped env is never asked to shrink.
+            # See 1-site finalize: consult both live cache and the
+            # best-env snapshot (Codex P2 on PR #542).
             _target_chi_2s = max(
-                ctm_cfg_2s.chi, _env_cache_chi(_env_cache_2s) or ctm_cfg_2s.chi
+                ctm_cfg_2s.chi,
+                _env_dict_chi(_env_cache_2s.get("envs")) or 0,
+                _env_dict_chi(_best_env_init_2s) or 0,
             )
             _best_env_init_2s = {
                 c: pad_dense_env_chi(
@@ -4691,7 +4706,13 @@ def _optimize_gs_ad_multisite(
     if _best_env_init_multi:
         # Issue #514: see 1-site finalize.  Pad to the larger of the
         # static ``ctm_cfg.chi`` and the env_cache's actual chi.
-        _target_chi_multi = max(ctm_cfg.chi, _env_cache_chi(_env_cache) or ctm_cfg.chi)
+        # See 1-site finalize: consult both live cache and the
+        # best-env snapshot (Codex P2 on PR #542).
+        _target_chi_multi = max(
+            ctm_cfg.chi,
+            _env_dict_chi(_env_cache.get("envs")) or 0,
+            _env_dict_chi(_best_env_init_multi) or 0,
+        )
         _best_env_init_multi = {
             c: pad_dense_env_chi(
                 _best_env_init_multi[c],
