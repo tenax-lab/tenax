@@ -18,7 +18,7 @@ two paths is physically correct.
 Test progression (each tier builds on the previous):
 
   Tier 1 (1x1 PBC self-loop): A has its u↔d and l↔r virtual legs closed
-    via PBC, phys traced against A.bar_super(). The result is a scalar
+    via PBC, phys traced against A.bar(). The result is a scalar
     that gives ⟨ψ_A|ψ_A⟩ for the trivial 1-site torus. Compare against
     A.norm()^2 — these should differ by exactly the Koszul phases the
     contractor adds for the virtual closure.
@@ -105,7 +105,7 @@ def _norm_1x1_pbc(A: SymmetricTensor) -> jax.Array:
     """Compute ⟨ψ_A|ψ_A⟩ on a 1x1 PBC torus via contractor self-trace.
 
     Network: a single ket A with u↔d and l↔r PBC closures, contracted
-    against a single bra A.bar_super() with the same virtual closures,
+    against a single bra A.bar() with the same virtual closures,
     on a shared phys leg.
 
     The contractor's ``_contraction_inversion_pairs`` adds Koszul phases
@@ -124,7 +124,7 @@ def _norm_1x1_pbc(A: SymmetricTensor) -> jax.Array:
     assert T_ket.labels() == ("phys",)
 
     # Bra: same closures but on bar_super(A); share phys with ket
-    A_bra = A.bar_super()
+    A_bra = A.bar()
     A_bra_pbc = (
         A_bra.relabel("u", "_ud_bra")
         .relabel("d", "_ud_bra")
@@ -200,7 +200,7 @@ def _build_2x2_pbc_tensors(
     ket and bra labels); all other sites trace phys (shared label).
 
     Returns (A00, A01, A10, A11, B00, B01, B10, B11) — A* are ket, B* are
-    bra-layer (built from A.bar_super()).
+    bra-layer (built from A.bar()).
     """
 
     def _ket_phys(site: tuple[int, int]) -> str:
@@ -248,7 +248,7 @@ def _build_2x2_pbc_tensors(
         }
     )
 
-    A_bra = A.bar_super()
+    A_bra = A.bar()
     B00 = A_bra.relabels(
         {
             "r": "H_top",
@@ -377,7 +377,7 @@ def _energy_horizontal_bond_2x2_pbc(
     for that bond.
 
     Note flow convention: the iPEPS A has ``phys`` with ``FlowDirection.IN``.
-    A.bar_super() has the flipped flow (OUT) on phys_bra. The gate's
+    A.bar() has the flipped flow (OUT) on phys_bra. The gate's
     (si, sj) legs are IN (acting on the bra) and (si_out, sj_out) are
     OUT (producing the ket). With those identifications the inserted
     gate's flows align with the bra/ket labels.
@@ -643,102 +643,21 @@ def test_tier6_jw_ed_ground_state_finite():
 # ============================================================ #
 
 
-def test_tier7_norm_sign_diagnostic():
-    """Diagnostic: 2x2 PBC fermionic norm sign across seeds.
-
-    For a properly-computed ⟨ψ|ψ⟩, the result must be non-negative.
-    Empirically, the contractor's 2x2 PBC fermionic norm comes out
-    *negative* for some seeds (4, 5, 70, 999 at D=2 d=2) and positive
-    for others — clear evidence that ``contractor(A, A.bar_super())``
-    on a fermionic PBC torus does **not** compute the physical inner
-    product.  Bosonic norms in the same network are all positive
-    (verified separately).
-
-    This is the smoking gun for a deeper fermionic-algebra issue than
-    #392's split-vs-shim — see the issue to be filed separately.
-    The test prints diagnostic info and asserts that bosonic norms are
-    positive (a strictly weaker check than fermionic ⟨ψ|ψ⟩ ≥ 0).
-    """
-    from tenax.core.symmetry import U1Symmetry
-
-    sym_b = U1Symmetry()
-    z_D = np.zeros(2, dtype=np.int32)
-    z_d = np.zeros(2, dtype=np.int32)
-    bos_indices = (
-        TensorIndex.from_charges(sym_b, z_D, FlowDirection.OUT, label="u"),
-        TensorIndex.from_charges(sym_b, z_D, FlowDirection.IN, label="d"),
-        TensorIndex.from_charges(sym_b, z_D, FlowDirection.OUT, label="l"),
-        TensorIndex.from_charges(sym_b, z_D, FlowDirection.IN, label="r"),
-        TensorIndex.from_charges(sym_b, z_d, FlowDirection.IN, label="phys"),
-    )
-
-    print(
-        f"\n[Tier 7-norm-diag] {'seed':>5} {'norm_fermionic':>20} {'norm_bosonic':>20}"
-    )
-    print("-" * 50)
-    neg_ferm_seeds = []
-    for seed in (0, 1, 2, 3, 4, 5, 70, 100, 999):
-        A_f = _make_random_fermionic_site(D=2, d=2, seed=seed)
-        norm_f = float(_norm_2x2_pbc(A_f).real)
-
-        A_b = SymmetricTensor.random_normal(bos_indices, jax.random.PRNGKey(seed))
-        nval = float(A_b.norm())
-        if nval > 0:
-            A_b = A_b * (1.0 / nval)
-        norm_b = float(_norm_2x2_pbc(A_b).real)
-        print(f"  {seed:>5} {norm_f:>+20.6e} {norm_b:>+20.6e}")
-        if norm_f < 0:
-            neg_ferm_seeds.append((seed, norm_f))
-        assert norm_b > 0, (
-            f"Bosonic 2x2 PBC norm is negative ({norm_b:.6e}) for seed={seed}. "
-            f"This is a strict bug — ⟨ψ|ψ⟩ ≥ 0 for any state."
-        )
-    # The fermionic side is currently broken — assert that at least *some*
-    # of the negative-norm seeds we observed in this session reproduce, so
-    # the test acts as a regression marker.  When the deeper fix lands,
-    # all fermionic norms should turn non-negative and this assertion will
-    # need to be flipped.
-    assert neg_ferm_seeds, (
-        "Expected at least one fermionic 2x2 PBC norm to be negative on "
-        "this branch (smoking-gun regression marker for the deeper "
-        "fermionic-algebra bug).  If this assertion fails, the bug may "
-        "have been fixed — flip the test to require all norms ≥ 0."
-    )
+# test_tier7_norm_sign_diagnostic removed (#555): the diagnostic codified the
+# bug — it asserted that at least one fermionic 2x2 PBC norm comes out
+# negative.  Post-#555 the bug is fixed (no negative norms), so the assertion
+# would fail.  See test_tier7_variational_bound_check below for the positive
+# replacement: ⟨H⟩/N ≥ E_GS is now enforced as a passing test.
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Fermionic 2x2 PBC variational bound is violated by the current "
-        "contractor.  Norms come out negative for some A and the energy "
-        "drops below E_GS for others — see issue to be filed.  This test "
-        "anchors the smoking gun; flip to assertEqual when the deeper "
-        "fermionic-algebra bug is fixed."
-    ),
-)
 def test_tier7_variational_bound_check():
     """For a *normalised* iPEPS state on the same 4-site 2x2 PBC torus, any
     convention computing ⟨H⟩/N must satisfy ⟨H⟩/N ≥ E_GS_per_site.
 
-    Currently fails: the contractor's 2x2 PBC reference produces
-    ``E_ref < E_GS/N`` for seeds 2 and 3 (random fermionic A at D=2 d=2),
-    a strict mathematical impossibility for any normalised ⟨ψ|H|ψ⟩/⟨ψ|ψ⟩.
-    The root cause is upstream of #392 — Tenax's fermionic PEPS norm on
-    a closed PBC torus is not always a valid inner product (it's
-    sometimes negative; see ``test_tier7_norm_sign_diagnostic``).
-
-    Possible interpretations (need investigation):
-      1. ``bar_super()`` + contractor's Koszul tracking doesn't form a
-         consistent fermionic adjoint on a closed-loop topology
-         (analogous to the multiple spin-structures of a fermionic torus
-         partition function — Tenax may be implicitly computing one
-         spin structure with wrong sign for some A).
-      2. The 2x2 PBC topology has too few virtual bonds for the algebra
-         to close cleanly — larger tori (e.g. 4x4) may behave correctly.
-      3. The auxiliary-bond ordering convention in Tenax's contractor
-         doesn't match the physical fermion creation-operator ordering
-         in the standard JW algebra.
+    Was xfail(strict=True) on main when the contractor's auto-Koszul + the
+    bar_super per-block phase together violated the bound for seeds 2 and 3.
+    Post-#555 (removal of both) the bound holds for all 7 seeds at D=2 d=2.
     """
     from tenax.algorithms.fermionic_ipeps import FPEPSConfig, spinless_fermion_gate
 
@@ -857,7 +776,7 @@ def _build_2x2_obc_tensors(
         }
     )
 
-    A_bra = A.bar_super()
+    A_bra = A.bar()
     B00 = A_bra.relabels(
         {
             "r": "H_top",
@@ -1102,7 +1021,7 @@ def test_tier8_obc_variational_bound():
 # ============================================================ #
 #
 # Empirical findings so far:
-#   single tensor:  contract(A, A.bar_super()) = +1.0 (Frobenius)  ✓
+#   single tensor:  contract(A, A.bar()) = +1.0 (Frobenius)  ✓
 #   2x2 OBC:        norm < 0 for 7/9 seeds                          ✗
 #
 # Walk up the ladder to find the smallest topology that fails.
@@ -1115,7 +1034,7 @@ def _norm_single_tensor_bar_super(A: SymmetricTensor) -> float:
     test confirms bar_super + contractor's Koszul tracking produce the
     positive-definite inner product *for a single tensor*.
     """
-    return float(contract(A, A.bar_super()).todense())
+    return float(contract(A, A.bar()).todense())
 
 
 def _norm_2site_obc_chain(A: SymmetricTensor) -> float:
@@ -1146,7 +1065,7 @@ def _norm_2site_obc_chain(A: SymmetricTensor) -> float:
             "phys": "p1",
         }
     )
-    A_bra = A.bar_super()
+    A_bra = A.bar()
     A_bra_0 = A_bra.relabels(
         {
             "u": "b0u",
@@ -1205,43 +1124,42 @@ def _norm_2site_obc_chain(A: SymmetricTensor) -> float:
 
 
 def test_tier9_single_tensor_norm_is_frobenius():
-    """contract(A, A.bar_super()) with all-same-labels = Frobenius norm².
+    """contract(A, A.bar()) with all-same-labels = Frobenius norm².
 
-    This is the SINGLE-TENSOR analog of the inner product.  For A
-    normalised to ‖A‖_F = 1, this must equal exactly +1.0.  Confirms
-    that bar_super + contractor signs *individually* produce a
-    positive-definite inner product.  The bug is multi-site-only.
+    Post-#555 the contractor no longer auto-applies Koszul signs, so the
+    naive single-tensor self-contraction sums squared block elements with
+    no cross-tensor compensation needed.  This was previously tested with
+    bar_super(); under the new convention bar() is enough.
     """
     print(f"\n[Tier 9 single] {'seed':>5} {'inner':>15} {'Frobenius':>15}")
     print("-" * 45)
     for seed in (0, 1, 2, 3, 4, 5, 70, 100, 999):
         A = _make_random_fermionic_site(D=2, d=2, seed=seed)
-        inner = _norm_single_tensor_bar_super(A)
+        inner = float(contract(A, A.bar()).todense())
         frob = float(jnp.sum(jnp.conj(A._data) * A._data).real)
         print(f"  {seed:>5} {inner:>+15.6e} {frob:>+15.6e}")
         np.testing.assert_allclose(inner, frob, atol=1e-12)
 
 
 def test_tier9_2site_obc_norm():
-    """⟨ψ_A|ψ_A⟩ on a 2-site OBC chain: positive or negative?
+    """⟨ψ_A|ψ_A⟩ on a 2-site OBC chain must be positive (#555 regression).
 
-    Diagnostic — prints norm sign per seed.  If the bug already manifests
-    at 2 sites, the minimal failure mode involves just one shared virtual
-    bond (the smallest possible multi-site PEPS network).
+    On main before the #555 fix, this returned negative norms for 4/9 seeds
+    (the minimum failing topology — a single shared virtual bond between two
+    fermionic site tensors).  After #555 (contractor's auto-Koszul removed,
+    bar_super phase removed) the norm equals the bosonic / dense reference,
+    which is a sum of squared block amplitudes — always positive.
     """
     print(f"\n[Tier 9 two-site] {'seed':>5} {'norm':>15}")
     print("-" * 30)
-    neg = []
     for seed in (0, 1, 2, 3, 4, 5, 70, 100, 999):
         A = _make_random_fermionic_site(D=2, d=2, seed=seed)
         norm = _norm_2site_obc_chain(A)
         print(f"  {seed:>5} {norm:>+15.6e}")
-        if norm < 0:
-            neg.append((seed, norm))
-    if neg:
-        print(f"  {len(neg)} negative — bug present already at 2 sites")
-    else:
-        print("  all positive — bug needs ≥3 sites to manifest")
+        assert norm > 0, (
+            f"2-site OBC fermionic norm is non-positive ({norm:.6e}) for "
+            f"seed={seed} — #555 regression."
+        )
 
 
 if __name__ == "__main__":
