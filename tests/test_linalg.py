@@ -311,3 +311,121 @@ class TestSvdBaseChargesEagerPath:
         # s_final[2] = 2nd SV of sector 0 = 1.0
         # s_final[3] = 2nd SV of sector 1 = 5.0
         np.testing.assert_allclose(s_vals, [2.0, 10.0, 1.0, 5.0], atol=1e-10)
+
+    def test_eager_base_charges_honors_max_truncation_err(self):
+        """max_truncation_err must trim n_keep below max_singular_values.
+
+        Codex P2 review of PR #560 flagged: with base_charges + max_singular_values
+        + max_truncation_err, the fix originally derived target_count from the
+        hard cap (max_singular_values) instead of the effective n_keep, so a
+        tight err cutoff was silently ignored. The fix uses n_keep (post-err
+        cutoff) to build target_charges.
+        """
+        from tenax.core.symmetry import FermionParity
+        from tenax.linalg import svd
+
+        sym = FermionParity()
+        charges = np.array([0, 1, 0, 1, 0, 1], dtype=np.int32)
+        idx_l = TensorIndex.from_charges(sym, charges, IN, label="l")
+        idx_r = TensorIndex.from_charges(sym, charges, OUT, label="r")
+        # Rapidly-decaying SVs: 1e-3 err cutoff keeps only the top two.
+        T_dense = np.diag(np.array([10.0, 9.0, 0.001, 0.001, 0.0001, 0.0001]))
+        T = SymmetricTensor.from_dense(T_dense, (idx_l, idx_r))
+
+        U, s, _, _ = svd(
+            T,
+            left_labels=["l"],
+            right_labels=["r"],
+            new_bond_label="bond",
+            max_singular_values=6,
+            max_truncation_err=1e-3,
+            base_charges=np.array([0, 1], dtype=np.int32),
+        )
+        # Expect 2 SVs (the two big ones); not 6 (the hard cap).
+        assert s.shape == (2,), (
+            f"max_truncation_err ignored when base_charges present — "
+            f"got {s.shape[0]} SVs, expected 2"
+        )
+        bond_charges = U.indices[U.labels().index("bond")].charges.tolist()
+        assert bond_charges == [0, 1], (
+            f"bond_charges {bond_charges} should follow canonical order from "
+            f"_derive_charges(base_charges, n_keep=2) = [0, 1]"
+        )
+        np.testing.assert_allclose(np.array(s).tolist(), [10.0, 9.0], atol=1e-10)
+
+    def test_eager_base_charges_expands_n_keep_to_honor_err(self):
+        """n_keep expands iteratively when the canonical prefix violates err.
+
+        Codex P2 follow-up on #561: when ``base_charges`` forces the canonical
+        prefix to keep weaker SVs from required sectors while discarding
+        larger ones from over-represented sectors, the global-cumulative err
+        estimate underestimates the actual err. The fix iteratively expands
+        ``n_keep`` (up to ``max_singular_values``) until the canonical-prefix
+        kept set actually meets the err budget.
+
+        Setup: ``base_charges=[0,1,1]`` with sector SVs ``q0:[1]``,
+        ``q1:[100, 90]``. Global top-2 = ``[100, 90]`` meets a tight err
+        budget, but ``_derive_charges([0,1,1], 2) = [0,1]`` keeps
+        ``[1, 100]`` and discards ``90`` → actual err = 0.67 ≫ 0.05.
+        Expansion to ``n_keep=3`` keeps all three SVs and meets the budget.
+        """
+        from tenax.linalg import svd
+
+        sym = U1Symmetry()
+        charges = np.array([0, 1, 1], dtype=np.int32)
+        idx_l = TensorIndex.from_charges(sym, charges, IN, label="l")
+        idx_r = TensorIndex.from_charges(sym, charges, OUT, label="r")
+        T_dense = np.diag(np.array([1.0, 100.0, 90.0]))
+        T = SymmetricTensor.from_dense(T_dense, (idx_l, idx_r))
+
+        U, s, _, _ = svd(
+            T,
+            left_labels=["l"],
+            right_labels=["r"],
+            new_bond_label="bond",
+            max_singular_values=3,
+            max_truncation_err=0.05,
+            base_charges=np.array([0, 1, 1], dtype=np.int32),
+        )
+        assert s.shape == (3,), (
+            f"n_keep should have expanded from 2 to 3 to honor err — got "
+            f"{s.shape[0]} SVs"
+        )
+        bond_charges = U.indices[U.labels().index("bond")].charges.tolist()
+        assert bond_charges == [0, 1, 1], (
+            f"bond_charges {bond_charges} should match canonical [0, 1, 1]"
+        )
+        np.testing.assert_allclose(np.array(s).tolist(), [1.0, 100.0, 90.0], atol=1e-10)
+
+    def test_eager_base_charges_caps_expansion_at_max_singular_values(self):
+        """Expansion stops at ``max_singular_values`` even if err still violated.
+
+        When the err budget cannot be met under the base_charges constraint
+        within the hard cap, we return what we have at the cap rather than
+        expand further. The actual err may exceed the budget — caller should
+        check ``s.shape[0]`` against expectations if a strict budget matters.
+        """
+        from tenax.linalg import svd
+
+        sym = U1Symmetry()
+        # Same structure but cap at 2 — cannot expand past 2.
+        charges = np.array([0, 1, 1], dtype=np.int32)
+        idx_l = TensorIndex.from_charges(sym, charges, IN, label="l")
+        idx_r = TensorIndex.from_charges(sym, charges, OUT, label="r")
+        T_dense = np.diag(np.array([1.0, 100.0, 90.0]))
+        T = SymmetricTensor.from_dense(T_dense, (idx_l, idx_r))
+
+        U, s, _, _ = svd(
+            T,
+            left_labels=["l"],
+            right_labels=["r"],
+            new_bond_label="bond",
+            max_singular_values=2,
+            max_truncation_err=0.05,
+            base_charges=np.array([0, 1, 1], dtype=np.int32),
+        )
+        # Cap is 2, so we return 2 SVs even though err budget can't be met.
+        assert s.shape == (2,)
+        bond_charges = U.indices[U.labels().index("bond")].charges.tolist()
+        # Canonical prefix for n=2 with base=[0,1,1] is [0, 1].
+        assert bond_charges == [0, 1]

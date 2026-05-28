@@ -288,25 +288,65 @@ def _truncated_svd_symmetric(
     if base_charges is not None and max_singular_values is not None:
         from tenax.algorithms._ctm_utils import _derive_charges
 
-        target_charges = _derive_charges(base_charges, max_singular_values)
-        target_count: dict[int, int] = {}
-        for tq in target_charges:
-            target_count[int(tq)] = target_count.get(int(tq), 0) + 1
         available = {q: len(sector_results[q][1]) for q in sector_results}
-        k_per_sector = {q: min(target_count.get(q, 0), available[q]) for q in available}
-        remaining = n_keep - sum(k_per_sector.values())
-        if remaining > 0:
-            for q in sorted(
-                available.keys(),
-                key=lambda qq: (-(available[qq] - k_per_sector.get(qq, 0)), qq),
-            ):
-                if remaining <= 0:
+        # Pre-build per-sector lists of (value, q, idx_in_sector). all_sv_pairs
+        # is globally descending, so per-sector slices preserve within-sector
+        # descending order.
+        per_sector_pool: dict[int, list[tuple[float, int, int]]] = {}
+        for p in all_sv_pairs:
+            per_sector_pool.setdefault(p[1], []).append(p)
+
+        def _canonical_select(target_n: int):
+            """Allocate per-sector keep matching ``_derive_charges(base, n)``,
+            with greedy fill for over-allocated sectors. Returns
+            ``(k_per_sector, target_charges, kept_pairs_set)``.
+            """
+            t_charges = _derive_charges(base_charges, target_n)
+            t_count: dict[int, int] = {}
+            for tq in t_charges:
+                t_count[int(tq)] = t_count.get(int(tq), 0) + 1
+            k_per: dict[int, int] = {
+                q: min(t_count.get(q, 0), available[q]) for q in available
+            }
+            remaining = target_n - sum(k_per.values())
+            if remaining > 0:
+                for q in sorted(
+                    available.keys(),
+                    key=lambda qq: (-(available[qq] - k_per.get(qq, 0)), qq),
+                ):
+                    if remaining <= 0:
+                        break
+                    capacity_left = available[q] - k_per.get(q, 0)
+                    take = min(remaining, capacity_left)
+                    if take > 0:
+                        k_per[q] = k_per.get(q, 0) + take
+                        remaining -= take
+            pair_set = {(q, i) for q, k in k_per.items() if k > 0 for i in range(k)}
+            return k_per, t_charges, pair_set
+
+        # Iteratively expand ``n_keep`` whenever the canonical-prefix kept set
+        # for the current ``n_keep`` discards weight in excess of
+        # ``max_truncation_err``. The global-cumulative err computed earlier
+        # assumed global top-n selection; under base_charges the canonical
+        # prefix may keep weaker SVs from required sectors and discard larger
+        # ones from over-represented sectors, so the actual err can exceed
+        # the budget. Expand up to ``max_singular_values``; if the budget
+        # still cannot be met we return what we have at the cap. (PR #561
+        # codex P2 review.)
+        if max_truncation_err is not None and n_total > 0:
+            total_sq = sum(p[0] ** 2 for p in all_sv_pairs)
+            err_sq_budget = max_truncation_err**2 * total_sq
+            cap = max_singular_values
+            while n_keep < cap:
+                _, _, pair_set = _canonical_select(n_keep)
+                discarded_sq = sum(
+                    p[0] ** 2 for p in all_sv_pairs if (p[1], p[2]) not in pair_set
+                )
+                if discarded_sq <= err_sq_budget:
                     break
-                capacity_left = available[q] - k_per_sector.get(q, 0)
-                take = min(remaining, capacity_left)
-                if take > 0:
-                    k_per_sector[q] = k_per_sector.get(q, 0) + take
-                    remaining -= take
+                n_keep += 1
+
+        k_per_sector, target_charges, _ = _canonical_select(n_keep)
 
         # Emit ``kept`` (and therefore ``bond_charges``/``s_final``) in the
         # caller's canonical position order, *not* in global SV-magnitude
@@ -317,14 +357,6 @@ def _truncated_svd_symmetric(
         # under ``np.where(idx.charges == q)``.  Mismatched ordering would
         # multiply the wrong charge sectors and silently corrupt the state
         # without crashing (PR #560 codex review).
-        #
-        # Pre-build per-sector lists of (value, q, idx_in_sector) sorted
-        # within-sector descending. all_sv_pairs is globally descending, so
-        # filtering by q preserves within-sector descending order.
-        per_sector_pool: dict[int, list[tuple[float, int, int]]] = {}
-        for p in all_sv_pairs:
-            per_sector_pool.setdefault(p[1], []).append(p)
-
         kept = []
         used = {q: 0 for q in k_per_sector}
         # Phase 1: fill in canonical-position order until target_charges is
@@ -335,7 +367,7 @@ def _truncated_svd_symmetric(
                 kept.append(per_sector_pool[q][used[q]])
                 used[q] += 1
         # Phase 2: append any remaining quota for sectors that got more from
-        # greedy fill than target_count requested.  These tail entries don't
+        # greedy fill than target_count requested. These tail entries don't
         # have a canonical position in ``base_charges`` -- placing them at
         # the end preserves sector-grouped contiguity for the overflow.
         for q in sorted(k_per_sector.keys()):
