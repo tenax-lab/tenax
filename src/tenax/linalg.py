@@ -307,13 +307,41 @@ def _truncated_svd_symmetric(
                 if take > 0:
                     k_per_sector[q] = k_per_sector.get(q, 0) + take
                     remaining -= take
+
+        # Emit ``kept`` (and therefore ``bond_charges``/``s_final``) in the
+        # caller's canonical position order, *not* in global SV-magnitude
+        # order. This matters because downstream code (fPEPS SU, traced path
+        # consumers) applies the returned ``sigma``/``lam`` to the opposite
+        # bond axis -- whose ``idx.charges`` is the canonical pattern -- via
+        # ``scale_bond_axis``, which slices the scale vector by position
+        # under ``np.where(idx.charges == q)``.  Mismatched ordering would
+        # multiply the wrong charge sectors and silently corrupt the state
+        # without crashing (PR #560 codex review).
+        #
+        # Pre-build per-sector lists of (value, q, idx_in_sector) sorted
+        # within-sector descending. all_sv_pairs is globally descending, so
+        # filtering by q preserves within-sector descending order.
+        per_sector_pool: dict[int, list[tuple[float, int, int]]] = {}
+        for p in all_sv_pairs:
+            per_sector_pool.setdefault(p[1], []).append(p)
+
         kept = []
-        for q, k in k_per_sector.items():
-            if k <= 0:
-                continue
-            sector_pairs = [p for p in all_sv_pairs if p[1] == q]
-            kept.extend(sector_pairs[:k])
-        kept.sort(key=lambda x: -x[0])
+        used = {q: 0 for q in k_per_sector}
+        # Phase 1: fill in canonical-position order until target_charges is
+        # exhausted *or* a sector runs out of its k_per_sector quota.
+        for tq in target_charges:
+            q = int(tq)
+            if used.get(q, 0) < k_per_sector.get(q, 0):
+                kept.append(per_sector_pool[q][used[q]])
+                used[q] += 1
+        # Phase 2: append any remaining quota for sectors that got more from
+        # greedy fill than target_count requested.  These tail entries don't
+        # have a canonical position in ``base_charges`` -- placing them at
+        # the end preserves sector-grouped contiguity for the overflow.
+        for q in sorted(k_per_sector.keys()):
+            while used[q] < k_per_sector[q]:
+                kept.append(per_sector_pool[q][used[q]])
+                used[q] += 1
     else:
         kept = all_sv_pairs[:n_keep]
 
