@@ -791,26 +791,25 @@ class TestSplitRDMs:
 
 @pytest.mark.slow
 class TestSplitRDMsFermionic:
-    """Parity vs shim with FermionParity site tensors (Tier 2).
+    """Native split-aware energy matches shim on FermionParity sites (#392).
 
-    Bosonic parity tests don't exercise ``A.bar_super()``'s Koszul-twist /
-    flow-flip handling.  The split-aware path's per-leg ``A.bar_super()``
-    absorption carries a stale Koszul phase that ``_build_double_layer_open_tensor``'s
-    raw ``fuse_indices`` would otherwise cancel; until the convention mismatch
-    in the split-aware RDM functions is resolved (issue #392),
-    ``compute_energy_split_ctm_tensor`` falls back to the shim path
-    automatically when the site is fermionic.  This parity test verifies
-    that the fall-back is wired up correctly: split-CTM-on-fermionic must
-    return the shim's energy to machine precision.
+    Pre-#555 the split-aware path absorbed an extra Koszul phase via
+    ``A.bar_super()`` that ``_build_double_layer_open_tensor``'s raw
+    ``fuse_indices`` (used by the standard path) couldn't cancel; the
+    energies disagreed once the bra was non-trivial.  PR #557 removed both
+    the contractor's auto-Koszul and ``bar_super()`` (only ``A.bar()``
+    remains), eliminating the convention mismatch.  The fermionic shim
+    fallback that ``compute_energy_split_ctm_tensor`` used to apply is now
+    gone, so this parity test exercises the native ``chi²·D⁴`` split-aware
+    contraction directly.
 
     Note on chi choice: with ``FermionParity`` virtual charges (alternating
     0/1), ``ctm_split_tensor`` converges cleanly at every chi after the
     fix for issue #391 (canonical SVD-bond charges shared between ket and
-    bra).  Pre-fix this test only exercised chi=6 and chi=12 because
-    intermediate chi values crashed in the projector path.
+    bra).
     """
 
-    @pytest.mark.parametrize("D, chi", [(2, 6), (3, 12)])
+    @pytest.mark.parametrize("D, chi", [(2, 6), (2, 8), (3, 12)])
     def test_fermionic_energy_matches_shim(self, D, chi, heisenberg_gate):
         from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
         from tenax.algorithms._split_ctm_tensor_energy import (

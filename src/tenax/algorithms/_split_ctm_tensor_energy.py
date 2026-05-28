@@ -24,24 +24,7 @@ from tenax.algorithms._tensor_utils import fuse_indices
 from tenax.contraction.contractor import contract
 from tenax.core import EPS
 from tenax.core.index import FlowDirection
-from tenax.core.tensor import SymmetricTensor, Tensor
-
-
-def _is_fermionic_site(A: Tensor) -> bool:
-    """Return True iff *A* is a SymmetricTensor with a fermionic symmetry.
-
-    Used by ``compute_energy_split_ctm_tensor*`` to detect when the split-aware
-    energy path would carry a stale ``A.bar()`` Koszul phase that the
-    standard double-layer path's ``fuse_indices`` would otherwise cancel (see
-    issue #392).  In that regime we fall back to the shim path, accepting the
-    standard ``chi²·D⁶`` peak (vs the split-aware ``chi²·D⁴·d`` floor) in
-    exchange for a fermion-correct result.
-    """
-    if not isinstance(A, SymmetricTensor):
-        return False
-    sym = A.indices[0].symmetry if A.indices else None
-    return bool(sym is not None and getattr(sym, "is_fermionic", False))
-
+from tenax.core.tensor import Tensor
 
 # Below this |trace| the unnormalized mixed-env RDM is treated as
 # catastrophically cancelling: dividing by the trace amplifies ~4e-18 rounding
@@ -1122,12 +1105,6 @@ def compute_energy_split_ctm_tensor(
     ``(T_ket, T_bra, A, A.bar())``, without merging ket/bra to the
     standard double-layer env. Bounded peak intermediate ~chi^2 * D^4.
 
-    For fermionic sites the split-aware path used to carry a stale
-    ``bar_super`` Koszul phase that ``fuse_indices`` couldn't cancel (#392).
-    Post-#555 (removal of the contractor's auto-Koszul + bar_super phase),
-    that convention mismatch should no longer exist; #392's shim fallback
-    remains in place until #392 is re-validated against the new convention.
-
     Args:
         A:                iPEPS site tensor with labels ``(u, d, l, r, phys)``.
         env:              Converged SplitCTMTensorEnv.
@@ -1137,13 +1114,6 @@ def compute_energy_split_ctm_tensor(
     Returns:
         Scalar energy per site.
     """
-    if _is_fermionic_site(A):
-        from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
-
-        return compute_energy_ctm_tensor(
-            A, _split_env_to_tensor_standard(env), hamiltonian_gate, d
-        )
-
     if d is None:
         phys_idx = [i for i in A.indices if i.label == "phys"]
         d = phys_idx[0].dim if phys_idx else A.indices[-1].dim
@@ -1170,9 +1140,6 @@ def compute_energy_split_ctm_tensor_2site(
 ) -> jax.Array:
     """Compute energy per site for a 2-site checkerboard iPEPS, split-aware.
 
-    Falls back to the shim path for fermionic sites (issue #392) — see
-    :func:`compute_energy_split_ctm_tensor` for details.
-
     Args:
         A:                Site tensor for sublattice A.
         B:                Site tensor for sublattice B.
@@ -1184,18 +1151,6 @@ def compute_energy_split_ctm_tensor_2site(
     Returns:
         Scalar energy per site.
     """
-    if _is_fermionic_site(A) or _is_fermionic_site(B):
-        from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
-
-        return compute_energy_ctm_tensor_2site(
-            A,
-            B,
-            _split_env_to_tensor_standard(env_A),
-            _split_env_to_tensor_standard(env_B),
-            hamiltonian_gate,
-            d,
-        )
-
     if d is None:
         phys_idx = [i for i in A.indices if i.label == "phys"]
         d = phys_idx[0].dim if phys_idx else A.indices[-1].dim
@@ -1230,9 +1185,6 @@ def compute_energy_split_ctm_tensor_multisite(
 
     Each bond is counted once. Energy is normalized by the number of sites.
 
-    Falls back to the shim path when any site is fermionic (issue #392) — see
-    :func:`compute_energy_split_ctm_tensor` for details.
-
     Args:
         site_tensors: ``{coord: Tensor}`` mapping coordinates to iPEPS site tensors.
         envs:         ``{coord: SplitCTMTensorEnv}`` converged split environments per site.
@@ -1244,18 +1196,6 @@ def compute_energy_split_ctm_tensor_multisite(
     Returns:
         Scalar energy per site.
     """
-    if any(_is_fermionic_site(site) for site in site_tensors.values()):
-        from tenax.algorithms._ctm_tensor_energy import (
-            compute_energy_ctm_tensor_multisite,
-        )
-
-        std_envs = {
-            coord: _split_env_to_tensor_standard(env) for coord, env in envs.items()
-        }
-        return compute_energy_ctm_tensor_multisite(
-            site_tensors, std_envs, neighbors, gate, d
-        )
-
     # Infer physical dimension
     if d is None:
         first_A = next(iter(site_tensors.values()))
