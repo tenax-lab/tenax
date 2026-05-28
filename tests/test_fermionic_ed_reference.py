@@ -502,6 +502,7 @@ def test_tier5_reference_energy_finite():
         print(f"  WARNING: imaginary part {e.imag:.3e} is non-trivial")
 
 
+@pytest.mark.slow
 def test_tier5_compare_to_ipeps_ctm_energy():
     """Compare contractor-reference energy vs the standard iPEPS CTM energy.
 
@@ -705,6 +706,7 @@ def test_tier7_norm_sign_diagnostic():
     )
 
 
+@pytest.mark.slow
 @pytest.mark.xfail(
     strict=True,
     reason=(
