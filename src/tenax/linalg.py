@@ -288,7 +288,13 @@ def _truncated_svd_symmetric(
     if base_charges is not None and max_singular_values is not None:
         from tenax.algorithms._ctm_utils import _derive_charges
 
-        target_charges = _derive_charges(base_charges, max_singular_values)
+        # Derive target charges from the effective ``n_keep`` rather than
+        # ``max_singular_values`` directly: ``n_keep`` already incorporates the
+        # adaptive ``max_truncation_err`` cutoff above. Using
+        # ``max_singular_values`` here would overshoot whenever the err cutoff
+        # trimmed ``n_keep`` below the hard cap, silently ignoring the
+        # truncation-error budget. (PR #560 codex P2 review.)
+        target_charges = _derive_charges(base_charges, n_keep)
         target_count: dict[int, int] = {}
         for tq in target_charges:
             target_count[int(tq)] = target_count.get(int(tq), 0) + 1

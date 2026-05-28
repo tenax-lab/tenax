@@ -311,3 +311,44 @@ class TestSvdBaseChargesEagerPath:
         # s_final[2] = 2nd SV of sector 0 = 1.0
         # s_final[3] = 2nd SV of sector 1 = 5.0
         np.testing.assert_allclose(s_vals, [2.0, 10.0, 1.0, 5.0], atol=1e-10)
+
+    def test_eager_base_charges_honors_max_truncation_err(self):
+        """max_truncation_err must trim n_keep below max_singular_values.
+
+        Codex P2 review of PR #560 flagged: with base_charges + max_singular_values
+        + max_truncation_err, the fix originally derived target_count from the
+        hard cap (max_singular_values) instead of the effective n_keep, so a
+        tight err cutoff was silently ignored. The fix uses n_keep (post-err
+        cutoff) to build target_charges.
+        """
+        from tenax.core.symmetry import FermionParity
+        from tenax.linalg import svd
+
+        sym = FermionParity()
+        charges = np.array([0, 1, 0, 1, 0, 1], dtype=np.int32)
+        idx_l = TensorIndex.from_charges(sym, charges, IN, label="l")
+        idx_r = TensorIndex.from_charges(sym, charges, OUT, label="r")
+        # Rapidly-decaying SVs: 1e-3 err cutoff keeps only the top two.
+        T_dense = np.diag(np.array([10.0, 9.0, 0.001, 0.001, 0.0001, 0.0001]))
+        T = SymmetricTensor.from_dense(T_dense, (idx_l, idx_r))
+
+        U, s, _, _ = svd(
+            T,
+            left_labels=["l"],
+            right_labels=["r"],
+            new_bond_label="bond",
+            max_singular_values=6,
+            max_truncation_err=1e-3,
+            base_charges=np.array([0, 1], dtype=np.int32),
+        )
+        # Expect 2 SVs (the two big ones); not 6 (the hard cap).
+        assert s.shape == (2,), (
+            f"max_truncation_err ignored when base_charges present — "
+            f"got {s.shape[0]} SVs, expected 2"
+        )
+        bond_charges = U.indices[U.labels().index("bond")].charges.tolist()
+        assert bond_charges == [0, 1], (
+            f"bond_charges {bond_charges} should follow canonical order from "
+            f"_derive_charges(base_charges, n_keep=2) = [0, 1]"
+        )
+        np.testing.assert_allclose(np.array(s).tolist(), [10.0, 9.0], atol=1e-10)
