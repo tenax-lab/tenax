@@ -31,7 +31,7 @@ def _is_fermionic_site(A: Tensor) -> bool:
     """Return True iff *A* is a SymmetricTensor with a fermionic symmetry.
 
     Used by ``compute_energy_split_ctm_tensor*`` to detect when the split-aware
-    energy path would carry a stale ``A.bar_super()`` Koszul phase that the
+    energy path would carry a stale ``A.bar()`` Koszul phase that the
     standard double-layer path's ``fuse_indices`` would otherwise cancel (see
     issue #392).  In that regime we fall back to the shim path, accepting the
     standard ``chi²·D⁶`` peak (vs the split-aware ``chi²·D⁴·d`` floor) in
@@ -147,7 +147,7 @@ def _rdm_1site_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     """Single-site RDM via split-aware contraction.
 
     Same network topology as ``_rdm_1site_tensor`` but uses 4-leg split edges
-    and keeps ``A`` and ``A.bar_super()`` separate (no double-layer fusion).
+    and keeps ``A`` and ``A.bar()`` separate (no double-layer fusion).
 
     Note: 1-site has an intrinsic chi^2 * D^6 frame stage; the chi^2 * D^4 peak
     target of the design only applies to the 2x1/1x2/diagonal RDMs (Tasks 4-6).
@@ -158,7 +158,7 @@ def _rdm_1site_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     T1, T2, T3, T4 = splits["T1"], splits["T2"], splits["T3"], splits["T4"]
 
     A_ket = A.relabels({"u": "u_ket", "d": "d_ket", "l": "l_ket", "r": "r_ket"})
-    A_bra = A.bar_super().relabels(
+    A_bra = A.bar().relabels(
         {
             "u": "u_bra",
             "d": "d_bra",
@@ -220,7 +220,7 @@ def _rdm1x2_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     splits = _make_split_edges(env)
     T1, T2, T3, T4 = splits["T1"], splits["T2"], splits["T3"], splits["T4"]
 
-    A_bra = A.bar_super().relabels(
+    A_bra = A.bar().relabels(
         {
             "u": "u_bra",
             "d": "d_bra",
@@ -357,7 +357,7 @@ def _rdm2x1_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     splits = _make_split_edges(env)
     T1, T2, T3, T4 = splits["T1"], splits["T2"], splits["T3"], splits["T4"]
 
-    A_bra = A.bar_super().relabels(
+    A_bra = A.bar().relabels(
         {
             "u": "u_bra",
             "d": "d_bra",
@@ -417,7 +417,7 @@ def _rdm2x1_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
             "phys": "phys_R",
         }
     )
-    A_bra_right = A.bar_super().relabels(
+    A_bra_right = A.bar().relabels(
         {
             "u": "u_braR",
             "d": "d_braR",
@@ -495,7 +495,7 @@ def _rdm_diagonal_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     A_TL = A.relabels({"u": "u_ket", "l": "l_ket"})  # keep d, r, phys open
     TL_frame_A = contract(TL_frame, A_TL)
     # open: (u_bra, t1_r, l_bra, t4_u, d, r, phys) — chi^2 * D^4 * d
-    A_bra_TL = A.bar_super().relabels(
+    A_bra_TL = A.bar().relabels(
         {
             "u": "u_bra",
             "l": "l_bra",
@@ -532,7 +532,7 @@ def _rdm_diagonal_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     )
     TR_frame_A = contract(TR_frame, A_TR)
     # open: (u_braR, t1_lR, r_braR, t2_d, d_TR_ket, l_TR_ket, phys) — chi^2 * D^4 * d
-    A_bra_TR = A.bar_super().relabels(
+    A_bra_TR = A.bar().relabels(
         {
             "u": "u_braR",
             "r": "r_braR",
@@ -575,7 +575,7 @@ def _rdm_diagonal_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     BL_frame_A = contract(BL_frame, A_BL)
     # open: (d_braB_BL, t3_l, t4_dB, l_braB, u_BL_ket, r_BL_ket, phys) — chi^2 * D^4 * d
     # phys label NOT relabeled; sharing with A_BL's phys causes the trace.
-    A_bra_BL = A.bar_super().relabels(
+    A_bra_BL = A.bar().relabels(
         {
             "d": "d_braB_BL",
             "l": "l_braB",
@@ -617,7 +617,7 @@ def _rdm_diagonal_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     )
     BR_frame_A = contract(BR_frame, A_BR)
     # open: (d_braR, t3_rR, t2_uB, r_braB, u_BR_ket, l_BR_ket, phys_BR) — chi^2 * D^4 * d
-    A_bra_BR = A.bar_super().relabels(
+    A_bra_BR = A.bar().relabels(
         {
             "d": "d_braR",
             "r": "r_braB",
@@ -726,7 +726,7 @@ def _rdm1x2_split_tensor_2site(
     T1, T4_A_split, T2_A_split = splits_A["T1"], splits_A["T4"], splits_A["T2"]
     T3, T4_B_split, T2_B_split = splits_B["T3"], splits_B["T4"], splits_B["T2"]
 
-    A_bra = A.bar_super().relabels(
+    A_bra = A.bar().relabels(
         {
             "u": "u_bra",
             "d": "d_bra",
@@ -753,7 +753,7 @@ def _rdm1x2_split_tensor_2site(
 
     # ---------- Bottom half (env_B, B) ----------
     # Suffix bottom-site labels with "B" so they don't collide with the top half.
-    B_bra = B.bar_super().relabels(
+    B_bra = B.bar().relabels(
         {
             "u": "u_bra",
             "d": "d_bra",
@@ -892,7 +892,7 @@ def _rdm2x1_split_tensor_2site(
         splits_B["T2"],
     )
 
-    A_bra = A.bar_super().relabels(
+    A_bra = A.bar().relabels(
         {
             "u": "u_bra",
             "d": "d_bra",
@@ -950,7 +950,7 @@ def _rdm2x1_split_tensor_2site(
             "phys": "phys_R",
         }
     )
-    B_bra_right = B.bar_super().relabels(
+    B_bra_right = B.bar().relabels(
         {
             "u": "u_braR",
             "d": "d_braR",
@@ -1119,15 +1119,14 @@ def compute_energy_split_ctm_tensor(
     """Compute energy per site using a split CTM environment, split-aware.
 
     Builds horizontal and vertical RDMs directly from
-    ``(T_ket, T_bra, A, A.bar_super())``, without merging ket/bra to the
+    ``(T_ket, T_bra, A, A.bar())``, without merging ket/bra to the
     standard double-layer env. Bounded peak intermediate ~chi^2 * D^4.
 
-    For fermionic sites the split-aware path carries a stale ``bar_super``
-    Koszul phase that ``fuse_indices`` would otherwise cancel; until that
-    convention mismatch is resolved (issue #392) the function falls back to
-    the shim path, which routes ``compute_energy_ctm_tensor`` through
-    ``_split_env_to_tensor_standard``.  The shim peaks at the standard
-    ``chi²·D⁶`` (vs the split-aware ``chi²·D⁴·d`` floor) but is fermion-correct.
+    For fermionic sites the split-aware path used to carry a stale
+    ``bar_super`` Koszul phase that ``fuse_indices`` couldn't cancel (#392).
+    Post-#555 (removal of the contractor's auto-Koszul + bar_super phase),
+    that convention mismatch should no longer exist; #392's shim fallback
+    remains in place until #392 is re-validated against the new convention.
 
     Args:
         A:                iPEPS site tensor with labels ``(u, d, l, r, phys)``.

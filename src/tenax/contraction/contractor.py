@@ -218,119 +218,6 @@ def _contract_dense(
     return DenseTensor(result, output_indices)
 
 
-# ---------- Fermionic sign helpers ----------
-
-
-def _contraction_inversion_pairs(
-    input_subs: list[str],
-    output_part: str,
-) -> list[tuple[str, str]]:
-    """Compute inversion pairs for fermionic contraction sign.
-
-    The contraction conceptually reorders legs:
-    1. For each input tensor, contracted legs move to the right.
-    2. Free legs are then reordered to match the output order.
-
-    We compute the composite permutation and return pairs of subscript
-    characters whose exchange could contribute a fermionic sign.
-
-    Args:
-        input_subs: List of subscript strings, one per input tensor.
-        output_part: Output subscript string.
-
-    Returns:
-        List of (char_i, char_j) pairs. For each pair, if both charges
-        have odd parity, the overall sign flips.
-
-    Algorithm:
-        We build a permutation that maps the "natural" leg order (all input
-        legs concatenated left-to-right) to the "target" order (free legs in
-        output order, then contracted legs paired up).  Inversions in this
-        permutation identify leg crossings; each crossing of two odd-parity
-        legs produces a Koszul sign flip for fermionic tensors.
-
-        Because contracted labels appear *twice* in all_chars but only *once*
-        in target, we use a ``pos*2 + use_idx`` encoding to assign each
-        occurrence a distinct integer:
-
-        - ``*2`` creates interleaving room so that the two occurrences of a
-          contracted char (at positions ``pos*2`` and ``pos*2+1``) get
-          adjacent but distinct target values without colliding with other
-          chars.
-        - ``+ use_idx`` (0 for the first occurrence, 1 for the second)
-          distinguishes the two occurrences, ensuring the inversion count
-          captures whether they must cross other legs to become adjacent.
-        - Free chars also use ``*2`` to stay on the same scale, so
-          inversions between free and contracted chars are counted correctly.
-    """
-    # Build the "natural" order: all input legs concatenated in order
-    all_chars: list[str] = []
-    for subs in input_subs:
-        all_chars.extend(subs)
-
-    # Count occurrences to identify contracted vs free
-    counts = Counter(all_chars)
-    contracted = {c for c, n in counts.items() if n >= 2}
-
-    # Build target order: free legs in output_part order, then contracted
-    # legs in the order they first appear (they cancel out but the reordering
-    # to bring them together matters).
-    seen_contracted: set[str] = set()
-
-    # For each input tensor, the contracted legs come at the end
-    # We want pairs of (i, j) from `all_chars` where i appears after j
-    # in the target ordering but before j in the natural ordering.
-    # This is equivalent to computing the permutation and finding inversions.
-
-    # Target ordering: for each input tensor, keep free legs in original
-    # order, move contracted legs to the right (standard convention).
-    # Then merge: free legs match output_part order; contracted legs pair up.
-
-    # Step 1: Build canonical target list
-    target: list[str] = list(output_part)
-    for c in all_chars:
-        if c in contracted and c not in seen_contracted:
-            # Each contracted char appears twice; we just need it once
-            # in the "contracted zone" to pair with itself
-            target.append(c)
-            seen_contracted.add(c)
-
-    # Step 2: Build position map for each occurrence in all_chars
-    # Each char in all_chars needs a target position
-    char_positions_in_target: dict[str, list[int]] = {}
-    for i, c in enumerate(target):
-        char_positions_in_target.setdefault(c, []).append(i)
-
-    # Assign target positions to each element in all_chars.
-    # We use *2 to create interleaving room for contracted chars that appear
-    # twice in all_chars but once in target; +use_idx (0 or 1) distinguishes
-    # the first vs second occurrence so they get adjacent distinct integers.
-    char_use_count: dict[str, int] = {}
-    perm_targets: list[int] = []
-    for c in all_chars:
-        use_idx = char_use_count.get(c, 0)
-        if c in contracted:
-            # pos*2 + use_idx: adjacent integers for the two occurrences,
-            # so the inversion count reflects whether other legs must cross
-            # between them.
-            perm_targets.append(char_positions_in_target[c][0] * 2 + use_idx)
-        else:
-            # Free chars also use *2 to stay on the same integer scale,
-            # ensuring inversions between free and contracted chars are
-            # counted correctly.
-            perm_targets.append(char_positions_in_target[c][0] * 2)
-        char_use_count[c] = use_idx + 1
-
-    # Step 3: Find inversion pairs (i < j but perm[i] > perm[j])
-    pairs: list[tuple[str, str]] = []
-    for i in range(len(all_chars)):
-        for j in range(i + 1, len(all_chars)):
-            if perm_targets[i] > perm_targets[j]:
-                pairs.append((all_chars[i], all_chars[j]))
-
-    return pairs
-
-
 # ---------- Symmetric (block-sparse) contraction ----------
 
 
@@ -428,12 +315,15 @@ def _contract_symmetric(
         _compute_valid_blocks(out_indices_ordered, target=output_target)
     )
 
-    # Precompute fermionic sign structure (once, outside block loop)
-    sym = tensors[0].indices[0].symmetry if tensors and tensors[0].indices else None
-    is_fermionic = sym is not None and sym.is_fermionic
-    inversion_pairs: list[tuple[str, str]] = []
-    if is_fermionic:
-        inversion_pairs = _contraction_inversion_pairs(input_subs, output_part)
+    # Fermionic sign convention (#555): the contractor does NOT auto-apply
+    # Koszul signs from leg permutations.  Tenax's auto-tracking (the original
+    # PR #13 design) was a *different* convention from TensorKit's fusion-tree
+    # braiding and produced incorrect multi-tensor inner products on planar
+    # PEPS networks (Tier 7-bound violation in PR #556).  For planar networks
+    # — the only kind Tenax's CTM/RDM/energy code uses — no signs are needed:
+    # FermionParity's R-symbol contributes only at physical line crossings,
+    # which planar diagrams have none of.  For future non-planar applications
+    # an explicit ``twist`` primitive can be added.
 
     # For each tensor, build an index:
     #   partial_sig -> list of (block_key, block_array)
@@ -568,17 +458,6 @@ def _contract_symmetric(
                 )
                 block_expr_cache[cache_key] = expr
                 result_array = expr(*arrays, backend="jax")
-
-            # Apply fermionic sign from leg reordering
-            if is_fermionic and inversion_pairs:
-                sign = 1
-                for ci, cj in inversion_pairs:
-                    pi = int(sym.parity(np.array([char_to_charge[ci]]))[0])
-                    pj = int(sym.parity(np.array([char_to_charge[cj]]))[0])
-                    if pi and pj:
-                        sign = -sign
-                if sign < 0:
-                    result_array = -result_array
 
             # Accumulate into output block
             if output_key in output_blocks:

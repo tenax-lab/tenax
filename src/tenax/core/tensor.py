@@ -343,24 +343,6 @@ class Tensor(ABC):
         ...
 
     @abstractmethod
-    def bar_super(self) -> Tensor:
-        """Same flow-flip + conjugate as :meth:`bar`, plus the super-algebra
-        Koszul twist ``(-1)^{sum_{i<j} p_i p_j}`` for Z₂-graded (fermionic)
-        symmetries.
-
-        For bosonic tensors this is identical to :meth:`bar` (the Koszul
-        sign is always +1). For fermionic ``SymmetricTensor`` it produces
-        the correct bra layer for double-layer / RDM constructions, where
-        :meth:`bar` alone misses the fermion exchange sign and
-        :meth:`dagger` over-applies it (charge-dual is not wanted in the
-        bra, only the twist).
-
-        Use this in any code path that may receive fermionic tensors and
-        would otherwise call :meth:`bar` to construct a bra.
-        """
-        ...
-
-    @abstractmethod
     def transpose(self, axes: tuple[int, ...]) -> Tensor: ...
 
     @abstractmethod
@@ -547,13 +529,6 @@ class DenseTensor(Tensor):
         """Element-wise conjugate with flipped flows. No charge dual."""
         new_indices = tuple(idx.flip_flow() for idx in self._indices)
         return DenseTensor(jnp.conj(self._data), new_indices)
-
-    def bar_super(self) -> DenseTensor:
-        """Identical to :meth:`bar` for ``DenseTensor`` — block-level
-        parities are not tracked, so no Koszul sign can be applied. The
-        method exists to satisfy the :class:`Tensor` protocol so callers
-        can use ``A.bar_super()`` polymorphically."""
-        return self.bar()
 
     def transpose(self, axes: tuple[int, ...]) -> DenseTensor:
         """Permute tensor legs.
@@ -1103,40 +1078,6 @@ class SymmetricTensor(Tensor):
             block_shapes=self._block_shapes,
             block_offsets=self._block_offsets,
         )
-
-    def bar_super(self) -> SymmetricTensor:
-        """Flow-flipped conjugate plus the super-algebra Koszul twist
-        ``(-1)^{sum_{i<j} p_i p_j}`` per block, for fermionic (Z₂-graded)
-        symmetries. Bosonic case is identical to :meth:`bar`.
-
-        This is the correct bra-layer construction for fermionic
-        double-layer / RDM contractions, where :meth:`bar` misses the
-        fermion exchange sign and :meth:`dagger` over-applies it (the
-        bra carries the original charges, not their dual).
-        """
-        new_indices = tuple(idx.flip_flow() for idx in self._indices)
-        sym = self._indices[0].symmetry if self._indices else None
-        if sym is None or not sym.is_fermionic:
-            return SymmetricTensor._raw(
-                indices=new_indices,
-                data=jnp.conj(self._data),
-                block_keys=self._block_keys,
-                block_shapes=self._block_shapes,
-                block_offsets=self._block_offsets,
-            )
-
-        new_blocks: dict[BlockKey, jax.Array] = {}
-        for key, block in self.blocks.items():
-            val = jnp.conj(block)
-            parities = [int(sym.parity(np.array([q]))[0]) for q in key]
-            n_sign = 0
-            for i in range(len(parities)):
-                for j in range(i + 1, len(parities)):
-                    n_sign += parities[i] * parities[j]
-            if n_sign % 2 == 1:
-                val = -val
-            new_blocks[key] = val
-        return SymmetricTensor._from_blocks_unchecked(new_blocks, new_indices)
 
     def transpose(self, axes: tuple[int, ...]) -> SymmetricTensor:
         """Permute tensor legs.
