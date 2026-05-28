@@ -275,8 +275,75 @@ def _truncated_svd_symmetric(
 
     n_keep = max(1, min(n_keep, n_total))
 
-    # Count per-sector keep
-    kept = all_sv_pairs[:n_keep]
+    # Select which singular values to keep.
+    # When ``base_charges`` is supplied with ``max_singular_values``, allocate
+    # keep counts per sector to match the canonical layout, mirroring the
+    # traced-path behavior in ``_truncated_svd_symmetric_traced``. This is the
+    # right policy whenever the caller needs a fixed bond charge structure
+    # (e.g. fPEPS simple update — #558 — where ``A.l`` and ``A.r`` are the
+    # same physical bond and the next step crashes if the SVD lets one drift).
+    # Without ``base_charges`` the historical global "democratic" truncation is
+    # retained — it minimises 2-norm truncation error and is the standard
+    # choice for DMRG.
+    if base_charges is not None and max_singular_values is not None:
+        from tenax.algorithms._ctm_utils import _derive_charges
+
+        target_charges = _derive_charges(base_charges, max_singular_values)
+        target_count: dict[int, int] = {}
+        for tq in target_charges:
+            target_count[int(tq)] = target_count.get(int(tq), 0) + 1
+        available = {q: len(sector_results[q][1]) for q in sector_results}
+        k_per_sector = {q: min(target_count.get(q, 0), available[q]) for q in available}
+        remaining = n_keep - sum(k_per_sector.values())
+        if remaining > 0:
+            for q in sorted(
+                available.keys(),
+                key=lambda qq: (-(available[qq] - k_per_sector.get(qq, 0)), qq),
+            ):
+                if remaining <= 0:
+                    break
+                capacity_left = available[q] - k_per_sector.get(q, 0)
+                take = min(remaining, capacity_left)
+                if take > 0:
+                    k_per_sector[q] = k_per_sector.get(q, 0) + take
+                    remaining -= take
+
+        # Emit ``kept`` (and therefore ``bond_charges``/``s_final``) in the
+        # caller's canonical position order, *not* in global SV-magnitude
+        # order. This matters because downstream code (fPEPS SU, traced path
+        # consumers) applies the returned ``sigma``/``lam`` to the opposite
+        # bond axis -- whose ``idx.charges`` is the canonical pattern -- via
+        # ``scale_bond_axis``, which slices the scale vector by position
+        # under ``np.where(idx.charges == q)``.  Mismatched ordering would
+        # multiply the wrong charge sectors and silently corrupt the state
+        # without crashing (PR #560 codex review).
+        #
+        # Pre-build per-sector lists of (value, q, idx_in_sector) sorted
+        # within-sector descending. all_sv_pairs is globally descending, so
+        # filtering by q preserves within-sector descending order.
+        per_sector_pool: dict[int, list[tuple[float, int, int]]] = {}
+        for p in all_sv_pairs:
+            per_sector_pool.setdefault(p[1], []).append(p)
+
+        kept = []
+        used = {q: 0 for q in k_per_sector}
+        # Phase 1: fill in canonical-position order until target_charges is
+        # exhausted *or* a sector runs out of its k_per_sector quota.
+        for tq in target_charges:
+            q = int(tq)
+            if used.get(q, 0) < k_per_sector.get(q, 0):
+                kept.append(per_sector_pool[q][used[q]])
+                used[q] += 1
+        # Phase 2: append any remaining quota for sectors that got more from
+        # greedy fill than target_count requested.  These tail entries don't
+        # have a canonical position in ``base_charges`` -- placing them at
+        # the end preserves sector-grouped contiguity for the overflow.
+        for q in sorted(k_per_sector.keys()):
+            while used[q] < k_per_sector[q]:
+                kept.append(per_sector_pool[q][used[q]])
+                used[q] += 1
+    else:
+        kept = all_sv_pairs[:n_keep]
 
     # Build bond charges and singular values in global descending order
     # so that s_final[k] pairs with U[:,k] and Vh[k,:].

@@ -155,3 +155,159 @@ class TestImportCompat:
 
         assert truncated_svd is linalg_svd
         assert svd_top is linalg_svd
+
+
+# ------------------------------------------------------------------ #
+# base_charges per-sector keep on the eager path (#558)               #
+# ------------------------------------------------------------------ #
+
+
+class TestSvdBaseChargesEagerPath:
+    """Eager-path block-sparse SVD honors base_charges for per-sector keep.
+
+    The eager path historically did global democratic truncation regardless
+    of base_charges (only the traced/AD path consumed it). Callers that
+    depend on a canonical bond layout being preserved across iterations
+    (fpeps SU at D>2 — #558) need per-sector keep matching base_charges.
+    Tests cover both fermionic and bosonic symmetries since the SVD code is
+    shared.
+    """
+
+    def _build_2leg_sym(self, sym, left_charges, right_charges, seed=0):
+        idx_l = TensorIndex.from_charges(sym, left_charges, IN, label="l")
+        idx_r = TensorIndex.from_charges(sym, right_charges, OUT, label="r")
+        return SymmetricTensor.random_normal((idx_l, idx_r), jax.random.PRNGKey(seed))
+
+    def test_eager_base_charges_preserves_canonical_layout_u1(self):
+        """U(1) eager SVD with base_charges keeps {-1:1, 0:1, 1:1} layout."""
+        from tenax.linalg import svd
+
+        sym = U1Symmetry()
+        charges = np.array([-1, 0, 1, -1, 0, 1], dtype=np.int32)
+        T = self._build_2leg_sym(sym, charges, charges, seed=11)
+        # Canonical layout has 2 of each charge; ask for 3 total to force a
+        # choice. Without base_charges, global truncation may keep 3 from one
+        # sector. With base_charges=[-1,0,1], we expect exactly {-1:1,0:1,1:1}.
+        U, s, Vh, _ = svd(
+            T,
+            left_labels=["l"],
+            right_labels=["r"],
+            new_bond_label="bond",
+            max_singular_values=3,
+            base_charges=np.array([-1, 0, 1], dtype=np.int32),
+        )
+        bond_idx = U.indices[U.labels().index("bond")]
+        counts = {int(q): 0 for q in (-1, 0, 1)}
+        for q in bond_idx.charges:
+            counts[int(q)] += 1
+        assert counts == {-1: 1, 0: 1, 1: 1}, (
+            f"bond charges {bond_idx.charges.tolist()} not balanced — "
+            f"got counts {counts}"
+        )
+        assert s.shape == (3,)
+
+    def test_eager_base_charges_preserves_canonical_layout_fermionic(self):
+        """FermionParity eager SVD with base_charges keeps {0:2, 1:2}."""
+        from tenax.core.symmetry import FermionParity
+        from tenax.linalg import svd
+
+        sym = FermionParity()
+        charges = np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=np.int32)
+        T = self._build_2leg_sym(sym, charges, charges, seed=22)
+        U, s, Vh, _ = svd(
+            T,
+            left_labels=["l"],
+            right_labels=["r"],
+            new_bond_label="bond",
+            max_singular_values=4,
+            base_charges=np.array([0, 1, 0, 1], dtype=np.int32),
+        )
+        bond_idx = U.indices[U.labels().index("bond")]
+        counts = {0: 0, 1: 0}
+        for q in bond_idx.charges:
+            counts[int(q)] += 1
+        assert counts == {0: 2, 1: 2}, (
+            f"fermionic bond charges {bond_idx.charges.tolist()} not balanced — "
+            f"got counts {counts}"
+        )
+        assert s.shape == (4,)
+
+    def test_eager_no_base_charges_keeps_global_truncation(self):
+        """Without base_charges, eager SVD still does global democratic keep."""
+        from tenax.linalg import svd
+
+        sym = U1Symmetry()
+        charges = np.array([-1, 0, 1, -1, 0, 1], dtype=np.int32)
+        T = self._build_2leg_sym(sym, charges, charges, seed=33)
+        U, s, Vh, _ = svd(
+            T,
+            left_labels=["l"],
+            right_labels=["r"],
+            new_bond_label="bond",
+            max_singular_values=3,
+        )
+        # No constraint asserted on bond charge distribution — just that we
+        # got 3 singular values total (global truncation).
+        assert s.shape == (3,)
+
+    def test_eager_base_charges_emits_kept_in_canonical_position_order(self):
+        """bond_charges + s_final follow base_charges position order, not SV magnitude.
+
+        Codex review of PR #560 flagged: emitting kept in global SV-magnitude
+        order silently corrupts downstream ``scale_bond_axis`` calls on the
+        unchanged opposite bond axis (whose ``idx.charges`` is the canonical
+        pattern). The scale vector slice ``scale[np.where(idx.charges == q)]``
+        then picks values that are NOT actually for sector q.
+
+        Test: build a SymmetricTensor whose theta SVD has clearly-ordered
+        singular values per sector (charge=1 sector dominates charge=0 by
+        construction), then verify that after the eager SVD with
+        base_charges, ``s_final[i]`` is the within-sector i-th value for the
+        sector ``base_charges[i]`` — i.e., the lambda vector lines up with
+        canonical positions.
+        """
+        from tenax.core.symmetry import FermionParity
+        from tenax.linalg import svd
+
+        sym = FermionParity()
+        # 4-dim virtual leg with 2 even (charge 0) and 2 odd (charge 1).
+        charges = np.array([0, 1, 0, 1], dtype=np.int32)
+        idx_l = TensorIndex.from_charges(sym, charges, IN, label="l")
+        idx_r = TensorIndex.from_charges(sym, charges, OUT, label="r")
+        # Build a tensor where sector 1 has clearly larger SVs than sector 0,
+        # so global ordering would interleave [1, ..., 0, ...] differently
+        # from canonical [0, 1, 0, 1].
+        T_dense = np.zeros((4, 4), dtype=np.float64)
+        # Sector 0 block (positions [0, 2] x [0, 2]):
+        T_dense[0, 0] = 2.0  # smaller singular values for sector 0
+        T_dense[2, 2] = 1.0
+        # Sector 1 block (positions [1, 3] x [1, 3]):
+        T_dense[1, 1] = 10.0  # larger singular values for sector 1
+        T_dense[3, 3] = 5.0
+        T = SymmetricTensor.from_dense(T_dense, (idx_l, idx_r))
+
+        U, s, Vh, _ = svd(
+            T,
+            left_labels=["l"],
+            right_labels=["r"],
+            new_bond_label="bond",
+            max_singular_values=4,
+            base_charges=np.array([0, 1, 0, 1], dtype=np.int32),
+        )
+        bond_idx = U.indices[U.labels().index("bond")]
+        bond_charges = bond_idx.charges.tolist()
+        s_vals = np.array(s).tolist()
+
+        # Canonical: positions 0, 2 are sector 0; positions 1, 3 are sector 1.
+        # If kept is in canonical order, bond_charges == [0, 1, 0, 1].
+        # If kept is in global SV order, bond_charges would be [1, 1, 0, 0]
+        # (sectors interleaved by SV magnitude).
+        assert bond_charges == [0, 1, 0, 1], (
+            f"bond_charges {bond_charges} not in canonical [0,1,0,1] order — "
+            f"would silently corrupt scale_bond_axis on opposite axis"
+        )
+        # s_final[0] = top SV of sector 0 = 2.0
+        # s_final[1] = top SV of sector 1 = 10.0
+        # s_final[2] = 2nd SV of sector 0 = 1.0
+        # s_final[3] = 2nd SV of sector 1 = 5.0
+        np.testing.assert_allclose(s_vals, [2.0, 10.0, 1.0, 5.0], atol=1e-10)
