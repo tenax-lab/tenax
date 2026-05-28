@@ -272,13 +272,18 @@ def _fpeps_simple_update_horizontal(
     theta = theta.relabel("phys_B", "sj")
     theta = contract(theta, gate)
 
-    # 5. SVD
+    # 5. SVD (per-sector keep matching canonical [i%2 for i in range(D)] —
+    # see #558: global democratic truncation lets the new bond drift from
+    # the {even: D/2, odd: D/2 (or ±1)} layout, which breaks the next SU
+    # step's contract on the unchanged opposite axis.)
+    virt_charges = np.array([i % 2 for i in range(max_D)], dtype=np.int32)
     U, sigma, Vh, s_full = truncated_svd(
         theta,
         left_labels=["u", "d", "l", "si_out"],
         right_labels=["u_B", "d_B", "r_B", "sj_out"],
         new_bond_label="r_new",
         max_singular_values=max_D,
+        base_charges=virt_charges,
     )
     # U has labels: (u, d, l, si_out, r_new)
 
@@ -350,13 +355,15 @@ def _fpeps_simple_update_vertical(
     theta = theta.relabel("phys_B", "sj")
     theta = contract(theta, gate)
 
-    # 5. SVD
+    # 5. SVD (per-sector keep matching canonical layout — see #558)
+    virt_charges = np.array([i % 2 for i in range(max_D)], dtype=np.int32)
     U, sigma, Vh, s_full = truncated_svd(
         theta,
         left_labels=["u", "l", "r", "si_out"],
         right_labels=["d_B", "l_B", "r_B", "sj_out"],
         new_bond_label="d_new",
         max_singular_values=max_D,
+        base_charges=virt_charges,
     )
     # U has labels: (u, l, r, si_out, d_new)
 

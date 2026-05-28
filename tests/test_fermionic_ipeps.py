@@ -310,6 +310,32 @@ class TestFPEPSSimpleUpdate:
         A_after = A_opt.todense()
         assert not jnp.allclose(A_before, A_after)
 
+    @pytest.mark.parametrize("D", [3, 4])
+    def test_simple_update_preserves_bond_layout_at_Dgt2(self, D):
+        """Regression for #558.
+
+        At D>2 the SU's truncated_svd used global democratic truncation, which
+        let the new `r` bond drift from the canonical {even: D/2, odd: D/2}
+        block layout. On the next step the contract(A_left, B_right) on the
+        unchanged `l` axis vs the new `r` axis triggered an opt_einsum size
+        mismatch. Per-sector keep allocation (via base_charges) preserves the
+        canonical layout and lets SU continue across many steps.
+        """
+        cfg = FPEPSConfig(D=D, t=1.0, V=0.0, dt=0.01)
+        A = _initialize_fpeps(cfg, jax.random.PRNGKey(0))
+        H = spinless_fermion_gate(cfg)
+        A_opt, _, _ = _fpeps_simple_update(A, H, max_D=cfg.D, dt=cfg.dt, steps=5)
+        for axis_label in ("u", "d", "l", "r"):
+            ax = A_opt.labels().index(axis_label)
+            idx = A_opt.indices[ax]
+            assert idx.dim == D, f"axis {axis_label!r} dim {idx.dim} != D={D}"
+            charges = sorted(int(c) for c in idx.charges)
+            expected = sorted([i % 2 for i in range(D)])
+            assert charges == expected, (
+                f"axis {axis_label!r} charges {charges} != canonical {expected}"
+            )
+        assert jnp.all(jnp.isfinite(A_opt.todense()))
+
 
 # ------------------------------------------------------------------ #
 # Task 7: fpeps (entry point)                                          #

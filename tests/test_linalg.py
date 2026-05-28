@@ -155,3 +155,97 @@ class TestImportCompat:
 
         assert truncated_svd is linalg_svd
         assert svd_top is linalg_svd
+
+
+# ------------------------------------------------------------------ #
+# base_charges per-sector keep on the eager path (#558)               #
+# ------------------------------------------------------------------ #
+
+
+class TestSvdBaseChargesEagerPath:
+    """Eager-path block-sparse SVD honors base_charges for per-sector keep.
+
+    The eager path historically did global democratic truncation regardless
+    of base_charges (only the traced/AD path consumed it). Callers that
+    depend on a canonical bond layout being preserved across iterations
+    (fpeps SU at D>2 — #558) need per-sector keep matching base_charges.
+    Tests cover both fermionic and bosonic symmetries since the SVD code is
+    shared.
+    """
+
+    def _build_2leg_sym(self, sym, left_charges, right_charges, seed=0):
+        idx_l = TensorIndex.from_charges(sym, left_charges, IN, label="l")
+        idx_r = TensorIndex.from_charges(sym, right_charges, OUT, label="r")
+        return SymmetricTensor.random_normal((idx_l, idx_r), jax.random.PRNGKey(seed))
+
+    def test_eager_base_charges_preserves_canonical_layout_u1(self):
+        """U(1) eager SVD with base_charges keeps {-1:1, 0:1, 1:1} layout."""
+        from tenax.linalg import svd
+
+        sym = U1Symmetry()
+        charges = np.array([-1, 0, 1, -1, 0, 1], dtype=np.int32)
+        T = self._build_2leg_sym(sym, charges, charges, seed=11)
+        # Canonical layout has 2 of each charge; ask for 3 total to force a
+        # choice. Without base_charges, global truncation may keep 3 from one
+        # sector. With base_charges=[-1,0,1], we expect exactly {-1:1,0:1,1:1}.
+        U, s, Vh, _ = svd(
+            T,
+            left_labels=["l"],
+            right_labels=["r"],
+            new_bond_label="bond",
+            max_singular_values=3,
+            base_charges=np.array([-1, 0, 1], dtype=np.int32),
+        )
+        bond_idx = U.indices[U.labels().index("bond")]
+        counts = {int(q): 0 for q in (-1, 0, 1)}
+        for q in bond_idx.charges:
+            counts[int(q)] += 1
+        assert counts == {-1: 1, 0: 1, 1: 1}, (
+            f"bond charges {bond_idx.charges.tolist()} not balanced — "
+            f"got counts {counts}"
+        )
+        assert s.shape == (3,)
+
+    def test_eager_base_charges_preserves_canonical_layout_fermionic(self):
+        """FermionParity eager SVD with base_charges keeps {0:2, 1:2}."""
+        from tenax.core.symmetry import FermionParity
+        from tenax.linalg import svd
+
+        sym = FermionParity()
+        charges = np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=np.int32)
+        T = self._build_2leg_sym(sym, charges, charges, seed=22)
+        U, s, Vh, _ = svd(
+            T,
+            left_labels=["l"],
+            right_labels=["r"],
+            new_bond_label="bond",
+            max_singular_values=4,
+            base_charges=np.array([0, 1, 0, 1], dtype=np.int32),
+        )
+        bond_idx = U.indices[U.labels().index("bond")]
+        counts = {0: 0, 1: 0}
+        for q in bond_idx.charges:
+            counts[int(q)] += 1
+        assert counts == {0: 2, 1: 2}, (
+            f"fermionic bond charges {bond_idx.charges.tolist()} not balanced — "
+            f"got counts {counts}"
+        )
+        assert s.shape == (4,)
+
+    def test_eager_no_base_charges_keeps_global_truncation(self):
+        """Without base_charges, eager SVD still does global democratic keep."""
+        from tenax.linalg import svd
+
+        sym = U1Symmetry()
+        charges = np.array([-1, 0, 1, -1, 0, 1], dtype=np.int32)
+        T = self._build_2leg_sym(sym, charges, charges, seed=33)
+        U, s, Vh, _ = svd(
+            T,
+            left_labels=["l"],
+            right_labels=["r"],
+            new_bond_label="bond",
+            max_singular_values=3,
+        )
+        # No constraint asserted on bond charge distribution — just that we
+        # got 3 singular values total (global truncation).
+        assert s.shape == (3,)

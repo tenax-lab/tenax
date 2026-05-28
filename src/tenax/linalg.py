@@ -275,8 +275,47 @@ def _truncated_svd_symmetric(
 
     n_keep = max(1, min(n_keep, n_total))
 
-    # Count per-sector keep
-    kept = all_sv_pairs[:n_keep]
+    # Select which singular values to keep.
+    # When ``base_charges`` is supplied with ``max_singular_values``, allocate
+    # keep counts per sector to match the canonical layout, mirroring the
+    # traced-path behavior in ``_truncated_svd_symmetric_traced``. This is the
+    # right policy whenever the caller needs a fixed bond charge structure
+    # (e.g. fPEPS simple update — #558 — where ``A.l`` and ``A.r`` are the
+    # same physical bond and the next step crashes if the SVD lets one drift).
+    # Without ``base_charges`` the historical global "democratic" truncation is
+    # retained — it minimises 2-norm truncation error and is the standard
+    # choice for DMRG.
+    if base_charges is not None and max_singular_values is not None:
+        from tenax.algorithms._ctm_utils import _derive_charges
+
+        target_charges = _derive_charges(base_charges, max_singular_values)
+        target_count: dict[int, int] = {}
+        for tq in target_charges:
+            target_count[int(tq)] = target_count.get(int(tq), 0) + 1
+        available = {q: len(sector_results[q][1]) for q in sector_results}
+        k_per_sector = {q: min(target_count.get(q, 0), available[q]) for q in available}
+        remaining = n_keep - sum(k_per_sector.values())
+        if remaining > 0:
+            for q in sorted(
+                available.keys(),
+                key=lambda qq: (-(available[qq] - k_per_sector.get(qq, 0)), qq),
+            ):
+                if remaining <= 0:
+                    break
+                capacity_left = available[q] - k_per_sector.get(q, 0)
+                take = min(remaining, capacity_left)
+                if take > 0:
+                    k_per_sector[q] = k_per_sector.get(q, 0) + take
+                    remaining -= take
+        kept = []
+        for q, k in k_per_sector.items():
+            if k <= 0:
+                continue
+            sector_pairs = [p for p in all_sv_pairs if p[1] == q]
+            kept.extend(sector_pairs[:k])
+        kept.sort(key=lambda x: -x[0])
+    else:
+        kept = all_sv_pairs[:n_keep]
 
     # Build bond charges and singular values in global descending order
     # so that s_final[k] pairs with U[:,k] and Vh[k,:].
