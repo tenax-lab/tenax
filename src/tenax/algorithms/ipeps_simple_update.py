@@ -75,13 +75,19 @@ def _simple_update_2site_horizontal_tensor(
     theta = theta.relabel("phys_B", "sj")
     theta = contract(theta, gate)
 
-    # 5. Truncated SVD
+    # 5. Truncated SVD — preserve the canonical layout of the old horizontal
+    #    bond (A.r) in the new bond. For fermionic SymmetricTensor inputs this
+    #    keeps the per-parity-sector keep COUNTS canonical at D>2 (#558/#559
+    #    in the single-site path; same root cause here per #563). For
+    #    DenseTensor (trivial-charge) inputs base_charges is a no-op.
+    base_charges = np.asarray(A.indices[A.labels().index("r")].charges)
     U, sigma, Vh, s_full = truncated_svd(
         theta,
         left_labels=["u", "d", "l", "si_out"],
         right_labels=["u_B", "d_B", "r_B", "sj_out"],
         new_bond_label="bond_new",
         max_singular_values=max_D,
+        base_charges=base_charges,
     )
 
     # 6. New lambda (normalized)
@@ -177,13 +183,17 @@ def _simple_update_2site_vertical_tensor(
     theta = theta.relabel("phys_B", "sj")
     theta = contract(theta, gate)
 
-    # 5. Truncated SVD
+    # 5. Truncated SVD — preserve the canonical layout of the old vertical
+    #    bond (A.d) in the new bond. See horizontal counterpart above for the
+    #    rationale (#563).
+    base_charges = np.asarray(A.indices[A.labels().index("d")].charges)
     U, sigma, Vh, s_full = truncated_svd(
         theta,
         left_labels=["u", "l", "r", "si_out"],
         right_labels=["d_B", "l_B", "r_B", "sj_out"],
         new_bond_label="bond_new",
         max_singular_values=max_D,
+        base_charges=base_charges,
     )
 
     # 6. New lambda (normalized)
