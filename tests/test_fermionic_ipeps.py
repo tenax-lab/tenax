@@ -337,6 +337,86 @@ class TestFPEPSSimpleUpdate:
         assert jnp.all(jnp.isfinite(A_opt.todense()))
 
 
+class TestFPEPS2SiteSimpleUpdate:
+    """Tests for the 2-site bipartite simple update on FermionParity sites.
+
+    The 2-site SU (``_simple_update_2site_horizontal_tensor`` /
+    ``_simple_update_2site_vertical_tensor``) is polymorphic over the Tensor
+    protocol, so it accepts FermionParity inputs. At D>2 the truncated SVD
+    inside must preserve the canonical ``[i % 2 for i in range(D)]`` bond
+    layout (#563); otherwise the new bond drifts and the next SU step's
+    contractions trip on per-axis charge-order mismatches (same root cause
+    as #558/#559 in the 1-site path).
+    """
+
+    @staticmethod
+    def _make_fermionic_AB(D, key, d=2):
+        sym = FermionParity()
+        virt = np.array([i % 2 for i in range(D)], dtype=np.int32)
+        phys = np.array([0, 1], dtype=np.int32)
+
+        def _indices():
+            return (
+                TensorIndex.from_charges(sym, virt, FlowDirection.OUT, label="u"),
+                TensorIndex.from_charges(sym, virt, FlowDirection.IN, label="d"),
+                TensorIndex.from_charges(sym, virt, FlowDirection.OUT, label="l"),
+                TensorIndex.from_charges(sym, virt, FlowDirection.IN, label="r"),
+                TensorIndex.from_charges(sym, phys, FlowDirection.IN, label="phys"),
+            )
+
+        kA, kB = jax.random.split(key)
+        A = SymmetricTensor.random_normal(_indices(), kA)
+        B = SymmetricTensor.random_normal(_indices(), kB)
+        return A, B
+
+    @pytest.mark.parametrize("D", [3, 4])
+    def test_2site_simple_update_preserves_bond_layout_at_Dgt2(self, D):
+        """20 alternating H/V 2-site SU steps at V=1 must keep the exact
+        canonical position-order ``[i % 2 for i in range(D)]`` on every
+        virtual axis of both A and B (#563).
+
+        The pre-fix code emits new-bond charges in global SV-magnitude
+        order, which (a) can keep different sector counts than canonical
+        and (b) even when counts match, scrambles position-order so
+        downstream ``scale_bond_axis(lam, axis)`` slices the wrong sectors.
+        Exact position-order matching is the discriminating check (sorted
+        counts alone can coincide pre-fix at low step counts).
+        """
+        from tenax.algorithms.ipeps_simple_update import (
+            _simple_update_2site_horizontal_tensor,
+            _simple_update_2site_vertical_tensor,
+        )
+
+        cfg = FPEPSConfig(D=D, t=1.0, V=1.0, dt=0.01)
+        A, B = self._make_fermionic_AB(D=D, key=jax.random.PRNGKey(0))
+        H = spinless_fermion_gate(cfg)
+        trotter = _trotter_gate(H, dt=cfg.dt)
+        lam_h = jnp.ones(D)
+        lam_v = jnp.ones(D)
+        for step in range(20):
+            if step % 2 == 0:
+                A, B, lam_h = _simple_update_2site_horizontal_tensor(
+                    A, B, trotter, lam_h, lam_v, D
+                )
+            else:
+                A, B, lam_v = _simple_update_2site_vertical_tensor(
+                    A, B, trotter, lam_h, lam_v, D
+                )
+
+        canonical = [i % 2 for i in range(D)]
+        for name, T in (("A", A), ("B", B)):
+            for axis_label in ("u", "d", "l", "r"):
+                ax = T.labels().index(axis_label)
+                idx = T.indices[ax]
+                assert idx.dim == D, f"{name}.{axis_label} dim {idx.dim} != D={D}"
+                charges = [int(c) for c in idx.charges]
+                assert charges == canonical, (
+                    f"{name}.{axis_label} position-order {charges} "
+                    f"!= canonical {canonical}"
+                )
+            assert jnp.all(jnp.isfinite(T.todense()))
+
+
 # ------------------------------------------------------------------ #
 # Task 7: fpeps (entry point)                                          #
 # ------------------------------------------------------------------ #
