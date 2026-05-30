@@ -31,6 +31,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import opt_einsum
 
@@ -221,6 +222,139 @@ def _contract_dense(
 # ---------- Symmetric (block-sparse) contraction ----------
 
 
+def _contract_symmetric_batched(
+    sig_iter: Any,
+    tensor_partial_indices: list[
+        tuple[list[tuple[int, int]], dict[tuple[int, ...], list[tuple[BlockKey, Any]]]]
+    ],
+    input_subs: list[str],
+    output_part: str,
+    input_part: str,
+    valid_output_set: set[tuple[int, ...]],
+) -> dict[BlockKey, Any]:
+    """Batched execution of the surviving block-combos (issue #568, M-B).
+
+    Performs the SAME filtering as the per-combo path (compatibility check +
+    valid_output_set membership) to collect surviving units, each carrying its
+    ``output_key`` and tuple of input arrays.  Surviving units are then grouped
+    by their input block-shape signature; per group a single batched
+    ``jnp.einsum`` runs over a fresh leading batch axis, and
+    ``jax.ops.segment_sum`` collapses combos that share an ``output_key``.
+    Groups are merged additively into the final ``output_blocks`` dict.
+
+    The subscripts are constant for the whole call, so the input block-shape
+    signature fully determines the einsum kernel; grouping on it guarantees
+    ``jnp.stack`` sees identical shapes per tensor-position.
+    """
+    # Collect surviving units: (output_key, tuple-of-arrays).
+    survivors: list[tuple[tuple[int, ...], tuple[Any, ...]]] = []
+
+    for full_sig in sig_iter:
+        matching_lists: list[list[tuple[BlockKey, Any]]] = []
+        skip = False
+        for covered, partial_sig_index in tensor_partial_indices:
+            partial_sig = tuple(full_sig[canonical_pos] for canonical_pos, _ in covered)
+            matching = partial_sig_index.get(partial_sig)
+            if not matching:
+                skip = True
+                break
+            matching_lists.append(matching)
+        if skip:
+            continue
+
+        for combo in itertools.product(*matching_lists):
+            keys = [c[0] for c in combo]
+            arrays = tuple(c[1] for c in combo)
+
+            char_to_charge: dict[str, int] = {}
+            compatible = True
+            for key, subs in zip(keys, input_subs):
+                for char, charge in zip(subs, key):
+                    charge_int = int(charge)
+                    if char in char_to_charge:
+                        if char_to_charge[char] != charge_int:
+                            compatible = False
+                            break
+                    else:
+                        char_to_charge[char] = charge_int
+                if not compatible:
+                    break
+            if not compatible:
+                continue
+
+            output_key = tuple(char_to_charge.get(c, 0) for c in output_part)
+            if output_key not in valid_output_set:
+                continue
+
+            survivors.append((output_key, arrays))
+
+    output_blocks: dict[BlockKey, Any] = {}
+    if not survivors:
+        return output_blocks
+
+    # Pick a batch label not already used in the subscripts.
+    used_chars = set(input_part.replace(",", "")) | set(output_part)
+    batch_char = None
+    for c in string.ascii_letters:
+        if c not in used_chars:
+            batch_char = c
+            break
+    if batch_char is None:  # pragma: no cover - 52-label ceiling guards this
+        raise ValueError("No free einsum label available for batch axis.")
+
+    # Build the batched subscripts: prepend the batch char to every input
+    # operand and to the output operand.
+    batched_inputs = ",".join(batch_char + s for s in input_subs)
+    batched_subscripts = batched_inputs + "->" + batch_char + output_part
+
+    # Group surviving units by full input block-shape signature.
+    groups: dict[tuple[tuple[int, ...], ...], list[int]] = {}
+    for unit_i, (_okey, arrays) in enumerate(survivors):
+        shape_sig = tuple(a.shape for a in arrays)
+        groups.setdefault(shape_sig, []).append(unit_i)
+
+    n_pos = len(input_subs)
+
+    for unit_indices in groups.values():
+        group_units = [survivors[i] for i in unit_indices]
+
+        # Stable per-group ordering of distinct output_keys -> segment ids.
+        distinct_keys: list[tuple[int, ...]] = []
+        key_to_seg: dict[tuple[int, ...], int] = {}
+        seg_ids: list[int] = []
+        for okey, _arrays in group_units:
+            seg = key_to_seg.get(okey)
+            if seg is None:
+                seg = len(distinct_keys)
+                key_to_seg[okey] = seg
+                distinct_keys.append(okey)
+            seg_ids.append(seg)
+
+        # Stack each tensor-position's arrays along a new leading batch axis.
+        stacked = [
+            jnp.stack([u[1][pos] for u in group_units], axis=0) for pos in range(n_pos)
+        ]
+
+        # One batched einsum over the batch axis.
+        batched_result = jnp.einsum(batched_subscripts, *stacked)
+
+        # Sum combos sharing an output_key via segment_sum over the batch axis.
+        segments = jnp.asarray(seg_ids, dtype=jnp.int32)
+        summed = jax.ops.segment_sum(
+            batched_result, segments, num_segments=len(distinct_keys)
+        )
+
+        # Merge across groups: ADD to any existing entry.
+        for seg, okey in enumerate(distinct_keys):
+            block = summed[seg]
+            if okey in output_blocks:
+                output_blocks[okey] = output_blocks[okey] + block
+            else:
+                output_blocks[okey] = block
+
+    return output_blocks
+
+
 def _contract_symmetric(
     tensors: Sequence[SymmetricTensor],
     subscripts: str,
@@ -393,6 +527,38 @@ def _contract_symmetric(
                 )
             allowed_per_pos.append(constraint if constraint is not None else {0})
         sig_iter = itertools.product(*[sorted(s) for s in allowed_per_pos])
+
+    # --- Gate: opt-in batched block-sparse execution path (issue #568, M-B) ---
+    # When TENAX_BATCH_BLOCKSPARSE is truthy, surviving (output_key, arrays)
+    # units are grouped by input block-shape signature and contracted with a
+    # single batched jnp.einsum + segment_sum per group, instead of one
+    # opt_einsum expression per combo.  Default (falsey) keeps the per-combo
+    # path byte-identical to before.
+    # Allowlist parse (truthy only for explicit on-values) so non-canonical
+    # falsey strings like "FALSE"/"no"/"off" are not misread as enabled.
+    _batch_blocksparse = os.environ.get(
+        "TENAX_BATCH_BLOCKSPARSE", "0"
+    ).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+    if _batch_blocksparse:
+        output_blocks = _contract_symmetric_batched(
+            sig_iter,
+            tensor_partial_indices,
+            input_subs,
+            output_part,
+            input_part,
+            valid_output_set,
+        )
+        if output_target is not None:
+            return SymmetricTensor._from_blocks_unchecked(
+                output_blocks, out_indices_ordered
+            )
+        return SymmetricTensor(output_blocks, out_indices_ordered)
 
     # Cache for within-block contraction expressions
     block_expr_cache: dict[tuple[tuple[int, ...], ...], Any] = {}
