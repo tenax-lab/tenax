@@ -939,3 +939,112 @@ class TestQRSymmetric:
                 assert net == u1.identity(), (
                     f"Block {key} violates conservation: net={net}"
                 )
+
+
+# ------------------------------------------------------------------ #
+# Batched block-sparse path (issue #568, Milestone B)                 #
+# ------------------------------------------------------------------ #
+
+
+class TestBatchedBlockSparse:
+    """The opt-in TENAX_BATCH_BLOCKSPARSE path must equal the per-combo path.
+
+    The gate is read fresh from os.environ on every contract() call, so toggling
+    the env var inside the test switches paths with no cache to clear.
+    """
+
+    @staticmethod
+    def _assert_paths_equal(monkeypatch, A, B):
+        """contract(A, B) must agree block-for-block with the flag off vs on."""
+        # Per-combo path (default / flag off).
+        monkeypatch.delenv("TENAX_BATCH_BLOCKSPARSE", raising=False)
+        res_off = contract(A, B)
+
+        # Batched path (flag on). Gate is read fresh per call, no cache to clear.
+        monkeypatch.setenv("TENAX_BATCH_BLOCKSPARSE", "1")
+        res_on = contract(A, B)
+
+        assert set(res_off.blocks.keys()) == set(res_on.blocks.keys())
+        assert len(res_off.blocks) > 0, "expected a non-trivial multi-block result"
+        for k in res_off.blocks:
+            a = res_off.blocks[k]
+            b = res_on.blocks[k]
+            assert a.shape == b.shape
+            assert a.dtype == b.dtype
+            np.testing.assert_allclose(
+                np.asarray(a), np.asarray(b), rtol=1e-10, atol=1e-12
+            )
+
+    def test_fermion_parity_multi_shape_group(self, monkeypatch):
+        """Multi-block bond so surviving combos span several shape-groups."""
+        from tenax.core.symmetry import FermionParity
+
+        fp = FermionParity()
+        charges = np.array([0, 1], dtype=np.int32)
+        bond_charges = np.array([0, 0, 1, 1], dtype=np.int32)
+        indices_A = (
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="p0"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="q0"),
+            TensorIndex.from_charges(fp, bond_charges, FlowDirection.OUT, label="bond"),
+        )
+        indices_B = (
+            TensorIndex.from_charges(fp, bond_charges, FlowDirection.IN, label="bond"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="p1"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="q1"),
+        )
+        k1, k2 = jax.random.split(jax.random.PRNGKey(123))
+        A = SymmetricTensor.random_normal(indices_A, k1)
+        B = SymmetricTensor.random_normal(indices_B, k2)
+        self._assert_paths_equal(monkeypatch, A, B)
+
+    def test_fermion_parity_single_crossing(self, monkeypatch):
+        """Single contracted-leg crossing (``ac,bc->ab``).
+
+        This topology is the one that *would* diverge if the two paths ever
+        disagreed on leg-permutation handling (it has a single, non-cancelling
+        leg crossing — unlike the duplicated-crossing multi-leg case). Guards
+        against a future re-introduction of a per-combo-only transform.
+        """
+        from tenax.core.symmetry import FermionParity
+
+        fp = FermionParity()
+        ch = np.array([0, 1], dtype=np.int32)
+        k1, k2 = jax.random.split(jax.random.PRNGKey(7))
+        A = SymmetricTensor.random_normal(
+            (
+                TensorIndex.from_charges(fp, ch, FlowDirection.IN, label="a"),
+                TensorIndex.from_charges(fp, ch, FlowDirection.OUT, label="c"),
+            ),
+            k1,
+        )
+        B = SymmetricTensor.random_normal(
+            (
+                TensorIndex.from_charges(fp, ch, FlowDirection.IN, label="b"),
+                TensorIndex.from_charges(fp, ch, FlowDirection.IN, label="c"),
+            ),
+            k2,
+        )
+        self._assert_paths_equal(monkeypatch, A, B)
+
+    def test_u1_batched_equals_per_combo(self, monkeypatch):
+        """The batched path is general to all charge-conserving symmetries,
+        not just fermionic — exercise a U(1) multi-block contraction."""
+
+        u1 = U1Symmetry()
+        ch = np.array([0, 1, -1], dtype=np.int32)
+        k1, k2 = jax.random.split(jax.random.PRNGKey(31))
+        A = SymmetricTensor.random_normal(
+            (
+                TensorIndex.from_charges(u1, ch, FlowDirection.IN, label="a"),
+                TensorIndex.from_charges(u1, ch, FlowDirection.OUT, label="c"),
+            ),
+            k1,
+        )
+        B = SymmetricTensor.random_normal(
+            (
+                TensorIndex.from_charges(u1, ch, FlowDirection.IN, label="b"),
+                TensorIndex.from_charges(u1, ch, FlowDirection.IN, label="c"),
+            ),
+            k2,
+        )
+        self._assert_paths_equal(monkeypatch, A, B)
