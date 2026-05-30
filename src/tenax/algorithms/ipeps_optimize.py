@@ -1178,6 +1178,27 @@ def _optimize_gs_ad_tensor_reference_c4v(
     return final_A, final_env, float(final_energy)
 
 
+def _log_ad_compile_notice(config) -> None:
+    """Emit a one-time, verbose-gated notice before the first gradient step.
+
+    Step 1 traces and XLA-compiles the CTM backward.  For block-sparse
+    (symmetric / fermionic) site tensors this trace+compile scales with the
+    number of charge blocks and can take minutes at larger ``D``/``chi`` —
+    a *one-time* cost per optimizer run (the implicit-AD backward is cached
+    across steps).  Without this notice the first step looks like a silent
+    hang, which is exactly how issue #565 was reported.  The underlying
+    compile-time scaling is tracked in issue #566.
+    """
+    if config.gs_verbose:
+        print(
+            "[iPEPS-AD] Tracing + compiling the CTM backward for step 1 "
+            "(one-time per run). For block-sparse symmetric/fermionic "
+            "tensors this scales with charge-block count and can take "
+            "minutes at larger D/chi — see issue #566.",
+            flush=True,
+        )
+
+
 def _optimize_gs_ad_tensor(
     hamiltonian_gate: jax.Array,
     A_init: Tensor,
@@ -1527,6 +1548,7 @@ def _optimize_gs_ad_tensor(
                 patience = p
         return patience
 
+    _log_ad_compile_notice(config)
     for step in range(config.gs_num_steps):
         # Update conv_tol if schedule is active
         if _conv_tol_schedule is not None:
@@ -2878,6 +2900,7 @@ def _optimize_gs_ad_tensor_2site(
         _prev_norm_diag = None
 
     try:
+        _log_ad_compile_notice(config)
         for step in range(start_step, config.gs_num_steps):
             # Snapshots for checkpoint "did chi change / new best" detection.
             # ``best_energy`` only decreases, so a strict < comparison after

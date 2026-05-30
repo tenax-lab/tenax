@@ -11,7 +11,11 @@ from tenax.algorithms.fermionic_ipeps import (
     spinless_fermion_gate,
 )
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
-from tenax.algorithms.ipeps_optimize import optimize_fpeps_ad
+from tenax.algorithms.ipeps_optimize import (
+    _log_ad_compile_notice,
+    optimize_fpeps_ad,
+    optimize_gs_ad,
+)
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 # ------------------------------------------------------------------ #
@@ -86,6 +90,91 @@ class TestOptimizeFpepsAd:
         H = spinless_fermion_gate(FPEPSConfig())
         with pytest.raises(ValueError, match="fpeps_config is required"):
             optimize_fpeps_ad(H, A_init=None, config=ipeps_config_short)
+
+
+# ------------------------------------------------------------------ #
+# #565: fermionic 2-site AD de-silencing + completion smoke test      #
+# ------------------------------------------------------------------ #
+
+
+class TestFermionic2SiteADRegression:
+    """Regression coverage for #565.
+
+    The 2-site fermionic AD path (``optimize_gs_ad(unit_cell="2site")``
+    on FermionParity input) was reported as a *silent hang*: 30+ min at
+    99% CPU with no output after the implicit-AD warning.  It is not a
+    deadlock — the cost is a one-time trace+compile of the block-sparse
+    CTM backward, which scales with charge-block count (tracked in #566).
+    Two regressions are guarded here:
+
+    1. The first-step compile notice fires (so the wait is never silent).
+    2. The path actually completes with a finite energy and preserves
+       the SymmetricTensor type — the multi-block symmetric AD that CI
+       did not previously exercise (``test_block_sparse_ctm_ad`` uses
+       trivial single-block charges).
+    """
+
+    def test_compile_notice_emitted_when_verbose(self, capsys):
+        """The de-silencing notice prints (with the #566 ref) iff verbose."""
+        verbose_cfg = iPEPSConfig(gs_verbose=True)
+        _log_ad_compile_notice(verbose_cfg)
+        out = capsys.readouterr().out
+        assert "step 1" in out and "#566" in out, out
+
+        quiet_cfg = iPEPSConfig(gs_verbose=False)
+        _log_ad_compile_notice(quiet_cfg)
+        assert capsys.readouterr().out == ""
+
+    @pytest.mark.slow
+    def test_fermionic_2site_ad_completes(self):
+        """One step of 2-site FermionParity AD completes with finite energy.
+
+        Wrapped in a generous wall-clock guard (the compile is the cost,
+        not a deadlock — see #566): a regression to a true hang fails the
+        test loudly instead of stalling the suite indefinitely.
+        """
+        import threading
+
+        fcfg = FPEPSConfig(D=2, t=1.0, V=2.0)
+        gate = spinless_fermion_gate(fcfg)
+        A = _build_initial_fpeps_tensor(fcfg, jax.random.PRNGKey(1))
+        B = _build_initial_fpeps_tensor(fcfg, jax.random.PRNGKey(2))
+        assert isinstance(A, SymmetricTensor)
+
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            unit_cell="2site",
+            su_init=False,
+            gs_implicit_ad=True,
+            gs_num_steps=1,
+            gs_verbose=False,
+            ctm=CTMConfig(chi=4, max_iter=20, conv_tol=1e-4),
+        )
+
+        result: dict = {}
+
+        def _run():
+            try:
+                (A_opt, B_opt), _envs, E = optimize_gs_ad(gate, (A, B), config)
+                result.update(A_opt=A_opt, B_opt=B_opt, E=E)
+            except BaseException as exc:  # noqa: BLE001 - re-raise in main thread
+                result["exc"] = exc
+
+        # XLA compile releases the GIL, so join(timeout) on the main thread
+        # observes a real wall-clock bound.  600s is generous for D=2 chi=4
+        # (~2-4 min) yet well under the >30 min #565 hang.
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        worker.join(timeout=600.0)
+
+        assert not worker.is_alive(), (
+            "Fermionic 2-site AD did not complete within 600s — possible "
+            "regression to the #565 hang."
+        )
+        assert "exc" not in result, f"2-site fermionic AD raised: {result['exc']!r}"
+        assert np.isfinite(float(result["E"])), f"Non-finite energy: {result['E']}"
+        assert isinstance(result["A_opt"], SymmetricTensor)
+        assert isinstance(result["B_opt"], SymmetricTensor)
 
 
 # ------------------------------------------------------------------ #

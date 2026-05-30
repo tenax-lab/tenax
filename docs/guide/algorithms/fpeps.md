@@ -61,6 +61,28 @@ print(f"E/site = {energy:.8f}")
   pipeline: simple update + CTM + energy.
 - ``spinless_fermion_gate(t, V, dt=None)`` — build the t-V model gate.
 - ``FPEPSConfig`` — configuration dataclass.
+- ``optimize_fpeps_ad(hamiltonian_gate, A_init, config, fpeps_config=None)`` —
+  AD-based ground-state optimization (1-site). For a 2-site unit cell use
+  ``optimize_gs_ad(gate, (A, B), config)`` with ``config.unit_cell="2site"``.
+
+## Performance: AD compile cost on symmetric tensors
+
+The AD path differentiates through the CTM fixed point. The backward is
+traced and XLA-compiled **once per optimizer run** (then reused across
+steps), but for block-sparse ``SymmetricTensor`` site tensors that single
+trace+compile scales with the **number of charge blocks** — hence with the
+symmetry's sector count and with ``D``/``chi``. This is *not* specific to
+fermions: any charge-conserving iPEPS AD (U(1), Zₙ, FermionParity) is
+affected; fermionic tensors simply always carry non-trivial parity sectors.
+
+Practical consequence: the **first** gradient step can take from seconds (a
+single block) to many minutes (large ``D``/``chi`` with many blocks). With
+``gs_verbose=True`` a one-time notice is printed before step 1 so the wait is
+not mistaken for a hang. Subsequent steps reuse the compiled backward and are
+fast. If the first step seems stuck, it is almost always compiling, not
+deadlocked. The underlying compile-time scaling — and the plan to fix it via
+sweep-level block batching — is tracked in
+[issue #566](https://github.com/tenax-lab/tenax/issues/566).
 
 ## References
 
