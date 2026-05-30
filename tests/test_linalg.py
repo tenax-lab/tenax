@@ -429,3 +429,235 @@ class TestSvdBaseChargesEagerPath:
         bond_charges = U.indices[U.labels().index("bond")].charges.tolist()
         # Canonical prefix for n=2 with base=[0,1,1] is [0, 1].
         assert bond_charges == [0, 1]
+
+
+# ------------------------------------------------------------------ #
+# Batched block-sparse decompositions (#569, Milestone A increment 1) #
+# ------------------------------------------------------------------ #
+
+import os  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+
+from tenax.core.symmetry import FermionParity, ZnSymmetry  # noqa: E402
+from tenax.linalg import qr, svd  # noqa: E402
+
+
+@contextmanager
+def _batch_gate(on: bool):
+    """Toggle the TENAX_BATCH_BLOCKSPARSE umbrella gate, restoring prior value."""
+    key = "TENAX_BATCH_BLOCKSPARSE"
+    prev = os.environ.get(key)
+    if on:
+        os.environ[key] = "1"
+    else:
+        os.environ.pop(key, None)
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = prev
+
+
+def _two_leg(sym, charges, seed=0):
+    """A 2-leg (l:IN, r:OUT) symmetric tensor.
+
+    With repeated charges of equal multiplicity, several bond-charge sectors
+    share the same assembled-matrix shape, so the batched ``vmap`` branch of
+    ``_grouped_decomp_by_shape`` is genuinely exercised (groups of size > 1),
+    not silently reduced to singletons.
+    """
+    ch = np.asarray(charges, dtype=np.int32)
+    idx_l = TensorIndex.from_charges(sym, ch, IN, label="l")
+    idx_r = TensorIndex.from_charges(sym, ch, OUT, label="r")
+    return SymmetricTensor.random_normal(
+        (idx_l, idx_r), jax.random.PRNGKey(seed), dtype=jnp.float64
+    )
+
+
+def _recon_us_vh(U, s, Vh):
+    """Gauge-invariant dense reconstruction U·diag(s)·Vh.
+
+    Compares decompositions without depending on the (sign/basis) gauge of the
+    raw U/Vh singular vectors, which batched vs sequential LAPACK may pick
+    differently on degenerate subspaces.
+    """
+    Ud = np.asarray(U.todense())  # (Dl, Dbond)
+    Vhd = np.asarray(Vh.todense())  # (Dbond, Dr)
+    return (Ud * np.asarray(s)[None, :]) @ Vhd
+
+
+# (name, symmetry, charges) — each yields >=2 sectors sharing a matrix shape.
+_SYM_CASES = [
+    ("u1", U1Symmetry(), [-1, -1, 0, 0, 1, 1]),
+    ("z2", ZnSymmetry(2), [0, 0, 1, 1]),
+    ("fp", FermionParity(), [0, 0, 1, 1]),
+]
+
+
+class TestBatchedDecompEquivalence:
+    """Gate-on (batched vmap) must equal gate-off (per-sector loop).
+
+    Equivalence is asserted on gauge-invariant quantities — singular/eigen
+    values and the dense reconstruction — rather than raw U/Vh, since batched
+    LAPACK may pick a different sign/basis gauge on (near-)degenerate subspaces.
+    """
+
+    @pytest.mark.parametrize("name,sym,charges", _SYM_CASES)
+    def test_svd_full(self, name, sym, charges):
+        T = _two_leg(sym, charges, seed=1)
+        with _batch_gate(False):
+            U0, s0, Vh0, _ = svd(T, ["l"], ["r"])
+        with _batch_gate(True):
+            U1, s1, Vh1, _ = svd(T, ["l"], ["r"])
+        np.testing.assert_allclose(
+            np.sort(np.asarray(s0)), np.sort(np.asarray(s1)), rtol=1e-10, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            _recon_us_vh(U0, s0, Vh0),
+            _recon_us_vh(U1, s1, Vh1),
+            rtol=1e-10,
+            atol=1e-12,
+        )
+        # Full SVD must reconstruct the input (sanity that recon is meaningful).
+        np.testing.assert_allclose(
+            _recon_us_vh(U0, s0, Vh0), np.asarray(T.todense()), rtol=1e-8, atol=1e-9
+        )
+
+    @pytest.mark.parametrize("name,sym,charges", _SYM_CASES)
+    def test_svd_truncated(self, name, sym, charges):
+        T = _two_leg(sym, charges, seed=2)
+        with _batch_gate(False):
+            _, s0, _, _ = svd(T, ["l"], ["r"], max_singular_values=3)
+        with _batch_gate(True):
+            _, s1, _, _ = svd(T, ["l"], ["r"], max_singular_values=3)
+        assert s0.shape == s1.shape
+        np.testing.assert_allclose(
+            np.sort(np.asarray(s0)), np.sort(np.asarray(s1)), rtol=1e-10, atol=1e-12
+        )
+
+    @pytest.mark.parametrize("name,sym,charges", _SYM_CASES)
+    def test_qr(self, name, sym, charges):
+        T = _two_leg(sym, charges, seed=3)
+        with _batch_gate(False):
+            Q0, R0 = qr(T, ["l"], ["r"])
+        with _batch_gate(True):
+            Q1, R1 = qr(T, ["l"], ["r"])
+        recon0 = np.asarray(Q0.todense()) @ np.asarray(R0.todense())
+        recon1 = np.asarray(Q1.todense()) @ np.asarray(R1.todense())
+        np.testing.assert_allclose(recon0, recon1, rtol=1e-10, atol=1e-12)
+        np.testing.assert_allclose(
+            recon0, np.asarray(T.todense()), rtol=1e-8, atol=1e-9
+        )
+
+    @pytest.mark.parametrize("name,sym,charges", _SYM_CASES)
+    def test_eigh(self, name, sym, charges):
+        T = _two_leg(sym, charges, seed=4)
+        with _batch_gate(False):
+            _, w0 = eigh(T, ["l"], ["r"])
+        with _batch_gate(True):
+            _, w1 = eigh(T, ["l"], ["r"])
+        np.testing.assert_allclose(
+            np.sort(np.asarray(w0)), np.sort(np.asarray(w1)), rtol=1e-10, atol=1e-12
+        )
+
+    def test_single_sector_sanity(self):
+        # One charge -> one sector -> singleton group -> direct call, must
+        # still equal the sequential path exactly.
+        T = _two_leg(U1Symmetry(), [0, 0, 0], seed=5)
+        with _batch_gate(False):
+            _, s0, _, _ = svd(T, ["l"], ["r"])
+        with _batch_gate(True):
+            _, s1, _, _ = svd(T, ["l"], ["r"])
+        np.testing.assert_allclose(
+            np.sort(np.asarray(s0)), np.sort(np.asarray(s1)), rtol=1e-12, atol=1e-14
+        )
+
+
+class TestBatchedTracedSvdAD:
+    """The AD-critical path: vmap over the ``truncated_svd_ad`` custom_vjp.
+
+    Differentiating a scalar of the SVD outputs forces the block arrays to be
+    tracers, routing through ``_truncated_svd_symmetric_traced``. The loss is
+    ``sum(s**2)`` — gauge-invariant and smooth, so finite differences are
+    reliable even when singular vectors are sign-ambiguous.
+    """
+
+    @staticmethod
+    def _flat_loss(T):
+        leaves, treedef = jax.tree_util.tree_flatten(T)
+        x0 = leaves[0]
+
+        def loss_x(x):
+            Tx = jax.tree_util.tree_unflatten(treedef, [x])
+            # max_singular_values=None -> traced path keeps k_q = available_q,
+            # uniform across same-shape sectors -> genuine multi-member
+            # (shape, k_q) vmap group.
+            _, s, _, _ = svd(Tx, ["l"], ["r"], max_singular_values=None)
+            return jnp.sum(s**2)
+
+        return loss_x, x0
+
+    def _check(self, T, do_fd=True):
+        loss_x, x0 = self._flat_loss(T)
+        with _batch_gate(False):
+            g_off = jax.grad(loss_x)(x0)
+        with _batch_gate(True):
+            g_on = jax.grad(loss_x)(x0)
+        # Batched gradient must equal the sequential gradient (vmap(f)==[f]).
+        np.testing.assert_allclose(
+            np.asarray(g_on), np.asarray(g_off), rtol=1e-8, atol=1e-10
+        )
+        if do_fd:
+            # Central finite difference on every flat-buffer entry (gate on).
+            with _batch_gate(True):
+                eps = 1e-6
+                x0n = np.asarray(x0)
+                fd = np.zeros_like(x0n)
+                for i in range(x0n.shape[0]):
+                    xp = x0n.copy()
+                    xp[i] += eps
+                    xm = x0n.copy()
+                    xm[i] -= eps
+                    fd[i] = (
+                        float(loss_x(jnp.asarray(xp))) - float(loss_x(jnp.asarray(xm)))
+                    ) / (2 * eps)
+            np.testing.assert_allclose(np.asarray(g_on), fd, rtol=1e-4, atol=1e-6)
+
+    def test_grad_parity_u1(self):
+        self._check(_two_leg(U1Symmetry(), [-1, -1, 0, 0, 1, 1], seed=11))
+
+    def test_grad_parity_fermion(self):
+        self._check(_two_leg(FermionParity(), [0, 0, 1, 1], seed=12))
+
+    def test_grad_parity_rank_deficient(self):
+        # Rank-1 sector blocks (one zero singular value per sector) exercise
+        # _zero_subrank_singular_values + the rank-aware F-mask under vmap.
+        # FD is unreliable at the rank boundary, so assert only batched==seq.
+        sym = U1Symmetry()
+        ch = np.array([0, 0, 1, 1], dtype=np.int32)
+        idx_l = TensorIndex.from_charges(sym, ch, IN, label="l")
+        idx_r = TensorIndex.from_charges(sym, ch, OUT, label="r")
+        key = jax.random.PRNGKey(13)
+        blocks = {}
+        for i, q in enumerate((0, 1)):
+            u = jax.random.normal(jax.random.fold_in(key, 2 * i), (2,))
+            v = jax.random.normal(jax.random.fold_in(key, 2 * i + 1), (2,))
+            blocks[(q, q)] = jnp.outer(u, v)  # rank-1 (2,2) block
+        T = SymmetricTensor(blocks, (idx_l, idx_r))
+        self._check(T, do_fd=False)
+
+    def test_grad_parity_degenerate(self):
+        # Scaled-identity sector blocks -> fully degenerate singular values,
+        # exercising the Lorentzian regularization under vmap.
+        sym = U1Symmetry()
+        ch = np.array([0, 0, 1, 1], dtype=np.int32)
+        idx_l = TensorIndex.from_charges(sym, ch, IN, label="l")
+        idx_r = TensorIndex.from_charges(sym, ch, OUT, label="r")
+        blocks = {
+            (0, 0): 1.5 * jnp.eye(2),
+            (1, 1): 2.5 * jnp.eye(2),
+        }
+        T = SymmetricTensor(blocks, (idx_l, idx_r))
+        self._check(T, do_fd=False)

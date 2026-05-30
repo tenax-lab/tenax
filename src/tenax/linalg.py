@@ -85,6 +85,85 @@ def _group_blocks_by_bond_charge(
     return grouped
 
 
+def _batch_blocksparse_enabled() -> bool:
+    """Return True iff the ``TENAX_BATCH_BLOCKSPARSE`` umbrella gate is truthy.
+
+    Uses the same allowlist parse as
+    ``tenax.contraction.contractor`` (issue #568): only the explicit
+    on-values ``"1"/"true"/"yes"/"on"`` (case-folded, stripped) enable the
+    batched path, so non-canonical falsey strings such as ``"FALSE"``/``"no"``
+    are never misread as enabled.  Default (unset/falsey) keeps the per-sector
+    Python loop byte-identical to before.
+    """
+    import os
+
+    return os.environ.get("TENAX_BATCH_BLOCKSPARSE", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _grouped_decomp_by_shape(
+    mats_by_q: dict[int, jax.Array],
+    decomp_fn,
+    group_extra_key=None,
+):
+    """Batch per-sector dense decompositions that share an assembled shape.
+
+    ``mats_by_q`` maps a charge-sector key ``q`` to its assembled dense matrix.
+    Sectors are partitioned into groups keyed by ``matrix.shape`` (optionally
+    extended by ``group_extra_key(q)`` — e.g. the static ``chi`` for the
+    truncated-SVD-AD path, which must be uniform within any ``vmap`` batch).
+
+    For every group with more than one member the matrices are stacked and the
+    decomposition is run through a single ``jax.vmap`` call; singletons call
+    ``decomp_fn`` directly with no stacking.  ``decomp_fn`` must return a tuple
+    of arrays.
+
+    Returns ``results_by_q``: a dict mapping each ``q`` to ``decomp_fn``'s tuple
+    output for that sector.  Iteration order of ``mats_by_q`` is preserved in
+    the returned dict, so downstream block-key ordering is unchanged versus the
+    sequential path; ``vmap(f) == [f(x_i)]`` keeps values (and gradients)
+    identical as well.
+
+    ``decomp_fn`` is either ``f(M) -> tuple`` (then vmapped with
+    ``in_axes=0``) or, when ``group_extra_key`` is given, ``f(M, extra) ->
+    tuple`` where ``extra`` is the static non-diff argument shared across the
+    group (vmapped with ``in_axes=(0, None)``).
+    """
+    # Partition q's into shape[/extra] groups, preserving first-seen order.
+    groups: dict[tuple, list[int]] = {}
+    for q, mat in mats_by_q.items():
+        if group_extra_key is None:
+            gkey = (tuple(mat.shape),)
+        else:
+            gkey = (tuple(mat.shape), group_extra_key(q))
+        groups.setdefault(gkey, []).append(q)
+
+    raw_results: dict[int, tuple] = {}
+    for gkey, qs in groups.items():
+        if len(qs) == 1:
+            q = qs[0]
+            if group_extra_key is None:
+                raw_results[q] = decomp_fn(mats_by_q[q])
+            else:
+                raw_results[q] = decomp_fn(mats_by_q[q], group_extra_key(q))
+        else:
+            stacked = jnp.stack([mats_by_q[q] for q in qs])
+            if group_extra_key is None:
+                batched = jax.vmap(decomp_fn, in_axes=0)(stacked)
+            else:
+                extra = group_extra_key(qs[0])
+                batched = jax.vmap(decomp_fn, in_axes=(0, None))(stacked, extra)
+            for i, q in enumerate(qs):
+                raw_results[q] = tuple(arr[i] for arr in batched)
+
+    # Restore original q iteration order.
+    return {q: raw_results[q] for q in mats_by_q}
+
+
 # ---------- Block-sparse SVD ----------
 
 
@@ -154,6 +233,13 @@ def _truncated_svd_symmetric(
         ],
     ] = {}
 
+    # Gated batched path (#569): collect assembled matrices + metadata in a
+    # first pass, then dispatch the per-sector SVDs (grouped by matrix shape
+    # under the gate, one-by-one otherwise). Sequential semantics unchanged.
+    _batch = _batch_blocksparse_enabled()
+    _mats_by_q: dict[int, jax.Array] = {}
+    _meta_by_q: dict[int, tuple] = {}
+
     for q, entries in grouped.items():
         # Collect unique left / right subkeys (preserving order for determinism)
         left_subkeys_seen: dict[BlockKey, int] = {}
@@ -218,8 +304,28 @@ def _truncated_svd_symmetric(
                 col_start : col_start + right_col_sizes[ri],
             ].set(flat_block)
 
-        # SVD this sector
-        U_q, s_q, Vh_q = jnp.linalg.svd(matrix, full_matrices=False)
+        # Defer the SVD: stash the assembled matrix + reconstruction metadata.
+        _mats_by_q[q] = matrix
+        _meta_by_q[q] = (
+            left_subkeys,
+            right_subkeys,
+            left_row_sizes,
+            right_col_sizes,
+        )
+
+    if _batch:
+        _svd_by_q = _grouped_decomp_by_shape(
+            _mats_by_q,
+            lambda M: jnp.linalg.svd(M, full_matrices=False),
+        )
+    else:
+        _svd_by_q = {
+            q: jnp.linalg.svd(M, full_matrices=False) for q, M in _mats_by_q.items()
+        }
+
+    for q in _mats_by_q:
+        U_q, s_q, Vh_q = _svd_by_q[q]
+        left_subkeys, right_subkeys, left_row_sizes, right_col_sizes = _meta_by_q[q]
         sector_results[q] = (
             U_q,
             s_q,
@@ -678,14 +784,32 @@ def _truncated_svd_symmetric_traced(
         k_per_sector[best_q] = 1
 
     # --- Per-sector AD-primitive SVD ---
+    # truncated_svd_ad is a jax.custom_vjp with nondiff_argnums=(1,) (chi=k_q),
+    # so the static chi must match across any vmapped batch. Under the gate we
+    # group sectors by (matrix.shape, k_q) and vmap with in_axes=(0, None);
+    # since vmap(f) == [f(x_i)] both values and gradients are identical to the
+    # sequential loop (#569).
     sector_svd: dict[int, tuple[jax.Array, jax.Array, jax.Array]] = {}
+    _ad_mats_by_q: dict[int, jax.Array] = {}
     for q, (matrix, _, _, _, _, _) in sector_results.items():
         k_q = k_per_sector.get(q, 0)
         if k_q <= 0:
             continue
-        # truncated_svd_ad takes a jax.Array matrix and chi
-        U_q, s_q, Vh_q = truncated_svd_ad(matrix, k_q)
-        sector_svd[q] = (U_q, s_q, Vh_q)
+        _ad_mats_by_q[q] = matrix
+
+    if _batch_blocksparse_enabled():
+        _ad_svd_by_q = _grouped_decomp_by_shape(
+            _ad_mats_by_q,
+            truncated_svd_ad,
+            group_extra_key=lambda q: int(k_per_sector[q]),
+        )
+        for q, res in _ad_svd_by_q.items():
+            sector_svd[q] = res
+    else:
+        for q, matrix in _ad_mats_by_q.items():
+            # truncated_svd_ad takes a jax.Array matrix and chi
+            U_q, s_q, Vh_q = truncated_svd_ad(matrix, int(k_per_sector[q]))
+            sector_svd[q] = (U_q, s_q, Vh_q)
 
     # --- Concatenate output in canonical sector-ascending order ---
     ordered_qs = sorted(sector_svd.keys())
@@ -1195,6 +1319,8 @@ def _qr_symmetric(
     ] = {}
 
     bond_charges_list: list[int] = []
+    _qr_mats_by_q: dict[int, jax.Array] = {}
+    _qr_meta_by_q: dict[int, tuple] = {}
 
     for q in sorted(grouped.keys()):
         entries = grouped[q]
@@ -1259,7 +1385,26 @@ def _qr_symmetric(
                 col_start : col_start + right_col_sizes[ri],
             ].set(flat_block)
 
-        Q_q, R_q = jnp.linalg.qr(matrix)
+        # Defer the QR: stash the assembled matrix + reconstruction metadata
+        # (in sorted-q order so bond_charges_list ordering is unchanged).
+        _qr_mats_by_q[q] = matrix
+        _qr_meta_by_q[q] = (
+            left_subkeys,
+            right_subkeys,
+            left_row_sizes,
+            right_col_sizes,
+        )
+
+    # Gated batched QR (#569): group sectors by assembled-matrix shape and
+    # vmap jnp.linalg.qr; sequential one-by-one otherwise. Order preserved.
+    if _batch_blocksparse_enabled():
+        _qr_by_q = _grouped_decomp_by_shape(_qr_mats_by_q, lambda M: jnp.linalg.qr(M))
+    else:
+        _qr_by_q = {q: jnp.linalg.qr(M) for q, M in _qr_mats_by_q.items()}
+
+    for q in _qr_mats_by_q:
+        Q_q, R_q = _qr_by_q[q]
+        left_subkeys, right_subkeys, left_row_sizes, right_col_sizes = _qr_meta_by_q[q]
         bond_dim_q = Q_q.shape[1]
 
         bond_charges_list.extend([q] * bond_dim_q)
@@ -1374,6 +1519,9 @@ def _eigh_symmetric(
         tuple[jax.Array, jax.Array, list[BlockKey], list[int]],
     ] = {}
 
+    _eigh_mats_by_q: dict[int, jax.Array] = {}
+    _eigh_meta_by_q: dict[int, tuple] = {}
+
     for q, entries in grouped.items():
         left_subkeys_seen: dict[BlockKey, int] = {}
         right_subkeys_seen: dict[BlockKey, int] = {}
@@ -1435,9 +1583,24 @@ def _eigh_symmetric(
                 col_start : col_start + right_col_sizes[ri],
             ].set(flat_block)
 
-        # Symmetrize for numerical stability
+        # Symmetrize for numerical stability (before the decomposition, exactly
+        # as the sequential path); stash for the gated batched eigh.
         matrix = 0.5 * (matrix + matrix.conj().T)
-        eigvals_q, eigvecs_q = jnp.linalg.eigh(matrix)
+        _eigh_mats_by_q[q] = matrix
+        _eigh_meta_by_q[q] = (left_subkeys, left_row_sizes)
+
+    # Gated batched eigh (#569): group already-Hermitian sectors by shape and
+    # vmap jnp.linalg.eigh; sequential one-by-one otherwise. Order preserved.
+    if _batch_blocksparse_enabled():
+        _eigh_by_q = _grouped_decomp_by_shape(
+            _eigh_mats_by_q, lambda M: jnp.linalg.eigh(M)
+        )
+    else:
+        _eigh_by_q = {q: jnp.linalg.eigh(M) for q, M in _eigh_mats_by_q.items()}
+
+    for q in _eigh_mats_by_q:
+        eigvals_q, eigvecs_q = _eigh_by_q[q]
+        left_subkeys, left_row_sizes = _eigh_meta_by_q[q]
         sector_results[q] = (eigvecs_q, eigvals_q, left_subkeys, left_row_sizes)
 
     # Global truncation: merge eigenvalues across sectors, keep top-k
