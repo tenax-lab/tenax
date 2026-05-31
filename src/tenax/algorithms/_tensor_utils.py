@@ -362,18 +362,20 @@ def _fuse_indices_symmetric(
             full_shape[a] = fused_dim[q_f]
             new_blocks[new_key] = jnp.zeros(full_shape, dtype=block.dtype)
 
-        # Scatter sub-block elements to correct positions in fused block
+        # Scatter every sub-block slice along axis a in ONE vectorized op:
+        #   existing[..., offsets[k], ...] = block_flat[..., k, ...]  for all k.
+        # The offsets are distinct (each local index maps to a unique target),
+        # so there are no scatter collisions; and different (qa, qb) pairs own
+        # disjoint offset ranges within the fused block, so successive `.set()`
+        # calls accumulate correctly without clobbering. This replaces a
+        # per-element Python loop (one `.at[].set()` primitive per element —
+        # hundreds at large bond dim, which bloats the jaxpr/XLA compile) with
+        # a single scatter primitive (#569, Milestone A). Numerically identical
+        # to the loop (same data movement) and differentiable (scatter VJP).
         existing = new_blocks[new_key]
-        sub_size = block_flat.shape[a]
-        for local_idx in range(sub_size):
-            target = int(offsets[local_idx])
-            # Extract slice along axis a at local_idx
-            slc_src = [slice(None)] * len(new_shape)
-            slc_src[a] = local_idx
-            slc_dst = [slice(None)] * len(new_shape)
-            slc_dst[a] = target
-            existing = existing.at[tuple(slc_dst)].set(block_flat[tuple(slc_src)])
-        new_blocks[new_key] = existing
+        dst = [slice(None)] * len(new_shape)
+        dst[a] = jnp.asarray(offsets)
+        new_blocks[new_key] = existing.at[tuple(dst)].set(block_flat)
 
     obj = object.__new__(SymmetricTensor)
     obj._indices = new_indices
@@ -523,21 +525,15 @@ def _split_index_symmetric(T: SymmetricTensor, axis: int) -> SymmetricTensor:
             ma = len(positions_a[qa])
             mb = len(positions_b[qb])
 
-            # Gather elements from fused block at scatter offsets
-            sub_size = ma * mb
-            # Build new block by gathering from fused axis
-            gathered_slices = []
-            for local_idx in range(sub_size):
-                target = int(offsets[local_idx])
-                slc = [slice(None)] * ndim
-                slc[axis] = target
-                gathered_slices.append(block[tuple(slc)])
-
-            if not gathered_slices:
-                continue
-
-            # Stack along fused axis, then reshape to (ma, mb)
-            sub_block = jnp.stack(gathered_slices, axis=axis)
+            # Gather every sub-block slice along the fused axis in ONE
+            # vectorized op: sub[..., k, ...] = block[..., offsets[k], ...].
+            # A single advanced-index gather (the gathered dim stays at `axis`
+            # since it is the only advanced index) replaces a per-element
+            # Python gather + jnp.stack (#569). Numerically identical and
+            # differentiable (gather VJP = scatter-add).
+            src = [slice(None)] * ndim
+            src[axis] = jnp.asarray(offsets)
+            sub_block = block[tuple(src)]
             shape = list(sub_block.shape)
             new_shape = shape[:axis] + [ma, mb] + shape[axis + 1 :]
             sub_block = sub_block.reshape(new_shape)

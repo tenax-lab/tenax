@@ -513,3 +513,90 @@ class TestDoubleLayerTensor:
             rtol=1e-5,
             err_msg="Symmetric double_layer_tensor doesn't match dense",
         )
+
+
+# ------------------------------------------------------------------ #
+# Vectorized fuse/split scatter-gather (#569, Milestone A)             #
+# ------------------------------------------------------------------ #
+
+
+class TestFuseSplitVectorized:
+    """The vectorized scatter (fuse) / gather (split) must be exactly
+    equivalent to the per-element loops they replaced — including under AD
+    and jit, and for fermionic tensors (the scatter/gather move data only,
+    so Koszul signs in the block values are carried through untouched)."""
+
+    def _u1_3leg(self, seed=0):
+        sym = U1Symmetry()
+        ch = np.array([-1, 0, 1], dtype=np.int32)
+        ch2 = np.array([0, 1], dtype=np.int32)
+        idx_a = TensorIndex.from_charges(sym, ch, FlowDirection.IN, label="a")
+        idx_b = TensorIndex.from_charges(sym, ch2, FlowDirection.IN, label="b")
+        idx_c = TensorIndex.from_charges(sym, ch, FlowDirection.OUT, label="c")
+        return SymmetricTensor.random_normal(
+            (idx_a, idx_b, idx_c), jax.random.PRNGKey(seed), dtype=jnp.float64
+        )
+
+    def test_fermionic_fuse_split_roundtrip(self):
+        from tenax.core.symmetry import FermionParity
+
+        sym = FermionParity()
+        ch = np.array([0, 0, 1, 1], dtype=np.int32)
+        idx_a = TensorIndex.from_charges(sym, ch, FlowDirection.IN, label="a")
+        idx_b = TensorIndex.from_charges(sym, ch, FlowDirection.IN, label="b")
+        idx_c = TensorIndex.from_charges(sym, ch, FlowDirection.OUT, label="c")
+        T = SymmetricTensor.random_normal(
+            (idx_a, idx_b, idx_c), jax.random.PRNGKey(1), dtype=jnp.float64
+        )
+        fused = fuse_indices(T, 0, 1, "ab", FlowDirection.IN)
+        recovered = split_index(fused, 0)
+        np.testing.assert_allclose(
+            recovered.todense(), T.todense(), rtol=1e-12, atol=1e-14
+        )
+
+    def test_fuse_split_jit_bit_identical(self):
+        # The vectorized scatter/gather must give the SAME result under jit as
+        # eager (data movement is a pure scatter/gather primitive).
+        T = self._u1_3leg(seed=2)
+        fused_eager = fuse_indices(T, 0, 1, "ab", FlowDirection.IN)
+        split_eager = split_index(fused_eager, 0)
+
+        fused_jit = jax.jit(lambda t: fuse_indices(t, 0, 1, "ab", FlowDirection.IN))(T)
+        split_jit = jax.jit(lambda t: split_index(t, 0))(fused_jit)
+        np.testing.assert_array_equal(
+            np.asarray(fused_jit.todense()), np.asarray(fused_eager.todense())
+        )
+        np.testing.assert_array_equal(
+            np.asarray(split_jit.todense()), np.asarray(split_eager.todense())
+        )
+
+    def test_fuse_split_ad_roundtrip(self):
+        # Differentiating through fuse->split (an identity on data) must give a
+        # gradient equal to differentiating the same scalar of the input —
+        # i.e. the scatter then gather compose to the identity VJP. Compares
+        # analytic grad to central finite difference on the flat buffer.
+        T = self._u1_3leg(seed=3)
+
+        leaves, treedef = jax.tree_util.tree_flatten(T)
+        x0 = leaves[0]
+
+        def loss(x):
+            Tx = jax.tree_util.tree_unflatten(treedef, [x])
+            fused = fuse_indices(Tx, 0, 1, "ab", FlowDirection.IN)
+            split = split_index(fused, 0)
+            # weighted sum so the gradient is a fixed nonconstant tensor
+            return jnp.sum(split.todense() ** 2)
+
+        g = jax.grad(loss)(x0)
+        x0n = np.asarray(x0)
+        eps = 1e-6
+        fd = np.zeros_like(x0n)
+        for i in range(x0n.shape[0]):
+            xp = x0n.copy()
+            xp[i] += eps
+            xm = x0n.copy()
+            xm[i] -= eps
+            fd[i] = (float(loss(jnp.asarray(xp))) - float(loss(jnp.asarray(xm)))) / (
+                2 * eps
+            )
+        np.testing.assert_allclose(np.asarray(g), fd, rtol=1e-5, atol=1e-7)
