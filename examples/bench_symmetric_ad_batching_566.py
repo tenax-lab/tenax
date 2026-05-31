@@ -18,16 +18,28 @@ so we can decide whether to flip the gate default-on (possibly device-aware).
 
 What it measures, per bond dimension D and per gate mode (off / on):
 
-  * **compile** time -- first `value_and_grad` call (trace + XLA compile + run).
-  * **step** time    -- steady-state median over several subsequent calls
-                        (compiled graph reused; pure device execution).
+  * **first** step -- first `value_and_grad` call: traces and XLA-compiles the
+                      internally-jitted CTM step (the one-time #566 compile
+                      cost, and where the batching takes effect at trace time).
+  * **step** time  -- median of subsequent calls: compiled inner steps are
+                      reused, but the eager CTM-convergence + Neumann-backward
+                      orchestration re-runs in Python each call. This is one
+                      real production-style AD step, NOT a single fused device
+                      kernel; the off/on ratio is the decision metric.
 
-It drives the *real* production multi-block symmetric-AD path: `jax.value_and_grad`
-of a CTM-converge + energy loss on a genuinely multi-block **FermionParity**
-`SymmetricTensor` iPEPS site tensor (`_build_initial_fpeps_tensor`, 16 charge
-blocks). This is the exact path validated by `tests/test_fpeps_ad.py`
-(`test_symmetric_nontrivial_gradient_finite`) and the #567 fermionic AD smoke
-test -- i.e. the multi-block regime #566/#565 are about.
+It drives the *actual default* production multi-block symmetric-AD path: a bare
+`jax.value_and_grad` (no outer jax.jit) with the default
+`ad_backward_method="vjp"` Neumann backward, on a genuinely multi-block
+**FermionParity** `SymmetricTensor` iPEPS site tensor
+(`_build_initial_fpeps_tensor`, 16 charge blocks) -- mirroring
+`ipeps_optimize._optimize_gs_ad_tensor`. This is the path validated by
+`tests/test_fpeps_ad.py::test_symmetric_nontrivial_gradient_finite` and the #567
+fermionic AD smoke test -- i.e. the multi-block regime #566/#565 are about.
+
+We deliberately do not jit the outer value_and_grad or switch to the gmres
+backward: production does neither, and the "vjp" backward's host-side Python
+loop is not jittable anyway (only the xfail-#292 gmres backend is). The
+block-sparse batching still applies inside the internally-jitted CTM step.
 
 Note: the U(1) single-site CTM path (unbounded charge sectors, the strongest
 block-count stress) currently fails in the production absorb step for non-trivial
@@ -41,7 +53,7 @@ GPU (the run that matters)::
     CUDA_VISIBLE_DEVICES=0 uv run python examples/bench_symmetric_ad_batching_566.py \
         --D 2 3 4 6 --chi-factor 3 --reps 5 --json bench_566_gpu.json
 
-CPU sanity (slow -- D=3 compile is minutes)::
+CPU sanity (slow -- D=3 first step is minutes)::
 
     JAX_PLATFORMS=cpu uv run python examples/bench_symmetric_ad_batching_566.py \
         --D 2 3 --chi-factor 2 --max-iter 8 --reps 2
@@ -91,7 +103,29 @@ FLAG = "TENAX_BATCH_BLOCKSPARSE"
 
 
 def build_loss(config_tuple, env_treedef, prev_env_leaves, gate, d_phys):
-    """value_and_grad-able CTM-converge + energy loss over one site tensor."""
+    """value_and_grad of the CTM-converge + energy loss (production path).
+
+    This deliberately mirrors what the production fermionic optimizer does in
+    ``ipeps_optimize._optimize_gs_ad_tensor``: it calls
+    ``jax.value_and_grad(loss_fn)(params)`` **directly, without an outer
+    jax.jit**, and uses the default ``ad_backward_method="vjp"`` (iterative
+    Neumann VJP) backward. We do NOT wrap this in jax.jit, because:
+
+      * production doesn't, so jitting would benchmark a different path; and
+      * the "vjp" backward is a host-driven Python loop (``float()`` /
+        data-dependent breaks) that cannot be traced under jax.jit at all --
+        only the experimental ``ad_backward_method="gmres"`` backend is
+        jittable, and that one is xfail (#292), i.e. not what users get.
+
+    The heavy block-sparse work (the per-sweep CTM contraction + projector
+    SVD) runs inside ``ctm_tensor_converge``'s *internally* jit-compiled CTM
+    step, so the first call still pays a real XLA compile (the #566 cost, and
+    where the TENAX_BATCH_BLOCKSPARSE batching takes effect at trace time) and
+    later calls reuse those compiled inner steps. The outer convergence /
+    Neumann-backward orchestration stays in Python -- exactly as in production
+    -- so a timed call here is one real production-style AD step, not a single
+    fused device kernel. See the timing labels in ``time_mode``.
+    """
 
     def loss_fn(A_param):
         A_norm = A_param * (1.0 / (A_param.norm() + 1e-10))
@@ -116,6 +150,15 @@ def setup(D: int, chi: int, max_iter: int, seed: int):
             chi=chi,
             max_iter=max_iter,
             conv_tol=1e-4,
+            # Leave ad_backward_method at its production default ("vjp"); see
+            # build_loss for why we do not jit / switch to gmres.
+            #
+            # The Arnoldi spectral-radius precheck is the one production
+            # default we override: on a *random* (un-optimized) iPEPS the
+            # backward Jacobian can have rho(J^T) >= the 5.0 threshold, which
+            # raises CTMRGGradientError and aborts the timing. Disabling it
+            # only skips ~20 Arnoldi matvecs and does not affect the
+            # block-sparse batching being measured.
             adjoint_arnoldi_precheck=False,
         ),
     )
@@ -129,9 +172,18 @@ def setup(D: int, chi: int, max_iter: int, seed: int):
 
 
 def time_mode(A, plumbing, on: bool, reps: int):
-    """Compile-once + steady-state timing for one gate mode.
+    """Time one gate mode: first AD step (incl. inner-step compile) + warm steps.
 
-    Returns (compile_s, step_median_s, step_min_s, energy, grad_finite).
+    ``first_s`` is the first value_and_grad call: it traces and XLA-compiles
+    the internally-jitted CTM step (the one-time #566 compile cost). ``step_s``
+    is the median of subsequent calls: the compiled inner steps are reused, but
+    the eager CTM-convergence + Neumann-backward orchestration re-runs in Python
+    each call -- i.e. one real production-style AD step (NOT a single fused
+    device kernel). The off/on ratio is the decision metric; the Python
+    orchestration is ~constant across modes so the ratio still reflects the
+    block-sparse batching delta.
+
+    Returns (first_s, step_median_s, step_min_s, energy, grad_finite).
     """
     gate, config_tuple, env_treedef, prev_env_leaves = plumbing
     os.environ[FLAG] = "1" if on else "0"  # flip the gate (read fresh per call)
@@ -141,7 +193,7 @@ def time_mode(A, plumbing, on: bool, reps: int):
     t0 = time.perf_counter()
     E, g = vg(A)
     jax.block_until_ready((E, g))
-    compile_s = time.perf_counter() - t0
+    first_s = time.perf_counter() - t0
 
     steps = []
     for _ in range(reps):
@@ -152,7 +204,7 @@ def time_mode(A, plumbing, on: bool, reps: int):
 
     grad_finite = bool(jnp.all(jnp.isfinite(g._data)))
     return (
-        compile_s,
+        first_s,
         statistics.median(steps),
         min(steps),
         float(E),
@@ -194,7 +246,7 @@ def main() -> None:
 
     hdr = (
         f"{'D':>3} {'chi':>4} {'blocks':>7} "
-        f"{'compile_off':>11} {'compile_on':>11} {'cmp_x':>6}  "
+        f"{'first_off':>11} {'first_on':>11} {'first_x':>7}  "
         f"{'step_off':>10} {'step_on':>9} {'step_x':>6}"
     )
     print(hdr)
@@ -214,14 +266,14 @@ def main() -> None:
             A, plumbing, on=True, reps=args.reps
         )
 
-        cmp_x = c_off / c_on if c_on else float("nan")
+        first_x = c_off / c_on if c_on else float("nan")
         step_x = s_off / s_on if s_on else float("nan")
         # Energies must match to many digits regardless of mode (correctness).
         e_match = abs(e_off - e_on) < 1e-9 * (1 + abs(e_off))
 
         print(
             f"{D:>3} {chi:>4} {n_blocks:>7} "
-            f"{c_off:>10.3f}s {c_on:>10.3f}s {cmp_x:>5.2f}x  "
+            f"{c_off:>10.3f}s {c_on:>10.3f}s {first_x:>6.2f}x  "
             f"{s_off * 1e3:>8.1f}ms {s_on * 1e3:>7.1f}ms {step_x:>5.2f}x"
         )
         if not e_match:
@@ -237,9 +289,9 @@ def main() -> None:
                 "D": D,
                 "chi": chi,
                 "n_blocks": n_blocks,
-                "compile_off_s": c_off,
-                "compile_on_s": c_on,
-                "compile_speedup": cmp_x,
+                "first_off_s": c_off,
+                "first_on_s": c_on,
+                "first_speedup": first_x,
                 "step_off_s": s_off,
                 "step_on_s": s_on,
                 "step_min_off_s": smin_off,
@@ -258,13 +310,13 @@ def main() -> None:
     print("\nSummary")
     print("  speedup > 1.0 means batching (gate ON) is FASTER.")
     cross_step = next((r["D"] for r in results if r["step_speedup"] > 1.0), None)
-    cross_cmp = next((r["D"] for r in results if r["compile_speedup"] > 1.0), None)
+    cross_cmp = next((r["D"] for r in results if r["first_speedup"] > 1.0), None)
     print(
-        f"  crossover D (step time, ON faster)   : "
+        f"  crossover D (warm step, ON faster) : "
         f"{cross_step if cross_step is not None else 'none in range'}"
     )
     print(
-        f"  crossover D (compile time, ON faster): "
+        f"  crossover D (first step, ON faster): "
         f"{cross_cmp if cross_cmp is not None else 'none in range'}"
     )
     all_match = all(r["energy_match"] for r in results)
