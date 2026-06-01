@@ -1,9 +1,21 @@
 [build-system]
-# hatchling capped <1.30: 1.30.0 (2026-06-01, since yanked) emitted
-# Metadata-Version 2.5, which `twine check` (the Build distribution CI step)
-# rejects as "not a valid metadata version". Lift the cap once twine/packaging
-# support 2.5.
-requires = ["hatchling>=1.27,<1.30", "hatch-vcs", "hatch-cython>=0.5", "cython>=3.0", "numpy>=1.26", "scipy>=1.11"]
+# Upper bounds guard the build against breaking releases of unpinned build
+# tooling (build-system.requires is not captured by uv.lock, so `uv build`
+# otherwise resolves the latest at build time). Caps are at the next major,
+# except:
+#   * hatchling <1.30 -- 1.30.0 (2026-06-01, since yanked) emitted
+#     Metadata-Version 2.5, which `twine check` (the Build distribution CI
+#     step) rejects as "not a valid metadata version"; lift once
+#     twine/packaging support 2.5.
+#   * hatch-vcs / hatch-cython are pre-1.0, so their cap is the next major (1.0).
+requires = [
+    "hatchling>=1.27,<1.30",
+    "hatch-vcs>=0.4,<1.0",
+    "hatch-cython>=0.5,<1.0",
+    "cython>=3.0,<4.0",
+    "numpy>=1.26,<3.0",
+    "scipy>=1.11,<2.0",
+]
 build-backend = "hatchling.build"
 
 [project]
