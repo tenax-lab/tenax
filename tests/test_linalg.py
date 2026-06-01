@@ -488,6 +488,61 @@ def _recon_us_vh(U, s, Vh):
     return (Ud * np.asarray(s)[None, :]) @ Vhd
 
 
+def _two_leg_prescribed_svals(sym, charges, sval_fn, seed=0):
+    """A 2-leg (l:IN, r:OUT) tensor whose per-sector matrices have *prescribed*
+    singular values, so we can force (near-)degenerate spectra.
+
+    Motivation: the energy-level off-vs-on divergence in the #569 iPEPS CTM
+    benchmark was driven by *near-degenerate singular values* in the CTM
+    environment. There, batched-vmap and looped LAPACK pick different (equally
+    valid) invariant subspaces, and the iterated CTM map amplifies that benign
+    gauge choice into an O(0.1) energy gap — which looked like a batching bug
+    but is not. This builder reproduces that regime at the op level, where the
+    well-posed invariant (singular values + U·diag(s)·Vh) must still match to
+    machine precision regardless of the subspace gauge.
+    """
+    ch = np.asarray(charges, dtype=np.int32)
+    idx_l = TensorIndex.from_charges(sym, ch, IN, label="l")
+    idx_r = TensorIndex.from_charges(sym, ch, OUT, label="r")
+    template = SymmetricTensor.random_normal(
+        (idx_l, idx_r), jax.random.PRNGKey(seed), dtype=jnp.float64
+    )
+    rng = np.random.RandomState(seed)
+    new_blocks = {}
+    for key, blk in template.blocks.items():
+        n, m = blk.shape
+        r = min(n, m)
+        s = np.asarray(sval_fn(r, rng), dtype=np.float64)
+        # Random orthogonal U (n×n), V (m×m): M = U[:, :r]·diag(s)·V[:r, :] has
+        # exactly the singular values s, with a generic (random) left/right gauge.
+        U, _ = np.linalg.qr(rng.standard_normal((n, n)))
+        V, _ = np.linalg.qr(rng.standard_normal((m, m)))
+        M = (U[:, :r] * s[None, :]) @ V[:r, :]
+        new_blocks[key] = jnp.asarray(M, dtype=blk.dtype)
+    return SymmetricTensor(new_blocks, (idx_l, idx_r))
+
+
+def _two_leg_prescribed_evals(sym, charges, eval_fn, seed=0):
+    """A 2-leg symmetric tensor with *prescribed*, possibly degenerate per-sector
+    eigenvalues (Hermitian blocks Q·diag(w)·Qᵀ) — the eigh analogue of
+    ``_two_leg_prescribed_svals``."""
+    ch = np.asarray(charges, dtype=np.int32)
+    idx_l = TensorIndex.from_charges(sym, ch, IN, label="l")
+    idx_r = TensorIndex.from_charges(sym, ch, OUT, label="r")
+    template = SymmetricTensor.random_normal(
+        (idx_l, idx_r), jax.random.PRNGKey(seed), dtype=jnp.float64
+    )
+    rng = np.random.RandomState(seed)
+    new_blocks = {}
+    for key, blk in template.blocks.items():
+        n, _ = blk.shape
+        w = np.asarray(eval_fn(n, rng), dtype=np.float64)
+        Q, _ = np.linalg.qr(rng.standard_normal((n, n)))
+        M = (Q * w[None, :]) @ Q.T  # symmetric, eigenvalues w
+        new_blocks[key] = jnp.asarray(M, dtype=blk.dtype)
+    return SymmetricTensor(new_blocks, (idx_l, idx_r))
+
+
 # (name, symmetry, charges) — each yields >=2 sectors sharing a matrix shape.
 _SYM_CASES = [
     ("u1", U1Symmetry(), [-1, -1, 0, 0, 1, 1]),
@@ -572,6 +627,91 @@ class TestBatchedDecompEquivalence:
             _, s1, _, _ = svd(T, ["l"], ["r"])
         np.testing.assert_allclose(
             np.sort(np.asarray(s0)), np.sort(np.asarray(s1)), rtol=1e-12, atol=1e-14
+        )
+
+    @pytest.mark.parametrize("name,sym,charges", _SYM_CASES)
+    def test_svd_near_degenerate_spectrum(self, name, sym, charges):
+        """The #569 regime: (near-)degenerate singular values.
+
+        With a degenerate cluster the raw U/Vh subspace is *ambiguous* — batched
+        vmap and looped LAPACK may pick different bases — which is exactly what
+        the iterated CTM amplified into the benchmark's O(0.1) energy gap. But
+        the gauge-invariant content (sorted singular values + U·diag(s)·Vh) must
+        still be identical off vs on. This is the well-posed correctness guard
+        the downstream energy comparison could never be.
+        """
+
+        def svals(r, _rng):
+            s = np.linspace(1.0, 0.25, r)
+            if r >= 2:
+                s[1] = s[0] + 1e-9  # tight near-degenerate pair at the top
+            return s
+
+        T = _two_leg_prescribed_svals(sym, charges, svals, seed=21)
+        with _batch_gate(False):
+            U0, s0, Vh0, _ = svd(T, ["l"], ["r"])
+        with _batch_gate(True):
+            U1, s1, Vh1, _ = svd(T, ["l"], ["r"])
+        np.testing.assert_allclose(
+            np.sort(np.asarray(s0)), np.sort(np.asarray(s1)), rtol=1e-10, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            _recon_us_vh(U0, s0, Vh0),
+            _recon_us_vh(U1, s1, Vh1),
+            rtol=1e-10,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            _recon_us_vh(U0, s0, Vh0), np.asarray(T.todense()), rtol=1e-8, atol=1e-9
+        )
+
+    def test_svd_exactly_degenerate_large_block(self):
+        """Larger blocks (4×4) with an *exactly* degenerate spectrum, two sectors
+        sharing the shape so the vmap group is genuinely size>1. The
+        gauge-invariant SVD must match off vs on to machine precision even when
+        whole singular subspaces are degenerate."""
+
+        def svals(r, _rng):
+            # e.g. [1, 1, 0.5, 0.5] — two exactly-degenerate pairs.
+            half = r // 2
+            return np.repeat(np.linspace(1.0, 0.5, max(half, 1)), 2)[:r]
+
+        T = _two_leg_prescribed_svals(
+            U1Symmetry(), [-1, -1, -1, -1, 1, 1, 1, 1], svals, seed=22
+        )
+        with _batch_gate(False):
+            U0, s0, Vh0, _ = svd(T, ["l"], ["r"])
+        with _batch_gate(True):
+            U1, s1, Vh1, _ = svd(T, ["l"], ["r"])
+        np.testing.assert_allclose(
+            np.sort(np.asarray(s0)), np.sort(np.asarray(s1)), rtol=1e-10, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            _recon_us_vh(U0, s0, Vh0),
+            _recon_us_vh(U1, s1, Vh1),
+            rtol=1e-10,
+            atol=1e-12,
+        )
+
+    @pytest.mark.parametrize("name,sym,charges", _SYM_CASES)
+    def test_eigh_near_degenerate_spectrum(self, name, sym, charges):
+        """eigh analogue: (near-)degenerate eigenvalues. Eigenvectors are
+        gauge-ambiguous on the degenerate subspace, but the eigenvalues — the
+        invariant — must match off vs on to machine precision."""
+
+        def evals(n, _rng):
+            w = np.linspace(2.0, 0.5, n)
+            if n >= 2:
+                w[1] = w[0] + 1e-9
+            return w
+
+        T = _two_leg_prescribed_evals(sym, charges, evals, seed=23)
+        with _batch_gate(False):
+            _, w0 = eigh(T, ["l"], ["r"])
+        with _batch_gate(True):
+            _, w1 = eigh(T, ["l"], ["r"])
+        np.testing.assert_allclose(
+            np.sort(np.asarray(w0)), np.sort(np.asarray(w1)), rtol=1e-10, atol=1e-12
         )
 
 
