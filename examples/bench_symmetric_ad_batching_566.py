@@ -53,14 +53,20 @@ GPU (the run that matters)::
     CUDA_VISIBLE_DEVICES=0 uv run python examples/bench_symmetric_ad_batching_566.py \
         --D 2 3 4 6 --chi-factor 3 --reps 5 --json bench_566_gpu.json
 
+f32 latency-bound probe (consumer GPU proxy for the datacenter regime)::
+
+    CUDA_VISIBLE_DEVICES=0 uv run python examples/bench_symmetric_ad_batching_566.py \
+        --no-x64 --D 2 3 4 6 --chi-factor 3 --reps 5 --json bench_566_gpu_f32.json
+
 CPU sanity (slow -- D=3 first step is minutes)::
 
     JAX_PLATFORMS=cpu uv run python examples/bench_symmetric_ad_batching_566.py \
         --D 2 3 --chi-factor 2 --max-iter 8 --reps 2
 
 The script prints a per-D table and a final summary with the speedup (off/on) at
-each D and the smallest D at which batching becomes a net win. Save stdout (and
-the --json) and attach it to issue #569.
+each D and the smallest D at which batching becomes a net win. The --json file is
+rewritten after every D (so a run killed on the large-D compile wall keeps its
+completed rows). Save stdout (and the --json) and attach it to issue #569.
 """
 
 from __future__ import annotations
@@ -212,6 +218,29 @@ def time_mode(A, plumbing, on: bool, reps: int):
     )
 
 
+def _write_json(path, base_meta, results):
+    """Dump base_meta + results-so-far + derived crossovers to ``path``.
+
+    Called after every D (not just at the end) so a long run that is killed
+    mid-sweep -- e.g. on the XLA:GPU compile wall at large D -- still leaves the
+    completed rows on disk instead of losing everything.
+    """
+    cross_step = next((r["D"] for r in results if r["step_speedup"] > 1.0), None)
+    cross_first = next((r["D"] for r in results if r["first_speedup"] > 1.0), None)
+    payload = {
+        **base_meta,
+        "crossover_step_D": cross_step,
+        "crossover_first_D": cross_first,
+        "all_energies_match": all(r["energy_match"] for r in results),
+        "all_grads_finite": all(
+            r["grad_finite_off"] and r["grad_finite_on"] for r in results
+        ),
+        "results": results,
+    }
+    with open(path, "w") as fh:
+        json.dump(payload, fh, indent=2)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--D", type=int, nargs="+", default=[2, 3, 4, 6])
@@ -226,9 +255,25 @@ def main() -> None:
     ap.add_argument("--reps", type=int, default=5, help="Steady-state timed reps.")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument(
+        "--x64",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use float64 (default; the realistic iPEPS regime). Pass --no-x64 to "
+        "run float32 -- on a consumer GPU that flips the workload from "
+        "f64-ALU-throughput-bound into the kernel-launch-latency-bound regime "
+        "the batching gate targets (better datacenter-GPU/TPU proxy). May be "
+        "less numerically stable (SVD/GMRES).",
+    )
+    ap.add_argument(
         "--json", type=str, default=None, help="Optional path to dump results JSON."
     )
     args = ap.parse_args()
+
+    # Apply the dtype choice. tenax/__init__.py force-enables jax_enable_x64 on
+    # import (which already happened above), so to honor --no-x64 we must
+    # re-apply the flag here -- before any array is created in setup(). A
+    # pre-import setting would be silently overridden by the tenax import.
+    jax.config.update("jax_enable_x64", args.x64)
 
     devices = jax.devices()
     plat = devices[0].platform
@@ -243,6 +288,24 @@ def main() -> None:
     print(f"# chi         : {chi_desc}   max_iter={args.max_iter}")
     print(f"# reps        : {args.reps}")
     print("=" * 78)
+
+    # Off vs on are the same math but batching reorders the reduction
+    # (stack + segment_sum vs per-block add), so they agree only up to
+    # accumulation error -- ~5e-7 for f64 on GPU, ~1e-3 for f32. Use a
+    # dtype-aware tolerance so the mismatch banner fires on real bugs, not on
+    # benign reduction-order drift.
+    e_tol = 1e-6 if args.x64 else 5e-3
+
+    base_meta = {
+        "platform": plat,
+        "device_kind": devices[0].device_kind,
+        "x64": bool(jax.config.read("jax_enable_x64")),
+        "symmetry": "FermionParity",
+        "chi_desc": chi_desc,
+        "max_iter": args.max_iter,
+        "reps": args.reps,
+        "energy_match_tol": e_tol,
+    }
 
     hdr = (
         f"{'D':>3} {'chi':>4} {'blocks':>7} "
@@ -268,8 +331,8 @@ def main() -> None:
 
         first_x = c_off / c_on if c_on else float("nan")
         step_x = s_off / s_on if s_on else float("nan")
-        # Energies must match to many digits regardless of mode (correctness).
-        e_match = abs(e_off - e_on) < 1e-9 * (1 + abs(e_off))
+        # Batching must not change the result beyond reduction-order drift.
+        e_match = abs(e_off - e_on) < e_tol * (1 + abs(e_off))
 
         print(
             f"{D:>3} {chi:>4} {n_blocks:>7} "
@@ -305,19 +368,24 @@ def main() -> None:
             }
         )
 
+        # Persist after every D so a run killed on the large-D compile wall
+        # still leaves the completed rows on disk.
+        if args.json:
+            _write_json(args.json, base_meta, results)
+
     # ----------------------------------------------------------------- summary
     print("-" * len(hdr))
     print("\nSummary")
     print("  speedup > 1.0 means batching (gate ON) is FASTER.")
     cross_step = next((r["D"] for r in results if r["step_speedup"] > 1.0), None)
-    cross_cmp = next((r["D"] for r in results if r["first_speedup"] > 1.0), None)
+    cross_first = next((r["D"] for r in results if r["first_speedup"] > 1.0), None)
     print(
         f"  crossover D (warm step, ON faster) : "
         f"{cross_step if cross_step is not None else 'none in range'}"
     )
     print(
         f"  crossover D (first step, ON faster): "
-        f"{cross_cmp if cross_cmp is not None else 'none in range'}"
+        f"{cross_first if cross_first is not None else 'none in range'}"
     )
     all_match = all(r["energy_match"] for r in results)
     all_fin = all(r["grad_finite_off"] and r["grad_finite_on"] for r in results)
@@ -330,25 +398,6 @@ def main() -> None:
     )
 
     if args.json:
-        with open(args.json, "w") as fh:
-            json.dump(
-                {
-                    "platform": plat,
-                    "device_kind": devices[0].device_kind,
-                    "x64": bool(jax.config.read("jax_enable_x64")),
-                    "symmetry": "FermionParity",
-                    "chi_desc": chi_desc,
-                    "max_iter": args.max_iter,
-                    "reps": args.reps,
-                    "crossover_step_D": cross_step,
-                    "crossover_compile_D": cross_cmp,
-                    "all_energies_match": all_match,
-                    "all_grads_finite": all_fin,
-                    "results": results,
-                },
-                fh,
-                indent=2,
-            )
         print(f"\n  JSON written to {args.json}")
 
 
