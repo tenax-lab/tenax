@@ -679,6 +679,51 @@ class TestSplitRDMs:
         )
         assert jnp.allclose(E_split, E_shim, atol=1e-10)
 
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12), (4, 16)])
+    def test_compute_energy_split_native_grad_matches_shim(
+        self, D, chi, heisenberg_gate
+    ):
+        """Split-aware energy GRADIENT must match the shim gradient.
+
+        Phase-1 acceptance for #463 ("1e-8 gradient" parity). Holds the
+        converged split env fixed (a constant w.r.t. the differentiated A) and
+        differentiates the per-site energy w.r.t. the site tensor through both
+        the split-aware RDM path and the shim path built from the *same* env.
+        Equal energies (1e-10, asserted above) imply equal A-gradients up to
+        the backward's accumulation error. Complements
+        ``test_compute_energy_split_native_matches_shim`` which only pins the
+        forward value.
+        """
+        import jax
+
+        from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _split_env_to_tensor_standard,
+            compute_energy_split_ctm_tensor,
+        )
+
+        A = make_random_dense_site(D, d=2, seed=30)
+        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+        env_std = _split_env_to_tensor_standard(env)
+
+        def loss_split(a):
+            return compute_energy_split_ctm_tensor(a, env, heisenberg_gate, d=2).real
+
+        def loss_shim(a):
+            return compute_energy_ctm_tensor(a, env_std, heisenberg_gate, d=2).real
+
+        g_split = jax.tree_util.tree_leaves(jax.grad(loss_split)(A))
+        g_shim = jax.tree_util.tree_leaves(jax.grad(loss_shim)(A))
+        assert len(g_split) == len(g_shim) and g_split, "gradient pytree mismatch"
+        for ls, lh in zip(g_split, g_shim):
+            np.testing.assert_allclose(
+                np.asarray(ls),
+                np.asarray(lh),
+                atol=1e-8,
+                rtol=1e-8,
+                err_msg="split-aware energy gradient diverges from shim gradient",
+            )
+
     @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
     def test_compute_energy_split_2site_matches_shim(self, D, chi, heisenberg_gate):
         from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
