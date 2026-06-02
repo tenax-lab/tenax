@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms._tensor_utils import scale_bond_axis
+from tenax.algorithms._tensor_utils import safe_inv_lambda, scale_bond_axis
 from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
@@ -108,9 +108,9 @@ def _simple_update_2site_horizontal_tensor(
     )
     B_new = scale_bond_axis(B_new, "l", sqrt_sig)
 
-    # 9. Remove outer lambdas
-    inv_lam_v = 1.0 / (lam_v + EPS)
-    inv_lam_h = 1.0 / (lam_h + EPS)
+    # 9. Remove outer lambdas (pseudo-inverse: drop dead sectors, no 1/eps blow-up)
+    inv_lam_v = safe_inv_lambda(lam_v)
+    inv_lam_h = safe_inv_lambda(lam_h)
     A_new = scale_bond_axis(A_new, "u", inv_lam_v)
     A_new = scale_bond_axis(A_new, "d", inv_lam_v)
     A_new = scale_bond_axis(A_new, "l", inv_lam_h)
@@ -214,9 +214,9 @@ def _simple_update_2site_vertical_tensor(
     )
     B_new = scale_bond_axis(B_new, "u", sqrt_sig)
 
-    # 9. Remove outer lambdas
-    inv_lam_v = 1.0 / (lam_v + EPS)
-    inv_lam_h = 1.0 / (lam_h + EPS)
+    # 9. Remove outer lambdas (pseudo-inverse: drop dead sectors, no 1/eps blow-up)
+    inv_lam_v = safe_inv_lambda(lam_v)
+    inv_lam_h = safe_inv_lambda(lam_h)
     A_new = scale_bond_axis(A_new, "u", inv_lam_v)
     A_new = scale_bond_axis(A_new, "l", inv_lam_h)
     A_new = scale_bond_axis(A_new, "r", inv_lam_h)
