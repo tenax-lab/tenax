@@ -204,6 +204,26 @@ def _normalize_tensor(T: SymmetricTensor) -> SymmetricTensor:
     return T * (1.0 / norm_val)
 
 
+def _safe_inv(lam: jax.Array, rel_tol: float = 1e-10, abs_tol: float = 1e-30) -> jax.Array:
+    """Pseudo-inverse of a bond-weight vector, dropping dead Schmidt sectors.
+
+    Returns ``1/lam`` for entries that are non-negligible relative to the largest
+    bond weight, and 0 otherwise. The cutoff is *relative* (``lam < rel_tol *
+    max(lam)``) -- a naive ``1/(lam + EPS)`` amplifies a vanishing sector to
+    ~``1/EPS``, and under the simple-update absorb-then-remove round-trip
+    (followed by a global re-normalization) that blow-up flips sector dominance
+    and degenerates the *whole* bond (all singular values collapse to 0, the
+    state flows to the trivial product/vacuum). A relative cutoff drops a dying
+    sector cleanly before it can amplify, keeping the canonical-form update
+    numerically stable. Mirrors ``pess._safe_inv`` / the Fishman SVD truncation
+    and the SVD stabilization used on the AD path.
+    """
+    lam = jnp.asarray(lam)
+    cutoff = jnp.maximum(rel_tol * jnp.max(lam), abs_tol)
+    keep = lam > cutoff
+    return jnp.where(keep, 1.0 / jnp.where(keep, lam, 1.0), 0.0)
+
+
 def _absorb_lambdas(
     A: SymmetricTensor, lam_h: jax.Array, lam_v: jax.Array
 ) -> SymmetricTensor:
@@ -299,8 +319,10 @@ def _fpeps_simple_update_horizontal(
     U_final = scale_bond_axis(U_final, "r", sqrt_sig)
 
     # 9. Remove outer lambdas: u <- lam_v^{-1}, d <- lam_v^{-1}, l <- lam_h^{-1}
-    inv_lam_v = 1.0 / (lam_v + EPS)
-    inv_lam_h = 1.0 / (lam_h + EPS)
+    #    Pseudo-inverse (drop dead sectors) -- see _safe_inv: the naive 1/(lam+EPS)
+    #    blows up a vanishing sector and collapses the whole bond.
+    inv_lam_v = _safe_inv(lam_v)
+    inv_lam_h = _safe_inv(lam_h)
     U_final = scale_bond_axis(U_final, "u", inv_lam_v)
     U_final = scale_bond_axis(U_final, "d", inv_lam_v)
     U_final = scale_bond_axis(U_final, "l", inv_lam_h)
@@ -379,8 +401,9 @@ def _fpeps_simple_update_vertical(
     U_final = scale_bond_axis(U_final, "d", sqrt_sig)
 
     # 9. Remove outer lambdas: u <- lam_v^{-1}, l <- lam_h^{-1}, r <- lam_h^{-1}
-    inv_lam_v = 1.0 / (lam_v + EPS)
-    inv_lam_h = 1.0 / (lam_h + EPS)
+    #    Pseudo-inverse (drop dead sectors) -- see _safe_inv.
+    inv_lam_v = _safe_inv(lam_v)
+    inv_lam_h = _safe_inv(lam_h)
     U_final = scale_bond_axis(U_final, "u", inv_lam_v)
     U_final = scale_bond_axis(U_final, "l", inv_lam_h)
     U_final = scale_bond_axis(U_final, "r", inv_lam_h)
