@@ -3,14 +3,23 @@
 
 This is the smallest end-to-end fPEPS that produces *physically correct* energy.
 
-Key finding (see the two paths below): for fermionic iPEPS the **AD optimizer**
+Key finding (see the two paths below): for free fermions the **AD optimizer**
 (`optimize_fpeps_ad`) works, while the **simple-update** entry point (`fpeps`)
-currently does NOT — its imaginary-time evolution drives the energy the wrong
-way (from a random state's ~-0.19 *up* to exactly 0, collapsing to a trivial
-fully-incoherent state). That is a fermionic-sign bug in the simple-update bond
-gate (`_fpeps_simple_update_horizontal/vertical`), related to the #392 Koszul
-sign issue; the end-to-end tests only assert `isfinite(energy)`, so it went
-uncaught. Until the SU signs are fixed, optimize via AD for fermions.
+does NOT — its imaginary-time evolution drives the energy the wrong way (random
+~-0.19 *up* to exactly 0, collapsing to the trivial product/vacuum state).
+
+IMPORTANT — this is NOT simple update being broken in general. Two things:
+  * 2D free fermions are *not an area-law state* (Fermi surface => S ~ L log L),
+    so they're intrinsically unrepresentable at low bond dimension -- a bad
+    target for ANY low-D PEPS. (Simple update reproduces the area-law 2D
+    Heisenberg energy, ~-0.707/site, just fine.) The collapse is also NOT
+    fermion-specific: the Z2 bosonic XY model (also non-area-law) collapses
+    identically, so it's not a Koszul/#392 sign bug.
+  * The collapse is a numerical λ⁻¹ instability in the SU canonical-form
+    bookkeeping that bites when a Schmidt sector legitimately vanishes (as a
+    non-area-law state forces). The principled fix is a numerically stable
+    iTEBD canonical form (Hastings, arXiv:0903.3253).
+For free fermions specifically, optimize via AD.
 
 Model: H = -t (c†_i c_j + h.c.) on the 2D square lattice (V=0 free fermions).
 
