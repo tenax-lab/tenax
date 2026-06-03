@@ -54,7 +54,7 @@ def ising_bulk(beta, spin_insert=False, h=0.0):
 def onsager_magnetization(beta):
     """Exact spontaneous magnetization (ordered phase, beta > beta_c)."""
     m8 = 1.0 - 1.0 / np.sinh(2.0 * beta) ** 4
-    return float(m8 ** 0.125) if m8 > 0 else 0.0
+    return float(m8**0.125) if m8 > 0 else 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -72,17 +72,20 @@ def _safe_eigh_fwd(A):
 
 
 def _safe_eigh_bwd(res, g):
-    """Standard symmetric-eigh VJP with a Lorentzian-regularized 1/(w_i - w_j).
+    """Standard symmetric-eigh VJP with a Lorentzian-regularized 1/(w_j - w_i).
 
-    The C4v corner has degenerate eigenvalues, where the bare ``1/(w_i - w_j)``
-    is 0/0 -> NaN. Replace it with ``(w_i-w_j)/((w_i-w_j)^2 + eps)`` (Francuz/
-    iPEPS-AD trick) so the gradient stays finite through the projector.
+    Eigenvectors are stored as columns (``A V = V diag(w)``), so the off-diagonal
+    denominator is ``w_j - w_i`` (matches ``jnp.linalg.eigh``'s VJP to ~1e-14;
+    the earlier ``w_i - w_j`` had the wrong sign — Codex P2). The C4v corner has
+    degenerate eigenvalues where the bare ``1/(w_j - w_i)`` is 0/0 -> NaN, so
+    replace it with ``(w_j-w_i)/((w_j-w_i)^2 + eps)`` (Francuz/iPEPS-AD trick)
+    so the gradient stays finite through the projector.
     """
     w, V = res
     gw, gV = g
     eps = 1e-12
-    diff = w[:, None] - w[None, :]
-    F = diff / (diff * diff + eps)  # regularized 1/(w_i - w_j); 0 on diagonal
+    diff = w[None, :] - w[:, None]
+    F = diff / (diff * diff + eps)  # regularized 1/(w_j - w_i); 0 on diagonal
     VtgV = V.T @ gV
     inner = jnp.diag(gw) + F * VtgV
     dA = V @ inner @ V.T
@@ -111,7 +114,7 @@ def ctm_step(C, T, a):
     # keep the chi largest-magnitude eigenvalues -> isometry P (chi*d, chi)
     order = jnp.argsort(-jnp.abs(w))[:chi]
     P = Z[:, order]  # (chi*d, chi)
-    C_new = (P.T @ Cp @ P)
+    C_new = P.T @ Cp @ P
     C_new = C_new / jnp.max(jnp.abs(C_new))
     # Edge renormalization: absorb one bulk a into T, project both bond legs.
     # T[i,a,u]; bulk a[u,l,D,r]: u contracts T's phys, l & r are the bond-side
@@ -132,7 +135,15 @@ def magnetization(C, T, a, a_sigma):
     def z1(bulk):
         return jnp.einsum(
             "ab,cd,ef,gh,bcp,deq,fgr,has,pqrs->",
-            C, C, C, C, T, T, T, T, bulk,
+            C,
+            C,
+            C,
+            C,
+            T,
+            T,
+            T,
+            T,
+            bulk,
         )
 
     return z1(a_sigma) / z1(a)
@@ -184,20 +195,25 @@ def main():
     # (1) correctness: magnetization vs Onsager (small field -> ~spontaneous m)
     m = float(converge_scan(beta, chi, 80, h=H))
     m_exact = onsager_magnetization(beta)
-    print(f"\n[1] correctness:  <sigma>_CTMRG = {m:.6f}   Onsager(h=0) = {m_exact:.6f}"
-          f"   |diff| = {abs(m - m_exact):.2e}")
+    print(
+        f"\n[1] correctness:  <sigma>_CTMRG = {m:.6f}   Onsager(h=0) = {m_exact:.6f}"
+        f"   |diff| = {abs(m - m_exact):.2e}"
+    )
 
     # (2) jittable + differentiable end-to-end
     g = jax.grad(lambda b: converge_scan(b, chi, 80, h=H))(beta)
-    print(f"[2] jittable + differentiable:  d<sigma>/dbeta = {float(g):+.4f} "
-          f"(finite: {np.isfinite(float(g))})")
+    print(
+        f"[2] jittable + differentiable:  d<sigma>/dbeta = {float(g):+.4f} "
+        f"(finite: {np.isfinite(float(g))})"
+    )
 
     # (3) bounded compile: scan(N) vs python-unrolled(N)
     C0, T0 = init_ctm(a, chi)
 
     def scan_fn(C, T, N):
-        (C, T), _ = jax.lax.scan(lambda c, _: (ctm_step(c[0], c[1], a), None),
-                                 (C, T), None, length=N)
+        (C, T), _ = jax.lax.scan(
+            lambda c, _: (ctm_step(c[0], c[1], a), None), (C, T), None, length=N
+        )
         return magnetization(C, T, a, a_sig)
 
     def unrolled_fn(C, T, N):
@@ -211,8 +227,10 @@ def main():
         cs = compile_seconds(lambda C, T: scan_fn(C, T, N), C0, T0)
         cu = compile_seconds(lambda C, T: unrolled_fn(C, T, N), C0, T0)
         print(f"{N:>8} {cs:>8.2f}s {cu:>11.2f}s")
-    print("\n-> scan_s ~flat in N (one compiled body); unrolled_s grows with N. "
-          "That is the compile-wall fix: a jittable, fixed-shape CTM-AD step.")
+    print(
+        "\n-> scan_s ~flat in N (one compiled body); unrolled_s grows with N. "
+        "That is the compile-wall fix: a jittable, fixed-shape CTM-AD step."
+    )
 
 
 if __name__ == "__main__":
