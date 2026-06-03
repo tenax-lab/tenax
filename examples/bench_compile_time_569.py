@@ -20,10 +20,10 @@ polymorphic loss runs on a ``DenseTensor`` and on a ``FermionParity``
 the op structure: one big op (dense) vs several small per-block ops (symmetric),
 collapsed into a few batched ops when the gate is on.
 
-Usage::
+Usage (fixed bond dim ``--D``; sweep graph depth ``--rounds``)::
 
     CUDA_VISIBLE_DEVICES=0 uv run python examples/bench_compile_time_569.py \
-        --D 8 16 32 48 --chi-factor 2 --json compile_569.json
+        --D 16 --rounds 1 4 8 16 32 --chi-factor 2 --json compile_569.json
 """
 
 from __future__ import annotations
