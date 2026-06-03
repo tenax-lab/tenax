@@ -39,11 +39,21 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
+# Importing tenax enables JAX's *persistent* on-disk compilation cache
+# (~/.cache/jax). For a compile-TIME benchmark that would let later lower()/
+# compile() calls (reruns, or a machine with prior entries) return cache-load
+# times instead of fresh XLA compile times -- jax.clear_caches() only resets the
+# in-process caches. Redirect the persistent cache to a fresh per-run temp dir so
+# every measured compile is a genuine cold compile.
+import tempfile  # noqa: E402
+
 from tenax.algorithms._tensor_utils import scale_bond_axis  # noqa: E402
 from tenax.contraction.contractor import contract, truncated_svd  # noqa: E402
 from tenax.core.index import FlowDirection, TensorIndex  # noqa: E402
 from tenax.core.symmetry import FermionParity  # noqa: E402
 from tenax.core.tensor import DenseTensor, SymmetricTensor  # noqa: E402
+
+jax.config.update("jax_compilation_cache_dir", tempfile.mkdtemp(prefix="jax_cc_569_"))
 
 FLAG = "TENAX_BATCH_BLOCKSPARSE"
 IN, OUT = FlowDirection.IN, FlowDirection.OUT
