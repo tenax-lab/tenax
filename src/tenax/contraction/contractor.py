@@ -44,6 +44,10 @@ from tenax.core.tensor import (
     _compute_valid_blocks,
 )
 
+# Test-observability counter: incremented each time the gated even-D stacked
+# block-sparse contraction path (TENAX_STACK_BLOCKSPARSE) actually executes.
+_STACK_FIRED = {"n": 0}
+
 # ---------- Label → Subscript Translation ----------
 
 
@@ -355,6 +359,247 @@ def _contract_symmetric_batched(
     return output_blocks
 
 
+def _contract_symmetric_stacked(
+    tensors: Sequence[SymmetricTensor],
+    subscripts: str,
+    output_indices: tuple[TensorIndex, ...],
+    optimize: str = "auto",
+) -> SymmetricTensor | None:
+    """Even-D stacked block-sparse contraction (issue #566, P1b).
+
+    Sources operands DIRECTLY from each tensor's contiguous ``_data`` buffer via
+    ``stacked_blocks()`` (one row-gather per shape-group) + ``jnp.take`` (one
+    op per operand), runs ONE batched ``jnp.einsum`` over a fresh leading batch
+    axis per input shape-group, and collapses combos sharing an output key with
+    ``jax.ops.segment_sum`` (reused from the batched path).  It builds partial
+    charge signatures from the STATIC ``_block_keys`` — NOT ``.blocks`` /
+    ``_get_block`` — so no per-block slicing is emitted at trace time.
+
+    Scoped tightly (returns ``None`` to fall back to the per-block path):
+      * only 2-tensor contractions;
+      * only when EVERY input tensor is single-shape-group
+        (``len(set(t._block_shapes)) <= 1``) — the even-D case.
+
+    No Koszul signs are applied (matching the per-block path; planar networks
+    need none — see ``_contract_symmetric``).  Value and gradient match the
+    per-block path within the fp tier.
+
+    Returns the contracted ``SymmetricTensor``, or ``None`` to fall back.
+    """
+    # YAGNI scope: even-D, 2-tensor, single-shape-group only.
+    if len(tensors) != 2:
+        return None
+    for t in tensors:
+        if len(set(t._block_shapes)) > 1:
+            return None
+        if not t._block_keys:
+            return None
+
+    # --- Prelude: identical to the per-block path (parse + targets + valid set).
+    input_part, output_part = subscripts.split("->")
+    input_subs = input_part.split(",")
+
+    char_to_index: dict[str, TensorIndex] = {}
+    for tensor, subs in zip(tensors, input_subs):
+        for char, idx in zip(subs, tensor.indices):
+            char_to_index[char] = idx
+    out_indices_ordered = tuple(char_to_index[c] for c in output_part)
+
+    char_counts: dict[str, int] = Counter(input_part.replace(",", ""))
+    contracted_chars = {c for c, n in char_counts.items() if n >= 2}
+
+    # Output target charge (same rule as the per-block path).
+    output_target: int | None = None
+    total_target = 0
+    for tensor in tensors:
+        if tensor._block_keys:
+            targets = set()
+            for key in tensor._block_keys:
+                t = sum(int(idx.flow) * int(q) for idx, q in zip(tensor.indices, key))
+                targets.add(t)
+            if len(targets) == 1:
+                total_target += targets.pop()
+    if total_target != 0:
+        output_target = total_target
+
+    valid_output_set = set(
+        _compute_valid_blocks(out_indices_ordered, target=output_target)
+    )
+
+    contracted_chars_sorted = sorted(contracted_chars)
+    char_to_canonical_pos = {c: i for i, c in enumerate(contracted_chars_sorted)}
+
+    # --- Source operands from the contiguous _data buffer (one gather/group).
+    # For each tensor, build:
+    #   covered:        [(canonical_pos, pos_in_subs), ...] sorted by canonical
+    #   partial_sig -> list of (row_index_into_stacked_group)
+    # where row j corresponds to view.keys[j] (the static block key).  We never
+    # touch .blocks / _get_block — only the static _block_keys and the single
+    # stacked group array per tensor.
+    stacked_arrays: list[Any] = []
+    tensor_covered: list[list[tuple[int, int]]] = []
+    tensor_partial_rows: list[dict[tuple[int, ...], list[int]]] = []
+    tensor_keys: list[tuple[BlockKey, ...]] = []
+
+    for tensor, subs in zip(tensors, input_subs):
+        view = tensor.stacked_blocks()
+        # Single shape-group guaranteed by the scope check above.
+        (group,) = view.groups.values()
+        stacked_arrays.append(group.array)
+        keys = group.keys
+        tensor_keys.append(keys)
+
+        covered: list[tuple[int, int]] = sorted(
+            (char_to_canonical_pos[c], pos)
+            for pos, c in enumerate(subs)
+            if c in contracted_chars
+        )
+        tensor_covered.append(covered)
+
+        partial_rows: dict[tuple[int, ...], list[int]] = {}
+        for row, key in enumerate(keys):
+            partial_sig = tuple(int(key[pos]) for _, pos in covered)
+            partial_rows.setdefault(partial_sig, []).append(row)
+        tensor_partial_rows.append(partial_rows)
+
+    # --- Enumerate surviving combos (same logic as the per-block / batched
+    #     paths: all_complete intersection or cartesian-product fallback), then
+    #     the compatibility + valid_output_set filter.
+    all_complete = all(
+        len(cov) == len(contracted_chars_sorted) for cov in tensor_covered
+    )
+    if all_complete:
+        common_sigs: set[tuple[int, ...]] = set(tensor_partial_rows[0].keys())
+        for partial_rows in tensor_partial_rows[1:]:
+            common_sigs &= set(partial_rows.keys())
+        sig_iter: Any = iter(common_sigs)
+    else:
+        allowed_per_pos: list[set[int]] = []
+        for pos_idx in range(len(contracted_chars_sorted)):
+            constraint: set[int] | None = None
+            for covered, partial_rows in zip(tensor_covered, tensor_partial_rows):
+                local_pos = None
+                for ci, (canonical_pos, _tensor_pos) in enumerate(covered):
+                    if canonical_pos == pos_idx:
+                        local_pos = ci
+                        break
+                if local_pos is None:
+                    continue
+                charges_here = {sig[local_pos] for sig in partial_rows}
+                constraint = (
+                    charges_here if constraint is None else constraint & charges_here
+                )
+            allowed_per_pos.append(constraint if constraint is not None else {0})
+        sig_iter = itertools.product(*[sorted(s) for s in allowed_per_pos])
+
+    n_pos = len(input_subs)
+
+    # Each survivor: (output_key, tuple-of-row-indices, shape_sig).
+    survivors: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
+    for full_sig in sig_iter:
+        matching_rows: list[list[int]] = []
+        skip = False
+        for covered, partial_rows in zip(tensor_covered, tensor_partial_rows):
+            partial_sig = tuple(full_sig[canonical_pos] for canonical_pos, _ in covered)
+            rows = partial_rows.get(partial_sig)
+            if not rows:
+                skip = True
+                break
+            matching_rows.append(rows)
+        if skip:
+            continue
+
+        for combo_rows in itertools.product(*matching_rows):
+            keys = [tensor_keys[i][combo_rows[i]] for i in range(n_pos)]
+
+            char_to_charge: dict[str, int] = {}
+            compatible = True
+            for key, subs in zip(keys, input_subs):
+                for char, charge in zip(subs, key):
+                    charge_int = int(charge)
+                    if char in char_to_charge:
+                        if char_to_charge[char] != charge_int:
+                            compatible = False
+                            break
+                    else:
+                        char_to_charge[char] = charge_int
+                if not compatible:
+                    break
+            if not compatible:
+                continue
+
+            output_key = tuple(char_to_charge.get(c, 0) for c in output_part)
+            if output_key not in valid_output_set:
+                continue
+
+            survivors.append((output_key, tuple(combo_rows)))
+
+    output_blocks: dict[BlockKey, Any] = {}
+    if not survivors:
+        if output_target is not None:
+            return SymmetricTensor._from_blocks_unchecked(
+                output_blocks, out_indices_ordered
+            )
+        return SymmetricTensor(output_blocks, out_indices_ordered)
+
+    # Batched subscripts: prepend a fresh batch label to every operand + output.
+    used_chars = set(input_part.replace(",", "")) | set(output_part)
+    batch_char = None
+    for c in string.ascii_letters:
+        if c not in used_chars:
+            batch_char = c
+            break
+    if batch_char is None:  # pragma: no cover - 52-label ceiling guards this
+        raise ValueError("No free einsum label available for batch axis.")
+    batched_inputs = ",".join(batch_char + s for s in input_subs)
+    batched_subscripts = batched_inputs + "->" + batch_char + output_part
+
+    # Single shape-group on both sides -> exactly one input shape-sig group.
+    # Stable per-group ordering of distinct output_keys -> segment ids.
+    distinct_keys: list[tuple[int, ...]] = []
+    key_to_seg: dict[tuple[int, ...], int] = {}
+    seg_ids: list[int] = []
+    # Per-operand row index lists (one entry per survivor, in survivor order).
+    per_op_rows: list[list[int]] = [[] for _ in range(n_pos)]
+    for okey, combo_rows in survivors:
+        seg = key_to_seg.get(okey)
+        if seg is None:
+            seg = len(distinct_keys)
+            key_to_seg[okey] = seg
+            distinct_keys.append(okey)
+        seg_ids.append(seg)
+        for pos in range(n_pos):
+            per_op_rows[pos].append(combo_rows[pos])
+
+    # Gather each operand's needed rows from its stacked group array in ONE op
+    # (jnp.take, axis=0) — no per-block slicing, no jnp.stack of slices.
+    gathered = [
+        jnp.take(stacked_arrays[pos], jnp.asarray(per_op_rows[pos]), axis=0)
+        for pos in range(n_pos)
+    ]
+
+    # ONE batched einsum over the combo batch axis.
+    batched_result = jnp.einsum(batched_subscripts, *gathered)
+
+    # Collapse combos sharing an output_key (KEEP segment_sum — dropping it was
+    # the prototype's correctness bug).
+    segments = jnp.asarray(seg_ids, dtype=jnp.int32)
+    summed = jax.ops.segment_sum(
+        batched_result, segments, num_segments=len(distinct_keys)
+    )
+
+    for seg, okey in enumerate(distinct_keys):
+        output_blocks[okey] = summed[seg]
+
+    _STACK_FIRED["n"] += 1
+
+    if output_target is not None:
+        return SymmetricTensor._from_blocks_unchecked(
+            output_blocks, out_indices_ordered
+        )
+    return SymmetricTensor(output_blocks, out_indices_ordered)
+
+
 def _contract_symmetric(
     tensors: Sequence[SymmetricTensor],
     subscripts: str,
@@ -406,6 +651,28 @@ def _contract_symmetric(
             return contract_blocksparse(
                 tensors[0], tensors[1], subscripts, output_indices
             )
+
+    # --- Gate: opt-in even-D stacked block-sparse path (issue #566, P1b) ---
+    # When TENAX_STACK_BLOCKSPARSE is truthy, single-shape-group 2-tensor
+    # contractions (the even-D case) source operands DIRECTLY from the
+    # contiguous _data buffer via stacked_blocks() + jnp.take and emit one
+    # batched einsum + segment_sum per shape-group (O(n_shape_groups) traced
+    # ops) instead of O(n_combos) per-block einsums.  Returns None to fall
+    # back to the per-block path for everything else.
+    _stack_blocksparse = os.environ.get(
+        "TENAX_STACK_BLOCKSPARSE", "0"
+    ).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if _stack_blocksparse:
+        stacked_result = _contract_symmetric_stacked(
+            tensors, subscripts, output_indices, optimize
+        )
+        if stacked_result is not None:
+            return stacked_result
 
     # Parse subscripts: e.g., "ij,jk->ik" → inputs=["ij","jk"], output="ik"
     input_part, output_part = subscripts.split("->")
