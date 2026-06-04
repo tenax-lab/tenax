@@ -359,6 +359,86 @@ def _contract_symmetric_batched(
     return output_blocks
 
 
+def _parse_contraction_prelude(
+    tensors: Sequence[SymmetricTensor],
+    subscripts: str,
+) -> tuple[
+    list[str],
+    str,
+    tuple[TensorIndex, ...],
+    set[str],
+    list[str],
+    dict[str, int],
+    int | None,
+    set[BlockKey],
+]:
+    """Shared prelude for the per-block and stacked symmetric contraction paths.
+
+    Returns the subscript/charge bookkeeping common to both; per-tensor block
+    indexing (arrays vs stacked rows) is built separately by each caller.
+
+    Returns:
+        input_subs, output_part, out_indices_ordered, contracted_chars (set),
+        contracted_chars_sorted, char_to_canonical_pos, output_target,
+        valid_output_set.
+    """
+    # Parse subscripts: e.g., "ij,jk->ik" -> inputs=["ij","jk"], output="ik".
+    input_part, output_part = subscripts.split("->")
+    input_subs = input_part.split(",")
+
+    # Map each character to the corresponding TensorIndex, then build the
+    # output index tuple in output_part order.
+    char_to_index: dict[str, TensorIndex] = {}
+    for tensor, subs in zip(tensors, input_subs):
+        for char, idx in zip(subs, tensor.indices):
+            char_to_index[char] = idx
+    out_indices_ordered = tuple(char_to_index[c] for c in output_part)
+
+    # Identify contracted characters (appear in multiple input tensors).
+    char_counts: dict[str, int] = Counter(input_part.replace(",", ""))
+    contracted_chars = {c for c, n in char_counts.items() if n >= 2}
+
+    # Infer the output target charge from input tensors.
+    # For U(1): output target = sum of input targets, since contracted legs
+    # have opposite flows and cancel.  This allows contracting tensors with
+    # non-identity targets (e.g. boundary MPS tensors targeting Sz != 0).
+    # We only count a tensor's target if ALL its blocks agree on the same
+    # value of sum(flow*q).  Mixed-charge tensors (e.g. operators that
+    # create/annihilate particles) contribute 0.  Iterating ``_block_keys``
+    # is equivalent to iterating ``.blocks`` keys but cheaper.
+    output_target: int | None = None
+    total_target = 0
+    for tensor in tensors:
+        if tensor._block_keys:
+            targets = set()
+            for key in tensor._block_keys:
+                t = sum(int(idx.flow) * int(q) for idx, q in zip(tensor.indices, key))
+                targets.add(t)
+            if len(targets) == 1:
+                total_target += targets.pop()
+    if total_target != 0:
+        output_target = total_target
+
+    # Precompute valid output keys as a set for O(1) lookup.
+    valid_output_set = set(
+        _compute_valid_blocks(out_indices_ordered, target=output_target)
+    )
+
+    contracted_chars_sorted = sorted(contracted_chars)
+    char_to_canonical_pos = {c: i for i, c in enumerate(contracted_chars_sorted)}
+
+    return (
+        input_subs,
+        output_part,
+        out_indices_ordered,
+        contracted_chars,
+        contracted_chars_sorted,
+        char_to_canonical_pos,
+        output_target,
+        valid_output_set,
+    )
+
+
 def _contract_symmetric_stacked(
     tensors: Sequence[SymmetricTensor],
     subscripts: str,
@@ -395,39 +475,21 @@ def _contract_symmetric_stacked(
         if not t._block_keys:
             return None
 
-    # --- Prelude: identical to the per-block path (parse + targets + valid set).
-    input_part, output_part = subscripts.split("->")
-    input_subs = input_part.split(",")
+    # ``optimize`` is accepted for signature parity with the dispatcher and is
+    # unused here (the batched jnp.einsum path takes no optimize argument).
+    del optimize
 
-    char_to_index: dict[str, TensorIndex] = {}
-    for tensor, subs in zip(tensors, input_subs):
-        for char, idx in zip(subs, tensor.indices):
-            char_to_index[char] = idx
-    out_indices_ordered = tuple(char_to_index[c] for c in output_part)
-
-    char_counts: dict[str, int] = Counter(input_part.replace(",", ""))
-    contracted_chars = {c for c, n in char_counts.items() if n >= 2}
-
-    # Output target charge (same rule as the per-block path).
-    output_target: int | None = None
-    total_target = 0
-    for tensor in tensors:
-        if tensor._block_keys:
-            targets = set()
-            for key in tensor._block_keys:
-                t = sum(int(idx.flow) * int(q) for idx, q in zip(tensor.indices, key))
-                targets.add(t)
-            if len(targets) == 1:
-                total_target += targets.pop()
-    if total_target != 0:
-        output_target = total_target
-
-    valid_output_set = set(
-        _compute_valid_blocks(out_indices_ordered, target=output_target)
-    )
-
-    contracted_chars_sorted = sorted(contracted_chars)
-    char_to_canonical_pos = {c: i for i, c in enumerate(contracted_chars_sorted)}
+    # --- Prelude: shared with the per-block path (parse + targets + valid set).
+    (
+        input_subs,
+        output_part,
+        out_indices_ordered,
+        contracted_chars,
+        contracted_chars_sorted,
+        char_to_canonical_pos,
+        output_target,
+        valid_output_set,
+    ) = _parse_contraction_prelude(tensors, subscripts)
 
     # --- Source operands from the contiguous _data buffer (one gather/group).
     # For each tensor, build:
@@ -462,35 +524,19 @@ def _contract_symmetric_stacked(
             partial_rows.setdefault(partial_sig, []).append(row)
         tensor_partial_rows.append(partial_rows)
 
-    # --- Enumerate surviving combos (same logic as the per-block / batched
-    #     paths: all_complete intersection or cartesian-product fallback), then
-    #     the compatibility + valid_output_set filter.
+    # --- Enumerate surviving combos via the all_complete intersection.
+    # Under the 2-tensor scope guard above, every contracted char appears in
+    # BOTH tensors, so each tensor covers every canonical contracted position
+    # -> all_complete is always True.  The per-block path keeps a cartesian
+    # else-branch for >2 tensors; here it is unreachable, so we assert instead.
     all_complete = all(
         len(cov) == len(contracted_chars_sorted) for cov in tensor_covered
     )
-    if all_complete:
-        common_sigs: set[tuple[int, ...]] = set(tensor_partial_rows[0].keys())
-        for partial_rows in tensor_partial_rows[1:]:
-            common_sigs &= set(partial_rows.keys())
-        sig_iter: Any = iter(common_sigs)
-    else:
-        allowed_per_pos: list[set[int]] = []
-        for pos_idx in range(len(contracted_chars_sorted)):
-            constraint: set[int] | None = None
-            for covered, partial_rows in zip(tensor_covered, tensor_partial_rows):
-                local_pos = None
-                for ci, (canonical_pos, _tensor_pos) in enumerate(covered):
-                    if canonical_pos == pos_idx:
-                        local_pos = ci
-                        break
-                if local_pos is None:
-                    continue
-                charges_here = {sig[local_pos] for sig in partial_rows}
-                constraint = (
-                    charges_here if constraint is None else constraint & charges_here
-                )
-            allowed_per_pos.append(constraint if constraint is not None else {0})
-        sig_iter = itertools.product(*[sorted(s) for s in allowed_per_pos])
+    assert all_complete, "2-tensor scope guarantees every char is contracted in both"
+    common_sigs: set[tuple[int, ...]] = set(tensor_partial_rows[0].keys())
+    for partial_rows in tensor_partial_rows[1:]:
+        common_sigs &= set(partial_rows.keys())
+    sig_iter: Any = iter(common_sigs)
 
     n_pos = len(input_subs)
 
@@ -543,7 +589,7 @@ def _contract_symmetric_stacked(
         return SymmetricTensor(output_blocks, out_indices_ordered)
 
     # Batched subscripts: prepend a fresh batch label to every operand + output.
-    used_chars = set(input_part.replace(",", "")) | set(output_part)
+    used_chars = set("".join(input_subs)) | set(output_part)
     batch_char = None
     for c in string.ascii_letters:
         if c not in used_chars:
@@ -674,47 +720,19 @@ def _contract_symmetric(
         if stacked_result is not None:
             return stacked_result
 
-    # Parse subscripts: e.g., "ij,jk->ik" → inputs=["ij","jk"], output="ik"
-    input_part, output_part = subscripts.split("->")
-    input_subs = input_part.split(",")
-
-    # Map each character to the corresponding TensorIndex
-    char_to_index: dict[str, TensorIndex] = {}
-    for tensor, subs in zip(tensors, input_subs):
-        for char, idx in zip(subs, tensor.indices):
-            char_to_index[char] = idx
-
-    # Build output_indices list in output_part order
-    out_indices_ordered = tuple(char_to_index[c] for c in output_part)
-
-    # Identify contracted characters (appear in multiple input tensors)
-    char_counts: dict[str, int] = Counter(input_part.replace(",", ""))
-    contracted_chars = {c for c, n in char_counts.items() if n >= 2}
-
-    # Infer the output target charge from input tensors.
-    # For U(1): output target = sum of input targets, since contracted legs
-    # have opposite flows and cancel.  This allows contracting tensors with
-    # non-identity targets (e.g. boundary MPS tensors targeting Sz != 0).
-    # We only count a tensor's target if ALL its blocks agree on the same
-    # value of sum(flow*q).  Mixed-charge tensors (e.g. operators that
-    # create/annihilate particles) contribute 0.
-    output_target: int | None = None
-    total_target = 0
-    for tensor in tensors:
-        if tensor.blocks:
-            targets = set()
-            for key in tensor.blocks:
-                t = sum(int(idx.flow) * int(q) for idx, q in zip(tensor.indices, key))
-                targets.add(t)
-            if len(targets) == 1:
-                total_target += targets.pop()
-    if total_target != 0:
-        output_target = total_target
-
-    # Precompute valid output keys as a set for O(1) lookup
-    valid_output_set = set(
-        _compute_valid_blocks(out_indices_ordered, target=output_target)
-    )
+    # Prelude: parse subscripts + output index order + contracted chars +
+    # inferred output target charge + valid output set + canonical contracted
+    # positions.  Shared verbatim with the stacked path (issue #566).
+    (
+        input_subs,
+        output_part,
+        out_indices_ordered,
+        contracted_chars,
+        contracted_chars_sorted,
+        char_to_canonical_pos,
+        output_target,
+        valid_output_set,
+    ) = _parse_contraction_prelude(tensors, subscripts)
 
     # Fermionic sign convention (#555): the contractor does NOT auto-apply
     # Koszul signs from leg permutations.  Tenax's auto-tracking (the original
@@ -733,10 +751,8 @@ def _contract_symmetric(
     # carries.  Per-tensor partial sigs allow correct multi-input contraction
     # even when some pair of inputs shares no contracted labels (issue #553);
     # the previous full-sig intersection silently dropped to zero whenever
-    # two tensors' sig tuples had different lengths.
-    contracted_chars_sorted = sorted(contracted_chars)
-    char_to_canonical_pos = {c: i for i, c in enumerate(contracted_chars_sorted)}
-
+    # two tensors' sig tuples had different lengths.  ``contracted_chars_sorted``
+    # / ``char_to_canonical_pos`` come from the shared prelude above.
     tensor_partial_indices: list[
         tuple[list[tuple[int, int]], dict[tuple[int, ...], list[tuple[BlockKey, Any]]]]
     ] = []
@@ -818,7 +834,7 @@ def _contract_symmetric(
             tensor_partial_indices,
             input_subs,
             output_part,
-            input_part,
+            ",".join(input_subs),
             valid_output_set,
         )
         if output_target is not None:
