@@ -51,6 +51,7 @@ def build_stacked(
     groups = {}
     for shape, (keys, gather) in layout.items():
         n = gather.shape[0]
+        # raw numpy index -> XLA compile-time-constant gather (one op per shape group)
         flat = data[gather.reshape(-1)]  # one gather per group
         groups[shape] = StackGroup(keys=keys, array=flat.reshape((n, *shape)))
     return StackedView(groups=groups, indices=indices)
@@ -62,9 +63,10 @@ def scatter_stacked(view, block_keys, block_shapes, block_offsets, total_size, d
     data = jnp.zeros(total_size, dtype=dtype)
     for shape, (keys, gather) in layout.items():
         grp = view.groups[shape]
+        # identity permutation in the round-trip path; O(n^2) only matters for cross-tensor scatter at large block counts
         order = [
             grp.keys.index(k) for k in keys
         ]  # reorder grp rows to canonical key order
-        rows = grp.array[jnp.asarray(order)]
-        data = data.at[jnp.asarray(gather.reshape(-1))].set(rows.reshape(-1))
+        rows = grp.array[np.asarray(order)]
+        data = data.at[gather.reshape(-1)].set(rows.reshape(-1))
     return data
