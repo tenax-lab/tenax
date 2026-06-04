@@ -1,5 +1,3 @@
-import os
-
 import jax.numpy as jnp
 import pytest
 
@@ -55,17 +53,25 @@ def _phys_double_layer(A):
     return contract(A, bra)
 
 
-def test_comparator_self_validates_against_per_block_vs_batched_paths():
+def test_comparator_self_validates_against_per_block_vs_batched_paths(monkeypatch):
     A = dict(canonical_tensors())["ferm_D2"]
 
-    try:
-        os.environ["TENAX_BATCH_BLOCKSPARSE"] = "0"
-        per_block = _phys_double_layer(A)
-        os.environ["TENAX_BATCH_BLOCKSPARSE"] = "1"
-        batched = _phys_double_layer(A)
-    finally:
-        os.environ["TENAX_BATCH_BLOCKSPARSE"] = "0"
+    # Per-combo path (flag off). Gate is read fresh per call, no cache to clear.
+    monkeypatch.setenv("TENAX_BATCH_BLOCKSPARSE", "0")
+    per_block = _phys_double_layer(A)
+    # Batched path (flag on).
+    monkeypatch.setenv("TENAX_BATCH_BLOCKSPARSE", "1")
+    batched = _phys_double_layer(A)
 
     assert per_block._data.size > 1, "double-layer collapsed to a scalar"
     assert per_block.labels() == batched.labels()
     assert_tiered(per_block._data, batched._data, tier="fp")
+
+
+def test_svd_invariants_smoke():
+    from tests.stacked._harness import assert_svd_invariants, canonical_tensors
+
+    M = dict(canonical_tensors())["degenerate_sv"]
+    U, S, Vh = jnp.linalg.svd(M, full_matrices=False)
+    # reconstruction matches; raw U/Vh never compared
+    assert_svd_invariants(M, U, S, Vh, tier="fp")
