@@ -69,10 +69,12 @@ Attach output + JSON to issue #566.
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import logging
 import platform
 import re
+import shutil
 import statistics
 import tempfile
 import time
@@ -197,19 +199,36 @@ def build_loss(gate, chi: int, depth: int, *, explicit: bool, warmup: int):
     return loss_fn
 
 
-def _cold(fn, A, cap: _CompileCapture):
-    """Clear caches, run one cold call, return (wall_s, compile_events).
+_PRIOR_CACHE_DIRS: list[str] = []
+atexit.register(
+    lambda: [shutil.rmtree(d, ignore_errors=True) for d in _PRIOR_CACHE_DIRS]
+)
+
+
+def _fresh_cache_dir() -> str:
+    """Point the persistent compile cache at a fresh temp dir, reaping old ones.
 
     Importing tenax enables JAX's *persistent* on-disk compilation cache, so
     ``jax.clear_caches()`` alone (in-process only) lets a repeated module compile
     load from disk instead of recompiling -- corrupting cold timings (the
-    #584/035d694 lesson).  Point the persistent cache at a *fresh* temp dir for
-    every cold call so the on-disk cache is always empty -> a genuine cold XLA
-    compile each time.
+    #584/035d694 lesson).  A fresh dir per cold call guarantees a genuine cold
+    XLA compile.  But multi-minute A100 compiles leave large artifacts, and the
+    long depth/chi/D grids would otherwise fill /tmp (Codex P2, #585): so we
+    delete all *previous* cache dirs (their cold call is done) before opening a
+    new one, and register an atexit reaper for the last one.  The current dir
+    stays valid through this call's compile + block_until_ready.
     """
-    jax.config.update(
-        "jax_compilation_cache_dir", tempfile.mkdtemp(prefix="jax_cc_566_")
-    )
+    while _PRIOR_CACHE_DIRS:
+        shutil.rmtree(_PRIOR_CACHE_DIRS.pop(), ignore_errors=True)
+    d = tempfile.mkdtemp(prefix="jax_cc_566_")
+    _PRIOR_CACHE_DIRS.append(d)
+    jax.config.update("jax_compilation_cache_dir", d)
+    return d
+
+
+def _cold(fn, A, cap: _CompileCapture):
+    """Clear caches, run one cold call, return (wall_s, compile_events)."""
+    _fresh_cache_dir()
     jax.clear_caches()
     cap.reset()
     t0 = time.perf_counter()

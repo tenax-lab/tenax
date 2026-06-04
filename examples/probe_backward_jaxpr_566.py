@@ -122,14 +122,31 @@ def count_primitives(jaxpr) -> collections.Counter:
     return counts
 
 
-def backward_vjp_jaxpr(A, chi: int):
-    """Make the jaxpr of apply_Jt = VJP of one gauge-fixed CTM sweep (Section B)."""
+def backward_vjp_jaxpr(
+    A, chi: int, projector_backward: str = "auto", *, full: bool = False
+):
+    """Jaxpr(s) of the fixed-point backward's CTM-sweep VJP graph(s).
+
+    ``apply_Jt`` (Section B) = VJP of one gauge-fixed CTM sweep w.r.t. the
+    ENVIRONMENT — the unit applied every Neumann iteration, and the dominant
+    repeated compile unit of ``_jit_fused_fixed_point_bwd``.
+
+    The fused F3 backward also compiles a SECOND sweep VJP w.r.t. the SITE
+    PARAMETERS (``gauge_fixed_sweep_from_params`` in ``_jit_chain_rule``) plus
+    energy VJPs (Codex P2 #585).  With ``full=True`` we also trace that
+    params-sweep VJP and return both, so the histogram covers the whole fused
+    unit rather than apply_Jt alone.  ``projector_backward`` matches the profiled
+    config (``CTMConfig`` default ``"auto"``); measured byte-identical to
+    ``"lorentzian"`` here, but kept faithful.
+    """
     A_norm = A * (1.0 / (A.norm() + 1e-10))
     site_tensors = {(0, 0): A_norm}
     env = initialize_ctm_tensor_env(A_norm, chi)
     envs = {(0, 0): env}
     treedef = jax.tree.structure(envs)
     env_leaves = tuple(jax.tree.leaves(envs))
+    param_treedef = jax.tree.structure(A_norm)
+    param_leaves = tuple(jax.tree.leaves(A_norm))
     jit_step = _make_jit_ctm_step(SINGLE_SITE_NEIGHBORS)
 
     def gauge_fixed_sweep_from_env(env_leaves_flat):
@@ -140,20 +157,38 @@ def backward_vjp_jaxpr(A, chi: int):
             chi=chi,
             projector_method="svd",
             renormalize=True,
-            projector_backward="lorentzian",
+            projector_backward=projector_backward,
         )
-        e_fixed = {c: _phase_fix_ctm_tensor(e_out[c]) for c in e_out}
-        return tuple(jax.tree.leaves(e_fixed))
+        return tuple(
+            jax.tree.leaves({c: _phase_fix_ctm_tensor(e_out[c]) for c in e_out})
+        )
 
-    # cotangent with the output structure (ones-like each output leaf)
     out = gauge_fixed_sweep_from_env(env_leaves)
     v = tuple(jnp.ones_like(o) for o in out)
+    env_jx = jax.make_jaxpr(
+        lambda vv: jax.vjp(gauge_fixed_sweep_from_env, env_leaves)[1](vv)
+    )(v)
+    if not full:
+        return env_jx
 
-    def apply_Jt(vv):
-        _, vjp_fn = jax.vjp(gauge_fixed_sweep_from_env, env_leaves)
-        return vjp_fn(vv)[0]
+    def gauge_fixed_sweep_from_params(p_flat):
+        Ap = jax.tree.unflatten(param_treedef, p_flat)
+        e_out, _eps, _smin = jit_step(
+            {(0, 0): Ap},
+            envs,
+            chi=chi,
+            projector_method="svd",
+            renormalize=True,
+            projector_backward=projector_backward,
+        )
+        return tuple(
+            jax.tree.leaves({c: _phase_fix_ctm_tensor(e_out[c]) for c in e_out})
+        )
 
-    return jax.make_jaxpr(apply_Jt)(v)
+    par_jx = jax.make_jaxpr(
+        lambda vv: jax.vjp(gauge_fixed_sweep_from_params, param_leaves)[1](vv)
+    )(v)
+    return env_jx, par_jx
 
 
 # Op buckets that matter for the #566 backward-batching question.
@@ -195,31 +230,65 @@ def bucketize(counts: collections.Counter) -> dict:
     return out
 
 
+def _combine(*counters: collections.Counter) -> collections.Counter:
+    out: collections.Counter = collections.Counter()
+    for c in counters:
+        out.update(c)
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--D", type=int, nargs="+", default=[2, 3])
     ap.add_argument("--chi-factor", type=int, default=3)
     ap.add_argument("--sym", nargs="+", default=["fermionic", "dense"])
+    ap.add_argument(
+        "--projector-backward",
+        default="auto",
+        choices=["auto", "lorentzian", "standard"],
+        help="Match the profiled CTMConfig (default 'auto'). Measured "
+        "byte-identical to 'lorentzian' here.",
+    )
+    ap.add_argument(
+        "--full",
+        action="store_true",
+        help="Also trace the params-sweep VJP (the _jit_chain_rule indirect "
+        "term) so the histogram covers the whole fused F3 backward, not just "
+        "apply_Jt (the Neumann matvec).",
+    )
     args = ap.parse_args()
 
+    pbw = args.projector_backward
     print(
         f"# #566 backward-VJP jaxpr op-histogram (trace-only) | x64={jax.config.read('jax_enable_x64')}"
     )
-    print(
-        "# unit = apply_Jt = VJP of one gauge-fixed CTM sweep (the compile-dominant graph)\n"
+    unit = (
+        (
+            "full fused backward = env-sweep VJP (apply_Jt) + params-sweep VJP "
+            "(chain-rule indirect)"
+        )
+        if args.full
+        else "apply_Jt = VJP of one gauge-fixed CTM sweep w.r.t. env (Neumann matvec)"
     )
+    print(f"# unit = {unit}")
+    print(f"# projector_backward = {pbw}\n")
+
+    def hist(A, chi, on):
+        os.environ[FLAG] = "1" if on else "0"
+        if args.full:
+            env_jx, par_jx = backward_vjp_jaxpr(A, chi, pbw, full=True)
+            return bucketize(
+                _combine(count_primitives(env_jx), count_primitives(par_jx))
+            )
+        return bucketize(count_primitives(backward_vjp_jaxpr(A, chi, pbw)))
 
     for sym in args.sym:
         for D in args.D:
             chi = args.chi_factor * D
             A = make_site(sym, D)
             n_blocks = getattr(A, "n_blocks", 1)
-            row = {}
-            for on in (False, True):
-                os.environ[FLAG] = "1" if on else "0"
-                jx = backward_vjp_jaxpr(A, chi)
-                row["on" if on else "off"] = bucketize(count_primitives(jx))
-            off, onb = row["off"], row["on"]
+            off = hist(A, chi, on=False)
+            onb = hist(A, chi, on=True)
             print(f"== {sym} D={D} chi={chi} blocks={n_blocks} ==")
             hdr = f"  {'bucket':<36} {'flag_off':>10} {'flag_on':>10} {'on/off':>8}"
             print(hdr)
