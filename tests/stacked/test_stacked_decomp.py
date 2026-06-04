@@ -47,6 +47,11 @@ def _sym_tensors():
     }
 
 
+def _dense_tensor():
+    """The U(1)-trivial DenseTensor iPEPS site exposed by the harness."""
+    return dict(canonical_tensors())["dense_D2"]
+
+
 def _run_svd(tensor):
     """Full (untruncated) block-sparse SVD; returns (U, s, Vh)."""
     U, s, Vh, _ = svd(
@@ -135,6 +140,34 @@ def test_svd_reconstruction_recovers_input(name, monkeypatch):
     assert_tiered(A_ref, recon, tier="fp")
 
 
+def test_dense_svd_reconstruction_and_batch_flag_independent(monkeypatch):
+    """DenseTensor (U(1)-trivial) SVD broadens the spine beyond fermionic.
+
+    Mirrors the ferm SVD case: full SVD reconstructs the dense matricization,
+    and sorted SVs + reconstruction are invariant across TENAX_BATCH_BLOCKSPARSE
+    (the dense path shares the same _LEFT/_RIGHT partition and factor layout).
+    """
+    tensor = _dense_tensor()
+    A_ref = _matricize(tensor)
+
+    _set_flags(monkeypatch, stack=None, batch=None)
+    U_off, s_off, Vh_off = _run_svd(tensor)
+
+    _set_flags(monkeypatch, stack=None, batch="1")
+    U_on, s_on, Vh_on = _run_svd(tensor)
+
+    # Reconstruction recovers the original dense matricization.
+    assert_tiered(A_ref, _reconstruct(U_off, s_off, Vh_off), tier="fp")
+
+    # Gauge-invariant across the batch gate.
+    assert_tiered(jnp.sort(s_off), jnp.sort(s_on), tier="fp")
+    assert_tiered(
+        _reconstruct(U_off, s_off, Vh_off),
+        _reconstruct(U_on, s_on, Vh_on),
+        tier="fp",
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 2. Plain-matrix degenerate-SV + rank-deficient guard.                       #
 #    Relies on invariants (reconstruction), not raw factors.                  #
@@ -190,22 +223,30 @@ def test_qr_reconstruction_batch_flag_independent(name, monkeypatch):
     assert_tiered(recon0, recon1, tier="fp")
 
 
-def test_eigh_eigenvalues_batch_flag_independent(monkeypatch):
-    """Symmetric eigh on a Hermitian tensor: sorted eigenvalues invariant under
-    the batch gate (never compare raw eigenvectors)."""
-    tensor = _sym_tensors()["ferm_D4"]
-    # Build a Hermitian operator H = A^dag A in the matricized space so eigh has
-    # a well-defined spectrum; do it via the dense matricization then wrap back
-    # is overkill — instead form a 2-leg Hermitian SymmetricTensor directly.
-    H = _hermitian_2leg(tensor)
+def test_eigh_invariants_batch_flag_independent(monkeypatch):
+    """Symmetric eigh on a multi-sector Hermitian H = M Mᴴ: sorted eigenvalues
+    AND the gauge-invariant reconstruction H = V diag(ev) Vᴴ are invariant under
+    the batch gate (never compare raw eigenvectors).
+
+    The Hermitian is built with a genuinely multi-sector charge structure (the
+    fused left index of ferm_D4 carries both FermionParity sectors) so the
+    TENAX_BATCH_BLOCKSPARSE gate actually has multiple sectors to batch.
+    """
+    H = _hermitian_2leg(_sym_tensors()["ferm_D4"])
+    H_ref = _matricize_2leg(H)
 
     _set_flags(monkeypatch, stack=None, batch=None)
-    _, ev0 = eigh(H, left_labels=["a"], right_labels=["b"], new_bond_label="bond")
+    V0, ev0 = eigh(H, left_labels=["a"], right_labels=["b"], new_bond_label="bond")
 
     _set_flags(monkeypatch, stack=None, batch="1")
-    _, ev1 = eigh(H, left_labels=["a"], right_labels=["b"], new_bond_label="bond")
+    V1, ev1 = eigh(H, left_labels=["a"], right_labels=["b"], new_bond_label="bond")
 
+    # Gauge-invariant: sorted eigenvalues unchanged across the gate.
     assert_tiered(jnp.sort(ev0), jnp.sort(ev1), tier="fp")
+
+    # Gauge-invariant: H = V diag(ev) Vᴴ recovers the input for BOTH gate states.
+    assert_tiered(H_ref, _reconstruct_eigh(V0, ev0), tier="fp")
+    assert_tiered(H_ref, _reconstruct_eigh(V1, ev1), tier="fp")
 
 
 # --------------------------------------------------------------------------- #
@@ -253,20 +294,53 @@ def _factor_to_matrix(factor, *, bond_last):
         return moved.reshape(dense.shape[bond_axis], cols)
 
 
+def _matricize_2leg(tensor):
+    """Dense (rows="a", cols="b") matricization of a 2-leg SymmetricTensor."""
+    dense = tensor.todense()
+    labels = list(tensor.labels())
+    perm = [labels.index("a"), labels.index("b")]
+    return jnp.transpose(dense, perm)
+
+
+def _reconstruct_eigh(V, ev):
+    """H = V diag(ev) Vᴴ in dense space, from the eigh factor tensor V.
+
+    V carries labels (left_labels..., bond); reuse the same bond-last layout as
+    the SVD/QR U/Q factors so the bond axis becomes the eigenvector columns.
+    """
+    Vd = _factor_to_matrix(V, bond_last=True)
+    return (Vd * jnp.asarray(ev)[None, : Vd.shape[1]]) @ Vd.conj().T
+
+
 def _hermitian_2leg(tensor):
-    """Build a Hermitian 2-leg SymmetricTensor H = M^dag M from the left-leg
-    fused index of ``tensor`` so eigh has a real, well-defined spectrum."""
+    """Build a multi-sector Hermitian 2-leg SymmetricTensor H = M Mᴴ from the
+    fused left index of ``tensor`` so eigh has a real, well-defined spectrum.
+
+    The fused (u, d) index of the fermionic site tensor carries both
+    FermionParity sectors, so H has a genuine multi-block charge structure and
+    the per-sector batch gate (TENAX_BATCH_BLOCKSPARSE) actually has several
+    sectors to batch — not a single trivial-charge block.
+    """
     from tenax.core.index import FlowDirection, TensorIndex
     from tenax.core.tensor import SymmetricTensor
 
-    A = _matricize(tensor)
+    A = _matricize(tensor)  # rows = fused (u, d), row-major
     M = A @ A.conj().T  # (left_dim, left_dim), Hermitian PSD
     n = M.shape[0]
 
-    # A single trivial-charge sector keeps the SymmetricTensor construction
-    # simple while still exercising the block-sparse eigh code path.
+    # Charges of the fused left index, in the same row-major order as _matricize
+    # (u outer, d inner) so they label the rows/cols of M correctly.
+    labels = list(tensor.labels())
     sym = tensor.indices[0].symmetry
-    charges = np.zeros(n, dtype=np.int32)
-    idx_a = TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="a")
-    idx_b = TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="b")
+    cu = np.asarray(tensor.indices[labels.index("u")].charges)
+    cd = np.asarray(tensor.indices[labels.index("d")].charges)
+    fused = np.asarray(
+        sym.fuse(np.repeat(cu, len(cd)), np.tile(cd, len(cu))), dtype=np.int32
+    )
+    assert fused.shape[0] == n and len(np.unique(fused)) > 1, (
+        "expected a genuinely multi-sector fused index"
+    )
+
+    idx_a = TensorIndex.from_charges(sym, fused, FlowDirection.IN, label="a")
+    idx_b = TensorIndex.from_charges(sym, fused, FlowDirection.OUT, label="b")
     return SymmetricTensor.from_dense(M, (idx_a, idx_b))
