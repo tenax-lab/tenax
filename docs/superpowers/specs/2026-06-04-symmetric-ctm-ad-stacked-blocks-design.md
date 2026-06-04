@@ -124,9 +124,11 @@ out of this spec's implementation scope — it stays on the per-block path until
   decomp gauge-invariants; FD gradient + per-block-vs-stacked VJP agreement.
 - **Integration:** full CTM-AD energy+grad vs golden, fermionic/U(1)/dense, even D.
 - **Perf gate (A100, documented — not CI-asserted):** `vg_cmp` compile + warm-step, even D
-  ∈{2,4} (extend to D=6 if it holds), stacked vs per-block. **Target: collapse the measured
-  52–61× fermionic/dense compile ratio toward dense, plus a warm-step win.** This is P1d and
-  the decision gate for P1e/P2.
+  ∈{2,4} (extend to D=6 if it holds), stacked vs per-block.
+  **Hard pass/fail: ≥10× reduction in fermionic `value_and_grad` compile (`vg_cmp`) at D=4
+  — i.e. from the measured ~2379 s baseline to ≤ ~238 s, stacked vs per-block on A100, f64.**
+  Secondary (not gating): a measurable warm-step runtime win at D=4. If the D=4 compile gate
+  is not met, **stop** — do not fund P1e (ragged) or P2 (cuTensorNet); revisit the approach.
 
 ## Phasing (committed scope = P0–P1d)
 
@@ -135,9 +137,10 @@ out of this spec's implementation scope — it stays on the per-block path until
 - **P1b** — stacked contractor, even-D, validated against golden tiers.
 - **P1c** — stacked decomposition + fuse/split, even-D.
 - **P1d** — thread stacked rep through the CTM absorb/RDM so it persists across calls;
-  **A100 compile + runtime measurement = the gate.**
+  **A100 measurement = the gate. Hard pass/fail: ≥10× fermionic `vg_cmp` compile reduction
+  at D=4 (≤ ~238 s vs the ~2379 s baseline).**
 
-Roadmap, gated on P1d showing the gain:
+Roadmap, gated on P1d clearing the ≥10×-at-D=4 bar:
 
 - **P1e** — ragged odd-D/U(1) via group-by-exact-shape (+ optional pad-to-max behind a
   sub-flag where it provably wins).
