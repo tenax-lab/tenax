@@ -98,6 +98,104 @@ class StackedJaxBackend:
         return stacked_execute(operand_stacks, plan)
 
 
+class MockFFIBackend:
+    """Opaque-FFI stand-in proving the hand-written VJP seam (#200, A3).
+
+    Test/dev-only. Genuinely simulates an opaque ``custom_call`` (cuTensorNet,
+    Pallas): its ``execute`` is wrapped in :func:`jax.custom_vjp`, so autodiff
+    CANNOT leak through the forward — the ONLY gradient path is the hand-written
+    transposed-plan backward
+    (:func:`~tenax.contraction.blocksparse_vjp.backward_contraction`). The
+    forward kernel happens to reuse ``stacked_execute`` (a real FFI backend would
+    call into CUDA here), but its custom-VJP backward does NOT differentiate
+    through that — it rebuilds the cotangent via the SAME plan machinery the
+    forward used, exactly as a cuTensorNet VJP author must.
+
+    Because the backward needs the FORWARD ``subscripts`` and per-operand block
+    metadata (keys/shapes/offsets/indices) — which the
+    :class:`BlockSparseContractBackend` protocol's ``execute(operand_stacks,
+    plan)`` signature does NOT carry — those static facts are captured at
+    construction (the contractor/test that builds the plan also has them). This
+    keeps the differentiable surface to the operand stacks only.
+
+    Args:
+        subscripts: forward einsum subscripts ``subA,subB->subO``.
+        operand_meta: per forward operand, the static
+            ``(indices, block_keys, block_shapes, block_offsets)`` needed to
+            rebuild a lightweight ``SymmetricTensor`` for the backward.
+        bwd_calls: optional shared counter ``dict`` whose ``["n"]`` is bumped
+            every time the hand-written backward fires (opacity probe).
+    """
+
+    name = "mockffi"
+
+    def __init__(self, subscripts, operand_meta, bwd_calls=None):
+        self._subscripts = subscripts
+        self._operand_meta = operand_meta
+        self._bwd_calls = bwd_calls
+
+    def available(self) -> bool:
+        return True
+
+    def supports(self, tensors: Sequence[Any], plan: BlockContractPlan) -> bool:
+        return True
+
+    def _rebuild_operand(self, pos: int, stack: Any) -> Any:
+        """Rebuild forward operand ``pos`` as a SymmetricTensor from its stack."""
+        from tenax.core.tensor import SymmetricTensor
+
+        indices, keys, shapes, offsets = self._operand_meta[pos]
+        blocks = {keys[i]: stack[i] for i in range(len(keys))}
+        return SymmetricTensor._from_blocks_unchecked(blocks, indices)
+
+    def execute(self, operand_stacks: Sequence[Any], plan: BlockContractPlan) -> Any:
+        return self._execute_opaque(tuple(operand_stacks), plan)
+
+    def _execute_opaque(self, operand_stacks, plan):
+        """``jax.custom_vjp``-wrapped opaque kernel (forward + hand-written bwd).
+
+        ``plan``, ``subscripts`` and ``operand_meta`` are static (closed over /
+        nondiff); only ``operand_stacks`` is differentiated.
+        """
+        import jax
+
+        @jax.custom_vjp
+        def opaque(operand_stacks):
+            # FORWARD: an opaque kernel. (Here it reuses stacked_execute, but its
+            # gradient is NOT taken through this — see opaque_bwd.)
+            return stacked_execute(operand_stacks, plan)
+
+        def opaque_fwd(operand_stacks):
+            out = stacked_execute(operand_stacks, plan)
+            # Residual carries ONLY the operand stacks the hand-written bwd
+            # consumes — no forward intermediates -> autodiff cannot leak through.
+            return out, operand_stacks
+
+        def opaque_bwd(operand_stacks_res, out_cotangent_stack):
+            from tenax.contraction.blocksparse_vjp import backward_contraction
+
+            fwd_operands = [
+                self._rebuild_operand(i, operand_stacks_res[i])
+                for i in range(len(operand_stacks_res))
+            ]
+            grads = tuple(
+                backward_contraction(
+                    self._subscripts,
+                    fwd_operands,
+                    out_cotangent_stack,
+                    plan,
+                    wrt,
+                )
+                for wrt in range(len(fwd_operands))
+            )
+            if self._bwd_calls is not None:
+                self._bwd_calls["n"] += 1
+            return (tuple(grads),)
+
+        opaque.defvjp(opaque_fwd, opaque_bwd)
+        return opaque(operand_stacks)
+
+
 _TRUTHY = ("1", "true", "yes", "on")
 
 
