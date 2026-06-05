@@ -528,8 +528,10 @@ def _contract_symmetric_stacked(
         return SymmetricTensor(output_blocks, out_indices_ordered)
 
     # --- Data-level execution: batched einsum(s) + segment_sum per group, then
-    # reorder to canonical sorted-key layout. Returns {out_block_key: array}.
-    out_blocks = stacked_execute(operand_stacks, plan)
+    # reorder to canonical sorted-key layout. Returns the canonical-ordered
+    # stacked output array of shape (n_out_blocks, *out_block_shape); rows map to
+    # ``plan.out_block_keys`` positionally.
+    out_stack = stacked_execute(operand_stacks, plan)
 
     _STACK_FIRED["n"] += 1
     _STACK_PERSIST["calls"] += 1
@@ -545,6 +547,10 @@ def _contract_symmetric_stacked(
         "TENAX_STACK_PERSIST_RETURN", "1"
     ).strip().lower() in ("1", "true", "yes", "on")
     if not _persist_return:
+        out_blocks = {
+            plan.out_block_keys[i]: out_stack[i]
+            for i in range(len(plan.out_block_keys))
+        }
         if output_target is not None:
             return SymmetricTensor._from_blocks_unchecked(
                 out_blocks, out_indices_ordered
@@ -553,15 +559,13 @@ def _contract_symmetric_stacked(
 
     # --- Build the output as a PERSISTING StackedSymmetricTensor (#566 P1d).
     # Keep the batched output array as the cached StackedView (lazy _data). The
-    # plan supplies canonical sorted-key block metadata; ``out_blocks`` is keyed
-    # in that same canonical order, so stacking its values rebuilds the canonical
-    # stacked array directly.
+    # plan supplies canonical sorted-key block metadata; ``out_stack`` rows are
+    # already in that same canonical order, so it IS the canonical stacked array.
     out_keys = plan.out_block_keys
     out_shapes = plan.out_block_shapes
     out_offsets = plan.out_block_offsets
     total_size = plan.total_size
     out_shape = out_shapes[0]
-    out_stack = jnp.stack([out_blocks[k] for k in out_keys], axis=0)
 
     out_group = StackGroup(keys=out_keys, array=out_stack)
     out_view = StackedView(

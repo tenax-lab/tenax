@@ -49,13 +49,11 @@ class PlanGroup:
         segment_ids: output-key accumulation segment id per survivor (for
             ``segment_sum`` over the batch axis).
         num_segments: number of distinct output keys in this group.
-        out_shape: output block shape produced by this group's einsum.
     """
 
     operand_rows: tuple[tuple[int, ...], ...]
     segment_ids: tuple[int, ...]
     num_segments: int
-    out_shape: tuple[int, ...]
     # Canonical sorted-key row -> segment (first-seen) row. Reorders the
     # segment_sum output into ``BlockContractPlan.out_block_keys`` order.
     canonical_perm: tuple[int, ...]
@@ -75,8 +73,6 @@ class BlockContractPlan:
         groups: per input-shape-group :class:`PlanGroup` tuple.
         output_target: inferred output target charge (``int``) or ``None``;
             drives ``_from_blocks_unchecked`` vs ``SymmetricTensor`` assembly.
-        dtype: output dtype (from operands), or ``None`` when there are no
-            surviving blocks.
     """
 
     out_indices: tuple
@@ -87,7 +83,6 @@ class BlockContractPlan:
     batched_subscripts: str
     groups: tuple
     output_target: object
-    dtype: object
 
 
 def build_block_contract_plan(
@@ -134,7 +129,6 @@ def build_block_contract_plan(
     tensor_covered: list[list[tuple[int, int]]] = []
     tensor_partial_rows: list[dict[tuple[int, ...], list[int]]] = []
     tensor_keys: list[tuple[BlockKey, ...]] = []
-    operand_dtype = None
 
     for tensor, subs in zip(tensors, input_subs):
         # Single shape-group guaranteed by the scope check; read the static keys
@@ -142,7 +136,6 @@ def build_block_contract_plan(
         # group array the caller will gather).
         keys = tuple(tensor._block_keys)
         tensor_keys.append(keys)
-        operand_dtype = tensor.dtype
 
         covered: list[tuple[int, int]] = sorted(
             (char_to_canonical_pos[c], pos)
@@ -230,7 +223,6 @@ def build_block_contract_plan(
             batched_subscripts=batched_subscripts,
             groups=(),
             output_target=output_target,
-            dtype=None,
         )
 
     # Single shape-group on both sides -> exactly one input shape-sig group.
@@ -274,7 +266,6 @@ def build_block_contract_plan(
         operand_rows=tuple(tuple(rows) for rows in per_op_rows),
         segment_ids=tuple(seg_ids),
         num_segments=len(distinct_keys),
-        out_shape=tuple(out_shape),
         canonical_perm=canonical_perm,
     )
 
@@ -287,7 +278,6 @@ def build_block_contract_plan(
         batched_subscripts=batched_subscripts,
         groups=(group,),
         output_target=output_target,
-        dtype=operand_dtype,
     )
 
 
@@ -313,21 +303,20 @@ def _einsum_output_shape(
     return tuple(char_to_dim[c] for c in output_part[1:])
 
 
-def stacked_execute(
-    operand_stacks: Sequence[Any], plan: BlockContractPlan
-) -> dict[BlockKey, Any]:
+def stacked_execute(operand_stacks: Sequence[Any], plan: BlockContractPlan) -> Any:
     """Data-level execution shared by the pure-JAX path.
 
     Given each operand's stacked group array (leading block axis, in the same
     sorted-key row order the plan's ``operand_rows`` index into), run the batched
     einsum + ``segment_sum`` per group, then reorder rows to canonical
-    sorted-key layout. Returns ``{out_block_key: array}`` keyed in canonical
-    sorted order. Pure ``jnp`` -> differentiable.
+    sorted-key layout. Returns the canonical-ordered stacked output blocks of
+    shape ``(n_out_blocks, *out_block_shape)``; callers map rows to block keys
+    via ``plan.out_block_keys``. Pure ``jnp`` -> differentiable.
 
-    For an empty plan (no surviving blocks) returns ``{}``.
+    For an empty plan (no surviving blocks) returns ``None``.
     """
     if not plan.groups:
-        return {}
+        return None
 
     # Even-D scope: exactly one group.
     (group,) = plan.groups
@@ -354,4 +343,4 @@ def stacked_execute(
     canon_perm = jnp.asarray(group.canonical_perm, dtype=jnp.int32)
     out_stack = jnp.take(summed, canon_perm, axis=0)
 
-    return {key: out_stack[i] for i, key in enumerate(plan.out_block_keys)}
+    return out_stack
