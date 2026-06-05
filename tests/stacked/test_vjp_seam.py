@@ -245,6 +245,86 @@ def test_vjp_seam_opacity_stop_gradient_forward():
     assert_tiered(g[1], g_sg[1], tier="fp")
 
 
+def _complexify(A, scale=1 + 0.7j, shift=0.3j):
+    """Promote a real tensor's data buffer to complex128 (distinct real/imag)."""
+    return type(A)._raw(
+        indices=A._indices,
+        data=(A._data * scale + shift).astype(jnp.complex128),
+        block_keys=A._block_keys,
+        block_shapes=A._block_shapes,
+        block_offsets=A._block_offsets,
+    )
+
+
+def test_vjp_seam_grad_complex128_triple_equivalence():
+    """complex128 crux: hand-written VJP == StackedJax autodiff == jax.vjp truth.
+
+    The production dtype is complex128. The premise that the backward needs a
+    conjugation for complex is WRONG: the VJP of a bilinear contraction
+    transposes the UNCONJUGATED surviving operand for both real and complex
+    (conjugation enters only via non-holomorphic LEAF ops, outside this seam).
+
+    Ground truth is ``jax.vjp(stacked_execute)`` (NOT the per-block shared-buffer
+    reconstruction, whose hand-rolled conj bookkeeping is awkward for complex).
+    The loss is the real-valued ``sum|out|**2`` so the complex grad of a real
+    loss is well-defined and matches physical energy/AD. dA and dB are checked on
+    two genuinely distinct complex operands.
+    """
+    A_real = dict(canonical_tensors())["ferm_D2"]
+    # Distinct complex bra: bar() of a *different*, perturbed tensor so dA and dB
+    # are independent, then promote both operands to complex128.
+    B_src_real = dict(canonical_tensors())["ferm_D2"]
+    B_src_real = type(B_src_real)._raw(
+        indices=B_src_real.indices,
+        data=B_src_real._data * 1.7 + 0.3,
+        block_keys=B_src_real._block_keys,
+        block_shapes=B_src_real._block_shapes,
+        block_offsets=B_src_real._block_offsets,
+    )
+    A = _complexify(A_real, scale=1 + 0.7j, shift=0.3j)
+    B = _complexify(_bra_from(B_src_real), scale=1 - 0.4j, shift=-0.2j)
+
+    subs, out_indices = _labels_to_subscripts([A, B])
+    plan = build_block_contract_plan([A, B], subs, out_indices)
+    assert plan is not None
+
+    sA = _stack_of(A)
+    sB = _stack_of(B)
+    assert sA.dtype == jnp.complex128 and sB.dtype == jnp.complex128
+
+    def real_loss(out):
+        # Real-valued: matches physical energy / non-holomorphic AD.
+        return jnp.sum(jnp.abs(out) ** 2)
+
+    # --- Ground truth: jax.grad of the pure-JAX forward (stacked_execute),
+    # which is jax.vjp(stacked_execute) composed with the real loss. This is the
+    # robust truth — no hand-rolled conj bookkeeping.
+    gA_truth, gB_truth = jax.grad(
+        lambda a, b: real_loss(stacked_execute([a, b], plan)),
+        argnums=(0, 1),
+    )(sA, sB)
+
+    # --- StackedJaxBackend autodiff.
+    def loss_stacked(a, b):
+        return real_loss(stacked_execute([a, b], plan))
+
+    gA_stacked, gB_stacked = jax.grad(loss_stacked, argnums=(0, 1))(sA, sB)
+
+    # --- MockFFIBackend hand-written transposed-plan VJP.
+    backend = MockFFIBackend(subs, _operand_meta([A, B]))
+
+    def loss_mock(a, b):
+        return real_loss(backend.execute([a, b], plan))
+
+    gA_mock, gB_mock = jax.grad(loss_mock, argnums=(0, 1))(sA, sB)
+
+    # Triple match at fp tier for BOTH dA and dB on the production dtype.
+    assert_tiered(gA_truth, gA_stacked, tier="fp")
+    assert_tiered(gB_truth, gB_stacked, tier="fp")
+    assert_tiered(gA_truth, gA_mock, tier="fp")
+    assert_tiered(gB_truth, gB_mock, tier="fp")
+
+
 def test_vjp_seam_two_distinct_operands():
     """dA and dB independently checked on A·B with B NOT sharing A's buffer."""
     A = dict(canonical_tensors())["ferm_D2"]

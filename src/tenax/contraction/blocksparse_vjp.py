@@ -21,9 +21,19 @@ contracted against the surviving forward operand, whose matching legs have the
 *same* flow (they were passed through in the forward). For the charge machinery
 to pair them as a contraction (opposite flows), the cotangent's indices are
 flow-flipped (:meth:`TensorIndex.flip_flow`: opposite flow, identical charge
-values) before building the backward plan. No conjugation is applied — JAX's
-einsum VJP convention contracts the cotangent with the *unconjugated* other
-operand (verified empirically), so this matches ``jnp.einsum`` autodiff exactly.
+values) before building the backward plan. ``flip_flow`` is purely about
+charge-value matching in the block machinery — it is NOT a conjugation and has
+nothing to do with complex dtypes.
+
+No conjugation rationale (read before touching the backward for Phase B):
+the VJP of a bilinear contraction transposes the UNCONJUGATED surviving operand
+for BOTH real and complex dtypes (this matches ``jax.vjp`` of the same
+``einsum`` / ``dot_general``). Conjugation in complex autodiff enters only
+through non-holomorphic LEAF operations (``abs``, ``conj``, real-valued loss),
+which are outside this contraction seam. Therefore ``backward_contraction``
+applies NO conjugation and is correct for complex128 as well as real — do NOT
+add a conjugation here. (Proven empirically against ``jax.vjp(stacked_execute)``
+ground truth at fp tier for complex128 in ``tests/stacked/test_vjp_seam.py``.)
 """
 
 from __future__ import annotations
@@ -77,6 +87,9 @@ def _backward_subscripts(subscripts: str, wrt: int) -> str:
             f"{len(in_subs)} operands in {subscripts!r}"
         )
     sub_a, sub_b = in_subs
+    # The surviving operand is contracted UNCONJUGATED (real and complex alike;
+    # matches jax.vjp of this einsum). Conjugation in complex autodiff comes only
+    # from non-holomorphic leaf ops, which live outside this seam.
     if wrt == 0:
         # dA = einsum(subO, subB -> subA): cotangent first, surviving operand B.
         return f"{output},{sub_b}->{sub_a}"
