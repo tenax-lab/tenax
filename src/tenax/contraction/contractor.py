@@ -48,6 +48,18 @@ from tenax.core.tensor import (
 # block-sparse contraction path (TENAX_STACK_BLOCKSPARSE) actually executes.
 _STACK_FIRED = {"n": 0}
 
+# Persist-hit-rate instrumentation (#566 P1d slice 1). Each stacked contraction
+# records, per operand, whether the input arrived as a StackedSymmetricTensor
+# (its stacked arrays PERSISTED from an upstream contraction, no _data gather) or
+# as a plain SymmetricTensor (the chain was INTERRUPTED upstream by a
+# fuse/bar/svd/_data-read, forcing a gather from _data).
+_STACK_PERSIST = {
+    "calls": 0,  # stacked contractions executed
+    "persisted_inputs": 0,  # operands that arrived already-stacked
+    "gathered_inputs": 0,  # operands that had to gather from _data
+    "fully_persisted": 0,  # calls where BOTH operands persisted
+}
+
 # ---------- Label → Subscript Translation ----------
 
 
@@ -503,7 +515,20 @@ def _contract_symmetric_stacked(
     tensor_partial_rows: list[dict[tuple[int, ...], list[int]]] = []
     tensor_keys: list[tuple[BlockKey, ...]] = []
 
+    from tenax.core.stacked_tensor import StackedSymmetricTensor
+    from tenax.core.stacked_view import StackedView, StackGroup
+
+    n_persisted = 0
     for tensor, subs in zip(tensors, input_subs):
+        # If the operand already carries a cached StackedView (it was produced by
+        # an upstream stacked contraction), stacked_blocks() returns it with NO
+        # gather from _data — the chain persisted. Otherwise stacked_blocks()
+        # gathers from the flat _data buffer (chain interrupted upstream).
+        if isinstance(tensor, StackedSymmetricTensor):
+            n_persisted += 1
+            _STACK_PERSIST["persisted_inputs"] += 1
+        else:
+            _STACK_PERSIST["gathered_inputs"] += 1
         view = tensor.stacked_blocks()
         # Single shape-group guaranteed by the scope check above.
         (group,) = view.groups.values()
@@ -634,16 +659,64 @@ def _contract_symmetric_stacked(
         batched_result, segments, num_segments=len(distinct_keys)
     )
 
-    for seg, okey in enumerate(distinct_keys):
-        output_blocks[okey] = summed[seg]
-
     _STACK_FIRED["n"] += 1
+    _STACK_PERSIST["calls"] += 1
+    if n_persisted == n_pos:
+        _STACK_PERSIST["fully_persisted"] += 1
 
-    if output_target is not None:
-        return SymmetricTensor._from_blocks_unchecked(
-            output_blocks, out_indices_ordered
-        )
-    return SymmetricTensor(output_blocks, out_indices_ordered)
+    # Diagnostic sub-flag: TENAX_STACK_PERSIST_RETURN=0 falls back to the
+    # original _from_blocks_unchecked return (no persisting subclass). Isolates
+    # the persisting-return change from the batched-einsum core for debugging.
+    import os
+
+    _persist_return = os.environ.get(
+        "TENAX_STACK_PERSIST_RETURN", "1"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if not _persist_return:
+        for seg, okey in enumerate(distinct_keys):
+            output_blocks[okey] = summed[seg]
+        if output_target is not None:
+            return SymmetricTensor._from_blocks_unchecked(
+                output_blocks, out_indices_ordered
+            )
+        return SymmetricTensor(output_blocks, out_indices_ordered)
+
+    # --- Build the output as a PERSISTING StackedSymmetricTensor (#566 P1d).
+    # Instead of scattering ``summed`` into a flat _data buffer here (the per-call
+    # output glue), keep the batched output array as the cached StackedView. The
+    # _data buffer is materialized lazily only if a downstream op actually reads
+    # it. ``summed`` rows are in survivor/first-seen order (``distinct_keys``);
+    # reorder ONCE to canonical sorted-key layout so it matches block metadata
+    # and can feed the next contraction directly.
+    sorted_keys = sorted(distinct_keys)
+    seg_of_key = {k: s for s, k in enumerate(distinct_keys)}
+    canon_perm = jnp.asarray([seg_of_key[k] for k in sorted_keys], dtype=jnp.int32)
+    out_stack = jnp.take(summed, canon_perm, axis=0)  # (n_out_blocks, *out_shape)
+    out_shape = tuple(out_stack.shape[1:])
+
+    # Block metadata in canonical sorted-key layout (single shape-group, so all
+    # blocks share ``out_shape``; offsets are contiguous).
+    out_keys = tuple(sorted_keys)
+    out_shapes = tuple(out_shape for _ in out_keys)
+    block_size = 1
+    for d in out_shape:
+        block_size *= d
+    out_offsets = tuple(i * block_size for i in range(len(out_keys)))
+    total_size = block_size * len(out_keys)
+
+    out_group = StackGroup(keys=out_keys, array=out_stack)
+    out_view = StackedView(
+        groups={out_shape: out_group}, indices=tuple(out_indices_ordered)
+    )
+    return StackedSymmetricTensor.from_stacked(
+        view=out_view,
+        indices=tuple(out_indices_ordered),
+        block_keys=out_keys,
+        block_shapes=out_shapes,
+        block_offsets=out_offsets,
+        total_size=total_size,
+        dtype=out_stack.dtype,
+    )
 
 
 def _contract_symmetric(
