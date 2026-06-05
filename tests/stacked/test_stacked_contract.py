@@ -13,7 +13,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax.contraction.contractor import _STACK_FIRED, contract
+from tenax.contraction.contractor import (
+    _STACK_FIRED,
+    contract,
+    contract_with_subscripts,
+)
 from tests.stacked._harness import assert_tiered, canonical_tensors
 
 
@@ -113,3 +117,42 @@ def test_stacked_falls_back_for_odd_d(monkeypatch):
     assert _STACK_FIRED["n"] == n0, "stacked path fired on multi-shape (odd-D) input"
     assert got._block_keys == ref._block_keys
     assert_tiered(ref._data, got._data, tier="fp")
+
+
+def test_stacked_falls_back_for_repeated_within_operand_label(monkeypatch):
+    """A diagonal/trace subscript (``"ii,j->j"``) repeats a label WITHIN one
+    operand, so ``all_complete`` is False even for single-shape-group inputs.
+    The stacked plan builder must return None (fall back to per-block), NOT
+    assert (Codex P2). The per-block path computes ``trace(M) * v``.
+    """
+    from tenax.core.symmetry import U1Symmetry
+    from tenax.core.tensor import FlowDirection, SymmetricTensor, TensorIndex
+
+    sym = U1Symmetry()
+    # Both i-legs charges [0, 1] => two blocks of shape (1, 1) => single group.
+    ch = np.array([0, 1], dtype=np.int32)
+    i0 = TensorIndex.from_charges(sym, ch, FlowDirection.OUT, label="i0")
+    i1 = TensorIndex.from_charges(sym, ch, FlowDirection.IN, label="i1")
+    # j-leg charges [0, 0] => single block of shape (2,) => single group.
+    chj = np.array([0, 0], dtype=np.int32)
+    jidx = TensorIndex.from_charges(sym, chj, FlowDirection.OUT, label="j")
+
+    mat = jnp.asarray(np.diag([2.0, 3.0]))  # diagonal => symmetry-allowed
+    vec = jnp.asarray(np.array([0.5, -1.3]))
+    T = SymmetricTensor.from_dense(mat, (i0, i1))
+    v = SymmetricTensor.from_dense(vec, (jidx,))
+    assert len(set(T._block_shapes)) == 1 and len(set(v._block_shapes)) == 1
+
+    monkeypatch.setenv("TENAX_STACK_BLOCKSPARSE", "0")
+    ref = contract_with_subscripts([T, v], "ii,j->j", (jidx,))
+
+    monkeypatch.setenv("TENAX_STACK_BLOCKSPARSE", "1")
+    n0 = _STACK_FIRED["n"]
+    got = contract_with_subscripts([T, v], "ii,j->j", (jidx,))
+
+    assert _STACK_FIRED["n"] == n0, (
+        "stacked path fired on repeated-within-operand label"
+    )
+    assert_tiered(ref._data, got._data, tier="fp")
+    # trace([[2,0],[0,3]]) = 5; 5 * [0.5, -1.3] = [2.5, -6.5]
+    assert_tiered(np.array([2.5, -6.5]), got._data, tier="fp")

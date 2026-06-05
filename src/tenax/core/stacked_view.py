@@ -60,6 +60,14 @@ def build_stacked(
 def scatter_stacked(view, block_keys, block_shapes, block_offsets, total_size, dtype):
     """Inverse: write groups back into one flat buffer in canonical sorted-key layout."""
     layout = _group_layout(block_keys, block_shapes, block_offsets)
+    # Promote the buffer dtype to cover the actual group-array dtype: an
+    # elementwise op (e.g. scalar multiply by 1j) can promote the arrays beyond
+    # the passed ``dtype``; allocating with the stale dtype would cast complex
+    # rows down to real and drop the imaginary part on the ``.set`` below.
+    if view.groups:
+        dtype = jnp.result_type(
+            dtype, *(grp.array.dtype for grp in view.groups.values())
+        )
     data = jnp.zeros(total_size, dtype=dtype)
     for shape, (keys, gather) in layout.items():
         grp = view.groups[shape]

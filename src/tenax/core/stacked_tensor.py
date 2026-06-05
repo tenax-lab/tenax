@@ -161,6 +161,14 @@ class StackedSymmetricTensor(SymmetricTensor):
             shape: type(grp)(keys=grp.keys, array=grp.array * scalar)
             for shape, grp in self._stacked_view.groups.items()
         }
+        # A scalar can PROMOTE the dtype (e.g. real array * 1j -> complex). The
+        # materialization buffer (scatter_stacked) is allocated with the stored
+        # dtype, so it MUST track the promoted array dtype — otherwise the
+        # scatter casts complex rows down to the stale real dtype and silently
+        # drops the imaginary part. Read the dtype off the multiplied arrays.
+        new_dtype = jnp.result_type(
+            self._dtype, *(grp.array.dtype for grp in new_groups.values())
+        )
         obj = StackedSymmetricTensor.from_stacked(
             view=StackedView(groups=new_groups, indices=self._indices),
             indices=self._indices,
@@ -168,7 +176,7 @@ class StackedSymmetricTensor(SymmetricTensor):
             block_shapes=self._block_shapes,
             block_offsets=self._block_offsets,
             total_size=self._total_size,
-            dtype=self._dtype,
+            dtype=new_dtype,
         )
         return obj
 

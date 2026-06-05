@@ -151,10 +151,19 @@ def build_block_contract_plan(
         tensor_partial_rows.append(partial_rows)
 
     # --- Enumerate surviving combos via the all_complete intersection.
+    # The even-D stacked scope assumes every operand carries every contracted
+    # char exactly once (partial sig == full sig). A repeated-within-operand
+    # label (e.g. ``"ii,j->j"`` — a diagonal/trace) produces TWO covered
+    # positions in one operand and NONE in the other, so ``all_complete`` is
+    # False. Fall back to the general per-block path (which handles it via
+    # opt_einsum) rather than asserting — an assert in a library hot path is
+    # also stripped under ``python -O``, which would silently produce a wrong
+    # result here.
     all_complete = all(
         len(cov) == len(contracted_chars_sorted) for cov in tensor_covered
     )
-    assert all_complete, "2-tensor scope guarantees every char is contracted in both"
+    if not all_complete:
+        return None
     common_sigs: set[tuple[int, ...]] = set(tensor_partial_rows[0].keys())
     for partial_rows in tensor_partial_rows[1:]:
         common_sigs &= set(partial_rows.keys())
