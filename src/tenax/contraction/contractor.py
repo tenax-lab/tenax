@@ -456,16 +456,19 @@ def _contract_symmetric_stacked(
     subscripts: str,
     output_indices: tuple[TensorIndex, ...],
     optimize: str = "auto",
+    backend: Any = None,
+    plan: Any = None,
 ) -> SymmetricTensor | None:
-    """Even-D stacked block-sparse contraction (issue #566, P1b).
+    """Even-D stacked block-sparse contraction (issue #566, P1b; seam A2).
 
     Sources operands DIRECTLY from each tensor's contiguous ``_data`` buffer via
     ``stacked_blocks()`` (one row-gather per shape-group) + ``jnp.take`` (one
-    op per operand), runs ONE batched ``jnp.einsum`` over a fresh leading batch
-    axis per input shape-group, and collapses combos sharing an output key with
-    ``jax.ops.segment_sum`` (reused from the batched path).  It builds partial
-    charge signatures from the STATIC ``_block_keys`` — NOT ``.blocks`` /
-    ``_get_block`` — so no per-block slicing is emitted at trace time.
+    op per operand), runs the contraction through the supplied ``backend`` (the
+    backend returns the canonical-ordered stacked output array — same shape
+    contract as ``stacked_execute``), then assembles the output
+    ``SymmetricTensor``.  It builds partial charge signatures from the STATIC
+    ``_block_keys`` — NOT ``.blocks`` / ``_get_block`` — so no per-block slicing
+    is emitted at trace time.
 
     Scoped tightly (returns ``None`` to fall back to the per-block path):
       * only 2-tensor contractions;
@@ -476,25 +479,35 @@ def _contract_symmetric_stacked(
     need none — see ``_contract_symmetric``).  Value and gradient match the
     per-block path within the fp tier.
 
+    Args:
+        backend: a :class:`~tenax.contraction.blocksparse_backend.BlockSparseContractBackend`
+            whose ``execute`` produces the canonical stacked output array. When
+            ``None``, the default :class:`StackedJaxBackend` is used (legacy
+            direct-call behavior).
+        plan: a prebuilt :class:`BlockContractPlan` (the dispatcher builds it once
+            and reuses it for backend selection); built here if ``None``.
+
     Returns the contracted ``SymmetricTensor``, or ``None`` to fall back.
     """
     # ``optimize`` is accepted for signature parity with the dispatcher and is
-    # unused here (the batched jnp.einsum path takes no optimize argument).
+    # unused here (the backend kernel takes no optimize argument).
     del optimize
 
-    from tenax.contraction.blocksparse_plan import (
-        build_block_contract_plan,
-        stacked_execute,
-    )
+    from tenax.contraction.blocksparse_backend import StackedJaxBackend
+    from tenax.contraction.blocksparse_plan import build_block_contract_plan
     from tenax.core.stacked_tensor import StackedSymmetricTensor
     from tenax.core.stacked_view import StackedView, StackGroup
 
     # --- Backend-agnostic plan from STATIC metadata only (charge matching,
     # valid-output filter, combo grouping, segment/accumulation structure,
     # batched subscripts, output keys/shapes). None => out of scope -> fall back.
-    plan = build_block_contract_plan(tensors, subscripts, output_indices)
+    if plan is None:
+        plan = build_block_contract_plan(tensors, subscripts, output_indices)
     if plan is None:
         return None
+
+    if backend is None:
+        backend = StackedJaxBackend()
 
     out_indices_ordered = plan.out_indices
     output_target = plan.output_target
@@ -527,11 +540,12 @@ def _contract_symmetric_stacked(
             )
         return SymmetricTensor(output_blocks, out_indices_ordered)
 
-    # --- Data-level execution: batched einsum(s) + segment_sum per group, then
-    # reorder to canonical sorted-key layout. Returns the canonical-ordered
-    # stacked output array of shape (n_out_blocks, *out_block_shape); rows map to
-    # ``plan.out_block_keys`` positionally.
-    out_stack = stacked_execute(operand_stacks, plan)
+    # --- Data-level execution through the selected backend. The backend returns
+    # the canonical-ordered stacked output array of shape
+    # (n_out_blocks, *out_block_shape); rows map to ``plan.out_block_keys``
+    # positionally. Backend-neutral: the assembly below is identical regardless
+    # of which backend produced ``out_stack``.
+    out_stack = backend.execute(operand_stacks, plan)
 
     _STACK_FIRED["n"] += 1
     _STACK_PERSIST["calls"] += 1
@@ -634,27 +648,29 @@ def _contract_symmetric(
                 tensors[0], tensors[1], subscripts, output_indices
             )
 
-    # --- Gate: opt-in even-D stacked block-sparse path (issue #566, P1b) ---
-    # When TENAX_STACK_BLOCKSPARSE is truthy, single-shape-group 2-tensor
-    # contractions (the even-D case) source operands DIRECTLY from the
-    # contiguous _data buffer via stacked_blocks() + jnp.take and emit one
-    # batched einsum + segment_sum per shape-group (O(n_shape_groups) traced
-    # ops) instead of O(n_combos) per-block einsums.  Returns None to fall
-    # back to the per-block path for everything else.
-    _stack_blocksparse = os.environ.get(
-        "TENAX_STACK_BLOCKSPARSE", "0"
-    ).strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-    if _stack_blocksparse:
-        stacked_result = _contract_symmetric_stacked(
-            tensors, subscripts, output_indices, optimize
-        )
-        if stacked_result is not None:
-            return stacked_result
+    # --- Backend seam: opt-in block-sparse contraction backend (issue #200) ---
+    # Build the STATIC plan once (None => out of even-D/2-tensor scope) and let
+    # select_backend pick a backend (or None => per-block). Precedence:
+    # TENAX_BLOCKSPARSE_BACKEND (stacked/cutensornet/perblock/auto) then the
+    # legacy TENAX_STACK_BLOCKSPARSE flag. With NO backend env set, no backend is
+    # selected and the per-block path below runs byte-identically to today.
+    from tenax.contraction.blocksparse_backend import select_backend
+    from tenax.contraction.blocksparse_plan import build_block_contract_plan
+
+    plan = build_block_contract_plan(tensors, subscripts, output_indices)
+    if plan is not None:
+        backend = select_backend(tensors, plan)
+        if backend is not None:
+            stacked_result = _contract_symmetric_stacked(
+                tensors,
+                subscripts,
+                output_indices,
+                optimize,
+                backend=backend,
+                plan=plan,
+            )
+            if stacked_result is not None:
+                return stacked_result
 
     # Prelude: parse subscripts + output index order + contracted chars +
     # inferred output target charge + valid output set + canonical contracted
