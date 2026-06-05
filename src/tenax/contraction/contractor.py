@@ -654,23 +654,25 @@ def _contract_symmetric(
     # TENAX_BLOCKSPARSE_BACKEND (stacked/cutensornet/perblock/auto) then the
     # legacy TENAX_STACK_BLOCKSPARSE flag. With NO backend env set, no backend is
     # selected and the per-block path below runs byte-identically to today.
-    from tenax.contraction.blocksparse_backend import select_backend
-    from tenax.contraction.blocksparse_plan import build_block_contract_plan
+    from tenax.contraction.blocksparse_backend import _backend_opt_in, select_backend
 
-    plan = build_block_contract_plan(tensors, subscripts, output_indices)
-    if plan is not None:
-        backend = select_backend(tensors, plan)
-        if backend is not None:
-            stacked_result = _contract_symmetric_stacked(
-                tensors,
-                subscripts,
-                output_indices,
-                optimize,
-                backend=backend,
-                plan=plan,
-            )
-            if stacked_result is not None:
-                return stacked_result
+    if _backend_opt_in():
+        from tenax.contraction.blocksparse_plan import build_block_contract_plan
+
+        plan = build_block_contract_plan(tensors, subscripts, output_indices)
+        if plan is not None:
+            backend = select_backend(tensors, plan)
+            if backend is not None:
+                stacked_result = _contract_symmetric_stacked(
+                    tensors,
+                    subscripts,
+                    output_indices,
+                    optimize,
+                    backend=backend,
+                    plan=plan,
+                )
+                if stacked_result is not None:
+                    return stacked_result
 
     # Prelude: parse subscripts + output index order + contracted chars +
     # inferred output target charge + valid output set + canonical contracted

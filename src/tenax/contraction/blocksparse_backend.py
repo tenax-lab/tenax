@@ -101,6 +101,17 @@ class StackedJaxBackend:
 _TRUTHY = ("1", "true", "yes", "on")
 
 
+def _backend_opt_in() -> bool:
+    """True iff a block-sparse backend env opt-in is active (cheap: env reads only, no plan)."""
+    choice = os.environ.get("TENAX_BLOCKSPARSE_BACKEND", "").strip().lower()
+    if choice in ("stacked", "cutensornet"):
+        return True
+    if choice == "perblock":
+        return False  # explicit force-off: skip plan-building entirely
+    # auto / unset / unknown -> defer to legacy flag
+    return os.environ.get("TENAX_STACK_BLOCKSPARSE", "0").strip().lower() in _TRUTHY
+
+
 def _stacked_if_ok(
     tensors: Sequence[Any], plan: BlockContractPlan
 ) -> BlockSparseContractBackend | None:
