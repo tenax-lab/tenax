@@ -83,12 +83,31 @@ def _check_case(name: str, D: int, complex_: bool) -> bool:
     got = jax.jit(lambda s: cutensor_backend.execute(s, plan))(stacks)
 
     err = _max_abs_diff(oracle, got)
-    passed = err < FP_TOL and bool(jnp.all(jnp.isfinite(got)))
+    value_ok = err < FP_TOL and bool(jnp.all(jnp.isfinite(got)))
+
+    # OP-COUNT (compile-collapse premise): the jaxpr must be O(#groups) callback
+    # ops, NOT O(#blocks) structural ops. On a REAL block-sparse contraction with
+    # n_blocks output blocks, the equation count must stay a small handful,
+    # independent of block count, with #callbacks == #groups.
     n_blocks = len(plan.out_block_keys)
+    n_groups = len(plan.groups)
+    jaxpr = jax.make_jaxpr(lambda s: cutensor_backend.execute(s, plan))(stacks).jaxpr
+    n_eqns = len(jaxpr.eqns)
+    n_callbacks = sum(
+        "callback" in str(e.primitive) or "custom_call" in str(e.primitive)
+        for e in jaxpr.eqns
+    )
+    # A handful of structural ops (gather/segment_sum/reorder per group) + one
+    # callback per group; emphatically << n_blocks. Bound generously but well
+    # below block count (128) to prove the collapse.
+    opcount_ok = n_callbacks == n_groups and n_eqns < 20 and n_eqns < n_blocks
+
+    passed = value_ok and opcount_ok
     print(
         f"  {name:9s} D={D} {str(dtype):11s} "
-        f"out_blocks={n_blocks:2d} shape={tuple(got.shape)}  "
-        f"max|Δ|={err:.2e}  {'PASS' if passed else 'FAIL'}"
+        f"out_blocks={n_blocks:3d} shape={tuple(got.shape)}  "
+        f"max|Δ|={err:.2e}  eqns={n_eqns:2d}(cb={n_callbacks}/grp={n_groups})  "
+        f"{'PASS' if passed else 'FAIL'}"
     )
     return passed
 
@@ -102,7 +121,7 @@ def main() -> int:
         return 2
 
     ok = True
-    print("\ncuTENSOR forward vs StackedJax oracle (fp tier 1e-12):")
+    print("\ncuTENSOR forward vs StackedJax oracle (fp 1e-12) + op-count (O(#groups)):")
     for D in (2, 4):
         ok &= _check_case("ferm_real", D, complex_=False)
         ok &= _check_case("ferm_c128", D, complex_=True)
