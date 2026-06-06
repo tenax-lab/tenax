@@ -54,8 +54,11 @@
 | 4 | 12 | fwd_cmp | 514.9s | 537.4s | 4% |
 | 4 | 12 | **vg_cmp** | 1061.2s | 1417.6s | **25%** |
 | 4 | 12 | bwd_cmp | 546.2s | 880.3s | **38%** |
+| 2 | 6 | warm_step | 4163.6ms | 4432.9ms | 6.1% |
+| 4 | 12 | warm_step | 5573.6ms | 5833.7ms | 4.5% |
 
 **Findings:**
+0. **Runtime is positive too (not just compile).** Warm-step is 4.5–6.1% faster under stacked — small but on the *right* side, and notably the new contiguous-`_data` `StackedJaxBackend` does NOT reproduce the runtime-NEGATIVE behavior of the abandoned `TENAX_BATCH_BLOCKSPARSE` (#571/2/3) on A100. So the stacked backend is a clean partial win on BOTH axes (compile + runtime), which removes the last objection to a possible GPU default-flip of `TENAX_BLOCKSPARSE_BACKEND=stacked`.
 1. **Win is entirely in the backward.** Forward compile is backend-independent (515 vs 537s at D=4); stacked's advantage is isolated to `bwd_cmp` (546 vs 880s, −38%). Consistent with the wall being the per-block fixed-point backward — stacking blocks into one fused op cuts op-emission count there.
 2. **Mitigates but does not collapse.** D=4 `vg_cmp` is still ~18 min under stacked. The 25–38% cut is worth banking but is not the order-of-magnitude needed; per-block emission is softened, not solved, by the stacked backend alone.
 3. **Win grows with D** (11%→25% on vg, 17%→38% on bwd from D=2 to D=4) — helps most where it hurts most, but won't reach a >10× collapse on its own.
