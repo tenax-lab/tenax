@@ -150,10 +150,14 @@ class CuTensorNetBackend:
     shape contract :class:`StackedJaxBackend` honours — so the contractor's
     assembly logic runs identically regardless of which backend produced it.
 
-    P-B1: ``execute`` is forward-only (value-validated against
-    :class:`StackedJaxBackend`). P-B2 wraps it in ``jax.custom_vjp`` + the
-    hand-written ``backward_contraction`` so autodiff cannot leak through the
-    opaque cuTENSOR forward.
+    The cuTENSOR forward is opaque to XLA (a ``pure_callback``), so autodiff
+    CANNOT trace through it; the ONLY gradient path is the hand-written
+    transposed-plan backward
+    (:func:`~tenax.contraction.blocksparse_vjp.backward_contraction`), wired via
+    ``jax.custom_vjp`` exactly as a real FFI backend must. The backward is itself
+    a block-sparse contraction expressed through the SAME plan machinery (it reads
+    ``plan.subscripts`` / ``plan.operand_*`` and rebuilds operands), so the
+    backend hands it nothing but ``(operand_stacks, plan)``.
     """
 
     name = "cutensornet"
@@ -168,4 +172,50 @@ class CuTensorNetBackend:
         return True
 
     def execute(self, operand_stacks: Sequence[Any], plan: BlockContractPlan) -> Any:
-        return cutensor_forward(tuple(operand_stacks), plan)
+        operand_stacks = tuple(operand_stacks)
+        # Empty plan: no surviving blocks -> nothing to differentiate. Skip the
+        # custom_vjp wrap (cutensor_forward returns None, which the contractor
+        # assembles into an empty tensor).
+        if not plan.groups:
+            return None
+        return self._execute_opaque(operand_stacks, plan)
+
+    def _execute_opaque(self, operand_stacks, plan):
+        """``jax.custom_vjp``-wrapped opaque cuTENSOR kernel (forward + hand bwd).
+
+        Structurally identical to
+        :meth:`~tenax.contraction.blocksparse_backend.MockFFIBackend._execute_opaque`,
+        but the forward is the real GPU cuTENSOR contraction
+        (:func:`cutensor_forward`). ``plan`` is static (closed over / nondiff) and
+        self-contained for the backward; only ``operand_stacks`` is differentiated.
+        """
+        import jax
+
+        @jax.custom_vjp
+        def opaque(operand_stacks):
+            # FORWARD: the opaque cuTENSOR kernel. Its gradient is NOT taken
+            # through this (see opaque_bwd) — autodiff stops at the pure_callback.
+            return cutensor_forward(operand_stacks, plan)
+
+        def opaque_fwd(operand_stacks):
+            out = cutensor_forward(operand_stacks, plan)
+            # Residual carries ONLY the operand stacks the hand-written bwd
+            # consumes — no forward intermediates -> autodiff cannot leak through.
+            return out, operand_stacks
+
+        def opaque_bwd(operand_stacks_res, out_cotangent_stack):
+            from tenax.contraction.blocksparse_vjp import backward_contraction
+
+            grads = tuple(
+                backward_contraction(
+                    operand_stacks_res,
+                    out_cotangent_stack,
+                    plan,
+                    wrt,
+                )
+                for wrt in range(len(operand_stacks_res))
+            )
+            return (tuple(grads),)
+
+        opaque.defvjp(opaque_fwd, opaque_bwd)
+        return opaque(operand_stacks)
