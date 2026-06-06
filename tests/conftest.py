@@ -68,6 +68,15 @@ _FILE_MARKERS = {
     "test_ctm_env_pad.py": "core",
     "test_ipeps_chi_bump_integration.py": "algorithm",
     "test_ctm_convergence_random_iPEPS.py": "algorithm",
+    # Block-sparse stacked-contraction backend seam (#200 / #566): fast,
+    # mechanism-level (small even-D fermionic tensors, no CTM convergence).
+    "test_harness.py": "core",
+    "test_stacked_view.py": "core",
+    "test_stacked_contract.py": "core",
+    "test_stacked_decomp.py": "core",
+    "test_backend_dispatch.py": "core",
+    "test_vjp_seam.py": "core",
+    "test_stacked_tensor_dtype.py": "core",
 }
 
 

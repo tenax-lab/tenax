@@ -44,6 +44,22 @@ from tenax.core.tensor import (
     _compute_valid_blocks,
 )
 
+# Test-observability counter: incremented each time the gated even-D stacked
+# block-sparse contraction path (TENAX_STACK_BLOCKSPARSE) actually executes.
+_STACK_FIRED = {"n": 0}
+
+# Persist-hit-rate instrumentation (#566 P1d slice 1). Each stacked contraction
+# records, per operand, whether the input arrived as a StackedSymmetricTensor
+# (its stacked arrays PERSISTED from an upstream contraction, no _data gather) or
+# as a plain SymmetricTensor (the chain was INTERRUPTED upstream by a
+# fuse/bar/svd/_data-read, forcing a gather from _data).
+_STACK_PERSIST = {
+    "calls": 0,  # stacked contractions executed
+    "persisted_inputs": 0,  # operands that arrived already-stacked
+    "gathered_inputs": 0,  # operands that had to gather from _data
+    "fully_persisted": 0,  # calls where BOTH operands persisted
+}
+
 # ---------- Label → Subscript Translation ----------
 
 
@@ -355,6 +371,231 @@ def _contract_symmetric_batched(
     return output_blocks
 
 
+def _parse_contraction_prelude(
+    tensors: Sequence[SymmetricTensor],
+    subscripts: str,
+) -> tuple[
+    list[str],
+    str,
+    tuple[TensorIndex, ...],
+    set[str],
+    list[str],
+    dict[str, int],
+    int | None,
+    set[BlockKey],
+]:
+    """Shared prelude for the per-block and stacked symmetric contraction paths.
+
+    Returns the subscript/charge bookkeeping common to both; per-tensor block
+    indexing (arrays vs stacked rows) is built separately by each caller.
+
+    Returns:
+        input_subs, output_part, out_indices_ordered, contracted_chars (set),
+        contracted_chars_sorted, char_to_canonical_pos, output_target,
+        valid_output_set.
+    """
+    # Parse subscripts: e.g., "ij,jk->ik" -> inputs=["ij","jk"], output="ik".
+    input_part, output_part = subscripts.split("->")
+    input_subs = input_part.split(",")
+
+    # Map each character to the corresponding TensorIndex, then build the
+    # output index tuple in output_part order.
+    char_to_index: dict[str, TensorIndex] = {}
+    for tensor, subs in zip(tensors, input_subs):
+        for char, idx in zip(subs, tensor.indices):
+            char_to_index[char] = idx
+    out_indices_ordered = tuple(char_to_index[c] for c in output_part)
+
+    # Identify contracted characters (appear in multiple input tensors).
+    char_counts: dict[str, int] = Counter(input_part.replace(",", ""))
+    contracted_chars = {c for c, n in char_counts.items() if n >= 2}
+
+    # Infer the output target charge from input tensors.
+    # For U(1): output target = sum of input targets, since contracted legs
+    # have opposite flows and cancel.  This allows contracting tensors with
+    # non-identity targets (e.g. boundary MPS tensors targeting Sz != 0).
+    # We only count a tensor's target if ALL its blocks agree on the same
+    # value of sum(flow*q).  Mixed-charge tensors (e.g. operators that
+    # create/annihilate particles) contribute 0.  Iterating ``_block_keys``
+    # is equivalent to iterating ``.blocks`` keys but cheaper.
+    output_target: int | None = None
+    total_target = 0
+    for tensor in tensors:
+        if tensor._block_keys:
+            targets = set()
+            for key in tensor._block_keys:
+                t = sum(int(idx.flow) * int(q) for idx, q in zip(tensor.indices, key))
+                targets.add(t)
+            if len(targets) == 1:
+                total_target += targets.pop()
+    if total_target != 0:
+        output_target = total_target
+
+    # Precompute valid output keys as a set for O(1) lookup.
+    valid_output_set = set(
+        _compute_valid_blocks(out_indices_ordered, target=output_target)
+    )
+
+    contracted_chars_sorted = sorted(contracted_chars)
+    char_to_canonical_pos = {c: i for i, c in enumerate(contracted_chars_sorted)}
+
+    return (
+        input_subs,
+        output_part,
+        out_indices_ordered,
+        contracted_chars,
+        contracted_chars_sorted,
+        char_to_canonical_pos,
+        output_target,
+        valid_output_set,
+    )
+
+
+def _contract_symmetric_stacked(
+    tensors: Sequence[SymmetricTensor],
+    subscripts: str,
+    output_indices: tuple[TensorIndex, ...],
+    optimize: str = "auto",
+    backend: Any = None,
+    plan: Any = None,
+) -> SymmetricTensor | None:
+    """Even-D stacked block-sparse contraction (issue #566, P1b; seam A2).
+
+    Sources operands DIRECTLY from each tensor's contiguous ``_data`` buffer via
+    ``stacked_blocks()`` (one row-gather per shape-group) + ``jnp.take`` (one
+    op per operand), runs the contraction through the supplied ``backend`` (the
+    backend returns the canonical-ordered stacked output array — same shape
+    contract as ``stacked_execute``), then assembles the output
+    ``SymmetricTensor``.  It builds partial charge signatures from the STATIC
+    ``_block_keys`` — NOT ``.blocks`` / ``_get_block`` — so no per-block slicing
+    is emitted at trace time.
+
+    Scoped tightly (returns ``None`` to fall back to the per-block path):
+      * only 2-tensor contractions;
+      * only when EVERY input tensor is single-shape-group
+        (``len(set(t._block_shapes)) <= 1``) — the even-D case.
+
+    No Koszul signs are applied (matching the per-block path; planar networks
+    need none — see ``_contract_symmetric``).  Value and gradient match the
+    per-block path within the fp tier.
+
+    Args:
+        backend: a :class:`~tenax.contraction.blocksparse_backend.BlockSparseContractBackend`
+            whose ``execute`` produces the canonical stacked output array. When
+            ``None``, the default :class:`StackedJaxBackend` is used (legacy
+            direct-call behavior).
+        plan: a prebuilt :class:`BlockContractPlan` (the dispatcher builds it once
+            and reuses it for backend selection); built here if ``None``.
+
+    Returns the contracted ``SymmetricTensor``, or ``None`` to fall back.
+    """
+    # ``optimize`` is accepted for signature parity with the dispatcher and is
+    # unused here (the backend kernel takes no optimize argument).
+    del optimize
+
+    from tenax.contraction.blocksparse_backend import StackedJaxBackend
+    from tenax.contraction.blocksparse_plan import build_block_contract_plan
+    from tenax.core.stacked_tensor import StackedSymmetricTensor
+    from tenax.core.stacked_view import StackedView, StackGroup
+
+    # --- Backend-agnostic plan from STATIC metadata only (charge matching,
+    # valid-output filter, combo grouping, segment/accumulation structure,
+    # batched subscripts, output keys/shapes). None => out of scope -> fall back.
+    if plan is None:
+        plan = build_block_contract_plan(tensors, subscripts, output_indices)
+    if plan is None:
+        return None
+
+    if backend is None:
+        backend = StackedJaxBackend()
+
+    out_indices_ordered = plan.out_indices
+    output_target = plan.output_target
+
+    # --- Source operands from the contiguous _data buffer (one gather/group).
+    # If an operand already carries a cached StackedView (produced by an upstream
+    # stacked contraction), stacked_blocks() returns it with NO gather from
+    # _data — the chain persisted. Otherwise stacked_blocks() gathers from the
+    # flat _data buffer (chain interrupted upstream). The single shape-group is
+    # guaranteed by the plan's scope check.
+    operand_stacks: list[Any] = []
+    n_pos = len(tensors)
+    n_persisted = 0
+    for tensor in tensors:
+        if isinstance(tensor, StackedSymmetricTensor):
+            n_persisted += 1
+            _STACK_PERSIST["persisted_inputs"] += 1
+        else:
+            _STACK_PERSIST["gathered_inputs"] += 1
+        view = tensor.stacked_blocks()
+        (group,) = view.groups.values()
+        operand_stacks.append(group.array)
+
+    # Empty plan (no surviving blocks): assemble an empty tensor exactly as before.
+    if not plan.groups:
+        output_blocks: dict[BlockKey, Any] = {}
+        if output_target is not None:
+            return SymmetricTensor._from_blocks_unchecked(
+                output_blocks, out_indices_ordered
+            )
+        return SymmetricTensor(output_blocks, out_indices_ordered)
+
+    # --- Data-level execution through the selected backend. The backend returns
+    # the canonical-ordered stacked output array of shape
+    # (n_out_blocks, *out_block_shape); rows map to ``plan.out_block_keys``
+    # positionally. Backend-neutral: the assembly below is identical regardless
+    # of which backend produced ``out_stack``.
+    out_stack = backend.execute(operand_stacks, plan)
+
+    _STACK_FIRED["n"] += 1
+    _STACK_PERSIST["calls"] += 1
+    if n_persisted == n_pos:
+        _STACK_PERSIST["fully_persisted"] += 1
+
+    # Diagnostic sub-flag: TENAX_STACK_PERSIST_RETURN=0 falls back to the
+    # original _from_blocks_unchecked return (no persisting subclass). Isolates
+    # the persisting-return change from the batched-einsum core for debugging.
+    import os
+
+    _persist_return = os.environ.get(
+        "TENAX_STACK_PERSIST_RETURN", "1"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if not _persist_return:
+        out_blocks = {
+            plan.out_block_keys[i]: out_stack[i]
+            for i in range(len(plan.out_block_keys))
+        }
+        if output_target is not None:
+            return SymmetricTensor._from_blocks_unchecked(
+                out_blocks, out_indices_ordered
+            )
+        return SymmetricTensor(out_blocks, out_indices_ordered)
+
+    # --- Build the output as a PERSISTING StackedSymmetricTensor (#566 P1d).
+    # Keep the batched output array as the cached StackedView (lazy _data). The
+    # plan supplies canonical sorted-key block metadata; ``out_stack`` rows are
+    # already in that same canonical order, so it IS the canonical stacked array.
+    out_keys = plan.out_block_keys
+    out_shapes = plan.out_block_shapes
+    out_offsets = plan.out_block_offsets
+    total_size = plan.total_size
+    out_shape = out_shapes[0]
+
+    out_group = StackGroup(keys=out_keys, array=out_stack)
+    out_view = StackedView(
+        groups={out_shape: out_group}, indices=tuple(out_indices_ordered)
+    )
+    return StackedSymmetricTensor.from_stacked(
+        view=out_view,
+        indices=tuple(out_indices_ordered),
+        block_keys=out_keys,
+        block_shapes=out_shapes,
+        block_offsets=out_offsets,
+        total_size=total_size,
+        dtype=out_stack.dtype,
+    )
+
+
 def _contract_symmetric(
     tensors: Sequence[SymmetricTensor],
     subscripts: str,
@@ -407,47 +648,45 @@ def _contract_symmetric(
                 tensors[0], tensors[1], subscripts, output_indices
             )
 
-    # Parse subscripts: e.g., "ij,jk->ik" → inputs=["ij","jk"], output="ik"
-    input_part, output_part = subscripts.split("->")
-    input_subs = input_part.split(",")
+    # --- Backend seam: opt-in block-sparse contraction backend (issue #200) ---
+    # Build the STATIC plan once (None => out of even-D/2-tensor scope) and let
+    # select_backend pick a backend (or None => per-block). Precedence:
+    # TENAX_BLOCKSPARSE_BACKEND (stacked/cutensornet/perblock/auto) then the
+    # legacy TENAX_STACK_BLOCKSPARSE flag. With NO backend env set, no backend is
+    # selected and the per-block path below runs byte-identically to today.
+    from tenax.contraction.blocksparse_backend import _backend_opt_in, select_backend
 
-    # Map each character to the corresponding TensorIndex
-    char_to_index: dict[str, TensorIndex] = {}
-    for tensor, subs in zip(tensors, input_subs):
-        for char, idx in zip(subs, tensor.indices):
-            char_to_index[char] = idx
+    if _backend_opt_in():
+        from tenax.contraction.blocksparse_plan import build_block_contract_plan
 
-    # Build output_indices list in output_part order
-    out_indices_ordered = tuple(char_to_index[c] for c in output_part)
+        plan = build_block_contract_plan(tensors, subscripts, output_indices)
+        if plan is not None:
+            backend = select_backend(tensors, plan)
+            if backend is not None:
+                stacked_result = _contract_symmetric_stacked(
+                    tensors,
+                    subscripts,
+                    output_indices,
+                    optimize,
+                    backend=backend,
+                    plan=plan,
+                )
+                if stacked_result is not None:
+                    return stacked_result
 
-    # Identify contracted characters (appear in multiple input tensors)
-    char_counts: dict[str, int] = Counter(input_part.replace(",", ""))
-    contracted_chars = {c for c, n in char_counts.items() if n >= 2}
-
-    # Infer the output target charge from input tensors.
-    # For U(1): output target = sum of input targets, since contracted legs
-    # have opposite flows and cancel.  This allows contracting tensors with
-    # non-identity targets (e.g. boundary MPS tensors targeting Sz != 0).
-    # We only count a tensor's target if ALL its blocks agree on the same
-    # value of sum(flow*q).  Mixed-charge tensors (e.g. operators that
-    # create/annihilate particles) contribute 0.
-    output_target: int | None = None
-    total_target = 0
-    for tensor in tensors:
-        if tensor.blocks:
-            targets = set()
-            for key in tensor.blocks:
-                t = sum(int(idx.flow) * int(q) for idx, q in zip(tensor.indices, key))
-                targets.add(t)
-            if len(targets) == 1:
-                total_target += targets.pop()
-    if total_target != 0:
-        output_target = total_target
-
-    # Precompute valid output keys as a set for O(1) lookup
-    valid_output_set = set(
-        _compute_valid_blocks(out_indices_ordered, target=output_target)
-    )
+    # Prelude: parse subscripts + output index order + contracted chars +
+    # inferred output target charge + valid output set + canonical contracted
+    # positions.  Shared verbatim with the stacked path (issue #566).
+    (
+        input_subs,
+        output_part,
+        out_indices_ordered,
+        contracted_chars,
+        contracted_chars_sorted,
+        char_to_canonical_pos,
+        output_target,
+        valid_output_set,
+    ) = _parse_contraction_prelude(tensors, subscripts)
 
     # Fermionic sign convention (#555): the contractor does NOT auto-apply
     # Koszul signs from leg permutations.  Tenax's auto-tracking (the original
@@ -466,10 +705,8 @@ def _contract_symmetric(
     # carries.  Per-tensor partial sigs allow correct multi-input contraction
     # even when some pair of inputs shares no contracted labels (issue #553);
     # the previous full-sig intersection silently dropped to zero whenever
-    # two tensors' sig tuples had different lengths.
-    contracted_chars_sorted = sorted(contracted_chars)
-    char_to_canonical_pos = {c: i for i, c in enumerate(contracted_chars_sorted)}
-
+    # two tensors' sig tuples had different lengths.  ``contracted_chars_sorted``
+    # / ``char_to_canonical_pos`` come from the shared prelude above.
     tensor_partial_indices: list[
         tuple[list[tuple[int, int]], dict[tuple[int, ...], list[tuple[BlockKey, Any]]]]
     ] = []
@@ -551,7 +788,7 @@ def _contract_symmetric(
             tensor_partial_indices,
             input_subs,
             output_part,
-            input_part,
+            ",".join(input_subs),
             valid_output_set,
         )
         if output_target is not None:

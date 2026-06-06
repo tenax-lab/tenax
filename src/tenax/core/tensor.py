@@ -752,6 +752,44 @@ class SymmetricTensor(Tensor):
             size *= d
         return self._data[offset : offset + size].reshape(shape)
 
+    def stacked_blocks(self):
+        """Return a StackedView: blocks grouped by shape, one array per group."""
+        from tenax.core.stacked_view import build_stacked
+
+        return build_stacked(
+            self._data,
+            self._block_keys,
+            self._block_shapes,
+            self._block_offsets,
+            self._indices,
+        )
+
+    def from_stacked_blocks(self, view):
+        """Rebuild a SymmetricTensor from a StackedView (canonical sorted-key layout)."""
+        from tenax.core.stacked_view import scatter_stacked
+
+        if not self._block_keys:
+            total = 0
+        else:
+            last_shape = self._block_shapes[-1]
+            last_size = int(np.prod(last_shape)) if last_shape else 1
+            total = self._block_offsets[-1] + last_size
+        data = scatter_stacked(
+            view,
+            self._block_keys,
+            self._block_shapes,
+            self._block_offsets,
+            total,
+            self._data.dtype,
+        )
+        return SymmetricTensor._raw(
+            indices=self._indices,
+            data=data,
+            block_keys=self._block_keys,
+            block_shapes=self._block_shapes,
+            block_offsets=self._block_offsets,
+        )
+
     # --- Pytree interface ---
 
     def tree_flatten(
