@@ -118,10 +118,28 @@ TENAX_BLOCKSPARSE_BACKEND=perblock    uv run python examples/profile_ctm_ad_wall
 TENAX_BLOCKSPARSE_BACKEND=cutensornet uv run python examples/profile_ctm_ad_wall_566.py \
   --D 2 3 4 --sym fermionic --depth 8 --reps 3 --json profile_cutensornet.json
 ```
-Report `vg_cmp` (compile) + warm-step for both. Reference baselines (A100, per-block):
-compile D2/3/4 ≈ 206 / 2111 / 2379 s; warm step ≈ 4.5 / 5.5 / 9.5 s. **Targets:** compile collapses
-toward dense (~40-60 s, χ/D-flat) — the original ≥10×-at-D4 framing now applies to the kernel; warm
-step approaches dense (~0.5-2.3 s) — the #195/#200 tiny-kernel fix.
+Run **all three** backends at the **same χ** (use the profiler default χ-factor 3, matching the
+A100 stacked-vs-per-block run §C, so the numbers are apples-to-apples — do NOT override `--chi-factor`):
+
+```bash
+for be in perblock stacked cutensornet; do
+  TENAX_BLOCKSPARSE_BACKEND=$be uv run python examples/profile_ctm_ad_wall_566.py \
+    --D 2 4 --sym fermionic --depth 8 --reps 3 --json profile_$be.json
+done
+```
+
+Report `bwd_cmp` + `vg_cmp` (compile) **and** warm-step for all three. Measured A100 baselines to
+beat (fermionic, **χ = 3·D**, from §C of `profile_566_a100_summary.md`):
+
+| D=4, χ=12 | per-block | **stacked** (current best) | dense floor (χ=16) |
+|---|---|---|---|
+| `bwd_cmp` | 880 s | **546 s** | ~13 s |
+| `vg_cmp`  | 1418 s | **1061 s** | ~39 s |
+
+(Per-block at the higher χ=4·D is worse still: D=4 `vg_cmp` ≈ 2379 s, §A.) Warm-step baseline not yet
+measured for stacked/per-block — capture it in this same run. **Targets:** `bwd_cmp` collapses from
+the **546 s stacked baseline toward the ~13 s dense floor** (that ~42× residual is the remaining
+order-of-magnitude #200 must deliver); warm step approaches dense (#195/#200 tiny-kernel fix).
 
 ---
 
@@ -150,9 +168,14 @@ step approaches dense (~0.5-2.3 s) — the #195/#200 tiny-kernel fix.
 
 1. **Correctness:** `CuTensorNetBackend` value + grad == per-block within fp 1e-12, real AND
    complex128, ferm_D2/D4 (the `test_vjp_seam` pattern on GPU).
-2. **Compile:** fermionic `vg_cmp` at D=4 collapses toward dense (from ~2379 s — order-of-magnitude
-   reduction).
-3. **Runtime:** warm step approaches dense (#195 tiny-kernel launches eliminated).
+2. **Compile (the bar to beat):** fermionic `bwd_cmp` at D=4, χ=12 drops from the **stacked
+   baseline 546 s toward the ~13 s dense floor** (per-block is 880 s; stacked already banked −38%).
+   The remaining ~42× from stacked→dense is the order-of-magnitude #200 must deliver; beating only
+   the 546 s stacked number by a little is NOT success — the goal is minutes→seconds. Equivalently
+   `vg_cmp` 1061 s → toward dense ~39 s.
+3. **Runtime:** warm step approaches dense (#195 tiny-kernel launches eliminated). NB: the
+   stacked-vs-per-block warm-step is not yet measured — capture it in the same P-B4 run so
+   cuTensorNet's runtime has a stacked baseline too, not just per-block.
 
 If 1 holds but 2/3 disappoint, that's a real finding about cuTensorNet block-sparse overhead on this
 problem size — bring the numbers back before scaling to Pallas/TPU.
