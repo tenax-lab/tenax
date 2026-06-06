@@ -80,28 +80,59 @@ branch, keep `tests/stacked/` green, and it folds back cleanly.
 
 ## 4. Build order (de-risk the novel/GPU-specific parts first)
 
-**P-B0 — cuTensorNet FFI smoke (highest unknown).** Can you call cuTensorNet from JAX as a
-`custom_call`/FFI at all on this stack? Do a trivial *dense* pairwise contraction, forward only,
-GPU. This answers the riskiest question (FFI plumbing + library availability) before touching the
-seam. Mine `src/tenax/contraction/cutensor_blocksparse.py` (`contract_blocksparse`, `is_available`)
-for the cuTensorNet **calling pattern** — but note it is the **legacy, NON-seam-conformant** path
-(`TENAX_USE_CUTENSOR_BLOCKSPARSE`, eager, full-tensor `custom_vjp`, non-fermionic); **do not reuse
-it as the backend**, only as an API reference.
+**P-B0 — JAX↔GPU contraction bridge smoke. ✅ DONE (A100, commit `df1b92f` on branch
+`feat/cutensornet-backend-200`; `examples/probe_200_cutensornet_smoke.py`).** A dense `ij,jk->ik`
+routed through cupy's cuTENSOR inside one `jax.pure_callback` returns a JAX array under jit as
+**exactly 1 opaque op in the jaxpr**, f64 bit-exact, c128 8.88e-16. Plumbing notes: `pure_callback`
+needs `JAX_PLATFORMS=cuda,cpu` (cuda alone has no CPU device to stage host inputs) + `JAX_ENABLE_X64=1`;
+cuQuantum installed transiently (`cuquantum-cu13` + `nvmath-python` + `cupy-cuda13x`), **not yet in
+`pyproject`**. (`src/tenax/contraction/cutensor_blocksparse.py` remains a NON-seam-conformant API
+reference only — do not reuse as the backend.)
 
-**P-B1 — forward block-sparse kernel.** For the even-D double-layer plan (build it from
-`tests/stacked` ferm_D2/D4), feed `operand_stacks` + `plan` to cuTensorNet and produce the
-canonical stacked output. Two viable shapes: (a) cuTensorNet does the grouped block-sparse
-contraction natively; (b) you drive the per-`PlanGroup` batched contraction via its API and
-`segment_sum`-accumulate (mirror `stacked_execute`). Either way the **output must be the canonical
-stacked array**. **Validate VALUE** against `StackedJaxBackend().execute(operand_stacks, plan)` at
-fp tier (`assert_tiered(..., tier="fp")`, 1e-12), real + complex128.
+### Decision surfaced by P-B0: `pure_callback` vs `jax.ffi` (read before P-B1)
+P-B0 used the **callback** bridge (cheapest faithful route). It splits the two #200 goals:
+- **Compile (#566): callback likely WINS** — 1 op/contraction, so the per-block structural graph
+  (incl. the fixed-point backward) collapses. Host round-trip does not affect compile-graph size.
+- **Runtime (#195): callback likely LOSES (maybe badly)** — `pure_callback` does a
+  device→host→device round-trip *per contraction*, and a CTM sweep is ~60–97 contractions ×
+  many iterations. That is the opposite of the tiny-kernel fix. The on-device win needs
+  **`jax.ffi.ffi_call`** (a C++/CUDA handler calling cuTensorNet on the device buffers, no transfer).
+
+**Strategy:** use `pure_callback` as the **correctness + compile-win scaffold** through P-B1→P-B3;
+let the **P-B4 warm-step measurement be the go/no-go for building the `jax.ffi` on-device handler**
+(almost certainly needed for runtime — but measure it, don't assume). Keep the backend's `execute`
+backend-shaped so swapping callback→FFI later is internal to `CuTensorNetBackend.execute`.
+
+**P-B1 — forward block-sparse kernel (still callback).** Build a `CuTensorNetBackend.execute(
+operand_stacks, plan)` that produces the **canonical stacked output array** (rows in
+`plan.out_block_keys` order). Generalize P-B0's callback from dense `ij,jk->ik` to the block-sparse
+forward: for each `PlanGroup`, gather the operand rows (`group.operand_rows`), run the batched
+group contraction via cuTENSOR inside ONE `pure_callback` (or one per group — fewer is better),
+and accumulate by `segment_ids`/`num_segments` then reorder by `canonical_perm` — i.e. the same
+shape as `stacked_execute` (`blocksparse_plan.py`), but the einsum runs on the GPU kernel. The plan
+is now self-contained (commit `34347b2`): everything you need is on it — `subscripts`,
+`batched_subscripts`, `groups`, `out_block_*`, and `operand_*` metadata.
+Validate, even-D `ferm_D2`/`ferm_D4`, real + complex128:
+1. **VALUE** == `StackedJaxBackend().execute(operand_stacks, plan)` at fp tier
+   (`tests/stacked/_harness.py::assert_tiered(..., tier="fp")`, 1e-12) — `StackedJaxBackend` is the
+   correctness oracle, identical block structure.
+2. **OP-COUNT** (the compile-collapse premise, on a REAL block-sparse contraction not just dense):
+   `len(jax.make_jaxpr(lambda s: backend.execute(s, plan))(operand_stacks).jaxpr.eqns)` should be
+   O(#groups) callback ops — NOT O(#blocks) structural ops. Confirm it's a handful, independent of
+   block count. This is the direct evidence the kernel route fixes #566.
+Forward + value/op-count only here; VJP is P-B2.
 
 **P-B2 — wrap in `jax.custom_vjp` + reuse `backward_contraction`.** Copy
-`MockFFIBackend._execute_opaque` (`blocksparse_backend.py:154-196`) verbatim in structure: forward
-= your cuTensorNet `execute`; `opaque_fwd` residual = operand stacks only (no forward intermediates
-→ autodiff can't leak); `opaque_bwd` = `backward_contraction(subscripts, fwd_operands,
-out_cotangent_stack, plan, wrt)` for each operand. Register the backend in `_select_cutensornet`
-(`blocksparse_backend.py:266`), guarded by `available()`.
+`MockFFIBackend._execute_opaque` verbatim in structure (`blocksparse_backend.py`): forward = your
+cuTensorNet `execute`; `opaque_fwd` residual = operand stacks only (no forward intermediates →
+autodiff can't leak); `opaque_bwd` = `backward_contraction(operand_stacks_res, out_cotangent_stack,
+plan, wrt)` for each operand. **NB (post-`34347b2`):** the signature is now plan-sourced —
+`backward_contraction(operand_stacks, out_cotangent_stack, plan, wrt)`, NO `subscripts`/`fwd_operands`
+args (it reads `plan.subscripts` + `plan.operand_*` and rebuilds operands itself). So the backend
+needs nothing but `(operand_stacks, plan)` — the protocol gap is already closed. The backward is
+itself a contraction, so under the **callback** route it becomes another `pure_callback` (the
+transposed contraction on GPU); under **FFI** it's another `ffi_call`. Register in
+`_select_cutensornet`, guarded by `available()` (cupy/cuQuantum import check).
 
 **P-B3 — validate against the spine.** Swap `MockFFIBackend` → `CuTensorNetBackend` in the
 `tests/stacked/test_vjp_seam.py` pattern: assert `value` and `jax.grad` match per-block AND
