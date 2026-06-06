@@ -134,12 +134,17 @@ itself a contraction, so under the **callback** route it becomes another `pure_c
 transposed contraction on GPU); under **FFI** it's another `ffi_call`. Register in
 `_select_cutensornet`, guarded by `available()` (cupy/cuQuantum import check).
 
-**P-B3 — validate against the spine.** Swap `MockFFIBackend` → `CuTensorNetBackend` in the
-`tests/stacked/test_vjp_seam.py` pattern: assert `value` and `jax.grad` match per-block AND
-`StackedJaxBackend`, **real and complex128**, ferm_D2/D4, fp tier. Run the whole
-`tests/stacked/` on GPU. (Note: GPU `segment_sum` reduction order can drift ~5e-7 — that lives in
-the bounded-fp tier, not bit-identical; the energy/grad assertions should still hold at 1e-12 in
-f64. Never compare raw SVD factors — N/A here, contraction only.)
+**P-B3 — validate against the spine. ✅ DONE (A100, `tests/stacked/test_vjp_seam_cutensor.py`).**
+Swapped `MockFFIBackend` → `CuTensorNetBackend` in the `tests/stacked/test_vjp_seam.py` pattern:
+`value` and `jax.grad` match per-block AND `StackedJaxBackend`, **real and complex128**, ferm_D2/D4,
+fp 1e-12 (incl. opacity — `stop_gradient` through the cuTENSOR forward leaves the grad unchanged).
+Whole `tests/stacked/` runs green on GPU (59 passed, `JAX_PLATFORMS=cuda,cpu`) and on CPU (the
+8 cuTENSOR tests skip via `cutensor_available()`). Also updated the now-stale dispatch test to
+`test_select_cutensornet_resolves_by_availability`: with P-B2 registered, `cutensornet` resolves to
+a real `CuTensorNetBackend` where available, else `None` (it was asserting `None` unconditionally).
+(Note: GPU `segment_sum` reduction order can drift ~5e-7 — that lives in the bounded-fp tier, not
+bit-identical; the grad assertions still hold at 1e-12 in f64 here. Never compare raw SVD factors —
+N/A here, contraction only.)
 
 **P-B4 — THE MEASUREMENT (the point of #200).**
 ```bash
