@@ -73,6 +73,14 @@ class BlockContractPlan:
         groups: per input-shape-group :class:`PlanGroup` tuple.
         output_target: inferred output target charge (``int``) or ``None``;
             drives ``_from_blocks_unchecked`` vs ``SymmetricTensor`` assembly.
+        subscripts: the FORWARD einsum subscripts (``subA,subB->subO``). Carried
+            so a backend's hand-written VJP can rebuild the backward contraction
+            from the plan alone — no construction-time side-channel.
+        operand_indices: per forward operand (in operand order), that operand's
+            ``.indices`` tuple.
+        operand_block_keys: per forward operand, its ``_block_keys``.
+        operand_block_shapes: per forward operand, its ``_block_shapes``.
+        operand_block_offsets: per forward operand, its ``_block_offsets``.
     """
 
     out_indices: tuple
@@ -83,6 +91,11 @@ class BlockContractPlan:
     batched_subscripts: str
     groups: tuple
     output_target: object
+    subscripts: str
+    operand_indices: tuple
+    operand_block_keys: tuple
+    operand_block_shapes: tuple
+    operand_block_offsets: tuple
 
 
 def build_block_contract_plan(
@@ -112,6 +125,14 @@ def build_block_contract_plan(
             return None
         if not t._block_keys:
             return None
+
+    # Per-operand block metadata carried on the plan so any backend's
+    # hand-written VJP can rebuild the forward operand(s) from
+    # ``execute(operand_stacks, plan)`` alone (no construction-time side-channel).
+    operand_indices = tuple(t.indices for t in tensors)
+    operand_block_keys = tuple(tuple(t._block_keys) for t in tensors)
+    operand_block_shapes = tuple(tuple(t._block_shapes) for t in tensors)
+    operand_block_offsets = tuple(tuple(t._block_offsets) for t in tensors)
 
     # --- Prelude: shared with the per-block path (parse + targets + valid set).
     (
@@ -232,6 +253,11 @@ def build_block_contract_plan(
             batched_subscripts=batched_subscripts,
             groups=(),
             output_target=output_target,
+            subscripts=subscripts,
+            operand_indices=operand_indices,
+            operand_block_keys=operand_block_keys,
+            operand_block_shapes=operand_block_shapes,
+            operand_block_offsets=operand_block_offsets,
         )
 
     # Single shape-group on both sides -> exactly one input shape-sig group.
@@ -287,6 +313,11 @@ def build_block_contract_plan(
         batched_subscripts=batched_subscripts,
         groups=(group,),
         output_target=output_target,
+        subscripts=subscripts,
+        operand_indices=operand_indices,
+        operand_block_keys=operand_block_keys,
+        operand_block_shapes=operand_block_shapes,
+        operand_block_offsets=operand_block_offsets,
     )
 
 

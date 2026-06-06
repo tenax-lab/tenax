@@ -99,11 +99,24 @@ def _backward_subscripts(subscripts: str, wrt: int) -> str:
     raise ValueError(f"wrt must be 0 or 1, got {wrt}")
 
 
+def _rebuild_operand(plan: BlockContractPlan, pos: int, stack: Any) -> SymmetricTensor:
+    """Rebuild forward operand ``pos`` as a SymmetricTensor from its stacked array.
+
+    Sources the static block metadata (indices/keys) from the PLAN itself
+    (``plan.operand_indices`` / ``plan.operand_block_keys``) — NOT from a
+    construction-time side-channel — so any backend reconstructs the forward
+    operand from ``execute(operand_stacks, plan)`` alone.
+    """
+    indices = plan.operand_indices[pos]
+    keys = plan.operand_block_keys[pos]
+    blocks = {keys[i]: stack[i] for i in range(len(keys))}
+    return SymmetricTensor._from_blocks_unchecked(blocks, indices)
+
+
 def backward_contraction(
-    subscripts: str,
-    fwd_operands: Sequence[SymmetricTensor],
+    operand_stacks: Sequence[Any],
     out_cotangent_stack: Any,
-    fwd_plan: BlockContractPlan,
+    plan: BlockContractPlan,
     wrt: int,
 ) -> Any:
     """Cotangent stack for forward operand ``wrt`` via the transposed plan.
@@ -112,14 +125,21 @@ def backward_contraction(
     backward contraction (cotangent paired with the other forward operand) —
     NOT a bespoke charge matcher — so the same machinery serves every backend.
 
+    Self-contained: the FORWARD subscripts and per-operand block metadata are
+    read straight off ``plan`` (``plan.subscripts`` / ``plan.operand_*``); the
+    forward operand(s) are rebuilt from those + the rows of ``operand_stacks``.
+    A backend hands in ONLY ``operand_stacks`` + ``plan`` (the residual it
+    already carries) — no construction-time side-channel.
+
     Args:
-        subscripts: the FORWARD einsum subscripts ``subA,subB->subO``.
-        fwd_operands: the two forward operand SymmetricTensors ``(A, B)``.
+        operand_stacks: per forward operand, its stacked block array
+            (``(n_blocks, *block_shape)``, rows aligned with the operand's
+            ``plan.operand_block_keys`` order).
         out_cotangent_stack: cotangent for the forward output, in the SAME
             canonical stacked layout the forward backend returned
             (``(n_out_blocks, *out_block_shape)``, rows aligned with
-            ``fwd_plan.out_block_keys``).
-        fwd_plan: the forward :class:`BlockContractPlan`.
+            ``plan.out_block_keys``).
+        plan: the forward :class:`BlockContractPlan`.
         wrt: which forward operand to differentiate w.r.t. (0 or 1).
 
     Returns:
@@ -128,12 +148,15 @@ def backward_contraction(
         into the operand's flat ``_data`` buffer), or ``None`` if the backward
         contraction has no surviving blocks (zero cotangent).
     """
+    fwd_operands = [
+        _rebuild_operand(plan, i, operand_stacks[i]) for i in range(len(operand_stacks))
+    ]
     if len(fwd_operands) != 2:
         raise ValueError("transposed-plan backward supports 2-operand forward only")
 
-    cot = _cotangent_tensor(fwd_plan, out_cotangent_stack)
+    cot = _cotangent_tensor(plan, out_cotangent_stack)
     other = fwd_operands[1 - wrt]
-    bwd_subs = _backward_subscripts(subscripts, wrt)
+    bwd_subs = _backward_subscripts(plan.subscripts, wrt)
 
     # Operand order MUST match bwd_subs: wrt==0 -> (cot, other); wrt==1 -> (other, cot).
     if wrt == 0:

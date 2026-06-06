@@ -111,27 +111,22 @@ class MockFFIBackend:
     through that — it rebuilds the cotangent via the SAME plan machinery the
     forward used, exactly as a cuTensorNet VJP author must.
 
-    Because the backward needs the FORWARD ``subscripts`` and per-operand block
-    metadata (keys/shapes/offsets/indices) — which the
-    :class:`BlockSparseContractBackend` protocol's ``execute(operand_stacks,
-    plan)`` signature does NOT carry — those static facts are captured at
-    construction (the contractor/test that builds the plan also has them). This
-    keeps the differentiable surface to the operand stacks only.
+    The backward needs the FORWARD ``subscripts`` and per-operand block metadata
+    (keys/indices) to rebuild the forward operand(s) — and as of the Phase-B
+    seam refinement (#200) those facts ride on the PLAN itself
+    (``plan.subscripts`` / ``plan.operand_*``). So this backend captures NOTHING
+    at construction: ``execute(operand_stacks, plan)`` + the residual operand
+    stacks are all the hand-written backward consumes. The protocol gap flagged
+    in A3 review is closed; a real ``CuTensorNetBackend`` slots in the same way.
 
     Args:
-        subscripts: forward einsum subscripts ``subA,subB->subO``.
-        operand_meta: per forward operand, the static
-            ``(indices, block_keys, block_shapes, block_offsets)`` needed to
-            rebuild a lightweight ``SymmetricTensor`` for the backward.
         bwd_calls: optional shared counter ``dict`` whose ``["n"]`` is bumped
             every time the hand-written backward fires (opacity probe).
     """
 
     name = "mockffi"
 
-    def __init__(self, subscripts, operand_meta, bwd_calls=None):
-        self._subscripts = subscripts
-        self._operand_meta = operand_meta
+    def __init__(self, bwd_calls=None):
         self._bwd_calls = bwd_calls
 
     def available(self) -> bool:
@@ -140,22 +135,14 @@ class MockFFIBackend:
     def supports(self, tensors: Sequence[Any], plan: BlockContractPlan) -> bool:
         return True
 
-    def _rebuild_operand(self, pos: int, stack: Any) -> Any:
-        """Rebuild forward operand ``pos`` as a SymmetricTensor from its stack."""
-        from tenax.core.tensor import SymmetricTensor
-
-        indices, keys, shapes, offsets = self._operand_meta[pos]
-        blocks = {keys[i]: stack[i] for i in range(len(keys))}
-        return SymmetricTensor._from_blocks_unchecked(blocks, indices)
-
     def execute(self, operand_stacks: Sequence[Any], plan: BlockContractPlan) -> Any:
         return self._execute_opaque(tuple(operand_stacks), plan)
 
     def _execute_opaque(self, operand_stacks, plan):
         """``jax.custom_vjp``-wrapped opaque kernel (forward + hand-written bwd).
 
-        ``plan``, ``subscripts`` and ``operand_meta`` are static (closed over /
-        nondiff); only ``operand_stacks`` is differentiated.
+        ``plan`` is static (closed over / nondiff) and self-contained for the
+        backward; only ``operand_stacks`` is differentiated.
         """
         import jax
 
@@ -174,19 +161,14 @@ class MockFFIBackend:
         def opaque_bwd(operand_stacks_res, out_cotangent_stack):
             from tenax.contraction.blocksparse_vjp import backward_contraction
 
-            fwd_operands = [
-                self._rebuild_operand(i, operand_stacks_res[i])
-                for i in range(len(operand_stacks_res))
-            ]
             grads = tuple(
                 backward_contraction(
-                    self._subscripts,
-                    fwd_operands,
+                    operand_stacks_res,
                     out_cotangent_stack,
                     plan,
                     wrt,
                 )
-                for wrt in range(len(fwd_operands))
+                for wrt in range(len(operand_stacks_res))
             )
             if self._bwd_calls is not None:
                 self._bwd_calls["n"] += 1

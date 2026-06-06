@@ -36,12 +36,6 @@ def _bra_from(A):
     return A.bar().relabels({"u": "U", "d": "D", "l": "L", "r": "R"})
 
 
-def _operand_meta(tensors):
-    return tuple(
-        (t.indices, t._block_keys, t._block_shapes, t._block_offsets) for t in tensors
-    )
-
-
 def _stack_of(t):
     view = t.stacked_blocks()
     (group,) = view.groups.values()
@@ -63,7 +57,7 @@ def test_vjp_seam_value_triple_equivalence(name):
     assert ref._data.size > 1, "double-layer collapsed to a scalar"
 
     stacked = StackedJaxBackend().execute(stacks, plan)
-    mock = MockFFIBackend(subs, _operand_meta([A, Abar])).execute(stacks, plan)
+    mock = MockFFIBackend().execute(stacks, plan)
 
     # Stacked / mock are canonical-row arrays aligned with plan.out_block_keys.
     assert plan.out_block_keys == ref._block_keys
@@ -128,7 +122,7 @@ def test_vjp_seam_grad_triple_equivalence(name):
 
     gA_stacked, gB_stacked = jax.grad(loss_stacked, argnums=(0, 1))(sA, sB)
 
-    backend = MockFFIBackend(subs, _operand_meta([A0, Abar0]))
+    backend = MockFFIBackend()
 
     def loss_mock(sA, sB):
         out = backend.execute([sA, sB], plan)
@@ -175,7 +169,7 @@ def test_vjp_seam_opacity_counter():
     sB = _stack_of(Abar0)
 
     counter = {"n": 0}
-    backend = MockFFIBackend(subs, _operand_meta([A0, Abar0]), bwd_calls=counter)
+    backend = MockFFIBackend(bwd_calls=counter)
 
     def loss(sA, sB):
         return jnp.sum(backend.execute([sA, sB], plan) ** 2)
@@ -185,8 +179,8 @@ def test_vjp_seam_opacity_counter():
 
     out = backend.execute([sA, sB], plan)
     gO = 2.0 * out  # cotangent of sum(out**2)
-    gA_direct = backward_contraction(subs, [A0, Abar0], gO, plan, 0)
-    gB_direct = backward_contraction(subs, [A0, Abar0], gO, plan, 1)
+    gA_direct = backward_contraction([sA, sB], gO, plan, 0)
+    gB_direct = backward_contraction([sA, sB], gO, plan, 1)
     assert_tiered(g[0], gA_direct, tier="fp")
     assert_tiered(g[1], gB_direct, tier="fp")
 
@@ -204,13 +198,12 @@ def test_vjp_seam_opacity_stop_gradient_forward():
     Abar0 = _bra_from(A0)
     subs, out_indices = _labels_to_subscripts([A0, Abar0])
     plan = build_block_contract_plan([A0, Abar0], subs, out_indices)
-    meta = _operand_meta([A0, Abar0])
 
     sA = _stack_of(A0)
     sB = _stack_of(Abar0)
 
     # Normal opaque backend.
-    backend = MockFFIBackend(subs, meta)
+    backend = MockFFIBackend()
 
     # Opaque backend whose forward kernel is stop_gradient-ed (a stricter black
     # box). custom_vjp's bwd is unaffected; the value path is identical.
@@ -230,7 +223,7 @@ def test_vjp_seam_opacity_stop_gradient_forward():
             finally:
                 _m.stacked_execute = saved
 
-    backend_sg = _StopGradFwdMock(subs, meta)
+    backend_sg = _StopGradFwdMock()
 
     def make_loss(b):
         def loss(sA, sB):
@@ -311,7 +304,7 @@ def test_vjp_seam_grad_complex128_triple_equivalence():
     gA_stacked, gB_stacked = jax.grad(loss_stacked, argnums=(0, 1))(sA, sB)
 
     # --- MockFFIBackend hand-written transposed-plan VJP.
-    backend = MockFFIBackend(subs, _operand_meta([A, B]))
+    backend = MockFFIBackend()
 
     def loss_mock(a, b):
         return real_loss(backend.execute([a, b], plan))
@@ -352,7 +345,7 @@ def test_vjp_seam_two_distinct_operands():
 
     gA_ref, gB_ref = jax.grad(loss_stacked, argnums=(0, 1))(sA, sB)
 
-    backend = MockFFIBackend(subs, _operand_meta([A, B]))
+    backend = MockFFIBackend()
 
     def loss_mock(sA, sB):
         return jnp.sum(backend.execute([sA, sB], plan) ** 2)
