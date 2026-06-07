@@ -146,7 +146,16 @@ a real `CuTensorNetBackend` where available, else `None` (it was asserting `None
 bit-identical; the grad assertions still hold at 1e-12 in f64 here. Never compare raw SVD factors —
 N/A here, contraction only.)
 
-**P-B4 — THE MEASUREMENT (the point of #200).**
+**P-B4 — THE MEASUREMENT (the point of #200). ✅ DONE (A100, 2026-06-07) — VERDICT: NO-GO.**
+cuTensorNet is **correct** but does **not** move the compile wall. At the D=4/χ=12 bar:
+`cutensornet` `bwd_cmp` 561.5 s vs `stacked` 550.1 s (**1.02×**, target was →~13 s dense floor)
+and `vg_cmp` 1046.7 s vs 1066.1 s (0.98×); warm-step 40.4 s vs 31.3 s (**1.29× worse**). The
+dominant compile `_jit_fused_fixed_point_bwd` is **548.7 s (cutensornet) vs 548.9 s (stacked)** —
+backend-invariant: the wall is the implicit-diff backward (block-sparse SVD/eigh/projector VJPs),
+NOT the contraction. **P-B5 (FFI) is therefore a NO-GO** (it targets the contraction transport).
+Pivot to **#570** (large-χ block-sparse SVD/eigh VJP). Full write-up + raw data:
+`2026-06-07-cutensornet-pb4-finding-nogo.md` (+ `pb4_results/`). Original P-B4 plan below (executed).
+
 ```bash
 # baseline (per-block) vs cuTensorNet, fermionic, A100, x64, implicit/fixed_point
 TENAX_BLOCKSPARSE_BACKEND=perblock    uv run python examples/profile_ctm_ad_wall_566.py \
