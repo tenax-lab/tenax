@@ -1,0 +1,34 @@
+{
+  "platform": "gpu",
+  "device_kind": "NVIDIA A100-SXM4-80GB",
+  "x64": true,
+  "syms": [
+    "fermionic"
+  ],
+  "depths": [
+    8
+  ],
+  "explicit": false,
+  "rows": [
+    {
+      "sym": "fermionic",
+      "D": 2,
+      "chi": 6,
+      "depth": 8,
+      "path": "implicit",
+      "n_blocks": 16,
+      "fwd_wall_s": 85.0574619686231,
+      "fwd_compile_s": 49.900037284999996,
+      "fwd_n_compiles": 310,
+      "vg_wall_s": 236.7909769276157,
+      "vg_compile_s": 149.66977811200002,
+      "vg_n_compiles": 325,
+      "bwd_compile_s_est": 99.76974082700002,
+      "top_compile_name": "jit(_jit_fused_fixed_point_bwd)",
+      "top_compile_s": 91.180354118,
+      "warm_step_s": 26.693113181740046,
+      "energy": -0.20308407890652988,
+      "grad_finite": true
+    }
+  ]
+}

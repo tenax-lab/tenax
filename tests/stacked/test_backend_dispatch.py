@@ -6,8 +6,10 @@ legacy ``TENAX_STACK_BLOCKSPARSE`` flag. With NO backend env set the default is
 ``None`` (per-block, byte-identical to today). The pure-JAX
 :class:`StackedJaxBackend` must fire exactly as the legacy stacked path did, and
 its value+gradient must match the per-block path within the fp tier. The
-``cutensornet`` env value must be ACCEPTED (no error) and resolve to ``None`` until
-Task B registers a real backend.
+``cutensornet`` env value resolves to a
+:class:`~tenax.contraction.blocksparse_cutensor.CuTensorNetBackend` where it is
+``available()`` (CUDA + cuTENSOR present; Phase B / P-B2 registered it) and to
+``None`` otherwise — accepted without error on every platform.
 """
 
 import jax
@@ -69,12 +71,29 @@ def test_select_stacked_returns_stacked_backend(monkeypatch):
     assert backend.name == "stacked"
 
 
-def test_select_cutensornet_accepted_returns_none(monkeypatch):
+def test_select_cutensornet_resolves_by_availability(monkeypatch):
+    """``cutensornet`` -> CuTensorNetBackend where available, else None (no error).
+
+    Phase B (P-B2) registered the GPU backend, so on a CUDA+cuTENSOR host this
+    resolves to a real :class:`CuTensorNetBackend`; on a CPU host ``available()``
+    is ``False`` and selection falls back to ``None`` (per-block) — accepted
+    without error on every platform.
+    """
+    from tenax.contraction.blocksparse_cutensor import (
+        CuTensorNetBackend,
+        cutensor_available,
+    )
+
     tensors, plan = _make_plan()
     _clear_env(monkeypatch)
     monkeypatch.setenv("TENAX_BLOCKSPARSE_BACKEND", "cutensornet")
-    # Accepted (no error), resolves to None until Task B registers a backend.
-    assert select_backend(tensors, plan) is None
+    backend = select_backend(tensors, plan)
+    if cutensor_available():
+        assert isinstance(backend, CuTensorNetBackend)
+        assert isinstance(backend, BlockSparseContractBackend)
+        assert backend.name == "cutensornet"
+    else:
+        assert backend is None
 
 
 def test_select_legacy_flag_returns_stacked_backend(monkeypatch):

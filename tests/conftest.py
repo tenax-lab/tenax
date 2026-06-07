@@ -76,6 +76,7 @@ _FILE_MARKERS = {
     "test_stacked_decomp.py": "core",
     "test_backend_dispatch.py": "core",
     "test_vjp_seam.py": "core",
+    "test_vjp_seam_cutensor.py": "core",
     "test_stacked_tensor_dtype.py": "core",
 }
 

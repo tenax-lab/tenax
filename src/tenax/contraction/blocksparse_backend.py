@@ -250,8 +250,16 @@ def _select_cutensornet(
 ) -> BlockSparseContractBackend | None:
     """Resolve the cuTensorNet backend, or ``None`` if not registered/usable.
 
-    Task B registers a real backend here; until then this returns ``None`` so the
-    ``cutensornet`` env value is accepted without error and falls back to the
-    per-block path.
+    The GPU :class:`~tenax.contraction.blocksparse_cutensor.CuTensorNetBackend`
+    (Phase B) is selected iff it is ``available()`` (CUDA present + cuTENSOR /
+    cuQuantum importable) and ``supports`` the plan. On a non-GPU host (or without
+    cuQuantum installed) ``available()`` is ``False`` and this returns ``None``, so
+    the ``cutensornet`` env value is accepted without error and falls back to the
+    per-block path. Imported lazily so non-GPU environments never import cupy.
     """
+    from tenax.contraction.blocksparse_cutensor import CuTensorNetBackend
+
+    backend = CuTensorNetBackend()
+    if backend.available() and backend.supports(tensors, plan):
+        return backend
     return None
