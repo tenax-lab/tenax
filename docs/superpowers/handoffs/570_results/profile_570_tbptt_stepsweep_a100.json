@@ -1,0 +1,65 @@
+{
+  "platform": "gpu",
+  "device_kind": "NVIDIA A100-SXM4-80GB",
+  "mode": "steps_sweep",
+  "D": 2,
+  "chi": 12,
+  "n_blocks": 16,
+  "total_sweeps": 12,
+  "impl_iter": 12,
+  "steps_list": [
+    1,
+    2,
+    4,
+    8
+  ],
+  "E_impl": -0.20320401511512892,
+  "impl_compile_s": 283.76484179399995,
+  "impl_n_compiles": 236,
+  "rows": [
+    {
+      "S": 1,
+      "warmup": 11,
+      "energy": -0.20273384560957997,
+      "compile_s": 249.65257859500022,
+      "n_compiles": 1254,
+      "compile_vs_impl": 0.8797868580750979,
+      "relerr_vs_impl": 0.033758029582082016,
+      "cos_vs_impl": 0.9994441248722848,
+      "grad_finite": true
+    },
+    {
+      "S": 2,
+      "warmup": 10,
+      "energy": -0.20273384560957997,
+      "compile_s": 360.54989338200016,
+      "n_compiles": 1257,
+      "compile_vs_impl": 1.2705939576632683,
+      "relerr_vs_impl": 0.025397303212332044,
+      "cos_vs_impl": 0.999678695071605,
+      "grad_finite": true
+    },
+    {
+      "S": 4,
+      "warmup": 8,
+      "energy": -0.20273384560957997,
+      "compile_s": 361.3996770480002,
+      "n_compiles": 1257,
+      "compile_vs_impl": 1.27358863332719,
+      "relerr_vs_impl": 0.024446887464364953,
+      "cos_vs_impl": 0.9997014865008934,
+      "grad_finite": true
+    },
+    {
+      "S": 8,
+      "warmup": 4,
+      "energy": -0.20273384560957997,
+      "compile_s": 363.0855076359999,
+      "n_compiles": 1257,
+      "compile_vs_impl": 1.2795295757545029,
+      "relerr_vs_impl": 0.024439065760749307,
+      "cos_vs_impl": 0.9997016556192266,
+      "grad_finite": true
+    }
+  ]
+}
