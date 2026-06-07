@@ -109,6 +109,54 @@ Two caveats the data makes explicit:
   (#572, default-off). Worth re-evaluating specifically for the SVD term now that we
   know it is the χ driver.
 
+## Follow-up: is the QR/eigh lever real? (the #570 premise)
+
+Two facts complicate the obvious "swap SVD→QR" plan:
+
+1. **The compile-dominant path is SVD-hardcoded.** `_ctm_tensor_projector_2x2.py`
+   (the symmetric single-site projector that `_make_jit_ctm_step` differentiates)
+   has **no `projector_method` parameter** — it always uses the symmetric SVD
+   (`_gauge_fixed_svd` / `_compute_2x2_projector_symmetric`). Passing
+   `projector_method="eigh"/"qr"` to the step is **silently ignored** there (the
+   attribution is byte-identical svd vs eigh). `projector_method` only affects the
+   *label-based* `_ctm_projector.py`, where moreover "qr" is itself eigh-relabeled
+   (`_qr_projector_symmetric` docstring: "identical to eigh path"). So #570's QR
+   lever is **not a config flip — it must be implemented** in the 2×2 symmetric
+   path.
+
+2. **Isolated decomposition-VJP cost** (`examples/probe_decomp_vjp_cost_570.py`,
+   backward jaxpr ops on a dense n×n matrix, k = n/2):
+
+   | n | svd_prod | svd_plain | qr | eigh_prod |
+   |---:|---:|---:|---:|---:|
+   | 8 | 261 | 90 | 99 | 113 |
+   | 16 | 261 | 90 | 99 | 113 |
+   | 32 | 261 | 90 | 99 | 113 |
+   | 64 | **261** | 90 | 99 | 113 |
+
+   - **Per-decomposition VJP op count is FLAT in n.** Confirms the real backward's
+     χ-scaling is **per-sector multiplicity** (more sectors at larger χ), NOT
+     per-sector matrix size. A cheaper per-sector decomposition lowers the
+     *constant*, not the *scaling*.
+   - **Production SVD VJP (261) is ~2.6× QR (99) and ~2.3× eigh (113).** The
+     gauge/Lorentzian degeneracy machinery alone triples plain SVD (90→261); QR
+     avoids the `1/(sᵢ²−sⱼ²)` degeneracy backward entirely.
+
+### Verdict for #570
+- **QR projector = ~2.6× constant-factor win** on the dominant svd_vjp term
+  (61% → ~24% of the backward; ≈38% fewer total backward ops, plausibly more in
+  compile *time* since compile is super-linear in op count). **Worth doing, but
+  not the order-of-magnitude alone**, and it requires implementing a QR projector
+  in `_ctm_tensor_projector_2x2.py` (caveat: a production QR projector still needs
+  per-iteration gauge stabilization, so the real ratio is a bit under 2.6×).
+- **The χ-scaling is untouched by QR** (per-sector emission persists). Killing it
+  needs **batching the per-sector decompositions** (the gated `TENAX_BATCH_BLOCKSPARSE`
+  batched-SVD #572, worth re-evaluating now that the SVD term is the confirmed χ
+  driver) and/or **truncated backprop** (shrinks the differentiated depth).
+- **Strongest #570 program:** QR-or-cheaper-SVD-VJP (constant) × batched per-sector
+  decomposition (scaling) × truncated backprop (depth). Each is independently
+  CPU-prototypable; the compile-time payoff is the A100 benchmark.
+
 ## Reproduce
 
 ```bash
@@ -118,4 +166,9 @@ JAX_PLATFORMS=cpu uv run python examples/probe_bwd_subop_attribution_570.py \
     --mode buckets --D 2 --chi 4 6 8 12 16 24 --full
 JAX_PLATFORMS=cpu uv run python examples/probe_bwd_subop_attribution_570.py \
     --mode buckets --D 4 --chi 8 12 16 --full
+# projector knob (currently a no-op on the SVD-hardcoded 2x2 path — see above):
+JAX_PLATFORMS=cpu uv run python examples/probe_bwd_subop_attribution_570.py \
+    --mode raw --D 2 --chi 6 --full --projector eigh
+# isolated decomposition-VJP cost (SVD vs QR vs eigh):
+JAX_PLATFORMS=cpu uv run python examples/probe_decomp_vjp_cost_570.py --n 8 16 32 64
 ```

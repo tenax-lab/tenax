@@ -68,8 +68,14 @@ def make_site(D: int, seed: int = 42):
     )
 
 
-def backward_vjp_jaxprs(A, chi: int, *, full: bool):
-    """Return the fused-backward VJP jaxpr(s): env-sweep VJP (+ params-sweep)."""
+def backward_vjp_jaxprs(A, chi: int, *, full: bool, projector: str = "svd"):
+    """Return the fused-backward VJP jaxpr(s): env-sweep VJP (+ params-sweep).
+
+    ``projector`` selects the CTM projector method the differentiated step uses
+    (``"svd"`` default, ``"eigh"``, or ``"qr"``). This is the #570 compile-lever
+    knob: it determines whether the dominant ``svd_vjp`` term is replaced by a
+    (hopefully cheaper) ``eigh_vjp``.
+    """
     A_norm = A * (1.0 / (A.norm() + 1e-10))
     site_tensors = {(0, 0): A_norm}
     env = initialize_ctm_tensor_env(A_norm, chi)
@@ -86,7 +92,7 @@ def backward_vjp_jaxprs(A, chi: int, *, full: bool):
             site_tensors,
             e,
             chi=chi,
-            projector_method="svd",
+            projector_method=projector,
             renormalize=True,
             projector_backward="auto",
         )
@@ -106,7 +112,7 @@ def backward_vjp_jaxprs(A, chi: int, *, full: bool):
             {(0, 0): Ap},
             envs,
             chi=chi,
-            projector_method="svd",
+            projector_method=projector,
             renormalize=True,
             projector_backward="auto",
         )
@@ -266,6 +272,13 @@ def main() -> None:
         help="Include the params-sweep VJP (whole fused backward), not just "
         "apply_Jt (the env-sweep Neumann matvec).",
     )
+    ap.add_argument(
+        "--projector",
+        choices=["svd", "eigh", "qr"],
+        default="svd",
+        help="CTM projector method the differentiated step uses (#570 lever: "
+        "does 'eigh'/'qr' replace the dominant svd_vjp with a cheaper eigh_vjp?).",
+    )
     args = ap.parse_args()
 
     os.environ.setdefault("TENAX_BATCH_BLOCKSPARSE", "0")
@@ -275,13 +288,13 @@ def main() -> None:
         else "env-sweep VJP (apply_Jt / Neumann matvec)"
     )
     print(f"# #570 source-attributed backward op histogram | D={args.D} | unit={unit}")
-    print(f"# x64={jax.config.read('jax_enable_x64')} | projector=svd\n")
+    print(f"# x64={jax.config.read('jax_enable_x64')} | projector={args.projector}\n")
 
     A = make_site(args.D)
 
     if args.mode == "raw":
         chi = args.chi[0]
-        jaxprs = backward_vjp_jaxprs(A, chi, full=args.full)
+        jaxprs = backward_vjp_jaxprs(A, chi, full=args.full, projector=args.projector)
         total, by_cat, by_source, kernels = analyze(jaxprs)
         print(f"== RAW top emitters | D={args.D} chi={chi} | TOTAL ops={total} ==")
         print("  -- by category --")
@@ -302,7 +315,7 @@ def main() -> None:
     )
     rows = []
     for chi in args.chi:
-        jaxprs = backward_vjp_jaxprs(A, chi, full=args.full)
+        jaxprs = backward_vjp_jaxprs(A, chi, full=args.full, projector=args.projector)
         total, by_cat, _src, kernels = analyze(jaxprs)
         decomp = by_cat["svd_vjp"] + by_cat["eigh_vjp"] + by_cat["projector"]
         rows.append((chi, total, by_cat, decomp, kernels))
