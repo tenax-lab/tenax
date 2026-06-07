@@ -1,0 +1,90 @@
+{
+  "platform": "gpu",
+  "device_kind": "NVIDIA A100-SXM4-80GB",
+  "x64": true,
+  "D": 2,
+  "methods": [
+    "svd"
+  ],
+  "chi_list": [
+    6,
+    12,
+    18,
+    24,
+    36
+  ],
+  "full": true,
+  "projector_backward": "auto",
+  "rows": [
+    {
+      "D": 2,
+      "chi": 6,
+      "method": "svd",
+      "n_blocks": 16,
+      "projector_backward": "auto",
+      "env_lower_s": 10.65117827616632,
+      "env_compile_s": 23.2919915728271,
+      "env_hlo_instr": 52842,
+      "par_lower_s": 12.374245467595756,
+      "par_compile_s": 27.3767351526767,
+      "par_hlo_instr": 53545,
+      "total_compile_s": 50.6687267255038
+    },
+    {
+      "D": 2,
+      "chi": 12,
+      "method": "svd",
+      "n_blocks": 16,
+      "projector_backward": "auto",
+      "env_lower_s": 15.066871707327664,
+      "env_compile_s": 49.32690402213484,
+      "env_hlo_instr": 111934,
+      "par_lower_s": 16.354916187934577,
+      "par_compile_s": 54.777322083711624,
+      "par_hlo_instr": 114060,
+      "total_compile_s": 104.10422610584646
+    },
+    {
+      "D": 2,
+      "chi": 18,
+      "method": "svd",
+      "n_blocks": 16,
+      "projector_backward": "auto",
+      "env_lower_s": 19.2145131547004,
+      "env_compile_s": 86.93177800625563,
+      "env_hlo_instr": 188976,
+      "par_lower_s": 20.906830769963562,
+      "par_compile_s": 91.53723049722612,
+      "par_hlo_instr": 187488,
+      "total_compile_s": 178.46900850348175
+    },
+    {
+      "D": 2,
+      "chi": 24,
+      "method": "svd",
+      "n_blocks": 16,
+      "projector_backward": "auto",
+      "env_lower_s": 23.04764862731099,
+      "env_compile_s": 146.35346805863082,
+      "env_hlo_instr": 307580,
+      "par_lower_s": 25.35971633065492,
+      "par_compile_s": 150.45558495540172,
+      "par_hlo_instr": 301775,
+      "total_compile_s": 296.80905301403254
+    },
+    {
+      "D": 2,
+      "chi": 36,
+      "method": "svd",
+      "n_blocks": 16,
+      "projector_backward": "auto",
+      "env_lower_s": 31.932567842304707,
+      "env_compile_s": 259.4615724813193,
+      "env_hlo_instr": 302517,
+      "par_lower_s": 33.9136562673375,
+      "par_compile_s": 263.4128901557997,
+      "par_hlo_instr": 297056,
+      "total_compile_s": 522.874462637119
+    }
+  ]
+}
