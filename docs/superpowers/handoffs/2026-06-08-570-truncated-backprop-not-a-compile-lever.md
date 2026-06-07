@@ -69,8 +69,42 @@ pragmatic split is: (i) treat compile as amortized and pursue **runtime** via TB
 projector restructure** if the one-time compile minutes are themselves the blocker.
 That is a scope decision, not a measurement question — the measurements are in.
 
+## Addendum (2026-06-08) — TBPTT is not a RUNTIME lever via the explicit path either
+
+After choosing "pursue runtime, accept compile" (#570 direction 1), measured the
+explicit-TBPTT warm-step via the production profiler (now exposes `--backward-steps`):
+
+| path (fermionic D=2 χ=6 depth=8) | warm-step |
+|---|---|
+| implicit fixed_point | **932 ms** |
+| explicit TBPTT K=4 | **8,353 ms (9.0× slower)** |
+
+Even with the backward truncated to K=4, explicit is **9× slower** — because the
+explicit path **re-runs the full forward (warmup + `backprop_steps` sweeps) unrolled
+every call**, which dominates; truncating the *backward* can't help when the
+*forward* re-execution is the cost. The implicit path caches the converged env
+(`best_env_cache`) and does incremental work. A 9× gap is unlikely to flip on GPU.
+
+**So TBPTT-via-explicit is not the runtime lever.** The viable runtime levers keep
+the implicit path's cached forward:
+1. **Truncated implicit adjoint** — cap the Neumann/fixed-point adjoint iterations
+   (truncate only the backward *solve*, keep the cached forward). The implicit
+   analog of TBPTT, without the forward re-run. Needs an iteration-cap knob +
+   gradient-accuracy validation vs the converged adjoint.
+2. **QR projector at large χ (GPU/TPU)** — the genuine Yang/Corboz runtime win (SVD
+   is the large-χ GPU bottleneck; QR batches cleanly). Needs implementation on the
+   2×2 symmetric projector path (not a config flip; see the FALSIFIED svd-via-eigh
+   spec for the projector structure). This is a real build, not a measurement.
+
+Tooling shipped: `examples/profile_ctm_ad_wall_566.py --backward-steps K` (auto-
+enables the explicit path) to measure TBPTT warm-step on the A100 if desired —
+but the CPU 9× already argues against it.
+
 ## Reproduce
 ```bash
 JAX_PLATFORMS=cpu uv run python examples/probe_truncated_backprop_570.py \
     --D 2 --depth 12 --K 1 2 4 8 --parity
+# TBPTT warm-step vs implicit (production profiler):
+JAX_PLATFORMS=cpu uv run python examples/profile_ctm_ad_wall_566.py \
+    --D 2 --chi 6 --depth 8 --sym fermionic --explicit --backward-steps 4 --reps 2
 ```
