@@ -1,6 +1,18 @@
-# #570 finding — the CTM-AD compile wall is the dense **SVD projector VJP**, and it is `projector_method`-invariant
+# #570 finding — the CTM-AD compile wall is the **SVD projector VJP**, and it is `projector_method`-invariant
 
 **Date:** 2026-06-07 (A100) · **Follows:** [`2026-06-07-cutensornet-pb4-finding-nogo.md`](2026-06-07-cutensornet-pb4-finding-nogo.md) (#200 NO-GO) · **Issue:** #570
+
+> **Correction (2026-06-08).** This doc originally said the wall is a **dense** SVD on the
+> χ-sized corner (and that the AD path "densifies" via the "Task 2.2" fallback). That
+> *mechanism* is **wrong**: the production fermionic path uses the **block-sparse**
+> `_compute_2x2_projector_symmetric` (`_ctm_tensor_projector_2x2.py`), which is tracer-safe
+> end-to-end (Issue #435) and runs **per-sector** `truncated_svd_ad` via
+> `_truncated_svd_symmetric_traced`. The "Task 2.2 dense fallback" lives in the **1×1**
+> recipe (`_ctm_projector.py`), which the production path does **not** use. The wall is the
+> **block-sparse (per-sector) SVD VJP**, already implemented — so the "implement block-sparse
+> SVD VJP (lever-3)" follow-up below is **moot**. All *conclusions* stand unchanged
+> (SVD-only, `projector_method`-invariant, super-linear in χ); only the dense-vs-block-sparse
+> mechanism is corrected inline below. See `2026-06-08-570-mechanism-correction.md`.
 
 ## TL;DR
 
@@ -9,15 +21,20 @@ fixed-point backward `_jit_fused_fixed_point_bwd` and proved it **backend-invari
 (perblock → stacked → cuTensorNet does not move it). The open #570 question was *which
 sub-op inside that backward dominates the compile*. Answer, with two parts:
 
-1. **It is the decomposition VJP — specifically a dense SVD.** The dominant repeated
-   compile unit (`apply_Jt`, one gauge-fixed sweep VJP) carries **24 dense `svd`
-   primitives** (D=2/χ=12 trace). Its cold XLA compile grows **super-linearly in χ**
+1. **It is the decomposition VJP — a block-sparse, per-sector SVD.** The dominant repeated
+   compile unit (`apply_Jt`, one gauge-fixed sweep VJP) carries **24 `svd`
+   primitives** (D=2/χ=12 trace), one per charge-sector block of each projector's M matrix
+   (the corner has 2 sectors; the SVD operands here are (24,24) per-sector blocks — *not*
+   one dense χ-corner). Its cold XLA compile grows **super-linearly in χ**
    (~χ^1.3): a *single* sweep-VJP unit goes **50.7 s → 522.9 s** as χ goes 6 → 36 (10.3×).
    This is the χ-driver behind the ~549 s full-backward wall.
 
 2. **But it is `projector_method`-invariant — the production path is SVD-only.** The
    default `recipe="2x2"` plaquette projector (`_ctm_tensor_projector_2x2.py`) contains
-   **no** `qr`/`eigh`/`projector_method` code — it is hardwired to `jnp.linalg.svd`.
+   **no** `qr`/`eigh`/`projector_method` code; for SymmetricTensor inputs it always routes
+   to the block-sparse `_compute_2x2_projector_symmetric`, which uses `tenax.linalg.svd`
+   (per-sector). (The dense variant `_compute_2x2_projector` → `jnp.linalg.svd` is reached
+   only for all-DenseTensor inputs.)
    `svd`/`qr`/`eigh` all trace to a **byte-identical** backward graph (TOTAL=34927; 24
    `svd`, 0 `qr`, 0 `eigh` in every case). `projector_method` only affects the alternate
    1×1 recipe (`_compute_projector_tensor`), which the production fermionic path does not use.
@@ -76,16 +93,20 @@ counts (52,842 / 111,934 at χ=6 / 12) in the smoke run.
 - The production fermionic CTM-AD loss (`make_ctm_energy_fn`, `iPEPSConfig` defaults,
   `gs_implicit_ad=True`, `adjoint_method="fixed_point"`) runs the symmetric tensor sweep
   `_ctm_tensor_sweep_multisite` with the default `recipe="2x2"`, whose projector is
-  `_compute_2x2_projector` / `_compute_plaquette_projector_pair`. That file
-  (`_ctm_tensor_projector_2x2.py`) is **SVD-only** (`_gauge_fixed_svd` → `jnp.linalg.svd`);
-  it never reads `projector_method`.
+  `_compute_2x2_projector` / `_compute_plaquette_projector_pair`. For SymmetricTensor
+  inputs `_compute_2x2_projector` dispatches **all** cases — including tracer-bearing AD
+  backward — to the **block-sparse** `_compute_2x2_projector_symmetric` (tracer-safe
+  end-to-end, Issue #435), which calls `tenax.linalg.svd` →
+  `_truncated_svd_symmetric_traced` → **per-sector** `truncated_svd_ad`. It is **SVD-only**
+  (no `qr`/`eigh` branch) but **block-sparse**, never `jnp.linalg.svd` on the full corner.
 - `projector_method` (`svd`/`qr`/`eigh`) only branches inside the **1×1** recipe's
-  `_compute_projector_tensor` (`_ctm_projector.py`), and even there the **AD-traced**
-  path deliberately densifies to an SVD VJP (the "Task 2.2" design decision, lines
-  ~946–962: backward keeps a dense fallback rather than a block-sparse AD-traced SVD).
-- So under AD, the decomposition the backward differentiates is **always a dense SVD on
-  the χ-sized corner matrix**, per projector. Its VJP (the SVD-gradient F-matrix dense
-  algebra) is what grows with χ and dominates compile.
+  `_compute_projector_tensor` (`_ctm_projector.py`), which the production path does not use.
+  (That 1×1 path *does* have the "Task 2.2" dense fallback at lines ~946–962 — but it is
+  irrelevant here.)
+- So under AD, the decomposition the backward differentiates is a **block-sparse SVD: one
+  per-sector `truncated_svd_ad` per charge block, per projector** (24 such ops at D=2/χ=12).
+  Each per-sector VJP (the SVD-gradient F-matrix dense algebra over that sector's block) is
+  what grows with χ; summed over sectors × projectors, it dominates compile.
 
 ## Implication for #570 — the levers, re-scoped
 
@@ -102,10 +123,13 @@ counts (52,842 / 111,934 at χ=6 / 12) in the smoke run.
    directly and is orthogonal to projector choice. Lower risk; the main validation is
    gradient/energy parity vs the exact fixed-point adjoint.
 
-3. **Lever-3 (alternative): block-sparse AD-traced SVD VJP.** Replace the dense-corner SVD
-   fallback with a per-sector truncated SVD VJP (smaller decomps). The design note flags
-   the static-shape-per-sector (`k_q` must be a Python int) complexity. Medium effort,
-   directly attacks the measured cost.
+3. ~~**Lever-3 (alternative): block-sparse AD-traced SVD VJP.**~~ **MOOT — already
+   implemented.** The production 2×2 path *already* differentiates a per-sector block-sparse
+   SVD (`_truncated_svd_symmetric_traced`), so there is no dense fallback to replace. The
+   per-sector block-SVD VJP cost *is* the wall. The remaining structural lever is **batching
+   the equal-shaped per-sector SVD-VJP units** into one vmapped graph to cut the XLA-module
+   count (the #566/#569 `TENAX_BATCH_BLOCKSPARSE` axis — built and benchmarked for *runtime*
+   ["never a net win" through D=6], but its effect on the *compile* wall is unmeasured).
 
 ## Next experiment (whichever lever)
 
@@ -113,8 +137,9 @@ counts (52,842 / 111,934 at χ=6 / 12) in the smoke run.
 sweep-VJP `total_compile_s` and `env_hlo_instr` vs the SVD baseline above:
 - **truncated backprop:** compile the N-sweep unrolled backward for N ∈ {1,2,4} and show
   compile scales with N while energy/grad track the full adjoint.
-- **QR-in-2×2 / block-sparse SVD:** once implemented, expect `total_compile_s` to drop and
-  flatten in χ relative to the SVD curve above.
+- **batched block-sparse SVD VJP (`TENAX_BATCH_BLOCKSPARSE`):** re-run with the gate ON and
+  check whether `total_compile_s` / `env_hlo_instr` drop relative to the per-sector baseline
+  above (the open compile question, since #569 only measured runtime).
 
 ## What would change the conclusion
 

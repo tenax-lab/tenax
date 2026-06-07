@@ -2,6 +2,13 @@
 
 **Date:** 2026-06-08 (A100) · **Follows:** [`2026-06-07-570-svd-vjp-compile-finding.md`](2026-06-07-570-svd-vjp-compile-finding.md) · **Issue:** #570
 
+> **Correction (2026-06-08).** Where this doc says "**dense** block-SVD VJP" or "**dense**-corner
+> SVD fallback," read **block-sparse (per-sector) SVD VJP**: the production 2×2 path already
+> differentiates a per-sector block-sparse SVD (`_compute_2x2_projector_symmetric` →
+> `_truncated_svd_symmetric_traced`, Issue #435), not a dense corner SVD. Consequently
+> **"lever-3" is moot — already implemented** (see `2026-06-08-570-mechanism-correction.md`).
+> The lever-2 NO-GO conclusion and all measurements are **unaffected**.
+
 ## TL;DR
 
 The #570 SVD-VJP finding recommended **lever-2 (truncated backprop / TBPTT)** as the
@@ -18,7 +25,7 @@ already implemented (`ctm_energy_explicit`, `backward_steps`, #506). Measured on
   (1.27–1.28×). The explicit path emits **1254–1257 compile units** vs the implicit
   adjoint's **236**.
 
-**Why:** the per-sweep **dense block-SVD VJP** is irreducible in *both* paths — any gradient
+**Why:** the per-sweep **block-sparse (per-sector) SVD VJP** is irreducible in *both* paths — any gradient
 needs ≥1 differentiated block-sparse SVD sweep (~250 s at D=2/χ=12), and the explicit unroll
 only adds forward-unroll compile on top (it traces the *whole* forward into one XLA module;
 `stop_gradient` removes backward ops but keeps the forward sweeps, while the implicit path
@@ -27,7 +34,7 @@ changes *how many* sweeps are differentiated, not the per-sweep SVD-VJP cost.
 
 This makes **three levers, all NO-GO for the compile wall** — #200 contraction backend,
 #570 lever-1 (QR projector), #570 lever-2 (truncated backprop) — all because the wall is the
-per-sweep dense block-SVD VJP emission, which none of them touches.
+per-sweep block-sparse (per-sector) SVD VJP emission, which none of them touches.
 
 ## Method
 
@@ -89,15 +96,18 @@ unmeasured here. If the goal shifts from compile to warm-step, re-open with a ru
 
 ## Conclusion for #570
 
-The compile wall is the **per-sweep dense block-SVD VJP**, and it is irreducible under both
-the implicit adjoint and any explicit unroll (you always differentiate ≥1 block-SVD sweep).
-Projector-swap (lever-1) and backprop-truncation (lever-2) both leave that per-sweep cost
-intact. **The only remaining lever that targets it is lever-3: a block-sparse (per-sector)
-AD-traced SVD VJP** — replace the dense-corner SVD fallback (the deliberate "Task 2.2"
-densification in `_ctm_projector.py`, and the SVD-only 2×2 plaquette path) with per-sector
-truncated SVD VJPs (smaller decomps, fewer emitted ops), the static-shape-per-sector `k_q`
-being the known complication. Absent that, the wall appears intrinsic to differentiating a
-block-sparse SVD in XLA.
+The compile wall is the **per-sweep block-sparse (per-sector) SVD VJP**, and it is
+irreducible under both the implicit adjoint and any explicit unroll (you always
+differentiate ≥1 block-SVD sweep). Projector-swap (lever-1) and backprop-truncation
+(lever-2) both leave that per-sweep cost intact. **Lever-3 (a block-sparse per-sector
+AD-traced SVD VJP) is NOT a new lever — the production 2×2 path already does exactly this**
+(`_compute_2x2_projector_symmetric` → `_truncated_svd_symmetric_traced`; the "Task 2.2"
+dense fallback in `_ctm_projector.py` is in the unused 1×1 recipe). So the per-sector
+block-SVD VJP cost *is* the wall. The remaining structural lever is **batching the
+equal-shaped per-sector SVD-VJP units** into one vmapped graph (the #566/#569
+`TENAX_BATCH_BLOCKSPARSE` axis — built, benchmarked for runtime ["never a net win" through
+D=6], compile effect unmeasured). Absent a compile win there, the wall appears intrinsic to
+differentiating a block-sparse SVD in XLA.
 
 ## Artifacts
 
