@@ -34,12 +34,20 @@ Verification (D=2, χ=12, fermionic, `apply_Jt` traced backward):
 ## What stands unchanged
 
 All *conclusions* of both prior docs hold:
-- The wall is the **decomposition (SVD) VJP** inside `_jit_fused_fixed_point_bwd`,
+- The wall is the **per-sector SVD/projector-wrapper VJP** inside `_jit_fused_fixed_point_bwd`,
   super-linear in χ (one sweep-VJP unit 50.7 s → 522.9 s as χ 6 → 36).
 - **Lever-1 (QR projector) is a no-op as a config flip** (the 2×2 path has no QR).
 - **Lever-2 (truncated backprop) is a NO-GO for the compile wall** (best 0.88× implicit).
 
 Only the dense-vs-block-sparse *mechanism* description is corrected.
+
+> **Refinement (PR #589).** This doc still calls the wall the "decomposition (SVD) VJP." A
+> deeper drill-down shows the cost is **~0% decomposition** — it's **#566 per-sector
+> *structural* emission** (block pack/unpack ~60% + gauge-fix/sign-logic ~25%) emitted inside
+> the SVD/projector wrapper. So the lever is not a cheaper decomposition but **stacking the
+> per-sector structural ops across sectors** (`TENAX_BATCH_BLOCKSPARSE` already does the
+> block/contraction part: ~20% off compile — `2026-06-08-570-batching-compile-finding.md`).
+> See `2026-06-08-570-relocalized-not-decomposition.md`.
 
 ## Implication — the levers, re-scoped (again)
 

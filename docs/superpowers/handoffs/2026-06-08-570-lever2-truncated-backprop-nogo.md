@@ -8,6 +8,9 @@
 > `_truncated_svd_symmetric_traced`, Issue #435), not a dense corner SVD. Consequently
 > **"lever-3" is moot — already implemented** (see `2026-06-08-570-mechanism-correction.md`).
 > The lever-2 NO-GO conclusion and all measurements are **unaffected**.
+> Further (PR #589): the per-sweep cost is **#566 structural emission** (block-pack ~60% +
+> gauge-fix ~25%, decomposition ~0%) — read "block-SVD VJP" here as that structural emission,
+> not the decomposition math. See `2026-06-08-570-relocalized-not-decomposition.md`.
 
 ## TL;DR
 
