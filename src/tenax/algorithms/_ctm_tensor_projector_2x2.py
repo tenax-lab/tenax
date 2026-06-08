@@ -60,69 +60,57 @@ def _gauge_fix_symmetric_svd(
     ``|U[:, j]|`` across all U-blocks that share its bond charge, rotates U's
     column and Vh's row by ``conj(phase)`` / ``phase`` so that
     ``U @ diag(s) @ Vh == M`` is preserved.  Critical for the 2x2 closure
-    ``P_bot · P_top = I`` (no intervening matrix to absorb a ``conj(phase)**2``
-    factor — see the docstring of :func:`_gauge_fixed_svd`).
+    ``P_bot · P_top = I``.
+
+    Vectorized over bond-charge sectors (#566): instead of looping over every
+    bond column, we process each (static) bond charge once — stacking that
+    sector's U-blocks into one matrix, computing all column phases in a single
+    ``argmax``, and applying them with one broadcast-multiply per block.  The
+    block concatenation order matches the column-order oracle, so ``argmax``
+    (including ties) and the output are byte-identical to the per-column loop.
     """
     bond_idx = U_T.indices[-1]  # last leg of U is the SVD bond
     bond_charges = np.asarray(bond_idx.charges, dtype=np.int32)
 
-    # Per global column j, find its (charge, in-sector local index).
-    # The sector ordering matches _truncated_svd_symmetric (bond charges
-    # are listed in descending-SV global order); within a sector, the
-    # local indices are 0..n_q-1 in the order they appear in bond_charges.
-    local_index_of: dict[int, dict[int, int]] = {}  # q -> {global_j: local_idx}
-    counter: dict[int, int] = {}
-    for j, q in enumerate(bond_charges):
-        q_int = int(q)
-        local_index_of.setdefault(q_int, {})[j] = counter.get(q_int, 0)
-        counter[q_int] = counter.get(q_int, 0) + 1
+    # Group U-blocks by bond charge (last key entry) and Vh-blocks by bond
+    # charge (first key entry), preserving block-dict order so the stacked
+    # argmax matches the per-column reference's concatenation order.
+    u_keys_by_q: dict[int, list] = {}
+    for key in U_T.blocks:
+        u_keys_by_q.setdefault(int(key[-1]), []).append(key)
+    vh_keys_by_q: dict[int, list] = {}
+    for key in Vh_T.blocks:
+        vh_keys_by_q.setdefault(int(key[0]), []).append(key)
 
-    # Collect U-blocks indexed by bond charge (last key entry).
-    u_blocks_by_q: dict[int, list[tuple[tuple[int, ...], jax.Array]]] = {}
-    for key, block in U_T.blocks.items():
-        q = int(key[-1])
-        u_blocks_by_q.setdefault(q, []).append((key, block))
-
-    # Collect Vh-blocks indexed by bond charge (FIRST key entry).
-    vh_blocks_by_q: dict[int, list[tuple[tuple[int, ...], jax.Array]]] = {}
-    for key, block in Vh_T.blocks.items():
-        q = int(key[0])
-        vh_blocks_by_q.setdefault(q, []).append((key, block))
-
-    new_u_blocks: dict[tuple[int, ...], jax.Array] = {
-        key: block for key, block in U_T.blocks.items()
-    }
-    new_vh_blocks: dict[tuple[int, ...], jax.Array] = {
-        key: block for key, block in Vh_T.blocks.items()
-    }
+    new_u_blocks: dict = dict(U_T.blocks)
+    new_vh_blocks: dict = dict(Vh_T.blocks)
 
     # Detect dtype statically so we don't promote real blocks to complex.
     sample_block = next(iter(U_T.blocks.values()))
     is_complex = jnp.issubdtype(sample_block.dtype, jnp.complexfloating)
 
-    # For each global column j, compute its phase and write it back.
-    for j, q in enumerate(bond_charges):
+    for q in np.unique(bond_charges):
         q_int = int(q)
-        local = local_index_of[q_int][j]
-        u_entries = u_blocks_by_q.get(q_int, [])
-        vh_entries = vh_blocks_by_q.get(q_int, [])
-
-        if not u_entries:
+        u_keys = u_keys_by_q.get(q_int, [])
+        if not u_keys:
             continue
 
-        candidates = jnp.concatenate(
-            [jnp.reshape(new_u_blocks[key][..., local], (-1,)) for key, _ in u_entries]
+        # All U-blocks of this sector share the bond multiplicity n_q (last axis).
+        n_q = new_u_blocks[u_keys[0]].shape[-1]
+
+        # Stack each U-block's (rows_i, n_q) view → (R, n_q), same order as the
+        # per-column reference's `candidates` concatenation.
+        M_q = jnp.concatenate(
+            [jnp.reshape(new_u_blocks[key], (-1, n_q)) for key in u_keys], axis=0
         )
-        max_idx = jnp.argmax(jnp.abs(candidates))
-        best_value = candidates[max_idx]
-        abs_best = jnp.abs(best_value)
+        idx = jnp.argmax(jnp.abs(M_q), axis=0)  # (n_q,)
+        best = M_q[idx, jnp.arange(n_q)]  # (n_q,)
+        abs_best = jnp.abs(best)
         phase = jnp.where(
             abs_best > 0,
-            best_value
-            / jnp.maximum(abs_best, jnp.asarray(1e-30, dtype=abs_best.dtype)),
-            jnp.ones_like(best_value),
+            best / jnp.maximum(abs_best, jnp.asarray(1e-30, dtype=abs_best.dtype)),
+            jnp.ones_like(best),
         )
-
         if is_complex:
             conj_phase = jnp.conj(phase)
             bare_phase = phase
@@ -130,15 +118,13 @@ def _gauge_fix_symmetric_svd(
             conj_phase = jnp.real(phase)
             bare_phase = jnp.real(phase)
 
-        for key, _block in u_entries:
-            new_block = new_u_blocks[key]
-            new_block = new_block.at[..., local].multiply(conj_phase)
-            new_u_blocks[key] = new_block
-
-        for key, _block in vh_entries:
-            new_block = new_vh_blocks[key]
-            new_block = new_block.at[local, ...].multiply(bare_phase)
-            new_vh_blocks[key] = new_block
+        # U columns (last axis) by conj(phase); Vh rows (first axis) by phase.
+        for key in u_keys:
+            new_u_blocks[key] = new_u_blocks[key] * conj_phase
+        for key in vh_keys_by_q.get(q_int, []):
+            blk = new_vh_blocks[key]
+            bcast = jnp.reshape(bare_phase, (n_q,) + (1,) * (blk.ndim - 1))
+            new_vh_blocks[key] = blk * bcast
 
     U_out = SymmetricTensor._from_blocks_unchecked(new_u_blocks, U_T.indices)
     Vh_out = SymmetricTensor._from_blocks_unchecked(new_vh_blocks, Vh_T.indices)
