@@ -779,3 +779,152 @@ def test_compute_2x2_projector_closure_under_tracing(symmetric_corners):
         atol=1e-6,
         err_msg="P_bot · P_top must be identity on chi_new × chi_new (Fishman closure)",
     )
+
+
+# --------------------------------------------------------------------------- #
+# Vectorization parity (#566): the per-sector rewrite of _gauge_fix_symmetric_svd
+# must be byte-identical to the original per-column loop, frozen here.
+# --------------------------------------------------------------------------- #
+def _reference_gauge_fix_loop(U_T, Vh_T):
+    """Frozen copy of the original per-column _gauge_fix_symmetric_svd loop.
+
+    Kept in the test as the behavioral oracle for the vectorized rewrite.
+    """
+    bond_idx = U_T.indices[-1]
+    bond_charges = np.asarray(bond_idx.charges, dtype=np.int32)
+
+    local_index_of: dict[int, dict[int, int]] = {}
+    counter: dict[int, int] = {}
+    for j, q in enumerate(bond_charges):
+        q_int = int(q)
+        local_index_of.setdefault(q_int, {})[j] = counter.get(q_int, 0)
+        counter[q_int] = counter.get(q_int, 0) + 1
+
+    u_blocks_by_q: dict[int, list] = {}
+    for key, block in U_T.blocks.items():
+        u_blocks_by_q.setdefault(int(key[-1]), []).append((key, block))
+    vh_blocks_by_q: dict[int, list] = {}
+    for key, block in Vh_T.blocks.items():
+        vh_blocks_by_q.setdefault(int(key[0]), []).append((key, block))
+
+    new_u_blocks = {key: block for key, block in U_T.blocks.items()}
+    new_vh_blocks = {key: block for key, block in Vh_T.blocks.items()}
+
+    sample_block = next(iter(U_T.blocks.values()))
+    is_complex = jnp.issubdtype(sample_block.dtype, jnp.complexfloating)
+
+    for j, q in enumerate(bond_charges):
+        q_int = int(q)
+        local = local_index_of[q_int][j]
+        u_entries = u_blocks_by_q.get(q_int, [])
+        vh_entries = vh_blocks_by_q.get(q_int, [])
+        if not u_entries:
+            continue
+        candidates = jnp.concatenate(
+            [jnp.reshape(new_u_blocks[key][..., local], (-1,)) for key, _ in u_entries]
+        )
+        max_idx = jnp.argmax(jnp.abs(candidates))
+        best_value = candidates[max_idx]
+        abs_best = jnp.abs(best_value)
+        phase = jnp.where(
+            abs_best > 0,
+            best_value / jnp.maximum(abs_best, jnp.asarray(1e-30, dtype=abs_best.dtype)),
+            jnp.ones_like(best_value),
+        )
+        if is_complex:
+            conj_phase = jnp.conj(phase)
+            bare_phase = phase
+        else:
+            conj_phase = jnp.real(phase)
+            bare_phase = jnp.real(phase)
+        for key, _block in u_entries:
+            new_u_blocks[key] = new_u_blocks[key].at[..., local].multiply(conj_phase)
+        for key, _block in vh_entries:
+            new_vh_blocks[key] = new_vh_blocks[key].at[local, ...].multiply(bare_phase)
+
+    U_out = SymmetricTensor._from_blocks_unchecked(new_u_blocks, U_T.indices)
+    Vh_out = SymmetricTensor._from_blocks_unchecked(new_vh_blocks, Vh_T.indices)
+    return U_out, Vh_out
+
+
+def _svd_of(M_T):
+    from tenax.linalg import svd as tensor_svd
+
+    U_T, s, Vh_T, _ = tensor_svd(
+        M_T, left_labels=("left",), right_labels=("right",), new_bond_label="bond"
+    )
+    return U_T, s, Vh_T
+
+
+def _complex_matrix_tensor(seed: int = 7) -> SymmetricTensor:
+    """Two-sector U(1) complex128 matrix tensor."""
+    sym = U1Symmetry()
+    charges = np.array([0, 0, 1, 1], dtype=np.int32)
+    left_idx = TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="left")
+    right_idx = TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="right")
+    k1, k2 = jax.random.split(jax.random.PRNGKey(seed))
+    re = SymmetricTensor.random_normal((left_idx, right_idx), k1)
+    im = SymmetricTensor.random_normal((left_idx, right_idx), k2)
+    blocks = {
+        key: (re.blocks[key] + 1j * im.blocks[key]).astype(jnp.complex128)
+        for key in re.blocks
+    }
+    return SymmetricTensor._from_blocks_unchecked(blocks, re.indices)
+
+
+def _degenerate_matrix_tensor(seed: int = 3) -> SymmetricTensor:
+    """Scaled-identity-per-sector matrix → fully degenerate singular values
+    (exercises argmax ties, where concat order must match the reference)."""
+    M_T = _make_test_matrix_tensor(seed=seed)
+    blocks = {}
+    for key, block in M_T.blocks.items():
+        n = block.shape[0]
+        blocks[key] = jnp.eye(n, block.shape[1], dtype=block.dtype) * (1.0 + key[0])
+    return SymmetricTensor._from_blocks_unchecked(blocks, M_T.indices)
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: _make_test_matrix_tensor(seed=0),
+        lambda: _make_test_matrix_tensor(seed=5),
+        _complex_matrix_tensor,
+        _degenerate_matrix_tensor,
+    ],
+    ids=["u1_real_a", "u1_real_b", "u1_complex", "degenerate_ties"],
+)
+def test_gauge_fix_vectorized_matches_reference_forward(factory):
+    """Vectorized gauge fix is byte-identical to the frozen per-column loop."""
+    M_T = factory()
+    U_T, _s, Vh_T = _svd_of(M_T)
+
+    U_ref, Vh_ref = _reference_gauge_fix_loop(U_T, Vh_T)
+    U_new, Vh_new = _gauge_fix_symmetric_svd(U_T, Vh_T)
+
+    for key in U_ref.blocks:
+        assert jnp.array_equal(U_new.blocks[key], U_ref.blocks[key]), f"U block {key}"
+    for key in Vh_ref.blocks:
+        assert jnp.array_equal(Vh_new.blocks[key], Vh_ref.blocks[key]), f"Vh block {key}"
+
+
+def test_gauge_fix_vectorized_matches_reference_grad():
+    """Gradient through the vectorized gauge fix matches the reference (fp tier)."""
+    M_T = _make_test_matrix_tensor(seed=2)
+    U_T, _s, Vh_T = _svd_of(M_T)
+
+    def _loss(U_T_in, Vh_T_in, gauge_fn):
+        U_fixed, Vh_fixed = gauge_fn(U_T_in, Vh_T_in)
+        u = U_fixed.todense()
+        v = Vh_fixed.todense()
+        return jnp.real(jnp.sum(u * jnp.conj(u))) + jnp.real(jnp.sum(v))
+
+    leaves, treedef = jax.tree.flatten(U_T)
+
+    def _from_leaves(ls, fn):
+        U_in = jax.tree.unflatten(treedef, ls)
+        return _loss(U_in, Vh_T, fn)
+
+    g_ref = jax.grad(lambda ls: _from_leaves(ls, _reference_gauge_fix_loop))(leaves)
+    g_new = jax.grad(lambda ls: _from_leaves(ls, _gauge_fix_symmetric_svd))(leaves)
+    for a, b in zip(jax.tree.leaves(g_new), jax.tree.leaves(g_ref)):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12, atol=1e-12)
