@@ -173,8 +173,15 @@ def make_site_and_gate(sym: str, D: int, seed: int):
 # --------------------------------------------------------------------------- #
 # Loss closure: the real production dispatcher
 # --------------------------------------------------------------------------- #
-def build_loss(gate, chi: int, depth: int, *, explicit: bool, warmup: int):
-    """``A -> energy`` via make_ctm_energy_fn (implicit fixed_point default)."""
+def build_loss(
+    gate, chi: int, depth: int, *, explicit: bool, warmup: int, backward_steps=None
+):
+    """``A -> energy`` via make_ctm_energy_fn (implicit fixed_point default).
+
+    ``backward_steps=K`` (explicit only) enables TBPTT (#506): only the last K of
+    the ``depth`` checkpointed sweeps are differentiated. Use to measure the
+    truncated-backprop RUNTIME lever (#570): warm-step vs implicit on the A100.
+    """
     ctm_cfg = CTMConfig(
         chi=chi,
         max_iter=depth,
@@ -189,7 +196,7 @@ def build_loss(gate, chi: int, depth: int, *, explicit: bool, warmup: int):
         use_explicit=explicit,
         explicit_warmup=warmup,
         explicit_steps=depth,
-        explicit_backward_steps=None,
+        explicit_backward_steps=backward_steps,
     )
 
     def loss_fn(A_param):
@@ -238,11 +245,20 @@ def _cold(fn, A, cap: _CompileCapture):
     return wall, list(cap.events), out
 
 
-def profile_config(sym, D, chi, depth, *, explicit, warmup, reps, cap):
+def profile_config(
+    sym, D, chi, depth, *, explicit, warmup, reps, cap, backward_steps=None
+):
     """One (sym,D,chi,depth,path) cell: cold fwd + cold v&g + warm steps."""
     A, gate = make_site_and_gate(sym, D, seed=42)
     n_blocks = getattr(A, "n_blocks", 1)
-    loss_fn = build_loss(gate, chi, depth, explicit=explicit, warmup=warmup)
+    loss_fn = build_loss(
+        gate,
+        chi,
+        depth,
+        explicit=explicit,
+        warmup=warmup,
+        backward_steps=backward_steps,
+    )
     vg = jax.value_and_grad(loss_fn)
 
     # (4a) cold forward-only: forward-step compile + run, NO backward graph.
@@ -270,6 +286,7 @@ def profile_config(sym, D, chi, depth, *, explicit, warmup, reps, cap):
         "chi": chi,
         "depth": depth,
         "path": "explicit" if explicit else "implicit",
+        "backward_steps": backward_steps,
         "n_blocks": int(n_blocks),
         "fwd_wall_s": fwd_wall,
         "fwd_compile_s": fwd_compile,
@@ -315,8 +332,19 @@ def main() -> None:
     )
     ap.add_argument("--warmup", type=int, default=3, help="Explicit warmup sweeps.")
     ap.add_argument("--reps", type=int, default=3, help="Warm steady-state reps.")
+    ap.add_argument(
+        "--backward-steps",
+        type=int,
+        default=None,
+        help="Explicit TBPTT (#506/#570): differentiate only the last K sweeps. "
+        "Implies the explicit path; use to measure the truncated-backprop RUNTIME "
+        "lever (warm-step vs implicit). Default None = full backprop.",
+    )
     ap.add_argument("--json", type=str, default=None)
     args = ap.parse_args()
+    # --backward-steps only affects the explicit path; auto-enable it.
+    if args.backward_steps is not None:
+        args.explicit = True
 
     cap = _install_compile_capture()
     dev = jax.devices()[0]
@@ -338,6 +366,7 @@ def main() -> None:
         "syms": args.sym,
         "depths": args.depth,
         "explicit": args.explicit,
+        "backward_steps": args.backward_steps,
     }
 
     # Build the (sym, D, chi, depth, path) grid.
@@ -376,6 +405,7 @@ def main() -> None:
                 warmup=args.warmup,
                 reps=args.reps,
                 cap=cap,
+                backward_steps=args.backward_steps if explicit else None,
             )
         except Exception as exc:  # noqa: BLE001 - record + continue the sweep
             print(
