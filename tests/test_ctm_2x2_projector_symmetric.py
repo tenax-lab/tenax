@@ -874,7 +874,9 @@ def _complex_matrix_tensor(seed: int = 7) -> SymmetricTensor:
 
 def _degenerate_matrix_tensor(seed: int = 3) -> SymmetricTensor:
     """Scaled-identity-per-sector matrix → fully degenerate singular values
-    (exercises argmax ties, where concat order must match the reference)."""
+    (exercises argmax ties). ``seed`` only sources the index structure; all
+    block values are overwritten deterministically, so the result is
+    seed-independent."""
     M_T = _make_test_matrix_tensor(seed=seed)
     blocks = {}
     for key, block in M_T.blocks.items():
@@ -901,6 +903,8 @@ def test_gauge_fix_vectorized_matches_reference_forward(factory):
     U_ref, Vh_ref = _reference_gauge_fix_loop(U_T, Vh_T)
     U_new, Vh_new = _gauge_fix_symmetric_svd(U_T, Vh_T)
 
+    assert set(U_new.blocks) == set(U_ref.blocks)
+    assert set(Vh_new.blocks) == set(Vh_ref.blocks)
     for key in U_ref.blocks:
         assert jnp.array_equal(U_new.blocks[key], U_ref.blocks[key]), f"U block {key}"
     for key in Vh_ref.blocks:
@@ -908,7 +912,8 @@ def test_gauge_fix_vectorized_matches_reference_forward(factory):
 
 
 def test_gauge_fix_vectorized_matches_reference_grad():
-    """Gradient through the vectorized gauge fix matches the reference (fp tier)."""
+    """Gradient through the vectorized gauge fix matches the reference (fp tier),
+    differentiating w.r.t. BOTH U and Vh inputs."""
     M_T = _make_test_matrix_tensor(seed=2)
     U_T, _s, Vh_T = _svd_of(M_T)
 
@@ -916,15 +921,19 @@ def test_gauge_fix_vectorized_matches_reference_grad():
         U_fixed, Vh_fixed = gauge_fn(U_T_in, Vh_T_in)
         u = U_fixed.todense()
         v = Vh_fixed.todense()
-        return jnp.real(jnp.sum(u * jnp.conj(u))) + jnp.real(jnp.sum(v))
+        return jnp.real(jnp.sum(u * jnp.conj(u))) + jnp.real(jnp.sum(v * jnp.conj(v)))
 
-    leaves, treedef = jax.tree.flatten(U_T)
+    u_leaves, u_tree = jax.tree.flatten(U_T)
+    vh_leaves, vh_tree = jax.tree.flatten(Vh_T)
 
-    def _from_leaves(ls, fn):
-        U_in = jax.tree.unflatten(treedef, ls)
-        return _loss(U_in, Vh_T, fn)
+    def _from_leaves(ul, vl, fn):
+        U_in = jax.tree.unflatten(u_tree, ul)
+        Vh_in = jax.tree.unflatten(vh_tree, vl)
+        return _loss(U_in, Vh_in, fn)
 
-    g_ref = jax.grad(lambda ls: _from_leaves(ls, _reference_gauge_fix_loop))(leaves)
-    g_new = jax.grad(lambda ls: _from_leaves(ls, _gauge_fix_symmetric_svd))(leaves)
+    g_ref = jax.grad(lambda ul, vl: _from_leaves(ul, vl, _reference_gauge_fix_loop),
+                     argnums=(0, 1))(u_leaves, vh_leaves)
+    g_new = jax.grad(lambda ul, vl: _from_leaves(ul, vl, _gauge_fix_symmetric_svd),
+                     argnums=(0, 1))(u_leaves, vh_leaves)
     for a, b in zip(jax.tree.leaves(g_new), jax.tree.leaves(g_ref)):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12, atol=1e-12)
