@@ -13,6 +13,15 @@
 > SVD VJP (lever-3)" follow-up below is **moot**. All *conclusions* stand unchanged
 > (SVD-only, `projector_method`-invariant, super-linear in χ); only the dense-vs-block-sparse
 > mechanism is corrected inline below. See `2026-06-08-570-mechanism-correction.md`.
+>
+> **Further correction (2026-06-08, PR #589).** A deeper sub-op drill-down shows the cost
+> *inside* the per-sector SVD VJP is **~60% block pack/unpack + ~25% gauge-fixing, ~0%
+> decomposition** — i.e. **#566 per-sector *structural* emission**, **not** the "SVD-gradient
+> F-matrix algebra" this doc says (e.g. the "Why (mechanistic)" bullet below). Read every
+> "F-matrix / decomposition cost" here as **structural block-pack + gauge-fix emission**. The
+> super-linear-in-χ and `projector_method`-invariant conclusions are unaffected. See
+> `2026-06-08-570-relocalized-not-decomposition.md` (PR #589) and
+> `2026-06-08-570-batching-compile-finding.md`.
 
 ## TL;DR
 
@@ -103,10 +112,12 @@ counts (52,842 / 111,934 at χ=6 / 12) in the smoke run.
   `_compute_projector_tensor` (`_ctm_projector.py`), which the production path does not use.
   (That 1×1 path *does* have the "Task 2.2" dense fallback at lines ~946–962 — but it is
   irrelevant here.)
-- So under AD, the decomposition the backward differentiates is a **block-sparse SVD: one
-  per-sector `truncated_svd_ad` per charge block, per projector** (24 such ops at D=2/χ=12).
-  Each per-sector VJP (the SVD-gradient F-matrix dense algebra over that sector's block) is
-  what grows with χ; summed over sectors × projectors, it dominates compile.
+- So under AD, the backward differentiates a **per-sector block-sparse SVD wrapper: one
+  `truncated_svd_ad` per charge block, per projector** (24 such ops at D=2/χ=12). The
+  compile cost of each per-sector VJP is **NOT the decomposition math** (the SVD-gradient
+  F-matrix is ~0% — PR #589) but the **per-sector structural emission around it** (block
+  pack/unpack ~60% + gauge-fix/sign-logic ~25%), which grows with χ via surviving-sector
+  count; summed over sectors × projectors, it dominates compile.
 
 ## Implication for #570 — the levers, re-scoped
 

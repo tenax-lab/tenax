@@ -1,22 +1,28 @@
-# #570 — batching (`TENAX_BATCH_BLOCKSPARSE`) is the only lever that moves the compile wall (~15–22%, bounded); #570 conclusion
+# #570 — batching (`TENAX_BATCH_BLOCKSPARSE`) IS a ~15–22% compile lever (HLO-measured), correcting the op-count dismissal; #570 conclusion
 
-**Date:** 2026-06-08 (A100) · **Follows:** [`2026-06-08-570-mechanism-correction.md`](2026-06-08-570-mechanism-correction.md) · **Issue:** #570
+**Date:** 2026-06-08 (A100) · **Builds on / corrects:** PR #589 (`2026-06-08-570-relocalized-not-decomposition.md`) · **Issue:** #570
 
 ## TL;DR
 
-After the mechanism correction (the AD projector is already block-sparse per-sector SVD, so
-"lever-3" was moot), the one remaining untested compile lever was **batching** the per-sector
-block-sparse work (`TENAX_BATCH_BLOCKSPARSE`, the #566/#569 umbrella gate). Measured gate
-OFF vs ON on the sweep-VJP compile rig:
+PR #589 nailed the **mechanism**: the compile wall is **#566 per-sector *structural* emission**
+(block pack/unpack + gauge-fixing) lexically inside the SVD/projector wrapper — the decomposition
+math (SVD-gradient F-matrix) is **~0%**. (This corrects my earlier #570 docs, which wrongly
+attributed the wall to the "SVD-gradient Lorentzian F-matrix algebra" — see the correction notes
+on `2026-06-07-570-svd-vjp-compile-finding.md` etc.)
 
-- **It works — modestly.** ON reduces the compiled backward by **~15–22%** (deterministic HLO
-  instruction count), with compile time tracking. This is the **first and only** lever that
-  measurably moves the compile wall.
-- **It does not scale toward the target.** The reduction is **bounded ~20% and slightly
-  *diminishes* with χ** (it shrinks the *contraction/block-pack* part of the VJP, while the
-  dominant *per-sector SVD-VJP* — which batching cannot reduce — grows with χ).
-- **It has a runtime cost.** #569 already showed batching is a *warm-step* loss ("never a net
-  win" through D=6). So ON is a **compile↓ / runtime↑ trade-off**, not a free win.
+PR #589 also tested **batching** (`TENAX_BATCH_BLOCKSPARSE`) and dismissed it — but judged it by
+**jaxpr op-count** (svd_vjp −0.7%, TOTAL +2.8%) and concluded "not a compile lever." That measure
+is the wrong one: **jaxpr op-count ≠ lowered-HLO size**. Measured at the **HLO/compile level**, the
+gate **does** help:
+
+- **~15–22% smaller compiled backward** (deterministic HLO instruction count), compile time tracks.
+- It is the **only lever that measurably moves the compile wall** — because it *is* the partial,
+  already-available form of #589's recommended fix (stack the per-sector structural ops across
+  sectors → fewer lowered kernels: #589 noted svd kernels 48→24).
+- **Bounded** (~20%, doesn't scale with χ) and carries a **runtime penalty** (#569: warm-step loss).
+
+Reconciliation: #589's "+2.8% jaxpr ops" and this "−20% HLO instrs" are **both correct and
+consistent** — the stacked form adds a few trace-level ops but XLA lowers it to fewer kernels.
 
 ## Results (A100, fermionic, x64, sweep-VJP unit, `--full` = env+params)
 
@@ -35,65 +41,70 @@ OFF vs ON on the sweep-VJP compile rig:
 | 12 | 111,934 | 102,223 | 0.91× | 104.1 s | 100.1 s |
 | 24 | 307,580 | 240,354 | 0.78× | 296.8 s | 232.1 s |
 
-HLO instruction count is **deterministic** (independent of run/contention), so the 0.78–0.84×
-ratios are the rigorous core; compile-time ratios (measured; D=4 OFF/ON were run concurrently
-so their *absolute* timings are CPU-contended, but the OFF and ON runs were contended equally
-and the ratios match the deterministic instr ratios). Raw: `570_results/profile_570_d4_batch{off,on}.json`,
-`570_results/profile_570_batch_on_a100.json` (D=2 ON) vs `profile_570_sweepvjp_a100.json` (D=2 OFF).
+HLO instruction count is **deterministic** (independent of run/CPU contention), so the 0.78–0.84×
+ratios are the rigorous core; compile-time ratios track them. (D=4 OFF/ON ran concurrently, so their
+*absolute* timings are equally CPU-contended; the ratios still hold against the deterministic instr
+ratios.) Raw: `570_results/profile_570_d4_batch{off,on}.json`, `…/profile_570_batch_on_a100.json`
+(D=2 ON) vs `…/profile_570_sweepvjp_a100.json` (D=2 OFF).
 
-## Why it's bounded (mechanism)
+## Why ~20% and bounded (mechanism, per #589 + this)
 
-`TENAX_BATCH_BLOCKSPARSE` is an **umbrella** gate. In the AD backward it does **not** reduce the
-SVD primitives — those are single-sector per projector call (24 ops of (96,96) at D=4, identical
-on/off at the jaxpr level), so the within-call sector-batching in `_truncated_svd_symmetric_traced`
-has nothing to group. What it *does* reduce is the **contraction / block-pack** emission
-(`contractor.py` batched path): fewer `dot_general` / scatter / reshape instructions around the
-SVDs. That is a roughly **fixed-fraction** overhead, so as χ grows the un-batched SVD-VJP grows
-faster and the batching win becomes a smaller share (0.80→0.84 across χ=8→16 at D=4).
+The wall bucket is **~60% per-sector block pack/unpack + ~25% per-sector gauge-fix, ~0%
+decomposition** (#589's drill-down: `broadcast_in_dim`, `scatter_mul`, `squeeze`/`reshape`/`slice`,
+`_fix_svd_signs` sign logic). `TENAX_BATCH_BLOCKSPARSE` is an umbrella gate that **stacks the
+per-sector block/contraction ops across sectors**, so XLA lowers them to fewer kernels → ~20% fewer
+HLO instructions. But the gate does **not** vectorize the per-sector **gauge-fix / sign logic**
+(`_gauge_fix_symmetric_svd`, `_fix_svd_signs` — #589's ~25%), and the SVD primitives stay per-call.
+So the win is capped at the block-pack share and slightly **diminishes with χ** (0.80→0.84 across
+χ=8→16 at D=4) as the un-stacked gauge-fix/sign part grows with surviving sectors.
 
-(An XLA `slow_operation_alarm` fired on constant-folding a `scatter-add` of shape
-`f64[16,6,6,8,8,8]` during the D=4 backward — direct evidence that block-pack scatter emission is
-a real slice of the compile, which is exactly the part batching trims.)
+(Direct corroboration: an XLA `slow_operation_alarm` fired constant-folding a `scatter-add` of
+shape `f64[16,6,6,8,8,8]` during the D=4 backward — block-pack scatter emission is a real,
+trimmable slice of compile.)
 
-## Methodological note (so it doesn't recur)
+## Method lesson (recorded twice now, both directions)
 
-A cheap **jaxpr `svd`-primitive count** diff (off vs on) showed *identical* graphs — which led me
-to predict "no effect." That was wrong: **jaxpr primitive count ≠ lowered-HLO instruction count**.
-The umbrella gate restructures contraction lowering without changing the `svd` primitive count, so
-only the **compile/HLO measurement** revealed the ~20% win. Trust the HLO/compile measurement over
-jaxpr op-counts for compile-cost questions.
+`jaxpr` primitive op-count is **not** a proxy for lowered-HLO / compile size:
+- I earlier predicted batching = "no-op" from an identical jaxpr `svd`-count → wrong (HLO −20%).
+- #589 dismissed batching from jaxpr op-count +2.8% → also missed the HLO −20%.
+
+For any **compile-cost** question, measure the **HLO/compiled** artifact, not the jaxpr.
 
 ## #570 conclusion — levers exhausted
-
-The minutes-long fermionic CTM-AD compile wall (`_jit_fused_fixed_point_bwd`, ~549 s at D=4/χ=12)
-is dominated by the **per-sector block-sparse SVD VJP**, summed over sectors × projectors × the
-fixed-point backward. Lever inventory:
 
 | Lever | Verdict | Why |
 |---|---|---|
 | #200 cuTensorNet contraction backend | NO-GO | backend-invariant; wall isn't the contraction executor |
 | Lever-1: QR projector | NO-GO | no-op as config flip (2×2 path is SVD-only; QR only in unused 1×1) |
-| Lever-2: truncated backprop | NO-GO (compile) | per-sweep SVD-VJP irreducible; explicit unroll ≈/worse than implicit |
-| Lever-3: block-sparse per-sector SVD VJP | MOOT | already implemented — it *is* the wall |
-| **Batching (`TENAX_BATCH_BLOCKSPARSE`)** | **PARTIAL** | **~15–22% compile, bounded, doesn't scale; + runtime penalty (#569)** |
+| Lever-2: truncated backprop | NO-GO (compile) | per-sweep structural emission irreducible; explicit unroll ≈/worse than implicit. (Runtime/robustness lever, not compile — #589 §5 agrees.) |
+| Lever-3: "implement block-sparse SVD VJP" | MOOT | already implemented; and the cost isn't the decomposition anyway (#589) |
+| **Batching (`TENAX_BATCH_BLOCKSPARSE`)** | **PARTIAL** | **~15–22% compile (HLO), bounded; + runtime penalty (#569)** |
 
-**No available lever reaches the original #200 target (~40× toward a ~13 s dense floor).** The wall
-is intrinsic to differentiating N per-sector block-sparse SVDs in XLA: the SVD-gradient (Lorentzian
-F-matrix) dense algebra per sector, super-linear in χ, summed over all projectors. Batching trims
-the surrounding contraction by ~20% but cannot touch the SVD-VJP core.
+**The wall is #566 per-sector structural emission** (block pack/unpack + gauge-fix), super-linear in
+χ via surviving-sector count, summed over projectors × the fixed-point backward. No available lever
+reaches the original #200 target (~40× toward a ~13 s dense floor).
+
+### The one lever that could go further
+
+Both threads converge on it: **extend the stacked-block representation (PR #586, contraction-only)
+to the SVD/projector wrapper** — stack the per-sector pack/unpack **and** gauge-fix/sign-fix across
+sectors instead of looping. `TENAX_BATCH_BLOCKSPARSE` already does the block/contraction part (this
+doc's ~20%); the remaining prize is vectorizing `_gauge_fix_symmetric_svd` + `_fix_svd_signs` (#589's
+~25% bucket) across sectors. High blast radius (#589's lever 2/3); the larger win but the harder
+build, and a scope decision since compile is one-time.
 
 ### Recommendation
 
-- **Default stays OFF.** The ~20% compile saving doesn't justify the warm-step regression for normal
-  optimization runs (many warm steps, one compile).
-- **Niche use:** if a workflow is compile-bound (e.g. rapid recompiles, short runs, CI), flipping
-  `TENAX_BATCH_BLOCKSPARSE=1` buys ~20% off compile — document it as a knob, don't change the default.
-- **To actually beat the wall** would require attacking the SVD-VJP itself (e.g. a cheaper SVD-gradient
-  formulation, or avoiding per-projector SVDs in the differentiated path) — a research-grade change, not
-  a config or batching tweak. Out of scope for #570 as posed; #570 is **characterized and concluded**.
+- **Default `TENAX_BATCH_BLOCKSPARSE` stays OFF** — the ~20% compile saving doesn't justify the
+  warm-step regression for normal optimization runs (many steps, one compile).
+- **Flip it ON for compile-bound niches** (rapid recompiles, short runs, CI) — document as a knob.
+- **To beat the wall**, pursue the stacked-block SVD/projector wrapper (above), not a cheaper
+  decomposition (the decomposition is ~0% — #589). #570 is **characterized and concluded**.
 
 ## Artifacts
 
-- `examples/profile_570_sweepvjp_compile.py` — the rig (honors `TENAX_BATCH_BLOCKSPARSE` via env)
+- `examples/profile_570_sweepvjp_compile.py` — the rig (honors `TENAX_BATCH_BLOCKSPARSE`)
 - `570_results/profile_570_d4_batchoff.json`, `…_d4_batchon.json` — D=4 OFF/ON sweep
 - `570_results/profile_570_batch_on_a100.json` — D=2 ON (vs `profile_570_sweepvjp_a100.json` OFF)
+- See also (PR #589): `2026-06-08-570-relocalized-not-decomposition.md`,
+  `examples/probe_bwd_subop_attribution_570.py`, `probe_decomp_vjp_cost_570.py`
