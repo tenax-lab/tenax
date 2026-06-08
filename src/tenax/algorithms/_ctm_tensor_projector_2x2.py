@@ -60,7 +60,8 @@ def _gauge_fix_symmetric_svd(
     ``|U[:, j]|`` across all U-blocks that share its bond charge, rotates U's
     column and Vh's row by ``conj(phase)`` / ``phase`` so that
     ``U @ diag(s) @ Vh == M`` is preserved.  Critical for the 2x2 closure
-    ``P_bot · P_top = I``.
+    ``P_bot · P_top = I`` (no intervening matrix to absorb a ``conj(phase)**2``
+    factor — see the docstring of :func:`_gauge_fixed_svd`).
 
     Vectorized over bond-charge sectors (#566): instead of looping over every
     bond column, we process each (static) bond charge once — stacking that
@@ -73,8 +74,10 @@ def _gauge_fix_symmetric_svd(
     bond_charges = np.asarray(bond_idx.charges, dtype=np.int32)
 
     # Group U-blocks by bond charge (last key entry) and Vh-blocks by bond
-    # charge (first key entry), preserving block-dict order so the stacked
-    # argmax matches the per-column reference's concatenation order.
+    # charge (first key entry). SymmetricTensor.blocks iterates in sorted-key
+    # order, so u_keys_by_q[q] preserves that order — the stacked M_q columns
+    # then match the original per-column loop's concatenation order, keeping
+    # the argmax (incl. ties) byte-identical.
     u_keys_by_q: dict[int, list] = {}
     for key in U_T.blocks:
         u_keys_by_q.setdefault(int(key[-1]), []).append(key)
@@ -82,8 +85,8 @@ def _gauge_fix_symmetric_svd(
     for key in Vh_T.blocks:
         vh_keys_by_q.setdefault(int(key[0]), []).append(key)
 
-    new_u_blocks: dict = dict(U_T.blocks)
-    new_vh_blocks: dict = dict(Vh_T.blocks)
+    new_u_blocks: dict[tuple[int, ...], jax.Array] = dict(U_T.blocks)
+    new_vh_blocks: dict[tuple[int, ...], jax.Array] = dict(Vh_T.blocks)
 
     # Detect dtype statically so we don't promote real blocks to complex.
     sample_block = next(iter(U_T.blocks.values()))
