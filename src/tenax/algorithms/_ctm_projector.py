@@ -1187,3 +1187,76 @@ def _compute_projector_tensor(
         as_symmetric=isinstance(C1g, SymmetricTensor),
     )
     return P, P, _eps_T_eigh
+
+
+def _reduced_qr_projector(
+    C1g: Tensor,
+    C4g: Tensor,
+    chi: int,
+    base_charges: np.ndarray | None = None,
+) -> Tensor:
+    """Dense reduced-corner QR-CTMRG projector (issue #570, Phase 1).
+
+    Productionizes the spike-validated "Candidate C" construction of the
+    reduced-corner QR-CTMRG scheme (Yang/Zhang/Corboz, arXiv:2505.00494): a
+    faithful, truncation-free projector that performs **no** large ``chi D^2``
+    SVD.  The only truncating decomposition is a tiny ``2*chi x 2*chi``
+    Hermitian eigendecomposition.
+
+    Construction (operating on the dense ``(fused | cut)`` corner matrices,
+    each shape ``(fused, chi)`` where ``fused = chi D^2`` and the cut leg
+    ``t1_r`` / ``t3_l`` is already ``chi`` — the reduced corner):
+
+    1. Concatenate both corners along the cut axis -> ``M : (fused, 2*chi)``.
+       Using BOTH corners keeps the projector correct off the C4v fixed point.
+    2. Unpivoted thin QR -> ``Q : (fused, 2*chi)`` with a ``diag(R) >= 0``
+       gauge fix (phase = d/|d|, 1 if |d| == 0) for forward smoothness and
+       uniqueness.
+    3. Build the small Hermitian ``R R^dagger`` and ``eigh`` it; keep the
+       top-``chi`` eigenvectors ``V``; the projector is ``P = Q @ V``.
+
+    This both-corners form provably spans the eigh density-matrix subspace via
+    ``R R^dagger``.  Candidate A (pure ``QR(C1g)`` alone) is the C4v
+    single-corner special case; the multisite / projector-pair generalization
+    is Phase 2.
+
+    Phase 1 is dense + forward only.  Returns a single ``DenseTensor`` ``P``
+    with labels ``(fused, chi_new)`` and flows ``(IN, OUT)`` — matching the
+    eigh/qr single-isometry contract.  The dispatch (a later task) returns
+    ``(P, P, jnp.asarray(0.0))``.
+    """
+    C1g_dense = _tensor_matrix_data(C1g)
+    C4g_dense = _tensor_matrix_data(C4g)
+
+    M = jnp.concatenate([C1g_dense, C4g_dense], axis=1)  # (fused, 2*chi)
+    Q, R = jnp.linalg.qr(M)
+    # diag(R) >= 0 gauge fix (uniqueness + forward smoothness).  For a zero
+    # diagonal entry the gauge is unconstrained, so phase = 1 (leave that
+    # column of Q untouched) rather than 0 (which would zero the column).
+    # Mirror of the dense "qr"/"eigh" branch sign-fix above.
+    diag_R = jnp.diag(R)
+    abs_diag = jnp.abs(diag_R)
+    unit = jnp.ones_like(diag_R)
+    phase = jnp.where(
+        abs_diag > 0, diag_R / jnp.where(abs_diag > 0, abs_diag, 1.0), unit
+    ).astype(R.dtype)
+    Q = Q * phase[None, :]
+    R = R * jnp.conj(phase)[:, None]
+
+    # Tiny 2*chi x 2*chi Hermitian eigendecomposition selects the chi dominant
+    # directions (top-chi eigenvectors, descending).  No large SVD anywhere.
+    rho_small = R @ R.conj().T
+    rho_small = 0.5 * (rho_small + rho_small.conj().T)
+    eigvals, eigvecs = jnp.linalg.eigh(rho_small)
+    k = min(chi, len(eigvals))
+    V = eigvecs[:, -k:][:, ::-1]
+    P_dense = Q @ V  # (fused, k)
+
+    fused_idx = C1g.indices[C1g.labels().index("fused")]
+    chi_new_idx = _make_chi_new_index(fused_idx, k, base_charges)
+    return _wrap_dense_projector(
+        P_dense,
+        fused_idx,
+        chi_new_idx,
+        as_symmetric=isinstance(C1g, SymmetricTensor),
+    )
