@@ -178,7 +178,7 @@ def _build_physical_state_heisenberg_D2():
     return _PHYS_STATE
 
 
-def _heisenberg_D2_ctm_energy_1x1(chi, projector_method):
+def _heisenberg_D2_ctm_energy_1x1(chi, projector_method, max_iter=200):
     """Converged single-site (1x1) dense CTM energy for the given projector.
 
     Mirrors the spike's drive of the canonical single-site sweep
@@ -188,12 +188,15 @@ def _heisenberg_D2_ctm_energy_1x1(chi, projector_method):
     ``"qr"`` method runs the ``qr_warmup_steps`` eigh warm-up (matching the
     spike's 6-sweep eigh warm-up) before switching to the reduced-corner QR
     projector; energy via ``compute_energy_ctm_tensor(A, env, gate_rot)``.
+
+    ``max_iter`` is exposed so a fixed-point-stability check can re-converge
+    with a larger sweep budget (the CTM still stops early at ``conv_tol``).
     """
     A, gate_rot = _build_physical_state_heisenberg_D2()
     env, _eps = ctm_tensor(
         A,
         chi=chi,
-        max_iter=200,
+        max_iter=max_iter,
         conv_tol=1e-10,
         projector_method=projector_method,
         qr_warmup_steps=6,
@@ -220,3 +223,30 @@ def test_reduced_qr_energy_gap_shrinks_with_chi():
         - _heisenberg_D2_ctm_energy_1x1(16, "eigh")
     )
     assert g16 <= g8 + 1e-12  # gap does not grow as chi increases
+
+
+@pytest.mark.algorithm
+def test_reduced_qr_ctm_converges_with_warmup():
+    """The ``qr`` 1x1 CTM (eigh warm-up active, ``qr_warmup_steps=6 > 0``)
+    converges to a clean, stable fixed point.
+
+    Two non-flaky assertions:
+
+    * **Finite, real energy** — no NaN/Inf escapes the reduced-corner QR
+      projector or its eigh warm-up.
+    * **Fixed-point stability** — re-converging with a doubled sweep budget
+      does not move the energy.  Since ``ctm_tensor`` stops early at
+      ``conv_tol`` (the helper's ``conv_tol=1e-10``), both runs reach the
+      *same* fixed point and their energies must agree to far tighter than the
+      assertion threshold; any residual drift (a limit cycle, or QR failing to
+      hold the eigh fixed point) would surface here.
+    """
+    # Finite, real energy (no NaN/Inf) from the qr + warm-up CTM:
+    e = _heisenberg_D2_ctm_energy_1x1(chi=8, projector_method="qr")
+    assert np.isfinite(e)
+
+    # Converged fixed point: doubling max_iter does not move the energy.
+    e_n = _heisenberg_D2_ctm_energy_1x1(chi=8, projector_method="qr", max_iter=100)
+    e_2n = _heisenberg_D2_ctm_energy_1x1(chi=8, projector_method="qr", max_iter=200)
+    assert np.isfinite(e_n) and np.isfinite(e_2n)
+    assert abs(e_n - e_2n) < 1e-8
