@@ -73,3 +73,35 @@ def test_reduced_qr_projector_is_isometry(chi):
     np.testing.assert_allclose(
         np.asarray(gram), np.eye(chi), atol=1e-9
     )
+
+
+def test_gauge_fix_qr_dense_makes_diag_R_nonneg_and_preserves_QR():
+    import jax, jax.numpy as jnp, numpy as np
+    jax.config.update("jax_enable_x64", True)
+    from tenax.algorithms._ctm_projector import _gauge_fix_qr_dense
+    key = jax.random.PRNGKey(3)
+    M = jax.random.normal(key, (12, 6))
+    Q, R = jnp.linalg.qr(M)
+    Qf, Rf = _gauge_fix_qr_dense(Q, R)
+    # Orthonormal columns preserved:
+    np.testing.assert_allclose(Qf.conj().T @ Qf, np.eye(Qf.shape[1]), atol=1e-10)
+    # Reconstruction preserved: Qf @ Rf == Q @ R == M
+    np.testing.assert_allclose(Qf @ Rf, M, atol=1e-10)
+    # diag(Rf) real, non-negative:
+    d = jnp.diag(Rf)
+    assert jnp.all(jnp.real(d) >= -1e-12)
+    assert jnp.allclose(jnp.imag(d), 0.0, atol=1e-10)
+
+
+def test_gauge_fix_qr_dense_is_smooth_under_perturbation():
+    import jax, jax.numpy as jnp, numpy as np
+    jax.config.update("jax_enable_x64", True)
+    from tenax.algorithms._ctm_projector import _gauge_fix_qr_dense
+    key = jax.random.PRNGKey(5)
+    M = jax.random.normal(key, (12, 6))
+    dM = 1e-7 * jax.random.normal(jax.random.PRNGKey(6), (12, 6))
+    def q_of(scale):
+        Q, R = jnp.linalg.qr(M + scale * dM)
+        Qf, _ = _gauge_fix_qr_dense(Q, R)
+        return Qf
+    assert jnp.max(jnp.abs(q_of(1.0) - q_of(0.0))) < 1e-3  # no O(1) sign flip for O(eps) perturbation

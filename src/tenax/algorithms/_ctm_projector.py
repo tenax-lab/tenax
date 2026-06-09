@@ -1061,14 +1061,7 @@ def _compute_projector_tensor(
         # diagonal entry is exactly zero the gauge is unconstrained, so
         # use phase=1 (leave the column/row untouched) rather than
         # phase=0 which would zero out that column of Q and row of R.
-        diag_R = jnp.diag(R)
-        abs_diag = jnp.abs(diag_R)
-        unit = jnp.ones_like(diag_R)
-        phase = jnp.where(
-            abs_diag > 0, diag_R / jnp.where(abs_diag > 0, abs_diag, 1.0), unit
-        ).astype(R.dtype)
-        Q = Q * phase[None, :]
-        R = R * jnp.conj(phase)[:, None]
+        Q, R = _gauge_fix_qr_dense(Q, R)
         if _has_tracers:
             from tenax.algorithms._ad_primitives import regularized_svd
 
@@ -1189,6 +1182,20 @@ def _compute_projector_tensor(
     return P, P, _eps_T_eigh
 
 
+def _gauge_fix_qr_dense(Q, R):
+    """Rephase QR factors so diag(R) is real-nonnegative (zero-diagonal -> phase 1),
+    preserving Q @ R.  Makes the QR gauge continuous across CTM iterations (jnp.linalg.qr's
+    sign choice is input-dependent; tiny perturbations otherwise flip Q's column signs)."""
+    diag_R = jnp.diag(R)
+    abs_diag = jnp.abs(diag_R)
+    phase = jnp.where(
+        abs_diag > 0, diag_R / jnp.where(abs_diag > 0, abs_diag, 1.0), jnp.ones_like(diag_R)
+    ).astype(R.dtype)
+    Q = Q * phase[None, :]
+    R = R * jnp.conj(phase)[:, None]
+    return Q, R
+
+
 def _reduced_qr_projector(
     C1g: Tensor,
     C4g: Tensor,
@@ -1234,14 +1241,7 @@ def _reduced_qr_projector(
     # diagonal entry the gauge is unconstrained, so phase = 1 (leave that
     # column of Q untouched) rather than 0 (which would zero the column).
     # Mirror of the dense "qr"/"eigh" branch sign-fix above.
-    diag_R = jnp.diag(R)
-    abs_diag = jnp.abs(diag_R)
-    unit = jnp.ones_like(diag_R)
-    phase = jnp.where(
-        abs_diag > 0, diag_R / jnp.where(abs_diag > 0, abs_diag, 1.0), unit
-    ).astype(R.dtype)
-    Q = Q * phase[None, :]
-    R = R * jnp.conj(phase)[:, None]
+    Q, R = _gauge_fix_qr_dense(Q, R)
 
     # Tiny 2*chi x 2*chi Hermitian eigendecomposition selects the chi dominant
     # directions (top-chi eigenvectors, descending).  No large SVD anywhere.
