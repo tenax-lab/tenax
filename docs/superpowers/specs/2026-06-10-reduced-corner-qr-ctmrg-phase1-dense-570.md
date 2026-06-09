@@ -140,3 +140,97 @@ eigh/SVD; QR is opt-in via `projector_method="qr"` on the 1×1 path.
   motivates removing *all* SVDs (Phase 3).
 - Codebase map: `_ctm_tensor_moves.py` (1×1 moves), `_ctm_projector.py` (`_compute_projector_tensor`
   dispatch + dense QR sign-fix), `_ctm_tensor_convergence.py:641` (warm-up), `ipeps_config.py:76,78`.
+
+---
+
+## Phase 1 Task 1 result
+
+**Status: DONE — faithful (no-large-SVD) reduced-corner QR projector VALIDATED.**
+
+Probe: `examples/probe_reduced_corner_qr_reconstruction_570.py`
+(`JAX_PLATFORMS=cpu uv run python examples/probe_reduced_corner_qr_reconstruction_570.py`, x64).
+
+### Harness
+
+- **State.** Spin-1/2 2D Heisenberg, `heisenberg_gate()` → `sublattice_rotate_gate` (AFM → uniform
+  single-site). D=2 physical tensor from `ipeps()` simple update, then **C₄ᵥ-symmetrized**
+  (`symmetrize_c4v`) and renormalized. The C₄ᵥ symmetrization is **load-bearing**: without it the
+  four directional 1×1 moves are inequivalent and the single-site eigh sweep **limit-cycles at
+  `sv_diff ~ 1e-4`** (the documented #425/#426 plateau), making the eigh oracle untrustworthy. After
+  symmetrization the eigh 1×1 CTM converges to `sv_diff < 1e-10`.
+- **Driver.** `_ctm_tensor_sweep` (the canonical single-site sweep: `_ctm_tensor_move_{left,top,
+  right,bottom}` with `env,env` self-neighbors) — the exact 1×1 path the spec points at
+  (`_ctm_tensor_moves.py:659-711`), which calls `_compute_projector_tensor`. **Not** the multisite
+  `recipe="1x1"` sweep nor the default `recipe="2x2"` (the latter never calls
+  `_compute_projector_tensor` — it uses the Fishman 2×2 projector). Candidate projectors are
+  substituted by monkeypatching `_ctm_tensor_moves._compute_projector_tensor` after a 6-sweep eigh
+  warm-up; energy via `compute_energy_ctm_tensor(A, env, gate_rot)`.
+
+### Corner diagnostic (chi=8 left move, near fixed point)
+
+| quantity | value |
+|---|---|
+| `C1g_shape` | `(32, 8)` = (fused=χD²=8·4, **cut=χ=8**) |
+| `C4g_shape` | `(32, 8)` |
+| `‖C1g − C4g‖` | `2.36e-5` (≈ C₄ᵥ-equal, not identical) |
+| `‖span(Q1) − span(eigh)‖` | `9.27e-3` |
+| `‖span(Q1) − span(Q4)‖` | `1.85e-2` |
+
+The cut leg is **already χ=8**, so `QR(C1g)` is rank-χ and **truncates nothing** — the faithful
+no-truncation property holds. Note `span(Q1)` is *not* identical to the eigh density-matrix subspace
+(differ ~1e-2); the energy nonetheless matches to ~1e-13 because the residual is a **projector gauge
+that washes out at the CTM fixed point**.
+
+### Energy table (`|ΔE| = |E_cand − E_eigh|`)
+
+| candidate | χ=8 | χ=16 | χ=24 | max\|ΔE\| | converges? |
+|---|---|---|---|---|---|
+| **eigh (oracle)** | −0.5136309912 | −0.5136309931 | −0.5136309931 | — | yes |
+| **A** (pure reduced corner, **no SVD**) | −0.5136309912 | −0.5136309931 | −0.5136309931 | **1.2e-13** | yes |
+| B (reduced + χ×χ overlap-SVD) | −0.5133048085 | −0.5390786558 | −0.5020165832 | 2.5e-2 | **no** |
+| C (diagnostic: concat→QR→2χ×2χ eigh) | −0.5136309912 | −0.5136309931 | −0.5136309931 | 3.3e-16 | yes |
+
+\|ΔE\| shrinks/stays at floor as χ grows for A (3.7e-15 → 1.2e-13 → 3.3e-16, all at machine-precision
+floor). A second, independently simple-updated physical state reproduces the A match (\|ΔE\| ~1e-15
+at χ∈{8,16,24}, converged) — not a single-state accident. E ≈ −0.5136 is the D=2 short-SU state's
+CTM energy (consistency reference, not the QMC −0.6694); the spike validates **projector agreement on
+a fixed `a`**, not absolute accuracy.
+
+### VERDICT — WINNER: **Candidate A** (faithful, no large SVD). Target REACHED.
+
+The pure reduced corner reproduces the eigh energy to **machine precision** at χ=8 and stays at the
+floor as χ grows, while converging cleanly. The faithful truncation-free goal (no χD² SVD anywhere)
+is met. Candidate B (extra χ×χ overlap-SVD) is **rejected** — it destabilizes the single-isometry
+CTM and does not converge. Candidate C (the existing dense `qr` path: `[C1g|C4g]`→QR→2χ×2χ eigh)
+also matches to machine precision and is the **robust general fallback** (it provably spans the eigh
+density-matrix subspace via `R Rᴴ`, using only a tiny 2χ×2χ eigh — still no large SVD), but it is
+**not** the minimal reduced corner.
+
+### EXACT construction of the winner (Candidate A) — for Task 2 to productionize verbatim
+
+In `_ctm_tensor_move_left` the enlarged corner `C1g` has labels `(fused, t1_r)` with
+`dim(fused)=χD²`, `dim(t1_r)=χ` (already χ — the reduced corner). As a dense `(fused | t1_r)` matrix:
+
+```
+C1 = C1g._data                      # (χD², χ), fused = rows, cut leg = cols
+Q1, R1 = qr(C1)                     # unpivoted thin QR → Q1: (χD², χ)
+# diag(R)>=0 gauge fix (uniqueness + AD-smoothness):
+d     = diag(R1)
+phase = where(|d|>0, d/|d|, 1)      # 1 if |d|==0 (gauge unconstrained)
+Q1    = Q1 * phase[None, :]         # column-wise
+P     = Q1                          # (fused, chi_new) isometry; P_1 = P_2 = P
+```
+
+`P` is wrapped as `(fused, chi_new)`, flows `(IN, OUT)`, via `_make_chi_new_index` +
+`_wrap_dense_projector`, then returned as `(P, P, eps_T=0.0)` — matching the existing eigh/qr
+single-isometry contract. No SVD, no eigendecomposition, no χD² object decomposed. (The cut leg
+being already χ is what guarantees `Q1` is the full χ-isometry with zero truncation.)
+
+**Caveats / for Task 2.** (1) Validated only at the **C₄ᵥ single-site fixed point**; the `‖C1g−C4g‖`
+≈ 2.4e-5 residual means a fully **general (non-C₄ᵥ / multisite)** cell may need a both-corners
+construction — Candidate **C** (concat→QR→small eigh) is the de-risked, faithful general form and
+should be the Task-2 starting point if A's single-corner choice proves gauge-fragile off the C₄ᵥ
+point. (2) Forward-only — AD smoothness of the `diag(R)≥0` QR is asserted by construction here, not
+yet measured (Phase 2 / T3). (3) eigh-oracle convergence on the 1×1 single-site path **requires**
+C₄ᵥ-symmetric `a`; productionizing on raw (non-symmetric) cells must use the multisite/2×2 machinery,
+not `_ctm_tensor_sweep`.
