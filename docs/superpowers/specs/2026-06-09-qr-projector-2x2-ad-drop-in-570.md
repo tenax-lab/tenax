@@ -3,7 +3,15 @@
 **Date:** 2026-06-09
 **Issue:** #570 (CTM-AD compile/runtime wall = block-sparse SVD VJP, confirmed PR #589)
 **Umbrella:** #566 · **Branch:** `feat/qr-projector-2x2-570` (off `main`)
-**Status:** DESIGN — awaiting build
+**Status:** ❌ NO-GO (2026-06-09) — superseded by the faithful reduced-corner QR-CTMRG.
+Three pre-build spikes killed the drop-in: (1) raw QR VJP needs `regularized_qr` near
+rank-deficiency; (2) PR #593 already banked the decomposition win — post-#593 the SVD-VJP is
+only ~10% of the backward (not #589's 61%, which was the per-column gauge-fix #593 vectorized),
+so drop-in saves only ~4.4% of backward ops; (3) compile micro-spike: a single symmetric SVD
+backward lowers to 2.2–2.5× the HLO of QR, but drop-in is **capped at ~1.4× per-projector compile**
+because it keeps the M′ truncation SVD. The full ~2.2–2.5× is only reachable by removing **all
+three** SVDs → the faithful reduced-corner scheme. See
+`docs/superpowers/handoffs/2026-06-09-570-qr-dropin-nogo-pivot-faithful.md`.
 
 ---
 
