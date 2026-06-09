@@ -28,6 +28,12 @@ from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
 
+# --- energy-agreement harness imports (reused from the spike) ---------------
+from tenax import CTMConfig, heisenberg_gate, ipeps, iPEPSConfig
+from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
+from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+from tenax.algorithms.ipeps import sublattice_rotate_gate, symmetrize_c4v
+
 
 def _build_dense_enlarged_corners(chi: int, D: int = 2, seed: int = 0):
     """Build a representative dense enlarged-corner pair ``(C1g, C4g)``.
@@ -127,3 +133,90 @@ def test_gauge_fix_qr_dense_is_smooth_under_perturbation():
         Qf, _ = _gauge_fix_qr_dense(Q, R)
         return Qf
     assert jnp.max(jnp.abs(q_of(1.0) - q_of(0.0))) < 1e-3  # no O(1) sign flip for O(eps) perturbation
+
+
+# --------------------------------------------------------------------------- #
+# Energy-agreement harness (reduced-corner QR vs eigh), reused from the spike  #
+# examples/probe_reduced_corner_qr_reconstruction_570.py.                      #
+#                                                                              #
+# The spike validated Candidate C (the production "qr" path now routed through #
+# _reduced_qr_projector) on the spin-1/2 2D Heisenberg model at D=2 in the     #
+# single-site (1x1) dense CTM, measuring |E_qr - E_eigh| ~ 1e-13.  These tests #
+# turn that validation into a regression.                                      #
+# --------------------------------------------------------------------------- #
+
+# Building the physical state (simple update) is expensive; cache it once.
+_PHYS_STATE = None
+
+
+def _build_physical_state_heisenberg_D2():
+    """Build a C4v-symmetrized D=2 single-site Heisenberg ``A`` + rotated gate.
+
+    Copied/adapted from the spike harness ``build_physical_state``: sublattice
+    rotation makes the Neel AFM ground state a *uniform* single-site iPEPS;
+    simple update converges a physical ``A``; then ``A`` is **C4v-symmetrized**
+    (load-bearing — otherwise the four directional 1x1 moves are inequivalent
+    and the single-site eigh sweep limit-cycles at the #425/#426 plateau, so the
+    eigh oracle is untrustworthy) and renormalized.
+    """
+    global _PHYS_STATE
+    if _PHYS_STATE is not None:
+        return _PHYS_STATE
+
+    gate = heisenberg_gate()
+    gate_rot = sublattice_rotate_gate(gate)
+    config = iPEPSConfig(
+        max_bond_dim=2,
+        num_imaginary_steps=400,
+        dt=0.05,
+        ctm=CTMConfig(chi=16, max_iter=80, projector_method="eigh"),
+    )
+    _E_su, (A, _B), _envs = ipeps(gate_rot, initial_peps=None, config=config)
+    A = DenseTensor(symmetrize_c4v(A._data), A.indices)
+    A = A * (1.0 / float(A.norm()))
+    _PHYS_STATE = (A, gate_rot)
+    return _PHYS_STATE
+
+
+def _heisenberg_D2_ctm_energy_1x1(chi, projector_method):
+    """Converged single-site (1x1) dense CTM energy for the given projector.
+
+    Mirrors the spike's drive of the canonical single-site sweep
+    (``_ctm_tensor_sweep``, reached here via the public ``ctm_tensor`` entry on
+    a DenseTensor, which selects ``_ctm_tensor_sweep`` and therefore exercises
+    ``_compute_projector_tensor`` — the 1x1 path the spec points at).  The
+    ``"qr"`` method runs the ``qr_warmup_steps`` eigh warm-up (matching the
+    spike's 6-sweep eigh warm-up) before switching to the reduced-corner QR
+    projector; energy via ``compute_energy_ctm_tensor(A, env, gate_rot)``.
+    """
+    A, gate_rot = _build_physical_state_heisenberg_D2()
+    env, _eps = ctm_tensor(
+        A,
+        chi=chi,
+        max_iter=200,
+        conv_tol=1e-10,
+        projector_method=projector_method,
+        qr_warmup_steps=6,
+    )
+    return float(compute_energy_ctm_tensor(A, env, gate_rot))
+
+
+@pytest.mark.algorithm
+@pytest.mark.parametrize("chi", [8, 16])
+def test_reduced_qr_energy_matches_eigh_heisenberg_D2(chi):
+    e_eigh = _heisenberg_D2_ctm_energy_1x1(chi=chi, projector_method="eigh")
+    e_qr = _heisenberg_D2_ctm_energy_1x1(chi=chi, projector_method="qr")
+    assert abs(e_qr - e_eigh) < 1e-3  # loosened vs eps; different scheme, same physics
+
+
+@pytest.mark.algorithm
+def test_reduced_qr_energy_gap_shrinks_with_chi():
+    g8 = abs(
+        _heisenberg_D2_ctm_energy_1x1(8, "qr")
+        - _heisenberg_D2_ctm_energy_1x1(8, "eigh")
+    )
+    g16 = abs(
+        _heisenberg_D2_ctm_energy_1x1(16, "qr")
+        - _heisenberg_D2_ctm_energy_1x1(16, "eigh")
+    )
+    assert g16 <= g8 + 1e-12  # gap does not grow as chi increases
