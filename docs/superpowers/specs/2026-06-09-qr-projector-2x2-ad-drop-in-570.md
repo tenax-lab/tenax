@@ -326,3 +326,90 @@ not capture. **The go/no-go for the full build (Tasks 3–9) should therefore hi
 on the A100 compile-time measurement (Task 8), not this op fraction.** If the
 A100 number does not show a real compile win, this is a NO-GO — the op-count case
 alone (~4.4 %) no longer justifies the build post-#593.
+
+## Compile micro-spike result
+
+Probe `examples/probe_svd_vs_qr_compile_570.py` (CPU, x64). The decisive
+**compile-time** test the Task-2 caveat deferred to: it isolates a *single*
+symmetric decomposition — the exact `tenax.linalg.svd(M, …, max_singular_values=None)`
+the projector calls for M1/M2 vs `tenax.linalg.qr(M, …)` — and measures the
+forward (`jax.jit(f)`) and backward (`jax.jit(jax.grad(f))`) **lowered-HLO
+instruction count** (deterministic) and **cold wall compile time** (fresh on-disk
+cache dir per compile, warm-once then median of N cold reps). No projector build,
+no CTM run — pure decomposition compile attribution.
+
+**M is synthetic-representative** (the spec's sanctioned fallback): a 4-leg
+`(chi_L,d_L)×(chi_R,d_R)` U(1) `SymmetricTensor` with χ-leg charges {-1,0,0,1}
+repeated to length χ and D-leg charges {-1,0,0,1} (D=4) / {0,1} (D=2), grouped to
+a (χD × χD) matrix carrying the multi-sector block structure of a real M1/M2
+(D=4/χ=12 → χD=48, 9 fused-charge sectors), decomposed by the *same* production
+`tenax.linalg.svd`/`qr`. (Driving the full enlarged-corner fixture for a
+byte-real M1_T is unnecessary for an isolated-decomposition compile measurement
+and was avoided to keep the spike cheap; the synthetic M's per-sector lowering is
+production-faithful.)
+
+Commands:
+```
+JAX_PLATFORMS=cpu uv run python examples/probe_svd_vs_qr_compile_570.py --D 4 --chi 12 --reps 5
+JAX_PLATFORMS=cpu uv run python examples/probe_svd_vs_qr_compile_570.py --D 2 --chi 12 --reps 3
+```
+
+| decomp | size (χD) | fwd_HLO | bwd_HLO | fwd_compile_s | bwd_compile_s |
+|---|---|---|---|---|---|
+| **D=4, χ=12** | | | | | |
+| SVD | 48×48 | 1144 | 3253 | 0.21 | 0.45 |
+| QR  | 48×48 |  541 | 1451 | 0.16 | 0.31 |
+| 3×SVD (current, distinct inputs) | 48×48 | — | 9679 | — | 1.27 |
+| 2×QR+1×SVD (drop-in) | 48×48 | — | 6108 | — | 0.89 |
+| **D=2, χ=12** | | | | | |
+| SVD | 24×24 | 761 | 2299 | 0.16 | 0.29 |
+| QR  | 24×24 | 309 |  911 | 0.11 | 0.20 |
+| 3×SVD (current) | 24×24 | — | 6812 | — | 0.72 |
+| 2×QR+1×SVD (drop-in) | 24×24 | — | 4061 | — | 0.55 |
+
+**Headline — SVD/QR backward ratios:**
+
+| metric | D=4/χ=12 | D=2/χ=12 |
+|---|---|---|
+| single-decomp backward **HLO** ratio | **2.24×** | **2.52×** |
+| single-decomp backward **compile-time** ratio | **1.47×** | **1.43×** |
+| composite per-projector **HLO** ratio (3×SVD ÷ 2QR+1SVD) | **1.58×** | **1.68×** |
+| composite per-projector **compile-time** ratio | **1.42×** | **1.32×** |
+
+Reliability: HLO instruction counts are **byte-deterministic** (identical across
+reps and across the D=2/D=4 verification runs). Cold compile-time ratios reproduce
+within ≈0.05× across reps (single-decomp 1.43–1.48×, composite 1.32–1.42×), so the
+ratios' magnitude is trustworthy. The composite uses three *distinct* rescaled
+inputs (1.0/1.3/0.7·M) — an earlier reuse-`m` version let XLA CSE 3×SVD → 1×SVD
+and reported a false ~1.0× composite; with distinct inputs the 3×SVD HLO is
+≈3× the single SVD, as expected.
+
+### Verdict: **MARGINAL → recommend the small end-to-end A100 check (Task 8) before the full build**
+
+- **A single symmetric SVD backward does compile to ≈2.2–2.5× the HLO of a QR
+  backward** — the per-decomposition op-emission belief is *confirmed* and crosses
+  the GO line on HLO. So XLA does lower the SVD VJP into materially more HLO than
+  QR, as hypothesized.
+- **But the quantity that actually matters — the per-projector composite compile
+  time — is only ≈1.3–1.4×, and the composite HLO only ≈1.6×.** Two reasons the
+  per-decomp 2.2× does not carry through: (a) the drop-in keeps the M′ truncating
+  SVD (QR cannot truncate to χ), and (b) two QR backwards still emit real HLO, so
+  replacing 2-of-3 SVDs nets ≈37 % fewer HLO, not 56 %. Cold compile time scales
+  *sub-linearly* in HLO here (the SVD/QR compile-time ratio 1.47× is well below the
+  HLO ratio 2.24×), so the realized per-projector compile win is even smaller than
+  the HLO delta.
+- Both the composite compile-time (≈1.3–1.4×) and composite HLO (≈1.6×) ratios sit
+  **inside the spec's MARGINAL band (1.3×–2×)**, stable across D∈{2,4}. This is
+  **not** the ≳2× the GO rule requires, but it is clearly **above the <1.3× NO-GO
+  floor**.
+
+**Recommendation:** MARGINAL. The drop-in plausibly shaves a per-projector
+compile fraction (~25–30 % of the differentiated-decomposition compile, gated by
+the retained M′ SVD), but the spike cannot promise the ≳2× that would make it a
+slam-dunk. Per the decision rule, run a **small end-to-end A100 compile-time check
+(Task 8: `profile_570_sweepvjp_compile.py`, svd vs a prototype qr projector, D=4
+χ∈{8,12,16})** *before* committing to the full Tasks 3–9 build. If that
+end-to-end number lands ≳1.5× on the whole fused backward compile, proceed; if it
+washes out to <1.3× (likely, since the projector decomposition compile is itself
+only a slice of the fused-backward compile, and #593 already removed the
+per-column gauge-fix mass), it is a NO-GO and #593 captured the reachable win.
