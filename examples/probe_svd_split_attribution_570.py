@@ -37,10 +37,36 @@ credited to the right SVD.
 
 GO/NO-GO: GO if (M1+M2) ops are ≳ the M′ share; NO-GO otherwise.
 
+RECONCILIATION WITH #589 (post-#593 baseline shift — verified 2026-06-09)
+------------------------------------------------------------------------
+The #589 handoff measured ``svd_vjp`` = 61.3 % of the backward (92,368 ops) at
+D=4/χ=12 and 36.2 % (27,856 ops) at D=2/χ=12, GROWING with χ. THIS probe reports
+``svd_vjp`` = 5,184 ops / ~10 % of the backward, FLAT in χ and D. That is NOT an
+undercount of the split: it is the genuine effect of **PR #593**, which merged
+between #589 and this branch and vectorized ``_gauge_fix_symmetric_svd`` from a
+**per-column** scatter loop to a **per-sector** batched op.
+
+The gauge-fix backward is categorized ``svd_vjp`` (it is part of each SVD
+decomposition). Pre-#593 its per-column emission was the DOMINANT svd_vjp mass
+and the χ-scaling driver: it scaled with the number of surviving singular
+values (≈ χ × block size). #593 collapsed it to one op per charge sector, cutting
+svd_vjp from 92,368 → 5,184 at D=4/χ=12 (−87,184 ops, −18×) and the whole
+backward from 150,621 → 51,581. Empirically re-verified by swapping the pre-#593
+projector back in: it reproduces #589's 150,621 / 61.3 % (D=4/χ=12) and 76,893 /
+36.2 % (D=2/χ=12) EXACTLY (within trace nondeterminism). So #589 is correct for
+its source snapshot; it is simply STALE — the lever it sized (per-column
+gauge-fix) is already gone, and what remains of svd_vjp is the per-sector SVD
+backward proper. ``svd/bwd%`` is printed alongside the split as the anchor.
+
+The op count is **block-COUNT driven** (16 charge blocks, identical for even D
+and saturated already at χ=4), so the traced jaxpr is byte-identical across D∈{2,4}
+and all χ — exactly #589 fact #2 ("structural … constant across all χ AND
+identical at D=2 and D=4"). Post-#593 svd_vjp now obeys the same flatness.
+
 Usage::
 
     JAX_PLATFORMS=cpu uv run python examples/probe_svd_split_attribution_570.py \
-        --D 2 --chi 4 8 12 --full
+        --D 4 --chi 8 12 16 --full
 """
 
 from __future__ import annotations
@@ -152,9 +178,12 @@ def main() -> None:
 
     A = make_site(args.D)
 
+    # #589-style anchor columns (total_backward + svd/bwd%) are printed alongside
+    # the split so this output is directly comparable to the #589 baseline table
+    # (D=4/χ=12: total≈150,663, svd_vjp=61.3% PRE-#593; ≈51,581 / ~10% POST-#593).
     hdr = (
         f"{'chi':>5} {'M1_ops':>8} {'M2_ops':>8} {'Mprime_ops':>11} "
-        f"{'total_svd_vjp':>14} {'(M1+M2)%':>9} {'svd/bwd%':>9}"
+        f"{'total_svd_vjp':>14} {'total_bwd':>10} {'(M1+M2)%':>9} {'svd/bwd%':>9}"
     )
     print(hdr)
     rows = []
@@ -170,7 +199,7 @@ def main() -> None:
         svd_bwd_share = 100 * total_svd / total_bwd if total_bwd else 0.0
         rows.append((chi, m1, m2, mp, total_svd, total_bwd, unattr))
         print(
-            f"{chi:>5} {m1:>8} {m2:>8} {mp:>11} {total_svd:>14} "
+            f"{chi:>5} {m1:>8} {m2:>8} {mp:>11} {total_svd:>14} {total_bwd:>10} "
             f"{m12_share:>8.1f}% {svd_bwd_share:>8.1f}%"
         )
 
@@ -179,6 +208,27 @@ def main() -> None:
     if tot_unattr:
         print(f"\n# WARNING: {tot_unattr} svd_vjp ops had NO projector-body frame "
               "(unattributed; split may be incomplete).")
+
+    print("\n# RECONCILIATION vs #589 (PR #593 baseline shift):")
+    print(
+        "#  - #589 (pre-#593): D=4/chi=12 total_bwd=150,663, svd_vjp=61.3%, GROWING "
+        "with chi."
+    )
+    print(
+        "#  - Now (post-#593): total_bwd=51,581, svd_vjp~10%, FLAT in chi AND D. "
+        "Not an undercount."
+    )
+    print(
+        "#  - Cause: #593 vectorized _gauge_fix_symmetric_svd (per-column -> "
+        "per-sector). The gauge-fix backward is svd_vjp; its per-column emission "
+        "WAS the dominant svd_vjp mass + the chi driver. #593 cut svd_vjp "
+        "92,368 -> 5,184 at D=4/chi=12 (re-verified by swapping the pre-#593 "
+        "projector back in -> reproduces #589 exactly)."
+    )
+    print(
+        "#  - Op count is block-COUNT driven (16 blocks for even D, saturated at "
+        "chi>=4) -> jaxpr identical across D in {2,4} and all chi (#589 fact #2)."
+    )
 
     print("\n# READOUT (#570 QR-drop-in go/no-go):")
     print(

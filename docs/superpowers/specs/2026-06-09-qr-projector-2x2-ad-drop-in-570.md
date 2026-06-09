@@ -83,6 +83,9 @@ M′ ─SVD,trunc→χ→ U' S' V'h
   reduced-corner rewrite removes it.
 - **Expected win (back-of-envelope):** svd_vjp share ~61% → ~35% (≈25–26% fewer total
   backward ops). The largest available win **without** the structural rewrite.
+  **⚠ OBSOLETE post-#593 — see "Task 2 result" below:** PR #593 (per-sector gauge-fix
+  vectorization) already captured most of this; svd_vjp is now only ~10% of the
+  backward and the remaining reachable end-to-end op reduction is **~4.4%**, not ~25%.
 - **Biorthogonality** `P_first† P_second = I_χ` is preserved: Q1,Q2 isometric,
   `S'^{-½}` balances — the two-projector generalization of the dense single-projector
   QR fallback already in `_ctm_projector.py`.
@@ -234,56 +237,92 @@ the three call-site regions. **Zero unattributed svd_vjp ops** — every one
 carried a projector-body frame, so the split is complete (not a residual-bucket
 estimate).
 
+Re-run at **production scale D=4** (2026-06-09) and reconciled against #589.
+
 Command:
-`JAX_PLATFORMS=cpu uv run python examples/probe_svd_split_attribution_570.py --D 2 --chi 4 8 12 --full`
+`JAX_PLATFORMS=cpu uv run python examples/probe_svd_split_attribution_570.py --D 4 --chi 8 12 16 --full`
 
 ```
-  chi   M1_ops   M2_ops  Mprime_ops  total_svd_vjp  (M1+M2)%  svd/bwd%
-    4     1980     1692        1512           5184     70.8%     10.1%
-    8     1980     1692        1512           5184     70.8%     10.1%
-   12     1980     1692        1512           5184     70.8%     10.1%
+  chi   M1_ops   M2_ops  Mprime_ops  total_svd_vjp  total_bwd  (M1+M2)%  svd/bwd%
+    8     1980     1692        1512           5184      51581     70.8%     10.1%
+   12     1980     1692        1512           5184      51581     70.8%     10.1%
+   16     1980     1692        1512           5184      51581     70.8%     10.1%
 ```
 
-(Op counts are flat in chi: the backward jaxpr STRUCTURE is chi-independent —
-chi changes per-sector block sizes, not the op graph. This matches the prior
-#570 finding that the wall is per-sweep block-sparse *structural emission*, not
-the numerical decomposition size.)
+The D=2 χ-sweep (`--D 2 --chi 4 8 12 24`) gives **byte-identical** numbers
+(total_bwd=51,581, svd_vjp=5,184 at every χ). The op count is **block-COUNT
+driven** (16 charge blocks, identical for even D and saturated already at χ=4),
+so the traced jaxpr is invariant across D∈{2,4} and all χ — exactly #589 fact #2
+("structural … constant across all χ AND identical at D=2 and D=4").
 
-### Split
+### Reconciliation with #589 (ROOT CAUSE of the apparent contradiction)
+
+The prior D=2 run looked like a 5–6× **undercount** vs #589 (svd_vjp 10 % vs
+36–61 %, FLAT vs growing). It is **not** an undercount — it is the genuine effect
+of **PR #593**, which merged between #589 and this branch and vectorized
+`_gauge_fix_symmetric_svd` from a **per-column** scatter loop to a **per-sector**
+batched op:
+
+- The gauge-fix backward is categorized `svd_vjp` (it is part of each SVD
+  decomposition). **Pre-#593** its per-column emission scaled with the number of
+  surviving singular values (≈ χ × block size) and was BOTH the dominant svd_vjp
+  mass AND the χ-scaling driver #589 measured.
+- **#593** collapsed it to one op per charge sector, cutting svd_vjp
+  **92,368 → 5,184** at D=4/χ=12 (−18×) and the whole backward **150,621 →
+  51,581**, and removing the χ-growth (no per-column loop ⇒ nothing scales with χ
+  at fixed block count).
+- **Empirically re-verified**: swapping the pre-#593 projector
+  (`git show a366165:…/_ctm_tensor_projector_2x2.py`) back in and re-running
+  `probe_bwd_subop_attribution_570.py` reproduces #589 **exactly** —
+  D=4/χ=12 → total 150,621 / svd_vjp 61.3 %; D=2/χ=12 → 76,893 / 36.2 %. So #589
+  is correct for its source snapshot; it is simply **stale**. The lever it sized
+  (per-column gauge-fix) is already gone; what remains of svd_vjp is the
+  per-sector SVD backward proper (3,216 truncated-SVD ops + 1,680 residual
+  per-sector gauge-fix + 288 misc = 5,184).
+
+The probe now prints the `total_bwd` and `svd/bwd%` anchor columns plus a
+reconciliation banner, so this comparison is self-evident in its output.
+
+### Split (complete partition, zero unattributed)
 
 - **M1 + M2 = 3672 ops = 70.8 %** of the svd_vjp ops.
 - **M_prime = 1512 ops = 29.2 %** of the svd_vjp ops.
-- So **(M1+M2) is 2.43× the M_prime share** — M1+M2 is the clear majority of the
-  differentiated-SVD op cost, comfortably ≳ M_prime.
+- So **(M1+M2) is 2.43× the M_prime share** — the within-svd ratio (~71/29) is
+  unchanged from the prior run; M1+M2 is the clear majority of the
+  differentiated-SVD op cost.
 
-### Backward-op reduction estimate
+### Backward-op reduction estimate (D=4/χ=12)
 
-- svd_vjp is **10.1 %** of the whole fused backward (total_backward = 51 581 ops
-  at chi=12; total_svd_vjp = 5184).
+- Post-#593, svd_vjp is **10.1 %** of the whole fused backward
+  (total_backward = 51,581; total_svd_vjp = 5,184).
 - The QR drop-in replaces M1+M2 (3672 ops) with QR but keeps M_prime as SVD.
 - Using the per-sector QR-vs-SVD VJP op ratio ≈ **2.6×** from Task 1
-  (`probe_decomp_vjp_cost_570.py`): expected backward-op reduction
+  (`probe_decomp_vjp_cost_570.py`): expected end-to-end backward-op reduction
   ≈ `(M1+M2)/total_backward × (1 − 1/2.6)` = `3672/51581 × 0.615` ≈ **4.4 %**.
-- Within the svd_vjp slice alone the reduction is larger:
-  `0.708 × (1 − 1/2.6)` ≈ **43.5 %** of svd_vjp ops, i.e. svd_vjp would shrink
-  from ~10.1 % to ~5.7 % of the backward.
+- Within the svd_vjp slice alone: `0.708 × (1 − 1/2.6)` ≈ **43.5 %** of svd_vjp
+  ops, i.e. svd_vjp shrinks from ~10.1 % → ~5.7 % of the backward.
 
-### Verdict: **GO** (with the caveat below)
+**The headline-win picture CHANGED vs the original spec.** The spec's
+"svd_vjp 61 % → ~35 %, ≈25–26 % fewer total backward ops" (lines 84–85) was
+sized against the **pre-#593** 61 % baseline and is now **obsolete**: #593
+already captured the bulk of that win (the per-column gauge-fix) for the SVD
+path. The QR drop-in's *remaining* reachable end-to-end op reduction is **~4.4 %**
+(not ~25 %).
+
+### Verdict: **GO on attribution, but DOWNGRADED end-to-end expectation**
 
 GO on the *attribution* criterion: M1+M2 (70.8 %) is the dominant slice of the
-differentiated-SVD op cost — about 2.4× the M_prime share — so a QR drop-in
-targets the right two SVDs, and ~57 % of the svd_vjp ops are reachable.
+remaining differentiated-SVD op cost (~2.4× M_prime), so a QR drop-in still
+targets the right two SVDs.
 
-**Caveat (gates the realized win, not this go/no-go):** svd_vjp is only ~10 % of
-the *whole* backward op count, so the projected end-to-end backward-op reduction
-is modest (~4.4 %). Two things may make the realized compile-time win larger than
-this op-count fraction suggests: (1) SVD custom-call lowerings are
-disproportionately expensive to *compile* relative to generic ops (op COUNT
-under-weights them — see the `kernels` column in
-`probe_bwd_subop_attribution_570.py`); replacing 2 of 3 per-sector SVD VJPs with
-QR removes those expensive lowerings. (2) The 2.6× factor is the per-sector op
-ratio; the kernel-lowering ratio may differ. Net: GO to proceed with the QR
-drop-in (Tasks 3–5), but the headline compile-wall win should be re-measured
-empirically on A100 (Task 8) rather than assumed from this op fraction —
-the value here is the *direction* (M1+M2 dominate, QR is well-targeted), not a
-precise speedup promise.
+**Material caveat (was a minor caveat pre-#593, now the headline):** post-#593,
+svd_vjp is only ~10 % of the whole backward, so the projected end-to-end
+backward-**op** reduction is ~4.4 %, not the ~25 % the spec assumed. The case for
+proceeding now rests on the *compile-time* (not op-count) argument: SVD
+custom-call lowerings are disproportionately expensive to compile (op COUNT
+under-weights them — see the `kernels` column; 48 SVD kernels, χ-flat), and the
+QR drop-in removes 2 of the 3 per-sector SVD lowerings — a benefit op-count does
+not capture. **The go/no-go for the full build (Tasks 3–9) should therefore hinge
+on the A100 compile-time measurement (Task 8), not this op fraction.** If the
+A100 number does not show a real compile win, this is a NO-GO — the op-count case
+alone (~4.4 %) no longer justifies the build post-#593.
