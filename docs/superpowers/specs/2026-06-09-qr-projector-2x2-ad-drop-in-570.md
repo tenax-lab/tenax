@@ -186,3 +186,38 @@ cheapest-first (TDD):
   lever (why QR ≠ eigh-of-Gram).
 - PR #593 — `_gauge_fix_symmetric_svd` per-sector vectorization (the gauge-fix pattern
   C1 mirrors).
+
+## Task 1 result
+
+SPIKE probe `examples/probe_qr_vjp_stability_570.py` run with
+`JAX_PLATFORMS=cpu uv run python examples/probe_qr_vjp_stability_570.py`
+(x64 enabled), exact output:
+
+```
+PASS  well-conditioned 12x12
+PASS  tall 16x8
+FAIL  near-rank-deficient 12x12: AssertionError:
+Not equal to tolerance rtol=0.0001, atol=0.0001
+VJP cotangent projection
+Mismatched elements: 1 / 1 (100%)
+Max absolute
+```
+
+- **well-conditioned 12×12** — PASS
+- **tall 16×8** — PASS
+- **near-rank-deficient 12×12** (trailing `drop=4` singular values zeroed) — FAIL
+  (`check_grads` reverse-mode cotangent mismatch beyond `rtol=atol=1e-4`)
+
+JAX's raw QR backward is fine for full-rank sectors but, exactly like the raw
+SVD backward, is **unstable when singular values collide / vanish** — the
+gauge-fixed `Q` cotangent blows up as `diag(R)` elements approach zero, which is
+precisely the regime CTM projector sectors hit near truncation.
+
+**DECISION: add `regularized_qr`.** A custom-VJP `regularized_qr` (analogous to
+the existing `regularized_svd` in `src/tenax/algorithms/_ad_primitives.py`) is
+required before the QR projector can be differentiated through safely. The raw
+`jnp.linalg.qr` VJP is **not** sufficient.
+
+**Task 1 Step 5 is TRIGGERED** (near-rank-deficient case FAILED): a
+`regularized_qr` custom-VJP must be implemented as a follow-up. Per the tight
+spike scope it is *not* implemented in this task — only flagged here.
