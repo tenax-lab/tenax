@@ -221,3 +221,69 @@ required before the QR projector can be differentiated through safely. The raw
 **Task 1 Step 5 is TRIGGERED** (near-rank-deficient case FAILED): a
 `regularized_qr` custom-VJP must be implemented as a follow-up. Per the tight
 spike scope it is *not* implemented in this task — only flagged here.
+
+## Task 2 result
+
+SPIKE — per-SVD cost attribution (`examples/probe_svd_split_attribution_570.py`).
+Reuses the fused-backward jaxpr and `svd_vjp` source-attribution of
+`examples/probe_bwd_subop_attribution_570.py`; sub-buckets every
+`svd_vjp`-attributed backward equation into {M1, M2, M_prime} by the source line
+of its originating `tensor_svd(...)` call inside `_ctm_tensor_projector_2x2.py`
+(M1≈L879/886, M2≈L889/896, M_prime≈L943/962/971/981), bucketed by proximity to
+the three call-site regions. **Zero unattributed svd_vjp ops** — every one
+carried a projector-body frame, so the split is complete (not a residual-bucket
+estimate).
+
+Command:
+`JAX_PLATFORMS=cpu uv run python examples/probe_svd_split_attribution_570.py --D 2 --chi 4 8 12 --full`
+
+```
+  chi   M1_ops   M2_ops  Mprime_ops  total_svd_vjp  (M1+M2)%  svd/bwd%
+    4     1980     1692        1512           5184     70.8%     10.1%
+    8     1980     1692        1512           5184     70.8%     10.1%
+   12     1980     1692        1512           5184     70.8%     10.1%
+```
+
+(Op counts are flat in chi: the backward jaxpr STRUCTURE is chi-independent —
+chi changes per-sector block sizes, not the op graph. This matches the prior
+#570 finding that the wall is per-sweep block-sparse *structural emission*, not
+the numerical decomposition size.)
+
+### Split
+
+- **M1 + M2 = 3672 ops = 70.8 %** of the svd_vjp ops.
+- **M_prime = 1512 ops = 29.2 %** of the svd_vjp ops.
+- So **(M1+M2) is 2.43× the M_prime share** — M1+M2 is the clear majority of the
+  differentiated-SVD op cost, comfortably ≳ M_prime.
+
+### Backward-op reduction estimate
+
+- svd_vjp is **10.1 %** of the whole fused backward (total_backward = 51 581 ops
+  at chi=12; total_svd_vjp = 5184).
+- The QR drop-in replaces M1+M2 (3672 ops) with QR but keeps M_prime as SVD.
+- Using the per-sector QR-vs-SVD VJP op ratio ≈ **2.6×** from Task 1
+  (`probe_decomp_vjp_cost_570.py`): expected backward-op reduction
+  ≈ `(M1+M2)/total_backward × (1 − 1/2.6)` = `3672/51581 × 0.615` ≈ **4.4 %**.
+- Within the svd_vjp slice alone the reduction is larger:
+  `0.708 × (1 − 1/2.6)` ≈ **43.5 %** of svd_vjp ops, i.e. svd_vjp would shrink
+  from ~10.1 % to ~5.7 % of the backward.
+
+### Verdict: **GO** (with the caveat below)
+
+GO on the *attribution* criterion: M1+M2 (70.8 %) is the dominant slice of the
+differentiated-SVD op cost — about 2.4× the M_prime share — so a QR drop-in
+targets the right two SVDs, and ~57 % of the svd_vjp ops are reachable.
+
+**Caveat (gates the realized win, not this go/no-go):** svd_vjp is only ~10 % of
+the *whole* backward op count, so the projected end-to-end backward-op reduction
+is modest (~4.4 %). Two things may make the realized compile-time win larger than
+this op-count fraction suggests: (1) SVD custom-call lowerings are
+disproportionately expensive to *compile* relative to generic ops (op COUNT
+under-weights them — see the `kernels` column in
+`probe_bwd_subop_attribution_570.py`); replacing 2 of 3 per-sector SVD VJPs with
+QR removes those expensive lowerings. (2) The 2.6× factor is the per-sector op
+ratio; the kernel-lowering ratio may differ. Net: GO to proceed with the QR
+drop-in (Tasks 3–5), but the headline compile-wall win should be re-measured
+empirically on A100 (Task 8) rather than assumed from this op fraction —
+the value here is the *direction* (M1+M2 dominate, QR is well-targeted), not a
+precise speedup promise.
