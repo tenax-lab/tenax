@@ -1247,7 +1247,8 @@ def _reduced_qr_projector(
 
     Phase 1 is dense + forward only.  Returns a single ``DenseTensor`` ``P``
     with labels ``(fused, chi_new)`` and flows ``(IN, OUT)`` — matching the
-    eigh/qr single-isometry contract.  The dispatch (a later task) returns
+    eigh/qr single-isometry contract.  The ``projector_method="qr"`` dense
+    forward branch of :func:`_compute_projector_tensor` calls this and returns
     ``(P, P, jnp.asarray(0.0))``.
     """
     C1g_dense = _tensor_matrix_data(C1g)
