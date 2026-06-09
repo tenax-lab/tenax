@@ -20,7 +20,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax.algorithms._ctm_projector import _reduced_qr_projector
+from tenax.algorithms._ctm_projector import (
+    _compute_projector_tensor,
+    _reduced_qr_projector,
+)
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
@@ -73,6 +76,25 @@ def test_reduced_qr_projector_is_isometry(chi):
     np.testing.assert_allclose(
         np.asarray(gram), np.eye(chi), atol=1e-9
     )
+
+
+def test_compute_projector_tensor_qr_uses_reduced_qr_dense():
+    """Dense forward ``projector_method='qr'`` dispatch routes through the
+    canonical ``_reduced_qr_projector`` (consolidation, issue #570 Phase 1)."""
+    chi = 6
+    C1g, C4g = _build_dense_enlarged_corners(chi)
+
+    P1, P2, eps = _compute_projector_tensor(C1g, C4g, chi, "qr", None, "auto")
+
+    # Single isometry (P_1 = P_2), and equals the canonical reference output.
+    P_ref = _reduced_qr_projector(C1g, C4g, chi)
+    np.testing.assert_allclose(P1.todense(), P_ref.todense(), atol=1e-10)
+    np.testing.assert_allclose(P1.todense(), P2.todense(), atol=1e-12)
+    assert float(eps) == 0.0
+
+    # Isometry holds through the dispatch:
+    g = P1._data.conj().T @ P1._data
+    np.testing.assert_allclose(np.asarray(g), np.eye(g.shape[0]), atol=1e-9)
 
 
 def test_gauge_fix_qr_dense_makes_diag_R_nonneg_and_preserves_QR():

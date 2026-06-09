@@ -857,6 +857,14 @@ def _compute_projector_tensor(
         C4g: Grown corner with labels ``(fused, <col2>)``.
         chi: Target bond dimension.
         projector_method: ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
+            On the **dense non-tracer forward** path, ``"qr"`` is the
+            reduced-corner QR isometry (issue #570, Phase 1): the dispatch
+            routes through the canonical ``_reduced_qr_projector`` (concat
+            both corners → QR → ``diag(R) >= 0`` gauge fix → tiny ``2χ×2χ``
+            ``eigh`` → top-χ).  The AD-tracer sub-branch (regularized-SVD)
+            and the ``SymmetricTensor`` non-tracer sub-branch
+            (``_qr_projector_symmetric``) are unchanged here and are handled
+            in later phases (Phase 2 = AD, Phase 3 = block-sparse).
         base_charges: Bond charges for per-sector allocation.
 
     Returns:
@@ -1023,8 +1031,19 @@ def _compute_projector_tensor(
         return P_1, P_2, _eps_T
 
     # --- QR path ---
+    #
+    # Sub-branch dispatch:
+    #   (a) SymmetricTensor non-tracer  -> _qr_projector_symmetric
+    #       (block-sparse; Phase 3 will replace this with a block-sparse
+    #       reduced-corner QR).
+    #   (b) Dense / SymmetricTensor-with-tracers (AD backward) -> dense
+    #       regularized-SVD path (Phase 2 handles AD).
+    #   (c) Dense non-tracer FORWARD -> the reduced-corner QR isometry
+    #       (issue #570, Phase 1).  Consolidated to call the canonical,
+    #       energy-validated _reduced_qr_projector so there is exactly one
+    #       implementation of the Candidate-C construction.
     if projector_method == "qr":
-        # Block-sparse QR for SymmetricTensor (non-tracer)
+        # Block-sparse QR for SymmetricTensor (non-tracer) -- sub-branch (a).
         if isinstance(C1g, SymmetricTensor) and isinstance(C4g, SymmetricTensor):
             has_tracers = isinstance(C1g._data, jax.core.Tracer) or isinstance(
                 C4g._data, jax.core.Tracer
@@ -1033,16 +1052,24 @@ def _compute_projector_tensor(
                 P = _qr_projector_symmetric(C1g, C4g, chi)
                 return P, P, jnp.asarray(0.0)
 
-        # Dense QR fallback — differentiable via regularized SVD when
-        # Dense QR fallback — only reached when blocks contain JAX tracers
-        # (AD backward) or for DenseTensor inputs.  Block-sparse
-        # _qr_projector_symmetric handles the non-tracer case above.
-        # (issue #282)
+        _has_tracers = isinstance(
+            _tensor_matrix_data(C1g), jax.core.Tracer
+        ) or isinstance(_tensor_matrix_data(C4g), jax.core.Tracer)
+
+        if not _has_tracers:
+            # Sub-branch (c): dense non-tracer forward.  The reduced-corner
+            # QR isometry (concat -> QR -> gauge fix -> tiny 2χ×2χ eigh ->
+            # top-χ -> P = Q @ V).  Routed through the canonical function so
+            # the dispatch runs exactly the energy-validated construction.
+            P = _reduced_qr_projector(C1g, C4g, chi, base_charges=base_charges)
+            return P, P, jnp.asarray(0.0)
+
+        # Sub-branch (b): dense QR fallback for the AD-traced path
+        # (blocks contain JAX tracers, or DenseTensor tracer inputs).
+        # Differentiable via regularized SVD.  Phase 2 handles AD; leave
+        # this byte-identical.  (issue #282)
         C1g_dense = _tensor_matrix_data(C1g)
         C4g_dense = _tensor_matrix_data(C4g)
-        _has_tracers = isinstance(C1g_dense, jax.core.Tracer) or isinstance(
-            C4g_dense, jax.core.Tracer
-        )
 
         M = jnp.concatenate([C1g_dense, C4g_dense], axis=1)
         Q, R = jnp.linalg.qr(M)
@@ -1062,20 +1089,11 @@ def _compute_projector_tensor(
         # use phase=1 (leave the column/row untouched) rather than
         # phase=0 which would zero out that column of Q and row of R.
         Q, R = _gauge_fix_qr_dense(Q, R)
-        if _has_tracers:
-            from tenax.algorithms._ad_primitives import regularized_svd
+        from tenax.algorithms._ad_primitives import regularized_svd
 
-            U_R, S_R, _Vh_R = regularized_svd(R)
-            k = min(chi, len(S_R))
-            P_dense = Q @ U_R[:, :k]
-        else:
-            rho_small = R @ R.conj().T
-            rho_small = 0.5 * (rho_small + rho_small.conj().T)
-            eigvals, eigvecs = jnp.linalg.eigh(rho_small)
-            k = min(chi, len(eigvals))
-            V = eigvecs[:, -k:][:, ::-1]
-            P_dense = Q @ V
-            P_dense = jax.lax.stop_gradient(P_dense)
+        U_R, S_R, _Vh_R = regularized_svd(R)
+        k = min(chi, len(S_R))
+        P_dense = Q @ U_R[:, :k]
 
         fused_idx = C1g.indices[C1g.labels().index("fused")]
         chi_new_idx = _make_chi_new_index(fused_idx, k, base_charges)
