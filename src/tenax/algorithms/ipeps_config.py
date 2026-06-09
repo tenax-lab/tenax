@@ -73,7 +73,10 @@ class CTMConfig:
     max_iter: int = 100
     conv_tol: float = 1e-8
     renormalize: bool = True
-    projector_method: str = "svd"  # "svd" (Fishman, default), "eigh", or "qr"
+    projector_method: str = "svd"  # "svd" (Fishman, default), "eigh", or "qr".
+    # "qr" on the dense single-site (recipe="1x1") path runs the reduced-corner
+    # QR-CTMRG isometry (arXiv:2505.00494, Zhang/Yang/Corboz); forward-only.
+    # SymmetricTensor/block-sparse "qr" and the AD backward are later phases.
     min_iter: int = 10  # minimum CTM sweeps before checking convergence
     qr_warmup_steps: int = 3  # eigh warm-up iterations before QR kicks in
     chi_I: int | None = None  # interlayer bond dim for split-CTMRG; None => chi_I = chi
