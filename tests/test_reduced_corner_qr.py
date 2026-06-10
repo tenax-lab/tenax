@@ -800,9 +800,10 @@ def test_implicit_qr_eigh_gradient_gap_shrinks_with_chi():
 # implicit-diff AD.  This validates the *whole* production GS optimizer: a few  #
 # optimize_gs_ad steps with gs_recipe='1x1' + gs_projector_method='qr' must     #
 # decrease the energy, stay finite, and track the eigh result on the same       #
-# physical D=2 Heisenberg state.  The implicit backward solves (I - Jᵀ)λ = b by  #
-# fixed-point iteration with a GMRES fallback if it diverges; we only require    #
-# the run to complete without NaN / blow-up.                                     #
+# physical D=2 Heisenberg state.  The 1-site implicit adjoint uses the          #
+# Neumann-series VJP (``ad_backward_method="vjp"``) with EMA divergence          #
+# detection and a ``lam_norm`` safety truncation; we only require the run to     #
+# complete without NaN / blow-up.                                                #
 # --------------------------------------------------------------------------- #
 
 
@@ -890,8 +891,9 @@ def test_optimize_gs_ad_qr_1x1_converges():
     Measured (chi=8, 5 Adam steps, lr=1e-2, deterministic):
         e0_qr = -0.5136, ef_qr = -0.6590 (decreased ~0.145),
         eigh-forward(opt A) = -0.6591, |ef_qr - e_eigh| ~ 7e-5 (<< 5e-3).
-    The implicit backward logs an adjoint-divergence→GMRES fallback on some
-    steps (accepted: the run stays finite and the energy descends cleanly).
+    The 1-site implicit adjoint uses the Neumann-series VJP with
+    divergence-truncation safeguards; the run stays finite (no NaN) and the
+    energy descends.
     """
     e0_qr, ef_qr, A_qr = _short_optimize(
         gs_recipe="1x1", gs_projector_method="qr", steps=5
