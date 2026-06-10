@@ -142,7 +142,11 @@ def _ctm_tensor_sweep(
     )
     if renormalize:
         env = _renormalize_tensor_env(env)
-    max_eps = max(eps_left, eps_top, eps_right, eps_bottom)
+    # Moves return eps as a (traced) array so the jitted multisite path stays
+    # jit-safe; this eager single-site sweep converts to a Python float here.
+    max_eps = max(
+        float(eps_left), float(eps_top), float(eps_right), float(eps_bottom)
+    )
     return env, max_eps
 
 

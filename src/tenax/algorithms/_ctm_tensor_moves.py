@@ -664,7 +664,7 @@ def _ctm_tensor_move_left(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
-) -> tuple[CTMTensorEnv, float]:
+) -> tuple[CTMTensorEnv, jax.Array]:
     """Left move: updates C1, T4, C4.
 
     Corners (C1, C4) from env_self, perpendicular edges (T1, T3) from
@@ -708,7 +708,7 @@ def _ctm_tensor_move_left(
     C1_new = _phase_fix_normalize_tensor(C1_new)
     C4_new = _phase_fix_normalize_tensor(C4_new)
     T4_new = _phase_fix_normalize_tensor(T4_new)
-    return env_self._replace(C1=C1_new, C4=C4_new, T4=T4_new), float(_eps_t)
+    return env_self._replace(C1=C1_new, C4=C4_new, T4=T4_new), _eps_t
 
 
 def _ctm_tensor_move_right(
@@ -719,7 +719,7 @@ def _ctm_tensor_move_right(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
-) -> tuple[CTMTensorEnv, float]:
+) -> tuple[CTMTensorEnv, jax.Array]:
     """Right move: updates C2, T2, C3.
 
     Corners (C2, C3) from env_self, perpendicular edges (T1, T3) from
@@ -762,7 +762,7 @@ def _ctm_tensor_move_right(
     C2_new = _phase_fix_normalize_tensor(C2_new)
     C3_new = _phase_fix_normalize_tensor(C3_new)
     T2_new = _phase_fix_normalize_tensor(T2_new)
-    return env_self._replace(C2=C2_new, C3=C3_new, T2=T2_new), float(_eps_t)
+    return env_self._replace(C2=C2_new, C3=C3_new, T2=T2_new), _eps_t
 
 
 def _ctm_tensor_move_top(
@@ -773,7 +773,7 @@ def _ctm_tensor_move_top(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
-) -> tuple[CTMTensorEnv, float]:
+) -> tuple[CTMTensorEnv, jax.Array]:
     """Top move: updates C1, T1, C2.
 
     Corners (C1, C2) from env_self, perpendicular edges (T4, T2) from
@@ -816,7 +816,7 @@ def _ctm_tensor_move_top(
     C1_new = _phase_fix_normalize_tensor(C1_new)
     C2_new = _phase_fix_normalize_tensor(C2_new)
     T1_new = _phase_fix_normalize_tensor(T1_new)
-    return env_self._replace(C1=C1_new, C2=C2_new, T1=T1_new), float(_eps_t)
+    return env_self._replace(C1=C1_new, C2=C2_new, T1=T1_new), _eps_t
 
 
 def _ctm_tensor_move_bottom(
@@ -827,7 +827,7 @@ def _ctm_tensor_move_bottom(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
-) -> tuple[CTMTensorEnv, float]:
+) -> tuple[CTMTensorEnv, jax.Array]:
     """Bottom move: updates C4, T3, C3.
 
     Corners (C4, C3) from env_self, perpendicular edges (T4, T2) from
@@ -870,7 +870,7 @@ def _ctm_tensor_move_bottom(
     C4_new = _phase_fix_normalize_tensor(C4_new)
     C3_new = _phase_fix_normalize_tensor(C3_new)
     T3_new = _phase_fix_normalize_tensor(T3_new)
-    return env_self._replace(C4=C4_new, C3=C3_new, T3=T3_new), float(_eps_t)
+    return env_self._replace(C4=C4_new, C3=C3_new, T3=T3_new), _eps_t
 
 
 def _ctm_tensor_move_left_2x2(

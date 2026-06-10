@@ -107,7 +107,7 @@ strict element-wise convergence is needed at large chi.
 |-------|-------------|
 | ``"svd"`` (default) | Fishman two-projector SVD with safe singular-value handling. |
 | ``"eigh"`` | Hermitian eigendecomposition of the corner density matrix. |
-| ``"qr"`` | Reduced-corner QR-CTMRG isometry (Zhang, Yang & Corboz, arXiv:2505.00494). On the dense single-site (``recipe="1x1"``) path this is a real reduced-corner QR projector; it is opt-in and **forward-only** (Phase 1). The SymmetricTensor/block-sparse ``"qr"`` path and the AD backward are later phases; the default remains ``"svd"``. |
+| ``"qr"`` | Reduced-corner QR-CTMRG isometry (Zhang, Yang & Corboz, arXiv:2505.00494). On the dense single-site (``recipe="1x1"``) path this is a real reduced-corner QR projector. As of Phase 2 it is also usable under AD ground-state optimization: set ``gs_recipe="1x1"`` + ``gs_projector_method="qr"`` to run reduced-corner QR-CTMRG under the implicit-diff AD optimizer (dense). The SymmetricTensor/block-sparse ``"qr"`` path is a later phase; the default remains ``"svd"`` with ``gs_recipe="2x2"``. |
 
 ### AD backward method
 

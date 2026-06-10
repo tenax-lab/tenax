@@ -23,8 +23,10 @@ def validate_ctm_for_implicit_ad(ctm_cfg: CTMConfig) -> None:
     :class:`CTMConfig`) share a single source of truth for the invariant.
     """
     errors: list[str] = []
-    if ctm_cfg.projector_method != "svd":
-        errors.append(f"projector_method={ctm_cfg.projector_method!r} (expected 'svd')")
+    if ctm_cfg.projector_method not in ("svd", "qr"):
+        errors.append(
+            f"projector_method={ctm_cfg.projector_method!r} (expected 'svd' or 'qr')"
+        )
     if ctm_cfg.forward_gauge != "phase":
         errors.append(f"forward_gauge={ctm_cfg.forward_gauge!r} (expected 'phase')")
     if ctm_cfg.ctm_conv_method != "elementwise":
@@ -34,7 +36,7 @@ def validate_ctm_for_implicit_ad(ctm_cfg: CTMConfig) -> None:
     if errors:
         raise ValueError(
             "Implicit AD requires CTM settings "
-            "(projector_method='svd', forward_gauge='phase', "
+            "(projector_method in ('svd', 'qr'), forward_gauge='phase', "
             "ctm_conv_method='elementwise'). Got: " + ", ".join(errors)
         )
 
@@ -156,6 +158,7 @@ def make_ctm_energy_fn(
     explicit_steps: int,
     explicit_backward_steps: int | None = None,
     energy_fn=None,
+    recipe: str = "2x2",
 ):
     """Build a ``site_tensors → energy`` closure used by every iPEPS AD dispatcher.
 
@@ -190,6 +193,12 @@ def make_ctm_energy_fn(
                           (default) preserves full backward.
         energy_fn:        Optional energy callback for non-default
                           (e.g. coarse-grain) energy evaluation.
+        recipe:           CTM sweep recipe for the implicit-AD path:
+                          ``"2x2"`` (Fishman, default) or ``"1x1"`` (enables
+                          ``projector_method``, incl. reduced-corner "qr").
+                          Sourced from ``iPEPSConfig.gs_recipe``.  No-op for
+                          the explicit-AD branch (it uses the hardcoded
+                          ``"2x2"`` step).
     """
     # Deferred to avoid pulling the CTM/AD stack at module import time.
     from tenax.algorithms._ctm_energy_ad import (
@@ -266,6 +275,8 @@ def make_ctm_energy_fn(
                 ctm_cfg.ctmrg_heuristic_increase_chi_step_size
             ),
             chi_max=ctm_cfg.chi_max,
+            # CTM recipe (gs_recipe): "2x2" (default) or "1x1" (enables qr).
+            recipe=recipe,
         )
 
     return _ctm_energy_fn

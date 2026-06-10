@@ -571,6 +571,9 @@ class iPEPSConfig:
     gs_projector_method: str | None = (
         None  # projector override for AD; None => use ctm.projector_method
     )
+    # CTM recipe for the GS-AD path: "2x2" (Fishman, default) or "1x1"
+    # (1-site moves that enable projector_method, incl. reduced-corner "qr").
+    gs_recipe: str = "2x2"
     # CTM convergence tolerance schedule: list of (step_fraction, conv_tol) pairs.
     # Ramps conv_tol from loose (early) to tight (late) during AD optimization.
     # Example: [(0.0, 1e-5), (0.5, 1e-6), (0.8, 1e-7)]
