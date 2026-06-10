@@ -99,6 +99,16 @@ strict element-wise convergence is needed at large chi.
 ``forward_gauge`` through unchanged.  Set it explicitly to override the
 ``"phase"`` default.
 
+### Projector methods
+
+``projector_method`` selects how each sweep truncates back to χ:
+
+| Value | Description |
+|-------|-------------|
+| ``"svd"`` (default) | Fishman two-projector SVD with safe singular-value handling. |
+| ``"eigh"`` | Hermitian eigendecomposition of the corner density matrix. |
+| ``"qr"`` | Reduced-corner QR-CTMRG isometry (Zhang, Yang & Corboz, arXiv:2505.00494). On the dense single-site (``recipe="1x1"``) path this is a real reduced-corner QR projector; it is opt-in and **forward-only** (Phase 1). The SymmetricTensor/block-sparse ``"qr"`` path and the AD backward are later phases; the default remains ``"svd"``. |
+
 ### AD backward method
 
 | Value | Description |
