@@ -26,8 +26,11 @@ from tenax.algorithms._ctm_projector import (
     _gauge_fix_qr_dense,
     _reduced_qr_projector,
 )
-from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
-from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+from tenax.algorithms._ctm_tensor_convergence import ctm_tensor, ctm_tensor_2site
+from tenax.algorithms._ctm_tensor_energy import (
+    compute_energy_ctm_tensor,
+    compute_energy_ctm_tensor_2site,
+)
 from tenax.algorithms.ipeps import sublattice_rotate_gate, symmetrize_c4v
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
@@ -288,3 +291,104 @@ def test_reduced_qr_ctm_converges_with_warmup():
     e_2n = _heisenberg_D2_ctm_energy_1x1(chi=8, projector_method="qr", max_iter=200)
     assert np.isfinite(e_n) and np.isfinite(e_2n)
     assert abs(e_n - e_2n) < 1e-8
+
+
+# --------------------------------------------------------------------------- #
+# 2-site (A != B) energy-agreement harness — Phase 2, Task 4.                  #
+#                                                                              #
+# Phase 1 validated reduced-corner QR on a single-site (1x1) dense CTM, where  #
+# the four directional cuts are equivalent after C4v symmetrization.  The open #
+# question deferred from Phase 1 was whether the *single*-isometry QR          #
+# projector (P_1 == P_2) is correct for genuinely *asymmetric* multisite cuts  #
+# — i.e. a bipartite 2-site cell with A != B.  ``recipe="1x1"`` already        #
+# iterates the QR projector per site / per bond, so no new projector code is   #
+# needed; this is a forward-energy validation that QR reproduces the eigh      #
+# subspace on the asymmetric cell.                                             #
+#                                                                              #
+# Construction mirrors ``tests/test_ctm_tensor.py`` (the ``test_2site_*``      #
+# tests): a physical bipartite (A, B) is produced by the public ``ipeps``      #
+# 2-site simple update on the *un-rotated* Heisenberg gate, so the Neel        #
+# ground state leaves A and B genuinely distinct (A != B verified below).      #
+# The converged 2-site dense CTM energy is then read out per projector method  #
+# via ``ctm_tensor_2site(..., recipe="1x1")`` + ``compute_energy_ctm_tensor_   #
+# 2site``.                                                                     #
+# --------------------------------------------------------------------------- #
+
+# Building the 2-site physical state (simple update) is expensive; cache once.
+_PHYS_STATE_2SITE = None
+
+
+def _build_physical_state_heisenberg_D2_2site():
+    """Build a genuine bipartite (A != B) D=2 Heisenberg state + dense gate.
+
+    Uses the public ``ipeps`` 2-site simple-update path (same construction the
+    ``test_2site_*`` tests in ``tests/test_ctm_tensor.py`` exercise) on the
+    *un-rotated* Heisenberg gate: the antiferromagnetic Neel order makes the two
+    sublattices distinct, so ``A != B`` and the asymmetric multisite cut is
+    genuinely exercised (asserted at call sites).  Returns ``(A, B, gate_dense)``
+    with both site tensors renormalized.
+    """
+    global _PHYS_STATE_2SITE
+    if _PHYS_STATE_2SITE is not None:
+        return _PHYS_STATE_2SITE
+
+    gate = heisenberg_gate()
+    config = iPEPSConfig(
+        max_bond_dim=2,
+        num_imaginary_steps=400,
+        dt=0.05,
+        ctm=CTMConfig(chi=16, max_iter=80, projector_method="eigh"),
+    )
+    _E_su, (A, B), _envs = ipeps(gate, initial_peps=None, config=config)
+    A = A * (1.0 / float(A.norm()))
+    B = B * (1.0 / float(B.norm()))
+    gate_dense = jnp.asarray(gate.todense() if hasattr(gate, "todense") else gate)
+    _PHYS_STATE_2SITE = (A, B, gate_dense)
+    return _PHYS_STATE_2SITE
+
+
+def _heisenberg_D2_2site_energy(chi, projector_method, max_iter=200):
+    """Converged 2-site (A != B) dense CTM energy for the given projector.
+
+    Drives the per-site ``recipe="1x1"`` 2-site CTM (``ctm_tensor_2site``),
+    which calls the QR projector per bond, and reads the bipartite per-site
+    energy via ``compute_energy_ctm_tensor_2site``.  ``"qr"`` runs the
+    ``qr_warmup_steps=6`` eigh warm-up before switching to reduced-corner QR,
+    matching the single-site harness above.
+    """
+    A, B, gate_dense = _build_physical_state_heisenberg_D2_2site()
+    # Sanity: the cell is genuinely asymmetric (A != B), so QR is being
+    # validated on an asymmetric multisite cut, not a disguised C4v case.
+    assert not bool(jnp.allclose(A.todense(), B.todense()))
+    env_A, env_B = ctm_tensor_2site(
+        A,
+        B,
+        chi=chi,
+        max_iter=max_iter,
+        conv_tol=1e-10,
+        projector_method=projector_method,
+        qr_warmup_steps=6,
+        recipe="1x1",
+    )
+    return float(
+        compute_energy_ctm_tensor_2site(A, B, env_A, env_B, gate_dense, d=2)
+    )
+
+
+@pytest.mark.algorithm
+@pytest.mark.parametrize("chi", [6, 10])
+def test_reduced_qr_energy_matches_eigh_2site_heisenberg_D2(chi):
+    e_eigh = _heisenberg_D2_2site_energy(chi=chi, projector_method="eigh")
+    e_qr = _heisenberg_D2_2site_energy(chi=chi, projector_method="qr")
+    assert abs(e_qr - e_eigh) < 1e-3  # different scheme, same physics
+
+
+@pytest.mark.algorithm
+def test_reduced_qr_2site_energy_gap_shrinks_with_chi():
+    g6 = abs(
+        _heisenberg_D2_2site_energy(6, "qr") - _heisenberg_D2_2site_energy(6, "eigh")
+    )
+    g10 = abs(
+        _heisenberg_D2_2site_energy(10, "qr") - _heisenberg_D2_2site_energy(10, "eigh")
+    )
+    assert g10 <= g6 + 1e-9
