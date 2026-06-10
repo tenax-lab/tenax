@@ -134,6 +134,45 @@ def test_gauge_fix_qr_dense_is_smooth_under_perturbation():
     )  # no O(1) sign flip for O(eps) perturbation
 
 
+@pytest.mark.core
+def test_qr_projector_gradient_finite_dense():
+    """jax.grad through the dense 'qr' projector dispatch (AD-tracer path) is
+    finite, including a rank-deficient corner (regularized_qr keeps it finite).
+
+    Finiteness guard: at this size/conditioning the gauge-fix + top-k SVD
+    truncation in the dispatch happens to discard the ill-conditioned QR
+    directions, so even raw ``jnp.linalg.qr`` yields a finite gradient here.
+    The guard pins the contract (finite backward through the AD-tracer 'qr'
+    path); ``regularized_qr`` is what keeps it finite at genuine
+    rank-deficiency, exercised directly in ``tests/test_regularized_qr.py``
+    (``test_regularized_qr_backward_finite_at_rank_deficiency``).
+    """
+    chi = 6
+    C1g, C4g = _build_dense_enlarged_corners(chi)
+
+    def loss(scale):
+        c1 = type(C1g)(C1g._data * scale, C1g.indices)
+        P1, _P2, _eps = _compute_projector_tensor(c1, C4g, chi, "qr", None, "auto")
+        return jnp.real(jnp.sum(jnp.abs(P1._data) ** 2))
+
+    g = jax.grad(loss)(1.3)
+    assert jnp.isfinite(g)
+
+    # Rank-deficient corner: zero out some fused-direction content so QR sees
+    # a near-singular M; gradient must still be finite via regularized_qr.
+    base = np.array(C1g._data)  # writable copy
+    base[chi:, :] = 0.0  # kill part of the fused space -> rank-deficient stack
+    C1g_rd = type(C1g)(jnp.asarray(base), C1g.indices)
+
+    def loss_rd(scale):
+        c1 = type(C1g_rd)(C1g_rd._data * scale, C1g_rd.indices)
+        P1, _P2, _eps = _compute_projector_tensor(c1, C4g, chi, "qr", None, "auto")
+        return jnp.real(jnp.sum(jnp.abs(P1._data) ** 2))
+
+    g_rd = jax.grad(loss_rd)(1.1)
+    assert jnp.isfinite(g_rd)
+
+
 # --------------------------------------------------------------------------- #
 # Energy-agreement harness (reduced-corner QR vs eigh), reused from the spike  #
 # examples/probe_reduced_corner_qr_reconstruction_570.py.                      #

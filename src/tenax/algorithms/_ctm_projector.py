@@ -1072,7 +1072,9 @@ def _compute_projector_tensor(
         C4g_dense = _tensor_matrix_data(C4g)
 
         M = jnp.concatenate([C1g_dense, C4g_dense], axis=1)
-        Q, R = jnp.linalg.qr(M)
+        from tenax.algorithms._ad_primitives import regularized_qr
+
+        Q, R = regularized_qr(M)
         # QR sign-fix: force diag(R) >= 0 so the factorization is unique.
         # Without this, JAX's QR makes a sign choice that depends on the
         # specific values in M, and tiny perturbations of M can flip the
