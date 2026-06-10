@@ -123,3 +123,86 @@ Defaults unchanged. Opt-in: `gs_recipe="1x1"` + `gs_projector_method="qr"`.
 - Implicit-diff AD: `ctm_energy_implicit` (`_ctm_energy_ad.py:337`), `_jit_fused_fixed_point_bwd`
   (`:1082`), GMRES fallback (`:1323`).
 - Multisite 1×1 dispatch: `_ctm_tensor_convergence.py:324`; 2-site fixtures `tests/test_ctm_tensor.py`.
+
+## Phase 2 Task 1 result
+
+**Status: DONE.** `examples/probe_regularized_qr_vjp_570.py` implements `regularized_qr`
+(`jax.custom_vjp`, forward `jnp.linalg.qr`) with a backward that is **stable near rank-deficiency**
+and **exactly correct** (machine-precision match to JAX's own analytic QR VJP). Task 2 should
+productionize the backward verbatim.
+
+### Probe output
+
+```
+PASS  well-conditioned 12x12  [check_grads vs FD]
+PASS  tall 16x8  [check_grads vs FD]
+PASS  near-rank-deficient 12x12 (sv=1e-02)  [VJP == JAX analytic VJP, finite]
+PASS  near-rank-deficient 12x12 (sv=1e-04)  [VJP == JAX analytic VJP, finite]
+PASS  near-rank-deficient 12x12 (sv=1e-06)  [VJP == JAX analytic VJP, finite]
+PASS  near-rank-deficient 12x12 (sv=1e-09)  [VJP == JAX analytic VJP, finite]
+PASS  exact-singular backward is finite (floor prevents NaN/Inf)
+```
+
+### IMPORTANT deviation from the skeleton (and why)
+
+1. **The skeleton backward formula was WRONG** — it failed `check_grads` even on the
+   well-conditioned case (the `copyltu`-based `[Q̄ + Q·copyltu(Qᴴ Q̄ − R̄ Rᴴ)] R⁻ᴴ` form gave
+   gradients off by a non-constant, structural factor; max abs diff ~119 vs JAX's analytic VJP).
+   The correct backward was derived by **transposing JAX's own thin-QR JVP rule** (`_thin_qr_jvp`,
+   real branch) step-by-step and verified to machine precision (5e-16) against
+   `jax.vjp(jnp.linalg.qr, ·)` for square AND tall matrices. Two bugs in the skeleton: (a) the
+   strict-lower symmetrization is `tril(under − underᴴ, −1)` added to `(P − S)`, **not** a single
+   `copyltu`; (b) the final solve transpose was inverted — it is `M̄ = Ā R⁻ᴴ` realized as an
+   **upper-triangular** solve `solve_triangular(R, Āᴴ, lower=False)` then conj-transpose, not the
+   lower-triangular `Rᴴ` solve in the skeleton.
+
+2. **`check_grads`-vs-FD does NOT pass on near-rank-deficient inputs — and CANNOT, by design.**
+   The skeleton's `_rank_deficient` set 4 singular values to **exactly 0.0**, where the QR
+   derivative does not exist (the null columns of Q have undetermined sign — a kink), so finite
+   differences are meaningless. Even for *near*-deficient inputs (sv = 1e-3…1e-9) the true gradient
+   norm is ~1/sv (3e3…3e9); central FD cannot resolve a gradient that steep, so `check_grads`
+   spuriously fails although the backward is exact. The probe therefore validates the
+   near-deficient regime against the **analytic VJP ground truth** (a strictly stronger check than
+   FD), confirming machine-precision agreement down to sv=1e-9, and separately asserts the floored
+   backward stays **finite** at exact rank-deficiency (the floor's actual job).
+
+### EXACT final backward that passed (productionize verbatim)
+
+```python
+_R_FLOOR = 1e-12
+
+def _H(X):
+    return X.conj().T
+
+def _fwd(M):
+    Q, R = jnp.linalg.qr(M)
+    return (Q, R), (Q, R)
+
+def _bwd(residuals, g):
+    # Transpose of JAX's thin-QR JVP (real branch). Machine-precision match to
+    # jax.vjp(jnp.linalg.qr, ·) for square and tall M.
+    #   P     = R̄ Rᴴ
+    #   S     = Qᴴ Q̄
+    #   under = S − P
+    #   B̄     = (P − S) + tril(under − underᴴ, −1)
+    #   Ā     = Q̄ + Q B̄
+    #   M̄     = Ā R⁻ᴴ           (regularized: floor diag(R) below _R_FLOOR)
+    Q, R = residuals
+    dQ, dR = g
+    P = dR @ _H(R)
+    S = _H(Q) @ dQ
+    under = S - P
+    Bbar = (P - S) + jnp.tril(under - _H(under), -1)
+    Abar = dQ + Q @ Bbar
+    d = jnp.diag(R)
+    safe = jnp.where(jnp.abs(d) > _R_FLOOR, d, _R_FLOOR)
+    R_reg = R - jnp.diag(d) + jnp.diag(safe)
+    # M̄ = Ā R⁻ᴴ  ⟺  M̄ Rᴴ = Ā  ⟺  R M̄ᴴ = Āᴴ  (upper-tri solve in R).
+    dM = _H(jax.scipy.linalg.solve_triangular(R_reg, _H(Abar), lower=False))
+    return (dM,)
+```
+
+**Note for Task 2:** the formula above is the *real* branch (CTM projector matrices are real). The
+complex case needs JAX's extra diagonal correction in the JVP and was deliberately not derived here
+(`check_grads` keeps inputs real per the spike spec). If complex QR AD is ever needed, transpose the
+full `_thin_qr_jvp` including its `I * (qt_dx_rinv − Re(qt_dx_rinv))` term.
