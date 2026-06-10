@@ -53,11 +53,12 @@ class CTMConvergeInfo(NamedTuple):
 # cost.  Diagnosed in docs/plans/2026-05-09-ipeps-ad-jit-cost-diagnosis.md.
 # Keyed by id(neighbors) — safe because neighbors dicts are constructed once
 # per optimizer invocation and stay alive throughout.
-_JIT_STEP_CACHE: dict[int, callable] = {}
+_JIT_STEP_CACHE: dict[tuple[int, str], callable] = {}
 
 
 def _make_jit_ctm_step(
     neighbors: dict[Coord, dict[str, Coord]],
+    recipe: str = "2x2",
 ):
     """Create a JIT-compiled CTM step function for a given neighbor topology.
 
@@ -78,7 +79,10 @@ def _make_jit_ctm_step(
         ``max_truncation_error`` is the largest singular-value truncation
         error (ε_T) observed across all projector computations in the sweep.
     """
-    cache_key = id(neighbors)
+    # Include ``recipe`` in the cache key so the "1x1" and "2x2" sweeps get
+    # distinct compiled ``_step`` closures even when they share the same
+    # ``neighbors`` dict (which is reused across optimizer steps).
+    cache_key = (id(neighbors), recipe)
     cached = _JIT_STEP_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -112,6 +116,7 @@ def _make_jit_ctm_step(
             renormalize,
             projector_method,
             projector_backward=projector_backward,
+            recipe=recipe,
         )
 
     _JIT_STEP_CACHE[cache_key] = _step
@@ -139,6 +144,7 @@ def python_loop_ctm_converge(
     ctmrg_heuristic_increase_chi_threshold: float = 1e-6,
     ctmrg_heuristic_increase_chi_step_size: int = 2,
     chi_max: int | None = None,
+    recipe: str = "2x2",
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM to convergence using a Python for-loop over JIT'd sweeps.
 
@@ -215,10 +221,11 @@ def python_loop_ctm_converge(
             env_init=env_init,
             gauge_fix_fn=gauge_fix_fn,
             plateau_patience=plateau_patience,
+            recipe=recipe,
         )
 
     # Build the JIT'd step function (captures neighbors in closure)
-    jit_step = _make_jit_ctm_step(neighbors)
+    jit_step = _make_jit_ctm_step(neighbors, recipe)
 
     # chi may grow during the loop when ``ctmrg_heuristic_increase_chi``
     # is enabled (variPEPS-style in-CTM bump; Issue #492).  ``chi_current``
@@ -319,6 +326,7 @@ def _python_loop_chi_ramp(
     env_init: dict[Coord, CTMTensorEnv] | None,
     gauge_fix_fn=None,
     plateau_patience: int | None = None,
+    recipe: str = "2x2",
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM with chi-ramp schedule."""
     envs = env_init
@@ -370,6 +378,7 @@ def _python_loop_chi_ramp(
             env_init=envs,
             gauge_fix_fn=gauge_fix_fn,
             plateau_patience=stage_patience,
+            recipe=recipe,
         )
         prev_chi = stage_chi
 

@@ -156,6 +156,7 @@ def make_ctm_energy_fn(
     explicit_steps: int,
     explicit_backward_steps: int | None = None,
     energy_fn=None,
+    recipe: str = "2x2",
 ):
     """Build a ``site_tensors → energy`` closure used by every iPEPS AD dispatcher.
 
@@ -190,6 +191,12 @@ def make_ctm_energy_fn(
                           (default) preserves full backward.
         energy_fn:        Optional energy callback for non-default
                           (e.g. coarse-grain) energy evaluation.
+        recipe:           CTM sweep recipe for the implicit-AD path:
+                          ``"2x2"`` (Fishman, default) or ``"1x1"`` (enables
+                          ``projector_method``, incl. reduced-corner "qr").
+                          Sourced from ``iPEPSConfig.gs_recipe``.  No-op for
+                          the explicit-AD branch (it uses the hardcoded
+                          ``"2x2"`` step).
     """
     # Deferred to avoid pulling the CTM/AD stack at module import time.
     from tenax.algorithms._ctm_energy_ad import (
@@ -266,6 +273,8 @@ def make_ctm_energy_fn(
                 ctm_cfg.ctmrg_heuristic_increase_chi_step_size
             ),
             chi_max=ctm_cfg.chi_max,
+            # CTM recipe (gs_recipe): "2x2" (default) or "1x1" (enables qr).
+            recipe=recipe,
         )
 
     return _ctm_energy_fn

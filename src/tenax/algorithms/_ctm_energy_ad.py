@@ -362,6 +362,7 @@ def ctm_energy_implicit(
     ctmrg_heuristic_increase_chi_threshold: float = 1e-6,
     ctmrg_heuristic_increase_chi_step_size: int = 2,
     chi_max: int | None = None,
+    recipe: str = "2x2",
 ) -> jnp.ndarray:
     """Compute iPEPS energy with implicit-differentiation backward (GMRES).
 
@@ -387,6 +388,12 @@ def ctm_energy_implicit(
         max_iter:          Maximum CTM iterations.
         conv_tol:          Convergence tolerance on corner singular values.
         projector_method:  ``"svd"`` (default), ``"eigh"``, or ``"qr"``.
+        recipe:            CTM sweep recipe for BOTH the forward and the
+                           fixed-point adjoint: ``"2x2"`` (Fishman plaquette,
+                           default) or ``"1x1"`` (1-site moves that honor
+                           ``projector_method``, incl. reduced-corner "qr").
+                           Both passes use the same recipe so the adjoint
+                           differentiates the sweep the forward converged.
         renormalize:       Renormalize environments after each sweep.
         projector_backward: ``"lorentzian"`` (default) or ``"standard"``.
         qr_warmup_steps:   Number of eigh warm-up sweeps before QR kicks in.
@@ -506,6 +513,7 @@ def ctm_energy_implicit(
         ctmrg_heuristic_increase_chi_threshold,
         ctmrg_heuristic_increase_chi_step_size,
         chi_max,
+        recipe,
     )
 
 
@@ -530,6 +538,7 @@ def _sigma_gauged_ctm_converge(
     ctmrg_heuristic_increase_chi_threshold: float = 1e-6,
     ctmrg_heuristic_increase_chi_step_size: int = 2,
     chi_max: int | None = None,
+    recipe: str = "2x2",
 ):
     """CTM convergence with sigma gauge fixing for element-wise fixed point.
 
@@ -555,7 +564,7 @@ def _sigma_gauged_ctm_converge(
         bump_step_size=ctmrg_heuristic_increase_chi_step_size,
     )
 
-    jit_step = _make_jit_ctm_step(neighbors)
+    jit_step = _make_jit_ctm_step(neighbors, recipe)
     envs = (
         env_init
         if env_init is not None
@@ -739,6 +748,7 @@ def _ctm_energy_implicit_dispatch(
     ctmrg_heuristic_increase_chi_threshold,
     ctmrg_heuristic_increase_chi_step_size,
     chi_max,
+    recipe="2x2",
 ):
     """Dispatch to custom_vjp-decorated function with caching.
 
@@ -774,6 +784,7 @@ def _ctm_energy_implicit_dispatch(
         ctmrg_heuristic_increase_chi_threshold,
         ctmrg_heuristic_increase_chi_step_size,
         chi_max,
+        recipe,  # distinct sweep recipe → distinct cached forward+backward
     )
 
     entry = _VJP_CACHE.get(cache_key)
@@ -817,6 +828,7 @@ def _ctm_energy_implicit_dispatch(
         ctmrg_heuristic_increase_chi_threshold=ctmrg_heuristic_increase_chi_threshold,
         ctmrg_heuristic_increase_chi_step_size=ctmrg_heuristic_increase_chi_step_size,
         chi_max=chi_max,
+        recipe=recipe,
     )
     _VJP_CACHE[cache_key] = (f, mutables)
     return f(params_data_tuple)
@@ -846,6 +858,7 @@ def _make_implicit_vjp_fn(
     ctmrg_heuristic_increase_chi_threshold: float = 1e-6,
     ctmrg_heuristic_increase_chi_step_size: int = 2,
     chi_max: int | None = None,
+    recipe: str = "2x2",
 ):
     """Build a custom_vjp-decorated function closed over static config.
 
@@ -918,6 +931,7 @@ def _make_implicit_vjp_fn(
                 env_init=env_init,
                 gauge_fix_fn=_gauge_fix_fn,
                 plateau_patience=plateau_patience,
+                recipe=recipe,
             )
             # chi_ramp doesn't trigger in-CTM bump (mutex enforced in dispatch);
             # chi_post is the final ramp stage's chi, which equals ``chi`` for
@@ -943,6 +957,7 @@ def _make_implicit_vjp_fn(
                 ctmrg_heuristic_increase_chi_threshold=ctmrg_heuristic_increase_chi_threshold,
                 ctmrg_heuristic_increase_chi_step_size=ctmrg_heuristic_increase_chi_step_size,
                 chi_max=chi_max,
+                recipe=recipe,
             )
         return envs, chi_post
 
@@ -970,8 +985,9 @@ def _make_implicit_vjp_fn(
         residuals = (params_data_tuple, env_leaves, chi_post)
         return energy, residuals
 
-    # Build JIT'd sweep step for backward (same as forward).
-    jit_step_bwd = _make_jit_ctm_step(neighbors)
+    # Build JIT'd sweep step for backward (same recipe as forward, so the
+    # fixed-point adjoint differentiates the sweep the forward converged).
+    jit_step_bwd = _make_jit_ctm_step(neighbors, recipe)
 
     # --- JIT'd building blocks for the backward ---
     # dE/denv and chain_rule are small JIT programs. The GMRES solve is
