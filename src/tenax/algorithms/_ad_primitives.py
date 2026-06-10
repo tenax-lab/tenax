@@ -358,6 +358,83 @@ regularized_svd.defvjp(_regularized_svd_fwd, _regularized_svd_bwd)
 
 
 # ---------------------------------------------------------------------------
+# 1a-quater. Thin QR with regularized backward (used by QR-CTMRG projectors)
+# ---------------------------------------------------------------------------
+
+# Floor applied to ``diag(R)`` in the backward triangular solve. This is the
+# only place where ``diag(R) -> 0`` (a fully truncated bond) would divide by
+# zero and produce NaN gradients; flooring keeps the backward finite without
+# changing the well-conditioned answer (the floor only activates when
+# ``|diag(R)| < _R_FLOOR``).
+_R_FLOOR = 1e-12
+
+
+def _qr_H(X):
+    """Conjugate transpose."""
+    return X.conj().T
+
+
+@partial(jax.custom_vjp)
+def regularized_qr(M: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """Thin QR with a backward stable through rank-deficient bonds.
+
+    Same forward as ``jnp.linalg.qr(M)`` (reduced/thin mode), but the VJP
+    floors ``diag(R)`` below ``_R_FLOOR`` in the backward triangular solve so
+    gradients stay finite when a bond is near- or exactly rank-deficient.
+    Raw ``jnp.linalg.qr``'s VJP divides by ``diag(R)`` and produces NaN when a
+    bond is fully truncated.
+
+    This is the *real* branch only: CTM projector matrices are real, so the
+    complex diagonal correction in JAX's thin-QR JVP is intentionally omitted.
+
+    Returns:
+        ``(Q, R)`` as in ``jnp.linalg.qr(M)``.
+    """
+    return jnp.linalg.qr(M)
+
+
+def _regularized_qr_fwd(M):
+    Q, R = jnp.linalg.qr(M)
+    return (Q, R), (Q, R)
+
+
+def _regularized_qr_bwd(residuals, g):
+    # Reverse-mode VJP of the thin QR M = Q R (m >= n), obtained by transposing
+    # JAX's own thin-QR JVP rule (real branch). Verified to machine precision
+    # (5e-16) against jax.vjp(jnp.linalg.qr, .) for square AND tall real
+    # matrices in the Task 1 spike (#570).
+    #
+    #   P     = R̄ Rᴴ
+    #   S     = Qᴴ Q̄
+    #   under = S − P
+    #   B̄     = (P − S) + tril(under − underᴴ, −1)
+    #   Ā     = Q̄ + Q B̄
+    #   M̄     = Ā R⁻ᴴ          ← regularized triangular solve (floor diag R)
+    #
+    # The R⁻ᴴ solve is the only place diag(R)→0 bites; flooring diag(R) there
+    # keeps M̄ finite near rank-deficiency without changing the well-conditioned
+    # answer (floor only activates when |diag(R)| < _R_FLOOR).
+    Q, R = residuals
+    dQ, dR = g
+    P = dR @ _qr_H(R)
+    S = _qr_H(Q) @ dQ
+    under = S - P
+    Bbar = (P - S) + jnp.tril(under - _qr_H(under), -1)
+    Abar = dQ + Q @ Bbar
+    d = jnp.diag(R)
+    safe = jnp.where(jnp.abs(d) > _R_FLOOR, d, _R_FLOOR)
+    R_reg = R - jnp.diag(d) + jnp.diag(safe)
+    # M̄ = Ā R⁻ᴴ  ⟺  M̄ Rᴴ = Ā  ⟺  R M̄ᴴ = Āᴴ  (upper-tri solve in R).
+    dM = _qr_H(
+        jax.scipy.linalg.solve_triangular(R_reg, _qr_H(Abar), lower=False)
+    )
+    return (dM,)
+
+
+regularized_qr.defvjp(_regularized_qr_fwd, _regularized_qr_bwd)
+
+
+# ---------------------------------------------------------------------------
 # 1a-ter. Symmetric eigendecomposition with regularized backward pass
 # ---------------------------------------------------------------------------
 
