@@ -23,6 +23,7 @@ _FILE_MARKERS = {
     "test_fermionic.py": "core",
     "test_dmrg.py": "algorithm",
     "test_idmrg.py": "algorithm",
+    "test_itebd.py": "algorithm",
     "test_trg.py": "algorithm",
     "test_hotrg.py": "algorithm",
     "test_ipeps.py": "algorithm",

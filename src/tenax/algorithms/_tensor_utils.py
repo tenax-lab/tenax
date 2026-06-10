@@ -19,6 +19,25 @@ from tenax.core.symmetry import BaseSymmetry
 from tenax.core.tensor import BlockKey, DenseTensor, SymmetricTensor, Tensor
 
 
+def safe_inv_lambda(lam: jax.Array, rel_tol: float = 1e-12) -> jax.Array:
+    """Pseudo-inverse of a simple-update bond-weight vector.
+
+    Returns ``1/lam`` for entries non-negligible relative to the largest weight
+    (``lam > rel_tol * max(lam)``) and 0 otherwise. The naive ``1/(lam + EPS)``
+    used in simple-update canonical-form bookkeeping amplifies a vanishing
+    Schmidt sector to ~``1/EPS``; under the absorb-then-remove round-trip plus a
+    global re-normalization that flips sector dominance and degenerates the whole
+    bond (all weights -> 0, or NaN). Dropping dead sectors keeps the update
+    numerically stable -- the gauge-restoration analogue of orthogonalizing
+    against the environment instead of dividing by singular values (cf. the
+    stable iTEBD of Hastings, arXiv:0903.3253). Mirrors ``pess._safe_inv``.
+    """
+    lam = jnp.asarray(lam)
+    cutoff = rel_tol * jnp.max(lam)
+    keep = lam > cutoff
+    return jnp.where(keep, 1.0 / jnp.where(keep, lam, 1.0), 0.0)
+
+
 def max_abs_normalize(T: Tensor) -> tuple[Tensor, jax.Array]:
     """Normalize tensor by its max absolute value.
 

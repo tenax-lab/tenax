@@ -24,7 +24,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms._tensor_utils import scale_bond_axis
+from tenax.algorithms._tensor_utils import safe_inv_lambda, scale_bond_axis
 from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
@@ -299,8 +299,10 @@ def _fpeps_simple_update_horizontal(
     U_final = scale_bond_axis(U_final, "r", sqrt_sig)
 
     # 9. Remove outer lambdas: u <- lam_v^{-1}, d <- lam_v^{-1}, l <- lam_h^{-1}
-    inv_lam_v = 1.0 / (lam_v + EPS)
-    inv_lam_h = 1.0 / (lam_h + EPS)
+    #    Pseudo-inverse (drop dead sectors) -- see _safe_inv: the naive 1/(lam+EPS)
+    #    blows up a vanishing sector and collapses the whole bond.
+    inv_lam_v = safe_inv_lambda(lam_v)
+    inv_lam_h = safe_inv_lambda(lam_h)
     U_final = scale_bond_axis(U_final, "u", inv_lam_v)
     U_final = scale_bond_axis(U_final, "d", inv_lam_v)
     U_final = scale_bond_axis(U_final, "l", inv_lam_h)
@@ -379,8 +381,9 @@ def _fpeps_simple_update_vertical(
     U_final = scale_bond_axis(U_final, "d", sqrt_sig)
 
     # 9. Remove outer lambdas: u <- lam_v^{-1}, l <- lam_h^{-1}, r <- lam_h^{-1}
-    inv_lam_v = 1.0 / (lam_v + EPS)
-    inv_lam_h = 1.0 / (lam_h + EPS)
+    #    Pseudo-inverse (drop dead sectors) -- see _safe_inv.
+    inv_lam_v = safe_inv_lambda(lam_v)
+    inv_lam_h = safe_inv_lambda(lam_h)
     U_final = scale_bond_axis(U_final, "u", inv_lam_v)
     U_final = scale_bond_axis(U_final, "l", inv_lam_h)
     U_final = scale_bond_axis(U_final, "r", inv_lam_h)
