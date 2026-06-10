@@ -20,19 +20,18 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from tenax import CTMConfig, heisenberg_gate, ipeps, iPEPSConfig
 from tenax.algorithms._ctm_projector import (
     _compute_projector_tensor,
+    _gauge_fix_qr_dense,
     _reduced_qr_projector,
 )
-from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor
-
-# --- energy-agreement harness imports (reused from the spike) ---------------
-from tenax import CTMConfig, heisenberg_gate, ipeps, iPEPSConfig
 from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms.ipeps import sublattice_rotate_gate, symmetrize_c4v
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.symmetry import U1Symmetry
+from tenax.core.tensor import DenseTensor
 
 
 def _build_dense_enlarged_corners(chi: int, D: int = 2, seed: int = 0):
@@ -79,9 +78,7 @@ def test_reduced_qr_projector_is_isometry(chi):
 
     # Isometry: contracting P.bar() with P over the fused leg yields I_chi.
     gram = P._data.conj().T @ P._data
-    np.testing.assert_allclose(
-        np.asarray(gram), np.eye(chi), atol=1e-9
-    )
+    np.testing.assert_allclose(np.asarray(gram), np.eye(chi), atol=1e-9)
 
 
 def test_compute_projector_tensor_qr_uses_reduced_qr_dense():
@@ -104,9 +101,6 @@ def test_compute_projector_tensor_qr_uses_reduced_qr_dense():
 
 
 def test_gauge_fix_qr_dense_makes_diag_R_nonneg_and_preserves_QR():
-    import jax, jax.numpy as jnp, numpy as np
-    jax.config.update("jax_enable_x64", True)
-    from tenax.algorithms._ctm_projector import _gauge_fix_qr_dense
     key = jax.random.PRNGKey(3)
     M = jax.random.normal(key, (12, 6))
     Q, R = jnp.linalg.qr(M)
@@ -122,17 +116,18 @@ def test_gauge_fix_qr_dense_makes_diag_R_nonneg_and_preserves_QR():
 
 
 def test_gauge_fix_qr_dense_is_smooth_under_perturbation():
-    import jax, jax.numpy as jnp, numpy as np
-    jax.config.update("jax_enable_x64", True)
-    from tenax.algorithms._ctm_projector import _gauge_fix_qr_dense
     key = jax.random.PRNGKey(5)
     M = jax.random.normal(key, (12, 6))
     dM = 1e-7 * jax.random.normal(jax.random.PRNGKey(6), (12, 6))
+
     def q_of(scale):
         Q, R = jnp.linalg.qr(M + scale * dM)
         Qf, _ = _gauge_fix_qr_dense(Q, R)
         return Qf
-    assert jnp.max(jnp.abs(q_of(1.0) - q_of(0.0))) < 1e-3  # no O(1) sign flip for O(eps) perturbation
+
+    assert (
+        jnp.max(jnp.abs(q_of(1.0) - q_of(0.0))) < 1e-3
+    )  # no O(1) sign flip for O(eps) perturbation
 
 
 # --------------------------------------------------------------------------- #
