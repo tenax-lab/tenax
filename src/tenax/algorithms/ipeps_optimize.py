@@ -1322,6 +1322,7 @@ def _optimize_gs_ad_tensor(
         explicit_steps=explicit_steps,
         explicit_backward_steps=explicit_backward_steps,
         energy_fn=_energy_fn_kw,
+        recipe=config.gs_recipe,
     )
 
     def loss_fn(params):
@@ -2543,6 +2544,7 @@ def _optimize_gs_ad_tensor_2site(
         explicit_steps=explicit_steps,
         explicit_backward_steps=explicit_backward_steps,
         energy_fn=_energy_fn_2site,
+        recipe=config.gs_recipe,
     )
 
     def loss_fn(params):
@@ -3962,6 +3964,7 @@ def _optimize_gs_ad_multisite(
         explicit_steps=explicit_steps,
         explicit_backward_steps=explicit_backward_steps,
         energy_fn=_energy_fn,
+        recipe=config.gs_recipe,
     )
 
     def loss_fn(params_):

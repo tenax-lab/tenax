@@ -95,13 +95,18 @@ def test_resolve_projector_backward_rejects_implicit_non_elementwise_conv():
 
 
 def test_resolve_projector_backward_rejects_implicit_gs_projector_override():
-    """Implicit AD validates effective projector after gs override."""
+    """Implicit AD validates effective projector after gs override.
+
+    ``"qr"`` is now an accepted implicit-AD projector (Phase 2, #570), so the
+    rejection probe uses ``"eigh"`` — still outside the supported
+    ``("svd", "qr")`` set.
+    """
     config = iPEPSConfig(
         ctm=CTMConfig(chi=8, projector_method="svd"),
-        gs_projector_method="qr",
+        gs_projector_method="eigh",
         gs_implicit_ad=True,
     )
-    with pytest.raises(ValueError, match="projector_method='svd'"):
+    with pytest.raises(ValueError, match="projector_method='eigh'"):
         resolve_projector_backward(config)
 
 

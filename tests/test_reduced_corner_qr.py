@@ -462,3 +462,76 @@ def test_implicit_ad_recipe_threads_to_sweep(monkeypatch):
     assert recipes_seen, "the CTM sweep was never reached"
     assert "1x1" in recipes_seen
     assert "2x2" not in recipes_seen  # not falling back to the hardcoded default
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2, Task 5b — recipe='1x1' + qr RUNS end-to-end under implicit-diff AD   #
+#                                                                              #
+# The wiring test above proves the recipe reaches the sweep, but the jitted    #
+# CTM step previously raised ConcretizationTypeError because the 1x1 moves did  #
+# ``float(eps_t)`` on a tracer.  This test proves the path now RUNS (finite     #
+# energy) AND DIFFERENTIATES (finite gradient w.r.t. the site tensor).          #
+# --------------------------------------------------------------------------- #
+
+
+def _wrap_single_site_dense(arr: jax.Array) -> DenseTensor:
+    """Wrap a raw (d, D, D, D, D) array as the trivial-U(1) DenseTensor used by
+    :func:`_build_single_site_dense` (same index layout)."""
+    d, D = arr.shape[0], arr.shape[1]
+    sym = U1Symmetry()
+    bond = np.zeros(D, dtype=np.int32)
+    phys = np.zeros(d, dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, phys.copy(), FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(sym, bond.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, bond.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(sym, bond.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, bond.copy(), FlowDirection.OUT, label="l"),
+    )
+    return DenseTensor(jnp.asarray(arr), indices)
+
+
+def _implicit_energy_of_A(A_arr):
+    """Raw-array → implicit-AD energy via recipe='1x1' + projector_method='qr'.
+
+    Tiny system (D=2, chi=4) and few iterations so it stays fast; the point is
+    that it RUNS under jit and differentiates, not the physical accuracy.
+    """
+    from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
+    from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+
+    A = _wrap_single_site_dense(A_arr)
+    gate = heisenberg_gate()
+    return ctm_energy_implicit(
+        {(0, 0): A},
+        SINGLE_SITE_NEIGHBORS,
+        gate,
+        chi=4,
+        max_iter=4,
+        min_iter=1,
+        recipe="1x1",
+        projector_method="qr",
+        qr_warmup_steps=2,
+    )
+
+
+def _implicit_energy(recipe="1x1", projector_method="qr"):
+    """Finite-energy probe for the recipe='1x1' + qr implicit-AD forward."""
+    A_arr = _build_single_site_dense().todense()
+    return _implicit_energy_of_A(A_arr)
+
+
+@pytest.mark.algorithm
+def test_implicit_ad_qr_1x1_runs_and_is_differentiable():
+    """ctm_energy_implicit(recipe='1x1', projector_method='qr') runs end-to-end
+    under jit and yields a finite energy AND a finite gradient.
+
+    Pre-fix this raised ConcretizationTypeError (the 1x1 moves did
+    ``float(eps_t)`` on a tracer inside the jitted CTM step).
+    """
+    e = _implicit_energy(recipe="1x1", projector_method="qr")
+    assert jnp.isfinite(e)
+
+    A_arr = _build_single_site_dense().todense()
+    g = jax.grad(lambda x: jnp.real(_implicit_energy_of_A(x)))(A_arr)
+    assert jnp.all(jnp.isfinite(g))

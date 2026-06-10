@@ -23,8 +23,10 @@ def validate_ctm_for_implicit_ad(ctm_cfg: CTMConfig) -> None:
     :class:`CTMConfig`) share a single source of truth for the invariant.
     """
     errors: list[str] = []
-    if ctm_cfg.projector_method != "svd":
-        errors.append(f"projector_method={ctm_cfg.projector_method!r} (expected 'svd')")
+    if ctm_cfg.projector_method not in ("svd", "qr"):
+        errors.append(
+            f"projector_method={ctm_cfg.projector_method!r} (expected 'svd' or 'qr')"
+        )
     if ctm_cfg.forward_gauge != "phase":
         errors.append(f"forward_gauge={ctm_cfg.forward_gauge!r} (expected 'phase')")
     if ctm_cfg.ctm_conv_method != "elementwise":
@@ -34,7 +36,7 @@ def validate_ctm_for_implicit_ad(ctm_cfg: CTMConfig) -> None:
     if errors:
         raise ValueError(
             "Implicit AD requires CTM settings "
-            "(projector_method='svd', forward_gauge='phase', "
+            "(projector_method in ('svd', 'qr'), forward_gauge='phase', "
             "ctm_conv_method='elementwise'). Got: " + ", ".join(errors)
         )
 

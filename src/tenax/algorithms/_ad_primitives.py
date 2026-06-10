@@ -388,9 +388,12 @@ def regularized_qr(M: jax.Array) -> tuple[jax.Array, jax.Array]:
     complex diagonal correction in JAX's thin-QR JVP is intentionally omitted.
 
     Returns:
-        ``(Q, R)`` as in ``jnp.linalg.qr(M)``.
+        ``(Q, R)`` as in ``jnp.linalg.qr(M)``.  Returned as a plain ``tuple``
+        (not the ``QRResult`` namedtuple of newer ``jnp.linalg.qr``) so the
+        primal output's pytree structure matches the ``custom_vjp`` fwd rule.
     """
-    return jnp.linalg.qr(M)
+    Q, R = jnp.linalg.qr(M)
+    return (Q, R)
 
 
 def _regularized_qr_fwd(M):
