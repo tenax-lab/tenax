@@ -66,6 +66,7 @@ def _build_dense_enlarged_corners(chi: int, D: int = 2, seed: int = 0):
     return C1g, C4g
 
 
+@pytest.mark.core
 @pytest.mark.parametrize("chi", [4, 8])
 def test_reduced_qr_projector_is_isometry(chi):
     """``P`` has labels ``(fused, chi_new)`` and ``P^dagger P = I_chi``."""
@@ -81,6 +82,7 @@ def test_reduced_qr_projector_is_isometry(chi):
     np.testing.assert_allclose(np.asarray(gram), np.eye(chi), atol=1e-9)
 
 
+@pytest.mark.core
 def test_compute_projector_tensor_qr_uses_reduced_qr_dense():
     """Dense forward ``projector_method='qr'`` dispatch routes through the
     canonical ``_reduced_qr_projector`` (consolidation, issue #570 Phase 1)."""
@@ -100,6 +102,7 @@ def test_compute_projector_tensor_qr_uses_reduced_qr_dense():
     np.testing.assert_allclose(np.asarray(g), np.eye(g.shape[0]), atol=1e-9)
 
 
+@pytest.mark.core
 def test_gauge_fix_qr_dense_makes_diag_R_nonneg_and_preserves_QR():
     key = jax.random.PRNGKey(3)
     M = jax.random.normal(key, (12, 6))
@@ -115,6 +118,7 @@ def test_gauge_fix_qr_dense_makes_diag_R_nonneg_and_preserves_QR():
     assert jnp.allclose(jnp.imag(d), 0.0, atol=1e-10)
 
 
+@pytest.mark.core
 def test_gauge_fix_qr_dense_is_smooth_under_perturbation():
     key = jax.random.PRNGKey(5)
     M = jax.random.normal(key, (12, 6))
