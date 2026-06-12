@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Dense 2D-Heisenberg iPEPS-AD characterization study (issue #570).
 
-Sweeps Tenax's dense single-site (C4v, sigma gauge) iPEPS-AD over a grid of
-bond dimension D and environment bond dimension chi.  For each (D, chi) cell
-the script records:
+Sweeps Tenax's dense single-site (C4v, phase gauge, implicit-AD) iPEPS over a
+grid of bond dimension D and environment bond dimension chi.  For each (D, chi)
+cell the script records:
 
   - Final variational energy E_final and deviation dE = E_final - REF_ENERGY
     from the QMC reference E/site ~ -0.6694430.
@@ -13,6 +13,12 @@ the script records:
 
 Purpose: establish a runtime / accuracy baseline for the dense path before
 evaluating block-sparse QR-CTMRG speedups in Phase 3 of issue #570.
+
+Anchor: D=2, chi=8, 100 steps → E ~ -0.6602 (implicit-AD / phase-gauge path).
+QMC reference: E/site ~ -0.6694430.  Note: the ``heisenberg_ipeps_ad.py``
+example docstring quotes E ~ -0.6625 for a sigma+eigh+gmres config that is
+incompatible with the current API (``validate_ctm_for_implicit_ad`` enforces
+phase+svd+elementwise); the reachable energy on the implicit-AD path is -0.6602.
 
 Usage::
 
@@ -85,6 +91,8 @@ def build_problem(D: int, chi: int, gs_steps: int):
     )
     config = iPEPSConfig(
         max_bond_dim=D,
+        num_imaginary_steps=200,
+        dt=0.05,
         ctm=ctm,
         gs_c4v=True,
         gs_num_steps=gs_steps,
