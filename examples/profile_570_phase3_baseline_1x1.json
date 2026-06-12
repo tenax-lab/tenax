@@ -1,0 +1,52 @@
+{
+  "platform": "gpu",
+  "device_kind": "NVIDIA A100-SXM4-80GB",
+  "x64": true,
+  "D": 4,
+  "methods": [
+    "svd",
+    "qr",
+    "eigh"
+  ],
+  "chi_list": [
+    12
+  ],
+  "full": false,
+  "recipe": "1x1",
+  "projector_backward": "auto",
+  "rows": [
+    {
+      "D": 4,
+      "chi": 12,
+      "method": "svd",
+      "n_blocks": 16,
+      "recipe": "1x1",
+      "projector_backward": "auto",
+      "env_lower_s": 3.9683938212692738,
+      "env_compile_s": 9.866915229707956,
+      "env_hlo_instr": 22422
+    },
+    {
+      "D": 4,
+      "chi": 12,
+      "method": "qr",
+      "n_blocks": 16,
+      "recipe": "1x1",
+      "projector_backward": "auto",
+      "env_lower_s": 3.9087854269891977,
+      "env_compile_s": 10.86985882371664,
+      "env_hlo_instr": 24152
+    },
+    {
+      "D": 4,
+      "chi": 12,
+      "method": "eigh",
+      "n_blocks": 16,
+      "recipe": "1x1",
+      "projector_backward": "auto",
+      "env_lower_s": 3.7619725354015827,
+      "env_compile_s": 11.200076624751091,
+      "env_hlo_instr": 21671
+    }
+  ]
+}

@@ -1,0 +1,179 @@
+diff --git a/src/tenax/algorithms/_ctm_projector.py b/src/tenax/algorithms/_ctm_projector.py
+index 6a5bb08..a539b90 100644
+--- a/src/tenax/algorithms/_ctm_projector.py
++++ b/src/tenax/algorithms/_ctm_projector.py
+@@ -39,6 +39,8 @@ constants, so the dense path affects only the backward step function.
+ 
+ from __future__ import annotations
+ 
++import os
++
+ import jax
+ import jax.numpy as jnp
+ import numpy as np
+@@ -911,6 +913,24 @@ def _compute_projector_tensor(
+     # Reference: Fishman et al., PRB 98, 235148 (2018);
+     #            YASTN proj_corners + regularize_1site_corners.
+     if projector_method == "svd":
++        # #570 Phase-3 spike (env-gated): route the TRACED SymmetricTensor SVD
++        # projector through the block-sparse reduced-corner construction instead
++        # of densifying, so the block-sparse SVD-VJP can be measured as the
++        # baseline against block-sparse QR.  Off by default -> byte-identical.
++        if (
++            _p3_blocksparse_spike()
++            and isinstance(C1g, SymmetricTensor)
++            and isinstance(C4g, SymmetricTensor)
++            and (
++                isinstance(C1g._data, jax.core.Tracer)
++                or isinstance(C4g._data, jax.core.Tracer)
++            )
++        ):
++            P = _reduced_proj_symmetric_traced(
++                C1g, C4g, chi, base_charges, decomp="svd"
++            )
++            return P, P, jnp.asarray(0.0)
++
+         # Block-sparse SVD for SymmetricTensor (non-tracer).
+         # The dense fallback below is intended only for DenseTensor inputs
+         # and the AD-traced backward path; for any non-traced SymmetricTensor
+@@ -1043,6 +1063,25 @@ def _compute_projector_tensor(
+     #       energy-validated _reduced_qr_projector so there is exactly one
+     #       implementation of the Candidate-C construction.
+     if projector_method == "qr":
++        # #570 Phase-3 spike (env-gated): route the TRACED SymmetricTensor QR
++        # projector through the block-sparse reduced-corner construction
++        # (per-sector QR -> tiny eigh(R R^H) -> top-k) instead of densifying.
++        # This is the candidate whose sweep-VJP compile cost the spike measures
++        # against the block-sparse SVD baseline above.  Off by default.
++        if (
++            _p3_blocksparse_spike()
++            and isinstance(C1g, SymmetricTensor)
++            and isinstance(C4g, SymmetricTensor)
++            and (
++                isinstance(C1g._data, jax.core.Tracer)
++                or isinstance(C4g._data, jax.core.Tracer)
++            )
++        ):
++            P = _reduced_proj_symmetric_traced(
++                C1g, C4g, chi, base_charges, decomp="qr"
++            )
++            return P, P, jnp.asarray(0.0)
++
+         # Block-sparse QR for SymmetricTensor (non-tracer) -- sub-branch (a).
+         if isinstance(C1g, SymmetricTensor) and isinstance(C4g, SymmetricTensor):
+             has_tracers = isinstance(C1g._data, jax.core.Tracer) or isinstance(
+@@ -1216,6 +1255,114 @@ def _gauge_fix_qr_dense(Q, R):
+     return Q, R
+ 
+ 
++def _p3_blocksparse_spike() -> bool:
++    """Whether the #570 Phase-3 block-sparse traced-projector spike is active.
++
++    Gated by ``TENAX_P3_BLOCKSPARSE_SPIKE`` (unset/``""``/``"0"`` => off). When
++    OFF, every production projector path is byte-identical to ``main``. When ON,
++    the *traced* ``SymmetricTensor`` projector branches route through
++    :func:`_reduced_proj_symmetric_traced` instead of densifying — the feasibility
++    instrument for the block-sparse reduced-corner QR compile-win hypothesis.
++    """
++    return os.environ.get("TENAX_P3_BLOCKSPARSE_SPIKE", "") not in ("", "0")
++
++
++def _reduced_proj_symmetric_traced(
++    C1g: SymmetricTensor,
++    C4g: SymmetricTensor,
++    chi: int,
++    base_charges: np.ndarray | None,
++    decomp: str = "qr",
++) -> SymmetricTensor:
++    """TRACED block-sparse reduced-corner projector (#570 Phase 3 spike).
++
++    Per fused charge sector ``q``, concatenates both grown corners' column
++    blocks into ``M_q`` ``(fused_dim_q, ncol_q)``, then:
++
++    * ``decomp="qr"`` (reduced-corner QR): thin ``QR(M_q)``, ``diag(R)>=0`` gauge
++      fix, tiny Hermitian ``eigh(R_q R_q^H)``, keep top-``k_q`` ->
++      ``P_q = Q_q V_q`` — **no large SVD**.
++    * ``decomp="svd"`` (per-sector SVD baseline): ``svd(M_q)``, keep the top-``k_q``
++      left singular vectors -> ``P_q``.
++
++    Both produce the *same* single-isometry ``(fused, chi_new)`` projector and
++    identical surrounding block structure, so a ``qr`` vs ``svd`` HLO/compile
++    comparison isolates **exactly** the per-sector decomposition VJP.
++
++    The per-sector ``k_q`` is allocated *statically* from ``base_charges`` (the
++    charge-structure truncation pattern, concrete even under tracing). No
++    host-side argsort of tracer eigenvalues is performed, so the whole
++    construction is JAX-traceable — unlike the magnitude-truncating
++    :func:`_qr_projector_symmetric` / :func:`_eigh_projector_symmetric` forward
++    paths.
++    """
++    from tenax.algorithms._ctm_utils import _derive_charges
++
++    fused_pos = C1g.labels().index("fused")
++    fused_idx = C1g.indices[fused_pos]
++    charges_arr = np.asarray(fused_idx.charges)
++
++    def _group_by_fused(Cg: SymmetricTensor) -> dict[int, list[jax.Array]]:
++        grouped: dict[int, list[jax.Array]] = {}
++        for key, block in Cg.blocks.items():
++            grouped.setdefault(int(key[fused_pos]), []).append(block)
++        return grouped
++
++    c1_groups = _group_by_fused(C1g)
++    c4_groups = _group_by_fused(C4g)
++    all_fused_charges = sorted(set(c1_groups) | set(c4_groups))
++
++    # Static per-sector budget k_q from the (concrete) charge-structure pattern.
++    fused_dim_of = {fq: int(np.sum(charges_arr == fq)) for fq in all_fused_charges}
++    n_keep = min(chi, sum(fused_dim_of.values()))
++    if base_charges is not None:
++        target = np.asarray(_derive_charges(base_charges, n_keep))
++        want: dict[int, int] = {}
++        for q in target:
++            want[int(q)] = want.get(int(q), 0) + 1
++    else:  # spike fallback (base_charges is populated in the real sweep)
++        per = max(n_keep // max(len(all_fused_charges), 1), 1)
++        want = {fq: per for fq in all_fused_charges}
++
++    chi_new_charges: list[int] = []
++    proj_blocks: dict[tuple[int, ...], jax.Array] = {}
++    for fq in all_fused_charges:
++        fused_dim = fused_dim_of[fq]
++        if fused_dim == 0:
++            continue
++        col_blocks: list[jax.Array] = []
++        for entries in (c1_groups.get(fq, []), c4_groups.get(fq, [])):
++            for block in entries:
++                if fused_pos == 0:
++                    col_blocks.append(block.reshape(fused_dim, -1))
++                else:
++                    col_blocks.append(block.reshape(-1, fused_dim).T)
++        if not col_blocks:
++            continue
++        M_q = jnp.concatenate(col_blocks, axis=1)  # (fused_dim, ncol_q)
++        ncol_q = M_q.shape[1]
++        k_q = min(int(want.get(fq, 0)), fused_dim, ncol_q)
++        if k_q <= 0:
++            continue
++        if decomp == "qr":
++            Q_q, R_q = jnp.linalg.qr(M_q)
++            Q_q, R_q = _gauge_fix_qr_dense(Q_q, R_q)
++            rho_q = R_q @ R_q.conj().T
++            rho_q = 0.5 * (rho_q + rho_q.conj().T)
++            _evals, evecs = jnp.linalg.eigh(rho_q)
++            V_q = evecs[:, -k_q:][:, ::-1]  # top-k_q, descending
++            P_q = Q_q @ V_q  # (fused_dim, k_q)
++        else:  # "svd": per-sector SVD baseline
++            U_q, _S_q, _Vh_q = jnp.linalg.svd(M_q, full_matrices=False)
++            P_q = U_q[:, :k_q]  # top-k_q left singular vectors
++        chi_new_charges.extend([fq] * k_q)
++        proj_blocks[(fq, fq)] = P_q
++
++    return _build_symmetric_projector(
++        proj_blocks, chi_new_charges, fused_idx, C1g.dtype
++    )
++
++
+ def _reduced_qr_projector(
+     C1g: Tensor,
+     C4g: Tensor,
