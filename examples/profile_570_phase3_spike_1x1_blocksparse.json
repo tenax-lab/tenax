@@ -1,0 +1,86 @@
+{
+  "platform": "gpu",
+  "device_kind": "NVIDIA A100-SXM4-80GB",
+  "x64": true,
+  "D": 4,
+  "methods": [
+    "svd",
+    "qr"
+  ],
+  "chi_list": [
+    12,
+    18,
+    24
+  ],
+  "full": false,
+  "recipe": "1x1",
+  "projector_backward": "auto",
+  "rows": [
+    {
+      "D": 4,
+      "chi": 12,
+      "method": "svd",
+      "n_blocks": 16,
+      "recipe": "1x1",
+      "projector_backward": "auto",
+      "env_lower_s": 3.762759590521455,
+      "env_compile_s": 9.953968349844217,
+      "env_hlo_instr": 22401
+    },
+    {
+      "D": 4,
+      "chi": 12,
+      "method": "qr",
+      "n_blocks": 16,
+      "recipe": "1x1",
+      "projector_backward": "auto",
+      "env_lower_s": 3.826449478045106,
+      "env_compile_s": 10.394762156531215,
+      "env_hlo_instr": 24042
+    },
+    {
+      "D": 4,
+      "chi": 18,
+      "method": "svd",
+      "n_blocks": 16,
+      "recipe": "1x1",
+      "projector_backward": "auto",
+      "env_lower_s": 3.6469452306628227,
+      "env_compile_s": 11.457413652911782,
+      "env_hlo_instr": 20846
+    },
+    {
+      "D": 4,
+      "chi": 18,
+      "method": "qr",
+      "n_blocks": 16,
+      "recipe": "1x1",
+      "projector_backward": "auto",
+      "env_lower_s": 3.8684459179639816,
+      "env_compile_s": 11.89765158854425,
+      "env_hlo_instr": 22474
+    },
+    {
+      "D": 4,
+      "chi": 24,
+      "method": "svd",
+      "n_blocks": 16,
+      "recipe": "1x1",
+      "projector_backward": "auto",
+      "env_lower_s": 3.7004782669246197,
+      "env_compile_s": 11.934548212215304,
+      "env_hlo_instr": 21593
+    },
+    {
+      "D": 4,
+      "chi": 24,
+      "method": "qr",
+      "n_blocks": 16,
+      "recipe": "1x1",
+      "projector_backward": "auto",
+      "env_lower_s": 3.9140930641442537,
+      "env_compile_s": 12.257912393659353,
+      "env_hlo_instr": 22584
+    }
+  ]
+}

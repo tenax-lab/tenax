@@ -104,7 +104,9 @@ def make_site(D: int, seed: int = 42):
     )
 
 
-def build_sweep_vjps(A, chi: int, method: str, projector_backward: str = "auto"):
+def build_sweep_vjps(
+    A, chi: int, method: str, projector_backward: str = "auto", recipe: str = "2x2"
+):
     """Return (apply_Jt_env, apply_Jt_params, v) for the requested projector.
 
     ``apply_Jt_env``   = VJP of one gauge-fixed sweep w.r.t. the ENVIRONMENT
@@ -122,7 +124,7 @@ def build_sweep_vjps(A, chi: int, method: str, projector_backward: str = "auto")
     env_leaves = tuple(jax.tree.leaves(envs))
     param_treedef = jax.tree.structure(A_norm)
     param_leaves = tuple(jax.tree.leaves(A_norm))
-    jit_step = _make_jit_ctm_step(SINGLE_SITE_NEIGHBORS)
+    jit_step = _make_jit_ctm_step(SINGLE_SITE_NEIGHBORS, recipe)
 
     def sweep_from_env(env_leaves_flat):
         e = jax.tree.unflatten(treedef, env_leaves_flat)
@@ -192,10 +194,10 @@ def _cold_compile(fn, v):
     return t_lower, t_compile, _hlo_instr_count(compiled)
 
 
-def profile_cell(D, chi, method, *, full, reps, projector_backward):
+def profile_cell(D, chi, method, *, full, reps, projector_backward, recipe="2x2"):
     A = make_site(D)
     n_blocks = getattr(A, "n_blocks", 1)
-    env_fn, par_fn, v = build_sweep_vjps(A, chi, method, projector_backward)
+    env_fn, par_fn, v = build_sweep_vjps(A, chi, method, projector_backward, recipe)
 
     def measure(fn):
         lowers, compiles, instrs = [], [], -1
@@ -216,6 +218,7 @@ def profile_cell(D, chi, method, *, full, reps, projector_backward):
         "chi": chi,
         "method": method,
         "n_blocks": int(n_blocks),
+        "recipe": recipe,
         "projector_backward": projector_backward,
         "env_lower_s": env_lower,
         "env_compile_s": env_compile,
@@ -256,6 +259,10 @@ def main() -> None:
         action="store_true",
         help="Also compile the params-sweep VJP (whole fused backward unit).",
     )
+    ap.add_argument(
+        "--recipe", default="2x2", choices=["2x2", "1x1"],
+        help="CTM move recipe. The reduced-corner QR projector lives in 1x1.",
+    )
     ap.add_argument("--reps", type=int, default=1, help="Cold-compile reps (median).")
     ap.add_argument("--json", type=str, default=None)
     args = ap.parse_args()
@@ -277,6 +284,7 @@ def main() -> None:
         "methods": args.methods,
         "chi_list": args.chi_list,
         "full": args.full,
+        "recipe": args.recipe,
         "projector_backward": args.projector_backward,
     }
 
@@ -300,6 +308,7 @@ def main() -> None:
                     full=args.full,
                     reps=args.reps,
                     projector_backward=args.projector_backward,
+                    recipe=args.recipe,
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"{method:>6} {chi:>4}  !! {type(exc).__name__}: {exc}")

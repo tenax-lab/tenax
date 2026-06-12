@@ -1,0 +1,28 @@
+{
+  "platform": "gpu",
+  "device_kind": "NVIDIA A100-SXM4-80GB",
+  "x64": true,
+  "D": 4,
+  "methods": [
+    "svd"
+  ],
+  "chi_list": [
+    12
+  ],
+  "full": false,
+  "recipe": "2x2",
+  "projector_backward": "auto",
+  "rows": [
+    {
+      "D": 4,
+      "chi": 12,
+      "method": "svd",
+      "n_blocks": 16,
+      "recipe": "2x2",
+      "projector_backward": "auto",
+      "env_lower_s": 7.235720401629806,
+      "env_compile_s": 14.158496698364615,
+      "env_hlo_instr": 28786
+    }
+  ]
+}
