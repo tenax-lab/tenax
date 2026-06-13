@@ -5,10 +5,10 @@
     "x64": true,
     "ref_energy": -0.669443,
     "D_list": [
-      3
+      4
     ],
     "chi_list": [
-      16
+      8
     ],
     "gs_steps": 150
   },
@@ -81,6 +81,18 @@
       "jit_compile_s": 27.165753465145826,
       "total_wall_s": 6475.452394368127,
       "warm_step_s": 3.992904331535101,
+      "num_steps": 150,
+      "converged": false,
+      "below_ref": false
+    },
+    {
+      "D": 4,
+      "chi": 8,
+      "E_final": -0.6671087782169047,
+      "dE": 0.0023342217830952805,
+      "jit_compile_s": 9.016008719801903,
+      "total_wall_s": 6636.997869975865,
+      "warm_step_s": 2.7874950524419546,
       "num_steps": 150,
       "converged": false,
       "below_ref": false
