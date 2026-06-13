@@ -1,0 +1,89 @@
+{
+  "meta": {
+    "platform": "dgxsa1h",
+    "device_kind": "NVIDIA A100-SXM4-80GB",
+    "x64": true,
+    "ref_energy": -0.669443,
+    "D_list": [
+      3
+    ],
+    "chi_list": [
+      16
+    ],
+    "gs_steps": 150
+  },
+  "rows": [
+    {
+      "D": 2,
+      "chi": 8,
+      "E_final": -0.660228703196764,
+      "dE": 0.009214296803236044,
+      "jit_compile_s": 19.840049857273698,
+      "total_wall_s": 551.6154555752873,
+      "warm_step_s": 0.5493958536535501,
+      "num_steps": 150,
+      "converged": false,
+      "below_ref": false
+    },
+    {
+      "D": 2,
+      "chi": 16,
+      "E_final": -0.6602306340268481,
+      "dE": 0.009212365973151893,
+      "jit_compile_s": 19.472965758293867,
+      "total_wall_s": 783.4731979481876,
+      "warm_step_s": 0.6993497740477324,
+      "num_steps": 150,
+      "converged": false,
+      "below_ref": false
+    },
+    {
+      "D": 3,
+      "chi": 8,
+      "E_final": -0.663993131553185,
+      "dE": 0.005449868446815054,
+      "jit_compile_s": 8.148931032046676,
+      "total_wall_s": 2493.2089373972267,
+      "warm_step_s": 1.635966893285513,
+      "num_steps": 150,
+      "converged": false,
+      "below_ref": false
+    },
+    {
+      "D": 2,
+      "chi": 24,
+      "E_final": -0.6602144625073598,
+      "dE": 0.009228537492640188,
+      "jit_compile_s": 8.510691015049815,
+      "total_wall_s": 1409.6838775761425,
+      "warm_step_s": 1.3651357609778643,
+      "num_steps": 150,
+      "converged": false,
+      "below_ref": false
+    },
+    {
+      "D": 2,
+      "chi": 32,
+      "E_final": -0.6601968320645122,
+      "dE": 0.009246167935487826,
+      "jit_compile_s": 8.638338325545192,
+      "total_wall_s": 2544.57846692577,
+      "warm_step_s": 2.20535783842206,
+      "num_steps": 150,
+      "converged": false,
+      "below_ref": false
+    },
+    {
+      "D": 3,
+      "chi": 16,
+      "E_final": -0.6641915527336046,
+      "dE": 0.00525144726639537,
+      "jit_compile_s": 27.165753465145826,
+      "total_wall_s": 6475.452394368127,
+      "warm_step_s": 3.992904331535101,
+      "num_steps": 150,
+      "converged": false,
+      "below_ref": false
+    }
+  ]
+}
