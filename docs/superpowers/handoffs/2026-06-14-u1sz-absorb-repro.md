@@ -35,7 +35,58 @@ The `(0,0)` block survives sweep 2 but zeros on sweep 3 because it contracts aga
 already-zero `(±1,∓1)` blocks of the edge tensors. Once all blocks are zero,
 `compute_energy_ctm_tensor_2site` returns 0.
 
-## Root cause — REVISED AGAIN (2026-06-14, second investigation; supersedes the jit-retrace theory)
+## Root cause — FINAL / DEFINITIVE (2026-06-14, third investigation; pins the WHY)
+
+The bond-order finding below is correct; this pins **why** order matters and why no focused fix exists.
+
+**The block-sparse contractor pairs contracted legs position-by-position within each charge
+sector and never realigns intra-sector basis ordering.** (`_contract_symmetric`,
+`src/tenax/contraction/contractor.py:599`; `_reembed_fused`, `_ctm_projector.py:213`, only
+pads/truncates per-sector *dimension*, not order.) A fused leg's intra-sector layout is derived
+from the chi sub-leg's charge order via `_compute_fused_charges` (`_tensor_utils.py:155`).
+
+- Eager SVD (`linalg.py:170`) emits chi in **SV-descending** order → the two independently-built
+  fused legs feeding the absorb contraction stay mutually consistent → the per-sector `einsum`
+  pairs the correct basis states → correct.
+- Traced SVD (`linalg.py:583`, used under jit/AD) emits **sector-block** order → the intra-sector
+  basis pairing across the two fused legs diverges → the dominant charge-0 content gets misrouted
+  and cancels → charged sectors collapse → E=0.
+
+**Decisive single-contraction isolation:** in `_ctm_tensor_absorb_bottom_2plaq`
+(`_ctm_tensor_moves.py:639-641`), with *identical* inputs (`env_src.C3 per c3_u = {0:1.0}`,
+`C3g = {0:0.103}`) the only difference is the projector's chi order:
+`contract(P_top_curr_bar, C3g)` gives charge-0 weight 0.069 (eager, SV-descending) vs **0.0**
+(traced, sector-block). The zeroed C3 then propagates: sweep-2 `Q_BR` loses its `chi_L=-1` sector
+→ `M2 = Q_BR·Q_BL` charged blocks → 0 → energy 0.
+
+**Why no focused fix exists (all three candidates rejected with evidence):**
+1. Make traced chi_new SV-descending → requires sorting by singular-value magnitude, which are
+   **traced values under jit** — not statically sortable, not jit-safe.
+2. "Root" projector fix → the projector is already internally consistent; the inconsistency is in
+   the *downstream contraction's positional intra-sector pairing*, not in
+   `_compute_2x2_projector_symmetric`. No local index/data swap there fixes it.
+3. Core contractor/fuse change to realign contracted legs by intra-sector basis identity → within
+   a sector, basis states are indistinguishable by charge alone, so realignment needs a consistent
+   canonical intra-sector ordering threaded through `fuse_indices` + projector + all four absorb
+   directions: a cross-cutting change to core block-sparse code **shared with the working
+   fermionic fPEPS path** — high blast radius.
+
+**Why fermionic (FermionParity = Z2) is unaffected:** only 2 bounded charge values {0,1}, small
+stable per-sector multiplicities → sector-block and SV-descending orderings coincide (or are
+positionally degenerate), so the intra-sector pairing never diverges. Unbounded U(1) with
+{−1,0,+1} and larger multiplicities is where they differ.
+
+**Verdict:** this is a **core block-sparse-contraction correctness item** (consistent intra-sector
+basis ordering for fused legs across SVD → projector → absorb), to be scoped and reviewed
+separately with the full fermionic suite as a regression gate — NOT a CTM-local or study-local
+patch. The U(1)-Sz Heisenberg perf study is **blocked** on it. Files for the eventual fix:
+`contraction/contractor.py:599`, `_tensor_utils.py:155/230`, `_ctm_tensor_moves.py` absorbs,
+`linalg.py:170/583`. Caveat for any fix: per-sector *dimensions* (not just order) drift between
+sweeps for unbounded U(1), so the canonical ordering must stay stable as multiplicities change.
+
+---
+
+## Root cause — REVISED (2026-06-14, second investigation; bond-order, jit-independent)
 
 A second, independent fix attempt ran a controlled experiment that **refutes the jit-retrace
 mechanism** below and is more decisive:
