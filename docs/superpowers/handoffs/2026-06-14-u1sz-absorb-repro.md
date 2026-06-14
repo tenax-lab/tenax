@@ -35,34 +35,58 @@ The `(0,0)` block survives sweep 2 but zeros on sweep 3 because it contracts aga
 already-zero `(±1,∓1)` blocks of the edge tensors. Once all blocks are zero,
 `compute_energy_ctm_tensor_2site` returns 0.
 
-## Candidate root cause (hypothesis — verify before fixing)
+## Root cause — CONFIRMED (2026-06-14, supersedes the initial hypothesis below)
 
-The symmetric CTM **edge/corner initialisation** seeds the chi legs with only the trivial
-`(0,0)` charge sector, while the D² (= u⊗ū) fused legs carry non-trivial charges. The first
-sweep's projectors populate the non-trivial chi blocks of the corners, but the edge tensors are
-re-absorbed from the **old** trivial-chi edges crossed with the double layer, so on the next
-sweep the `T4·a_src` contraction has a charge mismatch on the chi/D² legs and produces zeros.
+**The initial absorb-contraction hypothesis was REFUTED.** Independent diagnosis (eager-vs-jit
+isolation + retrace counter + bounded-symmetry cross-check) found the real mechanism: a
+**JIT + drifting static charge-layout interaction**, specific to **unbounded U(1)**.
 
-Frames implicated by the trace:
-1. `_ctm_python_loop.py:179` `_run_ctm_loop_with_bump` → `jit_step(...)`
-2. `_ctm_tensor_convergence.py:342` `_ctm_tensor_sweep_multisite` (recipe="2x2", Phase 2 absorb)
-3. `_ctm_tensor_moves.py:372-441` `_ctm_tensor_absorb_left_2plaq` (+ right/top/bottom analogs):
-   `contract(env_src.T4, a_src)` — `a_src.u2` carries `[-1,0,0,1]` but `T4.l2` (chi side) is
-   trivial-charge `[0]` only.
-4. `_ctm_tensor_init.py:252` `_init_symmetric_standard_edge` /
-   `_init_symmetric_standard_corner` — seed only trivial chi charges.
+- The CTM step is `jax.jit`-wrapped (`_make_jit_ctm_step`, `_ctm_python_loop.py:59`), called once
+  per sweep in a Python loop by the implicit-AD forward.
+- `SymmetricTensor.tree_flatten` (`core/tensor.py:795`) puts `_block_keys/_block_shapes/
+  _block_offsets/_indices` (the per-leg **charge vectors**) into pytree **aux_data** — static
+  under jit. Only the flat `_data` buffer is a traced leaf.
+- For unbounded U(1), the env chi-leg charge **ordering** is recomputed from the projector SVD
+  each sweep and **drifts**:
+  - init C1 chi charges: `[0,-1,1,0, 0,-1,1,0]`
+  - after sweep 1:        `[0,-1,1,0, -1,0,0,1]`  (reordered)
+  - after sweep 2:        `[0,-1,1,0, 0,-1,1,0]`  (reordered again)
+- Each new layout is a different treedef → **jit re-traces every sweep**, and the recompiled
+  block routing no longer matches the carried `_data` buffer, so the charged sectors land in
+  mismatched/empty offsets and zero out.
 
-## Files to focus the fix on
+**Evidence:** eager `_ctm_tensor_sweep_multisite` (no jit) keeps the charged `(-1,1)` block alive
+(~0.43–0.46) and gives the correct **E=-0.327**; the jit'd step retraces on sweeps 1→2 and the
+`(-1,1)` block goes 0.359 → 0.0 exactly when it retraces. **Bounded** symmetries do NOT drift:
+Z2/Z3 (and the working fermionic **FermionParity** path, `tests/test_fpeps_ad.py`) keep charged
+blocks alive across sweeps and give finite energy. So the absorb/projector/init code is correct;
+only unbounded-U(1) chi-layout drift breaks it. **Confidence: high.**
 
-- `src/tenax/algorithms/_ctm_tensor_init.py` — `_init_symmetric_standard_edge`,
-  `_init_symmetric_standard_corner` (may need charge-aware chi seeding).
-- `src/tenax/algorithms/_ctm_tensor_moves.py:372-441` — the four `_ctm_tensor_absorb_*_2plaq`
-  charge flow in the `T·a` contraction.
-- `src/tenax/algorithms/_ctm_tensor_convergence.py:412-434` — Phase 2 absorb dispatch.
+## Why fermionic (FermionParity = Z2) works but U(1) doesn't
 
-## Note
+Bounded groups have a small fixed set of charge values, so the per-sector projector SVD returns a
+**stable** chi-leg layout sweep-to-sweep → jit traces once, no buffer mismatch. Unbounded U(1)
+charge sets reorder, triggering the retrace/mismatch.
 
-The above mechanism is one agent's trace and is plausible but **not independently confirmed**.
-Task 5 must reproduce minimally and verify the root cause before patching, and should localize
-whether the bug is specific to unbounded U(1) charges or general to any non-trivial charge
-(re-run with a bounded `Zn`/capped-charge proxy).
+## Fix options (design)
+
+1. **Canonicalize chi-index charge ordering after each projector build** (recommended, localized,
+   ~30–60 lines in `_ctm_tensor_moves.py` `_half_to_chi_new_*` / `_compute_2x2_projector`): sort
+   new chi charges into a fixed canonical order and permute the projector data to match, so the
+   post-sweep env layout is deterministic → jit traces once. Symmetric path only; dense untouched.
+2. **Pre-declare a fixed padded chi-leg charge basis at init** (moderate, most robust): projectors
+   always emit a fixed-length/fixed-order charge vector (zero-size blocks for empty sectors).
+   Safer if a sector's *dimension* (not just order) drifts at larger D/chi.
+3. **(Fallback) run the U(1) sweep eagerly** (skip `_make_jit_ctm_step` for non-trivial unbounded
+   charges): trivially correct but loses jit performance and implicit-AD through the jit'd step.
+
+Residual uncertainty: whether canonical sort alone (option 1) suffices when a sector's dimension
+changes between sweeps at larger D/chi — option 2 is the safe fallback there.
+
+---
+
+## (Superseded) initial hypothesis — kept for the record
+
+The first trace guessed an absorb-contraction charge mismatch in `_ctm_tensor_absorb_left_2plaq`
+with trivial-chi edge seeding. This was **refuted** by the eager-vs-jit isolation above: eager
+runs the same absorb code correctly. Do not pursue the absorb/init seeding theory.
