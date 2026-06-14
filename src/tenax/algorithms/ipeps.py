@@ -35,7 +35,7 @@ from tenax.algorithms.ipeps_simple_update import (
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor, Tensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 
 def heisenberg_gate(dtype=jnp.float64) -> DenseTensor:
@@ -61,6 +61,36 @@ def heisenberg_gate(dtype=jnp.float64) -> DenseTensor:
         ),
     )
     return DenseTensor(H.reshape(2, 2, 2, 2), indices)
+
+
+def heisenberg_gate_u1sz(dtype=jnp.float64) -> SymmetricTensor:
+    """Build the 2-site Heisenberg Hamiltonian as a U(1)-Sz SymmetricTensor.
+
+    Identical numerics to :func:`heisenberg_gate`
+    (``H = Sz Sz + 0.5 (S+ S- + S- S+)``) but the physical legs carry
+    U(1) charges ``[+1, -1]`` for ``{up, down}`` (units of ``2*Sz``,
+    matching the ``S+``/``S-`` charge-(+/-)2 convention in
+    ``tests/test_observables.py``). Sz conservation makes the gate
+    block-sparse. Returned as a 4-leg ``SymmetricTensor`` with labels
+    ``(si, sj, si_out, sj_out)``.
+    """
+    Sz = jnp.array([[0.5, 0.0], [0.0, -0.5]], dtype=dtype)
+    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]], dtype=dtype)
+    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]], dtype=dtype)
+    H = jnp.kron(Sz, Sz) + 0.5 * (jnp.kron(Sp, Sm) + jnp.kron(Sm, Sp))
+    sym = U1Symmetry()
+    charges = np.array([1, -1], dtype=np.int32)  # Sz = +1/2, -1/2 -> 2*Sz
+    indices = (
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="si"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="sj"),
+        TensorIndex.from_charges(
+            sym, charges.copy(), FlowDirection.OUT, label="si_out"
+        ),
+        TensorIndex.from_charges(
+            sym, charges.copy(), FlowDirection.OUT, label="sj_out"
+        ),
+    )
+    return SymmetricTensor.from_dense(H.reshape(2, 2, 2, 2), indices)
 
 
 def xxz_gate(delta: float = 1.0, dtype=jnp.float64) -> DenseTensor:
