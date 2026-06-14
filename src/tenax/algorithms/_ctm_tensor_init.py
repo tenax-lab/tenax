@@ -249,6 +249,29 @@ def _make_dense_standard_edge(
     )
 
 
+def _grouped_chi_perm(charges: np.ndarray) -> np.ndarray:
+    """Stable argsort of ``charges`` into charge-grouped (ascending) order.
+
+    The symmetric CTM env init derives chi-bond charges by fusing virtual
+    legs, which yields an *enumeration* order (e.g. ``[0, -1, 1, 0, ...]``).
+    The block-sparse SVD used to grow the env under jit/AD
+    (``_truncated_svd_symmetric_traced``) instead emits its bond in
+    **charge-grouped** order (``sorted(sectors)``).  For an unbounded charge
+    set (U(1)) these two orderings differ, and because a fused leg's
+    intra-block layout is derived from its chi sub-leg's order
+    (``_compute_fused_charges``), the sweep-1 absorb then pairs the projector's
+    grouped fused leg against the env's enumeration-ordered fused leg
+    *positionally* and the charged sectors cancel to zero (#602).
+
+    Reordering the init chi bonds into the same charge-grouped order the SVD
+    uses makes the two agree.  This is a *faithful* permutation (data and
+    index are permuted together), so it preserves the tensor exactly; for
+    bounded symmetries (FermionParity) the two orderings already coincide, so
+    it is a no-op there.
+    """
+    return np.argsort(np.asarray(charges), kind="stable")
+
+
 def _init_symmetric_standard_edge(
     A: SymmetricTensor,
     chi: int,
@@ -293,6 +316,14 @@ def _init_symmetric_standard_edge(
     idx_bra = idx_ket.flip_flow()  # bar() flips flow
     D2_charges = _compute_fused_charges(idx_ket, idx_bra, flow_D2, sym)
 
+    # Canonicalize chi-bond order to match the block-sparse SVD's grouped
+    # bond order (#602); the D² leg is left as-is (it is matched against the
+    # double-layer tensor's identically-fused D² leg, not the SVD bond).
+    perm1 = _grouped_chi_perm(chi1_charges)
+    perm2 = _grouped_chi_perm(chi2_charges)
+    chi1_charges = np.asarray(chi1_charges)[perm1]
+    chi2_charges = np.asarray(chi2_charges)[perm2]
+
     idx_chi1 = TensorIndex.from_charges(sym, chi1_charges, flow_chi1, label=label_chi1)
     idx_D2 = TensorIndex.from_charges(sym, D2_charges, flow_D2, label=label_D2)
     idx_chi2 = TensorIndex.from_charges(sym, chi2_charges, flow_chi2, label=label_chi2)
@@ -305,6 +336,8 @@ def _init_symmetric_standard_edge(
     diag_idx = np.arange(D, dtype=np.int32) * (D + 1)
     T = jnp.zeros((chi, D2, chi), dtype=A.dtype)
     T = T.at[0, diag_idx, 0].set(jnp.ones(D, dtype=A.dtype))
+    # Faithful reorder of the chi axes into the grouped order chosen above.
+    T = T[perm1][:, :, perm2]
     return SymmetricTensor.from_dense(T, (idx_chi1, idx_D2, idx_chi2), tol=float("inf"))
 
 
@@ -339,11 +372,19 @@ def _init_symmetric_standard_corner(
         reps = chi // len(base_D2_charges) + 1
         chi_charges = np.asarray(np.tile(base_D2_charges, reps)[:chi], dtype=np.int32)
 
+    # Canonicalize chi-bond order to match the block-sparse SVD's grouped
+    # bond order (#602).  Both corner legs share the same chi charges, so the
+    # same permutation applies to both axes.
+    perm = _grouped_chi_perm(chi_charges)
+    chi_charges = np.asarray(chi_charges)[perm]
+
     idx_a = TensorIndex.from_charges(sym, chi_charges.copy(), flow_a, label=label_a)
     idx_b = TensorIndex.from_charges(sym, chi_charges.copy(), flow_b, label=label_b)
     # variPEPS chi_init=1: rank-1 corner — only the leading (0, 0) entry
     # is non-zero. Subsequent absorptions grow chi via SVD truncation.
     C_dense = jnp.zeros((chi, chi), dtype=A.dtype).at[0, 0].set(1.0)
+    # Faithful reorder of both chi axes into the grouped order chosen above.
+    C_dense = C_dense[perm][:, perm]
     return SymmetricTensor.from_dense(
         C_dense,
         (idx_a, idx_b),
