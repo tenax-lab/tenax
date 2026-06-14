@@ -143,3 +143,37 @@ class TestU1SzSymmetricMatchesDense:
         assert float(E_sym) < -0.05, f"charged CTM sectors collapsed: E_sym={E_sym}"
         # Physical agreement with dense (not exact — see docstring).
         np.testing.assert_allclose(float(E_sym), float(E_dense), atol=2e-2)
+
+
+class TestU1SzSymmetricCTMD3:
+    @pytest.mark.xfail(
+        reason="D>=3 T4-edge flow-conjugation bug (#605): the edge's "
+        "T4g.fl = fuse(t4_d, u2) comes out charge-conjugate to the projector's "
+        "fused leg, so the 2-plaq left-absorb contraction "
+        "(_ctm_tensor_absorb_left_2plaq) hits a per-sector dim mismatch "
+        "(e.g. 19 vs 16) at D=3, chi=16. Masked at D=2 by symmetric D^2 charges; "
+        "distinct from #602 (which was per-sector order). Dense from the same "
+        "init runs fine. Flip to a correctness check (vs dense + order-invariance) "
+        "once #605 lands.",
+        strict=True,
+        raises=ValueError,
+    )
+    def test_d3_chi16_symmetric_ctm_xfail(self):
+        """D=3 chi=16 U(1)-Sz symmetric CTM currently raises in the T4 absorb (#605)."""
+        from tenax import CTMConfig, iPEPSConfig, optimize_gs_ad
+        from tenax.algorithms.ipeps import (
+            heisenberg_gate,
+            heisenberg_u1sz_init_pair,
+        )
+
+        A_sym, B_sym = heisenberg_u1sz_init_pair(D=3, key=jax.random.PRNGKey(0))
+        gate = heisenberg_gate().todense()
+        config = iPEPSConfig(
+            max_bond_dim=3,
+            ctm=CTMConfig(chi=16, max_iter=30),
+            gs_num_steps=1,
+            unit_cell="2site",
+        )
+        # Raises ValueError("Size of label 'b' ... does not match ...") in the
+        # left absorb's contract(P_left, T4g); dense from the same init is fine.
+        optimize_gs_ad(gate, (A_sym, B_sym), config)
