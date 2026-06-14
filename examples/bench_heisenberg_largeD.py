@@ -126,25 +126,40 @@ def run_cell(D: int, chi: int, gs_steps: int) -> dict:
     num_steps = int(history["num_steps"])
     converged = bool(history["converged"])
 
-    E_final = float(min(energies)) if energies else float("nan")
+    # E_final: the energy of the actual final state returned by the
+    # optimizer (E_gs).  best_seen tracks the lowest energy recorded over
+    # the trajectory — only used for the variational-floor watch below, so a
+    # CTM-noisy transient can't be mistaken for the reported final energy.
+    E_final = float(E_gs)
+    # Lowest energy anywhere — the final state (E_gs) is often lower than any
+    # value in history["energies"], so include it in the minimum.
+    best_seen = min([E_final, *map(float, energies)]) if energies else E_final
     dE = E_final - REF_ENERGY
 
-    # Warm step = median of all step_times: the history accumulator stores
-    # jit_compile_time separately (step 0) and step_times contains only steps
-    # 1+ (all "warm" — already compiled), so no further slicing needed.
-    warm_step_s = statistics.median(step_times) if step_times else float("nan")
+    # grad_eval_s: history["step_times"] is stamped immediately after the
+    # jax.value_and_grad(loss_fn)(params) call, BEFORE the L-BFGS search
+    # direction + Hager-Zhang line search run, so its median is a gradient-
+    # evaluation time, NOT a full optimizer step.  The honest per-step wall is
+    # total_wall_s / num_steps (which includes line-search CTM re-evaluations).
+    grad_eval_s = statistics.median(step_times) if step_times else float("nan")
+    wall_per_step_s = total_wall_s / num_steps if num_steps else float("nan")
 
     return {
         "D": D,
         "chi": chi,
         "E_final": E_final,
+        "best_seen": best_seen,
         "dE": dE,
         "jit_compile_s": jit_compile_s,
         "total_wall_s": total_wall_s,
-        "warm_step_s": warm_step_s,
+        "wall_per_step_s": wall_per_step_s,
+        "grad_eval_s": grad_eval_s,
         "num_steps": num_steps,
         "converged": converged,
-        "below_ref": E_final < REF_ENERGY,
+        # Variational-floor watch: flag if the lowest energy *anywhere* on the
+        # trajectory dips below the QMC reference (signals a normalization/gauge
+        # bug), using best_seen rather than just the final state.
+        "below_ref": best_seen < REF_ENERGY,
     }
 
 
@@ -171,9 +186,32 @@ def _load_rows(path: str) -> list[dict]:
     try:
         with p.open() as f:
             data = json.load(f)
-        return data.get("rows", [])
+        return [_backfill_row(r) for r in data.get("rows", [])]
     except Exception:
         return []
+
+
+def _backfill_row(r: dict) -> dict:
+    """Upgrade a legacy checkpoint row to the current schema in place.
+
+    Rows written by an earlier version carry ``warm_step_s`` but not
+    ``wall_per_step_s``. The per-step wall is derivable as
+    ``total_wall_s / num_steps``, so backfill it (and drop the stale
+    ``warm_step_s`` label) before the row is reprinted or rewritten —
+    otherwise resumed legacy rows print ``nan`` for ``w/step`` and a
+    rewrite would persist a mixed schema. The energy fields are left as
+    stored: ``E_gs`` is not recoverable for legacy rows, and the
+    difference from the old ``min(energies)`` is negligible (5th–6th
+    decimal).
+    """
+    if "error" in r or "wall_per_step_s" in r:
+        return r
+    total = r.get("total_wall_s")
+    steps = r.get("num_steps")
+    if total is not None and steps:
+        r["wall_per_step_s"] = total / steps
+    r.pop("warm_step_s", None)
+    return r
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +220,7 @@ def _load_rows(path: str) -> list[dict]:
 
 _HEADER = (
     f"{'D':>3}  {'chi':>4}  {'E_final':>12}  {'dE':>10}  "
-    f"{'jit_s':>7}  {'wall_s':>7}  {'step_s':>7}  {'steps':>5}  "
+    f"{'jit_s':>7}  {'wall_s':>7}  {'w/step':>7}  {'steps':>5}  "
     f"{'conv':>5}  {'<ref':>5}"
 )
 _SEP = "-" * len(_HEADER)
@@ -197,10 +235,11 @@ def _print_row(r: dict) -> None:
     ref_s = "yes" if r.get("below_ref") else "no"
     jit = r.get("jit_compile_s", float("nan"))
     wall = r.get("total_wall_s", float("nan"))
-    step = r.get("warm_step_s", float("nan"))
+    # Per-step wall (full optimizer step incl. line search), not grad-eval.
+    w_step = r.get("wall_per_step_s", float("nan"))
     print(
         f"{r['D']:>3}  {r['chi']:>4}  {r['E_final']:>12.7f}  {r['dE']:>+10.6f}  "
-        f"{jit:>7.1f}  {wall:>7.1f}  {step:>7.3f}  {r['num_steps']:>5}  "
+        f"{jit:>7.1f}  {wall:>7.1f}  {w_step:>7.3f}  {r['num_steps']:>5}  "
         f"{conv_s:>5}  {ref_s:>5}"
     )
 
@@ -259,20 +298,26 @@ def main() -> None:
     except Exception:
         device_kind = "unknown"
 
+    # Load existing rows (resume support)
+    rows: list[dict] = _load_rows(args.json) if args.json else []
+    done: set[tuple[int, int]] = {
+        (r["D"], r["chi"]) for r in rows if "error" not in r
+    }
+
+    # Build metadata.  On a resume with a narrower CLI selection, the file may
+    # already hold rows outside the current --D-list/--chi-list; record the
+    # UNION of the D/chi actually present (existing rows ∪ this run's request)
+    # so the top-level metadata describes the whole sweep, not just this call.
+    d_union = sorted(set(args.D_list) | {r["D"] for r in rows})
+    chi_union = sorted(set(args.chi_list) | {r["chi"] for r in rows})
     meta = {
         "platform": platform.node(),
         "device_kind": device_kind,
         "x64": True,
         "ref_energy": REF_ENERGY,
-        "D_list": args.D_list,
-        "chi_list": args.chi_list,
+        "D_list": d_union,
+        "chi_list": chi_union,
         "gs_steps": args.gs_steps,
-    }
-
-    # Load existing rows (resume support)
-    rows: list[dict] = _load_rows(args.json) if args.json else []
-    done: set[tuple[int, int]] = {
-        (r["D"], r["chi"]) for r in rows if "error" not in r
     }
 
     # Print header

@@ -32,15 +32,21 @@ the rest of #570 / #566 chased is **compile-bound**. Dense and block-sparse hit 
 
 ## Results
 
-| D | χ | E_final | dE vs −0.6694430 | jit_compile (s) | total wall (s) | median warm-step (s) | steps | conv |
-|---|---|---------|------------------|-----------------|----------------|----------------------|-------|------|
-| 2 | 8  | −0.660229 | +0.00921 | 19.8 | 551.6  | 0.549 | 150 | no |
-| 2 | 16 | −0.660231 | +0.00921 | 19.5 | 783.5  | 0.699 | 150 | no |
-| 2 | 24 | −0.660214 | +0.00923 |  8.5 | 1409.7 | 1.365 | 150 | no |
-| 2 | 32 | −0.660197 | +0.00925 |  8.6 | 2544.6 | 2.205 | 150 | no |
-| 3 | 8  | −0.663993 | +0.00545 |  8.1 | 2493.2 | 1.636 | 150 | no |
-| 3 | 16 | −0.664192 | +0.00525 | 27.2 | 6475.5 | 3.993 | 150 | no |
-| 4 | 8  | −0.667109 | +0.00233 |  9.0 | 6637.0 | 2.787 | 150 | no |
+| D | χ | E_final | dE vs −0.6694430 | jit_compile (s) | total wall (s) | wall/step (s) | steps | conv |
+|---|---|---------|------------------|-----------------|----------------|---------------|-------|------|
+| 2 | 8  | −0.660229 | +0.00921 | 19.8 | 551.6  |  3.68 | 150 | no |
+| 2 | 16 | −0.660231 | +0.00921 | 19.5 | 783.5  |  5.22 | 150 | no |
+| 2 | 24 | −0.660214 | +0.00923 |  8.5 | 1409.7 |  9.40 | 150 | no |
+| 2 | 32 | −0.660197 | +0.00925 |  8.6 | 2544.6 | 16.96 | 150 | no |
+| 3 | 8  | −0.663993 | +0.00545 |  8.1 | 2493.2 | 16.62 | 150 | no |
+| 3 | 16 | −0.664192 | +0.00525 | 27.2 | 6475.5 | 43.17 | 150 | no |
+| 4 | 8  | −0.667109 | +0.00233 |  9.0 | 6637.0 | 44.25 | 150 | no |
+
+The **wall/step** column is `total_wall / steps` — the honest full optimizer-step cost (gradient
+eval **plus** the L-BFGS Hager-Zhang line search, which re-runs CTM several times per step). An
+earlier revision of this table reported the optimizer's `step_times` median (~0.5–4 s), but that
+is stamped before the line search and is a *gradient-evaluation* time, ~10× smaller than the real
+per-step wall — corrected here per PR #599 review.
 
 Every cell past D=3 χ=8 exceeds the 1-hour per-attempt budget — D=3 χ=16 took **108 min** and
 D=4 χ=8 took **111 min** — and the full 12-cell core grid did not finish in the kill/resume
@@ -62,16 +68,16 @@ finding.
   still lives in **D**, not χ. (D=2 χ-flatness CPU-validated separately before the sweep.)
 - `converged=no` everywhere: `grad_norm` does not reach 1e-5 within 150 steps because the
   near-minimum landscape is flat/CTM-noisy, but the **energy plateaus** well before the budget,
-  so `E_final` (min over the trajectory) is the meaningful number. No cell fell below the
-  reference (the variational-floor watch never tripped).
+  so `E_final` (the final state returned by the optimizer) is the meaningful number. No cell fell
+  below the reference (the variational-floor watch, on the lowest energy seen, never tripped).
 
 ## 2. Runtime + compile scaling
 
 - **Compile is cheap and ~flat:** `jit_compile_s` ≈ 8–20 s regardless of D/χ. The dense bosonic
   backward does **not** suffer the block-sparse compile wall.
 - **Runtime is the cost and it explodes:** total wall at D=2 grows 552 → 784 → 1410 → 2545 s as
-  χ goes 8 → 32 (≈ χ^1.7); median warm-step grows 0.55 → 2.2 s. D=3 χ=8 (2493 s) already costs as
-  much as D=2 χ=32, and D=3 χ=16 (6475 s, **108 min**, warm-step 3.99 s) is the single most
+  χ goes 8 → 32 (≈ χ^1.7); the full per-step wall grows 3.7 → 17 s. D=3 χ=8 (2493 s) already costs
+  as much as D=2 χ=32, and D=3 χ=16 (6475 s, **108 min**, **43 s/step**) is the single most
   expensive completed cell. The per-step cost is the implicit-AD step: a full CTM re-convergence
   (`max_iter` up to 100 sweeps) inside each L-BFGS line-search evaluation, and that scales
   steeply in both D and χ.
