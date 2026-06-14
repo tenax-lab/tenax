@@ -52,3 +52,27 @@ class TestHeisenbergGateU1Sz:
         signs = [int(ix.flow.value) for ix in gate.indices]
         for key in gate.blocks:
             assert sum(s * q for s, q in zip(signs, key)) == 0
+
+
+class TestHeisenbergU1SzInit:
+    def test_pair_are_symmetric_tensors(self):
+        from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
+
+        A, B = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
+        assert isinstance(A, SymmetricTensor)
+        assert isinstance(B, SymmetricTensor)
+
+    def test_pair_have_five_legs_and_nontrivial_blocks(self):
+        from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
+
+        A, B = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
+        assert len(A.indices) == 5  # u, d, l, r, phys
+        assert len(A.blocks) > 1    # non-trivially blocked -> exercises absorb step
+        assert len(B.blocks) > 1
+
+    def test_physical_leg_is_sz_charged(self):
+        from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
+
+        A, _ = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
+        phys = np.asarray(A.indices[4].charges)  # phys is the 5th leg
+        assert sorted(phys.tolist()) == [-1, 1]
