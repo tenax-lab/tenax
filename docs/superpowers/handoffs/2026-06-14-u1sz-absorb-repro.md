@@ -35,7 +35,39 @@ The `(0,0)` block survives sweep 2 but zeros on sweep 3 because it contracts aga
 already-zero `(±1,∓1)` blocks of the edge tensors. Once all blocks are zero,
 `compute_energy_ctm_tensor_2site` returns 0.
 
-## Root cause — CONFIRMED (2026-06-14, supersedes the initial hypothesis below)
+## Root cause — REVISED AGAIN (2026-06-14, second investigation; supersedes the jit-retrace theory)
+
+A second, independent fix attempt ran a controlled experiment that **refutes the jit-retrace
+mechanism** below and is more decisive:
+
+- **The jit step does NOT retrace every sweep.** `jax.tree_util.tree_structure` shows the env
+  treedef is *stable* from sweep 1 onward (one unavoidable init→steady retrace, then stable). The
+  "static aux_data treedef changes every sweep" claim is wrong.
+- **The bug is bond-ORDER dependence in the block-sparse 2×2 projector, independent of jit.**
+  Forcing the SVD bond into **sector-block (charge-grouped)** order collapses the charged sectors
+  to zero **even in pure eager mode (no jit)** → E=0. Leaving it in **SV-descending** order
+  (eager's default, `_truncated_svd_symmetric`, `linalg.py:170`) works → E≈-0.05. The jit path
+  takes the *traced* SVD (`_truncated_svd_symmetric_traced`, `linalg.py:583`, whose own comment at
+  `:616` says "bond axis emerges in sector-block order"), so it inherits the buggy order.
+- Consequence: the "canonical chi-order" fix (sort into sector-block order) is **actively wrong** —
+  it forces the buggy ordering and collapsed even the previously-correct eager path. Verified the
+  relabelling was faithful (`U·diag(S)·Vh == M` to 1e-16), so this is a genuine projector
+  order-dependence bug, not a botched permutation.
+
+**The real fix lead:** either make `_truncated_svd_symmetric_traced` emit the **same SV-descending
+bond order as the eager SVD**, or fix `_compute_2x2_projector_symmetric`
+(`_ctm_tensor_projector_2x2.py:925–1070`, Stages 4–6) to be correct regardless of bond order. This
+is a **core block-sparse linalg/projector correctness bug** shared with the symmetric CTM path.
+Residual open question: why the fermionic FermionParity (Z2) path is unaffected — likely its
+sector-block order coincides with (or is order-insensitive for) the few-charge bounded case;
+needs confirming as part of the fix.
+
+**Confidence:** high on the controlled eager-order experiment; the exact projector wiring bug is
+localized to the two files above but not yet pinned to a single line.
+
+---
+
+## Root cause — (first investigation; jit-retrace theory, now DISPUTED by the above)
 
 **The initial absorb-contraction hypothesis was REFUTED.** Independent diagnosis (eager-vs-jit
 isolation + retrace counter + bounded-symmetry cross-check) found the real mechanism: a
