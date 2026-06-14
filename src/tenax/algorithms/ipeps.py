@@ -35,7 +35,7 @@ from tenax.algorithms.ipeps_simple_update import (
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor, Tensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 
 def heisenberg_gate(dtype=jnp.float64) -> DenseTensor:
@@ -61,6 +61,86 @@ def heisenberg_gate(dtype=jnp.float64) -> DenseTensor:
         ),
     )
     return DenseTensor(H.reshape(2, 2, 2, 2), indices)
+
+
+def heisenberg_gate_u1sz(dtype=jnp.float64) -> SymmetricTensor:
+    """Build the 2-site Heisenberg Hamiltonian as a U(1)-Sz SymmetricTensor.
+
+    Identical numerics to :func:`heisenberg_gate`
+    (``H = Sz Sz + 0.5 (S+ S- + S- S+)``) but the physical legs carry
+    U(1) charges ``[+1, -1]`` for ``{up, down}`` (units of ``2*Sz``,
+    matching the ``S+``/``S-`` charge-(+/-)2 convention in
+    ``tests/test_observables.py``). Sz conservation makes the gate
+    block-sparse. Returned as a 4-leg ``SymmetricTensor`` with labels
+    ``(si, sj, si_out, sj_out)``.
+    """
+    Sz = jnp.array([[0.5, 0.0], [0.0, -0.5]], dtype=dtype)
+    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]], dtype=dtype)
+    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]], dtype=dtype)
+    H = jnp.kron(Sz, Sz) + 0.5 * (jnp.kron(Sp, Sm) + jnp.kron(Sm, Sp))
+    sym = U1Symmetry()
+    charges = np.array([1, -1], dtype=np.int32)  # Sz = +1/2, -1/2 -> 2*Sz
+    indices = (
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="si"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="sj"),
+        TensorIndex.from_charges(
+            sym, charges.copy(), FlowDirection.OUT, label="si_out"
+        ),
+        TensorIndex.from_charges(
+            sym, charges.copy(), FlowDirection.OUT, label="sj_out"
+        ),
+    )
+    return SymmetricTensor.from_dense(H.reshape(2, 2, 2, 2), indices)
+
+
+def heisenberg_u1sz_init_pair(
+    D: int, key: jax.Array
+) -> tuple[SymmetricTensor, SymmetricTensor]:
+    """Build a random U(1)-Sz-symmetric 2-site iPEPS pair ``(A, B)``.
+
+    Each site tensor has 5 legs ``(u, d, l, r, phys)`` with flows
+    ``u=OUT, d=IN, l=OUT, r=IN, phys=IN`` (matching
+    ``_build_initial_fpeps_tensor``). Physical charges are ``[+1, -1]``
+    (2*Sz, where Sz=+1/2 maps to +1 and Sz=-1/2 maps to -1); virtual
+    charges cycle through ``[0, +1, -1, 0, +1, -1, ...]`` over bond
+    dimension ``D`` so that the Sz-conservation law
+    ``-q_u + q_d - q_l + q_r + q_phys = 0`` has non-trivial solutions
+    (pure ``±1`` virtual charges produce a parity obstruction: all
+    virtual contributions are even while physical charges are odd,
+    giving zero valid sectors). Both tensors are Sz-conserving; the AFM
+    correlations emerge from optimization within the Sz=0 sector.
+
+    Args:
+        D:   Virtual bond dimension. Must be ``>= 2``: at D=1 the only
+             virtual charge is 0 and no Sz-conserving sector with a charged
+             physical leg exists (the tensor would be all-zeros).
+        key: JAX random key (split internally for A and B).
+
+    Returns:
+        Tuple ``(A, B)`` of SymmetricTensors.
+
+    Raises:
+        ValueError: if ``D < 2``.
+    """
+    if D < 2:
+        raise ValueError(f"D must be >= 2 for non-trivial Sz blocks; got D={D}")
+    sym = U1Symmetry()
+    pattern = [0, 1, -1]
+    virt_charges = np.array([pattern[i % 3] for i in range(D)], dtype=np.int32)
+    phys_charges = np.array([1, -1], dtype=np.int32)
+
+    indices = (
+        TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+    )
+
+    kA, kB = jax.random.split(key)
+    A = SymmetricTensor.random_normal(indices, kA)
+    B = SymmetricTensor.random_normal(indices, kB)
+    return A, B
 
 
 def xxz_gate(delta: float = 1.0, dtype=jnp.float64) -> DenseTensor:
