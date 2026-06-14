@@ -186,9 +186,32 @@ def _load_rows(path: str) -> list[dict]:
     try:
         with p.open() as f:
             data = json.load(f)
-        return data.get("rows", [])
+        return [_backfill_row(r) for r in data.get("rows", [])]
     except Exception:
         return []
+
+
+def _backfill_row(r: dict) -> dict:
+    """Upgrade a legacy checkpoint row to the current schema in place.
+
+    Rows written by an earlier version carry ``warm_step_s`` but not
+    ``wall_per_step_s``. The per-step wall is derivable as
+    ``total_wall_s / num_steps``, so backfill it (and drop the stale
+    ``warm_step_s`` label) before the row is reprinted or rewritten —
+    otherwise resumed legacy rows print ``nan`` for ``w/step`` and a
+    rewrite would persist a mixed schema. The energy fields are left as
+    stored: ``E_gs`` is not recoverable for legacy rows, and the
+    difference from the old ``min(energies)`` is negligible (5th–6th
+    decimal).
+    """
+    if "error" in r or "wall_per_step_s" in r:
+        return r
+    total = r.get("total_wall_s")
+    steps = r.get("num_steps")
+    if total is not None and steps:
+        r["wall_per_step_s"] = total / steps
+    r.pop("warm_step_s", None)
+    return r
 
 
 # ---------------------------------------------------------------------------
