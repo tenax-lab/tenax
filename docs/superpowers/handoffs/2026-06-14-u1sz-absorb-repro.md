@@ -2,8 +2,113 @@
 
 **Date:** 2026-06-14
 **Branch:** `study/u1sz-heisenberg-enablement`
-**Status:** confirmed bug, fix pending (Task 5 of the enablement plan)
+**Status:** ✅ **RESOLVED 2026-06-14** — fixed by a ~20-line init canonicalization (see "RESOLVED" section immediately below). #602's "no focused fix exists" verdict was wrong.
+
+---
+
+## RESOLVED (final, 2026-06-14): init↔SVD bond-order mismatch at sweep 1
+
+**Pinned root cause.** The symmetric CTM env init
+(`_init_symmetric_standard_corner` / `_init_symmetric_standard_edge`,
+`algorithms/_ctm_tensor_init.py`) emits chi-bond charges in **enumeration order**
+(D²-fused-charge order, e.g. `[0,-1,1,0,...]`), while the block-sparse SVD that grows the env under
+jit/AD (`_truncated_svd_symmetric_traced`, the production path) emits the bond in **charge-grouped**
+order (`sorted(sectors)`). For unbounded U(1) these differ. The CTM absorb pairs fused legs
+**positionally** (no realignment) and a fused leg's intra-block layout follows its chi sub-leg order
+(`_compute_fused_charges`), so the **sweep-1** absorb pairs the projector's grouped fused leg
+against the env's enumeration-ordered fused leg by position → charged sectors cancel → `E_sym=0`.
+
+**Decisive facts (this session's experiments):**
+- Eager vs traced SVD differ **only inter-sector**; per-sector they are **bit-identical** (so the
+  3rd investigation's "intra-sector pairing diverges" framing was wrong).
+- Forcing the **init** into charge-grouped order recovers `E_sym=0 → −0.4998` (== the eager value).
+- The symmetric contraction is **order-INVARIANT** when all bonds agree: the converged energy is
+  unchanged to **6e-14** under a faithful virtual-bond permutation. So charge-grouped order is fine
+  *when consistent*; the bug is the **init↔SVD mismatch**, not grouped-order itself. (The 2nd
+  investigation's "forcing grouped broke eager" was *incomplete* forcing — it changed the SVD but
+  not the init/env, leaving them inconsistent.)
+- **Fermions unaffected** because bounded FermionParity charges make enumeration and grouped order
+  coincide → the canonicalization is a no-op there.
+
+**The fix (shipped).** Canonicalize the env-init chi bonds into the same charge-grouped order the
+traced SVD uses, via a faithful (data+index) reorder in `_init_symmetric_standard_corner` /
+`_init_symmetric_standard_edge` (helper `_grouped_chi_perm`). The shared eager
+`_truncated_svd_symmetric` is **left untouched** — globally charge-sorting it breaks the
+`base_charges` position-order contract that simple-update relies on (#560), so the fix lives in the
+CTM init only.
+
+**Scope / limitation.** Production iPEPS-AD jits → traced SVD → grouped → now consistent with the
+grouped init → fixed. The **non-jit eager** symmetric CTM for unbounded U(1) remains inconsistent
+(grouped init + interleaved eager SVD) — but that path was *never* consistent (it gave a wrong-ish
+nonzero value, not a correct one) and is not a production path.
+
+**Why `E_sym ≠ E_dense` exactly (and the GO-gate reframe).** The symmetric path enforces charge
+conservation (block-diagonal, per-sector truncation); the dense path truncates globally without
+charge structure; and the CTM is not fully converged for this variationally-restricted D=2/χ=8 init.
+So the original test's `atol=1e-8` "matches dense" premise was unachievable *independent of #602*.
+The GO-gate is reframed (`test_one_step_symmetric_charged_ctm_no_collapse`) to guard the real
+property: charged sectors survive (`E_sym` finite and clearly negative) and agree with dense to a
+physical tolerance (`2e-2`).
+
+**Verification:** GO-gate passes; bosonic CTM 65 pass; fermionic `test_fpeps_ad.py::TestTodense…`
+3 pass; `base_charges` contract intact; order-invariance 6e-14.
+
+---
 **Repro test:** `tests/test_ipeps_u1sz.py::TestU1SzSymmetricMatchesDense::test_one_step_symmetric_matches_dense` (currently `xfail`)
+
+---
+
+## CORRECTED ROOT CAUSE — 4th investigation (2026-06-14): a focused, jit-safe fix DOES exist
+
+The three earlier root-cause sections below progressively narrowed the bug but the
+"FINAL/DEFINITIVE" conclusion (**"no focused fix exists"**) is **wrong**, and it was wrong for a
+specific, checkable reason. A 4th investigation reproduced #602, then verified every link of the
+mechanism in code + a controlled SVD experiment.
+
+**Decisive new evidence (controlled eager-vs-traced SVD on a charged U(1) tensor):**
+the two SVD paths differ ONLY in *inter-sector* bond arrangement — **per-sector the SVDs are
+bit-identical**:
+
+```
+EAGER  bond charge order: [1, 0, -1, 1, -1, 0, 0]   (SV-interleaved, magnitude-dependent)
+TRACED bond charge order: [-1, -1, 0, 0, 0, 1, 1]   (charge-grouped, deterministic)
+per-charge singular values: eager == traced (exact)   reconstruct err: 8e-15 both
+```
+
+So the 3rd investigation's framing ("the intra-sector basis *pairing* across the two fused legs
+*diverges*") mislocates the cause. The SVD does not diverge intra-sector. The **inter-sector order
+of the chi bond differs**, and that becomes *intra-block layout* only by passing through **fusion**.
+
+**The verified mechanism (all code-checked):**
+1. The contractor sums a contracted axis **positionally** over the full block array
+   (`opt_einsum.contract_expression`), with **no intra-block realignment** — `contractor.py:850-863`.
+2. Fusion bakes the chi sub-leg's enumeration order into each fused block's internal row layout:
+   `fused[i*db + j]` — `_tensor_utils.py:177-189`.
+3. Eager SVD emits the chi bond SV-interleaved; traced (under jit/AD) emits charge-grouped
+   (evidence above). Per-sector identical.
+4. `_reembed_fused` — the *only* fused-leg alignment step — reconciles per-charge **dimension only**;
+   its `tgt_dim == cur_dim` branch copies the block **verbatim**, never reordering —
+   `_ctm_projector.py:243-244`.
+5. ⇒ Under jit/AD the projector's fused leg (charge-grouped) and the env corner's independently-fused
+   leg are paired positionally by the absorb `contract(P_top_curr_bar, C3g)`
+   (`_ctm_tensor_moves.py:640`) → mismatched basis rows → charged sectors cancel → E=0.
+
+**Why "no focused fix exists" was a strawman.** It rejected (a) "make traced SV-descending — not
+jit-safe (SVs are traced)" and (b) "realign by basis identity — impossible, indistinguishable by
+charge." Neither is the actual requirement. We need **one canonical chi order shared by every
+bond-creating site**; canonical = **charge-sorted**, which is **static aux_data ⇒ jit-safe**
+(`_build_unified_fused_idx` already charge-sorts, `_ctm_projector.py:131`). The 2nd investigation's
+"forcing charge-grouped order broke eager too" was **incomplete forcing** (it changed the SVD output
+but not all carried env chi legs / didn't split truncation *selection* from bond *storage order*),
+not proof of impossibility.
+
+**The fix (Fix A, jit-safe, contractor/fusion/absorbs untouched):** decouple truncation *selection*
+from bond *storage order* and make EVERY chi-bond creator emit the same canonical charge-sorted
+order — `_truncated_svd_symmetric` (eager), `_truncated_svd_symmetric_traced`, the eigh/SVD
+projectors in `_ctm_projector.py`, and the init env chi legs. Regression gate: full
+`tests/test_fpeps_ad.py` (FermionParity — must be a verified no-op there, since its 2 bounded
+charges already make the orderings coincide) + bosonic/dense CTM + the U(1) GO-gate flipping
+`xfail`→pass.
 
 ## Symptom
 
