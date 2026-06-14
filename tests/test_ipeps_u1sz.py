@@ -76,3 +76,19 @@ class TestHeisenbergU1SzInit:
         A, _ = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
         phys = np.asarray(A.indices[4].charges)  # phys is the 5th leg
         assert sorted(phys.tolist()) == [-1, 1]
+
+    def test_blocks_conserve_sz(self):
+        """Every block of each site tensor conserves Sz (flow-signed sum 0)."""
+        from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
+
+        A, B = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
+        for tensor in (A, B):
+            signs = [int(ix.flow.value) for ix in tensor.indices]
+            for key in tensor.blocks:
+                assert sum(s * q for s, q in zip(signs, key)) == 0
+
+    def test_rejects_d_below_2(self):
+        from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
+
+        with pytest.raises(ValueError, match="D must be >= 2"):
+            heisenberg_u1sz_init_pair(D=1, key=jax.random.PRNGKey(0))

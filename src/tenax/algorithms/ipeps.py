@@ -93,7 +93,9 @@ def heisenberg_gate_u1sz(dtype=jnp.float64) -> SymmetricTensor:
     return SymmetricTensor.from_dense(H.reshape(2, 2, 2, 2), indices)
 
 
-def heisenberg_u1sz_init_pair(D: int, key: jax.Array):
+def heisenberg_u1sz_init_pair(
+    D: int, key: jax.Array
+) -> tuple[SymmetricTensor, SymmetricTensor]:
     """Build a random U(1)-Sz-symmetric 2-site iPEPS pair ``(A, B)``.
 
     Each site tensor has 5 legs ``(u, d, l, r, phys)`` with flows
@@ -109,15 +111,22 @@ def heisenberg_u1sz_init_pair(D: int, key: jax.Array):
     correlations emerge from optimization within the Sz=0 sector.
 
     Args:
-        D:   Virtual bond dimension (D≥2 recommended for non-trivial blocks).
+        D:   Virtual bond dimension. Must be ``>= 2``: at D=1 the only
+             virtual charge is 0 and no Sz-conserving sector with a charged
+             physical leg exists (the tensor would be all-zeros).
         key: JAX random key (split internally for A and B).
 
     Returns:
         Tuple ``(A, B)`` of SymmetricTensors.
+
+    Raises:
+        ValueError: if ``D < 2``.
     """
+    if D < 2:
+        raise ValueError(f"D must be >= 2 for non-trivial Sz blocks; got D={D}")
     sym = U1Symmetry()
-    _pattern = [0, 1, -1]
-    virt_charges = np.array([_pattern[i % 3] for i in range(D)], dtype=np.int32)
+    pattern = [0, 1, -1]
+    virt_charges = np.array([pattern[i % 3] for i in range(D)], dtype=np.int32)
     phys_charges = np.array([1, -1], dtype=np.int32)
 
     indices = (
