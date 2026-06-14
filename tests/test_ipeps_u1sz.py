@@ -92,3 +92,39 @@ class TestHeisenbergU1SzInit:
 
         with pytest.raises(ValueError, match="D must be >= 2"):
             heisenberg_u1sz_init_pair(D=1, key=jax.random.PRNGKey(0))
+
+
+class TestU1SzSymmetricMatchesDense:
+    @pytest.mark.xfail(
+        reason="U(1) non-trivial-charge CTM: charged env blocks collapse to "
+        "zero after sweep 1, so E_sym=0 != E_dense. See "
+        "docs/superpowers/handoffs/2026-06-14-u1sz-absorb-repro.md (#570).",
+        strict=True,
+    )
+    def test_one_step_symmetric_matches_dense(self):
+        """Symmetric and dense agree from the same init after 1 step (~1e-8)."""
+        from tenax import CTMConfig, iPEPSConfig, optimize_gs_ad
+        from tenax.algorithms.ipeps import (
+            heisenberg_gate,
+            heisenberg_u1sz_init_pair,
+        )
+
+        A_sym, B_sym = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
+        A_dense = A_sym.todense()
+        B_dense = B_sym.todense()
+        gate = heisenberg_gate().todense()  # dense gate, identical numerics
+
+        config = iPEPSConfig(
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=8, max_iter=20),
+            gs_num_steps=1,
+            unit_cell="2site",
+        )
+
+        # Symmetric run — this exercises the non-trivial-charge absorb step.
+        (_, _), _, E_sym = optimize_gs_ad(gate, (A_sym, B_sym), config)
+        # Dense run from the densified same init.
+        (_, _), _, E_dense = optimize_gs_ad(gate, (A_dense, B_dense), config)
+
+        assert np.isfinite(E_sym)
+        np.testing.assert_allclose(float(E_sym), float(E_dense), atol=1e-8)
