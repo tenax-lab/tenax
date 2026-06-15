@@ -1,0 +1,58 @@
+{
+  "platform": "cpu",
+  "device_kind": "cpu",
+  "x64": true,
+  "syms": [
+    "u1sz",
+    "dense"
+  ],
+  "depths": [
+    8
+  ],
+  "explicit": false,
+  "backward_steps": null,
+  "rows": [
+    {
+      "sym": "u1sz",
+      "D": 2,
+      "chi": 8,
+      "depth": 8,
+      "path": "implicit",
+      "backward_steps": null,
+      "n_blocks": 8,
+      "fwd_wall_s": 22.957368271425366,
+      "fwd_compile_s": 14.199369658000004,
+      "fwd_n_compiles": 491,
+      "vg_wall_s": 62.41877610050142,
+      "vg_compile_s": 31.510902650999995,
+      "vg_n_compiles": 505,
+      "bwd_compile_s_est": 17.311532992999993,
+      "top_compile_name": "jit(_jit_fused_fixed_point_bwd)",
+      "top_compile_s": 16.446952105,
+      "warm_step_s": 1.2527142772451043,
+      "energy": -0.19590757390817604,
+      "grad_finite": true
+    },
+    {
+      "sym": "dense",
+      "D": 2,
+      "chi": 8,
+      "depth": 8,
+      "path": "implicit",
+      "backward_steps": null,
+      "n_blocks": 1,
+      "fwd_wall_s": 11.806334614753723,
+      "fwd_compile_s": 10.817643640000004,
+      "fwd_n_compiles": 101,
+      "vg_wall_s": 58.597186682745814,
+      "vg_compile_s": 54.75995206500001,
+      "vg_n_compiles": 145,
+      "bwd_compile_s_est": 43.94230842500001,
+      "top_compile_name": "jit(while)",
+      "top_compile_s": 9.222443104,
+      "warm_step_s": 0.6576325334608555,
+      "energy": 0.5807663043128191,
+      "grad_finite": true
+    }
+  ]
+}
