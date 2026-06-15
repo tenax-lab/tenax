@@ -52,9 +52,16 @@ class FuseInfo:
     Attributes:
         parent_indices: The two TensorIndex objects that were fused to
                         produce this leg, in the order (axis_a, axis_b).
+        fused_flow:     The flow the fused leg had at fusion time.  Recorded so
+                        ``split_index`` can invert the fusion using the original
+                        sign even if the fused leg's flow was later flipped
+                        (e.g. by ``bar``/``flip_flow``).  ``None`` for legacy
+                        fuse_info, in which case split falls back to the fused
+                        leg's current flow.
     """
 
     parent_indices: tuple[TensorIndex, ...]
+    fused_flow: FlowDirection | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,6 +251,7 @@ class TensorIndex:
             multiplicities=self.multiplicities,
             flow=FlowDirection(-int(self.flow)),
             label=self.label,
+            fuse_info=self.fuse_info,
         )
         if self._charges_cache is not None:
             object.__setattr__(obj, "_charges_cache", self._charges_cache)
