@@ -167,6 +167,13 @@ def make_site_and_gate(sym: str, D: int, seed: int):
         return A, gate
     if sym == "dense":
         return make_dense_site(D, seed), heisenberg_gate()
+    if sym == "u1sz":
+        from tenax.algorithms.ipeps import (
+            heisenberg_u1sz_init_pair,
+            heisenberg_gate_u1sz,
+        )
+        A, _B = heisenberg_u1sz_init_pair(D=D, key=jax.random.PRNGKey(seed))
+        return A, heisenberg_gate_u1sz()
     raise ValueError(f"unknown sym {sym!r}")
 
 
@@ -324,7 +331,8 @@ def main() -> None:
         help="Sweep these chi values at the first D (axis 3). Overrides --chi.",
     )
     ap.add_argument("--depth", type=int, nargs="+", default=[4, 8, 16])
-    ap.add_argument("--sym", nargs="+", default=["fermionic", "dense"])
+    ap.add_argument("--sym", nargs="+", default=["fermionic", "dense"],
+                    help="arms: fermionic | dense | u1sz")
     ap.add_argument(
         "--explicit",
         action="store_true",

@@ -47,3 +47,18 @@ def test_stack_flag_energy_drift_is_bounded():
     print(f"\nU1Sz D=2 chi=8 energy drift |on-off| = {drift:.3e} "
           f"(off={e_off:.8f}, on={e_on:.8f})")
     assert drift < 1e-2, f"stacked drift {drift:.3e} too large to trust off/on grid"
+
+
+def test_profiler_u1sz_arm_builds_symmetric_site_and_gate():
+    import importlib.util, pathlib
+    spec = importlib.util.spec_from_file_location(
+        "profile_ctm_ad_wall_566",
+        pathlib.Path(__file__).parent.parent / "examples" / "profile_ctm_ad_wall_566.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    site, gate = mod.make_site_and_gate("u1sz", D=2, seed=0)
+    from tenax.core.tensor import SymmetricTensor
+    assert isinstance(site, SymmetricTensor)
+    assert len(site._block_keys) > 1
+    assert isinstance(gate, SymmetricTensor)
