@@ -4,8 +4,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair, heisenberg_gate_u1sz
 from tenax.algorithms._ctm_tensor import ctm_tensor
+from tenax.algorithms.ipeps import heisenberg_gate_u1sz, heisenberg_u1sz_init_pair
 
 
 @pytest.mark.parametrize("D,chi", [(2, 8), (3, 8)])
@@ -19,6 +19,7 @@ def test_u1sz_ctm_forward_runs(D, chi):
 
 
 import os
+
 from tenax import compute_energy_ctm_tensor  # re-exported from _ctm_tensor_energy
 
 
@@ -50,7 +51,8 @@ def test_stack_flag_energy_drift_is_bounded():
 
 
 def test_profiler_u1sz_arm_builds_symmetric_site_and_gate():
-    import importlib.util, pathlib
+    import importlib.util
+    import pathlib
     spec = importlib.util.spec_from_file_location(
         "profile_ctm_ad_wall_566",
         pathlib.Path(__file__).parent.parent / "examples" / "profile_ctm_ad_wall_566.py",

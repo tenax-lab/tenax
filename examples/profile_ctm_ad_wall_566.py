@@ -169,8 +169,8 @@ def make_site_and_gate(sym: str, D: int, seed: int):
         return make_dense_site(D, seed), heisenberg_gate()
     if sym == "u1sz":
         from tenax.algorithms.ipeps import (
-            heisenberg_u1sz_init_pair,
             heisenberg_gate_u1sz,
+            heisenberg_u1sz_init_pair,
         )
         A, _B = heisenberg_u1sz_init_pair(D=D, key=jax.random.PRNGKey(seed))
         return A, heisenberg_gate_u1sz()

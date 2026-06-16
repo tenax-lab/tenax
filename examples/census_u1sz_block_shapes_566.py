@@ -14,8 +14,8 @@ import json
 
 import jax
 
-from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
 from tenax.algorithms._ctm_tensor import ctm_tensor
+from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
 
 
 def census_one(D: int, chi: int) -> dict:

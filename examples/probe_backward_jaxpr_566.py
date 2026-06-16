@@ -338,7 +338,7 @@ def main() -> None:
                     set(off_raw) | set(onb_raw),
                     key=lambda p: -(off_raw.get(p, 0) + onb_raw.get(p, 0)),
                 )
-                print(f"  -- raw primitive counts (top-20, flag_off) --")
+                print("  -- raw primitive counts (top-20, flag_off) --")
                 print(f"  {'primitive':<40} {'flag_off':>10} {'pct':>8} {'flag_on':>10} {'pct':>8}")
                 for p in all_prims[:20]:
                     o, n = off_raw.get(p, 0), onb_raw.get(p, 0)
