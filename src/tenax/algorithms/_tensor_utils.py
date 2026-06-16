@@ -137,7 +137,7 @@ def _fuse_indices_dense(
     sym = idx_a.symmetry
     fused_charges = _compute_fused_charges(idx_a, idx_b, fused_flow, sym)
     sectors, mults = np.unique(fused_charges, return_counts=True)
-    fuse_info = FuseInfo(parent_indices=(idx_a, idx_b))
+    fuse_info = FuseInfo(parent_indices=(idx_a, idx_b), fused_flow=fused_flow)
     fused_idx = TensorIndex(
         sym,
         sectors.astype(np.int32),
@@ -249,7 +249,7 @@ def _fuse_indices_symmetric(
     # Build fused TensorIndex with FuseInfo
     fused_charges = _compute_fused_charges(idx_a, idx_b, fused_flow, sym)
     sectors, mults = np.unique(fused_charges, return_counts=True)
-    fuse_info = FuseInfo(parent_indices=(idx_a, idx_b))
+    fuse_info = FuseInfo(parent_indices=(idx_a, idx_b), fused_flow=fused_flow)
     fused_idx = TensorIndex(
         sym,
         sectors.astype(np.int32),
@@ -436,8 +436,14 @@ def _split_index_dense(T: DenseTensor, axis: int) -> DenseTensor:
     # _charges_cache. We need to invert: un-permute so positions map back
     # to the original (i*db + j) layout, then reshape.
     fused_charges = fused_idx.charges  # original (i,j) order from _charges_cache
-    # Compute what fuse would have produced for the parent charges
-    expected_charges = _compute_fused_charges(parent_a, parent_b, fused_idx.flow, sym)
+    # Compute what fuse would have produced for the parent charges, using the
+    # flow recorded at fusion time (robust to a later flow flip).
+    _split_flow = (
+        fused_idx.fuse_info.fused_flow
+        if fused_idx.fuse_info.fused_flow is not None
+        else fused_idx.flow
+    )
+    expected_charges = _compute_fused_charges(parent_a, parent_b, _split_flow, sym)
 
     if not np.array_equal(fused_charges, expected_charges):
         # If charges were reordered, compute and apply inverse permutation.
@@ -474,7 +480,14 @@ def _split_index_symmetric(T: SymmetricTensor, axis: int) -> SymmetricTensor:
 
     flow_a_sign = int(parent_a.flow)
     flow_b_sign = int(parent_b.flow)
-    fused_sign = int(fused_idx.flow)
+    # Use the flow recorded at fusion time so the inverse mapping is correct
+    # even if the fused leg's flow was later flipped (e.g. by bar/flip_flow,
+    # which keep the data layout but change the leg's flow label).
+    fused_sign = int(
+        fused_idx.fuse_info.fused_flow
+        if fused_idx.fuse_info.fused_flow is not None
+        else fused_idx.flow
+    )
     n_vals = sym.n_values()
 
     # Reconstruct the scatter map from fuse (same logic as _fuse_indices_symmetric)

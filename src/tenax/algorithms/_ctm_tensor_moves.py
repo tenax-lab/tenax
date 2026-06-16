@@ -36,6 +36,7 @@ from tenax.algorithms._ctm_tensor_projector_2x2 import (
     _build_enlarged_corner,
     _compute_2x2_projector,
 )
+from tenax.algorithms._tensor_utils import split_index
 from tenax.contraction.contractor import contract
 from tenax.core import EPS
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
@@ -66,6 +67,86 @@ def _flow_flip_no_conj(t):
         block_keys=t._block_keys,
         block_shapes=t._block_shapes,
         block_offsets=t._block_offsets,
+    )
+
+
+def _apply_proj_unfused(
+    P: Tensor,
+    env_T: Tensor,
+    chi_label: str,
+    d2_label: str,
+    *,
+    chi_new: str = "chi_new",
+    env_first: bool = False,
+) -> Tensor:
+    """Project ``env_T`` with ``P`` by UNFUSING the projector's fused leg first.
+
+    The 2-plaquette projector arrives with a hard-fused ``(chi_outer, fused_D2)``
+    leg (label ``"fused"``).  Hard-fusing the env-``chi`` and ``D²`` legs (two
+    flow-OUT constituents) under a single flow-IN signature produces fused
+    charges that are the **charge-conjugate** of the env edge/corner's own
+    fused leg, so the raw-charge block pairing in :func:`contract` clashes at
+    D≥3 (issue #605; masked at D=2 where the Sz seam charge set is self-dual).
+
+    The fix mirrors YASTN's CTM (`proj_corners` does ``.unfuse_legs`` before
+    applying): split the projector back into its bare ``(chi_outer, fused_D2)``
+    constituents and contract *those* against the env tensor's own ``chi_label``
+    / ``d2_label`` legs.  The constituents are individually contractible (equal
+    charges, opposite flow — they are literally the seam's two sides), so the
+    manufactured conjugation never arises.  Splitting also decouples the new
+    bond ``chi_new``: its flow is taken straight from the projector, so the
+    renormalised corner/edge chi bonds keep the projector-pair's mutually
+    opposite flows without any flow-flip.
+
+    The projector is first flow-flipped (as in the fuse-then-contract path)
+    so the renormalised bond ``chi_new`` keeps the projector-pair's flow
+    convention; the fused leg's data layout is unchanged by the flip, and
+    ``split_index`` inverts the fusion using the flow recorded in ``fuse_info``
+    (so the split is correct despite the flipped leg flow).  The split sub-legs
+    then carry the constituents' original (opposite-to-env) flows and contract
+    the env legs directly.
+
+    ``env_first`` selects the contraction operand order: ``contract(P_un, env_T)``
+    by default, or ``contract(env_T, P_un)`` when ``env_first=True``.  This must
+    match the operand order of the fuse-then-contract path it replaces — for
+    graded (fermionic) tensors swapping the operands' free legs introduces a
+    Koszul sign, so e.g. the edge's second (``fr``) projection, which the fused
+    path applied as ``contract(step, P_right)``, must use ``env_first=True``.
+    Matching the order also yields the canonical output leg layout directly, so
+    no Koszul-bearing ``transpose`` is needed afterwards.
+
+    For DenseTensor / self-dual charge sets this reproduces the previous
+    fuse-then-contract byte-for-byte (fusion is invertible; the constituents
+    pair the same elements the fused leg did), so dense / D=2 / fermionic paths
+    are unchanged.
+    """
+    P = _flow_flip_no_conj(P)
+    P_un = split_index(P, P.labels().index("fused"))
+    relabel = {"chi_outer": chi_label, "fused_D2": d2_label}
+    if chi_new != "chi_new":
+        relabel["chi_new"] = chi_new
+    P_un = P_un.relabels(relabel)
+    return contract(env_T, P_un) if env_first else contract(P_un, env_T)
+
+
+def _env_is_fermionic(env_src: CTMTensorEnv) -> bool:
+    """True when the env tensors are graded (fermionic) ``SymmetricTensor``s.
+
+    The unfused projector application (#605) is byte-identical to the original
+    fuse-then-contract for DenseTensor and bosonic ``SymmetricTensor`` (verified
+    per-absorb across all 4 directions), and it is what fixes the D≥3 U(1)-Sz
+    charge-sector mismatch.  But for **fermionic** tensors the fused path carries
+    Koszul signs from grouping the chi⊕D² edge legs (``fr = fuse(t4_u, d2)``
+    stays a single graded leg through the ``fl`` contraction); the unfused
+    sandwich contracts the bare legs and accumulates a *different* Koszul sign on
+    the renormalised EDGE (corners are unaffected).  Since #605 cannot occur for
+    FermionParity (Z₂ charges are self-dual, so the fused legs never come out
+    asymmetric-conjugate), fermionic envs keep the proven fused path.
+    """
+    C1 = env_src.C1
+    return (
+        isinstance(C1, SymmetricTensor)
+        and C1.indices[0].symmetry.is_fermionic
     )
 
 
@@ -396,41 +477,42 @@ def _ctm_tensor_absorb_left_2plaq(
     ["right"]``: this is the cell whose left edge boundary is the column
     just absorbed.
     """
+    # Fermionic envs keep the Koszul-correct fused path (see _env_is_fermionic).
+    if _env_is_fermionic(env_src):
+        return _ctm_tensor_absorb_left_2plaq_fused(
+            env_src, a_src, P_top_above, P_bot_above, P_top_curr, P_bot_curr
+        )
+    # Grown corners / edge are kept UNFUSED; projectors are applied via
+    # ``_apply_proj_unfused`` (split the projector's fused leg and contract the
+    # bare chi / D² constituents) to avoid the hard-fusion charge-conjugation
+    # that breaks the raw-charge block pairing at D≥3 (#605).
     # ---- C1·T1 (both at s_src) ----
     C1_r = env_src.C1.relabel("c1_r", "t1_l")
     C1g = contract(C1_r, env_src.T1)  # (c1_d, u2, t1_r)
-    C1g = _fuse_pair_by_label(C1g, "c1_d", "u2", "fused", IN)  # (fused, t1_r)
 
     # ---- C4·T3 (both at s_src) ----
     C4_u = env_src.C4.relabel("c4_u", "t3_r")
     C4g = contract(C4_u, env_src.T3)  # (c4_r, d2, t3_l)
-    C4g = _fuse_pair_by_label(C4g, "c4_r", "d2", "fused", IN)  # (fused, t3_l)
 
     # ---- T4·ket (T4 and ket both at s_src) ----
-    T4_with_a = contract(env_src.T4, a_src)
-    T4g = _fuse_pair_by_label(T4_with_a, "t4_d", "u2", "fl", IN)
-    T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", OUT)
+    T4_with_a = contract(env_src.T4, a_src)  # (t4_d, t4_u, u2, d2, r2)
 
     # ---- C1: project with P_bot_above only ----
-    P_bot_above_bar = _flow_flip_no_conj(P_bot_above)  # contracts on "fused"
-    C1_new = contract(P_bot_above_bar, C1g)  # (chi_new, t1_r)
+    C1_new = _apply_proj_unfused(P_bot_above, C1g, "c1_d", "u2")  # (chi_new, t1_r)
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t1_r": "c1_r"})
 
     # ---- C4: project with P_top_curr only ----
-    P_top_curr_bar = _flow_flip_no_conj(P_top_curr)
-    C4_new = contract(P_top_curr_bar, C4g)  # (chi_new, t3_l)
+    C4_new = _apply_proj_unfused(P_top_curr, C4g, "c4_r", "d2")  # (chi_new, t3_l)
     C4_new = C4_new.relabels({"chi_new": "c4_r", "t3_l": "c4_u"})
 
-    # ---- T4: sandwiched by P_top_above (top side, fl) and P_bot_curr (bottom side, fr) ----
-    # P_top_above acts on the top face of s_src (fl = t4_d ⊕ u2).
-    # P_bot_curr acts on the bottom face of s_src (fr = t4_u ⊕ d2).
-    P_top_above_bar = _flow_flip_no_conj(P_top_above)
-    P_left = P_top_above_bar.relabel("fused", "fl")
-    step = contract(P_left, T4g)  # (chi_new, fr, r2)
-
-    P_right = P_bot_curr.relabels({"fused": "fr", "chi_new": "chi_new_r"})
-    T4_new = contract(step, P_right)  # (chi_new, r2, chi_new_r)
-
+    # ---- T4: sandwiched by P_top_above (top face, t4_d⊕u2) and
+    #          P_bot_curr (bottom face, t4_u⊕d2) ----
+    step = _apply_proj_unfused(P_top_above, T4_with_a, "t4_d", "u2")  # (chi_new, t4_u, d2, r2)
+    # ``env_first`` matches the fused path's ``contract(step, P_right)`` order
+    # (Koszul-correct for fermions) and yields canonical leg order directly.
+    T4_new = _apply_proj_unfused(
+        P_bot_curr, step, "t4_u", "d2", chi_new="chi_new_r", env_first=True
+    )  # (chi_new, r2, chi_new_r)
     T4_new = T4_new.relabels({"chi_new": "t4_d", "chi_new_r": "t4_u", "r2": "l2"})
     T4_new = _flip_leg_flow(T4_new, "l2")  # r2(OUT) -> l2 needs IN
 
@@ -485,39 +567,35 @@ def _ctm_tensor_absorb_right_2plaq(
         ``P_top_curr``.
       * ``C3`` uses ``(curr).top`` ≡ ``P_bot_curr``.
     """
+    if _env_is_fermionic(env_src):
+        return _ctm_tensor_absorb_right_2plaq_fused(
+            env_src, a_src, P_top_above, P_bot_above, P_top_curr, P_bot_curr
+        )
+    # Unfused projector application (#605); see ``_apply_proj_unfused``.
     # ---- C2·T1 (both at s_src) ----
     C2_l = env_src.C2.relabel("c2_l", "t1_r")
     C2g = contract(C2_l, env_src.T1)  # (c2_d, t1_l, u2)
-    C2g = _fuse_pair_by_label(C2g, "c2_d", "u2", "fused", IN)  # (fused, t1_l)
 
     # ---- C3·T3 (both at s_src) ----
     C3_u = env_src.C3.relabel("c3_u", "t3_l")
     C3g = contract(C3_u, env_src.T3)  # (c3_l, t3_r, d2)
-    C3g = _fuse_pair_by_label(C3g, "c3_l", "d2", "fused", IN)  # (fused, t3_r)
 
     # ---- T2·ket (both at s_src) ----
-    T2_with_a = contract(env_src.T2, a_src)
-    T2g = _fuse_pair_by_label(T2_with_a, "t2_u", "u2", "fl", IN)
-    T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", OUT)
+    T2_with_a = contract(env_src.T2, a_src)  # (t2_u, t2_d, u2, d2, l2)
 
     # ---- C2: project with P_top_above only (≡ variPEPS .bottom of above) ----
-    P_top_above_bar = _flow_flip_no_conj(P_top_above)
-    C2_new = contract(P_top_above_bar, C2g)
+    C2_new = _apply_proj_unfused(P_top_above, C2g, "c2_d", "u2")
     C2_new = C2_new.relabels({"chi_new": "c2_l", "t1_l": "c2_d"})
 
     # ---- C3: project with P_bot_curr only (≡ variPEPS .top of curr) ----
-    P_bot_curr_bar = _flow_flip_no_conj(P_bot_curr)
-    C3_new = contract(P_bot_curr_bar, C3g)
+    C3_new = _apply_proj_unfused(P_bot_curr, C3g, "c3_l", "d2")
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t3_r": "c3_l"})
 
-    # ---- T2: sandwiched by P_bot_above (fl side, ≡ variPEPS .top of above)
-    #          and P_top_curr (fr side, ≡ variPEPS .bottom of curr) ----
-    P_bot_above_bar = _flow_flip_no_conj(P_bot_above)
-    P_left = P_bot_above_bar.relabel("fused", "fl")
-    step = contract(P_left, T2g)
-
-    P_right = P_top_curr.relabels({"fused": "fr", "chi_new": "chi_new_r"})
-    T2_new = contract(step, P_right)
+    # ---- T2: sandwiched by P_bot_above (fl, t2_u⊕u2) and P_top_curr (fr, t2_d⊕d2) ----
+    step = _apply_proj_unfused(P_bot_above, T2_with_a, "t2_u", "u2")  # (chi_new, t2_d, d2, l2)
+    T2_new = _apply_proj_unfused(
+        P_top_curr, step, "t2_d", "d2", chi_new="chi_new_r", env_first=True
+    )
     T2_new = T2_new.relabels({"chi_new": "t2_u", "chi_new_r": "t2_d", "l2": "r2"})
     T2_new = _flip_leg_flow(T2_new, "r2")  # l2(IN) -> r2 needs OUT
 
@@ -560,39 +638,35 @@ def _ctm_tensor_absorb_top_2plaq(
         ``P_top_curr``.
       * ``C2`` uses ``(curr).left`` ≡ ``P_bot_curr``.
     """
+    if _env_is_fermionic(env_src):
+        return _ctm_tensor_absorb_top_2plaq_fused(
+            env_src, a_src, P_top_left, P_bot_left, P_top_curr, P_bot_curr
+        )
+    # Unfused projector application (#605); see ``_apply_proj_unfused``.
     # ---- C1·T4 (both at s_src) ----
     C1_d = env_src.C1.relabel("c1_d", "t4_d")
     C1g = contract(C1_d, env_src.T4)  # (c1_r, l2, t4_u)
-    C1g = _fuse_pair_by_label(C1g, "c1_r", "l2", "fused", IN)  # (fused, t4_u)
 
     # ---- C2·T2 (both at s_src) ----
     C2_d = env_src.C2.relabel("c2_d", "t2_u")
     C2g = contract(C2_d, env_src.T2)  # (c2_l, r2, t2_d)
-    C2g = _fuse_pair_by_label(C2g, "c2_l", "r2", "fused", IN)  # (fused, t2_d)
 
     # ---- T1·ket (both at s_src) ----
-    T1_with_a = contract(env_src.T1, a_src)
-    T1g = _fuse_pair_by_label(T1_with_a, "t1_l", "l2", "fl", IN)
-    T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", OUT)
+    T1_with_a = contract(env_src.T1, a_src)  # (t1_l, t1_r, d2, l2, r2)
 
     # ---- C1: project with P_top_left (≡ variPEPS .right of left-plaq) ----
-    P_top_left_bar = _flow_flip_no_conj(P_top_left)
-    C1_new = contract(P_top_left_bar, C1g)
+    C1_new = _apply_proj_unfused(P_top_left, C1g, "c1_r", "l2")
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t4_u": "c1_r"})
 
     # ---- C2: project with P_bot_curr (≡ variPEPS .left of curr) ----
-    P_bot_curr_bar = _flow_flip_no_conj(P_bot_curr)
-    C2_new = contract(P_bot_curr_bar, C2g)
+    C2_new = _apply_proj_unfused(P_bot_curr, C2g, "c2_l", "r2")
     C2_new = C2_new.relabels({"chi_new": "c2_l", "t2_d": "c2_d"})
 
-    # ---- T1: sandwiched by P_bot_left (fl side, ≡ variPEPS .left of left-plaq)
-    #          and P_top_curr (fr side, ≡ variPEPS .right of curr) ----
-    P_bot_left_bar = _flow_flip_no_conj(P_bot_left)
-    P_left = P_bot_left_bar.relabel("fused", "fl")
-    step = contract(P_left, T1g)
-
-    P_right = P_top_curr.relabels({"fused": "fr", "chi_new": "chi_new_r"})
-    T1_new = contract(step, P_right)
+    # ---- T1: sandwiched by P_bot_left (fl, t1_l⊕l2) and P_top_curr (fr, t1_r⊕r2) ----
+    step = _apply_proj_unfused(P_bot_left, T1_with_a, "t1_l", "l2")  # (chi_new, t1_r, d2, r2)
+    T1_new = _apply_proj_unfused(
+        P_top_curr, step, "t1_r", "r2", chi_new="chi_new_r", env_first=True
+    )
     T1_new = T1_new.relabels({"chi_new": "t1_l", "chi_new_r": "t1_r", "d2": "u2"})
     T1_new = _flip_leg_flow(T1_new, "u2")  # d2(OUT) -> u2 needs IN
 
@@ -615,39 +689,303 @@ def _ctm_tensor_absorb_bottom_2plaq(
     Mirrors :func:`varipeps.ctmrg.absorption.do_bottom_absorption`.  The
     new (C4, T3, C3) get stored at ``s_dst = neighbors[s_src]["top"]``.
     """
+    if _env_is_fermionic(env_src):
+        return _ctm_tensor_absorb_bottom_2plaq_fused(
+            env_src, a_src, P_top_left, P_bot_left, P_top_curr, P_bot_curr
+        )
+    # Unfused projector application (#605); see ``_apply_proj_unfused``.
     # ---- C4·T4 (both at s_src) ----
     C4_r = env_src.C4.relabel("c4_r", "t4_u")
     C4g = contract(C4_r, env_src.T4)  # (c4_u, t4_d, l2)
-    C4g = _fuse_pair_by_label(C4g, "c4_u", "l2", "fused", IN)  # (fused, t4_d)
 
     # ---- C3·T2 (both at s_src) ----
     C3_l = env_src.C3.relabel("c3_l", "t2_d")
     C3g = contract(C3_l, env_src.T2)  # (c3_u, t2_u, r2)
-    C3g = _fuse_pair_by_label(C3g, "c3_u", "r2", "fused", IN)  # (fused, t2_u)
 
     # ---- T3·ket (both at s_src) ----
-    T3_with_a = contract(env_src.T3, a_src)
-    T3g = _fuse_pair_by_label(T3_with_a, "t3_r", "l2", "fl", IN)
-    T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", OUT)
+    T3_with_a = contract(env_src.T3, a_src)  # (t3_r, t3_l, u2, l2, r2)
 
     # ---- C4: project with P_bot_left ----
-    P_bot_left_bar = _flow_flip_no_conj(P_bot_left)
-    C4_new = contract(P_bot_left_bar, C4g)
+    C4_new = _apply_proj_unfused(P_bot_left, C4g, "c4_u", "l2")
     C4_new = C4_new.relabels({"chi_new": "c4_r", "t4_d": "c4_u"})
 
     # ---- C3: project with P_top_curr ----
-    P_top_curr_bar = _flow_flip_no_conj(P_top_curr)
-    C3_new = contract(P_top_curr_bar, C3g)
+    C3_new = _apply_proj_unfused(P_top_curr, C3g, "c3_u", "r2")
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t2_u": "c3_l"})
 
-    # ---- T3: sandwiched by P_top_left (fl) + P_bot_curr (fr) ----
-    P_top_left_bar = _flow_flip_no_conj(P_top_left)
-    P_left = P_top_left_bar.relabel("fused", "fl")
-    step = contract(P_left, T3g)
-
-    P_right = P_bot_curr.relabels({"fused": "fr", "chi_new": "chi_new_r"})
-    T3_new = contract(step, P_right)
+    # ---- T3: sandwiched by P_top_left (fl, t3_r⊕l2) + P_bot_curr (fr, t3_l⊕r2) ----
+    step = _apply_proj_unfused(P_top_left, T3_with_a, "t3_r", "l2")  # (chi_new, t3_l, u2, r2)
+    T3_new = _apply_proj_unfused(
+        P_bot_curr, step, "t3_l", "r2", chi_new="chi_new_r", env_first=True
+    )
     T3_new = T3_new.relabels({"chi_new": "t3_r", "chi_new_r": "t3_l", "u2": "d2"})
+    T3_new = _flip_leg_flow(T3_new, "d2")  # u2(IN) -> d2 needs OUT
+
+    C4_new = _phase_fix_normalize_tensor(C4_new)
+    C3_new = _phase_fix_normalize_tensor(C3_new)
+    T3_new = _phase_fix_normalize_tensor(T3_new)
+    return C4_new, T3_new, C3_new
+
+
+def _ctm_tensor_absorb_left_2plaq_fused(
+    env_src: CTMTensorEnv,
+    a_src: Tensor,
+    P_top_above: Tensor,
+    P_bot_above: Tensor,
+    P_top_curr: Tensor,
+    P_bot_curr: Tensor,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """variPEPS-style LEFT absorption using two plaquettes' projectors.
+
+    Mirrors :func:`varipeps.ctmrg.absorption.do_left_absorption`:
+
+      * ``new_C1 = (C1[s_src] · T1[s_src]) projected by P_bot_above``
+      * ``new_T4 = (T4[s_src] · ket[s_src]) sandwiched by P_top_above
+        (top face) and P_bot_curr (bottom face)``
+      * ``new_C4 = (C4[s_src] · T3[s_src]) projected by P_top_curr``
+
+    where ``P_*_above`` are halves of the projector pair for the plaquette
+    anchored at ``neighbors[s_src]["top"]`` (compressing the seam between
+    that cell and ``s_src``), and ``P_*_curr`` are halves for the
+    plaquette anchored at ``s_src`` (compressing the seam between
+    ``s_src`` and ``neighbors[s_src]["bottom"]``).
+
+    The new env tensors should be stored at ``s_dst = neighbors[s_src]
+    ["right"]``: this is the cell whose left edge boundary is the column
+    just absorbed.
+    """
+    # Grown corners / edge are kept UNFUSED; projectors are applied via
+    # ``_apply_proj_unfused`` (split the projector's fused leg and contract the
+    # bare chi / D² constituents) to avoid the hard-fusion charge-conjugation
+    # that breaks the raw-charge block pairing at D≥3 (#605).
+    # ---- C1·T1 (both at s_src) ----
+    C1_r = env_src.C1.relabel("c1_r", "t1_l")
+    C1g = contract(C1_r, env_src.T1)  # (c1_d, u2, t1_r)
+
+    # ---- C4·T3 (both at s_src) ----
+    C4_u = env_src.C4.relabel("c4_u", "t3_r")
+    C4g = contract(C4_u, env_src.T3)  # (c4_r, d2, t3_l)
+
+    # ---- T4·ket (T4 and ket both at s_src) ----
+    T4_with_a = contract(env_src.T4, a_src)  # (t4_d, t4_u, u2, d2, r2)
+
+    # ---- C1: project with P_bot_above only ----
+    C1_new = _apply_proj_unfused(P_bot_above, C1g, "c1_d", "u2")  # (chi_new, t1_r)
+    C1_new = C1_new.relabels({"chi_new": "c1_d", "t1_r": "c1_r"})
+
+    # ---- C4: project with P_top_curr only ----
+    C4_new = _apply_proj_unfused(P_top_curr, C4g, "c4_r", "d2")  # (chi_new, t3_l)
+    C4_new = C4_new.relabels({"chi_new": "c4_r", "t3_l": "c4_u"})
+
+    # ---- T4: sandwiched by P_top_above (top face, t4_d⊕u2) and
+    #          P_bot_curr (bottom face, t4_u⊕d2) ----
+    step = _apply_proj_unfused(P_top_above, T4_with_a, "t4_d", "u2")  # (chi_new, t4_u, d2, r2)
+    T4_new = _apply_proj_unfused(
+        P_bot_curr, step, "t4_u", "d2", chi_new="chi_new_r"
+    )  # (chi_new, r2, chi_new_r)
+    T4_new = T4_new.relabels({"chi_new": "t4_d", "chi_new_r": "t4_u", "r2": "l2"})
+    # Unfused contraction can emit the free legs in a different order than the
+    # fused path; restore the canonical edge layout so downstream positional
+    # uses (e.g. phase-fix ravel order) match the dense/fused result (#605).
+    T4_new = T4_new.transpose(
+        tuple(T4_new.labels().index(lbl) for lbl in ("t4_d", "l2", "t4_u"))
+    )
+    T4_new = _flip_leg_flow(T4_new, "l2")  # r2(OUT) -> l2 needs IN
+
+    # ---- phase-fix + normalize (matches variPEPS) ----
+    C1_new = _phase_fix_normalize_tensor(C1_new)
+    C4_new = _phase_fix_normalize_tensor(C4_new)
+    T4_new = _phase_fix_normalize_tensor(T4_new)
+    return C1_new, T4_new, C4_new
+
+
+def _ctm_tensor_absorb_right_2plaq_fused(
+    env_src: CTMTensorEnv,
+    a_src: Tensor,
+    P_top_above: Tensor,
+    P_bot_above: Tensor,
+    P_top_curr: Tensor,
+    P_bot_curr: Tensor,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """variPEPS-style RIGHT absorption using two plaquettes' projectors.
+
+    Mirrors :func:`varipeps.ctmrg.absorption.do_right_absorption`.  The
+    new (C2, T2, C3) get stored at ``s_dst = neighbors[s_src]["left"]``;
+    here ``s_src`` is the cell whose right column is being absorbed and
+    ``s_above = neighbors[s_src]["top"]`` is the cell whose plaquette
+    provides the top half of T2's projector pair.
+
+    For RIGHT direction, the same plaquette geometry as LEFT is used;
+    only the SEAM being cut shifts to the right column of the plaquette.
+    Specifically, the projector pair for the "above" plaquette anchored
+    at ``s_above`` has direction="right", which compresses the seam
+    between TR=``neighbors[s_above]["right"]`` and BR=
+    ``neighbors[s_src]["right"]``.  Since BR of above == TR of current
+    in our coordinate convention, ``P_*_above`` and ``P_*_curr`` together
+    project the chi+D² seam at the boundary between ``s_src`` and
+    ``s_dst = neighbors[s_src]["right"]``.
+
+    The Tenax ``_compute_2x2_projector`` for direction='right' has
+    ``prime_order=first_second`` (M_prime = M1 @ M2), so the resulting
+    ``P_top``/``P_bot`` naming is INVERTED relative to LEFT (where
+    direction='left' uses ``prime_order=second_first``).  Specifically:
+
+      * Tenax ``P_top`` for direction='right' acts on BR's TOP face
+        (BOTTOM side of the cut seam) ≡ variPEPS ``.bottom``.
+      * Tenax ``P_bot`` for direction='right' acts on TR's BOTTOM face
+        (TOP side of the cut seam) ≡ variPEPS ``.top``.
+
+    Hence variPEPS RIGHT absorption maps to:
+      * ``C2`` uses ``(above).bottom`` ≡ ``P_top_above``.
+      * ``T2`` top side (fl = t2_u ⊕ u2) uses ``(above).top`` ≡
+        ``P_bot_above``.
+      * ``T2`` bottom side (fr = t2_d ⊕ d2) uses ``(curr).bottom`` ≡
+        ``P_top_curr``.
+      * ``C3`` uses ``(curr).top`` ≡ ``P_bot_curr``.
+    """
+    # Unfused projector application (#605); see ``_apply_proj_unfused``.
+    # ---- C2·T1 (both at s_src) ----
+    C2_l = env_src.C2.relabel("c2_l", "t1_r")
+    C2g = contract(C2_l, env_src.T1)  # (c2_d, t1_l, u2)
+
+    # ---- C3·T3 (both at s_src) ----
+    C3_u = env_src.C3.relabel("c3_u", "t3_l")
+    C3g = contract(C3_u, env_src.T3)  # (c3_l, t3_r, d2)
+
+    # ---- T2·ket (both at s_src) ----
+    T2_with_a = contract(env_src.T2, a_src)  # (t2_u, t2_d, u2, d2, l2)
+
+    # ---- C2: project with P_top_above only (≡ variPEPS .bottom of above) ----
+    C2_new = _apply_proj_unfused(P_top_above, C2g, "c2_d", "u2")
+    C2_new = C2_new.relabels({"chi_new": "c2_l", "t1_l": "c2_d"})
+
+    # ---- C3: project with P_bot_curr only (≡ variPEPS .top of curr) ----
+    C3_new = _apply_proj_unfused(P_bot_curr, C3g, "c3_l", "d2")
+    C3_new = C3_new.relabels({"chi_new": "c3_u", "t3_r": "c3_l"})
+
+    # ---- T2: sandwiched by P_bot_above (fl, t2_u⊕u2) and P_top_curr (fr, t2_d⊕d2) ----
+    step = _apply_proj_unfused(P_bot_above, T2_with_a, "t2_u", "u2")  # (chi_new, t2_d, d2, l2)
+    T2_new = _apply_proj_unfused(P_top_curr, step, "t2_d", "d2", chi_new="chi_new_r")
+    T2_new = T2_new.relabels({"chi_new": "t2_u", "chi_new_r": "t2_d", "l2": "r2"})
+    T2_new = T2_new.transpose(
+        tuple(T2_new.labels().index(lbl) for lbl in ("t2_u", "r2", "t2_d"))
+    )
+    T2_new = _flip_leg_flow(T2_new, "r2")  # l2(IN) -> r2 needs OUT
+
+    C2_new = _phase_fix_normalize_tensor(C2_new)
+    C3_new = _phase_fix_normalize_tensor(C3_new)
+    T2_new = _phase_fix_normalize_tensor(T2_new)
+    return C2_new, T2_new, C3_new
+
+
+def _ctm_tensor_absorb_top_2plaq_fused(
+    env_src: CTMTensorEnv,
+    a_src: Tensor,
+    P_top_left: Tensor,
+    P_bot_left: Tensor,
+    P_top_curr: Tensor,
+    P_bot_curr: Tensor,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """variPEPS-style TOP absorption using two plaquettes' projectors.
+
+    Mirrors :func:`varipeps.ctmrg.absorption.do_top_absorption`.  The
+    "left plaquette" is anchored at ``neighbors[s_src]["left"]`` and the
+    "current plaquette" at ``s_src``.  The new (C1, T1, C2) tensors get
+    stored at ``s_dst = neighbors[s_src]["bottom"]``.
+
+    For TOP direction, the Tenax ``_compute_2x2_projector`` uses
+    ``prime_order=first_second``, so the ``P_top`` / ``P_bot`` naming
+    is INVERTED relative to the variPEPS ``Top_Projectors(left, right)``
+    pair.  Specifically:
+
+      * Tenax ``P_top`` for direction='top' acts on TR's LEFT face
+        (RIGHT side of cut seam) ≡ variPEPS ``.right``.
+      * Tenax ``P_bot`` for direction='top' acts on TL's RIGHT face
+        (LEFT side of cut seam) ≡ variPEPS ``.left``.
+
+    Hence variPEPS TOP absorption maps to:
+      * ``C1`` uses ``(left-plaq).right`` ≡ ``P_top_left``.
+      * ``T1`` left side (fl = t1_l ⊕ l2) uses ``(left-plaq).left`` ≡
+        ``P_bot_left``.
+      * ``T1`` right side (fr = t1_r ⊕ r2) uses ``(curr).right`` ≡
+        ``P_top_curr``.
+      * ``C2`` uses ``(curr).left`` ≡ ``P_bot_curr``.
+    """
+    # Unfused projector application (#605); see ``_apply_proj_unfused``.
+    # ---- C1·T4 (both at s_src) ----
+    C1_d = env_src.C1.relabel("c1_d", "t4_d")
+    C1g = contract(C1_d, env_src.T4)  # (c1_r, l2, t4_u)
+
+    # ---- C2·T2 (both at s_src) ----
+    C2_d = env_src.C2.relabel("c2_d", "t2_u")
+    C2g = contract(C2_d, env_src.T2)  # (c2_l, r2, t2_d)
+
+    # ---- T1·ket (both at s_src) ----
+    T1_with_a = contract(env_src.T1, a_src)  # (t1_l, t1_r, d2, l2, r2)
+
+    # ---- C1: project with P_top_left (≡ variPEPS .right of left-plaq) ----
+    C1_new = _apply_proj_unfused(P_top_left, C1g, "c1_r", "l2")
+    C1_new = C1_new.relabels({"chi_new": "c1_d", "t4_u": "c1_r"})
+
+    # ---- C2: project with P_bot_curr (≡ variPEPS .left of curr) ----
+    C2_new = _apply_proj_unfused(P_bot_curr, C2g, "c2_l", "r2")
+    C2_new = C2_new.relabels({"chi_new": "c2_l", "t2_d": "c2_d"})
+
+    # ---- T1: sandwiched by P_bot_left (fl, t1_l⊕l2) and P_top_curr (fr, t1_r⊕r2) ----
+    step = _apply_proj_unfused(P_bot_left, T1_with_a, "t1_l", "l2")  # (chi_new, t1_r, d2, r2)
+    T1_new = _apply_proj_unfused(P_top_curr, step, "t1_r", "r2", chi_new="chi_new_r")
+    T1_new = T1_new.relabels({"chi_new": "t1_l", "chi_new_r": "t1_r", "d2": "u2"})
+    T1_new = T1_new.transpose(
+        tuple(T1_new.labels().index(lbl) for lbl in ("t1_l", "u2", "t1_r"))
+    )
+    T1_new = _flip_leg_flow(T1_new, "u2")  # d2(OUT) -> u2 needs IN
+
+    C1_new = _phase_fix_normalize_tensor(C1_new)
+    C2_new = _phase_fix_normalize_tensor(C2_new)
+    T1_new = _phase_fix_normalize_tensor(T1_new)
+    return C1_new, T1_new, C2_new
+
+
+def _ctm_tensor_absorb_bottom_2plaq_fused(
+    env_src: CTMTensorEnv,
+    a_src: Tensor,
+    P_top_left: Tensor,
+    P_bot_left: Tensor,
+    P_top_curr: Tensor,
+    P_bot_curr: Tensor,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """variPEPS-style BOTTOM absorption using two plaquettes' projectors.
+
+    Mirrors :func:`varipeps.ctmrg.absorption.do_bottom_absorption`.  The
+    new (C4, T3, C3) get stored at ``s_dst = neighbors[s_src]["top"]``.
+    """
+    # Unfused projector application (#605); see ``_apply_proj_unfused``.
+    # ---- C4·T4 (both at s_src) ----
+    C4_r = env_src.C4.relabel("c4_r", "t4_u")
+    C4g = contract(C4_r, env_src.T4)  # (c4_u, t4_d, l2)
+
+    # ---- C3·T2 (both at s_src) ----
+    C3_l = env_src.C3.relabel("c3_l", "t2_d")
+    C3g = contract(C3_l, env_src.T2)  # (c3_u, t2_u, r2)
+
+    # ---- T3·ket (both at s_src) ----
+    T3_with_a = contract(env_src.T3, a_src)  # (t3_r, t3_l, u2, l2, r2)
+
+    # ---- C4: project with P_bot_left ----
+    C4_new = _apply_proj_unfused(P_bot_left, C4g, "c4_u", "l2")
+    C4_new = C4_new.relabels({"chi_new": "c4_r", "t4_d": "c4_u"})
+
+    # ---- C3: project with P_top_curr ----
+    C3_new = _apply_proj_unfused(P_top_curr, C3g, "c3_u", "r2")
+    C3_new = C3_new.relabels({"chi_new": "c3_u", "t2_u": "c3_l"})
+
+    # ---- T3: sandwiched by P_top_left (fl, t3_r⊕l2) + P_bot_curr (fr, t3_l⊕r2) ----
+    step = _apply_proj_unfused(P_top_left, T3_with_a, "t3_r", "l2")  # (chi_new, t3_l, u2, r2)
+    T3_new = _apply_proj_unfused(P_bot_curr, step, "t3_l", "r2", chi_new="chi_new_r")
+    T3_new = T3_new.relabels({"chi_new": "t3_r", "chi_new_r": "t3_l", "u2": "d2"})
+    T3_new = T3_new.transpose(
+        tuple(T3_new.labels().index(lbl) for lbl in ("t3_r", "d2", "t3_l"))
+    )
     T3_new = _flip_leg_flow(T3_new, "d2")  # u2(IN) -> d2 needs OUT
 
     C4_new = _phase_fix_normalize_tensor(C4_new)

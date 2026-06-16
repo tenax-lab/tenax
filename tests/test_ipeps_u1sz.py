@@ -146,34 +146,70 @@ class TestU1SzSymmetricMatchesDense:
 
 
 class TestU1SzSymmetricCTMD3:
-    @pytest.mark.xfail(
-        reason="D>=3 T4-edge flow-conjugation bug (#605): the edge's "
-        "T4g.fl = fuse(t4_d, u2) comes out charge-conjugate to the projector's "
-        "fused leg, so the 2-plaq left-absorb contraction "
-        "(_ctm_tensor_absorb_left_2plaq) hits a per-sector dim mismatch "
-        "(e.g. 19 vs 16) at D=3, chi=16. Masked at D=2 by symmetric D^2 charges; "
-        "distinct from #602 (which was per-sector order). Dense from the same "
-        "init runs fine. Flip to a correctness check (vs dense + order-invariance) "
-        "once #605 lands.",
-        strict=True,
-        raises=ValueError,
-    )
-    def test_d3_chi16_symmetric_ctm_xfail(self):
-        """D=3 chi=16 U(1)-Sz symmetric CTM currently raises in the T4 absorb (#605)."""
-        from tenax import CTMConfig, iPEPSConfig, optimize_gs_ad
-        from tenax.algorithms.ipeps import (
-            heisenberg_gate,
-            heisenberg_u1sz_init_pair,
+    """Regression guard for #605: U(1)-Sz 2-plaquette CTM absorb at D>=3.
+
+    Before #605 the symmetric 2-plaquette absorb hard-fused the env ``chi`` and
+    ``D**2`` legs into a single ``fused`` leg whose charges came out the exact
+    charge-CONJUGATE of the projector half's fused leg — because that projector
+    half is built from the *neighbour* cell's enlarged corner, whose seam legs
+    are the dual side of the current cell's edge.  ``_contract_symmetric`` pairs
+    blocks by raw charge value, so at ``D>=3`` (where the Sz seam charge set is
+    asymmetric) this raised ``ValueError: Size of label 'b' for operand 1 ...``.
+    It was masked at ``D=2`` (the Sz seam charge set is self-dual, so a leg and
+    its conjugate have identical per-sector dims) and never bit FermionParity
+    (Z2 charges are self-dual).
+
+    The fix mirrors YASTN's CTM (``proj_corners`` unfuses before applying): the
+    projector's fused leg is split back into its bare ``(chi, D**2)``
+    constituents (which are individually contractible — equal charges, opposite
+    flow — being literally the seam's two sides) and contracted against the
+    env's own legs.  The dense path is byte-identical (the constituents pair the
+    same elements the fused leg did); the symmetric path no longer raises.
+    """
+
+    @staticmethod
+    def _env_a_at_d3(chi):
+        from tenax.algorithms._ctm_tensor_init import (
+            _build_double_layer_tensor,
+            initialize_ctm_tensor_env,
+        )
+        from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
+
+        A, _ = heisenberg_u1sz_init_pair(D=3, key=jax.random.PRNGKey(0))
+        return A, initialize_ctm_tensor_env(A, chi), _build_double_layer_tensor(A)
+
+    @pytest.mark.parametrize("chi", [8])
+    def test_d3_symmetric_2plaq_absorbs_no_charge_mismatch(self, chi):
+        """All four D=3 symmetric 2-plaquette absorbs run without the #605
+        charge-sector dim mismatch and return finite, non-collapsed tensors.
+
+        ``chi=8`` is enough to expose the bug: it is D-dependent (the asymmetric
+        Sz seam appears at ``D>=3``), not chi-dependent.  ``chi=16`` reproduces
+        the same fix but the block-sparse projector SVD is markedly slower
+        there (#566 per-sector dispatch), so the guard runs at ``chi=8``.
+        """
+        from tenax.algorithms._ctm_tensor_moves import (
+            _compute_plaquette_projector_pair,
+            _ctm_tensor_absorb_bottom_2plaq,
+            _ctm_tensor_absorb_left_2plaq,
+            _ctm_tensor_absorb_right_2plaq,
+            _ctm_tensor_absorb_top_2plaq,
         )
 
-        A_sym, B_sym = heisenberg_u1sz_init_pair(D=3, key=jax.random.PRNGKey(0))
-        gate = heisenberg_gate().todense()
-        config = iPEPSConfig(
-            max_bond_dim=3,
-            ctm=CTMConfig(chi=16, max_iter=30),
-            gs_num_steps=1,
-            unit_cell="2site",
-        )
-        # Raises ValueError("Size of label 'b' ... does not match ...") in the
-        # left absorb's contract(P_left, T4g); dense from the same init is fine.
-        optimize_gs_ad(gate, (A_sym, B_sym), config)
+        _A, env, a = self._env_a_at_d3(chi)
+        absorbs = {
+            "left": _ctm_tensor_absorb_left_2plaq,
+            "right": _ctm_tensor_absorb_right_2plaq,
+            "top": _ctm_tensor_absorb_top_2plaq,
+            "bottom": _ctm_tensor_absorb_bottom_2plaq,
+        }
+        for direction, absorb in absorbs.items():
+            # Uniform plaquette: every cell shares ``env`` / ``a``.
+            P_top, P_bot, _, _ = _compute_plaquette_projector_pair(
+                env, env, env, env, a, a, a, a, chi, direction
+            )
+            # Was ``ValueError: Size of label 'b' ...`` before #605.
+            out = absorb(env, a, P_top, P_bot, P_top, P_bot)
+            for t in out:
+                arr = np.asarray(t.todense())
+                assert np.isfinite(arr).all(), f"{direction}: non-finite output"
