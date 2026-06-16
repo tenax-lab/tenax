@@ -213,3 +213,53 @@ class TestU1SzSymmetricCTMD3:
             for t in out:
                 arr = np.asarray(t.todense())
                 assert np.isfinite(arr).all(), f"{direction}: non-finite output"
+
+    @pytest.mark.slow
+    def test_d3_symmetric_energy_matches_dense(self):
+        """D=3 U(1)-Sz 2-site CTM energy must match the dense reference (#608 P1).
+
+        Closes the coverage gap behind a Codex P1 review comment on the #605 fix:
+        ``_apply_proj_unfused`` flow-flips unconditionally, so the renormalised
+        ``env.T1``/``env.T3`` chi legs come out *dualed* relative to
+        ``_STD_EDGE_SPECS`` (verified: real converged env has
+        ``T1 = (OUT, IN, IN)`` vs the documented ``(IN, IN, OUT)``, at BOTH D=2
+        and D=3).  Codex predicted this would build "charge blocks for the wrong
+        edge convention" at D>=3.
+
+        It does NOT: the dense path ignores flow (``DenseTensor`` contraction is
+        flow-insensitive), so ``E_dense`` is a flow-independent ground truth, and
+        the symmetric energy matches it within the same per-sector-truncation
+        tolerance as the (known-correct) D=2 case.  The CTM sweep is
+        self-consistent in its actual convention; the spec mismatch is latent,
+        not a results bug.  This test locks that correctness in (the prior
+        ``TestU1SzSymmetricMatchesDense`` test only ran at D=2, where self-dual
+        Sz charges mask the flow convention entirely).
+        """
+        from tenax.algorithms._ctm_tensor import (
+            compute_energy_ctm_tensor_2site,
+            ctm_tensor_2site,
+        )
+        from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
+        from tenax.core.tensor import DenseTensor
+
+        A, B = heisenberg_u1sz_init_pair(D=3, key=jax.random.PRNGKey(0))
+        gate = heisenberg_gate().todense()
+
+        envA, envB = ctm_tensor_2site(A, B, chi=8, max_iter=30, conv_tol=1e-8)
+        E_sym = float(compute_energy_ctm_tensor_2site(A, B, envA, envB, gate, d=2))
+
+        # Flow-insensitive dense baseline from the same init.
+        Ad = DenseTensor(A.todense(), A.indices)
+        Bd = DenseTensor(B.todense(), B.indices)
+        envAd, envBd = ctm_tensor_2site(Ad, Bd, chi=8, max_iter=30, conv_tol=1e-8)
+        E_dense = float(
+            compute_energy_ctm_tensor_2site(Ad, Bd, envAd, envBd, gate, d=2)
+        )
+
+        assert np.isfinite(E_sym)
+        # Charged sectors did not collapse (the #602 failure mode was E_sym==0).
+        assert abs(E_sym) > 1e-6, f"symmetric sectors collapsed: E_sym={E_sym}"
+        # Symmetric contraction value agrees with the flow-independent dense
+        # reference -> charge blocks are paired correctly despite the T1/T3 flow
+        # convention differing from _STD_EDGE_SPECS.
+        np.testing.assert_allclose(E_sym, E_dense, atol=5e-2)
