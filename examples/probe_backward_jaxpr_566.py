@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import argparse
 import collections
+import importlib.util
 import os
+import pathlib
 
 import jax
 import jax.numpy as jnp
@@ -52,6 +54,15 @@ from tenax.algorithms.fermionic_ipeps import (  # noqa: E402
     FPEPSConfig,
     _build_initial_fpeps_tensor,
 )
+
+# Load the shared profiler so make_site_and_gate is the single source of truth
+# for site construction (especially the u1sz arm added in Task 2).
+_prof_spec = importlib.util.spec_from_file_location(
+    "profile_ctm_ad_wall_566",
+    pathlib.Path(__file__).parent / "profile_ctm_ad_wall_566.py",
+)
+_PROF = importlib.util.module_from_spec(_prof_spec)
+_prof_spec.loader.exec_module(_PROF)
 
 FLAG = "TENAX_BATCH_BLOCKSPARSE"
 
@@ -82,6 +93,10 @@ def make_site(sym: str, D: int, seed: int = 42):
                 TensorIndex.from_charges(sym_, zd, FlowDirection.IN, label="phys"),
             ),
         )
+    if sym == "u1sz":
+        # Reuse make_site_and_gate from the shared profiler for a single source of truth.
+        site, _gate = _PROF.make_site_and_gate("u1sz", D, seed=seed)
+        return site
     raise ValueError(sym)
 
 
@@ -241,7 +256,20 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--D", type=int, nargs="+", default=[2, 3])
     ap.add_argument("--chi-factor", type=int, default=3)
+    ap.add_argument(
+        "--chi",
+        type=int,
+        default=None,
+        help="Fixed chi override (overrides --chi-factor * D when set).",
+    )
     ap.add_argument("--sym", nargs="+", default=["fermionic", "dense"])
+    ap.add_argument(
+        "--depth",
+        type=int,
+        default=None,
+        help="Accepted for CLI compatibility; ignored (trace-only, depth does not "
+        "affect the jaxpr).",
+    )
     ap.add_argument(
         "--projector-backward",
         default="auto",
@@ -255,6 +283,12 @@ def main() -> None:
         help="Also trace the params-sweep VJP (the _jit_chain_rule indirect "
         "term) so the histogram covers the whole fused F3 backward, not just "
         "apply_Jt (the Neumann matvec).",
+    )
+    ap.add_argument(
+        "--raw",
+        action="store_true",
+        help="Also print the per-primitive raw counts (top-20) alongside the bucket "
+        "summary, useful for identifying dominant individual ops.",
     )
     args = ap.parse_args()
 
@@ -277,18 +311,18 @@ def main() -> None:
         os.environ[FLAG] = "1" if on else "0"
         if args.full:
             env_jx, par_jx = backward_vjp_jaxpr(A, chi, pbw, full=True)
-            return bucketize(
-                _combine(count_primitives(env_jx), count_primitives(par_jx))
-            )
-        return bucketize(count_primitives(backward_vjp_jaxpr(A, chi, pbw)))
+            raw = _combine(count_primitives(env_jx), count_primitives(par_jx))
+        else:
+            raw = count_primitives(backward_vjp_jaxpr(A, chi, pbw))
+        return bucketize(raw), raw
 
     for sym in args.sym:
         for D in args.D:
-            chi = args.chi_factor * D
+            chi = args.chi if args.chi is not None else args.chi_factor * D
             A = make_site(sym, D)
             n_blocks = getattr(A, "n_blocks", 1)
-            off = hist(A, chi, on=False)
-            onb = hist(A, chi, on=True)
+            off, off_raw = hist(A, chi, on=False)
+            onb, onb_raw = hist(A, chi, on=True)
             print(f"== {sym} D={D} chi={chi} blocks={n_blocks} ==")
             hdr = f"  {'bucket':<36} {'flag_off':>10} {'flag_on':>10} {'on/off':>8}"
             print(hdr)
@@ -297,6 +331,20 @@ def main() -> None:
                 ratio = (n / o) if o else float("nan")
                 mark = "  <== TOTAL" if b == "TOTAL" else ""
                 print(f"  {b:<36} {o:>10} {n:>10} {ratio:>7.2f}x{mark}")
+            if args.raw:
+                total_off = sum(off_raw.values())
+                total_onb = sum(onb_raw.values())
+                all_prims = sorted(
+                    set(off_raw) | set(onb_raw),
+                    key=lambda p: -(off_raw.get(p, 0) + onb_raw.get(p, 0)),
+                )
+                print("  -- raw primitive counts (top-20, flag_off) --")
+                print(f"  {'primitive':<40} {'flag_off':>10} {'pct':>8} {'flag_on':>10} {'pct':>8}")
+                for p in all_prims[:20]:
+                    o, n = off_raw.get(p, 0), onb_raw.get(p, 0)
+                    pct_o = 100.0 * o / total_off if total_off else 0.0
+                    pct_n = 100.0 * n / total_onb if total_onb else 0.0
+                    print(f"  {p:<40} {o:>10} {pct_o:>7.1f}% {n:>10} {pct_n:>7.1f}%")
             print()
 
 

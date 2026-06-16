@@ -1,0 +1,122 @@
+[
+  {
+    "D": 2,
+    "chi": 8,
+    "rows": [
+      {
+        "tensor": "site",
+        "n_blocks": 8,
+        "n_distinct_shapes": 1,
+        "collapse_ceiling": 8.0
+      },
+      {
+        "tensor": "C1",
+        "n_blocks": 3,
+        "n_distinct_shapes": 2,
+        "collapse_ceiling": 1.5
+      },
+      {
+        "tensor": "C2",
+        "n_blocks": 3,
+        "n_distinct_shapes": 2,
+        "collapse_ceiling": 1.5
+      },
+      {
+        "tensor": "C3",
+        "n_blocks": 3,
+        "n_distinct_shapes": 2,
+        "collapse_ceiling": 1.5
+      },
+      {
+        "tensor": "C4",
+        "n_blocks": 3,
+        "n_distinct_shapes": 2,
+        "collapse_ceiling": 1.5
+      },
+      {
+        "tensor": "T1",
+        "n_blocks": 7,
+        "n_distinct_shapes": 4,
+        "collapse_ceiling": 1.75
+      },
+      {
+        "tensor": "T2",
+        "n_blocks": 7,
+        "n_distinct_shapes": 4,
+        "collapse_ceiling": 1.75
+      },
+      {
+        "tensor": "T3",
+        "n_blocks": 7,
+        "n_distinct_shapes": 4,
+        "collapse_ceiling": 1.75
+      },
+      {
+        "tensor": "T4",
+        "n_blocks": 7,
+        "n_distinct_shapes": 4,
+        "collapse_ceiling": 1.75
+      }
+    ]
+  },
+  {
+    "D": 3,
+    "chi": 12,
+    "rows": [
+      {
+        "tensor": "site",
+        "n_blocks": 32,
+        "n_distinct_shapes": 1,
+        "collapse_ceiling": 32.0
+      },
+      {
+        "tensor": "C1",
+        "n_blocks": 5,
+        "n_distinct_shapes": 3,
+        "collapse_ceiling": 1.667
+      },
+      {
+        "tensor": "C2",
+        "n_blocks": 5,
+        "n_distinct_shapes": 3,
+        "collapse_ceiling": 1.667
+      },
+      {
+        "tensor": "C3",
+        "n_blocks": 5,
+        "n_distinct_shapes": 3,
+        "collapse_ceiling": 1.667
+      },
+      {
+        "tensor": "C4",
+        "n_blocks": 5,
+        "n_distinct_shapes": 3,
+        "collapse_ceiling": 1.667
+      },
+      {
+        "tensor": "T1",
+        "n_blocks": 19,
+        "n_distinct_shapes": 10,
+        "collapse_ceiling": 1.9
+      },
+      {
+        "tensor": "T2",
+        "n_blocks": 19,
+        "n_distinct_shapes": 10,
+        "collapse_ceiling": 1.9
+      },
+      {
+        "tensor": "T3",
+        "n_blocks": 19,
+        "n_distinct_shapes": 10,
+        "collapse_ceiling": 1.9
+      },
+      {
+        "tensor": "T4",
+        "n_blocks": 19,
+        "n_distinct_shapes": 10,
+        "collapse_ceiling": 1.9
+      }
+    ]
+  }
+]
