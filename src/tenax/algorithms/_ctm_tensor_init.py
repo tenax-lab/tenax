@@ -48,9 +48,9 @@ class CTMTensorEnv(NamedTuple):
     C2: Tensor  # (c2_l, c2_d)    flows: (IN, OUT)
     C3: Tensor  # (c3_u, c3_l)    flows: (OUT, IN)
     C4: Tensor  # (c4_r, c4_u)    flows: (OUT, IN)
-    T1: Tensor  # (t1_l, u2, t1_r)  flows: (IN, ?, OUT)
+    T1: Tensor  # (t1_l, u2, t1_r)  flows: (IN, ?, OUT) at init; SWEPT: (OUT, ?, IN) (#612)
     T2: Tensor  # (t2_u, r2, t2_d)  flows: (OUT, ?, IN)
-    T3: Tensor  # (t3_r, d2, t3_l)  flows: (OUT, ?, IN)
+    T3: Tensor  # (t3_r, d2, t3_l)  flows: (OUT, ?, IN) at init; SWEPT: (IN, ?, OUT) (#612)
     T4: Tensor  # (t4_d, l2, t4_u)  flows: (IN, ?, OUT)
 
 
@@ -134,6 +134,18 @@ def _build_double_layer_open_tensor(A: Tensor) -> Tensor:
 # ref_axis_chi1/chi2 are A's axes used to derive the two chi legs' charges
 # (matching the connecting corners' ref axes for charge compatibility).
 # ref_axis_Da/Db are A's axes that get fused into the D² leg.
+#
+# RUNTIME-CONVENTION NOTE (#612): these specs build the *initial* env
+# (``initialize_ctm_tensor_env``).  The #605 2-plaquette absorb
+# (``_apply_proj_unfused``) flow-flips the projector unconditionally, so the
+# *renormalised* T1/T3 emerge with their chi legs DUALED relative to the specs
+# below — a swept env has ``T1 = (t1_l OUT, u2 IN, t1_r IN)`` and
+# ``T3 = (t3_r IN, d2 OUT, t3_l OUT)``, NOT the (IN,IN,OUT)/(OUT,OUT,IN) here.
+# T2/T4 keep the spec convention.  This is self-consistent and energy-correct
+# (the sweep both produces and consumes the dualed convention; E_sym == E_dense
+# at D=3, see ``tests/test_ipeps_u1sz.py::TestU1SzSymmetricCTMD3`` and PR #611) —
+# it is NOT a bug.  A consumer contracting the *swept* env's T1/T3 against an
+# externally built tensor must use the dualed flows above, not the init specs.
 _STD_EDGE_SPECS = {
     # T1: top edge. chi1(t1_l) connects to C1.c1_r (C1 ref=1=d),
     #               chi2(t1_r) connects to C2.c2_l (C2 ref=0=u).
