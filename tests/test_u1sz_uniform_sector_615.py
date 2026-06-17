@@ -5,6 +5,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
+from examples.probe_backward_jaxpr_566 import backward_vjp_jaxpr
 from tenax.algorithms._ctm_tensor import ctm_tensor
 from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
 from tenax.algorithms._ctm_uniform_sector import keep_sectors_context
@@ -67,3 +68,16 @@ def test_forward_env_block_counts_drop_under_keep():
         assert n1[name] < n0[name], f"{name}: {n1[name]} !< {n0[name]}"
     for name in env1._fields:
         assert _chi_sectors(getattr(env1, name)) <= {-1, 0, 1}
+
+
+def test_cold_backward_vjp_builds_under_keep():
+    """#615 make-or-break: the 2x2 multisite backward VJP — which raised
+    ValueError('Size of label d ...') in the #610 spike — now traces cold under
+    the sector drop. This is the structural gate the whole issue exists to clear.
+    """
+    A, _B = heisenberg_u1sz_init_pair(D=3, key=jax.random.PRNGKey(0))
+    jax.clear_caches()  # COLD: do not reuse a flag-off jaxpr (cold-trace caveat)
+    with keep_sectors_context({-1, 0, 1}):
+        jaxpr = backward_vjp_jaxpr(A, chi=12)
+    assert jaxpr is not None
+    assert len(jaxpr.eqns) > 0
