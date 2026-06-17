@@ -6,10 +6,11 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from examples.probe_backward_jaxpr_566 import backward_vjp_jaxpr
+from tenax import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor import ctm_tensor
 from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
 from tenax.algorithms._ctm_uniform_sector import keep_sectors_context
-from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
+from tenax.algorithms.ipeps import heisenberg_gate_u1sz, heisenberg_u1sz_init_pair
 
 
 def _env_block_signature(env):
@@ -81,3 +82,16 @@ def test_cold_backward_vjp_builds_under_keep():
         jaxpr = backward_vjp_jaxpr(A, chi=12)
     assert jaxpr is not None
     assert len(jaxpr.eqns) > 0
+
+
+def test_keep_env_is_faithful_at_d3_chi12():
+    """#615 faithfulness guard: the keep-active CTM env must be VALID before the
+    Gate-B op-count measurement is trustworthy — it must converge, be finite, and
+    give a sane (random-init, not ground-state) Heisenberg energy."""
+    A, _B = heisenberg_u1sz_init_pair(D=3, key=jax.random.PRNGKey(0))
+    env, _ = ctm_tensor(A, chi=12, max_iter=20, conv_tol=1e-7, keep_sectors={-1, 0, 1})
+    for name in env._fields:
+        assert np.all(np.isfinite(np.asarray(getattr(env, name)._data))), f"{name} non-finite"
+    e = float(compute_energy_ctm_tensor(A, env, heisenberg_gate_u1sz()))
+    assert np.isfinite(e), f"energy {e} non-finite"
+    assert -2.0 < e < 0.0, f"energy {e} outside sane Heisenberg window (-2, 0)"
