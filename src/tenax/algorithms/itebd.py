@@ -5,11 +5,17 @@ unit cell, in the Vidal ``Gamma-lambda`` canonical form. The one numerically
 delicate step of the original Vidal iTEBD is the explicit inversion of the bond
 weights (``lambda^-1``) when restoring the canonical form after a gate+SVD: a
 vanishing Schmidt value amplifies to ``1/eps`` and, after re-normalization,
-degenerates the whole bond (see ``fermionic_ipeps._safe_inv``). Following the
-spirit of Hastings' stable iTEBD (arXiv:0903.3253) we never let that blow up:
-the ``lambda^-1`` is taken as a *pseudo-inverse* that drops dead Schmidt sectors
-(``_safe_inv``), which is the gauge-restoration analogue of orthogonalizing
-against the environment instead of dividing by singular values.
+degenerates the whole bond (see ``fermionic_ipeps._safe_inv``). We guard that
+step by taking ``lambda^-1`` as a regularized *pseudo-inverse* that drops dead
+Schmidt sectors (``_safe_inv``) instead of dividing by ~0.
+
+Note: this is the standard Vidal ``Gamma-lambda`` iTEBD with a regularized
+inverse -- it is NOT the inversion-free canonical update of Hastings
+(arXiv:0903.3253). Hastings' trick avoids forming ``lambda^-1`` entirely: it
+applies the gate to a left-/right-canonical 2-site block and re-orthogonalizes
+via SVD, and never uses a pseudo-inverse. A genuine Hastings update could
+replace the inversion step here but is not implemented (and lacks a 2D
+canonical-form analogue for the PEPS simple-update path).
 
 Validated against iDMRG: the spin-1/2 Heisenberg chain converges to
 ``e_0 = 1/4 - ln 2 ~= -0.4431`` per site.

@@ -17,8 +17,10 @@ IMPORTANT — this is NOT simple update being broken in general. Two things:
     identically, so it's not a Koszul/#392 sign bug.
   * The collapse is a numerical λ⁻¹ instability in the SU canonical-form
     bookkeeping that bites when a Schmidt sector legitimately vanishes (as a
-    non-area-law state forces). The principled fix is a numerically stable
-    iTEBD canonical form (Hastings, arXiv:0903.3253).
+    non-area-law state forces). The principled fix is an inversion-free
+    canonical update that never forms λ⁻¹ (Hastings, arXiv:0903.3253); the
+    current code instead regularizes the inverse (``safe_inv_lambda``), and a
+    true Hastings update lacks a 2D canonical-form analogue.
 For free fermions specifically, optimize via AD.
 
 Model: H = -t (c†_i c_j + h.c.) on the 2D square lattice (V=0 free fermions).
