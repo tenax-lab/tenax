@@ -33,6 +33,7 @@ from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     initialize_ctm_tensor_env,
 )
+from tenax.algorithms._ctm_uniform_sector import keep_sectors_context
 from tenax.algorithms._gmres_lax import gmres_pytree, gmres_pytree_jax
 from tenax.algorithms.ad_utils import CTMRGGradientError, _phase_fix_ctm_tensor
 from tenax.contraction.contractor import contract
@@ -363,6 +364,7 @@ def ctm_energy_implicit(
     ctmrg_heuristic_increase_chi_step_size: int = 2,
     chi_max: int | None = None,
     recipe: str = "2x2",
+    keep_sectors: frozenset[int] | None = None,
 ) -> jnp.ndarray:
     """Compute iPEPS energy with implicit-differentiation backward (GMRES).
 
@@ -450,71 +452,73 @@ def ctm_energy_implicit(
     Returns:
         Scalar energy per site.
     """
-    # Reject ``ctmrg_heuristic_increase_chi`` + ``chi_ramp`` at the
-    # ctm_energy_implicit boundary.  Without this guard, the chi_ramp
-    # branch inside ``_run_forward`` silently drops the bump kwargs
-    # (``_python_loop_chi_ramp`` doesn't accept them), so a caller
-    # passing both would get a bump-off run with no error.  Mirrors
-    # ``python_loop_ctm_converge``'s identical check (#514 Task 5
-    # review follow-up).
-    if ctmrg_heuristic_increase_chi and chi_ramp is not None:
-        raise ValueError(
-            "ctmrg_heuristic_increase_chi and chi_ramp are mutually "
-            "exclusive: chi_ramp is a deterministic schedule applied "
-            "across stages, while ctmrg_heuristic_increase_chi is reactive "
-            "inside a single CTM convergence call."
+    with keep_sectors_context(keep_sectors):
+        # Reject ``ctmrg_heuristic_increase_chi`` + ``chi_ramp`` at the
+        # ctm_energy_implicit boundary.  Without this guard, the chi_ramp
+        # branch inside ``_run_forward`` silently drops the bump kwargs
+        # (``_python_loop_chi_ramp`` doesn't accept them), so a caller
+        # passing both would get a bump-off run with no error.  Mirrors
+        # ``python_loop_ctm_converge``'s identical check (#514 Task 5
+        # review follow-up).
+        if ctmrg_heuristic_increase_chi and chi_ramp is not None:
+            raise ValueError(
+                "ctmrg_heuristic_increase_chi and chi_ramp are mutually "
+                "exclusive: chi_ramp is a deterministic schedule applied "
+                "across stages, while ctmrg_heuristic_increase_chi is reactive "
+                "inside a single CTM convergence call."
+            )
+
+        # Mirror the bump-kwarg validation from ``_sigma_gauged_ctm_converge`` at
+        # the public boundary so kwarg-validation tests (chi_max=None,
+        # step_size<=0, env_init above chi_max) surface their specific
+        # ValueError at the entry point, before dispatch hands off to the
+        # custom_vjp factory.  Chi-lock (#516) lifted the prior
+        # NotImplementedError raise that this block historically preceded.
+        _validate_chi_bump_args(
+            chi=chi,
+            chi_max=chi_max,
+            env_init=env_init,
+            bump_enabled=ctmrg_heuristic_increase_chi,
+            bump_step_size=ctmrg_heuristic_increase_chi_step_size,
         )
 
-    # Mirror the bump-kwarg validation from ``_sigma_gauged_ctm_converge`` at
-    # the public boundary so kwarg-validation tests (chi_max=None,
-    # step_size<=0, env_init above chi_max) surface their specific
-    # ValueError at the entry point, before dispatch hands off to the
-    # custom_vjp factory.  Chi-lock (#516) lifted the prior
-    # NotImplementedError raise that this block historically preceded.
-    _validate_chi_bump_args(
-        chi=chi,
-        chi_max=chi_max,
-        env_init=env_init,
-        bump_enabled=ctmrg_heuristic_increase_chi,
-        bump_step_size=ctmrg_heuristic_increase_chi_step_size,
-    )
+        coords = sorted(site_tensors.keys())
+        # Pass Tensor objects directly through custom_vjp boundary.
+        # Both DenseTensor and SymmetricTensor are registered JAX pytrees,
+        # so JAX can differentiate through them without densifying.
+        params_data = tuple(site_tensors[c] for c in coords)
 
-    coords = sorted(site_tensors.keys())
-    # Pass Tensor objects directly through custom_vjp boundary.
-    # Both DenseTensor and SymmetricTensor are registered JAX pytrees,
-    # so JAX can differentiate through them without densifying.
-    params_data = tuple(site_tensors[c] for c in coords)
-
-    return _ctm_energy_implicit_dispatch(
-        params_data,
-        coords,
-        neighbors,
-        gate,
-        chi,
-        max_iter,
-        conv_tol,
-        projector_method,
-        renormalize,
-        projector_backward,
-        qr_warmup_steps,
-        chi_ramp,
-        env_init,
-        forward_gauge,
-        conv_method,
-        min_iter,
-        gmres_tol,
-        gmres_maxiter,
-        gmres_restart,
-        energy_fn,
-        arnoldi_precheck,
-        adjoint_method,
-        plateau_patience,
-        ctmrg_heuristic_increase_chi,
-        ctmrg_heuristic_increase_chi_threshold,
-        ctmrg_heuristic_increase_chi_step_size,
-        chi_max,
-        recipe,
-    )
+        return _ctm_energy_implicit_dispatch(
+            params_data,
+            coords,
+            neighbors,
+            gate,
+            chi,
+            max_iter,
+            conv_tol,
+            projector_method,
+            renormalize,
+            projector_backward,
+            qr_warmup_steps,
+            chi_ramp,
+            env_init,
+            forward_gauge,
+            conv_method,
+            min_iter,
+            gmres_tol,
+            gmres_maxiter,
+            gmres_restart,
+            energy_fn,
+            arnoldi_precheck,
+            adjoint_method,
+            plateau_patience,
+            ctmrg_heuristic_increase_chi,
+            ctmrg_heuristic_increase_chi_threshold,
+            ctmrg_heuristic_increase_chi_step_size,
+            chi_max,
+            recipe,
+            keep_sectors,
+        )
 
 
 def _sigma_gauged_ctm_converge(
@@ -749,6 +753,7 @@ def _ctm_energy_implicit_dispatch(
     ctmrg_heuristic_increase_chi_step_size,
     chi_max,
     recipe="2x2",
+    keep_sectors=None,
 ):
     """Dispatch to custom_vjp-decorated function with caching.
 
@@ -756,82 +761,83 @@ def _ctm_energy_implicit_dispatch(
     We cache it on a key derived from the static configuration so that
     optimizer loops reuse the compiled backward across steps.
     """
-    # Build a hashable key from the static configuration.
-    # Gate and energy_fn must be in the key because the JIT backward
-    # captures them at trace time as compile-time constants.
-    cache_key = (
-        tuple(coords),
-        chi,
-        max_iter,
-        conv_tol,
-        projector_method,
-        renormalize,
-        projector_backward,
-        qr_warmup_steps,
-        forward_gauge,
-        conv_method,
-        min_iter,
-        gmres_tol,
-        gmres_maxiter,
-        gmres_restart,
-        id(neighbors),  # same dict object across optimizer steps
-        id(gate),  # different Hamiltonian → different backward
-        id(energy_fn),  # different energy callback → different backward
-        arnoldi_precheck,
-        adjoint_method,
-        plateau_patience,
-        ctmrg_heuristic_increase_chi,
-        ctmrg_heuristic_increase_chi_threshold,
-        ctmrg_heuristic_increase_chi_step_size,
-        chi_max,
-        recipe,  # distinct sweep recipe → distinct cached forward+backward
-    )
+    with keep_sectors_context(keep_sectors):
+        # Build a hashable key from the static configuration.
+        # Gate and energy_fn must be in the key because the JIT backward
+        # captures them at trace time as compile-time constants.
+        cache_key = (
+            tuple(coords),
+            chi,
+            max_iter,
+            conv_tol,
+            projector_method,
+            renormalize,
+            projector_backward,
+            qr_warmup_steps,
+            forward_gauge,
+            conv_method,
+            min_iter,
+            gmres_tol,
+            gmres_maxiter,
+            gmres_restart,
+            id(neighbors),  # same dict object across optimizer steps
+            id(gate),  # different Hamiltonian → different backward
+            id(energy_fn),  # different energy callback → different backward
+            arnoldi_precheck,
+            adjoint_method,
+            plateau_patience,
+            ctmrg_heuristic_increase_chi,
+            ctmrg_heuristic_increase_chi_threshold,
+            ctmrg_heuristic_increase_chi_step_size,
+            chi_max,
+            recipe,  # distinct sweep recipe → distinct cached forward+backward
+        )
 
-    entry = _VJP_CACHE.get(cache_key)
-    if entry is not None:
-        f, mutables = entry
-        # Update per-call mutable state
-        mutables["gate"] = gate
-        mutables["chi_ramp"] = chi_ramp
-        mutables["env_init"] = env_init
-        mutables["energy_fn"] = energy_fn
+        entry = _VJP_CACHE.get(cache_key)
+        if entry is not None:
+            f, mutables = entry
+            # Update per-call mutable state
+            mutables["gate"] = gate
+            mutables["chi_ramp"] = chi_ramp
+            mutables["env_init"] = env_init
+            mutables["energy_fn"] = energy_fn
+            return f(params_data_tuple)
+
+        # First call with this config — build and cache
+        mutables = {
+            "gate": gate,
+            "chi_ramp": chi_ramp,
+            "env_init": env_init,
+            "energy_fn": energy_fn,
+        }
+        f = _make_implicit_vjp_fn(
+            coords=coords,
+            mutables=mutables,
+            neighbors=neighbors,
+            chi=chi,
+            max_iter=max_iter,
+            conv_tol=conv_tol,
+            projector_method=projector_method,
+            renormalize=renormalize,
+            projector_backward=projector_backward,
+            qr_warmup_steps=qr_warmup_steps,
+            forward_gauge=forward_gauge,
+            conv_method=conv_method,
+            min_iter=min_iter,
+            gmres_tol=gmres_tol,
+            gmres_maxiter=gmres_maxiter,
+            gmres_restart=gmres_restart,
+            arnoldi_precheck=arnoldi_precheck,
+            adjoint_method=adjoint_method,
+            plateau_patience=plateau_patience,
+            ctmrg_heuristic_increase_chi=ctmrg_heuristic_increase_chi,
+            ctmrg_heuristic_increase_chi_threshold=ctmrg_heuristic_increase_chi_threshold,
+            ctmrg_heuristic_increase_chi_step_size=ctmrg_heuristic_increase_chi_step_size,
+            chi_max=chi_max,
+            recipe=recipe,
+        )
+        _VJP_CACHE[cache_key] = (f, mutables)
         return f(params_data_tuple)
-
-    # First call with this config — build and cache
-    mutables = {
-        "gate": gate,
-        "chi_ramp": chi_ramp,
-        "env_init": env_init,
-        "energy_fn": energy_fn,
-    }
-    f = _make_implicit_vjp_fn(
-        coords=coords,
-        mutables=mutables,
-        neighbors=neighbors,
-        chi=chi,
-        max_iter=max_iter,
-        conv_tol=conv_tol,
-        projector_method=projector_method,
-        renormalize=renormalize,
-        projector_backward=projector_backward,
-        qr_warmup_steps=qr_warmup_steps,
-        forward_gauge=forward_gauge,
-        conv_method=conv_method,
-        min_iter=min_iter,
-        gmres_tol=gmres_tol,
-        gmres_maxiter=gmres_maxiter,
-        gmres_restart=gmres_restart,
-        arnoldi_precheck=arnoldi_precheck,
-        adjoint_method=adjoint_method,
-        plateau_patience=plateau_patience,
-        ctmrg_heuristic_increase_chi=ctmrg_heuristic_increase_chi,
-        ctmrg_heuristic_increase_chi_threshold=ctmrg_heuristic_increase_chi_threshold,
-        ctmrg_heuristic_increase_chi_step_size=ctmrg_heuristic_increase_chi_step_size,
-        chi_max=chi_max,
-        recipe=recipe,
-    )
-    _VJP_CACHE[cache_key] = (f, mutables)
-    return f(params_data_tuple)
 
 
 def _make_implicit_vjp_fn(

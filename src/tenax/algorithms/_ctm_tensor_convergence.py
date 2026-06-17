@@ -49,6 +49,7 @@ from tenax.algorithms._ctm_tensor_paired_moves import (
     _ctm_tensor_move_horizontal,
     _ctm_tensor_move_vertical,
 )
+from tenax.algorithms._ctm_uniform_sector import keep_sectors_context
 from tenax.core import EPS
 from tenax.core.lattice import Lattice
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
@@ -577,6 +578,7 @@ def ctm_tensor(
     projector_method: str = "svd",
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
+    keep_sectors: frozenset[int] | None = None,
 ) -> tuple[CTMTensorEnv, float]:
     """Run standard CTM to convergence using the Tensor protocol.
 
@@ -609,67 +611,70 @@ def ctm_tensor(
         is a v2 follow-up), or when the SVD runs inside a JAX tracer (AD
         backward pass).
     """
-    # Determine sweep function: use paired moves for SymmetricTensors
-    # with non-trivial virtual charges (fixes charge-sector mismatch
-    # from independent projectors in standard 4-move CTM).  When virtual
-    # charges are asymmetric (e.g. after simple update truncation),
-    # fall back to DenseTensor since the D^2 leg charges change per
-    # direction.
-    use_paired = False
-    if isinstance(A, SymmetricTensor):
-        import numpy as _np
+    with keep_sectors_context(keep_sectors):
+        # Determine sweep function: use paired moves for SymmetricTensors
+        # with non-trivial virtual charges (fixes charge-sector mismatch
+        # from independent projectors in standard 4-move CTM).  When virtual
+        # charges are asymmetric (e.g. after simple update truncation),
+        # fall back to DenseTensor since the D^2 leg charges change per
+        # direction.
+        use_paired = False
+        if isinstance(A, SymmetricTensor):
+            import numpy as _np
 
-        virtual_indices = [A.indices[i] for i in range(4)]
-        has_nontrivial = any(
-            not (_np.array_equal(vi.sectors, [0]) and vi.n_sectors == 1)
-            for vi in virtual_indices
-        )
-        idx0 = virtual_indices[0]
-        all_same = all(
-            _np.array_equal(idx0.sectors, virtual_indices[i].sectors)
-            and _np.array_equal(idx0.multiplicities, virtual_indices[i].multiplicities)
-            for i in range(1, 4)
-        )
-        if has_nontrivial and all_same:
-            use_paired = True
-        elif has_nontrivial and not all_same:
-            # Asymmetric virtual charges: densify for compatibility
-            A = DenseTensor(A.todense(), A.indices)
-
-    sweep_fn = _ctm_tensor_sweep_paired if use_paired else _ctm_tensor_sweep
-
-    a = _build_double_layer_tensor(A)
-    env = initialize_ctm_tensor_env(A, chi)
-
-    # QR warm-up: run a few eigh iterations before switching to QR
-    if projector_method == "qr" and qr_warmup_steps > 0:
-        warmup = min(qr_warmup_steps, max_iter)
-        for _ in range(warmup):
-            env, _ = sweep_fn(
-                env, a, chi, renormalize, "eigh", projector_backward=projector_backward
+            virtual_indices = [A.indices[i] for i in range(4)]
+            has_nontrivial = any(
+                not (_np.array_equal(vi.sectors, [0]) and vi.n_sectors == 1)
+                for vi in virtual_indices
             )
-        max_iter = max_iter - warmup
+            idx0 = virtual_indices[0]
+            all_same = all(
+                _np.array_equal(idx0.sectors, virtual_indices[i].sectors)
+                and _np.array_equal(
+                    idx0.multiplicities, virtual_indices[i].multiplicities
+                )
+                for i in range(1, 4)
+            )
+            if has_nontrivial and all_same:
+                use_paired = True
+            elif has_nontrivial and not all_same:
+                # Asymmetric virtual charges: densify for compatibility
+                A = DenseTensor(A.todense(), A.indices)
 
-    last_max_eps: float = 0.0
-    prev_sv = None
-    for _ in range(max_iter):
-        env, last_max_eps = sweep_fn(
-            env,
-            a,
-            chi,
-            renormalize,
-            projector_method,
-            projector_backward=projector_backward,
-        )
+        sweep_fn = _ctm_tensor_sweep_paired if use_paired else _ctm_tensor_sweep
 
-        current_sv = _corner_singular_values(env.C1)
-        if prev_sv is not None:
-            diff = _ctm_sv_diff(current_sv, prev_sv)
-            if float(diff) < conv_tol:
-                break
-        prev_sv = current_sv
+        a = _build_double_layer_tensor(A)
+        env = initialize_ctm_tensor_env(A, chi)
 
-    return env, last_max_eps
+        # QR warm-up: run a few eigh iterations before switching to QR
+        if projector_method == "qr" and qr_warmup_steps > 0:
+            warmup = min(qr_warmup_steps, max_iter)
+            for _ in range(warmup):
+                env, _ = sweep_fn(
+                    env, a, chi, renormalize, "eigh", projector_backward=projector_backward
+                )
+            max_iter = max_iter - warmup
+
+        last_max_eps: float = 0.0
+        prev_sv = None
+        for _ in range(max_iter):
+            env, last_max_eps = sweep_fn(
+                env,
+                a,
+                chi,
+                renormalize,
+                projector_method,
+                projector_backward=projector_backward,
+            )
+
+            current_sv = _corner_singular_values(env.C1)
+            if prev_sv is not None:
+                diff = _ctm_sv_diff(current_sv, prev_sv)
+                if float(diff) < conv_tol:
+                    break
+            prev_sv = current_sv
+
+        return env, last_max_eps
 
 
 def _ctm_tensor_multisite(
