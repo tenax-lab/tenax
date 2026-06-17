@@ -55,3 +55,15 @@ def test_env_init_seeds_only_keep_sectors():
         env = initialize_ctm_tensor_env(A, chi=12)
     for n in env._fields:
         assert _chi_sectors(getattr(env, n)) <= {-1, 0, 1}, f"{n} kept |Sz|=2"
+
+
+def test_forward_env_block_counts_drop_under_keep():
+    A, _B = heisenberg_u1sz_init_pair(D=3, key=jax.random.PRNGKey(0))
+    env0, _ = ctm_tensor(A, chi=12, max_iter=8, conv_tol=1e-6)
+    n0 = {n: len(getattr(env0, n).blocks) for n in env0._fields}
+    env1, _ = ctm_tensor(A, chi=12, max_iter=8, conv_tol=1e-6, keep_sectors={-1, 0, 1})
+    n1 = {n: len(getattr(env1, n).blocks) for n in env1._fields}
+    for name in n0:
+        assert n1[name] < n0[name], f"{name}: {n1[name]} !< {n0[name]}"
+    for name in env1._fields:
+        assert _chi_sectors(getattr(env1, name)) <= {-1, 0, 1}

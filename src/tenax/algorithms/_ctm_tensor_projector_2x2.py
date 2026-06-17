@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ctm_uniform_sector import current_keep_sectors
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
@@ -725,11 +726,16 @@ def _retruncate_by_base_charges(
     """
     from tenax.algorithms._ctm_utils import _derive_charges
 
+    # Keep-restriction (#615): read once; guarded — None => byte-identical.
+    _keep = current_keep_sectors()
+
     bond_charges_full = np.asarray(U_T.indices[-1].charges, dtype=np.int32)
     target_charges = _derive_charges(base_charges, chi)
     target_count: dict[int, int] = {}
     for q in target_charges:
         target_count[int(q)] = target_count.get(int(q), 0) + 1
+    if _keep is not None:
+        target_count = {q: c for q, c in target_count.items() if q in _keep}
 
     in_sector_idx_of: dict[int, list[int]] = {}
     for j, q in enumerate(bond_charges_full):
@@ -749,6 +755,8 @@ def _retruncate_by_base_charges(
         for j in range(len(bond_charges_full)):
             if remaining <= 0:
                 break
+            if _keep is not None and int(bond_charges_full[j]) not in _keep:
+                continue
             if j not in used_set:
                 keep_global.append(j)
                 used_set.add(j)

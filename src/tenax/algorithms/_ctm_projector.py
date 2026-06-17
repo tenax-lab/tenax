@@ -44,6 +44,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms._ctm_truncation_error import compute_truncation_error
+from tenax.algorithms._ctm_uniform_sector import current_keep_sectors
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
@@ -385,10 +386,17 @@ def _eigh_projector_symmetric(
         # by ensuring every charge from A's bond is represented.
         from tenax.algorithms._ctm_utils import _derive_charges
 
+        # Keep-restriction (#615): read once; guarded — None => byte-identical.
+        _keep = current_keep_sectors()
+
         target_charges = _derive_charges(base_charges, n_keep)
         target_count: dict[int, int] = {}
         for q in target_charges:
             target_count[int(q)] = target_count.get(int(q), 0) + 1
+        # Drop non-keep sectors before allocation so neither the per-sector
+        # take nor the absent-sector identity seed creates non-keep vectors.
+        if _keep is not None:
+            target_count = {q: c for q, c in target_count.items() if q in _keep}
 
         # Allocate per sector: take top eigenvalues within each sector.
         # For sectors absent from the data, create identity-like seed
@@ -428,6 +436,8 @@ def _eigh_projector_symmetric(
             for _, fq, idx in all_eig_pairs:
                 if remaining <= 0:
                     break
+                if _keep is not None and int(fq) not in _keep:
+                    continue
                 if (fq, idx) not in reserved:
                     sector_keep.setdefault(fq, []).append(idx)
                     reserved.add((fq, idx))

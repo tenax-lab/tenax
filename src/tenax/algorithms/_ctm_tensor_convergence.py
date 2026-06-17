@@ -49,7 +49,11 @@ from tenax.algorithms._ctm_tensor_paired_moves import (
     _ctm_tensor_move_horizontal,
     _ctm_tensor_move_vertical,
 )
-from tenax.algorithms._ctm_uniform_sector import keep_sectors_context
+from tenax.algorithms._ctm_uniform_sector import (
+    current_keep_sectors,
+    keep_sectors_context,
+    restrict_charges_to_keep,
+)
 from tenax.core import EPS
 from tenax.core.lattice import Lattice
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
@@ -247,6 +251,9 @@ def _get_base_charges(a: Tensor):
     charges = _np.asarray(a.indices[u2_pos].charges, dtype=_np.int32)
     if _np.all(charges == 0):
         return None
+    keep = current_keep_sectors()
+    if keep is not None:
+        charges = restrict_charges_to_keep(charges, keep)
     return charges
 
 

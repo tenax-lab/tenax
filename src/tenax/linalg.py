@@ -20,6 +20,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ctm_uniform_sector import current_keep_sectors
 from tenax.core.index import FlowDirection, Label, TensorIndex
 from tenax.core.tensor import (
     BlockKey,
@@ -719,8 +720,18 @@ def _truncated_svd_symmetric_traced(
         target_count: dict[int, int] = {}
         for tq in target_charges:
             target_count[int(tq)] = target_count.get(int(tq), 0) + 1
+        # Keep-restriction (#615): when a keep set is active, force k=0 for
+        # any sector outside keep and never backfill leftover budget into a
+        # non-keep sector, so the truncated chi bond is keep-only. Guarded by
+        # ``_keep is not None`` — byte-identical to the prior path when off.
+        _keep = current_keep_sectors()
         k_per_sector = {
-            q: min(target_count.get(q, 0), r[5]) for q, r in sector_results.items()
+            q: (
+                0
+                if (_keep is not None and int(q) not in _keep)
+                else min(target_count.get(q, 0), r[5])
+            )
+            for q, r in sector_results.items()
         }
         # Greedy fill: if base_charges over-allocates a sector (target_count[q]
         # > available_q), distribute the unused budget to sectors with
@@ -740,6 +751,8 @@ def _truncated_svd_symmetric_traced(
             ):
                 if remaining <= 0:
                     break
+                if _keep is not None and int(q) not in _keep:
+                    continue
                 capacity_left = sector_results[q][5] - k_per_sector.get(q, 0)
                 take = min(remaining, capacity_left)
                 if take > 0:

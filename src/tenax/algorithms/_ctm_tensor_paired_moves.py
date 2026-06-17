@@ -31,6 +31,10 @@ from tenax.algorithms._ctm_tensor_moves import (
     _flip_leg_flow,
     _normalize_tensor,
 )
+from tenax.algorithms._ctm_uniform_sector import (
+    current_keep_sectors,
+    restrict_charges_to_keep,
+)
 from tenax.contraction.contractor import contract
 from tenax.core.tensor import SymmetricTensor, Tensor
 
@@ -50,6 +54,9 @@ def _get_base_charges(a: Tensor) -> np.ndarray | None:
     # Only stabilize if charges are non-trivial
     if np.all(charges == 0):
         return None
+    keep = current_keep_sectors()
+    if keep is not None:
+        charges = restrict_charges_to_keep(charges, keep)
     return charges
 
 
