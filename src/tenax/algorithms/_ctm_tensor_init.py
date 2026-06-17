@@ -22,6 +22,10 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ctm_uniform_sector import (
+    current_keep_sectors,
+    restrict_charges_to_keep,
+)
 from tenax.algorithms._ctm_utils import (
     _CORNER_SPECS,
 )
@@ -328,6 +332,14 @@ def _init_symmetric_standard_edge(
     idx_bra = idx_ket.flip_flow()  # bar() flips flow
     D2_charges = _compute_fused_charges(idx_ket, idx_bra, flow_D2, sym)
 
+    # Keep-sector restriction: drop charges outside the active keep set so the
+    # seeded chi bonds carry only the allowed sectors (tactic A, #615).
+    # When no keep set is active this is a no-op and chi1_len/chi2_len == chi.
+    keep = current_keep_sectors()
+    chi1_charges = restrict_charges_to_keep(chi1_charges, keep)
+    chi2_charges = restrict_charges_to_keep(chi2_charges, keep)
+    chi1_len = len(chi1_charges)
+    chi2_len = len(chi2_charges)
     # Canonicalize chi-bond order to match the block-sparse SVD's grouped
     # bond order (#602); the D² leg is left as-is (it is matched against the
     # double-layer tensor's identically-fused D² leg, not the SVD bond).
@@ -346,7 +358,7 @@ def _init_symmetric_standard_edge(
     # previous diag-pattern across i ∈ 0..min(chi,D)-1 traps CTM at a
     # degenerate fixed point on generic complex iPEPS).
     diag_idx = np.arange(D, dtype=np.int32) * (D + 1)
-    T = jnp.zeros((chi, D2, chi), dtype=A.dtype)
+    T = jnp.zeros((chi1_len, D2, chi2_len), dtype=A.dtype)
     T = T.at[0, diag_idx, 0].set(jnp.ones(D, dtype=A.dtype))
     # Faithful reorder of the chi axes into the grouped order chosen above.
     T = T[perm1][:, :, perm2]
@@ -384,6 +396,11 @@ def _init_symmetric_standard_corner(
         reps = chi // len(base_D2_charges) + 1
         chi_charges = np.asarray(np.tile(base_D2_charges, reps)[:chi], dtype=np.int32)
 
+    # Keep-sector restriction: drop charges outside the active keep set so the
+    # seeded chi bond carries only the allowed sectors (tactic A, #615).
+    # When no keep set is active this is a no-op and chi_len == chi.
+    chi_charges = restrict_charges_to_keep(chi_charges, current_keep_sectors())
+    chi_len = len(chi_charges)
     # Canonicalize chi-bond order to match the block-sparse SVD's grouped
     # bond order (#602).  Both corner legs share the same chi charges, so the
     # same permutation applies to both axes.
@@ -394,7 +411,7 @@ def _init_symmetric_standard_corner(
     idx_b = TensorIndex.from_charges(sym, chi_charges.copy(), flow_b, label=label_b)
     # variPEPS chi_init=1: rank-1 corner — only the leading (0, 0) entry
     # is non-zero. Subsequent absorptions grow chi via SVD truncation.
-    C_dense = jnp.zeros((chi, chi), dtype=A.dtype).at[0, 0].set(1.0)
+    C_dense = jnp.zeros((chi_len, chi_len), dtype=A.dtype).at[0, 0].set(1.0)
     # Faithful reorder of both chi axes into the grouped order chosen above.
     C_dense = C_dense[perm][:, perm]
     return SymmetricTensor.from_dense(
