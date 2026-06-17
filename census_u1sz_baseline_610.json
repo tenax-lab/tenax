@@ -1,0 +1,62 @@
+[
+  {
+    "D": 3,
+    "chi": 12,
+    "rows": [
+      {
+        "tensor": "site",
+        "n_blocks": 32,
+        "n_distinct_shapes": 1,
+        "collapse_ceiling": 32.0
+      },
+      {
+        "tensor": "C1",
+        "n_blocks": 5,
+        "n_distinct_shapes": 3,
+        "collapse_ceiling": 1.667
+      },
+      {
+        "tensor": "C2",
+        "n_blocks": 5,
+        "n_distinct_shapes": 3,
+        "collapse_ceiling": 1.667
+      },
+      {
+        "tensor": "C3",
+        "n_blocks": 5,
+        "n_distinct_shapes": 3,
+        "collapse_ceiling": 1.667
+      },
+      {
+        "tensor": "C4",
+        "n_blocks": 5,
+        "n_distinct_shapes": 3,
+        "collapse_ceiling": 1.667
+      },
+      {
+        "tensor": "T1",
+        "n_blocks": 19,
+        "n_distinct_shapes": 10,
+        "collapse_ceiling": 1.9
+      },
+      {
+        "tensor": "T2",
+        "n_blocks": 19,
+        "n_distinct_shapes": 10,
+        "collapse_ceiling": 1.9
+      },
+      {
+        "tensor": "T3",
+        "n_blocks": 19,
+        "n_distinct_shapes": 10,
+        "collapse_ceiling": 1.9
+      },
+      {
+        "tensor": "T4",
+        "n_blocks": 19,
+        "n_distinct_shapes": 10,
+        "collapse_ceiling": 1.9
+      }
+    ]
+  }
+]
