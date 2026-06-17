@@ -435,7 +435,7 @@ def _eigh_projector_symmetric(
         # tile-then-restrict distribution). Default-off path keeps full backfill.
         used = sum(len(v) for v in sector_keep.values())
         remaining = n_keep - used
-        if remaining > 0 and _keep is None:
+        if remaining > 0 and _keep is None:  # under keep: no backfill — chi_new shrinks to the keep-target sum (matches env-init)
             reserved = {(fq, idx) for fq, idxs in sector_keep.items() for idx in idxs}
             for _, fq, idx in all_eig_pairs:
                 if remaining <= 0:
@@ -769,7 +769,7 @@ def _svd_projector_symmetric(
         # tile-then-restrict distribution). Default-off path keeps full backfill.
         used = sum(len(v) for v in sector_keep.values())
         remaining = n_keep - used
-        if remaining > 0 and _keep is None:
+        if remaining > 0 and _keep is None:  # under keep: no backfill — chi_new shrinks to the keep-target sum (matches env-init)
             reserved = {(fq, idx) for fq, idxs in sector_keep.items() for idx in idxs}
             for _, fq, idx in all_sv_pairs:
                 if remaining <= 0:

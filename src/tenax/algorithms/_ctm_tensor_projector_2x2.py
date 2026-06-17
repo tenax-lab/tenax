@@ -753,7 +753,7 @@ def _retruncate_by_base_charges(
     # bond shrinks to the keep-sector targets (matching env-init's
     # tile-then-restrict distribution). Default-off path keeps full backfill.
     remaining = chi - len(keep_global)
-    if remaining > 0 and _keep is None:
+    if remaining > 0 and _keep is None:  # under keep: no backfill — chi_new shrinks to the keep-target sum (matches env-init)
         used_set = set(keep_global)
         for j in range(len(bond_charges_full)):
             if remaining <= 0:

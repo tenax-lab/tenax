@@ -747,7 +747,7 @@ def _truncated_svd_symmetric_traced(
         # env-init's tile-then-restrict distribution). Default-off path
         # (_keep is None) keeps the full backfill, byte-identical to before.
         remaining = max_singular_values - sum(k_per_sector.values())
-        if remaining > 0 and _keep is None:
+        if remaining > 0 and _keep is None:  # under keep: no backfill — chi_new shrinks to the keep-target sum (matches env-init)
             for q in sorted(
                 sector_results.keys(),
                 key=lambda qq: (

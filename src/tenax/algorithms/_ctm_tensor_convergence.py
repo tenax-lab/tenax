@@ -249,6 +249,13 @@ def _get_base_charges(a: Tensor):
     charges = _np.asarray(a.indices[u2_pos].charges, dtype=_np.int32)
     if _np.all(charges == 0):
         return None
+    # #615: deliberately NOT keep-filtered (unlike the forward paired path's
+    # _ctm_tensor_paired_moves._get_base_charges). The 2x2 multisite/backward
+    # path must tile the FULL D² charge pattern and let the truncation drop
+    # non-keep sectors (tile-then-restrict), so freshly-truncated chi bonds
+    # match env-init's per-sector dims and the mixed-generation enlarged-corner
+    # contractions pair equal sizes. Re-adding a keep-filter here reintroduces
+    # the #610 cold-backward ValueError (only fails under the keep flag).
     return charges
 
 
