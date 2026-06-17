@@ -24,7 +24,8 @@
 | `src/tenax/algorithms/_ctm_tensor_convergence.py` | Modify | `_get_base_charges`: same keep-filter. `ctm_tensor`: add `keep_sectors` param wrapping the body in `keep_sectors_context`. |
 | `src/tenax/algorithms/_ctm_energy_ad.py` | Modify | `ctm_energy_implicit` (+ its dispatch): add `keep_sectors` param wrapping the body in `keep_sectors_context`, so the implicit-AD backward honors the drop. |
 | `src/tenax/linalg.py` | Modify | `_truncated_svd_symmetric_traced`: when keep is active, drop non-keep sectors in Phase-1 allocation and suppress the Phase-2 χ-backfill (promote the prototype's `_make_keep_filtered_traced_svd` logic into a guarded branch). |
-| `src/tenax/algorithms/_ctm_tensor_projector_2x2.py` | Modify | `_retruncate_by_base_charges`: mirror the keep-restriction (eager forward path). |
+| `src/tenax/algorithms/_ctm_projector.py` | Modify | `_svd_projector_symmetric`: keep-restrict the paired-moves forward eager projector allocation (the path `ctm_tensor` uses for U(1)-Sz). |
+| `src/tenax/algorithms/_ctm_tensor_projector_2x2.py` | Modify | `_retruncate_by_base_charges`: mirror the keep-restriction (2×2 multisite eager path). |
 | `tests/test_u1sz_uniform_sector_615.py` | **Create** | Default-off identity test, env-init keep-seed test, faithfulness guard, and the cold-trace-builds regression lock. |
 | `examples/probe_backward_jaxpr_566.py` | Modify | Repoint `--defrag` from the monkeypatch to `keep_sectors_context` (Gate B). |
 | `docs/superpowers/handoffs/2026-06-17-u1sz-uniform-sector-env-findings.md` | **Create (last task)** | The Gate-B measured number + GO/NO-GO finding. |
@@ -368,10 +369,11 @@ git commit -m "feat(#615): env-init seeds only keep sectors under active context
 
 The other half of tactic A: every projector truncation produces a `keep`-only chi bond — dropping non-keep sectors and **never** backfilling χ from a non-keep sector. This is the prototype's patch (4)/(3)/(1) promoted into guarded branches.
 
-**Files:**
-- Modify: `src/tenax/linalg.py` (`_truncated_svd_symmetric_traced`, ~lines 583–864; backfill ~732–747)
-- Modify: `src/tenax/algorithms/_ctm_tensor_projector_2x2.py` (`_retruncate_by_base_charges`, ~lines 709–801)
-- Modify: `src/tenax/algorithms/_ctm_tensor_paired_moves.py` (`_get_base_charges`, ~line 38) and `src/tenax/algorithms/_ctm_tensor_convergence.py` (`_get_base_charges`, ~line 239)
+**Files (THREE truncation allocation sites — one per active CTM path — plus both base_charges sources):**
+- Modify: `src/tenax/linalg.py` (`_truncated_svd_symmetric_traced`, allocation ~lines 714–747) — the **traced / backward** SVD (the make-or-break path).
+- Modify: `src/tenax/algorithms/_ctm_projector.py` (`_svd_projector_symmetric`, allocation ~lines 382–434) — the **paired-moves forward eager** projector that `ctm_tensor` uses for U(1)-Sz (this is what the Step-4 forward-block-count test exercises; it has its own greedy backfill AND an "absent sector seed" path that both must be keep-gated). *(Added vs. original plan: the forward `ctm_tensor` path goes through here, not `_retruncate_by_base_charges`.)*
+- Modify: `src/tenax/algorithms/_ctm_tensor_projector_2x2.py` (`_retruncate_by_base_charges`, ~lines 709–801) — the **2×2 multisite eager** retruncation.
+- Modify: `src/tenax/algorithms/_ctm_tensor_paired_moves.py` (`_get_base_charges`, ~line 38) and `src/tenax/algorithms/_ctm_tensor_convergence.py` (`_get_base_charges`, ~line 239).
 
 - [ ] **Step 1: Filter both `_get_base_charges` to the active keep set**
 
@@ -421,9 +423,13 @@ from tenax.algorithms._ctm_uniform_sector import current_keep_sectors
 ```
 Consequence: with keep active, `chi_new` is the sum of kept-sector allocations and may be `< max_singular_values` (~10 at D=3 χ=12). With keep `None`, this is byte-identical to the current code. **Do not** change the concatenation / block-rebuild logic below — only the `k_per_sector` allocation.
 
-- [ ] **Step 3: Mirror the restriction in the eager retruncation**
+- [ ] **Step 3: Constrain the paired-moves forward eager projector**
 
-In `src/tenax/algorithms/_ctm_tensor_projector_2x2.py`, `_retruncate_by_base_charges` (~lines 709–801): import `current_keep_sectors`, and in its greedy fill, apply the same two rules — a sector outside the active keep set gets `0`, and the leftover-budget refill skips non-keep sectors. (Match the exact local variable names in that function; the logic is identical to Step 2.)
+In `src/tenax/algorithms/_ctm_projector.py`, `_svd_projector_symmetric` (allocation ~lines 382–434): import `current_keep_sectors`, read `_keep = current_keep_sectors()` once, and apply the keep-gate at THREE points in the `base_charges is not None` block: (a) after building `target_count` (~line 391), drop non-keep sectors: `if _keep is not None: target_count = {q: c for q, c in target_count.items() if q in _keep}` — this also prevents the "absent sector seed" loop (~lines 405–414) from creating ±2 seed eigenvectors; (b) in the redistribution backfill loop (~lines 428–434), skip non-keep: `if _keep is not None and fq not in _keep: continue` before `sector_keep.setdefault(...)`. With keep None, byte-identical.
+
+- [ ] **Step 3b: Mirror the restriction in the 2×2 eager retruncation**
+
+In `src/tenax/algorithms/_ctm_tensor_projector_2x2.py`, `_retruncate_by_base_charges` (~lines 729–755): import `current_keep_sectors`, read `_keep = current_keep_sectors()` once, then (a) after `target_count` is built (~line 732), drop non-keep: `if _keep is not None: target_count = {q: c for q, c in target_count.items() if q in _keep}`; (b) in the global leftover-budget refill (~lines 745–755), skip indices whose charge is non-keep: `if _keep is not None and int(bond_charges_full[j]) not in _keep: continue` before appending `j`. With keep None, byte-identical.
 
 - [ ] **Step 4: Write the failing "truncation drops sectors" test**
 
