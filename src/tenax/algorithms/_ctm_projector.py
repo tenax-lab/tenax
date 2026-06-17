@@ -739,6 +739,13 @@ def _svd_projector_symmetric(
         for q in target_charges:
             target_count[int(q)] = target_count.get(int(q), 0) + 1
 
+        # #615 keep-restriction: drop non-keep sectors so this forward
+        # projector cannot allocate (nor backfill) |Sz|>1 chi-bond sectors.
+        # No-op when no keep set is active.
+        _keep = current_keep_sectors()
+        if _keep is not None:
+            target_count = {q: c for q, c in target_count.items() if q in _keep}
+
         for fq in sorted(target_count.keys()):
             n_want = target_count[fq]
             if fq in sector_results:
@@ -755,6 +762,8 @@ def _svd_projector_symmetric(
             for _, fq, idx in all_sv_pairs:
                 if remaining <= 0:
                     break
+                if _keep is not None and int(fq) not in _keep:
+                    continue
                 if (fq, idx) not in reserved:
                     sector_keep.setdefault(fq, []).append(idx)
                     reserved.add((fq, idx))
