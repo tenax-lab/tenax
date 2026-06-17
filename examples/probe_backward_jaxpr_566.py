@@ -222,6 +222,25 @@ BUCKETS = {
         "pad",
     ],
     "transpose": ["transpose"],
+    # Charge-mask / index arithmetic: the per-charge-sector comparisons, casts
+    # and index iotas/argmaxes that the block-sparse SVD-VJP emits to mask and
+    # route each sector.  This cluster scales with the NUMBER of chi-bond charge
+    # sectors, so it is the one the #610 sector-drop is expected to shrink.
+    "charge-mask / index arith": [
+        "lt",
+        "le",
+        "gt",
+        "ge",
+        "eq",
+        "ne",
+        "and",
+        "or",
+        "not",
+        "convert_element_type",
+        "iota",
+        "argmax",
+        "argmin",
+    ],
     "elementwise(add/mul/...)": [
         "add",
         "mul",
@@ -290,6 +309,14 @@ def main() -> None:
         help="Also print the per-primitive raw counts (top-20) alongside the bucket "
         "summary, useful for identifying dominant individual ops.",
     )
+    ap.add_argument(
+        "--defrag",
+        action="store_true",
+        help="#610 Gate B: wrap the backward trace in "
+        "examples.u1sz_defrag_prototype_610.sector_dropping_truncation() so the "
+        "traced CTM truncation drops the |Sz|>1 chi-bond sectors. Compare the "
+        "'charge-mask / index arith' cluster vs the un-wrapped baseline.",
+    )
     args = ap.parse_args()
 
     pbw = args.projector_backward
@@ -307,13 +334,36 @@ def main() -> None:
     print(f"# unit = {unit}")
     print(f"# projector_backward = {pbw}\n")
 
-    def hist(A, chi, on):
-        os.environ[FLAG] = "1" if on else "0"
+    # #610 Gate B: optionally wrap the backward trace so the CTM truncation
+    # drops |Sz|>1 chi-bond sectors. Mirrors backward_vjp_jaxpr's call signature
+    # exactly; the only change is the surrounding sector_dropping_truncation().
+    if args.defrag:
+        import importlib.util as _ilu
+        import pathlib as _pl
+
+        _spec = _ilu.spec_from_file_location(
+            "u1sz_defrag_prototype_610",
+            _pl.Path(__file__).parent / "u1sz_defrag_prototype_610.py",
+        )
+        _defrag_mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_defrag_mod)
+        _sector_drop = _defrag_mod.sector_dropping_truncation
+    else:
+        _sector_drop = None
+
+    def _trace(A, chi):
         if args.full:
             env_jx, par_jx = backward_vjp_jaxpr(A, chi, pbw, full=True)
-            raw = _combine(count_primitives(env_jx), count_primitives(par_jx))
+            return _combine(count_primitives(env_jx), count_primitives(par_jx))
+        return count_primitives(backward_vjp_jaxpr(A, chi, pbw))
+
+    def hist(A, chi, on):
+        os.environ[FLAG] = "1" if on else "0"
+        if _sector_drop is not None:
+            with _sector_drop():
+                raw = _trace(A, chi)
         else:
-            raw = count_primitives(backward_vjp_jaxpr(A, chi, pbw))
+            raw = _trace(A, chi)
         return bucketize(raw), raw
 
     for sym in args.sym:

@@ -76,14 +76,20 @@ import jax.numpy as jnp
 import numpy as np
 
 import tenax.algorithms._ctm_projector as _proj
+import tenax.algorithms._ctm_tensor_convergence as _conv
 import tenax.algorithms._ctm_tensor_paired_moves as _pm
 import tenax.linalg as _linalg
-from tenax.core.index import TensorIndex
+from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.tensor import SymmetricTensor
 
 # Pristine originals captured once at import so repeated / nested use always
 # restores the genuine implementations.
 _ORIG_GET_BASE_CHARGES = _pm._get_base_charges
+# The AD backward path (_make_jit_ctm_step -> _ctm_tensor_sweep_multisite, used by
+# both the Gate-B probe and production _ctm_energy_ad) reads base_charges from a
+# SECOND, distinct function in _ctm_tensor_convergence — NOT the paired-moves one.
+# Both must be filtered for the drop to reach the traced backward (see Step 0/#610).
+_ORIG_CONV_GET_BASE_CHARGES = _conv._get_base_charges
 _ORIG_SVD_PROJECTOR = _proj._svd_projector_symmetric
 _ORIG_TRACED_SVD = _linalg._truncated_svd_symmetric_traced
 
@@ -203,56 +209,366 @@ def _patched_traced_svd(
     return U_T, s_trunc, Vh_T, s_trunc
 
 
+def _make_keep_filtered_traced_svd(keep: set[int]):
+    """Build a drop-in for ``_truncated_svd_symmetric_traced`` that allocates
+    ZERO singular values to any new-bond sector ``q`` with ``int(q) not in keep``.
+
+    This is a faithful COPY of ``tenax.linalg._truncated_svd_symmetric_traced``
+    (``src/tenax/linalg.py`` lines 583-864 at the time of writing) with EXACTLY
+    two minimal edits, nothing else changed:
+
+      1. In the Phase-1 ``base_charges is not None`` allocation and the defensive
+         ``else`` fallback: a sector ``q`` outside ``keep`` is forced to
+         ``k_per_sector[q] = 0`` (dropped — never requests SVs for it).
+      2. In the Phase-2 greedy χ-backfill loop: ``if int(q) not in keep:
+         continue`` so the leftover χ budget is NEVER refilled from a
+         non-``keep`` sector (the bug that re-added ±2 at D=3 χ=12).
+
+    Consequence: ``chi_new`` is the SUM of kept-sector allocations and may be
+    < ``max_singular_values`` (e.g. ~10 at D=3 χ=12). That smaller bond is the
+    HONEST sector-dropped bond dim, produced BY the truncation itself, so the
+    downstream enlarged-corner contraction accepts it (unlike the post-hoc
+    column drop in ``_drop_bond_sectors_usv``, which broke the trace).
+
+    All library internals are referenced through the ``_linalg`` module so the
+    copy stays pinned to the same helpers (`_group_blocks_by_bond_charge`,
+    `_grouped_decomp_by_shape`, `_batch_blocksparse_enabled`, `_koszul_sign`).
+    """
+    keep = {int(q) for q in keep}
+
+    def _keep_filtered_traced(
+        tensor,
+        left_labels,
+        right_labels,
+        max_singular_values,
+        new_bond_label,
+        normalize,
+        base_charges=None,
+    ):
+        from tenax.algorithms._ad_primitives import truncated_svd_ad
+        from tenax.algorithms._ctm_utils import _derive_charges
+
+        all_labels = tensor.labels()
+        label_to_axis = {lbl: i for i, lbl in enumerate(all_labels)}
+        left_axes = [label_to_axis[lbl] for lbl in left_labels]
+        right_axes = [label_to_axis[lbl] for lbl in right_labels]
+        left_indices = tuple(tensor.indices[i] for i in left_axes)
+        right_indices = tuple(tensor.indices[i] for i in right_axes)
+
+        grouped = _linalg._group_blocks_by_bond_charge(tensor, left_axes, right_axes)
+
+        sym = tensor.indices[0].symmetry
+        is_fermionic = sym.is_fermionic
+        decomp_perm = tuple(left_axes + right_axes)
+
+        sector_results: dict[int, tuple] = {}
+
+        for q, entries in grouped.items():
+            left_subkeys_seen: dict = {}
+            right_subkeys_seen: dict = {}
+            for lk, rk, _ in entries:
+                if lk not in left_subkeys_seen:
+                    left_subkeys_seen[lk] = len(left_subkeys_seen)
+                if rk not in right_subkeys_seen:
+                    right_subkeys_seen[rk] = len(right_subkeys_seen)
+
+            left_subkeys = list(left_subkeys_seen.keys())
+            right_subkeys = list(right_subkeys_seen.keys())
+
+            left_row_sizes: list[int] = []
+            for lk in left_subkeys:
+                size = 1
+                for leg_pos, charge_val in zip(left_axes, lk):
+                    idx = tensor.indices[leg_pos]
+                    size *= idx.multiplicity(charge_val)
+                left_row_sizes.append(size)
+
+            right_col_sizes: list[int] = []
+            for rk in right_subkeys:
+                size = 1
+                for leg_pos, charge_val in zip(right_axes, rk):
+                    idx = tensor.indices[leg_pos]
+                    size *= idx.multiplicity(charge_val)
+                right_col_sizes.append(size)
+
+            total_rows = sum(left_row_sizes)
+            total_cols = sum(right_col_sizes)
+            if total_rows == 0 or total_cols == 0:
+                continue
+
+            matrix = jnp.zeros((total_rows, total_cols), dtype=tensor.dtype)
+            for lk, rk, block in entries:
+                li = left_subkeys_seen[lk]
+                ri = right_subkeys_seen[rk]
+                row_start = sum(left_row_sizes[:li])
+                col_start = sum(right_col_sizes[:ri])
+                flat_block = block.reshape(left_row_sizes[li], right_col_sizes[ri])
+                if is_fermionic:
+                    full_key = [0] * len(tensor.indices)
+                    for ax, ch in zip(left_axes, lk):
+                        full_key[ax] = ch
+                    for ax, ch in zip(right_axes, rk):
+                        full_key[ax] = ch
+                    parities = tuple(
+                        int(sym.parity(np.array([full_key[i]]))[0])
+                        for i in range(len(full_key))
+                    )
+                    ksign = _linalg._koszul_sign(parities, decomp_perm)
+                    if ksign < 0:
+                        flat_block = -flat_block
+                matrix = matrix.at[
+                    row_start : row_start + left_row_sizes[li],
+                    col_start : col_start + right_col_sizes[ri],
+                ].set(flat_block)
+
+            available_q = min(total_rows, total_cols)
+            sector_results[q] = (
+                matrix,
+                left_subkeys,
+                right_subkeys,
+                left_row_sizes,
+                right_col_sizes,
+                available_q,
+            )
+
+        # --- Static per-sector keep allocation ---
+        if max_singular_values is None:
+            k_per_sector: dict[int, int] = {
+                q: r[5] for q, r in sector_results.items()
+            }
+        elif base_charges is not None:
+            target_charges = _derive_charges(base_charges, max_singular_values)
+            target_count: dict[int, int] = {}
+            for tq in target_charges:
+                target_count[int(tq)] = target_count.get(int(tq), 0) + 1
+            # EDIT 1: a sector q outside `keep` is dropped (k_per_sector[q] = 0).
+            k_per_sector = {
+                q: (
+                    0
+                    if int(q) not in keep
+                    else min(target_count.get(q, 0), r[5])
+                )
+                for q, r in sector_results.items()
+            }
+            remaining = max_singular_values - sum(k_per_sector.values())
+            if remaining > 0:
+                for q in sorted(
+                    sector_results.keys(),
+                    key=lambda qq: (
+                        -(sector_results[qq][5] - k_per_sector.get(qq, 0)),
+                        qq,
+                    ),
+                ):
+                    if remaining <= 0:
+                        break
+                    # EDIT 2: never backfill from a non-keep sector (the bug that
+                    # re-added the ±2 sectors at D=3 χ=12).
+                    if int(q) not in keep:
+                        continue
+                    capacity_left = sector_results[q][5] - k_per_sector.get(q, 0)
+                    take = min(remaining, capacity_left)
+                    if take > 0:
+                        k_per_sector[q] = k_per_sector.get(q, 0) + take
+                        remaining -= take
+        else:
+            total_avail = sum(r[5] for r in sector_results.values()) or 1
+            # EDIT 1 (fallback): sectors outside `keep` get 0; others proportional.
+            k_per_sector = {
+                q: (
+                    0
+                    if int(q) not in keep
+                    else max(1, round(max_singular_values * r[5] / total_avail))
+                )
+                for q, r in sector_results.items()
+            }
+            excess = sum(k_per_sector.values()) - max_singular_values
+            for q in sorted(k_per_sector.keys()):
+                if excess <= 0:
+                    break
+                take = min(excess, k_per_sector[q] - 1)
+                if take > 0:
+                    k_per_sector[q] -= take
+                    excess -= take
+            if excess > 0:
+                for q in sorted(
+                    k_per_sector.keys(),
+                    key=lambda qq: (sector_results[qq][5], qq),
+                ):
+                    if excess <= 0:
+                        break
+                    take = min(excess, k_per_sector[q])
+                    k_per_sector[q] -= take
+                    excess -= take
+
+        # Floor at >=1 total (mirrors eager n_keep = max(1, n_keep)).  Restricted
+        # to keep sectors so the floor can never re-introduce a dropped sector.
+        total_keep = sum(k_per_sector.values())
+        if total_keep == 0 and sector_results:
+            keep_candidates = [
+                q for q in sector_results.keys() if int(q) in keep
+            ] or list(sector_results.keys())
+            best_q = max(
+                keep_candidates,
+                key=lambda q: (sector_results[q][5], -q),
+            )
+            k_per_sector[best_q] = 1
+
+        # --- Per-sector AD-primitive SVD ---
+        sector_svd: dict = {}
+        _ad_mats_by_q: dict = {}
+        for q, (matrix, _, _, _, _, _) in sector_results.items():
+            k_q = k_per_sector.get(q, 0)
+            if k_q <= 0:
+                continue
+            _ad_mats_by_q[q] = matrix
+
+        if _linalg._batch_blocksparse_enabled():
+            _ad_svd_by_q = _linalg._grouped_decomp_by_shape(
+                _ad_mats_by_q,
+                truncated_svd_ad,
+                group_extra_key=lambda q: int(k_per_sector[q]),
+            )
+            for q, res in _ad_svd_by_q.items():
+                sector_svd[q] = res
+        else:
+            for q, matrix in _ad_mats_by_q.items():
+                U_q, s_q, Vh_q = truncated_svd_ad(matrix, int(k_per_sector[q]))
+                sector_svd[q] = (U_q, s_q, Vh_q)
+
+        # --- Concatenate output in canonical sector-ascending order ---
+        ordered_qs = sorted(sector_svd.keys())
+        bond_charges = np.repeat(
+            np.array(ordered_qs, dtype=np.int32),
+            np.array(
+                [sector_svd[q][1].shape[0] for q in ordered_qs], dtype=np.int32
+            ),
+        )
+        s_final = jnp.concatenate([sector_svd[q][1] for q in ordered_qs])
+
+        if normalize and s_final.shape[0] > 0:
+            s_final = s_final / jnp.sum(s_final)
+
+        bond_index_out = TensorIndex.from_charges(
+            sym, bond_charges, FlowDirection.OUT, label=new_bond_label
+        )
+        bond_index_in = TensorIndex.from_charges(
+            sym, bond_charges, FlowDirection.IN, label=new_bond_label
+        )
+
+        U_blocks: dict = {}
+        Vh_blocks: dict = {}
+        for q in ordered_qs:
+            (
+                _matrix,
+                left_subkeys,
+                right_subkeys,
+                left_row_sizes,
+                right_col_sizes,
+                _,
+            ) = sector_results[q]
+            U_q, _, Vh_q = sector_svd[q]
+            row_offset = 0
+            for li, lk in enumerate(left_subkeys):
+                n_rows = left_row_sizes[li]
+                block_rows = U_q[row_offset : row_offset + n_rows, :]
+                row_offset += n_rows
+                shape = tuple(
+                    tensor.indices[ax].multiplicity(ch)
+                    for ax, ch in zip(left_axes, lk)
+                ) + (U_q.shape[1],)
+                U_blocks[lk + (q,)] = block_rows.reshape(shape)
+            col_offset = 0
+            for ri, rk in enumerate(right_subkeys):
+                n_cols = right_col_sizes[ri]
+                block_cols = Vh_q[:, col_offset : col_offset + n_cols]
+                col_offset += n_cols
+                shape = (Vh_q.shape[0],) + tuple(
+                    tensor.indices[ax].multiplicity(ch)
+                    for ax, ch in zip(right_axes, rk)
+                )
+                Vh_blocks[(q,) + rk] = block_cols.reshape(shape)
+
+        U_indices = left_indices + (bond_index_out,)
+        Vh_indices = (bond_index_in,) + right_indices
+        U_T = SymmetricTensor._from_blocks_unchecked(U_blocks, U_indices)
+        Vh_T = SymmetricTensor._from_blocks_unchecked(Vh_blocks, Vh_indices)
+
+        return U_T, s_final, Vh_T, s_final
+
+    return _keep_filtered_traced
+
+
 @contextlib.contextmanager
-def sector_dropping_truncation(keep=frozenset({-1, 0, 1}), *, patch_traced_svd=False):
+def sector_dropping_truncation(keep=frozenset({-1, 0, 1}), *, patch_traced_svd=True):
     """Monkeypatch the CTM truncation to drop chi-bond sectors outside ``keep``.
+
+    A single ``with sector_dropping_truncation(keep={-1, 0, 1}):`` activates ALL
+    of the following patches and restores every original on exit:
+
+      1. ``_ctm_tensor_paired_moves._get_base_charges`` — keep-filter (sets the
+         truncation intent on the FORWARD single-site paired-moves path).
+      2. ``_ctm_projector._svd_projector_symmetric`` — drops non-``keep``
+         ``chi_new`` columns from the eager forward block-sparse projector.
+      3. ``_ctm_tensor_convergence._get_base_charges`` — the SAME keep-filter as
+         (1) but on the SECOND, distinct ``_get_base_charges`` that the AD
+         backward path (``_make_jit_ctm_step`` -> ``_ctm_tensor_sweep_multisite``,
+         used by the Gate-B probe AND production ``_ctm_energy_ad``) reads from.
+         Without this the traced truncation never sees the filter (Step 0(a)).
+      4. ``tenax.linalg._truncated_svd_symmetric_traced`` — replaced by a faithful
+         copy whose per-sector keep allocation (a) drops non-``keep`` sectors and
+         (b) NEVER greedy-backfills the leftover χ budget from a non-``keep``
+         sector.  Result: ``chi_new`` is the SUM of kept-sector allocations and
+         may be < ``max_singular_values`` (~10 at D=3 χ=12).  This smaller bond
+         is produced BY the truncation, so the enlarged-corner contraction
+         accepts it (Step 0(b)).
+
+    Why both (3) and (4) are needed for the BACKWARD drop
+    -----------------------------------------------------
+    The forward single-site (``ctm_tensor`` -> paired moves) and the AD backward
+    that the Gate-B/Gate-C probes profile (``_make_jit_ctm_step`` ->
+    ``_ctm_tensor_sweep_multisite`` -> 2x2 plaquette projector ->
+    ``_truncated_svd_symmetric_traced``) are DIFFERENT projector paths that read
+    ``base_charges`` from DIFFERENT ``_get_base_charges`` functions.  Filtering
+    only the paired-moves one (1) leaves the backward truncation unfiltered, and
+    even a filtered ``base_charges`` was defeated by the traced SVD's Phase-2
+    greedy backfill re-adding ±2.  Patches (3)+(4) close both gaps so the drop
+    reaches the TRACED backward as a self-consistent smaller bond (NOT a post-hoc
+    column drop — that broke the trace; see ``_drop_bond_sectors_usv``, retained
+    only for reference / the legacy forward hook).
 
     Parameters
     ----------
     keep:
         Iterable of integer charges to retain on the environment (chi) bonds.
-        Any chi-bond sector whose charge is not in ``keep`` is dropped from the
-        eager forward (block-sparse paired-moves) projector.
     patch_traced_svd:
-        Whether to ALSO patch the traced block-sparse SVD
-        (``_truncated_svd_symmetric_traced``) to drop non-``keep`` new-bond
-        sectors. Default ``False``.
-
-        IMPORTANT — read before flipping this on. The two CTM entry points use
-        different projector machinery:
-
-          * ``ctm_tensor`` (single-site forward, used by the faithfulness
-            guard) -> ``_ctm_tensor_sweep_paired`` -> ``_svd_projector_symmetric``
-            (block-sparse). The default patches (``_get_base_charges`` +
-            ``_svd_projector_symmetric``) drop sectors faithfully here.
-          * ``_make_jit_ctm_step`` / ``ctm_multisite`` (the **AD backward** path
-            that ``_optimize_gs_ad_tensor`` and the Gate-B/Gate-C probes
-            actually use) -> ``_ctm_tensor_sweep_multisite`` -> the 2x2
-            plaquette projector (``_ctm_tensor_projector_2x2``), which truncates
-            via ``tensor_svd`` -> ``_truncated_svd_symmetric_traced``.
-
-        Setting ``patch_traced_svd=True`` makes the traced SVD physically drop
-        the chi bond, but in the 2x2 plaquette path that bond feeds
-        ``_build_enlarged_corner``, whose other (un-dropped) env legs then
-        mismatch the narrowed bond -> the single-sweep VJP fails to *trace*
-        (``dot_general``/einsum size error). So the traced drop, as a post-hoc
-        bond filter, is NOT consistent with the 2x2 enlarged-corner contraction.
-        Left as an opt-in hook for the Gate-B task to investigate; the default
-        keeps the prototype trace-able so Gate-B can at least build the
-        backward jaxpr (baseline-shaped, i.e. backward NOT yet dropped).
+        Whether to apply patches (3)+(4) (the traced/backward drop).  Default
+        ``True`` (the make-or-break Gate-B behaviour).  Set ``False`` to patch
+        only the forward eager path (1)+(2), e.g. to inspect the forward env
+        drop without touching the backward jaxpr.
 
     Guards
     ------
-    * ``_get_base_charges`` returning ``None`` (dense/trivial-charge) is a
+    * Either ``_get_base_charges`` returning ``None`` (dense/trivial-charge) is a
       no-op pass-through.
-    * If filtering would remove *every* charge from ``base_charges`` or from a
-      produced bond, the original (unfiltered) value is kept so the env can
-      never collapse to an empty bond.
+    * If filtering would remove *every* charge from ``base_charges``, the
+      original (unfiltered) value is kept so the env can never collapse.
+    * The traced allocator floors at >=1 SV restricted to ``keep`` sectors, so
+      the bond can never be empty nor re-introduce a dropped sector.
     """
     keep = {int(q) for q in keep}
 
     def _patched_get_base_charges(a):
         bc = _ORIG_GET_BASE_CHARGES(a)
+        if bc is None:
+            return None
+        filt = np.array([q for q in bc if int(q) in keep], dtype=np.int32)
+        return filt if filt.size else bc
+
+    def _patched_conv_get_base_charges(a):
+        # Same keep-filter as the paired-moves one, but for the SECOND
+        # _get_base_charges that the AD backward (_ctm_tensor_sweep_multisite)
+        # reads from (Step 0(a)).
+        bc = _ORIG_CONV_GET_BASE_CHARGES(a)
         if bc is None:
             return None
         filt = np.array([q for q in bc if int(q) in keep], dtype=np.int32)
@@ -267,33 +583,17 @@ def sector_dropping_truncation(keep=frozenset({-1, 0, 1}), *, patch_traced_svd=F
         P2 = _keep_columns_of_chi_new(P2, keep)
         return P1, P2, eps
 
-    def _traced(
-        tensor,
-        left_labels,
-        right_labels,
-        max_singular_values,
-        new_bond_label,
-        normalize,
-        base_charges=None,
-    ):
-        return _patched_traced_svd(
-            tensor,
-            left_labels,
-            right_labels,
-            max_singular_values,
-            new_bond_label,
-            normalize,
-            base_charges=base_charges,
-            _keep=keep,
-        )
+    _keep_filtered_traced = _make_keep_filtered_traced_svd(keep)
 
     _pm._get_base_charges = _patched_get_base_charges
     _proj._svd_projector_symmetric = _svd_proj
     if patch_traced_svd:
-        _linalg._truncated_svd_symmetric_traced = _traced
+        _conv._get_base_charges = _patched_conv_get_base_charges
+        _linalg._truncated_svd_symmetric_traced = _keep_filtered_traced
     try:
         yield
     finally:
         _pm._get_base_charges = _ORIG_GET_BASE_CHARGES
         _proj._svd_projector_symmetric = _ORIG_SVD_PROJECTOR
+        _conv._get_base_charges = _ORIG_CONV_GET_BASE_CHARGES
         _linalg._truncated_svd_symmetric_traced = _ORIG_TRACED_SVD

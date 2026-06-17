@@ -1,0 +1,135 @@
+# ============================================================================
+# #610 Gate B (--defrag) — TRACE DID NOT SURVIVE: NO-GO-BY-OBSTRUCTION
+# ============================================================================
+#
+# This run wraps the #566 backward-VJP trace in
+#   examples.u1sz_defrag_prototype_610.sector_dropping_truncation(keep={-1,0,1})
+# with ALL surgical patches active (Step 0 of the Gate-B task):
+#   (1) _ctm_tensor_paired_moves._get_base_charges   keep-filter (forward)
+#   (2) _ctm_projector._svd_projector_symmetric      forward chi_new column drop
+#   (3) _ctm_tensor_convergence._get_base_charges     keep-filter (BACKWARD path)
+#   (4) tenax.linalg._truncated_svd_symmetric_traced  per-sector keep allocation
+#       with the Phase-2 greedy backfill suppressed (chi_new = sum of kept
+#       sectors, ~10 at D=3 chi=12; an HONEST, truncation-emitted smaller bond,
+#       NOT a post-hoc column drop).
+#
+# RESULT: the single-sweep backward VJP cannot even be TRACED. The Gate-B
+# op-histogram below could therefore NOT be produced (the baseline histogram in
+# probe_u1sz_baseline_610.txt traces fine; the charge-mask cluster there is
+# 7398 / 63612 total ops).
+#
+# ROOT CAUSE — mixed-generation chi bonds inside one multisite 2x2 sweep
+# ----------------------------------------------------------------------
+# The traced truncation (4) now honestly emits a 3-sector {-1,0,1} chi bond on
+# the legs it refreshes. But the multisite 2x2 sweep
+# (_ctm_tensor_sweep_multisite) refreshes only the legs ALONG the current
+# absorption direction per move. env-init (initialize_ctm_tensor_env) seeds ALL
+# chi bonds at the full 5-sector {-2,-1,0,1,2} structure (dim 12). After the
+# "left" direction truncates the horizontal chi legs to {-1,0,1}, a later
+# direction's enlarged-corner build contracts a freshly-dropped leg against a
+# perpendicular leg that still carries the full 5-sector env-init bond.
+#
+# Captured at the failing contract (CT_v = contract(C_r, T_v), bottom_left):
+#   C  (corner C4): c4_r = {-1:4, 0:5, 1:3}        <- DROPPED (3 sectors)
+#                   c4_u = {-2:1,-1:3,0:4,1:3,2:1} <- FULL    (5 sectors)
+#   T_v(edge  T4):  t4_d = {-1:4, 0:5, 1:3}        <- DROPPED
+#                   t4_u = {-1:4, 0:5, 1:3}        <- DROPPED (3 sectors)
+# The shared bond c4_u(5 sectors) <-> t4_u(3 sectors) disagree ->
+#   ValueError: Size of label 'd' for operand 1 (4) does not match previous (5).
+#
+# This is DISTINCT from the prior post-hoc-bond-drop obstruction. There the
+# truncated bond mismatched its OWN paired neighbour. Here the truncation is
+# self-consistent per move, but the per-direction multisite sweep contracts
+# tensors from DIFFERENT truncation GENERATIONS (dropped absorbed legs vs the
+# un-refreshed perpendicular env-init legs) against each other mid-sweep.
+#
+# CONSEQUENCE: making the drop reach the traced backward via monkeypatch alone
+# is not possible. It would require env-init to seed 3-sector chi bonds AND the
+# multisite 2x2 sweep to refresh ALL chi legs to the same sector set before any
+# cross-leg contraction — i.e. a structural change to the CTM sweep, not a
+# runtime patch. Gate B's >=25% charge-mask reduction therefore CANNOT be
+# measured; the spike outcome is NO-GO-by-obstruction.
+#
+# Forward path is unaffected: the faithfulness test (tests/
+# test_u1sz_defrag_prototype_610.py) still passes (2 passed) — the forward
+# ctm_tensor env DOES drop (corners 5->3, edges 19->9). The wall is the
+# backward 2x2 multisite trace only.
+#
+# CAVEAT — jit cache must be cold for the patch to bite. The monkeypatch only
+# takes effect if the patched _make_jit_ctm_step unit is TRACED cold under the
+# patch. A prior un-patched trace of the same jit unit (identical input avals)
+# seeds the jax.jit compilation cache, so a later prototype-wrapped call reuses
+# the un-patched cached trace and silently produces a baseline-shaped jaxpr
+# WITHOUT raising. This `--defrag` probe runs cold (the prototype-wrapped trace
+# is the first in the process), so the failure above is the FAITHFUL result. The
+# obstruction-guard test clears jax caches (jax.clear_caches()) before the
+# prototype-wrapped call to reproduce the cold trace.
+#
+# Full captured traceback (JAX_TRACEBACK_FILTERING=off) follows.
+# ============================================================================
+# #566 backward-VJP jaxpr op-histogram (trace-only) | x64=True
+# unit = apply_Jt = VJP of one gauge-fixed CTM sweep w.r.t. env (Neumann matvec)
+# projector_backward = auto
+
+Traceback (most recent call last):
+  File "/home/yjkao/tenax/examples/probe_backward_jaxpr_566.py", line 402, in <module>
+    main()
+  File "/home/yjkao/tenax/examples/probe_backward_jaxpr_566.py", line 374, in main
+    off, off_raw = hist(A, chi, on=False)
+                   ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/examples/probe_backward_jaxpr_566.py", line 364, in hist
+    raw = _trace(A, chi)
+          ^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/examples/probe_backward_jaxpr_566.py", line 358, in _trace
+    return count_primitives(backward_vjp_jaxpr(A, chi, pbw))
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/examples/probe_backward_jaxpr_566.py", line 181, in backward_vjp_jaxpr
+    out = gauge_fixed_sweep_from_env(env_leaves)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/examples/probe_backward_jaxpr_566.py", line 169, in gauge_fixed_sweep_from_env
+    e_out, _eps, _smin = jit_step(
+                         ^^^^^^^^^
+  File "/home/yjkao/tenax/.venv/lib/python3.11/site-packages/jax/_src/traceback_util.py", line 195, in reraise_with_filtered_traceback
+    return fun(*args, **kwargs)  # pyrefly: ignore[not-callable]
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/.venv/lib/python3.11/site-packages/jax/_src/pjit.py", line 250, in cache_miss
+    p, args_flat = _infer_params(fun, jit_info, args, kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/.venv/lib/python3.11/site-packages/jax/_src/pjit.py", line 620, in _infer_params
+    p = _trace_for_jit(fun, ji, ctx_mesh, dbg_fn(), avals, args, kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/.venv/lib/python3.11/site-packages/jax/_src/pjit.py", line 522, in _trace_for_jit
+    jaxpr, out_avals = pe.trace_to_jaxpr(fun, in_type, dbg, qdd_token)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/.venv/lib/python3.11/site-packages/jax/_src/interpreters/partial_eval.py", line 2338, in trace_to_jaxpr
+    ans_pytree = fun(*args, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/src/tenax/algorithms/_ctm_python_loop.py", line 111, in _step
+    return _ctm_tensor_sweep_multisite(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/src/tenax/algorithms/_ctm_tensor_convergence.py", line 392, in _ctm_tensor_sweep_multisite
+    _compute_plaquette_projector_pair(
+  File "/home/yjkao/tenax/src/tenax/algorithms/_ctm_tensor_moves.py", line 436, in _compute_plaquette_projector_pair
+    Q_BL = _build_enlarged_corner(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/src/tenax/algorithms/_ctm_tensor_projector_2x2.py", line 238, in _build_enlarged_corner
+    CT_v = contract(C_r, T_v)  # -> (c4_r, t4_d, l2)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/src/tenax/contraction/contractor.py", line 923, in contract
+    return contract_with_subscripts(tensors, subscripts, output_indices, optimize)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/src/tenax/contraction/contractor.py", line 955, in contract_with_subscripts
+    return _contract_symmetric(list(tensors), subscripts, output_indices, optimize)  # type: ignore[arg-type]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/src/tenax/contraction/contractor.py", line 857, in _contract_symmetric
+    expr = opt_einsum.contract_expression(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/.venv/lib/python3.11/site-packages/opt_einsum/contract.py", line 1041, in contract_expression
+    return contract(
+           ^^^^^^^^^
+  File "/home/yjkao/tenax/.venv/lib/python3.11/site-packages/opt_einsum/contract.py", line 595, in contract
+    operands, contraction_list = contract_path(  # type: ignore
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yjkao/tenax/.venv/lib/python3.11/site-packages/opt_einsum/contract.py", line 324, in contract_path
+    raise ValueError(
+ValueError: Size of label 'd' for operand 1 (4) does not match previous terms (5).
