@@ -24,12 +24,10 @@ def _env_block_signature(env):
 
 
 def _chi_sectors(t):
-    """Set of charges appearing on chi-bond legs of tensor ``t``.
+    """Charges on the chi-bond legs of ``t``.
 
-    Corners: all legs are chi-bond legs (labels like c1_d, c1_r).
-    Edges: chi legs are the first and last; the D² middle leg has a label
-    ending in '2' (u2, r2, d2, l2).  We identify chi legs as those whose
-    label does NOT end with '2'.
+    D² legs are labelled with a trailing '2' (u2/d2/l2/r2); every other leg
+    is a chi bond. So a chi leg is any leg whose label does not end in '2'.
     """
     out = set()
     for ix in t.indices:

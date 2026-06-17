@@ -399,7 +399,8 @@ def _init_symmetric_standard_corner(
     # Keep-sector restriction: drop charges outside the active keep set so the
     # seeded chi bond carries only the allowed sectors (tactic A, #615).
     # When no keep set is active this is a no-op and chi_len == chi.
-    chi_charges = restrict_charges_to_keep(chi_charges, current_keep_sectors())
+    keep = current_keep_sectors()
+    chi_charges = restrict_charges_to_keep(chi_charges, keep)
     chi_len = len(chi_charges)
     # Canonicalize chi-bond order to match the block-sparse SVD's grouped
     # bond order (#602).  Both corner legs share the same chi charges, so the
