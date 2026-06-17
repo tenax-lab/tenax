@@ -380,14 +380,15 @@ def _eigh_projector_symmetric(
 
     sector_keep: dict[int, list[int]] = {}
 
+    # Keep-restriction (#615): read once per call regardless of branch; a cheap
+    # no-op (returns None) when no keep set is active — byte-identical default.
+    _keep = current_keep_sectors()
+
     if base_charges is not None:
         # Per-sector allocation matching _derive_charges distribution.
         # This prevents cascading charge-sector loss across CTM sweeps
         # by ensuring every charge from A's bond is represented.
         from tenax.algorithms._ctm_utils import _derive_charges
-
-        # Keep-restriction (#615): read once; guarded — None => byte-identical.
-        _keep = current_keep_sectors()
 
         target_charges = _derive_charges(base_charges, n_keep)
         target_count: dict[int, int] = {}
@@ -443,6 +444,8 @@ def _eigh_projector_symmetric(
                     reserved.add((fq, idx))
                     remaining -= 1
     else:
+        # No base_charges (DenseTensor / trivial charges) → no sector
+        # structure to keep-restrict; _keep intentionally unused here.
         # Pure global truncation (no base_charges)
         for _, fq, idx in all_eig_pairs[:n_keep]:
             sector_keep.setdefault(fq, []).append(idx)
@@ -731,6 +734,10 @@ def _svd_projector_symmetric(
 
     sector_keep: dict[int, list[int]] = {}
 
+    # Keep-restriction (#615): read once per call regardless of branch; a cheap
+    # no-op (returns None) when no keep set is active — byte-identical default.
+    _keep = current_keep_sectors()
+
     if base_charges is not None:
         from tenax.algorithms._ctm_utils import _derive_charges
 
@@ -739,10 +746,9 @@ def _svd_projector_symmetric(
         for q in target_charges:
             target_count[int(q)] = target_count.get(int(q), 0) + 1
 
-        # #615 keep-restriction: drop non-keep sectors so this forward
+        # Keep-restriction (#615): drop non-keep sectors so this forward
         # projector cannot allocate (nor backfill) |Sz|>1 chi-bond sectors.
         # No-op when no keep set is active.
-        _keep = current_keep_sectors()
         if _keep is not None:
             target_count = {q: c for q, c in target_count.items() if q in _keep}
 
@@ -769,6 +775,8 @@ def _svd_projector_symmetric(
                     reserved.add((fq, idx))
                     remaining -= 1
     else:
+        # No base_charges (DenseTensor / trivial charges) → no sector
+        # structure to keep-restrict; _keep intentionally unused here.
         for _, fq, idx in all_sv_pairs[:n_keep]:
             sector_keep.setdefault(fq, []).append(idx)
 

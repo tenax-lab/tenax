@@ -713,6 +713,8 @@ def _truncated_svd_symmetric_traced(
         )
 
     # --- Static per-sector keep allocation ---
+    # Full spectrum per sector (no chi budget) → keep restriction is not
+    # meaningful in no-truncation mode and is intentionally not applied here.
     if max_singular_values is None:
         k_per_sector: dict[int, int] = {q: r[5] for q, r in sector_results.items()}
     elif base_charges is not None:
