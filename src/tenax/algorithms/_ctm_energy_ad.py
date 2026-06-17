@@ -791,6 +791,7 @@ def _ctm_energy_implicit_dispatch(
             ctmrg_heuristic_increase_chi_step_size,
             chi_max,
             recipe,  # distinct sweep recipe → distinct cached forward+backward
+            keep_sectors,  # sector-restricted backward graph differs from unrestricted
         )
 
         entry = _VJP_CACHE.get(cache_key)

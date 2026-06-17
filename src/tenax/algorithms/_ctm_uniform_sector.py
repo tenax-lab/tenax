@@ -13,6 +13,7 @@ toggles (``set_implicit_ad_norm_diagnostics``, ``_batch_blocksparse_enabled``).
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Iterable
 
 import numpy as np
 
@@ -25,7 +26,7 @@ def current_keep_sectors() -> frozenset[int] | None:
 
 
 @contextlib.contextmanager
-def keep_sectors_context(keep):
+def keep_sectors_context(keep: frozenset[int] | Iterable[int] | None):
     """Activate a keep set for the duration of the ``with`` block.
 
     ``keep=None`` is a no-op pass-through (restores the default path), so callers
@@ -40,7 +41,7 @@ def keep_sectors_context(keep):
         _KEEP_SECTORS = prev
 
 
-def restrict_charges_to_keep(charges, keep) -> np.ndarray:
+def restrict_charges_to_keep(charges, keep: frozenset[int] | None) -> np.ndarray:
     """Return ``charges`` with entries outside ``keep`` removed.
 
     Degenerate guard: if filtering would empty the array, return the original
