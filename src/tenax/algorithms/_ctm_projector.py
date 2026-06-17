@@ -430,9 +430,12 @@ def _eigh_projector_symmetric(
                 all_eig_pairs.append((float(val), fq, i))
         all_eig_pairs.sort(key=lambda x: (-x[0], -x[2]))
 
+        # #615: under an active keep set, suppress backfill entirely so the
+        # retained bond shrinks to the keep-sector targets (matching env-init's
+        # tile-then-restrict distribution). Default-off path keeps full backfill.
         used = sum(len(v) for v in sector_keep.values())
         remaining = n_keep - used
-        if remaining > 0:
+        if remaining > 0 and _keep is None:
             reserved = {(fq, idx) for fq, idxs in sector_keep.items() for idx in idxs}
             for _, fq, idx in all_eig_pairs:
                 if remaining <= 0:
@@ -761,9 +764,12 @@ def _svd_projector_symmetric(
                 top_indices = list(np.argsort(sv_arr)[-n_take:][::-1])
                 sector_keep[fq] = top_indices
 
+        # #615: under an active keep set, suppress backfill entirely so the
+        # retained bond shrinks to the keep-sector targets (matching env-init's
+        # tile-then-restrict distribution). Default-off path keeps full backfill.
         used = sum(len(v) for v in sector_keep.values())
         remaining = n_keep - used
-        if remaining > 0:
+        if remaining > 0 and _keep is None:
             reserved = {(fq, idx) for fq, idxs in sector_keep.items() for idx in idxs}
             for _, fq, idx in all_sv_pairs:
                 if remaining <= 0:

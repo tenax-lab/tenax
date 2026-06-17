@@ -742,8 +742,12 @@ def _truncated_svd_symmetric_traced(
         # eager path under AD (codex P2 review on PR #440 / comment 3223755136).
         # Order: largest unused capacity first, ties broken by smallest q for
         # determinism.
+        # #615: under an active keep set, suppress backfill entirely so
+        # ``chi_new`` shrinks to the sum of keep-sector targets (matching
+        # env-init's tile-then-restrict distribution). Default-off path
+        # (_keep is None) keeps the full backfill, byte-identical to before.
         remaining = max_singular_values - sum(k_per_sector.values())
-        if remaining > 0:
+        if remaining > 0 and _keep is None:
             for q in sorted(
                 sector_results.keys(),
                 key=lambda qq: (

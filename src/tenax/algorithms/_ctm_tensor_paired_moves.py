@@ -45,6 +45,15 @@ def _get_base_charges(a: Tensor) -> np.ndarray | None:
     For SymmetricTensor with non-trivial charges, returns the charges
     of one of the D^2 legs.  For DenseTensor, returns None (no charge
     stabilization needed).
+
+    #615: the FORWARD paired-moves sweep is applied one direction at a time, so
+    a freshly-truncated chi leg is contracted against still-init legs on the
+    same tensor.  Keep-filtering the base charges here (restrict-then-tile) is
+    what keeps the paired path self-consistent under ``keep_sectors``.  The
+    2x2 multisite sweep (``_ctm_tensor_convergence._get_base_charges``)
+    deliberately does NOT filter — it tiles the FULL pattern then lets the
+    truncation drop non-keep (tile-then-restrict), which matches env-init for
+    the mixed-generation contractions in the cold backward VJP (the #615 gate).
     """
     if not isinstance(a, SymmetricTensor):
         return None

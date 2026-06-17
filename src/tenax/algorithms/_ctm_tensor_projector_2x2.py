@@ -749,8 +749,11 @@ def _retruncate_by_base_charges(
         keep_global.extend(slots[:take])
 
     # Fill any remaining budget greedily from any unused entry (global SV order).
+    # #615: under an active keep set, suppress backfill entirely so the retained
+    # bond shrinks to the keep-sector targets (matching env-init's
+    # tile-then-restrict distribution). Default-off path keeps full backfill.
     remaining = chi - len(keep_global)
-    if remaining > 0:
+    if remaining > 0 and _keep is None:
         used_set = set(keep_global)
         for j in range(len(bond_charges_full)):
             if remaining <= 0:
