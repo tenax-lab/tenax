@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 
 from examples.u1sz_defrag_prototype_610 import sector_dropping_truncation
-from tenax.algorithms._ctm_tensor import ctm_tensor
 from tenax import compute_energy_ctm_tensor
+from tenax.algorithms._ctm_tensor import ctm_tensor
 from tenax.algorithms.ipeps import heisenberg_gate_u1sz, heisenberg_u1sz_init_pair
 
 
