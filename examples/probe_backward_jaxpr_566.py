@@ -338,16 +338,15 @@ def main() -> None:
     # drops |Sz|>1 chi-bond sectors. Mirrors backward_vjp_jaxpr's call signature
     # exactly; the only change is the surrounding sector_dropping_truncation().
     if args.defrag:
-        import importlib.util as _ilu
-        import pathlib as _pl
+        import jax as _jax
 
-        _spec = _ilu.spec_from_file_location(
-            "u1sz_defrag_prototype_610",
-            _pl.Path(__file__).parent / "u1sz_defrag_prototype_610.py",
-        )
-        _defrag_mod = _ilu.module_from_spec(_spec)
-        _spec.loader.exec_module(_defrag_mod)
-        _sector_drop = _defrag_mod.sector_dropping_truncation
+        from tenax.algorithms._ctm_uniform_sector import keep_sectors_context
+
+        # #615 Gate B: cold-trace under the REAL keep flag (not the #610
+        # monkeypatch). clear_caches so the keep trace is not masked by a prior
+        # flag-off jaxpr of the same jit unit (cold-trace caveat).
+        _jax.clear_caches()
+        _sector_drop = lambda: keep_sectors_context({-1, 0, 1})  # noqa: E731
     else:
         _sector_drop = None
 

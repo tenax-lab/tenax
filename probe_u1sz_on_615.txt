@@ -1,0 +1,15 @@
+# #566 backward-VJP jaxpr op-histogram (trace-only) | x64=True
+# unit = apply_Jt = VJP of one gauge-fixed CTM sweep w.r.t. env (Neumann matvec)
+# projector_backward = auto
+
+== u1sz D=3 chi=12 blocks=32 ==
+  bucket                                 flag_off    flag_on   on/off
+  contraction                                2386       2386    1.00x
+  decomp(svd/eigh/qr)                          68         68    1.00x
+  block-pack(slice/scatter/reshape)         17671      17671    1.00x
+  transpose                                  3972       3972    1.00x
+  charge-mask / index arith                  5798       5798    1.00x
+  elementwise(add/mul/...)                   8428       8428    1.00x
+  other                                      7341       7341    1.00x
+  TOTAL                                     45664      45664    1.00x  <== TOTAL
+
