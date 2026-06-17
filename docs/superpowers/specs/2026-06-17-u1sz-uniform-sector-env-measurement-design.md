@@ -64,10 +64,16 @@ keep_sectors: frozenset[int] | None = None
 - `keep_sectors=frozenset({-1, 0, 1})` (the documented C-lever, |Sz| ≤ 1) → uniform-sector path
   active end-to-end.
 
-Threaded as a dedicated parameter (not folded into the existing `recipe` string) so default-off is
-trivial to assert and the Gate-B probe can pass it explicitly. Flow:
-`ctm_tensor(...)` → `initialize_ctm_tensor_env(...)` → corner/edge init helpers; and the AD entry
-(`_ctm_energy_ad` / `_make_jit_ctm_step`) → `_ctm_tensor_sweep_multisite` → projector truncation.
+Surfaced as a dedicated parameter on the public entry points (`ctm_tensor`, `ctm_energy_implicit`) —
+not folded into the existing `recipe` string — so default-off is trivial to assert and the Gate-B
+probe can pass it explicitly. Internally it is realized as a **process-local context** set by those
+entry points (`with keep_sectors_context(keep_sectors):`) and read at **trace time** by env-init and
+the projector truncation via `current_keep_sectors()`. This avoids threading the flag through the ~8
+projector layers between `_make_jit_ctm_step`/`_ctm_tensor_sweep_multisite` and
+`linalg._truncated_svd_symmetric_traced`, and mirrors the codebase's existing module-level toggles
+(`set_implicit_ad_norm_diagnostics`, `_batch_blocksparse_enabled()`). `keep_sectors` is a *static
+structural choice* (it changes block sectors/shapes), so reading it as a trace-time Python value — not
+a traced array — is correct; the jit-cache implication is exactly the §6 cold-trace caveat.
 
 ## 4. Mechanism — uniform-by-construction (tactic A), with a scoped fallback
 
