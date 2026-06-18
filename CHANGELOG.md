@@ -81,6 +81,9 @@
   reference scaffolding (#556); stall-runaway regression canary (#544);
   hardened macOS-fragile assertions (#531); D=3 U(1)-Sz energy-vs-dense
   guard (#611); fast reduced-corner QR tests marked `core` (#596).
+- **AI-comment marker hook** (#623) — `shlex`-parsing `PreToolUse` hook
+  that labels AI-authored `gh` comments with a 🤖 marker; fires only on an
+  actual `gh` posting command and checks the `--body` value (dev tooling).
 
 ### Documentation & Research
 
