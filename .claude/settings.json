@@ -9,7 +9,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cmd=$(jq -r '.tool_input.command // \"\"'); if printf '%s' \"$cmd\" | grep -Eq 'gh (pr|issue) (comment|create)|gh pr review'; then printf '%s' \"$cmd\" | grep -qiE '🤖|AI-generated|generated with' || echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"AI-comment convention (see CLAUDE.md): this gh command posts to GitHub with no AI marker. Re-issue with a 🤖 AI label in the body so AI comments are distinguishable from human ones.\"}}'; fi"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/ai_comment_marker.py\""
           }
         ]
       }
