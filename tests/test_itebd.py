@@ -58,6 +58,28 @@ class TestHastingsUpdate:
         assert np.allclose(recon, orig, atol=1e-10)
 
 
+class TestHastingsEnergy:
+    def test_product_state_energies(self):
+        """In left-canonical form, <H> on a chi=1 product state matches the
+        analytic Heisenberg diagonal: |up up> -> +0.25, |up down> -> -0.25."""
+        import numpy as np
+
+        from tenax.algorithms.itebd import _bond_energy_left, heisenberg_2site_h
+
+        H = heisenberg_2site_h(Jz=1.0, Jxy=1.0)
+        up = np.array([1.0, 0.0])
+        down = np.array([0.0, 1.0])
+        l_right = np.array([1.0])
+
+        def site(vec):
+            return vec.reshape(1, 2, 1)  # (chiL=1, d=2, chiR=1), already normalized
+
+        e_uu = _bond_energy_left(site(up), site(up), l_right, H)
+        e_ud = _bond_energy_left(site(up), site(down), l_right, H)
+        assert abs(e_uu - 0.25) < 1e-12, f"e_uu={e_uu}"
+        assert abs(e_ud - (-0.25)) < 1e-12, f"e_ud={e_ud}"
+
+
 class TestITEBDHeisenberg:
     def test_energy_matches_bethe_ansatz(self):
         """iTEBD reaches e_0 = 1/4 - ln 2 for the Heisenberg chain."""

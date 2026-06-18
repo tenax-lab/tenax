@@ -130,6 +130,17 @@ def _update_bond_hastings(A, B, l_right, gate, chi_max):
     return A_new, S, B_new
 
 
+def _bond_energy_left(A, B, l_right, H):
+    """<H> across the A-B bond for left-canonical A, B closed on the right by
+    ``l_right`` (left tensors are isometries => identity left env; ``l_right**2``
+    is the right env). ``Theta = A . B . diag(l_right)``."""
+    theta = np.einsum("aik,kjc,c->aijc", A, B, l_right)  # (chiL, d, d, chiR)
+    norm = np.einsum("aijc,aijc->", theta, theta.conj()).real
+    Ht = np.einsum("aijc,ijkl->aklc", theta, H)
+    e = np.einsum("aklc,aklc->", Ht, theta.conj()).real
+    return e / (norm + 1e-300)
+
+
 def itebd_groundstate(
     H2: np.ndarray,
     chi_max: int = 16,
