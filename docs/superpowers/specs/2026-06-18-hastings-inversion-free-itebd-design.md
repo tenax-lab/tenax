@@ -147,7 +147,25 @@ Tests are dense/small-χ and complete within the existing iTEBD test budget
 
 ## Out of scope / follow-ups
 
-- Block-sparse / JAX implementation.
+- **TODO — symmetric (block-sparse) extension** (its own brainstorm/phase). The
+  dense update maps directly onto Tenax's `SymmetricTensor` machinery, and the
+  inversion-free property matters *more* there: `λ` becomes a per-charge-sector
+  Schmidt spectrum, so the naive `λ⁻¹` is fragile sector-by-sector (sectors can
+  go empty/vanishing as the bond charge distribution shifts mid-evolution).
+  Hastings' `B' = X†·Θ` avoids the per-sector inversion entirely.
+  - Mapping: `A, B` → `SymmetricTensor` (physical leg fixed charges, e.g. Sz=±½);
+    `lab, lba` → diagonal bond `SymmetricTensor`s; `C=A·B`, `gate·C`, `X†·Θ` →
+    label-based `contract`; `M·diag(l_right)` → per-sector scaling (no inverse);
+    SVD → `tenax.linalg.svd` (block-sparse, truncated, no `todense()`); gate →
+    `heisenberg_gate_u1sz` (already in the codebase).
+  - New work: dynamic bond charge structure (each SVD re-decides surviving
+    sectors), `FlowDirection` bookkeeping on the SVD-produced bond, a symmetric
+    seed in the right sector (e.g. total Sz=0; cf. `heisenberg_u1sz_init_pair`),
+    and parity validation symmetric-vs-dense.
+  - Note: iTEBD is forward-only imaginary time, so this uses the block-sparse SVD
+    *without* a backward pass — it does NOT touch the SVD-VJP compile wall of
+    #566/#570.
+- Block-sparse / JAX (autodiff) implementation more broadly.
 - De-duplication of the `_safe_inv` helper across `itebd.py`,
   `_tensor_utils.safe_inv_lambda`, and `pess._safe_inv` (separate concern noted
   on #583).
