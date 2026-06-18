@@ -31,8 +31,6 @@
   late-stage CTM-iter cap (#540); `return_history` extended to the
   multisite optimizer (#550); implicit-AD warm-start invalidation API
   (#535); in-CTM chi-bump kwargs threaded into the PESS AD loss (#548).
-- **AutoMPO charge-aware compression** (#621) — `compress=True` now works
-  with `symmetric=True` (closes #620).
 
 ### Behavior Changes
 
@@ -59,6 +57,9 @@
   2-plaquette projectors (#608).
 - **iPEPS** — unblock in-CTM chi-bump on the 2-site implicit-AD path
   (#542); restore the Arnoldi precheck raise on high ρ (#532, #533).
+- **AutoMPO** — `compress=True` is no longer incompatible with
+  `symmetric=True`: charge-aware bond-charge tracking through compression
+  fixes the `SymmetricTensor.from_dense` shape mismatch (#621, closes #620).
 - **build** — pin upper bounds on `build-system.requires` to fix a twine
   Metadata-Version 2.5 failure (#577).
 

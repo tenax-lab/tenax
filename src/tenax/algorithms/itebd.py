@@ -9,13 +9,15 @@ degenerates the whole bond (see ``fermionic_ipeps._safe_inv``). We guard that
 step by taking ``lambda^-1`` as a regularized *pseudo-inverse* that drops dead
 Schmidt sectors (``_safe_inv``) instead of dividing by ~0.
 
-Note: this is the standard Vidal ``Gamma-lambda`` iTEBD with a regularized
-inverse -- it is NOT the inversion-free canonical update of Hastings
-(arXiv:0903.3253). Hastings' trick avoids forming ``lambda^-1`` entirely: it
-applies the gate to a left-/right-canonical 2-site block and re-orthogonalizes
-via SVD, and never uses a pseudo-inverse. A genuine Hastings update could
-replace the inversion step here but is not implemented (and lacks a 2D
-canonical-form analogue for the PEPS simple-update path).
+This module provides two 1D drivers. ``itebd_groundstate`` is the standard Vidal
+``Gamma-lambda`` iTEBD with the regularized inverse above -- it is NOT the
+inversion-free canonical update of Hastings (arXiv:0903.3253). Hastings' trick
+avoids forming ``lambda^-1`` entirely: it applies the gate to a left-canonical
+2-site block and re-orthogonalizes via SVD, never using a pseudo-inverse. That
+genuine inversion-free update IS provided here as ``itebd_groundstate_hastings``
+(``_update_bond_hastings``). The 2D PEPS simple-update path still uses the
+regularized pseudo-inverse: there is no 2D canonical-form analogue of the
+Hastings update.
 
 Validated against iDMRG: the spin-1/2 Heisenberg chain converges to
 ``e_0 = 1/4 - ln 2 ~= -0.4431`` per site.
