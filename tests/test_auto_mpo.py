@@ -79,6 +79,23 @@ def _build_heisenberg_matrix(L: int, Jz: float = 1.0, Jxy: float = 1.0) -> np.nd
     return H
 
 
+def _mpo_operator_matrix(mpo: TensorNetwork, L: int) -> np.ndarray:
+    """Contract an MPO into its full ``(2**L, 2**L)`` operator.
+
+    Site tensors are ``(left, top, bot, right)`` with dim-1 boundary bonds;
+    rows are the ``top`` (output) indices, columns the ``bot`` (input) indices.
+    Works on dense or symmetric MPOs (``todense`` per site).
+    """
+    op = None
+    for i in range(L):
+        T = np.asarray(mpo.get_tensor(i).todense())  # (Dl, d, d, Dr)
+        op = T if op is None else np.einsum("...r,rtbR->...tbR", op, T)
+    op = np.squeeze(op, axis=(0, op.ndim - 1))  # (t0, b0, t1, b1, ...)
+    tops = list(range(0, 2 * L, 2))
+    bots = list(range(1, 2 * L, 2))
+    return np.transpose(op, tops + bots).reshape(2**L, 2**L)
+
+
 # ---------------------------------------------------------------------------
 # TestSpinOps
 # ---------------------------------------------------------------------------
@@ -584,6 +601,40 @@ class TestBuildAutoMPOFunctional:
 
 class TestAutoMPOSymmetric:
     """Tests for symmetric (SymmetricTensor-based) MPO construction."""
+
+    def test_symmetric_compress_builds(self):
+        """Regression for #620: ``symmetric=True`` + ``compress=True`` must not
+        raise (stale bond charges previously crashed ``from_dense``) and must
+        actually shrink at least one virtual bond."""
+        L = 6
+        terms = _heisenberg_terms(L)
+        mpo_unc = build_auto_mpo(terms, L=L, symmetric=True)
+        mpo_cmp = build_auto_mpo(
+            terms, L=L, symmetric=True, compress=True, compress_tol=1e-10
+        )
+        assert mpo_cmp.n_nodes() == L
+        unc_bonds = [mpo_unc.get_tensor(i).todense().shape[3] for i in range(L)]
+        cmp_bonds = [mpo_cmp.get_tensor(i).todense().shape[3] for i in range(L)]
+        for i in range(L):
+            assert np.all(np.isfinite(np.asarray(mpo_cmp.get_tensor(i).todense())))
+        assert any(c < u for c, u in zip(cmp_bonds, unc_bonds)), (
+            f"no bond compressed: unc={unc_bonds} cmp={cmp_bonds}"
+        )
+
+    def test_symmetric_compress_preserves_operator(self):
+        """Charge-aware compression must preserve the Hamiltonian: the
+        compressed symmetric MPO contracts to the exact Heisenberg operator
+        (compression is approximate but ~machine-exact at tol=1e-10)."""
+        L = 4
+        terms = _heisenberg_terms(L)
+        mpo_cmp = build_auto_mpo(
+            terms, L=L, symmetric=True, compress=True, compress_tol=1e-10
+        )
+        M = _mpo_operator_matrix(mpo_cmp, L)
+        H = _build_heisenberg_matrix(L)
+        np.testing.assert_allclose(
+            M, H, atol=1e-9, err_msg="compressed symmetric MPO != Heisenberg H"
+        )
 
     def test_symmetric_mpo_todense_matches_dense(self):
         """The dense representation of a symmetric MPO should match a dense MPO."""

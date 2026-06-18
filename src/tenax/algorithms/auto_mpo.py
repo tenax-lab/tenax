@@ -263,6 +263,79 @@ def _compress_mpo_bond(
     return w_left_new, w_right_new
 
 
+def _compress_mpo_bond_symmetric(
+    w_left: np.ndarray,
+    w_right: np.ndarray,
+    mid_charges: np.ndarray,
+    tol: float = 1e-12,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Charge-preserving SVD compression of one symmetric MPO bond.
+
+    Like :func:`_compress_mpo_bond`, but block-diagonal in the U(1) charge of
+    the shared (mid) bond: that bond is grouped by charge and each sector is
+    compressed independently.  A plain dense SVD would mix bond states of
+    different charge -- the retained singular vectors would carry no definite
+    charge, so the compressed bond could not be a valid symmetric leg, and the
+    bond-charge array would no longer match the W-matrix shape (issue #620).
+    Doing it per sector keeps every retained bond state at a definite charge and
+    returns the updated ``new_mid_charges`` consistent with the compressed shape.
+
+    Because the charge-conserving W-matrix, reshaped to ``(D_l*d*d, D_mid)``, is
+    block-diagonal w.r.t. (row charge, mid charge), the per-sector SVD is exact
+    -- it equals the dense SVD restricted to each block.
+
+    Args:
+        w_left:      Shape ``(D_l, d, d, D_mid)``.
+        w_right:     Shape ``(D_mid, d, d, D_r)``.
+        mid_charges: Length-``D_mid`` int charge array for the shared bond.
+        tol:         Relative truncation threshold (against the global largest
+                     singular value, matching :func:`_compress_mpo_bond`).
+
+    Returns:
+        ``(w_left_new, w_right_new, new_mid_charges)`` with the compressed bond.
+    """
+    D_l, d, _, _ = w_left.shape
+    flat = w_left.reshape(D_l * d * d, -1)
+
+    # Per-sector SVD (block-diagonal in the mid-bond charge).
+    sectors: list[tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+    s_max = 0.0
+    for q in np.unique(mid_charges):
+        cols = np.nonzero(mid_charges == q)[0]
+        U_q, s_q, Vt_q = np.linalg.svd(flat[:, cols], full_matrices=False)
+        sectors.append((int(q), cols, U_q, s_q, Vt_q))
+        if s_q.size and s_q[0] > s_max:
+            s_max = float(s_q[0])
+
+    threshold = tol * s_max if s_max > 0.0 else tol
+
+    left_blocks: list[np.ndarray] = []
+    right_blocks: list[np.ndarray] = []
+    charge_blocks: list[np.ndarray] = []
+    for q, cols, U_q, s_q, Vt_q in sectors:
+        rank = int(np.sum(s_q > threshold))
+        if rank == 0:
+            continue
+        left_blocks.append(U_q[:, :rank] * s_q[:rank])
+        right_blocks.append(np.einsum("rm,mabn->rabn", Vt_q[:rank, :], w_right[cols]))
+        charge_blocks.append(np.full(rank, q, dtype=mid_charges.dtype))
+
+    if not left_blocks:
+        # Degenerate (all singular values below threshold): keep the single
+        # largest vector so the bond stays non-empty.
+        q, cols, U_q, s_q, Vt_q = max(
+            sectors, key=lambda t: float(t[3][0]) if t[3].size else -1.0
+        )
+        left_blocks.append(U_q[:, :1] * s_q[:1])
+        right_blocks.append(np.einsum("rm,mabn->rabn", Vt_q[:1, :], w_right[cols]))
+        charge_blocks.append(np.full(1, q, dtype=mid_charges.dtype))
+
+    w_left_new = np.concatenate(left_blocks, axis=1).reshape(D_l, d, d, -1)
+    w_right_new = np.concatenate(right_blocks, axis=0)
+    new_mid_charges = np.concatenate(charge_blocks)
+    return w_left_new, w_right_new, new_mid_charges
+
+
 def _compute_operator_charge(op: np.ndarray, phys_charges: np.ndarray) -> int:
     """Determine the U(1) charge transfer of a single-site operator.
 
@@ -683,12 +756,6 @@ class AutoMPO:
         bond_states = _assign_bond_states(self._terms, self.L)
         w_mats = _build_w_matrices(self._terms, bond_states, self.L, self.d, identity)
 
-        if compress and self.L > 1:
-            for j in range(self.L - 1):
-                w_mats[j], w_mats[j + 1] = _compress_mpo_bond(
-                    w_mats[j], w_mats[j + 1], tol=compress_tol
-                )
-
         if symmetric:
             if phys_charges is None:
                 if self.d == 2:
@@ -705,6 +772,19 @@ class AutoMPO:
             bond_charges = _compute_bond_charges(
                 self._terms, bond_states, self.L, phys_charges
             )
+            if compress and self.L > 1:
+                # Charge-aware compression: a plain dense SVD would mix charge
+                # sectors and leave bond_charges out of sync with the compressed
+                # W-matrix shape (issue #620).  Compress each charge sector
+                # separately so bond_charges stays consistent by construction.
+                for j in range(self.L - 1):
+                    (
+                        w_mats[j],
+                        w_mats[j + 1],
+                        bond_charges[j],
+                    ) = _compress_mpo_bond_symmetric(
+                        w_mats[j], w_mats[j + 1], bond_charges[j], tol=compress_tol
+                    )
             return _w_matrices_to_symmetric_mpo(
                 w_mats,
                 self.d,
@@ -712,6 +792,12 @@ class AutoMPO:
                 bond_charges,
                 dtype=dtype,
             )
+
+        if compress and self.L > 1:
+            for j in range(self.L - 1):
+                w_mats[j], w_mats[j + 1] = _compress_mpo_bond(
+                    w_mats[j], w_mats[j + 1], tol=compress_tol
+                )
 
         return _w_matrices_to_mpo(w_mats, self.d, dtype=dtype)
 
