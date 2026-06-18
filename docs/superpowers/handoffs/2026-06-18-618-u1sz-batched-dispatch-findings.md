@@ -72,9 +72,17 @@ A100, D=3 χ=12 depth=8, implicit fixed-point AD, `examples/profile_warm_dispatc
 | dense | 1 | 778.9 ms | 775.1 ms (99.5%) | ~0 ms | 1.01× |
 | u1sz | 32 | **18,482.6 ms** (~24× dense) | 18,498 ms (100.1%) | ~0 ms | 1.00× |
 
-`value_and_grad` returns only after the work is essentially done (`dispatch ≈ warm`, `sync ≈ 0`,
-pipeline ≈ 1×) — and the cProfile shows **why**: the forward CTM sweep runs **eagerly in Python**, not
-as one compiled unit. The warm `value_and_grad` cProfile (tottime / cumtime, u1sz):
+> ⚠️ **Caveat (PR #625 review):** the `dispatch`/`sync` split and the pipeline probe above are **not**
+> clean host-vs-device discriminators. The production loss converts the convergence scalars to Python
+> floats every sweep (`_ctm_loop_core.py:187-188`: `float(_max_eps)` / `float(_max_S)`), which blocks
+> on the device once per `max_iter` *inside* `value_and_grad`. So `sync ≈ 0` is **forced by those
+> internal syncs** and would look identical for genuinely device-bound work; treat those two columns
+> as indicative only. The load-bearing host-bound evidence is the **cProfile** below, which measures
+> host dispatch directly.
+
+`value_and_grad` returns only after the work is essentially done — and the cProfile shows the host
+cost directly: the forward CTM sweep runs **eagerly in Python**, not as one compiled unit. The warm
+`value_and_grad` cProfile (tottime / cumtime, u1sz):
 
 | frame | ncalls | tottime | cumtime |
 |---|---:|---:|---:|
@@ -93,10 +101,13 @@ block-pack** path — slicing the flat buffer per block, transposing/reshaping, 
 output blocks — runs **per block, eagerly, in Python, every sweep**. By contrast the jitted
 fixed-point backward (`f_bwd`) is **0.134 s** — the backward *is* compiled and fast; it is the
 **eager forward** that is the 18.5 s wall. This is **host-bound eager per-block dispatch**, exactly
-the mechanism #618 names — but the dominant cluster is the **fuse**, not contraction, and `dispatch
-≈ warm / sync ≈ 0 / pipeline 1×` is the host running the eager loop synchronously (not a device-sync
-artifact). The per-op count scales ~linearly with block count, so dense (1 block) pays ~nothing and
-u1sz (32 blocks) pays ~24×.
+the mechanism #618 names — but the dominant cluster is the **fuse**, not contraction. The host-bound
+verdict rests on **this cProfile** (tens of thousands of Python-dispatched micro-ops — a count a
+device-bound compiled graph cannot produce, and far more than the ~8 per-step `float()` syncs could
+account for), **not** on `dispatch ≈ warm / sync ≈ 0 / pipeline 1×`, which are contaminated by the
+per-sweep scalar syncs noted in the caveat above and do not by themselves separate host- from
+device-bound (PR #625 review). The per-op count scales ~linearly with block count, so dense (1 block)
+pays ~nothing and u1sz (32 blocks) pays ~24×.
 
 ### Why batching cannot close the gap (the measured ceiling) — and the fuse lever is already a NO-GO
 
