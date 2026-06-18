@@ -1,0 +1,36 @@
+######## DENSE ########
+
+Reading the table (the Phase-0 gate):
+  * implicit vg_cmp ~FLAT across depth  -> compile wall is NOT unroll;
+    scan-fusion buys runtime (eager dispatch), not compile, for the default path.
+  * explicit vg_cmp grows with depth     -> unroll wall (a), explicit-only.
+  * fermionic vg_cmp >> dense at same D/chi -> per-block emission (b) = #566 core.
+  * vg_cmp grows steeply with chi        -> large-chi SVD/eigh VJP (c) -> pivot #570.
+  * bwd_cmp (= vg_cmp - fwd_cmp) large   -> implicit-diff backward (d) dominates.
+######## U1SZ FRAGMENTED (keep off) ########
+      sym  D  chi  dep      path  blk  fwd_cmp   vg_cmp  bwd_cmp   vg_wall  warm_ms            top(name:s)
+----------------------------------------------------------------------------------------------------------
+     u1sz  3   12    8  implicit   32   83.06s 1265.54s 1182.48s  1576.70s 18643.1 jit(_jit_fused_f:523.5
+----------------------------------------------------------------------------------------------------------
+
+Reading the table (the Phase-0 gate):
+  * implicit vg_cmp ~FLAT across depth  -> compile wall is NOT unroll;
+    scan-fusion buys runtime (eager dispatch), not compile, for the default path.
+  * explicit vg_cmp grows with depth     -> unroll wall (a), explicit-only.
+  * fermionic vg_cmp >> dense at same D/chi -> per-block emission (b) = #566 core.
+  * vg_cmp grows steeply with chi        -> large-chi SVD/eigh VJP (c) -> pivot #570.
+  * bwd_cmp (= vg_cmp - fwd_cmp) large   -> implicit-diff backward (d) dominates.
+######## U1SZ KEEP {-1,0,1} (--defrag) ########
+      sym  D  chi  dep      path  blk  fwd_cmp   vg_cmp  bwd_cmp   vg_wall  warm_ms            top(name:s)
+----------------------------------------------------------------------------------------------------------
+     u1sz  3   12    8  implicit  !! ValueError: unexpected JAX type (e.g. shape/dtype) for argument to VJP function: got float64[36], but expected float64[34] because the corresponding output of the differentiated function had JAX type float64[34]
+----------------------------------------------------------------------------------------------------------
+
+Reading the table (the Phase-0 gate):
+  * implicit vg_cmp ~FLAT across depth  -> compile wall is NOT unroll;
+    scan-fusion buys runtime (eager dispatch), not compile, for the default path.
+  * explicit vg_cmp grows with depth     -> unroll wall (a), explicit-only.
+  * fermionic vg_cmp >> dense at same D/chi -> per-block emission (b) = #566 core.
+  * vg_cmp grows steeply with chi        -> large-chi SVD/eigh VJP (c) -> pivot #570.
+  * bwd_cmp (= vg_cmp - fwd_cmp) large   -> implicit-diff backward (d) dominates.
+######## DONE ########

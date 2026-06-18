@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import contextlib
 import json
 import logging
 import platform
@@ -348,11 +349,28 @@ def main() -> None:
         "Implies the explicit path; use to measure the truncated-backprop RUNTIME "
         "lever (warm-step vs implicit). Default None = full backprop.",
     )
+    ap.add_argument(
+        "--defrag",
+        action="store_true",
+        help="Run each cell inside keep_sectors_context({-1,0,1}) (#615 keep "
+        "flag): the U(1)-Sz uniform-sector env de-fragmentation. Forces a cold "
+        "compile (jax.clear_caches) under the keep set so env-init + truncation "
+        "restrict chi-bond charges. Measures keep vs fragmented-sym warm-step.",
+    )
     ap.add_argument("--json", type=str, default=None)
     args = ap.parse_args()
     # --backward-steps only affects the explicit path; auto-enable it.
     if args.backward_steps is not None:
         args.explicit = True
+
+    def _maybe_keep():
+        """Activate the #615 keep set for the cell measurement when --defrag."""
+        if args.defrag:
+            from tenax.algorithms._ctm_uniform_sector import keep_sectors_context
+
+            jax.clear_caches()
+            return keep_sectors_context({-1, 0, 1})
+        return contextlib.nullcontext()
 
     cap = _install_compile_capture()
     dev = jax.devices()[0]
@@ -375,6 +393,7 @@ def main() -> None:
         "depths": args.depth,
         "explicit": args.explicit,
         "backward_steps": args.backward_steps,
+        "defrag": args.defrag,
     }
 
     # Build the (sym, D, chi, depth, path) grid.
@@ -404,17 +423,18 @@ def main() -> None:
     rows = []
     for sym, D, chi, depth, explicit in configs:
         try:
-            r = profile_config(
-                sym,
-                D,
-                chi,
-                depth,
-                explicit=explicit,
-                warmup=args.warmup,
-                reps=args.reps,
-                cap=cap,
-                backward_steps=args.backward_steps if explicit else None,
-            )
+            with _maybe_keep():
+                r = profile_config(
+                    sym,
+                    D,
+                    chi,
+                    depth,
+                    explicit=explicit,
+                    warmup=args.warmup,
+                    reps=args.reps,
+                    cap=cap,
+                    backward_steps=args.backward_steps if explicit else None,
+                )
         except Exception as exc:  # noqa: BLE001 - record + continue the sweep
             print(
                 f"{sym:>9} {D:>2} {chi:>4} {depth:>4} "
