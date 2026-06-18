@@ -37,6 +37,11 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "iDMRGResult": ("tenax.algorithms.idmrg", "iDMRGResult"),
     "itebd_groundstate": ("tenax.algorithms.itebd", "itebd_groundstate"),
     "heisenberg_2site_h": ("tenax.algorithms.itebd", "heisenberg_2site_h"),
+    "itebd_groundstate_hastings": (
+        "tenax.algorithms.itebd",
+        "itebd_groundstate_hastings",
+    ),
+    "ITEBDStateLeft": ("tenax.algorithms.itebd", "ITEBDStateLeft"),
     "heisenberg_gate": ("tenax.algorithms.ipeps", "heisenberg_gate"),
     "ipeps": ("tenax.algorithms.ipeps", "ipeps"),
     "xxz_gate": ("tenax.algorithms.ipeps", "xxz_gate"),
@@ -174,6 +179,8 @@ __all__ = [
     # iTEBD
     "itebd_groundstate",
     "heisenberg_2site_h",
+    "itebd_groundstate_hastings",
+    "ITEBDStateLeft",
     # TRG
     "TRGConfig",
     "trg",

@@ -219,13 +219,21 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # itebd
     "itebd_groundstate": ("tenax.algorithms.itebd", "itebd_groundstate"),
     "heisenberg_2site_h": ("tenax.algorithms.itebd", "heisenberg_2site_h"),
+    "itebd_groundstate_hastings": (
+        "tenax.algorithms.itebd",
+        "itebd_groundstate_hastings",
+    ),
+    "ITEBDStateLeft": ("tenax.algorithms.itebd", "ITEBDStateLeft"),
     # ipeps
     "build_c4v_basis": ("tenax.algorithms.ipeps", "build_c4v_basis"),
     "c4v_coeffs_from_tensor": ("tenax.algorithms.ipeps", "c4v_coeffs_from_tensor"),
     "c4v_tensor_from_coeffs": ("tenax.algorithms.ipeps", "c4v_tensor_from_coeffs"),
     "heisenberg_gate": ("tenax.algorithms.ipeps", "heisenberg_gate"),
     "heisenberg_gate_u1sz": ("tenax.algorithms.ipeps", "heisenberg_gate_u1sz"),
-    "heisenberg_u1sz_init_pair": ("tenax.algorithms.ipeps", "heisenberg_u1sz_init_pair"),
+    "heisenberg_u1sz_init_pair": (
+        "tenax.algorithms.ipeps",
+        "heisenberg_u1sz_init_pair",
+    ),
     "ipeps": ("tenax.algorithms.ipeps", "ipeps"),
     "sublattice_rotate_gate": ("tenax.algorithms.ipeps", "sublattice_rotate_gate"),
     "symmetrize_c4v": ("tenax.algorithms.ipeps", "symmetrize_c4v"),
@@ -425,6 +433,8 @@ __all__ = [
     # iTEBD
     "itebd_groundstate",
     "heisenberg_2site_h",
+    "itebd_groundstate_hastings",
+    "ITEBDStateLeft",
     # TDVP
     "TDVPConfig",
     "TDVPResult",
