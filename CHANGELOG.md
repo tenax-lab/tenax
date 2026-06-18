@@ -2,6 +2,102 @@
 
 ## Unreleased
 
+## v0.8.0 (2026-06-18)
+
+### New Features
+
+- **1D iTEBD dense reference** (#583, #619) — translation-invariant
+  infinite-MPS imaginary-time evolution with a 2-site unit cell:
+  `itebd_groundstate` (Vidal `Γ-λ` form with a regularized `_safe_inv`
+  pseudo-inverse, no `λ^-1` blow-up) and the inversion-free
+  `itebd_groundstate_hastings` (`_update_bond_hastings`, arXiv:0903.3253).
+  Both converge to the spin-½ Heisenberg `e₀ = ¼ − ln 2` and agree
+  bit-for-bit across the truncation regime.
+- **Reduced-corner QR-CTMRG** (#570) — faithful QR-based CTMRG: Phase 1
+  dense 1×1 (#595) and Phase 2 dense multisite with implicit-diff AD
+  (#597); `regularized_qr` and a `recipe`/`gs_recipe` knob. (Block-sparse
+  QR ruled out as a compile lever — see Research.)
+- **U(1)-Sz symmetric CTM enablement** (#566, #602) — chi-bond order
+  canonicalization unblocks U(1)-Sz iPEPS-AD (#604) and the symmetric 2×2
+  plaquette projectors are applied unfused (#608); D=3 Heisenberg runs.
+- **Opt-in batched block-sparse execution** (#568, #569) behind the
+  `TENAX_BATCH_BLOCKSPARSE` gate — batched per-sector contraction (#571)
+  and batched SVD/QR/eigh over same-shape charge sectors (#572).
+- **Block-sparse contraction backend seam + cuTensorNet GPU backend**
+  (#200) — pluggable contraction backend (#586) and a validated,
+  default-OFF cuTensorNet path (#587).
+- **iPEPS optimizer knobs** — `gs_line_search_method='auto'` (Armijo at
+  low χ, Hager–Zhang at high χ) (#549); `gs_ctm_max_iter_schedule` for a
+  late-stage CTM-iter cap (#540); `return_history` extended to the
+  multisite optimizer (#550); implicit-AD warm-start invalidation API
+  (#535); in-CTM chi-bump kwargs threaded into the PESS AD loss (#548).
+- **AutoMPO charge-aware compression** (#621) — `compress=True` now works
+  with `symmetric=True` (closes #620).
+
+### Behavior Changes
+
+- **`hatch-vcs` versioning** (#530) — the git tag now drives the package
+  version.
+- **CTM χ-control consolidation** (#547) — `chi_ramp` and `chi_auto_bump`
+  deprecated (Phase 1) in favor of the unified schedule.
+- **iPEPS AD** — symmetric/fermionic first-step compile is no longer
+  silenced (#567); stall reset now requires a strict decrease above the
+  noise floor (#536); `hager_zhang` `bracket_only_phi` default reverted to
+  `False` (#541).
+- **linalg** — `max_truncation_err` is honored when `base_charges` is
+  supplied (#561).
+
+### Bug Fixes
+
+- **contractor** — multi-input `contract()` no longer silently returns 0
+  on disjoint inputs (#554).
+- **fermionic** — remove spurious auto-Koszul signs (#557); drop the
+  split-CTM shim fallback now that the algebra is closed (#562); preserve
+  the canonical bond layout in simple-update at D>2 (fPEPS #560, iPEPS
+  #564).
+- **U(1)-Sz CTM correctness** — bond-order fix (#604) and unfused
+  2-plaquette projectors (#608).
+- **iPEPS** — unblock in-CTM chi-bump on the 2-site implicit-AD path
+  (#542); restore the Arnoldi precheck raise on high ρ (#532, #533).
+- **build** — pin upper bounds on `build-system.requires` to fix a twine
+  Metadata-Version 2.5 failure (#577).
+
+### Performance
+
+- **`_gauge_fix_symmetric_svd` vectorized** (#593) — per-column → per-sector,
+  ~11–23× fewer HLO instructions.
+- **fuse/split vectorized** (#573) — scatter/gather loops replaced with
+  vectorized ops.
+- **iPEPS line search** — share the forward CTM env across HZ φ/φ′ probes
+  (#538), skip φ′ during the bracket phase (#539), cap CTM iters for
+  probes (#537); TBPTT truncation for the explicit-AD CTM backward (#546).
+- **split-CTM** — restore the split-aware mixed-env RDM with a trace-floor
+  fallback (#545).
+
+### Tests / CI
+
+- Bosonic split-vs-shim energy/gradient parity (#581); Jordan-Wigner ED
+  reference scaffolding (#556); stall-runaway regression canary (#544);
+  hardened macOS-fragile assertions (#531); D=3 U(1)-Sz energy-vs-dense
+  guard (#611); fast reduced-corner QR tests marked `core` (#596).
+
+### Documentation & Research
+
+- **Research spikes / NO-GO findings** (#566, #570, #610) — stacked
+  block-sparse feasibility NO-GO (#609); CTM env de-fragmentation
+  NO-GO-by-obstruction (#614); block-sparse QR Phase-3 NO-GO (#598);
+  CTM-AD compile-wall diagnosis (the wall is #566 structural per-block
+  emission, not the decomposition) (#588–#592); dense Heisenberg large-D
+  characterization (#599, #600); cuTensorNet NO-GO measurement (#587).
+- **Benchmarks** — #566 batching harness + A100/H100 results (#574–#580,
+  #584, #585); U(1)-Sz vs dense D-χ scaling (#607).
+- **iTEBD docs** — correct the Hastings attribution on the Vidal path
+  (#616); document the `B_new` gauge in the Hastings update (#622).
+- **Docs** — swept-env T1/T3 flow convention (#613); implicit-AD
+  variational-guarantee precondition (#534); stall-recovery rationale
+  (#552); minimal working fermionic fPEPS (AD) example + simple-update
+  breakage note (#582).
+
 ## v0.7.0 (2026-05-25)
 
 ### New Features
