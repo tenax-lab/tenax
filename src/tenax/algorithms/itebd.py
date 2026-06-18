@@ -104,6 +104,32 @@ def _bond_energy(G1, l_in, G2, l_out, H):
     return e / (norm + 1e-300)
 
 
+def _update_bond_hastings(A, B, l_right, gate, chi_max):
+    """Hastings' inversion-free iTEBD bond update (arXiv:0903.3253).
+
+    ``A``, ``B`` are left-canonical ``(chiL, d, chiR)`` tensors sharing the bond
+    to be updated; ``l_right`` is the Schmidt weight on the bond to the *right*
+    of the ``B`` tensor. Applies ``gate`` across the A-B bond and returns updated
+    left-canonical ``(A_new, l_AB_new, B_new)``. No ``lambda^-1`` is ever formed:
+    ``B_new = X^dagger . Theta`` contracts the *unweighted* gated block.
+    """
+    chiL, d, _ = A.shape
+    _, _, chiR = B.shape
+    C = np.einsum("aik,kjc->aijc", A, B)  # (chiL, d, d, chiR), both left-canonical
+    theta = np.einsum("aijc,ijkl->aklc", C, gate)  # apply gate: ket (ij) -> bra (kl)
+    M = np.einsum("aijc,c->aijc", theta, l_right)  # weight the right bond (no inverse)
+    mat = M.reshape(chiL * d, d * chiR)
+    X, S, _Yh = np.linalg.svd(mat, full_matrices=False)
+    k = min(chi_max, int(np.sum(S > 1e-14)))
+    k = max(k, 1)
+    X, S = X[:, :k], S[:k]
+    S = S / (np.linalg.norm(S) + 1e-300)
+    A_new = X.reshape(chiL, d, k)  # exact isometry (left-canonical)
+    # B_new = X^dagger . theta  (uses unweighted theta -> no l_right^-1)
+    B_new = np.einsum("aiK,aijc->Kjc", A_new.conj(), theta)
+    return A_new, S, B_new
+
+
 def itebd_groundstate(
     H2: np.ndarray,
     chi_max: int = 16,
