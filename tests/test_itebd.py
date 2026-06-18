@@ -134,3 +134,18 @@ class TestITEBDHeisenberg:
         e, st = itebd_groundstate(H, chi_max=8, steps_per_dt=1500)
         assert np.isfinite(e)
         assert np.all(np.isfinite(st.lA)) and np.all(np.isfinite(st.lB))
+
+
+class TestHastingsExports:
+    def test_public_imports_resolve(self):
+        """itebd_groundstate_hastings and ITEBDStateLeft are exported from both
+        tenax and tenax.algorithms (per CLAUDE.md new-public-API rule)."""
+        import tenax
+        import tenax.algorithms as ta
+
+        assert tenax.itebd_groundstate_hastings is ta.itebd_groundstate_hastings
+        assert tenax.ITEBDStateLeft is ta.ITEBDStateLeft
+        assert "itebd_groundstate_hastings" in tenax.__all__
+        assert "ITEBDStateLeft" in tenax.__all__
+        assert "itebd_groundstate_hastings" in ta.__all__
+        assert "ITEBDStateLeft" in ta.__all__
