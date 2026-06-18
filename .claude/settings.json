@@ -9,7 +9,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/ai_comment_marker.py\""
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/ai_comment_marker.py\"",
+            "if": "Bash(gh *)"
           }
         ]
       }
