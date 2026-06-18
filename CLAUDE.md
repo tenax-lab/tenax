@@ -9,6 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `main` has branch protection: `Tests (Python 3.11)`, `Tests (Python 3.12)`, and `Tests (macOS, Python 3.12)` must pass.
 - Branch protection requires the PR branch to be up-to-date with `main`. If behind, merge main into the branch (`git merge origin/main`) rather than rebasing — rebase can get stuck on `--continue`.
 - **Pytest markers**: Tests are auto-marked by file name (`core`, `algorithm`, `slow`) via `conftest.py`. CI required checks run only `pytest -m core`; full suite runs on push to main or with the `run-full-tests` PR label. Locally: `uv run pytest -m core` (fast), `uv run pytest -m "not slow"` (skip expensive), `uv run pytest` (all).
+- **AI-authored GitHub comments must be labeled.** Any comment, PR, or issue an AI agent posts (`gh pr comment`, `gh issue comment`, `gh pr review`, `gh pr/issue create`) must carry a `🤖` AI marker in the body so humans can distinguish AI from human comments. A `PreToolUse` hook in `.claude/settings.json` enforces this — it blocks such `gh` commands when no `🤖` (or `AI-generated`) marker is present. Suggested form for comments: `> 🤖 **AI-generated comment** — written by Claude Code, posted by @<user>.`
 
 
 
