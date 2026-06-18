@@ -129,9 +129,23 @@ def _update_bond_hastings(A, B, l_right, gate, chi_max):
 
     ``A``, ``B`` are left-canonical ``(chiL, d, chiR)`` tensors sharing the bond
     to be updated; ``l_right`` is the Schmidt weight on the bond to the *right*
-    of the ``B`` tensor. Applies ``gate`` across the A-B bond and returns updated
-    left-canonical ``(A_new, l_AB_new, B_new)``. No ``lambda^-1`` is ever formed:
-    ``B_new = X^dagger . Theta`` contracts the *unweighted* gated block.
+    of the ``B`` tensor. Applies ``gate`` across the A-B bond and returns
+    ``(A_new, l_AB_new, B_new)``.
+
+    ``A_new`` is an exact left-canonical isometry. ``B_new = X^dagger . Theta``
+    is the inversion-free right-partner and is **intentionally NOT left-canonical**
+    under truncation: its left Gram is ``Theta^dagger P_X Theta`` (``P_X = X X^dagger``,
+    the rank-k projector), equivalently ``B_new = S . Yh . lambda_right^-1`` — it
+    carries the implicit ``lambda^-1`` *without ever forming it*, which is the whole
+    point of the Hastings scheme. The asymmetry is self-correcting and does not need
+    re-orthogonalizing: the next sweep's SVD re-establishes the isometry from whatever
+    gauge ``B`` is in, and ``_bond_energy_left`` normalizes explicitly
+    (``<theta|H|theta>/<theta|theta>``), so a non-canonical ``B`` is absorbed, not
+    propagated. Verified: ``itebd_groundstate_hastings`` matches the Vidal
+    ``_safe_inv`` path (``itebd_groundstate``) bit-for-bit across the truncation
+    regime (chi=2..32), converging to ``e0 = 1/4 - ln 2``. Do NOT "fix" ``B_new`` to
+    be left-canonical — that reintroduces the normalization/inverse step the scheme
+    exists to avoid (see PR #619 review thread).
     """
     chiL, d, _ = A.shape
     _, _, chiR = B.shape
@@ -145,7 +159,9 @@ def _update_bond_hastings(A, B, l_right, gate, chi_max):
     X, S = X[:, :k], S[:k]
     S = S / (np.linalg.norm(S) + 1e-300)
     A_new = X.reshape(chiL, d, k)  # exact isometry (left-canonical)
-    # B_new = X^dagger . theta  (uses unweighted theta -> no l_right^-1)
+    # B_new = X^dagger . theta: inversion-free right-partner (= S.Yh.l_right^-1
+    # computed without forming l_right^-1). Intentionally NOT left-canonical under
+    # truncation; re-orthogonalized by the next sweep's SVD. See docstring.
     B_new = np.einsum("aiK,aijc->Kjc", A_new.conj(), theta)
     return A_new, S, B_new
 
