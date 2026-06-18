@@ -28,9 +28,10 @@ def safe_inv_lambda(lam: jax.Array, rel_tol: float = 1e-12) -> jax.Array:
     Schmidt sector to ~``1/EPS``; under the absorb-then-remove round-trip plus a
     global re-normalization that flips sector dominance and degenerates the whole
     bond (all weights -> 0, or NaN). Dropping dead sectors keeps the update
-    numerically stable -- the gauge-restoration analogue of orthogonalizing
-    against the environment instead of dividing by singular values (cf. the
-    stable iTEBD of Hastings, arXiv:0903.3253). Mirrors ``pess._safe_inv``.
+    numerically stable. This is a regularized/thresholded inverse, NOT the
+    inversion-free canonical update of Hastings (arXiv:0903.3253), which avoids
+    forming ``lambda^-1`` altogether and uses no pseudo-inverse. Mirrors
+    ``pess._safe_inv``.
     """
     lam = jnp.asarray(lam)
     cutoff = rel_tol * jnp.max(lam)
