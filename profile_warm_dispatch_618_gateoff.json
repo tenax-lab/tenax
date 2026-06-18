@@ -1,0 +1,366 @@
+{
+  "platform": "gpu",
+  "device_kind": "NVIDIA A100-SXM4-80GB",
+  "x64": true,
+  "gate": "0",
+  "D": 3,
+  "chi": 12,
+  "depth": 8,
+  "reps": 5,
+  "rows": [
+    {
+      "sym": "dense",
+      "D": 3,
+      "chi": 12,
+      "depth": 8,
+      "n_blocks": 1,
+      "gate": "0",
+      "energy": -0.0039617707236439675,
+      "compile_wall_s": 8.51032380387187,
+      "warm_med_s": 0.7789001185446978,
+      "warm_all_s": [
+        0.7926023062318563,
+        0.7781757153570652,
+        0.7789001185446978,
+        0.7791546955704689,
+        0.7770726531744003
+      ],
+      "dispatch_med_s": 0.7751356437802315,
+      "sync_med_s": 2.20518559217453e-05,
+      "dispatch_frac": 0.9951669351758479,
+      "pipeline_k": 4,
+      "pipeline_wall_s": 3.0947988722473383,
+      "pipeline_per_call_s": 0.7736997180618346,
+      "pipeline_speedup_vs_serial": 1.0067214713427717,
+      "top_tottime": [
+        {
+          "func": "_ctm_loop_core.py:116(_run_ctm_loop_with_bump)",
+          "ncalls": 1,
+          "tottime": 0.553395669,
+          "cumtime": 0.679742048
+        },
+        {
+          "func": "_ctm_energy_ad.py:1281(f_bwd)",
+          "ncalls": 1,
+          "tottime": 0.081315933,
+          "cumtime": 0.082353005
+        },
+        {
+          "func": "dispatch.py:82(apply_primitive)",
+          "ncalls": 431,
+          "tottime": 0.032246996,
+          "cumtime": 0.033511185
+        },
+        {
+          "func": "ufunc_api.py:175(__call__)",
+          "ncalls": 329,
+          "tottime": 0.026825426000000003,
+          "cumtime": 0.030192377000000003
+        },
+        {
+          "func": "ad_utils.py:442(_frob_phase_fix)",
+          "ncalls": 64,
+          "tottime": 0.010629707,
+          "cumtime": 0.11672328600000001
+        },
+        {
+          "func": "array_methods.py:795(_operator_truediv)",
+          "ncalls": 130,
+          "tottime": 0.0072539430000000005,
+          "cumtime": 0.007449217
+        },
+        {
+          "func": "array_methods.py:695(_operator_lt)",
+          "ncalls": 64,
+          "tottime": 0.006253456,
+          "cumtime": 0.006294635000000001
+        },
+        {
+          "func": "array.py:606(_value)",
+          "ncalls": 19,
+          "tottime": 0.005063563,
+          "cumtime": 0.005164467000000001
+        },
+        {
+          "func": "~:0(<built-in method builtins.isinstance>)",
+          "ncalls": 15966,
+          "tottime": 0.0036119980000000004,
+          "cumtime": 0.003882485
+        },
+        {
+          "func": "array_methods.py:719(_operator_ge)",
+          "ncalls": 64,
+          "tottime": 0.0034386150000000003,
+          "cumtime": 0.003562813
+        },
+        {
+          "func": "array_methods.py:262(_flatten)",
+          "ncalls": 65,
+          "tottime": 0.003308997,
+          "cumtime": 0.0039858260000000005
+        },
+        {
+          "func": "lax_numpy.py:8178(argmax)",
+          "ncalls": 64,
+          "tottime": 0.0033063570000000002,
+          "cumtime": 0.0038649630000000003
+        },
+        {
+          "func": "ufuncs.py:3351(conj)",
+          "ncalls": 68,
+          "tottime": 0.003203694,
+          "cumtime": 0.003203694
+        },
+        {
+          "func": "reductions.py:408(max)",
+          "ncalls": 64,
+          "tottime": 0.003086936,
+          "cumtime": 0.003272446
+        },
+        {
+          "func": "core.py:627(bind)",
+          "ncalls": 514,
+          "tottime": 0.003057447,
+          "cumtime": 0.729467894
+        },
+        {
+          "func": "util.py:270(wrapper)",
+          "ncalls": 1514,
+          "tottime": 0.002913871,
+          "cumtime": 0.005066811
+        },
+        {
+          "func": "ad_utils.py:424(_phase_fix_ctm_tensor)",
+          "ncalls": 8,
+          "tottime": 0.001956619,
+          "cumtime": 0.120293854
+        },
+        {
+          "func": "~:0(<method 'reduce' of 'numpy.ufunc' objects>)",
+          "ncalls": 629,
+          "tottime": 0.0015301210000000002,
+          "cumtime": 0.0015301210000000002
+        },
+        {
+          "func": "lax.py:1643(_convert_element_type)",
+          "ncalls": 224,
+          "tottime": 0.0014968120000000001,
+          "cumtime": 0.017752153
+        },
+        {
+          "func": "core.py:1212(process_primitive)",
+          "ncalls": 502,
+          "tottime": 0.001161008,
+          "cumtime": 0.037211763
+        },
+        {
+          "func": "core.py:1851(typeof)",
+          "ncalls": 1152,
+          "tottime": 0.001080103,
+          "cumtime": 0.0067505510000000005
+        },
+        {
+          "func": "array_constructors.py:106(array)",
+          "ncalls": 92,
+          "tottime": 0.0010737700000000001,
+          "cumtime": 0.005425846000000001
+        },
+        {
+          "func": "core.py:2111(canonicalize_value)",
+          "ncalls": 799,
+          "tottime": 0.0010706930000000002,
+          "cumtime": 0.002573536
+        },
+        {
+          "func": "slicing.py:3403(_dynamic_slice_indices)",
+          "ncalls": 64,
+          "tottime": 0.001025343,
+          "cumtime": 0.030465119000000002
+        },
+        {
+          "func": "array.py:1092(_get_aval_array)",
+          "ncalls": 993,
+          "tottime": 0.001019982,
+          "cumtime": 0.005180606
+        }
+      ]
+    },
+    {
+      "sym": "u1sz",
+      "D": 3,
+      "chi": 12,
+      "depth": 8,
+      "n_blocks": 32,
+      "gate": "0",
+      "energy": -0.013387147559970634,
+      "compile_wall_s": 1525.8242038600147,
+      "warm_med_s": 18.482632379978895,
+      "warm_all_s": [
+        18.670215716585517,
+        18.39398686774075,
+        18.34451510384679,
+        18.63091461919248,
+        18.482632379978895
+      ],
+      "dispatch_med_s": 18.49798772856593,
+      "sync_med_s": 2.7805566787719727e-05,
+      "dispatch_frac": 1.0008307987883625,
+      "pipeline_k": 4,
+      "pipeline_wall_s": 73.90780301205814,
+      "pipeline_per_call_s": 18.476950753014535,
+      "pipeline_speedup_vs_serial": 1.0003074980845221,
+      "top_tottime": [
+        {
+          "func": "dispatch.py:82(apply_primitive)",
+          "ncalls": 105814,
+          "tottime": 9.334403537,
+          "cumtime": 9.823501742000001
+        },
+        {
+          "func": "indexing.py:1280(_index_to_gather)",
+          "ncalls": 8302,
+          "tottime": 1.042379084,
+          "cumtime": 11.486321176
+        },
+        {
+          "func": "array_methods.py:695(_operator_lt)",
+          "ncalls": 6692,
+          "tottime": 0.9664950050000001,
+          "cumtime": 0.969393724
+        },
+        {
+          "func": "~:0(<built-in method builtins.isinstance>)",
+          "ncalls": 4197950,
+          "tottime": 0.6868989400000001,
+          "cumtime": 0.725645873
+        },
+        {
+          "func": "core.py:627(bind)",
+          "ncalls": 105906,
+          "tottime": 0.66616578,
+          "cumtime": 27.470209632000003
+        },
+        {
+          "func": "util.py:270(wrapper)",
+          "ncalls": 335610,
+          "tottime": 0.6660428930000001,
+          "cumtime": 1.041335275
+        },
+        {
+          "func": "_ctm_loop_core.py:116(_run_ctm_loop_with_bump)",
+          "ncalls": 1,
+          "tottime": 0.45680547000000005,
+          "cumtime": 5.673137963
+        },
+        {
+          "func": "lax_numpy.py:2269(squeeze)",
+          "ncalls": 7422,
+          "tottime": 0.45403885200000005,
+          "cumtime": 0.530606149
+        },
+        {
+          "func": "array_methods.py:262(_flatten)",
+          "ncalls": 8428,
+          "tottime": 0.442354342,
+          "cumtime": 0.44239817400000003
+        },
+        {
+          "func": "lax.py:1643(_convert_element_type)",
+          "ncalls": 73748,
+          "tottime": 0.358851014,
+          "cumtime": 2.6948000800000003
+        },
+        {
+          "func": "array_constructors.py:106(array)",
+          "ncalls": 32820,
+          "tottime": 0.33777052300000004,
+          "cumtime": 2.407737252
+        },
+        {
+          "func": "indexing.py:118(_parse_indices)",
+          "ncalls": 17567,
+          "tottime": 0.287504009,
+          "cumtime": 0.596378406
+        },
+        {
+          "func": "core.py:1212(process_primitive)",
+          "ncalls": 105886,
+          "tottime": 0.255306745,
+          "cumtime": 10.437052268
+        },
+        {
+          "func": "_tensor_utils.py:231(_fuse_indices_symmetric)",
+          "ncalls": 8,
+          "tottime": 0.24494790300000002,
+          "cumtime": 19.159168663000003
+        },
+        {
+          "func": "indexing.py:330(normalize_indices)",
+          "ncalls": 8302,
+          "tottime": 0.23498364600000002,
+          "cumtime": 5.7232806830000005
+        },
+        {
+          "func": "core.py:2111(canonicalize_value)",
+          "ncalls": 167272,
+          "tottime": 0.22258886800000002,
+          "cumtime": 0.6271169830000001
+        },
+        {
+          "func": "core.py:2391(__new__)",
+          "ncalls": 62392,
+          "tottime": 0.21051106700000002,
+          "cumtime": 0.422595604
+        },
+        {
+          "func": "core.py:2047(canonicalize_shape)",
+          "ncalls": 112923,
+          "tottime": 0.20981312100000002,
+          "cumtime": 0.400584732
+        },
+        {
+          "func": "core.py:1851(typeof)",
+          "ncalls": 220314,
+          "tottime": 0.20807197300000002,
+          "cumtime": 1.5508661920000002
+        },
+        {
+          "func": "dtypes.py:975(dtype)",
+          "ncalls": 157478,
+          "tottime": 0.20668507500000002,
+          "cumtime": 0.35656987
+        },
+        {
+          "func": "core.py:645(bind_with_trace)",
+          "ncalls": 99268,
+          "tottime": 0.181027464,
+          "cumtime": 9.633490735
+        },
+        {
+          "func": "array.py:1092(_get_aval_array)",
+          "ncalls": 178429,
+          "tottime": 0.18038910800000002,
+          "cumtime": 0.9108258410000001
+        },
+        {
+          "func": "core.py:1365(set_trace)",
+          "ncalls": 211870,
+          "tottime": 0.169896983,
+          "cumtime": 0.169896983
+        },
+        {
+          "func": "contextlib.py:78(inner)",
+          "ncalls": 2050,
+          "tottime": 0.156385939,
+          "cumtime": 0.171687734
+        },
+        {
+          "func": "core.py:2104(canonicalize_value_dtype)",
+          "ncalls": 167272,
+          "tottime": 0.14327673000000002,
+          "cumtime": 0.345367136
+        }
+      ]
+    }
+  ]
+}
