@@ -64,6 +64,20 @@ class ITEBDState:
     lB: np.ndarray  # (chi_B,) weight on the GB-GA bond
 
 
+@dataclass
+class ITEBDStateLeft:
+    """2-site unit cell in LEFT-canonical form: ... A B A B ...
+
+    ``A``, ``B`` are left-canonical site tensors; ``lab``/``lba`` are the Schmidt
+    weights on the A->B and B->A bonds respectively.
+    """
+
+    A: np.ndarray  # (chiB, d, chiA) left-canonical
+    B: np.ndarray  # (chiA, d, chiB) left-canonical
+    lab: np.ndarray  # (chiA,) Schmidt weights on the A->B bond
+    lba: np.ndarray  # (chiB,) Schmidt weights on the B->A bond
+
+
 def _bond_theta(G1, l_in, G2, l_out_left, l_out_right):
     """theta = l_out_left . G1 . l_in . G2 . l_out_right  ->  (chiL, d, d, chiR)."""
     t = np.einsum("a,aib->aib", l_out_left, G1)
@@ -176,3 +190,44 @@ def itebd_groundstate(
             break
         e_prev = e
     return float(e_prev), ITEBDState(GA, GB, lA, lB)
+
+
+def itebd_groundstate_hastings(
+    H2: np.ndarray,
+    chi_max: int = 16,
+    dts=(0.1, 0.03, 0.01, 0.003, 0.001),
+    steps_per_dt: int = 2000,
+    seed: int = 0,
+) -> tuple[float, ITEBDStateLeft]:
+    """Inversion-free (Hastings) imaginary-time iTEBD ground state for a 2-site
+    nearest-neighbour ``H2``. No ``lambda^-1`` is formed (cf. arXiv:0903.3253).
+
+    Returns ``(energy_per_site, state)``.
+    """
+    d = H2.shape[0]
+    rng = np.random.RandomState(seed)
+    chi = 1
+    # chi=1 left-canonical tensors: each is a normalized d-vector
+    A = rng.standard_normal((chi, d, chi))
+    A = A / np.linalg.norm(A)
+    B = rng.standard_normal((chi, d, chi))
+    B = B / np.linalg.norm(B)
+    lab = np.ones(chi)  # weight on A->B bond
+    lba = np.ones(chi)  # weight on B->A bond
+
+    e_prev = np.inf
+    for dt in dts:
+        gate = _trotter_gate(H2, dt)
+        for _ in range(steps_per_dt):
+            # bond A-B (closed on the right by lba)
+            A, lab, B = _update_bond_hastings(A, B, lba, gate, chi_max)
+            # bond B-A (translate one site; closed on the right by lab)
+            B, lba, A = _update_bond_hastings(B, A, lab, gate, chi_max)
+        eAB = _bond_energy_left(A, B, lba, H2)
+        eBA = _bond_energy_left(B, A, lab, H2)
+        e = 0.5 * (eAB + eBA)
+        if abs(e - e_prev) < 1e-10:
+            e_prev = e
+            break
+        e_prev = e
+    return float(e_prev), ITEBDStateLeft(A, B, lab, lba)

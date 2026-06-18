@@ -80,6 +80,36 @@ class TestHastingsEnergy:
         assert abs(e_ud - (-0.25)) < 1e-12, f"e_ud={e_ud}"
 
 
+class TestHastingsGroundState:
+    def test_matches_bethe_ansatz(self):
+        """Hastings iTEBD reaches e_0 = 1/4 - ln 2 for the Heisenberg chain."""
+        import math
+
+        from tenax.algorithms.itebd import (
+            heisenberg_2site_h,
+            itebd_groundstate_hastings,
+        )
+
+        H = heisenberg_2site_h(Jz=1.0, Jxy=1.0)
+        e, _ = itebd_groundstate_hastings(H, chi_max=16, steps_per_dt=600)
+        e_exact = 0.25 - math.log(2)
+        assert abs(e - e_exact) < 5e-3, f"e={e}, exact={e_exact}"
+
+    def test_matches_pseudoinverse(self):
+        """The inversion-free path reproduces the validated Vidal path."""
+        from tenax.algorithms.itebd import (
+            heisenberg_2site_h,
+            itebd_groundstate,
+            itebd_groundstate_hastings,
+        )
+
+        H = heisenberg_2site_h(Jz=1.0, Jxy=1.0)
+        kw = dict(chi_max=16, steps_per_dt=600, seed=0)
+        e_vidal, _ = itebd_groundstate(H, **kw)
+        e_hast, _ = itebd_groundstate_hastings(H, **kw)
+        assert abs(e_vidal - e_hast) < 1e-3, f"vidal={e_vidal}, hastings={e_hast}"
+
+
 class TestITEBDHeisenberg:
     def test_energy_matches_bethe_ansatz(self):
         """iTEBD reaches e_0 = 1/4 - ln 2 for the Heisenberg chain."""
