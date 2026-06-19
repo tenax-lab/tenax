@@ -13,7 +13,10 @@ import jax
 import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
+from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
+
 _AXIS = "d"
+_CORNER_FIELDS = frozenset(("C1", "C2", "C3", "C4"))
 
 
 def build_ctm_mesh(devices: Sequence[jax.Device] | None = None) -> Mesh:
@@ -42,18 +45,19 @@ def commit_double_layer(a: jax.Array, mesh: Mesh) -> jax.Array:
     return jax.device_put(a, NamedSharding(mesh, double_layer_partition_spec()))
 
 
-def commit_env(env, mesh: Mesh):
+def commit_env(env: CTMTensorEnv, mesh: Mesh) -> CTMTensorEnv:
     """device_put a CTMTensorEnv: edges D²-sharded, corners replicated.
 
-    Operates on the ``DenseTensor`` leaves and rebuilds the env via the pytree so
-    the wrapper/indices are preserved.
+    Operates on the Tensor pytree leaves (any registered Tensor — the helper is
+    symmetry-agnostic) and rebuilds the env via the pytree so the
+    wrapper/indices are preserved.
     """
     corner_sh = NamedSharding(mesh, corner_partition_spec())
     edge_sh = NamedSharding(mesh, edge_partition_spec())
     fields = {}
     for name in env._fields:
         t = getattr(env, name)
-        sh = corner_sh if name.startswith("C") else edge_sh
+        sh = corner_sh if name in _CORNER_FIELDS else edge_sh
         leaves, treedef = jax.tree_util.tree_flatten(t)
         leaves = [jax.device_put(x, sh) for x in leaves]
         fields[name] = jax.tree_util.tree_unflatten(treedef, leaves)
