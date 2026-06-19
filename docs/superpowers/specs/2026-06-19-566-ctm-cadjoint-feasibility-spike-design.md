@@ -2,7 +2,11 @@
 
 **Date:** 2026-06-19
 **Issue:** #566 (block-sparse `SymmetricTensor` AD compile cost scales with charge-block count)
-**Status:** design approved; spec for a throwaway feasibility spike (architectural GO/NO-GO only)
+**Status:** EXECUTED — **Gate 1 NO-GO** (A100, 2026-06-19). The architecture is sound
+(numpy-inner probe → outer compile 0.6s, flat in block count), but the production-JAX
+stand-in under `disable_jit` still scales (166s @ D3) — realizing O(1) needs a full
+non-JAX CTM-AD core. Gate 2 not run (NO-GO branch). Findings:
+`examples/spike_ctm_cadjoint_566_summary.md`.
 
 ## 1. Why this, and why now
 
