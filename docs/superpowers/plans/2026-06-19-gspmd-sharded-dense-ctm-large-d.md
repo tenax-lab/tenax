@@ -358,7 +358,18 @@ git commit -m "feat(ctm): opt-in CTMConfig.device_mesh for GSPMD-sharded dense C
 - Create: `tests/_ctm_sharding_parity_subproc.py`
 - Test: `tests/test_ctm_sharding.py`
 
-The integration point: when a mesh is provided, commit the double-layer/site tensors and the initial envs to their shardings before the loop; GSPMD propagates through the existing `jit_step`.
+The integration point: when a mesh is provided, (1) commit the initial envs to their shardings before the loop (edges D²-sharded, corners replicated), and (2) constrain the double-layer tensor `a` **per move** to a leg that survives that move, so the dominant `χ²·D⁶` intermediate stays sharded ≈1/N on every move. The Task-3 spike (see the design spec's resolved risk section) proved no single fixed `a` axis works for all four moves; the production-path spike measured the exact per-move surviving leg.
+
+**Per-move `a` sharding axis (production 2×2 absorb path, empirically confirmed — peak-temp 1/N AND output edge stays sharded so the win chains):**
+
+| move | `a` axis to shard | leg |
+|---|---|---|
+| left   | 3 | r2 |
+| right  | 2 | l2 |
+| top    | 1 | d2 |
+| bottom | 0 | u2 |
+
+Key property: `jax.lax.with_sharding_constraint` **never changes numerical results** (bit-exact parity verified for all axes), so correctness is path-independent — the parity test below confirms we didn't break anything; the *memory* win is what is path-specific (validated by the spike + Task 7).
 
 - [ ] **Step 1: Write the parity subprocess script**
 
@@ -425,7 +436,34 @@ Expected: FAIL — subprocess errors with `ImportError: cannot import name '_hei
 
 - [ ] **Step 4: Write minimal implementation**
 
-(a) In `src/tenax/algorithms/_ctm_python_loop.py`, give `python_loop_ctm_converge` an optional `device_mesh=None` keyword. Immediately after the envs are initialized (`envs = env_init if ... else {...}`, around line 258), add:
+(a) **Add the per-move constraint helper to `ctm_sharding.py`.** A spec map + a Tensor-aware `with_sharding_constraint` helper:
+
+```python
+from jax.lax import with_sharding_constraint
+
+# Per-move surviving D²-leg of the double-layer `a` (axes u2,d2,l2,r2 = 0,1,2,3).
+# Each move contracts a different leg; constraining `a` to a *surviving* leg keeps
+# the dominant χ²·D⁶ intermediate sharded ≈1/N and the new edge sharded so the win
+# chains. Verified by the rung-1 production-path spike.
+_MOVE_SURVIVING_AXIS = {"left": 3, "right": 2, "top": 1, "bottom": 0}
+
+
+def double_layer_move_partition_spec(direction: str) -> PartitionSpec:
+    spec = [None, None, None, None]
+    spec[_MOVE_SURVIVING_AXIS[direction]] = _AXIS
+    return PartitionSpec(*spec)
+
+
+def constrain_double_layer_for_move(a, direction: str, mesh: Mesh):
+    """with_sharding_constraint the double-layer Tensor `a` to its surviving-leg
+    sharding for `direction`. Operates on the single array leaf; returns a Tensor."""
+    sh = NamedSharding(mesh, double_layer_move_partition_spec(direction))
+    leaves, treedef = jax.tree_util.tree_flatten(a)
+    leaves = [with_sharding_constraint(x, sh) for x in leaves]
+    return jax.tree_util.tree_unflatten(treedef, leaves)
+```
+
+(b) **Commit initial envs.** In `src/tenax/algorithms/_ctm_python_loop.py`, give `python_loop_ctm_converge` an optional `device_mesh=None` keyword. Immediately after the envs are initialized (around line 258), add:
 
 ```python
     if device_mesh is not None:
@@ -433,23 +471,12 @@ Expected: FAIL — subprocess errors with `ImportError: cannot import name '_hei
         envs = {coord: commit_env(env, device_mesh) for coord, env in envs.items()}
 ```
 
-Also commit the site tensors when a mesh is set, right after `site_tensors` is available at the top of the function:
+(c) **Thread `device_mesh` into the jitted step and apply the per-move constraint.** Call chain (from the production-path mapping):
+`python_loop_ctm_converge` → `_make_jit_ctm_step(neighbors, recipe, device_mesh=...)` (capture `device_mesh` in the closure — it is a static/non-traced object, NOT a jit argument) → the `_step` body → `_ctm_tensor_sweep_multisite(..., device_mesh=device_mesh)` (`_ctm_tensor_convergence.py:276`). In the 2×2 sweep's Phase-2 directional dispatch (`_ctm_tensor_convergence.py` ~lines 414–507), **before each directional absorb call**, when `device_mesh is not None`, replace the `a` argument with `constrain_double_layer_for_move(a, direction, device_mesh)` for that move's direction. The `direction` is already the Phase-2 loop variable, so this is the minimal-intrusion site (no need to edit the four absorb functions). If the probe (Step 3) exercises the "1x1" recipe instead, apply the same constraint at that recipe's directional dispatch too — match whatever path the probe actually runs.
 
-```python
-    if device_mesh is not None:
-        from tenax.algorithms.ctm_sharding import commit_double_layer
-        # site_tensors carry the iPEPS A; the double-layer is built inside the
-        # step. Commit A's underlying array so the built double-layer inherits a
-        # D²-compatible sharding via GSPMD propagation.
-        site_tensors = {
-            c: t.with_data(commit_double_layer_compatible(t.data, device_mesh))
-            for c, t in site_tensors.items()
-        }
-```
+Because `with_sharding_constraint` is purely a layout hint (bit-exact results), this cannot change energies; the parity test only guards that the plumbing didn't break anything. Keep the flag-off path (`device_mesh is None`) a literal no-op.
 
-If `with_data` / a single-array commit on the raw site tensor is not a clean fit, commit only the envs (the dominant memory objects) in this rung and note it — the env commit alone drives the GSPMD propagation through the step. Keep this minimal: **env commit is the required path; site-tensor commit is best-effort.** (Implementer: prefer env-only commit if the site-tensor layout fights the D² spec; record which you did.)
-
-(b) Add the probe helper used by the subprocess. In `src/tenax/algorithms/ipeps.py` (or wherever the dense CTM energy entry is cleanest), add:
+(d) Add the probe helper used by the subprocess. In `src/tenax/algorithms/ipeps.py` (or wherever the dense CTM energy entry is cleanest), add:
 
 ```python
 def _heisenberg_dense_probe_energy(*, D: int, chi: int, device_mesh=None, seed: int = 0) -> float:
