@@ -66,21 +66,42 @@ Shard the **virtual `D²` axis** (not χ: χ≈16–24 is small and divides poor
 
 | Tensor | Shape | Sharding | Per-device |
 |---|---|---|---|
-| double-layer `a` | `(D², D², D², D²)` | one `D²` axis over `d` | `D⁸/N` (primary win) |
+| double-layer `a` | `(D², D², D², D²)` | a **per-move surviving** `D²` axis over `d` (see resolution below) | `D⁸/N` (primary win) |
 | edge `T` | `(χ, D², χ)` | the `D²` axis over `d` | `χ²D²/N` |
 | corner `C` | `(χ, χ)` | replicated (tiny ~χ²) | full (cheap) |
 | projector SVD matrix | `(χD², χD²)` | auto-replicated at the SVD | ~38 MB (cheap) |
 
 GSPMD propagates these shardings through the enlarged-corner and absorption
-einsums, so the large intermediates (all carrying `D²` legs) are partitioned
-without explicit annotation. All-gathers around the SVD ride NVLink — acceptable
-because the goal is memory, not speed.
+einsums, so the large intermediates (all carrying `D²` legs) are partitioned. For
+the double-layer `a`, one explicit `with_sharding_constraint` per move pins it to a
+leg that survives that move (the env edges/corners need no per-move annotation).
+All-gathers around the SVD ride NVLink — acceptable because the goal is memory, not
+speed.
 
-**Risk / empirical tuning point:** the exact axis choice (and whether to shard one
-vs multiple `D²` legs of `a`) may need empirical validation that GSPMD actually
-partitions the dominant intermediates and that per-device peak drops ≈1/N. The
-implementation's first step is a micro-benchmark to confirm this before wiring the
-full loop (see Testing).
+**Risk / empirical tuning point — RESOLVED 2026-06-19 by the Task-3 spike.** The
+exact axis choice was empirically validated on the four real edge-grow einsums
+(`_ctm_compiled_moves.py`) under 4 fake CPU devices. Finding: the double-layer `a`
+has four `D²` legs `(u2, d2, l2, r2)` and each directional move contracts a
+*different* one of them, so **no single fixed sharded axis survives all four
+moves** — the move that contracts the sharded leg all-reduces, returning that
+move's dominant `χ²·D⁶` intermediate fully **replicated** (full per-device size).
+The empty-intersection of the four survivor sets makes this unavoidable for any
+static single-axis scheme. Measured worst-case per-device fraction across the four
+moves (N=4):
+
+| Scheme | Worst-case per-device fraction | Ever replicates? |
+|---|---|---|
+| single fixed `D²` axis (1-D mesh) | `1.0` (one move replicates) | yes |
+| two `D²` legs on a 2-D `(2,2)` mesh | `0.5` (any leg pair, identical) | no |
+| **per-move resharding (1-D mesh, size N)** | **`1/N`** on all four moves | no |
+
+**Decision: per-move resharding.** Before each directional move the double-layer
+tensor is constrained (`jax.lax.with_sharding_constraint`) to shard a `D²` leg that
+*survives* that move, so the dominant `χ²·D⁶` intermediate stays `≈1/N` on every
+move. Cost: one all-to-all reshard of the small `a` (`D⁸`, ~134 MB at D=8) per move
+over NVLink — acceptable because the goal is memory, not speed. The static 2-D-mesh
+two-leg scheme (guaranteed ≥2× reduction, no resharding) is the simpler partial-win
+alternative but does **not** reach `1/N`; it is not adopted in rung 1.
 
 ## Components
 
@@ -102,8 +123,9 @@ full loop (see Testing).
 
 ## Data flow (one CTM sweep)
 
-sharded envs + sharded `a` → enlarged-corner contraction (GSPMD-partitioned,
-intermediates sharded on `D²`) → form projector matrix → all-gather → replicated
+sharded envs + sharded `a` → per move, constrain `a` to a surviving-leg sharding →
+enlarged-corner / edge-grow contraction (GSPMD-partitioned, dominant `χ²·D⁶`
+intermediate sharded ≈1/N) → form projector matrix → all-gather → replicated
 truncated SVD on each device → projectors → re-shard → corner/edge absorption
 (partitioned) → sharded envs out. The Python loop (`python_loop_ctm_converge`) is
 untouched; it carries sharded arrays. The `_max_eps`/`_max_S` convergence scalars
