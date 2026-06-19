@@ -1,8 +1,8 @@
 """Test-only dense iPEPS Heisenberg CTM probe for GSPMD sharding parity.
 
-Relocated here (out of ``src/tenax/algorithms/ipeps.py``) so production ships no
-test-only code. Composed from the same internal CTM builders the production
-large-D dense path uses; imported by ``tests/_ctm_sharding_parity_subproc.py``.
+A small dense iPEPS Heisenberg energy probe used solely by the sharding tests.
+Composed from the same internal CTM builders the production large-D dense path
+uses; imported by ``tests/_ctm_sharding_parity_subproc.py``.
 """
 
 from __future__ import annotations

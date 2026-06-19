@@ -117,9 +117,13 @@ alternative but does **not** reach `1/N`; it is not adopted in rung 1.
 - **JIT wrapper:** wrap `_jit_ctm_step` (forward) and the energy fn with
   `in_shardings`/`out_shardings` so envs remain sharded across Python CTM-loop
   iterations. The step body is unchanged.
-- **Opt-in surface:** a `device_mesh` (or `ctm_shard: bool` + device count) option
-  on `CTMConfig` / `iPEPSConfig`. Default **off** → today's single-device path,
-  bit-for-bit unchanged. When on, init + step route through the sharding layer.
+- **Opt-in surface:** rung 1 exposes the opt-in **only** as a direct
+  `python_loop_ctm_converge(device_mesh=...)` keyword argument. Default `None` →
+  today's single-device path, bit-for-bit unchanged; when a mesh is passed, init +
+  step route through the sharding layer. The `CTMConfig` / `iPEPSConfig`
+  config-level surface is deferred to rung 2, when the full `optimize_gs_ad`
+  forward+backward path is sharded — wiring a config field in rung 1 would shard
+  only the forward and leave the AD backward to OOM.
 
 ## Data flow (one CTM sweep)
 

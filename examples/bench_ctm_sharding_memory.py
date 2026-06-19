@@ -29,8 +29,8 @@ import jax
 
 from tenax.algorithms.ctm_sharding import build_ctm_mesh
 
-# This throwaway benchmark deliberately reuses the test-layer probe (relocated
-# out of production ipeps.py) to avoid duplicating the iPEPS construction.
+# This throwaway benchmark deliberately reuses the test-layer probe helper to
+# avoid duplicating the iPEPS construction.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tests"))
 from _ctm_sharding_probe import heisenberg_dense_probe_energy  # noqa: E402
 
