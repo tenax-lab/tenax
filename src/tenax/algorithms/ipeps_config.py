@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import jax
 
@@ -66,6 +66,9 @@ class CTMConfig:
         chi_max:            Hard ceiling on ``chi`` for the auto-bump
                             mechanism.  ``None`` means unbounded.  When
                             set, must satisfy ``chi_max >= chi``.
+        device_mesh:        Optional jax.sharding.Mesh; when set, the dense CTM
+                            shards env/double-layer tensors across it (multi-GPU
+                            large-D). None = single-device.
     """
 
     chi: int = 20
@@ -229,6 +232,9 @@ class CTMConfig:
     # CTMConfig ABI.
     probe_max_iter: int | None = None
     probe_conv_tol: float | None = None
+    # Optional jax.sharding.Mesh for GSPMD-sharded dense CTM (large-D, multi-GPU).
+    # None → single-device (default). See ctm_sharding.py and the rung-1 spec.
+    device_mesh: Any = None
 
     def __post_init__(self):
         valid_modes = {None, "c4v_reference"}

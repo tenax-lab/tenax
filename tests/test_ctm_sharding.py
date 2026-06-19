@@ -10,6 +10,16 @@ from tenax.algorithms.ctm_sharding import (
 )
 
 
+def test_ctmconfig_device_mesh_defaults_none():
+    from tenax.algorithms.ipeps_config import CTMConfig
+
+    cfg = CTMConfig(chi=8)
+    assert cfg.device_mesh is None  # default off → single-device path
+    mesh = build_ctm_mesh()
+    cfg2 = CTMConfig(chi=8, device_mesh=mesh)
+    assert cfg2.device_mesh is mesh
+
+
 def test_mesh_and_specs():
     devs = jax.devices()
     mesh = build_ctm_mesh(devs)
