@@ -3,9 +3,10 @@
 
 Wraps the production ``ctm_energy_implicit`` (via ``make_ctm_energy_fn``) in a
 parallel ``jax.custom_vjp`` whose forward/backward are ``jax.pure_callback``s.
-The host callbacks run the production energy and its ``jax.vjp`` directly
-(no ``disable_jit`` needed — ``pure_callback`` already makes the call opaque
-to XLA so no per-block ops are emitted in the outer graph).
+The host callbacks run the production energy and its ``jax.vjp`` under
+``jax.disable_jit()`` so XLA never emits per-block ops in the outer graph
+(the callback is opaque) and no fused per-block jaxpr is built inside the
+callback either (every internal jit is eager).
 
 Two staged gates (see the design spec):
   Gate 1 (compile collapse): spike vg_compile ~flat in block count, seconds not minutes.
@@ -80,35 +81,36 @@ def build_energy_fn(gate, chi, depth):
 def make_ctm_energy_cb(energy_fn, reconstruct, *, stub_backward):
     """custom_vjp over the flat data buffer; fwd/bwd run via pure_callback.
 
-    Host functions run the production energy (and its vjp) directly inside
-    the ``pure_callback`` host; XLA sees one opaque op each direction so no
-    fused per-block jaxpr is built in the outer graph.
+    Host functions run the production energy (and its vjp) under
+    ``jax.disable_jit()`` so every internal ``@jax.jit`` becomes eager
+    op-by-op dispatch: no fused per-block jaxpr is built anywhere, and XLA
+    sees one opaque ``pure_callback`` op each direction in the outer graph.
     ``stub_backward=True`` returns a zero cotangent (Gate-1 compile test only).
 
-    Note: ``jax.disable_jit()`` is intentionally NOT used inside the callbacks.
-    While the plan specified it, empirical testing showed that disable_jit changes
-    CTM convergence numerics (jitted CTM steps run differently under eager dispatch),
-    and pure_callback already provides the XLA opacity we need.
+    Verified (examples/_probe_cadjoint_discrepancy.py, fermionic D=2, FRESH
+    env_cache): direct-jit, callback-jit, callback-disable_jit and
+    direct-disable_jit agree on the energy to machine precision (6.7e-16 at
+    conv_tol=1e-4; 1.2e-11 at conv_tol=1e-10). ``disable_jit`` does NOT change
+    the numerics; an earlier ~7e-2 spread was an env-warm-start confound from a
+    SHARED env_cache + max_iter=8, not a pure_callback/disable_jit artifact
+    (make_losses now uses separate fresh caches).
     """
 
     def host_energy(data_np):
-        # pure_callback already makes this opaque to XLA; disable_jit is not
-        # needed here and would change CTM convergence numerics (jitted CTM
-        # steps run differently under eager dispatch).
-        A = reconstruct(jnp.asarray(data_np))
-        return np.asarray(energy_fn({(0, 0): A}), dtype=np.float64)
+        with jax.disable_jit():
+            A = reconstruct(jnp.asarray(data_np))
+            return np.asarray(energy_fn({(0, 0): A}), dtype=np.float64)
 
     def host_grad(data_np, ct_np):
-        # Same: pure_callback boundary prevents outer-graph tracing; jax.vjp
-        # through ctm_energy_implicit's custom_vjp works correctly here.
-        data = jnp.asarray(data_np)
+        with jax.disable_jit():
+            data = jnp.asarray(data_np)
 
-        def e_of_data(d):
-            return energy_fn({(0, 0): reconstruct(d)})
+            def e_of_data(d):
+                return energy_fn({(0, 0): reconstruct(d)})
 
-        _, vjp = jax.vjp(e_of_data, data)
-        (g,) = vjp(jnp.asarray(ct_np))
-        return np.asarray(g, dtype=data_np.dtype)
+            _, vjp = jax.vjp(e_of_data, data)
+            (g,) = vjp(jnp.asarray(ct_np))
+            return np.asarray(g, dtype=data_np.dtype)
 
     @jax.custom_vjp
     def ctm_energy_cb(data):
@@ -132,10 +134,19 @@ def make_ctm_energy_cb(energy_fn, reconstruct, *, stub_backward):
     return ctm_energy_cb
 
 
-def make_losses(template, energy_fn, reconstruct, *, stub_backward):
+def make_losses(gate, chi, depth, reconstruct, *, stub_backward):
     """Return (loss_spike, loss_prod), both flat-array -> scalar, with the
-    SAME normalization the production loss uses."""
-    cb = make_ctm_energy_cb(energy_fn, reconstruct, stub_backward=stub_backward)
+    SAME normalization the production loss uses.
+
+    loss_spike and loss_prod use SEPARATE fresh env_caches so a single-shot
+    parity/gradient comparison is not contaminated by env warm-start (the
+    confound that earlier made a shared-cache check look like a ~7e-2 callback
+    discrepancy). loss_spike runs through the pure_callback path; loss_prod is
+    the production (jitted) reference.
+    """
+    efn_spike = build_energy_fn(gate, chi, depth)
+    efn_prod = build_energy_fn(gate, chi, depth)
+    cb = make_ctm_energy_cb(efn_spike, reconstruct, stub_backward=stub_backward)
 
     def _normalized(data):
         A = reconstruct(data)
@@ -145,7 +156,7 @@ def make_losses(template, energy_fn, reconstruct, *, stub_backward):
         return cb(leaf_of(_normalized(data)))
 
     def loss_prod(data):
-        return energy_fn({(0, 0): _normalized(data)})
+        return efn_prod({(0, 0): _normalized(data)})
 
     return loss_spike, loss_prod
 
@@ -165,25 +176,18 @@ def _fwd_check(sym="fermionic", D=2, chi=8, depth=8):
     A, gate = _PROF.make_site_and_gate(sym, D, seed=42)
     reconstruct = make_reconstructor(A)
     data = leaf_of(A)
-    energy_fn = build_energy_fn(gate, chi, depth)
     loss_spike, loss_prod = make_losses(
-        A, energy_fn, reconstruct, stub_backward=True
+        gate, chi, depth, reconstruct, stub_backward=True
     )
-    # Forward parity: compare host_energy (the callback's host fn) called
-    # directly vs loss_prod.  We bypass jax.pure_callback here because
-    # pure_callback's execution context forces a cold XLA recompile of the
-    # inner jitted CTM steps, which produces a numerically distinct (but
-    # deterministic) trajectory from the warm-cache direct call.  The host
-    # function itself is correct; the discrepancy is a JAX dispatch artifact
-    # that does not affect Gate 1 (compile collapse, measured via jax.jit) or
-    # Gate 2 (grad correctness, measured by comparing gradients).
-    A_norm = reconstruct(data) * (1.0 / (reconstruct(data).norm() + _EPS))
-    data_norm = leaf_of(A_norm)
-    e_spike = float(energy_fn({(0, 0): reconstruct(data_norm)}))
+    # Forward parity THROUGH the pure_callback path (loss_spike) vs the
+    # production reference (loss_prod). Separate fresh env_caches (see
+    # make_losses) remove the warm-start confound, so these agree to machine
+    # precision.
+    e_spike = float(loss_spike(data))
     e_prod = float(loss_prod(data))
     print(f"[fwd-check] {sym} D={D} chi={chi}: spike={e_spike:.10f} "
           f"prod={e_prod:.10f} |Δ|={abs(e_spike - e_prod):.2e}")
-    assert abs(e_spike - e_prod) < 1e-8, "forward energy mismatch"
+    assert abs(e_spike - e_prod) < 1e-8, "forward energy mismatch through callback"
     # value_and_grad must run without error even with the stub backward.
     val, grad = jax.value_and_grad(loss_spike)(data)
     assert bool(jnp.all(jnp.isfinite(grad))), "non-finite stub grad"
