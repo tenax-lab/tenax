@@ -11,7 +11,7 @@ from collections.abc import Sequence
 
 import jax
 import numpy as np
-from jax.sharding import Mesh, PartitionSpec
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 _AXIS = "d"
 
@@ -35,3 +35,26 @@ def corner_partition_spec() -> PartitionSpec:
 def double_layer_partition_spec() -> PartitionSpec:
     """Double-layer ``(D², D², D², D²)`` → shard the first D² axis."""
     return PartitionSpec(_AXIS, None, None, None)
+
+
+def commit_double_layer(a: jax.Array, mesh: Mesh) -> jax.Array:
+    """device_put the double-layer tensor onto its D²-sharded layout."""
+    return jax.device_put(a, NamedSharding(mesh, double_layer_partition_spec()))
+
+
+def commit_env(env, mesh: Mesh):
+    """device_put a CTMTensorEnv: edges D²-sharded, corners replicated.
+
+    Operates on the ``DenseTensor`` leaves and rebuilds the env via the pytree so
+    the wrapper/indices are preserved.
+    """
+    corner_sh = NamedSharding(mesh, corner_partition_spec())
+    edge_sh = NamedSharding(mesh, edge_partition_spec())
+    fields = {}
+    for name in env._fields:
+        t = getattr(env, name)
+        sh = corner_sh if name.startswith("C") else edge_sh
+        leaves, treedef = jax.tree_util.tree_flatten(t)
+        leaves = [jax.device_put(x, sh) for x in leaves]
+        fields[name] = jax.tree_util.tree_unflatten(treedef, leaves)
+    return env._replace(**fields)
