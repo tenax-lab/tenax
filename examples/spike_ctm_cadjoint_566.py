@@ -195,6 +195,78 @@ def _fwd_check(sym="fermionic", D=2, chi=8, depth=8):
           f"{float(jnp.linalg.norm(grad)):.2e}) OK")
 
 
+# Gate 1: spike compile collapse.  (sym, D, chi, depth)
+_GATE1_SPIKE_GRID = [
+    ("fermionic", 2, 8, 8),
+    ("fermionic", 3, 12, 8),
+    ("dense", 3, 12, 8),
+]
+
+
+def _measure_compile(loss, data, cap):
+    """Cold value_and_grad compile: (wall_s, compile_s, n_compiles)."""
+    vg = jax.value_and_grad(loss)
+    wall, events, _out = _PROF._cold(vg, data, cap)
+    return wall, sum(t for _, t in events), len(events)
+
+
+def _gate1_row(arm, sym, D, chi, depth, cap):
+    A, gate = _PROF.make_site_and_gate(sym, D, seed=42)
+    reconstruct = make_reconstructor(A)
+    data = leaf_of(A)
+    loss_spike, loss_prod = make_losses(
+        gate, chi, depth, reconstruct, stub_backward=True
+    )
+    loss = loss_spike if arm == "spike" else loss_prod
+    wall, comp, ncomp = _measure_compile(loss, data, cap)
+    return {
+        "arm": arm, "sym": sym, "D": D, "chi": chi,
+        "n_blocks": int(getattr(A, "n_blocks", 1)),
+        "vg_wall_s": wall, "vg_compile_s": comp, "n_compiles": ncomp,
+    }
+
+
+def run_gate1(json_path=None):
+    cap = _PROF._install_compile_capture()
+    dev = jax.devices()[0]
+    print("=" * 78)
+    print(f"# Gate 1: spike compile collapse  [{dev.platform} {dev.device_kind}]")
+    print("=" * 78)
+    rows = []
+    # production anchor (fermionic D=2) — same machine/code contrast (~minutes).
+    rows.append(_gate1_row("baseline", "fermionic", 2, 8, 8, cap))
+    for sym, D, chi, depth in _GATE1_SPIKE_GRID:
+        rows.append(_gate1_row("spike", sym, D, chi, depth, cap))
+        if json_path:
+            with open(json_path, "w") as fh:
+                json.dump({"platform": dev.platform, "rows": rows}, fh, indent=2)
+    for r in rows:
+        print(f"  {r['arm']:>8} {r['sym']:>9} D={r['D']} chi={r['chi']:>2} "
+              f"blk={r['n_blocks']:>2}: vg_compile={r['vg_compile_s']:8.2f}s "
+              f"wall={r['vg_wall_s']:8.2f}s n_compiles={r['n_compiles']}")
+    if json_path:
+        with open(json_path, "w") as fh:
+            json.dump({"platform": dev.platform, "rows": rows}, fh, indent=2)
+    sp = {(r["sym"], r["D"]): r for r in rows if r["arm"] == "spike"}
+    bl = {(r["sym"], r["D"]): r for r in rows if r["arm"] == "baseline"}
+    fD2, fD3, dD3 = sp[("fermionic", 2)], sp[("fermionic", 3)], sp[("dense", 3)]
+    ratio = fD3["vg_compile_s"] / max(fD2["vg_compile_s"], 1e-9)
+    go = (fD3["vg_compile_s"] < 30.0) and (ratio < 2.0)
+    print("-" * 78)
+    print(f"  spike fermionic D2->D3 compile ratio = {ratio:.2f}  (GO if < 2.0)")
+    print(f"  spike fermionic D3 compile = {fD3['vg_compile_s']:.2f}s  (GO if < 30s)")
+    print(f"  spike fermionic D3 vs dense D3 = {fD3['vg_compile_s']:.2f}s vs "
+          f"{dD3['vg_compile_s']:.2f}s  (want ~equal)")
+    if ("fermionic", 2) in bl:
+        b = bl[("fermionic", 2)]
+        sx = b["vg_compile_s"] / max(fD2["vg_compile_s"], 1e-9)
+        print(f"  production baseline fermionic D2 = {b['vg_compile_s']:.2f}s  "
+              f"(spike D2 = {fD2['vg_compile_s']:.2f}s -> {sx:.1f}x faster)")
+    print("  recorded baseline fermionic vg_cmp: 206s -> 2111s D2->D3 (~10x)")
+    print(f"\n  GATE 1: {'GO' if go else 'NO-GO'}")
+    return go
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--self-check", action="store_true")
@@ -207,6 +279,8 @@ def main():
         _self_check()
     if args.fwd_check:
         _fwd_check()
+    if args.gate1:
+        run_gate1(args.json)
 
 
 if __name__ == "__main__":

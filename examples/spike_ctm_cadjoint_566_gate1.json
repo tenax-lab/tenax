@@ -1,0 +1,45 @@
+{
+  "platform": "gpu",
+  "rows": [
+    {
+      "arm": "baseline",
+      "sym": "fermionic",
+      "D": 2,
+      "chi": 8,
+      "n_blocks": 16,
+      "vg_wall_s": 276.9302025232464,
+      "vg_compile_s": 205.90466880199997,
+      "n_compiles": 270
+    },
+    {
+      "arm": "spike",
+      "sym": "fermionic",
+      "D": 2,
+      "chi": 8,
+      "n_blocks": 16,
+      "vg_wall_s": 29.40152110159397,
+      "vg_compile_s": 12.141509780999991,
+      "n_compiles": 549
+    },
+    {
+      "arm": "spike",
+      "sym": "fermionic",
+      "D": 3,
+      "chi": 12,
+      "n_blocks": 16,
+      "vg_wall_s": 255.2083155978471,
+      "vg_compile_s": 165.86743928300038,
+      "n_compiles": 6363
+    },
+    {
+      "arm": "spike",
+      "sym": "dense",
+      "D": 3,
+      "chi": 12,
+      "n_blocks": 1,
+      "vg_wall_s": 14.101024774834514,
+      "vg_compile_s": 9.420318604000004,
+      "n_compiles": 259
+    }
+  ]
+}
