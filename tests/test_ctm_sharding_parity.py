@@ -4,6 +4,12 @@ import sys
 
 import pytest
 
+# Importable when pytest runs this file directly (prepend import mode puts the
+# test dir on sys.path); guard the insert so it also works if invoked some other
+# way.  Same import the subprocess driver uses.
+sys.path.insert(0, os.path.dirname(__file__))
+from _ctm_sharding_probe import heisenberg_dense_probe_energy
+
 # Per device-count probe size: D² must divide the device count so every
 # sharded axis (the double-layer D² legs AND the chi legs of the edges) splits
 # evenly, otherwise XLA raises an IndivisibleError.
@@ -38,3 +44,15 @@ def test_sharded_forward_matches_single_device(n_dev):
         timeout=600,
     )
     assert r.returncode == 0, f"parity failed:\nSTDOUT:{r.stdout}\nSTDERR:{r.stderr}"
+
+
+def test_flag_off_is_unchanged():
+    """device_mesh=None must give the exact same energy as not passing it.
+
+    The sharding flag is opt-in: ``device_mesh=None`` (the default) must be a
+    literal no-op, so the energy is bit-identical to omitting the argument.
+    Both calls run single-device, so no fake-device env is needed.
+    """
+    e_default = heisenberg_dense_probe_energy(D=2, chi=8, seed=1)
+    e_none = heisenberg_dense_probe_energy(D=2, chi=8, device_mesh=None, seed=1)
+    assert e_default == e_none
