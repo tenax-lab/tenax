@@ -21,3 +21,9 @@ def test_mesh_and_specs():
     assert tuple(corner_partition_spec()) == (None, None)
     # double-layer (D2, D2, D2, D2): shard axis 0 over "d"
     assert tuple(double_layer_partition_spec()) == ("d", None, None, None)
+
+
+def test_build_ctm_mesh_default_devices():
+    mesh = build_ctm_mesh()
+    assert mesh.axis_names == ("d",)
+    assert mesh.devices.size == len(jax.devices())

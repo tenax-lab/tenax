@@ -7,6 +7,8 @@ per-device peak memory ≈1/N at large D. See the rung-1 design spec.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import jax
 import numpy as np
 from jax.sharding import Mesh, PartitionSpec
@@ -14,7 +16,7 @@ from jax.sharding import Mesh, PartitionSpec
 _AXIS = "d"
 
 
-def build_ctm_mesh(devices=None) -> Mesh:
+def build_ctm_mesh(devices: Sequence[jax.Device] | None = None) -> Mesh:
     """1-D mesh named ``"d"`` over the given devices (default: all local devices)."""
     devs = list(devices) if devices is not None else jax.devices()
     return Mesh(np.asarray(devs), axis_names=(_AXIS,))
