@@ -61,6 +61,19 @@ now exhausted (batched dispatch #568/#618/#627, stacking #566, env de-frag #610,
 uniform-sector env #615, cuTensorNet/FFI #200, the PBA+scan port, and this
 C-adjoint). The only remaining path leaves JAX entirely.
 
+> **Correction (2026-06-19, `examples/probe_padded_vmap_566_summary.md`):** the
+> clause "the PBA+scan port [is] exhausted" / "every tractable lever exhausted"
+> was an **overclaim**. A follow-up probe measured that the PBA+`vmap`/`scan`
+> port's feared obstacle — padding heterogeneous blocks to uniform *converges to
+> dense* — is **false for even-D fermionic**: the entire converged CTM environment
+> (corners + edges) is block-shape-uniform at even D (χ=8, 16), so a padded-`vmap`
+> representation has **zero padding waste, O(1) compile, and the full 2× Z₂
+> sparsity**. What is genuinely NO-GO is the *partial* batched-contraction form
+> (#568/#627), which leaves fusion + the sweep loop eager. The **full** port
+> (padded `_fuse_indices_symmetric` + `lax.scan` fixed-point as one jitted graph)
+> is **untested** at even D and is the one un-refuted lever. Odd D=3 / U(1)-Sz
+> still converge to dense (block fragmentation). See `566-padded-vmap-evenD` memory.
+
 It is **not** an algorithm limit: the same iPEPS-AD is efficient in **eager**
 frameworks — YASTN (PyTorch) wins symmetric-vs-dense at large D precisely because
 its per-block loop is cheap C-level with no compile wall.
