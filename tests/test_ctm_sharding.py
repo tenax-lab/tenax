@@ -1,3 +1,7 @@
+import os
+import subprocess
+import sys
+
 import jax
 import numpy as np
 import pytest
@@ -118,3 +122,28 @@ def test_commit_double_layer_is_sharded():
     shard_shape = a_sharded.sharding.shard_shape(a_sharded.shape)
     assert shard_shape[0] == D2 // n
     assert shard_shape[1:] == (D2, D2, D2)
+
+
+def test_sharded_forward_matches_single_device():
+    """Dense CTM energy under a 2-device GSPMD mesh equals the single-device
+    result to <1e-8 (subprocess with fake CPU devices)."""
+    # ``--xla_force_host_platform_device_count=2`` fabricates two devices on
+    # the CPU platform only, so the subprocess MUST run on CPU.  On a GPU box
+    # JAX otherwise defaults to the single real GPU, the 2-way mesh all-gather
+    # never finds its second peer, and the child aborts on a rendezvous
+    # timeout.  ``JAX_PLATFORMS=cpu`` pins the platform so the fake-device
+    # trick (and the GSPMD sharding it exercises) works regardless of host
+    # accelerators.
+    env = dict(
+        os.environ,
+        XLA_FLAGS="--xla_force_host_platform_device_count=2",
+        JAX_PLATFORMS="cpu",
+    )
+    r = subprocess.run(
+        [sys.executable, "tests/_ctm_sharding_parity_subproc.py"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert r.returncode == 0, f"parity failed:\nSTDOUT:{r.stdout}\nSTDERR:{r.stderr}"

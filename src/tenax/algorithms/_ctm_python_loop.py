@@ -59,6 +59,7 @@ _JIT_STEP_CACHE: dict[tuple[int, str], callable] = {}
 def _make_jit_ctm_step(
     neighbors: dict[Coord, dict[str, Coord]],
     recipe: str = "2x2",
+    device_mesh=None,
 ):
     """Create a JIT-compiled CTM step function for a given neighbor topology.
 
@@ -82,7 +83,10 @@ def _make_jit_ctm_step(
     # Include ``recipe`` in the cache key so the "1x1" and "2x2" sweeps get
     # distinct compiled ``_step`` closures even when they share the same
     # ``neighbors`` dict (which is reused across optimizer steps).
-    cache_key = (id(neighbors), recipe)
+    # ``device_mesh`` is captured (static, non-traced) in the closure, so it
+    # must participate in the cache key: the sharded and single-device steps
+    # are different compiled functions.
+    cache_key = (id(neighbors), recipe, id(device_mesh))
     cached = _JIT_STEP_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -117,6 +121,7 @@ def _make_jit_ctm_step(
             projector_method,
             projector_backward=projector_backward,
             recipe=recipe,
+            device_mesh=device_mesh,
         )
 
     _JIT_STEP_CACHE[cache_key] = _step
@@ -145,6 +150,7 @@ def python_loop_ctm_converge(
     ctmrg_heuristic_increase_chi_step_size: int = 2,
     chi_max: int | None = None,
     recipe: str = "2x2",
+    device_mesh=None,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM to convergence using a Python for-loop over JIT'd sweeps.
 
@@ -222,10 +228,11 @@ def python_loop_ctm_converge(
             gauge_fix_fn=gauge_fix_fn,
             plateau_patience=plateau_patience,
             recipe=recipe,
+            device_mesh=device_mesh,
         )
 
-    # Build the JIT'd step function (captures neighbors in closure)
-    jit_step = _make_jit_ctm_step(neighbors, recipe)
+    # Build the JIT'd step function (captures neighbors + device_mesh in closure)
+    jit_step = _make_jit_ctm_step(neighbors, recipe, device_mesh=device_mesh)
 
     # chi may grow during the loop when ``ctmrg_heuristic_increase_chi``
     # is enabled (variPEPS-style in-CTM bump; Issue #492).  ``chi_current``
@@ -263,6 +270,15 @@ def python_loop_ctm_converge(
             for c, A in site_tensors.items()
         }
     )
+
+    # GSPMD: commit the initial envs onto the device mesh (edges D²-sharded,
+    # corners replicated) so the JIT'd sweep's inputs already carry the
+    # sharding the per-move constraints chain off.  No-op when device_mesh
+    # is None (single-device path is byte-for-byte unchanged).
+    if device_mesh is not None:
+        from tenax.algorithms.ctm_sharding import commit_env
+
+        envs = {coord: commit_env(env, device_mesh) for coord, env in envs.items()}
 
     # QR warm-up: run a few eigh iterations before switching to QR
     warmup = 0
@@ -327,6 +343,7 @@ def _python_loop_chi_ramp(
     gauge_fix_fn=None,
     plateau_patience: int | None = None,
     recipe: str = "2x2",
+    device_mesh=None,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM with chi-ramp schedule."""
     envs = env_init
@@ -379,6 +396,7 @@ def _python_loop_chi_ramp(
             gauge_fix_fn=gauge_fix_fn,
             plateau_patience=stage_patience,
             recipe=recipe,
+            device_mesh=device_mesh,
         )
         prev_chi = stage_chi
 

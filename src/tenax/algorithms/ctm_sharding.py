@@ -11,6 +11,7 @@ from collections.abc import Sequence
 
 import jax
 import numpy as np
+from jax.lax import with_sharding_constraint
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
@@ -43,6 +44,30 @@ def double_layer_partition_spec() -> PartitionSpec:
 def commit_double_layer(a: jax.Array, mesh: Mesh) -> jax.Array:
     """device_put the double-layer tensor onto its D²-sharded layout."""
     return jax.device_put(a, NamedSharding(mesh, double_layer_partition_spec()))
+
+
+# Per-move surviving D²-leg of the double-layer tensor ``a`` (axes
+# u2,d2,l2,r2 = 0,1,2,3).  Sharding ``a`` on this axis keeps the dominant
+# χ²·D⁶ absorption intermediate at ≈1/N AND keeps the newly-absorbed edge
+# sharded, so the memory win chains across moves.  See the rung-1 spec.
+_MOVE_SURVIVING_AXIS = {"left": 3, "right": 2, "top": 1, "bottom": 0}
+
+
+def double_layer_move_partition_spec(direction: str) -> PartitionSpec:
+    """Shard the `a` D²-leg that survives the given move (keeps the χ²·D⁶
+    intermediate ≈1/N and the new edge sharded). See the rung-1 spec."""
+    spec = [None, None, None, None]
+    spec[_MOVE_SURVIVING_AXIS[direction]] = _AXIS
+    return PartitionSpec(*spec)
+
+
+def constrain_double_layer_for_move(a, direction: str, mesh: Mesh):
+    """with_sharding_constraint the double-layer Tensor `a` to its surviving-leg
+    sharding for `direction`; operates on the single array leaf, returns a Tensor."""
+    sh = NamedSharding(mesh, double_layer_move_partition_spec(direction))
+    leaves, treedef = jax.tree_util.tree_flatten(a)
+    leaves = [with_sharding_constraint(x, sh) for x in leaves]
+    return jax.tree_util.tree_unflatten(treedef, leaves)
 
 
 def commit_env(env: CTMTensorEnv, mesh: Mesh) -> CTMTensorEnv:
