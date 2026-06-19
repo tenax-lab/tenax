@@ -14,10 +14,14 @@ __all__ = [
     "python_loop_ctm_converge",
 ]
 
+from collections.abc import Callable
 from functools import partial
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import jax
+
+if TYPE_CHECKING:
+    from jax.sharding import Mesh
 
 from tenax.algorithms._ctm_loop_core import (
     _run_ctm_loop_with_bump,
@@ -53,7 +57,10 @@ class CTMConvergeInfo(NamedTuple):
 # cost.  Diagnosed in docs/plans/2026-05-09-ipeps-ad-jit-cost-diagnosis.md.
 # Keyed by id(neighbors) — safe because neighbors dicts are constructed once
 # per optimizer invocation and stay alive throughout.
-_JIT_STEP_CACHE: dict[tuple[int, str], callable] = {}
+# Key is (id(neighbors), recipe, device_mesh): a 3-tuple of an int, a str and a
+# ``jax.sharding.Mesh | None`` (Mesh imported only under TYPE_CHECKING; the
+# annotation is a string here thanks to ``from __future__ import annotations``).
+_JIT_STEP_CACHE: dict[tuple[int, str, Mesh | None], Callable] = {}
 
 
 def _make_jit_ctm_step(
@@ -86,7 +93,11 @@ def _make_jit_ctm_step(
     # ``device_mesh`` is captured (static, non-traced) in the closure, so it
     # must participate in the cache key: the sharded and single-device steps
     # are different compiled functions.
-    cache_key = (id(neighbors), recipe, id(device_mesh))
+    # Asymmetric keying: ``neighbors`` is an unhashable dict so we fall back to
+    # ``id()``; ``device_mesh`` is a hashable ``jax.sharding.Mesh`` (or None)
+    # with a value ``__eq__``, so it is used directly — equal meshes share a
+    # cache entry and we avoid id-reuse hazards after GC.
+    cache_key = (id(neighbors), recipe, device_mesh)
     cached = _JIT_STEP_CACHE.get(cache_key)
     if cached is not None:
         return cached
