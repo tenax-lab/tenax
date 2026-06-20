@@ -130,11 +130,17 @@ def heisenberg_u1sz_init_pair(
     phys_charges = np.array([1, -1], dtype=np.int32)
 
     indices = (
-        TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(
+            sym, virt_charges.copy(), FlowDirection.OUT, label="u"
+        ),
         TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.IN, label="d"),
-        TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(
+            sym, virt_charges.copy(), FlowDirection.OUT, label="l"
+        ),
         TensorIndex.from_charges(sym, virt_charges.copy(), FlowDirection.IN, label="r"),
-        TensorIndex.from_charges(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
     )
 
     kA, kB = jax.random.split(key)

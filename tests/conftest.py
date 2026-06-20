@@ -79,6 +79,11 @@ _FILE_MARKERS = {
     "test_vjp_seam.py": "core",
     "test_vjp_seam_cutensor.py": "core",
     "test_stacked_tensor_dtype.py": "core",
+    # GSPMD-sharded dense CTM (large-D rung 1): fast mechanism unit tests
+    # (mesh specs, commit helpers, config default) gate every PR; the heavy
+    # subprocess parity sweep (N=2,4 fake CPU devices) is slow-only.
+    "test_ctm_sharding.py": "core",
+    "test_ctm_sharding_parity.py": "slow",
 }
 
 

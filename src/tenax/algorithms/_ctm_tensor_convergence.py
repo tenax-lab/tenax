@@ -144,9 +144,7 @@ def _ctm_tensor_sweep(
         env = _renormalize_tensor_env(env)
     # Moves return eps as a (traced) array so the jitted multisite path stays
     # jit-safe; this eager single-site sweep converts to a Python float here.
-    max_eps = max(
-        float(eps_left), float(eps_top), float(eps_right), float(eps_bottom)
-    )
+    max_eps = max(float(eps_left), float(eps_top), float(eps_right), float(eps_bottom))
     return env, max_eps
 
 
@@ -282,6 +280,7 @@ def _ctm_tensor_sweep_multisite(
     projector_method: str = "svd",
     projector_backward: str = "auto",
     recipe: str = "2x2",
+    device_mesh=None,
 ) -> tuple[dict[Coord, CTMTensorEnv], jax.Array, jax.Array]:
     """One full multisite CTM sweep over all sites and directions.
 
@@ -340,6 +339,24 @@ def _ctm_tensor_sweep_multisite(
                 )
                 max_eps = jnp.maximum(max_eps, jnp.asarray(eps_t))
     elif recipe == "2x2":
+        # GSPMD: when a device mesh is supplied, re-shard the absorbed
+        # double-layer ``a`` onto its surviving-leg layout for the move's
+        # direction so the dominant χ²·D⁶ absorption intermediate stays at
+        # ≈1/N per device.  ``with_sharding_constraint`` is a pure layout hint
+        # (never changes numerics), so the flag-off path below is a literal
+        # no-op identical to the single-device code.
+        if device_mesh is not None:
+            from tenax.algorithms.ctm_sharding import (
+                constrain_double_layer_for_move,
+            )
+
+            def _shard_a(a, direction):
+                return constrain_double_layer_for_move(a, direction, device_mesh)
+        else:
+
+            def _shard_a(a, direction):
+                return a
+
         # variPEPS-style 2-plaquette absorption: for each direction, two
         # phases.
         #
@@ -425,7 +442,7 @@ def _ctm_tensor_sweep_multisite(
                     P_top_curr, P_bot_curr = projectors[s_src]
                     C1_new, T4_new, C4_new = _ctm_tensor_absorb_left_2plaq(
                         envs_old[s_src],
-                        double_layers[s_src],
+                        _shard_a(double_layers[s_src], "left"),
                         P_top_above,
                         P_bot_above,
                         P_top_curr,
@@ -455,7 +472,7 @@ def _ctm_tensor_sweep_multisite(
                     P_top_curr, P_bot_curr = projectors[s_dst]
                     C2_new, T2_new, C3_new = _ctm_tensor_absorb_right_2plaq(
                         envs_old[s_src],
-                        double_layers[s_src],
+                        _shard_a(double_layers[s_src], "right"),
                         P_top_above,
                         P_bot_above,
                         P_top_curr,
@@ -471,7 +488,7 @@ def _ctm_tensor_sweep_multisite(
                     P_top_curr, P_bot_curr = projectors[s_src]
                     C1_new, T1_new, C2_new = _ctm_tensor_absorb_top_2plaq(
                         envs_old[s_src],
-                        double_layers[s_src],
+                        _shard_a(double_layers[s_src], "top"),
                         P_top_left,
                         P_bot_left,
                         P_top_curr,
@@ -495,7 +512,7 @@ def _ctm_tensor_sweep_multisite(
                     P_top_curr, P_bot_curr = projectors[s_dst]
                     C4_new, T3_new, C3_new = _ctm_tensor_absorb_bottom_2plaq(
                         envs_old[s_src],
-                        double_layers[s_src],
+                        _shard_a(double_layers[s_src], "bottom"),
                         P_top_left,
                         P_bot_left,
                         P_top_curr,
