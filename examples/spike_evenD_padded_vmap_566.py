@@ -450,6 +450,206 @@ def gate0_opcount():
     return rows
 
 
+# --------------------------------------------------------------------------- #
+# Gate 1 — does collapsing the fuse op-count collapse the SWEEP-STEP COMPILE?
+#
+# Gate 0 proved the fuse jaxpr collapses 165->17 eqns (9.7x) on the fermionic
+# 16-block site.  The open question, attributed here: does that collapse the
+# COMPILE of one production CTM sweep step, or is the sweep compile dominated by
+# something padded_fuse never touches (SVD, dot_general, ...)?  We measure ONE
+# forward `_ctm_tensor_sweep_multisite` step for fermionic D=2 chi=8 and
+# D=4 chi=16 in two configs and ATTRIBUTE the jaxpr by primitive.
+#
+#   Config A (baseline):  TENAX_BATCH_BLOCKSPARSE=0, eager fuse (unpatched).
+#   Config B (levered):   TENAX_BATCH_BLOCKSPARSE=1, fuse monkeypatched to
+#                         padded_fuse (one gather + one scatter per fuse).
+#
+# This is data, not a verdict — the controller decides GO/NO-GO.
+# --------------------------------------------------------------------------- #
+import collections  # noqa: E402
+import os  # noqa: E402
+
+import tenax.algorithms._tensor_utils as _tu  # noqa: E402
+
+
+def _build_sweep_fn(D, chi, recipe="2x2"):
+    """Return (fn, (envs, dl)) where fn(packed)->scalar runs ONE sweep step.
+
+    ``packed = (envs, double_layers)`` are the traced pytree inputs; all other
+    sweep args (neighbors, chi, renormalize, recipe) are python statics closed
+    over.  The returned scalar sums every renormalized corner/edge norm of the
+    swept env plus ``max_eps`` so the whole sweep is forced.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import (
+        _ctm_tensor_sweep_multisite,
+    )
+
+    A, _gate = prof.make_site_and_gate("fermionic", D, seed=42)
+    cfg = CTMConfig(chi=chi, max_iter=10, conv_tol=1e-4)
+    envs = _ctm_tensor_multisite_fixed_point({(0, 0): A}, SINGLE_SITE_NEIGHBORS, cfg)
+    dl = {(0, 0): _build_double_layer_tensor(A)}
+
+    def fn(packed, _recipe=recipe, _chi=chi):
+        e, d = packed
+        new_envs, max_eps, _max_S = _ctm_tensor_sweep_multisite(
+            e, d, SINGLE_SITE_NEIGHBORS, _chi, True,
+            projector_method="svd", recipe=_recipe,
+        )
+        env = new_envs[(0, 0)]
+        s = max_eps
+        for t in (env.C1, env.C2, env.C3, env.C4,
+                  env.T1, env.T2, env.T3, env.T4):
+            s = s + t.norm()
+        return s
+
+    return fn, (envs, dl)
+
+
+def _swept_corners_dense(chi, packed, recipe="2x2"):
+    """Run one sweep eagerly and return a flat dense vector of the swept env."""
+    from tenax.algorithms._ctm_tensor_convergence import (
+        _ctm_tensor_sweep_multisite,
+    )
+
+    e, d = packed
+    new_envs, _eps, _S = _ctm_tensor_sweep_multisite(
+        e, d, SINGLE_SITE_NEIGHBORS, chi, True,
+        projector_method="svd", recipe=recipe,
+    )
+    env = new_envs[(0, 0)]
+    parts = []
+    for t in (env.C1, env.C2, env.C3, env.C4,
+              env.T1, env.T2, env.T3, env.T4):
+        parts.append(np.asarray(t.todense()).ravel())
+    return np.concatenate(parts)
+
+
+def _primitive_breakdown(jpr, top=10):
+    counts = collections.Counter(eqn.primitive.name for eqn in jpr.jaxpr.eqns)
+    return counts.most_common(top)
+
+
+def _install_padded_fuse_patch():
+    """Monkeypatch the symmetric fuse to ``padded_fuse``; return an undo fn.
+
+    All CTM fusion flows: move -> ``_fuse_pair_by_label`` (in _ctm_tensor_init)
+    -> module-level ``fuse_indices`` (in _tensor_utils) -> ``_fuse_indices_symmetric``
+    looked up in ``_tensor_utils.__dict__`` at call time.  So rebinding
+    ``_tu._fuse_indices_symmetric`` reaches every 2x2 move's symmetric fuse.
+    """
+    orig = _tu._fuse_indices_symmetric
+
+    def _patched(T, axis_a, axis_b, fused_label, fused_flow):
+        return padded_fuse(T, axis_a, axis_b, fused_label, fused_flow)
+
+    _tu._fuse_indices_symmetric = _patched
+
+    def undo():
+        _tu._fuse_indices_symmetric = orig
+
+    return undo
+
+
+def _attr_one(D, chi, levered, cap, recipe="2x2"):
+    """Measure one (D, config): compile_s, n_compiles, total_eqns, breakdown."""
+    os.environ["TENAX_BATCH_BLOCKSPARSE"] = "1" if levered else "0"
+    undo = _install_padded_fuse_patch() if levered else (lambda: None)
+    try:
+        fn, packed = _build_sweep_fn(D, chi, recipe=recipe)
+        # jaxpr (op-count + attribution) — traced, no compile.
+        jpr = jax.make_jaxpr(fn)(packed)
+        total_eqns = len(jpr.jaxpr.eqns)
+        breakdown = _primitive_breakdown(jpr, top=10)
+        # cold compile.
+        cap.reset()
+        wall, events, _out = prof._cold(jax.jit(fn), packed, cap)
+        compile_s = sum(t for _, t in events)
+        n_compiles = len(events)
+        # value for correctness cross-check (eager, no jit).
+        val = float(fn(packed))
+        return dict(D=D, chi=chi, levered=levered, compile_s=compile_s,
+                    n_compiles=n_compiles, total_eqns=total_eqns,
+                    breakdown=breakdown, val=val, fn_packed=(chi, packed))
+    finally:
+        undo()
+
+
+def gate1_attribution():
+    print("\n## Gate 1 — sweep-step COMPILE attribution (fermionic, recipe=2x2)")
+    print("  Config A = baseline (eager fuse, BATCH=0); "
+          "Config B = levered (padded_fuse, BATCH=1).")
+    cap = prof._install_compile_capture()
+    recipe = "2x2"
+    results = {}
+    correctness = {}
+    for D, chi in [(2, 8), (4, 16)]:
+        # --- run both configs; fall back to 1x1 if 2x2 errors in isolation. --
+        try:
+            a = _attr_one(D, chi, levered=False, cap=cap, recipe=recipe)
+        except Exception as exc:  # noqa: BLE001
+            if recipe == "2x2":
+                print(f"  !! recipe=2x2 errored at D={D} ({type(exc).__name__}: "
+                      f"{exc}); FALLING BACK to recipe=1x1 for ALL D.")
+                recipe = "1x1"
+                a = _attr_one(D, chi, levered=False, cap=cap, recipe=recipe)
+            else:
+                raise
+        b = _attr_one(D, chi, levered=True, cap=cap, recipe=recipe)
+        results[D] = (a, b)
+
+        # --- correctness: SAME converged env, eager vs padded fuse (+BATCH). ---
+        # NOTE: must use ONE shared env for both arms.  Comparing sweeps of two
+        # SEPARATELY-converged envs (a vs b) is a harness bug — they differ by
+        # gauge/convergence, giving a spurious ~1.0 diff.  Isolated 4-config check
+        # on a single env confirms: padded/BATCH-off = 0.0 exact, padded/BATCH-on
+        # = 2.2e-14 (float reorder).  padded_fuse IS a correct drop-in.
+        shared = a["fn_packed"][1]  # (envs, dl) from Config A's convergence
+        os.environ["TENAX_BATCH_BLOCKSPARSE"] = "0"
+        va = _swept_corners_dense(chi, shared, recipe=recipe)
+        os.environ["TENAX_BATCH_BLOCKSPARSE"] = "1"
+        undo = _install_padded_fuse_patch()
+        try:
+            vb = _swept_corners_dense(chi, shared, recipe=recipe)
+        finally:
+            undo()
+            os.environ["TENAX_BATCH_BLOCKSPARSE"] = "0"
+        cdiff = float(np.max(np.abs(va - vb))) if va.shape == vb.shape else float("inf")
+        correctness[D] = cdiff
+
+    # --- print the per-D table ------------------------------------------- #
+    print(f"\n  recipe used: {recipe}")
+    for D, (a, b) in results.items():
+        print(f"\n  ---- fermionic D={D} chi={a['chi']} ----")
+        print(f"  {'config':>8} | {'compile_s':>10} | {'n_compiles':>10} | "
+              f"{'total_eqns':>10} | top-primitive breakdown")
+        for tag, r in (("A base", a), ("B lever", b)):
+            bd = "  ".join(f"{n}:{c}" for n, c in r["breakdown"])
+            print(f"  {tag:>8} | {r['compile_s']:>10.2f} | {r['n_compiles']:>10} | "
+                  f"{r['total_eqns']:>10} | {bd}")
+        # fusion-primitive sanity: scatter+gather counts (did the patch take?).
+        a_sc = dict(a["breakdown"]).get("scatter", 0) + dict(a["breakdown"]).get("scatter-add", 0)
+        b_sc = dict(b["breakdown"]).get("scatter", 0) + dict(b["breakdown"]).get("scatter-add", 0)
+        print(f"  scatter(+scatter-add) eqns:  baseline={a_sc}  levered={b_sc}  "
+              f"(levered should DROP if patch reached the moves)")
+        cr = b["compile_s"] / max(a["compile_s"], 1e-9)
+        er = b["total_eqns"] / max(a["total_eqns"], 1)
+        print(f"  baseline->levered:  compile {cr:.3f}x   total_eqns {er:.3f}x")
+        print(f"  correctness (eager B vs A, max-abs dense diff): {correctness[D]:.3e}  "
+              f"({'PASS <1e-8' if correctness[D] < 1e-8 else 'FAIL'})")
+
+    # --- cross-D levered scaling ----------------------------------------- #
+    if 2 in results and 4 in results:
+        b2 = results[2][1]
+        b4 = results[4][1]
+        print(f"\n  D2->D4 LEVERED:  compile {b4['compile_s']/max(b2['compile_s'],1e-9):.2f}x   "
+              f"total_eqns {b4['total_eqns']/max(b2['total_eqns'],1):.2f}x")
+        a2 = results[2][0]
+        a4 = results[4][0]
+        print(f"  D2->D4 BASELINE: compile {a4['compile_s']/max(a2['compile_s'],1e-9):.2f}x   "
+              f"total_eqns {a4['total_eqns']/max(a2['total_eqns'],1):.2f}x")
+    return results, correctness
+
+
 def main():
     print(f"# #566 Gate 0 padded global-scatter fuse  [{jax.devices()[0].device_kind}]")
     ok, corr = test_padded_fuse_matches_eager()
@@ -481,4 +681,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "gate1":
+        print(f"# #566 Gate 1 sweep-step compile attribution  "
+              f"[{jax.devices()[0].device_kind}]")
+        gate1_attribution()
+    else:
+        main()
