@@ -363,6 +363,7 @@ def ctm_energy_implicit(
     ctmrg_heuristic_increase_chi_step_size: int = 2,
     chi_max: int | None = None,
     recipe: str = "2x2",
+    device_mesh=None,
 ) -> jnp.ndarray:
     """Compute iPEPS energy with implicit-differentiation backward (GMRES).
 
@@ -514,6 +515,7 @@ def ctm_energy_implicit(
         ctmrg_heuristic_increase_chi_step_size,
         chi_max,
         recipe,
+        device_mesh,
     )
 
 
@@ -539,6 +541,7 @@ def _sigma_gauged_ctm_converge(
     ctmrg_heuristic_increase_chi_step_size: int = 2,
     chi_max: int | None = None,
     recipe: str = "2x2",
+    device_mesh=None,
 ):
     """CTM convergence with sigma gauge fixing for element-wise fixed point.
 
@@ -564,7 +567,7 @@ def _sigma_gauged_ctm_converge(
         bump_step_size=ctmrg_heuristic_increase_chi_step_size,
     )
 
-    jit_step = _make_jit_ctm_step(neighbors, recipe)
+    jit_step = _make_jit_ctm_step(neighbors, recipe, device_mesh=device_mesh)
     envs = (
         env_init
         if env_init is not None
@@ -573,6 +576,14 @@ def _sigma_gauged_ctm_converge(
             for c, A in site_tensors.items()
         }
     )
+    # Rung-2 gate: commit the initial envs to their D²-sharded layout so the
+    # forward (and the residuals it saves for the implicit-AD backward) stay
+    # sharded; GSPMD then propagates through the jitted step.  No-op when
+    # ``device_mesh is None`` (default → today's single-device path).
+    if device_mesh is not None:
+        from tenax.algorithms.ctm_sharding import commit_env
+
+        envs = {c: commit_env(e, device_mesh) for c, e in envs.items()}
 
     # ---- QR warmup (unchanged) ----
     warmup = (
@@ -749,6 +760,7 @@ def _ctm_energy_implicit_dispatch(
     ctmrg_heuristic_increase_chi_step_size,
     chi_max,
     recipe="2x2",
+    device_mesh=None,
 ):
     """Dispatch to custom_vjp-decorated function with caching.
 
@@ -785,6 +797,7 @@ def _ctm_energy_implicit_dispatch(
         ctmrg_heuristic_increase_chi_step_size,
         chi_max,
         recipe,  # distinct sweep recipe → distinct cached forward+backward
+        device_mesh,  # sharded vs single → distinct cached forward+backward
     )
 
     entry = _VJP_CACHE.get(cache_key)
@@ -829,6 +842,7 @@ def _ctm_energy_implicit_dispatch(
         ctmrg_heuristic_increase_chi_step_size=ctmrg_heuristic_increase_chi_step_size,
         chi_max=chi_max,
         recipe=recipe,
+        device_mesh=device_mesh,
     )
     _VJP_CACHE[cache_key] = (f, mutables)
     return f(params_data_tuple)
@@ -859,6 +873,7 @@ def _make_implicit_vjp_fn(
     ctmrg_heuristic_increase_chi_step_size: int = 2,
     chi_max: int | None = None,
     recipe: str = "2x2",
+    device_mesh=None,
 ):
     """Build a custom_vjp-decorated function closed over static config.
 
@@ -932,6 +947,7 @@ def _make_implicit_vjp_fn(
                 gauge_fix_fn=_gauge_fix_fn,
                 plateau_patience=plateau_patience,
                 recipe=recipe,
+                device_mesh=device_mesh,
             )
             # chi_ramp doesn't trigger in-CTM bump (mutex enforced in dispatch);
             # chi_post is the final ramp stage's chi, which equals ``chi`` for
@@ -958,6 +974,7 @@ def _make_implicit_vjp_fn(
                 ctmrg_heuristic_increase_chi_step_size=ctmrg_heuristic_increase_chi_step_size,
                 chi_max=chi_max,
                 recipe=recipe,
+                device_mesh=device_mesh,
             )
         return envs, chi_post
 
