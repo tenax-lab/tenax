@@ -77,30 +77,60 @@ still scales **~D⁶** ⇒ N GPUs buy **N^(1/6)**. D=12 OOMs even on 4 GPUs. So 
 optimization *work and be correct*, but does not reach the large-D regime (D≥12) where eager/YASTN
 matters. Same verdict as `2026-06-21-632-multigpu-dense-ctm-findings.md`.
 
-## Recommendation for the (green-lit) full build
+## Full build — DONE (config surface + end-to-end sharded optimization)
 
-The gate already delivered most of the substance: the AD wiring, the correctness CI test, and the
-backward shards effectively *without* per-move constraints. What remains is **polish**, to weigh
-against the +2-in-D reality:
+After the GO, the green-lit polish was built and verified:
 
-1. **`optimize_gs_ad` / `CTMConfig.device_mesh` surface** — let a real multi-step optimization run
-   sharded via config, not just the `ctm_energy_implicit` keyword. **Highest remaining value** (it
-   turns the proven capability into a usable entry point); modest work.
-2. **Per-move `a` constraints in `jit_step_bwd`** — 2B already gets 2.24× without them; likely
-   marginal. **Low priority** — measure with/without before building.
-3. **End-to-end multi-GPU `optimize_gs_ad` benchmark** (a real ground-state run at D=10, χ=24 on
-   4 GPUs) — the convincing demonstration; moderate runtime.
+1. **`CTMConfig.device_mesh` end-to-end surface — DONE.** A field on `CTMConfig` (default `None`,
+   ABI-appended) threads through `ipeps_ad_policy` into the implicit-AD energy *and* (via
+   `ctm_converge_kwargs`) into every forward CTM eval in the 1-site optimize loop — `value_and_grad`,
+   the warm-start `_update_env_cache`, the line-search `loss_fn_fwd`, and the final `_eval_fresh`.
+   So `optimize_gs_ad` runs **fully sharded via config**, not just the bare `ctm_energy_implicit`
+   keyword. Single-device (`None`) is unchanged (existing AD tests pass).
+2. **Per-move `a` constraints in `jit_step_bwd` — SKIPPED (confirmed unneeded).** 2B already gets
+   2.24× without them.
+3. **End-to-end multi-GPU `optimize_gs_ad` — DONE (the headline).** On 4× A100, **D=10 / χ=24**
+   (where single-GPU `value_and_grad` OOMs): `E_init=0.499999 → E_final=0.499997` (dE=−2.3e-6,
+   energy decreases — valid optimization), **per-device peak 21.46 GB**, wall 1738 s for init + 2
+   sharded gradient steps. Multi-GPU ground-state optimization at a D one GPU cannot fit. ✅
+
+### End-to-end correctness (CI): `optimize_gs_ad` parity
+
+`tests/test_ctm_sharding_backward.py::test_sharded_optimize_gs_ad_matches_single_device` — a few
+optimize steps single vs 4-device sharded reach the same energy to **|ΔE|=2.9e-13** on a
+**well-conditioned** init.
+
+> **Subtlety found & resolved (not a bug).** On a *random* (ill-conditioned) init the multi-step
+> sharded trajectory diverges from single by ~1e-2: step 1 is **bit-exact** (empty warm-start →
+> identical to gate 2A), but step 2+ warm-start from the converged env, and the tiny FP
+> reassociation in the warm-started sharded **backward** (GSPMD makes its own backward sharding
+> choices — see the `_jit_fused_fixed_point_bwd` "involuntary full rematerialization" SPMD note) is
+> amplified by the ill-conditioned fixed point **and** the chaotic optimization trajectory. With a
+> **well-conditioned** init it collapses to 2.9e-13 (energy) — both trajectories reach the same
+> minimum. So the valid parity test uses a well-conditioned init and asserts on **energy** (the
+> physical observable); the tensor drifts ~1e-6 along a flat/gauge direction. Same lesson as the
+> rung-1 forward parity.
 
 ## Artifacts (branch `spike/632-rung2-backward-sharding`)
 
-- `src/tenax/algorithms/_ctm_energy_ad.py` — `device_mesh=None` threaded through the implicit-AD
-  entry/dispatch/factory/forward (default-None no-op; in VJP cache key).
-- `tests/_rung2_grad_probe.py` — self-contained `value_and_grad` probe (well-conditioned tensor).
-- `tests/_rung2_grad_parity_subproc.py` + `tests/test_ctm_sharding_backward.py` — Gate 2A CI test.
-- `examples/bench_rung2_grad_memory.py` — Gate 2B/2C GPU memory/ceiling bench (throwaway).
+- `src/tenax/algorithms/_ctm_energy_ad.py` — `device_mesh` through the implicit-AD entry/dispatch/
+  factory/forward (default-None no-op; in VJP cache key).
+- `src/tenax/algorithms/ipeps_config.py` — `CTMConfig.device_mesh` field.
+- `src/tenax/algorithms/ipeps_ad_policy.py` — passes the mesh into the implicit-AD energy +
+  `ctm_converge_kwargs` (shards warm-start/probe/final-env forwards).
+- `tests/_rung2_grad_probe.py`, `tests/_rung2_grad_parity_subproc.py`,
+  `tests/_rung2_optimize_parity_subproc.py`, `tests/test_ctm_sharding_backward.py` — probe + the two
+  CI parity tests (backward grad; end-to-end optimize).
+- `examples/bench_rung2_grad_memory.py`, `examples/bench_rung2_optimize.py` — GPU memory/ceiling +
+  end-to-end optimize benches (throwaway).
 
 ## Caveats
 
+- **SPMD inefficiency (perf, not correctness):** XLA logs `[SPMD] Involuntary full rematerialization`
+  for a transpose in `_jit_fused_fixed_point_bwd` — GSPMD can't reshard `{[1,1,4,1,1]} →
+  {[1,1,1,1,2,2]}` efficiently and replicates+repartitions. Correct, but a runtime tax on the
+  backward (Shardy partitioner / explicit backward shardings would fix it). Contributes to the
+  ~29 min D=10 wall.
 - D=14 / large configs hit the same XLA transpose-autotuner failure seen in rung-1 (orthogonal).
 - 2C ceiling measured on a well-conditioned near-product state (fast, valid gradient); physical
   states at the same (D, χ) have the same tensor shapes, so the memory ceiling is representative.
