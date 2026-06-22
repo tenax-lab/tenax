@@ -5,8 +5,12 @@
 large-χ bottleneck; QR is more GPU-friendly. **Revisits** [[570-svd-vjp-wall]] /
 [[570-phase3-kickoff]] (which reached a "wash" verdict) in the regime #570 did **not** test.
 **Hardware:** single A100-80GB, f64.
-**Verdict: QR WINS at large χ on GPU — ~1.4× fwd, ~1.3× bwd, consistently.** The #570 "wash" was a
-different regime (small-D / compile-bound / block-sparse `"qr"`=eigh). The user's instinct holds.
+**Verdict (ISOLATED decomposition): QR is ~1.4× fwd / ~1.3× bwd faster than SVD at large χ.** The
+#570 "wash" was a different regime (small-D / compile-bound / block-sparse `"qr"`=eigh).
+**Verdict (END-TO-END forward CTM — CORRECTS the takeaway, see the End-to-end section below): the
+real large-χ lever is the reduced-corner `1×1` SCHEME (≈109× faster than the default `2×2` full-SVD);
+within `1×1`, QR is ~1.25× *slower* per-sweep than SVD but uses ~1.4× *less memory* (higher χ
+ceiling). QR's end-to-end contribution is MEMORY, not speed.**
 
 ## Grounding (verified in code)
 
@@ -55,15 +59,55 @@ path at that size); the robust signal is **~1.3–1.5× fwd / ~1.2–1.4× bwd**
    scheme from the default 2×2 Fishman. Built + AD-validated already; correctness is not in question.
 3. Numbers are noisy at the ~×1.3 level; the claim is "QR consistently faster," not a precise factor.
 
-## Recommendation
+## End-to-end forward CTM — the result that CORRECTS the takeaway
 
-**Revisit confirmed — pursue QR projector for the large-χ dense regime.** Next: an end-to-end
-`recipe="1x1"` vs `"2x2"` forward-CTM benchmark at large χ on GPU to size the real speedup, then
-consider a "prefer QR projector when χ is large" policy (or default for the large-χ dense path).
-Composes with chunked-einsum (edge peak) and GSPMD (multi-GPU). Does not change the truly-large-**D**
-verdict (eager/YASTN); it targets the large-**χ** axis.
+`examples/bench_qr_vs_svd_ctm_e2e.py`, A100 f64, warm per-sweep, three configs:
+`svd2x2` (default = 2×2 Fishman, full-corner SVD), `svd1x1` and `qr1x1` (reduced-corner 1-site
+scheme; **same scheme, only the projector differs** → clean isolation).
+
+| D | χ | svd2x2 /sweep | svd1x1 /sweep | qr1x1 /sweep | svd1x1 peak | qr1x1 peak |
+|---|---|---:|---:|---:|---:|---:|
+| 4 | 64 | **2002 ms** | 7.7 ms | 31.7 ms | 0.54 GB | 0.68 GB |
+| 4 | 128 | 2821 ms | 16.4 ms | 93.5 ms | 1.64 GB | 1.51 GB |
+| 8 | 48 | **9731 ms** | 89 ms | 111 ms | 14.5 GB | 10.2 GB |
+| 8 | 64 | — | 145 ms | 183 ms | 25.8 GB | 17.8 GB |
+| 8 | 96 | — | **OOM** | 477 ms | OOM (>80) | **39.3 GB** |
+
+**Three findings:**
+1. **The dominant large-χ lever is the reduced-corner `1×1` SCHEME, not QR.** The default `svd2x2`
+   is **~100–260× slower** (`svd1x1` 89 ms vs `svd2x2` 9731 ms at D=8/χ=48) — it does the **full
+   `χD²×χD²` SVD**, which is catastrophic on GPU at large χ; `1×1` reduced-corner does only a
+   `χD²×χ` decomposition. This dwarfs the QR-vs-SVD effect.
+2. **Within `1×1`, QR is ~1.25× SLOWER per-sweep than SVD** (D=8: 111 vs 89, 183 vs 145). The
+   isolated decomposition's 1.4× QR *speed* win does **not** survive end-to-end — the projector is a
+   fraction of the sweep, and the `1×1` reduced SVD is already efficient. (At small D=4 it's worse,
+   ~4×, where QR's 3-op overhead on a tiny `χD²` dominates.)
+3. **QR's real end-to-end win is MEMORY:** `qr1x1` peak < `svd1x1` consistently (D=8/χ=64: 17.8 vs
+   25.8 GB), and at **χ=96 `svd1x1` OOMs while `qr1x1` runs** (39 GB). The QR construction avoids the
+   SVD's larger workspace/intermediates → higher χ ceiling.
+
+So the corrected story: the isolated projector finding (QR faster) is real **but doesn't transfer to
+wall-clock end-to-end**; QR instead buys **memory headroom** (higher χ before OOM), and the big
+*speed* win at large χ is switching off the default 2×2 full-SVD to the reduced-corner 1×1 scheme.
+
+## Recommendation (revised)
+
+- **Large-χ dense CTM speed: use `recipe="1x1"` (reduced-corner), not the default `2×2`.** That is
+  the ~100× lever — the default's full `χD²×χD²` SVD is the real large-χ wall (the user's "SVD is
+  GPU-unfriendly" instinct, but the fix is the reduced-corner *scheme*, of which QR is one variant).
+- **QR vs SVD projector is then a memory↔speed knob within 1×1:** SVD for ~1.25× faster sweeps; QR
+  for ~1.4× less memory / higher χ ceiling (e.g. χ=96 fits with QR, OOMs with SVD). Pick by the
+  binding constraint.
+- Composes with chunked-einsum (edge peak) and GSPMD (multi-GPU). Targets the large-**χ** axis; does
+  not change the truly-large-**D** verdict (eager/YASTN).
+- **Caveat to verify before any default change:** confirm `2×2` vs `1×1` reach the **same converged
+  energy/accuracy** (different CTMRG schemes; #570 AD-validated 1×1 correctness, but the
+  scheme-vs-scheme accuracy/convergence-rate comparison at large χ is not measured here). Also sanity
+  re-check the `svd2x2` 100× cost isn't a fixable slow-path/recompile artifact before citing it.
 
 ## Artifacts (branch `spike/chunked-einsum-ctm`)
 
 - `examples/spike_qr_vs_svd_projector.py` — isolated SVD-vs-reduced-corner-QR projector timing
   (fwd + VJP) over χ.
+- `examples/bench_qr_vs_svd_ctm_e2e.py` — end-to-end forward CTM, svd2x2 / svd1x1 / qr1x1 per-sweep
+  + peak (one config/process).
