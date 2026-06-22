@@ -102,8 +102,35 @@ wall-clock end-to-end**; QR instead buys **memory headroom** (higher χ before O
   not change the truly-large-**D** verdict (eager/YASTN).
 - **Caveat to verify before any default change:** confirm `2×2` vs `1×1` reach the **same converged
   energy/accuracy** (different CTMRG schemes; #570 AD-validated 1×1 correctness, but the
-  scheme-vs-scheme accuracy/convergence-rate comparison at large χ is not measured here). Also sanity
-  re-check the `svd2x2` 100× cost isn't a fixable slow-path/recompile artifact before citing it.
+  scheme-vs-scheme accuracy/convergence-rate comparison at large χ is not measured here). **The
+  `svd2x2` 100× is ROOT-CAUSED (not an artifact)** — see the Root-cause section below.
+
+## Root cause of the `svd2x2` ~100× (debugged — RESOLVED, it is NOT an artifact)
+
+Systematic debugging (`JAX_LOG_COMPILES` + differential `t(1)` vs `t(4)` + SVD-shape trace +
+standalone SVD timing) pinned it:
+
+- **Execution-bound, not compile.** Differential timing (shared jit-step cache): `t(1)=4.9 s`,
+  `t(4)=42.5 s` → ~10–14 s/sweep of *cached execution*, compile ≈ 0.
+- **The cost is the projector SVD.** Tracing the SVD shapes in the jitted step:
+  - `recipe="2x2"`: **12 × `jnp.linalg.svd(3072×3072)`** per sweep (+1 tiny metric SVD).
+  - `recipe="1x1"`: **5 × `svd(48×48)`** per sweep.
+- **GPU f64 SVD is slow:** standalone A100 — `svd(48×48)=3.7 ms`, `svd(1536²)=315 ms`,
+  **`svd(3072²)=1225 ms`**. So 12 × 1.2 s ≈ **14 s/sweep** for 2×2 vs ~18 ms for 1×1. Matches.
+- **Why 3072 vs 48:** `_compute_projector_tensor` SVDs `M = C1g^H @ C4g = (col1×col2)`. In `1×1`
+  the corners are **reduced** (`col=χ=48`); in the tensor `2×2` path they are **un-reduced**
+  (`col=χD²=3072`). The *raw* 2×2 path (`_svd_projector_raw`) DOES reduce to χ×χ — so the tensor
+  2×2 path's full-corner SVD looks like a **missed reduction**, not an inherent scheme cost.
+
+**Two compounding causes:** (a) the default tensor 2×2 SVDs the **full** χD²×χD² corner (12×/sweep)
+where a reduced χ×χ would do; (b) cuSOLVER f64 GPU SVD is intrinsically slow at these sizes. The
+1×1 reduced-corner scheme fixes (a); QR / a faster SVD path would help (b).
+
+**Fix options (not yet implemented — architectural choice):** (1) **use `recipe="1x1"`** for large-χ
+dense — already works, ~100×; (2) **make the tensor 2×2 projector reduce the corner** (χ×χ
+cross-product, like the raw path) before the SVD — could fix the *default* at large χ, needs
+correctness verification against the 2×2 multisite scheme; (3) faster decomposition (QR, or even a
+CPU-SVD callback — the GPU SVD is so slow a host SVD may beat 1.2 s).
 
 ## Artifacts (branch `spike/chunked-einsum-ctm`)
 
