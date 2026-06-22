@@ -437,6 +437,46 @@ def _regularized_qr_bwd(residuals, g):
 regularized_qr.defvjp(_regularized_qr_fwd, _regularized_qr_bwd)
 
 
+def truncated_lowrank_svd(
+    M: jax.Array, k: int, *, oversample: int = 8, n_power_iterations: int = 0
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """AD-stable top-*k* SVD, fast when ``rank(M) <= k`` and ``M`` is large.
+
+    For a matrix whose numerical rank is ``<= k`` (e.g. the 2x2 CTM projector
+    half-systems, which are exactly rank-χ), this returns the same top-*k*
+    ``(U, s, Vh)`` as a full ``jnp.linalg.svd`` truncated to *k*, but avoids the
+    full ``min(m, n)``-sized SVD: a randomized range finder reduces the problem
+    to a stable truncated SVD of a small ``(k+oversample, n)`` matrix.
+
+    Forward: ``Y = M Ω`` (deterministic Ω) → ``Q = qr(Y)`` → ``B = Qᴴ M`` →
+    ``truncated_svd_ad(B, k)`` → ``U = Q U_B``. Backward inherits the stable
+    Lorentzian VJP of :func:`truncated_svd_ad` on the small ``B`` plus the
+    :func:`regularized_qr` VJP — far better-conditioned than a full-SVD VJP at
+    ``χD²`` size. Exact (to round-off) whenever ``rank(M) <= k``.
+
+    ``n_power_iterations`` (subspace iteration, re-orthogonalized each step)
+    sharpens the captured subspace when the spectrum *decays* rather than having
+    a sharp rank cliff; 0 is exact for a genuinely rank-``<= k`` matrix.
+
+    Ω uses a fixed seed (a compile-time constant → no gradient, reproducible).
+    Falls back to ``truncated_svd_ad(M, k)`` when ``M`` is already small
+    (``k + oversample >= min(m, n)``), where the range finder gives no benefit.
+    """
+    m, n = M.shape
+    ell = k + oversample
+    if ell >= min(m, n):
+        return truncated_svd_ad(M, k)
+    omega = jax.random.normal(jax.random.PRNGKey(0), (n, ell), dtype=M.dtype)
+    q, _r = regularized_qr(M @ omega)  # (m, ell)
+    for _ in range(n_power_iterations):
+        q, _r = regularized_qr(M.conj().T @ q)  # (n, ell)
+        q, _r = regularized_qr(M @ q)  # (m, ell)
+    b = q.conj().T @ M  # (ell, n)
+    u_b, s, vh = truncated_svd_ad(b, k)  # (ell, k), (k,), (k, n)
+    u = q @ u_b  # (m, k)
+    return u, s, vh
+
+
 # ---------------------------------------------------------------------------
 # 1a-ter. Symmetric eigendecomposition with regularized backward pass
 # ---------------------------------------------------------------------------
