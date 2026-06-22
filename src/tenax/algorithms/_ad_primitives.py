@@ -458,6 +458,18 @@ def truncated_lowrank_svd(
     sharpens the captured subspace when the spectrum *decays* rather than having
     a sharp rank cliff; 0 is exact for a genuinely rank-``<= k`` matrix.
 
+    Relationship to :func:`tenax.linalg.rsvd` / ``_rsvd_matrix``: same HMT 2011
+    randomized SVD. This is the **AD-stable, layering-local** counterpart, kept
+    separate for two reasons: (1) it sits on the CTM fixed-point AD backward, so
+    it routes through :func:`regularized_qr` and :func:`truncated_svd_ad`
+    (Lorentzian-regularized VJPs) — the plain ``jnp.linalg.svd`` VJP that ``rsvd``
+    relies on produces NaN/blow-up through near-degenerate singular values (cf.
+    #570); and (2) ``_ad_primitives`` deliberately does not import
+    ``tenax.linalg`` (it would re-introduce the
+    ``algorithms → linalg → contraction → algorithms`` SCC, see the module
+    docstring), so it cannot call ``_rsvd_matrix`` directly. It also handles
+    complex ``M`` (``conjᵀ`` vs ``rsvd``'s real-only ``.T``).
+
     Ω uses a fixed seed (a compile-time constant → no gradient, reproducible).
     Falls back to ``truncated_svd_ad(M, k)`` when ``M`` is already small
     (``k + oversample >= min(m, n)``), where the range finder gives no benefit.
