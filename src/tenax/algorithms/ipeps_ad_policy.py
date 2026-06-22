@@ -144,6 +144,10 @@ def ctm_converge_kwargs(
             ctm_cfg.ctmrg_heuristic_increase_chi_step_size
         ),
         "chi_max": ctm_cfg.chi_max,
+        # GSPMD device mesh (#632 rung 2): shards the warm-start / probe /
+        # final-env forward CTM evals too, so the whole optimize loop runs
+        # sharded (not just the value_and_grad). None (default) → single-device.
+        "device_mesh": ctm_cfg.device_mesh,
     }
 
 
@@ -277,6 +281,9 @@ def make_ctm_energy_fn(
             chi_max=ctm_cfg.chi_max,
             # CTM recipe (gs_recipe): "2x2" (default) or "1x1" (enables qr).
             recipe=recipe,
+            # GSPMD device mesh (#632): when set, shards the implicit-AD forward
+            # CTM + backward across the mesh. None (default) → single-device.
+            device_mesh=ctm_cfg.device_mesh,
         )
 
     return _ctm_energy_fn

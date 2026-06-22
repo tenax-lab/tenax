@@ -229,6 +229,15 @@ class CTMConfig:
     # CTMConfig ABI.
     probe_max_iter: int | None = None
     probe_conv_tol: float | None = None
+    # Optional ``jax.sharding.Mesh`` for the GSPMD-sharded dense CTM-AD path
+    # (large-D, single-node multi-GPU; #632 rung 1 forward + rung 2 backward).
+    # When set, the implicit-AD forward commits env tensors to a D²-sharded
+    # layout and GSPMD partitions both the forward CTM and the implicit-AD
+    # backward across the mesh; per-device peak memory drops ~N^(1/6) in D
+    # (dense CTM memory ~D⁶). ``None`` (default) → single-device, bit-for-bit
+    # unchanged. Build a mesh via ``tenax.algorithms.ctm_sharding.build_ctm_mesh``.
+    # Appended at the end of the dataclass to preserve positional CTMConfig ABI.
+    device_mesh: jax.sharding.Mesh | None = None
 
     def __post_init__(self):
         valid_modes = {None, "c4v_reference"}
