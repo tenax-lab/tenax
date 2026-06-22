@@ -438,7 +438,7 @@ regularized_qr.defvjp(_regularized_qr_fwd, _regularized_qr_bwd)
 
 
 def truncated_lowrank_svd(
-    M: jax.Array, k: int, *, oversample: int = 8, n_power_iterations: int = 0
+    M: jax.Array, k: int, *, oversampling: int = 8, n_power_iter: int = 0
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """AD-stable top-*k* SVD, fast when ``rank(M) <= k`` and ``M`` is large.
 
@@ -454,39 +454,39 @@ def truncated_lowrank_svd(
     :func:`regularized_qr` VJP — far better-conditioned than a full-SVD VJP at
     ``χD²`` size. Exact (to round-off) whenever ``rank(M) <= k``.
 
-    ``n_power_iterations`` (subspace iteration, re-orthogonalized each step)
-    sharpens the captured subspace when the spectrum *decays* rather than having
-    a sharp rank cliff; 0 is exact for a genuinely rank-``<= k`` matrix.
+    ``n_power_iter`` (subspace iteration, re-orthogonalized each step) sharpens
+    the captured subspace when the spectrum *decays* rather than having a sharp
+    rank cliff; 0 is exact for a genuinely rank-``<= k`` matrix.
 
-    Relationship to :func:`tenax.linalg.rsvd` / ``_rsvd_matrix``: same HMT 2011
-    randomized SVD. This is the **AD-stable, layering-local** counterpart, kept
-    separate for two reasons: (1) it sits on the CTM fixed-point AD backward, so
-    it routes through :func:`regularized_qr` and :func:`truncated_svd_ad`
-    (Lorentzian-regularized VJPs) — the plain ``jnp.linalg.svd`` VJP that ``rsvd``
-    relies on produces NaN/blow-up through near-degenerate singular values (cf.
-    #570); and (2) ``_ad_primitives`` deliberately does not import
-    ``tenax.linalg`` (it would re-introduce the
-    ``algorithms → linalg → contraction → algorithms`` SCC, see the module
-    docstring), so it cannot call ``_rsvd_matrix`` directly. It also handles
-    complex ``M`` (``conjᵀ`` vs ``rsvd``'s real-only ``.T``).
+    Shares the HMT range-finder core (:func:`tenax._rsvd_core.hmt_rsvd`) with
+    :func:`tenax.linalg.rsvd`; this is the **AD-stable** specialization, injecting
+    :func:`regularized_qr` and :func:`truncated_svd_ad` (Lorentzian-regularized
+    VJPs) because it sits on the CTM fixed-point AD backward — the plain
+    ``jnp.linalg.svd`` VJP that ``rsvd`` uses produces NaN/blow-up through
+    near-degenerate singular values (cf. #570). The matrix-level signature (vs
+    ``rsvd``'s Tensor+labels API) and the small-``M`` fallback below are the only
+    other differences. (``_ad_primitives`` cannot import ``tenax.linalg`` — it
+    would re-introduce the ``algorithms → linalg`` SCC — but both reach the core,
+    a ``jax``-only leaf.)
 
     Ω uses a fixed seed (a compile-time constant → no gradient, reproducible).
     Falls back to ``truncated_svd_ad(M, k)`` when ``M`` is already small
-    (``k + oversample >= min(m, n)``), where the range finder gives no benefit.
+    (``k + oversampling >= min(m, n)``), where the range finder gives no benefit.
     """
+    from tenax._rsvd_core import hmt_rsvd
+
     m, n = M.shape
-    ell = k + oversample
-    if ell >= min(m, n):
+    if k + oversampling >= min(m, n):
         return truncated_svd_ad(M, k)
-    omega = jax.random.normal(jax.random.PRNGKey(0), (n, ell), dtype=M.dtype)
-    q, _r = regularized_qr(M @ omega)  # (m, ell)
-    for _ in range(n_power_iterations):
-        q, _r = regularized_qr(M.conj().T @ q)  # (n, ell)
-        q, _r = regularized_qr(M @ q)  # (m, ell)
-    b = q.conj().T @ M  # (ell, n)
-    u_b, s, vh = truncated_svd_ad(b, k)  # (ell, k), (k,), (k, n)
-    u = q @ u_b  # (m, k)
-    return u, s, vh
+    return hmt_rsvd(
+        M,
+        k,
+        oversampling=oversampling,
+        n_power_iter=n_power_iter,
+        key=jax.random.PRNGKey(0),
+        qr_fn=regularized_qr,
+        svd_fn=lambda b: truncated_svd_ad(b, k),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -59,7 +59,7 @@ def test_power_iterations_sharpen_decaying_spectrum():
     s_true_k = np.asarray(s_true[:k])
 
     def topk_err(n_power):
-        s = truncated_lowrank_svd(M, k, n_power_iterations=n_power)[1]
+        s = truncated_lowrank_svd(M, k, n_power_iter=n_power)[1]
         return float(jnp.max(jnp.abs(jnp.sort(s)[::-1] - s_true_k)))
 
     err0, err2 = topk_err(0), topk_err(2)
