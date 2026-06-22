@@ -66,64 +66,57 @@ def _time(fn, *args):
     return out, time.perf_counter() - t0
 
 
-def run_one(D, chi, chunks, grad):
-    X, Y = _make(D, chi, 0)
-    B = chi * chi
-    batch = max(1, B // chunks)
-    jfull = jax.jit(full)
-    jchunk = jax.jit(lambda X, Y: chunked(X, Y, batch))
-    jchunk_r = jax.jit(lambda X, Y: chunked(X, Y, batch, remat=True))
-    if grad:
-        # backward: d sum(out) / dX, where remat should cut activation memory.
-        gfull = jax.jit(jax.grad(lambda X, Y: full(X, Y).sum()))
-        gchunk = jax.jit(jax.grad(lambda X, Y: chunked(X, Y, batch).sum()))
-        gchunk_r = jax.jit(jax.grad(lambda X, Y: chunked(X, Y, batch, remat=True).sum()))
-
-    res = {"D": D, "B": B, "batch": batch, "chunks": B // batch}
-    try:
-        of, tf = _time(jfull, X, Y)
-        res["full"] = (peak_gb(), tf)
-    except Exception as ex:  # noqa: BLE001
-        res["full"] = (f"OOM:{type(ex).__name__}", float("nan"))
-        of = None
-    try:
-        oc, tc = _time(jchunk, X, Y)
-        err = float(jnp.max(jnp.abs(oc - of))) if of is not None else float("nan")
-        res["chunked"] = (peak_gb(), tc, err)
-    except Exception as ex:  # noqa: BLE001
-        res["chunked"] = (f"OOM:{type(ex).__name__}", float("nan"), float("nan"))
-    try:
-        or_, tr = _time(jchunk_r, X, Y)
-        res["chunked_remat"] = (peak_gb(), tr)
-    except Exception as ex:  # noqa: BLE001
-        res["chunked_remat"] = (f"OOM:{type(ex).__name__}", float("nan"))
-    if grad:
-        for name, g in (("g_full", gfull), ("g_chunk", gchunk), ("g_chunk_remat", gchunk_r)):
-            try:
-                _o, _t = _time(g, X, Y)
-                res[name] = (peak_gb(), _t)
-            except Exception as ex:  # noqa: BLE001
-                res[name] = (f"OOM:{type(ex).__name__}", float("nan"))
-    return res
+def _build(variant, batch):
+    """Return the jitted fn for one variant. ``peak_bytes_in_use`` is a cumulative
+    high-water mark JAX never resets, so each variant×D MUST run in its own process
+    (this script measures exactly ONE variant per invocation)."""
+    if variant == "full":
+        return jax.jit(full)
+    if variant == "chunked":
+        return jax.jit(lambda X, Y: chunked(X, Y, batch))
+    if variant == "remat":
+        return jax.jit(lambda X, Y: chunked(X, Y, batch, remat=True))
+    if variant == "g_full":
+        return jax.jit(jax.grad(lambda X, Y: full(X, Y).sum()))
+    if variant == "g_chunk":
+        return jax.jit(jax.grad(lambda X, Y: chunked(X, Y, batch).sum()))
+    if variant == "g_remat":
+        return jax.jit(jax.grad(lambda X, Y: chunked(X, Y, batch, remat=True).sum()))
+    raise ValueError(variant)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--D", type=int, nargs="+", default=[10, 12, 14])
+    ap.add_argument("--D", type=int, required=True)
     ap.add_argument("--chi", type=int, default=48)
     ap.add_argument("--chunks", type=int, default=4)
-    ap.add_argument("--grad", action="store_true")
-    args = ap.parse_args()
-    print(
-        f"# chunked-einsum spike  chi={args.chi} (B={args.chi**2})  "
-        f"chunks={args.chunks}  grad={args.grad}  x64={jax.config.jax_enable_x64}"
+    ap.add_argument(
+        "--variant",
+        default="full",
+        choices=["full", "chunked", "remat", "g_full", "g_chunk", "g_remat", "parity"],
     )
-    for D in args.D:
-        r = run_one(D, args.chi, args.chunks, args.grad)
-        print(f"D={D} B={r['B']} batch={r['batch']} ({r['chunks']} chunks):")
-        for kk in ("full", "chunked", "chunked_remat", "g_full", "g_chunk", "g_chunk_remat"):
-            if kk in r:
-                print(f"    {kk:14s} {r[kk]}")
+    args = ap.parse_args()
+    B = args.chi * args.chi
+    batch = max(1, B // args.chunks)
+    X, Y = _make(args.D, args.chi, 0)
+    hdr = (
+        f"# chunked-einsum spike  D={args.D} chi={args.chi} (B={B}) "
+        f"batch={batch} ({B // batch} chunks) x64={jax.config.jax_enable_x64}"
+    )
+    print(hdr)
+    if args.variant == "parity":  # full vs chunked in one process — peak ignored
+        of = jax.block_until_ready(jax.jit(full)(X, Y))
+        oc = jax.block_until_ready(jax.jit(lambda X, Y: chunked(X, Y, batch))(X, Y))
+        print(f"D={args.D} variant=parity  max|chunked-full|={float(jnp.max(jnp.abs(oc - of))):.2e}")
+        return
+    fn = _build(args.variant, batch)
+    try:
+        _o, dt = _time(fn, X, Y)
+        print(
+            f"D={args.D} variant={args.variant}  per_device_peak={peak_gb():.2f} GB  wall={dt:.3f}s"
+        )
+    except Exception as ex:  # noqa: BLE001
+        print(f"D={args.D} variant={args.variant}  FAILED({type(ex).__name__}: {str(ex)[:80]})")
 
 
 if __name__ == "__main__":
