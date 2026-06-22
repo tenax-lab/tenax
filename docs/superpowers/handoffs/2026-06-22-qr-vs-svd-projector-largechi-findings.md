@@ -132,6 +132,38 @@ cross-product, like the raw path) before the SVD — could fix the *default* at 
 correctness verification against the 2×2 multisite scheme; (3) faster decomposition (QR, or even a
 CPU-SVD callback — the GPU SVD is so slow a host SVD may beat 1.2 s).
 
+## Option-2 fix VALIDATED: truncated SVD makes the default 2×2 ~46× faster (rank-χ exact)
+
+Followed the root cause to a fix. The 12 slow SVDs are in `_ctm_tensor_projector_2x2._compute_2x2_
+projector` (3 `_gauge_fixed_svd` calls × 4 directions), each a full `χD²×χD²` SVD of the Fishman
+half-system (M1, M2, M_prime). **Measured runtime rank of those matrices: exactly χ** (numrank=16/256
+at χ=16; the (χ+1)-th singular value is ~1e-16). So the full SVD computes χD² singular values when
+only χ are nonzero — ~94% wasted on the slow GPU kernel.
+
+**Prototype** (`examples/spike_2x2_truncated_svd.py`): patch `_gauge_fixed_svd` with a randomized
+top-(χ+16) SVD (range-finder: `Y=MΩ → Q=qr(Y) → B=Q^H M → svd(B)`, + the same argmax gauge fix).
+Since the matrices are rank-χ, top-χ is mathematically exact. A100, D=8/χ=48:
+
+| | per-sweep | energy |
+|---|---:|---|
+| full-SVD 2×2 (default) | 9212 ms | −0.00312113 |
+| **trunc-SVD 2×2** | **199 ms** | −0.00313582 |
+| | **46× faster** | \|ΔE\|=1.5e-5 (un-converged-trajectory noise) |
+
+(CPU D=4/χ=16: 6.2×, \|ΔE\|=1.4e-7.) So the **default 2×2 path is fixable** — ~46× at large χ, **no
+scheme change**, because the half-system is rank-χ. It lands near `1×1` (199 ms vs 89 ms) while
+keeping the 2×2 multisite scheme.
+
+> **Prototype caveat (debugged):** `_make_jit_ctm_step` is module-cached, so the monkeypatch only
+> takes effect after `PL._JIT_STEP_CACHE.clear()` and patching *before* the trace — the first attempt
+> silently ran the full SVD for both arms (|ΔE|=0, 1.0×). Fixed; `patched_calls=24` confirms it fires.
+
+**Remaining for a production fix:** (1) an **AD-stable** truncated/randomized SVD (the `_gauge_fixed_
+svd` is on the backward path too — needs a custom VJP like #570's `truncated_svd_ad`, or verified
+stable autodiff); (2) tighten parity (more oversample / a power iteration / a deterministic exact
+low-rank SVD — the ~1e-5 is trajectory noise but should be ~1e-12 at the subspace level); (3)
+verify convergence parity (both reach the same fixed-point energy). The mechanism is proven.
+
 ## Artifacts (branch `spike/chunked-einsum-ctm`)
 
 - `examples/spike_qr_vs_svd_projector.py` — isolated SVD-vs-reduced-corner-QR projector timing
