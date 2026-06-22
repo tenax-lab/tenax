@@ -20,29 +20,62 @@ from _ctm_sharding_probe import heisenberg_dense_probe_energy
 _PARITY_PROBE = {2: (2, 8), 4: (4, 4)}
 
 
-@pytest.mark.parametrize("n_dev", [2, 4])
-def test_sharded_forward_matches_single_device(n_dev):
-    """Dense CTM energy under an N-device GSPMD mesh equals the single-device
-    result to <1e-8 (subprocess with fake CPU devices)."""
-    # ``--xla_force_host_platform_device_count=N`` fabricates N devices on the
-    # CPU platform only, so the subprocess MUST run on CPU.  On a GPU box JAX
-    # otherwise defaults to the single real GPU, the N-way mesh all-gather
-    # never finds its peers, and the child aborts on a rendezvous timeout.
-    # ``JAX_PLATFORMS=cpu`` pins the platform so the fake-device trick (and the
-    # GSPMD sharding it exercises) works regardless of host accelerators.
-    D, chi = _PARITY_PROBE[n_dev]
+def _run_parity_subproc(n_dev, D, chi, *, well_conditioned=False, thresh=1e-8):
+    """Drive the parity subprocess under ``n_dev`` fake CPU devices; return the
+    CompletedProcess.
+
+    ``--xla_force_host_platform_device_count=N`` fabricates N devices on the CPU
+    platform only, so the subprocess MUST run on CPU.  On a GPU box JAX otherwise
+    defaults to the single real GPU, the N-way mesh all-gather never finds its
+    peers, and the child aborts on a rendezvous timeout. ``JAX_PLATFORMS=cpu``
+    pins the platform so the fake-device trick (and the GSPMD sharding it
+    exercises) works regardless of host accelerators.
+    """
     env = dict(
         os.environ,
         XLA_FLAGS=f"--xla_force_host_platform_device_count={n_dev}",
         JAX_PLATFORMS="cpu",
     )
-    r = subprocess.run(
-        [sys.executable, "tests/_ctm_sharding_parity_subproc.py", str(D), str(chi)],
+    return subprocess.run(
+        [
+            sys.executable,
+            "tests/_ctm_sharding_parity_subproc.py",
+            str(D),
+            str(chi),
+            str(int(well_conditioned)),
+            repr(thresh),
+        ],
         env=env,
         capture_output=True,
         text=True,
         timeout=600,
     )
+
+
+@pytest.mark.parametrize("n_dev", [2, 4])
+def test_sharded_forward_matches_single_device(n_dev):
+    """Dense CTM energy under an N-device GSPMD mesh equals the single-device
+    result to <1e-8 (subprocess with fake CPU devices)."""
+    D, chi = _PARITY_PROBE[n_dev]
+    r = _run_parity_subproc(n_dev, D, chi)
+    assert r.returncode == 0, f"parity failed:\nSTDOUT:{r.stdout}\nSTDERR:{r.stderr}"
+
+
+def test_sharded_well_conditioned_tight_parity():
+    """On a WELL-CONDITIONED state the sharded forward CTM matches single-device
+    to ~1e-10 even at a larger χ where the contracted D²-axis is reassociated
+    across 4 devices (D=4 → 4 elements/device).
+
+    This guards the property that matters physically: sharding is exact up to
+    floating-point reassociation, and on a well-separated CTM fixed point that
+    reassociation stays at machine precision. The companion random-state probe
+    at the SAME (D=4, χ=8) diverges by ~1e-4 (the reassociation noise is
+    amplified by the random state's large condition number), so this case
+    exercises a regime the small-χ ``test_sharded_forward_matches_single_device``
+    cases (bit-exact only because their fixed points happen to be
+    well-conditioned) do not reach.
+    """
+    r = _run_parity_subproc(4, D=4, chi=8, well_conditioned=True, thresh=1e-10)
     assert r.returncode == 0, f"parity failed:\nSTDOUT:{r.stdout}\nSTDERR:{r.stderr}"
 
 
