@@ -21,8 +21,12 @@ the child initialises a JAX backend, and so the helper unit tests stay fast.
 # (``sys.modules[cls.__module__]``) returns None and ``@dataclass`` crashes. Do
 # not re-add it on this module while the importlib path-loader test exists.
 import argparse
+import csv
 import json
+import os
 import statistics
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -300,9 +304,87 @@ def make_plots(results, outdir):
     return written
 
 
+# Default sweep envelope.
+DEFAULT_D_LIST = [2, 3, 4, 5]
+DEFAULT_CHI_RAMP = [16, 24, 32, 48, 64, 96, 128]
+DEFAULT_DEVICE_COUNTS = [1, 4]
+DEFAULT_ANCHORS = [(2, 32), (3, 48), (4, 64)]
+DEFAULT_METRICS_STEPS = 5
+DEFAULT_ANCHOR_STEPS = 80
+
+
+def _load_or_run_cell(cell, results_dir):
+    """Resume: if a result JSON exists, load it; else launch the worker
+    subprocess and load what it wrote. Always returns a result dict with
+    is_anchor annotated from the Cell (so the reporter groups correctly)."""
+    path = Path(cell_result_path(results_dir, cell))
+    if path.exists():
+        res = json.loads(path.read_text())
+    else:
+        argv, env = cell_to_argv_env(
+            cell, results_dir=results_dir, python_exe=sys.executable,
+            script_path=str(Path(__file__).resolve()), base_env=dict(os.environ))
+        print(f"[run] {argv[-1]}", flush=True)
+        subprocess.run(argv, env=env, check=False)
+        if path.exists():
+            res = json.loads(path.read_text())
+        else:
+            res = {"D": cell.D, "chi": cell.chi, "n_devices": cell.n_devices,
+                   "gs_num_steps": cell.gs_num_steps, "is_anchor": cell.is_anchor,
+                   "oom": False, "error": "worker produced no result file",
+                   "ms_per_step": None, "peak_gb": None, "E_site": None,
+                   "converged": False}
+            path.write_text(json.dumps(res, indent=2))
+    res["is_anchor"] = cell.is_anchor
+    return res
+
+
+def main(args):
+    """Run the full sweep: per-cell subprocesses (resume + OOM-aware chi ramp),
+    then write the table, CSV, and plots."""
+    results_dir = args.results_dir
+    os.makedirs(results_dir, exist_ok=True)
+
+    anchor_cells = [c for c in build_grid(
+        [], [], DEFAULT_DEVICE_COUNTS, DEFAULT_ANCHORS,
+        DEFAULT_METRICS_STEPS, DEFAULT_ANCHOR_STEPS) if c.is_anchor]
+
+    results = []
+    # Metrics: ramp chi ascending per (n_devices, D) row; stop the row on OOM/err.
+    for n in DEFAULT_DEVICE_COUNTS:
+        for D in DEFAULT_D_LIST:
+            for chi in DEFAULT_CHI_RAMP:
+                cell = Cell(D, chi, n, DEFAULT_METRICS_STEPS, is_anchor=False)
+                res = _load_or_run_cell(cell, results_dir)
+                results.append(res)
+                if should_stop_row(res):
+                    print(f"[stop] row n={n} D={D} stopped at chi={chi} "
+                          f"({_status(res)})", flush=True)
+                    break
+    # Anchors (specific cells; run regardless of the metrics ramp).
+    for cell in anchor_cells:
+        results.append(_load_or_run_cell(cell, results_dir))
+
+    # Aggregate.
+    md = results_to_markdown(results)
+    (Path(results_dir) / "scaling_table.md").write_text(md)
+    rows = results_to_csv_rows(results)
+    if rows:
+        with open(Path(results_dir) / "scaling_results.csv", "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            w.writeheader()
+            w.writerows(rows)
+    try:
+        make_plots(results, results_dir)
+    except Exception as e:  # noqa: BLE001 — plotting is best-effort
+        print(f"[warn] plotting failed: {e}", flush=True)
+    print(md)
+    print(f"\n[done] wrote {results_dir}/scaling_table.md, scaling_results.csv, *.png")
+
+
 if __name__ == "__main__":
     _args = _build_argparser().parse_args()
     if _args.cell:
         _run_worker(_args)
     else:
-        main(_args)  # noqa: F821 — main defined in the orchestrator section (Task 7)
+        main(_args)
