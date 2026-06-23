@@ -64,13 +64,19 @@ showcase_heisenberg_scaling.py
 │
 └── per-cell worker (`--cell` mode)
       • build sublattice-rotated gate, iPEPSConfig (recipe=1x1, device_mesh?),
-      • measurement modes:
-          - "metrics": SU-init → 1 warm forward-CTM convergence → time N warm CTM
-            sweeps (ms/sweep) + one value_and_grad (ms/step, exercises AD backward)
-            → record per-device peak GB. No full optimization.
-          - "anchor": full optimize_gs_ad → converged E/site, plus the metrics.
-      • write ONE JSON: {D, chi, n_devices, mode, ms_per_sweep, ms_per_step,
-        peak_gb, E_site (anchor only), converged, oom, error}
+      • ONE entry point: `optimize_gs_ad(gate, A_init=None, config)` with
+        `return_history=True` (supported for unit_cell="1x1"). The returned
+        history gives `energies` + per-step `step_times`; step_times[0] includes
+        JIT compile, step_times[1:] are warm.
+            - ms_per_step  = median(step_times[1:])  (the faithful production cost
+              of one optimizer step = full forward CTM convergence + AD backward)
+            - peak_gb      = jax.devices()[0].memory_stats()["peak_bytes_in_use"]/1e9
+            - E_site       = energies[-1]; converged = |E[-1]-E[-2]| < gs_conv_tol
+      • metrics-cell vs anchor-cell differ ONLY in `gs_num_steps`
+        (metrics: small, e.g. 5 → timing/memory only, energy untrusted;
+         anchor: large, e.g. 60 → converged E/site trusted).
+      • write ONE JSON: {D, chi, n_devices, gs_num_steps, ms_per_step, peak_gb,
+        E_site, converged, oom, error}
 ```
 
 ### Components (each independently testable)
@@ -115,10 +121,15 @@ spending GPU-hours on a broken combination.
 - **Device configs:** 1-GPU (`CUDA_VISIBLE_DEVICES=0`) and 4-GPU
   (`CUDA_VISIBLE_DEVICES=0,1,2,3` — **not** the CUDA-index-4 display GPU) at
   matched cells.
-- **Metrics per cell (warm, compile excluded):** `ms_per_sweep` (forward CTM),
-  `ms_per_step` (one value_and_grad), `peak_gb` (per device).
-- **Anchor cells** (small set, e.g. D2χ32 / D3χ48 / D4χ64): full
-  `optimize_gs_ad` → converged `E_site`.
+- **Metric per cell (warm, compile excluded):** `ms_per_step` =
+  `median(step_times[1:])` from `optimize_gs_ad(return_history=True)` — the full
+  per-optimizer-step cost (forward CTM convergence + AD backward). Plus
+  per-device `peak_gb`. (Standalone `ms/sweep` is intentionally folded into
+  `ms/step`: faithfully isolating the `recipe="1x1"` forward sweep would require
+  replicating internal `ctm_converge_kwargs`/neighbor setup — `ms/step` is what
+  the production run actually pays.)
+- **Anchor cells** (small set, e.g. D2χ32 / D3χ48 / D4χ64): same call with large
+  `gs_num_steps` → trusted converged `E_site`.
 
 ## Error handling
 
