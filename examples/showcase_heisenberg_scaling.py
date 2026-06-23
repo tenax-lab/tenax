@@ -189,7 +189,11 @@ def run_cell(D, chi, n_devices, gs_num_steps, is_anchor):
                             device_mesh=mesh)
             opt_kwargs = dict(gs_optimizer="lbfgs", gs_metric_precond=True)
         else:
-            ctm = CTMConfig(chi=chi, max_iter=30, conv_tol=1e-6,
+            # FIXED CTM work (min_iter=max_iter, conv_tol=0 => exactly N sweeps
+            # every step) so per-step cost is deterministic and trajectory-
+            # independent — a clean ~chi^2 D^6 scaling signal, not optimization
+            # noise. Energy is not trusted for metrics cells anyway.
+            ctm = CTMConfig(chi=chi, max_iter=20, min_iter=20, conv_tol=0.0,
                             projector_method="svd", forward_gauge="phase",
                             device_mesh=mesh)
             opt_kwargs = dict(gs_optimizer="adam", gs_learning_rate=1e-2,
