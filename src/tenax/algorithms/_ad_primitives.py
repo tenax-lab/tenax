@@ -437,6 +437,58 @@ def _regularized_qr_bwd(residuals, g):
 regularized_qr.defvjp(_regularized_qr_fwd, _regularized_qr_bwd)
 
 
+def truncated_lowrank_svd(
+    M: jax.Array, k: int, *, oversampling: int = 8, n_power_iter: int = 0
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """AD-stable top-*k* SVD, fast when ``rank(M) <= k`` and ``M`` is large.
+
+    For a matrix whose numerical rank is ``<= k`` (e.g. the 2x2 CTM projector
+    half-systems, which are exactly rank-χ), this returns the same top-*k*
+    ``(U, s, Vh)`` as a full ``jnp.linalg.svd`` truncated to *k*, but avoids the
+    full ``min(m, n)``-sized SVD: a randomized range finder reduces the problem
+    to a stable truncated SVD of a small ``(k+oversample, n)`` matrix.
+
+    Forward: ``Y = M Ω`` (deterministic Ω) → ``Q = qr(Y)`` → ``B = Qᴴ M`` →
+    ``truncated_svd_ad(B, k)`` → ``U = Q U_B``. Backward inherits the stable
+    Lorentzian VJP of :func:`truncated_svd_ad` on the small ``B`` plus the
+    :func:`regularized_qr` VJP — far better-conditioned than a full-SVD VJP at
+    ``χD²`` size. Exact (to round-off) whenever ``rank(M) <= k``.
+
+    ``n_power_iter`` (subspace iteration, re-orthogonalized each step) sharpens
+    the captured subspace when the spectrum *decays* rather than having a sharp
+    rank cliff; 0 is exact for a genuinely rank-``<= k`` matrix.
+
+    Shares the HMT range-finder core (:func:`tenax._rsvd_core.hmt_rsvd`) with
+    :func:`tenax.linalg.rsvd`; this is the **AD-stable** specialization, injecting
+    :func:`regularized_qr` and :func:`truncated_svd_ad` (Lorentzian-regularized
+    VJPs) because it sits on the CTM fixed-point AD backward — the plain
+    ``jnp.linalg.svd`` VJP that ``rsvd`` uses produces NaN/blow-up through
+    near-degenerate singular values (cf. #570). The matrix-level signature (vs
+    ``rsvd``'s Tensor+labels API) and the small-``M`` fallback below are the only
+    other differences. (``_ad_primitives`` cannot import ``tenax.linalg`` — it
+    would re-introduce the ``algorithms → linalg`` SCC — but both reach the core,
+    a ``jax``-only leaf.)
+
+    Ω uses a fixed seed (a compile-time constant → no gradient, reproducible).
+    Falls back to ``truncated_svd_ad(M, k)`` when ``M`` is already small
+    (``k + oversampling >= min(m, n)``), where the range finder gives no benefit.
+    """
+    from tenax._rsvd_core import hmt_rsvd
+
+    m, n = M.shape
+    if k + oversampling >= min(m, n):
+        return truncated_svd_ad(M, k)
+    return hmt_rsvd(
+        M,
+        k,
+        oversampling=oversampling,
+        n_power_iter=n_power_iter,
+        key=jax.random.PRNGKey(0),
+        qr_fn=regularized_qr,
+        svd_fn=lambda b: truncated_svd_ad(b, k),
+    )
+
+
 # ---------------------------------------------------------------------------
 # 1a-ter. Symmetric eigendecomposition with regularized backward pass
 # ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax._rsvd_core import hmt_rsvd
 from tenax.core.index import FlowDirection, Label, TensorIndex
 from tenax.core.tensor import (
     BlockKey,
@@ -1866,33 +1867,17 @@ def _rsvd_matrix(
     Returns ``(U, s, Vh)`` with shapes ``(m, rank)``, ``(rank,)``,
     ``(rank, n)`` respectively.
     """
-    m, n = matrix.shape
-    k = min(rank + oversampling, m, n)
-
-    # Step 1: random Gaussian sketch
-    omega = jax.random.normal(key, (n, k), dtype=matrix.dtype)
-
-    # Step 2: form sample matrix and QR
-    Y = matrix @ omega
-    Q, _ = jnp.linalg.qr(Y)
-
-    # Step 3: power iteration for accuracy
-    for _ in range(n_power_iter):
-        Z = matrix.T @ Q
-        Q_z, _ = jnp.linalg.qr(Z)
-        Y2 = matrix @ Q_z
-        Q, _ = jnp.linalg.qr(Y2)
-
-    # Step 4: project to small matrix
-    B = Q.T @ matrix
-
-    # Step 5: SVD of small matrix
-    U_hat, s, Vh = jnp.linalg.svd(B, full_matrices=False)
-
-    # Step 6: recover left singular vectors, truncate to rank
-    U_full = Q @ U_hat
-    actual_rank = min(rank, len(s))
-    return U_full[:, :actual_rank], s[:actual_rank], Vh[:actual_rank, :]
+    # Shared HMT core (see tenax._rsvd_core); plain jnp decompositions here, the
+    # AD-stable counterpart (truncated_lowrank_svd) injects regularized VJPs.
+    return hmt_rsvd(
+        matrix,
+        rank,
+        oversampling=oversampling,
+        n_power_iter=n_power_iter,
+        key=key,
+        qr_fn=jnp.linalg.qr,
+        svd_fn=lambda b: jnp.linalg.svd(b, full_matrices=False),
+    )
 
 
 def _rsvd_symmetric(
