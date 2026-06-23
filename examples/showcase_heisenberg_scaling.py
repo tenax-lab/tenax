@@ -177,8 +177,10 @@ def run_cell(D, chi, n_devices, gs_num_steps):
         config = iPEPSConfig(
             max_bond_dim=D,
             ctm=CTMConfig(
+                # implicit AD requires forward_gauge="phase" (+ projector_method
+                # in {svd,qr}, ctm_conv_method="elementwise"); "sigma" is rejected.
                 chi=chi, max_iter=100, conv_tol=1e-8,
-                projector_method="svd", forward_gauge="sigma",
+                projector_method="svd", forward_gauge="phase",
                 device_mesh=mesh,
             ),
             unit_cell="1x1",
