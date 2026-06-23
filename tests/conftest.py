@@ -83,6 +83,7 @@ _FILE_MARKERS = {
     # (mesh specs, commit helpers, config default) gate every PR; the heavy
     # subprocess parity sweep (N=2,4 fake CPU devices) is slow-only.
     "test_ctm_sharding.py": "core",
+    "test_showcase_scaling.py": "core",
     "test_ctm_sharding_parity.py": "slow",
 }
 
