@@ -31,3 +31,19 @@ def test_build_grid_enumerates_metrics_and_anchor_cells():
     assert c.gs_num_steps == 5 and c.is_anchor is False
     # anchor cells carry the anchor step budget:
     assert all(c.gs_num_steps == 80 for c in anchors)
+
+
+def test_cell_result_path_is_unique_and_descriptive():
+    metrics = showcase.Cell(D=3, chi=48, n_devices=4, gs_num_steps=5, is_anchor=False)
+    anchor = showcase.Cell(D=3, chi=48, n_devices=4, gs_num_steps=80, is_anchor=True)
+    pm = showcase.cell_result_path("results", metrics)
+    pa = showcase.cell_result_path("results", anchor)
+    assert pm.endswith("D3_chi48_n4_metrics.json")
+    assert pa.endswith("D3_chi48_n4_anchor.json")
+    assert pm != pa  # anchor and metrics at the same (D,chi,n) must not collide
+
+
+def test_should_stop_row_on_oom_or_error_only():
+    assert showcase.should_stop_row({"oom": True, "error": None}) is True
+    assert showcase.should_stop_row({"oom": False, "error": "Boom"}) is True
+    assert showcase.should_stop_row({"oom": False, "error": None}) is False

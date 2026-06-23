@@ -21,6 +21,7 @@ the child initialises a JAX backend, and so the helper unit tests stay fast.
 # (``sys.modules[cls.__module__]``) returns None and ``@dataclass`` crashes. Do
 # not re-add it on this module while the importlib path-loader test exists.
 from dataclasses import dataclass
+from pathlib import Path
 
 REFERENCE_E = -0.669437  # Sandvik QMC, square-lattice spin-1/2 Heisenberg AFM
 
@@ -51,3 +52,15 @@ def build_grid(D_list, chi_ramp, device_counts, anchors, metrics_steps, anchor_s
         for (D, chi) in anchors:
             cells.append(Cell(D, chi, n, anchor_steps, is_anchor=True))
     return cells
+
+
+def cell_result_path(results_dir, cell):
+    """Per-cell JSON path. Anchor and metrics cells at the same (D,chi,n) get
+    distinct files so resume never confuses them."""
+    kind = "anchor" if cell.is_anchor else "metrics"
+    return str(Path(results_dir) / f"D{cell.D}_chi{cell.chi}_n{cell.n_devices}_{kind}.json")
+
+
+def should_stop_row(result):
+    """Stop ramping chi for a (D, n_devices) row once a cell OOMs or errors."""
+    return bool(result.get("oom") or result.get("error"))
