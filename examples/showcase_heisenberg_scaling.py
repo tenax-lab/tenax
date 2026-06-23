@@ -153,13 +153,16 @@ def run_cell(D, chi, n_devices, gs_num_steps, is_anchor):
 
     Two profiles (the showcase has two distinct goals):
     - metrics (is_anchor=False): a CHEAP fixed-step optimizer (adam, no line
-      search / no metric preconditioning, max_iter=30, conv_tol=1e-6). Each step
-      is exactly one forward-CTM convergence + one implicit-AD backward, so
-      ms_per_step = median(step_times[1:]) is a clean per-step machinery cost
-      that scales as ~chi^1.7*D. Energy is NOT trusted here.
-    - anchor (is_anchor=True): the ACCURATE optimizer (L-BFGS + line search +
-      metric preconditioning, max_iter=100, conv_tol=1e-8) for a trusted
-      converged E_site. Expensive, so only used on a few small cells.
+      search / no metric preconditioning) over a FIXED-work CTM
+      (min_iter=max_iter=20, conv_tol=0 => exactly 20 sweeps/step). Each step is
+      one deterministic forward-CTM + one implicit-AD backward, so the per-step
+      cost is trajectory-independent. The worker records the raw ``step_times``
+      and emits a rough live ``ms_per_step = min(step_times[1:])``; the robust
+      number for the findings is ``median(step_times[1:])`` recomputed post-hoc
+      (see showcase_analyze.py). Energy is NOT trusted here.
+    - anchor (is_anchor=True): the ACCURATE optimizer (L-BFGS + line search) over
+      a bounded CTM (max_iter=40, conv_tol=1e-6) for a best-effort converged
+      E_site. Expensive (~25x the fixed-step cost), so only a few small cells.
 
     implicit AD requires forward_gauge="phase" (+ projector_method in {svd,qr},
     ctm_conv_method="elementwise"); "sigma" is rejected.

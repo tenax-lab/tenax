@@ -54,7 +54,8 @@ def per_step_ms(d):
 def load_cells():
     cells = []
     for f in sorted(glob.glob(str(RESULTS / "*.json"))):
-        cells.append(json.load(open(f)))
+        with open(f) as fh:
+            cells.append(json.load(fh))
     return cells
 
 

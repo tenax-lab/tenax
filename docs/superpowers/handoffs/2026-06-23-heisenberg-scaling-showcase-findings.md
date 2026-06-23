@@ -115,7 +115,8 @@ story and hard-bounding total runtime (~1 h sweep).
    fall below nominal χ) and on **which kernel XLA's autotuner selects**, neither
    monotone in χ. Robust conclusions (D-scaling, multi-GPU crossover) are
    unaffected; the within-D χ-curve is noisy and such points are flagged `*` in
-   `scaling_table.md`.
+   `showcase_analyze.py`'s stdout (and rendered as `-` in the regenerated
+   `scaling_table.md` so they don't skew the plotted curve).
 3. **Converged-energy anchors are expensive.** The accurate AD path (L-BFGS +
    line search + implicit AD) costs **~25× the fixed-step measurement** — even at
    D2/χ16 it exceeded a 30-min budget (timeout at 1800 s) with and without metric
