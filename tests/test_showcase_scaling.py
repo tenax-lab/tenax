@@ -47,3 +47,29 @@ def test_should_stop_row_on_oom_or_error_only():
     assert showcase.should_stop_row({"oom": True, "error": None}) is True
     assert showcase.should_stop_row({"oom": False, "error": "Boom"}) is True
     assert showcase.should_stop_row({"oom": False, "error": None}) is False
+
+
+def test_cell_to_argv_env_sets_devices_and_flags():
+    cell1 = showcase.Cell(D=4, chi=64, n_devices=1, gs_num_steps=5, is_anchor=False)
+    cell4 = showcase.Cell(D=4, chi=64, n_devices=4, gs_num_steps=80, is_anchor=True)
+    base_env = {"PATH": "/usr/bin", "HOME": "/home/u"}
+
+    argv1, env1 = showcase.cell_to_argv_env(
+        cell1, results_dir="results", python_exe="python",
+        script_path="examples/showcase_heisenberg_scaling.py", base_env=base_env)
+    argv4, env4 = showcase.cell_to_argv_env(
+        cell4, results_dir="results", python_exe="python",
+        script_path="examples/showcase_heisenberg_scaling.py", base_env=base_env)
+
+    # single-GPU cell pins device 0; 4-GPU cell pins 0,1,2,3 (NOT the display GPU)
+    assert env1["CUDA_VISIBLE_DEVICES"] == "0"
+    assert env4["CUDA_VISIBLE_DEVICES"] == "0,1,2,3"
+    # preallocation must be off so peak_bytes_in_use is meaningful
+    assert env1["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
+    # base env is preserved, not replaced
+    assert env1["PATH"] == "/usr/bin"
+    # argv carries the worker flag, the cell params, and the right out path
+    assert "--cell" in argv1
+    assert "--D" in argv1 and "4" in argv1
+    assert argv1[-1].endswith("D4_chi64_n1_metrics.json")
+    assert argv4[-1].endswith("D4_chi64_n4_anchor.json")

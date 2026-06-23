@@ -64,3 +64,23 @@ def cell_result_path(results_dir, cell):
 def should_stop_row(result):
     """Stop ramping chi for a (D, n_devices) row once a cell OOMs or errors."""
     return bool(result.get("oom") or result.get("error"))
+
+
+def cell_to_argv_env(cell, results_dir, python_exe, script_path, base_env):
+    """Map a Cell to (argv, env) for its subprocess. Pins CUDA_VISIBLE_DEVICES
+    (device 0 for 1-GPU; 0..n-1 for n-GPU — never the display GPU at index 4)
+    and disables XLA preallocation so peak memory is real."""
+    out = cell_result_path(results_dir, cell)
+    argv = [
+        python_exe, script_path, "--cell",
+        "--D", str(cell.D),
+        "--chi", str(cell.chi),
+        "--n-devices", str(cell.n_devices),
+        "--gs-num-steps", str(cell.gs_num_steps),
+        "--out", out,
+    ]
+    devices = "0" if cell.n_devices == 1 else ",".join(str(i) for i in range(cell.n_devices))
+    env = dict(base_env)
+    env["CUDA_VISIBLE_DEVICES"] = devices
+    env["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+    return argv, env
