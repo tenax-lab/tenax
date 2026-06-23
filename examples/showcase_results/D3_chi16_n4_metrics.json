@@ -1,0 +1,15 @@
+{
+  "D": 3,
+  "chi": 16,
+  "n_devices": 4,
+  "gs_num_steps": 6,
+  "is_anchor": false,
+  "ms_per_step": null,
+  "step_times": null,
+  "peak_gb": 0.028521472,
+  "E_site": null,
+  "converged": false,
+  "jit_compile_time": null,
+  "oom": false,
+  "error": "IndivisibleError: Sharding NamedSharding(mesh=Mesh('d': 4, axis_types=(Auto,)), spec=P(None, 'd', None), memory_kind=device) implies that array axis 1 is partitioned 4 times, but the dimension size is 9 (full shape: (16, 9, 16), per-dimension tiling factors: [1, 4, 1] should evenly divide the shape)"
+}
