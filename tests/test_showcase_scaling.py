@@ -103,3 +103,26 @@ def test_results_to_csv_rows_are_flat_and_stable():
     for r in rows:
         assert set(["D", "chi", "n_devices", "ms_per_step", "peak_gb",
                     "E_site", "converged", "oom"]).issubset(r.keys())
+
+
+def test_make_plots_writes_pngs(tmp_path):
+    import pytest
+    pytest.importorskip("matplotlib")
+    results = [
+        {"D": 2, "chi": 16, "n_devices": 1, "is_anchor": False, "oom": False,
+         "error": None, "ms_per_step": 10.0, "peak_gb": 1.0, "E_site": None,
+         "converged": False},
+        {"D": 2, "chi": 32, "n_devices": 1, "is_anchor": False, "oom": False,
+         "error": None, "ms_per_step": 22.0, "peak_gb": 2.0, "E_site": None,
+         "converged": False},
+        {"D": 2, "chi": 32, "n_devices": 4, "is_anchor": False, "oom": False,
+         "error": None, "ms_per_step": 30.0, "peak_gb": 0.7, "E_site": None,
+         "converged": False},
+        {"D": 2, "chi": 32, "n_devices": 4, "is_anchor": True, "oom": False,
+         "error": None, "ms_per_step": 40.0, "peak_gb": 0.7, "E_site": -0.6690,
+         "converged": True},
+    ]
+    paths = showcase.make_plots(results, str(tmp_path))
+    assert len(paths) >= 1
+    for p in paths:
+        assert showcase.Path(p).exists()

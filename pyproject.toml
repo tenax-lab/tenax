@@ -75,7 +75,10 @@ Repository = "https://github.com/tenax-lab/tenax"
 Issues = "https://github.com/tenax-lab/tenax/issues"
 
 [dependency-groups]
-dev = ["tenax-tn[dev]"]
+dev = [
+    "matplotlib>=3.11.0",
+    "tenax-tn[dev]",
+]
 
 [tool.hatch.version]
 source = "vcs"

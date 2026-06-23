@@ -227,6 +227,79 @@ def _build_argparser():
     return p
 
 
+def make_plots(results, outdir):
+    """Write the showcase plots. Returns the list of PNG paths written.
+    Best-effort: cells without a metric are skipped, not errored."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    ok = [r for r in results if not r.get("oom") and not r.get("error")]
+    written = []
+
+    # Plot 1: ms/step vs chi per D (single-GPU scaling curves).
+    fig, ax = plt.subplots()
+    plotted = False
+    for D in sorted({r["D"] for r in ok if r["n_devices"] == 1}):
+        pts = sorted((r["chi"], r["ms_per_step"]) for r in ok
+                     if r["D"] == D and r["n_devices"] == 1 and r.get("ms_per_step") is not None)
+        if pts:
+            ax.plot(*zip(*pts), marker="o", label=f"D={D}")
+            plotted = True
+    if plotted:
+        ax.set_xlabel("χ")
+        ax.set_ylabel("ms / optimizer step")
+        ax.set_yscale("log")
+        ax.legend()
+        ax.set_title("Per-step cost vs χ (1 GPU)")
+        p = outdir / "ms_per_step_vs_chi.png"
+        fig.savefig(p, dpi=120)
+        written.append(str(p))
+    plt.close(fig)
+
+    # Plot 2: peak GB vs chi, 1-GPU vs 4-GPU overlay across every (D, n_devices).
+    fig, ax = plt.subplots()
+    plotted = False
+    for n in sorted({r["n_devices"] for r in ok}):
+        for D in sorted({r["D"] for r in ok if r["n_devices"] == n}):
+            pts = sorted((r["chi"], r["peak_gb"]) for r in ok
+                         if r["D"] == D and r["n_devices"] == n and r.get("peak_gb") is not None)
+            if pts:
+                ax.plot(*zip(*pts), marker="s", label=f"D={D}, {n}-GPU")
+                plotted = True
+    if plotted:
+        ax.set_xlabel("χ")
+        ax.set_ylabel("per-device peak GB")
+        ax.legend(fontsize="small")
+        ax.set_title("Peak memory: 1-GPU vs 4-GPU")
+        p = outdir / "peak_gb_vs_chi.png"
+        fig.savefig(p, dpi=120)
+        written.append(str(p))
+    plt.close(fig)
+
+    # Plot 3: anchor E/site vs chi with the QMC reference line.
+    anchors = [r for r in ok if r.get("is_anchor") and r.get("E_site") is not None]
+    if anchors:
+        fig, ax = plt.subplots()
+        for D in sorted({r["D"] for r in anchors}):
+            pts = sorted((r["chi"], r["E_site"]) for r in anchors if r["D"] == D)
+            ax.plot(*zip(*pts), marker="o", label=f"D={D}")
+        ax.axhline(REFERENCE_E, ls="--", color="k", label=f"QMC {REFERENCE_E}")
+        ax.set_xlabel("χ")
+        ax.set_ylabel("E / site")
+        ax.legend()
+        ax.set_title("Anchor energies vs QMC reference")
+        p = outdir / "energy_vs_chi.png"
+        fig.savefig(p, dpi=120)
+        written.append(str(p))
+        plt.close(fig)
+
+    return written
+
+
 if __name__ == "__main__":
     _args = _build_argparser().parse_args()
     if _args.cell:
