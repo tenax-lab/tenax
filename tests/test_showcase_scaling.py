@@ -73,3 +73,33 @@ def test_cell_to_argv_env_sets_devices_and_flags():
     assert "--D" in argv1 and "4" in argv1
     assert argv1[-1].endswith("D4_chi64_n1_metrics.json")
     assert argv4[-1].endswith("D4_chi64_n4_anchor.json")
+
+
+def _sample_results():
+    return [
+        {"D": 2, "chi": 16, "n_devices": 1, "is_anchor": False, "oom": False,
+         "error": None, "ms_per_step": 12.5, "peak_gb": 1.2, "E_site": None,
+         "converged": False},
+        {"D": 2, "chi": 32, "n_devices": 4, "is_anchor": True, "oom": False,
+         "error": None, "ms_per_step": 40.0, "peak_gb": 0.9, "E_site": -0.6690,
+         "converged": True},
+        {"D": 4, "chi": 96, "n_devices": 1, "is_anchor": False, "oom": True,
+         "error": None, "ms_per_step": None, "peak_gb": None, "E_site": None,
+         "converged": False},
+    ]
+
+
+def test_results_to_markdown_has_header_and_values_and_oom():
+    md = showcase.results_to_markdown(_sample_results())
+    assert "ms/step" in md and "peak GB" in md
+    assert "12.5" in md          # a metrics timing
+    assert "-0.6690" in md or "-0.669" in md  # an anchor energy
+    assert "OOM" in md           # the OOM cell is shown, not dropped
+
+
+def test_results_to_csv_rows_are_flat_and_stable():
+    rows = showcase.results_to_csv_rows(_sample_results())
+    assert len(rows) == 3
+    for r in rows:
+        assert set(["D", "chi", "n_devices", "ms_per_step", "peak_gb",
+                    "E_site", "converged", "oom"]).issubset(r.keys())

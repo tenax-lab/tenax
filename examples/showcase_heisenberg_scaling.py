@@ -84,3 +84,44 @@ def cell_to_argv_env(cell, results_dir, python_exe, script_path, base_env):
     env["CUDA_VISIBLE_DEVICES"] = devices
     env["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     return argv, env
+
+
+def _status(r):
+    if r.get("oom"):
+        return "OOM"
+    if r.get("error"):
+        return "ERR"
+    return "ok"
+
+
+def _fmt(x, spec):
+    return format(x, spec) if isinstance(x, (int, float)) else "-"
+
+
+def results_to_csv_rows(results):
+    """Flatten results to stable-keyed dicts for CSV export."""
+    keys = ["D", "chi", "n_devices", "is_anchor", "gs_num_steps",
+            "ms_per_step", "peak_gb", "E_site", "converged", "oom", "error"]
+    return [{k: r.get(k) for k in keys} for r in results]
+
+
+def results_to_markdown(results):
+    """Render a scaling table grouped by device count, sorted by (D, chi)."""
+    lines = []
+    for n in sorted({r["n_devices"] for r in results}):
+        lines.append(f"\n### {n}-GPU\n")
+        lines.append("| D | χ | kind | status | ms/step | peak GB | E/site | dE_ref | conv |")
+        lines.append("|---|---|------|--------|---------|---------|--------|--------|------|")
+        rows = sorted([r for r in results if r["n_devices"] == n],
+                      key=lambda r: (r["D"], r["chi"], r.get("is_anchor", False)))
+        for r in rows:
+            kind = "anchor" if r.get("is_anchor") else "metrics"
+            e = r.get("E_site")
+            d_ref = (e - REFERENCE_E) if isinstance(e, (int, float)) else None
+            lines.append(
+                f"| {r['D']} | {r['chi']} | {kind} | {_status(r)} | "
+                f"{_fmt(r.get('ms_per_step'), '.1f')} | {_fmt(r.get('peak_gb'), '.2f')} | "
+                f"{_fmt(e, '.6f')} | {_fmt(d_ref, '+.2e')} | "
+                f"{'Y' if r.get('converged') else 'N'} |"
+            )
+    return "\n".join(lines)
