@@ -84,8 +84,10 @@ def cell_to_argv_env(cell, results_dir, python_exe, script_path, base_env):
         "--chi", str(cell.chi),
         "--n-devices", str(cell.n_devices),
         "--gs-num-steps", str(cell.gs_num_steps),
-        "--out", out,
     ]
+    if cell.is_anchor:
+        argv.append("--is-anchor")
+    argv += ["--out", out]
     devices = "0" if cell.n_devices == 1 else ",".join(str(i) for i in range(cell.n_devices))
     env = dict(base_env)
     env["CUDA_VISIBLE_DEVICES"] = devices
@@ -147,17 +149,25 @@ def _peak_gb():
         return None
 
 
-def run_cell(D, chi, n_devices, gs_num_steps):
-    """Run ONE cell and return a result dict. One faithful entry point:
-    optimize_gs_ad(return_history=True). ms_per_step = median of warm
-    step_times (compile excluded). Anchor cells (large gs_num_steps) yield a
-    trusted converged E_site."""
+def run_cell(D, chi, n_devices, gs_num_steps, is_anchor):
+    """Run ONE cell and return a result dict via optimize_gs_ad(return_history).
+
+    Two profiles (the showcase has two distinct goals):
+    - metrics (is_anchor=False): a CHEAP fixed-step optimizer (adam, no line
+      search / no metric preconditioning, max_iter=30, conv_tol=1e-6). Each step
+      is exactly one forward-CTM convergence + one implicit-AD backward, so
+      ms_per_step = median(step_times[1:]) is a clean per-step machinery cost
+      that scales as ~chi^1.7*D. Energy is NOT trusted here.
+    - anchor (is_anchor=True): the ACCURATE optimizer (L-BFGS + line search +
+      metric preconditioning, max_iter=100, conv_tol=1e-8) for a trusted
+      converged E_site. Expensive, so only used on a few small cells.
+
+    implicit AD requires forward_gauge="phase" (+ projector_method in {svd,qr},
+    ctm_conv_method="elementwise"); "sigma" is rejected.
+    """
     result = {
         "D": D, "chi": chi, "n_devices": n_devices, "gs_num_steps": gs_num_steps,
-        # Standalone fallback only: the orchestrator overwrites is_anchor from the
-        # Cell. 40 is the midpoint of the grid's metrics_steps=5 / anchor_steps=80;
-        # keep those two far from 40 if you change them.
-        "is_anchor": gs_num_steps >= 40,
+        "is_anchor": is_anchor,
         "ms_per_step": None, "peak_gb": None, "E_site": None,
         "converged": False, "jit_compile_time": None, "oom": False, "error": None,
     }
@@ -173,24 +183,30 @@ def run_cell(D, chi, n_devices, gs_num_steps):
             from tenax.algorithms.ctm_sharding import build_ctm_mesh
             mesh = build_ctm_mesh()
 
+        if is_anchor:
+            ctm = CTMConfig(chi=chi, max_iter=100, conv_tol=1e-8,
+                            projector_method="svd", forward_gauge="phase",
+                            device_mesh=mesh)
+            opt_kwargs = dict(gs_optimizer="lbfgs", gs_metric_precond=True)
+        else:
+            ctm = CTMConfig(chi=chi, max_iter=30, conv_tol=1e-6,
+                            projector_method="svd", forward_gauge="phase",
+                            device_mesh=mesh)
+            opt_kwargs = dict(gs_optimizer="adam", gs_learning_rate=1e-2,
+                              gs_line_search=False, gs_metric_precond=False)
+
         gate = sublattice_rotate_gate(heisenberg_gate())
         config = iPEPSConfig(
             max_bond_dim=D,
-            ctm=CTMConfig(
-                # implicit AD requires forward_gauge="phase" (+ projector_method
-                # in {svd,qr}, ctm_conv_method="elementwise"); "sigma" is rejected.
-                chi=chi, max_iter=100, conv_tol=1e-8,
-                projector_method="svd", forward_gauge="phase",
-                device_mesh=mesh,
-            ),
+            ctm=ctm,
             unit_cell="1x1",
             gs_recipe="1x1",
-            gs_optimizer="lbfgs",
             gs_implicit_ad=True,
             gs_num_steps=gs_num_steps,
             su_init=True,
             return_history=True,
             gs_verbose=False,
+            **opt_kwargs,
         )
         _, _, E_gs, history = optimize_gs_ad(gate, None, config)
 
@@ -214,7 +230,7 @@ def run_cell(D, chi, n_devices, gs_num_steps):
 
 
 def _run_worker(args):
-    res = run_cell(args.D, args.chi, args.n_devices, args.gs_num_steps)
+    res = run_cell(args.D, args.chi, args.n_devices, args.gs_num_steps, args.is_anchor)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(res, indent=2))
     print(json.dumps(res))
@@ -223,6 +239,8 @@ def _run_worker(args):
 def _build_argparser():
     p = argparse.ArgumentParser(description="iPEPS Heisenberg scaling showcase")
     p.add_argument("--cell", action="store_true", help="run a single cell (worker mode)")
+    p.add_argument("--is-anchor", dest="is_anchor", action="store_true",
+                   help="anchor cell: accurate optimizer for a trusted energy")
     p.add_argument("--D", type=int)
     p.add_argument("--chi", type=int)
     p.add_argument("--n-devices", dest="n_devices", type=int, default=1)
@@ -306,19 +324,32 @@ def make_plots(results, outdir):
     return written
 
 
-# Default sweep envelope.
-DEFAULT_D_LIST = [2, 3, 4, 5]
+# Default sweep envelope. Metrics cells use the cheap fixed-step profile across
+# the (D, chi) grid x {1,4} GPU; anchors use the accurate profile on a few small
+# 1-GPU cells only (energy needs no device comparison).
+#
+# These 80 GB A100s have so much memory that the chi ramp would never OOM at
+# tractable D (peak ~0.17 GB at D3 chi32), so the ramp is bounded by a per-cell
+# WALL-CLOCK timeout instead: a cell that exceeds it is recorded as a timeout
+# error, which stops that (D, n_devices) row (cost is monotone in chi). This
+# makes "how far does each D get under a fixed per-cell time budget" the scaling
+# story, and hard-bounds total runtime.
+DEFAULT_D_LIST = [2, 3, 4]
 DEFAULT_CHI_RAMP = [16, 24, 32, 48, 64, 96, 128]
 DEFAULT_DEVICE_COUNTS = [1, 4]
-DEFAULT_ANCHORS = [(2, 32), (3, 48), (4, 64)]
-DEFAULT_METRICS_STEPS = 5
-DEFAULT_ANCHOR_STEPS = 80
+DEFAULT_ANCHOR_DEVICE_COUNTS = [1]
+DEFAULT_ANCHORS = [(2, 16), (2, 32)]
+DEFAULT_METRICS_STEPS = 4
+DEFAULT_ANCHOR_STEPS = 30
+DEFAULT_CELL_TIMEOUT_S = 600
+DEFAULT_ANCHOR_TIMEOUT_S = 1800
 
 
-def _load_or_run_cell(cell, results_dir):
+def _load_or_run_cell(cell, results_dir, timeout_s):
     """Resume: if a result JSON exists, load it; else launch the worker
-    subprocess and load what it wrote. Always returns a result dict with
-    is_anchor annotated from the Cell (so the reporter groups correctly)."""
+    subprocess (bounded by timeout_s) and load what it wrote. Always returns a
+    result dict with is_anchor annotated from the Cell (so the reporter groups
+    correctly). A timeout is recorded as an error so the row stops."""
     path = Path(cell_result_path(results_dir, cell))
     if path.exists():
         res = json.loads(path.read_text())
@@ -327,13 +358,18 @@ def _load_or_run_cell(cell, results_dir):
             cell, results_dir=results_dir, python_exe=sys.executable,
             script_path=str(Path(__file__).resolve()), base_env=dict(os.environ))
         print(f"[run] {argv[-1]}", flush=True)
-        subprocess.run(argv, env=env, check=False)
+        timed_out = False
+        try:
+            subprocess.run(argv, env=env, check=False, timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            timed_out = True
         if path.exists():
             res = json.loads(path.read_text())
         else:
+            err = f"timeout after {timeout_s}s" if timed_out else "worker produced no result file"
             res = {"D": cell.D, "chi": cell.chi, "n_devices": cell.n_devices,
                    "gs_num_steps": cell.gs_num_steps, "is_anchor": cell.is_anchor,
-                   "oom": False, "error": "worker produced no result file",
+                   "oom": False, "error": err,
                    "ms_per_step": None, "peak_gb": None, "E_site": None,
                    "converged": False}
             path.write_text(json.dumps(res, indent=2))
@@ -348,7 +384,7 @@ def main(args):
     os.makedirs(results_dir, exist_ok=True)
 
     anchor_cells = [c for c in build_grid(
-        [], [], DEFAULT_DEVICE_COUNTS, DEFAULT_ANCHORS,
+        [], [], DEFAULT_ANCHOR_DEVICE_COUNTS, DEFAULT_ANCHORS,
         DEFAULT_METRICS_STEPS, DEFAULT_ANCHOR_STEPS) if c.is_anchor]
 
     results = []
@@ -357,7 +393,7 @@ def main(args):
         for D in DEFAULT_D_LIST:
             for chi in DEFAULT_CHI_RAMP:
                 cell = Cell(D, chi, n, DEFAULT_METRICS_STEPS, is_anchor=False)
-                res = _load_or_run_cell(cell, results_dir)
+                res = _load_or_run_cell(cell, results_dir, DEFAULT_CELL_TIMEOUT_S)
                 results.append(res)
                 if should_stop_row(res):
                     print(f"[stop] row n={n} D={D} stopped at chi={chi} "
@@ -365,7 +401,7 @@ def main(args):
                     break
     # Anchors (specific cells; run regardless of the metrics ramp).
     for cell in anchor_cells:
-        results.append(_load_or_run_cell(cell, results_dir))
+        results.append(_load_or_run_cell(cell, results_dir, DEFAULT_ANCHOR_TIMEOUT_S))
 
     # Aggregate.
     md = results_to_markdown(results)

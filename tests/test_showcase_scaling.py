@@ -73,6 +73,9 @@ def test_cell_to_argv_env_sets_devices_and_flags():
     assert "--D" in argv1 and "4" in argv1
     assert argv1[-1].endswith("D4_chi64_n1_metrics.json")
     assert argv4[-1].endswith("D4_chi64_n4_anchor.json")
+    # anchor cells pass --is-anchor (accurate optimizer); metrics cells do not.
+    assert "--is-anchor" in argv4
+    assert "--is-anchor" not in argv1
 
 
 def _sample_results():
