@@ -24,7 +24,6 @@ import argparse
 import csv
 import json
 import os
-import statistics
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -168,7 +167,7 @@ def run_cell(D, chi, n_devices, gs_num_steps, is_anchor):
     result = {
         "D": D, "chi": chi, "n_devices": n_devices, "gs_num_steps": gs_num_steps,
         "is_anchor": is_anchor,
-        "ms_per_step": None, "peak_gb": None, "E_site": None,
+        "ms_per_step": None, "step_times": None, "peak_gb": None, "E_site": None,
         "converged": False, "jit_compile_time": None, "oom": False, "error": None,
     }
     try:
@@ -215,9 +214,15 @@ def run_cell(D, chi, n_devices, gs_num_steps, is_anchor):
         _, _, E_gs, history = optimize_gs_ad(gate, None, config)
 
         step_times = history.get("step_times") or []
+        result["step_times"] = [float(x) for x in step_times]
+        # Steady-state per-step = MIN of the warm steps (drop step 0's initial
+        # compile). At chi>=48 XLA re-autotunes on the first 1-2 warm steps too
+        # (those spike to ~compile time); min robustly ignores all warmup
+        # recompiles, leaving the pure-compute per-step cost. (median caught the
+        # recompile spikes -> a 16.7s artifact at D2 chi48 vs ~3s true.)
         warm = step_times[1:] if len(step_times) > 1 else step_times
         if warm:
-            result["ms_per_step"] = 1000.0 * statistics.median(warm)
+            result["ms_per_step"] = 1000.0 * min(warm)
         result["E_site"] = float(E_gs)
         result["converged"] = bool(history.get("converged"))
         result["jit_compile_time"] = (
@@ -343,7 +348,7 @@ DEFAULT_CHI_RAMP = [16, 24, 32, 48, 64, 96, 128]
 DEFAULT_DEVICE_COUNTS = [1, 4]
 DEFAULT_ANCHOR_DEVICE_COUNTS = [1]
 DEFAULT_ANCHORS = [(2, 16), (2, 32)]
-DEFAULT_METRICS_STEPS = 4
+DEFAULT_METRICS_STEPS = 6
 DEFAULT_ANCHOR_STEPS = 30
 DEFAULT_CELL_TIMEOUT_S = 600
 DEFAULT_ANCHOR_TIMEOUT_S = 1800
