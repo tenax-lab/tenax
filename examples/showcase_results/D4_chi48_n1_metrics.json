@@ -1,0 +1,13 @@
+{
+  "D": 4,
+  "chi": 48,
+  "n_devices": 1,
+  "gs_num_steps": 6,
+  "is_anchor": false,
+  "oom": false,
+  "error": "timeout after 600s",
+  "ms_per_step": null,
+  "peak_gb": null,
+  "E_site": null,
+  "converged": false
+}
