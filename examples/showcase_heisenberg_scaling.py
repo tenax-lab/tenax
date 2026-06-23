@@ -183,10 +183,14 @@ def run_cell(D, chi, n_devices, gs_num_steps, is_anchor):
             mesh = build_ctm_mesh()
 
         if is_anchor:
-            ctm = CTMConfig(chi=chi, max_iter=100, conv_tol=1e-8,
+            # Accurate-but-BOUNDED: full L-BFGS + line search for a best-effort
+            # converged energy, but a cheaper CTM (40 sweeps / 1e-6) than a
+            # publication run — the L-BFGS x line-search x CTM-to-1e-8 x precond
+            # stack costs ~60s/step even at D2 chi16 and blows a 30-min budget.
+            ctm = CTMConfig(chi=chi, max_iter=40, conv_tol=1e-6,
                             projector_method="svd", forward_gauge="phase",
                             device_mesh=mesh)
-            opt_kwargs = dict(gs_optimizer="lbfgs", gs_metric_precond=True)
+            opt_kwargs = dict(gs_optimizer="lbfgs", gs_metric_precond=False)
         else:
             # FIXED CTM work (min_iter=max_iter, conv_tol=0 => exactly N sweeps
             # every step) so per-step cost is deterministic and trajectory-
