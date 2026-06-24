@@ -323,3 +323,73 @@ def test_resume_1site_continues_from_saved_step(tmp_path):
     from tenax.algorithms._checkpoint import load_checkpoint
     assert load_checkpoint(str(tmp_path))["step"] == 7   # 0-indexed last of 8
     assert E_resumed < 0  # finished, sensible energy
+
+
+# ---------------------------------------------------------------------------
+# Coarse-grained (cg_gates) 1-site resume tests
+# ---------------------------------------------------------------------------
+
+
+def _honeycomb_cg_cfg(tmp_path, *, nsteps, resume, cg_gates=None):
+    """Verified-working CG 1-site checkpoint config (implicit-AD default).
+
+    Routes to ``_optimize_gs_ad_tensor`` (the checkpoint-wired non-c4v
+    path, log tag ``[iPEPS-AD:1site-tensor]``) — NOT the c4v reference
+    path, which has no checkpoint wiring.  ``su_init=False`` is required
+    with ``cg_gates``; the Hamiltonian placeholder is a (4,4,4,4) dummy
+    (the real interaction lives in ``cg_gates``, d_eff=4 for honeycomb).
+
+    ``cg_gates`` overrides the default honeycomb gates so the reject test
+    differs from the baseline in EXACTLY that one field (every other knob
+    stays in lockstep via this helper).
+    """
+    from tenax.algorithms.coarse_grain import honeycomb_cg_gates
+
+    return iPEPSConfig(
+        unit_cell="1x1",
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=8, max_iter=20, min_iter=5),
+        gs_num_steps=nsteps,
+        gs_checkpoint_path=str(tmp_path),
+        gs_checkpoint_every=1,
+        gs_resume=resume,
+        gs_c4v=False,
+        su_init=False,
+        cg_gates=honeycomb_cg_gates() if cg_gates is None else cg_gates,
+        gs_conv_criterion="grad_norm",
+    )
+
+
+@pytest.mark.slow
+def test_resume_cg_1site_continues_from_saved_step(tmp_path):
+    """Coarse-grained (cg_gates) 1-site run checkpoints and resumes; the saved
+    bundle records a non-None cg_gates fingerprint and resume continues."""
+    from tenax.algorithms._checkpoint import load_checkpoint
+
+    dummy = jnp.zeros((4, 4, 4, 4))
+    optimize_gs_ad(dummy, None, _honeycomb_cg_cfg(tmp_path, nsteps=2, resume=False))
+    b = load_checkpoint(str(tmp_path))
+    assert b["step"] == 1
+    assert b["cg_gates_fingerprint"] is not None
+
+    _, _, E = optimize_gs_ad(dummy, None, _honeycomb_cg_cfg(tmp_path, nsteps=4, resume=True))
+    assert load_checkpoint(str(tmp_path))["step"] == 3
+    assert E is not None  # finished without error (don't over-assert convergence)
+
+
+@pytest.mark.slow
+def test_resume_rejects_different_cg_gates(tmp_path):
+    """Resuming a CG run against perturbed cg_gates is a fatal mismatch
+    (the dummy hamiltonian gate is unchanged, isolating the cg_gates check)."""
+    from tenax.algorithms.coarse_grain import honeycomb_cg_gates
+
+    dummy = jnp.zeros((4, 4, 4, 4))
+    optimize_gs_ad(dummy, None, _honeycomb_cg_cfg(tmp_path, nsteps=2, resume=False))
+
+    # Identical config EXCEPT the coarse-grained gates (J=2.0 vs default J=1.0),
+    # so the only thing that can trigger the mismatch is the cg_gates check.
+    cfg_other = _honeycomb_cg_cfg(
+        tmp_path, nsteps=4, resume=True, cg_gates=honeycomb_cg_gates(J=2.0)
+    )
+    with pytest.raises(ValueError, match="cg_gates"):
+        optimize_gs_ad(dummy, None, cfg_other)
