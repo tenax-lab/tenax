@@ -1224,8 +1224,11 @@ def _optimize_gs_ad_tensor(
     from tenax.algorithms._checkpoint import (
         _config_to_dict,
         cg_gates_fingerprint,
+        checkpoint_exists,
         gate_fingerprint,
+        load_checkpoint,
         save_checkpoint,
+        validate_config,
     )
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
@@ -1566,6 +1569,109 @@ def _optimize_gs_ad_tensor(
         else None
     )
 
+    # ---- Checkpoint resume ----------------------------------------
+    # When gs_resume=True and a checkpoint exists at gs_checkpoint_path,
+    # restore optimizer state and pick up at step ``saved_step + 1``.
+    # All other branches keep the fresh-init values set above.  These
+    # statements reassign function locals (params, ctm_cfg, _env_cache
+    # contents, ...) at function scope, so plain assignment is correct.
+    start_step = 0
+    if config.gs_resume:
+        # Fail fast on a typo'd / deleted / never-written checkpoint
+        # path rather than silently falling through to fresh init.
+        if not checkpoint_exists(config.gs_checkpoint_path):
+            raise FileNotFoundError(
+                f"gs_resume=True but no checkpoint found at "
+                f"{config.gs_checkpoint_path!r} (looked for 'ckpt.last.pkl'). "
+                f"Either point gs_checkpoint_path at the directory of a prior "
+                f"run, or set gs_resume=False to start fresh."
+            )
+        bundle = load_checkpoint(config.gs_checkpoint_path)
+        validate_config(bundle.get("config", {}), config)
+
+        saved_fp = bundle.get("hamiltonian_fingerprint")
+        if saved_fp is not None and tuple(saved_fp) != _gate_fp:
+            raise ValueError(
+                "Cannot resume: the hamiltonian gate has changed since the "
+                "checkpoint was written.\n"
+                f"  saved fingerprint:   {tuple(saved_fp)!r}\n"
+                f"  current fingerprint: {_gate_fp!r}\n"
+                "If this is intentional, start a fresh run."
+            )
+
+        saved_cg_fp = bundle.get("cg_gates_fingerprint")
+        if saved_cg_fp is not None and saved_cg_fp != _cg_fp:
+            raise ValueError(
+                "Cannot resume: the coarse-grained cg_gates have changed since "
+                "the checkpoint was written.\n"
+                f"  saved cg fingerprint:   {saved_cg_fp!r}\n"
+                f"  current cg fingerprint: {_cg_fp!r}\n"
+                "If this is intentional, start a fresh run."
+            )
+
+        saved_cfg = bundle.get("config", {})
+        _opt_compat = (
+            saved_cfg.get("gs_optimizer") == config.gs_optimizer
+            and saved_cfg.get("gs_metric_precond") == config.gs_metric_precond
+        )
+
+        params = bundle["params"]
+        best_params = bundle["best_params"]
+        best_energy = float(bundle["best_energy"])
+        prev_energy = float(bundle["prev_energy"])
+        # Clear the env warm-start cache AND the implicit-AD lambda seed on
+        # restore (issue #501), matching the 2-site resume path. The restored
+        # env below is a fresh starting point; the prior Neumann seed is stale.
+        _drop_env_cache_for_reset(_env_cache)
+        _env_cache.update(bundle.get("env_cache", {}))
+        best_env_cache = dict(bundle.get("best_env_cache", {}))
+        stall_count = int(bundle.get("stall_count", 0))
+
+        if _opt_compat:
+            if optimizer is not None and bundle.get("opt_state") is not None:
+                opt_state = bundle["opt_state"]
+            lbfgs_history = list(bundle.get("lbfgs_history") or [])
+            prev_A_flat = bundle.get("prev_params_flat")
+            prev_grad_flat = bundle.get("prev_grad_flat")
+            cg_direction = bundle.get("cg_direction")
+            prev_grad = bundle.get("prev_grad")
+            prev_precond_grad = bundle.get("prev_precond_grad")
+        else:
+            import warnings as _warnings
+
+            _warnings.warn(
+                "Optimizer-defining config differs from checkpoint "
+                f"(saved: gs_optimizer={saved_cfg.get('gs_optimizer')!r}, "
+                f"gs_metric_precond={saved_cfg.get('gs_metric_precond')!r}; "
+                f"current: gs_optimizer={config.gs_optimizer!r}, "
+                f"gs_metric_precond={config.gs_metric_precond!r}). "
+                "Restoring params/envs/energies but discarding saved "
+                "optimizer history (curvature/momentum will restart fresh).",
+                stacklevel=2,
+            )
+
+        current_stage_idx = int(bundle.get("current_stage_idx", 0))
+        stage_start_step = int(bundle.get("stage_start_step", 0))
+        saved_chi = bundle.get("ctm_cfg_chi")
+        if saved_chi is not None and int(saved_chi) != ctm_cfg.chi:
+            ctm_cfg = _replace(ctm_cfg, chi=int(saved_chi))
+        saved_conv_tol = bundle.get("current_conv_tol")
+        if saved_conv_tol is not None:
+            _current_conv_tol = float(saved_conv_tol)
+            ctm_cfg = _replace(ctm_cfg, conv_tol=_current_conv_tol)
+        saved_patience = bundle.get("current_patience")
+        if saved_patience is not None:
+            _current_patience = int(saved_patience)
+            ctm_cfg = _replace(ctm_cfg, plateau_patience=_current_patience)
+
+        start_step = int(bundle["step"]) + 1
+        if config.gs_verbose:
+            print(
+                f"[iPEPS-AD:1site-tensor] resumed from step {start_step} "
+                f"(best E={best_energy:.10f}, chi={ctm_cfg.chi})",
+                flush=True,
+            )
+
     def _maybe_save_1s_checkpoint(step, chi_before, e_prev, *, force_last=False):
         if config.gs_checkpoint_path is None:
             return
@@ -1607,7 +1713,7 @@ def _optimize_gs_ad_tensor(
             save_checkpoint(_ckpt_state, config.gs_checkpoint_path, is_best=True)
 
     _log_ad_compile_notice(config)
-    for step in range(config.gs_num_steps):
+    for step in range(start_step, config.gs_num_steps):
         # Snapshots for checkpoint "did chi change / new best" detection.
         # ``best_energy`` only decreases, so a strict < comparison after the
         # step body identifies a freshly-accepted best.  Both snapshots are

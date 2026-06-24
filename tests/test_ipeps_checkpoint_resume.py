@@ -296,3 +296,30 @@ def test_1site_writes_checkpoint(tmp_path):
     assert bundle["step"] == 1  # 0-indexed last of 2 steps
     assert "params" in bundle and "opt_state" in bundle
     assert bundle["cg_gates_fingerprint"] is None  # plain 1-site, no cg_gates
+
+
+def test_resume_1site_continues_from_saved_step(tmp_path):
+    """Run 2 steps, checkpoint; resume to 8 total; the resumed run picks up at
+    step 2 and finishes with the saved step recorded as 7.
+
+    The random-init 1-site (non-c4v) path needs several steps to drop below
+    zero, so the resume horizon is set past that point: a correctly-resuming
+    run continues the saved trajectory and reaches a sensible (negative)
+    Heisenberg energy, whereas a silent fresh restart would not.
+    """
+    gate = _heisenberg_gate()
+
+    def cfg(nsteps, resume):
+        return iPEPSConfig(
+            unit_cell="1x1", max_bond_dim=2, ctm=CTMConfig(chi=4),
+            gs_num_steps=nsteps, gs_checkpoint_path=str(tmp_path),
+            gs_checkpoint_every=1, gs_resume=resume, gs_c4v=False,
+            su_init=False, gs_conv_criterion="grad_norm",
+        )
+
+    optimize_gs_ad(gate, None, cfg(2, False))            # phase A: 2 steps
+    _, _, E_resumed = optimize_gs_ad(gate, None, cfg(8, True))  # resume -> 8
+
+    from tenax.algorithms._checkpoint import load_checkpoint
+    assert load_checkpoint(str(tmp_path))["step"] == 7   # 0-indexed last of 8
+    assert E_resumed < 0  # finished, sensible energy
