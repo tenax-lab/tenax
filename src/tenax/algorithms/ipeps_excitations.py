@@ -22,7 +22,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms.ipeps_config import CTMEnvironment
-from tenax.core.tensor import Tensor
+from tenax.core.tensor import SymmetricTensor, Tensor
 
 # ---------------------------------------------------------------------------
 # Input normalization
@@ -35,11 +35,32 @@ from tenax.core.tensor import Tensor
 # leg/flow convention of the legacy ``CTMEnvironment`` (verified to machine
 # precision against ``compute_energy_ctm``), so ``.todense()`` on each field is
 # both correct and preserves the converged environment.
+#
+# The excitation contraction path is dense-only (raw ``einsum``).  For a
+# ``DenseTensor`` ``.todense()`` just returns the already-materialized buffer,
+# so it is free.  A ``SymmetricTensor``, however, would be densified here —
+# violating the project rule against ``todense()`` on the symmetric path
+# (CLAUDE.md / AGENTS.md): CTM edges scale as ``χ·D²·χ`` and a block-sparse
+# production run could OOM or silently bypass the symmetry machinery.  Until a
+# symmetric-aware excitation implementation exists we reject it explicitly.
 
 
 def _as_dense_array(x: jax.Array | Tensor) -> jax.Array:
-    """Return a raw ``jax.Array`` from either an array or a Tensor object."""
-    if isinstance(x, Tensor):
+    """Return a raw ``jax.Array`` from an array or ``DenseTensor``.
+
+    Raises ``NotImplementedError`` for ``SymmetricTensor`` — the excitation
+    path is dense-only and must not silently densify a block-sparse tensor.
+    """
+    if isinstance(x, SymmetricTensor):
+        raise NotImplementedError(
+            "compute_excitations does not support SymmetricTensor inputs: the "
+            "excitation contraction path is dense-only and densifying a "
+            "block-sparse tensor would defeat the symmetry machinery (and can "
+            "OOM at large chi/D). Convert the ground state to a dense iPEPS "
+            "before computing excitations, or track symmetric-aware "
+            "excitations as a follow-up."
+        )
+    if isinstance(x, Tensor):  # DenseTensor: todense() returns the stored buffer
         return x.todense()
     return jnp.asarray(x)
 

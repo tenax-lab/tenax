@@ -453,6 +453,23 @@ class TestTensorInputAcceptance:
         with pytest.raises(ValueError, match="8-tensor CTM environment"):
             _as_dense_env(twelve_field_env)
 
+    def test_symmetric_tensor_rejected(self, small_peps_and_env, heisenberg_gate):
+        """SymmetricTensor inputs must raise (dense-only path) rather than
+        silently densify a block-sparse tensor — project rule against
+        ``todense()`` on the symmetric path."""
+        from tenax.algorithms.ipeps_excitations import _as_dense_array
+        from tenax.core.index import FlowDirection, TensorIndex
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.core.tensor import SymmetricTensor
+
+        sym = U1Symmetry()
+        idx = TensorIndex.from_charges(
+            sym, np.array([0, 0], dtype=np.int32), FlowDirection.OUT
+        )
+        sym_t = SymmetricTensor.from_dense(jnp.eye(2), (idx, idx.dual()))
+        with pytest.raises(NotImplementedError, match="SymmetricTensor"):
+            _as_dense_array(sym_t)
+
 
 # ---------------------------------------------------------------------------
 # Momentum path tests
