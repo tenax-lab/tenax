@@ -74,19 +74,19 @@ def _make_ctm_config(chi: int) -> CTMConfig:
     )
 
 
-def _compute_e_p2_split(state, cg_gates, chi: int, max_iter: int = 30) -> float:
-    """Forward-only P2 probe via split-CTM + ``compute_energy_cg_split``.
+def _supersite_split_env(state, cg_gates, chi: int, max_iter: int = 30):
+    """Map a PESS ``state`` to the kagome supersite and converge a split-CTM env.
 
-    Builds the kagome supersite, drives ``ctm_split_tensor`` to convergence,
-    and evaluates the CG energy through the split-aware RDM dispatcher.
-    Stays at the ``chi^2 * D^4 * d`` peak instead of the std path's
-    ``chi^2 * D^6`` (matters at ``D >= 6`` where ``chi = 2 D^2`` makes the
-    std-path projector SVD allocate >100 GB on a 256 GB box).
+    Shared building block for the forward-only P2 probe and for
+    :func:`build_canonical_pess`. Stays at the split-aware ``chi^2 * D^4 * d``
+    peak instead of the std path's ``chi^2 * D^6`` (matters at ``D >= 6`` where
+    ``chi = 2 D^2`` makes the std-path projector SVD allocate >100 GB).
+
+    Returns ``(A_tensor, env, d_eff)``.
     """
     import jax.numpy as jnp_local
 
     from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor
-    from tenax.algorithms.coarse_grain import compute_energy_cg_split
     from tenax.algorithms.pess import pess_to_kagome_supersite
     from tenax.algorithms.pess_optimize import _make_supersite_indices
     from tenax.core.tensor import DenseTensor
@@ -101,7 +101,53 @@ def _compute_e_p2_split(state, cg_gates, chi: int, max_iter: int = 30) -> float:
     A_tensor = DenseTensor(A_super, indices)
 
     env = ctm_split_tensor(A_tensor, chi=chi, max_iter=max_iter, chi_I=chi)
+    return A_tensor, env, d_eff
+
+
+def _compute_e_p2_split(state, cg_gates, chi: int, max_iter: int = 30) -> float:
+    """Forward-only P2 probe via split-CTM + ``compute_energy_cg_split``.
+
+    Builds the kagome supersite, drives ``ctm_split_tensor`` to convergence,
+    and evaluates the CG energy through the split-aware RDM dispatcher.
+    """
+    from tenax.algorithms.coarse_grain import compute_energy_cg_split
+
+    A_tensor, env, d_eff = _supersite_split_env(state, cg_gates, chi, max_iter)
     return float(compute_energy_cg_split(A_tensor, env, cg_gates, d_eff).real)
+
+
+def heisenberg_gate():
+    """Coarse-grained kagome Heisenberg gates (``delta = 1``, ``d = 2``).
+
+    Returns the :class:`CGGates` bundle (intra-triangle ``h_intra`` plus the
+    inter-triangle 2-site gates) consumed by ``compute_energy_cg_split``.
+    Named for the large-D memory-regression harness
+    (``tests/test_split_ctm_large_d_memory.py``).
+    """
+    return kagome_xxz_pess_cg_gates(delta=DELTA, d=D_PHYS)
+
+
+def build_canonical_pess(D: int, chi: int, seed: int = 0, max_iter: int = 30):
+    """Build a converged split-CTM environment for the canonical kagome 3-PESS.
+
+    Runs the standard SU schedule to obtain the canonical site tensors, maps
+    them to the square-iPEPS supersite, normalises, and drives the split-aware
+    CTM (``ctm_split_tensor``) to convergence at ``chi_I = chi``.
+
+    Returns ``(A_tensor, env, cg_gates, d_eff)`` ready for
+    ``compute_energy_cg_split`` — the split-aware energy path whose peak
+    intermediate is bounded at ``chi^2 * D^4 * d`` (PR #389/#390). This is the
+    Convention-C "P2" path; at ``D = 4``, ``chi = 32`` it reproduces the
+    baseline ``E = -0.347185``.
+    """
+    H = kagome_triangle_xxz_hamiltonian(delta=DELTA, d=D_PHYS)
+    cg_gates = kagome_xxz_pess_cg_gates(delta=DELTA, d=D_PHYS)
+
+    state = IPESSState.random(D=D, d=D_PHYS, key=jax.random.PRNGKey(seed))
+    state = pess_simple_update(state, H, dt_schedule=SU_SCHEDULE, D_max=D)
+
+    A_tensor, env, d_eff = _supersite_split_env(state, cg_gates, chi, max_iter)
+    return A_tensor, env, cg_gates, d_eff
 
 
 def run_one(
