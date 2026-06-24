@@ -232,6 +232,69 @@ class TestComputeEnergyCGSplit:
         E_std = compute_energy_cg(A, std_env, gates, d_eff)
         np.testing.assert_allclose(float(E_split), float(E_std), atol=1e-10)
 
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
+    def test_kagome_split_grad_matches_std_at_small_D(self, D, chi):
+        """Split-aware kagome CG energy GRADIENT == std-path gradient.
+
+        Mirrors ``test_kagome_split_matches_std_at_small_D`` at the gradient
+        level: holds the converged split env fixed (a constant w.r.t. the
+        differentiated supersite A) and differentiates the CG energy w.r.t. A
+        through both the split-aware RDM path and the shim path built from the
+        *same* env. Isolates the energy-RDM-dispatch backward, complementing the
+        forward parity test. (Analogue of
+        ``test_compute_energy_split_native_grad_matches_shim`` for the
+        coarse-grained kagome supersite.)
+        """
+        from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _split_env_to_tensor_standard,
+        )
+        from tenax.algorithms.coarse_grain import compute_energy_cg_split
+        from tenax.algorithms.pess import kagome_xxz_pess_cg_gates
+
+        d_eff = 8  # spin-1/2 kagome 3-PESS supersite
+        gates = kagome_xxz_pess_cg_gates(delta=1.0, d=2)
+
+        rng = np.random.default_rng(seed=0)
+        data = rng.normal(size=(D, D, D, D, d_eff))
+        data /= np.linalg.norm(data)
+        sym = U1Symmetry()
+        zD = np.zeros(D, dtype=np.int32)
+        zd = np.zeros(d_eff, dtype=np.int32)
+        A = DenseTensor(
+            jnp.asarray(data),
+            (
+                TensorIndex.from_charges(sym, zD.copy(), FlowDirection.OUT, label="u"),
+                TensorIndex.from_charges(sym, zD.copy(), FlowDirection.IN, label="d"),
+                TensorIndex.from_charges(sym, zD.copy(), FlowDirection.OUT, label="l"),
+                TensorIndex.from_charges(sym, zD.copy(), FlowDirection.IN, label="r"),
+                TensorIndex.from_charges(
+                    sym, zd.copy(), FlowDirection.IN, label="phys"
+                ),
+            ),
+        )
+
+        split_env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+        std_env = _split_env_to_tensor_standard(split_env)
+
+        def loss_split(a):
+            return jnp.real(compute_energy_cg_split(a, split_env, gates, d_eff))
+
+        def loss_std(a):
+            return jnp.real(compute_energy_cg(a, std_env, gates, d_eff))
+
+        g_split = jax.tree_util.tree_leaves(jax.grad(loss_split)(A))
+        g_std = jax.tree_util.tree_leaves(jax.grad(loss_std)(A))
+        assert len(g_split) == len(g_std) and g_split, "gradient pytree mismatch"
+        for ls, lh in zip(g_split, g_std):
+            np.testing.assert_allclose(
+                np.asarray(ls),
+                np.asarray(lh),
+                atol=1e-8,
+                rtol=1e-8,
+                err_msg="split-aware CG energy gradient diverges from std gradient",
+            )
+
 
 # ---------------------------------------------------------------------------
 # AD optimization integration test
