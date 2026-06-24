@@ -59,6 +59,11 @@ _ = heisenberg_gate_fn
 _D, _CHI = 4, 32
 _BUDGET_GB = 1.5  # ~6x headroom over the ~0.25 GB measured peak
 
+# ``tracemalloc`` tracks host memory only, so the memory probe is CPU-only.
+# Evaluate the backend at collection time so the probe is skipped *before* the
+# ``canonical_d4`` fixture is requested (no device build on GPU/TPU runs).
+_NOT_CPU = jax.default_backend() != "cpu"
+
 
 @pytest.fixture(scope="module")
 def canonical_d4():
@@ -84,22 +89,23 @@ def test_kagome_cg_split_energy_matches_shim(canonical_d4):
 
 
 @pytest.mark.slow
+@pytest.mark.skipif(
+    _NOT_CPU, reason="tracemalloc tracks host memory only; CPU-backend probe"
+)
 def test_kagome_cg_split_energy_peak_under_budget(canonical_d4):
     """Split-aware CG energy peak stays under budget at the feasible CG size.
 
     ``tracemalloc`` tracks host allocations only, so this is a CPU-backend
-    probe (skipped on GPU/TPU where device memory is untracked). Only the
-    energy contraction is measured — the CTM convergence inside
+    probe (skipped at collection on GPU/TPU via ``skipif``, before the
+    ``canonical_d4`` fixture builds anything on-device). Only the energy
+    contraction is measured — the CTM convergence inside
     ``build_canonical_pess`` is excluded.
 
     Scope note: this guards the *energy evaluation* peak. The split-CTM forward
     *convergence* is NOT ``chi^2 * D^4``-bounded at large D (it peaks ~32 GB for
     a bare d=2 site at D=8 chi=128); that large-D convergence-memory limitation
-    is tracked separately, not by this test.
+    is tracked separately (#641), not by this test.
     """
-    if jax.default_backend() != "cpu":
-        pytest.skip("tracemalloc tracks host memory only; CPU-backend probe")
-
     A, env, cg_gates, d_eff = canonical_d4
 
     tracemalloc.start()
