@@ -273,6 +273,27 @@ def test_checkpoint_path_allows_1site_rejects_lattice():
         optimize_gs_ad(gate, None, cfg_multi)
 
 
+@pytest.mark.core
+def test_checkpoint_path_rejects_c4v_reference():
+    """The dense C4v-reference path has no checkpoint wiring, so a checkpoint
+    path on it must RAISE (not silently no-op): gs_resume would otherwise start
+    fresh and discard the intended long run."""
+    gate = _heisenberg_gate()
+    cfg_ref = iPEPSConfig(
+        unit_cell="1x1",
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4, ctm_ad_mode="c4v_reference"),
+        gs_num_steps=0,
+        gs_c4v=True,
+        gs_implicit_ad=True,
+        gs_checkpoint_path="/tmp/ckpt_guard_c4v_ref",
+        su_init=False,
+        gs_conv_criterion="grad_norm",
+    )
+    with pytest.raises(NotImplementedError, match="C4v|Lattice"):
+        optimize_gs_ad(gate, None, cfg_ref)
+
+
 def test_1site_writes_checkpoint(tmp_path):
     """A plain 1-site run with gs_checkpoint_path writes ckpt.last.pkl whose
     recorded step matches the last completed optimizer step."""

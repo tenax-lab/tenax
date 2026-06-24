@@ -912,12 +912,18 @@ def optimize_gs_ad(
     config = _resolve_projector_backward(config)
 
     # Checkpointing is wired for the 2-site and 1-site (incl. coarse-grained
-    # cg_gates) paths. Generic Lattice multisite is not yet wired (#497).
-    if config.gs_checkpoint_path is not None and isinstance(config.unit_cell, Lattice):
+    # cg_gates) paths via _optimize_gs_ad_tensor / _optimize_gs_ad_2site.
+    # Generic Lattice multisite and the dense C4v-reference path
+    # (_optimize_gs_ad_tensor_reference_c4v) are NOT wired — block them
+    # explicitly so gs_checkpoint_path is never silently ignored (#497).
+    if config.gs_checkpoint_path is not None and (
+        isinstance(config.unit_cell, Lattice) or _use_reference_c4v_path(config)
+    ):
         raise NotImplementedError(
             "iPEPSConfig.gs_checkpoint_path is not yet supported for generic "
-            "Lattice multisite unit cells; use unit_cell='2site' or '1x1' "
-            "(incl. cg_gates). Multisite checkpoint wiring is a follow-up (#497)."
+            "Lattice multisite unit cells or the dense C4v-reference path; use "
+            "unit_cell='2site' or '1x1' (non-C4v-reference, incl. cg_gates). "
+            "Multisite / C4v-reference checkpoint wiring is a follow-up (#497)."
         )
 
     if isinstance(config.unit_cell, Lattice):
