@@ -371,6 +371,107 @@ class TestExcitationEnergies:
 
 
 # ---------------------------------------------------------------------------
+# Tensor-protocol input acceptance (issue #636)
+# ---------------------------------------------------------------------------
+
+
+def _wrap_array_as_dense_tensor(arr):
+    """Wrap a raw array as a DenseTensor with trivial (all-zero U(1)) charges.
+
+    Flows/labels are irrelevant for the excitation path — it only calls
+    ``.todense()`` — so trivial indices suffice to exercise the conversion.
+    """
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import U1Symmetry
+    from tenax.core.tensor import DenseTensor
+
+    sym = U1Symmetry()
+    arr = jnp.asarray(arr)
+    indices = tuple(
+        TensorIndex.from_charges(
+            sym, np.zeros(arr.shape[i], dtype=np.int32), FlowDirection.OUT
+        )
+        for i in range(arr.ndim)
+    )
+    return DenseTensor(arr, indices)
+
+
+class TestTensorInputAcceptance:
+    """compute_excitations must accept the Tensor-protocol outputs of
+    ``optimize_gs_ad`` (DenseTensor site tensor + Tensor-based env), not only
+    raw ``jax.Array``/``CTMEnvironment`` inputs.  Regression for issue #636.
+    """
+
+    def test_dense_tensor_inputs_match_raw_arrays(
+        self, small_peps_and_env, heisenberg_gate
+    ):
+        """Wrapping A, the gate, and every env field as DenseTensor must yield
+        the same excitation spectrum as the raw-array call."""
+        A, env, d = small_peps_and_env
+        E_gs = float(compute_energy_ctm(A, env, heisenberg_gate, d))
+        config = ExcitationConfig(num_excitations=2, null_space_tol=1e-2)
+        momenta = [(0.0, 0.0), (np.pi, 0.0)]
+
+        ref = compute_excitations(A, env, heisenberg_gate, E_gs, momenta, config)
+
+        # Mimic optimize_gs_ad's return types: DenseTensor A + gate, and a
+        # CTM environment whose 8 fields are DenseTensors.
+        A_t = _wrap_array_as_dense_tensor(A)
+        gate_t = _wrap_array_as_dense_tensor(heisenberg_gate)
+        env_t = CTMEnvironment(*(_wrap_array_as_dense_tensor(f) for f in env))
+
+        res = compute_excitations(A_t, env_t, gate_t, E_gs, momenta, config)
+
+        assert isinstance(res, ExcitationResult)
+        np.testing.assert_allclose(res.energies, ref.energies, atol=1e-10, rtol=0)
+
+    def test_mixed_dense_tensor_and_raw_inputs(
+        self, small_peps_and_env, heisenberg_gate
+    ):
+        """A DenseTensor A with a raw-array env (and vice versa) must work —
+        the normalization is per-argument."""
+        A, env, d = small_peps_and_env
+        E_gs = float(compute_energy_ctm(A, env, heisenberg_gate, d))
+        config = ExcitationConfig(num_excitations=1, null_space_tol=1e-2)
+        momenta = [(np.pi, 0.0)]
+
+        ref = compute_excitations(A, env, heisenberg_gate, E_gs, momenta, config)
+        res = compute_excitations(
+            _wrap_array_as_dense_tensor(A), env, heisenberg_gate, E_gs, momenta, config
+        )
+        np.testing.assert_allclose(res.energies, ref.energies, atol=1e-10, rtol=0)
+
+    def test_split_env_rejected_with_clear_error(
+        self, small_peps_and_env, heisenberg_gate
+    ):
+        """A non-8-tensor (e.g. split) environment must raise a clear error
+        rather than fail deep in the contraction."""
+        from tenax.algorithms.ipeps_excitations import _as_dense_env
+
+        A, env, d = small_peps_and_env
+        twelve_field_env = tuple(env) + tuple(env[:4])  # 12 fields, like split CTM
+        with pytest.raises(ValueError, match="8-tensor CTM environment"):
+            _as_dense_env(twelve_field_env)
+
+    def test_symmetric_tensor_rejected(self, small_peps_and_env, heisenberg_gate):
+        """SymmetricTensor inputs must raise (dense-only path) rather than
+        silently densify a block-sparse tensor — project rule against
+        ``todense()`` on the symmetric path."""
+        from tenax.algorithms.ipeps_excitations import _as_dense_array
+        from tenax.core.index import FlowDirection, TensorIndex
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.core.tensor import SymmetricTensor
+
+        sym = U1Symmetry()
+        idx = TensorIndex.from_charges(
+            sym, np.array([0, 0], dtype=np.int32), FlowDirection.OUT
+        )
+        sym_t = SymmetricTensor.from_dense(jnp.eye(2), (idx, idx.dual()))
+        with pytest.raises(NotImplementedError, match="SymmetricTensor"):
+            _as_dense_array(sym_t)
+
+
+# ---------------------------------------------------------------------------
 # Momentum path tests
 # ---------------------------------------------------------------------------
 
