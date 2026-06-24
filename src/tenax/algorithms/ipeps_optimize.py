@@ -1221,6 +1221,12 @@ def _optimize_gs_ad_tensor(
     _warn_implicit_ad_variational_caveat(config, path="1-site Tensor-protocol")
     import optax
 
+    from tenax.algorithms._checkpoint import (
+        _config_to_dict,
+        cg_gates_fingerprint,
+        gate_fingerprint,
+        save_checkpoint,
+    )
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
@@ -1549,8 +1555,66 @@ def _optimize_gs_ad_tensor(
                 patience = p
         return patience
 
+    _gate_fp = (
+        gate_fingerprint(gate)
+        if (config.gs_checkpoint_path is not None and gate is not None)
+        else None
+    )
+    _cg_fp = (
+        cg_gates_fingerprint(config.cg_gates)
+        if (config.gs_checkpoint_path is not None and config.cg_gates is not None)
+        else None
+    )
+
+    def _maybe_save_1s_checkpoint(step, chi_before, e_prev, *, force_last=False):
+        if config.gs_checkpoint_path is None:
+            return
+        chi_changed = ctm_cfg.chi != chi_before
+        is_new_best = best_energy < e_prev
+        should_save_last = (
+            force_last or chi_changed or (step + 1) % config.gs_checkpoint_every == 0
+        )
+        if not (should_save_last or is_new_best):
+            return
+        _ckpt_state = {
+            "step": step,
+            "config": _config_to_dict(config),
+            "hamiltonian_fingerprint": _gate_fp,
+            "cg_gates_fingerprint": _cg_fp,
+            "params": params,
+            "best_params": best_params,
+            "best_energy": float(best_energy),
+            "prev_energy": float(prev_energy),
+            "env_cache": dict(_env_cache),
+            "best_env_cache": dict(best_env_cache),
+            "opt_state": opt_state,
+            "lbfgs_history": list(lbfgs_history),
+            "prev_params_flat": prev_A_flat,
+            "prev_grad_flat": prev_grad_flat,
+            "cg_direction": cg_direction,
+            "prev_grad": prev_grad,
+            "prev_precond_grad": prev_precond_grad,
+            "stall_count": stall_count,
+            "current_stage_idx": current_stage_idx,
+            "stage_start_step": stage_start_step,
+            "ctm_cfg_chi": ctm_cfg.chi,
+            "current_conv_tol": _current_conv_tol,
+            "current_patience": _current_patience,
+        }
+        if should_save_last:
+            save_checkpoint(_ckpt_state, config.gs_checkpoint_path)
+        if is_new_best:
+            save_checkpoint(_ckpt_state, config.gs_checkpoint_path, is_best=True)
+
     _log_ad_compile_notice(config)
     for step in range(config.gs_num_steps):
+        # Snapshots for checkpoint "did chi change / new best" detection.
+        # ``best_energy`` only decreases, so a strict < comparison after the
+        # step body identifies a freshly-accepted best.  Both snapshots are
+        # passed to ``_maybe_save_1s_checkpoint`` at every save call site so
+        # the helper can decide what to flush.
+        _best_energy_at_step_start = best_energy
+        _chi_at_step_start = ctm_cfg.chi
         # Update conv_tol if schedule is active
         if _conv_tol_schedule is not None:
             new_tol = _get_scheduled_conv_tol(step, config.gs_num_steps)
@@ -1788,6 +1852,15 @@ def _optimize_gs_ad_tensor(
                         f"chi={ctm_cfg.chi} (#455 PR2)",
                         flush=True,
                     )
+                # Force a checkpoint on stage advance before continuing so a
+                # crash inside the next stage's first step doesn't roll back
+                # across the boundary (mirror 2-site, Codex P2 #497).
+                _maybe_save_1s_checkpoint(
+                    step,
+                    _chi_at_step_start,
+                    _best_energy_at_step_start,
+                    force_last=True,
+                )
                 continue
             if config.gs_verbose:
                 if not logged:
@@ -2099,6 +2172,14 @@ def _optimize_gs_ad_tensor(
                                     flush=True,
                                 )
                         if bump_fired or stage_advanced:
+                            # Force a checkpoint on stall-cap stage advance
+                            # before continuing (mirror 2-site, Codex P2 #497).
+                            _maybe_save_1s_checkpoint(
+                                step,
+                                _chi_at_step_start,
+                                _best_energy_at_step_start,
+                                force_last=True,
+                            )
                             continue
                     n_resets_done = stall_count - 1
                     if config.gs_verbose:
@@ -2215,6 +2296,11 @@ def _optimize_gs_ad_tensor(
         # but does not touch ``_env_cache``), padded to the new χ by the bump.
         if _accepted_best_this_iter:
             best_env_cache = dict(_env_cache)
+
+        # End-of-step save: cadence-based + new-best detection.
+        _maybe_save_1s_checkpoint(
+            step, _chi_at_step_start, _best_energy_at_step_start
+        )
 
     # Re-evaluate both final A and best_A with fully converged fresh CTM.
     # In-loop energies use warm-started CTM that can produce unphysical values

@@ -271,3 +271,28 @@ def test_checkpoint_path_allows_1site_rejects_lattice():
     )
     with pytest.raises(NotImplementedError, match="Lattice|multisite"):
         optimize_gs_ad(gate, None, cfg_multi)
+
+
+def test_1site_writes_checkpoint(tmp_path):
+    """A plain 1-site run with gs_checkpoint_path writes ckpt.last.pkl whose
+    recorded step matches the last completed optimizer step."""
+    from tenax.algorithms._checkpoint import checkpoint_exists, load_checkpoint
+
+    gate = _heisenberg_gate()
+    cfg = iPEPSConfig(
+        unit_cell="1x1",
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4),
+        gs_num_steps=2,
+        gs_checkpoint_path=str(tmp_path),
+        gs_checkpoint_every=1,
+        gs_c4v=False,
+        su_init=False,
+        gs_conv_criterion="grad_norm",
+    )
+    optimize_gs_ad(gate, None, cfg)
+    assert checkpoint_exists(str(tmp_path))
+    bundle = load_checkpoint(str(tmp_path))
+    assert bundle["step"] == 1  # 0-indexed last of 2 steps
+    assert "params" in bundle and "opt_state" in bundle
+    assert bundle["cg_gates_fingerprint"] is None  # plain 1-site, no cg_gates
