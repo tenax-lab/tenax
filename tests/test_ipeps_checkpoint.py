@@ -199,3 +199,26 @@ def test_validate_config_compatible_no_warning():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         validate_config(saved, cfg)  # no warning expected
+
+
+def test_cg_gates_fingerprint_round_trip_and_changes_with_bytes():
+    import jax.numpy as jnp
+
+    from tenax.algorithms._checkpoint import cg_gates_fingerprint
+    from tenax.algorithms.coarse_grain import CGGates
+
+    h_intra = jnp.eye(4)
+    h_inter = {"h": jnp.ones((4, 4, 4, 4)), "v": jnp.zeros((4, 4, 4, 4))}
+    g1 = CGGates(h_intra=h_intra, h_inter=h_inter, n_sites=2, map_fn=None, init_fn=None)
+    # same arrays, DIFFERENT callable -> same fingerprint (callables not hashed)
+    g2 = CGGates(h_intra=h_intra, h_inter=h_inter, n_sites=2,
+                 map_fn=lambda x: x, init_fn=None)
+    assert cg_gates_fingerprint(g1) == cg_gates_fingerprint(g2)
+    # perturb h_intra -> different fingerprint
+    g3 = CGGates(h_intra=h_intra.at[0, 0].add(1.0), h_inter=h_inter, n_sites=2)
+    assert cg_gates_fingerprint(g3) != cg_gates_fingerprint(g1)
+    # perturb an h_inter entry -> different fingerprint
+    g4 = CGGates(h_intra=h_intra,
+                 h_inter={"h": h_inter["h"].at[0, 0, 0, 0].add(1.0), "v": h_inter["v"]},
+                 n_sites=2)
+    assert cg_gates_fingerprint(g4) != cg_gates_fingerprint(g1)
