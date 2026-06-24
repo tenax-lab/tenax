@@ -239,19 +239,35 @@ def test_resume_with_missing_checkpoint_raises(tmp_path):
 
 
 @pytest.mark.core
-def test_checkpoint_path_rejects_non_2site_paths():
-    """1-site and multisite paths must raise NotImplementedError when a
-    checkpoint path is requested (only 2-site is wired in this PR)."""
+def test_checkpoint_path_allows_1site_rejects_lattice():
+    """1-site (incl. CG) checkpointing is now wired; generic Lattice
+    multisite still raises NotImplementedError."""
+    from tenax.core.lattice import Lattice, checkerboard
+
     gate = _heisenberg_gate()
+    # 1-site no longer raises NotImplementedError on the guard. 0 steps -> returns fast.
     cfg_1site = iPEPSConfig(
         unit_cell="1x1",
         max_bond_dim=2,
         ctm=CTMConfig(chi=4),
-        gs_num_steps=1,
-        gs_checkpoint_path="/tmp/should_not_be_used",
-        gs_c4v=True,
+        gs_num_steps=0,
+        gs_checkpoint_path="/tmp/ckpt_guard_1site",
+        gs_c4v=False,
         su_init=False,
         gs_conv_criterion="grad_norm",
     )
-    with pytest.raises(NotImplementedError, match="2site"):
-        optimize_gs_ad(gate, None, cfg_1site)
+    optimize_gs_ad(gate, None, cfg_1site)  # must NOT raise NotImplementedError
+
+    # generic Lattice multisite is still guarded
+    lat = checkerboard()  # minimal valid 2-tensor lattice
+    assert isinstance(lat, Lattice)
+    cfg_multi = iPEPSConfig(
+        unit_cell=lat,
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4),
+        gs_num_steps=1,
+        gs_checkpoint_path="/tmp/ckpt_guard_lattice",
+        su_init=False,
+    )
+    with pytest.raises(NotImplementedError, match="Lattice|multisite"):
+        optimize_gs_ad(gate, None, cfg_multi)

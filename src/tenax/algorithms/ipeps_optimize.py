@@ -911,13 +911,13 @@ def optimize_gs_ad(
     # See docs/plans/2026-04-13-multisite-c4v-reference-ad-plan.md Task 8.
     config = _resolve_projector_backward(config)
 
-    # Checkpointing is currently wired only for the 2-site path; 1-site
-    # and multisite land in follow-up PRs to feat/ipeps-checkpoint-2site.
-    if config.gs_checkpoint_path is not None and config.unit_cell != "2site":
+    # Checkpointing is wired for the 2-site and 1-site (incl. coarse-grained
+    # cg_gates) paths. Generic Lattice multisite is not yet wired (#497).
+    if config.gs_checkpoint_path is not None and isinstance(config.unit_cell, Lattice):
         raise NotImplementedError(
-            "iPEPSConfig.gs_checkpoint_path is currently supported only for "
-            "unit_cell='2site'. 1-site and multisite checkpoint wiring land "
-            "in follow-up PRs (see PR #497)."
+            "iPEPSConfig.gs_checkpoint_path is not yet supported for generic "
+            "Lattice multisite unit cells; use unit_cell='2site' or '1x1' "
+            "(incl. cg_gates). Multisite checkpoint wiring is a follow-up (#497)."
         )
 
     if isinstance(config.unit_cell, Lattice):
