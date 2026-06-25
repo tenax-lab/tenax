@@ -284,6 +284,159 @@ class TestSplitCTMMoves:
             )
 
 
+class TestSplitCTMBoundedEdge:
+    """Issue #641: the dense forward move must avoid the chi^2*D^6 grown edge.
+
+    The bounded grow+project path (:func:`_grow_and_project_bounded`) absorbs
+    the projectors into the open half-edges before the interlayer join, so the
+    peak intermediate is chi^2*D^3*d instead of chi^2*D^6.  It must reproduce
+    the closed-path result (grow the full edge, then project) to machine
+    precision.
+    """
+
+    @pytest.mark.parametrize("D, seed", [(2, 1), (3, 7), (4, 11)])
+    def test_bounded_matches_closed_path_all_moves(self, D, seed):
+        """Bounded 4-leg projected edge == closed grow+project, every move."""
+        import tenax.algorithms._split_ctm_tensor_moves as moves
+
+        site = make_random_dense_site(D, 2, seed)
+        chi = 8
+        env = initialize_split_ctm_tensor_env(site, chi, chi)
+        for _ in range(6):
+            env = _split_ctm_tensor_sweep(env, site, chi, chi, True)
+        A_bar = site.bar()
+
+        # Capture the per-move (projectors, fuse tuples) the moves actually use
+        # by spying on the dispatcher, then compute both paths from them.
+        captured = []
+        orig = moves._grow_and_project_edge
+
+        def spy(*args, **kwargs):
+            captured.append((args, kwargs))
+            return orig(*args, **kwargs)
+
+        moves._grow_and_project_edge = spy
+        try:
+            moves._split_ctm_move_left(env, site, A_bar, chi, chi)
+            moves._split_ctm_move_right(env, site, A_bar, chi, chi)
+            moves._split_ctm_move_top(env, site, A_bar, chi, chi)
+            moves._split_ctm_move_bottom(env, site, A_bar, chi, chi)
+        finally:
+            moves._grow_and_project_edge = orig
+
+        assert len(captured) == 4
+        for args, kwargs in captured:
+            (T_ket, T_bra, A, A_bar_, P_first, P_second, leg, kI, bI, grow_out) = args
+            left_fuse = kwargs["left_fuse"]
+            right_fuse = kwargs["right_fuse"]
+
+            bounded = moves._grow_and_project_bounded(
+                T_ket,
+                T_bra,
+                A,
+                A_bar_,
+                P_first,
+                P_second,
+                leg,
+                kI,
+                bI,
+                left_fuse,
+                right_fuse,
+            )
+            closed_edge = moves._grow_edge_no_double_layer(
+                T_ket, T_bra, A, A_bar_, leg, kI, bI, grow_out
+            )
+            closed = moves._project_grown_edge_tensor(
+                closed_edge,
+                P_first,
+                P_second,
+                left_fuse=left_fuse,
+                right_fuse=right_fuse,
+            )
+
+            ref = closed.todense()
+            perm = tuple(bounded.labels().index(lbl) for lbl in closed.labels())
+            got = bounded.transpose(perm).todense()
+            scale = float(jnp.max(jnp.abs(ref))) + 1e-30
+            relerr = float(jnp.max(jnp.abs(ref - got))) / scale
+            assert relerr < 1e-10, f"move {leg}: relerr={relerr:.2e}"
+
+    def test_bounded_peak_is_chi2_d4_bounded(self):
+        """The dense grow+project must not allocate a chi^2*D^6 intermediate.
+
+        Tracks the largest dense array materialised during one bounded
+        grow+project and asserts it stays well under the chi^2*D^6 closed-path
+        peak (issue #641).  D=4, chi=16: chi^2*D^6 = 1.05e9 elems; the bounded
+        path's peak is ~chi^2*D^3*d = 5.2e5.
+        """
+        import tenax.algorithms._split_ctm_tensor_moves as moves
+
+        D, chi, d = 4, 16, 2
+        site = make_random_dense_site(D, d, seed=3)
+        env = initialize_split_ctm_tensor_env(site, chi, chi)
+        for _ in range(3):
+            env = _split_ctm_tensor_sweep(env, site, chi, chi, True)
+        A_bar = site.bar()
+
+        captured = {}
+        orig = moves._grow_and_project_edge
+
+        def spy(*args, **kwargs):
+            captured["args"] = (args, kwargs)
+            moves._grow_and_project_edge = orig  # capture once
+            return orig(*args, **kwargs)
+
+        moves._grow_and_project_edge = spy
+        try:
+            moves._split_ctm_move_left(env, site, A_bar, chi, chi)
+        finally:
+            moves._grow_and_project_edge = orig
+
+        args, kwargs = captured["args"]
+        (T_ket, T_bra, A, A_bar_, P_first, P_second, leg, kI, bI, _grow_out) = args
+
+        # Instrument DenseTensor construction to record the largest array size.
+        peak = {"n": 0}
+        real_init = DenseTensor.__init__
+
+        def tracking_init(self, data, indices, *a, **k):
+            try:
+                peak["n"] = max(peak["n"], int(np.prod(data.shape)))
+            except Exception:
+                pass
+            return real_init(self, data, indices, *a, **k)
+
+        DenseTensor.__init__ = tracking_init
+        try:
+            moves._grow_and_project_bounded(
+                T_ket,
+                T_bra,
+                A,
+                A_bar_,
+                P_first,
+                P_second,
+                leg,
+                kI,
+                bI,
+                kwargs["left_fuse"],
+                kwargs["right_fuse"],
+            )
+        finally:
+            DenseTensor.__init__ = real_init
+
+        closed_peak = chi**2 * D**6  # the chi^2*D^6 edge we must avoid
+        target = chi**2 * D**4  # the issue #641 chi^2*D^4 bound
+        assert peak["n"] > 0
+        # Bounded peak is chi^2*D^3*d (the half-edge); must meet the chi^2*D^4
+        # target and sit far below the closed chi^2*D^6 grown edge.
+        assert peak["n"] <= target, (
+            f"bounded peak {peak['n']:.2e} exceeds chi^2*D^4={target:.2e}"
+        )
+        assert peak["n"] < closed_peak / 10, (
+            f"bounded peak {peak['n']:.2e} not far below chi^2*D^6={closed_peak:.2e}"
+        )
+
+
 # ------------------------------------------------------------------ #
 # Phase 3: Convergence tests                                           #
 # ------------------------------------------------------------------ #
