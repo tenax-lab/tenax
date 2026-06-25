@@ -210,10 +210,14 @@ def test_cg_gates_fingerprint_round_trip_and_changes_with_bytes():
     h_intra = jnp.eye(4)
     h_inter = {"h": jnp.ones((4, 4, 4, 4)), "v": jnp.zeros((4, 4, 4, 4))}
     g1 = CGGates(h_intra=h_intra, h_inter=h_inter, n_sites=2, map_fn=None, init_fn=None)
-    # same arrays, DIFFERENT callable -> same fingerprint (callables not hashed)
-    g2 = CGGates(h_intra=h_intra, h_inter=h_inter, n_sites=2,
-                 map_fn=lambda x: x, init_fn=None)
-    assert cg_gates_fingerprint(g1) == cg_gates_fingerprint(g2)
+    # same arrays + same MODE (both map_fn set), DIFFERENT callable identity ->
+    # same fingerprint (the callables themselves are not hashed)
+    g2a = CGGates(h_intra=h_intra, h_inter=h_inter, n_sites=2, map_fn=lambda x: x)
+    g2b = CGGates(h_intra=h_intra, h_inter=h_inter, n_sites=2, map_fn=lambda x: x * 1)
+    assert cg_gates_fingerprint(g2a) == cg_gates_fingerprint(g2b)
+    # but a different parameterization MODE (map_fn=None vs map_fn set) -> DIFFERENT
+    # fingerprint (the param tree differs: direct supersite vs raw tuple)
+    assert cg_gates_fingerprint(g1) != cg_gates_fingerprint(g2a)
     # perturb h_intra -> different fingerprint
     g3 = CGGates(h_intra=h_intra.at[0, 0].add(1.0), h_inter=h_inter, n_sites=2)
     assert cg_gates_fingerprint(g3) != cg_gates_fingerprint(g1)

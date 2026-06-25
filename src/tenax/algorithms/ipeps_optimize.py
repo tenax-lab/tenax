@@ -1605,11 +1605,17 @@ def _optimize_gs_ad_tensor(
                 "If this is intentional, start a fresh run."
             )
 
+        # Full inequality (not `is not None and ...`): a plain checkpoint
+        # (saved_cg_fp is None) resumed with cg_gates set, or vice versa, or a
+        # changed parameterization mode, are ALL fatal mismatches — restoring a
+        # param tree that doesn't match the live (CG vs plain) path would crash
+        # or silently run with incompatible dims.
         saved_cg_fp = bundle.get("cg_gates_fingerprint")
-        if saved_cg_fp is not None and saved_cg_fp != _cg_fp:
+        if saved_cg_fp != _cg_fp:
             raise ValueError(
-                "Cannot resume: the coarse-grained cg_gates have changed since "
-                "the checkpoint was written.\n"
+                "Cannot resume: the coarse-grained cg_gates (or parameterization "
+                "mode / plain-vs-CG path) have changed since the checkpoint was "
+                "written.\n"
                 f"  saved cg fingerprint:   {saved_cg_fp!r}\n"
                 f"  current cg fingerprint: {_cg_fp!r}\n"
                 "If this is intentional, start a fresh run."

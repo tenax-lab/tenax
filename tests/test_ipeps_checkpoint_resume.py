@@ -414,3 +414,34 @@ def test_resume_rejects_different_cg_gates(tmp_path):
     )
     with pytest.raises(ValueError, match="cg_gates"):
         optimize_gs_ad(dummy, None, cfg_other)
+
+
+@pytest.mark.slow
+def test_resume_rejects_plain_to_cg(tmp_path):
+    """A PLAIN 1-site checkpoint resumed with cg_gates set is a fatal mismatch.
+
+    The saved bundle has ``cg_gates_fingerprint=None`` while the live config has
+    a CG fingerprint; the full-inequality resume check must reject this (else
+    plain-tensor params would be evaluated through the CG path and crash). A
+    matched (4,4,4,4) dummy gate is shared so the GATE fingerprint agrees and the
+    CG check (not the gate check) is what fires.
+    """
+    import jax
+
+    g = jax.random.normal(jax.random.PRNGKey(0), (16, 16))
+    shared = jnp.asarray(0.5 * (g + g.T)).reshape(4, 4, 4, 4)  # d_phys=4 == d_eff
+
+    plain_cfg = iPEPSConfig(
+        unit_cell="1x1", max_bond_dim=2, ctm=CTMConfig(chi=4, max_iter=20, min_iter=5),
+        gs_num_steps=2, gs_checkpoint_path=str(tmp_path), gs_checkpoint_every=1,
+        gs_c4v=False, su_init=False, gs_conv_criterion="grad_norm",
+    )
+    optimize_gs_ad(shared, None, plain_cfg)
+
+    from tenax.algorithms._checkpoint import load_checkpoint
+
+    assert load_checkpoint(str(tmp_path))["cg_gates_fingerprint"] is None
+    # resume the SAME gate but now with cg_gates -> fatal CG-mismatch
+    cg_cfg = _honeycomb_cg_cfg(tmp_path, nsteps=4, resume=True)
+    with pytest.raises(ValueError, match="cg_gates|parameterization"):
+        optimize_gs_ad(shared, None, cg_cfg)

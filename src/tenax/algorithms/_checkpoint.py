@@ -73,18 +73,29 @@ def gate_fingerprint(gate: Any) -> tuple[tuple[int, ...], str, str]:
 def cg_gates_fingerprint(cg_gates: Any) -> tuple:
     """Stable identifier for a coarse-grained ``CGGates`` Hamiltonian.
 
-    Hashes the array content + structure: ``(n_sites, fp(h_intra),
+    Hashes the array content + structure + parameterization MODE:
+    ``(n_sites, map_fn is None, fp(h_intra),
     ((label, fp(arr)) for label, arr in sorted h_inter))`` where ``fp`` is
-    :func:`gate_fingerprint`.  The ``map_fn`` / ``init_fn`` callables are
-    intentionally NOT hashed: they are re-supplied by the live ``config`` on
-    resume, and two equivalent closures should still resume.  Used to refuse a
-    silent coarse-grained-gate swap on resume.
+    :func:`gate_fingerprint`.
+
+    The ``map_fn``/``init_fn`` callables themselves are intentionally NOT hashed
+    (re-supplied by the live ``config`` on resume; two equivalent closures should
+    still resume), but the ``map_fn is None`` *mode* IS included: it determines
+    the optimizer parameter tree (``map_fn=None`` → a direct supersite tensor;
+    ``map_fn`` set → a raw tuple of site tensors), so resuming a checkpoint whose
+    saved params don't match the live parameterization would crash. Refuses a
+    silent coarse-grained-gate OR parameterization-mode swap on resume.
     """
     inter = tuple(
         (label, gate_fingerprint(arr))
         for label, arr in sorted(cg_gates.h_inter.items())
     )
-    return (int(cg_gates.n_sites), gate_fingerprint(cg_gates.h_intra), inter)
+    return (
+        int(cg_gates.n_sites),
+        cg_gates.map_fn is None,
+        gate_fingerprint(cg_gates.h_intra),
+        inter,
+    )
 
 
 def _tenax_git_sha() -> str | None:
