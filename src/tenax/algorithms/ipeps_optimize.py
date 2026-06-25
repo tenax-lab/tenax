@@ -911,13 +911,19 @@ def optimize_gs_ad(
     # See docs/plans/2026-04-13-multisite-c4v-reference-ad-plan.md Task 8.
     config = _resolve_projector_backward(config)
 
-    # Checkpointing is currently wired only for the 2-site path; 1-site
-    # and multisite land in follow-up PRs to feat/ipeps-checkpoint-2site.
-    if config.gs_checkpoint_path is not None and config.unit_cell != "2site":
+    # Checkpointing is wired for the 2-site and 1-site (incl. coarse-grained
+    # cg_gates) paths via _optimize_gs_ad_tensor / _optimize_gs_ad_2site.
+    # Generic Lattice multisite and the dense C4v-reference path
+    # (_optimize_gs_ad_tensor_reference_c4v) are NOT wired — block them
+    # explicitly so gs_checkpoint_path is never silently ignored (#497).
+    if config.gs_checkpoint_path is not None and (
+        isinstance(config.unit_cell, Lattice) or _use_reference_c4v_path(config)
+    ):
         raise NotImplementedError(
-            "iPEPSConfig.gs_checkpoint_path is currently supported only for "
-            "unit_cell='2site'. 1-site and multisite checkpoint wiring land "
-            "in follow-up PRs (see PR #497)."
+            "iPEPSConfig.gs_checkpoint_path is not yet supported for generic "
+            "Lattice multisite unit cells or the dense C4v-reference path; use "
+            "unit_cell='2site' or '1x1' (non-C4v-reference, incl. cg_gates). "
+            "Multisite / C4v-reference checkpoint wiring is a follow-up (#497)."
         )
 
     if isinstance(config.unit_cell, Lattice):
@@ -1221,6 +1227,15 @@ def _optimize_gs_ad_tensor(
     _warn_implicit_ad_variational_caveat(config, path="1-site Tensor-protocol")
     import optax
 
+    from tenax.algorithms._checkpoint import (
+        _config_to_dict,
+        cg_gates_fingerprint,
+        checkpoint_exists,
+        gate_fingerprint,
+        load_checkpoint,
+        save_checkpoint,
+        validate_config,
+    )
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
@@ -1549,8 +1564,175 @@ def _optimize_gs_ad_tensor(
                 patience = p
         return patience
 
+    _gate_fp = (
+        gate_fingerprint(gate)
+        if (config.gs_checkpoint_path is not None and gate is not None)
+        else None
+    )
+    _cg_fp = (
+        cg_gates_fingerprint(config.cg_gates)
+        if (config.gs_checkpoint_path is not None and config.cg_gates is not None)
+        else None
+    )
+
+    # ---- Checkpoint resume ----------------------------------------
+    # When gs_resume=True and a checkpoint exists at gs_checkpoint_path,
+    # restore optimizer state and pick up at step ``saved_step + 1``.
+    # All other branches keep the fresh-init values set above.  These
+    # statements reassign function locals (params, ctm_cfg, _env_cache
+    # contents, ...) at function scope, so plain assignment is correct.
+    start_step = 0
+    if config.gs_resume:
+        # Fail fast on a typo'd / deleted / never-written checkpoint
+        # path rather than silently falling through to fresh init.
+        if not checkpoint_exists(config.gs_checkpoint_path):
+            raise FileNotFoundError(
+                f"gs_resume=True but no checkpoint found at "
+                f"{config.gs_checkpoint_path!r} (looked for 'ckpt.last.pkl'). "
+                f"Either point gs_checkpoint_path at the directory of a prior "
+                f"run, or set gs_resume=False to start fresh."
+            )
+        bundle = load_checkpoint(config.gs_checkpoint_path)
+        validate_config(bundle.get("config", {}), config)
+
+        saved_fp = bundle.get("hamiltonian_fingerprint")
+        if saved_fp is not None and tuple(saved_fp) != _gate_fp:
+            raise ValueError(
+                "Cannot resume: the hamiltonian gate has changed since the "
+                "checkpoint was written.\n"
+                f"  saved fingerprint:   {tuple(saved_fp)!r}\n"
+                f"  current fingerprint: {_gate_fp!r}\n"
+                "If this is intentional, start a fresh run."
+            )
+
+        # Full inequality (not `is not None and ...`): a plain checkpoint
+        # (saved_cg_fp is None) resumed with cg_gates set, or vice versa, or a
+        # changed parameterization mode, are ALL fatal mismatches — restoring a
+        # param tree that doesn't match the live (CG vs plain) path would crash
+        # or silently run with incompatible dims.
+        saved_cg_fp = bundle.get("cg_gates_fingerprint")
+        if saved_cg_fp != _cg_fp:
+            raise ValueError(
+                "Cannot resume: the coarse-grained cg_gates (or parameterization "
+                "mode / plain-vs-CG path) have changed since the checkpoint was "
+                "written.\n"
+                f"  saved cg fingerprint:   {saved_cg_fp!r}\n"
+                f"  current cg fingerprint: {_cg_fp!r}\n"
+                "If this is intentional, start a fresh run."
+            )
+
+        saved_cfg = bundle.get("config", {})
+        _opt_compat = (
+            saved_cfg.get("gs_optimizer") == config.gs_optimizer
+            and saved_cfg.get("gs_metric_precond") == config.gs_metric_precond
+        )
+
+        params = bundle["params"]
+        best_params = bundle["best_params"]
+        best_energy = float(bundle["best_energy"])
+        prev_energy = float(bundle["prev_energy"])
+        # Clear the env warm-start cache AND the implicit-AD lambda seed on
+        # restore (issue #501), matching the 2-site resume path. The restored
+        # env below is a fresh starting point; the prior Neumann seed is stale.
+        _drop_env_cache_for_reset(_env_cache)
+        _env_cache.update(bundle.get("env_cache", {}))
+        best_env_cache = dict(bundle.get("best_env_cache", {}))
+        stall_count = int(bundle.get("stall_count", 0))
+
+        if _opt_compat:
+            if optimizer is not None and bundle.get("opt_state") is not None:
+                opt_state = bundle["opt_state"]
+            lbfgs_history = list(bundle.get("lbfgs_history") or [])
+            prev_A_flat = bundle.get("prev_params_flat")
+            prev_grad_flat = bundle.get("prev_grad_flat")
+            cg_direction = bundle.get("cg_direction")
+            prev_grad = bundle.get("prev_grad")
+            prev_precond_grad = bundle.get("prev_precond_grad")
+        else:
+            import warnings as _warnings
+
+            _warnings.warn(
+                "Optimizer-defining config differs from checkpoint "
+                f"(saved: gs_optimizer={saved_cfg.get('gs_optimizer')!r}, "
+                f"gs_metric_precond={saved_cfg.get('gs_metric_precond')!r}; "
+                f"current: gs_optimizer={config.gs_optimizer!r}, "
+                f"gs_metric_precond={config.gs_metric_precond!r}). "
+                "Restoring params/envs/energies but discarding saved "
+                "optimizer history (curvature/momentum will restart fresh).",
+                stacklevel=2,
+            )
+
+        current_stage_idx = int(bundle.get("current_stage_idx", 0))
+        stage_start_step = int(bundle.get("stage_start_step", 0))
+        saved_chi = bundle.get("ctm_cfg_chi")
+        if saved_chi is not None and int(saved_chi) != ctm_cfg.chi:
+            ctm_cfg = _replace(ctm_cfg, chi=int(saved_chi))
+        saved_conv_tol = bundle.get("current_conv_tol")
+        if saved_conv_tol is not None:
+            _current_conv_tol = float(saved_conv_tol)
+            ctm_cfg = _replace(ctm_cfg, conv_tol=_current_conv_tol)
+        saved_patience = bundle.get("current_patience")
+        if saved_patience is not None:
+            _current_patience = int(saved_patience)
+            ctm_cfg = _replace(ctm_cfg, plateau_patience=_current_patience)
+
+        start_step = int(bundle["step"]) + 1
+        if config.gs_verbose:
+            print(
+                f"[iPEPS-AD:1site-tensor] resumed from step {start_step} "
+                f"(best E={best_energy:.10f}, chi={ctm_cfg.chi})",
+                flush=True,
+            )
+
+    def _maybe_save_1s_checkpoint(step, chi_before, e_prev, *, force_last=False):
+        if config.gs_checkpoint_path is None:
+            return
+        chi_changed = ctm_cfg.chi != chi_before
+        is_new_best = best_energy < e_prev
+        should_save_last = (
+            force_last or chi_changed or (step + 1) % config.gs_checkpoint_every == 0
+        )
+        if not (should_save_last or is_new_best):
+            return
+        _ckpt_state = {
+            "step": step,
+            "config": _config_to_dict(config),
+            "hamiltonian_fingerprint": _gate_fp,
+            "cg_gates_fingerprint": _cg_fp,
+            "params": params,
+            "best_params": best_params,
+            "best_energy": float(best_energy),
+            "prev_energy": float(prev_energy),
+            "env_cache": dict(_env_cache),
+            "best_env_cache": dict(best_env_cache),
+            "opt_state": opt_state,
+            "lbfgs_history": list(lbfgs_history),
+            "prev_params_flat": prev_A_flat,
+            "prev_grad_flat": prev_grad_flat,
+            "cg_direction": cg_direction,
+            "prev_grad": prev_grad,
+            "prev_precond_grad": prev_precond_grad,
+            "stall_count": stall_count,
+            "current_stage_idx": current_stage_idx,
+            "stage_start_step": stage_start_step,
+            "ctm_cfg_chi": ctm_cfg.chi,
+            "current_conv_tol": _current_conv_tol,
+            "current_patience": _current_patience,
+        }
+        if should_save_last:
+            save_checkpoint(_ckpt_state, config.gs_checkpoint_path)
+        if is_new_best:
+            save_checkpoint(_ckpt_state, config.gs_checkpoint_path, is_best=True)
+
     _log_ad_compile_notice(config)
-    for step in range(config.gs_num_steps):
+    for step in range(start_step, config.gs_num_steps):
+        # Snapshots for checkpoint "did chi change / new best" detection.
+        # ``best_energy`` only decreases, so a strict < comparison after the
+        # step body identifies a freshly-accepted best.  Both snapshots are
+        # passed to ``_maybe_save_1s_checkpoint`` at every save call site so
+        # the helper can decide what to flush.
+        _best_energy_at_step_start = best_energy
+        _chi_at_step_start = ctm_cfg.chi
         # Update conv_tol if schedule is active
         if _conv_tol_schedule is not None:
             new_tol = _get_scheduled_conv_tol(step, config.gs_num_steps)
@@ -1788,6 +1970,15 @@ def _optimize_gs_ad_tensor(
                         f"chi={ctm_cfg.chi} (#455 PR2)",
                         flush=True,
                     )
+                # Force a checkpoint on stage advance before continuing so a
+                # crash inside the next stage's first step doesn't roll back
+                # across the boundary (mirror 2-site, Codex P2 #497).
+                _maybe_save_1s_checkpoint(
+                    step,
+                    _chi_at_step_start,
+                    _best_energy_at_step_start,
+                    force_last=True,
+                )
                 continue
             if config.gs_verbose:
                 if not logged:
@@ -2099,6 +2290,14 @@ def _optimize_gs_ad_tensor(
                                     flush=True,
                                 )
                         if bump_fired or stage_advanced:
+                            # Force a checkpoint on stall-cap stage advance
+                            # before continuing (mirror 2-site, Codex P2 #497).
+                            _maybe_save_1s_checkpoint(
+                                step,
+                                _chi_at_step_start,
+                                _best_energy_at_step_start,
+                                force_last=True,
+                            )
                             continue
                     n_resets_done = stall_count - 1
                     if config.gs_verbose:
@@ -2215,6 +2414,11 @@ def _optimize_gs_ad_tensor(
         # but does not touch ``_env_cache``), padded to the new χ by the bump.
         if _accepted_best_this_iter:
             best_env_cache = dict(_env_cache)
+
+        # End-of-step save: cadence-based + new-best detection.
+        _maybe_save_1s_checkpoint(
+            step, _chi_at_step_start, _best_energy_at_step_start
+        )
 
     # Re-evaluate both final A and best_A with fully converged fresh CTM.
     # In-loop energies use warm-started CTM that can produce unphysical values

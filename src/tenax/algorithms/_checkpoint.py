@@ -70,6 +70,34 @@ def gate_fingerprint(gate: Any) -> tuple[tuple[int, ...], str, str]:
     )
 
 
+def cg_gates_fingerprint(cg_gates: Any) -> tuple:
+    """Stable identifier for a coarse-grained ``CGGates`` Hamiltonian.
+
+    Hashes the array content + structure + parameterization MODE:
+    ``(n_sites, map_fn is None, fp(h_intra),
+    ((label, fp(arr)) for label, arr in sorted h_inter))`` where ``fp`` is
+    :func:`gate_fingerprint`.
+
+    The ``map_fn``/``init_fn`` callables themselves are intentionally NOT hashed
+    (re-supplied by the live ``config`` on resume; two equivalent closures should
+    still resume), but the ``map_fn is None`` *mode* IS included: it determines
+    the optimizer parameter tree (``map_fn=None`` → a direct supersite tensor;
+    ``map_fn`` set → a raw tuple of site tensors), so resuming a checkpoint whose
+    saved params don't match the live parameterization would crash. Refuses a
+    silent coarse-grained-gate OR parameterization-mode swap on resume.
+    """
+    inter = tuple(
+        (label, gate_fingerprint(arr))
+        for label, arr in sorted(cg_gates.h_inter.items())
+    )
+    return (
+        int(cg_gates.n_sites),
+        cg_gates.map_fn is None,
+        gate_fingerprint(cg_gates.h_intra),
+        inter,
+    )
+
+
 def _tenax_git_sha() -> str | None:
     """Return the tenax git SHA if discoverable, else ``None``.
 
@@ -104,8 +132,17 @@ def _config_to_dict(config: Any) -> dict:
     Uses ``dataclasses.asdict`` which recurses into nested dataclasses
     (e.g. ``CTMConfig``) and returns a JSON-pickleable structure.
 
+    A ``cg_gates=CGGates(...)`` field (1-site coarse-grained path) is
+    replaced by a hashable array fingerprint before ``asdict`` recurses:
+    ``CGGates`` holds ``jnp.ndarray`` fields plus ``map_fn`` / ``init_fn``
+    callables, so a raw ``asdict`` produces an unpicklable dict and
+    ``validate_config``'s dict-eq comparison would raise
+    ``ValueError: truth value of an array...``.  The fingerprint keeps the
+    snapshot picklable and comparable; the live ``cg_gates`` is re-supplied
+    from ``config`` on resume.
+
     Known limitations (unreachable in the 2-site-only scope wired in
-    PR #497; relevant to 1-site / multisite follow-ups):
+    PR #497; relevant to multisite follow-ups):
 
     * ``unit_cell=Lattice(...)`` — ``Lattice.neighbor_map`` is a
       ``MappingProxyType`` set in ``Lattice.__post_init__``; ``asdict``
@@ -113,20 +150,25 @@ def _config_to_dict(config: Any) -> dict:
       ``TypeError: cannot pickle 'mappingproxy' object``.  Fix when the
       multisite path is wired: convert ``neighbor_map`` to a plain dict
       before snapshotting (or store a stable Lattice identifier).
-    * ``cg_gates=CGGates(...)`` — ``CGGates`` is a dataclass with
-      ``jnp.ndarray`` fields; ``asdict`` produces nested arrays and
-      ``validate_config`` below then raises
-      ``ValueError: truth value of an array...`` on dict-eq comparison.
-      Fix when the 1-site cg_gates path is wired: special-case
-      ``cg_gates`` with an array-aware (hash or ``np.array_equal``)
-      comparator.
 
-    Both paths are currently blocked by the dispatch guard at
+    This path is currently blocked by the dispatch guard at
     ``optimize_gs_ad`` (``ipeps_optimize.py``), which raises
     ``NotImplementedError`` if ``gs_checkpoint_path`` is set with a
     non-``"2site"`` ``unit_cell``.  See PR #497 review threads.
     """
     if is_dataclass(config):
+        cg = getattr(config, "cg_gates", None)
+        if cg is not None:
+            # cg_gates holds jnp.ndarray fields + callables (map_fn/init_fn):
+            # asdict can't recurse it and validate_config's dict-eq would hit
+            # "truth value of an array".  Replace it with a hashable array
+            # fingerprint so the snapshot is picklable and comparable; the
+            # live cg_gates is re-supplied from `config` on resume.
+            from dataclasses import replace as _dc_replace
+
+            snap = _dc_replace(config, cg_gates=("__cg_gates_fp__",
+                                                 cg_gates_fingerprint(cg)))
+            return asdict(snap)
         return asdict(config)
     return dict(config)
 

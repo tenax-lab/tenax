@@ -239,19 +239,209 @@ def test_resume_with_missing_checkpoint_raises(tmp_path):
 
 
 @pytest.mark.core
-def test_checkpoint_path_rejects_non_2site_paths():
-    """1-site and multisite paths must raise NotImplementedError when a
-    checkpoint path is requested (only 2-site is wired in this PR)."""
+def test_checkpoint_path_allows_1site_rejects_lattice():
+    """1-site (incl. CG) checkpointing is now wired; generic Lattice
+    multisite still raises NotImplementedError."""
+    from tenax.core.lattice import Lattice, checkerboard
+
     gate = _heisenberg_gate()
+    # 1-site no longer raises NotImplementedError on the guard. 0 steps -> returns fast.
     cfg_1site = iPEPSConfig(
         unit_cell="1x1",
         max_bond_dim=2,
         ctm=CTMConfig(chi=4),
-        gs_num_steps=1,
-        gs_checkpoint_path="/tmp/should_not_be_used",
-        gs_c4v=True,
+        gs_num_steps=0,
+        gs_checkpoint_path="/tmp/ckpt_guard_1site",
+        gs_c4v=False,
         su_init=False,
         gs_conv_criterion="grad_norm",
     )
-    with pytest.raises(NotImplementedError, match="2site"):
-        optimize_gs_ad(gate, None, cfg_1site)
+    optimize_gs_ad(gate, None, cfg_1site)  # must NOT raise NotImplementedError
+
+    # generic Lattice multisite is still guarded
+    lat = checkerboard()  # minimal valid 2-tensor lattice
+    assert isinstance(lat, Lattice)
+    cfg_multi = iPEPSConfig(
+        unit_cell=lat,
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4),
+        gs_num_steps=1,
+        gs_checkpoint_path="/tmp/ckpt_guard_lattice",
+        su_init=False,
+    )
+    with pytest.raises(NotImplementedError, match="Lattice|multisite"):
+        optimize_gs_ad(gate, None, cfg_multi)
+
+
+@pytest.mark.core
+def test_checkpoint_path_rejects_c4v_reference():
+    """The dense C4v-reference path has no checkpoint wiring, so a checkpoint
+    path on it must RAISE (not silently no-op): gs_resume would otherwise start
+    fresh and discard the intended long run."""
+    gate = _heisenberg_gate()
+    cfg_ref = iPEPSConfig(
+        unit_cell="1x1",
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4, ctm_ad_mode="c4v_reference"),
+        gs_num_steps=0,
+        gs_c4v=True,
+        gs_implicit_ad=True,
+        gs_checkpoint_path="/tmp/ckpt_guard_c4v_ref",
+        su_init=False,
+        gs_conv_criterion="grad_norm",
+    )
+    with pytest.raises(NotImplementedError, match="C4v|Lattice"):
+        optimize_gs_ad(gate, None, cfg_ref)
+
+
+def test_1site_writes_checkpoint(tmp_path):
+    """A plain 1-site run with gs_checkpoint_path writes ckpt.last.pkl whose
+    recorded step matches the last completed optimizer step."""
+    from tenax.algorithms._checkpoint import checkpoint_exists, load_checkpoint
+
+    gate = _heisenberg_gate()
+    cfg = iPEPSConfig(
+        unit_cell="1x1",
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4),
+        gs_num_steps=2,
+        gs_checkpoint_path=str(tmp_path),
+        gs_checkpoint_every=1,
+        gs_c4v=False,
+        su_init=False,
+        gs_conv_criterion="grad_norm",
+    )
+    optimize_gs_ad(gate, None, cfg)
+    assert checkpoint_exists(str(tmp_path))
+    bundle = load_checkpoint(str(tmp_path))
+    assert bundle["step"] == 1  # 0-indexed last of 2 steps
+    assert "params" in bundle and "opt_state" in bundle
+    assert bundle["cg_gates_fingerprint"] is None  # plain 1-site, no cg_gates
+
+
+def test_resume_1site_continues_from_saved_step(tmp_path):
+    """Run 2 steps, checkpoint; resume to 8 total; the resumed run picks up at
+    step 2 and finishes with the saved step recorded as 7.
+
+    The random-init 1-site (non-c4v) path needs several steps to drop below
+    zero, so the resume horizon is set past that point: a correctly-resuming
+    run continues the saved trajectory and reaches a sensible (negative)
+    Heisenberg energy, whereas a silent fresh restart would not.
+    """
+    gate = _heisenberg_gate()
+
+    def cfg(nsteps, resume):
+        return iPEPSConfig(
+            unit_cell="1x1", max_bond_dim=2, ctm=CTMConfig(chi=4),
+            gs_num_steps=nsteps, gs_checkpoint_path=str(tmp_path),
+            gs_checkpoint_every=1, gs_resume=resume, gs_c4v=False,
+            su_init=False, gs_conv_criterion="grad_norm",
+        )
+
+    optimize_gs_ad(gate, None, cfg(2, False))            # phase A: 2 steps
+    _, _, E_resumed = optimize_gs_ad(gate, None, cfg(8, True))  # resume -> 8
+
+    from tenax.algorithms._checkpoint import load_checkpoint
+    assert load_checkpoint(str(tmp_path))["step"] == 7   # 0-indexed last of 8
+    assert E_resumed < 0  # finished, sensible energy
+
+
+# ---------------------------------------------------------------------------
+# Coarse-grained (cg_gates) 1-site resume tests
+# ---------------------------------------------------------------------------
+
+
+def _honeycomb_cg_cfg(tmp_path, *, nsteps, resume, cg_gates=None):
+    """Verified-working CG 1-site checkpoint config (implicit-AD default).
+
+    Routes to ``_optimize_gs_ad_tensor`` (the checkpoint-wired non-c4v
+    path, log tag ``[iPEPS-AD:1site-tensor]``) — NOT the c4v reference
+    path, which has no checkpoint wiring.  ``su_init=False`` is required
+    with ``cg_gates``; the Hamiltonian placeholder is a (4,4,4,4) dummy
+    (the real interaction lives in ``cg_gates``, d_eff=4 for honeycomb).
+
+    ``cg_gates`` overrides the default honeycomb gates so the reject test
+    differs from the baseline in EXACTLY that one field (every other knob
+    stays in lockstep via this helper).
+    """
+    from tenax.algorithms.coarse_grain import honeycomb_cg_gates
+
+    return iPEPSConfig(
+        unit_cell="1x1",
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=8, max_iter=20, min_iter=5),
+        gs_num_steps=nsteps,
+        gs_checkpoint_path=str(tmp_path),
+        gs_checkpoint_every=1,
+        gs_resume=resume,
+        gs_c4v=False,
+        su_init=False,
+        cg_gates=honeycomb_cg_gates() if cg_gates is None else cg_gates,
+        gs_conv_criterion="grad_norm",
+    )
+
+
+@pytest.mark.slow
+def test_resume_cg_1site_continues_from_saved_step(tmp_path):
+    """Coarse-grained (cg_gates) 1-site run checkpoints and resumes; the saved
+    bundle records a non-None cg_gates fingerprint and resume continues."""
+    from tenax.algorithms._checkpoint import load_checkpoint
+
+    dummy = jnp.zeros((4, 4, 4, 4))
+    optimize_gs_ad(dummy, None, _honeycomb_cg_cfg(tmp_path, nsteps=2, resume=False))
+    b = load_checkpoint(str(tmp_path))
+    assert b["step"] == 1
+    assert b["cg_gates_fingerprint"] is not None
+
+    _, _, E = optimize_gs_ad(dummy, None, _honeycomb_cg_cfg(tmp_path, nsteps=4, resume=True))
+    assert load_checkpoint(str(tmp_path))["step"] == 3
+    assert E is not None  # finished without error (don't over-assert convergence)
+
+
+@pytest.mark.slow
+def test_resume_rejects_different_cg_gates(tmp_path):
+    """Resuming a CG run against perturbed cg_gates is a fatal mismatch
+    (the dummy hamiltonian gate is unchanged, isolating the cg_gates check)."""
+    from tenax.algorithms.coarse_grain import honeycomb_cg_gates
+
+    dummy = jnp.zeros((4, 4, 4, 4))
+    optimize_gs_ad(dummy, None, _honeycomb_cg_cfg(tmp_path, nsteps=2, resume=False))
+
+    # Identical config EXCEPT the coarse-grained gates (J=2.0 vs default J=1.0),
+    # so the only thing that can trigger the mismatch is the cg_gates check.
+    cfg_other = _honeycomb_cg_cfg(
+        tmp_path, nsteps=4, resume=True, cg_gates=honeycomb_cg_gates(J=2.0)
+    )
+    with pytest.raises(ValueError, match="cg_gates"):
+        optimize_gs_ad(dummy, None, cfg_other)
+
+
+@pytest.mark.slow
+def test_resume_rejects_plain_to_cg(tmp_path):
+    """A PLAIN 1-site checkpoint resumed with cg_gates set is a fatal mismatch.
+
+    The saved bundle has ``cg_gates_fingerprint=None`` while the live config has
+    a CG fingerprint; the full-inequality resume check must reject this (else
+    plain-tensor params would be evaluated through the CG path and crash). A
+    matched (4,4,4,4) dummy gate is shared so the GATE fingerprint agrees and the
+    CG check (not the gate check) is what fires.
+    """
+    import jax
+
+    g = jax.random.normal(jax.random.PRNGKey(0), (16, 16))
+    shared = jnp.asarray(0.5 * (g + g.T)).reshape(4, 4, 4, 4)  # d_phys=4 == d_eff
+
+    plain_cfg = iPEPSConfig(
+        unit_cell="1x1", max_bond_dim=2, ctm=CTMConfig(chi=4, max_iter=20, min_iter=5),
+        gs_num_steps=2, gs_checkpoint_path=str(tmp_path), gs_checkpoint_every=1,
+        gs_c4v=False, su_init=False, gs_conv_criterion="grad_norm",
+    )
+    optimize_gs_ad(shared, None, plain_cfg)
+
+    from tenax.algorithms._checkpoint import load_checkpoint
+
+    assert load_checkpoint(str(tmp_path))["cg_gates_fingerprint"] is None
+    # resume the SAME gate but now with cg_gates -> fatal CG-mismatch
+    cg_cfg = _honeycomb_cg_cfg(tmp_path, nsteps=4, resume=True)
+    with pytest.raises(ValueError, match="cg_gates|parameterization"):
+        optimize_gs_ad(shared, None, cg_cfg)

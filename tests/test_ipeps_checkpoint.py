@@ -199,3 +199,64 @@ def test_validate_config_compatible_no_warning():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         validate_config(saved, cfg)  # no warning expected
+
+
+def test_cg_gates_fingerprint_round_trip_and_changes_with_bytes():
+    import jax.numpy as jnp
+
+    from tenax.algorithms._checkpoint import cg_gates_fingerprint
+    from tenax.algorithms.coarse_grain import CGGates
+
+    h_intra = jnp.eye(4)
+    h_inter = {"h": jnp.ones((4, 4, 4, 4)), "v": jnp.zeros((4, 4, 4, 4))}
+    g1 = CGGates(h_intra=h_intra, h_inter=h_inter, n_sites=2, map_fn=None, init_fn=None)
+    # same arrays + same MODE (both map_fn set), DIFFERENT callable identity ->
+    # same fingerprint (the callables themselves are not hashed)
+    g2a = CGGates(h_intra=h_intra, h_inter=h_inter, n_sites=2, map_fn=lambda x: x)
+    g2b = CGGates(h_intra=h_intra, h_inter=h_inter, n_sites=2, map_fn=lambda x: x * 1)
+    assert cg_gates_fingerprint(g2a) == cg_gates_fingerprint(g2b)
+    # but a different parameterization MODE (map_fn=None vs map_fn set) -> DIFFERENT
+    # fingerprint (the param tree differs: direct supersite vs raw tuple)
+    assert cg_gates_fingerprint(g1) != cg_gates_fingerprint(g2a)
+    # perturb h_intra -> different fingerprint
+    g3 = CGGates(h_intra=h_intra.at[0, 0].add(1.0), h_inter=h_inter, n_sites=2)
+    assert cg_gates_fingerprint(g3) != cg_gates_fingerprint(g1)
+    # perturb an h_inter entry -> different fingerprint
+    g4 = CGGates(h_intra=h_intra,
+                 h_inter={"h": h_inter["h"].at[0, 0, 0, 0].add(1.0), "v": h_inter["v"]},
+                 n_sites=2)
+    assert cg_gates_fingerprint(g4) != cg_gates_fingerprint(g1)
+
+
+def test_config_to_dict_handles_cg_gates():
+    import pickle
+
+    import jax.numpy as jnp
+
+    from tenax.algorithms._checkpoint import _config_to_dict, validate_config
+    from tenax.algorithms.coarse_grain import CGGates
+    from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+
+    cg = CGGates(
+        h_intra=jnp.eye(4),
+        h_inter={"h": jnp.ones((4, 4, 4, 4))},
+        n_sites=2,
+        map_fn=lambda *p: p[0],
+        init_fn=None,
+    )
+    cfg = iPEPSConfig(unit_cell="1x1", max_bond_dim=2, ctm=CTMConfig(chi=4),
+                      gs_num_steps=1, cg_gates=cg, su_init=False)
+    d = _config_to_dict(cfg)
+    # picklable (no jnp arrays / callables / mappingproxy leak through)
+    pickle.dumps(d)
+    # validate_config accepts an identical config (no array-truth-value error)
+    validate_config(d, cfg)
+    # a different cg_gates surfaces as a (soft) mismatch, not a crash
+    cfg2 = iPEPSConfig(unit_cell="1x1", max_bond_dim=2, ctm=CTMConfig(chi=4),
+                       gs_num_steps=1,
+                       cg_gates=CGGates(h_intra=jnp.eye(4).at[0, 0].add(1.0),
+                                        h_inter={"h": jnp.ones((4, 4, 4, 4))},
+                                        n_sites=2),
+                       su_init=False)
+    with pytest.warns(UserWarning):
+        validate_config(d, cfg2)
