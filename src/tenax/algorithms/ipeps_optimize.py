@@ -1455,6 +1455,12 @@ def _optimize_gs_ad_tensor(
     lbfgs_history: list = []
     prev_A_flat: jnp.ndarray | None = None
     prev_grad_flat: jnp.ndarray | None = None
+    # Rolling gradient-norm window for the spike guard (mirrors the 2-site
+    # path; #524).  Non-variational drift on the implicit-AD path shows up as
+    # a >Nx gradient blowup; rolling back the step before the line search both
+    # protects best-state tracking and avoids the line search thrashing on the
+    # exploded gradient.  Off unless ``gs_grad_spike_ratio`` is set.
+    recent_gnorms: list[float] = []
 
     from tenax.algorithms.ad_utils import (
         _wrap_tensor,
@@ -1827,6 +1833,56 @@ def _optimize_gs_ad_tensor(
                     prev_precond_grad = None
             continue
         energy_float = float(energy_val)
+        grad_norm_val = _grad_l2_norm(grads)
+
+        # Gradient-spike guard (ported from the 2-site path, #524): a
+        # non-variational implicit-AD step shows up as a >Nx gradient blowup
+        # (e.g. |g| jumping from ~0.2 to ~5e3) whose energy can dip below the
+        # variational floor.  Roll back to best BEFORE the line search so the
+        # bad step neither poisons best-state tracking nor makes the line
+        # search thrash on the exploded gradient.  Off unless
+        # ``gs_grad_spike_ratio`` is set.
+        if (
+            config.gs_grad_spike_ratio is not None
+            and len(recent_gnorms) >= 1
+            and best_energy < float("inf")
+        ):
+            spike_floor = max(float(np.median(recent_gnorms)), 1.0)
+            if grad_norm_val > config.gs_grad_spike_ratio * spike_floor:
+                params = best_params
+                _drop_env_cache_for_reset(_env_cache)
+                recent_gnorms.clear()
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_A_flat = None
+                    prev_grad_flat = None
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                    opt_state = optimizer.init(params)
+                _logger.warning(
+                    "[iPEPS-AD:1site-tensor] step %d/%d gradient spike "
+                    "|g|=%.3e > %.1fx median %.3e — rolling back to best",
+                    step + 1,
+                    config.gs_num_steps,
+                    grad_norm_val,
+                    config.gs_grad_spike_ratio,
+                    spike_floor,
+                )
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD:1site-tensor] step {step + 1}/"
+                        f"{config.gs_num_steps} |g|={grad_norm_val:.3e} spike "
+                        f"(>{config.gs_grad_spike_ratio:.1f}x median "
+                        f"{spike_floor:.3e}) — rollback to best, clear history",
+                        flush=True,
+                    )
+                continue
+        recent_gnorms.append(grad_norm_val)
+        if len(recent_gnorms) > config.gs_grad_spike_window:
+            recent_gnorms.pop(0)
 
         if config.return_history:
             _step_dt = _time.perf_counter() - _step_t0
@@ -1852,7 +1908,6 @@ def _optimize_gs_ad_tensor(
             _accepted_best_this_iter = True
 
         delta_energy = abs(energy_float - prev_energy)
-        grad_norm_val = _grad_l2_norm(grads)
         logged = False
         if config.gs_verbose and _should_log_step(
             step, config.gs_num_steps, log_interval

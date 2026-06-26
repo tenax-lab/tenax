@@ -2,42 +2,42 @@
 r"""D=3 χ-convergence study for the 2D square Heisenberg AFM via iPEPS-AD.
 
 Computes the ground-state energy of the spin-1/2 antiferromagnetic Heisenberg
-model on the infinite square lattice at fixed bond dimension ``D=3``, sweeping
-the CTM environment dimension χ along a ladder (16 → 24 → 32 → 48) to study the
-convergence of the variational energy in χ.
+model on the infinite square lattice at fixed bond dimension ``D=3`` and studies
+the convergence of the energy with the CTM environment dimension χ.
 
-Method (variational + crash-resilient)
---------------------------------------
-* **Implicit AD** (``gs_implicit_ad=True``) through the CTM fixed point — the
-  energy is a true variational expectation value (explicit/unrolled AD is
-  non-variational, see issue #328, so it is *not* used here).
-* **C4v symmetrization** (``gs_c4v=True``).  The square-lattice AFM ground state
-  is C4v-symmetric; enforcing it removes the iPEPS bond-gauge freedom that
-  otherwise makes the implicit-AD backward linear-solve ill-conditioned (NaN
-  gradients).  With default ``ctm_ad_mode=None`` this routes to the
-  checkpoint-wired ``_optimize_gs_ad_tensor`` (NOT the un-checkpointed
-  ``c4v_reference`` path).
-* **Fixed-χ-per-stage, warm-started** across the ladder: each stage optimizes at
-  one fixed χ starting from the previous stage's optimized tensor.  This avoids
-  the mid-run χ-bump that violates the implicit-AD variational precondition
-  (zero-padded env, issue #511).
-* **Checkpointing** every 2 steps within each stage, plus a per-stage optimized
-  tensor saved on completion.  Re-running the script resumes the ladder where it
-  left off (completed stages are skipped; an interrupted stage resumes from its
-  in-stage checkpoint) — so a long run survives crashes / preemption.
+Design (clean χ-convergence)
+----------------------------
+The variational state is optimized **once** at a high χ, then its energy is
+measured on a χ-ladder with a fully-converged CTM (no AD, no optimizer noise).
+This separates the two sources of error cleanly:
+
+* **Optimization** (one run): implicit AD through the CTM fixed point (the energy
+  is a true variational expectation value — explicit/unrolled AD is
+  non-variational, #328) with **C4v symmetrization** (``gs_c4v=True``).  The
+  square-lattice AFM ground state is C4v-symmetric; enforcing it removes the
+  iPEPS bond-gauge freedom that makes the implicit-AD backward ill-conditioned.
+  Two safety nets handle the rare non-variational CTM spike: ``gs_energy_floor``
+  (rejects sub-GS artifacts from best-state tracking) and ``gs_grad_spike_ratio``
+  (rolls a >Nx gradient blowup back to best before the line search thrashes).
+  Checkpointed for crash/preempt resilience; the optimized tensor is saved.
+
+* **χ-scan** (cheap): for each χ, run CTM to convergence on the *fixed* optimized
+  tensor and evaluate ⟨H⟩.  E(χ) is clean and converges monotonically — this is
+  the "is χ large enough" plot.
 
 Reference energy: E/site ≈ -0.6694 (QMC).  D=2 χ=8 gives ≈ -0.6625; D=3 should
-sit below that and approach the QMC value as χ grows.
+sit below that and the χ-scan should plateau as χ grows.
 
 Usage::
 
-    # quick validation (D=3, χ=16 only, few steps) — also the CI smoke path
+    # quick validation (small χ, few steps) — also the CI smoke path
     uv run python examples/heisenberg_d3_chi_convergence.py --smoke
 
-    # full production ladder (single GPU; ~1-2 GPU-days)
+    # full study (single GPU)
     uv run python examples/heisenberg_d3_chi_convergence.py --outdir runs/d3chi
 
-    # resume after a crash: just re-run the same command
+    # resume after a crash: just re-run the same command (optimization resumes;
+    # if the optimized tensor already exists, it jumps straight to the χ-scan)
 """
 
 from __future__ import annotations
@@ -54,19 +54,33 @@ jax.config.update("jax_enable_x64", True)
 
 from tenax import (  # noqa: E402
     CTMConfig,
+    compute_energy_ctm_tensor,
     heisenberg_gate,
     iPEPSConfig,
     optimize_gs_ad,
     sublattice_rotate_gate,
 )
 
+# The χ-scan must contract the optimized state with the SAME CTM the optimizer
+# uses (phase-gauge fixing, element-wise convergence) — the public ``ctm_tensor``
+# is the standard 4-move CTM without phase-gauge fixing and converges to a
+# different fixed point for this C4v-optimized state, giving inconsistent
+# energies.  We therefore reuse the optimizer's own fresh-CTM eval path
+# (``python_loop_ctm_converge`` + ``ctm_converge_kwargs``), exactly mirroring the
+# ``_eval_fresh`` helper that produces ``optimize_gs_ad``'s returned energy.
+from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge  # noqa: E402
+from tenax.algorithms._ctm_tensor_convergence import (  # noqa: E402
+    SINGLE_SITE_NEIGHBORS,
+)
+from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs  # noqa: E402
+
 QMC_REF = -0.6694  # E/site, square-lattice Heisenberg AFM (QMC)
 
 
-def make_config(
+def make_opt_config(
     *, chi: int, ckpt_path: str, num_steps: int, resume: bool, probe_max_iter: int | None
 ) -> iPEPSConfig:
-    """Validated variational config: implicit AD + C4v on the checkpoint path."""
+    """Validated variational optimizer config: implicit AD + C4v + safety nets."""
     return iPEPSConfig(
         max_bond_dim=3,
         num_imaginary_steps=200,
@@ -87,97 +101,118 @@ def make_config(
         gs_line_search_method="hager_zhang",
         gs_metric_precond=True,
         gs_num_steps=num_steps,
+        gs_energy_floor=QMC_REF,      # reject sub-GS CTM-artifact spikes (#298)
+        gs_grad_spike_ratio=5.0,      # roll back >5x gradient blowups before the
+                                      # line search thrashes (#524)
         gs_verbose=True,
         gs_log_interval=1,
-        su_init=True,                 # only runs when A_init is None (stage 1)
+        su_init=True,
         gs_checkpoint_path=ckpt_path,
         gs_checkpoint_every=2,
         gs_resume=resume,
     )
 
 
-def run_ladder(
-    outdir: str, ladder: list[tuple[int, int]], probe_max_iter: int | None
-) -> list[dict]:
-    """Run the warm-started fixed-χ ladder with ladder-level resume."""
-    os.makedirs(outdir, exist_ok=True)
+def optimize_state(outdir: str, chi_opt: int, num_steps: int, probe_max_iter: int | None):
+    """Optimize the D=3 state once at ``chi_opt``; cache the optimized tensor."""
     H = sublattice_rotate_gate(heisenberg_gate())
+    tensor_path = os.path.join(outdir, "A_opt.pkl")
+    if os.path.exists(tensor_path):
+        with open(tensor_path, "rb") as fh:
+            A_opt = pickle.load(fh)
+        print(f"[opt] optimized tensor already cached ({tensor_path}); "
+              f"skipping optimization", flush=True)
+        return A_opt, H
 
+    ckpt = os.path.join(outdir, "ckpt_opt", "ckpt")
+    os.makedirs(os.path.dirname(ckpt), exist_ok=True)
+    resume = os.path.exists(ckpt + ".last.pkl")
+    print(f"\n{'=' * 60}\n[opt] optimizing D=3 state at χ={chi_opt} "
+          f"(resume={resume}, {num_steps} steps)\n{'=' * 60}", flush=True)
+    cfg = make_opt_config(chi=chi_opt, ckpt_path=ckpt, num_steps=num_steps,
+                          resume=resume, probe_max_iter=probe_max_iter)
+    t0 = time.perf_counter()
+    A_opt, _env, E = optimize_gs_ad(H, None, cfg)
+    print(f"[opt] done in {time.perf_counter() - t0:.0f}s; in-loop E_best={float(E):.6f}",
+          flush=True)
+    with open(tensor_path, "wb") as fh:
+        pickle.dump(A_opt, fh)
+    return A_opt, H
+
+
+def scan_chi(A_opt, H, chi_ladder: list[int], outdir: str) -> list[dict]:
+    """Clean E(χ) on the fixed optimized state: converge CTM, evaluate ⟨H⟩."""
     results_path = os.path.join(outdir, "chi_convergence.json")
     results: list[dict] = []
     if os.path.exists(results_path):
         with open(results_path) as fh:
             results = json.load(fh)
-    done = {r["chi"]: r for r in results}
+    done = {r["chi"] for r in results}
 
-    A_warm = None  # warm-start tensor threaded across stages
-    for chi, nsteps in ladder:
-        stage_tensor = os.path.join(outdir, f"A_chi{chi}.pkl")
-        if chi in done and os.path.exists(stage_tensor):
-            with open(stage_tensor, "rb") as fh:
-                A_warm = pickle.load(fh)
-            print(f"[ladder] χ={chi}: already complete (E={done[chi]['E']:.6f}), "
-                  f"loaded warm-start tensor", flush=True)
+    print(f"\n{'=' * 60}\n[scan] clean E(χ) on the fixed optimized state\n{'=' * 60}",
+          flush=True)
+    for chi in chi_ladder:
+        if chi in done:
+            print(f"[scan] χ={chi}: cached", flush=True)
             continue
-
-        ckpt = os.path.join(outdir, f"ckpt_chi{chi}", "ckpt")
-        os.makedirs(os.path.dirname(ckpt), exist_ok=True)
-        resume = os.path.exists(ckpt + ".last.pkl")
-        print(f"\n{'=' * 60}\n[ladder] χ={chi}  (resume={resume}, warm_start="
-              f"{A_warm is not None})\n{'=' * 60}", flush=True)
-
-        cfg = make_config(chi=chi, ckpt_path=ckpt, num_steps=nsteps,
-                          resume=resume, probe_max_iter=probe_max_iter)
         t0 = time.perf_counter()
-        A_opt, _env, E = optimize_gs_ad(H, A_warm, cfg)
+        # Same CTM the optimizer's _eval_fresh uses: phase gauge, elementwise
+        # convergence (via ctm_converge_kwargs), converged tightly at this χ.
+        ctm_cfg = CTMConfig(chi=chi, max_iter=200, conv_tol=1e-10,
+                            projector_method="svd", forward_gauge="phase")
+        envs, info = python_loop_ctm_converge(
+            {(0, 0): A_opt}, SINGLE_SITE_NEIGHBORS,
+            **ctm_converge_kwargs(ctm_cfg),
+        )
+        E = float(compute_energy_ctm_tensor(A_opt, envs[(0, 0)], H, 2))
         dt = time.perf_counter() - t0
-        E = float(E)
-
-        with open(stage_tensor, "wb") as fh:
-            pickle.dump(A_opt, fh)
         results = [r for r in results if r["chi"] != chi]
-        results.append({"chi": chi, "E": E, "time_s": dt,
-                        "err_vs_qmc": E - QMC_REF})
+        results.append({"chi": chi, "E": E,
+                        "err_vs_qmc": E - QMC_REF, "time_s": dt})
         results.sort(key=lambda r: r["chi"])
         with open(results_path, "w") as fh:
             json.dump(results, fh, indent=2)
-        A_warm = A_opt
-        print(f"[ladder] χ={chi} DONE: E/site={E:.6f}  err_vs_qmc={E - QMC_REF:+.4f}"
-              f"  ({dt:.0f}s)", flush=True)
+        print(f"[scan] χ={chi:3d}: E/site={E:.6f}  err_vs_qmc={E - QMC_REF:+.5f}  "
+              f"({dt:.0f}s)", flush=True)
 
-    print(f"\n{'=' * 60}\nχ-convergence curve (D=3 Heisenberg AFM, QMC ref "
-          f"{QMC_REF})\n{'=' * 60}", flush=True)
+    print(f"\n{'=' * 60}\nχ-convergence curve (D=3 Heisenberg AFM, QMC ref {QMC_REF})"
+          f"\n{'=' * 60}", flush=True)
     for r in sorted(results, key=lambda r: r["chi"]):
         print(f"  χ={r['chi']:3d}   E/site={r['E']:.6f}   "
-              f"err_vs_qmc={r['err_vs_qmc']:+.5f}   ({r['time_s']:.0f}s)", flush=True)
+              f"err_vs_qmc={r['err_vs_qmc']:+.5f}", flush=True)
     return results
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--outdir", default="runs/d3_chi_convergence",
-                    help="directory for checkpoints, tensors, and results JSON")
+                    help="directory for checkpoint, optimized tensor, results JSON")
     ap.add_argument("--smoke", action="store_true",
-                    help="quick validation: χ=16 only, few steps")
-    ap.add_argument("--steps-per-stage", type=int, default=80,
-                    help="max optimizer steps per χ stage (full run)")
+                    help="quick validation: small χ, few steps, short scan")
+    ap.add_argument("--chi-opt", type=int, default=48,
+                    help="χ for the one-time variational optimization")
+    ap.add_argument("--opt-steps", type=int, default=120,
+                    help="optimizer steps for the one-time optimization")
     ap.add_argument("--probe-max-iter", type=int, default=15,
                     help="#503 cap on HZ line-search CTM probe sweeps "
-                         "(None disables; lower = faster, looser line search)")
+                         "(<=0 disables)")
     args = ap.parse_args()
 
     probe = None if args.probe_max_iter <= 0 else args.probe_max_iter
     if args.smoke:
-        ladder = [(16, 12)]
         outdir = args.outdir + "_smoke"
+        chi_opt, opt_steps = 16, 12
+        chi_ladder = [8, 12, 16, 24]
     else:
-        n = args.steps_per_stage
-        ladder = [(16, n), (24, n), (32, n), (48, n)]
         outdir = args.outdir
+        chi_opt, opt_steps = args.chi_opt, args.opt_steps
+        chi_ladder = [8, 16, 24, 32, 48, 64, 96]
 
-    print(f"D=3 χ-convergence study | ladder={ladder} | probe_max_iter={probe} | "
-          f"outdir={outdir}", flush=True)
-    run_ladder(outdir, ladder, probe)
+    print(f"D=3 χ-convergence study | optimize once at χ={chi_opt} ({opt_steps} steps)"
+          f" | scan χ={chi_ladder} | outdir={outdir}", flush=True)
+    os.makedirs(outdir, exist_ok=True)
+    A_opt, H = optimize_state(outdir, chi_opt, opt_steps, probe)
+    scan_chi(A_opt, H, chi_ladder, outdir)
 
 
 if __name__ == "__main__":
