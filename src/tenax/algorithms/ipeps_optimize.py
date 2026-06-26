@@ -1879,6 +1879,12 @@ def _optimize_gs_ad_tensor(
                         f"{spike_floor:.3e}) — rollback to best, clear history",
                         flush=True,
                     )
+                # A rollback leaves params == best_params, so the NEXT step
+                # re-evaluates the same state and sees dE == 0 — which the "dE"
+                # convergence criterion would misread as convergence (the
+                # gradient is still large).  Reset prev_energy so the
+                # post-rollback step cannot false-converge.
+                prev_energy = float("inf")
                 continue
         recent_gnorms.append(grad_norm_val)
         if len(recent_gnorms) > config.gs_grad_spike_window:

@@ -101,6 +101,11 @@ def make_opt_config(
         gs_line_search_method="hager_zhang",
         gs_metric_precond=True,
         gs_num_steps=num_steps,
+        gs_conv_criterion="grad_norm",  # dE is fragile: a spike rollback makes
+                                        # dE=0 and falsely "converges". grad_norm
+                                        # (||g||<tol) is a true stationarity test;
+                                        # with the finite-χ noise floor it simply
+                                        # runs the full step budget.
         gs_energy_floor=QMC_REF,      # reject sub-GS CTM-artifact spikes (#298)
         gs_grad_spike_ratio=5.0,      # roll back >5x gradient blowups before the
                                       # line search thrashes (#524)
@@ -189,9 +194,13 @@ def main() -> None:
                     help="directory for checkpoint, optimized tensor, results JSON")
     ap.add_argument("--smoke", action="store_true",
                     help="quick validation: small χ, few steps, short scan")
-    ap.add_argument("--chi-opt", type=int, default=48,
-                    help="χ for the one-time variational optimization")
-    ap.add_argument("--opt-steps", type=int, default=120,
+    ap.add_argument("--chi-opt", type=int, default=24,
+                    help="χ for the one-time variational optimization. Kept "
+                         "moderate: the implicit-AD backward is spike-prone at "
+                         "large χ (frequent rollbacks), while χ≈24 optimizes "
+                         "stably; the fixed-state χ-scan (forward-only) still "
+                         "runs up to 96.")
+    ap.add_argument("--opt-steps", type=int, default=100,
                     help="optimizer steps for the one-time optimization")
     ap.add_argument("--probe-max-iter", type=int, default=15,
                     help="#503 cap on HZ line-search CTM probe sweeps "
