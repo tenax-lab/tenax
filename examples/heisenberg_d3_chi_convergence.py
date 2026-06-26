@@ -131,7 +131,8 @@ def optimize_state(outdir: str, chi_opt: int, num_steps: int, probe_max_iter: in
 
     ckpt = os.path.join(outdir, "ckpt_opt", "ckpt")
     os.makedirs(os.path.dirname(ckpt), exist_ok=True)
-    resume = os.path.exists(ckpt + ".last.pkl")
+    # gs_checkpoint_path=X writes X/ckpt.last.pkl (and X/ckpt.best.pkl).
+    resume = os.path.exists(os.path.join(ckpt, "ckpt.last.pkl"))
     print(f"\n{'=' * 60}\n[opt] optimizing D=3 state at χ={chi_opt} "
           f"(resume={resume}, {num_steps} steps)\n{'=' * 60}", flush=True)
     cfg = make_opt_config(chi=chi_opt, ckpt_path=ckpt, num_steps=num_steps,
