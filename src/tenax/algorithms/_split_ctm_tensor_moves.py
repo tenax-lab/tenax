@@ -7,6 +7,8 @@ __all__ = [
     "_ensure_corner_flows",
     "_ensure_edge_flows",
     "_ensure_tensor_flows",
+    "_doublelayer_grown_corner",
+    "_factorize_projector",
     "_fused_charge_permutation",
     "_grow_and_project_bounded",
     "_grow_and_project_edge",
@@ -45,6 +47,61 @@ from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 from tenax.linalg import svd as tensor_svd
+
+# ------------------------------------------------------------------ #
+# Double-layer corner-pair projector + factorization helpers           #
+# ------------------------------------------------------------------ #
+
+
+def _doublelayer_grown_corner(C, T_ket, T_bra, c_relabel, ket_I, bra_I, fuse_labels):
+    """Grow a corner with BOTH ket and bra edges, joined over the interlayer.
+
+    Mirrors the fused move's grown corner but keeps it as a double layer:
+    fused leg = (env, u_ket, u_bra) of dim chi*D^2; the remaining leg is the
+    next-corner env bond. Returns (C_grown_fused, remaining_label).
+    """
+    C_r = C.relabel(*c_relabel)  # align bond label to the ket edge
+    Cg = contract(C_r, T_ket)  # (env, u_ket, ket_I)
+    Cg = contract(Cg.relabel(ket_I, bra_I), T_bra)  # (env, u_ket, u_bra, bra_r)
+    labels = Cg.labels()
+    # fuse the three to-truncate legs into 'fused' (env first, then u_ket, u_bra)
+    Cg = fuse_indices(
+        Cg,
+        labels.index(fuse_labels[0]),
+        labels.index(fuse_labels[1]),
+        "fused",
+        FlowDirection.IN,
+    )
+    labels = Cg.labels()
+    Cg = fuse_indices(
+        Cg,
+        labels.index("fused"),
+        labels.index(fuse_labels[2]),
+        "fused",
+        FlowDirection.IN,
+    )
+    remaining = [lbl for lbl in Cg.labels() if lbl != "fused"][0]
+    return Cg, remaining
+
+
+def _factorize_projector(P, env_label, ketD_label, braD_label, chi_label):
+    """Factorize a projector P[(env,ketD),(braD,chi)] -> P_first . P_second.
+
+    SVD across (env, ketD) | (braD, chi); factorization bond m <= env*ketD.
+    No truncation (exact rewrite). Returns (P_first, P_second, m).
+    P_first: (env, ketD, _fac), P_second: (_fac, braD, chi).
+    """
+    U, s, Vh, _ = tensor_svd(
+        P,
+        left_labels=[env_label, ketD_label],
+        right_labels=[braD_label, chi_label],
+        new_bond_label="_fac",
+        max_singular_values=None,
+    )
+    P_first, P_second = absorb_sqrt_singular_values(U, s, Vh, "_fac")
+    m = s.shape[0]
+    return P_first, P_second, m
+
 
 # ------------------------------------------------------------------ #
 # No-double-layer edge growth                                          #

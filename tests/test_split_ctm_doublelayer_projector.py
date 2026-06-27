@@ -56,3 +56,41 @@ def test_split_matches_fused_lossless_chi_I(D, chi):
     )
     E_split = float(compute_energy_split_ctm_tensor(A, split_env, gate))
     np.testing.assert_allclose(E_split, E_fused, atol=1e-8)
+
+
+def test_factorize_projector_reconstructs():
+    # P over (env, ketD, braD) -> chi factorizes exactly into P_first . P_second
+    import jax.numpy as jnp  # noqa: F401
+
+    from tenax.algorithms._split_ctm_tensor_moves import _factorize_projector
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import U1Symmetry
+    from tenax.core.tensor import DenseTensor
+
+    sym = U1Symmetry()
+    env, Dk, Db, chi = 4, 2, 2, 5
+    key = jax.random.PRNGKey(0)
+    data = jax.random.normal(key, (env, Dk, Db, chi))
+    z = lambda n: __import__("numpy").zeros(n, dtype="int32")  # noqa: E731
+    idx = [
+        TensorIndex.from_charges(sym, z(env), FlowDirection.IN, label="env"),
+        TensorIndex.from_charges(sym, z(Dk), FlowDirection.IN, label="ketD"),
+        TensorIndex.from_charges(sym, z(Db), FlowDirection.IN, label="braD"),
+        TensorIndex.from_charges(sym, z(chi), FlowDirection.OUT, label="chi_new"),
+    ]
+    P = DenseTensor(data, idx)
+    P_first, P_second, m = _factorize_projector(P, "env", "ketD", "braD", "chi_new")
+    # contract P_first . P_second over the factorization bond -> reconstruct P
+    from tenax.contraction.contractor import contract
+
+    P_rec = contract(P_first, P_second)
+    # compare dense values up to leg order
+    a = np.asarray(P.todense())
+    b = np.asarray(
+        P_rec.transpose(
+            tuple(
+                P_rec.labels().index(lbl) for lbl in ["env", "ketD", "braD", "chi_new"]
+            )
+        ).todense()
+    )
+    np.testing.assert_allclose(b, a, atol=1e-10)
