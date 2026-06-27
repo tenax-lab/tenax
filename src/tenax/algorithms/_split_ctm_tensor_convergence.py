@@ -10,6 +10,10 @@ __all__ = [
 
 import jax.numpy as jnp
 
+from tenax.algorithms._ctm_tensor_convergence import (
+    _corner_singular_values,
+    _ctm_sv_diff,
+)
 from tenax.algorithms._split_ctm_tensor_init import (
     SplitCTMTensorEnv,
     initialize_split_ctm_tensor_env,
@@ -23,7 +27,6 @@ from tenax.algorithms._split_ctm_tensor_moves import (
 from tenax.algorithms._tensor_utils import max_abs_normalize
 from tenax.core import EPS
 from tenax.core.tensor import Tensor
-from tenax.linalg import svd as tensor_svd
 
 # ------------------------------------------------------------------ #
 # Sweep + convergence                                                  #
@@ -93,17 +96,40 @@ def ctm_split_tensor(
     conv_tol: float = 1e-8,
     chi_I: int | None = None,
     renormalize: bool = True,
+    min_iter: int = 2,
 ) -> SplitCTMTensorEnv:
     """Run split-CTM to convergence using the Tensor protocol.
+
+    Convergence is measured on the corner (``C1``) singular-value spectrum
+    via the same :func:`_corner_singular_values` / :func:`_ctm_sv_diff`
+    helpers the fused :func:`ctm_tensor` uses, so the split path tracks the
+    same fixed point as the oracle.
+
+    .. note::
+        The corner singular-value criterion can **plateau** for degenerate
+        or low-rank corners — e.g. the boundary of a 1-site uniform iPEPS is
+        genuinely rank-1/2, so the *normalized* corner spectrum is constant
+        from the first sweep even while the environment (and energy) are
+        still relaxing toward the fixed point. The ``min_iter`` floor stops
+        the loop from breaking on that initial transient, but it cannot
+        detect convergence beyond it. For exact convergence studies on such
+        inputs (e.g. the lossless-``chi_I`` parity oracle), pass
+        ``conv_tol=0.0`` with a sufficiently large ``max_iter`` to force a
+        fixed number of full sweeps instead of relying on the spectral break.
 
     Args:
         A:          iPEPS site tensor (DenseTensor or SymmetricTensor) with
                     5 legs ``(u, d, l, r, phys)``.
         chi:        Environment bond dimension.
         max_iter:   Maximum number of CTM iterations.
-        conv_tol:   Convergence tolerance on corner singular values.
+        conv_tol:   Convergence tolerance on corner singular values. Use
+                    ``0.0`` to disable the early break (run all ``max_iter``
+                    sweeps).
         chi_I:      Interlayer bond dimension. Defaults to ``chi``.
         renormalize: Renormalize environment at each step.
+        min_iter:   Minimum number of sweeps before the ``conv_tol`` early
+                    break may fire. Guards against a premature break on the
+                    initial transient plateau of a degenerate corner.
 
     Returns:
         Converged SplitCTMTensorEnv.
@@ -114,20 +140,12 @@ def ctm_split_tensor(
     env = initialize_split_ctm_tensor_env(A, chi, chi_I)
 
     prev_sv = None
-    for _ in range(max_iter):
+    for iteration in range(max_iter):
         env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
 
-        _, current_sv, _, _ = tensor_svd(
-            env.C1,
-            left_labels=[env.C1.labels()[0]],
-            right_labels=[env.C1.labels()[1]],
-            new_bond_label="_conv_bond",
-        )
-        if prev_sv is not None:
-            sv1 = current_sv / (jnp.sum(current_sv) + 1e-15)
-            sv2 = prev_sv / (jnp.sum(prev_sv) + 1e-15)
-            min_len = min(len(sv1), len(sv2))
-            diff = jnp.max(jnp.abs(sv1[:min_len] - sv2[:min_len]))
+        current_sv = _corner_singular_values(env.C1)
+        if prev_sv is not None and iteration + 1 >= min_iter:
+            diff = _ctm_sv_diff(current_sv, prev_sv)
             if float(diff) < conv_tol:
                 break
         prev_sv = current_sv

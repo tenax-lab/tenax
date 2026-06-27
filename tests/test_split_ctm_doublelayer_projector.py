@@ -98,6 +98,37 @@ def test_factorize_projector_reconstructs():
     np.testing.assert_allclose(b, a, atol=1e-10)
 
 
+@pytest.mark.parametrize("min_iter,expected_sweeps", [(2, 2), (5, 5), (8, 8)])
+def test_split_min_iter_floor_blocks_early_break(
+    monkeypatch, min_iter, expected_sweeps
+):
+    """The min_iter floor must defer the conv_tol break past the transient.
+
+    This is a *mechanism* test (per the project's convergence-test guidance):
+    with a huge ``conv_tol`` the corner singular-value criterion would break at
+    the earliest opportunity (the 2nd sweep, once ``prev_sv`` exists). The
+    ``min_iter`` floor must instead force exactly ``min_iter`` sweeps before the
+    early break may fire. Actual physical convergence is validated by
+    ``test_split_matches_fused_lossless_chi_I`` (conv_tol=0.0, forced sweeps).
+    """
+    make_site, _, _ = _oracle()
+    import tenax.algorithms._split_ctm_tensor_convergence as C
+
+    A = make_site(2, 2, seed=7)
+    calls = {"n": 0}
+    real_sweep = C._split_ctm_tensor_sweep
+
+    def counting_sweep(*args, **kwargs):
+        calls["n"] += 1
+        return real_sweep(*args, **kwargs)
+
+    monkeypatch.setattr(C, "_split_ctm_tensor_sweep", counting_sweep)
+    # conv_tol=1e9 -> the SV diff is always below tol, so the loop breaks at the
+    # first sweep allowed by the min_iter floor.
+    C.ctm_split_tensor(A, chi=4, chi_I=8, max_iter=50, conv_tol=1e9, min_iter=min_iter)
+    assert calls["n"] == expected_sweeps
+
+
 @pytest.mark.parametrize("D,chi", [(2, 4), (3, 6)])
 def test_split_bounded_equals_closed(D, chi):
     """The bounded chi^2*D^4 edge path must reproduce the closed chi^2*D^6 one.
