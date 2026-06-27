@@ -39,9 +39,11 @@ def _split_ctm_tensor_sweep(
 ) -> SplitCTMTensorEnv:
     """One full split-CTM sweep: L/R/T/B moves + optional renormalize."""
     A_bar = A.bar()
+    # variPEPS sweep order (L/T/R/B), matching the fused ``_ctm_tensor_sweep``
+    # so the split path tracks the same fixed point as the oracle.
     env = _split_ctm_move_left(env, A, A_bar, chi, chi_I)
-    env = _split_ctm_move_right(env, A, A_bar, chi, chi_I)
     env = _split_ctm_move_top(env, A, A_bar, chi, chi_I)
+    env = _split_ctm_move_right(env, A, A_bar, chi, chi_I)
     env = _split_ctm_move_bottom(env, A, A_bar, chi, chi_I)
 
     if renormalize:
