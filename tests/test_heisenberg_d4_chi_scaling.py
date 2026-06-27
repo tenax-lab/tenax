@@ -104,3 +104,23 @@ def test_csv_rows_have_stable_keys():
         "D", "chi", "n_devices", "E_site", "err_vs_qmc", "ms_per_sweep",
         "n_sweeps", "peak_gb", "converged", "oom", "error",
     }
+
+
+def test_atomic_write_text_roundtrips_and_leaves_no_tmp(tmp_path):
+    p = tmp_path / "cell.json"
+    d4._atomic_write_text(str(p), '{"a": 1}')
+    assert p.read_text() == '{"a": 1}'
+    assert not (tmp_path / "cell.json.tmp").exists()  # temp file was renamed away
+
+
+def test_read_json_or_none_handles_missing_corrupt_and_valid(tmp_path):
+    # missing -> None (treated as 'not done', re-run)
+    assert d4._read_json_or_none(str(tmp_path / "nope.json")) is None
+    # truncated / corrupt -> None (never crashes the sweep)
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ truncated")
+    assert d4._read_json_or_none(str(bad)) is None
+    # valid -> parsed dict
+    good = tmp_path / "good.json"
+    good.write_text('{"k": 5}')
+    assert d4._read_json_or_none(str(good)) == {"k": 5}

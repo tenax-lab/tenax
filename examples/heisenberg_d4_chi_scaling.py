@@ -83,6 +83,32 @@ def should_stop_row(result):
     return bool(result.get("oom") or result.get("error"))
 
 
+def _atomic_write_bytes(path, data):
+    """Write bytes via a temp file + os.replace so a kill mid-write never leaves
+    a truncated file on disk (matches _checkpoint.save_checkpoint). Critical for
+    resume: a half-written A_opt.pkl / cell JSON would otherwise be trusted by the
+    existence-based short-circuits and corrupt every downstream load."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(data)
+    os.replace(tmp, path)
+
+
+def _atomic_write_text(path, text):
+    """Atomic UTF-8 text write (see _atomic_write_bytes)."""
+    _atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def _read_json_or_none(path):
+    """Load a JSON file, or None if missing or truncated/corrupt — so a
+    half-written resume artifact is treated as 'not done' (re-run) rather than
+    crashing the whole sweep on json.loads."""
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def _status(r):
     if r.get("oom"):
         return "OOM"
@@ -288,8 +314,9 @@ def optimize_once(outdir, chi_opt, opt_steps, n_devices, probe_max_iter=15):
     # serialise ("cannot pickle 'Device' object"). jax.device_get → numpy leaves
     # makes the saved tensor device-agnostic; each scan worker re-shards on load.
     A_opt_host = jax.device_get(A_opt)
-    with open(tensor_path, "wb") as fh:
-        pickle.dump(A_opt_host, fh)
+    _atomic_write_bytes(
+        tensor_path, pickle.dumps(A_opt_host, protocol=pickle.HIGHEST_PROTOCOL)
+    )
     return tensor_path
 
 
@@ -321,6 +348,10 @@ def scan_cell(tensor_path, chi, n_devices):
             chi=chi, max_iter=200, conv_tol=1e-10,
             projector_method="svd", forward_gauge="phase", device_mesh=mesh,
         )
+        # ctm_converge_kwargs forwards device_mesh but emits no `recipe`, so the
+        # scan uses python_loop_ctm_converge's default CTM recipe — intentionally
+        # independent of the optimizer's gs_recipe="1x1" (mirrors the validated
+        # d3 backbone heisenberg_d3_chi_convergence.scan_chi; energy parity holds).
         kwargs = ctm_converge_kwargs(cfg)  # forwards device_mesh
 
         # Warm-up: compile the χ-specific @jit step (reused via the process
@@ -374,7 +405,7 @@ def _run_worker(args):
     else:
         tensor_path = os.path.join(args.outdir, "A_opt.pkl")
         res = scan_cell(tensor_path, args.chi, args.n_devices)
-    Path(args.out).write_text(json.dumps(res, indent=2))
+    _atomic_write_text(args.out, json.dumps(res, indent=2))
     print(json.dumps(res))
 
 
@@ -446,23 +477,25 @@ def _load_or_run_scan(cell, outdir, timeout_s):
     """Resume: load an existing cell JSON, else launch the scan worker and load
     what it wrote. A timeout/no-file is recorded as an error so the row stops."""
     path = Path(cell_result_path(outdir, cell))
-    if path.exists():
-        return json.loads(path.read_text())
+    cached = _read_json_or_none(path) if path.exists() else None
+    if cached is not None:
+        return cached
     argv = [
         sys.executable, str(Path(__file__).resolve()), "--cell",
         "--phase", "scan", "--outdir", outdir, "--chi", str(cell.chi),
         "--n-devices", str(cell.n_devices), "--out", str(path),
     ]
     ok = _launch(argv, cell.n_devices, timeout_s)
-    if path.exists():
-        return json.loads(path.read_text())
+    loaded = _read_json_or_none(path)
+    if loaded is not None:
+        return loaded
     res = {
         "D": cell.D, "chi": cell.chi, "n_devices": cell.n_devices,
         "E_site": None, "err_vs_qmc": None, "ms_per_sweep": None,
         "n_sweeps": None, "peak_gb": None, "converged": False, "oom": False,
         "error": ("timeout" if not ok else "worker produced no result file"),
     }
-    path.write_text(json.dumps(res, indent=2))
+    _atomic_write_text(path, json.dumps(res, indent=2))
     return res
 
 
