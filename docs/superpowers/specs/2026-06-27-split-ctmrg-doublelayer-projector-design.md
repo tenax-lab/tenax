@@ -85,6 +85,36 @@ split env (C1..C4, T*_ket, T*_bra), A, A.bar()
 4. **Bounded == closed.** The factorized bounded edge path equals the closed-edge path (Component 3 sequencing) to 1e-10.
 5. **No regression** in `tests/test_split_ctm_tensor.py` and `pytest -m core`.
 
+## Memory & computational scaling (corner-pair vs half-system)
+
+χ = environment bond, D = PEPS bond (paper's χ_B). All *split* variants share the
+same leading order; corner-pair vs half-system differ only in prefactor and
+accuracy-per-χ, **not** in asymptotic cost.
+
+| | Time | Peak memory |
+|---|---|---|
+| Fused / conventional (Tenax current) | `O(χ³ D⁶)` | `O(χ² D⁶)` |
+| **Corner-pair split (this design)** | `O(χ³ D⁴)` | `O(χ² D⁴)` |
+| Half-system split (paper "full" projectors) | `O(χ³ D⁴)` | `O(χ² D⁴)` |
+| Half-projectors (paper App. B) | `O(χ³ D⁴)`, smaller prefactor | `O(χ² D⁴)` |
+
+- **Both split variants deliver the full D² advantage** over fused (paper
+  Eqs. 11–12). Choosing corner-pair vs half-system is not a scaling decision.
+- **Prefactor — corner-pair wins:** its projector is built from a double-layer
+  *corner* (χ²D² intermediate, *subleading* to the χ²D⁴ edge step). The
+  half-system projector construction sits *at* the leading χ³D⁴ order (the
+  paper's "teal" bottleneck).
+- **Accuracy per χ — half-system wins:** a half-system/RDM projector is a better
+  truncation than a corner (`C·C`) projector, so it reaches a target accuracy at
+  smaller χ. If corner-pair needs a modestly larger χ to match, that can erode
+  the prefactor edge (cost ~χ³).
+- **Implication for the deferral:** corner-pair *fully achieves the memory goal*
+  (χ²D⁴ — the thing blocking large-D fermionic/CG iPEPS); the half-system upgrade
+  is a pure accuracy-per-χ refinement with no change to the asymptotic budget.
+  Caveat: report any large-D accuracy benchmark as "corner-pair at this χ," not
+  "paper-equivalent at this χ" (corner-pair may sit at slightly higher truncation
+  error at fixed χ).
+
 ## Scope / out of scope
 
 - **In:** DenseTensor split forward — double-layer corner-pair projector in the four moves, the factorized bounded application, the convergence guard.
