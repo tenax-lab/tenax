@@ -580,48 +580,43 @@ def _apply_projector(
     return result
 
 
-def _precombine_factorized_pair(
-    P_a: Tensor,
-    P_b: Tensor,
+def _projector_edge_operator(
+    P_u: Tensor,
     env_label: str,
     ketD_label: str,
     braD_label: str,
     out_chi: str,
     side: str,
 ) -> Tensor:
-    """Fuse a factorized projector pair into one 4-leg edge operator.
+    """Relabel an unfused 4-leg projector into a half-edge operator.
 
-    ``P_a``/``P_b`` come from :func:`_factorize_projector` applied to one of
-    the biorthogonal corner projectors ``P_1`` (C1-side) or ``P_2`` (C4-side):
+    ``P_u`` is the unfused biorthogonal corner projector (output of
+    :func:`_unfuse_projector_fused`) with legs ``(env, ketD, braD, chi_new)``.
+    The closed :func:`_project_grown_edge_tensor_lr` applies the **left**
+    (C1-side) end with ``P_1.bar()`` and the **right** (C4-side) end with
+    ``P_2`` (no dagger); this builds the matching operator and relabels its
+    three contracted legs to the half-edge labels ``env_label`` /
+    ``ketD_label`` / ``braD_label`` and its open leg to ``out_chi``.
 
-    - ``P_a`` has legs ``(env, ketD, _fac)``;
-    - ``P_b`` has legs ``(_fac, braD, chi_new)``.
-
-    The closed :func:`_project_grown_edge_tensor_lr` applies the **left** side
-    with ``P_1.bar()`` and the **right** side with ``P_2`` (no dagger).  Since
-    ``P = contract(P_a, P_b)`` (over ``_fac``) and ``bar`` distributes over a
-    dense contraction, ``P.bar() = contract(P_a.bar(), P_b.bar())`` and
-    ``P = contract(P_a, P_b)``.  This builds the corresponding precombined
-    operator and relabels its three contracted legs to the half-edge labels
-    ``env_label``/``ketD_label``/``braD_label`` and its open leg to
-    ``out_chi``.
+    No SVD factorization is performed.  The earlier
+    :func:`_factorize_projector` → recombine round-trip was a memory-layout
+    artifact (the factors were contracted straight back into ``P``), and its
+    ``sqrt(s)`` / rank-deficient-SVD backward divided by the projector's
+    **zero** singular values — making the split explicit-AD gradient
+    non-finite on the degenerate 1-site double-layer corner (#463 split
+    backward AD-stability).  Applying ``P_u`` directly is forward-identical,
+    cheaper (no per-move SVD), and degeneracy-safe.
 
     Args:
-        side: ``"left"`` → use ``.bar()`` factors (mirrors ``P_1.bar()``);
-              ``"right"`` → use bare factors (mirrors un-daggered ``P_2``).
+        side: ``"left"`` → ``P_u.bar()`` (mirrors ``P_1.bar()``);
+              ``"right"`` → bare ``P_u`` (mirrors un-daggered ``P_2``).
 
     Returns a 4-leg operator ``(env_label, ketD_label, braD_label, out_chi)``.
 
-    DenseTensor only; ``bar`` distribution over contraction does not preserve
-    the order-dependent Koszul signs for SymmetricTensor (#641 / #463 Ph 2-4).
+    DenseTensor only; ``bar`` over the SymmetricTensor projector does not
+    preserve the order-dependent Koszul signs (#641 / #463 Ph 2-4).
     """
-    if side == "left":
-        Pa = P_a.bar()
-        Pb = P_b.bar()
-    else:
-        Pa = P_a
-        Pb = P_b
-    op = contract(Pa, Pb)  # -> (env, ketD, braD, chi_new) up to leg order
+    op = P_u.bar() if side == "left" else P_u
     return op.relabels(
         {
             "env": env_label,
@@ -637,10 +632,8 @@ def _grow_and_project_bounded_lr(
     T_bra: Tensor,
     A: Tensor,
     A_bar: Tensor,
-    P_left_first: Tensor,
-    P_left_second: Tensor,
-    P_right_first: Tensor,
-    P_right_second: Tensor,
+    P_1u: Tensor,
+    P_2u: Tensor,
     contracted_leg: str,
     ket_I_label: str,
     bra_I_label: str,
@@ -649,22 +642,25 @@ def _grow_and_project_bounded_lr(
 ) -> Tensor:
     """Memory-bounded biorthogonal edge application (chi^2 * D^4).
 
-    Like :func:`_grow_and_project_bounded` but uses the **left** factorized
-    pair ``(P_left_first, P_left_second)`` for the C1-side end and the
-    **right** factorized pair ``(P_right_first, P_right_second)`` for the
-    C4-side end — the double-layer biorthogonal pair ``(P_1, P_2)`` factorized
-    via :func:`_factorize_projector`.
+    Applies the unfused biorthogonal projector pair ``(P_1u, P_2u)`` — the
+    C1-side ``P_1`` and C4-side ``P_2`` corner projectors unfused into 4-leg
+    ``(env, ketD, braD, chi_new)`` form via :func:`_unfuse_projector_fused`.
 
     Reproduces :func:`_project_grown_edge_tensor_lr` applied to the closed
     :func:`_grow_edge_no_double_layer` edge to machine precision, but never
-    forms the ``chi^2 * D^6`` closed edge: each precombined 4-leg operator is
+    forms the ``chi^2 * D^6`` closed edge: each 4-leg projector operator is
     absorbed into the open half-edge that holds the majority of its legs before
     the interlayer join (peak ``chi^2 * D^3 * d``).
 
     ``left_fuse`` / ``right_fuse`` are ``(env_chi, ketD, braD)`` triples — the
-    same tuples the closed ``_lr`` path fuses.  The factorized pairs carry the
+    same tuples the closed ``_lr`` path fuses.  The projectors carry the
     generic ``env``/``ketD``/``braD``/``chi_new`` labels from
-    :func:`_factorize_projector`.
+    :func:`_unfuse_projector_fused`.
+
+    The projectors are applied directly (no :func:`_factorize_projector` SVD
+    round-trip): that factorization was a vestigial memory-layout step whose
+    rank-deficient backward made the split explicit-AD gradient non-finite on
+    the degenerate 1-site corner (see :func:`_projector_edge_operator`).
 
     Returns the 4-leg projected edge ``(left_chi, mid_ket, mid_bra,
     right_chi)``.  DenseTensor only.
@@ -676,12 +672,8 @@ def _grow_and_project_bounded_lr(
     la, lb, lc = left_fuse
     ra, rb, rc = right_fuse
     # Left end: mirrors P_1.bar(); right end: mirrors un-daggered P_2.
-    P_left = _precombine_factorized_pair(
-        P_left_first, P_left_second, la, lb, lc, "left_chi", "left"
-    )
-    P_right = _precombine_factorized_pair(
-        P_right_first, P_right_second, ra, rb, rc, "right_chi", "right"
-    )
+    P_left = _projector_edge_operator(P_1u, la, lb, lc, "left_chi", "left")
+    P_right = _projector_edge_operator(P_2u, ra, rb, rc, "right_chi", "right")
 
     def _absorb(op: Tensor) -> Tensor:
         op_labels = set(op.labels())
@@ -716,10 +708,10 @@ def _grow_and_project_edge_lr(
       builds the closed ``chi^2 * D^6`` double-layer edge and projects it with
       :func:`_project_grown_edge_tensor_lr`, preserving the fermionic
       Koszul-sign convention.
-    - For DenseTensor inputs, unfuses + factorizes each projector and routes
-      through the memory-bounded :func:`_grow_and_project_bounded_lr`
-      (``chi^2 * D^4``-bounded, issue #641), which reproduces the closed result
-      to machine precision without forming the ``chi^2 * D^6`` edge.
+    - For DenseTensor inputs, unfuses each projector and routes through the
+      memory-bounded :func:`_grow_and_project_bounded_lr` (``chi^2 * D^4``-
+      bounded, issue #641), which reproduces the closed result to machine
+      precision without forming the ``chi^2 * D^6`` edge.
 
     Returns the 4-leg projected edge ``(left_chi, mid_ket, mid_bra,
     right_chi)``.
@@ -746,17 +738,13 @@ def _grow_and_project_edge_lr(
     P_2u = _unfuse_projector_fused(
         P_2, P_2.indices[0].dim // (D * D), D, "env", "ketD", "braD"
     )
-    P1f, P1s, _ = _factorize_projector(P_1u, "env", "ketD", "braD", "chi_new")
-    P2f, P2s, _ = _factorize_projector(P_2u, "env", "ketD", "braD", "chi_new")
     return _grow_and_project_bounded_lr(
         T_ket,
         T_bra,
         A,
         A_bar,
-        P1f,
-        P1s,
-        P2f,
-        P2s,
+        P_1u,
+        P_2u,
         contracted_leg,
         ket_I_label,
         bra_I_label,

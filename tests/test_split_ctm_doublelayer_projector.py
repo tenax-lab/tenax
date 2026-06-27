@@ -224,10 +224,8 @@ def test_split_bounded_equals_closed(D, chi):
         P_2u = M._unfuse_projector_fused(
             P_2, P_2.indices[0].dim // (Dd * Dd), Dd, "env", "ketD", "braD"
         )
-        P1f, P1s, _ = M._factorize_projector(P_1u, "env", "ketD", "braD", "chi_new")
-        P2f, P2s, _ = M._factorize_projector(P_2u, "env", "ketD", "braD", "chi_new")
         bounded = M._grow_and_project_bounded_lr(
-            T_ket, T_bra, A, A_bar, P1f, P1s, P2f, P2s, leg, kI, bI, lf, rf
+            T_ket, T_bra, A, A_bar, P_1u, P_2u, leg, kI, bI, lf, rf
         )
         perm = tuple(bounded.labels().index(lbl) for lbl in closed.labels())
         a = closed.todense()

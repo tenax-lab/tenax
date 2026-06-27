@@ -85,23 +85,16 @@ def test_split_explicit_energy_finite(D):
     assert jnp.isfinite(e), f"energy is not finite: {e}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#463 split backward AD-stability (deferred, spec Scope / Phase 2-4): "
-        "the correct double-layer 1-site corner is exactly rank-degenerate "
-        "([0.5, 0.5, 0, 0]), so the projector-eigh / factorization-SVD adjoints "
-        "are non-finite. Forward energy is correct (see "
-        "test_split_explicit_energy_finite); a degeneracy-safe split backward is "
-        "Phase-2-4 work."
-    ),
-)
 @pytest.mark.parametrize("D", [2, 3])
 def test_split_explicit_grad_finite(D):
     """ctm_energy_split_explicit returns a finite, non-zero gradient.
 
-    Currently xfails: the double-layer projector's degenerate corner spectrum
-    makes the SVD/eigh backward NaN. Tracked as deferred split-AD stability.
+    The degenerate 1-site double-layer corner (spectrum ``[0.5, 0.5, 0, 0]``)
+    is AD-stable now that the production bounded edge path applies the
+    biorthogonal projector pair directly instead of routing through the
+    vestigial ``_factorize_projector`` SVD round-trip, whose ``sqrt(s)`` /
+    rank-deficient-SVD backward divided by the projector's zero singular
+    values (#463 split backward AD-stability).
     """
     loss, A = _split_explicit_loss(D)
     _, g = jax.value_and_grad(loss)(A)
