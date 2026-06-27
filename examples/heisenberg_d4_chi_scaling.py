@@ -283,8 +283,13 @@ def optimize_once(outdir, chi_opt, opt_steps, n_devices, probe_max_iter=15):
         f"[opt] done in {time.perf_counter() - t0:.0f}s; in-loop E_best={float(E):.6f}",
         flush=True,
     )
+    # Gather to host before pickling. Under a device_mesh A_opt is a sharded
+    # jax.Array whose sharding references Device objects that pickle can't
+    # serialise ("cannot pickle 'Device' object"). jax.device_get → numpy leaves
+    # makes the saved tensor device-agnostic; each scan worker re-shards on load.
+    A_opt_host = jax.device_get(A_opt)
     with open(tensor_path, "wb") as fh:
-        pickle.dump(A_opt, fh)
+        pickle.dump(A_opt_host, fh)
     return tensor_path
 
 
@@ -387,8 +392,12 @@ def _build_argparser():
     p.add_argument("--chi-opt", dest="chi_opt", type=int, default=32)
     p.add_argument("--opt-steps", dest="opt_steps", type=int, default=100)
     p.add_argument("--probe-max-iter", dest="probe_max_iter", type=int, default=15)
-    p.add_argument("--opt-devices", dest="opt_devices", type=int, default=4,
-                   help="GPUs for the one-time optimization")
+    p.add_argument("--opt-devices", dest="opt_devices", type=int, default=1,
+                   help="GPUs for the one-time optimization. Default 1: multi-GPU "
+                        "optimize is blocked by sharded gs-checkpoint pickling "
+                        "(_checkpoint.save_checkpoint can't pickle mesh-sharded "
+                        "jax.Arrays); the single-GPU path keeps crash-resilient "
+                        "checkpointing. The χ-scan carries the multi-GPU story.")
     p.add_argument("--chi-ladder", dest="chi_ladder", type=str,
                    default="16,24,32,48,64,96,128")
     p.add_argument("--device-counts", dest="device_counts", type=str, default="1,2,4")
@@ -569,7 +578,7 @@ if __name__ == "__main__":
         _args.outdir = _args.outdir + "_smoke"
         _args.chi_opt = 8
         _args.opt_steps = 6
-        _args.opt_devices = 2
+        _args.opt_devices = 1
         _args.chi_ladder = "8,12"
         _args.device_counts = "1,2"
         _args.cell_timeout_s = 1200
