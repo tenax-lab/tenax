@@ -98,6 +98,50 @@ def test_factorize_projector_reconstructs():
     np.testing.assert_allclose(b, a, atol=1e-10)
 
 
+def test_split_production_chi_I_converges_to_lossless():
+    """Production interlayer bond (chi_I=chi) is physical and converges to lossless.
+
+    Spec oracle 2: with the lossy production interlayer bond chi_I=chi the split
+    energy must stay physical (<=0.75/bond) and approach the lossless
+    (chi_I=chi*D) value as chi grows. Tested at D=3, where the interlayer
+    truncation is genuinely lossy (at D=2 chi_I=chi is already lossless, so the
+    interlayer-truncation error is identically zero and there is nothing to
+    converge). conv_tol=0.0 forces full sweeps so we compare true fixed points
+    (the corner-SV criterion is blind to the degenerate corner; see DL-Task 6).
+    """
+    make_site, heisenberg_gate, _ = _oracle()
+    D = 3
+    A = make_site(D, 2, seed=7)
+    gate = heisenberg_gate()
+
+    interlayer_err = []
+    for chi in (4, 6):
+        e_lossy = float(
+            compute_energy_split_ctm_tensor(
+                A,
+                ctm_split_tensor(A, chi=chi, chi_I=chi, max_iter=200, conv_tol=0.0),
+                gate,
+            )
+        )
+        e_lossless = float(
+            compute_energy_split_ctm_tensor(
+                A,
+                ctm_split_tensor(A, chi=chi, chi_I=chi * D, max_iter=200, conv_tol=0.0),
+                gate,
+            )
+        )
+        # E is the sum over the 2 NN bonds of the 1-site cell -> per-bond = E/2.
+        assert abs(e_lossy / 2.0) <= 0.75 + 1e-6, (
+            f"unphysical per-bond energy {e_lossy / 2.0}"
+        )
+        assert abs(e_lossless / 2.0) <= 0.75 + 1e-6
+        interlayer_err.append(abs(e_lossy - e_lossless))
+
+    # The interlayer-truncation error (lossy vs lossless at the SAME chi) shrinks
+    # as chi grows: the lossy path converges toward the lossless fixed point.
+    assert interlayer_err[1] < interlayer_err[0]
+
+
 @pytest.mark.parametrize("min_iter,expected_sweeps", [(2, 2), (5, 5), (8, 8)])
 def test_split_min_iter_floor_blocks_early_break(
     monkeypatch, min_iter, expected_sweeps
