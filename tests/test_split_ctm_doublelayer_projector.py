@@ -104,10 +104,12 @@ def test_split_bounded_equals_closed(D, chi):
 
     Two complementary gates, both to 1e-10:
 
-    1. **Exact per-move equality** of the 4-leg *projected edge* ``T*g`` (the
-       direct output of the bounded vs closed edge application, before the
-       interlayer SVD split) for all four moves.  This is the precise
-       ``_grow_and_project_bounded_lr == _project_grown_edge_tensor_lr`` claim.
+    1. **Exact equality** of the 4-leg *projected edge* ``T*g`` (the direct
+       output of the bounded vs closed edge application, before the interlayer
+       SVD split) for the **left** move.  This is the precise
+       ``_grow_and_project_bounded_lr == _project_grown_edge_tensor_lr`` claim;
+       the other three moves are covered by
+       ``tests/test_split_ctm_tensor.py::TestSplitCTMBoundedEdge::test_bounded_matches_closed_path_all_moves``.
     2. **Energy after a full sweep** (gauge-invariant).  The interlayer (``_I``)
        SVD that splits each projected edge into ket/bra halves is genuinely
        non-unique on the doubly-degenerate edge of a random seeded site (two

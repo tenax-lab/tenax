@@ -11,13 +11,10 @@ __all__ = [
     "_doublelayer_grown_corner",
     "_factorize_projector",
     "_fused_charge_permutation",
-    "_grow_and_project_bounded",
     "_grow_and_project_bounded_lr",
-    "_grow_and_project_edge",
+    "_grow_and_project_edge_lr",
     "_grow_edge_halves",
     "_grow_edge_no_double_layer",
-    "_precombine_projector_pair",
-    "_project_grown_edge_tensor",
     "_project_grown_edge_tensor_lr",
     "_reembed_target_for_projector",
     "_select_bond_entries",
@@ -44,7 +41,6 @@ from tenax.algorithms._tensor_utils import (
     absorb_sqrt_singular_values,
     fuse_indices,
     max_abs_normalize,
-    split_index,
 )
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
@@ -123,7 +119,8 @@ def _unfuse_projector_fused(P, env_dim, D, env_label, ketD_label, braD_label):
     chi_new_dim = data.shape[1]
     data = data.reshape(env_dim, D, D, chi_new_dim)
 
-    sym = P.indices[chi_pos if fused_pos == 0 else 0].symmetry
+    # Layout is now (fused, chi_new); symmetry is uniform across all indices.
+    sym = P.indices[0].symmetry
     z_env = np.zeros(env_dim, dtype=np.int32)
     z_D = np.zeros(D, dtype=np.int32)
     chi_new_idx = P.indices[1]  # chi_new index (now at axis 1 after transpose)
@@ -490,67 +487,6 @@ def _reembed_target_for_projector(P: Tensor, Tg: Tensor) -> Tensor:
     return Tg
 
 
-def _project_grown_edge_tensor(
-    Tg: Tensor,
-    P_first: Tensor,
-    P_second: Tensor,
-    left_fuse: tuple[str, str, str],
-    right_fuse: tuple[str, str, str],
-) -> Tensor:
-    """Apply four projectors to a grown edge via Tensor protocol.
-
-    Sequential application avoids todense: for each side (left/right),
-    fuse two legs and contract with P_first†, then fuse the result with
-    the third leg and contract with P_second†.
-
-    When the fused charges after ``fuse_indices`` differ from the
-    projector's unified fused index, ``_reembed_fused`` aligns them
-    before contraction.
-
-    Args:
-        Tg:         Grown edge tensor (8 legs).
-        P_first:    First projector (ket or bra, depending on move).
-        P_second:   Second projector (bra or ket, depending on move).
-        left_fuse:  (a, b, c) — fuse a+b for P_first, then chi+c for P_second.
-        right_fuse: (a, b, c) — same for right side.
-
-    Returns:
-        4-leg Tensor ``(left_chi, mid1, mid2, right_chi)``.
-    """
-    la, lb, lc = left_fuse
-    ra, rb, rc = right_fuse
-
-    # --- Left side ---
-    labels = Tg.labels()
-    Tg = fuse_indices(Tg, labels.index(la), labels.index(lb), "fused", FlowDirection.IN)
-    # Projector .bar() (no Koszul) for paired absorb contractions; see
-    # _ctm_tensor_moves note for why this stays bosonic-bar.
-    Tg = _reembed_target_for_projector(P_first, Tg)
-    Tg = contract(P_first.bar(), Tg)  # "fused" contracted → "chi_new" created
-    labels = Tg.labels()
-    Tg = fuse_indices(
-        Tg, labels.index("chi_new"), labels.index(lc), "fused", FlowDirection.IN
-    )
-    Tg = _reembed_target_for_projector(P_second, Tg)
-    Tg = contract(P_second.bar(), Tg)
-    Tg = Tg.relabel("chi_new", "left_chi")
-
-    # --- Right side ---
-    labels = Tg.labels()
-    Tg = fuse_indices(Tg, labels.index(ra), labels.index(rb), "fused", FlowDirection.IN)
-    Tg = _reembed_target_for_projector(P_first, Tg)
-    Tg = contract(P_first.bar(), Tg)
-    labels = Tg.labels()
-    Tg = fuse_indices(
-        Tg, labels.index("chi_new"), labels.index(rc), "fused", FlowDirection.IN
-    )
-    Tg = _reembed_target_for_projector(P_second, Tg)
-    Tg = contract(P_second.bar(), Tg)
-    Tg = Tg.relabel("chi_new", "right_chi")
-
-    return Tg
-
-
 def _project_grown_edge_tensor_lr(
     Tg: Tensor,
     P_1: Tensor,
@@ -642,97 +578,6 @@ def _apply_projector(
     # Projector .bar() (no Koszul) — see _ctm_tensor_moves note.
     result = contract(P.bar(), Cg_fused)  # contracts over "fused" → (chi_new, ...)
     return result
-
-
-def _precombine_projector_pair(
-    P_first: Tensor,
-    P_second: Tensor,
-    chi_leg: str,
-    D1_leg: str,
-    D2_leg: str,
-    out_label: str,
-) -> Tensor:
-    """Fuse a sequential projector pair into one 4-leg operator (dense path).
-
-    Reproduces the two-step projection that :func:`_project_grown_edge_tensor`
-    applies to one side of a grown edge — ``fuse(chi_leg, D1) -> P_first.bar()
-    -> m`` then ``fuse(m, D2) -> P_second.bar() -> out`` — but as a standalone
-    operator ``op(chi_leg, D1_leg, D2_leg, out_label)``.  Contracting ``op``
-    into a half-edge over the two legs that live there absorbs the projectors
-    *before* the interlayer join, so the ``chi^2 * D^6`` edge never forms.
-
-    Both grown-corner projectors carry a ``fused`` leg whose parents are
-    always ``(chi-type, D-type)`` (the env bond first, the ``A`` virtual leg
-    second).  Splitting the ``fused`` leg therefore exposes the env-bond and
-    ``D`` components in a known order; relabelling them to the edge's legs
-    and contracting over the shared ``chi_new`` bond rebuilds the paired
-    operator.
-
-    DenseTensor only: ``split_index`` after ``.bar()`` does not preserve the
-    order-dependent Koszul signs that the closed-edge contraction encodes for
-    SymmetricTensor (issue #641 / #463 Phase 2-4), so the SymmetricTensor
-    projection stays on the closed ``_project_grown_edge_tensor`` path.
-    """
-    Pf = P_first.bar().relabel("chi_new", "_pcomb_m")
-    Pf = split_index(Pf, Pf.labels().index("fused"))
-    pf_labels = Pf.labels()  # (parent_chi, parent_D, _pcomb_m)
-    Pf = Pf.relabels({pf_labels[0]: chi_leg, pf_labels[1]: D1_leg})
-
-    Ps = P_second.bar().relabel("chi_new", out_label)
-    Ps = split_index(Ps, Ps.labels().index("fused"))
-    ps_labels = Ps.labels()  # (parent_chi == _pcomb_m, parent_D, out_label)
-    Ps = Ps.relabels({ps_labels[0]: "_pcomb_m", ps_labels[1]: D2_leg})
-
-    return contract(Pf, Ps)  # -> (chi_leg, D1_leg, D2_leg, out_label)
-
-
-def _grow_and_project_bounded(
-    T_ket: Tensor,
-    T_bra: Tensor,
-    A: Tensor,
-    A_bar: Tensor,
-    P_first: Tensor,
-    P_second: Tensor,
-    contracted_leg: str,
-    ket_I_label: str,
-    bra_I_label: str,
-    left_fuse: tuple[str, str, str],
-    right_fuse: tuple[str, str, str],
-) -> Tensor:
-    """Grow + project an edge without forming the ``chi^2 * D^6`` tensor.
-
-    Builds the two open half-edges, precombines each projector pair into a
-    4-leg operator, absorbs each operator into the half-edge holding the
-    majority of its legs, then joins.  Peak intermediate is ``chi^2 * D^3 * d``
-    (vs the closed path's ``chi^2 * D^6``), so the forward CTM convergence is
-    ``chi^2 * D^4``-bounded (issue #641).
-
-    Returns the 4-leg projected edge ``(left_chi, mid_ket, mid_bra,
-    right_chi)`` — identical (to machine precision) to
-    ``_project_grown_edge_tensor(_grow_edge_no_double_layer(...), ...)``.
-
-    DenseTensor only; see :func:`_precombine_projector_pair`.
-    """
-    ket_half, bra_half = _grow_edge_halves(
-        T_ket, T_bra, A, A_bar, contracted_leg, ket_I_label, bra_I_label
-    )
-
-    # left_fuse is (chi, D, D); right_fuse is (D, chi, D) — the env bond sits
-    # at position 0 of left_fuse and position 1 of right_fuse for every move.
-    la, lb, lc = left_fuse
-    ra, rb, rc = right_fuse
-    P_left = _precombine_projector_pair(P_first, P_second, la, lb, lc, "left_chi")
-    P_right = _precombine_projector_pair(P_first, P_second, rb, ra, rc, "right_chi")
-
-    def _absorb(op: Tensor) -> Tensor:
-        op_labels = set(op.labels())
-        in_ket = len(op_labels & set(ket_half.labels()))
-        in_bra = len(op_labels & set(bra_half.labels()))
-        return contract(op, ket_half) if in_ket >= in_bra else contract(op, bra_half)
-
-    # Join over (_I, phys, and the two cross-legs shared between the reduced
-    # halves) -> (left_chi, mid_ket, mid_bra, right_chi).
-    return contract(_absorb(P_left), _absorb(P_right))
 
 
 def _precombine_factorized_pair(
@@ -847,13 +692,13 @@ def _grow_and_project_bounded_lr(
     return contract(_absorb(P_left), _absorb(P_right))
 
 
-def _grow_and_project_edge(
+def _grow_and_project_edge_lr(
     T_ket: Tensor,
     T_bra: Tensor,
     A: Tensor,
     A_bar: Tensor,
-    P_first: Tensor,
-    P_second: Tensor,
+    P_1: Tensor,
+    P_2: Tensor,
     contracted_leg: str,
     ket_I_label: str,
     bra_I_label: str,
@@ -861,40 +706,62 @@ def _grow_and_project_edge(
     left_fuse: tuple[str, str, str],
     right_fuse: tuple[str, str, str],
 ) -> Tensor:
-    """Grow + project an edge, choosing the memory-bounded path when possible.
+    """Grow + project a T-edge with a biorthogonal pair ``(P_1, P_2)``.
 
-    For DenseTensor inputs, routes through :func:`_grow_and_project_bounded`
-    (``chi^2 * D^4``-bounded, issue #641).  For SymmetricTensor inputs, falls
-    back to the closed ``chi^2 * D^6`` grow + project, which preserves the
-    fermionic Koszul-sign convention (bounded SymmetricTensor support is the
-    #463 Phase 2-4 follow-up).
+    Owns the whole Phase-B path shared by the four directional moves, mirroring
+    how the fused path uses a single
+    :func:`tenax.algorithms._ctm_tensor_moves._apply_projector_with_reembed`:
+
+    - For SymmetricTensor inputs (or when :data:`_FORCE_CLOSED_EDGE` is set),
+      builds the closed ``chi^2 * D^6`` double-layer edge and projects it with
+      :func:`_project_grown_edge_tensor_lr`, preserving the fermionic
+      Koszul-sign convention.
+    - For DenseTensor inputs, unfuses + factorizes each projector and routes
+      through the memory-bounded :func:`_grow_and_project_bounded_lr`
+      (``chi^2 * D^4``-bounded, issue #641), which reproduces the closed result
+      to machine precision without forming the ``chi^2 * D^6`` edge.
+
+    Returns the 4-leg projected edge ``(left_chi, mid_ket, mid_bra,
+    right_chi)``.
     """
-    if isinstance(T_ket, DenseTensor) and isinstance(T_bra, DenseTensor):
-        return _grow_and_project_bounded(
+    if _FORCE_CLOSED_EDGE or not isinstance(A, DenseTensor):
+        Tg = _grow_edge_no_double_layer(
             T_ket,
             T_bra,
             A,
             A_bar,
-            P_first,
-            P_second,
             contracted_leg,
             ket_I_label,
             bra_I_label,
-            left_fuse,
-            right_fuse,
+            grow_output_labels,
         )
-    Tg = _grow_edge_no_double_layer(
+        return _project_grown_edge_tensor_lr(
+            Tg, P_1, P_2, left_fuse=left_fuse, right_fuse=right_fuse
+        )
+
+    D = A.indices[0].dim
+    P_1u = _unfuse_projector_fused(
+        P_1, P_1.indices[0].dim // (D * D), D, "env", "ketD", "braD"
+    )
+    P_2u = _unfuse_projector_fused(
+        P_2, P_2.indices[0].dim // (D * D), D, "env", "ketD", "braD"
+    )
+    P1f, P1s, _ = _factorize_projector(P_1u, "env", "ketD", "braD", "chi_new")
+    P2f, P2s, _ = _factorize_projector(P_2u, "env", "ketD", "braD", "chi_new")
+    return _grow_and_project_bounded_lr(
         T_ket,
         T_bra,
         A,
         A_bar,
+        P1f,
+        P1s,
+        P2f,
+        P2s,
         contracted_leg,
         ket_I_label,
         bra_I_label,
-        grow_output_labels,
-    )
-    return _project_grown_edge_tensor(
-        Tg, P_first, P_second, left_fuse=left_fuse, right_fuse=right_fuse
+        left_fuse,
+        right_fuse,
     )
 
 
@@ -955,45 +822,20 @@ def _split_ctm_move_left(
     # --- Phase B: project the grown edge with the biorthogonal pair ---
     left_fuse = ("t4k_d", "u", "U")
     right_fuse = ("t4b_u", "d", "D")
-    if _FORCE_CLOSED_EDGE or not isinstance(A, DenseTensor):
-        Tg = _grow_edge_no_double_layer(
-            env.T4_ket,
-            env.T4_bra,
-            A,
-            A_bar,
-            "l",
-            "t4k_I",
-            "t4b_I",
-            ("t4k_d", "u", "U", "r", "R", "t4b_u", "d", "D"),
-        )
-        T4g = _project_grown_edge_tensor_lr(
-            Tg, P_1, P_2, left_fuse=left_fuse, right_fuse=right_fuse
-        )
-    else:
-        D = A.indices[0].dim
-        P_1u = _unfuse_projector_fused(
-            P_1, P_1.indices[0].dim // (D * D), D, "env", "ketD", "braD"
-        )
-        P_2u = _unfuse_projector_fused(
-            P_2, P_2.indices[0].dim // (D * D), D, "env", "ketD", "braD"
-        )
-        P1f, P1s, _ = _factorize_projector(P_1u, "env", "ketD", "braD", "chi_new")
-        P2f, P2s, _ = _factorize_projector(P_2u, "env", "ketD", "braD", "chi_new")
-        T4g = _grow_and_project_bounded_lr(
-            env.T4_ket,
-            env.T4_bra,
-            A,
-            A_bar,
-            P1f,
-            P1s,
-            P2f,
-            P2s,
-            "l",
-            "t4k_I",
-            "t4b_I",
-            left_fuse,
-            right_fuse,
-        )
+    T4g = _grow_and_project_edge_lr(
+        env.T4_ket,
+        env.T4_bra,
+        A,
+        A_bar,
+        P_1,
+        P_2,
+        "l",
+        "t4k_I",
+        "t4b_I",
+        ("t4k_d", "u", "U", "r", "R", "t4b_u", "d", "D"),
+        left_fuse,
+        right_fuse,
+    )
     # T4g now: (left_chi, r, R, right_chi)
 
     # --- Phase C: SVD split into ket/bra ---
@@ -1068,45 +910,20 @@ def _split_ctm_move_right(
     # --- Phase B: project the grown edge with the biorthogonal pair ---
     left_fuse = ("t2k_u", "u", "U")
     right_fuse = ("t2b_d", "d", "D")
-    if _FORCE_CLOSED_EDGE or not isinstance(A, DenseTensor):
-        Tg = _grow_edge_no_double_layer(
-            env.T2_ket,
-            env.T2_bra,
-            A,
-            A_bar,
-            "r",
-            "t2k_I",
-            "t2b_I",
-            ("t2k_u", "u", "U", "l", "L", "t2b_d", "d", "D"),
-        )
-        T2g = _project_grown_edge_tensor_lr(
-            Tg, P_1, P_2, left_fuse=left_fuse, right_fuse=right_fuse
-        )
-    else:
-        D = A.indices[0].dim
-        P_1u = _unfuse_projector_fused(
-            P_1, P_1.indices[0].dim // (D * D), D, "env", "ketD", "braD"
-        )
-        P_2u = _unfuse_projector_fused(
-            P_2, P_2.indices[0].dim // (D * D), D, "env", "ketD", "braD"
-        )
-        P1f, P1s, _ = _factorize_projector(P_1u, "env", "ketD", "braD", "chi_new")
-        P2f, P2s, _ = _factorize_projector(P_2u, "env", "ketD", "braD", "chi_new")
-        T2g = _grow_and_project_bounded_lr(
-            env.T2_ket,
-            env.T2_bra,
-            A,
-            A_bar,
-            P1f,
-            P1s,
-            P2f,
-            P2s,
-            "r",
-            "t2k_I",
-            "t2b_I",
-            left_fuse,
-            right_fuse,
-        )
+    T2g = _grow_and_project_edge_lr(
+        env.T2_ket,
+        env.T2_bra,
+        A,
+        A_bar,
+        P_1,
+        P_2,
+        "r",
+        "t2k_I",
+        "t2b_I",
+        ("t2k_u", "u", "U", "l", "L", "t2b_d", "d", "D"),
+        left_fuse,
+        right_fuse,
+    )
     # T2g now: (left_chi, l, L, right_chi)
 
     # --- Phase C: SVD split into ket/bra ---
@@ -1181,45 +998,20 @@ def _split_ctm_move_top(
     # --- Phase B: project the grown edge with the biorthogonal pair ---
     left_fuse = ("t1k_l", "l", "L")
     right_fuse = ("t1b_r", "r", "R")
-    if _FORCE_CLOSED_EDGE or not isinstance(A, DenseTensor):
-        Tg = _grow_edge_no_double_layer(
-            env.T1_ket,
-            env.T1_bra,
-            A,
-            A_bar,
-            "u",
-            "t1k_I",
-            "t1b_I",
-            ("t1k_l", "l", "L", "d", "D", "t1b_r", "r", "R"),
-        )
-        T1g = _project_grown_edge_tensor_lr(
-            Tg, P_1, P_2, left_fuse=left_fuse, right_fuse=right_fuse
-        )
-    else:
-        D = A.indices[0].dim
-        P_1u = _unfuse_projector_fused(
-            P_1, P_1.indices[0].dim // (D * D), D, "env", "ketD", "braD"
-        )
-        P_2u = _unfuse_projector_fused(
-            P_2, P_2.indices[0].dim // (D * D), D, "env", "ketD", "braD"
-        )
-        P1f, P1s, _ = _factorize_projector(P_1u, "env", "ketD", "braD", "chi_new")
-        P2f, P2s, _ = _factorize_projector(P_2u, "env", "ketD", "braD", "chi_new")
-        T1g = _grow_and_project_bounded_lr(
-            env.T1_ket,
-            env.T1_bra,
-            A,
-            A_bar,
-            P1f,
-            P1s,
-            P2f,
-            P2s,
-            "u",
-            "t1k_I",
-            "t1b_I",
-            left_fuse,
-            right_fuse,
-        )
+    T1g = _grow_and_project_edge_lr(
+        env.T1_ket,
+        env.T1_bra,
+        A,
+        A_bar,
+        P_1,
+        P_2,
+        "u",
+        "t1k_I",
+        "t1b_I",
+        ("t1k_l", "l", "L", "d", "D", "t1b_r", "r", "R"),
+        left_fuse,
+        right_fuse,
+    )
     # T1g now: (left_chi, d, D, right_chi)
 
     # --- Phase C: SVD split into ket/bra ---
@@ -1294,45 +1086,20 @@ def _split_ctm_move_bottom(
     # --- Phase B: project the grown edge with the biorthogonal pair ---
     left_fuse = ("t3k_r", "l", "L")
     right_fuse = ("t3b_l", "r", "R")
-    if _FORCE_CLOSED_EDGE or not isinstance(A, DenseTensor):
-        Tg = _grow_edge_no_double_layer(
-            env.T3_ket,
-            env.T3_bra,
-            A,
-            A_bar,
-            "d",
-            "t3k_I",
-            "t3b_I",
-            ("t3k_r", "l", "L", "u", "U", "t3b_l", "r", "R"),
-        )
-        T3g = _project_grown_edge_tensor_lr(
-            Tg, P_1, P_2, left_fuse=left_fuse, right_fuse=right_fuse
-        )
-    else:
-        D = A.indices[0].dim
-        P_1u = _unfuse_projector_fused(
-            P_1, P_1.indices[0].dim // (D * D), D, "env", "ketD", "braD"
-        )
-        P_2u = _unfuse_projector_fused(
-            P_2, P_2.indices[0].dim // (D * D), D, "env", "ketD", "braD"
-        )
-        P1f, P1s, _ = _factorize_projector(P_1u, "env", "ketD", "braD", "chi_new")
-        P2f, P2s, _ = _factorize_projector(P_2u, "env", "ketD", "braD", "chi_new")
-        T3g = _grow_and_project_bounded_lr(
-            env.T3_ket,
-            env.T3_bra,
-            A,
-            A_bar,
-            P1f,
-            P1s,
-            P2f,
-            P2s,
-            "d",
-            "t3k_I",
-            "t3b_I",
-            left_fuse,
-            right_fuse,
-        )
+    T3g = _grow_and_project_edge_lr(
+        env.T3_ket,
+        env.T3_bra,
+        A,
+        A_bar,
+        P_1,
+        P_2,
+        "d",
+        "t3k_I",
+        "t3b_I",
+        ("t3k_r", "l", "L", "u", "U", "t3b_l", "r", "R"),
+        left_fuse,
+        right_fuse,
+    )
     # T3g now: (left_chi, u, U, right_chi)
 
     # --- Phase C: SVD split into ket/bra ---
