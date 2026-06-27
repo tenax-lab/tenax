@@ -130,6 +130,9 @@ def ctm_split_tensor(
         min_iter:   Minimum number of sweeps before the ``conv_tol`` early
                     break may fire. Guards against a premature break on the
                     initial transient plateau of a degenerate corner.
+                    Effectively floored at 2: the first sweep has no previous
+                    spectrum to compare against, so the earliest possible break
+                    is the second sweep regardless of ``min_iter``.
 
     Returns:
         Converged SplitCTMTensorEnv.
