@@ -89,3 +89,6 @@ papers/
 
 # variPEPS compare benchmark outputs
 benchmarks/varipeps_compare/results/
+
+# iPEPS AD run artifacts (checkpoints, optimized tensors, results JSON)
+runs/
