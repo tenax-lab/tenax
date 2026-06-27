@@ -145,3 +145,29 @@ uv run python examples/heisenberg_d4_chi_scaling.py --smoke    # quick validatio
 2. The exact CUDA↔nvidia-smi index mapping under `CUDA_DEVICE_ORDER=PCI_BUS_ID`
    (the device-safety guard backstops this regardless).
 3. `A_opt.pkl` round-trips cleanly and re-shards across device counts.
+
+## Validation outcome (2026-06-27 smoke, 4×A100)
+
+Amendment to the architecture above. The smoke run resolved all three open items
+and surfaced one design change:
+
+- **Open item 1 (sharded energy):** resolved — the χ²·D⁴ env is gathered to one
+  device before `compute_energy_ctm_tensor`; 1-GPU vs 2-GPU energies agree to
+  ~1e-8 (FP reassociation from the sharded contraction order).
+- **Open item 2 (index mapping):** resolved — `CUDA_DEVICE_ORDER=PCI_BUS_ID` plus
+  the A100-only guard; the run never touched the display GPU.
+- **Open item 3 (A_opt re-shard):** resolved — `jax.device_get(A_opt)` before
+  pickling makes the cached tensor device-agnostic; each scan worker re-shards.
+- **Design change — the optimization runs single-GPU, not on 4 GPUs.** The gs
+  checkpoint (`_checkpoint.save_checkpoint`) pickles the optimizer state, which
+  under a `device_mesh` holds mesh-sharded `jax.Array`s referencing `Device`
+  objects that pickle cannot serialise. Since the one-time optimization gains
+  nothing from multi-GPU that the χ-scan doesn't already measure, it runs
+  single-GPU (checkpoint-safe, the proven d3 path) while the scan carries the
+  full multi-GPU story. The `--opt-devices` default is now **1**. Multi-GPU
+  optimization would require a core `_checkpoint.py` fix (gather/replicate
+  sharded leaves on save, re-shard on load) — a possible follow-up, out of scope.
+- Multi-GPU compute genuinely engages in the scan: 1.66× per-sweep speedup at
+  χ=12 even at the tiny smoke scale. Per-device peak memory does *not* drop at
+  smoke χ (8, 12) — the memory win is a large-χ effect (the χ²·D⁶ intermediate);
+  the speedup confirms sharding is active.
