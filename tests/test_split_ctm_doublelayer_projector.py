@@ -35,3 +35,24 @@ def test_fused_to_split_roundtrip(D):
     rt_env = _split_env_to_tensor_standard(split_env)
     E_rt = float(compute_energy_ctm_tensor(A, rt_env, gate))
     np.testing.assert_allclose(E_rt, E_fused, atol=1e-8)
+
+
+from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor
+from tenax.algorithms._split_ctm_tensor_energy import compute_energy_split_ctm_tensor
+
+
+@pytest.mark.xfail(
+    reason="#463: split moves use per-layer projector; fixed in DL-Task 5", strict=True
+)
+@pytest.mark.parametrize("D,chi", [(2, 4), (2, 8), (3, 6)])
+def test_split_matches_fused_lossless_chi_I(D, chi):
+    make_site, heisenberg_gate, fused_env_to_split = _oracle()
+    A = make_site(D, 2, seed=7)
+    gate = heisenberg_gate()
+    fused_env, _ = ctm_tensor(A, chi=chi, max_iter=300, conv_tol=1e-12)
+    E_fused = float(compute_energy_ctm_tensor(A, fused_env, gate))
+    split_env = ctm_split_tensor(
+        A, chi=chi, chi_I=chi * D, max_iter=300, conv_tol=1e-12
+    )
+    E_split = float(compute_energy_split_ctm_tensor(A, split_env, gate))
+    np.testing.assert_allclose(E_split, E_fused, atol=1e-8)
