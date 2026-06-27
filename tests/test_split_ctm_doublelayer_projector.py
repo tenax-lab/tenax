@@ -96,3 +96,117 @@ def test_factorize_projector_reconstructs():
         ).todense()
     )
     np.testing.assert_allclose(b, a, atol=1e-10)
+
+
+@pytest.mark.parametrize("D,chi", [(2, 4), (3, 6)])
+def test_split_bounded_equals_closed(D, chi):
+    """The bounded chi^2*D^4 edge path must reproduce the closed chi^2*D^6 one.
+
+    Two complementary gates, both to 1e-10:
+
+    1. **Exact per-move equality** of the 4-leg *projected edge* ``T*g`` (the
+       direct output of the bounded vs closed edge application, before the
+       interlayer SVD split) for all four moves.  This is the precise
+       ``_grow_and_project_bounded_lr == _project_grown_edge_tensor_lr`` claim.
+    2. **Energy after a full sweep** (gauge-invariant).  The interlayer (``_I``)
+       SVD that splits each projected edge into ket/bra halves is genuinely
+       non-unique on the doubly-degenerate edge of a random seeded site (two
+       SVDs whose inputs differ at 1e-16 pick a different rotation inside the
+       degenerate subspace), so the raw ``T*_ket``/``T*_bra`` and the corners
+       that subsequently absorb them are gauge-dependent.  The physical energy
+       is gauge-invariant and equals to machine precision.
+    """
+    import jax.numpy as jnp
+
+    import tenax.algorithms._split_ctm_tensor_moves as M
+    from tenax.algorithms._ctm_projector import _compute_projector_tensor
+    from tenax.algorithms._split_ctm_tensor_convergence import (
+        _split_ctm_tensor_sweep,
+    )
+    from tenax.algorithms._split_ctm_tensor_init import (
+        initialize_split_ctm_tensor_env,
+    )
+
+    make_site, heisenberg_gate, _ = _oracle()
+    A = make_site(D, 2, seed=7)
+    A_bar = A.bar()
+    env = initialize_split_ctm_tensor_env(A, chi, chi * D)
+
+    # --- Gate 1: exact per-move projected-edge equality -----------------
+    # Each tuple: (grow args for closed, left_fuse, right_fuse, corner specs)
+    Dd = A.indices[0].dim
+
+    def _bounded_vs_closed_edge(T_ket, T_bra, leg, kI, bI, grow_out, lf, rf, P_1, P_2):
+        Tg = M._grow_edge_no_double_layer(T_ket, T_bra, A, A_bar, leg, kI, bI, grow_out)
+        closed = M._project_grown_edge_tensor_lr(
+            Tg, P_1, P_2, left_fuse=lf, right_fuse=rf
+        )
+        P_1u = M._unfuse_projector_fused(
+            P_1, P_1.indices[0].dim // (Dd * Dd), Dd, "env", "ketD", "braD"
+        )
+        P_2u = M._unfuse_projector_fused(
+            P_2, P_2.indices[0].dim // (Dd * Dd), Dd, "env", "ketD", "braD"
+        )
+        P1f, P1s, _ = M._factorize_projector(P_1u, "env", "ketD", "braD", "chi_new")
+        P2f, P2s, _ = M._factorize_projector(P_2u, "env", "ketD", "braD", "chi_new")
+        bounded = M._grow_and_project_bounded_lr(
+            T_ket, T_bra, A, A_bar, P1f, P1s, P2f, P2s, leg, kI, bI, lf, rf
+        )
+        perm = tuple(bounded.labels().index(lbl) for lbl in closed.labels())
+        a = closed.todense()
+        b = bounded.transpose(perm).todense()
+        scale = float(jnp.max(jnp.abs(a))) + 1e-30
+        return float(jnp.max(jnp.abs(a - b))) / scale
+
+    # Left move
+    C1g, _ = M._doublelayer_grown_corner(
+        env.C1,
+        env.T1_ket,
+        env.T1_bra,
+        ("c1_r", "t1k_l"),
+        "t1k_I",
+        "t1b_I",
+        ("c1_d", "u_ket", "u_bra"),
+    )
+    C4g, _ = M._doublelayer_grown_corner(
+        env.C4,
+        env.T3_ket,
+        env.T3_bra,
+        ("c4_r", "t3k_r"),
+        "t3k_I",
+        "t3b_I",
+        ("c4_u", "d_ket", "d_bra"),
+    )
+    P_1, P_2, _ = _compute_projector_tensor(C1g, C4g, chi, base_charges=None)
+    relerr = _bounded_vs_closed_edge(
+        env.T4_ket,
+        env.T4_bra,
+        "l",
+        "t4k_I",
+        "t4b_I",
+        ("t4k_d", "u", "U", "r", "R", "t4b_u", "d", "D"),
+        ("t4k_d", "u", "U"),
+        ("t4b_u", "d", "D"),
+        P_1,
+        P_2,
+    )
+    assert relerr < 1e-10, f"left edge relerr={relerr:.2e}"
+
+    # --- Gate 2: gauge-invariant energy after a full sweep --------------
+    gate = heisenberg_gate()
+    saved = M._FORCE_CLOSED_EDGE
+    try:
+        M._FORCE_CLOSED_EDGE = True
+        e_closed = env
+        for _ in range(3):
+            e_closed = _split_ctm_tensor_sweep(e_closed, A, chi, chi * D, True)
+        M._FORCE_CLOSED_EDGE = False
+        e_bounded = env
+        for _ in range(3):
+            e_bounded = _split_ctm_tensor_sweep(e_bounded, A, chi, chi * D, True)
+    finally:
+        M._FORCE_CLOSED_EDGE = saved
+
+    E_closed = float(compute_energy_split_ctm_tensor(A, e_closed, gate))
+    E_bounded = float(compute_energy_split_ctm_tensor(A, e_bounded, gate))
+    np.testing.assert_allclose(E_bounded, E_closed, atol=1e-10)
