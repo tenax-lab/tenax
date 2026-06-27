@@ -41,19 +41,21 @@ from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor
 from tenax.algorithms._split_ctm_tensor_energy import compute_energy_split_ctm_tensor
 
 
-@pytest.mark.xfail(
-    reason="#463: split moves use per-layer projector; fixed in DL-Task 5", strict=True
-)
 @pytest.mark.parametrize("D,chi", [(2, 4), (2, 8), (3, 6)])
 def test_split_matches_fused_lossless_chi_I(D, chi):
+    # With the double-layer corner-pair projector and a lossless interlayer bond
+    # (chi_I = chi*D), the split path is an exact factorization of the fused path
+    # at the same chi. We force full convergence (conv_tol=0.0 -> run all
+    # max_iter sweeps) on BOTH paths: the corner-singular-value early-break
+    # criterion is unreliable for the low-rank corners of a random tensor (it
+    # plateaus on a transient for the fused oracle too), so we compare the true
+    # fixed points. A robust production convergence criterion is DL-Task 6.
     make_site, heisenberg_gate, fused_env_to_split = _oracle()
     A = make_site(D, 2, seed=7)
     gate = heisenberg_gate()
-    fused_env, _ = ctm_tensor(A, chi=chi, max_iter=300, conv_tol=1e-12)
+    fused_env, _ = ctm_tensor(A, chi=chi, max_iter=300, conv_tol=0.0)
     E_fused = float(compute_energy_ctm_tensor(A, fused_env, gate))
-    split_env = ctm_split_tensor(
-        A, chi=chi, chi_I=chi * D, max_iter=300, conv_tol=1e-12
-    )
+    split_env = ctm_split_tensor(A, chi=chi, chi_I=chi * D, max_iter=300, conv_tol=0.0)
     E_split = float(compute_energy_split_ctm_tensor(A, split_env, gate))
     np.testing.assert_allclose(E_split, E_fused, atol=1e-8)
 
