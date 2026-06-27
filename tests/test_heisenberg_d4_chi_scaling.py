@@ -60,3 +60,47 @@ def test_should_stop_row_on_oom_or_error():
     assert d4.should_stop_row({"oom": True}) is True
     assert d4.should_stop_row({"error": "timeout after 600s"}) is True
     assert d4.should_stop_row({"oom": False, "error": None}) is False
+
+
+def _sample_results():
+    # Two device rows over χ∈{16,32}. E identical across n (device-independent);
+    # 1-GPU is the speedup baseline.
+    return [
+        {"D": 4, "chi": 16, "n_devices": 1, "E_site": -0.6601, "err_vs_qmc": 0.0093,
+         "ms_per_sweep": 100.0, "n_sweeps": 30, "peak_gb": 1.0, "converged": True,
+         "oom": False, "error": None},
+        {"D": 4, "chi": 32, "n_devices": 1, "E_site": -0.6640, "err_vs_qmc": 0.0054,
+         "ms_per_sweep": 400.0, "n_sweeps": 40, "peak_gb": 4.0, "converged": True,
+         "oom": False, "error": None},
+        {"D": 4, "chi": 16, "n_devices": 4, "E_site": -0.6601, "err_vs_qmc": 0.0093,
+         "ms_per_sweep": 50.0, "n_sweeps": 30, "peak_gb": 0.3, "converged": True,
+         "oom": False, "error": None},
+        {"D": 4, "chi": 32, "n_devices": 4, "E_site": -0.6640, "err_vs_qmc": 0.0054,
+         "ms_per_sweep": 200.0, "n_sweeps": 40, "peak_gb": 1.1, "converged": True,
+         "oom": False, "error": None},
+    ]
+
+
+def test_convergence_table_dedups_by_chi_and_shows_qmc_error():
+    md = d4.results_to_convergence_md(_sample_results())
+    assert "E/site" in md and "err_vs_QMC" in md
+    # one row per distinct χ (device-independent), not one per (χ, n):
+    assert md.count("| 16 |") == 1
+    assert md.count("| 32 |") == 1
+    assert "-0.660100" in md
+
+
+def test_performance_table_reports_speedup_vs_one_gpu():
+    md = d4.results_to_performance_md(_sample_results())
+    assert "1-GPU" in md and "4-GPU" in md
+    # 4-GPU at χ=16 is 100/50 = 2.00× the 1-GPU baseline:
+    assert "2.00" in md
+
+
+def test_csv_rows_have_stable_keys():
+    rows = d4.results_to_csv_rows(_sample_results())
+    assert len(rows) == 4
+    assert set(rows[0]) == {
+        "D", "chi", "n_devices", "E_site", "err_vs_qmc", "ms_per_sweep",
+        "n_sweeps", "peak_gb", "converged", "oom", "error",
+    }
