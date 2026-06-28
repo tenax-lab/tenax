@@ -1,0 +1,14 @@
+{
+  "D": 4,
+  "chi": 48,
+  "n_devices": 2,
+  "E_site": -0.6633979326223923,
+  "err_vs_qmc": 0.006039067377607621,
+  "total_s": 31.485404880717397,
+  "n_sweeps": 11,
+  "ms_per_sweep": 2862.3095346106725,
+  "peak_gb": 0.494952448,
+  "converged": false,
+  "oom": false,
+  "error": null
+}
