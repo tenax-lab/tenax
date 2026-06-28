@@ -25,6 +25,32 @@ def _oracle():
 
 
 @pytest.mark.parametrize("D", [2, 3])
+def test_split_corner_init_is_rank1(D):
+    """Split corner init must be rank-1 (variPEPS ``chi_init=1``).
+
+    A rank-``min(chi,D)`` identity seed (``eye(min(chi,D))``) drove the split
+    env onto an *artificially* degenerate corner fixed point (e.g.
+    ``[0.5, 0.5, 0, 0]`` for D=2) whose degenerate subspace rotates each sweep,
+    blocking element-wise convergence and implicit-AD fixed-point
+    differentiation (#463).  A rank-1 seed matches the fused
+    ``_make_rank1_dense_corner`` and converges element-wise.
+    """
+    from tenax.algorithms._split_ctm_tensor_init import (
+        initialize_split_ctm_tensor_env,
+    )
+
+    make_site, _, _ = _oracle()
+    A = make_site(D, 2, seed=7)
+    chi = 4
+    env = initialize_split_ctm_tensor_env(A, chi, chi)
+    for name in ("C1", "C2", "C3", "C4"):
+        C = np.asarray(getattr(env, name).todense())
+        s = np.linalg.svd(C, compute_uv=False)
+        rank = int(np.sum(s > 1e-10 * (s[0] + 1e-30)))
+        assert rank == 1, f"{name} init rank={rank} (spectrum {np.round(s, 3)})"
+
+
+@pytest.mark.parametrize("D", [2, 3])
 def test_fused_to_split_roundtrip(D):
     make_site, heisenberg_gate, fused_env_to_split = _oracle()
     A = make_site(D, 2, seed=7)
@@ -99,15 +125,18 @@ def test_factorize_projector_reconstructs():
 
 
 def test_split_production_chi_I_converges_to_lossless():
-    """Production interlayer bond (chi_I=chi) is physical and converges to lossless.
+    """Production interlayer bond (chi_I=chi) is physical and tracks lossless.
 
-    Spec oracle 2: with the lossy production interlayer bond chi_I=chi the split
-    energy must stay physical (<=0.75/bond) and approach the lossless
-    (chi_I=chi*D) value as chi grows. Tested at D=3, where the interlayer
-    truncation is genuinely lossy (at D=2 chi_I=chi is already lossless, so the
-    interlayer-truncation error is identically zero and there is nothing to
-    converge). conv_tol=0.0 forces full sweeps so we compare true fixed points
-    (the corner-SV criterion is blind to the degenerate corner; see DL-Task 6).
+    Spec oracle 2: with the production interlayer bond chi_I=chi the split
+    energy must stay physical (<=0.75/bond) and match the lossless
+    (chi_I=chi*D) fixed point.  With the rank-1 (variPEPS ``chi_init=1``)
+    corner init (#463) the split env stays low-rank enough that chi_I=chi is
+    already lossless even at D=3 — the interlayer-truncation error is ~0, not
+    merely shrinking.  (The previous rank-``min(chi,D)`` corner seed left a
+    nonzero interlayer error that decreased as chi grew; the rank-1 seed
+    removes it entirely while reaching the *same* converged energy.)
+    conv_tol=0.0 forces full sweeps so we compare true fixed points (the
+    corner-SV criterion is blind to the degenerate corner; see DL-Task 6).
     """
     make_site, heisenberg_gate, _ = _oracle()
     D = 3
@@ -137,9 +166,12 @@ def test_split_production_chi_I_converges_to_lossless():
         assert abs(e_lossless / 2.0) <= 0.75 + 1e-6
         interlayer_err.append(abs(e_lossy - e_lossless))
 
-    # The interlayer-truncation error (lossy vs lossless at the SAME chi) shrinks
-    # as chi grows: the lossy path converges toward the lossless fixed point.
-    assert interlayer_err[1] < interlayer_err[0]
+    # The interlayer-truncation error (chi_I=chi vs lossless at the SAME chi)
+    # is non-increasing in chi and already converged (~0) under the rank-1
+    # corner init: the production interlayer bond tracks the lossless fixed
+    # point to machine precision.
+    assert interlayer_err[1] <= interlayer_err[0] + 1e-12
+    assert interlayer_err[-1] < 1e-6
 
 
 @pytest.mark.parametrize("min_iter,expected_sweeps", [(2, 2), (5, 5), (8, 8)])

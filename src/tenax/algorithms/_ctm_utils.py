@@ -21,17 +21,25 @@ def _trivial_symmetry():
 
 def _make_dense_corner(
     chi: int,
-    D: int,
+    D: int,  # noqa: ARG001 — kept for call-site compatibility (no longer used)
     label_a: Label,
     label_b: Label,
     flow_a: FlowDirection,
     flow_b: FlowDirection,
     dtype,
 ) -> DenseTensor:
-    """Create an identity-like DenseTensor corner (chi x chi)."""
-    C = jnp.eye(min(chi, D), dtype=dtype)
-    C_pad = jnp.zeros((chi, chi), dtype=dtype)
-    C_pad = C_pad.at[: C.shape[0], : C.shape[1]].set(C)
+    """Create a rank-1 (variPEPS ``chi_init=1``) DenseTensor corner (chi x chi).
+
+    Writes only entry ``(0, 0) = 1``.  A rank-``min(chi, D)`` identity seed
+    (the previous ``eye(min(chi, D))``) drove the split CTM onto an
+    *artificially* degenerate corner fixed point (e.g. ``[0.5, 0.5, 0, 0]``
+    for D=2) whose degenerate subspace rotates every sweep — the env then
+    never converges element-wise, which blocks implicit-AD fixed-point
+    differentiation (#463).  Rank-1 mirrors the fused/standard
+    ``_make_rank1_dense_corner`` and converges element-wise to the
+    non-degenerate ``[1, 0, …]`` corner.  (Used only by the split env init.)
+    """
+    C_pad = jnp.zeros((chi, chi), dtype=dtype).at[0, 0].set(1.0)
     sym = _trivial_symmetry()
     idx_a = TensorIndex.from_charges(
         sym, np.zeros(chi, dtype=np.int32), flow_a, label=label_a
