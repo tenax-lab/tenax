@@ -308,3 +308,88 @@ def test_split_implicit_raises_for_multisite():
             gate,
             chi=4,
         )
+
+
+# --------------------------------------------------------------------------- #
+# End-to-end optimizer integration (#463 Phase 2, Task 4)                      #
+# --------------------------------------------------------------------------- #
+
+
+def _split_opt_config(fuse, **overrides):
+    from tenax.algorithms.ipeps_config import CTMConfig as _CTMConfig
+    from tenax.algorithms.ipeps_config import iPEPSConfig
+
+    D = 2
+    chi = D * D
+    ctm_kw = dict(
+        chi=chi,
+        chi_I=chi,
+        fuse_virtual_legs=fuse,
+        max_iter=40,
+        conv_tol=1e-10,
+        min_iter=2,
+    )
+    ctm_kw.update(overrides.pop("ctm", {}))
+    cfg_kw = dict(
+        unit_cell="1x1",
+        gs_recipe="1x1",
+        gs_implicit_ad=True,
+        gs_num_steps=2,
+        gs_log_interval=1,
+        su_init=False,
+    )
+    cfg_kw.update(overrides)
+    return iPEPSConfig(ctm=_CTMConfig(**ctm_kw), **cfg_kw)
+
+
+def _split_opt_inputs():
+    A = jax.random.normal(jax.random.PRNGKey(3), (2, 2, 2, 2, 2))
+    A = A / jnp.linalg.norm(A)
+    return A, _heisenberg_gate()
+
+
+def test_optimize_gs_ad_split_returns_split_env():
+    """fuse_virtual_legs=False drives the whole 1-site optimizer through split.
+
+    The returned environment must be a ``SplitCTMTensorEnv`` (not the fused
+    ``CTMTensorEnv``), confirming the warm-start / line-search probe /
+    final-env eval all run the split χ²·D⁴ forward — not just the gradient.
+    """
+    from tenax.algorithms._split_ctm_tensor_init import SplitCTMTensorEnv
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    A, gate = _split_opt_inputs()
+    _, env, E = optimize_gs_ad(gate, A, _split_opt_config(fuse=False))
+    assert isinstance(env, SplitCTMTensorEnv)
+    assert jnp.isfinite(E)
+
+
+def test_optimize_gs_ad_fused_still_returns_fused_env():
+    """Regression: the default fused path is unchanged (returns CTMTensorEnv)."""
+    from tenax.algorithms._ctm_tensor import CTMTensorEnv
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    A, gate = _split_opt_inputs()
+    _, env, E = optimize_gs_ad(gate, A, _split_opt_config(fuse=True))
+    assert isinstance(env, CTMTensorEnv)
+    assert jnp.isfinite(E)
+
+
+def test_optimize_gs_ad_split_rejects_chi_auto_bump():
+    """The split optimizer path rejects fused-env-coupled accelerators."""
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    A, gate = _split_opt_inputs()
+    cfg = _split_opt_config(fuse=False, ctm={"chi_auto_bump": True, "chi_max": 6})
+    with pytest.raises(NotImplementedError, match="auto-bump"):
+        optimize_gs_ad(gate, A, cfg)
+
+
+def test_optimize_gs_ad_split_rejects_non_1x1_recipe():
+    """The split optimizer path requires gs_recipe='1x1'."""
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    A, gate = _split_opt_inputs()
+    cfg = _split_opt_config(fuse=False, gs_recipe="2x2")
+    with pytest.raises(NotImplementedError, match="1x1"):
+        optimize_gs_ad(gate, A, cfg)

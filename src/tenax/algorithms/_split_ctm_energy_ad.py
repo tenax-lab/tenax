@@ -14,7 +14,11 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-__all__ = ["ctm_energy_split_explicit", "ctm_energy_split_implicit"]
+__all__ = [
+    "converge_split_env",
+    "ctm_energy_split_explicit",
+    "ctm_energy_split_implicit",
+]
 
 
 def _extract_single_site(site_tensors):
@@ -221,3 +225,30 @@ def ctm_energy_split_implicit(
     static = (chi, chi_I, max_iter, conv_tol, renormalize, min_iter)
     env = _split_ctm_converge(A, static)
     return compute_energy_split_ctm_tensor(A, env, gate)
+
+
+def converge_split_env(
+    A,
+    *,
+    chi: int,
+    max_iter: int = 100,
+    conv_tol: float = 1e-8,
+    chi_I: int | None = None,
+    renormalize: bool = True,
+    min_iter: int = 2,
+):
+    """Forward-only gauge-fixed split-CTM converge (no gradient).
+
+    Returns the *same* Γ-phase-fixed element-wise fixed-point
+    ``SplitCTMTensorEnv`` that :func:`ctm_energy_split_implicit`
+    differentiates.  Forward-only energy evaluations on the split path
+    (the optimizer's warm-start, line-search probe, and final-env eval)
+    must use this rather than the bare :func:`ctm_split_tensor` so they
+    land on the identical fixed point as the AD loss — keeping the
+    line-search φ(α) and the gradient dφ/dα mutually consistent.
+    """
+    if chi_I is None:
+        chi_I = chi
+    return _converge_split_gauge_fixed(
+        A, chi, chi_I, max_iter, conv_tol, renormalize, min_iter
+    )
