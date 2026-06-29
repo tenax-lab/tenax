@@ -57,7 +57,16 @@ source_suffix = {
     ".rst": "restructuredtext",
     ".md": "markdown",
 }
-exclude_patterns = ["_build", "plans", "superpowers", "superpowers/**"]
+exclude_patterns = [
+    "_build",
+    "plans",
+    "superpowers",
+    "superpowers/**",
+    # Committed benchmark-result artifacts (auto-generated tables/READMEs), not
+    # narrative docs -- the toctree points at guide/benchmarks.md, never here.
+    "benchmarks",
+    "benchmarks/**",
+]
 
 # Suppress third-party deprecation warnings during build
 warnings.filterwarnings(
