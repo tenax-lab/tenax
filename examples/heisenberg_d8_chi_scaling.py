@@ -359,7 +359,7 @@ def main(args):
                       f"({d4._status(res)})", flush=True)
                 break
 
-    d4._aggregate(results, outdir)
+    d4._aggregate(results, outdir, d_label=D)
 
 
 if __name__ == "__main__":
