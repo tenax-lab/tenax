@@ -162,3 +162,52 @@ def _build_argparser():
     p.add_argument("--device-counts", dest="device_counts", type=str, default="1,2")
     p.add_argument("--cell-timeout-s", dest="cell_timeout_s", type=int, default=2400)
     return p
+
+
+def su_seed_once(outdir, chi_su, imaginary_steps, dt):
+    """Produce the single-site C4v seed via 2-site simple update and cache it to
+    `<outdir>/A_opt.pkl`. SU is intrinsically 2-site; we take the A-sublattice
+    tensor as the single-site seed (the optimize_gs_ad su_init convention) and
+    C4v-symmetrize. No AD. Existence-cached: a present A_opt.pkl returns at once."""
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+    from tenax import (
+        CTMConfig,
+        heisenberg_gate,
+        iPEPSConfig,
+        sublattice_rotate_gate,
+        symmetrize_c4v,
+    )
+    from tenax.algorithms.ipeps import _wrap_as_dense_tensor, ipeps
+
+    tensor_path = os.path.join(outdir, "A_opt.pkl")
+    if os.path.exists(tensor_path):
+        print(f"[su] cached {tensor_path}; skipping simple update", flush=True)
+        return tensor_path
+
+    os.makedirs(outdir, exist_ok=True)
+    gate = sublattice_rotate_gate(heisenberg_gate())
+    cfg = iPEPSConfig(
+        max_bond_dim=D,
+        num_imaginary_steps=imaginary_steps,
+        dt=dt,
+        ctm=CTMConfig(
+            chi=chi_su, max_iter=50, conv_tol=1e-8,
+            projector_method="svd", forward_gauge="phase",
+        ),
+        unit_cell="2site",  # ipeps() always runs 2-site SU
+        su_init=True,
+    )
+    print(f"[su] D={D} simple update ({imaginary_steps} steps, dt={dt}, "
+          f"χ_su={chi_su})", flush=True)
+    t0 = time.perf_counter()
+    e_su, (A_su, _B_su), _ = ipeps(gate, None, cfg)
+    A_seed = _wrap_as_dense_tensor(symmetrize_c4v(A_su.todense()))
+    print(f"[su] done in {time.perf_counter() - t0:.0f}s; SU E/site≈{float(e_su):.6f}",
+          flush=True)
+    A_host = jax.device_get(A_seed)  # numpy leaves -> device-agnostic, picklable
+    d4._atomic_write_bytes(
+        tensor_path, pickle.dumps(A_host, protocol=pickle.HIGHEST_PROTOCOL)
+    )
+    return tensor_path
