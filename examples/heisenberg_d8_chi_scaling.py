@@ -103,3 +103,62 @@ def build_grid(chi_ladder, device_counts):
         for n in device_counts
         for chi in chi_ladder
     ]
+
+
+def _worker_env(n_devices, base_env):
+    """Subprocess env: pin the n most-idle A100s, deterministic index order, no
+    XLA preallocation so peak_gb is the real high-water mark."""
+    env = dict(base_env)
+    env["CUDA_VISIBLE_DEVICES"] = cuda_visible_for(n_devices)
+    env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    env["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+    return env
+
+
+def _launch(argv, n_devices, timeout_s):
+    """Run a worker subprocess; return True if it exited within the timeout."""
+    env = _worker_env(n_devices, dict(os.environ))
+    print(f"[run] {' '.join(argv[argv.index('--cell'):])}", flush=True)
+    try:
+        subprocess.run(argv, env=env, check=False, timeout=timeout_s)
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def _run_worker(args):
+    """Worker entry: run one phase, write its result JSON, echo it."""
+    pathlib.Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    if args.phase == "su":
+        try:
+            su_seed_once(args.outdir, args.chi_su, args.imaginary_steps, args.dt)
+            res = {"phase": "su", "ok": True, "error": None}
+        except Exception as e:  # noqa: BLE001
+            res = {"phase": "su", "ok": False, "error": f"{type(e).__name__}: {e}"}
+    else:
+        tensor_path = os.path.join(args.outdir, "A_opt.pkl")
+        res = scan_cell(tensor_path, args.chi, args.n_devices)
+    d4._atomic_write_text(args.out, json.dumps(res, indent=2))
+    print(json.dumps(res))
+
+
+def _build_argparser():
+    p = argparse.ArgumentParser(description="iPEPS D=8 Heisenberg χ-scaling wall+rescue")
+    p.add_argument("--cell", action="store_true", help="worker mode: run one phase")
+    p.add_argument("--phase", choices=["su", "scan"], default="scan")
+    p.add_argument("--chi", type=int, help="scan χ (worker scan phase)")
+    p.add_argument("--n-devices", dest="n_devices", type=int, default=1)
+    p.add_argument("--out", type=str, help="worker result JSON path")
+    # shared / orchestrator:
+    p.add_argument("--outdir", default="runs/d8_chi_scaling")
+    p.add_argument("--smoke", action="store_true",
+                   help="quick validation: tiny SU seed, short χ ladder")
+    p.add_argument("--chi-su", dest="chi_su", type=int, default=24,
+                   help="CTM χ for the SU-phase energy eval (kept small/cheap)")
+    p.add_argument("--imaginary-steps", dest="imaginary_steps", type=int, default=200)
+    p.add_argument("--dt", type=float, default=0.05)
+    p.add_argument("--chi-ladder", dest="chi_ladder", type=str,
+                   default="64,96,128,160,192,224,256")
+    p.add_argument("--device-counts", dest="device_counts", type=str, default="1,2")
+    p.add_argument("--cell-timeout-s", dest="cell_timeout_s", type=int, default=2400)
+    return p

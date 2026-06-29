@@ -77,3 +77,19 @@ def test_build_grid_is_device_major_chi_minor_at_D8():
 def test_build_grid_uses_D8():
     cells = d8.build_grid(chi_ladder=[128], device_counts=[1])
     assert cells[0].D == 8
+
+
+def test_worker_env_pins_idle_a100s_and_disables_prealloc(monkeypatch):
+    monkeypatch.setattr(d8, "cuda_visible_for", lambda n: "1,2")
+    env = d8._worker_env(2, {"PATH": "/usr/bin"})
+    assert env["CUDA_VISIBLE_DEVICES"] == "1,2"
+    assert env["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+    assert env["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
+    assert env["PATH"] == "/usr/bin"  # base env preserved
+
+
+def test_argparser_defaults_target_the_wall():
+    args = d8._build_argparser().parse_args([])
+    assert args.chi_ladder == "64,96,128,160,192,224,256"
+    assert args.device_counts == "1,2"
+    assert args.outdir == "runs/d8_chi_scaling"
