@@ -11,6 +11,10 @@
     uv run python examples/heisenberg_d8_chi_scaling.py --cell --phase scan \
         --chi 64 --n-devices 1 --outdir runs/d8_chi_scaling --out /tmp/cell.json
 
+Unlike the D=4 sibling, the worker self-pins to idle A100s (the orchestrator's
+``_worker_env`` sets ``CUDA_VISIBLE_DEVICES`` via ``cuda_visible_for``), so the
+``--cell`` examples above need no manual ``CUDA_VISIBLE_DEVICES`` prefix.
+
 Pure helpers import only stdlib; jax/tenax imports live inside the worker so the
 parent's CUDA_VISIBLE_DEVICES takes effect before the child initialises a JAX
 backend, and so the helper unit tests stay fast and jax-free.
@@ -229,7 +233,9 @@ def scan_cell(tensor_path, chi, n_devices):
 
         jax.config.update("jax_enable_x64", True)
         from tenax import (
-            CTMConfig, compute_energy_ctm_tensor, heisenberg_gate,
+            CTMConfig,
+            compute_energy_ctm_tensor,
+            heisenberg_gate,
             sublattice_rotate_gate,
         )
         from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
