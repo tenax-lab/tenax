@@ -1239,6 +1239,10 @@ def _optimize_gs_ad_tensor(
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+    from tenax.algorithms._split_ctm_energy_ad import converge_split_env
+    from tenax.algorithms._split_ctm_tensor_energy import (
+        compute_energy_split_ctm_tensor,
+    )
     from tenax.algorithms.ad_utils import CTMRGGradientError
     from tenax.algorithms.ipeps_ad_policy import (
         ctm_converge_kwargs,
@@ -1297,6 +1301,45 @@ def _optimize_gs_ad_tensor(
     # Env warm-start cache — replaces flat env_leaves threading.
     _env_cache: dict[str, dict] = {}
 
+    # Split-CTM (fuse_virtual_legs=False) single-site path (#463 Phase 2).
+    # Routes the AD energy AND the forward-only CTMs (warm-start, line-search
+    # probe, final-env eval) through the split χ²·D⁴ forward so the memory win
+    # is real and the line-search φ(α)/dφ(α) stay consistent.  Only the
+    # simplest stable config is supported; reject the fused-env-coupled
+    # accelerators (bump, ramp, schedules, metric, cg) up front rather than
+    # silently feeding a SplitCTMTensorEnv to fused-only machinery.
+    use_split = not ctm_cfg.fuse_virtual_legs
+    if use_split:
+        if config.gs_recipe != "1x1":
+            raise NotImplementedError(
+                "fuse_virtual_legs=False (split CTM) requires gs_recipe='1x1'; "
+                f"got {config.gs_recipe!r}."
+            )
+        if _use_cg:
+            raise NotImplementedError(
+                "fuse_virtual_legs=False (split CTM) does not support cg_gates; "
+                "use fuse_virtual_legs=True."
+            )
+        if ctm_cfg.chi_auto_bump or ctm_cfg.ctmrg_heuristic_increase_chi:
+            raise NotImplementedError(
+                "in-CTM chi auto-bump is not supported on the split-CTM path; "
+                "use fuse_virtual_legs=True."
+            )
+        if ctm_cfg.chi_ramp is not None:
+            raise NotImplementedError(
+                "chi_ramp is not supported on the split-CTM path; "
+                "use fuse_virtual_legs=True."
+            )
+        if (
+            config.gs_ctm_conv_tol_schedule is not None
+            or config.gs_ctm_max_iter_schedule is not None
+            or config.gs_plateau_patience_schedule is not None
+        ):
+            raise NotImplementedError(
+                "CTM conv_tol/max_iter/plateau schedules are not supported on "
+                "the split-CTM path; use fuse_virtual_legs=True."
+            )
+
     use_explicit = not config.gs_implicit_ad
     explicit_steps = config.gs_explicit_ad_steps
     explicit_warmup = config.gs_explicit_ad_warmup
@@ -1346,9 +1389,32 @@ def _optimize_gs_ad_tensor(
         energy = _ctm_energy_fn(site_tensors)
         return energy
 
+    def _split_forward(A_norm):
+        """Forward-only gauge-fixed split-CTM converge (warm-start/probe/final).
+
+        Reads ``ctm_cfg`` live so any in-loop rebinding is honored (schedules
+        are rejected on the split path, so it is effectively static here).
+        Lands on the same fixed point the implicit-AD loss differentiates.
+        """
+        return converge_split_env(
+            A_norm,
+            chi=ctm_cfg.chi,
+            max_iter=ctm_cfg.max_iter,
+            conv_tol=ctm_cfg.conv_tol,
+            chi_I=ctm_cfg.chi_I,
+            renormalize=ctm_cfg.renormalize,
+            min_iter=ctm_cfg.min_iter,
+        )
+
     def _update_env_cache(params):
         """Re-run forward CTM (no grad) to warm-start next step."""
         A_norm = _params_to_A_norm(params)
+        if use_split:
+            # χ²·D⁴ split forward — no fused double layer is ever built.
+            # eps_T is unused (auto-bump is rejected on the split path).
+            _env_cache["envs"] = {(0, 0): _split_forward(A_norm)}
+            _env_cache["max_truncation_error"] = 0.0
+            return
         site_tensors = {(0, 0): A_norm}
         envs, info = python_loop_ctm_converge(
             site_tensors,
@@ -1399,6 +1465,11 @@ def _optimize_gs_ad_tensor(
         config.gs_metric_precond
         and config.gs_optimizer.lower() == "lbfgs"
         and not _cg_uses_tuple_params
+        # Metric preconditioning builds its inner product from the fused
+        # CTMTensorEnv (``env_for_metric`` below); the split path stores a
+        # SplitCTMTensorEnv, so disable it there rather than feed an
+        # incompatible env to the preconditioner.
+        and not use_split
     )
     if (
         _cg_uses_tuple_params
@@ -1412,6 +1483,19 @@ def _optimize_gs_ad_tensor(
             "supply a map_fn (params are a tuple of raw site tensors, but "
             "the metric path expects tensor-like params with .todense()). "
             "Falling back to non-preconditioned L-BFGS for this run.",
+            stacklevel=3,
+        )
+    if (
+        use_split
+        and config.gs_metric_precond
+        and config.gs_optimizer.lower() == "lbfgs"
+    ):
+        import warnings
+
+        warnings.warn(
+            "gs_metric_precond=True is not yet supported on the split-CTM path "
+            "(fuse_virtual_legs=False); the metric inner product needs the "
+            "fused CTMTensorEnv. Falling back to non-preconditioned L-BFGS.",
             stacklevel=3,
         )
     if _use_cg and _cg_map_fn is not None:
@@ -1469,6 +1553,12 @@ def _optimize_gs_ad_tensor(
     def loss_fn_fwd(p):
         """Forward-only loss for line search — warm-starts CTM from env cache."""
         A_norm = _params_to_A_norm(p)
+        if use_split:
+            # Same gauge-fixed split forward + split energy as the AD loss, so
+            # φ(α) (this probe) and dφ/dα (the implicit-AD gradient) agree.
+            env = _split_forward(A_norm)
+            _env_cache["envs"] = {(0, 0): env}
+            return float(compute_energy_split_ctm_tensor(A_norm, env, gate))
         site_tensors = {(0, 0): A_norm}
         envs, _ = python_loop_ctm_converge(
             site_tensors,
@@ -2477,9 +2567,7 @@ def _optimize_gs_ad_tensor(
             best_env_cache = dict(_env_cache)
 
         # End-of-step save: cadence-based + new-best detection.
-        _maybe_save_1s_checkpoint(
-            step, _chi_at_step_start, _best_energy_at_step_start
-        )
+        _maybe_save_1s_checkpoint(step, _chi_at_step_start, _best_energy_at_step_start)
 
     # Re-evaluate both final A and best_A with fully converged fresh CTM.
     # In-loop energies use warm-started CTM that can produce unphysical values
@@ -2489,6 +2577,12 @@ def _optimize_gs_ad_tensor(
     def _eval_fresh(p, env_init=None):
         """Evaluate energy with fully converged fresh CTM."""
         A_t = _params_to_A_norm(p)
+        if use_split:
+            # Final env is the split fixed point used by the gradient; return
+            # the SplitCTMTensorEnv (not the fused CTMTensorEnv).
+            env_ = _split_forward(A_t)
+            E_ = float(compute_energy_split_ctm_tensor(A_t, env_, gate))
+            return A_t, env_, E_
         envs, _ = python_loop_ctm_converge(
             {(0, 0): A_t},
             SINGLE_SITE_NEIGHBORS,
