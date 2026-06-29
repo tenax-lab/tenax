@@ -237,6 +237,8 @@ def make_ctm_energy_fn(
                 "use fuse_virtual_legs=True."
             )
         if use_explicit:
+            # The explicit split forward re-initializes internally; no
+            # env_init warm-start yet (perf follow-up).
             return ctm_energy_split_explicit(
                 site_tensors,
                 neighbors,
@@ -249,6 +251,11 @@ def make_ctm_energy_fn(
                 renormalize=ctm_cfg.renormalize,
                 energy_fn=energy_fn,
             )
+        # Warm-start the gauge-fixed forward from the cached split env (the
+        # optimizer stores a {coord: SplitCTMTensorEnv} dict).  The seed is
+        # gradient-free, so this only speeds convergence.
+        _cached = env_cache.get("envs", None)
+        split_env_init = _cached.get((0, 0)) if _cached else None
         return ctm_energy_split_implicit(
             site_tensors,
             neighbors,
@@ -260,6 +267,7 @@ def make_ctm_energy_fn(
             renormalize=ctm_cfg.renormalize,
             min_iter=ctm_cfg.min_iter,
             energy_fn=energy_fn,
+            env_init=split_env_init,
         )
 
     def _ctm_energy_fn(site_tensors):
