@@ -392,14 +392,13 @@ class iPEPSConfig:
                                CTM fixed-point equation instead of
                                differentiating through unrolled CTM sweeps.
                                ``True`` by default: the implicit-diff path
-                               (VJP backward with sigma gauge) is the
-                               recommended AD path.  When ``True`` and
-                               ``ctm.forward_gauge == "qr"`` (the static
-                               default), ``optimize_gs_ad`` transparently
-                               promotes the forward gauge to ``"sigma"``
-                               for stable element-wise CTM convergence.
-                               When ``False``, it promotes to ``"phase"``
-                               instead — see
+                               (iterative VJP backward) is the recommended
+                               AD path.  ``False`` opts into explicit AD
+                               (backprop through unrolled CTM sweeps).
+                               ``ctm.forward_gauge`` defaults to ``"phase"``
+                               for both paths — there is no silent gauge
+                               promotion, and the implicit path validates
+                               ``forward_gauge="phase"``.  See
                                ``docs/guide/algorithms/ipeps_ad_paths.md``.
         gs_ctm_conv_tol_schedule:
                                Optional ramp for the CTM convergence

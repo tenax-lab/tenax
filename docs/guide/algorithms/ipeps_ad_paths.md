@@ -95,7 +95,7 @@ scales cleanly to chi=64+, never NaNs, and is 6–9× faster than sigma
 gauge for equal or better energy.
 
 **Configuration**:
-- `gs_implicit_ad=False` — backprop through unrolled steps (explicit AD, default).
+- `gs_implicit_ad=False` — backprop through unrolled steps (explicit AD; opt-in, the default is `True` / implicit diff).
 - `gs_projector_method="qr"` — QR projectors (recommended for explicit AD).
 - `forward_gauge="phase"` (config default, AD-correct).  Users can
   override with `forward_gauge="sigma"` (historical path), `"qr"`
