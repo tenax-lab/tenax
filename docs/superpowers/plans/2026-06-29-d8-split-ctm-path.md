@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-06-29-d8-split-ctm-path-design.md`
 
-**Branch:** Work on `feat/d8-chi-forward-wall-rescue` (extends PR #650). A running orchestrator in the main checkout re-reads `examples/heisenberg_d8_chi_scaling.py` per cell — **execute in an isolated git worktree** (`superpowers:using-git-worktrees`) so edits don't corrupt a live worker. tenax is an editable install pointing at the main checkout's `src/`; tests that import tenax must run with `PYTHONPATH=<worktree>/src` so they exercise the worktree's library edit.
+**Branch:** Work in-place on `feat/d8-chi-forward-wall-rescue` (extends PR #650). A prior cuda_async orchestrator is still finishing its last (already-doomed-to-OOM) dense cells in this checkout; it runs the **dense** path only, so the backward-compatible `ctm_split_tensor` edit (Task 1) does not affect it, and the driver edit can at worst give that final OOM cell a messy error instead of a clean OOM (no science lost). tenax is an editable install pointing at this checkout's `src/`, so `uv run pytest` exercises the edits directly (the `PYTHONPATH=$PWD/src` prefix in test commands is harmless/redundant here).
 
 ---
 
