@@ -68,16 +68,23 @@ def test_parse_nvidia_smi_skips_malformed_and_na_lines():
     assert [r[0] for r in rows] == [0, 2]  # malformed + N/A rows skipped
 
 
-def test_build_grid_is_device_major_chi_minor_at_D8():
-    cells = d8.build_grid(chi_ladder=[64, 96], device_counts=[1, 2])
-    assert [(c.D, c.chi, c.n_devices) for c in cells] == [
-        (8, 64, 1), (8, 96, 1), (8, 64, 2), (8, 96, 2),
+def test_build_grid_both_paths_dense_rows_then_split_n1():
+    cells = d8.build_grid(
+        chi_ladder=[64, 96], device_counts=[1, 2], paths=["dense", "split"]
+    )
+    quads = [(c.D, c.chi, c.n_devices, c.path) for c in cells]
+    # dense: device-major chi-minor over {1,2}; split: n=1 only, appended last
+    assert quads == [
+        (8, 64, 1, "dense"), (8, 96, 1, "dense"),
+        (8, 64, 2, "dense"), (8, 96, 2, "dense"),
+        (8, 64, 1, "split"), (8, 96, 1, "split"),
     ]
 
 
-def test_build_grid_uses_D8():
-    cells = d8.build_grid(chi_ladder=[128], device_counts=[1])
-    assert cells[0].D == 8
+def test_build_grid_split_only_ignores_multi_device():
+    cells = d8.build_grid(chi_ladder=[128], device_counts=[1, 2], paths=["split"])
+    assert [(c.chi, c.n_devices, c.path) for c in cells] == [(128, 1, "split")]
+    assert all(c.D == 8 for c in cells)
 
 
 def test_worker_env_pins_idle_a100s_and_disables_prealloc(monkeypatch):
@@ -102,9 +109,17 @@ def test_worker_env_appends_to_existing_xla_flags(monkeypatch):
 
 def test_argparser_defaults_target_the_wall():
     args = d8._build_argparser().parse_args([])
-    assert args.chi_ladder == "64,96,128,160,192,224,256"
+    assert args.chi_ladder == "64,96,112,128,192,256,320,384,448"
     assert args.device_counts == "1,2"
+    assert args.path == "both"
     assert args.outdir == "runs/d8_chi_scaling"
+
+
+def test_argparser_path_choices_validated():
+    for p in ("dense", "split", "both"):
+        assert d8._build_argparser().parse_args(["--path", p]).path == p
+    with pytest.raises(SystemExit):
+        d8._build_argparser().parse_args(["--path", "bogus"])
 
 
 def test_smoke_args_shrink_the_run():
@@ -113,16 +128,19 @@ def test_smoke_args_shrink_the_run():
     assert args.outdir.endswith("_smoke")
     assert args.chi_ladder == "8,12"
     assert args.device_counts == "1"
+    assert args.path == "both"  # smoke still exercises both paths
     assert args.imaginary_steps <= 20
 
 
 def test_load_or_run_scan_returns_cached_cell(tmp_path):
-    cell = d4.Cell(D=8, chi=64, n_devices=1)
-    path = d4.cell_result_path(str(tmp_path), cell)
-    d4._atomic_write_text(path, '{"D": 8, "chi": 64, "n_devices": 1, "oom": false}')
+    cell = d8.Cell8(D=8, chi=64, n_devices=1, path="split")
+    path = d8._cell_path(str(tmp_path), cell)
+    d4._atomic_write_text(
+        path, '{"D": 8, "chi": 64, "n_devices": 1, "path": "split", "oom": false}'
+    )
     # cached file present -> no subprocess launched, returns the parsed dict
     res = d8._load_or_run_scan(cell, str(tmp_path), timeout_s=1)
-    assert res["chi"] == 64 and res["oom"] is False
+    assert res["chi"] == 64 and res["path"] == "split" and res["oom"] is False
 
 
 def test_wait_for_free_a100s_gives_up_past_deadline(monkeypatch):
@@ -154,7 +172,42 @@ def test_load_or_run_scan_returns_none_and_writes_no_poison(monkeypatch, tmp_pat
     # cell JSON behind, so a resume retries the cell rather than trusting a
     # transient-infra failure as a completed result.
     monkeypatch.setattr(d8, "_launch", lambda *a, **k: None)
-    cell = d4.Cell(D=8, chi=128, n_devices=2)
+    cell = d8.Cell8(D=8, chi=128, n_devices=2, path="dense")
     res = d8._load_or_run_scan(cell, str(tmp_path), timeout_s=1, gpu_wait_s=0)
     assert res is None
-    assert not pathlib.Path(d4.cell_result_path(str(tmp_path), cell)).exists()
+    assert not pathlib.Path(d8._cell_path(str(tmp_path), cell)).exists()
+
+
+def test_cell8_has_path_and_distinct_paths_dont_collide(tmp_path):
+    dense = d8.Cell8(D=8, chi=128, n_devices=1, path="dense")
+    split = d8.Cell8(D=8, chi=128, n_devices=1, path="split")
+    assert dense.path == "dense" and split.path == "split"
+    pd = d8._cell_path(str(tmp_path), dense)
+    ps = d8._cell_path(str(tmp_path), split)
+    assert pd != ps
+    assert pd.endswith("D8_chi128_n1_dense.json")
+    assert ps.endswith("D8_chi128_n1_split.json")
+
+
+def test_aggregate8_writes_both_path_sections(tmp_path):
+    results = [
+        {"D": 8, "chi": 96, "n_devices": 1, "path": "dense", "E_site": -0.605,
+         "err_vs_qmc": 0.064, "total_s": 785.0, "n_sweeps": 14,
+         "ms_per_sweep": 56000.0, "peak_gb": 59.7, "converged": False,
+         "oom": False, "error": None},
+        {"D": 8, "chi": 128, "n_devices": 1, "path": "dense", "E_site": None,
+         "err_vs_qmc": None, "total_s": None, "n_sweeps": None,
+         "ms_per_sweep": None, "peak_gb": 72.8, "converged": False,
+         "oom": True, "error": "RESOURCE_EXHAUSTED"},
+        {"D": 8, "chi": 128, "n_devices": 1, "path": "split", "E_site": -0.6005,
+         "err_vs_qmc": 0.0689, "total_s": 14.2, "n_sweeps": 8,
+         "ms_per_sweep": 1775.0, "peak_gb": 6.59, "converged": True,
+         "oom": False, "error": None},
+    ]
+    d8._aggregate8(results, str(tmp_path))
+    md = (tmp_path / "convergence.md").read_text()
+    assert "Dense" in md and "Split" in md
+    # comparison table lists the shared χ rows
+    assert "128" in md
+    csv_text = (tmp_path / "results.csv").read_text()
+    assert "path" in csv_text.splitlines()[0]

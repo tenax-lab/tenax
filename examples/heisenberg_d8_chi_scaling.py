@@ -24,6 +24,7 @@ driver (path-loaded as ``d4``) so the merged file is not modified.
 """
 
 import argparse
+import csv
 import importlib.util
 import json
 import os
@@ -32,6 +33,7 @@ import pickle
 import subprocess
 import sys
 import time
+from typing import NamedTuple
 
 # Path-load the D=4 driver to reuse its D-agnostic pure helpers. Its top level
 # imports only stdlib (jax/tenax live inside functions), so this stays jax-free.
@@ -42,6 +44,24 @@ _d4_spec.loader.exec_module(d4)
 
 REFERENCE_E = d4.REFERENCE_E  # Sandvik QMC, square-lattice spin-1/2 Heisenberg AFM
 D = 8  # fixed bond dimension for this driver
+
+
+class Cell8(NamedTuple):
+    """One D=8 scan cell: the fixed SU seed contracted at (chi, n_devices) via
+    the given forward-CTM ``path`` ('dense' or 'split')."""
+
+    D: int
+    chi: int
+    n_devices: int
+    path: str
+
+
+def _cell_path(outdir, cell):
+    """Per-cell JSON path, unique per (chi, n_devices, path) so dense and split
+    cells at the same chi never collide (resume-safe)."""
+    return os.path.join(
+        outdir, f"D{cell.D}_chi{cell.chi}_n{cell.n_devices}_{cell.path}.json"
+    )
 
 
 def _parse_nvidia_smi(text):
@@ -99,14 +119,21 @@ def cuda_visible_for(n_devices):
     return ",".join(str(i) for i in free_a100_indices(n_devices))
 
 
-def build_grid(chi_ladder, device_counts):
-    """Scan cells in device-major, chi-minor order (one row per n_devices).
-    Reuses the D=4 module's frozen ``Cell`` dataclass with D=8."""
-    return [
-        d4.Cell(D=D, chi=chi, n_devices=n)
-        for n in device_counts
-        for chi in chi_ladder
-    ]
+def build_grid(chi_ladder, device_counts, paths):
+    """Scan cells as Cell8. Dense rows cross device_counts × chi_ladder (one row
+    per n_devices); the split path has no device_mesh, so it emits n=1 rows only
+    and is appended after all dense rows. Dense rows come first so the shared χ
+    ladder lets each row self-stop at its own wall."""
+    cells = []
+    if "dense" in paths:
+        cells += [
+            Cell8(D=D, chi=chi, n_devices=n, path="dense")
+            for n in device_counts
+            for chi in chi_ladder
+        ]
+    if "split" in paths:
+        cells += [Cell8(D=D, chi=chi, n_devices=1, path="split") for chi in chi_ladder]
+    return cells
 
 
 def _worker_env(n_devices, base_env):
@@ -180,7 +207,7 @@ def _run_worker(args):
             res = {"phase": "su", "ok": False, "error": f"{type(e).__name__}: {e}"}
     else:
         tensor_path = os.path.join(args.outdir, "A_opt.pkl")
-        res = scan_cell(tensor_path, args.chi, args.n_devices)
+        res = scan_cell(tensor_path, args.chi, args.n_devices, args.path)
     d4._atomic_write_text(args.out, json.dumps(res, indent=2))
     print(json.dumps(res))
 
@@ -201,8 +228,11 @@ def _build_argparser():
     p.add_argument("--imaginary-steps", dest="imaginary_steps", type=int, default=200)
     p.add_argument("--dt", type=float, default=0.05)
     p.add_argument("--chi-ladder", dest="chi_ladder", type=str,
-                   default="64,96,128,160,192,224,256")
+                   default="64,96,112,128,192,256,320,384,448")
     p.add_argument("--device-counts", dest="device_counts", type=str, default="1,2")
+    p.add_argument("--path", choices=["dense", "split", "both"], default="both",
+                   help="forward-CTM path: dense (chi^2*D^6, wall ~chi=112), "
+                        "split (chi^2*D^4, wall ~chi=448), or both (comparison)")
     p.add_argument("--cell-timeout-s", dest="cell_timeout_s", type=int, default=2400)
     p.add_argument("--gpu-wait-s", dest="gpu_wait_s", type=int, default=1800,
                    help="max seconds to wait for n idle A100s before a cell "
@@ -260,13 +290,17 @@ def su_seed_once(outdir, chi_su, imaginary_steps, dt):
     return tensor_path
 
 
-def scan_cell(tensor_path, chi, n_devices):
-    """Converge forward CTM at χ on the fixed SU seed; return E/site + per-sweep
-    timing + per-device peak memory. The single-site path is the only one with
-    #632 device_mesh sharding, so n_devices>1 shards the D²=64 axis. Record-and-
+def scan_cell(tensor_path, chi, n_devices, path):
+    """Converge the forward CTM at χ on the fixed SU seed via ``path`` ('dense'
+    or 'split'); return E/site + per-sweep timing + per-device peak memory.
+
+    dense: closed χ²·D⁶ CTM (python_loop_ctm_converge); the single-site path is
+    the only one with #632 device_mesh sharding, so n_devices>1 shards the D²=64
+    axis. split: ctm_split_tensor — never forms the χ²·D⁶ edge (peak χ²·D³·d,
+    forward χ²·D⁴-bounded, #641); single-GPU only (no device_mesh). Record-and-
     resume safe: never raises (OOM/errors are recorded)."""
     result = {
-        "D": D, "chi": chi, "n_devices": n_devices,
+        "D": D, "chi": chi, "n_devices": n_devices, "path": path,
         "E_site": None, "err_vs_qmc": None, "total_s": None, "n_sweeps": None,
         "ms_per_sweep": None, "peak_gb": None, "converged": False,
         "oom": False, "error": None,
@@ -275,53 +309,23 @@ def scan_cell(tensor_path, chi, n_devices):
         import jax
 
         jax.config.update("jax_enable_x64", True)
-        from tenax import (
-            CTMConfig,
-            compute_energy_ctm_tensor,
-            heisenberg_gate,
-            sublattice_rotate_gate,
-        )
-        from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
-        from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
-        from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
+        from tenax import heisenberg_gate, sublattice_rotate_gate
 
-        mesh = d4._build_mesh(n_devices)  # A100-only guard + GSPMD mesh for n>1
         with open(tensor_path, "rb") as fh:
             A_opt = pickle.load(fh)
         H = sublattice_rotate_gate(heisenberg_gate())
 
-        cfg = CTMConfig(
-            chi=chi, max_iter=200, conv_tol=1e-10,
-            projector_method="svd", forward_gauge="phase", device_mesh=mesh,
-        )
-        kwargs = ctm_converge_kwargs(cfg)  # forwards device_mesh; default recipe
-
-        # Warm-up: compile the χ-specific @jit step (process-cached) so the timed
-        # converge measures pure per-sweep compute.
-        warm_envs, _ = python_loop_ctm_converge(
-            {(0, 0): A_opt}, SINGLE_SITE_NEIGHBORS, **kwargs
-        )
-        jax.block_until_ready(warm_envs[(0, 0)])
-
-        t0 = time.perf_counter()
-        envs, info = python_loop_ctm_converge(
-            {(0, 0): A_opt}, SINGLE_SITE_NEIGHBORS, **kwargs
-        )
-        jax.block_until_ready(envs[(0, 0)])
-        total_s = time.perf_counter() - t0
-
-        env = envs[(0, 0)]
-        if mesh is not None:  # gather the tiny env to device 0 for energy eval
-            env = jax.tree_util.tree_map(
-                lambda x: jax.device_put(x, jax.devices()[0]), env
+        if path == "split":
+            E, total_s, sweeps, converged = _converge_split(A_opt, H, chi)
+        else:
+            E, total_s, sweeps, converged = _converge_dense(
+                A_opt, H, chi, n_devices
             )
-        E = float(compute_energy_ctm_tensor(A_opt, env, H, 2))
-        sweeps = int(info.iterations)
 
         result.update(
             E_site=E, err_vs_qmc=E - REFERENCE_E, total_s=float(total_s),
             n_sweeps=sweeps, ms_per_sweep=1000.0 * total_s / max(sweeps, 1),
-            converged=bool(info.converged), peak_gb=d4._peak_gb(),
+            converged=bool(converged), peak_gb=d4._peak_gb(),
         )
     except Exception as e:  # noqa: BLE001 — record and resume, never crash the sweep
         msg = f"{type(e).__name__}: {e}"
@@ -330,6 +334,66 @@ def scan_cell(tensor_path, chi, n_devices):
             result["oom"] = True
         result["peak_gb"] = d4._peak_gb()
     return result
+
+
+def _converge_dense(A_opt, H, chi, n_devices):
+    """Dense closed-path forward CTM (χ²·D⁶); device_mesh-sharded for n>1."""
+    import jax
+
+    from tenax import CTMConfig, compute_energy_ctm_tensor
+    from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
+    from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+    from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
+
+    mesh = d4._build_mesh(n_devices)  # A100-only guard + GSPMD mesh for n>1
+    cfg = CTMConfig(
+        chi=chi, max_iter=200, conv_tol=1e-10,
+        projector_method="svd", forward_gauge="phase", device_mesh=mesh,
+    )
+    kwargs = ctm_converge_kwargs(cfg)
+
+    warm_envs, _ = python_loop_ctm_converge(
+        {(0, 0): A_opt}, SINGLE_SITE_NEIGHBORS, **kwargs
+    )
+    jax.block_until_ready(warm_envs[(0, 0)])
+
+    t0 = time.perf_counter()
+    envs, info = python_loop_ctm_converge(
+        {(0, 0): A_opt}, SINGLE_SITE_NEIGHBORS, **kwargs
+    )
+    jax.block_until_ready(envs[(0, 0)])
+    total_s = time.perf_counter() - t0
+
+    env = envs[(0, 0)]
+    if mesh is not None:  # gather the tiny env to device 0 for energy eval
+        env = jax.tree_util.tree_map(
+            lambda x: jax.device_put(x, jax.devices()[0]), env
+        )
+    E = float(compute_energy_ctm_tensor(A_opt, env, H, 2))
+    return E, total_s, int(info.iterations), bool(info.converged)
+
+
+def _converge_split(A_opt, H, chi):
+    """Split forward CTM (χ²·D⁴-bounded); single-GPU only. chi_I=chi is already
+    lossless at D=8 (the spike showed chi_I=2χ gives identical E and memory)."""
+    import jax
+
+    from tenax import compute_energy_split_ctm_tensor
+    from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor
+
+    # Warm-up compile (process-cached) so the timed converge is pure compute.
+    warm = ctm_split_tensor(A_opt, chi=chi, max_iter=200, conv_tol=1e-10, chi_I=chi)
+    jax.block_until_ready(list(warm))
+
+    t0 = time.perf_counter()
+    env, info = ctm_split_tensor(
+        A_opt, chi=chi, max_iter=200, conv_tol=1e-10, chi_I=chi, return_info=True
+    )
+    jax.block_until_ready(list(env))
+    total_s = time.perf_counter() - t0
+
+    E = float(compute_energy_split_ctm_tensor(A_opt, env, H, 2))
+    return E, total_s, int(info.iterations), bool(info.converged)
 
 
 def _su_phase(outdir, chi_su, imaginary_steps, dt, gpu_wait_s=1800):
@@ -355,14 +419,14 @@ def _load_or_run_scan(cell, outdir, timeout_s, gpu_wait_s=1800):
     Returns None (writing no cell JSON) when no idle A100s freed up within
     ``gpu_wait_s`` -- a transient-infra condition, not a result -- so the caller
     stops gracefully and a later resume retries the cell."""
-    path = pathlib.Path(d4.cell_result_path(outdir, cell))
+    path = pathlib.Path(_cell_path(outdir, cell))
     cached = d4._read_json_or_none(path) if path.exists() else None
     if cached is not None:
         return cached
     argv = [
         sys.executable, str(pathlib.Path(__file__).resolve()), "--cell",
         "--phase", "scan", "--outdir", outdir, "--chi", str(cell.chi),
-        "--n-devices", str(cell.n_devices), "--out", str(path),
+        "--n-devices", str(cell.n_devices), "--path", cell.path, "--out", str(path),
     ]
     ok = _launch(argv, cell.n_devices, timeout_s, gpu_wait_s)
     if ok is None:  # no idle A100s -> don't poison the resume cache
@@ -371,7 +435,7 @@ def _load_or_run_scan(cell, outdir, timeout_s, gpu_wait_s=1800):
     if loaded is not None:
         return loaded
     res = {
-        "D": cell.D, "chi": cell.chi, "n_devices": cell.n_devices,
+        "D": cell.D, "chi": cell.chi, "n_devices": cell.n_devices, "path": cell.path,
         "E_site": None, "err_vs_qmc": None, "ms_per_sweep": None,
         "n_sweeps": None, "peak_gb": None, "converged": False, "oom": False,
         "error": ("timeout" if not ok else "worker produced no result file"),
@@ -390,11 +454,103 @@ def _apply_smoke(args):
     args.cell_timeout_s = 1200
 
 
+def _comparison_table_md(dense, split):
+    """One row per χ present in either path: dense vs split peak/E/status."""
+    def by_chi(rs):
+        return {r["chi"]: r for r in rs}
+
+    d, s = by_chi(dense), by_chi(split)
+    chis = sorted(set(d) | set(s))
+    lines = [
+        "### Wall comparison: dense (χ²·D⁶) vs split (χ²·D⁴)",
+        "",
+        "| χ | dense peak GB | dense E | dense | split peak GB | split E | split |",
+        "|---|---------------|---------|-------|---------------|---------|-------|",
+    ]
+    for chi in chis:
+        dr, sr = d.get(chi), s.get(chi)
+        lines.append(
+            f"| {chi} "
+            f"| {d4._fmt(dr.get('peak_gb') if dr else None, '.2f')} "
+            f"| {d4._fmt(dr.get('E_site') if dr else None, '.5f')} "
+            f"| {d4._status(dr) if dr else '-'} "
+            f"| {d4._fmt(sr.get('peak_gb') if sr else None, '.2f')} "
+            f"| {d4._fmt(sr.get('E_site') if sr else None, '.5f')} "
+            f"| {d4._status(sr) if sr else '-'} |"
+        )
+    return "\n".join(lines)
+
+
+def _plot_wall_comparison(dense, split, outdir):
+    """Two-panel PNG: per-device peak GB and converge wall-time vs χ, dense vs
+    split, with the 80 GB device limit marked. Best-effort."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    def pts(rs, metric):
+        return sorted((r["chi"], r[metric]) for r in rs
+                      if not r.get("oom") and not r.get("error")
+                      and r.get(metric) is not None)
+
+    fig, (ax_m, ax_t) = plt.subplots(1, 2, figsize=(11, 4))
+    for rs, label, color in [(dense, "dense", "C0"), (split, "split", "C1")]:
+        m = pts(rs, "peak_gb")
+        if m:
+            ax_m.plot(*zip(*m), marker="o", label=label, color=color)
+        t = pts(rs, "total_s")
+        if t:
+            ax_t.plot(*zip(*t), marker="o", label=label, color=color)
+    ax_m.axhline(80.0, ls="--", color="k", label="80 GB A100")
+    ax_m.set_xlabel("χ"); ax_m.set_ylabel("per-device peak GB")
+    ax_m.set_title("D=8 single-GPU memory wall"); ax_m.legend()
+    ax_t.set_xlabel("χ"); ax_t.set_ylabel("converge wall (s)")
+    ax_t.set_yscale("log"); ax_t.set_title("D=8 converge time"); ax_t.legend()
+    fig.tight_layout()
+    p = os.path.join(outdir, "d8_wall_comparison.png")
+    fig.savefig(p, dpi=120); plt.close(fig)
+    return p
+
+
+def _aggregate8(results, outdir):
+    """Write per-path convergence + performance markdown, a dense-vs-split wall
+    comparison table, results.csv (with a path column), and the comparison PNG."""
+    dense = [r for r in results if r.get("path") == "dense"]
+    split = [r for r in results if r.get("path") == "split"]
+
+    sections = [_comparison_table_md(dense, split), ""]
+    for name, rs in [("Dense", dense), ("Split", split)]:
+        if rs:
+            sections += [f"## {name} path", "",
+                         d4.results_to_convergence_md(rs, d_label=D), "",
+                         d4.results_to_performance_md(rs), ""]
+    conv_md = "\n".join(sections)
+    d4._atomic_write_text(os.path.join(outdir, "convergence.md"), conv_md)
+
+    keys = ["D", "chi", "n_devices", "path", "E_site", "err_vs_qmc",
+            "ms_per_sweep", "n_sweeps", "peak_gb", "converged", "oom", "error"]
+    rows = [{k: r.get(k) for k in keys} for r in results]
+    if rows:
+        with open(os.path.join(outdir, "results.csv"), "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=keys)
+            w.writeheader(); w.writerows(rows)
+
+    try:
+        _plot_wall_comparison(dense, split, outdir)
+    except Exception as e:  # noqa: BLE001 — plotting is best-effort
+        print(f"[warn] plotting failed: {e}", flush=True)
+    print(conv_md)
+    print(f"\n[done] wrote {outdir}/convergence.md, results.csv, "
+          "d8_wall_comparison.png")
+
+
 def main(args):
     outdir = args.outdir
     os.makedirs(outdir, exist_ok=True)
     chi_ladder = [int(x) for x in args.chi_ladder.split(",")]
     device_counts = [int(x) for x in args.device_counts.split(",")]
+    paths = ["dense", "split"] if args.path == "both" else [args.path]
 
     # Phase 1: simple-update seed once (single idle A100).
     _su_phase(outdir, args.chi_su, args.imaginary_steps, args.dt, args.gpu_wait_s)
@@ -403,30 +559,34 @@ def main(args):
               f"{outdir}/su_status.json", flush=True)
         return
 
-    # Phase 2: scan χ per device row; stop a row on OOM/error/timeout. A None
-    # result means no idle A100s freed up in time -> stop the whole sweep
-    # gracefully and aggregate what completed (re-run to resume the rest).
+    # Phase 2: scan each (path, n_devices) row; stop a row at its wall. A None
+    # result means no idle A100s freed up in time -> stop gracefully and
+    # aggregate what completed (re-run to resume).
+    cells = build_grid(chi_ladder, device_counts, paths)
+    rows = {}
+    for c in cells:
+        rows.setdefault((c.path, c.n_devices), []).append(c)
+
     results = []
     aborted = False
-    for n in device_counts:
+    for key in rows:
         if aborted:
             break
-        for chi in chi_ladder:
-            res = _load_or_run_scan(d4.Cell(D=D, chi=chi, n_devices=n), outdir,
-                                    args.cell_timeout_s, args.gpu_wait_s)
+        for cell in rows[key]:
+            res = _load_or_run_scan(cell, outdir, args.cell_timeout_s, args.gpu_wait_s)
             if res is None:
-                print(f"[abort] no {n} idle A100(s) for χ={chi} within "
-                      f"{args.gpu_wait_s}s; aggregating completed cells "
-                      "(re-run to resume)", flush=True)
+                print(f"[abort] no {cell.n_devices} idle A100(s) for "
+                      f"{cell.path} χ={cell.chi} within {args.gpu_wait_s}s; "
+                      "aggregating completed cells (re-run to resume)", flush=True)
                 aborted = True
                 break
             results.append(res)
             if d4.should_stop_row(res):
-                print(f"[stop] n={n} row stopped at χ={chi} "
-                      f"({d4._status(res)})", flush=True)
+                print(f"[stop] {cell.path} n={cell.n_devices} row stopped at "
+                      f"χ={cell.chi} ({d4._status(res)})", flush=True)
                 break
 
-    d4._aggregate(results, outdir, d_label=D)
+    _aggregate8(results, outdir)
 
 
 if __name__ == "__main__":
