@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 __all__ = [
+    "_SplitCTMInfo",
     "_renormalize_split_env",
     "_split_ctm_tensor_sweep",
     "ctm_split_tensor",
 ]
+
+from typing import NamedTuple
 
 import jax.numpy as jnp
 
@@ -24,6 +27,14 @@ from tenax.algorithms._tensor_utils import max_abs_normalize
 from tenax.core import EPS
 from tenax.core.tensor import Tensor
 from tenax.linalg import svd as tensor_svd
+
+
+class _SplitCTMInfo(NamedTuple):
+    """Convergence info for ctm_split_tensor (mirrors the dense path's info)."""
+
+    iterations: int
+    converged: bool
+
 
 # ------------------------------------------------------------------ #
 # Sweep + convergence                                                  #
@@ -91,7 +102,8 @@ def ctm_split_tensor(
     conv_tol: float = 1e-8,
     chi_I: int | None = None,
     renormalize: bool = True,
-) -> SplitCTMTensorEnv:
+    return_info: bool = False,
+) -> SplitCTMTensorEnv | tuple[SplitCTMTensorEnv, _SplitCTMInfo]:
     """Run split-CTM to convergence using the Tensor protocol.
 
     Args:
@@ -102,6 +114,8 @@ def ctm_split_tensor(
         conv_tol:   Convergence tolerance on corner singular values.
         chi_I:      Interlayer bond dimension. Defaults to ``chi``.
         renormalize: Renormalize environment at each step.
+        return_info: If True, return ``(env, _SplitCTMInfo(iterations, converged))``
+                     instead of just ``env``.
 
     Returns:
         Converged SplitCTMTensorEnv.
@@ -112,7 +126,10 @@ def ctm_split_tensor(
     env = initialize_split_ctm_tensor_env(A, chi, chi_I)
 
     prev_sv = None
-    for _ in range(max_iter):
+    converged = False
+    iterations = 0
+    for i in range(max_iter):
+        iterations = i + 1
         env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
 
         _, current_sv, _, _ = tensor_svd(
@@ -127,7 +144,10 @@ def ctm_split_tensor(
             min_len = min(len(sv1), len(sv2))
             diff = jnp.max(jnp.abs(sv1[:min_len] - sv2[:min_len]))
             if float(diff) < conv_tol:
+                converged = True
                 break
         prev_sv = current_sv
 
+    if return_info:
+        return env, _SplitCTMInfo(iterations=iterations, converged=converged)
     return env
