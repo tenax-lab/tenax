@@ -23,6 +23,7 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **SVD and QR CTMRG projectors** — SVD (Fishman) projectors (`projector_method="svd"`, default) and `eigh` projectors, plus a reduced-corner QR-CTMRG projector (`projector_method="qr"`, arXiv:2505.00494) on the dense single-site path, usable both forward-only and under AD ground-state optimization via `gs_recipe="1x1"` + `gs_projector_method="qr"` (Phase 2, dense; block-sparse is a later phase)
 - **Split-CTMRG** — ket/bra-separated CTM environment tensors for O(χ³D³) projector cost instead of O(χ³D⁶); works with both `DenseTensor` and `SymmetricTensor` via the Tensor protocol (Naumann et al., arXiv:2502.10298)
 - **Split-CTM energy entry points** — `compute_energy_split_ctm_tensor_2site` and `compute_energy_split_ctm_tensor_multisite` for 2-site checkerboard and multisite unit cells (kagome PESS, etc.) at large D
+- **Split-CTM AD ground-state optimization** — `optimize_gs_ad` with `CTMConfig(fuse_virtual_legs=False)` drives the *whole* single-site optimizer (`unit_cell="1x1"`, `gs_recipe="1x1"`) through the split χ²·D⁴ forward instead of the fused χ²·D⁶ double layer: implicit AD via a Γ-gauge-fixed fixed-point `custom_vjp` (Neumann backward), with the line-search probe, warm-start, and final environment all routed through the same split forward (returns a `SplitCTMTensorEnv`). Implicit gradient matches the trusted explicit-AD gradient to ~1e-12. `DenseTensor` only (SymmetricTensor/fermionic split AD is a later phase); fixed χ (the χ-changing knobs are rejected on this path); the memory win over fused is a large-D effect (D≳16). References: Naumann et al., arXiv:2502.10298
 - **Honeycomb iPEPS CTM (native)** — rank-4, 6-corner, 3-direction, 2-sublattice CTMRG for honeycomb iPEPS (replaces the dummy-bond brick-wall workaround). Public entry `honeycomb_ctm_energy_implicit` provides `jax.custom_vjp` with a JIT-fused GMRES backward; default Corboz biorthogonal projector + per-column phase fix; configurable `energy_fn` hook for kagome iPESS triangle energies. References: Lukin & Sotnikov, PRB 107, 054424 (2023) for the 6-corner CTMRG and the bipartite extension in PRE 109, 045305 (2024) §II.C.
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary Brillouin-zone momenta (Ponsioen et al. 2022)
 - **Model gate helpers** — pre-built 2-site Hamiltonian tensors: `heisenberg_gate` (dense DenseTensor with trivial charges), `heisenberg_gate_u1sz` (U(1)-Sz block-sparse SymmetricTensor with charges `[+1, −1]` for spin-↑/↓), `xxz_gate` (XXZ anisotropy), `spinless_fermion_gate` (fPEPS hopping + interaction with FermionParity symmetry)
@@ -323,7 +324,7 @@ gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) + 0.5 * (
     jnp.einsum("ij,kl->ikjl", Sp, Sm) + jnp.einsum("ij,kl->ikjl", Sm, Sp)
 )
 
-# Recommended AD configuration: L-BFGS + explicit AD + QR projectors.
+# Explicit-AD configuration: L-BFGS + explicit AD + QR projectors.
 # forward_gauge defaults to "phase" (variPEPS-style Frobenius + phase
 # fix), correct for both implicit and explicit AD. Reaches E=-0.6628
 # at D=2, chi=16 (literature: -0.6548 at D=2).
@@ -334,7 +335,7 @@ config = iPEPSConfig(
         max_iter=80,
         projector_method="qr",  # recommended projector for explicit AD
     ),
-    # gs_implicit_ad=False is the default (explicit AD)
+    gs_implicit_ad=False,  # opt into explicit AD (the default is implicit)
     gs_projector_method="qr",
     gs_optimizer="lbfgs",  # L-BFGS with Hager-Zhang line search
     gs_line_search_method="hager_zhang",

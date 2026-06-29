@@ -237,19 +237,26 @@ result = optimize_gs_ad_chi_schedule(gate, None, config, chi_schedule)
 Each tuple is `(chi, num_optimization_steps)`. The schedule overrides
 `config.ctm.chi` and `config.gs_num_steps` at each level.
 
-For finer-grained control, ``CTMConfig.chi_ramp`` ramps chi *within*
-each CTM convergence call (1.2–2.1× speedup on GPU):
+To grow chi *inside* CTM convergence (recommended over a between-step
+ramp, which zero-pads the env and can corrupt the fixed point), use the
+in-CTM auto-bump (variPEPS §2.8.2):
 
 ```python
 config = iPEPSConfig(
     max_bond_dim=D,
     ctm=CTMConfig(
-        chi=32,
-        chi_ramp=[(8, 10), (16, 10), (32, None)],
+        chi=8,
+        chi_max=32,
+        ctmrg_heuristic_increase_chi=True,  # grows chi during CTM convergence
     ),
     gs_num_steps=100,
 )
 ```
+
+The env is always re-converged at the new chi before the optimizer sees
+it. The legacy `CTMConfig.chi_ramp` and `chi_auto_bump` knobs still work
+but emit `DeprecationWarning` and are slated for removal (issue #512) —
+prefer `ctmrg_heuristic_increase_chi`.
 
 ### Key AD tips
 
@@ -297,6 +304,46 @@ config = iPEPSConfig(
 )
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
 ```
+
+### Split-CTM AD (large-D, lower memory)
+
+For large bond dimension, the split (ket/bra-separated) CTM avoids forming
+the fused χ²·D⁶ double layer and contracts at χ²·D⁴ instead. Enable it with
+`fuse_virtual_legs=False` on a single-site config — the whole optimizer
+(CTM, line-search probe, warm-start, final env) runs through the split
+forward and returns a `SplitCTMTensorEnv`:
+
+```python
+config = iPEPSConfig(
+    max_bond_dim=D,
+    unit_cell="1x1",
+    gs_recipe="1x1",
+    gs_implicit_ad=True,          # implicit AD (default) — the validated split path
+    ctm=CTMConfig(
+        chi=chi,
+        chi_I=chi,                # interlayer bond; None => chi_I = chi
+        fuse_virtual_legs=False,  # split χ²·D⁴ forward instead of fused χ²·D⁶
+    ),
+    su_init=True,
+)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config)  # env is a SplitCTMTensorEnv
+```
+
+Constraints (each raises a clear `NotImplementedError` otherwise):
+
+- **Single-site dense only** — `unit_cell="1x1"` + `gs_recipe="1x1"`,
+  `DenseTensor`. SymmetricTensor/fermionic and multisite split AD are later
+  phases.
+- **Fixed chi** — the χ-changing knobs (`chi_ramp`, `chi_auto_bump`,
+  `ctmrg_heuristic_increase_chi`) and CTM schedules are rejected; pick one
+  `chi`. `gs_metric_precond` auto-disables with a warning.
+- **The memory win is large-D** — below D≈16 the default fused path
+  (`fuse_virtual_legs=True`) is just as fast and the cleaner choice; reach
+  for split when the fused χ²·D⁶ double layer no longer fits.
+
+The implicit gradient matches the trusted explicit-AD gradient to ~1e-12.
+The split energy at production `chi_I=chi` is an *approximation* of the
+fused energy — they coincide exactly only at the lossless `chi_I = chi·D`.
 
 ### Key differences from simple update
 

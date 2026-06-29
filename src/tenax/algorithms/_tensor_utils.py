@@ -74,7 +74,22 @@ def absorb_sqrt_singular_values(
     Returns:
         (F_left, F_right) with sqrt(s) absorbed into each.
     """
-    sqrt_s = jnp.sqrt(s)
+    # Backward-safe sqrt.  The adjoint of ``jnp.sqrt`` is ``0.5 / sqrt(s)``,
+    # which is ``+inf`` at ``s == 0``.  Rank-deficient SVD bonds carry exact
+    # zero singular values — e.g. the lossless split-CTM edge SVD padded to
+    # ``chi_I > rank`` (exposed once the env corner is the rank-1
+    # variPEPS ``chi_init=1`` seed) — so the naive sqrt NaNs the gradient.
+    # Mask sub-threshold entries with the standard double-``where`` guard: the
+    # forward value ``sqrt(0) = 0`` is unchanged (those bond entries carry no
+    # weight), but the masked adjoint is ``0`` instead of ``inf``.  Mirrors the
+    # ``S^{-1/2}`` guard in ``_compute_projector_tensor`` (#463).
+    if s.shape[0] == 0:
+        sqrt_s = s
+    else:
+        cutoff = 1e-14 * (jnp.max(s) + 1e-30)
+        mask = s > cutoff
+        s_safe = jnp.where(mask, s, 1.0)
+        sqrt_s = jnp.where(mask, jnp.sqrt(s_safe), 0.0)
     F_left = scale_bond_axis(U, bond_label, sqrt_s)
     F_right = scale_bond_axis(Vh, bond_label, sqrt_s)
     return F_left, F_right
