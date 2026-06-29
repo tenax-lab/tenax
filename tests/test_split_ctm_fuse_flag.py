@@ -433,3 +433,35 @@ def test_optimize_gs_ad_split_rejects_non_1x1_recipe():
     cfg = _split_opt_config(fuse=False, gs_recipe="2x2")
     with pytest.raises(NotImplementedError, match="1x1"):
         optimize_gs_ad(gate, A, cfg)
+
+
+def test_optimize_gs_ad_split_rejects_chi_schedule():
+    """Split path rejects gs_chi_schedule_steps up front.
+
+    Without the guard the schedule advances into _apply_chi_bump ->
+    pad_dense_env_chi, which assumes a fused CTMTensorEnv and would
+    AttributeError on the cached SplitCTMTensorEnv (Codex review on #651).
+    """
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    A, gate = _split_opt_inputs()
+    cfg = _split_opt_config(fuse=False, gs_chi_schedule_steps=[(4, 1)])
+    with pytest.raises(NotImplementedError, match="schedule"):
+        optimize_gs_ad(gate, A, cfg)
+
+
+def test_optimize_gs_ad_split_cg_metric_does_not_crash():
+    """Split + CG + gs_metric_precond falls back to plain CG (no crash).
+
+    The metric inner product needs the fused CTMTensorEnv; on the split path
+    the cache holds a SplitCTMTensorEnv, so metric preconditioning must be
+    disabled for the CG optimizer too — not just L-BFGS (Codex review on #651).
+    """
+    from tenax.algorithms._split_ctm_tensor_init import SplitCTMTensorEnv
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    A, gate = _split_opt_inputs()
+    cfg = _split_opt_config(fuse=False, gs_optimizer="cg", gs_metric_precond=True)
+    _, env, E = optimize_gs_ad(gate, A, cfg)
+    assert isinstance(env, SplitCTMTensorEnv)
+    assert jnp.isfinite(E)
