@@ -86,7 +86,18 @@ def test_worker_env_pins_idle_a100s_and_disables_prealloc(monkeypatch):
     assert env["CUDA_VISIBLE_DEVICES"] == "1,2"
     assert env["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
     assert env["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
+    # cuda_async avoids BFC fragmentation OOMs at large χ; autotuning off drops
+    # the autotuner's transient workspace (see _worker_env docstring).
+    assert env["XLA_PYTHON_CLIENT_ALLOCATOR"] == "cuda_async"
+    assert "--xla_gpu_autotune_level=0" in env["XLA_FLAGS"]
     assert env["PATH"] == "/usr/bin"  # base env preserved
+
+
+def test_worker_env_appends_to_existing_xla_flags(monkeypatch):
+    monkeypatch.setattr(d8, "cuda_visible_for", lambda n: "0")
+    env = d8._worker_env(1, {"XLA_FLAGS": "--foo=1"})
+    assert "--foo=1" in env["XLA_FLAGS"]
+    assert "--xla_gpu_autotune_level=0" in env["XLA_FLAGS"]
 
 
 def test_argparser_defaults_target_the_wall():

@@ -111,11 +111,24 @@ def build_grid(chi_ladder, device_counts):
 
 def _worker_env(n_devices, base_env):
     """Subprocess env: pin the n most-idle A100s, deterministic index order, no
-    XLA preallocation so peak_gb is the real high-water mark."""
+    XLA preallocation so peak_gb is the real high-water mark.
+
+    Uses JAX's ``cuda_async`` (cudaMallocAsync) allocator instead of the default
+    BFC allocator: at D=8/large χ the dominant CTM intermediate needs a single
+    ~18 GB contiguous block that BFC cannot place in its fragmented free space,
+    OOMing tens of GB below the device limit (a fragmentation artifact, not a
+    real wall). ``cuda_async``'s pool places it, exposing the *true* memory wall.
+    ``peak_bytes_in_use`` (the ``peak_gb`` probe) tracks real usage under it.
+    Autotuning is disabled to drop the autotuner's transient profiling workspace
+    (another fragmentation-prone large alloc) and to keep compile deterministic."""
     env = dict(base_env)
     env["CUDA_VISIBLE_DEVICES"] = cuda_visible_for(n_devices)
     env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     env["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+    env["XLA_PYTHON_CLIENT_ALLOCATOR"] = "cuda_async"
+    env["XLA_FLAGS"] = (
+        env.get("XLA_FLAGS", "") + " --xla_gpu_autotune_level=0"
+    ).strip()
     return env
 
 
