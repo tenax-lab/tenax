@@ -1324,10 +1324,15 @@ def _optimize_gs_ad_tensor(
             config.gs_ctm_conv_tol_schedule is not None
             or config.gs_ctm_max_iter_schedule is not None
             or config.gs_plateau_patience_schedule is not None
+            # gs_chi_schedule_steps (set by optimize_gs_ad_chi_schedule) drives
+            # _advance_chi_stage_if_due -> _apply_chi_bump -> pad_dense_env_chi,
+            # which assumes a fused CTMTensorEnv and crashes on a split env.
+            or config.gs_chi_schedule_steps is not None
         ):
             raise NotImplementedError(
-                "CTM conv_tol/max_iter/plateau schedules are not supported on "
-                "the split-CTM path; use fuse_virtual_legs=True."
+                "CTM conv_tol/max_iter/plateau and chi (gs_chi_schedule_steps / "
+                "optimize_gs_ad_chi_schedule) schedules are not supported on the "
+                "split-CTM path; use fuse_virtual_legs=True."
             )
 
     use_explicit = not config.gs_implicit_ad
@@ -1486,14 +1491,14 @@ def _optimize_gs_ad_tensor(
     if (
         use_split
         and config.gs_metric_precond
-        and config.gs_optimizer.lower() == "lbfgs"
+        and config.gs_optimizer.lower() in ("lbfgs", "cg")
     ):
         import warnings
 
         warnings.warn(
             "gs_metric_precond=True is not yet supported on the split-CTM path "
             "(fuse_virtual_legs=False); the metric inner product needs the "
-            "fused CTMTensorEnv. Falling back to non-preconditioned L-BFGS.",
+            "fused CTMTensorEnv. Falling back to non-preconditioned optimization.",
             stacklevel=3,
         )
     if _use_cg and _cg_map_fn is not None:
@@ -2155,7 +2160,11 @@ def _optimize_gs_ad_tensor(
 
         # Compute search direction
         if is_cg:
-            if config.gs_metric_precond and not use_c4v:
+            # ``not use_split``: the metric inner product (precondition_gradient)
+            # consumes the fused CTMTensorEnv edge fields; on the split path the
+            # cache holds a SplitCTMTensorEnv, so fall back to plain CG (a
+            # warning was emitted up front).  Mirrors is_metric_lbfgs.
+            if config.gs_metric_precond and not use_c4v and not use_split:
                 from tenax.algorithms._metric_precond import precondition_gradient
 
                 env_for_metric = _env_cache["envs"][(0, 0)]
