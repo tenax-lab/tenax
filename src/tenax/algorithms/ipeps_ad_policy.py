@@ -41,6 +41,45 @@ def validate_ctm_for_implicit_ad(ctm_cfg: CTMConfig) -> None:
         )
 
 
+def validate_split_ctm_config(ctm_cfg: CTMConfig, recipe: str) -> None:
+    """Reject ``CTMConfig`` combinations the split-CTM path cannot honor.
+
+    The split (``fuse_virtual_legs=False``) forward is fixed-χ single-site, so
+    every χ-changing knob is unsupported.  Raising up front beats the failure
+    modes of letting one through: ``chi_ramp`` would be *silently ignored*
+    (the split forward never reads it), and the end-of-step ``chi_auto_bump``
+    would *crash* when ``_maybe_bump_chi`` pads a ``SplitCTMTensorEnv`` with
+    the fused-only ``pad_dense_env_chi``.
+
+    Shared single source of truth for ``make_ctm_energy_fn``'s split branch and
+    the ``_optimize_gs_ad_tensor`` dispatcher so both entry points reject
+    identically.  Covers only the ``CTMConfig``-level knobs; ``cg_gates`` and
+    the ``iPEPSConfig`` schedules are guarded by the optimizer dispatcher.
+    """
+    if recipe != "1x1":
+        raise NotImplementedError(
+            "fuse_virtual_legs=False (split CTM) requires gs_recipe='1x1'; "
+            f"got recipe={recipe!r}."
+        )
+    if ctm_cfg.ctmrg_heuristic_increase_chi:
+        raise NotImplementedError(
+            "in-CTM chi auto-bump (ctmrg_heuristic_increase_chi) is not "
+            "supported on the split-CTM path; use fuse_virtual_legs=True."
+        )
+    # TODO(#512): chi_auto_bump and chi_ramp are deprecated and slated for
+    # removal next release; drop these two checks once the fields are gone.
+    if ctm_cfg.chi_auto_bump:
+        raise NotImplementedError(
+            "chi_auto_bump is not supported on the split-CTM path; "
+            "use fuse_virtual_legs=True."
+        )
+    if ctm_cfg.chi_ramp is not None:
+        raise NotImplementedError(
+            "chi_ramp is not supported on the split-CTM path; "
+            "use fuse_virtual_legs=True."
+        )
+
+
 def resolve_projector_backward(
     config: iPEPSConfig,
     *,
@@ -221,21 +260,7 @@ def make_ctm_energy_fn(
         Phase 2); guard the unsupported combinations up front so the failure
         is a clear policy error rather than a downstream shape mismatch.
         """
-        if recipe != "1x1":
-            raise NotImplementedError(
-                "fuse_virtual_legs=False (split CTM) requires gs_recipe='1x1'; "
-                f"got recipe={recipe!r}."
-            )
-        if ctm_cfg.chi_ramp is not None:
-            raise NotImplementedError(
-                "chi_ramp is not supported on the split-CTM path; "
-                "use fuse_virtual_legs=True."
-            )
-        if ctm_cfg.ctmrg_heuristic_increase_chi:
-            raise NotImplementedError(
-                "in-CTM chi auto-bump is not supported on the split-CTM path; "
-                "use fuse_virtual_legs=True."
-            )
+        validate_split_ctm_config(ctm_cfg, recipe)
         if use_explicit:
             return ctm_energy_split_explicit(
                 site_tensors,
