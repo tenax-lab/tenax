@@ -1,19 +1,24 @@
 """iPEPS D=8 square-lattice Heisenberg AFM: simple-update seed + forward-CTM
-χ-scan showing the single-GPU memory wall and the #632 multi-GPU rescue.
+χ-scan mapping the single-GPU memory wall (dense χ²·D⁶) and the split-CTM rescue
+(``--path {dense,split,both}``; multi-GPU GSPMD gives no per-device relief).
 
-    # full run (orchestrator): SU seed once, then scan χ × {1,2} GPU
+    # full run (orchestrator): SU seed once, then scan χ × {1,2} GPU × paths
     uv run python examples/heisenberg_d8_chi_scaling.py --outdir runs/d8_chi_scaling
 
-    # quick validation (tiny end-to-end)
+    # quick validation (tiny end-to-end, both paths)
     uv run python examples/heisenberg_d8_chi_scaling.py --smoke
 
-    # single cell (worker; normally invoked by the orchestrator):
-    uv run python examples/heisenberg_d8_chi_scaling.py --cell --phase scan \
-        --chi 64 --n-devices 1 --outdir runs/d8_chi_scaling --out /tmp/cell.json
+    # single cell (worker; normally invoked by the orchestrator, which pins the
+    # GPU for it). For a DIRECT run, pin an idle A100 yourself (never the display
+    # GPU) -- a directly-invoked worker does NOT self-pin:
+    CUDA_VISIBLE_DEVICES=1 uv run python examples/heisenberg_d8_chi_scaling.py \
+        --cell --phase scan --chi 64 --n-devices 1 --path split \
+        --outdir runs/d8_chi_scaling --out /tmp/cell.json
 
-Unlike the D=4 sibling, the worker self-pins to idle A100s (the orchestrator's
-``_worker_env`` sets ``CUDA_VISIBLE_DEVICES`` via ``cuda_visible_for``), so the
-``--cell`` examples above need no manual ``CUDA_VISIBLE_DEVICES`` prefix.
+When the orchestrator launches a worker it pins idle A100s for it (``_worker_env``
+sets ``CUDA_VISIBLE_DEVICES`` via ``cuda_visible_for``); a worker started directly
+with ``--cell`` does NOT self-pin, so set ``CUDA_VISIBLE_DEVICES`` yourself (on the
+DGX the display GPU is otherwise visible and ``_build_mesh`` will refuse to run).
 
 Pure helpers import only stdlib; jax/tenax imports live inside the worker so the
 parent's CUDA_VISIBLE_DEVICES takes effect before the child initialises a JAX
