@@ -211,3 +211,73 @@ def su_seed_once(outdir, chi_su, imaginary_steps, dt):
         tensor_path, pickle.dumps(A_host, protocol=pickle.HIGHEST_PROTOCOL)
     )
     return tensor_path
+
+
+def scan_cell(tensor_path, chi, n_devices):
+    """Converge forward CTM at χ on the fixed SU seed; return E/site + per-sweep
+    timing + per-device peak memory. The single-site path is the only one with
+    #632 device_mesh sharding, so n_devices>1 shards the D²=64 axis. Record-and-
+    resume safe: never raises (OOM/errors are recorded)."""
+    result = {
+        "D": D, "chi": chi, "n_devices": n_devices,
+        "E_site": None, "err_vs_qmc": None, "total_s": None, "n_sweeps": None,
+        "ms_per_sweep": None, "peak_gb": None, "converged": False,
+        "oom": False, "error": None,
+    }
+    try:
+        import jax
+
+        jax.config.update("jax_enable_x64", True)
+        from tenax import (
+            CTMConfig, compute_energy_ctm_tensor, heisenberg_gate,
+            sublattice_rotate_gate,
+        )
+        from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
+        from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+        from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
+
+        mesh = d4._build_mesh(n_devices)  # A100-only guard + GSPMD mesh for n>1
+        with open(tensor_path, "rb") as fh:
+            A_opt = pickle.load(fh)
+        H = sublattice_rotate_gate(heisenberg_gate())
+
+        cfg = CTMConfig(
+            chi=chi, max_iter=200, conv_tol=1e-10,
+            projector_method="svd", forward_gauge="phase", device_mesh=mesh,
+        )
+        kwargs = ctm_converge_kwargs(cfg)  # forwards device_mesh; default recipe
+
+        # Warm-up: compile the χ-specific @jit step (process-cached) so the timed
+        # converge measures pure per-sweep compute.
+        warm_envs, _ = python_loop_ctm_converge(
+            {(0, 0): A_opt}, SINGLE_SITE_NEIGHBORS, **kwargs
+        )
+        jax.block_until_ready(warm_envs[(0, 0)])
+
+        t0 = time.perf_counter()
+        envs, info = python_loop_ctm_converge(
+            {(0, 0): A_opt}, SINGLE_SITE_NEIGHBORS, **kwargs
+        )
+        jax.block_until_ready(envs[(0, 0)])
+        total_s = time.perf_counter() - t0
+
+        env = envs[(0, 0)]
+        if mesh is not None:  # gather the tiny env to device 0 for energy eval
+            env = jax.tree_util.tree_map(
+                lambda x: jax.device_put(x, jax.devices()[0]), env
+            )
+        E = float(compute_energy_ctm_tensor(A_opt, env, H, 2))
+        sweeps = int(info.iterations)
+
+        result.update(
+            E_site=E, err_vs_qmc=E - REFERENCE_E, total_s=float(total_s),
+            n_sweeps=sweeps, ms_per_sweep=1000.0 * total_s / max(sweeps, 1),
+            converged=bool(info.converged), peak_gb=d4._peak_gb(),
+        )
+    except Exception as e:  # noqa: BLE001 — record and resume, never crash the sweep
+        msg = f"{type(e).__name__}: {e}"
+        result["error"] = msg
+        if "RESOURCE_EXHAUSTED" in msg or "out of memory" in msg.lower():
+            result["oom"] = True
+        result["peak_gb"] = d4._peak_gb()
+    return result
