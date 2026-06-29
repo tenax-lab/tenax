@@ -421,6 +421,38 @@ def _gauge_fix_ctm_tensor(env):
     )
 
 
+_EPS_PHASE = 0.1  # threshold fraction for "large" element (variPEPS default)
+
+
+def _frob_phase_fix(arr):
+    """Frobenius-normalize and fix the global U(1) phase of a dense array.
+
+    1. Normalize by Frobenius norm (differentiable; norm wrapped in
+       ``stop_gradient`` so the backward only sees the tangential gradient
+       component — see #362 for why the radial path through divide-by-norm
+       produces NaN on SymmetricTensor with empty charge sectors).
+    2. Fix the phase by making the first "large" element (|x| >= EPS_PHASE *
+       max|arr|) real-positive (variPEPS ``_post_process_CTM_tensors``).
+
+    Shared by :func:`_phase_fix_ctm_tensor` (fused env) and
+    :func:`_phase_fix_split_ctm_tensor` (split env).
+    """
+    norm = jnp.linalg.norm(arr)
+    arr = arr / jax.lax.stop_gradient(norm + 1e-30)
+    # Find first element with |x| >= EPS_PHASE * max(|arr|)
+    flat = arr.ravel()
+    abs_flat = jnp.abs(flat)
+    abs_max = jnp.max(abs_flat)
+    threshold = _EPS_PHASE * abs_max
+    # Use argmax on a mask to find the first qualifying element
+    mask = abs_flat >= threshold
+    # jnp.argmax returns first True in the mask
+    idx = jnp.argmax(mask)
+    val = flat[idx]
+    phase = val / (jnp.abs(val) + 1e-30)
+    return arr * jnp.conj(phase)
+
+
 def _phase_fix_ctm_tensor(env):
     """Fix gauge of CTMTensorEnv via Frobenius normalization + phase fixing.
 
@@ -437,31 +469,6 @@ def _phase_fix_ctm_tensor(env):
     The from_dense re-projection into block structure is needed for
     numerical stability over many CTM sweeps.
     """
-    EPS_PHASE = 0.1  # threshold fraction for "large" element (variPEPS default)
-
-    def _frob_phase_fix(arr):
-        """Frobenius-normalize and fix phase of a dense array.
-
-        Norm is wrapped in ``stop_gradient`` so the backward only sees
-        the tangential gradient component. See #362 for why the radial
-        path through divide-by-norm produces NaN on SymmetricTensor
-        with empty charge sectors.
-        """
-        norm = jnp.linalg.norm(arr)
-        arr = arr / jax.lax.stop_gradient(norm + 1e-30)
-        # Find first element with |x| >= EPS_PHASE * max(|arr|)
-        flat = arr.ravel()
-        abs_flat = jnp.abs(flat)
-        abs_max = jnp.max(abs_flat)
-        threshold = EPS_PHASE * abs_max
-        # Use argmax on a mask to find the first qualifying element
-        mask = abs_flat >= threshold
-        # jnp.argmax returns first True in the mask
-        idx = jnp.argmax(mask)
-        val = flat[idx]
-        phase = val / (jnp.abs(val) + 1e-30)
-        return arr * jnp.conj(phase)
-
     C1 = _frob_phase_fix(env.C1.todense())
     C2 = _frob_phase_fix(env.C2.todense())
     C3 = _frob_phase_fix(env.C3.todense())
@@ -480,6 +487,54 @@ def _phase_fix_ctm_tensor(env):
         T2=_wrap_tensor(T2, env.T2),
         T3=_wrap_tensor(T3, env.T3),
         T4=_wrap_tensor(T4, env.T4),
+    )
+
+
+def _phase_fix_split_ctm_tensor(env):
+    """Fix gauge of a ``SplitCTMTensorEnv`` (Γ phase-fix over its 12 tensors).
+
+    The split env carries the same residual U(1) gauge freedom as the fused
+    :class:`CTMTensorEnv`, but on a 12-tensor (4 corners + 8 ket/bra edge
+    halves) layout.  Without a per-tensor gauge fix the converged split env
+    has no *element-wise* fixed point: the rank-1-seeded corner spectrum
+    ``[0.5, 0.5, 0, 0]`` leaves a degenerate 2-d subspace that rotates each
+    sweep, so the residual oscillates forever while the gauge-invariant
+    energy is machine-stable (#463).  Applying :func:`_frob_phase_fix` to
+    each tensor pins that gauge, giving the element-wise fixed point the
+    implicit Neumann backward (variPEPS Eq. 18-19) needs to converge.
+
+    Mirrors :func:`_phase_fix_ctm_tensor` exactly — same per-tensor
+    Frobenius-normalize + first-large-element phase fix, same
+    ``todense``/``from_dense`` round-trip — but over the split fields.
+    """
+    C1 = _frob_phase_fix(env.C1.todense())
+    C2 = _frob_phase_fix(env.C2.todense())
+    C3 = _frob_phase_fix(env.C3.todense())
+    C4 = _frob_phase_fix(env.C4.todense())
+    T1k = _frob_phase_fix(env.T1_ket.todense())
+    T1b = _frob_phase_fix(env.T1_bra.todense())
+    T2k = _frob_phase_fix(env.T2_ket.todense())
+    T2b = _frob_phase_fix(env.T2_bra.todense())
+    T3k = _frob_phase_fix(env.T3_ket.todense())
+    T3b = _frob_phase_fix(env.T3_bra.todense())
+    T4k = _frob_phase_fix(env.T4_ket.todense())
+    T4b = _frob_phase_fix(env.T4_bra.todense())
+
+    from tenax.algorithms._split_ctm_tensor_init import SplitCTMTensorEnv
+
+    return SplitCTMTensorEnv(
+        C1=_wrap_tensor(C1, env.C1),
+        C2=_wrap_tensor(C2, env.C2),
+        C3=_wrap_tensor(C3, env.C3),
+        C4=_wrap_tensor(C4, env.C4),
+        T1_ket=_wrap_tensor(T1k, env.T1_ket),
+        T1_bra=_wrap_tensor(T1b, env.T1_bra),
+        T2_ket=_wrap_tensor(T2k, env.T2_ket),
+        T2_bra=_wrap_tensor(T2b, env.T2_bra),
+        T3_ket=_wrap_tensor(T3k, env.T3_ket),
+        T3_bra=_wrap_tensor(T3b, env.T3_bra),
+        T4_ket=_wrap_tensor(T4k, env.T4_ket),
+        T4_bra=_wrap_tensor(T4b, env.T4_bra),
     )
 
 

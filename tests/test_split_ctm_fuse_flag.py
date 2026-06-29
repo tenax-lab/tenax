@@ -117,3 +117,194 @@ def test_split_explicit_raises_for_multisite():
             gate,
             chi=4,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Implicit (fixed-point) split-CTM AD (#463 Phase 2, Task 3)                   #
+# --------------------------------------------------------------------------- #
+
+
+def _split_implicit_loss(D, seed=7, chi=None):
+    from tenax.algorithms._split_ctm_energy_ad import ctm_energy_split_implicit
+
+    if chi is None:
+        chi = D * D  # lossless: rank of D×D corner ≤ D²
+    A = _make_site(D, 2, seed=seed)
+    gate = _heisenberg_gate()
+
+    def loss(a):
+        return ctm_energy_split_implicit(
+            {(0, 0): a},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=chi,
+            chi_I=chi,
+            max_iter=60,
+            conv_tol=1e-12,
+            min_iter=2,
+        ).real
+
+    return loss, A
+
+
+@pytest.mark.parametrize("D", [2, 3])
+def test_split_implicit_energy_finite(D):
+    """ctm_energy_split_implicit returns a finite energy (forward correctness)."""
+    loss, A = _split_implicit_loss(D)
+    e = loss(A)
+    assert jnp.isfinite(e), f"energy is not finite: {e}"
+
+
+@pytest.mark.parametrize("D", [2, 3])
+def test_split_implicit_grad_finite(D):
+    """ctm_energy_split_implicit returns a finite, non-zero gradient."""
+    loss, A = _split_implicit_loss(D)
+    _, g = jax.value_and_grad(loss)(A)
+    gs = jnp.concatenate([x.ravel() for x in jax.tree.leaves(g)])
+    assert jnp.all(jnp.isfinite(gs)), "gradient contains non-finite values"
+    assert float(jnp.sum(jnp.abs(gs))) > 0, "gradient is identically zero"
+
+
+def test_split_implicit_grad_matches_explicit():
+    """Implicit (Neumann) gradient matches the trusted explicit-AD gradient.
+
+    Both paths differentiate the same gauge-invariant split-CTM energy at the
+    same lossless ``chi_I=chi`` fixed point, so the implicit fixed-point
+    gradient and the explicit unrolled gradient must agree once the explicit
+    reference is itself converged (#463 Phase 2 validation — implicit==explicit,
+    not implicit==FD: the split energy_fn carries a pre-existing Wirtinger gap
+    that AD-vs-FD inherits and explicit shares).
+    """
+    from tenax.algorithms._split_ctm_energy_ad import (
+        ctm_energy_split_explicit,
+        ctm_energy_split_implicit,
+    )
+
+    D, seed = 2, 11  # well-converging lossless case
+    chi = D * D
+    A = _make_site(D, 2, seed=seed)
+    gate = _heisenberg_gate()
+
+    def loss_imp(a):
+        return ctm_energy_split_implicit(
+            {(0, 0): a},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=chi,
+            chi_I=chi,
+            max_iter=80,
+            conv_tol=1e-13,
+            min_iter=2,
+        ).real
+
+    def loss_exp(a):
+        return ctm_energy_split_explicit(
+            {(0, 0): a},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=chi,
+            chi_I=chi,
+            warmup_steps=40,
+            backprop_steps=40,
+        ).real
+
+    e_i, g_i = jax.value_and_grad(loss_imp)(A)
+    e_e, g_e = jax.value_and_grad(loss_exp)(A)
+    gi = jnp.concatenate([x.ravel() for x in jax.tree.leaves(g_i)])
+    ge = jnp.concatenate([x.ravel() for x in jax.tree.leaves(g_e)])
+
+    assert jnp.allclose(e_i, e_e, atol=1e-9), f"energy mismatch: {e_i} vs {e_e}"
+    cos = float(
+        jnp.real(jnp.vdot(gi, ge)) / (jnp.linalg.norm(gi) * jnp.linalg.norm(ge))
+    )
+    rel = float(jnp.linalg.norm(gi - ge) / jnp.linalg.norm(ge))
+    assert cos > 1 - 1e-9, f"gradient direction mismatch: cos={cos}"
+    assert rel < 1e-6, f"gradient magnitude mismatch: rel={rel}"
+
+
+def test_make_ctm_energy_fn_dispatches_to_split_implicit():
+    """make_ctm_energy_fn routes to the split path when fuse_virtual_legs=False.
+
+    With ``fuse_virtual_legs=False`` + ``recipe='1x1'`` the implicit branch
+    must produce the same energy as a direct ``ctm_energy_split_implicit``
+    call, and a finite gradient through the dispatch closure.
+    """
+    from tenax.algorithms._split_ctm_energy_ad import ctm_energy_split_implicit
+    from tenax.algorithms.ipeps_ad_policy import make_ctm_energy_fn
+
+    D = 2
+    chi = D * D
+    A = _make_site(D, 2, seed=7)
+    gate = _heisenberg_gate()
+    cfg = CTMConfig(
+        chi=chi,
+        chi_I=chi,
+        fuse_virtual_legs=False,
+        max_iter=60,
+        conv_tol=1e-12,
+        min_iter=2,
+    )
+
+    fn = make_ctm_energy_fn(
+        neighbors=SINGLE_SITE_NEIGHBORS,
+        gate=gate,
+        get_ctm_cfg=lambda: cfg,
+        env_cache={},
+        use_explicit=False,
+        explicit_warmup=2,
+        explicit_steps=3,
+        recipe="1x1",
+    )
+    e, g = jax.value_and_grad(lambda a: fn({(0, 0): a}).real)(A)
+    e_direct = ctm_energy_split_implicit(
+        {(0, 0): A},
+        SINGLE_SITE_NEIGHBORS,
+        gate,
+        chi=chi,
+        chi_I=chi,
+        max_iter=60,
+        conv_tol=1e-12,
+        min_iter=2,
+    ).real
+
+    assert jnp.allclose(e, e_direct, atol=1e-10)
+    gs = jnp.concatenate([x.ravel() for x in jax.tree.leaves(g)])
+    assert jnp.all(jnp.isfinite(gs)) and float(jnp.sum(jnp.abs(gs))) > 0
+
+
+def test_make_ctm_energy_fn_split_rejects_non_1x1_recipe():
+    """The split dispatch guards against unsupported recipes."""
+    from tenax.algorithms.ipeps_ad_policy import make_ctm_energy_fn
+
+    A = _make_site(2, 2, seed=0)
+    gate = _heisenberg_gate()
+    cfg = CTMConfig(chi=4, fuse_virtual_legs=False)
+
+    fn = make_ctm_energy_fn(
+        neighbors=SINGLE_SITE_NEIGHBORS,
+        gate=gate,
+        get_ctm_cfg=lambda: cfg,
+        env_cache={},
+        use_explicit=False,
+        explicit_warmup=2,
+        explicit_steps=3,
+        recipe="2x2",
+    )
+    with pytest.raises(NotImplementedError, match="recipe"):
+        fn({(0, 0): A})
+
+
+def test_split_implicit_raises_for_multisite():
+    """ctm_energy_split_implicit raises NotImplementedError for >1 site."""
+    from tenax.algorithms._split_ctm_energy_ad import ctm_energy_split_implicit
+
+    A = _make_site(2, 2, seed=0)
+    gate = _heisenberg_gate()
+
+    with pytest.raises(NotImplementedError, match="single-site"):
+        ctm_energy_split_implicit(
+            {(0, 0): A, (1, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=4,
+        )
