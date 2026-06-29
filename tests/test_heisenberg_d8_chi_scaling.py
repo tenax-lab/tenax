@@ -65,3 +65,15 @@ def test_parse_nvidia_smi_skips_malformed_and_na_lines():
     )
     rows = d8._parse_nvidia_smi(text)
     assert [r[0] for r in rows] == [0, 2]  # malformed + N/A rows skipped
+
+
+def test_build_grid_is_device_major_chi_minor_at_D8():
+    cells = d8.build_grid(chi_ladder=[64, 96], device_counts=[1, 2])
+    assert [(c.D, c.chi, c.n_devices) for c in cells] == [
+        (8, 64, 1), (8, 96, 1), (8, 64, 2), (8, 96, 2),
+    ]
+
+
+def test_build_grid_uses_D8():
+    cells = d8.build_grid(chi_ladder=[128], device_counts=[1])
+    assert cells[0].D == 8

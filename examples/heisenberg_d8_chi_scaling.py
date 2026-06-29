@@ -93,3 +93,13 @@ def free_a100_indices(n, mem_threshold_mib=2048, util_threshold=50):
 def cuda_visible_for(n_devices):
     """CUDA_VISIBLE_DEVICES string pinning the n most-idle A100s right now."""
     return ",".join(str(i) for i in free_a100_indices(n_devices))
+
+
+def build_grid(chi_ladder, device_counts):
+    """Scan cells in device-major, chi-minor order (one row per n_devices).
+    Reuses the D=4 module's frozen ``Cell`` dataclass with D=8."""
+    return [
+        d4.Cell(D=D, chi=chi, n_devices=n)
+        for n in device_counts
+        for chi in chi_ladder
+    ]
