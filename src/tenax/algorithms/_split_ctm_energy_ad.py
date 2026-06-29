@@ -109,19 +109,27 @@ def _split_env_max_diff(env_new, env_old) -> float:
 
 
 def _converge_split_gauge_fixed(
-    A, chi, chi_I, max_iter, conv_tol, renormalize, min_iter
+    A, chi, chi_I, max_iter, conv_tol, renormalize, min_iter, env_init=None
 ):
     """Run gauge-fixed split-CTM to an element-wise fixed point.
 
     Returns the converged ``SplitCTMTensorEnv``.  Convergence is measured
     element-wise on the Γ-phase-fixed env (not the corner spectrum, which
     plateaus on the degenerate 1-site corner — see ``ctm_split_tensor``).
-    """
-    from tenax.algorithms._split_ctm_tensor_init import (
-        initialize_split_ctm_tensor_env,
-    )
 
-    env = initialize_split_ctm_tensor_env(A, chi, chi_I)
+    When *env_init* (a ``SplitCTMTensorEnv``) is given it seeds the sweep
+    (warm-start) instead of the fresh rank-1 corner init.  The Γ phase-fix
+    canonicalizes the gauge each sweep, so a warm seed converges to the
+    identical fixed point as a cold start — only faster.
+    """
+    if env_init is not None:
+        env = env_init
+    else:
+        from tenax.algorithms._split_ctm_tensor_init import (
+            initialize_split_ctm_tensor_env,
+        )
+
+        env = initialize_split_ctm_tensor_env(A, chi, chi_I)
     prev = None
     for it in range(max_iter):
         env = _split_step(A, env, chi, chi_I, renormalize)
@@ -132,23 +140,26 @@ def _converge_split_gauge_fixed(
     return env
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(1,))
-def _split_ctm_converge(A, static):
+@partial(jax.custom_vjp, nondiff_argnums=(2,))
+def _split_ctm_converge(A, env_init, static):
     """Converge gauge-fixed split-CTM; custom-VJP via implicit differentiation.
 
     ``static = (chi, chi_I, max_iter, conv_tol, renormalize, min_iter)``
-    is a hashable tuple of non-differentiable CTM settings.  Returns the
-    converged ``SplitCTMTensorEnv`` pytree.
+    is a hashable tuple of non-differentiable CTM settings.  *env_init* is an
+    optional ``SplitCTMTensorEnv`` warm-start seed (``None`` → fresh init);
+    it carries **zero** gradient because the fixed point is seed-independent
+    (mirrors ``env_init_leaves`` in ``ad_utils.ctm_tensor_converge``).
+    Returns the converged ``SplitCTMTensorEnv`` pytree.
     """
     chi, chi_I, max_iter, conv_tol, renormalize, min_iter = static
     return _converge_split_gauge_fixed(
-        A, chi, chi_I, max_iter, conv_tol, renormalize, min_iter
+        A, chi, chi_I, max_iter, conv_tol, renormalize, min_iter, env_init=env_init
     )
 
 
-def _split_ctm_converge_fwd(A, static):
-    env = _split_ctm_converge(A, static)
-    return env, (A, env)
+def _split_ctm_converge_fwd(A, env_init, static):
+    env = _split_ctm_converge(A, env_init, static)
+    return env, (A, env, env_init)
 
 
 def _split_ctm_converge_bwd(static, residuals, g):
@@ -158,9 +169,10 @@ def _split_ctm_converge_bwd(static, residuals, g):
     pytree).  We accumulate ``λ`` in env space using ``J^T = (∂f/∂env)^T``,
     then project once to A space with ``(∂f/∂A)^T λ``.  Mirrors the
     YASTN-style iterative VJP in ``ad_utils._ctm_tensor_converge_bwd``.
+    The warm-start seed ``env_init`` gets a zero cotangent.
     """
     chi, chi_I, max_iter, conv_tol, renormalize, min_iter = static
-    A, env = residuals
+    A, env, env_init = residuals
 
     # J^T in env space (A fixed) and (∂f/∂A)^T projector (env fixed).
     _, vjp_env_fn = jax.vjp(lambda e: _split_step(A, e, chi, chi_I, renormalize), env)
@@ -182,7 +194,9 @@ def _split_ctm_converge_bwd(static, residuals, g):
             break
 
     dA = vjp_A_fn(lam)[0]
-    return (dA,)
+    # Warm-start seed is gradient-free (fixed point is seed-independent).
+    d_env_init = None if env_init is None else jax.tree.map(jnp.zeros_like, env_init)
+    return (dA, d_env_init)
 
 
 _split_ctm_converge.defvjp(_split_ctm_converge_fwd, _split_ctm_converge_bwd)
@@ -200,6 +214,7 @@ def ctm_energy_split_implicit(
     renormalize: bool = True,
     min_iter: int = 2,
     energy_fn=None,
+    env_init=None,
     **_ignored,
 ):
     """Single-site iPEPS energy with implicit (fixed-point) split-CTM AD.
@@ -208,6 +223,9 @@ def ctm_energy_split_implicit(
     the gradient is obtained by implicit differentiation (Neumann series),
     avoiding storage of the unrolled CTM iterations.  Single-site only
     (``recipe="1x1"``); multisite has no split forward yet.
+
+    *env_init* is an optional ``SplitCTMTensorEnv`` warm-start seed for the
+    forward CTM (gradient-free); ``None`` cold-starts from a fresh init.
     """
     A = _extract_single_site(site_tensors)
     if energy_fn is not None:
@@ -223,7 +241,7 @@ def ctm_energy_split_implicit(
     )
 
     static = (chi, chi_I, max_iter, conv_tol, renormalize, min_iter)
-    env = _split_ctm_converge(A, static)
+    env = _split_ctm_converge(A, env_init, static)
     return compute_energy_split_ctm_tensor(A, env, gate)
 
 
@@ -236,6 +254,7 @@ def converge_split_env(
     chi_I: int | None = None,
     renormalize: bool = True,
     min_iter: int = 2,
+    env_init=None,
 ):
     """Forward-only gauge-fixed split-CTM converge (no gradient).
 
@@ -246,9 +265,12 @@ def converge_split_env(
     must use this rather than the bare :func:`ctm_split_tensor` so they
     land on the identical fixed point as the AD loss — keeping the
     line-search φ(α) and the gradient dφ/dα mutually consistent.
+
+    *env_init* is an optional ``SplitCTMTensorEnv`` warm-start seed; ``None``
+    cold-starts from a fresh init.
     """
     if chi_I is None:
         chi_I = chi
     return _converge_split_gauge_fixed(
-        A, chi, chi_I, max_iter, conv_tol, renormalize, min_iter
+        A, chi, chi_I, max_iter, conv_tol, renormalize, min_iter, env_init=env_init
     )

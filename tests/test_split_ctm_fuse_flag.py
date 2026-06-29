@@ -222,6 +222,46 @@ def test_split_implicit_grad_matches_explicit():
     assert rel < 1e-6, f"gradient magnitude mismatch: rel={rel}"
 
 
+def test_split_implicit_warm_start_matches_cold():
+    """env_init warm-start yields the identical energy + gradient as cold start.
+
+    The Γ-gauge-fixed split fixed point is seed-independent, so warm-starting
+    the forward — even from a *different* tensor's converged env — must not
+    change the energy or the implicit gradient; it only speeds convergence.
+    The custom_vjp returns a zero cotangent for env_init.
+    """
+    from tenax.algorithms._split_ctm_energy_ad import (
+        converge_split_env,
+        ctm_energy_split_implicit,
+    )
+
+    D, seed = 2, 11
+    chi = D * D
+    A = _make_site(D, 2, seed=seed)
+    A_seed = _make_site(D, 2, seed=5)
+    gate = _heisenberg_gate()
+    kw = dict(chi=chi, chi_I=chi, max_iter=80, conv_tol=1e-12, min_iter=2)
+    warm_env = converge_split_env(A_seed, **kw)
+
+    def cold(a):
+        return ctm_energy_split_implicit(
+            {(0, 0): a}, SINGLE_SITE_NEIGHBORS, gate, **kw
+        ).real
+
+    def warm(a):
+        return ctm_energy_split_implicit(
+            {(0, 0): a}, SINGLE_SITE_NEIGHBORS, gate, env_init=warm_env, **kw
+        ).real
+
+    e_c, g_c = jax.value_and_grad(cold)(A)
+    e_w, g_w = jax.value_and_grad(warm)(A)
+    gc = jnp.concatenate([x.ravel() for x in jax.tree.leaves(g_c)])
+    gw = jnp.concatenate([x.ravel() for x in jax.tree.leaves(g_w)])
+
+    assert jnp.allclose(e_c, e_w, atol=1e-10), f"energy: cold={e_c} warm={e_w}"
+    assert float(jnp.linalg.norm(gc - gw) / jnp.linalg.norm(gc)) < 1e-8
+
+
 def test_make_ctm_energy_fn_dispatches_to_split_implicit():
     """make_ctm_energy_fn routes to the split path when fuse_virtual_legs=False.
 

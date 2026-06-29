@@ -1389,12 +1389,18 @@ def _optimize_gs_ad_tensor(
         energy = _ctm_energy_fn(site_tensors)
         return energy
 
-    def _split_forward(A_norm):
+    def _split_env_seed(envs_dict):
+        """Extract the single-site SplitCTMTensorEnv seed from a cache dict."""
+        return envs_dict.get((0, 0)) if envs_dict else None
+
+    def _split_forward(A_norm, env_init=None):
         """Forward-only gauge-fixed split-CTM converge (warm-start/probe/final).
 
         Reads ``ctm_cfg`` live so any in-loop rebinding is honored (schedules
         are rejected on the split path, so it is effectively static here).
         Lands on the same fixed point the implicit-AD loss differentiates.
+        *env_init* (a ``SplitCTMTensorEnv``) warm-starts the forward; the seed
+        is gradient-free so it only speeds convergence.
         """
         return converge_split_env(
             A_norm,
@@ -1404,6 +1410,7 @@ def _optimize_gs_ad_tensor(
             chi_I=ctm_cfg.chi_I,
             renormalize=ctm_cfg.renormalize,
             min_iter=ctm_cfg.min_iter,
+            env_init=env_init,
         )
 
     def _update_env_cache(params):
@@ -1412,7 +1419,8 @@ def _optimize_gs_ad_tensor(
         if use_split:
             # χ²·D⁴ split forward — no fused double layer is ever built.
             # eps_T is unused (auto-bump is rejected on the split path).
-            _env_cache["envs"] = {(0, 0): _split_forward(A_norm)}
+            seed = _split_env_seed(_env_cache.get("envs"))
+            _env_cache["envs"] = {(0, 0): _split_forward(A_norm, env_init=seed)}
             _env_cache["max_truncation_error"] = 0.0
             return
         site_tensors = {(0, 0): A_norm}
@@ -1556,7 +1564,8 @@ def _optimize_gs_ad_tensor(
         if use_split:
             # Same gauge-fixed split forward + split energy as the AD loss, so
             # φ(α) (this probe) and dφ/dα (the implicit-AD gradient) agree.
-            env = _split_forward(A_norm)
+            seed = _split_env_seed(_env_cache.get("envs"))
+            env = _split_forward(A_norm, env_init=seed)
             _env_cache["envs"] = {(0, 0): env}
             return float(compute_energy_split_ctm_tensor(A_norm, env, gate))
         site_tensors = {(0, 0): A_norm}
@@ -2579,8 +2588,9 @@ def _optimize_gs_ad_tensor(
         A_t = _params_to_A_norm(p)
         if use_split:
             # Final env is the split fixed point used by the gradient; return
-            # the SplitCTMTensorEnv (not the fused CTMTensorEnv).
-            env_ = _split_forward(A_t)
+            # the SplitCTMTensorEnv (not the fused CTMTensorEnv).  Warm-start
+            # from the passed env_init dict when available.
+            env_ = _split_forward(A_t, env_init=_split_env_seed(env_init))
             E_ = float(compute_energy_split_ctm_tensor(A_t, env_, gate))
             return A_t, env_, E_
         envs, _ = python_loop_ctm_converge(
