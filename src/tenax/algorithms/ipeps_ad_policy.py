@@ -209,9 +209,63 @@ def make_ctm_energy_fn(
         ctm_energy_explicit,
         ctm_energy_implicit,
     )
+    from tenax.algorithms._split_ctm_energy_ad import (
+        ctm_energy_split_explicit,
+        ctm_energy_split_implicit,
+    )
+
+    def _split_ctm_energy_fn(site_tensors, ctm_cfg):
+        """Dispatch to the split (``fuse_virtual_legs=False``) single-site path.
+
+        Only the single-site ``recipe="1x1"`` split forward exists (#463
+        Phase 2); guard the unsupported combinations up front so the failure
+        is a clear policy error rather than a downstream shape mismatch.
+        """
+        if recipe != "1x1":
+            raise NotImplementedError(
+                "fuse_virtual_legs=False (split CTM) requires gs_recipe='1x1'; "
+                f"got recipe={recipe!r}."
+            )
+        if ctm_cfg.chi_ramp is not None:
+            raise NotImplementedError(
+                "chi_ramp is not supported on the split-CTM path; "
+                "use fuse_virtual_legs=True."
+            )
+        if ctm_cfg.ctmrg_heuristic_increase_chi:
+            raise NotImplementedError(
+                "in-CTM chi auto-bump is not supported on the split-CTM path; "
+                "use fuse_virtual_legs=True."
+            )
+        if use_explicit:
+            return ctm_energy_split_explicit(
+                site_tensors,
+                neighbors,
+                gate,
+                chi=ctm_cfg.chi,
+                warmup_steps=explicit_warmup,
+                backprop_steps=explicit_steps,
+                backward_steps=explicit_backward_steps,
+                chi_I=ctm_cfg.chi_I,
+                renormalize=ctm_cfg.renormalize,
+                energy_fn=energy_fn,
+            )
+        return ctm_energy_split_implicit(
+            site_tensors,
+            neighbors,
+            gate,
+            chi=ctm_cfg.chi,
+            max_iter=ctm_cfg.max_iter,
+            conv_tol=ctm_cfg.conv_tol,
+            chi_I=ctm_cfg.chi_I,
+            renormalize=ctm_cfg.renormalize,
+            min_iter=ctm_cfg.min_iter,
+            energy_fn=energy_fn,
+        )
 
     def _ctm_energy_fn(site_tensors):
         ctm_cfg = get_ctm_cfg()
+        if not ctm_cfg.fuse_virtual_legs:
+            return _split_ctm_energy_fn(site_tensors, ctm_cfg)
         env_init = env_cache.get("envs", None)
         # In-CTM χ-bump knobs (variPEPS §2.8.2; Issue #492) are inlined at
         # both call sites for grep-ability and type-checker visibility.

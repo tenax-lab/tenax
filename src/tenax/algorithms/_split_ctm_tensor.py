@@ -82,9 +82,6 @@ from tenax.algorithms._split_ctm_tensor_moves import (
     _grow_edge_no_double_layer as _grow_edge_no_double_layer,
 )
 from tenax.algorithms._split_ctm_tensor_moves import (
-    _project_grown_edge_tensor as _project_grown_edge_tensor,
-)
-from tenax.algorithms._split_ctm_tensor_moves import (
     _reembed_target_for_projector as _reembed_target_for_projector,
 )
 from tenax.algorithms._split_ctm_tensor_moves import (
@@ -125,7 +122,6 @@ __all__ = [
     "_init_symmetric_edge_ket",
     "_make_dense_edge_bra",
     "_make_dense_edge_ket",
-    "_project_grown_edge_tensor",
     "_reembed_target_for_projector",
     "_renormalize_split_env",
     "_select_bond_entries",
