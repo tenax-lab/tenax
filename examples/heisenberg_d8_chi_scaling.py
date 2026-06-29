@@ -50,7 +50,10 @@ def _parse_nvidia_smi(text):
         if len(parts) < 4:
             continue
         idx, name, mem, util = parts[0], parts[1], parts[2], parts[3]
-        rows.append((int(idx), name, int(float(mem)), int(float(util))))
+        try:
+            rows.append((int(idx), name, int(float(mem)), int(float(util))))
+        except ValueError:
+            continue  # header row or [N/A] field -> skip, per the skip contract
     return rows
 
 
@@ -71,7 +74,7 @@ def select_free_a100s(rows, n, mem_threshold_mib=2048, util_threshold=50):
     if len(free) < n:
         raise RuntimeError(
             f"need {n} idle A100s, found {len(free)}: "
-            + ", ".join(f"gpu{r[0]}({r[2]}MiB,{r[3]}%)" for r in rows)
+            + ", ".join(f"gpu{r[0]}({r[2]}MiB,{r[3]}%)" for r in free)
         )
     return [r[0] for r in free[:n]]
 

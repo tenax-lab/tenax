@@ -54,3 +54,14 @@ def test_select_free_a100s_excludes_busy_a100():
     assert 4 not in d8.select_free_a100s(rows, 3)
     with pytest.raises(RuntimeError):
         d8.select_free_a100s(rows, 4)
+
+
+def test_parse_nvidia_smi_skips_malformed_and_na_lines():
+    text = (
+        "0, NVIDIA A100-SXM4-80GB, 56, 0\n"
+        "garbage line with too few fields\n"
+        "1, NVIDIA A100-SXM4-80GB, [N/A], [N/A]\n"  # MIG/vGPU state
+        "2, NVIDIA A100-SXM4-80GB, 20, 0\n"
+    )
+    rows = d8._parse_nvidia_smi(text)
+    assert [r[0] for r in rows] == [0, 2]  # malformed + N/A rows skipped
