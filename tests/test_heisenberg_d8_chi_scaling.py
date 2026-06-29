@@ -15,6 +15,7 @@ _PATH = (
 _spec = importlib.util.spec_from_file_location("heisenberg_d8_chi_scaling", _PATH)
 d8 = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(d8)
+d4 = d8.d4  # the d8 module path-loads the D=4 sibling for its reused helpers
 
 
 # nvidia-smi --query-gpu=index,name,memory.used,utilization.gpu
@@ -93,3 +94,21 @@ def test_argparser_defaults_target_the_wall():
     assert args.chi_ladder == "64,96,128,160,192,224,256"
     assert args.device_counts == "1,2"
     assert args.outdir == "runs/d8_chi_scaling"
+
+
+def test_smoke_args_shrink_the_run():
+    args = d8._build_argparser().parse_args(["--smoke"])
+    d8._apply_smoke(args)
+    assert args.outdir.endswith("_smoke")
+    assert args.chi_ladder == "8,12"
+    assert args.device_counts == "1"
+    assert args.imaginary_steps <= 20
+
+
+def test_load_or_run_scan_returns_cached_cell(tmp_path):
+    cell = d4.Cell(D=8, chi=64, n_devices=1)
+    path = d4.cell_result_path(str(tmp_path), cell)
+    d4._atomic_write_text(path, '{"D": 8, "chi": 64, "n_devices": 1, "oom": false}')
+    # cached file present -> no subprocess launched, returns the parsed dict
+    res = d8._load_or_run_scan(cell, str(tmp_path), timeout_s=1)
+    assert res["chi"] == 64 and res["oom"] is False

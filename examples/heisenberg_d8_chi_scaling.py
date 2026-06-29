@@ -281,3 +281,92 @@ def scan_cell(tensor_path, chi, n_devices):
             result["oom"] = True
         result["peak_gb"] = d4._peak_gb()
     return result
+
+
+def _su_phase(outdir, chi_su, imaginary_steps, dt):
+    """Run the one-time SU seed in a subprocess pinned to one idle A100."""
+    if os.path.exists(os.path.join(outdir, "A_opt.pkl")):
+        print("[su] A_opt.pkl present; simple update skipped", flush=True)
+        return
+    out = os.path.join(outdir, "su_status.json")
+    argv = [
+        sys.executable, str(pathlib.Path(__file__).resolve()), "--cell",
+        "--phase", "su", "--outdir", outdir, "--chi-su", str(chi_su),
+        "--imaginary-steps", str(imaginary_steps), "--dt", str(dt),
+        "--n-devices", "1", "--out", out,
+    ]
+    _launch(argv, n_devices=1, timeout_s=None)  # resume-safe; allow long wall
+
+
+def _load_or_run_scan(cell, outdir, timeout_s):
+    """Resume: load an existing cell JSON, else launch the scan worker and load
+    what it wrote. A timeout/no-file is recorded as an error so the row stops."""
+    path = pathlib.Path(d4.cell_result_path(outdir, cell))
+    cached = d4._read_json_or_none(path) if path.exists() else None
+    if cached is not None:
+        return cached
+    argv = [
+        sys.executable, str(pathlib.Path(__file__).resolve()), "--cell",
+        "--phase", "scan", "--outdir", outdir, "--chi", str(cell.chi),
+        "--n-devices", str(cell.n_devices), "--out", str(path),
+    ]
+    ok = _launch(argv, cell.n_devices, timeout_s)
+    loaded = d4._read_json_or_none(path)
+    if loaded is not None:
+        return loaded
+    res = {
+        "D": cell.D, "chi": cell.chi, "n_devices": cell.n_devices,
+        "E_site": None, "err_vs_qmc": None, "ms_per_sweep": None,
+        "n_sweeps": None, "peak_gb": None, "converged": False, "oom": False,
+        "error": ("timeout" if not ok else "worker produced no result file"),
+    }
+    d4._atomic_write_text(str(path), json.dumps(res, indent=2))
+    return res
+
+
+def _apply_smoke(args):
+    """Shrink an args namespace to a fast end-to-end validation run."""
+    args.outdir = args.outdir + "_smoke"
+    args.chi_su = 8
+    args.imaginary_steps = 20
+    args.chi_ladder = "8,12"
+    args.device_counts = "1"
+    args.cell_timeout_s = 1200
+
+
+def main(args):
+    outdir = args.outdir
+    os.makedirs(outdir, exist_ok=True)
+    chi_ladder = [int(x) for x in args.chi_ladder.split(",")]
+    device_counts = [int(x) for x in args.device_counts.split(",")]
+
+    # Phase 1: simple-update seed once (single idle A100).
+    _su_phase(outdir, args.chi_su, args.imaginary_steps, args.dt)
+    if not os.path.exists(os.path.join(outdir, "A_opt.pkl")):
+        print("[abort] SU produced no A_opt.pkl; see "
+              f"{outdir}/su_status.json", flush=True)
+        return
+
+    # Phase 2: scan χ per device row; stop a row on OOM/error/timeout.
+    results = []
+    for n in device_counts:
+        for chi in chi_ladder:
+            res = _load_or_run_scan(d4.Cell(D=D, chi=chi, n_devices=n), outdir,
+                                    args.cell_timeout_s)
+            results.append(res)
+            if d4.should_stop_row(res):
+                print(f"[stop] n={n} row stopped at χ={chi} "
+                      f"({d4._status(res)})", flush=True)
+                break
+
+    d4._aggregate(results, outdir)
+
+
+if __name__ == "__main__":
+    _args = _build_argparser().parse_args()
+    if _args.smoke:
+        _apply_smoke(_args)
+    if _args.cell:
+        _run_worker(_args)
+    else:
+        main(_args)
