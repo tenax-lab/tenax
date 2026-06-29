@@ -119,9 +119,35 @@ def _worker_env(n_devices, base_env):
     return env
 
 
-def _launch(argv, n_devices, timeout_s):
-    """Run a worker subprocess; return True if it exited within the timeout."""
-    env = _worker_env(n_devices, dict(os.environ))
+def _wait_for_free_a100s(n_devices, gpu_wait_s, poll_s=30):
+    """Block until n idle A100s are available, up to ``gpu_wait_s`` seconds, then
+    return True. On a shared box GPU contention is usually transient, so we wait
+    rather than crash. Returns False if the deadline passes (probing every
+    ``poll_s`` seconds). Never raises."""
+    deadline = time.monotonic() + gpu_wait_s
+    while True:
+        try:
+            free_a100_indices(n_devices)
+            return True
+        except RuntimeError as e:
+            if time.monotonic() >= deadline:
+                print(f"[gpu] {e}; gave up after {gpu_wait_s}s", flush=True)
+                return False
+            print(f"[gpu] {e}; retrying in {poll_s}s", flush=True)
+            time.sleep(poll_s)
+
+
+def _launch(argv, n_devices, timeout_s, gpu_wait_s=1800):
+    """Run a worker subprocess once n idle A100s are free. Returns True if it
+    exited within the timeout, False on timeout, or None if no n idle A100s
+    became free within ``gpu_wait_s`` (so the caller can stop the run gracefully
+    without poisoning the resume cache). Never raises on GPU unavailability."""
+    if not _wait_for_free_a100s(n_devices, gpu_wait_s):
+        return None
+    try:
+        env = _worker_env(n_devices, dict(os.environ))
+    except RuntimeError:
+        return None  # a GPU was grabbed in the race between the wait and the pin
     print(f"[run] {' '.join(argv[argv.index('--cell'):])}", flush=True)
     try:
         subprocess.run(argv, env=env, check=False, timeout=timeout_s)
@@ -165,6 +191,10 @@ def _build_argparser():
                    default="64,96,128,160,192,224,256")
     p.add_argument("--device-counts", dest="device_counts", type=str, default="1,2")
     p.add_argument("--cell-timeout-s", dest="cell_timeout_s", type=int, default=2400)
+    p.add_argument("--gpu-wait-s", dest="gpu_wait_s", type=int, default=1800,
+                   help="max seconds to wait for n idle A100s before a cell "
+                        "(shared box: transient contention); then stop "
+                        "gracefully and aggregate completed cells")
     return p
 
 
@@ -289,7 +319,7 @@ def scan_cell(tensor_path, chi, n_devices):
     return result
 
 
-def _su_phase(outdir, chi_su, imaginary_steps, dt):
+def _su_phase(outdir, chi_su, imaginary_steps, dt, gpu_wait_s=1800):
     """Run the one-time SU seed in a subprocess pinned to one idle A100."""
     if os.path.exists(os.path.join(outdir, "A_opt.pkl")):
         print("[su] A_opt.pkl present; simple update skipped", flush=True)
@@ -301,12 +331,17 @@ def _su_phase(outdir, chi_su, imaginary_steps, dt):
         "--imaginary-steps", str(imaginary_steps), "--dt", str(dt),
         "--n-devices", "1", "--out", out,
     ]
-    _launch(argv, n_devices=1, timeout_s=None)  # resume-safe; allow long wall
+    # resume-safe; allow a long wall and wait out transient GPU contention
+    _launch(argv, n_devices=1, timeout_s=None, gpu_wait_s=gpu_wait_s)
 
 
-def _load_or_run_scan(cell, outdir, timeout_s):
+def _load_or_run_scan(cell, outdir, timeout_s, gpu_wait_s=1800):
     """Resume: load an existing cell JSON, else launch the scan worker and load
-    what it wrote. A timeout/no-file is recorded as an error so the row stops."""
+    what it wrote. A timeout/no-file is recorded as an error so the row stops.
+
+    Returns None (writing no cell JSON) when no idle A100s freed up within
+    ``gpu_wait_s`` -- a transient-infra condition, not a result -- so the caller
+    stops gracefully and a later resume retries the cell."""
     path = pathlib.Path(d4.cell_result_path(outdir, cell))
     cached = d4._read_json_or_none(path) if path.exists() else None
     if cached is not None:
@@ -316,7 +351,9 @@ def _load_or_run_scan(cell, outdir, timeout_s):
         "--phase", "scan", "--outdir", outdir, "--chi", str(cell.chi),
         "--n-devices", str(cell.n_devices), "--out", str(path),
     ]
-    ok = _launch(argv, cell.n_devices, timeout_s)
+    ok = _launch(argv, cell.n_devices, timeout_s, gpu_wait_s)
+    if ok is None:  # no idle A100s -> don't poison the resume cache
+        return None
     loaded = d4._read_json_or_none(path)
     if loaded is not None:
         return loaded
@@ -347,18 +384,29 @@ def main(args):
     device_counts = [int(x) for x in args.device_counts.split(",")]
 
     # Phase 1: simple-update seed once (single idle A100).
-    _su_phase(outdir, args.chi_su, args.imaginary_steps, args.dt)
+    _su_phase(outdir, args.chi_su, args.imaginary_steps, args.dt, args.gpu_wait_s)
     if not os.path.exists(os.path.join(outdir, "A_opt.pkl")):
         print("[abort] SU produced no A_opt.pkl; see "
               f"{outdir}/su_status.json", flush=True)
         return
 
-    # Phase 2: scan χ per device row; stop a row on OOM/error/timeout.
+    # Phase 2: scan χ per device row; stop a row on OOM/error/timeout. A None
+    # result means no idle A100s freed up in time -> stop the whole sweep
+    # gracefully and aggregate what completed (re-run to resume the rest).
     results = []
+    aborted = False
     for n in device_counts:
+        if aborted:
+            break
         for chi in chi_ladder:
             res = _load_or_run_scan(d4.Cell(D=D, chi=chi, n_devices=n), outdir,
-                                    args.cell_timeout_s)
+                                    args.cell_timeout_s, args.gpu_wait_s)
+            if res is None:
+                print(f"[abort] no {n} idle A100(s) for χ={chi} within "
+                      f"{args.gpu_wait_s}s; aggregating completed cells "
+                      "(re-run to resume)", flush=True)
+                aborted = True
+                break
             results.append(res)
             if d4.should_stop_row(res):
                 print(f"[stop] n={n} row stopped at χ={chi} "

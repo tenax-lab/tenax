@@ -112,3 +112,38 @@ def test_load_or_run_scan_returns_cached_cell(tmp_path):
     # cached file present -> no subprocess launched, returns the parsed dict
     res = d8._load_or_run_scan(cell, str(tmp_path), timeout_s=1)
     assert res["chi"] == 64 and res["oom"] is False
+
+
+def test_wait_for_free_a100s_gives_up_past_deadline(monkeypatch):
+    # A shared box with no idle A100s: free_a100_indices keeps raising. With a
+    # zero-length wait window the helper gives up immediately (returns False)
+    # instead of blocking or propagating the RuntimeError.
+    def _none_free(n):
+        raise RuntimeError("no idle A100s")
+
+    monkeypatch.setattr(d8, "free_a100_indices", _none_free)
+    assert d8._wait_for_free_a100s(2, gpu_wait_s=0, poll_s=0) is False
+
+
+def test_wait_for_free_a100s_true_when_available(monkeypatch):
+    monkeypatch.setattr(d8, "free_a100_indices", lambda n: [0, 1][:n])
+    assert d8._wait_for_free_a100s(2, gpu_wait_s=0, poll_s=0) is True
+
+
+def test_launch_returns_none_when_no_idle_gpus(monkeypatch):
+    # When no idle A100s free up in time, _launch must NOT raise; it returns None
+    # so the orchestrator can stop gracefully (the bug that crashed a real run).
+    monkeypatch.setattr(d8, "_wait_for_free_a100s", lambda n, w, poll_s=30: False)
+    assert d8._launch(["x", "--cell", "--phase", "scan"], 2, timeout_s=1,
+                      gpu_wait_s=0) is None
+
+
+def test_load_or_run_scan_returns_none_and_writes_no_poison(monkeypatch, tmp_path):
+    # _launch signalling 'no GPUs' (None) must propagate as None and leave NO
+    # cell JSON behind, so a resume retries the cell rather than trusting a
+    # transient-infra failure as a completed result.
+    monkeypatch.setattr(d8, "_launch", lambda *a, **k: None)
+    cell = d4.Cell(D=8, chi=128, n_devices=2)
+    res = d8._load_or_run_scan(cell, str(tmp_path), timeout_s=1, gpu_wait_s=0)
+    assert res is None
+    assert not pathlib.Path(d4.cell_result_path(str(tmp_path), cell)).exists()
