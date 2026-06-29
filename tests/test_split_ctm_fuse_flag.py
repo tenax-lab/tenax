@@ -421,7 +421,7 @@ def test_optimize_gs_ad_split_rejects_chi_auto_bump():
 
     A, gate = _split_opt_inputs()
     cfg = _split_opt_config(fuse=False, ctm={"chi_auto_bump": True, "chi_max": 6})
-    with pytest.raises(NotImplementedError, match="auto-bump"):
+    with pytest.raises(NotImplementedError, match="chi_auto_bump"):
         optimize_gs_ad(gate, A, cfg)
 
 
@@ -433,3 +433,27 @@ def test_optimize_gs_ad_split_rejects_non_1x1_recipe():
     cfg = _split_opt_config(fuse=False, gs_recipe="2x2")
     with pytest.raises(NotImplementedError, match="1x1"):
         optimize_gs_ad(gate, A, cfg)
+
+
+def test_validate_split_ctm_config_rejects_chi_changing_knobs():
+    """The shared split-CTM validator rejects every χ-changing knob (one source
+    of truth for both make_ctm_energy_fn and the optimizer dispatcher)."""
+    from tenax.algorithms.ipeps_ad_policy import validate_split_ctm_config
+
+    base = dict(chi=4, chi_I=4, fuse_virtual_legs=False)
+
+    with pytest.raises(NotImplementedError, match="1x1"):
+        validate_split_ctm_config(CTMConfig(**base), "2x2")
+    with pytest.raises(NotImplementedError, match="ctmrg_heuristic_increase_chi"):
+        validate_split_ctm_config(
+            CTMConfig(**base, ctmrg_heuristic_increase_chi=True, chi_max=6), "1x1"
+        )
+    with pytest.raises(NotImplementedError, match="chi_auto_bump"):
+        validate_split_ctm_config(
+            CTMConfig(**base, chi_auto_bump=True, chi_max=6), "1x1"
+        )
+    with pytest.raises(NotImplementedError, match="chi_ramp"):
+        validate_split_ctm_config(CTMConfig(**base, chi_ramp=[(4, 10)]), "1x1")
+
+    # Valid fixed-χ split config: no raise.
+    validate_split_ctm_config(CTMConfig(**base), "1x1")

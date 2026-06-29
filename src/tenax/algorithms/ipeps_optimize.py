@@ -1247,6 +1247,7 @@ def _optimize_gs_ad_tensor(
     from tenax.algorithms.ipeps_ad_policy import (
         ctm_converge_kwargs,
         make_ctm_energy_fn,
+        validate_split_ctm_config,
     )
 
     cg_gates = config.cg_gates
@@ -1310,24 +1311,13 @@ def _optimize_gs_ad_tensor(
     # silently feeding a SplitCTMTensorEnv to fused-only machinery.
     use_split = not ctm_cfg.fuse_virtual_legs
     if use_split:
-        if config.gs_recipe != "1x1":
-            raise NotImplementedError(
-                "fuse_virtual_legs=False (split CTM) requires gs_recipe='1x1'; "
-                f"got {config.gs_recipe!r}."
-            )
+        # Shared single source of truth for the CTMConfig-level rejects
+        # (recipe + the three χ-changing knobs); see validate_split_ctm_config.
+        validate_split_ctm_config(ctm_cfg, config.gs_recipe)
+        # iPEPSConfig-level rejects the shared helper can't see.
         if _use_cg:
             raise NotImplementedError(
                 "fuse_virtual_legs=False (split CTM) does not support cg_gates; "
-                "use fuse_virtual_legs=True."
-            )
-        if ctm_cfg.chi_auto_bump or ctm_cfg.ctmrg_heuristic_increase_chi:
-            raise NotImplementedError(
-                "in-CTM chi auto-bump is not supported on the split-CTM path; "
-                "use fuse_virtual_legs=True."
-            )
-        if ctm_cfg.chi_ramp is not None:
-            raise NotImplementedError(
-                "chi_ramp is not supported on the split-CTM path; "
                 "use fuse_virtual_legs=True."
             )
         if (
