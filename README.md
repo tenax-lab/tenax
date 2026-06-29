@@ -323,7 +323,7 @@ gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) + 0.5 * (
     jnp.einsum("ij,kl->ikjl", Sp, Sm) + jnp.einsum("ij,kl->ikjl", Sm, Sp)
 )
 
-# Recommended AD configuration: L-BFGS + explicit AD + QR projectors.
+# Explicit-AD configuration: L-BFGS + explicit AD + QR projectors.
 # forward_gauge defaults to "phase" (variPEPS-style Frobenius + phase
 # fix), correct for both implicit and explicit AD. Reaches E=-0.6628
 # at D=2, chi=16 (literature: -0.6548 at D=2).
@@ -334,7 +334,7 @@ config = iPEPSConfig(
         max_iter=80,
         projector_method="qr",  # recommended projector for explicit AD
     ),
-    # gs_implicit_ad=False is the default (explicit AD)
+    gs_implicit_ad=False,  # opt into explicit AD (the default is implicit)
     gs_projector_method="qr",
     gs_optimizer="lbfgs",  # L-BFGS with Hager-Zhang line search
     gs_line_search_method="hager_zhang",
