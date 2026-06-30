@@ -241,8 +241,28 @@ class TestSplitCTMExplicitAD:
                 num_steps=3,
                 warmup_steps=2,
             )
-            # Use corner norm as loss
-            return jnp.sum(env.C1.todense() ** 2)
+            # NOTE: do *not* use ``sum(C1**2)`` here. The #463 double-layer
+            # split path renormalizes each corner per move (max_abs_normalize),
+            # and the boundary corner of a uniform 1-site iPEPS is genuinely
+            # rank-1, so the normalized C1 collapses to a constant one-hot
+            # matrix that is identically independent of A — its gradient is
+            # exactly zero. The A dependence lives in the edge tensors, so sum
+            # over the full environment to exercise the explicit-AD gradient.
+            env_tensors = (
+                env.C1,
+                env.C2,
+                env.C3,
+                env.C4,
+                env.T1_ket,
+                env.T2_ket,
+                env.T3_ket,
+                env.T4_ket,
+                env.T1_bra,
+                env.T2_bra,
+                env.T3_bra,
+                env.T4_bra,
+            )
+            return sum(jnp.sum(t.todense() ** 2) for t in env_tensors)
 
         grad = jax.grad(loss)(A_data)
         assert jnp.all(jnp.isfinite(grad))
