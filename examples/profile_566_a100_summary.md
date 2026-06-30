@@ -40,3 +40,27 @@
 ### Caveats
 - **Reproducibility:** shared point D=3,χ=12 fermionic agrees across the two runs (2111s vs 2135s, ~1%) — magnitudes are solid.
 - **Non-monotonic backward in χ:** fermionic `vg_cmp` is erratic (χ=16 *lower* than χ=12). Forward compile is clean/monotonic (281→553→727→1156s); the variance is isolated to the backward — likely XLA autotuning/caching or a χ-dependent shift in dominant blocks. Single-point fermionic backward timings carry real variance.
+
+## (C) Stacked vs per-block backend — fermionic, depth 8 (default χ-factor 3)
+
+**Seam gate:** `tests/stacked/` = **51/51 passed on GPU** (CUDA, 65s) — stacked VJP/contract/decomp/dtype/view seams are correct, so the comparison is valid.
+**Artifacts (raw, since removed from the repo root):** `stacked.json`, `perblock.json`
+
+| D | χ | metric | stacked | perblock | stacked win |
+|---|----|--------|---------|----------|-------------|
+| 2 | 6 | fwd_cmp | 47.5s | 44.7s | −6% |
+| 2 | 6 | **vg_cmp** | 146.4s | 164.2s | **11%** |
+| 2 | 6 | bwd_cmp | 98.9s | 119.5s | 17% |
+| 4 | 12 | fwd_cmp | 514.9s | 537.4s | 4% |
+| 4 | 12 | **vg_cmp** | 1061.2s | 1417.6s | **25%** |
+| 4 | 12 | bwd_cmp | 546.2s | 880.3s | **38%** |
+| 2 | 6 | warm_step | 4163.6ms | 4432.9ms | 6.1% |
+| 4 | 12 | warm_step | 5573.6ms | 5833.7ms | 4.5% |
+
+**Findings:**
+0. **Runtime is positive too (not just compile).** Warm-step is 4.5–6.1% faster under stacked — small but on the *right* side, and notably the new contiguous-`_data` `StackedJaxBackend` does NOT reproduce the runtime-NEGATIVE behavior of the abandoned `TENAX_BATCH_BLOCKSPARSE` (#571/2/3) on A100. So the stacked backend is a clean partial win on BOTH axes (compile + runtime), which removes the last objection to a possible GPU default-flip of `TENAX_BLOCKSPARSE_BACKEND=stacked`.
+1. **Win is entirely in the backward.** Forward compile is backend-independent (515 vs 537s at D=4); stacked's advantage is isolated to `bwd_cmp` (546 vs 880s, −38%). Consistent with the wall being the per-block fixed-point backward — stacking blocks into one fused op cuts op-emission count there.
+2. **Mitigates but does not collapse.** D=4 `vg_cmp` is still ~18 min under stacked. The 25–38% cut is worth banking but is not the order-of-magnitude needed; per-block emission is softened, not solved, by the stacked backend alone.
+3. **Win grows with D** (11%→25% on vg, 17%→38% on bwd from D=2 to D=4) — helps most where it hurts most, but won't reach a >10× collapse on its own.
+
+**Bottom line:** stacked backend is GPU-correct and a solid partial lever (bank ~38% backward-compile reduction), but the #566 redirect still needs a deeper attack on per-block op emission to take the wall from minutes to seconds. Necessary-but-not-sufficient.
