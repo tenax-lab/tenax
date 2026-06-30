@@ -131,10 +131,13 @@ def _e_by_chi(results):
     return [by_chi[c] for c in sorted(by_chi)]
 
 
-def results_to_convergence_md(results):
-    """E/site vs χ on the fixed optimized state (device-independent)."""
+def results_to_convergence_md(results, d_label=4):
+    """E/site vs χ on the fixed optimized state (device-independent).
+
+    ``d_label`` only sets the title's bond-dimension tag (default 4), so the
+    D=8 sibling driver can reuse this formatter with the correct label."""
     lines = [
-        "### Convergence: E/site vs χ (D=4 square-lattice Heisenberg AFM)",
+        f"### Convergence: E/site vs χ (D={d_label} square-lattice Heisenberg AFM)",
         "",
         f"QMC reference E/site = {REFERENCE_E}",
         "",
@@ -499,9 +502,11 @@ def _load_or_run_scan(cell, outdir, timeout_s):
     return res
 
 
-def make_plots(results, outdir):
+def make_plots(results, outdir, d_label=4):
     """Best-effort PNGs: E vs χ (with QMC line), ms/sweep vs χ per n, speedup vs
-    χ per n, peak GB vs χ per n. Returns the list of paths written."""
+    χ per n, peak GB vs χ per n. Returns the list of paths written.
+
+    ``d_label`` only sets the bond-dimension tag in plot titles (default 4)."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -517,7 +522,7 @@ def make_plots(results, outdir):
         ax.plot([r["chi"] for r in conv], [r["E_site"] for r in conv], marker="o")
         ax.axhline(REFERENCE_E, ls="--", color="k", label=f"QMC {REFERENCE_E}")
         ax.set_xlabel("χ"); ax.set_ylabel("E / site")
-        ax.set_title("D=4 convergence: E/site vs χ"); ax.legend()
+        ax.set_title(f"D={d_label} convergence: E/site vs χ"); ax.legend()
         p = outdir / "convergence_E_vs_chi.png"
         fig.savefig(p, dpi=120); written.append(str(p)); plt.close(fig)
 
@@ -536,7 +541,7 @@ def make_plots(results, outdir):
             ax.set_xlabel("χ"); ax.set_ylabel(ylabel)
             if logy:
                 ax.set_yscale("log")
-            ax.legend(); ax.set_title(f"D=4 {ylabel} vs χ")
+            ax.legend(); ax.set_title(f"D={d_label} {ylabel} vs χ")
             p = outdir / fname
             fig.savefig(p, dpi=120); written.append(str(p))
         plt.close(fig)
@@ -551,15 +556,15 @@ def make_plots(results, outdir):
     if plotted:
         ax.axhline(1.0, ls=":", color="k")
         ax.set_xlabel("χ"); ax.set_ylabel("speedup vs 1-GPU")
-        ax.legend(); ax.set_title("D=4 multi-GPU speedup vs χ")
+        ax.legend(); ax.set_title(f"D={d_label} multi-GPU speedup vs χ")
         p = outdir / "perf_speedup_vs_chi.png"
         fig.savefig(p, dpi=120); written.append(str(p))
     plt.close(fig)
     return written
 
 
-def _aggregate(results, outdir):
-    conv_md = results_to_convergence_md(results)
+def _aggregate(results, outdir, d_label=4):
+    conv_md = results_to_convergence_md(results, d_label=d_label)
     perf_md = results_to_performance_md(results)
     (Path(outdir) / "convergence.md").write_text(conv_md)
     (Path(outdir) / "performance.md").write_text(perf_md)
@@ -569,7 +574,7 @@ def _aggregate(results, outdir):
             w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
             w.writeheader(); w.writerows(rows)
     try:
-        make_plots(results, outdir)
+        make_plots(results, outdir, d_label=d_label)
     except Exception as e:  # noqa: BLE001 — plotting is best-effort
         print(f"[warn] plotting failed: {e}", flush=True)
     print(conv_md); print(); print(perf_md)

@@ -423,6 +423,19 @@ class TestSplitCTMTensorConvergence:
         for t in env:
             assert jnp.all(jnp.isfinite(t.todense()))
 
+    def test_return_info_reports_iterations_and_converged(self, small_peps_dense):
+        """return_info=True returns (env, info) with a sweep count and a bool
+        converged flag; the default call still returns a bare env."""
+        env_only = ctm_split_tensor(small_peps_dense, chi=8, max_iter=30, chi_I=4)
+        assert isinstance(env_only, SplitCTMTensorEnv)  # default unchanged
+
+        env, info = ctm_split_tensor(
+            small_peps_dense, chi=8, max_iter=30, chi_I=4, return_info=True
+        )
+        assert isinstance(env, SplitCTMTensorEnv)
+        assert isinstance(info.iterations, int) and info.iterations >= 1
+        assert isinstance(info.converged, bool)
+
 
 # ------------------------------------------------------------------ #
 # Correctness tests                                                    #
