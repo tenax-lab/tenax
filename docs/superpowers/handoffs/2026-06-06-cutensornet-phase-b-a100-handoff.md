@@ -174,7 +174,7 @@ done
 ```
 
 Report `bwd_cmp` + `vg_cmp` (compile) **and** warm-step for all three. Measured A100 baselines to
-beat (fermionic, **χ = 3·D**, from §C of `profile_566_a100_summary.md`):
+beat (fermionic, **χ = 3·D**, from §C of `examples/profile_566_a100_summary.md`):
 
 | D=4, χ=12 | per-block | **stacked** (current best) | dense floor (χ=16) |
 |---|---|---|---|
