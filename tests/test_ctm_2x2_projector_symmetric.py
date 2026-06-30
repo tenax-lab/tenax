@@ -896,7 +896,16 @@ def _degenerate_matrix_tensor(seed: int = 3) -> SymmetricTensor:
     ids=["u1_real_a", "u1_real_b", "u1_complex", "degenerate_ties"],
 )
 def test_gauge_fix_vectorized_matches_reference_forward(factory):
-    """Vectorized gauge fix is byte-identical to the frozen per-column loop."""
+    """Vectorized gauge fix matches the frozen per-column loop.
+
+    The two implementations are algebraically identical, but the gauge phase
+    of a *complex* column is normalized as ``best_value / |best_value|`` — a
+    complex division whose rounding is not bit-stable across platforms' BLAS.
+    For real inputs the phase is an exact ±1 and the results are byte-identical;
+    for the complex case they agree only to floating-point tolerance (a strict
+    ``array_equal`` fails on some CI runners, e.g. the ``u1_complex`` sector).
+    Compare at FP tolerance, matching ``..._matches_reference_grad`` below.
+    """
     M_T = factory()
     U_T, _s, Vh_T = _svd_of(M_T)
 
@@ -906,9 +915,21 @@ def test_gauge_fix_vectorized_matches_reference_forward(factory):
     assert set(U_new.blocks) == set(U_ref.blocks)
     assert set(Vh_new.blocks) == set(Vh_ref.blocks)
     for key in U_ref.blocks:
-        assert jnp.array_equal(U_new.blocks[key], U_ref.blocks[key]), f"U block {key}"
+        np.testing.assert_allclose(
+            np.asarray(U_new.blocks[key]),
+            np.asarray(U_ref.blocks[key]),
+            rtol=1e-12,
+            atol=1e-12,
+            err_msg=f"U block {key}",
+        )
     for key in Vh_ref.blocks:
-        assert jnp.array_equal(Vh_new.blocks[key], Vh_ref.blocks[key]), f"Vh block {key}"
+        np.testing.assert_allclose(
+            np.asarray(Vh_new.blocks[key]),
+            np.asarray(Vh_ref.blocks[key]),
+            rtol=1e-12,
+            atol=1e-12,
+            err_msg=f"Vh block {key}",
+        )
 
 
 def test_gauge_fix_vectorized_matches_reference_grad():
