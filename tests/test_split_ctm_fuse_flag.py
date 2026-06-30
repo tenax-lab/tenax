@@ -489,3 +489,61 @@ def test_validate_split_ctm_config_rejects_chi_changing_knobs():
 
     # Valid fixed-χ split config: no raise.
     validate_split_ctm_config(CTMConfig(**base), "1x1")
+
+
+def test_split_energy_fn_guard_rejects_custom_energy_fn():
+    """Layer-2 CG guard: the split AD entry points reject a custom energy_fn.
+
+    CG runs by passing a coarse-grain energy_fn; the split path does not
+    support it yet (compute_energy_cg_split exists but is not wired through
+    the split AD). Lock the rejection so a refactor can't silently drop it.
+    """
+    from tenax.algorithms._split_ctm_energy_ad import (
+        ctm_energy_split_explicit,
+        ctm_energy_split_implicit,
+    )
+
+    A = _make_site(2, 2, seed=0)
+    gate = _heisenberg_gate()
+    for fn in (ctm_energy_split_implicit, ctm_energy_split_explicit):
+        with pytest.raises(NotImplementedError, match="custom energy_fn"):
+            fn(
+                {(0, 0): A},
+                SINGLE_SITE_NEIGHBORS,
+                gate,
+                chi=4,
+                energy_fn=lambda *a: 0.0,
+            )
+
+
+def test_optimize_gs_ad_split_rejects_cg_gates():
+    """Layer-1 CG guard: the split optimizer path rejects cg_gates up front.
+
+    cg_gates couples to the fused CTMTensorEnv (compute_energy_cg uses the
+    fused diagonal-RDM env); the split path raises rather than silently
+    feeding a SplitCTMTensorEnv to fused-only machinery (ipeps_optimize.py).
+    """
+    import jax.numpy as jnp
+
+    from tenax.algorithms.coarse_grain import honeycomb_cg_gates
+    from tenax.algorithms.ipeps_config import CTMConfig as _CTMConfig
+    from tenax.algorithms.ipeps_config import iPEPSConfig
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    cfg = iPEPSConfig(
+        max_bond_dim=2,
+        ctm=_CTMConfig(chi=8, fuse_virtual_legs=False, max_iter=10, min_iter=2),
+        gs_num_steps=1,
+        gs_recipe="1x1",
+        unit_cell="1x1",
+        su_init=False,
+        gs_c4v=True,
+        gs_explicit_ad=True,
+        gs_explicit_ad_steps=5,
+        gs_explicit_ad_warmup=2,
+        gs_metric_precond=False,
+        cg_gates=honeycomb_cg_gates(),
+    )
+    dummy_gate = jnp.zeros((4, 4, 4, 4))  # d_eff placeholder for the CG supersite
+    with pytest.raises(NotImplementedError, match="cg_gates"):
+        optimize_gs_ad(dummy_gate, None, cfg)
