@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+## v0.8.1 (2026-06-30)
+
+### New Features
+
+- **Single-site split-CTM AD** (#647, #648, #651, #652, #653, #657, #662) —
+  opt-in via `CTMConfig(fuse_virtual_legs=False)`: the whole 1-site optimizer
+  (`unit_cell="1x1"`, `gs_recipe="1x1"`) runs through the split χ²·D⁴
+  double-layer forward instead of the fused χ²·D⁶. Explicit and implicit
+  (Γ-gauge-fixed `custom_vjp`, Neumann backward) gradients agree to ~1e-12;
+  the warm-start, line-search probe, and final environment all route through
+  the split forward (returns `SplitCTMTensorEnv`), behind a single consolidated
+  config validator. Validated production-correct with C4v (variational window).
+  `DenseTensor` only, fixed χ; the memory win over the fused path is a large-D
+  (D≳16) effect. (#644/#641 bound the dense split forward to χ²·D⁴; #640/#642
+  add the CG-kagome large-D memory harness + gradient parity.)
+- **1-site checkpoint/resume incl. the coarse-grained (`cg_gates`) path** (#643, #497).
+- **Multi-GPU large-D dense CTM (GSPMD)** (#632, #635, #637) — GSPMD-sharded
+  forward (rung 1) and backward (rung 2) for `optimize_gs_ad`, plus an
+  AD-stable randomized truncated low-rank SVD. (A100 verdict: correct but a
+  weak large-D lever at present — see #634.)
+- **`compute_excitations` accepts `optimize_gs_ad` Tensor outputs** (#639, #636).
+
+### Performance / Research
+
+- D=3 χ-convergence study + 1-site grad-spike guard (#645); Heisenberg
+  scaling/perf showcase (recipe=1x1 + multi-GPU) (#638).
+- #566 compile-wall investigation — NO-GO findings: batched dispatch can't
+  close the D≥3 U(1)-Sz CTM-AD warm wall (#625, #626, #627), C-adjoint NO-GO
+  (#630), padded-vmap spikes (#631, #633).
+
+### Docs
+
+- Split-CTM AD optimization-path docs + corrected stale "explicit AD is the
+  default" claims (#654, #656); Capabilities overview page (#661).
+- Heisenberg χ-scaling benchmarks: D=4 (#646, #649), D=8 (#650).
+
+### Fixes / Chore
+
+- Green chronic flaky/macOS tests (#658, #659); remove scratch study/profiling
+  artifacts (#660); revert scratch 2×2 benchmark scripts (#629).
+
 ## v0.8.0 (2026-06-18)
 
 ### New Features
