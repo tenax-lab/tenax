@@ -62,10 +62,37 @@ This spec is the first, tightly-scoped prerequisite for an eventual flip:
    clean split-vs-fused energy parity is achievable at default settings — we do
    **not** need to pin `chi_I=chi*D` for the parity test.
 
-2. **A 1×1 unit cell cannot represent Néel order.** An absolute QMC comparison
-   is therefore meaningless at 1-site. The correct production-correctness bar
-   is *split reproduces the trusted fused result on the same 1×1 problem*, not
-   an absolute physical energy.
+2. **(REVISED 2026-06-30 after empirical probing — supersedes the original
+   "fused-parity over optimization" bar.)** Three measured facts reshaped Part 1:
+
+   a. **Split ≠ fused over a full optimization, and it's structural (#425), not
+      truncation.** At D=2 χ=4 the bare-Heisenberg 1-site optimization gives
+      split → −0.0527 vs fused → +0.0311 (gap 0.084), **identical at
+      `chi_I=chi` and lossless `chi_I=chi*D` to 12 digits**, and unchanged by
+      `gs_metric_precond`. So the iterated split- and fused-CTM forwards select
+      *different fixed points* in the degenerate-corner SVD subspace — even
+      though a *single* evaluation is bit-identical at lossless χ_I (the existing
+      `test_split_matches_fused_lossless_chi_I`, 1e-8). ⟹ **"split == fused to
+      1e-6 over a full optimization" is known-false and cannot be a test bar.**
+
+   b. **An absolute reference IS achievable — via the sublattice-rotated
+      Heisenberg gate** `H_rot = −Sz⊗Sz − ½(S⁺⊗S⁺ + S⁻⊗S⁻)`, under which a 1-site
+      iPEPS represents Néel order, so E/site is comparable to QMC (−0.6694). The
+      original "absolute QMC meaningless at 1×1" claim was wrong — it only holds
+      for the *bare* (frustrated) gate.
+
+   c. **C4v is mandatory.** Without `gs_c4v=True` the unconstrained 1-site CTM is
+      non-variational for *both* paths (split converges cleanly to −0.714 *below*
+      the QMC floor; fused goes chaotic, |g|~1e7 stall-noise, E_best −0.763) —
+      the documented 1-site-CTM unreliability (`project_c3_floor_breach_smoking_gun`),
+      orthogonal to split. **With `gs_c4v=True`** both become stable and
+      variational and track within ~0.01/site. Measured converged values
+      (D=2, χ=10, grad_norm |g|<1e-3):
+      `split+c4v = −0.6505` (variational, +0.019 above QMC),
+      `fused+c4v = −0.6601` (variational, +0.009 above QMC). The 0.0096/site gap
+      **persists at tight |g|** ⟹ genuine bounded #425, not under-convergence.
+      Both sit in the physical window `[−0.6694, −0.60]` (above the QMC floor,
+      below the disordered energy ⟹ real order).
 
 3. **CG is blocked on the split path at two layers, despite the split-aware CG
    energy already existing:**
@@ -85,36 +112,53 @@ This spec is the first, tightly-scoped prerequisite for an eventual flip:
 
 ## Design
 
-### Part 1 — 1-site production-correctness test
+### Part 1 — 1-site production-correctness test (variational window, C4v)
 
-New test (target file: `tests/test_split_ctm_fuse_flag.py`, or a focused new
-`tests/test_split_ctm_production_parity.py` — implementation-plan decides).
+New test in a focused new file `tests/test_split_ctm_production_correctness.py`
+(keeps the slow optimizer test out of the `core`-marked `test_split_ctm_fuse_flag.py`).
 
-**Mechanism.** For D ∈ {2, 3}:
+**Mechanism (single split run — does NOT require running fused).**
 
-1. Build a single 1×1 site tensor `A` from a fixed seed; use the existing
-   `_heisenberg_gate()` antiferromagnetic gate.
-2. Run `optimize_gs_ad(gate, A, config)` **twice** with identical config except
-   the flag:
-   - split: `CTMConfig(chi, chi_I=chi, fuse_virtual_legs=False)`,
-   - fused: `CTMConfig(chi, fuse_virtual_legs=True)`,
-   - both `unit_cell="1x1"`, `gs_recipe="1x1"`, `gs_implicit_ad=True`,
-     `forward_gauge="phase"`, same `gs_num_steps` (small, e.g. 5–10), same seed.
-3. Assert:
-   - `E_split_final ≈ E_fused_final` to `atol ≈ 1e-6` (faithful drop-in),
-   - `E_split_final < E_split_initial` (the optimizer actually descends),
-   - returned env is a `SplitCTMTensorEnv` (already covered elsewhere; keep or
-     cross-reference).
+1. Build the sublattice-rotated Heisenberg gate
+   `H_rot = −Sz⊗Sz − ½(S⁺⊗S⁺ + S⁻⊗S⁻)` so a 1-site iPEPS represents Néel order.
+2. Run `optimize_gs_ad(gate, A, config)` once with the **split** path AND C4v:
+   - `CTMConfig(chi=10, chi_I=10, fuse_virtual_legs=False, max_iter=80,
+     conv_tol=1e-10, min_iter=4)`,
+   - `iPEPSConfig(unit_cell="1x1", gs_recipe="1x1", gs_implicit_ad=True,
+     gs_c4v=True, gs_metric_precond=False, gs_conv_criterion="grad_norm",
+     gs_grad_norm_tol=1e-3, gs_num_steps=100, su_init=False)`,
+   - `A = _make_site(2, 2, seed=3)` (D=2).
+3. Assert on the returned final energy `E` (per site = E_h + E_v):
+   - **Variational:** `E >= QMC_FLOOR - 1e-3` with `QMC_FLOOR = -0.6694` — split
+     stays above the QMC ground-state energy. *This is the assertion that
+     catches the failure mode:* without C4v split breaches to −0.714; with the
+     #425-spurious fixed point it would dip below the floor.
+   - **Ordered:** `E <= -0.60` — below the disordered/product energy, proving the
+     1-site Néel ansatz actually found order (not stuck high).
+   - i.e. `−0.6694 ≤ E ≤ −0.60`. Measured split+c4v value: **−0.6505** (margin
+     +0.019 above floor, −0.050 below the ordered bound — comfortable both ways).
 
-**Tolerance rationale.** Single-eval split-vs-fused parity holds to ~1e-8 at
-lossless `chi_I` (existing `test_split_matches_fused_lossless_chi_I`). Over a
-full optimization, accumulated L-BFGS path divergence and the
-`chi_I=chi`-vs-lossless residual (~0 but nonzero) loosen this; `1e-6` is the
-proposed bar, to be tightened in the implementation plan if the empirical gap
-is smaller. The bar must be justified by a measured number, not guessed.
+**Why a window, not fused-parity.** Split and fused converge to *different*
+fixed points (#425, gap ~0.01/site, both physical) — see finding 2a/2c. A
+1e-6 fused-parity bar is known-false. The physical window `[−0.6694, −0.60]`
+is the well-defined bar: it is exactly what a *correct* variational 1-site path
+must satisfy, and it is violated by the spurious sub-QMC fixed point the
+no-C4v probe exposed. Single-run ⟹ ~half the wall-clock of a split+fused pair.
 
-**Marker.** `algorithm`-tier (runs an optimizer); not `core` — keeps CI-required
-checks fast.
+**Optional companion (separate test, same file).** A `split-tracks-fused` check:
+run fused+c4v with the same config and assert `abs(E_split - E_fused) <= 0.03`
+(measured 0.0096, 3× margin). Marked `slow`; documents the bounded #425 gap.
+Include only if the extra optimizer run is acceptable; the window test is the
+primary deliverable.
+
+**Marker.** `slow` (one full implicit-AD optimization, ~minutes on GPU, much
+longer on CPU). Runs on push-to-main / `run-full-tests`, NOT the `core` CI gate.
+Use `@pytest.mark.slow` explicitly (do not rely on filename auto-marking).
+
+**Convergence caveat.** L-BFGS wobbles mid-run (line-search overshoot, stall
+recovery) — the assertion must be on the **final/E_best** energy after
+`grad_norm` convergence (|g|<1e-3, ~step 69 measured), never on an arbitrary
+intermediate step.
 
 ### Part 2 — CG guard lock-in + documentation
 
@@ -144,29 +188,38 @@ To run CG on the split path later:
 
 ## Testing
 
-- Part 1: the new optimizer-parity test (D=2, D=3).
-- Part 2: the CG-rejection regression test(s).
+- Part 1: the new `slow` variational-window test (split+c4v, rotated Heisenberg).
+- Part 2: the CG-rejection regression test(s) (both guard layers).
 - Regression guard: the existing split-CTM suite
   (`test_split_ctm_fuse_flag.py`, `test_split_ctm_doublelayer_projector.py`,
   `test_split_ctm_tensor.py`) must stay green.
 
 ## Acceptance criteria
 
-- [ ] 1-site split optimization matches fused to ≤1e-6 in final energy at
-      D∈{2,3}, and both descend from their initial energy.
-- [ ] CG + `fuse_virtual_legs=False` raises a clear `NotImplementedError`
-      (regression-locked).
+- [ ] `slow` split+c4v rotated-Heisenberg optimization lands in the physical
+      window `−0.6694 ≤ E/site ≤ −0.60` (variational + ordered), at D=2 χ=10
+      with `gs_c4v=True`, `gs_conv_criterion="grad_norm"`, `gs_grad_norm_tol=1e-3`.
+- [ ] CG + `fuse_virtual_legs=False` raises a clear `NotImplementedError` at BOTH
+      guard layers (optimizer `cg_gates` reject + split-AD `energy_fn` reject),
+      regression-locked.
 - [ ] Future CG-on-split enablement path is documented.
 - [ ] Full split-CTM test suite green; no behavior change to any shipped path.
 
 ## Risks
 
-- **Optimizer-path divergence** between split and fused could exceed 1e-6 even
-  though single-eval parity is ~1e-8 (different L-BFGS trajectories from
-  floating-point-order differences). Mitigation: keep step count small, seed
-  fixed; if the empirical gap is larger, the parity bar should compare
-  *per-step* energies for the first step (where paths can't yet diverge) and
-  loosen the final-energy tolerance with a measured justification — decided in
-  the implementation plan, not guessed here.
-- **CG guard message drift** — the test should match on a stable substring
-  (`"cg_gates"`), not the full message.
+- **The variational-window bar is config-sensitive.** It only holds *with*
+  `gs_c4v=True`; without C4v split breaches to −0.714 (measured). The test MUST
+  set `gs_c4v=True` and assert on the converged `E_best`, never an intermediate
+  step (L-BFGS wobbles). The −0.60 ordered bound has −0.050 margin and the QMC
+  floor +0.019 margin against the measured −0.6505; both comfortable.
+- **Runtime.** One implicit-AD optimization to |g|<1e-3 took ~69 steps (~minutes
+  on GPU, ~20+ min on CPU). Hence `slow`-marked and kept off the `core` gate. If
+  CI runtime is a concern, χ=8 / `gs_grad_norm_tol=2e-3` still clears the window
+  (split was already above the floor by step ~6) — the plan may lower these, but
+  must re-measure that the window still holds before tightening.
+- **CG guard message drift** — match on a stable substring (`"cg_gates"` /
+  `"energy_fn"`), not the full message.
+- **#425 is the real flip blocker, not this spec.** This validation *confirms*
+  the 1-site split path is variational with C4v; it does NOT close the bounded
+  ~0.01/site split-vs-fused fixed-point gap. Whether that gap is acceptable for
+  making split canonical (the actual flip) is a separate decision, out of scope.
