@@ -84,10 +84,15 @@ research.
   sees it.
 - **Split-CTMRG** -- ket/bra-separated environment tensors that cut the
   projector cost from O(χ³D⁶) to O(χ³D³) (Naumann et al., arXiv:2502.10298).
-  Works on both `DenseTensor` and `SymmetricTensor`, with energy entry points
-  for 2-site checkerboard and multisite (kagome PESS) cells, and an
-  AD ground-state path (`CTMConfig(fuse_virtual_legs=False)`) whose implicit
-  gradient matches the trusted explicit-AD gradient to ~1e-12.
+  The forward and energy entry points work on both `DenseTensor` and
+  `SymmetricTensor`, for 2-site checkerboard and multisite (kagome PESS) cells.
+  The split **AD ground-state** path is narrower: enable it with
+  `CTMConfig(fuse_virtual_legs=False)` **together with** the dense single-site
+  optimizer (`unit_cell="1x1"` *and* `gs_recipe="1x1"`). Other recipes / unit
+  cells and `SymmetricTensor` / fermionic inputs raise `NotImplementedError` (a
+  later phase), and χ is fixed on this path. Its implicit gradient matches the
+  trusted explicit-AD gradient to ~1e-12; the memory win over the fused double
+  layer is a large-D effect (D ≳ 16).
 - **Fermionic iPEPS (fPEPS)** -- graded tensors with Koszul signs,
   `FermionParity` / `FermionicU1`, and a `spinless_fermion_gate` (hopping +
   interaction). See {doc}`algorithms/fpeps`.
