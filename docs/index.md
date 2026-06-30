@@ -32,6 +32,7 @@ research. Bug reports and contributions are welcome.
 
 guide/installation
 guide/quickstart
+guide/capabilities
 guide/core_concepts
 guide/contraction
 guide/tensor_networks
