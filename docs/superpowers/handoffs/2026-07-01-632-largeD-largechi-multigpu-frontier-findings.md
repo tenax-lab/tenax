@@ -82,3 +82,10 @@ Full sweep driver: `scratchpad/run_frontier_sweep.sh` (anchor-gated, per-D early
 - Split reach for D≤10 is a **grid cap (χ=128), not a measured wall** — split's true single-GPU χ ceiling at D=8/10 is higher and unmeasured (phase-2 item a).
 - **2 GPUs only** (GPUs 1,2 clean; 0 held 61 GiB, 4 busy). A 4-GPU dense run would raise shard relief modestly (N=4 shards all of D²∈{36,64,100,144}) but the ~1.1–1.4× / no-D-reach pattern predicts it stays a "fit a bit bigger" lever, not a D-enabler.
 - Well-conditioned near-product state (clean adjoint); a random/critical state would have a harder backward but similar peak scaling (D⁶ dense / D⁴ split).
+
+## Harness follow-ups (non-blocking; for phase-2 reuse of this harness)
+
+Surfaced by the whole-branch review; none affected this run's numbers, but worth tightening before the phase-2 split-reach sweep reuses `bench_ctm_frontier_grad.py`:
+- **Narrow the run-time `except`** (`examples/bench_ctm_frontier_grad.py`): it catches all `Exception` and prints `FAILED(...)`. Every failure here was a legitimate XLA `RESOURCE_EXHAUSTED`/autotuner error (verified by the printed exc-type + GiB counts), but a genuine probe bug (TypeError/shape/NaN) would also be reported as a `FAILED` cell rather than surfacing — re-raise non-XLA exceptions so a real bug can't masquerade as a "wall". A NaN energy would still print `OK E=nan`; add a finite check if phase 2 hits ill-conditioned states.
+- **Lock the JAX-free-at-import invariant** with a subprocess assertion (in-process `"jax" not in sys.modules` is unreliable once another test imports jax) so a future top-level jax import in the harness fails loudly.
+- Align the probe's `chi_I=chi_I or chi` to `chi_I if chi_I is not None else chi` (matches `ctm_energy_split_implicit`'s own convention; only matters if a caller passes `chi_I=0`).
