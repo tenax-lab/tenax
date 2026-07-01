@@ -362,6 +362,36 @@ tiling + init-consistency fixes already landed); (3) re-examine whether the
 enlarged-corner `c4_u↔t4_u` pairing is itself the bug. The pre-plan memory note
 already leaned toward "not worth it beyond the clean tiling fix."
 
+### Phase 2 follow-up (user-approved investigation of the c4_u↔t4_u pairing) — DIRECTION-DEPENDENCE IS A RED HERRING
+
+A focused spike tested whether the `c4_u↔t4_u` invariant is the bug or the
+absorption, using a direction-**UNIFORM** multi-charge reference (normal U(1)-Sz
+SU with `base_charges` kept → `A.l == A.r`).
+
+- **The `c4_u == t4_u` invariant is BROKEN after a single `left` absorption for
+  the UNIFORM env too** (uniform: `C4.c4_u = {-2:2,-1:4,0:3,1:2,2:1}` — the
+  carried old `T3.t3_l` — vs `T4.t4_u = {-3:4,-2:7,0:1}` — the compressed
+  vertical bond). In BOTH uniform and direction-dependent, `new C4.c4_u` is the
+  carried `T3.t3_l` and the projector-compressed bond lands on `c4_r`.
+- **The real `ctm_tensor_2site(recipe="2x2")` RAISES on the uniform multi-charge
+  env** at the identical `bottom_left` `c4_u↔t4_u` contraction (3-vs-4). It is
+  NOT direction-dependent-specific.
+- `recipe="1x1"` on the same uniform env "completes" only by collapsing the
+  corner to norm 0 (the known 2-site symmetric collapse,
+  `project_forward_symmetric_ctm_energy_status`).
+
+**Conclusion: the symmetric block-sparse 2×2 forward sweep is latently broken for
+ANY genuine multi-charge U(1) env** — the `bottom_left`/`bottom_right` enlarged
+corner contracts a CARRIED leg (`c4_u ← T3.t3_l`) against a COMPRESSED leg
+(`t4_u ← P_bot_curr`), which only share block structure for trivial (dense)
+charges. Production never hit this because (a) the AD/tracer path runs with
+trivial charges (one block of size χ) and (b) the exercised symmetric forward CTM
+is single-site. The `c4_u↔t4_u` pairing is a correct requirement; the ABSORPTION
+violates it in general. **#667's direction-dependent 2×2 test cannot pass until
+this general symmetric-2×2-multicharge absorption bug is fixed — a separate,
+larger defect that deserves its own issue.** The genuinely-correct, shippable
+output of this whole plan is Phase 0 + Phase 1 (both landed).
+
 ---
 
 ## Phase 3 — Implement the chosen mechanism for the 2×2 recipe (code depends on Phase 2 outcome)
