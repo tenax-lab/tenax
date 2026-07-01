@@ -87,3 +87,10 @@ def _chunked_T_new_bottom(T3, a, P1, P2, chi, D2, batch):
         return jnp.tensordot(step, P2, axes=([1], [0]))              # (chi_new, u2, chi_new_r)
 
     return lax.map(per_i, (T3, P1r), batch_size=batch).sum(0)
+
+
+def _raw_in_label_order(T, order):
+    """Return T's raw array transposed to the given label order (DenseTensor only)."""
+    cur = list(T.labels())
+    perm = [cur.index(lbl) for lbl in order]
+    return T.transpose(tuple(perm)).todense()

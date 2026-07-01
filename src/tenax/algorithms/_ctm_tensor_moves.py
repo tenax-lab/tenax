@@ -1002,6 +1002,7 @@ def _ctm_tensor_move_left(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
+    chunk_size: int | None = None,
 ) -> tuple[CTMTensorEnv, jax.Array]:
     """Left move: updates C1, T4, C4.
 
@@ -1012,6 +1013,12 @@ def _ctm_tensor_move_left(
     Dense reference: C1g = einsum('ab,buc->auc', C1, T1)
                      C4g = einsum('gh,hdi->gdi', C4, T3)
                      T4g = einsum('alg,udlr->augdr', T4, a)
+
+    Args:
+        chunk_size: When not None and env_self.T4 is a DenseTensor, use the
+            chunked raw core (_chunked_T_new_left) to compute T4_new without
+            materializing the full chi^2*D^6 intermediate.  Default (None)
+            uses the standard fused-index path unchanged.
     """
     # C1(self) · T1(neighbor)
     C1_r = env_self.C1.relabel("c1_r", "t1_l")
@@ -1023,18 +1030,46 @@ def _ctm_tensor_move_left(
     C4g = contract(C4_u, env_neighbor.T3)  # (c4_r, d2, t3_l)
     C4g = _fuse_pair_by_label(C4g, "c4_r", "d2", "fused", IN)  # (fused, t3_l)
 
-    # T4(self) · a(neighbor)
-    T4_with_a = contract(env_self.T4, a)
-    T4g = _fuse_pair_by_label(T4_with_a, "t4_d", "u2", "fl", IN)
-    T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", OUT)
-
-    # Native projector
+    # Native projector (needs only the grown corners, not the grown edge)
     P_1, P_2, _eps_t = _compute_projector_tensor(
         C1g, C4g, chi, projector_method, base_charges, projector_backward
     )
-    C1_new, C4_new, T4_new = _apply_projector_with_reembed(
-        P_1, P_2, C1g, C4g, T4g, "fl", "fr"
-    )
+
+    if chunk_size is not None and isinstance(env_self.T4, DenseTensor):
+        from tenax.algorithms._ctm_chunked_absorb import (
+            _chunked_T_new_left,
+            _raw_in_label_order,
+        )
+
+        chi_dim = env_self.T4.indices[list(env_self.T4.labels()).index("t4_d")].dim
+        D2 = a.indices[list(a.labels()).index("r2")].dim
+        T4_raw = _raw_in_label_order(env_self.T4, ["t4_d", "l2", "t4_u"])
+        a_raw = _raw_in_label_order(a, ["u2", "d2", "l2", "r2"])
+        P1_bar = P_1.bar()
+        # Pass un-conjugated P1 data; the core conjugates P1 internally.
+        P1_raw = _raw_in_label_order(P1_bar, ["fused", "chi_new"]).conj()
+        P2_raw = _raw_in_label_order(P_2, ["fused", "chi_new"])
+        T4_arr = _chunked_T_new_left(T4_raw, a_raw, P1_raw, P2_raw, chi_dim, D2, chunk_size)
+
+        # Corners: identical to _apply_projector_tensor
+        C1_new = contract(P1_bar, C1g)   # (chi_new, t1_r)
+        C4_new = contract(P_2.bar(), C4g)  # (chi_new, t3_l)
+
+        # Rewrap T4_new with production TensorIndex objects.
+        # Shape (chi_new, r2, chi_new_r) matching default _apply_projector_tensor output.
+        chi_new_idx = P1_bar.indices[list(P1_bar.labels()).index("chi_new")]
+        surv_idx = a.indices[list(a.labels()).index("r2")]
+        chi_new_r_idx = P_2.indices[list(P_2.labels()).index("chi_new")].relabel("chi_new_r")
+        T4_new = DenseTensor(T4_arr, (chi_new_idx, surv_idx, chi_new_r_idx))
+    else:
+        # T4(self) · a(neighbor)
+        T4_with_a = contract(env_self.T4, a)
+        T4g = _fuse_pair_by_label(T4_with_a, "t4_d", "u2", "fl", IN)
+        T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", OUT)
+
+        C1_new, C4_new, T4_new = _apply_projector_with_reembed(
+            P_1, P_2, C1g, C4g, T4g, "fl", "fr"
+        )
 
     # Relabel to expected output labels
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t1_r": "c1_r"})
