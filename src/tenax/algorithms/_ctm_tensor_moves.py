@@ -151,10 +151,7 @@ def _env_is_fermionic(env_src: CTMTensorEnv) -> bool:
     asymmetric-conjugate), fermionic envs keep the proven fused path.
     """
     C1 = env_src.C1
-    return (
-        isinstance(C1, SymmetricTensor)
-        and C1.indices[0].symmetry.is_fermionic
-    )
+    return isinstance(C1, SymmetricTensor) and C1.indices[0].symmetry.is_fermionic
 
 
 def _phase_fix_normalize_tensor(T: Tensor) -> Tensor:
@@ -514,7 +511,9 @@ def _ctm_tensor_absorb_left_2plaq(
 
     # ---- T4: sandwiched by P_top_above (top face, t4_d⊕u2) and
     #          P_bot_curr (bottom face, t4_u⊕d2) ----
-    step = _apply_proj_unfused(P_top_above, T4_with_a, "t4_d", "u2")  # (chi_new, t4_u, d2, r2)
+    step = _apply_proj_unfused(
+        P_top_above, T4_with_a, "t4_d", "u2"
+    )  # (chi_new, t4_u, d2, r2)
     # ``env_first`` matches the fused path's ``contract(step, P_right)`` order
     # (Koszul-correct for fermions) and yields canonical leg order directly.
     T4_new = _apply_proj_unfused(
@@ -599,7 +598,9 @@ def _ctm_tensor_absorb_right_2plaq(
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t3_r": "c3_l"})
 
     # ---- T2: sandwiched by P_bot_above (fl, t2_u⊕u2) and P_top_curr (fr, t2_d⊕d2) ----
-    step = _apply_proj_unfused(P_bot_above, T2_with_a, "t2_u", "u2")  # (chi_new, t2_d, d2, l2)
+    step = _apply_proj_unfused(
+        P_bot_above, T2_with_a, "t2_u", "u2"
+    )  # (chi_new, t2_d, d2, l2)
     T2_new = _apply_proj_unfused(
         P_top_curr, step, "t2_d", "d2", chi_new="chi_new_r", env_first=True
     )
@@ -670,7 +671,9 @@ def _ctm_tensor_absorb_top_2plaq(
     C2_new = C2_new.relabels({"chi_new": "c2_l", "t2_d": "c2_d"})
 
     # ---- T1: sandwiched by P_bot_left (fl, t1_l⊕l2) and P_top_curr (fr, t1_r⊕r2) ----
-    step = _apply_proj_unfused(P_bot_left, T1_with_a, "t1_l", "l2")  # (chi_new, t1_r, d2, r2)
+    step = _apply_proj_unfused(
+        P_bot_left, T1_with_a, "t1_l", "l2"
+    )  # (chi_new, t1_r, d2, r2)
     T1_new = _apply_proj_unfused(
         P_top_curr, step, "t1_r", "r2", chi_new="chi_new_r", env_first=True
     )
@@ -706,8 +709,9 @@ def _ctm_tensor_absorb_bottom_2plaq(
     C4g = contract(C4_r, env_src.T4)  # (c4_u, t4_d, l2)
 
     # ---- C3·T2 (both at s_src) ----
-    C3_l = env_src.C3.relabel("c3_l", "t2_d")
-    C3g = contract(C3_l, env_src.T2)  # (c3_u, t2_u, r2)
+    # C3.c3_u <-> T2.t2_d  (energy/RDM convention; #670)
+    C3_u = env_src.C3.relabel("c3_u", "t2_d")
+    C3g = contract(C3_u, env_src.T2)  # (c3_l, t2_u, r2)  # #670
 
     # ---- T3·ket (both at s_src) ----
     T3_with_a = contract(env_src.T3, a_src)  # (t3_r, t3_l, u2, l2, r2)
@@ -717,11 +721,13 @@ def _ctm_tensor_absorb_bottom_2plaq(
     C4_new = C4_new.relabels({"chi_new": "c4_r", "t4_d": "c4_u"})
 
     # ---- C3: project with P_top_curr ----
-    C3_new = _apply_proj_unfused(P_top_curr, C3g, "c3_u", "r2")
+    C3_new = _apply_proj_unfused(P_top_curr, C3g, "c3_l", "r2")  # #670
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t2_u": "c3_l"})
 
     # ---- T3: sandwiched by P_top_left (fl, t3_r⊕l2) + P_bot_curr (fr, t3_l⊕r2) ----
-    step = _apply_proj_unfused(P_top_left, T3_with_a, "t3_r", "l2")  # (chi_new, t3_l, u2, r2)
+    step = _apply_proj_unfused(
+        P_top_left, T3_with_a, "t3_r", "l2"
+    )  # (chi_new, t3_l, u2, r2)
     T3_new = _apply_proj_unfused(
         P_bot_curr, step, "t3_l", "r2", chi_new="chi_new_r", env_first=True
     )
@@ -786,7 +792,9 @@ def _ctm_tensor_absorb_left_2plaq_fused(
 
     # ---- T4: sandwiched by P_top_above (top face, t4_d⊕u2) and
     #          P_bot_curr (bottom face, t4_u⊕d2) ----
-    step = _apply_proj_unfused(P_top_above, T4_with_a, "t4_d", "u2")  # (chi_new, t4_u, d2, r2)
+    step = _apply_proj_unfused(
+        P_top_above, T4_with_a, "t4_d", "u2"
+    )  # (chi_new, t4_u, d2, r2)
     T4_new = _apply_proj_unfused(
         P_bot_curr, step, "t4_u", "d2", chi_new="chi_new_r"
     )  # (chi_new, r2, chi_new_r)
@@ -871,7 +879,9 @@ def _ctm_tensor_absorb_right_2plaq_fused(
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t3_r": "c3_l"})
 
     # ---- T2: sandwiched by P_bot_above (fl, t2_u⊕u2) and P_top_curr (fr, t2_d⊕d2) ----
-    step = _apply_proj_unfused(P_bot_above, T2_with_a, "t2_u", "u2")  # (chi_new, t2_d, d2, l2)
+    step = _apply_proj_unfused(
+        P_bot_above, T2_with_a, "t2_u", "u2"
+    )  # (chi_new, t2_d, d2, l2)
     T2_new = _apply_proj_unfused(P_top_curr, step, "t2_d", "d2", chi_new="chi_new_r")
     T2_new = T2_new.relabels({"chi_new": "t2_u", "chi_new_r": "t2_d", "l2": "r2"})
     T2_new = T2_new.transpose(
@@ -939,7 +949,9 @@ def _ctm_tensor_absorb_top_2plaq_fused(
     C2_new = C2_new.relabels({"chi_new": "c2_l", "t2_d": "c2_d"})
 
     # ---- T1: sandwiched by P_bot_left (fl, t1_l⊕l2) and P_top_curr (fr, t1_r⊕r2) ----
-    step = _apply_proj_unfused(P_bot_left, T1_with_a, "t1_l", "l2")  # (chi_new, t1_r, d2, r2)
+    step = _apply_proj_unfused(
+        P_bot_left, T1_with_a, "t1_l", "l2"
+    )  # (chi_new, t1_r, d2, r2)
     T1_new = _apply_proj_unfused(P_top_curr, step, "t1_r", "r2", chi_new="chi_new_r")
     T1_new = T1_new.relabels({"chi_new": "t1_l", "chi_new_r": "t1_r", "d2": "u2"})
     T1_new = T1_new.transpose(
@@ -987,7 +999,9 @@ def _ctm_tensor_absorb_bottom_2plaq_fused(
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t2_u": "c3_l"})
 
     # ---- T3: sandwiched by P_top_left (fl, t3_r⊕l2) + P_bot_curr (fr, t3_l⊕r2) ----
-    step = _apply_proj_unfused(P_top_left, T3_with_a, "t3_r", "l2")  # (chi_new, t3_l, u2, r2)
+    step = _apply_proj_unfused(
+        P_top_left, T3_with_a, "t3_r", "l2"
+    )  # (chi_new, t3_l, u2, r2)
     T3_new = _apply_proj_unfused(P_bot_curr, step, "t3_l", "r2", chi_new="chi_new_r")
     T3_new = T3_new.relabels({"chi_new": "t3_r", "chi_new_r": "t3_l", "u2": "d2"})
     T3_new = T3_new.transpose(
@@ -1002,8 +1016,17 @@ def _ctm_tensor_absorb_bottom_2plaq_fused(
 
 
 def _chunked_T_new_apply(
-    edge, a, P_1, P_2, C1g, C4g,
-    edge_label_order, chi_leg, surv_leg, chunked_fn, chunk_size,
+    edge,
+    a,
+    P_1,
+    P_2,
+    C1g,
+    C4g,
+    edge_label_order,
+    chi_leg,
+    surv_leg,
+    chunked_fn,
+    chunk_size,
 ):
     """Chunked edge absorption for a 1x1 dense move.
 
@@ -1041,7 +1064,9 @@ def _chunked_T_new_apply(
     C4_new = contract(P_2.bar(), C4g)
     chi_new_idx = P1_bar.indices[list(P1_bar.labels()).index("chi_new")]
     surv_idx = a.indices[list(a.labels()).index(surv_leg)]
-    chi_new_r_idx = P_2.indices[list(P_2.labels()).index("chi_new")].relabel("chi_new_r")
+    chi_new_r_idx = P_2.indices[list(P_2.labels()).index("chi_new")].relabel(
+        "chi_new_r"
+    )
     T_new = DenseTensor(T_arr, (chi_new_idx, surv_idx, chi_new_r_idx))
     return C1_new, C4_new, T_new
 
@@ -1089,13 +1114,22 @@ def _ctm_tensor_move_left(
 
     if chunk_size is not None and isinstance(env_self.T4, DenseTensor):
         C1_new, C4_new, T4_new = _chunked_T_new_apply(
-            env_self.T4, a, P_1, P_2, C1g, C4g,
-            ["t4_d", "l2", "t4_u"], "t4_d", "r2",
-            _chunked_T_new_left, chunk_size,
+            env_self.T4,
+            a,
+            P_1,
+            P_2,
+            C1g,
+            C4g,
+            ["t4_d", "l2", "t4_u"],
+            "t4_d",
+            "r2",
+            _chunked_T_new_left,
+            chunk_size,
         )
     else:
         if chunk_size is not None:
             import warnings
+
             warnings.warn(
                 "chunk_size is set but env is not dense (SymmetricTensor); "
                 "falling back to the standard fused-index CTM path.",
@@ -1166,13 +1200,22 @@ def _ctm_tensor_move_right(
 
     if chunk_size is not None and isinstance(env_self.T2, DenseTensor):
         C2_new, C3_new, T2_new = _chunked_T_new_apply(
-            env_self.T2, a, P_1, P_2, C2g, C3g,
-            ["t2_u", "r2", "t2_d"], "t2_u", "l2",
-            _chunked_T_new_right, chunk_size,
+            env_self.T2,
+            a,
+            P_1,
+            P_2,
+            C2g,
+            C3g,
+            ["t2_u", "r2", "t2_d"],
+            "t2_u",
+            "l2",
+            _chunked_T_new_right,
+            chunk_size,
         )
     else:
         if chunk_size is not None:
             import warnings
+
             warnings.warn(
                 "chunk_size is set but env is not dense (SymmetricTensor); "
                 "falling back to the standard fused-index CTM path.",
@@ -1242,13 +1285,22 @@ def _ctm_tensor_move_top(
 
     if chunk_size is not None and isinstance(env_self.T1, DenseTensor):
         C1_new, C2_new, T1_new = _chunked_T_new_apply(
-            env_self.T1, a, P_1, P_2, C1g, C2g,
-            ["t1_l", "u2", "t1_r"], "t1_l", "d2",
-            _chunked_T_new_top, chunk_size,
+            env_self.T1,
+            a,
+            P_1,
+            P_2,
+            C1g,
+            C2g,
+            ["t1_l", "u2", "t1_r"],
+            "t1_l",
+            "d2",
+            _chunked_T_new_top,
+            chunk_size,
         )
     else:
         if chunk_size is not None:
             import warnings
+
             warnings.warn(
                 "chunk_size is set but env is not dense (SymmetricTensor); "
                 "falling back to the standard fused-index CTM path.",
@@ -1318,13 +1370,22 @@ def _ctm_tensor_move_bottom(
 
     if chunk_size is not None and isinstance(env_self.T3, DenseTensor):
         C4_new, C3_new, T3_new = _chunked_T_new_apply(
-            env_self.T3, a, P_1, P_2, C4g, C3g,
-            ["t3_r", "d2", "t3_l"], "t3_r", "u2",
-            _chunked_T_new_bottom, chunk_size,
+            env_self.T3,
+            a,
+            P_1,
+            P_2,
+            C4g,
+            C3g,
+            ["t3_r", "d2", "t3_l"],
+            "t3_r",
+            "u2",
+            _chunked_T_new_bottom,
+            chunk_size,
         )
     else:
         if chunk_size is not None:
             import warnings
+
             warnings.warn(
                 "chunk_size is set but env is not dense (SymmetricTensor); "
                 "falling back to the standard fused-index CTM path.",

@@ -255,8 +255,8 @@ def test_build_enlarged_corner_bottom_left_numerical():
       T4: (t4_d, l2, t4_u)     a:  (u2,   d2, l2,   r2)
 
     Shared bonds in the contraction:
-      C4.c4_u — T4.t4_u   (chi)
-      C4.c4_r — T3.t3_r   (chi)
+      C4.c4_r — T4.t4_u   (chi)
+      C4.c4_u — T3.t3_r   (chi)
       T3.d2   — a.d2      (D^2)
       T4.l2   — a.l2      (D^2)
     Remaining open legs: T4.t4_d (chi_T), T3.t3_l (chi_R), a.u2, a.r2.
@@ -288,13 +288,13 @@ def test_build_enlarged_corner_bottom_left_numerical():
     )
     Q_dense = np.asarray(Q.todense())
 
-    # Index legend:
-    #   a = c4_r / t3_r (chi)             b = c4_u / t4_u (chi)
+    # Index legend (corrected to production energy/RDM convention; #670):
+    #   a = c4_r / t4_u (chi)             b = c4_u / t3_r (chi)
     #   c = d2 (D^2)                      e = l2 (D^2)
     #   f = t4_d (chi_T)                  g = t3_l (chi_R)
     #   h = u2 (D^2)                      k = r2 (D^2)
     Q_ref = np.einsum(
-        "ab,acg,feb,hcek->fghk",
+        "ab,bcg,fea,hcek->fghk",
         C4_arr,
         T3_arr,
         T4_arr,

@@ -233,11 +233,11 @@ def _build_enlarged_corner(
         return Q.relabels({"t1_l": "chi_L", "t2_d": "chi_B"})
 
     if position == "bottom_left":
-        # C4.c4_u <-> T4.t4_u
-        C_r = C.relabel("c4_u", "t4_u")
-        CT_v = contract(C_r, T_v)  # -> (c4_r, t4_d, l2)
-        # C4.c4_r <-> T3.t3_r
-        T_h_r = T_h.relabel("t3_r", "c4_r")
+        # C4.c4_r <-> T4.t4_u  (energy/RDM convention; #670)
+        C_r = C.relabel("c4_r", "t4_u")
+        CT_v = contract(C_r, T_v)  # -> (c4_u, t4_d, l2)
+        # C4.c4_u <-> T3.t3_r
+        T_h_r = T_h.relabel("t3_r", "c4_u")
         CTT = contract(CT_v, T_h_r)  # -> (t4_d, l2, d2, t3_l)
         # T3.d2 <-> a.d2 ; T4.l2 <-> a.l2
         Q = contract(CTT, a)  # -> (t4_d, t3_l, u2, r2) free legs
