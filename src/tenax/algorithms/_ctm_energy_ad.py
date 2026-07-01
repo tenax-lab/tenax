@@ -1017,6 +1017,14 @@ def _make_implicit_vjp_fn(
 
     # Build JIT'd sweep step for backward (same recipe as forward, so the
     # fixed-point adjoint differentiates the sweep the forward converged).
+    # ``ctm_chunk_size`` is deliberately NOT threaded here: the #632 Increment-2
+    # gate measured that chunking the adjoint's J^T matvec (VJP through the
+    # chunked lax.map absorb) *increases* peak memory — it defeats XLA's existing
+    # rematerialization of the chi^2*D^6 intermediate and adds stacked-residual /
+    # VJP-transpose overhead (D=10 chi=16: monolith 28 GB fits, chunked OOMs).
+    # The backward stays monolith (XLA remat handles it better); large-D backward
+    # memory relief comes from GSPMD sharding (rung-2), not chunking. See
+    # docs/superpowers/handoffs/2026-07-01-chunk-ctm-absorb-increment2-backward-gate.md.
     jit_step_bwd = _make_jit_ctm_step(neighbors, recipe)
 
     # --- JIT'd building blocks for the backward ---
