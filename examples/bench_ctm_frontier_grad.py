@@ -18,6 +18,7 @@ Usage (PREALLOCATE=false for a faithful peak; one config per process):
     CUDA_VISIBLE_DEVICES=1,2 XLA_PYTHON_CLIENT_PREALLOCATE=false \
         uv run python examples/bench_ctm_frontier_grad.py --path dense --D 10 --chi 24 --shard --chunk 8
 """
+
 import argparse
 import os
 import sys
@@ -47,7 +48,9 @@ def main():
     ap.add_argument("--chi", type=int, default=24)
     ap.add_argument("--chi-I", type=int, default=None, dest="chi_I")
     ap.add_argument("--shard", action="store_true")
-    ap.add_argument("--chunk", type=int, default=0, help="ctm_chunk_size (0=off; dense only)")
+    ap.add_argument(
+        "--chunk", type=int, default=0, help="ctm_chunk_size (0=off; dense only)"
+    )
     ap.add_argument("--max-iter", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -92,7 +95,7 @@ def main():
                 well_conditioned=True,
                 max_iter=args.max_iter,
             )
-            gnorm = float((g ** 2).sum() ** 0.5)
+            gnorm = float((g**2).sum() ** 0.5)
             dt = time.perf_counter() - t0
             print(
                 f"path={args.path} D={D} chi={args.chi} OK  E={e:.6f}  |g|={gnorm:.3e}  "
