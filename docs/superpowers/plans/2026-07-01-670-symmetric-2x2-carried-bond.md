@@ -504,3 +504,35 @@ Merge per CLAUDE.md (auto-merge; CI must pass).
   `compute_energy_ctm_tensor_2site` are current symbols.
 - **No-op invariant:** Task 4 locks the dense path; Task 6 locks core/closure/
   fermionic — the fix must not regress the production (dense/trivial-charge) path.
+
+---
+
+## Outcome (2026-07-01) — DONE
+
+The fix was **bounded** (Approach A held; not structural), but the scope grew from
+the planned single site to **three**, because Task 1's diagnostic only ran one
+`left` absorption and never exercised the full sweep. The scope-mapping (fix-forward
+diagnostic) found every crash mapped cleanly to the production energy/RDM
+convention:
+
+1. `_build_enlarged_corner` `bottom_left` — C4 legs were swapped; now
+   `c4_u↔t3_r`, `c4_r↔t4_u` (commit `805757e`).
+2. `_ctm_tensor_absorb_bottom_2plaq` — C3·T2 paired `c3_l↔t2_d`; now `c3_u↔t2_d`.
+3. `_ctm_sv_diff` — zero-pads SV vectors so warmup block-structure growth on
+   asymmetric states reports not-converged instead of crashing (eager/non-AD
+   call sites, so gradient-safe).
+
+Result: direction-dependent symmetric 2×2 CTM matches dense to **4e-14**
+(E = −0.5421160718). Dense path is a true no-op (the swap is a benign gauge
+choice on a single block; a fatal charge-sector mismatch only for block-sparse
+`A.l != A.r`), so the plan's dense-no-op assumption (Task 4) held after all.
+
+Stale unit test `test_build_enlarged_corner_bottom_left_numerical` (its einsum
+encoded the old swapped C4 pairing) updated. #667 acceptance test un-xfailed and
+retargeted to `recipe="2x2"` (commit `07fa9ac`); dense guard added (commit
+`0523818`).
+
+**Out-of-scope follow-ups filed:** #674 (fermionic/fused twin
+`_ctm_tensor_absorb_bottom_2plaq_fused` has the same latent C3 bug), #675
+(compiled `_ctm_compiled_moves.py` uses the same pre-fix `c3_l↔t2_d` convention).
+Both are no-ops on uniform states so production is unaffected.
