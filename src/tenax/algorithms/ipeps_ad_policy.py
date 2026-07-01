@@ -187,6 +187,10 @@ def ctm_converge_kwargs(
         # final-env forward CTM evals too, so the whole optimize loop runs
         # sharded (not just the value_and_grad). None (default) → single-device.
         "device_mesh": ctm_cfg.device_mesh,
+        # Chunked edge absorption (#632 chunk×shard): lowers peak memory ÷K
+        # (1×1 recipe, dense envs). Composes with device_mesh (÷N·K total).
+        # None (default) → single monolithic contraction, unchanged.
+        "ctm_chunk_size": ctm_cfg.ctm_chunk_size,
     }
 
 
@@ -371,6 +375,9 @@ def make_ctm_energy_fn(
             # GSPMD device mesh (#632): when set, shards the implicit-AD forward
             # CTM + backward across the mesh. None (default) → single-device.
             device_mesh=ctm_cfg.device_mesh,
+            # Chunked edge absorption (#632 chunk×shard): lowers peak memory ÷K
+            # (1×1 recipe, dense envs). None (default) → monolithic, unchanged.
+            ctm_chunk_size=ctm_cfg.ctm_chunk_size,
         )
 
     return _ctm_energy_fn

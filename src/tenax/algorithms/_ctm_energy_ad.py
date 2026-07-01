@@ -364,6 +364,7 @@ def ctm_energy_implicit(
     chi_max: int | None = None,
     recipe: str = "2x2",
     device_mesh=None,
+    ctm_chunk_size: int | None = None,
 ) -> jnp.ndarray:
     """Compute iPEPS energy with implicit-differentiation backward (GMRES).
 
@@ -516,6 +517,7 @@ def ctm_energy_implicit(
         chi_max,
         recipe,
         device_mesh,
+        ctm_chunk_size,
     )
 
 
@@ -542,6 +544,7 @@ def _sigma_gauged_ctm_converge(
     chi_max: int | None = None,
     recipe: str = "2x2",
     device_mesh=None,
+    ctm_chunk_size: int | None = None,
 ):
     """CTM convergence with sigma gauge fixing for element-wise fixed point.
 
@@ -567,7 +570,11 @@ def _sigma_gauged_ctm_converge(
         bump_step_size=ctmrg_heuristic_increase_chi_step_size,
     )
 
-    jit_step = _make_jit_ctm_step(neighbors, recipe, device_mesh=device_mesh)
+    jit_step_raw = _make_jit_ctm_step(
+        neighbors, recipe, device_mesh=device_mesh, ctm_chunk_size=ctm_chunk_size
+    )
+    # Bind chunk_size so the bump helper and warmup loop pass it transparently.
+    jit_step = partial(jit_step_raw, chunk_size=ctm_chunk_size)
     envs = (
         env_init
         if env_init is not None
@@ -761,6 +768,7 @@ def _ctm_energy_implicit_dispatch(
     chi_max,
     recipe="2x2",
     device_mesh=None,
+    ctm_chunk_size=None,
 ):
     """Dispatch to custom_vjp-decorated function with caching.
 
@@ -798,6 +806,7 @@ def _ctm_energy_implicit_dispatch(
         chi_max,
         recipe,  # distinct sweep recipe → distinct cached forward+backward
         device_mesh,  # sharded vs single → distinct cached forward+backward
+        ctm_chunk_size,  # distinct chunk size → distinct forward lax.map shape
     )
 
     entry = _VJP_CACHE.get(cache_key)
@@ -843,6 +852,7 @@ def _ctm_energy_implicit_dispatch(
         chi_max=chi_max,
         recipe=recipe,
         device_mesh=device_mesh,
+        ctm_chunk_size=ctm_chunk_size,
     )
     _VJP_CACHE[cache_key] = (f, mutables)
     return f(params_data_tuple)
@@ -874,6 +884,7 @@ def _make_implicit_vjp_fn(
     chi_max: int | None = None,
     recipe: str = "2x2",
     device_mesh=None,
+    ctm_chunk_size: int | None = None,
 ):
     """Build a custom_vjp-decorated function closed over static config.
 
@@ -948,6 +959,7 @@ def _make_implicit_vjp_fn(
                 plateau_patience=plateau_patience,
                 recipe=recipe,
                 device_mesh=device_mesh,
+                ctm_chunk_size=ctm_chunk_size,
             )
             # chi_ramp doesn't trigger in-CTM bump (mutex enforced in dispatch);
             # chi_post is the final ramp stage's chi, which equals ``chi`` for
@@ -975,6 +987,7 @@ def _make_implicit_vjp_fn(
                 chi_max=chi_max,
                 recipe=recipe,
                 device_mesh=device_mesh,
+                ctm_chunk_size=ctm_chunk_size,
             )
         return envs, chi_post
 
@@ -1004,6 +1017,14 @@ def _make_implicit_vjp_fn(
 
     # Build JIT'd sweep step for backward (same recipe as forward, so the
     # fixed-point adjoint differentiates the sweep the forward converged).
+    # ``ctm_chunk_size`` is deliberately NOT threaded here: the #632 Increment-2
+    # gate measured that chunking the adjoint's J^T matvec (VJP through the
+    # chunked lax.map absorb) *increases* peak memory — it defeats XLA's existing
+    # rematerialization of the chi^2*D^6 intermediate and adds stacked-residual /
+    # VJP-transpose overhead (D=10 chi=16: monolith 28 GB fits, chunked OOMs).
+    # The backward stays monolith (XLA remat handles it better); large-D backward
+    # memory relief comes from GSPMD sharding (rung-2), not chunking. See
+    # docs/superpowers/handoffs/2026-07-01-chunk-ctm-absorb-increment2-backward-gate.md.
     jit_step_bwd = _make_jit_ctm_step(neighbors, recipe)
 
     # --- JIT'd building blocks for the backward ---

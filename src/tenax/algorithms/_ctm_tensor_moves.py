@@ -22,6 +22,13 @@ __all__ = [
 import jax
 import numpy as np
 
+from tenax.algorithms._ctm_chunked_absorb import (
+    _chunked_T_new_bottom,
+    _chunked_T_new_left,
+    _chunked_T_new_right,
+    _chunked_T_new_top,
+    _raw_in_label_order,
+)
 from tenax.algorithms._ctm_projector import (
     _compute_projector_tensor,
     _reembed_fused,
@@ -994,6 +1001,51 @@ def _ctm_tensor_absorb_bottom_2plaq_fused(
     return C4_new, T3_new, C3_new
 
 
+def _chunked_T_new_apply(
+    edge, a, P_1, P_2, C1g, C4g,
+    edge_label_order, chi_leg, surv_leg, chunked_fn, chunk_size,
+):
+    """Chunked edge absorption for a 1x1 dense move.
+
+    Computes (C1_new, C4_new, T_new) with the expensive chi^2 * D^6 edge
+    contraction chunked over the boundary-chi axis via ``chunked_fn`` (from
+    _ctm_chunked_absorb), avoiding materializing the full intermediate.
+    Bit-identical to the fused-index path (_apply_projector_tensor). Dense only.
+
+    Args:
+        edge:  the parallel edge DenseTensor being grown (T4/T2/T1/T3).
+        a:     double-layer DenseTensor (labels u2,d2,l2,r2).
+        P_1, P_2: projector pair (labels fused, chi_new).
+        C1g, C4g: grown corners (P_1 side, P_2 side).
+        edge_label_order: canonical edge leg order, e.g. ["t4_d","l2","t4_u"].
+        chi_leg: edge's boundary-chi (chunk) leg label, e.g. "t4_d".
+        surv_leg: surviving a-leg label (the new edge's D2 leg), e.g. "r2".
+        chunked_fn: the matching _chunked_T_new_* raw function.
+        chunk_size: lax.map batch size over the boundary-chi axis.
+
+    Returns:
+        (C1_new, C4_new, T_new) Tensors. T_new labels (chi_new, <surv_leg>, chi_new_r).
+    """
+    chi_dim = edge.indices[list(edge.labels()).index(chi_leg)].dim
+    D2 = a.indices[list(a.labels()).index(surv_leg)].dim
+    edge_raw = _raw_in_label_order(edge, edge_label_order)
+    a_raw = _raw_in_label_order(a, ["u2", "d2", "l2", "r2"])
+    # The raw core conjugates P1 internally (matches P_1.bar()); pass P_1 as-is.
+    P1_raw = _raw_in_label_order(P_1, ["fused", "chi_new"])
+    P2_raw = _raw_in_label_order(P_2, ["fused", "chi_new"])
+    T_arr = chunked_fn(edge_raw, a_raw, P1_raw, P2_raw, chi_dim, D2, chunk_size)
+
+    # Cheap corners (identical to _apply_projector_tensor)
+    P1_bar = P_1.bar()
+    C1_new = contract(P1_bar, C1g)
+    C4_new = contract(P_2.bar(), C4g)
+    chi_new_idx = P1_bar.indices[list(P1_bar.labels()).index("chi_new")]
+    surv_idx = a.indices[list(a.labels()).index(surv_leg)]
+    chi_new_r_idx = P_2.indices[list(P_2.labels()).index("chi_new")].relabel("chi_new_r")
+    T_new = DenseTensor(T_arr, (chi_new_idx, surv_idx, chi_new_r_idx))
+    return C1_new, C4_new, T_new
+
+
 def _ctm_tensor_move_left(
     env_self: CTMTensorEnv,
     env_neighbor: CTMTensorEnv,
@@ -1002,6 +1054,7 @@ def _ctm_tensor_move_left(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
+    chunk_size: int | None = None,
 ) -> tuple[CTMTensorEnv, jax.Array]:
     """Left move: updates C1, T4, C4.
 
@@ -1012,6 +1065,12 @@ def _ctm_tensor_move_left(
     Dense reference: C1g = einsum('ab,buc->auc', C1, T1)
                      C4g = einsum('gh,hdi->gdi', C4, T3)
                      T4g = einsum('alg,udlr->augdr', T4, a)
+
+    Args:
+        chunk_size: When not None and env_self.T4 is a DenseTensor, use the
+            chunked raw core (_chunked_T_new_left) to compute T4_new without
+            materializing the full chi^2*D^6 intermediate.  Default (None)
+            uses the standard fused-index path unchanged.
     """
     # C1(self) · T1(neighbor)
     C1_r = env_self.C1.relabel("c1_r", "t1_l")
@@ -1023,18 +1082,33 @@ def _ctm_tensor_move_left(
     C4g = contract(C4_u, env_neighbor.T3)  # (c4_r, d2, t3_l)
     C4g = _fuse_pair_by_label(C4g, "c4_r", "d2", "fused", IN)  # (fused, t3_l)
 
-    # T4(self) · a(neighbor)
-    T4_with_a = contract(env_self.T4, a)
-    T4g = _fuse_pair_by_label(T4_with_a, "t4_d", "u2", "fl", IN)
-    T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", OUT)
-
-    # Native projector
+    # Native projector (needs only the grown corners, not the grown edge)
     P_1, P_2, _eps_t = _compute_projector_tensor(
         C1g, C4g, chi, projector_method, base_charges, projector_backward
     )
-    C1_new, C4_new, T4_new = _apply_projector_with_reembed(
-        P_1, P_2, C1g, C4g, T4g, "fl", "fr"
-    )
+
+    if chunk_size is not None and isinstance(env_self.T4, DenseTensor):
+        C1_new, C4_new, T4_new = _chunked_T_new_apply(
+            env_self.T4, a, P_1, P_2, C1g, C4g,
+            ["t4_d", "l2", "t4_u"], "t4_d", "r2",
+            _chunked_T_new_left, chunk_size,
+        )
+    else:
+        if chunk_size is not None:
+            import warnings
+            warnings.warn(
+                "chunk_size is set but env is not dense (SymmetricTensor); "
+                "falling back to the standard fused-index CTM path.",
+                stacklevel=2,
+            )
+        # T4(self) · a(neighbor)
+        T4_with_a = contract(env_self.T4, a)
+        T4g = _fuse_pair_by_label(T4_with_a, "t4_d", "u2", "fl", IN)
+        T4g = _fuse_pair_by_label(T4g, "t4_u", "d2", "fr", OUT)
+
+        C1_new, C4_new, T4_new = _apply_projector_with_reembed(
+            P_1, P_2, C1g, C4g, T4g, "fl", "fr"
+        )
 
     # Relabel to expected output labels
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t1_r": "c1_r"})
@@ -1057,6 +1131,7 @@ def _ctm_tensor_move_right(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
+    chunk_size: int | None = None,
 ) -> tuple[CTMTensorEnv, jax.Array]:
     """Right move: updates C2, T2, C3.
 
@@ -1067,6 +1142,12 @@ def _ctm_tensor_move_right(
     Dense reference: C2g = einsum('ce,buc->eub', C2, T1)
                      C3g = einsum('im,hdi->mdh', C3, T3)
                      T2g = einsum('erm,udlr->eumdl', T2, a)
+
+    Args:
+        chunk_size: When not None and env_self.T2 is a DenseTensor, use the
+            chunked raw core (_chunked_T_new_right) to compute T2_new without
+            materializing the full chi^2*D^6 intermediate.  Default (None)
+            uses the standard fused-index path unchanged.
     """
     # C2(self) · T1(neighbor)
     C2_l = env_self.C2.relabel("c2_l", "t1_r")
@@ -1078,18 +1159,33 @@ def _ctm_tensor_move_right(
     C3g = contract(C3_u, env_neighbor.T3)  # (c3_l, t3_r, d2)
     C3g = _fuse_pair_by_label(C3g, "c3_l", "d2", "fused", IN)  # (fused, t3_r)
 
-    # T2(self) · a(neighbor)
-    T2_with_a = contract(env_self.T2, a)
-    T2g = _fuse_pair_by_label(T2_with_a, "t2_u", "u2", "fl", IN)
-    T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", OUT)
-
-    # Native projector
+    # Native projector (needs only the grown corners, not the grown edge)
     P_1, P_2, _eps_t = _compute_projector_tensor(
         C2g, C3g, chi, projector_method, base_charges, projector_backward
     )
-    C2_new, C3_new, T2_new = _apply_projector_with_reembed(
-        P_1, P_2, C2g, C3g, T2g, "fl", "fr"
-    )
+
+    if chunk_size is not None and isinstance(env_self.T2, DenseTensor):
+        C2_new, C3_new, T2_new = _chunked_T_new_apply(
+            env_self.T2, a, P_1, P_2, C2g, C3g,
+            ["t2_u", "r2", "t2_d"], "t2_u", "l2",
+            _chunked_T_new_right, chunk_size,
+        )
+    else:
+        if chunk_size is not None:
+            import warnings
+            warnings.warn(
+                "chunk_size is set but env is not dense (SymmetricTensor); "
+                "falling back to the standard fused-index CTM path.",
+                stacklevel=2,
+            )
+        # T2(self) · a(neighbor)
+        T2_with_a = contract(env_self.T2, a)
+        T2g = _fuse_pair_by_label(T2_with_a, "t2_u", "u2", "fl", IN)
+        T2g = _fuse_pair_by_label(T2g, "t2_d", "d2", "fr", OUT)
+
+        C2_new, C3_new, T2_new = _apply_projector_with_reembed(
+            P_1, P_2, C2g, C3g, T2g, "fl", "fr"
+        )
 
     # Relabel to expected output labels
     C2_new = C2_new.relabels({"chi_new": "c2_l", "t1_l": "c2_d"})
@@ -1111,6 +1207,7 @@ def _ctm_tensor_move_top(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
+    chunk_size: int | None = None,
 ) -> tuple[CTMTensorEnv, jax.Array]:
     """Top move: updates C1, T1, C2.
 
@@ -1121,6 +1218,12 @@ def _ctm_tensor_move_top(
     Dense reference: C1g = einsum('ab,alg->blg', C1, T4)
                      C2g = einsum('ce,erm->crm', C2, T2)
                      T1g = einsum('buc,udlr->bcdlr', T1, a)
+
+    Args:
+        chunk_size: When not None and env_self.T1 is a DenseTensor, use the
+            chunked raw core (_chunked_T_new_top) to compute T1_new without
+            materializing the full chi^2*D^6 intermediate.  Default (None)
+            uses the standard fused-index path unchanged.
     """
     # C1(self) · T4(neighbor)
     C1_d = env_self.C1.relabel("c1_d", "t4_d")
@@ -1132,18 +1235,33 @@ def _ctm_tensor_move_top(
     C2g = contract(C2_d, env_neighbor.T2)  # (c2_l, r2, t2_d)
     C2g = _fuse_pair_by_label(C2g, "c2_l", "r2", "fused", IN)  # (fused, t2_d)
 
-    # T1(self) · a(neighbor)
-    T1_with_a = contract(env_self.T1, a)
-    T1g = _fuse_pair_by_label(T1_with_a, "t1_l", "l2", "fl", IN)
-    T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", OUT)
-
-    # Native projector
+    # Native projector (needs only the grown corners, not the grown edge)
     P_1, P_2, _eps_t = _compute_projector_tensor(
         C1g, C2g, chi, projector_method, base_charges, projector_backward
     )
-    C1_new, C2_new, T1_new = _apply_projector_with_reembed(
-        P_1, P_2, C1g, C2g, T1g, "fl", "fr"
-    )
+
+    if chunk_size is not None and isinstance(env_self.T1, DenseTensor):
+        C1_new, C2_new, T1_new = _chunked_T_new_apply(
+            env_self.T1, a, P_1, P_2, C1g, C2g,
+            ["t1_l", "u2", "t1_r"], "t1_l", "d2",
+            _chunked_T_new_top, chunk_size,
+        )
+    else:
+        if chunk_size is not None:
+            import warnings
+            warnings.warn(
+                "chunk_size is set but env is not dense (SymmetricTensor); "
+                "falling back to the standard fused-index CTM path.",
+                stacklevel=2,
+            )
+        # T1(self) · a(neighbor)
+        T1_with_a = contract(env_self.T1, a)
+        T1g = _fuse_pair_by_label(T1_with_a, "t1_l", "l2", "fl", IN)
+        T1g = _fuse_pair_by_label(T1g, "t1_r", "r2", "fr", OUT)
+
+        C1_new, C2_new, T1_new = _apply_projector_with_reembed(
+            P_1, P_2, C1g, C2g, T1g, "fl", "fr"
+        )
 
     # Relabel to expected output labels
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t4_u": "c1_r"})
@@ -1165,6 +1283,7 @@ def _ctm_tensor_move_bottom(
     projector_method: str = "svd",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
+    chunk_size: int | None = None,
 ) -> tuple[CTMTensorEnv, jax.Array]:
     """Bottom move: updates C4, T3, C3.
 
@@ -1175,6 +1294,12 @@ def _ctm_tensor_move_bottom(
     Dense reference: C4g = einsum('gh,alg->hal', C4, T4).transpose(0,2,1)
                      C3g = einsum('im,erm->ire', C3, T2)
                      T3g = einsum('hdi,udlr->hiulr', T3, a)
+
+    Args:
+        chunk_size: When not None and env_self.T3 is a DenseTensor, use the
+            chunked raw core (_chunked_T_new_bottom) to compute T3_new without
+            materializing the full chi^2*D^6 intermediate.  Default (None)
+            uses the standard fused-index path unchanged.
     """
     # C4(self) · T4(neighbor)
     C4_r = env_self.C4.relabel("c4_r", "t4_u")
@@ -1186,18 +1311,33 @@ def _ctm_tensor_move_bottom(
     C3g = contract(C3_l, env_neighbor.T2)  # (c3_u, t2_u, r2)
     C3g = _fuse_pair_by_label(C3g, "c3_u", "r2", "fused", IN)  # (fused, t2_u)
 
-    # T3(self) · a(neighbor)
-    T3_with_a = contract(env_self.T3, a)
-    T3g = _fuse_pair_by_label(T3_with_a, "t3_r", "l2", "fl", IN)
-    T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", OUT)
-
-    # Native projector
+    # Native projector (needs only the grown corners, not the grown edge)
     P_1, P_2, _eps_t = _compute_projector_tensor(
         C4g, C3g, chi, projector_method, base_charges, projector_backward
     )
-    C4_new, C3_new, T3_new = _apply_projector_with_reembed(
-        P_1, P_2, C4g, C3g, T3g, "fl", "fr"
-    )
+
+    if chunk_size is not None and isinstance(env_self.T3, DenseTensor):
+        C4_new, C3_new, T3_new = _chunked_T_new_apply(
+            env_self.T3, a, P_1, P_2, C4g, C3g,
+            ["t3_r", "d2", "t3_l"], "t3_r", "u2",
+            _chunked_T_new_bottom, chunk_size,
+        )
+    else:
+        if chunk_size is not None:
+            import warnings
+            warnings.warn(
+                "chunk_size is set but env is not dense (SymmetricTensor); "
+                "falling back to the standard fused-index CTM path.",
+                stacklevel=2,
+            )
+        # T3(self) · a(neighbor)
+        T3_with_a = contract(env_self.T3, a)
+        T3g = _fuse_pair_by_label(T3_with_a, "t3_r", "l2", "fl", IN)
+        T3g = _fuse_pair_by_label(T3g, "t3_l", "r2", "fr", OUT)
+
+        C4_new, C3_new, T3_new = _apply_projector_with_reembed(
+            P_1, P_2, C4g, C3g, T3g, "fl", "fr"
+        )
 
     # Relabel to expected output labels
     C4_new = C4_new.relabels({"chi_new": "c4_r", "t4_d": "c4_u"})

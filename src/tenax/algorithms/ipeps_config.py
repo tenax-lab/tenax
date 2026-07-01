@@ -248,6 +248,17 @@ class CTMConfig:
     # unchanged. Build a mesh via ``tenax.algorithms.ctm_sharding.build_ctm_mesh``.
     # Appended at the end of the dataclass to preserve positional CTMConfig ABI.
     device_mesh: jax.sharding.Mesh | None = None
+    # Chunk the χ²·D⁶ edge absorption over the boundary-χ axis via
+    # ``lax.map(batch_size=ctm_chunk_size)`` (1×1 recipe, dense envs only).
+    # Lowers per-device peak memory ≈÷K at large D and composes with
+    # ``device_mesh`` (≈÷(N·K)). ``None`` (default) → single monolithic
+    # contraction (byte-for-byte unchanged). See the #632 chunk×shard gate.
+    # Applies to the implicit-AD **forward** CTM sweep (recipe="1x1", dense)
+    # only. The explicit-AD path (``ctm_energy_explicit``) and the split-CTM
+    # path (``fuse_virtual_legs=False``) do not consult this knob yet
+    # (Increment 2). Use it for large-D forward energy/observables.
+    # Appended at the end of the dataclass to preserve positional CTMConfig ABI.
+    ctm_chunk_size: int | None = None
 
     def __post_init__(self):
         valid_modes = {None, "c4v_reference"}
@@ -366,6 +377,10 @@ class CTMConfig:
                 "without an explicit ceiling the in-CTM bump would silently "
                 "no-op (chi can never grow above its initial value). "
                 "Set chi_max to the largest chi you want CTM to grow into."
+            )
+        if self.ctm_chunk_size is not None and self.ctm_chunk_size < 1:
+            raise ValueError(
+                f"ctm_chunk_size must be None or a positive int, got {self.ctm_chunk_size}"
             )
 
 
