@@ -19,7 +19,12 @@ from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
 )
-from tenax.algorithms._ctm_tensor_moves import _ctm_tensor_move_left
+from tenax.algorithms._ctm_tensor_moves import (
+    _ctm_tensor_move_bottom,
+    _ctm_tensor_move_left,
+    _ctm_tensor_move_right,
+    _ctm_tensor_move_top,
+)
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
@@ -210,6 +215,35 @@ def test_full_left_move_chunked_matches_default():
             / (jnp.max(jnp.abs(b_arr)) + 1e-30)
         )
         assert rel <= 1e-12, f"field={field!r} rel={rel}"
+
+
+@pytest.mark.parametrize("move_fn,fields", [
+    (_ctm_tensor_move_right, ("C2", "C3", "T2")),
+    (_ctm_tensor_move_top, ("C1", "C2", "T1")),
+    (_ctm_tensor_move_bottom, ("C4", "C3", "T3")),
+])
+def test_full_move_chunked_matches_default(move_fn, fields):
+    """Chunked branch of right/top/bottom CTM moves must match default (rel <= 1e-12)."""
+    D, d, chi = 2, 2, 12
+    A = _random_dense_site_tensor(D, d, seed=7)
+    a = _build_double_layer_tensor(A)
+    env = initialize_ctm_tensor_env(A, chi)
+    base_env, _ = move_fn(env, env, a, chi)
+    chunked_env, _ = move_fn(env, env, a, chi, chunk_size=4)
+    for field in fields:
+        b = getattr(base_env, field)
+        c = getattr(chunked_env, field)
+        b_arr = b.todense()
+        c_arr = c.todense()
+        b_labels = list(b.labels())
+        c_labels = list(c.labels())
+        perm = [c_labels.index(x) for x in b_labels]
+        c_arr_aligned = jnp.transpose(c_arr, perm)
+        rel = float(
+            jnp.max(jnp.abs(c_arr_aligned - b_arr))
+            / (jnp.max(jnp.abs(b_arr)) + 1e-30)
+        )
+        assert rel <= 1e-12, f"move={move_fn.__name__!r} field={field!r} rel={rel}"
 
 
 def test_full_left_move_chunked_ragged_matches_default():
