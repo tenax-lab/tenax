@@ -253,6 +253,10 @@ class CTMConfig:
     # Lowers per-device peak memory ≈÷K at large D and composes with
     # ``device_mesh`` (≈÷(N·K)). ``None`` (default) → single monolithic
     # contraction (byte-for-byte unchanged). See the #632 chunk×shard gate.
+    # Applies to the **forward** CTM sweep only; the implicit-AD backward is
+    # not yet chunked, so this alone does not lower peak memory of
+    # ``optimize_gs_ad`` gradients (that is a follow-up). Use it for
+    # large-D forward energy/observables.
     # Appended at the end of the dataclass to preserve positional CTMConfig ABI.
     ctm_chunk_size: int | None = None
 

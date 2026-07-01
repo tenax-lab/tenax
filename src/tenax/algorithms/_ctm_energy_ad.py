@@ -574,9 +574,7 @@ def _sigma_gauged_ctm_converge(
         neighbors, recipe, device_mesh=device_mesh, ctm_chunk_size=ctm_chunk_size
     )
     # Bind chunk_size so the bump helper and warmup loop pass it transparently.
-    from functools import partial as _partial
-
-    jit_step = _partial(jit_step_raw, chunk_size=ctm_chunk_size)
+    jit_step = partial(jit_step_raw, chunk_size=ctm_chunk_size)
     envs = (
         env_init
         if env_init is not None
