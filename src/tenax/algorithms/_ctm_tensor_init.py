@@ -393,13 +393,15 @@ def _init_symmetric_standard_corner(
     # The chi bonds carry D²-derived charges: fuse ref_idx with bar'd copy
     idx_bra = ref_idx.flip_flow()
     fused_charges = _compute_fused_charges(ref_idx, idx_bra, flow_a, sym)
-    # fused_charges has size D²; tile to chi
-    base_D2_charges = fused_charges
-    if chi <= len(base_D2_charges):
-        chi_charges = np.asarray(base_D2_charges[:chi], dtype=np.int32)
-    else:
-        reps = chi // len(base_D2_charges) + 1
-        chi_charges = np.asarray(np.tile(base_D2_charges, reps)[:chi], dtype=np.int32)
+    # Tile the size-D² fused charges to chi with the canonical (sorted-padding)
+    # scheme so the corner's chi legs agree with the edge chi legs they contract
+    # against (which route through the same helper since #667 Phase 0).  Both
+    # sides derive from the same virtual axis; the old enumeration-order padding
+    # gave the corner a different charge multiset past D², breaking the same-site
+    # corner↔edge contraction in the 2x2 enlarged corner on direction-dependent
+    # (A.l != A.r) bonds.  No-op for chi <= D² and for direction-uniform iPEPS.
+    # #667 Phase 1.
+    chi_charges = _tile_fused_to_chi(fused_charges, chi)
 
     # Canonicalize chi-bond order to match the block-sparse SVD's grouped
     # bond order (#602).  Both corner legs share the same chi charges, so the

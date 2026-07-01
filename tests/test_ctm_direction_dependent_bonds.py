@@ -87,5 +87,40 @@ def test_symmetric_2site_ctm_matches_dense_on_direction_dependent_bonds():
     assert E_sym < -0.3, f"energy {E_sym} unphysical (expected AFM, ~ -0.5 to -0.7)"
 
 
+def test_2x2_enlarged_corners_build_on_direction_dependent_init():
+    """First-sweep 2x2 enlarged corners must build (charge-consistent) on the
+    direction-dependent init env.
+
+    Phase 1 of docs/superpowers/plans/2026-07-01-direction-dependent-symmetric-ctm.md:
+    for the 2x2 recipe all enlarged-corner corner<->edge contractions are
+    SAME-site, so the original same-axis env-init seeding + Phase 0 canonical
+    tiling should already be charge-consistent (no 1x1-oriented axis reseeding).
+    """
+    import numpy as np
+
+    from tenax.algorithms._ctm_tensor_init import (
+        _build_double_layer_tensor,
+        initialize_ctm_tensor_env,
+    )
+    from tenax.algorithms._ctm_tensor_projector_2x2 import _build_enlarged_corner
+
+    A, B = _su_direction_dependent_pair()
+    chi = 12
+    envA = initialize_ctm_tensor_env(A, chi)
+    envB = initialize_ctm_tensor_env(B, chi)
+    aA = _build_double_layer_tensor(A)
+    aB = _build_double_layer_tensor(B)
+    # Same-site enlarged corners (each uses one site's env + that site's DL).
+    for env, a in ((envA, aA), (envB, aB)):
+        for pos, (C, Th, Tv) in {
+            "top_left": (env.C1, env.T1, env.T4),
+            "top_right": (env.C2, env.T1, env.T2),
+            "bottom_left": (env.C4, env.T3, env.T4),
+            "bottom_right": (env.C3, env.T3, env.T2),
+        }.items():
+            Q = _build_enlarged_corner(C, Th, Tv, a, position=pos)
+            assert Q is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
