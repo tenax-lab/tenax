@@ -261,7 +261,7 @@ Candidate mechanisms (from the 2026-07-01 investigation — each has an open ris
 **Files:**
 - Create (throwaway, do not commit): `scripts/spike_667_bond_drift.py`
 
-- [ ] **Step 1: Write a spike that runs N=1..5 2×2 sweeps and records, per env bond, the per-sector counts on each sublattice after each sweep**
+- [x] **Step 1: Write a spike that runs N=1..5 2×2 sweeps and records, per env bond, the per-sector counts on each sublattice after each sweep**
 
 Use `initialize_ctm_tensor_env`, `_build_double_layer_tensor`, and
 `_ctm_tensor_sweep_multisite(..., recipe="2x2")`; wrap the sweep in
@@ -270,12 +270,12 @@ counts (the failing contraction is reported by the `ValueError`). Regenerate the
 SU pair with `_su_direction_dependent_pair` (from the test) or cache it to
 `/tmp` to iterate fast.
 
-- [ ] **Step 2: Run and record**
+- [x] **Step 2: Run and record**
 
 Run: `uv run python scripts/spike_667_bond_drift.py`
 Record: (a) which sweep and which contraction first fails; (b) for the mismatching bond, the per-sector counts on A vs B across sweeps; (c) whether a fixed init-derived template's per-sector budget ever gets *exceeded* by a renormalised count (this decides A vs B/C).
 
-- [ ] **Step 3: Decide the mechanism**
+- [x] **Step 3: Decide the mechanism**
 
 Write the decision (and the measured evidence) into
 `docs/superpowers/plans/2026-07-01-direction-dependent-symmetric-ctm.md` under a
@@ -290,6 +290,77 @@ Run `examples/su_symmetric_ctm_e2e.py` and note whether the `base_charges`-free
 SU state is degenerate/near-classical (issue #667). If it is, note in the Phase 2
 outcome that the acceptance test's `E_sym < -0.3` bound may need revisiting and
 the "matches dense" goal is a numerical-consistency check, not a physics check.
+
+---
+
+## Phase 2 outcome (2026-07-01) — mechanism A ruled out; core is NOT a projector template
+
+**Measurement.** A per-*direction* spike (`scripts/spike_667_perdir.py`, throwaway,
+deleted) replicated the real `_ctm_tensor_sweep_multisite` 2×2 loop using the
+actual `_compute_plaquette_projector_pair` + `_ctm_tensor_absorb_*_2plaq`
+functions, snapshotting both sublattices' env chi-legs after each direction and
+checking them against a fixed init-derived per-sector template (per-sector max
+over A,B). SU pair cached to `/tmp/su667.pkl`.
+
+**Finding 1 — the init env is fully consistent.** All four 2×2 plaquette
+projector pairs build without error on the direction-dependent init env (both
+`s_anchor`). Phase 1's corner-tiling fix is confirmed sufficient for the *init*.
+
+**Finding 2 — first failure is WITHIN sweep 1, after the `left` absorption
+(not cross-sweep, not cross-sublattice).** Sweep order is `left, top, right,
+bottom`. `left` succeeds; `top`'s Phase-1 projector build then fails at the
+`bottom_left` enlarged corner, contraction `C4.c4_u ↔ T4.t4_u`, 6-vs-5 block
+mismatch. Crucially the failing quarter draws **all tensors from ONE env** (e.g.
+anchor `(0,0)` → `s_BL=(1,0)`, all of `C4/T3/T4` from env `(1,0)`), so it is a
+**single-env internal inconsistency**, not the cross-sublattice drift the plan
+modelled.
+
+**Finding 3 — mechanism A (fixed init-derived template) is measurably RULED
+OUT.** After only the `left` absorption the renormalised bonds acquire a **new
+charge sector absent from the init env** (charge `-4` appears) and existing
+per-sector counts **exceed** the init per-sector max (`-2: 6 > 4` on `C1.c1_d`,
+`C4.c4_r`, `T4.t4_d/t4_u`). A fixed init-derived template under-provisions and
+would truncate real renormalised data. (The earlier per-*sweep* spike's
+"never exceeded" verdict was vacuous — it never completed a sweep.)
+
+**Root cause — horizontal/vertical bond-identity crossing in the 2×2
+absorption.** In `_ctm_tensor_absorb_left_2plaq`, `new C4.c4_u` is the
+**carried-over, uncompressed `T3.t3_l` leg** (relabel `{"t3_l": "c4_u"}` after
+projecting only `(c4_r, d2)`), i.e. it inherits a *horizontal* bond's charges;
+but `new T4.t4_u` is **freshly compressed by `P_bot_curr`**, a *vertical* bond.
+The next `top` move's `bottom_left` enlarged corner contracts `c4_u ↔ t4_u`,
+pairing a horizontal-derived leg with a vertical-compressed leg. For
+direction-**uniform** iPEPS horizontal==vertical charge multisets so this is
+invisible (why 2×2 is the production default and never hit this); for
+`A.l != A.r` they differ and the contraction fails. Verified numerically: after
+`left`, `(1,0).C4.c4_u = {-2:4,0:6,2:2}` (= init `A.T3.t3_l`) vs
+`(1,0).T4.t4_u = {-4:1,-2:6,0:5}`.
+
+**Decision: none of A/B/C is the fix.** Mechanisms A/B/C all place a template on
+the **projector** truncation. But `c4_u` is not produced by a projector — it is a
+carried-over leg — so a projector template cannot reconcile it with `t4_u`. The
+real fix lives in the 2×2 absorption's **bond-direction bookkeeping**: the corner
+leg carried from `T3.t3_l` and the edge leg compressed by `P_bot_curr` must be
+made to represent the same renormalised bond (or the enlarged-corner leg-pairing
+must stop assuming horizontal==vertical). This is a **structural absorption
+change**, strictly larger than Phase 3 as scoped (projector-emit template), and
+consistent with the 2026-07-01 pre-plan verdict that direction-dependent 2×2 is
+"a substantial multi-layer effort … not a scoped patch."
+
+**Fixture validity (Step 4).** The dense CTM energy on this state is E≈−0.542
+(plan Background), ~19% above the square-lattice Heisenberg GS (−0.6694): the
+`base_charges`-free SU state is a poor/degenerate near-classical state. The
+acceptance test's "matches dense" is therefore a **numerical-consistency** check
+(sym-CTM == dense-CTM on the *same* state), not a physics check, and the
+`E_sym < -0.3` bound is not physically meaningful.
+
+**Recommended next step (needs a scope decision, see handoff):** Phase 3 as
+written will NOT unblock the test. Options: (1) redesign the 2×2 absorption to
+carry direction-tagged bonds through the enlarged corner (large); (2) shelve the
+direction-dependent 2×2 feature and keep only Phase 0+1 (the genuinely-correct
+tiling + init-consistency fixes already landed); (3) re-examine whether the
+enlarged-corner `c4_u↔t4_u` pairing is itself the bug. The pre-plan memory note
+already leaned toward "not worth it beyond the clean tiling fix."
 
 ---
 
