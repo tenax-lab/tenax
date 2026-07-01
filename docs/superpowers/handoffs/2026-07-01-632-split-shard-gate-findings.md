@@ -43,6 +43,19 @@ One compiled sweep step, D=10 χ=48, 2 devices: **12 all-gather + 12 all-reduce*
   2. `chi_I < χ` — the split-only interlayer-bond memory lever (held = χ throughout phases 1–2);
   3. the D≥12 autotuner **compile** wall (the giant transpose that blocks split χ128 / dense χ16) — a compile-model limit, not memory.
 
+## Addendum: split-1GPU χ-ceiling (2026-07-01) — the real wall is COMPILE, not memory
+
+Follow-up to phase-1 lever #1 ("push split-1GPU χ to its true memory wall"). Pushed χ on split 1-GPU (GPU 1, `bench_ctm_frontier_grad.py --path split`) until failure:
+
+| D | reach | per-device peak at reach | first failure | failure type |
+|---|-------|--------------------------|---------------|--------------|
+| 8 | **χ=224** | 51.2 GB (χ128 16.7 / 160 26.3 / 192 37.7 / 224 51.2) | χ256 | **autotuner compile-fail** `f64[2048,2048]` (χD=2048) |
+| 10 | **χ=128** | 37.3 GB | χ160 | **autotuner compile-fail** `f64[1600,1600]` (χD=1600) |
+
+**The single-GPU ceiling is an XLA autotuner _compile_ wall on the (χD)×(χD) projector gemm/SVD — NOT memory.** 30+ GB of card headroom remains at the failure point (D8 χ256 ≈ 65 GB, D10 χ160 ≈ 58 GB both fit an 80 GB A100). The wall lands at **χD ≈ 1700** (D8 χ224→1792 OK, χ256→2048 fail; D10 χ128→1280 OK, χ160→1600 fail) — the same autotuner failure that blocked dense D12 χ16 and split D12 χ128 in phase 1.
+
+**Consequence:** because split-1GPU is **compile-bound, not memory-bound**, the *memory* levers do not extend it — multi-GPU sharding (NO-GO above) and `chi_I<χ` both attack memory that isn't the constraint. **The one lever that actually raises the split-1GPU (D,χ) ceiling is the XLA autotuner wall on the large (χD)×(χD) gemm** — e.g. XLA autotune flags (`--xla_gpu_autotune_level`, triton gemm config), an alternative gemm/SVD strategy, or chunking the (χD) contraction so no single ≥~1700² gemm is emitted. That is the top post-1.0 large-(D,χ) item, superseding the memory levers.
+
 ## Reproduce
 
 ```bash
