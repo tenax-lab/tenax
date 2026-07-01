@@ -97,6 +97,7 @@ _FILE_MARKERS = {
     # #632 frontier benchmark (phase 1): tiny D=2 CPU value_and_grad finite +
     # path-guard checks. Fast; core so CI required checks run them.
     "test_frontier_probe.py": "core",
+    "test_frontier_bench_guard.py": "core",
 }
 
 
