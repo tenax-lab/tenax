@@ -64,19 +64,13 @@ def test_su_output_is_direction_dependent_but_cell_consistent():
     assert _charges(A, "l") == _charges(B, "r"), "A.l must match B.r (cell-consistent)"
 
 
-@pytest.mark.xfail(
-    reason="Blocked by #670: the symmetric block-sparse 2x2 CTM sweep is broken "
-    "for ANY multi-charge U(1) env (enlarged-corner carried-vs-compressed bond "
-    "mismatch), not just direction-dependent bonds. See "
-    "docs/superpowers/plans/2026-07-01-direction-dependent-symmetric-ctm.md "
-    "(Phase 2 outcome). Phase 0 (canonical tiling) + Phase 1 (init corner "
-    "consistency) landed and are correct; the 2x2 absorption fix is #670. The "
-    "1x1 recipe used here also has a fundamental edge-orientation wall (plan "
-    "Background).",
-    strict=False,
-)
 def test_symmetric_2site_ctm_matches_dense_on_direction_dependent_bonds():
-    """ctm_tensor_2site on A.l!=A.r must not error and must match the dense result."""
+    """ctm_tensor_2site on A.l!=A.r must not error and must match the dense result.
+
+    Fixed by #670 (carried-bond leg-pairing in the 2x2 enlarged-corner projector).
+    Uses recipe="2x2"; the 1x1 recipe has a separate fundamental edge-orientation
+    wall and is not targeted here.  Both paths should converge to E ≈ -0.5421.
+    """
     A, B = _su_direction_dependent_pair()
     Hd = heisenberg_gate()
 
@@ -84,12 +78,12 @@ def test_symmetric_2site_ctm_matches_dense_on_direction_dependent_bonds():
     Ad = DenseTensor(np.array(A.todense()), A.indices)
     Bd = DenseTensor(np.array(B.todense()), B.indices)
     eAd, eBd = ctm_tensor_2site(
-        Ad, Bd, chi=12, max_iter=60, conv_tol=1e-9, recipe="1x1"
+        Ad, Bd, chi=12, max_iter=60, conv_tol=1e-9, recipe="2x2"
     )
     E_dense = float(compute_energy_ctm_tensor_2site(Ad, Bd, eAd, eBd, Hd))
 
     # Symmetric block-sparse path (the one that used to crash with 7 vs 4).
-    eA, eB = ctm_tensor_2site(A, B, chi=12, max_iter=60, conv_tol=1e-9, recipe="1x1")
+    eA, eB = ctm_tensor_2site(A, B, chi=12, max_iter=60, conv_tol=1e-9, recipe="2x2")
     c1 = float(jnp.linalg.norm(eA.C1.todense()))
     E_sym = float(compute_energy_ctm_tensor_2site(A, B, eA, eB, Hd))
 

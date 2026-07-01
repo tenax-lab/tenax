@@ -541,7 +541,20 @@ def _ctm_tensor_sweep_multisite(
 
 
 def _ctm_sv_diff(sv_new: jax.Array, sv_old: jax.Array) -> jax.Array:
-    """Compute max absolute difference between normalized singular value vectors."""
+    """Compute max absolute difference between normalized singular value vectors.
+
+    On direction-dependent (asymmetric-bond) states the corner block
+    structure fills out empty charge sectors during CTM warmup, so the
+    concatenated per-sector SV vector can have a different length from one
+    iteration to the next (#670).  Zero-pad the shorter vector to the common
+    length: newly-appearing singular values then register as a nonzero diff,
+    which correctly reports the env as *not yet converged* while it is still
+    changing shape.  Once the block structure stabilises the lengths match
+    and the diff reduces to the usual element-wise comparison.
+    """
+    n = max(sv_new.shape[0], sv_old.shape[0])
+    sv_new = jnp.pad(sv_new, (0, n - sv_new.shape[0]))
+    sv_old = jnp.pad(sv_old, (0, n - sv_old.shape[0]))
     sv1 = sv_new / (jnp.sum(sv_new) + 1e-15)
     sv2 = sv_old / (jnp.sum(sv_old) + 1e-15)
     return jnp.max(jnp.abs(sv1 - sv2))
