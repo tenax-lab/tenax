@@ -22,6 +22,13 @@ __all__ = [
 import jax
 import numpy as np
 
+from tenax.algorithms._ctm_chunked_absorb import (
+    _chunked_T_new_bottom,
+    _chunked_T_new_left,
+    _chunked_T_new_right,
+    _chunked_T_new_top,
+    _raw_in_label_order,
+)
 from tenax.algorithms._ctm_projector import (
     _compute_projector_tensor,
     _reembed_fused,
@@ -994,6 +1001,51 @@ def _ctm_tensor_absorb_bottom_2plaq_fused(
     return C4_new, T3_new, C3_new
 
 
+def _chunked_T_new_apply(
+    edge, a, P_1, P_2, C1g, C4g,
+    edge_label_order, chi_leg, surv_leg, chunked_fn, chunk_size,
+):
+    """Chunked edge absorption for a 1x1 dense move.
+
+    Computes (C1_new, C4_new, T_new) with the expensive chi^2 * D^6 edge
+    contraction chunked over the boundary-chi axis via ``chunked_fn`` (from
+    _ctm_chunked_absorb), avoiding materializing the full intermediate.
+    Bit-identical to the fused-index path (_apply_projector_tensor). Dense only.
+
+    Args:
+        edge:  the parallel edge DenseTensor being grown (T4/T2/T1/T3).
+        a:     double-layer DenseTensor (labels u2,d2,l2,r2).
+        P_1, P_2: projector pair (labels fused, chi_new).
+        C1g, C4g: grown corners (P_1 side, P_2 side).
+        edge_label_order: canonical edge leg order, e.g. ["t4_d","l2","t4_u"].
+        chi_leg: edge's boundary-chi (chunk) leg label, e.g. "t4_d".
+        surv_leg: surviving a-leg label (the new edge's D2 leg), e.g. "r2".
+        chunked_fn: the matching _chunked_T_new_* raw function.
+        chunk_size: lax.map batch size over the boundary-chi axis.
+
+    Returns:
+        (C1_new, C4_new, T_new) Tensors. T_new labels (chi_new, <surv_leg>, chi_new_r).
+    """
+    chi_dim = edge.indices[list(edge.labels()).index(chi_leg)].dim
+    D2 = a.indices[list(a.labels()).index(surv_leg)].dim
+    edge_raw = _raw_in_label_order(edge, edge_label_order)
+    a_raw = _raw_in_label_order(a, ["u2", "d2", "l2", "r2"])
+    # The raw core conjugates P1 internally (matches P_1.bar()); pass P_1 as-is.
+    P1_raw = _raw_in_label_order(P_1, ["fused", "chi_new"])
+    P2_raw = _raw_in_label_order(P_2, ["fused", "chi_new"])
+    T_arr = chunked_fn(edge_raw, a_raw, P1_raw, P2_raw, chi_dim, D2, chunk_size)
+
+    # Cheap corners (identical to _apply_projector_tensor)
+    P1_bar = P_1.bar()
+    C1_new = contract(P1_bar, C1g)
+    C4_new = contract(P_2.bar(), C4g)
+    chi_new_idx = P1_bar.indices[list(P1_bar.labels()).index("chi_new")]
+    surv_idx = a.indices[list(a.labels()).index(surv_leg)]
+    chi_new_r_idx = P_2.indices[list(P_2.labels()).index("chi_new")].relabel("chi_new_r")
+    T_new = DenseTensor(T_arr, (chi_new_idx, surv_idx, chi_new_r_idx))
+    return C1_new, C4_new, T_new
+
+
 def _ctm_tensor_move_left(
     env_self: CTMTensorEnv,
     env_neighbor: CTMTensorEnv,
@@ -1036,32 +1088,19 @@ def _ctm_tensor_move_left(
     )
 
     if chunk_size is not None and isinstance(env_self.T4, DenseTensor):
-        from tenax.algorithms._ctm_chunked_absorb import (
-            _chunked_T_new_left,
-            _raw_in_label_order,
+        C1_new, C4_new, T4_new = _chunked_T_new_apply(
+            env_self.T4, a, P_1, P_2, C1g, C4g,
+            ["t4_d", "l2", "t4_u"], "t4_d", "r2",
+            _chunked_T_new_left, chunk_size,
         )
-
-        chi_dim = env_self.T4.indices[list(env_self.T4.labels()).index("t4_d")].dim
-        D2 = a.indices[list(a.labels()).index("r2")].dim
-        T4_raw = _raw_in_label_order(env_self.T4, ["t4_d", "l2", "t4_u"])
-        a_raw = _raw_in_label_order(a, ["u2", "d2", "l2", "r2"])
-        P1_bar = P_1.bar()
-        # Pass un-conjugated P1 data; the core conjugates P1 internally.
-        P1_raw = _raw_in_label_order(P1_bar, ["fused", "chi_new"]).conj()
-        P2_raw = _raw_in_label_order(P_2, ["fused", "chi_new"])
-        T4_arr = _chunked_T_new_left(T4_raw, a_raw, P1_raw, P2_raw, chi_dim, D2, chunk_size)
-
-        # Corners: identical to _apply_projector_tensor
-        C1_new = contract(P1_bar, C1g)   # (chi_new, t1_r)
-        C4_new = contract(P_2.bar(), C4g)  # (chi_new, t3_l)
-
-        # Rewrap T4_new with production TensorIndex objects.
-        # Shape (chi_new, r2, chi_new_r) matching default _apply_projector_tensor output.
-        chi_new_idx = P1_bar.indices[list(P1_bar.labels()).index("chi_new")]
-        surv_idx = a.indices[list(a.labels()).index("r2")]
-        chi_new_r_idx = P_2.indices[list(P_2.labels()).index("chi_new")].relabel("chi_new_r")
-        T4_new = DenseTensor(T4_arr, (chi_new_idx, surv_idx, chi_new_r_idx))
     else:
+        if chunk_size is not None:
+            import warnings
+            warnings.warn(
+                "chunk_size is set but env is not dense (SymmetricTensor); "
+                "falling back to the standard fused-index CTM path.",
+                stacklevel=2,
+            )
         # T4(self) · a(neighbor)
         T4_with_a = contract(env_self.T4, a)
         T4g = _fuse_pair_by_label(T4_with_a, "t4_d", "u2", "fl", IN)

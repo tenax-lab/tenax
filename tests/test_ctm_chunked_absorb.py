@@ -9,6 +9,21 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from tenax.algorithms._ctm_chunked_absorb import (
+    _chunked_T_new_bottom,
+    _chunked_T_new_left,
+    _chunked_T_new_right,
+    _chunked_T_new_top,
+)
+from tenax.algorithms._ctm_tensor_init import (
+    _build_double_layer_tensor,
+    initialize_ctm_tensor_env,
+)
+from tenax.algorithms._ctm_tensor_moves import _ctm_tensor_move_left
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.symmetry import U1Symmetry
+from tenax.core.tensor import DenseTensor
+
 
 @pytest.fixture(autouse=True, scope="session")
 def _enable_x64():
@@ -16,13 +31,6 @@ def _enable_x64():
     jax.config.update("jax_enable_x64", True)
     yield
     jax.config.update("jax_enable_x64", prev)
-
-from tenax.algorithms._ctm_chunked_absorb import (
-    _chunked_T_new_left,
-    _chunked_T_new_right,
-    _chunked_T_new_top,
-    _chunked_T_new_bottom,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -164,16 +172,6 @@ def test_chunked_left_complex_projector():
 # Full 1x1 LEFT move: chunked branch == default branch (Task 2)
 # ---------------------------------------------------------------------------
 
-from tenax.algorithms._ctm_tensor_init import (
-    _build_double_layer_tensor,
-    initialize_ctm_tensor_env,
-)
-from tenax.algorithms._ctm_tensor_moves import _ctm_tensor_move_left
-from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor
-
-
 def _random_dense_site_tensor(D: int, d: int, seed: int = 0) -> DenseTensor:
     """Random dense iPEPS site tensor with labels (u,d,l,r,phys), all-zero U(1) charges."""
     rng = np.random.RandomState(seed)
@@ -212,3 +210,28 @@ def test_full_left_move_chunked_matches_default():
             / (jnp.max(jnp.abs(b_arr)) + 1e-30)
         )
         assert rel <= 1e-12, f"field={field!r} rel={rel}"
+
+
+def test_full_left_move_chunked_ragged_matches_default():
+    """Ragged chunk_size=5 on chi=12 (5 does not divide 12) must match default (rel <= 1e-12)."""
+    D, d, chi = 2, 2, 12
+    A = _random_dense_site_tensor(D, d, seed=13)
+    a = _build_double_layer_tensor(A)
+    env = initialize_ctm_tensor_env(A, chi)
+    base_env, _ = _ctm_tensor_move_left(env, env, a, chi)
+    chunked_env, _ = _ctm_tensor_move_left(env, env, a, chi, chunk_size=5)
+    for field in ("C1", "C4", "T4"):
+        b = getattr(base_env, field)
+        c = getattr(chunked_env, field)
+        b_arr = b.todense()
+        c_arr = c.todense()
+        # align leg order via labels before comparing
+        b_labels = list(b.labels())
+        c_labels = list(c.labels())
+        perm = [c_labels.index(x) for x in b_labels]
+        c_arr_aligned = jnp.transpose(c_arr, perm)
+        rel = float(
+            jnp.max(jnp.abs(c_arr_aligned - b_arr))
+            / (jnp.max(jnp.abs(b_arr)) + 1e-30)
+        )
+        assert rel <= 1e-12, f"ragged chunk: field={field!r} rel={rel}"

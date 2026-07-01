@@ -13,6 +13,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jax import lax
 
+from tenax.core.tensor import DenseTensor
+
 
 def _chunked_T_new_left(T4, a, P1, P2, chi, D2, batch):
     """LEFT: edge T4 (t4_d, l2, t4_u), a (u2, d2, l2, r2).
@@ -91,6 +93,10 @@ def _chunked_T_new_bottom(T3, a, P1, P2, chi, D2, batch):
 
 def _raw_in_label_order(T, order):
     """Return T's raw array transposed to the given label order (DenseTensor only)."""
+    assert isinstance(T, DenseTensor), (
+        f"_raw_in_label_order requires a DenseTensor, got {type(T).__name__}; "
+        "chunked absorption is dense-only."
+    )
     cur = list(T.labels())
     perm = [cur.index(lbl) for lbl in order]
     return T.transpose(tuple(perm)).todense()
