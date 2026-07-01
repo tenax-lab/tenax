@@ -53,8 +53,10 @@ confirms no regressions.
   does NOT receive the `ctm_chunk_size` knob — that is Increment 2, gate-first.
 - **1×1 recipe.** The 2×2 absorb path is untouched (each 2×2 move already has its own per-move
   sharding path; chunking there is separate work).
-- **Dense only.** Symmetric and fermionic envs: the dense gate in the move functions means the
-  chunked branch is simply not entered; no warning is emitted (the knob is a no-op).
+- **Dense only.** Symmetric and fermionic envs: when `chunk_size` is set but the env is not
+  dense, the move functions emit `warnings.warn("chunk_size is set but env is not dense
+  (SymmetricTensor); falling back to the standard fused-index CTM path.")` and fall back to the
+  standard fused-index CTM path.
 - **No optimize_gs_ad benchmark.** The D=10–12 / large-χ multi-GPU benchmark depends on Increment
   2 (correct + bounded-memory grads through the chunked backward). Do not wire `optimize_gs_ad`
   until Increment 2 gate passes.

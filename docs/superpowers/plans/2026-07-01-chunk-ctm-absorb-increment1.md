@@ -611,7 +611,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 - **Increment 2** — chunked **backward** through the implicit-AD adjoint (`_ctm_energy_ad.py`, custom_vjp + fixed-point). This is gate-first: prove correct + bounded-memory grads through the chunked move BEFORE wiring `optimize_gs_ad`. The forward `device_mesh`/`ctm_chunk_size` are deliberately NOT threaded into the backward step (`:1007`).
 - **2×2 recipe** chunking (more absorb call sites; the 2×2 absorb already has per-move sharding).
-- **Symmetric / fermionic** envs (knob is a no-op there; large-D symmetric → YASTN).
+- **Symmetric / fermionic** envs (setting `ctm_chunk_size` on a non-dense env falls back to the
+  standard fused-index CTM path with a `warnings.warn`; large-D symmetric → YASTN).
 - The **D=10–12 / large-χ multi-GPU `optimize_gs_ad` benchmark** (depends on Increment 2).
 
 ---
