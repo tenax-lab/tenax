@@ -88,6 +88,9 @@ _FILE_MARKERS = {
     "test_heisenberg_d4_chi_scaling.py": "core",
     "test_heisenberg_d8_chi_scaling.py": "core",
     "test_ctm_sharding_parity.py": "slow",
+    # Chunked dense-CTM edge absorption (chunk x shard #632 Increment 1): fast
+    # mechanism unit tests; collected as core so CI required checks run them.
+    "test_ctm_chunked_absorb.py": "core",
 }
 
 

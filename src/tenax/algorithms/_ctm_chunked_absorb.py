@@ -5,7 +5,8 @@ Reproduces the expensive ``contract(edge, a)`` + projector sandwich of the
 ``lax.map`` so the chi^2 * D^6 intermediate is never materialized in full.
 Numerically faithful to ``_apply_projector_tensor`` (T_new = conj(P1)^T . (edge.a) . P2;
 P1 is barred -> conj data, P2 is not). Dense path only. See the gate findings
-docs/superpowers/handoffs/2026-06-30-chunk-shard-ctm-move-findings.md (STRONG GO).
+docs/superpowers/handoffs/2026-06-30-chunk-shard-ctm-move-findings.md (#632 gate,
+STRONG GO).
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ def _chunked_T_new_left(T4, a, P1, P2, chi, D2, batch):
     P1 raw (fl=(t4_d, u2), chi_new); P2 raw (fr=(t4_u, d2), chi_new).
     Returns T_new (chi_new, r2, chi_new_r).
     """
+    assert batch >= 1, f"batch must be >= 1, got {batch}"
     P1r = P1.reshape(chi, D2, -1)                       # (t4_d, u2, chi_new)
 
     def per_i(args):
@@ -32,7 +34,11 @@ def _chunked_T_new_left(T4, a, P1, P2, chi, D2, batch):
 
 
 def _chunked_T_new_right(T2, a, P1, P2, chi, D2, batch):
-    """RIGHT: edge T2 (t2_u, r2, t2_d). P1 fl=(t2_u,u2), P2 fr=(t2_d,d2). T_new (chi_new, l2, chi_new_r)."""
+    """RIGHT: edge T2 (t2_u, r2, t2_d). P1 fl=(t2_u,u2), P2 fr=(t2_d,d2).
+
+    Returns T_new (chi_new, l2, chi_new_r).
+    """
+    assert batch >= 1, f"batch must be >= 1, got {batch}"
     P1r = P1.reshape(chi, D2, -1)                       # (t2_u, u2, chi_new)
 
     def per_i(args):
@@ -46,7 +52,11 @@ def _chunked_T_new_right(T2, a, P1, P2, chi, D2, batch):
 
 
 def _chunked_T_new_top(T1, a, P1, P2, chi, D2, batch):
-    """TOP: edge T1 (t1_l, u2, t1_r). P1 fl=(t1_l,l2), P2 fr=(t1_r,r2). T_new (chi_new, d2, chi_new_r)."""
+    """TOP: edge T1 (t1_l, u2, t1_r). P1 fl=(t1_l,l2), P2 fr=(t1_r,r2).
+
+    Returns T_new (chi_new, d2, chi_new_r).
+    """
+    assert batch >= 1, f"batch must be >= 1, got {batch}"
     P1r = P1.reshape(chi, D2, -1)                       # (t1_l, l2, chi_new)
 
     def per_i(args):
@@ -61,7 +71,11 @@ def _chunked_T_new_top(T1, a, P1, P2, chi, D2, batch):
 
 
 def _chunked_T_new_bottom(T3, a, P1, P2, chi, D2, batch):
-    """BOTTOM: edge T3 (t3_r, d2, t3_l). P1 fl=(t3_r,l2), P2 fr=(t3_l,r2). T_new (chi_new, u2, chi_new_r)."""
+    """BOTTOM: edge T3 (t3_r, d2, t3_l). P1 fl=(t3_r,l2), P2 fr=(t3_l,r2).
+
+    Returns T_new (chi_new, u2, chi_new_r).
+    """
+    assert batch >= 1, f"batch must be >= 1, got {batch}"
     P1r = P1.reshape(chi, D2, -1)                       # (t3_r, l2, chi_new)
 
     def per_i(args):

@@ -5,9 +5,16 @@ monolithic einsum reference at rel-error <= 1e-12 (x64), across three batch
 sizes including a ragged one.
 """
 import jax
-jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import pytest
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _enable_x64():
+    prev = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", prev)
 
 from tenax.algorithms._ctm_chunked_absorb import (
     _chunked_T_new_left,
@@ -127,3 +134,26 @@ def test_chunked_bottom_matches_monolith(batch):
     got = _chunked_T_new_bottom(T3, a, P1, P2, chi, D2, batch)
     rel = float(jnp.max(jnp.abs(got - ref)) / (jnp.max(jnp.abs(ref)) + 1e-30))
     assert rel <= 1e-12, rel
+
+
+# ---------------------------------------------------------------------------
+# Complex-projector path (M-3): verifies P1.conj() is correct for complex P1
+# ---------------------------------------------------------------------------
+
+def test_chunked_left_complex_projector():
+    """LEFT with complex P1/P2 and T4 — exercises P1.conj() on non-real inputs."""
+    D, chi = 3, 16
+    D2 = D * D
+    keys = jax.random.split(jax.random.PRNGKey(42), 8)
+    T4 = (jax.random.normal(keys[0], (chi, D2, chi))
+          + 1j * jax.random.normal(keys[1], (chi, D2, chi)))
+    a  = (jax.random.normal(keys[2], (D2, D2, D2, D2))
+          + 1j * jax.random.normal(keys[3], (D2, D2, D2, D2)))
+    P1 = (jax.random.normal(keys[4], (chi * D2, chi))
+          + 1j * jax.random.normal(keys[5], (chi * D2, chi)))
+    P2 = (jax.random.normal(keys[6], (chi * D2, chi))
+          + 1j * jax.random.normal(keys[7], (chi * D2, chi)))
+    ref = _monolith_left(T4, a, P1, P2, chi, D2)
+    got = _chunked_T_new_left(T4, a, P1, P2, chi, D2, batch=8)
+    rel = float(jnp.max(jnp.abs(got - ref)) / (jnp.max(jnp.abs(ref)) + 1e-30))
+    assert rel <= 1e-12, f"complex-projector rel error {rel} > 1e-12"
