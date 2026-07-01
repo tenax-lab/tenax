@@ -1,6 +1,6 @@
 # Direction-Dependent Symmetric Multisite CTM Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 >
 > **Read this first — this is a hybrid design+plan.** The *core* of the problem
 > (keeping the two sublattices' renormalised environment bonds structurally
@@ -71,7 +71,7 @@ This is a genuine bug independent of the direction-dependent feature: two opposi
 - Create test: `tests/test_ctm_tensor_tiling.py`
 - Modify: `src/tenax/algorithms/_ctm_tensor_init.py` (add helper after `_grouped_chi_perm`, ~line 285)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_ctm_tensor_tiling.py
@@ -107,12 +107,12 @@ def test_tile_no_pad_when_chi_le_d2():
     assert np.array_equal(out, fused[:5])
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_ctm_tensor_tiling.py -v`
 Expected: FAIL with `ImportError: cannot import name '_tile_fused_to_chi'`
 
-- [ ] **Step 3: Implement the helper**
+- [x] **Step 3: Implement the helper**
 
 In `src/tenax/algorithms/_ctm_tensor_init.py`, add after `_grouped_chi_perm`:
 
@@ -138,21 +138,21 @@ def _tile_fused_to_chi(fused: np.ndarray, chi: int) -> np.ndarray:
 
 Also add `"_tile_fused_to_chi"` to `__all__` at the top of the file.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_ctm_tensor_tiling.py -v`
 Expected: PASS (3 tests)
 
-- [ ] **Step 5: Route existing tiling through the helper**
+- [x] **Step 5: Route existing tiling through the helper**
 
 In `_init_symmetric_standard_edge`, replace the body of the inner `_fused_chi_charges` (the `if chi <= len(fused): ... else: tile ...` block) with `return _tile_fused_to_chi(fused, chi)`. Leave the corner as-is for now (it is rewritten in Phase 1).
 
-- [ ] **Step 6: Run the init regression + full core suite**
+- [x] **Step 6: Run the init regression + full core suite**
 
 Run: `uv run pytest tests/test_ctm_tensor_init_rank1.py tests/test_ipeps_u1sz.py -q`
 Expected: PASS (no regression — for uniform/trivial charges the helper is a no-op).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add tests/test_ctm_tensor_tiling.py src/tenax/algorithms/_ctm_tensor_init.py
@@ -163,16 +163,28 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-## Phase 1 — 2×2-correct env init (understood)
+## Phase 1 — 2×2-correct env init (understood) — DONE (commit c9a77ed)
 
 For the **2×2** recipe, all enlarged-corner and absorption corner↔edge contractions are SAME-site, so the *original* same-axis seeding is correct. The only init change 2×2 needs is Phase 0's tiling (already landed). This phase is therefore a **verification phase**: confirm the enlarged-corner and 2-plaquette absorption contractions all pass on the fixture with the current (original) init + Phase 0 tiling, and lock that with a test. No init-axis changes — the 1×1-oriented axis reseeding from the 2026-07-01 WIP is explicitly NOT applied here.
+
+**Phase 1 outcome (2026-07-01):** the verification test initially FAILED at the
+first corner (`top_left`) on the same-site contraction `C1.c1_r <-> T1.t1_l`
+(7-vs-6 per-sector block mismatch). Root cause was the residual same-site gap the
+plan anticipated: Phase 0 routed only the *edge* chi legs through the canonical
+sorted `_tile_fused_to_chi`, but `_init_symmetric_standard_corner` still tiled its
+chi legs in **enumeration** order. Both legs derive from the same virtual axis
+(`ref_axis=d`) and share the same D²-fused multiset, but their padding past D²
+diverged. Fix: route the corner through `_tile_fused_to_chi` too (no axis
+reseeding — original same-axis 2×2 seeding kept). All four enlarged corners on
+both sublattices now build; regression green (tiling + init-rank1 + u1sz, 30
+passed).
 
 ### Task 1.1: Lock enlarged-corner charge-consistency on the fixture
 
 **Files:**
 - Test: `tests/test_ctm_direction_dependent_bonds.py` (add a focused sub-test)
 
-- [ ] **Step 1: Write a test that builds all four enlarged corners without error**
+- [x] **Step 1: Write a test that builds all four enlarged corners without error**
 
 ```python
 def test_2x2_enlarged_corners_build_on_direction_dependent_init():
@@ -202,12 +214,12 @@ def test_2x2_enlarged_corners_build_on_direction_dependent_init():
             assert Q is not None
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `uv run pytest tests/test_ctm_direction_dependent_bonds.py::test_2x2_enlarged_corners_build_on_direction_dependent_init -v`
 Expected: PASS (with Phase 0 tiling, the same-site enlarged corners are charge-consistent). If it FAILS, the failing contraction identifies a residual same-site seeding/tiling gap — fix in `_ctm_tensor_init.py` and re-run before proceeding. Record the exact failing contraction in the commit message.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add tests/test_ctm_direction_dependent_bonds.py
