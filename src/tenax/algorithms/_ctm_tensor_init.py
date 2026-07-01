@@ -14,6 +14,7 @@ __all__ = [
     "_init_symmetric_standard_edge",
     "_make_dense_standard_edge",
     "_make_rank1_dense_corner",
+    "_tile_fused_to_chi",
     "initialize_ctm_tensor_env",
 ]
 
@@ -284,6 +285,25 @@ def _grouped_chi_perm(charges: np.ndarray) -> np.ndarray:
     return np.argsort(np.asarray(charges), kind="stable")
 
 
+def _tile_fused_to_chi(fused: np.ndarray, chi: int) -> np.ndarray:
+    """Tile size-D² ``fused`` charges up to length ``chi`` canonically.
+
+    The leading D² block keeps the raw enumeration order (so index 0 stays the
+    charge-0 diagonal that anchors the rank-1 seed at the vacuum slot); any
+    padding beyond D² is appended in **sorted** order.  This makes two legs of
+    one bond that carry opposite flow (sign-flipped enumerations of the same
+    multiset) agree after tiling.  A no-op for ``chi <= D²`` and for
+    direction-uniform iPEPS.  #667.
+    """
+    fused = np.asarray(fused, dtype=np.int32)
+    if chi <= len(fused):
+        return fused[:chi]
+    srt = np.sort(fused)
+    reps = (chi - len(fused)) // len(srt) + 1
+    tail = np.tile(srt, reps)[: chi - len(fused)]
+    return np.concatenate([fused, tail]).astype(np.int32)
+
+
 def _init_symmetric_standard_edge(
     A: SymmetricTensor,
     chi: int,
@@ -315,10 +335,7 @@ def _init_symmetric_standard_edge(
         ref_idx = A.indices[ref_axis]
         ref_bra = ref_idx.flip_flow()
         fused = _compute_fused_charges(ref_idx, ref_bra, flow, sym)
-        if chi <= len(fused):
-            return np.asarray(fused[:chi], dtype=np.int32)
-        reps = chi // len(fused) + 1
-        return np.asarray(np.tile(fused, reps)[:chi], dtype=np.int32)
+        return _tile_fused_to_chi(fused, chi)
 
     chi1_charges = _fused_chi_charges(ref_axis_chi1, flow_chi1)
     chi2_charges = _fused_chi_charges(ref_axis_chi2, flow_chi2)
