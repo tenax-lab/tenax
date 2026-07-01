@@ -94,6 +94,9 @@ _FILE_MARKERS = {
     # #632 Increment 2 gate byproduct: forward-chunk grads through the (monolith)
     # implicit-AD backward stay exact. Tiny D=2 CPU value_and_grad parity.
     "test_ctm_chunk_backward_grad.py": "core",
+    # #632 frontier benchmark (phase 1): tiny D=2 CPU value_and_grad finite +
+    # path-guard checks. Fast; core so CI required checks run them.
+    "test_frontier_probe.py": "core",
 }
 
 
