@@ -281,6 +281,7 @@ def _ctm_tensor_sweep_multisite(
     projector_backward: str = "auto",
     recipe: str = "2x2",
     device_mesh=None,
+    chunk_size: int | None = None,
 ) -> tuple[dict[Coord, CTMTensorEnv], jax.Array, jax.Array]:
     """One full multisite CTM sweep over all sites and directions.
 
@@ -324,6 +325,26 @@ def _ctm_tensor_sweep_multisite(
     all_coords = list(envs.keys())
     max_eps = jnp.asarray(0.0)
     max_smallest_S = jnp.asarray(0.0)
+
+    # GSPMD: when a device mesh is supplied, re-shard the absorbed double-layer
+    # ``a`` onto its surviving-leg layout for the move's direction so the
+    # dominant χ²·D⁶ absorption intermediate stays at ≈1/N per device.
+    # ``with_sharding_constraint`` is a pure layout hint (never changes
+    # numerics), so the flag-off path below is a literal no-op identical to
+    # the single-device code.  Hoisted here so it is available to both the
+    # 1x1 and 2x2 branches.
+    if device_mesh is not None:
+        from tenax.algorithms.ctm_sharding import (
+            constrain_double_layer_for_move,
+        )
+
+        def _shard_a(a, direction):
+            return constrain_double_layer_for_move(a, direction, device_mesh)
+    else:
+
+        def _shard_a(a, direction):
+            return a
+
     if recipe == "1x1":
         for direction, move_fn in _DIRECTION_MOVES:
             for coord in _sort_coords_for_direction(all_coords, direction):
@@ -331,31 +352,16 @@ def _ctm_tensor_sweep_multisite(
                 envs[coord], eps_t = move_fn(
                     envs[coord],
                     envs[nb],
-                    double_layers[nb],
+                    _shard_a(double_layers[nb], direction),
                     chi,
                     projector_method,
                     base_charges=base_charges,
                     projector_backward=projector_backward,
+                    chunk_size=chunk_size,
                 )
                 max_eps = jnp.maximum(max_eps, jnp.asarray(eps_t))
     elif recipe == "2x2":
-        # GSPMD: when a device mesh is supplied, re-shard the absorbed
-        # double-layer ``a`` onto its surviving-leg layout for the move's
-        # direction so the dominant χ²·D⁶ absorption intermediate stays at
-        # ≈1/N per device.  ``with_sharding_constraint`` is a pure layout hint
-        # (never changes numerics), so the flag-off path below is a literal
-        # no-op identical to the single-device code.
-        if device_mesh is not None:
-            from tenax.algorithms.ctm_sharding import (
-                constrain_double_layer_for_move,
-            )
-
-            def _shard_a(a, direction):
-                return constrain_double_layer_for_move(a, direction, device_mesh)
-        else:
-
-            def _shard_a(a, direction):
-                return a
+        # (The _shard_a closure is now defined above, shared with 1x1.)
 
         # variPEPS-style 2-plaquette absorption: for each direction, two
         # phases.

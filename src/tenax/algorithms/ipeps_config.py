@@ -248,6 +248,13 @@ class CTMConfig:
     # unchanged. Build a mesh via ``tenax.algorithms.ctm_sharding.build_ctm_mesh``.
     # Appended at the end of the dataclass to preserve positional CTMConfig ABI.
     device_mesh: jax.sharding.Mesh | None = None
+    # Chunk the χ²·D⁶ edge absorption over the boundary-χ axis via
+    # ``lax.map(batch_size=ctm_chunk_size)`` (1×1 recipe, dense envs only).
+    # Lowers per-device peak memory ≈÷K at large D and composes with
+    # ``device_mesh`` (≈÷(N·K)). ``None`` (default) → single monolithic
+    # contraction (byte-for-byte unchanged). See the #632 chunk×shard gate.
+    # Appended at the end of the dataclass to preserve positional CTMConfig ABI.
+    ctm_chunk_size: int | None = None
 
     def __post_init__(self):
         valid_modes = {None, "c4v_reference"}

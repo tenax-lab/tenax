@@ -269,3 +269,33 @@ def test_full_left_move_chunked_ragged_matches_default():
             / (jnp.max(jnp.abs(b_arr)) + 1e-30)
         )
         assert rel <= 1e-12, f"ragged chunk: field={field!r} rel={rel}"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end parity: python_loop_ctm_converge with ctm_chunk_size (Task 4)
+# ---------------------------------------------------------------------------
+
+def test_converge_1x1_chunk_matches_default():
+    """python_loop_ctm_converge with ctm_chunk_size=3 must produce identical
+    envs to the default path (rel <= 1e-10) after 8 fixed sweeps (1x1 recipe).
+    """
+    from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
+
+    chi = 12
+    D, d = 2, 2
+    A = _random_dense_site_tensor(D, d, seed=99)
+    site_tensors = {(0, 0): A}
+    neighbors = {(0, 0): {direction: (0, 0) for direction in ("left", "right", "top", "bottom")}}
+    kw = dict(chi=chi, max_iter=8, min_iter=8, recipe="1x1", conv_tol=0.0)
+    envs_off, _ = python_loop_ctm_converge(site_tensors, neighbors, **kw)
+    envs_on, _ = python_loop_ctm_converge(site_tensors, neighbors, ctm_chunk_size=3, **kw)
+    e_off, e_on = envs_off[(0, 0)], envs_on[(0, 0)]
+    for field in e_off._fields:
+        b = getattr(e_off, field)
+        c = getattr(e_on, field)
+        b_labels = list(b.labels())
+        c_labels = list(c.labels())
+        perm = [c_labels.index(x) for x in b_labels]
+        cc = jnp.transpose(c.todense(), perm)
+        rel = float(jnp.max(jnp.abs(cc - b.todense())) / (jnp.max(jnp.abs(b.todense())) + 1e-30))
+        assert rel <= 1e-10, (field, rel)

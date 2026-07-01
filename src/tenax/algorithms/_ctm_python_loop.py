@@ -57,16 +57,18 @@ class CTMConvergeInfo(NamedTuple):
 # cost.  Diagnosed in docs/plans/2026-05-09-ipeps-ad-jit-cost-diagnosis.md.
 # Keyed by id(neighbors) — safe because neighbors dicts are constructed once
 # per optimizer invocation and stay alive throughout.
-# Key is (id(neighbors), recipe, device_mesh): a 3-tuple of an int, a str and a
-# ``jax.sharding.Mesh | None`` (Mesh imported only under TYPE_CHECKING; the
-# annotation is a string here thanks to ``from __future__ import annotations``).
-_JIT_STEP_CACHE: dict[tuple[int, str, Mesh | None], Callable] = {}
+# Key is (id(neighbors), recipe, device_mesh, ctm_chunk_size): a 4-tuple of an
+# int, a str, a ``jax.sharding.Mesh | None`` and an ``int | None`` (Mesh
+# imported only under TYPE_CHECKING; the annotation is a string here thanks to
+# ``from __future__ import annotations``).
+_JIT_STEP_CACHE: dict[tuple[int, str, Mesh | None, int | None], Callable] = {}
 
 
 def _make_jit_ctm_step(
     neighbors: dict[Coord, dict[str, Coord]],
     recipe: str = "2x2",
     device_mesh=None,
+    ctm_chunk_size: int | None = None,
 ):
     """Create a JIT-compiled CTM step function for a given neighbor topology.
 
@@ -80,7 +82,7 @@ def _make_jit_ctm_step(
         A JIT-compiled function with signature::
 
             step(site_tensors, envs, *, chi, projector_method,
-                 renormalize, projector_backward)
+                 renormalize, projector_backward, chunk_size)
                  -> tuple[dict[Coord, CTMTensorEnv], jax.Array]
 
         The returned tuple is ``(new_envs, max_truncation_error)`` where
@@ -93,11 +95,13 @@ def _make_jit_ctm_step(
     # ``device_mesh`` is captured (static, non-traced) in the closure, so it
     # must participate in the cache key: the sharded and single-device steps
     # are different compiled functions.
+    # ``ctm_chunk_size`` is static: different chunk sizes yield differently
+    # shaped lax.map computations that must not share a JIT cache entry.
     # Asymmetric keying: ``neighbors`` is an unhashable dict so we fall back to
     # ``id()``; ``device_mesh`` is a hashable ``jax.sharding.Mesh`` (or None)
     # with a value ``__eq__``, so it is used directly — equal meshes share a
     # cache entry and we avoid id-reuse hazards after GC.
-    cache_key = (id(neighbors), recipe, device_mesh)
+    cache_key = (id(neighbors), recipe, device_mesh, ctm_chunk_size)
     cached = _JIT_STEP_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -109,6 +113,7 @@ def _make_jit_ctm_step(
             "projector_method",
             "renormalize",
             "projector_backward",
+            "chunk_size",
         ),
     )
     def _step(
@@ -119,6 +124,7 @@ def _make_jit_ctm_step(
         projector_method: str = "svd",
         renormalize: bool = False,
         projector_backward: str = "auto",
+        chunk_size: int | None = None,
     ) -> tuple[dict[Coord, CTMTensorEnv], jax.Array, jax.Array]:
         double_layers = {
             c: _build_double_layer_tensor(A) for c, A in site_tensors.items()
@@ -133,6 +139,7 @@ def _make_jit_ctm_step(
             projector_backward=projector_backward,
             recipe=recipe,
             device_mesh=device_mesh,
+            chunk_size=chunk_size,
         )
 
     _JIT_STEP_CACHE[cache_key] = _step
@@ -162,6 +169,7 @@ def python_loop_ctm_converge(
     chi_max: int | None = None,
     recipe: str = "2x2",
     device_mesh=None,
+    ctm_chunk_size: int | None = None,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM to convergence using a Python for-loop over JIT'd sweeps.
 
@@ -240,10 +248,16 @@ def python_loop_ctm_converge(
             plateau_patience=plateau_patience,
             recipe=recipe,
             device_mesh=device_mesh,
+            ctm_chunk_size=ctm_chunk_size,
         )
 
     # Build the JIT'd step function (captures neighbors + device_mesh in closure)
-    jit_step = _make_jit_ctm_step(neighbors, recipe, device_mesh=device_mesh)
+    jit_step = _make_jit_ctm_step(
+        neighbors, recipe, device_mesh=device_mesh, ctm_chunk_size=ctm_chunk_size
+    )
+    # Bind chunk_size so callers that don't know about it (e.g.
+    # _run_ctm_loop_with_bump) pass it transparently.
+    jit_step = partial(jit_step, chunk_size=ctm_chunk_size)
 
     # chi may grow during the loop when ``ctmrg_heuristic_increase_chi``
     # is enabled (variPEPS-style in-CTM bump; Issue #492).  ``chi_current``
@@ -355,6 +369,7 @@ def _python_loop_chi_ramp(
     plateau_patience: int | None = None,
     recipe: str = "2x2",
     device_mesh=None,
+    ctm_chunk_size: int | None = None,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM with chi-ramp schedule."""
     envs = env_init
@@ -408,6 +423,7 @@ def _python_loop_chi_ramp(
             plateau_patience=stage_patience,
             recipe=recipe,
             device_mesh=device_mesh,
+            ctm_chunk_size=ctm_chunk_size,
         )
         prev_chi = stage_chi
 
