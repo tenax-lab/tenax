@@ -14,6 +14,7 @@ __all__ = [
     "_init_symmetric_standard_edge",
     "_make_dense_standard_edge",
     "_make_rank1_dense_corner",
+    "_tile_fused_to_chi",
     "initialize_ctm_tensor_env",
 ]
 
@@ -284,6 +285,25 @@ def _grouped_chi_perm(charges: np.ndarray) -> np.ndarray:
     return np.argsort(np.asarray(charges), kind="stable")
 
 
+def _tile_fused_to_chi(fused: np.ndarray, chi: int) -> np.ndarray:
+    """Tile size-D² ``fused`` charges up to length ``chi`` canonically.
+
+    The leading D² block keeps the raw enumeration order (so index 0 stays the
+    charge-0 diagonal that anchors the rank-1 seed at the vacuum slot); any
+    padding beyond D² is appended in **sorted** order.  This makes two legs of
+    one bond that carry opposite flow (sign-flipped enumerations of the same
+    multiset) agree after tiling.  A no-op for ``chi <= D²`` and for
+    direction-uniform iPEPS.  #667.
+    """
+    fused = np.asarray(fused, dtype=np.int32)
+    if chi <= len(fused):
+        return fused[:chi]
+    srt = np.sort(fused)
+    reps = (chi - len(fused)) // len(srt) + 1
+    tail = np.tile(srt, reps)[: chi - len(fused)]
+    return np.concatenate([fused, tail]).astype(np.int32)
+
+
 def _init_symmetric_standard_edge(
     A: SymmetricTensor,
     chi: int,
@@ -315,10 +335,7 @@ def _init_symmetric_standard_edge(
         ref_idx = A.indices[ref_axis]
         ref_bra = ref_idx.flip_flow()
         fused = _compute_fused_charges(ref_idx, ref_bra, flow, sym)
-        if chi <= len(fused):
-            return np.asarray(fused[:chi], dtype=np.int32)
-        reps = chi // len(fused) + 1
-        return np.asarray(np.tile(fused, reps)[:chi], dtype=np.int32)
+        return _tile_fused_to_chi(fused, chi)
 
     chi1_charges = _fused_chi_charges(ref_axis_chi1, flow_chi1)
     chi2_charges = _fused_chi_charges(ref_axis_chi2, flow_chi2)
@@ -376,13 +393,15 @@ def _init_symmetric_standard_corner(
     # The chi bonds carry D²-derived charges: fuse ref_idx with bar'd copy
     idx_bra = ref_idx.flip_flow()
     fused_charges = _compute_fused_charges(ref_idx, idx_bra, flow_a, sym)
-    # fused_charges has size D²; tile to chi
-    base_D2_charges = fused_charges
-    if chi <= len(base_D2_charges):
-        chi_charges = np.asarray(base_D2_charges[:chi], dtype=np.int32)
-    else:
-        reps = chi // len(base_D2_charges) + 1
-        chi_charges = np.asarray(np.tile(base_D2_charges, reps)[:chi], dtype=np.int32)
+    # Tile the size-D² fused charges to chi with the canonical (sorted-padding)
+    # scheme so the corner's chi legs agree with the edge chi legs they contract
+    # against (which route through the same helper since #667 Phase 0).  Both
+    # sides derive from the same virtual axis; the old enumeration-order padding
+    # gave the corner a different charge multiset past D², breaking the same-site
+    # corner↔edge contraction in the 2x2 enlarged corner on direction-dependent
+    # (A.l != A.r) bonds.  No-op for chi <= D² and for direction-uniform iPEPS.
+    # #667 Phase 1.
+    chi_charges = _tile_fused_to_chi(fused_charges, chi)
 
     # Canonicalize chi-bond order to match the block-sparse SVD's grouped
     # bond order (#602).  Both corner legs share the same chi charges, so the
