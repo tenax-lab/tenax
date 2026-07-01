@@ -984,8 +984,9 @@ def _ctm_tensor_absorb_bottom_2plaq_fused(
     C4g = contract(C4_r, env_src.T4)  # (c4_u, t4_d, l2)
 
     # ---- C3·T2 (both at s_src) ----
-    C3_l = env_src.C3.relabel("c3_l", "t2_d")
-    C3g = contract(C3_l, env_src.T2)  # (c3_u, t2_u, r2)
+    # C3.c3_u <-> T2.t2_d  (energy/RDM convention; #674, mirrors #670)
+    C3_u = env_src.C3.relabel("c3_u", "t2_d")
+    C3g = contract(C3_u, env_src.T2)  # (c3_l, t2_u, r2)  # #674
 
     # ---- T3·ket (both at s_src) ----
     T3_with_a = contract(env_src.T3, a_src)  # (t3_r, t3_l, u2, l2, r2)
@@ -995,7 +996,7 @@ def _ctm_tensor_absorb_bottom_2plaq_fused(
     C4_new = C4_new.relabels({"chi_new": "c4_r", "t4_d": "c4_u"})
 
     # ---- C3: project with P_top_curr ----
-    C3_new = _apply_proj_unfused(P_top_curr, C3g, "c3_u", "r2")
+    C3_new = _apply_proj_unfused(P_top_curr, C3g, "c3_l", "r2")  # #674
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t2_u": "c3_l"})
 
     # ---- T3: sandwiched by P_top_left (fl, t3_r⊕l2) + P_bot_curr (fr, t3_l⊕r2) ----
