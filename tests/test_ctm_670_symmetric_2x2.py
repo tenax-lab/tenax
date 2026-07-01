@@ -114,3 +114,20 @@ def test_enlarged_corners_build_after_left_absorption_multicharge():
         }.items():
             Q = _build_enlarged_corner(C, Th, Tv, dl[s_dst], position=pos)
             assert Q is not None, f"{pos} failed to build at {s_dst}"
+
+
+def test_dense_2x2_energy_unchanged_by_fix():
+    """The direction-dependent DENSE 2x2 energy is a no-op invariant of the
+    #670 fix (the corrected leg pairing is a benign gauge choice on the
+    single-block dense path). Locks it at the measured -0.5421160718."""
+    from tenax import compute_energy_ctm_tensor_2site, ctm_tensor_2site
+    from tenax.algorithms.ipeps import heisenberg_gate
+    from tenax.core.tensor import DenseTensor
+    from tests.test_ctm_direction_dependent_bonds import _su_direction_dependent_pair
+
+    A, B = _su_direction_dependent_pair()
+    Ad = DenseTensor(np.array(A.todense()), A.indices)
+    Bd = DenseTensor(np.array(B.todense()), B.indices)
+    eA, eB = ctm_tensor_2site(Ad, Bd, chi=12, max_iter=60, conv_tol=1e-9, recipe="2x2")
+    E = float(compute_energy_ctm_tensor_2site(Ad, Bd, eA, eB, heisenberg_gate()))
+    assert abs(E - (-0.5421160718)) < 1e-6, f"dense 2x2 energy drifted: {E}"
