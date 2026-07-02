@@ -431,3 +431,15 @@ def test_split_2x2_sweep_runs_and_preserves_uniform():
     )
     C1 = envs[(0, 0)].C1.todense()
     assert np.all(np.isfinite(C1)) and np.max(np.abs(C1)) > 0
+
+
+def test_ctm_split_tensor_2site_returns_two_envs():
+    from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor_2site
+
+    A = _random_dense_A(seed=13)
+    B = _random_dense_A(seed=14)
+    env_A, env_B = ctm_split_tensor_2site(A, B, chi=6, max_iter=10, conv_tol=0.0)
+    assert isinstance(env_A, SplitCTMTensorEnv)
+    assert isinstance(env_B, SplitCTMTensorEnv)
+    # Genuinely coupled: A's and B's envs must differ (distinct sublattices).
+    assert not np.allclose(env_A.C1.todense(), env_B.C1.todense())

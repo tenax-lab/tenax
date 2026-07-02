@@ -10,6 +10,7 @@ __all__ = [
     "_split_ctm_sweep_multisite",
     "_split_ctm_tensor_sweep",
     "ctm_split_tensor",
+    "ctm_split_tensor_2site",
 ]
 
 from typing import NamedTuple
@@ -18,6 +19,7 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._ctm_tensor_convergence import (
+    CHECKERBOARD_NEIGHBORS,
     Coord,
     _corner_singular_values,
     _ctm_sv_diff,
@@ -445,3 +447,50 @@ def _split_ctm_multisite(
         if converged:
             break
     return envs
+
+
+def ctm_split_tensor_2site(
+    A: Tensor,
+    B: Tensor,
+    chi: int,
+    max_iter: int = 100,
+    conv_tol: float = 1e-8,
+    chi_I: int | None = None,
+    renormalize: bool = True,
+    recipe: str = "2x2",
+) -> tuple[SplitCTMTensorEnv, SplitCTMTensorEnv]:
+    """Run 2-site checkerboard split-CTM to convergence.
+
+    Twin of :func:`ctm_tensor_2site`: builds ``{(0, 0): A, (1, 0): B}`` with
+    ``CHECKERBOARD_NEIGHBORS`` and delegates to :func:`_split_ctm_multisite`.
+    Returns ``(env_A, env_B)`` genuinely coupled -- A's environment absorbs B's
+    double layer and vice versa (a true bipartite checkerboard fixed point),
+    unlike two independently-converged single-site envs.
+
+    Args:
+        A, B:       The two checkerboard iPEPS site tensors (5-leg
+                    ``(u, d, l, r, phys)`` each).
+        chi:        Environment bond dimension.
+        max_iter:   Maximum CTM iterations.
+        conv_tol:   Convergence tolerance on corner singular values (``0.0``
+                    runs all ``max_iter`` sweeps).
+        chi_I:      Interlayer bond dimension. Defaults to ``chi``.
+        renormalize: Renormalize the environment each sweep.
+        recipe:     ``"2x2"`` (default, the genuine joint forward) or ``"1x1"``
+                    (single-site-move reuse, for bisection).
+
+    Returns:
+        ``(env_A, env_B)`` -- the converged split environments at ``(0, 0)``
+        and ``(1, 0)``.
+    """
+    envs = _split_ctm_multisite(
+        {(0, 0): A, (1, 0): B},
+        CHECKERBOARD_NEIGHBORS,
+        chi,
+        max_iter=max_iter,
+        conv_tol=conv_tol,
+        chi_I=chi_I,
+        renormalize=renormalize,
+        recipe=recipe,
+    )
+    return envs[(0, 0)], envs[(1, 0)]
