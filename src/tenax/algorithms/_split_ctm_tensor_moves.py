@@ -5,6 +5,7 @@ from __future__ import annotations
 __all__ = [
     "_FORCE_CLOSED_EDGE",
     "_apply_projector",
+    "_build_split_enlarged_corner",
     "_ensure_corner_flows",
     "_ensure_edge_flows",
     "_ensure_tensor_flows",
@@ -54,6 +55,139 @@ from tenax.linalg import svd as tensor_svd
 # reproduces the closed result to machine precision.  Tests flip this flag to
 # prove bounded == closed; production always uses the bounded default.
 _FORCE_CLOSED_EDGE = False
+
+# ------------------------------------------------------------------ #
+# Split enlarged corner (parity with fused _build_enlarged_corner)      #
+# ------------------------------------------------------------------ #
+
+
+def _fuse_ket_bra(
+    T: Tensor,
+    ket_label: str,
+    bra_label: str,
+    fused_label: str,
+    fused_flow: FlowDirection,
+) -> Tensor:
+    """Fuse a (ket, bra) virtual-leg pair KET-SLOW into one D^2 seam.
+
+    ``_build_double_layer_tensor`` fuses each virtual pair with the ket leg
+    slow-varying (``a8 = contract(A, A_bar)`` puts A's legs first, so ``u2 =
+    u_ket * D + u_bra``).  :func:`fuse_indices` makes the LOWER-indexed axis
+    slow, so we transpose the ket leg to sit immediately before the bra leg
+    before fusing, guaranteeing the same ket-slow layout regardless of the
+    incoming axis order.
+    """
+    labels = list(T.labels())
+    ket_pos = labels.index(ket_label)
+    bra_pos = labels.index(bra_label)
+    # Bring ket immediately before bra (ket slow, bra fast).
+    rest = [i for i in range(len(labels)) if i not in (ket_pos, bra_pos)]
+    perm = tuple(rest[:0] + [ket_pos, bra_pos] + rest)  # ket, bra, then rest
+    T = T.transpose(perm)
+    return fuse_indices(T, 0, 1, fused_label, fused_flow)
+
+
+def _build_split_enlarged_corner(
+    C: Tensor,
+    T_h_ket: Tensor,
+    T_h_bra: Tensor,
+    T_v_ket: Tensor,
+    T_v_bra: Tensor,
+    A: Tensor,
+    A_bar: Tensor,
+    *,
+    position: str,
+) -> Tensor:
+    """Split enlarged corner. Returns the SAME rank-4 object as the fused
+    :func:`_build_enlarged_corner`, assembled from ket/bra split edges + a
+    physical double layer (A ket, A_bar bra) with the phys index traced.
+
+    Output free legs match the fused recipe exactly:
+      top_left     -> (chi_R, r2, chi_B, d2)
+      top_right    -> (chi_L, l2, chi_B, d2)
+      bottom_left  -> (chi_T, u2, chi_R, r2)
+      bottom_right -> (chi_L, l2, chi_T, u2)
+
+    The physical double layer is built by contracting the ket edges with the
+    ket virtual legs of ``A`` and the bra edges with the bra virtual legs of
+    ``A_bar``, tracing the shared ``phys``.  Each surviving ket/bra
+    virtual-leg pair is fused KET-SLOW (matching
+    :func:`_build_double_layer_tensor`) into the D^2 seam.
+    """
+    if position == "top_left":
+        # Ket layer: C1.c1_r <-> T1k.t1k_l ; C1.c1_d <-> T4k.t4k_d ;
+        # A.u <-> u_ket ; A.l <-> l_ket.  Bra layer joins via interlayer bonds.
+        ket = contract(C.relabel("c1_r", "t1k_l"), T_h_ket)  # (c1_d,u_ket,t1k_I)
+        ket = contract(
+            ket.relabel("c1_d", "t4k_d"), T_v_ket
+        )  # (u_ket,t1k_I,l_ket,t4k_I)
+        A_ket = A.relabels({"u": "u_ket", "l": "l_ket"})
+        ket = contract(ket, A_ket)  # (t1k_I, t4k_I, d, r, phys)
+        # Bra layer joins interlayer bonds; A_bar supplies u_bra/l_bra + D_bra/R_bra.
+        ket = contract(ket.relabel("t1k_I", "t1b_I"), T_h_bra)  # +(u_bra,t1b_r)
+        ket = contract(ket.relabel("t4k_I", "t4b_I"), T_v_bra)  # +(l_bra,t4b_u)
+        A_bra = A_bar.relabels({"u": "u_bra", "l": "l_bra", "d": "D_bra", "r": "R_bra"})
+        Q = contract(ket, A_bra)  # (t1b_r, t4b_u, d, r, D_bra, R_bra)
+        Q = _fuse_ket_bra(Q, "d", "D_bra", "d2", FlowDirection.OUT)
+        Q = _fuse_ket_bra(Q, "r", "R_bra", "r2", FlowDirection.OUT)
+        return Q.relabels({"t1b_r": "chi_R", "t4b_u": "chi_B"})
+
+    if position == "top_right":
+        # C2.c2_l <-> T1's right = t1b_r (BRA) ; C2.c2_d <-> T2's top = t2k_u (KET).
+        # Output: t1k_l -> chi_L ; t2b_d -> chi_B.  A.u/r are the contracted legs.
+        ket = contract(C.relabel("c2_l", "t1b_r"), T_h_bra)  # (c2_d,u_bra,t1b_I)
+        ket = contract(
+            ket.relabel("c2_d", "t2k_u"), T_v_ket
+        )  # (u_bra,t1b_I,r_ket,t2k_I)
+        # ket layer contributions: T1_ket (u_ket) joins via interlayer; T2_ket (r_ket) here.
+        ket = contract(ket.relabel("t1b_I", "t1k_I"), T_h_ket)  # +(t1k_l,u_ket)
+        A_ket = A.relabels({"u": "u_ket", "r": "r_ket"})
+        ket = contract(ket, A_ket)  # trace u_ket,r_ket -> (u_bra,t2k_I,t1k_l,d,l,phys)
+        ket = contract(ket.relabel("t2k_I", "t2b_I"), T_v_bra)  # +(r_bra,t2b_d)
+        A_bra = A_bar.relabels({"u": "u_bra", "r": "r_bra", "d": "D_bra", "l": "L_bra"})
+        Q = contract(ket, A_bra)  # (t1k_l, d, l, t2b_d, D_bra, L_bra)
+        Q = _fuse_ket_bra(Q, "d", "D_bra", "d2", FlowDirection.OUT)
+        Q = _fuse_ket_bra(Q, "l", "L_bra", "l2", FlowDirection.IN)
+        return Q.relabels({"t1k_l": "chi_L", "t2b_d": "chi_B"})
+
+    if position == "bottom_left":
+        # C4.c4_r <-> T4's up = t4b_u (BRA) ; C4.c4_u <-> T3's right = t3k_r (KET).
+        # Output: t4k_d -> chi_T ; t3b_l -> chi_R.  A.l (T4) / A.d (T3) contracted.
+        ket = contract(C.relabel("c4_r", "t4b_u"), T_v_bra)  # (c4_u,l_bra,t4b_I)
+        ket = contract(
+            ket.relabel("c4_u", "t3k_r"), T_h_ket
+        )  # (l_bra,t4b_I,d_ket,t3k_I)
+        ket = contract(ket.relabel("t4b_I", "t4k_I"), T_v_ket)  # +(t4k_d,l_ket)
+        A_ket = A.relabels({"l": "l_ket", "d": "d_ket"})
+        ket = contract(ket, A_ket)  # trace l_ket,d_ket -> (l_bra,t3k_I,t4k_d,u,r,phys)
+        ket = contract(ket.relabel("t3k_I", "t3b_I"), T_h_bra)  # +(d_bra,t3b_l)
+        A_bra = A_bar.relabels({"l": "l_bra", "d": "d_bra", "u": "U_bra", "r": "R_bra"})
+        Q = contract(ket, A_bra)  # (t4k_d, u, r, t3b_l, U_bra, R_bra)
+        Q = _fuse_ket_bra(Q, "u", "U_bra", "u2", FlowDirection.IN)
+        Q = _fuse_ket_bra(Q, "r", "R_bra", "r2", FlowDirection.OUT)
+        return Q.relabels({"t4k_d": "chi_T", "t3b_l": "chi_R"})
+
+    if position == "bottom_right":
+        # C3.c3_l <-> T3's left = t3b_l (BRA) ; C3.c3_u <-> T2's bottom = t2b_d (BRA).
+        # Output: t3k_r -> chi_L ; t2k_u -> chi_T.  A.d (T3) / A.r (T2) contracted.
+        ket = contract(C.relabel("c3_l", "t3b_l"), T_h_bra)  # (c3_u,d_bra,t3b_I)
+        ket = contract(
+            ket.relabel("c3_u", "t2b_d"), T_v_bra
+        )  # (d_bra,t3b_I,r_bra,t2b_I)
+        ket = contract(ket.relabel("t3b_I", "t3k_I"), T_h_ket)  # +(t3k_r,d_ket)
+        ket = contract(ket.relabel("t2b_I", "t2k_I"), T_v_ket)  # +(t2k_u,r_ket)
+        A_ket = A.relabels({"d": "d_ket", "r": "r_ket"})
+        ket = contract(
+            ket, A_ket
+        )  # trace d_ket,r_ket -> (d_bra,r_bra,t3k_r,t2k_u,u,l,phys)
+        A_bra = A_bar.relabels({"d": "d_bra", "r": "r_bra", "u": "U_bra", "l": "L_bra"})
+        Q = contract(ket, A_bra)  # (t3k_r, t2k_u, u, l, U_bra, L_bra)
+        Q = _fuse_ket_bra(Q, "u", "U_bra", "u2", FlowDirection.IN)
+        Q = _fuse_ket_bra(Q, "l", "L_bra", "l2", FlowDirection.IN)
+        return Q.relabels({"t3k_r": "chi_L", "t2k_u": "chi_T"})
+
+    raise ValueError(f"unsupported position={position!r}")
+
 
 # ------------------------------------------------------------------ #
 # Double-layer corner-pair projector + factorization helpers           #
