@@ -4,6 +4,7 @@ from __future__ import annotations
 
 __all__ = [
     "_SplitCTMInfo",
+    "_initialize_split_multisite_env",
     "_renormalize_split_env",
     "_split_ctm_tensor_sweep",
     "ctm_split_tensor",
@@ -14,6 +15,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from tenax.algorithms._ctm_tensor_convergence import (
+    Coord,
     _corner_singular_values,
     _ctm_sv_diff,
 )
@@ -174,3 +176,20 @@ def ctm_split_tensor(
     if return_info:
         return env, _SplitCTMInfo(iterations=iterations, converged=converged)
     return env
+
+
+# ------------------------------------------------------------------ #
+# Multisite env init                                                   #
+# ------------------------------------------------------------------ #
+
+
+def _initialize_split_multisite_env(
+    site_tensors: dict[Coord, Tensor],
+    chi: int,
+    chi_I: int,
+) -> dict[Coord, SplitCTMTensorEnv]:
+    """Per-coord split env init: reuse the single-site builder per site."""
+    return {
+        c: initialize_split_ctm_tensor_env(A, chi, chi_I)
+        for c, A in site_tensors.items()
+    }
