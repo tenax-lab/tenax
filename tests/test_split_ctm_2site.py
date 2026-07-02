@@ -166,3 +166,48 @@ def test_split_enlarged_corner_matches_fused(position):
     ds = ds / np.max(np.abs(ds))
     assert dr.shape == ds.shape
     assert np.allclose(np.abs(dr), np.abs(ds), atol=1e-6)
+
+
+@pytest.mark.parametrize("direction", ["left", "right", "top", "bottom"])
+def test_split_plaquette_projector_matches_fused(direction):
+    from tenax.algorithms._ctm_tensor_convergence import _build_double_layer_tensor
+    from tenax.algorithms._ctm_tensor_moves import _compute_plaquette_projector_pair
+    from tenax.algorithms._split_ctm_tensor_moves import (
+        _compute_split_plaquette_projector_pair,
+    )
+
+    A = _random_dense_A(seed=7)
+    chi = 6
+    split, fused = _split_env_and_fused_env(A, chi)
+    a = _build_double_layer_tensor(A)
+    A_bar = A.bar()
+    Pt_ref, Pb_ref, _, _ = _compute_plaquette_projector_pair(
+        fused, fused, fused, fused, a, a, a, a, chi, direction
+    )
+    Pt_s, Pb_s, _, _ = _compute_split_plaquette_projector_pair(
+        split,
+        split,
+        split,
+        split,
+        A,
+        A_bar,
+        A,
+        A_bar,
+        A,
+        A_bar,
+        A,
+        A_bar,
+        chi,
+        direction,
+    )
+    # Projectors match up to per-column sign/gauge; compare sorted magnitudes.
+    assert np.allclose(
+        np.sort(np.abs(Pt_ref.todense()).ravel()),
+        np.sort(np.abs(Pt_s.todense()).ravel()),
+        atol=1e-6,
+    )
+    assert np.allclose(
+        np.sort(np.abs(Pb_ref.todense()).ravel()),
+        np.sort(np.abs(Pb_s.todense()).ravel()),
+        atol=1e-6,
+    )

@@ -6,6 +6,7 @@ __all__ = [
     "_FORCE_CLOSED_EDGE",
     "_apply_projector",
     "_build_split_enlarged_corner",
+    "_compute_split_plaquette_projector_pair",
     "_ensure_corner_flows",
     "_ensure_edge_flows",
     "_ensure_tensor_flows",
@@ -32,6 +33,11 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms._ctm_projector import _compute_projector_tensor, _reembed_fused
+from tenax.algorithms._ctm_tensor_moves import (
+    _half_to_chi_new_bot,
+    _half_to_chi_new_top,
+)
+from tenax.algorithms._ctm_tensor_projector_2x2 import _compute_2x2_projector
 from tenax.algorithms._ctm_utils import _CORNER_SPECS, _derive_charges
 from tenax.algorithms._split_ctm_tensor_init import (
     _EDGE_BRA_SPECS,
@@ -190,6 +196,91 @@ def _build_split_enlarged_corner(
         return Q.relabels({"t3k_r": "chi_L", "t2k_u": "chi_T"})
 
     raise ValueError(f"unsupported position={position!r}")
+
+
+# ------------------------------------------------------------------ #
+# Split plaquette projector pair (parity with fused)                   #
+# ------------------------------------------------------------------ #
+
+
+def _compute_split_plaquette_projector_pair(
+    env_TL: SplitCTMTensorEnv,
+    env_TR: SplitCTMTensorEnv,
+    env_BL: SplitCTMTensorEnv,
+    env_BR: SplitCTMTensorEnv,
+    A_TL: Tensor,
+    Abar_TL: Tensor,
+    A_TR: Tensor,
+    Abar_TR: Tensor,
+    A_BL: Tensor,
+    Abar_BL: Tensor,
+    A_BR: Tensor,
+    Abar_BR: Tensor,
+    chi: int,
+    direction: str,
+    base_charges: np.ndarray | None = None,
+) -> tuple[Tensor, Tensor, jax.Array, jax.Array]:
+    """Split twin of :func:`_compute_plaquette_projector_pair`.
+
+    Builds the four split enlarged corners (identical rank-4 objects to the
+    fused path via :func:`_build_split_enlarged_corner`) and feeds them to the
+    reused Fishman cross-projector :func:`_compute_2x2_projector` verbatim.
+
+    Returns ``(P_top, P_bot, eps_T, smallest_S)`` with the same layout as
+    :func:`_compute_plaquette_projector_pair`:
+
+    - ``P_top`` labels ``("fused", "chi_new")``, flow IN on ``"fused"``.
+    - ``P_bot`` labels ``("chi_new", "fused")``, flow IN on ``"fused"``.
+    """
+    Q_TL = _build_split_enlarged_corner(
+        env_TL.C1,
+        env_TL.T1_ket,
+        env_TL.T1_bra,
+        env_TL.T4_ket,
+        env_TL.T4_bra,
+        A_TL,
+        Abar_TL,
+        position="top_left",
+    )
+    Q_TR = _build_split_enlarged_corner(
+        env_TR.C2,
+        env_TR.T1_ket,
+        env_TR.T1_bra,
+        env_TR.T2_ket,
+        env_TR.T2_bra,
+        A_TR,
+        Abar_TR,
+        position="top_right",
+    )
+    Q_BL = _build_split_enlarged_corner(
+        env_BL.C4,
+        env_BL.T3_ket,
+        env_BL.T3_bra,
+        env_BL.T4_ket,
+        env_BL.T4_bra,
+        A_BL,
+        Abar_BL,
+        position="bottom_left",
+    )
+    Q_BR = _build_split_enlarged_corner(
+        env_BR.C3,
+        env_BR.T3_ket,
+        env_BR.T3_bra,
+        env_BR.T2_ket,
+        env_BR.T2_bra,
+        A_BR,
+        Abar_BR,
+        position="bottom_right",
+    )
+    P_top_raw, P_bot_raw, eps_T, smallest_S = _compute_2x2_projector(
+        Q_TL, Q_TR, Q_BL, Q_BR, chi, direction=direction, base_charges=base_charges
+    )
+    return (
+        _half_to_chi_new_top(P_top_raw),
+        _half_to_chi_new_bot(P_bot_raw),
+        eps_T,
+        smallest_S,
+    )
 
 
 # ------------------------------------------------------------------ #
