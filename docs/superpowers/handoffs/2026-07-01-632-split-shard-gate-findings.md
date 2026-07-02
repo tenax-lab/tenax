@@ -54,7 +54,30 @@ Follow-up to phase-1 lever #1 ("push split-1GPU χ to its true memory wall"). Pu
 
 **The single-GPU ceiling is an XLA autotuner _compile_ wall on the (χD)×(χD) projector gemm/SVD — NOT memory.** 30+ GB of card headroom remains at the failure point (D8 χ256 ≈ 65 GB, D10 χ160 ≈ 58 GB both fit an 80 GB A100). The wall lands at **χD ≈ 1700** (D8 χ224→1792 OK, χ256→2048 fail; D10 χ128→1280 OK, χ160→1600 fail) — the same autotuner failure that blocked dense D12 χ16 and split D12 χ128 in phase 1.
 
-**Consequence:** because split-1GPU is **compile-bound, not memory-bound**, the *memory* levers do not extend it — multi-GPU sharding (NO-GO above) and `chi_I<χ` both attack memory that isn't the constraint. **The one lever that actually raises the split-1GPU (D,χ) ceiling is the XLA autotuner wall on the large (χD)×(χD) gemm** — e.g. XLA autotune flags (`--xla_gpu_autotune_level`, triton gemm config), an alternative gemm/SVD strategy, or chunking the (χD) contraction so no single ≥~1700² gemm is emitted. That is the top post-1.0 large-(D,χ) item, superseding the memory levers.
+**Consequence:** at default settings split-1GPU is **compile-bound, not memory-bound** — the (χD)×(χD) f64 gemm autotuner fails while 30+ GB of card sits idle. The lever is therefore the autotuner wall, not a memory trick. That wall turns out to be **soft** (next section).
+
+## Autotuner-wall probe (2026-07-02) — the wall is SOFT (`--xla_gpu_autotune_level=0` bypasses it)
+
+Retried the failing configs (split D=10 χ160, D=8 χ256) under XLA flags:
+
+| flag | D=10 χ160 | D=8 χ256 |
+|------|-----------|----------|
+| baseline | FAIL (Triton `gemm_fusion_dot` autotune) | FAIL (Triton autotune) |
+| `--xla_gpu_enable_triton_gemm=false` | FAIL (**cuBLAS `custom-call` autotune**) | FAIL (cuBLAS autotune) |
+| `--xla_gpu_autotune_level=0` | **OK, 57.82 GB** | OOM (512 MiB short) |
+
+- **Forcing cuBLAS does NOT help** — the failure just moves to the cuBLAS custom-call autotuning. It is the *autotuning* that fails at this f64 size, not Triton specifically.
+- **`--xla_gpu_autotune_level=0` (disable autotuning) bypasses the wall.** D=10 χ160 (57.82 GB) — which **fits** an 80 GB card — was being blocked purely by the autotuner; disabling it recovers the config. Reach D=10 **χ128 → χ160**; the next step (χ192) then OOMs (memory).
+
+**Net:** the autotuner compile wall is soft. `--xla_gpu_autotune_level=0` recovers configs that fit in memory but were autotuner-blocked (a modest reach gain) and **converts the wall from a hard compile failure to a graceful memory limit** (~64 GB usable). **Practical recommendation: run large-χ split with `XLA_FLAGS=--xla_gpu_autotune_level=0`.**
+
+## D=12 recovery probe (2026-07-02) — NOT recovered (memory-gated)
+
+`--xla_gpu_autotune_level=0` does **not** re-open D=12:
+- **dense D12 χ16:** compiles past the autotuner but OOMs on a single **61 GiB** buffer — memory-infeasible on one 80 GB card (D⁶ scaling).
+- **split D12 χ96** (fit at 46 GB with *default* autotuning): **OOMs under autotune0** (2.85 GiB short) — untuned codegen has a higher memory footprint, so at D=12's tight budget autotune0 *hurts*.
+
+So D=12 is **memory-gated**, and `autotune_level=0` is a compile/memory-**boundary** lever (helps at D=8/D=10 where memory is slack), **not** a D=12 enabler. The only remaining D=12 lever is `chi_I < χ` (split-only, untested); multi-GPU stays NO-GO.
 
 ## Reproduce
 
