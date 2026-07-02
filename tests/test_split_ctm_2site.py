@@ -229,10 +229,18 @@ def _corner_sv_signature(t):
     # Gauge-invariant per-move corner check: under the #425 degenerate-subspace
     # projector-basis freedom, the split absorb's 2-leg corner equals the fused
     # one only up to a unitary on the new bond, so raw entries differ but the
-    # (max-normalized) singular values agree. Definitive element-wise parity is
-    # the non-degenerate fixed-point energy test (Task 1.5).
-    m = np.abs(t.todense())
-    m = m / np.max(m)
+    # singular values (basis-independent under a unitary on either leg) agree.
+    # We SVD the max-normalized corner directly (no elementwise abs -- that would
+    # break the unitary invariance and weaken the check).
+    #
+    # Tolerance note: this per-move check is oracle-limited to ~1e-3, NOT machine
+    # precision, because _split_env_and_fused_env runs two INDEPENDENT CTM solvers
+    # (fused ctm_tensor vs split ctm_split_tensor) that settle on slightly
+    # different fixed points (leading corner SV differs at ~1e-4 for some seeds).
+    # It localizes gross per-direction bugs; the definitive element-wise gate is
+    # the fixed-point energy parity in Task 1.5 (same A drives both forwards).
+    m = t.todense()
+    m = m / np.max(np.abs(m))
     return np.sort(np.linalg.svd(m, compute_uv=False))
 
 
