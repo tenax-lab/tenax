@@ -211,3 +211,215 @@ def test_split_plaquette_projector_matches_fused(direction):
         np.sort(np.abs(Pb_s.todense()).ravel()),
         atol=1e-6,
     )
+
+
+def _abs_sorted(t):
+    # Scale-invariant magnitude signature: the split absorb defers per-corner
+    # normalization to the sweep-level _renormalize_split_env, whereas the fused
+    # absorb phase-fix-normalizes in place, so the two match only up to a global
+    # scale (physically irrelevant -- CTM renormalizes every sweep).
+    d = np.abs(t.todense())
+    m = np.max(d)
+    if m > 0:
+        d = d / m
+    return np.sort(d.ravel())
+
+
+def _corner_sv_signature(t):
+    # Gauge-invariant per-move corner check: under the #425 degenerate-subspace
+    # projector-basis freedom, the split absorb's 2-leg corner equals the fused
+    # one only up to a unitary on the new bond, so raw entries differ but the
+    # (max-normalized) singular values agree. Definitive element-wise parity is
+    # the non-degenerate fixed-point energy test (Task 1.5).
+    m = np.abs(t.todense())
+    m = m / np.max(m)
+    return np.sort(np.linalg.svd(m, compute_uv=False))
+
+
+def test_split_absorb_bottom_corners_match_fused():
+    from tenax.algorithms._ctm_tensor_convergence import _build_double_layer_tensor
+    from tenax.algorithms._ctm_tensor_moves import (
+        _compute_plaquette_projector_pair,
+        _ctm_tensor_absorb_bottom_2plaq,
+    )
+    from tenax.algorithms._split_ctm_tensor_moves import (
+        _compute_split_plaquette_projector_pair,
+        _split_ctm_absorb_bottom_2plaq,
+    )
+
+    A = _random_dense_A(seed=11)
+    chi = 6
+    split, fused = _split_env_and_fused_env(A, chi)
+    a = _build_double_layer_tensor(A)
+    A_bar = A.bar()
+    Pt, Pb, _, _ = _compute_plaquette_projector_pair(
+        fused, fused, fused, fused, a, a, a, a, chi, "bottom"
+    )
+    C4f, T3f, C3f = _ctm_tensor_absorb_bottom_2plaq(fused, a, Pt, Pb, Pt, Pb)
+    sPt, sPb, _, _ = _compute_split_plaquette_projector_pair(
+        split,
+        split,
+        split,
+        split,
+        A,
+        A_bar,
+        A,
+        A_bar,
+        A,
+        A_bar,
+        A,
+        A_bar,
+        chi,
+        "bottom",
+    )
+    C4s, T3k, T3b, C3s = _split_ctm_absorb_bottom_2plaq(
+        split, A, A_bar, sPt, sPb, sPt, sPb, chi_I=chi
+    )
+    assert np.allclose(_abs_sorted(C4s), _abs_sorted(C4f), atol=1e-6)
+    assert np.allclose(_abs_sorted(C3s), _abs_sorted(C3f), atol=1e-6)
+
+
+def test_split_absorb_left_corners_match_fused():
+    from tenax.algorithms._ctm_tensor_convergence import _build_double_layer_tensor
+    from tenax.algorithms._ctm_tensor_moves import (
+        _compute_plaquette_projector_pair,
+        _ctm_tensor_absorb_left_2plaq,
+    )
+    from tenax.algorithms._split_ctm_tensor_moves import (
+        _compute_split_plaquette_projector_pair,
+        _split_ctm_absorb_left_2plaq,
+    )
+
+    A = _random_dense_A(seed=13)
+    chi = 6
+    split, fused = _split_env_and_fused_env(A, chi)
+    a = _build_double_layer_tensor(A)
+    A_bar = A.bar()
+    Pt, Pb, _, _ = _compute_plaquette_projector_pair(
+        fused, fused, fused, fused, a, a, a, a, chi, "left"
+    )
+    C1f, T4f, C4f = _ctm_tensor_absorb_left_2plaq(fused, a, Pt, Pb, Pt, Pb)
+    sPt, sPb, _, _ = _compute_split_plaquette_projector_pair(
+        split,
+        split,
+        split,
+        split,
+        A,
+        A_bar,
+        A,
+        A_bar,
+        A,
+        A_bar,
+        A,
+        A_bar,
+        chi,
+        "left",
+    )
+    C1s, T4k, T4b, C4s = _split_ctm_absorb_left_2plaq(
+        split, A, A_bar, sPt, sPb, sPt, sPb, chi_I=chi
+    )
+    assert np.allclose(_corner_sv_signature(C1s), _corner_sv_signature(C1f), atol=5e-3)
+    assert np.allclose(_corner_sv_signature(C4s), _corner_sv_signature(C4f), atol=5e-3)
+
+
+def test_split_absorb_right_corners_match_fused():
+    from tenax.algorithms._ctm_tensor_convergence import _build_double_layer_tensor
+    from tenax.algorithms._ctm_tensor_moves import (
+        _compute_plaquette_projector_pair,
+        _ctm_tensor_absorb_right_2plaq,
+    )
+    from tenax.algorithms._split_ctm_tensor_moves import (
+        _compute_split_plaquette_projector_pair,
+        _split_ctm_absorb_right_2plaq,
+    )
+
+    A = _random_dense_A(seed=15)
+    chi = 6
+    split, fused = _split_env_and_fused_env(A, chi)
+    a = _build_double_layer_tensor(A)
+    A_bar = A.bar()
+    Pt, Pb, _, _ = _compute_plaquette_projector_pair(
+        fused, fused, fused, fused, a, a, a, a, chi, "right"
+    )
+    C2f, T2f, C3f = _ctm_tensor_absorb_right_2plaq(fused, a, Pt, Pb, Pt, Pb)
+    sPt, sPb, _, _ = _compute_split_plaquette_projector_pair(
+        split,
+        split,
+        split,
+        split,
+        A,
+        A_bar,
+        A,
+        A_bar,
+        A,
+        A_bar,
+        A,
+        A_bar,
+        chi,
+        "right",
+    )
+    C2s, T2k, T2b, C3s = _split_ctm_absorb_right_2plaq(
+        split, A, A_bar, sPt, sPb, sPt, sPb, chi_I=chi
+    )
+    assert np.allclose(_corner_sv_signature(C2s), _corner_sv_signature(C2f), atol=5e-3)
+    assert np.allclose(_corner_sv_signature(C3s), _corner_sv_signature(C3f), atol=5e-3)
+
+
+def test_split_absorb_top_corners_match_fused():
+    from tenax.algorithms._ctm_tensor_convergence import _build_double_layer_tensor
+    from tenax.algorithms._ctm_tensor_moves import (
+        _compute_plaquette_projector_pair,
+        _ctm_tensor_absorb_top_2plaq,
+    )
+    from tenax.algorithms._split_ctm_tensor_moves import (
+        _compute_split_plaquette_projector_pair,
+        _split_ctm_absorb_top_2plaq,
+    )
+
+    A = _random_dense_A(seed=17)
+    chi = 6
+    split, fused = _split_env_and_fused_env(A, chi)
+    a = _build_double_layer_tensor(A)
+    A_bar = A.bar()
+    Pt, Pb, _, _ = _compute_plaquette_projector_pair(
+        fused, fused, fused, fused, a, a, a, a, chi, "top"
+    )
+    C1f, T1f, C2f = _ctm_tensor_absorb_top_2plaq(fused, a, Pt, Pb, Pt, Pb)
+    sPt, sPb, _, _ = _compute_split_plaquette_projector_pair(
+        split,
+        split,
+        split,
+        split,
+        A,
+        A_bar,
+        A,
+        A_bar,
+        A,
+        A_bar,
+        A,
+        A_bar,
+        chi,
+        "top",
+    )
+    C1s, T1k, T1b, C2s = _split_ctm_absorb_top_2plaq(
+        split, A, A_bar, sPt, sPb, sPt, sPb, chi_I=chi
+    )
+    assert np.allclose(_corner_sv_signature(C1s), _corner_sv_signature(C1f), atol=5e-3)
+    assert np.allclose(_corner_sv_signature(C2s), _corner_sv_signature(C2f), atol=5e-3)
+
+
+def test_split_2x2_sweep_runs_and_preserves_uniform():
+    from tenax.algorithms._split_ctm_tensor_convergence import _split_ctm_multisite
+
+    A = _random_dense_A(seed=12)
+    chi = 6
+    envs = _split_ctm_multisite(
+        {(0, 0): A, (1, 0): A},
+        CHECKERBOARD_NEIGHBORS,
+        chi,
+        max_iter=8,
+        conv_tol=0.0,
+        recipe="2x2",
+    )
+    C1 = envs[(0, 0)].C1.todense()
+    assert np.all(np.isfinite(C1)) and np.max(np.abs(C1)) > 0

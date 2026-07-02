@@ -224,7 +224,127 @@ def _split_ctm_sweep_multisite_2x2(
     chi: int,
     chi_I: int,
 ) -> dict[Coord, SplitCTMTensorEnv]:
-    raise NotImplementedError("2x2 split sweep lands in Task 1.3")
+    """One 2x2-recipe split sweep — twin of the fused 2x2 branch of
+    :func:`_ctm_tensor_sweep_multisite`.
+
+    Two phases per direction: Phase 1 builds the split plaquette projector
+    pair anchored at every cell (from the pre-sweep ``envs_old`` snapshot);
+    Phase 2 absorbs the neighbour column/row into each ``s_dst`` and replaces
+    the destination env's corner + ket/bra edge fields.  Neighbour/anchor
+    lookups and the cascade order mirror the fused sweep exactly.
+    """
+    from tenax.algorithms._split_ctm_tensor_moves import (
+        _compute_split_plaquette_projector_pair,
+        _split_ctm_absorb_bottom_2plaq,
+        _split_ctm_absorb_left_2plaq,
+        _split_ctm_absorb_right_2plaq,
+        _split_ctm_absorb_top_2plaq,
+    )
+
+    all_coords = list(envs.keys())
+    for direction in ("left", "top", "right", "bottom"):
+        envs_old = dict(envs)
+        # Phase 1: projector pair anchored at every cell (from the snapshot).
+        projectors: dict[Coord, tuple] = {}
+        for s in all_coords:
+            s_TR = neighbors[s]["right"]
+            s_BL = neighbors[s]["bottom"]
+            s_BR = neighbors[s_TR]["bottom"]
+            Pt, Pb, _eps, _sS = _compute_split_plaquette_projector_pair(
+                envs_old[s],
+                envs_old[s_TR],
+                envs_old[s_BL],
+                envs_old[s_BR],
+                site_tensors[s],
+                bars[s],
+                site_tensors[s_TR],
+                bars[s_TR],
+                site_tensors[s_BL],
+                bars[s_BL],
+                site_tensors[s_BR],
+                bars[s_BR],
+                chi,
+                direction,
+                base_charges=None,
+            )
+            projectors[s] = (Pt, Pb)
+        # Phase 2: absorb per destination cell using two plaquettes' halves.
+        new_envs: dict[Coord, SplitCTMTensorEnv] = {}
+        for s_dst in _sort_coords_for_direction(all_coords, direction):
+            if direction == "left":
+                s_src = neighbors[s_dst]["left"]
+                s_a = neighbors[s_src]["top"]
+                Pta, Pba = projectors[s_a]
+                Ptc, Pbc = projectors[s_src]
+                C1n, T4k, T4b, C4n = _split_ctm_absorb_left_2plaq(
+                    envs_old[s_src],
+                    site_tensors[s_src],
+                    bars[s_src],
+                    Pta,
+                    Pba,
+                    Ptc,
+                    Pbc,
+                    chi_I,
+                )
+                new_envs[s_dst] = envs_old[s_dst]._replace(
+                    C1=C1n, T4_ket=T4k, T4_bra=T4b, C4=C4n
+                )
+            elif direction == "right":
+                s_src = neighbors[s_dst]["right"]
+                s_a = neighbors[s_dst]["top"]
+                Pta, Pba = projectors[s_a]
+                Ptc, Pbc = projectors[s_dst]
+                C2n, T2k, T2b, C3n = _split_ctm_absorb_right_2plaq(
+                    envs_old[s_src],
+                    site_tensors[s_src],
+                    bars[s_src],
+                    Pta,
+                    Pba,
+                    Ptc,
+                    Pbc,
+                    chi_I,
+                )
+                new_envs[s_dst] = envs_old[s_dst]._replace(
+                    C2=C2n, T2_ket=T2k, T2_bra=T2b, C3=C3n
+                )
+            elif direction == "top":
+                s_src = neighbors[s_dst]["top"]
+                s_a = neighbors[s_src]["left"]
+                Ptl, Pbl = projectors[s_a]
+                Ptc, Pbc = projectors[s_src]
+                C1n, T1k, T1b, C2n = _split_ctm_absorb_top_2plaq(
+                    envs_old[s_src],
+                    site_tensors[s_src],
+                    bars[s_src],
+                    Ptl,
+                    Pbl,
+                    Ptc,
+                    Pbc,
+                    chi_I,
+                )
+                new_envs[s_dst] = envs_old[s_dst]._replace(
+                    C1=C1n, T1_ket=T1k, T1_bra=T1b, C2=C2n
+                )
+            else:  # bottom
+                s_src = neighbors[s_dst]["bottom"]
+                s_a = neighbors[s_dst]["left"]
+                Ptl, Pbl = projectors[s_a]
+                Ptc, Pbc = projectors[s_dst]
+                C4n, T3k, T3b, C3n = _split_ctm_absorb_bottom_2plaq(
+                    envs_old[s_src],
+                    site_tensors[s_src],
+                    bars[s_src],
+                    Ptl,
+                    Pbl,
+                    Ptc,
+                    Pbc,
+                    chi_I,
+                )
+                new_envs[s_dst] = envs_old[s_dst]._replace(
+                    C4=C4n, T3_ket=T3k, T3_bra=T3b, C3=C3n
+                )
+        envs = new_envs
+    return envs
 
 
 def _split_ctm_sweep_multisite(

@@ -20,6 +20,10 @@ __all__ = [
     "_project_grown_edge_tensor_lr",
     "_reembed_target_for_projector",
     "_select_bond_entries",
+    "_split_ctm_absorb_bottom_2plaq",
+    "_split_ctm_absorb_left_2plaq",
+    "_split_ctm_absorb_right_2plaq",
+    "_split_ctm_absorb_top_2plaq",
     "_split_ctm_move_bottom",
     "_split_ctm_move_left",
     "_split_ctm_move_right",
@@ -34,6 +38,7 @@ import numpy as np
 
 from tenax.algorithms._ctm_projector import _compute_projector_tensor, _reembed_fused
 from tenax.algorithms._ctm_tensor_moves import (
+    _apply_proj_unfused,
     _half_to_chi_new_bot,
     _half_to_chi_new_top,
 )
@@ -281,6 +286,367 @@ def _compute_split_plaquette_projector_pair(
         eps_T,
         smallest_S,
     )
+
+
+# ------------------------------------------------------------------ #
+# 2x2 split absorption (four directional twins of the fused            #
+# _ctm_tensor_absorb_*_2plaq, on ket/bra split edges)                  #
+# ------------------------------------------------------------------ #
+
+
+def _grow_split_corner_2x2(
+    C,
+    c_leg,
+    join_to,
+    T_first,
+    T_second,
+    first_I,
+    second_I,
+    D_ket,
+    D_bra,
+    d2_label,
+    d2_flow,
+):
+    """Grow a 2x2 corner from split ket/bra edges, keeping the env chi legs
+    SEPARATE and fusing only the ``(D_ket, D_bra)`` virtual pair into a single
+    D^2 seam ``d2_label`` (ket-slow, matching the fused double layer).
+
+    ``C.c_leg`` joins ``T_first.join_to``; the second layer joins over the
+    interlayer bond ``first_I -> second_I``.  Returns the 3-leg grown corner
+    (mirrors the fused ``contract(C_r, T)`` result, with the env legs unfused).
+    """
+    Cg = contract(C.relabel(c_leg, join_to), T_first)
+    Cg = contract(Cg.relabel(first_I, second_I), T_second)
+    return _fuse_ket_bra(Cg, D_ket, D_bra, d2_label, d2_flow)
+
+
+def _grow_split_edge_2x2(
+    T_ket,
+    T_bra,
+    A,
+    A_bar,
+    *,
+    absorbed,
+    ket_I,
+    bra_I,
+    surv,
+    proj_a,
+    proj_a_label,
+    proj_a_flow,
+    proj_b,
+    proj_b_label,
+    proj_b_flow,
+):
+    """Grow an edge double layer (ket = ``T_ket . A``, bra = ``T_bra . A_bar``),
+    keeping the surviving virtual pair SPLIT and fusing the two projected
+    seams (``proj_a``, ``proj_b``) into D^2 labels for leg-by-leg projection.
+
+    ``absorbed`` is the A virtual direction already carried by the edge (traced
+    into ``T_*``'s ``{absorbed}_ket`` / ``{absorbed}_bra`` leg); ``surv`` is the
+    virtual kept split (ket label ``surv``, bra label ``{surv}_bra``).  Returns
+    the grown edge with legs
+    ``(env_ket_outer, surv, proj_a_label, env_bra_outer, {surv}_bra, proj_b_label)``.
+    """
+    A_k = A.relabels({absorbed: f"{absorbed}_ket"})
+    Tk = contract(T_ket, A_k)  # joins {absorbed}_ket; frees surv/proj_a/proj_b/phys
+    A_b = A_bar.relabels(
+        {
+            absorbed: f"{absorbed}_bra",
+            surv: f"{surv}_bra",
+            proj_a: f"{proj_a}_bra",
+            proj_b: f"{proj_b}_bra",
+        }
+    )
+    Tb = contract(T_bra, A_b)  # joins {absorbed}_bra
+    Tg = contract(Tk.relabel(ket_I, bra_I), Tb)  # join interlayer + trace phys
+    Tg = _fuse_ket_bra(Tg, proj_a, f"{proj_a}_bra", proj_a_label, proj_a_flow)
+    Tg = _fuse_ket_bra(Tg, proj_b, f"{proj_b}_bra", proj_b_label, proj_b_flow)
+    return Tg
+
+
+def _split_ctm_absorb_bottom_2plaq(
+    env_src, A, A_bar, P_top_left, P_bot_left, P_top_curr, P_bot_curr, chi_I
+):
+    """Split BOTTOM absorption -> (C4_new, T3_ket_new, T3_bra_new, C3_new).
+
+    Twin of the fused ``_ctm_tensor_absorb_bottom_2plaq`` (``C3.c3_u<->T2.t2_d``
+    convention, #670/#674): projector halves applied via ``_apply_proj_unfused``,
+    ket/bra edge halves grown then SVD-split over ``chi_I``.
+    """
+    C4g = _grow_split_corner_2x2(
+        env_src.C4,
+        "c4_r",
+        "t4b_u",
+        env_src.T4_bra,
+        env_src.T4_ket,
+        "t4b_I",
+        "t4k_I",
+        "l_ket",
+        "l_bra",
+        "l2",
+        FlowDirection.IN,
+    )
+    C4_new = _apply_proj_unfused(P_bot_left, C4g, "c4_u", "l2")
+    C4_new = C4_new.relabels({"chi_new": "c4_r", "t4k_d": "c4_u"})
+
+    C3g = _grow_split_corner_2x2(
+        env_src.C3,
+        "c3_u",
+        "t2b_d",
+        env_src.T2_bra,
+        env_src.T2_ket,
+        "t2b_I",
+        "t2k_I",
+        "r_ket",
+        "r_bra",
+        "r2",
+        FlowDirection.OUT,
+    )
+    C3_new = _apply_proj_unfused(P_top_curr, C3g, "c3_l", "r2")
+    C3_new = C3_new.relabels({"chi_new": "c3_u", "t2k_u": "c3_l"})
+
+    T3g = _grow_split_edge_2x2(
+        env_src.T3_ket,
+        env_src.T3_bra,
+        A,
+        A_bar,
+        absorbed="d",
+        ket_I="t3k_I",
+        bra_I="t3b_I",
+        surv="u",
+        proj_a="l",
+        proj_a_label="l2",
+        proj_a_flow=FlowDirection.IN,
+        proj_b="r",
+        proj_b_label="r2",
+        proj_b_flow=FlowDirection.OUT,
+    )
+    step = _apply_proj_unfused(P_top_left, T3g, "t3k_r", "l2")
+    T3g = _apply_proj_unfused(
+        P_bot_curr, step, "t3b_l", "r2", chi_new="chi_new_r", env_first=True
+    )
+    T3_ket_new, T3_bra_new = _svd_split_edge_tensor(
+        T3g,
+        left_labels=["chi_new", "u"],
+        right_labels=["u_bra", "chi_new_r"],
+        chi_I=chi_I,
+        ket_relabels={"chi_new": "t3k_r", "u": "d_ket", "_svd_bond": "t3k_I"},
+        bra_relabels={"_svd_bond": "t3b_I", "u_bra": "d_bra", "chi_new_r": "t3b_l"},
+    )
+    C4_new = _ensure_corner_flows(C4_new, "C4")
+    C3_new = _ensure_corner_flows(C3_new, "C3")
+    T3_ket_new, T3_bra_new = _ensure_edge_flows(T3_ket_new, T3_bra_new, "T3")
+    return C4_new, T3_ket_new, T3_bra_new, C3_new
+
+
+def _split_ctm_absorb_left_2plaq(
+    env_src, A, A_bar, P_top_above, P_bot_above, P_top_curr, P_bot_curr, chi_I
+):
+    """Split LEFT absorption -> (C1_new, T4_ket_new, T4_bra_new, C4_new)."""
+    C1g = _grow_split_corner_2x2(
+        env_src.C1,
+        "c1_r",
+        "t1k_l",
+        env_src.T1_ket,
+        env_src.T1_bra,
+        "t1k_I",
+        "t1b_I",
+        "u_ket",
+        "u_bra",
+        "u2",
+        FlowDirection.IN,
+    )
+    C1_new = _apply_proj_unfused(P_bot_above, C1g, "c1_d", "u2")
+    C1_new = C1_new.relabels({"chi_new": "c1_d", "t1b_r": "c1_r"})
+
+    C4g = _grow_split_corner_2x2(
+        env_src.C4,
+        "c4_u",
+        "t3k_r",
+        env_src.T3_ket,
+        env_src.T3_bra,
+        "t3k_I",
+        "t3b_I",
+        "d_ket",
+        "d_bra",
+        "d2",
+        FlowDirection.OUT,
+    )
+    C4_new = _apply_proj_unfused(P_top_curr, C4g, "c4_r", "d2")
+    C4_new = C4_new.relabels({"chi_new": "c4_r", "t3b_l": "c4_u"})
+
+    T4g = _grow_split_edge_2x2(
+        env_src.T4_ket,
+        env_src.T4_bra,
+        A,
+        A_bar,
+        absorbed="l",
+        ket_I="t4k_I",
+        bra_I="t4b_I",
+        surv="r",
+        proj_a="u",
+        proj_a_label="u2",
+        proj_a_flow=FlowDirection.IN,
+        proj_b="d",
+        proj_b_label="d2",
+        proj_b_flow=FlowDirection.OUT,
+    )
+    step = _apply_proj_unfused(P_top_above, T4g, "t4k_d", "u2")
+    T4g = _apply_proj_unfused(
+        P_bot_curr, step, "t4b_u", "d2", chi_new="chi_new_r", env_first=True
+    )
+    T4_ket_new, T4_bra_new = _svd_split_edge_tensor(
+        T4g,
+        left_labels=["chi_new", "r"],
+        right_labels=["r_bra", "chi_new_r"],
+        chi_I=chi_I,
+        ket_relabels={"chi_new": "t4k_d", "r": "l_ket", "_svd_bond": "t4k_I"},
+        bra_relabels={"_svd_bond": "t4b_I", "r_bra": "l_bra", "chi_new_r": "t4b_u"},
+    )
+    C1_new = _ensure_corner_flows(C1_new, "C1")
+    C4_new = _ensure_corner_flows(C4_new, "C4")
+    T4_ket_new, T4_bra_new = _ensure_edge_flows(T4_ket_new, T4_bra_new, "T4")
+    return C1_new, T4_ket_new, T4_bra_new, C4_new
+
+
+def _split_ctm_absorb_right_2plaq(
+    env_src, A, A_bar, P_top_above, P_bot_above, P_top_curr, P_bot_curr, chi_I
+):
+    """Split RIGHT absorption -> (C2_new, T2_ket_new, T2_bra_new, C3_new)."""
+    C2g = _grow_split_corner_2x2(
+        env_src.C2,
+        "c2_l",
+        "t1b_r",
+        env_src.T1_bra,
+        env_src.T1_ket,
+        "t1b_I",
+        "t1k_I",
+        "u_ket",
+        "u_bra",
+        "u2",
+        FlowDirection.IN,
+    )
+    C2_new = _apply_proj_unfused(P_top_above, C2g, "c2_d", "u2")
+    C2_new = C2_new.relabels({"chi_new": "c2_l", "t1k_l": "c2_d"})
+
+    C3g = _grow_split_corner_2x2(
+        env_src.C3,
+        "c3_u",
+        "t3b_l",
+        env_src.T3_bra,
+        env_src.T3_ket,
+        "t3b_I",
+        "t3k_I",
+        "d_ket",
+        "d_bra",
+        "d2",
+        FlowDirection.OUT,
+    )
+    C3_new = _apply_proj_unfused(P_bot_curr, C3g, "c3_l", "d2")
+    C3_new = C3_new.relabels({"chi_new": "c3_u", "t3k_r": "c3_l"})
+
+    T2g = _grow_split_edge_2x2(
+        env_src.T2_ket,
+        env_src.T2_bra,
+        A,
+        A_bar,
+        absorbed="r",
+        ket_I="t2k_I",
+        bra_I="t2b_I",
+        surv="l",
+        proj_a="u",
+        proj_a_label="u2",
+        proj_a_flow=FlowDirection.IN,
+        proj_b="d",
+        proj_b_label="d2",
+        proj_b_flow=FlowDirection.OUT,
+    )
+    step = _apply_proj_unfused(P_bot_above, T2g, "t2k_u", "u2")
+    T2g = _apply_proj_unfused(
+        P_top_curr, step, "t2b_d", "d2", chi_new="chi_new_r", env_first=True
+    )
+    T2_ket_new, T2_bra_new = _svd_split_edge_tensor(
+        T2g,
+        left_labels=["chi_new", "l"],
+        right_labels=["l_bra", "chi_new_r"],
+        chi_I=chi_I,
+        ket_relabels={"chi_new": "t2k_u", "l": "r_ket", "_svd_bond": "t2k_I"},
+        bra_relabels={"_svd_bond": "t2b_I", "l_bra": "r_bra", "chi_new_r": "t2b_d"},
+    )
+    C2_new = _ensure_corner_flows(C2_new, "C2")
+    C3_new = _ensure_corner_flows(C3_new, "C3")
+    T2_ket_new, T2_bra_new = _ensure_edge_flows(T2_ket_new, T2_bra_new, "T2")
+    return C2_new, T2_ket_new, T2_bra_new, C3_new
+
+
+def _split_ctm_absorb_top_2plaq(
+    env_src, A, A_bar, P_top_left, P_bot_left, P_top_curr, P_bot_curr, chi_I
+):
+    """Split TOP absorption -> (C1_new, T1_ket_new, T1_bra_new, C2_new)."""
+    C1g = _grow_split_corner_2x2(
+        env_src.C1,
+        "c1_d",
+        "t4k_d",
+        env_src.T4_ket,
+        env_src.T4_bra,
+        "t4k_I",
+        "t4b_I",
+        "l_ket",
+        "l_bra",
+        "l2",
+        FlowDirection.IN,
+    )
+    C1_new = _apply_proj_unfused(P_top_left, C1g, "c1_r", "l2")
+    C1_new = C1_new.relabels({"chi_new": "c1_d", "t4b_u": "c1_r"})
+
+    C2g = _grow_split_corner_2x2(
+        env_src.C2,
+        "c2_d",
+        "t2k_u",
+        env_src.T2_ket,
+        env_src.T2_bra,
+        "t2k_I",
+        "t2b_I",
+        "r_ket",
+        "r_bra",
+        "r2",
+        FlowDirection.OUT,
+    )
+    C2_new = _apply_proj_unfused(P_bot_curr, C2g, "c2_l", "r2")
+    C2_new = C2_new.relabels({"chi_new": "c2_l", "t2b_d": "c2_d"})
+
+    T1g = _grow_split_edge_2x2(
+        env_src.T1_ket,
+        env_src.T1_bra,
+        A,
+        A_bar,
+        absorbed="u",
+        ket_I="t1k_I",
+        bra_I="t1b_I",
+        surv="d",
+        proj_a="l",
+        proj_a_label="l2",
+        proj_a_flow=FlowDirection.IN,
+        proj_b="r",
+        proj_b_label="r2",
+        proj_b_flow=FlowDirection.OUT,
+    )
+    step = _apply_proj_unfused(P_bot_left, T1g, "t1k_l", "l2")
+    T1g = _apply_proj_unfused(
+        P_top_curr, step, "t1b_r", "r2", chi_new="chi_new_r", env_first=True
+    )
+    T1_ket_new, T1_bra_new = _svd_split_edge_tensor(
+        T1g,
+        left_labels=["chi_new", "d"],
+        right_labels=["d_bra", "chi_new_r"],
+        chi_I=chi_I,
+        ket_relabels={"chi_new": "t1k_l", "d": "u_ket", "_svd_bond": "t1k_I"},
+        bra_relabels={"_svd_bond": "t1b_I", "d_bra": "u_bra", "chi_new_r": "t1b_r"},
+    )
+    C1_new = _ensure_corner_flows(C1_new, "C1")
+    C2_new = _ensure_corner_flows(C2_new, "C2")
+    T1_ket_new, T1_bra_new = _ensure_edge_flows(T1_ket_new, T1_bra_new, "T1")
+    return C1_new, T1_ket_new, T1_bra_new, C2_new
 
 
 # ------------------------------------------------------------------ #
