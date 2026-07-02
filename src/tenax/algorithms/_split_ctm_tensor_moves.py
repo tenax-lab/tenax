@@ -82,7 +82,9 @@ def _fuse_ket_bra(
     bra_pos = labels.index(bra_label)
     # Bring ket immediately before bra (ket slow, bra fast).
     rest = [i for i in range(len(labels)) if i not in (ket_pos, bra_pos)]
-    perm = tuple(rest[:0] + [ket_pos, bra_pos] + rest)  # ket, bra, then rest
+    perm = tuple(
+        [ket_pos, bra_pos] + rest
+    )  # ket at 0 (slow), bra at 1 (fast), then rest
     T = T.transpose(perm)
     return fuse_indices(T, 0, 1, fused_label, fused_flow)
 
@@ -102,11 +104,12 @@ def _build_split_enlarged_corner(
     :func:`_build_enlarged_corner`, assembled from ket/bra split edges + a
     physical double layer (A ket, A_bar bra) with the phys index traced.
 
-    Output free legs match the fused recipe exactly:
-      top_left     -> (chi_R, r2, chi_B, d2)
-      top_right    -> (chi_L, l2, chi_B, d2)
-      bottom_left  -> (chi_T, u2, chi_R, r2)
-      bottom_right -> (chi_L, l2, chi_T, u2)
+    Output free legs match the fused recipe's LABEL SET exactly (axis order is
+    not significant — ``_compute_2x2_projector`` indexes by label):
+      top_left     -> {chi_R, r2, chi_B, d2}
+      top_right    -> {chi_L, l2, chi_B, d2}
+      bottom_left  -> {chi_T, u2, chi_R, r2}
+      bottom_right -> {chi_L, l2, chi_T, u2}
 
     The physical double layer is built by contracting the ket edges with the
     ket virtual legs of ``A`` and the bra edges with the bra virtual legs of
