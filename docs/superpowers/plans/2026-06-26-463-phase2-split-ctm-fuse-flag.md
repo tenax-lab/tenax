@@ -699,3 +699,41 @@ git commit -m "chore(#463): Phase 2 single-site split-CTM flag — regression gr
 - **Spec coverage:** Component 1 → Task 1; Component 2 (explicit) → Task 2; Component 2 (implicit) → Task 3; Component 3 (dispatch + single-site/knob guards) → Task 4; other-path guards → Task 5; exports/docs → Task 6; "default unchanged" acceptance → Task 7.
 - **Type/name consistency:** module `_split_ctm_energy_ad.py`; functions `ctm_energy_split_explicit` / `ctm_energy_split_implicit` used identically in Tasks 2–6; `_extract_single_site` shared; `compute_energy_split_ctm_tensor` (single-site) used in both energy fns.
 - **Known open risk (carried from spec):** the implicit Neumann solve assumes `J_envᵀ` spectral radius < 1, which needs a gauge fix on the split sweep. Task 3 Step 4 gives the gauge-fix fallback and a follow-up-issue off-ramp so the explicit path (Task 2) still lands the parity gate if the implicit gauge needs separate work.
+
+---
+
+## Note: the C3↔T2 bond convention is **recipe-dependent** (read before lifting the 2-site/multisite guards)
+
+This plan keeps split-CTM on the single-site `recipe="1x1"` path and defers
+2-site/multisite (Task 5 `NotImplementedError` guards). When those guards are
+later lifted to run split-CTM on the **2×2** recipe, the bottom-move corner
+bookkeeping must change, because the `C3`↔`T2` corner-edge bond pairing differs
+between recipes:
+
+- **1×1 moves** (`_ctm_tensor_move_bottom`, `_ctm_tensor_moves.py`) pair
+  **`C3.c3_l ↔ T2.t2_d`**. The raw compiled mirror
+  (`_ctm_compiled_moves._compiled_move_bottom`) uses the same convention.
+- **2×2 moves** (`_ctm_tensor_absorb_bottom_2plaq`) **and** the production
+  energy/RDM path (`_ctm_tensor_energy.py`, e.g. `T2.relabels({"t2_d": "c3_u"})`)
+  pair **`C3.c3_u ↔ T2.t2_d`**.
+
+This divergence is a **no-op on uniform / leg-symmetric states** (a fresh env
+seeds `c3_u` and `c3_l` identically from the same reference axis, so swapping
+which leg glues to `t2_d` is invisible), which is why 1×1 and its compiled mirror
+are correct where they are actually used. It becomes **load-bearing on
+direction-dependent (`A.l != A.r`) states**: it was exactly the #670 bug in the
+2×2 Tensor path (and #674 in the fused/fermionic twin), where the swapped pairing
+produced a per-sector block-size mismatch. See #675 (closed not-planned) for why
+the 1×1/compiled `c3_l↔t2_d` was **not** changed — it faithfully mirrors the 1×1
+path and never runs on direction-dependent states.
+
+**Implication for split-CTM:** the current single-site split moves mirror 1×1
+(`c3_l↔t2_d`), which is correct while split-CTM stays single-site/1×1. When
+extending split-CTM to the 2-site/multisite (2×2) recipe, the split **bottom**
+move — and its fermionic/fused variant — must pair **`C3.c3_u ↔ T2.t2_d`** to
+stay consistent with the energy/RDM path; otherwise C3 is silently mis-glued on
+direction-dependent envs. Validate the extension against a direction-dependent
+pair (`tests/test_ctm_direction_dependent_bonds.py::_su_direction_dependent_pair`)
+with `E_split == E_dense`, not only against a uniform parity oracle (a uniform
+oracle cannot catch this class of bug). The full authority table for all four
+corners lives in `_ctm_tensor_energy.py`.
