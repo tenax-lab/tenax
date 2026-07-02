@@ -50,3 +50,29 @@ def test_initialize_split_multisite_env_keys_and_type():
     assert isinstance(envs[(0, 0)], SplitCTMTensorEnv)
     assert isinstance(envs[(1, 0)], SplitCTMTensorEnv)
     assert envs[(0, 0)].C1 is not envs[(1, 0)].C1
+
+
+def test_split_multisite_uniform_matches_single_site():
+    """recipe='1x1' multisite sweep on a uniform cell == single-site forward."""
+    from tenax.algorithms._split_ctm_tensor_convergence import (
+        _split_ctm_multisite,
+        ctm_split_tensor,
+    )
+    from tenax.algorithms._split_ctm_tensor_energy import (
+        _rdm_1site_split_tensor,
+    )
+
+    A = _random_dense_A(seed=3)
+    chi = 6
+    single = ctm_split_tensor(A, chi, max_iter=20, conv_tol=0.0)
+    envs = _split_ctm_multisite(
+        {(0, 0): A, (1, 0): A},
+        CHECKERBOARD_NEIGHBORS,
+        chi,
+        max_iter=20,
+        conv_tol=0.0,
+        recipe="1x1",
+    )
+    rho_single = _rdm_1site_split_tensor(A, single)
+    rho_multi = _rdm_1site_split_tensor(A, envs[(0, 0)])
+    assert np.allclose(rho_single, rho_multi, atol=1e-8)

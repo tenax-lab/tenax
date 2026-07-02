@@ -6,18 +6,22 @@ __all__ = [
     "_SplitCTMInfo",
     "_initialize_split_multisite_env",
     "_renormalize_split_env",
+    "_split_ctm_multisite",
+    "_split_ctm_sweep_multisite",
     "_split_ctm_tensor_sweep",
     "ctm_split_tensor",
 ]
 
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._ctm_tensor_convergence import (
     Coord,
     _corner_singular_values,
     _ctm_sv_diff,
+    _sort_coords_for_direction,
 )
 from tenax.algorithms._split_ctm_tensor_init import (
     SplitCTMTensorEnv,
@@ -193,3 +197,131 @@ def _initialize_split_multisite_env(
         c: initialize_split_ctm_tensor_env(A, chi, chi_I)
         for c, A in site_tensors.items()
     }
+
+
+# ------------------------------------------------------------------ #
+# Direction-move dispatch table                                        #
+# ------------------------------------------------------------------ #
+
+_SPLIT_DIRECTION_MOVES = {
+    "left": _split_ctm_move_left,
+    "top": _split_ctm_move_top,
+    "right": _split_ctm_move_right,
+    "bottom": _split_ctm_move_bottom,
+}
+
+
+# ------------------------------------------------------------------ #
+# Multisite sweep + driver                                             #
+# ------------------------------------------------------------------ #
+
+
+def _split_ctm_sweep_multisite_2x2(
+    envs: dict[Coord, SplitCTMTensorEnv],
+    site_tensors: dict[Coord, Tensor],
+    bars: dict[Coord, Tensor],
+    neighbors: dict[Coord, dict[str, Coord]],
+    chi: int,
+    chi_I: int,
+) -> dict[Coord, SplitCTMTensorEnv]:
+    raise NotImplementedError("2x2 split sweep lands in Task 1.3")
+
+
+def _split_ctm_sweep_multisite(
+    envs: dict[Coord, SplitCTMTensorEnv],
+    site_tensors: dict[Coord, Tensor],
+    bars: dict[Coord, Tensor],
+    neighbors: dict[Coord, dict[str, Coord]],
+    chi: int,
+    chi_I: int,
+    renormalize: bool,
+    recipe: str = "2x2",
+) -> dict[Coord, SplitCTMTensorEnv]:
+    """One full split multisite CTM sweep.
+
+    Args:
+        envs:        Per-coord split CTM environments.
+        site_tensors: Per-coord site tensors.
+        bars:        Per-coord conjugate (bar) tensors.
+        neighbors:   Per-coord directional neighbor map.
+        chi:         Corner bond dimension.
+        chi_I:       Interlayer bond dimension.
+        renormalize: If True, renormalize each environment after the sweep.
+        recipe:      ``'1x1'`` reuses single-site directional moves;
+                     ``'2x2'`` applies genuine 2×2 plaquette projectors
+                     (not yet implemented — lands in Task 1.3).
+
+    Returns:
+        Updated per-coord environments.
+    """
+    envs = dict(envs)
+    all_coords = list(envs.keys())
+    if recipe == "1x1":
+        for direction in ("left", "top", "right", "bottom"):
+            move_fn = _SPLIT_DIRECTION_MOVES[direction]
+            for coord in _sort_coords_for_direction(all_coords, direction):
+                nb = neighbors[coord][direction]
+                envs[coord] = move_fn(
+                    envs[coord], site_tensors[nb], bars[nb], chi, chi_I
+                )
+    elif recipe == "2x2":
+        envs = _split_ctm_sweep_multisite_2x2(
+            envs, site_tensors, bars, neighbors, chi, chi_I
+        )
+    else:
+        raise ValueError(
+            f"Unknown split CTM recipe {recipe!r}: expected '1x1' or '2x2'."
+        )
+    if renormalize:
+        envs = {c: _renormalize_split_env(e) for c, e in envs.items()}
+    return envs
+
+
+def _split_ctm_multisite(
+    site_tensors: dict[Coord, Tensor],
+    neighbors: dict[Coord, dict[str, Coord]],
+    chi: int,
+    max_iter: int = 100,
+    conv_tol: float = 1e-8,
+    chi_I: int | None = None,
+    renormalize: bool = True,
+    recipe: str = "2x2",
+) -> dict[Coord, SplitCTMTensorEnv]:
+    """Run split multisite CTM to convergence (mirrors ``_ctm_tensor_multisite``).
+
+    Args:
+        site_tensors: Per-coord iPEPS site tensors.
+        neighbors:   Per-coord directional neighbor map (e.g. ``CHECKERBOARD_NEIGHBORS``).
+        chi:         Corner bond dimension.
+        max_iter:    Maximum number of CTM sweep iterations.
+        conv_tol:    Convergence tolerance on corner singular values. Use
+                     ``0.0`` to disable early stopping and run all ``max_iter``
+                     sweeps.
+        chi_I:       Interlayer bond dimension. Defaults to ``chi``.
+        renormalize: Renormalize environment tensors after each sweep.
+        recipe:      ``'1x1'`` or ``'2x2'`` (see :func:`_split_ctm_sweep_multisite`).
+
+    Returns:
+        Per-coord converged :class:`SplitCTMTensorEnv` dict.
+    """
+    if chi_I is None:
+        chi_I = chi
+    bars = {c: A.bar() for c, A in site_tensors.items()}
+    envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
+    prev_svs: dict[Coord, jax.Array] = {}
+    for _ in range(max_iter):
+        envs = _split_ctm_sweep_multisite(
+            envs, site_tensors, bars, neighbors, chi, chi_I, renormalize, recipe
+        )
+        converged = True
+        for c in sorted(envs):
+            sv = _corner_singular_values(envs[c].C1)
+            if c in prev_svs:
+                if float(_ctm_sv_diff(sv, prev_svs[c])) >= conv_tol:
+                    converged = False
+            else:
+                converged = False
+            prev_svs[c] = sv
+        if converged:
+            break
+    return envs
