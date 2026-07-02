@@ -276,6 +276,8 @@ This task replaces **Phase A** of each move and uses the **closed** edge path (c
 
 - [ ] **Step 5: Mirror to `_split_ctm_move_right/top/bottom`.** Apply the same transformation (double-layer grown corners, `(P_1,P_2)` to the two sides, factorized closed-edge `_lr` application). Reuse the per-move `left_fuse/right_fuse`/relabel tuples already present in each existing move (they encode the rotation).
 
+> **Convention caveat for the `bottom` move — the `C3`↔`T2` pairing is recipe-dependent (#670/#674/#675).** These split moves mirror the **1×1** recipe, which pairs **`C3.c3_l ↔ T2.t2_d`**. The **2×2** moves and the production energy/RDM path (`_ctm_tensor_energy.py`) instead pair **`C3.c3_u ↔ T2.t2_d`**. The two agree on uniform / leg-symmetric states (`c3_u`/`c3_l` seed identically) but diverge on direction-dependent (`A.l != A.r`) states — that divergence was the #670 bug. Keep `c3_l↔t2_d` here **only** while this split path stays 1×1; if it is ever lifted to the 2×2 recipe, the bottom move must switch to `c3_u↔t2_d`. A uniform parity oracle cannot catch this — validate any recipe change against a direction-dependent pair. Full rationale in `docs/superpowers/plans/2026-06-26-463-phase2-split-ctm-fuse-flag.md` (§ "recipe-dependent C3↔T2 convention"); authority table in `_ctm_tensor_energy.py`.
+
 - [ ] **Step 6: Run all parity params with `--runxfail`** → all should now pass. Commit.
 ```bash
 git add src/tenax/algorithms/_split_ctm_tensor_moves.py
