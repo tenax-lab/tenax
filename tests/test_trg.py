@@ -250,7 +250,14 @@ class TestTRGRun:
         )
 
     def test_near_critical_free_energy(self):
-        """Near critical point (beta=0.44), TRG chi=16 should be within 5%."""
+        """Near critical point (beta=0.44), TRG chi=16 free energy is within 0.5%.
+
+        The measured rel err is ~2.4e-3 (plain Levin-Nave TRG plateaus at a
+        chi-independent CDL floor near criticality, so this is close to the best
+        TRG achieves at any chi). The 0.5% bound is a ~2x-margin regression guard
+        — much tighter than the old 5% placeholder — that still tolerates
+        platform floating-point variation.
+        """
         beta = 0.44
         tensor = compute_ising_tensor(beta=beta)
         config = TRGConfig(max_bond_dim=16, num_steps=20)
@@ -260,9 +267,31 @@ class TestTRGRun:
         relative_error = abs(trg_free_energy - exact_free_energy) / abs(
             exact_free_energy
         )
-        assert relative_error < 0.05, (
+        assert relative_error < 0.005, (
             f"TRG free energy {trg_free_energy:.6f} too far from "
             f"exact {exact_free_energy:.6f} (rel err={relative_error:.4f})"
+        )
+
+    def test_bond_dim_is_respected(self):
+        """TRG must actually use max_bond_dim: chi=2 is distinctly less accurate
+        than chi=4 (guards against a regression that silently ignores chi and
+        hides behind the chi-independent CDL plateau — the plateau only sets in
+        for chi >~ 6, so small chi still shows clear convergence).
+
+        Measured (beta=0.3, 20 steps): err(chi=2) ~ 1.8e-2, err(chi=4) ~ 8e-3
+        (ratio ~2.15). A broken truncation that pins the effective bond dim would
+        make these equal.
+        """
+        beta = 0.3
+        tensor = compute_ising_tensor(beta=beta)
+        exact = ising_free_energy_exact(beta)
+        err = {}
+        for chi in (2, 4):
+            f = float(-trg(tensor, TRGConfig(max_bond_dim=chi, num_steps=20)) / beta)
+            err[chi] = abs(f - exact)
+        assert err[2] > 1.3 * err[4], (
+            f"TRG not converging in chi (max_bond_dim ignored?): "
+            f"err(chi=2)={err[2]:.3e} vs err(chi=4)={err[4]:.3e}"
         )
 
     def test_low_temp_free_energy(self):
