@@ -54,6 +54,40 @@ HOTRG, unlike every CTM-AD multi-GPU attempt.
   so the largest intermediate is χ⁵/χ⁴) — that raises the single-GPU ceiling directly and is
   orthogonal to sharding.
 
+## Productized (same PR)
+
+`HOTRGConfig(device_mesh=<1-D Mesh>)` now shards dense HOTRG. Implementation
+(`src/tenax/algorithms/hotrg.py`):
+
+- Each step re-shards its input `up` leg via `with_sharding_constraint`
+  (`_shard_leg`); `up` is present in both the horizontal and vertical χ⁶
+  `T_merged`, so the eager contractions produce a sharded χ⁶ **without ever
+  materializing it replicated**. Re-sharding each step handles the leg rotation
+  across the horizontal/vertical alternation.
+- **Eager, not jit.** `truncated_svd` does host-side rank truncation
+  (`linalg.py:1793`, `np.array(s)`) and is **not jit-safe** — jitting the step
+  crashes (`reshape (4,4)->(2,2,8)` on the first rank-deficient SVD). Eager
+  `with_sharding_constraint` works and keeps χ⁶ sharded; the trade-off is ~49 GB
+  vs a jitted ~33 GB at χ=40 (eager keeps extra copies), still a clear win.
+- Guards: no-op for `device_mesh=None`, for non-`DenseTensor` (block-sparse HOTRG
+  is small), and when a leg dim isn't divisible by the device count (early
+  small-bond steps — no memory pressure there anyway).
+
+Measured on the **full productized** `hotrg()` (2×A100, real high-water, β=0.3):
+
+| χ (num_steps=8) | nomesh | mesh | note |
+|---|---|---|---|
+| 32 | 2.17 GB | **1.10 GB (2.0×)** | identical free energy |
+| 40 | **FAILS** (autotuner RESOURCE_EXHAUSTED on the χ⁶ transpose) | **49 GB, fits, f=−2.6339** | **ceiling extension** |
+| 44+ | fails | autotuner wall (even sharded) | compile-level cap |
+
+So multi-GPU extends the reachable χ (single-GPU wall ~χ=40 → reachable with 2
+GPUs) at 2× per-device relief and the same free energy. **Caveat:** beyond ~χ=44
+an XLA autotuner wall on the giant `(χ³×χ³)` gemm/transpose caps *both* paths
+(same class as the split-CTM D=12 wall; `--xla_gpu_autotune_level=0` may push it).
+Tests: `tests/test_hotrg_sharding.py` (parity on fake CPU devices) + 22 existing
+hotrg tests still pass.
+
 ## Artifacts
 
 - `examples/probe_hotrg_multigpu.py` — real high-water shard probe (HOTRG/TRG, per leg/χ/mode).

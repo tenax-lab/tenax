@@ -25,10 +25,39 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+from jax.lax import with_sharding_constraint
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from tenax.algorithms._tensor_utils import max_abs_normalize
 from tenax.contraction.contractor import contract, truncated_svd
-from tenax.core.tensor import Tensor
+from tenax.core.tensor import DenseTensor, Tensor
+
+
+def _shard_leg(T: Tensor, label: str, device_mesh: Mesh | None) -> Tensor:
+    """Constrain ``T``'s ``label`` leg to be sharded over ``device_mesh``.
+
+    A pure layout hint (``with_sharding_constraint``) — never changes numerics.
+    Applied to the dominant chi^6 ``T_merged`` intermediate inside the HOTRG
+    steps so it stays at ~1/N per device (dense large-chi multi-GPU HOTRG;
+    HOTRG is forward-only so there is no backward SVD-VJP replication wall).
+
+    No-op when ``device_mesh is None``, for non-``DenseTensor`` inputs (dense
+    large-chi is the target regime; block-sparse HOTRG is small), or when the
+    leg dimension is not divisible by the device count (the early small-bond
+    steps, which carry no memory pressure).
+    """
+    if device_mesh is None or not isinstance(T, DenseTensor):
+        return T
+    n = device_mesh.devices.size
+    axis = T.labels().index(label)
+    leaves, treedef = jax.tree_util.tree_flatten(T)
+    if not leaves or leaves[0].shape[axis] % n != 0:
+        return T
+    spec = [None] * len(T.labels())
+    spec[axis] = device_mesh.axis_names[0]
+    sharding = NamedSharding(device_mesh, PartitionSpec(*spec))
+    leaves = [with_sharding_constraint(x, sharding) for x in leaves]
+    return jax.tree_util.tree_unflatten(treedef, leaves)
 
 
 @dataclass
@@ -43,12 +72,20 @@ class HOTRGConfig:
                          "horizontal": horizontal only.
                          "vertical": vertical only.
         svd_trunc_err:   Optional maximum truncation error per HOSVD.
+        device_mesh:     Optional 1-D ``jax.sharding.Mesh`` for multi-GPU dense
+                         HOTRG. When set, each step shards the dominant chi^6
+                         ``T_merged`` intermediate over the mesh (~1/N per-device
+                         peak, extends the chi ceiling). Pure layout hint —
+                         same free energy as single-device. Opt-in; ``None``
+                         (default) is unchanged single-device behaviour. Only
+                         affects the dense path (block-sparse HOTRG is small).
     """
 
     max_bond_dim: int = 16
     num_steps: int = 10
     direction_order: str = "alternating"
     svd_trunc_err: float | None = None
+    device_mesh: Mesh | None = None
 
 
 def hotrg(
@@ -63,7 +100,10 @@ def hotrg(
     Args:
         tensor: Initial site tensor (DenseTensor or SymmetricTensor) with
                 4 legs labeled ("up", "down", "left", "right").
-        config: HOTRGConfig parameters.
+        config: HOTRGConfig parameters. Set ``config.device_mesh`` to a 1-D
+                ``jax.sharding.Mesh`` to shard the dominant chi^6 intermediate
+                over multiple GPUs (~1/N per-device peak, higher chi ceiling;
+                dense path only). See ``examples/probe_hotrg_multigpu.py``.
 
     Returns:
         Scalar JAX array: estimated log(Z)/N (free energy per site).
@@ -80,25 +120,24 @@ def hotrg(
 
     T = tensor
     log_norm_total = jnp.zeros((), dtype=T.dtype)
+    # Runs eager (``truncated_svd`` does host-side rank truncation and is not
+    # jit-safe). When ``device_mesh`` is set, each step re-shards its input
+    # ``up`` leg (see ``_hotrg_step_*``); eager contractions over sharded inputs
+    # keep the dominant chi^6 ``T_merged`` sharded (~1/N per device) without ever
+    # materializing it replicated.
+    mesh = config.device_mesh
 
     for step in range(config.num_steps):
         if config.direction_order == "alternating":
-            if step % 2 == 0:
-                T, log_norm = _hotrg_step_horizontal(
-                    T, config.max_bond_dim, config.svd_trunc_err
-                )
-            else:
-                T, log_norm = _hotrg_step_vertical(
-                    T, config.max_bond_dim, config.svd_trunc_err
-                )
+            step_fn = _hotrg_step_horizontal if step % 2 == 0 else _hotrg_step_vertical
         elif config.direction_order == "horizontal":
-            T, log_norm = _hotrg_step_horizontal(
-                T, config.max_bond_dim, config.svd_trunc_err
-            )
+            step_fn = _hotrg_step_horizontal
         else:
-            T, log_norm = _hotrg_step_vertical(
-                T, config.max_bond_dim, config.svd_trunc_err
-            )
+            step_fn = _hotrg_step_vertical
+
+        T, log_norm = step_fn(
+            T, config.max_bond_dim, config.svd_trunc_err, device_mesh=mesh
+        )
 
         # Each HOTRG step halves the number of tensors.
         log_norm_total = log_norm_total + log_norm / (2.0 ** (step + 1))
@@ -110,6 +149,7 @@ def _hotrg_step_horizontal(
     T: Tensor,
     max_bond_dim: int,
     svd_trunc_err: float | None = None,
+    device_mesh: Mesh | None = None,
 ) -> tuple[Tensor, jax.Array]:
     """Single horizontal HOTRG coarse-graining step (polymorphic).
 
@@ -124,6 +164,11 @@ def _hotrg_step_horizontal(
     Returns:
         (T_new, log_norm) where T_new has compressed up/down bonds.
     """
+    # Multi-GPU: shard the input "up" leg so the eager contractions below keep
+    # the dominant chi^6 T_merged at ~1/N per device. "up" is present in T_merged
+    # (up,down,left,U,D,right) and in every step's input, so re-sharding it here
+    # each step handles the leg rotation across horizontal/vertical alternation.
+    T = _shard_leg(T, "up", device_mesh)
     # Step 1: Form environment M by contracting T with itself over (left, right).
     # T has labels (up, down, left, right). Second copy relabeled to avoid collision.
     T_copy = T.relabels({"up": "U", "down": "D", "left": "right", "right": "left"})
@@ -167,6 +212,7 @@ def _hotrg_step_vertical(
     T: Tensor,
     max_bond_dim: int,
     svd_trunc_err: float | None = None,
+    device_mesh: Mesh | None = None,
 ) -> tuple[Tensor, jax.Array]:
     """Single vertical HOTRG coarse-graining step (polymorphic).
 
@@ -180,6 +226,9 @@ def _hotrg_step_vertical(
     Returns:
         (T_new, log_norm) where T_new has compressed left/right bonds.
     """
+    # Multi-GPU: shard the input "up" leg (present in T_merged
+    # (up,left,right,down,L,R)) so the eager contractions keep chi^6 at ~1/N.
+    T = _shard_leg(T, "up", device_mesh)
     # Step 1: Form environment M by contracting T with itself over (up, down).
     T_copy = T.relabels({"left": "L", "right": "R", "up": "down", "down": "up"})
     # T_copy: (down, up, L, R) — shares "up" and "down" with T

@@ -244,6 +244,13 @@ print(f"Exact: {f_exact:.8f}")
 See `examples/ising_trg.py` and `examples/ising_hotrg.py` for full TRG and HOTRG
 examples at multiple temperatures compared against the Onsager exact solution.
 
+For large-χ dense HOTRG, set `HOTRGConfig(device_mesh=mesh)` (a 1-D
+`jax.sharding.Mesh`) to shard the dominant χ⁶ intermediate across multiple GPUs —
+~1/N per-device peak memory and a higher reachable χ, at the same free energy.
+Since HOTRG is forward-only there is no autodiff-through-SVD barrier, so GSPMD
+sharding is effective here (unlike the CTM-AD path). See
+`examples/probe_hotrg_multigpu.py`.
+
 ## AutoMPO Example
 
 ```python
