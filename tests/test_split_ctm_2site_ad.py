@@ -388,8 +388,6 @@ def test_2site_implicit_grad_fd_directional(su_state):
 def test_validate_split_ctm_config_allows_2site():
     """The 2-site checkerboard recipe ('2x2') is allowed under fuse=False; the
     three chi-changing knobs are still rejected."""
-    import pytest as _pytest
-
     from tenax.algorithms.ipeps_ad_policy import validate_split_ctm_config
     from tenax.algorithms.ipeps_config import CTMConfig
 
@@ -398,7 +396,7 @@ def test_validate_split_ctm_config_allows_2site():
     validate_split_ctm_config(cfg, "2x2")  # 2-site now OK — must not raise
 
     bump = CTMConfig(chi=8, chi_I=8, fuse_virtual_legs=False, chi_auto_bump=True)
-    with _pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedError):
         validate_split_ctm_config(bump, "2x2")
 
 

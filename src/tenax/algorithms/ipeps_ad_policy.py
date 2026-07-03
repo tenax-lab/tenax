@@ -45,8 +45,9 @@ def validate_split_ctm_config(ctm_cfg: CTMConfig, recipe: str) -> None:
     """Reject ``CTMConfig`` combinations the split-CTM path cannot honor.
 
     The split (``fuse_virtual_legs=False``) forward is fixed-χ (single-site or
-    2-site checkerboard), so every χ-changing knob is unsupported.  Raising up front beats the failure
-    modes of letting one through: ``chi_ramp`` would be *silently ignored*
+    2-site checkerboard), so every χ-changing knob is unsupported.  Raising up
+    front beats the failure modes of letting one through: ``chi_ramp`` would be
+    *silently ignored*
     (the split forward never reads it), and the end-of-step ``chi_auto_bump``
     would *crash* when ``_maybe_bump_chi`` pads a ``SplitCTMTensorEnv`` with
     the fused-only ``pad_dense_env_chi``.
@@ -264,9 +265,10 @@ def make_ctm_energy_fn(
 
         Single-site (``recipe='1x1'``) and 2-site checkerboard (``recipe='2x2'``)
         split forwards exist (#463 Phase 2); guard unsupported combinations up
-        front.  The split path computes its own split-aware energy internally,
-        so the fused default ``energy_fn`` (if any) is ignored here; only a
-        genuinely custom callback would be rejected downstream.
+        front.  Energy-callback handling differs by branch: the single-site
+        branch forwards ``energy_fn`` (a genuinely custom CG callback is rejected
+        downstream), while the 2-site branch always computes its own split-aware
+        energy and ignores any ``energy_fn`` (the fused default, or a custom one).
         """
         validate_split_ctm_config(ctm_cfg, recipe)
         if len(site_tensors) == 2:
