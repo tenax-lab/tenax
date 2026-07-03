@@ -26,23 +26,31 @@ translate into full-sweep per-device relief.
 
 ## The real numbers (2× A100, D=10 χ=32, `peak_bytes_in_use`, one mode/process)
 
-| layer | replicated | sharded | relief |
-|---|---:|---:|---:|
-| **absorb** (isolated χ²D⁶ contraction) | 9.83 GB | 5.71 GB | **1.72×** ✓ |
-| **move** (full `_ctm_tensor_move_left`, all env live) | 13.1 GB | 9.40 GB | **1.39×** |
-| **sweep** (full 4-direction 1×1 sweep) | 9.83 GB | 10.20 GB | **0.96×** ✗ |
-| sweep (double-layer committed replicated) | 9.80 GB | 9.80 GB | 1.00× ✗ |
+> **Corrected 2026-07-03 (Codex review of #680, P1):** the earlier "replicated"
+> baseline still passed `device_mesh=mesh` into the sweep and applied the manual
+> `constrain_double_layer_for_move` in the absorb/move cases, so it compared two GSPMD
+> layouts rather than sharding-off vs on. Fixed (`mode=="repl"` now uses
+> `device_mesh=None` and no manual constraint). Re-measured numbers below; the **NO-GO
+> conclusion is unchanged** (the full sweep still gets ~1×). The clean baseline is
+> *higher* for the single move, so the move relief is actually better than first
+> reported — but that only sharpens that the erosion is a **sweep** (cross-move) effect.
 
-- The **isolated absorption shards** (1.72×, approaching the 2-device ideal) — the GSPMD
-  mechanism works at the contraction level (consistent with #632 rung-1's "contraction
+| layer | replicated (mesh=None) | sharded | relief |
+|---|---:|---:|---:|
+| **absorb** (isolated χ²D⁶ contraction) | 9.80 GB | 5.71 GB | **1.72×** ✓ |
+| **move** (full `_ctm_tensor_move_left`, all env live) | 17.19 GB | 9.40 GB | **1.83×** ✓ |
+| **sweep** (full 4-direction 1×1 sweep) | 17.19 GB | 17.60 GB | **0.98×** ✗ |
+
+- The **isolated absorption shards** (1.72×) and the **single move shards well** (1.83×) —
+  the GSPMD mechanism works at the move level (consistent with #632 rung-1's "contraction
   shards 2.00× without SVD").
-- The win **erodes monotonically**: through the full move (projector + reembed) it drops
-  to 1.39×, and by the full sweep it is **gone** (0.96–1.00×). The sweep re-shards one
-  double-layer `a` to four different surviving axes per sweep; those reshards (plus the
-  move's post-absorption ops materializing replicated intermediates) cost as much as the
-  absorption sharding saves.
-- Even the *best* layer (single move) caps at ~1.4× — the same weak regime as #632's 2×2
-  (~1.2×). There is no N× multi-GPU reach here.
+- But the win **vanishes at the full sweep** (0.98×, marginally *worse* than replicated
+  from sharding overhead). Across the 4 directions each move's output env comes back
+  replicated (the projector/isometry produces replicated env), so moves 2–4 run on
+  replicated env; the internal `_shard_a` only shards the small double-layer, not the env.
+  The env sharding does not persist across moves.
+- The single move shards ~1.8×, but that does **not survive** the 4-direction sweep
+  (~1×). There is no N× multi-GPU reach here for the CTM-AD path.
 
 ## Why the premise looked good but fails
 
@@ -66,7 +74,7 @@ no hook to add — and it does not deliver relief. No production change is warra
 - **NO-GO.** The reduced-corner 1×1 sweep is not a multi-GPU lever. Confirms #663's
   "multi-GPU deferred post-1.0" and `[[632-frontier-split-vs-dense-multigpu]]`
   (split-1GPU dominates). Large-D reach stays: **split-CTM on 1 GPU**.
-- If anyone revisits: the ceiling to beat is the **move-level 1.39×** (fix the projector/
+- If anyone revisits: the ceiling to beat is the **move-level ~1.8×** (fix the projector/
   reembed sharding loss first); the sweep additionally needs env-sharding persistence and
   a way to avoid re-sharding `a` four ways. Given the 1.4× ceiling, low priority.
 

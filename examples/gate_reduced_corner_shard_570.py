@@ -121,6 +121,10 @@ def scan_collectives(hlo):
                 if shapes:
                     biggest = max(shapes, key=_bytes)
                     found.append((op, biggest, _bytes(biggest)))
+                # matched this line's collective; stop so it isn't double-counted
+                # under a later op. The break MUST stay inside the `if` — at the
+                # `for op` level it would only ever test the first op (all-gather)
+                # and miss all-reduce/all-to-all/reduce-scatter/collective-permute.
                 break
     return found
 
