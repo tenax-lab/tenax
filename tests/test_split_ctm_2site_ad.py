@@ -1,10 +1,18 @@
 """#463 Phase 2 — dense 2-site split-CTM AD (explicit + implicit).
 
-Parity is validated on a PHYSICAL, convergent Heisenberg Néel checkerboard
-(2-site simple update), never random tensors: the fused 2-site CTM oracle
-oscillates on random input, making any split-vs-fused comparison meaningless.
-The trusted AD gate is implicit==explicit (not implicit==finite-difference):
-the split energy_fn carries a pre-existing Wirtinger gap that AD-vs-FD inherits.
+Parity is validated on PHYSICAL, convergent checkerboard states (2-site simple
+update), never random tensors: the fused 2-site CTM oracle oscillates on random
+input, making any split-vs-fused comparison meaningless.
+
+The trusted AD gate is implicit==explicit (not implicit==finite-difference; the
+split energy_fn carries a Wirtinger gap that AD-vs-FD inherits). The *tight*,
+machine-exact implicit==explicit gate lives in the non-degenerate anisotropic
+regime (``test_2site_implicit_grad_matches_explicit_clean_regime``, XXZ Δ=0.3):
+there the projector singular values are well separated, the Lorentzian SVD
+backward is exact, and rel~1e-15. At the SU(2)-symmetric Heisenberg point the
+degenerate-SV SVD backward imposes a ~5e-4 regularization floor on the *explicit
+reference*, so that test gates direction + energy + self-consistency instead
+(see its docstring).
 """
 
 import jax
