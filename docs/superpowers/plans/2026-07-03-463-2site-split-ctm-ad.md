@@ -806,50 +806,41 @@ Give the 2-site optimizer a `use_split` branch so the three forward-only CTMs (e
 
 Append to `tests/test_split_ctm_2site_ad.py`:
 
+Config surface (verified against current code): `optimize_gs_ad(gate, A_init, config)`
+takes 3 positional args — everything (`unit_cell`, `chi`, `recipe`) comes from
+`config`. `fuse_virtual_legs` is a field on the nested `CTMConfig`
+(`config.ctm.fuse_virtual_legs`, default `True`); `build_ad_ctm_config` passes it
+through unchanged, so `ctm_cfg_2s.fuse_virtual_legs` reflects it with no plumbing.
+2-site returns `((A_opt, B_opt), (env_A, env_B), E_gs)`. `optimize_gs_ad` imports
+from `tenax` (top-level), NOT `tenax.algorithms.ipeps`. `su_init` defaults `True`
+but only fires when `A_init is None`; we pass explicit `(A, B)`, so set it `False`
+for clarity.
+
 ```python
 def test_optimize_gs_ad_2site_split_runs(su_state):
-    """optimize_gs_ad(fuse_virtual_legs=False, recipe='2x2') runs a bipartite
-    Heisenberg optimization end-to-end (a few steps), producing a finite,
-    physical (variational, above the spin-1/2 AFH floor) energy."""
-    from tenax.algorithms.ipeps import optimize_gs_ad
-    from tenax.algorithms.ipeps_config import iPEPSConfig
+    """optimize_gs_ad with config.ctm.fuse_virtual_legs=False + recipe='2x2' runs
+    a bipartite Heisenberg optimization end-to-end (a few steps), producing a
+    finite, physical (variational, above the spin-1/2 AFH floor) energy."""
+    from tenax import optimize_gs_ad
+    from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 
     A, B = su_state
     gate = _heisenberg_gate()
+    ctm = CTMConfig(chi=8, chi_I=8, fuse_virtual_legs=False)
     cfg = iPEPSConfig(
-        gs_num_steps=3, gs_implicit_ad=True, gs_c4v=False,
-        gs_recipe="2x2", gs_optimizer="lbfgs",
+        ctm=ctm, unit_cell="2site", gs_num_steps=3, gs_implicit_ad=True,
+        gs_c4v=False, gs_recipe="2x2", gs_optimizer="lbfgs", su_init=False,
     )
-    # fuse_virtual_legs lives on CTMConfig, surfaced via iPEPSConfig CTM knobs;
-    # set through the field the optimizer reads (see build_ad_ctm_config).
-    cfg = cfg.replace(gs_fuse_virtual_legs=False) if hasattr(cfg, "replace") else cfg
-
-    result = optimize_gs_ad(
-        gate, (A, B), cfg, chi=8, unit_cell="2site",
-    )
-    E = float(result.energy if hasattr(result, "energy") else result[-1])
+    (A_opt, B_opt), (env_A, env_B), E_gs = optimize_gs_ad(gate, (A, B), cfg)
+    E = float(E_gs)
     assert E == E  # finite (not NaN)
     assert E > -1.0, f"energy below spin-1/2 AFH floor (non-variational): {E}"
 ```
 
-**IMPORTANT — resolve the config surface before writing this test.** The exact
-knob that sets `fuse_virtual_legs=False` on the 2-site optimizer path, the
-`optimize_gs_ad` signature (positional vs keyword `unit_cell`/`chi`), and the
-return type are all things to confirm against the current code, NOT guess. Before
-Step 1, run:
-
-Run: `grep -n "fuse_virtual_legs\|def optimize_gs_ad\|unit_cell\|gs_fuse" src/tenax/algorithms/ipeps.py src/tenax/algorithms/ipeps_config.py | head -40`
-
-Then fix the test's config construction and call to match. If `iPEPSConfig` has
-no `gs_fuse_virtual_legs` field and `fuse_virtual_legs` is only reachable via a
-`CTMConfig` passed separately, thread it through whatever `build_ad_ctm_config`
-reads (the single-site path proves such a surface exists, since
-`_optimize_gs_ad_tensor` already honors `ctm_cfg.fuse_virtual_legs`).
-
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `uv run pytest tests/test_split_ctm_2site_ad.py::test_optimize_gs_ad_2site_split_runs -x -q`
-Expected: FAIL — either the config surface rejects `fuse_virtual_legs=False` for 2-site, or the fused `python_loop_ctm_converge` warm-start crashes feeding split machinery.
+Expected: FAIL — the fused `python_loop_ctm_converge` warm-start in `_update_env_cache_2s` runs (since `use_split_2s` does not exist yet), stores a fused `{coord: CTMTensorEnv}` in `_env_cache_2s["envs"]`, and the split AD loss (Task 3 dispatch) then feeds that fused dict as `envs_init` to `ctm_energy_split_implicit_2site`, which expects a `SplitCTMTensorEnv` dict → shape/type error.
 
 - [ ] **Step 3: Add the `use_split` branch to the 2-site optimizer**
 
@@ -1008,4 +999,6 @@ EOF
 - Acceptance "optimize_gs_ad(...2site) runs end-to-end" → Task 4 Step 1. ✅
 - Out of scope (SymmetricTensor Tiers, fermionic Tier-4, chi-bump/schedule on split) → deferred to Phase 3/4, not in this plan. ✅
 
-**Known open item to resolve at execution time (Task 4 Step 1):** the exact `iPEPSConfig`/`CTMConfig` surface that sets `fuse_virtual_legs=False` for the 2-site optimizer entry. The plan instructs confirming it via grep before writing the end-to-end test rather than guessing — the single-site path proves the surface exists, but its 2-site plumbing must be verified, and may itself need a one-line addition if `build_ad_ctm_config` doesn't already propagate the flag on the 2-site branch.
+**Config surface (resolved during planning):** `fuse_virtual_legs` is `config.ctm.fuse_virtual_legs`; `build_ad_ctm_config` passes it through unchanged, so `ctm_cfg_2s.fuse_virtual_legs` already reflects the user's choice — no plumbing addition needed. `optimize_gs_ad` is a 3-positional-arg entry imported from `tenax` (top-level); 2-site returns `((A,B),(env_A,env_B),E_gs)`. Task 4 Step 1's test is written against this verified surface.
+
+**Genuine execution-time risk (design §10, not a code gap):** the coupled `(env_A, env_B)` fixed point may converge differently than two independent single-site loops, and the implicit-AD Neumann adjoint on the larger joint pytree is unproven at χ≥16. If Task 4 Step 4 shows a sub-floor (non-variational) energy, that is this risk surfacing — diagnose via chi/max_iter, do not loosen the assertion. The GMRES-conditioning concern is mitigated by reusing the *validated* single-site Neumann machinery (same `conv_tol` early-exit + `1e15` blow-up guard), but larger-pytree conditioning should be watched at χ=16 in a follow-up bench, not gated here.
