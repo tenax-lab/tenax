@@ -7,13 +7,14 @@ return and was fooled by dead-code elimination into reporting a spurious ~4× re
 Use ``memory_stats()['peak_bytes_in_use']`` — one mode per process — as
 ``bench_ctm_sharding_memory.py`` does.
 
-Finding (2×A100, D=10 χ=32):
-  absorb (isolated χ²·D⁶ contraction) : 9.83 -> 5.71 GB  = 1.72x  (shards)
-  move   (full _ctm_tensor_move_left) : 13.1 -> 9.40 GB  = 1.39x  (partial)
-  sweep  (full 4-direction 1×1 sweep) : 9.83 -> 10.2 GB  = 0.96x  (NO relief)
-The relief erodes absorb -> move -> sweep: the projector/reembed materialize replicated
-intermediates and the sweep re-shards one double-layer to four surviving axes per sweep.
-=> reduced-corner 1×1 is NOT a multi-GPU lever (same ~1× outcome as #632). NO-GO.
+Finding (2×A100, D=10 χ=32; repl = sharding OFF, device_mesh=None):
+  absorb (isolated χ²·D⁶ contraction) : 9.80 -> 5.71 GB  = 1.72x  (shards)
+  move   (full _ctm_tensor_move_left) : 17.19 -> 9.40 GB = 1.83x  (shards)
+  sweep  (full 4-direction 1×1 sweep) : 17.19 -> 17.60 GB = 0.98x (NO relief)
+The single move shards, but the full sweep does NOT: each move's output env comes back
+replicated (projector/isometry), so moves 2-4 run replicated; the internal _shard_a only
+shards the small double-layer, not the env. Env sharding does not persist across moves.
+=> reduced-corner 1×1 SWEEP is NOT a multi-GPU lever (~1× outcome, cf. #632). NO-GO.
 
 Run (one mode/process; NCCL 4-way deadlocks on the DGX-Display box, use 2 GPUs):
     CUDA_VISIBLE_DEVICES=0,1 NCCL_P2P_DISABLE=1 XLA_PYTHON_CLIENT_PREALLOCATE=false \
@@ -91,20 +92,26 @@ def main():
     env = _randomize(initialize_ctm_tensor_env(A, chi), 1)
     a = _randomize(_build_double_layer_tensor(A), 500)
 
+    # True replicated baseline: sharding OFF (device_mesh=None, no manual
+    # constraint). Only mode == "shard" turns GSPMD on, so the ratio is
+    # sharding-off vs sharding-on rather than two GSPMD layouts.
+    dm = mesh if mode == "shard" else None
+
+    def _sha(a, direction="left"):
+        return constrain_double_layer_for_move(a, direction, dm) if dm is not None else a
+
     if layer == "absorb":
         def fn(env, a):
-            return _sc(contract(env.T4, constrain_double_layer_for_move(a, "left", mesh)))
+            return _sc(contract(env.T4, _sha(a)))
     elif layer == "move":
         def fn(env, a):
-            e, _ = _ctm_tensor_move_left(
-                env, env, constrain_double_layer_for_move(a, "left", mesh), chi, "svd"
-            )
+            e, _ = _ctm_tensor_move_left(env, env, _sha(a), chi, "svd")
             return _sc(e)
     else:  # sweep
         def fn(envs, dls):
             e, _, _ = _ctm_tensor_sweep_multisite(
                 envs, dls, SINGLE_SITE_NEIGHBORS, chi, False, "svd",
-                recipe="1x1", device_mesh=mesh,
+                recipe="1x1", device_mesh=dm,
             )
             return _sc(e[(0, 0)])
 
