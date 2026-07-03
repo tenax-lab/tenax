@@ -383,3 +383,74 @@ def test_2site_implicit_grad_fd_directional(su_state):
         / (jnp.linalg.norm(g_ad_s) * jnp.linalg.norm(g_fd) + 1e-30)
     )
     assert cos > 0.99, f"AD and FD gradients point in different directions: cos={cos}"
+
+
+def test_validate_split_ctm_config_allows_2site():
+    """The 2-site checkerboard recipe ('2x2') is allowed under fuse=False; the
+    three chi-changing knobs are still rejected."""
+    import pytest as _pytest
+
+    from tenax.algorithms.ipeps_ad_policy import validate_split_ctm_config
+    from tenax.algorithms.ipeps_config import CTMConfig
+
+    cfg = CTMConfig(chi=8, chi_I=8, fuse_virtual_legs=False)
+    validate_split_ctm_config(cfg, "1x1")  # single-site still OK
+    validate_split_ctm_config(cfg, "2x2")  # 2-site now OK — must not raise
+
+    bump = CTMConfig(chi=8, chi_I=8, fuse_virtual_legs=False, chi_auto_bump=True)
+    with _pytest.raises(NotImplementedError):
+        validate_split_ctm_config(bump, "2x2")
+
+
+def test_make_ctm_energy_fn_dispatches_2site_split(su_state):
+    """make_ctm_energy_fn routes a 2-coord site dict to the 2-site split path
+    (fuse=False, recipe='2x2'), matching a direct implicit-2site call, with a
+    finite gradient through the dispatch closure."""
+    from tenax.algorithms._split_ctm_energy_ad import ctm_energy_split_implicit_2site
+    from tenax.algorithms.ipeps_ad_policy import make_ctm_energy_fn
+    from tenax.algorithms.ipeps_config import CTMConfig
+
+    A, B = su_state
+    gate = _heisenberg_gate()
+    chi = 8
+    cfg = CTMConfig(
+        chi=chi,
+        chi_I=chi,
+        fuse_virtual_legs=False,
+        max_iter=100,
+        conv_tol=1e-12,
+        min_iter=2,
+    )
+    fn = make_ctm_energy_fn(
+        neighbors=CHECKERBOARD_NEIGHBORS,
+        gate=gate,
+        get_ctm_cfg=lambda: cfg,
+        env_cache={},
+        use_explicit=False,
+        explicit_warmup=3,
+        explicit_steps=20,
+        explicit_backward_steps=None,
+        energy_fn=None,
+        recipe="2x2",
+    )
+    E_dispatch = float(fn({(0, 0): A, (1, 0): B}).real)
+    E_direct = float(
+        ctm_energy_split_implicit_2site(
+            {(0, 0): A, (1, 0): B},
+            CHECKERBOARD_NEIGHBORS,
+            gate,
+            chi=chi,
+            chi_I=chi,
+            max_iter=100,
+            conv_tol=1e-12,
+            min_iter=2,
+        ).real
+    )
+    assert abs(E_dispatch - E_direct) < 1e-10
+
+    def loss(a):
+        return fn({(0, 0): a, (1, 0): B}).real
+
+    _, g = jax.value_and_grad(loss)(A)
+    gs = jax.tree.leaves(g)[0]
+    assert bool(abs(gs).sum() > 0) and bool((gs == gs).all())

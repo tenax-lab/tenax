@@ -312,8 +312,12 @@ def test_make_ctm_energy_fn_dispatches_to_split_implicit():
     assert jnp.all(jnp.isfinite(gs)) and float(jnp.sum(jnp.abs(gs))) > 0
 
 
-def test_make_ctm_energy_fn_split_rejects_non_1x1_recipe():
-    """The split dispatch guards against unsupported recipes."""
+def test_make_ctm_energy_fn_split_rejects_unsupported_recipe():
+    """The split dispatch guards against unsupported recipes.
+
+    ``'1x1'`` (single-site) and ``'2x2'`` (2-site checkerboard) are supported
+    on the split path (#463 Phase 2); any other recipe must still raise.
+    """
     from tenax.algorithms.ipeps_ad_policy import make_ctm_energy_fn
 
     A = _make_site(2, 2, seed=0)
@@ -328,7 +332,7 @@ def test_make_ctm_energy_fn_split_rejects_non_1x1_recipe():
         use_explicit=False,
         explicit_warmup=2,
         explicit_steps=3,
-        recipe="2x2",
+        recipe="3x3",
     )
     with pytest.raises(NotImplementedError, match="recipe"):
         fn({(0, 0): A})
@@ -425,13 +429,17 @@ def test_optimize_gs_ad_split_rejects_chi_auto_bump():
         optimize_gs_ad(gate, A, cfg)
 
 
-def test_optimize_gs_ad_split_rejects_non_1x1_recipe():
-    """The split optimizer path requires gs_recipe='1x1'."""
+def test_optimize_gs_ad_split_rejects_unsupported_recipe():
+    """The split optimizer path supports gs_recipe in ('1x1', '2x2').
+
+    ``'2x2'`` is now accepted by the shared validator (#463 Phase 2); any
+    other recipe must still raise up front via ``validate_split_ctm_config``.
+    """
     from tenax.algorithms.ipeps_optimize import optimize_gs_ad
 
     A, gate = _split_opt_inputs()
-    cfg = _split_opt_config(fuse=False, gs_recipe="2x2")
-    with pytest.raises(NotImplementedError, match="1x1"):
+    cfg = _split_opt_config(fuse=False, gs_recipe="3x3")
+    with pytest.raises(NotImplementedError, match="recipe"):
         optimize_gs_ad(gate, A, cfg)
 
 
@@ -474,8 +482,11 @@ def test_validate_split_ctm_config_rejects_chi_changing_knobs():
 
     base = dict(chi=4, chi_I=4, fuse_virtual_legs=False)
 
-    with pytest.raises(NotImplementedError, match="1x1"):
-        validate_split_ctm_config(CTMConfig(**base), "2x2")
+    # '2x2' (2-site checkerboard) is now supported (#463 Phase 2); only
+    # genuinely unsupported recipes raise.
+    with pytest.raises(NotImplementedError, match="recipe"):
+        validate_split_ctm_config(CTMConfig(**base), "3x3")
+    validate_split_ctm_config(CTMConfig(**base), "2x2")
     with pytest.raises(NotImplementedError, match="ctmrg_heuristic_increase_chi"):
         validate_split_ctm_config(
             CTMConfig(**base, ctmrg_heuristic_increase_chi=True, chi_max=6), "1x1"
