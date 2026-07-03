@@ -1,12 +1,13 @@
-"""Single-site split-CTM AD energy entry points (#463 Phase 2).
+"""Single-site + 2-site split-CTM AD energy entry points (#463 Phase 2).
 
 Mirrors ``ctm_energy_explicit`` / ``ctm_energy_implicit`` from
 ``_ctm_energy_ad`` but on the split (ket/bra-separate) double layer.
 Single-site (``ctm_split_tensor``, isolated 1×1 iPEPS) and 2-site
 checkerboard multisite (``ctm_split_tensor_2site``, coupled forward) are
-both supported here: the single-site forward-only/explicit/implicit entries
-plus the 2-site forward-only + explicit-AD converge siblings below.  The
-2-site implicit VJP lands in #463 Phase 2 Task 2.
+both fully supported here: forward-only converge, explicit-AD (unrolled)
+converge, and implicit-AD (fixed-point ``custom_vjp`` with Neumann backward)
+energy entries for each — ``ctm_energy_split_{explicit,implicit}`` (1×1) and
+``ctm_energy_split_{explicit,implicit}_2site`` (2-site checkerboard).
 """
 
 from __future__ import annotations
