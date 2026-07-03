@@ -952,3 +952,47 @@ def test_split_2site_energy_matches_fused_convergent():
     # near-lossless in practice (comfortably under 1e-6).
     E_split_chi = split_energy(chi, 100)
     assert abs(E_split_chi - E_fused) < 1e-6
+
+
+def test_split_2site_energy_equals_multisite():
+    """The dedicated 2-site energy path == the generic multisite N=2 path.
+
+    Both ``compute_energy_split_ctm_tensor_2site`` and
+    ``compute_energy_split_ctm_tensor_multisite`` exist; on a convergent coupled
+    split env they must produce bit-identical energies (they count the same
+    4 checkerboard NN bonds, normalised by 2 sites). This guards against future
+    divergence of the two code paths.
+    """
+    from tenax.algorithms._split_ctm_tensor_convergence import (
+        ctm_split_tensor_2site,
+    )
+    from tenax.algorithms._split_ctm_tensor_energy import (
+        compute_energy_split_ctm_tensor_2site,
+        compute_energy_split_ctm_tensor_multisite,
+    )
+
+    gate = _heisenberg_gate()
+    chi = 8
+    A, B = _build_su_neel(D=2)
+
+    env_A, env_B = ctm_split_tensor_2site(
+        A, B, chi, max_iter=100, conv_tol=1e-12, chi_I=chi
+    )
+
+    E_2site = float(
+        compute_energy_split_ctm_tensor_2site(A, B, env_A, env_B, gate, d=2)
+    )
+
+    site_tensors = {(0, 0): A, (1, 0): B}
+    envs = {(0, 0): env_A, (1, 0): env_B}
+    E_multi = float(
+        compute_energy_split_ctm_tensor_multisite(
+            site_tensors, envs, CHECKERBOARD_NEIGHBORS, gate, d=2
+        )
+    )
+
+    assert abs(E_2site - E_multi) < 1e-10, (
+        f"2-site vs multisite energy diverge: "
+        f"E_2site={E_2site:.15f}, E_multi={E_multi:.15f}, "
+        f"|diff|={abs(E_2site - E_multi):.3e}"
+    )
