@@ -2875,14 +2875,20 @@ def _optimize_gs_ad_tensor_2site(
             or config.gs_chi_schedule_steps is not None
         ):
             raise NotImplementedError(
-                "CTM/chi schedules are not supported on the split-CTM path; "
-                "use fuse_virtual_legs=True."
+                "CTM conv_tol/max_iter/plateau and chi (gs_chi_schedule_steps / "
+                "optimize_gs_ad_chi_schedule) schedules are not supported on the "
+                "split-CTM path; use fuse_virtual_legs=True."
             )
 
     def _split_forward_2s(site_tensors, envs_init=None):
         """Forward-only gauge-fixed 2-site split-CTM converge (warm-start/probe/
         final-env).  Lands on the same fixed point the implicit-AD loss
-        differentiates so the line-search φ(α)/dφ(α) stay consistent."""
+        differentiates so the line-search φ(α)/dφ(α) stay consistent.
+
+        Note: the fused line-search probe honors ``probe_max_iter`` /
+        ``probe_conv_tol`` (#503) to shorten HZ φ-probes; those overrides are
+        not wired here yet, so split probes run a full converge (perf follow-up,
+        same gap as the 1-site split path)."""
         return converge_split_env_2site(
             site_tensors,
             CHECKERBOARD_NEIGHBORS,
@@ -4289,6 +4295,11 @@ def _optimize_gs_ad_tensor_2site(
         # producer-side guarantee that the snapshot is at ctm_cfg_2s.chi.
         _best_env_init_2s = best_env_cache_2s.get("envs", None)
         if _best_env_init_2s:
+            # On the split path this padding is a safe no-op: split chi is fixed
+            # (schedules/bump rejected up front), so _target_chi_2s == the env's
+            # chi and pad_dense_env_chi short-circuits before any fused-only
+            # access.  If split chi ever becomes mutable, guard this with
+            # ``not use_split_2s``.
             # Issue #514: see 1-site finalize.  Pad to the larger of the
             # static ``ctm_cfg_2s.chi`` and the env_cache's actual chi
             # so a bumped env is never asked to shrink.
