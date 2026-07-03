@@ -1151,27 +1151,20 @@ def compute_energy_split_ctm_tensor_2site(
     Returns:
         Scalar energy per site.
     """
-    if d is None:
-        phys_idx = [i for i in A.indices if i.label == "phys"]
-        d = phys_idx[0].dim if phys_idx else A.indices[-1].dim
+    # Route through the generic multisite N=2 checkerboard path so the two
+    # split energy code paths never diverge. The multisite function counts the
+    # same 4 NN bonds (2 A-B + 2 B-A) and normalises by 2 sites, matching the
+    # old 0.5 * sum-of-four-bonds formula (guarded by
+    # test_split_2site_energy_equals_multisite).
+    from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
 
-    if isinstance(hamiltonian_gate, Tensor):
-        H = hamiltonian_gate.todense().reshape(d, d, d, d)
-    else:
-        H = hamiltonian_gate.reshape(d, d, d, d)
-
-    rdm_h_AB = _rdm2x1_split_tensor_2site(A, B, env_A, env_B)
-    rdm_h_BA = _rdm2x1_split_tensor_2site(B, A, env_B, env_A)
-    rdm_v_AB = _rdm1x2_split_tensor_2site(A, B, env_A, env_B)
-    rdm_v_BA = _rdm1x2_split_tensor_2site(B, A, env_B, env_A)
-    E = (
-        jnp.einsum("ijkl,ijkl->", rdm_h_AB, H)
-        + jnp.einsum("ijkl,ijkl->", rdm_h_BA, H)
-        + jnp.einsum("ijkl,ijkl->", rdm_v_AB, H)
-        + jnp.einsum("ijkl,ijkl->", rdm_v_BA, H)
+    return compute_energy_split_ctm_tensor_multisite(
+        {(0, 0): A, (1, 0): B},
+        {(0, 0): env_A, (1, 0): env_B},
+        CHECKERBOARD_NEIGHBORS,
+        hamiltonian_gate,
+        d=d,
     )
-    # 4 NN bonds (2 A-B + 2 B-A) per [[0,1],[1,0]] unit cell / 2 unique sites.
-    return 0.5 * E.real
 
 
 def compute_energy_split_ctm_tensor_multisite(

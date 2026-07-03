@@ -5,6 +5,8 @@ from __future__ import annotations
 __all__ = [
     "_FORCE_CLOSED_EDGE",
     "_apply_projector",
+    "_build_split_enlarged_corner",
+    "_compute_split_plaquette_projector_pair",
     "_ensure_corner_flows",
     "_ensure_edge_flows",
     "_ensure_tensor_flows",
@@ -18,6 +20,10 @@ __all__ = [
     "_project_grown_edge_tensor_lr",
     "_reembed_target_for_projector",
     "_select_bond_entries",
+    "_split_ctm_absorb_bottom_2plaq",
+    "_split_ctm_absorb_left_2plaq",
+    "_split_ctm_absorb_right_2plaq",
+    "_split_ctm_absorb_top_2plaq",
     "_split_ctm_move_bottom",
     "_split_ctm_move_left",
     "_split_ctm_move_right",
@@ -31,6 +37,12 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms._ctm_projector import _compute_projector_tensor, _reembed_fused
+from tenax.algorithms._ctm_tensor_moves import (
+    _apply_proj_unfused,
+    _half_to_chi_new_bot,
+    _half_to_chi_new_top,
+)
+from tenax.algorithms._ctm_tensor_projector_2x2 import _compute_2x2_projector
 from tenax.algorithms._ctm_utils import _CORNER_SPECS, _derive_charges
 from tenax.algorithms._split_ctm_tensor_init import (
     _EDGE_BRA_SPECS,
@@ -54,6 +66,588 @@ from tenax.linalg import svd as tensor_svd
 # reproduces the closed result to machine precision.  Tests flip this flag to
 # prove bounded == closed; production always uses the bounded default.
 _FORCE_CLOSED_EDGE = False
+
+# ------------------------------------------------------------------ #
+# Split enlarged corner (parity with fused _build_enlarged_corner)      #
+# ------------------------------------------------------------------ #
+
+
+def _fuse_ket_bra(
+    T: Tensor,
+    ket_label: str,
+    bra_label: str,
+    fused_label: str,
+    fused_flow: FlowDirection,
+) -> Tensor:
+    """Fuse a (ket, bra) virtual-leg pair KET-SLOW into one D^2 seam.
+
+    ``_build_double_layer_tensor`` fuses each virtual pair with the ket leg
+    slow-varying (``a8 = contract(A, A_bar)`` puts A's legs first, so ``u2 =
+    u_ket * D + u_bra``).  :func:`fuse_indices` makes the LOWER-indexed axis
+    slow, so we transpose the ket leg to sit immediately before the bra leg
+    before fusing, guaranteeing the same ket-slow layout regardless of the
+    incoming axis order.
+    """
+    labels = list(T.labels())
+    ket_pos = labels.index(ket_label)
+    bra_pos = labels.index(bra_label)
+    # Bring ket immediately before bra (ket slow, bra fast).
+    rest = [i for i in range(len(labels)) if i not in (ket_pos, bra_pos)]
+    perm = tuple(
+        [ket_pos, bra_pos] + rest
+    )  # ket at 0 (slow), bra at 1 (fast), then rest
+    T = T.transpose(perm)
+    return fuse_indices(T, 0, 1, fused_label, fused_flow)
+
+
+def _build_split_enlarged_corner(
+    C: Tensor,
+    T_h_ket: Tensor,
+    T_h_bra: Tensor,
+    T_v_ket: Tensor,
+    T_v_bra: Tensor,
+    A: Tensor,
+    A_bar: Tensor,
+    *,
+    position: str,
+) -> Tensor:
+    """Split enlarged corner. Returns the SAME rank-4 object as the fused
+    :func:`_build_enlarged_corner`, assembled from ket/bra split edges + a
+    physical double layer (A ket, A_bar bra) with the phys index traced.
+
+    Output free legs match the fused recipe's LABEL SET exactly (axis order is
+    not significant — ``_compute_2x2_projector`` indexes by label):
+      top_left     -> {chi_R, r2, chi_B, d2}
+      top_right    -> {chi_L, l2, chi_B, d2}
+      bottom_left  -> {chi_T, u2, chi_R, r2}
+      bottom_right -> {chi_L, l2, chi_T, u2}
+
+    The physical double layer is built by contracting the ket edges with the
+    ket virtual legs of ``A`` and the bra edges with the bra virtual legs of
+    ``A_bar``, tracing the shared ``phys``.  Each surviving ket/bra
+    virtual-leg pair is fused KET-SLOW (matching
+    :func:`_build_double_layer_tensor`) into the D^2 seam.
+    """
+    if position == "top_left":
+        # Ket layer: C1.c1_r <-> T1k.t1k_l ; C1.c1_d <-> T4k.t4k_d ;
+        # A.u <-> u_ket ; A.l <-> l_ket.  Bra layer joins via interlayer bonds.
+        ket = contract(C.relabel("c1_r", "t1k_l"), T_h_ket)  # (c1_d,u_ket,t1k_I)
+        ket = contract(
+            ket.relabel("c1_d", "t4k_d"), T_v_ket
+        )  # (u_ket,t1k_I,l_ket,t4k_I)
+        A_ket = A.relabels({"u": "u_ket", "l": "l_ket"})
+        ket = contract(ket, A_ket)  # (t1k_I, t4k_I, d, r, phys)
+        # Bra layer joins interlayer bonds; A_bar supplies u_bra/l_bra + D_bra/R_bra.
+        ket = contract(ket.relabel("t1k_I", "t1b_I"), T_h_bra)  # +(u_bra,t1b_r)
+        ket = contract(ket.relabel("t4k_I", "t4b_I"), T_v_bra)  # +(l_bra,t4b_u)
+        A_bra = A_bar.relabels({"u": "u_bra", "l": "l_bra", "d": "D_bra", "r": "R_bra"})
+        Q = contract(ket, A_bra)  # (t1b_r, t4b_u, d, r, D_bra, R_bra)
+        Q = _fuse_ket_bra(Q, "d", "D_bra", "d2", FlowDirection.OUT)
+        Q = _fuse_ket_bra(Q, "r", "R_bra", "r2", FlowDirection.OUT)
+        return Q.relabels({"t1b_r": "chi_R", "t4b_u": "chi_B"})
+
+    if position == "top_right":
+        # C2.c2_l <-> T1's right = t1b_r (BRA) ; C2.c2_d <-> T2's top = t2k_u (KET).
+        # Output: t1k_l -> chi_L ; t2b_d -> chi_B.  A.u/r are the contracted legs.
+        ket = contract(C.relabel("c2_l", "t1b_r"), T_h_bra)  # (c2_d,u_bra,t1b_I)
+        ket = contract(
+            ket.relabel("c2_d", "t2k_u"), T_v_ket
+        )  # (u_bra,t1b_I,r_ket,t2k_I)
+        # ket layer contributions: T1_ket (u_ket) joins via interlayer; T2_ket (r_ket) here.
+        ket = contract(ket.relabel("t1b_I", "t1k_I"), T_h_ket)  # +(t1k_l,u_ket)
+        A_ket = A.relabels({"u": "u_ket", "r": "r_ket"})
+        ket = contract(ket, A_ket)  # trace u_ket,r_ket -> (u_bra,t2k_I,t1k_l,d,l,phys)
+        ket = contract(ket.relabel("t2k_I", "t2b_I"), T_v_bra)  # +(r_bra,t2b_d)
+        A_bra = A_bar.relabels({"u": "u_bra", "r": "r_bra", "d": "D_bra", "l": "L_bra"})
+        Q = contract(ket, A_bra)  # (t1k_l, d, l, t2b_d, D_bra, L_bra)
+        Q = _fuse_ket_bra(Q, "d", "D_bra", "d2", FlowDirection.OUT)
+        Q = _fuse_ket_bra(Q, "l", "L_bra", "l2", FlowDirection.IN)
+        return Q.relabels({"t1k_l": "chi_L", "t2b_d": "chi_B"})
+
+    if position == "bottom_left":
+        # C4.c4_r <-> T4's up = t4b_u (BRA) ; C4.c4_u <-> T3's right = t3k_r (KET).
+        # Output: t4k_d -> chi_T ; t3b_l -> chi_R.  A.l (T4) / A.d (T3) contracted.
+        ket = contract(C.relabel("c4_r", "t4b_u"), T_v_bra)  # (c4_u,l_bra,t4b_I)
+        ket = contract(
+            ket.relabel("c4_u", "t3k_r"), T_h_ket
+        )  # (l_bra,t4b_I,d_ket,t3k_I)
+        ket = contract(ket.relabel("t4b_I", "t4k_I"), T_v_ket)  # +(t4k_d,l_ket)
+        A_ket = A.relabels({"l": "l_ket", "d": "d_ket"})
+        ket = contract(ket, A_ket)  # trace l_ket,d_ket -> (l_bra,t3k_I,t4k_d,u,r,phys)
+        ket = contract(ket.relabel("t3k_I", "t3b_I"), T_h_bra)  # +(d_bra,t3b_l)
+        A_bra = A_bar.relabels({"l": "l_bra", "d": "d_bra", "u": "U_bra", "r": "R_bra"})
+        Q = contract(ket, A_bra)  # (t4k_d, u, r, t3b_l, U_bra, R_bra)
+        Q = _fuse_ket_bra(Q, "u", "U_bra", "u2", FlowDirection.IN)
+        Q = _fuse_ket_bra(Q, "r", "R_bra", "r2", FlowDirection.OUT)
+        return Q.relabels({"t4k_d": "chi_T", "t3b_l": "chi_R"})
+
+    if position == "bottom_right":
+        # C3.c3_l <-> T3's left = t3b_l (BRA) ; C3.c3_u <-> T2's bottom = t2b_d (BRA).
+        # Output: t3k_r -> chi_L ; t2k_u -> chi_T.  A.d (T3) / A.r (T2) contracted.
+        ket = contract(C.relabel("c3_l", "t3b_l"), T_h_bra)  # (c3_u,d_bra,t3b_I)
+        ket = contract(
+            ket.relabel("c3_u", "t2b_d"), T_v_bra
+        )  # (d_bra,t3b_I,r_bra,t2b_I)
+        ket = contract(ket.relabel("t3b_I", "t3k_I"), T_h_ket)  # +(t3k_r,d_ket)
+        ket = contract(ket.relabel("t2b_I", "t2k_I"), T_v_ket)  # +(t2k_u,r_ket)
+        A_ket = A.relabels({"d": "d_ket", "r": "r_ket"})
+        ket = contract(
+            ket, A_ket
+        )  # trace d_ket,r_ket -> (d_bra,r_bra,t3k_r,t2k_u,u,l,phys)
+        A_bra = A_bar.relabels({"d": "d_bra", "r": "r_bra", "u": "U_bra", "l": "L_bra"})
+        Q = contract(ket, A_bra)  # (t3k_r, t2k_u, u, l, U_bra, L_bra)
+        Q = _fuse_ket_bra(Q, "u", "U_bra", "u2", FlowDirection.IN)
+        Q = _fuse_ket_bra(Q, "l", "L_bra", "l2", FlowDirection.IN)
+        return Q.relabels({"t3k_r": "chi_L", "t2k_u": "chi_T"})
+
+    raise ValueError(f"unsupported position={position!r}")
+
+
+# ------------------------------------------------------------------ #
+# Split plaquette projector pair (parity with fused)                   #
+# ------------------------------------------------------------------ #
+
+
+def _compute_split_plaquette_projector_pair(
+    env_TL: SplitCTMTensorEnv,
+    env_TR: SplitCTMTensorEnv,
+    env_BL: SplitCTMTensorEnv,
+    env_BR: SplitCTMTensorEnv,
+    A_TL: Tensor,
+    Abar_TL: Tensor,
+    A_TR: Tensor,
+    Abar_TR: Tensor,
+    A_BL: Tensor,
+    Abar_BL: Tensor,
+    A_BR: Tensor,
+    Abar_BR: Tensor,
+    chi: int,
+    direction: str,
+    base_charges: np.ndarray | None = None,
+) -> tuple[Tensor, Tensor, jax.Array, jax.Array]:
+    """Split twin of :func:`_compute_plaquette_projector_pair`.
+
+    Builds the four split enlarged corners (identical rank-4 objects to the
+    fused path via :func:`_build_split_enlarged_corner`) and feeds them to the
+    reused Fishman cross-projector :func:`_compute_2x2_projector` verbatim.
+
+    Returns ``(P_top, P_bot, eps_T, smallest_S)`` with the same layout as
+    :func:`_compute_plaquette_projector_pair`:
+
+    - ``P_top`` labels ``("fused", "chi_new")``, flow IN on ``"fused"``.
+    - ``P_bot`` labels ``("chi_new", "fused")``, flow IN on ``"fused"``.
+    """
+    Q_TL = _build_split_enlarged_corner(
+        env_TL.C1,
+        env_TL.T1_ket,
+        env_TL.T1_bra,
+        env_TL.T4_ket,
+        env_TL.T4_bra,
+        A_TL,
+        Abar_TL,
+        position="top_left",
+    )
+    Q_TR = _build_split_enlarged_corner(
+        env_TR.C2,
+        env_TR.T1_ket,
+        env_TR.T1_bra,
+        env_TR.T2_ket,
+        env_TR.T2_bra,
+        A_TR,
+        Abar_TR,
+        position="top_right",
+    )
+    Q_BL = _build_split_enlarged_corner(
+        env_BL.C4,
+        env_BL.T3_ket,
+        env_BL.T3_bra,
+        env_BL.T4_ket,
+        env_BL.T4_bra,
+        A_BL,
+        Abar_BL,
+        position="bottom_left",
+    )
+    Q_BR = _build_split_enlarged_corner(
+        env_BR.C3,
+        env_BR.T3_ket,
+        env_BR.T3_bra,
+        env_BR.T2_ket,
+        env_BR.T2_bra,
+        A_BR,
+        Abar_BR,
+        position="bottom_right",
+    )
+    P_top_raw, P_bot_raw, eps_T, smallest_S = _compute_2x2_projector(
+        Q_TL, Q_TR, Q_BL, Q_BR, chi, direction=direction, base_charges=base_charges
+    )
+    return (
+        _half_to_chi_new_top(P_top_raw),
+        _half_to_chi_new_bot(P_bot_raw),
+        eps_T,
+        smallest_S,
+    )
+
+
+# ------------------------------------------------------------------ #
+# 2x2 split absorption (four directional twins of the fused            #
+# _ctm_tensor_absorb_*_2plaq, on ket/bra split edges)                  #
+# ------------------------------------------------------------------ #
+
+
+def _grow_split_corner_2x2(
+    C,
+    c_leg,
+    join_to,
+    T_first,
+    T_second,
+    first_I,
+    second_I,
+    D_ket,
+    D_bra,
+    d2_label,
+    d2_flow,
+):
+    """Grow a 2x2 corner from split ket/bra edges, keeping the env chi legs
+    SEPARATE and fusing only the ``(D_ket, D_bra)`` virtual pair into a single
+    D^2 seam ``d2_label`` (ket-slow, matching the fused double layer).
+
+    ``C.c_leg`` joins ``T_first.join_to``; the second layer joins over the
+    interlayer bond ``first_I -> second_I``.  Returns the 3-leg grown corner
+    (mirrors the fused ``contract(C_r, T)`` result, with the env legs unfused).
+    """
+    Cg = contract(C.relabel(c_leg, join_to), T_first)
+    Cg = contract(Cg.relabel(first_I, second_I), T_second)
+    return _fuse_ket_bra(Cg, D_ket, D_bra, d2_label, d2_flow)
+
+
+def _grow_split_edge_2x2(
+    T_ket,
+    T_bra,
+    A,
+    A_bar,
+    *,
+    absorbed,
+    ket_I,
+    bra_I,
+    surv,
+    proj_a,
+    proj_a_label,
+    proj_a_flow,
+    proj_b,
+    proj_b_label,
+    proj_b_flow,
+):
+    """Grow an edge double layer (ket = ``T_ket . A``, bra = ``T_bra . A_bar``),
+    keeping the surviving virtual pair SPLIT and fusing the two projected
+    seams (``proj_a``, ``proj_b``) into D^2 labels for leg-by-leg projection.
+
+    ``absorbed`` is the A virtual direction already carried by the edge (traced
+    into ``T_*``'s ``{absorbed}_ket`` / ``{absorbed}_bra`` leg); ``surv`` is the
+    virtual kept split (ket label ``surv``, bra label ``{surv}_bra``).  Returns
+    the grown edge with legs
+    ``(env_ket_outer, surv, proj_a_label, env_bra_outer, {surv}_bra, proj_b_label)``.
+    """
+    A_k = A.relabels({absorbed: f"{absorbed}_ket"})
+    Tk = contract(T_ket, A_k)  # joins {absorbed}_ket; frees surv/proj_a/proj_b/phys
+    A_b = A_bar.relabels(
+        {
+            absorbed: f"{absorbed}_bra",
+            surv: f"{surv}_bra",
+            proj_a: f"{proj_a}_bra",
+            proj_b: f"{proj_b}_bra",
+        }
+    )
+    Tb = contract(T_bra, A_b)  # joins {absorbed}_bra
+    Tg = contract(Tk.relabel(ket_I, bra_I), Tb)  # join interlayer + trace phys
+    Tg = _fuse_ket_bra(Tg, proj_a, f"{proj_a}_bra", proj_a_label, proj_a_flow)
+    Tg = _fuse_ket_bra(Tg, proj_b, f"{proj_b}_bra", proj_b_label, proj_b_flow)
+    return Tg
+
+
+def _split_ctm_absorb_bottom_2plaq(
+    env_src, A, A_bar, P_top_left, P_bot_left, P_top_curr, P_bot_curr, chi_I
+):
+    """Split BOTTOM absorption -> (C4_new, T3_ket_new, T3_bra_new, C3_new).
+
+    Twin of the fused ``_ctm_tensor_absorb_bottom_2plaq`` (``C3.c3_u<->T2.t2_d``
+    convention, #670/#674): projector halves applied via ``_apply_proj_unfused``,
+    ket/bra edge halves grown then SVD-split over ``chi_I``.
+    """
+    C4g = _grow_split_corner_2x2(
+        env_src.C4,
+        "c4_r",
+        "t4b_u",
+        env_src.T4_bra,
+        env_src.T4_ket,
+        "t4b_I",
+        "t4k_I",
+        "l_ket",
+        "l_bra",
+        "l2",
+        FlowDirection.IN,
+    )
+    C4_new = _apply_proj_unfused(P_bot_left, C4g, "c4_u", "l2")
+    C4_new = C4_new.relabels({"chi_new": "c4_r", "t4k_d": "c4_u"})
+
+    C3g = _grow_split_corner_2x2(
+        env_src.C3,
+        "c3_u",
+        "t2b_d",
+        env_src.T2_bra,
+        env_src.T2_ket,
+        "t2b_I",
+        "t2k_I",
+        "r_ket",
+        "r_bra",
+        "r2",
+        FlowDirection.OUT,
+    )
+    C3_new = _apply_proj_unfused(P_top_curr, C3g, "c3_l", "r2")
+    C3_new = C3_new.relabels({"chi_new": "c3_u", "t2k_u": "c3_l"})
+
+    T3g = _grow_split_edge_2x2(
+        env_src.T3_ket,
+        env_src.T3_bra,
+        A,
+        A_bar,
+        absorbed="d",
+        ket_I="t3k_I",
+        bra_I="t3b_I",
+        surv="u",
+        proj_a="l",
+        proj_a_label="l2",
+        proj_a_flow=FlowDirection.IN,
+        proj_b="r",
+        proj_b_label="r2",
+        proj_b_flow=FlowDirection.OUT,
+    )
+    step = _apply_proj_unfused(P_top_left, T3g, "t3k_r", "l2")
+    T3g = _apply_proj_unfused(
+        P_bot_curr, step, "t3b_l", "r2", chi_new="chi_new_r", env_first=True
+    )
+    T3_ket_new, T3_bra_new = _svd_split_edge_tensor(
+        T3g,
+        left_labels=["chi_new", "u"],
+        right_labels=["u_bra", "chi_new_r"],
+        chi_I=chi_I,
+        ket_relabels={"chi_new": "t3k_r", "u": "d_ket", "_svd_bond": "t3k_I"},
+        bra_relabels={"_svd_bond": "t3b_I", "u_bra": "d_bra", "chi_new_r": "t3b_l"},
+    )
+    C4_new = _ensure_corner_flows(C4_new, "C4")
+    C3_new = _ensure_corner_flows(C3_new, "C3")
+    T3_ket_new, T3_bra_new = _ensure_edge_flows(T3_ket_new, T3_bra_new, "T3")
+    return C4_new, T3_ket_new, T3_bra_new, C3_new
+
+
+def _split_ctm_absorb_left_2plaq(
+    env_src, A, A_bar, P_top_above, P_bot_above, P_top_curr, P_bot_curr, chi_I
+):
+    """Split LEFT absorption -> (C1_new, T4_ket_new, T4_bra_new, C4_new)."""
+    C1g = _grow_split_corner_2x2(
+        env_src.C1,
+        "c1_r",
+        "t1k_l",
+        env_src.T1_ket,
+        env_src.T1_bra,
+        "t1k_I",
+        "t1b_I",
+        "u_ket",
+        "u_bra",
+        "u2",
+        FlowDirection.IN,
+    )
+    C1_new = _apply_proj_unfused(P_bot_above, C1g, "c1_d", "u2")
+    C1_new = C1_new.relabels({"chi_new": "c1_d", "t1b_r": "c1_r"})
+
+    C4g = _grow_split_corner_2x2(
+        env_src.C4,
+        "c4_u",
+        "t3k_r",
+        env_src.T3_ket,
+        env_src.T3_bra,
+        "t3k_I",
+        "t3b_I",
+        "d_ket",
+        "d_bra",
+        "d2",
+        FlowDirection.OUT,
+    )
+    C4_new = _apply_proj_unfused(P_top_curr, C4g, "c4_r", "d2")
+    C4_new = C4_new.relabels({"chi_new": "c4_r", "t3b_l": "c4_u"})
+
+    T4g = _grow_split_edge_2x2(
+        env_src.T4_ket,
+        env_src.T4_bra,
+        A,
+        A_bar,
+        absorbed="l",
+        ket_I="t4k_I",
+        bra_I="t4b_I",
+        surv="r",
+        proj_a="u",
+        proj_a_label="u2",
+        proj_a_flow=FlowDirection.IN,
+        proj_b="d",
+        proj_b_label="d2",
+        proj_b_flow=FlowDirection.OUT,
+    )
+    step = _apply_proj_unfused(P_top_above, T4g, "t4k_d", "u2")
+    T4g = _apply_proj_unfused(
+        P_bot_curr, step, "t4b_u", "d2", chi_new="chi_new_r", env_first=True
+    )
+    T4_ket_new, T4_bra_new = _svd_split_edge_tensor(
+        T4g,
+        left_labels=["chi_new", "r"],
+        right_labels=["r_bra", "chi_new_r"],
+        chi_I=chi_I,
+        ket_relabels={"chi_new": "t4k_d", "r": "l_ket", "_svd_bond": "t4k_I"},
+        bra_relabels={"_svd_bond": "t4b_I", "r_bra": "l_bra", "chi_new_r": "t4b_u"},
+    )
+    C1_new = _ensure_corner_flows(C1_new, "C1")
+    C4_new = _ensure_corner_flows(C4_new, "C4")
+    T4_ket_new, T4_bra_new = _ensure_edge_flows(T4_ket_new, T4_bra_new, "T4")
+    return C1_new, T4_ket_new, T4_bra_new, C4_new
+
+
+def _split_ctm_absorb_right_2plaq(
+    env_src, A, A_bar, P_top_above, P_bot_above, P_top_curr, P_bot_curr, chi_I
+):
+    """Split RIGHT absorption -> (C2_new, T2_ket_new, T2_bra_new, C3_new)."""
+    C2g = _grow_split_corner_2x2(
+        env_src.C2,
+        "c2_l",
+        "t1b_r",
+        env_src.T1_bra,
+        env_src.T1_ket,
+        "t1b_I",
+        "t1k_I",
+        "u_ket",
+        "u_bra",
+        "u2",
+        FlowDirection.IN,
+    )
+    C2_new = _apply_proj_unfused(P_top_above, C2g, "c2_d", "u2")
+    C2_new = C2_new.relabels({"chi_new": "c2_l", "t1k_l": "c2_d"})
+
+    C3g = _grow_split_corner_2x2(
+        env_src.C3,
+        "c3_u",
+        "t3b_l",
+        env_src.T3_bra,
+        env_src.T3_ket,
+        "t3b_I",
+        "t3k_I",
+        "d_ket",
+        "d_bra",
+        "d2",
+        FlowDirection.OUT,
+    )
+    C3_new = _apply_proj_unfused(P_bot_curr, C3g, "c3_l", "d2")
+    C3_new = C3_new.relabels({"chi_new": "c3_u", "t3k_r": "c3_l"})
+
+    T2g = _grow_split_edge_2x2(
+        env_src.T2_ket,
+        env_src.T2_bra,
+        A,
+        A_bar,
+        absorbed="r",
+        ket_I="t2k_I",
+        bra_I="t2b_I",
+        surv="l",
+        proj_a="u",
+        proj_a_label="u2",
+        proj_a_flow=FlowDirection.IN,
+        proj_b="d",
+        proj_b_label="d2",
+        proj_b_flow=FlowDirection.OUT,
+    )
+    step = _apply_proj_unfused(P_bot_above, T2g, "t2k_u", "u2")
+    T2g = _apply_proj_unfused(
+        P_top_curr, step, "t2b_d", "d2", chi_new="chi_new_r", env_first=True
+    )
+    T2_ket_new, T2_bra_new = _svd_split_edge_tensor(
+        T2g,
+        left_labels=["chi_new", "l"],
+        right_labels=["l_bra", "chi_new_r"],
+        chi_I=chi_I,
+        ket_relabels={"chi_new": "t2k_u", "l": "r_ket", "_svd_bond": "t2k_I"},
+        bra_relabels={"_svd_bond": "t2b_I", "l_bra": "r_bra", "chi_new_r": "t2b_d"},
+    )
+    C2_new = _ensure_corner_flows(C2_new, "C2")
+    C3_new = _ensure_corner_flows(C3_new, "C3")
+    T2_ket_new, T2_bra_new = _ensure_edge_flows(T2_ket_new, T2_bra_new, "T2")
+    return C2_new, T2_ket_new, T2_bra_new, C3_new
+
+
+def _split_ctm_absorb_top_2plaq(
+    env_src, A, A_bar, P_top_left, P_bot_left, P_top_curr, P_bot_curr, chi_I
+):
+    """Split TOP absorption -> (C1_new, T1_ket_new, T1_bra_new, C2_new)."""
+    C1g = _grow_split_corner_2x2(
+        env_src.C1,
+        "c1_d",
+        "t4k_d",
+        env_src.T4_ket,
+        env_src.T4_bra,
+        "t4k_I",
+        "t4b_I",
+        "l_ket",
+        "l_bra",
+        "l2",
+        FlowDirection.IN,
+    )
+    C1_new = _apply_proj_unfused(P_top_left, C1g, "c1_r", "l2")
+    C1_new = C1_new.relabels({"chi_new": "c1_d", "t4b_u": "c1_r"})
+
+    C2g = _grow_split_corner_2x2(
+        env_src.C2,
+        "c2_d",
+        "t2k_u",
+        env_src.T2_ket,
+        env_src.T2_bra,
+        "t2k_I",
+        "t2b_I",
+        "r_ket",
+        "r_bra",
+        "r2",
+        FlowDirection.OUT,
+    )
+    C2_new = _apply_proj_unfused(P_bot_curr, C2g, "c2_l", "r2")
+    C2_new = C2_new.relabels({"chi_new": "c2_l", "t2b_d": "c2_d"})
+
+    T1g = _grow_split_edge_2x2(
+        env_src.T1_ket,
+        env_src.T1_bra,
+        A,
+        A_bar,
+        absorbed="u",
+        ket_I="t1k_I",
+        bra_I="t1b_I",
+        surv="d",
+        proj_a="l",
+        proj_a_label="l2",
+        proj_a_flow=FlowDirection.IN,
+        proj_b="r",
+        proj_b_label="r2",
+        proj_b_flow=FlowDirection.OUT,
+    )
+    step = _apply_proj_unfused(P_bot_left, T1g, "t1k_l", "l2")
+    T1g = _apply_proj_unfused(
+        P_top_curr, step, "t1b_r", "r2", chi_new="chi_new_r", env_first=True
+    )
+    T1_ket_new, T1_bra_new = _svd_split_edge_tensor(
+        T1g,
+        left_labels=["chi_new", "d"],
+        right_labels=["d_bra", "chi_new_r"],
+        chi_I=chi_I,
+        ket_relabels={"chi_new": "t1k_l", "d": "u_ket", "_svd_bond": "t1k_I"},
+        bra_relabels={"_svd_bond": "t1b_I", "d_bra": "u_bra", "chi_new_r": "t1b_r"},
+    )
+    C1_new = _ensure_corner_flows(C1_new, "C1")
+    C2_new = _ensure_corner_flows(C2_new, "C2")
+    T1_ket_new, T1_bra_new = _ensure_edge_flows(T1_ket_new, T1_bra_new, "T1")
+    return C1_new, T1_ket_new, T1_bra_new, C2_new
+
 
 # ------------------------------------------------------------------ #
 # Double-layer corner-pair projector + factorization helpers           #
@@ -272,9 +866,9 @@ def _svd_split_edge_tensor(
         # (split-CTM at small D after PR #399 flipped the projector default
         # to "svd"). Route through truncated_svd_symmetric_ad, whose backward
         # is the Lorentzian-regularized + rank-aware kernel from _ad_primitives.
-        # TODO: add SymmetricTensor block-sparse regularized SVD as a follow-up
-        # so the SymmetricTensor branches below also get a finite adjoint on
-        # rank-deficient blocks.
+        # TODO(#463 Phase 2-4): add SymmetricTensor block-sparse regularized SVD
+        # as a follow-up so the SymmetricTensor branches below also get a finite
+        # adjoint on rank-deficient blocks.
         from tenax.algorithms._ad_primitives import truncated_svd_symmetric_ad
 
         U_t, s, Vh_t = truncated_svd_symmetric_ad(
