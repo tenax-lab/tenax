@@ -452,3 +452,33 @@ def test_make_ctm_energy_fn_dispatches_2site_split(su_state):
     _, g = jax.value_and_grad(loss)(A)
     gs = jax.tree.leaves(g)[0]
     assert bool(abs(gs).sum() > 0) and bool((gs == gs).all())
+
+
+def test_optimize_gs_ad_2site_split_runs(su_state):
+    """optimize_gs_ad with config.ctm.fuse_virtual_legs=False + recipe='2x2' runs
+    a bipartite Heisenberg optimization end-to-end (a few steps), producing a
+    finite, physical (variational, above the spin-1/2 AFH floor) energy."""
+    from tenax import optimize_gs_ad
+    from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+
+    A, B = su_state
+    gate = _heisenberg_gate()
+    # chi=4=D^2 is lossless on this physical (low-interlayer-rank) state; a
+    # capped CTM max_iter + 2 optimizer steps keep this end-to-end smoke
+    # tractable while still exercising the full split path (warm-start +
+    # line-search probe + implicit-AD gradient, all on split envs/energy).
+    ctm = CTMConfig(chi=4, chi_I=4, fuse_virtual_legs=False, max_iter=40)
+    cfg = iPEPSConfig(
+        ctm=ctm,
+        unit_cell="2site",
+        gs_num_steps=2,
+        gs_implicit_ad=True,
+        gs_c4v=False,
+        gs_recipe="2x2",
+        gs_optimizer="lbfgs",
+        su_init=False,
+    )
+    (A_opt, B_opt), (env_A, env_B), E_gs = optimize_gs_ad(gate, (A, B), cfg)
+    E = float(E_gs)
+    assert E == E  # finite (not NaN)
+    assert E > -1.0, f"energy below spin-1/2 AFH floor (non-variational): {E}"
