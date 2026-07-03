@@ -202,6 +202,26 @@ class TestHOTRGRun:
             np.sign(result_hotrg) == np.sign(result_trg) or abs(result_hotrg) < 0.01
         ), f"HOTRG and TRG have different signs: {result_hotrg:.4f} vs {result_trg:.4f}"
 
+    def test_hotrg_converges_with_chi(self):
+        """HOTRG systematically improves with chi (unlike plain TRG's CDL
+        plateau): near criticality the free-energy error at chi=24 is well below
+        chi=8. Guards against a regression that stops using the larger bond dim.
+
+        Measured (beta=0.44, 20 steps): err(chi=8) ~ 3.7e-3, err(chi=24) ~ 1.5e-3
+        (ratio ~2.45).
+        """
+        beta = 0.44
+        tensor = compute_ising_tensor(beta=beta)
+        exact = ising_free_energy_exact(beta)
+        err = {}
+        for chi in (8, 24):
+            f = float(-hotrg(tensor, HOTRGConfig(max_bond_dim=chi, num_steps=20)) / beta)
+            err[chi] = abs(f - exact)
+        assert err[24] < 0.8 * err[8], (
+            f"HOTRG not converging in chi: err(chi=8)={err[8]:.3e} "
+            f"vs err(chi=24)={err[24]:.3e}"
+        )
+
     def test_hotrg_more_accurate_than_trg(self):
         """HOTRG should achieve better accuracy than TRG at the same chi."""
         from tenax.algorithms.trg import TRGConfig, trg
