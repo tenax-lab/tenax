@@ -235,6 +235,8 @@ def _split_ctm_sweep_multisite_2x2(
     the destination env's corner + ket/bra edge fields.  Neighbour/anchor
     lookups and the cascade order mirror the fused sweep exactly.
     """
+    # Function-local import: _split_ctm_tensor_moves imports from this module,
+    # so importing the absorb helpers at module scope would form a cycle.
     from tenax.algorithms._split_ctm_tensor_moves import (
         _compute_split_plaquette_projector_pair,
         _split_ctm_absorb_bottom_2plaq,
@@ -369,9 +371,10 @@ def _split_ctm_sweep_multisite(
         chi:         Corner bond dimension.
         chi_I:       Interlayer bond dimension.
         renormalize: If True, renormalize each environment after the sweep.
-        recipe:      ``'1x1'`` reuses single-site directional moves;
-                     ``'2x2'`` applies genuine 2×2 plaquette projectors
-                     (not yet implemented — lands in Task 1.3).
+        recipe:      ``'2x2'`` (default) runs the genuine joint 2-site forward
+                     via :func:`_split_ctm_sweep_multisite_2x2` (2×2 plaquette
+                     projectors, matching the fused sweep); ``'1x1'`` reuses the
+                     single-site directional moves (bisection / uniform smoke).
 
     Returns:
         Updated per-coord environments.

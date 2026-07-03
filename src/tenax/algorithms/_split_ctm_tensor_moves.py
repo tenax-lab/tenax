@@ -866,9 +866,9 @@ def _svd_split_edge_tensor(
         # (split-CTM at small D after PR #399 flipped the projector default
         # to "svd"). Route through truncated_svd_symmetric_ad, whose backward
         # is the Lorentzian-regularized + rank-aware kernel from _ad_primitives.
-        # TODO: add SymmetricTensor block-sparse regularized SVD as a follow-up
-        # so the SymmetricTensor branches below also get a finite adjoint on
-        # rank-deficient blocks.
+        # TODO(#463 Phase 2-4): add SymmetricTensor block-sparse regularized SVD
+        # as a follow-up so the SymmetricTensor branches below also get a finite
+        # adjoint on rank-deficient blocks.
         from tenax.algorithms._ad_primitives import truncated_svd_symmetric_ad
 
         U_t, s, Vh_t = truncated_svd_symmetric_ad(

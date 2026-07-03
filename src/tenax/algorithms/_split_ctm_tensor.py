@@ -24,6 +24,9 @@ from tenax.algorithms._split_ctm_tensor_convergence import (
 from tenax.algorithms._split_ctm_tensor_convergence import (
     ctm_split_tensor as ctm_split_tensor,
 )
+from tenax.algorithms._split_ctm_tensor_convergence import (
+    ctm_split_tensor_2site as ctm_split_tensor_2site,
+)
 from tenax.algorithms._split_ctm_tensor_energy import (
     _split_env_to_tensor_standard as _split_env_to_tensor_standard,
 )
@@ -137,5 +140,6 @@ __all__ = [
     "compute_energy_split_ctm_tensor_2site",
     "compute_energy_split_ctm_tensor_multisite",
     "ctm_split_tensor",
+    "ctm_split_tensor_2site",
     "initialize_split_ctm_tensor_env",
 ]
