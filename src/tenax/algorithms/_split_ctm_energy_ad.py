@@ -2,8 +2,11 @@
 
 Mirrors ``ctm_energy_explicit`` / ``ctm_energy_implicit`` from
 ``_ctm_energy_ad`` but on the split (ket/bra-separate) double layer.
-Single-site only: the split forward (``ctm_split_tensor``) converges one
-site as an isolated 1×1 iPEPS.  Multisite has no split forward yet.
+Single-site (``ctm_split_tensor``, isolated 1×1 iPEPS) and 2-site
+checkerboard multisite (``ctm_split_tensor_2site``, coupled forward) are
+both supported here: the single-site forward-only/explicit/implicit entries
+plus the 2-site forward-only + explicit-AD converge siblings below.  The
+2-site implicit VJP lands in #463 Phase 2 Task 2.
 """
 
 from __future__ import annotations
