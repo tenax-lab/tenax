@@ -641,3 +641,314 @@ def test_split_absorb_edge_matches_fused(direction):
         f"{direction}: max sv diff {np.max(np.abs(sv_f - sv_s)):.3e}\n"
         f"fused={sv_f}\nsplit={sv_s}"
     )
+
+
+# ------------------------------------------------------------------ #
+# Shared-env absorb BIT-PARITY (convergence-independent correctness). #
+# ------------------------------------------------------------------ #
+
+# Per-direction merge spec for the split ABSORB OUTPUT edge halves.  The split
+# absorb output edges carry the standard split labels (see the _svd_split_edge_
+# tensor relabels in _split_ctm_tensor_moves); this maps them to the FUSED
+# absorb output edge form for the same direction.
+_ABSORB_MERGE_SPEC = {
+    "left": dict(
+        ket_I="t4k_I",
+        bra_I="t4b_I",
+        d_ket="l_ket",
+        d_bra="l_bra",
+        fused_label="l2",
+        fused_flow="IN",
+        ket_chi="t4k_d",
+        bra_chi="t4b_u",
+        std_chi_l="t4_d",
+        std_chi_r="t4_u",
+    ),
+    "right": dict(
+        ket_I="t2k_I",
+        bra_I="t2b_I",
+        d_ket="r_ket",
+        d_bra="r_bra",
+        fused_label="r2",
+        fused_flow="OUT",
+        ket_chi="t2k_u",
+        bra_chi="t2b_d",
+        std_chi_l="t2_u",
+        std_chi_r="t2_d",
+    ),
+    "top": dict(
+        ket_I="t1k_I",
+        bra_I="t1b_I",
+        d_ket="u_ket",
+        d_bra="u_bra",
+        fused_label="u2",
+        fused_flow="IN",
+        ket_chi="t1k_l",
+        bra_chi="t1b_r",
+        std_chi_l="t1_l",
+        std_chi_r="t1_r",
+    ),
+    "bottom": dict(
+        ket_I="t3k_I",
+        bra_I="t3b_I",
+        d_ket="d_ket",
+        d_bra="d_bra",
+        fused_label="d2",
+        fused_flow="OUT",
+        ket_chi="t3k_r",
+        bra_chi="t3b_l",
+        std_chi_l="t3_r",
+        std_chi_r="t3_l",
+    ),
+}
+
+
+def _merge_absorb_edge(
+    T_ket,
+    T_bra,
+    ket_I,
+    bra_I,
+    d_ket,
+    d_bra,
+    fused_label,
+    fused_flow,
+    ket_chi,
+    bra_chi,
+    std_chi_l,
+    std_chi_r,
+):
+    """Replicate _split_env_to_tensor_standard._merge_edge on a single edge."""
+    from tenax.algorithms._tensor_utils import fuse_indices
+    from tenax.contraction.contractor import contract
+    from tenax.core.index import FlowDirection
+
+    fflow = FlowDirection.OUT if fused_flow == "OUT" else FlowDirection.IN
+    k = T_ket.relabel(ket_I, "_I")
+    b = T_bra.relabel(bra_I, "_I")
+    merged = contract(k, b)
+    labels = merged.labels()
+    merged = fuse_indices(
+        merged, labels.index(d_ket), labels.index(d_bra), fused_label, fflow
+    )
+    merged = merged.relabels({ket_chi: std_chi_l, bra_chi: std_chi_r})
+    return merged
+
+
+def _one_minus_fidelity(x, y):
+    """1 - scale/phase-invariant overlap fidelity, aligning axes by label."""
+    lx = list(x.labels())
+    ly = list(y.labels())
+    assert sorted(lx) == sorted(ly), f"label sets differ:\n {lx}\n {ly}"
+    perm = tuple(lx.index(lbl) for lbl in ly)  # permute x -> y's order
+    ax = np.asarray(x.transpose(perm).todense()).ravel()
+    ay = np.asarray(y.todense()).ravel()
+    nx = np.linalg.norm(ax)
+    ny = np.linalg.norm(ay)
+    assert nx > 0 and ny > 0
+    return 1.0 - abs(np.vdot(ax, ay)) / (nx * ny)
+
+
+@pytest.mark.parametrize("direction", ["left", "right", "top", "bottom"])
+def test_split_absorb_bitidentical_on_shared_env(direction):
+    """Split 2x2 absorb == fused 2x2 absorb on ONE shared env (machine precision).
+
+    This is the convergence-INDEPENDENT correctness proof for the split absorb
+    kernels.  We build a generic split env, merge it to the fused representation
+    via _split_env_to_tensor_standard, compute a single set of fused projectors,
+    then apply the fused absorb and the split absorb with the SAME projectors and
+    a lossless interlayer bond (chi_I=64).  Because both absorbs see the identical
+    env and identical projectors, they must agree to machine precision for the two
+    corners and the merged edge -- no fixed-point convergence is involved.
+    """
+    from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
+    from tenax.algorithms._ctm_tensor_moves import (
+        _compute_plaquette_projector_pair,
+        _ctm_tensor_absorb_bottom_2plaq,
+        _ctm_tensor_absorb_left_2plaq,
+        _ctm_tensor_absorb_right_2plaq,
+        _ctm_tensor_absorb_top_2plaq,
+    )
+    from tenax.algorithms._split_ctm_tensor_convergence import (
+        _split_ctm_tensor_sweep,
+    )
+    from tenax.algorithms._split_ctm_tensor_energy import (
+        _split_env_to_tensor_standard,
+    )
+    from tenax.algorithms._split_ctm_tensor_init import (
+        initialize_split_ctm_tensor_env,
+    )
+    from tenax.algorithms._split_ctm_tensor_moves import (
+        _split_ctm_absorb_bottom_2plaq,
+        _split_ctm_absorb_left_2plaq,
+        _split_ctm_absorb_right_2plaq,
+        _split_ctm_absorb_top_2plaq,
+    )
+
+    fused_fn = {
+        "left": _ctm_tensor_absorb_left_2plaq,
+        "right": _ctm_tensor_absorb_right_2plaq,
+        "top": _ctm_tensor_absorb_top_2plaq,
+        "bottom": _ctm_tensor_absorb_bottom_2plaq,
+    }[direction]
+    split_fn = {
+        "left": _split_ctm_absorb_left_2plaq,
+        "right": _split_ctm_absorb_right_2plaq,
+        "top": _split_ctm_absorb_top_2plaq,
+        "bottom": _split_ctm_absorb_bottom_2plaq,
+    }[direction]
+
+    A = _random_dense_A(D=2, seed=11)
+    A_bar = A.bar()
+    a = _build_double_layer_tensor(A)
+    chi = 6
+
+    # Build a generic (non-uniform) split env via init + a few sweeps.
+    E_s = initialize_split_ctm_tensor_env(A, chi, chi)
+    for _ in range(5):
+        E_s = _split_ctm_tensor_sweep(E_s, A, chi, chi, True)
+    E_f = _split_env_to_tensor_standard(E_s)
+
+    spec = _ABSORB_MERGE_SPEC[direction]
+
+    # Self-guard: our single-edge merge must reproduce _split_env_to_tensor_
+    # standard's edge for this direction to ~1e-12, else the comparison below
+    # could silently pass on a broken merge.
+    edge_ref = {
+        "left": (E_s.T4_ket, E_s.T4_bra, E_f.T4),
+        "right": (E_s.T2_ket, E_s.T2_bra, E_f.T2),
+        "top": (E_s.T1_ket, E_s.T1_bra, E_f.T1),
+        "bottom": (E_s.T3_ket, E_s.T3_bra, E_f.T3),
+    }[direction]
+    rt = _merge_absorb_edge(edge_ref[0], edge_ref[1], **spec)
+    assert _one_minus_fidelity(rt, edge_ref[2]) < 1e-12
+
+    # Single shared set of fused projectors drives BOTH absorbs.
+    Pt, Pb, _, _ = _compute_plaquette_projector_pair(
+        E_f, E_f, E_f, E_f, a, a, a, a, chi, direction
+    )
+    cf1, ef, cf2 = fused_fn(E_f, a, Pt, Pb, Pt, Pb)
+    cs1, ek, eb, cs2 = split_fn(E_s, A, A_bar, Pt, Pb, Pt, Pb, 64)
+    es_edge = _merge_absorb_edge(ek, eb, **spec)
+
+    assert _one_minus_fidelity(cs1, cf1) < 1e-10
+    assert _one_minus_fidelity(cs2, cf2) < 1e-10
+    assert _one_minus_fidelity(es_edge, ef) < 1e-10
+
+
+# ------------------------------------------------------------------ #
+# Convergent-input 2-site energy parity (corrected Tier-2 gate).     #
+# ------------------------------------------------------------------ #
+#
+# Random site tensors are deliberately NOT used here: the fused 2-site CTM
+# oscillates (does not converge) on raw random input, so split-vs-fused energy
+# parity on random tensors is meaningless.  A physical, convergent input is
+# required.  We build a Heisenberg Neel iPEPS via 2-site simple update, confirm
+# the fused CTM oracle plateaus, then compare split vs fused energy.
+
+
+def _heisenberg_gate(d=2):
+    import jax.numpy as jnp
+
+    Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]], dtype=jnp.float64)
+    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]], dtype=jnp.float64)
+    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]], dtype=jnp.float64)
+    H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+    return H.reshape(d, d, d, d)
+
+
+def _build_su_neel(D=2, d=2, n_steps=80, dt=0.05):
+    """Physical Heisenberg checkerboard (A,B) via 2-site simple update.
+
+    ~80 imaginary-time steps is enough for the *fused CTM oracle* to plateau
+    (that is what the parity test needs -- not fully-converged SU energy).
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from tenax.algorithms.ipeps import (
+        _make_trotter_gate_tensor,
+        _wrap_as_dense_tensor,
+    )
+    from tenax.algorithms.ipeps_simple_update import (
+        _simple_update_2site_horizontal_tensor,
+        _simple_update_2site_vertical_tensor,
+    )
+
+    H = _heisenberg_gate(d)
+    kA, kB = jax.random.split(jax.random.PRNGKey(7))
+    A_data = 0.1 * jax.random.normal(kA, (D, D, D, D, d), dtype=jnp.float64)
+    B_data = 0.1 * jax.random.normal(kB, (D, D, D, D, d), dtype=jnp.float64)
+    # Neel bias: physical component 0 for A, 1 for B.
+    A_data = A_data.at[0, 0, 0, 0, 0].add(1.0)
+    B_data = B_data.at[0, 0, 0, 0, 1].add(1.0)
+    A = _wrap_as_dense_tensor(A_data)
+    B = _wrap_as_dense_tensor(B_data)
+    A = A * (1.0 / float(A.norm()))
+    B = B * (1.0 / float(B.norm()))
+
+    gate = _make_trotter_gate_tensor(H, dt, site_tensor=A)
+    lam_h = jnp.ones(D)
+    lam_v = jnp.ones(D)
+    for step in range(n_steps):
+        if step % 2 == 0:
+            A, B, lam_h = _simple_update_2site_horizontal_tensor(
+                A, B, gate, lam_h, lam_v, D
+            )
+        else:
+            A, B, lam_v = _simple_update_2site_vertical_tensor(
+                A, B, gate, lam_h, lam_v, D
+            )
+        A = A * (1.0 / float(A.norm()))
+        B = B * (1.0 / float(B.norm()))
+    return A, B
+
+
+def test_split_2site_energy_matches_fused_convergent():
+    """Joint 2-site split forward matches fused energy on a convergent input.
+
+    On a physical Heisenberg Neel SU state where the fused 2-site CTM oracle
+    plateaus, the split forward reproduces the fused energy to ~1e-11 at a
+    lossless interlayer bond (chi_I = 2*chi) and to ~1e-10 at chi_I = chi.
+    Physical states have low interlayer rank, so chi_I = chi is already
+    near-lossless (hence the tight 1e-6 tolerance is easily met).
+    """
+    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
+    from tenax.algorithms._ctm_tensor_energy import (
+        compute_energy_ctm_tensor_2site,
+    )
+    from tenax.algorithms._split_ctm_tensor_convergence import (
+        ctm_split_tensor_2site,
+    )
+    from tenax.algorithms._split_ctm_tensor_energy import (
+        compute_energy_split_ctm_tensor_2site,
+    )
+
+    gate = _heisenberg_gate()
+    chi = 8
+    A, B = _build_su_neel(D=2)
+
+    def fused_energy(max_iter):
+        envA, envB = ctm_tensor_2site(A, B, chi, max_iter=max_iter, conv_tol=1e-12)
+        return float(compute_energy_ctm_tensor_2site(A, B, envA, envB, gate, d=2))
+
+    def split_energy(chi_I, max_iter):
+        envA, envB = ctm_split_tensor_2site(
+            A, B, chi, max_iter=max_iter, conv_tol=1e-12, chi_I=chi_I
+        )
+        return float(compute_energy_split_ctm_tensor_2site(A, B, envA, envB, gate, d=2))
+
+    # (i) Fused oracle must plateau -- else the parity comparison is meaningless.
+    E_fused_80 = fused_energy(80)
+    E_fused = fused_energy(100)
+    assert abs(E_fused_80 - E_fused) < 1e-8, (
+        f"fused oracle did not plateau: |E(80)-E(100)|={abs(E_fused_80 - E_fused):.3e}"
+    )
+
+    # (ii) Lossless interlayer bond (chi_I = 2*chi): near machine precision.
+    E_split_lossless = split_energy(2 * chi, 100)
+    assert abs(E_split_lossless - E_fused) < 1e-8
+
+    # (iii) chi_I = chi: physical states have low interlayer rank, so this is
+    # near-lossless in practice (comfortably under 1e-6).
+    E_split_chi = split_energy(chi, 100)
+    assert abs(E_split_chi - E_fused) < 1e-6
