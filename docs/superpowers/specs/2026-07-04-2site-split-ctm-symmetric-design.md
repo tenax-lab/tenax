@@ -36,11 +36,31 @@ per-block rewrite:
   single-site move path only — a red herring for Phase 3).
 
 **The actual gap:** `_split_ctm_sweep_multisite_2x2` hard-codes `base_charges=None`
-(`_split_ctm_tensor_convergence.py:272`) and never forwards it into the four
-`_split_ctm_absorb_*_2plaq` → their `_svd_split_edge_tensor` calls. Without it the
-per-sector-truncation symmetric branch never engages. The single-site moves derive
-it (`A.indices[0].charges if isinstance(A, SymmetricTensor) else None`, moves lines
-1363/1451/1539/1627); the 2-site path must do the same.
+(`_split_ctm_tensor_convergence.py:272`) and the four `_split_ctm_absorb_*_2plaq`
+never derive charges for their `_svd_split_edge_tensor` calls, so the
+per-sector-truncation symmetric branch never engages.
+
+**`base_charges` is a locally-derived value, NOT a plumbed parameter — the fix must
+respect that.** The codebase is actively *un*-plumbing `base_charges`: it is already
+vestigial in projector *application* (`_apply_projector`, "kept for API compat
+during transition" — charges recovered intrinsically via
+`_reembed_target_for_projector`). Where the *value* is still required — the
+interlayer-SVD split (`_svd_split_edge_tensor` → `_truncate_svd_per_sector` →
+`_derive_charges`) and the symmetric 2×2 projector — the convention is to derive it
+**locally at the point of use** from a site tensor already in hand:
+
+- Fused path: the `_get_base_charges(a)` helper reads the double-layer `"u2"` leg
+  charges and returns `None` when all charges are zero (trivial symmetry → the
+  global-truncation path).
+- Split single-site moves: inline
+  `A.indices[0].charges if isinstance(A, SymmetricTensor) else None`
+  (moves lines 1363/1451/1539/1627).
+
+The 2-site path already carries the needed site tensors at both call sites — the
+driver holds `site_tensors[s]` (convergence line 262) and each absorb receives its
+`A` (`_split_ctm_absorb_bottom_2plaq(env_src, A, A_bar, ...)`). So the fix derives
+charges locally at those two points; it does **not** add a `base_charges` parameter
+threaded through the sweep signatures.
 
 ## Requirements (pinned)
 
@@ -55,28 +75,38 @@ it (`A.indices[0].charges if isinstance(A, SymmetricTensor) else None`, moves li
 
 ## Chosen approach
 
-Thread `base_charges` through the 2-site sweep and the four absorbs so per-sector
-SVD truncation engages, then mirror the single-site symmetric test methodology on
-the 2-site path. The AD `custom_vjp` machinery is pure `jax.tree` over the env
-pytree and symmetry-agnostic — it is **verified**, not rewritten.
+Derive `base_charges` **locally at the two points of use** — the projector call in
+the driver and the interlayer-SVD split inside each absorb — from a site tensor
+already in hand, matching how the fused path (`_get_base_charges`) and the split
+single-site moves already do it. Do **not** add a `base_charges` parameter to the
+sweep/absorb signatures (that runs against the codebase's un-plumbing direction).
+Then mirror the single-site symmetric test methodology on the 2-site path. The AD
+`custom_vjp` machinery is pure `jax.tree` over the env pytree and symmetry-agnostic
+— it is **verified**, not rewritten.
 
 ## Design
 
 ### 1. Source changes
 
 **`_split_ctm_tensor_convergence.py`** (`_split_ctm_sweep_multisite_2x2`, ~line 272):
-- Derive per-sublattice `base_charges` from each site tensor:
-  `base_charges = A.indices[0].charges if isinstance(A, SymmetricTensor) else None`
-  (mirroring single-site moves). Pass it to
-  `_compute_split_plaquette_projector_pair` (replacing the hard-coded `None`) **and**
-  into each of the four `_split_ctm_absorb_*_2plaq` calls.
+- Replace the hard-coded `base_charges=None` in the
+  `_compute_split_plaquette_projector_pair` call with a value derived locally from
+  the anchor site tensor already in scope (`site_tensors[s]`, line 262), using the
+  split single-site convention (`indices[0].charges`, or the shared helper if one is
+  factored out). Only this one call site changes here; the absorb calls are unchanged.
 
 **`_split_ctm_tensor_moves.py`** (the four `_split_ctm_absorb_{bottom,left,right,top}_2plaq`):
-- Add a `base_charges` parameter (default `None` to preserve dense call sites) and
-  forward it to their internal `_svd_split_edge_tensor` calls so the symmetric
-  per-sector-truncation branch (`_truncate_svd_per_sector` → `_select_bond_entries`)
-  engages. The enlarged-corner assembly, projector dispatch, and
-  `_apply_proj_unfused` application are unchanged — already polymorphic / #605-safe.
+- **No signature change.** Each absorb already receives its `A`; derive
+  `base_charges = A.indices[0].charges if isinstance(A, SymmetricTensor) else None`
+  locally inside the function (mirroring single-site moves) and pass it to that
+  function's own `_svd_split_edge_tensor` call(s), engaging the symmetric
+  per-sector-truncation branch (`_truncate_svd_per_sector` → `_derive_charges`). The
+  enlarged-corner assembly, projector dispatch, and `_apply_proj_unfused` application
+  are unchanged — already polymorphic / #605-safe.
+- **Optional tidy (consistency, not required):** if a single shared derivation helper
+  reads better than four inline copies, factor a small local `_split_base_charges(A)`
+  — but keep it local to the split module; do not resurrect a plumbed cross-call
+  parameter.
 
 **`_split_ctm_energy_ad.py`** (2-site AD wrappers):
 - **Verify only.** The multisite `custom_vjp` (`_split_ctm_converge_multisite` +
@@ -137,10 +167,15 @@ Stack on `design/463-2site-split-ctm-ad` (PR #685 still open; a fresh branch off
   degenerate-singular-value floor at the Heisenberg point (same as dense/fused). The
   machine-exact gate is XXZ Δ=0.3; the Heisenberg companion asserts only the
   documented `~5e-4` floor. This is a known limitation, not a Phase-3 bug.
-- **`base_charges` per-sublattice:** on the checkerboard A and B may carry different
-  index charges; each absorb must receive the charges of the correct site tensor, not
-  a single global value. Thread per-coord, matching how the single-site moves read
-  `A.indices[0].charges` for the site being absorbed.
+- **`base_charges` locality + per-sublattice:** on the checkerboard A and B may carry
+  different index charges, so charges must come from the *correct* site tensor. This
+  is handled naturally by deriving locally (each absorb reads its own `A`; the driver
+  reads `site_tensors[s]`) — do not re-introduce a single plumbed value. The trivial-
+  U(1) parity input has all-zero charges: the fused `_get_base_charges` short-circuits
+  that to `None` (global truncation), while the split single-site inline form passes
+  `[0,…]` and takes the single-sector per-sector path. Both give the same result;
+  pick one convention and apply it consistently on the split 2-site path (the Tier-1/2
+  energy-parity test is the guard that the choice is correct).
 - **AD leaf-type surprise:** the expectation is zero AD-code change. If a
   dense-only assumption surfaces on the VJP path, fix it minimally and note it — do
   not restructure the Neumann backward.
