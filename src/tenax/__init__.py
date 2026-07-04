@@ -328,7 +328,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "compute_free_wilson_fermion_tensor",
     ),
     "compute_ising_tensor": ("tenax.algorithms.trg", "compute_ising_tensor"),
+    "compute_potts_tensor": ("tenax.algorithms.trg", "compute_potts_tensor"),
     "ising_free_energy_exact": ("tenax.algorithms.trg", "ising_free_energy_exact"),
+    "potts_critical_beta": ("tenax.algorithms.trg", "potts_critical_beta"),
     "trg": ("tenax.algorithms.trg", "trg"),
     "wilson_fermion_free_energy_exact": (
         "tenax.algorithms.trg",
@@ -417,8 +419,10 @@ __all__ = [
     "TRGConfig",
     "trg",
     "compute_ising_tensor",
+    "compute_potts_tensor",
     "compute_free_wilson_fermion_tensor",
     "ising_free_energy_exact",
+    "potts_critical_beta",
     "wilson_fermion_free_energy_exact",
     # HOTRG
     "HOTRGConfig",
