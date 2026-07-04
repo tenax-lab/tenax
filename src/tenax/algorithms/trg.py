@@ -242,6 +242,93 @@ def compute_ising_tensor(
     return DenseTensor(T, indices)
 
 
+def compute_potts_tensor(
+    beta: float,
+    q: int = 3,
+    J: float = 1.0,
+) -> Tensor:
+    """Build the initial transfer tensor for the 2D q-state Potts model.
+
+    The ferromagnetic q-state Potts model has energy
+    ``H = -J sum_<ij> delta(s_i, s_j)`` with ``s in {0, ..., q-1}``, giving the
+    per-bond Boltzmann weight matrix
+    ``Q[a, b] = exp(beta * J)`` if ``a == b`` else ``1``
+    (equivalently ``Q = ones(q, q) + (exp(beta*J) - 1) * I``).
+
+    As for the Ising tensor, we split ``Q = sqrtQ @ sqrtQ`` via its matrix
+    square root (``Q`` is symmetric positive-definite for ``beta*J > 0``) and
+    contract one factor onto each leg::
+
+        T_{udlr} = sum_s sqrtQ[u,s] sqrtQ[d,s] sqrtQ[l,s] sqrtQ[r,s]
+
+    so that ``Tr prod T`` reproduces the partition function ``Z``.
+
+    ``q = 2`` recovers the Ising model (up to a per-bond constant): its free
+    energy equals ``beta*J - beta * f_Ising(beta, J/2)``.
+
+    Args:
+        beta: Inverse temperature ``beta = 1/(k_B T)``.
+        q:    Number of Potts states (``q >= 2``). Default 3.
+        J:    Nearest-neighbor coupling (``J > 0`` ferromagnet).
+
+    Returns:
+        DenseTensor of shape ``(q, q, q, q)`` with legs
+        ``("up", "down", "left", "right")``.
+
+    Note:
+        The square-lattice Potts model is self-dual with a critical point at
+        ``beta_c = ln(1 + sqrt(q)) / J`` (see :func:`potts_critical_beta`),
+        continuous for ``q <= 4`` and first-order for ``q > 4``. Use HOTRG for
+        accurate free energies near ``beta_c``.
+    """
+    if q < 2:
+        raise ValueError(f"Potts model requires q >= 2, got q={q}")
+
+    # Q[a, b] = exp(beta*J) on the diagonal, 1 off-diagonal.
+    Q = jnp.asarray(np.ones((q, q)) + (np.exp(beta * J) - 1.0) * np.eye(q))
+
+    # Matrix square root of Q (NOT element-wise). Q is symmetric
+    # positive-definite for beta*J > 0, so sqrtQ @ sqrtQ = Q.
+    evals, evecs = jnp.linalg.eigh(Q)
+    sqrtQ = evecs @ jnp.diag(jnp.sqrt(evals)) @ evecs.T
+
+    # T_{udlr} = sum_s sqrtQ[u,s] sqrtQ[d,s] sqrtQ[l,s] sqrtQ[r,s]
+    T = jnp.einsum("us,ds,ls,rs->udlr", sqrtQ, sqrtQ, sqrtQ, sqrtQ)
+
+    sym = U1Symmetry()
+    bond_q = np.zeros(q, dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, bond_q, FlowDirection.IN, label="up"),
+        TensorIndex.from_charges(sym, bond_q, FlowDirection.OUT, label="down"),
+        TensorIndex.from_charges(sym, bond_q, FlowDirection.IN, label="left"),
+        TensorIndex.from_charges(sym, bond_q, FlowDirection.OUT, label="right"),
+    )
+    return DenseTensor(T, indices)
+
+
+def potts_critical_beta(q: int = 3, J: float = 1.0) -> float:
+    """Self-dual critical inverse temperature of the 2D q-state Potts model.
+
+    On the square lattice the ferromagnetic Potts model is self-dual, fixing
+    the critical point at ``exp(beta_c * J) - 1 = sqrt(q)``, i.e.
+
+        beta_c = ln(1 + sqrt(q)) / J.
+
+    The transition is continuous for ``q <= 4`` and first-order for ``q > 4``.
+    For ``q = 2`` this is ``2x`` the Ising ``beta_c`` (since ``J_Ising = J/2``).
+
+    Args:
+        q: Number of Potts states (``q >= 2``). Default 3.
+        J: Nearest-neighbor coupling.
+
+    Returns:
+        The critical inverse temperature ``beta_c``.
+    """
+    if q < 2:
+        raise ValueError(f"Potts model requires q >= 2, got q={q}")
+    return float(np.log(1.0 + np.sqrt(q)) / J)
+
+
 def ising_free_energy_exact(beta: float, J: float = 1.0) -> float:
     """Compute the exact 2D Ising free energy per site via Onsager's formula.
 

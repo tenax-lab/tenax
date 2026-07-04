@@ -107,7 +107,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     ),
     "TRGConfig": ("tenax.algorithms.trg", "TRGConfig"),
     "compute_ising_tensor": ("tenax.algorithms.trg", "compute_ising_tensor"),
+    "compute_potts_tensor": ("tenax.algorithms.trg", "compute_potts_tensor"),
     "ising_free_energy_exact": ("tenax.algorithms.trg", "ising_free_energy_exact"),
+    "potts_critical_beta": ("tenax.algorithms.trg", "potts_critical_beta"),
     "trg": ("tenax.algorithms.trg", "trg"),
     # pess (kagome iPESS)
     "IPESSState": ("tenax.algorithms.pess", "IPESSState"),
@@ -185,7 +187,9 @@ __all__ = [
     "TRGConfig",
     "trg",
     "compute_ising_tensor",
+    "compute_potts_tensor",
     "ising_free_energy_exact",
+    "potts_critical_beta",
     # HOTRG
     "HOTRGConfig",
     "hotrg",

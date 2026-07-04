@@ -251,6 +251,21 @@ Since HOTRG is forward-only there is no autodiff-through-SVD barrier, so GSPMD
 sharding is effective here (unlike the CTM-AD path). See
 `examples/probe_hotrg_multigpu.py`.
 
+The same coarse-graining works for the **q-state Potts model**
+(`compute_potts_tensor` produces any `q >= 2`; `q = 2` reduces to Ising):
+
+```python
+from tenax import HOTRGConfig, hotrg, compute_potts_tensor, potts_critical_beta
+
+q = 3
+beta_c = potts_critical_beta(q)  # ln(1 + sqrt(q)), the self-dual critical point
+T = compute_potts_tensor(beta_c, q=q)
+
+config = HOTRGConfig(max_bond_dim=16, num_steps=20)
+log_z_per_n = hotrg(T, config)
+print(f"Potts q={q} at beta_c={beta_c:.5f}:  ln(Z)/N = {float(log_z_per_n):.6f}")
+```
+
 ## AutoMPO Example
 
 ```python

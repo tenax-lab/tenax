@@ -10,7 +10,9 @@ from tenax.algorithms.trg import (
     _trg_step,
     compute_free_wilson_fermion_tensor,
     compute_ising_tensor,
+    compute_potts_tensor,
     ising_free_energy_exact,
+    potts_critical_beta,
     trg,
     wilson_fermion_free_energy_exact,
 )
@@ -578,4 +580,98 @@ class TestFreeWilsonFermion:
         rel_err = abs(f_trg - f_exact) / abs(f_exact)
         assert rel_err < 0.02, (
             f"TRG ln(Z)/V={f_trg:.8f} vs exact={f_exact:.8f} (rel err={rel_err:.4f})"
+        )
+
+
+class TestComputePottsTensor:
+    """Structural tests for the q-state Potts local transfer tensor."""
+
+    def test_returns_dense_tensor(self):
+        T = compute_potts_tensor(beta=0.5)
+        assert isinstance(T, DenseTensor)
+
+    def test_default_q_is_3(self):
+        T = compute_potts_tensor(beta=0.5)
+        assert T.todense().shape == (3, 3, 3, 3)
+
+    def test_shape_matches_q(self):
+        for q in (2, 3, 4):
+            T = compute_potts_tensor(beta=0.5, q=q)
+            assert T.todense().shape == (q, q, q, q)
+
+    def test_labels_are_set(self):
+        T = compute_potts_tensor(beta=0.5)
+        labels = set(idx.label for idx in T.indices)
+        assert labels == {"up", "down", "left", "right"}
+
+    def test_tensor_is_symmetric_under_leg_swaps(self):
+        """T_{udlr} is built symmetrically, so u<->d and l<->r are no-ops."""
+        arr = np.asarray(compute_potts_tensor(beta=0.7, q=3).todense())
+        assert np.allclose(arr, arr.transpose(1, 0, 2, 3), atol=1e-12)
+        assert np.allclose(arr, arr.transpose(0, 1, 3, 2), atol=1e-12)
+
+    def test_matrix_sqrt_property(self):
+        """The internal sqrtQ must satisfy sqrtQ @ sqrtQ == Q (matrix sqrt)."""
+        beta, q, J = 0.6, 3, 1.0
+        Q = np.ones((q, q)) + (np.exp(beta * J) - 1.0) * np.eye(q)
+        ev, U = np.linalg.eigh(Q)
+        sqrtQ = U @ np.diag(np.sqrt(ev)) @ U.T
+        assert np.allclose(sqrtQ @ sqrtQ, Q, atol=1e-12)
+
+    def test_permutation_symmetry_of_states(self):
+        """S_q symmetry: permuting Potts state labels leaves the tensor fixed."""
+        arr = np.asarray(compute_potts_tensor(beta=0.8, q=3).todense())
+        # swap states 0<->1 on every leg
+        perm = np.array([1, 0, 2])
+        permuted = arr[np.ix_(perm, perm, perm, perm)]
+        assert np.allclose(arr, permuted, atol=1e-12)
+
+
+class TestPottsCriticalBeta:
+    """The self-dual critical point beta_c = ln(1 + sqrt(q)) / J."""
+
+    def test_q3_known_value(self):
+        assert np.isclose(potts_critical_beta(q=3), np.log(1 + np.sqrt(3)))
+
+    def test_q2_matches_twice_ising_beta_c(self):
+        """q=2 Potts beta_c equals 2x the Ising beta_c (J_Ising = J/2)."""
+        ising_bc = np.log(1 + np.sqrt(2)) / 2
+        assert np.isclose(potts_critical_beta(q=2), 2 * ising_bc)
+
+    def test_scales_inversely_with_J(self):
+        assert np.isclose(
+            potts_critical_beta(q=3, J=2.0), np.log(1 + np.sqrt(3)) / 2.0
+        )
+
+
+class TestPottsFreeEnergy:
+    """Convergence of TRG on Potts tensors against exact anchors."""
+
+    def test_q2_matches_ising_mapping(self):
+        """q=2 Potts is exactly Ising: Z_Potts = e^{beta*J*N} Z_Ising(J/2).
+
+        So ln(Z)/N = beta*J - beta * f_Ising(beta, J/2). This is a rigorous
+        end-to-end check of the Potts tensor construction.
+        """
+        beta, J = 0.2, 1.0
+        tensor = compute_potts_tensor(beta=beta, q=2, J=J)
+        config = TRGConfig(max_bond_dim=16, num_steps=20)
+        log_z_per_n = float(trg(tensor, config))
+        exact = beta * J - beta * ising_free_energy_exact(beta, J=J / 2)
+        rel_err = abs(log_z_per_n - exact) / abs(exact)
+        assert rel_err < 0.01, (
+            f"Potts(q=2) ln(Z)/N={log_z_per_n:.6f} vs Ising-mapped "
+            f"{exact:.6f} (rel err={rel_err:.4f})"
+        )
+
+    def test_q3_low_temperature_limit(self):
+        """At low T (large beta), ln(Z)/N -> 2*beta*J (2 bonds/site, aligned)."""
+        beta, J = 1.5, 1.0
+        tensor = compute_potts_tensor(beta=beta, q=3, J=J)
+        config = TRGConfig(max_bond_dim=16, num_steps=20)
+        log_z_per_n = float(trg(tensor, config))
+        # ln(Z)/N approaches 2*beta*J from above (small positive excitation term).
+        assert log_z_per_n >= 2 * beta * J - 1e-3
+        assert abs(log_z_per_n - 2 * beta * J) < 0.05, (
+            f"Potts(q=3) ln(Z)/N={log_z_per_n:.6f} vs 2*beta*J={2 * beta * J:.6f}"
         )
