@@ -239,6 +239,7 @@ def _split_ctm_sweep_multisite_2x2(
     # so importing the absorb helpers at module scope would form a cycle.
     from tenax.algorithms._split_ctm_tensor_moves import (
         _compute_split_plaquette_projector_pair,
+        _split_base_charges,
         _split_ctm_absorb_bottom_2plaq,
         _split_ctm_absorb_left_2plaq,
         _split_ctm_absorb_right_2plaq,
@@ -269,7 +270,7 @@ def _split_ctm_sweep_multisite_2x2(
                 bars[s_BR],
                 chi,
                 direction,
-                base_charges=None,
+                base_charges=_split_base_charges(site_tensors[s]),
             )
             projectors[s] = (Pt, Pb)
         # Phase 2: absorb per destination cell using two plaquettes' halves.

@@ -373,6 +373,7 @@ def _split_ctm_absorb_bottom_2plaq(
     convention, #670/#674): projector halves applied via ``_apply_proj_unfused``,
     ket/bra edge halves grown then SVD-split over ``chi_I``.
     """
+    base_charges = _split_base_charges(A)
     C4g = _grow_split_corner_2x2(
         env_src.C4,
         "c4_r",
@@ -432,6 +433,7 @@ def _split_ctm_absorb_bottom_2plaq(
         chi_I=chi_I,
         ket_relabels={"chi_new": "t3k_r", "u": "d_ket", "_svd_bond": "t3k_I"},
         bra_relabels={"_svd_bond": "t3b_I", "u_bra": "d_bra", "chi_new_r": "t3b_l"},
+        base_charges=base_charges,
     )
     C4_new = _ensure_corner_flows(C4_new, "C4")
     C3_new = _ensure_corner_flows(C3_new, "C3")
@@ -443,6 +445,7 @@ def _split_ctm_absorb_left_2plaq(
     env_src, A, A_bar, P_top_above, P_bot_above, P_top_curr, P_bot_curr, chi_I
 ):
     """Split LEFT absorption -> (C1_new, T4_ket_new, T4_bra_new, C4_new)."""
+    base_charges = _split_base_charges(A)
     C1g = _grow_split_corner_2x2(
         env_src.C1,
         "c1_r",
@@ -502,6 +505,7 @@ def _split_ctm_absorb_left_2plaq(
         chi_I=chi_I,
         ket_relabels={"chi_new": "t4k_d", "r": "l_ket", "_svd_bond": "t4k_I"},
         bra_relabels={"_svd_bond": "t4b_I", "r_bra": "l_bra", "chi_new_r": "t4b_u"},
+        base_charges=base_charges,
     )
     C1_new = _ensure_corner_flows(C1_new, "C1")
     C4_new = _ensure_corner_flows(C4_new, "C4")
@@ -513,6 +517,7 @@ def _split_ctm_absorb_right_2plaq(
     env_src, A, A_bar, P_top_above, P_bot_above, P_top_curr, P_bot_curr, chi_I
 ):
     """Split RIGHT absorption -> (C2_new, T2_ket_new, T2_bra_new, C3_new)."""
+    base_charges = _split_base_charges(A)
     C2g = _grow_split_corner_2x2(
         env_src.C2,
         "c2_l",
@@ -572,6 +577,7 @@ def _split_ctm_absorb_right_2plaq(
         chi_I=chi_I,
         ket_relabels={"chi_new": "t2k_u", "l": "r_ket", "_svd_bond": "t2k_I"},
         bra_relabels={"_svd_bond": "t2b_I", "l_bra": "r_bra", "chi_new_r": "t2b_d"},
+        base_charges=base_charges,
     )
     C2_new = _ensure_corner_flows(C2_new, "C2")
     C3_new = _ensure_corner_flows(C3_new, "C3")
@@ -583,6 +589,7 @@ def _split_ctm_absorb_top_2plaq(
     env_src, A, A_bar, P_top_left, P_bot_left, P_top_curr, P_bot_curr, chi_I
 ):
     """Split TOP absorption -> (C1_new, T1_ket_new, T1_bra_new, C2_new)."""
+    base_charges = _split_base_charges(A)
     C1g = _grow_split_corner_2x2(
         env_src.C1,
         "c1_d",
@@ -642,6 +649,7 @@ def _split_ctm_absorb_top_2plaq(
         chi_I=chi_I,
         ket_relabels={"chi_new": "t1k_l", "d": "u_ket", "_svd_bond": "t1k_I"},
         bra_relabels={"_svd_bond": "t1b_I", "d_bra": "u_bra", "chi_new_r": "t1b_r"},
+        base_charges=base_charges,
     )
     C1_new = _ensure_corner_flows(C1_new, "C1")
     C2_new = _ensure_corner_flows(C2_new, "C2")
@@ -822,6 +830,18 @@ def _grow_edge_no_double_layer(
 # ------------------------------------------------------------------ #
 # SVD helper                                                            #
 # ------------------------------------------------------------------ #
+
+
+def _split_base_charges(A: Tensor) -> np.ndarray | None:
+    """Charges of a site tensor's first leg, for per-sector interlayer-SVD
+    truncation on the symmetric split path.
+
+    Returns ``None`` for a DenseTensor (global truncation). Derived locally at
+    the point of use — mirrors the single-site moves and the fused
+    ``_get_base_charges``; deliberately NOT a plumbed cross-call parameter
+    (``base_charges`` is being un-plumbed — see ``_apply_projector``).
+    """
+    return A.indices[0].charges if isinstance(A, SymmetricTensor) else None
 
 
 def _svd_split_edge_tensor(
