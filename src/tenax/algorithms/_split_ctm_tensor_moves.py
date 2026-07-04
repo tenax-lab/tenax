@@ -837,9 +837,9 @@ def _split_base_charges(A: Tensor) -> np.ndarray | None:
     truncation on the symmetric split path.
 
     Returns ``None`` for a DenseTensor (global truncation). Derived locally at
-    the point of use — mirrors the single-site moves and the fused
-    ``_get_base_charges``; deliberately NOT a plumbed cross-call parameter
-    (``base_charges`` is being un-plumbed — see ``_apply_projector``).
+    the point of use — a clean extraction of the single-site split-move inline
+    derivation (``A.indices[0].charges``); deliberately NOT a plumbed cross-call
+    parameter (``base_charges`` is being un-plumbed — see ``_apply_projector``).
     """
     return A.indices[0].charges if isinstance(A, SymmetricTensor) else None
 
