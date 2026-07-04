@@ -100,6 +100,28 @@ def _fuse_ket_bra(
     return fuse_indices(T, 0, 1, fused_label, fused_flow)
 
 
+# Fused enlarged-corner leg order per position (``chi`` seams first, then the
+# ``D²`` seams) — see :func:`_build_split_enlarged_corner`.  The split corner is
+# transposed to this order so the block-sparse ``tensor_svd`` in
+# :func:`_compute_2x2_projector` groups the ``(chi, d2)`` left legs correctly.
+_FUSED_CORNER_LEG_ORDER = {
+    "top_left": ("chi_R", "chi_B", "d2", "r2"),
+    "top_right": ("chi_L", "chi_B", "d2", "l2"),
+    "bottom_left": ("chi_T", "chi_R", "u2", "r2"),
+    "bottom_right": ("chi_L", "chi_T", "u2", "l2"),
+}
+
+
+def _canonical_split_corner(Q: Tensor, position: str) -> Tensor:
+    """Transpose a split enlarged corner to the fused corner's leg order."""
+    order = _FUSED_CORNER_LEG_ORDER[position]
+    labels = Q.labels()
+    perm = tuple(labels.index(lbl) for lbl in order)
+    if perm == tuple(range(len(labels))):
+        return Q
+    return Q.transpose(perm)
+
+
 def _build_split_enlarged_corner(
     C: Tensor,
     T_h_ket: Tensor,
@@ -115,12 +137,27 @@ def _build_split_enlarged_corner(
     :func:`_build_enlarged_corner`, assembled from ket/bra split edges + a
     physical double layer (A ket, A_bar bra) with the phys index traced.
 
-    Output free legs match the fused recipe's LABEL SET exactly (axis order is
-    not significant — ``_compute_2x2_projector`` indexes by label):
-      top_left     -> {chi_R, r2, chi_B, d2}
-      top_right    -> {chi_L, l2, chi_B, d2}
-      bottom_left  -> {chi_T, u2, chi_R, r2}
-      bottom_right -> {chi_L, l2, chi_T, u2}
+    Output free legs match the fused recipe's LABEL SET **and axis order**
+    exactly (``chi`` seams first, then the ``D²`` seams):
+      top_left     -> (chi_R, chi_B, d2, r2)
+      top_right    -> (chi_L, chi_B, d2, l2)
+      bottom_left  -> (chi_T, chi_R, u2, r2)
+      bottom_right -> (chi_L, chi_T, u2, l2)
+
+    Axis order **is** significant for the SymmetricTensor path (#463 Phase 3).
+    The block-sparse ``tensor_svd`` inside :func:`_compute_2x2_projector`
+    assembles each charge sector's matrix by reshaping every block *in its
+    native axis order* into ``(left_rows, right_cols)`` — it does NOT transpose
+    the block to the requested ``left_labels`` order first.  Its ``left_labels``
+    for the plaquette are ``(chi, d2)`` (chi slow), so if the corner were
+    returned with the ``d2`` seam *before* the ``chi`` seam (as the raw
+    ``_fuse_ket_bra`` output is), the reshape would flatten the row index in
+    ``(d2, chi)`` = d2-slow order.  That transposes the SVD's row basis, so
+    ``U·S·Vh`` reconstructs a *permuted* matrix — the projector then keeps a
+    different (wrong) subspace and the env drifts every sweep (energy wobbles /
+    collapses at D>=3, masked at D=2 where D²=4 and the seam is nearly
+    self-dual).  Matching the fused corner's ``(chi…, d2…)`` layout keeps the
+    split path byte-consistent with the working fused reference.
 
     The physical double layer is built by contracting the ket edges with the
     ket virtual legs of ``A`` and the bra edges with the bra virtual legs of
@@ -144,7 +181,8 @@ def _build_split_enlarged_corner(
         Q = contract(ket, A_bra)  # (t1b_r, t4b_u, d, r, D_bra, R_bra)
         Q = _fuse_ket_bra(Q, "d", "D_bra", "d2", FlowDirection.OUT)
         Q = _fuse_ket_bra(Q, "r", "R_bra", "r2", FlowDirection.OUT)
-        return Q.relabels({"t1b_r": "chi_R", "t4b_u": "chi_B"})
+        Q = Q.relabels({"t1b_r": "chi_R", "t4b_u": "chi_B"})
+        return _canonical_split_corner(Q, position)
 
     if position == "top_right":
         # C2.c2_l <-> T1's right = t1b_r (BRA) ; C2.c2_d <-> T2's top = t2k_u (KET).
@@ -162,7 +200,8 @@ def _build_split_enlarged_corner(
         Q = contract(ket, A_bra)  # (t1k_l, d, l, t2b_d, D_bra, L_bra)
         Q = _fuse_ket_bra(Q, "d", "D_bra", "d2", FlowDirection.OUT)
         Q = _fuse_ket_bra(Q, "l", "L_bra", "l2", FlowDirection.IN)
-        return Q.relabels({"t1k_l": "chi_L", "t2b_d": "chi_B"})
+        Q = Q.relabels({"t1k_l": "chi_L", "t2b_d": "chi_B"})
+        return _canonical_split_corner(Q, position)
 
     if position == "bottom_left":
         # C4.c4_r <-> T4's up = t4b_u (BRA) ; C4.c4_u <-> T3's right = t3k_r (KET).
@@ -179,7 +218,8 @@ def _build_split_enlarged_corner(
         Q = contract(ket, A_bra)  # (t4k_d, u, r, t3b_l, U_bra, R_bra)
         Q = _fuse_ket_bra(Q, "u", "U_bra", "u2", FlowDirection.IN)
         Q = _fuse_ket_bra(Q, "r", "R_bra", "r2", FlowDirection.OUT)
-        return Q.relabels({"t4k_d": "chi_T", "t3b_l": "chi_R"})
+        Q = Q.relabels({"t4k_d": "chi_T", "t3b_l": "chi_R"})
+        return _canonical_split_corner(Q, position)
 
     if position == "bottom_right":
         # C3.c3_l <-> T3's left = t3b_l (BRA) ; C3.c3_u <-> T2's bottom = t2b_d (BRA).
@@ -198,7 +238,8 @@ def _build_split_enlarged_corner(
         Q = contract(ket, A_bra)  # (t3k_r, t2k_u, u, l, U_bra, L_bra)
         Q = _fuse_ket_bra(Q, "u", "U_bra", "u2", FlowDirection.IN)
         Q = _fuse_ket_bra(Q, "l", "L_bra", "l2", FlowDirection.IN)
-        return Q.relabels({"t3k_r": "chi_L", "t2k_u": "chi_T"})
+        Q = Q.relabels({"t3k_r": "chi_L", "t2k_u": "chi_T"})
+        return _canonical_split_corner(Q, position)
 
     raise ValueError(f"unsupported position={position!r}")
 

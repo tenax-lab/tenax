@@ -168,3 +168,61 @@ def test_2site_symmetric_energy_matches_dense(D, chi):
     assert abs(E_sym - E_dense) < 1e-6, (
         f"sym={E_sym} dense={E_dense} (D={D}, chi={chi})"
     )
+
+
+def test_2site_symmetric_forward_converges_d3():
+    """#463 Phase 3 root-cause regression: the D=3 trivial-U(1) 2-site split-CTM
+    forward must CONVERGE (finite, non-zero, == dense-split), not collapse.
+
+    Two bugs (both fixed) made the D=3 symmetric forward degenerate:
+
+    1. ``_init_symmetric_corner`` seeded ``eye(min(chi, D))`` instead of the
+       dense path's rank-1 ``(0, 0) = 1`` corner — an artificially degenerate
+       corner whose subspace rotates every sweep, so the env never converges
+       element-wise.
+
+    2. ``_build_split_enlarged_corner`` returned its legs in ``(d2, chi)`` order
+       while ``_build_enlarged_corner`` (fused reference) uses ``(chi, d2)``.
+       The block-sparse ``tensor_svd`` in ``_compute_2x2_projector`` reshapes
+       each sector block *in native axis order* into ``(left_rows, right_cols)``
+       without first transposing to ``left_labels=(chi, d2)`` order, so the
+       wrong-order corner transposed the SVD row basis → the projector kept a
+       different subspace → the env drifted and the energy collapsed to exactly
+       0.0 from ~iter 8 at D=3.
+
+    Together they collapsed the energy: ``-0.523 → -0.348 → … → 0.0``.  This
+    test is RED before either fix (energy is 0.0 / not close to dense) and
+    GREEN after both.
+    """
+    from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor_2site
+    from tenax.algorithms._split_ctm_tensor_energy import (
+        compute_energy_split_ctm_tensor_2site,
+    )
+
+    D, chi = 3, 8
+    A, B = _build_su_neel(D=D)
+    gate = _heisenberg_gate()
+
+    envA_d, envB_d = ctm_split_tensor_2site(
+        A, B, chi, max_iter=60, conv_tol=1e-10, chi_I=chi
+    )
+    E_dense = float(
+        compute_energy_split_ctm_tensor_2site(A, B, envA_d, envB_d, gate, d=2)
+    )
+
+    As, Bs = _to_trivial_u1(A), _to_trivial_u1(B)
+    envA_s, envB_s = ctm_split_tensor_2site(
+        As, Bs, chi, max_iter=60, conv_tol=1e-10, chi_I=chi
+    )
+    E_sym = float(
+        compute_energy_split_ctm_tensor_2site(As, Bs, envA_s, envB_s, gate, d=2)
+    )
+
+    # Finite, non-zero (the collapse drove it to exactly 0.0), and == dense.
+    assert np.isfinite(E_sym), f"symmetric energy not finite: {E_sym}"
+    assert abs(E_sym) > 1e-2, (
+        f"symmetric energy collapsed toward zero: {E_sym} (D={D}, chi={chi})"
+    )
+    assert abs(E_sym - E_dense) < 1e-6, (
+        f"sym={E_sym} dense={E_dense} (D={D}, chi={chi})"
+    )
