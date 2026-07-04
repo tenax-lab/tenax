@@ -114,3 +114,57 @@ def test_2site_symmetric_charge_sectors_preserved():
             f"Global truncation dropped slots from the weaker charge sector "
             "(base_charges not engaged for per-sector interlayer-SVD truncation)"
         )
+
+
+def _to_trivial_u1(A):
+    """Wrap a dense iPEPS site (shape (D,D,D,D,d), labels u,d,l,r,phys) as a
+    trivial-U(1) SymmetricTensor with the same data — robust to whatever indices
+    the SU builder attached."""
+    data = A.todense()
+    sym = U1Symmetry()
+    flows = (
+        FlowDirection.OUT,
+        FlowDirection.IN,
+        FlowDirection.OUT,
+        FlowDirection.IN,
+        FlowDirection.IN,
+    )
+    labels = ("u", "d", "l", "r", "phys")
+    indices = tuple(
+        TensorIndex.from_charges(sym, np.zeros(n, dtype=np.int32), f, label=lbl)
+        for n, f, lbl in zip(data.shape, flows, labels)
+    )
+    return SymmetricTensor.from_dense(data, indices)
+
+
+@pytest.mark.parametrize("D,chi", [(2, 4), (2, 8), (3, 8)])
+def test_2site_symmetric_energy_matches_dense(D, chi):
+    """Trivial-U(1) symmetric split energy == dense split energy on a convergent
+    Neel checkerboard. The D=3 case is also the design-§10 hard-fusion guard."""
+    from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor_2site
+    from tenax.algorithms._split_ctm_tensor_energy import (
+        compute_energy_split_ctm_tensor_2site,
+    )
+
+    A, B = _build_su_neel(D=D)
+    gate = _heisenberg_gate()
+
+    envA_d, envB_d = ctm_split_tensor_2site(
+        A, B, chi, max_iter=60, conv_tol=1e-10, chi_I=chi
+    )
+    E_dense = float(
+        compute_energy_split_ctm_tensor_2site(A, B, envA_d, envB_d, gate, d=2)
+    )
+
+    As, Bs = _to_trivial_u1(A), _to_trivial_u1(B)
+    envA_s, envB_s = ctm_split_tensor_2site(
+        As, Bs, chi, max_iter=60, conv_tol=1e-10, chi_I=chi
+    )
+    E_sym = float(
+        compute_energy_split_ctm_tensor_2site(As, Bs, envA_s, envB_s, gate, d=2)
+    )
+
+    assert np.isfinite(E_sym), f"symmetric energy not finite: {E_sym}"
+    assert abs(E_sym - E_dense) < 1e-6, (
+        f"sym={E_sym} dense={E_dense} (D={D}, chi={chi})"
+    )
