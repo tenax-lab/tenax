@@ -44,9 +44,10 @@ def validate_ctm_for_implicit_ad(ctm_cfg: CTMConfig) -> None:
 def validate_split_ctm_config(ctm_cfg: CTMConfig, recipe: str) -> None:
     """Reject ``CTMConfig`` combinations the split-CTM path cannot honor.
 
-    The split (``fuse_virtual_legs=False``) forward is fixed-χ single-site, so
-    every χ-changing knob is unsupported.  Raising up front beats the failure
-    modes of letting one through: ``chi_ramp`` would be *silently ignored*
+    The split (``fuse_virtual_legs=False``) forward is fixed-χ (single-site or
+    2-site checkerboard), so every χ-changing knob is unsupported.  Raising up
+    front beats the failure modes of letting one through: ``chi_ramp`` would be
+    *silently ignored*
     (the split forward never reads it), and the end-of-step ``chi_auto_bump``
     would *crash* when ``_maybe_bump_chi`` pads a ``SplitCTMTensorEnv`` with
     the fused-only ``pad_dense_env_chi``.
@@ -56,10 +57,10 @@ def validate_split_ctm_config(ctm_cfg: CTMConfig, recipe: str) -> None:
     identically.  Covers only the ``CTMConfig``-level knobs; ``cg_gates`` and
     the ``iPEPSConfig`` schedules are guarded by the optimizer dispatcher.
     """
-    if recipe != "1x1":
+    if recipe not in ("1x1", "2x2"):
         raise NotImplementedError(
-            "fuse_virtual_legs=False (split CTM) requires gs_recipe='1x1'; "
-            f"got recipe={recipe!r}."
+            "fuse_virtual_legs=False (split CTM) supports gs_recipe in "
+            f"('1x1', '2x2'); got recipe={recipe!r}."
         )
     if ctm_cfg.ctmrg_heuristic_increase_chi:
         raise NotImplementedError(
@@ -254,17 +255,50 @@ def make_ctm_energy_fn(
     )
     from tenax.algorithms._split_ctm_energy_ad import (
         ctm_energy_split_explicit,
+        ctm_energy_split_explicit_2site,
         ctm_energy_split_implicit,
+        ctm_energy_split_implicit_2site,
     )
 
     def _split_ctm_energy_fn(site_tensors, ctm_cfg):
-        """Dispatch to the split (``fuse_virtual_legs=False``) single-site path.
+        """Dispatch to the split (``fuse_virtual_legs=False``) path.
 
-        Only the single-site ``recipe="1x1"`` split forward exists (#463
-        Phase 2); guard the unsupported combinations up front so the failure
-        is a clear policy error rather than a downstream shape mismatch.
+        Single-site (``recipe='1x1'``) and 2-site checkerboard (``recipe='2x2'``)
+        split forwards exist (#463 Phase 2); guard unsupported combinations up
+        front.  Energy-callback handling differs by branch: the single-site
+        branch forwards ``energy_fn`` (a genuinely custom CG callback is rejected
+        downstream), while the 2-site branch always computes its own split-aware
+        energy and ignores any ``energy_fn`` (the fused default, or a custom one).
         """
         validate_split_ctm_config(ctm_cfg, recipe)
+        if len(site_tensors) == 2:
+            if use_explicit:
+                return ctm_energy_split_explicit_2site(
+                    site_tensors,
+                    neighbors,
+                    gate,
+                    chi=ctm_cfg.chi,
+                    warmup_steps=explicit_warmup,
+                    backprop_steps=explicit_steps,
+                    chi_I=ctm_cfg.chi_I,
+                    renormalize=ctm_cfg.renormalize,
+                    energy_fn=None,
+                )
+            _cached = env_cache.get("envs", None)
+            envs_init = _cached if _cached else None
+            return ctm_energy_split_implicit_2site(
+                site_tensors,
+                neighbors,
+                gate,
+                chi=ctm_cfg.chi,
+                max_iter=ctm_cfg.max_iter,
+                conv_tol=ctm_cfg.conv_tol,
+                chi_I=ctm_cfg.chi_I,
+                renormalize=ctm_cfg.renormalize,
+                min_iter=ctm_cfg.min_iter,
+                energy_fn=None,
+                envs_init=envs_init,
+            )
         if use_explicit:
             # The explicit split forward re-initializes internally; no
             # env_init warm-start yet (perf follow-up).

@@ -1,9 +1,13 @@
-"""Single-site split-CTM AD energy entry points (#463 Phase 2).
+"""Single-site + 2-site split-CTM AD energy entry points (#463 Phase 2).
 
 Mirrors ``ctm_energy_explicit`` / ``ctm_energy_implicit`` from
 ``_ctm_energy_ad`` but on the split (ket/bra-separate) double layer.
-Single-site only: the split forward (``ctm_split_tensor``) converges one
-site as an isolated 1×1 iPEPS.  Multisite has no split forward yet.
+Single-site (``ctm_split_tensor``, isolated 1×1 iPEPS) and 2-site
+checkerboard multisite (``ctm_split_tensor_2site``, coupled forward) are
+both fully supported here: forward-only converge, explicit-AD (unrolled)
+converge, and implicit-AD (fixed-point ``custom_vjp`` with Neumann backward)
+energy entries for each — ``ctm_energy_split_{explicit,implicit}`` (1×1) and
+``ctm_energy_split_{explicit,implicit}_2site`` (2-site checkerboard).
 """
 
 from __future__ import annotations
@@ -16,8 +20,11 @@ import jax.numpy as jnp
 
 __all__ = [
     "converge_split_env",
+    "converge_split_env_2site",
     "ctm_energy_split_explicit",
+    "ctm_energy_split_explicit_2site",
     "ctm_energy_split_implicit",
+    "ctm_energy_split_implicit_2site",
 ]
 
 
@@ -273,4 +280,299 @@ def converge_split_env(
         chi_I = chi
     return _converge_split_gauge_fixed(
         A, chi, chi_I, max_iter, conv_tol, renormalize, min_iter, env_init=env_init
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multisite (2-site checkerboard) split-CTM AD (#463 Phase 2)
+# ---------------------------------------------------------------------------
+#
+# The single-site machinery above is written entirely against jax.tree leaves,
+# so it generalizes to a {coord: SplitCTMTensorEnv} dict pytree by swapping the
+# fixed-point step for the multisite sweep and per-coord Γ phase-fix.  The
+# custom_vjp now differentiates w.r.t. a {coord: Tensor} site dict.
+
+
+def _split_step_multisite(site_tensors, envs, neighbors, chi, chi_I, renormalize):
+    """One gauge-fixed multisite split-CTM sweep: ``Γ ∘ sweep`` per coord.
+
+    Fixed-point map ``f`` for the coupled ``{coord: env}`` system.  The per-coord
+    Γ phase-fix is what makes the joint env converge element-wise.
+    """
+    from tenax.algorithms._split_ctm_tensor_convergence import (
+        _split_ctm_sweep_multisite,
+    )
+    from tenax.algorithms.ad_utils import _phase_fix_split_ctm_tensor
+
+    bars = {c: A.bar() for c, A in site_tensors.items()}
+    envs = _split_ctm_sweep_multisite(
+        envs, site_tensors, bars, neighbors, chi, chi_I, renormalize, recipe="2x2"
+    )
+    return {c: _phase_fix_split_ctm_tensor(e) for c, e in envs.items()}
+
+
+def _converge_split_multisite_gauge_fixed(
+    site_tensors,
+    neighbors,
+    chi,
+    chi_I,
+    max_iter,
+    conv_tol,
+    renormalize,
+    min_iter,
+    envs_init=None,
+):
+    """Run gauge-fixed multisite split-CTM to an element-wise fixed point.
+
+    Convergence is measured element-wise on the Γ-phase-fixed ``{coord: env}``
+    dict (all tensors, all coords), mirroring the single-site
+    :func:`_converge_split_gauge_fixed`.
+    """
+    if envs_init is not None:
+        envs = envs_init
+    else:
+        from tenax.algorithms._split_ctm_tensor_convergence import (
+            _initialize_split_multisite_env,
+        )
+
+        envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
+    prev = None
+    for it in range(max_iter):
+        envs = _split_step_multisite(
+            site_tensors, envs, neighbors, chi, chi_I, renormalize
+        )
+        if prev is not None and it + 1 >= min_iter:
+            if _split_env_max_diff(envs, prev) < conv_tol:
+                break
+        prev = envs
+    return envs
+
+
+def converge_split_env_2site(
+    site_tensors,
+    neighbors,
+    *,
+    chi: int,
+    max_iter: int = 100,
+    conv_tol: float = 1e-8,
+    chi_I: int | None = None,
+    renormalize: bool = True,
+    min_iter: int = 2,
+    envs_init=None,
+):
+    """Forward-only gauge-fixed 2-site split-CTM converge (no gradient).
+
+    Returns the ``{coord: SplitCTMTensorEnv}`` dict at the same Γ-phase-fixed
+    element-wise fixed point that :func:`ctm_energy_split_implicit_2site`
+    differentiates.  Forward-only energy evaluations on the 2-site split path
+    (optimizer warm-start, line-search probe, final-env eval) must use this so
+    the line-search φ(α) and the gradient dφ/dα stay mutually consistent —
+    the 2-site analogue of :func:`converge_split_env`.
+    """
+    if chi_I is None:
+        chi_I = chi
+    return _converge_split_multisite_gauge_fixed(
+        site_tensors,
+        neighbors,
+        chi,
+        chi_I,
+        max_iter,
+        conv_tol,
+        renormalize,
+        min_iter,
+        envs_init=envs_init,
+    )
+
+
+def _explicit_split_multisite_converge(
+    site_tensors,
+    neighbors,
+    *,
+    chi,
+    chi_I=None,
+    renormalize=True,
+    warmup_steps=0,
+    backprop_steps=20,
+):
+    """Explicit (unrolled) multisite split-CTM converge for warm-start AD.
+
+    ``warmup_steps`` sweeps run under ``stop_gradient``; ``backprop_steps``
+    sweeps are fully differentiable.  Uses the raw multisite sweep (no Γ
+    phase-fix) — the energy is gauge-invariant, matching the single-site
+    :func:`ad_utils.ctm_split_tensor_converge_explicit`.
+    """
+    from tenax.algorithms._split_ctm_tensor_convergence import (
+        _initialize_split_multisite_env,
+        _split_ctm_sweep_multisite,
+    )
+
+    if chi_I is None:
+        chi_I = chi
+    bars = {c: A.bar() for c, A in site_tensors.items()}
+    envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
+    for _ in range(warmup_steps):
+        envs = _split_ctm_sweep_multisite(
+            envs, site_tensors, bars, neighbors, chi, chi_I, renormalize, "2x2"
+        )
+    if warmup_steps > 0:
+        envs = jax.tree.map(jax.lax.stop_gradient, envs)
+    for _ in range(backprop_steps):
+        envs = _split_ctm_sweep_multisite(
+            envs, site_tensors, bars, neighbors, chi, chi_I, renormalize, "2x2"
+        )
+    return envs
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(2, 3))
+def _split_ctm_converge_multisite(site_tensors, envs_init, neighbors, static):
+    """Converge gauge-fixed multisite split-CTM; custom-VJP via implicit diff.
+
+    ``static = (chi, chi_I, max_iter, conv_tol, renormalize, min_iter)``.
+    Differentiates w.r.t. the ``{coord: Tensor}`` site dict; ``envs_init`` is a
+    gradient-free warm-start seed (fixed point is seed-independent).  Returns the
+    converged ``{coord: SplitCTMTensorEnv}`` dict.
+    """
+    chi, chi_I, max_iter, conv_tol, renormalize, min_iter = static
+    return _converge_split_multisite_gauge_fixed(
+        site_tensors,
+        neighbors,
+        chi,
+        chi_I,
+        max_iter,
+        conv_tol,
+        renormalize,
+        min_iter,
+        envs_init=envs_init,
+    )
+
+
+def _split_ctm_converge_multisite_fwd(site_tensors, envs_init, neighbors, static):
+    envs = _split_ctm_converge_multisite(site_tensors, envs_init, neighbors, static)
+    return envs, (site_tensors, envs, envs_init)
+
+
+def _split_ctm_converge_multisite_bwd(neighbors, static, residuals, g):
+    """Backward via Neumann series ``λ = Σ_n (J^T)^n g`` at the coupled fixed point.
+
+    ``g`` is the cotangent on the converged ``{coord: env}`` dict.  Accumulate λ
+    in env space with ``J^T = (∂f/∂envs)^T`` (site dict fixed), then project once
+    to site space with ``(∂f/∂site_tensors)^T λ``.  Direct mirror of the
+    single-site :func:`_split_ctm_converge_bwd`, now over the dict pytree.
+    """
+    chi, chi_I, max_iter, conv_tol, renormalize, min_iter = static
+    site_tensors, envs, envs_init = residuals
+
+    _, vjp_env_fn = jax.vjp(
+        lambda e: _split_step_multisite(
+            site_tensors, e, neighbors, chi, chi_I, renormalize
+        ),
+        envs,
+    )
+    _, vjp_site_fn = jax.vjp(
+        lambda s: _split_step_multisite(s, envs, neighbors, chi, chi_I, renormalize),
+        site_tensors,
+    )
+
+    max_fp_iter = min(max_iter, 50)
+    grads = g
+    lam = g
+    for _ in range(max_fp_iter):
+        grads = vjp_env_fn(grads)[0]
+        grads_inf = max(float(jnp.max(jnp.abs(x))) for x in jax.tree.leaves(grads))
+        if grads_inf < conv_tol:
+            break
+        lam = jax.tree.map(lambda li, gi: li + gi, lam, grads)
+        lam_norm = sum(float(jnp.sum(x**2)) for x in jax.tree.leaves(lam)) ** 0.5
+        if not math.isfinite(lam_norm) or lam_norm > 1e15:
+            lam = jax.tree.map(lambda li, gi: li - gi, lam, grads)
+            break
+
+    d_site = vjp_site_fn(lam)[0]
+    d_envs_init = None if envs_init is None else jax.tree.map(jnp.zeros_like, envs_init)
+    return (d_site, d_envs_init)
+
+
+_split_ctm_converge_multisite.defvjp(
+    _split_ctm_converge_multisite_fwd, _split_ctm_converge_multisite_bwd
+)
+
+
+def ctm_energy_split_explicit_2site(
+    site_tensors,
+    neighbors,
+    gate,
+    *,
+    chi=20,
+    warmup_steps=3,
+    backprop_steps=20,
+    chi_I=None,
+    renormalize=True,
+    energy_fn=None,
+    **_ignored,
+):
+    """2-site checkerboard iPEPS energy with explicit (unrolled) split-CTM AD."""
+    if energy_fn is not None:
+        raise NotImplementedError(
+            "custom energy_fn is not supported on the split path; "
+            "use fuse_virtual_legs=True."
+        )
+    if chi_I is None:
+        chi_I = chi
+
+    from tenax.algorithms._split_ctm_tensor_energy import (
+        compute_energy_split_ctm_tensor_multisite,
+    )
+
+    envs = _explicit_split_multisite_converge(
+        site_tensors,
+        neighbors,
+        chi=chi,
+        chi_I=chi_I,
+        renormalize=renormalize,
+        warmup_steps=warmup_steps,
+        backprop_steps=backprop_steps,
+    )
+    return compute_energy_split_ctm_tensor_multisite(
+        site_tensors, envs, neighbors, gate
+    )
+
+
+def ctm_energy_split_implicit_2site(
+    site_tensors,
+    neighbors,
+    gate,
+    *,
+    chi=20,
+    max_iter=100,
+    conv_tol=1e-8,
+    chi_I=None,
+    renormalize=True,
+    min_iter=2,
+    energy_fn=None,
+    envs_init=None,
+    **_ignored,
+):
+    """2-site checkerboard iPEPS energy with implicit (fixed-point) split-CTM AD.
+
+    The coupled ``(env_A, env_B)`` forward is run to a gauge-fixed element-wise
+    fixed point; the gradient comes from implicit differentiation (Neumann
+    series) over the joint ``{coord: env}`` pytree.  *envs_init* is an optional
+    gradient-free ``{coord: SplitCTMTensorEnv}`` warm-start seed.
+    """
+    if energy_fn is not None:
+        raise NotImplementedError(
+            "custom energy_fn is not supported on the split path; "
+            "use fuse_virtual_legs=True."
+        )
+    if chi_I is None:
+        chi_I = chi
+
+    from tenax.algorithms._split_ctm_tensor_energy import (
+        compute_energy_split_ctm_tensor_multisite,
+    )
+
+    static = (chi, chi_I, max_iter, conv_tol, renormalize, min_iter)
+    envs = _split_ctm_converge_multisite(site_tensors, envs_init, neighbors, static)
+    return compute_energy_split_ctm_tensor_multisite(
+        site_tensors, envs, neighbors, gate
     )

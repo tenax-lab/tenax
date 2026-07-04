@@ -38,6 +38,10 @@ _FILE_MARKERS = {
     "test_tensor_utils.py": "core",
     "test_split_ctm_tensor.py": "algorithm",
     "test_split_ctm_2site.py": "algorithm",
+    # Dense 2-site split-CTM AD (#463 Phase 2): each parity test converges a
+    # coupled fixed point + a full AD gradient (~5 min); slow-only so they stay
+    # out of the -m core CI gate and the -m "not slow" bucket.
+    "test_split_ctm_2site_ad.py": "slow",
     "test_ctm_tensor.py": "algorithm",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",

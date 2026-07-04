@@ -2846,6 +2846,71 @@ def _optimize_gs_ad_tensor_2site(
     explicit_warmup = config.gs_explicit_ad_warmup
     explicit_backward_steps = config.gs_explicit_ad_backward_steps
 
+    # Split-CTM (fuse_virtual_legs=False) 2-site path (#463 Phase 2).
+    # Routes the AD energy AND the forward-only CTMs (warm-start, line-search
+    # probe, final-env eval) through the split χ²·D⁴ forward so the memory win
+    # is real and the line-search φ(α)/dφ(α) land on the SAME fixed point the
+    # implicit-AD gradient differentiates.  The 2-site analogue of the 1-site
+    # ``use_split`` branch.  Only the simplest stable config is supported;
+    # reject the fused-env-coupled schedules up front rather than silently
+    # feeding a SplitCTMTensorEnv to fused-only machinery.
+    from tenax.algorithms._split_ctm_energy_ad import converge_split_env_2site
+    from tenax.algorithms._split_ctm_tensor_energy import (
+        compute_energy_split_ctm_tensor_2site,
+    )
+    from tenax.algorithms.ipeps_ad_policy import validate_split_ctm_config
+
+    use_split_2s = not ctm_cfg_2s.fuse_virtual_legs
+    if use_split_2s:
+        # Shared single source of truth for the CTMConfig-level rejects
+        # (recipe + the χ-changing knobs); see validate_split_ctm_config.
+        validate_split_ctm_config(ctm_cfg_2s, config.gs_recipe)
+        # iPEPSConfig-level rejects the shared helper can't see: the CTM
+        # conv_tol/max_iter/plateau and chi schedules drive fused-only
+        # env-padding machinery that crashes on a SplitCTMTensorEnv.
+        if (
+            config.gs_ctm_conv_tol_schedule is not None
+            or config.gs_ctm_max_iter_schedule is not None
+            or config.gs_plateau_patience_schedule is not None
+            or config.gs_chi_schedule_steps is not None
+        ):
+            raise NotImplementedError(
+                "CTM conv_tol/max_iter/plateau and chi (gs_chi_schedule_steps / "
+                "optimize_gs_ad_chi_schedule) schedules are not supported on the "
+                "split-CTM path; use fuse_virtual_legs=True."
+            )
+
+    def _split_forward_2s(site_tensors, envs_init=None):
+        """Forward-only gauge-fixed 2-site split-CTM converge (warm-start/probe/
+        final-env).  Lands on the same fixed point the implicit-AD loss
+        differentiates so the line-search φ(α)/dφ(α) stay consistent.
+
+        Note: the fused line-search probe honors ``probe_max_iter`` /
+        ``probe_conv_tol`` (#503) to shorten HZ φ-probes; those overrides are
+        not wired here yet, so split probes run a full converge (perf follow-up,
+        same gap as the 1-site split path)."""
+        return converge_split_env_2site(
+            site_tensors,
+            CHECKERBOARD_NEIGHBORS,
+            chi=ctm_cfg_2s.chi,
+            max_iter=ctm_cfg_2s.max_iter,
+            conv_tol=ctm_cfg_2s.conv_tol,
+            chi_I=ctm_cfg_2s.chi_I,
+            renormalize=ctm_cfg_2s.renormalize,
+            min_iter=ctm_cfg_2s.min_iter,
+            envs_init=envs_init,
+        )
+
+    def _forward_energy_2s(A_norm, B_norm, envs):
+        """Forward-only 2-site energy on the accepted envs; split or fused."""
+        if use_split_2s:
+            return compute_energy_split_ctm_tensor_2site(
+                A_norm, B_norm, envs[(0, 0)], envs[(1, 0)], gate, d_phys
+            )
+        return compute_energy_ctm_tensor_2site(
+            A_norm, B_norm, envs[(0, 0)], envs[(1, 0)], gate, d_phys
+        )
+
     # Env warm-start cache — replaces flat env_leaves threading.
     _env_cache_2s: dict[str, dict] = {}
 
@@ -2935,6 +3000,16 @@ def _optimize_gs_ad_tensor_2site(
             A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
             B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
         site_tensors = {(0, 0): A_norm, (1, 0): B_norm}
+        if use_split_2s:
+            # χ²·D⁴ split forward — no fused double layer is ever built.
+            # Schedules/bump are rejected on the split path, so the ε_T /
+            # smallest-S trigger fields are unused; set them to 0.0.
+            _env_cache_2s["envs"] = _split_forward_2s(
+                site_tensors, _env_cache_2s.get("envs", None)
+            )
+            _env_cache_2s["max_truncation_error"] = 0.0
+            _env_cache_2s["max_smallest_S"] = 0.0
+            return
         envs, info = python_loop_ctm_converge(
             site_tensors,
             CHECKERBOARD_NEIGHBORS,
@@ -2954,8 +3029,27 @@ def _optimize_gs_ad_tensor_2site(
 
     params = c4v_coeffs if use_c4v else (A, B)
     is_metric_lbfgs = (
-        config.gs_metric_precond and config.gs_optimizer.lower() == "lbfgs"
+        config.gs_metric_precond
+        and config.gs_optimizer.lower() == "lbfgs"
+        # Metric preconditioning builds its inner product from the fused
+        # CTMTensorEnv; the split path stores a SplitCTMTensorEnv, so disable
+        # it there rather than feed an incompatible env to the preconditioner.
+        # Mirrors the 1-site split guard.
+        and not use_split_2s
     )
+    if (
+        use_split_2s
+        and config.gs_metric_precond
+        and config.gs_optimizer.lower() in ("lbfgs", "cg")
+    ):
+        import warnings
+
+        warnings.warn(
+            "gs_metric_precond=True is not yet supported on the split-CTM path "
+            "(fuse_virtual_legs=False); the metric inner product needs the "
+            "fused CTMTensorEnv. Falling back to non-preconditioned optimization.",
+            stacklevel=3,
+        )
     optimizer = None if is_metric_lbfgs else _build_optimizer(config)
     opt_state = optimizer.init(params) if optimizer is not None else None
     use_ls = _use_line_search(config)
@@ -3050,6 +3144,12 @@ def _optimize_gs_ad_tensor_2site(
             A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
             B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
         site_tensors = {(0, 0): A_norm, (1, 0): B_norm}
+        if use_split_2s:
+            # Same gauge-fixed split forward + split energy as the AD loss, so
+            # φ(α) (this probe) and dφ/dα (the implicit-AD gradient) agree.
+            envs = _split_forward_2s(site_tensors, _env_cache_2s.get("envs", None))
+            _env_cache_2s["envs"] = envs
+            return float(_forward_energy_2s(A_norm, B_norm, envs))
         envs, _ = python_loop_ctm_converge(
             site_tensors,
             CHECKERBOARD_NEIGHBORS,
@@ -3626,7 +3726,12 @@ def _optimize_gs_ad_tensor_2site(
 
             # Compute search direction
             if is_cg:
-                if config.gs_metric_precond and not use_c4v:
+                # ``not use_split_2s``: the multisite metric inner product
+                # consumes the fused CTMTensorEnv edge fields; on the split
+                # path the cache holds a SplitCTMTensorEnv, so fall back to
+                # plain CG (a warning was emitted up front).  Mirrors the
+                # 1-site guard and is_metric_lbfgs.
+                if config.gs_metric_precond and not use_c4v and not use_split_2s:
                     from tenax.algorithms._metric_precond import (
                         precondition_gradient_multisite,
                     )
@@ -4160,6 +4265,12 @@ def _optimize_gs_ad_tensor_2site(
             else:
                 A_t, B_t = _normalize_params(p)
             st = {(0, 0): A_t, (1, 0): B_t}
+            if use_split_2s:
+                # Final env is the split fixed point used by the gradient;
+                # return the SplitCTMTensorEnv dict (not the fused envs).
+                envs = _split_forward_2s(st, env_init)
+                E_ = float(_forward_energy_2s(A_t, B_t, envs))
+                return A_t, B_t, envs, E_
             envs, _ = python_loop_ctm_converge(
                 st,
                 CHECKERBOARD_NEIGHBORS,
@@ -4184,6 +4295,11 @@ def _optimize_gs_ad_tensor_2site(
         # producer-side guarantee that the snapshot is at ctm_cfg_2s.chi.
         _best_env_init_2s = best_env_cache_2s.get("envs", None)
         if _best_env_init_2s:
+            # On the split path this padding is a safe no-op: split chi is fixed
+            # (schedules/bump rejected up front), so _target_chi_2s == the env's
+            # chi and pad_dense_env_chi short-circuits before any fused-only
+            # access.  If split chi ever becomes mutable, guard this with
+            # ``not use_split_2s``.
             # Issue #514: see 1-site finalize.  Pad to the larger of the
             # static ``ctm_cfg_2s.chi`` and the env_cache's actual chi
             # so a bumped env is never asked to shrink.
