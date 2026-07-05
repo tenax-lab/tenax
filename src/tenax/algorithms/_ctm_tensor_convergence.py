@@ -52,6 +52,7 @@ from tenax.algorithms._ctm_tensor_paired_moves import (
 from tenax.core import EPS
 from tenax.core.lattice import Lattice
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.linalg import _dense_svd
 
 # ------------------------------------------------------------------ #
 # Sweep + renormalize                                                  #
@@ -593,7 +594,7 @@ def _corner_singular_values(C):  # noqa: N802
         svs = []
         for key in C._block_keys:
             block = C.blocks[key]
-            s = jnp.linalg.svd(block, compute_uv=False)
+            s = _dense_svd(block, compute_uv=False)
             svs.append(s)
         if svs:
             all_svs = jnp.concatenate(svs)
@@ -601,7 +602,7 @@ def _corner_singular_values(C):  # noqa: N802
         return jnp.zeros(0)
     # DenseTensor or raw array
     data = _tensor_leaf_data(C)
-    return jnp.linalg.svd(data, compute_uv=False)
+    return _dense_svd(data, compute_uv=False)
 
 
 def ctm_tensor(

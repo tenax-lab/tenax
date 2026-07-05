@@ -46,6 +46,7 @@ import numpy as np
 from tenax.algorithms._ctm_truncation_error import compute_truncation_error
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.linalg import _dense_svd
 
 OUT = FlowDirection.OUT
 
@@ -704,7 +705,7 @@ def _svd_projector_symmetric(
         if M_q.size == 0:
             continue
 
-        U_M, S_M, Vh_M = jnp.linalg.svd(M_q, full_matrices=False)
+        U_M, S_M, Vh_M = _dense_svd(M_q, full_matrices=False)
         U_M, S_M, Vh_M = _fix_svd_signs(U_M, S_M, Vh_M)
         V_M = Vh_M.conj().T
 
@@ -987,7 +988,7 @@ def _compute_projector_tensor(
             # (not AD); return placeholder so backward stays clean.
             _eps_T = jnp.asarray(0.0)
         else:
-            U_M_full, S_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
+            U_M_full, S_full, Vh_full = _dense_svd(M, full_matrices=False)
             k = min(chi, S_full.shape[0])
             from tenax.algorithms._ad_primitives import _fix_svd_signs
 

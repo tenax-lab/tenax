@@ -27,6 +27,7 @@ from tenax.algorithms.ipeps_config import (
     SplitCTMEnvironment,
 )
 from tenax.algorithms.ipeps_ctm_init import _build_double_layer
+from tenax.linalg import _dense_svd
 
 
 def _ctm_move_eigh(
@@ -392,7 +393,7 @@ def _svd_split_edge(
     T_4d = T_full.reshape(chi, D, D, chi)
     T_mat = T_4d.reshape(chi * D, D * chi)
 
-    U, s, Vh = jnp.linalg.svd(T_mat, full_matrices=False)
+    U, s, Vh = _dense_svd(T_mat, full_matrices=False)
     k = min(chi_I, len(s))
     sqrt_s = jnp.sqrt(s[:k])
     T_ket = (U[:, :k] * sqrt_s[None, :]).reshape(chi, D, k)

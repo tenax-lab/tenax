@@ -39,6 +39,7 @@ from tenax.algorithms.ipeps_ctm_moves import (
     _split_ctm_move,
 )
 from tenax.core import EPS
+from tenax.linalg import _dense_svd
 
 
 def _ctm_sweep(
@@ -131,7 +132,7 @@ def ctm(
     def body_fn(carry):
         env_i, prev_sv_i, iteration, _ = carry
         env_i = _ctm_sweep(env_i, a, chi, renormalize, projector_method)
-        current_sv = jnp.linalg.svd(env_i.C1, compute_uv=False)
+        current_sv = _dense_svd(env_i.C1, compute_uv=False)
         diff = _ctm_sv_diff(current_sv, prev_sv_i)
         converged = diff < conv_tol
         return (env_i, current_sv, iteration + 1, converged)
@@ -258,8 +259,8 @@ def ctm_2site(
     def body_fn(carry):
         eA, eB, psA, psB, iteration, _ = carry
         eA, eB = _ctm_2site_sweep(eA, eB, a_A, a_B, chi, renormalize)
-        sv_A = jnp.linalg.svd(eA.C1, compute_uv=False)
-        sv_B = jnp.linalg.svd(eB.C1, compute_uv=False)
+        sv_A = _dense_svd(eA.C1, compute_uv=False)
+        sv_B = _dense_svd(eB.C1, compute_uv=False)
         diff_A = _ctm_sv_diff(sv_A, psA)
         diff_B = _ctm_sv_diff(sv_B, psB)
         converged = jnp.maximum(diff_A, diff_B) < conv_tol
@@ -381,7 +382,7 @@ def ctm_split(
     for _ in range(config.max_iter):
         env = _split_ctm_sweep(env, A, chi, chi_I, config.renormalize)
 
-        current_sv = jnp.linalg.svd(env.C1, compute_uv=False)
+        current_sv = _dense_svd(env.C1, compute_uv=False)
         if prev_sv is not None:
             diff = _ctm_sv_diff(current_sv, prev_sv)
             if float(diff) < config.conv_tol:

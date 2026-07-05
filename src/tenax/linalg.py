@@ -19,6 +19,8 @@ from collections.abc import Sequence
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.lax.linalg import SvdAlgorithm as _SvdAlgorithm
+from jax.lax.linalg import svd as _lax_svd
 
 from tenax._rsvd_core import hmt_rsvd
 from tenax.core.index import FlowDirection, Label, TensorIndex
@@ -31,6 +33,39 @@ from tenax.core.tensor import (
 )
 
 # ---------- Shared helpers ----------
+
+
+def _dense_svd(
+    matrix: jax.Array,
+    full_matrices: bool = False,
+    compute_uv: bool = True,
+):
+    """Dense SVD that avoids the cuSOLVER ``gesvdj`` NaN on GPU.
+
+    Drop-in replacement for ``jnp.linalg.svd(matrix, full_matrices=...,
+    compute_uv=...)`` (returns ``(U, s, Vh)`` when ``compute_uv`` else ``s``).
+
+    On CUDA, jaxlib>=0.10.2 lowers ``jnp.linalg.svd`` to ``cusolver_gesvdj_ffi``
+    (the Jacobi SVD), whose iteration fails to converge (``info != 0`` -> the
+    output is filled with NaN) on ill-conditioned f64 matrices such as the HOTRG
+    HOSVD and CTM environment/projector tensors. The QR-based algorithm
+    (``gesvd``) always converges and matches the CPU/LAPACK result. CPU (LAPACK
+    ``gesdd``) is unaffected and faster, so only the GPU path is switched.
+
+    Ref: cuSOLVER 12.2.2.18 (jaxlib 0.10.1) -> 12.2.6.9 (jaxlib 0.10.2) regressed
+    ``gesvdj`` convergence on ill-conditioned inputs; JAX then NaN-fills the
+    result on ``info != 0`` (jax-ml/jax gesvdj non-convergence issue).
+    """
+    if jax.default_backend() == "gpu":
+        return _lax_svd(
+            matrix,
+            full_matrices=full_matrices,
+            compute_uv=compute_uv,
+            algorithm=_SvdAlgorithm.QR,
+        )
+    return jnp.linalg.svd(
+        matrix, full_matrices=full_matrices, compute_uv=compute_uv
+    )
 
 
 def _has_nonstandard_blocks(tensor: SymmetricTensor) -> bool:
@@ -317,12 +352,10 @@ def _truncated_svd_symmetric(
     if _batch:
         _svd_by_q = _grouped_decomp_by_shape(
             _mats_by_q,
-            lambda M: jnp.linalg.svd(M, full_matrices=False),
+            lambda M: _dense_svd(M),
         )
     else:
-        _svd_by_q = {
-            q: jnp.linalg.svd(M, full_matrices=False) for q, M in _mats_by_q.items()
-        }
+        _svd_by_q = {q: _dense_svd(M) for q, M in _mats_by_q.items()}
 
     for q in _mats_by_q:
         U_q, s_q, Vh_q = _svd_by_q[q]
@@ -1776,7 +1809,7 @@ def svd(
     matrix = dense_perm.reshape(left_dim, right_dim)
 
     # SVD (not JIT-able at this level due to dynamic truncation)
-    U, s, Vh = jnp.linalg.svd(matrix, full_matrices=False)
+    U, s, Vh = _dense_svd(matrix)
 
     # Preserve the full singular-value spectrum before truncation
     s_full = s
@@ -1876,7 +1909,7 @@ def _rsvd_matrix(
         n_power_iter=n_power_iter,
         key=key,
         qr_fn=jnp.linalg.qr,
-        svd_fn=lambda b: jnp.linalg.svd(b, full_matrices=False),
+        svd_fn=lambda b: _dense_svd(b),
     )
 
 

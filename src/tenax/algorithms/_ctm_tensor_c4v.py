@@ -31,6 +31,7 @@ from tenax.algorithms._ctm_tensor_moves import _flip_leg_flow
 from tenax.contraction.contractor import contract
 from tenax.core.index import TensorIndex
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.linalg import _dense_svd
 
 
 def _c4v_sweep(
@@ -224,7 +225,7 @@ def ctm_tensor_c4v(
     for _ in range(max_iter):
         C, T = _c4v_sweep(C, T, a, chi, projector_method)
 
-        current_sv = jnp.linalg.svd(C.todense(), compute_uv=False)
+        current_sv = _dense_svd(C.todense(), compute_uv=False)
         if prev_sv is not None:
             diff = _ctm_sv_diff(current_sv, prev_sv)
             if float(diff) < conv_tol:

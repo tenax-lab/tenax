@@ -27,6 +27,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.linalg import _dense_svd
+
 
 class CTMRGGradientError(RuntimeError):
     """Raised when the CTM adjoint system is non-contractive (rho(J^T) >= 1)."""
@@ -120,7 +122,7 @@ def truncated_svd_ad(
     Returns:
         ``(U, s, Vh)`` truncated to *chi*.
     """
-    U, s_full, Vh = jnp.linalg.svd(M, full_matrices=False)
+    U, s_full, Vh = _dense_svd(M, full_matrices=False)
     k = min(chi, s_full.shape[0])
     s_trunc = s_full[:k]
     s_trunc = _zero_subrank_singular_values(s_trunc, s_full, k)
@@ -135,7 +137,7 @@ def _truncated_svd_ad_fwd(
     chi: int,
 ) -> tuple[tuple[jax.Array, jax.Array, jax.Array], tuple]:
     """Forward pass — store full SVD for backward."""
-    U_full, s_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
+    U_full, s_full, Vh_full = _dense_svd(M, full_matrices=False)
     U_full, s_full, Vh_full = _fix_svd_signs(U_full, s_full, Vh_full)
     k = min(chi, s_full.shape[0])
     s_trunc = s_full[:k]
@@ -286,7 +288,7 @@ def truncated_svd_ad_vh_only(
     Uses the same Lorentzian-regularized backward as ``truncated_svd_ad``
     but with ``dU=0``, saving memory by not storing U in residuals.
     """
-    U, s_full, Vh = jnp.linalg.svd(M, full_matrices=False)
+    U, s_full, Vh = _dense_svd(M, full_matrices=False)
     k = min(chi, s_full.shape[0])
     s_trunc = s_full[:k]
     s_trunc = _zero_subrank_singular_values(s_trunc, s_full, k)
@@ -297,7 +299,7 @@ def truncated_svd_ad_vh_only(
 
 def _truncated_svd_ad_vh_only_fwd(M, chi):
     """Forward pass — store full SVD for backward but return only (s, Vh)."""
-    U_full, s_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
+    U_full, s_full, Vh_full = _dense_svd(M, full_matrices=False)
     U_full, s_full, Vh_full = _fix_svd_signs(U_full, s_full, Vh_full)
     k = min(chi, s_full.shape[0])
     s_trunc = s_full[:k]
@@ -337,12 +339,12 @@ def regularized_svd(M: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
 
     Returns a plain ``(U, s, Vh)`` tuple (not ``SVDResult``).
     """
-    result = jnp.linalg.svd(M, full_matrices=False)
+    result = _dense_svd(M, full_matrices=False)
     return _fix_svd_signs(result.U, result.S, result.Vh)
 
 
 def _regularized_svd_fwd(M):
-    result = jnp.linalg.svd(M, full_matrices=False)
+    result = _dense_svd(M, full_matrices=False)
     U, s, Vh = _fix_svd_signs(result.U, result.S, result.Vh)
     return (U, s, Vh), (U, s, Vh)
 

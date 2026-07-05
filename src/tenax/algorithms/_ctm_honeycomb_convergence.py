@@ -17,6 +17,7 @@ import jax.numpy as jnp
 
 from tenax.algorithms._ctm_honeycomb_env import HoneycombCTMEnv
 from tenax.algorithms._ctm_honeycomb_topology import Coord
+from tenax.linalg import _dense_svd
 
 __all__ = ["check_honeycomb_convergence"]
 
@@ -56,8 +57,8 @@ def _corner_sv_diff(
         for alpha in (0, 1, 2):
             C_old = getattr(env_old, f"C{alpha}").todense()
             C_new = getattr(env_new, f"C{alpha}").todense()
-            sv_old = jnp.linalg.svd(C_old, compute_uv=False)
-            sv_new = jnp.linalg.svd(C_new, compute_uv=False)
+            sv_old = _dense_svd(C_old, compute_uv=False)
+            sv_new = _dense_svd(C_new, compute_uv=False)
             sv_old = sv_old / (jnp.sum(sv_old) + 1e-15)
             sv_new = sv_new / (jnp.sum(sv_new) + 1e-15)
             diff = float(jnp.max(jnp.abs(sv_new - sv_old)))

@@ -18,6 +18,7 @@ import numpy as np
 
 from tenax.core.index import TensorIndex
 from tenax.core.tensor import SymmetricTensor, Tensor
+from tenax.linalg import _dense_svd
 
 
 def build_expansion_tensor_dense(
@@ -102,7 +103,7 @@ def expand_and_truncate_dense(
         expanded = jnp.concatenate([site, P], axis=-1)
         chi_l, d, chi_exp = expanded.shape
         mat = expanded.reshape(chi_l * d, chi_exp)
-        U, S, Vh = jnp.linalg.svd(mat, full_matrices=False)
+        U, S, Vh = _dense_svd(mat, full_matrices=False)
 
         k = _truncation_bond_dim(S, max_bond_dim, svd_trunc_err)
         A = U[:, :k].reshape(chi_l, d, k)
@@ -123,7 +124,7 @@ def expand_and_truncate_dense(
         expanded = jnp.concatenate([P, site], axis=0)
         chi_exp, d, chi_r = expanded.shape
         mat = expanded.reshape(chi_exp, d * chi_r)
-        U, S, Vh = jnp.linalg.svd(mat, full_matrices=False)
+        U, S, Vh = _dense_svd(mat, full_matrices=False)
 
         k = _truncation_bond_dim(S, max_bond_dim, svd_trunc_err)
         B = Vh[:k, :].reshape(k, d, chi_r)
@@ -205,7 +206,7 @@ def _hybrid_ltr(site, neighbor, P, max_bond_dim, num_extra, hybrid, svd_trunc_er
     M_mat = site.reshape(chi_l * d, chi_r)
 
     # Full SVD of site tensor
-    U, S, Vh = jnp.linalg.svd(M_mat, full_matrices=False)
+    U, S, Vh = _dense_svd(M_mat, full_matrices=False)
 
     # Truncate to χ, compute truncation error
     k = _truncation_bond_dim(S, max_bond_dim, svd_trunc_err)
@@ -235,7 +236,7 @@ def _hybrid_ltr(site, neighbor, P, max_bond_dim, num_extra, hybrid, svd_trunc_er
 
         # Concatenate [M | Q_scaled] and re-SVD to smoothly mix
         expanded = jnp.concatenate([M_mat, Q_scaled], axis=1)
-        U2, S2, Vh2 = jnp.linalg.svd(expanded, full_matrices=False)
+        U2, S2, Vh2 = _dense_svd(expanded, full_matrices=False)
         k2 = _truncation_bond_dim(S2, max_bond_dim, svd_trunc_err)
         A = U2[:, :k2].reshape(chi_l, d, k2)
         remainder = jnp.diag(S2[:k2]) @ Vh2[:k2, :]
@@ -272,7 +273,7 @@ def _hybrid_rtl(site, neighbor, P, max_bond_dim, num_extra, hybrid, svd_trunc_er
     M_mat = site.reshape(chi_l, d * chi_r)
 
     # Full SVD of site tensor
-    U, S, Vh = jnp.linalg.svd(M_mat, full_matrices=False)
+    U, S, Vh = _dense_svd(M_mat, full_matrices=False)
 
     # Truncate, compute truncation error
     k = _truncation_bond_dim(S, max_bond_dim, svd_trunc_err)
@@ -301,7 +302,7 @@ def _hybrid_rtl(site, neighbor, P, max_bond_dim, num_extra, hybrid, svd_trunc_er
 
         # Concatenate [Q_scaled; M] along left bond (rows) and re-SVD
         expanded = jnp.concatenate([Q_scaled, M_mat], axis=0)
-        U2, S2, Vh2 = jnp.linalg.svd(expanded, full_matrices=False)
+        U2, S2, Vh2 = _dense_svd(expanded, full_matrices=False)
         k2 = _truncation_bond_dim(S2, max_bond_dim, svd_trunc_err)
         B = Vh2[:k2, :].reshape(k2, d, chi_r)
         remainder = U2[:, :k2] @ jnp.diag(S2[:k2])
