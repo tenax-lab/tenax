@@ -134,6 +134,7 @@ import numpy as np
 
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.tensor import DenseTensor, Tensor
+from tenax.linalg import _dense_svd
 
 __all__ = [
     "compute_honeycomb_corner_biorthogonal_projector",
@@ -320,7 +321,7 @@ def compute_honeycomb_projector(
         # For complex matrices it breaks the SVD identity.  We apply our
         # own per-column gauge fix below, with the inverse ``phase`` going
         # to V (so ``M = U_new S V_new^dagger`` is preserved exactly).
-        U_full, S_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
+        U_full, S_full, Vh_full = _dense_svd(M, full_matrices=False)
         # SVD truncation is bounded by the matrix rank: min(chi_in*d2, chi_out).
         k = min(chi, S_full.shape[0])
         U_k = U_full[:, :k]
@@ -573,7 +574,7 @@ def compute_honeycomb_corner_biorthogonal_projector(
     # The biorthogonality identity follows from this SVD: U_χ · diag(S) · #
     # V_χ^† == R_U · R_L^T (truncated).                                   #
     # ------------------------------------------------------------------ #
-    U_svd, S, Vh = jnp.linalg.svd(R_U @ R_L.T, full_matrices=False)
+    U_svd, S, Vh = _dense_svd(R_U @ R_L.T, full_matrices=False)
 
     k = int(min(chi, S.shape[0]))
     U_k = U_svd[:, :k]  # (n_qr_U, k)

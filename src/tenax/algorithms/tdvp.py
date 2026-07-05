@@ -25,6 +25,7 @@ from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.mps import FiniteMPS
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, Tensor
+from tenax.linalg import _dense_svd
 from tenax.network.network import TensorNetwork
 
 
@@ -709,7 +710,7 @@ def _tdvp_step_2site(
         # SVD truncate
         chi_l_dim, dl, dr, chi_r_dim = theta_shape
         mat = evolved_4d.reshape(chi_l_dim * dl, dr * chi_r_dim)
-        U, s, Vh = jnp.linalg.svd(mat, full_matrices=False)
+        U, s, Vh = _dense_svd(mat, full_matrices=False)
 
         max_bond = config.max_bond_dim
         if config.svd_trunc_err is not None:
@@ -781,7 +782,7 @@ def _tdvp_step_2site(
 
         chi_l_dim, dl, dr, chi_r_dim = theta_shape
         mat = evolved_4d.reshape(chi_l_dim * dl, dr * chi_r_dim)
-        U, s, Vh = jnp.linalg.svd(mat, full_matrices=False)
+        U, s, Vh = _dense_svd(mat, full_matrices=False)
 
         max_bond = config.max_bond_dim
         if config.svd_trunc_err is not None:

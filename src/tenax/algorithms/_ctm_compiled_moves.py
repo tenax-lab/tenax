@@ -23,6 +23,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from tenax.algorithms.ad_utils import _fix_svd_signs, truncated_svd_ad
+from tenax.linalg import _dense_svd
 
 # ------------------------------------------------------------------ #
 # Helpers                                                              #
@@ -85,7 +86,7 @@ def _svd_projector_raw(
     if has_tracers:
         U_M, S_M, Vh_M = truncated_svd_ad(M, chi)
     else:
-        U_full, S_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
+        U_full, S_full, Vh_full = _dense_svd(M, full_matrices=False)
         U_full, S_full, Vh_full = _fix_svd_signs(U_full, S_full, Vh_full)
         k = min(chi, S_full.shape[0])
         S_M = S_full[:k]

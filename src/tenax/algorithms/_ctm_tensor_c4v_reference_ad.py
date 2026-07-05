@@ -43,6 +43,7 @@ from tenax.algorithms._lorentzian_eigh import (
 )
 from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.linalg import _dense_svd
 
 __all__ = [
     "_truncated_eigh_lorentzian_backward",
@@ -100,7 +101,7 @@ def _ctm_tensor_c4v_reference_fixed_point_reduced(
     for it in range(int(config.max_iter)):
         C, T = _c4v_sweep(C, T, a, config.chi, config.projector_method)
         iters = it + 1
-        current_sv = jnp.linalg.svd(C.todense(), compute_uv=False)
+        current_sv = _dense_svd(C.todense(), compute_uv=False)
 
         if prev_sv is not None:
             residual = float(_ctm_sv_diff(current_sv, prev_sv))

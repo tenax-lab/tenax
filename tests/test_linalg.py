@@ -801,3 +801,53 @@ class TestBatchedTracedSvdAD:
         }
         T = SymmetricTensor(blocks, (idx_l, idx_r))
         self._check(T, do_fd=False)
+
+
+# ------------------------------------------------------------------ #
+# Ill-conditioned SVD must not NaN (jaxlib>=0.10.2 GPU gesvdj guard)  #
+# ------------------------------------------------------------------ #
+
+
+def _ill_conditioned_dense(n: int = 128):
+    """A finite, ill-conditioned (cond~1e16) symmetric DenseTensor.
+
+    Singular values decay smoothly 1e0 -> 1e-16. This is the regime of HOTRG /
+    CTM environment tensors that trips the cuSOLVER gesvdj (Jacobi) SVD.
+    """
+    rng = np.random.default_rng(0)
+    Q = np.linalg.qr(rng.standard_normal((n, n)))[0]
+    A = (Q * np.logspace(0, -16, n)) @ Q.T
+    sym = U1Symmetry()
+    ch = np.zeros(n, dtype=np.int32)
+    idx = (
+        TensorIndex.from_charges(sym, ch, IN, label="l"),
+        TensorIndex.from_charges(sym, ch, OUT, label="r"),
+    )
+    return DenseTensor(jnp.asarray(A), idx), A
+
+
+class TestSvdIllConditioned:
+    """Regression guard for the jaxlib>=0.10.2 GPU cuSOLVER ``gesvdj`` (Jacobi)
+    non-convergence NaN: on CUDA the default SVD returns all-NaN U/s/Vh for
+    ill-conditioned f64 matrices. On CPU (LAPACK gesdd) this is a robustness
+    baseline; on GPU it directly catches the NaN-filled decomposition.
+    """
+
+    def test_svd_no_nan_on_ill_conditioned(self):
+        from tenax.linalg import svd
+
+        T, A = _ill_conditioned_dense()
+        U, s, Vh, _ = svd(T, left_labels=["l"], right_labels=["r"])
+        assert not np.isnan(np.asarray(U.todense())).any(), "U has NaN"
+        assert not np.isnan(np.asarray(Vh.todense())).any(), "Vh has NaN"
+        assert not np.isnan(np.asarray(s)).any(), "s has NaN"
+
+    def test_svd_singular_values_match_numpy(self):
+        from tenax.linalg import svd
+
+        T, A = _ill_conditioned_dense()
+        _, s, _, _ = svd(T, left_labels=["l"], right_labels=["r"])
+        s_ref = np.linalg.svd(A, compute_uv=False)
+        k = 16  # top of the spectrum is well-determined
+        got = np.sort(np.asarray(s))[::-1][:k]
+        np.testing.assert_allclose(got, s_ref[:k], rtol=1e-6)

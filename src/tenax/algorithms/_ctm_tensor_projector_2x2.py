@@ -19,6 +19,7 @@ from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.linalg import _dense_svd
 
 __all__ = ["_build_enlarged_corner", "_compute_2x2_projector"]
 
@@ -41,7 +42,7 @@ def _gauge_fixed_svd(
     mismatch, but it breaks the 2x2 closure ``P_bot @ P_top = I`` which
     has no intervening matrix.
     """
-    U, s, Vh = jnp.linalg.svd(M, full_matrices=False)
+    U, s, Vh = _dense_svd(M, full_matrices=False)
     max_idx = jnp.argmax(jnp.abs(U), axis=0)  # (k,)
     diag = U[max_idx, jnp.arange(U.shape[1])]
     phases = jnp.where(jnp.abs(diag) > 0, diag / jnp.abs(diag), 1.0)

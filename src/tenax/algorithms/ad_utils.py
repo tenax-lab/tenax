@@ -59,6 +59,7 @@ from tenax.algorithms._split_ctm_tensor import (
     ctm_split_tensor,
 )
 from tenax.algorithms.ipeps_config import CTMConfig
+from tenax.linalg import _dense_svd
 
 _logger = logging.getLogger(__name__)
 
@@ -1116,7 +1117,7 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
                 prev_env_arrays[c] = env_arrays
         else:
             for c in sorted(envs):
-                sv = jnp.linalg.svd(envs[c].C1.todense(), compute_uv=False)
+                sv = _dense_svd(envs[c].C1.todense(), compute_uv=False)
                 if c in prev_svs:
                     if float(_ctm_sv_diff_local(sv, prev_svs[c])) >= config.conv_tol:
                         converged = False

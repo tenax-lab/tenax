@@ -17,6 +17,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from tenax.linalg import _dense_svd
+
 # ------------------------------------------------------------------ #
 # Dense path                                                           #
 # ------------------------------------------------------------------ #
@@ -45,7 +47,7 @@ def padded_svd_dense(
     mat = theta.reshape(m, n)
 
     # Full (thin) SVD -- always returns min(m, n) singular values
-    U_full, s_full, Vh_full = jnp.linalg.svd(mat, full_matrices=False)
+    U_full, s_full, Vh_full = _dense_svd(mat, full_matrices=False)
     # U_full: (m, k), s_full: (k,), Vh_full: (k, n) where k = min(m, n)
     k = s_full.shape[0]
 
@@ -101,7 +103,7 @@ def padded_svd_blocks(
     # vmap SVD over all blocks
     # Each block is (M_max, N_max); SVD produces U (M_max, sv_per_block),
     # s (sv_per_block,), Vh (sv_per_block, N_max).
-    _, s_all, _ = jax.vmap(lambda m: jnp.linalg.svd(m, full_matrices=False))(pba.data)
+    _, s_all, _ = jax.vmap(lambda m: _dense_svd(m, full_matrices=False))(pba.data)
     # s_all: (num_blocks, sv_per_block)
 
     # Mask out padding: singular values from padded rows/cols are spurious.
@@ -183,7 +185,7 @@ def padded_svd_blocks_full(
     sv_per_block = min(M_max, N_max)
 
     # --- 1. vmap SVD over all blocks ---
-    U_all, s_all, Vh_all = jax.vmap(lambda m: jnp.linalg.svd(m, full_matrices=False))(
+    U_all, s_all, Vh_all = jax.vmap(lambda m: _dense_svd(m, full_matrices=False))(
         pba.data
     )
     # U_all:  (num_blocks, M_max, sv_per_block)

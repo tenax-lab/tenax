@@ -42,6 +42,7 @@ from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.mps import InfiniteMPS
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.linalg import _dense_svd
 
 # Optional Cython BLAS acceleration for hot loops.
 # Respect TENAX_DISABLE_CYTHON_BLAS env var consistently.
@@ -899,7 +900,7 @@ def _idmrg_sweep(
 
         chi_l, d_l, d_r, chi_r = theta_shape
         matrix = theta_opt.reshape(chi_l * d_l, d_r * chi_r)
-        U, s_full, Vt = jnp.linalg.svd(matrix, full_matrices=False)
+        U, s_full, Vt = _dense_svd(matrix, full_matrices=False)
 
         n_keep = min(config.max_bond_dim, len(s_full))
         U = U[:, :n_keep]
@@ -957,7 +958,7 @@ def _idmrg_sweep(
 
     chi_l, d_l, d_r, chi_r = theta_shape
     matrix = theta_opt.reshape(chi_l * d_l, d_r * chi_r)
-    U, s_full, Vt = jnp.linalg.svd(matrix, full_matrices=False)
+    U, s_full, Vt = _dense_svd(matrix, full_matrices=False)
     n_keep = min(config.max_bond_dim, len(s_full))
     U = U[:, :n_keep]
     s_center = s_full[:n_keep]
@@ -1008,7 +1009,7 @@ def _idmrg_sweep(
         # ---- SVD and truncate ----
         chi_l, d_l, d_r, chi_r = theta_shape
         matrix = theta_opt.reshape(chi_l * d_l, d_r * chi_r)
-        U, s_full, Vt = jnp.linalg.svd(matrix, full_matrices=False)
+        U, s_full, Vt = _dense_svd(matrix, full_matrices=False)
 
         n_keep = min(config.max_bond_dim, len(s_full))
         if config.svd_trunc_err is not None:
@@ -1530,7 +1531,7 @@ def _idmrg_1site_sweep(
         # ---- SVD to get A_L and A_R ----
         chi_l, d_l, d_r, chi_r = theta_shape
         matrix = theta_opt.reshape(chi_l * d_l, d_r * chi_r)
-        U, s_full, Vt = jnp.linalg.svd(matrix, full_matrices=False)
+        U, s_full, Vt = _dense_svd(matrix, full_matrices=False)
 
         n_keep = min(config.max_bond_dim, len(s_full))
         if config.svd_trunc_err is not None:
@@ -1568,7 +1569,7 @@ def _idmrg_1site_sweep(
         # new_A_R has s absorbed; extract s_center and right-canonical A_R
         chi_c = A_L.shape[2]
         mat_r = new_A_R.reshape(chi_c, d * chi_r)
-        U_r, s_r, Vt_r = jnp.linalg.svd(mat_r, full_matrices=False)
+        U_r, s_r, Vt_r = _dense_svd(mat_r, full_matrices=False)
         s_norm = jnp.linalg.norm(s_r)
         if s_norm > 1e-15:
             s_center = s_r / s_norm

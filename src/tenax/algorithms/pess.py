@@ -10,6 +10,7 @@ import numpy as np
 from scipy.linalg import expm
 
 from tenax.algorithms.auto_mpo import spin_half_ops, spin_one_ops
+from tenax.linalg import _dense_svd
 
 D_PHYS_DEFAULT = 3  # spin-1
 
@@ -110,7 +111,7 @@ def hosvd_truncate(
 
     # Site a
     mat_a = theta_reordered.reshape(D_ext_a * d, D_ext_b * d * D_ext_c * d)
-    U_a, _, _ = jnp.linalg.svd(mat_a, full_matrices=False)
+    U_a, _, _ = _dense_svd(mat_a, full_matrices=False)
     D_int_a = min(D_max, U_a.shape[1])
     U_a = U_a[:, :D_int_a]
 
@@ -118,7 +119,7 @@ def hosvd_truncate(
     mat_b = theta_reordered.transpose(2, 3, 0, 1, 4, 5).reshape(
         D_ext_b * d, D_ext_a * d * D_ext_c * d
     )
-    U_b, _, _ = jnp.linalg.svd(mat_b, full_matrices=False)
+    U_b, _, _ = _dense_svd(mat_b, full_matrices=False)
     D_int_b = min(D_max, U_b.shape[1])
     U_b = U_b[:, :D_int_b]
 
@@ -126,7 +127,7 @@ def hosvd_truncate(
     mat_c = theta_reordered.transpose(4, 5, 0, 1, 2, 3).reshape(
         D_ext_c * d, D_ext_a * d * D_ext_b * d
     )
-    U_c, _, _ = jnp.linalg.svd(mat_c, full_matrices=False)
+    U_c, _, _ = _dense_svd(mat_c, full_matrices=False)
     D_int_c = min(D_max, U_c.shape[1])
     U_c = U_c[:, :D_int_c]
 
@@ -140,12 +141,12 @@ def hosvd_truncate(
 
     # Extract per-bond singular value vectors from the core. We only need the
     # singular values, so skip the U/V allocations via compute_uv=False.
-    sig_a = jnp.linalg.svd(core.reshape(D_int_a, D_int_b * D_int_c), compute_uv=False)
-    sig_b = jnp.linalg.svd(
+    sig_a = _dense_svd(core.reshape(D_int_a, D_int_b * D_int_c), compute_uv=False)
+    sig_b = _dense_svd(
         core.transpose(1, 0, 2).reshape(D_int_b, D_int_a * D_int_c),
         compute_uv=False,
     )
-    sig_c = jnp.linalg.svd(
+    sig_c = _dense_svd(
         core.transpose(2, 0, 1).reshape(D_int_c, D_int_a * D_int_b),
         compute_uv=False,
     )
