@@ -42,6 +42,9 @@ _FILE_MARKERS = {
     # tests run in the algorithm bucket; the AD parity tests in this file carry
     # their own explicit @pytest.mark.slow so they stay out of -m "not slow".
     "test_split_ctm_2site_symmetric.py": "algorithm",
+    # 2-site split-CTM fermionic (#463 Phase 4): block-sparse forward parity vs
+    # the fused sweep; algorithm bucket like its symmetric/split siblings.
+    "test_split_ctm_2site_fermionic.py": "algorithm",
     # Dense 2-site split-CTM AD (#463 Phase 2): each parity test converges a
     # coupled fixed point + a full AD gradient (~5 min); slow-only so they stay
     # out of the -m core CI gate and the -m "not slow" bucket.

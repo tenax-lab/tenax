@@ -214,6 +214,171 @@ _SPLIT_DIRECTION_MOVES = {
 
 
 # ------------------------------------------------------------------ #
+# Fermionic (graded) routing — #463 Phase 4                            #
+# ------------------------------------------------------------------ #
+#
+# The split 2×2 grow/projector kernels build double-layer corners and edges
+# from graded ``A.bar()`` alone; they do NOT carry the order-dependent Koszul
+# signs that the *fused* 2-site path applies via its ``*_2plaq_fused`` variants
+# (gated by ``_env_is_fermionic``).  A raw fermionic split sweep therefore
+# diverges from the proven fused sweep — the corner GROW alone is already wrong
+# (#641).  Until a bounded (χ²·D⁴) Koszul-correct split kernel exists, fermionic
+# envs route through the fused sweep on the merged (χ²·D⁶) representation, then
+# the output edges are re-split back into ket/bra halves for storage.  The merge
+# (``_split_env_to_tensor_standard``) is a faithful inverse of the split, so this
+# is exact — see ``test_split_ctm_2site_fermionic``.
+
+
+def _split_env_is_fermionic(env: SplitCTMTensorEnv) -> bool:
+    """True when the split env tensors are graded (fermionic) SymmetricTensors."""
+    from tenax.core.tensor import SymmetricTensor
+
+    C1 = env.C1
+    return isinstance(C1, SymmetricTensor) and C1.indices[0].symmetry.is_fermionic
+
+
+# Per-edge spec to re-split a fused ``CTMTensorEnv`` edge into ket/bra halves.
+# Inverse of ``_split_env_to_tensor_standard._merge_edge``: the fused D² leg is
+# split back into its two parents (``d_ket``/``d_bra``), then an SVD over the
+# interlayer bond re-creates the ket ``(chi, D, chi_I)`` and bra ``(chi_I, D,
+# chi)`` halves with the standard split labels.
+_RESPLIT_SPEC = {
+    "T1": dict(
+        d2="u2",
+        left=("t1_l", "u_ket"),
+        right=("u_bra", "t1_r"),
+        ket_relabels={"t1_l": "t1k_l", "_svd_bond": "t1k_I"},
+        bra_relabels={"_svd_bond": "t1b_I", "t1_r": "t1b_r"},
+    ),
+    "T2": dict(
+        d2="r2",
+        left=("t2_u", "r_ket"),
+        right=("r_bra", "t2_d"),
+        ket_relabels={"t2_u": "t2k_u", "_svd_bond": "t2k_I"},
+        bra_relabels={"_svd_bond": "t2b_I", "t2_d": "t2b_d"},
+    ),
+    "T3": dict(
+        d2="d2",
+        left=("t3_r", "d_ket"),
+        right=("d_bra", "t3_l"),
+        ket_relabels={"t3_r": "t3k_r", "_svd_bond": "t3k_I"},
+        bra_relabels={"_svd_bond": "t3b_I", "t3_l": "t3b_l"},
+    ),
+    "T4": dict(
+        d2="l2",
+        left=("t4_d", "l_ket"),
+        right=("l_bra", "t4_u"),
+        ket_relabels={"t4_d": "t4k_d", "_svd_bond": "t4k_I"},
+        bra_relabels={"_svd_bond": "t4b_I", "t4_u": "t4b_u"},
+    ),
+}
+
+
+def _tensor_env_to_split_standard(
+    env, site_tensor: Tensor, chi_I: int
+) -> SplitCTMTensorEnv:
+    """Convert a fused ``CTMTensorEnv`` back to a ``SplitCTMTensorEnv``.
+
+    Inverse of ``_split_env_to_tensor_standard``: corners pass through
+    unchanged; each edge's fused D² leg is split into its two parents and an
+    SVD over the interlayer bond re-creates the ket/bra halves (truncated to
+    *chi_I*).
+
+    The fused edges produced by the fused CTM sweep carry no ``fuse_info`` on
+    their D² leg (it was built by projector application, not ``fuse_indices``),
+    so ``split_index`` cannot act on them directly.  Because the D² index
+    depends only on the site tensor (not the env), we transplant the
+    ``fuse_info``-bearing D² index from a freshly-initialised reference env of
+    the same site (sectors/multiplicities/flow are identical), then split.
+    """
+    from tenax.algorithms._split_ctm_tensor_energy import (
+        _split_env_to_tensor_standard,
+    )
+    from tenax.algorithms._split_ctm_tensor_moves import (
+        _split_base_charges,
+        _svd_split_edge_tensor,
+    )
+    from tenax.algorithms._tensor_utils import split_index
+    from tenax.core.tensor import SymmetricTensor
+
+    chi = env.C1.indices[0].dim
+    ref = _split_env_to_tensor_standard(
+        initialize_split_ctm_tensor_env(site_tensor, chi, chi_I)
+    )
+    base_charges = _split_base_charges(site_tensor)
+
+    halves = {}
+    for name, spec in _RESPLIT_SPEC.items():
+        edge = getattr(env, name)
+        ref_edge = getattr(ref, name)
+        d2 = spec["d2"]
+        ax = edge.labels().index(d2)
+        ref_d2 = ref_edge.indices[ref_edge.labels().index(d2)]
+        # Transplant the fuse_info-bearing D² index (shares block data).
+        new_indices = list(edge._indices)
+        new_indices[ax] = ref_d2.relabel(d2)
+        edge = SymmetricTensor._raw(
+            indices=tuple(new_indices),
+            data=edge._data,
+            block_keys=edge._block_keys,
+            block_shapes=edge._block_shapes,
+            block_offsets=edge._block_offsets,
+        )
+        edge = split_index(edge, ax)
+        halves[name] = _svd_split_edge_tensor(
+            edge,
+            left_labels=list(spec["left"]),
+            right_labels=list(spec["right"]),
+            chi_I=chi_I,
+            ket_relabels=spec["ket_relabels"],
+            bra_relabels=spec["bra_relabels"],
+            base_charges=base_charges,
+        )
+
+    return SplitCTMTensorEnv(
+        C1=env.C1,
+        C2=env.C2,
+        C3=env.C3,
+        C4=env.C4,
+        T1_ket=halves["T1"][0],
+        T1_bra=halves["T1"][1],
+        T2_ket=halves["T2"][0],
+        T2_bra=halves["T2"][1],
+        T3_ket=halves["T3"][0],
+        T3_bra=halves["T3"][1],
+        T4_ket=halves["T4"][0],
+        T4_bra=halves["T4"][1],
+    )
+
+
+def _split_ctm_sweep_multisite_2x2_via_fused(
+    envs: dict[Coord, SplitCTMTensorEnv],
+    site_tensors: dict[Coord, Tensor],
+    neighbors: dict[Coord, dict[str, Coord]],
+    chi: int,
+    chi_I: int,
+) -> dict[Coord, SplitCTMTensorEnv]:
+    """One fermionic 2×2 split sweep via ``merge → fused sweep → resplit``."""
+    from tenax.algorithms._ctm_tensor_convergence import (
+        _ctm_tensor_sweep_multisite,
+    )
+    from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
+    from tenax.algorithms._split_ctm_tensor_energy import (
+        _split_env_to_tensor_standard,
+    )
+
+    fused_envs = {c: _split_env_to_tensor_standard(e) for c, e in envs.items()}
+    double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
+    new_fused, _eps, _sS = _ctm_tensor_sweep_multisite(
+        fused_envs, double_layers, neighbors, chi, True, recipe="2x2"
+    )
+    return {
+        c: _tensor_env_to_split_standard(fe, site_tensors[c], chi_I)
+        for c, fe in new_fused.items()
+    }
+
+
+# ------------------------------------------------------------------ #
 # Multisite sweep + driver                                             #
 # ------------------------------------------------------------------ #
 
@@ -234,7 +399,16 @@ def _split_ctm_sweep_multisite_2x2(
     Phase 2 absorbs the neighbour column/row into each ``s_dst`` and replaces
     the destination env's corner + ket/bra edge fields.  Neighbour/anchor
     lookups and the cascade order mirror the fused sweep exactly.
+
+    Fermionic (graded) envs take the ``merge → fused sweep → resplit`` route
+    (see ``_split_ctm_sweep_multisite_2x2_via_fused``), since the split
+    double-layer kernels below do not yet carry the order-dependent Koszul
+    signs (#463 Phase 4 / #641).
     """
+    if _split_env_is_fermionic(next(iter(envs.values()))):
+        return _split_ctm_sweep_multisite_2x2_via_fused(
+            envs, site_tensors, neighbors, chi, chi_I
+        )
     # Function-local import: _split_ctm_tensor_moves imports from this module,
     # so importing the absorb helpers at module scope would form a cycle.
     from tenax.algorithms._split_ctm_tensor_moves import (
