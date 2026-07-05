@@ -100,6 +100,28 @@ def _fuse_ket_bra(
     return fuse_indices(T, 0, 1, fused_label, fused_flow)
 
 
+# Fused enlarged-corner leg order per position (``chi`` seams first, then the
+# ``D²`` seams) — see :func:`_build_split_enlarged_corner`.  The split corner is
+# transposed to this order so the block-sparse ``tensor_svd`` in
+# :func:`_compute_2x2_projector` groups the ``(chi, d2)`` left legs correctly.
+_FUSED_CORNER_LEG_ORDER = {
+    "top_left": ("chi_R", "chi_B", "d2", "r2"),
+    "top_right": ("chi_L", "chi_B", "d2", "l2"),
+    "bottom_left": ("chi_T", "chi_R", "u2", "r2"),
+    "bottom_right": ("chi_L", "chi_T", "u2", "l2"),
+}
+
+
+def _canonical_split_corner(Q: Tensor, position: str) -> Tensor:
+    """Transpose a split enlarged corner to the fused corner's leg order."""
+    order = _FUSED_CORNER_LEG_ORDER[position]
+    labels = Q.labels()
+    perm = tuple(labels.index(lbl) for lbl in order)
+    if perm == tuple(range(len(labels))):
+        return Q
+    return Q.transpose(perm)
+
+
 def _build_split_enlarged_corner(
     C: Tensor,
     T_h_ket: Tensor,
@@ -115,12 +137,27 @@ def _build_split_enlarged_corner(
     :func:`_build_enlarged_corner`, assembled from ket/bra split edges + a
     physical double layer (A ket, A_bar bra) with the phys index traced.
 
-    Output free legs match the fused recipe's LABEL SET exactly (axis order is
-    not significant — ``_compute_2x2_projector`` indexes by label):
-      top_left     -> {chi_R, r2, chi_B, d2}
-      top_right    -> {chi_L, l2, chi_B, d2}
-      bottom_left  -> {chi_T, u2, chi_R, r2}
-      bottom_right -> {chi_L, l2, chi_T, u2}
+    Output free legs match the fused recipe's LABEL SET **and axis order**
+    exactly (``chi`` seams first, then the ``D²`` seams):
+      top_left     -> (chi_R, chi_B, d2, r2)
+      top_right    -> (chi_L, chi_B, d2, l2)
+      bottom_left  -> (chi_T, chi_R, u2, r2)
+      bottom_right -> (chi_L, chi_T, u2, l2)
+
+    Axis order **is** significant for the SymmetricTensor path (#463 Phase 3).
+    The block-sparse ``tensor_svd`` inside :func:`_compute_2x2_projector`
+    assembles each charge sector's matrix by reshaping every block *in its
+    native axis order* into ``(left_rows, right_cols)`` — it does NOT transpose
+    the block to the requested ``left_labels`` order first.  Its ``left_labels``
+    for the plaquette are ``(chi, d2)`` (chi slow), so if the corner were
+    returned with the ``d2`` seam *before* the ``chi`` seam (as the raw
+    ``_fuse_ket_bra`` output is), the reshape would flatten the row index in
+    ``(d2, chi)`` = d2-slow order.  That transposes the SVD's row basis, so
+    ``U·S·Vh`` reconstructs a *permuted* matrix — the projector then keeps a
+    different (wrong) subspace and the env drifts every sweep (energy wobbles /
+    collapses at D>=3, masked at D=2 where D²=4 and the seam is nearly
+    self-dual).  Matching the fused corner's ``(chi…, d2…)`` layout keeps the
+    split path byte-consistent with the working fused reference.
 
     The physical double layer is built by contracting the ket edges with the
     ket virtual legs of ``A`` and the bra edges with the bra virtual legs of
@@ -144,7 +181,8 @@ def _build_split_enlarged_corner(
         Q = contract(ket, A_bra)  # (t1b_r, t4b_u, d, r, D_bra, R_bra)
         Q = _fuse_ket_bra(Q, "d", "D_bra", "d2", FlowDirection.OUT)
         Q = _fuse_ket_bra(Q, "r", "R_bra", "r2", FlowDirection.OUT)
-        return Q.relabels({"t1b_r": "chi_R", "t4b_u": "chi_B"})
+        Q = Q.relabels({"t1b_r": "chi_R", "t4b_u": "chi_B"})
+        return _canonical_split_corner(Q, position)
 
     if position == "top_right":
         # C2.c2_l <-> T1's right = t1b_r (BRA) ; C2.c2_d <-> T2's top = t2k_u (KET).
@@ -162,7 +200,8 @@ def _build_split_enlarged_corner(
         Q = contract(ket, A_bra)  # (t1k_l, d, l, t2b_d, D_bra, L_bra)
         Q = _fuse_ket_bra(Q, "d", "D_bra", "d2", FlowDirection.OUT)
         Q = _fuse_ket_bra(Q, "l", "L_bra", "l2", FlowDirection.IN)
-        return Q.relabels({"t1k_l": "chi_L", "t2b_d": "chi_B"})
+        Q = Q.relabels({"t1k_l": "chi_L", "t2b_d": "chi_B"})
+        return _canonical_split_corner(Q, position)
 
     if position == "bottom_left":
         # C4.c4_r <-> T4's up = t4b_u (BRA) ; C4.c4_u <-> T3's right = t3k_r (KET).
@@ -179,7 +218,8 @@ def _build_split_enlarged_corner(
         Q = contract(ket, A_bra)  # (t4k_d, u, r, t3b_l, U_bra, R_bra)
         Q = _fuse_ket_bra(Q, "u", "U_bra", "u2", FlowDirection.IN)
         Q = _fuse_ket_bra(Q, "r", "R_bra", "r2", FlowDirection.OUT)
-        return Q.relabels({"t4k_d": "chi_T", "t3b_l": "chi_R"})
+        Q = Q.relabels({"t4k_d": "chi_T", "t3b_l": "chi_R"})
+        return _canonical_split_corner(Q, position)
 
     if position == "bottom_right":
         # C3.c3_l <-> T3's left = t3b_l (BRA) ; C3.c3_u <-> T2's bottom = t2b_d (BRA).
@@ -198,7 +238,8 @@ def _build_split_enlarged_corner(
         Q = contract(ket, A_bra)  # (t3k_r, t2k_u, u, l, U_bra, L_bra)
         Q = _fuse_ket_bra(Q, "u", "U_bra", "u2", FlowDirection.IN)
         Q = _fuse_ket_bra(Q, "l", "L_bra", "l2", FlowDirection.IN)
-        return Q.relabels({"t3k_r": "chi_L", "t2k_u": "chi_T"})
+        Q = Q.relabels({"t3k_r": "chi_L", "t2k_u": "chi_T"})
+        return _canonical_split_corner(Q, position)
 
     raise ValueError(f"unsupported position={position!r}")
 
@@ -373,6 +414,7 @@ def _split_ctm_absorb_bottom_2plaq(
     convention, #670/#674): projector halves applied via ``_apply_proj_unfused``,
     ket/bra edge halves grown then SVD-split over ``chi_I``.
     """
+    base_charges = _split_base_charges(A)
     C4g = _grow_split_corner_2x2(
         env_src.C4,
         "c4_r",
@@ -432,6 +474,7 @@ def _split_ctm_absorb_bottom_2plaq(
         chi_I=chi_I,
         ket_relabels={"chi_new": "t3k_r", "u": "d_ket", "_svd_bond": "t3k_I"},
         bra_relabels={"_svd_bond": "t3b_I", "u_bra": "d_bra", "chi_new_r": "t3b_l"},
+        base_charges=base_charges,
     )
     C4_new = _ensure_corner_flows(C4_new, "C4")
     C3_new = _ensure_corner_flows(C3_new, "C3")
@@ -443,6 +486,7 @@ def _split_ctm_absorb_left_2plaq(
     env_src, A, A_bar, P_top_above, P_bot_above, P_top_curr, P_bot_curr, chi_I
 ):
     """Split LEFT absorption -> (C1_new, T4_ket_new, T4_bra_new, C4_new)."""
+    base_charges = _split_base_charges(A)
     C1g = _grow_split_corner_2x2(
         env_src.C1,
         "c1_r",
@@ -502,6 +546,7 @@ def _split_ctm_absorb_left_2plaq(
         chi_I=chi_I,
         ket_relabels={"chi_new": "t4k_d", "r": "l_ket", "_svd_bond": "t4k_I"},
         bra_relabels={"_svd_bond": "t4b_I", "r_bra": "l_bra", "chi_new_r": "t4b_u"},
+        base_charges=base_charges,
     )
     C1_new = _ensure_corner_flows(C1_new, "C1")
     C4_new = _ensure_corner_flows(C4_new, "C4")
@@ -513,6 +558,7 @@ def _split_ctm_absorb_right_2plaq(
     env_src, A, A_bar, P_top_above, P_bot_above, P_top_curr, P_bot_curr, chi_I
 ):
     """Split RIGHT absorption -> (C2_new, T2_ket_new, T2_bra_new, C3_new)."""
+    base_charges = _split_base_charges(A)
     C2g = _grow_split_corner_2x2(
         env_src.C2,
         "c2_l",
@@ -572,6 +618,7 @@ def _split_ctm_absorb_right_2plaq(
         chi_I=chi_I,
         ket_relabels={"chi_new": "t2k_u", "l": "r_ket", "_svd_bond": "t2k_I"},
         bra_relabels={"_svd_bond": "t2b_I", "l_bra": "r_bra", "chi_new_r": "t2b_d"},
+        base_charges=base_charges,
     )
     C2_new = _ensure_corner_flows(C2_new, "C2")
     C3_new = _ensure_corner_flows(C3_new, "C3")
@@ -583,6 +630,7 @@ def _split_ctm_absorb_top_2plaq(
     env_src, A, A_bar, P_top_left, P_bot_left, P_top_curr, P_bot_curr, chi_I
 ):
     """Split TOP absorption -> (C1_new, T1_ket_new, T1_bra_new, C2_new)."""
+    base_charges = _split_base_charges(A)
     C1g = _grow_split_corner_2x2(
         env_src.C1,
         "c1_d",
@@ -642,6 +690,7 @@ def _split_ctm_absorb_top_2plaq(
         chi_I=chi_I,
         ket_relabels={"chi_new": "t1k_l", "d": "u_ket", "_svd_bond": "t1k_I"},
         bra_relabels={"_svd_bond": "t1b_I", "d_bra": "u_bra", "chi_new_r": "t1b_r"},
+        base_charges=base_charges,
     )
     C1_new = _ensure_corner_flows(C1_new, "C1")
     C2_new = _ensure_corner_flows(C2_new, "C2")
@@ -824,6 +873,18 @@ def _grow_edge_no_double_layer(
 # ------------------------------------------------------------------ #
 
 
+def _split_base_charges(A: Tensor) -> np.ndarray | None:
+    """Charges of a site tensor's first leg, for per-sector interlayer-SVD
+    truncation on the symmetric split path.
+
+    Returns ``None`` for a DenseTensor (global truncation). Derived locally at
+    the point of use — a clean extraction of the single-site split-move inline
+    derivation (``A.indices[0].charges``); deliberately NOT a plumbed cross-call
+    parameter (``base_charges`` is being un-plumbed — see ``_apply_projector``).
+    """
+    return A.indices[0].charges if isinstance(A, SymmetricTensor) else None
+
+
 def _svd_split_edge_tensor(
     T: Tensor,
     left_labels: list[str],
@@ -866,9 +927,11 @@ def _svd_split_edge_tensor(
         # (split-CTM at small D after PR #399 flipped the projector default
         # to "svd"). Route through truncated_svd_symmetric_ad, whose backward
         # is the Lorentzian-regularized + rank-aware kernel from _ad_primitives.
-        # TODO(#463 Phase 2-4): add SymmetricTensor block-sparse regularized SVD
-        # as a follow-up so the SymmetricTensor branches below also get a finite
-        # adjoint on rank-deficient blocks.
+        # TODO(#687): add SymmetricTensor block-sparse regularized SVD so the
+        # SymmetricTensor branch above gets the same regularized adjoint. Its
+        # absence floors symmetric CTM AD (implicit==explicit) at ~1e-2 vs the
+        # dense path's 1e-6 — even on a non-degenerate spectrum, so it is more
+        # than missing regularization; see issue #687.
         from tenax.algorithms._ad_primitives import truncated_svd_symmetric_ad
 
         U_t, s, Vh_t = truncated_svd_symmetric_ad(

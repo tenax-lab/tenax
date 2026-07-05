@@ -155,12 +155,15 @@ def _init_symmetric_corner(
 
     idx_a = TensorIndex.from_charges(sym, charges.copy(), flow_a, label=label_a)
     idx_b = TensorIndex.from_charges(sym, charges.copy(), flow_b, label=label_b)
-    # Match dense reference: eye(min(chi, D)) padded to chi,
-    # which initializes fewer diagonal entries when chi > D.
-    D = A.indices[ref_axis].dim
-    C = jnp.eye(min(chi, D), dtype=A.dtype)
-    C_pad = jnp.zeros((chi, chi), dtype=A.dtype)
-    C_pad = C_pad.at[: C.shape[0], : C.shape[1]].set(C)
+    # Match the dense reference :func:`_make_dense_corner` EXACTLY: a rank-1
+    # corner with only entry ``(0, 0) = 1``.  The previous ``eye(min(chi, D))``
+    # seed diverged from the dense path — at D>=3 it drives the split CTM onto
+    # an *artificially* degenerate corner fixed point whose degenerate subspace
+    # rotates every sweep, so the symmetric env never converges element-wise
+    # (and, compounded with the leg-order SVD bug below, collapsed the energy to
+    # exactly 0.0).  Rank-1 converges element-wise to the non-degenerate
+    # ``[1, 0, ...]`` corner, matching dense.  (#463 Phase 3.)
+    C_pad = jnp.zeros((chi, chi), dtype=A.dtype).at[0, 0].set(1.0)
     return SymmetricTensor.from_dense(C_pad, (idx_a, idx_b), tol=float("inf"))
 
 

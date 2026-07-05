@@ -38,6 +38,10 @@ _FILE_MARKERS = {
     "test_tensor_utils.py": "core",
     "test_split_ctm_tensor.py": "algorithm",
     "test_split_ctm_2site.py": "algorithm",
+    # 2-site split-CTM SymmetricTensor (#463 Phase 3): forward/energy-parity
+    # tests run in the algorithm bucket; the AD parity tests in this file carry
+    # their own explicit @pytest.mark.slow so they stay out of -m "not slow".
+    "test_split_ctm_2site_symmetric.py": "algorithm",
     # Dense 2-site split-CTM AD (#463 Phase 2): each parity test converges a
     # coupled fixed point + a full AD gradient (~5 min); slow-only so they stay
     # out of the -m core CI gate and the -m "not slow" bucket.
