@@ -43,7 +43,11 @@ def _dense_svd(
     """Dense SVD that avoids the cuSOLVER ``gesvdj`` NaN on GPU.
 
     Drop-in replacement for ``jnp.linalg.svd(matrix, full_matrices=...,
-    compute_uv=...)`` (returns ``(U, s, Vh)`` when ``compute_uv`` else ``s``).
+    compute_uv=...)``. Always returns a plain ``(U, s, Vh)`` tuple when
+    ``compute_uv`` (else ``s``) on *both* backends: ``jnp.linalg.svd`` returns an
+    ``SVDResult`` namedtuple but ``jax.lax.linalg.svd`` returns a bare tuple, so
+    we normalise to a bare tuple to keep the two paths interchangeable (callers
+    must unpack, not use ``.U/.S/.Vh``).
 
     On CUDA, jaxlib>=0.10.2 lowers ``jnp.linalg.svd`` to ``cusolver_gesvdj_ffi``
     (the Jacobi SVD), whose iteration fails to converge (``info != 0`` -> the
@@ -57,15 +61,20 @@ def _dense_svd(
     result on ``info != 0`` (jax-ml/jax gesvdj non-convergence issue).
     """
     if jax.default_backend() == "gpu":
-        return _lax_svd(
+        result = _lax_svd(
             matrix,
             full_matrices=full_matrices,
             compute_uv=compute_uv,
             algorithm=_SvdAlgorithm.QR,
         )
-    return jnp.linalg.svd(
-        matrix, full_matrices=full_matrices, compute_uv=compute_uv
-    )
+    else:
+        result = jnp.linalg.svd(
+            matrix, full_matrices=full_matrices, compute_uv=compute_uv
+        )
+    if compute_uv:
+        u, s, vh = result  # SVDResult (CPU) or tuple (GPU) -> bare tuple
+        return u, s, vh
+    return result
 
 
 def _has_nonstandard_blocks(tensor: SymmetricTensor) -> bool:

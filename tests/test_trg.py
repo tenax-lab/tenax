@@ -626,6 +626,19 @@ class TestComputePottsTensor:
         permuted = arr[np.ix_(perm, perm, perm, perm)]
         assert np.allclose(arr, permuted, atol=1e-12)
 
+    def test_infinite_temperature_limit_is_finite(self):
+        """At beta*J -> 0, Q is only positive *semi*-definite (a single nonzero
+        uniform mode). eigh returns tiny negative zero-modes, so the matrix
+        square root must clip them to avoid an all-NaN tensor.
+        """
+        for beta in (0.0, 1e-13):
+            arr = np.asarray(compute_potts_tensor(beta=beta, q=3).todense())
+            assert np.isfinite(arr).all(), f"non-finite Potts tensor at beta={beta}"
+        # at beta=0 the tensor is the uniform rank-1 mode: every entry ~ 1/3
+        # (sum_s (1/sqrt(q))^4 = q / q^2 = 1/q).
+        arr0 = np.asarray(compute_potts_tensor(beta=0.0, q=3).todense())
+        assert np.allclose(arr0, 1.0 / 3.0, atol=1e-6)
+
 
 class TestPottsCriticalBeta:
     """The self-dual critical point beta_c = ln(1 + sqrt(q)) / J."""
