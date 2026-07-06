@@ -339,13 +339,13 @@ def regularized_svd(M: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
 
     Returns a plain ``(U, s, Vh)`` tuple (not ``SVDResult``).
     """
-    result = _dense_svd(M, full_matrices=False)
-    return _fix_svd_signs(result.U, result.S, result.Vh)
+    U0, s0, Vh0 = _dense_svd(M, full_matrices=False)
+    return _fix_svd_signs(U0, s0, Vh0)
 
 
 def _regularized_svd_fwd(M):
-    result = _dense_svd(M, full_matrices=False)
-    U, s, Vh = _fix_svd_signs(result.U, result.S, result.Vh)
+    U0, s0, Vh0 = _dense_svd(M, full_matrices=False)
+    U, s, Vh = _fix_svd_signs(U0, s0, Vh0)
     return (U, s, Vh), (U, s, Vh)
 
 

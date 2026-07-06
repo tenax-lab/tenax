@@ -287,10 +287,12 @@ def compute_potts_tensor(
     # Q[a, b] = exp(beta*J) on the diagonal, 1 off-diagonal.
     Q = jnp.asarray(np.ones((q, q)) + (np.exp(beta * J) - 1.0) * np.eye(q))
 
-    # Matrix square root of Q (NOT element-wise). Q is symmetric
-    # positive-definite for beta*J > 0, so sqrtQ @ sqrtQ = Q.
+    # Matrix square root of Q (NOT element-wise). Q is symmetric positive-
+    # definite for beta*J > 0 and only positive *semi*-definite at the
+    # beta*J -> 0 (infinite-temperature) limit, where eigh returns tiny negative
+    # zero-mode eigenvalues; clip to >= 0 so sqrt stays finite (else all-NaN).
     evals, evecs = jnp.linalg.eigh(Q)
-    sqrtQ = evecs @ jnp.diag(jnp.sqrt(evals)) @ evecs.T
+    sqrtQ = evecs @ jnp.diag(jnp.sqrt(jnp.clip(evals, 0.0, None))) @ evecs.T
 
     # T_{udlr} = sum_s sqrtQ[u,s] sqrtQ[d,s] sqrtQ[l,s] sqrtQ[r,s]
     T = jnp.einsum("us,ds,ls,rs->udlr", sqrtQ, sqrtQ, sqrtQ, sqrtQ)
