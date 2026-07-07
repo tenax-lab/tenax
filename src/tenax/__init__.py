@@ -129,6 +129,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "compute_energy_split_ctm_tensor_multisite",
     ),
     "ctm_split_tensor": ("tenax.algorithms._split_ctm_tensor", "ctm_split_tensor"),
+    "ctm_split_tensor_2site": (
+        "tenax.algorithms._split_ctm_tensor",
+        "ctm_split_tensor_2site",
+    ),
     # _tensor_utils
     "fuse_indices": ("tenax.algorithms._tensor_utils", "fuse_indices"),
     "split_index": ("tenax.algorithms._tensor_utils", "split_index"),
@@ -503,6 +507,7 @@ __all__ = [
     # Split CTM (Tensor protocol)
     "SplitCTMTensorEnv",
     "ctm_split_tensor",
+    "ctm_split_tensor_2site",
     "compute_energy_split_ctm_tensor",
     "compute_energy_split_ctm_tensor_2site",
     "compute_energy_split_ctm_tensor_multisite",

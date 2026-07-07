@@ -357,8 +357,14 @@ def _split_ctm_sweep_multisite_2x2_via_fused(
     neighbors: dict[Coord, dict[str, Coord]],
     chi: int,
     chi_I: int,
+    renormalize: bool = True,
 ) -> dict[Coord, SplitCTMTensorEnv]:
-    """One fermionic 2×2 split sweep via ``merge → fused sweep → resplit``."""
+    """One fermionic 2×2 split sweep via ``merge → fused sweep → resplit``.
+
+    ``renormalize`` is honored on the merged (fused) representation so a caller
+    disabling per-sweep normalization gets the same raw fixed-point map as the
+    dense/bosonic split path — it is *not* hard-coded on (#690).
+    """
     from tenax.algorithms._ctm_tensor_convergence import (
         _ctm_tensor_sweep_multisite,
     )
@@ -370,7 +376,7 @@ def _split_ctm_sweep_multisite_2x2_via_fused(
     fused_envs = {c: _split_env_to_tensor_standard(e) for c, e in envs.items()}
     double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
     new_fused, _eps, _sS = _ctm_tensor_sweep_multisite(
-        fused_envs, double_layers, neighbors, chi, True, recipe="2x2"
+        fused_envs, double_layers, neighbors, chi, renormalize, recipe="2x2"
     )
     return {
         c: _tensor_env_to_split_standard(fe, site_tensors[c], chi_I)
@@ -390,6 +396,7 @@ def _split_ctm_sweep_multisite_2x2(
     neighbors: dict[Coord, dict[str, Coord]],
     chi: int,
     chi_I: int,
+    renormalize: bool = True,
 ) -> dict[Coord, SplitCTMTensorEnv]:
     """One 2x2-recipe split sweep — twin of the fused 2x2 branch of
     :func:`_ctm_tensor_sweep_multisite`.
@@ -404,10 +411,15 @@ def _split_ctm_sweep_multisite_2x2(
     (see ``_split_ctm_sweep_multisite_2x2_via_fused``), since the split
     double-layer kernels below do not yet carry the order-dependent Koszul
     signs (#463 Phase 4 / #641).
+
+    ``renormalize`` is forwarded to the fermionic fused route so its internal
+    normalization matches the caller's flag (#690).  The bosonic branch does not
+    normalize here; :func:`_split_ctm_sweep_multisite` applies the post-sweep
+    ``renormalize`` for it.
     """
     if _split_env_is_fermionic(next(iter(envs.values()))):
         return _split_ctm_sweep_multisite_2x2_via_fused(
-            envs, site_tensors, neighbors, chi, chi_I
+            envs, site_tensors, neighbors, chi, chi_I, renormalize=renormalize
         )
     # Function-local import: _split_ctm_tensor_moves imports from this module,
     # so importing the absorb helpers at module scope would form a cycle.
@@ -566,7 +578,7 @@ def _split_ctm_sweep_multisite(
                 )
     elif recipe == "2x2":
         envs = _split_ctm_sweep_multisite_2x2(
-            envs, site_tensors, bars, neighbors, chi, chi_I
+            envs, site_tensors, bars, neighbors, chi, chi_I, renormalize=renormalize
         )
     else:
         raise ValueError(
