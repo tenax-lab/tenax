@@ -209,3 +209,67 @@ def test_fermionic_edge_resplit_roundtrip():
         assert _one_minus_fidelity(got, exp) < 1e-12, (
             f"{field}: 1-F={_one_minus_fidelity(got, exp):.3e}"
         )
+
+
+def _rel_corner_gap(merged_env, ref_env):
+    """Max relative-norm gap over the four corners (scale-SENSITIVE).
+
+    Corners are not resplit in the split representation, so the merge-back
+    preserves their absolute scale exactly — unlike edges, whose SVD resplit is
+    only scale/direction-faithful (see ``test_fermionic_edge_resplit_roundtrip``,
+    which checks fidelity, not magnitude).  Corners are therefore the honest
+    probe of whether the fused env was normalized.
+    """
+    worst = 0.0
+    for field in ("C1", "C2", "C3", "C4"):
+        got_t, exp_t = getattr(merged_env, field), getattr(ref_env, field)
+        perm = tuple(list(got_t.labels()).index(lbl) for lbl in exp_t.labels())
+        got = np.asarray(got_t.transpose(perm).todense()).ravel()
+        exp = np.asarray(exp_t.todense()).ravel()
+        worst = max(worst, np.linalg.norm(got - exp) / np.linalg.norm(exp))
+    return worst
+
+
+def test_fermionic_split_sweep_honors_renormalize_false():
+    """The fermionic ``merge → fused → resplit`` sweep honors ``renormalize=False``.
+
+    Regression for the hard-coded ``renormalize=True`` in the fused routing
+    (#690): a caller passing ``renormalize=False`` must get the *raw* fixed-point
+    map — identical to a raw (``renormalize=False``) fused sweep on the merged
+    environment — not a fused env that was silently normalized before resplit.
+
+    Scale-sensitive on purpose: the bug leaves *direction* unchanged (the fused
+    sweep runs either way) and only rescales, so the fidelity-based parity test
+    above cannot see it.  We key on the corners, whose absolute scale survives
+    the resplit round-trip exactly, and additionally assert the flag genuinely
+    toggles behaviour (``renormalize=True`` does *not* reproduce the raw oracle).
+    """
+    chi = 6
+    site_tensors, bars, split_envs, fused_envs = _build_shared_fermionic_envs(chi)
+
+    # Oracle: one RAW (renormalize=False) fused sweep on the merged env.
+    dls = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
+    fused_raw, _eps, _sS = _ctm_tensor_sweep_multisite(
+        fused_envs, dls, NB, chi, False, recipe="2x2"
+    )
+
+    # renormalize=False must reproduce the raw fused sweep (scale included).
+    split_raw = _split_ctm_sweep_multisite_2x2(
+        split_envs, site_tensors, bars, NB, chi, 4 * chi, renormalize=False
+    )
+    # renormalize=True must NOT — proving the flag is actually consulted.
+    split_norm = _split_ctm_sweep_multisite_2x2(
+        split_envs, site_tensors, bars, NB, chi, 4 * chi, renormalize=True
+    )
+
+    for c in site_tensors:
+        gap_raw = _rel_corner_gap(_split_env_to_tensor_standard(split_raw[c]), fused_raw[c])
+        gap_norm = _rel_corner_gap(_split_env_to_tensor_standard(split_norm[c]), fused_raw[c])
+        assert gap_raw < 1e-9, (
+            f"cell {c}: renormalize=False corner gap {gap_raw:.3e} vs the raw "
+            "fused oracle (fused env was normalized despite the flag)"
+        )
+        assert gap_norm > 1e-3, (
+            f"cell {c}: renormalize=True corner gap {gap_norm:.3e} — the "
+            "renormalize flag has no effect on the fused routing"
+        )

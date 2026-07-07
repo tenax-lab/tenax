@@ -272,6 +272,29 @@ def make_ctm_energy_fn(
         """
         validate_split_ctm_config(ctm_cfg, recipe)
         if len(site_tensors) == 2:
+            # The 2-site split forward is the genuine joint 2×2 plaquette CTM
+            # (#463 Phase 2); every 2-site split AD call hard-codes
+            # ``recipe="2x2"`` downstream.  ``recipe="1x1"`` is only wired for
+            # the single-site split path, so accept-then-silently-run-2x2 would
+            # mislabel the experiment — reject it instead of threading a recipe
+            # the 2-site kernels do not implement.
+            if recipe != "2x2":
+                raise NotImplementedError(
+                    "The 2-site split-CTM AD path only supports gs_recipe='2x2'; "
+                    f"got recipe={recipe!r}. Use unit_cell='1x1' for the '1x1' "
+                    "(single-site) split recipe."
+                )
+            # TBPTT (#506): the single-site split and fused explicit paths honor
+            # ``gs_explicit_ad_backward_steps``, but ``ctm_energy_split_explicit_2site``
+            # does not thread it (and swallows unknown kwargs), so forwarding it
+            # would silently backprop through every step and defeat the memory
+            # cap.  Reject rather than ignore until the 2-site path implements it.
+            if use_explicit and explicit_backward_steps is not None:
+                raise NotImplementedError(
+                    "Truncated backprop (gs_explicit_ad_backward_steps / TBPTT) "
+                    "is not wired into the 2-site split explicit-AD path; unset "
+                    "it, or use the single-site split / fused explicit path."
+                )
             if use_explicit:
                 return ctm_energy_split_explicit_2site(
                     site_tensors,

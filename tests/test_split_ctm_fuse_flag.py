@@ -338,6 +338,66 @@ def test_make_ctm_energy_fn_split_rejects_unsupported_recipe():
         fn({(0, 0): A})
 
 
+def test_make_ctm_energy_fn_2site_split_rejects_1x1_recipe():
+    """The 2-site split AD branch rejects ``gs_recipe='1x1'`` instead of
+    silently running the 2×2 plaquette CTM (#685/#463).
+
+    Config validation permits ``recipe='1x1'`` (it is legal for the single-site
+    split path), but every 2-site split AD call hard-codes ``recipe='2x2'``
+    downstream.  Rather than mislabel such a run, the 2-site branch must reject
+    the unsupported recipe up front.
+    """
+    from tenax.algorithms.ipeps_ad_policy import make_ctm_energy_fn
+
+    A = _make_site(2, 2, seed=0)
+    gate = _heisenberg_gate()
+    cfg = CTMConfig(chi=4, fuse_virtual_legs=False)
+
+    fn = make_ctm_energy_fn(
+        neighbors=SINGLE_SITE_NEIGHBORS,
+        gate=gate,
+        get_ctm_cfg=lambda: cfg,
+        env_cache={},
+        use_explicit=False,
+        explicit_warmup=2,
+        explicit_steps=3,
+        recipe="1x1",
+    )
+    with pytest.raises(NotImplementedError, match="2-site split.*recipe"):
+        fn({(0, 0): A, (1, 0): A})
+
+
+def test_make_ctm_energy_fn_2site_split_explicit_rejects_tbptt():
+    """The 2-site split *explicit* AD branch rejects the TBPTT cap instead of
+    silently backpropagating through every step (#685/#506).
+
+    The single-site split and fused explicit paths forward
+    ``explicit_backward_steps`` (``gs_explicit_ad_backward_steps``); the 2-site
+    split explicit path dropped it, so ``ctm_energy_split_explicit_2site``
+    (which swallows unknown kwargs) would differentiate all steps and defeat the
+    requested memory cap.  It must reject the setting rather than ignore it.
+    """
+    from tenax.algorithms.ipeps_ad_policy import make_ctm_energy_fn
+
+    A = _make_site(2, 2, seed=0)
+    gate = _heisenberg_gate()
+    cfg = CTMConfig(chi=4, fuse_virtual_legs=False)
+
+    fn = make_ctm_energy_fn(
+        neighbors=SINGLE_SITE_NEIGHBORS,
+        gate=gate,
+        get_ctm_cfg=lambda: cfg,
+        env_cache={},
+        use_explicit=True,
+        explicit_warmup=2,
+        explicit_steps=4,
+        explicit_backward_steps=2,
+        recipe="2x2",
+    )
+    with pytest.raises(NotImplementedError, match="TBPTT"):
+        fn({(0, 0): A, (1, 0): A})
+
+
 def test_split_implicit_raises_for_multisite():
     """ctm_energy_split_implicit raises NotImplementedError for >1 site."""
     from tenax.algorithms._split_ctm_energy_ad import ctm_energy_split_implicit

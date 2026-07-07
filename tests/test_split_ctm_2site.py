@@ -433,6 +433,24 @@ def test_split_2x2_sweep_runs_and_preserves_uniform():
     assert np.all(np.isfinite(C1)) and np.max(np.abs(C1)) > 0
 
 
+def test_ctm_split_tensor_2site_is_publicly_exported():
+    """``ctm_split_tensor_2site`` is importable from the top-level ``tenax``.
+
+    Its energy sibling ``compute_energy_split_ctm_tensor_2site`` is already a
+    public export; a user who obtains the coupled 2-site split environment via
+    ``ctm_split_tensor_2site`` must be able to import it the same way rather than
+    reach into the private ``_split_ctm_tensor`` shim (#684).
+    """
+    import tenax
+    from tenax.algorithms._split_ctm_tensor_convergence import (
+        ctm_split_tensor_2site as _canonical,
+    )
+
+    assert "ctm_split_tensor_2site" in tenax.__all__
+    assert hasattr(tenax, "ctm_split_tensor_2site")
+    assert tenax.ctm_split_tensor_2site is _canonical
+
+
 def test_ctm_split_tensor_2site_returns_two_envs():
     from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor_2site
 
