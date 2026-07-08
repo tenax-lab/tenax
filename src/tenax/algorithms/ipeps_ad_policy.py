@@ -284,16 +284,25 @@ def make_ctm_energy_fn(
                     f"got recipe={recipe!r}. Use unit_cell='1x1' for the '1x1' "
                     "(single-site) split recipe."
                 )
-            # TBPTT (#506): the single-site split and fused explicit paths honor
-            # ``gs_explicit_ad_backward_steps``, but ``ctm_energy_split_explicit_2site``
-            # does not thread it (and swallows unknown kwargs), so forwarding it
-            # would silently backprop through every step and defeat the memory
-            # cap.  Reject rather than ignore until the 2-site path implements it.
-            if use_explicit and explicit_backward_steps is not None:
+            # TBPTT (#506): the 2-site split explicit path always backprops
+            # through every step (``ctm_energy_split_explicit_2site`` does not
+            # thread ``backward_steps`` and swallows unknown kwargs).  Full
+            # backward — ``K is None`` or ``K == explicit_steps`` — is therefore
+            # already correct and must be allowed; only genuine truncation
+            # (``K < explicit_steps``) would be silently ignored and defeat the
+            # memory cap, so reject only that until the 2-site path implements
+            # truncation.
+            if (
+                use_explicit
+                and explicit_backward_steps is not None
+                and explicit_backward_steps < explicit_steps
+            ):
                 raise NotImplementedError(
-                    "Truncated backprop (gs_explicit_ad_backward_steps / TBPTT) "
-                    "is not wired into the 2-site split explicit-AD path; unset "
-                    "it, or use the single-site split / fused explicit path."
+                    "Truncated backprop (gs_explicit_ad_backward_steps < "
+                    "gs_explicit_ad_steps / TBPTT) is not wired into the 2-site "
+                    "split explicit-AD path; set gs_explicit_ad_backward_steps to "
+                    "None or gs_explicit_ad_steps (full backward), or use the "
+                    "single-site split / fused explicit path."
                 )
             if use_explicit:
                 return ctm_energy_split_explicit_2site(

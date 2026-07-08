@@ -398,6 +398,46 @@ def test_make_ctm_energy_fn_2site_split_explicit_rejects_tbptt():
         fn({(0, 0): A, (1, 0): A})
 
 
+def test_make_ctm_energy_fn_2site_split_explicit_allows_full_backward():
+    """``explicit_backward_steps == explicit_steps`` is full backward, not TBPTT.
+
+    ``gs_explicit_ad_backward_steps`` is validated in ``1..gs_explicit_ad_steps``;
+    the maximum ``K == steps`` differentiates every sweep (leading
+    ``steps - K == 0`` under ``stop_gradient``) — identical to the ``None``
+    default, which the 2-site split explicit path already does.  The TBPTT guard
+    must reject only genuine truncation (``K < steps``), not this valid
+    full-backward setting (#694 follow-up: Codex over-rejection).
+    """
+    import jax.numpy as jnp
+
+    from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
+    from tenax.algorithms.ipeps_ad_policy import make_ctm_energy_fn
+
+    D = 2
+    chi = D * D  # lossless interlayer bond
+    A = _make_site(D, 2, seed=1)
+    B = _make_site(D, 2, seed=2)
+    gate = _heisenberg_gate()
+    cfg = CTMConfig(chi=chi, chi_I=chi, fuse_virtual_legs=False)
+
+    steps = 2
+    fn = make_ctm_energy_fn(
+        neighbors=CHECKERBOARD_NEIGHBORS,
+        gate=gate,
+        get_ctm_cfg=lambda: cfg,
+        env_cache={},
+        use_explicit=True,
+        explicit_warmup=2,
+        explicit_steps=steps,
+        explicit_backward_steps=steps,  # == steps → full backward (valid)
+        recipe="2x2",
+    )
+    # Must NOT raise the TBPTT guard; runs the full-backward 2-site path.
+    e = fn({(0, 0): A, (1, 0): B})
+    assert jnp.isfinite(jnp.real(e))
+    assert abs(float(jnp.imag(e))) < 1e-8
+
+
 def test_split_implicit_raises_for_multisite():
     """ctm_energy_split_implicit raises NotImplementedError for >1 site."""
     from tenax.algorithms._split_ctm_energy_ad import ctm_energy_split_implicit
