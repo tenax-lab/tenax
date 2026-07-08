@@ -138,15 +138,17 @@ class TestPythonLoopCtmConverge:
             conv_tol=1e-8,
         )
         # Known limitation (Issues #425/#426): same CTM-iter plateau as
-        # test_python_loop_converges, on the 2-site CHECKERBOARD path. Bails
-        # at iter ~12 with sv_diff~0.004 under plateau_patience=20. Narrow to
-        # that signature (codex P2 on PR #444): any other non-convergence
-        # outcome surfaces as a real failure.
-        if (
-            not info.converged
-            and 1e-5 < float(info.sv_diff) < 0.5
-            and info.iterations < max_iter
-        ):
+        # test_python_loop_converges, on the 2-site CHECKERBOARD path. The
+        # random-init fixed point oscillates without converging; depending on
+        # BLAS/XLA numerics it either trips the plateau_patience=20 early-bail
+        # (~iter 12, sv_diff~0.004) OR keeps oscillating for the full max_iter
+        # (sv_diff~0.017). Both are the same non-convergence, so the guard keys
+        # only on the *healthy-oscillation* signature (bounded sv_diff), not the
+        # iteration count — the earlier `iterations < max_iter` clause was
+        # platform-sensitive and hard-failed the full-run case in CI (#692).
+        # A genuinely broken CTM (diverging/NaN sv_diff, or a spurious
+        # zero-diff non-convergence) still falls outside the band and fails.
+        if not info.converged and 1e-5 < float(info.sv_diff) < 0.5:
             pytest.xfail(
                 f"CTM plateau on random init (#425/#426, 2-site checkerboard): "
                 f"converged={info.converged}, sv_diff={float(info.sv_diff):.3e}, "
