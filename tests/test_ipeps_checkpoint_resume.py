@@ -323,27 +323,42 @@ def test_resume_1site_continues_from_saved_step(tmp_path):
     """Run 2 steps, checkpoint; resume to 8 total; the resumed run picks up at
     step 2 and finishes with the saved step recorded as 7.
 
-    The random-init 1-site (non-c4v) path needs several steps to drop below
-    zero, so the resume horizon is set past that point: a correctly-resuming
-    run continues the saved trajectory and reaches a sensible (negative)
-    Heisenberg energy, whereas a silent fresh restart would not.
+    The resume mechanism is verified by the checkpoint step counter; the
+    energy is a sanity guard that the resumed run continued the saved
+    trajectory rather than diverging.
     """
     gate = _heisenberg_gate()
 
     def cfg(nsteps, resume):
         return iPEPSConfig(
-            unit_cell="1x1", max_bond_dim=2, ctm=CTMConfig(chi=4),
-            gs_num_steps=nsteps, gs_checkpoint_path=str(tmp_path),
-            gs_checkpoint_every=1, gs_resume=resume, gs_c4v=False,
-            su_init=False, gs_conv_criterion="grad_norm",
+            unit_cell="1x1",
+            max_bond_dim=2,
+            ctm=CTMConfig(chi=4),
+            gs_num_steps=nsteps,
+            gs_checkpoint_path=str(tmp_path),
+            gs_checkpoint_every=1,
+            gs_resume=resume,
+            gs_c4v=False,
+            su_init=False,
+            gs_conv_criterion="grad_norm",
         )
 
-    optimize_gs_ad(gate, None, cfg(2, False))            # phase A: 2 steps
+    _, _, E_phaseA = optimize_gs_ad(gate, None, cfg(2, False))  # phase A: 2 steps
     _, _, E_resumed = optimize_gs_ad(gate, None, cfg(8, True))  # resume -> 8
 
     from tenax.algorithms._checkpoint import load_checkpoint
-    assert load_checkpoint(str(tmp_path))["step"] == 7   # 0-indexed last of 8
-    assert E_resumed < 0  # finished, sensible energy
+
+    assert load_checkpoint(str(tmp_path))["step"] == 7  # 0-indexed last of 8
+
+    # Energy sanity: the resumed best-seen energy is finite and no worse than
+    # the phase-A energy (mirrors test_resume_2site_continues_from_saved_step).
+    # The old `E_resumed < 0` gate flaked in CI (#692): the chi=4 random-init
+    # CTM is noise-dominated, so the absolute energy plateaus near the untrained
+    # value and its SIGN is BLAS/XLA-sensitive (it does not reliably cross zero
+    # in 8 steps). A relative check cancels that context-dependent CTM offset;
+    # the 1e-3 tolerance covers chi=4 re-evaluation drift (observed ~1e-5).
+    assert jnp.isfinite(E_resumed)
+    assert E_resumed <= E_phaseA + 1e-3, f"resumed regressed: {E_phaseA=} {E_resumed=}"
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +408,9 @@ def test_resume_cg_1site_continues_from_saved_step(tmp_path):
     assert b["step"] == 1
     assert b["cg_gates_fingerprint"] is not None
 
-    _, _, E = optimize_gs_ad(dummy, None, _honeycomb_cg_cfg(tmp_path, nsteps=4, resume=True))
+    _, _, E = optimize_gs_ad(
+        dummy, None, _honeycomb_cg_cfg(tmp_path, nsteps=4, resume=True)
+    )
     assert load_checkpoint(str(tmp_path))["step"] == 3
     assert E is not None  # finished without error (don't over-assert convergence)
 
@@ -432,9 +449,15 @@ def test_resume_rejects_plain_to_cg(tmp_path):
     shared = jnp.asarray(0.5 * (g + g.T)).reshape(4, 4, 4, 4)  # d_phys=4 == d_eff
 
     plain_cfg = iPEPSConfig(
-        unit_cell="1x1", max_bond_dim=2, ctm=CTMConfig(chi=4, max_iter=20, min_iter=5),
-        gs_num_steps=2, gs_checkpoint_path=str(tmp_path), gs_checkpoint_every=1,
-        gs_c4v=False, su_init=False, gs_conv_criterion="grad_norm",
+        unit_cell="1x1",
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4, max_iter=20, min_iter=5),
+        gs_num_steps=2,
+        gs_checkpoint_path=str(tmp_path),
+        gs_checkpoint_every=1,
+        gs_c4v=False,
+        su_init=False,
+        gs_conv_criterion="grad_norm",
     )
     optimize_gs_ad(shared, None, plain_cfg)
 
