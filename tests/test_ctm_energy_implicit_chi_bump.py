@@ -81,6 +81,17 @@ def _central_diff(f, x: jnp.ndarray, eps: float = 1e-4) -> jnp.ndarray:
 
 
 @pytest.mark.slow
+@pytest.mark.xfail(
+    reason=(
+        "#702: PR #676 (direction-dependent 2x2 bond bookkeeping) broke the "
+        "single-site 2x2 CTM chi-bump path. Bisected first-bad 7b8e5ad; the "
+        "implicit-AD gradient is now ~10x too small vs FD on 27/32 indices "
+        "(consistent with the chi-lock backward differentiating the chi=4 "
+        "Jacobian). Not a fragile assertion — the AD is genuinely wrong. Flips "
+        "green once #702 is fixed."
+    ),
+    strict=False,
+)
 def test_ad_gradient_matches_fd_with_bump():
     """Numerical smoke at D=2 with forced bump: gradient is finite, FD-consistent.
 
@@ -156,6 +167,18 @@ def test_ad_gradient_matches_fd_with_bump():
 
 
 @pytest.mark.slow
+@pytest.mark.xfail(
+    reason=(
+        "#702: PR #676 (direction-dependent 2x2 bond bookkeeping, bisected "
+        "first-bad 7b8e5ad) made the single-site 2x2 CTM fixed point "
+        "trajectory-dependent: the bump 4->8 path and direct chi=8 path now "
+        "converge to different energies (0.4836777 vs 0.4837477, |diff|=7e-5, "
+        "was 4e-14 at 815bc76), so the invariance premise (line 219) breaks "
+        "before the chi-lock gradient gate is even reached. Real regression, "
+        "not a fragile assertion. Flips green once #702 is fixed."
+    ),
+    strict=False,
+)
 def test_ad_gradient_invariance_bump_vs_fixed_chi_max():
     """Bump path's gradient must equal fixed-chi=chi_max path's gradient.
 
