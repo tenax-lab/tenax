@@ -14,20 +14,35 @@ import sys
 
 def test_sharded_backward_grad_matches_single_device():
     """value_and_grad under a 4-device GSPMD mesh equals the single-device
-    gradient to <1e-8 (well-conditioned state; fake CPU devices, subprocess)."""
+    gradient to a tight tolerance (well-conditioned state; fake CPU devices,
+    subprocess).
+
+    Tolerance (#692): sharding reassociates the D²-axis sums in both the forward
+    and the adjoint, so the sharded-vs-single gradient delta is O(eps*kappa).
+    On a well-conditioned state that floor is machine-precision (~1e-15)
+    locally, but **platform-dependent** — CI runners land at ~3e-7 on the
+    gradient (energy delta ~9e-10) on this same D=4 χ=8 state (measured on the
+    #692 Full-tests matrix), so the original 1e-8 gate was not portable. 1e-5
+    clears the observed CI gradient noise by ~36x (relative to |grad|~1.8e-2
+    that is ~5e-4 relative) while a real sharding/adjoint bug would give O(1)
+    relative error. The single-device fixed point is stable across PR #676, so
+    this is a tolerance-portability fix, not a masked regression.
+    """
     env = dict(
         os.environ,
         XLA_FLAGS="--xla_force_host_platform_device_count=4",
         JAX_PLATFORMS="cpu",
     )
     r = subprocess.run(
-        [sys.executable, "tests/_rung2_grad_parity_subproc.py", "4", "8", "1e-8"],
+        [sys.executable, "tests/_rung2_grad_parity_subproc.py", "4", "8", "1e-5"],
         env=env,
         capture_output=True,
         text=True,
         timeout=900,
     )
-    assert r.returncode == 0, f"grad parity failed:\nSTDOUT:{r.stdout}\nSTDERR:{r.stderr}"
+    assert r.returncode == 0, (
+        f"grad parity failed:\nSTDOUT:{r.stdout}\nSTDERR:{r.stderr}"
+    )
 
 
 def test_sharded_optimize_gs_ad_matches_single_device():
@@ -47,4 +62,6 @@ def test_sharded_optimize_gs_ad_matches_single_device():
         text=True,
         timeout=900,
     )
-    assert r.returncode == 0, f"optimize parity failed:\nSTDOUT:{r.stdout}\nSTDERR:{r.stderr}"
+    assert r.returncode == 0, (
+        f"optimize parity failed:\nSTDOUT:{r.stdout}\nSTDERR:{r.stderr}"
+    )
