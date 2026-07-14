@@ -18,6 +18,15 @@ Usage (one D per process for a clean peak; PREALLOCATE=false for a faithful peak
     # 2-GPU sharded:
     CUDA_VISIBLE_DEVICES=1,2 XLA_PYTHON_CLIENT_PREALLOCATE=false \
         uv run python examples/bench_ctm_shard_reach_grad.py --D 10 --chi 24 --shard
+    # 4-GPU sharded (select the four A100s, exclude the DGX display GPU — with
+    # CUDA_DEVICE_ORDER=PCI_BUS_ID the display is PCI index 3, so 0,1,2,4 are the
+    # A100s; NCCL_P2P_DISABLE=1 avoids the box's 4-way NCCL stall):
+    CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,1,2,4 NCCL_P2P_DISABLE=1 \
+        XLA_PYTHON_CLIENT_PREALLOCATE=false \
+        uv run python examples/bench_ctm_shard_reach_grad.py --D 10 --chi 24 --shard
+
+Passing several --D (e.g. ``--D 10 12``) auto-re-execs one fresh subprocess per D
+so each per-device peak is uncontaminated by a prior config's high-water mark.
 """
 
 import argparse
@@ -50,6 +59,24 @@ def main():
     ap.add_argument("--max-iter", type=int, default=30)
     args = ap.parse_args()
 
+    # One D per process: peak_bytes_in_use is a process high-water mark that is
+    # NOT reset between configs, so running several D in one process would
+    # contaminate later rows with earlier allocations/fragmentation/OOM-autotune.
+    # When multiple D are requested, re-exec a fresh subprocess per D (inherits
+    # CUDA_VISIBLE_DEVICES etc.) so every reported peak is clean.
+    if len(args.D) > 1:
+        import subprocess
+
+        base = [sys.executable, __file__, "--chi", str(args.chi),
+                "--max-iter", str(args.max_iter)]
+        if args.shard:
+            base.append("--shard")
+        rc = 0
+        for D in args.D:
+            rc |= subprocess.call(base + ["--D", str(D)])
+        sys.exit(rc)
+
+    (D,) = args.D
     n = jax.device_count()
     mesh = build_ctm_mesh() if args.shard else None
     mesh_n = n if args.shard else 1
@@ -57,25 +84,24 @@ def main():
         f"# devices={n} shard={args.shard} mesh_n={mesh_n} chi={args.chi} "
         f"max_iter={args.max_iter} recipe=2x2 well_conditioned=True x64=True"
     )
-    for D in args.D:
-        if args.shard and (D * D) % mesh_n != 0:
-            print(f"D={D}: SKIP (D^2={D*D} not divisible by mesh_n={mesh_n})")
-            continue
-        t0 = time.perf_counter()
-        try:
-            e, g = implicit_energy_and_grad(
-                D=D, chi=args.chi, device_mesh=mesh, seed=0,
-                well_conditioned=True, max_iter=args.max_iter,
-            )
-            gnorm = float((g ** 2).sum() ** 0.5)
-            dt = time.perf_counter() - t0
-            print(
-                f"D={D}: OK  E={e:.6f}  |g|={gnorm:.3e}  "
-                f"per_device_peak={peak_gb():.2f} GB  wall={dt:.1f}s"
-            )
-        except Exception as ex:  # noqa: BLE001
-            dt = time.perf_counter() - t0
-            print(f"D={D}: FAILED ({type(ex).__name__}: {str(ex)[:110]})  wall={dt:.1f}s")
+    if args.shard and (D * D) % mesh_n != 0:
+        print(f"D={D}: SKIP (D^2={D*D} not divisible by mesh_n={mesh_n})")
+        return
+    t0 = time.perf_counter()
+    try:
+        e, g = implicit_energy_and_grad(
+            D=D, chi=args.chi, device_mesh=mesh, seed=0,
+            well_conditioned=True, max_iter=args.max_iter,
+        )
+        gnorm = float((g ** 2).sum() ** 0.5)
+        dt = time.perf_counter() - t0
+        print(
+            f"D={D}: OK  E={e:.6f}  |g|={gnorm:.3e}  "
+            f"per_device_peak={peak_gb():.2f} GB  wall={dt:.1f}s"
+        )
+    except Exception as ex:  # noqa: BLE001
+        dt = time.perf_counter() - t0
+        print(f"D={D}: FAILED ({type(ex).__name__}: {str(ex)[:110]})  wall={dt:.1f}s")
 
 
 if __name__ == "__main__":
