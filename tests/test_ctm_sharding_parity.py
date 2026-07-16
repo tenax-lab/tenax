@@ -52,35 +52,33 @@ def _run_parity_subproc(n_dev, D, chi, *, well_conditioned=False, thresh=1e-8):
     )
 
 
-@pytest.mark.parametrize(
-    "n_dev",
-    [
-        pytest.param(
-            2,
-            marks=pytest.mark.xfail(
-                reason=(
-                    "#702: PR #676 (direction-dependent 2x2 bond bookkeeping, "
-                    "bisected first-bad 7b8e5ad) moved the D=2 random single-site "
-                    "2x2 CTM fixed point into an ill-conditioned region "
-                    "(e_single -0.0083153747 -> -0.0075941887). Sharding "
-                    "reassociates the D²-axis sum, so the sharded-vs-single "
-                    "delta is O(eps*kappa): it blew from 5.55e-17 at 7b8e5ad^ to "
-                    "7.68e-5 here, >> thresh 1e-8. Same #676 root cause as the "
-                    "chi-bump regression; the well-conditioned probes below are "
-                    "unaffected (fixed point stable across #676). Flips green "
-                    "once #702 restores the fixed point."
-                ),
-                strict=False,
-            ),
-        ),
-        4,
-    ],
-)
+@pytest.mark.parametrize("n_dev", [2, 4])
 def test_sharded_forward_matches_single_device(n_dev):
     """Dense CTM energy under an N-device GSPMD mesh equals the single-device
-    result to <1e-8 (subprocess with fake CPU devices)."""
+    result to <1e-8 (subprocess with fake CPU devices).
+
+    The ``n_dev=2`` case is a known #702 regression: PR #676 (direction-
+    dependent 2x2 bond bookkeeping, bisected first-bad 7b8e5ad) moved the D=2
+    random single-site 2x2 CTM fixed point into an ill-conditioned region
+    (e_single -0.0083153747 -> -0.0075941887). Sharding reassociates the
+    D²-axis sum, so the sharded-vs-single delta is O(eps*kappa): it blew from
+    5.55e-17 at 7b8e5ad^ to 7.68e-5, >> thresh 1e-8. Same #676 root cause as
+    the chi-bump regression; the well-conditioned probes are unaffected (fixed
+    point stable across #676).
+
+    We ``xfail`` **only** that specific parity miss — a child that reached the
+    ``|delta|=`` parity print and returned nonzero — rather than marking the
+    whole ``n_dev=2`` path. A ``subprocess.TimeoutExpired`` from the fake-device
+    rendezvous propagates out of ``_run_parity_subproc`` (ERROR, not xfail), and
+    an import/JAX-setup crash returns nonzero *without* reaching the parity
+    print, so it falls through to the assert and FAILS. Both stay visible; only
+    the known #702 energy-delta regression is expected. Flips green once #702
+    restores the fixed point.
+    """
     D, chi = _PARITY_PROBE[n_dev]
     r = _run_parity_subproc(n_dev, D, chi)
+    if n_dev == 2 and r.returncode != 0 and "|delta|=" in r.stdout:
+        pytest.xfail(f"#702: known D=2 sharding parity regression: {r.stdout.strip()}")
     assert r.returncode == 0, f"parity failed:\nSTDOUT:{r.stdout}\nSTDERR:{r.stderr}"
 
 
