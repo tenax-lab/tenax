@@ -103,6 +103,11 @@ _FILE_MARKERS = {
     # Chunked dense-CTM edge absorption (chunk x shard #632 Increment 1): fast
     # mechanism unit tests; collected as core so CI required checks run them.
     "test_ctm_chunked_absorb.py": "core",
+    # gs_recipe="2x2" (the iPEPSConfig default) production guard (#676 / #702).
+    # Only the forward-only cell-size consistency half is core; the end-to-end
+    # physical anchor lives in test_ctm_recipe_2x2_production_correctness.py so
+    # it does not inherit this marker and run in required CI (it is @slow).
+    "test_ctm_recipe_2x2_consistency.py": "core",
     # #632 Increment 2 gate byproduct: forward-chunk grads through the (monolith)
     # implicit-AD backward stay exact. Tiny D=2 CPU value_and_grad parity.
     "test_ctm_chunk_backward_grad.py": "core",
