@@ -286,22 +286,32 @@ def _grouped_chi_perm(charges: np.ndarray) -> np.ndarray:
 
 
 def _tile_fused_to_chi(fused: np.ndarray, chi: int) -> np.ndarray:
-    """Tile size-D² ``fused`` charges up to length ``chi`` canonically.
+    """Extend size-D² ``fused`` charges up to length ``chi`` canonically.
 
     The leading D² block keeps the raw enumeration order (so index 0 stays the
     charge-0 diagonal that anchors the rank-1 seed at the vacuum slot); any
-    padding beyond D² is appended in **sorted** order.  This makes two legs of
-    one bond that carry opposite flow (sign-flipped enumerations of the same
-    multiset) agree after tiling.  A no-op for ``chi <= D²`` and for
-    direction-uniform iPEPS.  #667.
+    padding beyond D² is filled with the **identity (charge-0) sector**.
+
+    Charge-0 padding is self-conjugate, so the two legs of one bond that carry
+    opposite flow still agree after extension (0 == -0), and the corner and edge
+    chi legs — which both route through this helper (#667 Phase 0/1) — pad
+    identically, preserving their charge-multiset consistency.  Crucially it
+    introduces no *asymmetric* spurious sectors: the earlier sorted-tail padding
+    appended the smallest charges, which for partial-tile χ (e.g. D=3, χ=12,
+    pad=3 → [-2,-1,-1]) gave the chi leg an imbalanced multiset.  Sweep-1
+    renormalises the corners to the natural rank-D² multiset while T1/T3 keep
+    the init padding, and the vertical move's contraction of those mismatched
+    multisets cancelled the env to exact zero (#700 regression from #671).
+    Vacuum padding matches the seed's charge sector, so the mismatch is inert.
+
+    A no-op for ``chi <= D²``.  Reproduces the pre-#671 energy exactly and is
+    χ-independent for direction-uniform iPEPS.  #667, #700.
     """
     fused = np.asarray(fused, dtype=np.int32)
     if chi <= len(fused):
         return fused[:chi]
-    srt = np.sort(fused)
-    reps = (chi - len(fused)) // len(srt) + 1
-    tail = np.tile(srt, reps)[: chi - len(fused)]
-    return np.concatenate([fused, tail]).astype(np.int32)
+    pad = np.zeros(chi - len(fused), dtype=np.int32)
+    return np.concatenate([fused, pad]).astype(np.int32)
 
 
 def _init_symmetric_standard_edge(
