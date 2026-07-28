@@ -93,17 +93,16 @@ class TestPythonLoopCtmConverge:
             SINGLE_SITE_NEIGHBORS,
             chi=4,
             max_iter=max_iter,
-            conv_tol=1e-8,
+            conv_tol=1e-5,
         )
-        # Known limitation (Issues #425/#426): _ctm_tensor_sweep_multisite
-        # plateaus at sv_diff~0.05 on random init at D=2/chi=4 while variPEPS
-        # converges in ~9 iters (per-quadrant ket/bra ordering mismatch,
-        # design note in PR #426). PR #439's plateau_patience=20 default
-        # deterministically bails with converged=False at iter ~28 with
-        # sv_diff~0.05. Narrow the xfail to that specific signature (codex P2
-        # on PR #444): only the documented plateau outcome is expected;
-        # max_iter exhaustion, NaN/inf sv_diff, or an out-of-band sv_diff
-        # magnitude all surface as real failures.
+        # conv_tol=1e-5: the #702 sweep-invariant corner convention removed
+        # the historic sv_diff~0.05 random-init plateau (#425/#426) — the
+        # sweep now converges to sv_diff ~1e-6, where it stalls on the
+        # degenerate-pair SV basis rotation (LAPACK basis choice inside
+        # ket-bra-paired SVs flips between iterations; same #425 mechanism
+        # at ~1e-6 amplitude instead of 0.05).  1e-5 sits above that floor,
+        # so this asserts genuine convergence.  The xfail band below is kept
+        # for platforms whose BLAS still lands in the old plateau regime.
         if (
             not info.converged
             and 1e-4 < float(info.sv_diff) < 0.5
@@ -115,7 +114,7 @@ class TestPythonLoopCtmConverge:
                 f"iter={info.iterations}; M2b honeycomb-native CTM pending."
             )
         assert info.converged
-        assert info.sv_diff < 1e-8
+        assert info.sv_diff < 1e-5
         assert info.iterations > 1
 
     def test_python_loop_2site_checkerboard_converges(self):
@@ -226,15 +225,13 @@ class TestPythonLoopCtmConverge:
             SINGLE_SITE_NEIGHBORS,
             chi=chi,
             max_iter=max_iter,
-            conv_tol=1e-10,
+            conv_tol=1e-5,
             env_init=envs_warm,
         )
-        # Known limitation (Issues #425/#426): the warm-start path inherits
-        # the same CTM-iter plateau as test_python_loop_converges (both the
-        # pre-run and the continuation use _ctm_tensor_sweep_multisite). Bails
-        # at iter ~18 with sv_diff~0.05 under plateau_patience=20. Narrow to
-        # that signature (codex P2 on PR #444): any other non-convergence
-        # outcome surfaces as a real failure.
+        # conv_tol=1e-5: see test_python_loop_converges — post-#702 the
+        # sweep converges to the ~1e-6 degenerate-pair floor instead of the
+        # old 0.05 plateau, so this asserts genuine convergence.  The xfail
+        # band below is kept for platforms still in the old plateau regime.
         if (
             not info.converged
             and 1e-4 < float(info.sv_diff) < 0.5

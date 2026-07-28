@@ -234,7 +234,9 @@ def _build_enlarged_corner(
         return Q.relabels({"t1_l": "chi_L", "t2_d": "chi_B"})
 
     if position == "bottom_left":
-        # C4.c4_r <-> T4.t4_u  (energy/RDM convention; #670)
+        # C4.c4_r <-> T4.t4_u  (natural init adjacency — c4_r/c4_u names are
+        # historically swapped vs geometry; #670/#702.  Valid because the
+        # sweep keeps corner labels in the init convention at every point.)
         C_r = C.relabel("c4_r", "t4_u")
         CT_v = contract(C_r, T_v)  # -> (c4_u, t4_d, l2)
         # C4.c4_u <-> T3.t3_r

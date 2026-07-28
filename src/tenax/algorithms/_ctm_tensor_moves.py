@@ -583,18 +583,18 @@ def _ctm_tensor_absorb_right_2plaq(
     C2g = contract(C2_l, env_src.T1)  # (c2_d, t1_l, u2)
 
     # ---- C3·T3 (both at s_src) ----
-    C3_u = env_src.C3.relabel("c3_u", "t3_l")
-    C3g = contract(C3_u, env_src.T3)  # (c3_l, t3_r, d2)
+    C3_l = env_src.C3.relabel("c3_l", "t3_l")
+    C3g = contract(C3_l, env_src.T3)  # (c3_u, t3_r, d2)
 
     # ---- T2·ket (both at s_src) ----
     T2_with_a = contract(env_src.T2, a_src)  # (t2_u, t2_d, u2, d2, l2)
 
     # ---- C2: project with P_top_above only (≡ variPEPS .bottom of above) ----
     C2_new = _apply_proj_unfused(P_top_above, C2g, "c2_d", "u2")
-    C2_new = C2_new.relabels({"chi_new": "c2_l", "t1_l": "c2_d"})
+    C2_new = C2_new.relabels({"chi_new": "c2_d", "t1_l": "c2_l"})
 
     # ---- C3: project with P_bot_curr only (≡ variPEPS .top of curr) ----
-    C3_new = _apply_proj_unfused(P_bot_curr, C3g, "c3_l", "d2")
+    C3_new = _apply_proj_unfused(P_bot_curr, C3g, "c3_u", "d2")
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t3_r": "c3_l"})
 
     # ---- T2: sandwiched by P_bot_above (fl, t2_u⊕u2) and P_top_curr (fr, t2_d⊕d2) ----
@@ -664,7 +664,7 @@ def _ctm_tensor_absorb_top_2plaq(
 
     # ---- C1: project with P_top_left (≡ variPEPS .right of left-plaq) ----
     C1_new = _apply_proj_unfused(P_top_left, C1g, "c1_r", "l2")
-    C1_new = C1_new.relabels({"chi_new": "c1_d", "t4_u": "c1_r"})
+    C1_new = C1_new.relabels({"chi_new": "c1_r", "t4_u": "c1_d"})
 
     # ---- C2: project with P_bot_curr (≡ variPEPS .left of curr) ----
     C2_new = _apply_proj_unfused(P_bot_curr, C2g, "c2_l", "r2")
@@ -718,11 +718,11 @@ def _ctm_tensor_absorb_bottom_2plaq(
 
     # ---- C4: project with P_bot_left ----
     C4_new = _apply_proj_unfused(P_bot_left, C4g, "c4_u", "l2")
-    C4_new = C4_new.relabels({"chi_new": "c4_r", "t4_d": "c4_u"})
+    C4_new = C4_new.relabels({"chi_new": "c4_u", "t4_d": "c4_r"})
 
     # ---- C3: project with P_top_curr ----
     C3_new = _apply_proj_unfused(P_top_curr, C3g, "c3_l", "r2")  # #670
-    C3_new = C3_new.relabels({"chi_new": "c3_u", "t2_u": "c3_l"})
+    C3_new = C3_new.relabels({"chi_new": "c3_l", "t2_u": "c3_u"})
 
     # ---- T3: sandwiched by P_top_left (fl, t3_r⊕l2) + P_bot_curr (fr, t3_l⊕r2) ----
     step = _apply_proj_unfused(
@@ -864,18 +864,18 @@ def _ctm_tensor_absorb_right_2plaq_fused(
     C2g = contract(C2_l, env_src.T1)  # (c2_d, t1_l, u2)
 
     # ---- C3·T3 (both at s_src) ----
-    C3_u = env_src.C3.relabel("c3_u", "t3_l")
-    C3g = contract(C3_u, env_src.T3)  # (c3_l, t3_r, d2)
+    C3_l = env_src.C3.relabel("c3_l", "t3_l")
+    C3g = contract(C3_l, env_src.T3)  # (c3_u, t3_r, d2)
 
     # ---- T2·ket (both at s_src) ----
     T2_with_a = contract(env_src.T2, a_src)  # (t2_u, t2_d, u2, d2, l2)
 
     # ---- C2: project with P_top_above only (≡ variPEPS .bottom of above) ----
     C2_new = _apply_proj_unfused(P_top_above, C2g, "c2_d", "u2")
-    C2_new = C2_new.relabels({"chi_new": "c2_l", "t1_l": "c2_d"})
+    C2_new = C2_new.relabels({"chi_new": "c2_d", "t1_l": "c2_l"})
 
     # ---- C3: project with P_bot_curr only (≡ variPEPS .top of curr) ----
-    C3_new = _apply_proj_unfused(P_bot_curr, C3g, "c3_l", "d2")
+    C3_new = _apply_proj_unfused(P_bot_curr, C3g, "c3_u", "d2")
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t3_r": "c3_l"})
 
     # ---- T2: sandwiched by P_bot_above (fl, t2_u⊕u2) and P_top_curr (fr, t2_d⊕d2) ----
@@ -942,7 +942,7 @@ def _ctm_tensor_absorb_top_2plaq_fused(
 
     # ---- C1: project with P_top_left (≡ variPEPS .right of left-plaq) ----
     C1_new = _apply_proj_unfused(P_top_left, C1g, "c1_r", "l2")
-    C1_new = C1_new.relabels({"chi_new": "c1_d", "t4_u": "c1_r"})
+    C1_new = C1_new.relabels({"chi_new": "c1_r", "t4_u": "c1_d"})
 
     # ---- C2: project with P_bot_curr (≡ variPEPS .left of curr) ----
     C2_new = _apply_proj_unfused(P_bot_curr, C2g, "c2_l", "r2")
@@ -993,11 +993,11 @@ def _ctm_tensor_absorb_bottom_2plaq_fused(
 
     # ---- C4: project with P_bot_left ----
     C4_new = _apply_proj_unfused(P_bot_left, C4g, "c4_u", "l2")
-    C4_new = C4_new.relabels({"chi_new": "c4_r", "t4_d": "c4_u"})
+    C4_new = C4_new.relabels({"chi_new": "c4_u", "t4_d": "c4_r"})
 
     # ---- C3: project with P_top_curr ----
     C3_new = _apply_proj_unfused(P_top_curr, C3g, "c3_l", "r2")  # #674
-    C3_new = C3_new.relabels({"chi_new": "c3_u", "t2_u": "c3_l"})
+    C3_new = C3_new.relabels({"chi_new": "c3_l", "t2_u": "c3_u"})
 
     # ---- T3: sandwiched by P_top_left (fl, t3_r⊕l2) + P_bot_curr (fr, t3_l⊕r2) ----
     step = _apply_proj_unfused(
