@@ -2,23 +2,21 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Tenax is a JAX-based tensor-network library: DMRG/iDMRG on MPS, TRG/HOTRG, and iPEPS/fPEPS with CTM environments, built on label-based `DenseTensor`/`SymmetricTensor` operations with block-sparse U(1)/Z_n and fermionic symmetries.
+
 ## Git Workflow
 
-- Always open a PR instead of pushing directly to `main`.
-- Merge PRs with `gh pr merge <number> --squash --delete-branch --auto` so CI must pass first.
-- `main` has branch protection: `Tests (Python 3.11)`, `Tests (Python 3.12)`, and `Tests (macOS, Python 3.12)` must pass.
-- Branch protection requires the PR branch to be up-to-date with `main`. If behind, merge main into the branch (`git merge origin/main`) rather than rebasing — rebase can get stuck on `--continue`.
-- **Pytest markers**: Tests are auto-marked by file name (`core`, `algorithm`, `slow`) via `conftest.py`. CI required checks run only `pytest -m core`; full suite runs on push to main or with the `run-full-tests` PR label. Locally: `uv run pytest -m core` (fast), `uv run pytest -m "not slow"` (skip expensive), `uv run pytest` (all).
-- **AI-authored GitHub comments must be labeled.** Any comment, PR, or issue an AI agent posts (`gh pr comment`, `gh issue comment`, `gh pr review`, `gh pr/issue create`) must carry a `🤖` AI marker in the body so humans can distinguish AI from human comments. A `PreToolUse` hook in `.claude/settings.json` enforces this — it blocks such `gh` commands when no `🤖` (or `AI-generated`) marker is present. Suggested form for comments: `> 🤖 **AI-generated comment** — written by Claude Code, posted by @<user>.`
+- Always open a PR instead of pushing directly to `main`; merge with `gh pr merge <number> --squash --delete-branch --auto` so CI must pass first.
+- Branch protection on `main` requires `Tests (Python 3.11)`, `Tests (Python 3.12)`, and `Tests (macOS, Python 3.12)`, and the PR branch must be up-to-date with `main`. If behind, `git merge origin/main` — don't rebase (rebase gets stuck on `--continue` here).
+- Run `pre-commit install` once per clone — hooks (ruff, ruff-format) must pass before committing.
+- Tests are auto-marked by file name (`core`, `algorithm`, `slow`) via `conftest.py`. CI required checks run only `pytest -m core`; the full suite runs on push to `main` or with the `run-full-tests` PR label. Locally: `uv run pytest -m core` (fast), `uv run pytest -m "not slow"`, or `uv run pytest` (all). On macOS/headless runs, force the CPU backend: `JAX_PLATFORMS=cpu uv run pytest ...`.
+- **AI-authored GitHub comments must be labeled.** Any comment, PR, or issue an AI agent posts must carry a `🤖` marker so humans can tell it apart — a `PreToolUse` hook in `.claude/settings.json` blocks `gh` comment/create commands without one. Suggested form: `> 🤖 **AI-generated comment** — written by Claude Code, posted by @<user>.`
 
+## Gotchas
 
+- **Avoid `todense()` on the symmetric-tensor path** unless the result is guaranteed small (a local operator, or a bond matrix after decomposition). Use the block-sparse operations (`SymmetricTensor` methods, `tenax.linalg.svd`/`qr`/`eigh`) instead — densifying a large `SymmetricTensor` defeats the point of symmetric tensors.
+- New public API must be exported in `src/tenax/__init__.py` (`__all__`) and reflected in `README.md`; keep README examples consistent with actual signatures and test usage.
 
-## Coding Rules
+## Skills
 
-- **Avoid `todense()` on the symmetric tensor path** unless the resulting dense matrix is guaranteed to be small (e.g. a local operator or a bond matrix after decomposition). Block-sparse operations (`SymmetricTensor` methods, `tenax.linalg.svd`/`qr`/`eigh`) should be used instead — they preserve sparsity, run faster at large bond dimension, and keep symmetry quantum numbers intact. Calling `todense()` on a large `SymmetricTensor` defeats the purpose of symmetric tensors.
-
-## Documentation
-
-- When adding new public API (algorithms, classes, functions), update both `README.md` (features list, example sections) and `src/tenax/__init__.py` (`__all__` exports).
-- Sphinx docs live in `docs/`; build with `cd docs && make html`.
-- Keep `README.md` example code consistent with actual function signatures and test usage.
+Task-specific guidance lives in `.claude/skills/` — workflows for DMRG, iPEPS, TRG, the symmetry system, AutoMPO, observables, debugging, benchmarking, and migrations from TeNPy/ITensor/quimb/Cytnx. Load the matching skill for those tasks instead of re-deriving the workflow.
