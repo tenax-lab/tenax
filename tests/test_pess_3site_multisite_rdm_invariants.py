@@ -76,7 +76,13 @@ def _contract_multisite_3x3_torus(sites: dict[str, jnp.ndarray]) -> jnp.ndarray:
     return jnp.einsum(spec, *args, optimize="optimal")
 
 
-@pytest.mark.core
+# ``slow``, not ``core``: this builds the full 3×3 torus wavefunction by brute
+# force, which costs ~184s at D=1 alone.  The three brute-force gates in this
+# file were 585s of the ~2500s ``-m core`` run (23%) — the single largest item
+# in the merge gate.  They are oracle checks against exact contraction, so
+# their value is catching a wrong answer, not catching it *fast*; the full
+# suite (push to main, ``run-full-tests`` label, nightly) is the right cadence.
+@pytest.mark.slow
 @pytest.mark.parametrize("D", [1, 2, 3])
 def test_multisite_3x3_torus_translation_invariant_diagonal(D):
     """ψ on the 3×3 PBC torus must be invariant under the (1,-1) diagonal
@@ -154,7 +160,7 @@ def _brute_force_rdm_from_torus_psi(
     return jnp.transpose(rho, perm)
 
 
-@pytest.mark.core
+@pytest.mark.slow  # brute-force oracle; see the note above
 @pytest.mark.parametrize("D", [1, 2, 3])
 def test_brute_force_rdm_is_physical(D):
     """Brute-force RDMs from the 3×3 torus ψ must be Hermitian, trace 1, PSD."""
@@ -298,7 +304,7 @@ def _brute_force_rdms(state: IPESSState) -> dict[str, jnp.ndarray]:
     return out
 
 
-@pytest.mark.core
+@pytest.mark.slow  # brute-force oracle; see the note above
 def test_d1_brute_force_equals_ctm_rdms():
     """Gate #6: at D=1 the encoded state is a product state, so finite-torus
     brute-force = infinite-lattice CTM exactly. All 6 RDMs must agree to 1e-10
