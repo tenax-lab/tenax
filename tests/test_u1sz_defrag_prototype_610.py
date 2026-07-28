@@ -13,17 +13,6 @@ from tenax.algorithms._ctm_tensor import ctm_tensor
 from tenax.algorithms.ipeps import heisenberg_gate_u1sz, heisenberg_u1sz_init_pair
 
 
-@pytest.mark.xfail(
-    reason=(
-        "#700: PR #671 sorted-tail chi-leg tiling collapses the U(1)-Sz "
-        "single-site CTM env to exact-zero (E=0) at D=3 chi=12 (bisected "
-        "regression, healthy env before 07e60c5 gave E=-0.0617). The energy "
-        "here is 0.0 because the underlying `ctm_tensor` returns a zero "
-        "environment, NOT because of this throwaway #610 prototype (baseline "
-        "`ctm_tensor` collapses identically). Flips green once #700 is fixed."
-    ),
-    strict=False,
-)
 def test_prototype_ctm_converges_and_energy_is_sane():
     jax.config.update("jax_enable_x64", True)
     A, _B = heisenberg_u1sz_init_pair(D=3, key=jax.random.PRNGKey(0))
@@ -51,12 +40,14 @@ def test_prototype_actually_drops_sectors():
 
 @pytest.mark.xfail(
     reason=(
-        "#700: PR #671 changed the D=3 chi=12 U(1)-Sz env-init chi-bond charge "
-        "structure (sorted-tail tiling), so the documented mixed-generation "
+        "#610 (stale obstruction, independent of #700): with the current "
+        "env-init chi-bond charge structure the documented mixed-generation "
         "chi-bond mismatch ('does not match previous') no longer trips — the "
-        "backward VJP now traces without raising. The #610 obstruction this "
-        "test pins is stale until the #700 env-init regression is resolved. "
-        "Flips green (or the obstruction message updates) once #700 is fixed."
+        "surgical-drop backward VJP traces without raising. #700's vacuum-tiling "
+        "fix does not restore the obstruction (it was pinning a since-changed "
+        "env-init detail, not the #700 collapse). The real #610 structural fix "
+        "(env-init + per-direction refresh emitting a uniform sector set) is "
+        "what would flip this test."
     ),
     strict=False,
 )
