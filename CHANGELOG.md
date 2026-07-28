@@ -2,6 +2,74 @@
 
 ## Unreleased
 
+## v0.8.2 (2026-07-29)
+
+A consolidation release: the direction-dependent CTM work from v0.8.1's cycle
+is finished and its two silent single-site regressions are closed, alongside
+additive features (multi-GPU HOTRG, 2-site split-CTM, Potts helpers).
+
+### Fixes
+
+- **Symmetric CTM χ-bond padding uses vacuum, not the sorted tail** (#700, #708) —
+  the U(1)-Sz single-site environment collapsed to zero at D=3, χ=12 when the
+  χ-bond was padded with sorted-tail charges instead of the vacuum sector.
+- **Sweep-invariant 2x2 CTM corner label convention** (#702, #710) — the TOP
+  move's C1, RIGHT's C2, and BOTTOM's C4+C3 wrote their corners with the two
+  legs swapped relative to the init convention that `_build_enlarged_corner`,
+  the move reads, and the energy/RDM contraction all assume. Pre-#676 the
+  defect was uniform (a tolerated global transpose); #676 fixed only C3, making
+  it non-uniform and rendering the single-site fixed point trajectory-dependent.
+  One cause behind all three symptoms: the χ-bump forward drift (7e-5 → 2e-14),
+  the ~10x-off implicit-AD gradient, and the D=2 sharding-parity blowup. Also
+  resolves the long-standing **#425/#426 random-init plateau** — the sweep now
+  converges to sv_diff ≈ 1e-6 instead of stalling at 0.05, so three plateau
+  xfails became genuine convergence guards. Note the single-site fixed point
+  moves (the prior value was the transposed-scheme artifact), and mutual
+  bump-vs-fixed *gradient* agreement now floors at ~1e-3 because the restored
+  ket-bra Z2 produces paired-degenerate projector SVs (#425 mechanism,
+  backward-only; both gradients stay FD-consistent).
+- **Direction-dependent 2x2 CTM bond bookkeeping** (#667, #670, #671, #676, #677) —
+  canonical env tiling + 2x2 init corner consistency, `bottom_left` enlarged-corner
+  pairing, and the fermionic/fused bottom-absorption C3 pairing (`c3_u`↔`t2_d`),
+  so the block-sparse U(1) sweep runs on asymmetric-corner (`A.l != A.r`) states.
+- **GPU SVD routed through the QR algorithm** (#691, #693) — avoids cuSOLVER
+  `gesvdj` returning NaN.
+- Split-CTM review fixes: 2-site TBPTT guard rejects only real truncation (#694, #696).
+
+### New Features
+
+- **2-site split-CTM, Phases 0–4** (#684, #685, #688, #690) — joint dense
+  forward, dense AD, `SymmetricTensor` forward, and fermionic forward
+  (merge → fused → resplit), extending the χ²·D⁴ split path to 2-site cells.
+- **Multi-GPU HOTRG** (#681, #682) — `HOTRGConfig(device_mesh=...)` shards a
+  surviving leg of the χ⁶ merge under GSPMD: ideal **2.00×/device** memory
+  relief on 2×A100 with numerically identical results, and a real χ-ceiling
+  extension (χ=40 OOMs replicated, fits sharded). Works where CTM-AD sharding
+  did not because coarse-graining is forward-only — no AD-through-SVD backward
+  to replicate the dominant operand.
+- **Potts model helpers** (#686) — `compute_potts_tensor` and
+  `potts_critical_beta` for q-state Potts TRG/HOTRG.
+- **Chunked dense-CTM edge absorption** (#665, #668) — forward, 1×1.
+
+### Research / Docs
+
+- **Multi-GPU CTM-AD characterized as NO-GO** (#632, #672, #673, #678, #680) —
+  dense sharding gives only ~1.1–1.4×/device and never extends D-reach;
+  split-CTM on 1 GPU beats dense on 2 across the whole (D,χ) frontier. Root
+  cause is path-agnostic: XLA lowers the projector SVD as unshardable and
+  all-gathers whatever GSPMD sharded. TRG is likewise not a sharding target
+  (no χ⁶ intermediate); HOTRG is, and shipped above.
+- `CLAUDE.md` / `AGENTS.md` rightsized for Claude 5-generation context
+  engineering (#709), and the documented merge command corrected — never pass
+  `--delete-branch` with a merge queue, which closes the PR instead of merging
+  it (#711).
+
+### Tests / Chore
+
+- #692 flake and regression triage across the sharding, AD, and CTM-plateau
+  suites (#695, #697, #698, #699, #701, #703, #704, #706).
+- CI coverage for `gs_recipe="2x2"`, the default CTM recipe (#707).
+
 ## v0.8.1 (2026-06-30)
 
 ### New Features
