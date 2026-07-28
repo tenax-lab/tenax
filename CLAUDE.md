@@ -6,7 +6,7 @@ Tenax is a JAX-based tensor-network library: DMRG/iDMRG on MPS, TRG/HOTRG, and i
 
 ## Git Workflow
 
-- Always open a PR instead of pushing directly to `main`; merge with `gh pr merge <number> --squash --delete-branch --auto` so CI must pass first.
+- Always open a PR instead of pushing directly to `main`; merge with `gh pr merge <number> --squash --auto` so CI must pass first. **Never pass `--delete-branch`** — `main` uses a merge queue, which deletes the head branch itself once the PR merges. Passing the flag deletes the branch the moment the PR *enters* the queue, which closes the PR and drops it from the queue (recover with `git push origin FETCH_HEAD:refs/heads/<branch>` from `refs/pull/<n>/head`, then reopen). The queue also picks the merge strategy, so `gh` reporting "The merge strategy for main is set by the merge queue" is normal, not a failure.
 - Branch protection on `main` requires `Tests (Python 3.11)`, `Tests (Python 3.12)`, and `Tests (macOS, Python 3.12)`, and the PR branch must be up-to-date with `main`. If behind, `git merge origin/main` — don't rebase (rebase gets stuck on `--continue` here).
 - Run `pre-commit install` once per clone — hooks (ruff, ruff-format) must pass before committing.
 - Tests are auto-marked by file name (`core`, `algorithm`, `slow`) via `conftest.py`. CI required checks run only `pytest -m core`; the full suite runs on push to `main` or with the `run-full-tests` PR label. Locally: `uv run pytest -m core` (fast), `uv run pytest -m "not slow"`, or `uv run pytest` (all). On macOS/headless runs, force the CPU backend: `JAX_PLATFORMS=cpu uv run pytest ...`.
