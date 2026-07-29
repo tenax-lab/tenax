@@ -124,6 +124,30 @@ smooth invertible change of variables, and a reparametrisation cannot change
 `dE/dp` — the measured error was identical to four digits. So the modified variables are
 *scaffolding*, not the fix. Useful only because the next step needs them.
 
+### Where the cut-leg roots go (derived, not yet measured)
+
+`M`'s two open legs are the right-facing legs of the two quadrants, and each carries a
+dangling `A = S^-1/2` inherited from the edge it came from: the left leg from move
+`k+1` (via `T1`), the right leg from move `k+3` (via `T3`). The internal bonds are fine —
+two halves meet and combine into a covariant `S^-1`. So the correction is
+
+```
+M̃ = kron(X_L, 1_d2) @ M @ kron(X_R, 1_d2)
+X_L = (S_{k+1} S_{k+1}†)^-1/4 @ S_{k+1}^1/2
+X_R = S_{k+3}^1/2 @ (S_{k+3}† S_{k+3})^-1/4
+```
+
+i.e. divide out the dangling half-root and multiply the quartic root back in. At the root
+every factor is `S^-1/2`, so `X = 1` and `M̃ = M` — consistent with the root residual
+being unchanged, and confirming only the *variation* differs. Which quartic root belongs
+on which side is a two-way choice; the gradient error is the oracle.
+
+**Cost warning.** A naive `A^-1/4` as two nested Denman–Beavers loops is ~48 matrix
+inversions, and `F` is evaluated hundreds of times per GMRES solve across four
+directions. That made the measurement infeasible in practice. Compute the quartic roots
+**once per direction outside the per-equation loop**, or use a single fused iteration for
+`A^-1/4` directly, before attempting this.
+
 **Therefore the entire remaining discrepancy sits in step 4:** the half-infinite
 environment must be built from the *modified* edges with `s^L`, `s^R` on the dangling cut
 legs, i.e. `M̃ ≠ M`. That changes the equations rather than the coordinates, and it is the
