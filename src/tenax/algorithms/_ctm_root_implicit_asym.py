@@ -623,6 +623,154 @@ def asym_characteristic_residual(y, a: jax.Array, consts: AsymRoot, chi: int):
     return (AsymEnv(*corners, *edges), tuple(R_u), tuple(R_S), tuple(R_v))
 
 
+def _covariant_pieces(consts: AsymRoot, S_all: tuple, u_all: tuple, v_all: tuple):
+    """Per-direction covariant building blocks (paper Eqs. 71-75).
+
+    ``s = S^-1``, and the Eq. 73 roots go on the *isometries*, not on the
+    projectors.  Their placement is fixed by the Eq. 87 transformation laws
+    rather than chosen: with ``U -> U Q_L†``, ``V -> Q_R V`` and
+    ``s -> Q_R s Q_L†``,
+
+        (s† s)^1/4 -> Q_L (s† s)^1/4 Q_L†,
+        (s s†)^1/4 -> Q_R (s s†)^1/4 Q_R†,
+
+    which is what makes them legitimate factors to attach to the isometries.
+
+    They attach to the ``n = chi * d2`` *cut* leg, on its ``chi`` sub-leg —
+    not to the outer ``chi`` index.  That is the leg §V.3 describes as
+    carrying "a dangling sqrt(s) on outer legs of the edge tensors that are
+    being cut", and it is what the reference's ``absorb_right`` reaches
+    (``domainind(P)[1]``, the first of the split ``(chi, D, D)`` triple).
+    Attaching to the outer ``chi`` instead is shape-legal for ``Ud`` and
+    ``Vd`` but not for the null-space blocks, which is the giveaway.
+
+    The direction offsets follow the reference's
+    ``_leftvec_invfroot_indices`` / ``_rightvec_invfroot_indices``, which at a
+    1x1 unit cell reduce to ``k-1`` and ``k+1``: the cut legs belong to the
+    neighbouring directions' edges.
+    """
+    s_all = tuple(jnp.linalg.inv(S) for S in S_all)
+    root_L = tuple(_quartic_root(s.conj().T @ s) for s in s_all)
+    root_R = tuple(_quartic_root(s @ s.conj().T) for s in s_all)
+
+    d2 = consts.U_star[0].shape[0] // S_all[0].shape[0]
+    eye_d2 = jnp.eye(d2, dtype=consts.U_star[0].dtype)
+    # chi is the slow index of the fused (chi, d2) cut leg.
+    K_L = tuple(jnp.kron(r, eye_d2) for r in root_L)
+    K_R = tuple(jnp.kron(r, eye_d2) for r in root_R)
+
+    Ud, Vd, ULd, VRd = [], [], [], []
+    for k in range(4):
+        km, kp = (k - 1) % 4, (k + 1) % 4
+        U = consts.U_star[k] + consts.U_perp[k] @ u_all[k]  # Eq. 71
+        Vh = consts.Vh_star[k] + v_all[k] @ consts.Vh_perp[k]  # Eq. 72
+        chi = S_all[k].shape[0]
+        Ud.append(U[:, :chi].conj().T @ K_L[km])
+        Vd.append(K_R[kp] @ Vh[:chi].conj().T)
+        ULd.append(consts.U_perp[k].conj().T @ K_L[km])
+        VRd.append(K_R[kp] @ consts.Vh_perp[k].conj().T)
+    return s_all, tuple(Ud), tuple(Vd), tuple(ULd), tuple(VRd)
+
+
+def _modified_env(env_tilde: AsymEnv, s_all: tuple) -> AsymEnv:
+    """``iCi = s_{k-1} C̃_k s_k`` with the edges left alone.
+
+    The full inverse goes on *both* corner legs (reference ``iCi``), which is
+    what puts the singular values explicitly into the contraction environment
+    so that it transforms covariantly.  Edges already carry their ``s`` from
+    the Eq. 82 map.
+    """
+    corners = []
+    for k in range(4):
+        prev_dir, own_dir = _corner_leg_directions(k)
+        corners.append(
+            s_all[prev_dir] @ getattr(env_tilde, f"C{k + 1}") @ s_all[own_dir]
+        )
+    edges = [getattr(env_tilde, f"T{k + 1}") for k in range(4)]
+    return AsymEnv(*corners, *edges)
+
+
+def asym_characteristic_residual_covariant(y, a: jax.Array, consts: AsymRoot, chi: int):
+    """``F(y, p)`` in the covariant parametrisation of paper §V.3.
+
+    .. warning::
+
+       **Incomplete — this does not vanish at the root yet**, so it is not
+       wired into any gradient path.  At ``D=2``, ``chi=4`` on a state where
+       :func:`asym_characteristic_residual` sits at 2.5e-16, this returns
+       ``3.4e1``, distributed as
+
+       * corners/edges: 5e0 … 1.8e1  <- the wrong part
+       * ``R_S``: 1e-2 … 2.5e-2
+       * ``R_u`` / ``R_v``: 1e-1 … 1e0
+
+       The isometry blocks are close; the modified corner/edge recursion is
+       not.  What is still unresolved is the placement of ``s_k`` on the
+       projectors (the ``P_bot``/``P_top`` lines below are a guess) and
+       whether the renormalised corner should be compared against ``C̃``
+       directly or against a differently normalised object.  Settling it
+       needs the reference's leg conventions for ``EnlargedCorner``,
+       ``_contract_PR_PL``, ``contract_EPL``, ``contract_EiCiEPL`` and
+       ``contract_PREPL`` decoded, or reference numbers to match term by
+       term.  Do not iterate on the residual blind: that produced the
+       refutation table in ``docs/plans/2026-07-29-715-phase1-modified-variables.md``.
+
+    ``y = (env_tilde, u, S, v)`` with *modified* corners and edges, so that
+    holding ``U*`` and ``V*`` constant is licensed by Eq. 88.  Normalisation
+    follows the reference implementation's ``X'/lambda - X`` rather than
+    ``X' - lambda X``; the two differ by a row scaling of ``F``, which leaves
+    the implicit gradient invariant but not the Jacobian conditioning.
+    """
+    env_tilde, u_all, S_all, v_all = y
+    s_all, Ud, Vd, ULd, VRd = _covariant_pieces(consts, S_all, u_all, v_all)
+    env_mod = _modified_env(env_tilde, s_all)
+
+    n = chi * a.shape[0]
+
+    # Pass 1: enlarged corners and projectors, all from the same y.
+    EC, P_top, P_bot = [], [], []
+    env_k, a_k = env_mod, a
+    for k in range(4):
+        top = _upper_left_quadrant(env_k, a_k).reshape(n, n)
+        bot = _lower_left_quadrant(env_k, a_k).reshape(n, n)
+        EC.append((top, bot))
+        # ``s_k`` on the outer legs, which become the new environment bonds;
+        # the cut legs are already carrying the Eq. 73 roots via Ud/Vd.
+        P_bot.append(s_all[k] @ (Ud[k] @ top))
+        P_top.append((bot @ Vd[k]) @ s_all[k])
+        env_k, a_k = rotate_env(env_k), rotate_a(a_k)
+
+    # Pass 2: residuals.
+    corners: list = [None] * 4
+    edges: list = [None] * 4
+    R_u, R_S, R_v = [None] * 4, [None] * 4, [None] * 4
+    env_k, a_k = env_mod, a
+    for k in range(4):
+        top, bot = EC[k]
+        M = top @ bot
+        s_inv = consts.s_star_inv[k]
+
+        core = Ud[k] @ M @ Vd[k]
+        lam_S = jnp.vdot(S_all[k], core).real
+        R_S[k] = core / lam_S - S_all[k]
+        R_u[k] = (ULd[k] @ M @ Vd[k]) @ s_inv / lam_S - u_all[k]
+        R_v[k] = s_inv @ (Ud[k] @ M @ VRd[k]) / lam_S - v_all[k]
+
+        C_new = _renormalised_corner(env_k, a_k, P_top[k], P_bot[(k + 1) % 4], chi)
+        C_cur = getattr(env_tilde, f"C{_unrotate_index(1, k)}")
+        lam_C = jnp.vdot(C_cur, C_new).real
+        corners[_unrotate_index(1, k) - 1] = C_new / lam_C - C_cur
+
+        E_new = _renormalised_edge(env_k, a_k, P_top[k], P_bot[k], chi)
+        E_cur = getattr(env_tilde, f"T{_unrotate_index(4, k)}")
+        lam_E = jnp.vdot(E_cur, E_new).real
+        edges[_unrotate_index(4, k) - 1] = E_new / lam_E - E_cur
+
+        env_k, a_k = rotate_env(env_k), rotate_a(a_k)
+
+    return (AsymEnv(*corners, *edges), tuple(R_u), tuple(R_S), tuple(R_v))
+
+
 def asym_root_parametrize(
     env: AsymEnv,
     a: jax.Array,

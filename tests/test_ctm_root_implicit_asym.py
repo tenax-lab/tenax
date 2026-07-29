@@ -410,3 +410,29 @@ def test_singular_value_adjoint_is_not_negligible():
     corner_scale = float(jnp.linalg.norm(tilde_bar.C1))
     biggest = max(float(jnp.linalg.norm(x)) for x in S_bar)
     assert biggest > 0.1 * corner_scale, (biggest, corner_scale)
+
+
+@pytest.mark.xfail(
+    reason=(
+        "§V.3 covariance port is incomplete (#718). The covariant characteristic "
+        "equations do not vanish at the root yet: 3.4e1 total at D=2 chi=4, where "
+        "the non-covariant form sits at 2.5e-16. The isometry blocks are close "
+        "(R_S ~ 1e-2, R_u/R_v ~ 1e-1..1e0) but the modified corner/edge recursion "
+        "is off by O(10). Unresolved: where s_k attaches to the projectors, and "
+        "the normalisation the renormalised corner should be compared against. "
+        "Needs the reference implementation's leg conventions decoded — see the "
+        "warning on asym_characteristic_residual_covariant."
+    ),
+    strict=True,
+)
+def test_covariant_characteristic_equations_vanish_at_the_root():
+    A, a, root = _converged_root()
+    chi = root.env.C1.shape[0]
+    S = _root_S(root)
+    tilde = M.remove_inverse_roots(root.env, S)
+
+    R = M.asym_characteristic_residual_covariant(
+        (tilde, root.u, S, root.v), a, root, chi
+    )
+    total = float(jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(R))))
+    assert total < 1e-10, total
