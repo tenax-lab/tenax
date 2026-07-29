@@ -1,5 +1,16 @@
 # #715 Phase 1 completion
 
+> **SUPERSEDED IN PART — 2026-07-30.** The exoneration/refutation table below
+> records each covariance arrangement tried *in isolation*, and concluded from each
+> failure that the arrangement was refuted. After reading §V.3 of arXiv:2607.15030v1
+> directly (rather than reconstructing it), that conclusion is wrong: §V.3 is a
+> package — `s` onto the edges + modified `C̃`/`Ẽ`/`P̃^L`/`P̃^R` (Eqs. 82, 74, 75),
+> `s^L`/`s^R` on the **cut legs** of the environment matrix in Eqs. 78–80, and `ў`
+> built by backpropagating `x̆` through Eq. 82 so that `S̆ ≠ 0`. Freezing `U*`, `V*`
+> is legitimate in the paper (Eq. 88); it is unlicensed *here* only because the
+> covariance package is absent. See tenax-lab/tenax#718 for the corrected diagnosis.
+> Read the table below as "tried in isolation, inconclusive", not "refuted".
+
 > **Read this first (supersedes most of what follows).** A discriminating
 > finite-difference test shows the residual error is **not** in the characteristic
 > equations:
