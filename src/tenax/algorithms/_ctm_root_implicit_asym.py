@@ -196,6 +196,86 @@ def _inv_quartic_root(A: jax.Array, n_iter: int = 24) -> jax.Array:
     return _denman_beavers(_denman_beavers(A, n_iter)[0], n_iter)[1]
 
 
+def _quartic_root(A: jax.Array, n_iter: int = 24) -> jax.Array:
+    """``A^1/4`` for Hermitian positive ``A``, as ``(A^1/2)^1/2``."""
+    return _denman_beavers(_denman_beavers(A, n_iter)[0], n_iter)[0]
+
+
+# ---------------------------------------------------------------------------
+# The y <-> x map (paper Eq. 82)
+# ---------------------------------------------------------------------------
+#
+# The characteristic equations are written in *modified* corners and edges,
+# which carry the inverse singular values explicitly on their environment
+# legs.  Only that form transforms covariantly under the eight gauge
+# unitaries of Eq. 84, and only then is the null-space restriction of Eq. 88
+# — hence holding ``U*`` and ``V*`` constant — legitimate.
+#
+# The forward contraction is untouched: it produces the regular ``x``, and
+# these two functions move between the two descriptions.  Crucially the
+# *adjoint* has to travel the same way, which is what makes ``S̆`` nonzero;
+# see :func:`asym_root_implicit_energy_and_grad`.
+#
+# Direction bookkeeping at a 1x1 unit cell (paper indices reduce to pure
+# direction arithmetic, cf. PEPSKit ``_prev_coordinate``): corner ``k`` has
+# its first environment leg on direction ``k-1``'s edge and its second on
+# direction ``k``'s, and edge ``k`` takes ``S_k`` on both chi legs.
+
+
+def _corner_leg_directions(k: int) -> tuple[int, int]:
+    """``(prev, own)`` singular-value slots for corner ``k`` (0-based)."""
+    return (k - 1) % 4, k
+
+
+def _apply_corner_roots(C: jax.Array, left: jax.Array, right: jax.Array) -> jax.Array:
+    return left @ C @ right
+
+
+def _apply_edge_roots(E: jax.Array, left: jax.Array, right: jax.Array) -> jax.Array:
+    """Absorb on both chi legs of ``E[chi_in, d2, chi_out]``."""
+    return jnp.einsum("ai,ixj,jb->axb", left, E, right)
+
+
+def _map_env_roots(env: AsymEnv, roots: tuple, *, normalize: bool) -> AsymEnv:
+    """Absorb ``roots[k]`` onto corner/edge environment legs (Eq. 82)."""
+    corners, edges = [], []
+    for k in range(4):
+        prev_dir, own_dir = _corner_leg_directions(k)
+        C = _apply_corner_roots(
+            getattr(env, f"C{k + 1}"), roots[prev_dir], roots[own_dir]
+        )
+        E = _apply_edge_roots(getattr(env, f"T{k + 1}"), roots[k], roots[k])
+        if normalize:
+            C = C / (jnp.linalg.norm(C) + 1e-300)
+            E = E / (jnp.linalg.norm(E) + 1e-300)
+        corners.append(C)
+        edges.append(E)
+    return AsymEnv(*corners, *edges)
+
+
+def remove_inverse_roots(env: AsymEnv, S: tuple) -> AsymEnv:
+    """Regular ``x`` -> modified ``(C̃, Ẽ)``: multiply by ``sqrt(S)``.
+
+    Undoes the inverse square roots the forward projectors put on the
+    environment legs, leaving the modified tensors of Eq. 82.
+    """
+    roots = tuple(_denman_beavers(s)[0] for s in S)
+    return _map_env_roots(env, roots, normalize=True)
+
+
+def absorb_inverse_roots(env_tilde: AsymEnv, S: tuple) -> AsymEnv:
+    """Modified ``(C̃, Ẽ)`` -> regular ``x``: multiply by ``sqrt(S^-1)``.
+
+    This is the differentiable direction.  ``S`` enters here, so the energy
+    — which is evaluated on the regular environment — depends on ``S``
+    through this map, and ``S̆`` picks that up.  A matrix square root of the
+    inverse is used rather than a diagonal power because ``dS`` is a general
+    non-diagonal matrix in the reverse pass.
+    """
+    roots = tuple(_inv_sqrt(s) for s in S)
+    return _map_env_roots(env_tilde, roots, normalize=True)
+
+
 def _pin_bond_gauge(U, Vh, P_top, P_bot, chi, prev_P_top=None):
     """Pin the residual phase freedom on each renormalised bond.
 
