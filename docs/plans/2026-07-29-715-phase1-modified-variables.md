@@ -1,5 +1,45 @@
 # #715 Phase 1 completion
 
+> **CAUSE FOUND — 2026-07-30 (supersedes the gauge-covariance claim below).**
+> The implicit machinery is **exact**; the function it differentiates is the wrong one.
+> Along a random direction `dA`:
+>
+> ```
+> FD of G(p) = E at the frozen-c root   = +0.3519056653   (stable, h = 1e-4..1e-6)
+> implicit gradient (IFT)               = +0.3519056655   <- 9-digit match
+> explicit backprop = FD of same map    = +0.3607559898   <- the truth
+> ```
+>
+> So `dG/dp` is computed perfectly and `G(p) != E_true(p)`. The `8.8503e-3` gap is
+> exactly the term the method drops, `dE/dc · dc/dp`, for the frozen
+> `c = (U*, U_perp, Vh*, Vh_perp, s*inv)`.
+>
+> **Three diagnoses are now refuted, in order:**
+> 1. `S̆ = 0` (the filed #718 cause) — fixed in Stage 3, gradient did not improve.
+> 2. Missing §V.3 covariance package — added in Stage 2, `‖F(y*)‖` = 1.7e-14, no help.
+> 3. Gauge covariance — **licensed to 1e-16.** The earlier ~1e-2 "violation" was a
+>    bad projection: every frozen constant carries the gauge on *two* index kinds, the
+>    new bond and the fused cut leg `n = chi·d2`, so `δU* = U* X − kron(X,I) U*`.
+>    Keeping only `U* X` reports 4.0e-3 where the full law gives 1e-16.
+>
+> **What is actually left:** a *non-gauge* motion of `c`. Largest non-gauge cotangents
+> are on the null-space bases — `U_perp` 6.4e-4, `Vh_perp` 1.2e-3 — with `U*`/`Vh*`
+> non-gauge parts ~1e-4…9e-4 and `s*inv` exactly zero (2.3e-19). Since `dc/dp` is
+> O(10) (‖ydot‖ = 18.6), those are the right order to explain 8.85e-3. Next step is to
+> find which frozen constant carries it: either enlarge `y` to include the offending
+> one, or add the `dE/dc · dc/dp` correction explicitly.
+>
+> **Methodology warning, learned the hard way.** Do **not** finite-difference the root
+> or the re-converged energy: `asym_root_parametrize` is gauge-*discontinuous* in `p`,
+> so `|ydot_fd|` diverges as `h` shrinks (1.98e4 at h=1e-5, 1.19e5 at h=1e-6) even
+> though every point is a valid root at 1e-16. That is also why the earlier FD of the
+> converged energy gave −0.046 / −0.374 / +32.2. Use the frozen-`c` Newton route
+> (`docs/plans/reference/718-frozenroot.py`), which is gauge-stable by construction.
+>
+> Also verified: the adjoint and forward (JVP) routes agree to 1.6e-15, and `∂_p F` is
+> linearised at exactly the right point (`a_rebuilt − a_arr = 0`), so the assembly is
+> sound. Diagnostics: `718-frozenroot.py`, `718-eq88-gauge.py`, `718-eq88.py`.
+
 > **STAGE 3 DONE, AND IT DID NOT FIX THE GRADIENT — 2026-07-30.** `ў` now carries a
 > nonzero `S̆` built by backpropagating the incoming environment cotangents through
 > Eq. 82 (`absorb_inverse_roots`), exactly as the reference's

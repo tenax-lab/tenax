@@ -193,19 +193,24 @@ def test_no_svd_in_the_differentiated_equations():
 
 @pytest.mark.xfail(
     reason=(
-        "#715 Phase 1 is not finished: the gradient is 3.06e-2 off. The §V.3 "
-        "package is now all present — F vanishes at the root in the modified "
-        "variables (1.7e-14), y-bar carries a nonzero S-bar via the Eq. 82 VJP, "
-        "and the adjoint solve converges to 5e-15 — so none of those is the "
-        "cause, and S-bar in particular is NOT (it was the filed #718 "
-        "diagnosis). What remains is gauge covariance: dE/dc for the frozen "
-        "U*, Vh* is ~2e-2 each, and 99% of it lies in the *gauge* directions "
-        "(dU* = U* X), which is exactly the component Eq. 88 needs to vanish. "
-        "The non-gauge part is ~100x smaller, confirming U = U* + U_perp u "
-        "does carry every non-gauge variation. See "
-        "test_frozen_isometries_have_no_gauge_cotangent for the direct gate — "
-        "target that, not this end-to-end number. Reference: explicit backprop, "
-        "converged to 1e-15 in sweep count (n=12 is already 3.5e-8 from n=48)."
+        "#715 Phase 1 is not finished: the gradient is 3.06e-2 off. The cause is "
+        "now pinned down, and it is NOT the machinery, which is exact. Along one "
+        "direction: FD of G(p) = E at the frozen-c root gives +0.3519056653 "
+        "(stable over h=1e-4..1e-6) against the implicit +0.3519056655 — a "
+        "9-digit match — while the truth is +0.3607559898 (explicit backprop, "
+        "itself matching FD of the same map to 9 digits). So the implicit path "
+        "differentiates its own function perfectly; that function is just not "
+        "the fixed-point energy. The 8.8503e-3 gap is exactly the dropped "
+        "dE/dc . dc/dp for the frozen c = (U*, U_perp, Vh*, Vh_perp, s*inv). "
+        "Two earlier diagnoses are refuted: S-bar = 0 (fixed, no help) and gauge "
+        "covariance (licensed to 1e-16, see "
+        "test_freezing_the_isometries_is_gauge_licensed). What is left is a "
+        "NON-gauge motion of c; the largest non-gauge cotangents sit on the "
+        "null-space bases, U_perp 6.4e-4 and Vh_perp 1.2e-3. Note that FD of the "
+        "root or of the re-converged energy cannot be used to chase this — "
+        "asym_root_parametrize is gauge-discontinuous in p, so |ydot_fd| diverges "
+        "as h shrinks. Use the frozen-c Newton route, docs/plans/reference/"
+        "718-frozenroot.py."
     ),
     strict=True,
 )
@@ -238,33 +243,34 @@ def test_gradient_parity_needs_the_modified_variables():
     assert rel < 1e-5, rel
 
 
-@pytest.mark.xfail(
-    reason=(
-        "#718: F is not gauge covariant. Measured gauge components of dE/dc, "
-        "per direction: U* 7.7e-4 / 8.4e-3 / 1.8e-2 / 2.4e-3 and Vh* 3.3e-3 / "
-        "2.2e-3 / 1.3e-2 / 1.5e-2, against non-gauge parts ~100x smaller. "
-        "Eq. 88 licenses freezing U*, Vh* only because varying them inside the "
-        "retained subspace is a gauge transformation under Eqs. 86-87, so this "
-        "is the load-bearing identity, and it is the last one still missing."
-    ),
-    strict=True,
-)
-def test_frozen_isometries_have_no_gauge_cotangent():
-    """Eq. 88: freezing ``U*``/``Vh*`` must cost nothing along gauge directions.
+def test_freezing_the_isometries_is_gauge_licensed():
+    """Eq. 88: freezing ``U*``/``Vh*`` costs nothing along the gauge orbit.
 
-    The implicit gradient holds ``c = (U*, U_perp, Vh*, Vh_perp, s*inv)``
-    fixed, so it silently drops ``dE/dc · dc/dp``.  Eq. 88 argues that is
-    harmless: ``dc/dp`` is a pure gauge, because ``U = U* + U_perp u`` already
-    carries every non-gauge variation of the retained subspace, and ``E`` is
-    gauge invariant.  ``dE/dc`` is available for free as ``-F̆ ∂_c F`` using the
-    same ``F̆`` the gradient already solves for, so this is a direct check of
-    that argument rather than an end-to-end gradient comparison.
+    The implicit gradient holds ``c = (U*, U_perp, Vh*, Vh_perp, s*inv)`` fixed,
+    so it silently drops ``dE/dc · dc/dp``.  Eq. 88 argues that is harmless:
+    ``dc/dp`` is a pure gauge, since ``U = U* + U_perp u`` already carries every
+    non-gauge variation of the retained subspace, and ``E`` is gauge invariant.
+    ``dE/dc`` comes for free as ``-F̆ ∂_c F`` using the same ``F̆`` the gradient
+    already solves for, so this checks the argument directly.
 
-    Only the gauge component matters — ``dU* = U* X`` for the ``U*`` side and
-    ``dVh* = X Vh*`` for the other — so the assertion projects onto it.
+    The gauge direction is the part that is easy to get wrong.  Every frozen
+    constant carries the bond gauge on **two** kinds of index — the new bond
+    (``chi``) and the fused cut leg ``n = chi*d2`` — so for a global unitary
+    ``W = exp(tX)`` with ``X`` anti-Hermitian,
+
+        U*      -> kron(W,I)† U* W          δU*      = U* X - kron(X,I) U*
+        U_perp  -> kron(W,I)† U_perp        δU_perp  =      - kron(X,I) U_perp
+        Vh*     -> W† Vh* kron(W,I)         δVh*     = Vh* kron(X,I) - X Vh*
+        Vh_perp -> Vh_perp kron(W,I)        δVh_perp = Vh_perp kron(X,I)
+        s*inv   -> W† s*inv W               δs*inv   = [s*inv, X]
+
+    Keeping only the ``U* X`` term drops the ``kron(X,I)`` pieces and is then
+    not a gauge direction at all: it reports ~4e-3 on the same data where the
+    full law gives 1e-16, which is how #718 came to be blamed on covariance.
     """
     A, a, root = _converged_root()
     chi = root.env.C1.shape[0]
+    d2 = a.shape[0]
     root = M.asym_root_to_covariant_convention(root)
     S = _root_S(root)
     tilde = M.remove_inverse_roots(root.env, S)
@@ -281,7 +287,7 @@ def test_frozen_isometries_have_no_gauge_cotangent():
         )
 
     energy, vjp_energy = jax.vjp(energy_of, A_data, tilde, S)
-    _grad_direct, tilde_bar, S_bar = vjp_energy(jnp.ones((), dtype=energy.dtype))
+    grad_direct, tilde_bar, S_bar = vjp_energy(jnp.ones((), dtype=energy.dtype))
     y_bar = (
         tilde_bar,
         tuple(jnp.zeros_like(x) for x in root.u),
@@ -293,27 +299,55 @@ def test_frozen_isometries_have_no_gauge_cotangent():
         lambda y: M.asym_characteristic_residual_covariant(y, a, root, chi), y_star
     )
     F_bar, _resid = _solve_root_adjoint(
-        lambda v: vjp_y(v)[0], y_bar, tol=1e-10, maxiter=600, restart=40
+        lambda v: vjp_y(v)[0], y_bar, tol=1e-11, maxiter=800, restart=40
     )
 
-    def F_of_consts(U_star, Vh_star):
-        c = root._replace(U_star=U_star, Vh_star=Vh_star)
+    def F_of_consts(U_star, U_perp, Vh_star, Vh_perp, s_star_inv):
+        c = root._replace(
+            U_star=U_star,
+            U_perp=U_perp,
+            Vh_star=Vh_star,
+            Vh_perp=Vh_perp,
+            s_star_inv=s_star_inv,
+        )
         return M.asym_characteristic_residual_covariant(y_star, a, c, chi)
 
-    _, vjp_c = jax.vjp(F_of_consts, root.U_star, root.Vh_star)
-    U_bar, Vh_bar = vjp_c(F_bar)
+    _, vjp_c = jax.vjp(
+        F_of_consts,
+        root.U_star,
+        root.U_perp,
+        root.Vh_star,
+        root.Vh_perp,
+        root.s_star_inv,
+    )
+    U_bar, Up_bar, Vh_bar, Vp_bar, si_bar = vjp_c(F_bar)
 
+    def pair(g, delta):
+        return float(jnp.real(jnp.sum(jnp.conj(g) * delta)))
+
+    key = jax.random.PRNGKey(11)
     worst = 0.0
-    for k in range(4):
-        Us, Vhs = root.U_star[k], root.Vh_star[k]
-        gauge_U = Us.conj().T @ U_bar[k]
-        gauge_V = Vh_bar[k] @ Vhs.conj().T
-        worst = max(
-            worst,
-            float(jnp.linalg.norm(gauge_U)),
-            float(jnp.linalg.norm(gauge_V)),
-        )
-    assert worst < 1e-6, worst
+    for _ in range(4):
+        key, sub = jax.random.split(key)
+        G = jax.random.normal(sub, (chi, chi), dtype=jnp.complex128)
+        X = 0.5 * (G - G.conj().T)
+        X = X / jnp.linalg.norm(X)
+        KX = jnp.kron(X, jnp.eye(d2, dtype=X.dtype))
+
+        total = 0.0
+        for k in range(4):
+            Us, Up = root.U_star[k], root.U_perp[k]
+            Vs, Vp = root.Vh_star[k], root.Vh_perp[k]
+            si = root.s_star_inv[k]
+            total += pair(U_bar[k], Us @ X - KX @ Us)
+            total += pair(Up_bar[k], -KX @ Up)
+            total += pair(Vh_bar[k], Vs @ KX - X @ Vs)
+            total += pair(Vp_bar[k], Vp @ KX)
+            total += pair(si_bar[k], si @ X - X @ si)
+        worst = max(worst, abs(total))
+
+    scale = float(jnp.linalg.norm(grad_direct))
+    assert worst < 1e-10 * scale, (worst, scale)
 
 
 def test_gradient_entry_point_is_gated():
