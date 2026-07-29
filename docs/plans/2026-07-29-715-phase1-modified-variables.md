@@ -109,6 +109,32 @@
 > anything — and before GMRES has a chance. Only then is it worth re-testing whether the
 > rotations are genuinely flat and whether Hermitian `S` is the right gauge condition.
 >
+> **Equilibration result — corrects two claims above.** Ruiz-equilibrated `dF/dy` for the
+> tilde / unsplit-`Z` formulation and solved densely (row scaling of `F` and column
+> scaling of `y` both leave the gradient exactly invariant, so this is pure numerics):
+>
+> ```
+> energy through the y -> x map = 4.4e-13   (must be 0.18833050074260632)
+> raw    max 1.432e-11  cond 2.150e+19
+> equil  max 1.843e+01  cond 2.654e+05   modes below 1e-12 x max: 0 / 768
+> solve residual 2.59e-13
+> equilibrated implicit = +1.8e-11        reference -0.817381274942
+> ```
+>
+> 1. **There is no gauge degeneracy.** The "65 modes vs 4 chi^2 = 64" reading was a pure
+>    scaling artefact; after equilibration the null space is empty and cond = 2.7e5.
+> 2. **The unsplit map is unverified, not confirmed.** `‖F(y*)‖ = 3.3e-16` was taken as
+>    evidence the bond assignment was right. It is not — `F` is self-consistent on a
+>    nonphysical environment, whose energy is 4.4e-13 instead of 0.188.
+>
+> **Methodological point:** `‖F(y*)‖` alone is not a sufficient oracle. Any change to the
+> `y -> x` map must be checked against the reconstructed energy at the same time, or a
+> broken map hides behind a machine-precision root. Every earlier conclusion in this file
+> that rests on the root residual alone should be re-read with that in mind.
+>
+> The equilibration is a keeper: it turns an unsolvable system into a well-conditioned
+> one, and any future attempt at the tilde formulation should carry it.
+>
 > Things already checked and believed correct: the sign of Eq. 18; `ў = (env̆, 0, 0, 0)`
 > (the energy depends on `y` only through the environment, so `ŭ = v̆ = S̆ = 0`); the
 > transpose convention in the solve (`matvec(v) = vjp_y(v)[0]` applies `(∂_yF)^T`, and
