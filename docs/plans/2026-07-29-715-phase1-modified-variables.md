@@ -80,16 +80,16 @@
 > with, so the two cotangents might have been separately large but jointly cancelling
 > (their magnitudes are suspiciously similar — 1.76e-2 vs 1.48e-2 at k=2/k=3). Scanning
 > all 12 combinations of index offset, sign and adjoint gives a best of 1.36e-2 against
-> 1.76e-2 for `gU` alone — no cancellation. The generators really are independent and
-> the gauge violation is real.
+> 1.76e-2 for `gU` alone — no cancellation.
 >
-> Next step: a direct covariance test of `F` under Eqs. 86–87 — apply a bond gauge to
-> `(y, c)` jointly and find which term fails to transform. Note the fourth roots in
-> Eq. 73 are only covariant for a *unitary* `Q` (`s†s → Q^L s† Q^{R†} Q^R s Q^{L†}`
-> needs `Q^{R†}Q^R = 1`), as are the `/norm` and `λ = ⟨X, X'⟩` normalisations, so
-> establishing which gauge group the argument actually requires is part of the job.
-> Gate on `test_frozen_isometries_have_no_gauge_cotangent`, not the end-to-end 3%.
-> Diagnostic: `docs/plans/reference/718-eq88.py`.
+> **↑ The "gauge violation" in this banner is WRONG — see the CAUSE FOUND banner at the
+> top.** All of these numbers come from projecting onto `δU* = U* X`, which is not a
+> gauge direction: it omits the `kron(X,I) U*` piece from the cut leg. Under the full
+> law the violation is 1e-16, so the cancellation scan above was answering a
+> meaningless question. The reasoning is kept only because the arithmetic that
+> establishes the gauge group is still correct and reusable: the Eq. 73 fourth roots,
+> the `/norm`, and `λ = ⟨X, X'⟩` are covariant for a *unitary* `Q` but not a general
+> one, which is why `X` is anti-Hermitian.
 >
 > Also settled: the explicit-backprop reference this is measured against **is**
 > converged — 1e-15 across sweep counts, with n=12 already 3.5e-8 from n=48 — so the
