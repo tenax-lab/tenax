@@ -16,6 +16,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 import tenax.algorithms._ctm_root_implicit_asym as M
+from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
 from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
@@ -192,18 +193,19 @@ def test_no_svd_in_the_differentiated_equations():
 
 @pytest.mark.xfail(
     reason=(
-        "#715 Phase 1 is not finished. Promoting S from a diagonal vector to a "
-        "general matrix, with a genuine matrix inverse square root, took the "
-        "gradient error from 1.2e0 to 1.1e-2..2.5e-2 — the in-space rotation of "
-        "the isometries now has somewhere to go, which is what Eq. 88's "
-        "null-space restriction needs in order to discard a gauge rather than "
-        "a physical contribution. What remains is the rest of paper Eqs. 73-82: "
-        "the modified corners/edges carrying s explicitly on the bonds, and the "
-        "s^L/s^R quartic roots on the *cut legs* of that environment. Putting "
-        "those roots inside the projectors instead was tried and is worse "
-        "(2.0e-1) — their product is not S^-1, so the closure breaks at first "
-        "order in a non-diagonal S. Reference: explicit backprop -0.817381274942, "
-        "itself matching a symmetric finite difference to ten digits."
+        "#715 Phase 1 is not finished: the gradient is 3.06e-2 off. The §V.3 "
+        "package is now all present — F vanishes at the root in the modified "
+        "variables (1.7e-14), y-bar carries a nonzero S-bar via the Eq. 82 VJP, "
+        "and the adjoint solve converges to 5e-15 — so none of those is the "
+        "cause, and S-bar in particular is NOT (it was the filed #718 "
+        "diagnosis). What remains is gauge covariance: dE/dc for the frozen "
+        "U*, Vh* is ~2e-2 each, and 99% of it lies in the *gauge* directions "
+        "(dU* = U* X), which is exactly the component Eq. 88 needs to vanish. "
+        "The non-gauge part is ~100x smaller, confirming U = U* + U_perp u "
+        "does carry every non-gauge variation. See "
+        "test_frozen_isometries_have_no_gauge_cotangent for the direct gate — "
+        "target that, not this end-to-end number. Reference: explicit backprop, "
+        "converged to 1e-15 in sweep count (n=12 is already 3.5e-8 from n=48)."
     ),
     strict=True,
 )
@@ -234,6 +236,84 @@ def test_gradient_parity_needs_the_modified_variables():
     g_ref = jax.grad(energy_explicit)(A.todense())
     rel = float(jnp.linalg.norm(grad - g_ref) / jnp.linalg.norm(g_ref))
     assert rel < 1e-5, rel
+
+
+@pytest.mark.xfail(
+    reason=(
+        "#718: F is not gauge covariant. Measured gauge components of dE/dc, "
+        "per direction: U* 7.7e-4 / 8.4e-3 / 1.8e-2 / 2.4e-3 and Vh* 3.3e-3 / "
+        "2.2e-3 / 1.3e-2 / 1.5e-2, against non-gauge parts ~100x smaller. "
+        "Eq. 88 licenses freezing U*, Vh* only because varying them inside the "
+        "retained subspace is a gauge transformation under Eqs. 86-87, so this "
+        "is the load-bearing identity, and it is the last one still missing."
+    ),
+    strict=True,
+)
+def test_frozen_isometries_have_no_gauge_cotangent():
+    """Eq. 88: freezing ``U*``/``Vh*`` must cost nothing along gauge directions.
+
+    The implicit gradient holds ``c = (U*, U_perp, Vh*, Vh_perp, s*inv)``
+    fixed, so it silently drops ``dE/dc · dc/dp``.  Eq. 88 argues that is
+    harmless: ``dc/dp`` is a pure gauge, because ``U = U* + U_perp u`` already
+    carries every non-gauge variation of the retained subspace, and ``E`` is
+    gauge invariant.  ``dE/dc`` is available for free as ``-F̆ ∂_c F`` using the
+    same ``F̆`` the gradient already solves for, so this is a direct check of
+    that argument rather than an end-to-end gradient comparison.
+
+    Only the gauge component matters — ``dU* = U* X`` for the ``U*`` side and
+    ``dVh* = X Vh*`` for the other — so the assertion projects onto it.
+    """
+    A, a, root = _converged_root()
+    chi = root.env.C1.shape[0]
+    root = M.asym_root_to_covariant_convention(root)
+    S = _root_S(root)
+    tilde = M.remove_inverse_roots(root.env, S)
+    y_star = (tilde, root.u, S, root.v)
+
+    template = initialize_ctm_tensor_env(A, chi)
+    gate = _gate(1.0)
+    A_data = A.todense()
+
+    def energy_of(a_data, env_tilde, S_all):
+        A_live = DenseTensor(a_data, A.indices)
+        return M.asym_energy(
+            A_live, M.absorb_inverse_roots(env_tilde, S_all), template, gate
+        )
+
+    energy, vjp_energy = jax.vjp(energy_of, A_data, tilde, S)
+    _grad_direct, tilde_bar, S_bar = vjp_energy(jnp.ones((), dtype=energy.dtype))
+    y_bar = (
+        tilde_bar,
+        tuple(jnp.zeros_like(x) for x in root.u),
+        S_bar,
+        tuple(jnp.zeros_like(x) for x in root.v),
+    )
+
+    _, vjp_y = jax.vjp(
+        lambda y: M.asym_characteristic_residual_covariant(y, a, root, chi), y_star
+    )
+    F_bar, _resid = _solve_root_adjoint(
+        lambda v: vjp_y(v)[0], y_bar, tol=1e-10, maxiter=600, restart=40
+    )
+
+    def F_of_consts(U_star, Vh_star):
+        c = root._replace(U_star=U_star, Vh_star=Vh_star)
+        return M.asym_characteristic_residual_covariant(y_star, a, c, chi)
+
+    _, vjp_c = jax.vjp(F_of_consts, root.U_star, root.Vh_star)
+    U_bar, Vh_bar = vjp_c(F_bar)
+
+    worst = 0.0
+    for k in range(4):
+        Us, Vhs = root.U_star[k], root.Vh_star[k]
+        gauge_U = Us.conj().T @ U_bar[k]
+        gauge_V = Vh_bar[k] @ Vhs.conj().T
+        worst = max(
+            worst,
+            float(jnp.linalg.norm(gauge_U)),
+            float(jnp.linalg.norm(gauge_V)),
+        )
+    assert worst < 1e-6, worst
 
 
 def test_gradient_entry_point_is_gated():

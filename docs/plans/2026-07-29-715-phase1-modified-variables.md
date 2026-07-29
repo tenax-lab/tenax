@@ -1,5 +1,53 @@
 # #715 Phase 1 completion
 
+> **STAGE 3 DONE, AND IT DID NOT FIX THE GRADIENT — 2026-07-30.** `ў` now carries a
+> nonzero `S̆` built by backpropagating the incoming environment cotangents through
+> Eq. 82 (`absorb_inverse_roots`), exactly as the reference's
+> `leading_boundary_characteristic_pullback` does, and the whole gradient path runs
+> on the covariant parametrisation. All the internal diagnostics are clean:
+>
+> ```
+> covariant ‖F(y*)‖   = 1.7e-14
+> adjoint solve resid = 5.2e-15
+> energy              = matches explicit to 1e-13
+> gradient rel error  = 3.06e-2      (was 2.5e-2)
+> ```
+>
+> So **`S̆ = 0` was not the cause** — that was the filed #718 diagnosis and it is now
+> refuted by construction. The end-to-end number moved slightly the wrong way, which
+> only means the previous 2.5e-2 was accidental: it solved the adjoint of equations
+> its own `y*` did not satisfy.
+>
+> **The defect is gauge covariance, and it is now measured directly.** `dE/dc` for the
+> frozen constants is available for free as `−F̆ ∂_c F` using the `F̆` the gradient
+> already solves for:
+>
+> | frozen constant | ‖dE/dc‖ | as a fraction of ‖grad‖ |
+> |---|---|---|
+> | `U*` | 1.97e-2 | 9.3e-3 |
+> | `Vh*` | 2.02e-2 | 9.5e-3 |
+> | `U_perp` | 6.4e-4 | 3.0e-4 |
+> | `Vh_perp` | 1.2e-3 | 5.6e-4 |
+> | `s*inv` | 2.3e-19 | 1.1e-19 |
+>
+> Eq. 88 only needs the **gauge** component (`dU* = U* X`, `dVh* = X Vh*`) to vanish,
+> and that is precisely where the weight sits — at direction k=2, gauge 1.76e-2 vs
+> non-gauge 1.6e-4, a factor of 110. The non-gauge part being ~100× smaller also
+> confirms `U = U* + U_perp u` is correctly carrying every non-gauge variation.
+>
+> Next step: a direct covariance test of `F` under Eqs. 86–87 — apply a bond gauge to
+> `(y, c)` jointly and find which term fails to transform. Note the fourth roots in
+> Eq. 73 are only covariant for a *unitary* `Q` (`s†s → Q^L s† Q^{R†} Q^R s Q^{L†}`
+> needs `Q^{R†}Q^R = 1`), as are the `/norm` and `λ = ⟨X, X'⟩` normalisations, so
+> establishing which gauge group the argument actually requires is part of the job.
+> Gate on `test_frozen_isometries_have_no_gauge_cotangent`, not the end-to-end 3%.
+> Diagnostic: `docs/plans/reference/718-eq88.py`.
+>
+> Also settled: the explicit-backprop reference this is measured against **is**
+> converged — 1e-15 across sweep counts, with n=12 already 3.5e-8 from n=48 — so the
+> 3% is real and not a reference artifact. FD of the re-converged energy is useless
+> here (−0.046 / −0.374 / +32.2 at h = 1e-4/1e-5/1e-6).
+
 > **STAGE 2 DONE — 2026-07-30.** The §V.3 characteristic equations now vanish at
 > the root: `asym_characteristic_residual_covariant` is at ~1e-12 where it was at
 > 1.16e0, gated by
