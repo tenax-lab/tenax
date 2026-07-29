@@ -463,6 +463,7 @@ def c4v_root_implicit_energy_and_grad(
     solve_maxiter: int = 200,
     solve_restart: int = 30,
     root_residual_warn: float = 1e-6,
+    solve_residual_warn: float = 1e-6,
     return_diagnostics: bool = False,
 ):
     """Energy and ``dE/dA`` for dense C4v iPEPS via root implicit AD.
@@ -573,6 +574,23 @@ def c4v_root_implicit_energy_and_grad(
 
     grad = grad_direct - grad_indirect
 
+    # An unconverged adjoint solve does not give an approximate gradient — it
+    # gives an arbitrary one, because F̆ is then not the solution of Eq. 17 at
+    # all.  Surfacing the residual only under ``return_diagnostics`` hid that:
+    # ``solve_maxiter=1`` returns a finite, badly wrong gradient in silence.
+    # Checked unconditionally.
+    if float(solve_resid) > solve_residual_warn:
+        warnings.warn(
+            f"C4v root implicit AD: adjoint solve did not converge "
+            f"(relative residual {float(solve_resid):.3e} > "
+            f"{solve_residual_warn:.1e} after {solve_maxiter} restart(s) of "
+            f"a {solve_restart}-dimensional Krylov space). The returned "
+            "gradient does not solve F̆ ∂_y F = ў and should not be used; "
+            "raise solve_maxiter/solve_restart or loosen solve_tol.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     if return_diagnostics:
         diag = {
             **meta,
@@ -583,8 +601,48 @@ def c4v_root_implicit_energy_and_grad(
     return energy, grad
 
 
-def c4v_root_implicit_energy(A: Tensor, gate, **kwargs) -> jax.Array:
-    """Energy only (forward contraction plus energy evaluation)."""
-    kwargs.pop("return_diagnostics", None)
-    energy, _ = c4v_root_implicit_energy_and_grad(A, gate, **kwargs)
-    return energy
+def c4v_root_implicit_energy(
+    A: Tensor,
+    gate,
+    *,
+    chi: int = 16,
+    max_iter: int = 100,
+    conv_tol: float = 1e-10,
+    min_iter: int = 4,
+    projector_method: str = "eigh",
+    polish_steps: int = 60,
+    polish_tol: float = 1e-10,
+    **_ignored,
+) -> jax.Array:
+    """Energy only — forward contraction, parametrisation and evaluation.
+
+    Deliberately does not build either VJP or run the adjoint solve.  Callers
+    that only want an energy (line searches, diagnostics, convergence probes)
+    would otherwise pay the whole backward cost, and could fail on an adjoint
+    solve they never asked for.
+    """
+    if isinstance(A, SymmetricTensor):
+        raise TypeError(
+            "c4v_root_implicit_energy supports dense tensors only "
+            "(#715 Phase 3 covers SymmetricTensor)."
+        )
+    if not isinstance(A, DenseTensor):
+        raise TypeError(f"Expected DenseTensor, got {type(A).__name__}.")
+
+    C_t, T_t, a_t, _meta = _converge_c4v(
+        A,
+        chi,
+        max_iter=max_iter,
+        conv_tol=conv_tol,
+        min_iter=min_iter,
+        projector_method=projector_method,
+    )
+    root, _residual = c4v_root_parametrize(
+        jnp.asarray(C_t.todense()),
+        jnp.asarray(T_t.todense()),
+        _a_dense(a_t),
+        chi,
+        polish_steps=polish_steps,
+        polish_tol=polish_tol,
+    )
+    return _energy_from_env_arrays(A, root.C, root.E, C_t, T_t, gate)

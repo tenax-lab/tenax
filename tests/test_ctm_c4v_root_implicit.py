@@ -19,6 +19,7 @@ jax.config.update("jax_enable_x64", True)
 
 from tenax.algorithms._ctm_c4v_root_implicit import (
     c4v_characteristic_residual,
+    c4v_root_implicit_energy,
     c4v_root_implicit_energy_and_grad,
 )
 from tenax.core.index import FlowDirection, TensorIndex
@@ -182,6 +183,54 @@ def test_warns_on_degenerate_truncation():
     A = _site_tensor(eps=0.1)
     with pytest.warns(RuntimeWarning, match=r"‖F\(y\*\)‖"):
         c4v_root_implicit_energy_and_grad(A, _xxz_gate(1.0), chi=8, **_CTM_KW)
+
+
+def test_warns_when_the_adjoint_solve_does_not_converge():
+    """An unconverged solve is an invalid gradient, not an approximate one.
+
+    ``F̆`` is defined as *the* solution of Eq. 17; stop the Krylov iteration
+    early and what comes back is finite, plausible-looking and wrong.  The
+    residual used to be visible only under ``return_diagnostics``.
+    """
+    A = _site_tensor(eps=1.0)
+    # ``solve_maxiter`` counts GMRES *restarts*, so the Krylov dimension has
+    # to be squeezed too -- one restart of a 30-dimensional space converges.
+    with pytest.warns(RuntimeWarning, match="adjoint solve did not converge"):
+        c4v_root_implicit_energy_and_grad(
+            A,
+            _xxz_gate(1.0),
+            chi=6,
+            solve_maxiter=1,
+            solve_restart=1,
+            solve_tol=1e-14,
+            **_CTM_KW,
+        )
+
+
+def test_energy_only_helper_skips_the_adjoint_solve():
+    """``c4v_root_implicit_energy`` must not pay for -- or fail in -- a solve.
+
+    Sabotaging the adjoint solve leaves the energy untouched, which is the
+    property that makes the helper usable in a line search.
+    """
+    import tenax.algorithms._ctm_c4v_root_implicit as mod
+
+    A = _site_tensor(eps=1.0)
+    gate = _xxz_gate(1.0)
+    kw = dict(chi=6, **_CTM_KW)
+
+    reference, _grad = c4v_root_implicit_energy_and_grad(A, gate, **kw)
+
+    original = mod._solve_root_adjoint
+    mod._solve_root_adjoint = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("energy-only path ran the adjoint solve")
+    )
+    try:
+        energy = c4v_root_implicit_energy(A, gate, **kw)
+    finally:
+        mod._solve_root_adjoint = original
+
+    assert abs(float(energy) - float(reference)) < 1e-12
 
 
 # ------------------------------------------------------------------ #
