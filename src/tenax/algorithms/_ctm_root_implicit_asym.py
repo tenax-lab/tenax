@@ -743,6 +743,15 @@ def asym_characteristic_residual_covariant(y, a: jax.Array, consts: AsymRoot, ch
     EC, P_top, P_bot = [], [], []
     env_k, a_k = env_mod, a
     for k in range(4):
+        # NOTE: the reference orders an enlarged corner (cut | outer) whereas
+        # these helpers return (outer | cut) — established to 7.7e-16 against
+        # its dumped ``EC`` (see ``docs/plans/reference/718-ecmap.py``).  So
+        # ``Ud`` should contract the *cut* leg and ``M`` should contract
+        # outer-against-cut, neither of which is what happens below.
+        # Transposing ``top`` alone makes it *worse* (1.16 -> 1.26e1): every
+        # consumer — ``bot``, the projector pair, and the corner/edge assembly
+        # — assumes the (outer | cut) order, so the convention has to be
+        # changed for all of them together, not here.
         top = _upper_left_quadrant(env_k, a_k).reshape(n, n)
         bot = _lower_left_quadrant(env_k, a_k).reshape(n, n)
         EC.append((top, bot))
