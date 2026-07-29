@@ -325,6 +325,27 @@ def test_freezing_the_isometries_is_gauge_licensed():
     def pair(g, delta):
         return float(jnp.real(jnp.sum(jnp.conj(g) * delta)))
 
+    def dE_along(Xs):
+        """``dE/dt`` for per-bond generators ``Xs[j]`` on bond ``j``.
+
+        The cut leg of direction ``k`` carries the bond of direction ``k-1`` on
+        the ``U`` side and ``k+1`` on the ``V`` side, read straight off
+        ``Ud[k] = U_k† K_L[k-1]`` and ``Vd[k] = K_R[k+1] Vh_k†``.
+        """
+        KX = [jnp.kron(X, jnp.eye(d2, dtype=X.dtype)) for X in Xs]
+        total = 0.0
+        for k in range(4):
+            km, kp = (k - 1) % 4, (k + 1) % 4
+            Us, Up = root.U_star[k], root.U_perp[k]
+            Vs, Vp = root.Vh_star[k], root.Vh_perp[k]
+            si = root.s_star_inv[k]
+            total += pair(U_bar[k], Us @ Xs[k] - KX[km] @ Us)
+            total += pair(Up_bar[k], -KX[km] @ Up)
+            total += pair(Vh_bar[k], Vs @ KX[kp] - Xs[k] @ Vs)
+            total += pair(Vp_bar[k], Vp @ KX[kp])
+            total += pair(si_bar[k], si @ Xs[k] - Xs[k] @ si)
+        return total
+
     key = jax.random.PRNGKey(11)
     worst = 0.0
     for _ in range(4):
@@ -332,19 +353,114 @@ def test_freezing_the_isometries_is_gauge_licensed():
         G = jax.random.normal(sub, (chi, chi), dtype=jnp.complex128)
         X = 0.5 * (G - G.conj().T)
         X = X / jnp.linalg.norm(X)
-        KX = jnp.kron(X, jnp.eye(d2, dtype=X.dtype))
+        worst = max(worst, abs(dE_along([X] * 4)))
 
-        total = 0.0
-        for k in range(4):
-            Us, Up = root.U_star[k], root.U_perp[k]
-            Vs, Vp = root.Vh_star[k], root.Vh_perp[k]
-            si = root.s_star_inv[k]
-            total += pair(U_bar[k], Us @ X - KX @ Us)
-            total += pair(Up_bar[k], -KX @ Up)
-            total += pair(Vh_bar[k], Vs @ KX - X @ Vs)
-            total += pair(Vp_bar[k], Vp @ KX)
-            total += pair(si_bar[k], si @ X - X @ si)
-        worst = max(worst, abs(total))
+    scale = float(jnp.linalg.norm(grad_direct))
+    assert worst < 1e-10 * scale, (worst, scale)
+
+
+@pytest.mark.xfail(
+    reason=(
+        "#718: only the GLOBAL diagonal subgroup of the bond gauge is licensed, "
+        "not the per-direction gauges. Using one generator per direction, "
+        "directions 0 and 1 vanish (2e-16) but 2 and 3 come out at +2.121e-03 "
+        "and -2.121e-03 — equal and opposite, so they cancel exactly in the sum "
+        "and the global test passes. Caught by Codex review on PR #720. Two "
+        "readings, both open: either the per-direction gauge genuinely is not "
+        "licensed (2.1e-3 times a dc/dp of order 10 is the right size to feed "
+        "the 8.85e-3 gradient gap), or the k-1/k+1 cut-leg assignment assumed "
+        "here is wrong for directions 2/3, in which case 'X on bond 2 alone' is "
+        "not a gauge direction and only certain combinations are. The exact "
+        "antisymmetry between 2 and 3 is what makes the second reading live."
+    ),
+    strict=True,
+)
+def test_each_directional_gauge_is_independently_licensed():
+    """Eq. 88 must hold for one gauge generator per bond, not just their sum.
+
+    The bond gauge has an independent generator per direction; a test that uses
+    the same ``X`` everywhere only probes the global diagonal subgroup, and
+    contributions from different directions can cancel inside it.
+    """
+    A, a, root = _converged_root()
+    chi = root.env.C1.shape[0]
+    d2 = a.shape[0]
+    root = M.asym_root_to_covariant_convention(root)
+    S = _root_S(root)
+    tilde = M.remove_inverse_roots(root.env, S)
+    y_star = (tilde, root.u, S, root.v)
+
+    template = initialize_ctm_tensor_env(A, chi)
+    gate = _gate(1.0)
+    A_data = A.todense()
+
+    def energy_of(a_data, env_tilde, S_all):
+        A_live = DenseTensor(a_data, A.indices)
+        return M.asym_energy(
+            A_live, M.absorb_inverse_roots(env_tilde, S_all), template, gate
+        )
+
+    energy, vjp_energy = jax.vjp(energy_of, A_data, tilde, S)
+    grad_direct, tilde_bar, S_bar = vjp_energy(jnp.ones((), dtype=energy.dtype))
+    y_bar = (
+        tilde_bar,
+        tuple(jnp.zeros_like(x) for x in root.u),
+        S_bar,
+        tuple(jnp.zeros_like(x) for x in root.v),
+    )
+
+    _, vjp_y = jax.vjp(
+        lambda y: M.asym_characteristic_residual_covariant(y, a, root, chi), y_star
+    )
+    F_bar, _resid = _solve_root_adjoint(
+        lambda v: vjp_y(v)[0], y_bar, tol=1e-11, maxiter=800, restart=40
+    )
+
+    def F_of_consts(U_star, U_perp, Vh_star, Vh_perp, s_star_inv):
+        c = root._replace(
+            U_star=U_star,
+            U_perp=U_perp,
+            Vh_star=Vh_star,
+            Vh_perp=Vh_perp,
+            s_star_inv=s_star_inv,
+        )
+        return M.asym_characteristic_residual_covariant(y_star, a, c, chi)
+
+    _, vjp_c = jax.vjp(
+        F_of_consts,
+        root.U_star,
+        root.U_perp,
+        root.Vh_star,
+        root.Vh_perp,
+        root.s_star_inv,
+    )
+    U_bar, Up_bar, Vh_bar, Vp_bar, si_bar = vjp_c(F_bar)
+
+    def pair(g, delta):
+        return float(jnp.real(jnp.sum(jnp.conj(g) * delta)))
+
+    zero = jnp.zeros((chi, chi))
+    rng = np.random.RandomState(0)
+    worst = 0.0
+    for _ in range(2):
+        G = jnp.asarray(rng.standard_normal((chi, chi)))
+        X = 0.5 * (G - G.T)  # the state is real, so the gauge group is orthogonal
+        X = X / jnp.linalg.norm(X)
+        for i in range(4):
+            Xs = [X if j == i else zero for j in range(4)]
+            KX = [jnp.kron(Z, jnp.eye(d2, dtype=Z.dtype)) for Z in Xs]
+            total = 0.0
+            for k in range(4):
+                km, kp = (k - 1) % 4, (k + 1) % 4
+                Us, Up = root.U_star[k], root.U_perp[k]
+                Vs, Vp = root.Vh_star[k], root.Vh_perp[k]
+                si = root.s_star_inv[k]
+                total += pair(U_bar[k], Us @ Xs[k] - KX[km] @ Us)
+                total += pair(Up_bar[k], -KX[km] @ Up)
+                total += pair(Vh_bar[k], Vs @ KX[kp] - Xs[k] @ Vs)
+                total += pair(Vp_bar[k], Vp @ KX[kp])
+                total += pair(si_bar[k], si @ Xs[k] - Xs[k] @ si)
+            worst = max(worst, abs(total))
 
     scale = float(jnp.linalg.norm(grad_direct))
     assert worst < 1e-10 * scale, (worst, scale)

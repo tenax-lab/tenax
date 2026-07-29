@@ -17,10 +17,20 @@
 > **Three diagnoses are now refuted, in order:**
 > 1. `S̆ = 0` (the filed #718 cause) — fixed in Stage 3, gradient did not improve.
 > 2. Missing §V.3 covariance package — added in Stage 2, `‖F(y*)‖` = 1.7e-14, no help.
-> 3. Gauge covariance — **licensed to 1e-16.** The earlier ~1e-2 "violation" was a
->    bad projection: every frozen constant carries the gauge on *two* index kinds, the
->    new bond and the fused cut leg `n = chi·d2`, so `δU* = U* X − kron(X,I) U*`.
->    Keeping only `U* X` reports 4.0e-3 where the full law gives 1e-16.
+> 3. Gauge covariance — licensed for the **global** gauge (1e-16), *not* per direction.
+>    The earlier ~1e-2 "violation" was a bad projection: every frozen constant carries
+>    the gauge on *two* index kinds, the new bond and the fused cut leg `n = chi·d2`, so
+>    `δU* = U* X − kron(X,I) U*`. Keeping only `U* X` reports 4.0e-3 where the full law
+>    gives 1e-16. **But (Codex review, PR #720) one generator per direction does not
+>    vanish:** directions 0 and 1 give 2e-16 while 2 and 3 give `+2.121e-03` and
+>    `-2.121e-03` — equal and opposite, cancelling exactly in the global sum. So the
+>    global test passes only by cancellation. `2.1e-3` times a `dc/dp` of order 10 is
+>    the right size to feed the 8.85e-3 gap, making this the strongest remaining lead.
+>    Two readings, both open: either the per-direction gauge genuinely is not licensed,
+>    or the `k-1`/`k+1` cut-leg assignment is wrong for directions 2/3, in which case
+>    "X on bond 2 alone" is not a gauge direction at all and only certain combinations
+>    are. The exact antisymmetry between 2 and 3 is what keeps the second reading live.
+>    Gate: `test_each_directional_gauge_is_independently_licensed`.
 >
 > **What is actually left:** a *non-gauge* motion of `c`. Largest non-gauge cotangents
 > are on the null-space bases — `U_perp` 6.4e-4, `Vh_perp` 1.2e-3 — with `U*`/`Vh*`
