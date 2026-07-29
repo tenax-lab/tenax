@@ -167,6 +167,18 @@ fine as-is; JAX's VJP for it is a plain contraction.
 | **`S` promoted to a general matrix + matrix `S^-1/2`** | **1.1e-2 … 2.5e-2** |
 | `(S S†)^-1/4`, `(S† S)^-1/4` inside the projectors | 2.0e-1 (worse) |
 | `C̃`, `Ẽ` promoted to primitive variables with `C = A C̃ A` | 2.508e-2 (**no change**) |
+| quartic roots on the cut legs of `M` | 6.2e-2 / 9.4e-1 (both conventions worse) |
+| **combined package**: root-free projectors + `ρ_L`,`ρ_R` in the `y→x` map + `C̃`,`Ẽ` primitive + `S̆` routed through the map | 2.0e-1 … 2.9e-1 (worse) |
+
+The combined package was the one arrangement the frozen-constant analysis predicted
+should work — the two roots are individually equivariant under the *independent* left and
+right rotations that `dU*/dp` and `dVh*/dp` actually undergo. It is worse by an order of
+magnitude, with the root still at ~1e-15. So that prediction is falsified too.
+
+**Every covariance repair that could be formulated has now been tried and measured.**
+`S` as a general matrix remains the only change that helped. The 2.5% residual is real,
+reproducible, stable across states and χ, and localised to `∂_pF` — but not explained by
+any of the arrangements above.
 
 Two of these results narrow the remaining work sharply.
 
