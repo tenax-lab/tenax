@@ -135,6 +135,31 @@
 > The equilibration is a keeper: it turns an unsolvable system into a well-conditioned
 > one, and any future attempt at the tilde formulation should carry it.
 >
+> **The `y -> x` map, rederived against the energy.** Variants tested directly on the
+> reconstructed energy, no gradient in the loop:
+>
+> ```
+> tilde tensor norms ~2e-3
+> mode=sym      normalise=False   E = 3.1e-13            err 1.9e-01
+> mode=sym      normalise=True    E = 0.18833050074260   err 1.2e-04   <- reference to 12 digits
+> mode=unsplit  normalise=False   E = 4.4e-13            err 1.9e-01
+> mode=unsplit  normalise=True    E = 0.24729853079102   err 5.9e-02
+> ```
+>
+> **Normalisation was masking the comparison** — both variants underflow without it, so
+> the previous run could not distinguish a wrong map from a badly scaled one.
+>
+> **With scaling fixed, the unsplit map is genuinely wrong** (0.2473 vs 0.1883), and the
+> **symmetric** map `C = A_k C̃ A_(k+1)`, `T = A_k T̃ A_k` with `A = S^-1/2` is confirmed
+> correct to twelve digits. The unsplit-`S^-1` proposal is refuted at the level of the
+> map: the bond-counting behind it (`A_k` one end, `A_k^-1` the other, therefore a gauge)
+> does not hold.
+>
+> Consequence: the covariance reasoning that motivated this whole line is wrong somewhere,
+> even though it did correctly predict the general-matrix-`S` fix. The 2.5% is unexplained
+> again — but the map is now pinned by a twelve-digit check instead of assumed, and the
+> normalisation requirement is understood.
+>
 > Things already checked and believed correct: the sign of Eq. 18; `ў = (env̆, 0, 0, 0)`
 > (the energy depends on `y` only through the environment, so `ŭ = v̆ = S̆ = 0`); the
 > transpose convention in the solve (`matvec(v) = vjp_y(v)[0]` applies `(∂_yF)^T`, and
