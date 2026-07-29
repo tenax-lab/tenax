@@ -1,4 +1,35 @@
-# #715 Phase 1 completion: the modified-variable formulation
+# #715 Phase 1 completion
+
+> **Read this first (supersedes most of what follows).** A discriminating
+> finite-difference test shows the residual error is **not** in the characteristic
+> equations:
+>
+> ```
+> implicit AD                   = -0.810241844341
+> FD of the implicit energy     = -0.817381291970    (stable across h = 1e-4..1e-6)
+> reference (explicit backprop) = -0.817381274942
+> ```
+>
+> `FD(E_implicit)` agrees with the reference to eight digits. So `E_implicit(p)` — the
+> energy at the root of `F` — is the *correct function of p*. The equations, the root and
+> the environment are all right; the bug is downstream, in the ~40 lines of
+> `asym_root_implicit_energy_and_grad` that assemble `dE/dp = ∂_p e - F̆ ∂_p F`.
+>
+> This invalidates the earlier conclusion that the next step needs the paper's figures.
+> It does not. Everything below about Eqs. 73-82 is still accurate as *physics*, but it is
+> not where the remaining 2.5% lives. Start from the assembly.
+>
+> Things already checked there and believed correct: the sign of Eq. 18; `ў = (env̆, 0, 0, 0)`
+> (the energy depends on `y` only through the environment, so `ŭ = v̆ = S̆ = 0`); the
+> transpose convention in the solve (`matvec(v) = vjp_y(v)[0]` applies `(∂_yF)^T`, and
+> `F̆ ∂_yF = ў` is the transposed system); GMRES convergence (residual 1e-11). The most
+> likely remaining suspect is that `parametrize` recomputes the frozen constants
+> `U*, U_perp, Vh*, Vh_perp` at each `p`, so the `y*(p)` that `E_implicit` actually
+> evaluates is the root of `F(·, p; consts(p))` while the implicit derivative is taken of
+> `F(·, p; consts(p0))`. The method assumes those agree to first order because `u`
+> absorbs the difference — worth verifying directly rather than assuming.
+
+
 
 Status: **partly implemented.** General-matrix `S` has landed (84f05f1) and takes the
 gradient error from 1.2e0 to 1.1e-2 … 2.5e-2. One ingredient remains — see
