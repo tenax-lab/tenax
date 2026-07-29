@@ -698,22 +698,34 @@ def asym_characteristic_residual_covariant(y, a: jax.Array, consts: AsymRoot, ch
        **Incomplete — this does not vanish at the root yet**, so it is not
        wired into any gradient path.  At ``D=2``, ``chi=4`` on a state where
        :func:`asym_characteristic_residual` sits at 2.5e-16, this returns
-       ``3.4e1``, distributed as
+       ``1.16e0``, distributed as
 
-       * corners/edges: 5e0 … 1.8e1  <- the wrong part
-       * ``R_S``: 1e-2 … 2.5e-2
-       * ``R_u`` / ``R_v``: 1e-1 … 1e0
+       * corners/edges: 1.6e-2 … 7.3e-2
+       * ``R_S``: 1.1e-2 … 2.5e-2
+       * ``R_u``: 1.5e-1 … 3.5e-1
+       * ``R_v``: 1.6e-1 … 8.2e-1   <- now the dominant error
 
-       The isometry blocks are close; the modified corner/edge recursion is
-       not.  What is still unresolved is the placement of ``s_k`` on the
-       projectors (the ``P_bot``/``P_top`` lines below are a guess) and
-       whether the renormalised corner should be compared against ``C̃``
-       directly or against a differently normalised object.  Settling it
-       needs the reference's leg conventions for ``EnlargedCorner``,
-       ``_contract_PR_PL``, ``contract_EPL``, ``contract_EiCiEPL`` and
-       ``contract_PREPL`` decoded, or reference numbers to match term by
-       term.  Do not iterate on the residual blind: that produced the
-       refutation table in ``docs/plans/2026-07-29-715-phase1-modified-variables.md``.
+       Down from 3.4e1 once the two ``s_k`` placements were pinned against
+       the reference implementation's tensor shapes (see the comments below).
+       The corner/edge recursion is close but not exact, and ``R_u``/``R_v``
+       are still wrong at the 10% level.
+
+       The remaining discrepancy is almost certainly in how Eqs. 78-80 build
+       their environment: the reference forms them from ``PR_k · PLpart_k``
+       and ``PR_k · EC_{k+1} · VRd_k`` via ``contract_EPL`` /
+       ``contract_EiCiEPL`` / ``_contract_PR_M``, which are *not* simply the
+       half-infinite environment sandwiched between isometries.
+
+       **Next step is a bisection, not more iteration.** A working Julia
+       oracle exists: see ``reference_implicit_diff_peps_jl`` in the notes for
+       the install, and ``dump.jl`` writes ``dump.txt`` (fixed point: C, T,
+       C̃, Ẽ, S, U, V) plus ``dump2.txt`` (intermediates: is, rootL, rootR,
+       iCi, EC, Ud, Vd, PR, PL, UL, VR) with the reference's own ``|F|`` at
+       its root confirmed at 1e-12.  Map their ``(chi, D, D)`` cut index onto
+       the fused ``n`` here and compare intermediates in order to find the
+       first one that diverges.  Do *not* keep adjusting placements against
+       the total residual: that is what produced the refutation table in
+       ``docs/plans/2026-07-29-715-phase1-modified-variables.md``.
 
     ``y = (env_tilde, u, S, v)`` with *modified* corners and edges, so that
     holding ``U*`` and ``V*`` constant is licensed by Eq. 88.  Normalisation
@@ -734,10 +746,13 @@ def asym_characteristic_residual_covariant(y, a: jax.Array, consts: AsymRoot, ch
         top = _upper_left_quadrant(env_k, a_k).reshape(n, n)
         bot = _lower_left_quadrant(env_k, a_k).reshape(n, n)
         EC.append((top, bot))
-        # ``s_k`` on the outer legs, which become the new environment bonds;
-        # the cut legs are already carrying the Eq. 73 roots via Ud/Vd.
-        P_bot.append(s_all[k] @ (Ud[k] @ top))
-        P_top.append((bot @ Vd[k]) @ s_all[k])
+        # ``s_k`` goes on the surviving *cut* leg's chi sub-leg, not on the
+        # new chi index.  Pinned by the reference's shapes: ``PR`` comes out
+        # the same shape as ``Ud`` (chi, n), so ``absorb_right``'s
+        # ``domainind(P)[1]`` is the chi of the remaining (chi, D, D) triple.
+        K_is = jnp.kron(s_all[k], jnp.eye(a.shape[0], dtype=s_all[k].dtype))
+        P_bot.append((Ud[k] @ top) @ K_is)
+        P_top.append(K_is @ (bot @ Vd[k]))
         env_k, a_k = rotate_env(env_k), rotate_a(a_k)
 
     # Pass 2: residuals.
@@ -747,7 +762,12 @@ def asym_characteristic_residual_covariant(y, a: jax.Array, consts: AsymRoot, ch
     env_k, a_k = env_mod, a
     for k in range(4):
         top, bot = EC[k]
-        M = top @ bot
+        # The half-infinite environment of Eqs. 78-80 carries one ``s_k`` at
+        # the cut: the reference forms these from ``PR_k · PLpart_k``, and
+        # ``PR_k`` already has ``is_k`` absorbed on the leg that contracts
+        # ``PLpart_k``.  The bare ``top @ bot`` is missing it.
+        K_is = jnp.kron(s_all[k], jnp.eye(a.shape[0], dtype=s_all[k].dtype))
+        M = top @ K_is @ bot
         s_inv = consts.s_star_inv[k]
 
         core = Ud[k] @ M @ Vd[k]

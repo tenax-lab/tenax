@@ -415,13 +415,14 @@ def test_singular_value_adjoint_is_not_negligible():
 @pytest.mark.xfail(
     reason=(
         "§V.3 covariance port is incomplete (#718). The covariant characteristic "
-        "equations do not vanish at the root yet: 3.4e1 total at D=2 chi=4, where "
-        "the non-covariant form sits at 2.5e-16. The isometry blocks are close "
-        "(R_S ~ 1e-2, R_u/R_v ~ 1e-1..1e0) but the modified corner/edge recursion "
-        "is off by O(10). Unresolved: where s_k attaches to the projectors, and "
-        "the normalisation the renormalised corner should be compared against. "
-        "Needs the reference implementation's leg conventions decoded — see the "
-        "warning on asym_characteristic_residual_covariant."
+        "equations do not vanish at the root yet: 1.16e0 total at D=2 chi=4, where "
+        "the non-covariant form sits at 2.5e-16. Down from 3.4e1 after pinning the "
+        "two s_k placements against the reference implementation's tensor shapes. "
+        "Corners/edges are now 1.6e-2..7.3e-2 and R_v dominates at up to 8.2e-1. "
+        "Remaining suspect: Eqs. 78-80 build their environment via contract_EPL / "
+        "contract_EiCiEPL / _contract_PR_M, not as a bare half-infinite environment "
+        "between isometries. Next step is bisecting against the Julia dump — see "
+        "the warning on asym_characteristic_residual_covariant."
     ),
     strict=True,
 )
