@@ -124,7 +124,27 @@ smooth invertible change of variables, and a reparametrisation cannot change
 `dE/dp` — the measured error was identical to four digits. So the modified variables are
 *scaffolding*, not the fix. Useful only because the next step needs them.
 
-### Where the cut-leg roots go (derived, not yet measured)
+### The cut-leg roots: derived, measured, **falsified**
+
+Implemented and measured both conventions. Both are worse than doing nothing:
+
+| cut-leg placement | gradient error |
+|---|---|
+| none (baseline) | 2.508e-2 |
+| `s^L`/`s^R` as derived below | 6.245e-2 |
+| swapped L/R | 9.447e-1 |
+
+with the root residual still ~1e-16, so this is not a convergence artefact. **The
+remaining 2.5% is not explained by the cut-leg roots as placed here.** Either the leg
+assignment is wrong in some way not captured by the two-way L/R choice, or the missing
+ingredient is something else entirely.
+
+Do not retry this from the derivation below — it has been tested. The next attempt needs
+the actual figures for Eq. 65 and Eqs. 78–80 to pin the wiring, or a different
+hypothesis for the residual.
+
+The derivation, for the record:
+
 
 `M`'s two open legs are the right-facing legs of the two quadrants, and each carries a
 dangling `A = S^-1/2` inherited from the edge it came from: the left leg from move
@@ -148,12 +168,12 @@ directions. That made the measurement infeasible in practice. Compute the quarti
 **once per direction outside the per-equation loop**, or use a single fused iteration for
 `A^-1/4` directly, before attempting this.
 
-**Therefore the entire remaining discrepancy sits in step 4:** the half-infinite
-environment must be built from the *modified* edges with `s^L`, `s^R` on the dangling cut
-legs, i.e. `M̃ ≠ M`. That changes the equations rather than the coordinates, and it is the
-only ingredient of Eqs. 73–82 not yet accounted for. It is also the one part whose leg
-wiring is not derivable from the closure condition alone, so it needs the figures from
-Eq. 65 and Eqs. 78–80.
+**The remaining 2.5% is now unexplained.** Every ingredient of Eqs. 73–82 that could be
+derived from the closure condition has been implemented and measured: general-matrix `S`
+(the one that worked), the modified variables (a no-op, as a reparametrisation must be),
+the quartic roots in the projectors (worse), and the quartic roots on the cut legs
+(worse, both conventions). What is left is genuinely not derivable from the closure
+condition alone — it needs the figures.
 
 ## Order of work
 
@@ -162,9 +182,9 @@ Eq. 65 and Eqs. 78–80.
    `test_no_svd_in_the_differentiated_equations` caught exactly that.
 2. ~~Promote `S` to a general matrix; `R_S` becomes the full χ×χ block~~ **done**
    (84f05f1). This is what took the error from 1.2e0 to ~2.5e-2.
-3. Rebuild `half_infinite_environment` from the *modified* edges, with `s^L`, `s^R` on
-   the dangling cut legs. **This is the only step left**, and the one that needs the
-   figures rather than a derivation.
+3. ~~Rebuild `half_infinite_environment` with the cut-leg roots~~ **tried, falsified**
+   (6.2e-2 and 9.4e-1 for the two conventions, vs 2.5e-2 baseline). Needs the figures,
+   not another derivation.
 4. The tilde variables and the `y ↦ x` map come along with step 3; on their own they are
    a no-op (measured), so do not land them separately.
 5. Re-check in this order — each is a sharp oracle:
