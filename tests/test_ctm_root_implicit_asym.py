@@ -192,16 +192,18 @@ def test_no_svd_in_the_differentiated_equations():
 
 @pytest.mark.xfail(
     reason=(
-        "#715 Phase 1 is incomplete: this module keeps S diagonal and uses the "
-        "standard Fishman projectors, skipping the modified corners/edges of "
-        "paper Eqs. 73-75/82. Those exist to make the equations covariant under "
-        "the eight environment gauge unitaries; the s^-1/2 inside the projectors "
-        "breaks that covariance (paper Eq. 86). Without it, restricting the "
-        "isometry variation to its null space (Eq. 88) discards a real "
-        "contribution rather than a gauge one, so the gradient is wrong even "
-        "though F(y*)=0 to 1e-16 and dF/dy is well conditioned. Measured: "
-        "implicit -1.7898 vs explicit-backprop -0.81738127494, which itself "
-        "matches a symmetric finite difference to ten digits."
+        "#715 Phase 1 is not finished. Promoting S from a diagonal vector to a "
+        "general matrix, with a genuine matrix inverse square root, took the "
+        "gradient error from 1.2e0 to 1.1e-2..2.5e-2 — the in-space rotation of "
+        "the isometries now has somewhere to go, which is what Eq. 88's "
+        "null-space restriction needs in order to discard a gauge rather than "
+        "a physical contribution. What remains is the rest of paper Eqs. 73-82: "
+        "the modified corners/edges carrying s explicitly on the bonds, and the "
+        "s^L/s^R quartic roots on the *cut legs* of that environment. Putting "
+        "those roots inside the projectors instead was tried and is worse "
+        "(2.0e-1) — their product is not S^-1, so the closure breaks at first "
+        "order in a non-diagonal S. Reference: explicit backprop -0.817381274942, "
+        "itself matching a symmetric finite difference to ten digits."
     ),
     strict=True,
 )

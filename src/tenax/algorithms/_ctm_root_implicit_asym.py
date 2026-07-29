@@ -24,24 +24,23 @@ environment of Eq. 65 and ``U_a = U*_a + U_perp,a u_a``,
     R_S = diag(U† M Vh†) - λ_S S                 (Eq. 79)
     R_v = S*^-1 (U† M Vh_perp†) - λ_S v          (Eq. 80)
 
-Deliberate deviation from the paper
------------------------------------
-§V.3 additionally replaces ``(C, E)`` by *modified* corners and edges that
-carry the inverse singular values explicitly (Eq. 82), with quartic roots
-``s^L = (s†s)^(1/4)`` and ``s^R = (s s†)^(1/4)`` on the cut legs (Eq. 73),
-so that every object transforms covariantly under the eight environment
-gauge unitaries.  That machinery exists to let ``S`` be a *general complex
-matrix* in the reverse pass.
+Where this stands (#715 Phase 1, incomplete)
+-------------------------------------------
+``S`` is a general complex chi x chi matrix, and the projectors use a genuine
+matrix inverse square root (Denman-Beavers, so no decomposition enters ``F``).
+That much is required, not optional: with a *diagonal* ``S`` the in-space
+rotation of the isometries has nowhere to go, the projector closure breaks at
+first order, and Eq. 88's null-space restriction then discards a physical
+contribution instead of a gauge one — the gradient came out 120% wrong.
+Promoting ``S`` brings it to 1-2.5%.
 
-Here ``S`` is kept diagonal — a length-χ vector — which is what it is at the
-root.  The consequence is that ``S^-1/2`` in the projectors stays an
-elementwise reciprocal instead of a matrix function, so no decomposition
-enters ``F`` and the whole point of the method is preserved.  What is given
-up is exact gauge covariance under *degenerate singular values*: the
-null-space restriction of Eq. 88 still removes the divergent in-subspace
-rotations, but the residual gauge inside a degenerate block is fixed by the
-deterministic phase convention of :func:`_pin_bond_gauge` rather than
-cancelled algebraically.  See the module tests for where that shows up.
+Still missing is the rest of Eqs. 73-82: the modified corners and edges that
+carry ``s`` explicitly on the bonds, and the quartic roots
+``s^L = (S S†)^-1/4``, ``s^R = (S† S)^-1/4`` on the *cut legs* of that
+environment.  Putting those roots inside the projectors instead was tried and
+is worse (20%): they are equivariant under independent left/right rotations,
+but their product is not ``S^-1``, so the closure breaks for a non-diagonal
+``S``.  See ``docs/plans/2026-07-29-715-phase1-modified-variables.md``.
 
 Conventions (all dense ``jnp`` arrays, ``d2 = D²``)
 ---------------------------------------------------
@@ -160,6 +159,43 @@ def _lower_left_quadrant(env: AsymEnv, a: jax.Array) -> jax.Array:
     return jnp.einsum("mn,pqm,nit,uqik->tupk", env.C4, env.T3, env.T4, a)
 
 
+def _denman_beavers(A: jax.Array, n_iter: int = 24):
+    """Principal square root and inverse square root, together.
+
+    Deliberately *not* ``eigh``.  ``S`` is a general matrix here, and while a
+    matrix root is smooth even where the spectrum is degenerate (its Frechet
+    derivative is a Loewner divided difference, which tends to ``f'(x)``),
+    JAX's ``eigh`` VJP still divides by eigenvalue differences and would NaN
+    exactly where this method is supposed to be safe.
+
+    Denman-Beavers is matrix multiplications and inverses only, so ``F``
+    stays free of decompositions and differentiates cleanly.  Convergence is
+    quadratic; the spectral range seen here (1 to ~1e-3) is comfortable.
+    """
+    eye = jnp.eye(A.shape[0], dtype=A.dtype)
+    # Frobenius scaling only — deliberately no decomposition here, not even
+    # for the scale factor, or an ``svd`` reappears in the jaxpr of ``F`` and
+    # the whole point of the method is lost.  Rank deficiency is handled
+    # where it arises, by flooring the retained spectrum in
+    # :func:`all_projectors`.
+    scale = jnp.sqrt(jnp.linalg.norm(A) + 1e-300)
+    Y, Z = A / (scale**2), eye
+    for _ in range(n_iter):
+        Yn = 0.5 * (Y + jnp.linalg.inv(Z))
+        Zn = 0.5 * (Z + jnp.linalg.inv(Y))
+        Y, Z = Yn, Zn
+    return Y * scale, Z / scale
+
+
+def _inv_sqrt(A: jax.Array, n_iter: int = 24) -> jax.Array:
+    return _denman_beavers(A, n_iter)[1]
+
+
+def _inv_quartic_root(A: jax.Array, n_iter: int = 24) -> jax.Array:
+    """``A^-1/4`` for Hermitian positive ``A``, as ``(A^1/2)^-1/2``."""
+    return _denman_beavers(_denman_beavers(A, n_iter)[0], n_iter)[1]
+
+
 def _pin_bond_gauge(U, Vh, P_top, P_bot, chi, prev_P_top=None):
     """Pin the residual phase freedom on each renormalised bond.
 
@@ -231,12 +267,31 @@ def _fishman_projectors(
     n = env.C1.shape[0] * a.shape[0]
     top = _upper_left_quadrant(env, a).reshape(n, n)
     bot = _lower_left_quadrant(env, a).reshape(n, n)
-    inv_sqrt = jnp.where(s > 0, 1.0 / jnp.sqrt(jnp.where(s > 0, s, 1.0)), 0.0)
+    # ``s`` is a general chi x chi matrix, not a vector of singular values.
+    # That is what makes the pair gauge-covariant: under the bond rotation
+    # U -> U W, Vh -> W† Vh, S -> W† S W the matrix root is equivariant,
+    # (W† S W)^-1/2 = W† S^-1/2 W, so P_bot -> W† P_bot and P_top -> P_top W
+    # and the closure survives.  With a *diagonal* S the in-space rotation is
+    # not representable, the closure breaks at first order, and the
+    # null-space restriction of Eq. 88 then discards a real contribution
+    # instead of a gauge one.
+    # A genuine *matrix* inverse square root, symmetric on both ends.  This
+    # is what makes the pair gauge-covariant: under the bond rotation
+    # U -> U W, Vh -> W† Vh, S -> W† S W the matrix root is equivariant,
+    # (W† S W)^-1/2 = W† S^-1/2 W, so P_bot -> W† P_bot, P_top -> P_top W and
+    # P_bot @ P_top = S^-1/2 (U† M Vh†) S^-1/2 = S^-1/2 S S^-1/2 = 1 survives
+    # for *any* S, diagonal or not.
+    #
+    # The two-sided roots of paper Eq. 73, (S S†)^-1/4 and (S† S)^-1/4, were
+    # tried here and are worse (2e-1 vs 2.5e-2 gradient error): they are
+    # equivariant under independent left/right rotations, but their product
+    # is not S^-1, so the closure breaks at first order in a non-diagonal S.
+    # In the paper they sit on the *cut legs* of the modified environment,
+    # where no closure condition applies — not inside the projectors.
+    inv_sqrt = _inv_sqrt(s)
 
-    # top[(chi_r,a_r), (chi_d,a_d)] and bot[(chi_u,a_u), (chi_r,a_r)] so that
-    # M = top @ bot.  P_bot @ P_top = s^-1/2 U† (top bot) Vh† s^-1/2 = 1.
-    P_top = (bot @ Vh[:chi].conj().T) * inv_sqrt[None, :]
-    P_bot = inv_sqrt[:, None] * (U[:, :chi].conj().T @ top)
+    P_top = bot @ Vh[:chi].conj().T @ inv_sqrt
+    P_bot = inv_sqrt @ (U[:, :chi].conj().T @ top)
     return P_top, P_bot
 
 
@@ -295,12 +350,18 @@ def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
     for k in range(4):
         M = half_infinite_environment(env_k, a_k)
         U, s, Vh = jnp.linalg.svd(M, full_matrices=True)
-        s_keep = s[:chi] / (jnp.linalg.norm(s[:chi]) + 1e-300)
-        P_top, P_bot = _fishman_projectors(env_k, a_k, U, s_keep, Vh, chi)
+        # Floor the retained spectrum before it becomes a matrix: early
+        # sweeps start from a near-identity environment whose half-infinite
+        # matrix is rank deficient, and a singular S makes the matrix
+        # inverse square root below produce NaNs.
+        s_k = s[:chi]
+        s_k = jnp.maximum(s_k, 1e-12 * s_k[0])
+        S_keep = jnp.diag(s_k / (jnp.linalg.norm(s_k) + 1e-300))
+        P_top, P_bot = _fishman_projectors(env_k, a_k, U, S_keep, Vh, chi)
         U, Vh, P_top, P_bot = _pin_bond_gauge(
             U, Vh, P_top, P_bot, chi, None if prev is None else prev[k][0]
         )
-        out.append((P_top, P_bot, U, s_keep, Vh))
+        out.append((P_top, P_bot, U, S_keep, Vh))
         env_k, a_k = rotate_env(env_k), rotate_a(a_k)
     return out
 
@@ -452,15 +513,19 @@ def asym_characteristic_residual(y, a: jax.Array, consts: AsymRoot, chi: int):
         M, U, Vh = M_all[k]
         s_inv = consts.s_star_inv[k]
         core = U.conj().T @ M @ Vh.conj().T
-        lam_S = jnp.vdot(s_all[k], jnp.diag(core)).real
+        lam_S = jnp.vdot(s_all[k], core).real
 
-        R_S[k] = jnp.diag(core) - lam_S * s_all[k]
-        R_u[k] = (consts.U_perp[k].conj().T @ M @ Vh.conj().T) * s_inv[
-            None, :
-        ] - lam_S * u_all[k]
+        # Eq. 79 as the full chi x chi block, not just its diagonal.  With U
+        # and Vh pinned to their null-space variations (Eq. 88) the in-space
+        # rotation has nowhere to go except into S, so S has to be free to
+        # leave the diagonal in the reverse pass.  Phase 0's analogue is
+        # "treat C as a generic complex Hermitian matrix".
+        R_S[k] = core - lam_S * s_all[k]
+        R_u[k] = (consts.U_perp[k].conj().T @ M @ Vh.conj().T) @ s_inv - lam_S * u_all[
+            k
+        ]
         R_v[k] = (
-            s_inv[:, None] * (U.conj().T @ M @ consts.Vh_perp[k].conj().T)
-            - lam_S * v_all[k]
+            s_inv @ (U.conj().T @ M @ consts.Vh_perp[k].conj().T) - lam_S * v_all[k]
         )
 
         C_new = _renormalised_corner(env_k, a_k, P_top[k], P_bot[(k + 1) % 4], chi)
@@ -502,18 +567,20 @@ def asym_root_parametrize(
         prev_projs = projs
         U_star, U_perp, Vh_star, Vh_perp, s_list, s_inv = [], [], [], [], [], []
         for k in range(4):
-            _pt, _pb, U, s_keep, Vh = projs[k]
+            _pt, _pb, U, S_keep, Vh = projs[k]
             U_star.append(U[:, :chi])
             U_perp.append(U[:, chi:])
             Vh_star.append(Vh[:chi])
             Vh_perp.append(Vh[chi:])
-            s_list.append(s_keep)
-            cutoff = pinv_rtol * jnp.max(s_keep)
-            s_inv.append(
-                jnp.where(
-                    s_keep > cutoff, 1.0 / jnp.where(s_keep > cutoff, s_keep, 1.0), 0.0
-                )
+            s_list.append(S_keep)
+            diag = jnp.diag(S_keep).real
+            cutoff = pinv_rtol * jnp.max(diag)
+            inv_diag = jnp.where(
+                diag > cutoff, 1.0 / jnp.where(diag > cutoff, diag, 1.0), 0.0
             )
+            # Constant right/left preconditioner for Eqs. 78 and 80; diagonal
+            # because the root S* is.
+            s_inv.append(jnp.diag(inv_diag).astype(S_keep.dtype))
 
         n = env.C1.shape[0] * a.shape[0]
         root = AsymRoot(
