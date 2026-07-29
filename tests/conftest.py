@@ -57,6 +57,7 @@ _FILE_MARKERS = {
     # Root implicit AD for C4v CTMRG (#715 Phase 0): each parity test runs a
     # full CTM convergence plus finite-difference reruns.
     "test_ctm_c4v_root_implicit.py": "algorithm",
+    "test_ctm_root_implicit_asym.py": "algorithm",
     "test_ctm_truncation_error.py": "core",
     "test_ctm_paired.py": "algorithm",
     "test_ctm_python_loop.py": "algorithm",

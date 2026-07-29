@@ -353,21 +353,33 @@ def _solve_root_adjoint(
     struct = _real_struct(rhs)
     b_vec = _to_real_vec(rhs)
 
+    @jax.jit
     def op(vec):
         tree = _from_real_vec(vec, treedef, struct)
         return _to_real_vec(matvec(tree))
 
-    sol, _ = jax.scipy.sparse.linalg.gmres(
-        op,
-        b_vec,
-        x0=b_vec,
-        tol=tol,
-        atol=0.0,
-        restart=restart,
-        maxiter=maxiter,
-        solve_method="batched",
-    )
-    resid = jnp.linalg.norm(op(sol) - b_vec) / (jnp.linalg.norm(b_vec) + 1e-30)
+    # The solve is the hot loop: GMRES evaluates ``op`` up to ``maxiter``
+    # times, and each evaluation is a VJP through the whole of ``F``.  Run
+    # eagerly, the per-operation Python dispatch dominates — enough that
+    # adding the Eq. 73 cut-leg roots to ``F`` made a single measurement
+    # fail to return.  Compiling the whole solve leaves one XLA program per
+    # call instead.
+    @jax.jit
+    def _solve(b):
+        sol, _info = jax.scipy.sparse.linalg.gmres(
+            op,
+            b,
+            x0=b,
+            tol=tol,
+            atol=0.0,
+            restart=restart,
+            maxiter=maxiter,
+            solve_method="batched",
+        )
+        resid = jnp.linalg.norm(op(sol) - b) / (jnp.linalg.norm(b) + 1e-30)
+        return sol, resid
+
+    sol, resid = _solve(b_vec)
     del leaves
     return _from_real_vec(sol, treedef, struct), resid
 
