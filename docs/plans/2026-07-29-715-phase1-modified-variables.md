@@ -78,6 +78,37 @@
 > `y -> x` map assigning the *whole* inverse to one side per bond rather than a half to
 > each. Then re-measure `dE/dU*`; it should collapse toward zero, and the 2.5% with it.
 >
+> **The unsplit-`S^-1` fix: implemented, partially works, blocked on scaling.**
+>
+> | attempt | root residual | adjoint solve | gradient |
+> |---|---|---|---|
+> | asymmetric split in the projectors (`P_bot = S^-1 P~_bot`) | 8.2e-4 | 0.64 | 6.8e-1 |
+> | tilde variables, one unsplit `Z_k = S_k^-1` per bond | **3.3e-16** | 0.84 | collapses |
+> | + `S` gauge-fixed Hermitian | 3.3e-16 | NaN | NaN |
+>
+> Row 1 fails because `P_bot = S^-1 P~_bot` inherits the full ~1e3 dynamic range of the
+> spectrum while `P_top` has none, so the *forward* environment becomes badly scaled and
+> stops converging. Keep the symmetric split in the forward; it is only the equations that
+> need the unsplit form.
+>
+> Row 2 is the real result: the bond assignment
+> (`Z_k` on the `P~_top` end of move `k`, covering each of the eight bonds exactly once)
+> is **self-consistent — the root is machine-precision**. So the `y -> x` map is right.
+> What breaks is the linear solve.
+>
+> Row 3 was an attempt to pin the resulting flat directions by requiring `S = S†`.
+> It made things worse, and in doing so exposed a flaw in the diagnosis: the row-2
+> Jacobian has **max singular value 1.4e-11**, i.e. the whole system is minuscule, so the
+> "65 modes below 1e-12 x max, against 4 chi^2 = 64" reading is confounded by scaling
+> rather than being clean evidence of one flat rotation per move. Adding an O(1) term
+> swamped every other equation (698/768 modes below threshold).
+>
+> **Next step: rescale before re-diagnosing.** The tilde equations carry factors of
+> `S^-1` that make them orders of magnitude smaller than the SVD equations, so `dF/dy`
+> must be row- and column-equilibrated before any conditioning or null-space claim means
+> anything — and before GMRES has a chance. Only then is it worth re-testing whether the
+> rotations are genuinely flat and whether Hermitian `S` is the right gauge condition.
+>
 > Things already checked and believed correct: the sign of Eq. 18; `ў = (env̆, 0, 0, 0)`
 > (the energy depends on `y` only through the environment, so `ŭ = v̆ = S̆ = 0`); the
 > transpose convention in the solve (`matvec(v) = vjp_y(v)[0]` applies `(∂_yF)^T`, and
