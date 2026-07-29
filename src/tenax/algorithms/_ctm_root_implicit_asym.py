@@ -640,9 +640,36 @@ def asym_root_implicit_energy_and_grad(
     solve_maxiter: int = 400,
     solve_restart: int = 30,
     root_residual_warn: float = 1e-6,
+    allow_known_invalid_gradient: bool = False,
     return_diagnostics: bool = False,
 ):
-    """Energy and ``dE/dA`` for a 1x1 unit cell via asymmetric root implicit AD."""
+    """Energy and ``dE/dA`` for a 1x1 unit cell via asymmetric root implicit AD.
+
+    .. warning::
+
+       **The gradient this returns is known to be wrong by ~2.5%** and is
+       gated behind ``allow_known_invalid_gradient`` so it cannot reach an
+       optimiser by accident.  See #718: ``F`` freezes ``U*`` and ``Vh*``,
+       which drops a real ``∂_c F · dc/dp`` term — measured directly as
+       ``dE/dU* ≈ 1.5e-2`` against a missing ``7.1e-3``.
+
+       Everything else in this path is verified: the root sits at 2.5e-16,
+       the ``y -> x`` map reproduces the energy to twelve digits, the solve
+       agrees with a dense reference to eleven digits, and the system is well
+       conditioned.  None of that makes the gradient usable.
+
+       The *energy* is correct and may be used; call :func:`asym_energy` on a
+       converged environment if that is all you need.
+    """
+    if not allow_known_invalid_gradient:
+        raise NotImplementedError(
+            "Asymmetric root-implicit gradients are incorrect by ~2.5% "
+            "(tenax-lab/tenax#718: freezing U*, Vh* in F drops a real term). "
+            "The forward energy is correct and the root is exact, but this "
+            "gradient must not be used for optimisation. Pass "
+            "allow_known_invalid_gradient=True to obtain it anyway, for "
+            "debugging or for reproducing the #718 measurements."
+        )
     from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
 
     if isinstance(A, SymmetricTensor):

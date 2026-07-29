@@ -212,7 +212,12 @@ def test_gradient_parity_needs_the_modified_variables():
     chi = 4
     gate = _gate(1.0)
     _e, grad = M.asym_root_implicit_energy_and_grad(
-        A, gate, chi=chi, max_iter=300, conv_tol=1e-13
+        A,
+        gate,
+        chi=chi,
+        max_iter=300,
+        conv_tol=1e-13,
+        allow_known_invalid_gradient=True,
     )
 
     env0, _a, _m = M.converge(A, chi, max_iter=300, conv_tol=1e-13)
@@ -229,3 +234,100 @@ def test_gradient_parity_needs_the_modified_variables():
     g_ref = jax.grad(energy_explicit)(A.todense())
     rel = float(jnp.linalg.norm(grad - g_ref) / jnp.linalg.norm(g_ref))
     assert rel < 1e-5, rel
+
+
+def test_gradient_entry_point_is_gated():
+    """The known-bad gradient cannot reach an optimiser by accident (#718)."""
+    A = _site_tensor()
+    with pytest.raises(NotImplementedError, match="718"):
+        M.asym_root_implicit_energy_and_grad(A, _gate(1.0), chi=4)
+
+
+def _contract_by_label(pieces, bonds, open_legs):
+    """``einsum`` driven purely by leg names, not by hand-written subscripts."""
+    letters: dict[tuple[str, str], str] = {}
+    canonical = {b: a for a, b in bonds}
+
+    def key(piece, leg):
+        return canonical.get((piece, leg), (piece, leg))
+
+    def letter(tag):
+        if tag not in letters:
+            letters[tag] = "abcdefghijklmnopqrstuvwxyz"[len(letters)]
+        return letters[tag]
+
+    subscripts = [
+        "".join(letter(key(name, leg)) for leg in legs) for name, _arr, legs in pieces
+    ]
+    out = "".join(letter(key(p, leg)) for p, leg in open_legs)
+    return jnp.einsum(
+        f"{','.join(subscripts)}->{out}", *[arr for _n, arr, _l in pieces]
+    )
+
+
+def test_quadrant_wiring_matches_the_library_leg_labels():
+    """The quadrant einsums join the legs the CTM env labels say are adjacent.
+
+    Every endpoint in a quadrant has dimension ``chi`` or ``D**2``, so a
+    transposed contraction is shape-legal and silently wrong.  This rebuilds
+    both quadrants from the adjacency the labels encode -- ``*_d`` meets
+    ``*_u``, ``*_r`` meets ``*_l``, and an edge's double-layer leg meets the
+    matching leg of ``a`` -- and pins the hand-written einsums against it.
+
+    The environment must be *converged*: the initial one is up/down
+    symmetric, which makes several distinct wirings agree numerically.
+    """
+    A = _site_tensor(seed=5)
+    chi = 6
+    env, a, info = M.converge(A, chi, max_iter=200, conv_tol=1e-12)
+    assert info["converged"]
+
+    template = initialize_ctm_tensor_env(A, chi)
+    legs = {
+        name: list(getattr(template, name).labels())
+        for name in ("C1", "C4", "T1", "T3", "T4")
+    }
+    a_legs = ["u2", "d2", "l2", "r2"]
+
+    def piece(name):
+        return (name, getattr(env, name), legs[name])
+
+    # C1 is left of T1 and above T4; a sits under T1 and right of T4.
+    upper_left = _contract_by_label(
+        pieces=[piece("C1"), piece("T1"), piece("T4"), ("a", a, a_legs)],
+        bonds=[
+            (("C1", "c1_r"), ("T1", "t1_l")),
+            (("C1", "c1_d"), ("T4", "t4_u")),
+            (("T1", "u2"), ("a", "u2")),
+            (("T4", "l2"), ("a", "l2")),
+        ],
+        open_legs=[("T1", "t1_r"), ("a", "r2"), ("T4", "t4_d"), ("a", "d2")],
+    )
+    assert jnp.allclose(upper_left, M._upper_left_quadrant(env, a), atol=1e-13)
+
+    # C4 is left of T3 and below T4; a sits above T3 and right of T4.
+    lower_left = _contract_by_label(
+        pieces=[piece("C4"), piece("T3"), piece("T4"), ("a", a, a_legs)],
+        bonds=[
+            (("C4", "c4_r"), ("T3", "t3_l")),
+            (("C4", "c4_u"), ("T4", "t4_d")),
+            (("T3", "d2"), ("a", "d2")),
+            (("T4", "l2"), ("a", "l2")),
+        ],
+        open_legs=[("T4", "t4_u"), ("a", "u2"), ("T3", "t3_r"), ("a", "r2")],
+    )
+    assert jnp.allclose(lower_left, M._lower_left_quadrant(env, a), atol=1e-13)
+
+    # The test has to be able to fail: joining C1's down leg to T4's *down*
+    # leg is shape-legal, and must give a different tensor.
+    miswired = _contract_by_label(
+        pieces=[piece("C1"), piece("T1"), piece("T4"), ("a", a, a_legs)],
+        bonds=[
+            (("C1", "c1_r"), ("T1", "t1_l")),
+            (("C1", "c1_d"), ("T4", "t4_d")),
+            (("T1", "u2"), ("a", "u2")),
+            (("T4", "l2"), ("a", "l2")),
+        ],
+        open_legs=[("T1", "t1_r"), ("a", "r2"), ("T4", "t4_u"), ("a", "d2")],
+    )
+    assert not jnp.allclose(miswired, upper_left, atol=1e-8)
