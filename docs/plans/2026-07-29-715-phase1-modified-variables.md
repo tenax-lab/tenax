@@ -19,7 +19,31 @@
 > It does not. Everything below about Eqs. 73-82 is still accurate as *physics*, but it is
 > not where the remaining 2.5% lives. Start from the assembly.
 >
-> Things already checked there and believed correct: the sign of Eq. 18; `ў = (env̆, 0, 0, 0)`
+> **Narrowed further by a dense-Jacobian solve** (bypassing GMRES and the real
+> embedding entirely, `np.linalg.solve` on `J.T`, solve residual 2.2e-15):
+>
+> ```
+> dense-solve implicit = -0.810241844336
+> gmres      implicit  = -0.810241844341     <- identical to 11 digits
+> direct term only     = -0.352819362514
+> reference            = -0.817381274942
+> ```
+>
+> So GMRES, the real embedding, the transpose convention and the ў structure are all
+> exonerated. The direct term `∂_p e` is a plain VJP of the energy and is right by
+> construction. **The entire error is in the indirect term `-F̆ ∂_p F`**, which is off by
+> 0.0072 out of 0.4646 — 1.55% of that term alone.
+>
+> Since the solve is exact and `∂_yF`, `∂_pF` both come from `jacfwd` of the same `F`,
+> that leaves one candidate: **`∂_pF` is incomplete**. `F` is differentiated with respect
+> to `p` only through `a`, while the frozen constants `U*, U_perp, Vh*, Vh_perp,
+> s_star_inv` also depend on `p` and contribute `∂F/∂consts · dconsts/dp`, which is being
+> dropped. The method's justification for freezing them is that `u` absorbs the change —
+> but that argument is about the *solution* `y*(p)`, not about the partial derivative, and
+> `E_implicit` evaluates `parametrize`'s `y` (built with `consts(p)`) while the derivative
+> tracks `y*(p; consts(p₀))`. Reconciling those two is the remaining work.
+>
+> Things already checked and believed correct: the sign of Eq. 18; `ў = (env̆, 0, 0, 0)`
 > (the energy depends on `y` only through the environment, so `ŭ = v̆ = S̆ = 0`); the
 > transpose convention in the solve (`matvec(v) = vjp_y(v)[0]` applies `(∂_yF)^T`, and
 > `F̆ ∂_yF = ў` is the transposed system); GMRES convergence (residual 1e-11). The most
