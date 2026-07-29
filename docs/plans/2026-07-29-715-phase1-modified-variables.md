@@ -43,6 +43,41 @@
 > `E_implicit` evaluates `parametrize`'s `y` (built with `consts(p)`) while the derivative
 > tracks `y*(p; consts(p₀))`. Reconciling those two is the remaining work.
 >
+> **RESOLVED — the frozen constants are the bug, and the fix is specific.**
+> Measured `dE/dc = -F̆ ∂_cF` for the frozen `U*`, `Vh*` (the energy has no explicit
+> dependence on them, so this should vanish if freezing is valid):
+>
+> ```
+> U*[0]:  |dE/dU*| = 1.455e-02   kept-rotation = 1.452e-02   tilt = 9.36e-04
+> U*[3]:  |dE/dU*| = 1.287e-02   kept-rotation = 1.287e-02   tilt = 1.11e-04
+> Vh*[3]: |dE/dVh*| = 1.736e-02  kept-rotation = 1.736e-02   tilt = 1.60e-04
+> ```
+>
+> Not zero, and the right scale to explain the missing 7.14e-3. Decisively dominated by
+> the **kept-subspace rotation** — 15x to 100x the subspace tilt.
+>
+> Working out what is actually invariant under that rotation, `U -> U W` with
+> `S -> W† S` (note: one-sided, not `W† S W`):
+>
+> ```
+> Π = bot Vh† S^-1 U† top      S^-1 U† -> (W† S)^-1 W† U† = S^-1 U†     invariant
+> ```
+>
+> and symmetrically `Vh† S^-1` is invariant under `Vh -> W_R† Vh`, `S -> S W_R`.
+> **Invariance requires `S^-1` adjacent to `U†` and `Vh†`, as one factor.**
+>
+> Every arrangement tried so far used a *symmetric* split `S^-1/2 … S^-1/2`. That
+> reproduces the correct energy *value* — the two halves meet on each bond and recombine
+> into `S^-1` — but it never places `S^-1` next to `U†` inside the **equations**, so `F`
+> stays non-covariant under precisely the rotation that dominates the error. It also
+> explains why the modified-variable test was an exact no-op: the map was written
+> `C = A C̃ A` with `A = S^-1/2`, which is still the symmetric split.
+>
+> **Next step:** rewrite `F` so `S^-1` never appears split — root-free projectors
+> `P̃_top = bot Vh†`, `P̃_bot = U† top`, with a single `S^-1` on each bond, and the
+> `y -> x` map assigning the *whole* inverse to one side per bond rather than a half to
+> each. Then re-measure `dE/dU*`; it should collapse toward zero, and the 2.5% with it.
+>
 > Things already checked and believed correct: the sign of Eq. 18; `ў = (env̆, 0, 0, 0)`
 > (the energy depends on `y` only through the environment, so `ŭ = v̆ = S̆ = 0`); the
 > transpose convention in the solve (`matvec(v) = vjp_y(v)[0]` applies `(∂_yF)^T`, and
