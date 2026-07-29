@@ -1,8 +1,11 @@
 # #715 Phase 1 completion: the modified-variable formulation
 
-Status: **derived, not implemented.** `test_gradient_parity_needs_the_modified_variables`
-in `tests/test_ctm_root_implicit_asym.py` is the gate; it is a strict xfail carrying the
-target number.
+Status: **partly implemented.** General-matrix `S` has landed (84f05f1) and takes the
+gradient error from 1.2e0 to 1.1e-2 … 2.5e-2. One ingredient remains — see
+"Measured: what actually moves the error" below.
+`test_gradient_parity_needs_the_modified_variables` in
+`tests/test_ctm_root_implicit_asym.py` is the gate; it is a strict xfail carrying the
+current number.
 
 ## Why the shortcut cannot be repaired in place
 
@@ -27,7 +30,7 @@ They are not: the `s^-1/2` inside the projectors does not transform covariantly
 Nor can `δω` simply be promoted to a variable. The equation that would determine it is
 the diagonality of `S` within the kept block — and linearising *that* is exactly the
 `1/(s_i² - s_j²)` divergence the whole method exists to avoid. There is no third option:
-the modified variables are required.
+`S` has to become a general matrix, which is the part now implemented.
 
 Phase 0 (C4v) gets away with the same restriction because the `eigh` formulation has no
 inverse roots and Eqs. 26–28 are genuinely covariant. That contrast is the cleanest
@@ -132,13 +135,14 @@ Eq. 65 and Eqs. 78–80.
 
 1. ~~Newton–Schulz helpers~~ **done** — `_denman_beavers` in the module, with
    `_inv_sqrt`. Note it must not call `svd` even for a scale factor;
-   `test_no_svd_in_the_differentiated_equations` caught exactly that. (`_inv_sqrt`, `_quartic_root`) + tests against `eigh` on
-   well-conditioned Hermitian PSD input, plus a gradient-finiteness test at degeneracy.
-2. Switch `_fishman_projectors` to the tilde form; add the explicit `s^-1` bond
-   insertions to the quadrants and to `half_infinite_environment`.
-3. Promote `S` to a general matrix; rewrite Eqs. 78–80 accordingly (`R_S` becomes the
-   full χ×χ block, not its diagonal).
-4. Add the `y ↦ x` map and route `ў` through it.
+   `test_no_svd_in_the_differentiated_equations` caught exactly that.
+2. ~~Promote `S` to a general matrix; `R_S` becomes the full χ×χ block~~ **done**
+   (84f05f1). This is what took the error from 1.2e0 to ~2.5e-2.
+3. Rebuild `half_infinite_environment` from the *modified* edges, with `s^L`, `s^R` on
+   the dangling cut legs. **This is the only step left**, and the one that needs the
+   figures rather than a derivation.
+4. The tilde variables and the `y ↦ x` map come along with step 3; on their own they are
+   a no-op (measured), so do not land them separately.
 5. Re-check in this order — each is a sharp oracle:
    - `‖F(y*)‖` back to ~1e-16 (it went 3.3e3 → 0.24 → 2.5e-16 as conventions were fixed
      the first time round; it localises errors to a single equation)
