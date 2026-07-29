@@ -160,6 +160,33 @@
 > again — but the map is now pinned by a twelve-digit check instead of assumed, and the
 > normalisation requirement is understood.
 >
+> **Numerics closed out.** Full pipeline on the verified symmetric map, Ruiz-equilibrated,
+> dense solve:
+>
+> ```
+> energy through the map = 0.18833050074260   (reference ...0632)   12 digits
+> raw    cond 4.556e+04
+> equil  cond 3.639e+02     modes below 1e-12 x max: 0 / 768
+> solve residual 2.33e-15
+> equilibrated implicit = -0.810241844336
+> baseline              = -0.810241844341     identical to 11 digits
+> reference             = -0.817381274942
+> ```
+>
+> Unchanged, as reparametrisation invariance requires — the prediction was stated before
+> the run. The symmetric map's raw cond is 4.6e4 against 2e19 for the unsplit one,
+> independently confirming which map is correct.
+>
+> **Every numerical component is now verified**: map, solve, conditioning, no null space,
+> and invariance under a change of variables. **No choice of variables, scaling or solver
+> can move the residual 2.5%.**
+>
+> One mechanism remains, matching the direct `dE/dU* ~ 1.5e-2` measurement: the
+> `∂_cF · dc/dp` term dropped by freezing `U*`, `Vh*`. Closing it needs either a genuinely
+> covariant formulation — every attempt here has failed — or `dU*/dp` itself, which is
+> dominated 15-100x by the rotation part, i.e. the divergent piece the method exists to
+> avoid. That tension is the open question.
+>
 > Things already checked and believed correct: the sign of Eq. 18; `ў = (env̆, 0, 0, 0)`
 > (the energy depends on `y` only through the environment, so `ŭ = v̆ = S̆ = 0`); the
 > transpose convention in the solve (`matvec(v) = vjp_y(v)[0]` applies `(∂_yF)^T`, and
