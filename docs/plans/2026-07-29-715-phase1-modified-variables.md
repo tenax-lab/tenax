@@ -101,9 +101,38 @@ matrix multiplications only. It is polynomial in the input, so it differentiates
 and `test_no_svd_in_the_differentiated_equations` keeps passing. Matrix *inverse* is
 fine as-is; JAX's VJP for it is a plain contraction.
 
+## Measured: what actually moves the error
+
+| change | gradient error |
+|---|---|
+| baseline (diagonal `S`, standard projectors) | 1.2e0 |
+| **`S` promoted to a general matrix + matrix `S^-1/2`** | **1.1e-2 … 2.5e-2** |
+| `(S S†)^-1/4`, `(S† S)^-1/4` inside the projectors | 2.0e-1 (worse) |
+| `C̃`, `Ẽ` promoted to primitive variables with `C = A C̃ A` | 2.508e-2 (**no change**) |
+
+Two of these results narrow the remaining work sharply.
+
+**The quartic roots do not belong in the projectors.** They are equivariant under
+independent left/right rotations, but their product is not `S^-1`, so the projector
+closure breaks at first order in a non-diagonal `S`.
+
+**Step 2 above is a no-op on its own.** Switching to the modified corners and edges is a
+smooth invertible change of variables, and a reparametrisation cannot change
+`dE/dp` — the measured error was identical to four digits. So the modified variables are
+*scaffolding*, not the fix. Useful only because the next step needs them.
+
+**Therefore the entire remaining discrepancy sits in step 4:** the half-infinite
+environment must be built from the *modified* edges with `s^L`, `s^R` on the dangling cut
+legs, i.e. `M̃ ≠ M`. That changes the equations rather than the coordinates, and it is the
+only ingredient of Eqs. 73–82 not yet accounted for. It is also the one part whose leg
+wiring is not derivable from the closure condition alone, so it needs the figures from
+Eq. 65 and Eqs. 78–80.
+
 ## Order of work
 
-1. Newton–Schulz helpers (`_inv_sqrt`, `_quartic_root`) + tests against `eigh` on
+1. ~~Newton–Schulz helpers~~ **done** — `_denman_beavers` in the module, with
+   `_inv_sqrt`. Note it must not call `svd` even for a scale factor;
+   `test_no_svd_in_the_differentiated_equations` caught exactly that. (`_inv_sqrt`, `_quartic_root`) + tests against `eigh` on
    well-conditioned Hermitian PSD input, plus a gradient-finiteness test at degeneracy.
 2. Switch `_fishman_projectors` to the tilde form; add the explicit `s^-1` bond
    insertions to the quadrants and to `half_infinite_environment`.
