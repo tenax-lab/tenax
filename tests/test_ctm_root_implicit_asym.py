@@ -331,3 +331,142 @@ def test_quadrant_wiring_matches_the_library_leg_labels():
         open_legs=[("T1", "t1_r"), ("a", "r2"), ("T4", "t4_u"), ("a", "d2")],
     )
     assert not jnp.allclose(miswired, upper_left, atol=1e-8)
+
+
+def test_the_two_half_plane_conventions_are_the_same_truncation():
+    """The forward sweep's left half and §V.3's upper half agree.
+
+    This identity is the whole licence for
+    :func:`asym_root_to_covariant_convention` being a pure relabelling: the
+    lower-left quadrant at one rotation *is* the upper-left quadrant at the
+    previous one, so the two half-infinite environments are transposes of each
+    other and their decompositions differ only by exchanging the isometries.
+    If it ever breaks, the covariant residual is being handed the
+    decomposition of a different matrix, which is exactly the failure that
+    showed up as a residual of 84 rather than 1e-12.
+    """
+    _A, a, root = _converged_root()
+    chi = root.env.C1.shape[0]
+    n = chi * a.shape[0]
+
+    upper, lower = [], []
+    env_k, a_k = root.env, a
+    for _k in range(4):
+        upper.append(M._upper_left_quadrant(env_k, a_k).reshape(n, n))
+        lower.append(M._lower_left_quadrant(env_k, a_k).reshape(n, n))
+        env_k, a_k = M.rotate_env(env_k), M.rotate_a(a_k)
+
+    for k in range(4):
+        km = (k - 1) % 4
+        scale = float(jnp.abs(upper[km]).max())
+        assert float(jnp.abs(lower[k] - upper[km]).max()) < 1e-12 * scale, k
+
+        # ... and therefore M_left(k) == M_up(k-1).T
+        m_left = upper[k] @ lower[k]
+        m_up = upper[km].T @ upper[k].T
+        m_scale = float(jnp.abs(m_left).max())
+        assert float(jnp.abs(m_left - m_up.T).max()) < 1e-10 * m_scale, k
+
+        # The identity is specific to the k-1 offset: the same-rotation
+        # pairing is shape-legal and must not hold, or the test is vacuous.
+        assert float(jnp.abs(lower[k] - upper[k]).max()) > 1e-3 * scale, k
+
+
+# ------------------------------------------------------------------ #
+# The y <-> x map (paper Eq. 82)                                      #
+# ------------------------------------------------------------------ #
+
+
+def _root_S(root):
+    """Singular values at the root, as full matrices."""
+    return tuple(jnp.diag(s) if s.ndim == 1 else s for s in root.s)
+
+
+def _converged_root(chi=4, seed=42):
+    A = _site_tensor(seed=seed)
+    env, a, _info = M.converge(A, chi, max_iter=300, conv_tol=1e-13)
+    root, residual = M.asym_root_parametrize(env, a, chi, polish_steps=30)
+    assert residual < 1e-12, residual
+    return A, a, root
+
+
+def test_inverse_root_map_round_trips():
+    """``absorb`` undoes ``remove`` — the two Eq. 82 directions are inverse.
+
+    Both normalise, so the comparison is against the normalised original.
+    """
+    _A, _a, root = _converged_root()
+    S = _root_S(root)
+
+    back = M.absorb_inverse_roots(M.remove_inverse_roots(root.env, S), S)
+    for name in ("C1", "C2", "C3", "C4", "T1", "T2", "T3", "T4"):
+        original = getattr(root.env, name)
+        original = original / jnp.linalg.norm(original)
+        assert jnp.allclose(original, getattr(back, name), atol=1e-12), name
+
+
+def test_energy_is_unchanged_by_going_through_the_modified_variables():
+    """Eq. 82 is a reparametrisation: the energy must not move."""
+    A, _a, root = _converged_root()
+    chi = root.env.C1.shape[0]
+    template = initialize_ctm_tensor_env(A, chi)
+    gate = _gate(1.0)
+    S = _root_S(root)
+
+    direct = float(M.asym_energy(A, root.env, template, gate))
+    via_tilde = float(
+        M.asym_energy(
+            A,
+            M.absorb_inverse_roots(M.remove_inverse_roots(root.env, S), S),
+            template,
+            gate,
+        )
+    )
+    assert abs(direct - via_tilde) < 1e-12, (direct, via_tilde)
+
+
+def test_singular_value_adjoint_is_not_negligible():
+    """``S̆`` is the same order as ``C̆`` — zeroing it is not a small error.
+
+    The energy depends on ``S`` only through the Eq. 82 map, so this adjoint
+    exists purely because the characteristic equations use modified
+    variables.  It is what the pre-#718 implementation set to zero, and it
+    is large enough to explain the gradient discrepancy on its own.
+    """
+    A, _a, root = _converged_root()
+    chi = root.env.C1.shape[0]
+    template = initialize_ctm_tensor_env(A, chi)
+    gate = _gate(1.0)
+    S = _root_S(root)
+    tilde = M.remove_inverse_roots(root.env, S)
+
+    def energy_of(S_in, tilde_in):
+        return M.asym_energy(A, M.absorb_inverse_roots(tilde_in, S_in), template, gate)
+
+    _e, vjp = jax.vjp(energy_of, S, tilde)
+    S_bar, tilde_bar = vjp(jnp.ones((), dtype=jnp.float64))
+
+    corner_scale = float(jnp.linalg.norm(tilde_bar.C1))
+    biggest = max(float(jnp.linalg.norm(x)) for x in S_bar)
+    assert biggest > 0.1 * corner_scale, (biggest, corner_scale)
+
+
+def test_covariant_characteristic_equations_vanish_at_the_root():
+    """The §V.3 characteristic equations must have the same root as the sweep.
+
+    This is the gate the whole covariance port exists to pass: ``y*`` extracted
+    from a converged CTMRG environment has to be a root of ``F`` in the
+    *modified* variables too, or Eq. 88 does not license freezing ``U*``/``V*``
+    and the gradient drops a real term (#718).
+    """
+    A, a, root = _converged_root()
+    chi = root.env.C1.shape[0]
+    root = M.asym_root_to_covariant_convention(root)
+    S = _root_S(root)
+    tilde = M.remove_inverse_roots(root.env, S)
+
+    R = M.asym_characteristic_residual_covariant(
+        (tilde, root.u, S, root.v), a, root, chi
+    )
+    total = float(jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(R))))
+    assert total < 1e-10, total

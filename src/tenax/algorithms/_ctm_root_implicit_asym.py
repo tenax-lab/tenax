@@ -196,6 +196,86 @@ def _inv_quartic_root(A: jax.Array, n_iter: int = 24) -> jax.Array:
     return _denman_beavers(_denman_beavers(A, n_iter)[0], n_iter)[1]
 
 
+def _quartic_root(A: jax.Array, n_iter: int = 24) -> jax.Array:
+    """``A^1/4`` for Hermitian positive ``A``, as ``(A^1/2)^1/2``."""
+    return _denman_beavers(_denman_beavers(A, n_iter)[0], n_iter)[0]
+
+
+# ---------------------------------------------------------------------------
+# The y <-> x map (paper Eq. 82)
+# ---------------------------------------------------------------------------
+#
+# The characteristic equations are written in *modified* corners and edges,
+# which carry the inverse singular values explicitly on their environment
+# legs.  Only that form transforms covariantly under the eight gauge
+# unitaries of Eq. 84, and only then is the null-space restriction of Eq. 88
+# — hence holding ``U*`` and ``V*`` constant — legitimate.
+#
+# The forward contraction is untouched: it produces the regular ``x``, and
+# these two functions move between the two descriptions.  Crucially the
+# *adjoint* has to travel the same way, which is what makes ``S̆`` nonzero;
+# see :func:`asym_root_implicit_energy_and_grad`.
+#
+# Direction bookkeeping at a 1x1 unit cell (paper indices reduce to pure
+# direction arithmetic, cf. PEPSKit ``_prev_coordinate``): corner ``k`` has
+# its first environment leg on direction ``k-1``'s edge and its second on
+# direction ``k``'s, and edge ``k`` takes ``S_k`` on both chi legs.
+
+
+def _corner_leg_directions(k: int) -> tuple[int, int]:
+    """``(prev, own)`` singular-value slots for corner ``k`` (0-based)."""
+    return (k - 1) % 4, k
+
+
+def _apply_corner_roots(C: jax.Array, left: jax.Array, right: jax.Array) -> jax.Array:
+    return left @ C @ right
+
+
+def _apply_edge_roots(E: jax.Array, left: jax.Array, right: jax.Array) -> jax.Array:
+    """Absorb on both chi legs of ``E[chi_in, d2, chi_out]``."""
+    return jnp.einsum("ai,ixj,jb->axb", left, E, right)
+
+
+def _map_env_roots(env: AsymEnv, roots: tuple, *, normalize: bool) -> AsymEnv:
+    """Absorb ``roots[k]`` onto corner/edge environment legs (Eq. 82)."""
+    corners, edges = [], []
+    for k in range(4):
+        prev_dir, own_dir = _corner_leg_directions(k)
+        C = _apply_corner_roots(
+            getattr(env, f"C{k + 1}"), roots[prev_dir], roots[own_dir]
+        )
+        E = _apply_edge_roots(getattr(env, f"T{k + 1}"), roots[k], roots[k])
+        if normalize:
+            C = C / (jnp.linalg.norm(C) + 1e-300)
+            E = E / (jnp.linalg.norm(E) + 1e-300)
+        corners.append(C)
+        edges.append(E)
+    return AsymEnv(*corners, *edges)
+
+
+def remove_inverse_roots(env: AsymEnv, S: tuple) -> AsymEnv:
+    """Regular ``x`` -> modified ``(C̃, Ẽ)``: multiply by ``sqrt(S)``.
+
+    Undoes the inverse square roots the forward projectors put on the
+    environment legs, leaving the modified tensors of Eq. 82.
+    """
+    roots = tuple(_denman_beavers(s)[0] for s in S)
+    return _map_env_roots(env, roots, normalize=True)
+
+
+def absorb_inverse_roots(env_tilde: AsymEnv, S: tuple) -> AsymEnv:
+    """Modified ``(C̃, Ẽ)`` -> regular ``x``: multiply by ``sqrt(S^-1)``.
+
+    This is the differentiable direction.  ``S`` enters here, so the energy
+    — which is evaluated on the regular environment — depends on ``S``
+    through this map, and ``S̆`` picks that up.  A matrix square root of the
+    inverse is used rather than a diagonal power because ``dS`` is a general
+    non-diagonal matrix in the reverse pass.
+    """
+    roots = tuple(_inv_sqrt(s) for s in S)
+    return _map_env_roots(env_tilde, roots, normalize=True)
+
+
 def _pin_bond_gauge(U, Vh, P_top, P_bot, chi, prev_P_top=None):
     """Pin the residual phase freedom on each renormalised bond.
 
@@ -539,6 +619,218 @@ def asym_characteristic_residual(y, a: jax.Array, consts: AsymRoot, chi: int):
         edges[_unrotate_index(4, k) - 1] = E_new - lam_E * E_cur
 
         env_k, a_k = rotate_env(env_k), rotate_a(a_k)
+
+    return (AsymEnv(*corners, *edges), tuple(R_u), tuple(R_S), tuple(R_v))
+
+
+def asym_root_to_covariant_convention(root: AsymRoot) -> AsymRoot:
+    """Relabel a forward-convention root into the one paper §V.3 uses.
+
+    The forward sweep truncates with the *left* half of the plane, gluing the
+    upper-left quadrant to the lower-left one at the same rotation.  §V.3
+    truncates with the *upper* half, gluing enlarged corner ``k`` to enlarged
+    corner ``k+1``.  Those are the same truncation, not two different ones:
+
+        _lower_left_quadrant(env_k, a_k) == _upper_left_quadrant(env_{k-1}, a_{k-1})
+
+    holds exactly (1e-16), and therefore
+
+        M_left(k) == M_up(k-1).T .
+
+    Transposing a decomposition exchanges its isometries — ``(U S Vh).T =
+    Vh.T S.T U.T``, and both factors stay isometric, since ``Vh Vh† = 1``
+    gives ``(Vh.T)† Vh.T = conj(Vh Vh†) = 1`` — so the §V.3 data at direction
+    ``j`` is the forward data at rotation ``j+1`` with ``U`` and ``Vh``
+    swapped and every block transposed.  Plain transpose, not adjoint: no
+    conjugation enters.
+
+    The environment itself is untouched; only which cut each ``S`` belongs to
+    changes.  Feed the result to :func:`remove_inverse_roots` and
+    :func:`asym_characteristic_residual_covariant`, which are §V.3-indexed;
+    :func:`asym_characteristic_residual` wants the un-relabelled root.
+    """
+
+    def shift(xs: tuple) -> tuple:
+        return tuple(xs[(j + 1) % 4] for j in range(4))
+
+    def shiftT(xs: tuple) -> tuple:
+        return tuple(x.T for x in shift(xs))
+
+    return AsymRoot(
+        env=root.env,
+        u=shiftT(root.v),
+        s=shiftT(root.s),
+        v=shiftT(root.u),
+        U_star=shiftT(root.Vh_star),
+        U_perp=shiftT(root.Vh_perp),
+        Vh_star=shiftT(root.U_star),
+        Vh_perp=shiftT(root.U_perp),
+        s_star_inv=shiftT(root.s_star_inv),
+    )
+
+
+def _covariant_pieces(consts: AsymRoot, S_all: tuple, u_all: tuple, v_all: tuple):
+    """Per-direction covariant building blocks (paper Eqs. 71-75).
+
+    ``s = S^-1``, and the Eq. 73 roots go on the *isometries*, not on the
+    projectors.  Their placement is fixed by the Eq. 87 transformation laws
+    rather than chosen: with ``U -> U Q_L†``, ``V -> Q_R V`` and
+    ``s -> Q_R s Q_L†``,
+
+        (s† s)^1/4 -> Q_L (s† s)^1/4 Q_L†,
+        (s s†)^1/4 -> Q_R (s s†)^1/4 Q_R†,
+
+    which is what makes them legitimate factors to attach to the isometries.
+
+    They attach to the ``n = chi * d2`` *cut* leg, on its ``chi`` sub-leg —
+    not to the outer ``chi`` index.  That is the leg §V.3 describes as
+    carrying "a dangling sqrt(s) on outer legs of the edge tensors that are
+    being cut", and it is what the reference's ``absorb_right`` reaches
+    (``domainind(P)[1]``, the first of the split ``(chi, D, D)`` triple).
+    Attaching to the outer ``chi`` instead is shape-legal for ``Ud`` and
+    ``Vd`` but not for the null-space blocks, which is the giveaway.
+
+    The direction offsets follow the reference's
+    ``_leftvec_invfroot_indices`` / ``_rightvec_invfroot_indices``, which at a
+    1x1 unit cell reduce to ``k-1`` and ``k+1``: the cut legs belong to the
+    neighbouring directions' edges.
+    """
+    s_all = tuple(jnp.linalg.inv(S) for S in S_all)
+    root_L = tuple(_quartic_root(s.conj().T @ s) for s in s_all)
+    root_R = tuple(_quartic_root(s @ s.conj().T) for s in s_all)
+
+    d2 = consts.U_star[0].shape[0] // S_all[0].shape[0]
+    eye_d2 = jnp.eye(d2, dtype=consts.U_star[0].dtype)
+    # chi is the slow index of the fused (chi, d2) cut leg.
+    K_L = tuple(jnp.kron(r, eye_d2) for r in root_L)
+    K_R = tuple(jnp.kron(r, eye_d2) for r in root_R)
+
+    Ud, Vd, ULd, VRd = [], [], [], []
+    for k in range(4):
+        km, kp = (k - 1) % 4, (k + 1) % 4
+        U = consts.U_star[k] + consts.U_perp[k] @ u_all[k]  # Eq. 71
+        Vh = consts.Vh_star[k] + v_all[k] @ consts.Vh_perp[k]  # Eq. 72
+        chi = S_all[k].shape[0]
+        Ud.append(U[:, :chi].conj().T @ K_L[km])
+        Vd.append(K_R[kp] @ Vh[:chi].conj().T)
+        ULd.append(consts.U_perp[k].conj().T @ K_L[km])
+        VRd.append(K_R[kp] @ consts.Vh_perp[k].conj().T)
+    return s_all, tuple(Ud), tuple(Vd), tuple(ULd), tuple(VRd)
+
+
+def _modified_env(env_tilde: AsymEnv, s_all: tuple) -> AsymEnv:
+    """``iCi = s_{k-1} C̃_k s_k`` with the edges left alone.
+
+    The full inverse goes on *both* corner legs (reference ``iCi``), which is
+    what puts the singular values explicitly into the contraction environment
+    so that it transforms covariantly.  Edges already carry their ``s`` from
+    the Eq. 82 map.
+    """
+    corners = []
+    for k in range(4):
+        prev_dir, own_dir = _corner_leg_directions(k)
+        corners.append(
+            s_all[prev_dir] @ getattr(env_tilde, f"C{k + 1}") @ s_all[own_dir]
+        )
+    edges = [getattr(env_tilde, f"T{k + 1}") for k in range(4)]
+    return AsymEnv(*corners, *edges)
+
+
+def asym_characteristic_residual_covariant(y, a: jax.Array, consts: AsymRoot, chi: int):
+    """``F(y, p)`` in the covariant parametrisation of paper §V.3.
+
+    ``y = (env_tilde, u, S, v)`` with *modified* corners and edges, so that
+    holding ``U*`` and ``V*`` constant is licensed by Eq. 88.  Normalisation
+    follows the reference implementation's ``X'/lambda - X`` rather than
+    ``X' - lambda X``; the two differ by a row scaling of ``F``, which leaves
+    the implicit gradient invariant but not the Jacobian conditioning.  It
+    does rely on every tensor in ``y`` having unit Frobenius norm, which
+    :func:`asym_root_parametrize` arranges.
+
+    ``lambda`` is deliberately *not* real-projected.  ``dot(X, X')`` is
+    genuinely complex for a complex state — at ``D=2``, ``chi=4`` the corner
+    ``lambda`` comes out around ``-2.1e2 - 3.6e2j`` — and taking the real
+    part alone moves ``|F1|`` from 2e-13 to 1.6e0.
+
+    The assembly mirrors the reference implementation
+    (``contract_asymmetric_characteristic_equation``, ``Val{:implicit}``)
+    rather than the forward sweep in :func:`asym_characteristic_residual`,
+    and the two use *different halves of the plane*:
+
+    * The forward sweep truncates with the left half, gluing the upper-left
+      quadrant to the lower-left one at the same rotation.
+    * §V.3 truncates with the upper half, gluing enlarged corner ``k`` to
+      enlarged corner ``k+1``.  So there is only one quadrant primitive here,
+      and ``_lower_left_quadrant`` is not used at all.
+
+    Every step below is pinned numerically against the reference's own dumped
+    fixed point (``docs/plans/reference/718-dump.jl``): the enlarged corners
+    to 8e-16, the projector pair to 5e-16, and all five residual blocks to
+    2e-12 — the same order as the reference's ``|F|`` at its own root.
+    """
+    env_tilde, u_all, S_all, v_all = y
+    s_all, Ud, Vd, ULd, VRd = _covariant_pieces(consts, S_all, u_all, v_all)
+    env_mod = _modified_env(env_tilde, s_all)
+
+    d2 = a.shape[0]
+    n = chi * d2
+
+    # Pass 1: one enlarged corner per direction, the ``s`` that sits on the
+    # leg being cut, and the column the renormalised edge is built from.
+    EC, K_is, cols = [], [], []
+    env_k, a_k = env_mod, a
+    for k in range(4):
+        # The reference orders an enlarged corner (cut | outer) while the
+        # helper returns (outer | cut), hence the transpose.  Verified to
+        # 7.7e-16 against its dumped ``EC`` by
+        # ``docs/plans/reference/718-ecmap.py``.
+        EC.append(_upper_left_quadrant(env_k, a_k).reshape(n, n).T)
+        # ``s_k`` lands on the cut leg's chi sub-leg, not on the outer chi:
+        # that is what the reference's ``absorb_right`` reaches
+        # (``domainind(P)[1]``, the chi of the split ``(chi, D, D)`` triple).
+        # ``chi`` is the slow index of the fused leg, so ``kron(s, I)``.
+        K_is.append(jnp.kron(s_all[k], jnp.eye(d2, dtype=s_all[k].dtype)))
+        # The same north edge that enters ``EC[k]``, with the sandwich
+        # attached: (chi_l, a_l | a_d | chi_r, a_r).
+        cols.append(jnp.einsum("xfy,fjlr->xljyr", env_k.T1, a_k).reshape(n, d2, n))
+        env_k, a_k = rotate_env(env_k), rotate_a(a_k)
+
+    # Pass 2: the half-infinite environment at direction ``k`` glues ``EC[k]``
+    # to ``EC[k+1]`` across the cut, carrying exactly one ``s_k``.
+    M_all, P_R, P_L = [], [], []
+    for k in range(4):
+        kp = (k + 1) % 4
+        M_all.append(EC[k] @ K_is[k] @ EC[kp])
+        P_R.append(Ud[k] @ EC[k] @ K_is[k])
+        P_L.append(K_is[k] @ EC[kp] @ Vd[k])
+
+    # Pass 3: residuals.  Both projectors of a corner belong to the *same*
+    # enlarged corner, one per group, so the corner takes ``P_R[k-1]`` — the
+    # partner of the cut that ``EC[k]``'s first group sits on.
+    corners: list = [None] * 4
+    edges: list = [None] * 4
+    R_u, R_S, R_v = [None] * 4, [None] * 4, [None] * 4
+    for k in range(4):
+        km = (k - 1) % 4
+        M_k, s_inv = M_all[k], consts.s_star_inv[k]
+
+        core = Ud[k] @ M_k @ Vd[k]
+        lam_S = jnp.vdot(S_all[k], core)
+        R_S[k] = core / lam_S - S_all[k]
+        R_u[k] = (ULd[k] @ M_k @ Vd[k]) @ s_inv / lam_S - u_all[k]
+        R_v[k] = s_inv @ (Ud[k] @ M_k @ VRd[k]) / lam_S - v_all[k]
+
+        # Direction ``k`` renormalises the corner and the edge that its own
+        # enlarged corner is built from, i.e. ``C1``/``T1`` of the rotated
+        # frame, which is index ``k+1`` unrotated.
+        idx = _unrotate_index(1, k)
+        C_new = P_R[km] @ EC[k] @ P_L[k]
+        C_cur = getattr(env_tilde, f"C{idx}")
+        corners[idx - 1] = C_new / jnp.vdot(C_cur, C_new) - C_cur
+
+        E_new = jnp.einsum("ax,xjy,yb->ajb", P_R[k], cols[k], P_L[k])
+        E_cur = getattr(env_tilde, f"T{idx}")
+        edges[idx - 1] = E_new / jnp.vdot(E_cur, E_new) - E_cur
 
     return (AsymEnv(*corners, *edges), tuple(R_u), tuple(R_S), tuple(R_v))
 
