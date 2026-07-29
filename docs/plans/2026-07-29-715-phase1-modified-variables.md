@@ -35,6 +35,14 @@
 > non-gauge 1.6e-4, a factor of 110. The non-gauge part being ~100× smaller also
 > confirms `U = U* + U_perp u` is correctly carrying every non-gauge variation.
 >
+> One alternative was checked and refuted: because `Vd[k]` takes its Eq. 73 root from
+> direction `k+1`, the bond index `U*_k` pairs with need not be the one `Vh*_k` pairs
+> with, so the two cotangents might have been separately large but jointly cancelling
+> (their magnitudes are suspiciously similar — 1.76e-2 vs 1.48e-2 at k=2/k=3). Scanning
+> all 12 combinations of index offset, sign and adjoint gives a best of 1.36e-2 against
+> 1.76e-2 for `gU` alone — no cancellation. The generators really are independent and
+> the gauge violation is real.
+>
 > Next step: a direct covariance test of `F` under Eqs. 86–87 — apply a bond gauge to
 > `(y, c)` jointly and find which term fails to transform. Note the fourth roots in
 > Eq. 73 are only covariant for a *unitary* `Q` (`s†s → Q^L s† Q^{R†} Q^R s Q^{L†}`

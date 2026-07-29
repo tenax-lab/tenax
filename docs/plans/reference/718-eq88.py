@@ -158,3 +158,33 @@ for k in range(4):
         f"   non-gauge {float(jnp.linalg.norm(n_V)):.4e}"
         f"   total {float(jnp.linalg.norm(Vb)):.4e}"
     )
+
+# ---------------------------------------------------------------------------
+# The gauge acts on ALL of c at once, so projecting U* and Vh* separately is
+# only valid if their generators are independent.  They may not be: Vd[k] takes
+# its Eq. 73 root from direction k+1, so the bond index that U*_k pairs with
+# need not be the one Vh*_k pairs with.  If the generators are linked, the two
+# cotangents must be summed before the gauge condition is read off, and the sum
+# can be far smaller than either term.
+# ---------------------------------------------------------------------------
+print()
+print("=== paired gauge condition: |gU[k] (+/-) gV[j]^H| over offsets ===")
+gU, gV = {}, {}
+for k in range(4):
+    Us, Vhs = root_cov.U_star[k], root_cov.Vh_star[k]
+    gU[k] = Us.conj().T @ U_bar[k]
+    gV[k] = Vh_bar[k] @ Vhs.conj().T
+
+for off in (0, 1, 3):
+    for sign in (+1, -1):
+        for adj in (False, True):
+            worst = 0.0
+            for k in range(4):
+                b = gV[(k + off) % 4]
+                b = b.conj().T if adj else b
+                worst = max(worst, float(jnp.linalg.norm(gU[k] + sign * b)))
+            base = max(float(jnp.linalg.norm(gU[k])) for k in range(4))
+            print(
+                f"  off={off} sign={sign:+d} adj={adj!s:5s}: worst = {worst:.4e}"
+                f"   (vs |gU| alone {base:.4e})"
+            )
