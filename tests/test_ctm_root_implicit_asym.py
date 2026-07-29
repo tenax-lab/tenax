@@ -333,6 +333,45 @@ def test_quadrant_wiring_matches_the_library_leg_labels():
     assert not jnp.allclose(miswired, upper_left, atol=1e-8)
 
 
+def test_the_two_half_plane_conventions_are_the_same_truncation():
+    """The forward sweep's left half and §V.3's upper half agree.
+
+    This identity is the whole licence for
+    :func:`asym_root_to_covariant_convention` being a pure relabelling: the
+    lower-left quadrant at one rotation *is* the upper-left quadrant at the
+    previous one, so the two half-infinite environments are transposes of each
+    other and their decompositions differ only by exchanging the isometries.
+    If it ever breaks, the covariant residual is being handed the
+    decomposition of a different matrix, which is exactly the failure that
+    showed up as a residual of 84 rather than 1e-12.
+    """
+    _A, a, root = _converged_root()
+    chi = root.env.C1.shape[0]
+    n = chi * a.shape[0]
+
+    upper, lower = [], []
+    env_k, a_k = root.env, a
+    for _k in range(4):
+        upper.append(M._upper_left_quadrant(env_k, a_k).reshape(n, n))
+        lower.append(M._lower_left_quadrant(env_k, a_k).reshape(n, n))
+        env_k, a_k = M.rotate_env(env_k), M.rotate_a(a_k)
+
+    for k in range(4):
+        km = (k - 1) % 4
+        scale = float(jnp.abs(upper[km]).max())
+        assert float(jnp.abs(lower[k] - upper[km]).max()) < 1e-12 * scale, k
+
+        # ... and therefore M_left(k) == M_up(k-1).T
+        m_left = upper[k] @ lower[k]
+        m_up = upper[km].T @ upper[k].T
+        m_scale = float(jnp.abs(m_left).max())
+        assert float(jnp.abs(m_left - m_up.T).max()) < 1e-10 * m_scale, k
+
+        # The identity is specific to the k-1 offset: the same-rotation
+        # pairing is shape-legal and must not hold, or the test is vacuous.
+        assert float(jnp.abs(lower[k] - upper[k]).max()) > 1e-3 * scale, k
+
+
 # ------------------------------------------------------------------ #
 # The y <-> x map (paper Eq. 82)                                      #
 # ------------------------------------------------------------------ #
@@ -412,23 +451,17 @@ def test_singular_value_adjoint_is_not_negligible():
     assert biggest > 0.1 * corner_scale, (biggest, corner_scale)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "§V.3 covariance port is incomplete (#718). The covariant characteristic "
-        "equations do not vanish at the root yet: 1.16e0 total at D=2 chi=4, where "
-        "the non-covariant form sits at 2.5e-16. Down from 3.4e1 after pinning the "
-        "two s_k placements against the reference implementation's tensor shapes. "
-        "Corners/edges are now 1.6e-2..7.3e-2 and R_v dominates at up to 8.2e-1. "
-        "Remaining suspect: Eqs. 78-80 build their environment via contract_EPL / "
-        "contract_EiCiEPL / _contract_PR_M, not as a bare half-infinite environment "
-        "between isometries. Next step is bisecting against the Julia dump — see "
-        "the warning on asym_characteristic_residual_covariant."
-    ),
-    strict=True,
-)
 def test_covariant_characteristic_equations_vanish_at_the_root():
+    """The §V.3 characteristic equations must have the same root as the sweep.
+
+    This is the gate the whole covariance port exists to pass: ``y*`` extracted
+    from a converged CTMRG environment has to be a root of ``F`` in the
+    *modified* variables too, or Eq. 88 does not license freezing ``U*``/``V*``
+    and the gradient drops a real term (#718).
+    """
     A, a, root = _converged_root()
     chi = root.env.C1.shape[0]
+    root = M.asym_root_to_covariant_convention(root)
     S = _root_S(root)
     tilde = M.remove_inverse_roots(root.env, S)
 

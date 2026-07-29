@@ -623,6 +623,52 @@ def asym_characteristic_residual(y, a: jax.Array, consts: AsymRoot, chi: int):
     return (AsymEnv(*corners, *edges), tuple(R_u), tuple(R_S), tuple(R_v))
 
 
+def asym_root_to_covariant_convention(root: AsymRoot) -> AsymRoot:
+    """Relabel a forward-convention root into the one paper §V.3 uses.
+
+    The forward sweep truncates with the *left* half of the plane, gluing the
+    upper-left quadrant to the lower-left one at the same rotation.  §V.3
+    truncates with the *upper* half, gluing enlarged corner ``k`` to enlarged
+    corner ``k+1``.  Those are the same truncation, not two different ones:
+
+        _lower_left_quadrant(env_k, a_k) == _upper_left_quadrant(env_{k-1}, a_{k-1})
+
+    holds exactly (1e-16), and therefore
+
+        M_left(k) == M_up(k-1).T .
+
+    Transposing a decomposition exchanges its isometries — ``(U S Vh).T =
+    Vh.T S.T U.T``, and both factors stay isometric, since ``Vh Vh† = 1``
+    gives ``(Vh.T)† Vh.T = conj(Vh Vh†) = 1`` — so the §V.3 data at direction
+    ``j`` is the forward data at rotation ``j+1`` with ``U`` and ``Vh``
+    swapped and every block transposed.  Plain transpose, not adjoint: no
+    conjugation enters.
+
+    The environment itself is untouched; only which cut each ``S`` belongs to
+    changes.  Feed the result to :func:`remove_inverse_roots` and
+    :func:`asym_characteristic_residual_covariant`, which are §V.3-indexed;
+    :func:`asym_characteristic_residual` wants the un-relabelled root.
+    """
+
+    def shift(xs: tuple) -> tuple:
+        return tuple(xs[(j + 1) % 4] for j in range(4))
+
+    def shiftT(xs: tuple) -> tuple:
+        return tuple(x.T for x in shift(xs))
+
+    return AsymRoot(
+        env=root.env,
+        u=shiftT(root.v),
+        s=shiftT(root.s),
+        v=shiftT(root.u),
+        U_star=shiftT(root.Vh_star),
+        U_perp=shiftT(root.Vh_perp),
+        Vh_star=shiftT(root.U_star),
+        Vh_perp=shiftT(root.U_perp),
+        s_star_inv=shiftT(root.s_star_inv),
+    )
+
+
 def _covariant_pieces(consts: AsymRoot, S_all: tuple, u_all: tuple, v_all: tuple):
     """Per-direction covariant building blocks (paper Eqs. 71-75).
 
@@ -693,109 +739,98 @@ def _modified_env(env_tilde: AsymEnv, s_all: tuple) -> AsymEnv:
 def asym_characteristic_residual_covariant(y, a: jax.Array, consts: AsymRoot, chi: int):
     """``F(y, p)`` in the covariant parametrisation of paper §V.3.
 
-    .. warning::
-
-       **Incomplete — this does not vanish at the root yet**, so it is not
-       wired into any gradient path.  At ``D=2``, ``chi=4`` on a state where
-       :func:`asym_characteristic_residual` sits at 2.5e-16, this returns
-       ``1.16e0``, distributed as
-
-       * corners/edges: 1.6e-2 … 7.3e-2
-       * ``R_S``: 1.1e-2 … 2.5e-2
-       * ``R_u``: 1.5e-1 … 3.5e-1
-       * ``R_v``: 1.6e-1 … 8.2e-1   <- now the dominant error
-
-       Down from 3.4e1 once the two ``s_k`` placements were pinned against
-       the reference implementation's tensor shapes (see the comments below).
-       The corner/edge recursion is close but not exact, and ``R_u``/``R_v``
-       are still wrong at the 10% level.
-
-       The remaining discrepancy is almost certainly in how Eqs. 78-80 build
-       their environment: the reference forms them from ``PR_k · PLpart_k``
-       and ``PR_k · EC_{k+1} · VRd_k`` via ``contract_EPL`` /
-       ``contract_EiCiEPL`` / ``_contract_PR_M``, which are *not* simply the
-       half-infinite environment sandwiched between isometries.
-
-       **Next step is a bisection, not more iteration.** A working Julia
-       oracle exists: see ``reference_implicit_diff_peps_jl`` in the notes for
-       the install, and ``dump.jl`` writes ``dump.txt`` (fixed point: C, T,
-       C̃, Ẽ, S, U, V) plus ``dump2.txt`` (intermediates: is, rootL, rootR,
-       iCi, EC, Ud, Vd, PR, PL, UL, VR) with the reference's own ``|F|`` at
-       its root confirmed at 1e-12.  Map their ``(chi, D, D)`` cut index onto
-       the fused ``n`` here and compare intermediates in order to find the
-       first one that diverges.  Do *not* keep adjusting placements against
-       the total residual: that is what produced the refutation table in
-       ``docs/plans/2026-07-29-715-phase1-modified-variables.md``.
-
     ``y = (env_tilde, u, S, v)`` with *modified* corners and edges, so that
     holding ``U*`` and ``V*`` constant is licensed by Eq. 88.  Normalisation
     follows the reference implementation's ``X'/lambda - X`` rather than
     ``X' - lambda X``; the two differ by a row scaling of ``F``, which leaves
-    the implicit gradient invariant but not the Jacobian conditioning.
+    the implicit gradient invariant but not the Jacobian conditioning.  It
+    does rely on every tensor in ``y`` having unit Frobenius norm, which
+    :func:`asym_root_parametrize` arranges.
+
+    ``lambda`` is deliberately *not* real-projected.  ``dot(X, X')`` is
+    genuinely complex for a complex state — at ``D=2``, ``chi=4`` the corner
+    ``lambda`` comes out around ``-2.1e2 - 3.6e2j`` — and taking the real
+    part alone moves ``|F1|`` from 2e-13 to 1.6e0.
+
+    The assembly mirrors the reference implementation
+    (``contract_asymmetric_characteristic_equation``, ``Val{:implicit}``)
+    rather than the forward sweep in :func:`asym_characteristic_residual`,
+    and the two use *different halves of the plane*:
+
+    * The forward sweep truncates with the left half, gluing the upper-left
+      quadrant to the lower-left one at the same rotation.
+    * §V.3 truncates with the upper half, gluing enlarged corner ``k`` to
+      enlarged corner ``k+1``.  So there is only one quadrant primitive here,
+      and ``_lower_left_quadrant`` is not used at all.
+
+    Every step below is pinned numerically against the reference's own dumped
+    fixed point (``docs/plans/reference/718-dump.jl``): the enlarged corners
+    to 8e-16, the projector pair to 5e-16, and all five residual blocks to
+    2e-12 — the same order as the reference's ``|F|`` at its own root.
     """
     env_tilde, u_all, S_all, v_all = y
     s_all, Ud, Vd, ULd, VRd = _covariant_pieces(consts, S_all, u_all, v_all)
     env_mod = _modified_env(env_tilde, s_all)
 
-    n = chi * a.shape[0]
+    d2 = a.shape[0]
+    n = chi * d2
 
-    # Pass 1: enlarged corners and projectors, all from the same y.
-    EC, P_top, P_bot = [], [], []
+    # Pass 1: one enlarged corner per direction, the ``s`` that sits on the
+    # leg being cut, and the column the renormalised edge is built from.
+    EC, K_is, cols = [], [], []
     env_k, a_k = env_mod, a
     for k in range(4):
-        # NOTE: the reference orders an enlarged corner (cut | outer) whereas
-        # these helpers return (outer | cut) — established to 7.7e-16 against
-        # its dumped ``EC`` (see ``docs/plans/reference/718-ecmap.py``).  So
-        # ``Ud`` should contract the *cut* leg and ``M`` should contract
-        # outer-against-cut, neither of which is what happens below.
-        # Transposing ``top`` alone makes it *worse* (1.16 -> 1.26e1): every
-        # consumer — ``bot``, the projector pair, and the corner/edge assembly
-        # — assumes the (outer | cut) order, so the convention has to be
-        # changed for all of them together, not here.
-        top = _upper_left_quadrant(env_k, a_k).reshape(n, n)
-        bot = _lower_left_quadrant(env_k, a_k).reshape(n, n)
-        EC.append((top, bot))
-        # ``s_k`` goes on the surviving *cut* leg's chi sub-leg, not on the
-        # new chi index.  Pinned by the reference's shapes: ``PR`` comes out
-        # the same shape as ``Ud`` (chi, n), so ``absorb_right``'s
-        # ``domainind(P)[1]`` is the chi of the remaining (chi, D, D) triple.
-        K_is = jnp.kron(s_all[k], jnp.eye(a.shape[0], dtype=s_all[k].dtype))
-        P_bot.append((Ud[k] @ top) @ K_is)
-        P_top.append(K_is @ (bot @ Vd[k]))
+        # The reference orders an enlarged corner (cut | outer) while the
+        # helper returns (outer | cut), hence the transpose.  Verified to
+        # 7.7e-16 against its dumped ``EC`` by
+        # ``docs/plans/reference/718-ecmap.py``.
+        EC.append(_upper_left_quadrant(env_k, a_k).reshape(n, n).T)
+        # ``s_k`` lands on the cut leg's chi sub-leg, not on the outer chi:
+        # that is what the reference's ``absorb_right`` reaches
+        # (``domainind(P)[1]``, the chi of the split ``(chi, D, D)`` triple).
+        # ``chi`` is the slow index of the fused leg, so ``kron(s, I)``.
+        K_is.append(jnp.kron(s_all[k], jnp.eye(d2, dtype=s_all[k].dtype)))
+        # The same north edge that enters ``EC[k]``, with the sandwich
+        # attached: (chi_l, a_l | a_d | chi_r, a_r).
+        cols.append(jnp.einsum("xfy,fjlr->xljyr", env_k.T1, a_k).reshape(n, d2, n))
         env_k, a_k = rotate_env(env_k), rotate_a(a_k)
 
-    # Pass 2: residuals.
+    # Pass 2: the half-infinite environment at direction ``k`` glues ``EC[k]``
+    # to ``EC[k+1]`` across the cut, carrying exactly one ``s_k``.
+    M_all, P_R, P_L = [], [], []
+    for k in range(4):
+        kp = (k + 1) % 4
+        M_all.append(EC[k] @ K_is[k] @ EC[kp])
+        P_R.append(Ud[k] @ EC[k] @ K_is[k])
+        P_L.append(K_is[k] @ EC[kp] @ Vd[k])
+
+    # Pass 3: residuals.  Both projectors of a corner belong to the *same*
+    # enlarged corner, one per group, so the corner takes ``P_R[k-1]`` — the
+    # partner of the cut that ``EC[k]``'s first group sits on.
     corners: list = [None] * 4
     edges: list = [None] * 4
     R_u, R_S, R_v = [None] * 4, [None] * 4, [None] * 4
-    env_k, a_k = env_mod, a
     for k in range(4):
-        top, bot = EC[k]
-        # The half-infinite environment of Eqs. 78-80 carries one ``s_k`` at
-        # the cut: the reference forms these from ``PR_k · PLpart_k``, and
-        # ``PR_k`` already has ``is_k`` absorbed on the leg that contracts
-        # ``PLpart_k``.  The bare ``top @ bot`` is missing it.
-        K_is = jnp.kron(s_all[k], jnp.eye(a.shape[0], dtype=s_all[k].dtype))
-        M = top @ K_is @ bot
-        s_inv = consts.s_star_inv[k]
+        km = (k - 1) % 4
+        M_k, s_inv = M_all[k], consts.s_star_inv[k]
 
-        core = Ud[k] @ M @ Vd[k]
-        lam_S = jnp.vdot(S_all[k], core).real
+        core = Ud[k] @ M_k @ Vd[k]
+        lam_S = jnp.vdot(S_all[k], core)
         R_S[k] = core / lam_S - S_all[k]
-        R_u[k] = (ULd[k] @ M @ Vd[k]) @ s_inv / lam_S - u_all[k]
-        R_v[k] = s_inv @ (Ud[k] @ M @ VRd[k]) / lam_S - v_all[k]
+        R_u[k] = (ULd[k] @ M_k @ Vd[k]) @ s_inv / lam_S - u_all[k]
+        R_v[k] = s_inv @ (Ud[k] @ M_k @ VRd[k]) / lam_S - v_all[k]
 
-        C_new = _renormalised_corner(env_k, a_k, P_top[k], P_bot[(k + 1) % 4], chi)
-        C_cur = getattr(env_tilde, f"C{_unrotate_index(1, k)}")
-        lam_C = jnp.vdot(C_cur, C_new).real
-        corners[_unrotate_index(1, k) - 1] = C_new / lam_C - C_cur
+        # Direction ``k`` renormalises the corner and the edge that its own
+        # enlarged corner is built from, i.e. ``C1``/``T1`` of the rotated
+        # frame, which is index ``k+1`` unrotated.
+        idx = _unrotate_index(1, k)
+        C_new = P_R[km] @ EC[k] @ P_L[k]
+        C_cur = getattr(env_tilde, f"C{idx}")
+        corners[idx - 1] = C_new / jnp.vdot(C_cur, C_new) - C_cur
 
-        E_new = _renormalised_edge(env_k, a_k, P_top[k], P_bot[k], chi)
-        E_cur = getattr(env_tilde, f"T{_unrotate_index(4, k)}")
-        lam_E = jnp.vdot(E_cur, E_new).real
-        edges[_unrotate_index(4, k) - 1] = E_new / lam_E - E_cur
-
-        env_k, a_k = rotate_env(env_k), rotate_a(a_k)
+        E_new = jnp.einsum("ax,xjy,yb->ajb", P_R[k], cols[k], P_L[k])
+        E_cur = getattr(env_tilde, f"T{idx}")
+        edges[idx - 1] = E_new / jnp.vdot(E_cur, E_new) - E_cur
 
     return (AsymEnv(*corners, *edges), tuple(R_u), tuple(R_S), tuple(R_v))
 

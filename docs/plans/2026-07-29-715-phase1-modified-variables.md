@@ -1,5 +1,33 @@
 # #715 Phase 1 completion
 
+> **STAGE 2 DONE — 2026-07-30.** The §V.3 characteristic equations now vanish at
+> the root: `asym_characteristic_residual_covariant` is at ~1e-12 where it was at
+> 1.16e0, gated by
+> `test_covariant_characteristic_equations_vanish_at_the_root` (was a strict
+> xfail). Three things were wrong, and none of them was the `s`/root placement
+> that the table below kept re-litigating:
+>
+> 1. **The half of the plane.** The forward sweep truncates with the *left* half
+>    (upper-left quadrant glued to lower-left at one rotation); §V.3 truncates
+>    with the *upper* half (`EC[k]` glued to `EC[k+1]`). Only one quadrant
+>    primitive is involved, and `_lower_left_quadrant` is not used at all.
+> 2. **λ is complex.** `dot(X, X')` is genuinely complex for a complex state
+>    (the corner λ is ≈ `-2.1e2 - 3.6e2j` at D=2, χ=4). Real-projecting it alone
+>    moves `|F1|` from 2e-13 to 1.6e0 — this is what made an otherwise correct
+>    corner formula look like a wiring bug.
+> 3. **The root has to be relabelled.** The two halves are the *same*
+>    truncation — `_lower_left_quadrant(env_k) == _upper_left_quadrant(env_{k-1})`
+>    exactly, so `M_left(k) == M_up(k-1).T` — so the §V.3 data at direction `j` is
+>    the forward data at rotation `j+1` with `U`/`Vh` swapped and transposed. Feeding
+>    the un-relabelled root to the correct equations gives 84, not 1e-12.
+>    See `asym_root_to_covariant_convention`.
+>
+> What settled it was not more reasoning but the Julia oracle:
+> `docs/plans/reference/718-dump.jl` dumps the reference's own fixed point and
+> `718-refF.py` re-derives all five blocks on it at ~1e-12, which pins every
+> convention independently of the port. Remaining for #718: Stage 3, building
+> `ў = (C̃̆, Ẽ̆, 0, S̆, 0)` by backpropagating through Eq. 82.
+
 > **SUPERSEDED IN PART — 2026-07-30.** The exoneration/refutation table below
 > records each covariance arrangement tried *in isolation*, and concluded from each
 > failure that the arrangement was refuted. After reading §V.3 of arXiv:2607.15030v1
