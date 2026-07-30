@@ -1,6 +1,60 @@
 # #715 Phase 1 completion
 
-> **CAUSE FOUND — 2026-07-30 (supersedes the gauge-covariance claim below).**
+> **#718 CLOSED — 2026-07-30. It was the environment convention at the energy
+> boundary, not the characteristic equations.**
+>
+> Gradient parity against explicit backprop through the same sweep went
+> **3.06e-2 → 4.1e-8**. The gate on `asym_root_implicit_energy_and_grad` is lifted.
+>
+> **The bug.** This module stores every tensor in the frame of its own direction, which
+> is what makes `rotate_env` a pure relabel: corner `k` is always
+> `(leg towards k-1, leg towards k)`, edge `k` always `(prev, phys, next)`, so the ring
+> closes uniformly. `CTMTensorEnv` is **not** uniform — per the connectivity documented
+> on `_rdm2x1_tensor`, it closes as `C3[1]-T3[2]`, `T3[0]-C4[1]`, `C4[0]-T4[2]`, i.e.
+> the same ring with `C4` transposed and `T3`, `T4` reversed. `_to_ctm_env` handed the
+> module's arrays straight to the production RDM with the template's indices, so the
+> energy contracted a mis-glued network. Fix: `swap_env_convention`, an involution,
+> applied at both ends of that boundary (`_to_ctm_env`, `_init_env`).
+>
+> Why it hid for so long: the mismatch is **invisible on a symmetric environment**.
+> `initialize_ctm_tensor_env` returns a symmetric `C4` and palindromic `T3`/`T4`, so the
+> conversion is a numerical no-op at init, and the production single-site CTM converges
+> to symmetric corners even for a random asymmetric `A`. Only this module's genuinely
+> asymmetric fixed point (‖C4 − C4ᵀ‖/‖C4‖ = 0.16) exercises it. Cost: energy wrong by
+> 2.8e-3 (1.5%), gradient by 3.06e-2.
+>
+> **How the ±2.121e-03 antisymmetry pointed at it.** A per-bond gauge `W_k` cannot change
+> anything a CTM environment computes. It didn't, for bonds 0 and 1 — but bonds 2 and 3
+> moved the energy by ∓2e-4, and those are *exactly the two bonds that touch `C4`*. A
+> single global `W` is blind to a `C4` transpose (both conventions give `W†C4W`), which
+> is why the errors were equal and opposite and why the global test passed on a sum of
+> two errors. Both readings offered at the time were wrong: the per-direction gauge **is**
+> licensed and the `k-1`/`k+1` cut-leg assignment **is** right.
+>
+> **What found it, after three wrong diagnoses:** two finite-transform probes that need
+> no reference value. (1) Is `F` still a root after a gauge on **one** bond? — yes, 1e-14,
+> so the equations were never the problem. (2) Is `E` invariant under the same? — no, on
+> bonds 2 and 3 only. That split the search space in one shot. Then a brute-force scan
+> over (edge, corner-leg, corner-leg) triples recovered the env's true bond grouping with
+> no convention reasoning at all, and an independent 2×1 contraction written in the
+> module's own convention pinned the energy to 0.185690719002 — which `asym_energy`
+> reproduces to 5.6e-16 only with `C4ᵀ + T3,T4 reversed`.
+>
+> **Reference-quality caveat for anyone re-measuring parity.** Explicit backprop through
+> `n` sweeps is a *truncated* reference; at seed 7 it reads 2.7e-3 / 3.4e-4 / 5.4e-6 /
+> 3.1e-8 at n = 8 / 12 / 20 / 30, converging onto the implicit gradient. At `D=3` it is
+> **NaN** — the SVD backward on the discarded spectrum — while the implicit gradient is
+> finite, which is the #566/#687 motivation for this whole path showing up as a plain
+> numerical fact. Validate `D=3` with directional FD of the sweep map, never with FD of
+> the root.
+>
+> Everything below this banner is the record of the hunt, kept for the reasoning. The
+> "what is actually left" paragraph immediately following is **wrong**: there was no
+> non-gauge motion of `c` to find.
+
+> **CAUSE FOUND — 2026-07-30 (superseded by the banner above: the machinery was indeed
+> exact, but `G != E_true` because the energy was mis-glued, not because a `dE/dc·dc/dp`
+> term was missing).**
 > The implicit machinery is **exact**; the function it differentiates is the wrong one.
 > Along a random direction `dA`:
 >

@@ -1,9 +1,9 @@
 """Asymmetric CTMRG root implicit AD (#715 Phase 1, arXiv:2607.15030 §V).
 
-Status: the forward, the characteristic equations and the root are all
-verified here.  The *gradient* is not — see
-``test_gradient_parity_needs_the_modified_variables`` for the reason and
-what it costs to fix.
+Status: the forward, the characteristic equations, the root and the gradient
+are all verified here.  Two of these tests are the ones that closed #718 —
+``test_the_energy_is_invariant_under_the_bond_gauge`` (the bug) and
+``test_gradient_parity_needs_the_modified_variables`` (what it cost).
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ jax.config.update("jax_enable_x64", True)
 
 import tenax.algorithms._ctm_root_implicit_asym as M
 from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
+from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
@@ -187,44 +188,35 @@ def test_no_svd_in_the_differentiated_equations():
 
 
 # ------------------------------------------------------------------ #
-# The gradient — known-bad, documented                                #
+# The gradient                                                        #
 # ------------------------------------------------------------------ #
 
 
-@pytest.mark.xfail(
-    reason=(
-        "#715 Phase 1 is not finished: the gradient is 3.06e-2 off. The cause is "
-        "now pinned down, and it is NOT the machinery, which is exact. Along one "
-        "direction: FD of G(p) = E at the frozen-c root gives +0.3519056653 "
-        "(stable over h=1e-4..1e-6) against the implicit +0.3519056655 — a "
-        "9-digit match — while the truth is +0.3607559898 (explicit backprop, "
-        "itself matching FD of the same map to 9 digits). So the implicit path "
-        "differentiates its own function perfectly; that function is just not "
-        "the fixed-point energy. The 8.8503e-3 gap is exactly the dropped "
-        "dE/dc . dc/dp for the frozen c = (U*, U_perp, Vh*, Vh_perp, s*inv). "
-        "Two earlier diagnoses are refuted: S-bar = 0 (fixed, no help) and gauge "
-        "covariance (licensed to 1e-16, see "
-        "test_freezing_the_isometries_is_gauge_licensed). What is left is a "
-        "NON-gauge motion of c; the largest non-gauge cotangents sit on the "
-        "null-space bases, U_perp 6.4e-4 and Vh_perp 1.2e-3. Note that FD of the "
-        "root or of the re-converged energy cannot be used to chase this — "
-        "asym_root_parametrize is gauge-discontinuous in p, so |ydot_fd| diverges "
-        "as h shrinks. Use the frozen-c Newton route, docs/plans/reference/"
-        "718-frozenroot.py."
-    ),
-    strict=True,
-)
 def test_gradient_parity_needs_the_modified_variables():
+    """Eq. 18 against explicit backprop through the same sweep: 4e-8 relative.
+
+    This was 3.06e-2 for the whole of #718, and the hunt went through the
+    characteristic equations three times.  Worth recording what it was *not*,
+    since each of these looked like the answer:
+
+    * not ``S̆ = 0`` — giving ``S`` its Eq. 82 adjoint was necessary but moved
+      the error the wrong way (2.5e-2 -> 3.06e-2; the 2.5e-2 was accidental);
+    * not the missing covariance package — added, no change;
+    * not Eq. 88's null-space restriction — the gauge is licensed to 1e-16,
+      globally and per direction (the two tests below).
+
+    The machinery was exact all along: FD of ``G(p) = E`` at the frozen-``c``
+    root matched the implicit gradient to nine digits while differing from the
+    truth by 8.8503e-3.  ``G`` was not the fixed-point energy because
+    :func:`M.swap_env_convention` was missing, so ``asym_energy`` contracted a
+    mis-glued network — see
+    ``test_the_energy_is_invariant_under_the_bond_gauge``.
+    """
     A = _site_tensor()
     chi = 4
     gate = _gate(1.0)
     _e, grad = M.asym_root_implicit_energy_and_grad(
-        A,
-        gate,
-        chi=chi,
-        max_iter=300,
-        conv_tol=1e-13,
-        allow_known_invalid_gradient=True,
+        A, gate, chi=chi, max_iter=300, conv_tol=1e-13
     )
 
     env0, _a, _m = M.converge(A, chi, max_iter=300, conv_tol=1e-13)
@@ -241,6 +233,57 @@ def test_gradient_parity_needs_the_modified_variables():
     g_ref = jax.grad(energy_explicit)(A.todense())
     rel = float(jnp.linalg.norm(grad - g_ref) / jnp.linalg.norm(g_ref))
     assert rel < 1e-5, rel
+
+
+def test_the_gradient_survives_where_explicit_backprop_nans():
+    """``D=3``: explicit backprop is all-NaN, the implicit gradient is exact.
+
+    This is #566/#687 as a plain numerical fact rather than a compile-time
+    argument.  Explicit AD differentiates the truncated SVD that builds the
+    projectors, and at ``D=3``, ``chi=4`` the discarded spectrum is degenerate
+    enough that the SVD backward divides by ``s_i^2 - s_j^2`` and returns NaN
+    for *every* entry.  ``F`` contains no decomposition
+    (``test_no_svd_in_the_differentiated_equations``), so the implicit route is
+    unaffected.
+
+    The reference here has to be a directional finite difference of the sweep
+    *map* from a fixed start, which is smooth in ``p``.  Do not finite-difference
+    the root: ``asym_root_parametrize`` is gauge-discontinuous, so ``|ẏ_fd|``
+    diverges as ``h`` shrinks even though every point is a valid root.
+    """
+    A = _site_tensor(D=3)
+    chi = 4
+    gate = _gate(1.0)
+    A_data = A.todense()
+    template = initialize_ctm_tensor_env(A, chi)
+
+    _e, grad = M.asym_root_implicit_energy_and_grad(
+        A, gate, chi=chi, max_iter=300, conv_tol=1e-13
+    )
+    assert bool(jnp.all(jnp.isfinite(grad)))
+
+    env0, _a, _m = M.converge(A, chi, max_iter=300, conv_tol=1e-13)
+
+    def energy_explicit(pdata):
+        A_live = DenseTensor(pdata, A.indices)
+        a_live = _a_array(A_live)
+        env, projs = env0, None
+        for _ in range(20):
+            env, projs = M.sweep(env, a_live, chi, projs)
+        return M.asym_energy(A_live, env, template, gate)
+
+    g_ref = jax.grad(energy_explicit)(A_data)
+    assert bool(jnp.all(~jnp.isfinite(g_ref))), "explicit backprop is expected to NaN"
+
+    rng = np.random.RandomState(1)
+    V = jnp.asarray(rng.standard_normal(A_data.shape))
+    V = V / jnp.linalg.norm(V)
+    analytic = float(jnp.real(jnp.sum(grad * V)))
+    h = 1e-5
+    fd = float(
+        (energy_explicit(A_data + h * V) - energy_explicit(A_data - h * V)) / (2 * h)
+    )
+    assert abs(fd - analytic) < 1e-6 * max(abs(analytic), 1e-3), (fd, analytic)
 
 
 def test_freezing_the_isometries_is_gauge_licensed():
@@ -359,28 +402,22 @@ def test_freezing_the_isometries_is_gauge_licensed():
     assert worst < 1e-10 * scale, (worst, scale)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "#718: only the GLOBAL diagonal subgroup of the bond gauge is licensed, "
-        "not the per-direction gauges. Using one generator per direction, "
-        "directions 0 and 1 vanish (2e-16) but 2 and 3 come out at +2.121e-03 "
-        "and -2.121e-03 — equal and opposite, so they cancel exactly in the sum "
-        "and the global test passes. Caught by Codex review on PR #720. Two "
-        "readings, both open: either the per-direction gauge genuinely is not "
-        "licensed (2.1e-3 times a dc/dp of order 10 is the right size to feed "
-        "the 8.85e-3 gradient gap), or the k-1/k+1 cut-leg assignment assumed "
-        "here is wrong for directions 2/3, in which case 'X on bond 2 alone' is "
-        "not a gauge direction and only certain combinations are. The exact "
-        "antisymmetry between 2 and 3 is what makes the second reading live."
-    ),
-    strict=True,
-)
 def test_each_directional_gauge_is_independently_licensed():
     """Eq. 88 must hold for one gauge generator per bond, not just their sum.
 
     The bond gauge has an independent generator per direction; a test that uses
     the same ``X`` everywhere only probes the global diagonal subgroup, and
-    contributions from different directions can cancel inside it.
+    contributions from different directions can cancel inside it — which is
+    exactly what happened.  Directions 0 and 1 vanished at 2e-16 while 2 and 3
+    came out at +2.121e-03 and -2.121e-03, equal and opposite, so the global
+    test passed on a sum of two errors (caught by Codex review on PR #720).
+
+    Both readings offered then were wrong: the per-direction gauge *is*
+    licensed, and the ``k-1``/``k+1`` cut-leg assignment *is* right.  The
+    antisymmetry came from the energy, not from ``F`` — the two broken
+    directions are the two bonds that touch ``C4``, the one tensor whose axis
+    order differs between this module's convention and the CTM env's.  See
+    :func:`M.swap_env_convention`.
     """
     A, a, root = _converged_root()
     chi = root.env.C1.shape[0]
@@ -466,11 +503,103 @@ def test_each_directional_gauge_is_independently_licensed():
     assert worst < 1e-10 * scale, (worst, scale)
 
 
-def test_gradient_entry_point_is_gated():
-    """The known-bad gradient cannot reach an optimiser by accident (#718)."""
+def test_gradient_entry_point_reports_clean_diagnostics():
+    """The entry point converges, roots, and solves — all three, on one call."""
     A = _site_tensor()
-    with pytest.raises(NotImplementedError, match="718"):
-        M.asym_root_implicit_energy_and_grad(A, _gate(1.0), chi=4)
+    _e, _g, info = M.asym_root_implicit_energy_and_grad(
+        A, _gate(1.0), chi=4, max_iter=300, conv_tol=1e-13, return_diagnostics=True
+    )
+    assert info["converged"], info
+    assert info["root_residual"] < 1e-10, info
+    assert info["covariant_residual"] < 1e-10, info
+    assert info["adjoint_residual"] < 1e-8, info
+
+
+def test_the_energy_is_invariant_under_the_bond_gauge():
+    """The energy must not move when a bond basis is rotated (#718's real bug).
+
+    A converged CTM environment has one chi-bond per direction, carried by four
+    legs: corner ``k``'s own leg, both legs of edge ``k``, and corner ``k+1``'s
+    other leg.  Inserting ``W W† = 1`` on bond ``k`` alone therefore cannot
+    change anything the environment computes.  It is a necessary condition on
+    the pairing of *every* env leg, it needs no reference value, and it is the
+    cheapest possible check that :func:`M.swap_env_convention` is applied.
+
+    Without the conversion the module's uniform convention is read as the CTM
+    env's non-uniform one, ``C4`` is glued in transposed, and the energy moves
+    on exactly the two bonds that touch ``C4`` — by 2e-4 here at ``t = 0.1``,
+    and antisymmetrically, so a single global ``W`` sees nothing at all.  That
+    made the energy wrong by 1.5% and the gradient by 3.06e-2.
+    """
+    A = _site_tensor()
+    chi = 4
+    gate = _gate(1.0)
+    template = initialize_ctm_tensor_env(A, chi)
+    env, _a, info = M.converge(A, chi, max_iter=300, conv_tol=1e-13)
+    assert info["converged"]
+
+    key = jax.random.PRNGKey(3)
+    G = jax.random.normal(key, (chi, chi))
+    X = 0.5 * (G - G.T)
+    W = jax.scipy.linalg.expm(0.1 * X / jnp.linalg.norm(X))
+    eye = jnp.eye(chi)
+
+    def gauged(bonds):
+        """Rotate the listed bonds, in this module's uniform convention."""
+        Ws = [W if j in bonds else eye for j in range(4)]
+        corners, edges = [], []
+        for k in range(4):
+            km = (k - 1) % 4
+            corners.append(Ws[km].conj().T @ getattr(env, f"C{k + 1}") @ Ws[k])
+            edges.append(
+                jnp.einsum(
+                    "ai,ixj,jb->axb",
+                    Ws[k].conj().T,
+                    getattr(env, f"T{k + 1}"),
+                    Ws[k],
+                )
+            )
+        return M.AsymEnv(*corners, *edges)
+
+    base = float(jnp.real(M.asym_energy(A, env, template, gate)))
+    for bonds in ([0], [1], [2], [3], [0, 1, 2, 3]):
+        moved = float(jnp.real(M.asym_energy(A, gauged(bonds), template, gate)))
+        assert abs(moved - base) < 1e-12, (bonds, moved - base)
+
+    # Negative control: drop the conversion and bonds 2 and 3 break, equally
+    # and oppositely, while the global rotation still looks fine.
+    def raw_energy(e):
+        return float(
+            jnp.real(
+                compute_energy_ctm_tensor(
+                    A,
+                    type(template)(
+                        **{
+                            n: DenseTensor(getattr(e, n), getattr(template, n).indices)
+                            for n in ("C1", "C2", "C3", "C4", "T1", "T2", "T3", "T4")
+                        }
+                    ),
+                    gate,
+                )
+            )
+        )
+
+    raw_base = raw_energy(env)
+    broken = [raw_energy(gauged([k])) - raw_base for k in range(4)]
+    assert abs(broken[0]) < 1e-12 and abs(broken[1]) < 1e-12, broken
+    assert abs(broken[2]) > 1e-5 and abs(broken[3]) > 1e-5, broken
+    assert abs(broken[2] + broken[3]) < 0.2 * abs(broken[2]), broken
+    assert abs(raw_energy(gauged([0, 1, 2, 3])) - raw_base) < 1e-12, "global cancels"
+
+
+def test_swapping_the_env_convention_is_an_involution():
+    A = _site_tensor()
+    env, _a, _m = M.converge(A, 4, max_iter=300, conv_tol=1e-13)
+    twice = M.swap_env_convention(M.swap_env_convention(env))
+    for name in ("C1", "C2", "C3", "C4", "T1", "T2", "T3", "T4"):
+        assert jnp.array_equal(getattr(twice, name), getattr(env, name)), name
+    once = M.swap_env_convention(env)
+    assert not jnp.allclose(once.C4, env.C4, atol=1e-8), "C4 is not symmetric here"
 
 
 def _contract_by_label(pieces, bonds, open_legs):

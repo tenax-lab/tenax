@@ -506,7 +506,10 @@ def _init_env(A: Tensor, chi: int) -> tuple[AsymEnv, jax.Array]:
         T3=jnp.asarray(env_t.T3.todense()),
         T4=jnp.asarray(env_t.T4.todense()),
     )
-    return env, a
+    # Numerically a no-op on this initialiser (symmetric C4, palindromic
+    # T3/T4), but this is the other side of the same convention boundary as
+    # ``_to_ctm_env``; see :func:`swap_env_convention`.
+    return swap_env_convention(env), a
 
 
 def converge(
@@ -905,7 +908,45 @@ def asym_root_parametrize(
 # ---------------------------------------------------------------------------
 
 
+def swap_env_convention(env: AsymEnv) -> AsymEnv:
+    """Convert between this module's rotation-uniform convention and the CTM one.
+
+    This module stores every tensor in the frame of its own direction, which is
+    what makes :func:`rotate_env` a pure relabel: corner ``k`` is always
+    ``(leg towards direction k-1, leg towards direction k)`` and edge ``k``
+    always ``(towards the previous corner, physical, towards the next)``.  So
+    the ring closes uniformly::
+
+        C1.1-T1.0  T1.2-C2.0  C2.1-T2.0  T2.2-C3.0
+        C3.1-T3.0  T3.2-C4.0  C4.1-T4.0  T4.2-C1.0
+
+    :class:`~tenax.algorithms._ctm_tensor_env.CTMTensorEnv` is *not* uniform —
+    per the connectivity documented on ``_rdm2x1_tensor``, it closes as::
+
+        C1.0-T4.0  C1.1-T1.0  T1.2-C2.0  C2.1-T2.0
+        T2.2-C3.0  C3.1-T3.2  T3.0-C4.1  C4.0-T4.2
+
+    which is the same ring with ``C4`` transposed and ``T3``, ``T4`` reversed.
+    Reinterpreting one as the other glues the network wrongly: at ``D=2``,
+    ``chi=4`` on the test state it moved the energy by 2.8e-3 (1.5%), and it
+    broke the per-bond gauge invariance of the energy on exactly the two bonds
+    that touch ``C4`` — the ±2.121e-3 antisymmetry of #718, which looked like an
+    unlicensed gauge in Eq. 88 but was this relabelling all along.
+
+    The map is an involution, so the same function converts either way.  It is
+    a no-op on :func:`initialize_ctm_tensor_env` output, whose ``C4`` is
+    symmetric and whose ``T3``/``T4`` are palindromic, which is why the mismatch
+    stayed invisible until the environment became genuinely asymmetric.
+    """
+    return env._replace(
+        C4=env.C4.T,
+        T3=jnp.transpose(env.T3, (2, 1, 0)),
+        T4=jnp.transpose(env.T4, (2, 1, 0)),
+    )
+
+
 def _to_ctm_env(env: AsymEnv, template):
+    env = swap_env_convention(env)
     return type(template)(
         **{
             name: DenseTensor(getattr(env, name), getattr(template, name).indices)
@@ -932,36 +973,23 @@ def asym_root_implicit_energy_and_grad(
     solve_maxiter: int = 400,
     solve_restart: int = 30,
     root_residual_warn: float = 1e-6,
-    allow_known_invalid_gradient: bool = False,
     return_diagnostics: bool = False,
 ):
     """Energy and ``dE/dA`` for a 1x1 unit cell via asymmetric root implicit AD.
 
-    .. warning::
+    Root implicit differentiation of paper §V: the environment is characterised
+    by ``F(y, p) = 0`` in the modified variables ``y = (C̃, Ẽ, u, S, v)`` of
+    Eqs. 76-80, and the gradient comes from Eq. 18 without back-propagating a
+    single SVD.  That is the point of the construction — see #566 and #687 for
+    the block-sparse SVD/eigh VJP compile wall and accuracy floor it avoids.
 
-       **The gradient this returns is known to be wrong by ~2.5%** and is
-       gated behind ``allow_known_invalid_gradient`` so it cannot reach an
-       optimiser by accident.  See #718: ``F`` freezes ``U*`` and ``Vh*``,
-       which drops a real ``∂_c F · dc/dp`` term — measured directly as
-       ``dE/dU* ≈ 1.5e-2`` against a missing ``7.1e-3``.
-
-       Everything else in this path is verified: the root sits at 2.5e-16,
-       the ``y -> x`` map reproduces the energy to twelve digits, the solve
-       agrees with a dense reference to eleven digits, and the system is well
-       conditioned.  None of that makes the gradient usable.
-
-       The *energy* is correct and may be used; call :func:`asym_energy` on a
-       converged environment if that is all you need.
+    Parity against explicit backprop through the same sweep is 4e-8 relative at
+    ``D=2``, ``chi=4``.  It was 3.06e-2 until 2026-07-30, and #718 spent a long
+    time hunting that in the characteristic equations; the cause turned out to
+    be neither the equations nor Eq. 88's null-space restriction but the
+    environment convention at the *energy* boundary — see
+    :func:`swap_env_convention`.
     """
-    if not allow_known_invalid_gradient:
-        raise NotImplementedError(
-            "Asymmetric root-implicit gradients are incorrect by ~2.5% "
-            "(tenax-lab/tenax#718: freezing U*, Vh* in F drops a real term). "
-            "The forward energy is correct and the root is exact, but this "
-            "gradient must not be used for optimisation. Pass "
-            "allow_known_invalid_gradient=True to obtain it anyway, for "
-            "debugging or for reproducing the #718 measurements."
-        )
     from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
 
     if isinstance(A, SymmetricTensor):
