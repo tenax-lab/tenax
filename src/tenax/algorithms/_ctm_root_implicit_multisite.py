@@ -276,3 +276,208 @@ def enlarged_corner(corners, edges, a_by_cell, co: Coord, nrows: int, ncols: int
     T_left = edges[left(co, nrows, ncols)]
     a = rotate_a_times(a_by_cell[(r, c)], k)
     return jnp.einsum("ce,efg,hic,fjik->gkhj", C, T_above, T_left, a)
+
+
+# ---------------------------------------------------------------------------
+# Forward: simultaneous CTMRG on the unit cell
+# ---------------------------------------------------------------------------
+#
+# Upper-half convention throughout (see the design note): the cut at ``co``
+# lies between ``EC[co]`` and ``EC[next_coordinate(co)]``.  Phase 1 cuts the
+# left half instead; the two are the same truncation up to a shift and a
+# transpose, which is why the 1x1 gate below compares *energies* and not
+# tensors.
+
+
+def coordinates(nrows: int, ncols: int) -> list[Coord]:
+    """Every ``(k, r, c)`` of the cell, directions slowest."""
+    return [(k, r, c) for k in range(4) for r in range(nrows) for c in range(ncols)]
+
+
+def _as_matrix(EC: jax.Array) -> jax.Array:
+    """Enlarged corner as a matrix: rows ``(chi_d, a_d)``, cols ``(chi_r, a_r)``.
+
+    This is the ``T`` of the design note.  ``T(X).T == X.reshape(n, n)`` is
+    what makes the upper-half cut the transpose of Phase 1's left-half one.
+    """
+    n = EC.shape[0] * EC.shape[1]
+    return jnp.transpose(EC, (2, 3, 0, 1)).reshape(n, n)
+
+
+def all_enlarged_corners(corners, edges, a_by_cell, nrows: int, ncols: int):
+    return {
+        co: enlarged_corner(corners, edges, a_by_cell, co, nrows, ncols)
+        for co in coordinates(nrows, ncols)
+    }
+
+
+def half_infinite_multisite(ECs, co: Coord, nrows: int, ncols: int):
+    """Paper Eq. 65 on the cell: ``M = A @ B`` with the two pieces returned too.
+
+    ``A`` is the enlarged corner at ``co``, ``B`` the one at
+    ``next_coordinate(co)``; the projectors need both, not just the product.
+    """
+    A = _as_matrix(ECs[co])
+    B = _as_matrix(ECs[next_coordinate(co, nrows, ncols)])
+    return A @ B, A, B
+
+
+def all_projectors_multisite(ECs, chi: int, nrows: int, ncols: int, prev=None):
+    """One Fishman pair per coordinate, all from the *same* environment.
+
+    Simultaneous, not Gauss-Seidel: a sequential sweep has a fixed point that
+    does not satisfy Eqs. 76-77, because those evaluate every direction at the
+    same ``y``.  Same argument as Phase 1's :func:`all_projectors`.
+
+    Returns ``{co: (P_left, P_right, U, S, Vh)}``.  ``P_left`` is ``(n, chi)``
+    and attaches to the ``co`` side of the cut; ``P_right`` is ``(chi, n)`` and
+    attaches to the ``next_coordinate(co)`` side, so ``P_right @ P_left`` is
+    the identity on the retained subspace by construction.
+    """
+    from tenax.algorithms._ctm_root_implicit_asym import _inv_sqrt, _pin_bond_gauge
+
+    out = {}
+    for co in coordinates(nrows, ncols):
+        M, A, B = half_infinite_multisite(ECs, co, nrows, ncols)
+        U, s, Vh = jnp.linalg.svd(M, full_matrices=True)
+        # Floor before S becomes a matrix: an early environment is rank
+        # deficient and a singular S makes the matrix inverse square root NaN.
+        s_k = jnp.maximum(s[:chi], 1e-12 * s[0])
+        # Cast to M's dtype — S is a *variable* of the characteristic
+        # equations and its cotangent must be free to leave the reals (#721).
+        S_keep = jnp.diag(s_k / (jnp.linalg.norm(s_k) + 1e-300)).astype(M.dtype)
+        inv_sqrt = _inv_sqrt(S_keep)
+        P_left = B @ Vh[:chi].conj().T @ inv_sqrt
+        P_right = inv_sqrt @ (U[:, :chi].conj().T @ A)
+        U, Vh, P_left, P_right = _pin_bond_gauge(
+            U, Vh, P_left, P_right, chi, None if prev is None else prev[co][0]
+        )
+        out[co] = (P_left, P_right, U, S_keep, Vh)
+    return out
+
+
+def _absorbed_edge(edges, a_by_cell, co: Coord, nrows: int, ncols: int):
+    """``edge[above(co)]`` with the local double layer absorbed.
+
+    Legs ``((chi, a), a_out, (chi, a))`` with ``chi`` slow in each fused pair,
+    matching the projectors' cut-leg order.
+    """
+    k, r, c = co
+    T = edges[above(co, nrows, ncols)]
+    a = rotate_a_times(a_by_cell[(r, c)], k)
+    chi, d2 = T.shape[0], a.shape[0]
+    # T[l, x, r] with x contracting a.u; a[u, d, l, r] = a[x, j, i, m].
+    raw = jnp.einsum("lxr,xjim->lijrm", T, a)
+    return raw.reshape(chi * d2, d2, chi * d2)
+
+
+def sweep_multisite(
+    corners, edges, a_by_cell, chi: int, nrows: int, ncols: int, prev=None
+):
+    """One simultaneous sweep over the whole cell.
+
+    Renormalisation coordinates are PEPSKit's, uniform in ``co``::
+
+        corner[co] = P_right[prev_coordinate(co)] · EC[co]        · P_left[co]
+        edge[co]   = P_right[left_projector(co)]  · (E[above] ⊗ a) · P_left[co]
+
+    The same tables the characteristic equations will use — a sweep and an
+    equation that disagree give a fixed point that is not a root, which is
+    how #718 started.
+    """
+    from tenax.algorithms._ctm_root_implicit_asym import _normalize
+
+    ECs = all_enlarged_corners(corners, edges, a_by_cell, nrows, ncols)
+    projs = all_projectors_multisite(ECs, chi, nrows, ncols, prev)
+
+    new_corners, new_edges = {}, {}
+    for co in coordinates(nrows, ncols):
+        P_left = projs[co][0]
+        P_right_prev = projs[prev_coordinate(co, nrows, ncols)][1]
+        new_corners[co] = _normalize(P_right_prev @ _as_matrix(ECs[co]) @ P_left)
+
+        P_right_lp = projs[left_projector(co, nrows, ncols)][1]
+        raw = _absorbed_edge(edges, a_by_cell, co, nrows, ncols)
+        new_edges[co] = _normalize(
+            jnp.einsum("ai,ixj,jb->axb", P_right_lp, raw, P_left)
+        )
+    return new_corners, new_edges, projs
+
+
+def init_cell_env(a_by_cell, A_by_cell, chi: int, nrows: int, ncols: int):
+    """Seed every cell from :func:`initialize_ctm_tensor_env`.
+
+    Each cell gets its own initial environment, built from its own site
+    tensor, in this module's rotation-uniform convention.
+    """
+    from tenax.algorithms._ctm_root_implicit_asym import _init_env
+
+    corners, edges = {}, {}
+    for (r, c), A in A_by_cell.items():
+        env, _a = _init_env(A, chi)
+        ck, ek = env_to_cell_maps(env, r, c)
+        corners.update(ck)
+        edges.update(ek)
+    del a_by_cell, nrows, ncols
+    return corners, edges
+
+
+def converge_multisite(
+    A_by_cell,
+    chi: int,
+    nrows: int,
+    ncols: int,
+    *,
+    max_iter: int = 200,
+    conv_tol: float = 1e-12,
+    min_iter: int = 4,
+    return_projectors: bool = False,
+):
+    """Sweep the cell until every corner and edge stops moving element-wise.
+
+    Element-wise, not spectral, for the Phase 1 reason: corner *singular
+    values* are invariant under independent rotations of each bond, so a
+    spectral criterion calls convergence while the tensors are still moving —
+    and the characteristic equations compare tensors.
+    """
+    from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
+
+    a_by_cell = {}
+    for (r, c), A in A_by_cell.items():
+        a_t = _build_double_layer_tensor(A)
+        labels = list(a_t.labels())
+        perm = tuple(labels.index(lbl) for lbl in ("u2", "d2", "l2", "r2"))
+        a_by_cell[(r, c)] = jnp.asarray(a_t.transpose(perm).todense())
+
+    corners, edges = init_cell_env(a_by_cell, A_by_cell, chi, nrows, ncols)
+    prev_state = None
+    prev_projs = None
+    residual = float("inf")
+    converged = False
+    iters = 0
+    for it in range(int(max_iter)):
+        corners, edges, prev_projs = sweep_multisite(
+            corners, edges, a_by_cell, chi, nrows, ncols, prev_projs
+        )
+        iters = it + 1
+        state = {
+            k: v / (jnp.linalg.norm(v) + 1e-300)
+            for k, v in list(corners.items()) + list(edges.items())
+        }
+        if prev_state is not None:
+            residual = float(
+                max(
+                    jnp.max(jnp.abs(state[k] - prev_state[k]))
+                    for k in state
+                    if state[k].shape == prev_state[k].shape
+                )
+            )
+            if iters >= min_iter and residual < conv_tol:
+                converged = True
+                break
+        prev_state = state
+
+    meta = {"iters": iters, "residual": residual, "converged": converged}
+    if return_projectors:
+        return corners, edges, meta, prev_projs, a_by_cell
+    return corners, edges, meta

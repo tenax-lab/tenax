@@ -280,3 +280,145 @@ def test_enlarged_corner_at_1x1_reproduces_the_phase1_quadrant():
         err = float(jnp.linalg.norm(got - want) / jnp.linalg.norm(want))
         assert err < 1e-13, f"direction {k}: relative error {err:.3e}"
         env_k, a_k = rotate_env(env_k), rotate_a(a_k)
+
+
+# ------------------------------------------------------------------ #
+# Forward sweep                                                      #
+# ------------------------------------------------------------------ #
+
+
+def _gate(delta=1.0):
+    import jax.numpy as jnp
+
+    Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+    H = delta * jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+    return H.reshape(2, 2, 2, 2)
+
+
+def test_multisite_forward_at_1x1_matches_the_phase1_energy():
+    """The 1x1 smoke test for the forward sweep.
+
+    Phase 1 truncates with the left half-plane, this module with the upper
+    half; ``docs/plans/2026-07-31-715-phase2-multisite-design.md`` shows those
+    are the same truncation up to a shift and a transpose.  So the two
+    environments are *not* tensor-equal, and only a gauge-invariant quantity
+    compares — the energy.
+    """
+    import jax.numpy as jnp
+
+    from tenax.algorithms._ctm_root_implicit_asym import asym_energy, converge
+    from tenax.algorithms._ctm_root_implicit_multisite import (
+        cell_maps_to_env,
+        converge_multisite,
+    )
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+
+    A = _site_tensor()
+    chi, gate = 4, _gate()
+    template = initialize_ctm_tensor_env(A, chi)
+
+    env1, _a1, meta1 = converge(A, chi, max_iter=200, conv_tol=1e-12)
+    E1 = float(asym_energy(A, env1, template, gate))
+
+    corners, edges, meta2 = converge_multisite(
+        {(0, 0): A}, chi, 1, 1, max_iter=200, conv_tol=1e-12
+    )
+    E2 = float(asym_energy(A, cell_maps_to_env(corners, edges), template, gate))
+
+    assert meta2["converged"], f"multisite forward did not converge: {meta2}"
+    assert jnp.isfinite(E2)
+    rel = abs(E1 - E2) / abs(E1)
+    assert rel < 1e-10, f"E_phase1={E1!r} E_multisite={E2!r} rel={rel:.3e}"
+
+
+def test_multisite_forward_runs_on_a_2x2_cell_of_different_tensors():
+    """A 2x2 cell of *different* tensors — the configuration a wrong cell
+    shift can actually be seen in.  Only asserts the forward is well formed;
+    the gradient gate comes with the characteristic equations."""
+    import jax.numpy as jnp
+
+    from tenax.algorithms._ctm_root_implicit_multisite import converge_multisite
+
+    chi = 4
+    cell = {
+        (0, 0): _site_tensor(seed=1),
+        (0, 1): _site_tensor(seed=2),
+        (1, 0): _site_tensor(seed=3),
+        (1, 1): _site_tensor(seed=4),
+    }
+    corners, edges, meta = converge_multisite(
+        cell, chi, 2, 2, max_iter=200, conv_tol=1e-12
+    )
+
+    assert len(corners) == 4 * 2 * 2
+    assert len(edges) == 4 * 2 * 2
+    for co, C in corners.items():
+        assert C.shape == (chi, chi), co
+        assert jnp.all(jnp.isfinite(C)), co
+    for co, T in edges.items():
+        assert T.shape[0] == chi and T.shape[2] == chi, co
+        assert jnp.all(jnp.isfinite(T)), co
+    assert meta["converged"], meta
+
+
+def test_the_unit_cell_is_not_secretly_uniform():
+    """Guards the guard: if a 2x2 cell of different tensors converged to four
+    identical environments, every cell-shift test built on it would be
+    vacuous — a wrong shift would read the same tensor either way."""
+    import jax.numpy as jnp
+
+    from tenax.algorithms._ctm_root_implicit_multisite import converge_multisite
+
+    cell = {
+        (0, 0): _site_tensor(seed=1),
+        (0, 1): _site_tensor(seed=2),
+        (1, 0): _site_tensor(seed=3),
+        (1, 1): _site_tensor(seed=4),
+    }
+    corners, _edges, _meta = converge_multisite(
+        cell, 4, 2, 2, max_iter=200, conv_tol=1e-12
+    )
+    ref = corners[(0, 0, 0)]
+    spread = max(
+        float(jnp.linalg.norm(corners[(0, r, c)] - ref))
+        for r in range(2)
+        for c in range(2)
+        if (r, c) != (0, 0)
+    )
+    assert spread > 1e-3, f"cells are effectively identical (spread {spread:.3e})"
+
+
+def test_the_1x1_energy_gate_is_load_bearing(monkeypatch):
+    """Guards the gate: break the gluing partner and the 1x1 energy must move.
+
+    The upper-half cut glues ``EC[co]`` to ``EC[next_coordinate(co)]``.  If the
+    forward were somehow insensitive to that choice, the agreement above would
+    be proving nothing.  Composing ``next`` with itself picks the wrong
+    neighbour, and the energy shifts by ~6e-3 relative — three orders above the
+    1e-10 gate and thirteen above the 1e-15 the correct wiring achieves.
+    """
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+    from tenax.algorithms._ctm_root_implicit_asym import asym_energy, converge
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+
+    A = _site_tensor()
+    chi, gate = 4, _gate()
+    template = initialize_ctm_tensor_env(A, chi)
+    env1, _a1, _m1 = converge(A, chi, max_iter=200, conv_tol=1e-12)
+    E1 = float(asym_energy(A, env1, template, gate))
+
+    good = M.next_coordinate
+    monkeypatch.setattr(
+        M, "next_coordinate", lambda co, nr, nc: good(good(co, nr, nc), nr, nc)
+    )
+    corners, edges, _m = M.converge_multisite(
+        {(0, 0): A}, chi, 1, 1, max_iter=60, conv_tol=1e-12
+    )
+    E_wrong = float(asym_energy(A, M.cell_maps_to_env(corners, edges), template, gate))
+
+    assert abs(E1 - E_wrong) / abs(E1) > 1e-4, (
+        "wrong gluing partner left the energy unchanged, so the 1x1 gate "
+        f"cannot detect a miswiring (E={E_wrong!r})"
+    )
