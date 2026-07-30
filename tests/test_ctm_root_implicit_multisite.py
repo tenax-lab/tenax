@@ -543,3 +543,144 @@ def test_at_1x1_the_cell_shifts_are_invisible(monkeypatch, table):
         ),
     )
     assert _root_residual(cell, 1, 1) == before
+
+
+# ------------------------------------------------------------------ #
+# Adjoint: gradient vs finite differences                            #
+# ------------------------------------------------------------------ #
+
+_SZ = None
+
+
+def _sz():
+    import jax.numpy as jnp
+
+    return jnp.array([[0.5, 0.0], [0.0, -0.5]])
+
+
+def _fd_parity(cell, nrows, ncols, chi=4, h=1e-5, seed=0):
+    """(AD directional derivative, FD directional derivative)."""
+    import jax.numpy as jnp
+
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+    from tenax.core.tensor import DenseTensor
+
+    op = _sz()
+    idx = {rc: A.indices for rc, A in cell.items()}
+    _value, grad = M.cell_root_implicit_energy_and_grad(
+        cell, op, chi=chi, nrows=nrows, ncols=ncols
+    )
+    base = {rc: jnp.asarray(A.todense()) for rc, A in cell.items()}
+    rng = np.random.RandomState(seed)
+    dirs = {rc: jnp.asarray(rng.standard_normal(v.shape)) for rc, v in base.items()}
+
+    def f(data):
+        c = {rc: DenseTensor(v, idx[rc]) for rc, v in data.items()}
+        return float(
+            M.cell_observable_forward(
+                c, op, chi, nrows, ncols, max_iter=300, conv_tol=1e-12
+            )
+        )
+
+    ad = float(sum(jnp.real(jnp.sum(grad[rc] * dirs[rc])) for rc in grad))
+    fd = (
+        f({rc: base[rc] + h * dirs[rc] for rc in base})
+        - f({rc: base[rc] - h * dirs[rc] for rc in base})
+    ) / (2 * h)
+    return ad, fd
+
+
+def test_gradient_matches_finite_differences_at_1x1():
+    ad, fd = _fd_parity({(0, 0): _site_tensor()}, 1, 1)
+    rel = abs(ad - fd) / max(abs(fd), 1e-30)
+    assert rel < 1e-8, f"AD={ad!r} FD={fd!r} rel={rel:.3e}"
+
+
+def test_gradient_matches_finite_differences_on_a_2x2_cell():
+    """The Phase 2 gate (#715).
+
+    Four different site tensors, so every Appendix F cell shift is live.
+    Measured h-convergence at 1e-4 / 1e-5 / 1e-6: 6.5e-6, 6.5e-8, 5.6e-10 —
+    clean second-order behaviour for a central difference, which is what says
+    the gradient is right rather than merely close.
+    """
+    ad, fd = _fd_parity(_cell_2x2(), 2, 2)
+    rel = abs(ad - fd) / max(abs(fd), 1e-30)
+    assert rel < 1e-6, f"AD={ad!r} FD={fd!r} rel={rel:.3e}"
+
+
+@pytest.mark.parametrize(
+    "table",
+    ["proj_sinv_indices", "leftvec_invfroot_indices", "rightvec_invfroot_indices"],
+)
+def test_a_wrong_cell_shift_breaks_the_2x2_gradient(monkeypatch, table):
+    """The gate #715 asks for by name: the tables must be load-bearing *for the
+    gradient*, not only for the root residual."""
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+
+    good = getattr(M, table)
+    monkeypatch.setattr(
+        M,
+        table,
+        lambda co, nr, nc: (
+            good(co, nr, nc)[0],
+            (good(co, nr, nc)[1] + 1) % nr,
+            good(co, nr, nc)[2],
+        ),
+    )
+    ad, fd = _fd_parity(_cell_2x2(), 2, 2)
+    rel = abs(ad - fd) / max(abs(fd), 1e-30)
+    assert rel > 1e-3, f"wrong {table} still matched FD (rel={rel:.3e})"
+
+
+def test_the_two_site_energy_is_gauge_dependent_on_a_nonuniform_cell():
+    """Records why the parity objective is a one-site observable.
+
+    ``compute_energy_ctm_tensor`` builds two-site RDMs with one site's ring.
+    On a cell of different tensors the halves meet on independently-gauged chi
+    bonds, so the scalar jumps under arbitrarily small changes of ``A`` even
+    though every fixed point converges to ~1e-13.  A gauge-dependent scalar has
+    no derivative, which is why finite differences diverged as h -> 0 before
+    the objective was changed.
+    """
+    import jax.numpy as jnp
+
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+    from tenax.core.tensor import DenseTensor
+
+    cell = _cell_2x2()
+    idx = {rc: A.indices for rc, A in cell.items()}
+    base = {rc: jnp.asarray(A.todense()) for rc, A in cell.items()}
+    rng = np.random.RandomState(0)
+    dirs = {rc: jnp.asarray(rng.standard_normal(v.shape)) for rc, v in base.items()}
+
+    def energy(t):
+        c = {rc: DenseTensor(base[rc] + t * dirs[rc], idx[rc]) for rc in base}
+        return float(
+            M.cell_energy_forward(c, _gate(), 4, 2, 2, max_iter=300, conv_tol=1e-12)
+        )
+
+    vals = [energy(t) for t in (-2e-5, -1e-5, 0.0, 1e-5, 2e-5)]
+    spread = max(vals) - min(vals)
+    assert spread > 1e-3, (
+        "two-site energy looks smooth on a non-uniform cell; if that is now "
+        f"true the one-site objective may no longer be necessary (spread {spread:.3e})"
+    )
+
+    # The one-site observable over the same span is smooth.
+    def obs(t):
+        c = {rc: DenseTensor(base[rc] + t * dirs[rc], idx[rc]) for rc in base}
+        return float(
+            M.cell_observable_forward(c, _sz(), 4, 2, 2, max_iter=300, conv_tol=1e-12)
+        )
+
+    o = [obs(t) for t in (-2e-5, -1e-5, 0.0, 1e-5, 2e-5)]
+    second = max(abs(o[i + 2] - 2 * o[i + 1] + o[i]) for i in range(3))
+    # A smooth f has second difference f''·h² — here h = 1e-5 and f'' ~ 75, so
+    # ~7.5e-9 is the *expected* value, not a defect.  What distinguishes the
+    # two objectives is scale: the one-site curvature term is seven orders
+    # below the two-site energy's spread over the same span.
+    assert second < 1e-4 * spread, (
+        f"one-site observable is not smooth either (second difference {second:.3e} "
+        f"vs two-site spread {spread:.3e})"
+    )

@@ -56,6 +56,10 @@ __all__ = [
     "rightvec_invfroot_indices",
     "remove_inverse_roots_multisite",
     "absorb_inverse_roots_multisite",
+    "cell_energy_forward",
+    "cell_observable_forward",
+    "env_ring_for_cell",
+    "cell_root_implicit_energy_and_grad",
     "rotate_a_times",
 ]
 
@@ -791,3 +795,281 @@ def root_parametrize_multisite(
 
     assert best is not None
     return best
+
+
+# ---------------------------------------------------------------------------
+# Energy and gradient on the cell
+# ---------------------------------------------------------------------------
+
+
+def env_ring_for_cell(corners, edges, r: int, c: int, nrows: int, ncols: int):
+    """The eight environment tensors that close the ring *around* site ``(r, c)``.
+
+    Not the eight at coordinate ``(k, r, c)``.  A renormalised corner at
+    ``(k, r, c)`` is the one that *absorbed* site ``(r, c)`` — it covers the
+    quadrant including that site — so the corner adjacent to the site is the
+    one at ``above_left((k, r, c))``, and likewise the edge is at
+    ``above((k, r, c))``.  Those are the same two tables
+    :func:`enlarged_corner` reads, which is the consistency one wants.
+
+    Getting this wrong does not raise: every leg still matches by dimension,
+    and the contraction returns a number.  It is simply not gauge invariant,
+    because the ring does not close on the lattice.  The symptom is a scalar
+    that is deterministic for fixed input but jumps by ~1e-3 under
+    arbitrarily small changes of ``A`` — the CTM bond gauge is pinned by an
+    ``argmax`` whose row hops — so finite differences diverge as ``h -> 0``
+    (measured: -1.4, +17, -67, +524, -8792 at h = 1e-3 .. 1e-7) while the
+    gradient stays finite.  At a 1x1 cell every shift collapses and the bug is
+    invisible, which is why this only appeared at 2x2.
+    """
+    return AsymEnv(
+        *[corners[above_left((k, r, c), nrows, ncols)] for k in range(4)],
+        *[edges[above((k, r, c), nrows, ncols)] for k in range(4)],
+    )
+
+
+def _cell_energy(A_live, corners_reg, edges_reg, template, gate, cell, nrows, ncols):
+    """Single-site CTM energy on the ring closing around ``cell``."""
+    from tenax.algorithms._ctm_root_implicit_asym import asym_energy
+
+    env = env_ring_for_cell(corners_reg, edges_reg, *cell, nrows, ncols)
+    return asym_energy(A_live, env, template, gate)
+
+
+def _cell_observable(A_live, corners_reg, edges_reg, template, op, cell, nrows, ncols):
+    """``<O>`` at one site, from the ring closing around ``cell``.
+
+    A *one-site* RDM, deliberately.  ``compute_energy_ctm_tensor`` builds
+    **two-site** RDMs (``_rdm2x1_tensor`` / ``_rdm1x2_tensor``) that place the
+    same ``A`` on both sites and glue them through a single site's environment
+    ring.  On a uniform cell that is exactly right and is what Phase 1 uses.
+    On a cell of *different* tensors it is not merely unphysical — the two
+    halves meet on chi bonds carrying independent gauges, so the number is
+    gauge dependent, and a gauge-dependent scalar is not a differentiable
+    function of ``A`` at all.  Measured: it moved over [0.143, 0.171] under
+    ``|t| <= 2e-5`` along a line while every fixed point converged to 8.6e-13,
+    and finite differences diverged as ``h -> 0``.
+
+    The one-site RDM closes on the eight tensors of :func:`env_ring_for_cell`
+    and nothing else, so every bond gauge cancels and the result is smooth.
+    That makes it the right objective for the parity gate on a unit cell; a
+    physical multisite *energy* needs a two-site ring spanning two cells and
+    is separate work.
+    """
+    from tenax.algorithms._ctm_root_implicit_asym import _to_ctm_env
+    from tenax.algorithms._ctm_tensor_energy import _rdm_1site_tensor
+
+    env = env_ring_for_cell(corners_reg, edges_reg, *cell, nrows, ncols)
+    rho = _rdm_1site_tensor(A_live, _to_ctm_env(env, template))
+    return jnp.real(jnp.trace(rho @ op))
+
+
+def cell_observable_forward(
+    A_by_cell, op, chi: int, nrows: int, ncols: int, *, objective_cell=(0, 0), **kw
+):
+    """Forward-only ``<O>`` — the finite-difference side of the parity gate."""
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+
+    corners, edges, _meta = converge_multisite(A_by_cell, chi, nrows, ncols, **kw)
+    template = initialize_ctm_tensor_env(A_by_cell[objective_cell], chi)
+    return _cell_observable(
+        A_by_cell[objective_cell],
+        corners,
+        edges,
+        template,
+        op,
+        objective_cell,
+        nrows,
+        ncols,
+    )
+
+
+def cell_energy_forward(
+    A_by_cell, gate, chi: int, nrows: int, ncols: int, *, objective_cell=(0, 0), **kw
+):
+    """Two-site CTM energy. **Valid only on a uniform (1x1) cell.**
+
+    ``compute_energy_ctm_tensor`` places the same ``A`` on both sites of a
+    two-site RDM and glues them through one site's environment ring.  On a cell
+    of different tensors the two halves meet on chi bonds carrying independent
+    gauges, so the result is gauge dependent and not a differentiable function
+    of ``A`` — see :func:`_cell_observable`.  Use that for anything larger than
+    1x1; a physical multisite energy needs a two-site ring spanning two cells
+    and is separate work.
+    """
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+
+    corners, edges, _meta = converge_multisite(A_by_cell, chi, nrows, ncols, **kw)
+    template = initialize_ctm_tensor_env(A_by_cell[objective_cell], chi)
+    return _cell_energy(
+        A_by_cell[objective_cell],
+        corners,
+        edges,
+        template,
+        gate,
+        objective_cell,
+        nrows,
+        ncols,
+    )
+
+
+def cell_root_implicit_energy_and_grad(
+    A_by_cell,
+    op,
+    *,
+    chi: int = 4,
+    nrows: int = 1,
+    ncols: int = 1,
+    objective_cell=(0, 0),
+    max_iter: int = 200,
+    conv_tol: float = 1e-12,
+    min_iter: int = 4,
+    polish_steps: int = 40,
+    polish_tol: float = 1e-10,
+    solve_tol: float = 1e-8,
+    solve_maxiter: int = 400,
+    solve_restart: int = 30,
+    root_residual_warn: float = 1e-6,
+    return_diagnostics: bool = False,
+):
+    """Energy and ``dE/dA`` per cell via root implicit differentiation.
+
+    Eq. 18 without back-propagating a single SVD, now over a unit cell.  The
+    structure is Phase 1's :func:`asym_root_implicit_energy_and_grad`; what the
+    cell changes is that ``y`` and the gradient are dicts over coordinates, and
+    that the shifted-cell tables carry ``S`` between them.
+
+    The energy is a function of the *regular* environment, so the last forward
+    step is the Eq. 82 absorption and differentiating through it is what gives
+    ``S`` an adjoint at all.  Writing ``F`` in the regular variables sets that
+    adjoint to zero, which was #718.
+    """
+    import warnings
+
+    from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
+    from tenax.algorithms._ctm_tensor_init import (
+        _build_double_layer_tensor,
+        initialize_ctm_tensor_env,
+    )
+    from tenax.core.tensor import DenseTensor, SymmetricTensor
+
+    if any(isinstance(A, SymmetricTensor) for A in A_by_cell.values()):
+        raise TypeError("Multisite root implicit AD is dense-only (#715 Phase 3).")
+
+    indices = {rc: A.indices for rc, A in A_by_cell.items()}
+    A_const = {
+        rc: DenseTensor(jax.lax.stop_gradient(A.todense()), A.indices)
+        for rc, A in A_by_cell.items()
+    }
+    corners, edges, meta, projs, a_by_cell = converge_multisite(
+        A_const,
+        chi,
+        nrows,
+        ncols,
+        max_iter=max_iter,
+        conv_tol=conv_tol,
+        min_iter=min_iter,
+        return_projectors=True,
+    )
+    root, root_residual = root_parametrize_multisite(
+        corners,
+        edges,
+        a_by_cell,
+        chi,
+        nrows,
+        ncols,
+        prev_projs=projs,
+        polish_steps=polish_steps,
+        polish_tol=polish_tol,
+    )
+    if root_residual > root_residual_warn:
+        warnings.warn(
+            f"Multisite root implicit AD: ‖F(y*)‖ = {root_residual:.3e} exceeds "
+            f"{root_residual_warn:.1e}; the implicit-function gradient is "
+            "correspondingly inaccurate (paper Fig. 1).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    S_star = root.s
+    y_star = (root.corners, root.edges, root.u, S_star, root.v)
+    template = initialize_ctm_tensor_env(A_const[objective_cell], chi)
+    A_data = {rc: jnp.asarray(A.todense()) for rc, A in A_by_cell.items()}
+
+    def energy_of(a_data, corners_t, edges_t, S_all):
+        c_reg, e_reg = absorb_inverse_roots_multisite(
+            corners_t, edges_t, S_all, nrows, ncols
+        )
+        A_live = DenseTensor(a_data[objective_cell], indices[objective_cell])
+        return _cell_observable(
+            A_live, c_reg, e_reg, template, op, objective_cell, nrows, ncols
+        )
+
+    energy, vjp_energy = jax.vjp(energy_of, A_data, root.corners, root.edges, S_star)
+    grad_direct, c_bar, e_bar, S_bar = vjp_energy(jnp.ones((), dtype=energy.dtype))
+    # u and v carry no cotangent: the energy does not see the null-space
+    # coordinates, only their effect through the root.
+    y_bar = (
+        c_bar,
+        e_bar,
+        {co: jnp.zeros_like(x) for co, x in root.u.items()},
+        S_bar,
+        {co: jnp.zeros_like(x) for co, x in root.v.items()},
+    )
+
+    # An independent phase on each environment tensor of each cell is an exact
+    # null direction of ∂_yF, so the adjoint system is singular and solvable
+    # only because the energy is invariant along every orbit.  That invariance
+    # lives at the energy boundary, not here, and #718 is a standing reminder
+    # that the boundary is where conventions go wrong — so measure it.
+    y_bar_norm = float(
+        jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(y_bar)))
+    )
+    gauge_consistency = 0.0
+    for bar_map, prim_map in ((c_bar, root.corners), (e_bar, root.edges)):
+        for co, bar in bar_map.items():
+            pairing = float(jnp.real(jnp.sum(bar * (1j * prim_map[co]))))
+            scale = y_bar_norm * float(jnp.linalg.norm(prim_map[co])) + 1e-300
+            gauge_consistency = max(gauge_consistency, abs(pairing) / scale)
+
+    def F_of_y(y):
+        return characteristic_residual_multisite(y, a_by_cell, root, chi)
+
+    F_at_root, vjp_y = jax.vjp(F_of_y, y_star)
+    covariant_residual = float(
+        jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(F_at_root)))
+    )
+    F_bar, solve_resid = _solve_root_adjoint(
+        lambda v: vjp_y(v)[0],
+        y_bar,
+        tol=solve_tol,
+        maxiter=solve_maxiter,
+        restart=solve_restart,
+    )
+
+    def F_of_p(a_data):
+        a_live = {}
+        for rc, data in a_data.items():
+            a_t = _build_double_layer_tensor(DenseTensor(data, indices[rc]))
+            labels = list(a_t.labels())
+            perm = tuple(labels.index(lbl) for lbl in ("u2", "d2", "l2", "r2"))
+            a_live[rc] = a_t.transpose(perm).todense()
+        return characteristic_residual_multisite(y_star, a_live, root, chi)
+
+    _, vjp_p = jax.vjp(F_of_p, A_data)
+    grad_indirect = vjp_p(F_bar)[0]
+    grad = {rc: grad_direct[rc] - grad_indirect[rc] for rc in grad_direct}
+
+    if return_diagnostics:
+        return (
+            energy,
+            grad,
+            {
+                **meta,
+                "root_residual": root_residual,
+                "covariant_residual": covariant_residual,
+                "adjoint_residual": float(solve_resid),
+                "gauge_consistency": gauge_consistency,
+            },
+        )
+    return energy, grad
