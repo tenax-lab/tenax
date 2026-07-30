@@ -21,6 +21,7 @@ These were run against the working tree, not assumed. Do not re-litigate them:
 - **Per-sector full SVD + global top-chi truncation works**: on a 4-leg enlarged corner with sector sizes `n_q = (4, 6, 4)`, chi=6 gives layout `{-1: 2, 0: 2, 1: 2}` summing exactly to 6, with `|U*^dag U_perp| ~ 1e-16` per sector.
 - **Reassembly works**: build the truncated bond `TensorIndex` from the layout and call `SymmetricTensor._from_blocks_unchecked(blocks, indices)`; `_validate()` passes. Block keys are *charge values* per axis, and the constraint is that flow-weighted charges fuse to zero.
 - **The contractor applies no Koszul signs** (`contractor.py:691-699`) because planar diagrams have no physical line crossings. CTM networks are planar.
+- **The einsum-to-`contract` translation reproduces the dense quadrant bit-exactly** (`max|diff| = 0.0`), with the relabel scheme given verbatim in Task 5. This was the plan's biggest identified risk; it is discharged.
 - **`initialize_ctm_tensor_env` works for U(1) at D=2 and fails at D=3.** At D=3 it raises `ValueError: data.shape (4, 4, 4) does not match index dims (4, 9, 4)` — #667's one-`ref_axis`-per-corner bug. Z2 works at both. So the test site tensor is U(1) at D=2, which still fragments (fused-leg multiplicities `[1, 2, 1]`). Do not "fix" this inside Phase 3.
 
 ## File Structure
@@ -772,8 +773,12 @@ def upper_left_quadrant_sym(env: SymEnv, a: SymmetricTensor) -> SymmetricTensor:
     Same network as ``_ctm_root_implicit_asym._upper_left_quadrant``; the
     einsum's index letters become labels.  ``(chi_d, a_d)`` is the vertical
     bond to be truncated, ``(chi_r, a_r)`` is what stays open to the right.
+
+    VERIFIED 2026-07-31 to reproduce ``_upper_left_quadrant`` bit-exactly
+    (``max|diff| = 0.0``) on the U(1) D=2 test tensor.  ``output_labels``
+    already fixes the axis order, so no transpose is needed afterwards.
     """
-    c1 = env.C1.relabels({env.C1.labels()[0]: "c", env.C1.labels()[1]: "e"})
+    c1 = env.C1.relabels(dict(zip(env.C1.labels(), ("c", "e"), strict=True)))
     t1 = env.T1.relabels(
         dict(zip(env.T1.labels(), ("e", "f", "chi_r"), strict=True))
     )
@@ -782,10 +787,7 @@ def upper_left_quadrant_sym(env: SymEnv, a: SymmetricTensor) -> SymmetricTensor:
     )
     a4 = a.relabels(dict(zip(a.labels(), ("f", "a_d", "i", "a_r"), strict=True)))
     q = contract(c1, t1, t4, a4, output_labels=("chi_r", "a_r", "h", "a_d"))
-    return q.relabels({"h": "chi_d"}).transpose(
-        tuple(q.relabels({"h": "chi_d"}).labels().index(lbl)
-              for lbl in ("chi_r", "a_r", "chi_d", "a_d"))
-    )
+    return q.relabels({"h": "chi_d"})
 
 
 def _as_matrix_sym(quadrant: SymmetricTensor) -> SymmetricTensor:
