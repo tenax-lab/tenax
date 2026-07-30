@@ -21,6 +21,8 @@ These were run against the working tree, not assumed. Do not re-litigate them:
 - **Per-sector full SVD + global top-chi truncation works**: on a 4-leg enlarged corner with sector sizes `n_q = (4, 6, 4)`, chi=6 gives layout `{-1: 2, 0: 2, 1: 2}` summing exactly to 6, with `|U*^dag U_perp| ~ 1e-16` per sector.
 - **Reassembly works**: build the truncated bond `TensorIndex` from the layout and call `SymmetricTensor._from_blocks_unchecked(blocks, indices)`; `_validate()` passes. Block keys are *charge values* per axis, and the constraint is that flow-weighted charges fuse to zero.
 - **The contractor applies no Koszul signs** (`contractor.py:691-699`) because planar diagrams have no physical line crossings. CTM networks are planar.
+- **The iPEPS site tensor's physical leg must be labelled `phys`.** With any other label `compute_energy_ctm_tensor` raises `ValueError: output_labels contains 'phys' which is not a free label`. Both `heisenberg_gate()` (dense) and `heisenberg_gate_u1sz()` (symmetric) then give the same energy on a symmetric env (`E = -0.114511058317` on the U(1) D=2 tensor at chi=4), so Task 7's parity gate is reachable.
+- **`BondLayout` is a frozen dataclass with a tuple field, not a `NamedTuple` with a dict.** A `NamedTuple` auto-registers as a pytree and flattens its dict to the sector dimensions as *traced leaves* — the exact "shapes moved under AD" failure the class exists to prevent — and is unhashable so it cannot be passed via `static_argnums` / `nondiff_argnums` either. Construct with `BondLayout.from_dims(mapping)`; read with `.total`, `.sectors`, `.dim_of(q)`, and `.dims` (sorted `(charge, dim)` pairs).
 - **The einsum-to-`contract` translation reproduces the dense quadrant bit-exactly** (`max|diff| = 0.0`), with the relabel scheme given verbatim in Task 5. This was the plan's biggest identified risk; it is discharged.
 - **`initialize_ctm_tensor_env` works for U(1) at D=2 and fails at D=3.** At D=3 it raises `ValueError: data.shape (4, 4, 4) does not match index dims (4, 9, 4)` — #667's one-`ref_axis`-per-corner bug. Z2 works at both. So the test site tensor is U(1) at D=2, which still fragments (fused-leg multiplicities `[1, 2, 1]`). Do not "fix" this inside Phase 3.
 
@@ -61,7 +63,7 @@ from tenax.algorithms._ctm_root_implicit_sym_sectors import (
 
 
 def test_bond_index_from_layout_has_one_sector_per_retained_charge():
-    layout = BondLayout(dims={-1: 2, 0: 3, 1: 2})
+    layout = BondLayout.from_dims({-1: 2, 0: 3, 1: 2})
     idx = bond_index_from_layout(
         layout, U1Symmetry(), FlowDirection.OUT, "chi_new"
     )
@@ -76,7 +78,7 @@ def test_bond_index_from_layout_drops_empty_sectors():
     # A sector that retained nothing must not appear as a zero-width sector:
     # a zero multiplicity is a shape of 0 that propagates into every
     # downstream contraction.
-    layout = BondLayout(dims={-1: 0, 0: 4, 1: 0})
+    layout = BondLayout.from_dims({-1: 0, 0: 4, 1: 0})
     idx = bond_index_from_layout(layout, U1Symmetry(), FlowDirection.IN, "b")
     assert list(idx.sectors) == [0]
     assert list(idx.multiplicities) == [4]
@@ -147,14 +149,16 @@ def bond_index_from_layout(
     A zero multiplicity is a legal but poisonous index: it survives every
     charge check and then produces zero-size blocks that contract to zero.
     """
-    charges = layout.charges
-    if not charges:
-        raise ValueError("BondLayout retained no charges; the cut is empty.")
+    sectors = layout.sectors
+    if not sectors:
+        raise ValueError(
+            f"BondLayout retained no charges; the cut is empty (dims={layout.dims})."
+        )
     return TensorIndex(
         symmetry=symmetry,
-        sectors=np.asarray(charges, dtype=np.int32),
+        sectors=np.asarray(sectors, dtype=np.int32),
         multiplicities=np.asarray(
-            [layout.dims[q] for q in charges], dtype=np.int32
+            [layout.dim_of(q) for q in sectors], dtype=np.int32
         ),
         flow=flow,
         label=label,
@@ -232,7 +236,7 @@ def test_sector_svd_truncates_globally_not_per_sector():
     # Global truncation: the retained values are exactly the top chi of the
     # union over sectors.  A per-sector rule would keep chi/n_sectors each.
     kept = sorted(
-        (float(s) for q in layout.charges for s in sectors[q].s[: layout.dims[q]]),
+        (float(s) for q in layout.sectors for s in sectors[q].s[: layout.dim_of(q)]),
         reverse=True,
     )
     every = sorted(
@@ -244,9 +248,9 @@ def test_sector_svd_truncates_globally_not_per_sector():
 def test_sector_svd_null_space_is_the_exact_complement():
     m = _matrix_tensor()
     sectors, layout = sector_svd(m, 6, row_axis=1, col_axis=0)
-    for q in layout.charges:
+    for q in layout.sectors:
         blk = sectors[q]
-        k = layout.dims[q]
+        k = layout.dim_of(q)
         u_star, u_perp = blk.U[:, :k], blk.U[:, k:]
         assert float(jnp.max(jnp.abs(u_star.conj().T @ u_perp))) < 1e-12
         # U_perp must actually span the rest, not be empty by accident.
@@ -260,8 +264,8 @@ def test_sector_svd_floors_against_the_global_maximum():
     m = _matrix_tensor()
     sectors, layout = sector_svd(m, 6, row_axis=1, col_axis=0)
     biggest = max(float(sectors[q].s[0]) for q in sectors)
-    for q in layout.charges:
-        k = layout.dims[q]
+    for q in layout.sectors:
+        k = layout.dim_of(q)
         assert float(jnp.min(sectors[q].S_keep_diag[:k])) >= 1e-12 * biggest * 0.5
 ```
 
@@ -344,7 +348,7 @@ def sector_svd(
     dims: dict[int, int] = {q: 0 for q in raw}
     for _sv, q, _i in ranked[: int(chi)]:
         dims[q] += 1
-    layout = BondLayout(dims=dims)
+    layout = BondLayout.from_dims(dims)
 
     biggest = max((float(raw[q][1][0]) for q in raw), default=0.0)
     floor = floor_rtol * biggest
@@ -561,7 +565,7 @@ def _site_tensor(seed: int = 0) -> SymmetricTensor:
         sectors=np.array([-1, 1]),
         multiplicities=np.array([1, 1]),
         flow=FlowDirection.OUT,
-        label="p",
+        label="phys",
     )
 
     def virt(flow, lbl):
@@ -867,7 +871,7 @@ def test_projector_closure_is_the_identity_per_sector():
     assert len(projs) == 4
     for k in range(4):
         p = projs[k]
-        for q, k_q in p.layout.dims.items():
+        for q, k_q in p.layout.dims:
             if k_q == 0:
                 continue
             closure = p.P_right[q] @ p.P_left[q]
@@ -962,8 +966,8 @@ def all_projectors_sym(env: SymEnv, a: SymmetricTensor, chi: int, prev=None):
         bot_blocks = _sector_blocks(bot)
 
         S = {}
-        for q in layout.charges:
-            k_q = layout.dims[q]
+        for q in layout.sectors:
+            k_q = layout.dim_of(q)
             s_k = sectors[q].S_keep_diag[:k_q]
             S[q] = jnp.diag(
                 s_k / (jnp.linalg.norm(s_k) + 1e-300)
@@ -971,8 +975,8 @@ def all_projectors_sym(env: SymEnv, a: SymmetricTensor, chi: int, prev=None):
         inv = sector_map(_inv_sqrt, S)
 
         P_left, P_right, U_out, Vh_out = {}, {}, {}, {}
-        for q in layout.charges:
-            k_q = layout.dims[q]
+        for q in layout.sectors:
+            k_q = layout.dim_of(q)
             blk = sectors[q]
             pl = bot_blocks[q] @ blk.Vh[:k_q].conj().T @ inv[q]
             pr = inv[q] @ (blk.U[:, :k_q].conj().T @ top_blocks[q])
@@ -1256,7 +1260,7 @@ def test_apply_bond_matrix_acts_only_on_the_chi_factor():
     env, a = init_env_sym(A, chi=4)
     quad = upper_left_quadrant_sym(env, a)
     layout = all_projectors_sym(env, a, chi=4)[0].layout
-    eye = {q: jnp.eye(layout.dims[q]) for q in layout.charges}
+    eye = {q: jnp.eye(layout.dim_of(q)) for q in layout.sectors}
     same = apply_bond_matrix(quad, eye, axis=2)
     assert float(jnp.max(jnp.abs(same.todense() - quad.todense()))) < 1e-12
 ```
@@ -1450,16 +1454,16 @@ def test_a_wrong_bond_layout_breaks_the_root():
     assert residual < 1e-10
 
     layout = projs[0].layout
-    charges = layout.charges
-    assert len(charges) >= 2, "need >=2 populated sectors for this test"
+    sectors = layout.sectors
+    assert len(sectors) >= 2, "need >=2 populated sectors for this test"
     bad = dict(layout.dims)
-    bad[charges[0]] -= 1
-    bad[charges[1]] += 1
+    bad[sectors[0]] -= 1
+    bad[sectors[1]] += 1
     assert sum(bad.values()) == layout.total
 
     with pytest.raises(Exception):
         _root, bad_residual = root_parametrize_sym(
-            env, a, chi=4, prev_projs=projs, layout_override=BondLayout(dims=bad)
+            env, a, chi=4, prev_projs=projs, layout_override=BondLayout.from_dims(bad)
         )
         assert bad_residual > 1e-6, (
             "a wrong layout produced a valid root; the bookkeeping is inert"
@@ -1574,7 +1578,7 @@ source function and line range and lists the substitutions, because these are *p
 reviewed code*, and retyping them here would invite drift from the reference that is the
 actual specification.
 
-**Type consistency.** `BondLayout(dims=...)` with `.total` / `.charges` throughout.
+**Type consistency.** `BondLayout.from_dims(...)` with `.total` / `.sectors` / `.dim_of(q)` throughout.
 `sector_svd(matrix, chi, *, row_axis, col_axis)` returns `(dict[int, SectorSVD],
 BondLayout)` — used consistently in Tasks 2, 3, 6. `SectorSVD` fields `U, s, Vh,
 S_keep_diag, row_key, col_key` — `S_keep_diag` used in Tasks 2 and 6. `SymProjectors`
