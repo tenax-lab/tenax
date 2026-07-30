@@ -513,6 +513,9 @@ def test_gradient_entry_point_reports_clean_diagnostics():
     assert info["root_residual"] < 1e-10, info
     assert info["covariant_residual"] < 1e-10, info
     assert info["adjoint_residual"] < 1e-8, info
+    # Identically zero for a real state — the phase tangent is imaginary and the
+    # cotangent is real — but the key has to be there for anything to watch it.
+    assert info["gauge_consistency"] < 1e-10, info
 
 
 def test_the_energy_is_invariant_under_the_bond_gauge():
@@ -829,3 +832,364 @@ def test_covariant_characteristic_equations_vanish_at_the_root():
     )
     total = float(jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(R))))
     assert total < 1e-10, total
+
+
+# ------------------------------------------------------------------ #
+# Complex states (#721)                                               #
+# ------------------------------------------------------------------ #
+#
+# Every test above runs on a *real* site tensor, and real data hides a whole
+# class of defect: a real tensor times ``exp(i theta)`` leaves the manifold, so
+# the environment's global phase gauge is invisible, and any variable that is
+# real only because it happens to be (singular values) never has to admit that
+# it is a complex unknown.  Complex tensors are the production regime for
+# iPEPS, so #721 covers them here.
+
+
+def _complex_site_tensor(D=2, d=2, seed=42, imag_seed=7, scale=0.25):
+    """The real test state plus an imaginary part, renormalised.
+
+    Same construction as ``docs/plans/reference/718-codex-review-checks.py`` so
+    the numbers in #721 stay comparable.
+    """
+    A = _site_tensor(D=D, d=d, seed=seed)
+    rng = np.random.RandomState(imag_seed)
+    base = np.asarray(A.todense())
+    data = base + scale * 1j * rng.standard_normal(base.shape)
+    data = jnp.asarray(data / np.linalg.norm(data))
+    return DenseTensor(data, A.indices)
+
+
+def _converged_complex_root(chi=4):
+    A = _complex_site_tensor()
+    env, a, info, projs = M.converge(
+        A, chi, max_iter=400, conv_tol=1e-13, return_projectors=True
+    )
+    assert info["converged"], info
+    root, residual = M.asym_root_parametrize(
+        env, a, chi, prev_projs=projs, polish_steps=30
+    )
+    return A, a, root, residual
+
+
+_ENV_NAMES = ("C1", "C2", "C3", "C4", "T1", "T2", "T3", "T4")
+
+
+def test_the_energy_is_invariant_under_every_environment_phase():
+    """A phase on any environment tensor cannot move the energy.
+
+    The RDM is one network, so a phase on any tensor in it is an overall complex
+    scalar on ``rho`` — and the energy is ``tr(rho H)/tr(rho)``, a ratio that
+    cancels any such scalar.  So all eight phases are separately free, not just
+    their sum.
+
+    #721 doubted this, and doubting it was reasonable: before
+    :func:`M.swap_env_convention` landed (#718) the energy moved by -7.9e-2 per
+    radian of the global phase.  A mis-glued network breaks the ket/bra
+    conjugation structure, so the raw RDM is genuinely non-Hermitian, and
+    ``_rdm2x1_tensor`` symmetrises *before* it divides by the trace — which
+    turns ``Herm(e^{i.phi} R)`` into ``cos(phi) H + sin(phi) iK`` and leaks the
+    anti-Hermitian part ``K`` into the energy as a physical-looking shift.  Glued
+    correctly, ``R`` is Hermitian up to one complex scalar and the ordering
+    stops mattering.
+
+    This is load bearing twice over.  Each of these phases is an exact null
+    direction of ``d_y F`` (see below), so the adjoint system is singular; it is
+    solvable only because ``E`` is invariant along every one of them.
+    """
+    A = _complex_site_tensor()
+    chi = 4
+    gate = _gate(1.0)
+    env, _a, info = M.converge(A, chi, max_iter=400, conv_tol=1e-13)
+    assert info["converged"], info
+    template = initialize_ctm_tensor_env(A, chi)
+
+    def energy_at(theta, which):
+        rot = M.AsymEnv(
+            *[
+                jnp.exp(1j * theta) * t if n in which else t
+                for n, t in zip(_ENV_NAMES, env)
+            ]
+        )
+        return float(jnp.real(M.asym_energy(A, rot, template, gate)))
+
+    base = energy_at(0.0, ())
+    assert abs(base) > 1e-3, base
+    for which in [(n,) for n in _ENV_NAMES] + [_ENV_NAMES]:
+        for theta in (0.2, 0.7, float(np.pi / 2)):
+            moved = energy_at(theta, which)
+            assert abs(moved - base) < 1e-11, (which, theta, moved - base)
+
+
+def test_characteristic_equations_hold_at_a_complex_root():
+    """All twenty residuals vanish for a complex state, not just a real one.
+
+    The environment and the root have to be in the *same* bond gauge, and
+    ``asym_root_parametrize`` used to throw the forward chain away and re-pin
+    from cold.  A real state survives that — its bond gauge is a sign, and one
+    sweep reproduces it exactly, which is why the polish loop drops from 1.3e-3
+    to 1.6e-17 in a single step.  A complex state does not: the gauge is a
+    continuous phase, and the corner residual plateaus at 5.8e-5 while the edges
+    fall geometrically past 1e-8.  Corners are where it shows because the corner
+    is the only equation built from two directions' projectors, so it is the
+    only one that sees a *relative* bond phase.
+    """
+    A, a, root, residual = _converged_complex_root()
+    chi = root.env.C1.shape[0]
+    assert jnp.iscomplexobj(root.env.C1)
+    assert residual < 1e-12, residual
+
+    R_env, R_u, R_S, R_v = M.asym_characteristic_residual(root.y, a, root, chi)
+    for name in ("C1", "C2", "C3", "C4", "T1", "T2", "T3", "T4"):
+        assert float(jnp.linalg.norm(getattr(R_env, name))) < 1e-12, name
+    for k in range(4):
+        assert float(jnp.linalg.norm(R_u[k])) < 1e-12, f"R_u[{k}]"
+        assert float(jnp.linalg.norm(R_S[k])) < 1e-12, f"R_S[{k}]"
+        assert float(jnp.linalg.norm(R_v[k])) < 1e-12, f"R_v[{k}]"
+
+
+def test_the_singular_values_are_a_complex_unknown():
+    """``S`` has to carry the environment's dtype, not the SVD's.
+
+    ``jnp.linalg.svd`` returns real singular values, so ``S`` came out
+    ``float64`` even for a ``complex128`` environment.  Two consequences, one
+    cosmetic and one fatal: ``R_S = core/lambda - S`` compares a complex matrix
+    against a real one, and — because the energy's cotangent inherits the
+    primal's dtype — the adjoint solve then hands ``vjp_y`` a ``float64`` block
+    where ``F`` produced ``complex128`` and JAX refuses outright.
+
+    This is the same argument that already promoted ``S`` from a diagonal to a
+    full ``chi x chi`` block, one axis further along: the reverse pass needs
+    ``S`` free to leave the reals, whatever the forward pass happens to put
+    there.
+    """
+    A = _complex_site_tensor()
+    chi = 4
+    env, a, _info = M.converge(A, chi, max_iter=400, conv_tol=1e-13)
+    for _pt, _pb, _U, S_keep, _Vh in M.all_projectors(env, a, chi):
+        assert jnp.iscomplexobj(S_keep), S_keep.dtype
+        # Still the SVD's real spectrum, only widened.
+        assert float(jnp.linalg.norm(jnp.imag(S_keep))) < 1e-300
+
+
+def test_gradient_parity_for_a_complex_state():
+    """End to end on a complex state: 2.5e-12 against explicit backprop.
+
+    The sweep count is the whole subtlety here.  The reference differentiates a
+    *truncated* sweep map, so it approaches the fixed-point gradient only as
+    fast as the CTM itself converges, and this state needs 53 forward iterations
+    where the real one needs 25.  At 12 sweeps — enough for the real state to
+    reach 4e-8 — the complex state sits at 2.1e-5, and finite differences agree
+    with the reference to four digits at two step sizes, so the gap reads
+    convincingly like a wrong gradient.  It is not: 20 sweeps gives 2.1e-7, 30
+    gives 6.9e-10, 40 gives 2.5e-12, each step matching the previous
+    reference-to-reference drift.  Do not "fix" a discrepancy here by hunting in
+    the adjoint before ruling the sweep count out.
+    """
+    A = _complex_site_tensor()
+    chi = 4
+    gate = _gate(1.0)
+    A_data = A.todense()
+
+    _energy, grad, info = M.asym_root_implicit_energy_and_grad(
+        A, gate, chi=chi, max_iter=400, conv_tol=1e-13, return_diagnostics=True
+    )
+    assert bool(jnp.all(jnp.isfinite(grad)))
+    assert jnp.iscomplexobj(grad)
+    assert info["converged"], info
+    assert info["root_residual"] < 1e-10, info
+    assert info["covariant_residual"] < 1e-10, info
+    assert info["adjoint_residual"] < 1e-8, info
+    assert info["gauge_consistency"] < 1e-10, info
+
+    env0, _a, _m = M.converge(A, chi, max_iter=400, conv_tol=1e-13)
+    template = initialize_ctm_tensor_env(A, chi)
+
+    def energy_explicit(pdata):
+        A_live = DenseTensor(pdata, A.indices)
+        a_live = _a_array(A_live)
+        env, projs = env0, None
+        for _ in range(40):
+            env, projs = M.sweep(env, a_live, chi, projs)
+        return jnp.real(M.asym_energy(A_live, env, template, gate))
+
+    g_ref = jax.grad(energy_explicit)(A_data)
+    assert bool(jnp.all(jnp.isfinite(g_ref))), "explicit backprop NaN'd; use FD instead"
+    rel = float(jnp.linalg.norm(grad - g_ref) / jnp.linalg.norm(g_ref))
+    assert rel < 1e-9, rel
+
+
+def test_the_environment_phases_are_licensed_gauges_of_the_root():
+    """The phase orbits are null directions of ``d_y F`` — and harmless ones.
+
+    ``F`` is phase-*covariant*, not phase-invariant, and the counting is exact.
+    An enlarged corner carries three environment tensors, so
+    ``EC -> e^{3i.theta}`` under a global phase, hence ``C_new -> e^{9i.theta}``
+    against ``lambda_C -> e^{8i.theta}``; the edge block goes ``e^{7i.theta}``
+    over ``e^{6i.theta}``.  But the mechanism is more general than the global
+    phase, because the normalisation is a *ratio*: ``X'/<X, X'>`` is invariant
+    under any phase on ``X'`` whatever, and picks up ``e^{i.gamma}`` from ``X``
+    alone, so ``R = X'/<X, X'> - X`` is covariant under a phase on **each**
+    environment tensor separately.  ``R_u``, ``R_S`` and ``R_v`` are ratios too
+    and are invariant outright.  So all eight phases are null directions, the
+    root is an eight-parameter family at least, and the implicit function
+    theorem does not apply as literally written.
+
+    Nothing is broken by that, and #721 filed it as a defect on the strength of
+    a mis-conjugated pairing.  Two conditions make the singular system fine, and
+    both are checked here:
+
+    * ``ў`` must be orthogonal to every null direction, or the adjoint system is
+      inconsistent and has no solution at all.  It is, because the energy is
+      invariant along each of them —
+      ``test_the_energy_is_invariant_under_every_environment_phase``, transported
+      to the cotangent.
+    * the leftover freedom in ``F̆`` must not reach the gradient.  It does not:
+      differentiating ``F(y*(p), p) = 0`` gives ``d_p F = -d_y F . d_p y*``, so
+      ``d_p F`` lands in the *range* of ``d_y F``, and the freedom is orthogonal
+      to that range.
+
+    The second one has to be tested on the operator that is actually inverted,
+    ``B(v) = vjp_y(v)``, and not on ``jacfwd(F)`` transposed: JAX's VJP for a
+    complex function is not the plain transpose of its JVP, so the null space of
+    ``jacfwd(F)^T`` is the wrong subspace and reports a 24% gradient change.
+    Against ``null(B)`` the same check gives 6e-15.
+
+    Both Jacobians come out with nullity 12 rather than 8, so there are four
+    more gauge directions than the eight phases named above.  They are not
+    chased here: whatever they are, the two conditions hold on all twelve, which
+    is what the gradient needs.
+    """
+    from tenax.algorithms._ctm_c4v_root_implicit import (
+        _from_real_vec,
+        _real_struct,
+        _solve_root_adjoint,
+        _to_real_vec,
+    )
+
+    A, a, root, _res = _converged_complex_root()
+    chi = root.env.C1.shape[0]
+    gate = _gate(1.0)
+    root = M.asym_root_to_covariant_convention(root)
+    S = _root_S(root)
+    tilde = M.remove_inverse_roots(root.env, S)
+    y_star = (tilde, root.u, S, root.v)
+    A_data = A.todense()
+    template = initialize_ctm_tensor_env(A, chi)
+
+    def F_of_y(y):
+        return M.asym_characteristic_residual_covariant(y, a, root, chi)
+
+    def nrm(t):
+        return float(
+            jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(t)))
+        )
+
+    def rpair(x, y):
+        return float(
+            jnp.real(
+                sum(
+                    jnp.sum(p * q)
+                    for p, q in zip(jax.tree.leaves(x), jax.tree.leaves(y))
+                )
+            )
+        )
+
+    zeros = (
+        tuple(jnp.zeros_like(x) for x in root.u),
+        tuple(jnp.zeros_like(x) for x in S),
+        tuple(jnp.zeros_like(x) for x in root.v),
+    )
+
+    def phase_tangent(which):
+        """``i * tilde`` on the named tensors, zero everywhere else."""
+        return (
+            M.AsymEnv(
+                *[
+                    1j * x if n in which else jnp.zeros_like(x)
+                    for n, x in zip(_ENV_NAMES, tilde)
+                ]
+            ),
+            *zeros,
+        )
+
+    tangents = [phase_tangent({n}) for n in _ENV_NAMES] + [phase_tangent(_ENV_NAMES)]
+
+    # 1. every phase is a null direction, by a wide margin against a random one
+    _F0, jvp = jax.linearize(F_of_y, y_star)
+    rng = np.random.RandomState(5)
+    random_dir = jax.tree.map(
+        lambda x: jnp.asarray(
+            rng.standard_normal(x.shape) + 1j * rng.standard_normal(x.shape)
+        ).astype(x.dtype),
+        y_star,
+    )
+    scale = nrm(tangents[0]) / nrm(random_dir)
+    random_dir = jax.tree.map(lambda x: x * scale, random_dir)
+    assert nrm(jvp(random_dir)) / nrm(random_dir) > 1.0, nrm(jvp(random_dir))
+    for t, name in zip(tangents, (*_ENV_NAMES, "global")):
+        assert nrm(jvp(t)) / nrm(t) < 1e-10, (name, nrm(jvp(t)) / nrm(t))
+
+    # 2. the adjoint system is consistent against every one of them
+    def energy_of(a_data, env_tilde, S_all):
+        A_live = DenseTensor(a_data, A.indices)
+        return M.asym_energy(
+            A_live, M.absorb_inverse_roots(env_tilde, S_all), template, gate
+        )
+
+    energy, vjp_energy = jax.vjp(energy_of, A_data, tilde, S)
+    grad_direct, tilde_bar, S_bar = vjp_energy(jnp.ones((), dtype=energy.dtype))
+    y_bar = (tilde_bar, zeros[0], S_bar, zeros[2])
+    for t, name in zip(tangents, (*_ENV_NAMES, "global")):
+        cos = abs(rpair(y_bar, t)) / (nrm(y_bar) * nrm(t))
+        assert cos < 1e-12, (name, cos)
+
+    # 3. the Jacobian really is rank deficient, and the phases live in its kernel
+    _leaves, treedef = jax.tree.flatten(y_star)
+    struct = _real_struct(y_star)
+
+    def f_real(vec):
+        return _to_real_vec(F_of_y(_from_real_vec(vec, treedef, struct)))
+
+    J = jax.jacfwd(f_real)(_to_real_vec(y_star))
+    _Uj, s_j, Vh_j = jnp.linalg.svd(J)
+    nullity = int(jnp.sum(s_j / s_j[0] < 1e-10))
+    assert nullity == 12, (nullity, [float(x) for x in (s_j / s_j[0])[-14:]])
+    kernel = Vh_j[-nullity:].conj().T
+    phases = jnp.stack([_to_real_vec(phase_tangent({n})) for n in _ENV_NAMES], axis=1)
+    Q, _R = jnp.linalg.qr(phases)
+    cosines = jnp.linalg.svd(Q.T @ kernel, compute_uv=False)
+    assert float(jnp.min(cosines)) > 1 - 1e-8, [float(x) for x in cosines]
+
+    # 4. the freedom in F̆ does not reach the gradient
+    _F_at_root, vjp_y = jax.vjp(F_of_y, y_star)
+    F_bar, solve_resid = _solve_root_adjoint(
+        lambda v: vjp_y(v)[0], y_bar, tol=1e-10, maxiter=400, restart=30
+    )
+    assert float(solve_resid) < 1e-8, float(solve_resid)
+
+    def F_of_p(a_data):
+        A_live = DenseTensor(a_data, A.indices)
+        return M.asym_characteristic_residual_covariant(
+            y_star, _a_array(A_live), root, chi
+        )
+
+    _, vjp_p = jax.vjp(F_of_p, A_data)
+    grad = grad_direct - vjp_p(F_bar)[0]
+    grad_scale = float(jnp.linalg.norm(grad))
+
+    bar_leaves, bar_treedef = jax.tree.flatten(y_bar)
+    bar_struct = _real_struct(y_bar)
+    del bar_leaves
+
+    def B_real(vec):
+        return _to_real_vec(vjp_y(_from_real_vec(vec, bar_treedef, bar_struct))[0])
+
+    B = jax.jacfwd(B_real)(_to_real_vec(y_bar))
+    _Ub, s_b, Vh_b = jnp.linalg.svd(B)
+    nullity_b = int(jnp.sum(s_b / s_b[0] < 1e-10))
+    assert nullity_b == 12, (nullity_b, [float(x) for x in (s_b / s_b[0])[-14:]])
+    for j in range(nullity_b):
+        n_tree = _from_real_vec(Vh_b[-(j + 1)].conj(), bar_treedef, bar_struct)
+        leak = float(jnp.linalg.norm(vjp_p(n_tree)[0])) / grad_scale
+        assert leak < 1e-10, (j, leak)

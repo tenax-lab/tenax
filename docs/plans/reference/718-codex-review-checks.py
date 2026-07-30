@@ -1,5 +1,28 @@
 """Both Codex claims, with the dtype reality accounted for.
 
+SUPERSEDED — kept as the record of what #719/#720/#721 actually ran.  Two of the
+numbers below are wrong, and the corrected checks live in
+``tests/test_ctm_root_implicit_asym.py`` under the "Complex states (#721)"
+heading.  What was wrong:
+
+  * ``pair`` and ``inner`` use ``Re sum(conj(g) * delta)``.  For a real-valued
+    function of a complex input JAX's cotangent is already conjugated, so the
+    directional derivative is ``Re sum(g * delta)`` with no further conjugation.
+    That is why ``<null_dir, y_bar>`` reads 2.6e-2 when the true pairing is
+    -1.5e-16 and the adjoint system is consistent.  (It makes no difference to
+    the real-state Eq. 88 check, where ``conj`` is a no-op.)
+  * the ``alpha`` sweep at the end perturbs ``F_bar`` along a *right* null
+    direction of ``d_yF``.  The freedom in ``F_bar`` is the null space of the
+    operator actually inverted, ``B(v) = vjp_y(v)``, which is not
+    ``jacfwd(F)`` transposed under JAX's complex VJP convention.  Against
+    ``null(B)`` the leak is 6e-15, not 15%.
+
+The dtype crash (claim 3) was real and is fixed.  ``dE/dtheta = -7.9e-2`` was
+also real when this was written and is now 1e-14: it predates the
+``swap_env_convention`` fix in 30a2e4a, and the residual ordering bug it
+depended on — symmetrising the RDM before trace-normalising it — is fixed in
+``_normalise_rdm``.
+
 The existing test state is REAL (every leaf of y* is float64), so:
   * #719's phase null direction cannot exist there -- a real tensor times
     exp(i.theta) leaves the manifold -- but it should appear for a complex state,

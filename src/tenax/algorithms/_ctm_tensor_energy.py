@@ -28,6 +28,35 @@ from tenax.core import EPS
 from tenax.core.tensor import Tensor
 
 
+def _normalise_rdm(mat: jax.Array) -> jax.Array:
+    """Trace-normalise a raw RDM matrix, *then* symmetrise it.
+
+    The order is not cosmetic.  Every environment tensor carries an arbitrary
+    complex phase — a gauge of the CTM, fixed by nothing in the sweep — so the
+    raw RDM network is only ever defined up to an overall complex scalar.
+    Dividing by the trace cancels that scalar exactly, and symmetrising a
+    gauge-independent object is gauge-independent in turn.
+
+    Symmetrising first does not survive it.  Writing the raw RDM as ``H + K``
+    with ``H`` Hermitian and ``K`` anti-Hermitian,
+
+        Herm(e^{i.phi} (H + K)) = cos(phi) H + sin(phi) iK,
+
+    so the phase mixes the anti-Hermitian part into the result with weight
+    ``sin(phi)`` and rescales the physical part by ``cos(phi)``.  A converged
+    environment has ``|K|/|H| ~ 1e-14``, which hides this for generic ``phi``,
+    but at ``phi = pi/2`` the ``cos`` kills ``H`` outright and the energy is
+    computed entirely from the numerical noise in ``K``: on the #721 complex
+    test state a phase of ``pi/2`` on ``C1`` alone moved the energy by 5.4e-3
+    while a phase of 0.7 moved it by 1e-14.
+
+    For real data the two orders agree identically — ``tr Herm(R) = tr R`` — so
+    this changes nothing on any real-tensor path.
+    """
+    mat = mat / (jnp.trace(mat) + EPS)
+    return 0.5 * (mat + mat.conj().T)
+
+
 def _rdm_1site_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     """Single-site RDM using label-based Tensor contractions.
 
@@ -78,8 +107,7 @@ def _rdm_1site_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     )
 
     rdm = rdm_t.todense()
-    rdm = 0.5 * (rdm + rdm.conj().T)
-    rdm = rdm / (jnp.trace(rdm) + EPS)
+    rdm = _normalise_rdm(rdm)
     return rdm
 
 
@@ -186,8 +214,7 @@ def _rdm_diagonal_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -308,8 +335,7 @@ def _rdm_diagonal_tensor_4site(
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -398,8 +424,7 @@ def _rdm2x1_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -487,8 +512,7 @@ def _rdm1x2_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -593,8 +617,7 @@ def _rdm2x1_tensor_2site(
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -678,8 +701,7 @@ def _rdm1x2_tensor_2site(
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 
