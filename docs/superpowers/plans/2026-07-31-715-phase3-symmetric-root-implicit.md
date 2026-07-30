@@ -21,6 +21,7 @@ These were run against the working tree, not assumed. Do not re-litigate them:
 - **Per-sector full SVD + global top-chi truncation works**: on a 4-leg enlarged corner with sector sizes `n_q = (4, 6, 4)`, chi=6 gives layout `{-1: 2, 0: 2, 1: 2}` summing exactly to 6, with `|U*^dag U_perp| ~ 1e-16` per sector.
 - **Reassembly works**: build the truncated bond `TensorIndex` from the layout and call `SymmetricTensor._from_blocks_unchecked(blocks, indices)`; `_validate()` passes. Block keys are *charge values* per axis, and the constraint is that flow-weighted charges fuse to zero.
 - **The contractor applies no Koszul signs** (`contractor.py:691-699`) because planar diagrams have no physical line crossings. CTM networks are planar.
+- **`initialize_ctm_tensor_env` works for U(1) at D=2 and fails at D=3.** At D=3 it raises `ValueError: data.shape (4, 4, 4) does not match index dims (4, 9, 4)` — #667's one-`ref_axis`-per-corner bug. Z2 works at both. So the test site tensor is U(1) at D=2, which still fragments (fused-leg multiplicities `[1, 2, 1]`). Do not "fix" this inside Phase 3.
 
 ## File Structure
 
@@ -535,13 +536,23 @@ from tenax.algorithms._ctm_root_implicit_symmetric import (
 )
 
 
-def _site_tensor(seed: int = 0, d: int = 2, D: int = 2) -> SymmetricTensor:
+def _site_tensor(seed: int = 0) -> SymmetricTensor:
     """A U(1) iPEPS site tensor with non-trivial charges on every leg.
 
     Non-trivial deliberately: a trivial-charge tensor has one block, so every
-    layout bug is invisible.  Sector sizes are unequal, which is the
-    fragmenting case (#566's D-parity finding) and the only one that
-    exercises the layout arithmetic.
+    layout bug is invisible.  The fused ``D**2`` leg comes out with sector
+    multiplicities ``[1, 2, 1]`` — *unequal*, which is the fragmenting case
+    (#566's D-parity finding) and the only one that exercises the layout
+    arithmetic.
+
+    **D=2 with virtual sectors [0, 1], not D=3 with [-1, 0, 1].** Verified
+    2026-07-31: at D=3 ``initialize_ctm_tensor_env`` raises
+    ``ValueError: data.shape (4, 4, 4) does not match index dims (4, 9, 4)``.
+    That is #667 — ``_CORNER_SPECS`` gives one ``ref_axis`` per corner, so an
+    env leg's charges are derived from a direction it does not physically
+    touch.  It is a real production coverage gap, not a defect in this port,
+    and the design doc defers it to follow-up slice 3.  D=2 initialises
+    cleanly and still fragments, so the coverage goal survives.
     """
     sym = U1Symmetry()
     phys = TensorIndex(
@@ -555,8 +566,8 @@ def _site_tensor(seed: int = 0, d: int = 2, D: int = 2) -> SymmetricTensor:
     def virt(flow, lbl):
         return TensorIndex(
             symmetry=sym,
-            sectors=np.array([-1, 0, 1]),
-            multiplicities=np.array([1, 1, 1])[:D] if D < 3 else np.array([1, 1, 1]),
+            sectors=np.array([0, 1]),
+            multiplicities=np.array([1, 1]),
             flow=flow,
             label=lbl,
         )
@@ -682,10 +693,10 @@ def init_env_sym(A: Tensor, chi: int) -> tuple[SymEnv, SymmetricTensor]:
 Run: `JAX_PLATFORMS=cpu uv run pytest tests/test_ctm_root_implicit_symmetric.py -v`
 Expected: PASS, 2 passed
 
-If `initialize_ctm_tensor_env` raises on the U(1) site tensor, reduce to `ZnSymmetry(2)`
-for this task and record it — the design flags U(1) non-trivial charges as a known
-production coverage gap; the *forward init* must still work, so an exception here is a
-finding worth filing, not a reason to densify.
+`initialize_ctm_tensor_env` is already known to work on `_site_tensor()` as defined above
+(verified 2026-07-31). If you change the site tensor's virtual dimension to D=3 it will
+raise `ValueError: data.shape (4, 4, 4) does not match index dims (4, 9, 4)` — that is
+#667, a production gap, not something to work around here. Keep D=2.
 
 - [ ] **Step 5: Commit**
 
