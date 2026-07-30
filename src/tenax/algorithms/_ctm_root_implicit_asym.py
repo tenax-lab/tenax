@@ -983,26 +983,55 @@ def asym_root_implicit_energy_and_grad(
             stacklevel=2,
         )
 
+    # §V.3 works in the modified variables, and indexes its cuts by the upper
+    # half of the plane rather than the left half the forward sweep uses.
+    root_cov = asym_root_to_covariant_convention(root)
+    S_star = root_cov.s
+    tilde = remove_inverse_roots(root_cov.env, S_star)
+    y_star = (tilde, root_cov.u, S_star, root_cov.v)
+
     template = initialize_ctm_tensor_env(A_const, chi)
     A_data = jnp.asarray(A.todense())
 
-    def energy_of(a_data, env_arrays):
+    # The energy is a function of the *regular* environment, so the last step
+    # of the forward pass is the Eq. 82 absorption; differentiating through it
+    # is what gives ``S`` an adjoint at all.  ``e`` depends on ``S`` only this
+    # way, and setting that adjoint to zero — which is what happens if ``F``
+    # is written in the regular variables — is the #718 bug: ``|S̆|`` comes out
+    # the same order as ``|C̆|``, not negligible.
+    def energy_of(a_data, env_tilde, S_all):
         A_live = DenseTensor(a_data, A.indices)
-        return asym_energy(A_live, env_arrays, template, gate)
+        return asym_energy(
+            A_live, absorb_inverse_roots(env_tilde, S_all), template, gate
+        )
 
-    energy, vjp_energy = jax.vjp(energy_of, A_data, root.env)
-    grad_direct, env_bar = vjp_energy(jnp.ones((), dtype=energy.dtype))
+    energy, vjp_energy = jax.vjp(energy_of, A_data, tilde, S_star)
+    grad_direct, tilde_bar, S_bar = vjp_energy(jnp.ones((), dtype=energy.dtype))
+    # ``u`` and ``v`` carry no cotangent: the energy does not see the
+    # null-space coordinates, only their effect through the root.
     y_bar = (
-        env_bar,
-        tuple(jnp.zeros_like(x) for x in root.u),
-        tuple(jnp.zeros_like(x) for x in root.s),
-        tuple(jnp.zeros_like(x) for x in root.v),
+        tilde_bar,
+        tuple(jnp.zeros_like(x) for x in root_cov.u),
+        S_bar,
+        tuple(jnp.zeros_like(x) for x in root_cov.v),
     )
 
     def F_of_y(y):
-        return asym_characteristic_residual(y, a_arr, root, chi)
+        return asym_characteristic_residual_covariant(y, a_arr, root_cov, chi)
 
-    _, vjp_y = jax.vjp(F_of_y, root.y)
+    F_at_root, vjp_y = jax.vjp(F_of_y, y_star)
+    covariant_residual = float(
+        jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(F_at_root)))
+    )
+    if covariant_residual > root_residual_warn:
+        warnings.warn(
+            f"Asymmetric root implicit AD: the covariant ‖F(y*)‖ = "
+            f"{covariant_residual:.3e} exceeds {root_residual_warn:.1e}. The "
+            "gradient solves the adjoint of equations that y* does not "
+            "satisfy, so it is correspondingly inaccurate.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     F_bar, solve_resid = _solve_root_adjoint(
         lambda v: vjp_y(v)[0],
         y_bar,
@@ -1017,7 +1046,7 @@ def asym_root_implicit_energy_and_grad(
         labels = list(a_t.labels())
         perm = tuple(labels.index(lbl) for lbl in ("u2", "d2", "l2", "r2"))
         a_live = a_t.transpose(perm).todense()
-        return asym_characteristic_residual(root.y, a_live, root, chi)
+        return asym_characteristic_residual_covariant(y_star, a_live, root_cov, chi)
 
     _, vjp_p = jax.vjp(F_of_p, A_data)
     grad = grad_direct - vjp_p(F_bar)[0]
@@ -1029,6 +1058,7 @@ def asym_root_implicit_energy_and_grad(
             {
                 **meta,
                 "root_residual": root_residual,
+                "covariant_residual": covariant_residual,
                 "adjoint_residual": float(solve_resid),
             },
         )

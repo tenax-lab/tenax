@@ -1,5 +1,111 @@
 # #715 Phase 1 completion
 
+> **CAUSE FOUND — 2026-07-30 (supersedes the gauge-covariance claim below).**
+> The implicit machinery is **exact**; the function it differentiates is the wrong one.
+> Along a random direction `dA`:
+>
+> ```
+> FD of G(p) = E at the frozen-c root   = +0.3519056653   (stable, h = 1e-4..1e-6)
+> implicit gradient (IFT)               = +0.3519056655   <- 9-digit match
+> explicit backprop = FD of same map    = +0.3607559898   <- the truth
+> ```
+>
+> So `dG/dp` is computed perfectly and `G(p) != E_true(p)`. The `8.8503e-3` gap is
+> exactly the term the method drops, `dE/dc · dc/dp`, for the frozen
+> `c = (U*, U_perp, Vh*, Vh_perp, s*inv)`.
+>
+> **Three diagnoses are now refuted, in order:**
+> 1. `S̆ = 0` (the filed #718 cause) — fixed in Stage 3, gradient did not improve.
+> 2. Missing §V.3 covariance package — added in Stage 2, `‖F(y*)‖` = 1.7e-14, no help.
+> 3. Gauge covariance — licensed for the **global** gauge (1e-16), *not* per direction.
+>    The earlier ~1e-2 "violation" was a bad projection: every frozen constant carries
+>    the gauge on *two* index kinds, the new bond and the fused cut leg `n = chi·d2`, so
+>    `δU* = U* X − kron(X,I) U*`. Keeping only `U* X` reports 4.0e-3 where the full law
+>    gives 1e-16. **But (Codex review, PR #720) one generator per direction does not
+>    vanish:** directions 0 and 1 give 2e-16 while 2 and 3 give `+2.121e-03` and
+>    `-2.121e-03` — equal and opposite, cancelling exactly in the global sum. So the
+>    global test passes only by cancellation. `2.1e-3` times a `dc/dp` of order 10 is
+>    the right size to feed the 8.85e-3 gap, making this the strongest remaining lead.
+>    Two readings, both open: either the per-direction gauge genuinely is not licensed,
+>    or the `k-1`/`k+1` cut-leg assignment is wrong for directions 2/3, in which case
+>    "X on bond 2 alone" is not a gauge direction at all and only certain combinations
+>    are. The exact antisymmetry between 2 and 3 is what keeps the second reading live.
+>    Gate: `test_each_directional_gauge_is_independently_licensed`.
+>
+> **What is actually left:** a *non-gauge* motion of `c`. Largest non-gauge cotangents
+> are on the null-space bases — `U_perp` 6.4e-4, `Vh_perp` 1.2e-3 — with `U*`/`Vh*`
+> non-gauge parts ~1e-4…9e-4 and `s*inv` exactly zero (2.3e-19). Since `dc/dp` is
+> O(10) (‖ydot‖ = 18.6), those are the right order to explain 8.85e-3. Next step is to
+> find which frozen constant carries it: either enlarge `y` to include the offending
+> one, or add the `dE/dc · dc/dp` correction explicitly.
+>
+> **Methodology warning, learned the hard way.** Do **not** finite-difference the root
+> or the re-converged energy: `asym_root_parametrize` is gauge-*discontinuous* in `p`,
+> so `|ydot_fd|` diverges as `h` shrinks (1.98e4 at h=1e-5, 1.19e5 at h=1e-6) even
+> though every point is a valid root at 1e-16. That is also why the earlier FD of the
+> converged energy gave −0.046 / −0.374 / +32.2. Use the frozen-`c` Newton route
+> (`docs/plans/reference/718-frozenroot.py`), which is gauge-stable by construction.
+>
+> Also verified: the adjoint and forward (JVP) routes agree to 1.6e-15, and `∂_p F` is
+> linearised at exactly the right point (`a_rebuilt − a_arr = 0`), so the assembly is
+> sound. Diagnostics: `718-frozenroot.py`, `718-eq88-gauge.py`, `718-eq88.py`.
+
+> **STAGE 3 DONE, AND IT DID NOT FIX THE GRADIENT — 2026-07-30.** `ў` now carries a
+> nonzero `S̆` built by backpropagating the incoming environment cotangents through
+> Eq. 82 (`absorb_inverse_roots`), exactly as the reference's
+> `leading_boundary_characteristic_pullback` does, and the whole gradient path runs
+> on the covariant parametrisation. All the internal diagnostics are clean:
+>
+> ```
+> covariant ‖F(y*)‖   = 1.7e-14
+> adjoint solve resid = 5.2e-15
+> energy              = matches explicit to 1e-13
+> gradient rel error  = 3.06e-2      (was 2.5e-2)
+> ```
+>
+> So **`S̆ = 0` was not the cause** — that was the filed #718 diagnosis and it is now
+> refuted by construction. The end-to-end number moved slightly the wrong way, which
+> only means the previous 2.5e-2 was accidental: it solved the adjoint of equations
+> its own `y*` did not satisfy.
+>
+> **The defect is gauge covariance, and it is now measured directly.** `dE/dc` for the
+> frozen constants is available for free as `−F̆ ∂_c F` using the `F̆` the gradient
+> already solves for:
+>
+> | frozen constant | ‖dE/dc‖ | as a fraction of ‖grad‖ |
+> |---|---|---|
+> | `U*` | 1.97e-2 | 9.3e-3 |
+> | `Vh*` | 2.02e-2 | 9.5e-3 |
+> | `U_perp` | 6.4e-4 | 3.0e-4 |
+> | `Vh_perp` | 1.2e-3 | 5.6e-4 |
+> | `s*inv` | 2.3e-19 | 1.1e-19 |
+>
+> Eq. 88 only needs the **gauge** component (`dU* = U* X`, `dVh* = X Vh*`) to vanish,
+> and that is precisely where the weight sits — at direction k=2, gauge 1.76e-2 vs
+> non-gauge 1.6e-4, a factor of 110. The non-gauge part being ~100× smaller also
+> confirms `U = U* + U_perp u` is correctly carrying every non-gauge variation.
+>
+> One alternative was checked and refuted: because `Vd[k]` takes its Eq. 73 root from
+> direction `k+1`, the bond index `U*_k` pairs with need not be the one `Vh*_k` pairs
+> with, so the two cotangents might have been separately large but jointly cancelling
+> (their magnitudes are suspiciously similar — 1.76e-2 vs 1.48e-2 at k=2/k=3). Scanning
+> all 12 combinations of index offset, sign and adjoint gives a best of 1.36e-2 against
+> 1.76e-2 for `gU` alone — no cancellation.
+>
+> **↑ The "gauge violation" in this banner is WRONG — see the CAUSE FOUND banner at the
+> top.** All of these numbers come from projecting onto `δU* = U* X`, which is not a
+> gauge direction: it omits the `kron(X,I) U*` piece from the cut leg. Under the full
+> law the violation is 1e-16, so the cancellation scan above was answering a
+> meaningless question. The reasoning is kept only because the arithmetic that
+> establishes the gauge group is still correct and reusable: the Eq. 73 fourth roots,
+> the `/norm`, and `λ = ⟨X, X'⟩` are covariant for a *unitary* `Q` but not a general
+> one, which is why `X` is anti-Hermitian.
+>
+> Also settled: the explicit-backprop reference this is measured against **is**
+> converged — 1e-15 across sweep counts, with n=12 already 3.5e-8 from n=48 — so the
+> 3% is real and not a reference artifact. FD of the re-converged energy is useless
+> here (−0.046 / −0.374 / +32.2 at h = 1e-4/1e-5/1e-6).
+
 > **STAGE 2 DONE — 2026-07-30.** The §V.3 characteristic equations now vanish at
 > the root: `asym_characteristic_residual_covariant` is at ~1e-12 where it was at
 > 1.16e0, gated by

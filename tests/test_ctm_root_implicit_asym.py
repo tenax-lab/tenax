@@ -16,6 +16,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 import tenax.algorithms._ctm_root_implicit_asym as M
+from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
 from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
@@ -192,18 +193,24 @@ def test_no_svd_in_the_differentiated_equations():
 
 @pytest.mark.xfail(
     reason=(
-        "#715 Phase 1 is not finished. Promoting S from a diagonal vector to a "
-        "general matrix, with a genuine matrix inverse square root, took the "
-        "gradient error from 1.2e0 to 1.1e-2..2.5e-2 — the in-space rotation of "
-        "the isometries now has somewhere to go, which is what Eq. 88's "
-        "null-space restriction needs in order to discard a gauge rather than "
-        "a physical contribution. What remains is the rest of paper Eqs. 73-82: "
-        "the modified corners/edges carrying s explicitly on the bonds, and the "
-        "s^L/s^R quartic roots on the *cut legs* of that environment. Putting "
-        "those roots inside the projectors instead was tried and is worse "
-        "(2.0e-1) — their product is not S^-1, so the closure breaks at first "
-        "order in a non-diagonal S. Reference: explicit backprop -0.817381274942, "
-        "itself matching a symmetric finite difference to ten digits."
+        "#715 Phase 1 is not finished: the gradient is 3.06e-2 off. The cause is "
+        "now pinned down, and it is NOT the machinery, which is exact. Along one "
+        "direction: FD of G(p) = E at the frozen-c root gives +0.3519056653 "
+        "(stable over h=1e-4..1e-6) against the implicit +0.3519056655 — a "
+        "9-digit match — while the truth is +0.3607559898 (explicit backprop, "
+        "itself matching FD of the same map to 9 digits). So the implicit path "
+        "differentiates its own function perfectly; that function is just not "
+        "the fixed-point energy. The 8.8503e-3 gap is exactly the dropped "
+        "dE/dc . dc/dp for the frozen c = (U*, U_perp, Vh*, Vh_perp, s*inv). "
+        "Two earlier diagnoses are refuted: S-bar = 0 (fixed, no help) and gauge "
+        "covariance (licensed to 1e-16, see "
+        "test_freezing_the_isometries_is_gauge_licensed). What is left is a "
+        "NON-gauge motion of c; the largest non-gauge cotangents sit on the "
+        "null-space bases, U_perp 6.4e-4 and Vh_perp 1.2e-3. Note that FD of the "
+        "root or of the re-converged energy cannot be used to chase this — "
+        "asym_root_parametrize is gauge-discontinuous in p, so |ydot_fd| diverges "
+        "as h shrinks. Use the frozen-c Newton route, docs/plans/reference/"
+        "718-frozenroot.py."
     ),
     strict=True,
 )
@@ -234,6 +241,229 @@ def test_gradient_parity_needs_the_modified_variables():
     g_ref = jax.grad(energy_explicit)(A.todense())
     rel = float(jnp.linalg.norm(grad - g_ref) / jnp.linalg.norm(g_ref))
     assert rel < 1e-5, rel
+
+
+def test_freezing_the_isometries_is_gauge_licensed():
+    """Eq. 88: freezing ``U*``/``Vh*`` costs nothing along the gauge orbit.
+
+    The implicit gradient holds ``c = (U*, U_perp, Vh*, Vh_perp, s*inv)`` fixed,
+    so it silently drops ``dE/dc · dc/dp``.  Eq. 88 argues that is harmless:
+    ``dc/dp`` is a pure gauge, since ``U = U* + U_perp u`` already carries every
+    non-gauge variation of the retained subspace, and ``E`` is gauge invariant.
+    ``dE/dc`` comes for free as ``-F̆ ∂_c F`` using the same ``F̆`` the gradient
+    already solves for, so this checks the argument directly.
+
+    The gauge direction is the part that is easy to get wrong.  Every frozen
+    constant carries the bond gauge on **two** kinds of index — the new bond
+    (``chi``) and the fused cut leg ``n = chi*d2`` — so for a global unitary
+    ``W = exp(tX)`` with ``X`` anti-Hermitian,
+
+        U*      -> kron(W,I)† U* W          δU*      = U* X - kron(X,I) U*
+        U_perp  -> kron(W,I)† U_perp        δU_perp  =      - kron(X,I) U_perp
+        Vh*     -> W† Vh* kron(W,I)         δVh*     = Vh* kron(X,I) - X Vh*
+        Vh_perp -> Vh_perp kron(W,I)        δVh_perp = Vh_perp kron(X,I)
+        s*inv   -> W† s*inv W               δs*inv   = [s*inv, X]
+
+    Keeping only the ``U* X`` term drops the ``kron(X,I)`` pieces and is then
+    not a gauge direction at all: it reports ~4e-3 on the same data where the
+    full law gives 1e-16, which is how #718 came to be blamed on covariance.
+    """
+    A, a, root = _converged_root()
+    chi = root.env.C1.shape[0]
+    d2 = a.shape[0]
+    root = M.asym_root_to_covariant_convention(root)
+    S = _root_S(root)
+    tilde = M.remove_inverse_roots(root.env, S)
+    y_star = (tilde, root.u, S, root.v)
+
+    template = initialize_ctm_tensor_env(A, chi)
+    gate = _gate(1.0)
+    A_data = A.todense()
+
+    def energy_of(a_data, env_tilde, S_all):
+        A_live = DenseTensor(a_data, A.indices)
+        return M.asym_energy(
+            A_live, M.absorb_inverse_roots(env_tilde, S_all), template, gate
+        )
+
+    energy, vjp_energy = jax.vjp(energy_of, A_data, tilde, S)
+    grad_direct, tilde_bar, S_bar = vjp_energy(jnp.ones((), dtype=energy.dtype))
+    y_bar = (
+        tilde_bar,
+        tuple(jnp.zeros_like(x) for x in root.u),
+        S_bar,
+        tuple(jnp.zeros_like(x) for x in root.v),
+    )
+
+    _, vjp_y = jax.vjp(
+        lambda y: M.asym_characteristic_residual_covariant(y, a, root, chi), y_star
+    )
+    F_bar, _resid = _solve_root_adjoint(
+        lambda v: vjp_y(v)[0], y_bar, tol=1e-11, maxiter=800, restart=40
+    )
+
+    def F_of_consts(U_star, U_perp, Vh_star, Vh_perp, s_star_inv):
+        c = root._replace(
+            U_star=U_star,
+            U_perp=U_perp,
+            Vh_star=Vh_star,
+            Vh_perp=Vh_perp,
+            s_star_inv=s_star_inv,
+        )
+        return M.asym_characteristic_residual_covariant(y_star, a, c, chi)
+
+    _, vjp_c = jax.vjp(
+        F_of_consts,
+        root.U_star,
+        root.U_perp,
+        root.Vh_star,
+        root.Vh_perp,
+        root.s_star_inv,
+    )
+    U_bar, Up_bar, Vh_bar, Vp_bar, si_bar = vjp_c(F_bar)
+
+    def pair(g, delta):
+        return float(jnp.real(jnp.sum(jnp.conj(g) * delta)))
+
+    def dE_along(Xs):
+        """``dE/dt`` for per-bond generators ``Xs[j]`` on bond ``j``.
+
+        The cut leg of direction ``k`` carries the bond of direction ``k-1`` on
+        the ``U`` side and ``k+1`` on the ``V`` side, read straight off
+        ``Ud[k] = U_k† K_L[k-1]`` and ``Vd[k] = K_R[k+1] Vh_k†``.
+        """
+        KX = [jnp.kron(X, jnp.eye(d2, dtype=X.dtype)) for X in Xs]
+        total = 0.0
+        for k in range(4):
+            km, kp = (k - 1) % 4, (k + 1) % 4
+            Us, Up = root.U_star[k], root.U_perp[k]
+            Vs, Vp = root.Vh_star[k], root.Vh_perp[k]
+            si = root.s_star_inv[k]
+            total += pair(U_bar[k], Us @ Xs[k] - KX[km] @ Us)
+            total += pair(Up_bar[k], -KX[km] @ Up)
+            total += pair(Vh_bar[k], Vs @ KX[kp] - Xs[k] @ Vs)
+            total += pair(Vp_bar[k], Vp @ KX[kp])
+            total += pair(si_bar[k], si @ Xs[k] - Xs[k] @ si)
+        return total
+
+    key = jax.random.PRNGKey(11)
+    worst = 0.0
+    for _ in range(4):
+        key, sub = jax.random.split(key)
+        G = jax.random.normal(sub, (chi, chi), dtype=jnp.complex128)
+        X = 0.5 * (G - G.conj().T)
+        X = X / jnp.linalg.norm(X)
+        worst = max(worst, abs(dE_along([X] * 4)))
+
+    scale = float(jnp.linalg.norm(grad_direct))
+    assert worst < 1e-10 * scale, (worst, scale)
+
+
+@pytest.mark.xfail(
+    reason=(
+        "#718: only the GLOBAL diagonal subgroup of the bond gauge is licensed, "
+        "not the per-direction gauges. Using one generator per direction, "
+        "directions 0 and 1 vanish (2e-16) but 2 and 3 come out at +2.121e-03 "
+        "and -2.121e-03 — equal and opposite, so they cancel exactly in the sum "
+        "and the global test passes. Caught by Codex review on PR #720. Two "
+        "readings, both open: either the per-direction gauge genuinely is not "
+        "licensed (2.1e-3 times a dc/dp of order 10 is the right size to feed "
+        "the 8.85e-3 gradient gap), or the k-1/k+1 cut-leg assignment assumed "
+        "here is wrong for directions 2/3, in which case 'X on bond 2 alone' is "
+        "not a gauge direction and only certain combinations are. The exact "
+        "antisymmetry between 2 and 3 is what makes the second reading live."
+    ),
+    strict=True,
+)
+def test_each_directional_gauge_is_independently_licensed():
+    """Eq. 88 must hold for one gauge generator per bond, not just their sum.
+
+    The bond gauge has an independent generator per direction; a test that uses
+    the same ``X`` everywhere only probes the global diagonal subgroup, and
+    contributions from different directions can cancel inside it.
+    """
+    A, a, root = _converged_root()
+    chi = root.env.C1.shape[0]
+    d2 = a.shape[0]
+    root = M.asym_root_to_covariant_convention(root)
+    S = _root_S(root)
+    tilde = M.remove_inverse_roots(root.env, S)
+    y_star = (tilde, root.u, S, root.v)
+
+    template = initialize_ctm_tensor_env(A, chi)
+    gate = _gate(1.0)
+    A_data = A.todense()
+
+    def energy_of(a_data, env_tilde, S_all):
+        A_live = DenseTensor(a_data, A.indices)
+        return M.asym_energy(
+            A_live, M.absorb_inverse_roots(env_tilde, S_all), template, gate
+        )
+
+    energy, vjp_energy = jax.vjp(energy_of, A_data, tilde, S)
+    grad_direct, tilde_bar, S_bar = vjp_energy(jnp.ones((), dtype=energy.dtype))
+    y_bar = (
+        tilde_bar,
+        tuple(jnp.zeros_like(x) for x in root.u),
+        S_bar,
+        tuple(jnp.zeros_like(x) for x in root.v),
+    )
+
+    _, vjp_y = jax.vjp(
+        lambda y: M.asym_characteristic_residual_covariant(y, a, root, chi), y_star
+    )
+    F_bar, _resid = _solve_root_adjoint(
+        lambda v: vjp_y(v)[0], y_bar, tol=1e-11, maxiter=800, restart=40
+    )
+
+    def F_of_consts(U_star, U_perp, Vh_star, Vh_perp, s_star_inv):
+        c = root._replace(
+            U_star=U_star,
+            U_perp=U_perp,
+            Vh_star=Vh_star,
+            Vh_perp=Vh_perp,
+            s_star_inv=s_star_inv,
+        )
+        return M.asym_characteristic_residual_covariant(y_star, a, c, chi)
+
+    _, vjp_c = jax.vjp(
+        F_of_consts,
+        root.U_star,
+        root.U_perp,
+        root.Vh_star,
+        root.Vh_perp,
+        root.s_star_inv,
+    )
+    U_bar, Up_bar, Vh_bar, Vp_bar, si_bar = vjp_c(F_bar)
+
+    def pair(g, delta):
+        return float(jnp.real(jnp.sum(jnp.conj(g) * delta)))
+
+    zero = jnp.zeros((chi, chi))
+    rng = np.random.RandomState(0)
+    worst = 0.0
+    for _ in range(2):
+        G = jnp.asarray(rng.standard_normal((chi, chi)))
+        X = 0.5 * (G - G.T)  # the state is real, so the gauge group is orthogonal
+        X = X / jnp.linalg.norm(X)
+        for i in range(4):
+            Xs = [X if j == i else zero for j in range(4)]
+            KX = [jnp.kron(Z, jnp.eye(d2, dtype=Z.dtype)) for Z in Xs]
+            total = 0.0
+            for k in range(4):
+                km, kp = (k - 1) % 4, (k + 1) % 4
+                Us, Up = root.U_star[k], root.U_perp[k]
+                Vs, Vp = root.Vh_star[k], root.Vh_perp[k]
+                si = root.s_star_inv[k]
+                total += pair(U_bar[k], Us @ Xs[k] - KX[km] @ Us)
+                total += pair(Up_bar[k], -KX[km] @ Up)
+                total += pair(Vh_bar[k], Vs @ KX[kp] - Xs[k] @ Vs)
+                total += pair(Vp_bar[k], Vp @ KX[kp])
+                total += pair(si_bar[k], si @ Xs[k] - Xs[k] @ si)
+            worst = max(worst, abs(total))
+
+    scale = float(jnp.linalg.norm(grad_direct))
+    assert worst < 1e-10 * scale, (worst, scale)
 
 
 def test_gradient_entry_point_is_gated():
