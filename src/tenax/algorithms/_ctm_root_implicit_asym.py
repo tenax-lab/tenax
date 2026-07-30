@@ -42,6 +42,20 @@ is worse (20%): they are equivariant under independent left/right rotations,
 but their product is not ``S^-1``, so the closure breaks for a non-diagonal
 ``S``.  See ``docs/plans/2026-07-29-715-phase1-modified-variables.md``.
 
+Complex states (#721)
+---------------------
+Everything above holds for a complex site tensor, but three things about the
+real case are accidents of real data and were fixed only in #721.  ``S`` is real
+because ``svd`` returns a real spectrum, not because the equations want it real,
+and the reverse pass needs it widened to the environment's dtype.  A converged
+environment carries the bond gauge of the sweep chain that produced it, and
+re-pinning from cold — which a real state's sign gauge survives and a complex
+state's continuous phase does not — leaves ``y*`` describing a different
+environment; :func:`asym_root_parametrize` takes the chain now.  And ``∂_y F``
+is genuinely singular: an independent phase on each environment tensor is an
+exact null direction, so the root is a gauge orbit rather than a point.  That
+last one is not a defect — see :func:`asym_root_implicit_energy_and_grad`.
+
 Conventions (all dense ``jnp`` arrays, ``d2 = D²``)
 ---------------------------------------------------
 ``a[u, d, l, r]`` double layer; environment laid out exactly as
@@ -436,7 +450,16 @@ def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
         # inverse square root below produce NaNs.
         s_k = s[:chi]
         s_k = jnp.maximum(s_k, 1e-12 * s_k[0])
-        S_keep = jnp.diag(s_k / (jnp.linalg.norm(s_k) + 1e-300))
+        # Cast to the environment's dtype.  ``S`` is a *variable* of the
+        # characteristic equations, and the reverse pass needs it free to leave
+        # the reals for the same reason Eq. 79 needs it free to leave the
+        # diagonal: ``R_S = core/λ - S`` compares it against a complex
+        # contraction, and a cotangent inherits its primal's dtype, so a real
+        # ``S`` hands the adjoint solve a ``float64`` block where ``F``
+        # produced ``complex128`` and JAX refuses outright (#721).
+        # ``jnp.linalg.svd`` only ever returns a real spectrum, hence the cast
+        # rather than a genuinely complex construction.
+        S_keep = jnp.diag(s_k / (jnp.linalg.norm(s_k) + 1e-300)).astype(M.dtype)
         P_top, P_bot = _fishman_projectors(env_k, a_k, U, S_keep, Vh, chi)
         U, Vh, P_top, P_bot = _pin_bond_gauge(
             U, Vh, P_top, P_bot, chi, None if prev is None else prev[k][0]
@@ -519,8 +542,16 @@ def converge(
     max_iter: int = 200,
     conv_tol: float = 1e-12,
     min_iter: int = 4,
-) -> tuple[AsymEnv, jax.Array, dict[str, Any]]:
-    """Run sweeps until the corner spectra stop moving."""
+    return_projectors: bool = False,
+):
+    """Run sweeps until the corner spectra stop moving.
+
+    With ``return_projectors`` the final projector set comes back as a fourth
+    element.  That is not a diagnostic: the converged environment sits in the
+    bond gauge of the chain that built it, and
+    :func:`asym_root_parametrize` needs the same chain to extract a root in that
+    gauge rather than re-pinning a different one — see its docstring.
+    """
     env, a = _init_env(A, chi)
     prev = None
     prev_projs = None
@@ -541,7 +572,14 @@ def converge(
                 converged = True
                 break
         prev = cur
-    return env, a, {"iters": iters, "residual": residual, "converged": converged}
+    meta: dict[str, Any] = {
+        "iters": iters,
+        "residual": residual,
+        "converged": converged,
+    }
+    if return_projectors:
+        return env, a, meta, prev_projs
+    return env, a, meta
 
 
 # ---------------------------------------------------------------------------
@@ -843,6 +881,7 @@ def asym_root_parametrize(
     a: jax.Array,
     chi: int,
     *,
+    prev_projs=None,
     pinv_rtol: float = 1e-10,
     polish_steps: int = 40,
     polish_tol: float = 1e-10,
@@ -853,9 +892,21 @@ def asym_root_parametrize(
     ``λ`` defined as an inner product in Eqs. 76-77 really is the
     eigenvalue those equations need.  Rescaling is harmless: the energy is
     a ratio with equal numbers of corners and edges above and below.
+
+    Pass ``prev_projs`` — :func:`converge`'s fourth return value — whenever the
+    environment came from a sweep chain.  A converged environment carries that
+    chain's bond gauge, and :func:`_pin_bond_gauge`'s cold start pins a
+    *different* one, which leaves ``y*`` describing an environment it was not
+    extracted from.  The polish loop is meant to absorb that, and for a real
+    state it does in a single sweep, because there the bond gauge is a sign and
+    one sweep reproduces it exactly.  For a complex state the gauge is a
+    continuous phase, the warm alignment only ever recovers it to best fit, and
+    the corner residual — the one equation that couples two directions'
+    projectors, hence two bond phases — plateaus at 6e-5 instead of falling,
+    while the edges converge geometrically past 1e-8.  Warm-started off the
+    forward chain the same environment is a root to 6e-17 (#721).
     """
     best: tuple[AsymRoot, float] | None = None
-    prev_projs = None
     for _step in range(max(int(polish_steps), 1)):
         env = AsymEnv(*[t / (jnp.linalg.norm(t) + 1e-300) for t in env])
         projs = all_projectors(env, a, chi, prev_projs)
@@ -989,6 +1040,17 @@ def asym_root_implicit_energy_and_grad(
     be neither the equations nor Eq. 88's null-space restriction but the
     environment convention at the *energy* boundary — see
     :func:`swap_env_convention`.
+
+    A complex state reaches 2.5e-12 against the same reference at 40 sweeps
+    (#721).  Compare only against a reference that has actually converged: the
+    explicit map is truncated, and this state needs 53 forward iterations where
+    the real one needs 25, so at 12 sweeps the reference is itself 2.1e-5 away
+    and finite differences will agree with it to four digits.
+
+    ``diagnostics["gauge_consistency"]`` reports how far the energy's cotangent
+    is from orthogonal to the environment-phase gauge, which is what makes the
+    singular adjoint system solvable; it is ~1e-16 when the energy boundary is
+    right and is worth watching whenever that boundary changes.
     """
     from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
 
@@ -996,11 +1058,21 @@ def asym_root_implicit_energy_and_grad(
         raise TypeError("Asymmetric root implicit AD is dense-only (#715 Phase 3).")
 
     A_const = DenseTensor(jax.lax.stop_gradient(A.todense()), A.indices)
-    env, a_arr, meta = converge(
-        A_const, chi, max_iter=max_iter, conv_tol=conv_tol, min_iter=min_iter
+    env, a_arr, meta, forward_projs = converge(
+        A_const,
+        chi,
+        max_iter=max_iter,
+        conv_tol=conv_tol,
+        min_iter=min_iter,
+        return_projectors=True,
     )
     root, root_residual = asym_root_parametrize(
-        env, a_arr, chi, polish_steps=polish_steps, polish_tol=polish_tol
+        env,
+        a_arr,
+        chi,
+        prev_projs=forward_projs,
+        polish_steps=polish_steps,
+        polish_tol=polish_tol,
     )
     if root_residual > root_residual_warn:
         warnings.warn(
@@ -1043,6 +1115,45 @@ def asym_root_implicit_energy_and_grad(
         S_bar,
         tuple(jnp.zeros_like(x) for x in root_cov.v),
     )
+
+    # An independent phase on *each* environment tensor is an exact null
+    # direction of ``∂_y F``.  The normalisation is a ratio, and
+    # ``X'/⟨X, X'⟩`` is invariant under any phase on ``X'`` while picking up
+    # ``e^{iγ}`` from ``X``, so ``R = X'/⟨X, X'⟩ - X`` is phase-*covariant*
+    # tensor by tensor and vanishes along all eight orbits at once; ``R_u``,
+    # ``R_S`` and ``R_v`` are ratios throughout and are invariant outright.
+    # ``∂_y F`` is therefore singular — measured nullity 12 at ``D=2``,
+    # ``chi=4`` — and the implicit function theorem does not apply as literally
+    # written.
+    #
+    # Two things make that harmless, and only the first can fail here.  The
+    # adjoint system is consistent iff ``ў`` is orthogonal to every null
+    # direction, which holds because the energy is invariant along each orbit —
+    # but that invariance lives at the *energy* boundary, not in this module,
+    # and #718 is a standing reminder that the boundary is where conventions go
+    # wrong, so measure it rather than trust it.  The leftover freedom in
+    # ``F̆`` then cannot reach the gradient at all: differentiating
+    # ``F(y*(p), p) = 0`` puts ``∂_p F`` in the range of ``∂_y F``, and the
+    # freedom is orthogonal to that range (verified to 6e-15 in the tests).
+    y_bar_norm = float(
+        jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(y_bar)))
+    )
+    gauge_consistency = 0.0
+    for bar, tensor in zip(tilde_bar, tilde):
+        pairing = float(jnp.real(jnp.sum(bar * (1j * tensor))))
+        scale = y_bar_norm * float(jnp.linalg.norm(tensor)) + 1e-300
+        gauge_consistency = max(gauge_consistency, abs(pairing) / scale)
+    if gauge_consistency > 1e-8:
+        warnings.warn(
+            f"Asymmetric root implicit AD: the energy cotangent has a "
+            f"{gauge_consistency:.3e} relative component along an environment "
+            "tensor's phase, which is a null direction of ∂F/∂y. The adjoint "
+            "system is inconsistent by that much and the gradient is "
+            "correspondingly unreliable; the energy is supposed to be "
+            "invariant under every such phase (#721).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     def F_of_y(y):
         return asym_characteristic_residual_covariant(y, a_arr, root_cov, chi)
@@ -1088,6 +1199,7 @@ def asym_root_implicit_energy_and_grad(
                 "root_residual": root_residual,
                 "covariant_residual": covariant_residual,
                 "adjoint_residual": float(solve_resid),
+                "gauge_consistency": gauge_consistency,
             },
         )
     return energy, grad
