@@ -34,6 +34,8 @@ the edge ``T{k+1}``, going around the ring.  A coordinate is the triple
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 
@@ -52,6 +54,8 @@ __all__ = [
     "prev_coordinate",
     "proj_sinv_indices",
     "rightvec_invfroot_indices",
+    "remove_inverse_roots_multisite",
+    "absorb_inverse_roots_multisite",
     "rotate_a_times",
 ]
 
@@ -481,3 +485,309 @@ def converge_multisite(
     if return_projectors:
         return corners, edges, meta, prev_projs, a_by_cell
     return corners, edges, meta
+
+
+# ---------------------------------------------------------------------------
+# The y <-> x map on the cell (paper Eq. 82)
+# ---------------------------------------------------------------------------
+#
+# The characteristic equations are written in *modified* corners and edges,
+# which carry the inverse singular values explicitly on their environment legs.
+# Only that form transforms covariantly under Eq. 84, and only then is holding
+# ``U*`` and ``V*`` constant licensed by Eq. 88.
+#
+# Which coordinate's root sits on which leg follows the projectors that put it
+# there.  ``corner[co] = P_R[prev_coordinate(co)] · EC · P_L[co]`` and
+# ``edge[co] = P_R[left_projector(co)] · … · P_L[co]``, and each projector
+# carries one ``S^-1/2``, so undoing them needs the roots at exactly those two
+# coordinates.  At 1x1 both collapse to Phase 1's ``roots[k]`` on the edge and
+# ``roots[k-1], roots[k]`` on the corner.
+
+
+def _map_cell_roots(corners, edges, roots, nrows: int, ncols: int, *, normalize: bool):
+    new_corners, new_edges = {}, {}
+    for co in coordinates(nrows, ncols):
+        C = roots[prev_coordinate(co, nrows, ncols)] @ corners[co] @ roots[co]
+        E = jnp.einsum(
+            "ai,ixj,jb->axb",
+            roots[left_projector(co, nrows, ncols)],
+            edges[co],
+            roots[co],
+        )
+        if normalize:
+            C = C / (jnp.linalg.norm(C) + 1e-300)
+            E = E / (jnp.linalg.norm(E) + 1e-300)
+        new_corners[co] = C
+        new_edges[co] = E
+    return new_corners, new_edges
+
+
+def remove_inverse_roots_multisite(corners, edges, S_all, nrows: int, ncols: int):
+    """Regular ``x`` -> modified ``(C̃, Ẽ)``: multiply by ``sqrt(S)``."""
+    from tenax.algorithms._ctm_root_implicit_asym import _denman_beavers
+
+    roots = {co: _denman_beavers(S)[0] for co, S in S_all.items()}
+    return _map_cell_roots(corners, edges, roots, nrows, ncols, normalize=True)
+
+
+def absorb_inverse_roots_multisite(corners_t, edges_t, S_all, nrows: int, ncols: int):
+    """Modified ``(C̃, Ẽ)`` -> regular ``x``: multiply by ``sqrt(S^-1)``.
+
+    The differentiable direction.  ``S`` enters here, so the energy — evaluated
+    on the *regular* environment — depends on ``S`` through this map, and that
+    is what gives ``S`` a nonzero adjoint.  Writing ``F`` in the regular
+    variables instead sets it to zero, which was the #718 bug.
+    """
+    from tenax.algorithms._ctm_root_implicit_asym import _inv_sqrt
+
+    roots = {co: _inv_sqrt(S) for co, S in S_all.items()}
+    return _map_cell_roots(corners_t, edges_t, roots, nrows, ncols, normalize=True)
+
+
+# ---------------------------------------------------------------------------
+# Characteristic equations on the unit cell (paper Eqs. 76-80, Appendix F)
+# ---------------------------------------------------------------------------
+#
+# Structurally identical to Phase 1's
+# ``asym_characteristic_residual_covariant``.  The one difference is that every
+# ``s``-derived factor is read from a *shifted* coordinate rather than from the
+# same direction:
+#
+#     S^-1 in the projectors      proj_sinv_indices(co)
+#     (s† s)^1/4 on U             leftvec_invfroot_indices(co)
+#     (s s†)^1/4 on V             rightvec_invfroot_indices(co)
+#     iCi = s · C̃ · s             prev_coordinate(co) and co
+#
+# At a 1x1 cell all four collapse to Phase 1's bare direction arithmetic.
+#
+# Phase 1 needs ``asym_root_to_covariant_convention`` to shift and transpose
+# its forward data, because its forward truncates with the left half-plane
+# while §V.3 uses the upper half.  This module's forward already uses the upper
+# half, so the forward's (U, S, Vh) at ``co`` *are* the §V.3 data at ``co`` and
+# no relabelling step exists here at all.
+
+
+class CellRoot(NamedTuple):
+    """Root variables plus the constants held fixed while differentiating."""
+
+    corners: dict  # C̃, modified
+    edges: dict  # Ẽ, modified
+    u: dict  # (n - chi) x chi
+    s: dict  # chi x chi, a general matrix
+    v: dict  # chi x (n - chi)
+    U_star: dict
+    U_perp: dict
+    Vh_star: dict
+    Vh_perp: dict
+    s_star_inv: dict
+    nrows: int
+    ncols: int
+
+    @property
+    def y(self):
+        return (self.corners, self.edges, self.u, self.s, self.v)
+
+
+def _covariant_pieces_multisite(consts: CellRoot, S_all, u_all, v_all, d2: int):
+    """Per-coordinate covariant building blocks (paper Eqs. 71-75).
+
+    The quartic roots attach to the ``n = chi * d2`` *cut* leg on its ``chi``
+    sub-leg — hence ``kron(root, I_d2)`` with ``chi`` the slow index — and they
+    come from the shifted coordinates, not from ``co``.  Phase 1 justifies the
+    placement from the Eq. 87 transformation laws; nothing about that argument
+    depends on the unit cell.
+    """
+    from tenax.algorithms._ctm_root_implicit_asym import _quartic_root
+
+    nrows, ncols = consts.nrows, consts.ncols
+    s_all = {co: jnp.linalg.inv(S) for co, S in S_all.items()}
+    eye_d2 = jnp.eye(d2, dtype=next(iter(s_all.values())).dtype)
+    K_L = {
+        co: jnp.kron(_quartic_root(s.conj().T @ s), eye_d2) for co, s in s_all.items()
+    }
+    K_R = {
+        co: jnp.kron(_quartic_root(s @ s.conj().T), eye_d2) for co, s in s_all.items()
+    }
+
+    Ud, Vd, ULd, VRd = {}, {}, {}, {}
+    for co in coordinates(nrows, ncols):
+        chi = S_all[co].shape[0]
+        kl = K_L[leftvec_invfroot_indices(co, nrows, ncols)]
+        kr = K_R[rightvec_invfroot_indices(co, nrows, ncols)]
+        U = consts.U_star[co] + consts.U_perp[co] @ u_all[co]  # Eq. 71
+        Vh = consts.Vh_star[co] + v_all[co] @ consts.Vh_perp[co]  # Eq. 72
+        Ud[co] = U[:, :chi].conj().T @ kl
+        Vd[co] = kr @ Vh[:chi].conj().T
+        ULd[co] = consts.U_perp[co].conj().T @ kl
+        VRd[co] = kr @ consts.Vh_perp[co].conj().T
+    return s_all, Ud, Vd, ULd, VRd
+
+
+def _modified_corners(corners_tilde, s_all, nrows: int, ncols: int):
+    """``iCi[co] = s[prev_coordinate(co)] · C̃[co] · s[co]``.
+
+    The full inverse on *both* corner legs is what puts the singular values
+    explicitly into the contraction environment, so that it transforms
+    covariantly under Eq. 84.  Edges already carry their ``s`` from the Eq. 82
+    map and are left alone.
+    """
+    return {
+        co: s_all[prev_coordinate(co, nrows, ncols)] @ C @ s_all[co]
+        for co, C in corners_tilde.items()
+    }
+
+
+def characteristic_residual_multisite(y, a_by_cell, consts: CellRoot, chi: int):
+    """``F(y, p)`` for the whole unit cell.
+
+    ``y = (corners_tilde, edges_tilde, u, S, v)``.  Normalisation is the
+    reference's ``X'/λ - X``; ``λ`` is deliberately not real-projected, since
+    ``dot(X, X')`` is genuinely complex for a complex state and taking the real
+    part alone moves ``|F1|`` by thirteen orders (Phase 1, #721).
+    """
+    corners_t, edges_t, u_all, S_all, v_all = y
+    nrows, ncols = consts.nrows, consts.ncols
+    d2 = next(iter(a_by_cell.values())).shape[0]
+    n = chi * d2
+
+    s_all, Ud, Vd, ULd, VRd = _covariant_pieces_multisite(
+        consts, S_all, u_all, v_all, d2
+    )
+    corners_mod = _modified_corners(corners_t, s_all, nrows, ncols)
+
+    eye_d2 = jnp.eye(d2, dtype=next(iter(s_all.values())).dtype)
+    K_is = {co: jnp.kron(s, eye_d2) for co, s in s_all.items()}
+
+    EC, cols = {}, {}
+    for co in coordinates(nrows, ncols):
+        k, r, c = co
+        EC[co] = _as_matrix(
+            enlarged_corner(corners_mod, edges_t, a_by_cell, co, nrows, ncols)
+        )
+        # The same edge that enters EC[co], with the sandwich attached:
+        # (chi_l, a_l | a_out | chi_r, a_r).
+        T = edges_t[above(co, nrows, ncols)]
+        a_k = rotate_a_times(a_by_cell[(r, c)], k)
+        cols[co] = jnp.einsum("xfy,fjlr->xljyr", T, a_k).reshape(n, d2, n)
+
+    M, P_R, P_L = {}, {}, {}
+    for co in coordinates(nrows, ncols):
+        nxt = next_coordinate(co, nrows, ncols)
+        kis = K_is[proj_sinv_indices(co, nrows, ncols)]
+        M[co] = EC[co] @ kis @ EC[nxt]
+        P_R[co] = Ud[co] @ EC[co] @ kis
+        P_L[co] = kis @ EC[nxt] @ Vd[co]
+
+    R_C, R_E, R_u, R_S, R_v = {}, {}, {}, {}, {}
+    for co in coordinates(nrows, ncols):
+        M_co, s_inv = M[co], consts.s_star_inv[co]
+
+        core = Ud[co] @ M_co @ Vd[co]
+        lam_S = jnp.vdot(S_all[co], core)
+        R_S[co] = core / lam_S - S_all[co]
+        R_u[co] = (ULd[co] @ M_co @ Vd[co]) @ s_inv / lam_S - u_all[co]
+        R_v[co] = s_inv @ (Ud[co] @ M_co @ VRd[co]) / lam_S - v_all[co]
+
+        C_new = P_R[prev_coordinate(co, nrows, ncols)] @ EC[co] @ P_L[co]
+        C_cur = corners_t[co]
+        R_C[co] = C_new / jnp.vdot(C_cur, C_new) - C_cur
+
+        E_new = jnp.einsum(
+            "ax,xjy,yb->ajb",
+            P_R[left_projector(co, nrows, ncols)],
+            cols[co],
+            P_L[co],
+        )
+        E_cur = edges_t[co]
+        R_E[co] = E_new / jnp.vdot(E_cur, E_new) - E_cur
+
+    return (R_C, R_E, R_u, R_S, R_v)
+
+
+def root_parametrize_multisite(
+    corners,
+    edges,
+    a_by_cell,
+    chi: int,
+    nrows: int,
+    ncols: int,
+    *,
+    prev_projs=None,
+    pinv_rtol: float = 1e-10,
+    polish_steps: int = 40,
+    polish_tol: float = 1e-10,
+):
+    """Extract ``y* = (C̃, Ẽ, 0, S*, 0)`` and the frozen isometries.
+
+    Every tensor is rescaled to unit Frobenius norm so the ``λ`` defined as an
+    inner product really is the eigenvalue Eqs. 76-77 need.
+
+    Pass ``prev_projs`` whenever the environment came from a sweep chain: it
+    carries that chain's bond gauge, and a cold pin fixes a *different* one,
+    leaving ``y*`` describing an environment it was not extracted from.  For a
+    real state one polish sweep absorbs the difference; for a complex state the
+    gauge is a continuous phase and the corner residual plateaus instead
+    (#721).
+    """
+    from tenax.algorithms._ctm_root_implicit_asym import _normalize
+
+    del _normalize
+    best = None
+    d2 = next(iter(a_by_cell.values())).shape[0]
+    n = chi * d2
+    dtype = next(iter(corners.values())).dtype
+
+    for _step in range(max(int(polish_steps), 1)):
+        corners = {co: C / (jnp.linalg.norm(C) + 1e-300) for co, C in corners.items()}
+        edges = {co: E / (jnp.linalg.norm(E) + 1e-300) for co, E in edges.items()}
+
+        ECs = all_enlarged_corners(corners, edges, a_by_cell, nrows, ncols)
+        projs = all_projectors_multisite(ECs, chi, nrows, ncols, prev_projs)
+        prev_projs = projs
+
+        U_star, U_perp, Vh_star, Vh_perp, s_map, s_inv = {}, {}, {}, {}, {}, {}
+        for co in coordinates(nrows, ncols):
+            _pl, _pr, U, S_keep, Vh = projs[co]
+            U_star[co] = U[:, :chi]
+            U_perp[co] = U[:, chi:]
+            Vh_star[co] = Vh[:chi]
+            Vh_perp[co] = Vh[chi:]
+            s_map[co] = S_keep
+            diag = jnp.diag(S_keep).real
+            cutoff = pinv_rtol * jnp.max(diag)
+            inv_diag = jnp.where(
+                diag > cutoff, 1.0 / jnp.where(diag > cutoff, diag, 1.0), 0.0
+            )
+            s_inv[co] = jnp.diag(inv_diag).astype(S_keep.dtype)
+
+        corners_t, edges_t = remove_inverse_roots_multisite(
+            corners, edges, s_map, nrows, ncols
+        )
+        root = CellRoot(
+            corners=corners_t,
+            edges=edges_t,
+            u={co: jnp.zeros((n - chi, chi), dtype=dtype) for co in s_map},
+            s=s_map,
+            v={co: jnp.zeros((chi, n - chi), dtype=dtype) for co in s_map},
+            U_star=U_star,
+            U_perp=U_perp,
+            Vh_star=Vh_star,
+            Vh_perp=Vh_perp,
+            s_star_inv=s_inv,
+            nrows=nrows,
+            ncols=ncols,
+        )
+        R = characteristic_residual_multisite(root.y, a_by_cell, root, chi)
+        residual = float(
+            jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(R)))
+        )
+        if best is None or residual < best[1]:
+            best = (root, residual)
+        if residual <= polish_tol:
+            break
+        corners, edges, prev_projs = sweep_multisite(
+            corners, edges, a_by_cell, chi, nrows, ncols, projs
+        )
+
+    assert best is not None
+    return best

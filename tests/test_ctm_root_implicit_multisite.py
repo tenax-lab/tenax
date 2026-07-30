@@ -422,3 +422,124 @@ def test_the_1x1_energy_gate_is_load_bearing(monkeypatch):
         "wrong gluing partner left the energy unchanged, so the 1x1 gate "
         f"cannot detect a miswiring (E={E_wrong!r})"
     )
+
+
+# ------------------------------------------------------------------ #
+# Characteristic equations                                           #
+# ------------------------------------------------------------------ #
+
+
+def _cell_2x2():
+    """Four *different* site tensors — the only configuration in which a wrong
+    cell shift is observable at all."""
+    return {
+        (0, 0): _site_tensor(seed=1),
+        (0, 1): _site_tensor(seed=2),
+        (1, 0): _site_tensor(seed=3),
+        (1, 1): _site_tensor(seed=4),
+    }
+
+
+def _root_residual(cell, nrows, ncols, chi=4, polish_steps=3):
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+
+    corners, edges, _meta, projs, a_by_cell = M.converge_multisite(
+        cell, chi, nrows, ncols, max_iter=200, conv_tol=1e-12, return_projectors=True
+    )
+    _root, residual = M.root_parametrize_multisite(
+        corners,
+        edges,
+        a_by_cell,
+        chi,
+        nrows,
+        ncols,
+        prev_projs=projs,
+        polish_steps=polish_steps,
+    )
+    return residual
+
+
+def test_characteristic_equations_vanish_at_a_1x1_root():
+    assert _root_residual({(0, 0): _site_tensor()}, 1, 1) < 1e-11
+
+
+def test_characteristic_equations_vanish_at_a_2x2_root():
+    """The Phase 2 gate: all 20 equations per cell hold at the converged root
+    of a 2x2 cell of different tensors."""
+    assert _root_residual(_cell_2x2(), 2, 2) < 1e-11
+
+
+def test_every_block_of_F_vanishes_not_just_the_norm():
+    """A single dominant block could hide four broken ones behind a small
+    total, so check R_C, R_E, R_u, R_S and R_v separately."""
+    import jax.numpy as jnp
+
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+
+    corners, edges, _m, projs, a_by = M.converge_multisite(
+        _cell_2x2(), 4, 2, 2, max_iter=200, conv_tol=1e-12, return_projectors=True
+    )
+    root, _r = M.root_parametrize_multisite(
+        corners, edges, a_by, 4, 2, 2, prev_projs=projs, polish_steps=3
+    )
+    blocks = M.characteristic_residual_multisite(root.y, a_by, root, 4)
+    for name, blk in zip(("R_C", "R_E", "R_u", "R_S", "R_v"), blocks):
+        norm = float(jnp.sqrt(sum(jnp.sum(jnp.abs(v) ** 2) for v in blk.values())))
+        assert norm < 1e-11, f"{name} = {norm:.3e}"
+
+
+@pytest.mark.parametrize(
+    "table",
+    ["proj_sinv_indices", "leftvec_invfroot_indices", "rightvec_invfroot_indices"],
+)
+def test_each_cell_shift_table_is_load_bearing(monkeypatch, table):
+    """Perturb one table's *cell* component and the 2x2 root must stop being a
+    root.  Without this, ``‖F(y*)‖ ~ 1e-13`` says only that the equations are
+    self-consistent, not that Appendix F was transcribed correctly.
+
+    The direction component is left alone so the failure is attributable to the
+    ``(r, c)`` assignment specifically.  Measured: 4.7e-13 -> ~1, twelve orders.
+    """
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+
+    good = getattr(M, table)
+    monkeypatch.setattr(
+        M,
+        table,
+        lambda co, nr, nc: (
+            good(co, nr, nc)[0],
+            (good(co, nr, nc)[1] + 1) % nr,
+            good(co, nr, nc)[2],
+        ),
+    )
+    assert _root_residual(_cell_2x2(), 2, 2) > 1e-3
+
+
+@pytest.mark.parametrize(
+    "table",
+    ["proj_sinv_indices", "leftvec_invfroot_indices", "rightvec_invfroot_indices"],
+)
+def test_at_1x1_the_cell_shifts_are_invisible(monkeypatch, table):
+    """The other half of the argument, and the reason the 2x2 gate exists.
+
+    A 1x1 cell has one cell, so every ``(r, c)`` shift is the identity and the
+    residual is *bit-identical* under the same perturbation that costs twelve
+    orders at 2x2.  Any Phase 2 test written only at 1x1 verifies nothing about
+    Appendix F.
+    """
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+
+    cell = {(0, 0): _site_tensor()}
+    before = _root_residual(cell, 1, 1)
+
+    good = getattr(M, table)
+    monkeypatch.setattr(
+        M,
+        table,
+        lambda co, nr, nc: (
+            good(co, nr, nc)[0],
+            (good(co, nr, nc)[1] + 1) % nr,
+            good(co, nr, nc)[2],
+        ),
+    )
+    assert _root_residual(cell, 1, 1) == before
