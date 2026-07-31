@@ -1511,12 +1511,28 @@ def test_a_wrong_bond_layout_breaks_the_root(converged_root):
       failing: it does not, and the module says so rather than reshaping around
       it.
     * Give the wrong layout every chance instead — let it re-truncate the
-      environment consistently, so that the bonds, ``S``, the isometries and the
-      cut all agree with each other and nothing *can* raise — and ``‖F(y)‖``
-      floors at **4.0e-1**, against 2.7e-13 for the layout the truncation
-      actually chose.  It is not a matter of polishing further: the residual is
-      the same to seven digits at 3 sweeps and at 40.  A forced layout is a
-      legal truncation with legal shapes and no root nearby.
+      environment consistently, so that the bonds, ``S``, the isometries and
+      the cut all agree with each other and nothing *can* raise — and it
+      **does** find a root: ``‖F(y)‖`` falls 8.8e-2 → 2.4e-6 → 9.3e-11 at 3,
+      10 and 40 polish sweeps from the natural fixed point, and reaches
+      2.2e-14 — as clean as the natural root's 2.7e-13 — when the forced
+      layout is converged from a fresh environment on its own terms, which is
+      what this test does.  Forcing a layout does not break the equations;
+      it poses a *different* truncation problem, and that problem has its own
+      fixed point.  What the moved dimension changes is the state you land on:
+      the forced fixed point reports ``E = -0.10873`` against ``-0.10502`` for
+      the layout the truncation actually chose, a 3.7e-3 gap next to the 1e-10
+      the natural layout reproduces against the dense module.  So the layout is
+      load-bearing — it selects which fixed point you get — but ``‖F‖`` is not
+      what detects it, and this test asserts the energy instead.
+
+      This corrects an earlier reading of this fixture.  Before the polish
+      sweep forwarded ``layout_override`` (it was passed to
+      ``all_projectors_sym`` but dropped on the sweep that advances the
+      environment), the run alternated forced and natural truncations and
+      ``‖F‖`` sat at 4.0e-1 — a floor produced by the alternation, not by the
+      forced layout.  The claim "a legal truncation with no root nearby" was an
+      artifact of that bug and is false.
 
     The control matters as much as the trap: pushing the *right* layout through
     the same override reproduces the fixture's residual (identically, in fact,
@@ -1544,17 +1560,35 @@ def test_a_wrong_bond_layout_breaks_the_root(converged_root):
             env, a, chi=4, prev_projs=projs, layout_override=wrong, polish_steps=1
         )
 
-    # (b) Applied consistently — the polish sweeps use it too — everything is
-    #     shape-legal and the residual is still twelve orders too big.
-    bad_root, res_wrong = root_parametrize_sym(
-        env, a, chi=4, prev_projs=projs, layout_override=wrong, polish_steps=3
+    # (b) Applied consistently — the polish sweeps use it too — the forced
+    #     layout is shape-legal *and* reaches a root of its own.  Converge it
+    #     on its own terms from a fresh environment, then ask what it costs.
+    import tenax
+
+    gate = tenax.heisenberg_gate()
+    env_w, a_w = init_env_sym(_A, chi=4)
+    prev_w = None
+    for _ in range(40):
+        env_w, prev_w = sweep_sym(env_w, a_w, 4, prev_w, layout_override=wrong)
+    assert [p.layout.dims for p in prev_w] == [x.dims for x in wrong]
+
+    forced_root, res_wrong = root_parametrize_sym(
+        env_w, a_w, chi=4, prev_projs=prev_w, layout_override=wrong, polish_steps=3
     )
-    assert [x.dims for x in bad_root.layouts] == [x.dims for x in wrong]
-    assert res_wrong > 1e-2, res_wrong
-    assert res_wrong > 1e9 * residual, (res_wrong, residual)
+    assert [x.dims for x in forced_root.layouts] == [x.dims for x in wrong]
+    # It is a root: forcing the layout poses a different problem, not a broken
+    # one.  Asserting otherwise is what the dropped kwarg used to make look true.
+    assert res_wrong < 1e-8, res_wrong
+
+    # It is a *different* root.  That is what the layout buys, and the gap is
+    # seven orders above the agreement the natural layout reaches.
+    e_forced = float(sym_energy(_A, env_w, gate))
+    e_true = float(sym_energy(_A, env, gate))
+    assert abs(e_forced - e_true) > 1e-3, (e_forced, e_true)
     print(
-        f"layout {right[0].dims} -> {wrong[0].dims}: norm(F) {residual:.3e} -> "
-        f"{res_wrong:.3e}"
+        f"layout {right[0].dims} -> {wrong[0].dims}: "
+        f"norm(F) {residual:.3e} -> {res_wrong:.3e} (still a root), "
+        f"E {e_true:.8f} -> {e_forced:.8f}"
     )
 
 

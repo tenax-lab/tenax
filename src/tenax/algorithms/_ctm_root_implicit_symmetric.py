@@ -1701,7 +1701,7 @@ def root_parametrize_sym(
             best = (root_cov._replace(env=tilde), residual)
         if residual <= polish_tol:
             break
-        env, prev_projs = sweep_sym(env, a, chi, projs)
+        env, prev_projs = sweep_sym(env, a, chi, projs, layout_override=layout_override)
 
     if best is None:
         raise ValueError(
