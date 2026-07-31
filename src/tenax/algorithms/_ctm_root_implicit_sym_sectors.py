@@ -17,11 +17,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import NamedTuple
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 
+from tenax.core import BlockKey, SymmetricTensor
 from tenax.core.index import FlowDirection, Label, TensorIndex
 from tenax.core.symmetry import BaseSymmetry
+from tenax.linalg import _group_blocks_by_bond_charge
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,3 +114,86 @@ def bond_index_from_layout(
         flow=flow,
         label=label,
     )
+
+
+class SectorSVD(NamedTuple):
+    """A full dense SVD of one charge sector of the cut, plus its keys.
+
+    ``U`` and ``Vh`` are *full* (``full_matrices=True``): the null-space
+    columns ``U[:, k:]`` and rows ``Vh[k:]`` are the ``U_perp`` / ``Vh_perp``
+    of paper Eq. 71-72, restricted to this sector.  #715 planned to avoid
+    materialising them; per sector these matrices are small, and the
+    complementary-projector form would add a redundant null direction to
+    ``d_yF`` for nothing.
+    """
+
+    U: jax.Array
+    s: jax.Array
+    Vh: jax.Array
+    S_keep_diag: jax.Array
+    row_key: BlockKey
+    col_key: BlockKey
+
+
+def sector_svd(
+    matrix: SymmetricTensor,
+    chi: int,
+    *,
+    row_axis: int,
+    col_axis: int,
+    floor_rtol: float = 1e-12,
+) -> tuple[dict[int, SectorSVD], BondLayout]:
+    """Full SVD per charge sector, then one global top-``chi`` truncation.
+
+    The matrix is block diagonal in the bond charge, so each sector decomposes
+    independently — but the *truncation* is global, over the union of every
+    sector's spectrum.  That is what makes the retained charge distribution
+    data-dependent, and hence what :class:`BondLayout` has to record.
+
+    The floor is taken against the largest singular value of the **whole cut**,
+    not of each sector.  Flooring per sector would rescale a sector whose
+    values are all numerically zero up to the retained range and promote its
+    noise to a kept direction.  Phase 1 floors for the same reason — an early
+    environment is rank deficient and a singular ``S`` makes the matrix inverse
+    square root produce NaNs (``_ctm_root_implicit_asym.all_projectors``).
+    """
+    grouped = _group_blocks_by_bond_charge(matrix, [row_axis], [col_axis])
+
+    raw: dict[int, tuple] = {}
+    for q, entries in grouped.items():
+        if len(entries) != 1:  # pragma: no cover - a fused matrix has one per q
+            raise ValueError(
+                f"sector {q} has {len(entries)} blocks; expected a fused matrix"
+            )
+        (row_key, col_key, block) = entries[0]
+        U, s, Vh = jnp.linalg.svd(block, full_matrices=True)
+        raw[q] = (U, s, Vh, row_key, col_key)
+
+    # Global truncation across sectors.
+    ranked = sorted(
+        (
+            (float(sv), q, i)
+            for q, (_U, s, *_r) in raw.items()
+            for i, sv in enumerate(s)
+        ),
+        key=lambda t: -t[0],
+    )
+    dims: dict[int, int] = dict.fromkeys(raw, 0)
+    for _sv, q, _i in ranked[: int(chi)]:
+        dims[q] += 1
+    layout = BondLayout.from_dims(dims)
+
+    biggest = max((float(raw[q][1][0]) for q in raw), default=0.0)
+    floor = floor_rtol * biggest
+
+    sectors: dict[int, SectorSVD] = {}
+    for q, (U, s, Vh, row_key, col_key) in raw.items():
+        sectors[q] = SectorSVD(
+            U=U,
+            s=s,
+            Vh=Vh,
+            S_keep_diag=jnp.maximum(s, floor),
+            row_key=row_key,
+            col_key=col_key,
+        )
+    return sectors, layout

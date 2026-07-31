@@ -1,13 +1,22 @@
 """Sector layer for the symmetric root-implicit CTMRG gradient (#715 Phase 3)."""
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax import FlowDirection, TensorIndex, U1Symmetry, ZnSymmetry
+from tenax import (
+    FlowDirection,
+    SymmetricTensor,
+    TensorIndex,
+    U1Symmetry,
+    ZnSymmetry,
+    fuse_indices,
+)
 from tenax.algorithms._ctm_root_implicit_sym_sectors import (
     BondLayout,
     bond_index_from_layout,
+    sector_svd,
 )
 
 
@@ -97,3 +106,69 @@ def test_bond_layout_is_not_a_pytree_and_is_hashable():
 
     jitted = jax.jit(lambda lay: lay.total, static_argnums=0)
     assert jitted(layout) == 7
+
+
+def _matrix_tensor(seed=0, sectors=(-1, 0, 1), mults=(1, 2, 1)):
+    """A fused 2-leg tensor shaped like a half-infinite environment cut."""
+    sym = U1Symmetry()
+
+    def leg(flow, lbl):
+        return TensorIndex(
+            symmetry=sym,
+            sectors=np.asarray(sectors),
+            multiplicities=np.asarray(mults),
+            flow=flow,
+            label=lbl,
+        )
+
+    ec = SymmetricTensor.random_normal_np(
+        (
+            leg(FlowDirection.OUT, "chi_r"),
+            leg(FlowDirection.OUT, "a_r"),
+            leg(FlowDirection.IN, "chi_d"),
+            leg(FlowDirection.IN, "a_d"),
+        ),
+        np.random.RandomState(seed),
+    )
+    fused = fuse_indices(ec, 2, 3, "row", FlowDirection.IN)
+    return fuse_indices(fused, 0, 1, "col", FlowDirection.OUT)
+
+
+def test_sector_svd_truncates_globally_not_per_sector():
+    m = _matrix_tensor()
+    chi = 6
+    sectors, layout = sector_svd(m, chi, row_axis=1, col_axis=0)
+
+    assert layout.total == chi
+    # Global truncation: the retained values are exactly the top chi of the
+    # union over sectors.  A per-sector rule would keep chi/n_sectors each.
+    kept = sorted(
+        (float(s) for q in layout.sectors for s in sectors[q].s[: layout.dim_of(q)]),
+        reverse=True,
+    )
+    every = sorted((float(s) for q in sectors for s in sectors[q].s), reverse=True)
+    assert kept == pytest.approx(every[:chi], rel=1e-12)
+
+
+def test_sector_svd_null_space_is_the_exact_complement():
+    m = _matrix_tensor()
+    sectors, layout = sector_svd(m, 6, row_axis=1, col_axis=0)
+    for q in layout.sectors:
+        blk = sectors[q]
+        k = layout.dim_of(q)
+        u_star, u_perp = blk.U[:, :k], blk.U[:, k:]
+        assert float(jnp.max(jnp.abs(u_star.conj().T @ u_perp))) < 1e-12
+        # U_perp must actually span the rest, not be empty by accident.
+        assert u_perp.shape[1] == blk.U.shape[0] - k
+
+
+def test_sector_svd_floors_against_the_global_maximum():
+    # A sector whose own singular values are all tiny must not have its noise
+    # promoted: the floor is relative to the largest SV of the whole cut, not
+    # of the sector.
+    m = _matrix_tensor()
+    sectors, layout = sector_svd(m, 6, row_axis=1, col_axis=0)
+    biggest = max(float(sectors[q].s[0]) for q in sectors)
+    for q in layout.sectors:
+        k = layout.dim_of(q)
+        assert float(jnp.min(sectors[q].S_keep_diag[:k])) >= 1e-12 * biggest * 0.5
