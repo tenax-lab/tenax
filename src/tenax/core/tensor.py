@@ -25,7 +25,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.core.index import FlowDirection, Label, TensorIndex
+from tenax.core.index import FlowDirection, Label, TensorIndex, _net_charges
 
 # Block key: tuple of one charge value per leg identifying a charge sector
 BlockKey = tuple[int, ...]
@@ -697,21 +697,18 @@ class SymmetricTensor(Tensor):
     def _validate(self) -> None:
         """Verify all block keys satisfy the symmetry conservation law.
 
-        Vectorised over blocks: the whole key table is fused leg by leg, so the
-        symmetry sees one ``(n_blocks,)`` array per leg instead of one scalar per
-        (block, leg) pair.  The per-key :func:`_net_charge` adapter remains the
-        right call for scalar sites; here it dominated ``SymmetricTensor``
-        construction (~27% on a 489-block rank-4 U(1) tensor).
+        Delegates to :func:`~tenax.core.index._net_charges`, the vectorised twin
+        of :func:`~tenax.core.index._net_charge`: the whole key table is fused
+        leg by leg, so the symmetry sees one ``(n_blocks,)`` array per leg
+        instead of one scalar per (block, leg) pair.  The per-key adapter
+        remains the right call for scalar sites; here it dominated
+        ``SymmetricTensor`` construction (~27% on a 489-block rank-4 U(1)
+        tensor).
         """
         if not self._indices or not self._block_keys:
             return
-        sym = self._indices[0].symmetry
-        identity = sym.identity()
-
-        keys = np.array(self._block_keys, dtype=np.int32)  # (n_blocks, n_legs)
-        net = np.full(len(keys), identity, dtype=np.int32)
-        for i, idx in enumerate(self._indices):
-            net = sym.fuse(net, sym.flow_charge(idx.flow, keys[:, i]))
+        identity = self._indices[0].symmetry.identity()
+        net = _net_charges(self._indices, self._block_keys)
 
         bad = np.flatnonzero(net != identity)
         if bad.size:

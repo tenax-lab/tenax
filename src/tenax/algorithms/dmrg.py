@@ -3119,22 +3119,28 @@ def compute_mps_sector(mps_tensors: list[Tensor]) -> int | None:
     """
     from tenax.core._block_array import BlockArray
 
+    # Fall back to 0 only when no block-sparse tensor was seen at all; otherwise
+    # return the same identity the comparison below uses.  The two halves happen
+    # to agree for every symmetry currently implemented, but a hard-coded 0
+    # return next to an ``identity()`` comparison is a latent contradiction.
+    identity = 0
     for site in mps_tensors:
         if not isinstance(site, (SymmetricTensor, BlockArray)):
             continue
         if not site.blocks or not site.indices:
             continue
 
+        identity = site.indices[0].symmetry.identity()
         sectors = {_net_charge(site.indices, key) for key in site.blocks}
 
         if len(sectors) != 1:
             return None
         charge = sectors.pop()
-        if charge != site.indices[0].symmetry.identity():
+        if charge != identity:
             return charge
 
     # All tensors have standard conservation (net charge == identity)
-    return 0
+    return identity
 
 
 def validate_mps_sector(mps_tensors: list[Tensor], target_charge: int) -> None:

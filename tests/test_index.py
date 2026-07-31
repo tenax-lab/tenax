@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from tenax.core.index import FlowDirection, TensorIndex, _net_charge
+from tenax.core.index import FlowDirection, TensorIndex, _net_charge, _net_charges
 from tenax.core.symmetry import ProductSymmetry, U1Symmetry, ZnSymmetry
 
 
@@ -356,6 +356,91 @@ def test_net_charge_rejects_a_rank_mismatch():
 def test_net_charge_rejects_empty_indices():
     with pytest.raises(ValueError, match="at least one index"):
         _net_charge((), ())
+
+
+def _two_legs(sym=U1Symmetry()):
+    a = TensorIndex.from_charges(
+        sym, np.array([0, 1], dtype=np.int32), FlowDirection.IN, label="a"
+    )
+    b = TensorIndex.from_charges(
+        sym, np.array([0, 1], dtype=np.int32), FlowDirection.OUT, label="b"
+    )
+    return a, b
+
+
+def test_net_charges_rejects_a_rank_mismatch():
+    """The vectorised twin must be as strict as the scalar adapter.
+
+    ``_net_charge`` gets this from ``zip(..., strict=True)``.  ``_net_charges``
+    iterates ``range(len(indices))`` over a 2-D table, so without an explicit
+    check a key table with extra columns is silently truncated — and a
+    *non*-conserving block then reports a conserving net charge, which is
+    exactly the class of silent wrong answer #734 exists to remove.
+    """
+    a, b = _two_legs()
+    np.testing.assert_array_equal(_net_charges((a, b), [(1, 1), (0, 0)]), [0, 0])
+
+    with pytest.raises(ValueError, match="one column per index"):
+        _net_charges((a, b), [(1, 1, 1)])  # extra column — used to be ignored
+    with pytest.raises(ValueError, match="one column per index"):
+        _net_charges((a, b), [(1,)])  # missing column
+    with pytest.raises(ValueError, match="one column per index"):
+        _net_charges((a, b), [1, 1])  # 1-D: a single key passed unwrapped
+
+
+def test_net_charges_rejects_empty_indices():
+    with pytest.raises(ValueError, match="at least one index"):
+        _net_charges((), [(1,)])
+
+
+@pytest.mark.parametrize(
+    "sym",
+    [
+        U1Symmetry(),
+        ZnSymmetry(3),
+        ProductSymmetry(U1Symmetry(), ZnSymmetry(3)),
+    ],
+    ids=["u1", "z3", "u1xz3"],
+)
+def test_net_charges_matches_the_scalar_adapter(sym):
+    """One conservation law, two implementations — pin them equal.
+
+    ``_net_charges`` is a speed rewrite of ``_net_charge`` used by
+    ``SymmetricTensor._validate`` and the symmetric contraction prelude.
+    Nothing else forces the two to agree, and a divergence resurfaces as
+    exactly the silent-zero bug #734 closes.
+    """
+    rng = np.random.RandomState(3)
+    raw = rng.randint(-3, 4, size=(40, 4))
+    if isinstance(sym, ProductSymmetry):
+        sectors = sym.encode_charges(raw, rng.randint(0, 3, size=(40, 4)))
+    else:
+        sectors = raw.astype(np.int32)
+
+    flows = (
+        FlowDirection.IN,
+        FlowDirection.OUT,
+        FlowDirection.IN,
+        FlowDirection.OUT,
+    )
+    indices = tuple(
+        TensorIndex(
+            sym,
+            np.unique(sectors[:, i]),
+            np.full(len(np.unique(sectors[:, i])), 2, dtype=np.int32),
+            flow,
+            label=lbl,
+        )
+        for i, (flow, lbl) in enumerate(zip(flows, "abcd"))
+    )
+    keys = [tuple(int(q) for q in row) for row in sectors]
+
+    got = _net_charges(indices, keys)
+    want = np.array([_net_charge(indices, k) for k in keys], dtype=np.int32)
+    np.testing.assert_array_equal(got, want)
+    # Guard: a helper that returned a constant would pass an equality check
+    # against a scalar adapter that also returned that constant.
+    assert len(set(want.tolist())) > 1, "degenerate fixture"
 
 
 def test_index_canonicalises_and_merges_duplicate_representatives():

@@ -1,5 +1,7 @@
 """Sector layer for the symmetric root-implicit CTMRG gradient (#715 Phase 3)."""
 
+import itertools
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -482,26 +484,27 @@ def test_zn_same_flow_bonds_carry_the_canonical_representative():
             assert idx.has_sector(int(q)), (key, idx.label, list(idx.sectors))
 
 
-def test_product_symmetry_is_refused_rather_than_mis_assembled():
-    """The refusal is a coverage gate, not a correctness claim.
+@pytest.mark.parametrize(
+    "row_flow,col_flow",
+    list(itertools.product([FlowDirection.IN, FlowDirection.OUT], repeat=2)),
+    ids=["ii", "io", "oi", "oo"],
+)
+def test_product_symmetry_round_trips_instead_of_being_refused(row_flow, col_flow):
+    """#734 Task 4 lifted the ``ProductSymmetry`` refusal; this is what replaced it.
 
-    Since #734 the partner charge is derived through ``symmetry.flow_charge``
-    and ``symmetry.dual``, which is group-correct for :class:`ProductSymmetry`
-    exactly as it is for U(1) and ``Z_n`` — nothing in the arithmetic below
-    knows or cares that the charges are bit-packed.  What has *not* happened is
-    running the rest of #715 Phase 3 on bit-packed charges, and this test pins
-    that the module says so rather than assuming it works.
+    The refusal was a coverage gate, not a correctness claim: the partner charge
+    has been derived through ``symmetry.flow_charge``/``symmetry.dual`` since
+    #734 Task 2, which is group-correct for :class:`ProductSymmetry` exactly as
+    it is for U(1) and ``Z_n``.  What had not happened was running the rest of
+    the Phase 3 path on bit-packed charges.  It now has, so the gate is replaced
+    by the round trip it was standing in for.
 
-    The gate is worth having because the cost of being wrong is asymmetric.
-    For ``Z_n`` a wrong partner is a different representative of the right
-    charge, so ``__post_init__`` and the sector table can still catch it.  For
-    :class:`ProductSymmetry` it is a different charge outright, the block is a
-    genuine conservation violation, and ``_from_blocks_unchecked`` would pass it
-    straight through to a contraction, which per this module's own measurements
-    keeps the conserving components and silently zeroes the rest — the failure
-    mode #715 exists to make loud.  Nothing downstream would raise.
-
-    Lifting the gate is #734 Task 4's job, and belongs with end-to-end coverage.
+    The stakes are why this asserts on conservation and not just on shape.  For
+    ``Z_n`` a wrong partner is a different representative of the right charge,
+    which ``__post_init__`` and the sector table can still catch.  For
+    :class:`ProductSymmetry` it is a different charge outright, and
+    ``_from_blocks_unchecked`` would hand it straight to a contraction that
+    keeps the conserving components and silently zeroes the rest.
     """
     from tenax.core.symmetry import ProductSymmetry
 
@@ -510,7 +513,7 @@ def test_product_symmetry_is_refused_rather_than_mis_assembled():
 
     # Why a wrong partner would be unrecoverable here, measured rather than
     # asserted from the docstring.  These are *not* claims about the shipped
-    # code -- it uses ``dual`` -- but about what the guard is protecting.
+    # code -- it uses ``dual`` -- but about what the arithmetic has to avoid.
     assert ProductSymmetry.decode(-a) == (-1, -3)  # raw negation: wrong charge
     assert ProductSymmetry.decode(int(sym.dual(np.array([a]))[0])) == (-1, -2)
     # ... and the wrong partner does not merely relabel: it breaks conservation.
@@ -520,16 +523,39 @@ def test_product_symmetry_is_refused_rather_than_mis_assembled():
         return TensorIndex(
             symmetry=sym,
             sectors=np.array([0, a]),
-            multiplicities=np.array([1, 1]),
+            multiplicities=np.array([2, 2]),
             flow=flow,
             label=lbl,
         )
 
-    with pytest.raises(NotImplementedError, match="ProductSymmetry"):
-        tensor_from_sector_matrices(
-            {0: jnp.ones((1, 1))},
-            row_index=leg(FlowDirection.OUT, "r"),
-            col_index=leg(FlowDirection.OUT, "c"),
-            row_axis=0,
-            col_axis=1,
-        )
+    row_index = leg(row_flow, "r")
+    col_index = leg(col_flow, "c")
+    m = SymmetricTensor.random_normal_np(
+        (row_index, col_index), np.random.RandomState(4)
+    )
+    assert m.blocks, "fixture must have at least one conserving block"
+
+    sectors, _ = sector_svd(m, 8, row_axis=0, col_axis=1)
+    mats = {
+        q: blk.U[:, : len(blk.s)]
+        @ jnp.diag(blk.s.astype(blk.U.dtype))
+        @ blk.Vh[: len(blk.s), :]
+        for q, blk in sectors.items()
+    }
+    rebuilt = tensor_from_sector_matrices(
+        mats, row_index=row_index, col_index=col_index, row_axis=0, col_axis=1
+    )
+
+    # Every key conserves charge, and names a sector its own leg carries --
+    # ``_from_blocks_unchecked`` does neither for us.
+    rebuilt._validate()
+    for key in rebuilt._block_keys:
+        for idx, q in zip(rebuilt.indices, key):
+            assert idx.has_sector(int(q)), (key, idx.label, list(idx.sectors))
+
+    # And the decomposition is lossless, so a dropped/misplaced block shows up
+    # as a numeric difference rather than only as a key-set difference.
+    assert set(rebuilt._block_keys) == set(m._block_keys)
+    ref = np.asarray(m.todense())
+    assert float(np.linalg.norm(ref)) > 1.0, "reference is degenerate"
+    np.testing.assert_allclose(np.asarray(rebuilt.todense()), ref, atol=1e-10)

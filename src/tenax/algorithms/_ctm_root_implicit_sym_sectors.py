@@ -25,7 +25,7 @@ import numpy as np
 
 from tenax.core import BlockKey, SymmetricTensor
 from tenax.core.index import FlowDirection, Label, TensorIndex
-from tenax.core.symmetry import BaseSymmetry, ProductSymmetry
+from tenax.core.symmetry import BaseSymmetry
 from tenax.linalg import _group_blocks_by_bond_charge
 
 
@@ -274,27 +274,20 @@ def tensor_from_sector_matrices(
     For :class:`~tenax.core.symmetry.ProductSymmetry` the failure was worse
     still: charges are bit-packed, so ``-encode(1, 2)`` decodes as ``(-1, -3)``
     and ``fuse(q, -q)`` is ``-65536`` rather than the identity — a genuine
-    conservation violation, not a relabelling.  The arithmetic above is
-    group-correct for product symmetries too, but the rest of the Phase 3 path
-    has not been exercised on them, so they stay refused here until #734's
-    ProductSymmetry enablement verifies the whole path end to end.
+    conservation violation, not a relabelling.  Product symmetries were refused
+    outright while that was the only difference between "group-correct here" and
+    "group-correct everywhere else on the path".  #734 Task 4 closed the rest of
+    it — leg fusion was deriving fused charges from the same ``flow * q`` sum,
+    with a ``% n_values()`` that treats a group cardinality as a modulus for the
+    packed integer — so the refusal is lifted and this function supports U(1),
+    ``Z_n`` and their products alike.  ``_from_blocks_unchecked`` still skips
+    validation, so the round trip is pinned by tests that call ``._validate()``
+    on the rebuilt tensor rather than by a runtime check here.
     """
     if {row_axis, col_axis} != {0, 1}:
         raise ValueError("row_axis and col_axis must be 0 and 1 in some order")
 
     sym = row_index.symmetry
-    if isinstance(sym, ProductSymmetry):
-        raise NotImplementedError(
-            "tensor_from_sector_matrices now derives both block-key charges "
-            "through symmetry.flow_charge/dual, which is group-correct for "
-            "ProductSymmetry as well, but the rest of #715 Phase 3 has never "
-            "been run on bit-packed charges -- where a wrong partner is a "
-            "conservation violation (-encode(1, 2) decodes as (-1, -3), not "
-            "(-1, -2)) rather than a relabelling, and "
-            "_from_blocks_unchecked would pass it straight to a contraction. "
-            "Until #734's ProductSymmetry enablement verifies that path, "
-            "Phase 3 supports U(1) and Z_n only."
-        )
 
     indices: list[TensorIndex] = [None, None]  # type: ignore[list-item]
     indices[row_axis] = row_index

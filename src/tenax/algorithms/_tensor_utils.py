@@ -151,14 +151,11 @@ def _fuse_indices_dense(
     # Build fused index with FuseInfo
     idx_a, idx_b = indices_perm[a], indices_perm[a + 1]
     sym = idx_a.symmetry
-    # Canonicalise before deriving sectors.  TensorIndex.__post_init__ rewrites
-    # ``sectors`` to canonical representatives (#734), so caching uncanonicalised
-    # charges would leave ``charges`` naming sectors the index does not have, and
-    # blocks on those charges are dropped silently.  U(1)/Z_n are unaffected
-    # (``_compute_fused_charges`` already reduces mod n); ProductSymmetry is not.
-    fused_charges = sym.canonicalize_charges(
-        _compute_fused_charges(idx_a, idx_b, fused_flow, sym)
-    )
+    # ``_compute_fused_charges`` returns canonical representatives.  That matters
+    # because TensorIndex.__post_init__ rewrites ``sectors`` to canonical form
+    # (#734): uncanonicalised charges would leave ``charges`` naming sectors the
+    # index does not have, and blocks on those charges are dropped silently.
+    fused_charges = _compute_fused_charges(idx_a, idx_b, fused_flow, sym)
     sectors, mults = np.unique(fused_charges, return_counts=True)
     fuse_info = FuseInfo(parent_indices=(idx_a, idx_b), fused_flow=fused_flow)
     fused_idx = TensorIndex(
@@ -175,43 +172,126 @@ def _fuse_indices_dense(
     return DenseTensor(data, new_indices)
 
 
+def _fused_charge_array(
+    charges_a: np.ndarray,
+    charges_b: np.ndarray,
+    flow_a: int,
+    flow_b: int,
+    fused_flow: int,
+    sym: BaseSymmetry,
+) -> np.ndarray:
+    """Charge carried by the fused leg for element-wise paired parent charges.
+
+    This is the single charge-arithmetic site of leg fusion, and the fusion
+    counterpart of :func:`~tenax.core.index._net_charge`: every ``q_f`` in this
+    module is derived here so the sector table, the cached dense charges, the
+    ``(qa, qb) -> q_f`` grouping and the rewritten block keys cannot drift apart.
+
+    The defining property is that fusing must not change a block's net charge —
+    the fused leg has to contribute exactly what its two parents did::
+
+        flow_charge(fused_flow, q_f) == fuse(flow_charge(flow_a, qa),
+                                             flow_charge(flow_b, qb))
+
+    which inverts to the expression below because ``flow_charge`` is an
+    involution on canonical representatives.
+
+    The former ``(flow_a * qa + flow_b * qb) * fused_sign``, reduced by a
+    hand-rolled ``% n_values()``, was wrong for
+    :class:`~tenax.core.symmetry.ProductSymmetry` twice over (#734): negating a
+    bit-packed charge is not the component-wise group inverse, and
+    ``n_values()`` is a group cardinality (``2 * 3 == 6``) rather than a modulus
+    for the packed integer.  Measured on ``ProductSymmetry(Z2, Z3)``, fusing two
+    IN legs produced block keys ``{0, 1, 3, 4, 5}`` against a fused sector table
+    of ``{0, 1}`` — keys naming charges the leg does not carry, whose blocks are
+    then silently dropped by every downstream contraction.
+
+    Args:
+        charges_a:  Parent-a charges, broadcastable against ``charges_b``.
+        charges_b:  Parent-b charges, broadcastable against ``charges_a``.
+        flow_a:     Flow of parent leg a (``+1`` IN / ``-1`` OUT).
+        flow_b:     Flow of parent leg b.
+        fused_flow: Flow the fused leg is being given.
+        sym:        Symmetry governing both parents.
+
+    Returns:
+        Canonical int32 fused charges, one per input pair.
+    """
+    effective = sym.fuse(
+        sym.flow_charge(flow_a, np.asarray(charges_a, dtype=np.int32)),
+        sym.flow_charge(flow_b, np.asarray(charges_b, dtype=np.int32)),
+    )
+    return sym.canonicalize_charges(sym.flow_charge(fused_flow, effective)).astype(
+        np.int32
+    )
+
+
+def _fused_charge_grid(
+    sectors_a: np.ndarray,
+    sectors_b: np.ndarray,
+    flow_a: int,
+    flow_b: int,
+    fused_flow: int,
+    sym: BaseSymmetry,
+) -> np.ndarray:
+    """Fused charge of every ``(qa, qb)`` pair, flattened in ``i * nb + j`` order."""
+    qa = np.asarray(sectors_a, dtype=np.int32)
+    qb = np.asarray(sectors_b, dtype=np.int32)
+    return _fused_charge_array(
+        np.repeat(qa, len(qb)),
+        np.tile(qb, len(qa)),
+        flow_a,
+        flow_b,
+        fused_flow,
+        sym,
+    )
+
+
+def _fused_sector_map(
+    idx_a: TensorIndex,
+    idx_b: TensorIndex,
+    fused_flow: FlowDirection,
+    sym: BaseSymmetry,
+) -> dict[tuple[int, int], int]:
+    """Map each ``(qa, qb)`` sector pair to the sector it fuses into."""
+    grid = _fused_charge_grid(
+        idx_a.sectors,
+        idx_b.sectors,
+        int(idx_a.flow),
+        int(idx_b.flow),
+        int(fused_flow),
+        sym,
+    )
+    nb = len(idx_b.sectors)
+    return {
+        (int(qa), int(qb)): int(grid[i * nb + j])
+        for i, qa in enumerate(idx_a.sectors)
+        for j, qb in enumerate(idx_b.sectors)
+    }
+
+
 def _compute_fused_charges(
     idx_a: TensorIndex,
     idx_b: TensorIndex,
     fused_flow: FlowDirection,
-    sym: object,
+    sym: BaseSymmetry,
 ) -> np.ndarray:
     """Compute the charges array for a fused index.
 
-    For each (i, j) pair of basis states from legs a and b, the fused
-    charge is: q_f = (flow_a * q_a[i] + flow_b * q_b[j]) * fused_flow_sign.
-
-    The ordering is lexicographic over unique charge pairs (q_a, q_b),
-    with states within each charge sector ordered contiguously.
+    For each ``(i, j)`` pair of basis states from legs a and b, the fused charge
+    is :func:`_fused_charge_array` of the two parent charges, stored at
+    ``i * db + j``.  The result is canonical, so it can be handed straight to
+    ``TensorIndex`` (which canonicalises ``sectors``) without the two halves
+    naming different representatives of the same sector (#734).
     """
-    da = len(idx_a.charges)
-    db = len(idx_b.charges)
-    fused = np.empty(da * db, dtype=np.int32)
-
-    flow_a_sign = int(idx_a.flow)
-    flow_b_sign = int(idx_b.flow)
-    fused_sign = int(fused_flow)
-
-    for i in range(da):
-        for j in range(db):
-            # Raw charge contribution: flow_a * q_a + flow_b * q_b
-            raw = flow_a_sign * int(idx_a.charges[i]) + flow_b_sign * int(
-                idx_b.charges[j]
-            )
-            # Map to fused charge: q_f such that fused_flow * q_f = raw
-            q_f = raw * fused_sign  # since fused_sign^2 = 1
-            # For Zn: reduce mod n
-            n = sym.n_values() if hasattr(sym, "n_values") else None
-            if n is not None:
-                q_f = q_f % n
-            fused[i * db + j] = q_f
-
-    return fused
+    return _fused_charge_grid(
+        idx_a.charges,
+        idx_b.charges,
+        int(idx_a.flow),
+        int(idx_b.flow),
+        int(fused_flow),
+        sym,
+    )
 
 
 def _compute_fused_sectors(
@@ -222,32 +302,32 @@ def _compute_fused_sectors(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute sectors and multiplicities for a fused index at O(n_sectors^2).
 
-    For each pair of sectors (qa, qb), the fused charge is
-    ``(flow_a * qa + flow_b * qb) * fused_flow_sign``, and the fused
-    multiplicity is ``m_a * m_b`` (summed over pairs giving the same q_f).
+    For each pair of sectors ``(qa, qb)`` the fused charge comes from
+    :func:`_fused_charge_array`, and the fused multiplicity is ``m_a * m_b``
+    (summed over pairs giving the same ``q_f``).
 
     Returns:
         (sectors, multiplicities) — sorted int32 arrays.
     """
-    flow_a = int(idx_a.flow)
-    flow_b = int(idx_b.flow)
-    fused_sign = int(fused_flow)
-    n_vals = sym.n_values()
+    q_f = _fused_charge_grid(
+        idx_a.sectors,
+        idx_b.sectors,
+        int(idx_a.flow),
+        int(idx_b.flow),
+        int(fused_flow),
+        sym,
+    )
+    nb = len(idx_b.sectors)
+    # Accumulate in int64: the pairwise product of two int32 multiplicities can
+    # overflow int32 before the per-sector sum is taken.
+    mults = np.repeat(idx_a.multiplicities.astype(np.int64), nb) * np.tile(
+        idx_b.multiplicities.astype(np.int64), len(idx_a.sectors)
+    )
 
-    fused_mults: dict[int, int] = {}
-    for i, qa in enumerate(idx_a.sectors):
-        ma = int(idx_a.multiplicities[i])
-        for j, qb in enumerate(idx_b.sectors):
-            mb = int(idx_b.multiplicities[j])
-            raw = flow_a * int(qa) + flow_b * int(qb)
-            q_f = raw * fused_sign
-            if n_vals is not None:
-                q_f = q_f % n_vals
-            fused_mults[q_f] = fused_mults.get(q_f, 0) + ma * mb
-
-    sectors = np.array(sorted(fused_mults.keys()), dtype=np.int32)
-    multiplicities = np.array([fused_mults[int(q)] for q in sectors], dtype=np.int32)
-    return sectors, multiplicities
+    sectors, inverse = np.unique(q_f, return_inverse=True)
+    multiplicities = np.zeros(len(sectors), dtype=np.int64)
+    np.add.at(multiplicities, inverse.ravel(), mults)
+    return sectors.astype(np.int32), multiplicities.astype(np.int32)
 
 
 def _fuse_indices_symmetric(
@@ -269,13 +349,11 @@ def _fuse_indices_symmetric(
     idx_b = T.indices[b]
     sym = idx_a.symmetry
 
-    # Build fused TensorIndex with FuseInfo.  Canonicalise before deriving
-    # sectors so the cached dense charges and the sector table agree on
-    # representatives -- __post_init__ canonicalises ``sectors`` (#734), and a
-    # charge with no matching sector loses its blocks silently.
-    fused_charges = sym.canonicalize_charges(
-        _compute_fused_charges(idx_a, idx_b, fused_flow, sym)
-    )
+    # Build fused TensorIndex with FuseInfo.  ``_compute_fused_charges`` returns
+    # canonical representatives so the cached dense charges and the sector table
+    # agree -- __post_init__ canonicalises ``sectors`` (#734), and a charge with
+    # no matching sector loses its blocks silently.
+    fused_charges = _compute_fused_charges(idx_a, idx_b, fused_flow, sym)
     sectors, mults = np.unique(fused_charges, return_counts=True)
     fuse_info = FuseInfo(parent_indices=(idx_a, idx_b), fused_flow=fused_flow)
     fused_idx = TensorIndex(
@@ -302,11 +380,6 @@ def _fuse_indices_symmetric(
     unique_qa = idx_a.sectors
     unique_qb = idx_b.sectors
 
-    flow_a_sign = int(idx_a.flow)
-    flow_b_sign = int(idx_b.flow)
-    fused_sign = int(fused_flow)
-    n_vals = sym.n_values()
-
     # For each (qa, qb) pair, find which positions in idx_a/idx_b have those charges
     positions_a: dict[int, np.ndarray] = {}
     for q in unique_qa:
@@ -315,15 +388,18 @@ def _fuse_indices_symmetric(
     for q in unique_qb:
         positions_b[int(q)] = np.where(idx_b.charges == q)[0]
 
-    # Group (qa, qb) pairs by fused charge q_f
+    # Group (qa, qb) pairs by fused charge q_f.  The map is built once and then
+    # reused when rewriting the block keys below, so the grouping (which sizes
+    # and lays out the fused blocks) and the keys (which name them) cannot
+    # disagree -- they used to be two independent copies of the same wrong
+    # ``flow * q`` arithmetic (#734).
+    qf_of = _fused_sector_map(idx_a, idx_b, fused_flow, sym)
     fused_groups: dict[int, list[tuple[int, int]]] = {}
     for qa in unique_qa:
         for qb in unique_qb:
-            raw = flow_a_sign * int(qa) + flow_b_sign * int(qb)
-            q_f = raw * fused_sign
-            if n_vals is not None:
-                q_f = q_f % n_vals
-            fused_groups.setdefault(q_f, []).append((int(qa), int(qb)))
+            fused_groups.setdefault(qf_of[(int(qa), int(qb))], []).append(
+                (int(qa), int(qb))
+            )
 
     # For each fused charge q_f, compute:
     #   fused_dim[q_f]: total number of elements in this block
@@ -381,11 +457,8 @@ def _fuse_indices_symmetric(
         qa = int(key[a])
         qb = int(key[b])
 
-        # Compute q_f for this (qa, qb) pair
-        raw = flow_a_sign * qa + flow_b_sign * qb
-        q_f = raw * fused_sign
-        if n_vals is not None:
-            q_f = q_f % n_vals
+        # Same map that built ``fused_groups``/``scatter_map`` above.
+        q_f = qf_of[(qa, qb)]
 
         # Transpose block to bring axes a and b adjacent
         other_block_axes = [i for i in range(ndim) if i not in (a, b)]
@@ -506,17 +579,14 @@ def _split_index_symmetric(T: SymmetricTensor, axis: int) -> SymmetricTensor:
     sym = parent_a.symmetry
     ndim = T.ndim
 
-    flow_a_sign = int(parent_a.flow)
-    flow_b_sign = int(parent_b.flow)
     # Use the flow recorded at fusion time so the inverse mapping is correct
     # even if the fused leg's flow was later flipped (e.g. by bar/flip_flow,
     # which keep the data layout but change the leg's flow label).
-    fused_sign = int(
+    split_flow = (
         fused_idx.fuse_info.fused_flow
         if fused_idx.fuse_info.fused_flow is not None
         else fused_idx.flow
     )
-    n_vals = sym.n_values()
 
     # Reconstruct the scatter map from fuse (same logic as _fuse_indices_symmetric)
     db = parent_b.dim
@@ -527,15 +597,15 @@ def _split_index_symmetric(T: SymmetricTensor, axis: int) -> SymmetricTensor:
     for q in parent_b.sectors:
         positions_b[int(q)] = np.where(parent_b.charges == q)[0]
 
-    # Group (qa, qb) pairs by fused charge q_f
+    # Group (qa, qb) pairs by fused charge q_f -- through the same helper the
+    # forward direction uses, so the split inverts the fuse exactly (#734).
+    qf_of = _fused_sector_map(parent_a, parent_b, split_flow, sym)
     fused_groups: dict[int, list[tuple[int, int]]] = {}
     for qa in parent_a.sectors:
         for qb in parent_b.sectors:
-            raw = flow_a_sign * int(qa) + flow_b_sign * int(qb)
-            q_f = raw * fused_sign
-            if n_vals is not None:
-                q_f = q_f % n_vals
-            fused_groups.setdefault(q_f, []).append((int(qa), int(qb)))
+            fused_groups.setdefault(qf_of[(int(qa), int(qb))], []).append(
+                (int(qa), int(qb))
+            )
 
     # Rebuild scatter_map (same as fuse)
     scatter_map: dict[tuple[int, int], np.ndarray] = {}

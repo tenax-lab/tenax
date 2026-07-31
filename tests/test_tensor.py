@@ -844,3 +844,162 @@ class TestInner:
         result = inner(dense, sym)
         expected = jnp.sum(jnp.abs(sym.todense()) ** 2)
         np.testing.assert_allclose(float(result), float(expected), rtol=1e-6)
+
+
+# --- ProductSymmetry end to end (#734 Task 4) ------------------------------
+#
+# Mixed-flow ``ProductSymmetry`` tensors did not work at all before #734: every
+# charge-arithmetic site in the tree assumed the group inverse is integer
+# negation and the group operation integer addition.  For bit-packed charges
+# both are false -- ``-encode(1, 1)`` decodes as ``(-1, -2)``, and adding two
+# packed charges carries across the 16-bit factor boundary -- so a conserving
+# block fused to ``-65536`` instead of the identity.  These tests walk the whole
+# path (construct -> validate -> decompose -> contract) on the two shapes of
+# product group that fail differently: one factor infinite (no ``% n``
+# reduction anywhere) and both factors finite (where ``n_values()`` returns the
+# *cardinality* 2*3 == 6, which is not a modulus for the packed integer).
+
+_PRODUCT_CASES = [
+    (
+        "Prod(Z2,U1)",
+        ProductSymmetry(ZnSymmetry(2), U1Symmetry()),
+        [ProductSymmetry.encode(0, 0), ProductSymmetry.encode(1, 1)],
+    ),
+    (
+        "Prod(Z2,Z3)",
+        ProductSymmetry(ZnSymmetry(2), ZnSymmetry(3)),
+        [ProductSymmetry.encode(0, 0), ProductSymmetry.encode(1, 1)],
+    ),
+]
+
+
+def _product_leg(sym, sectors, flow, label):
+    return TensorIndex(
+        symmetry=sym,
+        sectors=np.array(sectors, dtype=np.int32),
+        multiplicities=np.array([2, 2], dtype=np.int32),
+        flow=flow,
+        label=label,
+    )
+
+
+@pytest.mark.parametrize(
+    "name,sym,sectors", _PRODUCT_CASES, ids=[c[0] for c in _PRODUCT_CASES]
+)
+def test_product_symmetry_mixed_flow_tensor_constructs(name, sym, sectors):
+    """Before #734 this raised: fused=-65536 for the conserving block (q, q)."""
+    t = SymmetricTensor.random_normal_np(
+        (
+            _product_leg(sym, sectors, FlowDirection.IN, "a"),
+            _product_leg(sym, sectors, FlowDirection.OUT, "b"),
+        ),
+        np.random.RandomState(0),
+    )
+    assert t.blocks, f"{name}: no valid blocks found"
+    t._validate()
+    # Both sectors are actually populated -- an enumerator that kept only the
+    # identity block would also "construct and validate".
+    assert set(t._block_keys) == {(int(q), int(q)) for q in sectors}
+
+
+@pytest.mark.parametrize(
+    "name,sym,sectors", _PRODUCT_CASES, ids=[c[0] for c in _PRODUCT_CASES]
+)
+def test_product_symmetry_svd_reconstructs(name, sym, sectors):
+    """SVD -> contract round trip on a mixed-flow product-symmetry tensor.
+
+    ``tenax.linalg.svd`` holds the singular values out of U and Vh, so they are
+    folded back in before contracting.  The comparison is against the dense
+    original, which catches a dropped block (the #734 failure mode) as a numeric
+    difference rather than only as a missing key.
+    """
+    import tenax.linalg as tl
+    from tenax.contraction.contractor import contract
+    from tenax.core._tensor_utils import scale_bond_axis
+
+    t = SymmetricTensor.random_normal_np(
+        (
+            _product_leg(sym, sectors, FlowDirection.IN, "a"),
+            _product_leg(sym, sectors, FlowDirection.OUT, "b"),
+        ),
+        np.random.RandomState(0),
+    )
+    U, s, Vh, _ = tl.svd(t, left_labels=["a"], right_labels=["b"])
+    rebuilt = contract(scale_bond_axis(U, "bond", s), Vh)
+
+    ref = t.todense()
+    assert float(jnp.linalg.norm(ref)) > 1.0, "reference is degenerate"
+    got = rebuilt.todense()
+    # A silently-dropped block reads as an all-zero slab, not as noise.
+    assert float(jnp.linalg.norm(got)) > 1.0, f"{name}: reconstruction collapsed"
+    assert float(jnp.max(jnp.abs(got - ref))) < 1e-8
+
+
+@pytest.mark.parametrize(
+    "name,sym,sectors", _PRODUCT_CASES, ids=[c[0] for c in _PRODUCT_CASES]
+)
+def test_product_symmetry_svd_over_a_multi_leg_row_reconstructs(name, sym, sectors):
+    """The same round trip, but with two labels grouped into the SVD's row leg.
+
+    ``tenax.linalg`` matricises through ``_group_blocks_by_bond_charge``, which
+    fuses the flow-weighted charges of *several* legs into one bond charge —
+    a rank-3 case exercises that reduction, where the rank-2 case above only
+    ever fuses one leg per side.  (It does not reach
+    ``_tensor_utils.fuse_indices``; ``test_tensor_utils.py`` covers that path
+    directly.)
+    """
+    import tenax.linalg as tl
+    from tenax.contraction.contractor import contract
+    from tenax.core._tensor_utils import scale_bond_axis
+
+    t = SymmetricTensor.random_normal_np(
+        (
+            _product_leg(sym, sectors, FlowDirection.IN, "a"),
+            _product_leg(sym, sectors, FlowDirection.IN, "b"),
+            _product_leg(sym, sectors, FlowDirection.OUT, "c"),
+        ),
+        np.random.RandomState(5),
+    )
+    assert t.blocks, f"{name}: no valid blocks found"
+
+    U, s, Vh, _ = tl.svd(t, left_labels=["a", "b"], right_labels=["c"])
+    rebuilt = contract(scale_bond_axis(U, "bond", s), Vh)
+
+    ref = t.todense()
+    assert float(jnp.linalg.norm(ref)) > 1.0, "reference is degenerate"
+    perm = tuple(rebuilt.labels().index(lbl) for lbl in t.labels())
+    got = rebuilt.transpose(perm).todense()
+    assert float(jnp.linalg.norm(got)) > 1.0, f"{name}: reconstruction collapsed"
+    assert float(jnp.max(jnp.abs(got - ref))) < 1e-8
+
+
+@pytest.mark.parametrize(
+    "name,sym,sectors", _PRODUCT_CASES, ids=[c[0] for c in _PRODUCT_CASES]
+)
+def test_product_symmetry_contraction_is_not_silently_zero(name, sym, sectors):
+    """``contract`` on two mixed-flow product-symmetry tensors matches dense.
+
+    The target-charge inference in ``_parse_contraction_prelude`` and the block
+    enumerator both run here; either getting the packed arithmetic wrong yields
+    an all-zero result rather than an error.
+    """
+    from tenax.contraction.contractor import contract
+
+    left = SymmetricTensor.random_normal_np(
+        (
+            _product_leg(sym, sectors, FlowDirection.IN, "a"),
+            _product_leg(sym, sectors, FlowDirection.OUT, "m"),
+        ),
+        np.random.RandomState(1),
+    )
+    right = SymmetricTensor.random_normal_np(
+        (
+            _product_leg(sym, sectors, FlowDirection.IN, "m"),
+            _product_leg(sym, sectors, FlowDirection.OUT, "c"),
+        ),
+        np.random.RandomState(2),
+    )
+    got = contract(left, right).todense()
+    ref = left.todense() @ right.todense()
+    assert float(jnp.linalg.norm(ref)) > 1.0, "reference is degenerate"
+    np.testing.assert_allclose(np.asarray(got), np.asarray(ref), atol=1e-10)

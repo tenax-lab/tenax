@@ -333,6 +333,66 @@ class TestFuseIndices:
         # sectors should be sorted
         np.testing.assert_array_equal(sectors, np.sort(sectors))
 
+    @pytest.mark.parametrize(
+        "sym",
+        [
+            U1Symmetry(),
+            ZnSymmetry(3),
+            ProductSymmetry(ZnSymmetry(2), U1Symmetry()),
+            ProductSymmetry(ZnSymmetry(2), ZnSymmetry(3)),
+        ],
+        ids=["u1", "z3", "z2_x_u1", "z2_x_z3"],
+    )
+    @pytest.mark.parametrize(
+        "flows",
+        [
+            (FlowDirection.IN, FlowDirection.IN),
+            (FlowDirection.IN, FlowDirection.OUT),
+            (FlowDirection.OUT, FlowDirection.OUT),
+        ],
+        ids=["ii", "io", "oo"],
+    )
+    @pytest.mark.parametrize("fused_flow", [FlowDirection.IN, FlowDirection.OUT])
+    def test_fuse_sectors_agrees_with_fused_charges(self, sym, flows, fused_flow):
+        """The sector-level and charge-level fusions must be one function.
+
+        ``_compute_fused_sectors`` has no production caller today — only
+        ``_compute_fused_charges`` is on the live path — so a bug in it is
+        invisible to every end-to-end test, and reverting its arithmetic to the
+        raw ``flow * q`` sum killed nothing.  What pins it is the relation it
+        exists to compute cheaply: the sector table it returns must equal
+        ``np.unique(_compute_fused_charges(...), return_counts=True)``.  Under
+        ``ProductSymmetry`` the two part company hard, because ``n_values()`` is
+        the group cardinality (``2 * 3 == 6``) and not a modulus for the packed
+        charge (#734).
+        """
+        from tenax.algorithms._tensor_utils import (
+            _compute_fused_charges,
+            _compute_fused_sectors,
+        )
+
+        if isinstance(sym, ProductSymmetry):
+            raw = np.array(
+                [ProductSymmetry.encode(q1, q2) for q1 in range(2) for q2 in range(3)],
+                dtype=np.int32,
+            )
+        else:
+            raw = np.array([0, 1, 2], dtype=np.int32)
+        charges = np.unique(sym.canonicalize_charges(raw))
+
+        idx_a = TensorIndex.from_charges(sym, charges, flows[0], label="a")
+        idx_b = TensorIndex.from_charges(sym, charges, flows[1], label="b")
+
+        sectors, mults = _compute_fused_sectors(idx_a, idx_b, fused_flow, sym)
+        want_sectors, want_mults = np.unique(
+            _compute_fused_charges(idx_a, idx_b, fused_flow, sym), return_counts=True
+        )
+
+        np.testing.assert_array_equal(sectors, want_sectors)
+        np.testing.assert_array_equal(mults, want_mults)
+        assert int(np.sum(mults)) == idx_a.dim * idx_b.dim
+        assert len(sectors) > 1, "degenerate fixture: nothing to get wrong"
+
 
 class TestSplitIndex:
     """Tests for split_index — inverse of fuse_indices."""
@@ -683,3 +743,95 @@ def test_fused_charges_never_name_a_sector_the_index_lacks(sym, pairs, fused_flo
         sorted(set(leg.charges.tolist())),
         leg.sectors.tolist(),
     )
+
+
+@pytest.mark.parametrize(
+    "sym",
+    [
+        ProductSymmetry(ZnSymmetry(2), U1Symmetry()),
+        ProductSymmetry(ZnSymmetry(2), ZnSymmetry(3)),
+    ],
+    ids=["z2_x_u1", "z2_x_z3"],
+)
+@pytest.mark.parametrize(
+    "flows",
+    [
+        (FlowDirection.IN, FlowDirection.IN, FlowDirection.OUT),
+        (FlowDirection.IN, FlowDirection.OUT, FlowDirection.OUT),
+        (FlowDirection.OUT, FlowDirection.OUT, FlowDirection.OUT),
+    ],
+    ids=["iio", "ioo", "ooo"],
+)
+@pytest.mark.parametrize("fused_flow", [FlowDirection.IN, FlowDirection.OUT])
+def test_fused_block_keys_name_sectors_their_leg_carries(sym, flows, fused_flow):
+    """Every key ``fuse_indices`` writes must exist in its own leg's sector table.
+
+    The companion test above pins the *charges* side of this, which #734 Task 2
+    fixed.  The keys were still derived from an independent copy of
+    ``flow_a * qa + flow_b * qb`` reduced by ``% n_values()`` -- twice over, in
+    ``_fuse_indices_symmetric``'s ``fused_groups`` grouping and again when
+    rewriting each block key.  Measured on ``ProductSymmetry(Z2, Z3)``, that
+    produced fused keys ``{0, 1, 3, 4, 5}`` against a fused sector table of
+    ``{0, 1}``: keys naming charges the leg does not carry.  Nothing raises on
+    such a key -- ``todense`` and every later contraction simply drop the block.
+
+    ``ProductSymmetry(Z2, U(1))`` is the control: ``n_values()`` is ``None``
+    there, so no bogus modulus was applied and only the flow weighting was
+    wrong.  ``ProductSymmetry(Z2, Z3)`` gets both errors at once.
+    """
+    sectors = np.array(
+        [ProductSymmetry.encode(0, 0), ProductSymmetry.encode(1, 1)], dtype=np.int32
+    )
+
+    def leg(flow, label):
+        return TensorIndex(
+            symmetry=sym,
+            sectors=sectors.copy(),
+            multiplicities=np.array([2, 2], dtype=np.int32),
+            flow=flow,
+            label=label,
+        )
+
+    indices = tuple(leg(f, lbl) for f, lbl in zip(flows, "abc"))
+    keys = _compute_valid_blocks(indices)
+    assert keys, "fixture must have at least one conserving block"
+    t = SymmetricTensor(
+        {
+            k: jnp.asarray(
+                np.random.RandomState(abs(hash(k)) % 2**31).standard_normal(
+                    tuple(i.multiplicity(int(q)) for i, q in zip(indices, k))
+                )
+            )
+            for k in keys
+        },
+        indices,
+    )
+
+    fused = fuse_indices(t, 0, 1, "ab", fused_flow)
+
+    assert fused.blocks, "fusion dropped every block"
+    for key in fused._block_keys:
+        for idx, q in zip(fused.indices, key):
+            assert idx.has_sector(int(q)), (
+                key,
+                idx.label,
+                idx.sectors.tolist(),
+            )
+    # A key that names a real sector can still violate conservation.
+    fused._validate()
+    # No data lost: fusing is a relabelling of the same numbers.
+    np.testing.assert_allclose(
+        float(jnp.linalg.norm(fused.todense())),
+        float(jnp.linalg.norm(t.todense())),
+        rtol=1e-12,
+    )
+    assert float(jnp.linalg.norm(t.todense())) > 1.0, "degenerate fixture"
+
+    # ... and the split inverts it, which pins the two ``(qa, qb) -> q_f``
+    # groupings (fuse's and split's) to the same map.
+    unfused = split_index(fused, 0)
+    assert set(unfused._block_keys) == set(t._block_keys)
+    for key in t._block_keys:
+        np.testing.assert_allclose(
+            np.asarray(unfused.blocks[key]), np.asarray(t.blocks[key]), atol=1e-12
+        )

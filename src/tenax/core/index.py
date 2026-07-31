@@ -426,3 +426,57 @@ def _net_charge(
     return indices[0].symmetry.net_charge(
         [q for _, q in pairs], [idx.flow for idx, _ in pairs]
     )
+
+
+def _net_charges(
+    indices: Sequence[TensorIndex],
+    keys: Sequence[Sequence[int]] | np.ndarray,
+) -> np.ndarray:
+    """Vectorised :func:`_net_charge` over a table of keys.
+
+    Returns one net fused charge per key.  The whole key table is fused leg by
+    leg, so the symmetry sees one ``(n_keys,)`` array per leg instead of one
+    scalar per (key, leg) pair.  That is why it exists: at the two hot sites
+    that use it — :meth:`~tenax.core.tensor.SymmetricTensor._validate` and the
+    symmetric contraction prelude — calling :func:`_net_charge` once per key
+    dominated the call, and this form beats it by an order of magnitude on
+    block counts in the hundreds.
+
+    Against the raw ``sum(flow * q)`` it replaces, the win is only asymptotic:
+    it is cheaper for large block counts and *more* expensive for a handful of
+    blocks, where a few NumPy calls cost more than the loop they remove.  No
+    timings are quoted because they rot; measure before treating either form as
+    a speedup.  Correctness, not speed, is why the raw sum is gone.
+
+    Every charge is still inverted and combined by the symmetry class, so this
+    is the sanctioned boundary of #734 rather than a bypass of it.  It is
+    deliberately the *only* vectorised copy: three independent transcriptions of
+    one conservation law is what #734 set out to remove.
+
+    Args:
+        indices: Tensor indices, one per leg.  Must be non-empty.
+        keys:    Block keys, each one charge per leg in ``indices`` order.
+
+    Returns:
+        Integer array of shape ``(len(keys),)``.
+
+    Raises:
+        ValueError: If ``indices`` is empty, or if ``keys`` is not a 2-D table
+            with one column per index.  The scalar adapter gets that check for
+            free from ``zip(..., strict=True)``; without it here, a key table
+            with the wrong arity would silently ignore its extra columns and
+            report a conserving net charge for a non-conserving block.
+    """
+    if len(indices) == 0:
+        raise ValueError("_net_charges requires at least one index")
+    table = np.asarray(keys, dtype=np.int32)  # (n_keys, n_legs)
+    if table.ndim != 2 or table.shape[1] != len(indices):
+        raise ValueError(
+            f"keys must be a 2-D table with one column per index: got shape "
+            f"{table.shape} for {len(indices)} indices"
+        )
+    sym = indices[0].symmetry
+    net = np.full(len(table), sym.identity(), dtype=np.int32)
+    for i, idx in enumerate(indices):
+        net = sym.fuse(net, sym.flow_charge(idx.flow, table[:, i]))
+    return net

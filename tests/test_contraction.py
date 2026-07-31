@@ -1188,53 +1188,36 @@ def test_z2_contraction_survives_a_raw_target_of_two():
 _PRELUDE_TARGET_POS = 6  # index of ``output_target`` in the prelude's tuple
 
 
-@pytest.mark.parametrize(
-    "sym",
-    [
-        U1Symmetry(),
-        ZnSymmetry(3),
-        ProductSymmetry(U1Symmetry(), ZnSymmetry(3)),
-    ],
-    ids=["u1", "z3", "u1xz3"],
-)
-def test_net_charges_matches_the_scalar_adapter(sym):
-    """``_net_charges`` is a speed rewrite of ``_net_charge``, so pin them equal.
+def _prelude_target(tensors, subscripts):
+    """``output_target`` out of the prelude's tuple, with its arity pinned.
 
-    The prelude fuses a whole key table at once because the per-key adapter is
-    ~10x more expensive there.  Nothing else forces the two to agree, and a
-    divergence would resurface as exactly the silent-zero bug #734 closes.
+    ``_PRELUDE_TARGET_POS`` indexes an 8-tuple positionally, so a field added to
+    or removed from ``_parse_contraction_prelude`` would silently start reading
+    a different element -- and every assertion below would then be about the
+    wrong thing while still passing or failing for unrelated reasons.
     """
-    rng = np.random.RandomState(3)
-    raw = rng.randint(-3, 4, size=(40, 4))
-    if isinstance(sym, ProductSymmetry):
-        sectors = sym.encode_charges(raw, rng.randint(0, 3, size=(40, 4)))
-    else:
-        sectors = raw.astype(np.int32)
-
-    flows = (
-        FlowDirection.IN,
-        FlowDirection.OUT,
-        FlowDirection.IN,
-        FlowDirection.OUT,
+    prelude = _parse_contraction_prelude(tensors, subscripts)
+    assert len(prelude) == 8, (
+        f"_parse_contraction_prelude returned {len(prelude)} fields, not 8; "
+        f"_PRELUDE_TARGET_POS needs updating"
     )
-    indices = tuple(
-        TensorIndex(
-            sym,
-            np.unique(sectors[:, i]),
-            np.full(len(np.unique(sectors[:, i])), 2, dtype=np.int32),
-            flow,
-            label=lbl,
-        )
-        for i, (flow, lbl) in enumerate(zip(flows, "abcd"))
-    )
-    keys = [tuple(int(q) for q in row) for row in sectors]
+    return prelude[_PRELUDE_TARGET_POS]
 
-    got = _net_charges(indices, keys)
-    want = np.array([_net_charge(indices, k) for k in keys], dtype=np.int32)
-    np.testing.assert_array_equal(got, want)
-    # Guard: a helper that returned a constant would pass an equality check
-    # against a scalar adapter that also returned that constant.
-    assert len(set(want.tolist())) > 1, "degenerate fixture"
+
+def test_prelude_uses_the_shared_vectorised_net_charge_helper():
+    """The prelude must call ``core.index._net_charges``, not a private copy.
+
+    #734's premise is one charge-arithmetic boundary; the prelude used to hold
+    its own line-for-line transcription of the vectorised fuse loop, alongside
+    the one in ``SymmetricTensor._validate``.  Pin the identity so a re-fork
+    fails here rather than drifting silently.
+    """
+    from tenax.contraction import contractor
+    from tenax.core import index as index_mod
+    from tenax.core import tensor as tensor_mod
+
+    assert contractor._net_charges is index_mod._net_charges
+    assert tensor_mod._net_charges is index_mod._net_charges
 
 
 def test_zn_target_inference_yields_a_charge_not_a_raw_sum():
@@ -1281,12 +1264,8 @@ def test_zn_target_inference_yields_a_charge_not_a_raw_sum():
     assert _raw(N) == {4} and {_net_charge(N.indices, k) for k in N.blocks} == {1}
     assert _raw(M) == {0}
 
-    identity_target = _parse_contraction_prelude((T, M), "abc,cd->abd")[
-        _PRELUDE_TARGET_POS
-    ]
-    charged_target = _parse_contraction_prelude((N, M), "abc,cd->abd")[
-        _PRELUDE_TARGET_POS
-    ]
+    identity_target = _prelude_target((T, M), "abc,cd->abd")
+    charged_target = _prelude_target((N, M), "abc,cd->abd")
 
     # An identity target is encoded as ``None`` (== "validate normally").
     assert identity_target is None, identity_target
@@ -1350,7 +1329,7 @@ def test_product_symmetry_contraction_target_accumulates_by_fusion():
     assert {_net_charge(A.indices, k) for k in A.blocks} == {charge}
     assert {_net_charge(B.indices, k) for k in B.blocks} == {charge}
 
-    target = _parse_contraction_prelude((A, B), "ax,xb->ab")[_PRELUDE_TARGET_POS]
+    target = _prelude_target((A, B), "ax,xb->ab")
     assert target == fused, sym.decode(target) if target is not None else target
 
     ref = jnp.einsum("ax,xb->ab", A.todense(), B.todense())
