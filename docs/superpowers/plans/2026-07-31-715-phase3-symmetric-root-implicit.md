@@ -1284,6 +1284,22 @@ Expected: FAIL — `ImportError: cannot import name 'characteristic_residual_sym
 
 - [ ] **Step 3: Write minimal implementation**
 
+**Two half-planes — read this before touching anything.** The forward sweep and the
+characteristic equations cut the plane differently, and mixing them silently produces a
+root that is not a root:
+
+| | cut | glues | quadrant primitive |
+|---|---|---|---|
+| forward sweep (Tasks 5-7) | **left** half | upper-left quadrant to lower-left, same rotation | both quadrants |
+| §V.3 residual (this task) | **upper** half | `EC[k]` to `EC[k+1]` | `_upper_left_quadrant` only, **transposed** |
+
+So in the residual, `_lower_left_quadrant` is not used at all, and the enlarged corner is
+`_upper_left_quadrant(env_k, a_k).reshape(n, n).T` — the reference orders it
+`(cut | outer)` while the helper returns `(outer | cut)`. The dense module pins that
+transpose to 7.7e-16 against the authors' dumped fixed point. Phase 1 bridges the two
+conventions in `asym_root_to_covariant_convention` (`:667-712`), a shift-by-one plus a
+transpose; the symmetric port needs the same bridge, so read that function too.
+
 Port `_ctm_root_implicit_asym.asym_characteristic_residual_covariant` (`:780-878`),
 `_covariant_pieces` (`:713-761`) and `_modified_env` (`:762-779`) with these
 substitutions, and nothing else changed:
