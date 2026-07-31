@@ -9,6 +9,9 @@ from hypothesis.extra import numpy as hnp
 from tenax.core.symmetry import (
     BaseNonAbelianSymmetry,
     BaseSymmetry,
+    FermionicU1,
+    FermionParity,
+    ProductSymmetry,
     U1Symmetry,
     ZnSymmetry,
 )
@@ -254,3 +257,78 @@ class TestBaseNonAbelianSymmetry:
         sym = ConcreteNonAbelian()
         assert sym.identity() == 0
         assert sym.allowed_fusions(1, 1) == [0, 2]
+
+
+_BOUNDARY_CASES = [
+    ("U1", U1Symmetry(), [-2, -1, 0, 1, 2]),
+    ("Z2", ZnSymmetry(2), [0, 1]),
+    ("Z3", ZnSymmetry(3), [0, 1, 2]),
+    ("Z4", ZnSymmetry(4), [0, 1, 2, 3]),
+    ("FermionParity", FermionParity(), [0, 1]),
+    ("FermionicU1", FermionicU1(), [-2, -1, 0, 1, 2]),
+    (
+        "Prod(Z2,U1)",
+        ProductSymmetry(ZnSymmetry(2), U1Symmetry()),
+        [ProductSymmetry.encode(a, b) for a in (0, 1) for b in (-2, -1, 0, 1, 2)],
+    ),
+    (
+        "Prod(Z2,Z3)",
+        ProductSymmetry(ZnSymmetry(2), ZnSymmetry(3)),
+        [ProductSymmetry.encode(a, b) for a in (0, 1) for b in (0, 1, 2)],
+    ),
+]
+_BOUNDARY_IDS = [c[0] for c in _BOUNDARY_CASES]
+
+
+@pytest.mark.parametrize("name,sym,sectors", _BOUNDARY_CASES, ids=_BOUNDARY_IDS)
+def test_canonicalize_fixes_canonical_sectors_and_is_idempotent(name, sym, sectors):
+    secs = np.array(sectors, dtype=np.int32)
+    once = sym.canonicalize(secs)
+    assert np.array_equal(once, secs), f"{name}: canonical input was rewritten"
+    assert np.array_equal(sym.canonicalize(once), once), f"{name}: not idempotent"
+
+
+@pytest.mark.parametrize("name,sym,sectors", _BOUNDARY_CASES, ids=_BOUNDARY_IDS)
+def test_flow_charge_is_an_involution_on_canonical_sectors(name, sym, sectors):
+    secs = np.array(sectors, dtype=np.int32)
+    twice = sym.flow_charge(-1, sym.flow_charge(-1, secs))
+    assert np.array_equal(twice, secs), f"{name}: OUT twice is not the identity map"
+    assert np.array_equal(sym.flow_charge(1, secs), secs), f"{name}: IN altered charges"
+
+
+@pytest.mark.parametrize("name,sym,sectors", _BOUNDARY_CASES, ids=_BOUNDARY_IDS)
+def test_fuse_with_dual_gives_identity(name, sym, sectors):
+    secs = np.array(sectors, dtype=np.int32)
+    assert np.all(sym.fuse(secs, sym.dual(secs)) == sym.identity()), name
+
+
+@pytest.mark.parametrize("name,sym,sectors", _BOUNDARY_CASES, ids=_BOUNDARY_IDS)
+def test_closed_form_solves_the_last_leg_charge(name, sym, sectors):
+    """``q = flow_charge(flow, fuse(target, dual(partial)))`` inverts conservation.
+
+    This is the property that lets ``_compute_valid_blocks`` drop its
+    ``n_values() is None`` split: it holds for every abelian group, not just U(1).
+    """
+    secs = np.array(sectors, dtype=np.int32)
+    for flow in (1, -1):
+        for partial in secs:
+            for target in secs:
+                p = np.array([partial], dtype=np.int32)
+                t = np.array([target], dtype=np.int32)
+                q_last = sym.flow_charge(flow, sym.fuse(t, sym.dual(p)))
+                got = int(sym.fuse(p, sym.flow_charge(flow, q_last))[0])
+                assert got == int(t[0]), f"{name}: flow={flow} partial={partial}"
+
+
+def test_canonicalize_maps_negative_zn_representatives():
+    sym = ZnSymmetry(3)
+    got = sym.canonicalize(np.array([-1, -2, 0], dtype=np.int32))
+    assert np.array_equal(got, np.array([2, 1, 0], dtype=np.int32))
+
+
+def test_is_conserved_accepts_a_conserving_product_symmetry_block():
+    """The IN/OUT pair that ``int(flow) * q`` rejects for bit-packed charges."""
+    ps = ProductSymmetry(ZnSymmetry(2), U1Symmetry())
+    q = ProductSymmetry.encode(1, 1)
+    assert ps.is_conserved([q, q], [1, -1])
+    assert not ps.is_conserved([q, ProductSymmetry.encode(0, 1)], [1, -1])
