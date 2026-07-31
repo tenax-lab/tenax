@@ -9,6 +9,7 @@ from tenax import FlowDirection, SymmetricTensor, TensorIndex, U1Symmetry, ZnSym
 from tenax.algorithms._ctm_root_implicit_symmetric import (
     SymEnv,
     SymRoot,
+    _double_layer_sym,
     absorb_inverse_roots_sym,
     all_projectors_sym,
     apply_bond_matrix,
@@ -24,6 +25,7 @@ from tenax.algorithms._ctm_root_implicit_symmetric import (
     swap_env_convention_sym,
     sweep_sym,
     sym_energy,
+    sym_root_implicit_energy_and_grad,
     sym_root_to_covariant_convention,
     upper_left_quadrant_sym,
 )
@@ -1332,4 +1334,282 @@ def test_a_bond_sign_orbit_is_a_root_not_a_stall():
     print(
         f"bond-sign orbit: λ = {[f'{signs[n].real:+.3f}' for n in names]}, "
         f"norm(F(y*)) = {residual:.3e}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The adjoint and the gradient (paper Eq. 18)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def sym_gradient():
+    """``(A, gate, chi, energy, dE/dA, diagnostics)`` — computed once.
+
+    Module scoped because this is the expensive object in the file: a 36-sweep
+    convergence, the root extraction, three VJP traces and a GMRES solve
+    through the block-sparse ``F``.  Every gradient test below reads the same
+    result rather than recomputing it.
+    """
+    import tenax
+
+    A = _convergent_site_tensor()
+    gate = tenax.heisenberg_gate()
+    energy, grad, diag = sym_root_implicit_energy_and_grad(A, gate, chi=4)
+    return A, gate, 4, energy, grad, diag
+
+
+def test_no_svd_or_eigh_primitive_in_the_backward(sym_gradient):
+    """The claim the whole method rests on, asserted on the jaxpr.
+
+    ``diagnostics["backward_jaxpr"]`` is the **primitive listing** of the six
+    jaxprs the gradient traces — the energy, ``F(y)`` and ``F(p)``, and each of
+    their pullbacks — rather than their pretty-printed text.  Two things about
+    that are deliberate.
+
+    The *forward* three are the half that actually pins the claim.  The VJP of
+    a decomposition contains no decomposition: it is the stored ``U``, ``s``,
+    ``Vh`` and a divided difference.  So an ``svd`` inside ``F`` would leave
+    the pullbacks' primitive lists clean while putting the ``1/(s_i² - s_j²)``
+    this method exists to avoid straight back into the gradient.
+
+    And the listing replaces the text because ``jaxpr.__str__`` names variables
+    ``a, b, ..., z, aa, ab, ...``; these programs run to ~40k equations, so the
+    namer reaches a variable literally called ``svd`` — measured — which makes
+    ``"svd" not in str(jaxpr)`` false against a jaxpr containing no such
+    primitive.  The dense module's version of this test is safe only because
+    its jaxpr is smaller.
+
+    The forward decomposition still happens, in ``all_projectors_sym``; it
+    enters all six as a *constant*.  That is the whole method: #566's
+    block-sparse SVD/eigh VJP compile wall and #687's accuracy floor are
+    avoided by never differentiating one.
+    """
+    _A, _gate, _chi, _e, _g, diag = sym_gradient
+    text = diag["backward_jaxpr"]
+    assert "svd" not in text, "an SVD survived into the backward"
+    assert "eigh" not in text, "an eigh survived into the backward"
+    # Not vacuous: the listing has to be a real listing.
+    assert "dot_general" in text, text
+    print(f"backward primitives: {sorted(text.split())}")
+
+
+def test_the_gradient_entry_point_reports_clean_diagnostics(sym_gradient):
+    """The gradient is a ``SymmetricTensor`` on ``A``'s own indices, and finite.
+
+    The charge structure is part of the answer, not scaffolding around it: a
+    gradient that came back dense would have to be projected before it could
+    be added to ``A``, and the projection is exactly the information the
+    symmetric path is supposed to keep.
+    """
+    A, _gate, _chi, energy, grad, diag = sym_gradient
+
+    assert isinstance(grad, SymmetricTensor)
+    assert grad.indices == A.indices
+    assert set(grad.blocks) == set(A.blocks)
+    assert bool(jnp.all(jnp.isfinite(grad._data)))
+    assert float(jnp.linalg.norm(grad._data)) > 1e-6
+
+    assert diag["converged"], diag
+    assert diag["iters"] < 60, diag
+    assert diag["root_residual"] < 1e-10, diag
+    assert diag["covariant_residual"] < 1e-10, diag
+    assert diag["gmres_residual"] < 1e-8, diag
+    assert diag["gauge_consistency"] < 1e-8, diag
+    print(
+        f"E = {float(energy):.12f}, |dE/dA| = "
+        f"{float(jnp.linalg.norm(grad._data)):.6f}, "
+        f"root {diag['root_residual']:.2e}, gmres {diag['gmres_residual']:.2e}, "
+        f"gauge {diag['gauge_consistency']:.2e}"
+    )
+
+
+def test_a_dense_site_tensor_is_refused(sym_gradient):
+    """The dense 1x1 path is a different function, and says so."""
+    A, gate, _chi, _e, _g, _diag = sym_gradient
+    with pytest.raises(TypeError, match="SymmetricTensor"):
+        sym_root_implicit_energy_and_grad(_as_dense_site(A), gate, chi=4)
+
+
+def test_the_singular_value_adjoint_is_not_negligible(sym_gradient):
+    """``S̆`` is the same order as ``C̆`` — the #718 bug, as a number.
+
+    The energy is evaluated on the *regular* environment, so ``S`` reaches it
+    only through the Eq. 82 absorption of :func:`absorb_inverse_roots_sym`.
+    Writing ``F`` in the regular variables instead — the obvious
+    simplification — sets this ratio to exactly zero, and dense that was worth
+    2.5e-2 of gradient error.  It is ~0.4 here, i.e. not a correction.
+    """
+    _A, _gate, _chi, _e, _g, diag = sym_gradient
+    ratio = diag["singular_value_adjoint_ratio"]
+    assert ratio > 1e-2, ratio
+    print(f"|S̆| / |C̆, Ĕ| = {ratio:.4f}")
+
+
+def test_the_energy_is_invariant_under_every_environment_phase():
+    """What ``gauge_consistency`` measures, checked without differentiating.
+
+    An independent phase on *each* environment tensor is an exact null
+    direction of ``∂_y F``, so the adjoint system is singular and is solvable
+    only because the right-hand side — the energy's cotangent — is orthogonal
+    to every one of those directions.  That orthogonality is a property of the
+    **energy boundary**, not of the characteristic equations, and #718 is the
+    standing reminder that the boundary is where conventions go wrong.  Here it
+    is checked directly: eight separate phases, energy unchanged.
+
+    A phase rather than a scale, deliberately.  A real rescaling would also
+    cancel in the ratio, but it is not the null direction at issue: the
+    cotangent pairing is ``Re Σ g·δz`` with ``δz = i x``, and only a phase
+    probes the direction the pairing is taken along.
+    """
+    import tenax
+
+    A = _convergent_site_tensor()
+    gate = tenax.heisenberg_gate()
+    env, _a, meta = converge_sym(A, chi=4, max_iter=60)
+    assert meta["converged"], meta
+    e0 = complex(sym_energy(A, env, gate))
+
+    names = ("C1", "C2", "C3", "C4", "T1", "T2", "T3", "T4")
+    for i, name in enumerate(names):
+        phase = jnp.exp(1j * (0.3 + 0.4 * i))
+        phased = env._replace(**{name: getattr(env, name) * phase})
+        e = complex(sym_energy(A, phased, gate))
+        assert abs(e - e0) < 1e-10 * max(abs(e0), 1.0), (name, e, e0)
+    print(f"energy invariant under all eight environment phases at E = {e0.real:.12f}")
+
+
+def test_explicit_backprop_through_the_symmetric_sweep_does_not_even_trace(
+    converged_root,
+):
+    """On this path the implicit route is not the faster one — it is the only one.
+
+    The dense module's counterpart of this test
+    (``test_the_gradient_survives_where_explicit_backprop_nans``) is a
+    *numerical* statement: at D=3 the SVD backward divides by ``s_i² - s_j²``
+    on a degenerate discarded spectrum and returns NaN.  Per sector the
+    obstruction is one level harder, and it bites at D=2.  ``sector_svd``
+    truncates **globally across sectors**, which means ranking every sector's
+    singular values against each other in Python — ``float(sv)`` — so a
+    tracer never gets past the first sweep.  There is no gradient to be
+    inaccurate.
+
+    Which is also why the finite-difference check below differences the map
+    rather than calling ``jax.grad`` on it.
+    """
+    import tenax
+
+    A, _a, env, _projs, _root, _residual = converged_root
+    gate = tenax.heisenberg_gate()
+
+    def energy_explicit(A_live):
+        env_next, _projs = sweep_sym(env, _double_layer_sym(A_live), 4, None)
+        return sym_energy(A_live, env_next, gate)
+
+    with pytest.raises(jax.errors.ConcretizationTypeError):
+        jax.grad(energy_explicit)(A)
+
+
+@pytest.mark.slow
+def test_the_gradient_matches_the_dense_root_implicit_gradient(sym_gradient):
+    """Eq. 18 twice on the same state: block sparse against dense, 3e-15.
+
+    The dense route (``_ctm_root_implicit_asym``) is the verified Phase 1
+    implementation, so this is the parity gate for the whole symmetric layer —
+    forward, root, adjoint and energy boundary at once.  It is a genuine
+    comparison and not a rerun of the same code: the dense path takes one
+    global SVD of the whole cut and orders the renormalised bond by singular
+    value, this one takes a per-sector SVD and orders the bond by charge.  The
+    two bonds differ by a permutation, which is a gauge — so the *gradient*
+    agrees while almost nothing in between does.
+
+    The comparison is unmasked.  The dense gradient is free to have components
+    that break ``A``'s charge structure and the symmetric one cannot; they come
+    out 4.2e-16, because the energy of a symmetric state is even under the
+    group action and so stationary along every symmetry-breaking direction.
+    """
+    from tenax.algorithms._ctm_root_implicit_asym import (
+        asym_root_implicit_energy_and_grad,
+    )
+
+    A, gate, chi, energy, grad, _diag = sym_gradient
+    e_dense, g_dense = asym_root_implicit_energy_and_grad(
+        _as_dense_site(A), gate, chi=chi
+    )
+
+    assert abs(float(energy) - float(e_dense)) < 1e-12, (energy, e_dense)
+    g_sym = jnp.asarray(grad.todense())
+    g_dense = jnp.asarray(g_dense)
+    rel = float(jnp.linalg.norm(g_sym - g_dense) / jnp.linalg.norm(g_dense))
+    assert rel < 1e-9, rel
+    print(f"symmetric vs dense root-implicit gradient: {rel:.3e} relative")
+
+
+@pytest.mark.slow
+def test_the_gradient_matches_a_directional_finite_difference(
+    sym_gradient, converged_root
+):
+    """A finite difference of the **sweep map from a fixed start**, not the root.
+
+    Three things about this test are load-bearing and each was expensive to
+    learn:
+
+    * The reference is the *truncated* map — ``n`` sweeps from the converged
+      environment — and it is therefore wrong by however much ``n`` is short.
+      Measured here: 4.3e-4 at 12 sweeps, 7.7e-7 at 20, 5.1e-9 at 30, i.e. it
+      converges **onto** the implicit gradient.  A too-short reference
+      disagrees with the implicit gradient and agrees with its own finite
+      difference to four digits at two step sizes, which is indistinguishable
+      by inspection from a wrong gradient.  So the ladder is asserted, not just
+      the endpoint.
+    * The differentiated map starts from a **fixed** environment.  Finite
+      differencing the root, or the re-converged energy, does not work: the
+      root parametrisation is gauge-*discontinuous* in ``p``, and ``|ẏ_fd|``
+      diverges as ``h`` shrinks (dense measured 1.98e4 -> 1.19e5) even though
+      every point is a valid root to 1e-16.
+    * The perturbation is charge preserving — a ``SymmetricTensor`` on ``A``'s
+      own indices — because that is the only kind of direction ``dE/dA`` is
+      defined along here.
+
+    The pairing is ``Re Σ g·δA``, unconjugated, which is how JAX pairs a
+    cotangent with a tangent.
+    """
+    A, gate, chi, _e, grad, _diag = sym_gradient
+    # The converged environment the other fixture already paid for; both come
+    # from the same seeded ``_convergent_site_tensor()`` at the same ``chi``.
+    _A0, _a0, env0, _projs, _root, _residual = converged_root
+
+    def energy_explicit(A_live, nsweeps):
+        a_live = _double_layer_sym(A_live)
+        env, projs = env0, None
+        for _ in range(nsweeps):
+            env, projs = sweep_sym(env, a_live, chi, projs)
+        return float(sym_energy(A_live, env, gate))
+
+    rng = np.random.RandomState(7)
+    V = SymmetricTensor.random_normal_np(A.indices, rng)
+    V = V * (1.0 / float(jnp.linalg.norm(V._data)))
+    assert set(V.blocks) == set(grad.blocks)
+    # Block by block rather than on the flat buffer, so the pairing does not
+    # depend on two tensors having packed their blocks in the same order.
+    analytic = float(
+        sum(jnp.real(jnp.sum(grad.blocks[k] * V.blocks[k])) for k in grad.blocks)
+    )
+    assert abs(analytic) > 1e-6, analytic
+
+    h = 1e-6
+    rel = {}
+    for nsweeps in (12, 30):
+        plus = energy_explicit(A + V * h, nsweeps)
+        minus = energy_explicit(A - V * h, nsweeps)
+        fd = (plus - minus) / (2 * h)
+        rel[nsweeps] = abs(fd - analytic) / abs(analytic)
+
+    assert rel[30] < 1e-6, rel
+    # The 12-sweep reference is *supposed* to disagree; if it did not, the
+    # test would be insensitive to the thing it is checking.
+    assert rel[12] > 100 * rel[30], rel
+    print(
+        f"<dE/dA, V> = {analytic:.12e}; finite difference of the sweep map "
+        f"relative error {rel[12]:.2e} at 12 sweeps, {rel[30]:.2e} at 30"
     )

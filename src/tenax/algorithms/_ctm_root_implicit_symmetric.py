@@ -12,6 +12,7 @@ file never touches a charge directly.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, NamedTuple
 
 import jax
@@ -63,6 +64,7 @@ __all__ = [
     "swap_env_convention_sym",
     "sweep_sym",
     "sym_energy",
+    "sym_root_implicit_energy_and_grad",
     "sym_root_to_covariant_convention",
     "upper_left_quadrant_sym",
 ]
@@ -1702,3 +1704,307 @@ def _to_ctm_env_sym(env: SymEnv) -> CTMTensorEnv:
 def sym_energy(A: Tensor, env: SymEnv, gate) -> jax.Array:
     """Nearest-neighbour energy per site from a symmetric CTM environment."""
     return compute_energy_ctm_tensor(A, _to_ctm_env_sym(env), gate)
+
+
+# ---------------------------------------------------------------------------
+# The adjoint (paper Eq. 18)
+# ---------------------------------------------------------------------------
+
+
+def _pytree_norm(tree) -> float:
+    """``‖·‖_2`` over a pytree, Frobenius on every ``SymmetricTensor`` leaf.
+
+    A ``SymmetricTensor`` flattens to a *single* leaf — its packed ``_data``
+    buffer — and every entry outside a block is exactly zero, so the flat L2
+    norm of that buffer already is the Frobenius norm of the tensor.  No
+    adapter, and nothing is densified.
+    """
+    return float(
+        jnp.sqrt(
+            sum(jnp.sum(jnp.abs(_leaf_data(x)) ** 2) for x in jax.tree.leaves(tree))
+        )
+    )
+
+
+def _zeros_like_sectors(xs: tuple) -> tuple:
+    """A tuple of ``{charge: zeros}`` dicts shaped like ``xs``."""
+    return tuple({q: jnp.zeros_like(m) for q, m in d.items()} for d in xs)
+
+
+def _sub_jaxprs(params: dict):
+    """Every jaxpr nested inside an equation's parameters.
+
+    ``pjit``, ``closed_call``, ``scan``, ``cond`` and the custom-derivative
+    primitives all hide their bodies in ``eqn.params``, sometimes wrapped in a
+    ``ClosedJaxpr`` and sometimes in a list.  Duck-typed rather than matched
+    against ``jax.core`` classes, which have moved between JAX versions.
+    """
+    for value in params.values():
+        items = value if isinstance(value, (list, tuple)) else (value,)
+        for item in items:
+            jaxpr = getattr(item, "jaxpr", item)
+            if hasattr(jaxpr, "eqns"):
+                yield jaxpr
+
+
+def _primitive_names(closed_jaxpr) -> set[str]:
+    """The set of primitives a jaxpr applies, sub-jaxprs included."""
+    names: set[str] = set()
+    stack = [getattr(closed_jaxpr, "jaxpr", closed_jaxpr)]
+    while stack:
+        jaxpr = stack.pop()
+        for eqn in jaxpr.eqns:
+            names.add(eqn.primitive.name)
+            stack.extend(_sub_jaxprs(eqn.params))
+    return names
+
+
+def _double_layer_sym(A: Tensor) -> SymmetricTensor:
+    """``a`` in this module's ``(u, d, l, r)`` order, still block sparse.
+
+    The same two lines :func:`init_env_sym` uses, factored out because the
+    gradient needs ``a`` as a *function of* ``A`` — that dependence is the
+    whole of ``∂_p F``.
+    """
+    a_t = _build_double_layer_tensor(A)
+    labels = list(a_t.labels())
+    perm = tuple(labels.index(lbl) for lbl in ("u2", "d2", "l2", "r2"))
+    return a_t.transpose(perm)
+
+
+def sym_root_implicit_energy_and_grad(
+    A: Tensor,
+    gate,
+    *,
+    chi: int = 8,
+    max_iter: int = 200,
+    conv_tol: float = 1e-12,
+    min_iter: int = 4,
+    polish_steps: int = 40,
+    polish_tol: float = 1e-10,
+    solve_tol: float = 1e-8,
+    solve_maxiter: int = 400,
+    solve_restart: int = 30,
+    root_residual_warn: float = 1e-6,
+):
+    """Energy and ``dE/dA`` for a 1x1 unit cell, block sparse throughout.
+
+    ``_ctm_root_implicit_asym.asym_root_implicit_energy_and_grad`` with every
+    dense array replaced by a :class:`~tenax.core.SymmetricTensor` or a
+    ``{charge: block}`` dict.  Returns ``(energy, dE/dA, diagnostics)``, with
+    the gradient a ``SymmetricTensor`` on ``A``'s own indices — the charge
+    structure is part of the answer, not scaffolding around it.
+
+    Root implicit differentiation of paper §V: the environment is characterised
+    by ``F(y, p) = 0`` in the modified variables ``y = (C̃, Ẽ, u, S, v)`` of
+    Eqs. 76-80, and Eq. 18 turns that into a gradient without back-propagating
+    a single decomposition.  On the symmetric path that is not a convenience
+    but the point: the block-sparse SVD/eigh VJPs are the #566 compile wall and
+    the #687 accuracy floor, and ``F`` is contractions, inverses and
+    Denman-Beavers roots only — see
+    ``diagnostics["backward_jaxpr"]``, which the tests assert contains neither
+    ``svd`` nor ``eigh``.
+
+    Structure, mirroring the dense function step for step:
+
+    1. :func:`converge_sym` with ``return_projectors=True``.  The chain is not
+       a diagnostic — the converged environment sits in *its* bond gauge and a
+       cold re-pin describes a different one (#721).
+    2. :func:`root_parametrize_sym` for ``y*`` and the frozen constants.
+    3. the energy on the **regular** environment recovered by
+       :func:`absorb_inverse_roots_sym`.  That is the only path by which ``S``
+       reaches the energy, and it is what makes ``S̆`` nonzero; writing ``F``
+       in the regular variables sets that adjoint to zero, which was #718.
+    4. ``ў`` = VJP of the energy with respect to ``y``.
+    5. ``F̆ ∂_y F = ў`` by GMRES.
+    6. ``dE/dA = ∂_p E - F̆ ∂_p F``.
+
+    On the gauge, and why there is no phase-fixing condition here.  An
+    independent phase on *each* environment tensor is an exact null direction
+    of ``∂_y F``: the normalisation is a ratio, ``X'/⟨X, X'⟩`` is invariant
+    under a phase on ``X'`` while picking up ``e^{iγ}`` from ``X``, so
+    ``R = X'/⟨X, X'⟩ - X`` is phase-*covariant* tensor by tensor and vanishes
+    along all eight orbits at once.  ``∂_y F`` is therefore singular, and two
+    things make that harmless.  The adjoint system is consistent because ``ў``
+    is orthogonal to every null direction — the energy is invariant along each
+    orbit — and the leftover freedom in ``F̆`` cannot reach the gradient at
+    all, because differentiating ``F(y*(p), p) = 0`` puts ``∂_p F`` in
+    **range**(``∂_y F``), to which the cokernel is orthogonal.  GMRES converges
+    on the singular system.  Only the first of the two can fail, and it fails
+    at the *energy* boundary rather than in this module — which is exactly
+    where #718 went wrong — so ``diagnostics["gauge_consistency"]`` measures it
+    rather than assuming it.
+
+    The pairing there is ``Re Σ g·δz``, **unconjugated**: that is how JAX pairs
+    a complex cotangent with a tangent.  The conjugated form manufactures
+    violations that are not there — it reported 2.59e-2 against a true
+    -1.5e-16 on the dense path.
+
+    The adjoint solve runs on the *real embedding* of the pytree
+    (``_ctm_c4v_root_implicit._solve_root_adjoint``, shared with the dense
+    path).  ``F`` conjugates, so its VJP is only real-linear and a
+    complex-linear Krylov method does not apply; for a real state the embedding
+    is the plain real solve at no extra cost.  No ``SymmetricTensor`` adapter
+    is needed on top of that — the tensors flatten to a single array leaf and
+    ``jax.tree.unflatten`` puts them back.
+    """
+    from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
+
+    if not isinstance(A, SymmetricTensor):
+        raise TypeError(
+            "sym_root_implicit_energy_and_grad expects a SymmetricTensor; the "
+            "dense 1x1 path is _ctm_root_implicit_asym."
+            "asym_root_implicit_energy_and_grad."
+        )
+
+    A_const = jax.lax.stop_gradient(A)
+    env, a_const, meta, forward_projs = converge_sym(
+        A_const,
+        chi,
+        max_iter=max_iter,
+        conv_tol=conv_tol,
+        min_iter=min_iter,
+        return_projectors=True,
+    )
+    root_cov, root_residual = root_parametrize_sym(
+        env,
+        a_const,
+        chi,
+        prev_projs=forward_projs,
+        polish_steps=polish_steps,
+        polish_tol=polish_tol,
+    )
+    if root_residual > root_residual_warn:
+        warnings.warn(
+            f"Symmetric root implicit AD: ‖F(y*)‖ = {root_residual:.3e} exceeds "
+            f"{root_residual_warn:.1e}; the implicit-function gradient is "
+            "correspondingly inaccurate (paper Fig. 1).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    # ``root_parametrize_sym`` already returns the covariant convention and
+    # already carries the *modified* environment in ``.env``.
+    tilde = root_cov.env
+    S_star = root_cov.s
+    y_star = (tilde, root_cov.u, S_star, root_cov.v)
+
+    def energy_of(A_live, env_tilde, S_all):
+        return sym_energy(A_live, absorb_inverse_roots_sym(env_tilde, S_all), gate)
+
+    energy, vjp_energy = jax.vjp(energy_of, A, tilde, S_star)
+    grad_direct, tilde_bar, S_bar = vjp_energy(jnp.ones((), dtype=energy.dtype))
+    # ``u`` and ``v`` carry no cotangent: the energy does not see the
+    # null-space coordinates, only their effect through the root.
+    y_bar = (
+        tilde_bar,
+        _zeros_like_sectors(root_cov.u),
+        S_bar,
+        _zeros_like_sectors(root_cov.v),
+    )
+
+    y_bar_norm = _pytree_norm(y_bar)
+    gauge_consistency = 0.0
+    for bar, tensor in zip(tilde_bar, tilde, strict=True):
+        # JAX pairs cotangents unconjugated: ``Re Σ g·δz`` with the tangent
+        # ``δz = i x`` of the phase orbit.  Conjugating instead reports a
+        # violation that is not there.
+        pairing = float(jnp.real(jnp.sum(bar._data * (1j * tensor._data))))
+        scale = y_bar_norm * float(jnp.linalg.norm(tensor._data)) + 1e-300
+        gauge_consistency = max(gauge_consistency, abs(pairing) / scale)
+    if gauge_consistency > 1e-8:
+        warnings.warn(
+            f"Symmetric root implicit AD: the energy cotangent has a "
+            f"{gauge_consistency:.3e} relative component along an environment "
+            "tensor's phase, which is a null direction of ∂F/∂y. The adjoint "
+            "system is inconsistent by that much and the gradient is "
+            "correspondingly unreliable; the energy is supposed to be "
+            "invariant under every such phase (#721).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    def F_of_y(y):
+        return characteristic_residual_sym(y, a_const, root_cov, chi)
+
+    F_at_root, vjp_y = jax.vjp(F_of_y, y_star)
+    covariant_residual = _pytree_norm(F_at_root)
+    if covariant_residual > root_residual_warn:
+        warnings.warn(
+            f"Symmetric root implicit AD: the covariant ‖F(y*)‖ = "
+            f"{covariant_residual:.3e} exceeds {root_residual_warn:.1e}. The "
+            "gradient solves the adjoint of equations that y* does not "
+            "satisfy, so it is correspondingly inaccurate.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    F_bar, solve_resid = _solve_root_adjoint(
+        lambda v: vjp_y(v)[0],
+        y_bar,
+        tol=solve_tol,
+        maxiter=solve_maxiter,
+        restart=solve_restart,
+    )
+
+    def F_of_p(A_live):
+        return characteristic_residual_sym(
+            y_star, _double_layer_sym(A_live), root_cov, chi
+        )
+
+    _, vjp_p = jax.vjp(F_of_p, A)
+    grad = grad_direct - vjp_p(F_bar)[0]
+
+    # The claim the whole method rests on, in a form a test can assert: the
+    # three functions this gradient differentiates, and the three pullbacks it
+    # runs.  The forward decomposition that built ``U*``/``Vh*`` happens in
+    # ``all_projectors_sym``, outside all six, and enters them as a constant.
+    #
+    # The **forward** jaxprs are the load-bearing half, which is not obvious.
+    # The VJP of a decomposition contains no decomposition — it is the stored
+    # ``U``, ``s``, ``Vh`` and a divided difference — so an ``svd`` smuggled
+    # into ``F`` would leave the pullback's primitive list clean while putting
+    # exactly the ``1/(s_i^2 - s_j^2)`` this method exists to avoid back into
+    # the gradient.  The pullbacks are listed too, to catch a custom rule that
+    # introduces one.
+    #
+    # What is recorded is the **primitive listing**, not the pretty-printed
+    # jaxpr, and that is not tidiness either.  ``jaxpr.__str__`` names
+    # variables ``a, b, ..., z, aa, ab, ...``; these programs run to ~40k
+    # equations, so the namer gets as far as a variable literally called
+    # ``svd``, and ``"svd" not in str(jaxpr)`` is then false against a jaxpr
+    # that applies no such primitive.  The dense module's version of this test
+    # is safe only because its jaxpr is small enough.  Listing primitives says
+    # exactly what is meant, and is 300 bytes instead of 4 MB.
+    primitives: set[str] = set()
+    for fn, args in (
+        (energy_of, (A, tilde, S_star)),
+        (F_of_y, (y_star,)),
+        (F_of_p, (A,)),
+    ):
+        primitives |= _primitive_names(jax.make_jaxpr(fn)(*args))
+    for pullback, cotangent in (
+        (vjp_energy, jnp.ones((), dtype=energy.dtype)),
+        (vjp_y, y_bar),
+        (vjp_p, F_bar),
+    ):
+        primitives |= _primitive_names(jax.make_jaxpr(pullback)(cotangent))
+    backward_jaxpr = "\n".join(sorted(primitives))
+
+    return (
+        energy,
+        grad,
+        {
+            **meta,
+            "root_residual": root_residual,
+            "covariant_residual": covariant_residual,
+            "gmres_residual": float(solve_resid),
+            "gauge_consistency": gauge_consistency,
+            # ``|S̆| / |C̆, Ĕ|``.  The energy reaches ``S`` only through the
+            # Eq. 82 absorption, so writing ``F`` in the regular variables
+            # would make this exactly zero — the #718 bug.  Measured ~0.4
+            # here, i.e. the same order as the environment's own cotangent.
+            "singular_value_adjoint_ratio": _pytree_norm(S_bar)
+            / (_pytree_norm(tilde_bar) + 1e-300),
+            "backward_jaxpr": backward_jaxpr,
+        },
+    )
