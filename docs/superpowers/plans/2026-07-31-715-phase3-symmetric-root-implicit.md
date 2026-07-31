@@ -1029,11 +1029,13 @@ def rotate_env_sym(env: SymEnv) -> SymEnv:
 
 
 def rotate_a_sym(a: SymmetricTensor) -> SymmetricTensor:
-    """``a`` legs ``(u, d, l, r)`` rotated to match ``rotate_env_sym``."""
-    labels = a.labels()
-    perm = (labels.index(labels[3]), labels.index(labels[2]),
-            labels.index(labels[0]), labels.index(labels[1]))
-    return a.transpose(perm)
+    """``a`` legs ``(u, d, l, r)`` rotated to match ``rotate_env_sym``.
+
+    new-up = old-right, new-down = old-left, new-left = old-up,
+    new-right = old-down — i.e. exactly ``_ctm_root_implicit_asym.rotate_a``,
+    which is ``jnp.transpose(a, (3, 2, 0, 1))`` (checked against the source).
+    """
+    return a.transpose((3, 2, 0, 1))
 ```
 
 Verify `rotate_env_sym` / `rotate_a_sym` against `_ctm_root_implicit_asym.rotate_env` /
