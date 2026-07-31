@@ -16,7 +16,9 @@ from tenax import (
 from tenax.algorithms._ctm_root_implicit_sym_sectors import (
     BondLayout,
     bond_index_from_layout,
+    sector_map,
     sector_svd,
+    tensor_from_sector_matrices,
 )
 
 
@@ -247,3 +249,122 @@ def test_sector_svd_floors_against_the_global_maximum():
     for q in layout.sectors:
         k = layout.dim_of(q)
         assert float(jnp.min(sectors[q].S_keep_diag[:k])) >= 1e-12 * biggest * 0.5
+
+
+def test_sector_map_applies_the_dense_function_blockwise():
+    from tenax.algorithms._ctm_root_implicit_asym import _inv_sqrt
+
+    mats = {
+        -1: jnp.eye(2) * 4.0,
+        0: jnp.eye(3) * 9.0,
+    }
+    out = sector_map(_inv_sqrt, mats)
+    assert set(out) == {-1, 0}
+    assert float(jnp.max(jnp.abs(out[-1] - jnp.eye(2) * 0.5))) < 1e-10
+    assert float(jnp.max(jnp.abs(out[0] - jnp.eye(3) / 3.0))) < 1e-10
+
+
+def test_tensor_from_sector_matrices_round_trips_through_todense():
+    m = _matrix_tensor()
+    sectors, layout = sector_svd(m, 6, row_axis=1, col_axis=0)
+
+    # Rebuild the *untruncated* matrix from its per-sector SVDs; it must equal
+    # the original.  This is the reassembly path every projector uses.
+    rebuilt_mats = {
+        q: sectors[q].U
+        @ jnp.diag(sectors[q].s.astype(sectors[q].U.dtype))
+        @ sectors[q].Vh
+        for q in sectors
+    }
+    rebuilt = tensor_from_sector_matrices(
+        rebuilt_mats,
+        row_index=m.indices[1],
+        col_index=m.indices[0],
+        row_axis=1,
+        col_axis=0,
+    )
+    assert float(jnp.max(jnp.abs(rebuilt.todense() - m.todense()))) < 1e-10
+    assert rebuilt.labels() == m.labels()
+
+
+def test_tensor_from_sector_matrices_handles_reversed_row_col_flow():
+    # Every other fixture in this file pairs an IN row leg with an OUT col
+    # leg, for which key[row_axis] and key[col_axis] both collapse to the
+    # SVD's bond-charge dict key q. That's a special case, not the general
+    # rule: conservation is flow * charge, not charge alone, so a naive
+    # "both keys are q" reassembly is wrong once the flows are swapped. Build
+    # a matrix with row=OUT, col=IN (the reverse of every other fixture) and
+    # check the round trip -- and _validate() -- still hold.
+    sym = U1Symmetry()
+
+    def leg(flow, lbl):
+        return TensorIndex(
+            symmetry=sym,
+            sectors=np.array([-1, 0, 1]),
+            multiplicities=np.array([1, 2, 1]),
+            flow=flow,
+            label=lbl,
+        )
+
+    ec = SymmetricTensor.random_normal_np(
+        (
+            leg(FlowDirection.IN, "chi_r"),
+            leg(FlowDirection.IN, "a_r"),
+            leg(FlowDirection.OUT, "chi_d"),
+            leg(FlowDirection.OUT, "a_d"),
+        ),
+        np.random.RandomState(1),
+    )
+    fused = fuse_indices(ec, 2, 3, "row", FlowDirection.OUT)
+    m = fuse_indices(fused, 0, 1, "col", FlowDirection.IN)
+
+    sectors, _ = sector_svd(m, 6, row_axis=1, col_axis=0)
+    rebuilt_mats = {}
+    for q, blk in sectors.items():
+        k = len(blk.s)
+        rebuilt_mats[q] = (
+            blk.U[:, :k] @ jnp.diag(blk.s.astype(blk.U.dtype)) @ blk.Vh[:k, :]
+        )
+
+    rebuilt = tensor_from_sector_matrices(
+        rebuilt_mats,
+        row_index=m.indices[1],
+        col_index=m.indices[0],
+        row_axis=1,
+        col_axis=0,
+    )
+    rebuilt._validate()  # must not raise
+    assert float(jnp.max(jnp.abs(rebuilt.todense() - m.todense()))) < 1e-10
+    assert rebuilt.labels() == m.labels()
+
+
+def test_tensor_from_sector_matrices_round_trips_nonsquare_sectors():
+    # Same round trip as above, but through _nonsquare_matrix_tensor (Task 2's
+    # fixture): square sector blocks can't detect a row/col orientation swap
+    # because U and Vh have the same shape either way, so this is the test
+    # that actually pins tensor_from_sector_matrices's transpose branch.
+    #
+    # U/Vh are full_matrices=True, so on a non-square block they are not the
+    # same shape (U is row_dim x row_dim, Vh is col_dim x col_dim); the
+    # reconstruction has to go through the economy-size k = len(s) slice
+    # rather than a bare U @ diag(s) @ Vh, or the matmul shapes don't even
+    # line up.
+    m = _nonsquare_matrix_tensor()
+    sectors, _ = sector_svd(m, 4, row_axis=1, col_axis=0)
+
+    rebuilt_mats = {}
+    for q, blk in sectors.items():
+        k = len(blk.s)
+        rebuilt_mats[q] = (
+            blk.U[:, :k] @ jnp.diag(blk.s.astype(blk.U.dtype)) @ blk.Vh[:k, :]
+        )
+
+    rebuilt = tensor_from_sector_matrices(
+        rebuilt_mats,
+        row_index=m.indices[1],
+        col_index=m.indices[0],
+        row_axis=1,
+        col_axis=0,
+    )
+    assert float(jnp.max(jnp.abs(rebuilt.todense() - m.todense()))) < 1e-10
+    assert rebuilt.labels() == m.labels()

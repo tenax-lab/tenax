@@ -15,7 +15,7 @@ apart keeps the tests that catch them apart too.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -211,3 +211,67 @@ def sector_svd(
             col_key=col_key,
         )
     return sectors, layout
+
+
+def sector_map(
+    fn: Callable[[jax.Array], jax.Array], mats: dict[int, jax.Array]
+) -> dict[int, jax.Array]:
+    """Apply a dense matrix function to every charge sector.
+
+    Phase 1's ``_denman_beavers`` / ``_inv_sqrt`` / ``_quartic_root`` go
+    through here untouched.  They are ``jnp.linalg.inv`` plus matmuls, so they
+    put no decomposition back into ``F`` — which is the whole point of the
+    method — and they are already correct on a general (non-diagonal, complex)
+    matrix, which is what ``S`` becomes in the reverse pass.
+
+    Charge conservation forbids entries between sectors, so a block-diagonal
+    matrix function *is* the per-sector function.  There is nothing to
+    generalise.
+    """
+    return {q: fn(m) for q, m in mats.items()}
+
+
+def tensor_from_sector_matrices(
+    mats: dict[int, jax.Array],
+    *,
+    row_index: TensorIndex,
+    col_index: TensorIndex,
+    row_axis: int,
+    col_axis: int,
+) -> SymmetricTensor:
+    """Rebuild a 2-leg :class:`SymmetricTensor` from per-sector matrices.
+
+    Inverse of :func:`sector_svd`'s orientation step: ``mats[q]`` is in
+    ``(row, col)`` orientation and is written back in the tensor's native
+    axis order.
+
+    Block keys are *charge values* per axis, not bare copies of the dict key
+    ``q``.  ``q`` is what :func:`_group_blocks_by_bond_charge` (called by
+    :func:`sector_svd` with ``left_leg_positions=[row_axis]``) computes as
+    ``row_index.flow * key[row_axis]``; charge conservation
+    (``row_index.flow * key[row_axis] + col_index.flow * key[col_axis] ==
+    identity``) then pins ``key[col_axis] = -q * col_index.flow``.  Both
+    reduce to plain ``q`` only in the IN-row/OUT-col case (flows +1/-1) that
+    every fixture in this module happens to use — verified empirically
+    against ``sector_svd`` + ``._validate()`` + a numeric round trip for all
+    four IN/OUT combinations, not assumed from the IN/OUT case alone.
+    """
+    if {row_axis, col_axis} != {0, 1}:
+        raise ValueError("row_axis and col_axis must be 0 and 1 in some order")
+
+    indices: list[TensorIndex] = [None, None]  # type: ignore[list-item]
+    indices[row_axis] = row_index
+    indices[col_axis] = col_index
+
+    row_flow = int(row_index.flow)
+    col_flow = int(col_index.flow)
+
+    blocks: dict[BlockKey, jax.Array] = {}
+    for q, mat in mats.items():
+        if mat.size == 0:
+            continue
+        key = [0, 0]
+        key[row_axis] = int(q) * row_flow
+        key[col_axis] = -int(q) * col_flow
+        blocks[tuple(key)] = mat if row_axis == 0 else mat.T
+    return SymmetricTensor._from_blocks_unchecked(blocks, tuple(indices))
