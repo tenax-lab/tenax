@@ -4,16 +4,19 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax import FlowDirection, SymmetricTensor, TensorIndex, U1Symmetry
+from tenax import FlowDirection, SymmetricTensor, TensorIndex, U1Symmetry, ZnSymmetry
 from tenax.algorithms._ctm_root_implicit_symmetric import (
     SymEnv,
     all_projectors_sym,
+    converge_sym,
     half_infinite_sym,
     init_env_sym,
     lower_left_quadrant_sym,
     rotate_a_sym,
     rotate_env_sym,
     swap_env_convention_sym,
+    sweep_sym,
+    sym_energy,
     upper_left_quadrant_sym,
 )
 
@@ -513,3 +516,308 @@ def test_a_sector_that_retains_nothing_is_dropped_not_kept_at_width_zero():
         # the characteristic equations need the null-space blocks of the ones
         # that kept nothing just as much.
         assert len(p.sectors) >= len(p.layout.sectors)
+
+
+# ---------------------------------------------------------------------------
+# Sweep, convergence and forward energy
+# ---------------------------------------------------------------------------
+
+
+def _convergent_site_tensor(seed: int = 2, eps: float = 0.3) -> SymmetricTensor:
+    """A Z2 site tensor whose CTM *converges*, for the tests that need a limit.
+
+    :func:`_site_tensor` cannot be used here, and the reason is a property of
+    the state, not of this port.  Its U(1) structure — virtual sectors ``[0,1]``
+    against physical ``[-1,1]`` — leaves exactly **8** allowed blocks, each a
+    single scalar, because every block has to emit ``qp = +-1`` through virtual
+    charges bounded by 1.  Run the *dense*, finite-difference-validated
+    ``_ctm_root_implicit_asym.converge`` on that manifold and it never settles:
+    the element-wise residual sits at 1.0-1.9 for 200 sweeps while the energy
+    drifts (0.31 -> 1.17 -> 2.32 at 60/100/200 sweeps).  That was measured over
+    112 variants — every single- and pair-block boost at three noise levels,
+    two seeds — and over U(1) at D=3 with 32 blocks: **zero** converged.  The
+    same dense routine converges in 23 sweeps on the trivial-charge fixture of
+    ``test_ctm_root_implicit_asym``, so this is the state, not the algorithm.
+    (This is the repo's standing rule that CTM parity needs a convergent input;
+    a random tensor gives an oracle that oscillates and numbers that mean
+    nothing.)
+
+    Z2 (``ZnSymmetry(2)``) at the same leg dimensions has 16 allowed blocks
+    instead of 8, and with a dominant block it converges in 36 sweeps —
+    *the same 36* the dense module takes, which is the sharpest available
+    statement that the two are running the same algebra.  The boost is needed:
+    a plain random Z2 tensor converges densely but not per sector, because a
+    retained dimension that moves between sweeps forces a cold gauge pin and
+    the sign then oscillates with period two.
+
+    Z2 gives **equal** sector sizes on the fused ``D**2`` leg, which is what
+    the design note asks a Z2 fixture for; the *unequal*, fragmenting layout is
+    covered by :func:`_site_tensor` in
+    :func:`test_symmetric_sweep_tracks_the_dense_sweep_on_the_u1_fixture`, which
+    does not need a limit.  Z2 with virtual multiplicities ``[2,1]`` (D=3, fused
+    ``[5,4]``) is convergent *and* fragmenting — measured, 23 sweeps symmetric
+    and dense alike — but costs ~170 s against this fixture's ~17 s, essentially
+    all of it block-sparse compile, and this file runs in the ``core`` CI gate.
+    """
+    sym = ZnSymmetry(2)
+    phys = TensorIndex(
+        symmetry=sym,
+        sectors=np.array([0, 1]),
+        multiplicities=np.array([1, 1]),
+        flow=FlowDirection.OUT,
+        label="phys",
+    )
+
+    def virt(flow, lbl):
+        return TensorIndex(
+            symmetry=sym,
+            sectors=np.array([0, 1]),
+            multiplicities=np.array([1, 1]),
+            flow=flow,
+            label=lbl,
+        )
+
+    A = SymmetricTensor.random_normal_np(
+        (
+            virt(FlowDirection.IN, "u"),
+            virt(FlowDirection.OUT, "d"),
+            virt(FlowDirection.IN, "l"),
+            virt(FlowDirection.OUT, "r"),
+            phys,
+        ),
+        np.random.RandomState(seed),
+    )
+    blocks = {k: eps * v for k, v in A.blocks.items()}
+    blocks[(0, 1, 1, 0, 0)] = blocks[(0, 1, 1, 0, 0)] + 1.0
+    return SymmetricTensor._from_blocks_unchecked(blocks, A.indices)
+
+
+def _as_dense_site(A):
+    """``A`` as a ``DenseTensor`` on the same indices.
+
+    ``asym_energy`` builds the open double layer from whatever site tensor it is
+    handed, and ``contract`` refuses to mix a ``SymmetricTensor`` double layer
+    with the ``DenseTensor`` environment the dense module produces.  The dense
+    reference path therefore has to be dense end to end.
+    """
+    from tenax.core.tensor import DenseTensor
+
+    return DenseTensor(jnp.asarray(A.todense()), A.indices)
+
+
+def test_unrotate_index_sym_matches_the_dense_module():
+    from tenax.algorithms._ctm_root_implicit_asym import _unrotate_index
+    from tenax.algorithms._ctm_root_implicit_symmetric import _unrotate_index_sym
+
+    for slot in (1, 2, 3, 4):
+        for k in range(4):
+            assert _unrotate_index_sym(slot, k) == _unrotate_index(slot, k)
+
+
+def test_normalize_sym_is_max_abs_not_frobenius():
+    """The dense module divides by ``max|x|``; Frobenius would be a different root.
+
+    The two do not differ by a constant — the ratio depends on how the weight is
+    spread — so a Frobenius normaliser would rescale ``S`` differently on every
+    sweep and every tensor.
+    """
+    from tenax.algorithms._ctm_root_implicit_symmetric import _normalize_sym
+
+    A = _site_tensor()
+    env, _a = init_env_sym(A, chi=4)
+    for name in ("C1", "T1"):
+        t = getattr(env, name)
+        got = _normalize_sym(t).todense()
+        expected = t.todense() / (jnp.max(jnp.abs(t.todense())) + 1e-300)
+        assert float(jnp.max(jnp.abs(got - expected))) < 1e-14, name
+        assert abs(float(jnp.max(jnp.abs(got))) - 1.0) < 1e-14, name
+
+
+def test_symmetric_sweep_keeps_every_tensor_block_sparse():
+    """Nothing collapses to a single dense block, to zero, or out of the class.
+
+    The failure this guards against is silent: ``contract`` drops the part of a
+    network the charges cannot carry rather than raising, so a mis-assembled
+    projector shows up as an environment that is still a ``SymmetricTensor`` but
+    has lost its charge structure.  ``n_blocks > 1`` on every tensor says the
+    block structure survived a full sweep; a densified port would fail the type
+    assertion first.
+    """
+    A = _convergent_site_tensor()
+    env, a = init_env_sym(A, chi=4)
+    projs = None
+    for _ in range(3):
+        env, projs = sweep_sym(env, a, 4, projs)
+        assert isinstance(env, SymEnv)
+        for name in ("C1", "C2", "C3", "C4", "T1", "T2", "T3", "T4"):
+            t = getattr(env, name)
+            assert isinstance(t, SymmetricTensor), f"{name} was densified"
+            assert t.n_blocks > 1, (name, t.n_blocks)
+    assert len(projs) == 4
+
+
+def test_symmetric_forward_energy_matches_the_dense_module():
+    """The gate for the whole forward: same number, block-sparse or not."""
+    import tenax
+    from tenax.algorithms._ctm_root_implicit_asym import asym_energy, converge
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+
+    A = _convergent_site_tensor()
+    gate = tenax.heisenberg_gate()
+
+    env_s, _a_s, meta_s = converge_sym(A, chi=4, max_iter=60)
+    e_sym = float(sym_energy(A, env_s, gate))
+
+    env_d, _a_d, meta_d = converge(A, chi=4, max_iter=60)
+    e_dense = float(
+        asym_energy(_as_dense_site(A), env_d, initialize_ctm_tensor_env(A, 4), gate)
+    )
+
+    assert meta_s["converged"], meta_s
+    assert meta_s["iters"] < 60, meta_s
+    assert abs(e_sym - e_dense) < 1e-10, (e_sym, e_dense)
+    # Same algebra means the same iteration count, not merely the same limit.
+    assert meta_s["iters"] == meta_d["iters"], (meta_s, meta_d)
+    print(
+        f"e_sym={e_sym!r} e_dense={e_dense!r} diff={abs(e_sym - e_dense):.3e} "
+        f"iters sym={meta_s['iters']} dense={meta_d['iters']}"
+    )
+
+
+def test_converge_sym_returns_the_projector_chain_that_built_it():
+    """``return_projectors`` is a requirement of the root, not a diagnostic.
+
+    The converged environment sits in the bond gauge of the chain that produced
+    it; a cold re-pin fixes a *different* gauge and leaves ``y*`` describing an
+    environment it was not extracted from.  So the chain has to come back, and
+    it has to be the *last* one — re-pinning the returned projectors against
+    themselves is a fixed point, which is what this checks.
+    """
+    A = _convergent_site_tensor()
+    env, a, meta, projs = converge_sym(A, chi=4, max_iter=60, return_projectors=True)
+    assert meta["converged"], meta
+    assert len(projs) == 4
+    again = all_projectors_sym(env, a, chi=4, prev=projs)
+    for k in range(4):
+        assert again[k].layout.dims == projs[k].layout.dims, k
+        for q in projs[k].layout.sectors:
+            lhs = again[k].P_left[q]
+            rhs = projs[k].P_left[q]
+            assert float(jnp.max(jnp.abs(lhs - rhs))) < 1e-8, (k, q)
+
+
+def test_symmetric_sweep_tracks_the_dense_sweep_on_the_u1_fixture():
+    """Sweep-by-sweep parity on the *fragmenting* U(1) layout.
+
+    :func:`_convergent_site_tensor` is Z2 because U(1) at these leg charges has
+    no CTM limit to compare (see its docstring), but the U(1) fixture is the one
+    with unequal ``[1, 2, 1]`` sectors on the cut, so it must not go untested.
+    Convergence is not needed for that: from the *same* seed environment, the
+    symmetric and dense sweeps are the same map, so their corner spectra and
+    their energies have to agree at *every* sweep, converged or not.  That is a
+    stronger statement than agreeing on a limit — it fails on the first sweep
+    that mis-glues, instead of being rescued by the fixed point.
+
+    The tensors themselves are *not* compared: the per-sector gauge pin picks a
+    different phase from the dense global one, so only gauge-invariant
+    quantities are meaningful. Corner singular values and the energy are.
+
+    Two tolerances, because two things are being said.  The *last* sweep has to
+    agree to machine precision — that is the real assertion.  The looser bound
+    over all sweeps covers one measured transient: at sweep 2 this fixture's cut
+    has an **exact cross-sector tie**, ``s[3] == s[4] == 0.2801102`` in different
+    charge sectors, so "the top chi singular values" is not a well-defined set
+    and the global dense SVD and the per-sector one legitimately retain
+    different subspaces (the same phenomenon the ``_TIE_FREE`` table above
+    records).  The gap reopens and the discrepancy falls 1.5e-7 -> 1.3e-8 ->
+    3.1e-10 -> 1e-16 as it does.
+    """
+    import tenax
+    from tenax.algorithms import _ctm_root_implicit_asym as dense
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+
+    A = _site_tensor()
+    A_dense = _as_dense_site(A)
+    gate = tenax.heisenberg_gate()
+    template = initialize_ctm_tensor_env(A, 4)
+
+    env_s, a_s = init_env_sym(A, 4)
+    env_d, a_d = dense._init_env(A, 4)
+    projs_s = projs_d = None
+    worst_sv = worst_e = 0.0
+    last_e = float("inf")
+    for _ in range(5):
+        env_s, projs_s = sweep_sym(env_s, a_s, 4, projs_s)
+        env_d, projs_d = dense.sweep(env_d, a_d, 4, projs_d)
+        for name in ("C1", "C2", "C3", "C4"):
+            sv_s = jnp.linalg.svd(getattr(env_s, name).todense(), compute_uv=False)
+            sv_d = jnp.linalg.svd(getattr(env_d, name), compute_uv=False)
+            worst_sv = max(
+                worst_sv, float(jnp.max(jnp.abs(jnp.sort(sv_s) - jnp.sort(sv_d))))
+            )
+        e_s = float(sym_energy(A, env_s, gate))
+        e_d = float(dense.asym_energy(A_dense, env_d, template, gate))
+        last_e = abs(e_s - e_d)
+        worst_e = max(worst_e, last_e)
+    assert worst_sv < 1e-12, worst_sv
+    assert worst_e < 1e-6, worst_e
+    assert last_e < 1e-11, last_e
+    print(
+        f"u1 sweep parity: corner-sv {worst_sv:.3e}, energy worst {worst_e:.3e}, "
+        f"last sweep {last_e:.3e}"
+    )
+
+
+def test_to_ctm_env_sym_applies_the_convention_swap():
+    """The #718 boundary: the swap is load-bearing and must not be dropped.
+
+    This module closes the ring uniformly; ``CTMTensorEnv`` closes it with
+    ``C4`` transposed and ``T3``/``T4`` reversed.  Reinterpreting one as the
+    other moved the energy by 1.5% and produced a +-2.121e-3 per-bond
+    antisymmetry.  It is a *no-op* on the initialiser — symmetric ``C4``,
+    palindromic ``T3``/``T4`` — so the check has to be made on a swept
+    environment, where the asymmetry is real.
+    """
+    import tenax
+    from tenax.algorithms._ctm_root_implicit_symmetric import (
+        _CTM_LABELS,
+        _to_ctm_env_sym,
+    )
+    from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+    from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
+
+    A = _convergent_site_tensor()
+    env, a = init_env_sym(A, chi=4)
+    projs = None
+    for _ in range(3):
+        env, projs = sweep_sym(env, a, 4, projs)
+
+    swapped = swap_env_convention_sym(env)
+    ctm = _to_ctm_env_sym(env)
+    for name in ("C1", "C2", "C3", "C4", "T1", "T2", "T3", "T4"):
+        lhs = getattr(ctm, name).todense()
+        rhs = getattr(swapped, name).todense()
+        assert float(jnp.max(jnp.abs(lhs - rhs))) < 1e-14, name
+
+    # C4/T3/T4 really moved: a swept environment is genuinely asymmetric, so
+    # the swap is not silently the identity the way it is on the initialiser.
+    for name in ("C4", "T3", "T4"):
+        lhs = getattr(ctm, name).todense()
+        rhs = getattr(env, name).todense()
+        assert float(jnp.max(jnp.abs(lhs - rhs))) > 1e-6, name
+
+    # And the swap changes the energy: relabelling without it is a real bug,
+    # not a cosmetic one.
+    unswapped = CTMTensorEnv(
+        **{
+            name: getattr(env, name).relabels(
+                dict(zip(getattr(env, name).labels(), labels, strict=True))
+            )
+            for name, labels in _CTM_LABELS.items()
+        }
+    )
+    gate = tenax.heisenberg_gate()
+    e_ok = float(sym_energy(A, env, gate))
+    e_bad = float(compute_energy_ctm_tensor(A, unswapped, gate))
+    assert abs(e_ok - e_bad) > 1e-6, (e_ok, e_bad)
+    print(f"swap matters: e={e_ok:.12f} vs unswapped e={e_bad:.12f}")

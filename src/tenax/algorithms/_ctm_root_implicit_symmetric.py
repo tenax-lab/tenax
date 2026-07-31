@@ -12,7 +12,7 @@ file never touches a charge directly.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -21,10 +21,14 @@ from tenax.algorithms._ctm_root_implicit_asym import _inv_sqrt
 from tenax.algorithms._ctm_root_implicit_sym_sectors import (
     BondLayout,
     SectorSVD,
+    bond_index_from_layout,
     sector_map,
     sector_svd,
+    tensor_from_sector_matrices,
 )
+from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import (
+    CTMTensorEnv,
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
 )
@@ -38,12 +42,17 @@ __all__ = [
     "SymEnv",
     "SymProjectors",
     "all_projectors_sym",
+    "converge_sym",
     "half_infinite_sym",
     "init_env_sym",
     "lower_left_quadrant_sym",
+    "renormalised_corner_sym",
+    "renormalised_edge_sym",
     "rotate_a_sym",
     "rotate_env_sym",
     "swap_env_convention_sym",
+    "sweep_sym",
+    "sym_energy",
     "upper_left_quadrant_sym",
 ]
 
@@ -276,6 +285,11 @@ class SymProjectors(NamedTuple):
     pair was built from — with ``U`` and ``Vh`` already rotated into the pinned
     bond gauge, so projectors rebuilt from them inside a characteristic
     equation land in the same gauge as these.
+
+    ``P_left_t`` and ``P_right_t`` are the same two objects assembled into
+    ``SymmetricTensor``s on the cut leg, which is the form the sweep actually
+    contracts; see :func:`_projector_tensors_sym` for why they are built here,
+    where the two cut indices are in hand, rather than rebuilt at the use site.
     """
 
     P_left: dict[int, jax.Array]  # per sector, (n_q, chi_q)
@@ -283,6 +297,8 @@ class SymProjectors(NamedTuple):
     S: dict[int, jax.Array]  # per sector, (chi_q, chi_q) MATRIX
     sectors: dict[int, SectorSVD]
     layout: BondLayout
+    P_left_t: SymmetricTensor  # (cut, chi_new)
+    P_right_t: SymmetricTensor  # (chi_new, cut)
 
 
 def _sector_blocks(
@@ -452,6 +468,64 @@ def _fishman_projectors_sym(
     return P_left, P_right
 
 
+def _projector_tensors_sym(
+    P_left: dict[int, jax.Array],
+    P_right: dict[int, jax.Array],
+    layout: BondLayout,
+    top: SymmetricTensor,
+    bot: SymmetricTensor,
+) -> tuple[SymmetricTensor, SymmetricTensor]:
+    """Assemble the per-sector Fishman pair into two ``SymmetricTensor``s.
+
+    Applying the projectors *as tensors* rather than sector by sector is the
+    choice this module makes, and the reason is the renormalised **corner**.
+    Its two projectors come from two different moves — ``P_left`` of move ``k``
+    and ``P_right`` of move ``k+1`` — so a per-sector implementation would have
+    to know how the sector keys of two independently decomposed cuts line up
+    against the same quadrant.  As a tensor there is nothing to line up:
+    ``contract`` matches the charge sectors itself and raises if they cannot be
+    matched, which is exactly the class of bug (#718) this module exists to
+    make loud.
+
+    Which index goes where is fixed by the identity insertion, not by which
+    half each projector was *built* from.  Eq. 65 factorises the cut as
+    ``M = top . bot`` and inserts ``P_left . P_right`` on the shared bond, so
+    ``P_left``'s cut leg contracts a leg playing ``top``'s role and
+    ``P_right``'s contracts one playing ``bot``'s.  The flows follow: the two
+    quadrants carry opposite flows on the cut (``_cut_halves_sym``), so
+    ``P_left`` takes ``bot``'s cut index and ``P_right`` takes ``top``'s, and
+    each then meets its partner with the opposite arrow.
+
+    The truncated bond is built from :func:`bond_index_from_layout` twice, OUT
+    on ``P_left`` and IN on ``P_right``.  That is forced, not a convention:
+    ``tensor_from_sector_matrices`` pins the new leg's charge to
+    ``-q * flow``, so the two flows give the same sector list with opposite
+    arrows — the exact dual pair the renormalised ring needs, since a corner
+    takes its first leg from a ``P_left`` and its second from a ``P_right``
+    while the edge that shares each of those bonds takes the other one.
+    """
+    cut_top = top.indices[top.labels().index("cut")]
+    cut_bot = bot.indices[bot.labels().index("cut")]
+    sym = cut_top.symmetry
+    new_out = bond_index_from_layout(layout, sym, FlowDirection.OUT, "chi_new")
+    new_in = bond_index_from_layout(layout, sym, FlowDirection.IN, "chi_new")
+    P_left_t = tensor_from_sector_matrices(
+        {q: P_left[q] for q in layout.sectors},
+        row_index=cut_bot,
+        col_index=new_out,
+        row_axis=0,
+        col_axis=1,
+    )
+    P_right_t = tensor_from_sector_matrices(
+        {q: P_right[q] for q in layout.sectors},
+        row_index=new_in,
+        col_index=cut_top,
+        row_axis=0,
+        col_axis=1,
+    )
+    return P_left_t, P_right_t
+
+
 def all_projectors_sym(
     env: SymEnv,
     a: SymmetricTensor,
@@ -506,6 +580,7 @@ def all_projectors_sym(
             )
             pinned[q] = svds[q]._replace(U=U_q, Vh=Vh_q)
 
+        P_left_t, P_right_t = _projector_tensors_sym(P_left, P_right, layout, top, bot)
         out.append(
             SymProjectors(
                 P_left=P_left,
@@ -513,7 +588,292 @@ def all_projectors_sym(
                 S=S,
                 sectors=pinned,
                 layout=layout,
+                P_left_t=P_left_t,
+                P_right_t=P_right_t,
             )
         )
         env_k, a_k = rotate_env_sym(env_k), rotate_a_sym(a_k)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Forward: one left move, four rotations to a sweep (paper Eqs. 68-69)
+# ---------------------------------------------------------------------------
+
+
+def _unrotate_index_sym(slot: int, k: int) -> int:
+    """Which original tensor sits in ``slot`` after ``k`` rotations.
+
+    ``_ctm_root_implicit_asym._unrotate_index`` verbatim.  Slots and tensors
+    are both numbered 1..4 in the ``C1..C4`` order and one rotation advances
+    the label by one, so this is modular arithmetic and needs no symmetric
+    counterpart of its own — it is repeated here only so the symmetric sweep
+    reads without a cross-module hop.
+    """
+    return (slot - 1 + k) % 4 + 1
+
+
+def _normalize_sym(t: SymmetricTensor) -> SymmetricTensor:
+    """``t / max|t|`` — max-abs, not Frobenius, matching the dense module.
+
+    ``_ctm_root_implicit_asym._normalize`` divides by ``jnp.max(jnp.abs(x))``,
+    and the two do not agree up to a constant: the ratio depends on how the
+    weight is spread over the tensor, so it changes from sweep to sweep and
+    from tensor to tensor.  Since ``S`` is a variable of the characteristic
+    equations and the renormalisation is what fixes the corner scale, a
+    different normaliser is a different root, not a different presentation.
+
+    The max is taken over the flat block buffer rather than ``todense()``:
+    every entry outside a block is exactly zero, so the two agree, and the
+    dense array is what this module exists to avoid materialising.
+    """
+    scale = jnp.max(jnp.abs(t._data))
+    return t * (1.0 / (scale + 1e-300))
+
+
+def renormalised_corner_sym(
+    env_k: SymEnv,
+    a_k: SymmetricTensor,
+    projs_k: SymProjectors,
+    projs_next: SymProjectors,
+) -> SymmetricTensor:
+    """Paper Eq. 68: the upper-left quadrant projected on *both* open legs.
+
+    ``_ctm_root_implicit_asym._renormalised_corner`` with the two
+    ``jnp.einsum`` index letters become labels.  The corner sits in the ``C1``
+    slot of move ``k`` — above its vertical bond, hence ``P_left`` of move
+    ``k`` — and in the ``C4`` slot of move ``k+1``, below its bond in the
+    rotated frame, hence ``P_right`` of move ``k+1``.
+
+    :func:`_as_matrix_sym` fuses the quadrant exactly as the dense
+    ``.reshape(n, n)`` does, and the two fused legs are then *literally* the
+    two cut indices the projectors expect:
+
+    * axes 2-3 ``(chi_d, a_d)``, fused IN, are move ``k``'s ``top`` cut;
+    * axes 0-1 ``(chi_r, a_r)``, fused OUT, are the ``(chi_u, a_u)`` of move
+      ``k+1``'s *lower* quadrant — the rotation sends this quadrant's
+      right-facing pair to the next move's upward-facing one — so they are
+      move ``k+1``'s ``bot`` cut.
+
+    That second identification is what makes the corner contract at all, and
+    it is the one place where two different moves' charge sectors have to
+    agree.  They do because ``T1.l``/``T1.r`` and ``a.l``/``a.r`` are dual
+    pairs, so the two fusions (IN of the duals, OUT of the originals) produce
+    the same charges.
+    """
+    quad = _as_matrix_sym(upper_left_quadrant_sym(env_k, a_k))
+    quad = quad.relabels({"col": "cut_next", "row": "cut_k"})
+    p_left = projs_k.P_left_t.relabels({"cut": "cut_k", "chi_new": "new_l"})
+    p_right = projs_next.P_right_t.relabels({"cut": "cut_next", "chi_new": "new_r"})
+    return contract(p_right, quad, p_left, output_labels=("new_l", "new_r"))
+
+
+def renormalised_edge_sym(
+    env_k: SymEnv,
+    a_k: SymmetricTensor,
+    projs_k: SymProjectors,
+) -> SymmetricTensor:
+    """Paper Eq. 69: the edge absorbs one ``a`` and is projected on both bonds.
+
+    The dense reference is ``_renormalised_edge``, whose only ingredient is
+    ``_left_move_pieces``' ``t4g``::
+
+        jnp.einsum("hit,ujik->tukhj", T4, a).reshape(chi*d2, d2, chi*d2)
+
+    — the left edge with one ``a`` absorbed, legs ``((chi,a), a_r, (chi,a))``.
+    Here the two fused pairs are built with :func:`fuse_indices` instead of a
+    reshape, with the *same* flows :func:`_as_matrix_sym` gives the quadrants:
+    ``(T4.u, a.u)`` OUT, which is the lower quadrant's ``(chi_u, a_u)`` and so
+    the ``bot`` cut, and ``(T4.d, a.d)`` IN, which is the upper quadrant's
+    ``(chi_d, a_d)`` and so the ``top`` cut.  ``P_right`` therefore lands on
+    the upper bond and ``P_left`` on the lower one — the dense
+    ``einsum("ui,ixj,jd->dxu", P_bot, t4g, P_top)``, which reads backwards
+    until the insertion ``Q_upper (P_left P_right) Q_lower`` is written out:
+    the piece *above* a bond carries ``P_left``, the piece below carries
+    ``P_right``.
+
+    The open ``a.r`` leg becomes the new edge's middle leg.  It is left exactly
+    as ``a`` hands it over — no relabel, no flow flip — because ``a.l`` and
+    ``a.r`` are a dual pair, so next sweep's ``T4.a-leg x a.l`` contraction
+    finds matching charges and opposite arrows on its own.
+    """
+    t4 = env_k.T4.relabels(
+        dict(zip(env_k.T4.labels(), ("chi_d", "a_l", "chi_u"), strict=True))
+    )
+    a4 = a_k.relabels(
+        dict(zip(a_k.labels(), ("a_u", "a_d", "a_l", "a_r"), strict=True))
+    )
+    g = contract(t4, a4, output_labels=("chi_u", "a_u", "a_r", "chi_d", "a_d"))
+    g = fuse_indices(g, 0, 1, "cut_u", FlowDirection.OUT)
+    g = fuse_indices(g, 2, 3, "cut_d", FlowDirection.IN)
+    p_left = projs_k.P_left_t.relabels({"cut": "cut_d", "chi_new": "new_l"})
+    p_right = projs_k.P_right_t.relabels({"cut": "cut_u", "chi_new": "new_r"})
+    return contract(p_right, g, p_left, output_labels=("new_l", "a_r", "new_r"))
+
+
+def sweep_sym(
+    env: SymEnv,
+    a: SymmetricTensor,
+    chi: int,
+    prev: list[SymProjectors] | None = None,
+) -> tuple[SymEnv, list[SymProjectors]]:
+    """One simultaneous CTMRG sweep: all four directions from one environment.
+
+    ``_ctm_root_implicit_asym.sweep`` function for function.  Every projector
+    comes from the *same* environment and every corner and edge is renormalised
+    against it; a sequential (Gauss-Seidel) sweep would have a fixed point that
+    does not satisfy Eqs. 76-77, since those evaluate all four moves at one
+    ``y``.
+
+    Returns ``(env, projectors)``; the projectors feed the next sweep's
+    per-sector gauge alignment.
+    """
+    projs = all_projectors_sym(env, a, chi, prev)
+    corners: list = [None] * 4
+    edges: list = [None] * 4
+    env_k, a_k = env, a
+    for k in range(4):
+        corners[_unrotate_index_sym(1, k) - 1] = _normalize_sym(
+            renormalised_corner_sym(env_k, a_k, projs[k], projs[(k + 1) % 4])
+        )
+        edges[_unrotate_index_sym(4, k) - 1] = _normalize_sym(
+            renormalised_edge_sym(env_k, a_k, projs[k])
+        )
+        env_k, a_k = rotate_env_sym(env_k), rotate_a_sym(a_k)
+    return SymEnv(*corners, *edges), projs
+
+
+def _same_block_structure(x: SymmetricTensor, y: SymmetricTensor) -> bool:
+    """Whether two symmetric tensors can be compared entry by entry.
+
+    The dense module skips a sweep pair "whose shapes changed".  Here the shape
+    is not the whole story: the retained charge distribution over the cut is
+    data-dependent, so two sweeps can produce the same total ``chi`` split
+    differently over sectors — same dense shape, different blocks.  Comparing
+    the flat buffers in that case would subtract unrelated entries.
+    """
+    return x._data.shape == y._data.shape and x._block_keys == y._block_keys
+
+
+def _max_abs_diff_sym(x: SymmetricTensor, y: SymmetricTensor) -> float:
+    """Largest entry-wise difference, over the flat block buffer.
+
+    Every entry outside a block is zero in both operands once
+    :func:`_same_block_structure` holds, so this equals the max-abs difference
+    of the dense arrays without building either.
+    """
+    return float(jnp.max(jnp.abs(x._data - y._data)))
+
+
+def converge_sym(
+    A: Tensor,
+    chi: int,
+    *,
+    max_iter: int = 200,
+    conv_tol: float = 1e-12,
+    min_iter: int = 4,
+    return_projectors: bool = False,
+):
+    """Sweep until the environment stops moving, element by element.
+
+    ``_ctm_root_implicit_asym.converge`` with the dense sweep replaced by
+    :func:`sweep_sym`.  The convergence test is deliberately **element-wise,
+    not spectral**: corner singular values are invariant under independent
+    rotations of each bond, so a spectral criterion calls convergence while
+    the tensors are still moving — and the characteristic equations compare
+    tensors, not spectra.  Each tensor is normalised before the comparison,
+    and a pair whose block structure moved between sweeps is skipped rather
+    than compared (see :func:`_same_block_structure`).
+
+    With ``return_projectors`` the final projector set comes back as a fourth
+    element.  That is not a diagnostic: the converged environment sits in the
+    bond gauge of the chain that built it, and the root parametrisation needs
+    the same chain.  A cold re-pin fixes a *different* gauge and leaves ``y*``
+    describing an environment it was not extracted from — a real state
+    survives that (the gauge is a sign, one sweep absorbs it), a complex one
+    does not (#721).
+    """
+    env, a = init_env_sym(A, chi)
+    prev = None
+    prev_projs: list[SymProjectors] | None = None
+    residual = float("inf")
+    converged = False
+    iters = 0
+    for it in range(int(max_iter)):
+        env, prev_projs = sweep_sym(env, a, chi, prev_projs)
+        iters = it + 1
+        cur = tuple(t * (1.0 / (jnp.linalg.norm(t._data) + 1e-300)) for t in env)
+        if prev is not None and all(
+            _same_block_structure(c, q) for c, q in zip(cur, prev, strict=True)
+        ):
+            residual = max(
+                _max_abs_diff_sym(c, q) for c, q in zip(cur, prev, strict=True)
+            )
+            if iters >= min_iter and residual < conv_tol:
+                converged = True
+                break
+        prev = cur
+    meta: dict[str, Any] = {
+        "iters": iters,
+        "residual": residual,
+        "converged": converged,
+    }
+    if return_projectors:
+        return env, a, meta, prev_projs
+    return env, a, meta
+
+
+# ---------------------------------------------------------------------------
+# Energy
+# ---------------------------------------------------------------------------
+
+# Positional leg names of :class:`CTMTensorEnv`, in this module's post-swap
+# axis order.  ``compute_energy_ctm_tensor`` contracts purely by label, so the
+# boundary between the two conventions is a rename plus the axis swap of
+# :func:`swap_env_convention_sym` — nothing else.  The D² leg of each edge is
+# renamed too (a sweep leaves it carrying whichever of ``a``'s four legs the
+# absorption left open) but is *not* flow-flipped: opposite legs of ``a`` are a
+# dual pair, so the renamed leg already meets the open double layer with
+# matching charges and the opposite arrow.
+_CTM_LABELS = {
+    "C1": ("c1_d", "c1_r"),
+    "C2": ("c2_l", "c2_d"),
+    "C3": ("c3_u", "c3_l"),
+    "C4": ("c4_r", "c4_u"),
+    "T1": ("t1_l", "u2", "t1_r"),
+    "T2": ("t2_u", "r2", "t2_d"),
+    "T3": ("t3_r", "d2", "t3_l"),
+    "T4": ("t4_d", "l2", "t4_u"),
+}
+
+
+def _to_ctm_env_sym(env: SymEnv) -> CTMTensorEnv:
+    """This module's uniform ring -> ``CTMTensorEnv``'s.
+
+    The swap is load-bearing and must not be dropped: this module closes the
+    ring uniformly while ``CTMTensorEnv`` closes it with ``C4`` transposed and
+    ``T3``, ``T4`` reversed.  Reinterpreting one as the other glues the network
+    wrongly — 1.5% on the energy at D=2 chi=4 and the ±2.121e-3 per-bond
+    antisymmetry that was #718, which read as an unlicensed gauge in Eq. 88 and
+    was this relabelling all along.  It is a *no-op* on the initialiser, whose
+    ``C4`` is symmetric and whose ``T3``/``T4`` are palindromic, so the mistake
+    is invisible until the environment is genuinely asymmetric — i.e. after the
+    first sweep.
+
+    Unlike the dense ``_to_ctm_env`` this takes no template.  A converged
+    symmetric environment's chi legs carry the charge layout the truncation
+    chose, which is data-dependent and generally *not* the initialiser's, so
+    borrowing the template's indices would assert a layout the data does not
+    have.  The tensors carry their own indices; only the labels are renamed.
+    """
+    env = swap_env_convention_sym(env)
+    fields = {}
+    for name, labels in _CTM_LABELS.items():
+        t = getattr(env, name)
+        fields[name] = t.relabels(dict(zip(t.labels(), labels, strict=True)))
+    return CTMTensorEnv(**fields)
+
+
+def sym_energy(A: Tensor, env: SymEnv, gate) -> jax.Array:
+    """Nearest-neighbour energy per site from a symmetric CTM environment."""
+    return compute_energy_ctm_tensor(A, _to_ctm_env_sym(env), gate)
