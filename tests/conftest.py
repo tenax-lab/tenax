@@ -59,6 +59,7 @@ _FILE_MARKERS = {
     "test_ctm_c4v_root_implicit.py": "algorithm",
     "test_ctm_root_implicit_asym.py": "algorithm",
     "test_ctm_root_implicit_sym_sectors.py": "core",
+    "test_ctm_root_implicit_symmetric.py": "core",
     "test_ctm_truncation_error.py": "core",
     "test_ctm_paired.py": "algorithm",
     "test_ctm_python_loop.py": "algorithm",
