@@ -1300,6 +1300,20 @@ transpose to 7.7e-16 against the authors' dumped fixed point. Phase 1 bridges th
 conventions in `asym_root_to_covariant_convention` (`:667-712`), a shift-by-one plus a
 transpose; the symmetric port needs the same bridge, so read that function too.
 
+The bridge is exactly: shift every per-direction tuple by `+1`, transpose every block,
+and swap `u <-> v`, `U_star <-> Vh_star`, `U_perp <-> Vh_perp`. **Plain transpose, not
+adjoint** — no conjugation enters. It is licensed because
+`_lower_left_quadrant(env_k, a_k) == _upper_left_quadrant(env_{k-1}, a_{k-1})` exactly
+(1e-16), hence `M_left(k) == M_up(k-1).T`, and transposing a decomposition exchanges its
+isometries while keeping both isometric.
+
+**Symmetric-specific hazard the dense bridge does not have.** Transposing a *block* also
+swaps which leg its sector key was derived from, so the per-sector dicts may need their
+keys remapped (`q -> q` or `q -> -q` depending on flows), not just their values
+transposed. Determine this empirically — build the bridge, then assert that the bridged
+root still satisfies `norm(F(y*))` small. If the keys are wrong the residual will be
+O(1), not subtly off, so this one does fail loudly.
+
 Port `_ctm_root_implicit_asym.asym_characteristic_residual_covariant` (`:780-878`),
 `_covariant_pieces` (`:713-761`) and `_modified_env` (`:762-779`) with these
 substitutions, and nothing else changed:
