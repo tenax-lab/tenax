@@ -414,22 +414,22 @@ def test_zn_round_trips_when_the_flows_are_opposite():
         assert err < 1e-10, (sym, err)
 
 
-def test_zn_same_flow_bonds_carry_the_library_s_own_representative():
-    """Same-flow legs label ``Z_n`` partners ``-q``, matching ``tenax.linalg``.
+def test_zn_same_flow_bonds_carry_the_canonical_representative():
+    """Same-flow legs label ``Z_n`` partners canonically, matching ``tenax.linalg``.
 
-    This is the orientation the CTM cut actually uses (both projectors are
-    built with row and col flowing the same way), and there the partner of
-    charge 1 is written ``-1`` rather than the canonical ``1``.  It is a
-    non-canonical *representative*, not a broken block: ``fuse`` reduces mod
-    ``n``, so ``_validate`` passes and every leg in the module agrees.
+    This is the orientation the CTM cut actually uses (both projectors are built
+    with row and col flowing the same way).  Before #734 the partner of charge 1
+    was written ``-1`` here and by ``tenax.linalg.svd``, because
+    ``_group_blocks_by_bond_charge`` fused a single flow-weighted charge and
+    ``fuse_many`` of one array skipped the ``% n``.  Both now go through
+    ``_net_charge``, which seeds the fusion with the identity, so the single-leg
+    and multi-leg paths agree by construction.
 
-    The point of pinning it is that it is not this module's invention —
-    ``tenax.linalg.svd`` emits exactly the same labels for a ``Z2`` tensor
-    whose left leg flows OUT, because ``_group_blocks_by_bond_charge`` fuses a
-    single flow-weighted charge and ``fuse_many`` of one array skips the
-    ``% n``.  If #733 canonicalises that upstream, this test is the one that
-    should fail and be updated in step, rather than the two conventions
-    drifting apart silently.
+    :func:`tensor_from_sector_matrices` then had to follow: it derived the
+    partner key by raw integer negation, which with both flows OUT lands on
+    ``(-1, 1)`` — a charge the ``Z2`` leg's canonical sectors ``[0, 1]`` do not
+    contain, so every later contraction dropped that block.  It now inverts
+    ``flow_charge`` instead, and the keys name sectors the legs actually have.
     """
     import tenax.linalg as tl
 
@@ -451,7 +451,10 @@ def test_zn_same_flow_bonds_carry_the_library_s_own_representative():
     )
     U = tl.svd(t, left_labels=["a"], right_labels=["b"])[0]
     lib_bond = [i for i in U.indices if i.label != "a"][0]
-    assert sorted(int(q) for q in lib_bond.sectors) == [-1, 0]
+    assert sorted(int(q) for q in lib_bond.sectors) == [0, 1]
+    # ... and the keys name sectors the bond actually has, which is the part
+    # that used to be wrong even once the index itself was canonicalised.
+    assert sorted(U._block_keys) == [(0, 0), (1, 1)]
 
     # This module, same convention.
     m = SymmetricTensor.random_normal_np(
@@ -469,7 +472,14 @@ def test_zn_same_flow_bonds_carry_the_library_s_own_representative():
         mats, row_index=m.indices[0], col_index=m.indices[1], row_axis=0, col_axis=1
     )
     rebuilt._validate()
-    assert (1, -1) in set(rebuilt._block_keys)
+    # The bond charges this module groups by are canonical ...
+    assert sorted(sectors) == [0, 1]
+    # ... and so are the keys it writes back: every one names a sector its own
+    # leg carries, which the raw-negation form did not.
+    assert (1, 1) in set(rebuilt._block_keys)
+    for key in rebuilt._block_keys:
+        for idx, q in zip(rebuilt.indices, key):
+            assert idx.has_sector(int(q)), (key, idx.label, list(idx.sectors))
 
 
 def test_product_symmetry_is_refused_rather_than_mis_assembled():

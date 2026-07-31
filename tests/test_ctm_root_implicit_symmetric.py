@@ -1022,10 +1022,10 @@ def test_to_ctm_env_sym_applies_the_convention_swap():
 def _plain_z2_site_tensor(seed: int = 2) -> SymmetricTensor:
     """:func:`_convergent_site_tensor` *without* the dominant-block boost.
 
-    Kept as its own fixture because it is the state whose sweep settles onto a
-    residual **bond-sign orbit** rather than a fixed point — see
-    :func:`test_a_bond_sign_orbit_is_a_root_not_a_stall`, which is the only
-    thing it is used for.
+    Kept as its own fixture because it is the state whose sweep used to settle
+    onto a residual **bond-sign orbit** rather than a fixed point — see
+    :func:`test_the_unboosted_z2_state_settles_element_wise`, which is the only
+    thing it is used for, and which records why #734 removed the orbit.
     """
     sym = ZnSymmetry(2)
     phys = TensorIndex(
@@ -1060,10 +1060,14 @@ def _plain_z2_site_tensor(seed: int = 2) -> SymmetricTensor:
 def _complex_site_tensor(imag: float = 0.25, seed: int = 5) -> SymmetricTensor:
     """:func:`_convergent_site_tensor` with an imaginary part on every block.
 
-    Complex is not decoration: ``λ = ⟨X, X'⟩`` is genuinely complex for a
-    complex state and real-projecting it is a silent, large error (#721).  On
-    this fixture the four corner ``λ`` come out ``-0.3758+0.2185j``,
-    ``0.4953``, ``0.4487-0.0522j``, ``0.6260``.
+    Complex is not decoration: ``λ = ⟨X, X'⟩`` enters ``F`` as ``X'/λ - X``, so
+    its phase is part of the equation and perturbing it is a silent, large
+    error (#721).  Whether ``λ`` *itself* comes out complex is a bond-gauge
+    question rather than a property of the state — on this fixture the four
+    corner ``λ`` are ``0.4348, 0.4953, 0.4517, 0.6260``, real, where before
+    #734's canonical ``Z2`` labels they were ``-0.3758+0.2185j``, ``0.4953``,
+    ``0.4487-0.0522j``, ``0.6260``: the same moduli in a different gauge.  See
+    :func:`test_the_root_survives_a_complex_state`.
     """
     A = _convergent_site_tensor()
     rng = np.random.RandomState(seed)
@@ -1405,11 +1409,23 @@ def test_the_covariant_layouts_are_the_forward_ones_shifted(converged_root):
 
 
 def test_the_root_survives_a_complex_state(monkeypatch):
-    """A complex state, and the reason ``λ`` is not real-projected (#721).
+    """A complex state, and the reason ``λ``'s phase is carried, not dropped (#721).
 
-    ``λ = ⟨X, X'⟩`` is genuinely complex here, so ``.real`` is not a tidy-up —
-    it changes the equation.  Dense the same edit moved ``|F1|`` from 2e-13 to
-    1.6e0; here it moves ``‖F(y*)‖`` from 3e-13 to 4.9.
+    ``F`` normalises as ``X'/λ - X``, so ``λ``'s phase is part of the equation:
+    perturb it and the converged point stops being a root.  That is what #721
+    is about, and the counterfactual below measures it directly.
+
+    It used to be measured by real-projecting ``λ``, which on this fixture
+    moved ``‖F(y*)‖`` from 3e-13 to 4.9 (dense, the same edit moved ``|F1|``
+    from 2e-13 to 1.6e0).  That form went **vacuous** at #734: the four corner
+    ``λ`` were ``-0.3758+0.2185j, 0.4953, 0.4487-0.0522j, 0.6260`` only because
+    the ``Z2`` bond was labelled with the non-canonical representative ``-1``,
+    which put the odd sector first and picked a different SVD column gauge.
+    With canonical labels the same corners give ``0.4348, 0.4953, 0.4517,
+    0.6260`` — *identical moduli*, zero phase — so ``.real`` is now a no-op
+    here and would have quietly stopped testing anything.  Rotating the phase
+    instead pins the same property without depending on which gauge the bond
+    happens to land in.
     """
     from tenax.algorithms import _ctm_root_implicit_symmetric as mod
 
@@ -1419,22 +1435,22 @@ def test_the_root_survives_a_complex_state(monkeypatch):
     root, residual = root_parametrize_sym(env, a, chi=4, prev_projs=projs)
     assert residual < 1e-10, residual
 
-    real_lambda = mod._vdot_sym
+    true_lambda = mod._vdot_sym
 
-    def projected(x, y):
-        return jnp.real(real_lambda(x, y))
+    def rotated(x, y):
+        return jnp.exp(1j * 0.25) * true_lambda(x, y)
 
-    monkeypatch.setattr(mod, "_vdot_sym", projected)
+    monkeypatch.setattr(mod, "_vdot_sym", rotated)
     wrong = _residual_norm(characteristic_residual_sym(root.y, a, root, 4))
     # Two-part, scale-free: large in absolute terms AND enormous relative to
     # the true root.  A bare ``> 1.0`` is calibrated at the edge of a
-    # platform-dependent quantity — macOS measured 0.924 here where Linux
-    # measured 4.9, which failed CI while the counterfactual was in fact
-    # firing across twelve orders of magnitude.  Same pattern as
-    # ``test_a_wrong_bond_layout_breaks_the_root``.
+    # platform-dependent quantity — macOS measured 0.924 for the old
+    # real-projection form where Linux measured 4.9, which failed CI while the
+    # counterfactual was in fact firing across twelve orders of magnitude.
+    # Same pattern as ``test_a_wrong_bond_layout_breaks_the_root``.
     assert wrong > 1e-2, wrong
     assert wrong > 1e9 * residual, (wrong, residual)
-    print(f"complex |F| = {residual:.3e}; with a real-projected λ = {wrong:.3e}")
+    print(f"complex |F| = {residual:.3e}; with λ's phase rotated = {wrong:.3e}")
 
 
 def test_the_root_survives_an_empty_and_uneven_sector_layout():
@@ -1694,26 +1710,30 @@ def test_a_wrong_sector_assignment_survives_every_shape_check(converged_root):
     )
 
 
-def test_a_bond_sign_orbit_is_a_root_not_a_stall():
-    """The unboosted Z2 state settles onto a bond-sign orbit, and that is fine.
+def test_the_unboosted_z2_state_settles_element_wise():
+    """The unboosted Z2 state reaches a genuine fixed point, not a sign orbit.
 
-    Measured, before this was understood: the sweep reproduces the environment
-    exactly except that ``C2`` and ``C4`` change sign every iteration, so the
-    raw element-wise residual sits at 1.88 for 200 sweeps while every ``|·|``
-    agrees to 1e-13.  That ``σ`` is a **bond gauge** — per-direction signs
-    ``s = (+, +, -, -)`` give corner ``C_j`` the factor ``s_{j-1} s_j`` and every
-    edge ``s_j² = +1``, which is exactly the observed pattern — so it is not a
-    physical difference, and the product of the four corner signs is ``+1``, the
-    gauge-invariant consistency check.
+    This test used to pin the opposite, and the history is worth keeping.  With
+    the ``Z2`` bond labelled by the non-canonical representative ``-1``, the
+    odd sector sorted *first*, which picked a different SVD column gauge: the
+    sweep then reproduced the environment exactly except that ``C2`` and ``C4``
+    changed sign every iteration, so the raw element-wise residual sat at 1.88
+    for 200 sweeps while every ``|·|`` agreed to 1e-13.  That ``σ`` was a bond
+    gauge — per-direction signs ``s = (+, +, -, -)`` give corner ``C_j`` the
+    factor ``s_{j-1} s_j`` and every edge ``s_j² = +1`` — so the orbit was a
+    root, and the forward criterion had to be the phase-aligned one.
 
-    It is also not the mechanism the Phase 3 plan expected: the retained layout
-    is ``((-1, 2), (0, 2))`` on all four directions at *every* sweep, so the
-    warm gauge pin never cold-restarts.  The projectors are stationary to
-    3e-11; the sign that reaches a corner comes from the enlarged quadrant.
+    #734's canonical labels put the odd sector second and the orbit is gone:
+    every ``λ`` is ``+1``, and the raw and phase-aligned differences agree to
+    1e-13.  The phase-aligned criterion is still the right one (the complex
+    fixture and the general gauge argument have not changed), but it is no
+    longer load-bearing *here*, so this pins the stronger element-wise
+    statement instead.
 
-    Since ``F`` normalises as ``X'/λ - X``, ``λ`` comes out ``-1`` on the two
-    flipping corners and the orbit **is** a root.  So the forward criterion is
-    the phase-aligned one, and this test pins all three statements at once.
+    The retained layout is ``((0, 2), (1, 2))`` on all four directions at
+    *every* sweep, so the warm gauge pin never cold-restarts and the projectors
+    are stationary.  (It read ``((-1, 2), (0, 2))`` before #734 — the same two
+    sectors, written with the non-canonical representative.)
     """
     from tenax.algorithms._ctm_root_implicit_symmetric import (
         _max_abs_diff_sym,
@@ -1727,12 +1747,11 @@ def test_a_bond_sign_orbit_is_a_root_not_a_stall():
 
     # The layout never moved, so the "cold re-pin" mechanism is ruled out.
     for p in projs:
-        assert p.layout.dims == ((-1, 2), (0, 2)), p.layout.dims
+        assert p.layout.dims == ((0, 2), (1, 2)), p.layout.dims
 
     env_next, _ = sweep_sym(env, a, 4, projs)
     names = ("C1", "C2", "C3", "C4", "T1", "T2", "T3", "T4")
     signs = {}
-    flipped = []
     for name in names:
         x, y = getattr(env, name), getattr(env_next, name)
         xn = x * (1.0 / jnp.linalg.norm(x._data))
@@ -1740,20 +1759,19 @@ def test_a_bond_sign_orbit_is_a_root_not_a_stall():
         lam = complex(jnp.vdot(xn._data, yn._data))
         signs[name] = lam
         assert _phase_aligned_max_diff(xn, yn) < 1e-11, name
-        assert abs(abs(lam) - 1.0) < 1e-11, (name, lam)
-        if _max_abs_diff_sym(xn, yn) > 1e-6:
-            flipped.append(name)
+        # No orbit: the raw difference is as small as the phase-aligned one,
+        # which is what distinguishes a fixed point from a gauge orbit.
+        assert _max_abs_diff_sym(xn, yn) < 1e-11, (name, _max_abs_diff_sym(xn, yn))
+        assert abs(lam - 1.0) < 1e-11, (name, lam)
 
-    assert flipped == ["C2", "C4"], flipped
-    for name in ("T1", "T2", "T3", "T4"):
-        assert abs(signs[name] - 1.0) < 1e-11, (name, signs[name])
+    # Kept from the orbit era: the gauge-invariant consistency check.
     corner_product = np.prod([signs[f"C{i}"] for i in (1, 2, 3, 4)])
     assert abs(corner_product - 1.0) < 1e-10, corner_product
 
     _root, residual = root_parametrize_sym(env, a, chi=4, prev_projs=projs)
     assert residual < 1e-10, residual
     print(
-        f"bond-sign orbit: λ = {[f'{signs[n].real:+.3f}' for n in names]}, "
+        f"element-wise fixed point: λ = {[f'{signs[n].real:+.3f}' for n in names]}, "
         f"norm(F(y*)) = {residual:.3e}"
     )
 

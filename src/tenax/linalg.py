@@ -23,7 +23,7 @@ from jax.lax.linalg import SvdAlgorithm as _SvdAlgorithm
 from jax.lax.linalg import svd as _lax_svd
 
 from tenax._rsvd_core import hmt_rsvd
-from tenax.core.index import FlowDirection, Label, TensorIndex
+from tenax.core.index import FlowDirection, Label, TensorIndex, _net_charge
 from tenax.core.tensor import (
     BlockKey,
     DenseTensor,
@@ -78,16 +78,12 @@ def _dense_svd(
 
 
 def _has_nonstandard_blocks(tensor: SymmetricTensor) -> bool:
-    """Return True if any block violates standard conservation sum(flow*q)==0."""
+    """Return True if any block violates standard conservation."""
     if not tensor.blocks:
         return False
-    sym = tensor.indices[0].symmetry
-    identity = sym.identity()
+    identity = tensor.indices[0].symmetry.identity()
     for key in tensor.blocks:
-        total = 0
-        for idx, q in zip(tensor.indices, key):
-            total += int(idx.flow) * q
-        if total != identity:
+        if _net_charge(tensor.indices, key) != identity:
             return True
     return False
 
@@ -112,19 +108,13 @@ def _group_blocks_by_bond_charge(
         Dict mapping bond charge ``q`` to a list of
         ``(left_subkey, right_subkey, block_array)`` tuples.
     """
-    sym = tensor.indices[0].symmetry
     grouped: dict[int, list[tuple[BlockKey, BlockKey, jax.Array]]] = {}
+    left_indices_for_charge = tuple(tensor.indices[i] for i in left_leg_positions)
 
     for key, block in tensor.blocks.items():
-        # Compute bond charge from left legs
-        effective = [
-            np.array([int(tensor.indices[i].flow) * int(key[i])], dtype=np.int32)
-            for i in left_leg_positions
-        ]
-        q = int(sym.fuse_many(effective)[0])
-
         left_subkey = tuple(key[i] for i in left_leg_positions)
         right_subkey = tuple(key[i] for i in right_leg_positions)
+        q = _net_charge(left_indices_for_charge, left_subkey)
         grouped.setdefault(q, []).append((left_subkey, right_subkey, block))
 
     return grouped
@@ -601,11 +591,9 @@ def _truncated_svd_symmetric(
     input_target = 0
     if tensor.blocks:
         key0 = next(iter(tensor.blocks))
-        input_target = sum(
-            int(idx.flow) * int(q) for idx, q in zip(tensor.indices, key0)
-        )
+        input_target = _net_charge(tensor.indices, key0)
 
-    if input_target != 0:
+    if input_target != tensor.indices[0].symmetry.identity():
         # Bypass validation for non-identity targets
         U_tensor = object.__new__(SymmetricTensor)
         U_tensor._indices = U_indices
@@ -2105,11 +2093,9 @@ def _rsvd_symmetric(
     input_target = 0
     if tensor.blocks:
         key0 = next(iter(tensor.blocks))
-        input_target = sum(
-            int(idx.flow) * int(q) for idx, q in zip(tensor.indices, key0)
-        )
+        input_target = _net_charge(tensor.indices, key0)
 
-    if input_target != 0:
+    if input_target != tensor.indices[0].symmetry.identity():
         U_tensor = object.__new__(SymmetricTensor)
         U_tensor._indices = U_indices
         U_tensor._init_flat_buffer(U_blocks)

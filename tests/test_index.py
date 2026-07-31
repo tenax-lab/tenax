@@ -356,3 +356,54 @@ def test_net_charge_rejects_a_rank_mismatch():
 def test_net_charge_rejects_empty_indices():
     with pytest.raises(ValueError, match="at least one index"):
         _net_charge((), ())
+
+
+def test_index_canonicalises_and_merges_duplicate_representatives():
+    """Z2 ``-1`` and ``1`` are one sector written two ways; they must merge."""
+    sym = ZnSymmetry(2)
+    idx = TensorIndex.from_charges(
+        sym, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.IN, label="x"
+    )
+    assert np.array_equal(idx.sectors, np.array([0, 1], dtype=np.int32))
+    assert np.array_equal(idx.multiplicities, np.array([1, 2], dtype=np.int32))
+    assert idx.dim == 3
+    assert idx.n_sectors == 2
+    assert idx.multiplicity(1) == 2
+    assert not idx.has_sector(-1)
+
+
+def test_index_charges_stay_consistent_with_sectors_after_canonicalisation():
+    """``charges`` must not desynchronise from ``sectors``/``multiplicities``."""
+    sym = ZnSymmetry(2)
+    idx = TensorIndex.from_charges(
+        sym, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.IN, label="x"
+    )
+    charges = idx.charges
+    assert len(charges) == idx.dim
+    for q in idx.sectors:
+        assert int(np.sum(charges == q)) == idx.multiplicity(int(q))
+
+
+def test_index_dual_is_an_involution():
+    """``dual()`` used to sort without merging, emitting sectors=[0, 1, 1]."""
+    sym = ZnSymmetry(3)
+    idx = TensorIndex.from_charges(
+        sym, np.array([0, 1, 2], dtype=np.int32), FlowDirection.IN, label="x"
+    )
+    back = idx.dual().dual()
+    assert np.array_equal(back.sectors, idx.sectors)
+    assert np.array_equal(back.multiplicities, idx.multiplicities)
+    assert back.flow == idx.flow
+
+
+def test_index_sectors_are_always_sorted_and_unique():
+    sym = ZnSymmetry(2)
+    idx = TensorIndex(
+        symmetry=sym,
+        sectors=np.array([1, -1, 0], dtype=np.int32),
+        multiplicities=np.array([2, 3, 4], dtype=np.int32),
+        flow=FlowDirection.IN,
+        label="x",
+    )
+    assert np.array_equal(idx.sectors, np.array([0, 1], dtype=np.int32))
+    assert np.array_equal(idx.multiplicities, np.array([4, 5], dtype=np.int32))

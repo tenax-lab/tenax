@@ -246,39 +246,38 @@ def tensor_from_sector_matrices(
     axis order.
 
     Block keys are *charge values* per axis, not bare copies of the dict key
-    ``q``.  ``q`` is what :func:`_group_blocks_by_bond_charge` (called by
-    :func:`sector_svd` with ``left_leg_positions=[row_axis]``) computes as
-    ``row_index.flow * key[row_axis]``; charge conservation
-    (``row_index.flow * key[row_axis] + col_index.flow * key[col_axis] ==
-    identity``) then pins ``key[col_axis] = -q * col_index.flow``.  Both
-    reduce to plain ``q`` only in the IN-row/OUT-col case (flows +1/-1) that
-    every fixture in this module happens to use — verified empirically
+    ``q``.  ``q`` is the bond charge :func:`_group_blocks_by_bond_charge`
+    (called by :func:`sector_svd` with ``left_leg_positions=[row_axis]``)
+    computes as ``flow_charge(row_index.flow, key[row_axis])``, seeded with the
+    identity.  Inverting it recovers the row charge, because ``flow_charge`` is
+    an involution on canonical representatives; charge conservation then pins
+    the column charge, since ``fuse(q, flow_charge(col_flow, q_col))`` must be
+    the identity:
+
+    * ``key[row_axis] = flow_charge(row_flow, q)``
+    * ``key[col_axis] = flow_charge(col_flow, dual(q))``
+
+    Both reduce to plain ``q`` only in the IN-row/OUT-col case (flows +1/-1)
+    that every fixture in this module happens to use — verified empirically
     against ``sector_svd`` + ``._validate()`` + a numeric round trip for all
     four IN/OUT combinations, not assumed from the IN/OUT case alone.
 
-    **This arithmetic is raw integer negation, not the group inverse**, so it
-    is valid exactly where ``dual(q) == -q`` as integers.  That holds for
-    U(1).  For ``Z_n`` it holds only modulo ``n``: the partner of ``q`` is
-    written ``-q`` where the canonical representative is ``(-q) % n``, so a
-    ``Z2`` bond comes out labelled ``-1`` rather than ``1``.  That is
-    *consistent* — every leg this module builds uses the same convention, and
-    ``ZnSymmetry.fuse`` reduces mod ``n``, so conservation still checks out —
-    and it is the convention ``tenax.linalg`` itself produces, because
-    :func:`~tenax.linalg._group_blocks_by_bond_charge` calls ``fuse_many`` on
-    a *single* flow-weighted charge and ``fuse_many`` of one array returns it
-    unreduced.  ``tenax.linalg.svd`` on a ``Z2`` tensor whose left leg flows
-    OUT yields bond sectors ``[-1, 0]`` for the same reason (see #733).
-    Diverging from it here would make this module's bonds fail to contract
-    against the rest of the library, so this follows the library.
+    This goes through the symmetry rather than negating the integer (#734).
+    Raw negation agreed with ``dual`` for U(1) and, modulo ``n``, for ``Z_n``;
+    what it did *not* agree with is the canonical representative a
+    :class:`~tenax.core.index.TensorIndex` now carries.  With both flows the
+    same way a ``Z2`` partner came out ``-1`` where the leg's sectors are
+    ``[0, 1]``, so the key named a charge the leg did not have and every later
+    contraction silently dropped that block — the projector pair in
+    ``_ctm_root_implicit_symmetric`` collapsed its corners to a single sector.
 
-    For :class:`~tenax.core.symmetry.ProductSymmetry` the equality fails in a
-    way modular arithmetic does *not* absorb — charges are bit-packed, so
-    negating the packed integer is not the component-wise inverse:
-    ``-encode(1, 2)`` decodes as ``(-1, -3)``, and ``fuse(q, -q)`` is
-    ``-65536`` rather than the identity.  Those blocks genuinely violate
-    charge conservation, and ``_from_blocks_unchecked`` would let them through
-    to later contractions, so product symmetries are refused outright rather
-    than silently mis-assembled.
+    For :class:`~tenax.core.symmetry.ProductSymmetry` the failure was worse
+    still: charges are bit-packed, so ``-encode(1, 2)`` decodes as ``(-1, -3)``
+    and ``fuse(q, -q)`` is ``-65536`` rather than the identity — a genuine
+    conservation violation, not a relabelling.  The arithmetic above is
+    group-correct for product symmetries too, but the rest of the Phase 3 path
+    has not been exercised on them, so they stay refused here until #734's
+    ProductSymmetry enablement verifies the whole path end to end.
     """
     if {row_axis, col_axis} != {0, 1}:
         raise ValueError("row_axis and col_axis must be 0 and 1 in some order")
@@ -286,28 +285,28 @@ def tensor_from_sector_matrices(
     sym = row_index.symmetry
     if isinstance(sym, ProductSymmetry):
         raise NotImplementedError(
-            "tensor_from_sector_matrices pins the partner charge as the raw "
-            "integer -q, which is the group inverse for U(1) and (mod n) for "
-            "Z_n but not for ProductSymmetry: charges are bit-packed, so "
-            "-encode(1, 2) decodes as (-1, -3), not (-1, -2), and the block "
-            "violates charge conservation.  Reconstructing through "
-            "symmetry.dual/fuse is the fix; until then #715 Phase 3 supports "
-            "U(1) and Z_n only."
+            "tensor_from_sector_matrices now derives both block-key charges "
+            "through symmetry.flow_charge/dual, which is group-correct for "
+            "ProductSymmetry as well, but the rest of #715 Phase 3 has never "
+            "been run on bit-packed charges -- where a wrong partner is a "
+            "conservation violation (-encode(1, 2) decodes as (-1, -3), not "
+            "(-1, -2)) rather than a relabelling, and "
+            "_from_blocks_unchecked would pass it straight to a contraction. "
+            "Until #734's ProductSymmetry enablement verifies that path, "
+            "Phase 3 supports U(1) and Z_n only."
         )
 
     indices: list[TensorIndex] = [None, None]  # type: ignore[list-item]
     indices[row_axis] = row_index
     indices[col_axis] = col_index
 
-    row_flow = int(row_index.flow)
-    col_flow = int(col_index.flow)
-
     blocks: dict[BlockKey, jax.Array] = {}
     for q, mat in mats.items():
         if mat.size == 0:
             continue
+        q_arr = np.array([int(q)], dtype=np.int32)
         key = [0, 0]
-        key[row_axis] = int(q) * row_flow
-        key[col_axis] = -int(q) * col_flow
+        key[row_axis] = int(sym.flow_charge(row_index.flow, q_arr)[0])
+        key[col_axis] = int(sym.flow_charge(col_index.flow, sym.dual(q_arr))[0])
         blocks[tuple(key)] = mat if row_axis == 0 else mat.T
     return SymmetricTensor._from_blocks_unchecked(blocks, tuple(indices))
