@@ -166,6 +166,20 @@ def sector_svd(
                 f"sector {q} has {len(entries)} blocks; expected a fused matrix"
             )
         (row_key, col_key, block) = entries[0]
+        # Orientation contract: U spans row_axis, Vh spans col_axis (standard
+        # SVD convention M = U diag(s) Vh, where U spans M's row space).
+        #
+        # `_group_blocks_by_bond_charge` returns `block` in the tensor's own
+        # (native) axis order, *not* reordered to (row_axis, col_axis) --
+        # `row_key`/`col_key` are correctly labelled, but the array itself
+        # isn't. `jnp.transpose(block, (row_axis, col_axis))` moves the
+        # tensor's `row_axis` to position 0 and `col_axis` to position 1, so
+        # after this line `block` really is (row, col) and the SVD below
+        # honours the names it's given. Skipping this step is exactly the
+        # #718-flavoured bug this function used to have: parameter names that
+        # don't match behaviour, invisible on square sectors, silently wrong
+        # on non-square ones.
+        block = jnp.transpose(block, (row_axis, col_axis))
         U, s, Vh = jnp.linalg.svd(block, full_matrices=True)
         raw[q] = (U, s, Vh, row_key, col_key)
 

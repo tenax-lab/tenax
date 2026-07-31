@@ -162,6 +162,81 @@ def test_sector_svd_null_space_is_the_exact_complement():
         assert u_perp.shape[1] == blk.U.shape[0] - k
 
 
+def _nonsquare_matrix_tensor(seed=0):
+    """A fused matrix whose sector blocks are NOT square.
+
+    Square blocks cannot detect a U/Vh orientation swap, which is why the
+    original sector_svd tests missed one.
+    """
+    sym = U1Symmetry()
+
+    def leg(flow, lbl, mults):
+        return TensorIndex(
+            symmetry=sym,
+            sectors=np.array([-1, 0, 1]),
+            multiplicities=np.array(mults),
+            flow=flow,
+            label=lbl,
+        )
+
+    ec = SymmetricTensor.random_normal_np(
+        (
+            leg(FlowDirection.OUT, "chi_r", [1, 2, 1]),
+            leg(FlowDirection.OUT, "a_r", [1, 1, 1]),
+            leg(FlowDirection.IN, "chi_d", [2, 1, 2]),
+            leg(FlowDirection.IN, "a_d", [1, 1, 1]),
+        ),
+        np.random.RandomState(seed),
+    )
+    fused = fuse_indices(ec, 2, 3, "row", FlowDirection.IN)
+    return fuse_indices(fused, 0, 1, "col", FlowDirection.OUT)
+
+
+def test_sector_svd_orients_u_to_row_axis_and_vh_to_col_axis():
+    # Regression for a U/Vh orientation bug: sector_svd used row_axis/col_axis
+    # only to compute each block's bond charge, never to orient the block
+    # before jnp.linalg.svd -- so U ended up spanning whichever axis the
+    # SymmetricTensor happened to store first, not the caller-requested
+    # row_axis. Square sector blocks can't see this (U and Vh have the same
+    # shape either way, and generic SVD algebra like orthogonality is
+    # invariant under swapping them), which is why the original tests above
+    # missed it. This fixture is deliberately non-square.
+    m = _nonsquare_matrix_tensor()
+    sectors, _ = sector_svd(m, 4, row_axis=1, col_axis=0)
+
+    row_index, col_index = m.indices[1], m.indices[0]
+    assert row_index.label == "row"
+    assert col_index.label == "col"
+
+    saw_nonsquare_sector = False
+    for q, blk in sectors.items():
+        row_dim = row_index.multiplicity(q)
+        col_dim = col_index.multiplicity(q)
+        if row_dim != col_dim:
+            saw_nonsquare_sector = True
+
+        # (1) Shapes must match the *requested* row/col axes, not whichever
+        # axis happened to be stored first. On its own this could pass by a
+        # lucky shape coincidence, which is why (2) also pins the content.
+        assert blk.U.shape[0] == row_dim
+        assert blk.Vh.shape[1] == col_dim
+
+        # (2) The reconstruction must equal the block oriented as (row, col).
+        # The tensor's stored axis order is (col, row) -- labels are
+        # ('col', 'row') -- so the raw stored block has shape
+        # (col_dim, row_dim) and the correctly oriented reconstruction is its
+        # transpose, not the raw block itself.
+        k = len(blk.s)
+        recon = blk.U[:, :k] @ jnp.diag(blk.s) @ blk.Vh[:k, :]
+        raw_block = m.blocks[(q, q)]
+        assert raw_block.shape == (col_dim, row_dim)
+        np.testing.assert_allclose(
+            np.asarray(recon), np.asarray(raw_block).T, atol=1e-10
+        )
+
+    assert saw_nonsquare_sector  # fixture must actually exercise one
+
+
 def test_sector_svd_floors_against_the_global_maximum():
     # A sector whose own singular values are all tiny must not have its noise
     # promoted: the floor is relative to the largest SV of the whole cut, not
