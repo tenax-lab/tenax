@@ -24,7 +24,17 @@ These were run against the working tree, not assumed. Do not re-litigate them:
 - **The iPEPS site tensor's physical leg must be labelled `phys`.** With any other label `compute_energy_ctm_tensor` raises `ValueError: output_labels contains 'phys' which is not a free label`. Both `heisenberg_gate()` (dense) and `heisenberg_gate_u1sz()` (symmetric) then give the same energy on a symmetric env (`E = -0.114511058317` on the U(1) D=2 tensor at chi=4), so Task 7's parity gate is reachable.
 - **`BondLayout` is a frozen dataclass with a tuple field, not a `NamedTuple` with a dict.** A `NamedTuple` auto-registers as a pytree and flattens its dict to the sector dimensions as *traced leaves* — the exact "shapes moved under AD" failure the class exists to prevent — and is unhashable so it cannot be passed via `static_argnums` / `nondiff_argnums` either. Construct with `BondLayout.from_dims(mapping)`; read with `.total`, `.sectors`, `.dim_of(q)`, and `.dims` (sorted `(charge, dim)` pairs).
 - **The einsum-to-`contract` translation reproduces the dense quadrant bit-exactly** (`max|diff| = 0.0`), with the relabel scheme given verbatim in Task 5. This was the plan's biggest identified risk; it is discharged.
-- **`initialize_ctm_tensor_env` works for U(1) at D=2 and fails at D=3.** At D=3 it raises `ValueError: data.shape (4, 4, 4) does not match index dims (4, 9, 4)` — #667's one-`ref_axis`-per-corner bug. Z2 works at both. So the test site tensor is U(1) at D=2, which still fragments (fused-leg multiplicities `[1, 2, 1]`). Do not "fix" this inside Phase 3.
+- **The site tensor's legs must be ordered `(u, d, l, r, phys)` — physical leg LAST.** This is the library-wide iPEPS convention (`_ctm_utils.py:62`, `ipeps_optimize`, `pess_optimize`, ...). `_build_double_layer_tensor` contracts by label and is order-blind, so a wrong order survives it; but `_CORNER_SPECS` / `_STD_EDGE_SPECS` name their `ref_axis` **positionally**, so with `phys` first, `ref_axis=0` lands on the physical leg and every chi leg inherits `phys ⊗ phys-bar` charges. Measured consequence: `T4`'s two chi legs came out with charges `[-2,0,0,2]` and `[-1,0,0,1]`, and since the half-infinite cut glues top-`T4.d` to bottom-`T4.u` while `a.d`/`a.u` charges are equal, **the cut has no charge-consistent form at all** — not merely an awkward one.
+
+  **CORRECTION (supersedes an earlier note in this file).** An earlier revision recorded that `initialize_ctm_tensor_env` "fails for U(1) at D=3" and attributed it to #667. That was wrong. The failure was entirely the `phys`-first ordering. Measured with `phys` last:
+
+  | | `phys` last | `phys` first |
+  |---|---|---|
+  | U(1) D=2 `[0,1]` | env OK | env OK |
+  | U(1) D=3 `[-1,0,1]` | **env OK**, `T1 (4, 9, 4)` | `ValueError: data.shape (4, 4, 4) ... (4, 9, 4)` |
+  | Z2 D=2 | env OK | env OK |
+
+  So D=3 U(1) is available and #667 does not block it. The fixture stays at D=2 for test speed, not because D=3 is broken; #667 remains a genuine blocker only for the *multisite* `A.l != A.r` case (design doc §8 item 3), which is a different defect.
 
 ## File Structure
 
@@ -699,9 +709,9 @@ Run: `JAX_PLATFORMS=cpu uv run pytest tests/test_ctm_root_implicit_symmetric.py 
 Expected: PASS, 2 passed
 
 `initialize_ctm_tensor_env` is already known to work on `_site_tensor()` as defined above
-(verified 2026-07-31). If you change the site tensor's virtual dimension to D=3 it will
-raise `ValueError: data.shape (4, 4, 4) does not match index dims (4, 9, 4)` — that is
-#667, a production gap, not something to work around here. Keep D=2.
+(verified 2026-07-31), **provided the legs are ordered `(u, d, l, r, phys)` with the
+physical leg last** — see the ground-truth section. D=3 also works with that ordering;
+D=2 is chosen for test speed, not necessity.
 
 - [ ] **Step 5: Commit**
 
