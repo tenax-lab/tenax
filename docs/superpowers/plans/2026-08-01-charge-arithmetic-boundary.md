@@ -4,7 +4,7 @@
 
 **Goal:** Make `BaseSymmetry` the only place in Tenax that inverts or combines a charge, fixing Z_n bond mislabelling (#733), Z_n `contract` silently returning zeros, and `ProductSymmetry` being unusable.
 
-**Architecture:** Add `flow_charge` and `canonicalize` to `BaseSymmetry`, plus a `net_charge(indices, key)` helper in `core/index.py` seeded with `identity()`. `flow_charge` is an involution on canonical representatives; `TensorIndex.__post_init__` guarantees canonical representatives by canonicalising and merging duplicate sectors. Then replace all eight hand-rolled `int(flow) * q` sites with these.
+**Architecture:** Add `flow_charge` and `canonicalize_charges` to `BaseSymmetry`, plus a `_net_charge(indices, key)` helper in `core/index.py` seeded with `identity()`. `flow_charge` is an involution on canonical representatives; `TensorIndex.__post_init__` guarantees canonical representatives by canonicalising and merging duplicate sectors. Then replace all eight hand-rolled `int(flow) * q` sites with these.
 
 **Tech Stack:** Python 3.11+, NumPy (charge algebra is host-side, never traced), JAX (block data only), pytest with `core`/`algorithm`/`slow` markers auto-applied by `tests/conftest.py`.
 
@@ -64,17 +64,17 @@ without a conftest change. **Do not create new test files** — add to these.
 
 | File | Responsibility | Task |
 |---|---|---|
-| `src/tenax/core/symmetry.py` | Owns all charge algebra. Gains `flow_charge`, `canonicalize`; `is_conserved` rewritten on top of them. | 1 |
-| `src/tenax/core/index.py` | Gains `net_charge(indices, key)` — the one way to evaluate a block's conservation law. `TensorIndex.__post_init__` canonicalises and merges. | 1, 2 |
-| `src/tenax/core/tensor.py` | `_validate` and `_compute_valid_blocks` consume `net_charge` / `flow_charge`. | 2 |
-| `src/tenax/linalg.py` | Four sites (80, 121, 605, 2109) consume `net_charge`. | 2 |
-| `src/tenax/contraction/contractor.py` | Target inference consumes `net_charge` and fuses targets instead of adding them. | 3 |
-| `src/tenax/algorithms/dmrg.py` | Target inference consumes `net_charge`. | 3 |
+| `src/tenax/core/symmetry.py` | Owns all charge algebra. Gains `flow_charge`, `canonicalize_charges`; `is_conserved` rewritten on top of them. | 1 |
+| `src/tenax/core/index.py` | Gains `_net_charge(indices, key)` — the one way to evaluate a block's conservation law. `TensorIndex.__post_init__` canonicalises and merges. | 1, 2 |
+| `src/tenax/core/tensor.py` | `_validate` and `_compute_valid_blocks` consume `_net_charge` / `flow_charge`. | 2 |
+| `src/tenax/linalg.py` | Four sites (80, 121, 605, 2109) consume `_net_charge`. | 2 |
+| `src/tenax/contraction/contractor.py` | Target inference consumes `_net_charge` and fuses targets instead of adding them. | 3 |
+| `src/tenax/algorithms/dmrg.py` | Target inference consumes `_net_charge`. | 3 |
 | `src/tenax/algorithms/_tensor_utils.py` | `_compute_fused_sectors` drops its hand-rolled `% n`. | 4 |
 
 `core/index.py` imports only `core/symmetry.py`; `core/tensor.py` imports `core/index.py`.
-So `net_charge` in `index.py` is importable by `tensor.py`, `linalg.py`, `contractor.py`
-and `dmrg.py` with no import cycle. **Do not put `net_charge` in `core/_tensor_utils.py`**
+So `_net_charge` in `index.py` is importable by `tensor.py`, `linalg.py`, `contractor.py`
+and `dmrg.py` with no import cycle. **Do not put `_net_charge` in `core/_tensor_utils.py`**
 — that module imports `core/tensor.py`, which would make `_validate` circular.
 
 ---
@@ -83,7 +83,7 @@ and `dmrg.py` with no import cycle. **Do not put `net_charge` in `core/_tensor_u
 
 **Files:**
 - Modify: `src/tenax/core/symmetry.py` (add two methods to `BaseSymmetry`; override in `U1Symmetry` and `FermionicU1`; rewrite `is_conserved` at lines 156-179)
-- Modify: `src/tenax/core/index.py` (add module-level `net_charge`)
+- Modify: `src/tenax/core/index.py` (add module-level `_net_charge`)
 - Test: `tests/test_symmetry.py`, `tests/test_index.py`
 
 - [ ] **Step 1: Write the failing tests for the symmetry boundary**
@@ -125,11 +125,11 @@ _BOUNDARY_IDS = [c[0] for c in _BOUNDARY_CASES]
 
 
 @pytest.mark.parametrize("name,sym,sectors", _BOUNDARY_CASES, ids=_BOUNDARY_IDS)
-def test_canonicalize_fixes_canonical_sectors_and_is_idempotent(name, sym, sectors):
+def test_canonicalize_charges_fixes_canonical_sectors_and_is_idempotent(name, sym, sectors):
     secs = np.array(sectors, dtype=np.int32)
-    once = sym.canonicalize(secs)
+    once = sym.canonicalize_charges(secs)
     assert np.array_equal(once, secs), f"{name}: canonical input was rewritten"
-    assert np.array_equal(sym.canonicalize(once), once), f"{name}: not idempotent"
+    assert np.array_equal(sym.canonicalize_charges(once), once), f"{name}: not idempotent"
 
 
 @pytest.mark.parametrize("name,sym,sectors", _BOUNDARY_CASES, ids=_BOUNDARY_IDS)
@@ -164,9 +164,9 @@ def test_closed_form_solves_the_last_leg_charge(name, sym, sectors):
                 assert got == int(t[0]), f"{name}: flow={flow} partial={partial}"
 
 
-def test_canonicalize_maps_negative_zn_representatives():
+def test_canonicalize_charges_maps_negative_zn_representatives():
     sym = ZnSymmetry(3)
-    got = sym.canonicalize(np.array([-1, -2, 0], dtype=np.int32))
+    got = sym.canonicalize_charges(np.array([-1, -2, 0], dtype=np.int32))
     assert np.array_equal(got, np.array([2, 1, 0], dtype=np.int32))
 
 
@@ -180,13 +180,13 @@ def test_is_conserved_accepts_a_conserving_product_symmetry_block():
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `JAX_PLATFORMS=cpu uv run pytest tests/test_symmetry.py -k "canonicalize or flow_charge or closed_form or is_conserved" -q`
+Run: `JAX_PLATFORMS=cpu uv run pytest tests/test_symmetry.py -k "canonicalize_charges or flow_charge or closed_form or is_conserved" -q`
 
-Expected: FAIL — `AttributeError: 'U1Symmetry' object has no attribute 'canonicalize'` for the
+Expected: FAIL — `AttributeError: 'U1Symmetry' object has no attribute 'canonicalize_charges'` for the
 new-method tests, and `test_is_conserved_accepts_a_conserving_product_symmetry_block` failing
 on the first assert.
 
-- [ ] **Step 3: Add `flow_charge` and `canonicalize` to `BaseSymmetry`**
+- [ ] **Step 3: Add `flow_charge` and `canonicalize_charges` to `BaseSymmetry`**
 
 In `src/tenax/core/symmetry.py`, insert both methods into `BaseSymmetry` immediately after
 `fuse_many` (which ends at line 87, before the `braiding_style` property):
@@ -218,7 +218,7 @@ In `src/tenax/core/symmetry.py`, insert both methods into `BaseSymmetry` immedia
         charges = np.asarray(charges, dtype=np.int32)
         return charges if int(flow) > 0 else self.dual(charges)
 
-    def canonicalize(self, charges: np.ndarray) -> np.ndarray:
+    def canonicalize_charges(self, charges: np.ndarray) -> np.ndarray:
         """Return the canonical representative of each charge.
 
         Fusing against the identity applies whatever reduction the group
@@ -238,16 +238,16 @@ In `src/tenax/core/symmetry.py`, insert both methods into `BaseSymmetry` immedia
         return self.fuse(np.full_like(charges, self.identity()), charges)
 ```
 
-- [ ] **Step 4: Override `canonicalize` in the two symmetries where it is a no-op**
+- [ ] **Step 4: Override `canonicalize_charges` in the two symmetries where it is a no-op**
 
-`TensorIndex.__post_init__` will call `canonicalize` on every index construction (Task 2),
+`TensorIndex.__post_init__` will call `canonicalize_charges` on every index construction (Task 2),
 and the codebase builds millions of them. For U(1)-style groups every integer already *is*
 its own canonical representative, so skip the allocation.
 
 Add to `U1Symmetry` (after `identity`, before `n_values`):
 
 ```python
-    def canonicalize(self, charges: np.ndarray) -> np.ndarray:
+    def canonicalize_charges(self, charges: np.ndarray) -> np.ndarray:
         # Every integer is its own canonical U(1) representative.
         return np.asarray(charges, dtype=np.int32)
 ```
@@ -284,7 +284,7 @@ the version ending `return net == target`) with:
             for f, q in zip(flows, charges_per_leg)
         )
         net = int(self.fuse_many(effective)[0])
-        want = int(self.canonicalize(np.array([int(target)], dtype=np.int32))[0])
+        want = int(self.canonicalize_charges(np.array([int(target)], dtype=np.int32))[0])
         return net == want
 ```
 
@@ -298,14 +298,14 @@ Run: `JAX_PLATFORMS=cpu uv run pytest tests/test_symmetry.py -q`
 
 Expected: PASS, all cases including both `ProductSymmetry` variants.
 
-- [ ] **Step 7: Write the failing test for `net_charge`**
+- [ ] **Step 7: Write the failing test for `_net_charge`**
 
 Append to `tests/test_index.py`:
 
 ```python
 import numpy as np
 
-from tenax.core.index import FlowDirection, TensorIndex, net_charge
+from tenax.core.index import FlowDirection, TensorIndex, _net_charge
 from tenax.core.symmetry import ProductSymmetry, U1Symmetry, ZnSymmetry
 
 
@@ -315,7 +315,7 @@ def test_net_charge_reduces_a_single_out_leg():
     idx = TensorIndex.from_charges(
         sym, np.array([0, 1], dtype=np.int32), FlowDirection.OUT, label="a"
     )
-    assert net_charge((idx,), (1,)) == 1  # not -1
+    assert _net_charge((idx,), (1,)) == 1  # not -1
 
 
 def test_net_charge_agrees_between_one_leg_and_two_legs():
@@ -327,7 +327,7 @@ def test_net_charge_agrees_between_one_leg_and_two_legs():
         sym, np.array([0], dtype=np.int32), FlowDirection.IN, label="b"
     )
     for q in (0, 1, 2):
-        assert net_charge((out,), (q,)) == net_charge((out, trivial), (q, 0))
+        assert _net_charge((out,), (q,)) == _net_charge((out, trivial), (q, 0))
 
 
 def test_net_charge_is_identity_for_a_conserving_product_symmetry_block():
@@ -336,7 +336,7 @@ def test_net_charge_is_identity_for_a_conserving_product_symmetry_block():
     secs = np.array([ProductSymmetry.encode(0, 0), q], dtype=np.int32)
     a = TensorIndex.from_charges(ps, secs, FlowDirection.IN, label="a")
     b = TensorIndex.from_charges(ps, secs, FlowDirection.OUT, label="b")
-    assert net_charge((a, b), (q, q)) == ps.identity()
+    assert _net_charge((a, b), (q, q)) == ps.identity()
 
 
 def test_net_charge_matches_plain_summation_for_u1():
@@ -350,28 +350,28 @@ def test_net_charge_matches_plain_summation_for_u1():
     )
     for qa in (-1, 0, 1):
         for qb in (-1, 0, 1):
-            assert net_charge((a, b), (qa, qb)) == qa - qb
+            assert _net_charge((a, b), (qa, qb)) == qa - qb
 ```
 
 - [ ] **Step 8: Run it to verify it fails**
 
 Run: `JAX_PLATFORMS=cpu uv run pytest tests/test_index.py -k net_charge -q`
 
-Expected: FAIL with `ImportError: cannot import name 'net_charge' from 'tenax.core.index'`.
+Expected: FAIL with `ImportError: cannot import name '_net_charge' from 'tenax.core.index'`.
 
-- [ ] **Step 9: Add `net_charge` to `core/index.py`**
+- [ ] **Step 9: Add `_net_charge` to `core/index.py`**
 
 Append at module level in `src/tenax/core/index.py` (after the `TensorIndex` class):
 
 ```python
-def net_charge(
+def _net_charge(
     indices: Sequence[TensorIndex],
     key: Sequence[int],
 ) -> int:
     """Return the net fused charge of a block key, as a Python int.
 
     This is the only sanctioned way to evaluate a block's conservation law: a
-    block is valid exactly when ``net_charge(indices, key) == symmetry.identity()``.
+    block is valid exactly when ``_net_charge(indices, key) == symmetry.identity()``.
 
     ``sum(int(idx.flow) * int(q) for ...)`` is **not** equivalent. It assumes the
     group inverse is integer negation and the group operation is integer
@@ -395,7 +395,7 @@ def net_charge(
         ValueError: If ``indices`` is empty.
     """
     if len(indices) == 0:
-        raise ValueError("net_charge requires at least one index")
+        raise ValueError("_net_charge requires at least one index")
     sym = indices[0].symmetry
     effective = [np.array([sym.identity()], dtype=np.int32)]
     effective.extend(
@@ -431,7 +431,7 @@ If anything fails here, it is a genuine regression; stop and diagnose before con
 git add src/tenax/core/symmetry.py src/tenax/core/index.py tests/test_symmetry.py tests/test_index.py
 git commit -m "feat(#734): charge-arithmetic boundary on BaseSymmetry
 
-Add flow_charge and canonicalize to BaseSymmetry plus a net_charge helper
+Add flow_charge and canonicalize_charges to BaseSymmetry plus a _net_charge helper
 in core/index.py, seeded with identity so a rank-1 tensor reduces exactly
 like a rank-N one. Rewrite the never-called is_conserved on top of them,
 dropping its % n_values() reduction (wrong for the bit-packed
@@ -540,7 +540,7 @@ In `src/tenax/core/index.py`, append to the end of `__post_init__` (after the ex
         # Every construction path funnels through __post_init__, so this also
         # repairs ``dual()``, which sorted without merging and could emit
         # sectors=[0, 1, 1] in violation of the sorted-unique invariant.
-        canon = self.symmetry.canonicalize(self.sectors)
+        canon = self.symmetry.canonicalize_charges(self.sectors)
         uniq, inverse = np.unique(canon, return_inverse=True)
         if len(uniq) != len(canon) or not np.array_equal(canon, self.sectors):
             merged = np.zeros(len(uniq), dtype=np.int32)
@@ -577,7 +577,7 @@ with:
         # Canonicalise before deriving sectors so the cached dense array and the
         # sector table agree on representatives (#734).  Element-wise, so basis
         # ordering within the leg is preserved.
-        charges = symmetry.canonicalize(charges)
+        charges = symmetry.canonicalize_charges(charges)
         sectors, multiplicities = np.unique(charges, return_counts=True)
 ```
 
@@ -587,7 +587,7 @@ And in `dual`, replace `object.__setattr__(obj, "_charges_cache", self.symmetry.
             object.__setattr__(
                 obj,
                 "_charges_cache",
-                self.symmetry.canonicalize(self.symmetry.dual(self._charges_cache)),
+                self.symmetry.canonicalize_charges(self.symmetry.dual(self._charges_cache)),
             )
 ```
 
@@ -618,7 +618,7 @@ for name, sym in [('U1', U1Symmetry()), ('Z2', ZnSymmetry(2))]:
 ```
 
 Expected: single-digit microseconds. U(1) should be the cheaper of the two because
-`U1Symmetry.canonicalize` is overridden to return its argument. If Z2 exceeds ~10 µs,
+`U1Symmetry.canonicalize_charges` is overridden to return its argument. If Z2 exceeds ~10 µs,
 record the number in the PR description rather than optimising speculatively.
 
 - [ ] **Step 7: Write the failing test for `svd` bond-label symmetry**
@@ -676,7 +676,7 @@ def test_svd_bond_sectors_do_not_depend_on_left_leg_flow(name, sym, sectors):
 
     assert seen["IN"] == seen["OUT"], f"{name}: bond labels depend on flow: {seen}"
     canonical = sorted(
-        int(sym.canonicalize(np.array([q], dtype=np.int32))[0]) for q in seen["IN"]
+        int(sym.canonicalize_charges(np.array([q], dtype=np.int32))[0]) for q in seen["IN"]
     )
     assert seen["IN"] == canonical, f"{name}: bond labels are not canonical: {seen}"
 ```
@@ -688,13 +688,13 @@ Run: `JAX_PLATFORMS=cpu uv run pytest tests/test_linalg.py -k svd_bond_sectors -
 Expected: FAIL for `Z2`, `Z3` and `FermionParity` with e.g. `Z2: bond labels depend on flow:
 {'IN': [0, 1], 'OUT': [-1, 0]}`. `U1` passes — `-1` is a genuine U(1) charge.
 
-- [ ] **Step 9: Route the four `linalg.py` sites through `net_charge`**
+- [ ] **Step 9: Route the four `linalg.py` sites through `_net_charge`**
 
 Add the import near the top of `src/tenax/linalg.py`, alongside the existing
 `tenax.core.index` import:
 
 ```python
-from tenax.core.index import net_charge
+from tenax.core.index import _net_charge
 ```
 
 **9a.** Replace the body of `_has_nonstandard_blocks` (lines 80-92):
@@ -706,7 +706,7 @@ def _has_nonstandard_blocks(tensor: SymmetricTensor) -> bool:
         return False
     identity = tensor.indices[0].symmetry.identity()
     for key in tensor.blocks:
-        if net_charge(tensor.indices, key) != identity:
+        if _net_charge(tensor.indices, key) != identity:
             return True
     return False
 ```
@@ -724,7 +724,7 @@ branch at line 1516.
     for key, block in tensor.blocks.items():
         left_subkey = tuple(key[i] for i in left_leg_positions)
         right_subkey = tuple(key[i] for i in right_leg_positions)
-        q = net_charge(left_indices_for_charge, left_subkey)
+        q = _net_charge(left_indices_for_charge, left_subkey)
         grouped.setdefault(q, []).append((left_subkey, right_subkey, block))
 
     return grouped
@@ -740,7 +740,7 @@ lines 2105-2111 with:
     input_target = 0
     if tensor.blocks:
         key0 = next(iter(tensor.blocks))
-        input_target = net_charge(tensor.indices, key0)
+        input_target = _net_charge(tensor.indices, key0)
 
     if input_target != tensor.indices[0].symmetry.identity():
 ```
@@ -760,7 +760,7 @@ shown, keeping its indented body unchanged).
         identity = self._indices[0].symmetry.identity()
 
         for key in self._block_keys:
-            fused_val = net_charge(self._indices, key)
+            fused_val = _net_charge(self._indices, key)
             if fused_val != identity:
                 raise ValueError(
                     f"Block {key} violates charge conservation: "
@@ -768,7 +768,7 @@ shown, keeping its indented body unchanged).
                 )
 ```
 
-Add `net_charge` to the existing `from tenax.core.index import ...` line at
+Add `_net_charge` to the existing `from tenax.core.index import ...` line at
 `src/tenax/core/tensor.py:28`.
 
 **10b.** Replace `_compute_valid_blocks` (lines 162-274). The `is_infinite` split
@@ -807,7 +807,7 @@ def _compute_valid_blocks(
     identity_arr = np.array([sym.identity()], dtype=np.int32)
     raw_target = target if target is not None else sym.identity()
     effective_target = int(
-        sym.canonicalize(np.array([int(raw_target)], dtype=np.int32))[0]
+        sym.canonicalize_charges(np.array([int(raw_target)], dtype=np.int32))[0]
     )
 
     # Sectors are canonical, sorted and unique (guaranteed by TensorIndex).
@@ -891,7 +891,7 @@ replace its docstring with:
     was written ``-1`` here and by ``tenax.linalg.svd``, because
     ``_group_blocks_by_bond_charge`` fused a single flow-weighted charge and
     ``fuse_many`` of one array skipped the ``% n``.  Both now go through
-    ``net_charge``, which seeds the fusion with the identity, so the single-leg
+    ``_net_charge``, which seeds the fusion with the identity, so the single-leg
     and multi-leg paths agree by construction.
     """
 ```
@@ -937,7 +937,7 @@ guarantees the precondition flow_charge needs, and repairs dual(), which
 sorted without merging and could emit sectors=[0, 1, 1] against its own
 sorted-unique invariant.
 
-_validate and the four linalg.py sites consume net_charge.
+_validate and the four linalg.py sites consume _net_charge.
 _compute_valid_blocks loses its n_values() is None split entirely: with
 flow_charge an involution, the closed form for the last leg is valid for
 any abelian group, so the U(1)-only integer algebra that ran on
@@ -1030,7 +1030,7 @@ Add the import near the other `tenax.core` imports in
 `src/tenax/contraction/contractor.py`:
 
 ```python
-from tenax.core.index import net_charge
+from tenax.core.index import _net_charge
 ```
 
 Replace lines 421-433 (the `output_target: int | None = None` block through
@@ -1050,7 +1050,7 @@ Replace lines 421-433 (the `output_target: int | None = None` block through
         total = np.array([sym.identity()], dtype=np.int32)
         for tensor in tensors:
             if getattr(tensor, "_block_keys", None):
-                targets = {net_charge(tensor.indices, key) for key in tensor._block_keys}
+                targets = {_net_charge(tensor.indices, key) for key in tensor._block_keys}
                 if len(targets) == 1:
                     total = sym.fuse(
                         total, np.array([targets.pop()], dtype=np.int32)
@@ -1071,7 +1071,7 @@ Expected: PASS.
 
 - [ ] **Step 5: Verify `BlockArray` exposes `.indices` before touching dmrg.py**
 
-`dmrg.py:3115` accepts both `SymmetricTensor` and `BlockArray`, and `net_charge` needs
+`dmrg.py:3115` accepts both `SymmetricTensor` and `BlockArray`, and `_net_charge` needs
 `.indices`.
 
 Run:
@@ -1087,7 +1087,7 @@ Expected: `True`. If it prints `False`, do not proceed with Step 6 — instead k
 
 - [ ] **Step 6: Fix target inference in `dmrg.py`**
 
-Add `from tenax.core.index import net_charge` to the imports at the top of
+Add `from tenax.core.index import _net_charge` to the imports at the top of
 `src/tenax/algorithms/dmrg.py`. Replace lines 3120-3131:
 
 ```python
@@ -1108,7 +1108,7 @@ Add `from tenax.core.index import net_charge` to the imports at the top of
 with:
 
 ```python
-        sectors = {net_charge(site.indices, key) for key in site.blocks}
+        sectors = {_net_charge(site.indices, key) for key in site.blocks}
 
         if len(sectors) != 1:
             return None
@@ -1150,7 +1150,7 @@ output_target and _compute_valid_blocks then admitted nothing -- an
 all-zero contraction with no error raised. Measured on Z3: reference norm
 5.824, contract result 0.0.
 
-Targets are now read with net_charge and accumulated with fuse rather
+Targets are now read with _net_charge and accumulated with fuse rather
 than +=; adding them as plain integers was the same category error as
 weighting a charge by int(flow). dmrg.py's target inference gets the same
 treatment.
@@ -1409,8 +1409,8 @@ dense reference in norm and guards the reference is non-degenerate; `_charges_ca
 Task 2 Step 4 plus its dedicated test; fermionic paths → `FermionParity` appears in every
 parametrised case list.
 
-**Naming consistency.** `flow_charge(flow, charges)`, `canonicalize(charges)`,
-`net_charge(indices, key)` — used identically in every task.
+**Naming consistency.** `flow_charge(flow, charges)`, `canonicalize_charges(charges)`,
+`_net_charge(indices, key)` — used identically in every task.
 
 **Known judgement calls left to the implementer**, each with a verification step rather than
 a guess: whether `BlockArray` exposes `.indices` (Task 3 Step 5), whether `tl.svd` folds the

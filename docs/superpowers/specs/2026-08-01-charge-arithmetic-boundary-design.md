@@ -87,13 +87,13 @@ Nothing outside `BaseSymmetry` may invert or combine a charge. Two additions to
 
 ```python
 def flow_charge(self, flow, charges):   # charges if IN else self.dual(charges)
-def canonicalize(self, charges):        # self.fuse(identity, charges)
+def canonicalize_charges(self, charges):        # self.fuse(identity, charges)
 ```
 
 One helper in `core/`, used by every conservation site:
 
 ```python
-def net_charge(indices, key) -> int:    # fuse_many of flow_charge per leg, seeded with identity
+def _net_charge(indices, key) -> int:    # fuse_many of flow_charge per leg, seeded with identity
 ```
 
 Seeding with `identity()` is what fixes #733: there is no longer a path where zero fusions
@@ -132,7 +132,7 @@ construction rather than by discipline. Every construction path — `from_charge
 Merging is not optional: canonicalising Z2 `[-1, 0, 1]` yields `[1, 0, 1]`, which must
 become sectors `[0, 1]` with multiplicities `[1, 2]`. The steps are:
 
-1. `sectors ← symmetry.canonicalize(sectors)`
+1. `sectors ← symmetry.canonicalize_charges(sectors)`
 2. group equal sectors, summing their multiplicities
 3. re-sort ascending
 4. canonicalise `_charges_cache` the same way when present, so `charges`,
@@ -147,7 +147,7 @@ Four PRs, each independently landable, each with its own regression gate.
 
 | PR | Scope | Behaviour change | Gate |
 |---|---|---|---|
-| 1 | `flow_charge`, `canonicalize`, `net_charge`; rewrite the dead `is_conserved` to use them | none (pure addition) | unit tests per symmetry, including `ProductSymmetry`: `flow_charge` involution, `fuse(q, dual(q)) == identity`, `canonicalize` idempotent |
+| 1 | `flow_charge`, `canonicalize_charges`, `BaseSymmetry.net_charge` + the `core/index.py` `_net_charge` adapter; rewrite the dead `is_conserved` to use them | none (pure addition) | unit tests per symmetry, including `ProductSymmetry`: `flow_charge` involution, `fuse(q, dual(q)) == identity`, `canonicalize_charges` idempotent |
 | 2 | `core/tensor.py` (`_validate`, `_compute_valid_blocks`, `TensorIndex.__post_init__`) and `linalg.py` (lines 80, 121, 605, 2109) | **Z_n bond labels canonicalise**; updates `test_zn_same_flow_bonds_carry_the_library_s_own_representative` | full symmetric-tensor suite; new test asserting `svd` gives identical bond sectors with the left leg IN and OUT, for U(1), Z2, Z3 |
 | 3 | `contraction/contractor.py:427`, `dmrg.py:3124` | **fixes Z_n `contract` returning all zeros** | the verified 5.824 → 0.0 repro becomes a regression test |
 | 4 | `ProductSymmetry` enablement; `_tensor_utils.py:204` | mixed-flow `ProductSymmetry` tensors work for the first time | construction, `svd`, `contract` round-trips on `ProductSymmetry(Z2, U1)` and `(Z2, Z3)`; lift the refusal in `_ctm_root_implicit_sym_sectors.py` |
@@ -164,7 +164,7 @@ Per-symmetry parametrised tests over `U1Symmetry`, `ZnSymmetry(2)`, `ZnSymmetry(
 
 - `flow_charge(OUT, flow_charge(OUT, q)) == q` for canonical `q`
 - `fuse(q, dual(q)) == identity()` for every sector
-- `canonicalize` is idempotent, and `canonicalize(sectors)` equals `sectors` for any index
+- `canonicalize_charges` is idempotent, and `canonicalize_charges(sectors)` equals `sectors` for any index
   built through `TensorIndex`
 - `svd` produces the same bond sectors with the left leg IN and with it OUT (the
   regression test named in #733)
