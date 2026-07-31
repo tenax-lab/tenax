@@ -1,6 +1,17 @@
 # #715 Phase 3 slice 1 — root implicit AD on `SymmetricTensor`
 
-Status: design approved, nothing built. Scope is the **bosonic abelian 1x1**
+Status: **BUILT AND VALIDATED**, 2026-07-31. Headline result, D=2 chi=4 Z2:
+
+| quantity | value |
+|---|---|
+| symmetric gradient vs dense root-implicit | **3.29e-15** relative |
+| energy vs dense | 1.5e-16 |
+| `norm(F(y*))` | 2.70e-13 |
+| `gmres_residual` | 6.38e-15 |
+| directional FD (sweep map, 12/20/30 sweeps) | 4.28e-4 / 7.67e-7 / 5.14e-9 |
+| svd/eigh primitives in the graph | **none**, over six jaxprs |
+
+Scope is the **bosonic abelian 1x1**
 slice. Fermionic `FermionParity`, multisite symmetric, and production wiring
 are separate slices; §8 says why each is deferred and what unblocks it.
 
@@ -42,6 +53,29 @@ not make:
    is therefore *plausible and directionally right, but unmeasured*. This slice
    is parity-gated by decision; the measurement is §8's first follow-up and it
    is the thing that converts "it runs" into "it pays".
+
+   **What the build did establish (2026-07-31), and what it did not.** The
+   *qualitative* claim is now demonstrated: the differentiated graph contains no
+   `svd` and no `eigh` primitive at all, asserted over six jaxprs covering both
+   the forward functions and their pullbacks. So the entire class of failure this
+   method exists to remove — the degenerate-SV NaN cluster, the `lorentzian`
+   regularisation, #687's accuracy floor — is structurally gone rather than
+   mitigated. Sharper than expected: explicit backprop through the symmetric
+   sweep does not merely NaN, it **raises** (`sector_svd` ranks singular values
+   across sectors in Python, so `jax.grad` dies with `ConcretizationTypeError`
+   at D=2), which makes the implicit path the only one that produces a symmetric
+   gradient here at all.
+
+   The *quantitative* cost claim remains unmeasured, and one number now argues
+   against a naive reading of it: **peak RSS is 8.4 GB, essentially all in the
+   GMRES solve**, where XLA compiles the ~15k-equation block-sparse VJP inside a
+   `lax.while_loop`. Staged: 0.69 GB after root extraction, 2.33 after the energy
+   VJP, 2.50 after the `F` VJP trace, 8.36 after the solve. `restart=10` reaches
+   only 7.19 GB while being slower (93 s vs 49 s) and five orders less accurate
+   (2.5e-10 vs 6.4e-15), so there is no cheap lever inside the solver. Removing
+   the SVD VJP therefore did **not** remove the compile-scale problem; it moved
+   it. Whether the move is a net win is exactly what §8's measurement must decide,
+   and it should now measure memory alongside op count.
 2. **Do not sell any of this on wall-clock.** Paper §VI.3 shows implicit losing
    to fixed-point at our D and chi. The arguments are stability (#687's floor,
    the degenerate-SV NaN class) and compile-graph size (#566).
