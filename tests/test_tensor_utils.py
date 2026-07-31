@@ -15,8 +15,13 @@ from tenax.algorithms._tensor_utils import (
 )
 from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor, SymmetricTensor
+from tenax.core.symmetry import (
+    FermionParity,
+    ProductSymmetry,
+    U1Symmetry,
+    ZnSymmetry,
+)
+from tenax.core.tensor import DenseTensor, SymmetricTensor, _compute_valid_blocks
 
 
 class TestScaleBondAxis:
@@ -600,3 +605,81 @@ class TestFuseSplitVectorized:
                 2 * eps
             )
         np.testing.assert_allclose(np.asarray(g), fd, rtol=1e-5, atol=1e-7)
+
+
+# ------------------------------------------------------------------ #
+# Fused indices keep charges and sectors on the same representatives   #
+# ------------------------------------------------------------------ #
+
+
+@pytest.mark.parametrize(
+    "sym,pairs",
+    [
+        (
+            ProductSymmetry(ZnSymmetry(2), ZnSymmetry(3)),
+            [(q1, q2) for q1 in range(2) for q2 in range(3)],
+        ),
+        (
+            ProductSymmetry(FermionParity(), U1Symmetry()),
+            [(n % 2, n) for n in range(3)],
+        ),
+    ],
+    ids=["z2_x_z3", "fp_x_u1"],
+)
+@pytest.mark.parametrize("fused_flow", [FlowDirection.IN, FlowDirection.OUT])
+def test_fused_charges_never_name_a_sector_the_index_lacks(sym, pairs, fused_flow):
+    """``idx.charges`` and ``idx.sectors`` must use the same representatives.
+
+    ``fuse_indices`` derives the fused sectors from the fused *charges*, then
+    overwrites ``_charges_cache`` with those same charges — but the
+    ``TensorIndex`` constructor canonicalises ``sectors`` on the way through
+    (#734), so the two halves stop agreeing unless the charges are canonicalised
+    too.  U(1)/``Z_n`` are unaffected because ``_compute_fused_charges`` already
+    reduces mod ``n``; ``ProductSymmetry``'s bit-packed charges are not reduced
+    by that, and were measured landing outside their own sector table:
+    ``Z2 x Z3`` produced charge ``2`` against sectors ``[0, 1]``, and
+    ``FP x U(1)`` produced a charge set *disjoint* from its sectors.
+
+    A charge with no matching sector is not an error anywhere — it just means
+    the blocks sitting on it are dropped.
+    """
+    charges = np.unique(
+        sym.canonicalize_charges(
+            np.array([ProductSymmetry.encode(*p) for p in pairs], dtype=np.int32)
+        )
+    )
+    idx_a = TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="a")
+    idx_b = TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="b")
+    idx_c = TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="c")
+
+    dense = DenseTensor(
+        jnp.ones((idx_a.dim, idx_b.dim, idx_c.dim)), (idx_a, idx_b, idx_c)
+    )
+    fused = fuse_indices(dense, 0, 1, "ab", fused_flow)
+    leg = fused.indices[0]
+    assert set(leg.charges.tolist()) <= set(leg.sectors.tolist()), (
+        sorted(set(leg.charges.tolist())),
+        leg.sectors.tolist(),
+    )
+    assert len(leg.charges) == leg.dim
+    for q in leg.sectors:
+        assert int(np.sum(leg.charges == q)) == leg.multiplicity(int(q))
+
+    # And the same through the block-sparse path, which caches its own copy.
+    keys = _compute_valid_blocks((idx_a, idx_b, idx_c))
+    assert keys, "fixture must have at least one conserving block"
+    sym_tensor = SymmetricTensor(
+        {
+            k: jnp.ones(
+                tuple(i.multiplicity(int(q)) for i, q in zip((idx_a, idx_b, idx_c), k))
+            )
+            for k in keys
+        },
+        (idx_a, idx_b, idx_c),
+    )
+    fused_sym = fuse_indices(sym_tensor, 0, 1, "ab", fused_flow)
+    leg = fused_sym.indices[0]
+    assert set(leg.charges.tolist()) <= set(leg.sectors.tolist()), (
+        sorted(set(leg.charges.tolist())),
+        leg.sectors.tolist(),
+    )

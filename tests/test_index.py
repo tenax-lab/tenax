@@ -407,3 +407,57 @@ def test_index_sectors_are_always_sorted_and_unique():
     )
     assert np.array_equal(idx.sectors, np.array([0, 1], dtype=np.int32))
     assert np.array_equal(idx.multiplicities, np.array([4, 5], dtype=np.int32))
+
+
+def test_index_sorts_already_canonical_sectors():
+    """Unsorted-but-canonical sectors are worse than untidy: they are *wrong*.
+
+    ``multiplicity``, ``has_sector`` and ``sector_offset`` all resolve a charge
+    with ``np.searchsorted``, which is only defined on a sorted array.  Before
+    #734 a ``U1`` leg built as ``sectors=[1, 0]`` therefore reported
+    ``has_sector(0) is False``, ``multiplicity(1) == 0`` and raised
+    ``KeyError`` from ``sector_offset(0)`` — silently wrong answers, not a
+    refusal.  ``U1`` has nothing to canonicalise, so only the sort repairs it.
+    """
+    idx = TensorIndex(
+        symmetry=U1Symmetry(),
+        sectors=np.array([1, 0], dtype=np.int32),
+        multiplicities=np.array([2, 3], dtype=np.int32),
+        flow=FlowDirection.IN,
+        label="x",
+    )
+    assert np.array_equal(idx.sectors, np.array([0, 1], dtype=np.int32))
+    assert np.array_equal(idx.multiplicities, np.array([3, 2], dtype=np.int32))
+
+    assert idx.has_sector(0)
+    assert idx.has_sector(1)
+    assert not idx.has_sector(2)
+    assert idx.multiplicity(0) == 3
+    assert idx.multiplicity(1) == 2
+    assert idx.multiplicity(2) == 0
+    assert idx.sector_offset(0) == 0
+    assert idx.sector_offset(1) == 3
+    assert idx.dim == 5
+    assert np.array_equal(idx.charges, np.array([0, 0, 0, 1, 1], dtype=np.int32))
+
+
+def test_index_rewrites_a_lone_non_canonical_sector():
+    """A single sector still needs canonicalising; ``len < 2`` is not a bypass.
+
+    The sorted-check short-circuit that pays for the constructor must stay
+    *inside* the canonicity conjunct.  A bare ``len(sectors) < 2: return``
+    would leave ``Z2 [-1]`` alone, and ``-1`` is the representative that
+    ``flow_charge`` is not an involution on.
+    """
+    idx = TensorIndex(
+        symmetry=ZnSymmetry(2),
+        sectors=np.array([-1], dtype=np.int32),
+        multiplicities=np.array([2], dtype=np.int32),
+        flow=FlowDirection.OUT,
+        label="x",
+    )
+    assert np.array_equal(idx.sectors, np.array([1], dtype=np.int32))
+    assert np.array_equal(idx.multiplicities, np.array([2], dtype=np.int32))
+    assert idx.has_sector(1)
+    assert not idx.has_sector(-1)
+    assert idx.sector_offset(1) == 0

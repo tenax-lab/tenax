@@ -857,8 +857,6 @@ class TestSvdIllConditioned:
 # Canonical bond labels out of svd (#733 / #734)                       #
 # ------------------------------------------------------------------ #
 
-import tenax.linalg as tl  # noqa: E402
-
 _BOND_LABEL_CASES = [
     ("U1", U1Symmetry(), [0, 1]),
     ("Z2", ZnSymmetry(2), [0, 1]),
@@ -909,7 +907,7 @@ def test_svd_bond_labels_are_canonical_for_either_left_leg_flow(name, sym, secto
         t = SymmetricTensor.random_normal_np(
             (leg(left_flow, "a"), leg(right_flow, "b")), np.random.RandomState(0)
         )
-        U, _, Vh, _ = tl.svd(t, left_labels=["a"], right_labels=["b"])
+        U, _, Vh, _ = svd(t, left_labels=["a"], right_labels=["b"])
 
         # Every block key must name a sector its own leg actually carries.
         # This is what a non-canonical representative breaks.

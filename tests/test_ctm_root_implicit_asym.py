@@ -972,6 +972,87 @@ def test_the_singular_values_are_a_complex_unknown():
         assert float(jnp.linalg.norm(jnp.imag(S_keep))) < 1e-300
 
 
+def test_the_dense_root_carries_lambdas_phase_rather_than_dropping_it(monkeypatch):
+    """Real-projecting ``lambda`` breaks the dense root — in the gauge that shows it.
+
+    ``asym_characteristic_residual_covariant`` normalises as ``X'/lambda - X``,
+    so ``lambda``'s phase is part of the equation and dropping it is not a
+    rescaling of ``F`` but a different ``F``.  That is the #721 property, and
+    until now it was only *asserted*, in this module's own docstring, as
+    "``.real`` moves ``|F1|`` from 2e-13 to 1.6e0".  It is measured here.
+
+    The measurement needs a gauge, which is the part the old prose left out.
+    At the natural root every ``lambda`` comes out real to machine precision —
+    the twelve of them have ``|arg| < 8e-16`` — because ``asym_root_parametrize``
+    polishes the bond phases into alignment.  So ``.real`` is a *no-op* there
+    (6.50e-14 both ways, measured), and a test written against that fixture
+    would pass whether or not the code took the real part.
+
+    The eight environment phases are exact null directions of the root
+    (``test_the_environment_phases_are_licensed_gauges_of_the_root``), so
+    phasing ``tilde`` moves to a different, equally valid root: ``F`` is
+    covariant, ``R -> e^{i.gamma} R``, and zero stays zero — asserted below at
+    6.5e-14, unchanged from the unphased root.  What the phases *do* change is
+    ``lambda``, which is now genuinely complex (``|arg|`` up to 3.0).  Now
+    ``.real`` has something to destroy, and it destroys it: ``‖F‖`` goes to
+    3.6e0 and 1.2e1 for the two gauges below.
+
+    Two-part, scale-free assertion for the reason given in
+    ``test_the_root_survives_a_complex_state`` in the symmetric file: a bare
+    ``> 1.0`` sits at the edge of a platform-dependent quantity.
+    """
+    A, a, root, _res = _converged_complex_root()
+    chi = root.env.C1.shape[0]
+    root = M.asym_root_to_covariant_convention(root)
+    S = _root_S(root)
+    tilde = M.remove_inverse_roots(root.env, S)
+
+    def total(R):
+        return float(
+            jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(R)))
+        )
+
+    class _RealProjectedVdot:
+        """``jnp``, except ``vdot`` drops the imaginary part."""
+
+        def __getattr__(self, name):
+            return getattr(jnp, name)
+
+        @staticmethod
+        def vdot(x, y):
+            return jnp.vdot(x, y).real
+
+    # The natural gauge first, to pin *why* it cannot be the fixture.
+    y_natural = (tilde, root.u, S, root.v)
+    natural = total(M.asym_characteristic_residual_covariant(y_natural, a, root, chi))
+    assert natural < 1e-10, natural
+    monkeypatch.setattr(M, "jnp", _RealProjectedVdot())
+    vacuous = total(M.asym_characteristic_residual_covariant(y_natural, a, root, chi))
+    monkeypatch.undo()
+    assert abs(vacuous - natural) < 1e-12, (natural, vacuous)
+
+    for thetas in (
+        (0.3,) * 8,
+        (0.7, 0.1, -0.4, 0.9, 0.25, -0.6, 1.1, 0.05),
+    ):
+        phased = M.AsymEnv(
+            *[jnp.exp(1j * t) * x for t, x in zip(thetas, tilde, strict=True)]
+        )
+        y = (phased, root.u, S, root.v)
+
+        # Still a root: the phases are a licensed gauge.
+        good = total(M.asym_characteristic_residual_covariant(y, a, root, chi))
+        assert good < 1e-10, (thetas, good)
+
+        monkeypatch.setattr(M, "jnp", _RealProjectedVdot())
+        wrong = total(M.asym_characteristic_residual_covariant(y, a, root, chi))
+        monkeypatch.undo()
+
+        assert wrong > 1e-2, (thetas, wrong)
+        assert wrong > 1e9 * good, (thetas, wrong, good)
+        print(f"dense |F| = {good:.3e}; with lambda real-projected = {wrong:.3e}")
+
+
 def test_gradient_parity_for_a_complex_state():
     """End to end on a complex state: 2.5e-12 against explicit backprop.
 

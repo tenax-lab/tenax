@@ -88,6 +88,23 @@ def _has_nonstandard_blocks(tensor: SymmetricTensor) -> bool:
     return False
 
 
+def _input_target(tensor: SymmetricTensor) -> int:
+    """Return the conservation-law target that ``tensor``'s blocks satisfy.
+
+    Read off the first block, since every block of a well-formed tensor shares
+    one target.  A boundary MPS tensor targeting ``Sz != 0`` returns that
+    charge; a standard tensor returns ``symmetry.identity()``.
+
+    An empty tensor reports the identity rather than a literal ``0`` -- ``0`` is
+    the identity only for U(1) and ``Z_n``, not for the bit-packed charges of
+    :class:`~tenax.core.symmetry.ProductSymmetry` (#734).
+    """
+    identity = tensor.indices[0].symmetry.identity()
+    if not tensor.blocks:
+        return identity
+    return _net_charge(tensor.indices, next(iter(tensor.blocks)))
+
+
 def _group_blocks_by_bond_charge(
     tensor: SymmetricTensor,
     left_leg_positions: list[int],
@@ -588,12 +605,7 @@ def _truncated_svd_symmetric(
     # Check if input tensor has a non-identity target (e.g. boundary MPS
     # tensor targeting Sz != 0).  If so, the output tensors may also have
     # non-identity targets and need to bypass standard validation.
-    input_target = 0
-    if tensor.blocks:
-        key0 = next(iter(tensor.blocks))
-        input_target = _net_charge(tensor.indices, key0)
-
-    if input_target != tensor.indices[0].symmetry.identity():
+    if _input_target(tensor) != tensor.indices[0].symmetry.identity():
         # Bypass validation for non-identity targets
         U_tensor = object.__new__(SymmetricTensor)
         U_tensor._indices = U_indices
@@ -2090,12 +2102,9 @@ def _rsvd_symmetric(
             Vh_blocks[(q,) + rk] = vh_block
             col_offset += n_cols
 
-    input_target = 0
-    if tensor.blocks:
-        key0 = next(iter(tensor.blocks))
-        input_target = _net_charge(tensor.indices, key0)
-
-    if input_target != tensor.indices[0].symmetry.identity():
+    # Non-identity targets (e.g. a boundary MPS tensor at Sz != 0) propagate to
+    # the factors, which must therefore bypass standard validation.
+    if _input_target(tensor) != tensor.indices[0].symmetry.identity():
         U_tensor = object.__new__(SymmetricTensor)
         U_tensor._indices = U_indices
         U_tensor._init_flat_buffer(U_blocks)

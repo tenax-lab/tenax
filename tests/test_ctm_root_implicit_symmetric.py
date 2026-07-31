@@ -1416,16 +1416,19 @@ def test_the_root_survives_a_complex_state(monkeypatch):
     is about, and the counterfactual below measures it directly.
 
     It used to be measured by real-projecting ``λ``, which on this fixture
-    moved ``‖F(y*)‖`` from 3e-13 to 4.9 (dense, the same edit moved ``|F1|``
-    from 2e-13 to 1.6e0).  That form went **vacuous** at #734: the four corner
-    ``λ`` were ``-0.3758+0.2185j, 0.4953, 0.4487-0.0522j, 0.6260`` only because
-    the ``Z2`` bond was labelled with the non-canonical representative ``-1``,
-    which put the odd sector first and picked a different SVD column gauge.
-    With canonical labels the same corners give ``0.4348, 0.4953, 0.4517,
-    0.6260`` — *identical moduli*, zero phase — so ``.real`` is now a no-op
-    here and would have quietly stopped testing anything.  Rotating the phase
-    instead pins the same property without depending on which gauge the bond
-    happens to land in.
+    moved ``‖F(y*)‖`` from 3e-13 to 4.9.  That form went **vacuous** at #734:
+    the four corner ``λ`` were ``-0.3758+0.2185j, 0.4953, 0.4487-0.0522j,
+    0.6260`` only because the ``Z2`` bond was labelled with the non-canonical
+    representative ``-1``, which put the odd sector first and picked a different
+    SVD column gauge.  With canonical labels the same corners give ``0.4348,
+    0.4953, 0.4517, 0.6260`` — *identical moduli*, zero phase — so ``.real`` is
+    now a no-op here and would have quietly stopped testing anything.  Rotating
+    the phase instead pins the same property without depending on which gauge
+    the bond happens to land in.
+
+    The ``.real`` counterfactual itself is not lost: the dense module keeps it,
+    in a gauge chosen so that it cannot go vacuous, as
+    ``test_the_dense_root_carries_lambdas_phase_rather_than_dropping_it``.
     """
     from tenax.algorithms import _ctm_root_implicit_symmetric as mod
 
@@ -1456,7 +1459,7 @@ def test_the_root_survives_a_complex_state(monkeypatch):
 def test_the_root_survives_an_empty_and_uneven_sector_layout():
     """chi=2 on this fixture retains *different* charges in different directions.
 
-    Two directions keep ``{-1: 1, 0: 1}`` and two keep ``{0: 2}`` outright, so
+    Two directions keep ``{0: 1, 1: 1}`` and two keep ``{0: 2}`` outright, so
     a sector is empty on half the ring.  That is the case where the bridge's
     per-direction layouts genuinely differ and where an implementation that
     assumed one global ``chi_q`` would break — at a uniform fixed point all four
@@ -1515,8 +1518,8 @@ def test_a_wrong_bond_layout_breaks_the_root(converged_root):
     a root after that, the sector bookkeeping is not doing anything and none
     of the other tests mean what they claim.
 
-    Measured on this fixture, ``{-1: 2, 0: 2}`` at chi=4 against
-    ``{-1: 1, 0: 3}``, and the answer comes in two parts because the layout is
+    Measured on this fixture, ``{0: 2, 1: 2}`` at chi=4 against
+    ``{0: 1, 1: 3}``, and the answer comes in two parts because the layout is
     load-bearing in two different places.
 
     * The layout is recorded in the *environment*, not only in the equations:
@@ -1643,7 +1646,7 @@ def test_a_wrong_sector_assignment_survives_every_shape_check(converged_root):
     """The companion trap, for the case no guard can catch.
 
     Moving a dimension changes shapes, so the module gets to refuse it.  This
-    one does not: at chi=4 the Z2 cut retains ``{-1: 2, 0: 2}`` and **every**
+    one does not: at chi=4 the Z2 cut retains ``{0: 2, 1: 2}`` and **every**
     per-sector block — ``u``, ``S``, ``v``, ``U*``, ``U_perp``, ``V*``,
     ``V_perp`` — has literally the same shape in both sectors, which the test
     asserts before doing anything else.  So exchanging the two sectors' blocks

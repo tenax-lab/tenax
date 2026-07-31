@@ -25,7 +25,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.core.index import FlowDirection, Label, TensorIndex, _net_charge
+from tenax.core.index import FlowDirection, Label, TensorIndex
 
 # Block key: tuple of one charge value per leg identifying a charge sector
 BlockKey = tuple[int, ...]
@@ -169,9 +169,15 @@ def _compute_valid_blocks(
     one leg at a time, then solves the last leg in closed form via
     ``q = flow_charge(flow, fuse(target, dual(partial)))``.  That inversion is
     valid for any abelian group because ``flow_charge`` is an involution on
-    canonical representatives, so there is no longer a separate U(1) branch
-    (#734 -- the old ``n_values() is None`` split ran U(1)-only integer algebra
-    on ``ProductSymmetry``'s bit-packed charges).
+    canonical representatives, so a single path now covers every rank and every
+    symmetry (#734).
+
+    Both of the branches this replaces were broken for the bit-packed charges of
+    :class:`~tenax.core.symmetry.ProductSymmetry`: the ``n_values() is None``
+    branch solved ``q_last = (target - prev) * flow_last`` with integer algebra,
+    and the finite branch weighted charges as ``flow_last * q`` -- neither of
+    which is the group operation once charges are packed bitfields rather than
+    integers.
 
     Args:
         indices: Tuple of TensorIndex objects, one per tensor leg.
@@ -187,37 +193,29 @@ def _compute_valid_blocks(
         return [()]
 
     sym = indices[0].symmetry
-    identity_arr = np.array([sym.identity()], dtype=np.int32)
-    raw_target = target if target is not None else sym.identity()
     effective_target = int(
-        sym.canonicalize_charges(np.array([int(raw_target)], dtype=np.int32))[0]
+        sym.canonicalize_charges(
+            np.array(
+                [int(target if target is not None else sym.identity())], dtype=np.int32
+            )
+        )[0]
     )
 
     # Sectors are canonical, sorted and unique (guaranteed by TensorIndex).
     unique_charges_per_leg = [idx.sectors.tolist() for idx in indices]
     n_legs = len(indices)
 
-    def _effective(leg_i: int, q: int) -> np.ndarray:
+    def _flow_weighted(leg_i: int, q: int) -> np.ndarray:
         return sym.flow_charge(indices[leg_i].flow, np.array([q], dtype=np.int32))
 
-    if n_legs == 1:
-        # Seed with identity so the lone leg is still reduced (#733).
-        return [
-            (q,)
-            for q in unique_charges_per_leg[0]
-            if int(sym.fuse(identity_arr, _effective(0, q))[0]) == effective_target
-        ]
-
-    partial: dict[int, list[tuple[int, ...]]] = {}
-    for q in unique_charges_per_leg[0]:
-        fused = int(sym.fuse(identity_arr, _effective(0, q))[0])
-        partial.setdefault(fused, []).append((q,))
-
-    last_leg_idx = n_legs - 1
-    for leg_i in range(1, last_leg_idx):
+    # partial maps running fused charge -> list of partial BlockKey prefixes.
+    # Seeding with the identity (rather than the first leg) makes the rank-1
+    # case fall out of the same closed form below (#733).
+    partial: dict[int, list[tuple[int, ...]]] = {sym.identity(): [()]}
+    for leg_i in range(n_legs - 1):
         next_partial: dict[int, list[tuple[int, ...]]] = {}
         for q in unique_charges_per_leg[leg_i]:
-            eff_q = _effective(leg_i, q)
+            eff_q = _flow_weighted(leg_i, q)
             for prev_fused, prev_combos in partial.items():
                 new_fused = int(
                     sym.fuse(np.array([prev_fused], dtype=np.int32), eff_q)[0]
@@ -231,8 +229,8 @@ def _compute_valid_blocks(
 
     # Closed form for the last leg. In an abelian group the solution is unique,
     # so this replaces enumeration for finite groups too.
-    last_charge_set = set(unique_charges_per_leg[last_leg_idx])
-    flow_last = indices[last_leg_idx].flow
+    last_charge_set = set(unique_charges_per_leg[n_legs - 1])
+    flow_last = indices[n_legs - 1].flow
     target_arr = np.array([effective_target], dtype=np.int32)
     valid_keys: list[BlockKey] = []
 
@@ -697,18 +695,32 @@ class SymmetricTensor(Tensor):
         return obj
 
     def _validate(self) -> None:
-        """Verify all block keys satisfy the symmetry conservation law."""
-        if not self._indices:
-            return
-        identity = self._indices[0].symmetry.identity()
+        """Verify all block keys satisfy the symmetry conservation law.
 
-        for key in self._block_keys:
-            fused_val = _net_charge(self._indices, key)
-            if fused_val != identity:
-                raise ValueError(
-                    f"Block {key} violates charge conservation: "
-                    f"fused={fused_val}, expected identity={identity}"
-                )
+        Vectorised over blocks: the whole key table is fused leg by leg, so the
+        symmetry sees one ``(n_blocks,)`` array per leg instead of one scalar per
+        (block, leg) pair.  The per-key :func:`_net_charge` adapter remains the
+        right call for scalar sites; here it dominated ``SymmetricTensor``
+        construction (~27% on a 489-block rank-4 U(1) tensor).
+        """
+        if not self._indices or not self._block_keys:
+            return
+        sym = self._indices[0].symmetry
+        identity = sym.identity()
+
+        keys = np.array(self._block_keys, dtype=np.int32)  # (n_blocks, n_legs)
+        net = np.full(len(keys), identity, dtype=np.int32)
+        for i, idx in enumerate(self._indices):
+            net = sym.fuse(net, sym.flow_charge(idx.flow, keys[:, i]))
+
+        bad = np.flatnonzero(net != identity)
+        if bad.size:
+            key = self._block_keys[int(bad[0])]
+            fused = int(net[int(bad[0])])
+            raise ValueError(
+                f"Block {key} violates charge conservation: "
+                f"fused={fused}, expected identity={identity}"
+            )
 
     def _get_block(self, idx: int) -> jax.Array:
         """Return the block array at position idx in sorted key order."""

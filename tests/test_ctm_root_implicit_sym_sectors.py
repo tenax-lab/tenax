@@ -483,25 +483,38 @@ def test_zn_same_flow_bonds_carry_the_canonical_representative():
 
 
 def test_product_symmetry_is_refused_rather_than_mis_assembled():
-    """Bit-packed charges make ``-q`` the wrong partner, and nothing catches it.
+    """The refusal is a coverage gate, not a correctness claim.
 
-    For ``Z_n`` the raw negation is a different representative of the right
-    charge.  For :class:`ProductSymmetry` it is a different charge outright:
-    ``-encode(1, 2)`` decodes as ``(-1, -3)``, and ``fuse(q, -q)`` is not the
-    identity, so the block violates conservation.  ``_from_blocks_unchecked``
-    would pass it straight through to a later contraction, which per this
-    module's own measurements keeps the conserving components and silently
-    zeroes the rest — the failure mode #715 exists to make loud.  So it raises.
+    Since #734 the partner charge is derived through ``symmetry.flow_charge``
+    and ``symmetry.dual``, which is group-correct for :class:`ProductSymmetry`
+    exactly as it is for U(1) and ``Z_n`` — nothing in the arithmetic below
+    knows or cares that the charges are bit-packed.  What has *not* happened is
+    running the rest of #715 Phase 3 on bit-packed charges, and this test pins
+    that the module says so rather than assuming it works.
+
+    The gate is worth having because the cost of being wrong is asymmetric.
+    For ``Z_n`` a wrong partner is a different representative of the right
+    charge, so ``__post_init__`` and the sector table can still catch it.  For
+    :class:`ProductSymmetry` it is a different charge outright, the block is a
+    genuine conservation violation, and ``_from_blocks_unchecked`` would pass it
+    straight through to a contraction, which per this module's own measurements
+    keeps the conserving components and silently zeroes the rest — the failure
+    mode #715 exists to make loud.  Nothing downstream would raise.
+
+    Lifting the gate is #734 Task 4's job, and belongs with end-to-end coverage.
     """
     from tenax.core.symmetry import ProductSymmetry
 
     sym = ProductSymmetry(U1Symmetry(), U1Symmetry())
     a = ProductSymmetry.encode(1, 2)
 
-    # The premise, measured rather than asserted from the docstring.
-    assert ProductSymmetry.decode(-a) == (-1, -3)
+    # Why a wrong partner would be unrecoverable here, measured rather than
+    # asserted from the docstring.  These are *not* claims about the shipped
+    # code -- it uses ``dual`` -- but about what the guard is protecting.
+    assert ProductSymmetry.decode(-a) == (-1, -3)  # raw negation: wrong charge
     assert ProductSymmetry.decode(int(sym.dual(np.array([a]))[0])) == (-1, -2)
-    assert int(sym.fuse(np.array([a]), np.array([-a]))[0]) != 0
+    # ... and the wrong partner does not merely relabel: it breaks conservation.
+    assert int(sym.fuse(np.array([a]), np.array([-a]))[0]) != sym.identity()
 
     def leg(flow, lbl):
         return TensorIndex(
