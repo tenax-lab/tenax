@@ -102,17 +102,26 @@ class BaseSymmetry(ABC):
         ``q = flow_charge(flow, fuse(target, dual(partial)))`` a valid closed
         form for the last leg of a conservation law in any abelian group.
 
+        The default implementation assumes abelian fusion (a single fusion
+        outcome per pair); a future ``BaseNonAbelianSymmetry`` subclass must
+        override it.
+
+        Note:
+            ``np.asarray(charges, dtype=np.int32)`` silently wraps on int64
+            overflow rather than raising.
+
         Args:
             flow:    ``+1`` (IN) or ``-1`` (OUT); a ``FlowDirection`` works too.
             charges: Integer charge array.
 
         Returns:
-            Effective charge array of the same shape.
+            Effective charge array of the same shape.  On an IN leg this may
+            **alias** ``charges``, so the result must be treated as read-only.
         """
         charges = np.asarray(charges, dtype=np.int32)
         return charges if int(flow) > 0 else self.dual(charges)
 
-    def canonicalize(self, charges: np.ndarray) -> np.ndarray:
+    def canonicalize_charges(self, charges: np.ndarray) -> np.ndarray:
         """Return the canonical representative of each charge.
 
         Fusing against the identity applies whatever reduction the group
@@ -122,14 +131,18 @@ class BaseSymmetry(ABC):
         is *not* free is letting two representatives of one sector coexist,
         because label equality is how blocks are paired during contraction.
 
+        The default implementation assumes abelian fusion; a future
+        ``BaseNonAbelianSymmetry`` subclass must override it.
+
         Args:
             charges: Integer charge array.
 
         Returns:
-            Canonical charge array of the same shape.
+            Canonical charge array of the same shape.  Overrides may **alias**
+            ``charges``, so the result must be treated as read-only.
         """
         charges = np.asarray(charges, dtype=np.int32)
-        return self.fuse(np.full_like(charges, self.identity()), charges)
+        return self.fuse(np.int32(self.identity()), charges)
 
     @property
     def braiding_style(self) -> BraidingStyle:
@@ -198,6 +211,44 @@ class BaseSymmetry(ABC):
         """
         return 1.0
 
+    def net_charge(
+        self,
+        charges_per_leg: list[int],
+        flows: list[int],
+    ) -> int:
+        """Fuse one charge per leg, weighted by that leg's flow.
+
+        This is the only sanctioned way to evaluate a conservation law: a block
+        is valid exactly when ``net_charge(...) == identity()``.
+
+        ``sum(int(f) * int(q) for ...)`` is **not** equivalent. It assumes the
+        group inverse is integer negation and the group operation is integer
+        addition — true for U(1), accidentally true for ``Z_n`` whenever two or
+        more legs fuse afterwards, and false for the bit-packed charges of
+        :class:`ProductSymmetry` (#734).
+
+        The fusion is seeded with ``identity()`` so that a rank-1 tensor is
+        reduced exactly like a rank-N one. Without the seed, ``fuse_many`` of a
+        single array returns it unreduced and a lone OUT leg yields a
+        non-canonical representative (#733).
+
+        Args:
+            charges_per_leg: One scalar charge per leg.
+            flows: ``+1`` (IN) or ``-1`` (OUT) per leg, in the same order.
+
+        Returns:
+            The fused net charge, as a Python int.
+
+        Raises:
+            ValueError: If the two sequences have different lengths.
+        """
+        effective = [np.array([self.identity()], dtype=np.int32)]
+        effective.extend(
+            self.flow_charge(f, np.array([int(q)], dtype=np.int32))
+            for f, q in zip(flows, charges_per_leg, strict=True)
+        )
+        return int(self.fuse_many(effective)[0])
+
     def is_conserved(
         self,
         charges_per_leg: list[np.ndarray],
@@ -216,14 +267,9 @@ class BaseSymmetry(ABC):
         """
         if target is None:
             target = self.identity()
-        effective = [np.array([self.identity()], dtype=np.int32)]
-        effective.extend(
-            self.flow_charge(f, np.array([int(q)], dtype=np.int32))
-            for f, q in zip(flows, charges_per_leg)
-        )
-        net = int(self.fuse_many(effective)[0])
-        want = int(self.canonicalize(np.array([int(target)], dtype=np.int32))[0])
-        return net == want
+        net = self.net_charge(charges_per_leg, flows)
+        want = self.canonicalize_charges(np.array([int(target)], dtype=np.int32))
+        return net == int(want[0])
 
 
 class U1Symmetry(BaseSymmetry):
@@ -247,8 +293,13 @@ class U1Symmetry(BaseSymmetry):
     def identity(self) -> int:
         return 0
 
-    def canonicalize(self, charges: np.ndarray) -> np.ndarray:
-        # Every integer is its own canonical U(1) representative.
+    def canonicalize_charges(self, charges: np.ndarray) -> np.ndarray:
+        """Identity map: every integer is its own canonical U(1) representative.
+
+        Returns:
+            The input viewed as int32.  This may **alias** ``charges``, so the
+            result must be treated as read-only.
+        """
         return np.asarray(charges, dtype=np.int32)
 
     def n_values(self) -> None:
@@ -292,6 +343,17 @@ class ZnSymmetry(BaseSymmetry):
 
     def identity(self) -> int:
         return 0
+
+    def canonicalize_charges(self, charges: np.ndarray) -> np.ndarray:
+        """Reduce each charge into ``[0, n)``.
+
+        Equivalent to the base implementation, but skips fusing against a
+        broadcast identity — this runs on every index construction.
+
+        Returns:
+            Canonical charge array of the same shape (read-only by contract).
+        """
+        return np.asarray(charges, dtype=np.int32) % self.n
 
     def n_values(self) -> int:
         return self.n
@@ -390,6 +452,17 @@ class FermionParity(BaseSymmetry):
     def identity(self) -> int:
         return 0
 
+    def canonicalize_charges(self, charges: np.ndarray) -> np.ndarray:
+        """Reduce each charge into ``{0, 1}``.
+
+        Equivalent to the base implementation, but skips fusing against a
+        broadcast identity — this runs on every index construction.
+
+        Returns:
+            Canonical charge array of the same shape (read-only by contract).
+        """
+        return np.asarray(charges, dtype=np.int32) % 2
+
     def n_values(self) -> int:
         return 2
 
@@ -471,8 +544,13 @@ class FermionicU1(BaseSymmetry):
     def identity(self) -> int:
         return 0
 
-    def canonicalize(self, charges: np.ndarray) -> np.ndarray:
-        # Every integer is its own canonical U(1) representative.
+    def canonicalize_charges(self, charges: np.ndarray) -> np.ndarray:
+        """Identity map: every integer is its own canonical U(1) representative.
+
+        Returns:
+            The input viewed as int32.  This may **alias** ``charges``, so the
+            result must be treated as read-only.
+        """
         return np.asarray(charges, dtype=np.int32)
 
     def n_values(self) -> None:
