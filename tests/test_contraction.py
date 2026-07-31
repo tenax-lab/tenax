@@ -8,13 +8,15 @@ import pytest
 from tenax.contraction.contractor import (
     _cached_contraction_path,
     _labels_to_subscripts,
+    _net_charges,
+    _parse_contraction_prelude,
     contract,
     contract_with_subscripts,
     qr_decompose,
     truncated_svd,
 )
-from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import U1Symmetry, ZnSymmetry
+from tenax.core.index import FlowDirection, TensorIndex, _net_charge
+from tenax.core.symmetry import ProductSymmetry, U1Symmetry, ZnSymmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 # ------------------------------------------------------------------ #
@@ -1159,4 +1161,201 @@ def test_z2_contraction_survives_a_raw_target_of_two():
     got = contract(T, M)
     assert [idx.label for idx in got.indices] == ["a", "b", "d"]
     assert set(got.blocks) == set(t_keys), sorted(got.blocks)
+    np.testing.assert_allclose(np.asarray(got.todense()), np.asarray(ref), atol=1e-12)
+
+
+# ------------------------------------------------------------------ #
+# Target *inference* -- the seam itself (#734)                         #
+# ------------------------------------------------------------------ #
+#
+# The two tests above enter through ``contract`` and so exercise the block
+# enumerator's target canonicalisation.  They are green even with the raw-sum
+# inference restored, because ``_compute_valid_blocks`` canonicalises whatever
+# target it is handed and for ``Z_n`` "sum then reduce" equals "reduce then
+# fuse" -- the enumerator absorbs the contractor's bad arithmetic.
+#
+# The tests below close that gap from both ends:
+#
+#   * ``test_zn_target_inference_*`` asserts on the *inferred* target returned
+#     by ``_parse_contraction_prelude``, so it sees the error at the seam
+#     regardless of what a downstream consumer does with it.
+#   * ``test_product_symmetry_*`` is the case the enumerator cannot rescue:
+#     ``ProductSymmetry`` charges are bit-packed, so integer addition mixes the
+#     two factors across the 16-bit boundary and produces a target that is a
+#     *different charge*, not merely a non-canonical representative of the right
+#     one.  That one fails end-to-end, with a silent all-zero result.
+
+_PRELUDE_TARGET_POS = 6  # index of ``output_target`` in the prelude's tuple
+
+
+@pytest.mark.parametrize(
+    "sym",
+    [
+        U1Symmetry(),
+        ZnSymmetry(3),
+        ProductSymmetry(U1Symmetry(), ZnSymmetry(3)),
+    ],
+    ids=["u1", "z3", "u1xz3"],
+)
+def test_net_charges_matches_the_scalar_adapter(sym):
+    """``_net_charges`` is a speed rewrite of ``_net_charge``, so pin them equal.
+
+    The prelude fuses a whole key table at once because the per-key adapter is
+    ~10x more expensive there.  Nothing else forces the two to agree, and a
+    divergence would resurface as exactly the silent-zero bug #734 closes.
+    """
+    rng = np.random.RandomState(3)
+    raw = rng.randint(-3, 4, size=(40, 4))
+    if isinstance(sym, ProductSymmetry):
+        sectors = sym.encode_charges(raw, rng.randint(0, 3, size=(40, 4)))
+    else:
+        sectors = raw.astype(np.int32)
+
+    flows = (
+        FlowDirection.IN,
+        FlowDirection.OUT,
+        FlowDirection.IN,
+        FlowDirection.OUT,
+    )
+    indices = tuple(
+        TensorIndex(
+            sym,
+            np.unique(sectors[:, i]),
+            np.full(len(np.unique(sectors[:, i])), 2, dtype=np.int32),
+            flow,
+            label=lbl,
+        )
+        for i, (flow, lbl) in enumerate(zip(flows, "abcd"))
+    )
+    keys = [tuple(int(q) for q in row) for row in sectors]
+
+    got = _net_charges(indices, keys)
+    want = np.array([_net_charge(indices, k) for k in keys], dtype=np.int32)
+    np.testing.assert_array_equal(got, want)
+    # Guard: a helper that returned a constant would pass an equality check
+    # against a scalar adapter that also returned that constant.
+    assert len(set(want.tolist())) > 1, "degenerate fixture"
+
+
+def test_zn_target_inference_yields_a_charge_not_a_raw_sum():
+    """``output_target`` must be a Z3 charge, never the raw ``sum(flow*q)``.
+
+    Two premises, both asserted below so the test cannot rot into a tautology:
+
+    * ``T``'s blocks all have raw sum ``3`` and all fuse to ``0`` (the identity),
+      so the inferred target must be "no target".
+    * ``N``'s single block has raw sum ``4`` and fuses to the charge ``1``, so
+      the inferred target must be ``1`` -- this pins that the fix reads a
+      charge rather than merely suppressing non-zero targets.
+    """
+    z3 = ZnSymmetry(3)
+    rng = np.random.RandomState(7)
+
+    def _t3(keys, flows, unchecked=False):
+        indices = tuple(
+            _zn_leg(z3, 3, f, lbl) for f, lbl in zip(flows, ("a", "b", "c"))
+        )
+        blocks = {k: jnp.asarray(rng.standard_normal((2, 2, 2))) for k in keys}
+        if unchecked:
+            return SymmetricTensor._from_blocks_unchecked(blocks, indices)
+        return SymmetricTensor(blocks, indices)
+
+    flows = (FlowDirection.IN, FlowDirection.IN, FlowDirection.OUT)
+    T = _t3([(2, 1, 0), (1, 2, 0), (2, 2, 1)], flows)
+    N = _t3([(2, 2, 0)], flows, unchecked=True)
+    M = SymmetricTensor(
+        {k: jnp.asarray(rng.standard_normal((2, 2))) for k in [(0, 0), (1, 1), (2, 2)]},
+        (
+            _zn_leg(z3, 3, FlowDirection.IN, "c"),
+            _zn_leg(z3, 3, FlowDirection.OUT, "d"),
+        ),
+    )
+
+    def _raw(t):
+        return {
+            sum(int(i.flow) * int(q) for i, q in zip(t.indices, k)) for k in t.blocks
+        }
+
+    # The premises.  ``M`` contributes nothing either way (raw sum 0 == identity).
+    assert _raw(T) == {3} and {_net_charge(T.indices, k) for k in T.blocks} == {0}
+    assert _raw(N) == {4} and {_net_charge(N.indices, k) for k in N.blocks} == {1}
+    assert _raw(M) == {0}
+
+    identity_target = _parse_contraction_prelude((T, M), "abc,cd->abd")[
+        _PRELUDE_TARGET_POS
+    ]
+    charged_target = _parse_contraction_prelude((N, M), "abc,cd->abd")[
+        _PRELUDE_TARGET_POS
+    ]
+
+    # An identity target is encoded as ``None`` (== "validate normally").
+    assert identity_target is None, identity_target
+    assert charged_target == 1, charged_target
+
+    # And end to end, against a dense reference.  Guarded so that the all-zero
+    # result the raw-sum inference used to produce cannot satisfy it.
+    for tensor in (T, N):
+        ref = jnp.einsum("abc,cd->abd", tensor.todense(), M.todense())
+        assert float(jnp.linalg.norm(ref)) > 1.0, "reference is degenerate"
+        got = contract(tensor, M)
+        np.testing.assert_allclose(
+            np.asarray(got.todense()), np.asarray(ref), atol=1e-12
+        )
+
+
+def test_product_symmetry_contraction_target_accumulates_by_fusion():
+    """Bit-packed charges: adding two targets as integers carries across factors.
+
+    ``A`` and ``B`` each carry the ``U(1) x Z3`` charge ``encode(-1, 0)``, which
+    packs to ``65535``.  Summing the two as plain integers gives ``131070``,
+    which decodes to ``(-2, 1)`` -- the borrow out of the low 16 bits invents a
+    ``Z3`` charge of ``1``.  Fusing gives ``encode(-2, 0) == 65534``.
+
+    Unlike the ``Z_n`` cases, ``_compute_valid_blocks`` cannot rescue this:
+    ``131070`` is already canonical, so the enumerator faithfully looks for a
+    charge no output block carries, admits nothing, and ``contract`` returns a
+    structurally valid all-zero tensor with nothing raised.
+    """
+    sym = ProductSymmetry(U1Symmetry(), ZnSymmetry(3))
+    rng = np.random.RandomState(11)
+
+    charge = sym.encode(-1, 0)
+    identity = sym.identity()
+    assert charge == 65535 and sym.decode(charge) == (-1, 0)
+    # The premise: integer addition and fusion disagree on these two charges.
+    fused = int(sym.fuse(np.array([charge]), np.array([charge]))[0])
+    assert sym.decode(charge + charge) == (-2, 1)  # the borrow
+    assert sym.decode(fused) == (-2, 0)  # the truth
+    assert int(sym.canonicalize_charges(np.array([charge + charge]))[0]) == (
+        charge + charge
+    ), "raw sum is already canonical -- the enumerator cannot repair it"
+
+    def leg(sector, flow, label):
+        return TensorIndex(
+            sym,
+            np.array([sector], dtype=np.int32),
+            np.array([2], dtype=np.int32),
+            flow,
+            label=label,
+        )
+
+    A = SymmetricTensor._from_blocks_unchecked(
+        {(charge, identity): jnp.asarray(rng.standard_normal((2, 2)))},
+        (leg(charge, FlowDirection.IN, "a"), leg(identity, FlowDirection.IN, "x")),
+    )
+    B = SymmetricTensor._from_blocks_unchecked(
+        {(identity, charge): jnp.asarray(rng.standard_normal((2, 2)))},
+        (leg(identity, FlowDirection.OUT, "x"), leg(charge, FlowDirection.IN, "b")),
+    )
+    assert {_net_charge(A.indices, k) for k in A.blocks} == {charge}
+    assert {_net_charge(B.indices, k) for k in B.blocks} == {charge}
+
+    target = _parse_contraction_prelude((A, B), "ax,xb->ab")[_PRELUDE_TARGET_POS]
+    assert target == fused, sym.decode(target) if target is not None else target
+
+    ref = jnp.einsum("ax,xb->ab", A.todense(), B.todense())
+    assert float(jnp.linalg.norm(ref)) > 1.0, "reference is degenerate"
+
+    got = contract(A, B)
+    assert set(got.blocks) == {(charge, charge)}, sorted(got.blocks)
     np.testing.assert_allclose(np.asarray(got.todense()), np.asarray(ref), atol=1e-12)
