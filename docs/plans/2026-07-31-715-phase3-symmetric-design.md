@@ -74,9 +74,31 @@ It also inherits two properties of the library that A and B do not:
   none. CTM / RDM / energy networks are planar. This is what makes the
   fermionic slice (§8) small *provided* the network is expressed through
   `contract`, which B would forfeit.
-- **Charge bookkeeping is the library's job**, so a `FlowDirection` error
-  becomes a raised exception rather than a silently mis-glued network — the
-  #718 failure mode.
+- **Charge bookkeeping is the library's job**, so a *structural* mismatch —
+  incompatible dimensions, a charge set that cannot pair — raises instead of
+  producing a silently wrong number.
+
+  **Partial correction (measured during Task 6).** This was originally written
+  as the stronger claim that a `FlowDirection` error "becomes a raised
+  exception rather than a silently mis-glued network — the #718 failure mode".
+  That over-states it. `contract` enforces charge *conservation*, not physical
+  correctness: on a network whose flows pair badly it keeps the
+  charge-conserving components and **silently zeroes the rest** — measured at
+  3.09 out of an 8.81-scale result on a `T1 x a` contraction, 120 of 1024
+  entries retained. So the library catches structural errors, but a network
+  that is charge-legal and still physically mis-glued returns a plausible
+  wrong number, exactly as the dense path would. Approach C's advantage over B
+  here is narrower than claimed; its advantages on fermionic planarity and on
+  not hand-rolling charge fusion are unaffected.
+
+  Practical consequence, and the reason this matters beyond bookkeeping: a
+  random `SymmetricTensor` built on environment indices is **not** a legal CTM
+  environment tensor (the double layer conserves ket and bra charges
+  separately, while the fused index tracks only the difference). So
+  symmetric-vs-dense parity can only be tested on environments that came from
+  `initialize_ctm_tensor_env` / the sweep — never on random ones. Cf.
+  [[feedback_ctm_oracle_needs_wellconditioned_state]], which is the same
+  lesson from the other direction.
 
 C also follows existing precedent: `_truncated_svd_symmetric` already groups
 blocks by bond charge, runs dense per sector, and reassembles.
