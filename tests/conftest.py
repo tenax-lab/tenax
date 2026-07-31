@@ -59,6 +59,12 @@ _FILE_MARKERS = {
     "test_ctm_c4v_root_implicit.py": "algorithm",
     "test_ctm_root_implicit_asym.py": "algorithm",
     "test_ctm_root_implicit_sym_sectors.py": "core",
+    # Symmetric root-implicit AD (#715 Phase 3): the structural half of this
+    # file is cheap and belongs in the required gate, but the gradient tests
+    # peak at 8.4 GB RSS (XLA compiling the ~15k-equation block-sparse VJP
+    # inside GMRES's ``lax.while_loop``).  They carry their own explicit
+    # ``@pytest.mark.slow``, which the rule below honours by *withholding* this
+    # ``core``; see ``pytest_collection_modifyitems``.
     "test_ctm_root_implicit_symmetric.py": "core",
     "test_ctm_truncation_error.py": "core",
     "test_ctm_paired.py": "algorithm",
@@ -125,10 +131,33 @@ _FILE_MARKERS = {
 
 
 def pytest_collection_modifyitems(items):
+    """Apply the file's bucket marker, except where an explicit ``slow`` wins.
+
+    ``core`` is the *required* CI gate (``pytest -m core``, see
+    ``.github/workflows/ci.yml``), and ``-m core`` is a positive selector: a
+    test carrying both ``core`` and ``slow`` is selected by it.  So for a file
+    mapped to ``core``, an explicit ``@pytest.mark.slow`` on a test has to
+    *withhold* the file marker or it means nothing — the test would run in the
+    required gate anyway, which is how an 8.4 GB block-sparse AD test came to
+    be pointed at GitHub's ~7 GB Linux runners.
+
+    The ``algorithm`` files are deliberately left alone.  Their coexistence of
+    ``algorithm`` + explicit ``slow`` is already correct and already relied on
+    (see the ``test_split_ctm_2site_symmetric.py`` note above): the two
+    non-core buckets select ``not core and not slow``, so a slow test in an
+    ``algorithm`` file is excluded from them by the ``slow`` half regardless.
+    Measured, this rule moves exactly the two tests it is meant to move —
+    ``-m "core and slow"`` collected 2 items before it, both in
+    ``test_ctm_root_implicit_symmetric.py``, against 17 for
+    ``-m "algorithm and slow"``.
+    """
     for item in items:
-        filename = item.path.name
-        if filename in _FILE_MARKERS:
-            item.add_marker(getattr(pytest.mark, _FILE_MARKERS[filename]))
+        marker = _FILE_MARKERS.get(item.path.name)
+        if marker is None:
+            continue
+        if marker == "core" and item.get_closest_marker("slow") is not None:
+            continue
+        item.add_marker(getattr(pytest.mark, marker))
 
 
 # ------------------------------------------------------------------ #

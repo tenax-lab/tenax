@@ -539,11 +539,40 @@ def _projector_tensors_sym(
     return P_left_t, P_right_t
 
 
+def _check_layout_override(
+    wanted: BondLayout, svds: dict[int, SectorSVD], k: int
+) -> BondLayout:
+    """Check a forced layout is a legal truncation of ``svds``, and return it.
+
+    Test-only; see ``layout_override`` on :func:`all_projectors_sym`.  "Legal"
+    means every retained charge is one the cut actually carries and no sector is
+    asked for more directions than it has, so that what the caller gets is a
+    *different truncation of the same decomposition* rather than an index error
+    — which is the whole point of the hook.
+    """
+    for q in wanted.sectors:
+        if q not in svds:
+            raise ValueError(
+                f"layout_override[{k}] retains charge {q}, which the cut does not "
+                f"carry (it has {sorted(svds)}); an override has to be a different "
+                "truncation of the same decomposition, not a different cut."
+            )
+        available = min(svds[q].U.shape[1], svds[q].Vh.shape[0])
+        if wanted.dim_of(q) > available:
+            raise ValueError(
+                f"layout_override[{k}] asks sector {q} for {wanted.dim_of(q)} "
+                f"states; it only has {available}."
+            )
+    return wanted
+
+
 def all_projectors_sym(
     env: SymEnv,
     a: SymmetricTensor,
     chi: int,
     prev: list[SymProjectors] | None = None,
+    *,
+    layout_override: tuple[BondLayout | None, ...] | None = None,
 ) -> list[SymProjectors]:
     """Decompose the cut in all four directions, from the *same* environment.
 
@@ -559,13 +588,29 @@ def all_projectors_sym(
     pin.  A sector whose retained dimension moved between sweeps is pinned cold
     instead: the charge distribution over the cut is data-dependent, so unlike
     the dense case the two sweeps' blocks need not even have the same shape.
+
+    ``layout_override`` **exists solely for the trap test**
+    ``test_a_wrong_bond_layout_breaks_the_root`` and has no production caller.
+    It is a per-direction ``BondLayout | None`` replacing the one
+    :func:`sector_svd` chose, so a test can retain a *deliberately wrong* set
+    of states — one dimension moved from one charge sector to another, total
+    still ``chi`` — and ask whether anything downstream notices.  Nothing else
+    may use it: the layout is what the truncation *chose*, and choosing it from
+    outside is exactly the bug the trap test is built to catch.
     """
+    if layout_override is not None and len(layout_override) != 4:
+        raise ValueError(
+            f"layout_override must have one entry per direction, got "
+            f"{len(layout_override)}"
+        )
     out: list[SymProjectors] = []
     env_k, a_k = env, a
     for k in range(4):
         top, bot = _cut_halves_sym(env_k, a_k)
         M = contract(top, bot, output_labels=("m_row", "m_col"))
         svds, layout = sector_svd(M, chi, row_axis=0, col_axis=1)
+        if layout_override is not None and layout_override[k] is not None:
+            layout = _check_layout_override(layout_override[k], svds, k)
         # ``top`` keyed on ``m_row`` and ``bot`` keyed on ``cut`` reproduce
         # ``M``'s sector keys; see :func:`_sector_blocks`.
         top_blocks = _sector_blocks(top, row_axis=0, col_axis=1)
@@ -729,6 +774,8 @@ def sweep_sym(
     a: SymmetricTensor,
     chi: int,
     prev: list[SymProjectors] | None = None,
+    *,
+    layout_override: tuple[BondLayout | None, ...] | None = None,
 ) -> tuple[SymEnv, list[SymProjectors]]:
     """One simultaneous CTMRG sweep: all four directions from one environment.
 
@@ -740,8 +787,11 @@ def sweep_sym(
 
     Returns ``(env, projectors)``; the projectors feed the next sweep's
     per-sector gauge alignment.
+
+    ``layout_override`` is forwarded to :func:`all_projectors_sym` and is
+    test-only; see that function.
     """
-    projs = all_projectors_sym(env, a, chi, prev)
+    projs = all_projectors_sym(env, a, chi, prev, layout_override=layout_override)
     corners: list = [None] * 4
     edges: list = [None] * 4
     env_k, a_k = env, a
@@ -1500,6 +1550,7 @@ def root_parametrize_sym(
     pinv_rtol: float = 1e-10,
     polish_steps: int = 40,
     polish_tol: float = 1e-10,
+    layout_override: tuple[BondLayout | None, ...] | None = None,
 ) -> tuple[SymRoot, float]:
     """Extract ``y* = (C̃, Ẽ, 0, S*, 0)`` and the frozen isometries.
 
@@ -1525,18 +1576,26 @@ def root_parametrize_sym(
     geometrically, because the corner is the only equation built from two
     directions' projectors and so the only one that sees a *relative* bond
     phase (#721).
+
+    ``layout_override`` is forwarded to :func:`all_projectors_sym`, including
+    to the polish sweeps so the forced truncation is applied consistently, and
+    is test-only; see that function.
     """
     best: tuple[SymRoot, float] | None = None
     for _step in range(max(int(polish_steps), 1)):
         env = SymEnv(*[t * (1.0 / (jnp.linalg.norm(t._data) + 1e-300)) for t in env])
-        projs = all_projectors_sym(env, a, chi, prev_projs)
+        projs = all_projectors_sym(
+            env, a, chi, prev_projs, layout_override=layout_override
+        )
         prev_projs = projs
         if not _env_matches_layouts(env, projs):
             # Away from a fixed point the cut can retain a different charge
             # distribution than the bonds the environment was built on.  One
             # sweep makes them agree by construction, so sweep rather than
             # extract a root whose ``S`` lives on charges the corners lack.
-            env, prev_projs = sweep_sym(env, a, chi, projs)
+            env, prev_projs = sweep_sym(
+                env, a, chi, projs, layout_override=layout_override
+            )
             continue
         U_star, U_perp, Vh_star, Vh_perp, s_list, s_inv = [], [], [], [], [], []
         u_zero, v_zero = [], []

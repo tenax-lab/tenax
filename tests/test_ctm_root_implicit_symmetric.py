@@ -477,7 +477,8 @@ def test_retained_subspace_projector_matches_dense_across_layouts(seed, chi):
     carry (3.09 out of 8.81 on the very first ``T1 x a`` contraction), so the
     symmetric quadrant stops agreeing with the dense einsum before the
     projectors are even reached.  Generic-environment coverage needs the
-    symmetric sweep, i.e. a later task.
+    symmetric sweep, i.e. a later task — now
+    :func:`test_the_projectors_match_the_dense_module_on_a_swept_u1_environment`.
     """
     from tenax.algorithms._ctm_root_implicit_asym import all_projectors
     from tenax.algorithms._ctm_root_implicit_symmetric import (
@@ -776,6 +777,92 @@ def test_symmetric_sweep_tracks_the_dense_sweep_on_the_u1_fixture():
         f"u1 sweep parity: corner-sv {worst_sv:.3e}, energy worst {worst_e:.3e}, "
         f"last sweep {last_e:.3e}"
     )
+
+
+def test_the_projectors_match_the_dense_module_on_a_swept_u1_environment():
+    """The fragmenting layout, checked on *generic* environments, sweep by sweep.
+
+    :func:`test_retained_subspace_projector_matches_dense_across_layouts` pins
+    the same quantity but only ever on ``initialize_ctm_tensor_env``'s
+    environment, and says so: "Generic-environment coverage needs the symmetric
+    sweep, i.e. a later task."  This is that check.  A swept U(1) environment is
+    the case the initialiser cannot produce — its corner and edge chi legs carry
+    whatever charges the *previous* truncation chose rather than the uniform
+    ones the initialiser stamps — and it is where the layout arithmetic actually
+    has to work rather than happening to be uniform.  The sweep is also the
+    *only* way to get one: as that docstring records, a random
+    ``SymmetricTensor`` on the same indices is a legal tensor but not a legal
+    CTM environment, and the symmetric and dense quadrants stop agreeing before
+    the projectors are reached.
+
+    What makes it worth its 40 s is that the layout genuinely moves.  Measured
+    over these six sweeps, direction 0 goes
+
+        {-1:1, 0:2, 1:1} -> {0:3, 1:1} -> {-1:1, 0:3} -> {0:4}
+
+    while directions 1 and 2 sit at ``{-1:1, 0:2, 1:1}`` throughout — so within
+    one comparison the test covers three-sector and one-sector cuts, sectors
+    that empty out, sectors that grow, and four directions disagreeing about all
+    of it.  An assembly that mapped sector blocks to the wrong offsets of the
+    fused cut leg survives none of that.
+
+    Convergence is deliberately not required, and cannot be had: this fixture's
+    CTM does not settle (see :func:`_convergent_site_tensor`).  It is not needed
+    — the projectors of a *given* environment are a well-defined function of it,
+    so the symmetric and dense layers must agree at every sweep, converged or
+    not.  The dense reference is taken from the densified symmetric environment
+    rather than from an independently swept dense chain, so the comparison
+    isolates the projector layer: the two cannot drift apart upstream and then
+    be blamed on the projectors.
+
+    The compared quantity is ``P_left @ P_right``, the oblique projector onto
+    the retained subspace, because it is the gauge-invariant one — see
+    :func:`test_retained_subspace_projector_matches_the_dense_module`.
+    """
+    from tenax.algorithms import _ctm_root_implicit_asym as dense
+    from tenax.algorithms._ctm_root_implicit_symmetric import _as_matrix_sym
+    from tenax.linalg import _group_blocks_by_bond_charge
+
+    chi = 4
+    A = _site_tensor()
+    env, a = init_env_sym(A, chi)
+    projs = None
+    worst = 0.0
+    seen = set()
+    for _sweep in range(6):
+        sym_projs = all_projectors_sym(env, a, chi, projs)
+        dense_projs = dense.all_projectors(
+            _dense_env_of(env), jnp.asarray(a.todense()), chi
+        )
+        env_k, a_k = env, a
+        for k in range(4):
+            layout = sym_projs[k].layout
+            assert layout.total == chi, layout.dims
+            seen.add(layout.dims)
+            bot = _as_matrix_sym(lower_left_quadrant_sym(env_k, a_k))
+            grouped = _group_blocks_by_bond_charge(bot, [0], [1])
+            cut_charge_of_q = {q: int(e[0][0][0]) for q, e in grouped.items()}
+            got = _dense_retained_projector(
+                sym_projs[k], bot.indices[0], cut_charge_of_q
+            )
+            expected = dense_projs[k][0] @ dense_projs[k][1]
+            rel = float(jnp.max(jnp.abs(got - expected))) / float(
+                jnp.max(jnp.abs(expected))
+            )
+            worst = max(worst, rel)
+            assert rel < 1e-10, (k, rel, layout.dims)
+            env_k, a_k = rotate_env_sym(env_k), rotate_a_sym(a_k)
+        env, projs = sweep_sym(env, a, chi, projs)
+
+    # Not vacuous: the environment really did leave the initialiser's uniform
+    # layout, and the fragmenting three-sector cut really is among those
+    # compared.  (Measured here: four distinct layouts, down to a single-sector
+    # ``{0: 4}``.  Only the two statements below are asserted, because which
+    # layouts a *non-convergent* trajectory visits after a few sweeps is a
+    # weaker thing to pin than the parity itself.)
+    assert len(seen) >= 2, sorted(seen)
+    assert any(len(d) == 3 for d in seen), sorted(seen)
+    print(f"swept-u1 projector parity {worst:.3e}; layouts visited {sorted(seen)}")
 
 
 def test_to_ctm_env_sym_applies_the_convention_swap():
@@ -1273,6 +1360,186 @@ def test_a_moving_bond_layout_is_refused_rather_than_mis_extracted():
         root_parametrize_sym(env, a, chi=4, prev_projs=projs, polish_steps=1)
 
 
+def _move_one_dimension(layout):
+    """``layout`` with one retained state moved from its first sector to its second.
+
+    Total unchanged, so it is still a truncation to ``chi``; only *which*
+    charges get to keep how many states differs.
+    """
+    from tenax.algorithms._ctm_root_implicit_sym_sectors import BondLayout
+
+    dims = dict(layout.dims)
+    lo, hi = sorted(dims)[:2]
+    dims[lo] -= 1
+    dims[hi] += 1
+    return BondLayout.from_dims(dims)
+
+
+def test_a_wrong_bond_layout_breaks_the_root(converged_root):
+    """The layout must be load-bearing.
+
+    Take the converged root and move one retained dimension from one charge
+    sector to another, keeping the total at chi.  Every shape still fits and
+    every charge still conserves — only the *physics* is wrong.  If F is still
+    a root after that, the sector bookkeeping is not doing anything and none
+    of the other tests mean what they claim.
+
+    Measured on this fixture, ``{-1: 2, 0: 2}`` at chi=4 against
+    ``{-1: 1, 0: 3}``, and the answer comes in two parts because the layout is
+    load-bearing in two different places.
+
+    * The layout is recorded in the *environment*, not only in the equations:
+      every corner and edge chi leg carries it as its index multiplicities.  So
+      re-extracting a root of the **same** environment under a moved layout is
+      refused outright — ``root_parametrize_sym`` will not put an ``S`` on a
+      bond the corners do not have.  That is the "every shape still fits" claim
+      failing: it does not, and the module says so rather than reshaping around
+      it.
+    * Give the wrong layout every chance instead — let it re-truncate the
+      environment consistently, so that the bonds, ``S``, the isometries and the
+      cut all agree with each other and nothing *can* raise — and ``‖F(y)‖``
+      floors at **4.0e-1**, against 2.7e-13 for the layout the truncation
+      actually chose.  It is not a matter of polishing further: the residual is
+      the same to seven digits at 3 sweeps and at 40.  A forced layout is a
+      legal truncation with legal shapes and no root nearby.
+
+    The control matters as much as the trap: pushing the *right* layout through
+    the same override reproduces the fixture's residual (identically, in fact,
+    on this machine — asserted to 1e-3 relative so a different BLAS cannot make
+    it flaky), so what breaks the root above is the moved dimension and not the
+    hook.
+    """
+    _A, a, env, projs, _root, residual = converged_root
+    right = tuple(p.layout for p in projs)
+    wrong = tuple(_move_one_dimension(x) for x in right)
+    assert all(x.total == 4 for x in wrong), [x.dims for x in wrong]
+    assert all(w.dims != r.dims for w, r in zip(wrong, right, strict=True))
+
+    # The hook is inert: the right layout through it is the fixture's root.
+    _same, res_control = root_parametrize_sym(
+        env, a, chi=4, prev_projs=projs, layout_override=right, polish_steps=1
+    )
+    assert res_control < 1e-10, res_control
+    assert abs(res_control - residual) <= 1e-3 * residual, (res_control, residual)
+
+    # (a) The environment's own bonds record the layout, so a moved one is
+    #     refused rather than mis-extracted.
+    with pytest.raises(ValueError, match="never carried the charge distribution"):
+        root_parametrize_sym(
+            env, a, chi=4, prev_projs=projs, layout_override=wrong, polish_steps=1
+        )
+
+    # (b) Applied consistently — the polish sweeps use it too — everything is
+    #     shape-legal and the residual is still twelve orders too big.
+    bad_root, res_wrong = root_parametrize_sym(
+        env, a, chi=4, prev_projs=projs, layout_override=wrong, polish_steps=3
+    )
+    assert [x.dims for x in bad_root.layouts] == [x.dims for x in wrong]
+    assert res_wrong > 1e-2, res_wrong
+    assert res_wrong > 1e9 * residual, (res_wrong, residual)
+    print(
+        f"layout {right[0].dims} -> {wrong[0].dims}: norm(F) {residual:.3e} -> "
+        f"{res_wrong:.3e}"
+    )
+
+
+def test_layout_override_refuses_a_layout_the_cut_cannot_supply():
+    """The trap hook only forces truncations that exist, so the trap is a trap.
+
+    ``layout_override`` is there to retain a *different* set of states from the
+    same decomposition (:func:`test_a_wrong_bond_layout_breaks_the_root`).  If
+    it also accepted charges the cut does not carry, or more states than a
+    sector has, the trap test would be measuring an index error rather than a
+    wrong truncation.
+    """
+    from tenax.algorithms._ctm_root_implicit_sym_sectors import BondLayout
+
+    A = _convergent_site_tensor()
+    env, a = init_env_sym(A, chi=4)
+    good = tuple(p.layout for p in all_projectors_sym(env, a, chi=4))
+
+    absent = (BondLayout.from_dims({7: 4}),) + good[1:]
+    with pytest.raises(ValueError, match="which the cut does not carry"):
+        all_projectors_sym(env, a, chi=4, layout_override=absent)
+
+    greedy = (BondLayout.from_dims({good[0].sectors[0]: 4096}),) + good[1:]
+    with pytest.raises(ValueError, match="it only has"):
+        all_projectors_sym(env, a, chi=4, layout_override=greedy)
+
+    with pytest.raises(ValueError, match="one entry per direction"):
+        all_projectors_sym(env, a, chi=4, layout_override=good[:3])
+
+    # And passing the real layouts back in is a no-op, direction by direction.
+    same = all_projectors_sym(env, a, chi=4, layout_override=good)
+    assert [p.layout.dims for p in same] == [x.dims for x in good]
+
+
+def test_a_wrong_sector_assignment_survives_every_shape_check(converged_root):
+    """The companion trap, for the case no guard can catch.
+
+    Moving a dimension changes shapes, so the module gets to refuse it.  This
+    one does not: at chi=4 the Z2 cut retains ``{-1: 2, 0: 2}`` and **every**
+    per-sector block — ``u``, ``S``, ``v``, ``U*``, ``U_perp``, ``V*``,
+    ``V_perp`` — has literally the same shape in both sectors, which the test
+    asserts before doing anything else.  So exchanging the two sectors' blocks
+    is invisible to every shape check, every charge check and the bond index
+    itself; nothing raises, and the only thing that can notice is ``F``.
+
+    It does: ``‖F‖`` goes from 2.7e-13 to ~1.2e3.  Swapping only ``S`` (27) or
+    only the isometries (40) is enough on its own, so the sector assignment is
+    live in both halves of the equations rather than in one place that happens
+    to dominate.
+    """
+    _A, a, _env, _projs, root, residual = converged_root
+
+    def swap(d):
+        lo, hi = sorted(d)
+        return {lo: d[hi], hi: d[lo]}
+
+    def swap_all(xs):
+        return tuple(swap(d) for d in xs)
+
+    fields = ("u", "s", "v", "U_star", "U_perp", "Vh_star", "Vh_perp", "s_star_inv")
+    for k in range(4):
+        sectors = root.layouts[k].sectors
+        assert len(sectors) == 2, (k, root.layouts[k].dims)
+        for name in fields:
+            shapes = {getattr(root, name)[k][q].shape for q in sectors}
+            assert len(shapes) == 1, (k, name, shapes)
+
+    swapped = root._replace(**{name: swap_all(getattr(root, name)) for name in fields})
+    both = _residual_norm(
+        characteristic_residual_sym(
+            (root.env, swapped.u, swapped.s, swapped.v), a, swapped, 4
+        )
+    )
+    s_only = _residual_norm(
+        characteristic_residual_sym(
+            (root.env, root.u, swap_all(root.s), root.v), a, root, 4
+        )
+    )
+    iso_only = _residual_norm(
+        characteristic_residual_sym(
+            root.y,
+            a,
+            root._replace(
+                **{
+                    name: swap_all(getattr(root, name))
+                    for name in ("U_star", "U_perp", "Vh_star", "Vh_perp")
+                }
+            ),
+            4,
+        )
+    )
+    assert both > 1.0, both
+    assert s_only > 1.0, s_only
+    assert iso_only > 1.0, iso_only
+    print(
+        f"sector swap: |F| root {residual:.2e} / all {both:.2e} / S only "
+        f"{s_only:.2e} / isometries only {iso_only:.2e}"
+    )
+
+
 def test_a_bond_sign_orbit_is_a_root_not_a_stall():
     """The unboosted Z2 state settles onto a bond-sign orbit, and that is fine.
 
@@ -1339,6 +1606,23 @@ def test_a_bond_sign_orbit_is_a_root_not_a_stall():
 
 # ---------------------------------------------------------------------------
 # The adjoint and the gradient (paper Eq. 18)
+#
+# **Every test below that touches the ``sym_gradient`` fixture must carry
+# ``@pytest.mark.slow``, and that is a CI requirement rather than a
+# preference.**  Building the fixture peaks at 8.4 GB RSS — measured, staged:
+# 0.69 GB after the root extraction, 2.33 after the energy VJP, 2.50 after the
+# ``F`` VJP trace, 8.36 after the GMRES solve, flat thereafter.  The step that
+# costs it is XLA compiling the ~15k-equation block-sparse VJP inside GMRES's
+# ``lax.while_loop``; ``restart=10`` only reaches 7.19 GB and is both slower
+# (93 s vs 49 s) and far less accurate (2.5e-10 vs 6.4e-15), so there is no
+# cheap lever inside the solver.  GitHub's Linux runners have ~7 GB (see the
+# ``jax.clear_caches`` threshold note in ``tests/conftest.py``), and ``-m
+# core`` is the required gate, so an unmarked test here OOM-kills the runner
+# — which is what a marker on only *some* consumers of a module-scoped
+# fixture would still do, since the first consumer to run builds it.
+# ``tests/conftest.py`` withholds this file's ``core`` marker from anything
+# explicitly marked ``slow``; without the marker here that mechanism has
+# nothing to act on.
 # ---------------------------------------------------------------------------
 
 
@@ -1349,7 +1633,8 @@ def sym_gradient():
     Module scoped because this is the expensive object in the file: a 36-sweep
     convergence, the root extraction, three VJP traces and a GMRES solve
     through the block-sparse ``F``.  Every gradient test below reads the same
-    result rather than recomputing it.
+    result rather than recomputing it — and every one of them is ``slow``, for
+    the 8.4 GB reason in the section header above.
     """
     import tenax
 
@@ -1359,6 +1644,7 @@ def sym_gradient():
     return A, gate, 4, energy, grad, diag
 
 
+@pytest.mark.slow
 def test_no_svd_or_eigh_primitive_in_the_backward(sym_gradient):
     """The claim the whole method rests on, asserted on the jaxpr.
 
@@ -1394,6 +1680,7 @@ def test_no_svd_or_eigh_primitive_in_the_backward(sym_gradient):
     print(f"backward primitives: {sorted(text.split())}")
 
 
+@pytest.mark.slow
 def test_the_gradient_entry_point_reports_clean_diagnostics(sym_gradient):
     """The gradient is a ``SymmetricTensor`` on ``A``'s own indices, and finite.
 
@@ -1424,6 +1711,7 @@ def test_the_gradient_entry_point_reports_clean_diagnostics(sym_gradient):
     )
 
 
+@pytest.mark.slow
 def test_a_dense_site_tensor_is_refused(sym_gradient):
     """The dense 1x1 path is a different function, and says so."""
     A, gate, _chi, _e, _g, _diag = sym_gradient
@@ -1431,6 +1719,7 @@ def test_a_dense_site_tensor_is_refused(sym_gradient):
         sym_root_implicit_energy_and_grad(_as_dense_site(A), gate, chi=4)
 
 
+@pytest.mark.slow
 def test_the_singular_value_adjoint_is_not_negligible(sym_gradient):
     """``S̆`` is the same order as ``C̆`` — the #718 bug, as a number.
 
