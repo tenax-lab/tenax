@@ -25,7 +25,7 @@ import numpy as np
 
 from tenax.core import BlockKey, SymmetricTensor
 from tenax.core.index import FlowDirection, Label, TensorIndex
-from tenax.core.symmetry import BaseSymmetry
+from tenax.core.symmetry import BaseSymmetry, ProductSymmetry
 from tenax.linalg import _group_blocks_by_bond_charge
 
 
@@ -255,9 +255,45 @@ def tensor_from_sector_matrices(
     every fixture in this module happens to use — verified empirically
     against ``sector_svd`` + ``._validate()`` + a numeric round trip for all
     four IN/OUT combinations, not assumed from the IN/OUT case alone.
+
+    **This arithmetic is raw integer negation, not the group inverse**, so it
+    is valid exactly where ``dual(q) == -q`` as integers.  That holds for
+    U(1).  For ``Z_n`` it holds only modulo ``n``: the partner of ``q`` is
+    written ``-q`` where the canonical representative is ``(-q) % n``, so a
+    ``Z2`` bond comes out labelled ``-1`` rather than ``1``.  That is
+    *consistent* — every leg this module builds uses the same convention, and
+    ``ZnSymmetry.fuse`` reduces mod ``n``, so conservation still checks out —
+    and it is the convention ``tenax.linalg`` itself produces, because
+    :func:`~tenax.linalg._group_blocks_by_bond_charge` calls ``fuse_many`` on
+    a *single* flow-weighted charge and ``fuse_many`` of one array returns it
+    unreduced.  ``tenax.linalg.svd`` on a ``Z2`` tensor whose left leg flows
+    OUT yields bond sectors ``[-1, 0]`` for the same reason (see #733).
+    Diverging from it here would make this module's bonds fail to contract
+    against the rest of the library, so this follows the library.
+
+    For :class:`~tenax.core.symmetry.ProductSymmetry` the equality fails in a
+    way modular arithmetic does *not* absorb — charges are bit-packed, so
+    negating the packed integer is not the component-wise inverse:
+    ``-encode(1, 2)`` decodes as ``(-1, -3)``, and ``fuse(q, -q)`` is
+    ``-65536`` rather than the identity.  Those blocks genuinely violate
+    charge conservation, and ``_from_blocks_unchecked`` would let them through
+    to later contractions, so product symmetries are refused outright rather
+    than silently mis-assembled.
     """
     if {row_axis, col_axis} != {0, 1}:
         raise ValueError("row_axis and col_axis must be 0 and 1 in some order")
+
+    sym = row_index.symmetry
+    if isinstance(sym, ProductSymmetry):
+        raise NotImplementedError(
+            "tensor_from_sector_matrices pins the partner charge as the raw "
+            "integer -q, which is the group inverse for U(1) and (mod n) for "
+            "Z_n but not for ProductSymmetry: charges are bit-packed, so "
+            "-encode(1, 2) decodes as (-1, -3), not (-1, -2), and the block "
+            "violates charge conservation.  Reconstructing through "
+            "symmetry.dual/fuse is the fix; until then #715 Phase 3 supports "
+            "U(1) and Z_n only."
+        )
 
     indices: list[TensorIndex] = [None, None]  # type: ignore[list-item]
     indices[row_axis] = row_index

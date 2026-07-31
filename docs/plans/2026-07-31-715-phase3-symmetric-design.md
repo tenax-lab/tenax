@@ -249,6 +249,24 @@ the only one that sees a *relative* bond phase (#721).
   obscurely: non-uniform unit cells (#667 — `initialize_ctm_tensor_env` derives
   both corner chi-legs from one `ref_axis`, so `A.l != A.r` is wrong, not merely
   untested) and 2-site.
+- **`ProductSymmetry` is refused** (added 2026-08-01, from a Codex review of
+  PR #729). The sector layer pins a partner charge as the raw integer `-q`,
+  which is the group inverse for U(1) and, mod `n`, for `Z_n` — but charges in
+  a product group are bit-packed, so `-encode(1,2)` decodes as `(-1,-3)` and
+  `fuse(q,-q)` is not the identity. Those blocks violate conservation, and
+  `_from_blocks_unchecked` would carry them into a contraction that silently
+  zeroes the non-conserving part. Raising is the only safe option until the
+  reconstruction goes through `symmetry.dual`/`fuse`.
+- **`Z_n` bonds carry a non-canonical representative**, and this module
+  reproduces it deliberately. A Z2 partner is labelled `-1` rather than `1`
+  because `_group_blocks_by_bond_charge` fuses a *single* flow-weighted charge
+  and `fuse_many` of one array skips the `% n`. This is not this module's
+  invention — `tenax.linalg.svd` emits the same labels for a Z2 tensor whose
+  left leg flows OUT (#733) — and the CTM cut hits it because both projectors
+  are built with row and col flowing the same way. Diverging unilaterally would
+  make these bonds fail to contract against the rest of the library, so the
+  convention is pinned by a test that should fail and be updated in step when
+  #733 is fixed.
 
 ## 6. Testing
 
@@ -258,7 +276,7 @@ the only one that sees a *relative* bond phase (#721).
 | Dense agreement | symmetric forward energy == densified dense energy, ~1e-12; `norm(F(y*))` ~ 1e-14 |
 | **Gradient** | symmetric gradient vs (a) dense root-implicit gradient after densifying, (b) directional FD. Target ~1e-9 |
 | Jaxpr | no `svd` or `eigh` primitive anywhere in the backward (Phase 0 precedent) |
-| **Trap** | a deliberately wrong cut-leg charge assignment must **fail** |
+| **Trap** | a deliberately wrong cut-leg charge assignment must change the **state**, measured by energy — see below for why not by `norm(F)` |
 
 Coverage is **both** Z2 (equal sector sizes) and U(1) with non-trivial charges
 (unequal sectors). Testing only one hides layout bugs: per #566's D-parity
@@ -267,6 +285,31 @@ fragment, and only the fragmenting case exercises the layout arithmetic.
 
 Scale D=2, chi=4-8. Tests are named so `conftest.py` auto-marking keeps the
 cheap tiers in `core` and the gradient parity in the slow bucket.
+
+### A forced layout is a different problem, not a broken one
+
+The trap tier originally asserted that moving one retained dimension between
+charge sectors leaves `norm(F)` far from zero — measured at 4.0e-1 against
+2.7e-13. **That was an artifact and the claim is withdrawn** (2026-08-01, from
+a Codex review of PR #729). `root_parametrize_sym` forwarded `layout_override`
+to the projectors but dropped it on the sweep that advances the environment, so
+the run alternated forced and natural truncations; 4.0e-1 was the floor of the
+alternation, not of the forced layout.
+
+Forwarded consistently, the forced layout **converges to a root of its own** —
+`norm(F)` falls 8.8e-2 -> 2.4e-6 -> 9.3e-11 over 3/10/40 polish sweeps, and
+reaches 2.2e-14 when converged from a fresh environment. That is the right
+answer physically: fixing the retained charge distribution poses a different
+truncation problem, and that problem has a fixed point. What the moved
+dimension changes is *which* fixed point — `E = -0.10873` against `-0.10502`,
+a 3.7e-3 gap next to the 1e-10 the natural layout reproduces against the dense
+module.
+
+So the layout is load-bearing, and the trap still bites; the discriminator is
+the energy, not the residual. The general lesson is the one worth keeping: **a
+counterfactual that fails for the reason you assumed is worth re-deriving when
+the harness that forces it is itself new.** Both halves have to be forced, or
+the number measures the harness.
 
 ### Two measurement traps that cost hours in Phases 1-2
 

@@ -368,3 +368,145 @@ def test_tensor_from_sector_matrices_round_trips_nonsquare_sectors():
     )
     assert float(jnp.max(jnp.abs(rebuilt.todense() - m.todense()))) < 1e-10
     assert rebuilt.labels() == m.labels()
+
+
+def test_zn_round_trips_when_the_flows_are_opposite():
+    """``Z_n`` is safe in the orientation the sector layer is normally used in.
+
+    The partner charge is pinned as the raw integer ``-q``, which is the group
+    inverse for U(1) but only ``(-q) % n`` for ``Z_n``.  With opposite row/col
+    flows the negation is applied twice and cancels, so the keys land back on
+    the originals whatever the modulus.  This is the case every SVD-shaped use
+    hits, and it must stay exact.
+    """
+    for sym, secs in [(ZnSymmetry(2), [0, 1]), (ZnSymmetry(3), [0, 1, 2])]:
+
+        def leg(flow, lbl, sym=sym, secs=secs):
+            return TensorIndex(
+                symmetry=sym,
+                sectors=np.array(secs),
+                multiplicities=np.array([2] * len(secs)),
+                flow=flow,
+                label=lbl,
+            )
+
+        m = SymmetricTensor.random_normal_np(
+            (leg(FlowDirection.IN, "r"), leg(FlowDirection.OUT, "c")),
+            np.random.RandomState(0),
+        )
+        sectors, _ = sector_svd(m, 8, row_axis=0, col_axis=1)
+        mats = {
+            q: blk.U[:, : len(blk.s)]
+            @ jnp.diag(blk.s.astype(blk.U.dtype))
+            @ blk.Vh[: len(blk.s), :]
+            for q, blk in sectors.items()
+        }
+        rebuilt = tensor_from_sector_matrices(
+            mats,
+            row_index=m.indices[0],
+            col_index=m.indices[1],
+            row_axis=0,
+            col_axis=1,
+        )
+        rebuilt._validate()
+        assert sorted(rebuilt._block_keys) == sorted(m._block_keys)
+        err = float(jnp.max(jnp.abs(rebuilt.todense() - m.todense())))
+        assert err < 1e-10, (sym, err)
+
+
+def test_zn_same_flow_bonds_carry_the_library_s_own_representative():
+    """Same-flow legs label ``Z_n`` partners ``-q``, matching ``tenax.linalg``.
+
+    This is the orientation the CTM cut actually uses (both projectors are
+    built with row and col flowing the same way), and there the partner of
+    charge 1 is written ``-1`` rather than the canonical ``1``.  It is a
+    non-canonical *representative*, not a broken block: ``fuse`` reduces mod
+    ``n``, so ``_validate`` passes and every leg in the module agrees.
+
+    The point of pinning it is that it is not this module's invention —
+    ``tenax.linalg.svd`` emits exactly the same labels for a ``Z2`` tensor
+    whose left leg flows OUT, because ``_group_blocks_by_bond_charge`` fuses a
+    single flow-weighted charge and ``fuse_many`` of one array skips the
+    ``% n``.  If #733 canonicalises that upstream, this test is the one that
+    should fail and be updated in step, rather than the two conventions
+    drifting apart silently.
+    """
+    import tenax.linalg as tl
+
+    sym = ZnSymmetry(2)
+
+    def leg(flow, lbl):
+        return TensorIndex(
+            symmetry=sym,
+            sectors=np.array([0, 1]),
+            multiplicities=np.array([2, 2]),
+            flow=flow,
+            label=lbl,
+        )
+
+    # The library, on the same orientation, for reference.
+    t = SymmetricTensor.random_normal_np(
+        (leg(FlowDirection.OUT, "a"), leg(FlowDirection.IN, "b")),
+        np.random.RandomState(0),
+    )
+    U = tl.svd(t, left_labels=["a"], right_labels=["b"])[0]
+    lib_bond = [i for i in U.indices if i.label != "a"][0]
+    assert sorted(int(q) for q in lib_bond.sectors) == [-1, 0]
+
+    # This module, same convention.
+    m = SymmetricTensor.random_normal_np(
+        (leg(FlowDirection.OUT, "r"), leg(FlowDirection.OUT, "c")),
+        np.random.RandomState(1),
+    )
+    sectors, _ = sector_svd(m, 8, row_axis=0, col_axis=1)
+    mats = {
+        q: blk.U[:, : len(blk.s)]
+        @ jnp.diag(blk.s.astype(blk.U.dtype))
+        @ blk.Vh[: len(blk.s), :]
+        for q, blk in sectors.items()
+    }
+    rebuilt = tensor_from_sector_matrices(
+        mats, row_index=m.indices[0], col_index=m.indices[1], row_axis=0, col_axis=1
+    )
+    rebuilt._validate()
+    assert (1, -1) in set(rebuilt._block_keys)
+
+
+def test_product_symmetry_is_refused_rather_than_mis_assembled():
+    """Bit-packed charges make ``-q`` the wrong partner, and nothing catches it.
+
+    For ``Z_n`` the raw negation is a different representative of the right
+    charge.  For :class:`ProductSymmetry` it is a different charge outright:
+    ``-encode(1, 2)`` decodes as ``(-1, -3)``, and ``fuse(q, -q)`` is not the
+    identity, so the block violates conservation.  ``_from_blocks_unchecked``
+    would pass it straight through to a later contraction, which per this
+    module's own measurements keeps the conserving components and silently
+    zeroes the rest — the failure mode #715 exists to make loud.  So it raises.
+    """
+    from tenax.core.symmetry import ProductSymmetry
+
+    sym = ProductSymmetry(U1Symmetry(), U1Symmetry())
+    a = ProductSymmetry.encode(1, 2)
+
+    # The premise, measured rather than asserted from the docstring.
+    assert ProductSymmetry.decode(-a) == (-1, -3)
+    assert ProductSymmetry.decode(int(sym.dual(np.array([a]))[0])) == (-1, -2)
+    assert int(sym.fuse(np.array([a]), np.array([-a]))[0]) != 0
+
+    def leg(flow, lbl):
+        return TensorIndex(
+            symmetry=sym,
+            sectors=np.array([0, a]),
+            multiplicities=np.array([1, 1]),
+            flow=flow,
+            label=lbl,
+        )
+
+    with pytest.raises(NotImplementedError, match="ProductSymmetry"):
+        tensor_from_sector_matrices(
+            {0: jnp.ones((1, 1))},
+            row_index=leg(FlowDirection.OUT, "r"),
+            col_index=leg(FlowDirection.OUT, "c"),
+            row_axis=0,
+            col_axis=1,
+        )
