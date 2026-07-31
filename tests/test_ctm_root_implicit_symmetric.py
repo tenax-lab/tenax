@@ -1,5 +1,6 @@
 """Symmetric root-implicit CTMRG gradient (#715 Phase 3, 1x1 bosonic abelian)."""
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -7,16 +8,23 @@ import pytest
 from tenax import FlowDirection, SymmetricTensor, TensorIndex, U1Symmetry, ZnSymmetry
 from tenax.algorithms._ctm_root_implicit_symmetric import (
     SymEnv,
+    SymRoot,
+    absorb_inverse_roots_sym,
     all_projectors_sym,
+    apply_bond_matrix,
+    characteristic_residual_sym,
     converge_sym,
     half_infinite_sym,
     init_env_sym,
     lower_left_quadrant_sym,
+    remove_inverse_roots_sym,
+    root_parametrize_sym,
     rotate_a_sym,
     rotate_env_sym,
     swap_env_convention_sym,
     sweep_sym,
     sym_energy,
+    sym_root_to_covariant_convention,
     upper_left_quadrant_sym,
 )
 
@@ -821,3 +829,507 @@ def test_to_ctm_env_sym_applies_the_convention_swap():
     e_bad = float(compute_energy_ctm_tensor(A, unswapped, gate))
     assert abs(e_ok - e_bad) > 1e-6, (e_ok, e_bad)
     print(f"swap matters: e={e_ok:.12f} vs unswapped e={e_bad:.12f}")
+
+
+# ---------------------------------------------------------------------------
+# Characteristic equations, covariant form (paper §V.3)
+# ---------------------------------------------------------------------------
+
+
+def _plain_z2_site_tensor(seed: int = 2) -> SymmetricTensor:
+    """:func:`_convergent_site_tensor` *without* the dominant-block boost.
+
+    Kept as its own fixture because it is the state whose sweep settles onto a
+    residual **bond-sign orbit** rather than a fixed point — see
+    :func:`test_a_bond_sign_orbit_is_a_root_not_a_stall`, which is the only
+    thing it is used for.
+    """
+    sym = ZnSymmetry(2)
+    phys = TensorIndex(
+        symmetry=sym,
+        sectors=np.array([0, 1]),
+        multiplicities=np.array([1, 1]),
+        flow=FlowDirection.OUT,
+        label="phys",
+    )
+
+    def virt(flow, lbl):
+        return TensorIndex(
+            symmetry=sym,
+            sectors=np.array([0, 1]),
+            multiplicities=np.array([1, 1]),
+            flow=flow,
+            label=lbl,
+        )
+
+    return SymmetricTensor.random_normal_np(
+        (
+            virt(FlowDirection.IN, "u"),
+            virt(FlowDirection.OUT, "d"),
+            virt(FlowDirection.IN, "l"),
+            virt(FlowDirection.OUT, "r"),
+            phys,
+        ),
+        np.random.RandomState(seed),
+    )
+
+
+def _complex_site_tensor(imag: float = 0.25, seed: int = 5) -> SymmetricTensor:
+    """:func:`_convergent_site_tensor` with an imaginary part on every block.
+
+    Complex is not decoration: ``λ = ⟨X, X'⟩`` is genuinely complex for a
+    complex state and real-projecting it is a silent, large error (#721).  On
+    this fixture the four corner ``λ`` come out ``-0.3758+0.2185j``,
+    ``0.4953``, ``0.4487-0.0522j``, ``0.6260``.
+    """
+    A = _convergent_site_tensor()
+    rng = np.random.RandomState(seed)
+    blocks = {
+        k: v + 1j * imag * jnp.asarray(rng.standard_normal(v.shape))
+        for k, v in A.blocks.items()
+    }
+    return SymmetricTensor._from_blocks_unchecked(blocks, A.indices)
+
+
+def _residual_norm(R) -> float:
+    """``‖F‖`` over a residual pytree.
+
+    ``SymmetricTensor`` flattens to a *single* leaf — its packed ``_data``
+    buffer — whose L2 norm is the Frobenius norm, so this needs no adapter and
+    never materialises a dense array.
+    """
+    from tenax.algorithms._ctm_root_implicit_symmetric import _leaf_data
+
+    return float(
+        jnp.sqrt(sum(jnp.sum(jnp.abs(_leaf_data(x)) ** 2) for x in jax.tree.leaves(R)))
+    )
+
+
+@pytest.fixture(scope="module")
+def converged_root():
+    """One converged Z2 environment and its root, shared across the §V.3 tests.
+
+    Module-scoped because the 36 sweeps plus the extraction are the expensive
+    part and this file runs in the ``core`` CI gate; every test below reads the
+    same root rather than rebuilding it.
+    """
+    A = _convergent_site_tensor()
+    env, a, meta, projs = converge_sym(A, chi=4, max_iter=60, return_projectors=True)
+    assert meta["converged"], meta
+    root, residual = root_parametrize_sym(env, a, chi=4, prev_projs=projs)
+    return A, a, env, projs, root, residual
+
+
+def test_the_converged_environment_is_a_root(converged_root):
+    """The gate for the whole of §V.3: the sweep's fixed point solves ``F = 0``.
+
+    ``F`` is assembled from the **upper** half of the plane while
+    :func:`sweep_sym` truncates with the **left** half, so this is not a
+    tautology — the two are related only through
+    :func:`sym_root_to_covariant_convention`, and a sweep and an equation that
+    disagree give a fixed point that is not a root.  That is how #718 started.
+
+    ``prev_projs`` is passed deliberately: a cold re-pin fixes a *different*
+    bond gauge and leaves ``y*`` describing an environment it was not extracted
+    from.
+    """
+    _A, _a, _env, _projs, _root, residual = converged_root
+    assert residual < 1e-10, residual
+    print(f"norm(F(y*)) = {residual:.3e}")
+
+
+def test_the_root_residual_is_not_vacuously_zero(converged_root):
+    """``F`` really depends on ``y`` — 1e-13 at the root is a statement, not a bug.
+
+    A residual that collapsed to zero because a contraction silently dropped
+    the charge-conserving part of the network (``contract`` does that rather
+    than raising) would pass the gate above and nothing else.  Perturbing the
+    environment and the null-space coordinate ``u`` separately moves ``F`` by
+    ten orders of magnitude, which says both blocks of the equation are live.
+    """
+    _A, a, _env, _projs, root, residual = converged_root
+
+    rng = np.random.RandomState(0)
+    env_p = []
+    for t in root.env:
+        blocks = {
+            key: b + 1e-3 * jnp.asarray(rng.standard_normal(b.shape))
+            for key, b in t.blocks.items()
+        }
+        env_p.append(SymmetricTensor._from_blocks_unchecked(blocks, t.indices))
+    moved_env = _residual_norm(
+        characteristic_residual_sym(
+            (SymEnv(*env_p), root.u, root.s, root.v), a, root, 4
+        )
+    )
+
+    u_p = tuple({q: m + 1e-3 for q, m in d.items()} for d in root.u)
+    moved_u = _residual_norm(
+        characteristic_residual_sym((root.env, u_p, root.s, root.v), a, root, 4)
+    )
+
+    assert moved_env > 1e-3, moved_env
+    assert moved_u > 1e-4, moved_u
+    print(f"|F| root {residual:.2e} / env+1e-3 {moved_env:.2e} / u+1e-3 {moved_u:.2e}")
+
+
+def test_the_enlarged_corner_transpose_is_load_bearing(converged_root, monkeypatch):
+    """§V.3 orders an enlarged corner ``(cut | outer)``; the helper returns the other.
+
+    The dense module pins that transpose to 7.7e-16 against the reference
+    implementation's dumped fixed point.  Dropping it is not a small error —
+    it is a different network — and this test says so in the only currency that
+    matters here: the root stops being a root.
+    """
+    from tenax.algorithms import _ctm_root_implicit_symmetric as mod
+    from tenax.linalg import _group_blocks_by_bond_charge
+
+    _A, a, _env, _projs, root, residual = converged_root
+
+    def untransposed(matrix):
+        grouped = _group_blocks_by_bond_charge(matrix, [0], [1])
+        return {
+            q: (e[0][2], int(e[0][0][0]), int(e[0][1][0])) for q, e in grouped.items()
+        }
+
+    monkeypatch.setattr(mod, "_cut_outer_blocks", untransposed)
+    wrong = _residual_norm(characteristic_residual_sym(root.y, a, root, 4))
+    assert wrong > 1.0, wrong
+    print(f"|F| with the (cut|outer) transpose {residual:.2e}, without it {wrong:.2e}")
+
+
+def test_the_covariant_shift_is_load_bearing(converged_root):
+    """§V.3's direction ``j`` is the forward sweep's rotation ``j+1``, not ``j``.
+
+    Shifting once more takes every ``(u, S, v, U*, V*)`` to the wrong cut while
+    leaving every shape intact, so nothing raises — the only symptom is that
+    ``y*`` stops solving the equations.  That is exactly the failure mode the
+    bridge exists to prevent, and it fails loudly: 19 against 3e-13.
+    """
+    _A, a, _env, _projs, root, residual = converged_root
+
+    def shift(xs):
+        return tuple(xs[(j + 1) % 4] for j in range(4))
+
+    bad = root._replace(
+        u=shift(root.u),
+        s=shift(root.s),
+        v=shift(root.v),
+        U_star=shift(root.U_star),
+        U_perp=shift(root.U_perp),
+        Vh_star=shift(root.Vh_star),
+        Vh_perp=shift(root.Vh_perp),
+        s_star_inv=shift(root.s_star_inv),
+        layouts=shift(root.layouts),
+    )
+    wrong = _residual_norm(
+        characteristic_residual_sym((root.env, bad.u, bad.s, bad.v), a, bad, 4)
+    )
+    assert wrong > 1.0, wrong
+    print(f"|F| at the right shift {residual:.2e}, one shift further {wrong:.2e}")
+
+
+def test_apply_bond_matrix_acts_only_on_the_chi_factor(converged_root):
+    """The deleted kron, tested directly: per-sector identity is a no-op.
+
+    And, less trivially, the operator it *does* apply is the one the dense
+    module means by ``kron(root, eye_d2)``: a matrix on the ``chi`` factor of
+    the cut leg and the identity on the ``D²`` factor.  The dense oracle is
+    legitimate because ``fuse_indices`` keeps the parent legs' row-major
+    ordering inside the fused charge array — see :func:`_as_matrix_sym` — so a
+    dense ``kron`` on the *whole* leg is right even though the per-sector one
+    is not (:func:`test_a_per_sector_kron_cannot_express_a_bond_matrix`).
+    """
+    _A, a, env, _projs, _root, _residual = converged_root
+    quad = upper_left_quadrant_sym(env, a)
+    chi_idx = quad.indices[0]
+    dims = {
+        int(c): int(m)
+        for c, m in zip(np.asarray(chi_idx.sectors), np.asarray(chi_idx.multiplicities))
+    }
+
+    eye = {q: jnp.eye(d) for q, d in dims.items()}
+    for side in ("left", "right"):
+        same = apply_bond_matrix(quad, eye, axis=0, side=side)
+        assert bool(jnp.all(same._data == quad._data)), side
+
+    rng = np.random.RandomState(0)
+    mats = {q: jnp.asarray(rng.standard_normal((d, d))) for q, d in dims.items()}
+    charges = np.asarray(chi_idx.charges)
+    M = np.zeros((len(charges), len(charges)))
+    for q, m in mats.items():
+        pos = np.where(charges == q)[0]
+        M[np.ix_(pos, pos)] = np.asarray(m)
+    M = jnp.asarray(M)
+    dense_quad = quad.todense()
+
+    got_l = apply_bond_matrix(quad, mats, axis=0, side="left").todense()
+    want_l = jnp.einsum("ab,bjkl->ajkl", M, dense_quad)
+    assert float(jnp.max(jnp.abs(got_l - want_l))) < 1e-12
+
+    got_r = apply_bond_matrix(quad, mats, axis=0, side="right").todense()
+    want_r = jnp.einsum("ajkl,ab->bjkl", dense_quad, M)
+    assert float(jnp.max(jnp.abs(got_r - want_r))) < 1e-12
+
+    # A charge the leg does not carry is a raise, not a silent skip.
+    with pytest.raises(ValueError, match="no bond matrix for charge"):
+        apply_bond_matrix(quad, {q: m for q, m in mats.items() if q != 0}, axis=0)
+
+
+def test_a_per_sector_kron_cannot_express_a_bond_matrix():
+    """Why the dense ``jnp.kron(root, eye_d2)`` is deleted rather than ported.
+
+    Dense, the cut leg is the flat product ``n = chi * d2`` with ``chi`` slow,
+    so a matrix on the ``chi`` factor is ``kron(root, I_d2)``.  Fused, sector
+    ``q`` of the cut is a direct sum over every ``(q_chi, q_d2)`` summing to
+    ``q``, and on the fragmenting U(1) fixture that is not a product at all:
+
+    * the fused leg carries charges ``±2`` that the ``chi`` leg does not have,
+      so there is no ``root`` block to kron with in the first place;
+    * where the charge does exist the dimensions disagree — fused sector ``0``
+      has 6 states while ``chi_0 * d2`` is ``2 * 4 = 8``.
+
+    So the per-sector kron is not merely inaccurate, it is not shape-legal, and
+    the fix is to keep the leg split and contract (:func:`apply_bond_matrix`).
+    """
+    from tenax.algorithms._ctm_root_implicit_symmetric import _as_matrix_sym
+
+    A = _site_tensor()
+    env, a = init_env_sym(A, chi=4)
+    projs = None
+    for _ in range(3):
+        env, projs = sweep_sym(env, a, 4, projs)
+
+    quad = upper_left_quadrant_sym(env, a)
+    chi_idx, a_idx = quad.indices[0], quad.indices[1]
+    fused = _as_matrix_sym(quad).indices[0]
+    chi_dims = {
+        int(c): int(m)
+        for c, m in zip(np.asarray(chi_idx.sectors), np.asarray(chi_idx.multiplicities))
+    }
+    fused_dims = {
+        int(c): int(m)
+        for c, m in zip(np.asarray(fused.sectors), np.asarray(fused.multiplicities))
+    }
+    d2 = a_idx.dim
+
+    assert set(fused_dims) - set(chi_dims), (fused_dims, chi_dims)
+    mismatched = {
+        q: (n, chi_dims.get(q, 0) * d2)
+        for q, n in fused_dims.items()
+        if n != chi_dims.get(q, 0) * d2
+    }
+    assert mismatched, (fused_dims, chi_dims, d2)
+    print(f"fused vs chi*d2 per sector: {mismatched}")
+
+
+def test_sym_root_to_covariant_convention_shifts_transposes_and_swaps():
+    """The bridge, on hand-built data where every block is identifiable.
+
+    Three things at once and each is separately wrong-able: the ``+1``
+    direction shift, the **plain** transpose of every block (not the adjoint —
+    no conjugation enters), and the ``u <-> v`` / ``U <-> Vh`` swap.  Sector
+    keys are carried across unchanged; see the function's docstring for the
+    measurement that licenses that.
+    """
+    from tenax.algorithms._ctm_root_implicit_sym_sectors import BondLayout
+
+    def block(k, tag):
+        return {0: jnp.asarray([[k + 0.5j, tag + 0.0j]])}
+
+    layouts = tuple(BondLayout.from_dims({0: k + 1}) for k in range(4))
+    root = SymRoot(
+        env=None,
+        u=tuple(block(k, 1) for k in range(4)),
+        s=tuple(block(k, 2) for k in range(4)),
+        v=tuple(block(k, 3) for k in range(4)),
+        U_star=tuple(block(k, 4) for k in range(4)),
+        U_perp=tuple(block(k, 5) for k in range(4)),
+        Vh_star=tuple(block(k, 6) for k in range(4)),
+        Vh_perp=tuple(block(k, 7) for k in range(4)),
+        s_star_inv=tuple(block(k, 8) for k in range(4)),
+        layouts=layouts,
+    )
+    cov = sym_root_to_covariant_convention(root)
+
+    for j in range(4):
+        src = (j + 1) % 4
+        assert cov.layouts[j] is layouts[src]
+        for got, want in (
+            (cov.u[j], root.v[src]),
+            (cov.s[j], root.s[src]),
+            (cov.v[j], root.u[src]),
+            (cov.U_star[j], root.Vh_star[src]),
+            (cov.U_perp[j], root.Vh_perp[src]),
+            (cov.Vh_star[j], root.U_star[src]),
+            (cov.Vh_perp[j], root.U_perp[src]),
+            (cov.s_star_inv[j], root.s_star_inv[src]),
+        ):
+            assert got[0].shape == want[0].T.shape
+            assert bool(jnp.all(got[0] == want[0].T)), (j, "plain transpose")
+            # Not the adjoint: the imaginary part survives unconjugated.
+            assert bool(jnp.any(got[0] != want[0].conj().T))
+
+
+def test_remove_and_absorb_inverse_roots_invert_each_other(converged_root):
+    """Eq. 82 both ways, up to the per-tensor normalisation both maps apply.
+
+    ``absorb_inverse_roots_sym`` is the *differentiable* direction — the energy
+    is evaluated on the regular environment, so ``S`` reaches the energy only
+    through it, and that is where ``S̆`` comes from.  A round trip that did not
+    close would put a systematic error straight into the gradient.
+    """
+    _A, _a, _env, _projs, root, _residual = converged_root
+    regular = absorb_inverse_roots_sym(root.env, root.s)
+    back = remove_inverse_roots_sym(regular, root.s)
+    for i, name in enumerate(("C1", "C2", "C3", "C4", "T1", "T2", "T3", "T4")):
+        x, y = root.env[i], back[i]
+        xn = x._data / jnp.linalg.norm(x._data)
+        yn = y._data / jnp.linalg.norm(y._data)
+        assert float(jnp.max(jnp.abs(xn - yn))) < 1e-10, name
+    # And the regular environment is genuinely different from the modified one.
+    moved = max(
+        float(jnp.max(jnp.abs(regular[i]._data - root.env[i]._data))) for i in range(8)
+    )
+    assert moved > 1e-6, moved
+
+
+def test_the_covariant_layouts_are_the_forward_ones_shifted(converged_root):
+    """``root.layouts[j]`` is the forward truncation at rotation ``j+1``.
+
+    The shape bookkeeping of the whole covariant layer keys off this, and it is
+    the one piece of the bridge that does not fail loudly if it is wrong at a
+    *uniform* fixed point, where all four layouts happen to coincide.
+    """
+    _A, a, env, projs, root, _residual = converged_root
+    forward = all_projectors_sym(env, a, 4, projs)
+    for j in range(4):
+        assert root.layouts[j].dims == forward[(j + 1) % 4].layout.dims, j
+
+
+def test_the_root_survives_a_complex_state(monkeypatch):
+    """A complex state, and the reason ``λ`` is not real-projected (#721).
+
+    ``λ = ⟨X, X'⟩`` is genuinely complex here, so ``.real`` is not a tidy-up —
+    it changes the equation.  Dense the same edit moved ``|F1|`` from 2e-13 to
+    1.6e0; here it moves ``‖F(y*)‖`` from 3e-13 to 4.9.
+    """
+    from tenax.algorithms import _ctm_root_implicit_symmetric as mod
+
+    A = _complex_site_tensor()
+    env, a, meta, projs = converge_sym(A, chi=4, max_iter=60, return_projectors=True)
+    assert meta["converged"], meta
+    root, residual = root_parametrize_sym(env, a, chi=4, prev_projs=projs)
+    assert residual < 1e-10, residual
+
+    real_lambda = mod._vdot_sym
+
+    def projected(x, y):
+        return jnp.real(real_lambda(x, y))
+
+    monkeypatch.setattr(mod, "_vdot_sym", projected)
+    wrong = _residual_norm(characteristic_residual_sym(root.y, a, root, 4))
+    assert wrong > 1.0, wrong
+    print(f"complex |F| = {residual:.3e}; with a real-projected λ = {wrong:.3e}")
+
+
+def test_the_root_survives_an_empty_and_uneven_sector_layout():
+    """chi=2 on this fixture retains *different* charges in different directions.
+
+    Two directions keep ``{-1: 1, 0: 1}`` and two keep ``{0: 2}`` outright, so
+    a sector is empty on half the ring.  That is the case where the bridge's
+    per-direction layouts genuinely differ and where an implementation that
+    assumed one global ``chi_q`` would break — at a uniform fixed point all four
+    layouts coincide and nothing is tested.
+    """
+    A = _convergent_site_tensor()
+    env, a, meta, projs = converge_sym(A, chi=2, max_iter=80, return_projectors=True)
+    assert meta["converged"], meta
+    root, residual = root_parametrize_sym(env, a, chi=2, prev_projs=projs)
+    dims = [tuple(x.dims) for x in root.layouts]
+    assert len({d for d in dims}) > 1, dims
+    assert any(len(d) == 1 for d in dims), dims
+    assert residual < 1e-10, residual
+    print(f"chi=2 layouts {dims}, norm(F(y*)) = {residual:.3e}")
+
+
+def test_a_moving_bond_layout_is_refused_rather_than_mis_extracted():
+    """``S`` on charges the corners do not carry is a raise, not a wrong number.
+
+    Away from a fixed point the truncation can retain a different charge
+    distribution than the bonds the environment was built on — the U(1) fixture
+    does exactly that, which is why it has no CTM limit (see
+    :func:`_convergent_site_tensor`).  The polish loop sweeps instead of
+    extracting when that happens, and says so plainly if it never resolves.
+    """
+    A = _site_tensor()
+    env, a = init_env_sym(A, chi=4)
+    projs = None
+    for _ in range(3):
+        env, projs = sweep_sym(env, a, 4, projs)
+    with pytest.raises(ValueError, match="never carried the charge distribution"):
+        root_parametrize_sym(env, a, chi=4, prev_projs=projs, polish_steps=1)
+
+
+def test_a_bond_sign_orbit_is_a_root_not_a_stall():
+    """The unboosted Z2 state settles onto a bond-sign orbit, and that is fine.
+
+    Measured, before this was understood: the sweep reproduces the environment
+    exactly except that ``C2`` and ``C4`` change sign every iteration, so the
+    raw element-wise residual sits at 1.88 for 200 sweeps while every ``|·|``
+    agrees to 1e-13.  That ``σ`` is a **bond gauge** — per-direction signs
+    ``s = (+, +, -, -)`` give corner ``C_j`` the factor ``s_{j-1} s_j`` and every
+    edge ``s_j² = +1``, which is exactly the observed pattern — so it is not a
+    physical difference, and the product of the four corner signs is ``+1``, the
+    gauge-invariant consistency check.
+
+    It is also not the mechanism the Phase 3 plan expected: the retained layout
+    is ``((-1, 2), (0, 2))`` on all four directions at *every* sweep, so the
+    warm gauge pin never cold-restarts.  The projectors are stationary to
+    3e-11; the sign that reaches a corner comes from the enlarged quadrant.
+
+    Since ``F`` normalises as ``X'/λ - X``, ``λ`` comes out ``-1`` on the two
+    flipping corners and the orbit **is** a root.  So the forward criterion is
+    the phase-aligned one, and this test pins all three statements at once.
+    """
+    from tenax.algorithms._ctm_root_implicit_symmetric import (
+        _max_abs_diff_sym,
+        _phase_aligned_max_diff,
+    )
+
+    A = _plain_z2_site_tensor()
+    env, a, meta, projs = converge_sym(A, chi=4, max_iter=80, return_projectors=True)
+    assert meta["converged"], meta
+    assert meta["residual"] < 1e-12, meta
+
+    # The layout never moved, so the "cold re-pin" mechanism is ruled out.
+    for p in projs:
+        assert p.layout.dims == ((-1, 2), (0, 2)), p.layout.dims
+
+    env_next, _ = sweep_sym(env, a, 4, projs)
+    names = ("C1", "C2", "C3", "C4", "T1", "T2", "T3", "T4")
+    signs = {}
+    flipped = []
+    for name in names:
+        x, y = getattr(env, name), getattr(env_next, name)
+        xn = x * (1.0 / jnp.linalg.norm(x._data))
+        yn = y * (1.0 / jnp.linalg.norm(y._data))
+        lam = complex(jnp.vdot(xn._data, yn._data))
+        signs[name] = lam
+        assert _phase_aligned_max_diff(xn, yn) < 1e-11, name
+        assert abs(abs(lam) - 1.0) < 1e-11, (name, lam)
+        if _max_abs_diff_sym(xn, yn) > 1e-6:
+            flipped.append(name)
+
+    assert flipped == ["C2", "C4"], flipped
+    for name in ("T1", "T2", "T3", "T4"):
+        assert abs(signs[name] - 1.0) < 1e-11, (name, signs[name])
+    corner_product = np.prod([signs[f"C{i}"] for i in (1, 2, 3, 4)])
+    assert abs(corner_product - 1.0) < 1e-10, corner_product
+
+    _root, residual = root_parametrize_sym(env, a, chi=4, prev_projs=projs)
+    assert residual < 1e-10, residual
+    print(
+        f"bond-sign orbit: λ = {[f'{signs[n].real:+.3f}' for n in names]}, "
+        f"norm(F(y*)) = {residual:.3e}"
+    )

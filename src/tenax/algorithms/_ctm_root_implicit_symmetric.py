@@ -17,7 +17,11 @@ from typing import Any, NamedTuple
 import jax
 import jax.numpy as jnp
 
-from tenax.algorithms._ctm_root_implicit_asym import _inv_sqrt
+from tenax.algorithms._ctm_root_implicit_asym import (
+    _denman_beavers,
+    _inv_sqrt,
+    _quartic_root,
+)
 from tenax.algorithms._ctm_root_implicit_sym_sectors import (
     BondLayout,
     SectorSVD,
@@ -41,18 +45,25 @@ from tenax.linalg import _group_blocks_by_bond_charge
 __all__ = [
     "SymEnv",
     "SymProjectors",
+    "SymRoot",
+    "absorb_inverse_roots_sym",
     "all_projectors_sym",
+    "apply_bond_matrix",
+    "characteristic_residual_sym",
     "converge_sym",
     "half_infinite_sym",
     "init_env_sym",
     "lower_left_quadrant_sym",
+    "remove_inverse_roots_sym",
     "renormalised_corner_sym",
     "renormalised_edge_sym",
+    "root_parametrize_sym",
     "rotate_a_sym",
     "rotate_env_sym",
     "swap_env_convention_sym",
     "sweep_sym",
     "sym_energy",
+    "sym_root_to_covariant_convention",
     "upper_left_quadrant_sym",
 ]
 
@@ -765,6 +776,49 @@ def _max_abs_diff_sym(x: SymmetricTensor, y: SymmetricTensor) -> float:
     return float(jnp.max(jnp.abs(x._data - y._data)))
 
 
+def _phase_aligned_max_diff(prev: SymmetricTensor, cur: SymmetricTensor) -> float:
+    """``max|cur/λ - prev|`` with ``λ = ⟨prev, cur⟩`` — the *root* residual.
+
+    This is the corner/edge block of the characteristic equations themselves
+    (``X'/λ - X``, :func:`characteristic_residual_sym`), evaluated on one sweep
+    of the forward map.  It is deliberately *weaker* than the raw element-wise
+    difference by exactly one complex scalar per tensor, and the reason is
+    measured, not stylistic.
+
+    On an unboosted D=2 Z2 state the sweep settles onto a **period-2 orbit**
+    rather than a fixed point: ``sweep(x) = σ(x)`` with ``σ`` flipping the sign
+    of ``C2`` and ``C4`` and leaving the other six tensors alone, reproduced to
+    1e-12 while the raw residual sits at 1.880 for 200 sweeps.  That ``σ`` is a
+    *bond gauge*, not a physical difference — with per-direction signs
+    ``s = (+, +, -, -)`` on the four renormalised bonds, corner ``C_{j}`` picks
+    up ``s_{j-1} s_j`` and every edge picks up ``s_j² = +1``, which is exactly
+    the observed pattern (and the product of the four corner signs is ``+1``,
+    the gauge-invariant consistency check).  The mechanism is that the pin of
+    :func:`_pin_bond_gauge_sector` fixes the *projectors* — ``P_left`` and
+    ``P_right`` are stationary to 3e-11 at every direction — while the sign
+    that reaches a renormalised corner comes from the enlarged **quadrant**,
+    which carries the previous sweep's corner sign directly.  Measured: ``top``
+    flips at directions 1 and 3, ``bot`` at 0 and 2, projectors nowhere.
+
+    Diagnosis note for the record: this is *not* the "a sector's retained
+    dimension moved between sweeps, so the pin cold-restarts" mechanism the
+    Phase 3 plan expected.  The layout is ``((-1, 2), (0, 2))`` on all four
+    directions at every one of the 200 sweeps, so the warm pin never restarts.
+
+    Since ``F`` is built from ``X'/λ - X`` tensor by tensor, such an orbit *is*
+    a root — ``λ`` comes out ``-1`` on the two flipping corners and the residual
+    is zero — so stopping on the raw difference rejects an environment the
+    characteristic equations are perfectly happy with.  Aligning the phase is
+    what makes the forward criterion agree with the equations it feeds.
+    """
+    lam = jnp.vdot(prev._data, cur._data)
+    if float(jnp.abs(lam)) < 1e-12:
+        # Orthogonal to the previous sweep: nothing to align, and dividing
+        # would manufacture a tiny residual out of a large motion.
+        return _max_abs_diff_sym(prev, cur)
+    return float(jnp.max(jnp.abs(cur._data / lam - prev._data)))
+
+
 def converge_sym(
     A: Tensor,
     chi: int,
@@ -784,6 +838,12 @@ def converge_sym(
     tensors, not spectra.  Each tensor is normalised before the comparison,
     and a pair whose block structure moved between sweeps is skipped rather
     than compared (see :func:`_same_block_structure`).
+
+    The comparison is element-wise *up to one complex scalar per tensor*
+    (:func:`_phase_aligned_max_diff`), which is precisely the freedom
+    ``F``'s ``X'/λ - X`` normalisation quotients out.  Without it a residual
+    bond-sign orbit — a genuine root — is reported as a permanent stall; with
+    it the criterion says exactly "the characteristic equations hold".
 
     With ``return_projectors`` the final projector set comes back as a fourth
     element.  That is not a diagnostic: the converged environment sits in the
@@ -807,7 +867,7 @@ def converge_sym(
             _same_block_structure(c, q) for c, q in zip(cur, prev, strict=True)
         ):
             residual = max(
-                _max_abs_diff_sym(c, q) for c, q in zip(cur, prev, strict=True)
+                _phase_aligned_max_diff(q, c) for c, q in zip(cur, prev, strict=True)
             )
             if iters >= min_iter and residual < conv_tol:
                 converged = True
@@ -821,6 +881,771 @@ def converge_sym(
     if return_projectors:
         return env, a, meta, prev_projs
     return env, a, meta
+
+
+# ---------------------------------------------------------------------------
+# Bond matrices on a *split* chi leg — the deleted ``kron``
+# ---------------------------------------------------------------------------
+
+
+def apply_bond_matrix(
+    t: SymmetricTensor,
+    mats: dict[int, jax.Array],
+    *,
+    axis: int,
+    side: str = "left",
+) -> SymmetricTensor:
+    """Contract a per-sector matrix onto one renormalised chi leg.
+
+    This replaces the dense modules' ``jnp.kron(root, eye_d2)``, and it is a
+    replacement rather than a port because the identity behind that ``kron``
+    **breaks under charge fusion**.  Dense, the cut leg is the flat product
+    ``n = chi * d2`` with ``chi`` the slow index, so a matrix acting on the
+    ``chi`` factor alone is ``kron(root, I_d2)``.  Fused, sector ``q`` of the
+    cut leg is a direct sum over every ``(q_chi, q_d2)`` with
+    ``q_chi + q_d2 = q``, and ``todense()`` orders it by charge rather than
+    row-major in ``(chi, d2)`` — so within one sector the ``chi`` index is not
+    the slow one, is not even contiguous, and no per-sector ``kron`` reproduces
+    the operator.
+
+    The fix is to never fuse in the first place.  The quadrant keeps its legs
+    split as ``(chi_r, a_r, chi_d, a_d)``, the bond matrix is contracted onto
+    the ``chi`` leg here, and :func:`_as_matrix_sym` fuses only afterwards, to
+    feed the per-sector ``U``/``Vh`` algebra.  Nothing else in this module
+    needs the fused form.
+
+    ``mats`` is keyed by the **charge value carried on** ``axis``, which for a
+    renormalised chi bond is the :class:`BondLayout` key ``q`` itself:
+    :func:`bond_index_from_layout` builds the index with
+    ``sectors = layout.sectors`` for either flow, so ``q`` and the charge
+    coincide on both ends of the bond.
+
+    ``side="left"`` is ``M @ t`` on that axis, ``side="right"`` is ``t @ M``;
+    for the Hermitian Eq. 73 roots the two agree, for ``s`` they do not.
+    """
+    if side not in ("left", "right"):
+        raise ValueError(f"side must be 'left' or 'right', got {side!r}")
+    blocks: dict[Any, jax.Array] = {}
+    for key, block in t.blocks.items():
+        q = int(key[axis])
+        m = mats.get(q)
+        if m is None:
+            raise ValueError(
+                f"no bond matrix for charge {q} on axis {axis} of a tensor whose "
+                f"leg carries sectors {[int(c) for c in t.indices[axis].sectors]}; "
+                f"the bond matrices are keyed {sorted(mats)}.  This is the "
+                "environment and the truncation disagreeing about the retained "
+                "charges — the bond the tensor lives on came from an earlier "
+                "sweep, and the current cut keeps a different set.  It cannot "
+                "happen at a fixed point, and :func:`root_parametrize_sym` "
+                "sweeps rather than extracting when it does."
+            )
+        if side == "left":
+            new = jnp.tensordot(m, block, axes=((1,), (axis,)))
+            new = jnp.moveaxis(new, 0, axis)
+        else:
+            new = jnp.tensordot(block, m, axes=((axis,), (0,)))
+            new = jnp.moveaxis(new, -1, axis)
+        blocks[key] = new
+    return SymmetricTensor._from_blocks_unchecked(blocks, t.indices)
+
+
+def _map_env_roots_sym(env: SymEnv, roots: tuple, *, normalize: bool) -> SymEnv:
+    """Absorb ``roots[k]`` onto corner/edge environment legs (paper Eq. 82).
+
+    ``_ctm_root_implicit_asym._map_env_roots`` with ``left @ C @ right`` and
+    ``einsum("ai,ixj,jb->axb")`` replaced by :func:`apply_bond_matrix`, and the
+    same direction bookkeeping: corner ``k`` has its first chi leg on direction
+    ``k-1``'s bond and its second on direction ``k``'s, while edge ``k`` takes
+    ``roots[k]`` on both.  The indices are **covariant** (§V.3) direction
+    numbers throughout, which is what :func:`sym_root_to_covariant_convention`
+    hands over.
+    """
+    corners, edges = [], []
+    for k in range(4):
+        prev_dir, own_dir = (k - 1) % 4, k
+        C = getattr(env, f"C{k + 1}")
+        C = apply_bond_matrix(C, roots[prev_dir], axis=0, side="left")
+        C = apply_bond_matrix(C, roots[own_dir], axis=1, side="right")
+        E = getattr(env, f"T{k + 1}")
+        E = apply_bond_matrix(E, roots[k], axis=0, side="left")
+        E = apply_bond_matrix(E, roots[k], axis=2, side="right")
+        if normalize:
+            C = C * (1.0 / (jnp.linalg.norm(C._data) + 1e-300))
+            E = E * (1.0 / (jnp.linalg.norm(E._data) + 1e-300))
+        corners.append(C)
+        edges.append(E)
+    return SymEnv(*corners, *edges)
+
+
+def remove_inverse_roots_sym(env: SymEnv, S_all: tuple) -> SymEnv:
+    """Regular ``x`` -> modified ``(C̃, Ẽ)``: multiply by ``sqrt(S)``.
+
+    Undoes the inverse square roots the forward projectors put on the
+    environment legs, leaving the modified tensors of paper Eq. 82.  ``S_all``
+    is covariant-indexed and per sector; the root is Denman-Beavers, never
+    ``eigh``, for the reason in :func:`_fishman_projectors_sym`.
+    """
+    roots = tuple(sector_map(lambda m: _denman_beavers(m)[0], S) for S in S_all)
+    return _map_env_roots_sym(env, roots, normalize=True)
+
+
+def absorb_inverse_roots_sym(env_tilde: SymEnv, S_all: tuple) -> SymEnv:
+    """Modified ``(C̃, Ẽ)`` -> regular ``x``: multiply by ``sqrt(S^-1)``.
+
+    The **differentiable** direction.  ``S`` enters here, so the energy — which
+    is evaluated on the regular environment — depends on ``S`` through this map
+    and ``S̆`` picks that up.  Writing ``F`` in the regular variables instead
+    sets that adjoint to zero, which is measurably wrong: dense, ``|S̆|`` comes
+    out the same order as ``|C̆|``.
+    """
+    roots = tuple(sector_map(_inv_sqrt, S) for S in S_all)
+    return _map_env_roots_sym(env_tilde, roots, normalize=True)
+
+
+# ---------------------------------------------------------------------------
+# Characteristic equations, covariant form (paper §V.3, Eqs. 71-88)
+# ---------------------------------------------------------------------------
+
+
+class SymRoot(NamedTuple):
+    """Root variables plus the constants held fixed while differentiating.
+
+    ``_ctm_root_implicit_asym.AsymRoot`` with every dense ``chi``-shaped array
+    replaced by a ``{charge: block}`` dict.  ``s`` is a full ``chi_q x chi_q``
+    **matrix** per sector, not a vector — see :func:`_fishman_projectors_sym`
+    for why a diagonal ``S`` breaks the projector closure at first order.
+
+    ``layouts`` has no dense counterpart and is not optional: "chi is an int"
+    is exactly what stops being true here, and every shape in ``u``, ``v``,
+    ``S`` and the reassembled bond index is read off it.  It is a frozen
+    dataclass, hence a pytree *leaf*, so it stays static under AD.
+    """
+
+    env: SymEnv
+    u: tuple[dict[int, jax.Array], ...]
+    s: tuple[dict[int, jax.Array], ...]
+    v: tuple[dict[int, jax.Array], ...]
+    U_star: tuple[dict[int, jax.Array], ...]
+    U_perp: tuple[dict[int, jax.Array], ...]
+    Vh_star: tuple[dict[int, jax.Array], ...]
+    Vh_perp: tuple[dict[int, jax.Array], ...]
+    s_star_inv: tuple[dict[int, jax.Array], ...]
+    layouts: tuple[BondLayout, ...]
+
+    @property
+    def y(self):
+        return (self.env, self.u, self.s, self.v)
+
+
+def sym_root_to_covariant_convention(root: SymRoot) -> SymRoot:
+    """Relabel a forward-convention root into the one paper §V.3 uses.
+
+    ``_ctm_root_implicit_asym.asym_root_to_covariant_convention`` per sector.
+    The forward sweep truncates with the **left** half of the plane, gluing the
+    upper-left quadrant to the lower-left one at the same rotation.  §V.3
+    truncates with the **upper** half, gluing enlarged corner ``k`` to enlarged
+    corner ``k+1``.  Those are the same truncation, because
+
+        lower_left_quadrant_sym(env_k) == upper_left_quadrant_sym(env_{k-1})
+
+    holds exactly, and therefore ``M_left(k) == M_up(k-1).T``.  Transposing a
+    decomposition exchanges its isometries — ``(U S Vh).T = Vh.T S.T U.T``, and
+    both factors stay isometric since ``Vh Vh† = 1`` gives
+    ``(Vh.T)† Vh.T = conj(Vh Vh†) = 1`` — so §V.3's data at direction ``j`` is
+    the forward data at rotation ``j+1`` with ``U`` and ``Vh`` swapped and every
+    block transposed.  **Plain transpose, not adjoint**: no conjugation enters.
+
+    Sector keys are carried across **unchanged**, and that is a measured
+    statement rather than an omission.  Transposing a block does swap which leg
+    its key was read off, so a remap ``q -> -q`` is the obvious hazard; it is
+    not needed here because of which leg each layer keys by:
+
+    * forward, :func:`sector_svd` keys ``M_left(k)`` by its row leg, which is
+      the upper-left quadrant's fused ``(chi_r, a_r)`` — the **outer** leg,
+      flow ``OUT``, so ``q = -charge``;
+    * covariant, :func:`_cut_outer_blocks` keys the enlarged corner by that
+      same outer leg.
+
+    A fused quadrant matrix carries equal charges on its two legs (measured:
+    block keys ``(0, 0)`` and ``(1, 1)`` on the D=2 Z2 fixture, with the
+    ``OUT``/``IN`` flow pair making that charge conservation), so keying by the
+    outer leg gives the same integer on both sides of every glue, and the
+    forward layout keys ``{-1, 0}`` are exactly the covariant ones.  The
+    alternative — keying the covariant layer by the *cut* leg, which is the
+    literal transpose convention — would have needed ``q -> -q`` and, on
+    ``ZnSymmetry(2)``, a modular one rather than an integer negation, since the
+    live keys are ``{-1, 0}`` and not ``{0, 1}``.
+
+    The environment itself is untouched; only which cut each ``S`` belongs to
+    changes.  Feed the result to :func:`remove_inverse_roots_sym` and
+    :func:`characteristic_residual_sym`, which are §V.3-indexed.
+    """
+
+    def shift(xs: tuple) -> tuple:
+        return tuple(xs[(j + 1) % 4] for j in range(4))
+
+    def shiftT(xs: tuple) -> tuple:
+        return tuple({q: m.T for q, m in d.items()} for d in shift(xs))
+
+    return SymRoot(
+        env=root.env,
+        u=shiftT(root.v),
+        s=shiftT(root.s),
+        v=shiftT(root.u),
+        U_star=shiftT(root.Vh_star),
+        U_perp=shiftT(root.Vh_perp),
+        Vh_star=shiftT(root.U_star),
+        Vh_perp=shiftT(root.U_perp),
+        s_star_inv=shiftT(root.s_star_inv),
+        layouts=shift(root.layouts),
+    )
+
+
+def _cut_outer_blocks(
+    matrix: SymmetricTensor,
+) -> dict[int, tuple[jax.Array, int, int]]:
+    """``(cut, outer)`` block plus both legs' charges, keyed by the OUTER leg.
+
+    :func:`_as_matrix_sym` returns a quadrant as ``(col, row)`` = ``(outer,
+    cut)``; §V.3 orders an enlarged corner ``(cut | outer)``, hence the
+    transpose.  The dense module pins that same transpose to 7.7e-16 against
+    the reference implementation's dumped fixed point, and getting it backwards
+    is an O(1) residual, not a small one.
+
+    Keying by the outer leg — not the row, which is what
+    :func:`_sector_blocks` would do — is what makes
+    :func:`sym_root_to_covariant_convention` a pure transpose with no charge
+    remap; see its docstring.  The two charges are returned alongside because
+    the projector tensors have to be reassembled with explicit block keys, and
+    deriving those from ``q`` by hand is exactly the arithmetic this module
+    exists to avoid.
+    """
+    grouped = _group_blocks_by_bond_charge(matrix, [0], [1])
+    out: dict[int, tuple[jax.Array, int, int]] = {}
+    for q, entries in grouped.items():
+        if len(entries) != 1:  # pragma: no cover - a fused matrix has one per q
+            raise ValueError(
+                f"sector {q} has {len(entries)} blocks; expected a fused matrix"
+            )
+        (outer_key, cut_key, block) = entries[0]
+        out[q] = (jnp.transpose(block, (1, 0)), int(outer_key[0]), int(cut_key[0]))
+    return out
+
+
+def _decorated_quadrant(
+    quad: SymmetricTensor,
+    *,
+    cut_left: dict[int, jax.Array] | None = None,
+    outer_right: dict[int, jax.Array] | None = None,
+) -> dict[int, tuple[jax.Array, int, int]]:
+    """One enlarged corner with bond matrices on its two split chi legs.
+
+    ``quad`` is :func:`upper_left_quadrant_sym`'s ``(chi_r, a_r, chi_d, a_d)``.
+    ``cut_left`` left-multiplies the **cut** leg ``chi_d`` (axis 2) and
+    ``outer_right`` right-multiplies the **outer** leg ``chi_r`` (axis 0),
+    matching the dense ``K_L[k-1] @ EC[k] @ K_is[k]`` with ``EC`` in
+    ``(cut | outer)`` order.  Both act on the *split* leg, which is the whole
+    point (:func:`apply_bond_matrix`); the fusion happens afterwards.
+    """
+    if cut_left is not None:
+        quad = apply_bond_matrix(quad, cut_left, axis=2, side="left")
+    if outer_right is not None:
+        quad = apply_bond_matrix(quad, outer_right, axis=0, side="right")
+    return _cut_outer_blocks(_as_matrix_sym(quad))
+
+
+def _projector_tensor_right(
+    P_R: dict[int, jax.Array],
+    charges: dict[int, tuple[int, int]],
+    outer_index,
+    layout: BondLayout,
+) -> SymmetricTensor:
+    """``P_R[k]`` as a tensor on ``(outer_k, chi_new)``, ``chi_new`` flowing OUT.
+
+    ``P_R`` is the §V.3 partner of the forward ``P_left`` (the bridge maps one
+    to the other), so its renormalised leg is the corner's ``new_l`` — flow
+    ``OUT`` — and the corner it feeds is the one the forward sweep builds from
+    ``P_left`` of the matching direction.  That agreement is not decorative:
+    the residual subtracts against ``C̃`` from the forward chain, so a swapped
+    flow is a subtraction between different index sets.
+    """
+    sym = outer_index.symmetry
+    chi_new = bond_index_from_layout(layout, sym, FlowDirection.OUT, "chi_new")
+    blocks = {(charges[q][0], int(q)): P_R[q].T for q in layout.sectors if P_R[q].size}
+    return SymmetricTensor._from_blocks_unchecked(blocks, (outer_index, chi_new))
+
+
+def _projector_tensor_left(
+    P_L: dict[int, jax.Array],
+    charges: dict[int, tuple[int, int]],
+    cut_index,
+    layout: BondLayout,
+) -> SymmetricTensor:
+    """``P_L[k]`` as a tensor on ``(cut_{k+1}, chi_new)``, ``chi_new`` IN.
+
+    Mirror of :func:`_projector_tensor_right`: the bridge sends this to the
+    forward ``P_right``, whose renormalised leg is the corner's ``new_r``.
+    """
+    sym = cut_index.symmetry
+    chi_new = bond_index_from_layout(layout, sym, FlowDirection.IN, "chi_new")
+    blocks = {(charges[q][1], int(q)): P_L[q] for q in layout.sectors if P_L[q].size}
+    return SymmetricTensor._from_blocks_unchecked(blocks, (cut_index, chi_new))
+
+
+def _vdot_sym(x: SymmetricTensor, y: SymmetricTensor) -> jax.Array:
+    """``⟨x, y⟩`` over the blocks the two share.
+
+    Deliberately **not** real-projected.  ``λ`` is genuinely complex for a
+    complex state — dense at D=2, chi=4 the corner ``λ`` comes out around
+    ``-2.1e2 - 3.6e2j`` — and taking the real part alone moved dense ``|F1|``
+    from 2e-13 to 1.6e0.
+    """
+    keys = set(x.blocks) & set(y.blocks)
+    xb, yb = x.blocks, y.blocks
+    return sum(jnp.vdot(xb[k], yb[k]) for k in sorted(keys))
+
+
+def _normalised_residual_sym(
+    new: SymmetricTensor, cur: SymmetricTensor
+) -> SymmetricTensor:
+    """``new/λ - cur`` with ``λ = ⟨cur, new⟩``, on ``cur``'s block structure.
+
+    The reference implementation's ``X'/λ - X`` rather than ``X' - λ X``.  The
+    two differ by a row scaling of ``F``, which leaves the implicit gradient
+    invariant but not the Jacobian conditioning, and it relies on every tensor
+    in ``y`` having unit Frobenius norm — which
+    :func:`root_parametrize_sym` arranges via
+    :func:`remove_inverse_roots_sym`'s normalisation.
+
+    Blocks are taken from ``cur``: the residual has to be a pytree matching
+    ``y``, so a block ``new`` grew or lost would make ``F(y)`` un-subtractable
+    from ``y`` in the adjoint solve.
+    """
+    lam = _vdot_sym(cur, new)
+    nb = new.blocks
+    extra = set(nb) - set(cur.blocks)
+    if extra:  # pragma: no cover - guards a silent drop
+        raise ValueError(
+            f"the renormalised tensor has blocks {sorted(extra)} the environment "
+            "does not; dropping them would make F(y) quietly ignore part of the "
+            "network, which is the failure mode this module exists to avoid."
+        )
+    blocks = {
+        key: (nb[key] / lam - block) if key in nb else -block
+        for key, block in cur.blocks.items()
+    }
+    return SymmetricTensor._from_blocks_unchecked(blocks, cur.indices)
+
+
+def _isometries_sym(consts: SymRoot, u_all: tuple, v_all: tuple, k: int):
+    """Paper Eqs. 71-72 per sector: ``U = U* + U_perp u``, ``Vh = V* + v V_perp``."""
+    U = {
+        q: consts.U_star[k][q] + consts.U_perp[k][q] @ u_all[k][q]
+        for q in consts.U_star[k]
+    }
+    Vh = {
+        q: consts.Vh_star[k][q] + v_all[k][q] @ consts.Vh_perp[k][q]
+        for q in consts.Vh_star[k]
+    }
+    return U, Vh
+
+
+def _north_edge_column(env_k: SymEnv, a_k: SymmetricTensor) -> SymmetricTensor:
+    """The north edge with one ``a`` absorbed, both chi pairs fused.
+
+    Dense this is ``einsum("xfy,fjlr->xljyr", T1, a).reshape(n, d2, n)``, whose
+    two fused pairs are ``(T1.l, a.l)`` and ``(T1.r, a.r)``.  ``P_R[k]`` is
+    built on the enlarged corner's *outer* leg — ``(T1.r, a.r)`` — and is
+    applied to ``(T1.l, a.l)``; that reads like a mismatch and is not, because
+    a 1x1 unit cell's two enlarged corners are translated copies of the same
+    edge, so the glue joins one copy's right end to the next copy's left end.
+    The flows follow: the left pair fuses ``IN`` against ``P_R``'s ``OUT`` and
+    the right pair ``OUT`` against ``P_L``'s ``IN``, which is the *same*
+    duals-fuse-to-matching-charges argument :func:`renormalised_corner_sym`
+    already rests on.
+    """
+    t1 = env_k.T1.relabels(
+        dict(zip(env_k.T1.labels(), ("chi_l", "a_u", "chi_r"), strict=True))
+    )
+    a4 = a_k.relabels(
+        dict(zip(a_k.labels(), ("a_u", "a_d", "a_l", "a_r"), strict=True))
+    )
+    g = contract(t1, a4, output_labels=("chi_l", "a_l", "a_d", "chi_r", "a_r"))
+    g = fuse_indices(g, 0, 1, "col_l", FlowDirection.IN)
+    g = fuse_indices(g, 2, 3, "col_r", FlowDirection.OUT)
+    return g
+
+
+def characteristic_residual_sym(y, a: SymmetricTensor, consts: SymRoot, chi: int):
+    """``F(y, p)`` in the covariant parametrisation of paper §V.3.
+
+    ``y = (env_tilde, u, S, v)`` with *modified* corners and edges, so that
+    holding ``U*`` and ``V*`` constant is licensed by Eq. 88.  Returns a pytree
+    matching ``y``: four corners, four edges, and per direction one ``u``, one
+    ``S`` and one ``v``, each a ``{charge: block}`` dict.
+
+    The assembly mirrors
+    ``_ctm_root_implicit_asym.asym_characteristic_residual_covariant``, which
+    in turn mirrors the reference implementation's
+    ``contract_asymmetric_characteristic_equation`` — and it uses a **different
+    half of the plane from the forward sweep in this module**:
+
+    * :func:`sweep_sym` truncates with the left half, gluing the upper-left
+      quadrant to the lower-left one at the same rotation.
+    * §V.3 truncates with the upper half, gluing enlarged corner ``k`` to
+      enlarged corner ``k+1``.  So :func:`lower_left_quadrant_sym` is **not
+      used here at all**, and the enlarged corner is the upper-left quadrant
+      *transposed* into ``(cut | outer)`` order.
+
+    A sweep and an equation that disagree give a fixed point that is not a
+    root; that is how #718 started, and it is why
+    :func:`sym_root_to_covariant_convention` exists rather than the two halves
+    being reconciled by adjusting placements.
+
+    The quartic roots of Eq. 73 go on the **cut legs**, never inside the
+    projectors: they are equivariant under independent left/right rotations but
+    their product is not ``S^-1``, so the closure breaks for a non-diagonal
+    ``S`` (dense measured 2e-1 against 2.5e-2 gradient error when Phase 1 put
+    them in the projectors).  They are attached by contraction on the split
+    ``chi`` leg — see :func:`apply_bond_matrix` for why not ``kron``.
+    """
+    env_tilde, u_all, S_all, v_all = y
+    layouts = consts.layouts
+    for k, layout in enumerate(layouts):
+        if layout.total != int(chi):  # pragma: no cover - guards a caller error
+            raise ValueError(
+                f"direction {k} retains {layout.total} states, not chi={chi}; "
+                "the layout and the truncation have come apart."
+            )
+
+    # Eq. 73.  ``s = S^-1``, and the roots are Denman-Beavers (matmuls and
+    # inverses only), so no decomposition re-enters ``F``.
+    s_all = tuple(sector_map(jnp.linalg.inv, S) for S in S_all)
+    root_L = tuple(
+        {q: _quartic_root(m.conj().T @ m) for q, m in s.items()} for s in s_all
+    )
+    root_R = tuple(
+        {q: _quartic_root(m @ m.conj().T) for q, m in s.items()} for s in s_all
+    )
+    env_mod = _modified_env_sym(env_tilde, s_all)
+
+    # Pass 1: per direction the bare enlarged corner, the two decorated ones,
+    # and the column the renormalised edge is built from.
+    EC, As, B, sB, cols, outer_idx, cut_idx = [], [], [], [], [], [], []
+    env_k, a_k = env_mod, a
+    for k in range(4):
+        km = (k - 1) % 4
+        quad = upper_left_quadrant_sym(env_k, a_k)
+        matrix = _as_matrix_sym(quad)
+        outer_idx.append(matrix.indices[0])
+        cut_idx.append(matrix.indices[1])
+        EC.append(matrix)
+        As.append(_decorated_quadrant(quad, cut_left=root_L[km], outer_right=s_all[k]))
+        B.append(_decorated_quadrant(quad, outer_right=root_R[k]))
+        sB.append(_decorated_quadrant(quad, cut_left=s_all[km], outer_right=root_R[k]))
+        cols.append(_north_edge_column(env_k, a_k))
+        env_k, a_k = rotate_env_sym(env_k), rotate_a_sym(a_k)
+
+    # Pass 2: the half-infinite environment at direction ``k`` glues the
+    # decorated ``EC[k]`` to ``EC[k+1]`` across the cut, carrying exactly one
+    # ``s_k`` (already absorbed into ``As[k]``'s outer leg).
+    W, P_R_t, P_L_t = [], [], []
+    U_all, Vh_all = [], []
+    for k in range(4):
+        kp = (k + 1) % 4
+        layout = layouts[k]
+        U, Vh = _isometries_sym(consts, u_all, v_all, k)
+        U_all.append(U)
+        Vh_all.append(Vh)
+        for q in layout.sectors:
+            if q not in As[k] or q not in B[kp]:  # pragma: no cover - guard
+                missing = "EC[k]" if q not in As[k] else "EC[k+1]"
+                raise ValueError(
+                    f"direction {k} retains charge {q} but {missing} has no such "
+                    "block; the two enlarged corners' sector keys have stopped "
+                    "agreeing, which they cannot do at a fixed point."
+                )
+        W.append({q: As[k][q][0] @ B[kp][q][0] for q in layout.sectors})
+        P_R = {q: U[q].conj().T @ As[k][q][0] for q in layout.sectors}
+        P_L = {q: sB[kp][q][0] @ Vh[q].conj().T for q in layout.sectors}
+        P_R_t.append(
+            _projector_tensor_right(
+                P_R,
+                {q: As[k][q][1:] for q in layout.sectors},
+                outer_idx[k],
+                layout,
+            )
+        )
+        P_L_t.append(
+            _projector_tensor_left(
+                P_L,
+                {q: sB[kp][q][1:] for q in layout.sectors},
+                cut_idx[kp],
+                layout,
+            )
+        )
+
+    # Pass 3: residuals.  Both projectors of a corner belong to the *same*
+    # enlarged corner, one per group, so the corner takes ``P_R[k-1]`` — the
+    # partner of the cut that ``EC[k]``'s first group sits on.
+    corners: list = [None] * 4
+    edges: list = [None] * 4
+    R_u: list = [None] * 4
+    R_S: list = [None] * 4
+    R_v: list = [None] * 4
+    for k in range(4):
+        km = (k - 1) % 4
+        layout = layouts[k]
+        U, Vh = U_all[k], Vh_all[k]
+        core = {q: U[q].conj().T @ W[k][q] @ Vh[q].conj().T for q in layout.sectors}
+        # One ``λ`` per direction, summed over sectors, because ``S`` is
+        # normalised over the whole cut and not sector by sector
+        # (:func:`_retained_S_sym`); a per-sector ``λ`` would rescale each
+        # sector's equation independently and move the root.
+        lam_S = sum(jnp.vdot(S_all[k][q], core[q]) for q in layout.sectors)
+        R_S[k] = {q: core[q] / lam_S - S_all[k][q] for q in layout.sectors}
+        R_u[k] = {
+            q: (consts.U_perp[k][q].conj().T @ W[k][q] @ Vh[q].conj().T)
+            @ consts.s_star_inv[k][q]
+            / lam_S
+            - u_all[k][q]
+            for q in layout.sectors
+        }
+        R_v[k] = {
+            q: consts.s_star_inv[k][q]
+            @ (U[q].conj().T @ W[k][q] @ consts.Vh_perp[k][q].conj().T)
+            / lam_S
+            - v_all[k][q]
+            for q in layout.sectors
+        }
+
+        kp = (k + 1) % 4
+        idx = _unrotate_index_sym(1, k)
+        ec = EC[k].relabels({"col": "outer_k", "row": "cut_k"})
+        p_r = P_R_t[km].relabels({"col": "cut_k", "chi_new": "new_l"})
+        p_l = P_L_t[k].relabels({"row": "outer_k", "chi_new": "new_r"})
+        C_new = contract(p_r, ec, p_l, output_labels=("new_l", "new_r"))
+        C_cur = getattr(env_tilde, f"C{idx}")
+        corners[idx - 1] = _normalised_residual_sym(C_new, C_cur)
+
+        col = cols[k].relabels({"col_l": "cut_k", "col_r": "outer_k"})
+        p_r_e = P_R_t[k].relabels({"col": "cut_k", "chi_new": "new_l"})
+        E_new = contract(p_r_e, col, p_l, output_labels=("new_l", "a_d", "new_r"))
+        E_cur = getattr(env_tilde, f"T{idx}")
+        edges[idx - 1] = _normalised_residual_sym(E_new, E_cur)
+
+    return (SymEnv(*corners, *edges), tuple(R_u), tuple(R_S), tuple(R_v))
+
+
+def _modified_env_sym(env_tilde: SymEnv, s_all: tuple) -> SymEnv:
+    """``iCi = s_{k-1} C̃_k s_k`` with the edges left alone.
+
+    The full inverse goes on *both* corner legs, which is what puts the
+    singular values explicitly into the contraction environment so that it
+    transforms covariantly.  Edges already carry their ``s`` from the Eq. 82
+    map, so :func:`remove_inverse_roots_sym` has done their half already.
+    """
+    corners = []
+    for k in range(4):
+        prev_dir, own_dir = (k - 1) % 4, k
+        C = getattr(env_tilde, f"C{k + 1}")
+        C = apply_bond_matrix(C, s_all[prev_dir], axis=0, side="left")
+        C = apply_bond_matrix(C, s_all[own_dir], axis=1, side="right")
+        corners.append(C)
+    edges = [getattr(env_tilde, f"T{k + 1}") for k in range(4)]
+    return SymEnv(*corners, *edges)
+
+
+def _env_matches_layouts(env: SymEnv, projs: list[SymProjectors]) -> bool:
+    """Whether every chi leg of ``env`` carries the layout the cut now chooses.
+
+    The environment's bonds were built by the *previous* sweep's truncation and
+    the layouts come from the current one.  At a fixed point they agree; away
+    from one they need not, because the retained charge distribution is
+    data-dependent — and then ``S`` is a matrix on charges the corner does not
+    have, which is not a small error to absorb but a mis-shaped one.
+
+    Forward-convention indices throughout: direction ``k``'s bond is leg 0 of
+    corner ``unrot(1, k)``, leg 1 of corner ``unrot(1, k-1)``, and both chi legs
+    of edge ``unrot(4, k)``.
+    """
+    for k in range(4):
+        want = projs[k].layout
+        sectors = want.sectors
+        mults = [want.dim_of(q) for q in sectors]
+        edge = getattr(env, f"T{_unrotate_index_sym(4, k)}")
+        legs = (
+            getattr(env, f"C{_unrotate_index_sym(1, k)}").indices[0],
+            getattr(env, f"C{_unrotate_index_sym(1, (k - 1) % 4)}").indices[1],
+            edge.indices[0],
+            edge.indices[2],
+        )
+        for leg in legs:
+            if [int(c) for c in leg.sectors] != sectors:
+                return False
+            if [int(m) for m in leg.multiplicities] != mults:
+                return False
+    return True
+
+
+def root_parametrize_sym(
+    env: SymEnv,
+    a: SymmetricTensor,
+    chi: int,
+    *,
+    prev_projs: list[SymProjectors] | None = None,
+    pinv_rtol: float = 1e-10,
+    polish_steps: int = 40,
+    polish_tol: float = 1e-10,
+) -> tuple[SymRoot, float]:
+    """Extract ``y* = (C̃, Ẽ, 0, S*, 0)`` and the frozen isometries.
+
+    Returns the **covariant** root — already shifted, transposed and swapped by
+    :func:`sym_root_to_covariant_convention` — together with
+    ``‖F(y*)‖`` measured by :func:`characteristic_residual_sym`, so the number
+    reported is the residual of the equations Phase 3's adjoint will actually
+    differentiate rather than a proxy for it.
+
+    Each environment tensor is rescaled to unit Frobenius norm so that the
+    ``λ`` defined as an inner product really is the eigenvalue Eqs. 76-77 need;
+    the modified tensors are renormalised again by
+    :func:`remove_inverse_roots_sym`.  Rescaling is harmless: the energy is a
+    ratio with equal numbers of corners and edges above and below.
+
+    Pass ``prev_projs`` — :func:`converge_sym`'s fourth return value — whenever
+    the environment came from a sweep chain.  A converged environment carries
+    that chain's bond gauge, and a cold re-pin fixes a *different* one, which
+    leaves ``y*`` describing an environment it was not extracted from.  For a
+    real state one polish sweep absorbs that, because there the gauge is a sign
+    and one sweep reproduces it exactly; for a complex state the gauge is a
+    continuous phase, and the **corner** residual plateaus while the edges fall
+    geometrically, because the corner is the only equation built from two
+    directions' projectors and so the only one that sees a *relative* bond
+    phase (#721).
+    """
+    best: tuple[SymRoot, float] | None = None
+    for _step in range(max(int(polish_steps), 1)):
+        env = SymEnv(*[t * (1.0 / (jnp.linalg.norm(t._data) + 1e-300)) for t in env])
+        projs = all_projectors_sym(env, a, chi, prev_projs)
+        prev_projs = projs
+        if not _env_matches_layouts(env, projs):
+            # Away from a fixed point the cut can retain a different charge
+            # distribution than the bonds the environment was built on.  One
+            # sweep makes them agree by construction, so sweep rather than
+            # extract a root whose ``S`` lives on charges the corners lack.
+            env, prev_projs = sweep_sym(env, a, chi, projs)
+            continue
+        U_star, U_perp, Vh_star, Vh_perp, s_list, s_inv = [], [], [], [], [], []
+        u_zero, v_zero = [], []
+        for k in range(4):
+            p = projs[k]
+            layout = p.layout
+            U_star.append(
+                {q: p.sectors[q].U[:, : layout.dim_of(q)] for q in layout.sectors}
+            )
+            U_perp.append(
+                {q: p.sectors[q].U[:, layout.dim_of(q) :] for q in layout.sectors}
+            )
+            Vh_star.append(
+                {q: p.sectors[q].Vh[: layout.dim_of(q)] for q in layout.sectors}
+            )
+            Vh_perp.append(
+                {q: p.sectors[q].Vh[layout.dim_of(q) :] for q in layout.sectors}
+            )
+            s_list.append(p.S)
+            # Constant right/left preconditioner for Eqs. 78 and 80, diagonal
+            # because the root ``S*`` is; the floor is relative to the largest
+            # retained value of the *whole* cut, not of each sector, for the
+            # reason :func:`sector_svd` floors globally.
+            biggest = max(
+                float(jnp.max(jnp.abs(jnp.diag(p.S[q])))) for q in layout.sectors
+            )
+            cutoff = pinv_rtol * biggest
+            inv = {}
+            for q in layout.sectors:
+                diag = jnp.diag(p.S[q]).real
+                inv_diag = jnp.where(
+                    diag > cutoff, 1.0 / jnp.where(diag > cutoff, diag, 1.0), 0.0
+                )
+                inv[q] = jnp.diag(inv_diag).astype(p.S[q].dtype)
+            s_inv.append(inv)
+            # ``u`` is a coordinate on ``U``'s null space and ``v`` on ``Vh``'s,
+            # and those live on *different* legs of the cut: ``U`` spans the
+            # rows of sector ``q`` and ``Vh`` its columns.  Reading both
+            # dimensions off ``U`` is right only when every sector block is
+            # square, which the Z2 fixture is and the U(1) one is not — it fails
+            # as a 6-against-4 matmul inside Eq. 71 rather than as a wrong
+            # number, but only on the fragmenting layout.
+            n_row = {q: p.sectors[q].U.shape[0] for q in layout.sectors}
+            n_col = {q: p.sectors[q].Vh.shape[1] for q in layout.sectors}
+            dtype = env.C1._data.dtype
+            u_zero.append(
+                {
+                    q: jnp.zeros(
+                        (n_row[q] - layout.dim_of(q), layout.dim_of(q)), dtype=dtype
+                    )
+                    for q in layout.sectors
+                }
+            )
+            v_zero.append(
+                {
+                    q: jnp.zeros(
+                        (layout.dim_of(q), n_col[q] - layout.dim_of(q)), dtype=dtype
+                    )
+                    for q in layout.sectors
+                }
+            )
+
+        root = SymRoot(
+            env=env,
+            u=tuple(u_zero),
+            s=tuple(s_list),
+            v=tuple(v_zero),
+            U_star=tuple(U_star),
+            U_perp=tuple(U_perp),
+            Vh_star=tuple(Vh_star),
+            Vh_perp=tuple(Vh_perp),
+            s_star_inv=tuple(s_inv),
+            layouts=tuple(p.layout for p in projs),
+        )
+        root_cov = sym_root_to_covariant_convention(root)
+        tilde = remove_inverse_roots_sym(root_cov.env, root_cov.s)
+        y_star = (tilde, root_cov.u, root_cov.s, root_cov.v)
+        R = characteristic_residual_sym(y_star, a, root_cov, chi)
+        residual = float(
+            jnp.sqrt(
+                sum(
+                    jnp.sum(jnp.abs(_leaf_data(leaf)) ** 2)
+                    for leaf in jax.tree.leaves(R)
+                )
+            )
+        )
+        if best is None or residual < best[1]:
+            best = (root_cov._replace(env=tilde), residual)
+        if residual <= polish_tol:
+            break
+        env, prev_projs = sweep_sym(env, a, chi, projs)
+
+    if best is None:
+        raise ValueError(
+            f"root_parametrize_sym: after {polish_steps} sweeps the environment's "
+            "chi bonds never carried the charge distribution the truncation "
+            "chooses, so no root could be extracted.  That is a state whose CTM "
+            "has not settled — the retained charges are still moving between "
+            "sweeps — not a bug in the equations; converge further first."
+        )
+    return best
+
+
+def _leaf_data(leaf):
+    """The flat buffer of a pytree leaf, whether it is a tensor or an array.
+
+    ``SymmetricTensor`` flattens to a *single* leaf — its packed ``_data``
+    buffer (PR #87) — whose L2 norm is the Frobenius norm, so a residual norm
+    taken this way needs no adapter and no ``todense()``.
+    """
+    return leaf._data if isinstance(leaf, SymmetricTensor) else leaf
 
 
 # ---------------------------------------------------------------------------
