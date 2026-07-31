@@ -10,6 +10,7 @@ from tenax.algorithms._ctm_root_implicit_symmetric import (
     SymEnv,
     SymRoot,
     _double_layer_sym,
+    _same_block_structure,
     absorb_inverse_roots_sym,
     all_projectors_sym,
     apply_bond_matrix,
@@ -2021,3 +2022,46 @@ def test_the_gradient_matches_a_directional_finite_difference(
         f"<dE/dA, V> = {analytic:.12e}; finite difference of the sweep map "
         f"relative error {rel[12]:.2e} at 12 sweeps, {rel[30]:.2e} at 30"
     )
+
+
+def test_same_block_structure_rejects_a_permuted_layout():
+    """Keys and buffer length are not enough to license a flat-buffer compare.
+
+    A layout that merely *permutes* multiplicities between sectors —
+    ``{0: 1, 1: 2}`` to ``{0: 2, 1: 1}`` — keeps the diagonal key set
+    ``((0, 0), (1, 1))`` and keeps the packed buffer length (``1**2 + 2**2``
+    equals ``2**2 + 1**2``) while every block's shape and offset moves.  The
+    original predicate compared only those two things and so returned ``True``,
+    which would let :func:`converge_sym` subtract unrelated flat-buffer entries
+    and declare convergence on a meaningless residual.
+
+    Reported by automated review on PR #729 and reproduced before fixing.
+    """
+    sym = U1Symmetry()
+
+    def corner(m0, m1):
+        def leg(flow):
+            return TensorIndex(
+                symmetry=sym,
+                sectors=np.array([0, 1]),
+                multiplicities=np.array([m0, m1]),
+                flow=flow,
+                label="c",
+            )
+
+        return SymmetricTensor.random_normal_np(
+            (leg(FlowDirection.OUT), leg(FlowDirection.IN)),
+            np.random.RandomState(0),
+        )
+
+    a, b = corner(1, 2), corner(2, 1)
+    # The trap: identical on both things the old predicate looked at.
+    assert a._block_keys == b._block_keys
+    assert a._data.shape == b._data.shape
+    # ... but the blocks genuinely differ in shape.
+    assert [blk.shape for blk in a.blocks.values()] != [
+        blk.shape for blk in b.blocks.values()
+    ]
+    assert not _same_block_structure(a, b)
+    # Unchanged behaviour on a genuinely identical structure.
+    assert _same_block_structure(a, corner(1, 2))

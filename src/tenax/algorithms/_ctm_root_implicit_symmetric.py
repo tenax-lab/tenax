@@ -17,6 +17,7 @@ from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from tenax.algorithms._ctm_root_implicit_asym import (
     _denman_beavers,
@@ -814,8 +815,22 @@ def _same_block_structure(x: SymmetricTensor, y: SymmetricTensor) -> bool:
     data-dependent, so two sweeps can produce the same total ``chi`` split
     differently over sectors — same dense shape, different blocks.  Comparing
     the flat buffers in that case would subtract unrelated entries.
+
+    Keys and buffer length are *not* sufficient, which is subtle enough to have
+    shipped once: a layout that merely **permutes** multiplicities between
+    sectors, ``{0: 1, 1: 2} -> {0: 2, 1: 1}``, keeps the diagonal key set
+    ``((0,0), (1,1))`` and keeps the packed length (``1² + 2² == 2² + 1²``)
+    while every block's shape and offset moves.  So the per-leg charge layout
+    is compared too — it is what actually determines the packing.
     """
-    return x._data.shape == y._data.shape and x._block_keys == y._block_keys
+    if x._data.shape != y._data.shape or x._block_keys != y._block_keys:
+        return False
+    return all(
+        np.array_equal(xi.sectors, yi.sectors)
+        and np.array_equal(xi.multiplicities, yi.multiplicities)
+        and xi.flow == yi.flow
+        for xi, yi in zip(x.indices, y.indices, strict=True)
+    )
 
 
 def _max_abs_diff_sym(x: SymmetricTensor, y: SymmetricTensor) -> float:
