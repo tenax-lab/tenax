@@ -1176,7 +1176,14 @@ def test_the_enlarged_corner_transpose_is_load_bearing(converged_root, monkeypat
 
     monkeypatch.setattr(mod, "_cut_outer_blocks", untransposed)
     wrong = _residual_norm(characteristic_residual_sym(root.y, a, root, 4))
-    assert wrong > 1.0, wrong
+    # Two-part, scale-free: large in absolute terms AND enormous relative to
+    # the true root.  A bare ``> 1.0`` is calibrated at the edge of a
+    # platform-dependent quantity — macOS measured 0.924 here where Linux
+    # measured 4.9, which failed CI while the counterfactual was in fact
+    # firing across twelve orders of magnitude.  Same pattern as
+    # ``test_a_wrong_bond_layout_breaks_the_root``.
+    assert wrong > 1e-2, wrong
+    assert wrong > 1e9 * residual, (wrong, residual)
     print(f"|F| with the (cut|outer) transpose {residual:.2e}, without it {wrong:.2e}")
 
 
@@ -1207,7 +1214,14 @@ def test_the_covariant_shift_is_load_bearing(converged_root):
     wrong = _residual_norm(
         characteristic_residual_sym((root.env, bad.u, bad.s, bad.v), a, bad, 4)
     )
-    assert wrong > 1.0, wrong
+    # Two-part, scale-free: large in absolute terms AND enormous relative to
+    # the true root.  A bare ``> 1.0`` is calibrated at the edge of a
+    # platform-dependent quantity — macOS measured 0.924 here where Linux
+    # measured 4.9, which failed CI while the counterfactual was in fact
+    # firing across twelve orders of magnitude.  Same pattern as
+    # ``test_a_wrong_bond_layout_breaks_the_root``.
+    assert wrong > 1e-2, wrong
+    assert wrong > 1e9 * residual, (wrong, residual)
     print(f"|F| at the right shift {residual:.2e}, one shift further {wrong:.2e}")
 
 
@@ -1411,7 +1425,14 @@ def test_the_root_survives_a_complex_state(monkeypatch):
 
     monkeypatch.setattr(mod, "_vdot_sym", projected)
     wrong = _residual_norm(characteristic_residual_sym(root.y, a, root, 4))
-    assert wrong > 1.0, wrong
+    # Two-part, scale-free: large in absolute terms AND enormous relative to
+    # the true root.  A bare ``> 1.0`` is calibrated at the edge of a
+    # platform-dependent quantity — macOS measured 0.924 here where Linux
+    # measured 4.9, which failed CI while the counterfactual was in fact
+    # firing across twelve orders of magnitude.  Same pattern as
+    # ``test_a_wrong_bond_layout_breaks_the_root``.
+    assert wrong > 1e-2, wrong
+    assert wrong > 1e9 * residual, (wrong, residual)
     print(f"complex |F| = {residual:.3e}; with a real-projected λ = {wrong:.3e}")
 
 
@@ -1624,9 +1645,14 @@ def test_a_wrong_sector_assignment_survives_every_shape_check(converged_root):
             4,
         )
     )
-    assert both > 1.0, both
-    assert s_only > 1.0, s_only
-    assert iso_only > 1.0, iso_only
+    # Scale-free, for the reason given in
+    # ``test_the_root_survives_a_complex_state``: an absolute ``> 1.0`` sits at
+    # the edge of a platform-dependent value.  These measured 1.19e3 / 27.0 /
+    # 39.9 locally, so 1e-2 keeps three orders of margin at worst while still
+    # asserting the swap is catastrophic rather than merely detectable.
+    for name, value in (("both", both), ("S only", s_only), ("isometries", iso_only)):
+        assert value > 1e-2, (name, value)
+        assert value > 1e9 * residual, (name, value, residual)
     print(
         f"sector swap: |F| root {residual:.2e} / all {both:.2e} / S only "
         f"{s_only:.2e} / isometries only {iso_only:.2e}"
