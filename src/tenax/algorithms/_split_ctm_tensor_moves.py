@@ -332,6 +332,16 @@ def _compute_split_plaquette_projector_pair(
 # ------------------------------------------------------------------ #
 # 2x2 split absorption (four directional twins of the fused            #
 # _ctm_tensor_absorb_*_2plaq, on ket/bra split edges)                  #
+#                                                                      #
+# These four kernels must track the corner label convention of their   #
+# fused counterparts in _ctm_tensor_moves.py exactly -- the corner     #
+# read pairing, the _apply_proj_unfused env leg, and the output        #
+# relabels.  They are separate code, so a convention change there does #
+# NOT propagate here: #710 fixed the fused RIGHT/TOP/BOTTOM corners and #
+# left these stale, which silently transposed C1/C2/C3/C4 on the split #
+# path until #740.  test_split_absorb_bitidentical_on_shared_env is    #
+# the convergence-independent guard; it compares both kernels on one   #
+# shared env, so it catches any future drift immediately.              #
 # ------------------------------------------------------------------ #
 
 
@@ -429,7 +439,7 @@ def _split_ctm_absorb_bottom_2plaq(
         FlowDirection.IN,
     )
     C4_new = _apply_proj_unfused(P_bot_left, C4g, "c4_u", "l2")
-    C4_new = C4_new.relabels({"chi_new": "c4_r", "t4k_d": "c4_u"})
+    C4_new = C4_new.relabels({"chi_new": "c4_u", "t4k_d": "c4_r"})  # #710
 
     C3g = _grow_split_corner_2x2(
         env_src.C3,
@@ -445,7 +455,7 @@ def _split_ctm_absorb_bottom_2plaq(
         FlowDirection.OUT,
     )
     C3_new = _apply_proj_unfused(P_top_curr, C3g, "c3_l", "r2")
-    C3_new = C3_new.relabels({"chi_new": "c3_u", "t2k_u": "c3_l"})
+    C3_new = C3_new.relabels({"chi_new": "c3_l", "t2k_u": "c3_u"})  # #710
 
     T3g = _grow_split_edge_2x2(
         env_src.T3_ket,
@@ -573,11 +583,11 @@ def _split_ctm_absorb_right_2plaq(
         FlowDirection.IN,
     )
     C2_new = _apply_proj_unfused(P_top_above, C2g, "c2_d", "u2")
-    C2_new = C2_new.relabels({"chi_new": "c2_l", "t1k_l": "c2_d"})
+    C2_new = C2_new.relabels({"chi_new": "c2_d", "t1k_l": "c2_l"})  # #710
 
     C3g = _grow_split_corner_2x2(
         env_src.C3,
-        "c3_u",
+        "c3_l",  # #710: pair c3_l <-> t3_l, leaving c3_u as the surviving leg
         "t3b_l",
         env_src.T3_bra,
         env_src.T3_ket,
@@ -588,7 +598,7 @@ def _split_ctm_absorb_right_2plaq(
         "d2",
         FlowDirection.OUT,
     )
-    C3_new = _apply_proj_unfused(P_bot_curr, C3g, "c3_l", "d2")
+    C3_new = _apply_proj_unfused(P_bot_curr, C3g, "c3_u", "d2")  # #710
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t3k_r": "c3_l"})
 
     T2g = _grow_split_edge_2x2(
@@ -645,7 +655,7 @@ def _split_ctm_absorb_top_2plaq(
         FlowDirection.IN,
     )
     C1_new = _apply_proj_unfused(P_top_left, C1g, "c1_r", "l2")
-    C1_new = C1_new.relabels({"chi_new": "c1_d", "t4b_u": "c1_r"})
+    C1_new = C1_new.relabels({"chi_new": "c1_r", "t4b_u": "c1_d"})  # #710
 
     C2g = _grow_split_corner_2x2(
         env_src.C2,
