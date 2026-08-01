@@ -37,16 +37,67 @@ def _random_peps(seed=2026, D=2, d=2):
 
 
 @pytest.mark.algorithm
-def test_fixed_point_matches_gmres_at_chi8():
-    """``adjoint_method`` choice must not change the optimization outcome.
+def test_fixed_point_matches_gmres_gradient():
+    """``adjoint_method`` must not change the GRADIENT.
 
-    Both Neumann iteration and eager GMRES solve the same linear system
-    to the same tolerance.  Running ``optimize_gs_ad`` from the same
-    seed under both methods must yield matching energies and tensors.
+    ``adjoint_method`` only selects the *backward* linear solver; both methods
+    see the identical forward fixed point and therefore solve the identical
+    system ``(I - J^T) λ = dE/denv``.  Compared at a single gradient evaluation
+    the two agree to well inside ``gmres_tol`` (measured: cos = 1.000000000000,
+    relative L2 difference 1.9e-7), so this is gated tightly.
+
+    Why not compare ``optimize_gs_ad`` end states (issue #740)?  Because that
+    measures chaos amplification through the CTM fixed point, not the solver.
+    Since #710 restored ket-bra Z2 at the fixed point, the projector singular
+    values come in exact degenerate pairs whose LAPACK basis choice is
+    platform- and version-dependent, so a sub-solver-tolerance difference at
+    step 1 explodes across subsequent steps.  Measured on the old fixture
+    (D=2, chi=8, lr=1e-2, seed 2026):
+
+        steps   |dE|       max|dA|
+        1       2.2e-09    1.3e-08
+        2       5.3e-06    3.8e-03    <- what this test used to assert on
+        3       5.2e-03    5.0e-02
+
+    ~3 orders of magnitude per step.  The old 2-step assertion passed only
+    before #710 (verified: green at 3f25688^, red at 3f25688) because the
+    pre-#710 transposed convention broke the degeneracy.  A single step is
+    still stable, so the production path is covered by the second half below.
     """
     H = _heisenberg_gate()
-    A_init = _random_peps()
+    A = _wrap_as_dense_tensor(_random_peps())
 
+    def grad_with(method):
+        def loss(A_):
+            return ctm_energy_implicit(
+                {(0, 0): A_},
+                SINGLE_SITE_NEIGHBORS,
+                H,
+                chi=8,
+                max_iter=40,
+                conv_tol=1e-8,
+                gmres_tol=1e-6,
+                gmres_maxiter=200,
+                adjoint_method=method,
+            )
+
+        g = jax.grad(loss)(A)
+        return np.asarray(g.todense() if hasattr(g, "todense") else g).ravel()
+
+    g_fp = grad_with("fixed_point")
+    g_gmres = grad_with("gmres")
+
+    n_fp, n_gmres = np.linalg.norm(g_fp), np.linalg.norm(g_gmres)
+    assert n_fp > 1e-8 and n_gmres > 1e-8, "gradient collapsed to zero"
+
+    rel = float(np.linalg.norm(g_fp - g_gmres) / n_fp)
+    assert rel < 1e-5, (
+        f"adjoint_method changed the gradient beyond the solver tolerance: "
+        f"rel={rel:.3e} (|g_fp|={n_fp:.6e}, |g_gmres|={n_gmres:.6e})"
+    )
+
+    # Production path: one optimizer step is still below the amplification
+    # threshold, so the two methods must agree there element-wise.
     def make_config(method: str) -> iPEPSConfig:
         return iPEPSConfig(
             max_bond_dim=2,
@@ -56,30 +107,20 @@ def test_fixed_point_matches_gmres_at_chi8():
                 conv_tol=1e-8,
                 adjoint_method=method,
             ),
-            gs_num_steps=2,
+            gs_num_steps=1,
             gs_learning_rate=1e-2,
             su_init=False,
             gs_metric_precond=False,
         )
 
+    A_init = _random_peps()
     A_fp, _, E_fp = optimize_gs_ad(H, A_init, make_config("fixed_point"))
     A_gmres, _, E_gmres = optimize_gs_ad(H, A_init, make_config("gmres"))
 
-    # The two backward solvers do NOT converge to the same tolerance: GMRES
-    # solves its linear system to ``gmres_tol`` (1e-6) while the Neumann
-    # fixed-point loop targets ``adjoint_tol`` (1e-8). Their gradients can
-    # therefore differ at the ~``gmres_tol`` level, which after two optimizer
-    # steps (lr=1e-2) shows up as an energy/tensor disagreement of order 1e-5.
-    # A 1e-6 match is thus tighter than the solvers themselves and fails on
-    # some platforms' BLAS (observed CI diff ≈ 1.8e-5). Assert agreement at the
-    # solver-tolerance scale instead — still tight enough to catch a genuine
-    # method discrepancy (which would be orders of magnitude larger).
-    assert abs(float(E_fp) - float(E_gmres)) < 1e-4, (
-        f"Energies should match within solver tolerance: "
-        f"fixed_point={float(E_fp)}, gmres={float(E_gmres)}, "
-        f"diff={abs(float(E_fp) - float(E_gmres))}"
+    assert abs(float(E_fp) - float(E_gmres)) < 1e-6, (
+        f"one-step energies should match: fixed_point={float(E_fp)}, "
+        f"gmres={float(E_gmres)}, diff={abs(float(E_fp) - float(E_gmres))}"
     )
-
     A_fp_arr = np.asarray(A_fp.todense() if hasattr(A_fp, "todense") else A_fp)
     A_gmres_arr = np.asarray(
         A_gmres.todense() if hasattr(A_gmres, "todense") else A_gmres
@@ -87,9 +128,9 @@ def test_fixed_point_matches_gmres_at_chi8():
     np.testing.assert_allclose(
         A_fp_arr,
         A_gmres_arr,
-        rtol=1e-3,
-        atol=1e-5,
-        err_msg=("Final tensors should match element-wise within solver tolerance"),
+        rtol=1e-5,
+        atol=1e-6,
+        err_msg="one-step tensors should match within solver tolerance",
     )
 
 
