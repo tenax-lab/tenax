@@ -888,6 +888,115 @@ class TestTargetSector:
             sector = compute_mps_sector(tensors)
             assert sector == target, f"Expected sector={target}, got {sector}"
 
+    def test_zn_sector_is_a_charge_not_a_raw_sum(self):
+        """A ``Z3`` site whose blocks all sum to 3 is in sector 0, not sector 3.
+
+        Every other sector test in the suite is U(1), where ``sum(flow * q)``
+        and the fused net charge coincide identically — so the whole
+        ``_net_charge`` migration in ``compute_mps_sector`` is invisible to
+        them.  Under ``Z_n`` the two part company: the raw sum reports ``3``,
+        which is not even a charge the legs carry, and ``compute_mps_sector``
+        would then hand a phantom target to ``validate_mps_sector``.
+
+        The fixture is built so *every* block has raw sum exactly 3, so the raw
+        version yields a single confident wrong answer rather than ``None``.
+        """
+        from tenax.core.symmetry import ZnSymmetry
+
+        sym = ZnSymmetry(3)
+        sectors = np.array([0, 1, 2], dtype=np.int32)
+        indices = tuple(
+            TensorIndex(
+                symmetry=sym,
+                sectors=sectors.copy(),
+                multiplicities=np.array([1, 1, 1], dtype=np.int32),
+                flow=FlowDirection.IN,
+                label=lbl,
+            )
+            for lbl in ("l", "p", "r")
+        )
+        keys = [
+            (a, b, c)
+            for a in range(3)
+            for b in range(3)
+            for c in range(3)
+            if a + b + c == 3
+        ]
+        assert keys, "fixture must have blocks"
+        # Premise 1: the raw sum is a constant 3 on every block ...
+        assert {
+            sum(int(i.flow) * int(q) for i, q in zip(indices, k)) for k in keys
+        } == {3}
+        # ... and 3 is not a charge any leg carries.
+        assert not any(idx.has_sector(3) for idx in indices)
+        # Premise 2: every one of them is nonetheless conserving.
+        site = SymmetricTensor({k: jnp.ones((1, 1, 1)) for k in keys}, indices)
+        site._validate()
+
+        assert compute_mps_sector([site]) == 0
+        validate_mps_sector([site], 0)
+
+    def test_sector_returns_the_identity_it_compares_against(self):
+        """The "no charged site" return and the comparison must be one value.
+
+        ``compute_mps_sector`` decides a site is uncharged by comparing its net
+        charge against ``symmetry.identity()``, then returns a literal.  Every
+        symmetry in the tree has ``identity() == 0``, so the two agree by
+        coincidence and no fixture built from them can tell the difference.
+        This one uses U(1) rewritten with ``7`` as its neutral element — the
+        same group, a different labelling — which is precisely the case a
+        hard-coded ``0`` gets wrong: it would report an *uncharged* MPS as
+        sitting in a sector the legs cannot even represent.
+        """
+        from tenax.core.symmetry import U1Symmetry as _U1
+
+        class ShiftedU1(_U1):
+            """U(1) with 7 as the neutral element instead of 0."""
+
+            def fuse(self, a, b):
+                return np.asarray(a, np.int32) + np.asarray(b, np.int32) - 7
+
+            def dual(self, c):
+                return 14 - np.asarray(c, np.int32)
+
+            def identity(self):
+                return 7
+
+        sym = ShiftedU1()
+        # Premises: it really is a group, with a neutral element that is not 0.
+        q = np.array([9], dtype=np.int32)
+        assert sym.identity() == 7
+        np.testing.assert_array_equal(sym.fuse(np.int32(sym.identity()), q), q)
+        assert int(sym.fuse(q, sym.dual(q))[0]) == sym.identity()
+
+        sectors = np.array([6, 7, 8], dtype=np.int32)
+        indices = tuple(
+            TensorIndex(
+                symmetry=sym,
+                sectors=sectors.copy(),
+                multiplicities=np.array([1, 1, 1], dtype=np.int32),
+                flow=flow,
+                label=lbl,
+            )
+            for flow, lbl in zip(
+                (FlowDirection.IN, FlowDirection.IN, FlowDirection.OUT), ("l", "p", "r")
+            )
+        )
+        keys = [
+            (a, b, c)
+            for a in (6, 7, 8)
+            for b in (6, 7, 8)
+            for c in (6, 7, 8)
+            if a + b - c == 7
+        ]
+        assert keys, "fixture must have blocks"
+        site = SymmetricTensor({k: jnp.ones((1, 1, 1)) for k in keys}, indices)
+        site._validate()  # every block is conserving, i.e. the MPS is uncharged
+
+        assert compute_mps_sector([site]) == 7
+        # ... and 0 is not merely a different label, it is not a charge at all.
+        assert not any(idx.has_sector(0) for idx in indices)
+
 
 class TestMixedTypeRejection:
     """Test that dmrg() rejects mixed DenseTensor/SymmetricTensor inputs."""

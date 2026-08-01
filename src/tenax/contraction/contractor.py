@@ -35,7 +35,7 @@ import jax.numpy as jnp
 import numpy as np
 import opt_einsum
 
-from tenax.core.index import Label, TensorIndex
+from tenax.core.index import Label, TensorIndex, _net_charges
 from tenax.core.tensor import (
     BlockKey,
     DenseTensor,
@@ -371,38 +371,6 @@ def _contract_symmetric_batched(
     return output_blocks
 
 
-def _net_charges(
-    indices: Sequence[TensorIndex],
-    keys: Sequence[BlockKey],
-) -> np.ndarray:
-    """Vectorised :func:`~tenax.core.index._net_charge` over a table of keys.
-
-    Returns one net fused charge per key.  The whole key table is fused leg by
-    leg, so the symmetry sees one ``(n_keys,)`` array per leg instead of one
-    scalar per (key, leg) pair -- the same shape of call
-    :meth:`SymmetricTensor._validate` makes, and for the same reason: the
-    per-key adapter costs ~10x more here (2.3 ms vs 0.2 ms for the raw sum it
-    replaces, on a 489-block rank-4 U(1) tensor) and this prelude runs on every
-    symmetric contraction.  Vectorised it is ~3x *cheaper* than the raw sum.
-
-    Every charge is still inverted and combined by the symmetry class, so this
-    is the sanctioned boundary of #734 rather than a bypass of it.
-
-    Args:
-        indices: Tensor indices, one per leg.  Must be non-empty.
-        keys:    Block keys, each one charge per leg in ``indices`` order.
-
-    Returns:
-        Integer array of shape ``(len(keys),)``.
-    """
-    sym = indices[0].symmetry
-    table = np.array(keys, dtype=np.int32)  # (n_keys, n_legs)
-    net = np.full(len(table), sym.identity(), dtype=np.int32)
-    for i, idx in enumerate(indices):
-        net = sym.fuse(net, sym.flow_charge(idx.flow, table[:, i]))
-    return net
-
-
 def _parse_contraction_prelude(
     tensors: Sequence[SymmetricTensor],
     subscripts: str,
@@ -450,10 +418,16 @@ def _parse_contraction_prelude(
     # charge.  Mixed-charge tensors (e.g. operators that create/annihilate
     # particles) contribute the identity.  Iterating ``_block_keys`` is
     # equivalent to iterating ``.blocks`` keys but cheaper.
+    # ``indices`` is part of the SymmetricTensor contract, so read it directly.
+    # A ``getattr(..., None)`` here read as "tensors might not have indices",
+    # which is not true -- the loop above already dereferences ``tensor.indices``
+    # unconditionally -- and would have turned a future rename into "no target
+    # inferred", silently, which is the #734 failure mode rather than an
+    # AttributeError.  Unobservable today; the point is that it stays that way.
     output_target: int | None = None
     sym = None
     for tensor in tensors:
-        if getattr(tensor, "indices", None):
+        if tensor.indices:
             sym = tensor.indices[0].symmetry
             break
 
@@ -464,9 +438,7 @@ def _parse_contraction_prelude(
         # 16-bit factor boundary and lands on a different charge entirely.
         total = np.array([sym.identity()], dtype=np.int32)
         for tensor in tensors:
-            if not getattr(tensor, "indices", None) or not getattr(
-                tensor, "_block_keys", None
-            ):
+            if not tensor.indices or not getattr(tensor, "_block_keys", None):
                 continue
             targets = np.unique(_net_charges(tensor.indices, tensor._block_keys))
             if targets.size == 1:
