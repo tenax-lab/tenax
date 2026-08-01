@@ -35,6 +35,27 @@ from tenax.core.tensor import (
 # ---------- Shared helpers ----------
 
 
+def _block_in_decomp_order(block, decomp_perm: tuple[int, ...]):
+    """Transpose a sector block into ``left_axes + right_axes`` order (#689).
+
+    Block-sparse blocks are stored in the tensor's *native* axis order, but the
+    matrix assembled by the decompositions below is indexed by ``left_labels``
+    rows against ``right_labels`` columns.  Reshaping a block without this
+    transpose flattens it in the wrong order whenever the requested split is
+    not the identity permutation of the stored axes, so the decomposition
+    silently operates on a permuted matrix and returns finite but wrong
+    factors.  The dense paths already do the equivalent ``jnp.transpose(dense,
+    left_axes + right_axes)``; this is the block-sparse counterpart.
+
+    Uses the array's own ``.transpose`` so numpy-backed and JAX-backed blocks
+    each keep their type.  Identity permutations return the block untouched, so
+    the common in-order case costs nothing.
+    """
+    if decomp_perm == tuple(range(len(decomp_perm))):
+        return block
+    return block.transpose(decomp_perm)
+
+
 def _dense_svd(
     matrix: jax.Array,
     full_matrices: bool = False,
@@ -336,7 +357,9 @@ def _truncated_svd_symmetric(
             ri = right_subkeys_seen[rk]
             row_start = sum(left_row_sizes[:li])
             col_start = sum(right_col_sizes[:ri])
-            flat_block = block.reshape(left_row_sizes[li], right_col_sizes[ri])
+            flat_block = _block_in_decomp_order(block, decomp_perm).reshape(
+                left_row_sizes[li], right_col_sizes[ri]
+            )
             # Apply Koszul sign for leg reordering (original -> left+right)
             if is_fermionic:
                 full_key = [0] * len(tensor.indices)
@@ -725,7 +748,9 @@ def _truncated_svd_symmetric_traced(
             ri = right_subkeys_seen[rk]
             row_start = sum(left_row_sizes[:li])
             col_start = sum(right_col_sizes[:ri])
-            flat_block = block.reshape(left_row_sizes[li], right_col_sizes[ri])
+            flat_block = _block_in_decomp_order(block, decomp_perm).reshape(
+                left_row_sizes[li], right_col_sizes[ri]
+            )
             if is_fermionic:
                 full_key = [0] * len(tensor.indices)
                 for ax, ch in zip(left_axes, lk):
@@ -1000,7 +1025,7 @@ def _truncated_svd_symmetric_np(
             ri = right_subkeys_seen[rk]
             row_start = sum(left_row_sizes[:li])
             col_start = sum(right_col_sizes[:ri])
-            flat_block = np.asarray(block).reshape(
+            flat_block = _block_in_decomp_order(np.asarray(block), decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
             # Apply Koszul sign for leg reordering (original -> left+right)
@@ -1229,7 +1254,7 @@ def _qr_symmetric_np(
             ri = right_subkeys_seen[rk]
             row_start = sum(left_row_sizes[:li])
             col_start = sum(right_col_sizes[:ri])
-            flat_block = np.asarray(block).reshape(
+            flat_block = _block_in_decomp_order(np.asarray(block), decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
             # Apply Koszul sign for leg reordering (original -> left+right)
@@ -1408,7 +1433,9 @@ def _qr_symmetric(
             ri = right_subkeys_seen[rk]
             row_start = sum(left_row_sizes[:li])
             col_start = sum(right_col_sizes[:ri])
-            flat_block = block.reshape(left_row_sizes[li], right_col_sizes[ri])
+            flat_block = _block_in_decomp_order(block, decomp_perm).reshape(
+                left_row_sizes[li], right_col_sizes[ri]
+            )
             # Apply Koszul sign for leg reordering (original -> left+right)
             if is_fermionic:
                 full_key = [0] * len(tensor.indices)
@@ -1606,7 +1633,9 @@ def _eigh_symmetric(
             ri = right_subkeys_seen[rk]
             row_start = sum(left_row_sizes[:li])
             col_start = sum(right_col_sizes[:ri])
-            flat_block = block.reshape(left_row_sizes[li], right_col_sizes[ri])
+            flat_block = _block_in_decomp_order(block, decomp_perm).reshape(
+                left_row_sizes[li], right_col_sizes[ri]
+            )
             # Apply Koszul sign for leg reordering (original -> left+right)
             if is_fermionic:
                 full_key = [0] * len(tensor.indices)
@@ -2001,7 +2030,9 @@ def _rsvd_symmetric(
             ri = right_subkeys_seen[rk]
             row_start = sum(left_row_sizes[:li])
             col_start = sum(right_col_sizes[:ri])
-            flat_block = block.reshape(left_row_sizes[li], right_col_sizes[ri])
+            flat_block = _block_in_decomp_order(block, decomp_perm).reshape(
+                left_row_sizes[li], right_col_sizes[ri]
+            )
             if is_fermionic:
                 full_key = [0] * len(tensor.indices)
                 for ax, ch in zip(left_axes, lk):
