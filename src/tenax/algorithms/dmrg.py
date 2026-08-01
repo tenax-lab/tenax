@@ -40,7 +40,7 @@ import opt_einsum
 from tenax.algorithms._tensor_utils import scale_bond_axis
 from tenax.algorithms.auto_mpo import build_auto_mpo
 from tenax.contraction.contractor import contract, truncated_svd
-from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.index import FlowDirection, TensorIndex, _net_charge
 from tenax.core.mps import FiniteMPS
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor, inner
@@ -3092,18 +3092,26 @@ def build_random_symmetric_mps(
 def compute_mps_sector(mps_tensors: list[Tensor]) -> int | None:
     """Infer total charge sector of an MPS from its tensor block structure.
 
-    With the 3-leg boundary convention every MPS tensor satisfies
-    ``sum(flow_i * charge_i) = 0`` per block, and both boundary bonds
-    carry charge 0.  The target charge Q is encoded through block
-    selection: exactly one tensor (typically the orthogonality center)
-    has all blocks satisfying ``sum(flow_i * charge_i) = Q`` instead
-    of 0.  This function scans all tensors and returns Q.
+    With the 3-leg boundary convention every MPS tensor satisfies the
+    conservation law per block -- its net fused charge is the identity --
+    and both boundary bonds carry the identity charge.  The target charge
+    Q is encoded through block selection: exactly one tensor (typically
+    the orthogonality center) has all blocks whose net charge is Q instead
+    of the identity.  This function scans all tensors and returns Q.
 
-    If all tensors satisfy standard conservation (``sum = 0``), the
-    function returns 0.
+    If all tensors satisfy standard conservation, the function returns the
+    identity charge (``0`` for every symmetry currently implemented).
+
+    The net charge is read through :func:`~tenax.core.index._net_charge`
+    rather than ``sum(flow * q)``: the latter assumes the group inverse is
+    integer negation, which is false for ``ProductSymmetry``'s bit-packed
+    charges (#734).
 
     Args:
         mps_tensors: List of SymmetricTensor (or BlockArray) MPS site tensors.
+            Both expose ``.blocks`` and ``.indices``; ``BlockArray`` is a
+            plain dataclass, so those are instance attributes rather than
+            class attributes.
 
     Returns:
         The total charge if consistently detectable, or None if the
@@ -3114,23 +3122,18 @@ def compute_mps_sector(mps_tensors: list[Tensor]) -> int | None:
     for site in mps_tensors:
         if not isinstance(site, (SymmetricTensor, BlockArray)):
             continue
-        if not site.blocks:
+        if not site.blocks or not site.indices:
             continue
 
-        sectors: set[int] = set()
-        for key in site.blocks:
-            total = 0
-            for idx, q in zip(site.indices, key):
-                total += int(idx.flow) * q
-            sectors.add(total)
+        sectors = {_net_charge(site.indices, key) for key in site.blocks}
 
         if len(sectors) != 1:
             return None
         charge = sectors.pop()
-        if charge != 0:
+        if charge != site.indices[0].symmetry.identity():
             return charge
 
-    # All tensors have standard conservation (sum = 0)
+    # All tensors have standard conservation (net charge == identity)
     return 0
 
 
