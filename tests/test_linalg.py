@@ -933,3 +933,200 @@ def test_svd_bond_labels_are_canonical_for_either_left_leg_flow(name, sym, secto
     assert seen["OUT"] == canon(sym.dual(np.array(seen["IN"], dtype=np.int32))), (
         f"{name}: mirrored bond labels are not the canonical dual: {seen}"
     )
+
+
+# ------------------------------------------------------------------ #
+# #689 — block-sparse decompositions must honour left/right label      #
+# order rather than the tensor's native stored axis order.             #
+# ------------------------------------------------------------------ #
+
+
+@pytest.fixture
+def u1_sym_tensor_3leg_mult2():
+    """3-leg U(1) tensor whose every charge sector has multiplicity 2.
+
+    Multiplicity matters here: with multiplicity 1 on every charge, each sector
+    block is 1x1x1 and reshaping it in native versus ``left+right`` axis order
+    gives the identical matrix — so a multiplicity-1 fixture cannot detect #689
+    at all.  Repeating each charge twice makes the blocks 2x2x2, where the two
+    orders genuinely differ.
+    """
+    sym = U1Symmetry()
+    pl = np.array([0, 0, 1, 1], dtype=np.int32)  # phys / left: charges {0,1} x2
+    r = np.array([0, 0, 1, 1, 2, 2], dtype=np.int32)  # right: {0,1,2} x2
+    indices = (
+        TensorIndex.from_charges(sym, pl, IN, label="phys"),
+        TensorIndex.from_charges(sym, pl, IN, label="left"),
+        TensorIndex.from_charges(sym, sym.dual(r), OUT, label="right"),
+    )
+    return SymmetricTensor.random_normal(indices, jax.random.PRNGKey(7))
+
+
+def _reference_in_split_order(tensor, left_labels, right_labels):
+    """``tensor`` densified and transposed to ``left_labels + right_labels``."""
+    stored = list(tensor.labels())
+    perm = tuple(stored.index(lbl) for lbl in list(left_labels) + list(right_labels))
+    return np.asarray(tensor.todense()).transpose(perm)
+
+
+def _contract_over_bond(left_factor, right_factor, scale=None):
+    """Contract ``(left..., bond)`` against ``(bond, right...)``, optionally
+    scaling the bond by ``scale`` (the singular values)."""
+    lf = np.asarray(left_factor.todense())
+    rf = np.asarray(right_factor.todense())
+    if scale is not None:
+        lf = lf * np.asarray(scale).reshape((1,) * (lf.ndim - 1) + (-1,))
+    return np.tensordot(lf, rf, axes=([lf.ndim - 1], [0]))
+
+
+class TestBlockSparseDecompLabelOrder:
+    """``svd``/``qr``/``eigh`` accept ``left_labels``/``right_labels``, but the
+    block-sparse path reshaped each sector block in its *native* stored axis
+    order — silently decomposing a permuted matrix (#689).
+
+    Each case requests a split whose ``left + right`` concatenation is NOT the
+    identity permutation of the stored axes, on a fixture with multiplicity 2,
+    which is exactly when the two orders disagree.  The dense path already
+    transposes to ``left_axes + right_axes`` before reshaping, so it defines
+    the contract.  Reconstruction is gauge-free, so it holds for any correct
+    decomposition regardless of basis choice.
+    """
+
+    LEFT = ["left"]
+    RIGHT = ["phys", "right"]  # stored order is (phys, left, right)
+
+    def test_qr_reconstructs_under_permuted_label_split(self, u1_sym_tensor_3leg_mult2):
+        """Q·R == T when left_labels+right_labels reorders the stored axes."""
+        from tenax.linalg import qr
+
+        T = u1_sym_tensor_3leg_mult2
+        Q, R = qr(T, left_labels=self.LEFT, right_labels=self.RIGHT)
+        np.testing.assert_allclose(
+            _contract_over_bond(Q, R),
+            _reference_in_split_order(T, self.LEFT, self.RIGHT),
+            atol=1e-12,
+        )
+
+    def test_svd_reconstructs_under_permuted_label_split(
+        self, u1_sym_tensor_3leg_mult2
+    ):
+        """U·diag(S)·Vh == T when the requested split reorders the stored axes."""
+        from tenax.linalg import svd
+
+        T = u1_sym_tensor_3leg_mult2
+        U, S, Vh, _ = svd(T, left_labels=self.LEFT, right_labels=self.RIGHT)
+        np.testing.assert_allclose(
+            _contract_over_bond(U, Vh, scale=S),
+            _reference_in_split_order(T, self.LEFT, self.RIGHT),
+            atol=1e-12,
+        )
+
+    def test_qr_symmetric_matches_dense_under_permuted_split(
+        self, u1_sym_tensor_3leg_mult2
+    ):
+        """Block-sparse QR reconstructs the same tensor as the dense path."""
+        from tenax.linalg import qr
+
+        T = u1_sym_tensor_3leg_mult2
+        T_dense = DenseTensor(T.todense(), T.indices)
+        np.testing.assert_allclose(
+            _contract_over_bond(*qr(T, self.LEFT, self.RIGHT)),
+            _contract_over_bond(*qr(T_dense, self.LEFT, self.RIGHT)),
+            atol=1e-12,
+        )
+
+    def test_rsvd_reconstructs_under_permuted_label_split(
+        self, u1_sym_tensor_3leg_mult2
+    ):
+        """Randomized SVD also assembles its blocks in the requested order.
+
+        ``rank`` exceeds the true per-sector rank, so HMT randomized SVD is
+        essentially exact here and reconstruction is still the right invariant.
+        """
+        from tenax.linalg import rsvd
+
+        T = u1_sym_tensor_3leg_mult2
+        U, S, Vh = rsvd(
+            T, left_labels=self.LEFT, right_labels=self.RIGHT, rank=8, oversampling=6
+        )
+        np.testing.assert_allclose(
+            _contract_over_bond(U, Vh, scale=S),
+            _reference_in_split_order(T, self.LEFT, self.RIGHT),
+            atol=1e-8,
+        )
+
+
+@pytest.fixture
+def u1_hermitian_4leg_mult2():
+    """4-leg U(1) tensor, Hermitian under the ``(a,b) | (c,d)`` bipartition.
+
+    Multiplicity 2 on every charge so the sector blocks are 2x2x2x2, where
+    native-order and ``left+right``-order flattening genuinely differ (#689).
+    """
+    sym = U1Symmetry()
+    c = np.array([0, 0, 1, 1], dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, c, IN, label="a"),
+        TensorIndex.from_charges(sym, c, IN, label="b"),
+        TensorIndex.from_charges(sym, sym.dual(c), OUT, label="c"),
+        TensorIndex.from_charges(sym, sym.dual(c), OUT, label="d"),
+    )
+    # Project onto the allowed sectors FIRST, then symmetrize.  Legs c/d are
+    # the duals of a/b in the same index order, so the charge condition is
+    # invariant under (a,b) <-> (c,d) and symmetrizing keeps the result inside
+    # the allowed sectors.  Symmetrizing a dense random matrix instead would
+    # leave most of its weight outside them.
+    T0 = SymmetricTensor.random_normal(indices, jax.random.PRNGKey(11))
+    M = np.asarray(T0.todense()).reshape(16, 16)
+    M = M + M.T
+    return SymmetricTensor.from_dense(jnp.asarray(M.reshape(4, 4, 4, 4)), indices)
+
+
+def test_eigh_reconstructs_under_permuted_label_split(u1_hermitian_4leg_mult2):
+    """``eigh``: V·diag(w)·V^dag == T when the split reorders the stored axes.
+
+    Rows and columns are permuted consistently (``b,a | d,c``) so the matrix
+    stays Hermitian; the permutation ``(1,0,3,2)`` is still non-identity, which
+    is what #689 turns on.
+    """
+    T = u1_hermitian_4leg_mult2
+    left, right = ["b", "a"], ["d", "c"]
+    V, w = eigh(T, left_labels=left, right_labels=right)
+    Vd = np.asarray(V.todense()).reshape(16, -1)
+    recon = (Vd * np.asarray(w)[None, :]) @ Vd.conj().T
+    ref = _reference_in_split_order(T, left, right).reshape(16, 16)
+    np.testing.assert_allclose(recon, ref, atol=1e-10)
+
+
+def test_traced_svd_honors_permuted_label_split(u1_sym_tensor_3leg_mult2):
+    """The traced (jit/AD) SVD path assembles blocks in the requested order too.
+
+    ``_truncated_svd_symmetric_traced`` is a separate implementation reached
+    when the blocks are tracers, so it needs its own guard against #689.
+
+    The probe is the nuclear norm ``sum(s)``, which depends on *how* the tensor
+    is folded into a matrix.  (``sum(s**2)`` — what the other traced-SVD tests
+    use — is the Frobenius norm and is invariant under any reshuffling of
+    elements, so it cannot detect a mis-ordered block assembly.)
+
+    The reference is computed densely from the correctly folded matrix, NOT
+    from the eager block-sparse path: both block-sparse paths shared the same
+    defect, so comparing them against each other agrees while both are wrong.
+    Per-sector singular values are the singular values of the block-diagonal
+    matrix, so the two nuclear norms are equal for a correct implementation.
+    """
+    T = u1_sym_tensor_3leg_mult2
+    left, right = ["left"], ["phys", "right"]
+    leaves, treedef = jax.tree_util.tree_flatten(T)
+    x0 = leaves[0]
+
+    def loss(x):
+        Tx = jax.tree_util.tree_unflatten(treedef, [x])
+        _, s, _, _ = svd(Tx, left, right, max_singular_values=None)
+        return jnp.sum(s)
+
+    folded = _reference_in_split_order(T, left, right).reshape(4, 24)
+    expected = float(np.linalg.svd(folded, compute_uv=False).sum())
+
+    # jit forces the blocks to be tracers -> _truncated_svd_symmetric_traced.
+    np.testing.assert_allclose(float(jax.jit(loss)(x0)), expected, rtol=1e-10)

@@ -197,3 +197,69 @@ class TestQrSymmetricNp:
             np.asarray(recon_jax.todense()),
             atol=1e-12,
         )
+
+
+# ------------------------------------------------------------------ #
+# #689 — the numpy block-sparse variants must honour left/right label  #
+# order rather than the tensor's native stored axis order.             #
+# ------------------------------------------------------------------ #
+
+
+@pytest.fixture
+def sym_3leg_mult2():
+    """3-leg U(1) tensor with multiplicity 2 in every charge sector.
+
+    Multiplicity is what makes #689 detectable: with multiplicity 1 each sector
+    block is 1x1x1 and reshaping it in native versus ``left+right`` axis order
+    yields the same matrix, so a multiplicity-1 fixture cannot see the bug.
+    """
+    sym = U1Symmetry()
+    pl = np.array([0, 0, 1, 1], dtype=np.int32)
+    r = np.array([0, 0, 1, 1, 2, 2], dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, pl, IN, label="phys"),
+        TensorIndex.from_charges(sym, pl, IN, label="left"),
+        TensorIndex.from_charges(sym, sym.dual(r), OUT, label="right"),
+    )
+    return SymmetricTensor.random_normal(indices, jax.random.PRNGKey(7))
+
+
+def _split_order_reference(tensor, left_labels, right_labels):
+    """``tensor`` densified and transposed to ``left_labels + right_labels``."""
+    stored = list(tensor.labels())
+    perm = tuple(stored.index(lbl) for lbl in list(left_labels) + list(right_labels))
+    return np.asarray(tensor.todense()).transpose(perm)
+
+
+def test_qr_symmetric_np_honors_permuted_label_split(sym_3leg_mult2):
+    """``_qr_symmetric_np``: Q·R == T when the split reorders the stored axes.
+
+    Stored order is ``(phys, left, right)``; requesting ``left | phys, right``
+    makes ``left_axes + right_axes`` a non-identity permutation, which is
+    exactly when native-order reshaping decomposes the wrong matrix (#689).
+    """
+    T = sym_3leg_mult2
+    left, right = ["left"], ["phys", "right"]
+    Q_ba, R_ba = _qr_symmetric_np(T, left, right, "bond")
+    Q = np.asarray(ba_to_symmetric(Q_ba).todense())
+    R = np.asarray(ba_to_symmetric(R_ba).todense())
+    recon = np.tensordot(Q, R, axes=([Q.ndim - 1], [0]))
+    np.testing.assert_allclose(
+        recon, _split_order_reference(T, left, right), atol=1e-12
+    )
+
+
+def test_truncated_svd_symmetric_np_honors_permuted_label_split(sym_3leg_mult2):
+    """``_truncated_svd_symmetric_np``: U·diag(s)·Vh == T under a permuted split."""
+    T = sym_3leg_mult2
+    left, right = ["left"], ["phys", "right"]
+    U_ba, s, Vh_ba, _ = _truncated_svd_symmetric_np(
+        T, left, right, None, None, "bond", False
+    )
+    U = np.asarray(ba_to_symmetric(U_ba).todense())
+    Vh = np.asarray(ba_to_symmetric(Vh_ba).todense())
+    U = U * np.asarray(s).reshape((1,) * (U.ndim - 1) + (-1,))
+    recon = np.tensordot(U, Vh, axes=([U.ndim - 1], [0]))
+    np.testing.assert_allclose(
+        recon, _split_order_reference(T, left, right), atol=1e-12
+    )
