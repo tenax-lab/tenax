@@ -851,3 +851,85 @@ class TestSvdIllConditioned:
         k = 16  # top of the spectrum is well-determined
         got = np.sort(np.asarray(s))[::-1][:k]
         np.testing.assert_allclose(got, s_ref[:k], rtol=1e-6)
+
+
+# ------------------------------------------------------------------ #
+# Canonical bond labels out of svd (#733 / #734)                       #
+# ------------------------------------------------------------------ #
+
+_BOND_LABEL_CASES = [
+    ("U1", U1Symmetry(), [0, 1]),
+    ("Z2", ZnSymmetry(2), [0, 1]),
+    ("Z3", ZnSymmetry(3), [0, 1, 2]),
+    ("FermionParity", FermionParity(), [0, 1]),
+]
+
+
+@pytest.mark.parametrize(
+    "name,sym,sectors", _BOND_LABEL_CASES, ids=[c[0] for c in _BOND_LABEL_CASES]
+)
+def test_svd_bond_labels_are_canonical_for_either_left_leg_flow(name, sym, sectors):
+    """``svd`` must label the new bond so its keys name sectors the bond has.
+
+    Mirroring the flows *dualises* the bond charge, and for U(1) that is real
+    physics rather than a relabelling: the partner of ``1`` is ``-1``, so the
+    OUT orientation legitimately gets bond sectors ``[-1, 0]``.  What must not
+    happen is the library writing a **non-canonical representative** of that
+    partner.  Before #734 a ``Z2`` left leg flowing OUT produced bond *keys*
+    ``(1, -1)`` while the bond *index* carried sectors ``[0, 1]`` -- the key
+    named a charge the leg did not have, because
+    ``_group_blocks_by_bond_charge`` fused a single flow-weighted charge and
+    ``fuse_many`` of one array skips the ``% n``.  Such a tensor still passes
+    ``_validate`` (``fuse`` reduces mod ``n``), and then silently fails to pair
+    with canonically-built tensors during contraction (#733).
+    """
+
+    def leg(flow, lbl):
+        return TensorIndex(
+            symmetry=sym,
+            sectors=np.array(sectors, dtype=np.int32),
+            multiplicities=np.array([2] * len(sectors), dtype=np.int32),
+            flow=flow,
+            label=lbl,
+        )
+
+    def canon(charges):
+        return sorted(
+            int(q)
+            for q in sym.canonicalize_charges(np.asarray(charges, dtype=np.int32))
+        )
+
+    seen = {}
+    for left_flow, right_flow in (
+        (FlowDirection.IN, FlowDirection.OUT),
+        (FlowDirection.OUT, FlowDirection.IN),
+    ):
+        t = SymmetricTensor.random_normal_np(
+            (leg(left_flow, "a"), leg(right_flow, "b")), np.random.RandomState(0)
+        )
+        U, _, Vh, _ = svd(t, left_labels=["a"], right_labels=["b"])
+
+        # Every block key must name a sector its own leg actually carries.
+        # This is what a non-canonical representative breaks.
+        for factor, fname in ((U, "U"), (Vh, "Vh")):
+            for key in factor._block_keys:
+                for idx, q in zip(factor.indices, key):
+                    assert idx.has_sector(int(q)), (
+                        f"{name} left={left_flow.name}: {fname} block key {key} "
+                        f"names charge {int(q)} on leg {idx.label!r}, whose sectors "
+                        f"are {list(idx.sectors)}"
+                    )
+
+        bond = [i for i in U.indices if i.label != "a"][0]
+        bond_sectors = sorted(int(q) for q in bond.sectors)
+        assert bond_sectors == canon(bond_sectors), (
+            f"{name} left={left_flow.name}: bond labels are not canonical: "
+            f"{bond_sectors}"
+        )
+        seen[left_flow.name] = bond_sectors
+
+    # Flipping the left leg's flow dualises the bond, nothing more: no extra
+    # sector appears or disappears, and the result stays canonical.
+    assert seen["OUT"] == canon(sym.dual(np.array(seen["IN"], dtype=np.int32))), (
+        f"{name}: mirrored bond labels are not the canonical dual: {seen}"
+    )

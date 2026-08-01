@@ -414,22 +414,22 @@ def test_zn_round_trips_when_the_flows_are_opposite():
         assert err < 1e-10, (sym, err)
 
 
-def test_zn_same_flow_bonds_carry_the_library_s_own_representative():
-    """Same-flow legs label ``Z_n`` partners ``-q``, matching ``tenax.linalg``.
+def test_zn_same_flow_bonds_carry_the_canonical_representative():
+    """Same-flow legs label ``Z_n`` partners canonically, matching ``tenax.linalg``.
 
-    This is the orientation the CTM cut actually uses (both projectors are
-    built with row and col flowing the same way), and there the partner of
-    charge 1 is written ``-1`` rather than the canonical ``1``.  It is a
-    non-canonical *representative*, not a broken block: ``fuse`` reduces mod
-    ``n``, so ``_validate`` passes and every leg in the module agrees.
+    This is the orientation the CTM cut actually uses (both projectors are built
+    with row and col flowing the same way).  Before #734 the partner of charge 1
+    was written ``-1`` here and by ``tenax.linalg.svd``, because
+    ``_group_blocks_by_bond_charge`` fused a single flow-weighted charge and
+    ``fuse_many`` of one array skipped the ``% n``.  Both now go through
+    ``_net_charge``, which seeds the fusion with the identity, so the single-leg
+    and multi-leg paths agree by construction.
 
-    The point of pinning it is that it is not this module's invention —
-    ``tenax.linalg.svd`` emits exactly the same labels for a ``Z2`` tensor
-    whose left leg flows OUT, because ``_group_blocks_by_bond_charge`` fuses a
-    single flow-weighted charge and ``fuse_many`` of one array skips the
-    ``% n``.  If #733 canonicalises that upstream, this test is the one that
-    should fail and be updated in step, rather than the two conventions
-    drifting apart silently.
+    :func:`tensor_from_sector_matrices` then had to follow: it derived the
+    partner key by raw integer negation, which with both flows OUT lands on
+    ``(-1, 1)`` — a charge the ``Z2`` leg's canonical sectors ``[0, 1]`` do not
+    contain, so every later contraction dropped that block.  It now inverts
+    ``flow_charge`` instead, and the keys name sectors the legs actually have.
     """
     import tenax.linalg as tl
 
@@ -451,7 +451,10 @@ def test_zn_same_flow_bonds_carry_the_library_s_own_representative():
     )
     U = tl.svd(t, left_labels=["a"], right_labels=["b"])[0]
     lib_bond = [i for i in U.indices if i.label != "a"][0]
-    assert sorted(int(q) for q in lib_bond.sectors) == [-1, 0]
+    assert sorted(int(q) for q in lib_bond.sectors) == [0, 1]
+    # ... and the keys name sectors the bond actually has, which is the part
+    # that used to be wrong even once the index itself was canonicalised.
+    assert sorted(U._block_keys) == [(0, 0), (1, 1)]
 
     # This module, same convention.
     m = SymmetricTensor.random_normal_np(
@@ -469,29 +472,49 @@ def test_zn_same_flow_bonds_carry_the_library_s_own_representative():
         mats, row_index=m.indices[0], col_index=m.indices[1], row_axis=0, col_axis=1
     )
     rebuilt._validate()
-    assert (1, -1) in set(rebuilt._block_keys)
+    # The bond charges this module groups by are canonical ...
+    assert sorted(sectors) == [0, 1]
+    # ... and so are the keys it writes back: every one names a sector its own
+    # leg carries, which the raw-negation form did not.
+    assert (1, 1) in set(rebuilt._block_keys)
+    for key in rebuilt._block_keys:
+        for idx, q in zip(rebuilt.indices, key):
+            assert idx.has_sector(int(q)), (key, idx.label, list(idx.sectors))
 
 
 def test_product_symmetry_is_refused_rather_than_mis_assembled():
-    """Bit-packed charges make ``-q`` the wrong partner, and nothing catches it.
+    """The refusal is a coverage gate, not a correctness claim.
 
-    For ``Z_n`` the raw negation is a different representative of the right
-    charge.  For :class:`ProductSymmetry` it is a different charge outright:
-    ``-encode(1, 2)`` decodes as ``(-1, -3)``, and ``fuse(q, -q)`` is not the
-    identity, so the block violates conservation.  ``_from_blocks_unchecked``
-    would pass it straight through to a later contraction, which per this
-    module's own measurements keeps the conserving components and silently
-    zeroes the rest — the failure mode #715 exists to make loud.  So it raises.
+    Since #734 the partner charge is derived through ``symmetry.flow_charge``
+    and ``symmetry.dual``, which is group-correct for :class:`ProductSymmetry`
+    exactly as it is for U(1) and ``Z_n`` — nothing in the arithmetic below
+    knows or cares that the charges are bit-packed.  What has *not* happened is
+    running the rest of #715 Phase 3 on bit-packed charges, and this test pins
+    that the module says so rather than assuming it works.
+
+    The gate is worth having because the cost of being wrong is asymmetric.
+    For ``Z_n`` a wrong partner is a different representative of the right
+    charge, so ``__post_init__`` and the sector table can still catch it.  For
+    :class:`ProductSymmetry` it is a different charge outright, the block is a
+    genuine conservation violation, and ``_from_blocks_unchecked`` would pass it
+    straight through to a contraction, which per this module's own measurements
+    keeps the conserving components and silently zeroes the rest — the failure
+    mode #715 exists to make loud.  Nothing downstream would raise.
+
+    Lifting the gate is #734 Task 4's job, and belongs with end-to-end coverage.
     """
     from tenax.core.symmetry import ProductSymmetry
 
     sym = ProductSymmetry(U1Symmetry(), U1Symmetry())
     a = ProductSymmetry.encode(1, 2)
 
-    # The premise, measured rather than asserted from the docstring.
-    assert ProductSymmetry.decode(-a) == (-1, -3)
+    # Why a wrong partner would be unrecoverable here, measured rather than
+    # asserted from the docstring.  These are *not* claims about the shipped
+    # code -- it uses ``dual`` -- but about what the guard is protecting.
+    assert ProductSymmetry.decode(-a) == (-1, -3)  # raw negation: wrong charge
     assert ProductSymmetry.decode(int(sym.dual(np.array([a]))[0])) == (-1, -2)
-    assert int(sym.fuse(np.array([a]), np.array([-a]))[0]) != 0
+    # ... and the wrong partner does not merely relabel: it breaks conservation.
+    assert int(sym.fuse(np.array([a]), np.array([-a]))[0]) != sym.identity()
 
     def leg(flow, lbl):
         return TensorIndex(

@@ -132,6 +132,35 @@ class TensorIndex:
                 self, "multiplicities", self.multiplicities.astype(np.int32)
             )
 
+        # Canonicalise sectors through the symmetry and merge duplicates.
+        #
+        # Charge representatives are a basis convention, not physics, so
+        # rewriting them is free.  But ``flow_charge`` is an involution only on
+        # canonical representatives, and label *equality* is how blocks get
+        # paired during contraction -- so two representatives of one sector
+        # (Z2 ``-1`` and ``1``) must never coexist on a leg (#734).
+        #
+        # Every construction path funnels through __post_init__, so this also
+        # repairs ``dual()``, which sorted without merging and could emit
+        # sectors=[0, 1, 1] in violation of the sorted-unique invariant.
+        #
+        # Sorting is part of the same repair, not a nicety: ``multiplicity``,
+        # ``has_sector`` and ``sector_offset`` all use ``np.searchsorted``, so
+        # unsorted-but-canonical sectors return silently wrong answers rather
+        # than raising.  The short-circuit below is also the fast path -- the
+        # overwhelmingly common case is already canonical and already sorted.
+        sectors = self.sectors
+        canon = self.symmetry.canonicalize_charges(sectors)
+        if np.array_equal(canon, sectors) and (
+            len(sectors) < 2 or bool(np.all(sectors[1:] > sectors[:-1]))
+        ):
+            return
+        uniq, inverse = np.unique(canon, return_inverse=True)
+        merged = np.zeros(len(uniq), dtype=np.int32)
+        np.add.at(merged, inverse, self.multiplicities)
+        object.__setattr__(self, "sectors", uniq.astype(np.int32))
+        object.__setattr__(self, "multiplicities", merged)
+
     @classmethod
     def from_charges(
         cls,
@@ -158,6 +187,10 @@ class TensorIndex:
         charges = np.asarray(charges, dtype=np.int32)
         if charges.ndim != 1:
             raise ValueError(f"charges must be 1-D, got shape {charges.shape}")
+        # Canonicalise before deriving sectors so the cached dense array and the
+        # sector table agree on representatives (#734).  Element-wise, so basis
+        # ordering within the leg is preserved.
+        charges = symmetry.canonicalize_charges(charges)
         sectors, multiplicities = np.unique(charges, return_counts=True)
         obj = cls(
             symmetry=symmetry,
@@ -233,10 +266,23 @@ class TensorIndex:
             flow=FlowDirection(-int(self.flow)),
             label=self.label,
         )
-        # Compute dual charges preserving original ordering if available
+        # Compute dual charges preserving original ordering if available.
+        #
+        # The canonicalisation is defence in depth, not a fix: for every
+        # symmetry currently in the tree ``dual`` already maps canonical
+        # representatives to canonical representatives, so it never fires
+        # (reverting it fails no test).  It is kept so that a future symmetry
+        # whose ``dual`` leaves the fundamental domain cannot silently
+        # desynchronise the cached dense charges from ``sectors``, which
+        # __post_init__ does canonicalise.  It costs one extra ``% n``
+        # allocation per ``dual()`` for Z_n.
         if self._charges_cache is not None:
             object.__setattr__(
-                obj, "_charges_cache", self.symmetry.dual(self._charges_cache)
+                obj,
+                "_charges_cache",
+                self.symmetry.canonicalize_charges(
+                    self.symmetry.dual(self._charges_cache)
+                ),
             )
         return obj
 

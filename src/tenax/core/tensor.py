@@ -165,19 +165,26 @@ def _compute_valid_blocks(
 ) -> list[BlockKey]:
     """Find all charge-sector tuples satisfying the symmetry conservation law.
 
-    Uses incremental fused-sector propagation: instead of testing all N-leg
-    combinations, builds up partial charge sums one leg at a time, pruning
-    incompatible branches early.  For finite groups (Zn), every intermediate
-    sum is kept.  For infinite groups (U1), the last leg is constrained to
-    exactly cancel the running sum, avoiding enumeration of its charges.
+    Uses incremental fused-sector propagation: builds up partial fused charges
+    one leg at a time, then solves the last leg in closed form via
+    ``q = flow_charge(flow, fuse(target, dual(partial)))``.  That inversion is
+    valid for any abelian group because ``flow_charge`` is an involution on
+    canonical representatives, so a single path now covers every rank and every
+    symmetry (#734).
+
+    Both of the branches this replaces were broken for the bit-packed charges of
+    :class:`~tenax.core.symmetry.ProductSymmetry`: the ``n_values() is None``
+    branch solved ``q_last = (target - prev) * flow_last`` with integer algebra,
+    and the finite branch weighted charges as ``flow_last * q`` -- neither of
+    which is the group operation once charges are packed bitfields rather than
+    integers.
 
     Args:
         indices: Tuple of TensorIndex objects, one per tensor leg.
         target:  Target charge for the conservation law. If None, uses the
-                 symmetry identity (standard conservation). For U(1), setting
-                 target=Q selects blocks where sum(flow_i * charge_i) == Q
-                 instead of 0. Used at MPS boundaries to enforce a specific
-                 quantum number sector.
+                 symmetry identity (standard conservation).  Setting target=Q
+                 selects blocks whose net charge is Q instead of the identity;
+                 used at MPS boundaries to enforce a specific quantum number.
 
     Returns:
         List of BlockKey tuples (one charge per leg) for valid sectors.
@@ -186,48 +193,32 @@ def _compute_valid_blocks(
         return [()]
 
     sym = indices[0].symmetry
-    effective_target = target if target is not None else sym.identity()
+    effective_target = int(
+        sym.canonicalize_charges(
+            np.array(
+                [int(target if target is not None else sym.identity())], dtype=np.int32
+            )
+        )[0]
+    )
 
-    # Collect unique charge values per leg (sectors are already sorted and unique)
+    # Sectors are canonical, sorted and unique (guaranteed by TensorIndex).
     unique_charges_per_leg = [idx.sectors.tolist() for idx in indices]
-
     n_legs = len(indices)
 
-    # For infinite symmetries (U1), the last leg's charge is fully determined
-    # by the running sum of the previous legs. We can skip enumeration.
-    is_infinite = sym.n_values() is None
+    def _flow_weighted(leg_i: int, q: int) -> np.ndarray:
+        return sym.flow_charge(indices[leg_i].flow, np.array([q], dtype=np.int32))
 
-    if n_legs == 1:
-        # Single leg: only target charge is valid
-        return [
-            (q,)
-            for q in unique_charges_per_leg[0]
-            if int(indices[0].flow) * q == effective_target
-        ]
-
-    # Incremental propagation: partial_combos maps
-    #   running_fused_charge -> list of partial BlockKey tuples
-    # Start with the first leg
-    flow0 = int(indices[0].flow)
-    partial: dict[int, list[tuple[int, ...]]] = {}
-    for q in unique_charges_per_leg[0]:
-        fused = flow0 * q
-        partial.setdefault(fused, []).append((q,))
-
-    # Process legs 1 .. n_legs-2 (all except the last)
-    last_leg_idx = n_legs - 1
-    for leg_i in range(1, last_leg_idx):
-        flow_i = int(indices[leg_i].flow)
+    # partial maps running fused charge -> list of partial BlockKey prefixes.
+    # Seeding with the identity (rather than the first leg) makes the rank-1
+    # case fall out of the same closed form below (#733).
+    partial: dict[int, list[tuple[int, ...]]] = {sym.identity(): [()]}
+    for leg_i in range(n_legs - 1):
         next_partial: dict[int, list[tuple[int, ...]]] = {}
         for q in unique_charges_per_leg[leg_i]:
-            effective_q = flow_i * q
-            # For each existing partial sum, fuse with this leg's charge
+            eff_q = _flow_weighted(leg_i, q)
             for prev_fused, prev_combos in partial.items():
                 new_fused = int(
-                    sym.fuse(
-                        np.array([prev_fused], dtype=np.int32),
-                        np.array([effective_q], dtype=np.int32),
-                    )[0]
+                    sym.fuse(np.array([prev_fused], dtype=np.int32), eff_q)[0]
                 )
                 extended = [combo + (q,) for combo in prev_combos]
                 if new_fused in next_partial:
@@ -236,40 +227,19 @@ def _compute_valid_blocks(
                     next_partial[new_fused] = extended
         partial = next_partial
 
-    # Process the last leg: only keep combos where total fuses to identity
-    flow_last = int(indices[last_leg_idx].flow)
+    # Closed form for the last leg. In an abelian group the solution is unique,
+    # so this replaces enumeration for finite groups too.
+    last_charge_set = set(unique_charges_per_leg[n_legs - 1])
+    flow_last = indices[n_legs - 1].flow
+    target_arr = np.array([effective_target], dtype=np.int32)
     valid_keys: list[BlockKey] = []
 
-    if is_infinite:
-        # For U1: the required effective charge for the last leg is
-        # determined by: fuse(prev_fused, flow_last * q_last) == effective_target
-        # For U1: prev_fused + flow_last * q_last == effective_target
-        # => q_last = (effective_target - prev_fused) * flow_last
-        last_charge_set = set(unique_charges_per_leg[last_leg_idx])
-        for prev_fused, prev_combos in partial.items():
-            if flow_last == 0:
-                continue
-            # needed = effective_target - prev_fused (what flow_last * q_last must equal)
-            needed = effective_target - prev_fused
-            # q_last = needed / flow_last; for flow IN(+1)/OUT(-1): q_last = needed * flow_last
-            q_last = needed * flow_last
-            if q_last in last_charge_set:
-                for combo in prev_combos:
-                    valid_keys.append(combo + (q_last,))
-    else:
-        # For finite groups: enumerate last leg charges
-        for q in unique_charges_per_leg[last_leg_idx]:
-            effective_q = flow_last * q
-            for prev_fused, prev_combos in partial.items():
-                total = int(
-                    sym.fuse(
-                        np.array([prev_fused], dtype=np.int32),
-                        np.array([effective_q], dtype=np.int32),
-                    )[0]
-                )
-                if total == effective_target:
-                    for combo in prev_combos:
-                        valid_keys.append(combo + (q,))
+    for prev_fused, prev_combos in partial.items():
+        needed = sym.fuse(target_arr, sym.dual(np.array([prev_fused], dtype=np.int32)))
+        q_last = int(sym.flow_charge(flow_last, needed)[0])
+        if q_last in last_charge_set:
+            for combo in prev_combos:
+                valid_keys.append(combo + (q_last,))
 
     return valid_keys
 
@@ -725,23 +695,32 @@ class SymmetricTensor(Tensor):
         return obj
 
     def _validate(self) -> None:
-        """Verify all block keys satisfy the symmetry conservation law."""
-        if not self._indices:
+        """Verify all block keys satisfy the symmetry conservation law.
+
+        Vectorised over blocks: the whole key table is fused leg by leg, so the
+        symmetry sees one ``(n_blocks,)`` array per leg instead of one scalar per
+        (block, leg) pair.  The per-key :func:`_net_charge` adapter remains the
+        right call for scalar sites; here it dominated ``SymmetricTensor``
+        construction (~27% on a 489-block rank-4 U(1) tensor).
+        """
+        if not self._indices or not self._block_keys:
             return
         sym = self._indices[0].symmetry
         identity = sym.identity()
 
-        for key in self._block_keys:
-            effective = [
-                np.array([int(idx.flow) * int(charge)], dtype=np.int32)
-                for idx, charge in zip(self._indices, key)
-            ]
-            fused_val = int(sym.fuse_many(effective)[0])
-            if fused_val != identity:
-                raise ValueError(
-                    f"Block {key} violates charge conservation: "
-                    f"fused={fused_val}, expected identity={identity}"
-                )
+        keys = np.array(self._block_keys, dtype=np.int32)  # (n_blocks, n_legs)
+        net = np.full(len(keys), identity, dtype=np.int32)
+        for i, idx in enumerate(self._indices):
+            net = sym.fuse(net, sym.flow_charge(idx.flow, keys[:, i]))
+
+        bad = np.flatnonzero(net != identity)
+        if bad.size:
+            key = self._block_keys[int(bad[0])]
+            fused = int(net[int(bad[0])])
+            raise ValueError(
+                f"Block {key} violates charge conservation: "
+                f"fused={fused}, expected identity={identity}"
+            )
 
     def _get_block(self, idx: int) -> jax.Array:
         """Return the block array at position idx in sorted key order."""

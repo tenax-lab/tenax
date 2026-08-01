@@ -788,10 +788,20 @@ def asym_characteristic_residual_covariant(y, a: jax.Array, consts: AsymRoot, ch
     does rely on every tensor in ``y`` having unit Frobenius norm, which
     :func:`asym_root_parametrize` arranges.
 
-    ``lambda`` is deliberately *not* real-projected.  ``dot(X, X')`` is
-    genuinely complex for a complex state — at ``D=2``, ``chi=4`` the corner
-    ``lambda`` comes out around ``-2.1e2 - 3.6e2j`` — and taking the real
-    part alone moves ``|F1|`` from 2e-13 to 1.6e0.
+    ``lambda`` is deliberately *not* real-projected.  ``dot(X, X')`` is a
+    genuinely complex quantity for a complex state, and since ``F`` normalises
+    by it rather than subtracting it, dropping the phase is a different ``F``,
+    not a rescaled one.
+
+    How visible that is depends on the gauge, which an earlier version of this
+    note did not say.  At the root :func:`asym_root_parametrize` polishes to,
+    the bond phases are aligned and all twelve ``lambda`` come out real to
+    ``|arg| < 8e-16``, so real-projecting there is a no-op (6.50e-14 either
+    way).  The eight environment phases are exact null directions, so phasing
+    ``env_tilde`` lands on an equally valid root with ``|arg(lambda)|`` up to
+    3.0 — and there the same edit moves ``‖F‖`` to 3.6e0 and 1.2e1.
+    ``test_the_dense_root_carries_lambdas_phase_rather_than_dropping_it``
+    measures both halves.
 
     The assembly mirrors the reference implementation
     (``contract_asymmetric_characteristic_equation``, ``Val{:implicit}``)

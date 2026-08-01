@@ -14,7 +14,7 @@ from tenax.contraction.contractor import (
     truncated_svd,
 )
 from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import U1Symmetry
+from tenax.core.symmetry import U1Symmetry, ZnSymmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 # ------------------------------------------------------------------ #
@@ -1048,3 +1048,115 @@ class TestBatchedBlockSparse:
             k2,
         )
         self._assert_paths_equal(monkeypatch, A, B)
+
+
+# ------------------------------------------------------------------ #
+# Non-canonical conservation targets (#734)                            #
+# ------------------------------------------------------------------ #
+#
+# ``contract`` derives the output tensor's conservation target as the raw
+# integer ``sum(flow * q)`` of the inputs' blocks, and hands it to
+# ``_compute_valid_blocks`` as ``target=``.  For ``Z_n`` that number is not a
+# charge: it is *some* integer congruent to one mod ``n``.  If the block
+# enumerator compares it against fused charges without reducing it first, the
+# match never fires, the valid-key set comes back empty, and every output block
+# is dropped.  Nothing raises -- ``contract`` returns a structurally valid
+# tensor that happens to be zero -- which is the silent-zero failure mode #734
+# exists to close.
+#
+# These two tests are the ones that fail if ``_compute_valid_blocks`` loses its
+# target canonicalisation; ``TestComputeValidBlocks`` in ``test_tensor.py``
+# cannot see it, because it only re-derives conservation from the keys it was
+# handed and so never asserts *completeness*.
+
+
+def _zn_leg(sym, n, flow, label, mult=2):
+    return TensorIndex(
+        sym,
+        np.arange(n, dtype=np.int32),
+        np.full(n, mult, dtype=np.int32),
+        flow,
+        label=label,
+    )
+
+
+def test_z3_contraction_survives_a_raw_target_of_three():
+    """Every block of ``T`` has ``sum(flow*q) == 3``, which is ``Z3``'s identity.
+
+    Flows ``(IN, IN, OUT)`` and blocks ``(2,1,0)``, ``(1,2,0)``, ``(2,2,1)``:
+    the raw sum is 3 for all three, so ``contract`` sets ``output_target=3``,
+    while the *charge* they all fuse to is ``0``.  A ``3`` compared against
+    fused charges drawn from ``{0, 1, 2}`` matches nothing.
+    """
+    z3 = ZnSymmetry(3)
+    rng = np.random.RandomState(0)
+
+    t_keys = [(2, 1, 0), (1, 2, 0), (2, 2, 1)]
+    for key in t_keys:
+        raw = key[0] + key[1] - key[2]
+        assert raw == 3, (key, raw)  # the premise: raw target is not a charge
+        assert raw % 3 == z3.identity(), (key, raw)  # ... but the block is legal
+
+    T = SymmetricTensor(
+        {k: jnp.asarray(rng.standard_normal((2, 2, 2))) for k in t_keys},
+        (
+            _zn_leg(z3, 3, FlowDirection.IN, "a"),
+            _zn_leg(z3, 3, FlowDirection.IN, "b"),
+            _zn_leg(z3, 3, FlowDirection.OUT, "c"),
+        ),
+    )
+    M = SymmetricTensor(
+        {k: jnp.asarray(rng.standard_normal((2, 2))) for k in [(0, 0), (1, 1), (2, 2)]},
+        (
+            _zn_leg(z3, 3, FlowDirection.IN, "c"),
+            _zn_leg(z3, 3, FlowDirection.OUT, "d"),
+        ),
+    )
+
+    ref = jnp.einsum("abc,cd->abd", T.todense(), M.todense())
+    # Guard: the reference must be non-degenerate, or "matches the reference"
+    # would be satisfied by returning zeros -- which is exactly the bug.
+    assert float(jnp.linalg.norm(ref)) > 1.0
+
+    got = contract(T, M)
+    assert [idx.label for idx in got.indices] == ["a", "b", "d"]
+    assert set(got.blocks) == set(t_keys), sorted(got.blocks)
+    np.testing.assert_allclose(np.asarray(got.todense()), np.asarray(ref), atol=1e-12)
+
+
+def test_z2_contraction_survives_a_raw_target_of_two():
+    """The ``Z2`` analogue: raw target 2, identity 0.
+
+    Flows ``(IN, IN, IN)`` and blocks ``(1,1,0)``, ``(1,0,1)``, ``(0,1,1)``.
+    """
+    z2 = ZnSymmetry(2)
+    rng = np.random.RandomState(1)
+
+    t_keys = [(1, 1, 0), (1, 0, 1), (0, 1, 1)]
+    for key in t_keys:
+        assert sum(key) == 2, key
+        assert sum(key) % 2 == z2.identity(), key
+
+    T = SymmetricTensor(
+        {k: jnp.asarray(rng.standard_normal((2, 2, 2))) for k in t_keys},
+        (
+            _zn_leg(z2, 2, FlowDirection.IN, "a"),
+            _zn_leg(z2, 2, FlowDirection.IN, "b"),
+            _zn_leg(z2, 2, FlowDirection.IN, "c"),
+        ),
+    )
+    M = SymmetricTensor(
+        {k: jnp.asarray(rng.standard_normal((2, 2))) for k in [(0, 0), (1, 1)]},
+        (
+            _zn_leg(z2, 2, FlowDirection.OUT, "c"),
+            _zn_leg(z2, 2, FlowDirection.OUT, "d"),
+        ),
+    )
+
+    ref = jnp.einsum("abc,cd->abd", T.todense(), M.todense())
+    assert float(jnp.linalg.norm(ref)) > 1.0
+
+    got = contract(T, M)
+    assert [idx.label for idx in got.indices] == ["a", "b", "d"]
+    assert set(got.blocks) == set(t_keys), sorted(got.blocks)
+    np.testing.assert_allclose(np.asarray(got.todense()), np.asarray(ref), atol=1e-12)

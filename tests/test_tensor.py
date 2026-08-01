@@ -1,12 +1,19 @@
 """Tests for DenseTensor and SymmetricTensor."""
 
+import itertools
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import U1Symmetry, ZnSymmetry
+from tenax.core.index import FlowDirection, TensorIndex, _net_charge
+from tenax.core.symmetry import (
+    FermionParity,
+    ProductSymmetry,
+    U1Symmetry,
+    ZnSymmetry,
+)
 from tenax.core.tensor import (
     DenseTensor,
     SymmetricTensor,
@@ -166,6 +173,74 @@ class TestComputeValidBlocks:
         for key in keys:
             net = (1 * key[0] + 1 * key[1] + (-1) * key[2]) % 2
             assert net == 0
+
+    # The three tests above re-derive conservation from the keys they were
+    # handed, so they can only catch keys that should not be there.  They say
+    # nothing about *completeness*, which is the half that fails silently: a
+    # missing key is a dropped block, not an error.  The ProductSymmetry cases
+    # below assert the exact key set against exhaustive filtering, and cover
+    # both branches the old implementation split on -- ``n_values() is None``,
+    # where it did U(1) integer algebra on bit-packed charges, and the finite
+    # branch, where ``flow_last * q`` was an integer negation of a bitfield.
+
+    @pytest.mark.parametrize(
+        "sym,pairs",
+        [
+            # n_values() is None -> the old code took the U(1) branch and
+            # solved q_last = (target - prev) * flow_last in plain integers.
+            (
+                ProductSymmetry(FermionParity(), U1Symmetry()),
+                [(n % 2, n) for n in range(4)],
+            ),
+            # Both factors finite -> the old code took the enumeration branch,
+            # whose flow weighting was ``flow_last * q`` on a packed bitfield.
+            (
+                ProductSymmetry(ZnSymmetry(3), ZnSymmetry(2)),
+                [(q1, q2) for q1 in range(3) for q2 in range(2)],
+            ),
+        ],
+        ids=["fp_x_u1", "z3_x_z2"],
+    )
+    @pytest.mark.parametrize(
+        "flows",
+        [
+            (FlowDirection.IN, FlowDirection.IN, FlowDirection.OUT),
+            (FlowDirection.OUT, FlowDirection.IN, FlowDirection.IN),
+            (FlowDirection.OUT, FlowDirection.OUT, FlowDirection.OUT),
+        ],
+        ids=["iio", "oii", "ooo"],
+    )
+    def test_product_symmetry_keys_are_exactly_the_conserving_ones(
+        self, sym, pairs, flows
+    ):
+        sectors = np.unique(
+            sym.canonicalize_charges(
+                np.array([ProductSymmetry.encode(*p) for p in pairs], dtype=np.int32)
+            )
+        )
+        indices = tuple(
+            TensorIndex(
+                sym,
+                sectors,
+                np.full(len(sectors), 2, dtype=np.int32),
+                flow,
+                label=lbl,
+            )
+            for flow, lbl in zip(flows, "abc")
+        )
+
+        expected = {
+            key
+            for key in itertools.product(*(idx.sectors.tolist() for idx in indices))
+            if _net_charge(indices, key) == sym.identity()
+        }
+        got = _compute_valid_blocks(indices)
+
+        assert len(got) == len(set(got)), got  # no duplicates
+        assert set(got) == expected
+        # The trap this is really for: a hollowed-out enumerator returns a
+        # *subset* and nothing complains.  There must be something to drop.
+        assert 0 < len(expected) < len(sectors) ** 3, (len(expected), len(sectors))
 
 
 class TestSymmetricTensorCreation:

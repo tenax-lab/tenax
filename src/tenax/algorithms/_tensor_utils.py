@@ -151,7 +151,14 @@ def _fuse_indices_dense(
     # Build fused index with FuseInfo
     idx_a, idx_b = indices_perm[a], indices_perm[a + 1]
     sym = idx_a.symmetry
-    fused_charges = _compute_fused_charges(idx_a, idx_b, fused_flow, sym)
+    # Canonicalise before deriving sectors.  TensorIndex.__post_init__ rewrites
+    # ``sectors`` to canonical representatives (#734), so caching uncanonicalised
+    # charges would leave ``charges`` naming sectors the index does not have, and
+    # blocks on those charges are dropped silently.  U(1)/Z_n are unaffected
+    # (``_compute_fused_charges`` already reduces mod n); ProductSymmetry is not.
+    fused_charges = sym.canonicalize_charges(
+        _compute_fused_charges(idx_a, idx_b, fused_flow, sym)
+    )
     sectors, mults = np.unique(fused_charges, return_counts=True)
     fuse_info = FuseInfo(parent_indices=(idx_a, idx_b), fused_flow=fused_flow)
     fused_idx = TensorIndex(
@@ -262,8 +269,13 @@ def _fuse_indices_symmetric(
     idx_b = T.indices[b]
     sym = idx_a.symmetry
 
-    # Build fused TensorIndex with FuseInfo
-    fused_charges = _compute_fused_charges(idx_a, idx_b, fused_flow, sym)
+    # Build fused TensorIndex with FuseInfo.  Canonicalise before deriving
+    # sectors so the cached dense charges and the sector table agree on
+    # representatives -- __post_init__ canonicalises ``sectors`` (#734), and a
+    # charge with no matching sector loses its blocks silently.
+    fused_charges = sym.canonicalize_charges(
+        _compute_fused_charges(idx_a, idx_b, fused_flow, sym)
+    )
     sectors, mults = np.unique(fused_charges, return_counts=True)
     fuse_info = FuseInfo(parent_indices=(idx_a, idx_b), fused_flow=fused_flow)
     fused_idx = TensorIndex(
