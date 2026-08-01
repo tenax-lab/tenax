@@ -9,6 +9,9 @@ from hypothesis.extra import numpy as hnp
 from tenax.core.symmetry import (
     BaseNonAbelianSymmetry,
     BaseSymmetry,
+    FermionicU1,
+    FermionParity,
+    ProductSymmetry,
     U1Symmetry,
     ZnSymmetry,
 )
@@ -254,3 +257,146 @@ class TestBaseNonAbelianSymmetry:
         sym = ConcreteNonAbelian()
         assert sym.identity() == 0
         assert sym.allowed_fusions(1, 1) == [0, 2]
+
+
+_E = ProductSymmetry.encode
+
+# (name, symmetry, canonical sectors, non-canonical input, its canonical form).
+#
+# The non-canonical column is what makes the canonicalize_charges tests bite: on
+# canonical sectors the method is the identity map, so asserting f(x) == x there
+# is satisfied by a stubbed-out implementation too.  U(1) and FermionicU1 have no
+# non-canonical representative at all, so for them the mapping *is* the identity
+# and that itself is the claim under test.
+_CHARGE_CASES = [
+    ("U1", U1Symmetry(), [-2, -1, 0, 1, 2], [-5, 7, 12345], [-5, 7, 12345]),
+    ("Z2", ZnSymmetry(2), [0, 1], [-1, -2, 3, -7], [1, 0, 1, 1]),
+    ("Z3", ZnSymmetry(3), [0, 1, 2], [-1, -2, 5, -6], [2, 1, 2, 0]),
+    ("Z4", ZnSymmetry(4), [0, 1, 2, 3], [-1, -3, 9, -8], [3, 1, 1, 0]),
+    ("FermionParity", FermionParity(), [0, 1], [-1, -2, 3, 4], [1, 0, 1, 0]),
+    ("FermionicU1", FermionicU1(), [-2, -1, 0, 1, 2], [-9, 11, 400], [-9, 11, 400]),
+    (
+        "Prod(Z2,U1)",
+        ProductSymmetry(ZnSymmetry(2), U1Symmetry()),
+        [_E(a, b) for a in (0, 1) for b in (-2, -1, 0, 1, 2)],
+        [_E(-1, 3), _E(-2, -4), _E(3, 5)],
+        [_E(1, 3), _E(0, -4), _E(1, 5)],
+    ),
+    (
+        "Prod(Z2,Z3)",
+        ProductSymmetry(ZnSymmetry(2), ZnSymmetry(3)),
+        [_E(a, b) for a in (0, 1) for b in (0, 1, 2)],
+        [_E(-1, -1), _E(2, 4), _E(-3, -2)],
+        [_E(1, 2), _E(0, 1), _E(1, 1)],
+    ),
+]
+_BOUNDARY_CASES = [(name, sym, secs) for name, sym, secs, _, _ in _CHARGE_CASES]
+_BOUNDARY_IDS = [c[0] for c in _CHARGE_CASES]
+
+
+@pytest.mark.parametrize("name,sym,sectors", _BOUNDARY_CASES, ids=_BOUNDARY_IDS)
+def test_canonicalize_charges_fixes_canonical_sectors_and_is_idempotent(
+    name, sym, sectors
+):
+    secs = np.array(sectors, dtype=np.int32)
+    once = sym.canonicalize_charges(secs)
+    assert np.array_equal(once, secs), f"{name}: canonical input was rewritten"
+    assert np.array_equal(sym.canonicalize_charges(once), once), (
+        f"{name}: not idempotent"
+    )
+
+
+@pytest.mark.parametrize("name,sym,sectors", _BOUNDARY_CASES, ids=_BOUNDARY_IDS)
+def test_flow_charge_is_an_involution_on_canonical_sectors(name, sym, sectors):
+    secs = np.array(sectors, dtype=np.int32)
+    twice = sym.flow_charge(-1, sym.flow_charge(-1, secs))
+    assert np.array_equal(twice, secs), f"{name}: OUT twice is not the identity map"
+    assert np.array_equal(sym.flow_charge(1, secs), secs), f"{name}: IN altered charges"
+
+
+@pytest.mark.parametrize("name,sym,sectors", _BOUNDARY_CASES, ids=_BOUNDARY_IDS)
+def test_fuse_with_dual_gives_identity(name, sym, sectors):
+    secs = np.array(sectors, dtype=np.int32)
+    assert np.all(sym.fuse(secs, sym.dual(secs)) == sym.identity()), name
+
+
+@pytest.mark.parametrize("name,sym,sectors", _BOUNDARY_CASES, ids=_BOUNDARY_IDS)
+def test_closed_form_solves_the_last_leg_charge(name, sym, sectors):
+    """``q = flow_charge(flow, fuse(target, dual(partial)))`` inverts conservation.
+
+    This is the property that lets ``_compute_valid_blocks`` drop its
+    ``n_values() is None`` split: it holds for every abelian group, not just U(1).
+    """
+    secs = np.array(sectors, dtype=np.int32)
+    for flow in (1, -1):
+        for partial in secs:
+            for target in secs:
+                p = np.array([partial], dtype=np.int32)
+                t = np.array([target], dtype=np.int32)
+                q_last = sym.flow_charge(flow, sym.fuse(t, sym.dual(p)))
+                got = int(sym.fuse(p, sym.flow_charge(flow, q_last))[0])
+                assert got == int(t[0]), f"{name}: flow={flow} partial={partial}"
+
+
+@pytest.mark.parametrize(
+    "name,sym,sectors,raw,expected", _CHARGE_CASES, ids=_BOUNDARY_IDS
+)
+def test_canonicalize_charges_rewrites_noncanonical_input(
+    name, sym, sectors, raw, expected
+):
+    """The non-vacuous half: assert the mapping off the fixed points of the map."""
+    got = sym.canonicalize_charges(np.array(raw, dtype=np.int32))
+    want = np.array(expected, dtype=np.int32)
+    assert np.array_equal(got, want), (
+        f"{name}: {raw} -> {got.tolist()}, want {expected}"
+    )
+
+
+@pytest.mark.parametrize(
+    "name,sym,sectors,raw,expected", _CHARGE_CASES, ids=_BOUNDARY_IDS
+)
+def test_canonicalize_charges_override_agrees_with_base(
+    name, sym, sectors, raw, expected
+):
+    """A fast override that silently disagrees with the generic fusion is the risk."""
+    for label, values in (("canonical", sectors), ("non-canonical", raw)):
+        x = np.array(values, dtype=np.int32)
+        got = sym.canonicalize_charges(x)
+        base = BaseSymmetry.canonicalize_charges(sym, x)
+        assert np.array_equal(got, base), (
+            f"{name}: override diverges from BaseSymmetry on {label} input "
+            f"{values}: {got.tolist()} != {base.tolist()}"
+        )
+
+
+def test_canonicalize_charges_maps_negative_zn_representatives():
+    sym = ZnSymmetry(3)
+    got = sym.canonicalize_charges(np.array([-1, -2, 0], dtype=np.int32))
+    assert np.array_equal(got, np.array([2, 1, 0], dtype=np.int32))
+
+
+def test_is_conserved_accepts_a_conserving_product_symmetry_block():
+    """The IN/OUT pair that ``int(flow) * q`` rejects for bit-packed charges."""
+    ps = ProductSymmetry(ZnSymmetry(2), U1Symmetry())
+    q = ProductSymmetry.encode(1, 1)
+    assert ps.is_conserved([q, q], [1, -1])
+    assert not ps.is_conserved([q, ProductSymmetry.encode(0, 1)], [1, -1])
+
+
+def test_is_conserved_canonicalizes_a_noncanonical_target():
+    """``-2 == 1 (mod 3)``, so the old raw ``net == target`` compare said False."""
+    sym = ZnSymmetry(3)
+    assert sym.is_conserved([1], [1], target=1)
+    assert sym.is_conserved([1], [1], target=-2)
+    assert not sym.is_conserved([1], [1], target=-1)
+
+
+def test_net_charge_rejects_a_rank_mismatch():
+    """Without ``strict=True`` a short flows list silently drops a leg."""
+    sym = U1Symmetry()
+    assert sym.net_charge([1, 1], [1, -1]) == 0
+
+    with pytest.raises(ValueError):
+        sym.net_charge([1, 1], [1])
+    with pytest.raises(ValueError):
+        sym.net_charge([1], [1, -1])

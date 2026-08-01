@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import U1Symmetry, ZnSymmetry
+from tenax.core.index import FlowDirection, TensorIndex, _net_charge
+from tenax.core.symmetry import ProductSymmetry, U1Symmetry, ZnSymmetry
 
 
 class TestFlowDirection:
@@ -290,3 +290,69 @@ class TestTensorIndexSectors:
         # U(1) dual negates: [-1,0,1] → [1,0,-1], sorted → [-1,0,1]
         np.testing.assert_array_equal(d.sectors, np.array([-1, 0, 1]))
         np.testing.assert_array_equal(d.multiplicities, np.array([1, 1, 1]))
+
+
+def test_net_charge_reduces_a_single_out_leg():
+    """The #733 case: one OUT leg, nothing to fuse against, so no reduction ran."""
+    sym = ZnSymmetry(2)
+    idx = TensorIndex.from_charges(
+        sym, np.array([0, 1], dtype=np.int32), FlowDirection.OUT, label="a"
+    )
+    assert _net_charge((idx,), (1,)) == 1  # not -1
+
+
+def test_net_charge_agrees_between_one_leg_and_two_legs():
+    sym = ZnSymmetry(3)
+    out = TensorIndex.from_charges(
+        sym, np.array([0, 1, 2], dtype=np.int32), FlowDirection.OUT, label="a"
+    )
+    trivial = TensorIndex.from_charges(
+        sym, np.array([0], dtype=np.int32), FlowDirection.IN, label="b"
+    )
+    for q in (0, 1, 2):
+        assert _net_charge((out,), (q,)) == _net_charge((out, trivial), (q, 0))
+
+
+def test_net_charge_is_identity_for_a_conserving_product_symmetry_block():
+    ps = ProductSymmetry(ZnSymmetry(2), U1Symmetry())
+    q = ProductSymmetry.encode(1, 1)
+    secs = np.array([ProductSymmetry.encode(0, 0), q], dtype=np.int32)
+    a = TensorIndex.from_charges(ps, secs, FlowDirection.IN, label="a")
+    b = TensorIndex.from_charges(ps, secs, FlowDirection.OUT, label="b")
+    assert _net_charge((a, b), (q, q)) == ps.identity()
+
+
+def test_net_charge_matches_plain_summation_for_u1():
+    """U(1) is the case the old hand-rolled arithmetic got right; keep it right."""
+    sym = U1Symmetry()
+    a = TensorIndex.from_charges(
+        sym, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.IN, label="a"
+    )
+    b = TensorIndex.from_charges(
+        sym, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.OUT, label="b"
+    )
+    for qa in (-1, 0, 1):
+        for qb in (-1, 0, 1):
+            assert _net_charge((a, b), (qa, qb)) == qa - qb
+
+
+def test_net_charge_rejects_a_rank_mismatch():
+    """Without ``strict=True`` a short key silently returns a plausible wrong int."""
+    sym = U1Symmetry()
+    a = TensorIndex.from_charges(
+        sym, np.array([0, 1], dtype=np.int32), FlowDirection.IN, label="a"
+    )
+    b = TensorIndex.from_charges(
+        sym, np.array([0, 1], dtype=np.int32), FlowDirection.OUT, label="b"
+    )
+    assert _net_charge((a, b), (1, 1)) == 0  # the correct answer
+
+    with pytest.raises(ValueError):
+        _net_charge((a, b), (1,))  # missing leg — used to return 1
+    with pytest.raises(ValueError):
+        _net_charge((a,), (1, 1))  # extra charge — used to return 1
+
+
+def test_net_charge_rejects_empty_indices():
+    with pytest.raises(ValueError, match="at least one index"):
+        _net_charge((), ())

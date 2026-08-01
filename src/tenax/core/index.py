@@ -14,6 +14,7 @@ contracted when contract() or TensorNetwork.contract() is called.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import IntEnum
 
@@ -33,8 +34,12 @@ class FlowDirection(IntEnum):
     OUT (-1): Outgoing leg — corresponds to a "bra" index, arrow pointing
               out of the tensor. Positive charge flows out.
 
-    Conservation law: sum_i(flow_i * charge_i) == symmetry.identity()
-    for any valid block of a symmetric tensor.
+    Conservation law: for any valid block of a symmetric tensor, fusing each
+    leg's flow-weighted charge (``symmetry.flow_charge(flow_i, charge_i)``,
+    i.e. the charge itself on an IN leg and its group inverse on an OUT leg)
+    must yield ``symmetry.identity()``.  See :func:`_net_charge`, which is the
+    one place that evaluates it.  This is *not* the same as
+    ``sum_i(flow_i * charge_i)``, which only coincides for U(1) (#734).
     """
 
     IN = 1
@@ -337,3 +342,41 @@ class TensorIndex:
             f"n_sectors={self.n_sectors}, flow={self.flow.name}, "
             f"label={self.label!r})"
         )
+
+
+def _net_charge(
+    indices: Sequence[TensorIndex],
+    key: Sequence[int],
+) -> int:
+    """Return the net fused charge of a block key, as a Python int.
+
+    This is the only sanctioned way to evaluate a block's conservation law: a
+    block is valid exactly when ``_net_charge(indices, key) == sym.identity()``.
+
+    ``sum(int(idx.flow) * int(q) for ...)`` is **not** equivalent. It assumes the
+    group inverse is integer negation and the group operation is integer
+    addition — true for U(1), accidentally true for ``Z_n`` whenever two or more
+    legs fuse afterwards, and false for the bit-packed charges of
+    :class:`~tenax.core.symmetry.ProductSymmetry` (#734).
+
+    This is a thin adapter: it reads the flow off each index and delegates the
+    arithmetic to :meth:`~tenax.core.symmetry.BaseSymmetry.net_charge`, so that
+    no charge is ever inverted or combined outside the symmetry class.
+
+    Args:
+        indices: Tensor indices, one per leg.
+        key:     One charge per leg, in the same order.
+
+    Returns:
+        The fused net charge.
+
+    Raises:
+        ValueError: If ``indices`` is empty, or if ``key`` has a different
+            length than ``indices``.
+    """
+    if len(indices) == 0:
+        raise ValueError("_net_charge requires at least one index")
+    pairs = list(zip(indices, key, strict=True))
+    return indices[0].symmetry.net_charge(
+        [q for _, q in pairs], [idx.flow for idx, _ in pairs]
+    )
