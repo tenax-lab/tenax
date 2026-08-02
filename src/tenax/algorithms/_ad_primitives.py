@@ -59,8 +59,15 @@ def _fix_svd_signs(
     max_idx = jnp.argmax(jnp.abs(U), axis=0)  # shape (k,)
     signs = U[max_idx, jnp.arange(U.shape[1])]
     phases = jnp.where(jnp.abs(signs) > 0, signs / jnp.abs(signs), 1.0)
+    # The two factors must be inverses, not equal: column j of U and row j of
+    # Vh both contribute to term j of `U diag(s) Vh`, so scaling both by
+    # conj(p_j) multiplies that term by conj(p_j)^2.  That is 1 only for real
+    # p_j = +-1; for a genuine complex phase it destroys the reconstruction
+    # (measured ||U s Vh - M|| = 1.1e+01 on a norm-10 complex matrix, #751).
+    # Pairing conj(p_j) with p_j gives |p_j|^2 = 1 and still lands the
+    # max-|U| element on the real-positive axis.
     U = U * jnp.conj(phases)[None, :]
-    Vh = Vh * jnp.conj(phases)[:, None]
+    Vh = Vh * phases[:, None]
     return U, s, Vh
 
 
@@ -185,6 +192,16 @@ def _svd_sector_backward(
     m = U.shape[0]
     n = Vh.shape[1]
 
+    # Convention bridge (#751).  The adjoint assembled below is the textbook
+    # one (Townsend 2016; Wan & Zhang 2019), stated in the convention where a
+    # cotangent is dL/dX.  JAX's cotangents for a real-valued loss of a
+    # complex input are the conjugate of that (`grad` returns
+    # dL/dRe - i dL/dIm).  Conjugating in and out converts between the two.
+    # On real dtypes `conj` is the identity, so the real path is bit-identical.
+    dU = dU.conj()
+    ds = ds.conj()
+    dVh = dVh.conj()
+
     # Kept subspace
     U_k = U[:, :k]
     s_k = s[:k]
@@ -207,17 +224,27 @@ def _svd_sector_backward(
     keep_mask = (s_k > eps_rank).astype(s.dtype)  # (k,) -- 1.0 or 0.0
 
     # --- Lorentzian-regularized F-matrix ---
+    #
+    # F_ij = 1 / (s_j^2 - s_i^2), Lorentzian-broadened.  The index order is
+    # NOT free: the standard SVD adjoint pairs `F ∘ (J - J^H)` with this
+    # orientation, and transposing it flips the sign of the whole off-diagonal
+    # contribution (#750).  `regularized_eigh` below carries the same warning
+    # for `w_i - w_j` after the identical bug was fixed there in #316.
     s2 = s_k**2
-    diff = s2[:, None] - s2[None, :]
+    diff = s2[None, :] - s2[:, None]
     F = diff / (diff**2 + eps**2)
     F = F - jnp.diag(jnp.diag(F))
     F = F * keep_mask[:, None] * keep_mask[None, :]
 
-    # Antisymmetric parts of projected cotangents
+    # Antisymmetric parts of projected cotangents.  These are the FULL
+    # `J - J^H`, not `(J - J^H)/2`: the 1/2 belongs to the symmetric/
+    # antisymmetric decomposition, but the adjoint formula takes the plain
+    # difference.  Halving it (with the F transpose above) put terms 2 and 3
+    # at exactly -0.5x their correct value (#750).
     UtdU = U_k.conj().T @ dU  # (k, k)
     VtdV = V_k.conj().T @ dVh.conj().T  # (k, k)
-    UtdU_anti = 0.5 * (UtdU - UtdU.conj().T)
-    VtdV_anti = 0.5 * (VtdV - VtdV.conj().T)
+    UtdU_anti = UtdU - UtdU.conj().T
+    VtdV_anti = VtdV - VtdV.conj().T
 
     # Inverse singular values — sanitize input so JAX backward never
     # evaluates 1/0 (jnp.where evaluates both branches during AD).
@@ -247,7 +274,16 @@ def _svd_sector_backward(
     # 5. Truncation correction from dVh (kept-truncated coupling)
     dM = dM + U_k @ jnp.diag(s_inv) @ dVh @ proj_V_perp
 
-    return dM
+    # 6. Complex-only phase term (Wan & Zhang 2019, arXiv:1909.02659).  The
+    #    pair (u_j, v_j) is fixed only up to a common phase, and the diagonal
+    #    of V^H dV carries that residual freedom.  `L^H - L` is a purely
+    #    imaginary diagonal, so this term is exactly zero for real input and
+    #    the real path is unaffected.
+    L_diag = jnp.diag(VtdV)
+    dM = dM + U_k @ jnp.diag(0.5 * s_inv * (L_diag.conj() - L_diag)) @ Vh_k
+
+    # Back to JAX's cotangent convention -- see the note at the top.
+    return dM.conj()
 
 
 def _truncated_svd_ad_bwd(
@@ -430,9 +466,7 @@ def _regularized_qr_bwd(residuals, g):
     safe = jnp.where(jnp.abs(d) > _R_FLOOR, d, _R_FLOOR)
     R_reg = R - jnp.diag(d) + jnp.diag(safe)
     # M̄ = Ā R⁻ᴴ  ⟺  M̄ Rᴴ = Ā  ⟺  R M̄ᴴ = Āᴴ  (upper-tri solve in R).
-    dM = _qr_H(
-        jax.scipy.linalg.solve_triangular(R_reg, _qr_H(Abar), lower=False)
-    )
+    dM = _qr_H(jax.scipy.linalg.solve_triangular(R_reg, _qr_H(Abar), lower=False))
     return (dM,)
 
 
@@ -529,6 +563,15 @@ def _regularized_eigh_bwd(residuals, g):
     """
     w, v = residuals
     dw, dv = g
+    # Convention bridge, exactly as in `_svd_sector_backward` (#751).  The
+    # assembly below is the textbook eigh adjoint (cotangent = dL/dX); JAX's
+    # cotangents for a real-valued loss of a complex input are the conjugate.
+    # `conj` is the identity on real dtypes, so the real path is unchanged.
+    # Without this, eigenvector-dependent losses on complex Hermitian input
+    # came out at cos = 0.12 vs finite differences (eigenvalue-only losses
+    # happened to pass, because their gradient is real).
+    dw = dw.conj()
+    dv = dv.conj()
     # Adaptive Lorentzian broadening: scale with largest |w| to cap F at ~1/eps.
     # Hardcoded eps=1e-12 broadcast gradient spikes to O(1e12) when two
     # eigenvalues of the projector density matrix were numerically degenerate;
@@ -552,7 +595,9 @@ def _regularized_eigh_bwd(residuals, g):
 
     # Symmetrize output (input was symmetric)
     dM = 0.5 * (dM + dM.conj().T)
-    return (dM,)
+    # Back to JAX's cotangent convention -- see the note above.  Conjugation
+    # commutes with the Hermitian symmetrisation, so the order here is free.
+    return (dM.conj(),)
 
 
 regularized_eigh.defvjp(_regularized_eigh_fwd, _regularized_eigh_bwd)

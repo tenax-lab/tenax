@@ -35,12 +35,17 @@ def _gauge_fixed_svd(
     *bare* ``phase`` on ``Vh``, which preserves the SVD reconstruction
     ``U @ diag(s) @ Vh == M`` even for complex inputs.
 
-    The shared :func:`tenax.algorithms._ad_primitives._fix_svd_signs` puts
-    ``conj(phase)`` on both factors, so ``U @ diag(s) @ Vh`` picks up a
-    ``conj(phase)**2`` factor. That is fine for the 1x1 Fishman closure
-    ``P1^H @ M @ P2 = I`` because the middle ``M`` absorbs the phase
-    mismatch, but it breaks the 2x2 closure ``P_bot @ P_top = I`` which
-    has no intervening matrix.
+    The shared :func:`tenax.algorithms._ad_primitives._fix_svd_signs` used to
+    put ``conj(phase)`` on *both* factors, so ``U @ diag(s) @ Vh`` picked up a
+    ``conj(phase)**2`` factor -- tolerable for the 1x1 Fishman closure
+    ``P1^H @ M @ P2 = I``, where the middle ``M`` absorbs the phase mismatch,
+    but fatal for the 2x2 closure ``P_bot @ P_top = I``, which has no
+    intervening matrix.  That is why this local copy exists.
+
+    As of #751 the shared helper uses this same convention and the two are
+    now equivalent; the workaround was masking a defect that also corrupted
+    the complex SVD *backward* (#750/#751).  This copy is kept only to avoid
+    churn in a correctness fix -- deduplicating it is safe follow-up work.
     """
     U, s, Vh = _dense_svd(M, full_matrices=False)
     max_idx = jnp.argmax(jnp.abs(U), axis=0)  # (k,)

@@ -315,12 +315,13 @@ def compute_honeycomb_projector(
     M = boundary_arr.reshape(chi_in * d2, chi_out)  # (chi_in*d2, chi_out)
 
     if method == "svd":
-        # NOTE: do NOT call ``_fix_svd_signs`` here.  That helper applies
-        # ``conj(phase)`` to BOTH U and Vh per column/row, which preserves
-        # ``M = U S Vh`` only for real matrices (where conj(phase)^2 = 1).
-        # For complex matrices it breaks the SVD identity.  We apply our
-        # own per-column gauge fix below, with the inverse ``phase`` going
-        # to V (so ``M = U_new S V_new^dagger`` is preserved exactly).
+        # NOTE: this local gauge fix predates #751.  ``_fix_svd_signs`` used
+        # to apply ``conj(phase)`` to BOTH U and Vh per column/row, which
+        # preserves ``M = U S Vh`` only for real matrices (where
+        # conj(phase)^2 = 1) and broke the SVD identity for complex ones.
+        # #751 fixed the shared helper to use this same convention -- the
+        # inverse ``phase`` on V -- so calling it here would now be correct.
+        # Left inlined to keep a correctness fix free of refactoring.
         U_full, S_full, Vh_full = _dense_svd(M, full_matrices=False)
         # SVD truncation is bounded by the matrix rank: min(chi_in*d2, chi_out).
         k = min(chi, S_full.shape[0])

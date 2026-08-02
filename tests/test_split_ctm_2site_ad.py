@@ -4,8 +4,14 @@ Parity is validated on PHYSICAL, convergent checkerboard states (2-site simple
 update), never random tensors: the fused 2-site CTM oracle oscillates on random
 input, making any split-vs-fused comparison meaningless.
 
-The trusted AD gate is implicit==explicit (not implicit==finite-difference; the
-split energy_fn carries a Wirtinger gap that AD-vs-FD inherits). The *tight*,
+The trusted AD gate is implicit==explicit (not implicit==finite-difference).
+Historically that choice was justified by a "Wirtinger gap" in the split
+energy_fn; that explanation was wrong -- the computation is entirely real, so
+Wirtinger cannot apply, and the AD-vs-FD disagreement it described was the
+#750 SVD-adjoint bug (the off-diagonal adjoint term came out at -0.5x, which
+flips the gradient's sign).  With #750/#751 fixed, AD and FD agree.
+implicit==explicit remains the primary gate here because it is far cheaper than
+FD on a CTM fixed point, not because FD is untrustworthy.  The *tight*,
 machine-exact implicit==explicit gate lives in the non-degenerate anisotropic
 regime (``test_2site_implicit_grad_matches_explicit_clean_regime``, XXZ Δ=0.3):
 there the projector singular values are well separated, the Lorentzian SVD
@@ -158,8 +164,9 @@ def test_explicit_multisite_converge_grad_finite(su_state):
 def test_2site_implicit_grad_matches_explicit(su_state):
     """PRIMARY Tier-3 gate: 2-site split implicit (Neumann) gradient parity.
 
-    implicit==explicit, NOT implicit==FD: the split energy_fn carries a
-    pre-existing Wirtinger gap that AD-vs-FD inherits and explicit shares.
+    implicit==explicit, NOT implicit==FD -- for cost, not for trust.  (The
+    "Wirtinger gap" this docstring used to cite was the #750 SVD-adjoint bug,
+    now fixed; see the module docstring.)
     Gradient taken w.r.t. sublattice A only (B held fixed) for a clean scalar
     parity, at the lossless chi_I=chi fixed point.
 
@@ -337,12 +344,15 @@ def test_2site_split_energy_matches_fused_ad_path(su_state):
 
 
 def test_2site_implicit_grad_fd_directional(su_state):
-    """FD is a LOOSE directional sanity check only, never a tight magnitude gate.
+    """AD vs finite differences on the split energy — direction AND magnitude.
 
-    The split energy_fn carries a pre-existing Wirtinger (real/complex-derivative)
-    gap, so AD-vs-FD magnitude does NOT match to 1e-6 — only the direction agrees.
-    Trusted magnitude parity is implicit==explicit (see
-    test_2site_implicit_grad_matches_explicit)."""
+    This gate used to assert direction only, on the stated grounds that the
+    split energy_fn carried a "Wirtinger (real/complex-derivative) gap".  That
+    was a misdiagnosis: the computation is entirely real, so Wirtinger cannot
+    apply.  The real cause was the #750 SVD-adjoint bug, which put the
+    off-diagonal adjoint contribution at -0.5x and flipped the gradient's sign.
+    With #750/#751 fixed, AD and FD agree in magnitude too, so the magnitude
+    assertion below is now a live gate rather than a documented waiver."""
     from tenax.algorithms._split_ctm_energy_ad import ctm_energy_split_implicit_2site
     from tenax.algorithms.ipeps import _wrap_as_dense_tensor
 
@@ -383,6 +393,10 @@ def test_2site_implicit_grad_fd_directional(su_state):
         / (jnp.linalg.norm(g_ad_s) * jnp.linalg.norm(g_fd) + 1e-30)
     )
     assert cos > 0.99, f"AD and FD gradients point in different directions: cos={cos}"
+    rel = float(jnp.linalg.norm(g_ad_s - g_fd) / (jnp.linalg.norm(g_fd) + 1e-30))
+    # Threshold set by the FD step (eps=1e-5) on a CTM fixed point, not by any
+    # remaining adjoint defect; pre-#750 this sat above 0.5 with a sign flip.
+    assert rel < 1e-3, f"AD and FD gradient magnitudes disagree: rel={rel}"
 
 
 def test_validate_split_ctm_config_allows_2site():
