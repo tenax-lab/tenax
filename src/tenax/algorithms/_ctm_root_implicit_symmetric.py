@@ -19,6 +19,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ad_primitives import (
+    _check_root_residual_policy,
+    _report_root_residual,
+)
 from tenax.algorithms._ctm_root_implicit_asym import (
     _denman_beavers,
     _inv_sqrt,
@@ -1860,6 +1864,7 @@ def sym_root_implicit_energy_and_grad(
     solve_maxiter: int = 400,
     solve_restart: int = 30,
     root_residual_warn: float = 1e-6,
+    on_root_residual: str = "raise",
 ):
     """Energy and ``dE/dA`` for a 1x1 unit cell, block sparse throughout.
 
@@ -1922,6 +1927,7 @@ def sym_root_implicit_energy_and_grad(
     is needed on top of that — the tensors flatten to a single array leaf and
     ``jax.tree.unflatten`` puts them back.
     """
+    _check_root_residual_policy(on_root_residual)
     from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
 
     if not isinstance(A, SymmetricTensor):
@@ -1949,12 +1955,13 @@ def sym_root_implicit_energy_and_grad(
         polish_tol=polish_tol,
     )
     if root_residual > root_residual_warn:
-        warnings.warn(
+        _report_root_residual(
+            on_root_residual,
             f"Symmetric root implicit AD: ‖F(y*)‖ = {root_residual:.3e} exceeds "
             f"{root_residual_warn:.1e}; the implicit-function gradient is "
             "correspondingly inaccurate (paper Fig. 1).",
-            RuntimeWarning,
-            stacklevel=2,
+            residual=float(root_residual),
+            tolerance=float(root_residual_warn),
         )
 
     # ``root_parametrize_sym`` already returns the covariant convention and
@@ -2004,13 +2011,14 @@ def sym_root_implicit_energy_and_grad(
     F_at_root, vjp_y = jax.vjp(F_of_y, y_star)
     covariant_residual = _pytree_norm(F_at_root)
     if covariant_residual > root_residual_warn:
-        warnings.warn(
+        _report_root_residual(
+            on_root_residual,
             f"Symmetric root implicit AD: the covariant ‖F(y*)‖ = "
             f"{covariant_residual:.3e} exceeds {root_residual_warn:.1e}. The "
             "gradient solves the adjoint of equations that y* does not "
             "satisfy, so it is correspondingly inaccurate.",
-            RuntimeWarning,
-            stacklevel=2,
+            residual=float(covariant_residual),
+            tolerance=float(root_residual_warn),
         )
     F_bar, solve_resid = _solve_root_adjoint(
         lambda v: vjp_y(v)[0],

@@ -930,6 +930,7 @@ def cell_root_implicit_energy_and_grad(
     solve_maxiter: int = 400,
     solve_restart: int = 30,
     root_residual_warn: float = 1e-6,
+    on_root_residual: str = "raise",
     return_diagnostics: bool = False,
 ):
     """Energy and ``dE/dA`` per cell via root implicit differentiation.
@@ -944,14 +945,18 @@ def cell_root_implicit_energy_and_grad(
     ``S`` an adjoint at all.  Writing ``F`` in the regular variables sets that
     adjoint to zero, which was #718.
     """
-    import warnings
-
+    from tenax.algorithms._ad_primitives import (
+        _check_root_residual_policy,
+        _report_root_residual,
+    )
     from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
     from tenax.algorithms._ctm_tensor_init import (
         _build_double_layer_tensor,
         initialize_ctm_tensor_env,
     )
     from tenax.core.tensor import DenseTensor, SymmetricTensor
+
+    _check_root_residual_policy(on_root_residual)
 
     if any(isinstance(A, SymmetricTensor) for A in A_by_cell.values()):
         raise TypeError("Multisite root implicit AD is dense-only (#715 Phase 3).")
@@ -983,12 +988,13 @@ def cell_root_implicit_energy_and_grad(
         polish_tol=polish_tol,
     )
     if root_residual > root_residual_warn:
-        warnings.warn(
+        _report_root_residual(
+            on_root_residual,
             f"Multisite root implicit AD: ‖F(y*)‖ = {root_residual:.3e} exceeds "
             f"{root_residual_warn:.1e}; the implicit-function gradient is "
             "correspondingly inaccurate (paper Fig. 1).",
-            RuntimeWarning,
-            stacklevel=2,
+            residual=float(root_residual),
+            tolerance=float(root_residual_warn),
         )
 
     S_star = root.s

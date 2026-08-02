@@ -21,6 +21,7 @@ Reference: Francuz et al., Phys. Rev. Research 7, 013237 (2025).
 
 from __future__ import annotations
 
+import warnings
 from functools import partial
 
 import jax
@@ -38,6 +39,48 @@ class CTMRGGradientError(RuntimeError):
         super().__init__(
             f"CTM adjoint non-contractive: spectral radius {spectral_radius:.4f} >= 1.0"
         )
+
+
+class RootResidualError(RuntimeError):
+    """Raised when a converged environment is not a root of ``F(y, p) = 0``.
+
+    The root-implicit gradient (#715) solves the adjoint of the characteristic
+    equations *at* ``y*``.  If ``y*`` does not satisfy them, the gradient is
+    the exact answer to the wrong question — and it comes back finite,
+    plausibly scaled, and silently wrong (paper Fig. 1).  Nothing downstream
+    can detect that, so callers running unattended must be able to fail on it
+    rather than read a warning nobody is watching.
+
+    Carries ``residual`` and ``tolerance`` so a caller that *can* recover --
+    an optimizer line search rejecting a trial step, say -- can catch this and
+    fall back instead of aborting the run.
+    """
+
+    def __init__(self, message: str, *, residual: float, tolerance: float):
+        self.residual = residual
+        self.tolerance = tolerance
+        super().__init__(message)
+
+
+_ROOT_RESIDUAL_POLICIES = ("raise", "warn")
+
+
+def _check_root_residual_policy(on_root_residual: str) -> None:
+    """Validate the policy up front, so a typo fails before the expensive part."""
+    if on_root_residual not in _ROOT_RESIDUAL_POLICIES:
+        raise ValueError(
+            f"on_root_residual must be one of {_ROOT_RESIDUAL_POLICIES}, "
+            f"got {on_root_residual!r}"
+        )
+
+
+def _report_root_residual(
+    on_root_residual: str, message: str, *, residual: float, tolerance: float
+) -> None:
+    """Raise or warn on a non-vanishing root residual, per policy."""
+    if on_root_residual == "raise":
+        raise RootResidualError(message, residual=residual, tolerance=tolerance)
+    warnings.warn(message, RuntimeWarning, stacklevel=3)
 
 
 # ---------------------------------------------------------------------------

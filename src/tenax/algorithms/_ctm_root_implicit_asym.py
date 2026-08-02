@@ -95,6 +95,10 @@ from typing import Any, NamedTuple
 import jax
 import jax.numpy as jnp
 
+from tenax.algorithms._ad_primitives import (
+    _check_root_residual_policy,
+    _report_root_residual,
+)
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
@@ -1051,6 +1055,7 @@ def asym_root_implicit_energy_and_grad(
     solve_maxiter: int = 400,
     solve_restart: int = 30,
     root_residual_warn: float = 1e-6,
+    on_root_residual: str = "raise",
     return_diagnostics: bool = False,
 ):
     """Energy and ``dE/dA`` for a 1x1 unit cell via asymmetric root implicit AD.
@@ -1079,6 +1084,7 @@ def asym_root_implicit_energy_and_grad(
     singular adjoint system solvable; it is ~1e-16 when the energy boundary is
     right and is worth watching whenever that boundary changes.
     """
+    _check_root_residual_policy(on_root_residual)
     from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
 
     if isinstance(A, SymmetricTensor):
@@ -1102,12 +1108,13 @@ def asym_root_implicit_energy_and_grad(
         polish_tol=polish_tol,
     )
     if root_residual > root_residual_warn:
-        warnings.warn(
+        _report_root_residual(
+            on_root_residual,
             f"Asymmetric root implicit AD: ‖F(y*)‖ = {root_residual:.3e} exceeds "
             f"{root_residual_warn:.1e}; the implicit-function gradient is "
             "correspondingly inaccurate (paper Fig. 1).",
-            RuntimeWarning,
-            stacklevel=2,
+            residual=float(root_residual),
+            tolerance=float(root_residual_warn),
         )
 
     # §V.3 works in the modified variables, and indexes its cuts by the upper
@@ -1190,13 +1197,14 @@ def asym_root_implicit_energy_and_grad(
         jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(F_at_root)))
     )
     if covariant_residual > root_residual_warn:
-        warnings.warn(
+        _report_root_residual(
+            on_root_residual,
             f"Asymmetric root implicit AD: the covariant ‖F(y*)‖ = "
             f"{covariant_residual:.3e} exceeds {root_residual_warn:.1e}. The "
             "gradient solves the adjoint of equations that y* does not "
             "satisfy, so it is correspondingly inaccurate.",
-            RuntimeWarning,
-            stacklevel=2,
+            residual=float(covariant_residual),
+            tolerance=float(root_residual_warn),
         )
     F_bar, solve_resid = _solve_root_adjoint(
         lambda v: vjp_y(v)[0],

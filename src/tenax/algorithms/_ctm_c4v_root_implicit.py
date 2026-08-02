@@ -55,6 +55,10 @@ from typing import Any, NamedTuple
 import jax
 import jax.numpy as jnp
 
+from tenax.algorithms._ad_primitives import (
+    _check_root_residual_policy,
+    _report_root_residual,
+)
 from tenax.algorithms._ctm_tensor_c4v import _c4v_sweep, _c4v_to_full_env
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import (
@@ -463,6 +467,7 @@ def c4v_root_implicit_energy_and_grad(
     solve_maxiter: int = 200,
     solve_restart: int = 30,
     root_residual_warn: float = 1e-6,
+    on_root_residual: str = "raise",
     solve_residual_warn: float = 1e-6,
     return_diagnostics: bool = False,
 ):
@@ -491,6 +496,7 @@ def c4v_root_implicit_energy_and_grad(
         ``(energy, grad_A)`` where ``grad_A`` is a dense array shaped like
         ``A``; plus a diagnostics dict when ``return_diagnostics`` is set.
     """
+    _check_root_residual_policy(on_root_residual)
     if isinstance(A, SymmetricTensor):
         raise TypeError(
             "c4v_root_implicit_energy_and_grad supports dense tensors only "
@@ -520,15 +526,16 @@ def c4v_root_implicit_energy_and_grad(
     )
 
     if root_residual > root_residual_warn:
-        warnings.warn(
+        _report_root_residual(
+            on_root_residual,
             f"C4v root implicit AD: ‖F(y*)‖ = {root_residual:.3e} exceeds "
             f"{root_residual_warn:.1e}. The environment is not a root of the "
             "characteristic equations, so the implicit-function gradient is "
             "correspondingly inaccurate (paper Fig. 1). Usual cause: chi cuts "
             "through a numerically degenerate part of the corner spectrum — "
             "lower chi, or converge the forward CTM further.",
-            RuntimeWarning,
-            stacklevel=2,
+            residual=float(root_residual),
+            tolerance=float(root_residual_warn),
         )
 
     A_data = jnp.asarray(A.todense())
