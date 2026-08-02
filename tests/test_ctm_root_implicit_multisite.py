@@ -240,6 +240,7 @@ def test_shifts_are_genuinely_periodic():
 # ------------------------------------------------------------------ #
 
 
+@pytest.mark.slow
 def test_enlarged_corner_at_1x1_reproduces_the_phase1_quadrant():
     """A 1x1 unit cell must reproduce Phase 1's rotate-and-reuse quadrant.
 
@@ -297,6 +298,7 @@ def _gate(delta=1.0):
     return H.reshape(2, 2, 2, 2)
 
 
+@pytest.mark.slow
 def test_multisite_forward_at_1x1_matches_the_phase1_energy():
     """The 1x1 smoke test for the forward sweep.
 
@@ -333,6 +335,7 @@ def test_multisite_forward_at_1x1_matches_the_phase1_energy():
     assert rel < 1e-10, f"E_phase1={E1!r} E_multisite={E2!r} rel={rel:.3e}"
 
 
+@pytest.mark.slow
 def test_multisite_forward_runs_on_a_2x2_cell_of_different_tensors():
     """A 2x2 cell of *different* tensors — the configuration a wrong cell
     shift can actually be seen in.  Only asserts the forward is well formed;
@@ -363,6 +366,7 @@ def test_multisite_forward_runs_on_a_2x2_cell_of_different_tensors():
     assert meta["converged"], meta
 
 
+@pytest.mark.slow
 def test_the_unit_cell_is_not_secretly_uniform():
     """Guards the guard: if a 2x2 cell of different tensors converged to four
     identical environments, every cell-shift test built on it would be
@@ -390,6 +394,7 @@ def test_the_unit_cell_is_not_secretly_uniform():
     assert spread > 1e-3, f"cells are effectively identical (spread {spread:.3e})"
 
 
+@pytest.mark.slow
 def test_the_1x1_energy_gate_is_load_bearing(monkeypatch):
     """Guards the gate: break the gluing partner and the 1x1 energy must move.
 
@@ -459,16 +464,19 @@ def _root_residual(cell, nrows, ncols, chi=4, polish_steps=3):
     return residual
 
 
+@pytest.mark.slow
 def test_characteristic_equations_vanish_at_a_1x1_root():
     assert _root_residual({(0, 0): _site_tensor()}, 1, 1) < 1e-11
 
 
+@pytest.mark.slow
 def test_characteristic_equations_vanish_at_a_2x2_root():
     """The Phase 2 gate: all 20 equations per cell hold at the converged root
     of a 2x2 cell of different tensors."""
     assert _root_residual(_cell_2x2(), 2, 2) < 1e-11
 
 
+@pytest.mark.slow
 def test_every_block_of_F_vanishes_not_just_the_norm():
     """A single dominant block could hide four broken ones behind a small
     total, so check R_C, R_E, R_u, R_S and R_v separately."""
@@ -488,6 +496,7 @@ def test_every_block_of_F_vanishes_not_just_the_norm():
         assert norm < 1e-11, f"{name} = {norm:.3e}"
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
     "table",
     ["proj_sinv_indices", "leftvec_invfroot_indices", "rightvec_invfroot_indices"],
@@ -515,6 +524,7 @@ def test_each_cell_shift_table_is_load_bearing(monkeypatch, table):
     assert _root_residual(_cell_2x2(), 2, 2) > 1e-3
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
     "table",
     ["proj_sinv_indices", "leftvec_invfroot_indices", "rightvec_invfroot_indices"],
@@ -590,12 +600,14 @@ def _fd_parity(cell, nrows, ncols, chi=4, h=1e-5, seed=0):
     return ad, fd
 
 
+@pytest.mark.slow
 def test_gradient_matches_finite_differences_at_1x1():
     ad, fd = _fd_parity({(0, 0): _site_tensor()}, 1, 1)
     rel = abs(ad - fd) / max(abs(fd), 1e-30)
     assert rel < 1e-8, f"AD={ad!r} FD={fd!r} rel={rel:.3e}"
 
 
+@pytest.mark.slow
 def test_gradient_matches_finite_differences_on_a_2x2_cell():
     """The Phase 2 gate (#715).
 
@@ -609,6 +621,7 @@ def test_gradient_matches_finite_differences_on_a_2x2_cell():
     assert rel < 1e-6, f"AD={ad!r} FD={fd!r} rel={rel:.3e}"
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
     "table",
     ["proj_sinv_indices", "leftvec_invfroot_indices", "rightvec_invfroot_indices"],
@@ -633,6 +646,7 @@ def test_a_wrong_cell_shift_breaks_the_2x2_gradient(monkeypatch, table):
     assert rel > 1e-3, f"wrong {table} still matched FD (rel={rel:.3e})"
 
 
+@pytest.mark.slow
 def test_the_two_site_energy_is_gauge_dependent_on_a_nonuniform_cell():
     """Records why the parity objective is a one-site observable.
 
