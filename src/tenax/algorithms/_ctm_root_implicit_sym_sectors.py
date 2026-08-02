@@ -2,10 +2,9 @@
 
 Nothing here knows about CTM.  It knows about charge sectors: how a chi bond
 is split across them, how to decompose a block-diagonal matrix sector by
-sector, and how to get back to a :class:`SymmetricTensor`.  A future CTM
-layer (``_ctm_root_implicit_symmetric``, not yet written) will call into this
-at the cut and nowhere else; the decomposition/reassembly helpers implied by
-that split are forthcoming and not part of this module yet.
+sector, and how to get back to a :class:`SymmetricTensor`.  The CTM layer
+that consumes it is :mod:`tenax.algorithms._ctm_root_implicit_symmetric`
+(#715 Phase 3, shipped in #729); it calls in at the cut and nowhere else.
 
 The split exists because the two halves fail differently.  A bug here is a
 wrong *shape* or a wrong charge and shows up as an exception; a bug in the CTM
