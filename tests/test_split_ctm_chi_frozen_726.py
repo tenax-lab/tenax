@@ -145,3 +145,35 @@ def test_single_site_split_rejects_the_default_2x2_recipe():
     _E, tensors, _envs = ipeps(gate, None, cfg)
     with pytest.raises(NotImplementedError, match=r"only implements the '1x1'"):
         optimize_gs_ad(gate, tensors[0], cfg)
+
+
+def test_the_guard_survives_when_the_loss_is_never_called():
+    """``gs_num_steps=0`` must reject too -- the loss-path guard is not enough.
+
+    Evaluate-only mode (and a resumed checkpoint already at or beyond the final
+    step) never calls ``loss_fn``, so a guard living only inside
+    ``_split_ctm_energy_fn`` is bypassed: the final ``_eval_fresh`` reaches
+    ``_split_forward`` -> ``converge_split_env`` directly and still returns the
+    1x1 chi-independent energy under the default ``gs_recipe='2x2'``.  The
+    rejection therefore has to happen in ``validate_split_ctm_config``, before
+    the optimization loop.
+
+    Caught by Codex review on PR #749.
+    """
+    from tenax.algorithms.ipeps_config import iPEPSConfig as Cfg
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    gate = sublattice_rotate_gate(heisenberg_gate())
+    cfg = Cfg(
+        max_bond_dim=2,
+        num_imaginary_steps=2,
+        dt=0.05,
+        unit_cell="1x1",
+        gs_num_steps=0,  # evaluate-only: loss_fn is never invoked
+        ctm=CTMConfig(chi=4, max_iter=20, conv_tol=1e-8, fuse_virtual_legs=False),
+    )
+    assert cfg.gs_recipe == "2x2", "precondition: 2x2 is the default recipe"
+
+    _E, tensors, _envs = ipeps(gate, None, cfg)
+    with pytest.raises(NotImplementedError, match=r"only implements the '1x1'"):
+        optimize_gs_ad(gate, tensors[0], cfg)

@@ -1313,7 +1313,12 @@ def _optimize_gs_ad_tensor(
     if use_split:
         # Shared single source of truth for the CTMConfig-level rejects
         # (recipe + the three χ-changing knobs); see validate_split_ctm_config.
-        validate_split_ctm_config(ctm_cfg, config.gs_recipe)
+        # ``single_site=True`` narrows the recipe to '1x1' here rather than only
+        # inside the loss (#726): with gs_num_steps=0, or a resumed checkpoint
+        # already at the final step, the loss never runs and the final
+        # ``_eval_fresh`` -> ``_split_forward`` would otherwise still return the
+        # 1x1 chi-independent energy under the default gs_recipe='2x2'.
+        validate_split_ctm_config(ctm_cfg, config.gs_recipe, single_site=True)
         # iPEPSConfig-level rejects the shared helper can't see.
         if _use_cg:
             raise NotImplementedError(
