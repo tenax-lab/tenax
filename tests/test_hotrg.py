@@ -215,7 +215,9 @@ class TestHOTRGRun:
         exact = ising_free_energy_exact(beta)
         err = {}
         for chi in (8, 24):
-            f = float(-hotrg(tensor, HOTRGConfig(max_bond_dim=chi, num_steps=20)) / beta)
+            f = float(
+                -hotrg(tensor, HOTRGConfig(max_bond_dim=chi, num_steps=20)) / beta
+            )
             err[chi] = abs(f - exact)
         assert err[24] < 0.8 * err[8], (
             f"HOTRG not converging in chi: err(chi=8)={err[8]:.3e} "

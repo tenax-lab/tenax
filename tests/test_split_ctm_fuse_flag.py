@@ -172,8 +172,10 @@ def test_split_implicit_grad_matches_explicit():
     same lossless ``chi_I=chi`` fixed point, so the implicit fixed-point
     gradient and the explicit unrolled gradient must agree once the explicit
     reference is itself converged (#463 Phase 2 validation — implicit==explicit,
-    not implicit==FD: the split energy_fn carries a pre-existing Wirtinger gap
-    that AD-vs-FD inherits and explicit shares).
+    not implicit==FD; FD is simply expensive on a CTM fixed point.  The
+    "pre-existing Wirtinger gap" previously cited here did not exist: the
+    computation is real-valued throughout, and the AD-vs-FD disagreement was
+    the #750 SVD-adjoint bug, now fixed).
     """
     from tenax.algorithms._split_ctm_energy_ad import (
         ctm_energy_split_explicit,

@@ -828,7 +828,8 @@ def _reference_gauge_fix_loop(U_T, Vh_T):
         abs_best = jnp.abs(best_value)
         phase = jnp.where(
             abs_best > 0,
-            best_value / jnp.maximum(abs_best, jnp.asarray(1e-30, dtype=abs_best.dtype)),
+            best_value
+            / jnp.maximum(abs_best, jnp.asarray(1e-30, dtype=abs_best.dtype)),
             jnp.ones_like(best_value),
         )
         if is_complex:
@@ -952,9 +953,11 @@ def test_gauge_fix_vectorized_matches_reference_grad():
         Vh_in = jax.tree.unflatten(vh_tree, vl)
         return _loss(U_in, Vh_in, fn)
 
-    g_ref = jax.grad(lambda ul, vl: _from_leaves(ul, vl, _reference_gauge_fix_loop),
-                     argnums=(0, 1))(u_leaves, vh_leaves)
-    g_new = jax.grad(lambda ul, vl: _from_leaves(ul, vl, _gauge_fix_symmetric_svd),
-                     argnums=(0, 1))(u_leaves, vh_leaves)
+    g_ref = jax.grad(
+        lambda ul, vl: _from_leaves(ul, vl, _reference_gauge_fix_loop), argnums=(0, 1)
+    )(u_leaves, vh_leaves)
+    g_new = jax.grad(
+        lambda ul, vl: _from_leaves(ul, vl, _gauge_fix_symmetric_svd), argnums=(0, 1)
+    )(u_leaves, vh_leaves)
     for a, b in zip(jax.tree.leaves(g_new), jax.tree.leaves(g_ref)):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12, atol=1e-12)

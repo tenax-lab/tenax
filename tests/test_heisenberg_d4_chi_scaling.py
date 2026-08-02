@@ -66,18 +66,58 @@ def _sample_results():
     # Two device rows over χ∈{16,32}. E identical across n (device-independent);
     # 1-GPU is the speedup baseline.
     return [
-        {"D": 4, "chi": 16, "n_devices": 1, "E_site": -0.6601, "err_vs_qmc": 0.0093,
-         "ms_per_sweep": 100.0, "n_sweeps": 30, "peak_gb": 1.0, "converged": True,
-         "oom": False, "error": None},
-        {"D": 4, "chi": 32, "n_devices": 1, "E_site": -0.6640, "err_vs_qmc": 0.0054,
-         "ms_per_sweep": 400.0, "n_sweeps": 40, "peak_gb": 4.0, "converged": True,
-         "oom": False, "error": None},
-        {"D": 4, "chi": 16, "n_devices": 4, "E_site": -0.6601, "err_vs_qmc": 0.0093,
-         "ms_per_sweep": 50.0, "n_sweeps": 30, "peak_gb": 0.3, "converged": True,
-         "oom": False, "error": None},
-        {"D": 4, "chi": 32, "n_devices": 4, "E_site": -0.6640, "err_vs_qmc": 0.0054,
-         "ms_per_sweep": 200.0, "n_sweeps": 40, "peak_gb": 1.1, "converged": True,
-         "oom": False, "error": None},
+        {
+            "D": 4,
+            "chi": 16,
+            "n_devices": 1,
+            "E_site": -0.6601,
+            "err_vs_qmc": 0.0093,
+            "ms_per_sweep": 100.0,
+            "n_sweeps": 30,
+            "peak_gb": 1.0,
+            "converged": True,
+            "oom": False,
+            "error": None,
+        },
+        {
+            "D": 4,
+            "chi": 32,
+            "n_devices": 1,
+            "E_site": -0.6640,
+            "err_vs_qmc": 0.0054,
+            "ms_per_sweep": 400.0,
+            "n_sweeps": 40,
+            "peak_gb": 4.0,
+            "converged": True,
+            "oom": False,
+            "error": None,
+        },
+        {
+            "D": 4,
+            "chi": 16,
+            "n_devices": 4,
+            "E_site": -0.6601,
+            "err_vs_qmc": 0.0093,
+            "ms_per_sweep": 50.0,
+            "n_sweeps": 30,
+            "peak_gb": 0.3,
+            "converged": True,
+            "oom": False,
+            "error": None,
+        },
+        {
+            "D": 4,
+            "chi": 32,
+            "n_devices": 4,
+            "E_site": -0.6640,
+            "err_vs_qmc": 0.0054,
+            "ms_per_sweep": 200.0,
+            "n_sweeps": 40,
+            "peak_gb": 1.1,
+            "converged": True,
+            "oom": False,
+            "error": None,
+        },
     ]
 
 
@@ -101,8 +141,17 @@ def test_csv_rows_have_stable_keys():
     rows = d4.results_to_csv_rows(_sample_results())
     assert len(rows) == 4
     assert set(rows[0]) == {
-        "D", "chi", "n_devices", "E_site", "err_vs_qmc", "ms_per_sweep",
-        "n_sweeps", "peak_gb", "converged", "oom", "error",
+        "D",
+        "chi",
+        "n_devices",
+        "E_site",
+        "err_vs_qmc",
+        "ms_per_sweep",
+        "n_sweeps",
+        "peak_gb",
+        "converged",
+        "oom",
+        "error",
     }
 
 

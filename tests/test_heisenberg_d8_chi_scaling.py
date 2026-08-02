@@ -75,9 +75,12 @@ def test_build_grid_both_paths_dense_rows_then_split_n1():
     quads = [(c.D, c.chi, c.n_devices, c.path) for c in cells]
     # dense: device-major chi-minor over {1,2}; split: n=1 only, appended last
     assert quads == [
-        (8, 64, 1, "dense"), (8, 96, 1, "dense"),
-        (8, 64, 2, "dense"), (8, 96, 2, "dense"),
-        (8, 64, 1, "split"), (8, 96, 1, "split"),
+        (8, 64, 1, "dense"),
+        (8, 96, 1, "dense"),
+        (8, 64, 2, "dense"),
+        (8, 96, 2, "dense"),
+        (8, 64, 1, "split"),
+        (8, 96, 1, "split"),
     ]
 
 
@@ -163,8 +166,10 @@ def test_launch_returns_none_when_no_idle_gpus(monkeypatch):
     # When no idle A100s free up in time, _launch must NOT raise; it returns None
     # so the orchestrator can stop gracefully (the bug that crashed a real run).
     monkeypatch.setattr(d8, "_wait_for_free_a100s", lambda n, w, poll_s=30: False)
-    assert d8._launch(["x", "--cell", "--phase", "scan"], 2, timeout_s=1,
-                      gpu_wait_s=0) is None
+    assert (
+        d8._launch(["x", "--cell", "--phase", "scan"], 2, timeout_s=1, gpu_wait_s=0)
+        is None
+    )
 
 
 def test_load_or_run_scan_returns_none_and_writes_no_poison(monkeypatch, tmp_path):
@@ -191,18 +196,51 @@ def test_cell8_has_path_and_distinct_paths_dont_collide(tmp_path):
 
 def test_aggregate8_writes_both_path_sections(tmp_path):
     results = [
-        {"D": 8, "chi": 96, "n_devices": 1, "path": "dense", "E_site": -0.605,
-         "err_vs_qmc": 0.064, "total_s": 785.0, "n_sweeps": 14,
-         "ms_per_sweep": 56000.0, "peak_gb": 59.7, "converged": False,
-         "oom": False, "error": None},
-        {"D": 8, "chi": 128, "n_devices": 1, "path": "dense", "E_site": None,
-         "err_vs_qmc": None, "total_s": None, "n_sweeps": None,
-         "ms_per_sweep": None, "peak_gb": 72.8, "converged": False,
-         "oom": True, "error": "RESOURCE_EXHAUSTED"},
-        {"D": 8, "chi": 128, "n_devices": 1, "path": "split", "E_site": -0.6005,
-         "err_vs_qmc": 0.0689, "total_s": 14.2, "n_sweeps": 8,
-         "ms_per_sweep": 1775.0, "peak_gb": 6.59, "converged": True,
-         "oom": False, "error": None},
+        {
+            "D": 8,
+            "chi": 96,
+            "n_devices": 1,
+            "path": "dense",
+            "E_site": -0.605,
+            "err_vs_qmc": 0.064,
+            "total_s": 785.0,
+            "n_sweeps": 14,
+            "ms_per_sweep": 56000.0,
+            "peak_gb": 59.7,
+            "converged": False,
+            "oom": False,
+            "error": None,
+        },
+        {
+            "D": 8,
+            "chi": 128,
+            "n_devices": 1,
+            "path": "dense",
+            "E_site": None,
+            "err_vs_qmc": None,
+            "total_s": None,
+            "n_sweeps": None,
+            "ms_per_sweep": None,
+            "peak_gb": 72.8,
+            "converged": False,
+            "oom": True,
+            "error": "RESOURCE_EXHAUSTED",
+        },
+        {
+            "D": 8,
+            "chi": 128,
+            "n_devices": 1,
+            "path": "split",
+            "E_site": -0.6005,
+            "err_vs_qmc": 0.0689,
+            "total_s": 14.2,
+            "n_sweeps": 8,
+            "ms_per_sweep": 1775.0,
+            "peak_gb": 6.59,
+            "converged": True,
+            "oom": False,
+            "error": None,
+        },
     ]
     d8._aggregate8(results, str(tmp_path))
     md = (tmp_path / "convergence.md").read_text()

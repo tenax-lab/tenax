@@ -263,11 +263,15 @@ def test_2site_symmetric_ad_direction_and_stability():
       * the symmetric gradient agrees in direction with the dense gradient
         (cos > 0.99) -- a different SVD backend, hence only a loose gate.
 
-    NOTE: AD-vs-finite-difference is deliberately NOT asserted -- the split
-    energy_fn carries a pre-existing Wirtinger gap that the dense path shares
-    (dense AD also disagrees with FD, incl. sign flips). The trusted gate is
-    implicit==explicit, and its tightening to ~1e-6 for the symmetric path is
-    tracked in #687.
+    NOTE: AD-vs-finite-difference is not asserted here, for cost -- FD on a
+    symmetric CTM fixed point is expensive.  The reason previously given (a
+    "pre-existing Wirtinger gap" shared with the dense path, "incl. sign
+    flips") was a misdiagnosis of the #750 SVD-adjoint bug: the computation is
+    real-valued, so Wirtinger cannot apply, and the sign flips were #750's
+    -0.5x off-diagonal term.  The primitive itself is now gated directly
+    against FD in ``tests/test_svd_adjoint_fd_750.py``.  The trusted gate here
+    remains implicit==explicit; its tightening to ~1e-6 for the symmetric path
+    is tracked in #687.
     """
     from tenax.algorithms._split_ctm_energy_ad import (
         ctm_energy_split_explicit_2site,

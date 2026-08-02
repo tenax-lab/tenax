@@ -652,9 +652,7 @@ class TestPottsCriticalBeta:
         assert np.isclose(potts_critical_beta(q=2), 2 * ising_bc)
 
     def test_scales_inversely_with_J(self):
-        assert np.isclose(
-            potts_critical_beta(q=3, J=2.0), np.log(1 + np.sqrt(3)) / 2.0
-        )
+        assert np.isclose(potts_critical_beta(q=3, J=2.0), np.log(1 + np.sqrt(3)) / 2.0)
 
 
 class TestPottsFreeEnergy:
