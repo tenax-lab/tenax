@@ -18,11 +18,11 @@ __all__ = [
 import jax
 import jax.numpy as jnp
 
+from tenax.algorithms._ctm_tensor_energy import _normalise_rdm
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 from tenax.algorithms._split_ctm_tensor_init import SplitCTMTensorEnv
 from tenax.algorithms._tensor_utils import fuse_indices
 from tenax.contraction.contractor import contract
-from tenax.core import EPS
 from tenax.core.index import FlowDirection
 from tenax.core.tensor import Tensor
 
@@ -178,8 +178,7 @@ def _rdm_1site_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     )  # consumes u_bra, l_bra, r_bra, d_bra
 
     rdm = rdm_t.todense()
-    rdm = 0.5 * (rdm + rdm.conj().T)
-    rdm = rdm / (jnp.trace(rdm) + EPS)
+    rdm = _normalise_rdm(rdm)
     return rdm
 
 
@@ -307,8 +306,7 @@ def _rdm1x2_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -441,8 +439,7 @@ def _rdm2x1_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -665,8 +662,7 @@ def _rdm_diagonal_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -812,13 +808,16 @@ def _rdm1x2_split_tensor_2site(
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-
     # Trace-floor guard: if the split contraction's trace lands in the
     # catastrophic-cancellation regime, fall back to the shim path so the
     # atol=1e-10 parity tolerance holds.  Eager Python branch — these RDM
     # routines are not jit-traced anywhere in the codebase (energy probes
     # only).  ``.item()`` forces a host sync.
+    #
+    # Guard on the *raw* trace, before symmetrising.  ``tr Herm(R) = Re(tr R)``,
+    # which is not gauge-invariant: an environment phase near pi/2 drives the
+    # real part through zero while ``|tr R|`` stays O(1), so guarding the
+    # symmetrised trace fires the fallback on a perfectly healthy RDM.
     trace_val = jnp.trace(rdm_mat)
     if float(jnp.abs(trace_val).item()) < _MIXED_ENV_RDM_TRACE_FLOOR:
         from tenax.algorithms._ctm_tensor_energy import _rdm1x2_tensor_2site
@@ -830,7 +829,7 @@ def _rdm1x2_split_tensor_2site(
             _split_env_to_tensor_standard(env_B),
         )
 
-    rdm_mat = rdm_mat / (trace_val + EPS)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -967,9 +966,8 @@ def _rdm2x1_split_tensor_2site(
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-
-    # Trace-floor guard: see :func:`_rdm1x2_split_tensor_2site` for rationale.
+    # Trace-floor guard on the raw trace: see
+    # :func:`_rdm1x2_split_tensor_2site` for rationale.
     trace_val = jnp.trace(rdm_mat)
     if float(jnp.abs(trace_val).item()) < _MIXED_ENV_RDM_TRACE_FLOOR:
         from tenax.algorithms._ctm_tensor_energy import _rdm2x1_tensor_2site
@@ -981,7 +979,7 @@ def _rdm2x1_split_tensor_2site(
             _split_env_to_tensor_standard(env_B),
         )
 
-    rdm_mat = rdm_mat / (trace_val + EPS)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 

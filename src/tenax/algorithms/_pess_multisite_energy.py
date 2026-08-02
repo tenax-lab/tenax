@@ -20,6 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms._ctm_tensor_energy import (
+    _normalise_rdm,
     _rdm1x2_tensor_2site,
     _rdm2x1_tensor_2site,
 )
@@ -30,7 +31,6 @@ from tenax.algorithms._ctm_tensor_init import (
 )
 from tenax.algorithms.pess import _site_ops
 from tenax.contraction.contractor import contract
-from tenax.core import EPS
 from tenax.core.tensor import Tensor
 
 __all__ = [
@@ -183,8 +183,7 @@ def _rdm_3site_marginal_vw_row(
     rdm = rdm_t.todense()
     d_phys = rdm.shape[0]
     rdm_mat = rdm.reshape(d_phys * d_phys, d_phys * d_phys)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d_phys, d_phys, d_phys, d_phys)
 
 
@@ -270,8 +269,7 @@ def _rdm_3site_marginal_vw_col(
     rdm = rdm_t.todense()
     d_phys = rdm.shape[0]
     rdm_mat = rdm.reshape(d_phys * d_phys, d_phys * d_phys)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + EPS)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d_phys, d_phys, d_phys, d_phys)
 
 
