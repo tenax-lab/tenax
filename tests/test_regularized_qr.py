@@ -8,6 +8,7 @@ not exist). So correctness is checked against JAX's own analytic QR VJP where
 the floor does not engage, FD is used only on a well-conditioned input, and the
 rank-deficient case asserts only finiteness (the floor's actual job).
 """
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -47,6 +48,7 @@ def test_regularized_qr_backward_matches_analytic_vjp_well_conditioned():
     M = jax.random.normal(jax.random.PRNGKey(2), (12, 8))
     Q, R = jnp.linalg.qr(M)
     cot = (jnp.ones_like(Q), jnp.ones_like(R))
+
     # ``jnp.linalg.qr`` returns a ``QRResult`` namedtuple; wrap it so its
     # output tree matches the plain-tuple cotangent (mirrors the spike's
     # ``_ref_qr``). This still uses JAX's own analytic QR VJP as the ground
@@ -65,7 +67,7 @@ def test_regularized_qr_backward_finite_at_rank_deficiency():
     # Exactly rank-deficient: raw QR VJP would NaN; the floor keeps ours finite.
     A = jax.random.normal(jax.random.PRNGKey(3), (12, 12))
     U, s, Vh = jnp.linalg.svd(A)
-    s = s.at[8:].set(0.0)          # 4 exactly-zero singular values
+    s = s.at[8:].set(0.0)  # 4 exactly-zero singular values
     M = (U * s) @ Vh
     g = jax.grad(_scalar)(M)
     assert jnp.all(jnp.isfinite(g))

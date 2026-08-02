@@ -35,7 +35,9 @@ def test_singular_values_match_full_svd():
     M = _rank_k_matrix(256, 256, 16, seed=2)
     _, s, _ = truncated_lowrank_svd(M, 16)
     s_full = np.asarray(jnp.linalg.svd(M, compute_uv=False))[:16]
-    np.testing.assert_allclose(np.sort(np.asarray(s))[::-1], s_full, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(
+        np.sort(np.asarray(s))[::-1], s_full, rtol=1e-8, atol=1e-9
+    )
 
 
 def test_gradient_matches_reference_truncated_svd():

@@ -951,9 +951,11 @@ class TestSvdSectorBackward:
         passed precisely because the kernel had the same defect.
 
         The reference is now the textbook adjoint (Townsend 2016) -- ``F_ij =
-        1/(s_j^2 - s_i^2)`` and the plain ``J - J^H``.  Input is real, so the
-        conjugation bridge and the complex phase term (#751) are both no-ops
-        here and the two must agree to machine precision.
+        1/(s_j^2 - s_i^2)`` and the plain ``J - J^H`` -- evaluated on the FULL
+        spectrum with the cotangents zero-padded onto the discarded columns,
+        which is the exact VJP of the truncated map (#752).  Input is real, so
+        the conjugation bridge and the complex phase term (#751) are both
+        no-ops here and the two must agree to machine precision.
         """
         key = jax.random.PRNGKey(42)
         M = jax.random.normal(key, (6, 4))
@@ -961,7 +963,8 @@ class TestSvdSectorBackward:
 
         # Full SVD
         U_full, s_full, Vh_full = jnp.linalg.svd(M, full_matrices=False)
-        k = min(chi, s_full.shape[0])
+        p = s_full.shape[0]
+        k = min(chi, p)
 
         # Fake incoming gradients
         key2 = jax.random.PRNGKey(99)
@@ -971,28 +974,34 @@ class TestSvdSectorBackward:
 
         dM_new = _svd_sector_backward(U_full, s_full, Vh_full, dU, ds, dVh)
 
-        # Independent reimplementation of the textbook adjoint.
+        # Independent reimplementation: the truncated factors are a slice of
+        # the full SVD, so the exact VJP is the full-SVD adjoint with the
+        # cotangents zero-padded onto the discarded columns.
         eps = 1e-12
-        U = U_full[:, :k]
-        s = s_full[:k]
-        V = Vh_full[:k, :].conj().T
+        dU_f = jnp.pad(dU, ((0, 0), (0, p - k)))
+        ds_f = jnp.pad(ds, (0, p - k))
+        dVh_f = jnp.pad(dVh, ((0, p - k), (0, 0)))
+
+        U = U_full
+        s = s_full
+        V = Vh_full.conj().T
         s2 = s**2
         diff = s2[None, :] - s2[:, None]  # F_ij = 1/(s_j^2 - s_i^2)
         F = diff / (diff**2 + eps**2)
         F = F - jnp.diag(jnp.diag(F))
-        UtdU = U.conj().T @ dU
-        VtdV = V.conj().T @ dVh.conj().T
+        UtdU = U.conj().T @ dU_f
+        VtdV = V.conj().T @ dVh_f.conj().T
         UtdU_anti = UtdU - UtdU.conj().T  # plain difference, not half
         VtdV_anti = VtdV - VtdV.conj().T
         s_inv = jnp.where(s > eps, 1.0 / s, 0.0)
         proj_U_perp = jnp.eye(M.shape[0]) - U @ U.conj().T
         proj_V_perp = jnp.eye(M.shape[1]) - V @ V.conj().T
         dM_ref = jnp.zeros_like(M)
-        dM_ref = dM_ref + U @ jnp.diag(ds) @ Vh_full[:k, :]
-        dM_ref = dM_ref + U @ (F * UtdU_anti) @ jnp.diag(s) @ Vh_full[:k, :]
-        dM_ref = dM_ref + U @ jnp.diag(s) @ (F * VtdV_anti) @ Vh_full[:k, :]
-        dM_ref = dM_ref + proj_U_perp @ dU @ jnp.diag(s_inv) @ Vh_full[:k, :]
-        dM_ref = dM_ref + U @ jnp.diag(s_inv) @ dVh @ proj_V_perp
+        dM_ref = dM_ref + U @ jnp.diag(ds_f) @ Vh_full
+        dM_ref = dM_ref + U @ (F * UtdU_anti) @ jnp.diag(s) @ Vh_full
+        dM_ref = dM_ref + U @ jnp.diag(s) @ (F * VtdV_anti) @ Vh_full
+        dM_ref = dM_ref + proj_U_perp @ dU_f @ jnp.diag(s_inv) @ Vh_full
+        dM_ref = dM_ref + U @ jnp.diag(s_inv) @ dVh_f @ proj_V_perp
 
         assert jnp.allclose(dM_new, dM_ref, atol=1e-12), (
             f"Max diff: {float(jnp.max(jnp.abs(dM_new - dM_ref)))}"

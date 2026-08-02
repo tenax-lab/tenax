@@ -43,8 +43,11 @@ def _cfg(mesh, chi):
         # gradient); gs_line_search=False so the only CTM path is the sharded
         # value_and_grad.
         ctm=CTMConfig(
-            chi=chi, max_iter=60, conv_tol=1e-10,
-            plateau_patience=None, device_mesh=mesh,
+            chi=chi,
+            max_iter=60,
+            conv_tol=1e-10,
+            plateau_patience=None,
+            device_mesh=mesh,
         ),
         gs_num_steps=4,
         gs_learning_rate=1e-2,

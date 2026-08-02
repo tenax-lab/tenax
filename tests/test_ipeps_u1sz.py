@@ -67,7 +67,7 @@ class TestHeisenbergU1SzInit:
 
         A, B = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
         assert len(A.indices) == 5  # u, d, l, r, phys
-        assert len(A.blocks) > 1    # non-trivially blocked -> exercises absorb step
+        assert len(A.blocks) > 1  # non-trivially blocked -> exercises absorb step
         assert len(B.blocks) > 1
 
     def test_physical_leg_is_sz_charged(self):

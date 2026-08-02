@@ -120,7 +120,8 @@ def truncated_svd_ad(
     """Truncated SVD with correct and stable backward pass.
 
     Forward: standard SVD truncated to *chi* singular values.
-    Backward: Lorentzian-regularized F-matrix + truncation correction.
+    Backward: Lorentzian-regularized F-matrix, with the kept/discarded coupling
+    handled exactly via zero-padded cotangents (#752).
 
     Args:
         M:   2-D matrix of shape ``(m, n)``.
@@ -202,17 +203,48 @@ def _svd_sector_backward(
     ds = ds.conj()
     dVh = dVh.conj()
 
-    # Kept subspace
+    # --- Exact truncation via zero-padding (#752) ---
+    #
+    # ``(U_k, s_k, Vh_k)`` is a *slice* of the full SVD, so the exact VJP of
+    # the truncated map is the FULL-SVD adjoint evaluated with the cotangents
+    # zero-padded onto the discarded columns.  Doing that makes the F-matrix
+    # span the whole spectrum, which is what carries the kept/discarded
+    # coupling exactly.
+    #
+    # The previous formulation instead handled that coupling in terms 4/5 with
+    # weight ``1/s_kept``, which is the ``s_discarded -> 0`` limit of the exact
+    # weight ``s_j / (s_j^2 - s_r^2)``.  Its error was proportional to the
+    # discarded weight (2.2e-02 at s_disc/s_kept = 0.1).  After padding, terms
+    # 4/5 are left carrying only the genuine null space (``m > p``), which is
+    # exactly what they are correct for.
+    #
+    # When ``k == p`` (no truncation) this is a no-op and the full-rank path is
+    # bit-identical.
+    k_kept = k  # width of the genuinely-kept block, before padding
+    p = s.shape[0]
+    if k < p:
+        pad = p - k
+        dU = jnp.pad(dU, ((0, 0), (0, pad)))
+        ds = jnp.pad(ds, (0, pad))
+        dVh = jnp.pad(dVh, ((0, pad), (0, 0)))
+    k = p
+
+    # Full spectrum (post-padding `k == p`, so these are the full factors)
     U_k = U[:, :k]
     s_k = s[:k]
     V_k = Vh[:k, :].conj().T  # (n, k)
 
-    # Rank-aware F-matrix mask: zero F[i, j] where either sigma_i or sigma_j
-    # is below the rank threshold. The unregularized F entry for (sigma>0,
-    # sigma=0) pairs evaluates to ~1/sigma^2 — a gauge artifact that pumps
-    # arbitrary upstream cotangent components on the kept-but-zero columns
-    # of U/Vh into the gradient. Masking F drops those contributions while
-    # leaving the well-defined sigma>0 / sigma>0 entries unchanged.
+    # Rank-aware F-matrix mask: zero F[i, j] where sigma_i or sigma_j is below
+    # the rank threshold *and the corresponding cotangent is meaningful*. The
+    # unregularized F entry for (sigma>0, sigma=0) pairs evaluates to
+    # ~1/sigma^2 — a gauge artifact that pumps arbitrary upstream cotangent
+    # components on the KEPT-but-zero columns of U/Vh into the gradient.
+    #
+    # Discarded indices (>= the original chi) are deliberately NOT masked: their
+    # padded cotangents are identically zero, so they inject nothing arbitrary,
+    # and their F entries 1/(s_j^2 - s_r^2) are exactly the kept/discarded
+    # coupling that replaces the old terms 4/5. Masking them would silently
+    # reintroduce the very approximation this padding removes.
     #
     # NOTE: we deliberately do NOT mask U_k, V_k, or proj_U_perp. Doing so
     # would change the discarded-subspace projector for full-SVD on rank-
@@ -221,7 +253,8 @@ def _svd_sector_backward(
     # dU components through 1/sigma_kept, producing a wrong answer that
     # disagrees with finite-difference gradients).
     eps_rank = 1e-12 * jnp.maximum(s[0], 1e-30)
-    keep_mask = (s_k > eps_rank).astype(s.dtype)  # (k,) -- 1.0 or 0.0
+    is_kept = jnp.arange(k) < k_kept
+    keep_mask = jnp.where(is_kept, (s_k > eps_rank).astype(s.dtype), 1.0)
 
     # --- Lorentzian-regularized F-matrix ---
     #
@@ -251,7 +284,10 @@ def _svd_sector_backward(
     s_safe = jnp.where(s_k > eps, s_k, 1.0)
     s_inv = jnp.where(s_k > eps, 1.0 / s_safe, 0.0)
 
-    # Projectors onto complements of kept subspaces (UNMASKED — see note above)
+    # Projectors onto the complement of the FULL range (UNMASKED — see note
+    # above).  Post-padding these span only the genuine null space, which is
+    # non-trivial solely for non-square input: for m <= n, U is m x m unitary
+    # and proj_U_perp is exactly 0.
     proj_U_perp = jnp.eye(m) - U_k @ U_k.conj().T
     proj_V_perp = jnp.eye(n) - V_k @ V_k.conj().T
 
@@ -262,16 +298,18 @@ def _svd_sector_backward(
     # 1. Diagonal part from ds
     dM = dM + U_k @ jnp.diag(ds) @ Vh_k
 
-    # 2. Off-diagonal from dU (within kept subspace)
+    # 2. Off-diagonal from dU.  Spans the full spectrum, so this now carries
+    #    the kept/discarded coupling exactly (it used to be approximated in
+    #    term 4 -- see the padding note above, #752).
     dM = dM + U_k @ (F * UtdU_anti) @ jnp.diag(s_k) @ Vh_k
 
-    # 3. Off-diagonal from dVh (within kept subspace)
+    # 3. Off-diagonal from dVh (same, for the right factors)
     dM = dM + U_k @ jnp.diag(s_k) @ (F * VtdV_anti) @ Vh_k
 
-    # 4. Truncation correction from dU (kept-truncated coupling)
+    # 4. Null-space contribution from dU (non-square input only)
     dM = dM + proj_U_perp @ dU @ jnp.diag(s_inv) @ Vh_k
 
-    # 5. Truncation correction from dVh (kept-truncated coupling)
+    # 5. Null-space contribution from dVh (non-square input only)
     dM = dM + U_k @ jnp.diag(s_inv) @ dVh @ proj_V_perp
 
     # 6. Complex-only phase term (Wan & Zhang 2019, arXiv:1909.02659).  The
@@ -291,14 +329,15 @@ def _truncated_svd_ad_bwd(
     residuals: tuple,
     g: tuple[jax.Array, jax.Array, jax.Array],
 ) -> tuple[jax.Array]:
-    """Backward pass with Lorentzian regularization and truncation term.
+    """Backward pass with Lorentzian regularization and exact truncation.
 
     Implements the stable SVD adjoint from Francuz et al. PRR 7, 013237:
     - Lorentzian broadening ``s_i^2 - s_j^2 / ((s_i^2-s_j^2)^2 + eps^2)``
       prevents divergences from degenerate singular values.
-    - Full truncation correction accounts for coupling between kept and
-      discarded subspaces (the dominant error source identified by Francuz
-      et al.).
+    - The kept/discarded coupling (the dominant error source identified by
+      Francuz et al.) is handled *exactly*, by evaluating the full-SVD adjoint
+      with the cotangents zero-padded onto the discarded columns rather than
+      taking the ``s_discarded -> 0`` limit (#752).
     """
     U_full, s_full, Vh_full, M, k = residuals
     dU, ds, dVh = g

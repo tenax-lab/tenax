@@ -24,7 +24,11 @@ def _run_subproc(n_dev, *args):
         JAX_PLATFORMS="cpu",
     )
     return subprocess.run(
-        [sys.executable, "tests/_hotrg_sharding_parity_subproc.py", *[str(a) for a in args]],
+        [
+            sys.executable,
+            "tests/_hotrg_sharding_parity_subproc.py",
+            *[str(a) for a in args],
+        ],
         env=env,
         capture_output=True,
         text=True,
@@ -57,7 +61,5 @@ def test_hotrg_flag_off_is_unchanged():
 
     T = compute_ising_tensor(0.3)
     f_default = float(hotrg(T, HOTRGConfig(max_bond_dim=8, num_steps=6)))
-    f_none = float(
-        hotrg(T, HOTRGConfig(max_bond_dim=8, num_steps=6, device_mesh=None))
-    )
+    f_none = float(hotrg(T, HOTRGConfig(max_bond_dim=8, num_steps=6, device_mesh=None)))
     assert f_default == f_none

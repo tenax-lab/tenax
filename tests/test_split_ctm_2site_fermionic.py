@@ -263,8 +263,12 @@ def test_fermionic_split_sweep_honors_renormalize_false():
     )
 
     for c in site_tensors:
-        gap_raw = _rel_corner_gap(_split_env_to_tensor_standard(split_raw[c]), fused_raw[c])
-        gap_norm = _rel_corner_gap(_split_env_to_tensor_standard(split_norm[c]), fused_raw[c])
+        gap_raw = _rel_corner_gap(
+            _split_env_to_tensor_standard(split_raw[c]), fused_raw[c]
+        )
+        gap_norm = _rel_corner_gap(
+            _split_env_to_tensor_standard(split_norm[c]), fused_raw[c]
+        )
         assert gap_raw < 1e-9, (
             f"cell {c}: renormalize=False corner gap {gap_raw:.3e} vs the raw "
             "fused oracle (fused env was normalized despite the flag)"

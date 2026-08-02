@@ -276,13 +276,13 @@ def test_off_diagonal_contribution_is_not_halved():
 
 
 # ---------------------------------------------------------------------------
-# 3. Truncation -- exact in the limit, controlled approximation away from it.
+# 3. #752 -- truncation is exact, at any discarded weight.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("complex_", [False, True], ids=["real", "complex"])
 def test_truncated_gradient_is_exact_when_nothing_is_discarded(complex_):
-    """With negligible discarded weight the ``s_discarded -> 0`` limit is exact."""
+    """Baseline: negligible discarded weight, where even the old limit was exact."""
     rng = _rng(15)
     n, k = 6, 3
     Ug, _ = np.linalg.qr(_mat(rng, (n, n), complex_))
@@ -298,14 +298,23 @@ def test_truncated_gradient_is_exact_when_nothing_is_discarded(complex_):
     assert cos > 1 - 1e-9 and rel < 1e-6, f"rel={rel:.3e} cos={cos:.9f}"
 
 
-def test_truncation_error_vanishes_with_discarded_weight():
-    """Characterises the residual as an approximation, not a defect (#752).
+@pytest.mark.parametrize("tail", [2e-1, 2e-2, 2e-3])
+def test_truncated_gradient_is_exact_at_any_discarded_weight(tail):
+    """#752: the truncated adjoint is exact, not a small-discarded-weight limit.
 
-    Terms 4/5 treat the kept/discarded coupling in the ``s_discarded -> 0``
-    limit.  The signature of an *approximation* is that its error is driven to
-    zero by the small parameter; the signature of a *bug* is that it is not.
-    Measured here: the error falls by ~10x for each 10x reduction of the
-    discarded weight.
+    Terms 4/5 used to handle the kept/discarded coupling with weight
+    ``1/s_kept``, the ``s_discarded -> 0`` limit of the exact
+    ``s_j / (s_j^2 - s_r^2)``.  Its error tracked the discarded weight -- 2.2e-02
+    at ``s_disc/s_kept = 0.1``, falling ~10x per decade -- so it was a genuine
+    approximation, and a test could only assert that it *shrank*.
+
+    Zero-padding the cotangents onto the full spectrum makes the adjoint exact
+    instead, because the truncated factors are a slice of the full SVD.  The
+    error is now flat at the finite-difference noise floor (~2.4e-09) across
+    this whole sweep, so the assertion is exactness at every point.
+
+    The largest ``tail`` here discards 10% of the leading singular value -- well
+    past where the old limit was defensible.
     """
     rng = _rng(16)
     n, k = 6, 3
@@ -317,18 +326,57 @@ def test_truncation_error_vanishes_with_discarded_weight():
         U, s, Vh = truncated_svd_ad(A, k)
         return jnp.sum(W * (U @ jnp.diag(s**2) @ Vh))
 
-    errs = []
-    for tail in (2e-1, 2e-2, 2e-3):
-        M = Ug @ np.diag([4.0, 3.0, 2.0, tail, tail / 2, tail / 4]) @ Vg.T
-        rel, cos = _agreement(loss, M)
-        errs.append(rel)
-        assert cos > 0.99, f"direction lost at discarded={tail}: cos={cos:.6f}"
+    M = Ug @ np.diag([4.0, 3.0, 2.0, tail, tail / 2, tail / 4]) @ Vg.T
+    rel, cos = _agreement(loss, M)
+    assert cos > 1 - 1e-9, f"direction lost at discarded={tail}: cos={cos:.9f}"
+    assert rel < 1e-6, (
+        f"truncated adjoint is not exact at discarded={tail}: rel={rel:.3e} "
+        "-- the s_discarded -> 0 approximation has come back (#752)"
+    )
 
-    for coarse, fine in zip(errs, errs[1:]):
-        assert fine < coarse / 5, (
-            f"truncation error not vanishing with discarded weight: {errs} "
-            "-- this would indicate a defect in terms 4/5, not an approximation"
-        )
+
+def test_truncated_gradient_is_exact_for_non_square_matrices():
+    """Padding must not disturb the genuine null space (``m > p``).
+
+    After padding, terms 4/5 no longer carry the kept/discarded coupling -- they
+    carry only the true null space, which exists solely for tall inputs.  Both
+    orientations are checked so a null-space regression cannot hide.
+    """
+    rng = _rng(17)
+    for m, n in ((8, 5), (5, 8)):
+        k = 3
+        M = rng.standard_normal((m, n))
+        W = rng.standard_normal((m, n))
+
+        def loss(A, W=W, k=k):
+            U, s, Vh = truncated_svd_ad(A, k)
+            return jnp.sum(W * (U @ jnp.diag(s**2) @ Vh))
+
+        rel, cos = _agreement(loss, M)
+        assert cos > 1 - 1e-9 and rel < 1e-6, f"({m}x{n}) rel={rel:.3e} cos={cos:.9f}"
+
+
+def test_truncated_gradient_is_finite_on_rank_deficient_input():
+    """Exact zeros in the spectrum must stay finite, not divide by sigma=0.
+
+    The rank mask covers kept-but-zero columns, whose cotangents are gauge-
+    arbitrary.  Discarded indices are deliberately left unmasked -- their padded
+    cotangents are zero, so they inject nothing -- and this pins that the choice
+    does not produce NaN/inf through the 1/(s_j^2 - s_r^2) entries.
+    """
+    rng = _rng(18)
+    n = 6
+    Ug, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    Vg, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    M = Ug @ np.diag([4.0, 3.0, 0.0, 0.0, 0.0, 0.0]) @ Vg.T
+    W = rng.standard_normal((n, n))
+
+    def loss(A):
+        U, s, Vh = truncated_svd_ad(A, 4)
+        return jnp.sum(W * (U @ jnp.diag(s**2) @ Vh))
+
+    g = np.asarray(jax.grad(loss)(jnp.asarray(M)))
+    assert np.all(np.isfinite(g)), "rank-deficient input produced a non-finite gradient"
 
 
 # ---------------------------------------------------------------------------
