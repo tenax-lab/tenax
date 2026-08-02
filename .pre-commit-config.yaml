@@ -1,7 +1,12 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.2
+    rev: v0.15.15
     hooks:
-      - id: ruff
+      # Scoped to CI's lint scope (`ruff check src/ tests/`). examples/,
+      # benchmarks/ and docs/ have never been held to these rules, so an
+      # unscoped hook reformats ~45 example files on first touch.
+      - id: ruff-check
         args: [--fix]
+        files: ^(src|tests)/
       - id: ruff-format
+        files: ^(src|tests)/
