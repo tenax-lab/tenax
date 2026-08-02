@@ -41,7 +41,19 @@ def validate_ctm_for_implicit_ad(ctm_cfg: CTMConfig) -> None:
         )
 
 
-def validate_split_ctm_config(ctm_cfg: CTMConfig, recipe: str) -> None:
+SINGLE_SITE_SPLIT_RECIPE_ERROR = (
+    "The single-site split-CTM path only implements the '1x1' CTM recipe; got "
+    "gs_recipe={recipe!r}. Set gs_recipe='1x1' to opt in explicitly -- but note "
+    "that '1x1' collapses the environment to rank-1 corners and yields a "
+    "chi-independent (mean-field) energy (#726). For a correct single-site "
+    "environment use the fused path (fuse_virtual_legs=True) with "
+    "gs_recipe='2x2'."
+)
+
+
+def validate_split_ctm_config(
+    ctm_cfg: CTMConfig, recipe: str, *, single_site: bool = False
+) -> None:
     """Reject ``CTMConfig`` combinations the split-CTM path cannot honor.
 
     The split (``fuse_virtual_legs=False``) forward is fixed-χ (single-site or
@@ -62,6 +74,15 @@ def validate_split_ctm_config(ctm_cfg: CTMConfig, recipe: str) -> None:
             "fuse_virtual_legs=False (split CTM) supports gs_recipe in "
             f"('1x1', '2x2'); got recipe={recipe!r}."
         )
+    # Branch-specific narrowing (#726).  Must live here, not only in
+    # ``_split_ctm_energy_fn``: the loss is not called at all when
+    # ``gs_num_steps=0`` (evaluate-only) or when a resumed checkpoint starts at
+    # or beyond the final step, and the final ``_eval_fresh`` then reaches
+    # ``_split_forward``/``converge_split_env`` directly.  A guard that only
+    # sits on the loss path lets those configurations through still returning
+    # the 1x1 chi-independent energy under the default gs_recipe='2x2'.
+    if single_site and recipe != "1x1":
+        raise NotImplementedError(SINGLE_SITE_SPLIT_RECIPE_ERROR.format(recipe=recipe))
     if ctm_cfg.ctmrg_heuristic_increase_chi:
         raise NotImplementedError(
             "in-CTM chi auto-bump (ctmrg_heuristic_increase_chi) is not "
@@ -330,6 +351,28 @@ def make_ctm_energy_fn(
                 min_iter=ctm_cfg.min_iter,
                 energy_fn=None,
                 envs_init=envs_init,
+            )
+        # Single-site split.  Mirror of the 2-site guard above, and for the same
+        # stated reason: accept-then-silently-run-a-different-recipe mislabels
+        # the experiment.  Every single-site split entry point below runs the
+        # ``1x1`` moves unconditionally, so honouring ``gs_recipe="2x2"`` here is
+        # not possible — and "2x2" is the *default*, so without this guard the
+        # default config silently produced 1x1 results.
+        #
+        # That is not a cosmetic mislabel.  The 1x1 corner-pair projector
+        # collapses the environment to rank-1 corners (#726, same root cause as
+        # #723): ``M = C1g† C4g`` is indexed by the outer chi legs only, so the
+        # updated corner's spectrum is sqrt(spec(M)) and rank(C_new) <=
+        # rank(C1g) = 1 at cold init.  The resulting energy is chi-independent —
+        # measured bit-identical from chi=2 to chi=32 on a physical D=2 SU state
+        # — i.e. a chi_eff=1 mean-field boundary, not a corner transfer matrix.
+        # Fail loudly rather than return that under the default config.
+        # Defence in depth: the dispatcher below also validates with
+        # ``single_site=True`` before the optimization loop, which is what
+        # covers the loss-never-called paths.  Same message, one source.
+        if recipe != "1x1":
+            raise NotImplementedError(
+                SINGLE_SITE_SPLIT_RECIPE_ERROR.format(recipe=recipe)
             )
         if use_explicit:
             # The explicit split forward re-initializes internally; no

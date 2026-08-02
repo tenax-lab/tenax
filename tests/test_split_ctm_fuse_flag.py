@@ -530,10 +530,18 @@ def test_optimize_gs_ad_split_rejects_chi_auto_bump():
 
 
 def test_optimize_gs_ad_split_rejects_unsupported_recipe():
-    """The split optimizer path supports gs_recipe in ('1x1', '2x2').
+    """The shared validator accepts only gs_recipe in ('1x1', '2x2').
 
-    ``'2x2'`` is now accepted by the shared validator (#463 Phase 2); any
-    other recipe must still raise up front via ``validate_split_ctm_config``.
+    ``'2x2'`` is accepted *by the validator* (#463 Phase 2); any other recipe
+    must raise up front via ``validate_split_ctm_config``.
+
+    Note this is the validator's contract, not the dispatcher's: which of the
+    two recipes a given branch will actually run is narrower.  The 2-site
+    branch accepts only ``'2x2'``, and since #726 the single-site branch
+    accepts only ``'1x1'`` -- it runs the 1x1 moves unconditionally, and those
+    collapse the environment to rank-1 corners, so silently honouring the
+    ``'2x2'`` default would return a chi-independent mean-field energy.  See
+    ``tests/test_split_ctm_chi_frozen_726.py``.
     """
     from tenax.algorithms.ipeps_optimize import optimize_gs_ad
 
