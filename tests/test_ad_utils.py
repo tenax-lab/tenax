@@ -250,19 +250,24 @@ class TestTruncatedSVDADMissingTerm:
         grad_ref = jax.grad(loss)(M)
 
         def _naive_sector_backward(U, s, Vh, dU, ds, dVh, eps=1e-12):
+            # Same textbook adjoint as the production kernel, with terms 4/5
+            # (the kept-discarded coupling) deliberately dropped -- that
+            # omission is the single variable this test isolates.  It formerly
+            # also carried the pre-#750 `F` orientation and the spurious 1/2,
+            # which confounded "no truncation correction" with "wrong adjoint".
             k = ds.shape[0]
             U_k = U[:, :k]
             s_k = s[:k]
             Vh_k = Vh[:k, :]
             V_k = Vh_k.conj().T
             s2 = s_k**2
-            diff = s2[:, None] - s2[None, :]
+            diff = s2[None, :] - s2[:, None]
             F = diff / (diff**2 + eps**2)
             F = F - jnp.diag(jnp.diag(F))
             UtdU = U_k.conj().T @ dU
             VtdV = V_k.conj().T @ dVh.conj().T
-            UtdU_anti = 0.5 * (UtdU - UtdU.conj().T)
-            VtdV_anti = 0.5 * (VtdV - VtdV.conj().T)
+            UtdU_anti = UtdU - UtdU.conj().T
+            VtdV_anti = VtdV - VtdV.conj().T
             dM = U_k @ jnp.diag(ds) @ Vh_k
             dM = dM + U_k @ (F * UtdU_anti) @ jnp.diag(s_k) @ Vh_k
             dM = dM + U_k @ jnp.diag(s_k) @ (F * VtdV_anti) @ Vh_k
@@ -934,8 +939,22 @@ class TestGMRESBackwardPath:
 class TestSvdSectorBackward:
     """Tests for the factored _svd_sector_backward function."""
 
-    def test_svd_sector_backward_matches_original(self):
-        """Factored function must reproduce the original backward exactly."""
+    def test_svd_sector_backward_matches_the_textbook_adjoint(self):
+        """The kernel must match an independent reimplementation of the adjoint.
+
+        This test used to reproduce whatever ``_svd_sector_backward`` happened
+        to contain and assert exact equality, under the name
+        ``..._matches_original``.  That made it an oracle for the *shipped*
+        code rather than for the mathematics, so it pinned the #750 bug in
+        place: the reference below carried the transposed ``F`` index order and
+        the spurious ``1/2`` on the antisymmetric projections, and the test
+        passed precisely because the kernel had the same defect.
+
+        The reference is now the textbook adjoint (Townsend 2016) -- ``F_ij =
+        1/(s_j^2 - s_i^2)`` and the plain ``J - J^H``.  Input is real, so the
+        conjugation bridge and the complex phase term (#751) are both no-ops
+        here and the two must agree to machine precision.
+        """
         key = jax.random.PRNGKey(42)
         M = jax.random.normal(key, (6, 4))
         chi = 3
@@ -950,34 +969,33 @@ class TestSvdSectorBackward:
         ds = jax.random.normal(jax.random.PRNGKey(100), (k,))
         dVh = jax.random.normal(jax.random.PRNGKey(101), (k, 4))
 
-        # Factored version
         dM_new = _svd_sector_backward(U_full, s_full, Vh_full, dU, ds, dVh)
 
-        # Original inline version (reproduced for comparison)
+        # Independent reimplementation of the textbook adjoint.
         eps = 1e-12
         U = U_full[:, :k]
         s = s_full[:k]
         V = Vh_full[:k, :].conj().T
         s2 = s**2
-        diff = s2[:, None] - s2[None, :]
+        diff = s2[None, :] - s2[:, None]  # F_ij = 1/(s_j^2 - s_i^2)
         F = diff / (diff**2 + eps**2)
         F = F - jnp.diag(jnp.diag(F))
         UtdU = U.conj().T @ dU
         VtdV = V.conj().T @ dVh.conj().T
-        UtdU_anti = 0.5 * (UtdU - UtdU.conj().T)
-        VtdV_anti = 0.5 * (VtdV - VtdV.conj().T)
+        UtdU_anti = UtdU - UtdU.conj().T  # plain difference, not half
+        VtdV_anti = VtdV - VtdV.conj().T
         s_inv = jnp.where(s > eps, 1.0 / s, 0.0)
         proj_U_perp = jnp.eye(M.shape[0]) - U @ U.conj().T
         proj_V_perp = jnp.eye(M.shape[1]) - V @ V.conj().T
-        dM_orig = jnp.zeros_like(M)
-        dM_orig = dM_orig + U @ jnp.diag(ds) @ Vh_full[:k, :]
-        dM_orig = dM_orig + U @ (F * UtdU_anti) @ jnp.diag(s) @ Vh_full[:k, :]
-        dM_orig = dM_orig + U @ jnp.diag(s) @ (F * VtdV_anti) @ Vh_full[:k, :]
-        dM_orig = dM_orig + proj_U_perp @ dU @ jnp.diag(s_inv) @ Vh_full[:k, :]
-        dM_orig = dM_orig + U @ jnp.diag(s_inv) @ dVh @ proj_V_perp
+        dM_ref = jnp.zeros_like(M)
+        dM_ref = dM_ref + U @ jnp.diag(ds) @ Vh_full[:k, :]
+        dM_ref = dM_ref + U @ (F * UtdU_anti) @ jnp.diag(s) @ Vh_full[:k, :]
+        dM_ref = dM_ref + U @ jnp.diag(s) @ (F * VtdV_anti) @ Vh_full[:k, :]
+        dM_ref = dM_ref + proj_U_perp @ dU @ jnp.diag(s_inv) @ Vh_full[:k, :]
+        dM_ref = dM_ref + U @ jnp.diag(s_inv) @ dVh @ proj_V_perp
 
-        assert jnp.allclose(dM_new, dM_orig, atol=1e-12), (
-            f"Max diff: {float(jnp.max(jnp.abs(dM_new - dM_orig)))}"
+        assert jnp.allclose(dM_new, dM_ref, atol=1e-12), (
+            f"Max diff: {float(jnp.max(jnp.abs(dM_new - dM_ref)))}"
         )
 
     def test_svd_sector_backward_no_truncation(self):
