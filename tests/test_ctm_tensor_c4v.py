@@ -50,6 +50,39 @@ def small_peps_dense():
 
 
 @pytest.fixture
+def entangled_peps_c4v():
+    """*Entangled* C4v-symmetric iPEPS site tensor, D=2, d=2, trivial U1.
+
+    ``small_peps_dense`` perturbs a product state by 1%, which leaves the
+    corner spectrum so close to rank-1 that a wrong enlarged corner barely
+    moves the energy — that fixture passed throughout #760.  This one is a
+    fully random tensor projected onto the C4v-invariant subspace, so the
+    environment carries real weight beyond the leading eigenvalue and the
+    two CTM schemes have something to disagree about.
+    """
+    from tenax.algorithms.ipeps import symmetrize_c4v
+
+    D, d = 2, 2
+    rng = np.random.RandomState(7)
+    data = jnp.array(rng.standard_normal((D, D, D, D, d)))
+    data = symmetrize_c4v(data)
+    data = data / (jnp.linalg.norm(data) + 1e-10)
+    sym = U1Symmetry()
+    charges = np.zeros(D, dtype=np.int32)
+    phys_charges = np.zeros(d, dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(
+            sym, phys_charges.copy(), FlowDirection.IN, label="phys"
+        ),
+    )
+    return DenseTensor(data, indices)
+
+
+@pytest.fixture
 def heisenberg_gate():
     """Heisenberg 2-site Hamiltonian gate as dense array."""
     d = 2
@@ -103,6 +136,51 @@ class TestC4vCTM:
         )
 
         np.testing.assert_allclose(E_c4v, E_gen, atol=1e-4)
+
+    def test_energy_matches_general_ctm_on_an_entangled_state(
+        self, entangled_peps_c4v, heisenberg_gate
+    ):
+        """#760: two converged CTMs must contract the same state identically.
+
+        The C4v sweep grew its corner as ``C·T`` — one edge, and the
+        double-layer tensor ``a`` absorbed only into the *edge*, never into
+        the corner.  Standard CTMRG enlarges the corner as ``C·T_h·T_v·a``
+        (:func:`_build_enlarged_corner`).  The omission converges cleanly to
+        the *wrong* fixed point, so nothing upstream reports a failure; the
+        energy is simply wrong, by 4.6e-3 at D=2 and 1.8e-2 at D=4 on
+        optimised Heisenberg states, and the gap does **not** close as chi
+        grows.
+
+        Both schemes are run to 1e-12 here, so a converged-vs-converged
+        comparison is exact up to CTM tolerance — no ``atol=1e-4`` slack that
+        a near-product fixture can hide inside.
+        """
+        from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
+
+        chi = 8
+        env_gen, _ = ctm_tensor(
+            entangled_peps_c4v,
+            chi=chi,
+            max_iter=300,
+            conv_tol=1e-12,
+            projector_method="eigh",
+        )
+        E_gen = float(
+            compute_energy_ctm_tensor(entangled_peps_c4v, env_gen, heisenberg_gate, d=2)
+        )
+
+        env_c4v = ctm_tensor_c4v(
+            entangled_peps_c4v, chi=chi, max_iter=300, conv_tol=1e-12
+        )
+        E_c4v = float(
+            compute_energy_ctm_tensor(entangled_peps_c4v, env_c4v, heisenberg_gate, d=2)
+        )
+
+        assert abs(E_c4v - E_gen) / max(abs(E_gen), 1e-30) < 1e-8, (
+            f"C4v CTM energy {E_c4v!r} != general CTM energy {E_gen!r} "
+            f"(rel {abs(E_c4v - E_gen) / abs(E_gen):.3e}); the two schemes "
+            "converged to different environments (#760)."
+        )
 
 
 # ------------------------------------------------------------------ #

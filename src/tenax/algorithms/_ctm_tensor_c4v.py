@@ -15,7 +15,6 @@ __all__ = [
     "ctm_tensor_c4v",
 ]
 
-import jax.numpy as jnp
 
 from tenax.algorithms._ctm_projector import _compute_projector_tensor
 from tenax.algorithms._ctm_tensor_convergence import _ctm_sv_diff
@@ -29,7 +28,6 @@ from tenax.algorithms._ctm_tensor_init import (
 )
 from tenax.algorithms._ctm_tensor_moves import _flip_leg_flow
 from tenax.contraction.contractor import contract
-from tenax.core.index import TensorIndex
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 from tenax.linalg import _dense_svd
 
@@ -53,10 +51,28 @@ def _c4v_sweep(
     Returns:
         ``(C_new, T_new)`` with the same label conventions.
     """
-    # 1. Grow corner: Cg = C · T  (connect C.c_b to T.t_l)
-    C_conn = C.relabel("c_b", "t_l")
-    Cg = contract(C_conn, T)  # (c_a, D2, t_r)
-    Cg = _fuse_pair_by_label(Cg, "c_a", "D2", "fused", IN)  # (fused, t_r)
+    # 1. Enlarged corner: Q = C · T_top · T_left · a  (top-left quadrant).
+    #
+    #    The corner must absorb the double-layer tensor, exactly as
+    #    ``_build_enlarged_corner`` does for the general sweep.  This used to
+    #    be ``Cg = C · T`` — one edge, with ``a`` contracted only into the
+    #    *edge* and never into the corner — whose implicit density matrix is
+    #    ``C·T·T†·C†``: two copies of the same edge, one conjugated, and no
+    #    site tensor.  That converges cleanly to the *wrong* fixed point, so
+    #    nothing reports a failure while the energy is simply wrong (#760).
+    #
+    #    C.c_b joins the top edge's t_l and C.c_a joins the left edge's t_r,
+    #    matching the adjacency ``_c4v_to_full_env`` builds (C1.c1_r -> T1.t1_l,
+    #    C1.c1_d -> T4.t4_u).  The top edge's D2 is a.u2, the left edge's is
+    #    a.l2, leaving the right face (t_r, r2) and bottom face (t_l, d2) open.
+    C_top = C.relabel("c_b", "t_l")
+    Q = contract(C_top, T)  # (c_a, D2, t_r)
+    Q = Q.relabels({"D2": "u2", "t_r": "o_r"})
+    T_left = T.relabels({"t_r": "c_a", "D2": "l2", "t_l": "o_d"})
+    Q = contract(Q, T_left)  # (u2, o_r, o_d, l2)
+    Q = contract(Q, a)  # (o_r, o_d, d2, r2)
+    Qf = _fuse_pair_by_label(Q, "o_d", "d2", "fused", IN)
+    Qf = _fuse_pair_by_label(Qf, "o_r", "r2", "col", OUT)  # (fused, col)
 
     # 2. Grow edge: Tg = T · a  (connect T.D2 to a.u2)
     T_conn = T.relabel("D2", "u2")
@@ -64,12 +80,14 @@ def _c4v_sweep(
     Tg = _fuse_pair_by_label(T_with_a, "t_l", "l2", "fl", IN)
     Tg = _fuse_pair_by_label(Tg, "t_r", "r2", "fr", OUT)  # (fl, d2, fr)
 
-    # 3. Projector from Cg alone (C4v: both corners are equivalent)
-    #    Use Cg for both corner slots — the density matrix is ρ = 2 * Cg · Cg†
+    # 3. Projector from the enlarged corner (C4v: both faces are equivalent).
+    #    Use Qf for both corner slots — the density matrix is ρ = 2 * Qf · Qf†.
+    #    Qf is symmetric for a C4v state, so its eigenvectors are those of
+    #    ρ = Qf², i.e. the same subspace, ordered identically by |λ|.
     #    No base_charges: the C4v sweep uses a single corner, so there is no
     #    charge-sector drift between independent projectors.
     P, _, _eps_t = _compute_projector_tensor(
-        Cg, Cg, chi, projector_method
+        Qf, Qf, chi, projector_method
     )  # C4v eigh/qr: P_1 == P_2, second slot intentionally discarded
 
     # 4. Apply projector to edge: T_new = P† · Tg · P (paired projector
@@ -81,31 +99,21 @@ def _c4v_sweep(
     T_new = contract(step, P_right)  # (chi_new, d2, chi_new_r)
     T_new = T_new.relabels({"chi_new": "t_l", "d2": "D2", "chi_new_r": "t_r"})
 
-    # 5. New corner: C_new = (P† · Cg) · (P† · Cg)†
-    #    Compute half = P† · Cg, then form C_new = half · half† in the
-    #    dense domain.  The previous approach (contracting Cg with bar(Cg)
-    #    as SymmetricTensor) introduced spurious Koszul signs for fermionic
-    #    symmetries, making the density matrix non-PSD and preventing
-    #    convergence.  The dense half · conj(half).T is PSD by construction.
-    half = contract(P_bar, Cg)  # (chi_new, t_r)
-    half_dense = half.todense()
-    C_new_dense = half_dense @ jnp.conj(half_dense).T  # (chi_new, chi_new)
-
-    # Build corner indices with the same charge distribution as the
-    # projector's chi_new leg, ensuring compatibility with the edges.
-    chi_new_idx = P.indices[P.labels().index("chi_new")]
-    c_a_idx = TensorIndex.from_charges(
-        chi_new_idx.symmetry, chi_new_idx.charges.copy(), IN, label="c_a"
-    )
-    c_b_idx = TensorIndex.from_charges(
-        chi_new_idx.symmetry, chi_new_idx.charges.copy(), OUT, label="c_b"
-    )
-    if isinstance(Cg, SymmetricTensor):
-        C_new = SymmetricTensor.from_dense(
-            C_new_dense, (c_a_idx, c_b_idx), tol=float("inf")
-        )
-    else:
-        C_new = DenseTensor(C_new_dense, (c_a_idx, c_b_idx))
+    # 5. New corner: C_new = P† · Q · P — the enlarged corner projected on
+    #    *both* faces, mirroring ``new_C1 = (C1·T1) projected by P_bot`` in
+    #    the general sweep.  Both faces of Qf carry the same charge structure
+    #    for a C4v state, so the single projector applies to each.
+    #
+    #    This replaces a ``half · half†`` construction (half = P†·Cg), which
+    #    stored the projected *density matrix* rather than the projected
+    #    corner.  That was introduced to keep the corner PSD for fermionic
+    #    symmetries; the paired P†·Q·P contraction here is the same shape as
+    #    the general sweep's projector application, which is Koszul-correct
+    #    by construction (see the ``.bar()`` note above).
+    C_half = contract(P_bar, Qf)  # (chi_new, col)
+    P_col = P.relabels({"fused": "col", "chi_new": "chi_new_r"})
+    C_new = contract(C_half, P_col)  # (chi_new, chi_new_r)
+    C_new = C_new.relabels({"chi_new": "c_a", "chi_new_r": "c_b"})
 
     # 7. Normalize
     C_norm = C_new.max_abs()
