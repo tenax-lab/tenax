@@ -73,7 +73,17 @@ def _xxz_gate(delta: float = 1.0):
     return H.reshape(2, 2, 2, 2)
 
 
-_CTM_KW = dict(max_iter=300, conv_tol=1e-12, projector_method="eigh")
+# ``conv_tol`` is load-bearing for ``test_gradient_matches_finite_difference``
+# and must not be loosened.  The finite difference divides by ``2h = 2e-5``, so
+# it amplifies any residual error in the converged energy by 5e4.  At
+# ``conv_tol=1e-12`` the environment still carries a ~1.4e-13 energy error,
+# which lands as ~9e-9 in ``fd`` — the same order as the 1e-8 tolerance the
+# test asserts.  The test then measures the FD noise floor rather than the
+# gradient: it passes at ``h=1e-5`` and fails at ``h=1e-6`` (9.0e-8) on code
+# whose gradient is fine.  At 1e-14 the parity is 1.2e-10..2.2e-09 across both
+# h and every parametrization, and the assertion means what it says.
+# Costs ~11 extra CTM iterations (58 -> 69 at chi=6).
+_CTM_KW = dict(max_iter=300, conv_tol=1e-14, projector_method="eigh")
 
 
 def _directional_fd(A, gate, direction, h, **kw):
