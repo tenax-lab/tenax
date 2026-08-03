@@ -240,13 +240,44 @@ class TestRDM:
 
     @pytest.fixture
     def peps_env(self):
-        """PEPS tensor and converged CTM environment."""
+        """Random PEPS tensor with a deliberately *approximate* CTM environment.
+
+        ``max_iter=20`` with no convergence check: this is a smoke-test
+        fixture, not a converged state.  Assertions using it must be
+        scale-free (finiteness, hermiticity, trace), never a numeric bound
+        on the spectrum -- see :meth:`test_rdm_eigenvalues_are_finite`.
+        """
         key = jax.random.PRNGKey(55)
         D, d = 2, 2
         A = jax.random.normal(key, (D, D, D, D, d))
         A = A / (jnp.linalg.norm(A) + 1e-10)
         config = CTMConfig(chi=8, max_iter=20)
         env = ctm(A, config)
+        return A, env, d
+
+    @pytest.fixture
+    def converged_peps_env(self):
+        """Weakly-entangled *physical* PEPS with a genuinely converged CTM env.
+
+        A random tensor (the ``peps_env`` fixture) is a pathological CTM
+        input: at ``chi=8`` the environment has not converged, and
+        converging it harder makes the RDM *worse* rather than better --
+        at ``chi>=16`` the norm collapses and ``trace(rdm)`` lands
+        anywhere from ~1e-5 to 0.3 instead of 1.  So a random tensor
+        cannot support a positive-semidefinite assertion at all.
+
+        A product state perturbed towards entanglement is a genuine PEPS
+        state whose CTM fixed point is well conditioned.  Its RDM is PSD
+        to ~1e-9 and agrees between ``chi=8`` and ``chi=16`` to ~1e-11,
+        which is what makes the PSD assertion below both meaningful and
+        platform-stable (#756).
+        """
+        D, d = 2, 2
+        A = jnp.zeros((D, D, D, D, d)).at[0, 0, 0, 0, 0].set(1.0)
+        pert = jax.random.normal(jax.random.PRNGKey(0), (D, D, D, D, d))
+        A = A + 0.2 * pert / jnp.linalg.norm(pert)
+        A = A / jnp.linalg.norm(A)
+        env = ctm(A, CTMConfig(chi=8, max_iter=100, conv_tol=1e-10))
         return A, env, d
 
     def test_rdm_hermitian(self, peps_env):
@@ -260,21 +291,45 @@ class TestRDM:
         assert jnp.allclose(rdm_h_mat, rdm_h_mat.conj().T, atol=1e-10)
         assert jnp.allclose(rdm_v_mat, rdm_v_mat.conj().T, atol=1e-10)
 
-    def test_rdm_positive_semidefinite(self, peps_env):
-        """Eigenvalues of the RDM should be bounded.
+    def test_rdm_positive_semidefinite(self, converged_peps_env):
+        """A converged environment must give a genuinely PSD RDM.
 
-        For a random (non-optimized) PEPS with small chi the CTM
-        environment is approximate, so eigenvalues outside [0,1] are
-        expected.  We check they are not wildly unphysical (> O(10)).
+        This asserts what the test is named after: every eigenvalue in
+        ``[0, 1]`` up to a numerical tolerance, on a state where that is
+        actually expected to hold.
+
+        Previously this ran on the unconverged random fixture and asserted
+        ``abs(eigval) < 10`` -- a magic constant that straddled a platform
+        difference (Linux peaked at 6.43, macOS at 11.73 on the same seed),
+        making it chronically red on macOS while testing nothing (#756).
+        """
+        A, env, d = converged_peps_env
+        rdm_h = _rdm2x1(A, env, d).reshape(d * d, d * d)
+        rdm_v = _rdm1x2(A, env, d).reshape(d * d, d * d)
+
+        # Observed slack is ~1e-9; 1e-6 leaves three orders of margin for
+        # platform LAPACK differences without letting a real regression
+        # through -- a broken normalization moves these by O(0.1) or more.
+        tol = 1e-6
+        for name, rdm in (("horizontal", rdm_h), ("vertical", rdm_v)):
+            eigvals = jnp.linalg.eigvalsh(rdm)
+            assert jnp.all(eigvals > -tol), f"{name} RDM not PSD: {eigvals}"
+            assert jnp.all(eigvals < 1.0 + tol), f"{name} RDM eigenvalue > 1: {eigvals}"
+
+    def test_rdm_eigenvalues_are_finite(self, peps_env):
+        """Smoke test on the approximate environment: no NaN, no inf.
+
+        The unconverged random fixture cannot support a bound on the
+        spectrum (that is what #756 was), but it can still catch a CTM or
+        RDM path that produces non-finite numbers.  Finiteness is
+        scale-free, so it cannot straddle a platform difference.
         """
         A, env, d = peps_env
         rdm_h = _rdm2x1(A, env, d).reshape(d * d, d * d)
         rdm_v = _rdm1x2(A, env, d).reshape(d * d, d * d)
 
-        eigvals_h = jnp.linalg.eigvalsh(rdm_h)
-        eigvals_v = jnp.linalg.eigvalsh(rdm_v)
-        assert jnp.all(jnp.abs(eigvals_h) < 10), f"Unbounded eigenvalues: {eigvals_h}"
-        assert jnp.all(jnp.abs(eigvals_v) < 10), f"Unbounded eigenvalues: {eigvals_v}"
+        assert jnp.all(jnp.isfinite(jnp.linalg.eigvalsh(rdm_h)))
+        assert jnp.all(jnp.isfinite(jnp.linalg.eigvalsh(rdm_v)))
 
     def test_rdm_trace_one(self, peps_env):
         """trace(rdm) should be approximately 1."""
