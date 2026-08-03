@@ -24,23 +24,40 @@ environment of Eq. 65 and ``U_a = U*_a + U_perp,a u_a``,
     R_S = diag(U† M Vh†) - λ_S S                 (Eq. 79)
     R_v = S*^-1 (U† M Vh_perp†) - λ_S v          (Eq. 80)
 
-Where this stands (#715 Phase 1, incomplete)
--------------------------------------------
+Where this stands (#715 Phase 1, complete)
+-----------------------------------------
+Phase 1 is done for the dense asymmetric 1x1 cell, real and complex.  Measured
+gradient parity against finite differences is ``< 1e-5`` real
+(``test_gradient_parity_needs_the_modified_variables``) and ``< 1e-9`` complex
+(``test_gradient_parity_for_a_complex_state``), with ``||F(y*)|| = 2.5e-16``.
+
+Two ingredients get it there, and both were arrived at the hard way, so neither
+is worth re-litigating from the equations alone:
+
 ``S`` is a general complex chi x chi matrix, and the projectors use a genuine
 matrix inverse square root (Denman-Beavers, so no decomposition enters ``F``).
-That much is required, not optional: with a *diagonal* ``S`` the in-space
-rotation of the isometries has nowhere to go, the projector closure breaks at
-first order, and Eq. 88's null-space restriction then discards a physical
+That is required, not optional: with a *diagonal* ``S`` the in-space rotation
+of the isometries has nowhere to go, the projector closure breaks at first
+order, and Eq. 88's null-space restriction then discards a physical
 contribution instead of a gauge one — the gradient came out 120% wrong.
-Promoting ``S`` brings it to 1-2.5%.
+Promoting ``S`` alone brings it to 1-2.5%.
 
-Still missing is the rest of Eqs. 73-82: the modified corners and edges that
-carry ``s`` explicitly on the bonds, and the quartic roots
-``s^L = (S S†)^-1/4``, ``s^R = (S† S)^-1/4`` on the *cut legs* of that
-environment.  Putting those roots inside the projectors instead was tried and
-is worse (20%): they are equivariant under independent left/right rotations,
-but their product is not ``S^-1``, so the closure breaks for a non-diagonal
-``S``.  See ``docs/plans/2026-07-29-715-phase1-modified-variables.md``.
+The rest of Eqs. 73-82 closes that residual: the modified corners and edges
+carrying ``s`` explicitly on the bonds (:func:`_modified_env`) and the quartic
+roots ``s^L = (S S†)^-1/4``, ``s^R = (S† S)^-1/4`` on the *cut legs* of that
+environment (:func:`_quartic_root`, :func:`_inv_quartic_root`), assembled by
+:func:`asym_characteristic_residual_covariant`.  Putting those roots inside the
+projectors instead was tried and is worse (20%): they are equivariant under
+independent left/right rotations, but their product is not ``S^-1``, so the
+closure breaks for a non-diagonal ``S``.  See
+``docs/plans/2026-07-29-715-phase1-modified-variables.md``.
+
+What is *not* done is #715 as a whole: none of this is wired into the
+production gradient path.  ``optimize_gs_ad`` still differentiates the CTM
+fixed point through :mod:`tenax.algorithms._ctm_energy_ad`, SVD backward and
+all.  Phase 3 (:mod:`tenax.algorithms._ctm_root_implicit_symmetric`) is the
+phase that would pay off #566/#687 and is blocked on #731 (8.4 GB peak in the
+GMRES solve at D=2, chi=4).
 
 Complex states (#721)
 ---------------------

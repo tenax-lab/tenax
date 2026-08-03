@@ -58,6 +58,17 @@ _FILE_MARKERS = {
     # full CTM convergence plus finite-difference reruns.
     "test_ctm_c4v_root_implicit.py": "algorithm",
     "test_ctm_root_implicit_asym.py": "algorithm",
+    # Multisite root-implicit AD (#715 Phase 2): the Appendix-F cell-shift
+    # index tables are the whole risk of this phase -- a wrong shift still
+    # yields a well-conditioned Jacobian and a plausible root, then a silently
+    # wrong gradient (#700 / #702 failure shape).  Pinning them costs 0.14s for
+    # 13 tests, so they belong in the required gate.  The root/gradient tests
+    # in the same file each converge a 2x2 CTM plus finite-difference reruns
+    # and carry their own explicit ``@pytest.mark.slow``, which the rule below
+    # honours by *withholding* this ``core``; see ``pytest_collection_modifyitems``.
+    # Previously absent from this table entirely, so all 33 tests were
+    # deselected by ``-m core`` and never ran in a required check (#730).
+    "test_ctm_root_implicit_multisite.py": "core",
     "test_ctm_root_implicit_sym_sectors.py": "core",
     # Symmetric root-implicit AD (#715 Phase 3): the structural half of this
     # file is cheap and belongs in the required gate, but the gradient tests
