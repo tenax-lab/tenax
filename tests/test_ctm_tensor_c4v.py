@@ -190,19 +190,88 @@ class TestC4vCTM:
 
 @pytest.fixture
 def small_peps_u1():
-    """Random U(1) SymmetricTensor iPEPS with D=2, d=2."""
+    """C4v-symmetric U(1) SymmetricTensor iPEPS with D=2, d=2.
+
+    Two independent constraints make this fixture fiddly; the previous version
+    satisfied neither, and each failure was silent.
+
+    **1. It must be non-zero.**  It used ``vc = [-1, 1]`` with ``pc = [-1, 1]``,
+    which admits no charge-conserving block at all: the four virtual legs
+    contribute an even total (four odd charges, signed by flow) and the single
+    odd physical charge cannot cancel it.  ``random_normal`` therefore returned
+    0 blocks and ``‖A‖ = 0``, so ``test_u1_energy_matches_dense`` compared
+    ``0`` against ``0`` at ``atol=1e-4`` and passed no matter what the code did.
+    ``vc`` must span BOTH parities; ``[0, 1]`` does, and keeps the physical
+    spin-1/2 leg.
+
+    **2. It must actually be C4v.**  These tests exercise the C4v CTM, which is
+    only defined on the C4v-invariant manifold — the same trap as the 75%
+    non-C4v ``_site_tensor`` that #760 had to fix.  But ``symmetrize_c4v`` is
+    not applicable to an arbitrary charged tensor: the C4 rotation reinterprets
+    IN legs as OUT, which for U(1) needs ``q -> -q``, so with ``vc`` on all four
+    virtual legs only trivial charges survive the projection.  Assigning
+    ``u, l = OUT/vc`` and ``d, r = IN/(-vc)`` makes every C4v element replace a
+    leg only by one of matching flow-signed charge, so the projection preserves
+    the block structure exactly.
+
+    **3. It must not be physically trivial.**  ``pc = [-1, 1]`` alongside
+    ``vc = [0, 1]`` projects onto a *polarised product state*: only one physical
+    basis state carries weight, the physical index factorises out of the tensor,
+    and the Heisenberg energy is exactly ``2 x 0.25 = 0.5`` at every chi.  Such a
+    fixture is non-zero and genuinely C4v yet still cannot discriminate — the
+    symmetric and dense paths agree on it because there is nothing to get wrong.
+    ``pc = [0, 1]`` gives 5 blocks and a rank-2 physical-leg Gram matrix.
+
+    All three properties are asserted below rather than assumed.  Each one was
+    violated in turn while this fixture was being repaired, and every violation
+    was silent, so the assertions are the point of the fixture as much as the
+    tensor is.
+    """
+    from tenax.algorithms.ipeps import symmetrize_c4v
+
     key = jax.random.PRNGKey(42)
     sym = U1Symmetry()
-    vc = np.array([-1, 1], dtype=np.int32)
-    pc = np.array([-1, 1], dtype=np.int32)
+    vc = np.array([0, 1], dtype=np.int32)
+    pc = np.array([0, 1], dtype=np.int32)
     indices = (
         TensorIndex.from_charges(sym, vc.copy(), FlowDirection.OUT, label="u"),
-        TensorIndex.from_charges(sym, vc.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, (-vc).copy(), FlowDirection.IN, label="d"),
         TensorIndex.from_charges(sym, vc.copy(), FlowDirection.OUT, label="l"),
-        TensorIndex.from_charges(sym, vc.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(sym, (-vc).copy(), FlowDirection.IN, label="r"),
         TensorIndex.from_charges(sym, pc.copy(), FlowDirection.IN, label="phys"),
     )
-    return SymmetricTensor.random_normal(indices, key)
+    raw = SymmetricTensor.random_normal(indices, key)
+    projected = symmetrize_c4v(jnp.asarray(raw.todense()))
+    A = SymmetricTensor.from_dense(projected, indices)
+
+    assert len(A.blocks) > 1 and float(A.norm()) > 0.0, (
+        f"vacuous U(1) fixture: {len(A.blocks)} blocks, norm {float(A.norm())}"
+    )
+    kept = float(A.norm()) / float(jnp.linalg.norm(projected))
+    assert abs(kept - 1.0) < 1e-12, (
+        f"symmetrize_c4v broke charge conservation: kept {kept}; the index "
+        "charges do not admit the C4v action"
+    )
+    dense = np.asarray(A.todense())
+    # C4v invariance: the projector is idempotent, so a symmetric tensor is a
+    # fixed point of it.  This covers all 8 group elements, not just one.
+    residual = float(
+        jnp.linalg.norm(symmetrize_c4v(jnp.asarray(dense)) - dense)
+    ) / np.linalg.norm(dense)
+    assert residual < 1e-12, f"fixture is not C4v-symmetric: residual {residual}"
+
+    # Non-triviality: Gram matrix of the physical leg after tracing the four
+    # virtual legs.  Rank 1 means A[u,d,l,r,s] = B[u,d,l,r] * v[s], i.e. the
+    # physical index factorises and the state is a product state.  (This is a
+    # property of the tensor, not an entropy of the state — there is no
+    # environment in it.)
+    gram = np.einsum("udlrs,udlrt->st", dense, dense.conj())
+    gram_rank = int(np.linalg.matrix_rank(gram, tol=1e-10 * np.trace(gram).real))
+    assert gram_rank > 1, (
+        f"fixture is a product state: physical-leg Gram rank {gram_rank}; "
+        "symmetric and dense agree on it trivially"
+    )
+    return A
 
 
 @pytest.fixture
@@ -232,8 +301,28 @@ class TestC4vCTMSymmetric:
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "#762: C4v CTM energy is wrong for a charged U(1) state. The two "
+            "paths converge to the SAME environment — corner spectra agree to "
+            "1e-15 — yet the energies differ by ~2.7e-1, and the gap is FLAT "
+            "across chi=6/8/12/16, so it is not the charge-sector-allocated vs "
+            "unconstrained truncation difference. Localised to the block-sparse "
+            "RDM contraction: _c4v_to_full_env is byte-exact, but _rdm2x1_tensor "
+            "diverges from its dense equivalent on the same inputs, first at "
+            "UL_T4 where c1_d is contracted IN against IN. Invisible until the "
+            "fixture stopped being zero / non-C4v / a product state."
+        ),
+    )
     def test_u1_energy_matches_dense(self, small_peps_u1, heisenberg_gate):
-        """U(1) C4v CTM energy matches DenseTensor path."""
+        """U(1) C4v CTM energy matches DenseTensor path.
+
+        Only meaningful on a fixture that is C4v-symmetric *and* not a product
+        state.  On a non-C4v state the two paths converge to different
+        environments; on a product state they agree trivially.  Neither says
+        anything about the code.
+        """
         from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
 
         chi = 8
