@@ -28,17 +28,27 @@ from tenax.core.tensor import DenseTensor
 
 
 def _site_tensor(D: int = 2, d: int = 2, seed: int = 42, eps: float = 0.5):
-    """Entangled-but-C4v-friendly iPEPS tensor with trivial U(1) charges.
+    """Entangled, genuinely C4v-symmetric iPEPS tensor with trivial U(1) charges.
 
     ``eps`` controls the deviation from a product state.  It must be large
     enough that the kept corner spectrum sits above numerical noise: at
     ``eps = 0.1`` and ``chi = 8`` the truncation cuts through eigenvalues of
     order 1e-12 and the environment is no longer a root of the
-    characteristic equations (see ``test_warns_on_degenerate_truncation``).
+    characteristic equations.
+
+    The projection onto the C4v-invariant subspace is load-bearing, not
+    cosmetic.  The enlarged corner ``C·E_top·E_left·a`` is Hermitian *only*
+    for a C4v-symmetric state — on the raw random tensor this fixture used to
+    return, ``‖M - M†‖/‖M‖`` is 0.97 and no root exists to find.  The old
+    ``M = 2 Cg Cg†`` was Hermitian PSD for any input whatsoever, so it
+    accepted states the scheme does not apply to (#760).
     """
+    from tenax.algorithms.ipeps import symmetrize_c4v
+
     rng = np.random.RandomState(seed)
     data = eps * jnp.array(rng.standard_normal((D, D, D, D, d)))
     data = data.at[0, 0, 0, 0, 0].set(1.0)
+    data = symmetrize_c4v(data)
     data = data / (jnp.linalg.norm(data) + 1e-10)
     sym = U1Symmetry()
     charges = np.zeros(D, dtype=np.int32)
@@ -139,7 +149,19 @@ def test_gradient_matches_finite_difference(delta, chi):
     ``delta = 1.0`` is the isotropic Heisenberg point, where the corner
     spectrum is SU(2)-degenerate — the case that floors the truncated-SVD
     backward on the production path at ~5e-4.
+
+    The difference direction is projected onto the C4v-invariant subspace,
+    because that is the manifold the method is defined on: off it the
+    enlarged corner ``C·E_top·E_left·a`` is not Hermitian, so ``A ± h·v``
+    along a generic ``v`` (76% off-manifold for this seed) is not a state the
+    C4v CTM contracts consistently.  Measured at chi=4: generic ``v`` floors
+    at 3.6e-5 while a symmetric one reaches 1.7e-9 — the parity is exact
+    in-manifold, and it was only the old scheme's ``M = 2 Cg Cg†``, Hermitian
+    for *any* input, that made an off-manifold difference look meaningful
+    (#760).
     """
+    from tenax.algorithms.ipeps import symmetrize_c4v
+
     A = _site_tensor(eps=1.0)
     gate = _xxz_gate(delta)
     kw = dict(chi=chi, **_CTM_KW)
@@ -151,11 +173,12 @@ def test_gradient_matches_finite_difference(delta, chi):
 
     rng = np.random.RandomState(7)
     v = jnp.array(rng.standard_normal(A.todense().shape))
+    v = symmetrize_c4v(v)
     v = v / jnp.linalg.norm(v)
 
     ad = float(jnp.sum(grad * v))
     fd = _directional_fd(A, gate, v, 1e-5, **kw)
-    assert abs(fd - ad) / max(abs(fd), 1e-30) < 1e-5, (fd, ad)
+    assert abs(fd - ad) / max(abs(fd), 1e-30) < 1e-8, (fd, ad)
 
 
 def test_gradient_is_finite_on_a_degenerate_spectrum():
@@ -168,11 +191,6 @@ def test_gradient_is_finite_on_a_degenerate_spectrum():
     """
     A = _site_tensor(eps=0.02)
     with warnings.catch_warnings():
-        # A large residual is a legitimate outcome here and is covered by
-        # ``test_raises_on_degenerate_truncation_by_default``; this test is
-        # about the gradient being finite either way, so it opts out of the
-        # default hard failure rather than depending on the residual landing
-        # under the tolerance by luck.
         warnings.simplefilter("ignore", RuntimeWarning)
         _e, grad = c4v_root_implicit_energy_and_grad(
             A, _xxz_gate(1.0), chi=8, on_root_residual="warn", **_CTM_KW
@@ -180,28 +198,47 @@ def test_gradient_is_finite_on_a_degenerate_spectrum():
     assert jnp.all(jnp.isfinite(grad))
 
 
-def test_raises_on_degenerate_truncation_by_default():
-    """Truncating through numerical noise is a hard failure, not a warning.
+def test_raises_on_a_non_vanishing_residual_by_default():
+    """A non-vanishing ``‖F(y*)‖`` is a hard failure, not a warning.
 
     The gradient solves the adjoint of equations ``y*`` does not satisfy, so
     it comes back finite and silently wrong.  An unattended optimizer cannot
     detect that, so the default has to stop rather than report.
+
+    Driven by making the *tolerance* impossible rather than by engineering a
+    degenerate spectrum, matching
+    ``test_ctm_root_implicit_multisite.test_an_unconverged_root_raises_by_default``.
+    This used to truncate a near-product state through numerical noise at
+    ``eps=0.1, chi=8``, but the corrected enlarged corner (#760) no longer
+    produces a collapsing corner spectrum — a sweep of
+    ``eps ∈ {0.02..0.3} × chi ∈ {8,12,16}`` now stays under 1.9e-10
+    throughout, so that trigger is gone and the policy needs a deterministic
+    one.
     """
     from tenax.algorithms._ad_primitives import RootResidualError
 
     A = _site_tensor(eps=0.1)
-    with pytest.raises(RootResidualError, match=r"‖F\(y\*\)‖"):
-        c4v_root_implicit_energy_and_grad(A, _xxz_gate(1.0), chi=8, **_CTM_KW)
+    with pytest.raises(RootResidualError, match=r"‖F\(y\*\)‖") as excinfo:
+        c4v_root_implicit_energy_and_grad(
+            A, _xxz_gate(1.0), chi=8, root_residual_warn=0.0, **_CTM_KW
+        )
+    assert excinfo.value.residual >= 0.0
+    assert excinfo.value.tolerance == 0.0
 
 
-def test_degenerate_truncation_still_warns_under_the_warn_policy():
+def test_a_non_vanishing_residual_still_warns_under_the_warn_policy():
     """The diagnostic itself is not lost -- ``on_root_residual='warn'`` keeps
     the old reporting behaviour for callers that want to inspect the bad
     gradient rather than abort."""
     A = _site_tensor(eps=0.1)
     with pytest.warns(RuntimeWarning, match=r"‖F\(y\*\)‖"):
         c4v_root_implicit_energy_and_grad(
-            A, _xxz_gate(1.0), chi=8, on_root_residual="warn", **_CTM_KW
+            A,
+            _xxz_gate(1.0),
+            chi=8,
+            root_residual_warn=0.0,
+            on_root_residual="warn",
+            **_CTM_KW,
         )
 
 

@@ -101,18 +101,27 @@ class C4vRoot(NamedTuple):
 # ---------------------------------------------------------------------------
 
 
-def _enlarged_corner(C: jax.Array, E: jax.Array) -> jax.Array:
-    """Hermitian enlarged corner ``M = 2 Cg Cg†`` with ``Cg = (C·E)`` fused.
+def _enlarged_corner(C: jax.Array, E: jax.Array, a: jax.Array) -> jax.Array:
+    """Hermitian enlarged corner ``M = C·E_top·E_left·a``, fused to a matrix.
 
-    Mirrors steps 1 and 3 of :func:`_c4v_sweep`: the corner is grown by one
-    edge and the density matrix accumulated from the two (identical, by C4v)
-    corner slots.  Returns a ``(chi*d2, chi*d2)`` Hermitian PSD matrix whose
-    dominant eigenvectors are the CTM projector.
+    Mirrors step 1 of :func:`_c4v_sweep`: the top-left quadrant, i.e. the
+    corner grown by *both* adjacent edges with the double-layer tensor filling
+    the plaquette between them.  ``C.c_b`` joins the top edge's ``t_l`` and
+    ``C.c_a`` the left edge's ``t_r``; the top edge's ``D2`` is ``a.u2`` and
+    the left edge's is ``a.l2``, leaving the bottom face ``(t_l, d2)`` and the
+    right face ``(t_r, r2)`` open, fused in that order to match the sweep's
+    ``(fused, col)``.
+
+    This was ``M = 2 Cg Cg†`` with ``Cg = C·E`` — one edge, no ``a`` — which
+    converges cleanly to the wrong fixed point (#760).
+
+    ``M`` is Hermitian for a C4v state, so its dominant eigenvectors are those
+    of the sweep's density matrix ``ρ = 2 M M†`` and ``U†MU`` is the projected
+    corner.  That lets one matrix keep serving both roles, exactly as before.
     """
     chi, d2 = C.shape[0], E.shape[1]
-    Cg = jnp.einsum("ab,bmc->amc", C, E).reshape(chi * d2, chi)
-    M = 2.0 * (Cg @ Cg.conj().T)
-    # eigh below assumes exact hermiticity; the product form is Hermitian up
+    M = jnp.einsum("ij,jup,qli,udlr->qdpr", C, E, E, a).reshape(chi * d2, chi * d2)
+    # eigh below assumes exact hermiticity; the contraction is Hermitian up
     # to rounding, so symmetrise rather than let the asymmetry leak into the
     # eigenvectors.
     return 0.5 * (M + M.conj().T)
@@ -164,7 +173,7 @@ def c4v_characteristic_residual(
     C, E, u = y
     U = U_star + U_perp @ u  # Eq. 25 — differentiable only through ``u``
 
-    M = _enlarged_corner(C, E)
+    M = _enlarged_corner(C, E, a)
     N = _enlarged_edge(E, a)
 
     proj_C = _project_corner(M, U)
@@ -239,10 +248,16 @@ def c4v_root_parametrize(
     best: tuple[C4vRoot, float] | None = None
 
     for _step in range(max(int(polish_steps), 1)):
-        M = _enlarged_corner(C, E)
-        # eigh returns ascending eigenvalues; keep the chi dominant ones.
+        M = _enlarged_corner(C, E, a)
+        # eigh returns ascending eigenvalues; keep the chi dominant ones by
+        # MAGNITUDE.  The sweep's projector comes from ρ = 2 M M† (see
+        # ``_compute_projector_tensor``), whose spectrum is w², so it ranks by
+        # |w|.  While M was ``2 Cg Cg†`` it was PSD and signed-vs-magnitude
+        # ordering coincided; the enlarged corner is Hermitian but *not* PSD,
+        # so ranking by signed w would drop large negative modes the sweep
+        # keeps and converge to a different root entirely (#760).
         w, V = jnp.linalg.eigh(M)
-        order = jnp.argsort(-w)
+        order = jnp.argsort(-jnp.abs(w))
         V = V[:, order]
         U_star = _align_isometry(V[:, :chi], U_prev)
         U_perp = V[:, chi:]
