@@ -568,8 +568,14 @@ def _sz():
     return jnp.array([[0.5, 0.0], [0.0, -0.5]])
 
 
-def _fd_parity(cell, nrows, ncols, chi=4, h=1e-5, seed=0):
-    """(AD directional derivative, FD directional derivative)."""
+def _fd_parity(cell, nrows, ncols, chi=4, h=1e-5, seed=0, on_root_residual="raise"):
+    """(AD directional derivative, FD directional derivative).
+
+    ``on_root_residual`` is threaded through because the mutation tests below
+    deliberately construct a cell whose ``y*`` is *not* a root; they need the
+    wrong gradient returned so they can measure how wrong it is, where a
+    production caller wants the default hard failure.
+    """
     import jax.numpy as jnp
 
     import tenax.algorithms._ctm_root_implicit_multisite as M
@@ -578,7 +584,12 @@ def _fd_parity(cell, nrows, ncols, chi=4, h=1e-5, seed=0):
     op = _sz()
     idx = {rc: A.indices for rc, A in cell.items()}
     _value, grad = M.cell_root_implicit_energy_and_grad(
-        cell, op, chi=chi, nrows=nrows, ncols=ncols
+        cell,
+        op,
+        chi=chi,
+        nrows=nrows,
+        ncols=ncols,
+        on_root_residual=on_root_residual,
     )
     base = {rc: jnp.asarray(A.todense()) for rc, A in cell.items()}
     rng = np.random.RandomState(seed)
@@ -621,6 +632,48 @@ def test_gradient_matches_finite_differences_on_a_2x2_cell():
     assert rel < 1e-6, f"AD={ad!r} FD={fd!r} rel={rel:.3e}"
 
 
+def test_an_unconverged_root_raises_by_default(monkeypatch):
+    """A non-vanishing ``‖F(y*)‖`` must be a hard failure, not a warning.
+
+    The gradient solves the adjoint of equations ``y*`` does not satisfy, so it
+    comes back finite, plausibly scaled and silently wrong (paper Fig. 1).  An
+    unattended optimizer would keep stepping on it.  Nothing downstream can
+    detect that, so the default has to be loud.
+
+    Driven by making the *tolerance* impossible rather than by breaking the
+    physics, so the test stays fast and independent of the cell-shift tables.
+    """
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+    from tenax.algorithms._ad_primitives import RootResidualError
+
+    with pytest.raises(RootResidualError) as excinfo:
+        M.cell_root_implicit_energy_and_grad(
+            {(0, 0): _site_tensor()},
+            _sz(),
+            chi=4,
+            nrows=1,
+            ncols=1,
+            root_residual_warn=0.0,
+        )
+    assert excinfo.value.residual >= 0.0
+    assert excinfo.value.tolerance == 0.0
+
+
+def test_the_residual_policy_is_validated_before_the_expensive_part():
+    """A typo must fail immediately, not after a full CTM convergence."""
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+
+    with pytest.raises(ValueError, match="on_root_residual"):
+        M.cell_root_implicit_energy_and_grad(
+            {(0, 0): _site_tensor()},
+            _sz(),
+            chi=4,
+            nrows=1,
+            ncols=1,
+            on_root_residual="warm",  # not "warn"
+        )
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize(
     "table",
@@ -641,7 +694,7 @@ def test_a_wrong_cell_shift_breaks_the_2x2_gradient(monkeypatch, table):
             good(co, nr, nc)[2],
         ),
     )
-    ad, fd = _fd_parity(_cell_2x2(), 2, 2)
+    ad, fd = _fd_parity(_cell_2x2(), 2, 2, on_root_residual="warn")
     rel = abs(ad - fd) / max(abs(fd), 1e-30)
     assert rel > 1e-3, f"wrong {table} still matched FD (rel={rel:.3e})"
 

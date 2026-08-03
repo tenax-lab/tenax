@@ -169,20 +169,40 @@ def test_gradient_is_finite_on_a_degenerate_spectrum():
     A = _site_tensor(eps=0.02)
     with warnings.catch_warnings():
         # A large residual is a legitimate outcome here and is covered by
-        # ``test_warns_on_degenerate_truncation``; this test is about the
-        # gradient being finite either way.
+        # ``test_raises_on_degenerate_truncation_by_default``; this test is
+        # about the gradient being finite either way, so it opts out of the
+        # default hard failure rather than depending on the residual landing
+        # under the tolerance by luck.
         warnings.simplefilter("ignore", RuntimeWarning)
         _e, grad = c4v_root_implicit_energy_and_grad(
-            A, _xxz_gate(1.0), chi=8, **_CTM_KW
+            A, _xxz_gate(1.0), chi=8, on_root_residual="warn", **_CTM_KW
         )
     assert jnp.all(jnp.isfinite(grad))
 
 
-def test_warns_on_degenerate_truncation():
-    """Truncating through numerical noise is reported, not silently absorbed."""
+def test_raises_on_degenerate_truncation_by_default():
+    """Truncating through numerical noise is a hard failure, not a warning.
+
+    The gradient solves the adjoint of equations ``y*`` does not satisfy, so
+    it comes back finite and silently wrong.  An unattended optimizer cannot
+    detect that, so the default has to stop rather than report.
+    """
+    from tenax.algorithms._ad_primitives import RootResidualError
+
+    A = _site_tensor(eps=0.1)
+    with pytest.raises(RootResidualError, match=r"‖F\(y\*\)‖"):
+        c4v_root_implicit_energy_and_grad(A, _xxz_gate(1.0), chi=8, **_CTM_KW)
+
+
+def test_degenerate_truncation_still_warns_under_the_warn_policy():
+    """The diagnostic itself is not lost -- ``on_root_residual='warn'`` keeps
+    the old reporting behaviour for callers that want to inspect the bad
+    gradient rather than abort."""
     A = _site_tensor(eps=0.1)
     with pytest.warns(RuntimeWarning, match=r"‖F\(y\*\)‖"):
-        c4v_root_implicit_energy_and_grad(A, _xxz_gate(1.0), chi=8, **_CTM_KW)
+        c4v_root_implicit_energy_and_grad(
+            A, _xxz_gate(1.0), chi=8, on_root_residual="warn", **_CTM_KW
+        )
 
 
 def test_warns_when_the_adjoint_solve_does_not_converge():
