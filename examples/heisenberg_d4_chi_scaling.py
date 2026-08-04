@@ -657,14 +657,26 @@ def _aggregate(results, outdir, d_label=4):
     print(f"\n[done] wrote {outdir}/convergence.md, performance.md, results.csv, *.png")
 
 
+def _apply_device_opt_out(args):
+    """Publish ``--allow-non-a100`` into the environment. Called before dispatch
+    so it covers both entry points: the orchestrator (whose spawned workers
+    inherit the environment, not kwargs) and a worker invoked directly with
+    ``--cell``, which never reaches ``main()``. Returns whether it was set.
+
+    This used to live inside ``main()``, which made ``--allow-non-a100 --cell``
+    a silent no-op: the worker never set the variable, so ``_assert_only_a100s``
+    refused non-A100 hardware however the flag was passed (#747)."""
+    if getattr(args, "allow_non_a100", False):
+        os.environ["TENAX_ALLOW_NON_A100"] = "1"
+        return True
+    return False
+
+
 def main(args):
     outdir = args.outdir
     os.makedirs(outdir, exist_ok=True)
     chi_ladder = [int(x) for x in args.chi_ladder.split(",")]
     device_counts = [int(x) for x in args.device_counts.split(",")]
-
-    if getattr(args, "allow_non_a100", False):
-        os.environ["TENAX_ALLOW_NON_A100"] = "1"
 
     # Phase 1: optimize once (pinned to opt_devices GPUs).
     _optimize_phase(outdir, args.chi_opt, args.opt_steps, args.opt_devices,
@@ -689,17 +701,25 @@ def main(args):
     _aggregate(results, outdir)
 
 
-if __name__ == "__main__":
-    _args = _build_argparser().parse_args()
-    if _args.smoke:
-        _args.outdir = _args.outdir + "_smoke"
-        _args.chi_opt = 8
-        _args.opt_steps = 6
-        _args.opt_devices = 1
-        _args.chi_ladder = "8,12"
-        _args.device_counts = "1,2"
-        _args.cell_timeout_s = 1200
-    if _args.cell:
-        _run_worker(_args)
+def _dispatch(args):
+    """Shrink for --smoke, publish the device opt-out, then route to the worker
+    or the orchestrator. Kept out of ``__main__`` so the ordering is testable:
+    the opt-out must be applied BEFORE dispatch, or worker mode silently loses
+    it (#747)."""
+    if args.smoke:
+        args.outdir = args.outdir + "_smoke"
+        args.chi_opt = 8
+        args.opt_steps = 6
+        args.opt_devices = 1
+        args.chi_ladder = "8,12"
+        args.device_counts = "1,2"
+        args.cell_timeout_s = 1200
+    _apply_device_opt_out(args)
+    if args.cell:
+        _run_worker(args)
     else:
-        main(_args)
+        main(args)
+
+
+if __name__ == "__main__":
+    _dispatch(_build_argparser().parse_args())

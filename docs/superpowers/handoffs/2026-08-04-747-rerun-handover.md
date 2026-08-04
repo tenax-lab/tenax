@@ -128,6 +128,43 @@ Delete or move `runs/d4_chi_scaling/A_opt.pkl` first if reusing that outdir —
 `optimize_once` returns immediately when it finds one, so a stale `A_opt` from
 the `1x1` run would be silently reused.
 
+### Choosing the GPU
+
+**`CUDA_VISIBLE_DEVICES` on the orchestrator does not pin the run.** Every
+phase runs in a spawned worker, and `_worker_env` *overwrites*
+`CUDA_VISIBLE_DEVICES` with its own most-idle pick from `nvidia-smi`. An outer
+pin is discarded, so on a shared box the run lands wherever the picker decides.
+
+To choose the device yourself, drive the workers directly — they run in-process
+and keep the environment you give them:
+
+```bash
+export CUDA_VISIBLE_DEVICES=1
+export XLA_PYTHON_CLIENT_PREALLOCATE=false   # so peak_gb is the real high-water mark
+export TENAX_ALLOW_NON_A100=1                # only if not on an A100
+D=examples/heisenberg_d4_chi_scaling.py
+O=runs/d4_rerun_2x2
+
+uv run python $D --cell --phase optimize --outdir $O \
+    --chi-opt 32 --opt-steps 100 --probe-max-iter 15 \
+    --gs-recipe 2x2 --n-devices 1 --out $O/optimize_status.json
+for chi in 16 24 32 48 64 96 128; do
+  uv run python $D --cell --phase scan --outdir $O --chi $chi \
+      --n-devices 1 --out $O/D4_chi${chi}_n1.json
+done
+uv run python $D --gs-recipe 2x2 --allow-non-a100 --device-counts 1 --outdir $O
+```
+
+Filenames must match `cell_result_path()` exactly (`D4_chi<χ>_n<n>.json`) or
+the final call recomputes the cells instead of aggregating them. That call
+launches no workers — the optimize phase skips on an existing `A_opt.pkl` and
+every cell is cached — so nothing can re-pin the device.
+
+Two things this sequence avoids: `--device-counts 1` keeps the n=2/n=4 rows out
+of `results.csv`, since they cannot run against a single visible GPU; and
+`--smoke` is not used, because it overrides `device_counts` to `"1,2"` *after*
+parsing, silently discarding a `--device-counts 1` passed alongside it.
+
 ---
 
 ## Reporting back

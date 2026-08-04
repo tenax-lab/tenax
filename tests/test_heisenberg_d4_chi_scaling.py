@@ -176,3 +176,114 @@ def test_read_json_or_none_handles_missing_corrupt_and_valid(tmp_path):
     good = tmp_path / "good.json"
     good.write_text('{"k": 5}')
     assert d4._read_json_or_none(str(good)) == {"k": 5}
+
+
+# --- device opt-out (#747): --allow-non-a100 must reach worker mode too ------
+#
+# The flag used to be published to the environment inside main(), which a
+# worker started with --cell never reaches -- so `--allow-non-a100 --cell`
+# was silently a no-op and _assert_only_a100s refused non-A100 hardware.
+# This is the same defect fixed for the D=8 driver in #775.
+
+
+class _FakeDevice:
+    def __init__(self, kind, bytes_limit):
+        self.device_kind = kind
+        self._limit = bytes_limit
+
+    def memory_stats(self):
+        return {"bytes_limit": self._limit}
+
+    def __str__(self):
+        return f"fake({self.device_kind})"
+
+
+def _install_fake_jax(monkeypatch, devices):
+    """_assert_only_a100s does `import jax` inside the function, so a stub in
+    sys.modules is enough to exercise it without a GPU or a real backend."""
+    import sys
+    import types
+
+    fake = types.ModuleType("jax")
+    fake.devices = lambda: devices
+    monkeypatch.setitem(sys.modules, "jax", fake)
+
+
+def test_apply_device_opt_out_publishes_the_flag(monkeypatch):
+    monkeypatch.delenv("TENAX_ALLOW_NON_A100", raising=False)
+    args = d4._build_argparser().parse_args(["--allow-non-a100"])
+    assert d4._apply_device_opt_out(args) is True
+    import os
+
+    assert os.environ["TENAX_ALLOW_NON_A100"] == "1"
+
+
+def test_apply_device_opt_out_absent_leaves_environment_untouched(monkeypatch):
+    monkeypatch.delenv("TENAX_ALLOW_NON_A100", raising=False)
+    args = d4._build_argparser().parse_args([])
+    assert d4._apply_device_opt_out(args) is False
+    import os
+
+    assert "TENAX_ALLOW_NON_A100" not in os.environ
+
+
+def test_guard_refuses_small_gpu_without_the_opt_out(monkeypatch):
+    monkeypatch.delenv("TENAX_ALLOW_NON_A100", raising=False)
+    _install_fake_jax(
+        monkeypatch, [_FakeDevice("NVIDIA GeForce RTX 4070 Ti SUPER", 16 * 1000**3)]
+    )
+    with pytest.raises(RuntimeError, match="non-A100"):
+        d4._assert_only_a100s()
+
+
+def test_guard_passes_on_small_gpu_once_the_flag_is_applied(monkeypatch):
+    """The end-to-end contract the worker path depends on: applying the parsed
+    flag is sufficient to make the guard accept non-A100 hardware."""
+    monkeypatch.delenv("TENAX_ALLOW_NON_A100", raising=False)
+    _install_fake_jax(
+        monkeypatch, [_FakeDevice("NVIDIA GeForce RTX 4070 Ti SUPER", 16 * 1000**3)]
+    )
+    args = d4._build_argparser().parse_args(
+        ["--cell", "--phase", "scan", "--allow-non-a100"]
+    )
+    d4._apply_device_opt_out(args)
+    d4._assert_only_a100s()  # must not raise
+
+
+def test_guard_still_refuses_a_display_gpu_without_the_flag(monkeypatch):
+    monkeypatch.delenv("TENAX_ALLOW_NON_A100", raising=False)
+    _install_fake_jax(monkeypatch, [_FakeDevice("NVIDIA DGX Display", 4 * 1000**3)])
+    with pytest.raises(RuntimeError):
+        d4._assert_only_a100s()
+
+
+def test_dispatch_applies_the_opt_out_before_running_the_worker(monkeypatch):
+    """The regression guard: worker mode must see TENAX_ALLOW_NON_A100 already
+    set. Asserting on the environment *at the moment _run_worker is called* is
+    what makes deleting the _apply_device_opt_out call a test failure."""
+    import os
+
+    monkeypatch.delenv("TENAX_ALLOW_NON_A100", raising=False)
+    seen = {}
+    monkeypatch.setattr(
+        d4,
+        "_run_worker",
+        lambda a: seen.update(env=os.environ.get("TENAX_ALLOW_NON_A100")),
+    )
+    monkeypatch.setattr(
+        d4, "main", lambda a: pytest.fail("worker mode must not call main()")
+    )
+    args = d4._build_argparser().parse_args(
+        ["--cell", "--phase", "scan", "--chi", "16", "--allow-non-a100"]
+    )
+    d4._dispatch(args)
+    assert seen["env"] == "1"
+
+
+def test_dispatch_routes_to_the_orchestrator_without_cell(monkeypatch):
+    monkeypatch.delenv("TENAX_ALLOW_NON_A100", raising=False)
+    called = {}
+    monkeypatch.setattr(d4, "main", lambda a: called.update(main=True))
+    monkeypatch.setattr(d4, "_run_worker", lambda a: pytest.fail("not worker mode"))
+    d4._dispatch(d4._build_argparser().parse_args([]))
+    assert called == {"main": True}
