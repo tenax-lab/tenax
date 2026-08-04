@@ -86,24 +86,40 @@ def _parse_nvidia_smi(text):
     return rows
 
 
-def select_free_a100s(rows, n, mem_threshold_mib=2048, util_threshold=50):
+def select_free_a100s(rows, n, mem_threshold_mib=2048, util_threshold=50,
+                      allow_non_a100=None):
     """The n most-idle 80 GB A100 indices from parsed nvidia-smi rows.
 
     Idle = an A100 (never the DGX Display GPU) with memory.used and
     utilization below the thresholds. Sorted by (memory.used, index) so the
     most-idle device comes first; deterministic tiebreak by index. Raises
     RuntimeError if fewer than n idle A100s are available (so a row stops
-    rather than landing on a busy or display GPU)."""
+    rather than landing on a busy or display GPU).
+
+    *allow_non_a100* drops the A100 vendor-string requirement so the driver
+    runs on other >=40 GB hardware (H100 etc.) — the #747 re-runs move to
+    another machine. It defaults to the ``TENAX_ALLOW_NON_A100`` environment
+    variable, which is how ``--allow-non-a100`` reaches the spawned per-cell
+    workers (they inherit the environment, not kwargs). The display-GPU
+    exclusion and the idle thresholds are NOT relaxed: landing on a 4 GB
+    display card is the failure this guard exists to prevent, and it is a
+    failure on every machine, not just the origin box."""
+    if allow_non_a100 is None:
+        allow_non_a100 = os.environ.get("TENAX_ALLOW_NON_A100") == "1"
     free = [
         r for r in rows
-        if "A100" in r[1] and "Display" not in r[1]
+        if (allow_non_a100 or "A100" in r[1]) and "Display" not in r[1]
         and r[2] <= mem_threshold_mib and r[3] <= util_threshold
     ]
     free.sort(key=lambda r: (r[2], r[0]))
     if len(free) < n:
+        kind = "idle GPUs" if allow_non_a100 else "idle A100s"
         raise RuntimeError(
-            f"need {n} idle A100s, found {len(free)}: "
+            f"need {n} {kind}, found {len(free)}: "
             + ", ".join(f"gpu{r[0]}({r[2]}MiB,{r[3]}%)" for r in free)
+            + ("" if allow_non_a100 else
+               " [non-A100 devices are excluded; pass --allow-non-a100 to "
+               "run on other >=40 GB hardware]")
         )
     return [r[0] for r in free[:n]]
 
@@ -243,6 +259,12 @@ def _build_argparser():
                    help="max seconds to wait for n idle A100s before a cell "
                         "(shared box: transient contention); then stop "
                         "gracefully and aggregate completed cells")
+    p.add_argument("--allow-non-a100", dest="allow_non_a100", action="store_true",
+                   help="run on non-A100 hardware (H100 etc.): drops the A100 "
+                        "vendor-string requirement in GPU selection and the "
+                        ">=40 GB device guard. Display GPUs and busy devices "
+                        "are still excluded. Sets TENAX_ALLOW_NON_A100=1 so "
+                        "spawned per-cell workers inherit it")
     return p
 
 
@@ -609,10 +631,22 @@ def main(args):
     _aggregate8(results, outdir)
 
 
+def _apply_device_opt_out(args):
+    """Publish ``--allow-non-a100`` into the environment. Called before dispatch
+    so it covers both entry points: the orchestrator (whose spawned workers
+    inherit the environment, not kwargs) and a worker invoked directly with
+    ``--cell``, which never reaches ``main()``. Returns whether it was set."""
+    if getattr(args, "allow_non_a100", False):
+        os.environ["TENAX_ALLOW_NON_A100"] = "1"
+        return True
+    return False
+
+
 if __name__ == "__main__":
     _args = _build_argparser().parse_args()
     if _args.smoke:
         _apply_smoke(_args)
+    _apply_device_opt_out(_args)
     if _args.cell:
         _run_worker(_args)
     else:
