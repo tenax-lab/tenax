@@ -614,6 +614,7 @@ def ctm_tensor(
     projector_method: str = "svd",
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
+    recipe: str = "2x2",
 ) -> tuple[CTMTensorEnv, float]:
     """Run standard CTM to convergence using the Tensor protocol.
 
@@ -629,7 +630,26 @@ def ctm_tensor(
         conv_tol:          Convergence tolerance on corner singular values.
         renormalize:       Renormalize environment at each step.
         projector_method:  ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
+                           Consulted only on the ``"1x1"`` recipe; the ``"2x2"``
+                           recipe always uses Fishman SVD via
+                           ``_compute_2x2_projector``.
         qr_warmup_steps:   Number of eigh warm-up sweeps before QR kicks in.
+        recipe:            ``"2x2"`` (default) — the variPEPS-style 2x2
+                           plaquette projector, run on a 1-site neighbour map.
+                           ``"1x1"`` — the legacy single-site corner-pair
+                           projector, kept only for regression bisection.
+
+                           **``"1x1"`` collapses the environment to rank-1
+                           corners and must not be used for physics** (#723,
+                           #726, #747).  Its projector comes from
+                           ``M = C1g^H C4g``, which is ``chi x chi`` — the
+                           ``chi * D**2`` seam is summed away, so
+                           ``rank(P) <= rank(C1g)``, and the cold ``chi_init=1``
+                           seed makes rank-1 an absorbing state.  The symptom is
+                           an energy that is bit-identical across a 4x change in
+                           chi.  Switching ``projector_method`` does not help:
+                           ``eigh``/``qr`` escape the rank collapse but are
+                           wildly non-convergent on the same recipe.
 
     Returns:
         ``(env, max_truncation_error)`` where ``env`` is the converged
@@ -673,7 +693,38 @@ def ctm_tensor(
             # Asymmetric virtual charges: densify for compatibility
             A = DenseTensor(A.todense(), A.indices)
 
-    sweep_fn = _ctm_tensor_sweep_paired if use_paired else _ctm_tensor_sweep
+    if recipe not in ("2x2", "1x1"):
+        raise ValueError(f"Unknown recipe={recipe!r}; expected '2x2' or '1x1'.")
+    # Validated here rather than inside the projector: the 2x2 recipe never
+    # consults projector_method, so an unknown value would otherwise be
+    # silently accepted on the default path.
+    if projector_method not in ("eigh", "qr", "svd"):
+        raise ValueError(
+            f"Unknown projector_method={projector_method!r}; "
+            f"expected 'eigh', 'qr', or 'svd'."
+        )
+
+    if recipe == "2x2":
+        # A uniform 1-site lattice is just the multisite path with a
+        # self-referential neighbour map, so the 2x2 plaquette projector
+        # applies verbatim.  Wrapped to keep the single-site convergence loop,
+        # normalisation and ``(env, eps)`` return contract below unchanged.
+        def sweep_fn(
+            env, a, chi, renormalize, projector_method, *, projector_backward="auto"
+        ):
+            envs, eps, _smallest_s = _ctm_tensor_sweep_multisite(
+                {(0, 0): env},
+                {(0, 0): a},
+                SINGLE_SITE_NEIGHBORS,
+                chi,
+                renormalize,
+                projector_method,
+                projector_backward=projector_backward,
+                recipe="2x2",
+            )
+            return envs[(0, 0)], float(eps)
+    else:
+        sweep_fn = _ctm_tensor_sweep_paired if use_paired else _ctm_tensor_sweep
 
     a = _build_double_layer_tensor(A)
     env = initialize_ctm_tensor_env(A, chi)

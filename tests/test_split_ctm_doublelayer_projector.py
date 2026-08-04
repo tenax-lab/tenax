@@ -79,7 +79,19 @@ def test_split_matches_fused_lossless_chi_I(D, chi):
     make_site, heisenberg_gate, fused_env_to_split = _oracle()
     A = make_site(D, 2, seed=7)
     gate = heisenberg_gate()
-    fused_env, _ = ctm_tensor(A, chi=chi, max_iter=300, conv_tol=0.0)
+    # ``recipe="1x1"`` is pinned deliberately.  This test asserts a
+    # *representation* claim — that the split double-layer path is an exact
+    # factorization of the fused one at the same chi — so both sides must run
+    # the same projector recipe or the comparison is meaningless.
+    #
+    # ``ctm_tensor`` now defaults to ``recipe="2x2"`` (#723) while
+    # ``ctm_split_tensor`` is still on ``1x1``; rerouting the split path is the
+    # remaining half of #746.  Until that lands, this is the circular oracle
+    # #746 calls out — both sides collapse to rank-1 corners, so agreement here
+    # says nothing about physics, only that the factorization is faithful.
+    # When #746 lands, drop this pin so both sides run 2x2 and the oracle
+    # becomes real.
+    fused_env, _ = ctm_tensor(A, chi=chi, max_iter=300, conv_tol=0.0, recipe="1x1")
     E_fused = float(compute_energy_ctm_tensor(A, fused_env, gate))
     split_env = ctm_split_tensor(A, chi=chi, chi_I=chi * D, max_iter=300, conv_tol=0.0)
     E_split = float(compute_energy_split_ctm_tensor(A, split_env, gate))
