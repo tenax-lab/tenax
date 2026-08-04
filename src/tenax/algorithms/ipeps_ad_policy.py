@@ -127,6 +127,19 @@ def use_reference_c4v_path(config: iPEPSConfig) -> bool:
     )
 
 
+def use_root_implicit_path(config: iPEPSConfig) -> bool:
+    """Return ``True`` when ``ctm_ad_mode`` selects a root-implicit engine (#715).
+
+    Mirrors :func:`use_reference_c4v_path`.  Unlike that gate this does *not*
+    require ``gs_c4v`` or a particular unit cell -- the variant is chosen from
+    the unit cell inside ``ipeps_optimize_root_implicit.root_implicit_variant``.
+    """
+    return getattr(config.ctm, "ctm_ad_mode", None) in (
+        "root_implicit",
+        "root_implicit_symmetric",
+    )
+
+
 def build_ad_ctm_config(config: iPEPSConfig) -> CTMConfig:
     """Return the effective CTMConfig used by iPEPS AD optimizers.
 
