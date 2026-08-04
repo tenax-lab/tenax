@@ -76,43 +76,52 @@ def test_single_site_env_is_not_rank_one(su_state):
 
 
 def test_chi_frozen_energy_is_only_a_bug_together_with_a_rank_1_corner(su_state):
-    """The collapse signature is the *conjunction*: frozen in chi AND rank-1.
+    """The environment must *grow* with chi; the energy need not.
 
-    #747 uses "the energy does not move with chi" as the cheap detector, and on
-    the ``1x1`` recipe that is exactly right -- the energy is bit-identical from
-    chi=2 to chi=32 because the boundary is chi_eff=1.
+    Two corrections are baked into this test, both found by required CI on
+    macOS after these files were promoted to `core`:
 
-    But a *converged* environment is also flat in chi; that is what convergence
-    means.  On this D=2 state the 2x2 energy is already converged at chi=4, so
-    E(4) and E(16) agree to the last bit on some platforms and differ in it on
-    others.  An earlier version of this test asserted ``E(4) != E(16)`` for 2x2
-    and was a coin flip: it passed on Linux and failed on macOS reporting the
-    *correct* value, -0.488638504625172.
+    1. The original asserted ``E(chi=4) != E(chi=16)`` on 2x2.  False for a
+       correct implementation -- a converged environment is flat in chi, and on
+       this D=2 state 2x2 converges by chi=4.  It failed on macOS reporting the
+       *correct* value.
+    2. The replacement asserted the 1x1 energy was bit-identical across chi.
+       Also not portable: the split 1x1 energies differ by 1 ULP on macOS
+       (0.49620072949960814 vs ...803) while agreeing exactly on Linux.
 
-    So the two halves are asserted separately and honestly: ``1x1`` must be both
-    frozen and rank-1, while ``2x2`` need only be rank>1 -- its energy is
-    allowed to be flat, because by then flat means converged.
+    Energy-vs-chi cannot discriminate on this fixture in *either* direction.
+    The portable statement is about the corner rank, which is what the collapse
+    actually destroys:
+
+    ==========  =====  =====  ======  ======
+    recipe      chi=4  chi=8  chi=16  chi=24
+    ==========  =====  =====  ======  ======
+    ``"1x1"``   1      1      1       1
+    ``"2x2"``   4      6      6       6
+    ==========  =====  =====  ======  ======
+
+    Rank-1 is *absorbing* under 1x1 -- the environment can never grow, at any
+    chi.  Under 2x2 it grows until it saturates at the true environment rank.
+    Singular values here are either ~1e-17 or >=2e-3, far from the 1e-10
+    threshold, so the ranks are robust to last-bit platform differences.
     """
-    A, gate = su_state
+    A, _gate = su_state
 
-    def energy(chi, recipe):
+    def rank_at(chi, recipe):
         env, _ = ctm_tensor(A, chi=chi, max_iter=100, conv_tol=1e-12, recipe=recipe)
-        return float(compute_energy_ctm_tensor(A, env, gate, d=2)), _corner_rank(env)
+        return _corner_rank(env)
 
-    E4_1x1, rank4_1x1 = energy(4, "1x1")
-    E16_1x1, rank16_1x1 = energy(16, "1x1")
-    assert E4_1x1 == E16_1x1, (
-        f"the 1x1 recipe is expected to be chi-frozen; got {E4_1x1!r} vs "
-        f"{E16_1x1!r}. If 1x1 now responds to chi, the projector was fixed and "
-        f"this whole file is stale."
+    assert rank_at(4, "1x1") == 1 and rank_at(16, "1x1") == 1, (
+        "the 1x1 corner is expected to stay rank-1 at every chi (rank-1 is an "
+        "absorbing state); if it now grows, the projector was fixed and this "
+        "whole file is stale"
     )
-    assert rank4_1x1 == 1 and rank16_1x1 == 1
 
-    _E4, rank4 = energy(4, "2x2")
-    _E16, rank16 = energy(16, "2x2")
-    assert rank4 > 1 and rank16 > 1, (
-        f"2x2 corner collapsed (ranks {rank4}, {rank16}) -- the working recipe "
-        f"has regressed into the #723 failure mode"
+    r4, r16 = rank_at(4, "2x2"), rank_at(16, "2x2")
+    assert r4 > 1, f"2x2 corner collapsed at chi=4 (rank {r4})"
+    assert r16 > r4, (
+        f"2x2 environment did not grow with chi (rank {r4} -> {r16}); a real "
+        f"corner transfer matrix gains boundary entanglement as chi rises"
     )
 
 
