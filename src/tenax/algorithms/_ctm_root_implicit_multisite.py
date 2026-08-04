@@ -342,15 +342,22 @@ def all_projectors_multisite(ECs, chi: int, nrows: int, ncols: int, prev=None):
     attaches to the ``next_coordinate(co)`` side, so ``P_right @ P_left`` is
     the identity on the retained subspace by construction.
     """
-    from tenax.algorithms._ctm_root_implicit_asym import _inv_sqrt, _pin_bond_gauge
+    from tenax.algorithms._ctm_root_implicit_asym import (
+        _inv_sqrt,
+        _pin_bond_gauge,
+        _rank_capped_spectrum,
+    )
 
     out = {}
     for co in coordinates(nrows, ncols):
         M, A, B = half_infinite_multisite(ECs, co, nrows, ncols)
         U, s, Vh = jnp.linalg.svd(M, full_matrices=True)
-        # Floor before S becomes a matrix: an early environment is rank
-        # deficient and a singular S makes the matrix inverse square root NaN.
-        s_k = jnp.maximum(s[:chi], 1e-12 * s[0])
+        # Cap the usable rank and clamp the numerically-null tail (#772). The
+        # same equations run here, so the same precision limit applies: a
+        # retained direction below eps^(1/3) of the largest cannot be resolved
+        # and makes ‖F(y*)‖ explode. See _rank_capped_spectrum for why the
+        # clamp is raised rather than lowered.
+        s_k, _usable_rank = _rank_capped_spectrum(s, chi)
         # Cast to M's dtype — S is a *variable* of the characteristic
         # equations and its cotangent must be free to leave the reals (#721).
         S_keep = jnp.diag(s_k / (jnp.linalg.norm(s_k) + 1e-300)).astype(M.dtype)

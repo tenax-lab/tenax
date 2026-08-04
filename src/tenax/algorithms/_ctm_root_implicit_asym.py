@@ -450,6 +450,51 @@ def _normalize(x: jax.Array) -> jax.Array:
     return x / (jnp.max(jnp.abs(x)) + 1e-300)
 
 
+def _rank_capped_spectrum(s: jax.Array, chi: int, *, rel_floor: float | None = None):
+    """Truncate to ``chi`` and clamp the numerically-null tail (#772).
+
+    Returns ``(s_capped, usable_rank)``.  ``usable_rank`` counts the retained
+    directions that carry real weight; when it is below ``chi`` the extra
+    directions are noise and ``chi`` exceeds what the state's environment
+    supports.
+
+    **Why the clamp is raised, not lowered.**  The covariant characteristic
+    equations carry ``S^-1`` on *both* corner legs (:func:`_modified_env`) plus
+    the Eq. 73 quartic roots on the isometries, so their dependence on ``S`` is
+    cubic.  A retained direction whose weight is below ``eps^(1/3)`` relative to
+    the largest cannot be resolved in the working precision, and retaining one
+    makes ``‖F(y*)‖`` explode — measured 5.7e+05 with NaN gradients on a
+    physical simple-update state at ``chi=6`` (#772).
+
+    The distinction that matters is *small-but-real* versus *floored-and-empty*.
+    A direction at or below the clamp is harmless: the environment carries
+    approximately no weight there, so the large ``S^-1`` multiplies
+    approximately nothing.  A direction carrying genuine but tiny weight is what
+    breaks the equations.  Raising the old ``1e-12`` clamp to ``eps^(1/3)``
+    converts the second kind into the first, which is why it *improves*
+    accuracy rather than costing it: measured ``‖F‖`` 5.7e+05 -> 1.9e-05 at
+    ``chi=6``, and the gradient goes from NaN to finite and FD-correct to 6e-08.
+
+    The clamp is two-sided in its effect and must not be raised further: pushing
+    it above the genuinely-weighted directions makes ``S`` disagree with the
+    environment it came from, which breaks well-conditioned states that were
+    fine (a ``1e-2`` clamp takes the random-tensor fixture from 2e-14 to 4e-03).
+    ``eps^(1/3)`` sits below any physically meaningful weight and above the
+    unresolvable band; ``eps^(1/2)`` is measurably too low (1.3e+04 at chi=6).
+
+    This also subsumes the guard the old constant existed for — early sweeps
+    start from a rank-deficient near-identity environment, and a singular ``S``
+    would make :func:`_inv_sqrt` produce NaNs.  The clamp is strictly positive,
+    so that cannot happen.
+    """
+    s_k = s[:chi]
+    if rel_floor is None:
+        rel_floor = float(jnp.finfo(s_k.dtype).eps ** (1.0 / 3.0))
+    cut = rel_floor * s_k[0]
+    usable_rank = jnp.sum(s_k > cut)
+    return jnp.maximum(s_k, cut), usable_rank
+
+
 def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
     """Decompose the cut in all four directions, from the *same* environment.
 
@@ -469,8 +514,7 @@ def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
         # sweeps start from a near-identity environment whose half-infinite
         # matrix is rank deficient, and a singular S makes the matrix
         # inverse square root below produce NaNs.
-        s_k = s[:chi]
-        s_k = jnp.maximum(s_k, 1e-12 * s_k[0])
+        s_k, _rank = _rank_capped_spectrum(s, chi)
         # Cast to the environment's dtype.  ``S`` is a *variable* of the
         # characteristic equations, and the reverse pass needs it free to leave
         # the reals for the same reason Eq. 79 needs it free to leave the

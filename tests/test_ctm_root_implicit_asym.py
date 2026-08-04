@@ -1274,3 +1274,81 @@ def test_the_environment_phases_are_licensed_gauges_of_the_root():
         n_tree = _from_real_vec(Vh_b[-(j + 1)].conj(), bar_treedef, bar_struct)
         leak = float(jnp.linalg.norm(vjp_p(n_tree)[0])) / grad_scale
         assert leak < 1e-10, (j, leak)
+
+
+# --- #772: rank cap on the retained spectrum -------------------------------
+#
+# The covariant characteristic equations carry S^-1 on BOTH corner legs plus the
+# Eq. 73 quartic roots, so they cannot resolve a retained direction whose weight
+# is below ~eps^(1/3) relative to the largest. Retaining one produced |F(y*)| =
+# 5.7e+05 and NaN gradients on a physical simple-update state (#772).
+#
+# Directions at or below the clamp are harmless -- the large S^-1 multiplies
+# approximately nothing. Directions carrying real but tiny weight are what break
+# the equations, which is why the clamp is raised rather than lowered.
+
+
+def test_rank_cap_leaves_a_healthy_spectrum_untouched():
+    """A well-conditioned cut must pass through bit-exactly: no silent change to
+    states that were already fine."""
+    s = jnp.array([1.0, 0.5, 0.1, 0.02])
+    capped, rank = M._rank_capped_spectrum(s, 4)
+    assert jnp.allclose(capped, s, rtol=0, atol=0)
+    assert int(rank) == 4
+
+
+def test_rank_cap_clamps_a_numerically_null_tail():
+    eps13 = float(jnp.finfo(jnp.float64).eps ** (1 / 3))
+    s = jnp.array([1.0, 2.45e-4, 2.03e-4, 6.96e-8, 1.24e-9])
+    capped, rank = M._rank_capped_spectrum(s, 5)
+    # the three leading directions survive untouched
+    assert jnp.allclose(capped[:3], s[:3], rtol=0, atol=0)
+    # the tail is clamped to one uniform value at the precision-derived level
+    assert float(capped[3]) == pytest.approx(eps13, rel=1e-12)
+    assert float(capped[4]) == pytest.approx(eps13, rel=1e-12)
+    # and the usable rank is reported as 3, not 5
+    assert int(rank) == 3
+
+
+def test_rank_cap_is_relative_to_the_largest_singular_value():
+    """The clamp must scale with the spectrum, not be an absolute constant."""
+    s = jnp.array([1e6, 1e-2])
+    capped, rank = M._rank_capped_spectrum(s, 2)
+    eps13 = float(jnp.finfo(jnp.float64).eps ** (1 / 3))
+    assert float(capped[1]) == pytest.approx(1e6 * eps13, rel=1e-12)
+    assert int(rank) == 1
+
+
+def test_rank_cap_truncates_to_chi_first():
+    s = jnp.array([1.0, 0.5, 0.25, 0.125])
+    capped, _rank = M._rank_capped_spectrum(s, 2)
+    assert capped.shape == (2,)
+
+
+def test_rank_cap_never_returns_a_zero_or_negative_value():
+    """The clamp subsumes the old NaN guard: _inv_sqrt must stay finite."""
+    s = jnp.array([1.0, 0.0, 0.0])
+    capped, rank = M._rank_capped_spectrum(s, 3)
+    assert bool(jnp.all(capped > 0))
+    assert int(rank) == 1
+
+
+def test_rank_cap_honours_an_explicit_relative_floor():
+    s = jnp.array([1.0, 1e-3, 1e-9])
+    capped, rank = M._rank_capped_spectrum(s, 3, rel_floor=1e-6)
+    assert float(capped[1]) == pytest.approx(1e-3, rel=1e-12)
+    assert float(capped[2]) == pytest.approx(1e-6, rel=1e-12)
+    assert int(rank) == 2
+
+
+def test_all_projectors_reports_a_rank_below_chi_on_a_flat_cut():
+    """End-to-end: the usable rank comes back from the projector build so a
+    caller can tell that chi exceeds what the state supports."""
+    A = _site_tensor(D=2)
+    env, a, _meta = M.converge(A, chi=4, max_iter=60, conv_tol=1e-12)
+    projs = M.all_projectors(env, a, 4)
+    for entry in projs:
+        S_keep = entry[3]
+        diag = jnp.abs(jnp.diag(S_keep))
+        # every retained value is strictly positive and no larger than the max
+        assert bool(jnp.all(diag > 0))
