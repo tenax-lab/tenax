@@ -188,12 +188,15 @@ def test_symmetric_variant_is_refused_and_cites_its_blocker():
 @pytest.mark.slow
 @pytest.mark.xfail(
     reason=(
-        "#772: the asym engine's covariant characteristic equations fail on a "
-        "physical simple-update state -- covariant residual 1.9e-2 at chi=4 "
-        "and 5.7e+05 with NaN gradients at chi>=6, while being ~1e-14 clean on "
-        "the random tensor its own tests use. Independent of every CTM "
-        "convergence knob. Until that is fixed this path cannot run a "
-        "production optimization."
+        "#772, NARROWED by the rank cap: the covariant residual on a physical "
+        "simple-update state is now 1.9e-05 at chi=6 (was 5.7e+05) and the "
+        "gradient is finite and FD-correct to 6.9e-08 (was NaN). What still "
+        "fails is the GATE, not the gradient: clamping the unusable directions "
+        "leaves the forward root residual at 2.8e-06, and the default "
+        "root_residual_warn=1e-06 rejects that by 2.8x. The residual floor is "
+        "intrinsic to a clamped spectrum, so closing this needs a decision on "
+        "the tolerance -- note the gradient is 40x more accurate than the gate "
+        "implies, so 1e-06 is not predictive of gradient quality here."
     ),
     strict=False,
 )
