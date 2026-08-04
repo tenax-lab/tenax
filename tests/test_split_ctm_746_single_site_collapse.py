@@ -71,38 +71,49 @@ def test_split_env_is_not_rank_one(su_state):
 
 
 def test_chi_frozen_energy_is_only_a_bug_together_with_a_rank_1_corner(su_state):
-    """The collapse signature is the *conjunction*: frozen in chi AND rank-1.
+    """The environment must *grow* with chi; the energy need not.
 
-    A converged environment is flat in chi too -- that is what convergence
-    means -- so "the energy did not move" is only diagnostic when the corner is
-    also rank-1.  The fused twin of this test (#723) asserted the chi-response
-    alone and was a platform coin flip: it failed on macOS while reporting the
-    *correct* converged energy.
+    Two corrections are baked into this test, both found by required CI on
+    macOS after these files were promoted to `core`:
 
-    ``1x1`` must therefore be both frozen and rank-1; ``2x2`` need only be
-    rank>1, since by then flat means converged.
+    1. The original asserted ``E(chi=4) != E(chi=16)`` on 2x2.  False for a
+       correct implementation -- a converged environment is flat in chi, and on
+       this D=2 state 2x2 converges by chi=4.  It failed on macOS reporting the
+       *correct* value.
+    2. The replacement asserted the 1x1 energy was bit-identical across chi.
+       Also not portable: the split 1x1 energies differ by 1 ULP on macOS
+       (0.49620072949960814 vs ...803) while agreeing exactly on Linux.
+
+    Energy-vs-chi cannot discriminate on this fixture in *either* direction.
+    The portable statement is about the corner rank, which is what the collapse
+    actually destroys:
+
+    ==========  =====  =====  ======  ======
+    recipe      chi=4  chi=8  chi=16  chi=24
+    ==========  =====  =====  ======  ======
+    ``"1x1"``   1      1      1       1
+    ``"2x2"``   4      6      6       6
+    ==========  =====  =====  ======  ======
+
+    Rank-1 is *absorbing* under 1x1 -- the environment can never grow, at any
+    chi.  Under 2x2 it grows until it saturates at the true environment rank.
+    Singular values here are either ~1e-17 or >=2e-3, far from the 1e-10
+    threshold, so the ranks are robust to last-bit platform differences.
     """
-    A, gate = su_state
+    A, _gate = su_state
 
-    def energy(chi, recipe):
+    def rank_at(chi, recipe):
         env = ctm_split_tensor(A, chi=chi, max_iter=100, conv_tol=1e-12, recipe=recipe)
-        return float(compute_energy_split_ctm_tensor(A, env, gate)), _corner_rank(env)
+        return _corner_rank(env)
 
-    E4_1x1, rank4_1x1 = energy(4, "1x1")
-    E16_1x1, rank16_1x1 = energy(16, "1x1")
-    assert E4_1x1 == E16_1x1, (
-        f"the 1x1 split recipe is expected to be chi-frozen; got {E4_1x1!r} vs "
-        f"{E16_1x1!r}. If it now responds to chi, the projector was fixed and "
-        f"this whole file is stale."
+    assert rank_at(4, "1x1") == 1 and rank_at(16, "1x1") == 1, (
+        "the 1x1 split corner is expected to stay rank-1 at every chi; if it "
+        "now grows, the projector was fixed and this whole file is stale"
     )
-    assert rank4_1x1 == 1 and rank16_1x1 == 1
 
-    _E4, rank4 = energy(4, "2x2")
-    _E16, rank16 = energy(16, "2x2")
-    assert rank4 > 1 and rank16 > 1, (
-        f"2x2 split corner collapsed (ranks {rank4}, {rank16}) -- the working "
-        f"recipe has regressed into the #726 failure mode"
-    )
+    r4, r16 = rank_at(4, "2x2"), rank_at(16, "2x2")
+    assert r4 > 1, f"2x2 split corner collapsed at chi=4 (rank {r4})"
+    assert r16 > r4, f"2x2 split environment did not grow with chi (rank {r4} -> {r16})"
 
 
 def test_split_matches_fused_oracle(su_state):
