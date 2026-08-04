@@ -126,11 +126,21 @@ def results_to_markdown(results):
         for r in rows:
             kind = "anchor" if r.get("is_anchor") else "metrics"
             e = r.get("E_site")
+            # #747: never publish an energy that is not entitled to be read as
+            # one.  A cell qualifies only if the optimizer converged AND the CTM
+            # environment did not collapse to a rank-1 corner.  The original
+            # sweep printed six-decimal energies for cells that were neither --
+            # 6 optimizer steps, converged=false, and (on gs_recipe="1x1") a
+            # chi_eff=1 mean-field boundary -- and those numbers were then read
+            # as a physics result.  Render them as "n/c" instead.
+            collapsed = (r.get("corner_rank") or 2) <= 1
+            if not r.get("converged") or collapsed:
+                e = None
             d_ref = (e - REFERENCE_E) if isinstance(e, (int, float)) else None
             lines.append(
                 f"| {r['D']} | {r['chi']} | {kind} | {_status(r)} | "
                 f"{_fmt(r.get('ms_per_step'), '.1f')} | {_fmt(r.get('peak_gb'), '.2f')} | "
-                f"{_fmt(e, '.6f')} | {_fmt(d_ref, '+.2e')} | "
+                f"{_fmt(e, '.6f')} | {_fmt(d_ref, '+.2e')} | "  # n/c when unusable
                 f"{'Y' if r.get('converged') else 'N'} |"
             )
     return "\n".join(lines)
