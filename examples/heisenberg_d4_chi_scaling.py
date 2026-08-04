@@ -190,10 +190,47 @@ def results_to_performance_md(results):
     return "\n".join(lines)
 
 
+def report_frozen_chi(results, *, group_keys=("D", "n_devices", "path")):
+    """#747 backstop: flag chi pairs whose energies are bit-identical.
+
+    The direct detector is ``corner_rank`` (recorded per cell above).  This is
+    the indirect one, for the shape of failure that actually got past four
+    review cycles: a scan whose energy simply does not move with chi reads as
+    convergence.  The D=8 split arm of PR #650 reported an energy identical to
+    13 digits across chi 48 -> 384 and it was a rank-1 boundary.
+
+    Returns the printed report (empty string when nothing is frozen) so callers
+    can also embed it in a results file.
+    """
+    from tenax.algorithms._ctm_diagnostics import frozen_chi_pairs
+
+    groups = {}
+    for r in results:
+        key = tuple(r.get(k) for k in group_keys if k in r)
+        groups.setdefault(key, []).append((r.get("chi"), r.get("E_site")))
+
+    lines = []
+    for key, pts in sorted(groups.items(), key=lambda kv: str(kv[0])):
+        pairs = frozen_chi_pairs([(c, e) for c, e in pts if c is not None])
+        if pairs:
+            label = ", ".join(
+                f"{k}={v}" for k, v in zip(group_keys, key) if v is not None
+            )
+            lines.append(
+                f"  [{label}] bit-identical E at chi pairs {pairs} -- this is "
+                f"the #726 rank-1 collapse signature, not convergence (#747)."
+            )
+    if not lines:
+        return ""
+    report = "\nWARNING: chi-frozen energies detected:\n" + "\n".join(lines)
+    print(report)
+    return report
+
+
 def results_to_csv_rows(results):
     keys = [
         "D", "chi", "n_devices", "E_site", "err_vs_qmc", "ms_per_sweep",
-        "n_sweeps", "peak_gb", "converged", "oom", "error",
+        "n_sweeps", "peak_gb", "converged", "corner_rank", "oom", "error",
     ]
     return [{k: r.get(k) for k in keys} for r in results]
 
@@ -330,7 +367,7 @@ def scan_cell(tensor_path, chi, n_devices):
         "D": D, "chi": chi, "n_devices": n_devices,
         "E_site": None, "err_vs_qmc": None, "total_s": None, "n_sweeps": None,
         "ms_per_sweep": None, "peak_gb": None, "converged": False,
-        "oom": False, "error": None,
+        "corner_rank": None, "oom": False, "error": None,
     }
     try:
         import jax
@@ -338,6 +375,7 @@ def scan_cell(tensor_path, chi, n_devices):
         jax.config.update("jax_enable_x64", True)
         from tenax import CTMConfig, compute_energy_ctm_tensor, heisenberg_gate, \
             sublattice_rotate_gate
+        from tenax.algorithms._ctm_diagnostics import check_ctm_env
         from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
         from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
         from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
@@ -378,11 +416,17 @@ def scan_cell(tensor_path, chi, n_devices):
             )
         E = float(compute_energy_ctm_tensor(A_opt, env, H, 2))
         sweeps = int(info.iterations)
+        # #747: a rank-1 corner is a chi_eff=1 mean-field boundary whose energy
+        # does not respond to chi.  Recorded per cell so the scan cannot later
+        # be read as a convergence success.  (This scan runs the 2x2 default --
+        # `ctm_converge_kwargs` emits no `recipe` -- so it should stay > 1; the
+        # check is here to keep it that way.)
+        rank = check_ctm_env(env, context=f"D=4 chi={chi} n={n_devices}")
 
         result.update(
             E_site=E, err_vs_qmc=E - REFERENCE_E, total_s=float(total_s),
             n_sweeps=sweeps, ms_per_sweep=1000.0 * total_s / max(sweeps, 1),
-            converged=bool(info.converged), peak_gb=_peak_gb(),
+            converged=bool(info.converged), peak_gb=_peak_gb(), corner_rank=rank,
         )
     except Exception as e:  # noqa: BLE001 — record and resume, never crash the sweep
         msg = f"{type(e).__name__}: {e}"
@@ -568,6 +612,7 @@ def _aggregate(results, outdir, d_label=4):
     perf_md = results_to_performance_md(results)
     (Path(outdir) / "convergence.md").write_text(conv_md)
     (Path(outdir) / "performance.md").write_text(perf_md)
+    report_frozen_chi(results)
     rows = results_to_csv_rows(results)
     if rows:
         with open(Path(outdir) / "results.csv", "w", newline="") as fh:

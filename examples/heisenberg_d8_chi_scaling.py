@@ -308,6 +308,11 @@ def scan_cell(tensor_path, chi, n_devices, path):
         "D": D, "chi": chi, "n_devices": n_devices, "path": path,
         "E_site": None, "err_vs_qmc": None, "total_s": None, "n_sweeps": None,
         "ms_per_sweep": None, "peak_gb": None, "converged": False,
+        # #747: rank(C1) <= 1 means the environment collapsed to a chi_eff=1
+        # mean-field boundary and the energy is meaningless, however clean the
+        # chi scan looks.  Recorded per cell so a sweep cannot be read as a
+        # convergence success after the fact.
+        "corner_rank": None,
         "oom": False, "error": None,
     }
     try:
@@ -321,16 +326,16 @@ def scan_cell(tensor_path, chi, n_devices, path):
         H = sublattice_rotate_gate(heisenberg_gate())
 
         if path == "split":
-            E, total_s, sweeps, converged = _converge_split(A_opt, H, chi)
+            E, total_s, sweeps, converged, rank = _converge_split(A_opt, H, chi)
         else:
-            E, total_s, sweeps, converged = _converge_dense(
+            E, total_s, sweeps, converged, rank = _converge_dense(
                 A_opt, H, chi, n_devices
             )
 
         result.update(
             E_site=E, err_vs_qmc=E - REFERENCE_E, total_s=float(total_s),
             n_sweeps=sweeps, ms_per_sweep=1000.0 * total_s / max(sweeps, 1),
-            converged=bool(converged), peak_gb=d4._peak_gb(),
+            converged=bool(converged), peak_gb=d4._peak_gb(), corner_rank=rank,
         )
     except Exception as e:  # noqa: BLE001 — record and resume, never crash the sweep
         msg = f"{type(e).__name__}: {e}"
@@ -346,6 +351,7 @@ def _converge_dense(A_opt, H, chi, n_devices):
     import jax
 
     from tenax import CTMConfig, compute_energy_ctm_tensor
+    from tenax.algorithms._ctm_diagnostics import check_ctm_env
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
     from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
@@ -375,7 +381,8 @@ def _converge_dense(A_opt, H, chi, n_devices):
             lambda x: jax.device_put(x, jax.devices()[0]), env
         )
     E = float(compute_energy_ctm_tensor(A_opt, env, H, 2))
-    return E, total_s, int(info.iterations), bool(info.converged)
+    rank = check_ctm_env(env, context=f"D=8 chi={chi} n={n_devices} dense")
+    return E, total_s, int(info.iterations), bool(info.converged), rank
 
 
 def _converge_split(A_opt, H, chi):
@@ -384,6 +391,7 @@ def _converge_split(A_opt, H, chi):
     import jax
 
     from tenax import compute_energy_split_ctm_tensor
+    from tenax.algorithms._ctm_diagnostics import check_ctm_env
     from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor
 
     # Warm-up compile (process-cached) so the timed converge is pure compute.
@@ -398,7 +406,8 @@ def _converge_split(A_opt, H, chi):
     total_s = time.perf_counter() - t0
 
     E = float(compute_energy_split_ctm_tensor(A_opt, env, H, 2))
-    return E, total_s, int(info.iterations), bool(info.converged)
+    rank = check_ctm_env(env, context=f"D=8 chi={chi} split")
+    return E, total_s, int(info.iterations), bool(info.converged), rank
 
 
 def _su_phase(outdir, chi_su, imaginary_steps, dt, gpu_wait_s=1800):
@@ -533,13 +542,19 @@ def _aggregate8(results, outdir):
     conv_md = "\n".join(sections)
     d4._atomic_write_text(os.path.join(outdir, "convergence.md"), conv_md)
 
-    keys = ["D", "chi", "n_devices", "path", "E_site", "err_vs_qmc",
+    keys = ["D", "chi", "n_devices", "path", "E_site", "err_vs_qmc", "corner_rank",
             "ms_per_sweep", "n_sweeps", "peak_gb", "converged", "oom", "error"]
     rows = [{k: r.get(k) for k in keys} for r in results]
     if rows:
         with open(os.path.join(outdir, "results.csv"), "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=keys)
             w.writeheader(); w.writerows(rows)
+
+    # #747 backstop: a chi scan whose energy does not move is a collapsed
+    # environment, not a converged one.  Reported per (D, n_devices, path) so
+    # the dense and split arms are judged separately -- they do not share a
+    # recipe, which is exactly how the original D=8 reading went wrong.
+    d4.report_frozen_chi(results)
 
     try:
         _plot_wall_comparison(dense, split, outdir)

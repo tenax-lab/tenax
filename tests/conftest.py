@@ -58,6 +58,9 @@ _FILE_MARKERS = {
     # chi<=16 dense, ~50s each.
     "test_ctm_723_single_site_collapse.py": "core",
     "test_split_ctm_746_single_site_collapse.py": "core",
+    # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
+    # the guard: if these rot, nothing else notices a collapsed environment.
+    "test_ctm_collapse_detector.py": "core",
     "test_ctm_tensor.py": "algorithm",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",

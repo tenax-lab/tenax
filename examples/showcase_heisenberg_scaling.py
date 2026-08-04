@@ -109,7 +109,8 @@ def _fmt(x, spec):
 def results_to_csv_rows(results):
     """Flatten results to stable-keyed dicts for CSV export."""
     keys = ["D", "chi", "n_devices", "is_anchor", "gs_num_steps",
-            "ms_per_step", "peak_gb", "E_site", "converged", "oom", "error"]
+            "ms_per_step", "peak_gb", "E_site", "converged", "corner_rank",
+            "oom", "error"]
     return [{k: r.get(k) for k in keys} for r in results]
 
 
@@ -171,6 +172,7 @@ def run_cell(D, chi, n_devices, gs_num_steps, is_anchor):
         "D": D, "chi": chi, "n_devices": n_devices, "gs_num_steps": gs_num_steps,
         "is_anchor": is_anchor,
         "ms_per_step": None, "step_times": None, "peak_gb": None, "E_site": None,
+        "corner_rank": None,
         "converged": False, "jit_compile_time": None, "oom": False, "error": None,
     }
     try:
@@ -218,7 +220,23 @@ def run_cell(D, chi, n_devices, gs_num_steps, is_anchor):
             gs_verbose=False,
             **opt_kwargs,
         )
-        _, _, E_gs, history = optimize_gs_ad(gate, None, config)
+        _A_opt, envs, E_gs, history = optimize_gs_ad(gate, None, config)
+
+        # #747: this driver runs gs_recipe="1x1", whose corner-pair projector
+        # collapses the environment to rank-1 corners -- a chi_eff=1 mean-field
+        # boundary whose energy does not respond to chi.  Every energy this
+        # sweep has ever recorded was measured that way.  Record the rank so a
+        # reader can tell, and warn loudly at run time.
+        try:
+            from tenax.algorithms._ctm_diagnostics import check_ctm_env
+
+            env = envs[(0, 0)] if isinstance(envs, dict) else envs
+            result["corner_rank"] = check_ctm_env(
+                env, context=f"D={D} chi={chi} n={n_devices} "
+                             f"gs_recipe={config.gs_recipe}"
+            )
+        except Exception:  # noqa: BLE001 — a diagnostic must never fail a cell
+            pass
 
         step_times = history.get("step_times") or []
         result["step_times"] = [float(x) for x in step_times]
