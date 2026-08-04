@@ -45,12 +45,26 @@ Requires x64 (the drivers set `jax_enable_x64` themselves) and one GPU with
 
 **Device guard.** Both drivers refuse to start if any visible device is under
 40 GB. That exists to stop a run silently landing on a display GPU — the
-original machine has a 4 GB DGX Display card at index 3, which is why. On
-different hardware:
+original machine has a 4 GB DGX Display card at index 3, which is why. Pass
+`--allow-non-a100` on either driver to disable it; it prints the visible
+devices and continues.
 
-- ≥40 GB A100/H100 → passes unchanged, do nothing.
-- Anything smaller, or a deliberate small-scale smoke test → pass
-  `--allow-non-a100`. It prints the visible devices and continues.
+**The D=8 driver has a second, stricter gate**, and it is not the 40 GB one.
+Its orchestrator picks GPUs from `nvidia-smi` by matching the literal string
+`A100` in the device *name*, so **H100s are rejected too** — "≥40 GB" is not
+the criterion there. `--allow-non-a100` drops that vendor-string requirement
+as well (busy devices and anything named `Display` stay excluded on every
+path, since landing on a display card is a failure on any machine).
+
+So, on different hardware:
+
+- A100 box → passes unchanged, do nothing.
+- H100 or any other ≥40 GB card → pass `--allow-non-a100`. **Without it Run 1
+  does not fail fast**: `_wait_for_free_a100s` polls every 30 s for
+  `--gpu-wait-s` (default 1800 s), gives up, and the run aborts with
+  `[abort] SU produced no A_opt.pkl` — half an hour to discover the hardware
+  was never eligible.
+- Anything smaller, or a deliberate small-scale smoke test → same flag.
 
 Pin devices explicitly rather than relying on index order:
 
@@ -64,11 +78,14 @@ export CUDA_VISIBLE_DEVICES=0        # check nvidia-smi first
 
 ```bash
 uv run python examples/heisenberg_d8_chi_scaling.py --path split \
-    --outdir runs/d8_rerun_2x2
+    --outdir runs/d8_rerun_2x2          # add --allow-non-a100 off the A100 box
 ```
 
 **No code change needed.** PR #768 made `ctm_split_tensor` default to
 `recipe="2x2"`, so the driver now runs the correct recipe by construction.
+There is no `--gs-recipe` here and none is needed: this driver's `A_opt` comes
+from the SU seed, not from a `gs_*` optimization, so the collapsed-environment
+contamination that Run 2 has to undo never applied to it.
 
 ### What to check, in order
 

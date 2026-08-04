@@ -57,6 +57,85 @@ def test_select_free_a100s_excludes_busy_a100():
         d8.select_free_a100s(rows, 4)
 
 
+# A non-A100 box (the #747 re-runs move to other hardware): H100s plus the same
+# kind of small display GPU the A100-only guard exists to avoid.
+_SMI_H100 = (
+    "0, NVIDIA H100 80GB HBM3, 12, 0\n"
+    "1, NVIDIA H100 80GB HBM3, 40, 0\n"
+    "2, NVIDIA DGX Display, 7, 0\n"
+)
+
+
+def test_select_free_a100s_refuses_non_a100_by_default():
+    """Default stays strict: the vendor-string filter is what stops a run from
+    landing on the origin box's display GPU."""
+    rows = d8._parse_nvidia_smi(_SMI_H100)
+    with pytest.raises(RuntimeError):
+        d8.select_free_a100s(rows, 1)
+
+
+def test_select_free_a100s_honours_the_opt_out_argument():
+    rows = d8._parse_nvidia_smi(_SMI_H100)
+    assert d8.select_free_a100s(rows, 2, allow_non_a100=True) == [0, 1]
+
+
+def test_select_free_a100s_honours_the_opt_out_env_var(monkeypatch):
+    """`--allow-non-a100` reaches the selector through the environment, since
+    the orchestrator pins GPUs in a spawned worker that inherits env, not args."""
+    rows = d8._parse_nvidia_smi(_SMI_H100)
+    monkeypatch.setenv("TENAX_ALLOW_NON_A100", "1")
+    assert d8.select_free_a100s(rows, 2) == [0, 1]
+
+
+def test_opt_out_still_never_picks_the_display_gpu():
+    """Relaxing the A100 requirement must not relax the display-GPU exclusion —
+    that is the failure the guard was built for."""
+    rows = d8._parse_nvidia_smi(_SMI_H100)
+    assert 2 not in d8.select_free_a100s(rows, 2, allow_non_a100=True)
+    with pytest.raises(RuntimeError):
+        d8.select_free_a100s(rows, 3, allow_non_a100=True)
+
+
+def test_opt_out_still_excludes_busy_devices():
+    rows = d8._parse_nvidia_smi(
+        "0, NVIDIA H100 80GB HBM3, 12, 0\n1, NVIDIA H100 80GB HBM3, 9000, 97\n"
+    )
+    assert d8.select_free_a100s(rows, 1, allow_non_a100=True) == [0]
+    with pytest.raises(RuntimeError):
+        d8.select_free_a100s(rows, 2, allow_non_a100=True)
+
+
+def test_d8_parser_accepts_allow_non_a100():
+    """The handover doc points operators at this flag; before this change the
+    D=8 driver rejected it with argparse exit 2."""
+    args = d8._build_argparser().parse_args(["--path", "split", "--allow-non-a100"])
+    assert args.allow_non_a100 is True
+    assert d8._build_argparser().parse_args(["--path", "split"]).allow_non_a100 is False
+
+
+def test_allow_non_a100_flag_reaches_the_environment(monkeypatch):
+    """The selector runs inside spawned workers, so the flag has to travel as
+    an env var; a worker started directly with --cell never reaches main()."""
+    monkeypatch.delenv("TENAX_ALLOW_NON_A100", raising=False)
+    args = d8._build_argparser().parse_args(["--path", "split", "--allow-non-a100"])
+    assert d8._apply_device_opt_out(args) is True
+    import os
+
+    assert os.environ["TENAX_ALLOW_NON_A100"] == "1"
+    # and the selector, called with no explicit argument, now honours it
+    rows = d8._parse_nvidia_smi(_SMI_H100)
+    assert d8.select_free_a100s(rows, 1) == [0]
+
+
+def test_allow_non_a100_absent_leaves_environment_untouched(monkeypatch):
+    monkeypatch.delenv("TENAX_ALLOW_NON_A100", raising=False)
+    args = d8._build_argparser().parse_args(["--path", "split"])
+    assert d8._apply_device_opt_out(args) is False
+    import os
+
+    assert "TENAX_ALLOW_NON_A100" not in os.environ
+
+
 def test_parse_nvidia_smi_skips_malformed_and_na_lines():
     text = (
         "0, NVIDIA A100-SXM4-80GB, 56, 0\n"
