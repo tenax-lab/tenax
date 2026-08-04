@@ -70,16 +70,38 @@ def test_split_env_is_not_rank_one(su_state):
     )
 
 
-def test_split_energy_moves_with_chi(su_state):
-    """#747's cheap detector: a chi-frozen energy is a broken environment."""
+def test_chi_frozen_energy_is_only_a_bug_together_with_a_rank_1_corner(su_state):
+    """The collapse signature is the *conjunction*: frozen in chi AND rank-1.
+
+    A converged environment is flat in chi too -- that is what convergence
+    means -- so "the energy did not move" is only diagnostic when the corner is
+    also rank-1.  The fused twin of this test (#723) asserted the chi-response
+    alone and was a platform coin flip: it failed on macOS while reporting the
+    *correct* converged energy.
+
+    ``1x1`` must therefore be both frozen and rank-1; ``2x2`` need only be
+    rank>1, since by then flat means converged.
+    """
     A, gate = su_state
-    env_lo = ctm_split_tensor(A, chi=4, max_iter=100, conv_tol=1e-12)
-    env_hi = ctm_split_tensor(A, chi=16, max_iter=100, conv_tol=1e-12)
-    E_lo = float(compute_energy_split_ctm_tensor(A, env_lo, gate))
-    E_hi = float(compute_energy_split_ctm_tensor(A, env_hi, gate))
-    assert E_lo != E_hi, (
-        f"split energy bit-identical across a 4x change in chi ({E_lo!r}); "
-        f"that is the rank-1 collapse signature (#726/#746), not convergence"
+
+    def energy(chi, recipe):
+        env = ctm_split_tensor(A, chi=chi, max_iter=100, conv_tol=1e-12, recipe=recipe)
+        return float(compute_energy_split_ctm_tensor(A, env, gate)), _corner_rank(env)
+
+    E4_1x1, rank4_1x1 = energy(4, "1x1")
+    E16_1x1, rank16_1x1 = energy(16, "1x1")
+    assert E4_1x1 == E16_1x1, (
+        f"the 1x1 split recipe is expected to be chi-frozen; got {E4_1x1!r} vs "
+        f"{E16_1x1!r}. If it now responds to chi, the projector was fixed and "
+        f"this whole file is stale."
+    )
+    assert rank4_1x1 == 1 and rank16_1x1 == 1
+
+    _E4, rank4 = energy(4, "2x2")
+    _E16, rank16 = energy(16, "2x2")
+    assert rank4 > 1 and rank16 > 1, (
+        f"2x2 split corner collapsed (ranks {rank4}, {rank16}) -- the working "
+        f"recipe has regressed into the #726 failure mode"
     )
 
 
