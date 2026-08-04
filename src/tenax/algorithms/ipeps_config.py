@@ -118,7 +118,15 @@ class CTMConfig:
     # — explicit user choice is preserved.  See ipeps_ad_paths.md.
     forward_gauge: str = "phase"
     # Optional reference-mode implicit AD mode (App. C-F) for dense 1-site C4v.
-    ctm_ad_mode: str | None = None  # None or "c4v_reference"
+    # None | "c4v_reference" | "root_implicit" | "root_implicit_symmetric".
+    # The root-implicit modes (#715) drive arXiv:2607.15030 characteristic
+    # equations instead of back-propagating the CTM sweep, so no SVD/eigh
+    # backward appears in the gradient path.  See
+    # ``ipeps_optimize_root_implicit`` -- notably that they own their CTM
+    # convergence and reject warm-start-dependent knobs rather than
+    # silently ignoring them, and that they are a stability/accuracy
+    # lever, not a speed one.
+    ctm_ad_mode: str | None = None
     adjoint_solver: str = "bicgstab"  # "bicgstab" or "gmres"
     adjoint_maxiter: int = 50
     adjoint_tol: float = 1e-8
@@ -261,7 +269,12 @@ class CTMConfig:
     ctm_chunk_size: int | None = None
 
     def __post_init__(self):
-        valid_modes = {None, "c4v_reference"}
+        valid_modes = {
+            None,
+            "c4v_reference",
+            "root_implicit",
+            "root_implicit_symmetric",
+        }
         if self.ctm_ad_mode not in valid_modes:
             raise ValueError(
                 f"ctm_ad_mode must be one of {valid_modes}, got {self.ctm_ad_mode!r}"

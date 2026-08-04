@@ -21,6 +21,7 @@ from tenax.algorithms.ipeps_ad_policy import (
     build_ad_ctm_config,
     resolve_projector_backward,
     use_reference_c4v_path,
+    use_root_implicit_path,
 )
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
@@ -925,6 +926,18 @@ def optimize_gs_ad(
             "unit_cell='2site' or '1x1' (non-C4v-reference, incl. cg_gates). "
             "Multisite / C4v-reference checkpoint wiring is a follow-up (#497)."
         )
+
+    # Root implicit AD (#715).  Placed ahead of the unit-cell branches because
+    # the variant (dense 1x1 vs dense cell vs symmetric) is selected from the
+    # unit cell *inside* that dispatcher, and its own validator decides what it
+    # can honour -- routing through the ordinary branches first would apply
+    # warm-start machinery the entry points cannot use.
+    if use_root_implicit_path(config):
+        from tenax.algorithms.ipeps_optimize_root_implicit import (
+            optimize_gs_ad_root_implicit,
+        )
+
+        return optimize_gs_ad_root_implicit(hamiltonian_gate, A_init, config)
 
     if isinstance(config.unit_cell, Lattice):
         return _optimize_gs_ad_multisite(hamiltonian_gate, A_init, config)

@@ -318,14 +318,19 @@ _register(
         type_str="str | None",
         category=TuningCategory.METHOD_SELECTION,
         description=(
-            "Opt-in reference-mode implicit AD path for dense 1-site C4v "
-            "(Francuz et al. App. C–F). None disables; 'c4v_reference' "
-            "enables the dense C4v fixed-point backward."
+            "Selects a non-default AD backward. None uses fixed-point implicit "
+            "AD. 'c4v_reference' enables the dense 1-site C4v fixed-point "
+            "backward (Francuz et al. App. C-F). 'root_implicit' and "
+            "'root_implicit_symmetric' drive root implicit differentiation "
+            "(arXiv:2607.15030), which removes every SVD/eigh backward from "
+            "the gradient path -- a stability and block-sparse-accuracy lever, "
+            "NOT a speed one (#715 is on the wrong side of the crossover at "
+            "production D and chi)."
         ),
         hint=TuningHint(
             scale=Scale.CATEGORICAL,
             sensitivity=Sensitivity.HIGH,
-            values=(None, "c4v_reference"),
+            values=(None, "c4v_reference", "root_implicit"),
         ),
         dependencies=(
             Dependency(
@@ -338,10 +343,23 @@ _register(
             ),
             Dependency(
                 name="iPEPSConfig.unit_cell",
-                relation="'c4v_reference' requires unit_cell='1x1'",
+                relation=(
+                    "'c4v_reference' requires unit_cell='1x1'; 'root_implicit' "
+                    "currently wires the dense 1x1 engine only"
+                ),
+            ),
+            Dependency(
+                name="CTMConfig.chi_auto_bump",
+                relation=(
+                    "the root_implicit modes reject chi_auto_bump, chi_ramp, "
+                    "ctmrg_heuristic_increase_chi, gs_checkpoint_path, "
+                    "cg_gates and gs_metric_precond rather than silently "
+                    "ignoring them -- they own their CTM convergence and take "
+                    "no warm-start environment"
+                ),
             ),
         ),
-        references=("arXiv:2311.11894",),
+        references=("arXiv:2311.11894", "arXiv:2607.15030"),
     )
 )
 
