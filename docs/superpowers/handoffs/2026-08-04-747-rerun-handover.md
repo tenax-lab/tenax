@@ -76,16 +76,82 @@ export CUDA_VISIBLE_DEVICES=0        # check nvidia-smi first
 
 ## Run 1 — D=8 split arm at 2x2 (the invalid physics result)
 
-```bash
-uv run python examples/heisenberg_d8_chi_scaling.py --path split \
-    --outdir runs/d8_rerun_2x2          # add --allow-non-a100 off the A100 box
-```
-
 **No code change needed.** PR #768 made `ctm_split_tensor` default to
 `recipe="2x2"`, so the driver now runs the correct recipe by construction.
 There is no `--gs-recipe` here and none is needed: this driver's `A_opt` comes
 from the SU seed, not from a `gs_*` optimization, so the collapsed-environment
 contamination that Run 2 has to undo never applied to it.
+
+### Commands
+
+**Step 0 — smoke first.** Five minutes, and it exercises the whole
+orchestrator → worker → aggregate path including `corner_rank` recording. Do
+not skip it on new hardware; it is how you find a device-guard or driver
+problem before burning the real ladder.
+
+```bash
+uv run python examples/heisenberg_d8_chi_scaling.py --path split \
+    --outdir runs/d8_rerun_2x2 --smoke        # writes runs/d8_rerun_2x2_smoke/
+```
+
+`--smoke` shrinks to `chi_su=8`, 20 imaginary-time steps, χ ladder `8,12`,
+single device. Check `results.csv` shows `corner_rank > 1` before continuing.
+
+**Step 1 — the real run.** On the A100 box:
+
+```bash
+uv run python examples/heisenberg_d8_chi_scaling.py --path split \
+    --outdir runs/d8_rerun_2x2
+```
+
+On an H100 or any other ≥40 GB card, add the opt-out — see the device-guard
+note above for why the run otherwise stalls 30 minutes and aborts:
+
+```bash
+uv run python examples/heisenberg_d8_chi_scaling.py --path split \
+    --outdir runs/d8_rerun_2x2 --allow-non-a100
+```
+
+Useful adjustments: `--chi-ladder` (default
+`64,96,112,128,192,256,320,384,448`) to stop short of the wall or extend past
+it; `--path both` to re-measure the dense arm alongside, at roughly double the
+wall-clock — **not needed for the physics**, since the audit already cleared
+dense; `--cell-timeout-s` (default 2400) if a large-χ cell needs a longer wall.
+
+**Resume is automatic and free.** Each cell writes
+`runs/d8_rerun_2x2/D8_chi<χ>_n<n>_split.json`, and a re-run loads whatever is
+already there instead of recomputing it. If the run stops — GPU contention,
+timeout, ctrl-C — just issue the same command again. The SU phase likewise
+skips when `A_opt.pkl` exists.
+
+**Escape hatch: drive the cells yourself.** If GPU selection misbehaves (a
+scheduler that hands you devices, an unusual `nvidia-smi`), bypass the
+orchestrator's picker entirely by running the workers directly. Pin devices
+with `CUDA_VISIBLE_DEVICES` and use exactly these filenames, or the aggregation
+step won't find them:
+
+```bash
+export CUDA_VISIBLE_DEVICES=0
+export TENAX_ALLOW_NON_A100=1        # only if not on an A100
+D=examples/heisenberg_d8_chi_scaling.py
+O=runs/d8_rerun_2x2
+
+uv run python $D --cell --phase su --outdir $O --n-devices 1 \
+    --out $O/su_status.json
+for chi in 64 96 112 128 192 256 320 384 448; do
+  uv run python $D --cell --phase scan --outdir $O --chi $chi \
+      --n-devices 1 --path split --out $O/D8_chi${chi}_n1_split.json
+done
+uv run python $D --path split --outdir $O    # aggregates the cached cells
+```
+
+The final orchestrator call needs no GPU: every cell JSON already exists, so it
+loads them and writes `results.csv` / `convergence.md` without launching a
+worker.
+
+**Reusing an outdir from an earlier attempt?** Delete `A_opt.pkl` and the
+per-cell JSONs first — both are treated as cache and would be silently reused,
+which is how a stale run masquerades as a fresh one.
 
 ### What to check, in order
 
