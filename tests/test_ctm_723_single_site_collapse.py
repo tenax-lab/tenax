@@ -75,16 +75,44 @@ def test_single_site_env_is_not_rank_one(su_state):
     )
 
 
-def test_single_site_energy_moves_with_chi(su_state):
-    """#747's cheap detector: a chi-frozen energy is a broken environment."""
+def test_chi_frozen_energy_is_only_a_bug_together_with_a_rank_1_corner(su_state):
+    """The collapse signature is the *conjunction*: frozen in chi AND rank-1.
+
+    #747 uses "the energy does not move with chi" as the cheap detector, and on
+    the ``1x1`` recipe that is exactly right -- the energy is bit-identical from
+    chi=2 to chi=32 because the boundary is chi_eff=1.
+
+    But a *converged* environment is also flat in chi; that is what convergence
+    means.  On this D=2 state the 2x2 energy is already converged at chi=4, so
+    E(4) and E(16) agree to the last bit on some platforms and differ in it on
+    others.  An earlier version of this test asserted ``E(4) != E(16)`` for 2x2
+    and was a coin flip: it passed on Linux and failed on macOS reporting the
+    *correct* value, -0.488638504625172.
+
+    So the two halves are asserted separately and honestly: ``1x1`` must be both
+    frozen and rank-1, while ``2x2`` need only be rank>1 -- its energy is
+    allowed to be flat, because by then flat means converged.
+    """
     A, gate = su_state
-    e_lo, _ = ctm_tensor(A, chi=4, max_iter=100, conv_tol=1e-12)
-    e_hi, _ = ctm_tensor(A, chi=16, max_iter=100, conv_tol=1e-12)
-    E_lo = float(compute_energy_ctm_tensor(A, e_lo, gate, d=2))
-    E_hi = float(compute_energy_ctm_tensor(A, e_hi, gate, d=2))
-    assert E_lo != E_hi, (
-        f"energy bit-identical across a 4x change in chi ({E_lo!r}); that is the "
-        f"rank-1 collapse signature (#723/#747), not convergence"
+
+    def energy(chi, recipe):
+        env, _ = ctm_tensor(A, chi=chi, max_iter=100, conv_tol=1e-12, recipe=recipe)
+        return float(compute_energy_ctm_tensor(A, env, gate, d=2)), _corner_rank(env)
+
+    E4_1x1, rank4_1x1 = energy(4, "1x1")
+    E16_1x1, rank16_1x1 = energy(16, "1x1")
+    assert E4_1x1 == E16_1x1, (
+        f"the 1x1 recipe is expected to be chi-frozen; got {E4_1x1!r} vs "
+        f"{E16_1x1!r}. If 1x1 now responds to chi, the projector was fixed and "
+        f"this whole file is stale."
+    )
+    assert rank4_1x1 == 1 and rank16_1x1 == 1
+
+    _E4, rank4 = energy(4, "2x2")
+    _E16, rank16 = energy(16, "2x2")
+    assert rank4 > 1 and rank16 > 1, (
+        f"2x2 corner collapsed (ranks {rank4}, {rank16}) -- the working recipe "
+        f"has regressed into the #723 failure mode"
     )
 
 
