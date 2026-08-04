@@ -176,6 +176,23 @@ def test_split_implicit_grad_matches_explicit():
     "pre-existing Wirtinger gap" previously cited here did not exist: the
     computation is real-valued throughout, and the AD-vs-FD disagreement was
     the #750 SVD-adjoint bug, now fixed).
+
+    Pinned to ``recipe="1x1"``.  This is an *AD-plumbing* test — that the
+    Neumann backward reproduces the unrolled one through the same forward —
+    and it needs a forward that actually reaches an element-wise fixed point.
+    ``_make_site`` is a **random** tensor, and on random tensors the 2x2
+    gauge-fixed split forward does not converge element-wise: the per-sweep
+    diff sits at 0.5..0.85 after 80 sweeps instead of falling to ``conv_tol``.
+    That is not specific to the single-site reroute in #746 — the *already
+    shipped* 2-site path (``_split_step_multisite``, 2x2 since #463 Phase 2)
+    behaves the same on the same fixture (0.68).  It only looked converged on
+    ``1x1`` because rank-1 corners are an absorbing state, so the sweep is
+    stationary to 1e-15 while being physically meaningless (#726).  The silent
+    non-convergence itself is tracked in #767.
+
+    Physical states are unaffected and are covered on the 2x2 default by
+    ``test_split_ctm_746_single_site_collapse.py`` (implicit vs explicit agree
+    to 7.1e-10 on a simple-update state, whose forward converges to 1.3e-14).
     """
     from tenax.algorithms._split_ctm_energy_ad import (
         ctm_energy_split_explicit,
@@ -197,6 +214,7 @@ def test_split_implicit_grad_matches_explicit():
             max_iter=80,
             conv_tol=1e-13,
             min_iter=2,
+            recipe="1x1",
         ).real
 
     def loss_exp(a):
@@ -208,6 +226,7 @@ def test_split_implicit_grad_matches_explicit():
             chi_I=chi,
             warmup_steps=40,
             backprop_steps=40,
+            recipe="1x1",
         ).real
 
     e_i, g_i = jax.value_and_grad(loss_imp)(A)
@@ -231,6 +250,20 @@ def test_split_implicit_warm_start_matches_cold():
     the forward — even from a *different* tensor's converged env — must not
     change the energy or the implicit gradient; it only speeds convergence.
     The custom_vjp returns a zero cotangent for env_init.
+
+    Pinned to ``recipe="1x1"`` for the same reason as
+    ``test_split_implicit_grad_matches_explicit``: seed-independence is a
+    property *of a fixed point*, so the claim is only testable where the
+    forward reaches one.  ``_make_site`` is a random tensor, on which the 2x2
+    gauge-fixed forward does not converge element-wise (per-sweep diff 0.5..0.85
+    after 80 sweeps, shared with the already-shipped 2-site path -- #767), so warm
+    and cold land in different places and the premise fails before the wiring is
+    exercised.  On ``1x1`` the forward is stationary and the wiring is what gets
+    tested.
+
+    The same property on the 2x2 default is covered on a physical state in
+    ``test_split_ctm_746_single_site_collapse.py``: warm vs cold there give a
+    bit-identical energy (|dE| = 0.0) and gradients agreeing to 1.9e-13.
     """
     from tenax.algorithms._split_ctm_energy_ad import (
         converge_split_env,
@@ -242,7 +275,7 @@ def test_split_implicit_warm_start_matches_cold():
     A = _make_site(D, 2, seed=seed)
     A_seed = _make_site(D, 2, seed=5)
     gate = _heisenberg_gate()
-    kw = dict(chi=chi, chi_I=chi, max_iter=80, conv_tol=1e-12, min_iter=2)
+    kw = dict(chi=chi, chi_I=chi, max_iter=80, conv_tol=1e-12, min_iter=2, recipe="1x1")
     warm_env = converge_split_env(A_seed, **kw)
 
     def cold(a):
@@ -307,6 +340,12 @@ def test_make_ctm_energy_fn_dispatches_to_split_implicit():
         max_iter=60,
         conv_tol=1e-12,
         min_iter=2,
+        # Match the recipe handed to ``make_ctm_energy_fn`` above.  Since #746
+        # ``ctm_energy_split_implicit`` defaults to "2x2", so leaving this off
+        # compares a 1x1 dispatch against a 2x2 direct call and fails on the
+        # recipe difference rather than on the dispatch wiring this test is
+        # about (measured 0.07447736 vs 0.07545637).
+        recipe="1x1",
     ).real
 
     assert jnp.allclose(e, e_direct, atol=1e-10)

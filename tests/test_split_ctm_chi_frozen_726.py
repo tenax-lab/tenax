@@ -19,10 +19,13 @@ Two guards live here:
 * ``test_the_2x2_recipe_energy_is_not_frozen_in_chi`` -- the positive control.
   It must keep passing; if it ever goes chi-frozen, the *working* recipe has
   regressed into the same failure mode.
-* ``test_single_site_split_rejects_the_default_2x2_recipe`` -- the production
+* ``test_single_site_split_honours_the_default_2x2_recipe`` -- the production
   guard.  ``gs_recipe="2x2"`` is the default, and the single-site split path
-  runs ``1x1`` moves unconditionally, so before #726 the default config
-  silently returned mean-field numbers.
+  used to run ``1x1`` moves unconditionally, so before #726 the default config
+  silently returned mean-field numbers.  #726 made that raise; #746 routed the
+  path through the 2x2 plaquette sweep, so it now has to *run* and return a
+  rank>1 corner.  ``test_single_site_split_still_accepts_1x1_for_bisection``
+  keeps the opt-in legacy path honest.
 
 The ``1x1`` collapse itself is deliberately *not* asserted as expected
 behaviour here.  Three existing tests were shaped around that symptom (see
@@ -31,6 +34,8 @@ tracked separately.
 """
 
 from __future__ import annotations
+
+import dataclasses
 
 import jax
 import numpy as np
@@ -120,60 +125,72 @@ def test_the_2x2_recipe_corner_is_not_rank_1(_su_state):
     )
 
 
-def test_single_site_split_rejects_the_default_2x2_recipe():
-    """The production guard: the default config must not silently run 1x1.
+def _split_cfg(gs_num_steps):
+    from tenax.algorithms.ipeps_config import iPEPSConfig as Cfg
 
-    ``gs_recipe`` defaults to ``"2x2"`` and the single-site split path runs the
-    ``1x1`` moves unconditionally, so before #726 a default-configured
+    return Cfg(
+        max_bond_dim=2,
+        num_imaginary_steps=2,
+        dt=0.05,
+        unit_cell="1x1",
+        gs_num_steps=gs_num_steps,
+        ctm=CTMConfig(chi=4, max_iter=20, conv_tol=1e-8, fuse_virtual_legs=False),
+    )
+
+
+@pytest.mark.parametrize("gs_num_steps", [1, 0])
+def test_single_site_split_honours_the_default_2x2_recipe(gs_num_steps):
+    """The default config must actually *run* 2x2 on the single-site split path.
+
+    History: ``gs_recipe`` defaults to ``"2x2"`` while the single-site split
+    path ran the ``1x1`` moves unconditionally, so a default-configured
     ``fuse_virtual_legs=False`` run returned a chi_eff=1 mean-field energy with
-    no indication anything was wrong.  It must now raise instead.
+    no indication anything was wrong.  #726 made that *raise* rather than lie.
+    #746 then routed the path through the 2x2 plaquette sweep, so the honest
+    behaviour is now to run it.
+
+    ``gs_num_steps=0`` is the evaluate-only case: ``loss_fn`` is never invoked
+    and the final ``_eval_fresh`` reaches ``_split_forward`` ->
+    ``converge_split_env`` directly.  That path used to bypass a loss-only
+    guard (Codex review, PR #749), so it is still covered here — it must now
+    succeed by the same route it used to escape through.
     """
-    from tenax.algorithms.ipeps_config import iPEPSConfig as Cfg
     from tenax.algorithms.ipeps_optimize import optimize_gs_ad
 
     gate = sublattice_rotate_gate(heisenberg_gate())
-    cfg = Cfg(
-        max_bond_dim=2,
-        num_imaginary_steps=2,
-        dt=0.05,
-        unit_cell="1x1",
-        gs_num_steps=1,
-        ctm=CTMConfig(chi=4, max_iter=20, conv_tol=1e-8, fuse_virtual_legs=False),
-    )
+    cfg = _split_cfg(gs_num_steps)
     assert cfg.gs_recipe == "2x2", "precondition: 2x2 is the default recipe"
 
     _E, tensors, _envs = ipeps(gate, None, cfg)
-    with pytest.raises(NotImplementedError, match=r"only implements the '1x1'"):
-        optimize_gs_ad(gate, tensors[0], cfg)
+    _A_opt, envs, E = optimize_gs_ad(gate, tensors[0], cfg)
+    assert np.isfinite(float(E)), f"split 2x2 optimize returned {E!r}"
+
+    # The point of the recipe change: a non-collapsed environment.
+    env = envs[(0, 0)] if isinstance(envs, dict) else envs
+    s = np.linalg.svd(np.asarray(env.C1.todense()), compute_uv=False)
+    rank = int((s > 1e-10 * s[0]).sum())
+    assert rank > 1, (
+        f"single-site split env still rank {rank} under gs_recipe='2x2' "
+        f"(spectrum {s[:6]}); the #726 collapse survived the #746 reroute"
+    )
 
 
-def test_the_guard_survives_when_the_loss_is_never_called():
-    """``gs_num_steps=0`` must reject too -- the loss-path guard is not enough.
+def test_single_site_split_still_accepts_1x1_for_bisection():
+    """``gs_recipe='1x1'`` stays reachable, and still collapses.
 
-    Evaluate-only mode (and a resumed checkpoint already at or beyond the final
-    step) never calls ``loss_fn``, so a guard living only inside
-    ``_split_ctm_energy_fn`` is bypassed: the final ``_eval_fresh`` reaches
-    ``_split_forward`` -> ``converge_split_env`` directly and still returns the
-    1x1 chi-independent energy under the default ``gs_recipe='2x2'``.  The
-    rejection therefore has to happen in ``validate_split_ctm_config``, before
-    the optimization loop.
-
-    Caught by Codex review on PR #749.
+    Kept so the regression-bisection path does not rot: if this starts
+    returning a rank>1 corner, the 1x1 projector itself changed and the
+    surrounding #726/#746 documentation is stale.
     """
-    from tenax.algorithms.ipeps_config import iPEPSConfig as Cfg
     from tenax.algorithms.ipeps_optimize import optimize_gs_ad
 
     gate = sublattice_rotate_gate(heisenberg_gate())
-    cfg = Cfg(
-        max_bond_dim=2,
-        num_imaginary_steps=2,
-        dt=0.05,
-        unit_cell="1x1",
-        gs_num_steps=0,  # evaluate-only: loss_fn is never invoked
-        ctm=CTMConfig(chi=4, max_iter=20, conv_tol=1e-8, fuse_virtual_legs=False),
-    )
-    assert cfg.gs_recipe == "2x2", "precondition: 2x2 is the default recipe"
+    cfg = _split_cfg(1)
+    cfg = dataclasses.replace(cfg, gs_recipe="1x1")
 
     _E, tensors, _envs = ipeps(gate, None, cfg)
-    with pytest.raises(NotImplementedError, match=r"only implements the '1x1'"):
-        optimize_gs_ad(gate, tensors[0], cfg)
+    _A_opt, envs, E = optimize_gs_ad(gate, tensors[0], cfg)
+    assert np.isfinite(float(E))
+    env = envs[(0, 0)] if isinstance(envs, dict) else envs
+    s = np.linalg.svd(np.asarray(env.C1.todense()), compute_uv=False)
+    assert int((s > 1e-10 * s[0]).sum()) == 1

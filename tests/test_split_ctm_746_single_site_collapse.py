@@ -129,3 +129,114 @@ def test_unknown_recipe_raises(su_state):
     A, _ = su_state
     with pytest.raises(ValueError, match="Unknown split CTM recipe"):
         ctm_split_tensor(A, chi=4, max_iter=1, recipe="3x3")
+
+
+# ------------------------------------------------------------------ #
+# AD path (#746): the reroute has to survive differentiation, not just  #
+# the forward.  Before #746 the single-site split AD path was rejected  #
+# outright under the default gs_recipe="2x2" (ipeps_ad_policy).         #
+# ------------------------------------------------------------------ #
+
+
+def test_split_2x2_implicit_grad_matches_explicit(su_state):
+    """Implicit (Neumann) and explicit (unrolled) backward must agree.
+
+    Two independent gradient mechanisms through the same 2x2 split forward.
+    Measured agreement on this state: 7.1e-10 relative.  A directional finite
+    difference along ``g/|g|`` matches the analytic ``g.v`` to 5.3e-5, stable
+    across eps=1e-4..1e-6 (so the residual is CTM fixed-point accuracy, not FD
+    noise) -- kept out of the test because a converged-enough FD costs minutes.
+    """
+    import jax.numpy as jnp
+
+    from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+    from tenax.algorithms._split_ctm_energy_ad import (
+        ctm_energy_split_explicit,
+        ctm_energy_split_implicit,
+    )
+    from tenax.core.tensor import DenseTensor
+
+    A, gate = su_state
+    idx = A.indices
+    x0 = A.todense()
+
+    def E_imp(x):
+        return ctm_energy_split_implicit(
+            {(0, 0): DenseTensor(x, idx)},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=4,
+            chi_I=4,
+            max_iter=60,
+            conv_tol=1e-11,
+        ).real
+
+    def E_exp(x):
+        return ctm_energy_split_explicit(
+            {(0, 0): DenseTensor(x, idx)},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=4,
+            chi_I=4,
+            warmup_steps=12,
+            backprop_steps=12,
+        ).real
+
+    assert float(E_imp(x0)) == pytest.approx(float(E_exp(x0)), rel=1e-8)
+
+    g_imp = np.asarray(jax.grad(E_imp)(x0))
+    g_exp = np.asarray(jax.grad(E_exp)(x0))
+    den = max(np.linalg.norm(g_imp), np.linalg.norm(g_exp), 1e-30)
+    rel = np.linalg.norm(g_imp - g_exp) / den
+    assert np.linalg.norm(g_imp) > 1e-8, "gradient is identically zero"
+    assert rel < 1e-6, f"implicit vs explicit split-2x2 gradient differ by {rel:.3e}"
+    assert jnp.all(jnp.isfinite(jnp.asarray(g_imp)))
+
+
+def test_split_2x2_warm_start_matches_cold(su_state):
+    """The 2x2 fixed point is seed-independent, on a state that reaches one.
+
+    ``test_split_ctm_fuse_flag.py`` tests this on ``recipe="1x1"`` because its
+    random ``_make_site`` fixture does not converge element-wise under 2x2
+    (per-sweep diff 0.5..0.85 after 80 sweeps -- a property shared with the
+    already-shipped 2-site path, not introduced by the #746 reroute -- #767).  A
+    physical simple-update state does converge (1.3e-14), so the claim is
+    testable here: warm-starting from a *different* tensor's converged env must
+    not move the energy or the implicit gradient.
+
+    Measured: |dE| = 0.0 exactly, gradient agreement 1.9e-13.
+    """
+    import jax.numpy as jnp
+
+    from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+    from tenax.algorithms._split_ctm_energy_ad import (
+        converge_split_env,
+        ctm_energy_split_implicit,
+    )
+
+    A, gate = su_state
+    kw = dict(chi=4, chi_I=4, max_iter=80, conv_tol=1e-12, min_iter=2)
+
+    # Seed from a *different* state so the warm start is a genuine perturbation.
+    warm_env = converge_split_env(A * 1.3, **kw)
+
+    def cold(a):
+        return ctm_energy_split_implicit(
+            {(0, 0): a}, SINGLE_SITE_NEIGHBORS, gate, **kw
+        ).real
+
+    def warm(a):
+        return ctm_energy_split_implicit(
+            {(0, 0): a}, SINGLE_SITE_NEIGHBORS, gate, env_init=warm_env, **kw
+        ).real
+
+    e_c, g_c = jax.value_and_grad(cold)(A)
+    e_w, g_w = jax.value_and_grad(warm)(A)
+    gc = jnp.concatenate([x.ravel() for x in jax.tree.leaves(g_c)])
+    gw = jnp.concatenate([x.ravel() for x in jax.tree.leaves(g_w)])
+
+    assert float(e_c) == pytest.approx(float(e_w), abs=1e-10), (
+        f"warm start moved the 2x2 fixed point: cold={e_c!r} warm={e_w!r}"
+    )
+    rel = float(jnp.linalg.norm(gc - gw) / jnp.linalg.norm(gc))
+    assert rel < 1e-9, f"warm vs cold implicit gradient differ by {rel:.3e}"
