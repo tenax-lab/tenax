@@ -1330,6 +1330,7 @@ def ctm_split_tensor_converge_explicit(
     renormalize: bool = True,
     num_steps: int | None = None,
     warmup_steps: int = 0,
+    recipe: str = "2x2",
 ):
     """Split-CTM with explicit (unrolled) autodiff.
 
@@ -1345,26 +1346,60 @@ def ctm_split_tensor_converge_explicit(
         renormalize:    Renormalize environment at each step.
         num_steps:      Backprop iterations (overrides ``max_iter``).
         warmup_steps:   Warmup iterations wrapped in ``stop_gradient``.
+        recipe:         ``"2x2"`` (default) or ``"1x1"``.  See
+                        :func:`~tenax.algorithms._split_ctm_tensor_convergence.ctm_split_tensor`
+                        — ``"1x1"`` collapses the environment to rank-1 corners
+                        and is kept only for regression bisection (#726, #746).
 
     Returns:
         Converged SplitCTMTensorEnv.
     """
+    from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+    from tenax.algorithms._split_ctm_tensor_convergence import (
+        _split_ctm_sweep_multisite,
+    )
     from tenax.algorithms._split_ctm_tensor_init import (
         initialize_split_ctm_tensor_env,
     )
 
     if chi_I is None:
         chi_I = chi
+    if recipe not in ("2x2", "1x1"):
+        raise ValueError(
+            f"Unknown split CTM recipe {recipe!r}: expected '1x1' or '2x2'."
+        )
 
     env = initialize_split_ctm_tensor_env(A, chi, chi_I)
 
+    if recipe == "2x2":
+        # A uniform 1-site lattice is the multisite path with a
+        # self-referential neighbour map, so the 2x2 plaquette projector
+        # applies verbatim (mirrors ``ctm_split_tensor``).
+        bar = A.bar()
+
+        def sweep(e):
+            return _split_ctm_sweep_multisite(
+                {(0, 0): e},
+                {(0, 0): A},
+                {(0, 0): bar},
+                SINGLE_SITE_NEIGHBORS,
+                chi,
+                chi_I,
+                renormalize,
+                recipe="2x2",
+            )[(0, 0)]
+    else:
+
+        def sweep(e):
+            return _split_ctm_tensor_sweep(e, A, chi, chi_I, renormalize)
+
     for _ in range(warmup_steps):
-        env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
+        env = sweep(env)
     if warmup_steps > 0:
         env = jax.tree.map(jax.lax.stop_gradient, env)
 
     n = num_steps if num_steps is not None else max_iter
     for _ in range(n):
-        env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
+        env = sweep(env)
 
     return env

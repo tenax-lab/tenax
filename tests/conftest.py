@@ -49,6 +49,15 @@ _FILE_MARKERS = {
     # coupled fixed point + a full AD gradient (~5 min); slow-only so they stay
     # out of the -m core CI gate and the -m "not slow" bucket.
     "test_split_ctm_2site_ad.py": "slow",
+    # The rank-1 environment-collapse guards (#723 fused / #746 split).  These
+    # gate a defect that silently produced chi-independent mean-field energies
+    # on the default path for every result predating #747, so they belong in
+    # the *required* check rather than the unwatched full suite -- both files
+    # were previously absent from this table entirely, which meant `-m core`
+    # deselected them and they never ran in a required job.  Cheap: D=2,
+    # chi<=16 dense, ~50s each.
+    "test_ctm_723_single_site_collapse.py": "core",
+    "test_split_ctm_746_single_site_collapse.py": "core",
     "test_ctm_tensor.py": "algorithm",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",

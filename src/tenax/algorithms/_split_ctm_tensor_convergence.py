@@ -20,6 +20,7 @@ import jax.numpy as jnp
 
 from tenax.algorithms._ctm_tensor_convergence import (
     CHECKERBOARD_NEIGHBORS,
+    SINGLE_SITE_NEIGHBORS,
     Coord,
     _corner_singular_values,
     _ctm_sv_diff,
@@ -117,6 +118,7 @@ def ctm_split_tensor(
     renormalize: bool = True,
     min_iter: int = 2,
     return_info: bool = False,
+    recipe: str = "2x2",
 ) -> SplitCTMTensorEnv | tuple[SplitCTMTensorEnv, _SplitCTMInfo]:
     """Run split-CTM to convergence using the Tensor protocol.
 
@@ -127,15 +129,20 @@ def ctm_split_tensor(
 
     .. note::
         The corner singular-value criterion can **plateau** for degenerate
-        or low-rank corners — e.g. the boundary of a 1-site uniform iPEPS is
-        genuinely rank-1/2, so the *normalized* corner spectrum is constant
-        from the first sweep even while the environment (and energy) are
-        still relaxing toward the fixed point. The ``min_iter`` floor stops
-        the loop from breaking on that initial transient, but it cannot
-        detect convergence beyond it. For exact convergence studies on such
-        inputs (e.g. the lossless-``chi_I`` parity oracle), pass
-        ``conv_tol=0.0`` with a sufficiently large ``max_iter`` to force a
-        fixed number of full sweeps instead of relying on the spectral break.
+        or low-rank corners, so the *normalized* corner spectrum can be
+        constant from the first sweep even while the environment (and energy)
+        are still relaxing toward the fixed point. The ``min_iter`` floor
+        stops the loop from breaking on that initial transient, but it cannot
+        detect convergence beyond it. For exact convergence studies (e.g. the
+        lossless-``chi_I`` parity oracle), pass ``conv_tol=0.0`` with a
+        sufficiently large ``max_iter`` to force a fixed number of full
+        sweeps instead of relying on the spectral break.
+
+        This note used to claim the boundary of a 1-site uniform iPEPS "is
+        genuinely rank-1/2". That was the ``1x1`` collapse (#726/#746) being
+        read as a property of the physics; on the ``2x2`` default the same
+        state gives a rank-6 corner with spectrum
+        ``1, 0.128, 0.127, 0.016, 2.1e-3, 2.0e-3``.
 
     Args:
         A:          iPEPS site tensor (DenseTensor or SymmetricTensor) with
@@ -155,21 +162,56 @@ def ctm_split_tensor(
                     is the second sweep regardless of ``min_iter``.
         return_info: If True, return ``(env, _SplitCTMInfo(iterations, converged))``
                      instead of just ``env``.
+        recipe:      ``"2x2"`` (default) — the variPEPS-style 2x2 plaquette
+                     projector, run on a 1-site neighbour map.  ``"1x1"`` —
+                     the legacy single-site corner-pair moves, kept only for
+                     regression bisection.
+
+                     **``"1x1"`` collapses the environment to rank-1 corners
+                     and must not be used for physics** (#723, #726, #746,
+                     #747).  Its projector comes from ``M = C1g^H C4g``, which
+                     is ``chi x chi`` — the ``chi * D**2`` seam is summed away,
+                     so ``rank(P) <= rank(C1g)``, and the cold rank-1 seed
+                     makes rank-1 an absorbing state.  The symptom is an energy
+                     bit-identical across a 4x change in chi.  This is the
+                     *same* projector the fused path used before #723; it is
+                     shared verbatim, so this was never a split-CTM defect.
 
     Returns:
         Converged SplitCTMTensorEnv.
     """
     if chi_I is None:
         chi_I = chi
+    if recipe not in ("2x2", "1x1"):
+        raise ValueError(
+            f"Unknown split CTM recipe {recipe!r}: expected '1x1' or '2x2'."
+        )
 
     env = initialize_split_ctm_tensor_env(A, chi, chi_I)
+    # A uniform 1-site lattice is just the multisite path with a
+    # self-referential neighbour map, so the working 2x2 plaquette projector
+    # applies verbatim.  Wrapped to keep the convergence loop, ``min_iter``
+    # floor and ``(env, info)`` return contract below unchanged.
+    bar = A.bar() if recipe == "2x2" else None
 
     prev_sv = None
     converged = False
     iterations = 0
     for iteration in range(max_iter):
         iterations = iteration + 1
-        env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
+        if recipe == "2x2":
+            env = _split_ctm_sweep_multisite(
+                {(0, 0): env},
+                {(0, 0): A},
+                {(0, 0): bar},
+                SINGLE_SITE_NEIGHBORS,
+                chi,
+                chi_I,
+                renormalize,
+                recipe="2x2",
+            )[(0, 0)]
+        else:
+            env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
 
         current_sv = _corner_singular_values(env.C1)
         if prev_sv is not None and iteration + 1 >= min_iter:

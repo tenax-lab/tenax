@@ -557,13 +557,31 @@ class TestSplitCTMSymmetric:
 
         Uses the same tensor data wrapped as both DenseTensor and SymmetricTensor
         (with trivial U(1) charges) to verify the symmetric path is correct.
+
+        ``chi_I = chi`` (the production default) rather than the ``chi_I=4,
+        chi=8`` this used to run.  On a *random* site tensor an interlayer bond
+        that far below chi leaves the retained interlayer subspace genuinely
+        ambiguous, and the dense and block-sparse SVDs tie-break it
+        differently: measured dense ``0.2925`` vs symmetric ``-14.32`` at
+        chi_I=4, while at chi_I=chi they agree to 1.7e-16 and the corner
+        spectra are identical.  Neither number is meaningful there — dense at
+        chi_I=4 is itself 0.11 away from its own chi_I>=8 value, and chi_I=2
+        gives -1.05 — so the old setting could not discriminate correctness in
+        the first place.  It only passed because the ``1x1`` rank-1 collapse
+        (#726/#746) made chi_I inert: that path returns a bit-identical energy
+        at chi_I=4 and chi_I=8.
+
+        A physical (simple-update) state is clean at every chi_I from 2 to 16
+        (dense vs symmetric agree to <=1e-10), so this is a random-tensor
+        artifact of an under-resolved interlayer bond, not a symmetric-path
+        defect.  Tracked in #766.
         """
         # Build SymmetricTensor with same data as small_peps_dense
         A_sym = SymmetricTensor.from_dense(
             small_peps_dense.todense(), small_peps_dense.indices
         )
 
-        chi, chi_I = 8, 4
+        chi, chi_I = 8, 8
         d = 2
 
         env_d = ctm_split_tensor(small_peps_dense, chi=chi, max_iter=50, chi_I=chi_I)
