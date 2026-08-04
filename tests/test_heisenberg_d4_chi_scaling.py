@@ -3,9 +3,32 @@ The example file is path-loaded (it is not an importable package) so these
 tests stay jax-free and fast."""
 
 import importlib.util
+import os
 import pathlib
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_device_opt_out():
+    """Keep TENAX_ALLOW_NON_A100 from leaking between tests.
+
+    ``_apply_device_opt_out`` writes ``os.environ`` directly, and
+    ``monkeypatch.delenv(..., raising=False)`` records *nothing* when the key is
+    absent (pytest returns early), so it cannot undo that write. Without this
+    the flag leaks into every later test in the session -- it broke the D=8
+    driver's strict-default guard, which reads the same variable.
+    """
+    prev = os.environ.get("TENAX_ALLOW_NON_A100")
+    os.environ.pop("TENAX_ALLOW_NON_A100", None)
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("TENAX_ALLOW_NON_A100", None)
+        else:
+            os.environ["TENAX_ALLOW_NON_A100"] = prev
+
 
 _PATH = (
     pathlib.Path(__file__).resolve().parent.parent

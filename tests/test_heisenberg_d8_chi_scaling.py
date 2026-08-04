@@ -66,9 +66,16 @@ _SMI_H100 = (
 )
 
 
-def test_select_free_a100s_refuses_non_a100_by_default():
+def test_select_free_a100s_refuses_non_a100_by_default(monkeypatch):
     """Default stays strict: the vendor-string filter is what stops a run from
-    landing on the origin box's display GPU."""
+    landing on the origin box's display GPU.
+
+    Clears the opt-out explicitly rather than trusting the ambient environment,
+    so a variable leaked by another test cannot make this pass or fail for the
+    wrong reason -- which is exactly what happened once (see the isolation
+    fixture in ``test_heisenberg_d4_chi_scaling.py``).
+    """
+    monkeypatch.delenv("TENAX_ALLOW_NON_A100", raising=False)
     rows = d8._parse_nvidia_smi(_SMI_H100)
     with pytest.raises(RuntimeError):
         d8.select_free_a100s(rows, 1)
