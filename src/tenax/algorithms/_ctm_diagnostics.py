@@ -134,7 +134,20 @@ def frozen_chi_pairs(chi_to_energy) -> list[tuple[int, int]]:
     convergence and was in fact a rank-1 boundary.
 
     Exact equality is deliberate: this is a *detector*, not a convergence
-    criterion, and a genuinely converged scan still differs in the last bits.
+    criterion.
+
+    .. warning::
+        This check alone **can** false-positive.  A fully converged environment
+        is also flat in chi -- that is what convergence means -- so a scan whose
+        energy has saturated to the last bit will be reported here even though
+        nothing is wrong.  The collapse signature is the *conjunction*: frozen
+        in chi **and** :func:`env_is_collapsed`.  Use :func:`ctm_corner_rank`
+        to disambiguate, which is why the drivers record ``corner_rank``
+        alongside this rather than relying on either signal by itself.
+
+        This is not hypothetical: a #723 regression test asserted the chi
+        response on its own and was a platform coin flip, failing on macOS
+        while reporting the correct converged energy.
 
     Args:
         chi_to_energy: Mapping ``{chi: energy}``, or an iterable of
