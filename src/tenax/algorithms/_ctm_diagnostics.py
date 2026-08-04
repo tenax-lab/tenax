@@ -137,17 +137,28 @@ def frozen_chi_pairs(chi_to_energy) -> list[tuple[int, int]]:
     criterion.
 
     .. warning::
-        This check alone **can** false-positive.  A fully converged environment
-        is also flat in chi -- that is what convergence means -- so a scan whose
-        energy has saturated to the last bit will be reported here even though
-        nothing is wrong.  The collapse signature is the *conjunction*: frozen
-        in chi **and** :func:`env_is_collapsed`.  Use :func:`ctm_corner_rank`
-        to disambiguate, which is why the drivers record ``corner_rank``
-        alongside this rather than relying on either signal by itself.
+        **This is a weak signal. It errs in both directions, and
+        :func:`ctm_corner_rank` is the only sound detector.**
 
-        This is not hypothetical: a #723 regression test asserted the chi
-        response on its own and was a platform coin flip, failing on macOS
-        while reporting the correct converged energy.
+        *False positives.* A fully converged environment is flat in chi too --
+        that is what convergence means -- so a scan whose energy has saturated
+        to the last bit is reported here with nothing wrong.
+
+        *False negatives.* A collapsed environment is not reliably
+        **bit**-identical either.  The rank-1 corner is the same at every chi,
+        but the energy contracted from it need not be: the split ``1x1`` path
+        returns ``0.49620072949960814`` at chi=4 and ``...803`` at chi=16 on
+        macOS while agreeing exactly on Linux.  So exact equality can miss a
+        genuine collapse that differs in the last ULP.
+
+        Both directions were found the hard way, by required CI, on successive
+        attempts to write a #723 regression test around the chi response.
+
+        Use this only to *audit recorded data* where the corner rank was never
+        stored -- bit-identity across a wide chi range (the D=8 scan of #747
+        was identical to 13 digits across an 8x range) is a strong smell worth
+        chasing.  It is not a test, and the drivers record ``corner_rank``
+        rather than relying on it.
 
     Args:
         chi_to_energy: Mapping ``{chi: energy}``, or an iterable of

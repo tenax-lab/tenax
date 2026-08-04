@@ -172,6 +172,13 @@ def test_frozen_scan_alone_can_false_positive_and_rank_disambiguates(su_state):
     limitation so nobody re-derives it the hard way -- a #723 regression test
     asserted the chi response alone and failed on macOS while reporting the
     correct converged energy.
+
+    It errs the *other* way too, which cannot be pinned portably here: a
+    collapsed environment is not reliably bit-identical either.  The split
+    ``1x1`` path returns ``0.49620072949960814`` at chi=4 and ``...803`` at
+    chi=16 on macOS while agreeing exactly on Linux, so exact equality can
+    miss a genuine collapse differing in the last ULP.  Only
+    :func:`ctm_corner_rank` is sound in both directions.
     """
     A = su_state
     gate = heisenberg_gate()
