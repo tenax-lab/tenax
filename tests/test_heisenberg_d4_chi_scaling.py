@@ -150,6 +150,9 @@ def test_csv_rows_have_stable_keys():
         "n_sweeps",
         "peak_gb",
         "converged",
+        # #747: rank(C1) per cell, so a completed sweep can be checked for the
+        # rank-1 collapse after the fact rather than only at run time.
+        "corner_rank",
         "oom",
         "error",
     }
