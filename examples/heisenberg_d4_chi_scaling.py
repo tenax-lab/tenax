@@ -253,6 +253,13 @@ def _assert_only_a100s():
     mismatch so a run can never silently land on the display GPU."""
     import jax
 
+    if os.environ.get("TENAX_ALLOW_NON_A100") == "1":
+        # Set by --allow-non-a100. Uses an env var rather than a threaded
+        # argument because this runs inside the spawned per-cell workers, which
+        # inherit the environment but not arbitrary kwargs.
+        print("[warn] device guard disabled (--allow-non-a100); visible devices: "
+              + ", ".join(str(d) for d in jax.devices()), flush=True)
+        return
     bad = []
     for dev in jax.devices():
         try:
@@ -280,10 +287,21 @@ def _build_mesh(n_devices):
     return build_ctm_mesh()  # over all visible devices (== the pinned A100s)
 
 
-def optimize_once(outdir, chi_opt, opt_steps, n_devices, probe_max_iter=15):
+def optimize_once(outdir, chi_opt, opt_steps, n_devices, probe_max_iter=15,
+                  gs_recipe="2x2"):
     """Optimize the D=4 state once at χ_opt; cache the optimized tensor to
     `<outdir>/A_opt.pkl`. Resumes from its gs checkpoint; if A_opt.pkl already
-    exists, returns immediately."""
+    exists, returns immediately.
+
+    *gs_recipe* defaults to ``"2x2"``.  It used to be hard-coded to ``"1x1"``,
+    whose corner-pair projector collapses the environment to rank-1 corners
+    (#723/#726), so every A_opt this driver has produced was optimized against
+    a chi_eff=1 mean-field environment.  The chi *scan* was always correct
+    (it goes through ``python_loop_ctm_converge``, which defaults to 2x2), so
+    the recorded convergence data stands -- but the +6.04e-3 vs QMC mixes iPEPS
+    truncation with a badly-optimized state and should not be quoted as a D=4
+    truncation error until this is re-run.  ``"1x1"`` reproduces the old
+    (invalid) behaviour for bisection.  See #747."""
     import jax
 
     jax.config.update("jax_enable_x64", True)
@@ -322,7 +340,7 @@ def optimize_once(outdir, chi_opt, opt_steps, n_devices, probe_max_iter=15):
         unit_cell="1x1",
         gs_c4v=True,                  # removes bond-gauge freedom -> stable backward
         gs_implicit_ad=True,          # variational (true expectation value)
-        gs_recipe="1x1",
+        gs_recipe=gs_recipe,
         gs_optimizer="lbfgs",
         gs_line_search_method="hager_zhang",
         gs_metric_precond=True,
@@ -445,6 +463,7 @@ def _run_worker(args):
             optimize_once(
                 args.outdir, args.chi_opt, args.opt_steps, args.n_devices,
                 probe_max_iter=args.probe_max_iter,
+                gs_recipe=args.gs_recipe,
             )
             res = {"phase": "optimize", "ok": True, "error": None}
         except Exception as e:  # noqa: BLE001
@@ -470,6 +489,16 @@ def _build_argparser():
     p.add_argument("--chi-opt", dest="chi_opt", type=int, default=32)
     p.add_argument("--opt-steps", dest="opt_steps", type=int, default=100)
     p.add_argument("--probe-max-iter", dest="probe_max_iter", type=int, default=15)
+    p.add_argument("--gs-recipe", dest="gs_recipe", default="2x2",
+                   choices=["2x2", "1x1"],
+                   help="optimizer CTM recipe. 2x2 is correct; 1x1 collapses "
+                        "the environment to rank-1 corners and only exists "
+                        "to reproduce the pre-#747 runs (#723/#726/#747).")
+    p.add_argument("--allow-non-a100", dest="allow_non_a100", action="store_true",
+                   help="skip the >=40 GB device guard. For porting the run to "
+                        "other hardware; the guard exists to stop a run "
+                        "silently landing on a small display GPU, so only use "
+                        "this when you know what is visible.")
     p.add_argument("--opt-devices", dest="opt_devices", type=int, default=1,
                    help="GPUs for the one-time optimization. Default 1: multi-GPU "
                         "optimize is blocked by sharded gs-checkpoint pickling "
@@ -503,7 +532,8 @@ def _launch(argv, n_devices, timeout_s):
         return False
 
 
-def _optimize_phase(outdir, chi_opt, opt_steps, opt_devices, probe_max_iter):
+def _optimize_phase(outdir, chi_opt, opt_steps, opt_devices, probe_max_iter,
+                    gs_recipe="2x2"):
     """Run the one-time optimization in a subprocess pinned to opt_devices."""
     if os.path.exists(os.path.join(outdir, "A_opt.pkl")):
         print("[opt] A_opt.pkl present; optimization skipped", flush=True)
@@ -514,6 +544,7 @@ def _optimize_phase(outdir, chi_opt, opt_steps, opt_devices, probe_max_iter):
         "--phase", "optimize", "--outdir", outdir,
         "--chi-opt", str(chi_opt), "--opt-steps", str(opt_steps),
         "--probe-max-iter", str(probe_max_iter),
+        "--gs-recipe", str(gs_recipe),
         "--n-devices", str(opt_devices), "--out", out,
     ]
     # Optimization can be long; allow generous wall-clock (resume-safe anyway).
@@ -632,9 +663,12 @@ def main(args):
     chi_ladder = [int(x) for x in args.chi_ladder.split(",")]
     device_counts = [int(x) for x in args.device_counts.split(",")]
 
+    if getattr(args, "allow_non_a100", False):
+        os.environ["TENAX_ALLOW_NON_A100"] = "1"
+
     # Phase 1: optimize once (pinned to opt_devices GPUs).
     _optimize_phase(outdir, args.chi_opt, args.opt_steps, args.opt_devices,
-                    args.probe_max_iter)
+                    args.probe_max_iter, gs_recipe=args.gs_recipe)
     if not os.path.exists(os.path.join(outdir, "A_opt.pkl")):
         print("[abort] optimization produced no A_opt.pkl; see "
               f"{outdir}/optimize_status.json", flush=True)
