@@ -27,6 +27,7 @@ from tenax.algorithms._ctm_diagnostics import (
     frozen_chi_pairs,
 )
 from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
+from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor
 from tenax.algorithms.ipeps import heisenberg_gate, ipeps, sublattice_rotate_gate
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
@@ -157,3 +158,36 @@ def test_accepts_pairs_and_skips_none():
 def test_single_point_scan_is_vacuously_clean():
     assert frozen_chi_pairs({8: -1.0}) == []
     assert frozen_chi_pairs({}) == []
+
+
+def test_frozen_scan_alone_can_false_positive_and_rank_disambiguates(su_state):
+    """Documented limitation: a *converged* scan is flat too.
+
+    `frozen_chi_pairs` is the indirect detector and cannot tell "collapsed"
+    from "converged" on its own -- both are flat in chi.  On this D=2 state the
+    2x2 energy saturates by chi=4, so a chi=4/chi=8/chi=16 scan can be
+    bit-identical while the environment is perfectly healthy.
+
+    The conjunction is what indicts: frozen AND rank-1.  This test pins the
+    limitation so nobody re-derives it the hard way -- a #723 regression test
+    asserted the chi response alone and failed on macOS while reporting the
+    correct converged energy.
+    """
+    A = su_state
+    gate = heisenberg_gate()
+
+    energies, ranks = {}, {}
+    for chi in (4, 8, 16):
+        env, _ = ctm_tensor(A, chi=chi, max_iter=100, conv_tol=1e-12)
+        energies[chi] = float(compute_energy_ctm_tensor(A, env, gate, d=2))
+        ranks[chi] = ctm_corner_rank(env)
+
+    # Healthy: every corner carries real boundary entanglement ...
+    assert all(r > 1 for r in ranks.values()), ranks
+    # ... yet if the energies happen to saturate exactly, the indirect detector
+    # fires anyway.  That is the false positive, and it is fine *because* the
+    # rank check overrules it.
+    if frozen_chi_pairs(energies):
+        assert min(ranks.values()) > 1, (
+            "frozen + rank-1 would be a real collapse; this fixture is healthy"
+        )
