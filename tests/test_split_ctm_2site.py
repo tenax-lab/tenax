@@ -53,7 +53,14 @@ def test_initialize_split_multisite_env_keys_and_type():
 
 
 def test_split_multisite_uniform_matches_single_site():
-    """recipe='1x1' multisite sweep on a uniform cell == single-site forward."""
+    """recipe='1x1' multisite sweep on a uniform cell == single-site forward.
+
+    Both sides are pinned to ``1x1``: the claim is that the multisite sweep
+    reduces to the single-site one on a uniform cell *for a given recipe*, so
+    the recipes have to match.  ``ctm_split_tensor`` defaults to ``2x2`` since
+    #746, which would compare a 2x2 single-site forward against the 1x1
+    multisite sweep this test names in its own title.
+    """
     from tenax.algorithms._split_ctm_tensor_convergence import (
         _split_ctm_multisite,
         ctm_split_tensor,
@@ -64,7 +71,7 @@ def test_split_multisite_uniform_matches_single_site():
 
     A = _random_dense_A(seed=3)
     chi = 6
-    single = ctm_split_tensor(A, chi, max_iter=20, conv_tol=0.0)
+    single = ctm_split_tensor(A, chi, max_iter=20, conv_tol=0.0, recipe="1x1")
     envs = _split_ctm_multisite(
         {(0, 0): A, (1, 0): A},
         CHECKERBOARD_NEIGHBORS,
@@ -78,14 +85,40 @@ def test_split_multisite_uniform_matches_single_site():
     assert np.allclose(rho_single, rho_multi, atol=1e-8)
 
 
-def _split_env_and_fused_env(A, chi):
-    """Matched pair: split env and fused env from the same converged single-site
-    CTM, for enlarged-corner parity (uniform 1x1, so envs are directly comparable)."""
+def _split_env_and_fused_env(A, chi, D=2):
+    """Matched pair: a fused env and its *exact* split factorization.
+
+    Every caller compares a split kernel against its fused counterpart, so the
+    two envs have to be the same environment -- not merely two envs converged
+    from the same site tensor.  This used to converge them independently
+    (``ctm_tensor`` and ``ctm_split_tensor``), which only produced identical
+    envs because both entry points ran the collapsing ``1x1`` recipe and landed
+    on the same rank-1 corner (#726).
+
+    Once the two defaults moved to ``2x2`` (#723 fused, #746 split) they stopped
+    agreeing tensor-for-tensor: the split side carries a ``chi_I`` interlayer
+    truncation the fused side does not, and on the *random* site tensors used
+    here the 2x2 forward does not converge element-wise (#767).  Measured on
+    ``seed=5``, chi=6: the fused enlarged corner keeps a degenerate pair
+    ``0.1654, 0.1654`` where the split one splits it to ``0.1605, 0.1748``, and
+    an exact structural zero (4.3e-19) becomes 8.8e-3.  Both are legitimate
+    environments; they are simply not the *same* one, so a tensor-level parity
+    assertion between them tests nothing.
+
+    Building the split env by exact factorization of the fused env
+    (``fused_env_to_split`` at the lossless ``chi_I = chi*D``) restores the
+    premise by construction, and does so on the production ``2x2`` recipe
+    rather than on the collapsed one.
+    """
     from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
-    from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor
+
+    try:
+        from tests._split_ctm_oracle import fused_env_to_split
+    except ModuleNotFoundError:
+        from _split_ctm_oracle import fused_env_to_split
 
     fused, _eps = ctm_tensor(A, chi, max_iter=30, conv_tol=0.0)
-    split = ctm_split_tensor(A, chi, chi_I=chi, max_iter=30, conv_tol=0.0)
+    split = fused_env_to_split(fused, D, chi_I=chi * D)
     return split, fused
 
 

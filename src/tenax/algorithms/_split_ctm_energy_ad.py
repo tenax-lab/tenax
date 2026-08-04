@@ -50,6 +50,7 @@ def ctm_energy_split_explicit(
     chi_I: int | None = None,
     renormalize: bool = True,
     energy_fn=None,
+    recipe: str = "2x2",
     **_ignored,
 ):
     """Single-site iPEPS energy with explicit (unrolled) split-CTM AD."""
@@ -79,6 +80,7 @@ def ctm_energy_split_explicit(
         renormalize=renormalize,
         num_steps=backprop_steps,
         warmup_steps=warmup_steps,
+        recipe=recipe,
     )
     return compute_energy_split_ctm_tensor(A, env, gate)
 
@@ -94,17 +96,41 @@ def ctm_energy_split_explicit(
 # in ``ad_utils``).  Validated against the trusted explicit-AD gradient.
 
 
-def _split_step(A, env, chi, chi_I, renormalize):
+def _split_step(A, env, chi, chi_I, renormalize, recipe="2x2"):
     """One gauge-fixed split-CTM sweep: ``Γ ∘ sweep``.
 
     This is the fixed-point map ``f`` whose Jacobian drives the implicit
     backward.  The Γ phase-fix is what makes the env converge element-wise
     (and hence makes ``f`` a contraction in the physical subspace).
+
+    On ``recipe="2x2"`` (the default since #746) the sweep is the multisite
+    2x2 plaquette sweep on a 1-site neighbour map — identical in form to
+    :func:`_split_step_multisite`, which has always run 2x2.  ``"1x1"`` keeps
+    the legacy single-site moves, which collapse the environment to rank-1
+    corners (#726) and are retained only for regression bisection.
     """
-    from tenax.algorithms._split_ctm_tensor import _split_ctm_tensor_sweep
     from tenax.algorithms.ad_utils import _phase_fix_split_ctm_tensor
 
-    env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
+    if recipe == "2x2":
+        from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+        from tenax.algorithms._split_ctm_tensor_convergence import (
+            _split_ctm_sweep_multisite,
+        )
+
+        env = _split_ctm_sweep_multisite(
+            {(0, 0): env},
+            {(0, 0): A},
+            {(0, 0): A.bar()},
+            SINGLE_SITE_NEIGHBORS,
+            chi,
+            chi_I,
+            renormalize,
+            recipe="2x2",
+        )[(0, 0)]
+    else:
+        from tenax.algorithms._split_ctm_tensor import _split_ctm_tensor_sweep
+
+        env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
     return _phase_fix_split_ctm_tensor(env)
 
 
@@ -116,7 +142,15 @@ def _split_env_max_diff(env_new, env_old) -> float:
 
 
 def _converge_split_gauge_fixed(
-    A, chi, chi_I, max_iter, conv_tol, renormalize, min_iter, env_init=None
+    A,
+    chi,
+    chi_I,
+    max_iter,
+    conv_tol,
+    renormalize,
+    min_iter,
+    env_init=None,
+    recipe="2x2",
 ):
     """Run gauge-fixed split-CTM to an element-wise fixed point.
 
@@ -139,7 +173,7 @@ def _converge_split_gauge_fixed(
         env = initialize_split_ctm_tensor_env(A, chi, chi_I)
     prev = None
     for it in range(max_iter):
-        env = _split_step(A, env, chi, chi_I, renormalize)
+        env = _split_step(A, env, chi, chi_I, renormalize, recipe)
         if prev is not None and it + 1 >= min_iter:
             if _split_env_max_diff(env, prev) < conv_tol:
                 break
@@ -151,16 +185,24 @@ def _converge_split_gauge_fixed(
 def _split_ctm_converge(A, env_init, static):
     """Converge gauge-fixed split-CTM; custom-VJP via implicit differentiation.
 
-    ``static = (chi, chi_I, max_iter, conv_tol, renormalize, min_iter)``
+    ``static = (chi, chi_I, max_iter, conv_tol, renormalize, min_iter, recipe)``
     is a hashable tuple of non-differentiable CTM settings.  *env_init* is an
     optional ``SplitCTMTensorEnv`` warm-start seed (``None`` → fresh init);
     it carries **zero** gradient because the fixed point is seed-independent
     (mirrors ``env_init_leaves`` in ``ad_utils.ctm_tensor_converge``).
     Returns the converged ``SplitCTMTensorEnv`` pytree.
     """
-    chi, chi_I, max_iter, conv_tol, renormalize, min_iter = static
+    chi, chi_I, max_iter, conv_tol, renormalize, min_iter, recipe = static
     return _converge_split_gauge_fixed(
-        A, chi, chi_I, max_iter, conv_tol, renormalize, min_iter, env_init=env_init
+        A,
+        chi,
+        chi_I,
+        max_iter,
+        conv_tol,
+        renormalize,
+        min_iter,
+        env_init=env_init,
+        recipe=recipe,
     )
 
 
@@ -178,12 +220,16 @@ def _split_ctm_converge_bwd(static, residuals, g):
     YASTN-style iterative VJP in ``ad_utils._ctm_tensor_converge_bwd``.
     The warm-start seed ``env_init`` gets a zero cotangent.
     """
-    chi, chi_I, max_iter, conv_tol, renormalize, min_iter = static
+    chi, chi_I, max_iter, conv_tol, renormalize, min_iter, recipe = static
     A, env, env_init = residuals
 
     # J^T in env space (A fixed) and (∂f/∂A)^T projector (env fixed).
-    _, vjp_env_fn = jax.vjp(lambda e: _split_step(A, e, chi, chi_I, renormalize), env)
-    _, vjp_A_fn = jax.vjp(lambda a: _split_step(a, env, chi, chi_I, renormalize), A)
+    _, vjp_env_fn = jax.vjp(
+        lambda e: _split_step(A, e, chi, chi_I, renormalize, recipe), env
+    )
+    _, vjp_A_fn = jax.vjp(
+        lambda a: _split_step(a, env, chi, chi_I, renormalize, recipe), A
+    )
 
     max_fp_iter = min(max_iter, 50)
 
@@ -222,14 +268,21 @@ def ctm_energy_split_implicit(
     min_iter: int = 2,
     energy_fn=None,
     env_init=None,
+    recipe: str = "2x2",
     **_ignored,
 ):
     """Single-site iPEPS energy with implicit (fixed-point) split-CTM AD.
 
     The split-CTM forward is run to a gauge-fixed element-wise fixed point;
     the gradient is obtained by implicit differentiation (Neumann series),
-    avoiding storage of the unrolled CTM iterations.  Single-site only
-    (``recipe="1x1"``); multisite has no split forward yet.
+    avoiding storage of the unrolled CTM iterations.  Single-site (1x1 unit
+    cell); the coupled multisite analogue is
+    :func:`ctm_energy_split_implicit_2site`.
+
+    *recipe* selects the projector, not the unit cell: ``"2x2"`` (default
+    since #746) runs the 2x2 plaquette sweep on a 1-site neighbour map,
+    ``"1x1"`` the legacy corner-pair moves that collapse to rank-1 corners
+    (#726).
 
     *env_init* is an optional ``SplitCTMTensorEnv`` warm-start seed for the
     forward CTM (gradient-free); ``None`` cold-starts from a fresh init.
@@ -247,7 +300,7 @@ def ctm_energy_split_implicit(
         compute_energy_split_ctm_tensor,
     )
 
-    static = (chi, chi_I, max_iter, conv_tol, renormalize, min_iter)
+    static = (chi, chi_I, max_iter, conv_tol, renormalize, min_iter, recipe)
     env = _split_ctm_converge(A, env_init, static)
     return compute_energy_split_ctm_tensor(A, env, gate)
 
@@ -262,6 +315,7 @@ def converge_split_env(
     renormalize: bool = True,
     min_iter: int = 2,
     env_init=None,
+    recipe: str = "2x2",
 ):
     """Forward-only gauge-fixed split-CTM converge (no gradient).
 
@@ -279,7 +333,15 @@ def converge_split_env(
     if chi_I is None:
         chi_I = chi
     return _converge_split_gauge_fixed(
-        A, chi, chi_I, max_iter, conv_tol, renormalize, min_iter, env_init=env_init
+        A,
+        chi,
+        chi_I,
+        max_iter,
+        conv_tol,
+        renormalize,
+        min_iter,
+        env_init=env_init,
+        recipe=recipe,
     )
 
 

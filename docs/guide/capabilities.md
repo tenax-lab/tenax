@@ -88,11 +88,19 @@ research.
   `SymmetricTensor`, for 2-site checkerboard and multisite (kagome PESS) cells.
   The split **AD ground-state** path is narrower: enable it with
   `CTMConfig(fuse_virtual_legs=False)` **together with** the dense single-site
-  optimizer (`unit_cell="1x1"` *and* `gs_recipe="1x1"`). Other recipes / unit
-  cells and `SymmetricTensor` / fermionic inputs raise `NotImplementedError` (a
-  later phase), and χ is fixed on this path. Its implicit gradient matches the
-  trusted explicit-AD gradient to ~1e-12; the memory win over the fused double
-  layer is a large-D effect (D ≳ 16).
+  optimizer (`unit_cell="1x1"`), on either `gs_recipe` -- the default `"2x2"`
+  since #746, or `"1x1"`. `SymmetricTensor` / fermionic inputs raise
+  `NotImplementedError` (a later phase), and χ is fixed on this path. Its
+  implicit gradient matches the trusted explicit-AD gradient to ~1e-12; the
+  memory win over the fused double layer is a large-D effect (D ≳ 16).
+
+  :::{warning}
+  `gs_recipe="1x1"` is retained only for regression bisection and **must not be
+  used for physics**. Its corner-pair projector collapses the environment to
+  rank-1 corners, giving a χ_eff = 1 mean-field boundary whose energy is
+  bit-identical across any range of χ. Nothing raises -- the collapsed
+  environment is still finite, Hermitian and PSD. See #723, #726, #746, #747.
+  :::
 - **Fermionic iPEPS (fPEPS)** -- graded tensors with Koszul signs,
   `FermionParity` / `FermionicU1`, and a `spinless_fermion_gate` (hopping +
   interaction). See {doc}`algorithms/fpeps`.

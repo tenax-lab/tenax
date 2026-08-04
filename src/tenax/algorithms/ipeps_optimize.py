@@ -1411,6 +1411,7 @@ def _optimize_gs_ad_tensor(
             renormalize=ctm_cfg.renormalize,
             min_iter=ctm_cfg.min_iter,
             env_init=env_init,
+            recipe=config.gs_recipe,
         )
 
     def _update_env_cache(params):

@@ -79,19 +79,20 @@ def test_split_matches_fused_lossless_chi_I(D, chi):
     make_site, heisenberg_gate, fused_env_to_split = _oracle()
     A = make_site(D, 2, seed=7)
     gate = heisenberg_gate()
-    # ``recipe="1x1"`` is pinned deliberately.  This test asserts a
-    # *representation* claim — that the split double-layer path is an exact
-    # factorization of the fused one at the same chi — so both sides must run
-    # the same projector recipe or the comparison is meaningless.
+    # Both sides now run the default ``recipe="2x2"``: the fused path since
+    # #723, the split path since #746.  This test asserts a *representation*
+    # claim — that the split double-layer path is an exact factorization of the
+    # fused one at the same chi — so both sides must run the same projector
+    # recipe or the comparison is meaningless.
     #
-    # ``ctm_tensor`` now defaults to ``recipe="2x2"`` (#723) while
-    # ``ctm_split_tensor`` is still on ``1x1``; rerouting the split path is the
-    # remaining half of #746.  Until that lands, this is the circular oracle
-    # #746 calls out — both sides collapse to rank-1 corners, so agreement here
-    # says nothing about physics, only that the factorization is faithful.
-    # When #746 lands, drop this pin so both sides run 2x2 and the oracle
-    # becomes real.
-    fused_env, _ = ctm_tensor(A, chi=chi, max_iter=300, conv_tol=0.0, recipe="1x1")
+    # The temporary ``recipe="1x1"`` pin that bridged #723 and #746 is gone.
+    # While it was in place this was the circular oracle #746 calls out: both
+    # sides collapsed to rank-1 corners, so agreement said nothing about
+    # physics, only that the factorization was faithful.  On 2x2 both sides
+    # carry a genuine rank-4..6 corner, so this is now a real oracle.
+    # Measured agreement: 2.5e-16 (D=2,chi=4), 9.0e-16 (D=2,chi=8),
+    # 5.0e-16 (D=3,chi=6) — well inside the 1e-8 tolerance.
+    fused_env, _ = ctm_tensor(A, chi=chi, max_iter=300, conv_tol=0.0)
     E_fused = float(compute_energy_ctm_tensor(A, fused_env, gate))
     split_env = ctm_split_tensor(A, chi=chi, chi_I=chi * D, max_iter=300, conv_tol=0.0)
     E_split = float(compute_energy_split_ctm_tensor(A, split_env, gate))
@@ -140,13 +141,18 @@ def test_split_production_chi_I_converges_to_lossless():
     """Production interlayer bond (chi_I=chi) is physical and tracks lossless.
 
     Spec oracle 2: with the production interlayer bond chi_I=chi the split
-    energy must stay physical (<=0.75/bond) and match the lossless
-    (chi_I=chi*D) fixed point.  With the rank-1 (variPEPS ``chi_init=1``)
-    corner init (#463) the split env stays low-rank enough that chi_I=chi is
-    already lossless even at D=3 — the interlayer-truncation error is ~0, not
-    merely shrinking.  (The previous rank-``min(chi,D)`` corner seed left a
-    nonzero interlayer error that decreased as chi grew; the rank-1 seed
-    removes it entirely while reaching the *same* converged energy.)
+    energy must stay physical (<=0.75/bond) and approach the lossless
+    (chi_I=chi*D) fixed point as chi grows.
+
+    This docstring used to claim the rank-1 (variPEPS ``chi_init=1``) corner
+    init made chi_I=chi "already lossless even at D=3 — the interlayer-
+    truncation error is ~0, not merely shrinking".  That was reading the
+    #726/#746 collapse as a property of the init: on the ``1x1`` recipe the
+    environment was chi_eff=1, so there was nothing for the interlayer bond to
+    truncate.  On the 2x2 default the error is nonzero and *does* merely
+    shrink (7.24e-4 -> 5.64e-4 for chi 4 -> 6), which is the ordinary and
+    expected behaviour of a truncated interlayer bond.
+
     conv_tol=0.0 forces full sweeps so we compare true fixed points (the
     corner-SV criterion is blind to the degenerate corner; see DL-Task 6).
     """
@@ -179,11 +185,19 @@ def test_split_production_chi_I_converges_to_lossless():
         interlayer_err.append(abs(e_lossy - e_lossless))
 
     # The interlayer-truncation error (chi_I=chi vs lossless at the SAME chi)
-    # is non-increasing in chi and already converged (~0) under the rank-1
-    # corner init: the production interlayer bond tracks the lossless fixed
-    # point to machine precision.
+    # is small and non-increasing in chi.
+    #
+    # This used to assert ``< 1e-6`` — "already lossless ... to machine
+    # precision".  That was an artifact of the #726/#746 rank-1 collapse: on the
+    # ``1x1`` recipe the environment was chi_eff=1, so the interlayer bond had
+    # nothing to truncate and chi_I made no difference at all (the same state
+    # returns a bit-identical energy at chi_I=4 and chi_I=8 under 1x1).  On the
+    # 2x2 recipe the corner is genuinely rank-4..6 and the production
+    # interlayer bond does truncate: measured 7.24e-4 at chi=4 and 5.64e-4 at
+    # chi=6 for this D=3 random site.  Shrinking with chi is the real claim;
+    # "lossless" never was one.
     assert interlayer_err[1] <= interlayer_err[0] + 1e-12
-    assert interlayer_err[-1] < 1e-6
+    assert interlayer_err[-1] < 1e-3
 
 
 @pytest.mark.parametrize("min_iter,expected_sweeps", [(2, 2), (5, 5), (8, 8)])
@@ -204,13 +218,18 @@ def test_split_min_iter_floor_blocks_early_break(
 
     A = make_site(2, 2, seed=7)
     calls = {"n": 0}
-    real_sweep = C._split_ctm_tensor_sweep
+    # Count the sweep the *default* recipe actually calls.  Since #746
+    # ``ctm_split_tensor`` defaults to ``recipe="2x2"`` and delegates to
+    # ``_split_ctm_sweep_multisite`` on a 1-site neighbour map, so patching
+    # ``_split_ctm_tensor_sweep`` (the legacy 1x1 move) would count zero calls
+    # and the assertion would pass or fail for the wrong reason.
+    real_sweep = C._split_ctm_sweep_multisite
 
     def counting_sweep(*args, **kwargs):
         calls["n"] += 1
         return real_sweep(*args, **kwargs)
 
-    monkeypatch.setattr(C, "_split_ctm_tensor_sweep", counting_sweep)
+    monkeypatch.setattr(C, "_split_ctm_sweep_multisite", counting_sweep)
     # conv_tol=1e9 -> the SV diff is always below tol, so the loop breaks at the
     # first sweep allowed by the min_iter floor.
     C.ctm_split_tensor(A, chi=4, chi_I=8, max_iter=50, conv_tol=1e9, min_iter=min_iter)
