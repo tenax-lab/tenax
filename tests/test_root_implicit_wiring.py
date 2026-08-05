@@ -14,6 +14,7 @@ policy is to hard-error at config time.
 from __future__ import annotations
 
 import dataclasses
+import math
 
 import pytest
 
@@ -194,6 +195,28 @@ def test_production_heisenberg_run_through_optimize_gs_ad():
     clamp fixed that.  What remained was the *gate*: clamping leaves an
     O(rel_floor) inconsistency in the equations by construction, and the fixed
     1e-06 threshold rejected it.  The gate is now set from the clamp.
+
+    **What this asserts, and why not an energy target.**  It used to end at
+    ``E == approx(-0.4886, abs=5e-3)``.  That number was written in the same
+    commit that marked the test xfail, so it was never observed to pass; it is
+    a guess, not a regression baseline, and the run in fact lands at
+    ``-0.5066``.  Pinning an unvalidated constant would either freeze in
+    whatever the optimizer happens to do today or keep failing for a reason
+    that has nothing to do with the wiring.  So this asserts what the test can
+    actually certify: the whole path runs end to end without tripping the
+    residual gate (no ``RootResidualError`` -- the point of #772), the energy
+    is finite, and the optimizer *descends*.
+
+    The descent baseline is measured, not quoted.  It cannot come from
+    ``PHYSICAL_SU_D2_E_SU``: that is ``ipeps()``'s own simple-update energy
+    evaluation, whereas ``E`` here is a converged CTM energy from
+    ``compute_energy_ctm_tensor``, and the two are different quantities (the
+    SU number is *lower*, so comparing them fails for an apples-to-oranges
+    reason).  Instead the same config with ``gs_num_steps=0`` is run first,
+    which returns the SU-initialised starting tensor through the identical
+    ``_final_env`` + ``compute_energy_ctm_tensor`` path.  Measured: baseline
+    ``-0.48198``, optimized ``-0.50660``, a descent of 2.5e-02 over three adam
+    steps.
     """
     import jax
 
@@ -215,5 +238,12 @@ def test_production_heisenberg_run_through_optimize_gs_ad():
         gs_metric_precond=False,
         ctm=CTMConfig(chi=6, max_iter=100, conv_tol=1e-10, ctm_ad_mode="root_implicit"),
     )
+
+    # Pre-optimization energy of the same starting tensor on the same CTM path.
+    _A0, _env0, E_start = optimize_gs_ad(
+        gate, None, dataclasses.replace(cfg, gs_num_steps=0)
+    )
+
     _A, _env, E = optimize_gs_ad(gate, None, cfg)
-    assert E == pytest.approx(-0.4886, abs=5e-3)
+    assert math.isfinite(E), E
+    assert E < E_start, f"no descent: {E!r} did not improve on {E_start!r}"

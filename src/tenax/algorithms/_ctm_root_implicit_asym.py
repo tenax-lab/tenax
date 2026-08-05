@@ -450,6 +450,27 @@ def _normalize(x: jax.Array) -> jax.Array:
     return x / (jnp.max(jnp.abs(x)) + 1e-300)
 
 
+def _derived_rel_floor(dtype) -> float:
+    """The default rank clamp for a working precision: ``eps^(1/3)``.
+
+    One definition with two callers, deliberately.  :func:`_rank_capped_spectrum`
+    *applies* the clamp and :func:`_default_root_residual_warn` sizes the
+    residual gate from it, and the two must agree: the clamp is what produces
+    the inconsistency the gate measures, so a gate derived from a different
+    precision's ``eps`` is #772 over again.  Under ``float32`` the two differ by
+    812x (4.92e-03 against 6.06e-06 in ``float64``), which would put the
+    clamp-induced residual well above a gate frozen at the ``float64`` value and
+    reject every state.  ``tenax.__init__`` forces x64 globally so this is
+    latent today, but a caller-supplied ``float32`` ``DenseTensor`` stays
+    ``float32`` under x64, so the path is reachable.
+
+    Takes anything :func:`jax.numpy.finfo` does, complex types included: it
+    reports the eps of the component float, which is the precision the (always
+    real) singular spectrum is resolved to.
+    """
+    return float(jnp.finfo(dtype).eps ** (1.0 / 3.0))
+
+
 def _rank_capped_spectrum(s: jax.Array, chi: int, *, rel_floor: float | None = None):
     """Truncate to ``chi`` and clamp the numerically-null tail (#772).
 
@@ -489,7 +510,7 @@ def _rank_capped_spectrum(s: jax.Array, chi: int, *, rel_floor: float | None = N
     """
     s_k = s[:chi]
     if rel_floor is None:
-        rel_floor = float(jnp.finfo(s_k.dtype).eps ** (1.0 / 3.0))
+        rel_floor = _derived_rel_floor(s_k.dtype)
     cut = rel_floor * s_k[0]
     usable_rank = jnp.sum(s_k > cut)
     return jnp.maximum(s_k, cut), usable_rank
@@ -1132,7 +1153,7 @@ def asym_energy(A: Tensor, env: AsymEnv, template, gate) -> jax.Array:
     return compute_energy_ctm_tensor(A, _to_ctm_env(env, template), gate)
 
 
-def _default_root_residual_warn(rel_floor: float | None) -> float:
+def _default_root_residual_warn(rel_floor: float | None, dtype=None) -> float:
     """The residual gate, set from the clamp that produces the residual.
 
     Clamping the numerically-null tail (#778) leaves an inconsistency of order
@@ -1154,9 +1175,16 @@ def _default_root_residual_warn(rel_floor: float | None) -> float:
     31x.  Tied to the clamp rather than raised to a constant so that lowering
     ``rel_floor`` restores the tight gate, where residuals genuinely are
     ~1e-13.
+
+    ``dtype`` is the working precision the clamp actually ran in, and only
+    matters when ``rel_floor`` is ``None``: the default clamp is
+    precision-dependent (:func:`_derived_rel_floor`), so the gate has to be
+    too.  ``None`` means ``float64``, which is what ``tenax`` runs in
+    everywhere x64 is on; callers that reach the clamp with narrower data
+    should pass the dtype rather than take that default.
     """
     if rel_floor is None:
-        rel_floor = float(jnp.finfo(jnp.float64).eps ** (1.0 / 3.0))
+        rel_floor = _derived_rel_floor(jnp.float64 if dtype is None else dtype)
     return max(1e-6, 100.0 * rel_floor)
 
 
@@ -1212,8 +1240,6 @@ def asym_root_implicit_energy_and_grad(
     ``RuntimeWarning``.
     """
     _check_root_residual_policy(on_root_residual)
-    if root_residual_warn is None:
-        root_residual_warn = _default_root_residual_warn(rel_floor)
     from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
 
     if isinstance(A, SymmetricTensor):
@@ -1229,6 +1255,17 @@ def asym_root_implicit_energy_and_grad(
         return_projectors=True,
         rel_floor=rel_floor,
     )
+    if root_residual_warn is None:
+        # Sized after the forward pass, not before it, so the gate can be read
+        # off the precision the clamp actually ran in: the spectrum
+        # ``_rank_capped_spectrum`` clamps is that of
+        # ``half_infinite_environment(env, a)``, and a gate derived from some
+        # other eps is #772 over again (see :func:`_derived_rel_floor`).  The
+        # policy string is still validated up front, so a typo fails before any
+        # of this.
+        root_residual_warn = _default_root_residual_warn(
+            rel_floor, jnp.result_type(env.C1, a_arr)
+        )
     rank_report = retained_rank_report(env, a_arr, chi, rel_floor)
     if rank_report["usable_rank"] < chi:
         warnings.warn(

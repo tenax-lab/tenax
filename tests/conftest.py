@@ -63,7 +63,7 @@ _FILE_MARKERS = {
     "test_ctm_collapse_detector.py": "core",
     # Root-implicit AD wiring (#715): dispatch + guard surface only, no
     # CTM convergence, so it is milliseconds.  The production-run case it
-    # also carries is explicitly @slow + xfail (#772).
+    # also carries is explicitly @slow (#772).
     "test_root_implicit_wiring.py": "core",
     "test_ctm_tensor.py": "algorithm",
     "test_integration_regression.py": "algorithm",

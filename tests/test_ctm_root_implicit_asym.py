@@ -1483,12 +1483,59 @@ def test_the_gate_tightens_back_when_the_clamp_is_lowered():
     assert M._default_root_residual_warn(1e-2) == pytest.approx(1.0)
 
 
+def test_the_gate_and_the_clamp_share_one_definition():
+    """The gate must be derived from the clamp, not from a copy of it.
+
+    ``_rank_capped_spectrum`` takes its default clamp from the *spectrum's*
+    dtype; :func:`_default_root_residual_warn` has to follow the same
+    definition or the two disagree the moment the working precision is not
+    ``float64``.  In ``float32`` the clamp is 4.92e-03 -- 812x the ``float64``
+    value -- so a gate frozen at 6.06e-04 would sit an order of magnitude below
+    the inconsistency the clamp itself introduces, which is #772 again with the
+    numbers scaled up.  ``tenax.__init__`` forces x64 globally, but a
+    caller-supplied ``float32`` ``DenseTensor`` stays ``float32`` under x64,
+    so this is reachable rather than hypothetical.
+    """
+    assert M._derived_rel_floor(jnp.float64) == pytest.approx(6.0555e-06, rel=1e-3)
+    assert M._derived_rel_floor(jnp.float32) == pytest.approx(4.9215e-03, rel=1e-3)
+    # Complex reports its component float's eps, which is the precision the
+    # (always real) singular spectrum is resolved to.
+    assert M._derived_rel_floor(jnp.complex128) == M._derived_rel_floor(jnp.float64)
+
+    # The clamp side: a float32 spectrum floors at the float32 value.
+    s32 = jnp.asarray([1.0, 1e-2, 1e-9], dtype=jnp.float32)
+    capped, rank = M._rank_capped_spectrum(s32, 3)
+    assert float(capped[-1]) == pytest.approx(
+        M._derived_rel_floor(jnp.float32), rel=1e-5
+    )
+    assert int(rank) == 2
+
+    # The gate side, from the same helper.  float64 is unchanged -- the whole
+    # point is that nothing about the calibrated path moves.
+    assert M._default_root_residual_warn(None) == pytest.approx(6.0555e-04, rel=1e-3)
+    assert M._default_root_residual_warn(None, jnp.float64) == (
+        M._default_root_residual_warn(None)
+    )
+    assert M._default_root_residual_warn(None, jnp.float32) == pytest.approx(
+        100.0 * M._derived_rel_floor(jnp.float32), rel=1e-12
+    )
+    # An explicit rel_floor still wins outright, dtype or no dtype.
+    assert M._default_root_residual_warn(1e-12, jnp.float32) == 1e-6
+
+
 def test_the_gate_still_rejects_a_genuinely_broken_root():
-    """Recalibrated, not disabled: the pre-#778 failure was 1.9e-02."""
+    """Recalibrated, not disabled: the pre-#778 failure was 1.9e-02.
+
+    This is the *tight* branch: at ``rel_floor=1e-12`` the gate is
+    ``max(1e-6, 100 * 1e-12) = 1e-6``, i.e. the pre-#772 threshold.  Valuable
+    on its own -- an unclamped spectrum must still be held to 1e-6 -- but it
+    says nothing about the relaxed default, which
+    ``test_the_default_gate_still_rejects_a_genuinely_broken_root`` covers.
+    """
     from tenax.algorithms._ad_primitives import RootResidualError
 
     A = physical_su_d2()
-    with pytest.raises(RootResidualError):
+    with pytest.raises(RootResidualError) as excinfo:
         M.asym_root_implicit_energy_and_grad(
             A,
             _gate(),
@@ -1498,3 +1545,40 @@ def test_the_gate_still_rejects_a_genuinely_broken_root():
             rel_floor=1e-12,
             on_root_residual="raise",
         )
+    assert excinfo.value.tolerance == 1e-6
+    assert excinfo.value.residual > excinfo.value.tolerance
+
+
+def test_the_default_gate_still_rejects_a_genuinely_broken_root():
+    """The relaxed 6.06e-04 gate has to still be a guard, not decoration.
+
+    Relaxing a guard is only safe if something proves the relaxed guard still
+    fires, and no other test does: every rejection case in this file runs at
+    ``rel_floor=1e-12``, where the gate collapses back to the old 1e-6 branch.
+    Here the *default* clamp is in force, so the ``6.06e-04`` threshold is the
+    one doing the rejecting -- which is what ``excinfo.value.tolerance``
+    pins.
+
+    Broken honestly rather than by handing the entry point an impossible
+    tolerance (the ``root_residual_warn=0.0`` idiom the multisite suite uses
+    would exercise the plumbing, not the calibration).  One sweep from the
+    near-identity initialiser is nowhere near the CTM fixed point, and with the
+    polish loop cut to a single pass ``y*`` is read straight off it instead of
+    being iterated onto a root.  Measured ``‖F(y*)‖ = 5.3e-03``, 8.7x above the
+    gate; the polish loop is what closes that, and at ``polish_steps=40`` the
+    same state lands at 2.8e-06 and is admitted.
+    """
+    from tenax.algorithms._ad_primitives import RootResidualError
+
+    with pytest.raises(RootResidualError) as excinfo:
+        M.asym_root_implicit_energy_and_grad(
+            physical_su_d2(),
+            _gate(),
+            chi=6,
+            max_iter=1,
+            min_iter=1,
+            polish_steps=1,
+            on_root_residual="raise",
+        )
+    assert excinfo.value.tolerance == pytest.approx(6.0555e-04, rel=1e-3)
+    assert excinfo.value.residual > excinfo.value.tolerance
