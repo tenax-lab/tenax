@@ -236,19 +236,31 @@ def test_production_heisenberg_run_through_optimize_gs_ad():
     assert E > -0.669437, f"non-variational energy below the exact ground state: {E}"
 
 
+@pytest.mark.slow
 def test_the_root_implicit_gradient_descends_the_energy():
     """A few plain gradient steps must lower the energy monotonically.
 
-    The slow test above exercises the whole ``optimize_gs_ad`` stack but is
-    deselected from the required gate, which runs ``-m core`` only.  This is
-    the same claim -- the gradient points downhill -- at a size the required
-    gate can afford, using the engine directly so no optimizer schedule sits
-    between the gradient and the assertion.
+    Uses the engine directly, so no optimizer schedule sits between the
+    gradient and the assertion.  A wrong-sign or badly-scaled gradient shows
+    up here immediately -- that was the failure mode #718 spent a long time
+    on, where the energy boundary was mis-glued and the gradient was off by
+    3e-2 relative while every residual looked healthy.
 
-    A wrong-sign or badly-scaled gradient shows up here immediately; that was
-    the failure mode #718 spent a long time on, where the energy boundary was
-    mis-glued and the gradient was off by 3e-2 relative while every residual
-    looked healthy.
+    **Marked slow, reluctantly.**  This was written to give the *required*
+    gate (``-m core``) coverage of the claim that the gradient points
+    downhill, which it otherwise has none of.  Measured, one root-implicit
+    gradient at D=2 chi=4 peaks at **4.2 GB** against a 210 MB baseline for
+    the rest of this file -- almost entirely the adjoint solve's Krylov
+    basis.  ``-m core`` already peaks at 6.35 GB against ~7 GB runners
+    (#732), and JAX caches persist across tests within a session, so landing
+    4 GB on top of an accumulated cache risks an OOM that would present as a
+    confusing flake.  Shrinking ``solve_restart`` 30 -> 5 only reached 3.6 GB
+    while making the test 55% slower, which is not a trade worth making.
+
+    So the required gate still has no convergence coverage for this path.
+    That is a real gap, recorded here rather than hidden by a marker: the
+    memory cost of a single gradient is the blocker, and it is the same
+    quantity #731 tracks at 8.4 GB on the symmetric path.
     """
     import jax
     import jax.numpy as jnp
@@ -282,7 +294,11 @@ def test_the_root_implicit_gradient_descends_the_energy():
     lr = 0.05
     for _ in range(3):
         E, g = asym_root_implicit_energy_and_grad(
-            DenseTensor(params, indices), gate, chi=4, max_iter=40, conv_tol=1e-10
+            DenseTensor(params, indices),
+            gate,
+            chi=4,
+            max_iter=40,
+            conv_tol=1e-10,
         )
         assert bool(jnp.all(jnp.isfinite(g))), "non-finite gradient"
         energies.append(float(jnp.real(E)))
