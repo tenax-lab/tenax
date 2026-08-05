@@ -16,6 +16,8 @@ from __future__ import annotations
 import dataclasses
 import math
 
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from tenax.algorithms.ipeps_ad_policy import use_root_implicit_path
@@ -193,6 +195,74 @@ def test_symmetric_variant_is_refused_and_cites_its_blocker():
 
 
 # ------------------------------------------------------------------ #
+# rel_floor forwarding + the NaN-gradient warnings (#772 Task 4)       #
+# ------------------------------------------------------------------ #
+
+
+def test_rel_floor_forwards_and_nonfinite_grads_warn(monkeypatch):
+    """Pins the ``rel_floor=ctm_cfg.rel_floor`` forwarding and both new
+    warnings that replaced the old silent NaN-gradient mask.
+
+    ``asym_root_implicit_energy_and_grad`` is imported *inside* the body of
+    ``optimize_gs_ad_root_implicit``, so monkeypatching it on
+    ``ipeps_optimize_root_implicit`` itself would do nothing -- the import
+    statement rebinds the name from its *source* module,
+    ``tenax.algorithms._ctm_root_implicit_asym``, at call time.  Patching
+    there is what actually takes effect.
+
+    The stub records the ``rel_floor`` it was called with and returns
+    deliberately non-finite gradients, so a single ``gs_num_steps=1`` run
+    exercises the per-step warning and the end-of-run summary without paying
+    for a real root-implicit CTM solve (the point of stubbing it out).
+    """
+    import tenax.algorithms._ctm_root_implicit_asym as asym_mod
+    from tenax.algorithms.ipeps_optimize_root_implicit import (
+        optimize_gs_ad_root_implicit,
+    )
+
+    captured = {}
+
+    def _stub_energy_and_grad(A, gate, *, rel_floor, **kwargs):
+        captured["rel_floor"] = rel_floor
+        data = A.todense()
+        return jnp.asarray(-0.5 + 0.0j), jnp.full_like(data, jnp.nan)
+
+    monkeypatch.setattr(
+        asym_mod, "asym_root_implicit_energy_and_grad", _stub_energy_and_grad
+    )
+
+    D, d = 2, 2
+    rng = np.random.RandomState(0)
+    A_init = jnp.asarray(rng.standard_normal((D, D, D, D, d)))
+    gate = jnp.eye(d * d, dtype=jnp.float64).reshape(d, d, d, d)
+
+    cfg = iPEPSConfig(
+        max_bond_dim=D,
+        unit_cell="1x1",
+        gs_num_steps=1,
+        gs_optimizer="adam",
+        gs_learning_rate=1e-2,
+        gs_conv_criterion="grad_norm",
+        ctm=CTMConfig(
+            chi=4,
+            max_iter=5,
+            conv_tol=1e-10,
+            ctm_ad_mode="root_implicit",
+            rel_floor=1e-5,
+        ),
+    )
+
+    with pytest.warns(RuntimeWarning) as record:
+        optimize_gs_ad_root_implicit(gate, A_init, cfg)
+
+    assert captured["rel_floor"] == 1e-5, "rel_floor was not forwarded"
+
+    messages = [str(w.message) for w in record]
+    assert any("non-finite gradient entries" in m for m in messages), messages
+    assert any("optimizer steps made no progress" in m for m in messages), messages
+
+
+# ------------------------------------------------------------------ #
 # The gap that blocks production use (#772)                            #
 # ------------------------------------------------------------------ #
 
@@ -216,7 +286,8 @@ def test_production_heisenberg_run_through_optimize_gs_ad():
     state (that file uses ``num_imaginary_steps=60`` against this test's
     ``40``, which accounts for the small offset from the measured
     ``E_start = -0.48198`` below).  So the old assertion demanded that three
-    Adam steps change nothing, and the run in fact lands at ``-0.5066``.
+    Adam steps barely move the energy, and the run in fact lands at
+    ``-0.5066``.
     Pinning an unvalidated constant would either freeze in whatever the
     optimizer happens to do today or keep failing for a reason that has
     nothing to do with the wiring.  So this asserts what the test can actually

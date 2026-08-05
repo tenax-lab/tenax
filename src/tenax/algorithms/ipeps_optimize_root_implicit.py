@@ -270,8 +270,10 @@ def optimize_gs_ad_root_implicit(
     best_params = params
     prev_energy = float("inf")
     nonfinite_grad_steps = 0
+    steps_run = 0
 
     for step in range(config.gs_num_steps):
+        steps_run = step + 1
         energy_val, grads = _energy_and_grad(params)
         n_nonfinite = int(jnp.sum(~jnp.isfinite(grads)))
         if n_nonfinite:
@@ -346,7 +348,7 @@ def optimize_gs_ad_root_implicit(
     if nonfinite_grad_steps:
         warnings.warn(
             f"ctm_ad_mode='root_implicit': {nonfinite_grad_steps} of "
-            f"{config.gs_num_steps} optimizer steps made no progress because "
+            f"{steps_run} optimizer steps made no progress because "
             "their gradient was masked. The reported energy is from the best "
             "state actually reached, not from a converged optimization.",
             RuntimeWarning,
