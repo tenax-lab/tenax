@@ -191,7 +191,15 @@ def python_loop_ctm_converge(
         conv_tol:          Convergence tolerance on corner singular values.
         conv_method:       Convergence method: ``"sv"`` (corner singular
                            values) or ``"elementwise"`` (max element-wise
-                           difference across all env tensors).
+                           difference across all env tensors).  Prefer
+                           ``"sv"``: the environment is defined only up to a
+                           gauge on each chi-bond, so ``"elementwise"``
+                           measures gauge motion as well as convergence and
+                           plateaus far above any usable ``conv_tol`` on a
+                           physical state (#780).  Note this default does NOT
+                           reach config-driven callers -- ``ctm_converge_kwargs``
+                           always emits ``CTMConfig.ctm_conv_method``, which
+                           is ``"elementwise"`` for the AD path (#351).
         renormalize:       Renormalize environments after each sweep.
         projector_method:  ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
         qr_warmup_steps:   Number of eigh warm-up sweeps before QR kicks in.

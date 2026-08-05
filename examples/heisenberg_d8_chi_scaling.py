@@ -333,6 +333,7 @@ def scan_cell(tensor_path, chi, n_devices, path):
         # arm's plateau bail (the split loop has no bail).  See #781.
         "best_iteration": None,
         "ms_per_sweep": None, "peak_gb": None, "converged": False,
+        "conv_metric": None, "conv_method": None,
         # #747: rank(C1) <= 1 means the environment collapsed to a chi_eff=1
         # mean-field boundary and the energy is meaningless, however clean the
         # chi scan looks.  Recorded per cell so a sweep cannot be read as a
@@ -351,19 +352,20 @@ def scan_cell(tensor_path, chi, n_devices, path):
         H = sublattice_rotate_gate(heisenberg_gate())
 
         if path == "split":
-            E, total_s, sweeps, converged, rank, best_iter = _converge_split(
-                A_opt, H, chi
-            )
+            (E, total_s, sweeps, converged, rank, best_iter,
+             conv_metric, conv_method) = _converge_split(A_opt, H, chi)
         else:
-            E, total_s, sweeps, converged, rank, best_iter = _converge_dense(
-                A_opt, H, chi, n_devices
-            )
+            (E, total_s, sweeps, converged, rank, best_iter,
+             conv_metric, conv_method) = _converge_dense(A_opt, H, chi, n_devices)
 
         result.update(
             E_site=E, err_vs_qmc=E - REFERENCE_E, total_s=float(total_s),
             n_sweeps=sweeps, ms_per_sweep=1000.0 * total_s / max(sweeps, 1),
             best_iteration=best_iter,
             converged=bool(converged), peak_gb=d4._peak_gb(), corner_rank=rank,
+            # #780: `converged` is only readable next to the criterion that
+            # produced it and the metric it reached.
+            conv_metric=conv_metric, conv_method=conv_method,
         )
     except Exception as e:  # noqa: BLE001 — record and resume, never crash the sweep
         msg = f"{type(e).__name__}: {e}"
@@ -378,18 +380,17 @@ def _converge_dense(A_opt, H, chi, n_devices):
     """Dense closed-path forward CTM (χ²·D⁶); device_mesh-sharded for n>1."""
     import jax
 
-    from tenax import CTMConfig, compute_energy_ctm_tensor
+    from tenax import compute_energy_ctm_tensor
     from tenax.algorithms._ctm_diagnostics import check_ctm_env
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
     from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
 
     mesh = d4._build_mesh(n_devices)  # A100-only guard + GSPMD mesh for n>1
-    cfg = CTMConfig(
-        chi=chi, max_iter=200, conv_tol=1e-10,
-        projector_method="svd", forward_gauge="phase", device_mesh=mesh,
-    )
-    kwargs = ctm_converge_kwargs(cfg)
+    # Shared with the D=4 driver: same forward-only scan, same deviation from
+    # the CTMConfig default (`ctm_conv_method="sv"`, #780). The split arm below
+    # has only ever used the sv criterion, so both arms now agree.
+    kwargs = ctm_converge_kwargs(d4.scan_ctm_config(chi, mesh))
 
     warm_envs, _ = python_loop_ctm_converge(
         {(0, 0): A_opt}, SINGLE_SITE_NEIGHBORS, **kwargs
@@ -414,7 +415,7 @@ def _converge_dense(A_opt, H, chi, n_devices):
     # sweep whose env came back, which the plateau bail leaves behind.
     return (
         E, total_s, int(info.iterations), bool(info.converged), rank,
-        int(info.best_iteration),
+        int(info.best_iteration), float(info.sv_diff), kwargs["conv_method"],
     )
 
 
@@ -442,9 +443,12 @@ def _converge_split(A_opt, H, chi):
     rank = check_ctm_env(env, context=f"D=8 chi={chi} split")
     # The split loop breaks on convergence or exhausts max_iter -- it has no
     # plateau bail -- so the returned env is always the last sweep's (#781).
+    # It has only ever used the gauge-invariant sv criterion (`_ctm_sv_diff`
+    # on the corner spectrum) and has no elementwise mode, so #780 never
+    # applied to this arm; it does not surface the achieved metric.
     return (
         E, total_s, int(info.iterations), bool(info.converged), rank,
-        int(info.iterations),
+        int(info.iterations), None, "sv",
     )
 
 
@@ -490,7 +494,8 @@ def _load_or_run_scan(cell, outdir, timeout_s, gpu_wait_s=1800):
         "D": cell.D, "chi": cell.chi, "n_devices": cell.n_devices, "path": cell.path,
         "E_site": None, "err_vs_qmc": None, "ms_per_sweep": None,
         "n_sweeps": None, "best_iteration": None, "peak_gb": None,
-        "converged": False, "oom": False,
+        "converged": False, "conv_metric": None, "conv_method": None,
+        "oom": False,
         "error": ("timeout" if not ok else "worker produced no result file"),
     }
     d4._atomic_write_text(str(path), json.dumps(res, indent=2))
@@ -583,7 +588,7 @@ def _aggregate8(results, outdir):
 
     keys = ["D", "chi", "n_devices", "path", "E_site", "err_vs_qmc", "corner_rank",
             "ms_per_sweep", "n_sweeps", "best_iteration", "peak_gb", "converged",
-            "oom", "error"]
+            "conv_metric", "conv_method", "oom", "error"]
     rows = [{k: r.get(k) for k in keys} for r in results]
     if rows:
         with open(os.path.join(outdir, "results.csv"), "w", newline="") as fh:

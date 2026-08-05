@@ -178,6 +178,12 @@ def test_csv_rows_have_stable_keys():
         "best_iteration",
         "peak_gb",
         "converged",
+        # #780: `converged` alone is not readable — the default `elementwise`
+        # criterion is gauge-dependent and cannot reach any usable tolerance,
+        # so an `N` says nothing about the environment. Store the criterion
+        # used and the metric it achieved alongside the flag.
+        "conv_metric",
+        "conv_method",
         # #747: rank(C1) per cell, so a completed sweep can be checked for the
         # rank-1 collapse after the fact rather than only at run time.
         "corner_rank",
@@ -315,3 +321,56 @@ def test_dispatch_routes_to_the_orchestrator_without_cell(monkeypatch):
     monkeypatch.setattr(d4, "_run_worker", lambda a: pytest.fail("not worker mode"))
     d4._dispatch(d4._build_argparser().parse_args([]))
     assert called == {"main": True}
+
+
+# --------------------------------------------------------------------- #
+# #780: make `converged` interpretable                                    #
+# --------------------------------------------------------------------- #
+
+
+def test_convergence_table_reports_the_criterion_and_its_metric():
+    """A bare `conv` column cannot be read without the criterion behind it.
+
+    #780: the D=4 benchmark published `converged=false` in all seven cells
+    while the environments were converged to ten digits — the default
+    `elementwise` criterion is gauge-dependent and plateaus around 2.6e-01.
+    Recording the achieved metric and which criterion produced it is what
+    makes an `N` in that column diagnosable rather than alarming.
+    """
+    results = _sample_results()
+    results[0].update(converged=False, conv_metric=2.55e-01, conv_method="elementwise")
+    results[1].update(converged=True, conv_metric=6.46e-09, conv_method="sv")
+    md = d4.results_to_convergence_md(results)
+
+    assert "metric" in md and "crit" in md
+    assert "2.55e-01" in md, "the achieved metric must be shown, not just Y/N"
+    assert "6.46e-09" in md
+    assert "elementwise" in md and "sv" in md
+
+
+def test_convergence_table_tolerates_missing_criterion_fields():
+    """Results recorded before #780 have neither key; the table must not
+    crash on them (the driver is record-and-resume, so old per-cell JSONs
+    are re-read verbatim)."""
+    md = d4.results_to_convergence_md(_sample_results())
+    assert "| 16 |" in md and "| 32 |" in md
+
+
+def test_scan_ctm_config_uses_the_gauge_invariant_criterion():
+    """The forward-only χ-scan must not inherit the `elementwise` default.
+
+    #780: `CTMConfig.ctm_conv_method` defaults to `elementwise`, which is
+    gauge-dependent and cannot reach any usable tolerance on a physical
+    state, so `converged` is False regardless of the environment. That
+    default exists for the implicit-AD path (#351, warm-start consistency);
+    a forward-only scan has no such constraint and must opt out explicitly.
+
+    Unlike the rest of this file, this test imports tenax (hence jax) --
+    the point is precisely what the real CTMConfig ends up holding.
+    """
+    cfg = d4.scan_ctm_config(chi=32, mesh=None)
+    assert cfg.ctm_conv_method == "sv"
+    assert cfg.chi == 32
+    # The knobs the scan does NOT deviate on, so the deviation stays minimal.
+    assert cfg.projector_method == "svd"
+    assert cfg.forward_gauge == "phase"

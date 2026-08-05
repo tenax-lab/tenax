@@ -110,7 +110,29 @@ class CTMConfig:
     # ``gmres_maxiter`` (step cap).  The fixed-point loop additionally
     # falls back to GMRES in-loop when ``diff > prev_diff`` after step 5.
     adjoint_method: Literal["fixed_point", "gmres"] = "fixed_point"
-    ctm_conv_method: str = "elementwise"  # "elementwise" or "sv" (singular value)
+    # "elementwise" or "sv" (corner singular-value spectrum).
+    #
+    # #780 -- "elementwise" is GAUGE-DEPENDENT and does not converge on a
+    # physical state.  A CTM environment is defined only up to a rotation on
+    # each chi-bond joining a corner to an edge, so comparing raw tensor
+    # entries across sweeps measures gauge motion rather than convergence.
+    # Measured: a genuine gauge (energy invariant to 2.2e-16) moves the
+    # element-wise metric to 1.0 while leaving the sv metric at 1.1e-16.  On a
+    # converged D=4 Heisenberg environment it plateaus at ~2.6e-01 -- seven
+    # orders above any usable conv_tol -- while "sv" reaches 6.5e-09 in 18
+    # sweeps on the identical state, energies agreeing to 9 digits.  So under
+    # this default `CTMConvergeInfo.converged` is always False and
+    # plateau_patience is always the exit path; no conv_tol can change that.
+    #
+    # It stays the default because implicit AD requires it (#351: warm-start
+    # paths silently disagreeing with the implicit-AD energy) and
+    # `validate_ctm_for_implicit_ad` enforces it -- consistency across AD
+    # paths matters more there than reaching an absolute tolerance.
+    # FORWARD-ONLY callers (chi scans, one-off energy evaluations) should set
+    # "sv" explicitly, as the chi-scaling drivers do.  Whether elementwise
+    # should remain the AD default is open: the AD path has not been measured
+    # under "sv".
+    ctm_conv_method: str = "elementwise"
     # forward_gauge: "phase" (default — Frobenius-norm phase fix per CTM
     # absorption; works for both implicit and explicit AD, 1-site and
     # 2-site).  "sigma" (transfer-matrix eigenvector alignment, 1-site
