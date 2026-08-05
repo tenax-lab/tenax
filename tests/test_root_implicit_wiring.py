@@ -50,6 +50,17 @@ def test_unknown_ctm_ad_mode_still_rejected():
         iPEPSConfig(max_bond_dim=2, ctm=CTMConfig(chi=4, ctm_ad_mode="root"))
 
 
+def test_ctm_config_carries_the_rank_clamp():
+    assert CTMConfig(chi=6).rel_floor is None
+
+
+def test_ctm_config_rejects_a_nonsensical_rank_clamp():
+    with pytest.raises(ValueError, match="rel_floor"):
+        CTMConfig(chi=6, rel_floor=0.0)
+    with pytest.raises(ValueError, match="rel_floor"):
+        CTMConfig(chi=6, rel_floor=1.5)
+
+
 @pytest.mark.parametrize(
     "mode,expected",
     [

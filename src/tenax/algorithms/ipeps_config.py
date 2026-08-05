@@ -267,6 +267,14 @@ class CTMConfig:
     # (Increment 2). Use it for large-D forward energy/observables.
     # Appended at the end of the dataclass to preserve positional CTMConfig ABI.
     ctm_chunk_size: int | None = None
+    # Relative clamp on the retained CTM spectrum for the root-implicit path.
+    # ``None`` (default) uses the derived ``eps**(1/3)``: the covariant
+    # characteristic equations depend on ``S`` cubically, so a retained
+    # direction below that cannot be resolved in working precision (#772/#778).
+    # Two-sided -- raising it above genuinely-weighted directions breaks
+    # well-conditioned states.  Consulted by ``ctm_ad_mode="root_implicit"``
+    # only.  Appended at the end to preserve positional CTMConfig ABI.
+    rel_floor: float | None = None
 
     def __post_init__(self):
         valid_modes = {
@@ -394,6 +402,11 @@ class CTMConfig:
         if self.ctm_chunk_size is not None and self.ctm_chunk_size < 1:
             raise ValueError(
                 f"ctm_chunk_size must be None or a positive int, got {self.ctm_chunk_size}"
+            )
+        if self.rel_floor is not None and not 0.0 < self.rel_floor < 1.0:
+            raise ValueError(
+                "rel_floor must be None or lie in (0, 1) -- it is a relative "
+                f"clamp on the retained spectrum; got {self.rel_floor}"
             )
 
 
