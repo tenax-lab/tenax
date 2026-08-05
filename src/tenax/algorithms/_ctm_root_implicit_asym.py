@@ -495,7 +495,9 @@ def _rank_capped_spectrum(s: jax.Array, chi: int, *, rel_floor: float | None = N
     return jnp.maximum(s_k, cut), usable_rank
 
 
-def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
+def all_projectors(
+    env: AsymEnv, a: jax.Array, chi: int, prev=None, *, rel_floor: float | None = None
+):
     """Decompose the cut in all four directions, from the *same* environment.
 
     Paper Eq. 65 and "their corresponding rotated versions": every projector
@@ -504,6 +506,10 @@ def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
     (Gauss-Seidel) sweep, where move ``k+1`` sees the output of move ``k``,
     has a fixed point that does *not* satisfy Eqs. 76-77, because those
     equations evaluate all four moves at the same ``y``.
+
+    ``rel_floor`` forwards to :func:`_rank_capped_spectrum`; ``None`` uses its
+    derived ``eps^(1/3)`` clamp.  See :func:`retained_rank_report` for the
+    ``usable_rank`` this discards.
     """
     out = []
     env_k, a_k = env, a
@@ -514,7 +520,7 @@ def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
         # sweeps start from a near-identity environment whose half-infinite
         # matrix is rank deficient, and a singular S makes the matrix
         # inverse square root below produce NaNs.
-        s_k, _rank = _rank_capped_spectrum(s, chi)
+        s_k, _rank = _rank_capped_spectrum(s, chi, rel_floor=rel_floor)
         # Cast to the environment's dtype.  ``S`` is a *variable* of the
         # characteristic equations, and the reverse pass needs it free to leave
         # the reals for the same reason Eq. 79 needs it free to leave the
@@ -532,6 +538,36 @@ def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
         out.append((P_top, P_bot, U, S_keep, Vh))
         env_k, a_k = rotate_env(env_k), rotate_a(a_k)
     return out
+
+
+def retained_rank_report(
+    env: AsymEnv, a: jax.Array, chi: int, rel_floor: float | None = None
+) -> dict:
+    """How much of the retained spectrum carries real weight, before clamping.
+
+    ``usable_rank`` is the minimum over the four directions of the count
+    :func:`_rank_capped_spectrum` would leave above the clamp; when it is below
+    ``chi`` the extra directions are numerically empty and ``chi`` exceeds what
+    the state's environment supports.  ``retained_smin_rtol`` is the true
+    ``s_min/s_max`` of the *unclamped* cut, so it describes the state rather
+    than reading back ``rel_floor``.
+
+    #778 computes the rank inside :func:`all_projectors` and discards it, which
+    left the signal it describes as "the honest signal that chi exceeds what
+    the state's environment supports" unreachable.  This is that accessor.
+    """
+    smin_rtol = float("inf")
+    rank = chi
+    env_k, a_k = env, a
+    for _k in range(4):
+        M_k = half_infinite_environment(env_k, a_k)
+        s = jnp.linalg.svd(M_k, compute_uv=False)
+        _capped, usable = _rank_capped_spectrum(s, chi, rel_floor=rel_floor)
+        s_k = s[:chi]
+        smin_rtol = min(smin_rtol, float(s_k[-1]) / (float(s_k[0]) + 1e-300))
+        rank = min(rank, int(usable))
+        env_k, a_k = rotate_env(env_k), rotate_a(a_k)
+    return {"usable_rank": rank, "retained_smin_rtol": smin_rtol}
 
 
 def _renormalised_corner(env_k, a_k, P_top_k, P_bot_next, chi):
@@ -555,13 +591,15 @@ def _renormalised_edge(env_k, a_k, P_top_k, P_bot_k, chi):
     return jnp.einsum("ui,ixj,jd->dxu", P_bot_k, t4g, P_top_k)
 
 
-def sweep(env: AsymEnv, a: jax.Array, chi: int, prev=None):
+def sweep(
+    env: AsymEnv, a: jax.Array, chi: int, prev=None, *, rel_floor: float | None = None
+):
     """One simultaneous CTMRG sweep: all four directions from one environment.
 
     Returns ``(env, projectors)``; the projectors feed the next sweep's
-    gauge alignment.
+    gauge alignment.  ``rel_floor`` forwards to :func:`all_projectors`.
     """
-    projs = all_projectors(env, a, chi, prev)
+    projs = all_projectors(env, a, chi, prev, rel_floor=rel_floor)
     corners: list = [None] * 4
     edges: list = [None] * 4
     env_k, a_k = env, a
@@ -608,6 +646,7 @@ def converge(
     conv_tol: float = 1e-12,
     min_iter: int = 4,
     return_projectors: bool = False,
+    rel_floor: float | None = None,
 ):
     """Run sweeps until the corner spectra stop moving.
 
@@ -616,6 +655,8 @@ def converge(
     bond gauge of the chain that built it, and
     :func:`asym_root_parametrize` needs the same chain to extract a root in that
     gauge rather than re-pinning a different one — see its docstring.
+
+    ``rel_floor`` forwards to :func:`sweep` / :func:`all_projectors`.
     """
     env, a = _init_env(A, chi)
     prev = None
@@ -624,7 +665,7 @@ def converge(
     converged = False
     iters = 0
     for it in range(int(max_iter)):
-        env, prev_projs = sweep(env, a, chi, prev_projs)
+        env, prev_projs = sweep(env, a, chi, prev_projs, rel_floor=rel_floor)
         iters = it + 1
         # Element-wise, not spectral.  Corner *singular values* are invariant
         # under independent rotations of each bond, so a spectral criterion
@@ -960,6 +1001,7 @@ def asym_root_parametrize(
     pinv_rtol: float = 1e-10,
     polish_steps: int = 40,
     polish_tol: float = 1e-10,
+    rel_floor: float | None = None,
 ) -> tuple[AsymRoot, float]:
     """Extract ``y* = ({C}, {E}, 0, {S*}, 0)`` and the frozen isometries.
 
@@ -980,11 +1022,16 @@ def asym_root_parametrize(
     projectors, hence two bond phases — plateaus at 6e-5 instead of falling,
     while the edges converge geometrically past 1e-8.  Warm-started off the
     forward chain the same environment is a root to 6e-17 (#721).
+
+    ``rel_floor`` must reach *both* internal projector builds below (the
+    ``all_projectors`` call and the ``sweep`` call) — they must agree, or
+    ``y*`` is extracted against a different clamp than the one the next
+    polish step's forward environment uses, and is not a root of it.
     """
     best: tuple[AsymRoot, float] | None = None
     for _step in range(max(int(polish_steps), 1)):
         env = AsymEnv(*[t / (jnp.linalg.norm(t) + 1e-300) for t in env])
-        projs = all_projectors(env, a, chi, prev_projs)
+        projs = all_projectors(env, a, chi, prev_projs, rel_floor=rel_floor)
         prev_projs = projs
         U_star, U_perp, Vh_star, Vh_perp, s_list, s_inv = [], [], [], [], [], []
         for k in range(4):
@@ -1023,7 +1070,7 @@ def asym_root_parametrize(
             best = (root, residual)
         if residual <= polish_tol:
             break
-        env, prev_projs = sweep(env, a, chi, projs)
+        env, prev_projs = sweep(env, a, chi, projs, rel_floor=rel_floor)
 
     assert best is not None
     return best
@@ -1101,6 +1148,7 @@ def asym_root_implicit_energy_and_grad(
     root_residual_warn: float = 1e-6,
     on_root_residual: str = "raise",
     return_diagnostics: bool = False,
+    rel_floor: float | None = None,
 ):
     """Energy and ``dE/dA`` for a 1x1 unit cell via asymmetric root implicit AD.
 
@@ -1127,6 +1175,13 @@ def asym_root_implicit_energy_and_grad(
     is from orthogonal to the environment-phase gauge, which is what makes the
     singular adjoint system solvable; it is ~1e-16 when the energy boundary is
     right and is worth watching whenever that boundary changes.
+
+    ``rel_floor`` forwards to :func:`_rank_capped_spectrum` (``None`` uses its
+    derived ``eps^(1/3)`` clamp) and reaches both the forward sweep and the
+    root extraction, which must agree.  ``return_diagnostics`` additionally
+    reports ``usable_rank`` and ``retained_smin_rtol`` from
+    :func:`retained_rank_report`, and a ``chi`` above ``usable_rank`` raises a
+    ``RuntimeWarning``.
     """
     _check_root_residual_policy(on_root_residual)
     from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
@@ -1142,7 +1197,22 @@ def asym_root_implicit_energy_and_grad(
         conv_tol=conv_tol,
         min_iter=min_iter,
         return_projectors=True,
+        rel_floor=rel_floor,
     )
+    rank_report = retained_rank_report(env, a_arr, chi, rel_floor)
+    if rank_report["usable_rank"] < chi:
+        warnings.warn(
+            f"Asymmetric root implicit AD: only "
+            f"{rank_report['usable_rank']} of {chi} retained directions carry "
+            f"weight above the rank clamp (smallest is "
+            f"{rank_report['retained_smin_rtol']:.2e} relative), so chi={chi} "
+            "exceeds this state's usable environment rank. The gradient is "
+            "sound, but the energy will stop moving with chi -- which looks "
+            "like the #723/#726 rank-1 collapse and is not. Reduce chi, or "
+            "increase D.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     root, root_residual = asym_root_parametrize(
         env,
         a_arr,
@@ -1150,6 +1220,7 @@ def asym_root_implicit_energy_and_grad(
         prev_projs=forward_projs,
         polish_steps=polish_steps,
         polish_tol=polish_tol,
+        rel_floor=rel_floor,
     )
     if root_residual > root_residual_warn:
         _report_root_residual(
@@ -1275,6 +1346,7 @@ def asym_root_implicit_energy_and_grad(
             grad,
             {
                 **meta,
+                **rank_report,
                 "root_residual": root_residual,
                 "covariant_residual": covariant_residual,
                 "adjoint_residual": float(solve_resid),

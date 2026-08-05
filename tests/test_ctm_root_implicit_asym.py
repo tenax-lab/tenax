@@ -1352,3 +1352,38 @@ def test_all_projectors_reports_a_rank_below_chi_on_a_flat_cut():
         diag = jnp.abs(jnp.diag(S_keep))
         # every retained value is strictly positive and no larger than the max
         assert bool(jnp.all(diag > 0))
+
+
+def test_rel_floor_reaches_the_projectors():
+    """#778 exposed rel_floor on _rank_capped_spectrum but no caller can pass it."""
+    A = _site_tensor(D=2)
+    env, a = M._init_env(A, 4)
+    projs = M.all_projectors(env, a, 4, rel_floor=1e-2)
+    for _pt, _pb, _U, S_keep, _Vh in projs:
+        d = np.abs(np.diag(np.asarray(S_keep)))
+        assert d.min() / d.max() >= 1e-2 * (1 - 1e-9)
+
+
+def test_rel_floor_reaches_both_the_forward_and_the_root_paths():
+    """converge and asym_root_parametrize build projectors independently.
+
+    If only one honours the knob, y* is not a root of the environment it was
+    extracted from and the root residual is meaningless.
+    """
+    A = _site_tensor(D=2)
+    env, a, _meta, projs = M.converge(
+        A, 4, max_iter=60, conv_tol=1e-12, return_projectors=True, rel_floor=1e-2
+    )
+    root, _resid = M.asym_root_parametrize(env, a, 4, prev_projs=projs, rel_floor=1e-2)
+    for S in root.s:
+        d = np.abs(np.diag(np.asarray(S)))
+        assert d.min() / d.max() >= 1e-2 * (1 - 1e-9)
+
+
+def test_usable_rank_is_reported_not_discarded():
+    """#778 computes usable_rank and drops it on the floor at all_projectors."""
+    A = _site_tensor(D=2)
+    env, a = M._init_env(A, 4)
+    rep = M.retained_rank_report(env, a, 4)
+    assert rep["usable_rank"] == 4
+    assert rep["retained_smin_rtol"] > 1e-5
