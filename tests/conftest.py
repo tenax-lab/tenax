@@ -65,6 +65,21 @@ _FILE_MARKERS = {
     # CTM convergence, so it is milliseconds.  The production-run case it
     # also carries is explicitly @slow + xfail (#772).
     "test_root_implicit_wiring.py": "core",
+    # Environment-phase (gauge) invariance of the RDM builders (#748, follow-up
+    # to #725/#742).  Cheap -- one module-scoped D=2 simple-update state per
+    # file, then pure phase reruns of the contraction (~5s each).  These guard
+    # a defect that silently rescaled the physical part of every RDM under a
+    # CTM gauge the sweep does not fix, so they belong in the *required* gate
+    # rather than the unwatched full suite; unregistered, all 80 of them were
+    # deselected by ``-m core`` and ran only on push to main.
+    "test_ipeps_rdm_gauge.py": "core",
+    "test_ipeps_excitations_gauge.py": "core",
+    "test_ctm_honeycomb_energy_gauge.py": "core",
+    # ``_normalise_rdm``'s zero-matrix branch must stay differentiable: the
+    # excitation H_eff/N are built by differentiating the norm at ``B = 0``, so
+    # a NaN cotangent there is as fatal as a NaN value.  Milliseconds for the
+    # unit half; the reachability test converges one D=2 chi=8 CTM.
+    "test_normalise_rdm_zero_grad.py": "core",
     "test_ctm_tensor.py": "algorithm",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",

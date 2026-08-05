@@ -74,10 +74,28 @@ def _normalise_rdm(mat: jax.Array) -> jax.Array:
     still returns zero rather than ``0/0``.  A relative floor alone vanishes
     with the matrix, which turned the excitation norm at ``B = 0`` into NaN --
     a legitimate input, since a zero excitation vector must have zero norm.
+    That guarantee covers the *gradient* as well as the value: the excitation
+    ``H_eff``/``N`` matrices are built by differentiating those norms, so a
+    NaN cotangent at ``B = 0`` would be as fatal as a NaN value.  See the
+    comment on ``scale`` below for why that needs more than a ``jnp.where``.
     """
     tr = jnp.trace(mat)
-    scale = jnp.linalg.norm(mat)
-    floor = EPS * jnp.where(scale > 0, scale, 1.0)
+    # ``jnp.linalg.norm`` would be the obvious spelling of ``scale``, but its
+    # derivative at the all-zero matrix is ``x/||x|| = 0/0 = NaN``, and a
+    # ``jnp.where`` around it does *not* short-circuit that VJP -- the
+    # unselected branch still contributes ``0 * NaN``.  The forward value would
+    # look right while every cotangent came back NaN, which matters because the
+    # zero case is reached under ``jax.grad``: ``_build_effective_matrices``
+    # builds the excitation ``H_eff``/``N`` from ``vmap(grad(norm_fn))``, and
+    # ``B = 0`` is exactly the input this floor exists to support.
+    # So the squared norm is formed as a polynomial (differentiable
+    # everywhere) and ``sqrt`` is fenced off from zero by a second ``where`` on
+    # its *argument*.  The value is Frobenius either way, so the gauge argument
+    # above is unaffected.
+    sq = jnp.sum(mat.real**2 + mat.imag**2)
+    nonzero = sq > 0
+    scale = jnp.where(nonzero, jnp.sqrt(jnp.where(nonzero, sq, 1.0)), 0.0)
+    floor = EPS * jnp.where(nonzero, scale, 1.0)
     denom = jnp.where(jnp.abs(tr) > floor, tr, floor.astype(tr.dtype))
     mat = mat / denom
     return 0.5 * (mat + mat.conj().T)
