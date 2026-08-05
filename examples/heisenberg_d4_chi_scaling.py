@@ -230,7 +230,13 @@ def report_frozen_chi(results, *, group_keys=("D", "n_devices", "path")):
 def results_to_csv_rows(results):
     keys = [
         "D", "chi", "n_devices", "E_site", "err_vs_qmc", "ms_per_sweep",
-        "n_sweeps", "peak_gb", "converged", "corner_rank", "oom", "error",
+        # n_sweeps is the sweeps performed; best_iteration is the sweep whose
+        # environment was returned (they differ only on the plateau bail, by
+        # exactly plateau_patience).  Both are recorded so ms_per_sweep can be
+        # audited after the fact rather than re-derived -- #781 published a
+        # per-sweep cost inflated up to 3x because only the latter was stored.
+        "n_sweeps", "best_iteration", "peak_gb", "converged", "corner_rank",
+        "oom", "error",
     ]
     return [{k: r.get(k) for k in keys} for r in results]
 
@@ -384,6 +390,7 @@ def scan_cell(tensor_path, chi, n_devices):
     result = {
         "D": D, "chi": chi, "n_devices": n_devices,
         "E_site": None, "err_vs_qmc": None, "total_s": None, "n_sweeps": None,
+        "best_iteration": None,
         "ms_per_sweep": None, "peak_gb": None, "converged": False,
         "corner_rank": None, "oom": False, "error": None,
     }
@@ -444,6 +451,7 @@ def scan_cell(tensor_path, chi, n_devices):
         result.update(
             E_site=E, err_vs_qmc=E - REFERENCE_E, total_s=float(total_s),
             n_sweeps=sweeps, ms_per_sweep=1000.0 * total_s / max(sweeps, 1),
+            best_iteration=int(info.best_iteration),
             converged=bool(info.converged), peak_gb=_peak_gb(), corner_rank=rank,
         )
     except Exception as e:  # noqa: BLE001 — record and resume, never crash the sweep
@@ -570,7 +578,8 @@ def _load_or_run_scan(cell, outdir, timeout_s):
     res = {
         "D": cell.D, "chi": cell.chi, "n_devices": cell.n_devices,
         "E_site": None, "err_vs_qmc": None, "ms_per_sweep": None,
-        "n_sweeps": None, "peak_gb": None, "converged": False, "oom": False,
+        "n_sweeps": None, "best_iteration": None, "peak_gb": None,
+        "converged": False, "oom": False,
         "error": ("timeout" if not ok else "worker produced no result file"),
     }
     _atomic_write_text(path, json.dumps(res, indent=2))

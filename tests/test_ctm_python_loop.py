@@ -292,10 +292,11 @@ class TestPlateauPatience:
             plateau_patience=patience,
         )
         assert not info.converged
-        # Bail must happen before exhausting the budget, and the returned
-        # iteration count is the best-iter (not the bail-iter) so it is
-        # bounded by ``max_iter - patience``.
+        # Bail must happen before exhausting the budget.  Since #781
+        # ``iterations`` is the bail sweep itself (the sweeps performed);
+        # ``best_iteration`` is the one trailing it by ``patience``.
         assert info.iterations < max_iter
+        assert info.best_iteration == info.iterations - patience
 
     def test_large_patience_matches_disabled(self):
         """``plateau_patience > max_iter`` is equivalent to ``None``."""
@@ -319,6 +320,126 @@ class TestPlateauPatience:
         assert info_none.iterations == info_huge.iterations == max_iter
         assert not info_none.converged
         assert not info_huge.converged
+
+    def test_iterations_counts_sweeps_actually_run(self, monkeypatch):
+        """``iterations`` is the sweep count performed, not the best-metric index.
+
+        Issue #781: the plateau bail used to report ``iterations=best_iter``
+        — the iteration that achieved the best metric — so every caller
+        computing a per-sweep cost (``1000 * total_s / info.iterations``)
+        divided the full elapsed time by an index roughly ``patience``
+        sweeps short of the truth, inflating per-sweep timings by up to 2x.
+        Counting the actual ``jit_step`` invocations is the ground truth
+        the field has to match.
+        """
+        from tenax.algorithms import _ctm_python_loop as _loop_mod
+
+        sweeps_run = 0
+        real_make = _loop_mod._make_jit_ctm_step
+
+        def _counting_make(*args, **kwargs):
+            step = real_make(*args, **kwargs)
+
+            def _counted(*step_args, **step_kwargs):
+                nonlocal sweeps_run
+                sweeps_run += 1
+                return step(*step_args, **step_kwargs)
+
+            return _counted
+
+        monkeypatch.setattr(_loop_mod, "_make_jit_ctm_step", _counting_make)
+
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+        max_iter = 50
+        patience = 5
+        _, info = python_loop_ctm_converge(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=max_iter,
+            min_iter=5,
+            conv_tol=0.0,  # impossible — forces the plateau bail
+            conv_method="elementwise",
+            renormalize=True,
+            projector_method="svd",
+            plateau_patience=patience,
+        )
+        assert not info.converged
+        # Guard the premise: this must be the *bail* path, not budget exhaustion.
+        assert sweeps_run < max_iter, (
+            f"expected an early plateau bail, ran the full budget ({sweeps_run} sweeps)"
+        )
+        assert info.iterations == sweeps_run, (
+            f"iterations={info.iterations} but {sweeps_run} CTM sweeps were "
+            "actually executed (#781)"
+        )
+
+    def test_best_iteration_locates_the_returned_env(self):
+        """``best_iteration`` says which sweep produced the env handed back.
+
+        The bail returns the best-metric env, so the information that
+        ``iterations`` used to carry is still needed — it just belongs in
+        its own field.  On a bail the counter can only have been reset by
+        an improvement, so the gap to the bail sweep is exactly
+        ``plateau_patience``.
+        """
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+        max_iter = 50
+        patience = 5
+        _, info = python_loop_ctm_converge(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=max_iter,
+            min_iter=5,
+            conv_tol=0.0,
+            conv_method="elementwise",
+            renormalize=True,
+            projector_method="svd",
+            plateau_patience=patience,
+        )
+        assert not info.converged
+        assert info.iterations < max_iter
+        assert info.best_iteration + patience == info.iterations, (
+            f"best_iteration={info.best_iteration}, iterations="
+            f"{info.iterations}, patience={patience}"
+        )
+
+    def test_best_iteration_equals_iterations_without_a_bail(self):
+        """Off the bail path the returned env *is* the last sweep's.
+
+        Only the ``plateau_patience`` stop-loss hands back an earlier
+        environment.  When the loop converges, or exhausts ``max_iter``
+        with the bail disabled, ``best_iteration`` must not lag.
+        """
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+        base = dict(
+            site_tensors={(0, 0): A},
+            neighbors=SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            min_iter=5,
+            conv_method="elementwise",
+            renormalize=True,
+            projector_method="svd",
+        )
+
+        # Budget-exhausted path: impossible tolerance, bail disabled.
+        max_iter = 25
+        _, exhausted = python_loop_ctm_converge(
+            max_iter=max_iter, conv_tol=0.0, plateau_patience=None, **base
+        )
+        assert not exhausted.converged
+        assert exhausted.iterations == max_iter
+        assert exhausted.best_iteration == exhausted.iterations
+
+        # Converged path: a tolerance loose enough that the elementwise
+        # metric clears it well inside the budget.
+        _, converged = python_loop_ctm_converge(
+            max_iter=max_iter, conv_tol=1e3, plateau_patience=20, **base
+        )
+        assert converged.converged
+        assert converged.iterations < max_iter
+        assert converged.best_iteration == converged.iterations
 
     def test_returned_env_is_best_seen(self):
         """Returned env corresponds to the best ``sv_diff``, not the bail iter."""
