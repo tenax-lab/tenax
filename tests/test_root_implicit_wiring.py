@@ -14,6 +14,7 @@ policy is to hard-error at config time.
 from __future__ import annotations
 
 import dataclasses
+import math
 
 import pytest
 
@@ -181,35 +182,27 @@ def test_symmetric_variant_is_refused_and_cites_its_blocker():
 
 
 # ------------------------------------------------------------------ #
-# The gap that blocks production use (#772)                            #
+# The production case: an optimizer running through the path (#715)    #
 # ------------------------------------------------------------------ #
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    reason=(
-        "#772, NARROWED by the rank cap: the covariant residual on a physical "
-        "simple-update state is now 1.9e-05 at chi=6 (was 5.7e+05) and the "
-        "gradient is finite and FD-correct to 6.9e-08 (was NaN). What still "
-        "fails is the GATE, not the gradient: clamping the unusable directions "
-        "leaves the forward root residual at 2.8e-06, and the default "
-        "root_residual_warn=1e-06 rejects that by 2.8x. The residual floor is "
-        "intrinsic to a clamped spectrum, so closing this needs a decision on "
-        "the tolerance -- note the gradient is 40x more accurate than the gate "
-        "implies, so 1e-06 is not predictive of gradient quality here."
-    ),
-    strict=False,
-)
 def test_production_heisenberg_run_through_optimize_gs_ad():
-    """The production case this wiring exists for: a real Heisenberg state.
+    """A real Heisenberg state optimized through the root-implicit path.
 
-    Left in as an executable record of #772 rather than deleted, so whoever
-    fixes the engine gets an immediate signal here (an XPASS) instead of having
-    to reconstruct the case.
+    This is the gate #715 actually had to clear.  Every other verification in
+    the suite is a single gradient at a single point; what was never shown is
+    that an optimizer *descends* through this path.  Until #779 it could not
+    even take its first step -- the root-residual gate raised on a physical
+    simple-update state, whose environment supports only three directions at
+    any chi so the rank clamp always fires.
 
-    The failure is at least *loud*: ``on_root_residual="raise"`` (#759) turns a
-    non-vanishing root residual into ``RootResidualError``, so the optimizer
-    stops rather than stepping on a NaN gradient.
+    The assertions are physical rather than a pinned number: at three Adam
+    steps the exact value is a property of the optimizer schedule, but the
+    energy must go *down* from the simple-update start and must not fall below
+    the exact ground state.  A run that breaches the latter is reporting a
+    non-variational energy, which is the failure mode that matters and the one
+    a hard-coded ``approx`` would have hidden behind a tolerance.
     """
     import jax
 
@@ -232,4 +225,71 @@ def test_production_heisenberg_run_through_optimize_gs_ad():
         ctm=CTMConfig(chi=6, max_iter=100, conv_tol=1e-10, ctm_ad_mode="root_implicit"),
     )
     _A, _env, E = optimize_gs_ad(gate, None, cfg)
-    assert E == pytest.approx(-0.4886, abs=5e-3)
+
+    assert math.isfinite(E), E
+    # The simple-update start sits at -0.48198 at this chi; three Adam steps
+    # reach -0.5066.  Requiring a clear improvement rather than the exact value
+    # keeps the test about the optimizer working, not about its schedule.
+    assert E < -0.49, f"the optimizer did not improve on the SU start: {E}"
+    # Square-lattice spin-1/2 Heisenberg AFM, Sandvik QMC.  A D=2 chi=6 state
+    # cannot legitimately go below this.
+    assert E > -0.669437, f"non-variational energy below the exact ground state: {E}"
+
+
+def test_the_root_implicit_gradient_descends_the_energy():
+    """A few plain gradient steps must lower the energy monotonically.
+
+    The slow test above exercises the whole ``optimize_gs_ad`` stack but is
+    deselected from the required gate, which runs ``-m core`` only.  This is
+    the same claim -- the gradient points downhill -- at a size the required
+    gate can afford, using the engine directly so no optimizer schedule sits
+    between the gradient and the assertion.
+
+    A wrong-sign or badly-scaled gradient shows up here immediately; that was
+    the failure mode #718 spent a long time on, where the energy boundary was
+    mis-glued and the gradient was off by 3e-2 relative while every residual
+    looked healthy.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    jax.config.update("jax_enable_x64", True)
+    from tenax.algorithms._ctm_root_implicit_asym import (
+        asym_root_implicit_energy_and_grad,
+    )
+    from tenax.algorithms.ipeps import heisenberg_gate, sublattice_rotate_gate
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import U1Symmetry
+    from tenax.core.tensor import DenseTensor
+
+    D = d = 2
+    sym = U1Symmetry()
+    zeros = [0] * D
+    zphys = [0] * d
+    indices = (
+        TensorIndex.from_charges(sym, list(zeros), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, list(zeros), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, list(zeros), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, list(zeros), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(sym, list(zphys), FlowDirection.IN, label="phys"),
+    )
+    key = jax.random.PRNGKey(0)
+    params = jax.random.normal(key, (D, D, D, D, d))
+    params = params / jnp.linalg.norm(params)
+
+    gate = sublattice_rotate_gate(heisenberg_gate())
+    energies = []
+    lr = 0.05
+    for _ in range(3):
+        E, g = asym_root_implicit_energy_and_grad(
+            DenseTensor(params, indices), gate, chi=4, max_iter=40, conv_tol=1e-10
+        )
+        assert bool(jnp.all(jnp.isfinite(g))), "non-finite gradient"
+        energies.append(float(jnp.real(E)))
+        params = params - lr * g
+        params = params / jnp.linalg.norm(params)
+
+    assert all(energies[i + 1] < energies[i] for i in range(len(energies) - 1)), (
+        f"energy did not decrease monotonically: {energies}"
+    )
+    assert energies[-1] > -0.669437, f"below the exact ground state: {energies}"

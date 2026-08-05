@@ -76,7 +76,7 @@ def test_projectors_close_on_the_retained_subspace():
     A = _site_tensor()
     chi = 6
     env, a, _meta = M.converge(A, chi, max_iter=300, conv_tol=1e-12)
-    P_top, P_bot, _U, _s, _Vh = M.all_projectors(env, a, chi)[0]
+    P_top, P_bot, _U, _s, _Vh, _rank = M.all_projectors(env, a, chi)[0]
     # Proportional to the identity, not equal to it: the retained singular
     # values are normalised, so the closure carries their overall scale.
     closure = P_bot @ P_top
@@ -966,7 +966,7 @@ def test_the_singular_values_are_a_complex_unknown():
     A = _complex_site_tensor()
     chi = 4
     env, a, _info = M.converge(A, chi, max_iter=400, conv_tol=1e-13)
-    for _pt, _pb, _U, S_keep, _Vh in M.all_projectors(env, a, chi):
+    for _pt, _pb, _U, S_keep, _Vh, _rank in M.all_projectors(env, a, chi):
         assert jnp.iscomplexobj(S_keep), S_keep.dtype
         # Still the SVD's real spectrum, only widened.
         assert float(jnp.linalg.norm(jnp.imag(S_keep))) < 1e-300
@@ -1352,3 +1352,137 @@ def test_all_projectors_reports_a_rank_below_chi_on_a_flat_cut():
         diag = jnp.abs(jnp.diag(S_keep))
         # every retained value is strictly positive and no larger than the max
         assert bool(jnp.all(diag > 0))
+
+
+# --- #779: surface the usable rank so the gate can adapt to it -------------
+#
+# The rank cap sets an intrinsic floor on the root residual: once a retained
+# direction is clamped, y* cannot satisfy the characteristic equations to
+# better than the clamp level, and no amount of polishing changes that.  The
+# gate therefore has to know whether the clamp fired -- `all_projectors`
+# computed `usable_rank` and threw it away.
+
+
+def test_all_projectors_reports_the_usable_rank_per_direction():
+    """Each direction's decomposition carries the rank its spectrum supports."""
+    A = _site_tensor(seed=42)
+    chi = 4
+    env, a, _info = M.converge(A, chi, max_iter=300, conv_tol=1e-13)
+    projs = M.all_projectors(env, a, chi)
+    assert len(projs) == 4
+    for k, p in enumerate(projs):
+        assert len(p) == 6, f"direction {k} carries no usable_rank"
+        rank = p[5]
+        assert isinstance(rank, int), type(rank)
+        assert 1 <= rank <= chi, (k, rank)
+
+
+def test_a_well_conditioned_cut_reports_full_rank():
+    """A healthy random state uses every retained direction, so the clamp is
+    inert and the strict residual gate stays applicable."""
+    A = _site_tensor(seed=42)
+    chi = 4
+    env, a, _info = M.converge(A, chi, max_iter=300, conv_tol=1e-13)
+    projs = M.all_projectors(env, a, chi)
+    assert min(p[5] for p in projs) == chi
+
+
+def test_root_parametrize_can_return_the_usable_rank():
+    """``asym_root_parametrize`` surfaces the binding (minimum) rank, which is
+    what decides whether the residual floor is intrinsic."""
+    A = _site_tensor(seed=42)
+    chi = 4
+    env, a, _info = M.converge(A, chi, max_iter=300, conv_tol=1e-13)
+
+    two = M.asym_root_parametrize(env, a, chi, polish_steps=30)
+    assert len(two) == 2, "the default return must stay (root, residual)"
+
+    root, residual, usable_rank = M.asym_root_parametrize(
+        env, a, chi, polish_steps=30, return_usable_rank=True
+    )
+    assert residual == pytest.approx(float(two[1]), rel=1e-12)
+    assert jnp.allclose(root.env.C1, two[0].env.C1)
+    assert usable_rank == chi  # well-conditioned fixture
+
+
+def test_the_gate_stays_strict_when_the_clamp_is_inert():
+    """#779: a full-rank cut has no intrinsic residual floor.
+
+    When every retained direction carries real weight the clamp never fires,
+    the equations are solvable to roundoff (healthy states reach ~1e-16), and
+    the strict default is both meaningful and achievable. Relaxing it there
+    would be a pure loss of guard.
+    """
+    base = 1e-6
+    assert M._root_residual_tolerance(base, 4, 4, jnp.float64) == base
+    assert M._root_residual_tolerance(base, 8, 8, jnp.float64) == base
+    # rank can't exceed chi, but be defensive about the comparison direction
+    assert M._root_residual_tolerance(base, 9, 8, jnp.float64) == base
+
+
+def test_the_gate_relaxes_only_where_the_clamp_sets_the_floor():
+    """A clamped cut cannot satisfy the equations below the clamp level, so
+    the tolerance has to follow the clamp rather than the other way round."""
+    base = 1e-6
+    relaxed = M._root_residual_tolerance(base, 3, 6, jnp.float64)
+    assert relaxed > base, "a clamped cut needs the floor the clamp imposes"
+    # ...but it is a floor, never a tightening, and it stays scale-free.
+    assert M._root_residual_tolerance(1.0, 3, 6, jnp.float64) == 1.0
+
+
+def test_the_relaxed_gate_is_derived_from_the_clamp_not_invented():
+    """The relaxed tolerance comes from the same precision-derived constant
+    that sets the clamp (``eps**(1/3)``), so it tracks dtype rather than being
+    a magic number."""
+    eps13_64 = float(jnp.finfo(jnp.float64).eps ** (1 / 3))
+    eps13_32 = float(jnp.finfo(jnp.float32).eps ** (1 / 3))
+    t64 = M._root_residual_tolerance(1e-30, 3, 6, jnp.float64)
+    t32 = M._root_residual_tolerance(1e-30, 3, 6, jnp.float32)
+    assert t32 > t64, "single precision must get a looser floor, not the same"
+    root3 = 3.0**0.5  # chi - usable_rank = 3 clamped directions
+    assert t64 == pytest.approx(
+        M._CLAMPED_RESIDUAL_FACTOR * eps13_64 * root3, rel=1e-12
+    )
+    assert t32 == pytest.approx(
+        M._CLAMPED_RESIDUAL_FACTOR * eps13_32 * root3, rel=1e-12
+    )
+
+
+def test_the_relaxed_gate_grows_as_sqrt_of_the_clamped_directions():
+    """The measured law, and the reason this is derived rather than fitted.
+
+    Each clamped direction contributes about the clamp level to the residual
+    norm, which adds them in quadrature, so the floor scales as
+    ``sqrt(chi - usable_rank)``.  Measured on the D=2 simple-update state
+    (usable_rank=3 at every chi), the covariant residual divided by that
+    square root converges to 1.18e-5 across chi = 4..16, and a *different*
+    state at usable_rank=1 gives 1.03-1.14e-5 -- so the coefficient belongs to
+    the clamp, not to one fixture.
+
+    A tolerance flat in chi would either reject a legitimate chi=16 run or
+    wave through a chi=4 one.
+    """
+    base = 1e-30
+    t = {c: M._root_residual_tolerance(base, 3, c, jnp.float64) for c in (4, 6, 12, 19)}
+    # 1, 3, 9, 16 clamped directions -> ratios 1, sqrt(3), 3, 4
+    assert t[6] / t[4] == pytest.approx(3.0**0.5, rel=1e-12)
+    assert t[12] / t[4] == pytest.approx(3.0, rel=1e-12)
+    assert t[19] / t[4] == pytest.approx(4.0, rel=1e-12)
+
+
+def test_the_relaxed_gate_clears_the_residuals_a_clamped_state_reaches():
+    """Margin check against the measured table: the tolerance must accept the
+    covariant residuals the simple-update state actually produces (it is the
+    larger of the two), with headroom rather than by a hair."""
+    measured_cov = {
+        4: 8.493e-06,
+        6: 1.911e-05,
+        8: 2.567e-05,
+        12: 3.529e-05,
+        16: 4.280e-05,
+        24: 5.482e-05,
+    }
+    for chi, cov in measured_cov.items():
+        tol = M._root_residual_tolerance(1e-6, 3, chi, jnp.float64)
+        assert tol > cov, (chi, tol, cov)
+        assert tol / cov > 2.0, f"chi={chi}: only {tol / cov:.2f}x margin"

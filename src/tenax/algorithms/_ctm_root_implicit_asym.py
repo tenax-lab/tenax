@@ -495,6 +495,70 @@ def _rank_capped_spectrum(s: jax.Array, chi: int, *, rel_floor: float | None = N
     return jnp.maximum(s_k, cut), usable_rank
 
 
+# #779: how far a *clamped* cut can be polished, and no further.
+#
+# Once :func:`_rank_capped_spectrum` clamps a retained direction, ``y*`` cannot
+# satisfy the characteristic equations below the clamp level however long it is
+# polished — the clamp is part of the map being solved.  Each clamped direction
+# contributes about that level to the residual norm, and the norm adds them in
+# quadrature, so the floor grows as the square root of their number:
+#
+#     ‖F(y*)‖  ≈  C · eps^(1/3) · sqrt(chi - usable_rank)
+#
+# Measured on the D=2 simple-update Heisenberg state, whose environment
+# supports usable_rank=3 at *every* chi (so every production chi over-provisions
+# and the clamp always fires):
+#
+#     chi            4        6        8       10       12       16       24
+#     forward   1.26e-6  2.81e-6  3.77e-6  4.53e-6  5.18e-6  6.28e-6  8.04e-6
+#     covariant 8.49e-6  1.91e-5  2.57e-5  3.09e-5  3.53e-5  4.28e-5  5.48e-5
+#
+# Dividing by sqrt(chi-3) converges to C = 0.29 (forward) and C = 1.95
+# (covariant).  The law was checked by prediction rather than by fit: from the
+# chi<=12 rows alone, chi=16 was predicted at 6.2e-6 / 4.3e-5 and measured
+# 6.279e-6 / 4.280e-5, and chi=24 predicted at 7.9e-6 / 5.4e-5 and measured
+# 8.042e-6 / 5.482e-5 -- both within 1.5%.
+#
+# The covariant coefficient is close to state-INDEPENDENT, which is what makes
+# this a property of the clamp rather than a fit to one fixture: a squashed
+# random state (usable_rank=1) gives 1.03/1.11/1.14e-5 against this state's
+# 1.18e-5, and at chi=24 a squashed state at usable_rank=3 reads 5.417e-5
+# against this state's 5.482e-5 -- 1.2% apart on entirely different physics.
+#
+# The factor carries ~4x margin over the measured covariant coefficient so one
+# tolerance serves both residuals (their ratio is *not* universal — 6.8 on this
+# state but 200-370 on the others, so a per-residual factor would be fitting
+# noise).
+_CLAMPED_RESIDUAL_FACTOR = 8.0
+
+
+def _root_residual_tolerance(base_tol, usable_rank, chi, dtype) -> float:
+    """Residual tolerance for a cut of rank ``usable_rank`` out of ``chi``.
+
+    Returns ``base_tol`` unchanged while the clamp is inert — a full-rank cut
+    has no intrinsic floor and reaches roundoff (measured 1.5e-16 forward /
+    3.5e-14 covariant on a well-conditioned random state), so the strict
+    default is both meaningful and achievable and must not be weakened there.
+
+    When the clamp has fired the floor above applies and the tolerance follows
+    it.  This only ever *relaxes*: it returns at least ``base_tol``.
+
+    **This gate does not measure gradient quality**, and must not be described
+    as if it did.  Measured against a converged directional finite difference,
+    the residual mispredicts in both directions: the simple-update state is
+    rejected by the strict forward gate at 1.26e-6 while its gradient is
+    correct to 3.1e-8, and a squashed random state *passes* it at 1.7e-8 while
+    its gradient is off by 4.4e-5.  What the residual reports is whether
+    ``y*`` solves the equations, which is a different question — see #785.
+    """
+    if int(usable_rank) >= int(chi):
+        return float(base_tol)
+    eps13 = float(jnp.finfo(dtype).eps ** (1.0 / 3.0))
+    n_clamped = max(1, int(chi) - int(usable_rank))
+    floor = _CLAMPED_RESIDUAL_FACTOR * eps13 * float(n_clamped) ** 0.5
+    return max(float(base_tol), floor)
+
+
 def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
     """Decompose the cut in all four directions, from the *same* environment.
 
@@ -504,6 +568,14 @@ def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
     (Gauss-Seidel) sweep, where move ``k+1`` sees the output of move ``k``,
     has a fixed point that does *not* satisfy Eqs. 76-77, because those
     equations evaluate all four moves at the same ``y``.
+
+    Each entry is ``(P_top, P_bot, U, S_keep, Vh, usable_rank)``.  The trailing
+    ``usable_rank`` is what :func:`_rank_capped_spectrum` resolved for that
+    direction; it used to be discarded here.  It is load-bearing for #779: once
+    a retained direction is clamped, ``y*`` cannot satisfy the characteristic
+    equations to better than the clamp level no matter how long it is polished,
+    so the root-residual gate has to know whether the clamp fired before it can
+    decide what residual is acceptable.
     """
     out = []
     env_k, a_k = env, a
@@ -514,7 +586,7 @@ def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
         # sweeps start from a near-identity environment whose half-infinite
         # matrix is rank deficient, and a singular S makes the matrix
         # inverse square root below produce NaNs.
-        s_k, _rank = _rank_capped_spectrum(s, chi)
+        s_k, usable_rank = _rank_capped_spectrum(s, chi)
         # Cast to the environment's dtype.  ``S`` is a *variable* of the
         # characteristic equations, and the reverse pass needs it free to leave
         # the reals for the same reason Eq. 79 needs it free to leave the
@@ -529,7 +601,7 @@ def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
         U, Vh, P_top, P_bot = _pin_bond_gauge(
             U, Vh, P_top, P_bot, chi, None if prev is None else prev[k][0]
         )
-        out.append((P_top, P_bot, U, S_keep, Vh))
+        out.append((P_top, P_bot, U, S_keep, Vh, int(usable_rank)))
         env_k, a_k = rotate_env(env_k), rotate_a(a_k)
     return out
 
@@ -960,6 +1032,7 @@ def asym_root_parametrize(
     pinv_rtol: float = 1e-10,
     polish_steps: int = 40,
     polish_tol: float = 1e-10,
+    return_usable_rank: bool = False,
 ) -> tuple[AsymRoot, float]:
     """Extract ``y* = ({C}, {E}, 0, {S*}, 0)`` and the frozen isometries.
 
@@ -982,13 +1055,14 @@ def asym_root_parametrize(
     forward chain the same environment is a root to 6e-17 (#721).
     """
     best: tuple[AsymRoot, float] | None = None
+    best_rank = chi
     for _step in range(max(int(polish_steps), 1)):
         env = AsymEnv(*[t / (jnp.linalg.norm(t) + 1e-300) for t in env])
         projs = all_projectors(env, a, chi, prev_projs)
         prev_projs = projs
         U_star, U_perp, Vh_star, Vh_perp, s_list, s_inv = [], [], [], [], [], []
         for k in range(4):
-            _pt, _pb, U, S_keep, Vh = projs[k]
+            _pt, _pb, U, S_keep, Vh, _rank = projs[k]
             U_star.append(U[:, :chi])
             U_perp.append(U[:, chi:])
             Vh_star.append(Vh[:chi])
@@ -1021,11 +1095,16 @@ def asym_root_parametrize(
         )
         if best is None or residual < best[1]:
             best = (root, residual)
+            # The binding direction: one clamped cut is enough to floor the
+            # residual, so the minimum is what the #779 gate must react to.
+            best_rank = min(int(p[5]) for p in projs)
         if residual <= polish_tol:
             break
         env, prev_projs = sweep(env, a, chi, projs)
 
     assert best is not None
+    if return_usable_rank:
+        return (*best, best_rank)
     return best
 
 
@@ -1143,22 +1222,32 @@ def asym_root_implicit_energy_and_grad(
         min_iter=min_iter,
         return_projectors=True,
     )
-    root, root_residual = asym_root_parametrize(
+    root, root_residual, usable_rank = asym_root_parametrize(
         env,
         a_arr,
         chi,
         prev_projs=forward_projs,
         polish_steps=polish_steps,
         polish_tol=polish_tol,
+        return_usable_rank=True,
     )
-    if root_residual > root_residual_warn:
+    # #779: a clamped cut has an intrinsic residual floor that no amount of
+    # polishing removes, so the tolerance has to know whether the clamp fired.
+    # Unchanged (strict) whenever it did not.
+    residual_tol = _root_residual_tolerance(
+        root_residual_warn, usable_rank, chi, env.C1.dtype
+    )
+    if root_residual > residual_tol:
         _report_root_residual(
             on_root_residual,
             f"Asymmetric root implicit AD: ‖F(y*)‖ = {root_residual:.3e} exceeds "
-            f"{root_residual_warn:.1e}; the implicit-function gradient is "
-            "correspondingly inaccurate (paper Fig. 1).",
+            f"{residual_tol:.1e}, so y* does not solve the characteristic "
+            f"equations (usable_rank={usable_rank} of chi={chi}). The gradient "
+            "differentiates equations the environment does not satisfy. Note "
+            "this residual is not a measure of gradient accuracy in either "
+            "direction -- see #785.",
             residual=float(root_residual),
-            tolerance=float(root_residual_warn),
+            tolerance=float(residual_tol),
         )
 
     # §V.3 works in the modified variables, and indexes its cuts by the upper
@@ -1240,15 +1329,16 @@ def asym_root_implicit_energy_and_grad(
     covariant_residual = float(
         jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(F_at_root)))
     )
-    if covariant_residual > root_residual_warn:
+    if covariant_residual > residual_tol:
         _report_root_residual(
             on_root_residual,
             f"Asymmetric root implicit AD: the covariant ‖F(y*)‖ = "
-            f"{covariant_residual:.3e} exceeds {root_residual_warn:.1e}. The "
-            "gradient solves the adjoint of equations that y* does not "
-            "satisfy, so it is correspondingly inaccurate.",
+            f"{covariant_residual:.3e} exceeds {residual_tol:.1e} "
+            f"(usable_rank={usable_rank} of chi={chi}). The gradient solves "
+            "the adjoint of equations that y* does not satisfy. As above, "
+            "this does not by itself imply an inaccurate gradient (#785).",
             residual=float(covariant_residual),
-            tolerance=float(root_residual_warn),
+            tolerance=float(residual_tol),
         )
     F_bar, solve_resid = _solve_root_adjoint(
         lambda v: vjp_y(v)[0],
