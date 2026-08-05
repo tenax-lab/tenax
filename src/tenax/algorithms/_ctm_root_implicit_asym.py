@@ -1153,7 +1153,9 @@ def asym_energy(A: Tensor, env: AsymEnv, template, gate) -> jax.Array:
     return compute_energy_ctm_tensor(A, _to_ctm_env(env, template), gate)
 
 
-def _default_root_residual_warn(rel_floor: float | None, dtype=None) -> float:
+def _default_root_residual_warn(
+    rel_floor: float | None, dtype: jnp.dtype | None = None
+) -> float:
     """The residual gate, set from the clamp that produces the residual.
 
     Clamping the numerically-null tail (#778) leaves an inconsistency of order
@@ -1289,7 +1291,7 @@ def asym_root_implicit_energy_and_grad(
         polish_tol=polish_tol,
         rel_floor=rel_floor,
     )
-    if root_residual > root_residual_warn:
+    if not (root_residual <= root_residual_warn):
         _report_root_residual(
             on_root_residual,
             f"Asymmetric root implicit AD: ‖F(y*)‖ = {root_residual:.3e} exceeds "
@@ -1378,7 +1380,7 @@ def asym_root_implicit_energy_and_grad(
     covariant_residual = float(
         jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(F_at_root)))
     )
-    if covariant_residual > root_residual_warn:
+    if not (covariant_residual <= root_residual_warn):
         _report_root_residual(
             on_root_residual,
             f"Asymmetric root implicit AD: the covariant ‖F(y*)‖ = "

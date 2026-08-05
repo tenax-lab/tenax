@@ -8,6 +8,8 @@ are all verified here.  Two of these tests are the ones that closed #718 —
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -1582,3 +1584,34 @@ def test_the_default_gate_still_rejects_a_genuinely_broken_root():
         )
     assert excinfo.value.tolerance == pytest.approx(6.0555e-04, rel=1e-3)
     assert excinfo.value.residual > excinfo.value.tolerance
+
+
+def test_a_nan_residual_raises_rather_than_passing_silently(monkeypatch):
+    """The gate must not fail OPEN on a NaN residual.
+
+    ``float('nan') > x`` is ``False``, so the old ``if root_residual >
+    root_residual_warn:`` shape took the *non-reporting* branch on a NaN
+    residual and the error was never raised -- the gate failed open on
+    exactly the failure mode #772 was about.  The comparisons now read
+    ``if not (residual <= tolerance):``, which is ``True`` for NaN.
+    """
+    from tenax.algorithms._ad_primitives import RootResidualError
+
+    real_root_parametrize = M.asym_root_parametrize
+
+    def _nan_residual(*args, **kwargs):
+        root, _residual = real_root_parametrize(*args, **kwargs)
+        return root, float("nan")
+
+    monkeypatch.setattr(M, "asym_root_parametrize", _nan_residual)
+
+    with pytest.raises(RootResidualError) as excinfo:
+        M.asym_root_implicit_energy_and_grad(
+            physical_su_d2(),
+            _gate(),
+            chi=6,
+            max_iter=300,
+            conv_tol=1e-13,
+            on_root_residual="raise",
+        )
+    assert math.isnan(excinfo.value.residual)

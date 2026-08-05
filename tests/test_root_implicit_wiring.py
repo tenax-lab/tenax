@@ -209,14 +209,20 @@ def test_production_heisenberg_run_through_optimize_gs_ad():
 
     **What this asserts, and why not an energy target.**  It used to end at
     ``E == approx(-0.4886, abs=5e-3)``.  That number was written in the same
-    commit that marked the test xfail, so it was never observed to pass; it is
-    a guess, not a regression baseline, and the run in fact lands at
-    ``-0.5066``.  Pinning an unvalidated constant would either freeze in
-    whatever the optimizer happens to do today or keep failing for a reason
-    that has nothing to do with the wiring.  So this asserts what the test can
-    actually certify: the whole path runs end to end without tripping the
-    residual gate (no ``RootResidualError`` -- the point of #772), the energy
-    is finite, and the optimizer *descends*.
+    commit that marked the test xfail.  Its provenance is now known: ``-0.4886``
+    matches ``-0.488638504625`` recorded at
+    ``tests/test_ctm_723_single_site_collapse.py:16`` as the pre-optimization
+    2x2 CTM energy of the same D=2 sublattice-rotated Heisenberg simple-update
+    state (that file uses ``num_imaginary_steps=60`` against this test's
+    ``40``, which accounts for the small offset from the measured
+    ``E_start = -0.48198`` below).  So the old assertion demanded that three
+    Adam steps change nothing, and the run in fact lands at ``-0.5066``.
+    Pinning an unvalidated constant would either freeze in whatever the
+    optimizer happens to do today or keep failing for a reason that has
+    nothing to do with the wiring.  So this asserts what the test can actually
+    certify: the whole path runs end to end without tripping the residual gate
+    (no ``RootResidualError`` -- the point of #772), the energy is finite, and
+    the optimizer *descends*.
 
     The descent baseline is measured, not quoted.  It cannot come from
     ``PHYSICAL_SU_D2_E_SU``: that is ``ipeps()``'s own simple-update energy
