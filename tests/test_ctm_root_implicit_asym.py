@@ -1454,3 +1454,47 @@ def test_the_frozen_fixture_still_matches_simple_update():
     live = M.retained_rank_report(env_l, a_l, 4)["retained_smin_rtol"]
     frozen = M.retained_rank_report(env_f, a_f, 4)["retained_smin_rtol"]
     assert live == pytest.approx(frozen, rel=1e-3)
+
+
+@pytest.mark.parametrize("chi", [4, 6, 8, 12])
+def test_the_default_gate_admits_a_healthy_clamped_state(chi):
+    """#772: the gate rejected the state the clamp had just made healthy."""
+    A = physical_su_d2()
+    _E, _g, d = M.asym_root_implicit_energy_and_grad(
+        A,
+        _gate(),
+        chi=chi,
+        max_iter=300,
+        conv_tol=1e-13,
+        return_diagnostics=True,
+        on_root_residual="raise",
+    )
+    assert np.all(np.isfinite(np.asarray(_g)))
+
+
+def test_the_gate_tightens_back_when_the_clamp_is_lowered():
+    """The threshold is tied to the clamp, not a loosened constant.
+
+    A caller running an unclamped spectrum should still get the 1e-6 gate,
+    where residuals genuinely are ~1e-13.
+    """
+    assert M._default_root_residual_warn(None) == pytest.approx(6.0555e-04, rel=1e-3)
+    assert M._default_root_residual_warn(1e-12) == 1e-6
+    assert M._default_root_residual_warn(1e-2) == pytest.approx(1.0)
+
+
+def test_the_gate_still_rejects_a_genuinely_broken_root():
+    """Recalibrated, not disabled: the pre-#778 failure was 1.9e-02."""
+    from tenax.algorithms._ad_primitives import RootResidualError
+
+    A = physical_su_d2()
+    with pytest.raises(RootResidualError):
+        M.asym_root_implicit_energy_and_grad(
+            A,
+            _gate(),
+            chi=6,
+            max_iter=300,
+            conv_tol=1e-13,
+            rel_floor=1e-12,
+            on_root_residual="raise",
+        )

@@ -186,30 +186,14 @@ def test_symmetric_variant_is_refused_and_cites_its_blocker():
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    reason=(
-        "#772, NARROWED by the rank cap: the covariant residual on a physical "
-        "simple-update state is now 1.9e-05 at chi=6 (was 5.7e+05) and the "
-        "gradient is finite and FD-correct to 6.9e-08 (was NaN). What still "
-        "fails is the GATE, not the gradient: clamping the unusable directions "
-        "leaves the forward root residual at 2.8e-06, and the default "
-        "root_residual_warn=1e-06 rejects that by 2.8x. The residual floor is "
-        "intrinsic to a clamped spectrum, so closing this needs a decision on "
-        "the tolerance -- note the gradient is 40x more accurate than the gate "
-        "implies, so 1e-06 is not predictive of gradient quality here."
-    ),
-    strict=False,
-)
 def test_production_heisenberg_run_through_optimize_gs_ad():
     """The production case this wiring exists for: a real Heisenberg state.
 
-    Left in as an executable record of #772 rather than deleted, so whoever
-    fixes the engine gets an immediate signal here (an XPASS) instead of having
-    to reconstruct the case.
-
-    The failure is at least *loud*: ``on_root_residual="raise"`` (#759) turns a
-    non-vanishing root residual into ``RootResidualError``, so the optimizer
-    stops rather than stepping on a NaN gradient.
+    This carried #772 as an xfail through two rounds.  First the covariant
+    equations NaN'd the gradient on a physical simple-update state; #778's rank
+    clamp fixed that.  What remained was the *gate*: clamping leaves an
+    O(rel_floor) inconsistency in the equations by construction, and the fixed
+    1e-06 threshold rejected it.  The gate is now set from the clamp.
     """
     import jax
 

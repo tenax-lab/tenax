@@ -1132,6 +1132,34 @@ def asym_energy(A: Tensor, env: AsymEnv, template, gate) -> jax.Array:
     return compute_energy_ctm_tensor(A, _to_ctm_env(env, template), gate)
 
 
+def _default_root_residual_warn(rel_floor: float | None) -> float:
+    """The residual gate, set from the clamp that produces the residual.
+
+    Clamping the numerically-null tail (#778) leaves an inconsistency of order
+    ``rel_floor`` in the characteristic equations *by construction* -- the
+    stored ``S`` no longer matches the contraction that reproduces the true
+    singular values.  A gate at a fixed ``1e-6`` therefore rejects exactly the
+    states the clamp has just made healthy, which is what kept #772 open after
+    the NaN gradients were fixed.
+
+    **This gate is a sanity check on the equations, not a proxy for gradient
+    accuracy.**  Measured on the physical simple-update fixture, the covariant
+    residual grows 4.2x from chi=4 to chi=12 (8.49e-06 -> 3.53e-05) while the
+    gradient's error against a directional finite difference is flat, and
+    marginally smaller at the worse residual (2.94e-07 -> 2.80e-07).  Do not
+    tighten this onto gradient quality; it does not measure it.
+
+    The 100x headroom over ``rel_floor`` covers the observed growth in chi with
+    room to spare, and still rejects the pre-#778 failure (1.9e-02 at chi=4) by
+    31x.  Tied to the clamp rather than raised to a constant so that lowering
+    ``rel_floor`` restores the tight gate, where residuals genuinely are
+    ~1e-13.
+    """
+    if rel_floor is None:
+        rel_floor = float(jnp.finfo(jnp.float64).eps ** (1.0 / 3.0))
+    return max(1e-6, 100.0 * rel_floor)
+
+
 def asym_root_implicit_energy_and_grad(
     A: Tensor,
     gate,
@@ -1145,7 +1173,7 @@ def asym_root_implicit_energy_and_grad(
     solve_tol: float = 1e-8,
     solve_maxiter: int = 400,
     solve_restart: int = 30,
-    root_residual_warn: float = 1e-6,
+    root_residual_warn: float | None = None,
     on_root_residual: str = "raise",
     return_diagnostics: bool = False,
     rel_floor: float | None = None,
@@ -1184,6 +1212,8 @@ def asym_root_implicit_energy_and_grad(
     ``RuntimeWarning``.
     """
     _check_root_residual_policy(on_root_residual)
+    if root_residual_warn is None:
+        root_residual_warn = _default_root_residual_warn(rel_floor)
     from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
 
     if isinstance(A, SymmetricTensor):
