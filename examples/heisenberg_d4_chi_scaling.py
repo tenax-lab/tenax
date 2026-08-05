@@ -15,7 +15,10 @@ Orchestrator + per-cell worker in one file.
 
 Pure helpers import only stdlib; jax/tenax imports live inside the worker so the
 parent's CUDA_VISIBLE_DEVICES takes effect before the child initialises a JAX
-backend, and so the helper unit tests stay fast and jax-free.
+backend, and so the helper unit tests stay fast and jax-free.  ``scan_ctm_config``
+is the one helper that constructs a ``CTMConfig`` -- it imports tenax inside the
+function, so the module top level stays stdlib-only and the ordering guarantee
+holds.
 """
 
 import argparse
@@ -141,15 +144,17 @@ def results_to_convergence_md(results, d_label=4):
         "",
         f"QMC reference E/site = {REFERENCE_E}",
         "",
-        "| χ | E/site | err_vs_QMC | sweeps | conv |",
-        "|---|--------|------------|--------|------|",
+        "| χ | E/site | err_vs_QMC | sweeps | conv | metric | crit |",
+        "|---|--------|------------|--------|------|--------|------|",
     ]
     for r in _e_by_chi(results):
         e = r["E_site"]
         lines.append(
             f"| {r['chi']} | {e:.6f} | {e - REFERENCE_E:+.2e} | "
             f"{_fmt(r.get('n_sweeps'), 'd')} | "
-            f"{'Y' if r.get('converged') else 'N'} |"
+            f"{'Y' if r.get('converged') else 'N'} | "
+            f"{_fmt(r.get('conv_metric'), '.2e')} | "
+            f"{r.get('conv_method') or '-'} |"
         )
     return "\n".join(lines)
 
@@ -230,7 +235,13 @@ def report_frozen_chi(results, *, group_keys=("D", "n_devices", "path")):
 def results_to_csv_rows(results):
     keys = [
         "D", "chi", "n_devices", "E_site", "err_vs_qmc", "ms_per_sweep",
-        "n_sweeps", "peak_gb", "converged", "corner_rank", "oom", "error",
+        "n_sweeps", "peak_gb", "converged",
+        # #780: the criterion used and the metric it reached. `converged` is
+        # not readable without them -- under the CTMConfig default
+        # (`elementwise`, gauge-dependent) the flag is False no matter how
+        # converged the environment is.
+        "conv_metric", "conv_method",
+        "corner_rank", "oom", "error",
     ]
     return [{k: r.get(k) for k in keys} for r in results]
 
@@ -378,6 +389,38 @@ def optimize_once(outdir, chi_opt, opt_steps, n_devices, probe_max_iter=15,
     return tensor_path
 
 
+def scan_ctm_config(chi, mesh):
+    """CTMConfig for the forward-only χ-scan, on both the D=4 and D=8 drivers.
+
+    Split out of ``scan_cell`` so the one knob the scan deliberately deviates
+    on is assertable without a GPU. ``tenax`` is imported inside so the module
+    top level stays stdlib-only (see the module docstring).
+
+    That knob is ``ctm_conv_method="sv"`` (#780). The ``CTMConfig`` default is
+    ``"elementwise"``, which compares raw environment tensor entries between
+    sweeps -- and a CTM environment is defined only up to a gauge on each
+    χ-bond, so that comparison measures gauge motion as well as convergence.
+    Measured: a pure gauge (energy invariant to 2.2e-16) moves the element-wise
+    metric to 1.0 while leaving the ``sv`` metric at 1.1e-16. On a converged
+    D=4 state elementwise plateaus at ~2.6e-01 -- seven orders above any usable
+    ``conv_tol`` -- while ``sv`` reaches 6.5e-09 in 18 sweeps, the two agreeing
+    on the energy to 9 digits. Under the default, ``converged`` is therefore
+    False no matter how converged the environment is.
+
+    The default exists for the implicit-AD path (#351: warm-start paths
+    silently disagreeing with the implicit-AD energy), and
+    ``validate_ctm_for_implicit_ad`` enforces it there. This is a forward-only
+    scan, so that constraint does not apply and the scan opts out.
+    """
+    from tenax import CTMConfig
+
+    return CTMConfig(
+        chi=chi, max_iter=200, conv_tol=1e-10,
+        projector_method="svd", forward_gauge="phase", device_mesh=mesh,
+        ctm_conv_method="sv",
+    )
+
+
 def scan_cell(tensor_path, chi, n_devices):
     """Converge forward CTM at χ on the fixed optimized state; return E/site +
     per-sweep timing + peak memory. Record-and-resume safe."""
@@ -385,13 +428,14 @@ def scan_cell(tensor_path, chi, n_devices):
         "D": D, "chi": chi, "n_devices": n_devices,
         "E_site": None, "err_vs_qmc": None, "total_s": None, "n_sweeps": None,
         "ms_per_sweep": None, "peak_gb": None, "converged": False,
+        "conv_metric": None, "conv_method": None,
         "corner_rank": None, "oom": False, "error": None,
     }
     try:
         import jax
 
         jax.config.update("jax_enable_x64", True)
-        from tenax import CTMConfig, compute_energy_ctm_tensor, heisenberg_gate, \
+        from tenax import compute_energy_ctm_tensor, heisenberg_gate, \
             sublattice_rotate_gate
         from tenax.algorithms._ctm_diagnostics import check_ctm_env
         from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
@@ -403,10 +447,7 @@ def scan_cell(tensor_path, chi, n_devices):
             A_opt = pickle.load(fh)
         H = sublattice_rotate_gate(heisenberg_gate())
 
-        cfg = CTMConfig(
-            chi=chi, max_iter=200, conv_tol=1e-10,
-            projector_method="svd", forward_gauge="phase", device_mesh=mesh,
-        )
+        cfg = scan_ctm_config(chi, mesh)
         # ctm_converge_kwargs forwards device_mesh but emits no `recipe`, so the
         # scan uses python_loop_ctm_converge's default CTM recipe — intentionally
         # independent of the optimizer's gs_recipe="1x1" (mirrors the validated
@@ -445,6 +486,9 @@ def scan_cell(tensor_path, chi, n_devices):
             E_site=E, err_vs_qmc=E - REFERENCE_E, total_s=float(total_s),
             n_sweeps=sweeps, ms_per_sweep=1000.0 * total_s / max(sweeps, 1),
             converged=bool(info.converged), peak_gb=_peak_gb(), corner_rank=rank,
+            # #780: the flag alone is not interpretable -- record what was
+            # measured and by which criterion.
+            conv_metric=float(info.sv_diff), conv_method=kwargs["conv_method"],
         )
     except Exception as e:  # noqa: BLE001 — record and resume, never crash the sweep
         msg = f"{type(e).__name__}: {e}"
@@ -570,7 +614,8 @@ def _load_or_run_scan(cell, outdir, timeout_s):
     res = {
         "D": cell.D, "chi": cell.chi, "n_devices": cell.n_devices,
         "E_site": None, "err_vs_qmc": None, "ms_per_sweep": None,
-        "n_sweeps": None, "peak_gb": None, "converged": False, "oom": False,
+        "n_sweeps": None, "peak_gb": None, "converged": False,
+        "conv_metric": None, "conv_method": None, "oom": False,
         "error": ("timeout" if not ok else "worker produced no result file"),
     }
     _atomic_write_text(path, json.dumps(res, indent=2))

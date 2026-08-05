@@ -452,3 +452,115 @@ class TestPlateauPatience:
         cfg_custom = CTMConfig(plateau_patience=7)
         kwargs_custom = ctm_converge_kwargs(cfg_custom)
         assert kwargs_custom["plateau_patience"] == 7
+
+
+class TestConvergenceCriterionIsGaugeDependent:
+    """#780: why ``conv_method="elementwise"`` cannot converge.
+
+    A CTM environment is defined only up to a gauge on each χ-bond joining a
+    corner to an edge: inserting ``G G⁻¹`` there leaves every contraction --
+    and so the energy -- untouched.  ``_max_env_leaf_diff`` compares raw
+    tensor entries, so it sees such a rotation as a change; ``_ctm_sv_diff``
+    compares the corner singular-value spectrum, which is invariant under it.
+
+    Successive CTM sweeps land in different gauges within degenerate
+    subspaces (#425/#426), so the element-wise metric has a floor set by the
+    gauge motion rather than by the physics.  That is the mechanism behind
+    the D=4 measurement in #780, where elementwise plateaus at ~2.6e-01 while
+    ``sv`` reaches 6.5e-09 on the identical state.  The issue listed this
+    explanation as *not established*; this pins it directly.
+    """
+
+    @staticmethod
+    def _apply_G(tensor, label, G):
+        """Absorb ``G`` into the leg named ``label``: ``X[..k..] → Σ_k G[k,a]``.
+
+        The axis is resolved *by label*, never by position: the CTM sweep does
+        not preserve the corner axis order (a converged ``C1`` is
+        ``(c1_r, c1_d)``, the reverse of its constructor order — the #702
+        convention), so a positional gauge silently lands on the vertical bond
+        instead and stops being a gauge at all.
+        """
+        axis = [i.label for i in tensor.indices].index(label)
+        moved = jnp.moveaxis(tensor._data, axis, 0)
+        moved = jnp.tensordot(G, moved, axes=([0], [0]))
+        return DenseTensor(jnp.moveaxis(moved, 0, axis), tensor.indices)
+
+    @classmethod
+    def _gauge_top_row_bond(cls, env, G):
+        """Insert ``G Gᵀ = I`` on every seam of the top-row χ-bond.
+
+        The RDM contracts that row as ``C1 — T1 — T1 — C2`` with
+        ``c1_r ↔ t1_l``, ``t1_r ↔ t1_l`` (the next copy of the *same* edge,
+        this being a 1-site cell) and ``t1_r ↔ c2_l``.  Absorbing ``G`` into
+        *each* of those four leg slots leaves ``G Gᵀ = I`` on every seam.
+        Gauging only some of them is not a gauge — it is a different
+        environment, and the energy assertion below would catch it.
+        """
+        return env._replace(
+            C1=cls._apply_G(env.C1, "c1_r", G),
+            T1=cls._apply_G(cls._apply_G(env.T1, "t1_l", G), "t1_r", G),
+            C2=cls._apply_G(env.C2, "c2_l", G),
+        )
+
+    def _converged_env(self):
+        A = _make_random_A(D=2, key=jax.random.PRNGKey(3))
+        envs, _ = python_loop_ctm_converge(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            chi=6,
+            max_iter=60,
+            conv_tol=1e-10,
+            conv_method="sv",
+        )
+        return A, envs[(0, 0)]
+
+    def test_gauge_moves_elementwise_metric_but_not_sv_or_energy(self):
+        from tenax.algorithms._ctm_tensor_convergence import (
+            _corner_singular_values,
+            _ctm_sv_diff,
+            _max_env_leaf_diff,
+        )
+
+        A, env = self._converged_env()
+        gate = _heisenberg_gate()
+
+        # A genuine gauge: orthogonal, and far from the identity.
+        G, _ = jnp.linalg.qr(jax.random.normal(jax.random.PRNGKey(11), (6, 6)))
+        gauged = self._gauge_top_row_bond(env, G)
+
+        # 1. It really is a gauge -- the physics does not move.
+        e_ref = float(compute_energy_ctm_tensor(A, env, gate))
+        e_gauged = float(compute_energy_ctm_tensor(A, gauged, gate))
+        assert abs(e_gauged - e_ref) < 1e-10 * max(1.0, abs(e_ref)), (
+            f"the transform changed the energy ({e_ref} -> {e_gauged}), so it "
+            "is not a gauge and this test proves nothing"
+        )
+
+        # 2. The sv criterion is blind to it (orthogonal G preserves the
+        #    corner spectrum exactly).
+        sv_diff = float(
+            _ctm_sv_diff(
+                _corner_singular_values(gauged.C1), _corner_singular_values(env.C1)
+            )
+        )
+        assert sv_diff < 1e-10, f"sv metric moved under a pure gauge: {sv_diff:.3e}"
+
+        # 3. The elementwise criterion is not -- by orders of magnitude, which
+        #    is exactly the floor that keeps `converged` False forever.
+        leaf_diff = _max_env_leaf_diff(env, gauged)
+        assert leaf_diff > 1e-3, (
+            f"expected the element-wise metric to register the gauge, got "
+            f"{leaf_diff:.3e}"
+        )
+        assert leaf_diff > 1e6 * max(sv_diff, 1e-16)
+
+    def test_ctm_config_default_selects_the_gauge_dependent_criterion(self):
+        """The default that #780 is about: config says elementwise, the
+        function signature's ``"sv"`` never applies because
+        ``ctm_converge_kwargs`` always emits the config value."""
+        from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
+        from tenax.algorithms.ipeps_config import CTMConfig
+
+        assert CTMConfig().ctm_conv_method == "elementwise"
+        assert ctm_converge_kwargs(CTMConfig())["conv_method"] == "elementwise"
