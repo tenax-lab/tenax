@@ -259,6 +259,153 @@ config = iPEPSConfig(
   `ctm.ctm_ad_mode="c4v_reference"`,
 - supports `gs_num_steps>0` optimization with implicit gradients.
 
+### Path 5: Root Implicit AD (Opt-In, dense 1×1)
+
+Root implicit differentiation of the CTMRG fixed point, following
+Burgelman et al., [arXiv:2607.15030](https://arxiv.org/abs/2607.15030).
+Instead of back-propagating the CTM sweep, the environment is
+characterised by a system of *characteristic equations* `F(y, p) = 0` in
+modified variables, and the gradient comes from the implicit function
+theorem:
+
+```
+Forward:  A -> CTM fixed point -> root parametrisation y* with F(y*, p) = 0
+Backward: solve the adjoint of F -- no SVD or eigh backward anywhere in
+          the gradient path
+```
+
+**This is an accuracy/stability lever, not a speed one.** The paper's own
+§VI.3 shows implicit differentiation *losing* to fixed-point iteration at
+the bond dimensions we run. The reason to reach for it is #566 and #687:
+the block-sparse SVD/eigh VJP compile wall, and the accuracy floor of the
+SVD backward on a degenerate discarded spectrum. At `D=3, chi=4` explicit
+back-propagation returns **NaN for every entry** — the SVD backward
+divides by `s_i^2 - s_j^2` — while this path stays finite and
+finite-difference-correct.
+
+**Enable it with:**
+
+```python
+config = iPEPSConfig(
+    max_bond_dim=2,
+    unit_cell="1x1",
+    su_init=True,
+    gs_num_steps=40,
+    gs_optimizer="adam",
+    gs_learning_rate=1e-2,
+    gs_line_search=False,
+    gs_metric_precond=False,          # unsupported here; warns and falls back
+    ctm=CTMConfig(chi=6, max_iter=100, conv_tol=1e-10,
+                  ctm_ad_mode="root_implicit"),
+)
+```
+
+**Current scope:**
+- **dense 1×1 (asymmetric) only.** `unit_cell` other than `"1x1"` and
+  `ctm_ad_mode="root_implicit_symmetric"` both raise `NotImplementedError`
+  with the reason; a `SymmetricTensor` input raises `TypeError`. The
+  multisite and symmetric engines exist and are tested, but are not wired
+  to the optimizer — the symmetric one is blocked on #731 (8.4 GB peak in
+  the GMRES solve).
+- **Rejected rather than silently ignored:** `chi_auto_bump`, `chi_ramp`,
+  `ctmrg_heuristic_increase_chi`, `fuse_virtual_legs=False`,
+  `gs_checkpoint_path`, `cg_gates`. These knobs depend on warm-start
+  behaviour this path does not have, so it refuses them instead of
+  quietly dropping them.
+
+#### The rank clamp, and what the residual gate does and does not mean
+
+The covariant equations carry `S^-1` on both corner legs plus the Eq. 73
+quartic roots, so their dependence on the retained spectrum is *cubic*: a
+direction whose weight is below `eps^(1/3)` relative to the largest cannot
+be resolved in float64, and retaining one makes `‖F(y*)‖` explode.
+`_rank_capped_spectrum` clamps those directions (#772).
+
+Physical states routinely trip this. A `D=2` simple-update Heisenberg
+state has a `usable_rank` of **3 at every chi from 4 to 24** — its
+environment simply does not support more — so every production chi
+over-provisions and the clamp always fires. Once it does, `y*` cannot
+satisfy the equations below the clamp level however long it is polished,
+and the residual floor grows as `sqrt(chi - usable_rank)`. The gate
+follows that floor and stays strict (`1e-6`) only where the clamp is
+inert, i.e. where a well-conditioned state genuinely reaches ~1e-16
+(#779).
+
+> **The root residual is not a measure of gradient accuracy.** Measured
+> against a converged directional finite difference, it mispredicts in
+> both directions: it rejects a simple-update state whose gradient is
+> correct to `3.1e-08` and accepts a poorly-conditioned one whose gradient
+> is off by `4.4e-05`. What it reports is whether `y*` solves the
+> equations. Tracking a real gradient-quality signal is #785.
+
+#### Do not over-provision chi on this path
+
+**Raising `chi` past the number of directions the state's environment
+actually supports makes the gradient *worse*.** This inverts the usual
+"a larger `chi` is at worst wasted work" intuition, and it is specific to
+this path — it follows from the rank clamp above, which is part of the map
+being differentiated.
+
+Measured on one state, changing nothing but `chi`:
+
+| | `usable_rank` | gradient error |
+|---|---|---|
+| `chi=4` | **4 / 4** (clamp inert) | **7.7e-10** |
+| `chi=8` | 4 / 8 (clamp fires) | **2.1e-08** |
+
+**27x worse from raising `chi` alone.** The state supports four directions
+either way; at `chi=8` the extra four are noise, the clamp fires on them,
+and `y*` stops being an exact root. Every full-rank cut measured
+differentiates to ~1e-9, and every clamped one to 3e-8 or worse.
+
+Practical consequence: pick `chi` for this path from where the corner
+spectrum actually decays, not by the usual "raise it until the energy stops
+moving". A χ-scan that looks converged in *energy* can still be losing
+gradient accuracy, because the energy is far less sensitive to the clamp
+than the gradient is.
+
+Note this does not make clamped runs unusable — the physical simple-update
+state is clamped at *every* chi (`usable_rank=3` from 4 to 24) and its
+gradient is accurate to 3.1e-08, which drove the 40-step optimization
+below. It means the accuracy band widens, and that `usable_rank < chi` is
+the only signal available for it (#785).
+
+#### Benchmark
+
+`D=2`, `chi=6`, square-lattice AFM Heisenberg, Adam at `lr=1e-2` from a
+simple-update start:
+
+| step | E/site |
+|------|--------|
+| 1 (SU start) | -0.481981694887 |
+| 5 | -0.525497737892 |
+| 10 | -0.579427060195 |
+| 20 | -0.623884726814 |
+| 30 | -0.636958101476 |
+| 40 | **-0.642224027865** |
+
+Monotone at every step, and above the exact ground state (-0.669437) as a
+`D=2` state must be.
+
+**Cross-check against explicit AD**, same start, same 40 Adam steps:
+
+| path | E/site | wall-clock |
+|------|--------|------------|
+| root implicit | -0.642224022008 | 926.4 s |
+| explicit AD (Path 1) | -0.643015471158 | 14.8 s |
+| difference | 7.9e-04 | **63x slower** |
+
+The two land 7.9e-04 apart, and explicit AD is still descending at
+`dE = 2.4e-04` per step at step 40 — so that gap is roughly three steps of
+remaining progress, not a disagreement between the gradients.
+
+The 63x is the point to take seriously, and it is not a defect to be tuned
+away: it is the same conclusion as the paper's §VI.3. **Do not choose this
+path for speed.** Choose it when explicit back-propagation cannot produce a
+gradient at all — at `D=3, chi=4` it returns NaN for every entry while this
+path is finite and finite-difference-correct — or to avoid the block-sparse
+SVD/eigh VJP compile wall (#566, #687).
+
 ## Forward Gauge Mode Matrix
 
 Tenax supports four ``forward_gauge`` modes. Their intended use is
@@ -390,6 +537,14 @@ optimization stability and speed.
 5. **Sigma gauge cost**: ~40% overhead from power iteration per sweep.
    Phase gauge is the recommended replacement for explicit AD; reserve
    sigma gauge for the implicit-diff path.
+
+6. **Root implicit AD has no gradient-quality signal**: the root residual
+   it reports says whether `y*` solves the characteristic equations, and
+   that is measurably *not* the same as whether the gradient is accurate —
+   it mispredicts in both directions (see Path 5). `usable_rank` does not
+   separate the cases either. Gradient accuracy on this path currently has
+   to be established by finite differences offline, not by anything the
+   library reports at run time. Tracked by issue #785.
 
 ## Stall recovery (`gs_stall_recovery`)
 
