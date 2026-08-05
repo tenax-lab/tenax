@@ -516,9 +516,18 @@ The root-implicit path additionally reads ``CTMConfig.rel_floor``, the
 relative clamp on the retained CTM spectrum (``None`` uses the derived
 ``eps**(1/3)``), and gates on a ``root_residual_warn`` that now defaults
 to ``None`` and is resolved from that same clamp rather than a fixed
-constant (#772/#778). That residual gate is a sanity check on the
-characteristic equations the root satisfies, not a proxy for gradient
-accuracy — do not tighten it expecting better gradients.
+constant (#772/#778). Two conditions bound that relaxation, because it is
+licensed only by the O(``rel_floor``) inconsistency clamping introduces:
+it applies only when the clamp actually bound (``usable_rank < chi``) —
+a state that never touched the clamp is still held to the tight ``1e-6``,
+which it measurably meets (1.8e-13 covariant at χ=12) — and the derived
+value is capped at ``1e-3``. Without that cap a gate proportional to
+``rel_floor`` grows exactly as fast as the damage an over-raised clamp
+does, so it could never fire on one: ``rel_floor=1e-2`` used to be
+admitted at a gate of 1.0 with a gradient 25% wrong. That residual gate
+is a sanity check on the characteristic equations the root satisfies, not
+a proxy for gradient accuracy — do not tighten it expecting better
+gradients.
 
 ## Key Files
 

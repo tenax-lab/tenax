@@ -8,10 +8,14 @@ Regenerate with ``scripts/gen_su_fixture.py``.  ``test_the_frozen_fixture_still
 _matches_simple_update`` (slow) checks it against a live run.
 
 This state matters because it *violates* the retained-spectrum precondition of
-the covariant characteristic equations: at chi=4 its half-infinite environment
-retains a direction at 3e-8 relative, and at chi>=6 it reaches the 1e-12 floor.
-That is what NaN'd the gradient in #772.  The random ``_site_tensor`` fixture
-never gets near it -- its smallest retained value at chi=8 is 4e-4.
+the covariant characteristic equations: its half-infinite environment retains
+directions far below what the working precision can resolve, and the smallest
+falls fast with chi -- measured 3.0e-08 at chi=4, 8.4e-10 at chi=6, 2.1e-13 at
+chi=8 and 2.8e-17 at chi=12, all relative to the largest.  Only from chi=8 is it
+at or below 1e-12; chi=6 is still ~800x above that.  Its usable rank is 3 at
+every one of those chi.  That is what NaN'd the gradient in #772.  The random
+``_site_tensor`` fixture never gets near it -- its smallest retained value at
+chi=8 is 4e-4, and its usable rank is chi.
 """
 
 from __future__ import annotations

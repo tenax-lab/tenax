@@ -1478,11 +1478,41 @@ def test_the_gate_tightens_back_when_the_clamp_is_lowered():
     """The threshold is tied to the clamp, not a loosened constant.
 
     A caller running an unclamped spectrum should still get the 1e-6 gate,
-    where residuals genuinely are ~1e-13.
+    where residuals genuinely are ~1e-13.  Above the calibrated band the tie is
+    deliberately cut: see ``test_the_gate_is_capped_so_it_cannot_track_its_own
+    _abuse``.
     """
     assert M._default_root_residual_warn(None) == pytest.approx(6.0555e-04, rel=1e-3)
     assert M._default_root_residual_warn(1e-12) == 1e-6
-    assert M._default_root_residual_warn(1e-2) == pytest.approx(1.0)
+    # 100 * 1e-2 would be 1.0; the ceiling holds it at 1e-3.
+    assert M._default_root_residual_warn(1e-2) == 1e-3
+    # The tie is still live everywhere between the two clamps -- monotone, and
+    # strictly proportional right up to where the ceiling binds.
+    assert M._default_root_residual_warn(1e-7) == pytest.approx(1e-5)
+    assert M._default_root_residual_warn(1e-5) == pytest.approx(1e-3)
+
+
+def test_the_gate_is_capped_so_it_cannot_track_its_own_abuse():
+    """A gate proportional to the clamp cannot detect an over-raised clamp.
+
+    Over-clamping damages the equations by O(``rel_floor``), so an uncapped
+    ``100 * rel_floor`` grows exactly as fast as the damage and is structurally
+    incapable of firing.  ``CTMConfig`` accepts any ``rel_floor`` in ``(0, 1)``,
+    so that regime is inside the supported range: at ``rel_floor=0.99`` the
+    uncapped gate was 99.0, which admits literally everything.
+
+    The ceiling has to clear the calibrated default and still reject both
+    failures the suite pins.
+    """
+    assert M._default_root_residual_warn(0.99) == 1e-3
+    assert M._default_root_residual_warn(0.5) == 1e-3
+    # Clears the calibrated default, so nothing about the default path moves...
+    assert M._default_root_residual_warn(None) < 1e-3
+    # ...and still sits below both failures the suite pins: the measured
+    # over-clamp (covariant 3.09e-02 at rel_floor=1e-2, chi=4), which the
+    # uncapped gate of 1.0 admitted, and the unpolished root (5.30e-03).
+    assert M._default_root_residual_warn(1e-2) < 3.09e-02
+    assert M._default_root_residual_warn(None) < 5.30e-03
 
 
 def test_the_gate_and_the_clamp_share_one_definition():
@@ -1518,9 +1548,15 @@ def test_the_gate_and_the_clamp_share_one_definition():
     assert M._default_root_residual_warn(None, jnp.float64) == (
         M._default_root_residual_warn(None)
     )
-    assert M._default_root_residual_warn(None, jnp.float32) == pytest.approx(
-        100.0 * M._derived_rel_floor(jnp.float32), rel=1e-12
-    )
+    # float32 is where the two definitions would diverge, and the derived gate
+    # does follow the clamp -- but 100 * 4.92e-03 is far above the 1e-3 ceiling,
+    # so the ceiling binds and the gate stops tracking. That is the conservative
+    # direction: a float32 state is *rejected* rather than silently admitted
+    # under a gate wide enough to hide anything. Callers who genuinely want
+    # float64-grade tolerances at float32 precision must pass an explicit
+    # ``root_residual_warn``.
+    assert 100.0 * M._derived_rel_floor(jnp.float32) > 1e-3
+    assert M._default_root_residual_warn(None, jnp.float32) == 1e-3
     # An explicit rel_floor still wins outright, dtype or no dtype.
     assert M._default_root_residual_warn(1e-12, jnp.float32) == 1e-6
 
@@ -1528,9 +1564,12 @@ def test_the_gate_and_the_clamp_share_one_definition():
 def test_the_gate_still_rejects_a_genuinely_broken_root():
     """Recalibrated, not disabled: the pre-#778 failure was 1.9e-02.
 
-    This is the *tight* branch: at ``rel_floor=1e-12`` the gate is
-    ``max(1e-6, 100 * 1e-12) = 1e-6``, i.e. the pre-#772 threshold.  Valuable
-    on its own -- an unclamped spectrum must still be held to 1e-6 -- but it
+    This is the *tight* branch, and it is now reached twice over.  Measured on
+    this config: ``usable_rank == 6 == chi``, so at ``rel_floor=1e-12`` nothing
+    is clamped and the full-rank branch pins the gate at 1e-6 without consulting
+    :func:`_default_root_residual_warn` at all; that helper would independently
+    return ``max(1e-6, 100 * 1e-12) = 1e-6`` anyway.  Valuable on its own -- an
+    unclamped spectrum must still be held to the pre-#772 threshold -- but it
     says nothing about the relaxed default, which
     ``test_the_default_gate_still_rejects_a_genuinely_broken_root`` covers.
     """
@@ -1557,9 +1596,12 @@ def test_the_default_gate_still_rejects_a_genuinely_broken_root():
     Relaxing a guard is only safe if something proves the relaxed guard still
     fires, and no other test does: every rejection case in this file runs at
     ``rel_floor=1e-12``, where the gate collapses back to the old 1e-6 branch.
-    Here the *default* clamp is in force, so the ``6.06e-04`` threshold is the
-    one doing the rejecting -- which is what ``excinfo.value.tolerance``
-    pins.
+    Here the *default* clamp is in force and it binds -- measured
+    ``usable_rank == 3`` against ``chi=6`` on this deliberately-unconverged
+    config, so the gate takes the relaxed branch and the ``6.06e-04`` threshold
+    is the one doing the rejecting, which is what ``excinfo.value.tolerance``
+    pins.  (Had the rank come out full, the gate would be 1e-6 and this test
+    would prove something weaker; it does not, so it does not.)
 
     Broken honestly rather than by handing the entry point an impossible
     tolerance (the ``root_residual_warn=0.0`` idiom the multisite suite uses
@@ -1584,6 +1626,119 @@ def test_the_default_gate_still_rejects_a_genuinely_broken_root():
         )
     assert excinfo.value.tolerance == pytest.approx(6.0555e-04, rel=1e-3)
     assert excinfo.value.residual > excinfo.value.tolerance
+
+
+def test_the_relaxed_gate_applies_only_where_the_clamp_bound(monkeypatch):
+    """The relaxation is licensed by the clamp, so it needs the clamp to bind.
+
+    ``_default_root_residual_warn`` is justified by the O(``rel_floor``)
+    inconsistency clamping introduces.  A state whose retained spectrum sits
+    entirely above the clamp has no such inconsistency -- nothing was floored --
+    and measurably meets the tight guard, so resolving the gate unconditionally
+    would have widened it 600x for every well-conditioned state in the library
+    in exchange for nothing.
+
+    The two fixtures in this file are exactly the contrast: the random tensor
+    keeps its full rank, the frozen simple-update state does not.  The spy pins
+    which branch each one takes, and the two ``covariant_residual`` assertions
+    show the branch is load-bearing rather than cosmetic -- the clamped state's
+    residual is above the tight threshold the full-rank state clears.
+    """
+    calls = []
+    real = M._default_root_residual_warn
+
+    def _spy(rel_floor, dtype=None):
+        value = real(rel_floor, dtype)
+        calls.append(value)
+        return value
+
+    monkeypatch.setattr(M, "_default_root_residual_warn", _spy)
+
+    _E, _g, d_full = M.asym_root_implicit_energy_and_grad(
+        _site_tensor(D=2),
+        _gate(),
+        chi=4,
+        max_iter=300,
+        conv_tol=1e-13,
+        return_diagnostics=True,
+        on_root_residual="raise",
+    )
+    assert d_full["usable_rank"] == 4
+    assert calls == [], "the relaxed gate was resolved for a state that never clamped"
+    # Not raising already proves it met 1e-6; state it, so a regression that
+    # loosens the branch cannot hide behind a residual that grew with it.
+    assert d_full["covariant_residual"] < 1e-6
+
+    with pytest.warns(RuntimeWarning, match="usable environment rank"):
+        _E, _g, d_clamped = M.asym_root_implicit_energy_and_grad(
+            physical_su_d2(),
+            _gate(),
+            chi=4,
+            max_iter=300,
+            conv_tol=1e-13,
+            return_diagnostics=True,
+            on_root_residual="raise",
+        )
+    assert d_clamped["usable_rank"] == 3
+    assert calls == [pytest.approx(6.0555e-04, rel=1e-3)]
+    assert d_clamped["covariant_residual"] > 1e-6
+
+
+def test_an_over_raised_clamp_raises_instead_of_a_silently_wrong_gradient():
+    """The regression test for the gate that could not fire on its own abuse.
+
+    Before the 1e-3 ceiling this exact call *succeeded*: ``rel_floor=1e-2``
+    drove ``usable_rank`` to 1, gave ``‖F(y*)‖ = 4.66e-03`` and a covariant
+    residual of 3.09e-02, and the derived gate came out at 1.0 -- so both gates
+    passed and the caller got a gradient 2.52e-01 relative away from the
+    ``rel_floor=None`` one, while the rank warning told them it was sound.
+
+    Now the gate is capped below both residuals and the forward one trips first.
+    ``CTMConfig`` accepts ``rel_floor=1e-2``, so this is a reachable
+    configuration, not a contrived one.
+    """
+    from tenax.algorithms._ad_primitives import RootResidualError
+
+    with pytest.raises(RootResidualError) as excinfo:
+        M.asym_root_implicit_energy_and_grad(
+            physical_su_d2(),
+            _gate(),
+            chi=4,
+            max_iter=300,
+            conv_tol=1e-13,
+            rel_floor=1e-2,
+            on_root_residual="raise",
+        )
+    assert excinfo.value.tolerance == 1e-3
+    assert excinfo.value.residual > excinfo.value.tolerance
+
+
+def test_an_explicit_gate_still_overrides_the_rank_conditional():
+    """The caller's own threshold wins over both branches of the conditional.
+
+    Pinned in both directions on the *same* state, so this cannot pass by
+    accident: the frozen fixture at chi=4 sits at 8.49e-06 covariant, which a
+    1e-2 threshold admits and a 1e-9 one rejects -- neither of which is a value
+    the automatic resolution would ever pick for it (it picks 6.06e-04).
+    """
+    from tenax.algorithms._ad_primitives import RootResidualError
+
+    kwargs = dict(chi=4, max_iter=300, conv_tol=1e-13, on_root_residual="raise")
+    with pytest.warns(RuntimeWarning, match="usable environment rank"):
+        _E, g, _d = M.asym_root_implicit_energy_and_grad(
+            physical_su_d2(),
+            _gate(),
+            root_residual_warn=1e-2,
+            return_diagnostics=True,
+            **kwargs,
+        )
+    assert np.all(np.isfinite(np.asarray(g)))
+
+    with pytest.raises(RootResidualError) as excinfo:
+        M.asym_root_implicit_energy_and_grad(
+            physical_su_d2(), _gate(), root_residual_warn=1e-9, **kwargs
+        )
+    assert excinfo.value.tolerance == 1e-9
 
 
 def test_a_nan_residual_raises_rather_than_passing_silently(monkeypatch):

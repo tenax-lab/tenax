@@ -1178,16 +1178,37 @@ def _default_root_residual_warn(
     ``rel_floor`` restores the tight gate, where residuals genuinely are
     ~1e-13.
 
+    **Why the 1e-3 ceiling.**  The proportionality that justifies the relaxation
+    also makes the gate blind to its own abuse: over-clamping damages the
+    equations by O(``rel_floor``), and an uncapped ``100 * rel_floor`` grows
+    with the damage, so the gate can never fire on it.  Measured on the frozen
+    simple-update fixture at chi=4, ``rel_floor=1e-2`` gives a covariant
+    residual of 3.09e-02 against an uncapped gate of 1.0 -- admitted, with a
+    gradient 25% away from the ``rel_floor=None`` one.  The ceiling breaks the
+    proportionality above the band the relaxation was calibrated on: 1e-3 sits
+    above the default 6.06e-04 (so the calibrated path is untouched) and below
+    both that 3.09e-02 over-clamp and the 5.30e-03 deliberately-broken root the
+    tests pin, so both are rejected.  A caller who raises ``rel_floor`` past
+    what the equations tolerate now gets an error instead of a wrong number.
+
     ``dtype`` is the working precision the clamp actually ran in, and only
     matters when ``rel_floor`` is ``None``: the default clamp is
     precision-dependent (:func:`_derived_rel_floor`), so the gate has to be
     too.  ``None`` means ``float64``, which is what ``tenax`` runs in
     everywhere x64 is on; callers that reach the clamp with narrower data
     should pass the dtype rather than take that default.
+
+    The ceiling does bind at ``float32``: ``100 * 4.92e-03`` is 0.49, so the
+    gate stops tracking the clamp there and caps at 1e-3, below the
+    inconsistency a ``float32`` clamp introduces.  Such a state is therefore
+    *rejected* rather than admitted under a gate wide enough to hide anything
+    -- the conservative direction, and the one that leaves a caller who really
+    wants it an explicit ``root_residual_warn``.  This is latent while
+    ``tenax.__init__`` forces x64 globally.
     """
     if rel_floor is None:
         rel_floor = _derived_rel_floor(jnp.float64 if dtype is None else dtype)
-    return max(1e-6, 100.0 * rel_floor)
+    return min(max(1e-6, 100.0 * rel_floor), 1e-3)
 
 
 def asym_root_implicit_energy_and_grad(
@@ -1240,6 +1261,13 @@ def asym_root_implicit_energy_and_grad(
     reports ``usable_rank`` and ``retained_smin_rtol`` from
     :func:`retained_rank_report`, and a ``chi`` above ``usable_rank`` raises a
     ``RuntimeWarning``.
+
+    ``root_residual_warn=None`` resolves the residual gate from that same
+    ``usable_rank``: the relaxed :func:`_default_root_residual_warn` value
+    applies only when the clamp actually bound (``usable_rank < chi``), because
+    that is the only case with an O(``rel_floor``) inconsistency to make room
+    for.  A state that never touched the clamp is still held to ``1e-6``.  An
+    explicitly-passed ``root_residual_warn`` overrides both.
     """
     _check_root_residual_policy(on_root_residual)
     from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
@@ -1257,28 +1285,58 @@ def asym_root_implicit_energy_and_grad(
         return_projectors=True,
         rel_floor=rel_floor,
     )
-    if root_residual_warn is None:
-        # Sized after the forward pass, not before it, so the gate can be read
-        # off the precision the clamp actually ran in: the spectrum
-        # ``_rank_capped_spectrum`` clamps is that of
-        # ``half_infinite_environment(env, a)``, and a gate derived from some
-        # other eps is #772 over again (see :func:`_derived_rel_floor`).  The
-        # policy string is still validated up front, so a typo fails before any
-        # of this.
-        root_residual_warn = _default_root_residual_warn(
-            rel_floor, jnp.result_type(env.C1, a_arr)
-        )
     rank_report = retained_rank_report(env, a_arr, chi, rel_floor)
+    if root_residual_warn is None:
+        # Sized after the forward pass, not before it, for two reasons.
+        #
+        # The precision: the gate has to be read off the precision the clamp
+        # actually ran in, because the spectrum ``_rank_capped_spectrum`` clamps
+        # is that of ``half_infinite_environment(env, a)``, and a gate derived
+        # from some other eps is #772 over again (see
+        # :func:`_derived_rel_floor`).
+        #
+        # The rank: the relaxation is justified *only* by the O(rel_floor)
+        # inconsistency the clamp introduces, so it applies only where the clamp
+        # actually bound.  ``usable_rank == chi`` means every retained direction
+        # sat above the clamp and nothing was floored, so there is no induced
+        # inconsistency to make room for -- and the tight guard is still
+        # achievable there, measured 1.8e-13 covariant on the random chi=12
+        # fixture.  Relaxing it for those states would have quietly widened the
+        # guard by 600x for every well-conditioned state in the library.
+        #
+        # ``_check_root_residual_policy`` still runs before the forward pass, so
+        # a typo'd policy fails before any of this is paid for.  Both gate
+        # comparisons below (the forward ``root_residual`` and the covariant
+        # one) read the value resolved here.
+        if rank_report["usable_rank"] == chi:
+            root_residual_warn = 1e-6
+        else:
+            root_residual_warn = _default_root_residual_warn(
+                rel_floor, jnp.result_type(env.C1, a_arr)
+            )
     if rank_report["usable_rank"] < chi:
+        # Only the default clamp has finite-difference evidence behind the
+        # soundness claim (6e-08 relative against a directional FD, #772/#778).
+        # Under a caller-supplied ``rel_floor`` the clamp can be raised past the
+        # genuinely-weighted directions, which breaks the equations rather than
+        # regularising them -- so this warning must not pre-empt the residual
+        # gates below, which are what actually detect that.
+        soundness = (
+            "The gradient is sound, but the energy will stop moving with chi"
+            if rel_floor is None
+            else "Whether the gradient is still sound is decided by the "
+            "residual gates below, not here -- a rel_floor raised past the "
+            "genuinely-weighted directions breaks the equations. The energy "
+            "will also stop moving with chi"
+        )
         warnings.warn(
             f"Asymmetric root implicit AD: only "
             f"{rank_report['usable_rank']} of {chi} retained directions carry "
             f"weight above the rank clamp (smallest is "
             f"{rank_report['retained_smin_rtol']:.2e} relative), so chi={chi} "
-            "exceeds this state's usable environment rank. The gradient is "
-            "sound, but the energy will stop moving with chi -- which looks "
-            "like the #723/#726 rank-1 collapse and is not. Reduce chi, or "
-            "increase D.",
+            f"exceeds this state's usable environment rank. {soundness} -- "
+            "which looks like the #723/#726 rank-1 collapse and is not. "
+            "Reduce chi, or increase D.",
             RuntimeWarning,
             stacklevel=2,
         )
