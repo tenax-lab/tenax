@@ -171,6 +171,11 @@ def test_csv_rows_have_stable_keys():
         "err_vs_qmc",
         "ms_per_sweep",
         "n_sweeps",
+        # #781: the sweep whose environment was returned.  Equals n_sweeps
+        # except on the plateau bail, which hands back an earlier env; storing
+        # both is what makes a recorded ms_per_sweep auditable instead of
+        # needing plateau_patience re-derived from the config.
+        "best_iteration",
         "peak_gb",
         "converged",
         # #747: rank(C1) per cell, so a completed sweep can be checked for the
