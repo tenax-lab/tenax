@@ -25,6 +25,7 @@ from tenax.algorithms._ctm_tensor_init import (
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
+from tests._su_fixtures import PHYSICAL_SU_D2_E_SU, physical_su_d2
 
 
 def _site_tensor(D=2, d=2, seed=42, eps=1.0):
@@ -1387,3 +1388,69 @@ def test_usable_rank_is_reported_not_discarded():
     rep = M.retained_rank_report(env, a, 4)
     assert rep["usable_rank"] == 4
     assert rep["retained_smin_rtol"] > 1e-5
+
+
+# --- #772: the physical-state fixture ---------------------------------------
+#
+# #778's tests use random tensors and unit-test the clamp function directly,
+# which is the same gap that let #772 reach the wiring stage undetected: the
+# random ``_site_tensor`` fixture never gets near a rank-poor environment.
+
+
+@pytest.mark.parametrize("chi", [4, 6, 8])
+def test_the_physical_state_exhausts_its_usable_rank(chi):
+    """The fixture's whole point: a real state whose environment is rank-poor.
+
+    The random tensor the rest of this file uses never gets near the clamp,
+    which is why #772 reached the wiring stage undetected.
+    """
+    A = physical_su_d2()
+    env, a, _meta, _projs = M.converge(
+        A, chi, max_iter=100, conv_tol=1e-11, return_projectors=True
+    )
+    rep = M.retained_rank_report(env, a, chi)
+    assert rep["usable_rank"] < chi
+    assert rep["retained_smin_rtol"] < 1e-7
+
+
+@pytest.mark.parametrize("chi", [4, 6, 8])
+def test_the_random_fixture_keeps_its_full_rank(chi):
+    """The contrast that hid the bug."""
+    A = _site_tensor(D=2)
+    env, a, _meta, _projs = M.converge(
+        A, chi, max_iter=100, conv_tol=1e-11, return_projectors=True
+    )
+    rep = M.retained_rank_report(env, a, chi)
+    assert rep["usable_rank"] == chi
+    assert rep["retained_smin_rtol"] > 1e-5
+
+
+@pytest.mark.slow
+def test_the_frozen_fixture_still_matches_simple_update():
+    """The frozen literal must stay the state it claims to be.
+
+    Compares *physically*: a simple-update tensor is defined only up to a bond
+    gauge, so an element-wise diff would be wrong even when nothing drifted.
+    """
+    import importlib.util
+    import pathlib
+
+    script_path = (
+        pathlib.Path(__file__).resolve().parent.parent / "scripts" / "gen_su_fixture.py"
+    )
+    spec = importlib.util.spec_from_file_location("gen_su_fixture", script_path)
+    gen_su_fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen_su_fixture)
+    build = gen_su_fixture.build
+
+    E_live, A_live = build()
+    assert E_live == pytest.approx(PHYSICAL_SU_D2_E_SU, abs=1e-6)
+    env_l, a_l, _m, _p = M.converge(
+        A_live, 4, max_iter=100, conv_tol=1e-11, return_projectors=True
+    )
+    env_f, a_f, _m, _p = M.converge(
+        physical_su_d2(), 4, max_iter=100, conv_tol=1e-11, return_projectors=True
+    )
+    live = M.retained_rank_report(env_l, a_l, 4)["retained_smin_rtol"]
+    frozen = M.retained_rank_report(env_f, a_f, 4)["retained_smin_rtol"]
+    assert live == pytest.approx(frozen, rel=1e-3)
