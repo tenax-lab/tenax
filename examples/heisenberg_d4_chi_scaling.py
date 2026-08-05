@@ -378,7 +378,7 @@ def optimize_once(outdir, chi_opt, opt_steps, n_devices, probe_max_iter=15,
     return tensor_path
 
 
-def scan_cell(tensor_path, chi, n_devices):
+def scan_cell(tensor_path, chi, n_devices, scan_conv_tol=1e-8):
     """Converge forward CTM at χ on the fixed optimized state; return E/site +
     per-sweep timing + peak memory. Record-and-resume safe."""
     result = {
@@ -403,8 +403,12 @@ def scan_cell(tensor_path, chi, n_devices):
             A_opt = pickle.load(fh)
         H = sublattice_rotate_gate(heisenberg_gate())
 
+        # conv_tol is a *flag* (--scan-conv-tol), not a constant: at 1e-10 no
+        # cell ever converged -- every one bailed on plateau_patience=20 after
+        # 14-78 sweeps against a 200 cap, so the tolerance gated nothing and
+        # `converged=False` reported the stop-loss rather than the physics.
         cfg = CTMConfig(
-            chi=chi, max_iter=200, conv_tol=1e-10,
+            chi=chi, max_iter=200, conv_tol=scan_conv_tol,
             projector_method="svd", forward_gauge="phase", device_mesh=mesh,
         )
         # ctm_converge_kwargs forwards device_mesh but emits no `recipe`, so the
@@ -470,7 +474,10 @@ def _run_worker(args):
             res = {"phase": "optimize", "ok": False, "error": f"{type(e).__name__}: {e}"}
     else:
         tensor_path = os.path.join(args.outdir, "A_opt.pkl")
-        res = scan_cell(tensor_path, args.chi, args.n_devices)
+        res = scan_cell(
+            tensor_path, args.chi, args.n_devices,
+            scan_conv_tol=args.scan_conv_tol,
+        )
     _atomic_write_text(args.out, json.dumps(res, indent=2))
     print(json.dumps(res))
 
@@ -480,6 +487,12 @@ def _build_argparser():
     p.add_argument("--cell", action="store_true", help="worker mode: run one phase")
     p.add_argument("--phase", choices=["optimize", "scan"], default="scan")
     p.add_argument("--chi", type=int, help="scan χ (worker scan phase)")
+    p.add_argument("--scan-conv-tol", dest="scan_conv_tol", type=float,
+                   default=1e-8,
+                   help="CTM conv_tol for the χ-scan cells. Default 1e-8; "
+                        "the previous hard-coded 1e-10 was unreachable, so "
+                        "every cell bailed on plateau_patience instead of "
+                        "converging")
     p.add_argument("--n-devices", dest="n_devices", type=int, default=1)
     p.add_argument("--out", type=str, help="worker result JSON path")
     # shared / orchestrator:
