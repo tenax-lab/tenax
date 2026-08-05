@@ -9,6 +9,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from tenax.algorithms._ctm_tensor_energy import _normalise_rdm
 from tenax.algorithms.ipeps_config import (
     CTMEnvironment,
     SplitCTMEnvironment,
@@ -93,10 +94,9 @@ def _rdm2x1(A: jax.Array, env: CTMEnvironment, d: int) -> jax.Array:
     # ket and columns = bra, matching the Hamiltonian convention.
     rdm = rdm.transpose(0, 2, 1, 3)
 
-    # Symmetrize and normalize
+    # Trace-normalise, then symmetrise (order matters -- see _normalise_rdm)
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + 1e-15)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -162,10 +162,9 @@ def _rdm1x2(A: jax.Array, env: CTMEnvironment, d: int) -> jax.Array:
     # reshape(d*d, d*d) yields a proper density matrix.
     rdm = rdm.transpose(0, 2, 1, 3)
 
-    # Symmetrize and normalize
+    # Trace-normalise, then symmetrise (order matters -- see _normalise_rdm)
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + 1e-15)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -244,8 +243,7 @@ def _rdm2x1_2site(
     rdm = rdm.transpose(0, 2, 1, 3)
 
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + 1e-15)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -292,8 +290,7 @@ def _rdm1x2_2site(
     rdm = rdm.transpose(0, 2, 1, 3)
 
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    rdm_mat = rdm_mat / (jnp.trace(rdm_mat) + 1e-15)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 

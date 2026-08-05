@@ -52,8 +52,34 @@ def _normalise_rdm(mat: jax.Array) -> jax.Array:
 
     For real data the two orders agree identically — ``tr Herm(R) = tr R`` — so
     this changes nothing on any real-tensor path.
+
+    An *additive* epsilon in the denominator breaks the same invariance it is
+    written to protect: ``e^{i.phi} tr + EPS`` is not ``e^{i.phi} (tr + EPS)``,
+    so the guard itself is gauge-dependent.  That is not a corner case here —
+    the raw RDM's scale is arbitrary because the environment tensors are
+    renormalised every sweep, so ``|tr|`` lands wherever the contraction puts
+    it.  Measured on a D=2 simple-update state, ``|tr| = 3.5e-14`` against
+    ``EPS = 1e-15``: only 35x apart, and a ``pi/2`` phase on ``C1`` then moved
+    the energy by 2.8e-2 relative — matching the predicted ``EPS/|tr|``
+    — *after* the ordering above was already correct.
+
+    So the floor is relative and phase-preserving instead.  ``norm(mat)`` is
+    gauge-*invariant*, hence so is the comparison, and dividing by ``tr``
+    itself keeps the covariance exact whenever the RDM carries any trace at
+    all.  The real fallback applies only when the trace has effectively
+    vanished relative to the matrix, where there is no physical content left
+    to preserve.
+
+    The floor is kept strictly positive so that an *identically zero* matrix
+    still returns zero rather than ``0/0``.  A relative floor alone vanishes
+    with the matrix, which turned the excitation norm at ``B = 0`` into NaN --
+    a legitimate input, since a zero excitation vector must have zero norm.
     """
-    mat = mat / (jnp.trace(mat) + EPS)
+    tr = jnp.trace(mat)
+    scale = jnp.linalg.norm(mat)
+    floor = EPS * jnp.where(scale > 0, scale, 1.0)
+    denom = jnp.where(jnp.abs(tr) > floor, tr, floor.astype(tr.dtype))
+    mat = mat / denom
     return 0.5 * (mat + mat.conj().T)
 
 
