@@ -422,6 +422,7 @@ The 2-site L-BFGS path still has a separate convergence gap at
 | 2-site shared-tensor C4v          | **Working**      | ``unit_cell="2site"`` + ``gs_c4v=True``; spin-1/2 only (PR #304).  |
 | 2-site independent A/B            | **EXPERIMENTAL** | Unconstrained 2-site AD; needs ``complex128`` site tensors to stay variational (real ``float64`` drifts non-variationally — see ``project_complex_tensors_variational`` notes / PR #341). |
 | Reference-mode C4v AD             | **Working**      | ``ctm_ad_mode="c4v_reference"``; dense 1-site C4v only (PR #304).  |
+| Root-implicit AD                  | **Working**      | ``ctm_ad_mode="root_implicit"`` (arXiv:2607.15030); dense 1x1 asymmetric engine only (PR #773) -- ``unit_cell`` other than ``"1x1"`` raises ``NotImplementedError`` (the multisite engine is built and tested but not yet wired, see ``ipeps_optimize_root_implicit.py:197``). |
 | QR-CTMRG (C4v)                    | **Working**      | Best-scaling projector at D=2 for explicit AD; recommended for ``chi ≥ 16`` on the explicit path. Implicit AD requires ``"svd"``. |
 | Phase gauge (``forward_gauge``)   | **Working**      | variPEPS-style Frobenius + first-above-threshold phase fix per absorption. Default for both implicit and explicit AD. |
 | Sigma gauge (``forward_gauge``)   | **Working**      | Transfer-matrix eigenvector alignment, **1-site only**. Breaks 2-site (inconsistent A/B alignment causes gradient explosion). Not auto-promoted; opt-in for 1-site users mirroring YASTN. |
@@ -473,7 +474,7 @@ for the full benchmark table and the projector × gauge comparison matrix.
 | Line search           | ``gs_line_search_method``   | ``"hager_zhang"``| ``"armijo"``                         |
 | C4v symmetry          | ``gs_c4v``                  | ``False``        | ``True`` = enforce C4v               |
 | AD method             | ``gs_implicit_ad``          | ``True``         | ``False`` = explicit AD              |
-| Implicit AD mode      | ``ctm_ad_mode``             | ``None``         | ``"c4v_reference"`` (Francuz et al., 1-site C4v) |
+| Implicit AD mode      | ``ctm_ad_mode``             | ``None``         | ``"c4v_reference"`` (Francuz et al., 1-site C4v) / ``"root_implicit"`` (dense 1x1 asymmetric root-implicit AD, arXiv:2607.15030; ``unit_cell`` other than ``"1x1"`` raises ``NotImplementedError``) |
 | Implicit adjoint      | ``adjoint_solver``          | ``"bicgstab"``   | ``"gmres"`` (reference-mode only)    |
 | Adjoint max iters     | ``adjoint_maxiter``         | ``50``           | reference-mode only                  |
 | Adjoint tol           | ``adjoint_tol``             | ``1e-8``         | reference-mode only                  |
@@ -510,6 +511,14 @@ through unchanged.  ``build_ad_ctm_config`` performs **no silent
 promotion** of any value: only ``gs_projector_method`` (when set)
 overrides ``ctm.projector_method``.  Direct ``CTMConfig()`` users get
 the same behavior the optimizer uses.
+
+The root-implicit path additionally reads ``CTMConfig.rel_floor``, the
+relative clamp on the retained CTM spectrum (``None`` uses the derived
+``eps**(1/3)``), and gates on a ``root_residual_warn`` that now defaults
+to ``None`` and is resolved from that same clamp rather than a fixed
+constant (#772/#778). That residual gate is a sanity check on the
+characteristic equations the root satisfies, not a proxy for gradient
+accuracy — do not tighten it expecting better gradients.
 
 ## Key Files
 
