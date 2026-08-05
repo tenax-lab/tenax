@@ -349,10 +349,30 @@ simple-update start:
 | 5 | -0.525497737892 |
 | 10 | -0.579427060195 |
 | 20 | -0.623884726814 |
-| 23 | -0.629448788654 |
+| 30 | -0.636958101476 |
+| 40 | **-0.642224027865** |
 
-Monotone throughout, and above the exact ground state (-0.669437) as a
+Monotone at every step, and above the exact ground state (-0.669437) as a
 `D=2` state must be.
+
+**Cross-check against explicit AD**, same start, same 40 Adam steps:
+
+| path | E/site | wall-clock |
+|------|--------|------------|
+| root implicit | -0.642224022008 | 926.4 s |
+| explicit AD (Path 1) | -0.643015471158 | 14.8 s |
+| difference | 7.9e-04 | **63x slower** |
+
+The two land 7.9e-04 apart, and explicit AD is still descending at
+`dE = 2.4e-04` per step at step 40 — so that gap is roughly three steps of
+remaining progress, not a disagreement between the gradients.
+
+The 63x is the point to take seriously, and it is not a defect to be tuned
+away: it is the same conclusion as the paper's §VI.3. **Do not choose this
+path for speed.** Choose it when explicit back-propagation cannot produce a
+gradient at all — at `D=3, chi=4` it returns NaN for every entry while this
+path is finite and finite-difference-correct — or to avoid the block-sparse
+SVD/eigh VJP compile wall (#566, #687).
 
 ## Forward Gauge Mode Matrix
 
