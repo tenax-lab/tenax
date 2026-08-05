@@ -338,6 +338,38 @@ inert, i.e. where a well-conditioned state genuinely reaches ~1e-16
 > is off by `4.4e-05`. What it reports is whether `y*` solves the
 > equations. Tracking a real gradient-quality signal is #785.
 
+#### Do not over-provision chi on this path
+
+**Raising `chi` past the number of directions the state's environment
+actually supports makes the gradient *worse*.** This inverts the usual
+"a larger `chi` is at worst wasted work" intuition, and it is specific to
+this path — it follows from the rank clamp above, which is part of the map
+being differentiated.
+
+Measured on one state, changing nothing but `chi`:
+
+| | `usable_rank` | gradient error |
+|---|---|---|
+| `chi=4` | **4 / 4** (clamp inert) | **7.7e-10** |
+| `chi=8` | 4 / 8 (clamp fires) | **2.1e-08** |
+
+**27x worse from raising `chi` alone.** The state supports four directions
+either way; at `chi=8` the extra four are noise, the clamp fires on them,
+and `y*` stops being an exact root. Every full-rank cut measured
+differentiates to ~1e-9, and every clamped one to 3e-8 or worse.
+
+Practical consequence: pick `chi` for this path from where the corner
+spectrum actually decays, not by the usual "raise it until the energy stops
+moving". A χ-scan that looks converged in *energy* can still be losing
+gradient accuracy, because the energy is far less sensitive to the clamp
+than the gradient is.
+
+Note this does not make clamped runs unusable — the physical simple-update
+state is clamped at *every* chi (`usable_rank=3` from 4 to 24) and its
+gradient is accurate to 3.1e-08, which drove the 40-step optimization
+below. It means the accuracy band widens, and that `usable_rank < chi` is
+the only signal available for it (#785).
+
 #### Benchmark
 
 `D=2`, `chi=6`, square-lattice AFM Heisenberg, Adam at `lr=1e-2` from a

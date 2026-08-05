@@ -80,8 +80,11 @@ research.
     for speed -- it is ~63x slower than explicit AD at D=2, χ=6, matching the
     paper's own §VI.3. Its reason to exist is that explicit backprop returns
     NaN for every entry at D=3, χ=4, where this path stays finite and
-    finite-difference-correct. Multisite and `SymmetricTensor` inputs are
-    refused with their reasons. See `ipeps_ad_paths.md` Path 5.
+    finite-difference-correct. Note `chi` must not be over-provisioned here:
+    raising it past the directions the environment supports fires the rank
+    clamp and degrades the gradient (measured 27x on one state), which is the
+    opposite of the usual intuition. Multisite and `SymmetricTensor` inputs
+    are refused with their reasons. See `ipeps_ad_paths.md` Path 5.
   - Stability knobs: sigma gauge fixing (`forward_gauge="sigma"`) and a
     chi-ramping schedule for progressive refinement.
 - **CTMRG projectors** -- SVD/Fishman (default), `eigh`, and a reduced-corner
