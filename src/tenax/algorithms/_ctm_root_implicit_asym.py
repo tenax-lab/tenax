@@ -601,7 +601,12 @@ def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
         U, Vh, P_top, P_bot = _pin_bond_gauge(
             U, Vh, P_top, P_bot, chi, None if prev is None else prev[k][0]
         )
-        out.append((P_top, P_bot, U, S_keep, Vh, int(usable_rank)))
+        # Kept as the raw traced scalar, NOT int(): ``all_projectors`` runs
+        # inside ``sweep``, which callers put under ``jax.jit``, and
+        # concretising here raises ConcretizationTypeError.  The conversion
+        # belongs in ``asym_root_parametrize``, which is already un-jittable
+        # (it does ``float(residual)`` and breaks out of a Python loop).
+        out.append((P_top, P_bot, U, S_keep, Vh, usable_rank))
         env_k, a_k = rotate_env(env_k), rotate_a(a_k)
     return out
 

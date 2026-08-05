@@ -1372,9 +1372,30 @@ def test_all_projectors_reports_the_usable_rank_per_direction():
     assert len(projs) == 4
     for k, p in enumerate(projs):
         assert len(p) == 6, f"direction {k} carries no usable_rank"
-        rank = p[5]
-        assert isinstance(rank, int), type(rank)
+        rank = int(p[5])
         assert 1 <= rank <= chi, (k, rank)
+
+
+def test_all_projectors_stays_jit_traceable():
+    """``usable_rank`` must not be concretised where the sweep is traced.
+
+    ``all_projectors`` runs inside :func:`sweep`, which callers put under
+    ``jax.jit``.  Surfacing the rank as a Python ``int`` there raises
+    ``ConcretizationTypeError`` -- and only under ``jit``: ``jax.grad`` of the
+    same function still succeeds, so the whole existing suite passes while the
+    jitted path is broken.  This pins the property directly.
+    """
+    A = _site_tensor(seed=42)
+    chi = 4
+    env, a, _info = M.converge(A, chi, max_iter=200, conv_tol=1e-12)
+
+    def one_sweep(a_live):
+        env_new, _projs = M.sweep(env, a_live, chi, None)
+        return jnp.real(jnp.sum(jnp.abs(env_new.C1) ** 2))
+
+    eager = float(one_sweep(a))
+    jitted = float(jax.jit(one_sweep)(a))
+    assert jitted == pytest.approx(eager, rel=1e-12)
 
 
 def test_a_well_conditioned_cut_reports_full_rank():
