@@ -329,6 +329,9 @@ def scan_cell(tensor_path, chi, n_devices, path):
     result = {
         "D": D, "chi": chi, "n_devices": n_devices, "path": path,
         "E_site": None, "err_vs_qmc": None, "total_s": None, "n_sweeps": None,
+        # Sweep whose env was returned; trails n_sweeps only on the dense
+        # arm's plateau bail (the split loop has no bail).  See #781.
+        "best_iteration": None,
         "ms_per_sweep": None, "peak_gb": None, "converged": False,
         "conv_metric": None, "conv_method": None,
         # #747: rank(C1) <= 1 means the environment collapsed to a chi_eff=1
@@ -349,15 +352,16 @@ def scan_cell(tensor_path, chi, n_devices, path):
         H = sublattice_rotate_gate(heisenberg_gate())
 
         if path == "split":
-            (E, total_s, sweeps, converged, rank,
+            (E, total_s, sweeps, converged, rank, best_iter,
              conv_metric, conv_method) = _converge_split(A_opt, H, chi)
         else:
-            (E, total_s, sweeps, converged, rank,
+            (E, total_s, sweeps, converged, rank, best_iter,
              conv_metric, conv_method) = _converge_dense(A_opt, H, chi, n_devices)
 
         result.update(
             E_site=E, err_vs_qmc=E - REFERENCE_E, total_s=float(total_s),
             n_sweeps=sweeps, ms_per_sweep=1000.0 * total_s / max(sweeps, 1),
+            best_iteration=best_iter,
             converged=bool(converged), peak_gb=d4._peak_gb(), corner_rank=rank,
             # #780: `converged` is only readable next to the criterion that
             # produced it and the metric it reached.
@@ -407,9 +411,11 @@ def _converge_dense(A_opt, H, chi, n_devices):
         )
     E = float(compute_energy_ctm_tensor(A_opt, env, H, 2))
     rank = check_ctm_env(env, context=f"D=8 chi={chi} n={n_devices} dense")
+    # info.iterations is the sweeps performed (#781); best_iteration is the
+    # sweep whose env came back, which the plateau bail leaves behind.
     return (
         E, total_s, int(info.iterations), bool(info.converged), rank,
-        float(info.sv_diff), kwargs["conv_method"],
+        int(info.best_iteration), float(info.sv_diff), kwargs["conv_method"],
     )
 
 
@@ -435,12 +441,14 @@ def _converge_split(A_opt, H, chi):
 
     E = float(compute_energy_split_ctm_tensor(A_opt, env, H, 2))
     rank = check_ctm_env(env, context=f"D=8 chi={chi} split")
-    # The split loop has only ever used the gauge-invariant sv criterion
-    # (`_ctm_sv_diff` on the corner spectrum) -- it has no elementwise mode, so
-    # #780 never applied to this arm.  It does not surface the achieved metric.
+    # The split loop breaks on convergence or exhausts max_iter -- it has no
+    # plateau bail -- so the returned env is always the last sweep's (#781).
+    # It has only ever used the gauge-invariant sv criterion (`_ctm_sv_diff`
+    # on the corner spectrum) and has no elementwise mode, so #780 never
+    # applied to this arm; it does not surface the achieved metric.
     return (
         E, total_s, int(info.iterations), bool(info.converged), rank,
-        None, "sv",
+        int(info.iterations), None, "sv",
     )
 
 
@@ -485,8 +493,9 @@ def _load_or_run_scan(cell, outdir, timeout_s, gpu_wait_s=1800):
     res = {
         "D": cell.D, "chi": cell.chi, "n_devices": cell.n_devices, "path": cell.path,
         "E_site": None, "err_vs_qmc": None, "ms_per_sweep": None,
-        "n_sweeps": None, "peak_gb": None, "converged": False,
-        "conv_metric": None, "conv_method": None, "oom": False,
+        "n_sweeps": None, "best_iteration": None, "peak_gb": None,
+        "converged": False, "conv_metric": None, "conv_method": None,
+        "oom": False,
         "error": ("timeout" if not ok else "worker produced no result file"),
     }
     d4._atomic_write_text(str(path), json.dumps(res, indent=2))
@@ -578,7 +587,7 @@ def _aggregate8(results, outdir):
     d4._atomic_write_text(os.path.join(outdir, "convergence.md"), conv_md)
 
     keys = ["D", "chi", "n_devices", "path", "E_site", "err_vs_qmc", "corner_rank",
-            "ms_per_sweep", "n_sweeps", "peak_gb", "converged",
+            "ms_per_sweep", "n_sweeps", "best_iteration", "peak_gb", "converged",
             "conv_metric", "conv_method", "oom", "error"]
     rows = [{k: r.get(k) for k in keys} for r in results]
     if rows:
