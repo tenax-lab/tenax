@@ -65,6 +65,11 @@ _FILE_MARKERS = {
     # CTM convergence, so it is milliseconds.  The production-run case it
     # also carries is explicitly @slow (#772).
     "test_root_implicit_wiring.py": "core",
+    # Knobs the root-implicit path accepted and then ignored (#792).  Config
+    # validation and one warning: milliseconds, no CTM.  The end-to-end
+    # return_history shape test carries its own ``@pytest.mark.slow``, which
+    # the rule below honours by *withholding* this ``core``.
+    "test_root_implicit_ignored_knobs.py": "core",
     # Environment-phase (gauge) invariance of the RDM builders (#748, follow-up
     # to #725/#742).  Cheap -- one module-scoped D=2 simple-update state per
     # file, then pure phase reruns of the contraction (~5s each).  These guard
