@@ -292,10 +292,11 @@ class TestPlateauPatience:
             plateau_patience=patience,
         )
         assert not info.converged
-        # Bail must happen before exhausting the budget, and the returned
-        # iteration count is the best-iter (not the bail-iter) so it is
-        # bounded by ``max_iter - patience``.
+        # Bail must happen before exhausting the budget.  Since #781
+        # ``iterations`` is the bail sweep itself (the sweeps performed);
+        # ``best_iteration`` is the one trailing it by ``patience``.
         assert info.iterations < max_iter
+        assert info.best_iteration == info.iterations - patience
 
     def test_large_patience_matches_disabled(self):
         """``plateau_patience > max_iter`` is equivalent to ``None``."""
@@ -319,6 +320,126 @@ class TestPlateauPatience:
         assert info_none.iterations == info_huge.iterations == max_iter
         assert not info_none.converged
         assert not info_huge.converged
+
+    def test_iterations_counts_sweeps_actually_run(self, monkeypatch):
+        """``iterations`` is the sweep count performed, not the best-metric index.
+
+        Issue #781: the plateau bail used to report ``iterations=best_iter``
+        — the iteration that achieved the best metric — so every caller
+        computing a per-sweep cost (``1000 * total_s / info.iterations``)
+        divided the full elapsed time by an index roughly ``patience``
+        sweeps short of the truth, inflating per-sweep timings by up to 2x.
+        Counting the actual ``jit_step`` invocations is the ground truth
+        the field has to match.
+        """
+        from tenax.algorithms import _ctm_python_loop as _loop_mod
+
+        sweeps_run = 0
+        real_make = _loop_mod._make_jit_ctm_step
+
+        def _counting_make(*args, **kwargs):
+            step = real_make(*args, **kwargs)
+
+            def _counted(*step_args, **step_kwargs):
+                nonlocal sweeps_run
+                sweeps_run += 1
+                return step(*step_args, **step_kwargs)
+
+            return _counted
+
+        monkeypatch.setattr(_loop_mod, "_make_jit_ctm_step", _counting_make)
+
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+        max_iter = 50
+        patience = 5
+        _, info = python_loop_ctm_converge(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=max_iter,
+            min_iter=5,
+            conv_tol=0.0,  # impossible — forces the plateau bail
+            conv_method="elementwise",
+            renormalize=True,
+            projector_method="svd",
+            plateau_patience=patience,
+        )
+        assert not info.converged
+        # Guard the premise: this must be the *bail* path, not budget exhaustion.
+        assert sweeps_run < max_iter, (
+            f"expected an early plateau bail, ran the full budget ({sweeps_run} sweeps)"
+        )
+        assert info.iterations == sweeps_run, (
+            f"iterations={info.iterations} but {sweeps_run} CTM sweeps were "
+            "actually executed (#781)"
+        )
+
+    def test_best_iteration_locates_the_returned_env(self):
+        """``best_iteration`` says which sweep produced the env handed back.
+
+        The bail returns the best-metric env, so the information that
+        ``iterations`` used to carry is still needed — it just belongs in
+        its own field.  On a bail the counter can only have been reset by
+        an improvement, so the gap to the bail sweep is exactly
+        ``plateau_patience``.
+        """
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+        max_iter = 50
+        patience = 5
+        _, info = python_loop_ctm_converge(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=max_iter,
+            min_iter=5,
+            conv_tol=0.0,
+            conv_method="elementwise",
+            renormalize=True,
+            projector_method="svd",
+            plateau_patience=patience,
+        )
+        assert not info.converged
+        assert info.iterations < max_iter
+        assert info.best_iteration + patience == info.iterations, (
+            f"best_iteration={info.best_iteration}, iterations="
+            f"{info.iterations}, patience={patience}"
+        )
+
+    def test_best_iteration_equals_iterations_without_a_bail(self):
+        """Off the bail path the returned env *is* the last sweep's.
+
+        Only the ``plateau_patience`` stop-loss hands back an earlier
+        environment.  When the loop converges, or exhausts ``max_iter``
+        with the bail disabled, ``best_iteration`` must not lag.
+        """
+        A = _make_random_A(D=3, key=jax.random.PRNGKey(7))
+        base = dict(
+            site_tensors={(0, 0): A},
+            neighbors=SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            min_iter=5,
+            conv_method="elementwise",
+            renormalize=True,
+            projector_method="svd",
+        )
+
+        # Budget-exhausted path: impossible tolerance, bail disabled.
+        max_iter = 25
+        _, exhausted = python_loop_ctm_converge(
+            max_iter=max_iter, conv_tol=0.0, plateau_patience=None, **base
+        )
+        assert not exhausted.converged
+        assert exhausted.iterations == max_iter
+        assert exhausted.best_iteration == exhausted.iterations
+
+        # Converged path: a tolerance loose enough that the elementwise
+        # metric clears it well inside the budget.
+        _, converged = python_loop_ctm_converge(
+            max_iter=max_iter, conv_tol=1e3, plateau_patience=20, **base
+        )
+        assert converged.converged
+        assert converged.iterations < max_iter
+        assert converged.best_iteration == converged.iterations
 
     def test_returned_env_is_best_seen(self):
         """Returned env corresponds to the best ``sv_diff``, not the bail iter."""
@@ -452,3 +573,115 @@ class TestPlateauPatience:
         cfg_custom = CTMConfig(plateau_patience=7)
         kwargs_custom = ctm_converge_kwargs(cfg_custom)
         assert kwargs_custom["plateau_patience"] == 7
+
+
+class TestConvergenceCriterionIsGaugeDependent:
+    """#780: why ``conv_method="elementwise"`` cannot converge.
+
+    A CTM environment is defined only up to a gauge on each χ-bond joining a
+    corner to an edge: inserting ``G G⁻¹`` there leaves every contraction --
+    and so the energy -- untouched.  ``_max_env_leaf_diff`` compares raw
+    tensor entries, so it sees such a rotation as a change; ``_ctm_sv_diff``
+    compares the corner singular-value spectrum, which is invariant under it.
+
+    Successive CTM sweeps land in different gauges within degenerate
+    subspaces (#425/#426), so the element-wise metric has a floor set by the
+    gauge motion rather than by the physics.  That is the mechanism behind
+    the D=4 measurement in #780, where elementwise plateaus at ~2.6e-01 while
+    ``sv`` reaches 6.5e-09 on the identical state.  The issue listed this
+    explanation as *not established*; this pins it directly.
+    """
+
+    @staticmethod
+    def _apply_G(tensor, label, G):
+        """Absorb ``G`` into the leg named ``label``: ``X[..k..] → Σ_k G[k,a]``.
+
+        The axis is resolved *by label*, never by position: the CTM sweep does
+        not preserve the corner axis order (a converged ``C1`` is
+        ``(c1_r, c1_d)``, the reverse of its constructor order — the #702
+        convention), so a positional gauge silently lands on the vertical bond
+        instead and stops being a gauge at all.
+        """
+        axis = [i.label for i in tensor.indices].index(label)
+        moved = jnp.moveaxis(tensor._data, axis, 0)
+        moved = jnp.tensordot(G, moved, axes=([0], [0]))
+        return DenseTensor(jnp.moveaxis(moved, 0, axis), tensor.indices)
+
+    @classmethod
+    def _gauge_top_row_bond(cls, env, G):
+        """Insert ``G Gᵀ = I`` on every seam of the top-row χ-bond.
+
+        The RDM contracts that row as ``C1 — T1 — T1 — C2`` with
+        ``c1_r ↔ t1_l``, ``t1_r ↔ t1_l`` (the next copy of the *same* edge,
+        this being a 1-site cell) and ``t1_r ↔ c2_l``.  Absorbing ``G`` into
+        *each* of those four leg slots leaves ``G Gᵀ = I`` on every seam.
+        Gauging only some of them is not a gauge — it is a different
+        environment, and the energy assertion below would catch it.
+        """
+        return env._replace(
+            C1=cls._apply_G(env.C1, "c1_r", G),
+            T1=cls._apply_G(cls._apply_G(env.T1, "t1_l", G), "t1_r", G),
+            C2=cls._apply_G(env.C2, "c2_l", G),
+        )
+
+    def _converged_env(self):
+        A = _make_random_A(D=2, key=jax.random.PRNGKey(3))
+        envs, _ = python_loop_ctm_converge(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            chi=6,
+            max_iter=60,
+            conv_tol=1e-10,
+            conv_method="sv",
+        )
+        return A, envs[(0, 0)]
+
+    def test_gauge_moves_elementwise_metric_but_not_sv_or_energy(self):
+        from tenax.algorithms._ctm_tensor_convergence import (
+            _corner_singular_values,
+            _ctm_sv_diff,
+            _max_env_leaf_diff,
+        )
+
+        A, env = self._converged_env()
+        gate = _heisenberg_gate()
+
+        # A genuine gauge: orthogonal, and far from the identity.
+        G, _ = jnp.linalg.qr(jax.random.normal(jax.random.PRNGKey(11), (6, 6)))
+        gauged = self._gauge_top_row_bond(env, G)
+
+        # 1. It really is a gauge -- the physics does not move.
+        e_ref = float(compute_energy_ctm_tensor(A, env, gate))
+        e_gauged = float(compute_energy_ctm_tensor(A, gauged, gate))
+        assert abs(e_gauged - e_ref) < 1e-10 * max(1.0, abs(e_ref)), (
+            f"the transform changed the energy ({e_ref} -> {e_gauged}), so it "
+            "is not a gauge and this test proves nothing"
+        )
+
+        # 2. The sv criterion is blind to it (orthogonal G preserves the
+        #    corner spectrum exactly).
+        sv_diff = float(
+            _ctm_sv_diff(
+                _corner_singular_values(gauged.C1), _corner_singular_values(env.C1)
+            )
+        )
+        assert sv_diff < 1e-10, f"sv metric moved under a pure gauge: {sv_diff:.3e}"
+
+        # 3. The elementwise criterion is not -- by orders of magnitude, which
+        #    is exactly the floor that keeps `converged` False forever.
+        leaf_diff = _max_env_leaf_diff(env, gauged)
+        assert leaf_diff > 1e-3, (
+            f"expected the element-wise metric to register the gauge, got "
+            f"{leaf_diff:.3e}"
+        )
+        assert leaf_diff > 1e6 * max(sv_diff, 1e-16)
+
+    def test_ctm_config_default_selects_the_gauge_dependent_criterion(self):
+        """The default that #780 is about: config says elementwise, the
+        function signature's ``"sv"`` never applies because
+        ``ctm_converge_kwargs`` always emits the config value."""
+        from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
+        from tenax.algorithms.ipeps_config import CTMConfig
+
+        assert CTMConfig().ctm_conv_method == "elementwise"
+        assert ctm_converge_kwargs(CTMConfig())["conv_method"] == "elementwise"

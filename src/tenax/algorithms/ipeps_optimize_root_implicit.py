@@ -270,6 +270,7 @@ def optimize_gs_ad_root_implicit(
     best_params = params
     prev_energy = float("inf")
     nonfinite_grad_steps = 0
+    fully_masked_steps = 0
     steps_run = 0
 
     for step in range(config.gs_num_steps):
@@ -278,12 +279,30 @@ def optimize_gs_ad_root_implicit(
         n_nonfinite = int(jnp.sum(~jnp.isfinite(grads)))
         if n_nonfinite:
             nonfinite_grad_steps += 1
+            # Masking every entry really is a no-op; masking *some* of them is
+            # not, and must not be reported as one.  The surviving components
+            # still drive a full optimizer update -- and they came out of the
+            # same solve that produced the non-finite ones, so that step moves
+            # the state along a direction already known to be contaminated.
+            # That is a worse situation than a stalled step, not a milder one.
+            if n_nonfinite == grads.size:
+                fully_masked_steps += 1
+                detail = (
+                    "every entry was non-finite, so the step is a no-op and "
+                    "apparent convergence here is not convergence"
+                )
+            else:
+                detail = (
+                    f"the remaining {grads.size - n_nonfinite} finite entries "
+                    "still drive a full update, so this step is NOT a no-op -- "
+                    "it moves the state along a gradient already known to be "
+                    "contaminated"
+                )
             warnings.warn(
                 f"ctm_ad_mode='root_implicit': step {step} produced "
-                f"{n_nonfinite} non-finite gradient entries, masked to zero so "
-                "the best-so-far state survives. The step is a no-op, so "
-                "apparent convergence here is not convergence. Check "
-                "usable_rank -- this is the #772 failure shape.",
+                f"{n_nonfinite} of {grads.size} non-finite gradient entries, "
+                f"masked to zero so the best-so-far state survives; {detail}. "
+                "Check usable_rank -- this is the #772 failure shape.",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -346,11 +365,15 @@ def optimize_gs_ad_root_implicit(
             params = _normalize_params(optax.apply_updates(params, updates))
 
     if nonfinite_grad_steps:
+        partly_masked = nonfinite_grad_steps - fully_masked_steps
         warnings.warn(
             f"ctm_ad_mode='root_implicit': {nonfinite_grad_steps} of "
-            f"{steps_run} optimizer steps made no progress because "
-            "their gradient was masked. The reported energy is from the best "
-            "state actually reached, not from a converged optimization.",
+            f"{steps_run} optimizer steps had a non-finite gradient "
+            f"({fully_masked_steps} fully masked, so genuinely no-ops; "
+            f"{partly_masked} only partly masked, which still stepped -- on a "
+            "gradient known to be contaminated). The reported energy is from "
+            "the best state actually reached, not from a converged "
+            "optimization.",
             RuntimeWarning,
             stacklevel=2,
         )

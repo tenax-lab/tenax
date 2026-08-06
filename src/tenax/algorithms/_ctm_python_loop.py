@@ -43,11 +43,16 @@ class CTMConvergeInfo(NamedTuple):
     """Convergence information from python_loop_ctm_converge."""
 
     converged: bool
-    iterations: int
+    iterations: int  # CTM sweeps actually performed (#781)
     sv_diff: float
     max_truncation_error: float = 0.0  # variPEPS §2.8.2 indicator (last sweep)
     max_smallest_S: float = 0.0  # variPEPS norm_smallest_S indicator (#492)
     final_chi: int = 0  # final chi after any in-CTM bumps (#492); 0 ⇒ unchanged
+    # Sweep index whose environment is returned.  Equals ``iterations``
+    # except on the ``plateau_patience`` bail, where the best-metric env is
+    # handed back and this trails ``iterations`` by ``plateau_patience``.
+    # ``sv_diff`` is the metric of *this* sweep, not of ``iterations``.
+    best_iteration: int = 0
 
 
 # Process-lifetime cache so repeat calls with the same neighbors dict reuse
@@ -186,7 +191,15 @@ def python_loop_ctm_converge(
         conv_tol:          Convergence tolerance on corner singular values.
         conv_method:       Convergence method: ``"sv"`` (corner singular
                            values) or ``"elementwise"`` (max element-wise
-                           difference across all env tensors).
+                           difference across all env tensors).  Prefer
+                           ``"sv"``: the environment is defined only up to a
+                           gauge on each chi-bond, so ``"elementwise"``
+                           measures gauge motion as well as convergence and
+                           plateaus far above any usable ``conv_tol`` on a
+                           physical state (#780).  Note this default does NOT
+                           reach config-driven callers -- ``ctm_converge_kwargs``
+                           always emits ``CTMConfig.ctm_conv_method``, which
+                           is ``"elementwise"`` for the AD path (#351).
         renormalize:       Renormalize environments after each sweep.
         projector_method:  ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
         qr_warmup_steps:   Number of eigh warm-up sweeps before QR kicks in.
@@ -202,7 +215,12 @@ def python_loop_ctm_converge(
                            ``plateau_patience`` iterations.  The loop
                            returns the env that achieved the best metric
                            and ``CTMConvergeInfo.converged=False`` — the
-                           bail is a stop-loss, not a fixed point.
+                           bail is a stop-loss, not a fixed point.  On that
+                           path ``iterations`` counts the sweeps performed
+                           (the bail sweep) while ``best_iteration`` locates
+                           the returned env, ``plateau_patience`` sweeps
+                           earlier; divide elapsed time by ``iterations``
+                           for a per-sweep cost (#781).
                            Default ``20`` is a sane stop-loss against the
                            SU/random-init CTM plateau tracked in #425/#426
                            (memory ``project_tenax_ctm_doesnt_converge_random_init``):
@@ -347,6 +365,7 @@ def python_loop_ctm_converge(
         max_truncation_error=result.max_truncation_error,
         max_smallest_S=result.max_smallest_S,
         final_chi=result.final_chi,
+        best_iteration=warmup + result.best_iteration,
     )
 
 

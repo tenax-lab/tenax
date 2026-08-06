@@ -166,8 +166,9 @@ def _config_to_dict(config: Any) -> dict:
             # live cg_gates is re-supplied from `config` on resume.
             from dataclasses import replace as _dc_replace
 
-            snap = _dc_replace(config, cg_gates=("__cg_gates_fp__",
-                                                 cg_gates_fingerprint(cg)))
+            snap = _dc_replace(
+                config, cg_gates=("__cg_gates_fp__", cg_gates_fingerprint(cg))
+            )
             return asdict(snap)
         return asdict(config)
     return dict(config)

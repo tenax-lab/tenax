@@ -1210,7 +1210,9 @@ def _gauge_fix_qr_dense(Q, R):
     diag_R = jnp.diag(R)
     abs_diag = jnp.abs(diag_R)
     phase = jnp.where(
-        abs_diag > 0, diag_R / jnp.where(abs_diag > 0, abs_diag, 1.0), jnp.ones_like(diag_R)
+        abs_diag > 0,
+        diag_R / jnp.where(abs_diag > 0, abs_diag, 1.0),
+        jnp.ones_like(diag_R),
     ).astype(R.dtype)
     Q = Q * phase[None, :]
     R = R * jnp.conj(phase)[:, None]

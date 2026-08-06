@@ -111,6 +111,14 @@ class CTMLoopResult(NamedTuple):
     max_smallest_S: float
     final_chi: int
     bump_extra_sweeps: int
+    # Sweep index whose environment is the one returned in ``envs``.  Equal
+    # to ``iterations`` on the converged and budget-exhausted paths; on the
+    # ``plateau_patience`` bail it is the best-metric sweep, which trails
+    # ``iterations`` by exactly ``plateau_patience``.  Split out from
+    # ``iterations`` in #781, which reported the best-metric index as the
+    # sweep count and so inflated every ``total_s / iterations`` per-sweep
+    # timing derived from a bailed run.
+    best_iteration: int = 0
 
 
 def _run_ctm_loop_with_bump(
@@ -274,6 +282,7 @@ def _run_ctm_loop_with_bump(
                 max_smallest_S=last_max_smallest_S,
                 final_chi=chi_current,
                 bump_extra_sweeps=bump_extra_sweeps,
+                best_iteration=total_iter,
             )
 
         if plateau_patience is not None and plateau_metric_valid:
@@ -288,12 +297,17 @@ def _run_ctm_loop_with_bump(
                     return CTMLoopResult(
                         envs=best_envs or envs,
                         converged=False,
-                        iterations=best_iter or total_iter,
+                        # Sweeps performed, not the best-metric index: the
+                        # bail happens ``plateau_patience`` sweeps after the
+                        # last improvement and callers divide elapsed time by
+                        # this to get a per-sweep cost (#781).
+                        iterations=total_iter,
                         sv_diff=best_diff,
                         max_truncation_error=last_max_eps,
                         max_smallest_S=last_max_smallest_S,
                         final_chi=chi_current,
                         bump_extra_sweeps=bump_extra_sweeps,
+                        best_iteration=best_iter or total_iter,
                     )
 
     return CTMLoopResult(
@@ -305,4 +319,5 @@ def _run_ctm_loop_with_bump(
         max_smallest_S=last_max_smallest_S,
         final_chi=chi_current,
         bump_extra_sweeps=bump_extra_sweeps,
+        best_iteration=remaining,
     )

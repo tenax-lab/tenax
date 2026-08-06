@@ -259,52 +259,37 @@ def test_rel_floor_forwards_and_nonfinite_grads_warn(monkeypatch):
 
     messages = [str(w.message) for w in record]
     assert any("non-finite gradient entries" in m for m in messages), messages
-    assert any("optimizer steps made no progress" in m for m in messages), messages
+    assert any("had a non-finite gradient" in m for m in messages), messages
+    # A fully-masked step is the only kind that is genuinely a no-op, and the
+    # end-of-run summary has to say which kind it saw rather than calling every
+    # masked step no progress -- a partly-masked step still moves the state.
+    summary = next(m for m in messages if "had a non-finite gradient" in m)
+    assert "fully masked" in summary and "partly masked" in summary, summary
 
 
 # ------------------------------------------------------------------ #
 # The gap that blocks production use (#772)                            #
+# The production case: an optimizer running through the path (#715)    #
 # ------------------------------------------------------------------ #
 
 
 @pytest.mark.slow
 def test_production_heisenberg_run_through_optimize_gs_ad():
-    """The production case this wiring exists for: a real Heisenberg state.
+    """A real Heisenberg state optimized through the root-implicit path.
 
-    This carried #772 as an xfail through two rounds.  First the covariant
-    equations NaN'd the gradient on a physical simple-update state; #778's rank
-    clamp fixed that.  What remained was the *gate*: clamping leaves an
-    O(rel_floor) inconsistency in the equations by construction, and the fixed
-    1e-06 threshold rejected it.  The gate is now set from the clamp.
+    This is the gate #715 actually had to clear.  Every other verification in
+    the suite is a single gradient at a single point; what was never shown is
+    that an optimizer *descends* through this path.  Until #779 it could not
+    even take its first step -- the root-residual gate raised on a physical
+    simple-update state, whose environment supports only three directions at
+    any chi so the rank clamp always fires.
 
-    **What this asserts, and why not an energy target.**  It used to end at
-    ``E == approx(-0.4886, abs=5e-3)``.  That number was written in the same
-    commit that marked the test xfail.  Its provenance is now known: ``-0.4886``
-    matches ``-0.488638504625`` recorded at
-    ``tests/test_ctm_723_single_site_collapse.py:16`` as the pre-optimization
-    2x2 CTM energy of the same D=2 sublattice-rotated Heisenberg simple-update
-    state (that file uses ``num_imaginary_steps=60`` against this test's
-    ``40``, which accounts for the small offset from the measured
-    ``E_start = -0.48198`` below).  So the old assertion demanded that three
-    Adam steps barely move the energy, and the run in fact lands at
-    ``-0.5066``.
-    Pinning an unvalidated constant would either freeze in whatever the
-    optimizer happens to do today or keep failing for a reason that has
-    nothing to do with the wiring.  So this asserts what the test can actually
-    certify: the whole path runs end to end without tripping the residual gate
-    (no ``RootResidualError`` -- the point of #772), the energy is finite, and
-    the optimizer *descends*.
-
-    The descent baseline is measured, not quoted.  It cannot come from
-    ``PHYSICAL_SU_D2_E_SU``: that is ``ipeps()``'s own simple-update energy
-    evaluation, whereas ``E`` here is a converged CTM energy from
-    ``compute_energy_ctm_tensor``, and the two are different quantities (the
-    SU number is *lower*, so comparing them fails for an apples-to-oranges
-    reason).  Instead the same config with ``gs_num_steps=0`` is run first,
-    which returns the SU-initialised starting tensor through the identical
-    ``_final_env`` + ``compute_energy_ctm_tensor`` path.  Measured: baseline
-    ``-0.48198``, optimized ``-0.50660``, a descent of 2.5e-02 over three adam
-    steps.
+    The assertions are physical rather than a pinned number: at three Adam
+    steps the exact value is a property of the optimizer schedule, but the
+    energy must go *down* from the simple-update start and must not fall below
+    the exact ground state.  A run that breaches the latter is reporting a
+    non-variational energy, which is the failure mode that matters and the one
+    a hard-coded ``approx`` would have hidden behind a tolerance.
     """
     import jax
 
@@ -335,3 +320,85 @@ def test_production_heisenberg_run_through_optimize_gs_ad():
     _A, _env, E = optimize_gs_ad(gate, None, cfg)
     assert math.isfinite(E), E
     assert E < E_start, f"no descent: {E!r} did not improve on {E_start!r}"
+    # The simple-update start sits at -0.48198 at this chi; three Adam steps
+    # reach -0.5066.  Requiring a clear improvement rather than the exact value
+    # keeps the test about the optimizer working, not about its schedule.
+    assert E < -0.49, f"the optimizer did not improve on the SU start: {E}"
+    # Square-lattice spin-1/2 Heisenberg AFM, Sandvik QMC.  A D=2 chi=6 state
+    # cannot legitimately go below this.
+    assert E > -0.669437, f"non-variational energy below the exact ground state: {E}"
+
+
+@pytest.mark.slow
+def test_the_root_implicit_gradient_descends_the_energy():
+    """A few plain gradient steps must lower the energy monotonically.
+
+    Uses the engine directly, so no optimizer schedule sits between the
+    gradient and the assertion.  A wrong-sign or badly-scaled gradient shows
+    up here immediately -- that was the failure mode #718 spent a long time
+    on, where the energy boundary was mis-glued and the gradient was off by
+    3e-2 relative while every residual looked healthy.
+
+    **Marked slow, reluctantly.**  This was written to give the *required*
+    gate (``-m core``) coverage of the claim that the gradient points
+    downhill, which it otherwise has none of.  Measured, one root-implicit
+    gradient at D=2 chi=4 peaks at **4.2 GB** against a 210 MB baseline for
+    the rest of this file -- almost entirely the adjoint solve's Krylov
+    basis.  ``-m core`` already peaks at 6.35 GB against ~7 GB runners
+    (#732), and JAX caches persist across tests within a session, so landing
+    4 GB on top of an accumulated cache risks an OOM that would present as a
+    confusing flake.  Shrinking ``solve_restart`` 30 -> 5 only reached 3.6 GB
+    while making the test 55% slower, which is not a trade worth making.
+
+    So the required gate still has no convergence coverage for this path.
+    That is a real gap, recorded here rather than hidden by a marker: the
+    memory cost of a single gradient is the blocker, and it is the same
+    quantity #731 tracks at 8.4 GB on the symmetric path.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    jax.config.update("jax_enable_x64", True)
+    from tenax.algorithms._ctm_root_implicit_asym import (
+        asym_root_implicit_energy_and_grad,
+    )
+    from tenax.algorithms.ipeps import heisenberg_gate, sublattice_rotate_gate
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import U1Symmetry
+    from tenax.core.tensor import DenseTensor
+
+    D = d = 2
+    sym = U1Symmetry()
+    zeros = [0] * D
+    zphys = [0] * d
+    indices = (
+        TensorIndex.from_charges(sym, list(zeros), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, list(zeros), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, list(zeros), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, list(zeros), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(sym, list(zphys), FlowDirection.IN, label="phys"),
+    )
+    key = jax.random.PRNGKey(0)
+    params = jax.random.normal(key, (D, D, D, D, d))
+    params = params / jnp.linalg.norm(params)
+
+    gate = sublattice_rotate_gate(heisenberg_gate())
+    energies = []
+    lr = 0.05
+    for _ in range(3):
+        E, g = asym_root_implicit_energy_and_grad(
+            DenseTensor(params, indices),
+            gate,
+            chi=4,
+            max_iter=40,
+            conv_tol=1e-10,
+        )
+        assert bool(jnp.all(jnp.isfinite(g))), "non-finite gradient"
+        energies.append(float(jnp.real(E)))
+        params = params - lr * g
+        params = params / jnp.linalg.norm(params)
+
+    assert all(energies[i + 1] < energies[i] for i in range(len(energies) - 1)), (
+        f"energy did not decrease monotonically: {energies}"
+    )
+    assert energies[-1] > -0.669437, f"below the exact ground state: {energies}"

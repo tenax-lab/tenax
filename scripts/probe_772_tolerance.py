@@ -20,8 +20,9 @@ import jax.numpy as jnp  # noqa: E402
 
 sys.path.insert(0, "tests")
 
-import tenax.algorithms._ctm_root_implicit_asym as M  # noqa: E402
 from _su_fixtures import physical_su_d2  # noqa: E402
+
+import tenax.algorithms._ctm_root_implicit_asym as M  # noqa: E402
 
 eps13 = float(np.finfo(np.float64).eps ** (1.0 / 3.0))
 print(f"main's default clamp: eps^(1/3) = {eps13:.4e}\n")
@@ -38,11 +39,20 @@ def _gate(delta=1.0):
 A = physical_su_d2()
 H = _gate()
 
-hdr = f"{'state':>10} {'chi':>4} {'root_resid':>12} {'cov_resid':>12} {'max|g|':>12}"
+hdr = (
+    f"{'state':>10} {'chi':>4} {'rank':>5} {'root_resid':>12} "
+    f"{'cov_resid':>12} {'max|g|':>12} {'gate':>12} {'verdict':>8}"
+)
 print(hdr)
 print("-" * len(hdr))
 
-worst_cov = 0.0
+# The gate is *derived*, not a constant: `_root_residual_tolerance` relaxes the
+# base tolerance only where the rank clamp actually bound, in proportion to how
+# many directions it clamped.  Reading a flat 1e-6 here would report REJECTS for
+# rows the production default accepts, which is the failure this probe exists to
+# measure -- so resolve it exactly the way the library does.
+BASE_TOL = 1e-6
+worst = None
 for label, state in (("physical", A), ("random", None)):
     for chi in (4, 6, 8, 12):
         if state is None:
@@ -65,12 +75,28 @@ for label, state in (("physical", A), ("random", None)):
             print(f"{label:>10} {chi:>4}  ERROR {type(exc).__name__}: {exc}")
             continue
         gmax = float(np.abs(np.asarray(g)).max())
+        rank = int(d["usable_rank"])
+        gate = M._root_residual_tolerance(BASE_TOL, rank, chi, jnp.complex128)
+        cov = float(d["covariant_residual"])
+        worst_resid = max(float(d["root_residual"]), cov)
+        ok = worst_resid <= gate
         print(
-            f"{label:>10} {chi:>4} {d['root_residual']:>12.3e} "
-            f"{d['covariant_residual']:>12.3e} {gmax:>12.3e}"
+            f"{label:>10} {chi:>4} {rank:>5} {d['root_residual']:>12.3e} "
+            f"{cov:>12.3e} {gmax:>12.3e} {gate:>12.3e} "
+            f"{'PASS' if ok else 'REJECTS':>8}"
         )
-        if label == "physical":
-            worst_cov = max(worst_cov, float(d["covariant_residual"]))
+        if label == "physical" and (worst is None or worst_resid / gate > worst[0]):
+            worst = (worst_resid / gate, chi, rank, worst_resid, gate)
 
-print(f"\nworst physical covariant_residual = {worst_cov:.3e}")
-print(f"current root_residual_warn default = 1.0e-06 -> {'PASS' if worst_cov < 1e-6 else 'REJECTS'}")
+if worst is not None:
+    margin, chi, rank, resid, gate = worst
+    print(
+        f"\ntightest physical margin: chi={chi} rank={rank} "
+        f"residual {resid:.3e} against the resolved gate {gate:.3e} "
+        f"({margin:.2f}x) -> {'PASS' if margin <= 1.0 else 'REJECTS'}"
+    )
+    print(
+        f"a flat {BASE_TOL:.1e} would have called this "
+        f"{'PASS' if resid <= BASE_TOL else 'REJECTS'} -- which is the #772 "
+        "misreport this probe exists to catch."
+    )
