@@ -94,6 +94,12 @@ _FILE_MARKERS = {
     # no CTM, milliseconds.  They guard a defect class that has now recurred
     # on four engines, so they belong in the required gate.
     "test_root_implicit_nan_gates.py": "core",
+    # The multisite clamped-residual gate (#784).  The rank-report half is one
+    # SVD per coordinate and runs in the gate; the two end-to-end cases each
+    # converge a 300-sweep CTM plus an adjoint solve and carry their own
+    # explicit ``@pytest.mark.slow``, which the rule below honours by
+    # *withholding* this ``core``; see ``pytest_collection_modifyitems``.
+    "test_multisite_clamped_gate.py": "core",
     "test_ctm_tensor.py": "algorithm",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",

@@ -371,6 +371,40 @@ def all_projectors_multisite(ECs, chi: int, nrows: int, ncols: int, prev=None):
     return out
 
 
+def retained_rank_report_multisite(
+    corners, edges, a_by_cell, chi: int, nrows: int, ncols: int, rel_floor=None
+) -> dict:
+    """How much of the retained spectrum carries real weight, per unit cell.
+
+    ``usable_rank`` is the minimum over *every coordinate* of the count
+    :func:`_rank_capped_spectrum` leaves above the clamp — the worst cut in the
+    cell sets the floor, because a single clamped direction anywhere makes
+    ``y*`` unable to satisfy the equations below the clamp level.  Same
+    aggregation as Phase 1's :func:`retained_rank_report`, which minimises over
+    the four directions.
+
+    ``all_projectors_multisite`` computes this rank and discards it into
+    ``_usable_rank`` (#778 did the same in Phase 1); this is the accessor that
+    makes it reachable, which is what #784 needs to size the gate.
+
+    Costs one SVD per coordinate and runs no adjoint solve, against the
+    hundreds of sweeps the caller has already paid for.
+    """
+    from tenax.algorithms._ctm_root_implicit_asym import _rank_capped_spectrum
+
+    ECs = all_enlarged_corners(corners, edges, a_by_cell, nrows, ncols)
+    rank = int(chi)
+    smin_rtol = float("inf")
+    for co in coordinates(nrows, ncols):
+        M, _A, _B = half_infinite_multisite(ECs, co, nrows, ncols)
+        s = jnp.linalg.svd(M, compute_uv=False)
+        _capped, usable = _rank_capped_spectrum(s, chi, rel_floor=rel_floor)
+        s_k = s[:chi]
+        smin_rtol = min(smin_rtol, float(s_k[-1]) / (float(s_k[0]) + 1e-300))
+        rank = min(rank, int(usable))
+    return {"usable_rank": rank, "retained_smin_rtol": smin_rtol}
+
+
 def _absorbed_edge(edges, a_by_cell, co: Coord, nrows: int, ncols: int):
     """``edge[above(co)]`` with the local double layer absorbed.
 
@@ -958,6 +992,7 @@ def cell_root_implicit_energy_and_grad(
         _residual_exceeds,
     )
     from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
+    from tenax.algorithms._ctm_root_implicit_asym import _root_residual_tolerance
     from tenax.algorithms._ctm_tensor_init import (
         _build_double_layer_tensor,
         initialize_ctm_tensor_env,
@@ -995,14 +1030,40 @@ def cell_root_implicit_energy_and_grad(
         polish_steps=polish_steps,
         polish_tol=polish_tol,
     )
-    if _residual_exceeds(root_residual, root_residual_warn):
+    # #784: this engine clamps the numerically-null tail exactly as Phase 1
+    # does, so it inherits the same intrinsic residual floor -- a clamped cut
+    # cannot satisfy the equations below the clamp level however long y* is
+    # polished.  A flat 1e-6 therefore rejects the very states the clamp just
+    # made solvable: the frozen physical D=2 simple-update state reads 8.493e-06
+    # at chi=4 and 1.911e-05 at chi=6, both with finite, usable gradients.
+    # Those are the asymmetric engine's covariant numbers at the same chi, so
+    # the same law applies rather than a new constant.
+    #
+    # rel_floor is None because this engine always uses the *derived* clamp:
+    # all_projectors_multisite calls _rank_capped_spectrum without one.  If a
+    # rel_floor knob is ever threaded through here it must be forwarded to this
+    # call too, or the gate will reject what the wider clamp just permitted.
+    rank_report = retained_rank_report_multisite(
+        corners, edges, a_by_cell, chi, nrows, ncols
+    )
+    usable_rank = rank_report["usable_rank"]
+    residual_tol = _root_residual_tolerance(
+        root_residual_warn,
+        usable_rank,
+        chi,
+        a_by_cell[objective_cell].dtype,
+        rel_floor=None,
+    )
+    if _residual_exceeds(root_residual, residual_tol):
         _report_root_residual(
             on_root_residual,
             f"Multisite root implicit AD: ‖F(y*)‖ = {root_residual:.3e} exceeds "
-            f"{root_residual_warn:.1e}; the implicit-function gradient is "
-            "correspondingly inaccurate (paper Fig. 1).",
+            f"{residual_tol:.1e}, so y* does not solve the characteristic "
+            f"equations (usable_rank={usable_rank} of chi={chi}). Note this "
+            "residual measures whether y* solves the equations, NOT gradient "
+            "accuracy -- it mispredicts in both directions (#785).",
             residual=float(root_residual),
-            tolerance=float(root_residual_warn),
+            tolerance=float(residual_tol),
         )
 
     S_star = root.s
