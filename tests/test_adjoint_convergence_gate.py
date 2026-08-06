@@ -47,14 +47,33 @@ def _random_peps(seed=2026, D=2, d=2):
     return _wrap_as_dense_tensor(A / (jnp.linalg.norm(A) + 1e-10))
 
 
-def _grad(A, H, *, maxiter, restart, tol, method="gmres"):
+def _grad(A, H, *, maxiter, restart, tol, method="gmres", ctm_max_iter=20):
+    """Gradient through the implicit-AD energy.
+
+    ``ctm_max_iter`` is separate from ``maxiter`` on purpose, and the tests
+    that assert *silence* must raise it.  The backward linearises about the
+    forward CTM iterate: if the forward has not reached its fixed point,
+    ``(I - Jᵀ)`` is not the operator the adjoint system assumes and GMRES
+    stalls no matter how large its Krylov budget is.  Measured on this D=2
+    chi=4 fixture:
+
+        ctm_max_iter =  20  ->  adjoint residual 2.5e-02   (guard fires)
+        ctm_max_iter = 100  ->  adjoint residual 1.3e-10
+        ctm_max_iter = 300  ->  adjoint residual 3.4e-10
+
+    At 20 the guard is *correct* to warn, so a silence assertion there is
+    testing luck: it held on CPU and failed on CUDA, where the unconverged
+    forward lands somewhere else.  Starve the Krylov budget to provoke the
+    warning, never the forward sweep count.
+    """
+
     def loss(A_):
         return ctm_energy_implicit(
             {(0, 0): A_},
             SINGLE_SITE_NEIGHBORS,
             H,
             chi=4,
-            max_iter=20,
+            max_iter=ctm_max_iter,
             conv_tol=1e-8,
             gmres_tol=tol,
             gmres_maxiter=maxiter,
@@ -79,13 +98,18 @@ def test_a_converged_gmres_adjoint_is_silent():
 
     Without this the previous test passes against a helper that warns
     unconditionally.
+
+    ``ctm_max_iter`` is raised so the forward actually reaches its fixed
+    point — see ``_grad``. With the default 20 this asserts silence about a
+    solve that genuinely does not converge, which is a backend-dependent
+    coin flip rather than a property of the guard.
     """
     A, H = _random_peps(), _heisenberg_gate()
     import warnings
 
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
-        _grad(A, H, maxiter=200, restart=20, tol=1e-6)
+        _grad(A, H, maxiter=200, restart=20, tol=1e-6, ctm_max_iter=200)
     bad = [
         str(w.message)
         for w in rec
@@ -172,6 +196,29 @@ def test_the_gate_still_fails_closed_on_a_non_finite_residual():
     assert _adjoint_converged(float("nan"), float("nan"), 1e-6) is False
 
 
+def test_a_non_finite_rhs_norm_cannot_make_the_threshold_swallow_the_residual():
+    """The ‖b‖-relative threshold must not become the thing that fails open.
+
+    Scaling the tolerance by ‖b‖ introduces a failure mode the residual-only
+    check does not have: if the RHS norm overflows, ``max(tol·inf, tol)`` is
+    ``inf``, and *every* residual satisfies ``r <= inf`` — including ``inf``
+    itself.  So the exact situation the guard exists to catch, a blown-up
+    adjoint solve, is the one it reports as converged.
+
+    Note ``(nan, inf)`` already fails closed for an unrelated reason
+    (``nan <= inf`` is False), so testing only nan residuals misses this.
+    An infinite ‖b‖ means the RHS itself is garbage, so no residual against
+    it is meaningful, however small.
+    """
+    from tenax.algorithms._ctm_energy_ad import _adjoint_converged
+
+    inf = float("inf")
+    assert _adjoint_converged(inf, inf, 1e-6) is False
+    # A *small* residual against an infinite RHS is not evidence of anything.
+    assert _adjoint_converged(1e-9, inf, 1e-6) is False
+    assert _adjoint_converged(1e-9, float("nan"), 1e-6) is False
+
+
 def test_a_successful_fixed_point_backward_clears_a_stale_residual():
     """Diagnostics must describe the latest solve, not a previous one.
 
@@ -189,7 +236,16 @@ def test_a_successful_fixed_point_backward_clears_a_stale_residual():
     assert M._F3_LAST_DIAGNOSTICS.get("adjoint_residual") is not None
 
     # Now a healthy fixed-point backward: the stale value must not survive it.
-    _grad(A, H, maxiter=200, restart=20, tol=1e-6, method="fixed_point")
+    # Converged forward (see _grad) so "healthy" is a fact, not a coin flip.
+    _grad(
+        A,
+        H,
+        maxiter=200,
+        restart=20,
+        tol=1e-6,
+        method="fixed_point",
+        ctm_max_iter=200,
+    )
     stale = M._F3_LAST_DIAGNOSTICS.get("adjoint_residual")
     assert stale is None, (
         f"stale adjoint_residual={stale} survived a successful fixed-point "

@@ -10,6 +10,7 @@ __all__ = [
 ]
 
 import logging
+import math
 import warnings
 from functools import partial
 
@@ -61,9 +62,17 @@ def _adjoint_converged(residual: float, b_norm: float, tol: float) -> bool:
     *not* converged.  ``nan > x`` is ``False``, so the naive spelling takes the
     silent branch exactly when the solve has blown up — the #796 failure shape,
     and the reason this is a named function with its own test rather than an
-    inline comparison.  ``max()`` with a NaN ``b_norm`` is also handled: the
-    comparison against any threshold is ``False`` for a NaN residual.
+    inline comparison.
+
+    Scaling by ``‖b‖`` reintroduces that hazard on the *threshold* side: if the
+    RHS norm overflows, ``max(tol·inf, tol)`` is ``inf`` and every residual —
+    ``inf`` included — passes ``r <= inf``, so a blown-up solve reads as
+    converged.  Both inputs are therefore screened for finiteness up front.  An
+    infinite or NaN ``‖b‖`` means the RHS is garbage, so no residual measured
+    against it is meaningful, however small.
     """
+    if not math.isfinite(residual) or not math.isfinite(b_norm):
+        return False
     threshold = tol if not b_norm > 0 else max(tol * b_norm, tol)
     return bool(residual <= threshold)
 
