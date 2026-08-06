@@ -313,6 +313,8 @@ def optimize_gs_ad_root_implicit(
     # shape as the 1-site tensor path in ipeps_optimize.
     history_energies: list[float] = []
     history_step_times: list[float] = []
+    jit_compile_time = 0.0
+    first_step = True
 
     def _with_history(A_t, env, E, *, converged):
         if not config.return_history:
@@ -324,10 +326,7 @@ def optimize_gs_ad_root_implicit(
             {
                 "energies": history_energies,
                 "step_times": history_step_times,
-                # No jit: this path drives eager per-step solves, so there is
-                # no single compile event to attribute.  Reported as 0.0
-                # rather than omitted, so the key is always present.
-                "jit_compile_time": 0.0,
+                "jit_compile_time": jit_compile_time,
                 "num_steps": len(history_energies),
                 "converged": converged,
             },
@@ -389,8 +388,23 @@ def optimize_gs_ad_root_implicit(
             )
         grads = jnp.where(jnp.isfinite(grads), grads, 0.0)
         E = float(jnp.real(energy_val))
-        history_energies.append(E)
-        history_step_times.append(_time.perf_counter() - _step_t0)
+        if config.return_history:
+            _step_dt = float(_time.perf_counter() - _step_t0)
+            if first_step:
+                # The first evaluation is compile-dominated even though this
+                # path has no top-level ``jax.jit``: the root solve and its
+                # adjoint are jitted internally, so step 0 pays their lazy
+                # compilation.  Charging it to ``step_times`` would hand the
+                # two-point compile/steady-state fit a cold sample as if it
+                # were warm.  Diverting it here is also what keeps
+                # ``len(step_times) == max(num_steps - 1, 0)`` -- the shape
+                # invariant asserted for the other AD paths in
+                # ``tests/test_ipeps_ad_history.py``.
+                jit_compile_time = _step_dt
+                first_step = False
+            else:
+                history_step_times.append(_step_dt)
+            history_energies.append(E)
 
         if _should_accept_best(
             current_best=best_energy,
@@ -425,7 +439,15 @@ def optimize_gs_ad_root_implicit(
                     grad_norm_tol=config.gs_grad_norm_tol,
                     criterion=config.gs_conv_criterion,
                 )
-            converged_flag = True
+            # Masking a non-finite gradient to zero deflates both criteria: a
+            # fully masked step drives ``grad_norm_val`` to exactly 0.0, and it
+            # is a no-op, so the *next* step re-evaluates identical params and
+            # sees delta_energy == 0.0.  Either can fire ``_converged_outer``
+            # on a run this loop has already warned is "not ... a converged
+            # optimization".  The break itself is pre-existing behaviour and is
+            # left alone here (#812); what must not happen is publishing that
+            # as converged=True to a consumer that cannot see the warning.
+            converged_flag = nonfinite_grad_steps == 0
             break
 
         if use_cg:

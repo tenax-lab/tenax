@@ -34,6 +34,32 @@ from tenax.algorithms.ipeps_optimize_root_implicit import (
 )
 
 
+def _tiny_state():
+    """Smallest D=2 1x1 state the root-implicit path will accept, plus a gate."""
+    import numpy as np
+
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import U1Symmetry
+    from tenax.core.tensor import DenseTensor
+
+    rng = np.random.RandomState(0)
+    data = jax.numpy.array(rng.standard_normal((2, 2, 2, 2, 2)))
+    sym = U1Symmetry()
+    ch = np.zeros(2, dtype=np.int32)
+    idx = (
+        TensorIndex.from_charges(sym, ch.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, ch.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, ch.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, ch.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(sym, ch.copy(), FlowDirection.IN, label="phys"),
+    )
+    A = DenseTensor(data / (jax.numpy.linalg.norm(data) + 1e-10), idx)
+
+    Sz = 0.5 * jax.numpy.array([[1.0, 0.0], [0.0, -1.0]])
+    H = jax.numpy.kron(Sz, Sz).reshape(2, 2, 2, 2)
+    return H, A
+
+
 def _cfg(**kw):
     base = dict(
         max_bond_dim=2,
@@ -130,31 +156,17 @@ def test_return_history_yields_the_documented_four_tuple():
     documented 1x1 history API got a 3-tuple and lost the trajectory.
 
     The loop already computes every field, so this is honoured rather than
-    refused.  ``jit_compile_time`` is 0.0 by construction: this path drives
-    eager per-step solves and has no single compile event to attribute -- the
-    key is present so consumers do not have to special-case the path.
+    refused.
+
+    The shape is the one ``tests/test_ipeps_ad_history.py`` asserts for the
+    other AD paths: step 0 is charged to ``jit_compile_time`` and excluded
+    from ``step_times``, so ``len(step_times) == max(num_steps - 1, 0)``.
+    This path has no top-level ``jax.jit``, but its root solve and adjoint are
+    jitted internally, so the first evaluation is still the compile-dominated
+    one -- reporting it as a warm step would feed the benchmark's two-point
+    compile/steady-state fit a cold sample.
     """
-    import numpy as np
-
-    from tenax.core.index import FlowDirection, TensorIndex
-    from tenax.core.symmetry import U1Symmetry
-    from tenax.core.tensor import DenseTensor
-
-    rng = np.random.RandomState(0)
-    data = jax.numpy.array(rng.standard_normal((2, 2, 2, 2, 2)))
-    sym = U1Symmetry()
-    ch = np.zeros(2, dtype=np.int32)
-    idx = (
-        TensorIndex.from_charges(sym, ch.copy(), FlowDirection.OUT, label="u"),
-        TensorIndex.from_charges(sym, ch.copy(), FlowDirection.IN, label="d"),
-        TensorIndex.from_charges(sym, ch.copy(), FlowDirection.OUT, label="l"),
-        TensorIndex.from_charges(sym, ch.copy(), FlowDirection.IN, label="r"),
-        TensorIndex.from_charges(sym, ch.copy(), FlowDirection.IN, label="phys"),
-    )
-    A = DenseTensor(data / (jax.numpy.linalg.norm(data) + 1e-10), idx)
-
-    Sz = 0.5 * jax.numpy.array([[1.0, 0.0], [0.0, -1.0]])
-    H = jax.numpy.kron(Sz, Sz).reshape(2, 2, 2, 2)
+    H, A = _tiny_state()
 
     cfg = _cfg(gs_num_steps=2, gs_line_search=False, return_history=True)
     out = optimize_gs_ad_root_implicit(H, A, cfg)
@@ -169,9 +181,61 @@ def test_return_history_yields_the_documented_four_tuple():
         "converged",
     }, sorted(hist)
     assert hist["num_steps"] == len(hist["energies"])
-    assert len(hist["step_times"]) == len(hist["energies"])
     assert hist["energies"], "no energies recorded"
     assert all(isinstance(e, float) for e in hist["energies"])
+
+    # The invariant the other AD paths are held to (test_ipeps_ad_history.py):
+    # step 0 lands in jit_compile_time, never in step_times.
+    assert len(hist["step_times"]) == max(hist["num_steps"] - 1, 0), (
+        f"step_times must exclude the cold step 0: {hist['step_times']} vs "
+        f"num_steps={hist['num_steps']}"
+    )
+    assert all(isinstance(t, float) for t in hist["step_times"])
+    assert isinstance(hist["jit_compile_time"], float)
+    # Not 0.0: the first evaluation really was timed and charged here.  A
+    # hard-coded 0.0 would tell the benchmark this path compiles for free.
+    assert hist["jit_compile_time"] > 0.0, hist["jit_compile_time"]
+
+
+def test_a_masked_gradient_is_not_published_as_convergence(monkeypatch):
+    """A failed root solve must not surface as ``history['converged'] = True``.
+
+    When the solve returns non-finite entries the loop masks them to zero.  A
+    *fully* masked gradient therefore has L2 norm exactly 0.0, which satisfies
+    ``gs_conv_criterion='grad_norm'`` and breaks the loop -- on a step the same
+    function has just warned is "a no-op and apparent convergence here is not
+    convergence".
+
+    The warning is the only signal a human sees; a benchmark consumer reads the
+    flag.  Those two must not disagree.  The break itself is pre-existing
+    behaviour and is deliberately left alone here (#812).
+    """
+    import tenax.algorithms._ctm_root_implicit_asym as _asym
+
+    H, A = _tiny_state()
+
+    def _all_nan_grad(A_t, gate, **kw):
+        return (
+            jax.numpy.asarray(-0.25),
+            jax.numpy.full((2, 2, 2, 2, 2), jax.numpy.nan),
+        )
+
+    monkeypatch.setattr(_asym, "asym_root_implicit_energy_and_grad", _all_nan_grad)
+
+    cfg = _cfg(
+        gs_num_steps=1,
+        gs_line_search=False,
+        return_history=True,
+        gs_conv_criterion="grad_norm",
+    )
+    with pytest.warns(RuntimeWarning, match="non-finite gradient"):
+        out = optimize_gs_ad_root_implicit(H, A, cfg)
+
+    assert out[3]["converged"] is False, (
+        "a fully masked gradient has norm exactly 0.0 and fires "
+        "_converged_outer; reporting that as converged contradicts this same "
+        "loop's warning that it is not a converged optimization"
+    )
 
 
 def test_history_is_absent_by_default():
