@@ -159,9 +159,14 @@ _FILE_MARKERS = {
     # (mesh specs, commit helpers, config default) gate every PR; the heavy
     # subprocess parity sweep (N=2,4 fake CPU devices) is slow-only.
     "test_ctm_sharding.py": "core",
-    "test_showcase_scaling.py": "core",
-    "test_heisenberg_d4_chi_scaling.py": "core",
-    "test_heisenberg_d8_chi_scaling.py": "core",
+    # These three test the orchestration helpers of driver scripts under
+    # examples/, not the library: they path-load the example and exercise its
+    # argument/schedule plumbing, and are jax-free by design.  The required
+    # gate is for library behaviour, so a broken example should not block a
+    # merge -- they still run in the full suite and on push to main.
+    "test_showcase_scaling.py": "algorithm",
+    "test_heisenberg_d4_chi_scaling.py": "algorithm",
+    "test_heisenberg_d8_chi_scaling.py": "algorithm",
     "test_ctm_sharding_parity.py": "slow",
     # Chunked dense-CTM edge absorption (chunk x shard #632 Increment 1): fast
     # mechanism unit tests; collected as core so CI required checks run them.
@@ -177,7 +182,11 @@ _FILE_MARKERS = {
     # #632 frontier benchmark (phase 1): tiny D=2 CPU value_and_grad finite +
     # path-guard checks. Fast; core so CI required checks run them.
     "test_frontier_probe.py": "core",
-    "test_frontier_bench_guard.py": "core",
+    # Stays out of the gate for the same reason as the scaling drivers above:
+    # it only checks the `skip_reason` arithmetic of an examples/ benchmark
+    # script.  (test_frontier_probe.py above is NOT in this group -- it runs a
+    # real D=2 chi=6 CTM energy+gradient, so it is library behaviour.)
+    "test_frontier_bench_guard.py": "algorithm",
 }
 
 
