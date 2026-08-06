@@ -119,8 +119,16 @@ def ctm(
             env = _ctm_sweep(env, a, chi, renormalize, "eigh")
         max_iter = max_iter - warmup_steps
 
-    # Initial singular values (zeros — first iteration never converges)
-    prev_sv = jnp.zeros(min(chi, env.C1.shape[0]), dtype=env.C1.dtype)
+    # Initial singular values (zeros — first iteration never converges).
+    # Seeded with the REAL dtype, not ``env.C1.dtype``: ``body_fn`` assigns
+    # ``_dense_svd(..., compute_uv=False)``, which is always real, and
+    # ``lax.while_loop`` requires an invariant carry type.  On a complex site
+    # tensor the old seed made carry[1] complex128 going in and float64 coming
+    # out, so ``ctm()`` raised outright rather than returning a wrong answer.
+    # Real states are unaffected — there ``C1.dtype`` is already real — which
+    # is why this went unnoticed.
+    _sv_dtype = jnp.zeros((), dtype=env.C1.dtype).real.dtype
+    prev_sv = jnp.zeros(min(chi, env.C1.shape[0]), dtype=_sv_dtype)
 
     # Carry: (env, prev_sv, iteration, converged)
     init_carry = (env, prev_sv, jnp.array(0, dtype=jnp.int32), jnp.bool_(False))

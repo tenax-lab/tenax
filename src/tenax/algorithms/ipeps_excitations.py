@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ctm_tensor_energy import _normalise_rdm
 from tenax.algorithms.ipeps_config import CTMEnvironment
 from tenax.core.tensor import SymmetricTensor, Tensor
 
@@ -245,9 +246,7 @@ def _rdm2x1_with_open_tensors(
     rdm = jnp.einsum("crjst,cjruv->stuv", Lenv_ao1, Renv_ao2)
 
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    trace = jnp.trace(rdm_mat)
-    rdm_mat = rdm_mat / (trace + 1e-15)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -282,9 +281,7 @@ def _rdm1x2_with_open_tensors(
     rdm = jnp.einsum("hqistwx,hqi->stwx", site12_r, bot_row)
 
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = 0.5 * (rdm_mat + rdm_mat.conj().T)
-    trace = jnp.trace(rdm_mat)
-    rdm_mat = rdm_mat / (trace + 1e-15)
+    rdm_mat = _normalise_rdm(rdm_mat)
     return rdm_mat.reshape(d, d, d, d)
 
 
