@@ -97,7 +97,9 @@ import jax.numpy as jnp
 
 from tenax.algorithms._ad_primitives import (
     _check_root_residual_policy,
+    _gauge_consistency,
     _report_root_residual,
+    _residual_exceeds,
 )
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import (
@@ -1471,12 +1473,8 @@ def asym_root_implicit_energy_and_grad(
     y_bar_norm = float(
         jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(y_bar)))
     )
-    gauge_consistency = 0.0
-    for bar, tensor in zip(tilde_bar, tilde):
-        pairing = float(jnp.real(jnp.sum(bar * (1j * tensor))))
-        scale = y_bar_norm * float(jnp.linalg.norm(tensor)) + 1e-300
-        gauge_consistency = max(gauge_consistency, abs(pairing) / scale)
-    if gauge_consistency > 1e-8:
+    gauge_consistency = _gauge_consistency(tilde_bar, tilde, y_bar_norm)
+    if _residual_exceeds(gauge_consistency, 1e-8):
         warnings.warn(
             f"Asymmetric root implicit AD: the energy cotangent has a "
             f"{gauge_consistency:.3e} relative component along an environment "

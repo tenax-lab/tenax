@@ -89,6 +89,11 @@ _FILE_MARKERS = {
     # class of defect the required gate exists for.  Cheap: D=2, chi=4, and
     # the starved-budget cases converge in one iteration by construction.
     "test_adjoint_convergence_gate.py": "core",
+    # The root-implicit gates' fail-closed comparison (#796 / #787).  Pure
+    # unit tests on the shared predicate and the gauge_consistency reduction:
+    # no CTM, milliseconds.  They guard a defect class that has now recurred
+    # on four engines, so they belong in the required gate.
+    "test_root_implicit_nan_gates.py": "core",
     "test_ctm_tensor.py": "algorithm",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",

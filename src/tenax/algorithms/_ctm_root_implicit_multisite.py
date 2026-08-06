@@ -955,6 +955,7 @@ def cell_root_implicit_energy_and_grad(
     from tenax.algorithms._ad_primitives import (
         _check_root_residual_policy,
         _report_root_residual,
+        _residual_exceeds,
     )
     from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
     from tenax.algorithms._ctm_tensor_init import (
@@ -994,7 +995,7 @@ def cell_root_implicit_energy_and_grad(
         polish_steps=polish_steps,
         polish_tol=polish_tol,
     )
-    if root_residual > root_residual_warn:
+    if _residual_exceeds(root_residual, root_residual_warn):
         _report_root_residual(
             on_root_residual,
             f"Multisite root implicit AD: ‖F(y*)‖ = {root_residual:.3e} exceeds "

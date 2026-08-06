@@ -58,6 +58,7 @@ import jax.numpy as jnp
 from tenax.algorithms._ad_primitives import (
     _check_root_residual_policy,
     _report_root_residual,
+    _residual_exceeds,
 )
 from tenax.algorithms._ctm_tensor_c4v import _c4v_sweep, _c4v_to_full_env
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
@@ -540,7 +541,7 @@ def c4v_root_implicit_energy_and_grad(
         polish_tol=polish_tol,
     )
 
-    if root_residual > root_residual_warn:
+    if _residual_exceeds(root_residual, root_residual_warn):
         _report_root_residual(
             on_root_residual,
             f"C4v root implicit AD: ‖F(y*)‖ = {root_residual:.3e} exceeds "
