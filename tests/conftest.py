@@ -83,6 +83,12 @@ _FILE_MARKERS = {
     # The bucket guard itself (#805). Pure filesystem inspection, microseconds,
     # and it must run in the gate it protects or it protects nothing.
     "test_bucket_registry.py": "core",
+    # The adjoint-convergence gate on the DEFAULT iPEPS AD gradient path
+    # (#801, first raised on #341).  An unconverged adjoint yields a gradient
+    # that is wrong, finite, and indistinguishable downstream -- the exact
+    # class of defect the required gate exists for.  Cheap: D=2, chi=4, and
+    # the starved-budget cases converge in one iteration by construction.
+    "test_adjoint_convergence_gate.py": "core",
     "test_ctm_tensor.py": "algorithm",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",
