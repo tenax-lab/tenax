@@ -10,6 +10,7 @@ __all__ = [
 ]
 
 import logging
+import warnings
 from functools import partial
 
 import jax
@@ -38,6 +39,74 @@ from tenax.algorithms.ad_utils import CTMRGGradientError, _phase_fix_ctm_tensor
 from tenax.contraction.contractor import contract
 
 _GMRES_LOGGER = logging.getLogger("tenax.ctm.gmres")
+
+
+def _adjoint_converged(residual: float, tol: float) -> bool:
+    """Whether an adjoint solve met its tolerance.  Fails **closed**.
+
+    Written as ``residual <= tol`` rather than ``not (residual > tol)`` so that
+    a non-finite residual is reported as *not* converged.  ``nan > tol`` is
+    ``False``, so the naive spelling takes the silent branch exactly when the
+    solve has blown up — the #796 failure shape, and the reason this is a named
+    function with its own test rather than an inline comparison.
+    """
+    return bool(residual <= tol)
+
+
+def _relative_adjoint_residual(matvec, lam, rhs) -> float:
+    """``‖(I - Jᵀ)λ - b‖ / ‖b‖`` for the adjoint system, as a host float.
+
+    Costs one extra matvec per backward.  That is one VJP through a CTM sweep
+    against the ``gmres_maxiter`` (default 200) the solve itself is budgeted,
+    so it is well under a percent of the backward — cheap enough to run
+    unconditionally, which is the point: a diagnostic that has to be switched
+    on does not catch the run that needed it.
+    """
+
+    def _norm(tree) -> float:
+        return float(
+            jax.device_get(
+                jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(tree)))
+            )
+        )
+
+    resid = jax.tree.map(lambda a, b: a - b, matvec(lam), rhs)
+    b_norm = _norm(rhs)
+    return _norm(resid) / b_norm if b_norm > 0 else _norm(resid)
+
+
+def _warn_if_adjoint_unconverged(
+    matvec, lam, rhs, *, tol: float, maxiter: int, restart: int
+) -> float:
+    """Measure the adjoint residual and warn when the solve did not converge.
+
+    The solver's own status flag cannot do this job:
+    ``jax.scipy.sparse.linalg.gmres`` returns ``info = 0`` whether or not it
+    converged (measured: ``maxiter=1, restart=1`` on a 2x2 system returns
+    ``info = 0`` at residual 0.54).  Both call sites here previously bound that
+    flag and discarded it, so reading it would have looked like a fix and
+    changed nothing.  The residual is therefore measured directly.
+
+    Reports rather than raises: ``λ`` is still the best available solution, and
+    an iPEPS optimization that aborts mid-run on one bad backward is usually
+    worse for the caller than one that continues with a warned-about gradient.
+    The C4v sibling (#716) makes the same choice.
+    """
+    rel = _relative_adjoint_residual(matvec, lam, rhs)
+    if not _adjoint_converged(rel, tol):
+        warnings.warn(
+            f"Implicit-AD CTM: adjoint solve did not converge (relative "
+            f"residual {rel:.3e} > gmres_tol {tol:.1e} after gmres_maxiter="
+            f"{maxiter} iterations of a {restart}-dimensional Krylov space). "
+            "The gradient contracts a λ that does not solve "
+            "(I - Jᵀ)λ = dE/denv, so it is wrong by roughly that relative "
+            "amount and nothing downstream can tell. Raise gmres_maxiter/"
+            "gmres_restart, or loosen gmres_tol if this residual is "
+            "acceptable for your use.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return rel
 
 
 def _default_energy(site_tensors, envs, gate, coords, neighbors):
@@ -1500,6 +1569,16 @@ def _make_implicit_vjp_fn(
                     maxiter=gmres_maxiter,
                     restart=gmres_restart,
                 )
+                # ``_info`` is not a convergence flag on this solver -- see
+                # _warn_if_adjoint_unconverged.  Measure the residual instead.
+                _F3_LAST_DIAGNOSTICS["adjoint_residual"] = _warn_if_adjoint_unconverged(
+                    _eager_apply_I_minus_Jt,
+                    lam,
+                    rhs,
+                    tol=gmres_tol,
+                    maxiter=gmres_maxiter,
+                    restart=gmres_restart,
+                )
                 lam_leaves = tuple(jax.tree.leaves(lam))
                 _cached["prev_lam_leaves"] = lam_leaves
                 return _jit_chain_rule(
@@ -1539,6 +1618,16 @@ def _make_implicit_vjp_fn(
                 _eager_apply_I_minus_Jt,
                 rhs,
                 x0,
+                tol=gmres_tol,
+                maxiter=gmres_maxiter,
+                restart=gmres_restart,
+            )
+            # ``_info`` is not a convergence flag on this solver -- see
+            # _warn_if_adjoint_unconverged.  Measure the residual instead.
+            _F3_LAST_DIAGNOSTICS["adjoint_residual"] = _warn_if_adjoint_unconverged(
+                _eager_apply_I_minus_Jt,
+                lam,
+                rhs,
                 tol=gmres_tol,
                 maxiter=gmres_maxiter,
                 restart=gmres_restart,
