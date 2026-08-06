@@ -41,20 +41,39 @@ from tenax.contraction.contractor import contract
 _GMRES_LOGGER = logging.getLogger("tenax.ctm.gmres")
 
 
-def _adjoint_converged(residual: float, tol: float) -> bool:
-    """Whether an adjoint solve met its tolerance.  Fails **closed**.
+def _adjoint_converged(residual: float, b_norm: float, tol: float) -> bool:
+    """Whether an adjoint solve met **the solver's own** criterion.  Fails closed.
 
-    Written as ``residual <= tol`` rather than ``not (residual > tol)`` so that
-    a non-finite residual is reported as *not* converged.  ``nan > tol`` is
-    ``False``, so the naive spelling takes the silent branch exactly when the
-    solve has blown up — the #796 failure shape, and the reason this is a named
-    function with its own test rather than an inline comparison.
+    Two things this must get right.
+
+    *The criterion.*  ``gmres_pytree_jax`` configures JAX GMRES with
+    ``tol=tol, atol=tol``, and that solver stops at
+    ``‖r‖ <= max(tol·‖b‖, atol)``.  Gating on the relative residual alone
+    (``‖r‖/‖b‖ <= tol``) is a *stricter* test, so whenever ``‖b‖ < 1`` the
+    solver can legitimately stop above the gate and be reported as a failure.
+    ``‖b‖`` is O(1) on this path (measured 1.285 on the D=2 chi=8 fixture), so
+    that is one state away, not hypothetical — and a guard that cries wolf
+    gets ignored, which would undo the point of #801.  The comparison
+    therefore mirrors the solver exactly.
+
+    *Failing closed.*  Written as ``residual <= threshold`` rather than
+    ``not (residual > threshold)`` so a non-finite residual is reported as
+    *not* converged.  ``nan > x`` is ``False``, so the naive spelling takes the
+    silent branch exactly when the solve has blown up — the #796 failure shape,
+    and the reason this is a named function with its own test rather than an
+    inline comparison.  ``max()`` with a NaN ``b_norm`` is also handled: the
+    comparison against any threshold is ``False`` for a NaN residual.
     """
-    return bool(residual <= tol)
+    threshold = tol if not b_norm > 0 else max(tol * b_norm, tol)
+    return bool(residual <= threshold)
 
 
-def _relative_adjoint_residual(matvec, lam, rhs) -> float:
-    """``‖(I - Jᵀ)λ - b‖ / ‖b‖`` for the adjoint system, as a host float.
+def _adjoint_residual_and_rhs_norm(matvec, lam, rhs) -> tuple[float, float]:
+    """``(‖(I - Jᵀ)λ - b‖, ‖b‖)`` for the adjoint system, as host floats.
+
+    Both are needed: the gate compares against the solver's combined
+    ``max(tol·‖b‖, atol)`` threshold, and the warning quotes the *relative*
+    residual because that is the number a caller can interpret.
 
     Costs one extra matvec per backward.  That is one VJP through a CTM sweep
     against the ``gmres_maxiter`` (default 200) the solve itself is budgeted,
@@ -71,8 +90,7 @@ def _relative_adjoint_residual(matvec, lam, rhs) -> float:
         )
 
     resid = jax.tree.map(lambda a, b: a - b, matvec(lam), rhs)
-    b_norm = _norm(rhs)
-    return _norm(resid) / b_norm if b_norm > 0 else _norm(resid)
+    return _norm(resid), _norm(rhs)
 
 
 def _warn_if_adjoint_unconverged(
@@ -92,8 +110,9 @@ def _warn_if_adjoint_unconverged(
     worse for the caller than one that continues with a warned-about gradient.
     The C4v sibling (#716) makes the same choice.
     """
-    rel = _relative_adjoint_residual(matvec, lam, rhs)
-    if not _adjoint_converged(rel, tol):
+    abs_resid, b_norm = _adjoint_residual_and_rhs_norm(matvec, lam, rhs)
+    rel = abs_resid / b_norm if b_norm > 0 else abs_resid
+    if not _adjoint_converged(abs_resid, b_norm, tol):
         warnings.warn(
             f"Implicit-AD CTM: adjoint solve did not converge (relative "
             f"residual {rel:.3e} > gmres_tol {tol:.1e} after gmres_maxiter="
@@ -1394,6 +1413,15 @@ def _make_implicit_vjp_fn(
         per distinct chi value visited (#516 chi-lock).
         """
         params_data_tuple, env_leaves, chi_post = residuals
+
+        # ``adjoint_residual`` is written only where an eager solve actually
+        # runs.  Clear it first so a fused fixed-point backward that never
+        # reaches one cannot leave the *previous* call's residual sitting in
+        # the diagnostics next to this call's ``converged=True`` -- a consumer
+        # reading them together would attribute a failed solve to a healthy
+        # one.  Absent means "no eager solve this backward", which is the
+        # honest report.
+        _F3_LAST_DIAGNOSTICS.pop("adjoint_residual", None)
 
         # Defense-in-depth: a malformed final_chi from a future
         # _run_ctm_loop_with_bump regression would silently corrupt the
