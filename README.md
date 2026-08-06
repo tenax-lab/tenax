@@ -427,6 +427,31 @@ config_reference = iPEPSConfig(
 )
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config_reference)
 
+# Root implicit AD (Burgelman et al. arXiv:2607.15030), dense 1x1 only.
+# Drives the characteristic equations instead of back-propagating the CTM
+# sweep, so no SVD/eigh backward appears in the gradient path.
+config_root = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(
+        chi=6,
+        max_iter=100,
+        conv_tol=1e-10,
+        ctm_ad_mode="root_implicit",
+        # Relative clamp on the retained CTM spectrum. None (the default) uses
+        # the derived eps**(1/3): the covariant equations depend on S cubically,
+        # so a retained direction below that cannot be resolved in working
+        # precision and would produce NaN gradients. Raise it only to diagnose
+        # a state whose environment is rank-deficient -- clamping past the
+        # genuinely-weighted directions breaks the equations rather than
+        # regularising them, which the root-residual gate then rejects.
+        rel_floor=None,
+    ),
+    unit_cell="1x1",
+    gs_num_steps=20,
+    gs_optimizer="adam",
+)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config_root)
+
 # Quasiparticle excitations (Ponsioen et al. 2022)
 momenta = make_momentum_path("brillouin", num_points=20)
 exc_config = ExcitationConfig(num_excitations=3)

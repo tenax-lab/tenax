@@ -16,6 +16,8 @@ from __future__ import annotations
 import dataclasses
 import math
 
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from tenax.algorithms.ipeps_ad_policy import use_root_implicit_path
@@ -48,6 +50,17 @@ def test_valid_ctm_ad_modes_are_accepted(mode):
 def test_unknown_ctm_ad_mode_still_rejected():
     with pytest.raises(ValueError, match="ctm_ad_mode must be one of"):
         iPEPSConfig(max_bond_dim=2, ctm=CTMConfig(chi=4, ctm_ad_mode="root"))
+
+
+def test_ctm_config_carries_the_rank_clamp():
+    assert CTMConfig(chi=6).rel_floor is None
+
+
+def test_ctm_config_rejects_a_nonsensical_rank_clamp():
+    with pytest.raises(ValueError, match="rel_floor"):
+        CTMConfig(chi=6, rel_floor=0.0)
+    with pytest.raises(ValueError, match="rel_floor"):
+        CTMConfig(chi=6, rel_floor=1.5)
 
 
 @pytest.mark.parametrize(
@@ -182,6 +195,80 @@ def test_symmetric_variant_is_refused_and_cites_its_blocker():
 
 
 # ------------------------------------------------------------------ #
+# rel_floor forwarding + the NaN-gradient warnings (#772 Task 4)       #
+# ------------------------------------------------------------------ #
+
+
+def test_rel_floor_forwards_and_nonfinite_grads_warn(monkeypatch):
+    """Pins the ``rel_floor=ctm_cfg.rel_floor`` forwarding and both new
+    warnings that replaced the old silent NaN-gradient mask.
+
+    ``asym_root_implicit_energy_and_grad`` is imported *inside* the body of
+    ``optimize_gs_ad_root_implicit``, so monkeypatching it on
+    ``ipeps_optimize_root_implicit`` itself would do nothing -- the import
+    statement rebinds the name from its *source* module,
+    ``tenax.algorithms._ctm_root_implicit_asym``, at call time.  Patching
+    there is what actually takes effect.
+
+    The stub records the ``rel_floor`` it was called with and returns
+    deliberately non-finite gradients, so a single ``gs_num_steps=1`` run
+    exercises the per-step warning and the end-of-run summary without paying
+    for a real root-implicit CTM solve (the point of stubbing it out).
+    """
+    import tenax.algorithms._ctm_root_implicit_asym as asym_mod
+    from tenax.algorithms.ipeps_optimize_root_implicit import (
+        optimize_gs_ad_root_implicit,
+    )
+
+    captured = {}
+
+    def _stub_energy_and_grad(A, gate, *, rel_floor, **kwargs):
+        captured["rel_floor"] = rel_floor
+        data = A.todense()
+        return jnp.asarray(-0.5 + 0.0j), jnp.full_like(data, jnp.nan)
+
+    monkeypatch.setattr(
+        asym_mod, "asym_root_implicit_energy_and_grad", _stub_energy_and_grad
+    )
+
+    D, d = 2, 2
+    rng = np.random.RandomState(0)
+    A_init = jnp.asarray(rng.standard_normal((D, D, D, D, d)))
+    gate = jnp.eye(d * d, dtype=jnp.float64).reshape(d, d, d, d)
+
+    cfg = iPEPSConfig(
+        max_bond_dim=D,
+        unit_cell="1x1",
+        gs_num_steps=1,
+        gs_optimizer="adam",
+        gs_learning_rate=1e-2,
+        gs_conv_criterion="grad_norm",
+        ctm=CTMConfig(
+            chi=4,
+            max_iter=5,
+            conv_tol=1e-10,
+            ctm_ad_mode="root_implicit",
+            rel_floor=1e-5,
+        ),
+    )
+
+    with pytest.warns(RuntimeWarning) as record:
+        optimize_gs_ad_root_implicit(gate, A_init, cfg)
+
+    assert captured["rel_floor"] == 1e-5, "rel_floor was not forwarded"
+
+    messages = [str(w.message) for w in record]
+    assert any("non-finite gradient entries" in m for m in messages), messages
+    assert any("had a non-finite gradient" in m for m in messages), messages
+    # A fully-masked step is the only kind that is genuinely a no-op, and the
+    # end-of-run summary has to say which kind it saw rather than calling every
+    # masked step no progress -- a partly-masked step still moves the state.
+    summary = next(m for m in messages if "had a non-finite gradient" in m)
+    assert "fully masked" in summary and "partly masked" in summary, summary
+
+
+# ------------------------------------------------------------------ #
+# The gap that blocks production use (#772)                            #
 # The production case: an optimizer running through the path (#715)    #
 # ------------------------------------------------------------------ #
 
@@ -224,9 +311,15 @@ def test_production_heisenberg_run_through_optimize_gs_ad():
         gs_metric_precond=False,
         ctm=CTMConfig(chi=6, max_iter=100, conv_tol=1e-10, ctm_ad_mode="root_implicit"),
     )
-    _A, _env, E = optimize_gs_ad(gate, None, cfg)
 
+    # Pre-optimization energy of the same starting tensor on the same CTM path.
+    _A0, _env0, E_start = optimize_gs_ad(
+        gate, None, dataclasses.replace(cfg, gs_num_steps=0)
+    )
+
+    _A, _env, E = optimize_gs_ad(gate, None, cfg)
     assert math.isfinite(E), E
+    assert E < E_start, f"no descent: {E!r} did not improve on {E_start!r}"
     # The simple-update start sits at -0.48198 at this chi; three Adam steps
     # reach -0.5066.  Requiring a clear improvement rather than the exact value
     # keeps the test about the optimizer working, not about its schedule.

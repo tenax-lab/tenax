@@ -8,6 +8,7 @@ P1 is barred -> conj data, P2 is not). Dense path only. See the gate findings
 docs/superpowers/handoffs/2026-06-30-chunk-shard-ctm-move-findings.md (#632 gate,
 STRONG GO).
 """
+
 from __future__ import annotations
 
 import jax.numpy as jnp
@@ -23,14 +24,16 @@ def _chunked_T_new_left(T4, a, P1, P2, chi, D2, batch):
     Returns T_new (chi_new, r2, chi_new_r).
     """
     assert batch >= 1, f"batch must be >= 1, got {batch}"
-    P1r = P1.reshape(chi, D2, -1)                       # (t4_d, u2, chi_new)
+    P1r = P1.reshape(chi, D2, -1)  # (t4_d, u2, chi_new)
 
     def per_i(args):
-        T4_i, P1_i = args                               # (l2, t4_u), (u2, chi_new)
-        T4a_i = jnp.einsum("jk,lmjn->klmn", T4_i, a)    # (t4_u, u2, d2, r2)
-        Tg_i = T4a_i.transpose(1, 0, 2, 3).reshape(D2, chi * D2, D2)  # (u2, (t4_u,d2), r2)
-        step = jnp.tensordot(P1_i.conj(), Tg_i, axes=([0], [0]))      # (chi_new, fr, r2)
-        return jnp.tensordot(step, P2, axes=([1], [0]))              # (chi_new, r2, chi_new_r)
+        T4_i, P1_i = args  # (l2, t4_u), (u2, chi_new)
+        T4a_i = jnp.einsum("jk,lmjn->klmn", T4_i, a)  # (t4_u, u2, d2, r2)
+        Tg_i = T4a_i.transpose(1, 0, 2, 3).reshape(
+            D2, chi * D2, D2
+        )  # (u2, (t4_u,d2), r2)
+        step = jnp.tensordot(P1_i.conj(), Tg_i, axes=([0], [0]))  # (chi_new, fr, r2)
+        return jnp.tensordot(step, P2, axes=([1], [0]))  # (chi_new, r2, chi_new_r)
 
     return lax.map(per_i, (T4, P1r), batch_size=batch).sum(0)
 
@@ -41,12 +44,14 @@ def _chunked_T_new_right(T2, a, P1, P2, chi, D2, batch):
     Returns T_new (chi_new, l2, chi_new_r).
     """
     assert batch >= 1, f"batch must be >= 1, got {batch}"
-    P1r = P1.reshape(chi, D2, -1)                       # (t2_u, u2, chi_new)
+    P1r = P1.reshape(chi, D2, -1)  # (t2_u, u2, chi_new)
 
     def per_i(args):
-        T2_i, P1_i = args                               # (r2, t2_d), (u2, chi_new)
-        T2a_i = jnp.einsum("jk,lmnj->klmn", T2_i, a)    # (t2_d, u2, d2, l2)
-        Tg_i = T2a_i.transpose(1, 0, 2, 3).reshape(D2, chi * D2, D2)  # (u2, (t2_d,d2), l2)
+        T2_i, P1_i = args  # (r2, t2_d), (u2, chi_new)
+        T2a_i = jnp.einsum("jk,lmnj->klmn", T2_i, a)  # (t2_d, u2, d2, l2)
+        Tg_i = T2a_i.transpose(1, 0, 2, 3).reshape(
+            D2, chi * D2, D2
+        )  # (u2, (t2_d,d2), l2)
         step = jnp.tensordot(P1_i.conj(), Tg_i, axes=([0], [0]))
         return jnp.tensordot(step, P2, axes=([1], [0]))
 
@@ -59,15 +64,17 @@ def _chunked_T_new_top(T1, a, P1, P2, chi, D2, batch):
     Returns T_new (chi_new, d2, chi_new_r).
     """
     assert batch >= 1, f"batch must be >= 1, got {batch}"
-    P1r = P1.reshape(chi, D2, -1)                       # (t1_l, l2, chi_new)
+    P1r = P1.reshape(chi, D2, -1)  # (t1_l, l2, chi_new)
 
     def per_i(args):
-        T1_i, P1_i = args                               # (u2, t1_r), (l2, chi_new)
-        T1a_i = jnp.einsum("jk,jlmn->klmn", T1_i, a)    # (t1_r, d2, l2, r2)
+        T1_i, P1_i = args  # (u2, t1_r), (l2, chi_new)
+        T1a_i = jnp.einsum("jk,jlmn->klmn", T1_i, a)  # (t1_r, d2, l2, r2)
         # need (fl_D2=l2, fr=(t1_r,r2), surv=d2): order axes (l2, t1_r, r2, d2)
-        Tg_i = T1a_i.transpose(2, 0, 3, 1).reshape(D2, chi * D2, D2)  # (l2, (t1_r,r2), d2)
-        step = jnp.tensordot(P1_i.conj(), Tg_i, axes=([0], [0]))      # (chi_new, fr, d2)
-        return jnp.tensordot(step, P2, axes=([1], [0]))              # (chi_new, d2, chi_new_r)
+        Tg_i = T1a_i.transpose(2, 0, 3, 1).reshape(
+            D2, chi * D2, D2
+        )  # (l2, (t1_r,r2), d2)
+        step = jnp.tensordot(P1_i.conj(), Tg_i, axes=([0], [0]))  # (chi_new, fr, d2)
+        return jnp.tensordot(step, P2, axes=([1], [0]))  # (chi_new, d2, chi_new_r)
 
     return lax.map(per_i, (T1, P1r), batch_size=batch).sum(0)
 
@@ -78,15 +85,17 @@ def _chunked_T_new_bottom(T3, a, P1, P2, chi, D2, batch):
     Returns T_new (chi_new, u2, chi_new_r).
     """
     assert batch >= 1, f"batch must be >= 1, got {batch}"
-    P1r = P1.reshape(chi, D2, -1)                       # (t3_r, l2, chi_new)
+    P1r = P1.reshape(chi, D2, -1)  # (t3_r, l2, chi_new)
 
     def per_i(args):
-        T3_i, P1_i = args                               # (d2, t3_l), (l2, chi_new)
-        T3a_i = jnp.einsum("jk,ljmn->klmn", T3_i, a)    # (t3_l, u2, l2, r2)
+        T3_i, P1_i = args  # (d2, t3_l), (l2, chi_new)
+        T3a_i = jnp.einsum("jk,ljmn->klmn", T3_i, a)  # (t3_l, u2, l2, r2)
         # need (fl_D2=l2, fr=(t3_l,r2), surv=u2): order axes (l2, t3_l, r2, u2)
-        Tg_i = T3a_i.transpose(2, 0, 3, 1).reshape(D2, chi * D2, D2)  # (l2, (t3_l,r2), u2)
-        step = jnp.tensordot(P1_i.conj(), Tg_i, axes=([0], [0]))      # (chi_new, fr, u2)
-        return jnp.tensordot(step, P2, axes=([1], [0]))              # (chi_new, u2, chi_new_r)
+        Tg_i = T3a_i.transpose(2, 0, 3, 1).reshape(
+            D2, chi * D2, D2
+        )  # (l2, (t3_l,r2), u2)
+        step = jnp.tensordot(P1_i.conj(), Tg_i, axes=([0], [0]))  # (chi_new, fr, u2)
+        return jnp.tensordot(step, P2, axes=([1], [0]))  # (chi_new, u2, chi_new_r)
 
     return lax.map(per_i, (T3, P1r), batch_size=batch).sum(0)
 

@@ -63,7 +63,7 @@ _FILE_MARKERS = {
     "test_ctm_collapse_detector.py": "core",
     # Root-implicit AD wiring (#715): dispatch + guard surface only, no
     # CTM convergence, so it is milliseconds.  The production-run case it
-    # also carries is explicitly @slow + xfail (#772).
+    # also carries is explicitly @slow (#772).
     "test_root_implicit_wiring.py": "core",
     # Environment-phase (gauge) invariance of the RDM builders (#748, follow-up
     # to #725/#742).  Cheap -- one module-scoped D=2 simple-update state per

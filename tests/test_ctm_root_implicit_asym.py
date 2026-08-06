@@ -8,6 +8,8 @@ are all verified here.  Two of these tests are the ones that closed #718 —
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -25,6 +27,7 @@ from tenax.algorithms._ctm_tensor_init import (
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
+from tests._su_fixtures import PHYSICAL_SU_D2_E_SU, physical_su_d2
 
 
 def _site_tensor(D=2, d=2, seed=42, eps=1.0):
@@ -1352,6 +1355,469 @@ def test_all_projectors_reports_a_rank_below_chi_on_a_flat_cut():
         diag = jnp.abs(jnp.diag(S_keep))
         # every retained value is strictly positive and no larger than the max
         assert bool(jnp.all(diag > 0))
+
+
+def test_rel_floor_reaches_the_projectors():
+    """#778 exposed rel_floor on _rank_capped_spectrum but no caller can pass it."""
+    A = _site_tensor(D=2)
+    env, a = M._init_env(A, 4)
+    projs = M.all_projectors(env, a, 4, rel_floor=1e-2)
+    for _pt, _pb, _U, S_keep, _Vh, _rank in projs:
+        d = np.abs(np.diag(np.asarray(S_keep)))
+        assert d.min() / d.max() >= 1e-2 * (1 - 1e-9)
+
+
+def test_rel_floor_reaches_both_the_forward_and_the_root_paths():
+    """converge and asym_root_parametrize build projectors independently.
+
+    If only one honours the knob, y* is not a root of the environment it was
+    extracted from and the root residual is meaningless.
+    """
+    A = _site_tensor(D=2)
+    env, a, _meta, projs = M.converge(
+        A, 4, max_iter=60, conv_tol=1e-12, return_projectors=True, rel_floor=1e-2
+    )
+    root, _resid = M.asym_root_parametrize(env, a, 4, prev_projs=projs, rel_floor=1e-2)
+    for S in root.s:
+        d = np.abs(np.diag(np.asarray(S)))
+        assert d.min() / d.max() >= 1e-2 * (1 - 1e-9)
+
+
+def test_usable_rank_is_reported_not_discarded():
+    """#778 computes usable_rank and drops it on the floor at all_projectors."""
+    A = _site_tensor(D=2)
+    env, a = M._init_env(A, 4)
+    rep = M.retained_rank_report(env, a, 4)
+    assert rep["usable_rank"] == 4
+    assert rep["retained_smin_rtol"] > 1e-5
+
+
+# --- #772: the physical-state fixture ---------------------------------------
+#
+# #778's tests use random tensors and unit-test the clamp function directly,
+# which is the same gap that let #772 reach the wiring stage undetected: the
+# random ``_site_tensor`` fixture never gets near a rank-poor environment.
+
+
+@pytest.mark.parametrize("chi", [4, 6, 8])
+def test_the_physical_state_exhausts_its_usable_rank(chi):
+    """The fixture's whole point: a real state whose environment is rank-poor.
+
+    The random tensor the rest of this file uses never gets near the clamp,
+    which is why #772 reached the wiring stage undetected.
+    """
+    A = physical_su_d2()
+    env, a, _meta, _projs = M.converge(
+        A, chi, max_iter=100, conv_tol=1e-11, return_projectors=True
+    )
+    rep = M.retained_rank_report(env, a, chi)
+    assert rep["usable_rank"] < chi
+    assert rep["retained_smin_rtol"] < 1e-7
+
+
+@pytest.mark.parametrize("chi", [4, 6, 8])
+def test_the_random_fixture_keeps_its_full_rank(chi):
+    """The contrast that hid the bug."""
+    A = _site_tensor(D=2)
+    env, a, _meta, _projs = M.converge(
+        A, chi, max_iter=100, conv_tol=1e-11, return_projectors=True
+    )
+    rep = M.retained_rank_report(env, a, chi)
+    assert rep["usable_rank"] == chi
+    assert rep["retained_smin_rtol"] > 1e-5
+
+
+@pytest.mark.slow
+def test_the_frozen_fixture_still_matches_simple_update():
+    """The frozen literal must stay the state it claims to be.
+
+    Compares *physically*: a simple-update tensor is defined only up to a bond
+    gauge, so an element-wise diff would be wrong even when nothing drifted.
+    """
+    import importlib.util
+    import pathlib
+
+    script_path = (
+        pathlib.Path(__file__).resolve().parent.parent / "scripts" / "gen_su_fixture.py"
+    )
+    spec = importlib.util.spec_from_file_location("gen_su_fixture", script_path)
+    gen_su_fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen_su_fixture)
+    build = gen_su_fixture.build
+
+    E_live, A_live = build()
+    assert E_live == pytest.approx(PHYSICAL_SU_D2_E_SU, abs=1e-6)
+    env_l, a_l, _m, _p = M.converge(
+        A_live, 4, max_iter=100, conv_tol=1e-11, return_projectors=True
+    )
+    env_f, a_f, _m, _p = M.converge(
+        physical_su_d2(), 4, max_iter=100, conv_tol=1e-11, return_projectors=True
+    )
+    live = M.retained_rank_report(env_l, a_l, 4)["retained_smin_rtol"]
+    frozen = M.retained_rank_report(env_f, a_f, 4)["retained_smin_rtol"]
+    assert live == pytest.approx(frozen, rel=1e-3)
+
+
+@pytest.mark.parametrize("chi", [4, 6, 8, 12])
+def test_the_default_gate_admits_a_healthy_clamped_state(chi):
+    """#772: the gate rejected the state the clamp had just made healthy."""
+    A = physical_su_d2()
+    _E, _g, d = M.asym_root_implicit_energy_and_grad(
+        A,
+        _gate(),
+        chi=chi,
+        max_iter=300,
+        conv_tol=1e-13,
+        return_diagnostics=True,
+        on_root_residual="raise",
+    )
+    assert np.all(np.isfinite(np.asarray(_g)))
+
+
+def _resid_tol(rel_floor=None, dtype=jnp.float64, *, base=1e-6, chi=4, rank=3):
+    """The production gate at one clamped direction, unless told otherwise."""
+    return M._root_residual_tolerance(base, rank, chi, dtype, rel_floor=rel_floor)
+
+
+def test_the_gate_tightens_back_when_the_clamp_is_lowered():
+    """The threshold is tied to the clamp, not a loosened constant.
+
+    A caller running an unclamped spectrum should still get the 1e-6 gate,
+    where residuals genuinely are ~1e-13.  Above the calibrated band the tie is
+    deliberately cut: see ``test_the_gate_is_capped_so_it_cannot_track_its_own
+    _abuse``.
+    """
+    # One clamped direction at the derived float64 clamp: 8 * 6.0555e-06.
+    assert _resid_tol(None) == pytest.approx(4.8444e-05, rel=1e-3)
+    # Drive the clamp far below the base tolerance and the base wins outright.
+    assert _resid_tol(1e-12) == 1e-6
+    # 8 * 1e-2 would be 8e-2; the ceiling holds it at 1e-3.
+    assert _resid_tol(1e-2) == 1e-3
+    # The tie is live everywhere between: monotone, and strictly proportional
+    # right up to where the base floor and the ceiling bind.
+    assert _resid_tol(1e-5) == pytest.approx(8e-5)
+    assert _resid_tol(1e-4) == pytest.approx(8e-4)
+    # ...and it grows in quadrature with the *number* of clamped directions,
+    # which the flat-constant form could not express at all.
+    assert _resid_tol(None, chi=6, rank=3) == pytest.approx(
+        4.8444e-05 * 3**0.5, rel=1e-3
+    )
+
+
+def test_the_gate_is_capped_so_it_cannot_track_its_own_abuse():
+    """A gate proportional to the clamp cannot detect an over-raised clamp.
+
+    Over-clamping damages the equations by O(``rel_floor``), so an uncapped
+    ``100 * rel_floor`` grows exactly as fast as the damage and is structurally
+    incapable of firing.  ``CTMConfig`` accepts any ``rel_floor`` in ``(0, 1)``,
+    so that regime is inside the supported range: at ``rel_floor=0.99`` the
+    uncapped gate was 99.0, which admits literally everything.
+
+    The ceiling has to clear the calibrated default and still reject both
+    failures the suite pins.
+    """
+    assert _resid_tol(0.99) == 1e-3
+    assert _resid_tol(0.5) == 1e-3
+    # Clears the calibrated default, so nothing about the default path moves...
+    assert _resid_tol(None) < 1e-3
+    # ...even at the widest clamp count a production chi reaches.
+    assert _resid_tol(None, chi=24, rank=3) < 1e-3
+    # ...and still sits below both failures the suite pins: the measured
+    # over-clamp (covariant 3.09e-02 at rel_floor=1e-2, chi=4), which the
+    # uncapped floor of 8e-2 would have admitted, and the unpolished root
+    # (5.30e-03).
+    assert _resid_tol(1e-2) < 3.09e-02
+    assert _resid_tol(None) < 5.30e-03
+    # The ceiling caps only the *derived* relaxation. An explicit base tolerance
+    # is the caller's business and must survive it.
+    assert _resid_tol(0.99, base=1e-2) == 1e-2
+
+
+def test_the_gate_and_the_clamp_share_one_definition():
+    """The gate must be derived from the clamp, not from a copy of it.
+
+    ``_rank_capped_spectrum`` takes its default clamp from the *spectrum's*
+    dtype; :func:`_root_residual_tolerance` has to follow the same
+    definition or the two disagree the moment the working precision is not
+    ``float64``.  In ``float32`` the clamp is 4.92e-03 -- 812x the ``float64``
+    value -- so a gate frozen at 6.06e-04 would sit an order of magnitude below
+    the inconsistency the clamp itself introduces, which is #772 again with the
+    numbers scaled up.  ``tenax.__init__`` forces x64 globally, but a
+    caller-supplied ``float32`` ``DenseTensor`` stays ``float32`` under x64,
+    so this is reachable rather than hypothetical.
+    """
+    assert M._derived_rel_floor(jnp.float64) == pytest.approx(6.0555e-06, rel=1e-3)
+    assert M._derived_rel_floor(jnp.float32) == pytest.approx(4.9215e-03, rel=1e-3)
+    # Complex reports its component float's eps, which is the precision the
+    # (always real) singular spectrum is resolved to.
+    assert M._derived_rel_floor(jnp.complex128) == M._derived_rel_floor(jnp.float64)
+
+    # The clamp side: a float32 spectrum floors at the float32 value.
+    s32 = jnp.asarray([1.0, 1e-2, 1e-9], dtype=jnp.float32)
+    capped, rank = M._rank_capped_spectrum(s32, 3)
+    assert float(capped[-1]) == pytest.approx(
+        M._derived_rel_floor(jnp.float32), rel=1e-5
+    )
+    assert int(rank) == 2
+
+    # The gate side, from the same helper.  float64 is unchanged -- the whole
+    # point is that nothing about the calibrated path moves.
+    assert _resid_tol(None, jnp.float64) == pytest.approx(4.8444e-05, rel=1e-3)
+    # float32 is where the two definitions would diverge, and the derived gate
+    # follows the clamp there without a ceiling: 4.92e-03 is what the
+    # arithmetic costs, so the residual it induces is honest rather than
+    # self-inflicted, and capping it would reject every float32 state on
+    # principle.  The ceiling is reserved for a clamp raised *past* what
+    # precision requires -- see
+    # ``test_the_gate_is_capped_so_it_cannot_track_its_own_abuse``.
+    assert M._CLAMPED_RESIDUAL_FACTOR * M._derived_rel_floor(jnp.float32) > 1e-3
+    assert _resid_tol(None, jnp.float32) == pytest.approx(3.9372e-02, rel=1e-3)
+    assert _resid_tol(None, jnp.float32) > _resid_tol(None, jnp.float64)
+    # An explicit rel_floor still wins outright, dtype or no dtype.
+    assert _resid_tol(1e-12, jnp.float32) == 1e-6
+
+
+def test_the_gate_still_rejects_a_genuinely_broken_root():
+    """Recalibrated, not disabled: the pre-#778 failure was 1.9e-02.
+
+    This is the *tight* branch, and it is now reached twice over.  Measured on
+    this config: ``usable_rank == 6 == chi``, so at ``rel_floor=1e-12`` nothing
+    is clamped and the full-rank branch pins the gate at 1e-6 without consulting
+    the clamped branch at all; that branch would independently return
+    ``max(1e-6, 8 * 1e-12 * sqrt(n)) = 1e-6`` anyway.  Valuable on its own -- an
+    unclamped spectrum must still be held to the pre-#772 threshold -- but it
+    says nothing about the relaxed default, which
+    ``test_the_default_gate_still_rejects_a_genuinely_broken_root`` covers.
+    """
+    from tenax.algorithms._ad_primitives import RootResidualError
+
+    A = physical_su_d2()
+    with pytest.raises(RootResidualError) as excinfo:
+        M.asym_root_implicit_energy_and_grad(
+            A,
+            _gate(),
+            chi=6,
+            max_iter=300,
+            conv_tol=1e-13,
+            rel_floor=1e-12,
+            on_root_residual="raise",
+        )
+    assert excinfo.value.tolerance == 1e-6
+    assert excinfo.value.residual > excinfo.value.tolerance
+
+
+def test_the_default_gate_still_rejects_a_genuinely_broken_root():
+    """The relaxed 6.06e-04 gate has to still be a guard, not decoration.
+
+    Relaxing a guard is only safe if something proves the relaxed guard still
+    fires, and no other test does: every rejection case in this file runs at
+    ``rel_floor=1e-12``, where the gate collapses back to the old 1e-6 branch.
+    Here the *default* clamp is in force and it binds -- measured
+    ``usable_rank == 3`` against ``chi=6`` on this deliberately-unconverged
+    config, so the gate takes the relaxed branch and the ``6.06e-04`` threshold
+    is the one doing the rejecting, which is what ``excinfo.value.tolerance``
+    pins.  (Had the rank come out full, the gate would be 1e-6 and this test
+    would prove something weaker; it does not, so it does not.)
+
+    Broken honestly rather than by handing the entry point an impossible
+    tolerance (the ``root_residual_warn=0.0`` idiom the multisite suite uses
+    would exercise the plumbing, not the calibration).  One sweep from the
+    near-identity initialiser is nowhere near the CTM fixed point, and with the
+    polish loop cut to a single pass ``y*`` is read straight off it instead of
+    being iterated onto a root.  Measured ``‖F(y*)‖ = 5.3e-03``, 8.7x above the
+    gate; the polish loop is what closes that, and at ``polish_steps=40`` the
+    same state lands at 2.8e-06 and is admitted.
+    """
+    from tenax.algorithms._ad_primitives import RootResidualError
+
+    with pytest.raises(RootResidualError) as excinfo:
+        M.asym_root_implicit_energy_and_grad(
+            physical_su_d2(),
+            _gate(),
+            chi=6,
+            max_iter=1,
+            min_iter=1,
+            polish_steps=1,
+            on_root_residual="raise",
+        )
+    # chi=6 against usable_rank=3: 8 * 6.0555e-06 * sqrt(3).
+    assert excinfo.value.tolerance == pytest.approx(8.3907e-05, rel=1e-3)
+    assert excinfo.value.residual > excinfo.value.tolerance
+
+
+def test_the_relaxed_gate_applies_only_where_the_clamp_bound(monkeypatch):
+    """The relaxation is licensed by the clamp, so it needs the clamp to bind.
+
+    The relaxation in :func:`_root_residual_tolerance` is justified by the O(``rel_floor``)
+    inconsistency clamping introduces.  A state whose retained spectrum sits
+    entirely above the clamp has no such inconsistency -- nothing was floored --
+    and measurably meets the tight guard, so resolving the gate unconditionally
+    would have widened it 600x for every well-conditioned state in the library
+    in exchange for nothing.
+
+    The two fixtures in this file are exactly the contrast: the random tensor
+    keeps its full rank, the frozen simple-update state does not.  The spy pins
+    which branch each one takes, and the two ``covariant_residual`` assertions
+    show the branch is load-bearing rather than cosmetic -- the clamped state's
+    residual is above the tight threshold the full-rank state clears.
+    """
+    calls = []
+    real = M._root_residual_tolerance
+
+    def _spy(base_tol, usable_rank, chi, dtype, *, rel_floor=None):
+        value = real(base_tol, usable_rank, chi, dtype, rel_floor=rel_floor)
+        calls.append((int(usable_rank), int(chi), value))
+        return value
+
+    monkeypatch.setattr(M, "_root_residual_tolerance", _spy)
+
+    _E, _g, d_full = M.asym_root_implicit_energy_and_grad(
+        _site_tensor(D=2),
+        _gate(),
+        chi=4,
+        max_iter=300,
+        conv_tol=1e-13,
+        return_diagnostics=True,
+        on_root_residual="raise",
+    )
+    assert d_full["usable_rank"] == 4
+    # The gate is always consulted; what must not happen is a *relaxation*.  A
+    # full-rank cut has to come back at the base tolerance, untouched.
+    assert calls == [(4, 4, 1e-6)], (
+        "the gate was relaxed for a state that never clamped"
+    )
+    # Not raising already proves it met 1e-6; state it, so a regression that
+    # loosens the branch cannot hide behind a residual that grew with it.
+    assert d_full["covariant_residual"] < 1e-6
+
+    with pytest.warns(RuntimeWarning, match="usable environment rank"):
+        _E, _g, d_clamped = M.asym_root_implicit_energy_and_grad(
+            physical_su_d2(),
+            _gate(),
+            chi=4,
+            max_iter=300,
+            conv_tol=1e-13,
+            return_diagnostics=True,
+            on_root_residual="raise",
+        )
+    assert d_clamped["usable_rank"] == 3
+    assert calls[-1][:2] == (3, 4)
+    assert calls[-1][2] == pytest.approx(4.8444e-05, rel=1e-3)
+    assert d_clamped["covariant_residual"] > 1e-6
+
+
+def test_an_over_raised_clamp_raises_instead_of_a_silently_wrong_gradient():
+    """The regression test for the gate that could not fire on its own abuse.
+
+    Before the 1e-3 ceiling this exact call *succeeded*: ``rel_floor=1e-2``
+    drove ``usable_rank`` to 1, gave ``‖F(y*)‖ = 4.66e-03`` and a covariant
+    residual of 3.09e-02, and the derived gate came out at 1.0 -- so both gates
+    passed and the caller got a gradient 2.52e-01 relative away from the
+    ``rel_floor=None`` one, while the rank warning told them it was sound.
+
+    Now the gate is capped below both residuals and the forward one trips first.
+    ``CTMConfig`` accepts ``rel_floor=1e-2``, so this is a reachable
+    configuration, not a contrived one.
+    """
+    from tenax.algorithms._ad_primitives import RootResidualError
+
+    with pytest.raises(RootResidualError) as excinfo:
+        M.asym_root_implicit_energy_and_grad(
+            physical_su_d2(),
+            _gate(),
+            chi=4,
+            max_iter=300,
+            conv_tol=1e-13,
+            rel_floor=1e-2,
+            on_root_residual="raise",
+        )
+    assert excinfo.value.tolerance == 1e-3
+    assert excinfo.value.residual > excinfo.value.tolerance
+
+
+def test_an_explicit_gate_can_only_loosen_the_rank_conditional():
+    """``root_residual_warn`` is a *base*: it loosens, it cannot tighten.
+
+    This is the #779 contract, and it is deliberate.  Once the clamp fires it
+    imposes an intrinsic floor on the residual that no amount of polishing
+    removes, so a gate below that floor is not a stricter test -- it is one no
+    state can ever pass, and it would reject unconditionally instead of
+    detecting anything.  :func:`_root_residual_tolerance` therefore returns
+    ``max(base_tol, derived_floor)``.
+
+    Pinned in both directions on the *same* frozen fixture, which at chi=4 sits
+    at 8.49e-06 covariant against a derived floor of 4.84e-05:
+
+    * ``1e-2`` is above the floor, so the caller's value is what applies;
+    * ``1e-9`` is below it, so the floor applies and the state is still
+      admitted -- the tightening is refused rather than silently honoured.
+
+    ``test_the_gate_still_rejects_a_genuinely_broken_root`` covers the case
+    that matters for safety: a residual genuinely *above* the floor still
+    raises, so refusing to tighten costs no detection power.
+    """
+    kwargs = dict(chi=4, max_iter=300, conv_tol=1e-13, on_root_residual="raise")
+    with pytest.warns(RuntimeWarning, match="usable environment rank"):
+        _E, g, _d = M.asym_root_implicit_energy_and_grad(
+            physical_su_d2(),
+            _gate(),
+            root_residual_warn=1e-2,
+            return_diagnostics=True,
+            **kwargs,
+        )
+    assert np.all(np.isfinite(np.asarray(g)))
+
+    # The resolution itself, stated directly: a sub-floor request floors.
+    assert M._root_residual_tolerance(1e-9, 3, 4, jnp.complex128) == pytest.approx(
+        4.8444e-05, rel=1e-3
+    )
+    # ...and end-to-end, the run that used to raise on 1e-9 now completes.
+    with pytest.warns(RuntimeWarning, match="usable environment rank"):
+        _E, g_tight, _d = M.asym_root_implicit_energy_and_grad(
+            physical_su_d2(),
+            _gate(),
+            root_residual_warn=1e-9,
+            return_diagnostics=True,
+            **kwargs,
+        )
+    assert np.all(np.isfinite(np.asarray(g_tight)))
+
+
+def test_a_nan_residual_raises_rather_than_passing_silently(monkeypatch):
+    """The gate must not fail OPEN on a NaN residual.
+
+    ``float('nan') > x`` is ``False``, so the old ``if root_residual >
+    root_residual_warn:`` shape took the *non-reporting* branch on a NaN
+    residual and the error was never raised -- the gate failed open on
+    exactly the failure mode #772 was about.  The comparisons now read
+    ``if not (residual <= tolerance):``, which is ``True`` for NaN.
+    """
+    from tenax.algorithms._ad_primitives import RootResidualError
+
+    real_root_parametrize = M.asym_root_parametrize
+
+    def _nan_residual(*args, **kwargs):
+        out = real_root_parametrize(*args, **kwargs)
+        # #779 added an optional third element (usable_rank); preserve whatever
+        # arity the caller asked for and poison only the residual.
+        if len(out) == 3:
+            root, _residual, usable_rank = out
+            return root, float("nan"), usable_rank
+        root, _residual = out
+        return root, float("nan")
+
+    monkeypatch.setattr(M, "asym_root_parametrize", _nan_residual)
+
+    with pytest.raises(RootResidualError) as excinfo:
+        M.asym_root_implicit_energy_and_grad(
+            physical_su_d2(),
+            _gate(),
+            chi=6,
+            max_iter=300,
+            conv_tol=1e-13,
+            on_root_residual="raise",
+        )
+    assert math.isnan(excinfo.value.residual)
 
 
 # --- #779: surface the usable rank so the gate can adapt to it -------------

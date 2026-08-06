@@ -450,6 +450,27 @@ def _normalize(x: jax.Array) -> jax.Array:
     return x / (jnp.max(jnp.abs(x)) + 1e-300)
 
 
+def _derived_rel_floor(dtype) -> float:
+    """The default rank clamp for a working precision: ``eps^(1/3)``.
+
+    One definition with two callers, deliberately.  :func:`_rank_capped_spectrum`
+    *applies* the clamp and :func:`_root_residual_tolerance` sizes the
+    residual gate from it, and the two must agree: the clamp is what produces
+    the inconsistency the gate measures, so a gate derived from a different
+    precision's ``eps`` is #772 over again.  Under ``float32`` the two differ by
+    812x (4.92e-03 against 6.06e-06 in ``float64``), which would put the
+    clamp-induced residual well above a gate frozen at the ``float64`` value and
+    reject every state.  ``tenax.__init__`` forces x64 globally so this is
+    latent today, but a caller-supplied ``float32`` ``DenseTensor`` stays
+    ``float32`` under x64, so the path is reachable.
+
+    Takes anything :func:`jax.numpy.finfo` does, complex types included: it
+    reports the eps of the component float, which is the precision the (always
+    real) singular spectrum is resolved to.
+    """
+    return float(jnp.finfo(dtype).eps ** (1.0 / 3.0))
+
+
 def _rank_capped_spectrum(s: jax.Array, chi: int, *, rel_floor: float | None = None):
     """Truncate to ``chi`` and clamp the numerically-null tail (#772).
 
@@ -489,7 +510,7 @@ def _rank_capped_spectrum(s: jax.Array, chi: int, *, rel_floor: float | None = N
     """
     s_k = s[:chi]
     if rel_floor is None:
-        rel_floor = float(jnp.finfo(s_k.dtype).eps ** (1.0 / 3.0))
+        rel_floor = _derived_rel_floor(s_k.dtype)
     cut = rel_floor * s_k[0]
     usable_rank = jnp.sum(s_k > cut)
     return jnp.maximum(s_k, cut), usable_rank
@@ -531,14 +552,49 @@ def _rank_capped_spectrum(s: jax.Array, chi: int, *, rel_floor: float | None = N
 # noise).
 _CLAMPED_RESIDUAL_FACTOR = 8.0
 
+# #772: ceiling on the *derived* relaxation, so the gate cannot be widened past
+# the band it was calibrated on.
+#
+# The proportionality that justifies relaxing the gate also makes it blind to
+# its own abuse: over-clamping damages the equations by O(rel_floor), and a
+# floor that grows with rel_floor grows with the damage, so it could never fire
+# on it.  Measured on the frozen simple-update fixture at chi=4,
+# ``rel_floor=1e-2`` gives a covariant residual of 3.09e-02 -- with a gradient
+# 25% away from the default-clamp one -- against an uncapped floor of 8e-2,
+# i.e. silently admitted.
+#
+# 1e-3 sits above every derived value on the default clamp (4.9e-5 at
+# n_clamped=1, 2.2e-4 at chi=24/rank=3, so the calibrated path is untouched)
+# and below both that 3.09e-02 over-clamp and the 5.30e-03 deliberately-broken
+# root the tests pin, so both are rejected.
+#
+# Two things it deliberately does *not* cap.  Not an explicitly-passed
+# ``base_tol`` -- a caller who asks for a loose gate still gets it.  And not the
+# dtype-derived default: at float32 the clamp is 4.92e-03 because that is what
+# the arithmetic costs, so the residual it induces is honest rather than
+# self-inflicted, and a gate that refused to follow it would reject every
+# float32 state on principle.  The ceiling is for a clamp raised *past* what
+# precision requires, which is the only case where the gate would otherwise
+# grow with damage the caller introduced.
+_DERIVED_RESIDUAL_CEILING = 1e-3
 
-def _root_residual_tolerance(base_tol, usable_rank, chi, dtype) -> float:
+
+def _root_residual_tolerance(
+    base_tol, usable_rank, chi, dtype, *, rel_floor: float | None = None
+) -> float:
     """Residual tolerance for a cut of rank ``usable_rank`` out of ``chi``.
 
     Returns ``base_tol`` unchanged while the clamp is inert — a full-rank cut
     has no intrinsic floor and reaches roundoff (measured 1.5e-16 forward /
     3.5e-14 covariant on a well-conditioned random state), so the strict
     default is both meaningful and achievable and must not be weakened there.
+
+    ``rel_floor`` is the clamp level actually in force (#772).  The law above
+    is stated at the derived ``eps^(1/3)`` because that is the default, but
+    what sets the floor is the clamp, not the constant — a caller who raises
+    ``rel_floor`` raises the level each clamped direction is pinned at, and the
+    gate has to follow it or it rejects the very states the wider clamp just
+    made solvable.  ``None`` reproduces the derived default exactly.
 
     When the clamp has fired the floor above applies and the tolerance follows
     it.  This only ever *relaxes*: it returns at least ``base_tol``.
@@ -553,13 +609,22 @@ def _root_residual_tolerance(base_tol, usable_rank, chi, dtype) -> float:
     """
     if int(usable_rank) >= int(chi):
         return float(base_tol)
-    eps13 = float(jnp.finfo(dtype).eps ** (1.0 / 3.0))
     n_clamped = max(1, int(chi) - int(usable_rank))
-    floor = _CLAMPED_RESIDUAL_FACTOR * eps13 * float(n_clamped) ** 0.5
-    return max(float(base_tol), floor)
+    if rel_floor is None:
+        # The derived clamp is the working precision's own floor: at float32 an
+        # inconsistency of 4.9e-03 is what the arithmetic costs, not damage
+        # someone chose, so the gate tracks it without a ceiling.
+        floor = _CLAMPED_RESIDUAL_FACTOR * _derived_rel_floor(dtype)
+        return max(float(base_tol), floor * float(n_clamped) ** 0.5)
+    # A caller-supplied clamp above what precision requires is a choice, and it
+    # has to be bounded -- see _DERIVED_RESIDUAL_CEILING.
+    floor = _CLAMPED_RESIDUAL_FACTOR * float(rel_floor) * float(n_clamped) ** 0.5
+    return max(float(base_tol), min(floor, _DERIVED_RESIDUAL_CEILING))
 
 
-def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
+def all_projectors(
+    env: AsymEnv, a: jax.Array, chi: int, prev=None, *, rel_floor: float | None = None
+):
     """Decompose the cut in all four directions, from the *same* environment.
 
     Paper Eq. 65 and "their corresponding rotated versions": every projector
@@ -568,6 +633,10 @@ def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
     (Gauss-Seidel) sweep, where move ``k+1`` sees the output of move ``k``,
     has a fixed point that does *not* satisfy Eqs. 76-77, because those
     equations evaluate all four moves at the same ``y``.
+
+    ``rel_floor`` forwards to :func:`_rank_capped_spectrum`; ``None`` uses its
+    derived ``eps^(1/3)`` clamp.  See :func:`retained_rank_report` for a
+    read-only view of the same ``usable_rank`` without running a sweep.
 
     Each entry is ``(P_top, P_bot, U, S_keep, Vh, usable_rank)``.  The trailing
     ``usable_rank`` is what :func:`_rank_capped_spectrum` resolved for that
@@ -586,7 +655,7 @@ def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
         # sweeps start from a near-identity environment whose half-infinite
         # matrix is rank deficient, and a singular S makes the matrix
         # inverse square root below produce NaNs.
-        s_k, usable_rank = _rank_capped_spectrum(s, chi)
+        s_k, usable_rank = _rank_capped_spectrum(s, chi, rel_floor=rel_floor)
         # Cast to the environment's dtype.  ``S`` is a *variable* of the
         # characteristic equations, and the reverse pass needs it free to leave
         # the reals for the same reason Eq. 79 needs it free to leave the
@@ -611,6 +680,36 @@ def all_projectors(env: AsymEnv, a: jax.Array, chi: int, prev=None):
     return out
 
 
+def retained_rank_report(
+    env: AsymEnv, a: jax.Array, chi: int, rel_floor: float | None = None
+) -> dict:
+    """How much of the retained spectrum carries real weight, before clamping.
+
+    ``usable_rank`` is the minimum over the four directions of the count
+    :func:`_rank_capped_spectrum` would leave above the clamp; when it is below
+    ``chi`` the extra directions are numerically empty and ``chi`` exceeds what
+    the state's environment supports.  ``retained_smin_rtol`` is the true
+    ``s_min/s_max`` of the *unclamped* cut, so it describes the state rather
+    than reading back ``rel_floor``.
+
+    #778 computes the rank inside :func:`all_projectors` and discards it, which
+    left the signal it describes as "the honest signal that chi exceeds what
+    the state's environment supports" unreachable.  This is that accessor.
+    """
+    smin_rtol = float("inf")
+    rank = chi
+    env_k, a_k = env, a
+    for _k in range(4):
+        M_k = half_infinite_environment(env_k, a_k)
+        s = jnp.linalg.svd(M_k, compute_uv=False)
+        _capped, usable = _rank_capped_spectrum(s, chi, rel_floor=rel_floor)
+        s_k = s[:chi]
+        smin_rtol = min(smin_rtol, float(s_k[-1]) / (float(s_k[0]) + 1e-300))
+        rank = min(rank, int(usable))
+        env_k, a_k = rotate_env(env_k), rotate_a(a_k)
+    return {"usable_rank": rank, "retained_smin_rtol": smin_rtol}
+
+
 def _renormalised_corner(env_k, a_k, P_top_k, P_bot_next, chi):
     """Paper Eq. 68: the quadrant projected on *both* open legs.
 
@@ -632,13 +731,15 @@ def _renormalised_edge(env_k, a_k, P_top_k, P_bot_k, chi):
     return jnp.einsum("ui,ixj,jd->dxu", P_bot_k, t4g, P_top_k)
 
 
-def sweep(env: AsymEnv, a: jax.Array, chi: int, prev=None):
+def sweep(
+    env: AsymEnv, a: jax.Array, chi: int, prev=None, *, rel_floor: float | None = None
+):
     """One simultaneous CTMRG sweep: all four directions from one environment.
 
     Returns ``(env, projectors)``; the projectors feed the next sweep's
-    gauge alignment.
+    gauge alignment.  ``rel_floor`` forwards to :func:`all_projectors`.
     """
-    projs = all_projectors(env, a, chi, prev)
+    projs = all_projectors(env, a, chi, prev, rel_floor=rel_floor)
     corners: list = [None] * 4
     edges: list = [None] * 4
     env_k, a_k = env, a
@@ -685,6 +786,7 @@ def converge(
     conv_tol: float = 1e-12,
     min_iter: int = 4,
     return_projectors: bool = False,
+    rel_floor: float | None = None,
 ):
     """Run sweeps until the corner spectra stop moving.
 
@@ -693,6 +795,8 @@ def converge(
     bond gauge of the chain that built it, and
     :func:`asym_root_parametrize` needs the same chain to extract a root in that
     gauge rather than re-pinning a different one — see its docstring.
+
+    ``rel_floor`` forwards to :func:`sweep` / :func:`all_projectors`.
     """
     env, a = _init_env(A, chi)
     prev = None
@@ -701,7 +805,7 @@ def converge(
     converged = False
     iters = 0
     for it in range(int(max_iter)):
-        env, prev_projs = sweep(env, a, chi, prev_projs)
+        env, prev_projs = sweep(env, a, chi, prev_projs, rel_floor=rel_floor)
         iters = it + 1
         # Element-wise, not spectral.  Corner *singular values* are invariant
         # under independent rotations of each bond, so a spectral criterion
@@ -1037,6 +1141,7 @@ def asym_root_parametrize(
     pinv_rtol: float = 1e-10,
     polish_steps: int = 40,
     polish_tol: float = 1e-10,
+    rel_floor: float | None = None,
     return_usable_rank: bool = False,
 ) -> tuple[AsymRoot, float]:
     """Extract ``y* = ({C}, {E}, 0, {S*}, 0)`` and the frozen isometries.
@@ -1058,12 +1163,17 @@ def asym_root_parametrize(
     projectors, hence two bond phases — plateaus at 6e-5 instead of falling,
     while the edges converge geometrically past 1e-8.  Warm-started off the
     forward chain the same environment is a root to 6e-17 (#721).
+
+    ``rel_floor`` must reach *both* internal projector builds below (the
+    ``all_projectors`` call and the ``sweep`` call) — they must agree, or
+    ``y*`` is extracted against a different clamp than the one the next
+    polish step's forward environment uses, and is not a root of it.
     """
     best: tuple[AsymRoot, float] | None = None
     best_rank = chi
     for _step in range(max(int(polish_steps), 1)):
         env = AsymEnv(*[t / (jnp.linalg.norm(t) + 1e-300) for t in env])
-        projs = all_projectors(env, a, chi, prev_projs)
+        projs = all_projectors(env, a, chi, prev_projs, rel_floor=rel_floor)
         prev_projs = projs
         U_star, U_perp, Vh_star, Vh_perp, s_list, s_inv = [], [], [], [], [], []
         for k in range(4):
@@ -1105,7 +1215,7 @@ def asym_root_parametrize(
             best_rank = min(int(p[5]) for p in projs)
         if residual <= polish_tol:
             break
-        env, prev_projs = sweep(env, a, chi, projs)
+        env, prev_projs = sweep(env, a, chi, projs, rel_floor=rel_floor)
 
     assert best is not None
     if return_usable_rank:
@@ -1185,6 +1295,7 @@ def asym_root_implicit_energy_and_grad(
     root_residual_warn: float = 1e-6,
     on_root_residual: str = "raise",
     return_diagnostics: bool = False,
+    rel_floor: float | None = None,
 ):
     """Energy and ``dE/dA`` for a 1x1 unit cell via asymmetric root implicit AD.
 
@@ -1211,6 +1322,22 @@ def asym_root_implicit_energy_and_grad(
     is from orthogonal to the environment-phase gauge, which is what makes the
     singular adjoint system solvable; it is ~1e-16 when the energy boundary is
     right and is worth watching whenever that boundary changes.
+
+    ``rel_floor`` forwards to :func:`_rank_capped_spectrum` (``None`` uses its
+    derived ``eps^(1/3)`` clamp) and reaches both the forward sweep and the
+    root extraction, which must agree.  ``return_diagnostics`` additionally
+    reports ``usable_rank`` and ``retained_smin_rtol`` from
+    :func:`retained_rank_report`, and a ``chi`` above ``usable_rank`` raises a
+    ``RuntimeWarning``.
+
+    ``root_residual_warn`` is the *base* gate.  :func:`_root_residual_tolerance`
+    relaxes it from that same ``usable_rank``, and only when the clamp actually
+    bound (``usable_rank < chi``), because that is the only case with an
+    O(``rel_floor``) inconsistency to make room for.  A state that never touched
+    the clamp is still held to the base value.  The relaxation follows whatever
+    ``rel_floor`` is in force and is capped at ``_DERIVED_RESIDUAL_CEILING`` so
+    that over-clamping is rejected rather than hidden; the base value itself is
+    never capped, so a caller who wants a loose gate still gets one.
     """
     _check_root_residual_policy(on_root_residual)
     from tenax.algorithms._ctm_c4v_root_implicit import _solve_root_adjoint
@@ -1226,7 +1353,35 @@ def asym_root_implicit_energy_and_grad(
         conv_tol=conv_tol,
         min_iter=min_iter,
         return_projectors=True,
+        rel_floor=rel_floor,
     )
+    rank_report = retained_rank_report(env, a_arr, chi, rel_floor)
+    if rank_report["usable_rank"] < chi:
+        # Only the default clamp has finite-difference evidence behind the
+        # soundness claim (6e-08 relative against a directional FD, #772/#778).
+        # Under a caller-supplied ``rel_floor`` the clamp can be raised past the
+        # genuinely-weighted directions, which breaks the equations rather than
+        # regularising them -- so this warning must not pre-empt the residual
+        # gates below, which are what actually detect that.
+        soundness = (
+            "The gradient is sound, but the energy will stop moving with chi"
+            if rel_floor is None
+            else "Whether the gradient is still sound is decided by the "
+            "residual gates below, not here -- a rel_floor raised past the "
+            "genuinely-weighted directions breaks the equations. The energy "
+            "will also stop moving with chi"
+        )
+        warnings.warn(
+            f"Asymmetric root implicit AD: only "
+            f"{rank_report['usable_rank']} of {chi} retained directions carry "
+            f"weight above the rank clamp (smallest is "
+            f"{rank_report['retained_smin_rtol']:.2e} relative), so chi={chi} "
+            f"exceeds this state's usable environment rank. {soundness} -- "
+            "which looks like the #723/#726 rank-1 collapse and is not. "
+            "Reduce chi, or increase D.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     root, root_residual, usable_rank = asym_root_parametrize(
         env,
         a_arr,
@@ -1234,15 +1389,21 @@ def asym_root_implicit_energy_and_grad(
         prev_projs=forward_projs,
         polish_steps=polish_steps,
         polish_tol=polish_tol,
+        rel_floor=rel_floor,
         return_usable_rank=True,
     )
     # #779: a clamped cut has an intrinsic residual floor that no amount of
     # polishing removes, so the tolerance has to know whether the clamp fired.
-    # Unchanged (strict) whenever it did not.
+    # Unchanged (strict) whenever it did not.  ``rel_floor`` goes with it (#772):
+    # the floor is set by the clamp actually in force, not by the derived
+    # default, so a caller-widened clamp must widen the gate too.
     residual_tol = _root_residual_tolerance(
-        root_residual_warn, usable_rank, chi, env.C1.dtype
+        root_residual_warn, usable_rank, chi, env.C1.dtype, rel_floor=rel_floor
     )
-    if root_residual > residual_tol:
+    # ``nan > x`` is False, so the plain comparison fails OPEN on a NaN
+    # residual -- exactly the #772 failure mode. ``not (x <= tol)`` is True for
+    # NaN, so it fails closed.
+    if not (root_residual <= residual_tol):
         _report_root_residual(
             on_root_residual,
             f"Asymmetric root implicit AD: ‖F(y*)‖ = {root_residual:.3e} exceeds "
@@ -1334,7 +1495,7 @@ def asym_root_implicit_energy_and_grad(
     covariant_residual = float(
         jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(F_at_root)))
     )
-    if covariant_residual > residual_tol:
+    if not (covariant_residual <= residual_tol):
         _report_root_residual(
             on_root_residual,
             f"Asymmetric root implicit AD: the covariant ‖F(y*)‖ = "
@@ -1370,6 +1531,7 @@ def asym_root_implicit_energy_and_grad(
             grad,
             {
                 **meta,
+                **rank_report,
                 "root_residual": root_residual,
                 "covariant_residual": covariant_residual,
                 "adjoint_residual": float(solve_resid),
