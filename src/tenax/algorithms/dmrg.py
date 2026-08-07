@@ -452,6 +452,54 @@ def _run_symmetric_jit_executor(
     )
 
 
+def _validate_physical_basis(mps_tensors, mpo_tensors) -> None:
+    """Reject an MPS and MPO whose physical legs use different charge orders.
+
+    Symmetric contraction pairs sectors by *charge value*, so a run whose MPS
+    and MPO list the same physical charges in a different order still converges
+    to the correct state and reports the correct energy -- and then returns an
+    MPS whose dense physical index is permuted relative to the caller's
+    convention.  Everything read off that state (occupations, correlators,
+    entanglement across an orbital cut) is silently in the wrong basis while
+    the energy check that would normally catch it passes (#816).
+
+    The failure is *not* specific to fermions or Jordan-Wigner: it needs only a
+    ground state that is not invariant under the relabelling.  An XXZ chain
+    hides it (its Sz=0 ground state is spin-flip symmetric); adding a single
+    on-site field exposes the same 4.9e-01 mismatch with no fermions in sight.
+
+    Only ``build_auto_mpo`` MPOs paired with ``p{i}``-labelled MPS tensors are
+    checked, so a hand-built network is never rejected on a label heuristic.
+    """
+    import numpy as _np
+
+    for site, (mps_t, mpo_t) in enumerate(zip(mps_tensors, mpo_tensors)):
+        mps_ix = next((ix for ix in mps_t.indices if str(ix.label) == f"p{site}"), None)
+        mpo_ix = next(
+            (ix for ix in mpo_t.indices if str(ix.label) == f"mpo_top_{site}"), None
+        )
+        if mps_ix is None or mpo_ix is None:
+            continue
+        mps_q = _np.asarray(mps_ix.charges)
+        mpo_q = _np.asarray(mpo_ix.charges)
+        if mps_q.shape == mpo_q.shape and _np.array_equal(mps_q, mpo_q):
+            continue
+        raise ValueError(
+            f"MPS and MPO disagree on the physical basis at site {site}: the "
+            f"MPS physical leg carries charges {mps_q.tolist()} but the MPO's "
+            f"carries {mpo_q.tolist()}.\n"
+            "Symmetric contraction pairs sectors by charge value, so this "
+            "would still converge and report the correct energy -- while "
+            "returning an MPS whose dense physical index is permuted relative "
+            "to the MPO's. Occupations, correlators and entanglement read off "
+            "that state would be in the wrong basis, silently (#816).\n"
+            "Build both with the same phys_charges: pass the same array to "
+            "build_auto_mpo(phys_charges=...) and to the MPS builder "
+            "(build_random_symmetric_mps(phys_charges=...) or "
+            "FiniteMPS.random)."
+        )
+
+
 def dmrg(
     hamiltonian: TensorNetwork,
     initial_mps: FiniteMPS | TensorNetwork,
@@ -509,6 +557,7 @@ def dmrg(
 
     if all_mps_sym and all_mpo_sym:
         use_symmetric = True
+        _validate_physical_basis(mps_tensors, mpo_tensors)
         ops = _symmetric_ops(config)
     elif all_mps_dense and all_mpo_dense:
         use_symmetric = False
@@ -2937,6 +2986,7 @@ def build_random_symmetric_mps(
     dtype: Any = jnp.float64,
     seed: int = 42,
     target_charge: int = 0,
+    phys_charges: np.ndarray | None = None,
 ) -> TensorNetwork:
     """Build a random block-sparse MPS with U(1) charge conservation.
 
@@ -2984,8 +3034,23 @@ def build_random_symmetric_mps(
 
     sym = U1Symmetry()
 
-    # Physical: spin up = +1, spin down = −1
-    phys_charges = np.array([1, -1], dtype=np.int32)
+    # Physical: spin up = +1, spin down = −1.  The *order* is caller-visible:
+    # it fixes which dense physical index means which charge, and it must match
+    # whatever was handed to ``build_auto_mpo(phys_charges=...)`` or the
+    # returned MPS is permuted relative to the MPO (#816).  Overridable for
+    # exactly that reason; the virtual-sector construction below assumes the
+    # charges are ±1, so only a reordering is accepted.
+    if phys_charges is None:
+        phys_charges = np.array([1, -1], dtype=np.int32)
+    else:
+        phys_charges = np.asarray(phys_charges, dtype=np.int32)
+        if sorted(phys_charges.tolist()) != [-1, 1]:
+            raise ValueError(
+                f"phys_charges must be a reordering of [1, -1], got "
+                f"{phys_charges.tolist()}. This builder distributes virtual "
+                "sectors assuming each site contributes ±1; for other physical "
+                "charges use FiniteMPS.random."
+            )
     trivial_zero = np.array([0], dtype=np.int32)
 
     # Virtual bond: include charge sectors compatible with target propagation.
