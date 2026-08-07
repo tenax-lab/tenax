@@ -87,6 +87,13 @@ _FILE_MARKERS = {
     "test_ipeps_rdm_gauge.py": "core",
     "test_ipeps_excitations_gauge.py": "core",
     "test_ctm_honeycomb_energy_gauge.py": "core",
+    # Multi-operand mixed-dtype einsum must not emit a real-by-real GEMM with
+    # a complex output (#813).  Jaxpr inspection + an AST scan, so it is
+    # microseconds and -- critically -- backend-independent: the crash it
+    # guards only reproduces on CUDA, and the required gate is CPU-only.  The
+    # two gauge files above are what it actually protects: they are already
+    # ``core``, CI ran them green, and they still died on GPU.
+    "test_einsum_mixed_dtype.py": "core",
     # ``_normalise_rdm``'s zero-matrix branch must stay differentiable: the
     # excitation H_eff/N are built by differentiating the norm at ``B = 0``, so
     # a NaN cotangent there is as fatal as a NaN value.  Milliseconds for the
