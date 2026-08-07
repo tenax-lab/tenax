@@ -307,7 +307,15 @@ class FiniteMPS:
         env = None
         for i in range(self.L):
             ket = other[i]
-            bra = self[i].conj()
+            # ``bar()``, not ``conj()``: the bra must have *opposite flows* so
+            # its legs can contract, while keeping identical charges so blocks
+            # still match by equality.  ``conj()`` only conjugates the data and
+            # leaves the flows alone, so on a SymmetricTensor every physical
+            # pairing is OUT-against-OUT, no block matches, and the whole
+            # overlap collapses to exactly 0j -- see #819.  ``dagger()`` flips
+            # the flows but also duals the charges, which reintroduces the
+            # charge mismatch ``bar()`` was written to avoid.
+            bra = self[i].bar()
 
             # Relabel bra's virtual bond labels to avoid collision with ket.
             # Physical labels (p{i}) stay the same so they contract.
@@ -349,8 +357,42 @@ class FiniteMPS:
         Returns:
             The norm as a non-negative real number.
         """
+        # Fast path, following ITensor: with a known orthogonality center every
+        # other site is an isometry, so <t|t> is just the center tensor's
+        # Frobenius norm squared.  O(chi^2 d) instead of O(L chi^3) -- and it
+        # cannot be corrupted by a bug in the transfer-matrix contraction,
+        # which is exactly how #819 went unnoticed.
+        if self.orth_center is not None:
+            centre = float(self.tensors[self.orth_center].norm())
+            return float(jnp.exp(self.log_norm) * centre)
+
         raw = self._raw_overlap(self)
-        return float(jnp.exp(self.log_norm) * jnp.sqrt(jnp.abs(raw)))
+        # <t|t> is a positive real by construction.  Anything else means the
+        # contraction is broken, and the old ``jnp.abs(raw)`` laundered exactly
+        # that into a plausible non-negative float: #819 returned 0.0 for a
+        # perfectly good state and nothing complained.  Fail instead.
+        raw_c = complex(raw)
+        scale = abs(raw_c)
+        if scale > 0.0 and abs(raw_c.imag) > 1e-8 * scale:
+            raise ValueError(
+                f"<psi|psi> came back complex ({raw_c!r}); the norm of a state "
+                "is a positive real, so the overlap contraction is wrong. This "
+                "is a bug in tenax, not in your state (#819)."
+            )
+        if raw_c.real < 0.0:
+            raise ValueError(
+                f"<psi|psi> came back negative ({raw_c.real!r}); the norm of a "
+                "state is a positive real, so the overlap contraction is wrong. "
+                "This is a bug in tenax, not in your state (#819)."
+            )
+        if raw_c.real == 0.0 and any(float(t.norm()) > 0.0 for t in self.tensors):
+            raise ValueError(
+                "<psi|psi> came back exactly 0 for an MPS whose site tensors "
+                "are not all zero, so the overlap contraction is wrong rather "
+                "than the state being null (#819). A genuinely zero state "
+                "would have zero tensors."
+            )
+        return float(jnp.exp(self.log_norm) * jnp.sqrt(raw_c.real))
 
     def entanglement_entropy(self, bond: int) -> float:
         """Compute the Von Neumann entanglement entropy at a bond.

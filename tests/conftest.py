@@ -136,6 +136,9 @@ _FILE_MARKERS = {
     "test_observables.py": "algorithm",
     "test_cbe_validation.py": "algorithm",
     "test_mps.py": "core",
+    # FiniteMPS.norm() vs an explicit contraction (#819).  Neither backend had
+    # such a test, which is how an exactly-zero symmetric norm survived.
+    "test_mps_norm.py": "core",
     "test_blas_plan.py": "core",
     "test_padded_block_array.py": "core",
     "test_jit_sweep.py": "core",
