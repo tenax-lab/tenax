@@ -428,7 +428,26 @@ def optimize_gs_ad_root_implicit(
             if config.gs_conv_criterion in ("grad_norm", "both")
             else None
         )
-        if _converged_outer(config, delta_energy, grad_norm_val):
+        if n_nonfinite:
+            # #812.  Masking a non-finite gradient to zero is what keeps the
+            # run alive, and it is also what makes the run look converged --
+            # the rescue and the false signal are the same operation.  It
+            # deflates *both* criteria:
+            #
+            #   grad_norm: a fully masked gradient has L2 norm exactly 0.0,
+            #              which is below any tolerance.  Fires here.
+            #   dE:        a fully masked step is a no-op, so the *next* step
+            #              re-evaluates identical params and sees
+            #              delta_energy == 0.0.  Fires one step later, on a
+            #              step whose own gradient is perfectly finite.
+            #
+            # So skipping the test on this step is not enough; ``prev_energy``
+            # has to be reset as well, or the manufactured zero ends the run
+            # anyway.  ``ipeps_optimize`` already does exactly this after a
+            # grad-spike rollback, for the same "re-evaluates the same state
+            # and sees dE == 0" reason.
+            prev_energy = float("inf")
+        elif _converged_outer(config, delta_energy, grad_norm_val):
             if config.gs_verbose:
                 _log_ad_converged(
                     "root_implicit",
@@ -439,14 +458,10 @@ def optimize_gs_ad_root_implicit(
                     grad_norm_tol=config.gs_grad_norm_tol,
                     criterion=config.gs_conv_criterion,
                 )
-            # Masking a non-finite gradient to zero deflates both criteria: a
-            # fully masked step drives ``grad_norm_val`` to exactly 0.0, and it
-            # is a no-op, so the *next* step re-evaluates identical params and
-            # sees delta_energy == 0.0.  Either can fire ``_converged_outer``
-            # on a run this loop has already warned is "not ... a converged
-            # optimization".  The break itself is pre-existing behaviour and is
-            # left alone here (#812); what must not happen is publishing that
-            # as converged=True to a consumer that cannot see the warning.
+            # Run-wide, not just this step (#792): the end-of-run warning below
+            # already declares the *whole* run "not ... a converged
+            # optimization" once any step was contaminated, so reporting
+            # converged=True here would contradict it.
             converged_flag = nonfinite_grad_steps == 0
             break
 
