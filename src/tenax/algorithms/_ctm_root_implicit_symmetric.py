@@ -21,7 +21,9 @@ import numpy as np
 
 from tenax.algorithms._ad_primitives import (
     _check_root_residual_policy,
+    _gauge_consistency,
     _report_root_residual,
+    _residual_exceeds,
 )
 from tenax.algorithms._ctm_root_implicit_asym import (
     _denman_beavers,
@@ -1954,7 +1956,7 @@ def sym_root_implicit_energy_and_grad(
         polish_steps=polish_steps,
         polish_tol=polish_tol,
     )
-    if root_residual > root_residual_warn:
+    if _residual_exceeds(root_residual, root_residual_warn):
         _report_root_residual(
             on_root_residual,
             f"Symmetric root implicit AD: ‖F(y*)‖ = {root_residual:.3e} exceeds "
@@ -1985,15 +1987,14 @@ def sym_root_implicit_energy_and_grad(
     )
 
     y_bar_norm = _pytree_norm(y_bar)
-    gauge_consistency = 0.0
-    for bar, tensor in zip(tilde_bar, tilde, strict=True):
-        # JAX pairs cotangents unconjugated: ``Re Σ g·δz`` with the tangent
-        # ``δz = i x`` of the phase orbit.  Conjugating instead reports a
-        # violation that is not there.
-        pairing = float(jnp.real(jnp.sum(bar._data * (1j * tensor._data))))
-        scale = y_bar_norm * float(jnp.linalg.norm(tensor._data)) + 1e-300
-        gauge_consistency = max(gauge_consistency, abs(pairing) / scale)
-    if gauge_consistency > 1e-8:
+    # JAX pairs cotangents unconjugated: ``Re Σ g·δz`` with the tangent
+    # ``δz = i x`` of the phase orbit.  Conjugating instead reports a violation
+    # that is not there.  Shared helper so the NaN handling cannot drift from
+    # the asymmetric engine's copy again (#787).
+    gauge_consistency = _gauge_consistency(
+        [b._data for b in tilde_bar], [t._data for t in tilde], y_bar_norm
+    )
+    if _residual_exceeds(gauge_consistency, 1e-8):
         warnings.warn(
             f"Symmetric root implicit AD: the energy cotangent has a "
             f"{gauge_consistency:.3e} relative component along an environment "
@@ -2010,7 +2011,7 @@ def sym_root_implicit_energy_and_grad(
 
     F_at_root, vjp_y = jax.vjp(F_of_y, y_star)
     covariant_residual = _pytree_norm(F_at_root)
-    if covariant_residual > root_residual_warn:
+    if _residual_exceeds(covariant_residual, root_residual_warn):
         _report_root_residual(
             on_root_residual,
             f"Symmetric root implicit AD: the covariant ‖F(y*)‖ = "

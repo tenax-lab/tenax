@@ -21,6 +21,7 @@ Reference: Francuz et al., Phys. Rev. Research 7, 013237 (2025).
 
 from __future__ import annotations
 
+import math
 import warnings
 from functools import partial
 
@@ -72,6 +73,48 @@ def _check_root_residual_policy(on_root_residual: str) -> None:
             f"on_root_residual must be one of {_ROOT_RESIDUAL_POLICIES}, "
             f"got {on_root_residual!r}"
         )
+
+
+def _residual_exceeds(value: float, tolerance: float) -> bool:
+    """``True`` when ``value`` is not provably within ``tolerance``.
+
+    Spelled ``not (value <= tolerance)`` rather than ``value > tolerance``.
+    The two differ only on NaN -- and that is the case that matters: ``nan``
+    compares ``False`` to everything, so the naive form takes the *silent*
+    branch exactly when the quantity is most obviously invalid, and the caller
+    proceeds to build a gradient on a root it could not even measure.  Every
+    root-implicit gate is a guard, so every one of them must fail closed.
+
+    This lives here, next to :func:`_report_root_residual`, because the
+    comparison drifting *away* from the reporter is how the engines diverged in
+    the first place: the asymmetric path was fixed in #791 while the C4v,
+    symmetric and multisite engines kept the fail-open spelling (#796).
+    """
+    return not (value <= tolerance)
+
+
+def _gauge_consistency(tilde_bar, tilde, y_bar_norm: float) -> float:
+    """Largest relative component of the energy cotangent along a phase null direction.
+
+    Returns NaN if any pair is NaN, rather than skipping it.  The obvious
+    ``acc = max(acc, ratio)`` loop is silently wrong here: ``max`` picks by
+    ``>``, and ``nan > 0.0`` is ``False``, so an accumulator starting at 0.0
+    *keeps the 0.0* and the diagnostic reports **perfect** gauge consistency
+    for a NaN cotangent -- silent and inverted, on the one input (#772's NaN
+    cotangent) it exists to catch (#787).
+
+    Note the swallowing is order-dependent -- ``max(nan, 0.0)`` does keep the
+    NaN -- so the accumulator's 0.0 seed is what makes the broken ordering the
+    one that always occurs.  Both orders are pinned by tests.
+    """
+    ratios: list[float] = []
+    for bar, tensor in zip(tilde_bar, tilde):
+        pairing = float(jnp.real(jnp.sum(bar * (1j * tensor))))
+        scale = y_bar_norm * float(jnp.linalg.norm(tensor)) + 1e-300
+        ratios.append(abs(pairing) / scale)
+    if any(math.isnan(r) for r in ratios):
+        return math.nan
+    return max(ratios, default=0.0)
 
 
 def _report_root_residual(
