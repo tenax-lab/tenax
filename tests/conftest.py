@@ -80,6 +80,11 @@ _FILE_MARKERS = {
     # CTM gauge the sweep does not fix, so they belong in the *required* gate
     # rather than the unwatched full suite; unregistered, all 80 of them were
     # deselected by ``-m core`` and ran only on push to main.
+    # Multi-operand mixed-dtype einsum must not emit a real-by-real GEMM with
+    # a complex output (#813).  Jaxpr inspection + an AST scan, so it is
+    # microseconds and -- critically -- backend-independent: the crash it
+    # guards only reproduces on CUDA, and the required gate is CPU-only.
+    "test_einsum_mixed_dtype.py": "core",
     "test_ipeps_rdm_gauge.py": "core",
     "test_ipeps_excitations_gauge.py": "core",
     "test_ctm_honeycomb_energy_gauge.py": "core",
