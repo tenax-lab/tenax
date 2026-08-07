@@ -65,6 +65,11 @@ _FILE_MARKERS = {
     # CTM convergence, so it is milliseconds.  The production-run case it
     # also carries is explicitly @slow (#772).
     "test_root_implicit_wiring.py": "core",
+    # MPS/MPO physical-basis agreement (#816).  A mismatched charge ORDER
+    # still converges and reports the correct energy while returning a
+    # permuted state, so the energy check that normally catches everything
+    # passes.  Small L=6 DMRG runs, a few seconds.
+    "test_dmrg_phys_basis.py": "core",
     # Knobs the root-implicit path accepted and then ignored (#792).  Mostly
     # config validation and one warning: milliseconds, no CTM.  The masked-
     # gradient convergence-flag test does converge one final D=2/chi=4 env
