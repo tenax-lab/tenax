@@ -73,6 +73,10 @@ _FILE_MARKERS = {
     # shape test is expensive; it carries its own ``@pytest.mark.slow``, which
     # the rule below honours by *withholding* this ``core``.
     "test_root_implicit_ignored_knobs.py": "core",
+    # A masked gradient must not end the optimization (#812).  Scripted
+    # (energy, grad) pairs, so the only real work is one final D=2/chi=4 env
+    # per test (~1s).  Guards control flow a benchmark consumer cannot see.
+    "test_root_implicit_masked_convergence.py": "core",
     # Environment-phase (gauge) invariance of the RDM builders (#748, follow-up
     # to #725/#742).  Cheap -- one module-scoped D=2 simple-update state per
     # file, then pure phase reruns of the contraction (~5s each).  These guard
