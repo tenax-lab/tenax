@@ -158,8 +158,8 @@ def validate_root_implicit_config(config: iPEPSConfig) -> None:
 
 def _initial_tensor(hamiltonian_gate, A_init, config: iPEPSConfig, gate, d_phys):
     """Resolve the starting site tensor (explicit / simple-update / random)."""
+    from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
     from tenax.algorithms.ipeps import ipeps
-    from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor
 
     if A_init is not None:
         return A_init if isinstance(A_init, Tensor) else _wrap_as_dense_tensor(A_init)
@@ -194,8 +194,7 @@ def optimize_gs_ad_root_implicit(
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
     from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
-    from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
-    from tenax.algorithms.ipeps_optimize import (
+    from tenax.algorithms._ipeps_optimize_shared import (
         _build_optimizer,
         _converged_outer,
         _grad_l2_norm,
@@ -205,6 +204,7 @@ def optimize_gs_ad_root_implicit(
         _use_line_search,
         _warn_implicit_ad_variational_caveat,
     )
+    from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
 
     validate_root_implicit_config(config)
     if getattr(config, "gs_metric_precond", False):
