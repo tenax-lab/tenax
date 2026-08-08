@@ -179,12 +179,41 @@ instead of corner-pair ones, so the cost profile is different. The *memory*
 claim (χ²·D³·d vs χ²·D⁶, ~12×) is shape-derived and should hold; the χ ceiling
 depends on the new peak and needs the ladder walked again.
 
-Budget: the recorded `1x1` split converge was ~14–21 s per χ. `2x2` measured
-3–6× slower on small cells, so ~1–2 min per χ plus compile, times the ladder.
+**Budget — the estimate below was wrong; raise `--cell-timeout-s`.** The first
+attempt (2026-08-06) died with `"error": "timeout"` at the *first* rung, χ=64,
+against the 2400 s default, and the row-stop rule then killed the rest of the
+ladder. Two things the original estimate missed: `_converge_split` runs the full
+`max_iter=200` converge **twice** (an untimed warm-up compile, then the timed
+one), and the `1x1` per-χ figures it extrapolated from were collapsed-corner
+timings. For scale, the *dense* arm needed 13.6 s/sweep × 33 sweeps at this same
+χ=64. Pass `--cell-timeout-s 21600` so a row stops on a real OOM wall rather
+than the clock — a clock stop is indistinguishable from a χ ceiling in
+`results.csv`, which is exactly the confusion this issue exists to remove.
+
+A timed-out cell is **cached like any other result**, so a plain re-run resumes
+straight past it. Move or delete that cell's JSON before retrying.
+
+Superseded estimate, for the record: `1x1` split converge was ~14–21 s per χ,
+and `2x2` measured 3–6× slower on small cells, suggesting ~1–2 min per χ.
 
 ---
 
-## Run 2 — D=4 re-optimization at `gs_recipe="2x2"`
+## Run 2 — D=4 re-optimization at `gs_recipe="2x2"` — ✅ DONE 2026-08-05
+
+Completed on 2×RTX 4070 Ti SUPER; written up as **#747 comment 4**.
+`corner_rank == χ` in all seven cells, and **E/site = −0.6639345178,
+err vs QMC = +5.50e-03**, superseding +6.04e-3. That figure is itself an upper
+bound: the optimization was stopped at step 14 with `E_best` flat for ~4 h.
+Artifacts stayed on that machine (`runs/d4_rerun_2x2/`); the published
+`docs/benchmarks/d4_chi_scaling/` prose was corrected separately.
+
+Two findings from it that outlive the run: `conv_tol` is **dead code** in this
+configuration (a full re-scan at 1e-8 was bit-identical — every cell exits on
+`plateau_patience=20`, never on tolerance, so `plateau_patience` is the real
+knob), and `CUDA_VISIBLE_DEVICES` on the orchestrator **does not pin the run**
+(`_worker_env` overwrites it with its own most-idle pick).
+
+The original instructions are kept below for reproduction and bisection.
 
 ```bash
 uv run python examples/heisenberg_d4_chi_scaling.py \

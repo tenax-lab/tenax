@@ -315,9 +315,15 @@ def optimize_once(outdir, chi_opt, opt_steps, n_devices, probe_max_iter=15,
     a chi_eff=1 mean-field environment.  The chi *scan* was always correct
     (it goes through ``python_loop_ctm_converge``, which defaults to 2x2), so
     the recorded convergence data stands -- but the +6.04e-3 vs QMC mixes iPEPS
-    truncation with a badly-optimized state and should not be quoted as a D=4
-    truncation error until this is re-run.  ``"1x1"`` reproduces the old
-    (invalid) behaviour for bisection.  See #747."""
+    truncation with a badly-optimized state and must not be quoted as a D=4
+    truncation error.
+
+    That re-run is done (#747 comment 4, 2026-08-05): at ``gs_recipe="2x2"``,
+    with ``corner_rank == chi`` in all seven cells, E/site = -0.6639345178 and
+    err vs QMC = +5.50e-3, superseding +6.04e-3.  That figure is itself an
+    upper bound -- its optimization was stopped at step 14, not converged.
+
+    ``"1x1"`` reproduces the old (invalid) behaviour for bisection.  See #747."""
     import jax
 
     jax.config.update("jax_enable_x64", True)
