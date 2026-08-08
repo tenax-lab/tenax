@@ -65,6 +65,23 @@ _FILE_MARKERS = {
     # CTM convergence, so it is milliseconds.  The production-run case it
     # also carries is explicitly @slow (#772).
     "test_root_implicit_wiring.py": "core",
+    # MPS/MPO physical-basis agreement (#816).  A mismatched charge ORDER
+    # still converges and reports the correct energy while returning a
+    # permuted state, so the energy check that normally catches everything
+    # passes.  Small L=6 DMRG runs, a few seconds.
+    "test_dmrg_phys_basis.py": "core",
+    # Knobs the root-implicit path accepted and then ignored (#792).  Mostly
+    # config validation and one warning: milliseconds, no CTM.  The masked-
+    # gradient convergence-flag test does converge one final D=2/chi=4 env
+    # (~1s) and is intentionally left in ``core`` -- it guards a flag a
+    # benchmark consumer reads (#812).  Only the end-to-end return_history
+    # shape test is expensive; it carries its own ``@pytest.mark.slow``, which
+    # the rule below honours by *withholding* this ``core``.
+    "test_root_implicit_ignored_knobs.py": "core",
+    # A masked gradient must not end the optimization (#812).  Scripted
+    # (energy, grad) pairs, so the only real work is one final D=2/chi=4 env
+    # per test (~1s).  Guards control flow a benchmark consumer cannot see.
+    "test_root_implicit_masked_convergence.py": "core",
     # Environment-phase (gauge) invariance of the RDM builders (#748, follow-up
     # to #725/#742).  Cheap -- one module-scoped D=2 simple-update state per
     # file, then pure phase reruns of the contraction (~5s each).  These guard
@@ -75,6 +92,13 @@ _FILE_MARKERS = {
     "test_ipeps_rdm_gauge.py": "core",
     "test_ipeps_excitations_gauge.py": "core",
     "test_ctm_honeycomb_energy_gauge.py": "core",
+    # Multi-operand mixed-dtype einsum must not emit a real-by-real GEMM with
+    # a complex output (#813).  Jaxpr inspection + an AST scan, so it is
+    # microseconds and -- critically -- backend-independent: the crash it
+    # guards only reproduces on CUDA, and the required gate is CPU-only.  The
+    # two gauge files above are what it actually protects: they are already
+    # ``core``, CI ran them green, and they still died on GPU.
+    "test_einsum_mixed_dtype.py": "core",
     # ``_normalise_rdm``'s zero-matrix branch must stay differentiable: the
     # excitation H_eff/N are built by differentiating the norm at ``B = 0``, so
     # a NaN cotangent there is as fatal as a NaN value.  Milliseconds for the
@@ -89,6 +113,17 @@ _FILE_MARKERS = {
     # class of defect the required gate exists for.  Cheap: D=2, chi=4, and
     # the starved-budget cases converge in one iteration by construction.
     "test_adjoint_convergence_gate.py": "core",
+    # The root-implicit gates' fail-closed comparison (#796 / #787).  Pure
+    # unit tests on the shared predicate and the gauge_consistency reduction:
+    # no CTM, milliseconds.  They guard a defect class that has now recurred
+    # on four engines, so they belong in the required gate.
+    "test_root_implicit_nan_gates.py": "core",
+    # The multisite clamped-residual gate (#784).  The rank-report half is one
+    # SVD per coordinate and runs in the gate; the two end-to-end cases each
+    # converge a 300-sweep CTM plus an adjoint solve and carry their own
+    # explicit ``@pytest.mark.slow``, which the rule below honours by
+    # *withholding* this ``core``; see ``pytest_collection_modifyitems``.
+    "test_multisite_clamped_gate.py": "core",
     "test_ctm_tensor.py": "algorithm",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",
@@ -128,6 +163,9 @@ _FILE_MARKERS = {
     "test_observables.py": "algorithm",
     "test_cbe_validation.py": "algorithm",
     "test_mps.py": "core",
+    # FiniteMPS.norm() vs an explicit contraction (#819).  Neither backend had
+    # such a test, which is how an exactly-zero symmetric norm survived.
+    "test_mps_norm.py": "core",
     "test_blas_plan.py": "core",
     "test_padded_block_array.py": "core",
     "test_jit_sweep.py": "core",

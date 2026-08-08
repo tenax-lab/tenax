@@ -41,6 +41,7 @@ __all__ = [
 ]
 
 import logging
+import time as _time
 import warnings
 
 import jax
@@ -121,6 +122,31 @@ def validate_root_implicit_config(config: iPEPSConfig) -> None:
         unsupported.append(
             ("cg_gates", "coarse-grained gates have no root-implicit objective")
         )
+    # #792.  Both are opt-in -- you only get them by asking -- so an
+    # unsatisfiable request is an error here.  ``gs_line_search`` is NOT in
+    # this list: it is effectively default-on (``gs_optimizer`` defaults to
+    # 'lbfgs' and ``gs_line_search=None`` means auto-on), so refusing it would
+    # reject the path's own default configuration.  It warns instead, in
+    # ``optimize_gs_ad_root_implicit``, the same way ``gs_metric_precond``
+    # does.
+    if config.gs_optimizer.lower() == "cg":
+        unsupported.append(
+            (
+                "gs_optimizer='cg'",
+                "the loop would run plain gradient descent under that name -- "
+                "no retained previous gradient, no Polak-Ribiere coefficient, "
+                "no conjugate direction. Use 'lbfgs' or 'adam'",
+            )
+        )
+    if getattr(config, "gs_c4v", False):
+        unsupported.append(
+            (
+                "gs_c4v",
+                "nothing on this path projects into the C4v basis or "
+                "optimises reduced coefficients, so the first update can "
+                "leave the requested symmetry sector",
+            )
+        )
     if unsupported:
         lines = "\n".join(f"  - {k}: {why}" for k, why in unsupported)
         raise NotImplementedError(
@@ -132,8 +158,8 @@ def validate_root_implicit_config(config: iPEPSConfig) -> None:
 
 def _initial_tensor(hamiltonian_gate, A_init, config: iPEPSConfig, gate, d_phys):
     """Resolve the starting site tensor (explicit / simple-update / random)."""
+    from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
     from tenax.algorithms.ipeps import ipeps
-    from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor
 
     if A_init is not None:
         return A_init if isinstance(A_init, Tensor) else _wrap_as_dense_tensor(A_init)
@@ -168,16 +194,17 @@ def optimize_gs_ad_root_implicit(
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
     from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
-    from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
-    from tenax.algorithms.ipeps_optimize import (
+    from tenax.algorithms._ipeps_optimize_shared import (
         _build_optimizer,
         _converged_outer,
         _grad_l2_norm,
         _log_ad_converged,
         _normalize_params,
         _should_accept_best,
+        _use_line_search,
         _warn_implicit_ad_variational_caveat,
     )
+    from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
 
     validate_root_implicit_config(config)
     if getattr(config, "gs_metric_precond", False):
@@ -189,6 +216,27 @@ def optimize_gs_ad_root_implicit(
             "needs a per-step CTM environment, which the *_energy_and_grad "
             "entry points do not expose. Falling back to non-preconditioned "
             "optimization.",
+            UserWarning,
+            stacklevel=2,
+        )
+    if _use_line_search(config):
+        # #792.  Default-on for lbfgs/cg, so this warns rather than raising --
+        # refusing it would reject the path's own default configuration.
+        #
+        # No line search runs here: ``_build_optimizer`` returns a plain
+        # ``optax.chain(scale_by_lbfgs, clip_by_global_norm, scale(-1))`` and
+        # ``value_fn=`` is consumed only by ``optax.lbfgs(linesearch=...)``.
+        # Passing it to that chain does nothing.
+        warnings.warn(
+            "gs_line_search is enabled (explicitly, or by default for "
+            f"gs_optimizer={config.gs_optimizer!r}) but no line search runs on "
+            "the root-implicit AD path (ctm_ad_mode='root_implicit'): the "
+            "optimizer chain has no line-search transform, so gs_line_search, "
+            "gs_line_search_method, gs_line_search_max_steps and gs_hz_max_iter "
+            "are all no-ops. Steps are unconditional quasi-Newton steps and an "
+            "energy-increasing one can be accepted. The best-so-far state is "
+            "still tracked and returned. Set gs_line_search=False to silence "
+            "this.",
             UserWarning,
             stacklevel=2,
         )
@@ -259,9 +307,39 @@ def optimize_gs_ad_root_implicit(
 
     params = A.todense()
 
+    # #792: return_history was accepted and dropped, so callers of the
+    # documented 1x1 history API got a 3-tuple and lost the trajectory.  The
+    # loop already computes every field; this only records them.  Same dict
+    # shape as the 1-site tensor path in ipeps_optimize.
+    history_energies: list[float] = []
+    history_step_times: list[float] = []
+    jit_compile_time = 0.0
+    first_step = True
+
+    def _with_history(A_t, env, E, *, converged):
+        if not config.return_history:
+            return A_t, env, E
+        return (
+            A_t,
+            env,
+            E,
+            {
+                "energies": history_energies,
+                "step_times": history_step_times,
+                "jit_compile_time": jit_compile_time,
+                "num_steps": len(history_energies),
+                "converged": converged,
+            },
+        )
+
     if config.gs_num_steps == 0:
         A_t, env = _final_env(params)
-        return A_t, env, float(compute_energy_ctm_tensor(A_t, env, gate, d_phys))
+        return _with_history(
+            A_t,
+            env,
+            float(compute_energy_ctm_tensor(A_t, env, gate, d_phys)),
+            converged=False,
+        )
 
     optimizer = _build_optimizer(config)
     use_cg = optimizer is None
@@ -273,8 +351,10 @@ def optimize_gs_ad_root_implicit(
     fully_masked_steps = 0
     steps_run = 0
 
+    converged_flag = False
     for step in range(config.gs_num_steps):
         steps_run = step + 1
+        _step_t0 = _time.perf_counter()
         energy_val, grads = _energy_and_grad(params)
         n_nonfinite = int(jnp.sum(~jnp.isfinite(grads)))
         if n_nonfinite:
@@ -308,6 +388,23 @@ def optimize_gs_ad_root_implicit(
             )
         grads = jnp.where(jnp.isfinite(grads), grads, 0.0)
         E = float(jnp.real(energy_val))
+        if config.return_history:
+            _step_dt = float(_time.perf_counter() - _step_t0)
+            if first_step:
+                # The first evaluation is compile-dominated even though this
+                # path has no top-level ``jax.jit``: the root solve and its
+                # adjoint are jitted internally, so step 0 pays their lazy
+                # compilation.  Charging it to ``step_times`` would hand the
+                # two-point compile/steady-state fit a cold sample as if it
+                # were warm.  Diverting it here is also what keeps
+                # ``len(step_times) == max(num_steps - 1, 0)`` -- the shape
+                # invariant asserted for the other AD paths in
+                # ``tests/test_ipeps_ad_history.py``.
+                jit_compile_time = _step_dt
+                first_step = False
+            else:
+                history_step_times.append(_step_dt)
+            history_energies.append(E)
 
         if _should_accept_best(
             current_best=best_energy,
@@ -331,7 +428,26 @@ def optimize_gs_ad_root_implicit(
             if config.gs_conv_criterion in ("grad_norm", "both")
             else None
         )
-        if _converged_outer(config, delta_energy, grad_norm_val):
+        if n_nonfinite:
+            # #812.  Masking a non-finite gradient to zero is what keeps the
+            # run alive, and it is also what makes the run look converged --
+            # the rescue and the false signal are the same operation.  It
+            # deflates *both* criteria:
+            #
+            #   grad_norm: a fully masked gradient has L2 norm exactly 0.0,
+            #              which is below any tolerance.  Fires here.
+            #   dE:        a fully masked step is a no-op, so the *next* step
+            #              re-evaluates identical params and sees
+            #              delta_energy == 0.0.  Fires one step later, on a
+            #              step whose own gradient is perfectly finite.
+            #
+            # So skipping the test on this step is not enough; ``prev_energy``
+            # has to be reset as well, or the manufactured zero ends the run
+            # anyway.  ``ipeps_optimize`` already does exactly this after a
+            # grad-spike rollback, for the same "re-evaluates the same state
+            # and sees dE == 0" reason.
+            prev_energy = float("inf")
+        elif _converged_outer(config, delta_energy, grad_norm_val):
             if config.gs_verbose:
                 _log_ad_converged(
                     "root_implicit",
@@ -342,6 +458,11 @@ def optimize_gs_ad_root_implicit(
                     grad_norm_tol=config.gs_grad_norm_tol,
                     criterion=config.gs_conv_criterion,
                 )
+            # Run-wide, not just this step (#792): the end-of-run warning below
+            # already declares the *whole* run "not ... a converged
+            # optimization" once any step was contaminated, so reporting
+            # converged=True here would contradict it.
+            converged_flag = nonfinite_grad_steps == 0
             break
 
         if use_cg:
@@ -379,4 +500,9 @@ def optimize_gs_ad_root_implicit(
         )
 
     A_opt, env = _final_env(best_params)
-    return A_opt, env, float(compute_energy_ctm_tensor(A_opt, env, gate, d_phys))
+    return _with_history(
+        A_opt,
+        env,
+        float(compute_energy_ctm_tensor(A_opt, env, gate, d_phys)),
+        converged=converged_flag,
+    )

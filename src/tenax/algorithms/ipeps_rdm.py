@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._ctm_tensor_energy import _normalise_rdm
+from tenax.algorithms._einsum_compat import einsum_promoted
 from tenax.algorithms.ipeps_config import (
     CTMEnvironment,
     SplitCTMEnvironment,
@@ -67,12 +68,12 @@ def _rdm2x1(A: jax.Array, env: CTMEnvironment, d: int) -> jax.Array:
 
     # Left env: UL[a,u1,c] · T4[a,l1,g] · LL[g,d1,j]
     # Contract a between UL and T4, g between T4 and LL
-    Lenv = jnp.einsum("auc,axg,gdj->ucxdj", UL, T4, LL)
+    Lenv = einsum_promoted("auc,axg,gdj->ucxdj", UL, T4, LL)
     # shape: (D2, chi, D2, D2, chi) → (u1, c, l1, d1, j)
 
     # Right env: UR[c,u2,f] · T2[f,r2,m] · LR[j,d2,m]
     # Contract f between UR and T2, m between T2 and LR
-    Renv = jnp.einsum("cuf,frm,jdm->curjd", UR, T2, LR)
+    Renv = einsum_promoted("cuf,frm,jdm->curjd", UR, T2, LR)
     # shape: (chi, D2, D2, chi, D2) → (c, u2, r2, j, d2)
 
     # Contract Lenv with ao1[u1, d1, l1, r1, s, sp]:
@@ -123,12 +124,12 @@ def _rdm1x2(A: jax.Array, env: CTMEnvironment, d: int) -> jax.Array:
     a_open = _build_double_layer_open(A)
 
     # Top row: C1·T1·C2 → (chi, D2, chi)  indices: (a, u, e)
-    top_row = jnp.einsum("ab,buc,ce->aue", C1, T1, C2)
+    top_row = einsum_promoted("ab,buc,ce->aue", C1, T1, C2)
 
     # Contract top_row with T4 (site-1 left) and T2 (site-1 right):
     # top_row[a, u1, e]  T4[a, l1, f]  T2[e, r1, g]
     # Contract a, e → env_row1[u1, l1, f, r1, g]
-    env_row1 = jnp.einsum("aue,alf,erg->ulfrg", top_row, T4, T2)
+    env_row1 = einsum_promoted("aue,alf,erg->ulfrg", top_row, T4, T2)
     # (D2, D2, chi, D2, chi) → (u1, l1, f, r1, g)
 
     # Contract with ao1[u1, d1, l1, r1, s, sp]:  match u1, l1, r1
@@ -153,7 +154,7 @@ def _rdm1x2(A: jax.Array, env: CTMEnvironment, d: int) -> jax.Array:
     # (chi, D2, chi, d, d, d, d) → (h, q=d2, i, s1, s1', s2, s2')
 
     # Bottom row: C4·T3·C3 → (chi, D2, chi)  indices: (h, d2, i)
-    bot_row = jnp.einsum("hj,jqk,ik->hqi", C4, T3, C3)
+    bot_row = einsum_promoted("hj,jqk,ik->hqi", C4, T3, C3)
 
     # Final: contract site12_r with bot_row  match h, q=d2, i
     rdm = jnp.einsum("hqistwx,hqi->stwx", site12_r, bot_row)
@@ -225,12 +226,12 @@ def _rdm2x1_2site(
     # Left boundary from env_A
     UL = jnp.einsum("ab,buc->auc", env_A.C1, env_A.T1)
     LL = jnp.einsum("gi,idj->gdj", env_A.C4, env_A.T3)
-    Lenv = jnp.einsum("auc,axg,gdj->ucxdj", UL, env_A.T4, LL)
+    Lenv = einsum_promoted("auc,axg,gdj->ucxdj", UL, env_A.T4, LL)
 
     # Right boundary from env_B
     UR = jnp.einsum("cuf,fg->cug", env_B.T1, env_B.C2)
     LR = jnp.einsum("jdk,mk->jdm", env_B.T3, env_B.C3)
-    Renv = jnp.einsum("cuf,frm,jdm->curjd", UR, env_B.T2, LR)
+    Renv = einsum_promoted("cuf,frm,jdm->curjd", UR, env_B.T2, LR)
 
     # Contract left env with ao_A
     Lenv_ao = jnp.einsum("ucxdj,udxrst->crjst", Lenv, ao_A)
@@ -269,9 +270,9 @@ def _rdm1x2_2site(
     ao_B = _build_double_layer_open(B)
 
     # Top row from env_A
-    top_row = jnp.einsum("ab,buc,ce->aue", env_A.C1, env_A.T1, env_A.C2)
+    top_row = einsum_promoted("ab,buc,ce->aue", env_A.C1, env_A.T1, env_A.C2)
     # Env row 1: contract with T4_A (left) and T2_A (right)
-    env_row1 = jnp.einsum("aue,alf,erg->ulfrg", top_row, env_A.T4, env_A.T2)
+    env_row1 = einsum_promoted("aue,alf,erg->ulfrg", top_row, env_A.T4, env_A.T2)
     # Contract with ao_A
     site1 = jnp.einsum("ulfrg,udlrst->dfgst", env_row1, ao_A)
 
@@ -282,7 +283,7 @@ def _rdm1x2_2site(
     # Contract T2_B
     site12_r = jnp.einsum("chqnstwx,cni->hqistwx", site12, env_B.T2)
     # Bottom row from env_B
-    bot_row = jnp.einsum("hj,jqk,ik->hqi", env_B.C4, env_B.T3, env_B.C3)
+    bot_row = einsum_promoted("hj,jqk,ik->hqi", env_B.C4, env_B.T3, env_B.C3)
     # Final
     rdm = jnp.einsum("hqistwx,hqi->stwx", site12_r, bot_row)
     # Transpose from (s1_ket, s1_bra, s2_ket, s2_bra) to
