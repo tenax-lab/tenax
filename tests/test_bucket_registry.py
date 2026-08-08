@@ -33,6 +33,110 @@ import re
 
 TESTS_DIR = pathlib.Path(__file__).parent
 
+_VALID_BUCKETS = {"core", "algorithm", "slow"}
+
+# Frozen at the commit that introduced the guard (#805). Removals only:
+# a file leaves this set by being bucketed in _FILE_MARKERS, never by being
+# added here. Kept in the TEST, not in conftest, so the thing being checked
+# and the thing checking it cannot be edited in one place.
+_FROZEN_LEGACY = {
+    "test_ad_primitives_rank_aware.py",
+    "test_apply_chi_bump.py",
+    "test_architecture_imports.py",
+    "test_arnoldi.py",
+    "test_block_sparse_ctm_ad.py",
+    "test_c4v_reference_ad.py",
+    "test_chi_ramp_chi_auto_bump_deprecation.py",
+    "test_coarse_grain.py",
+    "test_complex128_ad.py",
+    "test_ctm_2x2_projector_symmetric.py",
+    "test_ctm_670_symmetric_2x2.py",
+    "test_ctm_674_fermionic_fused.py",
+    "test_ctm_700_env_collapse.py",
+    "test_ctm_chi_ramp.py",
+    "test_ctm_compiled.py",
+    "test_ctm_direction_dependent_bonds.py",
+    "test_ctm_energy_implicit.py",
+    "test_ctm_energy_implicit_chi_bump.py",
+    "test_ctm_env_pad_chi_schedule.py",
+    "test_ctm_explicit_tbptt.py",
+    "test_ctm_honeycomb_ad.py",
+    "test_ctm_honeycomb_convergence.py",
+    "test_ctm_honeycomb_cross_path.py",
+    "test_ctm_honeycomb_energy.py",
+    "test_ctm_honeycomb_env.py",
+    "test_ctm_honeycomb_forward.py",
+    "test_ctm_honeycomb_init.py",
+    "test_ctm_honeycomb_lukin_sotnikov.py",
+    "test_ctm_honeycomb_moves.py",
+    "test_ctm_honeycomb_projector.py",
+    "test_ctm_honeycomb_safeguards.py",
+    "test_ctm_implicit_warm_start_adjoint.py",
+    "test_ctm_in_loop_bump_ad_paths.py",
+    "test_ctm_in_loop_chi_bump.py",
+    "test_ctm_loop_core.py",
+    "test_ctm_multisite_2x2_contract.py",
+    "test_ctm_projector.py",
+    "test_ctm_recipe_2x2_production_correctness.py",
+    "test_ctm_sharding_backward.py",
+    "test_ctm_tensor_flow_flip.py",
+    "test_ctm_tensor_init_rank1.py",
+    "test_ctm_tensor_projector_2x2.py",
+    "test_ctm_tensor_tiling.py",
+    "test_gmres_lax.py",
+    "test_hotrg_sharding.py",
+    "test_ipeps_ad_adjoint_methods.py",
+    "test_ipeps_ad_conv_criterion.py",
+    "test_ipeps_ad_f3_fused_bwd.py",
+    "test_ipeps_ad_history.py",
+    "test_ipeps_ad_policy.py",
+    "test_ipeps_checkpoint.py",
+    "test_ipeps_checkpoint_resume.py",
+    "test_ipeps_chi_adaptive_bump_unit.py",
+    "test_ipeps_chi_bump_rollback_desync.py",
+    "test_ipeps_chi_schedule_wiring.py",
+    "test_ipeps_config_chi_ceiling_bailout.py",
+    "test_ipeps_config_grad_spike.py",
+    "test_ipeps_config_hz_max_iter.py",
+    "test_ipeps_config_stall_recovery_retries.py",
+    "test_ipeps_ctm_stall_recovery_cap.py",
+    "test_ipeps_stall_recovery_cap.py",
+    "test_ipeps_tree_dot.py",
+    "test_ipeps_u1sz.py",
+    "test_line_search.py",
+    "test_line_search_auto.py",
+    "test_lorentzian_eigh_kernel.py",
+    "test_make_neighbors.py",
+    "test_metric_precond.py",
+    "test_optimize_gs_ad_chi_schedule_shim.py",
+    "test_optimize_gs_ad_chi_schedule_unified.py",
+    "test_pess_3site_multisite_encoding.py",
+    "test_pess_3site_multisite_rdm_invariants.py",
+    "test_pess_3site_multisite_wavefunction.py",
+    "test_pess_ad_honeycomb.py",
+    "test_pess_local_energy.py",
+    "test_profiler_u1sz_arm.py",
+    "test_projector_backward_dispatch.py",
+    "test_reduced_corner_qr.py",
+    "test_regularized_qr.py",
+    "test_regularized_svd.py",
+    "test_split_ctm_chi_frozen_726.py",
+    "test_split_ctm_doublelayer_projector.py",
+    "test_split_ctm_energy_gauge.py",
+    "test_split_ctm_fuse_flag.py",
+    "test_split_ctm_large_d_memory.py",
+    "test_split_ctm_production_correctness.py",
+    "test_sublattice_rotation.py",
+    "test_svd_adjoint_fd_750.py",
+    "test_symmetric_custom_vjp.py",
+    "test_truncated_lowrank_svd.py",
+    "test_tuning_registry.py",
+    "test_u1sz_defrag_prototype_610.py",
+    "test_varipeps_compare.py",
+    "test_varipeps_compare_payload.py",
+    "test_varipeps_compare_su.py",
+}
+
 
 def _registered_keys() -> set[str]:
     """Filenames appearing as keys of ``_FILE_MARKERS`` in conftest."""
@@ -47,6 +151,20 @@ def _legacy_keys() -> set[str]:
     start = src.index("_UNBUCKETED_LEGACY = {")
     end = src.index("\n}\n", start)
     return set(re.findall(r'"(test_[A-Za-z0-9_]+\.py)"', src[start:end]))
+
+
+def _registered_items() -> dict[str, str]:
+    """``{filename: bucket}`` for every entry of ``_FILE_MARKERS``.
+
+    Parsed rather than imported so a syntax-level typo in the *value* is
+    visible; importing conftest would only surface the keys.
+    """
+    src = (TESTS_DIR / "conftest.py").read_text()
+    start = src.index("_FILE_MARKERS = {")
+    end = src.index("\n}\n", start)
+    return dict(
+        re.findall(r'"(test_[A-Za-z0-9_]+\.py)"\s*:\s*"([^"]*)"', src[start:end])
+    )
 
 
 def _test_files() -> set[str]:
@@ -93,17 +211,42 @@ def test_the_registry_has_no_keys_for_files_that_no_longer_exist():
     )
 
 
-def test_the_legacy_list_is_a_ratchet():
-    """The unbucketed backlog may shrink, never grow.
+def test_the_legacy_list_can_only_shrink():
+    """Freeze *membership*, not size — a size ceiling is dodgeable.
 
-    Without this the legacy list becomes the path of least resistance and the
-    guard above is decorative.
+    ``len(legacy) <= N`` leaves a reusable slot the moment one file is
+    correctly bucketed: a later change can remove one entry and add a
+    different one in the same diff, keep the count at N, and pass every
+    guard while the new file still carries no marker and ``-m core`` skips
+    it. That is precisely the hole this whole file exists to close.
+
+    So the frozen set lives *here*, independent of conftest, and conftest's
+    list is checked as a subset of it. Removals pass; additions cannot.
     """
-    legacy = _legacy_keys()
-    assert len(legacy) <= 95, (
-        f"_UNBUCKETED_LEGACY grew to {len(legacy)} (ceiling 95). It is frozen "
-        "debt from #805: move files OUT of it into `_FILE_MARKERS`, never in. "
-        "If you are draining it, lower the ceiling in this test to match."
+    extra = sorted(_legacy_keys() - _FROZEN_LEGACY)
+    assert not extra, (
+        "these files were added to `_UNBUCKETED_LEGACY`, which is frozen "
+        "debt (#805) and accepts removals only:\n  "
+        + "\n  ".join(extra)
+        + "\n\nBucket them in `_FILE_MARKERS` instead."
+    )
+
+
+def test_every_registered_bucket_is_a_real_bucket():
+    """A typo'd bucket silently deselects the file.
+
+    ``pytest_collection_modifyitems`` does ``getattr(pytest.mark, marker)``,
+    which happily creates an unknown marker — pytest only *warns* about it,
+    since this repo does not enable strict markers. So
+    ``"test_new.py": "algoritm"`` registers cleanly, passes every other guard
+    here, and is still deselected by ``pytest -m core``: the file looks
+    bucketed and runs nowhere.
+    """
+    bad = {f: b for f, b in _registered_items().items() if b not in _VALID_BUCKETS}
+    assert not bad, (
+        "these entries in `_FILE_MARKERS` name a bucket that does not "
+        f"exist (valid: {sorted(_VALID_BUCKETS)}):\n  "
+        + "\n  ".join(f"{f}: {b!r}" for f, b in sorted(bad.items()))
     )
 
 
