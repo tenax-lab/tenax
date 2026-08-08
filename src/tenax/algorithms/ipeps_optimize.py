@@ -3413,6 +3413,12 @@ def _optimize_gs_ad_tensor_2site(
                 # amplification so chi-ceiling collapse runs (e.g. v9d/v9h)
                 # have a smoking-gun trace.  Populated by the fused fixed-point
                 # backward; empty dict on the explicit-AD path.
+                #
+                # ``resid`` is the one to read: ``converged`` reports only
+                # that the solver hit its own stopping criterion, which is a
+                # different norm from the gate's and so can be True while the
+                # relative residual is 1e-2 (#824).  Unlike ||lam||/amp it is
+                # not gated on _F3_DIAG_COMPUTE_NORMS, so it is always real.
                 if config.gs_implicit_ad:
                     from tenax.algorithms._ctm_energy_ad import (
                         get_last_implicit_ad_diagnostics,
@@ -3424,6 +3430,7 @@ def _optimize_gs_ad_tensor_2site(
                             f"[iPEPS-AD:2site-tensor] step {step + 1}/{config.gs_num_steps} "
                             f"GMRES n_iter={_diag.get('n_iter', '?')} "
                             f"converged={_diag.get('converged', '?')} "
+                            f"resid={_diag.get('adjoint_residual', float('nan')):.3e} "
                             f"diverged={_diag.get('diverged', '?')} "
                             f"||lam||={_diag.get('lam_norm', float('nan')):.3e} "
                             f"amp={_diag.get('amplification', float('nan')):.3e}",
