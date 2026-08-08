@@ -80,7 +80,7 @@ behavior was to accept the setting and silently do something else.
 
 ### Fixes
 
-- **`FiniteMPS.norm()` returned exactly 0.0 for symmetric MPS** (#819, PR #820 — *pending merge; drop this entry if it does not land before the tag*) — the
+- **`FiniteMPS.norm()` returned exactly 0.0 for symmetric MPS** (#819) — the
   bra was built with `conj()`, which conjugates the data but leaves the flows
   alone, so every physical pairing was OUT-against-OUT, no block matched, and
   the overlap collapsed to `0j`. Now uses `bar()`. `norm()` also takes the
