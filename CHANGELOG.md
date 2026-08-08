@@ -2,8 +2,7 @@
 
 ## Unreleased
 
-*(Becomes v0.8.3. Staying in the v0.8.x patch line per the versioning strategy —
-approaching v1.0.0 as a coherent milestone.)*
+## v0.8.3 (2026-08-09)
 
 A correctness release. The headline feature is root implicit AD for CTMRG
 (#715), but the reason to upgrade is the set of silent-wrong-answer defects
