@@ -2,6 +2,125 @@
 
 ## Unreleased
 
+*(Becomes v0.8.3. Staying in the v0.8.x patch line per the versioning strategy —
+approaching v1.0.0 as a coherent milestone.)*
+
+A correctness release. The headline feature is root implicit AD for CTMRG
+(#715), but the reason to upgrade is the set of silent-wrong-answer defects
+closed alongside it.
+
+### ⚠️ Results affected — please re-check
+
+Three defects in this cycle produced **plausible, non-crashing, wrong numbers**.
+If you have results from v0.8.2 or earlier, check whether they came through any
+of these paths.
+
+- **DMRG returned a state that was not the one whose energy it reported**
+  (#816). If you passed an explicit `phys_charges` to `build_auto_mpo`, the MPS
+  and MPO could disagree on the *order* of the physical charges. Symmetric
+  contraction pairs sectors by charge *value*, so DMRG still converged to the
+  true ground state and reported the true energy — while `DMRGResult.mps` came
+  back in a **permuted physical basis**. Occupations, correlators and
+  entanglement read off that state were silently wrong, and the energy check
+  that would normally catch it *passed*. Found while measuring orbital-cut
+  entanglement of an FQH ground state, where energies reproduced ED exactly at
+  every size. Not fermion-specific: an XXZ chain hides it only because its
+  Sz=0 ground state is spin-flip symmetric.
+
+- **The SVD and eigh adjoint kernels were wrong** (#750, #751, #752, #753) —
+  AD gradients disagreed with finite differences. Affects any
+  gradient-based optimization that went through those decompositions.
+
+- **The 1x1 CTM recipe collapses the environment to rank-1 corners** (#723,
+  #726, #747) — producing χ-independent, effectively mean-field energies on
+  what was the default path. The showcase energies computed on it have been
+  retracted (#771); the performance results stand. `ctm_tensor` now defaults to
+  the 2x2 recipe. **Re-runs are still outstanding (#747), and the split-CTM
+  rank-1 collapse (#726) remains open** — this cycle changed the default and
+  retracted the affected numbers; it did not re-derive them.
+
+### Behavior changes
+
+Several configurations that previously ran now raise. In every case the old
+behavior was to accept the setting and silently do something else.
+
+- `ctm_ad_mode="root_implicit"` rejects `gs_optimizer="cg"` and `gs_c4v=True`
+  (#792). CG ran plain gradient descent under the CG name; nothing projected
+  into the C4v basis. `gs_line_search` **warns** rather than raising, because it
+  is effectively default-on and refusing it would reject the path's own default
+  configuration.
+- `dmrg()` rejects an MPS and MPO whose physical legs carry different charge
+  orders (#816). Remedy: `build_random_symmetric_mps` gained `phys_charges`, so
+  both can be built from the same array.
+- `FiniteMPS.norm()` raises on an overlap that is complex, negative, or exactly
+  zero from non-zero tensors (#819) — all impossible for a true `<psi|psi>`,
+  all previously laundered into a plausible float by `abs()`.
+- A masked (non-finite) gradient no longer ends a root-implicit optimization
+  (#812), so a contaminated run consumes more of its step budget instead of
+  exiting early having optimized nothing.
+
+### Features
+
+- **Root implicit AD for CTMRG** (#715, arXiv:2607.15030) — the converged
+  environment is characterised as the root of an algebraic equation and the
+  gradient comes from a single un-nested linear solve, so **no SVD or eigh
+  backward appears in the gradient path**. Phase 0 (C4v), Phase 1
+  (asymmetric), Phase 2 (unit cell, 2x2 FD parity 5.6e-10), Phase 3 slice 1
+  (`SymmetricTensor`), wired behind `ctm_ad_mode="root_implicit"`. This is a
+  *stability* feature, not a speed one: it removes the degenerate-singular-value
+  failure class outright. **#715 remains open**: the default `recipe="2x2"`
+  performs three SVDs per direction while the paper derives the characteristic
+  equations for a single truncated SVD, and nothing yet detects an inaccurate
+  root-implicit gradient (#785).
+- **Charge-arithmetic boundary on `BaseSymmetry`** (#733, #734) — all charge
+  arithmetic goes through the symmetry, including mixed-flow `ProductSymmetry`
+  and fusion.
+- **Collapsed-CTM environment detection** (#770) instead of silently reporting
+  collapsed environments.
+
+### Fixes
+
+- **`FiniteMPS.norm()` returned exactly 0.0 for symmetric MPS** (#819, PR #820 — *pending merge; drop this entry if it does not land before the tag*) — the
+  bra was built with `conj()`, which conjugates the data but leaves the flows
+  alone, so every physical pairing was OUT-against-OUT, no block matched, and
+  the overlap collapsed to `0j`. Now uses `bar()`. `norm()` also takes the
+  orthogonality-centre fast path when one is set (O(χ²d) instead of O(Lχ³)),
+  following ITensor.
+- **Mixed real/complex multi-operand einsum crashed on CUDA** (#813) — JAX
+  propagates the final complex result type onto an intermediate `dot_general`
+  whose own operands are both real, and cuBLASLt has no such kernel. Took out
+  22 gauge tests on GPU while CI (CPU-only) stayed green.
+- **Root-implicit gates failed open** (#796, #787, #784) — a NaN residual
+  passed the gate; `gauge_consistency` reported a NaN cotangent as 0.0
+  (perfect); the multisite gate kept a pre-#778 tolerance it could never meet.
+- **Implicit-AD backward discarded the GMRES convergence flag** (#801) — an
+  unconverged adjoint yielded a gradient wrong by roughly the residual, with
+  nothing downstream able to tell.
+- **Root-implicit NaN gradients on physical simple-update states** (#772, #779)
+  — the retained CTM spectrum is now rank-capped and the residual gate follows
+  the clamp that sets its floor.
+- **RDM symmetrised before trace-normalising** (#725, #742, #748) — 8 further
+  sites routed through `_normalise_rdm`, plus a gauge leak in `_normalise_rdm`
+  itself.
+- **Block-sparse decompositions ignored `left_labels`/`right_labels`** (#689).
+- **C4v enlarged corner did not absorb the site tensor** (#760).
+- **Asymmetric root-implicit AD on complex states** (#721), and the env
+  convention at the energy boundary (#718) — gradient 3.06e-2 → 4.1e-8.
+- **Elementwise CTM convergence criterion** could not converge on forward-only
+  scans (#780, still open for the underlying D=4 case); `ms_per_sweep` reported the best-metric iteration rather than
+  the sweeps performed (#781).
+- **`ipeps_optimize` ↔ `ipeps_optimize_root_implicit` import cycle** (#790) —
+  shared helpers hoisted into `_ipeps_optimize_shared`; the architecture guard
+  had been red since #773 and so could not catch a new cycle.
+
+### CI / tests
+
+- **A test file in no bucket now fails CI** (#805, #806). Files absent from the
+  bucket table were silently deselected by `-m core` and ran in no required
+  job — which is how #790 and #803 sat red unnoticed. 95 files remain in
+  `_UNBUCKETED_LEGACY` (#805).
+- Phase 2 cell-shift tables gated in required CI (#730).
+
 ## v0.8.2 (2026-07-29)
 
 A consolidation release: the direction-dependent CTM work from v0.8.1's cycle
