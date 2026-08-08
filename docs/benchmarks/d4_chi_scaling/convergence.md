@@ -2,6 +2,29 @@
 
 QMC reference E/site = -0.669437
 
+> **⚠️ These energies are superseded — #747.** The scanned state was optimized
+> at `gs_recipe="1x1"`, against a CTM environment that collapses to rank-1
+> corners (#723/#726). The scan below is sound — it ran `2x2` throughout — but
+> the state it scans is badly optimized, so **+6.04e-03 is not the D=4
+> truncation error**.
+>
+> Run 2 (#747 comment 4, 2026-08-05) re-optimized at `gs_recipe="2x2"`, with
+> `corner_rank == χ` in all seven cells:
+>
+> | χ | E/site | err vs QMC | sweeps | corner_rank |
+> |---|--------|------------|--------|-------------|
+> | 16 | -0.6638308456 | +5.606e-03 | 54 | 16 |
+> | 24 | -0.6639137982 | +5.523e-03 | 54 | 24 |
+> | 32 | -0.6639289593 | +5.508e-03 | 39 | 32 |
+> | 48 | -0.6639337605 | +5.503e-03 | 42 | 48 |
+> | 64 | -0.6639343531 | +5.503e-03 | 78 | 64 |
+> | 96 | -0.6639345149 | +5.502e-03 | 14 | 96 |
+> | 128 | **-0.6639345178** | **+5.502e-03** | 18 | 128 |
+>
+> That run's `A_opt` was stopped at step 14, so **+5.50e-03 is also an upper
+> bound**, not a converged variational result. Both tables agree that χ≈32
+> saturates the scan; they disagree on the level by 5.4e-04.
+
 > **The `conv` column reads `N` everywhere, and that is a criterion artifact —
 > issue #780.** This run inherited `CTMConfig.ctm_conv_method="elementwise"`,
 > which compares raw environment tensor entries between sweeps. A CTM
