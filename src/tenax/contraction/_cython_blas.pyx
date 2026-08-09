@@ -1052,9 +1052,14 @@ cdef double _ba_norm_impl(dict blocks):
 cdef void _ba_axpy_impl(dict blocks_x, dict blocks_y, double alpha):
     """y[k] += alpha * x[k] for shared keys only, in-place via BLAS.
 
-    Keys in blocks_x but not blocks_y are skipped.  This is safe for the
-    Lanczos use-case: H_eff is block-diagonal in charge sectors, so matvec
-    never introduces keys absent from the initial vector.
+    Keys in ``blocks_x`` but not ``blocks_y`` are skipped.  **Callers that need
+    y += alpha*x must use ``_ba_axpy_union_impl``.**  This variant previously
+    carried a Lanczos-specific safety argument -- H_eff is block-diagonal, so
+    the matvec never introduces keys absent from the initial vector -- which
+    bounds the key set from above and says nothing about ``y`` being *narrower*
+    than ``x``.  That is the direction Lanczos reorthogonalisation hits, and it
+    left w non-orthogonal to a basis vector in every sector w happened to lack
+    (#829).  Only use this where the skip is the intended semantics.
     """
     cdef int n, inc = 1
     cdef double a_d = alpha
@@ -1126,8 +1131,15 @@ cdef void _ba_axpy_union_impl(dict blocks_x, dict blocks_y, double alpha):
 
 
 cdef void _ba_sub_scaled_impl(dict w_blocks, dict q_blocks, double scalar):
-    """w -= scalar * q (calls _ba_axpy_impl with -scalar)."""
-    _ba_axpy_impl(q_blocks, w_blocks, -scalar)
+    """w -= scalar * q, union of keys (calls _ba_axpy_union_impl with -scalar).
+
+    Union, not shared-keys-only: the pure-Python ``ba_sub_scaled`` inserts keys
+    present only in ``q`` (``core/_block_array.py``), and a sector where ``w``
+    is implicitly zero must become ``-scalar * q[k]`` or ``w`` is left
+    non-orthogonal to ``q`` there.  Using the shared-keys form here made the
+    Cython and Python Lanczos paths disagree on the same input (#829).
+    """
+    _ba_axpy_union_impl(q_blocks, w_blocks, -scalar)
 
 
 cdef void _ba_scale_impl(dict blocks, double scalar):
@@ -1961,10 +1973,10 @@ cdef void _lanczos_reorth_impl(list basis_blocks_list, dict w_blocks):
                 with nogil:
                     coeff += _ddot(&n, qp, &inc, wp, &inc)
 
-            # Phase 2: w -= coeff * q via _ba_axpy_impl (safe in-place update)
+            # Phase 2: w -= coeff * q, union of keys (see _ba_sub_scaled_impl).
             if coeff == 0.0:
                 continue
-            _ba_axpy_impl(q_blocks, w_blocks, -coeff)
+            _ba_axpy_union_impl(q_blocks, w_blocks, -coeff)
 
         elif dtype_code == 1:
             # Phase 1: coeff = <q|w> via zdotc (full complex)
@@ -1992,11 +2004,14 @@ cdef void _lanczos_reorth_impl(list basis_blocks_list, dict w_blocks):
             # Phase 2: w -= coeff * q via _ba_axpy_impl (safe in-place update)
             if z_coeff_accum == 0.0:
                 continue
-            # _ba_axpy_impl only takes double alpha; for complex we fall back
+            # _ba_axpy_union_impl only takes double alpha; for complex we fall
+            # back, keeping its union-of-keys semantics (#829).
             for k in q_blocks:
                 wk = w_blocks.get(k)
                 if wk is not None:
                     w_blocks[k] = wk - z_coeff_accum * q_blocks[k]
+                else:
+                    w_blocks[k] = -(z_coeff_accum * q_blocks[k])
 
         elif dtype_code == 2:
             # Phase 1: coeff = <q|w> via cdotc (full complex)
@@ -2028,6 +2043,8 @@ cdef void _lanczos_reorth_impl(list basis_blocks_list, dict w_blocks):
                 wk = w_blocks.get(k)
                 if wk is not None:
                     w_blocks[k] = wk - c_coeff_accum * q_blocks[k]
+                else:
+                    w_blocks[k] = -(c_coeff_accum * q_blocks[k])
 
         else:
             # Fallback: numpy (full complex overlap)
@@ -2043,6 +2060,8 @@ cdef void _lanczos_reorth_impl(list basis_blocks_list, dict w_blocks):
                 wk = w_blocks.get(k)
                 if wk is not None:
                     w_blocks[k] = wk - fb_coeff * q_blocks[k]
+                else:
+                    w_blocks[k] = -(fb_coeff * q_blocks[k])
 
 
 def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
@@ -2055,7 +2074,7 @@ def cython_lanczos_reorth(list basis_blocks_list, dict w_blocks):
 # ------------------------------------------------------------------ #
 
 def cython_ba_sub_scaled_inplace(dict w_blocks, dict q_blocks, double scalar):
-    """w[k] -= scalar * q[k] for all shared keys. In-place, no allocation.
+    """w[k] -= scalar * q[k], union of keys.  In-place for shared keys.
 
     Replaces ``ba_sub_scaled`` in the Lanczos hot loop, avoiding dict and
     array creation on every call (~87K calls per DMRG run).
@@ -2136,3 +2155,13 @@ def cython_ba_sub_scaled_inplace(dict w_blocks, dict q_blocks, double scalar):
                     wk = wk.copy()
                     w_blocks[k] = wk
                 wk -= scalar * q_blocks[k]
+
+    # Union of keys.  The four in-place loops above skip sectors absent from
+    # w, because BLAS needs an existing destination buffer; a sector present
+    # only in q must still become -scalar * q[k], or w is left non-orthogonal
+    # there and this diverges from the pure-Python ``ba_sub_scaled`` (#829).
+    # Done as a separate pass so the hot loops stay untouched -- it is a dict
+    # lookup per key and inserts nothing in the common equal-keys case.
+    for k in q_blocks:
+        if w_blocks.get(k) is None:
+            w_blocks[k] = -(scalar * q_blocks[k])

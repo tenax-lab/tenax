@@ -271,7 +271,19 @@ class TestCythonLanczosReorth:
 
     @staticmethod
     def _sequential_reorth(basis_blocks_list, w_blocks):
-        """Reference implementation: sequential inner + axpy per basis vector."""
+        """Reference implementation: sequential inner + axpy per basis vector.
+
+        Union of keys, matching ``core._block_array.ba_sub_scaled`` -- which is
+        what ``dmrg.py`` runs when the Cython path is disabled, and therefore
+        the only thing this reference may encode.
+
+        It previously skipped keys absent from ``w`` (``if wk is not None``),
+        reproducing the very defect the Cython side had, so
+        ``test_partial_key_overlap`` asserted agreement between two
+        implementations that were wrong in the same way and passed while #829
+        was live.  A hand-rolled reference is only worth having if it is
+        derived from the real one.
+        """
         for q_blocks in basis_blocks_list:
             coeff = 0.0
             for k in q_blocks:
@@ -284,6 +296,8 @@ class TestCythonLanczosReorth:
                 wk = w_blocks.get(k)
                 if wk is not None:
                     w_blocks[k] = wk - coeff * q_blocks[k]
+                else:
+                    w_blocks[k] = -(coeff * q_blocks[k])
 
     def _make_random_blocks(self, rng, keys, shapes, dtype=np.float64):
         """Create a dict of random blocks with given keys and shapes."""
@@ -328,6 +342,9 @@ class TestCythonLanczosReorth:
         cython_lanczos_reorth(basis, w_fused)
         self._sequential_reorth(basis, w_seq)
 
+        # Key sets too, not just the shared values: the sectors a basis vector
+        # has and ``w`` lacks are precisely the ones #829 dropped.
+        assert sorted(w_fused) == sorted(w_seq), (sorted(w_fused), sorted(w_seq))
         for k in w_fused:
             np.testing.assert_allclose(w_fused[k], w_seq[k], rtol=1e-12, atol=1e-14)
 

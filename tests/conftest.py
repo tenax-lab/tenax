@@ -179,6 +179,12 @@ _FILE_MARKERS = {
     "test_padded_linalg.py": "core",
     "test_lanczos_np.py": "algorithm",
     "test_block_array.py": "core",
+    # Cython/Python parity for the Lanczos block-array ops (#829).  dmrg.py
+    # picks between the two at import time, so a semantic gap makes the same
+    # input converge differently depending on whether the extension loaded --
+    # and the extension is the default.  Pure numpy on 2-element blocks,
+    # microseconds, so it belongs in the required gate.
+    "test_cython_lanczos_block_keys.py": "core",
     "test_dmrg3s.py": "algorithm",
     "test_dmrg_cython.py": "algorithm",
     "test_ipeps_config.py": "core",
