@@ -708,11 +708,25 @@ def optimize_gs_ad(
             "tracked as a follow-up issue."
         )
 
-    # Resolve projector_backward policy before dispatch so every downstream
-    # helper (1-site, 2-site, reference-C4v) sees the same CTM config.  No
-    # silent gauge promotion — explicit user choices are preserved.
-    # See docs/plans/2026-04-13-multisite-c4v-reference-ad-plan.md Task 8.
-    config = _resolve_projector_backward(config)
+    # Validate the implicit-AD CTM combination -- but only for configs that
+    # reach the path those requirements describe.  ``svd``/``qr`` projectors,
+    # phase gauge and element-wise convergence are properties of the *fused
+    # fixed-point* implicit backward, not of implicit AD in general, and the
+    # two engines dispatched below own their own validation: the root-implicit
+    # path runs ``validate_root_implicit_config`` and reads none of these three
+    # knobs, while the C4v-reference sweep's natural projector is the isometric
+    # ``"eigh"`` this check rejected outright.
+    #
+    # That rejection was a false one, not a guard doing its job: on a C4v state
+    # the enlarged corner is symmetric, so Fishman's two projectors coincide
+    # (‖P_1 - P_2‖ ~ 3e-15) and eigh / qr / svd converge to the same energy to
+    # 12 digits.  The check was refusing a configuration it had no claim over.
+    #
+    # No silent gauge promotion either way -- explicit user choices are
+    # preserved on every path.  See
+    # docs/plans/2026-04-13-multisite-c4v-reference-ad-plan.md Task 8.
+    if not (use_root_implicit_path(config) or _use_reference_c4v_path(config)):
+        config = _resolve_projector_backward(config)
 
     # Checkpointing is wired for the 2-site and 1-site (incl. coarse-grained
     # cg_gates) paths via _optimize_gs_ad_tensor / _optimize_gs_ad_2site.

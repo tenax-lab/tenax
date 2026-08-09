@@ -107,6 +107,12 @@ _FILE_MARKERS = {
     # The bucket guard itself (#805). Pure filesystem inspection, microseconds,
     # and it must run in the gate it protects or it protects nothing.
     "test_bucket_registry.py": "core",
+    # Scope of the implicit-AD CTM guard (#802 rows for #349/#350/#343). The
+    # dispatch half is mocked at the engine boundary (microseconds); the one
+    # numeric test converges three D=2 chi=8 C4v CTMs, ~4.5s of a ~5s file. It
+    # gates a merge because the failure it prevents -- the guard regrowing to
+    # cover paths it does not describe -- is a silent config-time refusal.
+    "test_implicit_ad_guard_scope.py": "core",
     # Arnoldi spectral-radius estimator: the divergence precheck for the
     # explicit-AD CTM backward (``if rho >= threshold: raise``).  Pure linear
     # algebra on 3x3 matrices, ~1s for the file.  Bucketed out of
