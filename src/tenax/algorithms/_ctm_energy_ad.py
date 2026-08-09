@@ -118,57 +118,28 @@ def _warn_if_adjoint_unconverged(
     an iPEPS optimization that aborts mid-run on one bad backward is usually
     worse for the caller than one that continues with a warned-about gradient.
     The C4v sibling (#716) makes the same choice.
+
+    The fused fixed-point branch does not come through here.  It cannot: this
+    *measures* the residual with an extra matvec, and that branch already has
+    the residual for free (its Neumann step is the residual) while an extra
+    matvec would cost it +18% of the backward.  It also does not need the
+    warning — see ``_jit_fused_fixed_point_bwd``, where reaching the caller at
+    all implies the residual already cleared ``tol``.
     """
     abs_resid, b_norm = _adjoint_residual_and_rhs_norm(matvec, lam, rhs)
-    return _warn_unconverged_adjoint_residual(
-        abs_resid,
-        b_norm,
-        tol=tol,
-        budget=(
-            f"after gmres_maxiter={maxiter} iterations of a "
-            f"{restart}-dimensional Krylov space"
-        ),
-        remedy=(
-            "Raise gmres_maxiter/gmres_restart, or loosen gmres_tol if this "
-            "residual is acceptable for your use."
-        ),
-        stacklevel=3,
-    )
-
-
-def _warn_unconverged_adjoint_residual(
-    abs_resid: float,
-    b_norm: float,
-    *,
-    tol: float,
-    budget: str,
-    remedy: str,
-    stacklevel: int = 3,
-) -> float:
-    """Gate an already-measured adjoint residual, warn on a miss, return ``rel``.
-
-    Takes ``(‖r‖, ‖b‖)`` rather than the ratio because the gate and the message
-    need different things: ``_adjoint_converged`` compares the *absolute*
-    residual against the solver's own ``max(tol·‖b‖, tol)`` threshold, while
-    the caller-facing number is the *relative* residual.  Collapsing them early
-    would reintroduce the cry-wolf gate that #807 removed — on this path
-    ``‖b‖`` is O(1) but routinely below it, so a relative-only test flags
-    solves that stopped exactly where they were told to.
-
-    Shared by both adjoint solvers so the two cannot drift apart in wording or
-    in the comparison they use; ``budget`` names what was exhausted and
-    ``remedy`` what to do about it, which is all that differs between them.
-    """
     rel = abs_resid / b_norm if b_norm > 0 else abs_resid
     if not _adjoint_converged(abs_resid, b_norm, tol):
         warnings.warn(
             f"Implicit-AD CTM: adjoint solve did not converge (relative "
-            f"residual {rel:.3e} > gmres_tol {tol:.1e} {budget}). "
+            f"residual {rel:.3e} > gmres_tol {tol:.1e} after gmres_maxiter="
+            f"{maxiter} iterations of a {restart}-dimensional Krylov space). "
             "The gradient contracts a λ that does not solve "
             "(I - Jᵀ)λ = dE/denv, so it is wrong by roughly that relative "
-            f"amount and nothing downstream can tell. {remedy}",
+            "amount and nothing downstream can tell. Raise gmres_maxiter/"
+            "gmres_restart, or loosen gmres_tol if this residual is "
+            "acceptable for your use.",
             RuntimeWarning,
-            stacklevel=stacklevel,
+            stacklevel=2,
         )
     return rel
 
@@ -850,14 +821,15 @@ def get_last_implicit_ad_diagnostics() -> dict:
     Populated by the backward after every gradient call, under either
     ``adjoint_method``.  Keys:
 
-    * ``adjoint_residual`` -- ``||(I - J^T) lam - b|| / ||b||``.  **This is
-      the one that says whether the gradient is trustworthy**; the gradient
-      is wrong by roughly this relative amount.  Prefer it to ``converged``,
-      which reports only that the solver stopped on its own criterion -- a
-      different norm from the gate's, so it can read True at a relative
-      residual of 1e-2 (#824).  Cleared at the start of each backward, so a
-      missing key means the last solve did not measure one, not that it was
-      healthy.
+    * ``adjoint_residual`` -- ``||(I - J^T) lam - b|| / ||b||``, the relative
+      residual of the adjoint solve, on both ``adjoint_method`` values and in
+      the same norm, so the two are comparable.  Roughly how wrong the
+      gradient is.  On the fused fixed-point path it is the residual of the
+      penultimate Neumann iterate (see ``_jit_fused_fixed_point_bwd``) and is
+      always at most ``gmres_tol`` -- read it as the tolerance actually
+      achieved, not as a certificate for the returned ``lam``.  Cleared at
+      the start of each backward, so a missing key means the last solve did
+      not measure one rather than that it was healthy.
     * ``converged`` -- True if the fixed-point iteration crossed
       ``gmres_tol`` within ``gmres_maxiter``.
     * ``diverged`` -- True if the in-loop divergence guard fired
@@ -1310,24 +1282,32 @@ def _make_implicit_vjp_fn(
             this and passes it back as ``init_lam`` on the next call to
             warm-start the Neumann iteration.
         abs_resid, b_norm : real scalars
-            ``‖(I - Jᵀ)λ - b‖`` and ``‖b‖``, the pair ``_adjoint_converged``
-            gates on and the two the caller needs to report a relative
-            residual.  Not the loop's ``diff`` criterion, which is absolute
-            and an ℓ1-of-ℓ2 sum over leaves, so it can sit at ``gmres_tol``
-            while the residual the GMRES branch would report is orders larger
-            (#824 measured ``converged=True`` at a relative 1.5e-02).
+            ``‖(I - Jᵀ)λ_{k-1} - b‖`` and ``‖b‖`` — the loop's own convergence
+            measure, in the plain ℓ2 the GMRES branch reports, so the two
+            solvers' ``adjoint_residual`` diagnostics are comparable.  The
+            loop's ``diff`` is the *same step vector* in an ℓ1-of-ℓ2 sum over
+            leaves; reporting that instead would not be comparable to
+            anything.
 
-            Evaluated at ``λ_{k-1}``, one Neumann step behind the returned
-            ``λ_final``, because that is where it is free: the step difference
-            the loop already forms *is* the residual.  Measuring at
-            ``λ_final`` costs a second Jᵀ application, benchmarked at +18% on
-            the whole backward (92.6 -> 109.0 ms median, D=2 χ=8, n_iter=19)
-            against +0.04% for this form — too much for a diagnostic that has
-            to stay on by default to be worth anything.  Under the contraction
-            the loop requires (ρ(Jᵀ) < 1) the residual only shrinks, so this
-            over-reports slightly (measured 1.8x): it can raise a false alarm
-            but cannot hide a bad solve, which is the right direction for a
-            guard.
+            Free because the Neumann step *is* the residual,
+
+                λ_{k+1} - λ_k = b + Jᵀλ_k - λ_k = b - (I - Jᵀ)λ_k
+
+            so this is one ℓ2 over an array the loop already forms.  It is
+            therefore the residual of ``λ_{k-1}``, one step behind the
+            returned ``λ_final``, whose residual is ``‖Jᵀ(λ_k - λ_{k-1})‖``.
+            **That is not bounded by this one**: ρ(Jᵀ) < 1 gives asymptotic
+            decay, not a monotone norm, and Jᵀ here is non-normal, so a
+            transient-growth step can make the returned iterate's residual
+            larger than the reported one.  Measuring at ``λ_final`` would need
+            a second Jᵀ application, benchmarked at +18% of the whole backward
+            (92.6 -> 109.0 ms median, D=2 χ=8, n_iter=19) against +0.04% for
+            this form.
+
+            Read it as "the tolerance the loop actually achieved", not as a
+            certificate for ``λ_final``.  It is not load-bearing for
+            correctness: nothing gates on it, and the branch that returns it
+            has already met ``diff <= gmres_tol`` (see the caller).
         """
         gate_ = mutables["gate"]
         energy_fn_ = mutables["energy_fn"]
@@ -1714,28 +1694,16 @@ def _make_implicit_vjp_fn(
                 return _jit_chain_rule(
                     params_data_tuple, env_leaves, lam_leaves, g, chi=chi_post
                 )
-            # The fused loop stopped on its own criterion, so no fallback ran
-            # and nothing above has checked whether the system was actually
-            # solved.  That criterion is a different norm from the one the
-            # gate uses, so ``converged=True`` does not imply the residual
-            # cleared it (#824: converged=True at a relative 1.5e-02).
-            # Without this the default adjoint path returns a gradient wrong
-            # by percent with no residual, no warning, and a converged flag.
-            _warn_unconverged_adjoint_residual(
-                _abs_resid,
-                _b_norm,
-                tol=gmres_tol,
-                budget=(
-                    f"after {_F3_LAST_DIAGNOSTICS['n_iter']} Neumann "
-                    "iterations of the fused fixed-point loop, which stopped "
-                    "on its own step-size criterion"
-                ),
-                remedy=(
-                    "Raise gmres_maxiter, tighten gmres_tol, or switch to "
-                    "adjoint_method='gmres'."
-                ),
-                stacklevel=2,
-            )
+            # No convergence warning here, and it would be dead code if there
+            # were one.  Reaching this line means the loop set ``converged``,
+            # i.e. ``diff <= gmres_tol``; ``diff`` is the ell1-of-ell2 sum over
+            # leaves of the same step vector whose plain ell2 is ``_abs_resid``,
+            # and ||v||_2 <= ||v||_1, so ``_abs_resid <= gmres_tol`` always.
+            # The gate's threshold is ``max(tol*||b||, tol) >= tol``, so it can
+            # never fire on this branch.  The fused loop's stopping criterion
+            # *is* a residual criterion -- what it lacked was reporting, not a
+            # guard.  Pinned by
+            # test_the_fused_happy_path_is_residual_gated_by_construction.
             _cached["prev_lam_leaves"] = tuple(jax.tree.leaves(lam_final))
             return grads_tuple
         else:

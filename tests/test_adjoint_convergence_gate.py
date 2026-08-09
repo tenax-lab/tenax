@@ -335,40 +335,35 @@ def test_the_fixed_point_residual_tracks_the_tolerance():
     )
 
 
-def test_the_shared_warning_helper_gates_on_the_solver_criterion():
-    """Both solvers must reach the gate through one code path.
+def test_the_fused_happy_path_is_residual_gated_by_construction():
+    """Why the fused branch carries no convergence warning: it cannot need one.
 
-    The fused branch cannot reuse ``_warn_if_adjoint_unconverged`` — that one
-    *measures* the residual with an extra matvec, which is the +18% the fused
-    path exists to avoid.  It shares the gate instead, so a second copy of the
-    ``max(tol·‖b‖, tol)`` comparison (and of the #796 NaN handling) never gets
-    written.
+    Returning to the caller means the loop set ``converged``, i.e.
+    ``diff <= gmres_tol``.  ``diff`` is the ell1-of-ell2 sum over leaves of the
+    same step vector whose plain ell2 is the published residual, and
+    ``||v||_2 <= ||v||_1``, so the residual is always at most ``gmres_tol``
+    while the gate's threshold is ``max(tol*||b||, tol) >= tol``.  A warning
+    there would be unreachable code that reads like a guard.
+
+    Pinned as a property rather than argued in a comment: if someone changes
+    the loop's stopping criterion so it no longer implies the residual bound,
+    this fails and the branch genuinely does need a gate again.
     """
-    from tenax.algorithms._ctm_energy_ad import (
-        _warn_unconverged_adjoint_residual,
-    )
-
-    kw = {"budget": "after 18 Neumann iterations", "remedy": "x"}
-
-    # Genuine miss: ‖r‖ = 1.5e-2 against ‖b‖ = 1 and tol = 1e-6.
-    with pytest.warns(RuntimeWarning, match="adjoint solve did not converge"):
-        rel = _warn_unconverged_adjoint_residual(1.5e-2, 1.0, tol=1e-6, **kw)
-    assert rel == pytest.approx(1.5e-2)
-
-    # Healthy solve stays silent, or the guard is noise.
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter("always")
-        _warn_unconverged_adjoint_residual(1e-9, 1.0, tol=1e-6, **kw)
-    assert not rec, [str(w.message) for w in rec]
-
-    # Small ‖b‖: the solver's atol floor applies, so this is NOT a miss even
-    # though ‖r‖/‖b‖ = 1e-4 exceeds tol.  Sharing the gate is what gets this
-    # right; a relative-only test here would cry wolf (#807).
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter("always")
-        _warn_unconverged_adjoint_residual(1e-7, 1e-3, tol=1e-6, **kw)
-    assert not rec, [str(w.message) for w in rec]
-
-    # Fails closed on a non-finite residual, same as the eager branch (#796).
-    with pytest.warns(RuntimeWarning, match="adjoint solve did not converge"):
-        _warn_unconverged_adjoint_residual(float("nan"), 1.0, tol=1e-6, **kw)
+    A, H = _random_peps(), _heisenberg_gate()
+    for tol in (1e-4, 1e-6, 1e-8):
+        _grad(
+            A,
+            H,
+            maxiter=200,
+            restart=20,
+            tol=tol,
+            method="fixed_point",
+            ctm_max_iter=200,
+        )
+        diag = get_last_implicit_ad_diagnostics()
+        assert diag.get("converged") is True, (tol, diag)
+        assert diag["adjoint_residual"] <= tol, (
+            f"published residual {diag['adjoint_residual']:.3e} exceeds "
+            f"gmres_tol {tol:.1e} on the happy path — the branch now needs "
+            "the convergence gate that was removed as unreachable"
+        )
