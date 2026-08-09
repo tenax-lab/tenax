@@ -1,11 +1,24 @@
 """The frozen physical state the root-implicit engines are tested against (#772).
 
 A D=2 Heisenberg simple-update ground state, frozen rather than regenerated so
-the guard costs seconds instead of the ~2 minutes the imaginary-time evolution
-takes, and so it cannot drift when the simple-update implementation changes.
+it cannot drift when the simple-update implementation changes, and so the tests
+that use it do not each pay for the imaginary-time evolution (measured 3.6s
+cold, 0.5s once XLA has cached the compile).
 
-Regenerate with ``scripts/gen_su_fixture.py``.  ``test_the_frozen_fixture_still
-_matches_simple_update`` (slow) checks it against a live run.
+Regenerate with ``scripts/gen_su_fixture.py``.
+``test_the_frozen_fixture_still_matches_simple_update`` checks it against a
+live run.
+
+**There is deliberately no frozen energy here** (#836).  An energy literal
+used to sit beside the tensor and the test asserted the live run reproduced it
+to ``abs=1e-6``.  That assertion never passed once, and could
+not: the energy ``ipeps()`` returns for this state comes from a 2-site CTM at
+chi=6, and *this state is precisely the one whose chi=6 environment is rank-3
+of 6* -- see below.  That CTM stops on ``max_iter``, not on convergence, so the
+number moves ~7e-3 with the iteration budget and is unchanged by tightening
+``conv_tol``.  The state is reproducible; its energy at this chi is not, and a
+frozen literal for it is noise wearing a tolerance.  Compare states physically
+instead, which is what the test now does.
 
 This state matters because it *violates* the retained-spectrum precondition of
 the covariant characteristic equations: its half-infinite environment retains
@@ -28,7 +41,6 @@ from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
 
 # labels = ['u', 'd', 'l', 'r', 'phys']
-PHYSICAL_SU_D2_E_SU = -0.5517095758652025
 PHYSICAL_SU_D2_DATA = np.array(
     [
         [
