@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### ⚠️ Published performance claims retracted
+
+- **The v0.8.2 iPEPS multi-GPU / split-CTM frontier numbers were measured
+  against a collapsed CTM environment and are retracted** (#747, #825). The
+  #672 benchmark ran `recipe="1x1"` on both arms; that projector drives the
+  environment to a rank-1 corner (#723/#726), i.e. a χ_eff=1 mean-field
+  boundary, so its (D,χ) reach figures described how cheaply *that* scales
+  rather than the reach of a converged CTM. Re-derived at `recipe="2x2"` on
+  A100-80GB, with `corner_rank` gated and every ceiling walled:
+
+  | claim as published | re-measured |
+  |---|---|
+  | "split-CTM on 1 GPU beats dense on 2 across the whole (D,χ) frontier" | **ties** dense-2GPU at D=8 (χ=96) and D=10 (χ=48); wins **2× only at D=12** |
+  | frontier reach D=10 χ≥128, D=12 χ96 | **D=8 χ=96, D=10 χ=48, D=12 χ=32** |
+  | split-1GPU ceilings χ=224 (D=8) / χ=128 (D=10), compile-bound | **χ=96 / χ=48**, and **memory**-bound — every autotuner wall converts to a plain OOM under `--xla_gpu_autotune_level=0` |
+  | dense shard relief ~1.1–1.4×/device, never extends D-reach | **0.88–1.77×/device** (at D=12 sharding *costs* 14%); extends reach once, D=8 χ=64→96 |
+
+  **The multi-GPU CTM-AD NO-GO itself is unaffected** — it rests on the
+  SVD-replication mechanism, which is recipe-independent. What changed is the
+  split-vs-dense comparison layered on top of it. Split-CTM is still the better
+  path on equal hardware (1.5× in χ at D=8, 2× at D=12) and still matches a
+  2-GPU dense run using one GPU at D=12; the advantage is simply much smaller
+  than published, and it *erodes with χ* — 2.66× in peak at χ=16 down to 1.02×
+  at the ceiling.
+
+  One caveat on attribution: a same-recipe control showed that replacing the
+  BFC allocator with `cuda_async` alone moves the *dense* arm (D=12 χ=16 goes
+  autotuner-fail → OK at unchanged `1x1`), so #672's "dense cannot compile even
+  χ16 / split is the only path that runs D=12" falls to the allocator rather
+  than the recipe. The split-side collapse is cleanly the recipe — its controls
+  reproduce to ≤1.8%.
+
 ## v0.8.3 (2026-08-09)
 
 A correctness release. The headline feature is root implicit AD for CTMRG
@@ -171,12 +203,17 @@ additive features (multi-GPU HOTRG, 2-site split-CTM, Potts helpers).
 
 ### Research / Docs
 
-- **Multi-GPU CTM-AD characterized as NO-GO** (#632, #672, #673, #678, #680) —
-  dense sharding gives only ~1.1–1.4×/device and never extends D-reach;
-  split-CTM on 1 GPU beats dense on 2 across the whole (D,χ) frontier. Root
-  cause is path-agnostic: XLA lowers the projector SVD as unshardable and
+- **Multi-GPU CTM-AD characterized as NO-GO** (#632, #672, #673, #678, #680).
+  Root cause is path-agnostic: XLA lowers the projector SVD as unshardable and
   all-gathers whatever GSPMD sharded. TRG is likewise not a sharding target
-  (no χ⁶ intermediate); HOTRG is, and shipped above.
+  (no χ⁶ intermediate); HOTRG is, and shipped above. **The NO-GO stands, but
+  two figures published in this entry were measured against a collapsed CTM
+  environment and are retracted — see Unreleased (#747, #825).** They were:
+  "dense sharding gives only ~1.1–1.4×/device and never extends D-reach"
+  (re-measured: 0.88–1.77×/device, and it does extend reach once, D=8 χ=64→96)
+  and "split-CTM on 1 GPU beats dense on 2 across the whole (D,χ) frontier"
+  (re-measured: split *ties* dense-2GPU at D=8 and D=10 and wins 2× only at
+  D=12).
 - `CLAUDE.md` / `AGENTS.md` rightsized for Claude 5-generation context
   engineering (#709), and the documented merge command corrected — never pass
   `--delete-branch` with a merge queue, which closes the PR instead of merging

@@ -225,6 +225,12 @@ _FILE_MARKERS = {
     # script.  (test_frontier_probe.py above is NOT in this group -- it runs a
     # real D=2 chi=6 CTM energy+gradient, so it is library behaviour.)
     "test_frontier_bench_guard.py": "algorithm",
+    # Same group, same reason: bookkeeping helpers of the #672 re-derivation
+    # driver under scripts/ (gate classification, cache identity, wall set,
+    # device labelling), path-loaded and jax-free.  Not library behaviour, so
+    # it does not gate a merge -- but it is what keeps a crashed gate cell from
+    # being recorded as a confirmed rank-1 collapse (#747).
+    "test_bench_672_driver_guard.py": "algorithm",
 }
 
 
