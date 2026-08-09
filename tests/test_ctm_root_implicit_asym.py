@@ -27,7 +27,7 @@ from tenax.algorithms._ctm_tensor_init import (
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
-from tests._su_fixtures import PHYSICAL_SU_D2_E_SU, physical_su_d2
+from tests._su_fixtures import physical_su_d2
 
 
 def _site_tensor(D=2, d=2, seed=42, eps=1.0):
@@ -1427,12 +1427,43 @@ def test_the_random_fixture_keeps_its_full_rank(chi):
     assert rep["retained_smin_rtol"] > 1e-5
 
 
-@pytest.mark.slow
+@pytest.mark.core
 def test_the_frozen_fixture_still_matches_simple_update():
     """The frozen literal must stay the state it claims to be.
 
+    ``core`` (13s) rather than the file's ``algorithm``, and no longer
+    ``slow``.  It was ``@pytest.mark.slow`` in an ``algorithm`` file, which put
+    it outside ``-m core`` *and* outside ``-m "not slow"`` -- so it ran only on
+    push to main, which is how a test that had never passed stayed unnoticed
+    from the commit that added it (#836).  A drift guard for the fixture
+    #772/#778/#784/#785 all depend on belongs in the gate that blocks a merge.
+
     Compares *physically*: a simple-update tensor is defined only up to a bond
     gauge, so an element-wise diff would be wrong even when nothing drifted.
+
+    **On the energy assertion that used to open this test** (#836).  It read
+    ``assert E_live == pytest.approx(PHYSICAL_SU_D2_E_SU, abs=1e-6)`` and had
+    never passed once -- not at HEAD, not on main, not at the commit that
+    introduced it -- so everything below it had never executed.  It could not
+    have passed, and re-freezing the literal would only have re-armed it,
+    because the energy ``ipeps()`` returns here is not a property of the state.
+    It is a 2-site CTM at chi=6 on a state whose usable environment rank at
+    chi=6 is 3 of 6 (see ``_su_fixtures``), and that CTM does not converge:
+
+        max_iter=100 -> -0.541373    conv_tol=1e-11 -> unchanged
+        max_iter=120 -> -0.548673    conv_tol=1e-12 -> unchanged
+        max_iter=300 -> -0.543002
+
+    Tightening the tolerance changes nothing while the iteration budget moves E
+    by ~7e-3, which is the signature of a sweep that stops on ``max_iter``
+    rather than on convergence.  A chi scan is worse still (-0.272 at chi=4,
+    -0.541 at 6, -0.278 at 8, -0.556 at 12).  Freezing any of those at
+    ``abs=1e-6`` freezes noise.
+
+    So the drift check is the physical comparison alone.  It is a far better
+    one than the energy ever was: the two states agree to ~1e-11 relative, nine
+    orders inside the gate, on the exact quantities the fixture exists to
+    provide.
     """
     import importlib.util
     import pathlib
@@ -1445,17 +1476,40 @@ def test_the_frozen_fixture_still_matches_simple_update():
     spec.loader.exec_module(gen_su_fixture)
     build = gen_su_fixture.build
 
-    E_live, A_live = build()
-    assert E_live == pytest.approx(PHYSICAL_SU_D2_E_SU, abs=1e-6)
-    env_l, a_l, _m, _p = M.converge(
-        A_live, 4, max_iter=100, conv_tol=1e-11, return_projectors=True
-    )
-    env_f, a_f, _m, _p = M.converge(
-        physical_su_d2(), 4, max_iter=100, conv_tol=1e-11, return_projectors=True
-    )
-    live = M.retained_rank_report(env_l, a_l, 4)["retained_smin_rtol"]
-    frozen = M.retained_rank_report(env_f, a_f, 4)["retained_smin_rtol"]
-    assert live == pytest.approx(frozen, rel=1e-3)
+    _E_live, A_live = build()
+    A_frozen = physical_su_d2()
+
+    # Swept rather than checked at chi=4 alone: the fixture's whole claim is
+    # that the retained spectrum *collapses with chi* (3.0e-08 / 8.4e-10 /
+    # 2.1e-13 at chi=4/6/8), and a single chi cannot tell a state that still
+    # does that from one that merely happens to match at one cut.
+    #
+    # On ``rel=1e-3``.  Inherited, and kept deliberately rather than by
+    # default.  Measured: live vs frozen agree to 6e-12 / 1.1e-10 / 1.2e-10 at
+    # chi=4/6/8, and ``retained_smin_rtol`` responds linearly at ~10x a
+    # perturbation of the tensor, so this gate trips on element drift above
+    # ~1e-4 and 1e-6 would trip above ~1e-7.  Not tightened: the drift it
+    # exists to catch (a simple-update change) is orders larger than either
+    # bound, and this test now runs in the *required* gate, which includes
+    # macOS -- #756 is what a threshold with too little platform margin costs.
+    for chi in (4, 6, 8):
+        env_l, a_l, _m, _p = M.converge(
+            A_live, chi, max_iter=100, conv_tol=1e-11, return_projectors=True
+        )
+        env_f, a_f, _m, _p = M.converge(
+            A_frozen, chi, max_iter=100, conv_tol=1e-11, return_projectors=True
+        )
+        rep_l = M.retained_rank_report(env_l, a_l, chi)
+        rep_f = M.retained_rank_report(env_f, a_f, chi)
+        assert rep_l["retained_smin_rtol"] == pytest.approx(
+            rep_f["retained_smin_rtol"], rel=1e-3
+        ), f"retained spectrum drifted at chi={chi}"
+        # The rank is what #772 turned on, and it is an integer -- so it can
+        # shift without moving ``retained_smin_rtol`` past a 1e-3 gate.
+        assert rep_l["usable_rank"] == rep_f["usable_rank"], (
+            f"usable_rank drifted at chi={chi}: live {rep_l['usable_rank']} "
+            f"vs frozen {rep_f['usable_rank']}"
+        )
 
 
 @pytest.mark.parametrize("chi", [4, 6, 8, 12])

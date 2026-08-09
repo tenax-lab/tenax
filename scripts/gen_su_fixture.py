@@ -35,7 +35,13 @@ def build():
 if __name__ == "__main__":
     E, A = build()
     print(f"# labels = {list(A.labels())}")
-    print(f"PHYSICAL_SU_D2_E_SU = {E!r}")
+    # The energy is printed as a comment, NOT as a paste-in literal (#836).
+    # ``ipeps`` evaluates it with a 2-site CTM at the config's chi=6, and this
+    # state is the one whose chi=6 environment is rank-3 of 6 -- that sweep
+    # stops on max_iter rather than converging, so E moves ~7e-3 with the
+    # iteration budget while conv_tol does nothing.  A frozen literal for it
+    # cannot hold; the test compares states physically instead.
+    print(f"# E_su (diagnostic only, not reproducible -- see #836) = {E!r}")
     print("PHYSICAL_SU_D2_DATA = np.array(")
     print(f"    {np.asarray(A.todense()).tolist()!r}")
     print(")")
