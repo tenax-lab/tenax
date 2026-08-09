@@ -118,6 +118,13 @@ def _warn_if_adjoint_unconverged(
     an iPEPS optimization that aborts mid-run on one bad backward is usually
     worse for the caller than one that continues with a warned-about gradient.
     The C4v sibling (#716) makes the same choice.
+
+    The fused fixed-point branch does not come through here.  It cannot: this
+    *measures* the residual with an extra matvec, and that branch already has
+    the residual for free (its Neumann step is the residual) while an extra
+    matvec would cost it +18% of the backward.  It also does not need the
+    warning — see ``_jit_fused_fixed_point_bwd``, where reaching the caller at
+    all implies the residual already cleared ``tol``.
     """
     abs_resid, b_norm = _adjoint_residual_and_rhs_norm(matvec, lam, rhs)
     rel = abs_resid / b_norm if b_norm > 0 else abs_resid
@@ -811,9 +818,18 @@ def set_implicit_ad_norm_diagnostics(enabled: bool) -> bool:
 def get_last_implicit_ad_diagnostics() -> dict:
     """Snapshot of the most recent implicit-AD adjoint solve diagnostics.
 
-    Populated by the fused fixed-point backward (``adjoint_method="fixed_point"``)
-    after every gradient call.  Keys:
+    Populated by the backward after every gradient call, under either
+    ``adjoint_method``.  Keys:
 
+    * ``adjoint_residual`` -- ``||(I - J^T) lam - b|| / ||b||``, the relative
+      residual of the adjoint solve, on both ``adjoint_method`` values and in
+      the same norm, so the two are comparable.  Roughly how wrong the
+      gradient is.  On the fused fixed-point path it is the residual of the
+      penultimate Neumann iterate (see ``_jit_fused_fixed_point_bwd``) and is
+      always at most ``gmres_tol`` -- read it as the tolerance actually
+      achieved, not as a certificate for the returned ``lam``.  Cleared at
+      the start of each backward, so a missing key means the last solve did
+      not measure one rather than that it was healthy.
     * ``converged`` -- True if the fixed-point iteration crossed
       ``gmres_tol`` within ``gmres_maxiter``.
     * ``diverged`` -- True if the in-loop divergence guard fired
@@ -1265,6 +1281,33 @@ def _make_implicit_vjp_fn(
             Final adjoint vector, shaped like ``dE_denv``.  Caller caches
             this and passes it back as ``init_lam`` on the next call to
             warm-start the Neumann iteration.
+        abs_resid, b_norm : real scalars
+            ``‖(I - Jᵀ)λ_{k-1} - b‖`` and ``‖b‖`` — the loop's own convergence
+            measure, in the plain ℓ2 the GMRES branch reports, so the two
+            solvers' ``adjoint_residual`` diagnostics are comparable.  The
+            loop's ``diff`` is the *same step vector* in an ℓ1-of-ℓ2 sum over
+            leaves; reporting that instead would not be comparable to
+            anything.
+
+            Free because the Neumann step *is* the residual,
+
+                λ_{k+1} - λ_k = b + Jᵀλ_k - λ_k = b - (I - Jᵀ)λ_k
+
+            so this is one ℓ2 over an array the loop already forms.  It is
+            therefore the residual of ``λ_{k-1}``, one step behind the
+            returned ``λ_final``, whose residual is ``‖Jᵀ(λ_k - λ_{k-1})‖``.
+            **That is not bounded by this one**: ρ(Jᵀ) < 1 gives asymptotic
+            decay, not a monotone norm, and Jᵀ here is non-normal, so a
+            transient-growth step can make the returned iterate's residual
+            larger than the reported one.  Measuring at ``λ_final`` would need
+            a second Jᵀ application, benchmarked at +18% of the whole backward
+            (92.6 -> 109.0 ms median, D=2 χ=8, n_iter=19) against +0.04% for
+            this form.
+
+            Read it as "the tolerance the loop actually achieved", not as a
+            certificate for ``λ_final``.  It is not load-bearing for
+            correctness: nothing gates on it, and the branch that returns it
+            has already met ``diff <= gmres_tol`` (see the caller).
         """
         gate_ = mutables["gate"]
         energy_fn_ = mutables["energy_fn"]
@@ -1317,31 +1360,46 @@ def _make_implicit_vjp_fn(
         init_diff = jnp.array(jnp.inf, dtype=real_dtype)
         init_k = jnp.array(0, dtype=jnp.int32)
         init_diverged = jnp.array(False)
+        # Fails closed: if the body never runs (gmres_maxiter=0) this stays inf
+        # and ``_adjoint_converged`` reports not-converged rather than nothing.
+        init_resid = jnp.array(jnp.inf, dtype=real_dtype)
 
         tol_arr = jnp.array(gmres_tol, dtype=real_dtype)
         maxiter_arr = jnp.array(gmres_maxiter, dtype=jnp.int32)
 
         def cond_fn(carry):
-            _lam, prev_diff, k, diverged = carry
+            _lam, prev_diff, k, diverged, _resid = carry
             return (k < maxiter_arr) & (~diverged) & (prev_diff > tol_arr)
 
         def body_fn(carry):
-            lam, prev_diff, k, _diverged = carry
+            lam, prev_diff, k, _diverged, _resid = carry
             jt_lam = apply_Jt(lam)
             new_lam = tuple(b + j for b, j in zip(dE_denv, jt_lam))
-            diff = sum(jnp.linalg.norm(n - p) for n, p in zip(new_lam, lam)).astype(
+            delta = tuple(n - p for n, p in zip(new_lam, lam))
+            diff = sum(jnp.linalg.norm(d) for d in delta).astype(real_dtype)
+            # ‖(I - Jᵀ)λ_k - b‖ for free: the Neumann step *is* the residual,
+            #   λ_{k+1} - λ_k = b + Jᵀλ_k - λ_k = b - (I - Jᵀ)λ_k
+            # so this is one L2 over an array already formed, not a second Jᵀ
+            # application.  Kept separate from ``diff``, which is an ℓ1-of-ℓ2
+            # sum over leaves and drives the stopping criterion — the two are
+            # different norms and only this one is what the GMRES branch gates
+            # and reports (#824).
+            resid = jnp.sqrt(sum(jnp.sum(jnp.abs(d) ** 2) for d in delta)).astype(
                 real_dtype
             )
             # Divergence guard: same trigger as F2 Python loop.
             new_diverged = (diff > prev_diff) & (k > jnp.array(5, jnp.int32))
-            return (new_lam, diff, k + jnp.array(1, jnp.int32), new_diverged)
+            return (new_lam, diff, k + jnp.array(1, jnp.int32), new_diverged, resid)
 
-        lam_final, final_diff, n_iter, diverged = jax.lax.while_loop(
+        lam_final, final_diff, n_iter, diverged, abs_resid = jax.lax.while_loop(
             cond_fn,
             body_fn,
-            (init_lam_local, init_diff, init_k, init_diverged),
+            (init_lam_local, init_diff, init_k, init_diverged, init_resid),
         )
         converged = final_diff <= tol_arr
+        b_norm = jnp.sqrt(sum(jnp.sum(jnp.abs(b) ** 2) for b in dE_denv)).astype(
+            real_dtype
+        )
 
         # --- 4. Chain rule: direct dE/dparams + indirect J_p^T @ lam ---
         def energy_from_params(p_tuple):
@@ -1370,7 +1428,7 @@ def _make_implicit_vjp_fn(
         indirect = vjp_sweep_params(lam_final)[0]
 
         total = jax.tree.map(lambda d, ind: g_scalar * (d + ind), direct, indirect)
-        return (total,), diverged, converged, n_iter, lam_final
+        return (total,), diverged, converged, n_iter, lam_final, abs_resid, b_norm
 
     @partial(jax.jit, static_argnames=("chi",))
     def _jit_gmres_solve(params_data_tuple, env_leaves, rhs, *, chi):
@@ -1422,6 +1480,14 @@ def _make_implicit_vjp_fn(
         per distinct chi value visited (#516 chi-lock).
         """
         params_data_tuple, env_leaves, chi_post = residuals
+
+        # Drop the previous backward's residual before any branch can return.
+        # ``_F3_LAST_DIAGNOSTICS`` is module-global, so a path that fails to
+        # publish one would otherwise hand the caller a stale value from an
+        # unrelated solve and read as a healthy adjoint (#824).  Absent beats
+        # wrong: every branch below sets it, and if a future one forgets, the
+        # consumer sees a missing key rather than someone else's number.
+        _F3_LAST_DIAGNOSTICS.pop("adjoint_residual", None)
 
         # ``adjoint_residual`` is written only where an eager solve actually
         # runs.  Clear it first so a fused fixed-point backward that never
@@ -1522,6 +1588,8 @@ def _make_implicit_vjp_fn(
                 _converged,
                 _n_iter,
                 lam_final,
+                _abs_resid,
+                _b_norm,
             ) = _jit_fused_fixed_point_bwd(
                 params_data_tuple, env_leaves, g, init_lam, chi=chi_post
             )
@@ -1529,6 +1597,11 @@ def _make_implicit_vjp_fn(
             _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
             _F3_LAST_DIAGNOSTICS["n_iter"] = int(jax.device_get(_n_iter))
             _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = invalidated_by_shape
+            _abs_resid = float(jax.device_get(_abs_resid))
+            _b_norm = float(jax.device_get(_b_norm))
+            _F3_LAST_DIAGNOSTICS["adjoint_residual"] = (
+                _abs_resid / _b_norm if _b_norm > 0 else _abs_resid
+            )
             # Adjoint-amplification diagnostic: ||lam_final|| vs ||init_lam||.
             # Large ratios point to (I - J^T) being near-singular (typical at
             # chi-ceiling with degenerate retained SVs in the frozen
@@ -1621,6 +1694,16 @@ def _make_implicit_vjp_fn(
                 return _jit_chain_rule(
                     params_data_tuple, env_leaves, lam_leaves, g, chi=chi_post
                 )
+            # No convergence warning here, and it would be dead code if there
+            # were one.  Reaching this line means the loop set ``converged``,
+            # i.e. ``diff <= gmres_tol``; ``diff`` is the ell1-of-ell2 sum over
+            # leaves of the same step vector whose plain ell2 is ``_abs_resid``,
+            # and ||v||_2 <= ||v||_1, so ``_abs_resid <= gmres_tol`` always.
+            # The gate's threshold is ``max(tol*||b||, tol) >= tol``, so it can
+            # never fire on this branch.  The fused loop's stopping criterion
+            # *is* a residual criterion -- what it lacked was reporting, not a
+            # guard.  Pinned by
+            # test_the_fused_happy_path_is_residual_gated_by_construction.
             _cached["prev_lam_leaves"] = tuple(jax.tree.leaves(lam_final))
             return grads_tuple
         else:

@@ -21,13 +21,18 @@ residual has to be measured.
 
 from __future__ import annotations
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
+from tenax.algorithms._ctm_energy_ad import (
+    ctm_energy_implicit,
+    get_last_implicit_ad_diagnostics,
+)
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
 from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor
 
@@ -105,7 +110,6 @@ def test_a_converged_gmres_adjoint_is_silent():
     coin flip rather than a property of the guard.
     """
     A, H = _random_peps(), _heisenberg_gate()
-    import warnings
 
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
@@ -219,21 +223,24 @@ def test_a_non_finite_rhs_norm_cannot_make_the_threshold_swallow_the_residual():
     assert _adjoint_converged(1e-9, float("nan"), 1e-6) is False
 
 
-def test_a_successful_fixed_point_backward_clears_a_stale_residual():
+def test_a_successful_fixed_point_backward_replaces_a_stale_residual():
     """Diagnostics must describe the latest solve, not a previous one.
 
-    ``adjoint_residual`` is written only on the eager paths.  Without an
-    explicit reset, a later successful fused fixed-point backward leaves the
-    old value in place, so a consumer reads a failed solve's residual next to
-    the current solve's ``converged=True``.
+    Originally pinned as "the fused path clears the key", because that path
+    measured nothing and absent was the best it could do.  It now measures its
+    own residual (#824), so the same requirement is met more strongly: the
+    value describes *this* solve rather than merely not describing the last
+    one.  The assertion tracks that — what must never happen is the previous
+    solve's number sitting next to this solve's ``converged=True``.
     """
     from tenax.algorithms import _ctm_energy_ad as M
 
     A, H = _random_peps(), _heisenberg_gate()
-    # Starve the budget so the eager fallback runs and records a residual.
+    # Starve the budget so the eager fallback runs and records a bad residual.
     with pytest.warns(RuntimeWarning):
         _grad(A, H, maxiter=1, restart=1, tol=1e-14)
-    assert M._F3_LAST_DIAGNOSTICS.get("adjoint_residual") is not None
+    starved = M._F3_LAST_DIAGNOSTICS.get("adjoint_residual")
+    assert starved is not None and starved > 1e-8, starved
 
     # Now a healthy fixed-point backward: the stale value must not survive it.
     # Converged forward (see _grad) so "healthy" is a fact, not a coin flip.
@@ -246,9 +253,117 @@ def test_a_successful_fixed_point_backward_clears_a_stale_residual():
         method="fixed_point",
         ctm_max_iter=200,
     )
-    stale = M._F3_LAST_DIAGNOSTICS.get("adjoint_residual")
-    assert stale is None, (
-        f"stale adjoint_residual={stale} survived a successful fixed-point "
+    fresh = M._F3_LAST_DIAGNOSTICS.get("adjoint_residual")
+    assert fresh is not None, (
+        "the fused fixed-point backward published no residual at all; a "
+        "consumer cannot distinguish that from a solve it never ran"
+    )
+    assert fresh != starved, (
+        f"stale adjoint_residual={starved} survived a successful fixed-point "
         "backward; get_last_implicit_ad_diagnostics() would report it "
         "alongside converged=True for a different solve"
     )
+    assert fresh < 1e-5, f"healthy solve reported residual {fresh}"
+
+
+# --- #824: the fused fixed-point happy path -------------------------------
+
+
+def test_the_fixed_point_happy_path_publishes_a_residual():
+    """The default solver must report a residual when it *succeeds*, too.
+
+    ``test_the_default_fixed_point_path_is_covered_too`` above only reaches
+    the eager-GMRES fallback — it starves the budget so the fused loop fails.
+    When that loop stops on its own criterion it returns straight to the
+    caller, and before #824 that path measured nothing: no residual, no
+    warning, ``converged=True``.  Since it is the default ``adjoint_method``
+    that was the hole covering the majority of real backward calls, and #824
+    measured it returning a gradient wrong by 3e-3 on CUDA under exactly that
+    clean bill of health.
+    """
+    A, H = _random_peps(), _heisenberg_gate()
+    _grad(
+        A,
+        H,
+        maxiter=200,
+        restart=20,
+        tol=1e-6,
+        method="fixed_point",
+        ctm_max_iter=200,
+    )
+
+    diag = get_last_implicit_ad_diagnostics()
+    assert diag.get("converged") is True, (
+        "precondition: this test must exercise the fused happy path, not the "
+        f"eager fallback (diagnostics={diag})"
+    )
+    assert "adjoint_residual" in diag, (
+        "the fused fixed-point loop returned without publishing a residual; "
+        f"diagnostics={diag}"
+    )
+    assert diag["adjoint_residual"] < 1e-5, diag
+
+
+def test_the_fixed_point_residual_tracks_the_tolerance():
+    """Pins that the number is measured, not a constant.
+
+    A hardcoded ``0.0`` — or an alias of the loop's own ``diff``, which is a
+    different norm — passes the presence check above.  Stopping the Neumann
+    iteration earlier via a looser ``gmres_tol`` has to show up as a *larger*
+    reported residual, which only holds if ``‖(I - Jᵀ)λ - b‖/‖b‖`` is really
+    being evaluated.
+    """
+    A, H = _random_peps(), _heisenberg_gate()
+    seen = {}
+    for tol in (1e-2, 1e-8):
+        _grad(
+            A,
+            H,
+            maxiter=200,
+            restart=20,
+            tol=tol,
+            method="fixed_point",
+            ctm_max_iter=200,
+        )
+        diag = get_last_implicit_ad_diagnostics()
+        assert diag.get("converged") is True, (tol, diag)
+        seen[tol] = diag["adjoint_residual"]
+
+    assert seen[1e-2] > seen[1e-8], (
+        f"residual did not respond to gmres_tol: {seen} — it is not being "
+        "measured at the returned λ"
+    )
+
+
+def test_the_fused_happy_path_is_residual_gated_by_construction():
+    """Why the fused branch carries no convergence warning: it cannot need one.
+
+    Returning to the caller means the loop set ``converged``, i.e.
+    ``diff <= gmres_tol``.  ``diff`` is the ell1-of-ell2 sum over leaves of the
+    same step vector whose plain ell2 is the published residual, and
+    ``||v||_2 <= ||v||_1``, so the residual is always at most ``gmres_tol``
+    while the gate's threshold is ``max(tol*||b||, tol) >= tol``.  A warning
+    there would be unreachable code that reads like a guard.
+
+    Pinned as a property rather than argued in a comment: if someone changes
+    the loop's stopping criterion so it no longer implies the residual bound,
+    this fails and the branch genuinely does need a gate again.
+    """
+    A, H = _random_peps(), _heisenberg_gate()
+    for tol in (1e-4, 1e-6, 1e-8):
+        _grad(
+            A,
+            H,
+            maxiter=200,
+            restart=20,
+            tol=tol,
+            method="fixed_point",
+            ctm_max_iter=200,
+        )
+        diag = get_last_implicit_ad_diagnostics()
+        assert diag.get("converged") is True, (tol, diag)
+        assert diag["adjoint_residual"] <= tol, (
+            f"published residual {diag['adjoint_residual']:.3e} exceeds "
+            f"gmres_tol {tol:.1e} on the happy path — the branch now needs "
+            "the convergence gate that was removed as unreachable"
+        )
