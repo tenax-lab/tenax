@@ -31,7 +31,10 @@ ORIGINAL = {
     (12, "dense", 2): "cannot compile chi=16 (autotuner)",
 }
 
-WALL = ("OOM", "COMPILE_FAIL", "FAILED", "TIMEOUT")
+# Kept identical to ``bench_672_rederivation.WALL``.  When the two disagree,
+# the ladder climbs past a cell this reports as a ceiling, and the published
+# reach is whichever of the two happened to be looser.
+WALL = ("OOM", "COMPILE_FAIL", "FAILED", "TIMEOUT", "NO_OUTPUT")
 
 
 def load(path):
@@ -116,6 +119,20 @@ def main():
                 f"  D={g['D']:2d} {g['path']:6s} chi={g['chi']:4d} "
                 f"corner_rank={g.get('corner_rank')}  {g['status']}"
             )
+        # An execution failure is not evidence about rank.  Called out
+        # separately so a crashed gate cell cannot be read as a collapse --
+        # the gate exists to test whether 2x2 collapses, so that conflation
+        # would be self-confirming.
+        unrun = [g for g in gates if g["status"] in ("GATE_NO_RANK", "GATE_TIMEOUT")]
+        if unrun:
+            print(
+                f"\n  {len(unrun)} gate cell(s) produced no rank "
+                "(crash/timeout) — these are UNMEASURED, not collapsed:"
+            )
+            for g in unrun:
+                print(
+                    f"    D={g['D']:2d} {g['path']:6s} chi={g['chi']:4d} {g['status']}"
+                )
     else:
         print("\n(no collapse-gate results yet)")
 

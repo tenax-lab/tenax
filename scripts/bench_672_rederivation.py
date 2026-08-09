@@ -39,8 +39,31 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 DRIVER = REPO / "examples" / "bench_ctm_frontier_grad.py"
 
 
-def _cell_key(path, D, chi, n_dev, recipe, chunk, autotune0=False):
-    key = f"{path}|D{D}|chi{chi}|n{n_dev}|{recipe}|chunk{chunk}"
+# A ladder stops at the first cell that cannot run.  Kept identical to
+# ``analyze_672_rederivation.WALL`` -- the two disagreed at first (the analyzer
+# counted TIMEOUT as a wall, the ladder climbed past it), which is how a run
+# ends up with a reach number the analyzer then reports as a ceiling.
+#
+# NO_OUTPUT belongs here for the same reason it is easy to omit: a process
+# killed by the OOM-killer, or one that dies before the driver prints its
+# ``path=`` line, lands there rather than in OOM.  Climbing past it means
+# spending hours on configurations that provably cannot fit.
+WALL = ("OOM", "COMPILE_FAIL", "FAILED", "TIMEOUT", "NO_OUTPUT")
+
+
+def _cell_key(path, D, chi, n_dev, recipe, chunk, max_iter, autotune0=False):
+    """Cache identity of a cell.
+
+    Every knob that changes what is measured has to appear here, or a re-run
+    into the same ``--outdir`` silently reuses a result produced under a
+    different protocol.  ``max_iter`` is one: it sets how many CTM sweeps the
+    cell runs, so it moves convergence, wall time and the cumulative peak.
+
+    That is the failure this whole benchmark exists to undo -- #672's
+    conclusion was invalidated by an unrecorded protocol difference
+    (``recipe=1x1``), and a resumable cache is the same trap one level down.
+    """
+    key = f"{path}|D{D}|chi{chi}|n{n_dev}|{recipe}|chunk{chunk}|it{max_iter}"
     return key + "|at0" if autotune0 else key
 
 
@@ -85,6 +108,31 @@ def _classify(stdout, returncode, timed_out):
         if line.startswith("path=") and "SKIP" in line:
             return "SKIP", None, None, None, line.strip()
     return "NO_OUTPUT", None, None, None, (stdout[-400:] if stdout else "")
+
+
+def _classify_gate(out, timed_out):
+    """Map gate-run output to ``(status, corner_rank)``.
+
+    A gate that cannot fail open is not a gate.  This run exists to establish
+    that ``recipe=2x2`` does **not** collapse the environment to a rank-1
+    corner (#723/#726/#747), so folding "the subprocess died" into
+    ``GATE_COLLAPSED`` would manufacture evidence for the very proposition
+    under test -- every OOM, timeout and crash would read as a confirmed
+    collapse.  An unparsed rank is an execution failure and is reported as
+    one; ``GATE_COLLAPSED`` is reserved for a rank that was actually read.
+
+    Split out of ``run_cell`` so the classification is checkable without
+    launching a subprocess.
+    """
+    rank = None
+    for line in out.splitlines():
+        if line.startswith("GATE") and "corner_rank=" in line:
+            for tok in line.split():
+                if tok.startswith("corner_rank="):
+                    rank = int(tok.split("=")[1].split("/")[0])
+    if rank is None:
+        return ("GATE_TIMEOUT" if timed_out else "GATE_NO_RANK"), None
+    return ("GATE_OK" if rank > 1 else "GATE_COLLAPSED"), rank
 
 
 def run_cell(
@@ -140,14 +188,13 @@ def run_cell(
     wall = time.perf_counter() - t0
 
     if gate:
-        rank = None
-        for line in out.splitlines():
-            if line.startswith("GATE") and "corner_rank=" in line:
-                for tok in line.split():
-                    if tok.startswith("corner_rank="):
-                        rank = int(tok.split("=")[1].split("/")[0])
-        status = "GATE_OK" if rank and rank > 1 else "GATE_COLLAPSED"
-        return {"status": status, "corner_rank": rank, "wall_s": round(wall, 1)}
+        status, rank = _classify_gate(out, timed_out)
+        return {
+            "status": status,
+            "corner_rank": rank,
+            "wall_s": round(wall, 1),
+            "detail": ("" if rank is not None else out[-300:]),
+        }
 
     status, peak, energy, gnorm, detail = _classify(out, rc, timed_out)
     return {
@@ -186,6 +233,22 @@ def main():
     )
     args = ap.parse_args()
 
+    # ``bench_ctm_frontier_grad.py`` neuters the flag on this path --
+    #     shard = args.shard and args.path == "dense"
+    # -- and says so only on stdout, which never reaches results.jsonl.  Left
+    # alone, `--path split --shard --gpus 0,1` runs single-device while this
+    # wrapper records n_devices=2, and the analyzer keys arms on
+    # ``(D, path, n_devices)``, so it would publish a split 2-GPU arm that was
+    # never run.  That is the exact axis #672's headline is measured on
+    # ("split on 1 GPU dominates dense multi-GPU"), so reject the combination
+    # rather than silently relabelling what the caller asked for.
+    if args.shard and args.path == "split":
+        ap.error(
+            "--shard is not supported on --path split: the driver runs it "
+            "single-device, so the run would be recorded under a device count "
+            "it never used. Drop --shard, or use --path dense."
+        )
+
     outdir = REPO / args.outdir
     outdir.mkdir(parents=True, exist_ok=True)
     results_path = outdir / ("gate.jsonl" if args.gate else "results.jsonl")
@@ -197,12 +260,19 @@ def main():
 
     for chi in args.chi:
         key = _cell_key(
-            args.path, args.D, chi, n_dev, args.recipe, args.chunk, args.autotune0
+            args.path,
+            args.D,
+            chi,
+            n_dev,
+            args.recipe,
+            args.chunk,
+            args.max_iter,
+            args.autotune0,
         )
         if key in done:
             rec = done[key]
             print(f"  [cached] chi={chi:4d} {rec['status']}", flush=True)
-            if not args.no_stop and rec["status"] in ("OOM", "COMPILE_FAIL", "FAILED"):
+            if not args.no_stop and rec["status"] in WALL:
                 print(f"  ladder stops at chi={chi} ({rec['status']}, cached)")
                 break
             continue
@@ -229,6 +299,7 @@ def main():
             "n_devices": n_dev,
             "recipe": args.recipe,
             "chunk": args.chunk,
+            "max_iter": args.max_iter,
             "autotune0": args.autotune0,
             "gpus": args.gpus,
             **res,
@@ -243,7 +314,7 @@ def main():
             f"wall={rec['wall_s']}s",
             flush=True,
         )
-        if not args.no_stop and rec["status"] in ("OOM", "COMPILE_FAIL", "FAILED"):
+        if not args.no_stop and rec["status"] in WALL:
             print(f"  ladder stops at chi={chi} ({rec['status']})", flush=True)
             break
 
