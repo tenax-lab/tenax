@@ -153,6 +153,18 @@ raises ``ValueError`` if any of the three components is set
 otherwise.  Explicit AD with QR projectors remains supported as a
 secondary path (see below).
 
+The trifecta describes the **fused fixed-point** implicit backward, so
+that is the only path it gates.  ``ctm_ad_mode="c4v_reference"`` and
+``ctm_ad_mode="root_implicit"`` select different engines with different
+requirements — the C4v sweep's own projector default is the isometric
+``"eigh"``, and the root-implicit entry points read none of the three
+knobs — so ``optimize_gs_ad`` skips the check for those two modes and
+lets each engine validate itself (``validate_root_implicit_config`` for
+the latter).  Until this was scoped, a C4v-reference run with the
+projector C4v actually wants was refused at config time.  Note that the
+PESS multisite path calls ``validate_ctm_for_implicit_ad`` directly and
+is unaffected: it runs the fused backward and keeps all three rules.
+
 The defaults already match the recommended combination:
 ``gs_implicit_ad=True``, ``ctm.projector_method="svd"``,
 ``ctm.forward_gauge="phase"``, ``ctm.ctm_conv_method="elementwise"``,
