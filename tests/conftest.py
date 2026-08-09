@@ -107,6 +107,13 @@ _FILE_MARKERS = {
     # The bucket guard itself (#805). Pure filesystem inspection, microseconds,
     # and it must run in the gate it protects or it protects nothing.
     "test_bucket_registry.py": "core",
+    # Arnoldi spectral-radius estimator: the divergence precheck for the
+    # explicit-AD CTM backward (``if rho >= threshold: raise``).  Pure linear
+    # algebra on 3x3 matrices, ~1s for the file.  Bucketed out of
+    # _UNBUCKETED_LEGACY because #828 was a live defect here -- a stale
+    # duplicate under-reported rho on complex input, so the guard passed a
+    # divergent adjoint -- and a guard that runs in no required job is not one.
+    "test_arnoldi.py": "core",
     # The adjoint-convergence gate on the DEFAULT iPEPS AD gradient path
     # (#801, first raised on #341).  An unconverged adjoint yields a gradient
     # that is wrong, finite, and indistinguishable downstream -- the exact
@@ -244,7 +251,6 @@ _UNBUCKETED_LEGACY = {
     "test_ad_primitives_rank_aware.py",
     "test_apply_chi_bump.py",
     "test_architecture_imports.py",
-    "test_arnoldi.py",
     "test_block_sparse_ctm_ad.py",
     "test_c4v_reference_ad.py",
     "test_chi_ramp_chi_auto_bump_deprecation.py",

@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import math
 import warnings
-from collections.abc import Callable
 from functools import partial
 
 import jax
@@ -44,6 +43,9 @@ from tenax.algorithms._ad_primitives import (
 )
 from tenax.algorithms._ad_primitives import (
     truncated_svd_symmetric_ad as truncated_svd_symmetric_ad,
+)
+from tenax.algorithms._arnoldi import (
+    arnoldi_spectral_radius as arnoldi_spectral_radius,
 )
 from tenax.algorithms._ctm_tensor import (
     CTMTensorEnv,
@@ -187,52 +189,6 @@ def _transfer_matrix_leading_eigvec(T_dense: jax.Array, n_iter: int = 30) -> jax
         v = v / (jnp.linalg.norm(v) + 1e-30)
 
     return v.real.reshape(chi, chi)
-
-
-def arnoldi_spectral_radius(
-    matvec: Callable[[jnp.ndarray], jnp.ndarray],
-    v0: jnp.ndarray,
-    n_iter: int = 20,
-) -> float:
-    """Estimate the spectral radius of a linear operator via Arnoldi iteration.
-
-    Builds an (n_iter x n_iter) upper Hessenberg matrix H from the Krylov
-    subspace {v0, A v0, A^2 v0, ...} using Modified Gram-Schmidt, then
-    returns max |eigenvalue(H)| as an approximation to rho(A).
-
-    Args:
-        matvec: Function applying the operator (e.g. J^T) to a flat vector.
-        v0: Initial vector (typically the gradient g, flattened).
-        n_iter: Number of Arnoldi iterations (default 20).
-
-    Returns:
-        Estimated spectral radius rho(A).
-    """
-    n = v0.shape[0]
-    k = min(n_iter, n)
-    Q = jnp.zeros((n, k + 1))
-    H = jnp.zeros((k + 1, k))
-
-    q = v0 / (jnp.linalg.norm(v0) + 1e-30)
-    Q = Q.at[:, 0].set(q)
-
-    actual_k = k
-    for j in range(k):
-        v = matvec(Q[:, j])
-        for i in range(j + 1):
-            h = jnp.dot(Q[:, i], v)
-            H = H.at[i, j].set(h)
-            v = v - h * Q[:, i]
-        h_next = jnp.linalg.norm(v)
-        H = H.at[j + 1, j].set(h_next)
-        if h_next < 1e-14:
-            actual_k = j + 1
-            break
-        Q = Q.at[:, j + 1].set(v / h_next)
-
-    H_k = H[:actual_k, :actual_k]
-    eigenvalues = jnp.linalg.eigvals(H_k)
-    return float(jnp.max(jnp.abs(eigenvalues)))
 
 
 def _sigma_gauge_fix_ctm_tensor(env_new, env_old):

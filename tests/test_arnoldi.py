@@ -49,3 +49,38 @@ def test_pytree_matvec():
     v0 = (jnp.ones(3), jnp.ones(4))
     rho = arnoldi_spectral_radius_pytree(matvec, v0, n_iter=20)
     assert 0.85 < rho < 0.95, f"Expected rho ~ 0.9, got {rho}"
+
+
+# --- #828: there must be exactly one implementation ------------------------
+
+
+def test_ad_utils_reexports_the_reviewed_implementation():
+    """``ad_utils`` must not carry its own copy of this function.
+
+    It did, and the copy was wrong on complex input: real Krylov buffers and an
+    unconjugated ``jnp.dot`` for the Gram-Schmidt projection.  The explicit-AD
+    CTM backward calls it as a *divergence precheck* -- ``if rho >= threshold:
+    raise CTMRGGradientError`` -- so under-reporting rho passes a divergent
+    adjoint through the guard that exists to catch it.
+
+    Pinned as an identity rather than a value check: a future edit that
+    reintroduces a local definition fails here even if it happens to be
+    correct, because two copies is the defect (#828, and #829 the same week).
+    """
+    from tenax.algorithms import _arnoldi, ad_utils
+
+    assert ad_utils.arnoldi_spectral_radius is _arnoldi.arnoldi_spectral_radius
+
+
+def test_the_explicit_ad_entry_point_is_correct_on_complex_input():
+    """The symptom #828 was filed for, at the name the backward actually calls.
+
+    ``diag(2i, 1, 0.5)`` has rho = 2 unambiguously.  The stale copy returned
+    0.972 -- below even the rho >= 1 divergence line.
+    """
+    from tenax.algorithms.ad_utils import arnoldi_spectral_radius as rho_fn
+
+    A = jnp.diag(jnp.array([2j, 1.0 + 0j, 0.5 + 0j]))
+    v0 = jnp.array([1.0 + 1j, 0.3 - 0.2j, 0.1 + 0.4j])
+    rho = rho_fn(lambda v: A @ v, v0, n_iter=3)
+    assert abs(rho - 2.0) < 1e-9, f"expected rho = 2.0, got {rho}"
