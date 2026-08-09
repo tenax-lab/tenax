@@ -5,6 +5,7 @@ from __future__ import annotations
 __all__ = [
     "_ctm_sweep",
     "_ctm_sv_diff",
+    "CTMConvergenceInfo",
     "ctm",
     "_renormalize_env",
     "_ctm_2site_sweep",
@@ -13,6 +14,8 @@ __all__ = [
     "_split_env_to_standard",
     "ctm_split",
 ]
+
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -66,11 +69,52 @@ def _ctm_sv_diff(sv_new: jax.Array, sv_old: jax.Array) -> jax.Array:
     return jnp.max(jnp.abs(sv1 - sv2))
 
 
+class CTMConvergenceInfo(NamedTuple):
+    """Whether a dense CTM sweep converged, and what it did (#839).
+
+    These entry points used to compute ``converged`` and the iteration count
+    inside their loop and then discard both, so a caller could not tell a
+    converged environment from one that silently exhausted ``max_iter`` --
+    the forward-side twin of #801/#824.  ``ipeps()`` in particular returned an
+    energy with no channel to report the environment's status.
+
+    Obtained by passing ``return_meta=True`` to :func:`ctm`, :func:`ctm_2site`
+    or :func:`ctm_split`.  Opt-in because all three are public API and their
+    return arity cannot change.
+
+    ``converged`` and ``n_iter`` come straight out of a ``lax.while_loop``
+    carry for :func:`ctm` / :func:`ctm_2site`, so they are **JAX arrays**, not
+    Python scalars.  That keeps the entry points jittable; call ``bool(...)``
+    / ``int(...)`` at the point of use.  :func:`ctm_split` runs a Python loop
+    and returns Python scalars.
+
+    Attributes:
+        converged: True when the sweep met ``conv_tol`` and stopped early.
+                   False means it ran out of iterations -- the value is
+                   whatever the last sweep produced.
+        n_iter:    Sweeps actually performed.  Equal to ``max_iter`` exactly
+                   when ``converged`` is False.  For :func:`ctm` with a QR
+                   warm-up this counts the post-warm-up loop only, matching
+                   the budget that loop was given.
+        diff:      Final value of the convergence criterion -- the max
+                   absolute difference between successive normalized corner
+                   singular-value vectors.  ``inf`` if no comparison was ever
+                   made (fewer than two sweeps).  Note this watches the corner
+                   spectrum, not the energy.
+    """
+
+    converged: jax.Array | bool
+    n_iter: jax.Array | int
+    diff: jax.Array | float
+
+
 def ctm(
     A: jax.Array,
     config: CTMConfig,
     initial_env: CTMEnvironment | None = None,
-) -> CTMEnvironment:
+    *,
+    return_meta: bool = False,
+) -> CTMEnvironment | tuple[CTMEnvironment, CTMConvergenceInfo]:
     """Compute CTM environment for a PEPS with 1x1 unit cell.
 
     Runs the CTM algorithm (Corboz/Orus scheme) until convergence.
@@ -84,9 +128,15 @@ def ctm(
         A:           Site tensor (single layer) of PEPS.
         config:      CTMConfig.
         initial_env: Optional starting environment for warm start.
+        return_meta: When True, also return a :class:`CTMConvergenceInfo`
+                     saying whether the loop converged or exhausted
+                     ``max_iter`` (#839).  Keyword-only and off by default so
+                     the return arity of this public entry point is unchanged.
 
     Returns:
-        Converged CTMEnvironment.
+        The CTMEnvironment, or ``(env, info)`` when ``return_meta=True``.
+        **The environment is not necessarily converged** -- that is what
+        ``info`` is for.
     """
     chi = config.chi
 
@@ -130,22 +180,34 @@ def ctm(
     _sv_dtype = jnp.zeros((), dtype=env.C1.dtype).real.dtype
     prev_sv = jnp.zeros(min(chi, env.C1.shape[0]), dtype=_sv_dtype)
 
-    # Carry: (env, prev_sv, iteration, converged)
-    init_carry = (env, prev_sv, jnp.array(0, dtype=jnp.int32), jnp.bool_(False))
+    # Carry: (env, prev_sv, iteration, converged, diff)
+    # ``diff`` rides along purely so it can be reported (#839); ``converged``
+    # is still derived from it inside the body, so the loop's behaviour is
+    # unchanged.  Seeded at inf: before two sweeps have run there is no
+    # comparison to report, and inf never satisfies ``< conv_tol``.
+    init_carry = (
+        env,
+        prev_sv,
+        jnp.array(0, dtype=jnp.int32),
+        jnp.bool_(False),
+        jnp.array(jnp.inf, dtype=_sv_dtype),
+    )
 
     def cond_fn(carry):
-        _, _, iteration, converged = carry
+        _, _, iteration, converged, _ = carry
         return ~converged & (iteration < max_iter)
 
     def body_fn(carry):
-        env_i, prev_sv_i, iteration, _ = carry
+        env_i, prev_sv_i, iteration, _, _ = carry
         env_i = _ctm_sweep(env_i, a, chi, renormalize, projector_method)
         current_sv = _dense_svd(env_i.C1, compute_uv=False)
         diff = _ctm_sv_diff(current_sv, prev_sv_i)
         converged = diff < conv_tol
-        return (env_i, current_sv, iteration + 1, converged)
+        return (env_i, current_sv, iteration + 1, converged, diff)
 
-    env, _, _, _ = jax.lax.while_loop(cond_fn, body_fn, init_carry)
+    env, _, n_iter, converged, diff = jax.lax.while_loop(cond_fn, body_fn, init_carry)
+    if return_meta:
+        return env, CTMConvergenceInfo(converged=converged, n_iter=n_iter, diff=diff)
     return env
 
 
@@ -201,7 +263,12 @@ def ctm_2site(
     A: jax.Array,
     B: jax.Array,
     config: CTMConfig,
-) -> tuple[CTMEnvironment, CTMEnvironment]:
+    *,
+    return_meta: bool = False,
+) -> (
+    tuple[CTMEnvironment, CTMEnvironment]
+    | tuple[CTMEnvironment, CTMEnvironment, CTMConvergenceInfo]
+):
     """Compute CTM environments for a 2-site checkerboard unit cell.
 
     .. note::
@@ -222,9 +289,17 @@ def ctm_2site(
         A: Site tensor for sublattice A, shape (D, D, D, D, d).
         B: Site tensor for sublattice B, shape (D, D, D, D, d).
         config: CTMConfig.
+        return_meta: When True, also return a :class:`CTMConvergenceInfo`
+                     saying whether the loop converged or exhausted
+                     ``max_iter`` (#839).  Keyword-only and off by default so
+                     the return arity of this public entry point is unchanged.
 
     Returns:
-        (env_A, env_B) — converged CTM environments for each sublattice.
+        ``(env_A, env_B)``, or ``(env_A, env_B, info)`` when
+        ``return_meta=True``.  **The environments are not necessarily
+        converged** -- that is what ``info`` is for.  A single ``info``
+        covers both sublattices because the loop's criterion is their
+        maximum, so they converge or fail together.
     """
     chi = config.chi
 
@@ -250,7 +325,14 @@ def ctm_2site(
     prev_sv_A = jnp.zeros(sv_size_A, dtype=env_A.C1.dtype)
     prev_sv_B = jnp.zeros(sv_size_B, dtype=env_B.C1.dtype)
 
-    # Carry: (env_A, env_B, prev_sv_A, prev_sv_B, iteration, converged)
+    # Carry: (env_A, env_B, prev_sv_A, prev_sv_B, iteration, converged, diff)
+    # ``diff`` rides along only so it can be reported (#839); ``converged`` is
+    # still derived from it in the body, so loop behaviour is unchanged.
+    # Seeded at inf -- no comparison exists before two sweeps, and inf never
+    # satisfies ``< conv_tol``.  Its dtype is taken as the *real* part of the
+    # corner dtype because ``_ctm_sv_diff`` returns a magnitude, and
+    # ``lax.while_loop`` requires an invariant carry type.
+    _diff_dtype = jnp.zeros((), dtype=env_A.C1.dtype).real.dtype
     init_carry = (
         env_A,
         env_B,
@@ -258,23 +340,33 @@ def ctm_2site(
         prev_sv_B,
         jnp.array(0, dtype=jnp.int32),
         jnp.bool_(False),
+        jnp.array(jnp.inf, dtype=_diff_dtype),
     )
 
     def cond_fn(carry):
-        _, _, _, _, iteration, converged = carry
+        _, _, _, _, iteration, converged, _ = carry
         return ~converged & (iteration < max_iter)
 
     def body_fn(carry):
-        eA, eB, psA, psB, iteration, _ = carry
+        eA, eB, psA, psB, iteration, _, _ = carry
         eA, eB = _ctm_2site_sweep(eA, eB, a_A, a_B, chi, renormalize)
         sv_A = _dense_svd(eA.C1, compute_uv=False)
         sv_B = _dense_svd(eB.C1, compute_uv=False)
         diff_A = _ctm_sv_diff(sv_A, psA)
         diff_B = _ctm_sv_diff(sv_B, psB)
-        converged = jnp.maximum(diff_A, diff_B) < conv_tol
-        return (eA, eB, sv_A, sv_B, iteration + 1, converged)
+        diff = jnp.maximum(diff_A, diff_B)
+        converged = diff < conv_tol
+        return (eA, eB, sv_A, sv_B, iteration + 1, converged, diff)
 
-    env_A, env_B, _, _, _, _ = jax.lax.while_loop(cond_fn, body_fn, init_carry)
+    env_A, env_B, _, _, n_iter, converged, diff = jax.lax.while_loop(
+        cond_fn, body_fn, init_carry
+    )
+    if return_meta:
+        return (
+            env_A,
+            env_B,
+            CTMConvergenceInfo(converged=converged, n_iter=n_iter, diff=diff),
+        )
     return env_A, env_B
 
 
@@ -367,7 +459,9 @@ def _split_env_to_standard(
 def ctm_split(
     A: jax.Array,
     config: CTMConfig,
-) -> SplitCTMEnvironment:
+    *,
+    return_meta: bool = False,
+) -> SplitCTMEnvironment | tuple[SplitCTMEnvironment, CTMConvergenceInfo]:
     """Compute split-CTM environment for a PEPS with 1x1 unit cell.
 
     Uses the split-CTMRG algorithm (arXiv:2502.10298) where ket and bra
@@ -377,9 +471,16 @@ def ctm_split(
     Args:
         A:      Site tensor of shape ``(D, D, D, D, d)``.
         config: CTMConfig with ``chi_I`` set.
+        return_meta: When True, also return a :class:`CTMConvergenceInfo`
+                     saying whether the loop converged or ran out of
+                     iterations (#839).  Keyword-only and off by default so
+                     the return arity is unchanged.
 
     Returns:
-        Converged SplitCTMEnvironment.
+        The SplitCTMEnvironment, or ``(env, info)`` when ``return_meta=True``.
+        **The environment is not necessarily converged** -- that is what
+        ``info`` is for.  Unlike :func:`ctm` / :func:`ctm_2site` this is a
+        Python loop, so ``info``'s fields are Python scalars.
     """
     chi = config.chi
     chi_I = config.chi_I if config.chi_I is not None else chi
@@ -387,14 +488,23 @@ def ctm_split(
     env = _initialize_split_ctm_env(A, chi, chi_I)
 
     prev_sv = None
+    converged = False
+    n_iter = 0
+    diff_val = float("inf")
     for _ in range(config.max_iter):
         env = _split_ctm_sweep(env, A, chi, chi_I, config.renormalize)
+        n_iter += 1
 
         current_sv = _dense_svd(env.C1, compute_uv=False)
         if prev_sv is not None:
-            diff = _ctm_sv_diff(current_sv, prev_sv)
-            if float(diff) < config.conv_tol:
+            diff_val = float(_ctm_sv_diff(current_sv, prev_sv))
+            if diff_val < config.conv_tol:
+                converged = True
                 break
         prev_sv = current_sv
 
+    if return_meta:
+        return env, CTMConvergenceInfo(
+            converged=converged, n_iter=n_iter, diff=diff_val
+        )
     return env

@@ -9,6 +9,9 @@ This module re-exports public names so that ``from tenax.algorithms.ipeps_ctm
 import X`` keeps working for downstream / notebook code.
 """
 
+from tenax.algorithms.ipeps_ctm_convergence import (
+    CTMConvergenceInfo as CTMConvergenceInfo,
+)
 from tenax.algorithms.ipeps_ctm_convergence import (  # noqa: F401
     _ctm_2site_sweep as _ctm_2site_sweep,
 )
