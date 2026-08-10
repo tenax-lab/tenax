@@ -18,7 +18,9 @@ __all__ = [
 import jax
 import jax.numpy as jnp
 
-from tenax.algorithms._ctm_tensor_energy import _normalise_rdm
+from tenax.algorithms._ctm_tensor_energy import (
+    _normalise_rdm_for_energy,
+)
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 from tenax.algorithms._split_ctm_tensor_init import SplitCTMTensorEnv
 from tenax.algorithms._tensor_utils import fuse_indices
@@ -178,7 +180,7 @@ def _rdm_1site_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     )  # consumes u_bra, l_bra, r_bra, d_bra
 
     rdm = rdm_t.todense()
-    rdm = _normalise_rdm(rdm)
+    rdm = _normalise_rdm_for_energy(rdm, "_rdm_1site_split_tensor")
     return rdm
 
 
@@ -306,7 +308,7 @@ def _rdm1x2_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm1x2_split_tensor")
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -439,7 +441,7 @@ def _rdm2x1_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm2x1_split_tensor")
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -662,7 +664,7 @@ def _rdm_diagonal_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm_diagonal_split_tensor")
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -829,7 +831,7 @@ def _rdm1x2_split_tensor_2site(
             _split_env_to_tensor_standard(env_B),
         )
 
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm1x2_split_tensor_2site")
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -979,7 +981,7 @@ def _rdm2x1_split_tensor_2site(
             _split_env_to_tensor_standard(env_B),
         )
 
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm2x1_split_tensor_2site")
     return rdm_mat.reshape(d, d, d, d)
 
 

@@ -101,6 +101,39 @@ def _normalise_rdm(mat: jax.Array) -> jax.Array:
     return 0.5 * (mat + mat.conj().T)
 
 
+def _normalise_rdm_for_energy(mat: jax.Array, context: str = "") -> jax.Array:
+    """:func:`_normalise_rdm` for an RDM that is about to be contracted with H.
+
+    Same normalisation, plus a check that the result is actually a density
+    matrix.  The two exist separately because the callers want opposite things
+    from the zero case:
+
+    * The **excitation** path legitimately passes an all-zero matrix -- a zero
+      excitation vector ``B = 0`` must have zero norm, and the zero-matrix
+      guard in :func:`_normalise_rdm` exists precisely to return ``0`` there
+      instead of ``NaN``.  Those call sites keep using the plain function.
+    * The **energy** path has no such case.  A bond whose RDM contracts to
+      zero has not measured "zero energy on that bond", it has failed to
+      measure anything, and adding its ``0`` into ``E_h + E_v`` makes the
+      total silently too small (#845: ``-0.2750`` against a true ``-0.5486``,
+      a factor of 1.995, with ``converged=True`` reported throughout).
+
+    The check runs only on concrete arrays.  Under ``jit``/``grad`` the value
+    is a tracer with no runtime value to inspect, and the AD path is hot
+    enough that a ``debug.callback`` on every bond of every sweep is not worth
+    its cost.  Drivers that want the guarantee under tracing should call
+    :func:`~tenax.algorithms._ctm_diagnostics.check_rdm` on the concrete
+    result, or :func:`~tenax.algorithms._ctm_diagnostics.check_ctm_env` on the
+    environment beforehand.
+    """
+    out = _normalise_rdm(mat)
+    if not isinstance(out, jax.core.Tracer):
+        from tenax.algorithms._ctm_diagnostics import check_rdm
+
+        check_rdm(out, context=context)
+    return out
+
+
 def _rdm_1site_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     """Single-site RDM using label-based Tensor contractions.
 
@@ -151,7 +184,7 @@ def _rdm_1site_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     )
 
     rdm = rdm_t.todense()
-    rdm = _normalise_rdm(rdm)
+    rdm = _normalise_rdm_for_energy(rdm, "_rdm_1site_tensor")
     return rdm
 
 
@@ -258,7 +291,7 @@ def _rdm_diagonal_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm_diagonal_tensor")
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -379,7 +412,7 @@ def _rdm_diagonal_tensor_4site(
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm_diagonal_tensor_4site")
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -468,7 +501,7 @@ def _rdm2x1_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm2x1_tensor")
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -556,7 +589,7 @@ def _rdm1x2_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm1x2_tensor")
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -661,7 +694,7 @@ def _rdm2x1_tensor_2site(
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm2x1_tensor_2site")
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -745,7 +778,7 @@ def _rdm1x2_tensor_2site(
     rdm = rdm_t.todense()
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm1x2_tensor_2site")
     return rdm_mat.reshape(d, d, d, d)
 
 
