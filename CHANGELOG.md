@@ -73,6 +73,14 @@
   value. Measure with `ctm_tensor(recipe="2x2")` instead. `fermionic_ipeps.py`
   absorbs `sqrt(σ)` the same way and is an untested lead for #392.
 
+  One characterization worth knowing if you compare CTM paths: **split-CTM and
+  fused-CTM agree only as χ→∞.** On a genuinely entangled D=2 state their
+  energies differ by 1.67e-05 at χ=8, falling to 9.62e-09 by χ=48 — and the gap
+  is identical to 12 digits at max_iter 100/400/2000, so it is finite-χ
+  truncation, not non-convergence. This was invisible while the state was
+  collapsing, because a near-product state made the two paths trivially
+  identical.
+
 ## v0.8.3 (2026-08-09)
 
 A correctness release. The headline feature is root implicit AD for CTMRG
