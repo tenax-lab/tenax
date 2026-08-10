@@ -177,6 +177,12 @@ def ctm(
     # out, so ``ctm()`` raised outright rather than returning a wrong answer.
     # Real states are unaffected — there ``C1.dtype`` is already real — which
     # is why this went unnoticed.
+    #
+    # The same seed exists in ``ctm_2site`` below, where it was *not* fixed
+    # here and had to be fixed separately (#842).  ``ctm_split`` is a Python
+    # loop seeded with ``prev_sv = None``, so it never had the constraint.
+    # Any new ``lax.while_loop`` entry point in this module needs the same
+    # care.
     _sv_dtype = jnp.zeros((), dtype=env.C1.dtype).real.dtype
     prev_sv = jnp.zeros(min(chi, env.C1.shape[0]), dtype=_sv_dtype)
 
@@ -319,20 +325,26 @@ def ctm_2site(
     conv_tol = config.conv_tol
     renormalize = config.renormalize
 
-    # Initial singular values (zeros — first iteration never converges)
-    sv_size_A = min(chi, env_A.C1.shape[0])
-    sv_size_B = min(chi, env_B.C1.shape[0])
-    prev_sv_A = jnp.zeros(sv_size_A, dtype=env_A.C1.dtype)
-    prev_sv_B = jnp.zeros(sv_size_B, dtype=env_B.C1.dtype)
+    # Initial singular values (zeros — first iteration never converges).
+    # Seeded with the REAL dtype, not ``C1.dtype``, for the same reason as in
+    # ``ctm`` above: ``body_fn`` assigns ``_dense_svd(..., compute_uv=False)``,
+    # which is always real, and ``lax.while_loop`` requires an invariant carry
+    # type.  ``ctm`` was fixed for this; ``ctm_2site`` was not, so it raised
+    # ``TypeError`` on any complex site tensor -- including through public
+    # ``ipeps()`` with a complex ``initial_peps`` (#842).
+    _sv_dtype_A = jnp.zeros((), dtype=env_A.C1.dtype).real.dtype
+    _sv_dtype_B = jnp.zeros((), dtype=env_B.C1.dtype).real.dtype
+    prev_sv_A = jnp.zeros(min(chi, env_A.C1.shape[0]), dtype=_sv_dtype_A)
+    prev_sv_B = jnp.zeros(min(chi, env_B.C1.shape[0]), dtype=_sv_dtype_B)
 
     # Carry: (env_A, env_B, prev_sv_A, prev_sv_B, iteration, converged, diff)
     # ``diff`` rides along only so it can be reported (#839); ``converged`` is
     # still derived from it in the body, so loop behaviour is unchanged.
     # Seeded at inf -- no comparison exists before two sweeps, and inf never
-    # satisfies ``< conv_tol``.  Its dtype is taken as the *real* part of the
-    # corner dtype because ``_ctm_sv_diff`` returns a magnitude, and
-    # ``lax.while_loop`` requires an invariant carry type.
-    _diff_dtype = jnp.zeros((), dtype=env_A.C1.dtype).real.dtype
+    # satisfies ``< conv_tol``.  Its dtype is the promotion of the two
+    # sublattice singular-value dtypes because the body reports
+    # ``max(diff_A, diff_B)``, which promotes.
+    _diff_dtype = jnp.result_type(_sv_dtype_A, _sv_dtype_B)
     init_carry = (
         env_A,
         env_B,
