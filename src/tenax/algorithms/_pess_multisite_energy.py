@@ -20,7 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms._ctm_tensor_energy import (
-    _normalise_rdm,
+    _normalise_rdm_for_energy,
     _rdm1x2_tensor_2site,
     _rdm2x1_tensor_2site,
 )
@@ -183,7 +183,7 @@ def _rdm_3site_marginal_vw_row(
     rdm = rdm_t.todense()
     d_phys = rdm.shape[0]
     rdm_mat = rdm.reshape(d_phys * d_phys, d_phys * d_phys)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm_3site_marginal_vw_row")
     return rdm_mat.reshape(d_phys, d_phys, d_phys, d_phys)
 
 
@@ -269,7 +269,7 @@ def _rdm_3site_marginal_vw_col(
     rdm = rdm_t.todense()
     d_phys = rdm.shape[0]
     rdm_mat = rdm.reshape(d_phys * d_phys, d_phys * d_phys)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm_3site_marginal_vw_col")
     return rdm_mat.reshape(d_phys, d_phys, d_phys, d_phys)
 
 

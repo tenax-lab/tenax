@@ -113,6 +113,7 @@ _FILE_MARKERS = {
     # flag goes missing again, which is exactly how it went unnoticed until a
     # scan showed conv_tol having no effect on the answer.
     "test_ctm_complex_site_tensors.py": "core",
+    "test_rdm_validity_guard.py": "core",
     "test_ctm_convergence_meta.py": "core",
     # Scope of the implicit-AD CTM guard (#802 rows for #349/#350/#343). The
     # dispatch half is mocked at the engine boundary (microseconds); the one

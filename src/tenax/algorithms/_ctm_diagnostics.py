@@ -23,11 +23,15 @@ Both are cheap enough to run unconditionally in benchmark drivers.
 from __future__ import annotations
 
 __all__ = [
+    "RDM_TRACE_TOL",
     "CollapsedEnvironmentError",
+    "CollapsedRDMError",
     "check_ctm_env",
+    "check_rdm",
     "ctm_corner_rank",
     "env_is_collapsed",
     "frozen_chi_pairs",
+    "rdm_trace_defect",
 ]
 
 import warnings
@@ -37,6 +41,92 @@ import numpy as np
 
 class CollapsedEnvironmentError(RuntimeError):
     """Raised by :func:`check_ctm_env` in ``strict`` mode on a rank-1 corner."""
+
+
+class CollapsedRDMError(RuntimeError):
+    """Raised by :func:`check_rdm` in ``strict`` mode on a non-unit trace."""
+
+
+#: Tolerance on ``|tr(rdm) - 1|``.  A trace-normalised RDM that carried any
+#: physical content has a trace of *exactly* 1 -- ``_normalise_rdm`` divides by
+#: the trace, and Hermitian symmetrisation preserves it -- so this only has to
+#: absorb the rounding of that division, never a physical spread.
+RDM_TRACE_TOL = 1e-8
+
+
+def rdm_trace_defect(rdm) -> float:
+    """``|tr(rdm) - 1|`` for a trace-normalised reduced density matrix.
+
+    Accepts the ``(d, d)`` / ``(d*d, d*d)`` matrix form or the ``(d, d, d, d)``
+    form the RDM builders return.
+
+    The value is a clean two-state discriminator rather than a quality score.
+    ``_normalise_rdm`` divides by the trace, so **any** RDM with physical
+    content comes back with trace exactly 1 and defect 0.  A defect of 1 means
+    the raw network contracted to zero and the normaliser's zero-matrix guard
+    returned zeros -- correctly, since ``0/0`` is not a density matrix.
+    """
+    M = np.asarray(rdm.todense() if hasattr(rdm, "todense") else rdm)
+    if M.ndim == 4:
+        tr = np.einsum("ijij->", M)
+    elif M.ndim == 2:
+        tr = np.trace(M)
+    else:
+        raise ValueError(
+            f"rdm_trace_defect expects a 2- or 4-leg RDM, got ndim={M.ndim}"
+        )
+    return float(abs(complex(tr) - 1.0))
+
+
+def check_rdm(
+    rdm,
+    *,
+    context: str = "",
+    tol: float = RDM_TRACE_TOL,
+    strict: bool = False,
+) -> float:
+    """Warn (or raise) when an RDM is not a density matrix; return the defect.
+
+    The failure this exists for is #845: on a degenerate corner one bond's RDM
+    network contracts to **exactly zero**, and the energy sum then adds ``0``
+    for that bond instead of its real value.  Measured at D=2, chi=4 (where
+    ``chi = D**2`` makes the corner spectrum exactly flat, ``s0/s_last = 1.00``)
+    the horizontal RDM came back with ``||rdm||_F = 0`` and ``tr = 0`` while the
+    vertical one was untouched, so ``E`` was ``-0.2750`` against ``-0.5486``
+    from every other chi -- a factor of 1.995, reported as a converged energy.
+
+    Nothing upstream catches it: the CTM convergence criterion compares corner
+    *singular values*, which are identical between the two bases, so it reports
+    ``converged=True`` with ``diff ~ 1e-17``.  See also :func:`check_ctm_env`,
+    which detects a different collapse (rank-1 corner) at the environment
+    level.
+
+    Args:
+        rdm:     A trace-normalised RDM, 2- or 4-leg.
+        context: Free-text label naming the bond (e.g. ``"2x1 horizontal"``),
+                 so the message says *which* contribution died.
+        tol:     Tolerance on ``|tr - 1|``.
+        strict:  Raise :class:`CollapsedRDMError` instead of warning.
+
+    Returns:
+        The trace defect, so callers can record it alongside the energy.
+    """
+    defect = rdm_trace_defect(rdm)
+    if defect > tol:
+        where = f" [{context}]" if context else ""
+        msg = (
+            f"reduced density matrix is not a density matrix{where}: "
+            f"|tr - 1| = {defect:.3g} (a valid RDM has trace exactly 1). "
+            f"The raw network contracted to zero or to a vanishing trace, so "
+            f"this bond contributes 0 to the energy instead of its real "
+            f"value, and the total is silently too small. This happens on a "
+            f"degenerate corner -- check the corner spectrum, and note that "
+            f"the CTM convergence flag cannot see it. See #845."
+        )
+        if strict:
+            raise CollapsedRDMError(msg)
+        warnings.warn(msg, RuntimeWarning, stacklevel=3)
+    return defect
 
 
 def _corner_spectrum(env) -> np.ndarray:
