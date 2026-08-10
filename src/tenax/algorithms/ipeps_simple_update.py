@@ -21,6 +21,47 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 # 2-site Tensor-protocol simple update                                #
 # ------------------------------------------------------------------ #
 
+# Relative cutoff for the 1/lambda pseudo-inverse.  The Vidal update divides the
+# outer lambdas back out, so a bond direction whose Schmidt value has gone to
+# zero would otherwise produce inf * 0 = NaN (observed at D=3, dt=0.01).  Null
+# directions are projected out instead, which is the standard simple-update
+# regularization.  Lambdas are normalized to max == 1, so this is absolute too.
+_LAMBDA_PINV_CUTOFF = 1e-12
+
+
+def _inv_lambda(lam: jax.Array) -> jax.Array:
+    """Pseudo-inverse of a bond-weight vector: 1/lam, or 0 on null directions."""
+    return jnp.where(lam > _LAMBDA_PINV_CUTOFF, 1.0 / jnp.where(lam > 0, lam, 1.0), 0.0)
+
+
+def _to_physical_tensor(gamma: Tensor, lam_h: jax.Array, lam_v: jax.Array) -> Tensor:
+    """Convert a Vidal ``Gamma`` site tensor to the physical iPEPS tensor.
+
+    The simple-update routines keep the state in Vidal (``Gamma``-``lambda``)
+    form: bare site tensors with the Schmidt weights held separately on the
+    bonds.  The tensor a CTM contracts is the symmetric-gauge one, carrying
+    ``sqrt(lambda)`` on **all four** virtual legs, so that every bond of the
+    lattice picks up ``sqrt(lambda) * sqrt(lambda) = lambda`` exactly once.
+
+    Args:
+        gamma: Bare site tensor with labels ``(u, d, l, r, phys)``.
+        lam_h: Horizontal bond lambda vector.
+        lam_v: Vertical bond lambda vector.
+
+    Returns:
+        The physical site tensor, normalized.
+    """
+    sqrt_h = jnp.sqrt(lam_h)
+    sqrt_v = jnp.sqrt(lam_v)
+    out = scale_bond_axis(gamma, "l", sqrt_h)
+    out = scale_bond_axis(out, "r", sqrt_h)
+    out = scale_bond_axis(out, "u", sqrt_v)
+    out = scale_bond_axis(out, "d", sqrt_v)
+    norm = float(out.norm())
+    if norm > EPS:
+        out = out * (1.0 / norm)
+    return out
+
 
 def _simple_update_2site_horizontal_tensor(
     A: Tensor,
@@ -33,6 +74,15 @@ def _simple_update_2site_horizontal_tensor(
     """2-site simple update on the horizontal bond (A.r <-> B.l).
 
     Works polymorphically with DenseTensor and SymmetricTensor.
+
+    Returns the state in Vidal (``Gamma``-``lambda``) form: the site tensors are
+    **bare**, with the bond weights carried only by the returned lambda.  Call
+    :func:`_to_physical_tensor` to get the tensor a CTM should contract.
+
+    The caller must evolve **all four** bonds of the checkerboard unit cell --
+    this call covers ``A.r <-> B.l`` only.  Driving just this bond and its
+    vertical partner leaves ``B.r <-> A.l`` and ``B.d <-> A.u`` unevolved and
+    the state spuriously dimerized (#667).
 
     Args:
         A:     Left site tensor with labels (u, d, l, r, phys).
@@ -92,13 +142,15 @@ def _simple_update_2site_horizontal_tensor(
 
     # 6. New lambda (normalized)
     lam_h_new = sigma / (jnp.max(sigma) + EPS)
-    sqrt_sig = jnp.sqrt(sigma + EPS)
 
     # 7. Reconstruct A_new from U: labels are (u, d, l, si_out, bond_new)
     #    Transpose so bond_new is in the r position: (u, d, l, bond_new, si_out)
+    #    Gamma stays BARE (#667): the shared bond's weight lives in lam_h_new and
+    #    is re-absorbed in full by step 1 of the next sweep.  Scaling it in here
+    #    as well made the bond carry lambda**1.5, which drove the state to the
+    #    product state -- see ``_to_physical_tensor`` for how it comes back.
     A_new = U.transpose((0, 1, 2, 4, 3))
     A_new = A_new.relabels({"bond_new": "r", "si_out": "phys"})
-    A_new = scale_bond_axis(A_new, "r", sqrt_sig)
 
     # 8. Reconstruct B_new from Vh: labels are (bond_new, u_B, d_B, r_B, sj_out)
     #    Transpose so bond_new is in the l position: (u_B, d_B, bond_new, r_B, sj_out)
@@ -106,11 +158,10 @@ def _simple_update_2site_horizontal_tensor(
     B_new = B_new.relabels(
         {"bond_new": "l", "u_B": "u", "d_B": "d", "r_B": "r", "sj_out": "phys"}
     )
-    B_new = scale_bond_axis(B_new, "l", sqrt_sig)
 
     # 9. Remove outer lambdas
-    inv_lam_v = 1.0 / (lam_v + EPS)
-    inv_lam_h = 1.0 / (lam_h + EPS)
+    inv_lam_v = _inv_lambda(lam_v)
+    inv_lam_h = _inv_lambda(lam_h)
     A_new = scale_bond_axis(A_new, "u", inv_lam_v)
     A_new = scale_bond_axis(A_new, "d", inv_lam_v)
     A_new = scale_bond_axis(A_new, "l", inv_lam_h)
@@ -140,7 +191,8 @@ def _simple_update_2site_vertical_tensor(
 ) -> tuple[Tensor, Tensor, jax.Array]:
     """2-site simple update on the vertical bond (A.d <-> B.u).
 
-    Works polymorphically with DenseTensor and SymmetricTensor.
+    Works polymorphically with DenseTensor and SymmetricTensor.  Returns bare
+    Vidal ``Gamma`` tensors -- see the horizontal counterpart above.
 
     Args:
         A:     Top site tensor with labels (u, d, l, r, phys).
@@ -198,13 +250,12 @@ def _simple_update_2site_vertical_tensor(
 
     # 6. New lambda (normalized)
     lam_v_new = sigma / (jnp.max(sigma) + EPS)
-    sqrt_sig = jnp.sqrt(sigma + EPS)
 
     # 7. Reconstruct A_new from U: labels are (u, l, r, si_out, bond_new)
     #    Transpose so bond_new is in the d position: (u, bond_new, l, r, si_out)
+    #    Gamma stays BARE -- see the horizontal counterpart above (#667).
     A_new = U.transpose((0, 4, 1, 2, 3))
     A_new = A_new.relabels({"bond_new": "d", "si_out": "phys"})
-    A_new = scale_bond_axis(A_new, "d", sqrt_sig)
 
     # 8. Reconstruct B_new from Vh: labels are (bond_new, d_B, l_B, r_B, sj_out)
     #    Transpose so bond_new is in the u position: (bond_new, d_B, l_B, r_B, sj_out)
@@ -212,11 +263,10 @@ def _simple_update_2site_vertical_tensor(
     B_new = Vh.relabels(
         {"bond_new": "u", "d_B": "d", "l_B": "l", "r_B": "r", "sj_out": "phys"}
     )
-    B_new = scale_bond_axis(B_new, "u", sqrt_sig)
 
     # 9. Remove outer lambdas
-    inv_lam_v = 1.0 / (lam_v + EPS)
-    inv_lam_h = 1.0 / (lam_h + EPS)
+    inv_lam_v = _inv_lambda(lam_v)
+    inv_lam_h = _inv_lambda(lam_h)
     A_new = scale_bond_axis(A_new, "u", inv_lam_v)
     A_new = scale_bond_axis(A_new, "l", inv_lam_h)
     A_new = scale_bond_axis(A_new, "r", inv_lam_h)
