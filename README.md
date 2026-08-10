@@ -477,6 +477,25 @@ env = ctm_split(A, config)
 E = compute_energy_split_ctm(A, env, gate, d=2)
 ```
 
+### Checking whether the CTM actually converged
+
+`ctm`, `ctm_2site` and `ctm_split` return an environment whether or not the
+sweep met `conv_tol` — running out of `max_iter` is not an error. Pass
+`return_meta=True` for a `CTMConvergenceInfo` saying which happened, rather
+than inferring it from an energy that silently moves with `max_iter` (#839):
+
+```python
+from tenax import CTMConfig, ctm_2site
+
+env_A, env_B, info = ctm_2site(A, B, CTMConfig(chi=16), return_meta=True)
+if not bool(info.converged):
+    print(f"stopped at max_iter after {int(info.n_iter)} sweeps, "
+          f"criterion still {float(info.diff):.2e}")
+```
+
+`info.diff` is the convergence criterion — the change in the corner singular
+values, not in the energy. `ipeps()` performs this check itself and warns.
+
 ## Honeycomb iPEPS CTM (native rank-4)
 
 Native rank-4 CTMRG for honeycomb iPEPS — six corners, three edge

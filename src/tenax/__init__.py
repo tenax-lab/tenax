@@ -255,6 +255,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "ctm": ("tenax.algorithms.ipeps_ctm", "ctm"),
     "ctm_2site": ("tenax.algorithms.ipeps_ctm", "ctm_2site"),
     "ctm_split": ("tenax.algorithms.ipeps_ctm", "ctm_split"),
+    "CTMConvergenceInfo": ("tenax.algorithms.ipeps_ctm", "CTMConvergenceInfo"),
     # honeycomb_ctm (native rank-4, 6-corner, 3-direction, 2-sublattice)
     "honeycomb_ctm_energy_implicit": (
         "tenax.algorithms.honeycomb_ctm",
@@ -468,6 +469,7 @@ __all__ = [
     "ctm",
     "ctm_2site",
     "ctm_split",
+    "CTMConvergenceInfo",
     "compute_energy_ctm_2site",
     "compute_energy_split_ctm",
     "optimize_gs_ad",

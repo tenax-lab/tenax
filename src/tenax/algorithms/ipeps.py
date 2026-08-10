@@ -20,6 +20,8 @@ Reference:
 
 from __future__ import annotations
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -449,7 +451,28 @@ def ipeps(
     # CTM environment (uses dense arrays)
     A_dense = A.todense()
     B_dense = B.todense()
-    env_A, env_B = ctm_2site(A_dense, B_dense, config.ctm)
+    env_A, env_B, ctm_info = ctm_2site(A_dense, B_dense, config.ctm, return_meta=True)
+
+    # #839: this return signature has no slot for convergence status, and the
+    # energy below is computed from the environment either way -- so an
+    # environment that merely ran out of sweeps used to be indistinguishable
+    # from a converged one.  Warn rather than raise: a non-converged CTM is a
+    # normal intermediate state during simple update (short imaginary time, a
+    # deliberately small max_iter), and raising would break every such caller.
+    # Same policy as ``check_ctm_env`` for a collapsed environment (#747).
+    if not bool(ctm_info.converged):
+        warnings.warn(
+            f"CTM did not converge in ipeps(): ran the full "
+            f"max_iter={config.ctm.max_iter} sweeps at chi={config.ctm.chi} "
+            f"without reaching conv_tol={config.ctm.conv_tol:g} (final "
+            f"criterion {float(ctm_info.diff):.3g}). The returned energy is "
+            f"computed from that environment and may not be a converged "
+            f"value -- it can move with max_iter. Raise max_iter, or call "
+            f"ctm_2site(..., return_meta=True) to inspect convergence "
+            f"directly.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     # Compute energy
     energy = compute_energy_ctm_2site(A_dense, B_dense, env_A, env_B, gate_dense, d)

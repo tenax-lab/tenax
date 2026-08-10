@@ -107,6 +107,12 @@ _FILE_MARKERS = {
     # The bucket guard itself (#805). Pure filesystem inspection, microseconds,
     # and it must run in the gate it protects or it protects nothing.
     "test_bucket_registry.py": "core",
+    # The dense CTM entry points must report whether they converged (#839).
+    # D=2, chi=6, starved budgets -- a few seconds. It belongs in the required
+    # gate because the defect it guards is *silence*: nothing fails when the
+    # flag goes missing again, which is exactly how it went unnoticed until a
+    # scan showed conv_tol having no effect on the answer.
+    "test_ctm_convergence_meta.py": "core",
     # Scope of the implicit-AD CTM guard (#802 rows for #349/#350/#343). The
     # dispatch half is mocked at the engine boundary (microseconds); the one
     # numeric test converges three D=2 chi=8 C4v CTMs, ~4.5s of a ~5s file. It
