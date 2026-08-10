@@ -116,30 +116,82 @@ def test_chi_frozen_energy_is_only_a_bug_together_with_a_rank_1_corner(su_state)
     assert r16 > r4, f"2x2 split environment did not grow with chi (rank {r4} -> {r16})"
 
 
+def _split_fused_energies(A, gate, chi):
+    env_split = ctm_split_tensor(A, chi=chi, max_iter=200, conv_tol=1e-12)
+    env_fused, _ = ctm_tensor(A, chi=chi, max_iter=200, conv_tol=1e-12)
+    return (
+        float(compute_energy_split_ctm_tensor(A, env_split, gate)),
+        float(compute_energy_ctm_tensor(A, env_fused, gate)),
+    )
+
+
 def test_split_matches_fused_oracle(su_state):
     """The split path must reach the same fixed point as the fused one.
 
     This is the *non-circular* oracle: the fused side runs its own (2x2)
     default rather than the shared broken projector, so agreement is a real
     physics check, unlike the split-1x1-vs-fused-1x1 comparison #746 flags.
+    It is the standing validity check on split-CTM and stays armed until that
+    path is stable.
+
+    **Compared at chi=48, not chi=8** (#667).  Split and fused are different
+    algorithms that truncate differently, so at finite chi they need not agree:
+    measured 1.67e-05 at chi=8 falling to 9.62e-09 at chi=48, and the gap is
+    identical to 12 digits at max_iter 100/400/2000, so it is truncation and not
+    non-convergence.  The old chi=8 / rel=1e-7 form passed only because the
+    simple-update state it ran on had collapsed to a near-product state, which
+    made both paths trivially identical -- the same #667 defect that had
+    ``test_2site_heisenberg_D2_energy`` recommending dt=0.3.
+
+    At chi=48 >> D**2=4 the boundary is essentially exact, so both schemes must
+    reproduce the *same* contraction.  That makes this a stronger oracle than
+    the chi=8 version: any disagreement here is a defect, with no truncation
+    left to excuse it.
     """
     A, gate = su_state
-    chi = 8
-    env_split = ctm_split_tensor(A, chi=chi, max_iter=100, conv_tol=1e-12)
-    env_fused, _ = ctm_tensor(A, chi=chi, max_iter=100, conv_tol=1e-12)
-    E_split = float(compute_energy_split_ctm_tensor(A, env_split, gate))
-    E_fused = float(compute_energy_ctm_tensor(A, env_fused, gate))
+    E_split, E_fused = _split_fused_energies(A, gate, chi=48)
     assert E_split == pytest.approx(E_fused, rel=1e-7), (
-        f"split-CTM energy {E_split!r} != fused 2x2 oracle {E_fused!r}"
+        f"split-CTM energy {E_split!r} != fused 2x2 oracle {E_fused!r} at "
+        f"chi=48, where truncation cannot explain it"
+    )
+
+
+def test_split_fused_gap_closes_with_chi(su_state):
+    """A defect is flat in chi; truncation shrinks.  (#762's own standard.)
+
+    The chi=48 oracle above would still pass if split-CTM were wrong by a fixed
+    amount too small to see there.  This pins the *trend*, which is what
+    separates a finite-chi truncation difference from a real disagreement.
+
+    Deliberately **not** a monotonicity assertion: the measured gap is
+    1.67e-05 / 2.49e-05 / 3.71e-06 / 1.72e-06 / 1.93e-06 / 9.62e-09 at
+    chi = 8 / 12 / 16 / 24 / 32 / 48, which rises at chi=12 and again at 32.
+    Only the endpoints are compared, with two orders of margin on a measured
+    1.7e+03 ratio.
+    """
+    A, gate = su_state
+    gaps = []
+    for chi in (8, 48):
+        E_split, E_fused = _split_fused_energies(A, gate, chi)
+        gaps.append(abs(E_split - E_fused) / abs(E_fused))
+    assert gaps[1] < gaps[0] / 10, (
+        f"split-vs-fused gap did not close with chi ({gaps[0]:.2e} at chi=8 -> "
+        f"{gaps[1]:.2e} at chi=48); a gap flat in chi is a defect, not truncation"
     )
 
 
 def test_split_corner_spectrum_matches_fused(su_state):
-    """The stronger form: the whole corner spectrum, not just the energy."""
+    """The stronger form: the whole corner spectrum, not just the energy.
+
+    At chi=48 for the reason given in ``test_split_matches_fused_oracle``: at
+    chi=8 the two schemes' spectra differ by up to 7.3e-05 on the small
+    singular values (2.3% relative) purely from truncation, which the 1e-6
+    tolerance here cannot accommodate.  Measured 5.49e-08 at chi=48.
+    """
     A, _ = su_state
-    chi = 8
-    env_split = ctm_split_tensor(A, chi=chi, max_iter=100, conv_tol=1e-12)
-    env_fused, _ = ctm_tensor(A, chi=chi, max_iter=100, conv_tol=1e-12)
+    chi = 48
+    env_split = ctm_split_tensor(A, chi=chi, max_iter=200, conv_tol=1e-12)
+    env_fused, _ = ctm_tensor(A, chi=chi, max_iter=200, conv_tol=1e-12)
     s_split = np.linalg.svd(np.asarray(env_split.C1.todense()), compute_uv=False)
     s_fused = np.linalg.svd(np.asarray(env_fused.C1.todense()), compute_uv=False)
     n = min(len(s_split), len(s_fused))
