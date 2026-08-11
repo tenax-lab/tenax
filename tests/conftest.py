@@ -70,6 +70,13 @@ _FILE_MARKERS = {
     # is shared across the cases via a module fixture; the D=4 case is @slow.
     "test_su_865_symmetric_collapse.py": "core",
     "test_su_667_product_state.py": "core",
+    # #851: the four-phase checkerboard sweep stored two Schmidt spectra for
+    # its four bonds, so ``num_imaginary_steps % 4`` selected which bond's
+    # gauge was stamped onto the lattice -- a silent-wrong-answer defect
+    # steered by an ordinary convergence knob, and one that only shows up away
+    # from the symmetric fixed point, i.e. exactly where nobody is looking.
+    # Cheap: D=2/3 simple update, no CTM anywhere (~30s total).
+    "test_su_851_four_bond_lambdas.py": "core",
     # Root-implicit AD wiring (#715): dispatch + guard surface only, no
     # CTM convergence, so it is milliseconds.  The production-run case it
     # also carries is explicitly @slow (#772).
