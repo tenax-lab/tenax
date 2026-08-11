@@ -62,6 +62,34 @@ NOT carry into the traced backward via post-hoc bond filtering. The default
 config keeps Gate-B trace-able (backward not yet dropped) and leaves the traced
 drop as an opt-in hook for the Gate-B task to resolve.
 
+What sector dropping costs: RDM positivity (#853)
+--------------------------------------------------
+**Energies read off a dropped environment are not bounded by the Hamiltonian.**
+The prototype deletes whole *charge* sectors from the environment's chi bonds,
+and each projector stays an isometry on the sectors it keeps -- which is why the
+corner stays rank-4 and the environment stays well-formed by every structural
+check. But a CTM reduced density matrix is positive because the environment
+approximates ``<psi|...|psi>`` with the ket and bra layers truncated
+*consistently*, and a hard projection selected by charge rather than by weight is
+not that kind of truncation.
+
+Measured at D=3, chi=12, ``keep={-1,0,1}``, 50 sweeps::
+
+    dropping   min eig / spectral radius   E_h + E_v
+    off        +6.65e-02                   +0.080313
+    on         -7.98e-01                   +0.759466
+
+``E_h + E_v`` for ``H = S_i . S_j`` lies in ``[-1.5, +0.5]`` for *any* state, so
+``+0.759`` is not an inaccurate energy -- it is not an energy. The trace cannot
+see this: ``rdm_h``'s trace is exactly 1 in both rows, because negative
+eigenvalues cancel against positive ones inside the sum (#854).
+
+So positivity is something the C-lever trades away, not a defect that leaked in,
+and the plain symmetric CTM keeps it on the same input at every sweep budget
+(pinned by ``test_the_plain_symmetric_ctm_keeps_the_rdm_positive``). Gate-B and
+Gate-C should treat block counts and timings from this prototype as meaningful
+and any *energy* as not.
+
 Usage
 -----
     with sector_dropping_truncation(keep={-1, 0, 1}):
