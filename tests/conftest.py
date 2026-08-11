@@ -146,6 +146,11 @@ _FILE_MARKERS = {
     # *withholding* this ``core``; see ``pytest_collection_modifyitems``.
     "test_multisite_clamped_gate.py": "core",
     "test_ctm_tensor.py": "algorithm",
+    # The invariant that keeps the 2x2 enlarged corner contraction-correct on
+    # non-dual bonds (#834/#762).  It is a property of the *sweep*, not of the
+    # flow convention, so nothing in the type system enforces it -- required
+    # gate.  The D=3 case carries its own ``@pytest.mark.slow``.
+    "test_enlarged_corner_flow_invariant_834.py": "core",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",
     "test_tdvp.py": "algorithm",
