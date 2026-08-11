@@ -130,28 +130,28 @@ def _normalise_rdm_for_energy(mat: jax.Array, context: str = "") -> jax.Array:
     if not isinstance(out, jax.core.Tracer):
         from tenax.algorithms._ctm_diagnostics import check_rdm
 
-        # ``psd_tol=None`` skips the positive-semidefiniteness test (#854).
+        # All three checks run here, positive-semidefiniteness included (#854).
         #
-        # Not because it is wrong -- it is correct, and it agrees with this
-        # repository's own physics: it stays silent on ``converged_peps_env``
-        # in ``test_ipeps.py`` (PSD to ~1e-9) and fires on ``peps_env``, whose
+        # The PSD check is *loud*: it fires 24 times across 8 tests on the
+        # current suite.  That is deliberate.  It is not miscalibrated -- it
+        # agrees with this repository's own physics, staying silent on
+        # ``converged_peps_env`` in ``test_ipeps.py`` (whose docstring records
+        # the RDM is "PSD to ~1e-9") and firing on ``peps_env``, whose
         # docstring already says "a random tensor cannot support a
         # positive-semidefinite assertion at all".
         #
-        # The reason it is off *here* is frequency.  A trace collapse (#845)
-        # and a NaN (#848) are rare and always bugs, so firing on every energy
-        # evaluation is right for those.  Loss of positivity is neither: an
-        # approximate CTM environment does not guarantee a PSD RDM, and on the
-        # current suite this check fires 24 times across 8 tests -- including
-        # -31% of the spectral radius on ``test_2site_heisenberg_D4_energy``
-        # and -56% on ``test_qr_energy_is_finite``.  Warning that often would
-        # train readers to filter the message, taking the rare actionable
-        # #845/#848 warnings with it.
+        # Three of those eight are that pathological fixture.  The other five
+        # are real runs, and they are the reason the noise stays: the worst is
+        # -56% of the spectral radius on ``test_qr_energy_is_finite``, and
+        # ``test_2site_heisenberg_D4_energy`` asserts a physical E < -0.66 from
+        # an RDM with a -31% negative eigenvalue.  An energy contracted from a
+        # non-PSD RDM is not bounded by the spectrum of H, so it carries no
+        # variational guarantee -- and until #854's audit closes, that is worth
+        # saying out loud on every evaluation rather than filing away.
         #
-        # So the detector ships enabled in ``check_rdm`` itself, where a driver
-        # asks for it deliberately, and off on this automatic path until the
-        # underlying non-positivity is addressed. See #854 for the audit.
-        check_rdm(out, context=context, psd_tol=None)
+        # ``psd_tol=None`` remains available for a caller that has to opt out
+        # of just this check; nothing in the library does.
+        check_rdm(out, context=context)
     return out
 
 

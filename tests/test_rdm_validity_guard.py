@@ -590,30 +590,26 @@ def test_no_energy_path_bypasses_the_checked_normaliser():
     )
 
 
-def test_the_automatic_energy_path_does_not_run_the_psd_check():
-    """``_normalise_rdm_for_energy`` passes ``psd_tol=None`` deliberately (#854).
+def test_the_automatic_energy_path_runs_the_psd_check():
+    """``_normalise_rdm_for_energy`` runs all three checks, PSD included (#854).
 
-    The PSD check is correct and stays enabled in :func:`check_rdm`, but it
-    fires 24 times across 8 tests on the current suite -- an approximate CTM
-    environment does not guarantee a PSD RDM -- so running it on every energy
-    evaluation would bury the rare, always-actionable #845/#848 warnings under
-    a common and partly-inherent one.
+    This is deliberately loud: the PSD check fires 24 times across 8 tests on
+    the current suite, because an approximate CTM environment does not
+    guarantee a PSD RDM. Five of those are real runs -- the worst is -56% of
+    the spectral radius -- and an energy contracted from a non-PSD RDM carries
+    no variational guarantee, so it is worth saying on every evaluation rather
+    than filing away.
 
-    This pins the decision so that flipping it is a deliberate act with a
-    visible test change, rather than something that drifts back on.
+    Pinned so that silencing it later is a deliberate act with a visible test
+    change rather than a quiet default flip.
     """
     poisoned = _rdm_with_spectrum(MEASURED_BAD_SPECTRUM)
 
-    # Directly: the check is on, and fires.
     with pytest.warns(RuntimeWarning, match=PSD_MATCH):
         check_rdm(poisoned, context="direct")
 
-    # Through the energy path: silent.
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with pytest.warns(RuntimeWarning, match=PSD_MATCH):
         _normalise_rdm_for_energy(poisoned, "energy-path")
-    psd = [w for w in caught if PSD_MATCH in str(w.message)]
-    assert not psd, f"energy path ran the PSD check: {[str(w.message) for w in psd]}"
 
 
 def test_psd_tol_none_skips_only_the_psd_check():
