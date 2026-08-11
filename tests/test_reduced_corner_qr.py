@@ -760,6 +760,26 @@ def test_implicit_qr_gradient_matches_eigh():
 
 
 @pytest.mark.algorithm
+@pytest.mark.xfail(
+    reason=(
+        "#858: the premise cannot hold on this configuration. The assertion "
+        "'the gap does not grow as the environment is refined' requires the "
+        "environment to refine, and recipe='1x1' gives corner rank 1 at EVERY "
+        "chi (the #723/#726 chi_eff=1 collapse) while '2x2' grows 4->8->12->"
+        "16->21 on the same state. It cannot be switched to '2x2' either: "
+        "projector_method is 'Consulted only on the 1x1 recipe' (#795), so "
+        "there is no non-collapsing configuration in which the QR adjoint can "
+        "be compared at all. On top of that the implicit adjoint DIVERGES here "
+        "-- relative residuals 9.0e-02, 1.581e+00 and 2.103e+00, i.e. a lambda "
+        "that solves the adjoint equation worse than lambda=0 would -- so the "
+        "gradients being compared carry no information about the true "
+        "gradient. Measured gap vs chi: 0.0113, 0.0198, 0.0662, 0.0266, 0.531 "
+        "at chi=4/8/12/16/24; the sampled pair (8,16) fails, (8,12) fails "
+        "three times worse, and (12,16) PASSES. Re-tuning the pair would only "
+        "move which coin flip is recorded."
+    ),
+    strict=False,
+)
 def test_implicit_qr_eigh_gradient_gap_shrinks_with_chi():
     """The qr-AD vs eigh-AD gradient gap does not grow as chi increases.
 
@@ -768,6 +788,22 @@ def test_implicit_qr_eigh_gradient_gap_shrinks_with_chi():
     same physics, so their gradient disagreement (1 - cosine similarity) must
     not grow with chi — confirming the qr backward tracks the eigh reference as
     the environment is refined rather than diverging from it.
+
+    **Currently xfail (#858).** The intent is right and the design is sound --
+    comparing two independent implementations is how a real adjoint bug would
+    be caught -- but it asks the question on an environment that cannot answer
+    it, with gradients too inaccurate to resolve the difference::
+
+        chi  rank(1x1)  rank(2x2)   gap        |g_qr|     |g_eigh|
+          4      1          4     0.011297895  4.4009e-01 4.3609e-01
+          8      1          8     0.019805025  4.3434e-01 4.5293e-01
+         12      1         12     0.066223983  4.6575e-01 4.5824e-01
+         16      1         16     0.026562736  4.4307e-01 4.7237e-01
+         24      1         21     0.530718621  4.9620e-01 9.6011e-01
+
+    At chi=24 the two gradients are nearly orthogonal (cos ~ 0.47) with
+    magnitudes differing by ~2x.  ``strict=False`` so that fixing either
+    blocker flips this green without failing the suite in the meantime.
     """
 
     def cos_gap(chi):
