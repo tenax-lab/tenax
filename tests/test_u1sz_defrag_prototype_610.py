@@ -83,6 +83,68 @@ def test_prototype_env_is_not_collapsed_and_energy_is_physical():
     )
 
 
+#: The doubled *virtual* legs of the environment tensors.  These carry the
+#: site tensor's own charge structure (D=3 with pattern [0, +1, -1] fuses to
+#: +/-2) and are **not** chi bonds, so the prototype neither does nor should
+#: drop them.
+_D2_LEGS = {"u2", "d2", "l2", "r2"}
+
+KEEP = {-1, 0, 1}
+
+
+def _chi_bond_charges(env) -> dict[str, list[int]]:
+    """Charge set of every **chi bond** in the environment, by ``tensor.leg``."""
+    out = {}
+    for name in env._fields:
+        t = getattr(env, name)
+        for idx in t.indices:
+            if idx.label in _D2_LEGS:
+                continue
+            out[f"{name}.{idx.label}"] = sorted(
+                {int(c) for c in np.asarray(idx.charges).ravel()}
+            )
+    return out
+
+
+def test_every_chi_bond_carries_only_kept_charges():
+    """The prototype's actual contract: no chi bond outside ``keep``.
+
+    Added after review of the guard rewrite (#855): ``rank > 1`` and a physical
+    energy interval are both satisfied by a **baseline** environment, and the
+    block-count guard below asserts *counts* (5 -> 3, 19 -> 9), which can fall
+    without the excluded charges being gone.  So nothing in this file verified
+    the thing the prototype exists to do.
+
+    Measured per leg at D=3 chi=12, which is also the negative control::
+
+        leg          dim   dropping=False       dropping=True
+        C1.c1_r       12   [-2,-1, 0, 1, 2]     [-1, 0, 1]
+        C1.c1_d       12   [-2,-1, 0, 1, 2]     [-1, 0, 1]
+        T1.t1_l       12   [-2,-1, 0, 1, 2]     [-1, 0, 1]
+        T1.t1_r       12   [-2,-1, 0, 1, 2]     [-1, 0, 1]
+        T1.u2          9   [-2,-1, 0, 1, 2]     [-2,-1, 0, 1, 2]   <- D^2 leg
+
+    Every chi bond is exactly ``keep`` under the prototype and carries the full
+    five-sector structure without it, so this discriminates.  ``T1.u2`` is the
+    site's fused virtual leg rather than a chi bond and is excluded -- dropping
+    it would be wrong, and a check that demanded it would fail on correct
+    behaviour.
+    """
+    A, _B = heisenberg_u1sz_init_pair(D=3, key=jax.random.PRNGKey(0))
+    with sector_dropping_truncation(keep=KEEP):
+        env, _diff = ctm_tensor(A, chi=12, max_iter=20, conv_tol=1e-7)
+
+    charges = _chi_bond_charges(env)
+    assert charges, "no chi bonds found -- the leg-classification is wrong"
+    offenders = {leg: cs for leg, cs in charges.items() if set(cs) - KEEP}
+    assert not offenders, (
+        f"chi bonds carry charges outside keep={sorted(KEEP)}: {offenders}. "
+        f"The prototype's truncation did not take effect on those legs, so an "
+        f"environment that looks healthy by rank and energy is really the "
+        f"un-dropped baseline."
+    )
+
+
 def test_prototype_actually_drops_sectors():
     # Under the prototype, the env block counts must drop toward the Gate-A
     # static prediction: corners 5->3, edges 19->9 at D=3 chi=12.
