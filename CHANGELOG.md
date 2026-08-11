@@ -58,6 +58,26 @@
   than the recipe. The split-side collapse is cleanly the recipe — its controls
   reproduce to ≤1.8%.
 
+### CI / tests
+
+- **A network blip no longer reds the documentation build.** `sphinx-build -W`
+  in CI and `fail_on_warning: true` on Read the Docs both make every warning
+  fatal, and intersphinx fetches `docs.python.org`, `numpy.org` and
+  `jax.readthedocs.io` on every cold build — so an SSL hiccup on a third-party
+  host failed the docs job of whatever unrelated PR happened to be in flight
+  (seen on #844). `suppress_warnings` cannot express the exception: it matches
+  on a warning's `type`, and the unreachable-inventory message is the one
+  warning intersphinx emits without one. `docs/conf.py` now demotes exactly
+  that warning to INFO via a logger filter, keyed on the absent type rather
+  than on message text, so the failure stays visible in the build log without
+  failing the build; intersphinx's resolve-time warnings, which are real
+  documentation defects, remain fatal. `intersphinx_timeout` is set so a host
+  that accepts the connection and then stalls can no longer hang the job.
+
+  Verified against a dead proxy — before, exit 1 with three warnings; after,
+  exit 0 with none and all three failures still reported in the log. `conf.py`
+  records the one-line command so the property can be re-checked.
+
 ## v0.8.3 (2026-08-09)
 
 A correctness release. The headline feature is root implicit AD for CTMRG
