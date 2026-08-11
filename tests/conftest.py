@@ -65,6 +65,14 @@ _FILE_MARKERS = {
     # CTM convergence, so it is milliseconds.  The production-run case it
     # also carries is explicitly @slow (#772).
     "test_root_implicit_wiring.py": "core",
+    # #858: the adjoint solver was seeded above ``||b||``, so it could return a
+    # ``lambda`` that solves ``(I - J^T)lambda = dE/denv`` *worse than
+    # ``lambda = 0``* -- measured relative residuals 1.581 and 2.103.  A wrong
+    # gradient that still optimizes is the least visible failure this library
+    # has, so it belongs in the gate that blocks a merge.  Mostly synthetic
+    # (milliseconds); the two D=2 chi<=8 backward cases that cover the call
+    # sites are ~25s each.
+    "test_adjoint_seed_858.py": "core",
     # MPS/MPO physical-basis agreement (#816).  A mismatched charge ORDER
     # still converges and reports the correct energy while returning a
     # permuted state, so the energy check that normally catches everything
