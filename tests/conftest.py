@@ -114,6 +114,12 @@ _FILE_MARKERS = {
     # scan showed conv_tol having no effect on the answer.
     "test_ctm_complex_site_tensors.py": "core",
     "test_rdm_validity_guard.py": "core",
+    # #789: the phase-fix VJP guard. ``core`` because the defect is a NaN
+    # gradient that only appears in the zero column -- everything else in a
+    # cotangent looks healthy, so nothing else in the suite would notice a
+    # regression, and the production default phase gauge is one of the four
+    # sites. The whole file runs in ~6s.
+    "test_phase_fix_nan_vjp_789.py": "core",
     "test_ctm_convergence_meta.py": "core",
     # Scope of the implicit-AD CTM guard (#802 rows for #349/#350/#343). The
     # dispatch half is mocked at the engine boundary (microseconds); the one

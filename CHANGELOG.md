@@ -26,6 +26,34 @@
   The guard reports; it does not repair. A degenerate corner still produces the
   wrong energy, now audibly.
 
+- **The phase-fix idiom had a NaN VJP at zero, at four sites including the
+  production-default phase gauge** (#789). Normalising a reference element to a
+  unit phase was spelled `jnp.where(jnp.abs(z) > 0, z / jnp.abs(z), 1.0)`. That
+  makes the *value* correct at `z = 0` and leaves the *gradient* wrong:
+  `jnp.where` does not short-circuit a VJP, so the unselected branch still
+  evaluates `0/0 = NaN` and contributes `0 · NaN = NaN`.
+
+  The values are bit-identical between the broken and fixed forms, which is why
+  it survived — any test that checks outputs passes against it. And only the
+  zero entries are poisoned, so a cotangent looks healthy everywhere else while
+  one column of whatever consumes it is silently NaN.
+
+  All four sites now share one `_unit_phase` helper using the fenced-argument
+  form already standard in the tree (`_ctm_projector`'s `S_rsqrt`, the
+  `_ctm_c4v_root_implicit` pseudo-inverse, `_normalise_rdm`'s norm floor):
+  keep the division from ever *seeing* zero rather than selecting against its
+  result. A source scan pins that a fifth copy cannot be hand-written.
+
+  Two corrections to the issue's framing, both measured. The zero reference is
+  reachable at `_fix_svd_signs` (which takes `U` as an argument, so a
+  rank-deficient charge sector supplies a zero column) and at both root-implicit
+  bond-gauge sites (the warm reference `Σ conj(P_prev)·P` vanishes whenever the
+  columns are orthogonal). It is **not** reachable through `_gauge_fixed_svd`,
+  whose reference comes from LAPACK's `U`, whose columns are orthonormal — that
+  site's fence is defensive. Separately, the all-zero matrix does produce a NaN
+  gradient there, but from the SVD backward on a fully degenerate spectrum,
+  which is the #406/#750 cluster and a different defect.
+
 ### ⚠️ Published performance claims retracted
 
 - **The v0.8.2 iPEPS multi-GPU / split-CTM frontier numbers were measured
