@@ -9,11 +9,54 @@ import pytest
 
 from examples.u1sz_defrag_prototype_610 import sector_dropping_truncation
 from tenax import compute_energy_ctm_tensor
+from tenax.algorithms._ctm_diagnostics import ctm_corner_rank
 from tenax.algorithms._ctm_tensor import ctm_tensor
 from tenax.algorithms.ipeps import heisenberg_gate_u1sz, heisenberg_u1sz_init_pair
 
+# ``compute_energy_ctm_tensor`` returns ``E_h + E_v`` with ``H = S_i . S_j``,
+# whose eigenvalues are -3/4 (singlet) and +1/4 (triplet).  Two bonds, so any
+# genuine expectation value lies in [-1.5, +0.5] whatever the state and however
+# poorly converged the environment: an inaccurate RDM is still a density
+# matrix.  Leaving this interval means the RDM is not one, which is a different
+# and worse failure than an inaccurate energy.
+E_MIN, E_MAX = -1.5, 0.5
 
-def test_prototype_ctm_converges_and_energy_is_sane():
+
+def test_prototype_env_is_not_collapsed_and_energy_is_physical():
+    """The #610 sector-dropping prototype must not destroy the environment.
+
+    This replaces an assertion of ``-2.0 < e < 0.0`` that was passing for the
+    wrong reason.  ``ctm_tensor``'s ``recipe`` default changed ``1x1`` -> ``2x2``
+    in #765 (fixing #723), and this test passes no ``recipe``, so it silently
+    switched environments.  Measured at D=3, chi=12, the same call under each::
+
+        recipe   criterion      corner_rank   energy      old assertion
+        1x1      0.000000e+00   1             -0.018152   passes
+        2x2      1.256895e-01   5             +0.140116   fails
+
+    The ``1x1`` criterion is *exactly* zero because a rank-1 corner is an
+    absorbing state: the environment stops changing, so the sweep reports
+    convergence.  That is the #723/#726 chi_eff=1 mean-field collapse, the same
+    defect behind the #747/#771 retractions.  So the old green was produced by a
+    collapsed environment, and #765 did not break this test -- it removed the
+    thing that was making it pass.
+
+    Hence the two assertions that carry weight here:
+
+    * **The corner is not rank-1.**  ``ctm_corner_rank`` has shipped since #747
+      for exactly this, and would have caught the old environment rather than
+      blessing it.
+    * **The energy is physical**, not negative.  ``A`` is ``random_normal`` and
+      is never optimised -- the fixture's own docstring says AFM correlations
+      "emerge from optimization", which this test does not do -- so
+      ``<S_i . S_j> ~ 0`` with no preferred sign, and the old upper bound of 0.0
+      excluded the entire allowed positive half.
+
+    Convergence is deliberately **not** asserted, and this test is no longer
+    named as though it were: under ``2x2`` the criterion does not reach
+    ``conv_tol`` even at 400 sweeps and is not monotone (3.9e-2 at 200, back up
+    to 8.8e-2 at 400).  See #853.
+    """
     jax.config.update("jax_enable_x64", True)
     A, _B = heisenberg_u1sz_init_pair(D=3, key=jax.random.PRNGKey(0))
     with sector_dropping_truncation(keep={-1, 0, 1}):
@@ -22,8 +65,22 @@ def test_prototype_ctm_converges_and_energy_is_sane():
             t = getattr(env, name)
             assert np.all(np.isfinite(np.asarray(t._data))), f"{name} non-finite"
         e = float(compute_energy_ctm_tensor(A, env, heisenberg_gate_u1sz()))
+
+    rank = ctm_corner_rank(env)
+    assert rank > 1, (
+        f"CTM environment collapsed to a rank-{rank} corner: this is a "
+        f"chi_eff=1 mean-field boundary, not a corner transfer matrix (#723, "
+        f"#726, #747). Any energy read off it is meaningless, and this test "
+        f"passed on exactly such an environment before #765 fixed the "
+        f"ctm_tensor recipe default."
+    )
     assert np.isfinite(e), "prototype energy non-finite"
-    assert -2.0 < e < 0.0, f"prototype energy {e} outside sane Heisenberg window"
+    assert E_MIN <= e <= E_MAX, (
+        f"prototype energy {e} is outside the physically attainable range "
+        f"[{E_MIN}, {E_MAX}] for E_h + E_v with H = S_i . S_j. An unconverged "
+        f"environment gives an inaccurate energy, not an impossible one, so "
+        f"this means the RDM is not a valid density matrix. See #853."
+    )
 
 
 def test_prototype_actually_drops_sectors():
