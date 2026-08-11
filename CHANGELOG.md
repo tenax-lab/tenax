@@ -26,6 +26,32 @@
   The guard reports; it does not repair. A degenerate corner still produces the
   wrong energy, now audibly.
 
+- **`check_rdm` now detects a non-positive-semi-definite RDM** (#854). This was
+  the third hole in the same guard and the first that was not constructed — it
+  fell out of an ordinary CTM run (#853). The trace is a *sum* over the
+  diagonal, so negative eigenvalues cancel against positive ones inside the
+  very quantity being tested: a spectrum of
+  `[-1.2997, -0.0736, 0.7446, 1.6287]` traces to exactly 1, is entirely finite,
+  and passed both existing checks with a defect of `0.0` — the value meaning
+  "checked, healthy". It matters because `⟨H⟩ = tr(ρH)` lies within the
+  spectrum of a Hermitian `H` only for PSD `ρ`; #853 reported `E = +0.759` for
+  two `S·S` bonds whose attainable maximum is `+0.5`, a number no state can
+  have.
+
+  A non-PSD RDM now returns `INVALID_RDM_DEFECT` rather than its trace defect,
+  closing the same recording trap as #848. The order is load-bearing —
+  finiteness, then trace, then positivity — because a collapsed all-zero RDM
+  has an all-zero spectrum and is PSD *vacuously*, so checking positivity first
+  would return it clean and lose #845.
+
+  The tolerance is relative to the spectral radius rather than an exact
+  `min_eig < 0`, because a converged RDM is routinely rank-deficient and its
+  zero eigenvalues land either side of zero. Measured on 2-site CTM runs at
+  D=2: every **converged** environment gave negativity of exactly `0.0`, while
+  every run that exhausted `max_iter` gave `1e-1` to `1.0`. So the check has no
+  false-positive margin problem, and non-positivity tracks non-convergence —
+  which is exactly #853's own symptom.
+
 ### ⚠️ Published performance claims retracted
 
 - **The v0.8.2 iPEPS multi-GPU / split-CTM frontier numbers were measured
