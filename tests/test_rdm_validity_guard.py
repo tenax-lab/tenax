@@ -29,6 +29,7 @@ import warnings
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from tenax.algorithms._ctm_diagnostics import (
@@ -36,6 +37,7 @@ from tenax.algorithms._ctm_diagnostics import (
     RDM_TRACE_TOL,
     CollapsedRDMError,
     check_rdm,
+    rdm_min_eigenvalue,
     rdm_trace_defect,
 )
 from tenax.algorithms._ctm_tensor_energy import (
@@ -403,6 +405,147 @@ def test_the_finiteness_check_covers_the_4_leg_form():
     rdm = _poisoned((0, 1), jnp.nan).reshape(2, 2, 2, 2)
     with pytest.warns(RuntimeWarning, match=NONFINITE_MATCH):
         check_rdm(rdm, context="unit-test")
+
+
+# ---------------------------------------------------------------------------
+# Positive semi-definiteness (#854).
+#
+# The trace is a *sum* over the diagonal, so negative eigenvalues cancel
+# against positive ones inside the very quantity being tested. An RDM can be
+# arbitrarily far from a density matrix with |tr - 1| exactly 0.
+#
+# The spectrum used here is not constructed to make a point -- it was measured
+# on a live U(1)-Sz D=3 chi=12 CTM run at 50 sweeps, which produced an energy
+# of +0.759 against an attainable maximum of +0.5.
+# ---------------------------------------------------------------------------
+
+PSD_MATCH = "not positive semi-definite"
+
+#: Measured eigenvalues of ``rdm_h`` at ``max_iter=50``, and of the healthy
+#: ``max_iter=20`` run for contrast.
+MEASURED_BAD_SPECTRUM = (-1.299674, -0.073617, 0.744597, 1.628694)
+MEASURED_GOOD_SPECTRUM = (0.020412, 0.057108, 0.359424, 0.563055)
+
+
+def _rdm_with_spectrum(eigenvalues, *, seed: int = 0) -> jnp.ndarray:
+    """A Hermitian, trace-1 matrix with the requested eigenvalues.
+
+    Rotated into a generic basis so the failure cannot be an artefact of the
+    matrix being diagonal -- a diagonal RDM would let a lazy implementation
+    "detect" negativity by looking at entries rather than eigenvalues.
+    """
+    w = np.asarray(eigenvalues, dtype=float)
+    w = w / w.sum()  # trace exactly 1, as measured
+    q, _ = np.linalg.qr(np.random.default_rng(seed).normal(size=(len(w), len(w))))
+    return jnp.asarray(q @ np.diag(w) @ q.T)
+
+
+def test_a_measured_non_psd_rdm_is_caught():
+    """The case from the live run: trace exactly 1, entries finite, eig -1.30."""
+    rdm = _rdm_with_spectrum(MEASURED_BAD_SPECTRUM)
+
+    # Preconditions: this must defeat both pre-existing checks, or the test is
+    # not exercising the gap that motivated the PSD check.
+    assert rdm_trace_defect(rdm) < RDM_TRACE_TOL, (
+        "precondition: the trace must look perfect, or the #845 check would "
+        "already have caught this and the PSD check is untested"
+    )
+    assert bool(jnp.isfinite(rdm).all()), "precondition: entries must be finite"
+
+    with pytest.warns(RuntimeWarning, match=PSD_MATCH):
+        check_rdm(rdm, context="unit-test")
+
+    with pytest.raises(CollapsedRDMError, match=PSD_MATCH):
+        check_rdm(rdm, context="unit-test", strict=True)
+
+
+def test_a_non_psd_rdm_does_not_report_a_healthy_defect():
+    """Same recording trap as #848: it must not hand back ``0.0``."""
+    rdm = _rdm_with_spectrum(MEASURED_BAD_SPECTRUM)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        defect = check_rdm(rdm, context="unit-test")
+
+    assert defect != 0.0
+    assert defect > RDM_TRACE_TOL
+    assert defect == INVALID_RDM_DEFECT
+
+
+def test_the_measured_healthy_spectrum_is_silent():
+    """The 20-sweep RDM from the same run must not warn.
+
+    Without this, raising ``RDM_PSD_TOL`` until the bad case passes would go
+    unnoticed.
+    """
+    rdm = _rdm_with_spectrum(MEASURED_GOOD_SPECTRUM)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        assert check_rdm(rdm, context="unit-test") == pytest.approx(0.0, abs=1e-12)
+
+
+@pytest.mark.parametrize("eps", [1e-17, 1e-15, 1e-12])
+def test_roundoff_negative_eigenvalues_do_not_fire(eps):
+    """A healthy RDM's smallest eigenvalues sit either side of zero.
+
+    The check has to be relative and tolerant, or every converged run warns and
+    the warning gets filtered out -- which is how a guard stops working.
+    """
+    rdm = _rdm_with_spectrum((-eps, 0.1, 0.3, 0.6))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        check_rdm(rdm, context="unit-test")
+
+
+def test_the_psd_check_covers_the_4_leg_form():
+    """The builders return ``(d, d, d, d)``."""
+    rdm = _rdm_with_spectrum(MEASURED_BAD_SPECTRUM).reshape(2, 2, 2, 2)
+    with pytest.warns(RuntimeWarning, match=PSD_MATCH):
+        check_rdm(rdm, context="unit-test")
+
+
+def test_a_collapsed_rdm_still_reports_the_trace_failure_not_psd():
+    """Ordering: the zero matrix is PSD vacuously (spectrum all zeros).
+
+    If PSD were tested first it would pass, and #845's collapse would be
+    reported with the wrong message -- or not at all.
+    """
+    with pytest.warns(RuntimeWarning, match=MATCH) as caught:
+        check_rdm(jnp.zeros((4, 4)), context="unit-test")
+    assert PSD_MATCH not in str(caught[0].message)
+
+
+def test_the_three_failures_have_three_distinct_messages():
+    """Each points somewhere different; a shared message would misdirect.
+
+    Collapse -> the corner spectrum (#845). Poisoned -> the contraction
+    upstream (#848). Non-PSD -> the environment (#854). Reporting a non-PSD
+    RDM as "contributes 0 to the energy" would be actively wrong: it
+    contributes an out-of-range value, not zero.
+    """
+    msgs = {}
+    for key, rdm in (
+        ("collapse", jnp.zeros((4, 4))),
+        ("poisoned", _poisoned((0, 1), jnp.nan)),
+        ("non_psd", _rdm_with_spectrum(MEASURED_BAD_SPECTRUM)),
+    ):
+        with pytest.warns(RuntimeWarning) as caught:
+            check_rdm(rdm, context="unit-test")
+        msgs[key] = str(caught[0].message)
+
+    assert "#845" in msgs["collapse"] and "#854" not in msgs["collapse"]
+    assert "#848" in msgs["poisoned"] and "#854" not in msgs["poisoned"]
+    assert "#854" in msgs["non_psd"] and "#845" not in msgs["non_psd"]
+    assert "contributes 0 to the energy" not in msgs["non_psd"]
+    assert len({m[:60] for m in msgs.values()}) == 3
+
+
+def test_rdm_min_eigenvalue_reports_the_measured_values():
+    """The helper is public; pin what it returns."""
+    rdm = _rdm_with_spectrum(MEASURED_BAD_SPECTRUM)
+    min_eig, radius = rdm_min_eigenvalue(rdm)
+    scale = sum(MEASURED_BAD_SPECTRUM)
+    assert min_eig == pytest.approx(MEASURED_BAD_SPECTRUM[0] / scale, rel=1e-9)
+    assert radius == pytest.approx(MEASURED_BAD_SPECTRUM[-1] / scale, rel=1e-9)
 
 
 # ---------------------------------------------------------------------------

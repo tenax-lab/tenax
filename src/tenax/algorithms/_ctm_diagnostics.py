@@ -24,6 +24,7 @@ from __future__ import annotations
 
 __all__ = [
     "INVALID_RDM_DEFECT",
+    "RDM_PSD_TOL",
     "RDM_TRACE_TOL",
     "CollapsedEnvironmentError",
     "CollapsedRDMError",
@@ -32,6 +33,7 @@ __all__ = [
     "ctm_corner_rank",
     "env_is_collapsed",
     "frozen_chi_pairs",
+    "rdm_min_eigenvalue",
     "rdm_trace_defect",
 ]
 
@@ -45,7 +47,13 @@ class CollapsedEnvironmentError(RuntimeError):
 
 
 class CollapsedRDMError(RuntimeError):
-    """Raised by :func:`check_rdm` in ``strict`` mode on a non-unit trace."""
+    """Raised by :func:`check_rdm` in ``strict`` mode on an invalid RDM.
+
+    Covers all three ways an RDM fails validation -- non-finite entries, a
+    non-unit trace, and loss of positive semi-definiteness -- not only the
+    trace collapse the name refers to. The name predates the other two checks
+    and is kept for compatibility.
+    """
 
 
 #: Tolerance on ``|tr(rdm) - 1|``.  A trace-normalised RDM that carried any
@@ -67,6 +75,17 @@ RDM_TRACE_TOL = 1e-8
 #: ``|tr - 1|``; this substitution belongs to the *validity check*, which is
 #: reporting "not a usable measurement", not to the measurement itself.
 INVALID_RDM_DEFECT = float("inf")
+
+#: Relative tolerance on the most negative eigenvalue of an RDM, as a fraction
+#: of its spectral radius.
+#:
+#: A genuine reduced density matrix is positive semi-definite.  Roundoff in the
+#: contraction puts the smallest eigenvalues at ~1e-16 either side of zero on a
+#: healthy RDM, so the test has to be relative and cannot be exact -- but the
+#: failures worth catching are nowhere near that scale.  The case this was
+#: written from had eigenvalues ``[-1.300, -0.074, 0.745, 1.629]``: a negative
+#: eigenvalue **larger in magnitude than the whole trace**.
+RDM_PSD_TOL = 1e-8
 
 
 def _as_rdm_matrix(rdm) -> np.ndarray:
@@ -107,11 +126,36 @@ def rdm_trace_defect(rdm) -> float:
     return float(abs(complex(tr) - 1.0))
 
 
+def rdm_min_eigenvalue(rdm) -> tuple[float, float]:
+    """Smallest eigenvalue of an RDM's Hermitian part, and its spectral radius.
+
+    A reduced density matrix is Hermitian and positive semi-definite.  The
+    eigenvalues are taken of ``(M + M^H)/2`` rather than of ``M``: for a genuine
+    RDM the two agree, and for a non-Hermitian one it is the Hermitian part that
+    determines ``<H>`` for Hermitian ``H``, so this measures the quantity that
+    actually reaches the energy.
+
+    The matrix is ``d x d`` or ``d**2 x d**2`` -- 4x4 for a 2-site spin-1/2 bond
+    -- so the eigendecomposition is negligible next to the contraction that
+    produced it.
+
+    Returns:
+        ``(min_eigenvalue, spectral_radius)``.
+    """
+    M = _as_rdm_matrix(rdm)
+    if M.ndim == 4:
+        n = M.shape[0] * M.shape[1]
+        M = M.reshape(n, n)
+    w = np.linalg.eigvalsh(0.5 * (M + M.conj().T))
+    return float(w.min()), float(np.abs(w).max())
+
+
 def check_rdm(
     rdm,
     *,
     context: str = "",
     tol: float = RDM_TRACE_TOL,
+    psd_tol: float = RDM_PSD_TOL,
     strict: bool = False,
 ) -> float:
     """Warn (or raise) when an RDM is not a density matrix; return the defect.
@@ -130,7 +174,11 @@ def check_rdm(
     which detects a different collapse (rank-1 corner) at the environment
     level.
 
-    Two distinct failures are reported, because they need different responses:
+    Three distinct failures are reported, because they need different
+    responses -- and because no one scalar detects all three.  ``|tr - 1|`` is a
+    sum over the diagonal; it cannot see a ``NaN`` off the diagonal, and it
+    cannot see negative eigenvalues, which cancel against positive ones inside
+    the very sum being tested:
 
     * **Non-finite entries** (``NaN``/``inf``) -- the contraction was
       numerically unstable upstream.  Checked over the whole array, not via the
@@ -141,15 +189,27 @@ def check_rdm(
       ``NaN``, and ``NaN > tol`` is ``False``, so the comparison below fails
       open in ``strict`` mode too.
     * **Trace defect** -- the #845 collapse described above.
+    * **Loss of positive semi-definiteness** (#854) -- a density matrix has no
+      negative eigenvalues.  When it does, ``<H>`` is no longer bounded by the
+      spectrum of ``H``, so the energy can land outside the range the
+      Hamiltonian can physically produce.  Found in a live CTM run, not
+      constructed: a U(1)-Sz D=3 chi=12 environment at 50 sweeps gave a
+      horizontal RDM with eigenvalues ``[-1.300, -0.074, 0.745, 1.629]`` and an
+      energy of ``+0.759`` against an attainable maximum of ``+0.5``.  Its
+      trace was ``+1.000000000`` -- **exactly** 1 -- so both checks above pass
+      it, which is the whole reason this one exists.
 
-    Finiteness is tested first; on a poisoned array the trace defect is not a
-    meaningful number to report.
+    Order is finiteness, then trace, then PSD: on a poisoned array the trace is
+    not a meaningful number to report, and on a collapsed (zero) RDM the
+    spectrum is all zeros and would pass a PSD test vacuously.
 
     Args:
         rdm:     A trace-normalised RDM, 2- or 4-leg.
         context: Free-text label naming the bond (e.g. ``"2x1 horizontal"``),
                  so the message says *which* contribution died.
         tol:     Tolerance on ``|tr - 1|``.
+        psd_tol: Relative tolerance on the most negative eigenvalue, as a
+                 fraction of the spectral radius.
         strict:  Raise :class:`CollapsedRDMError` instead of warning.
 
     Returns:
@@ -188,7 +248,23 @@ def check_rdm(
             f"the CTM convergence flag cannot see it. See #845."
         )
     else:
-        return defect
+        min_eig, radius = rdm_min_eigenvalue(M)
+        if min_eig < -psd_tol * max(radius, 1.0):
+            defect = INVALID_RDM_DEFECT
+            msg = (
+                f"reduced density matrix is not positive semi-definite{where}: "
+                f"smallest eigenvalue {min_eig:.6g} against spectral radius "
+                f"{radius:.6g}. A density matrix has no negative eigenvalues, "
+                f"so this is not one, and the energy contracted from it is not "
+                f"bounded by the spectrum of H -- it can fall outside the range "
+                f"the Hamiltonian can physically produce. Note the trace is "
+                f"unhelpful here: it is a sum, so positive and negative "
+                f"eigenvalues cancel and |tr - 1| can be exactly 0 on a matrix "
+                f"this far from a density matrix. Look upstream at the "
+                f"environment, not at the normalisation. See #854."
+            )
+        else:
+            return defect
 
     if strict:
         raise CollapsedRDMError(msg)
