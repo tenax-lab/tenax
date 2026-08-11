@@ -37,6 +37,27 @@ class BaseSymmetry(ABC):
     serve as dict keys and be compared for compatibility checks.
     """
 
+    #: Width used for *intermediate* charge arithmetic in the conservation law.
+    #:
+    #: Charge **storage** stays ``int32`` throughout the codebase --
+    #: ``TensorIndex.__post_init__`` re-forces it -- and that was never the
+    #: problem.  Summing several stored charges in ``int32`` was: four legs of
+    #: ``2**30`` fused to exactly ``0``, so a nonconserving block was reported
+    #: conserved and a ``SymmetricTensor`` built from it without complaint
+    #: (#799).  The failure was silent and failed *open*.
+    #:
+    #: ``int32`` is the default because it is required by the symmetries whose
+    #: charges are bounded *by construction*: ``ProductSymmetry`` packs two
+    #: int16 charges into one int32, and widening it would corrupt that
+    #: encoding.  ``Z_n`` reduces mod ``n`` and is indifferent.
+    #:
+    #: Only the groups with genuinely unbounded charges override it -- U(1) and
+    #: ``FermionicU1``, where unboundedness is the defining property.  This
+    #: raises the ceiling from ``2**31`` to ``2**63``; it does not remove it.
+    #: A truly unbounded guarantee needs Python integers, at the cost of the
+    #: vectorised path that :func:`~tenax.core.index._net_charges` exists for.
+    charge_accumulator_dtype: type = np.int32
+
     @abstractmethod
     def fuse(self, charges_a: np.ndarray, charges_b: np.ndarray) -> np.ndarray:
         """Fuse two charge arrays element-wise under group multiplication.
@@ -107,8 +128,12 @@ class BaseSymmetry(ABC):
         override it.
 
         Note:
-            ``np.asarray(charges, dtype=np.int32)`` silently wraps on int64
-            overflow rather than raising.
+            The integer **width of the input is preserved**.  This used to cast
+            to ``int32`` unconditionally, which silently truncated a wider
+            accumulator back down and re-introduced the very overflow
+            :attr:`charge_accumulator_dtype` exists to avoid (#799).  Weighting
+            a charge by a flow is this method's job; normalising its dtype is
+            not.
 
         Args:
             flow:    ``+1`` (IN) or ``-1`` (OUT); a ``FlowDirection`` works too.
@@ -118,7 +143,9 @@ class BaseSymmetry(ABC):
             Effective charge array of the same shape.  On an IN leg this may
             **alias** ``charges``, so the result must be treated as read-only.
         """
-        charges = np.asarray(charges, dtype=np.int32)
+        charges = np.asarray(charges)
+        if not np.issubdtype(charges.dtype, np.integer):
+            charges = charges.astype(self.charge_accumulator_dtype)
         return charges if int(flow) > 0 else self.dual(charges)
 
     def canonicalize_charges(self, charges: np.ndarray) -> np.ndarray:
@@ -141,8 +168,16 @@ class BaseSymmetry(ABC):
             Canonical charge array of the same shape.  Overrides may **alias**
             ``charges``, so the result must be treated as read-only.
         """
-        charges = np.asarray(charges, dtype=np.int32)
-        return self.fuse(np.int32(self.identity()), charges)
+        charges = np.asarray(charges)
+        if not np.issubdtype(charges.dtype, np.integer):
+            charges = charges.astype(self.charge_accumulator_dtype)
+        # A *full-shaped* identity, not ``np.int32(self.identity())``.  ``fuse``
+        # is documented to take two arrays of shape ``(D,)``; passing a scalar
+        # works only for subclasses whose ``fuse`` happens to broadcast, so a
+        # conforming implementation -- one that indexes, or checks ``.shape`` --
+        # broke the moment this default was invoked (#799).
+        identity = np.full(charges.shape, self.identity(), dtype=charges.dtype)
+        return self.fuse(identity, charges)
 
     @property
     def braiding_style(self) -> BraidingStyle:
@@ -242,9 +277,10 @@ class BaseSymmetry(ABC):
         Raises:
             ValueError: If the two sequences have different lengths.
         """
-        effective = [np.array([self.identity()], dtype=np.int32)]
+        dtype = self.charge_accumulator_dtype
+        effective = [np.array([self.identity()], dtype=dtype)]
         effective.extend(
-            self.flow_charge(f, np.array([int(q)], dtype=np.int32))
+            self.flow_charge(f, np.array([int(q)], dtype=dtype))
             for f, q in zip(flows, charges_per_leg, strict=True)
         )
         return int(self.fuse_many(effective)[0])
@@ -268,7 +304,9 @@ class BaseSymmetry(ABC):
         if target is None:
             target = self.identity()
         net = self.net_charge(charges_per_leg, flows)
-        want = self.canonicalize_charges(np.array([int(target)], dtype=np.int32))
+        want = self.canonicalize_charges(
+            np.array([int(target)], dtype=self.charge_accumulator_dtype)
+        )
         return net == int(want[0])
 
 
@@ -284,6 +322,9 @@ class U1Symmetry(BaseSymmetry):
         array([1, 0, -1])
     """
 
+    #: int64: U(1) charges are unbounded by definition, so int32 accumulation wraps (#799).
+    charge_accumulator_dtype: type = np.int64
+
     def fuse(self, charges_a: np.ndarray, charges_b: np.ndarray) -> np.ndarray:
         return charges_a + charges_b
 
@@ -297,10 +338,16 @@ class U1Symmetry(BaseSymmetry):
         """Identity map: every integer is its own canonical U(1) representative.
 
         Returns:
-            The input viewed as int32.  This may **alias** ``charges``, so the
-            result must be treated as read-only.
+            The input, unchanged in value and integer width.  This may
+            **alias** ``charges``, so the result must be treated as read-only.
+            The width is preserved rather than forced to ``int32``, which would
+            truncate a wider accumulator back down and re-introduce the
+            overflow of #799.
         """
-        return np.asarray(charges, dtype=np.int32)
+        charges = np.asarray(charges)
+        if not np.issubdtype(charges.dtype, np.integer):
+            charges = charges.astype(self.charge_accumulator_dtype)
+        return charges
 
     def n_values(self) -> None:
         return None
@@ -514,6 +561,9 @@ class FermionicU1(BaseSymmetry):
         array([0, 1, 0, 1])
     """
 
+    #: int64: same unbounded-charge argument as U(1), so int32 accumulation wraps (#799).
+    charge_accumulator_dtype: type = np.int64
+
     def __init__(
         self,
         grading: object = None,
@@ -548,10 +598,16 @@ class FermionicU1(BaseSymmetry):
         """Identity map: every integer is its own canonical U(1) representative.
 
         Returns:
-            The input viewed as int32.  This may **alias** ``charges``, so the
-            result must be treated as read-only.
+            The input, unchanged in value and integer width.  This may
+            **alias** ``charges``, so the result must be treated as read-only.
+            The width is preserved rather than forced to ``int32``, which would
+            truncate a wider accumulator back down and re-introduce the
+            overflow of #799.
         """
-        return np.asarray(charges, dtype=np.int32)
+        charges = np.asarray(charges)
+        if not np.issubdtype(charges.dtype, np.integer):
+            charges = charges.astype(self.charge_accumulator_dtype)
+        return charges
 
     def n_values(self) -> None:
         return None

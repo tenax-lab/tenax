@@ -26,6 +26,54 @@
   The guard reports; it does not repair. A degenerate corner still produces the
   wrong energy, now audibly.
 
+- **The symmetry core disagreed with itself about charges, in two ways that
+  both failed silently and open** (#799).
+
+  *The conservation law wrapped at int32.* U(1) charges are unbounded by
+  definition — that is what distinguishes them from `Z_n` — but the accumulator
+  was forced to `int32`, so four legs of `2**30` fused to exactly `0`:
+
+  ```python
+  >>> U1Symmetry().is_conserved([2**30]*4, [1]*4)
+  True                                   # the true sum is 2**32
+  ```
+
+  The consequence is worse than the predicate. `SymmetricTensor._validate` goes
+  through `_net_charges`, which had the same cast, so a genuinely nonconserving
+  block was **built into a tensor without error** and every downstream
+  contraction then treated it as conserving. Fixed by widening only the
+  *accumulator*: charge storage stays `int32` (a codebase-wide convention —
+  `TensorIndex.__post_init__` re-forces it), while `charge_accumulator_dtype`
+  is `int64` for U(1) and `FermionicU1`. `Z_n` reduces mod `n` and
+  `ProductSymmetry` packs two int16 charges into one int32, so both keep
+  `int32` — widening the latter would corrupt its encoding. This raises the
+  ceiling from 2³¹ to 2⁶³; it does not remove it.
+
+  *A non-canonical block key passed validation and then vanished.* #733
+  canonicalises the *index* sectors; a block key written with the caller's own
+  representative was stored as given. It still validated — fusion reduces
+  modulo `n`, so the key really is conserving — and then `todense()` found no
+  matching sector and wrote nothing:
+
+  ```python
+  # Z2 index with sectors [-1, 1], both canonicalising to 1
+  SymmetricTensor({(-1, 1): ones}, idx).todense().sum()   # 0.0
+  SymmetricTensor({( 1, 1): ones}, idx).todense().sum()   # 4.0
+  ```
+
+  Same caller, same charge, two answers depending on which representative they
+  happened to write. Block keys are now canonicalised on the same boundary as
+  index sectors, so the two cannot disagree. Two representatives of one sector
+  in the same dict raise rather than merge — silently summing them, or letting
+  dict order pick a winner, would be a fresh instance of the same class.
+
+  Also fixed: `canonicalize_charges`'s default passed a *scalar* identity into
+  `fuse`, whose documented contract is two arrays of shape `(D,)`, so a
+  conforming subclass broke the moment the default was invoked. And the charge
+  arithmetic API — `flow_charge`, `canonicalize_charges`, `net_charge`,
+  `is_conserved` — is now documented in the README, which had zero mentions of
+  it despite #734 making it the sanctioned boundary.
+
 ### ⚠️ Published performance claims retracted
 
 - **The v0.8.2 iPEPS multi-GPU / split-CTM frontier numbers were measured
