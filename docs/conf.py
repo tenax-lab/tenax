@@ -104,6 +104,13 @@ class _DemoteInventoryFetchFailure(logging.Filter):
 
 # Sphinx namespaces its loggers under "sphinx.", so an extension logs to
 # "sphinx." + its own module path -- hence the doubled prefix.
+#
+# This is the *emitting* logger, not an ancestor of it, which matters because a
+# logger's filters do not apply to records propagated up from descendants. The
+# whole intersphinx package shares one logger, defined in `_shared.py` and
+# imported by `_load.py`; there is no `..._load` child logger. Checked against
+# every Sphinx in the declared `>=7.0` range -- 7.0.0, 7.4.7, 8.0.2, 8.2.3,
+# 9.0.4 and 9.1.0 all emit on this exact object.
 logging.getLogger(f"sphinx.{_intersphinx.__name__}").addFilter(
     _DemoteInventoryFetchFailure()
 )
