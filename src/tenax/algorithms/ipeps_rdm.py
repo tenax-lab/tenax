@@ -9,7 +9,9 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from tenax.algorithms._ctm_tensor_energy import _normalise_rdm
+from tenax.algorithms._ctm_tensor_energy import (
+    _normalise_rdm_for_energy,
+)
 from tenax.algorithms._einsum_compat import einsum_promoted
 from tenax.algorithms.ipeps_config import (
     CTMEnvironment,
@@ -97,7 +99,7 @@ def _rdm2x1(A: jax.Array, env: CTMEnvironment, d: int) -> jax.Array:
 
     # Trace-normalise, then symmetrise (order matters -- see _normalise_rdm)
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm2x1")
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -165,7 +167,7 @@ def _rdm1x2(A: jax.Array, env: CTMEnvironment, d: int) -> jax.Array:
 
     # Trace-normalise, then symmetrise (order matters -- see _normalise_rdm)
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm1x2")
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -244,7 +246,7 @@ def _rdm2x1_2site(
     rdm = rdm.transpose(0, 2, 1, 3)
 
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm2x1_2site")
     return rdm_mat.reshape(d, d, d, d)
 
 
@@ -291,7 +293,7 @@ def _rdm1x2_2site(
     rdm = rdm.transpose(0, 2, 1, 3)
 
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm1x2_2site")
     return rdm_mat.reshape(d, d, d, d)
 
 

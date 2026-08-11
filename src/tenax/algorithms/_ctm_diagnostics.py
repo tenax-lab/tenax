@@ -23,11 +23,16 @@ Both are cheap enough to run unconditionally in benchmark drivers.
 from __future__ import annotations
 
 __all__ = [
+    "INVALID_RDM_DEFECT",
+    "RDM_TRACE_TOL",
     "CollapsedEnvironmentError",
+    "CollapsedRDMError",
     "check_ctm_env",
+    "check_rdm",
     "ctm_corner_rank",
     "env_is_collapsed",
     "frozen_chi_pairs",
+    "rdm_trace_defect",
 ]
 
 import warnings
@@ -37,6 +42,158 @@ import numpy as np
 
 class CollapsedEnvironmentError(RuntimeError):
     """Raised by :func:`check_ctm_env` in ``strict`` mode on a rank-1 corner."""
+
+
+class CollapsedRDMError(RuntimeError):
+    """Raised by :func:`check_rdm` in ``strict`` mode on a non-unit trace."""
+
+
+#: Tolerance on ``|tr(rdm) - 1|``.  A trace-normalised RDM that carried any
+#: physical content has a trace of *exactly* 1 -- ``_normalise_rdm`` divides by
+#: the trace, and Hermitian symmetrisation preserves it -- so this only has to
+#: absorb the rounding of that division, never a physical spread.
+RDM_TRACE_TOL = 1e-8
+
+#: Returned by :func:`check_rdm` in place of the trace defect when the RDM
+#: carries non-finite entries.
+#:
+#: ``inf`` rather than ``nan``, deliberately.  The entire failure class in #848
+#: is a tolerance comparison that fails open: ``nan > tol`` is ``False``, so
+#: handing back ``nan`` invites a caller who gates on
+#: ``check_rdm(...) > tol`` to repeat the bug one level up.  ``inf > tol`` is
+#: ``True``, so that caller is fail-closed instead.
+#:
+#: :func:`rdm_trace_defect` is unaffected and keeps returning the honest
+#: ``|tr - 1|``; this substitution belongs to the *validity check*, which is
+#: reporting "not a usable measurement", not to the measurement itself.
+INVALID_RDM_DEFECT = float("inf")
+
+
+def _as_rdm_matrix(rdm) -> np.ndarray:
+    """Densify an RDM to a NumPy array, accepting 2- or 4-leg forms.
+
+    The RDM is ``d x d`` or ``d**2 x d**2`` -- a local operator, not a boundary
+    object -- so ``todense()`` here is the sanctioned small-result case, not the
+    one the symmetric-tensor guidance warns about.
+    """
+    M = np.asarray(rdm.todense() if hasattr(rdm, "todense") else rdm)
+    if M.ndim not in (2, 4):
+        raise ValueError(f"expected a 2- or 4-leg RDM, got ndim={M.ndim}")
+    return M
+
+
+def rdm_trace_defect(rdm) -> float:
+    """``|tr(rdm) - 1|`` for a trace-normalised reduced density matrix.
+
+    Accepts the ``(d, d)`` / ``(d*d, d*d)`` matrix form or the ``(d, d, d, d)``
+    form the RDM builders return.
+
+    The value is a clean two-state discriminator rather than a quality score.
+    ``_normalise_rdm`` divides by the trace, so **any** RDM with physical
+    content comes back with trace exactly 1 and defect 0.  A defect of 1 means
+    the raw network contracted to zero and the normaliser's zero-matrix guard
+    returned zeros -- correctly, since ``0/0`` is not a density matrix.
+
+    .. warning::
+        **A small defect does not certify the RDM.**  The trace is one number
+        summed over the diagonal, so it says nothing about the rest of the
+        array: an RDM carrying ``NaN`` or ``inf`` *off* the diagonal has a
+        trace of exactly 1 and a defect of exactly 0, while the energy
+        contracted from it is ``NaN``.  Use :func:`check_rdm`, which tests
+        finiteness of the whole array as well.
+    """
+    M = _as_rdm_matrix(rdm)
+    tr = np.einsum("ijij->", M) if M.ndim == 4 else np.trace(M)
+    return float(abs(complex(tr) - 1.0))
+
+
+def check_rdm(
+    rdm,
+    *,
+    context: str = "",
+    tol: float = RDM_TRACE_TOL,
+    strict: bool = False,
+) -> float:
+    """Warn (or raise) when an RDM is not a density matrix; return the defect.
+
+    The failure this exists for is #845: on a degenerate corner one bond's RDM
+    network contracts to **exactly zero**, and the energy sum then adds ``0``
+    for that bond instead of its real value.  Measured at D=2, chi=4 (where
+    ``chi = D**2`` makes the corner spectrum exactly flat, ``s0/s_last = 1.00``)
+    the horizontal RDM came back with ``||rdm||_F = 0`` and ``tr = 0`` while the
+    vertical one was untouched, so ``E`` was ``-0.2750`` against ``-0.5486``
+    from every other chi -- a factor of 1.995, reported as a converged energy.
+
+    Nothing upstream catches it: the CTM convergence criterion compares corner
+    *singular values*, which are identical between the two bases, so it reports
+    ``converged=True`` with ``diff ~ 1e-17``.  See also :func:`check_ctm_env`,
+    which detects a different collapse (rank-1 corner) at the environment
+    level.
+
+    Two distinct failures are reported, because they need different responses:
+
+    * **Non-finite entries** (``NaN``/``inf``) -- the contraction was
+      numerically unstable upstream.  Checked over the whole array, not via the
+      trace: a ``NaN`` off the diagonal leaves the trace at exactly 1, so a
+      trace-only test hands back a defect of ``0.0`` -- an affirmative clean
+      bill of health -- for an RDM whose energy is ``NaN`` (#848).  The
+      all-``NaN`` case is missed for a second reason: the defect is then
+      ``NaN``, and ``NaN > tol`` is ``False``, so the comparison below fails
+      open in ``strict`` mode too.
+    * **Trace defect** -- the #845 collapse described above.
+
+    Finiteness is tested first; on a poisoned array the trace defect is not a
+    meaningful number to report.
+
+    Args:
+        rdm:     A trace-normalised RDM, 2- or 4-leg.
+        context: Free-text label naming the bond (e.g. ``"2x1 horizontal"``),
+                 so the message says *which* contribution died.
+        tol:     Tolerance on ``|tr - 1|``.
+        strict:  Raise :class:`CollapsedRDMError` instead of warning.
+
+    Returns:
+        The trace defect, so callers can record it alongside the energy --
+        except on a non-finite RDM, where :data:`INVALID_RDM_DEFECT` (``inf``)
+        is returned instead.  The substitution is the point: ``|tr - 1|`` for
+        an RDM whose only ``NaN`` sits off the diagonal is exactly ``0.0``, the
+        same value a healthy RDM reports, so returning it would let a caller
+        record a poisoned RDM as "checked, healthy" -- which is the defect this
+        function exists to prevent, one level up (#848).
+    """
+    M = _as_rdm_matrix(rdm)
+    defect = rdm_trace_defect(M)
+    where = f" [{context}]" if context else ""
+
+    n_bad = int((~np.isfinite(M)).sum())
+    if n_bad:
+        defect = INVALID_RDM_DEFECT
+        msg = (
+            f"reduced density matrix is not finite{where}: "
+            f"{n_bad} of {M.size} entries are NaN or inf. The energy "
+            f"contracted from it is NaN, which propagates into the total and "
+            f"into every gradient taken through it. Note that the trace alone "
+            f"does not catch this -- a non-finite entry off the diagonal "
+            f"leaves |tr - 1| at 0. Look upstream at the contraction that "
+            f"built this RDM, not at the normalisation. See #848."
+        )
+    elif defect > tol:
+        msg = (
+            f"reduced density matrix is not a density matrix{where}: "
+            f"|tr - 1| = {defect:.3g} (a valid RDM has trace exactly 1). "
+            f"The raw network contracted to zero or to a vanishing trace, so "
+            f"this bond contributes 0 to the energy instead of its real "
+            f"value, and the total is silently too small. This happens on a "
+            f"degenerate corner -- check the corner spectrum, and note that "
+            f"the CTM convergence flag cannot see it. See #845."
+        )
+    else:
+        return defect
+
+    if strict:
+        raise CollapsedRDMError(msg)
+    warnings.warn(msg, RuntimeWarning, stacklevel=3)
+    return defect
 
 
 def _corner_spectrum(env) -> np.ndarray:

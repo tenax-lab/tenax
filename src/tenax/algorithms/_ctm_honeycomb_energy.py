@@ -27,7 +27,9 @@ import jax.numpy as jnp
 from tenax.algorithms._ctm_honeycomb_env import HoneycombCTMEnv
 from tenax.algorithms._ctm_honeycomb_init import _double_layer_honeycomb_open
 from tenax.algorithms._ctm_honeycomb_topology import Coord
-from tenax.algorithms._ctm_tensor_energy import _normalise_rdm
+from tenax.algorithms._ctm_tensor_energy import (
+    _normalise_rdm_for_energy,
+)
 from tenax.contraction.contractor import contract
 from tenax.core.tensor import Tensor
 
@@ -200,7 +202,7 @@ def _rdm2_bond(
     rdm = rdm_t.todense()  # (d, d, d, d) — ket_A, ket_B, bra_A, bra_B
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
+    rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm2_bond")
     return rdm_mat
 
 
@@ -264,7 +266,7 @@ def _rdm1(
 
     rdm_t = contract(C0, L0, C1, L1, C2, L2, T_r, output_labels=("_phys", "_phys_bra"))
     rdm = rdm_t.todense()  # (d, d) — ket, bra
-    rdm = _normalise_rdm(rdm)
+    rdm = _normalise_rdm_for_energy(rdm, "_rdm1")
     return rdm
 
 

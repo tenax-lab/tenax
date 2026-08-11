@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A bond whose reduced density matrix is invalid is no longer summed into the
+  energy silently** (#845, #848). `_normalise_rdm` divides by the trace, so a
+  raw network that contracts to zero returns the zero matrix — correctly, since
+  `0/0` is not a density matrix — and the energy sum then added that bond's `0`
+  as though it were a measurement. Measured at D=2, χ=4, where χ=D² makes the
+  corner spectrum exactly flat: one bond died and `E` came back `-0.2750`
+  against `-0.5486` from every other χ, with `converged=True` and
+  `diff ~ 1e-17` reported throughout. The CTM criterion compares corner
+  *singular values*, which are identical between the two bases, so nothing
+  upstream could see it.
+
+  Every RDM on an energy path now goes through a checked normaliser that warns
+  (or raises, under `check_rdm(..., strict=True)`) and names the bond. The
+  check covers **non-finite** entries as well as the trace: `NaN > tol` is
+  `False`, and a `NaN` off the diagonal leaves the trace at exactly 1, so a
+  trace-only test returned a defect of `0.0` — the value meaning "checked,
+  healthy" — for an RDM whose energy is `NaN` (#848). The excitation path is
+  deliberately exempt, where `B = 0` is a legitimate input.
+
+  The guard reports; it does not repair. A degenerate corner still produces the
+  wrong energy, now audibly.
+
 ### ⚠️ Published performance claims retracted
 
 - **The v0.8.2 iPEPS multi-GPU / split-CTM frontier numbers were measured
@@ -98,6 +122,26 @@
   (#860) — direction fine, and flat at 5.48e-2 across FD steps 1e-3…1e-6, which
   is what rules out a finite-difference artifact. That one is gated by a strict
   `xfail`, not by a loosened threshold.
+
+### CI / tests
+
+- **A network blip no longer reds the documentation build.** `sphinx-build -W`
+  in CI and `fail_on_warning: true` on Read the Docs both make every warning
+  fatal, and intersphinx fetches `docs.python.org`, `numpy.org` and
+  `jax.readthedocs.io` on every cold build — so an SSL hiccup on a third-party
+  host failed the docs job of whatever unrelated PR happened to be in flight
+  (seen on #844). `suppress_warnings` cannot express the exception: it matches
+  on a warning's `type`, and the unreachable-inventory message is the one
+  warning intersphinx emits without one. `docs/conf.py` now demotes exactly
+  that warning to INFO via a logger filter, keyed on the absent type rather
+  than on message text, so the failure stays visible in the build log without
+  failing the build; intersphinx's resolve-time warnings, which are real
+  documentation defects, remain fatal. `intersphinx_timeout` is set so a host
+  that accepts the connection and then stalls can no longer hang the job.
+
+  Verified against a dead proxy — before, exit 1 with three warnings; after,
+  exit 0 with none and all three failures still reported in the log. `conf.py`
+  records the one-line command so the property can be re-checked.
 
 ## v0.8.3 (2026-08-09)
 
