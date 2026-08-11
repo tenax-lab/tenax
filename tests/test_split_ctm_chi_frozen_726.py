@@ -8,17 +8,25 @@ the outer chi legs.  Since ``C1_new = S^{1/2} U^H``, the updated corner's whole
 spectrum is ``sqrt(spec(M))`` and ``rank(C_new) <= rank(C1g)``, which is 1 at
 cold init.  The corner can never grow rank.
 
-The cheapest possible detector for that is **energy frozen in chi**: a genuine
-corner transfer matrix improves as the boundary grows, a chi_eff=1 mean-field
-boundary does not.  On a physical D=2 SU state the ``1x1`` energy is
-bit-identical from chi=2 to chi=32 (delta exactly 0.0), while the ``2x2``
-recipe converges normally over the same range.
+The detector is the **rank of the corner**, measured directly.
+
+An earlier version of this file used *energy frozen in chi* instead, on the
+reasoning that a genuine corner transfer matrix improves as the boundary grows
+while a chi_eff=1 mean-field boundary does not.  That proxy does not work, and
+the file now says so rather than carrying it: a collapsed environment gives a
+chi-independent *wrong* energy and a converged one gives a chi-independent
+*right* energy, so flatness is consistent with both and discriminates neither.
+On this fixture the 2x2 energy moves by **2 ULP** between chi=8 and chi=16 and
+by exactly zero between 4 and 8, with the corner at rank 4/6/6 throughout --
+so the bit-inequality assertion was decided by rounding, and split by platform
+accordingly.  ``frozen_chi_pairs`` in ``_ctm_diagnostics`` carries the same
+warning from the same lesson.
 
 Two guards live here:
 
-* ``test_the_2x2_recipe_energy_is_not_frozen_in_chi`` -- the positive control.
-  It must keep passing; if it ever goes chi-frozen, the *working* recipe has
-  regressed into the same failure mode.
+* ``test_the_2x2_recipe_corner_is_not_rank_1`` -- the positive control, swept
+  across chi.  It must keep passing; if the *working* recipe ever returns a
+  rank-1 corner it has regressed into the same failure mode.
 * ``test_single_site_split_honours_the_default_2x2_recipe`` -- the production
   guard.  ``gs_recipe="2x2"`` is the default, and the single-site split path
   used to run ``1x1`` moves unconditionally, so before #726 the default config
@@ -44,7 +52,6 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from tenax.algorithms._ctm_tensor_convergence import _ctm_tensor_multisite
-from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms.ipeps import heisenberg_gate, ipeps, sublattice_rotate_gate
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 
@@ -89,39 +96,81 @@ def _env_at(A, chi, recipe):
     return envs[_ORIGIN]
 
 
-def _energy_at(A, gate, chi, recipe):
-    return float(compute_energy_ctm_tensor(A, _env_at(A, chi, recipe), gate))
+@pytest.mark.parametrize("chi", [4, 8, 16])
+def test_the_2x2_recipe_corner_is_not_rank_1(chi, _su_state):
+    """Positive control: the working recipe must not collapse, at any chi.
 
+    This replaces ``test_the_2x2_recipe_energy_is_not_frozen_in_chi``, which
+    asserted ``E(chi_lo) != E(chi_hi)`` -- bit-inequality -- as a proxy for "the
+    boundary is doing something".  That proxy has no discriminating power here,
+    and the parametrisation was decided by rounding.  Measured on this fixture::
 
-@pytest.mark.parametrize("chi_lo,chi_hi", [(4, 8), (8, 16)])
-def test_the_2x2_recipe_energy_is_not_frozen_in_chi(chi_lo, chi_hi, _su_state):
-    """Positive control: a working recipe must respond to chi.
+        chi  corner_rank  energy (repr)
+          4      4        0.49912538691954667
+          8      6        0.49912538691954667
+         16      6        0.49912538691954655
 
-    Not an accuracy assertion -- only that the boundary is doing something.  A
-    chi_eff=1 environment returns *bit-identical* energies across any chi range
-    (delta exactly 0.0), which is what this catches.  The real 2x2 movement
-    between chi=4 and chi=8 on this state is ~2.3e-7, so the threshold sits far
-    below it and far above float noise.
+        chi 4->8 : delta = 0.0            bit-identical  -> old test FAILED
+        chi 8->16: delta = 1.110223e-16   = 2.000 ULP    -> old test PASSED
+
+    The corner is rank 4/6/6 -- never 1 -- so the collapse the old message
+    announced was simply absent.  ``[8-16]`` passed on a **two-ULP** difference:
+    not a detection, just noise that happened to move the last bit.  Which way
+    each case fell was therefore a property of the platform's floating point,
+    and CI split accordingly (ubuntu-3.11 and macOS-3.12 red, ubuntu-3.12
+    green).  The old docstring's "real 2x2 movement ... is ~2.3e-7" is off by
+    seven orders of magnitude against this state.
+
+    The reason no threshold would have rescued it: **energy flatness cannot
+    discriminate.**  A collapsed environment gives a chi-independent *wrong*
+    energy; a converged one gives a chi-independent *right* energy.  Both are
+    flat, so the signal is empty in both directions.  ``frozen_chi_pairs`` in
+    ``_ctm_diagnostics`` already documents this ("a fully converged environment
+    is flat in chi too -- that is what convergence means") and states that
+    ``ctm_corner_rank`` is the only sound detector.  That is what this asserts,
+    now swept across chi so it still covers the range the old parametrisation
+    was reaching for.
     """
-    A, gate = _su_state
-    E_lo = _energy_at(A, gate, chi_lo, "2x2")
-    E_hi = _energy_at(A, gate, chi_hi, "2x2")
-    assert E_lo != E_hi, (
-        f"2x2 energy is bit-identical at chi={chi_lo} and chi={chi_hi} "
-        f"({E_lo!r}); the working recipe has regressed into the #726 "
-        "chi_eff=1 collapse."
-    )
-
-
-def test_the_2x2_recipe_corner_is_not_rank_1(_su_state):
-    """The direct form of the same check, on the corner itself."""
     A, _gate = _su_state
-    env = _env_at(A, chi=8, recipe="2x2")
+    env = _env_at(A, chi=chi, recipe="2x2")
     s = np.linalg.svd(np.asarray(env.C1.todense()), compute_uv=False)
     rank = int((s > 1e-10 * s[0]).sum())
     assert rank > 1, (
-        f"2x2 corner collapsed to rank {rank} (spectrum {s[:6]}); this is the "
-        "#726 signature on the recipe that is supposed to work."
+        f"2x2 corner collapsed to rank {rank} at chi={chi} (spectrum {s[:6]}); "
+        "this is the #726 signature on the recipe that is supposed to work."
+    )
+
+
+@pytest.mark.parametrize("chi", [4, 8, 16])
+def test_the_1x1_recipe_collapses_here_at_every_chi(chi, _su_state):
+    """Negative control: the detector above must be *able* to fail.
+
+    Same helper, same state, same chi -- only the recipe differs::
+
+        recipe  chi     corner_rank  spectrum[:4]
+        1x1     4/8/16       1       [1.      0.      0.      0.     ]
+        2x2     4            4       [1.      0.1276  0.1266  0.0164 ]
+        2x2     8/16         6       [1.      0.1276  0.1266  0.0164 ]
+
+    The ``1x1`` spectrum is *exactly* ``[1, 0, 0, 0]``, and ``2x2`` shows the
+    expected Neel degenerate pairs.  So ``rank > 1`` is discriminating at every
+    chi rather than passing for incidental reasons -- which is the property the
+    energy-flatness assertion it replaced never had, at any chi.
+
+    This overlaps ``test_single_site_split_still_accepts_1x1_for_bisection`` in
+    intent, but reaches the collapse through ``_ctm_tensor_multisite`` directly
+    rather than through ``optimize_gs_ad``, so it pins the projector itself
+    rather than the production wiring around it.
+    """
+    A, _gate = _su_state
+    env = _env_at(A, chi=chi, recipe="1x1")
+    s = np.linalg.svd(np.asarray(env.C1.todense()), compute_uv=False)
+    rank = int((s > 1e-10 * s[0]).sum())
+    assert rank == 1, (
+        f"1x1 corner is rank {rank} at chi={chi} (spectrum {s[:6]}), not 1. "
+        "If the 1x1 projector has been fixed this is good news, but the #726 "
+        "documentation in this module and the positive control's negative "
+        "control both go stale -- update them together."
     )
 
 
