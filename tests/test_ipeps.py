@@ -480,37 +480,61 @@ class TestIPEPS2Site:
         assert len(envs) == 2
 
     def test_2site_heisenberg_D2_energy(self, heisenberg_gate):
-        """2-site D=2 iPEPS should give E < -0.63 (literature ~-0.648).
+        """2-site D=2 iPEPS smoke test on the energy ``ipeps()`` reports.
 
-        A moderate dt (0.3) is used so the simple update builds sufficient
-        entanglement.  Small dt causes the bond lambdas to converge to a
-        product-like fixed point with too little entanglement.
+        **This test used to document #667 as intended behaviour.**  It read "a
+        moderate dt (0.3) is used so the simple update builds sufficient
+        entanglement; small dt causes the bond lambdas to converge to a
+        product-like fixed point" -- which is the bug, not a property of simple
+        update.  The old update had ``lam_2`` proportional to ``dt``, so dt=0.3
+        happened to land near the correct ``lam_2`` ~ 0.16 and any smaller step
+        decayed to the product state.  With #667 fixed the state is
+        dt-stable (E_1x1 = -0.6570 / -0.6593 / -0.6591 at dt = 0.3 / 0.05 /
+        0.01), so a physical dt is used here.
+
+        The bound is loose because ``ipeps()``'s own energy comes from the
+        legacy 2-site ``ctm_2site``, which does **not** converge on a genuinely
+        entangled state -- measured -0.6294 to -0.6366 across chi=10..32 and
+        max_iter=40..400, against the -0.6593 a converged 1x1 CTM gives for the
+        same state.  Pinning it tightly would pin that non-convergence.  The
+        physics assertion lives in ``test_su_667_product_state.py``, which
+        measures the state rather than this environment.
         """
         config = iPEPSConfig(
             max_bond_dim=2,
             num_imaginary_steps=200,
-            dt=0.3,
+            dt=0.05,
             ctm=CTMConfig(chi=10, max_iter=40),
             unit_cell="2site",
         )
         energy, _, _ = ipeps(heisenberg_gate, None, config)
-        assert float(energy) < -0.63, (
-            f"Energy {float(energy)} not low enough — D=2 iPEPS should give E < -0.63"
+        assert float(energy) < -0.60, (
+            f"Energy {float(energy)} not low enough — D=2 iPEPS should give "
+            f"E < -0.60 even through the unconverged 2-site CTM"
         )
 
     @pytest.mark.slow
     def test_2site_heisenberg_D4_energy(self, heisenberg_gate):
-        """2-site D=4 iPEPS should give E < -0.66 (literature ~-0.667)."""
+        """2-site D=4 iPEPS smoke test on the energy ``ipeps()`` reports.
+
+        Same framing as the D=2 case above: dt moved from 0.3 to a physical step
+        (#667), and the bound is loose because ``ctm_2site`` does not converge
+        on the resulting state -- measured -0.6350 here against the -0.6674 a
+        converged 1x1 CTM gives for the same state, which *is* the "literature
+        ~-0.667" this test used to claim.  That claim is asserted properly in
+        ``test_su_667_product_state.py::test_d4_beats_d2``.
+        """
         config = iPEPSConfig(
             max_bond_dim=4,
             num_imaginary_steps=400,
-            dt=0.3,
+            dt=0.05,
             ctm=CTMConfig(chi=20, max_iter=60),
             unit_cell="2site",
         )
         energy, _, _ = ipeps(heisenberg_gate, None, config)
-        assert float(energy) < -0.66, (
-            f"Energy {float(energy)} not low enough — D=4 iPEPS should give E < -0.66"
+        assert float(energy) < -0.60, (
+            f"Energy {float(energy)} not low enough — D=4 iPEPS should give "
+            f"E < -0.60 even through the unconverged 2-site CTM"
         )
 
     def test_2site_with_initial_peps(self, heisenberg_gate):

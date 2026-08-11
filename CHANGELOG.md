@@ -58,6 +58,71 @@
   than the recipe. The split-side collapse is cleanly the recipe — its controls
   reproduce to ≤1.8%.
 
+### Fixes
+
+- **Simple update converged to the product state; every `ipeps()` result is
+  affected** (#667). Two independent defects in the simple-update path:
+
+  1. The sweep drove only 2 of the checkerboard's 4 bonds — `A.r↔B.l` and
+     `A.d↔B.u`, never `B.r↔A.l` or `B.d↔A.u`. A was therefore always the
+     left/top site of every gate and only ever picked up bond weight on its
+     `r`/`d` legs, leaving **half the lattice bonds with no Schmidt weight at
+     all**. That state is spuriously dimerized (the two horizontal bonds differ
+     by 2.5e-2), its 1-site RDM depends on which bond you trace it from
+     (‖ρ_A(h) − ρ_A(v)‖ = 0.37), and that RDM has a **negative eigenvalue**
+     (−0.094).
+  2. `Γ` absorbed `sqrt(σ)` that was *also* stored as the new λ and re-absorbed
+     in full on the next sweep, so the shared bond carried `λ^1.5`. This is what
+     drove the state to a product state: λ₂ ∝ dt, λ₃ ∝ dt², and E → **−0.5
+     exactly** as dt → 0. It is why *smaller dt was worse* — dt was the only
+     thing entangling the state.
+
+  Neither correction works alone. Together, D=2 Heisenberg goes **−0.548 →
+  −0.659334287637** (reference −0.6599; the residual is ordinary simple-update
+  error), D=3 → −0.663196204307 and D=4 → −0.6674, χ-converged with corner rank
+  = χ. The state is now dt-stable (−0.6570 / −0.6593 / −0.6591 at dt =
+  0.3 / 0.05 / 0.01).
+
+  **Two consequences for existing results.** Any nominally-D=3 state from
+  `ipeps()` was really D=2 — its third Schmidt value was ~2e-6. And
+  `sublattice_rotate_gate` now does what it promises: the rotated-frame state is
+  uniform, so `A` and `B` are the same physical tensor (their 1×1 CTM energies
+  agree to 1e-16), which makes the single-site/C4v route usable. `‖A−B‖` is not
+  the way to check that — it measures the bond gauge and stays ≈1.7 either way.
+
+  Not fixed here, and newly visible now that the state is genuinely entangled:
+  the legacy 2-site `ctm_2site` that `ipeps()` reports its energy through does
+  **not converge** on such a state (diff 1.6e-3…6.5e-2 after 600 sweeps at any
+  χ up to 32), so `ipeps()`'s returned energy sits ~0.02 above the state's true
+  value. Measure with `ctm_tensor(recipe="2x2")` instead. `fermionic_ipeps.py`
+  absorbs `sqrt(σ)` the same way and is an untested lead for #392.
+
+  One characterization worth knowing if you compare CTM paths: **split-CTM and
+  fused-CTM agree only as χ→∞.** On a genuinely entangled D=2 state their
+  energies differ by 1.67e-05 at χ=8, falling to 9.62e-09 by χ=48 — and the gap
+  is identical to 12 digits at max_iter 100/400/2000, so it is finite-χ
+  truncation, not non-convergence. This was invisible while the state was
+  collapsing, because a near-product state made the two paths trivially
+  identical.
+
+  **Three test fixtures built simple-update states by hand and were migrated
+  with the library** (`_build_su_neel`, `_build_su_xxz`, `evolve_physical_site`).
+  Each ran the same 2-of-4-bond sweep and returned the bare Vidal `Γ`, so the
+  split-CTM parity tests were validating a state with no bond weights on any leg
+  while their docstrings described a physical one. They still passed — split and
+  fused agreed with each other on the wrong ansatz — which is the failure mode
+  worth naming: a parity test cannot tell you *what* it achieved parity on.
+
+  Fixing them exposed two things the collapsed fixture had been hiding. The
+  split-vs-fused gap at a truncated interlayer bond (`chi_I = chi`) is ~1.2e-5,
+  not the ~1e-6 the tolerance assumed — a genuinely entangled state has higher
+  interlayer rank, and the gap still collapses to 2.4e-15 at the lossless point,
+  so it is truncation and the tolerance was calibrated against the bug. And the
+  implicit-AD **gradient magnitude** is ~5% wrong on the corrected state
+  (#860) — direction fine, and flat at 5.48e-2 across FD steps 1e-3…1e-6, which
+  is what rules out a finite-difference artifact. That one is gated by a strict
+  `xfail`, not by a loosened threshold.
+
 ### CI / tests
 
 - **A network blip no longer reds the documentation build.** `sphinx-build -W`

@@ -5,9 +5,15 @@ it cannot drift when the simple-update implementation changes, and so the tests
 that use it do not each pay for the imaginary-time evolution (measured 3.6s
 cold, 0.5s once XLA has cached the compile).
 
-Regenerate with ``scripts/gen_su_fixture.py``.
-``test_the_frozen_fixture_still_matches_simple_update`` checks it against a
-live run.
+**Do not regenerate this** (#667).  It was produced before simple update was
+fixed, and the pathology described below -- a retained spectrum that collapses
+with chi, usable rank 3 -- is a *consequence* of the bug that was fixed: the
+broken update drove the state toward a product state, whose environment has
+almost no usable directions.  ``scripts/gen_su_fixture.py`` now builds a
+genuinely entangled state instead (``retained_smin_rtol`` 4.0e-04 rather than
+3.0e-08 at chi=4), which would silently defang every test that depends on this
+one being pathological.  ``test_the_frozen_fixture_still_has_the_spectrum_it_claims``
+pins the properties rather than the provenance.
 
 **There is deliberately no frozen energy here** (#836).  An energy literal
 used to sit beside the tensor and the test asserted the live run reproduced it

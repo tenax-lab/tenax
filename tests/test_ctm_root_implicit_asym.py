@@ -1428,8 +1428,25 @@ def test_the_random_fixture_keeps_its_full_rank(chi):
 
 
 @pytest.mark.core
-def test_the_frozen_fixture_still_matches_simple_update():
+def test_the_frozen_fixture_still_has_the_spectrum_it_claims():
     """The frozen literal must stay the state it claims to be.
+
+    **This used to compare the literal against a live ``ipeps()`` run, and no
+    longer can** (#667).  The fixture was generated before simple update was
+    fixed, and its defining property -- a retained spectrum that collapses with
+    chi, usable rank 3 of chi -- is a *consequence* of that bug: the broken
+    update drove the state toward a product state, whose environment has almost
+    no usable directions.  A live run now produces a genuinely entangled state
+    whose spectrum does not collapse (``retained_smin_rtol`` 4.0e-04 rather than
+    3.0e-08 at chi=4), so a live-vs-frozen comparison would fail by construction.
+
+    The literal is deliberately **not** regenerated.  #772/#778/#784/#785 need
+    precisely this pathological state -- it is the one that NaN'd the gradient --
+    and regenerating it would silently replace it with a healthy one and defang
+    every test built on it.  Provenance stopped being the point; the properties
+    are, so those are what this pins now.  That is the better guard anyway: it
+    catches drift in the literal or in ``converge``/``retained_rank_report``
+    without depending on a generator that has legitimately moved on.
 
     ``core`` (13s) rather than the file's ``algorithm``, and no longer
     ``slow``.  It was ``@pytest.mark.slow`` in an ``algorithm`` file, which put
@@ -1465,50 +1482,33 @@ def test_the_frozen_fixture_still_matches_simple_update():
     orders inside the gate, on the exact quantities the fixture exists to
     provide.
     """
-    import importlib.util
-    import pathlib
-
-    script_path = (
-        pathlib.Path(__file__).resolve().parent.parent / "scripts" / "gen_su_fixture.py"
-    )
-    spec = importlib.util.spec_from_file_location("gen_su_fixture", script_path)
-    gen_su_fixture = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(gen_su_fixture)
-    build = gen_su_fixture.build
-
-    _E_live, A_live = build()
     A_frozen = physical_su_d2()
 
     # Swept rather than checked at chi=4 alone: the fixture's whole claim is
-    # that the retained spectrum *collapses with chi* (3.0e-08 / 8.4e-10 /
-    # 2.1e-13 at chi=4/6/8), and a single chi cannot tell a state that still
-    # does that from one that merely happens to match at one cut.
+    # that the retained spectrum *collapses with chi*, and a single chi cannot
+    # tell a state that still does that from one that merely happens to match
+    # at one cut.
     #
     # On ``rel=1e-3``.  Inherited, and kept deliberately rather than by
-    # default.  Measured: live vs frozen agree to 6e-12 / 1.1e-10 / 1.2e-10 at
-    # chi=4/6/8, and ``retained_smin_rtol`` responds linearly at ~10x a
-    # perturbation of the tensor, so this gate trips on element drift above
-    # ~1e-4 and 1e-6 would trip above ~1e-7.  Not tightened: the drift it
-    # exists to catch (a simple-update change) is orders larger than either
-    # bound, and this test now runs in the *required* gate, which includes
-    # macOS -- #756 is what a threshold with too little platform margin costs.
-    for chi in (4, 6, 8):
-        env_l, a_l, _m, _p = M.converge(
-            A_live, chi, max_iter=100, conv_tol=1e-11, return_projectors=True
-        )
+    # default.  ``retained_smin_rtol`` responds linearly at ~10x a perturbation
+    # of the tensor, so this gate trips on element drift above ~1e-4 and 1e-6
+    # would trip above ~1e-7.  Not tightened: the drift it exists to catch is
+    # orders larger than either bound, and this test runs in the *required*
+    # gate, which includes macOS -- #756 is what a threshold with too little
+    # platform margin costs.
+    expected = {4: 3.042600584079e-08, 6: 8.389955424232e-10, 8: 2.128532486162e-13}
+    for chi, smin in expected.items():
         env_f, a_f, _m, _p = M.converge(
             A_frozen, chi, max_iter=100, conv_tol=1e-11, return_projectors=True
         )
-        rep_l = M.retained_rank_report(env_l, a_l, chi)
         rep_f = M.retained_rank_report(env_f, a_f, chi)
-        assert rep_l["retained_smin_rtol"] == pytest.approx(
-            rep_f["retained_smin_rtol"], rel=1e-3
-        ), f"retained spectrum drifted at chi={chi}"
+        assert rep_f["retained_smin_rtol"] == pytest.approx(smin, rel=1e-3), (
+            f"retained spectrum drifted at chi={chi}"
+        )
         # The rank is what #772 turned on, and it is an integer -- so it can
         # shift without moving ``retained_smin_rtol`` past a 1e-3 gate.
-        assert rep_l["usable_rank"] == rep_f["usable_rank"], (
-            f"usable_rank drifted at chi={chi}: live {rep_l['usable_rank']} "
-            f"vs frozen {rep_f['usable_rank']}"
+        assert rep_f["usable_rank"] == 3, (
+            f"usable_rank drifted at chi={chi}: {rep_f['usable_rank']} vs 3"
         )
 
 

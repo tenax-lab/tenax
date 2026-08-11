@@ -33,6 +33,7 @@ from tenax.algorithms.ipeps_simple_update import (
     _make_trotter_gate_tensor,
     _simple_update_2site_horizontal_tensor,
     _simple_update_2site_vertical_tensor,
+    _to_physical_tensor,
 )
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
@@ -437,16 +438,35 @@ def ipeps(
     lam_h = jnp.ones(D_h)
     lam_v = jnp.ones(D_v)
 
-    # Simple update iterations — alternate horizontal and vertical bonds
+    # Simple update iterations — cycle through all FOUR bonds of the
+    # checkerboard unit cell.  Evolving only (A.r<->B.l) and (A.d<->B.u), as
+    # this loop used to, leaves (B.r<->A.l) and (B.d<->A.u) untouched: A is then
+    # always the left/top site of every gate, so it only ever picks up bond
+    # weight on its r/d legs and half the lattice bonds end up with none at all.
+    # That state is spuriously dimerized and its 1-site RDM is indefinite (#667).
     for step in range(config.num_imaginary_steps):
-        if step % 2 == 0:
+        phase = step % 4
+        if phase == 0:
             A, B, lam_h = _simple_update_2site_horizontal_tensor(
                 A, B, gate, lam_h, lam_v, D
             )
-        else:
+        elif phase == 1:
             A, B, lam_v = _simple_update_2site_vertical_tensor(
                 A, B, gate, lam_h, lam_v, D
             )
+        elif phase == 2:
+            B, A, lam_h = _simple_update_2site_horizontal_tensor(
+                B, A, gate, lam_h, lam_v, D
+            )
+        else:
+            B, A, lam_v = _simple_update_2site_vertical_tensor(
+                B, A, gate, lam_h, lam_v, D
+            )
+
+    # The loop keeps the state in Vidal form; the CTM contracts the physical
+    # (symmetric-gauge) tensor, with sqrt(lambda) on all four legs.
+    A = _to_physical_tensor(A, lam_h, lam_v)
+    B = _to_physical_tensor(B, lam_h, lam_v)
 
     # CTM environment (uses dense arrays)
     A_dense = A.todense()

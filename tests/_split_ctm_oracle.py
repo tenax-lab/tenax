@@ -47,19 +47,52 @@ def heisenberg_gate():
 
 
 def evolve_physical_site(A, gate, D, n_steps=40, dt=0.05):
+    """Simple-update evolve a 1-site ansatz and return the PHYSICAL tensor.
+
+    The name is a contract: the returned tensor carries ``sqrt(lambda)`` on all
+    four legs, so a CTM contracting it sees the simple-update state rather than
+    a bare Vidal ``Gamma`` with every bond weight dropped.
+
+    Two things this used to get wrong, both of them #667:
+
+    * It ran only the (A.r<->B.l) and (A.d<->B.u) bonds, so half the lattice
+      bonds never acquired Schmidt weight.  The sweep now cycles all four.
+    * It discarded the gate's *right*-site output (``A, _, lam_h = ...``), so
+      ``A`` only ever received the left-site update.  Both sites are now kept.
+
+    Note this helper currently has **no callers**, so nothing exercises it; it
+    is fixed rather than deleted to keep the module's stated contract honest.
+    """
     from tenax.algorithms.ipeps_simple_update import (
         _make_trotter_gate_tensor,
         _simple_update_2site_horizontal_tensor,
         _simple_update_2site_vertical_tensor,
+        _to_physical_tensor,
     )
 
     tg = _make_trotter_gate_tensor(gate, dt, site_tensor=A)
+    B = A
     lam_h = jnp.ones(D)
     lam_v = jnp.ones(D)
-    for _ in range(n_steps):
-        A, _, lam_h = _simple_update_2site_horizontal_tensor(A, A, tg, lam_h, lam_v, D)
-        A, _, lam_v = _simple_update_2site_vertical_tensor(A, A, tg, lam_h, lam_v, D)
-    A, _ = max_abs_normalize(A)
+    for step in range(n_steps):
+        phase = step % 4
+        if phase == 0:
+            A, B, lam_h = _simple_update_2site_horizontal_tensor(
+                A, B, tg, lam_h, lam_v, D
+            )
+        elif phase == 1:
+            A, B, lam_v = _simple_update_2site_vertical_tensor(
+                A, B, tg, lam_h, lam_v, D
+            )
+        elif phase == 2:
+            B, A, lam_h = _simple_update_2site_horizontal_tensor(
+                B, A, tg, lam_h, lam_v, D
+            )
+        else:
+            B, A, lam_v = _simple_update_2site_vertical_tensor(
+                B, A, tg, lam_h, lam_v, D
+            )
+    A, _ = max_abs_normalize(_to_physical_tensor(A, lam_h, lam_v))
     return A
 
 
