@@ -155,7 +155,7 @@ def check_rdm(
     *,
     context: str = "",
     tol: float = RDM_TRACE_TOL,
-    psd_tol: float = RDM_PSD_TOL,
+    psd_tol: float | None = RDM_PSD_TOL,
     strict: bool = False,
 ) -> float:
     """Warn (or raise) when an RDM is not a density matrix; return the defect.
@@ -209,7 +209,8 @@ def check_rdm(
                  so the message says *which* contribution died.
         tol:     Tolerance on ``|tr - 1|``.
         psd_tol: Relative tolerance on the most negative eigenvalue, as a
-                 fraction of the spectral radius.
+                 fraction of the spectral radius.  ``None`` skips the PSD
+                 test; the automatic energy path passes ``None`` (see below).
         strict:  Raise :class:`CollapsedRDMError` instead of warning.
 
     Returns:
@@ -248,6 +249,8 @@ def check_rdm(
             f"the CTM convergence flag cannot see it. See #845."
         )
     else:
+        if psd_tol is None:
+            return defect
         min_eig, radius = rdm_min_eigenvalue(M)
         if min_eig < -psd_tol * max(radius, 1.0):
             defect = INVALID_RDM_DEFECT

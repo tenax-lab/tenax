@@ -130,7 +130,28 @@ def _normalise_rdm_for_energy(mat: jax.Array, context: str = "") -> jax.Array:
     if not isinstance(out, jax.core.Tracer):
         from tenax.algorithms._ctm_diagnostics import check_rdm
 
-        check_rdm(out, context=context)
+        # ``psd_tol=None`` skips the positive-semidefiniteness test (#854).
+        #
+        # Not because it is wrong -- it is correct, and it agrees with this
+        # repository's own physics: it stays silent on ``converged_peps_env``
+        # in ``test_ipeps.py`` (PSD to ~1e-9) and fires on ``peps_env``, whose
+        # docstring already says "a random tensor cannot support a
+        # positive-semidefinite assertion at all".
+        #
+        # The reason it is off *here* is frequency.  A trace collapse (#845)
+        # and a NaN (#848) are rare and always bugs, so firing on every energy
+        # evaluation is right for those.  Loss of positivity is neither: an
+        # approximate CTM environment does not guarantee a PSD RDM, and on the
+        # current suite this check fires 24 times across 8 tests -- including
+        # -31% of the spectral radius on ``test_2site_heisenberg_D4_energy``
+        # and -56% on ``test_qr_energy_is_finite``.  Warning that often would
+        # train readers to filter the message, taking the rare actionable
+        # #845/#848 warnings with it.
+        #
+        # So the detector ships enabled in ``check_rdm`` itself, where a driver
+        # asks for it deliberately, and off on this automatic path until the
+        # underlying non-positivity is addressed. See #854 for the audit.
+        check_rdm(out, context=context, psd_tol=None)
     return out
 
 

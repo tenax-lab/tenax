@@ -588,3 +588,37 @@ def test_no_energy_path_bypasses_the_checked_normaliser():
         f"these build an RDM for an energy contraction but skip the validity "
         f"check: {offenders}. Use _normalise_rdm_for_energy(mat, '<name>')."
     )
+
+
+def test_the_automatic_energy_path_does_not_run_the_psd_check():
+    """``_normalise_rdm_for_energy`` passes ``psd_tol=None`` deliberately (#854).
+
+    The PSD check is correct and stays enabled in :func:`check_rdm`, but it
+    fires 24 times across 8 tests on the current suite -- an approximate CTM
+    environment does not guarantee a PSD RDM -- so running it on every energy
+    evaluation would bury the rare, always-actionable #845/#848 warnings under
+    a common and partly-inherent one.
+
+    This pins the decision so that flipping it is a deliberate act with a
+    visible test change, rather than something that drifts back on.
+    """
+    poisoned = _rdm_with_spectrum(MEASURED_BAD_SPECTRUM)
+
+    # Directly: the check is on, and fires.
+    with pytest.warns(RuntimeWarning, match=PSD_MATCH):
+        check_rdm(poisoned, context="direct")
+
+    # Through the energy path: silent.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _normalise_rdm_for_energy(poisoned, "energy-path")
+    psd = [w for w in caught if PSD_MATCH in str(w.message)]
+    assert not psd, f"energy path ran the PSD check: {[str(w.message) for w in psd]}"
+
+
+def test_psd_tol_none_skips_only_the_psd_check():
+    """Disabling PSD must not disable the other two."""
+    with pytest.warns(RuntimeWarning, match=MATCH):
+        check_rdm(jnp.zeros((4, 4)), context="unit-test", psd_tol=None)
+    with pytest.warns(RuntimeWarning, match=NONFINITE_MATCH):
+        check_rdm(_poisoned((0, 1), jnp.nan), context="unit-test", psd_tol=None)
