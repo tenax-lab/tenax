@@ -22,6 +22,7 @@ other survives) deterministically.
 
 from __future__ import annotations
 
+import math
 import pathlib
 import re
 import warnings
@@ -31,6 +32,8 @@ import jax.numpy as jnp
 import pytest
 
 from tenax.algorithms._ctm_diagnostics import (
+    INVALID_RDM_DEFECT,
+    RDM_TRACE_TOL,
     CollapsedRDMError,
     check_rdm,
     rdm_trace_defect,
@@ -334,21 +337,59 @@ def test_the_nonfinite_message_is_not_the_collapse_message():
     assert "contributes 0 to the energy" not in poisoned_msg
 
 
-def test_a_nonfinite_rdm_never_reports_a_zero_defect():
-    """The returned defect is what drivers record next to the energy.
-
-    A poisoned RDM must not be recordable as ``0.0``; that is precisely the
-    number that means "checked, healthy".
-    """
-    for rdm in (
+@pytest.mark.parametrize(
+    "rdm",
+    [
         _poisoned((0, 1), jnp.nan),
         _poisoned((2, 3), jnp.inf),
         jnp.full((4, 4), jnp.nan),
-    ):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            defect = check_rdm(rdm, context="unit-test")
-        assert defect != 0.0 or not jnp.isfinite(jnp.asarray(rdm)).all()
+    ],
+    ids=["nan-off-diagonal", "inf-off-diagonal", "all-nan"],
+)
+def test_a_nonfinite_rdm_never_reports_a_healthy_defect(rdm):
+    """The returned defect is what drivers record next to the energy.
+
+    A poisoned RDM must not be recordable as ``0.0`` -- that is precisely the
+    number that means "checked, healthy" -- and must not read as healthy under
+    the tolerance comparison a caller is most likely to write.
+
+    An earlier version of this test asserted
+    ``defect != 0.0 or not isfinite(rdm).all()``, which is **vacuous**: the
+    right operand is ``True`` for every poisoned input by construction, so the
+    whole disjunction is ``True`` regardless of what ``check_rdm`` returns. It
+    passed against an implementation that returned ``0.0`` here. Assert the
+    property directly, with no escape clause.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        defect = check_rdm(rdm, context="unit-test")
+
+    assert defect != 0.0, "a poisoned RDM reported the healthy sentinel 0.0"
+    assert defect > RDM_TRACE_TOL, (
+        f"defect {defect!r} does not exceed the tolerance, so a caller gating "
+        f"on `check_rdm(...) > tol` reads this poisoned RDM as healthy"
+    )
+    assert defect == INVALID_RDM_DEFECT
+
+
+def test_the_invalid_sentinel_is_not_nan():
+    """``nan`` would re-create #848 one level up.
+
+    The bug being fixed is a tolerance comparison failing open. Returning
+    ``nan`` hands that same trap to every caller, since ``nan > tol`` is
+    ``False``; the sentinel must compare *greater* than any tolerance.
+    """
+    assert not math.isnan(INVALID_RDM_DEFECT)
+    assert INVALID_RDM_DEFECT > RDM_TRACE_TOL
+    assert INVALID_RDM_DEFECT > 1e300
+
+
+def test_a_healthy_rdm_still_returns_its_real_defect():
+    """The sentinel must not leak into the valid path."""
+    assert check_rdm(jnp.eye(4) / 4.0) == pytest.approx(0.0, abs=1e-12)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        assert check_rdm(jnp.zeros((4, 4))) == pytest.approx(1.0, abs=1e-12)
 
 
 def test_a_finite_rdm_with_a_real_trace_defect_still_reports_the_collapse():

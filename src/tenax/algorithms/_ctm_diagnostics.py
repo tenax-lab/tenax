@@ -23,6 +23,7 @@ Both are cheap enough to run unconditionally in benchmark drivers.
 from __future__ import annotations
 
 __all__ = [
+    "INVALID_RDM_DEFECT",
     "RDM_TRACE_TOL",
     "CollapsedEnvironmentError",
     "CollapsedRDMError",
@@ -52,6 +53,20 @@ class CollapsedRDMError(RuntimeError):
 #: the trace, and Hermitian symmetrisation preserves it -- so this only has to
 #: absorb the rounding of that division, never a physical spread.
 RDM_TRACE_TOL = 1e-8
+
+#: Returned by :func:`check_rdm` in place of the trace defect when the RDM
+#: carries non-finite entries.
+#:
+#: ``inf`` rather than ``nan``, deliberately.  The entire failure class in #848
+#: is a tolerance comparison that fails open: ``nan > tol`` is ``False``, so
+#: handing back ``nan`` invites a caller who gates on
+#: ``check_rdm(...) > tol`` to repeat the bug one level up.  ``inf > tol`` is
+#: ``True``, so that caller is fail-closed instead.
+#:
+#: :func:`rdm_trace_defect` is unaffected and keeps returning the honest
+#: ``|tr - 1|``; this substitution belongs to the *validity check*, which is
+#: reporting "not a usable measurement", not to the measurement itself.
+INVALID_RDM_DEFECT = float("inf")
 
 
 def _as_rdm_matrix(rdm) -> np.ndarray:
@@ -138,9 +153,13 @@ def check_rdm(
         strict:  Raise :class:`CollapsedRDMError` instead of warning.
 
     Returns:
-        The trace defect, so callers can record it alongside the energy.  It is
-        ``NaN`` when the RDM is, so a recorded defect of ``0.0`` cannot come
-        from a poisoned RDM.
+        The trace defect, so callers can record it alongside the energy --
+        except on a non-finite RDM, where :data:`INVALID_RDM_DEFECT` (``inf``)
+        is returned instead.  The substitution is the point: ``|tr - 1|`` for
+        an RDM whose only ``NaN`` sits off the diagonal is exactly ``0.0``, the
+        same value a healthy RDM reports, so returning it would let a caller
+        record a poisoned RDM as "checked, healthy" -- which is the defect this
+        function exists to prevent, one level up (#848).
     """
     M = _as_rdm_matrix(rdm)
     defect = rdm_trace_defect(M)
@@ -148,6 +167,7 @@ def check_rdm(
 
     n_bad = int((~np.isfinite(M)).sum())
     if n_bad:
+        defect = INVALID_RDM_DEFECT
         msg = (
             f"reduced density matrix is not finite{where}: "
             f"{n_bad} of {M.size} entries are NaN or inf. The energy "
