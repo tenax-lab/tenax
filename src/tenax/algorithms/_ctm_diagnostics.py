@@ -54,6 +54,19 @@ class CollapsedRDMError(RuntimeError):
 RDM_TRACE_TOL = 1e-8
 
 
+def _as_rdm_matrix(rdm) -> np.ndarray:
+    """Densify an RDM to a NumPy array, accepting 2- or 4-leg forms.
+
+    The RDM is ``d x d`` or ``d**2 x d**2`` -- a local operator, not a boundary
+    object -- so ``todense()`` here is the sanctioned small-result case, not the
+    one the symmetric-tensor guidance warns about.
+    """
+    M = np.asarray(rdm.todense() if hasattr(rdm, "todense") else rdm)
+    if M.ndim not in (2, 4):
+        raise ValueError(f"expected a 2- or 4-leg RDM, got ndim={M.ndim}")
+    return M
+
+
 def rdm_trace_defect(rdm) -> float:
     """``|tr(rdm) - 1|`` for a trace-normalised reduced density matrix.
 
@@ -65,16 +78,17 @@ def rdm_trace_defect(rdm) -> float:
     content comes back with trace exactly 1 and defect 0.  A defect of 1 means
     the raw network contracted to zero and the normaliser's zero-matrix guard
     returned zeros -- correctly, since ``0/0`` is not a density matrix.
+
+    .. warning::
+        **A small defect does not certify the RDM.**  The trace is one number
+        summed over the diagonal, so it says nothing about the rest of the
+        array: an RDM carrying ``NaN`` or ``inf`` *off* the diagonal has a
+        trace of exactly 1 and a defect of exactly 0, while the energy
+        contracted from it is ``NaN``.  Use :func:`check_rdm`, which tests
+        finiteness of the whole array as well.
     """
-    M = np.asarray(rdm.todense() if hasattr(rdm, "todense") else rdm)
-    if M.ndim == 4:
-        tr = np.einsum("ijij->", M)
-    elif M.ndim == 2:
-        tr = np.trace(M)
-    else:
-        raise ValueError(
-            f"rdm_trace_defect expects a 2- or 4-leg RDM, got ndim={M.ndim}"
-        )
+    M = _as_rdm_matrix(rdm)
+    tr = np.einsum("ijij->", M) if M.ndim == 4 else np.trace(M)
     return float(abs(complex(tr) - 1.0))
 
 
@@ -101,6 +115,21 @@ def check_rdm(
     which detects a different collapse (rank-1 corner) at the environment
     level.
 
+    Two distinct failures are reported, because they need different responses:
+
+    * **Non-finite entries** (``NaN``/``inf``) -- the contraction was
+      numerically unstable upstream.  Checked over the whole array, not via the
+      trace: a ``NaN`` off the diagonal leaves the trace at exactly 1, so a
+      trace-only test hands back a defect of ``0.0`` -- an affirmative clean
+      bill of health -- for an RDM whose energy is ``NaN`` (#848).  The
+      all-``NaN`` case is missed for a second reason: the defect is then
+      ``NaN``, and ``NaN > tol`` is ``False``, so the comparison below fails
+      open in ``strict`` mode too.
+    * **Trace defect** -- the #845 collapse described above.
+
+    Finiteness is tested first; on a poisoned array the trace defect is not a
+    meaningful number to report.
+
     Args:
         rdm:     A trace-normalised RDM, 2- or 4-leg.
         context: Free-text label naming the bond (e.g. ``"2x1 horizontal"``),
@@ -109,11 +138,26 @@ def check_rdm(
         strict:  Raise :class:`CollapsedRDMError` instead of warning.
 
     Returns:
-        The trace defect, so callers can record it alongside the energy.
+        The trace defect, so callers can record it alongside the energy.  It is
+        ``NaN`` when the RDM is, so a recorded defect of ``0.0`` cannot come
+        from a poisoned RDM.
     """
-    defect = rdm_trace_defect(rdm)
-    if defect > tol:
-        where = f" [{context}]" if context else ""
+    M = _as_rdm_matrix(rdm)
+    defect = rdm_trace_defect(M)
+    where = f" [{context}]" if context else ""
+
+    n_bad = int((~np.isfinite(M)).sum())
+    if n_bad:
+        msg = (
+            f"reduced density matrix is not finite{where}: "
+            f"{n_bad} of {M.size} entries are NaN or inf. The energy "
+            f"contracted from it is NaN, which propagates into the total and "
+            f"into every gradient taken through it. Note that the trace alone "
+            f"does not catch this -- a non-finite entry off the diagonal "
+            f"leaves |tr - 1| at 0. Look upstream at the contraction that "
+            f"built this RDM, not at the normalisation. See #848."
+        )
+    elif defect > tol:
         msg = (
             f"reduced density matrix is not a density matrix{where}: "
             f"|tr - 1| = {defect:.3g} (a valid RDM has trace exactly 1). "
@@ -123,9 +167,12 @@ def check_rdm(
             f"degenerate corner -- check the corner spectrum, and note that "
             f"the CTM convergence flag cannot see it. See #845."
         )
-        if strict:
-            raise CollapsedRDMError(msg)
-        warnings.warn(msg, RuntimeWarning, stacklevel=3)
+    else:
+        return defect
+
+    if strict:
+        raise CollapsedRDMError(msg)
+    warnings.warn(msg, RuntimeWarning, stacklevel=3)
     return defect
 
 
