@@ -923,6 +923,7 @@ def _build_su_neel(D=2, d=2, n_steps=80, dt=0.05):
     from tenax.algorithms.ipeps_simple_update import (
         _simple_update_2site_horizontal_tensor,
         _simple_update_2site_vertical_tensor,
+        _to_physical_tensor,
     )
 
     H = _heisenberg_gate(d)
@@ -940,28 +941,61 @@ def _build_su_neel(D=2, d=2, n_steps=80, dt=0.05):
     gate = _make_trotter_gate_tensor(H, dt, site_tensor=A)
     lam_h = jnp.ones(D)
     lam_v = jnp.ones(D)
+    # All FOUR checkerboard bonds, then out of Vidal form -- the two corrections
+    # #667 made to ``ipeps()``, which this fixture has to mirror or it does not
+    # build the state its docstring claims.  A 2-phase loop leaves
+    # (B.r<->A.l) and (B.d<->A.u) with no Schmidt weight at all, and returning
+    # the bare Gamma hands the CTM a state with no bond weights on any leg.
     for step in range(n_steps):
-        if step % 2 == 0:
+        phase = step % 4
+        if phase == 0:
             A, B, lam_h = _simple_update_2site_horizontal_tensor(
                 A, B, gate, lam_h, lam_v, D
             )
-        else:
+        elif phase == 1:
             A, B, lam_v = _simple_update_2site_vertical_tensor(
                 A, B, gate, lam_h, lam_v, D
             )
+        elif phase == 2:
+            B, A, lam_h = _simple_update_2site_horizontal_tensor(
+                B, A, gate, lam_h, lam_v, D
+            )
+        else:
+            B, A, lam_v = _simple_update_2site_vertical_tensor(
+                B, A, gate, lam_h, lam_v, D
+            )
         A = A * (1.0 / float(A.norm()))
         B = B * (1.0 / float(B.norm()))
-    return A, B
+    return (
+        _to_physical_tensor(A, lam_h, lam_v),
+        _to_physical_tensor(B, lam_h, lam_v),
+    )
 
 
 def test_split_2site_energy_matches_fused_convergent():
     """Joint 2-site split forward matches fused energy on a convergent input.
 
     On a physical Heisenberg Neel SU state where the fused 2-site CTM oracle
-    plateaus, the split forward reproduces the fused energy to ~1e-11 at a
-    lossless interlayer bond (chi_I = 2*chi) and to ~1e-10 at chi_I = chi.
-    Physical states have low interlayer rank, so chi_I = chi is already
-    near-lossless (hence the tight 1e-6 tolerance is easily met).
+    plateaus, the split forward reproduces the fused energy to machine
+    precision once the interlayer bond is lossless, and to ~1e-5 when it is
+    truncated at chi_I = chi.
+
+    The chi_I = chi tolerance used to be 1e-6, and that number was calibrated
+    against a bug.  Before #667 this fixture returned bare Vidal ``Gamma``
+    tensors with every bond weight dropped -- a markedly *less entangled*
+    state, whose interlayer rank was correspondingly low, so truncating at
+    chi_I = chi cost almost nothing.  On the actual simple-update state it
+    costs ~1e-5.  Measured gap against the fused energy (chi = 8, D = 2):
+
+        chi_I    6        8        10       12       14       16 / 20 / 24
+        gap      1.6e-4   1.2e-5   1.6e-5   1.8e-5   7.7e-7   2.4e-15
+
+    That is a truncation curve, not a defect: it collapses to machine
+    precision exactly at the lossless point chi_I = 2*chi and stays there.
+    The mild non-monotonicity in the middle is expected -- each chi_I
+    reconverges to its own fixed point.  If a future change makes the
+    chi_I = chi gap *flat* in chi_I instead, that is a defect and this test
+    should fail rather than be loosened again.
     """
     from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
     from tenax.algorithms._ctm_tensor_energy import (
@@ -999,10 +1033,22 @@ def test_split_2site_energy_matches_fused_convergent():
     E_split_lossless = split_energy(2 * chi, 100)
     assert abs(E_split_lossless - E_fused) < 1e-8
 
-    # (iii) chi_I = chi: physical states have low interlayer rank, so this is
-    # near-lossless in practice (comfortably under 1e-6).
+    # (iii) chi_I = chi truncates the interlayer bond, and on a genuinely
+    # entangled simple-update state that costs ~1e-5 (see the table above).
     E_split_chi = split_energy(chi, 100)
-    assert abs(E_split_chi - E_fused) < 1e-6
+    gap_truncated = abs(E_split_chi - E_fused)
+    assert gap_truncated < 5e-5, (
+        f"chi_I=chi gap {gap_truncated:.3e} exceeds the measured 1.2e-5"
+    )
+
+    # (iv) ...and that cost must be a *truncation*: relieving the interlayer
+    # bond has to buy back orders of magnitude.  A gap that stays put when
+    # chi_I is doubled is a defect, which (iii) alone would not catch.
+    assert gap_truncated > 100 * abs(E_split_lossless - E_fused), (
+        f"chi_I=chi gap {gap_truncated:.3e} is not meaningfully worse than the "
+        f"lossless gap {abs(E_split_lossless - E_fused):.3e}: the interlayer "
+        "truncation is not what is limiting accuracy here"
+    )
 
 
 def test_split_2site_energy_equals_multisite():

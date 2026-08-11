@@ -81,6 +81,24 @@
   collapsing, because a near-product state made the two paths trivially
   identical.
 
+  **Three test fixtures built simple-update states by hand and were migrated
+  with the library** (`_build_su_neel`, `_build_su_xxz`, `evolve_physical_site`).
+  Each ran the same 2-of-4-bond sweep and returned the bare Vidal `Γ`, so the
+  split-CTM parity tests were validating a state with no bond weights on any leg
+  while their docstrings described a physical one. They still passed — split and
+  fused agreed with each other on the wrong ansatz — which is the failure mode
+  worth naming: a parity test cannot tell you *what* it achieved parity on.
+
+  Fixing them exposed two things the collapsed fixture had been hiding. The
+  split-vs-fused gap at a truncated interlayer bond (`chi_I = chi`) is ~1.2e-5,
+  not the ~1e-6 the tolerance assumed — a genuinely entangled state has higher
+  interlayer rank, and the gap still collapses to 2.4e-15 at the lossless point,
+  so it is truncation and the tolerance was calibrated against the bug. And the
+  implicit-AD **gradient magnitude** is ~5% wrong on the corrected state
+  (#860) — direction fine, and flat at 5.48e-2 across FD steps 1e-3…1e-6, which
+  is what rules out a finite-difference artifact. That one is gated by a strict
+  `xfail`, not by a loosened threshold.
+
 ## v0.8.3 (2026-08-09)
 
 A correctness release. The headline feature is root implicit AD for CTMRG
