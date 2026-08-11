@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A bond whose reduced density matrix is invalid is no longer summed into the
+  energy silently** (#845, #848). `_normalise_rdm` divides by the trace, so a
+  raw network that contracts to zero returns the zero matrix — correctly, since
+  `0/0` is not a density matrix — and the energy sum then added that bond's `0`
+  as though it were a measurement. Measured at D=2, χ=4, where χ=D² makes the
+  corner spectrum exactly flat: one bond died and `E` came back `-0.2750`
+  against `-0.5486` from every other χ, with `converged=True` and
+  `diff ~ 1e-17` reported throughout. The CTM criterion compares corner
+  *singular values*, which are identical between the two bases, so nothing
+  upstream could see it.
+
+  Every RDM on an energy path now goes through a checked normaliser that warns
+  (or raises, under `check_rdm(..., strict=True)`) and names the bond. The
+  check covers **non-finite** entries as well as the trace: `NaN > tol` is
+  `False`, and a `NaN` off the diagonal leaves the trace at exactly 1, so a
+  trace-only test returned a defect of `0.0` — the value meaning "checked,
+  healthy" — for an RDM whose energy is `NaN` (#848). The excitation path is
+  deliberately exempt, where `B = 0` is a legitimate input.
+
+  The guard reports; it does not repair. A degenerate corner still produces the
+  wrong energy, now audibly.
+
 ### ⚠️ Published performance claims retracted
 
 - **The v0.8.2 iPEPS multi-GPU / split-CTM frontier numbers were measured

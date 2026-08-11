@@ -22,6 +22,7 @@ other survives) deterministically.
 
 from __future__ import annotations
 
+import math
 import pathlib
 import re
 import warnings
@@ -31,6 +32,8 @@ import jax.numpy as jnp
 import pytest
 
 from tenax.algorithms._ctm_diagnostics import (
+    INVALID_RDM_DEFECT,
+    RDM_TRACE_TOL,
     CollapsedRDMError,
     check_rdm,
     rdm_trace_defect,
@@ -256,6 +259,150 @@ def test_check_rdm_strict_raises_instead_of_warning():
         check_rdm(jnp.zeros((4, 4)), context="unit-test", strict=True)
 
     assert check_rdm(jnp.eye(4) / 4.0) == pytest.approx(0.0, abs=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Non-finite RDMs (#848).
+#
+# The guard shipped in #847 tested only the trace, which fails open on NaN
+# twice over: ``NaN > tol`` is False, and a non-finite entry off the diagonal
+# does not move the trace at all.  Both cases returned "healthy" for an RDM
+# whose energy is NaN.
+# ---------------------------------------------------------------------------
+
+NONFINITE_MATCH = "not finite"
+
+
+def _poisoned(where: tuple[int, int], value: float) -> jnp.ndarray:
+    """A trace-1 RDM with a single non-finite entry at ``where``."""
+    M = jnp.eye(4) / 4.0
+    return M.at[where].set(value)
+
+
+@pytest.mark.parametrize("value", [jnp.nan, jnp.inf, -jnp.inf])
+@pytest.mark.parametrize("where", [(0, 1), (2, 3), (1, 0)])
+def test_a_nonfinite_entry_off_the_diagonal_is_caught(where, value):
+    """The trace is exactly 1 here -- only an array-wide test sees these.
+
+    This is the case the #847 review did *not* find, and the more dangerous of
+    the two: ``rdm_trace_defect`` returns ``0.0``, an affirmative clean bill of
+    health, for an RDM that contracts to a NaN energy.
+    """
+    rdm = _poisoned(where, value)
+    assert rdm_trace_defect(rdm) == pytest.approx(0.0, abs=1e-12), (
+        "precondition: this RDM must have a clean trace, or the test is not "
+        "exercising the off-diagonal blind spot"
+    )
+
+    with pytest.warns(RuntimeWarning, match=NONFINITE_MATCH):
+        check_rdm(rdm, context="unit-test")
+
+    with pytest.raises(CollapsedRDMError, match=NONFINITE_MATCH):
+        check_rdm(rdm, context="unit-test", strict=True)
+
+
+def test_an_all_nan_rdm_is_caught():
+    """The review's case: ``NaN > tol`` is False, so the comparison failed open.
+
+    Note this is the *less* severe of the two -- the defect at least came back
+    ``NaN`` rather than ``0.0``.
+    """
+    rdm = jnp.full((4, 4), jnp.nan)
+
+    with pytest.warns(RuntimeWarning, match=NONFINITE_MATCH):
+        check_rdm(rdm, context="unit-test")
+
+    with pytest.raises(CollapsedRDMError, match=NONFINITE_MATCH):
+        check_rdm(rdm, context="unit-test", strict=True)
+
+
+def test_the_nonfinite_message_is_not_the_collapse_message():
+    """The two failures need different responses, so they must read differently.
+
+    A collapsed RDM points at the corner spectrum (#845); a poisoned one points
+    upstream at the contraction (#848).  Reporting a NaN as "not a density
+    matrix ... contributes 0 to the energy" would send a reader to the wrong
+    place -- it contributes NaN, not 0.
+    """
+    with pytest.warns(RuntimeWarning) as poisoned:
+        check_rdm(_poisoned((0, 1), jnp.nan), context="unit-test")
+    with pytest.warns(RuntimeWarning) as collapsed:
+        check_rdm(jnp.zeros((4, 4)), context="unit-test")
+
+    poisoned_msg = str(poisoned[0].message)
+    collapsed_msg = str(collapsed[0].message)
+
+    assert "#848" in poisoned_msg and "#845" not in poisoned_msg
+    assert "#845" in collapsed_msg and "#848" not in collapsed_msg
+    assert "contributes 0 to the energy" not in poisoned_msg
+
+
+@pytest.mark.parametrize(
+    "rdm",
+    [
+        _poisoned((0, 1), jnp.nan),
+        _poisoned((2, 3), jnp.inf),
+        jnp.full((4, 4), jnp.nan),
+    ],
+    ids=["nan-off-diagonal", "inf-off-diagonal", "all-nan"],
+)
+def test_a_nonfinite_rdm_never_reports_a_healthy_defect(rdm):
+    """The returned defect is what drivers record next to the energy.
+
+    A poisoned RDM must not be recordable as ``0.0`` -- that is precisely the
+    number that means "checked, healthy" -- and must not read as healthy under
+    the tolerance comparison a caller is most likely to write.
+
+    An earlier version of this test asserted
+    ``defect != 0.0 or not isfinite(rdm).all()``, which is **vacuous**: the
+    right operand is ``True`` for every poisoned input by construction, so the
+    whole disjunction is ``True`` regardless of what ``check_rdm`` returns. It
+    passed against an implementation that returned ``0.0`` here. Assert the
+    property directly, with no escape clause.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        defect = check_rdm(rdm, context="unit-test")
+
+    assert defect != 0.0, "a poisoned RDM reported the healthy sentinel 0.0"
+    assert defect > RDM_TRACE_TOL, (
+        f"defect {defect!r} does not exceed the tolerance, so a caller gating "
+        f"on `check_rdm(...) > tol` reads this poisoned RDM as healthy"
+    )
+    assert defect == INVALID_RDM_DEFECT
+
+
+def test_the_invalid_sentinel_is_not_nan():
+    """``nan`` would re-create #848 one level up.
+
+    The bug being fixed is a tolerance comparison failing open. Returning
+    ``nan`` hands that same trap to every caller, since ``nan > tol`` is
+    ``False``; the sentinel must compare *greater* than any tolerance.
+    """
+    assert not math.isnan(INVALID_RDM_DEFECT)
+    assert INVALID_RDM_DEFECT > RDM_TRACE_TOL
+    assert INVALID_RDM_DEFECT > 1e300
+
+
+def test_a_healthy_rdm_still_returns_its_real_defect():
+    """The sentinel must not leak into the valid path."""
+    assert check_rdm(jnp.eye(4) / 4.0) == pytest.approx(0.0, abs=1e-12)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        assert check_rdm(jnp.zeros((4, 4))) == pytest.approx(1.0, abs=1e-12)
+
+
+def test_a_finite_rdm_with_a_real_trace_defect_still_reports_the_collapse():
+    """Adding the finiteness test must not shadow the #845 path it precedes."""
+    with pytest.warns(RuntimeWarning, match=MATCH):
+        check_rdm(jnp.zeros((4, 4)), context="unit-test")
+
+
+def test_the_finiteness_check_covers_the_4_leg_form():
+    """The builders return ``(d, d, d, d)``; the guard must not only see 2-leg."""
+    rdm = _poisoned((0, 1), jnp.nan).reshape(2, 2, 2, 2)
+    with pytest.warns(RuntimeWarning, match=NONFINITE_MATCH):
+        check_rdm(rdm, context="unit-test")
 
 
 # ---------------------------------------------------------------------------
