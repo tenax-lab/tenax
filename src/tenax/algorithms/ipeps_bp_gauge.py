@@ -107,7 +107,14 @@ class BondWeights(NamedTuple):
 
     @classmethod
     def ones(cls, D_h: int, D_v: int) -> BondWeights:
-        """Unweighted bonds, the natural starting point for a BP solve."""
+        """Unweighted bonds --- the state ``Gamma_L I Gamma_R``.
+
+        This is a *state*, not a neutral initial guess: pass it only when the
+        bonds really do carry no weight, e.g. for freshly initialised random
+        ``Gamma`` tensors.  Passing it for a simple-update pair discards that
+        pair's ``lambda`` and re-gauges a different state (see
+        :func:`bp_gauge_checkerboard`).
+        """
         return cls(
             h_AB=jnp.ones(D_h),
             h_BA=jnp.ones(D_h),
@@ -215,10 +222,6 @@ def _gauge_bond(
     )
 
 
-def _leg_dim(t: Tensor, leg: str) -> int:
-    return t.indices[t.labels().index(leg)].dim
-
-
 def _reorder(t: Tensor, labels: tuple[str, ...]) -> Tensor:
     """Restore ``labels`` as the axis order.
 
@@ -236,7 +239,7 @@ def _reorder(t: Tensor, labels: tuple[str, ...]) -> Tensor:
 def bp_gauge_checkerboard(
     A: Tensor,
     B: Tensor,
-    weights: BondWeights | None = None,
+    weights: BondWeights,
     *,
     max_iter: int = 100,
     tol: float = 1e-12,
@@ -248,10 +251,19 @@ def bp_gauge_checkerboard(
     the self-consistent BP messages rather than whatever the last SVD left
     behind.
 
+    ``weights`` is **required**, and is not an initial guess: in Vidal form the
+    state is ``... Gamma_A lambda Gamma_B ...``, so the incoming ``lambda`` is
+    half of what the caller is handing over, and it is what each bond's
+    re-gauging SVD factors.  Defaulting it to one would silently re-gauge
+    ``Gamma_A I Gamma_B`` --- a *different* state --- while still reporting the
+    invariance guarantee above, so a simple-update pair must pass its own
+    ``lambda`` and a fresh random pair must pass :meth:`BondWeights.ones`
+    explicitly.
+
     Args:
         A:        Bare Vidal ``Gamma`` for sublattice A, labels ``(u,d,l,r,phys)``.
         B:        Bare Vidal ``Gamma`` for sublattice B, same labels.
-        weights:  Starting bond weights.  ``None`` starts from unweighted bonds.
+        weights:  The bond weights ``A`` and ``B`` currently carry.
         max_iter: Maximum BP sweeps.
         tol:      Stop once the largest relative change in any weight vector
                   falls below this.
@@ -260,13 +272,11 @@ def bp_gauge_checkerboard(
         ``(A, B, weights, info)``.
 
     Example:
-        >>> A, B, w, info = bp_gauge_checkerboard(A, B)   # doctest: +SKIP
-        >>> info.converged                                # doctest: +SKIP
+        >>> w = BondWeights(lam_h, lam_h, lam_v, lam_v)     # doctest: +SKIP
+        >>> A, B, w, info = bp_gauge_checkerboard(A, B, w)  # doctest: +SKIP
+        >>> info.converged                                  # doctest: +SKIP
         True
     """
-    if weights is None:
-        weights = BondWeights.ones(_leg_dim(A, "r"), _leg_dim(A, "d"))
-
     order = {"A": A.labels(), "B": B.labels()}
     gam = {"A": A, "B": B}
     residual = float("inf")

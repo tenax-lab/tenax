@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Added
+
+- **`bp_gauge_checkerboard`: the bond weights simple update stores are not the
+  Schmidt spectra they are read as** (#869). Simple update takes each bond's
+  spectrum straight from the SVD that produced it and never recomputes it, but
+  a *non-unitary* gate on a neighbouring bond changes this bond's Schmidt
+  values. Both reference implementations avoid this rather than tolerate it —
+  TeNPy's `update_bond_imag` exists to sweep "without using old singular
+  values", and YASTN's `EnvBP.post_truncation_` recomputes a bond's messages in
+  both directions after every truncation.
+
+  Bond weights on a PEPS *are* belief-propagation messages (Tindall & Fishman,
+  SciPost Phys. **15**, 222 (2023)), so re-deriving them is one BP fixed-point
+  solve. Measured on simple update's own converged output, the drift is not
+  small: at D=3 the stored spectrum is `[1, 0.16586, 0.01564]` where the
+  BP-consistent one is `[1, 0.14243, 0.01130]` — 15% on the second Schmidt
+  value and ~35% on the tail. Use it before reading `lambda` as a spectrum:
+  entanglement entropy, truncation-error estimates, or the symmetric gauge
+  handed to a CTM.
+
+  Every step is a gauge transformation, exact to machine precision, so the
+  physical state does not move — only the weights do. This corrects the
+  weights, **not** simple update's dynamics, and does not change the state
+  `ipeps()` converges to; in particular it does not rescue #851's
+  four-independent-spectra sweep at D ≥ 3, whose diverged state's
+  BP-consistent weights are the diverged ones (#869).
+
+  Because the state is `... Gamma_A lambda Gamma_B ...`, the incoming `lambda`
+  is half of what a caller hands over, and the entry point requires it: a pair
+  whose bonds really are unweighted passes `BondWeights.ones(D, D)` explicitly
+  rather than getting it by default.
+
 ### Fixed
 
 - **A bond whose reduced density matrix is invalid is no longer summed into the

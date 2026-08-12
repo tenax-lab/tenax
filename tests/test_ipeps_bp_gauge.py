@@ -59,6 +59,46 @@ def _symmetric_pair(D: int = D, seed: int = 0):
 _PAIRS = {"dense": _dense_pair, "symmetric": _symmetric_pair}
 
 
+def _udlrp(t):
+    """``t`` as a plain array in ``(u, d, l, r, phys)`` order."""
+    labels = t.labels()
+    return np.asarray(t.todense()).transpose(
+        [labels.index(lab) for lab in ("u", "d", "l", "r", "phys")]
+    )
+
+
+def _torus_2x2(A, B, weights):
+    """The closed 2x2 checkerboard torus, physical legs open.
+
+    Exactly gauge invariant, and the only probe here that covers all four bonds
+    at once: every bond appears twice, each time with the gauge on one end and
+    its inverse on the other, so a gauge that fails to cancel shows up.
+    ``_two_site`` cannot do this -- it leaves three legs open per site, so a
+    gauge on any of them survives uncancelled and the comparison is meaningless.
+
+    Sites ``A(0,0) B(1,0) / B(0,1) A(1,1)``.  Each site carries the weight of
+    the bond leaving its ``r`` and ``d`` legs, which places each of the four
+    weights exactly twice and each edge's weight exactly once::
+
+        i = A00.r-B10.l  h_AB     m = A00.d-B01.u  v_AB
+        j = B10.r-A00.l  h_BA *   n = B01.d-A00.u  v_BA *
+        k = B01.r-A11.l  h_BA     o = B10.d-A11.u  v_BA
+        l = A11.r-B01.l  h_AB *   p = A11.d-B10.u  v_AB *
+
+    (``*`` = wraps around the torus.)
+    """
+    a = _udlrp(A) * np.asarray(weights.v_AB)[None, :, None, None, None]
+    a = a * np.asarray(weights.h_AB)[None, None, None, :, None]
+    b = _udlrp(B) * np.asarray(weights.v_BA)[None, :, None, None, None]
+    b = b * np.asarray(weights.h_BA)[None, None, None, :, None]
+    #      u  d  l  r  phys
+    # A00  n  m  j  i  w
+    # B10  p  o  i  j  x
+    # B01  m  n  l  k  y
+    # A11  o  p  k  l  z
+    return np.einsum("nmjiw,poijx,mnlky,opklz->wxyz", a, b, b, a, optimize=True)
+
+
 def _two_site(gam_L, gam_R, leg_L, leg_R, lam):
     """``gam_L -- lam -- gam_R`` across one bond, every other leg left free.
 
@@ -112,10 +152,46 @@ def test_the_bond_gauge_leaves_the_physical_state_untouched(kind):
 
 
 @pytest.mark.parametrize("kind", list(_PAIRS))
+def test_the_whole_solve_preserves_a_state_with_nontrivial_weights(kind):
+    """The invariance guarantee, end to end and on all four bonds at once.
+
+    ``_gauge_bond`` is checked above with a nontrivial ``lambda``, but only one
+    bond in isolation; the solve itself was only checked for structure, on
+    unweighted bonds.  That gap is what let ``weights`` default to one: with
+    ``lambda = 1`` every way of mishandling the incoming weights preserves the
+    state anyway, so nothing here could see it (#870).
+    """
+    A, B = _PAIRS[kind]()
+    w = BondWeights(
+        h_AB=jnp.array([1.0, 0.4, 0.1]),
+        h_BA=jnp.array([1.0, 0.6, 0.2]),
+        v_AB=jnp.array([1.0, 0.3, 0.05]),
+        v_BA=jnp.array([1.0, 0.7, 0.3]),
+    )
+
+    before = _torus_2x2(A, B, w)
+    A2, B2, w2, info = bp_gauge_checkerboard(A, B, w, max_iter=400, tol=1e-13)
+    assert info.converged, f"{kind}: BP did not converge ({info.residual:.2e})"
+    after = _torus_2x2(A2, B2, w2)
+
+    # Gamma and lambda are both renormalised each sweep, so only the direction
+    # of the torus tensor is meaningful -- as in the single-bond check above.
+    before = before / np.linalg.norm(before)
+    after = after / np.linalg.norm(after)
+    rel = float(np.linalg.norm(after - before))
+    assert rel < GAUGE_TOL, (
+        f"{kind}: the solve changed the physical state by {rel:.3e}; every step "
+        f"is meant to be a gauge transformation of Gamma_A lambda Gamma_B"
+    )
+
+
+@pytest.mark.parametrize("kind", list(_PAIRS))
 def test_the_solve_converges_and_hands_back_the_same_tensor_structure(kind):
     """Labels, axis order and flows must survive, or callers break silently."""
     A, B = _PAIRS[kind]()
-    A2, B2, weights, info = bp_gauge_checkerboard(A, B, max_iter=400, tol=1e-13)
+    A2, B2, weights, info = bp_gauge_checkerboard(
+        A, B, BondWeights.ones(D, D), max_iter=400, tol=1e-13
+    )
 
     assert info.converged, f"{kind}: BP did not converge (residual {info.residual:.2e})"
     for original, gauged, tag in ((A, A2, "A"), (B, B2, "B")):
@@ -137,7 +213,9 @@ def test_bp_resolves_the_two_horizontal_bonds_separately():
     represent this at all.
     """
     A, B = _symmetric_pair()
-    _, _, weights, info = bp_gauge_checkerboard(A, B, max_iter=400, tol=1e-13)
+    _, _, weights, info = bp_gauge_checkerboard(
+        A, B, BondWeights.ones(D, D), max_iter=400, tol=1e-13
+    )
     assert info.converged
     h_AB = np.asarray(weights.h_AB)
     h_BA = np.asarray(weights.h_BA)

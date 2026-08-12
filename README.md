@@ -341,12 +341,18 @@ four of them by solving the belief-propagation fixed point (bond weights on a
 PEPS *are* BP messages) and re-gauges the tensors to match:
 
 ```python
-from tenax import bp_gauge_checkerboard
+from tenax import BondWeights, bp_gauge_checkerboard
 
-A, B, weights, info = bp_gauge_checkerboard(A, B)   # bare Vidal Gamma tensors
+# A, B are bare Vidal Gamma tensors; lam_h, lam_v are the weights they carry.
+stored = BondWeights(h_AB=lam_h, h_BA=lam_h, v_AB=lam_v, v_BA=lam_v)
+A, B, weights, info = bp_gauge_checkerboard(A, B, stored)
 print(info.converged, info.iterations)
 print(weights.h_AB, weights.h_BA)   # the two horizontal bonds, resolved separately
 ```
+
+The weights are required, and are not an initial guess: in Vidal form the state
+is `... Γ_A λ Γ_B ...`, so `λ` is half of what you are handing over. A fresh
+random pair whose bonds really are unweighted passes `BondWeights.ones(D, D)`.
 
 Every step is a gauge transformation, so the physical state is unchanged to
 machine precision — only the weights move. Measured on simple update's own
