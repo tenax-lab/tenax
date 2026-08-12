@@ -24,6 +24,7 @@ from tenax.algorithms._ad_primitives import (
     _gauge_consistency,
     _report_root_residual,
     _residual_exceeds,
+    _unit_phase,
 )
 from tenax.algorithms._ctm_root_implicit_asym import (
     _denman_beavers,
@@ -392,7 +393,7 @@ def _pin_bond_gauge_sector(
         ref = P_left[idx, jnp.arange(P_left.shape[1])]
     else:
         ref = jnp.sum(jnp.conj(prev_P_left) * P_left, axis=0)
-    psi = jnp.where(jnp.abs(ref) > 0, jnp.conj(ref) / jnp.abs(ref), 1.0)
+    psi = _unit_phase(jnp.conj(ref))
     P_left = P_left * psi[None, :]
     P_right = jnp.conj(psi)[:, None] * P_right
     U = U.at[:, :k_q].multiply(psi[None, :])

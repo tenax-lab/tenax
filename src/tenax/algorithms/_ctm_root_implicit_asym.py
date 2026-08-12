@@ -100,6 +100,7 @@ from tenax.algorithms._ad_primitives import (
     _gauge_consistency,
     _report_root_residual,
     _residual_exceeds,
+    _unit_phase,
 )
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import (
@@ -343,7 +344,7 @@ def _pin_bond_gauge(U, Vh, P_top, P_bot, chi, prev_P_top=None):
         # between sweeps and the pinned phase oscillates with period two,
         # which is exactly what a near-degenerate pair produced here.
         ref = jnp.sum(jnp.conj(prev_P_top) * P_top, axis=0)
-    psi = jnp.where(jnp.abs(ref) > 0, jnp.conj(ref) / jnp.abs(ref), 1.0)
+    psi = _unit_phase(jnp.conj(ref))
     P_top = P_top * psi[None, :]
     P_bot = jnp.conj(psi)[:, None] * P_bot
     U = U.at[:, :chi].multiply(psi[None, :])

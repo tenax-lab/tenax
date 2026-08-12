@@ -102,6 +102,74 @@ def _adjoint_residual_and_rhs_norm(matvec, lam, rhs) -> tuple[float, float]:
     return _norm(resid), _norm(rhs)
 
 
+def _best_adjoint_seed(matvec, rhs, candidates):
+    """The candidate ``x0`` with the smallest residual, zero always included.
+
+    GMRES minimises ``‖b - A x‖`` over ``x0 + Krylov``, so its final residual
+    is bounded by its *starting* residual ``‖b - A x0‖`` — **not** by ``‖b‖``.
+    Those coincide only at ``x0 = 0``.  Seed it anywhere else and the solver
+    can hand back a ``λ`` worse than the trivial one, and be unable to recover
+    if it stagnates.
+
+    That is #858.  Every adjoint site here passed ``x0 = rhs`` — the first
+    Neumann term of ``(I - Jᵀ)^-1 b``, which is a good seed while ``‖Jᵀb‖ <
+    ‖b‖`` and a bad one otherwise.  On the C4v D=2 state with ``recipe="1x1"``
+    (rank-1 corners at every χ, #723/#726) it is the latter, and the measured
+    relative residuals were 9.0e-02, **1.581** and **2.103** — a ``λ`` that
+    solves the adjoint equation worse than ``λ = 0``.  It read as the solver
+    diverging, which GMRES cannot do.
+
+    So the seed is *measured* rather than assumed.  Zero is always in the
+    running, which makes "worse than λ = 0" structurally impossible rather
+    than merely unlikely, and the warm start (#514/F3) and the Neumann term
+    keep their benefit wherever they actually have one.
+
+    Costs one matvec per candidate — two or three against the
+    ``gmres_maxiter`` (default 200) the solve itself is budgeted, i.e. ~1.5%
+    of the backward.  Same argument as :func:`_adjoint_residual_and_rhs_norm`,
+    which already pays one unconditionally: a diagnostic or a safeguard that
+    has to be switched on does not catch the run that needed it.
+
+    Selection is done in **traced** arithmetic — norms compared with
+    ``jnp.where`` rather than Python ``<`` — because one of the two call sites
+    is inside ``_jit_gmres_solve``, which is ``jax.jit``-compiled.  Pulling the
+    residuals to the host there would raise ``ConcretizationTypeError``, and a
+    host-side variant that worked only on the eager path would leave the
+    compiled path carrying the bug.
+
+    Args:
+        matvec:     The adjoint operator ``v -> (I - Jᵀ)v``.
+        rhs:        ``b``.
+        candidates: Seeds to consider, best-guess first.  ``None`` entries are
+                    skipped, so a caller with no warm start can pass it
+                    straight through.  Zero is the incumbent.
+
+    Returns:
+        The pytree among ``candidates + [0]`` minimising ``‖b - A x‖``.  A
+        candidate must *strictly* beat the incumbent, so zero wins ties and
+        an earlier candidate beats a later equal one.
+    """
+
+    def _l2(tree):
+        return jnp.sqrt(sum(jnp.sum(jnp.abs(x) ** 2) for x in jax.tree.leaves(tree)))
+
+    # ``x = 0`` is the incumbent and its residual is ``‖b - A·0‖ = ‖b‖``,
+    # available without a matvec.
+    best = jax.tree.map(jnp.zeros_like, rhs)
+    best_resid = _l2(rhs)
+    for cand in candidates:
+        if cand is None:
+            continue
+        resid = _l2(jax.tree.map(lambda a, b: a - b, matvec(cand), rhs))
+        # Strict ``<``, so a NaN residual never wins: every comparison against
+        # NaN is False, which here means "keep the incumbent" — the fail-closed
+        # direction.  ``>=`` would invert that.
+        take = resid < best_resid
+        best = jax.tree.map(lambda c, b: jnp.where(take, c, b), cand, best)
+        best_resid = jnp.where(take, resid, best_resid)
+    return best
+
+
 def _warn_if_adjoint_unconverged(
     matvec, lam, rhs, *, tol: float, maxiter: int, restart: int
 ) -> float:
@@ -1464,7 +1532,7 @@ def _make_implicit_vjp_fn(
         lam, info = gmres_pytree(
             apply_I_minus_Jt,
             rhs,
-            rhs,
+            _best_adjoint_seed(apply_I_minus_Jt, rhs, [rhs]),
             tol=gmres_tol,
             maxiter=gmres_maxiter,
             restart=gmres_restart,
@@ -1674,7 +1742,7 @@ def _make_implicit_vjp_fn(
                 lam, _info = gmres_pytree_jax(
                     _eager_apply_I_minus_Jt,
                     rhs,
-                    rhs,
+                    _best_adjoint_seed(_eager_apply_I_minus_Jt, rhs, [rhs]),
                     tol=gmres_tol,
                     maxiter=gmres_maxiter,
                     restart=gmres_restart,
@@ -1721,12 +1789,15 @@ def _make_implicit_vjp_fn(
             ):
                 _cached["prev_lam_leaves"] = None
                 prev_lam = None
+            # Warm start first, then the Neumann term, then zero -- but chosen
+            # by measured residual, not by preference order (#858).  Both
+            # non-zero seeds are good only where they beat zero, and where
+            # they do not GMRES cannot undo them.
+            warm = None
             if prev_lam is not None:
                 # Unflatten back into the same pytree structure as rhs.
-                rhs_treedef = jax.tree.structure(rhs)
-                x0 = jax.tree.unflatten(rhs_treedef, prev_lam)
-            else:
-                x0 = rhs
+                warm = jax.tree.unflatten(jax.tree.structure(rhs), prev_lam)
+            x0 = _best_adjoint_seed(_eager_apply_I_minus_Jt, rhs, [warm, rhs])
             _GMRES_LOGGER.debug(
                 "Eager GMRES: maxiter=%d tol=%g restart=%d warm=%s",
                 gmres_maxiter,

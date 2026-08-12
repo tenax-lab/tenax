@@ -265,11 +265,36 @@ def gmres_pytree_jax(
     Args:
         matvec: Pytree-valued linear operator.
         b_tree: Right-hand side pytree.
-        x0_tree: Initial guess (optional).
+        x0_tree: Initial guess.  ``None`` means **zeros**, matching JAX and
+            SciPy.  It used to mean ``b``, which is not a neutral default --
+            see the warning below.
         tol: Absolute tolerance.
         maxiter: Maximum GMRES iterations (outer restarts).
         restart: Inner Krylov dimension before restart.
         solve_method: ``"batched"`` (GPU) or ``"incremental"`` (CPU).
+
+    .. warning::
+        **A non-zero ``x0`` removes the guarantee that the answer beats
+        ``x = 0``.**  GMRES minimises ``||b - A x||`` over ``x0 + Krylov``, so
+        its final residual is bounded by ``||b - A x0||`` -- its *starting*
+        residual -- and not by ``||b||``.  With ``x0 = 0`` those coincide and
+        the returned ``x`` can never be worse than the trivial answer.  With
+        ``x0 = b`` the bound is ``||b - A b||``, which exceeds ``||b||``
+        whenever the operator is not contracting.
+
+        That is #858: this wrapper substituted ``b`` for a missing ``x0``, so
+        adjoint solves on a poorly conditioned CTM fixed point reported
+        relative residuals of 1.58 and 2.10 -- a ``lambda`` that solves the
+        adjoint equation *worse than* ``lambda = 0``.  It read as GMRES
+        diverging, which GMRES cannot do; it was the seed.  The sibling
+        :func:`gmres_pytree` never had this (it passes ``None`` through), so
+        the two implementations of one interface disagreed on their default.
+
+        ``b`` is a reasonable seed -- it is the first Neumann term of
+        ``(I - J^T)^-1 b`` -- but only where ``||J^T b|| < ||b||``.  Callers
+        that want it should pass it explicitly, having checked that it helps;
+        :func:`~tenax.algorithms._ctm_energy_ad._best_adjoint_seed` does this
+        by measurement.
     """
     from jax.scipy.sparse.linalg import gmres as jax_gmres
 
@@ -295,7 +320,10 @@ def gmres_pytree_jax(
         return flatten(matvec(unflatten(v)))
 
     b_flat = flatten(b_tree)
-    x0_flat = flatten(x0_tree) if x0_tree is not None else b_flat
+    # ``None`` -> let JAX use its own zeros default.  See the warning above:
+    # substituting ``b`` here is what let an adjoint solve come back worse
+    # than ``lambda = 0`` (#858).
+    x0_flat = flatten(x0_tree) if x0_tree is not None else None
 
     kwargs = {"tol": tol, "atol": tol}
     if maxiter is not None:

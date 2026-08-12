@@ -73,6 +73,14 @@ _FILE_MARKERS = {
     # CTM convergence, so it is milliseconds.  The production-run case it
     # also carries is explicitly @slow (#772).
     "test_root_implicit_wiring.py": "core",
+    # #858: the adjoint solver was seeded above ``||b||``, so it could return a
+    # ``lambda`` that solves ``(I - J^T)lambda = dE/denv`` *worse than
+    # ``lambda = 0``* -- measured relative residuals 1.581 and 2.103.  A wrong
+    # gradient that still optimizes is the least visible failure this library
+    # has, so it belongs in the gate that blocks a merge.  Mostly synthetic
+    # (milliseconds); the two D=2 chi<=8 backward cases that cover the call
+    # sites are ~25s each.
+    "test_adjoint_seed_858.py": "core",
     # MPS/MPO physical-basis agreement (#816).  A mismatched charge ORDER
     # still converges and reports the correct energy while returning a
     # permuted state, so the energy check that normally catches everything
@@ -127,6 +135,12 @@ _FILE_MARKERS = {
     # nonconserving block, the other drops a block's data on ``todense()``
     # -- so nothing else in the suite would notice a regression. Runs in <1s.
     "test_symmetry_charge_arithmetic_799.py": "core",
+    # #789: the phase-fix VJP guard. ``core`` because the defect is a NaN
+    # gradient that only appears in the zero column -- everything else in a
+    # cotangent looks healthy, so nothing else in the suite would notice a
+    # regression, and the production default phase gauge is one of the four
+    # sites. The whole file runs in ~6s.
+    "test_phase_fix_nan_vjp_789.py": "core",
     "test_ctm_convergence_meta.py": "core",
     # Scope of the implicit-AD CTM guard (#802 rows for #349/#350/#343). The
     # dispatch half is mocked at the engine boundary (microseconds); the one
