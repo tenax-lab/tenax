@@ -131,6 +131,34 @@ def _report_root_residual(
 # ---------------------------------------------------------------------------
 
 
+def _unit_phase(z: jax.Array) -> jax.Array:
+    """``z / |z|`` where ``z`` is non-zero and ``1`` where it is not, NaN-free under AD.
+
+    The obvious spelling selects against the *result* of the division::
+
+        jnp.where(jnp.abs(z) > 0, z / jnp.abs(z), 1.0)
+
+    That is correct in value and wrong in gradient.  ``jnp.where`` does not
+    short-circuit a VJP: the unselected branch still evaluates ``0/0 = NaN``
+    and contributes ``0 * NaN = NaN``.  Only the zero entries are poisoned, so
+    the cotangent looks healthy everywhere else and the failure does not
+    announce itself -- it silently NaNs one column of whatever consumes it
+    (#789).
+
+    Fencing the *argument* keeps the division from ever seeing zero, which is
+    the house style already used by the ``S_rsqrt`` idiom in
+    ``_ctm_projector`` and by the norm floor in ``_normalise_rdm``.
+
+    Values are bit-identical to the unfenced form -- this changes gradients
+    only.  Four sites shared this idiom by copy; they now share this function,
+    and ``test_phase_fix_nan_vjp_789.py`` scans the tree so a fifth copy
+    cannot be written by hand.
+    """
+    nonzero = jnp.abs(z) > 0
+    safe = jnp.where(nonzero, z, 1.0)
+    return jnp.where(nonzero, safe / jnp.abs(safe), 1.0)
+
+
 def _fix_svd_signs(
     U: jax.Array, s: jax.Array, Vh: jax.Array
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -144,7 +172,7 @@ def _fix_svd_signs(
     """
     max_idx = jnp.argmax(jnp.abs(U), axis=0)  # shape (k,)
     signs = U[max_idx, jnp.arange(U.shape[1])]
-    phases = jnp.where(jnp.abs(signs) > 0, signs / jnp.abs(signs), 1.0)
+    phases = _unit_phase(signs)
     # The two factors must be inverses, not equal: column j of U and row j of
     # Vh both contribute to term j of `U diag(s) Vh`, so scaling both by
     # conj(p_j) multiplies that term by conj(p_j)^2.  That is 1 only for real

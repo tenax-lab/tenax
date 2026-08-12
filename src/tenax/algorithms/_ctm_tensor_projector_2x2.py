@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ad_primitives import _unit_phase
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
@@ -50,7 +51,7 @@ def _gauge_fixed_svd(
     U, s, Vh = _dense_svd(M, full_matrices=False)
     max_idx = jnp.argmax(jnp.abs(U), axis=0)  # (k,)
     diag = U[max_idx, jnp.arange(U.shape[1])]
-    phases = jnp.where(jnp.abs(diag) > 0, diag / jnp.abs(diag), 1.0)
+    phases = _unit_phase(diag)
     U = U * jnp.conj(phases)[None, :]
     Vh = Vh * phases[:, None]
     return U, s, Vh
