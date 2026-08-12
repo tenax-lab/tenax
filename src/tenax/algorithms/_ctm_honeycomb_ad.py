@@ -416,10 +416,15 @@ def _make_honeycomb_implicit_vjp_fn(
         def _matvec(v):
             return _jit_apply_I_minus_Jt(params_data_tuple, env_leaves, v)
 
+        # Seed by measured residual, zero included: ``dE_denv`` is the first
+        # Neumann term and a good seed only where it beats zero, and GMRES's
+        # residual bound is against its *starting* point, not ``||b||`` (#858).
+        from tenax.algorithms._ctm_energy_ad import _best_adjoint_seed
+
         lam, _info = gmres_pytree_jax(
             _matvec,
             dE_denv,
-            dE_denv,
+            _best_adjoint_seed(_matvec, dE_denv, [dE_denv]),
             tol=gmres_tol,
             maxiter=gmres_maxiter,
             restart=gmres_restart,
