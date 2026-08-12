@@ -331,6 +331,34 @@ that *smaller* `dt` made it worse — see the changelog.
 
 See `examples/heisenberg_ipeps_su.py` for 1-site and 2-site unit cell examples.
 
+### Belief-propagation gauge (correct bond weights)
+
+Simple update stores each bond's Schmidt spectrum straight from the SVD that
+produced it. A *non-unitary* gate on a neighbouring bond changes this bond's
+Schmidt values, and they are never recomputed, so the stored weights drift away
+from the spectra they are taken to be. `bp_gauge_checkerboard` re-derives all
+four of them by solving the belief-propagation fixed point (bond weights on a
+PEPS *are* BP messages) and re-gauges the tensors to match:
+
+```python
+from tenax import bp_gauge_checkerboard
+
+A, B, weights, info = bp_gauge_checkerboard(A, B)   # bare Vidal Gamma tensors
+print(info.converged, info.iterations)
+print(weights.h_AB, weights.h_BA)   # the two horizontal bonds, resolved separately
+```
+
+Every step is a gauge transformation, so the physical state is unchanged to
+machine precision — only the weights move. Measured on simple update's own
+converged D=3 output, the stored spectrum is `[1, 0.16586, 0.01564]` where the
+BP-consistent one is `[1, 0.14243, 0.01130]`: 15% off on the second Schmidt
+value and ~35% on the tail. Use this before reading `lambda` as a Schmidt
+spectrum — entanglement entropy, truncation-error estimates, or the symmetric
+gauge handed to a CTM.
+
+This corrects the *weights*, not simple update's dynamics; it does not change
+the state `ipeps()` converges to.
+
 ## iPEPS AD Optimization and Excitations
 
 ```python
