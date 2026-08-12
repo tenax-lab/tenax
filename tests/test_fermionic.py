@@ -957,24 +957,46 @@ class TestFermionicContractionCrossValidation:
         )
 
     def test_product_symmetry_contraction(self, rng, rng2):
-        """Cross-validate with ProductSymmetry(FermionParity, U1)."""
+        """Cross-validate with ProductSymmetry(FermionParity, U1).
+
+        **Fixture strengthened for #834.**  It used to build both operands over
+        ``charges = [encode(0,0), encode(1,1)]``, where conservation admits only
+        the ``(0,0)`` block -- so each was a 2x2 with a *single* nonzero, and
+        every block the contractor could have mis-paired was zero.  A
+        cross-validation over an almost-entirely-zero tensor demonstrates very
+        little, which is one of the two blind spots #834 identified.
+
+        The shared leg now uses ``flip_flow`` (opposite flow, identical charges,
+        the convention block matching implements) rather than ``dual``, and the
+        block count is asserted before the comparison is trusted.
+        """
         sym = ProductSymmetry(FermionParity(), U1Symmetry())
         charges = np.array(
-            [ProductSymmetry.encode(0, 0), ProductSymmetry.encode(1, 1)],
+            [
+                ProductSymmetry.encode(0, 0),
+                ProductSymmetry.encode(1, 1),
+                ProductSymmetry.encode(0, 2),
+                ProductSymmetry.encode(1, 3),
+            ],
             dtype=np.int32,
         )
-        dual_charges = sym.dual(charges)
+        shared_in = TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="b")
 
         idx_A = (
             TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="a"),
-            TensorIndex.from_charges(sym, dual_charges, FlowDirection.OUT, label="b"),
+            shared_in.flip_flow(),
         )
         idx_B = (
-            TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="b"),
-            TensorIndex.from_charges(sym, dual_charges, FlowDirection.OUT, label="c"),
+            shared_in,
+            TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="c"),
         )
         A = SymmetricTensor.random_normal(idx_A, rng)
         B = SymmetricTensor.random_normal(idx_B, rng2)
+
+        assert len(A.blocks) > 1 and len(B.blocks) > 1, (
+            f"degenerate fixture (A: {len(A.blocks)} blocks, B: {len(B.blocks)}); "
+            f"the cross-validation below would prove nothing"
+        )
 
         result = contract(A, B)
         result_dense = result.todense()

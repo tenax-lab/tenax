@@ -734,6 +734,44 @@ bounded by their packing. This puts the overflow ceiling at 2⁶³ rather than
 
 **Limitations:** `ProductSymmetry` combines exactly two factors by bit-packing two int16 charges into one int32. Nesting is not supported, so three-factor groups (e.g., U(1)×U(1)×Z₂) require a future `MultiProductSymmetry`. Each factor charge must fit in the int16 range [-32768, 32767].
 
+### Which legs may be contracted
+
+Two symmetric legs may be contracted when they have **opposite flows and
+identical charges** — what `flip_flow()` on a `TensorIndex`, or `bar()` on a
+tensor, produces. This is not the same as `is_dual_of()` / `dual()` / `dagger()`,
+which negate the charges: block-sparse contraction pairs blocks by charge
+*value* while dense contraction pairs by *position*, and negation permutes the
+position→charge map, so the two representations then compute different sums.
+
+```python
+from tenax import FlowDirection, SymmetricTensor, TensorIndex, U1Symmetry, contract
+import jax, numpy as np
+
+sym = U1Symmetry()
+charges = np.array([-1, 0, 1], dtype=np.int32)
+free_a = TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="i")
+free_b = TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="j")
+shared = TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="k")
+
+A = SymmetricTensor.random_normal((free_a, shared.flip_flow()), jax.random.PRNGKey(0))
+B = SymmetricTensor.random_normal((shared, free_b), jax.random.PRNGKey(1))
+contract(A, B)          # `k` is OUT on A and IN on B, with identical charges
+```
+
+Mixing the conventions makes `contract()` return a representation-dependent
+answer, silently (#834). Set `TENAX_STRICT_CONTRACT=1` to make it raise
+`ValueError` instead — naming both legs — when the two representations would
+disagree:
+
+```bash
+TENAX_STRICT_CONTRACT=1 python my_script.py
+```
+
+It is opt-in rather than the default because the checks are structural while the
+disagreement depends on the blocks' values: the CTM initial environment contracts
+non-dual bonds and discards products by the thousand, and is exact anyway because
+those products are all zero. Turn it on when auditing a path, not in production.
+
 ## Gotchas
 
 ### Float64 precision and `JAX_ENABLE_X64`

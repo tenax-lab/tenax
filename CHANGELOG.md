@@ -126,6 +126,56 @@
   site's fence is defensive. Separately, the all-zero matrix does produce a NaN
   gradient there, but from the SVD backward on a fully degenerate spectrum,
   which is the #406/#750 cluster and a different defect.
+### Added
+
+- **`TENAX_STRICT_CONTRACT=1` detects block-sparse contractions that disagree
+  with the densified one** (#834). The block-sparse path pairs blocks by charge
+  **value**; dense einsum pairs by **position**. Where those differ the
+  mismatched products were discarded with a bare `continue` — no error, no
+  warning. Measured: 22 of 64 flow/charge configurations disagreed, by 4.2e-01
+  to 1.5e+00 relative, with `|sym|/|den|` from 0.458 to **1.514**. A result
+  *larger* than the true one is not discarded weight, so blocks were being
+  mis-paired. At all-zero charges every combination is exact, which is why this
+  survived — negation is the identity there, so the position→charge map cannot
+  be permuted.
+
+  With the flag set, `contract()` raises `ValueError` naming both legs.
+  Refusing is the only available answer, not a conservative one: the dense
+  result of such a contraction is generally not a symmetric tensor. With `A.k`
+  OUT `[-1,0,1]` against `B.k` IN `[1,0,-1]`, dense pairs charge −1 with charge
+  +1 and puts weight on output block `(i=1, j=-1)`, whose charge is −2 — no
+  `SymmetricTensor` over those indices can carry it. Over 256 configurations
+  strict mode is sound *and* complete: it admits every one that agrees with
+  dense and refuses every one that does not.
+
+  **It is opt-in, and that is a measured decision rather than a cautious one.**
+  Both checks are structural — leg charges, flows, block keys — while whether
+  the two representations actually differ depends on the blocks' *values*, which
+  are traced. Scoring every `_contract_symmetric` call of a D=2, χ=8 charged
+  U(1)-Sz sweep against the densified contraction of the same operands, the
+  structural verdict is anti-correlated with the truth:
+
+  | call site | calls | max rel. gap |
+  |---|---|---|
+  | *refused*: `_apply_proj_unfused` | 40 | 1.7e-16 |
+  | *refused*: `_build_enlarged_corner` (4 frames) | 82 | 0.0 |
+  | *refused*: `_ctm_tensor_absorb_*_2plaq` (4) | 16 | 0.0 |
+  | *allowed*: `_apply_proj_unfused` | 56 | **8.3e-01** |
+
+  Every refusal is a false alarm — the discarded products are exactly zero — and
+  the one genuinely wrong site is allowed. A default-on check would break the
+  default CTM path *and* still miss the defect on it.
+
+  That last row is a real defect and is filed separately: its mechanism is
+  target inference over mixed-charge operands, not leg pairing. `test_contract_leg_pairing_834.py`
+  pins it so a fix announces itself.
+
+  `TensorIndex.is_dual_of()` is **not** the predicate — it is this tree's other
+  duality convention (opposite flow + *negated* charges) and admits 28 of those
+  256 configurations that produce wrong answers. Its docstring now says so, and
+  the two test fixtures that were built on it (`test_padded_block_array.py`,
+  `test_fermionic.py`) now use `flip_flow`; the latter was also a 2×2 with a
+  single nonzero, so it could not have caught this.
 
 ### ⚠️ Published performance claims retracted
 
