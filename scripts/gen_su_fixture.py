@@ -6,6 +6,15 @@ Paste the printed literal into ``tests/_su_fixtures.py``.
 The state is a D=2 Heisenberg simple-update ground state.  It is the smallest
 *physical* state that violates the retained-spectrum precondition the covariant
 characteristic equations depend on (#772), which is why it is the fixture.
+
+**This script no longer reproduces the frozen literal, and must not be used to
+refresh it** (#667).  That literal was generated when simple update converged to
+the product state, and its defining pathology -- a retained spectrum collapsing
+with chi, usable rank 3 -- is a consequence of that bug.  Simple update is fixed,
+so this now builds a genuinely entangled state (``retained_smin_rtol`` 4.0e-04
+rather than 3.0e-08 at chi=4); pasting it in would silently replace the
+pathological state #772/#778/#784/#785 exist to exercise with a healthy one.
+Kept for provenance and for generating *new* fixtures, not for refreshing that one.
 """
 
 import jax

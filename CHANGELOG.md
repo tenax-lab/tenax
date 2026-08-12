@@ -26,6 +26,79 @@
   The guard reports; it does not repair. A degenerate corner still produces the
   wrong energy, now audibly.
 
+- **`check_rdm` now detects a non-positive-semi-definite RDM** (#854). This was
+  the third hole in the same guard and the first that was not constructed — it
+  fell out of an ordinary CTM run (#853). The trace is a *sum* over the
+  diagonal, so negative eigenvalues cancel against positive ones inside the
+  very quantity being tested: a spectrum of
+  `[-1.2997, -0.0736, 0.7446, 1.6287]` traces to exactly 1, is entirely finite,
+  and passed both existing checks with a defect of `0.0` — the value meaning
+  "checked, healthy". It matters because `⟨H⟩ = tr(ρH)` lies within the
+  spectrum of a Hermitian `H` only for PSD `ρ`; #853 reported `E = +0.759` for
+  two `S·S` bonds whose attainable maximum is `+0.5`, a number no state can
+  have.
+
+  A non-PSD RDM now returns `INVALID_RDM_DEFECT` rather than its trace defect,
+  closing the same recording trap as #848. The order is load-bearing —
+  finiteness, then trace, then positivity — because a collapsed all-zero RDM
+  has an all-zero spectrum and is PSD *vacuously*, so checking positivity first
+  would return it clean and lose #845.
+
+  The tolerance is relative to the spectral radius rather than an exact
+  `min_eig < 0`, because a converged RDM is routinely rank-deficient and its
+  zero eigenvalues land either side of zero. Measured on 2-site CTM runs at
+  D=2: every **converged** environment gave negativity of exactly `0.0`, while
+  every run that exhausted `max_iter` gave `1e-1` to `1.0`. So the check has no
+  false-positive margin problem, and non-positivity tracks non-convergence —
+  which is exactly #853's own symptom.
+
+- **The symmetry core disagreed with itself about charges, in two ways that
+  both failed silently and open** (#799).
+
+  *The conservation law wrapped at int32.* U(1) charges are unbounded by
+  definition — that is what distinguishes them from `Z_n` — but the accumulator
+  was forced to `int32`, so four legs of `2**30` fused to exactly `0`:
+
+  ```python
+  >>> U1Symmetry().is_conserved([2**30]*4, [1]*4)
+  True                                   # the true sum is 2**32
+  ```
+
+  The consequence is worse than the predicate. `SymmetricTensor._validate` goes
+  through `_net_charges`, which had the same cast, so a genuinely nonconserving
+  block was **built into a tensor without error** and every downstream
+  contraction then treated it as conserving. Fixed by widening only the
+  *accumulator*: charge storage stays `int32` (a codebase-wide convention —
+  `TensorIndex.__post_init__` re-forces it), while `charge_accumulator_dtype`
+  is `int64` for U(1) and `FermionicU1`. `Z_n` reduces mod `n` and
+  `ProductSymmetry` packs two int16 charges into one int32, so both keep
+  `int32` — widening the latter would corrupt its encoding. This raises the
+  ceiling from 2³¹ to 2⁶³; it does not remove it.
+
+  *A non-canonical block key passed validation and then vanished.* #733
+  canonicalises the *index* sectors; a block key written with the caller's own
+  representative was stored as given. It still validated — fusion reduces
+  modulo `n`, so the key really is conserving — and then `todense()` found no
+  matching sector and wrote nothing:
+
+  ```python
+  # Z2 index with sectors [-1, 1], both canonicalising to 1
+  SymmetricTensor({(-1, 1): ones}, idx).todense().sum()   # 0.0
+  SymmetricTensor({( 1, 1): ones}, idx).todense().sum()   # 4.0
+  ```
+
+  Same caller, same charge, two answers depending on which representative they
+  happened to write. Block keys are now canonicalised on the same boundary as
+  index sectors, so the two cannot disagree. Two representatives of one sector
+  in the same dict raise rather than merge — silently summing them, or letting
+  dict order pick a winner, would be a fresh instance of the same class.
+
+  Also fixed: `canonicalize_charges`'s default passed a *scalar* identity into
+  `fuse`, whose documented contract is two arrays of shape `(D,)`, so a
+  conforming subclass broke the moment the default was invoked. And the charge
+  arithmetic API — `flow_charge`, `canonicalize_charges`, `net_charge`,
+  `is_conserved` — is now documented in the README, which had zero mentions of
+  it despite #734 making it the sanctioned boundary.
 - **The phase-fix idiom had a NaN VJP at zero, at four sites including the
   production-default phase gauge** (#789). Normalising a reference element to a
   unit phase was spelled `jnp.where(jnp.abs(z) > 0, z / jnp.abs(z), 1.0)`. That
@@ -85,6 +158,71 @@
   χ16 / split is the only path that runs D=12" falls to the allocator rather
   than the recipe. The split-side collapse is cleanly the recipe — its controls
   reproduce to ≤1.8%.
+
+### Fixes
+
+- **Simple update converged to the product state; every `ipeps()` result is
+  affected** (#667). Two independent defects in the simple-update path:
+
+  1. The sweep drove only 2 of the checkerboard's 4 bonds — `A.r↔B.l` and
+     `A.d↔B.u`, never `B.r↔A.l` or `B.d↔A.u`. A was therefore always the
+     left/top site of every gate and only ever picked up bond weight on its
+     `r`/`d` legs, leaving **half the lattice bonds with no Schmidt weight at
+     all**. That state is spuriously dimerized (the two horizontal bonds differ
+     by 2.5e-2), its 1-site RDM depends on which bond you trace it from
+     (‖ρ_A(h) − ρ_A(v)‖ = 0.37), and that RDM has a **negative eigenvalue**
+     (−0.094).
+  2. `Γ` absorbed `sqrt(σ)` that was *also* stored as the new λ and re-absorbed
+     in full on the next sweep, so the shared bond carried `λ^1.5`. This is what
+     drove the state to a product state: λ₂ ∝ dt, λ₃ ∝ dt², and E → **−0.5
+     exactly** as dt → 0. It is why *smaller dt was worse* — dt was the only
+     thing entangling the state.
+
+  Neither correction works alone. Together, D=2 Heisenberg goes **−0.548 →
+  −0.659334287637** (reference −0.6599; the residual is ordinary simple-update
+  error), D=3 → −0.663196204307 and D=4 → −0.6674, χ-converged with corner rank
+  = χ. The state is now dt-stable (−0.6570 / −0.6593 / −0.6591 at dt =
+  0.3 / 0.05 / 0.01).
+
+  **Two consequences for existing results.** Any nominally-D=3 state from
+  `ipeps()` was really D=2 — its third Schmidt value was ~2e-6. And
+  `sublattice_rotate_gate` now does what it promises: the rotated-frame state is
+  uniform, so `A` and `B` are the same physical tensor (their 1×1 CTM energies
+  agree to 1e-16), which makes the single-site/C4v route usable. `‖A−B‖` is not
+  the way to check that — it measures the bond gauge and stays ≈1.7 either way.
+
+  Not fixed here, and newly visible now that the state is genuinely entangled:
+  the legacy 2-site `ctm_2site` that `ipeps()` reports its energy through does
+  **not converge** on such a state (diff 1.6e-3…6.5e-2 after 600 sweeps at any
+  χ up to 32), so `ipeps()`'s returned energy sits ~0.02 above the state's true
+  value. Measure with `ctm_tensor(recipe="2x2")` instead. `fermionic_ipeps.py`
+  absorbs `sqrt(σ)` the same way and is an untested lead for #392.
+
+  One characterization worth knowing if you compare CTM paths: **split-CTM and
+  fused-CTM agree only as χ→∞.** On a genuinely entangled D=2 state their
+  energies differ by 1.67e-05 at χ=8, falling to 9.62e-09 by χ=48 — and the gap
+  is identical to 12 digits at max_iter 100/400/2000, so it is finite-χ
+  truncation, not non-convergence. This was invisible while the state was
+  collapsing, because a near-product state made the two paths trivially
+  identical.
+
+  **Three test fixtures built simple-update states by hand and were migrated
+  with the library** (`_build_su_neel`, `_build_su_xxz`, `evolve_physical_site`).
+  Each ran the same 2-of-4-bond sweep and returned the bare Vidal `Γ`, so the
+  split-CTM parity tests were validating a state with no bond weights on any leg
+  while their docstrings described a physical one. They still passed — split and
+  fused agreed with each other on the wrong ansatz — which is the failure mode
+  worth naming: a parity test cannot tell you *what* it achieved parity on.
+
+  Fixing them exposed two things the collapsed fixture had been hiding. The
+  split-vs-fused gap at a truncated interlayer bond (`chi_I = chi`) is ~1.2e-5,
+  not the ~1e-6 the tolerance assumed — a genuinely entangled state has higher
+  interlayer rank, and the gap still collapses to 2.4e-15 at the lossless point,
+  so it is truncation and the tolerance was calibrated against the bug. And the
+  implicit-AD **gradient magnitude** is ~5% wrong on the corrected state
+  (#860) — direction fine, and flat at 5.48e-2 across FD steps 1e-3…1e-6, which
+  is what rules out a finite-difference artifact. That one is gated by a strict
+  `xfail`, not by a loosened threshold.
 
 ### CI / tests
 

@@ -56,6 +56,17 @@ DPHYS = 2
 CFG = CTMConfig(chi=4, chi_I=4, max_iter=5, conv_tol=1e-10)
 MATCH = "not a density matrix"
 
+#: Common prefix of all three guard messages -- "reduced density matrix is not
+#: finite / not a density matrix / not positive semi-definite".
+#:
+#: The "must stay silent" tests below filter on *this*, not on ``MATCH``.  They
+#: used to filter on ``MATCH`` alone, which made them blind to any check added
+#: later: when the PSD test landed (#854) they would have passed a healthy
+#: environment that warned about positivity, because that message does not
+#: contain "not a density matrix".  A silence assertion has to be able to see
+#: every warning the guard can raise, or it silently narrows as the guard grows.
+ANY_RDM_MATCH = "reduced density matrix"
+
 
 def _site(seed: int) -> jax.Array:
     return jax.random.normal(jax.random.PRNGKey(seed), (D, D, D, D, DPHYS))
@@ -76,11 +87,11 @@ def _kill(env_B, name):
 
 
 def _rdm_warnings(fn):
-    """Run ``fn`` and return the RDM-validity warnings it raised."""
+    """Run ``fn`` and return every RDM-validity warning it raised."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         result = fn()
-    return result, [w for w in caught if MATCH in str(w.message)]
+    return result, [w for w in caught if ANY_RDM_MATCH in str(w.message)]
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +413,193 @@ def test_the_finiteness_check_covers_the_4_leg_form():
     """The builders return ``(d, d, d, d)``; the guard must not only see 2-leg."""
     rdm = _poisoned((0, 1), jnp.nan).reshape(2, 2, 2, 2)
     with pytest.warns(RuntimeWarning, match=NONFINITE_MATCH):
+        check_rdm(rdm, context="unit-test")
+
+
+# ---------------------------------------------------------------------------
+# Non-PSD RDMs (#854).
+#
+# The third hole in the same guard, and the first that was not constructed --
+# it fell out of an ordinary CTM run (#853).  The trace is a *sum* over the
+# diagonal, so negative eigenvalues cancel against positive ones inside the
+# very quantity being tested.  No single scalar certifies a matrix.
+# ---------------------------------------------------------------------------
+
+PSD_MATCH = "not positive semi-definite"
+
+#: Eigenvalues measured on a live U(1)-Sz D=3 chi=12 CTM run at 50 sweeps
+#: (#853).  They sum to exactly 1, and the most negative one is larger in
+#: magnitude than the whole trace.
+LIVE_NONPSD_EIGS = (-1.299674, -0.073617, 0.744597, 1.628694)
+
+
+def _hermitian_with_spectrum(eigs, seed: int | None = None) -> jnp.ndarray:
+    """A Hermitian matrix whose eigenvalues are exactly ``eigs``.
+
+    ``seed=None`` gives the diagonal form, where the negative eigenvalue is
+    plainly visible.  A seed conjugates it by a fixed orthogonal ``Q``, so no
+    entry is individually suspicious and the check has to actually diagonalise.
+    """
+    L = jnp.diag(jnp.asarray(eigs, dtype=float))
+    if seed is None:
+        return L
+    Q, _ = jnp.linalg.qr(jax.random.normal(jax.random.PRNGKey(seed), (len(eigs),) * 2))
+    return Q @ L @ Q.conj().T
+
+
+def _any_warnings(fn):
+    """Run ``fn`` and return every warning it raised, filtered by nothing.
+
+    Stronger than :func:`_rdm_warnings` and used for the "a valid RDM must be
+    silent" controls, which call ``check_rdm`` directly: there is no other
+    source of warnings on that path, so anything at all -- including a NumPy
+    warning out of ``eigvalsh`` -- is a result worth failing on.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = fn()
+    return result, list(caught)
+
+
+def test_the_trace_cannot_see_a_negative_eigenvalue():
+    """The claim #854 rests on, stated as an assertion rather than prose.
+
+    Every existing check passes this matrix: it is finite, and its trace is
+    exactly 1.  It is still not a density matrix, and the energy contracted
+    from it is not bounded by the Hamiltonian's spectrum.
+    """
+    rdm = _hermitian_with_spectrum(LIVE_NONPSD_EIGS, seed=3)
+
+    assert bool(jnp.isfinite(rdm).all()), "precondition: finiteness must pass"
+    assert rdm_trace_defect(rdm) == pytest.approx(0.0, abs=1e-12), (
+        "precondition: the trace must be clean, or this is not exercising the "
+        "blind spot"
+    )
+    assert float(jnp.min(jnp.linalg.eigvalsh(rdm))) < -1.0
+
+
+@pytest.mark.parametrize("seed", [None, 3], ids=["diagonal", "rotated"])
+def test_a_non_psd_rdm_is_caught(seed):
+    """Both spellings of the same spectrum, since one is diagonal by luck."""
+    rdm = _hermitian_with_spectrum(LIVE_NONPSD_EIGS, seed=seed)
+
+    with pytest.warns(RuntimeWarning, match=PSD_MATCH):
+        check_rdm(rdm, context="unit-test")
+
+    with pytest.raises(CollapsedRDMError, match=PSD_MATCH):
+        check_rdm(rdm, context="unit-test", strict=True)
+
+
+def test_a_non_psd_rdm_never_reports_a_healthy_defect():
+    """Same recording trap as #848: ``0.0`` is the value meaning "healthy".
+
+    The trace defect of this RDM is exactly ``0.0``, so returning it would let
+    a driver record a physically impossible measurement as checked and clean.
+    """
+    rdm = _hermitian_with_spectrum(LIVE_NONPSD_EIGS, seed=3)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        defect = check_rdm(rdm, context="unit-test")
+
+    assert defect != 0.0, "a non-PSD RDM reported the healthy sentinel 0.0"
+    assert defect > RDM_TRACE_TOL, (
+        f"defect {defect!r} does not exceed the tolerance, so a caller gating "
+        f"on `check_rdm(...) > tol` reads this non-PSD RDM as healthy"
+    )
+    assert defect == INVALID_RDM_DEFECT
+
+
+@pytest.mark.parametrize(
+    "eigs",
+    [
+        (0.25, 0.25, 0.25, 0.25),
+        (0.7, 0.2, 0.1, 0.0),
+        (1.0, 0.0, 0.0, 0.0),
+        (0.5, 0.5, 0.0, -1e-14),
+    ],
+    ids=["flat", "generic", "pure", "roundoff-negative"],
+)
+@pytest.mark.parametrize("seed", [None, 5], ids=["diagonal", "rotated"])
+def test_a_psd_rdm_is_silent(eigs, seed):
+    """A guard that cries wolf gets filtered out, so the controls come first.
+
+    The last spectrum is the one that sets the tolerance. A converged RDM's
+    smallest eigenvalues land a few ulp either side of zero -- a rank-deficient
+    one sits exactly there -- so an exact ``min_eig < 0`` test would warn on
+    every healthy run and the warning would be suppressed within a week.
+    """
+    rdm = _hermitian_with_spectrum(eigs, seed=seed)
+
+    _defect, caught = _any_warnings(lambda: check_rdm(rdm, context="unit-test"))
+
+    assert not caught, f"warned on a valid density matrix: {caught}"
+
+
+def test_the_collapsed_rdm_still_reports_the_trace_defect():
+    """Ordering: an all-zero RDM is PSD *vacuously*, so the trace check wins.
+
+    Its spectrum is all zeros, which passes any PSD test. Were the PSD check to
+    run first and return early, #845 would stop being reported -- so this pins
+    the order rather than merely the presence of the new check.
+    """
+    with pytest.warns(RuntimeWarning, match=MATCH) as caught:
+        defect = check_rdm(jnp.zeros((4, 4)), context="unit-test")
+
+    assert PSD_MATCH not in str(caught[0].message)
+    assert defect == pytest.approx(1.0, abs=1e-12)
+
+
+def test_the_psd_message_is_not_either_of_the_other_two():
+    """Three failures, three responses, so the message has to say which.
+
+    Non-finite points upstream at the contraction (#848); a dead trace points
+    at the corner spectrum (#845); a negative eigenvalue means the environment
+    is not a positive map and the energy is unbounded by physics (#854).
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        check_rdm(_hermitian_with_spectrum(LIVE_NONPSD_EIGS, seed=3), context="t")
+    psd_msg = str(caught[0].message)
+
+    assert "#854" in psd_msg
+    assert "#845" not in psd_msg and "#848" not in psd_msg
+    assert "contributes 0 to the energy" not in psd_msg
+
+
+def test_the_psd_check_covers_the_4_leg_form():
+    """The builders return ``(d, d, d, d)``; the guard must not only see 2-leg."""
+    rdm = _hermitian_with_spectrum(LIVE_NONPSD_EIGS, seed=3).reshape(2, 2, 2, 2)
+
+    with pytest.warns(RuntimeWarning, match=PSD_MATCH):
+        check_rdm(rdm, context="unit-test")
+
+
+def test_a_non_psd_rdm_can_exceed_the_hamiltonian_spectrum():
+    """The harm: ``<H> = tr(rho H)`` is bounded by H only when ``rho`` is PSD.
+
+    Built by aligning the RDM's negative eigenvalue with the Heisenberg gate's
+    ground state -- the configuration that produced #853's ``E = +0.759``
+    against an attainable maximum of ``+0.5`` over two bonds.  The resulting
+    number is not merely inaccurate; no state can have it.
+    """
+    H = jnp.asarray(heisenberg_gate().todense()).reshape(4, 4)
+    h, U = jnp.linalg.eigh(H)  # ascending, matching LIVE_NONPSD_EIGS
+    rdm = U @ jnp.diag(jnp.asarray(LIVE_NONPSD_EIGS)) @ U.conj().T
+
+    E = float(
+        jnp.real(
+            jnp.einsum("ijkl,ijkl->", rdm.reshape(2, 2, 2, 2), H.reshape(2, 2, 2, 2))
+        )
+    )
+
+    assert rdm_trace_defect(rdm) == pytest.approx(0.0, abs=1e-12)
+    assert E > float(h.max()), (
+        f"E = {E:.6f} must exceed max eig(H) = {float(h.max()):.6f} for this "
+        f"test to be demonstrating impossible physics"
+    )
+
+    with pytest.warns(RuntimeWarning, match=PSD_MATCH):
         check_rdm(rdm, context="unit-test")
 
 

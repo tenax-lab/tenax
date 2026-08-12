@@ -639,8 +639,57 @@ class SymmetricTensor(Tensor):
         indices: tuple[TensorIndex, ...],
     ) -> None:
         self._indices = tuple(indices)
-        self._init_flat_buffer(blocks)
+        self._init_flat_buffer(self._canonicalise_keys(blocks))
         self._validate()
+
+    def _canonicalise_keys(
+        self, blocks: dict[BlockKey, jax.Array]
+    ) -> dict[BlockKey, jax.Array]:
+        """Rewrite each block key to its canonical charge representative.
+
+        ``#733`` canonicalises the *index* sectors, but a block key written with
+        the caller's own representative was stored exactly as given.  It still
+        passed :meth:`_validate` -- fusion reduces modulo ``n``, so the key
+        genuinely is conserving -- and then :meth:`todense` found no matching
+        sector and wrote nothing.  The data silently disappeared, and the same
+        caller got two different answers depending on which representative they
+        happened to write (#799):
+
+            Z2, sectors [-1, 1] -> both canonicalise to 1
+            key (-1, 1): todense().sum() == 0.0
+            key ( 1, 1): todense().sum() == 4.0
+
+        Canonicalising here puts keys on the same boundary as index sectors, so
+        the two cannot disagree.  For U(1) it is the identity map and no key
+        moves.
+
+        A collision is an error rather than a merge.  Once keys are canonical,
+        ``(-1, 1)`` and ``(1, 1)`` name the *same* block; summing them, or
+        letting dict order decide which survives, would be a fresh instance of
+        exactly the silent-wrong-answer class this fixes.
+        """
+        if not self._indices or not blocks:
+            return blocks
+        sym = self._indices[0].symmetry
+        out: dict[BlockKey, jax.Array] = {}
+        written_as: dict[BlockKey, BlockKey] = {}
+        for key, arr in blocks.items():
+            canon = tuple(
+                int(c)
+                for c in sym.canonicalize_charges(
+                    np.asarray(key, dtype=sym.charge_accumulator_dtype)
+                )
+            )
+            if canon in out:
+                raise ValueError(
+                    f"Blocks {written_as[canon]} and {key} name the same sector "
+                    f"{canon} under {type(sym).__name__}: two representatives of "
+                    f"one charge cannot label different blocks. Combine them "
+                    f"before constructing the tensor."
+                )
+            out[canon] = arr
+            written_as[canon] = key
+        return out
 
     def _init_flat_buffer(self, blocks: dict[BlockKey, jax.Array]) -> None:
         """Pack block arrays into a single flat 1D buffer with index metadata."""

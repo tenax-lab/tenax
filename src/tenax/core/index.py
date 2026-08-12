@@ -469,14 +469,18 @@ def _net_charges(
     """
     if len(indices) == 0:
         raise ValueError("_net_charges requires at least one index")
-    table = np.asarray(keys, dtype=np.int32)  # (n_keys, n_legs)
+    # Accumulate in the symmetry's width, not int32: this is the copy that
+    # ``SymmetricTensor._validate`` calls, so an overflow here admits a
+    # nonconserving block into a tensor silently (#799).
+    sym_dtype = indices[0].symmetry.charge_accumulator_dtype
+    table = np.asarray(keys, dtype=sym_dtype)  # (n_keys, n_legs)
     if table.ndim != 2 or table.shape[1] != len(indices):
         raise ValueError(
             f"keys must be a 2-D table with one column per index: got shape "
             f"{table.shape} for {len(indices)} indices"
         )
     sym = indices[0].symmetry
-    net = np.full(len(table), sym.identity(), dtype=np.int32)
+    net = np.full(len(table), sym.identity(), dtype=sym_dtype)
     for i, idx in enumerate(indices):
         net = sym.fuse(net, sym.flow_charge(idx.flow, table[:, i]))
     return net

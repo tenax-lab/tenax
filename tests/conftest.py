@@ -61,6 +61,13 @@ _FILE_MARKERS = {
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",
+    # #667: simple update converged to the product state, and survived because
+    # *no test asserted a simple-update energy* -- one test even documented the
+    # bug ("small dt causes the bond lambdas to converge to a product-like fixed
+    # point") as intended behaviour.  A guard against a silent-wrong-answer
+    # defect of that shape belongs in the gate that blocks a merge.  The D=2 run
+    # is shared across the cases via a module fixture; the D=4 case is @slow.
+    "test_su_667_product_state.py": "core",
     # Root-implicit AD wiring (#715): dispatch + guard surface only, no
     # CTM convergence, so it is milliseconds.  The production-run case it
     # also carries is explicitly @slow (#772).
@@ -114,6 +121,11 @@ _FILE_MARKERS = {
     # scan showed conv_tol having no effect on the answer.
     "test_ctm_complex_site_tensors.py": "core",
     "test_rdm_validity_guard.py": "core",
+    # #799: the symmetry core disagreeing with itself about charges. ``core``
+    # because both defects are silent and fail *open* -- one admits a
+    # nonconserving block, the other drops a block's data on ``todense()``
+    # -- so nothing else in the suite would notice a regression. Runs in <1s.
+    "test_symmetry_charge_arithmetic_799.py": "core",
     # #789: the phase-fix VJP guard. ``core`` because the defect is a NaN
     # gradient that only appears in the zero column -- everything else in a
     # cotangent looks healthy, so nothing else in the suite would notice a
@@ -152,6 +164,11 @@ _FILE_MARKERS = {
     # *withholding* this ``core``; see ``pytest_collection_modifyitems``.
     "test_multisite_clamped_gate.py": "core",
     "test_ctm_tensor.py": "algorithm",
+    # The invariant that keeps the 2x2 enlarged corner contraction-correct on
+    # non-dual bonds (#834/#762).  It is a property of the *sweep*, not of the
+    # flow convention, so nothing in the type system enforces it -- required
+    # gate.  The D=3 case carries its own ``@pytest.mark.slow``.
+    "test_enlarged_corner_flow_invariant_834.py": "core",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",
     "test_tdvp.py": "algorithm",

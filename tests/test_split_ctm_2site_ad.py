@@ -61,6 +61,7 @@ def _build_su_xxz(delta, D=2, d=2, n_steps=80, dt=0.05, seed=7):
     from tenax.algorithms.ipeps_simple_update import (
         _simple_update_2site_horizontal_tensor,
         _simple_update_2site_vertical_tensor,
+        _to_physical_tensor,
     )
 
     H = _xxz_gate(delta, d)
@@ -77,18 +78,32 @@ def _build_su_xxz(delta, D=2, d=2, n_steps=80, dt=0.05, seed=7):
     gate = _make_trotter_gate_tensor(H, dt, site_tensor=A)
     lam_h = jnp.ones(D)
     lam_v = jnp.ones(D)
+    # Four-bond checkerboard sweep + symmetric gauge, mirroring ``ipeps()``
+    # after #667.  See the same comment in ``_build_su_neel``.
     for step in range(n_steps):
-        if step % 2 == 0:
+        phase = step % 4
+        if phase == 0:
             A, B, lam_h = _simple_update_2site_horizontal_tensor(
                 A, B, gate, lam_h, lam_v, D
             )
-        else:
+        elif phase == 1:
             A, B, lam_v = _simple_update_2site_vertical_tensor(
                 A, B, gate, lam_h, lam_v, D
             )
+        elif phase == 2:
+            B, A, lam_h = _simple_update_2site_horizontal_tensor(
+                B, A, gate, lam_h, lam_v, D
+            )
+        else:
+            B, A, lam_v = _simple_update_2site_vertical_tensor(
+                B, A, gate, lam_h, lam_v, D
+            )
         A = A * (1.0 / float(A.norm()))
         B = B * (1.0 / float(B.norm()))
-    return A, B
+    return (
+        _to_physical_tensor(A, lam_h, lam_v),
+        _to_physical_tensor(B, lam_h, lam_v),
+    )
 
 
 def test_converge_split_env_2site_matches_forward(su_state):
@@ -316,7 +331,18 @@ def test_2site_implicit_grad_matches_explicit_clean_regime():
 
 def test_2site_split_energy_matches_fused_ad_path(su_state):
     """The AD-energy value (split implicit) matches the fused 2-site energy on
-    the convergent state — energy correctness independent of the gradient."""
+    the convergent state — energy correctness independent of the gradient.
+
+    Runs at ``chi_I = chi``, so the interlayer bond is truncated and the
+    comparison carries that truncation's cost: ~1.2e-5 on this state.  The
+    tolerance was 1e-6, calibrated before #667 when this fixture returned bare
+    Vidal ``Gamma`` tensors with no bond weights — a less entangled state whose
+    interlayer rank was low enough for the truncation to be nearly free.  See
+    ``test_split_2site_energy_matches_fused_convergent`` in
+    ``test_split_ctm_2site.py`` for the measured gap-vs-chi_I curve; it reaches
+    2.4e-15 at the lossless point, which is what makes this truncation and not
+    a defect.
+    """
     from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
     from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
     from tenax.algorithms._split_ctm_energy_ad import ctm_energy_split_implicit_2site
@@ -340,19 +366,16 @@ def test_2site_split_energy_matches_fused_ad_path(su_state):
             min_iter=2,
         ).real
     )
-    assert abs(E_split - E_fused) < 1e-6, f"split={E_split} fused={E_fused}"
+    assert abs(E_split - E_fused) < 5e-5, f"split={E_split} fused={E_fused}"
 
 
-def test_2site_implicit_grad_fd_directional(su_state):
-    """AD vs finite differences on the split energy — direction AND magnitude.
+@pytest.fixture(scope="module")
+def _grad_vs_fd(su_state):
+    """(cos, rel) between the implicit-AD gradient and central differences.
 
-    This gate used to assert direction only, on the stated grounds that the
-    split energy_fn carried a "Wirtinger (real/complex-derivative) gap".  That
-    was a misdiagnosis: the computation is entirely real, so Wirtinger cannot
-    apply.  The real cause was the #750 SVD-adjoint bug, which put the
-    off-diagonal adjoint contribution at -0.5x and flipped the gradient's sign.
-    With #750/#751 fixed, AD and FD agree in magnitude too, so the magnitude
-    assertion below is now a live gate rather than a documented waiver."""
+    Computed once: the AD pass plus 24 CTM convergences is the expensive part
+    of this file, and both gates below score the same comparison.
+    """
     from tenax.algorithms._split_ctm_energy_ad import ctm_energy_split_implicit_2site
     from tenax.algorithms.ipeps import _wrap_as_dense_tensor
 
@@ -392,10 +415,45 @@ def test_2site_implicit_grad_fd_directional(su_state):
         jnp.dot(g_ad_s, g_fd)
         / (jnp.linalg.norm(g_ad_s) * jnp.linalg.norm(g_fd) + 1e-30)
     )
-    assert cos > 0.99, f"AD and FD gradients point in different directions: cos={cos}"
     rel = float(jnp.linalg.norm(g_ad_s - g_fd) / (jnp.linalg.norm(g_fd) + 1e-30))
-    # Threshold set by the FD step (eps=1e-5) on a CTM fixed point, not by any
-    # remaining adjoint defect; pre-#750 this sat above 0.5 with a sign flip.
+    return cos, rel
+
+
+def test_2site_implicit_grad_fd_direction(_grad_vs_fd):
+    """The implicit-AD gradient points where finite differences say it should.
+
+    Direction is the half of this comparison that is currently correct; the
+    magnitude half is #860, gated separately below.  Pre-#750 this failed too
+    (the SVD-adjoint bug put the off-diagonal contribution at -0.5x and flipped
+    the sign), so it is a real gate, not a formality."""
+    cos, _rel = _grad_vs_fd
+    assert cos > 0.99, f"AD and FD gradients point in different directions: cos={cos}"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#860: the implicit-AD gradient magnitude is ~5% wrong on a physical "
+        "simple-update state. Measured rel=5.09e-2 against central differences "
+        "while the direction is fine (cos=0.9988). It is NOT a finite-difference "
+        "artifact: the disagreement is FLAT at 5.48e-2 across eps = 1e-3, 1e-4, "
+        "1e-5, 1e-6 (identical to 4 significant figures), whereas FD truncation "
+        "error would scale as eps^2 and roundoff would grow as eps->0. Masked "
+        "until #667: this fixture previously returned bare Vidal Gamma tensors "
+        "with every bond weight dropped, and on that much less entangled state "
+        "the gradient error was under 1e-3. Same class as #841 (direction valid, "
+        "scale is not), two orders of magnitude smaller."
+    ),
+)
+def test_2site_implicit_grad_fd_magnitude(_grad_vs_fd):
+    """AD and FD must agree in magnitude, not just direction.
+
+    Do not loosen this threshold to make it pass. The 1e-3 here is set by the
+    FD step on a CTM fixed point; a gradient that is 5% off is a defect in the
+    adjoint, and calibrating the gate to accept it would hide #860 the way the
+    old fixture hid it.
+    """
+    _cos, rel = _grad_vs_fd
     assert rel < 1e-3, f"AD and FD gradient magnitudes disagree: rel={rel}"
 
 

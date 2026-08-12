@@ -79,7 +79,9 @@ def main():
         D=2,
         chi=16,
         num_steps=200,
-        dt=0.3,
+        # dt=0.3 predates the #667 fix, when lam_2 was proportional to dt and a
+        # large step was the only thing keeping the state off the product state.
+        dt=0.05,
         label="2-site checkerboard, D=2",
     )
 
