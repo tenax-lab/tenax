@@ -36,10 +36,13 @@ This prototype monkeypatches (restoring all on exit):
   1. ``_get_base_charges`` — filter to ``keep`` (sets the truncation intent).
   2. ``_svd_projector_symmetric`` (forward, eager block-sparse) — wrap the
      original and drop any ``chi_new`` columns whose charge is outside ``keep``.
-     This post-filters the genuine projector output, removing whole orthonormal
-     columns for the dropped charges so each projector stays an isometry on the
-     retained sectors and the resulting env is a valid (narrower)
-     charge-conserving environment.
+     This post-filters the genuine projector output, removing whole columns for
+     the dropped charges from ``P1`` and ``P2`` alike, so the pair stays
+     biorthogonal on the retained bond and the resulting env is a valid
+     (narrower) charge-conserving environment.  (These are *not* isometries:
+     ``_svd_projector_symmetric`` returns the Fishman pair
+     ``P1 = C4g V S^-1/2``, ``P2 = C1g U S^-1/2``, which satisfies
+     ``P1^T P2 = I`` but is not orthonormal and has ``P1 != P2``.)
   3. (OPT-IN, default OFF) ``_truncated_svd_symmetric_traced`` (the traced
      block-sparse SVD). See ``sector_dropping_truncation``'s ``patch_traced_svd``
      argument for why this is off by default.
@@ -62,16 +65,9 @@ NOT carry into the traced backward via post-hoc bond filtering. The default
 config keeps Gate-B trace-able (backward not yet dropped) and leaves the traced
 drop as an opt-in hook for the Gate-B task to resolve.
 
-What sector dropping costs: RDM positivity (#853)
---------------------------------------------------
+Energies off a dropped environment are not usable (#853)
+---------------------------------------------------------
 **Energies read off a dropped environment are not bounded by the Hamiltonian.**
-The prototype deletes whole *charge* sectors from the environment's chi bonds,
-and each projector stays an isometry on the sectors it keeps -- which is why the
-corner stays rank-4 and the environment stays well-formed by every structural
-check. But a CTM reduced density matrix is positive because the environment
-approximates ``<psi|...|psi>`` with the ket and bra layers truncated
-*consistently*, and a hard projection selected by charge rather than by weight is
-not that kind of truncation.
 
 Measured at D=3, chi=12, ``keep={-1,0,1}``, 50 sweeps::
 
@@ -84,11 +80,28 @@ Measured at D=3, chi=12, ``keep={-1,0,1}``, 50 sweeps::
 see this: ``rdm_h``'s trace is exactly 1 in both rows, because negative
 eigenvalues cancel against positive ones inside the sum (#854).
 
-So positivity is something the C-lever trades away, not a defect that leaked in,
-and the plain symmetric CTM keeps it on the same input at every sweep budget
-(pinned by ``test_the_plain_symmetric_ctm_keeps_the_rdm_positive``). Gate-B and
-Gate-C should treat block counts and timings from this prototype as meaningful
-and any *energy* as not.
+**Why is unexplained -- and it looks like a defect here, not a cost of
+dropping.** The tempting story is that selecting by charge rather than by weight
+cannot be a consistent ket/bra truncation. That story does not survive
+measurement. On this fixture the converged *plain* environment is supported
+entirely on ``q=0`` -- every other corner block is identically zero::
+
+    C1 block    (-2,-2)   (-1,-1)     (0,0)     (1,1)     (2,2)
+    ||block||    0.0000    0.0000    1.4769    0.0000    0.0000
+
+So ``keep={-1,0,1}`` deletes blocks that carry no weight at all, and the column
+drop is applied to ``P1`` and ``P2`` alike, which leaves the pair biorthogonal on
+the retained bond. Neither the selection rule nor a ket/bra mismatch explains a
+spectrum that reaches ``-0.798`` of the radius. The remaining suspect is the
+per-sector chi re-allocation in the patched traced SVD (patch 4 below), which
+also changes how the surviving ``q=0`` sector is truncated -- but that is a
+hypothesis, not a measurement. Until it is understood, treat the indefinite RDM
+as a **bug in this prototype**, not as the price of the C-lever.
+
+The plain symmetric CTM keeps this RDM positive on the same input at every sweep
+budget, pinned by ``test_the_plain_symmetric_ctm_keeps_the_rdm_positive``.
+Gate-B and Gate-C should treat block counts and timings from this prototype as
+meaningful and any *energy* as not.
 
 Usage
 -----
@@ -127,8 +140,11 @@ def _keep_columns_of_chi_new(P: SymmetricTensor, keep: set[int]) -> SymmetricTen
 
     ``P`` is a projector with indices ``(fused, chi_new)`` and blocks keyed
     ``(fq, fq)``. Removing the whole ``(q, q)`` block for ``q not in keep``
-    deletes those orthonormal columns; the result stays an isometry on the
-    retained sectors. Rebuilds ``chi_new`` without the dropped charges.
+    deletes those columns. Applied to both halves of the Fishman pair (see
+    ``sector_dropping_truncation``) this keeps ``P1^T P2 = I`` on the retained
+    bond -- these columns are biorthogonal, not orthonormal, so the result is a
+    narrower projector pair and not an isometry. Rebuilds ``chi_new`` without
+    the dropped charges.
     """
     if not isinstance(P, SymmetricTensor):
         return P
