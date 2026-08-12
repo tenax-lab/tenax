@@ -314,13 +314,20 @@ gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) + 0.5 * (
 config = iPEPSConfig(
     max_bond_dim=2,
     num_imaginary_steps=200,
-    dt=0.3,
+    dt=0.05,
     ctm=CTMConfig(chi=10, max_iter=40),
     unit_cell="2site",
 )
 energy, peps, (env_A, env_B) = ipeps(gate, None, config)
-print(f"Energy per site: {energy:.6f}")  # ~ -0.65
+print(f"Energy per site: {energy:.6f}")  # ~ -0.63
 ```
+
+The energy `ipeps()` reports comes from the legacy 2-site CTM, which does not
+converge on a genuinely entangled state — it sits ~0.02 above the truth. For an
+accurate number, measure the returned state with `ctm_tensor(recipe="2x2")`
+(D=2 gives −0.65933, χ-converged). Simple update itself was fixed in #667; if
+you have results from before that, note it converged to the product state and
+that *smaller* `dt` made it worse — see the changelog.
 
 See `examples/heisenberg_ipeps_su.py` for 1-site and 2-site unit cell examples.
 
@@ -393,7 +400,7 @@ config_2site = iPEPSConfig(
     gs_c4v=True,
     su_init=True,
     num_imaginary_steps=100,
-    dt=0.3,
+    dt=0.05,
 )
 (A_opt, B_opt), (env_A, env_B), E_gs = optimize_gs_ad(gate, None, config_2site)
 

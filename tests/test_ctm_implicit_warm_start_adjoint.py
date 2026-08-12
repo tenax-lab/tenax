@@ -45,7 +45,7 @@ def _make_su_tensor(D: int = 2, d: int = 2):
     return data  # raw jax.Array; wrapped per-call inside _loss
 
 
-def _make_loss_fn(*, gmres_maxiter: int = 200):
+def _make_loss_fn(*, gmres_maxiter: int = 200, gmres_tol: float = 1e-6):
     """Build a scalar loss function ``params -> ctm_energy_implicit``."""
     gate = heisenberg_gate()
 
@@ -58,7 +58,7 @@ def _make_loss_fn(*, gmres_maxiter: int = 200):
             chi=4,
             max_iter=40,
             conv_tol=1e-8,
-            gmres_tol=1e-6,
+            gmres_tol=gmres_tol,
             gmres_maxiter=gmres_maxiter,
             gmres_restart=30,
         )
@@ -72,9 +72,19 @@ def test_adjoint_warm_start_grad_unchanged():
     Warm-start must converge to the same fixed point as cold-start; if
     the seed-vs-converged mismatch leaked through, the second call's
     gradient would shift.
+
+    **Solved to gmres_tol=1e-10 rather than the 1e-6 default** (#667).  The
+    cold-vs-warm difference is governed by the adjoint solve tolerance --
+    measured max|g1-g2| of 3.26e-08 / 1.00e-09 / 5.40e-12 / 2.97e-14 at
+    gmres_tol 1e-6 / 1e-8 / 1e-10 / 1e-12 -- so asserting 1e-8 while asking the
+    solver for only 1e-6 was asserting past what the solver was told to deliver.
+    It passed until now only because the simple-update state had collapsed to a
+    near-product state, whose adjoint solve converges far past its request.  At
+    1e-10 the assertion has ~2000x of margin, which also keeps it off the
+    platform-tolerance rocks that #756 hit.
     """
     params = _make_su_tensor(D=2, d=2)
-    loss = _make_loss_fn()
+    loss = _make_loss_fn(gmres_tol=1e-10)
 
     g1 = jax.grad(loss)(params)
     g2 = jax.grad(loss)(params)

@@ -61,6 +61,13 @@ _FILE_MARKERS = {
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",
+    # #667: simple update converged to the product state, and survived because
+    # *no test asserted a simple-update energy* -- one test even documented the
+    # bug ("small dt causes the bond lambdas to converge to a product-like fixed
+    # point") as intended behaviour.  A guard against a silent-wrong-answer
+    # defect of that shape belongs in the gate that blocks a merge.  The D=2 run
+    # is shared across the cases via a module fixture; the D=4 case is @slow.
+    "test_su_667_product_state.py": "core",
     # Root-implicit AD wiring (#715): dispatch + guard surface only, no
     # CTM convergence, so it is milliseconds.  The production-run case it
     # also carries is explicitly @slow (#772).
