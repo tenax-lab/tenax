@@ -697,6 +697,41 @@ packed = ProductSymmetry.encode_charges(
 q1, q2 = ProductSymmetry.decode_charges(packed)
 ```
 
+### Charge arithmetic
+
+`BaseSymmetry` is the sanctioned boundary for every charge operation. Extension
+authors should call these rather than hand-rolling the arithmetic — the
+hand-rolled forms assume the group inverse is integer negation and the group
+operation is integer addition, which is true for U(1), accidentally true for
+`Z_n`, and false for the bit-packed charges of `ProductSymmetry`.
+
+```python
+from tenax import U1Symmetry
+import numpy as np
+
+sym = U1Symmetry()
+charges = np.array([-1, 0, 2], dtype=np.int32)
+
+# Weight a charge by its leg's flow: IN (+1) unchanged, OUT (-1) inverted.
+# Use this instead of `int(flow) * charge`.
+sym.flow_charge(-1, charges)            # [1, 0, -2]
+
+# Reduce to the canonical representative (`% n` for Z_n, identity for U(1)).
+sym.canonicalize_charges(charges)
+
+# Evaluate a conservation law. A block is valid exactly when the net charge
+# equals `identity()`. Use this instead of `sum(flow * q for ...)`.
+sym.net_charge([1, 1], flows=[1, -1])   # 0
+sym.is_conserved([1, 1], flows=[1, -1]) # True
+```
+
+**Charge width.** Charges are *stored* as `int32`. Intermediate arithmetic in
+the conservation law uses `charge_accumulator_dtype`, which is `int64` for U(1)
+and `FermionicU1` — whose charges are unbounded by definition — and `int32`
+elsewhere, since `Z_n` reduces mod `n` and `ProductSymmetry`'s charges are
+bounded by their packing. This puts the overflow ceiling at 2⁶³ rather than
+2³¹; it does not remove it.
+
 **Limitations:** `ProductSymmetry` combines exactly two factors by bit-packing two int16 charges into one int32. Nesting is not supported, so three-factor groups (e.g., U(1)×U(1)×Z₂) require a future `MultiProductSymmetry`. Each factor charge must fit in the int16 range [-32768, 32767].
 
 ## Gotchas

@@ -121,6 +121,11 @@ _FILE_MARKERS = {
     # scan showed conv_tol having no effect on the answer.
     "test_ctm_complex_site_tensors.py": "core",
     "test_rdm_validity_guard.py": "core",
+    # #799: the symmetry core disagreeing with itself about charges. ``core``
+    # because both defects are silent and fail *open* -- one admits a
+    # nonconserving block, the other drops a block's data on ``todense()``
+    # -- so nothing else in the suite would notice a regression. Runs in <1s.
+    "test_symmetry_charge_arithmetic_799.py": "core",
     "test_ctm_convergence_meta.py": "core",
     # Scope of the implicit-AD CTM guard (#802 rows for #349/#350/#343). The
     # dispatch half is mocked at the engine boundary (microseconds); the one
