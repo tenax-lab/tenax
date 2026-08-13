@@ -68,6 +68,7 @@ _FILE_MARKERS = {
     # point") as intended behaviour.  A guard against a silent-wrong-answer
     # defect of that shape belongs in the gate that blocks a merge.  The D=2 run
     # is shared across the cases via a module fixture; the D=4 case is @slow.
+    "test_su_865_symmetric_collapse.py": "algorithm",
     "test_su_667_product_state.py": "core",
     # Root-implicit AD wiring (#715): dispatch + guard surface only, no
     # CTM convergence, so it is milliseconds.  The production-run case it
