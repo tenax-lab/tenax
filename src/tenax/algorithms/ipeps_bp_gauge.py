@@ -357,6 +357,15 @@ def bp_gauge_checkerboard(
     # same state -- would under/overflow the very first message and the solve
     # would fail on a state it handles fine at unit scale.
     gam = {"A": _rescale(A), "B": _rescale(B)}
+    # And the same for lambda, for the same reason: ``_message`` multiplies
+    # three incoming weights into each tensor, so a scaled weight vector
+    # overflows just as a scaled Gamma does.  Free, and not merely harmless:
+    # ``_gauge_bond`` is already exactly scale-invariant in ``lam`` -- scaling
+    # it scales the SVD's ``s`` by the same factor and ``lam_new = s / max(s)``
+    # is unchanged -- so this cannot move the answer.  It also makes the first
+    # sweep's residual meaningful, which otherwise compares a max-1 output
+    # against whatever convention the caller's input used.
+    weights = BondWeights(*(w / jnp.max(w) for w in weights))
     residual = float("inf")
     # Any completed sweep is an exact gauge of the input, so the last healthy
     # iterate is a valid -- merely unconverged -- answer to fall back to.

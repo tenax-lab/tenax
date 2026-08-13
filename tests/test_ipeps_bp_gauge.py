@@ -300,27 +300,35 @@ def test_an_su_evolved_symmetric_state_does_not_walk_out_of_f64(phases):
 
 
 @pytest.mark.parametrize("kind", list(_PAIRS))
-def test_an_overall_scale_on_gamma_changes_nothing(kind):
+@pytest.mark.parametrize("target", ["gamma", "lambda"])
+def test_an_overall_scale_on_the_input_changes_nothing(kind, target):
     """An unobservable prefactor must not decide whether the solve works.
 
-    ``_message`` squares ``Gamma``, so at 1e-200 the first message underflowed
-    to zero and at 1e200 it overflowed; both returned ``iterations=0,
-    residual=inf`` on a state that solves fine at unit scale.  Rescaling by the
-    Frobenius norm does not fix it -- ``||Gamma||`` squares before it sums, so
-    it is itself 0 and ``inf`` at those scales, and the rescale silently does
-    nothing.  Hence max-abs.
+    ``_message`` squares ``Gamma`` *and* multiplies three incoming weights into
+    it, so an overall factor on either one under/overflowed the very first
+    message and returned ``iterations=0, residual=inf`` on a state that solves
+    in ~38 sweeps at unit scale.  Both are unobservable: a factor on ``Gamma``
+    or on ``lambda`` rescales the whole state, and the output weights are
+    max-normalised regardless.
+
+    Rescaling ``Gamma`` by the Frobenius norm does not fix its half --
+    ``||Gamma||`` squares before it sums, so it is itself 0 at 1e-200 and
+    ``inf`` at 1e200, and the rescale silently does nothing.  Hence max-abs.
 
     Compared after a *fixed* number of sweeps rather than at the fixed point,
     so the whole trajectory is checked and not just where it lands.
     """
     A, B = _PAIRS[kind]()
-    w0 = BondWeights.ones(D, D)
+    lam = jnp.array([1.0, 0.4, 0.1])
+    base = BondWeights(h_AB=lam, h_BA=lam, v_AB=lam, v_BA=lam)
     sweeps = 15
 
     def run(scale):
-        _, _, w, info = bp_gauge_checkerboard(
-            A * scale, B * scale, w0, max_iter=sweeps, tol=0.0
-        )
+        if target == "gamma":
+            args = (A * scale, B * scale, base)
+        else:
+            args = (A, B, BondWeights(*(w * scale for w in base)))
+        _, _, w, info = bp_gauge_checkerboard(*args, max_iter=sweeps, tol=0.0)
         return np.concatenate([np.asarray(x) for x in w]), info
 
     ref, ref_info = run(1.0)
@@ -329,9 +337,11 @@ def test_an_overall_scale_on_gamma_changes_nothing(kind):
 
     for scale in (1e-200, 1e200):
         got, info = run(scale)
-        assert info.iterations == sweeps, f"{kind} at {scale:.0e}: {info}"
+        assert info.iterations == sweeps, f"{kind}/{target} at {scale:.0e}: {info}"
         d = float(np.max(np.abs(got - ref)))
-        assert d < 1e-13, f"{kind}: scaling by {scale:.0e} moved the weights {d:.3e}"
+        assert d < 1e-13, (
+            f"{kind}: scaling {target} by {scale:.0e} moved the weights {d:.3e}"
+        )
 
 
 def test_the_health_predicate_rejects_every_way_an_iterate_dies():

@@ -57,7 +57,10 @@
   is itself `0.0` and `inf` at those scales and the rescale silently does
   nothing. Every normalisation in the module is now `max_abs`, and the input is
   rescaled before the first message: the weights agree to 6e-15 across 400
-  orders of magnitude of input scale.
+  orders of magnitude of input scale. The fourth was the same defect one level
+  out — `_message` multiplies three incoming *weights* into each tensor too, so
+  a scaled `lambda` overflowed exactly as a scaled `Gamma` did; the incoming
+  weights are now normalised as well.
 
 ### Fixed
 
