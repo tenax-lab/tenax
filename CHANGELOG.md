@@ -34,6 +34,21 @@
   whose bonds really are unweighted passes `BondWeights.ones(D, D)` explicitly
   rather than getting it by default.
 
+  Two defects were found and fixed before this shipped, both of which returned
+  a plausible-looking answer. The first was that default: it re-gauged
+  `Gamma_A I Gamma_B` while promising invariance for the state the caller
+  actually held. The second was an overflow — `X^-1` is a pseudo-inverse
+  *square root*, so a bond whose message eigenvalues are small inflates
+  `||Gamma||`, and rescaling once per sweep let four bonds compound. On an
+  SU-evolved U(1)-Sz D=3 state that reached `||Gamma|| ~ 1e112` by sweep 59 and
+  then `inf`, after which normalising returned **exactly zero** — with
+  `converged=True` and `residual=0.0`, because zero is an absorbing fixed point
+  and `norm(0 - 0) / max(0, 1e-300)` passes any tolerance. The residual fell
+  monotonically to 9.8e-12 the whole way down, so nothing in the convergence
+  report hinted at it. Sites are now rescaled after every *bond*, and a
+  per-sweep health check rolls back to the last completed sweep — still an
+  exact gauge — rather than returning the overflow artefact.
+
 ### Fixed
 
 - **A bond whose reduced density matrix is invalid is no longer summed into the

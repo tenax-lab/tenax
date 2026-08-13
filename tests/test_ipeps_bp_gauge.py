@@ -31,6 +31,7 @@ from tenax.algorithms.ipeps import (
 from tenax.algorithms.ipeps_bp_gauge import (
     BondWeights,
     _gauge_bond,
+    _is_representable,
     _message,
     bp_gauge_checkerboard,
 )
@@ -97,6 +98,53 @@ def _torus_2x2(A, B, weights):
     # B01  m  n  l  k  y
     # A11  o  p  k  l  z
     return np.einsum("nmjiw,poijx,mnlky,opklz->wxyz", a, b, b, a, optimize=True)
+
+
+def _simple_update(A, B, *, phases, rotate):
+    """Run ``phases`` phases of the shipped checkerboard sweep; return the pair
+    and the weights it stored.
+
+    ``rotate`` picks the sublattice-rotated gate, which is the physical choice
+    on a dense pair but does **not** conserve Sz, so it cannot be cast to a
+    U(1)-Sz ``SymmetricTensor`` at all.
+    """
+    gate = heisenberg_gate()
+    gate_t = _make_trotter_gate_tensor(
+        sublattice_rotate_gate(gate) if rotate else gate, 0.05, site_tensor=A
+    )
+    lam_h, lam_v = jnp.ones(D), jnp.ones(D)
+    for step in range(phases):
+        phase = step % 4
+        if phase == 0:
+            A, B, lam_h = _simple_update_2site_horizontal_tensor(
+                A, B, gate_t, lam_h, lam_v, D
+            )
+        elif phase == 1:
+            A, B, lam_v = _simple_update_2site_vertical_tensor(
+                A, B, gate_t, lam_h, lam_v, D
+            )
+        elif phase == 2:
+            B, A, lam_h = _simple_update_2site_horizontal_tensor(
+                B, A, gate_t, lam_h, lam_v, D
+            )
+        else:
+            B, A, lam_v = _simple_update_2site_vertical_tensor(
+                B, A, gate_t, lam_h, lam_v, D
+            )
+    return A, B, BondWeights(h_AB=lam_h, h_BA=lam_h, v_AB=lam_v, v_BA=lam_v)
+
+
+def _direction(t):
+    """``t`` rescaled to unit max-abs, for comparing states up to normalisation.
+
+    Max-abs rather than the 2-norm because the 2-norm squares first: an
+    SU-evolved state can have bond spectra spanning ~29 orders, the torus
+    multiplies eight of them, and the resulting ~1e-172 tensor squares to
+    1e-344 -- which underflows f64 to exactly zero and turns the comparison
+    into ``nan``.
+    """
+    m = float(np.max(np.abs(t)))
+    return t / m if m > 0.0 else t
 
 
 def _two_site(gam_L, gam_R, leg_L, leg_R, lam):
@@ -200,10 +248,133 @@ def test_the_solve_converges_and_hands_back_the_same_tensor_structure(kind):
             int(i.flow) for i in original.indices
         ], f"{kind}/{tag}: flows changed"
         assert type(gauged) is type(original)
-        assert np.isfinite(float(gauged.norm()))
+        # ``> 0``, not merely finite: an all-zero return is finite, and is what
+        # an overflowed iterate normalises to, so a finiteness-only assertion
+        # passes on the one output that is definitely wrong (#870).
+        assert float(gauged.norm()) > 0.0, f"{kind}/{tag}: gauged to zero"
     for name in weights._fields:
         w = np.asarray(getattr(weights, name))
         assert np.all(np.isfinite(w)) and np.all(w >= 0.0)
+        assert w.max() > 0.0, f"{kind}: {name} came back all zero"
+
+
+@pytest.mark.parametrize("phases", [1, 4, 8])
+def test_an_su_evolved_symmetric_state_does_not_walk_out_of_f64(phases):
+    """The iterate must stay representable, and a corpse must not be certified.
+
+    Measured before the per-bond rescale: at ``phases=1`` this returned
+    ``|A| = 0`` with all four weights zero and
+    ``BPGaugeInfo(iterations=84, residual=0.0, converged=True)``.  ``X^-1`` is
+    a pseudo-inverse square root, so a decaying spectrum inflates ``||Gamma||``
+    without bound; rescaling once per sweep let four bonds compound and the
+    iterate reached ``1e112`` by sweep 59, then ``inf``, then zero.
+
+    The residual test cannot catch this on its own -- it fell monotonically to
+    9.8e-12 on the way down, and once both weight sets are zero,
+    ``norm(0 - 0) / max(0, 1e-300)`` is 0, which passes any tolerance.  So the
+    assertions below are on the *state*, not on the report.
+
+    The invariance check holds at full tolerance despite the spectra spanning
+    ~29 orders here (measured: 4.2e-15, 1.2e-16, 4.4e-16 for 1, 4 and 8
+    phases), so it is not weakened for these states -- only the *comparison*
+    changes, to max-abs, since the torus underflows the 2-norm.
+    """
+    A, B, stored = _simple_update(*_symmetric_pair(), phases=phases, rotate=False)
+    before = _torus_2x2(A, B, stored)
+
+    A2, B2, weights, info = bp_gauge_checkerboard(A, B, stored, max_iter=400, tol=1e-13)
+
+    assert float(A2.norm()) > 0.0 and float(B2.norm()) > 0.0, (
+        f"{phases} phase(s): the solve returned a zero tensor and reported {info}"
+    )
+    for name in weights._fields:
+        assert float(jnp.max(getattr(weights, name))) > 0.0, f"{name} all zero"
+    assert info.converged, f"{phases} phase(s): {info}"
+
+    # And it is still a gauge -- the guard must not be buying health by
+    # quietly changing the state.
+    rel = float(
+        np.max(np.abs(_direction(_torus_2x2(A2, B2, weights)) - _direction(before)))
+    )
+    assert rel < GAUGE_TOL, f"{phases} phase(s): state moved by {rel:.3e}"
+
+
+def test_the_health_predicate_rejects_every_way_an_iterate_dies():
+    """Unit-test on ``_is_representable``, because nothing else reaches it.
+
+    After the per-bond rescale no state in this file overflows any more, so the
+    guard is unreachable from the solve -- which means without this test it is
+    unverified code that could be deleted with every test still green.  It is
+    kept rather than deleted because the rescale bounds the *compounding*, not
+    the per-bond factor: ``X^-1`` is still an unbounded pseudo-inverse.
+    """
+    A, _ = _dense_pair()
+    healthy = {"h_AB": jnp.ones(D)}
+
+    assert _is_representable({"A": A}, healthy)
+    assert not _is_representable({"A": A * 0.0}, healthy), "zero Gamma accepted"
+    assert not _is_representable({"A": A * jnp.inf}, healthy), "inf Gamma accepted"
+    assert not _is_representable({"A": A * jnp.nan}, healthy), "nan Gamma accepted"
+    assert not _is_representable({"A": A}, {"h_AB": jnp.zeros(D)}), "zero lambda"
+    assert not _is_representable({"A": A}, {"h_AB": jnp.array([1.0, jnp.nan, 0.1])}), (
+        "nan lambda accepted"
+    )
+
+
+def test_an_unrepresentable_sweep_rolls_back_and_is_not_certified(monkeypatch):
+    """The solve must honour the predicate: return the last good gauge, say so.
+
+    Driven by a mocked health signal rather than by finding an input that still
+    overflows -- what is being tested is the loop's *reaction*, and a real
+    overflow would only make the test hostage to whichever state still triggers
+    it.
+    """
+    import tenax.algorithms.ipeps_bp_gauge as bp
+
+    A, B = _dense_pair()
+    w0 = BondWeights.ones(D, D)
+    before = _torus_2x2(A, B, w0)
+
+    calls = {"n": 0}
+
+    def dies_on_the_third_sweep(gam, new_weights):
+        calls["n"] += 1
+        return calls["n"] < 3
+
+    monkeypatch.setattr(bp, "_is_representable", dies_on_the_third_sweep)
+    A2, B2, weights, info = bp.bp_gauge_checkerboard(A, B, w0, max_iter=50, tol=0.0)
+
+    assert not info.converged, "an unrepresentable iterate was certified"
+    assert info.residual == float("inf")
+    assert info.iterations == 2, "reported sweeps it did not complete"
+
+    # The rollback must hand back a usable state, not the corpse -- and the two
+    # completed sweeps are exact gauges, so it is still the same state.
+    assert float(A2.norm()) > 0.0 and float(B2.norm()) > 0.0
+    rel = float(
+        np.max(np.abs(_direction(_torus_2x2(A2, B2, weights)) - _direction(before)))
+    )
+    assert rel < GAUGE_TOL, f"rollback returned a different state ({rel:.3e})"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        pytest.param(jnp.zeros(D), id="all-zero"),
+        pytest.param(jnp.array([1.0, jnp.nan, 0.1]), id="non-finite"),
+    ],
+)
+def test_a_weight_vector_that_is_not_a_state_is_rejected(bad):
+    """Zero weights are the absorbing fixed point, so they cannot be an input.
+
+    ``residual`` divides by ``norm(lambda_old)``, guarded at ``1e-300``: given
+    all-zero input weights the ratio is ``0/1e-300 = 0``, so the very first
+    sweep would report a perfect solve.
+    """
+    A, B = _dense_pair()
+    w = BondWeights.ones(D, D)._replace(h_BA=bad)
+    with pytest.raises(ValueError, match="usable bond weight"):
+        bp_gauge_checkerboard(A, B, w)
 
 
 def test_bp_resolves_the_two_horizontal_bonds_separately():
@@ -235,30 +406,8 @@ def test_the_weights_simple_update_stores_are_not_bp_self_consistent():
     avoid (#869).  If this assertion ever fails, the module has lost its
     motivation and should be reconsidered, not "fixed".
     """
-    A, B = _dense_pair()
-    gate = sublattice_rotate_gate(heisenberg_gate())
-    gate_t = _make_trotter_gate_tensor(gate, 0.05, site_tensor=A)
-    lam_h, lam_v = jnp.ones(D), jnp.ones(D)
-    for step in range(400):
-        phase = step % 4
-        if phase == 0:
-            A, B, lam_h = _simple_update_2site_horizontal_tensor(
-                A, B, gate_t, lam_h, lam_v, D
-            )
-        elif phase == 1:
-            A, B, lam_v = _simple_update_2site_vertical_tensor(
-                A, B, gate_t, lam_h, lam_v, D
-            )
-        elif phase == 2:
-            B, A, lam_h = _simple_update_2site_horizontal_tensor(
-                B, A, gate_t, lam_h, lam_v, D
-            )
-        else:
-            B, A, lam_v = _simple_update_2site_vertical_tensor(
-                B, A, gate_t, lam_h, lam_v, D
-            )
-
-    stored = BondWeights(h_AB=lam_h, h_BA=lam_h, v_AB=lam_v, v_BA=lam_v)
+    A, B, stored = _simple_update(*_dense_pair(), phases=400, rotate=True)
+    lam_h = stored.h_AB
     _, _, weights, info = bp_gauge_checkerboard(A, B, stored, max_iter=400, tol=1e-13)
     assert info.converged, f"BP did not converge (residual {info.residual:.2e})"
 

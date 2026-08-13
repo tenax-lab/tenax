@@ -55,12 +55,28 @@ What one sweep does
    Dropping ``lambda_old`` from that SVD makes this not a gauge transformation
    at all --- it moved the energy by 1.2e-01 in testing.
 
+3. Rescale each site.  This is bookkeeping, not physics --- an overall scale on
+   ``Gamma`` is not observable and ``lambda`` is separately max-normalised ---
+   but it has to happen after every *bond*.  ``X^-1`` is a pseudo-inverse
+   square root, so a bond whose message has small eigenvalues multiplies
+   ``||Gamma||`` by a large factor, and the factor grows as the spectrum
+   decays.  Rescaling once per sweep lets four of them compound: on an
+   SU-evolved U(1)-Sz ``D=3`` state that reached ``||Gamma|| ~ 1e112`` by sweep
+   59 and then ``inf``, after which normalising returns exactly **zero** ---
+   and zero is an absorbing fixed point that the residual test certifies as
+   converged, since ``norm(0 - 0) / max(0, 1e-300)`` is 0.  The residual fell
+   monotonically to 9.8e-12 the whole way down, so nothing in the convergence
+   report hinted at it.  Hence :func:`_is_representable`, checked every sweep:
+   an iterate that has left f64 is not a solution, and must not be reported as
+   one.
+
 The four bonds touch a different leg of each tensor, so their gauge
 transformations commute and are applied together.
 """
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import jax
@@ -222,6 +238,24 @@ def _gauge_bond(
     )
 
 
+def _is_representable(
+    gam: dict[str, Tensor], new_weights: dict[str, jax.Array]
+) -> bool:
+    """Is the iterate still a state, rather than an overflow artefact?
+
+    Checked every sweep because the convergence test cannot see this: an
+    all-zero iterate is an absorbing fixed point that reports ``residual = 0``.
+    """
+    for t in gam.values():
+        n = float(t.norm())
+        if not math.isfinite(n) or n <= 0.0:
+            return False
+    for w in new_weights.values():
+        if not bool(jnp.all(jnp.isfinite(w))) or float(jnp.max(w)) <= 0.0:
+            return False
+    return True
+
+
 def _reorder(t: Tensor, labels: tuple[str, ...]) -> Tensor:
     """Restore ``labels`` as the axis order.
 
@@ -269,7 +303,14 @@ def bp_gauge_checkerboard(
                   falls below this.
 
     Returns:
-        ``(A, B, weights, info)``.
+        ``(A, B, weights, info)``.  If a sweep walks the iterate out of f64,
+        the last healthy sweep is returned instead --- still an exact gauge of
+        the input, just not converged --- with ``info.converged`` false and
+        ``info.residual`` infinite.  It is never the overflow artefact.
+
+    Raises:
+        ValueError: if any weight vector is non-finite or has no positive
+            entry.  That is not a state, and the residual divides by its norm.
 
     Example:
         >>> w = BondWeights(lam_h, lam_h, lam_v, lam_v)     # doctest: +SKIP
@@ -277,9 +318,23 @@ def bp_gauge_checkerboard(
         >>> info.converged                                  # doctest: +SKIP
         True
     """
+    for bond, w in zip(BondWeights._fields, weights, strict=True):
+        if not bool(jnp.all(jnp.isfinite(w))) or float(jnp.max(w)) <= 0.0:
+            raise ValueError(
+                f"weights.{bond} is not a usable bond weight (max "
+                f"{float(jnp.max(w)):.3g}).  Every weight vector must be finite "
+                f"with at least one positive entry: it is half the state being "
+                f"gauged, and the convergence test divides by its norm."
+            )
+
     order = {"A": A.labels(), "B": B.labels()}
     gam = {"A": A, "B": B}
     residual = float("inf")
+    # Any completed sweep is an exact gauge of the input, so the last healthy
+    # iterate is a valid -- merely unconverged -- answer to fall back to.
+    last_good = (dict(gam), weights)
+    done = 0
+
     for sweep in range(max_iter):
         msg = {
             (site, leg): _message(gam[site], site, leg, weights)
@@ -298,10 +353,29 @@ def bp_gauge_checkerboard(
                 msg[(site_R, leg_R)],
                 getattr(weights, bond),
             )
+            # Rescale after every *bond*, not once per sweep.  ``X_inv`` is a
+            # pseudo-inverse square root, so a bond whose message has small
+            # eigenvalues multiplies ``||Gamma||`` by a large factor; letting
+            # four of them compound before any rescale walks the iterate out of
+            # f64.  Measured on an SU-evolved U(1)-Sz D=3 state, per-sweep
+            # rescaling reached ||Gamma|| ~ 1e112 by sweep 59 and then inf,
+            # after which normalising returns exactly zero.  An overall scale on
+            # Gamma is not physical and lambda is separately max-normalised, so
+            # doing it more often cannot move the fixed point.
+            for site in (site_L, site_R):
+                n = gam[site].norm()
+                gam[site] = gam[site] * (1.0 / jnp.where(n > 0, n, 1.0))
 
-        for site in ("A", "B"):
-            n = gam[site].norm()
-            gam[site] = gam[site] * (1.0 / jnp.where(n > 0, n, 1.0))
+        if not _is_representable(gam, new_weights):
+            # Do not hand back the corpse, and do not call it converged.  The
+            # residual test cannot see this on its own: once both weight sets
+            # are zero, ``norm(0 - 0) / max(0, 1e-300)`` is 0, which passes any
+            # tolerance.  Zero is an absorbing fixed point, not a solution.
+            gam, weights = last_good
+            residual = float("inf")
+            break
+
+        done = sweep + 1
 
         residual = max(
             float(
@@ -311,6 +385,7 @@ def bp_gauge_checkerboard(
             for b in new_weights
         )
         weights = BondWeights(**new_weights)
+        last_good = (dict(gam), weights)
         if residual < tol:
             return (
                 _reorder(gam["A"], order["A"]),
@@ -319,9 +394,11 @@ def bp_gauge_checkerboard(
                 BPGaugeInfo(sweep + 1, residual, True),
             )
 
+    # ``done``, not ``max_iter``: a health rollback stops early, and reporting
+    # the cap would claim sweeps that never ran.
     return (
         _reorder(gam["A"], order["A"]),
         _reorder(gam["B"], order["B"]),
         weights,
-        BPGaugeInfo(max_iter, residual, False),
+        BPGaugeInfo(done, residual, False),
     )
