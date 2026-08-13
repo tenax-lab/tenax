@@ -131,6 +131,39 @@ def _rdm_negativity(M: np.ndarray) -> tuple[float, float]:
     return max(0.0, -min_eig) / radius, min_eig
 
 
+#: How many ``eps`` of the input dtype the negativity floor sits at.
+#:
+#: ``eigvalsh`` resolves a true zero eigenvalue to ~``eps`` of the spectral
+#: radius, and 32 covers the measured spread with room to spare: on PSD-by-
+#: construction ``Q diag(s) Q^T`` matrices of rank ``n/2``, the worst float32
+#: negativity over 20 trials was 2.7e-08 (n=4), 2.6e-08 (n=16) and 3.1e-08
+#: (n=64) -- against ``32 * eps`` = 3.8e-06.  It costs nothing on the default
+#: path, where ``32 * eps`` is 7.1e-15 and :data:`RDM_PSD_TOL` still governs.
+_PSD_TOL_EPS_FACTOR = 32.0
+
+
+def _psd_tol_for(M: np.ndarray, psd_tol: float) -> float:
+    """:data:`RDM_PSD_TOL`, floored at the input dtype's own resolution.
+
+    :data:`RDM_PSD_TOL` is dimensionless -- the negativity is divided by the
+    spectral radius -- but it is not dtype-free, and its 1e-8 was chosen for
+    the ~1e-16 roundoff of float64.  ``float32`` eps is 1.19e-7, an order of
+    magnitude *above* that tolerance, so a legitimately rank-deficient float32
+    RDM reports a negativity of ~3e-8 purely from ``eigvalsh`` roundoff and
+    trips a check that exists to catch a state 0.8 of the spectral radius
+    below zero (#873).
+
+    Floored rather than promoted: promoting would double the memory of the
+    densified RDM to buy precision the caller did not ask for, and the fix is
+    to stop asserting f64 roundoff on an f32 input, not to make the input f64.
+
+    Latent on the default path -- ``import tenax`` sets ``jax_enable_x64`` --
+    so this protects a caller who deliberately works in single precision.
+    """
+    eps = float(np.finfo(M.dtype).eps) if np.issubdtype(M.dtype, np.inexact) else 0.0
+    return max(psd_tol, _PSD_TOL_EPS_FACTOR * eps)
+
+
 def rdm_trace_defect(rdm) -> float:
     """``|tr(rdm) - 1|`` for a trace-normalised reduced density matrix.
 
@@ -270,7 +303,7 @@ def check_rdm(
         )
     else:
         negativity, min_eig = _rdm_negativity(M)
-        if negativity <= psd_tol:
+        if negativity <= _psd_tol_for(M, psd_tol):
             return defect
         defect = INVALID_RDM_DEFECT
         msg = (
