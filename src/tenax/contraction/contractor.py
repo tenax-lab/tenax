@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import functools
 import itertools
+import os
 import string
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import jax
@@ -612,6 +613,236 @@ def _contract_symmetric_stacked(
     )
 
 
+def _strict_contract() -> bool:
+    """Whether ``TENAX_STRICT_CONTRACT`` arms the #834 cross-representation checks.
+
+    Off by default, and the reason is measured rather than cautious.  Both
+    checks below are *structural* -- they read leg charges, flows and block
+    keys -- while whether the two representations actually differ depends on the
+    blocks' **values**, which are traced.  Scoring every ``_contract_symmetric``
+    call of a D=2, chi=8 charged U(1)-Sz sweep against the densified contraction
+    of the same operands:
+
+    ==========================================  =====  ==============
+    call site                                   calls  max rel. gap
+    ==========================================  =====  ==============
+    *refused* by the leg-pairing check
+      ``_apply_proj_unfused``                     40   1.7e-16
+      ``_build_enlarged_corner`` (4 frames)       82   0.0
+      ``_ctm_tensor_absorb_*_2plaq`` (4)          16   0.0
+    *allowed* by it
+      ``_apply_proj_unfused``                     56   **8.3e-01**
+    ==========================================  =====  ==============
+
+    Every refusal is a false alarm, and the one genuinely wrong site is allowed.
+    A default-on structural guard would therefore break the default CTM path
+    while still missing the defect on it.  Read per call rather than cached at
+    import, so an audit can toggle it around a single call.
+
+    While armed, this **also pins execution to the reference per-block path**:
+    the cuTENSOR, stacked and batched backends each return from
+    ``_contract_symmetric`` before the discard check and drop out-of-set output
+    keys with their own bare ``continue``, so leaving them enabled would report
+    clean on precisely the products never inspected.  A partial audit is worse
+    than none -- the contract of a diagnostic is that silence means agreement --
+    and since this is a diagnostic, the lost throughput costs nothing that
+    matters.  Do not "restore" the accelerated paths under the flag without
+    implementing the discard check in each of them; the test
+    ``test_strict_mode_is_not_bypassed_by_an_accelerated_backend`` pins this.
+    """
+    return os.environ.get("TENAX_STRICT_CONTRACT", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _leg_charges_on(tensor: SymmetricTensor, axis: int) -> set[int]:
+    """Charge values that actually carry a block on ``axis`` of ``tensor``.
+
+    Reads ``_block_keys`` rather than ``.blocks`` so this does not materialise
+    the block-array dict, and works unchanged under tracing: block keys are
+    static Python metadata, never traced values.
+    """
+    keys = getattr(tensor, "_block_keys", None)
+    if keys is None:
+        keys = tuple(tensor.blocks)
+    return {int(key[axis]) for key in keys}
+
+
+def _leg_pairing_fault(
+    idx_a: TensorIndex,
+    idx_b: TensorIndex,
+    live_a: Callable[[], set[int]],
+    live_b: Callable[[], set[int]],
+) -> str | None:
+    """Say why block-sparse and dense would *mis-pair* on this leg pair, or None.
+
+    Block-sparse contraction pairs **charge value q with charge value q**; dense
+    einsum pairs **position p with position p**.  Wherever either path pairs
+    anything at position ``p``, the two legs must carry the same charge there,
+    or the two are contracting different slots and the results differ.  That is
+    the mechanism #834 documents and the one this refuses.
+
+    **This is not the only way the two paths can differ, and the other way is
+    deliberately not checked here.**  Products whose output key falls outside
+    the output legs' valid set are discarded by the per-block loop; dense keeps
+    them.  Whether that changes the answer depends on whether those products are
+    *numerically* zero, which is a traced value and not visible to any
+    structural check.  Both outcomes occur in one CTM sweep at D=2, chi=8 on a
+    charged U(1)-Sz state:
+
+    ======================================  ==========  ===============
+    site                                    discarded   any non-zero?
+    ======================================  ==========  ===============
+    ``_build_enlarged_corner`` (6 frames)    ~2000       no -- exact
+    ``_apply_proj_unfused``                  560         **192, max 8.15**
+    ======================================  ==========  ===============
+
+    So refusing on the structural condition would hard-error the default CTM
+    path on contractions measured exact (#852), while permitting it hides real
+    weight loss.  ``TENAX_STRICT_CONTRACT=1`` turns the discard itself into an
+    error for anyone who wants to audit a path; it is off by default because it
+    fires on both rows above.
+
+    ``live_a`` / ``live_b`` are read lazily: on the sanctioned convention this
+    returns before either is needed, so the common case costs one array
+    comparison and never scans the block keys.  That matters because this runs
+    on every contraction, and the eager symmetric path is host-bound (#618).
+
+    Reported rather than raised so the caller can name the legs.
+    """
+    charges_a = np.asarray(idx_a.charges)
+    charges_b = np.asarray(idx_b.charges)
+
+    # Fast path: opposite flows with element-wise equal charges is the
+    # convention flip_flow()/bar() produce and the one the block matching
+    # implements.  Value-pairing and position-pairing then coincide by
+    # construction, whatever blocks the operands carry.
+    if (
+        idx_a.flow != idx_b.flow
+        and charges_a.shape == charges_b.shape
+        and np.array_equal(charges_a, charges_b)
+    ):
+        return None
+
+    if charges_a.shape != charges_b.shape:
+        return (
+            f"their dimensions differ ({charges_a.size} vs {charges_b.size}), so "
+            f"there is no pairing at all"
+        )
+
+    populated_a = live_a()
+    populated_b = live_b()
+    shared = populated_a & populated_b
+
+    # The value-pairing and the position-pairing must select the same slots.
+    # A position matters when either path pairs something there: the
+    # block-sparse path pairs a shared charge, or the dense path finds both
+    # operands populated.
+    shared_arr = np.array(sorted(shared), dtype=charges_a.dtype)
+    live_a_arr = np.array(sorted(populated_a), dtype=charges_a.dtype)
+    live_b_arr = np.array(sorted(populated_b), dtype=charges_b.dtype)
+    paired = (
+        np.isin(charges_a, shared_arr)
+        | np.isin(charges_b, shared_arr)
+        | (np.isin(charges_a, live_a_arr) & np.isin(charges_b, live_b_arr))
+    )
+    offending = np.flatnonzero(paired & (charges_a != charges_b))
+    if offending.size:
+        p = int(offending[0])
+        return (
+            f"their charges differ where it matters: slot {p} carries charge "
+            f"{int(charges_a[p])} on one leg and {int(charges_b[p])} on the "
+            f"other ({offending.size} such slot(s)). Block pairing is by charge "
+            f"value and dense pairing is positional, so the two pair different "
+            f"slots"
+        )
+
+    return None
+
+
+def _validate_contracted_legs(
+    tensors: Sequence[SymmetricTensor], subscripts: str
+) -> None:
+    """Refuse a contraction whose legs the two representations pair differently.
+
+    **Armed only by ``TENAX_STRICT_CONTRACT``** -- see :func:`_strict_contract`
+    for the measurement that made default-on untenable.
+
+    Tenax treats :class:`DenseTensor` and :class:`SymmetricTensor` as
+    interchangeable representations of the same object.  On legs whose charge
+    arrays do not line up that breaks: measured 22 of 64 flow/charge
+    configurations returned a *different* tensor with no error and no warning,
+    by 4.2e-01 to 1.5e+00 relative.  ``|sym|/|den|`` ran from 0.458 to 1.514 --
+    a result larger than the true one, so blocks were being mis-paired, not
+    merely dropped.
+
+    **Refusing is the only available answer, not a conservative choice.**  The
+    dense result of such a contraction is generally not a symmetric tensor at
+    all.  Worked example (U(1), ``A.k`` OUT ``[-1,0,1]`` against ``B.k`` IN
+    ``[1,0,-1]``): dense pairs position 0 of each, charge -1 against charge +1,
+    and puts weight on output block ``(i=1, j=-1)``, whose charge under ``i``
+    OUT / ``j`` IN is ``-2``.  No relabelling can make a ``SymmetricTensor``
+    over those indices carry it.
+
+    The check consults the operands' **blocks**, not just their leg metadata.
+    The purely structural condition -- opposite flows and element-wise equal
+    charges, what ``bar()``/``flip_flow()`` produce -- refuses 88 of 256 measured
+    configurations that are exact; restricting it to populated sectors cuts that
+    to 0 while still refusing every one of the 88 that are wrong.
+
+    It is deliberately not :meth:`TensorIndex.is_dual_of`, this tree's other
+    duality convention (opposite flow + *negated* charges): negation preserves
+    the charge set but permutes the position->charge map, and it admits 28 of
+    those 256 configurations that produce wrong answers.
+
+    Raises:
+        ValueError: If any contracted leg pair would make the block-sparse and
+            dense results differ, and strict mode is on.
+    """
+    if not _strict_contract():
+        return
+
+    groups = subscripts.split("->")[0].split(",")
+    if len(groups) != len(tensors):
+        return  # malformed subscripts are the caller's problem, not ours
+
+    occurrences: dict[str, list[tuple[int, int]]] = {}
+    for t_i, group in enumerate(groups):
+        for axis, char in enumerate(group):
+            occurrences.setdefault(char, []).append((t_i, axis))
+
+    for char, places in occurrences.items():
+        if len(places) != 2:
+            continue  # a free leg, or an n-way index this does not model
+        (t1, a1), (t2, a2) = places
+        if t1 == t2:
+            continue  # a trace within one tensor: no pairing between operands
+
+        idx_a = tensors[t1].indices[a1]
+        idx_b = tensors[t2].indices[a2]
+        fault = _leg_pairing_fault(
+            idx_a,
+            idx_b,
+            lambda t=t1, ax=a1: _leg_charges_on(tensors[t], ax),
+            lambda t=t2, ax=a2: _leg_charges_on(tensors[t], ax),
+        )
+        if fault is None:
+            continue
+
+        raise ValueError(
+            f"Cannot contract leg {idx_a.label!r} ({idx_a.flow.name}) with leg "
+            f"{idx_b.label!r} ({idx_b.flow.name}) as subscript {char!r}: {fault}. "
+            f"The block-sparse and dense results would differ, silently (#834). "
+            f"Build the second leg with flip_flow() / bar() -- opposite flow, "
+            f"identical charges -- which is the convention the block matching "
+            f"implements. Note this is stricter than TensorIndex.is_dual_of(), "
+            f"which admits negated charges and is unsound here."
+        )
+
+
 def _contract_symmetric(
     tensors: Sequence[SymmetricTensor],
     subscripts: str,
@@ -645,12 +876,23 @@ def _contract_symmetric(
     Returns:
         Contracted SymmetricTensor.
     """
-    # --- Optional cuTENSOR block-sparse GPU path ---
-    import os
+    _validate_contracted_legs(tensors, subscripts)
 
+    # An armed audit has to inspect every block product, so it pins execution to
+    # the reference per-block path below.  Each accelerated backend returns
+    # before the discard check and drops out-of-set output keys with its own
+    # bare ``continue``, so leaving them enabled would report clean on exactly
+    # the products never inspected -- worse than not offering the flag, since
+    # the contract of a diagnostic is that silence means agreement.  The flag is
+    # a diagnostic, so giving up the accelerated path while it is on costs
+    # nothing that matters.
+    strict = _strict_contract()
+
+    # --- Optional cuTENSOR block-sparse GPU path ---
     sym = tensors[0].indices[0].symmetry if tensors and tensors[0].indices else None
     if (
-        len(tensors) == 2
+        not strict
+        and len(tensors) == 2
         and os.environ.get("TENAX_USE_CUTENSOR_BLOCKSPARSE", "0") == "1"
         and not any(isinstance(t._data, jax.core.Tracer) for t in tensors)
         and (sym is None or not sym.is_fermionic)
@@ -672,7 +914,7 @@ def _contract_symmetric(
     # selected and the per-block path below runs byte-identically to today.
     from tenax.contraction.blocksparse_backend import _backend_opt_in, select_backend
 
-    if _backend_opt_in():
+    if not strict and _backend_opt_in():
         from tenax.contraction.blocksparse_plan import build_block_contract_plan
 
         plan = build_block_contract_plan(tensors, subscripts, output_indices)
@@ -798,7 +1040,7 @@ def _contract_symmetric(
         "on",
     )
 
-    if _batch_blocksparse:
+    if _batch_blocksparse and not strict:
         output_blocks = _contract_symmetric_batched(
             sig_iter,
             tensor_partial_indices,
@@ -861,6 +1103,22 @@ def _contract_symmetric(
             # Determine output block key
             output_key = tuple(char_to_charge.get(c, 0) for c in output_part)
             if output_key not in valid_output_set:
+                # This product exists in the densified contraction and not here
+                # (#834).  Whether that changes the answer depends on the
+                # block's *values*, which are traced, so the discard cannot be
+                # judged structurally -- see ``_leg_pairing_fault``.  Opt in to
+                # make it an error while auditing a path.
+                if strict:
+                    raise ValueError(
+                        f"Discarding the block product {tuple(keys)} -> "
+                        f"{output_key} for subscripts {subscripts!r}: it is "
+                        f"outside the output legs' valid set, so the "
+                        f"block-sparse result omits weight the densified "
+                        f"contraction keeps (#834). Set "
+                        f"TENAX_STRICT_CONTRACT=0 to allow it; note that a "
+                        f"discarded product is harmless when its value happens "
+                        f"to be zero, which is why this is opt-in."
+                    )
                 continue
 
             # Contract using cached expression or opt_einsum
@@ -904,6 +1162,15 @@ def contract(
 
     Legs with the same label across different tensors are automatically
     contracted (summed over). Legs with unique labels become output legs.
+
+    For :class:`SymmetricTensor` operands, two legs may be contracted when they
+    have **opposite flows and identical charges** -- what :meth:`TensorIndex.
+    flip_flow` and :meth:`Tensor.bar` produce.  This is *not*
+    :meth:`TensorIndex.is_dual_of` / :meth:`Tensor.dagger`, which negate the
+    charges: block pairing is by charge value while dense pairing is
+    positional, so mixing the conventions makes this return a
+    representation-dependent answer, silently (#834).  Set
+    ``TENAX_STRICT_CONTRACT=1`` to raise instead of returning one.
 
     Args:
         *tensors:       Two or more Tensor objects to contract.

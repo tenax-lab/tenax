@@ -293,12 +293,21 @@ from tenax.contraction.contractor import contract
 
 
 def _make_matrix_pair(u1, rng, charges_i, charges_j, charges_k):
-    """Create two SymmetricTensors A(i,j) and B(j,k) that can be multiplied."""
+    """Create two SymmetricTensors A(i,j) and B(j,k) that can be multiplied.
+
+    The shared leg uses ``flip_flow`` -- opposite flow, *identical* charges.
+    It used to use ``u1.dual(charges_j)`` against ``charges_j``, i.e. the
+    ``is_dual_of`` convention, which ``TENAX_STRICT_CONTRACT=1`` refuses (#834):
+    block pairing is by charge value and dense pairing is positional, so
+    negating the charges makes the two representations compute different sums.
+
+    That this file did not catch the mismatch is structural, not luck -- it
+    cross-validates ``contract_padded`` against ``contract``, both of which are
+    block-sparse, so both mis-paired identically.
+    """
     idx_i = TensorIndex.from_charges(u1, charges_i, FlowDirection.IN, label="i")
-    idx_j_out = TensorIndex.from_charges(
-        u1, u1.dual(charges_j), FlowDirection.OUT, label="j"
-    )
     idx_j_in = TensorIndex.from_charges(u1, charges_j, FlowDirection.IN, label="j")
+    idx_j_out = idx_j_in.flip_flow()
     idx_k = TensorIndex.from_charges(
         u1, u1.dual(charges_k), FlowDirection.OUT, label="k"
     )

@@ -335,6 +335,26 @@ class TensorIndex:
         Strict check: requires opposite flows AND charge sectors that are
         dual of each other with matching multiplicities.
 
+        .. warning::
+
+            **This is not the condition for contracting two legs** (#834), and
+            it is unsound if used as one.  Two legs are contractible when they
+            have opposite flows and *identical* charges -- what
+            :meth:`flip_flow` and ``Tensor.bar`` produce -- because the
+            block-sparse contractor pairs blocks by charge **value** while dense
+            einsum pairs by **position**.  Duality negates the charges, which
+            preserves the charge *set* but permutes the position->charge map, so
+            the two paths pair different slots: measured over 256
+            configurations, ``is_dual_of`` admits 28 that return a different
+            answer from the densified contraction.  ``TENAX_STRICT_CONTRACT=1``
+            makes ``contract()`` refuse those (see
+            ``_validate_contracted_legs``); this predicate would bless them.
+
+            Two duality conventions coexist in this tree.  :meth:`dual` /
+            ``Tensor.dagger`` implement the mathematical one (opposite flow,
+            negated charges); :meth:`flip_flow` / ``Tensor.bar`` implement the
+            equality-based one the contraction engine is built on.
+
         Args:
             other: Another TensorIndex to compare against.
 

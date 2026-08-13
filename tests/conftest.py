@@ -140,6 +140,15 @@ _FILE_MARKERS = {
     # regression, and the production default phase gauge is one of the four
     # sites. The whole file runs in ~6s.
     "test_phase_fix_nan_vjp_789.py": "core",
+    # #834: block-sparse contract() silently disagreeing with the densified
+    # contraction on legs whose charges do not line up. ``core`` because the
+    # defect is representation-dependent arithmetic in the contraction engine
+    # -- every algorithm above it inherits the wrong answer, and nothing warns.
+    # It also pins the two facts that shaped the design: that the default CTM
+    # path must keep contracting, and that one site on it is still 8.3e-01
+    # wrong. ~90s, dominated by densifying both operands across the grid so that
+    # dense, not the checks' own predicate, is the reference.
+    "test_contract_leg_pairing_834.py": "core",
     "test_ctm_convergence_meta.py": "core",
     # Scope of the implicit-AD CTM guard (#802 rows for #349/#350/#343). The
     # dispatch half is mocked at the engine boundary (microseconds); the one

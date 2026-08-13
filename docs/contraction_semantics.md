@@ -61,6 +61,61 @@ before JAX executes any computation.
 
 ---
 
+## Which symmetric legs may be contracted (#834)
+
+Sharing a label makes two legs *eligible* for contraction. For `SymmetricTensor`
+operands there is a second requirement, and it is not enforced by default:
+
+> Two legs may be contracted when they have **opposite flows and identical
+> charges**.
+
+That is what `TensorIndex.flip_flow()` and `Tensor.bar()` produce. It is **not**
+what `TensorIndex.dual()`, `is_dual_of()` or `Tensor.dagger()` produce — those
+negate the charges. Both conventions exist in the tree and they are not
+interchangeable here:
+
+| operation | flow | charges | contractible |
+|---|---|---|---|
+| `flip_flow()` / `bar()` | opposite | identical | ✅ |
+| `dual()` / `dagger()` | opposite | negated | ❌ |
+
+The reason is that the two representations pair blocks differently. Block-sparse
+contraction pairs **charge value `q` with charge value `q`**; the densified
+contraction pairs **position `p` with position `p`**. Negating charges preserves
+the charge *set* but permutes the position→charge map, so the two paths then
+contract different slots and return different tensors. Measured over 256
+configurations, `is_dual_of` admits 28 that disagree with dense.
+
+At all-zero charges every combination is exact, because negation is the identity
+there — which is why this can hide indefinitely in a test suite that only
+exercises trivial charges.
+
+### Checking a path
+
+```bash
+TENAX_STRICT_CONTRACT=1 python my_script.py
+```
+
+`contract()` then raises `ValueError` naming both legs instead of returning a
+representation-dependent answer. It covers two mechanisms: legs the two paths
+pair differently, and block products discarded for falling outside the output
+legs' valid set.
+
+The flag also pins execution to the reference per-block contraction while it is
+on, overriding `TENAX_BATCH_BLOCKSPARSE`, `TENAX_STACK_BLOCKSPARSE` and
+`TENAX_USE_CUTENSOR_BLOCKSPARSE`. Those backends return before the discard check
+and drop out-of-set output keys themselves, so an audit that left them enabled
+would pass on the products it never looked at. Audits are slower than production
+runs for this reason, and that is the intended trade.
+
+It is **opt-in**, because both checks are structural while the disagreement
+depends on the blocks' *values*. The CTM initial environment contracts non-dual
+bonds and discards thousands of products per sweep, and is exact anyway because
+those products are all zero — so with the flag on, correct code is refused. Use
+it to audit a path, not in production.
+
+---
+
 ## `TensorNetwork.contract(nodes, output_labels, optimize, cache)`
 
 When tensors are stored in a `TensorNetwork`, contraction is done via the
