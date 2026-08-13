@@ -242,6 +242,13 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "sublattice_rotate_gate": ("tenax.algorithms.ipeps", "sublattice_rotate_gate"),
     "symmetrize_c4v": ("tenax.algorithms.ipeps", "symmetrize_c4v"),
     "xxz_gate": ("tenax.algorithms.ipeps", "xxz_gate"),
+    # ipeps_bp_gauge
+    "BPGaugeInfo": ("tenax.algorithms.ipeps_bp_gauge", "BPGaugeInfo"),
+    "BondWeights": ("tenax.algorithms.ipeps_bp_gauge", "BondWeights"),
+    "bp_gauge_checkerboard": (
+        "tenax.algorithms.ipeps_bp_gauge",
+        "bp_gauge_checkerboard",
+    ),
     # ipeps_config
     "CTMConfig": ("tenax.algorithms.ipeps_config", "CTMConfig"),
     "CTMEnvironment": ("tenax.algorithms.ipeps_config", "CTMEnvironment"),
@@ -460,6 +467,9 @@ __all__ = [
     "heisenberg_gate_u1sz",
     "heisenberg_u1sz_init_pair",
     "ipeps",
+    "bp_gauge_checkerboard",
+    "BondWeights",
+    "BPGaugeInfo",
     "sublattice_rotate_gate",
     "symmetrize_c4v",
     "build_c4v_basis",
