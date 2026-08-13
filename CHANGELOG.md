@@ -64,6 +64,35 @@
 
 ### Fixed
 
+- **Simple update no longer throws away the largest singular value on the
+  symmetric path** (#865). The U(1)-Sz state reached *exactly* zero at step 22
+  — every bond weight zero, `|A| = 0`, the RDM's trace 0 and its normalisation
+  `NaN`.
+
+  The cause is `base_charges`, which pinned the new bond's charge layout to the
+  old one. That fixes the per-sector *keep counts*, so the truncation can no
+  longer take the globally largest singular values. Measured at D=3, step 0, it
+  kept `[4.611, 1.428, 0.159]` when the true top-3 were `[6.378, 4.611, 4.183]`
+  — discarding the largest singular value of `theta` outright, retaining 25.6%
+  of the weight where the optimal choice keeps 87.0%. Repeated, `||theta||`
+  falls from 9.6 to 1.9e-15 by step 16.
+
+  The additive epsilon in `sigma / (max(sigma) + EPS)` is the amplifier, not
+  the cause: it is a no-op while `max(sigma) >> EPS` and inverts the moment it
+  is not, returning a spectrum whose maximum is 0.643 rather than 1 — the same
+  defect class as #748. Both are fixed. The layout constraint now applies only
+  to the fermionic path that needs it (#558/#559/#563), where `A.l` and `A.r`
+  are the same physical bond; the normalisation is relative.
+
+  Dense was never affected, because `base_charges` is a no-op on trivial
+  charges. Run from the *same* state rather than from a different fixture,
+  dense survived and symmetric died — which is what localised this.
+
+  The symmetric path now converges to the dense reference spectrum
+  `[1, 0.165865, 0.015641]` at D=3. `A.l` and `A.r` are different bonds with
+  different charge layouts sharing one `lam_h`, so a fully correct symmetric
+  state additionally needs #851's four-lambda bookkeeping; with both, all four
+  bonds agree to six digits at D=2, 3 and 4.
 - **`check_rdm`'s PSD tolerance no longer fires on float32's own roundoff**
   (#873). `RDM_PSD_TOL = 1e-8` is compared against a *dimensionless*
   negativity — `max(0, -min_eig) / max|eig|` — so it is scale-free, as

@@ -34,6 +34,49 @@ def _inv_lambda(lam: jax.Array) -> jax.Array:
     return jnp.where(lam > _LAMBDA_PINV_CUTOFF, 1.0 / jnp.where(lam > 0, lam, 1.0), 0.0)
 
 
+def _normalise_lambda(sigma: jax.Array) -> jax.Array:
+    """Scale a Schmidt spectrum to ``max = 1`` exactly.
+
+    ``sigma / (max(sigma) + EPS)`` was a no-op while ``max(sigma) >> EPS`` and
+    inverted the moment it was not: at ``max(sigma) ~ 1e-15`` it returned a
+    spectrum whose maximum was **0.643** rather than 1, the next sweep absorbed
+    that shrunken lambda into ``theta``, ``sigma`` shrank again, and the state
+    reached exactly zero two steps later.  An additive absolute epsilon in a
+    denominator is the same defect as #748; the guard has to be relative.
+
+    ``sigma`` is non-negative and descending, so ``max`` is ``sigma[0]``; an
+    all-zero spectrum returns all zeros rather than dividing by nothing.
+    """
+    smax = jnp.max(sigma)
+    return sigma / jnp.where(smax > 0, smax, 1.0)
+
+
+def _truncation_base_charges(A: Tensor, leg: str) -> np.ndarray | None:
+    """The canonical bond charge layout to impose on the SVD, or ``None``.
+
+    ``base_charges`` pins the new bond's per-sector *keep counts* to the old
+    bond's layout.  That is a constraint on the truncation, not a relabelling:
+    it stops the SVD from keeping the globally largest singular values.
+
+    The fermionic single-site path needs it, because there ``A.l`` and ``A.r``
+    are the same physical bond and the next step crashes if the layout drifts
+    (#558/#559/#563).  On the bosonic 2-site checkerboard they are *different*
+    bonds, nothing downstream requires a fixed layout, and imposing it is
+    actively wrong: measured on U(1)-Sz D=3 at step 0 it kept
+    ``[4.611, 1.428, 0.159]`` when the true top-3 were
+    ``[6.378, 4.611, 4.183]`` -- discarding the largest singular value of
+    ``theta`` and retaining 25.6% of the weight where the optimal choice keeps
+    87.0%.  Repeated, that drives ``lambda`` to zero and the state with it
+    (#865).
+
+    Returning ``None`` restores the global truncation, which is what minimises
+    the 2-norm truncation error and what the dense path has always done.
+    """
+    if not A.indices[A.labels().index(leg)].symmetry.is_fermionic:
+        return None
+    return np.asarray(A.indices[A.labels().index(leg)].charges)
+
+
 def _to_physical_tensor(gamma: Tensor, lam_h: jax.Array, lam_v: jax.Array) -> Tensor:
     """Convert a Vidal ``Gamma`` site tensor to the physical iPEPS tensor.
 
@@ -125,12 +168,15 @@ def _simple_update_2site_horizontal_tensor(
     theta = theta.relabel("phys_B", "sj")
     theta = contract(theta, gate)
 
-    # 5. Truncated SVD — preserve the canonical layout of the old horizontal
-    #    bond (A.r) in the new bond. For fermionic SymmetricTensor inputs this
-    #    keeps the per-parity-sector keep COUNTS canonical at D>2 (#558/#559
-    #    in the single-site path; same root cause here per #563). For
-    #    DenseTensor (trivial-charge) inputs base_charges is a no-op.
-    base_charges = np.asarray(A.indices[A.labels().index("r")].charges)
+    # 5. Truncated SVD.  ``base_charges`` pins the new bond's charge layout to
+    #    the old one, which is a *constraint*, not a free choice: it fixes the
+    #    per-sector keep counts, so the truncation can no longer take the
+    #    globally largest singular values.  Only the fermionic single-site path
+    #    needs it (#558/#559/#563), where ``A.l`` and ``A.r`` are the same
+    #    physical bond and the next step crashes if the layout drifts.  Here
+    #    they are different bonds, and imposing it discarded the *largest*
+    #    singular value of theta -- see :func:`_truncation_base_charges`.
+    base_charges = _truncation_base_charges(A, "r")
     U, sigma, Vh, s_full = truncated_svd(
         theta,
         left_labels=["u", "d", "l", "si_out"],
@@ -140,8 +186,8 @@ def _simple_update_2site_horizontal_tensor(
         base_charges=base_charges,
     )
 
-    # 6. New lambda (normalized)
-    lam_h_new = sigma / (jnp.max(sigma) + EPS)
+    # 6. New lambda, normalised to max 1.
+    lam_h_new = _normalise_lambda(sigma)
 
     # 7. Reconstruct A_new from U: labels are (u, d, l, si_out, bond_new)
     #    Transpose so bond_new is in the r position: (u, d, l, bond_new, si_out)
@@ -235,10 +281,9 @@ def _simple_update_2site_vertical_tensor(
     theta = theta.relabel("phys_B", "sj")
     theta = contract(theta, gate)
 
-    # 5. Truncated SVD — preserve the canonical layout of the old vertical
-    #    bond (A.d) in the new bond. See horizontal counterpart above for the
-    #    rationale (#563).
-    base_charges = np.asarray(A.indices[A.labels().index("d")].charges)
+    # 5. Truncated SVD.  See the horizontal counterpart for why the canonical
+    #    charge layout is imposed only on the fermionic path (#563, #865).
+    base_charges = _truncation_base_charges(A, "d")
     U, sigma, Vh, s_full = truncated_svd(
         theta,
         left_labels=["u", "l", "r", "si_out"],
@@ -248,8 +293,8 @@ def _simple_update_2site_vertical_tensor(
         base_charges=base_charges,
     )
 
-    # 6. New lambda (normalized)
-    lam_v_new = sigma / (jnp.max(sigma) + EPS)
+    # 6. New lambda, normalised to max 1.
+    lam_v_new = _normalise_lambda(sigma)
 
     # 7. Reconstruct A_new from U: labels are (u, l, r, si_out, bond_new)
     #    Transpose so bond_new is in the d position: (u, bond_new, l, r, si_out)
