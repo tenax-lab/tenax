@@ -49,6 +49,16 @@
   per-sweep health check rolls back to the last completed sweep — still an
   exact gauge — rather than returning the overflow artefact.
 
+  The third was the same squaring trap one level up: `_message` squares `Gamma`
+  before anything normalises it, so the *same state* handed over with an
+  unobservable overall prefactor of `1e-200` or `1e200` under/overflowed the
+  first message and returned `iterations=0, residual=inf`. Rescaling by the
+  Frobenius norm does not fix that — `||Gamma||` squares before it sums, so it
+  is itself `0.0` and `inf` at those scales and the rescale silently does
+  nothing. Every normalisation in the module is now `max_abs`, and the input is
+  rescaled before the first message: the weights agree to 6e-15 across 400
+  orders of magnitude of input scale.
+
 ### Fixed
 
 - **A bond whose reduced density matrix is invalid is no longer summed into the

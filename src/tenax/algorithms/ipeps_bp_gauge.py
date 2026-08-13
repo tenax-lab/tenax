@@ -70,6 +70,14 @@ What one sweep does
    an iterate that has left f64 is not a solution, and must not be reported as
    one.
 
+   The rescale is by **max-abs**, never the Frobenius norm, and the input is
+   rescaled before the first message rather than only between sweeps.  Both for
+   the same reason: ``_message`` and ``||Gamma||`` each square before they sum,
+   so a caller handing over the same state with an overall prefactor of 1e-200
+   or 1e200 -- unobservable, by definition -- underflows or overflows the first
+   message, while a norm-based rescale is itself 0 or ``inf`` there and so
+   silently does nothing about it.
+
 The four bonds touch a different leg of each tensor, so their gauge
 transformations commute and are applied together.
 """
@@ -238,6 +246,22 @@ def _gauge_bond(
     )
 
 
+def _rescale(t: Tensor) -> Tensor:
+    """Scale ``t`` to unit max-abs.
+
+    Max-abs, never the Frobenius norm, because the norm squares before it
+    sums: ``||Gamma||`` of a state whose entries are ~1e-200 underflows to
+    exactly 0 and ~1e200 overflows to ``inf``, so a norm-based rescale silently
+    does nothing on precisely the inputs that need it most.  An overall scale
+    on ``Gamma`` is not observable, so this is free.
+
+    No additive epsilon in the denominator: that would make the result depend
+    on the input's scale, which is the bug this exists to prevent.
+    """
+    m = t.max_abs()
+    return t * (1.0 / jnp.where(m > 0, m, 1.0))
+
+
 def _is_representable(
     gam: dict[str, Tensor], new_weights: dict[str, jax.Array]
 ) -> bool:
@@ -247,7 +271,7 @@ def _is_representable(
     all-zero iterate is an absorbing fixed point that reports ``residual = 0``.
     """
     for t in gam.values():
-        n = float(t.norm())
+        n = float(t.max_abs())
         if not math.isfinite(n) or n <= 0.0:
             return False
     for w in new_weights.values():
@@ -328,7 +352,11 @@ def bp_gauge_checkerboard(
             )
 
     order = {"A": A.labels(), "B": B.labels()}
-    gam = {"A": A, "B": B}
+    # Before the first message, not just between sweeps: ``_message`` squares
+    # Gamma, so a caller's overall scale of 1e-200 or 1e200 -- physically the
+    # same state -- would under/overflow the very first message and the solve
+    # would fail on a state it handles fine at unit scale.
+    gam = {"A": _rescale(A), "B": _rescale(B)}
     residual = float("inf")
     # Any completed sweep is an exact gauge of the input, so the last healthy
     # iterate is a valid -- merely unconverged -- answer to fall back to.
@@ -363,8 +391,7 @@ def bp_gauge_checkerboard(
             # Gamma is not physical and lambda is separately max-normalised, so
             # doing it more often cannot move the fixed point.
             for site in (site_L, site_R):
-                n = gam[site].norm()
-                gam[site] = gam[site] * (1.0 / jnp.where(n > 0, n, 1.0))
+                gam[site] = _rescale(gam[site])
 
         if not _is_representable(gam, new_weights):
             # Do not hand back the corpse, and do not call it converged.  The

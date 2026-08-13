@@ -299,6 +299,41 @@ def test_an_su_evolved_symmetric_state_does_not_walk_out_of_f64(phases):
     assert rel < GAUGE_TOL, f"{phases} phase(s): state moved by {rel:.3e}"
 
 
+@pytest.mark.parametrize("kind", list(_PAIRS))
+def test_an_overall_scale_on_gamma_changes_nothing(kind):
+    """An unobservable prefactor must not decide whether the solve works.
+
+    ``_message`` squares ``Gamma``, so at 1e-200 the first message underflowed
+    to zero and at 1e200 it overflowed; both returned ``iterations=0,
+    residual=inf`` on a state that solves fine at unit scale.  Rescaling by the
+    Frobenius norm does not fix it -- ``||Gamma||`` squares before it sums, so
+    it is itself 0 and ``inf`` at those scales, and the rescale silently does
+    nothing.  Hence max-abs.
+
+    Compared after a *fixed* number of sweeps rather than at the fixed point,
+    so the whole trajectory is checked and not just where it lands.
+    """
+    A, B = _PAIRS[kind]()
+    w0 = BondWeights.ones(D, D)
+    sweeps = 15
+
+    def run(scale):
+        _, _, w, info = bp_gauge_checkerboard(
+            A * scale, B * scale, w0, max_iter=sweeps, tol=0.0
+        )
+        return np.concatenate([np.asarray(x) for x in w]), info
+
+    ref, ref_info = run(1.0)
+    assert ref_info.iterations == sweeps
+    assert np.max(ref) > 0.0, "the unit-scale reference is itself degenerate"
+
+    for scale in (1e-200, 1e200):
+        got, info = run(scale)
+        assert info.iterations == sweeps, f"{kind} at {scale:.0e}: {info}"
+        d = float(np.max(np.abs(got - ref)))
+        assert d < 1e-13, f"{kind}: scaling by {scale:.0e} moved the weights {d:.3e}"
+
+
 def test_the_health_predicate_rejects_every_way_an_iterate_dies():
     """Unit-test on ``_is_representable``, because nothing else reaches it.
 
@@ -312,6 +347,11 @@ def test_the_health_predicate_rejects_every_way_an_iterate_dies():
     healthy = {"h_AB": jnp.ones(D)}
 
     assert _is_representable({"A": A}, healthy)
+    # Representable, not unit-scaled: an unobservable prefactor is not a defect,
+    # and a norm-based predicate would reject both of these -- ||Gamma|| is 0 at
+    # 1e-200 and inf at 1e200 because it squares before it sums.
+    assert _is_representable({"A": A * 1e-200}, healthy), "small scale rejected"
+    assert _is_representable({"A": A * 1e200}, healthy), "large scale rejected"
     assert not _is_representable({"A": A * 0.0}, healthy), "zero Gamma accepted"
     assert not _is_representable({"A": A * jnp.inf}, healthy), "inf Gamma accepted"
     assert not _is_representable({"A": A * jnp.nan}, healthy), "nan Gamma accepted"
