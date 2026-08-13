@@ -29,12 +29,15 @@ import warnings
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from tenax.algorithms._ctm_diagnostics import (
     INVALID_RDM_DEFECT,
+    RDM_PSD_TOL,
     RDM_TRACE_TOL,
     CollapsedRDMError,
+    _psd_tol_for,
     check_rdm,
     rdm_trace_defect,
 )
@@ -643,3 +646,71 @@ def test_no_energy_path_bypasses_the_checked_normaliser():
         f"these build an RDM for an energy contraction but skip the validity "
         f"check: {offenders}. Use _normalise_rdm_for_energy(mat, '<name>')."
     )
+
+
+# ---------------------------------------------------------------------------
+# The PSD tolerance is dimensionless but not dtype-free (#873).
+#
+# RDM_PSD_TOL's 1e-8 was chosen against float64's ~1e-16 roundoff.  float32
+# eps is 1.19e-7 -- an order of magnitude *above* that tolerance -- so on a
+# float32 input the guard fires on its own arithmetic.  Latent rather than
+# live: ``import tenax`` sets jax_enable_x64, so this is a caller who
+# deliberately works in single precision.
+# ---------------------------------------------------------------------------
+
+
+def _psd_rank_deficient(n: int, rank: int, seed: int, dtype) -> np.ndarray:
+    """PSD by construction: ``Q diag(s) Q^T`` with ``Q`` orthonormal.
+
+    Rank-deficient on purpose -- that is the ordinary case (a product state's
+    two-site RDM has one non-zero eigenvalue), and it is what puts eigenvalues
+    at exactly zero where roundoff decides their sign.
+    """
+    rng = np.random.default_rng(seed)
+    Q, _ = np.linalg.qr(rng.normal(size=(n, rank)))
+    rho = Q @ np.diag(np.linspace(1.0, 0.2, rank)) @ Q.T
+    return (rho / np.trace(rho)).astype(dtype)
+
+
+@pytest.mark.parametrize("n,rank", [(4, 2), (16, 8), (64, 32)])
+@pytest.mark.parametrize("seed", range(4))
+def test_a_valid_float32_rdm_is_not_reported_non_psd(n, rank, seed):
+    """The regression: these are PSD by construction and must stay silent.
+
+    Measured before the fix, worst negativity over 20 trials per size: 2.7e-08
+    at n=4, 2.6e-08 at n=16, 3.1e-08 at n=64 -- all above RDM_PSD_TOL's 1e-8,
+    firing in 7/20, 19/20 and 20/20 trials.  The identical matrices in float64
+    give ~1e-17.
+    """
+    rdm = _psd_rank_deficient(n, rank, seed, np.float32)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        defect = check_rdm(rdm, context="f32")
+    assert defect != INVALID_RDM_DEFECT
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_the_float32_floor_does_not_blind_the_check(dtype):
+    """The fix must not be "loosen until nothing fires".
+
+    #853's real spectrum sits 0.8 of the spectral radius below zero, which is
+    seven orders above even the float32 floor, so raising the tolerance to
+    cover f32 roundoff cannot cost the case the check was built for.
+    """
+    rdm = np.asarray(_hermitian_with_spectrum(LIVE_NONPSD_EIGS, seed=3), dtype=dtype)
+    with pytest.warns(RuntimeWarning, match=PSD_MATCH):
+        defect = check_rdm(rdm, context="t")
+    assert defect == INVALID_RDM_DEFECT
+
+
+def test_the_floor_is_inert_in_float64():
+    """It must not quietly relax the default path.
+
+    ``32 * eps(float64)`` is 7.1e-15, four orders below RDM_PSD_TOL, so the
+    tolerance every existing test was calibrated against is unchanged.
+    """
+    assert _psd_tol_for(np.zeros(1, dtype=np.float64), RDM_PSD_TOL) == RDM_PSD_TOL
+    assert _psd_tol_for(np.zeros(1, dtype=np.complex128), RDM_PSD_TOL) == RDM_PSD_TOL
+    f32 = _psd_tol_for(np.zeros(1, dtype=np.float32), RDM_PSD_TOL)
+    assert f32 > RDM_PSD_TOL
+    assert f32 == pytest.approx(32 * np.finfo(np.float32).eps)

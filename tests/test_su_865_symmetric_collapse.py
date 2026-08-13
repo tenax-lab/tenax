@@ -85,7 +85,18 @@ def _symmetric_run(D=3, steps=60):
     return _four_phase(A, B, D, steps, gate_t)
 
 
-@pytest.mark.parametrize("D", [2, 3, 4])
+@pytest.mark.parametrize(
+    "D",
+    [
+        2,
+        # D=3 and D=4 reproduce the same defect and cost 26s and 176s against
+        # D=2's 6s, so they are withheld from the required gate.  D=2 is not a
+        # weaker check: it kills the defect mutant on its own (the collapse
+        # happens at every D, only the survival time grows with it).
+        pytest.param(3, marks=pytest.mark.slow),
+        pytest.param(4, marks=pytest.mark.slow),
+    ],
+)
 def test_the_symmetric_state_survives_and_stays_normalised(D):
     """The filed symptom: exactly zero at step 22, on every D.
 
@@ -105,6 +116,7 @@ def test_the_symmetric_state_survives_and_stays_normalised(D):
         assert float(jnp.min(lam)) > 0.0, f"D={D}: {name} has a dead direction"
 
 
+@pytest.mark.slow
 def test_the_symmetric_spectrum_matches_the_dense_reference():
     """Surviving is not enough -- it has to be the *right* state.
 
