@@ -772,6 +772,13 @@ disagreement depends on the blocks' values: the CTM initial environment contract
 non-dual bonds and discards products by the thousand, and is exact anyway because
 those products are all zero. Turn it on when auditing a path, not in production.
 
+While armed it also forces the reference per-block contraction, overriding the
+accelerated block-sparse backends (`TENAX_BATCH_BLOCKSPARSE`,
+`TENAX_STACK_BLOCKSPARSE`, `TENAX_USE_CUTENSOR_BLOCKSPARSE`) for the duration.
+Those paths drop out-of-set output keys without consulting the check, so an
+audit that left them enabled would report clean on the products it never
+inspected — and a diagnostic whose silence is unreliable is worse than none.
+
 ## Gotchas
 
 ### Float64 precision and `JAX_ENABLE_X64`

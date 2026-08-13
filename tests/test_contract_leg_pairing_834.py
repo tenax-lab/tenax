@@ -572,3 +572,67 @@ def test_strict_mode_reports_real_weight_loss_in_the_ctm_sweep(monkeypatch):
     monkeypatch.setenv(STRICT, "1")
     with pytest.raises(ValueError, match="#834"):
         _charged_u1_sweep()
+
+
+# The accelerated execution paths, each of which returns from
+# ``_contract_symmetric`` before the per-block loop.  ``_validate_contracted_legs``
+# runs first and so covers all of them; the *discard* check does not, which is
+# what these pin.
+_ACCEL_FLAGS = (
+    "TENAX_BATCH_BLOCKSPARSE",
+    "TENAX_STACK_BLOCKSPARSE",
+    "TENAX_USE_CUTENSOR_BLOCKSPARSE",
+)
+
+
+def _discard_class_pair(monkeypatch):
+    """A grid configuration strict refuses via the *discard* check alone.
+
+    Leg pairing must accept it, so that what the accelerated paths would skip is
+    the only thing standing between the caller and a silent disagreement.
+    """
+    for sym, ck, free_a, free_b in CASES:
+        for flow_a, flow_b, sign_b in COMBOS:
+            A, B = _pair(sym, ck, free_a, free_b, flow_a, flow_b, sign_b, 0)
+            if not _informative(A, B):
+                continue
+            monkeypatch.setenv(STRICT, "1")
+            try:
+                contractor._validate_contracted_legs([A, B], "ik,kj->ij")
+                pairing_refuses = False
+            except ValueError:
+                pairing_refuses = True
+            try:
+                contract(A, B)
+                strict_refuses = False
+            except ValueError:
+                strict_refuses = True
+            monkeypatch.setenv(STRICT, "0")
+            if strict_refuses and not pairing_refuses:
+                return A, B
+    return None, None
+
+
+@pytest.mark.parametrize("flag", _ACCEL_FLAGS)
+def test_strict_mode_is_not_bypassed_by_an_accelerated_backend(monkeypatch, flag):
+    """An armed audit must be complete on every execution path, or it lies.
+
+    ``_contract_symmetric`` returns early for the cuTENSOR, stacked and batched
+    backends, all of which drop out-of-set output keys with the same bare
+    ``continue`` as the per-block loop.  Before this was fixed,
+    ``TENAX_STRICT_CONTRACT=1`` combined with ``TENAX_BATCH_BLOCKSPARSE=1``
+    returned a silently truncated result and raised nothing.
+
+    That is worse than not having the flag: the whole contract of a diagnostic
+    is that "no raise" means "no disagreement", and a partial audit reports
+    clean on exactly the configurations it did not inspect.
+    """
+    A, B = _discard_class_pair(monkeypatch)
+    assert A is not None, (
+        "the grid no longer contains a discard-class configuration, so this "
+        "test is pinning nothing -- re-derive it before deleting"
+    )
+    monkeypatch.setenv(STRICT, "1")
+    monkeypatch.setenv(flag, "1")
+    with pytest.raises(ValueError, match="#834"):
+        contract(A, B)

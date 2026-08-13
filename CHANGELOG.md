@@ -148,6 +148,14 @@
   strict mode is sound *and* complete: it admits every one that agrees with
   dense and refuses every one that does not.
 
+  While armed the flag also **pins execution to the reference per-block path**,
+  overriding `TENAX_BATCH_BLOCKSPARSE`, `TENAX_STACK_BLOCKSPARSE` and
+  `TENAX_USE_CUTENSOR_BLOCKSPARSE`. Each of those returns before the discard
+  check and drops out-of-set output keys with its own bare `continue`, so an
+  audit that left them enabled reported clean on exactly the products it never
+  inspected — a partial audit is worse than none, since the contract of a
+  diagnostic is that silence means agreement.
+
   **It is opt-in, and that is a measured decision rather than a cautious one.**
   Both checks are structural — leg charges, flows, block keys — while whether
   the two representations actually differ depends on the blocks' *values*, which

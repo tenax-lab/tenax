@@ -101,6 +101,13 @@ representation-dependent answer. It covers two mechanisms: legs the two paths
 pair differently, and block products discarded for falling outside the output
 legs' valid set.
 
+The flag also pins execution to the reference per-block contraction while it is
+on, overriding `TENAX_BATCH_BLOCKSPARSE`, `TENAX_STACK_BLOCKSPARSE` and
+`TENAX_USE_CUTENSOR_BLOCKSPARSE`. Those backends return before the discard check
+and drop out-of-set output keys themselves, so an audit that left them enabled
+would pass on the products it never looked at. Audits are slower than production
+runs for this reason, and that is the intended trade.
+
 It is **opt-in**, because both checks are structural while the disagreement
 depends on the blocks' *values*. The CTM initial environment contracts non-dual
 bonds and discards thousands of products per sweep, and is exact anyway because

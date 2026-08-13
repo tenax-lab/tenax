@@ -638,6 +638,17 @@ def _strict_contract() -> bool:
     A default-on structural guard would therefore break the default CTM path
     while still missing the defect on it.  Read per call rather than cached at
     import, so an audit can toggle it around a single call.
+
+    While armed, this **also pins execution to the reference per-block path**:
+    the cuTENSOR, stacked and batched backends each return from
+    ``_contract_symmetric`` before the discard check and drop out-of-set output
+    keys with their own bare ``continue``, so leaving them enabled would report
+    clean on precisely the products never inspected.  A partial audit is worse
+    than none -- the contract of a diagnostic is that silence means agreement --
+    and since this is a diagnostic, the lost throughput costs nothing that
+    matters.  Do not "restore" the accelerated paths under the flag without
+    implementing the discard check in each of them; the test
+    ``test_strict_mode_is_not_bypassed_by_an_accelerated_backend`` pins this.
     """
     return os.environ.get("TENAX_STRICT_CONTRACT", "0").strip().lower() in (
         "1",
@@ -867,12 +878,21 @@ def _contract_symmetric(
     """
     _validate_contracted_legs(tensors, subscripts)
 
-    # --- Optional cuTENSOR block-sparse GPU path ---
-    import os
+    # An armed audit has to inspect every block product, so it pins execution to
+    # the reference per-block path below.  Each accelerated backend returns
+    # before the discard check and drops out-of-set output keys with its own
+    # bare ``continue``, so leaving them enabled would report clean on exactly
+    # the products never inspected -- worse than not offering the flag, since
+    # the contract of a diagnostic is that silence means agreement.  The flag is
+    # a diagnostic, so giving up the accelerated path while it is on costs
+    # nothing that matters.
+    strict = _strict_contract()
 
+    # --- Optional cuTENSOR block-sparse GPU path ---
     sym = tensors[0].indices[0].symmetry if tensors and tensors[0].indices else None
     if (
-        len(tensors) == 2
+        not strict
+        and len(tensors) == 2
         and os.environ.get("TENAX_USE_CUTENSOR_BLOCKSPARSE", "0") == "1"
         and not any(isinstance(t._data, jax.core.Tracer) for t in tensors)
         and (sym is None or not sym.is_fermionic)
@@ -894,7 +914,7 @@ def _contract_symmetric(
     # selected and the per-block path below runs byte-identically to today.
     from tenax.contraction.blocksparse_backend import _backend_opt_in, select_backend
 
-    if _backend_opt_in():
+    if not strict and _backend_opt_in():
         from tenax.contraction.blocksparse_plan import build_block_contract_plan
 
         plan = build_block_contract_plan(tensors, subscripts, output_indices)
@@ -1020,7 +1040,7 @@ def _contract_symmetric(
         "on",
     )
 
-    if _batch_blocksparse:
+    if _batch_blocksparse and not strict:
         output_blocks = _contract_symmetric_batched(
             sig_iter,
             tensor_partial_indices,
@@ -1039,10 +1059,6 @@ def _contract_symmetric(
     block_expr_cache: dict[tuple[tuple[int, ...], ...], Any] = {}
 
     output_blocks: dict[BlockKey, Any] = {}
-
-    # Hoisted: the discard check below runs once per product, and a real sweep
-    # discards thousands of them.
-    strict = _strict_contract()
 
     for full_sig in sig_iter:
         # For each tensor, extract its partial sig from full_sig and look up
