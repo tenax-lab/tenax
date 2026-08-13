@@ -64,6 +64,30 @@
 
 ### Fixed
 
+- **`check_rdm`'s PSD tolerance no longer fires on float32's own roundoff**
+  (#873). `RDM_PSD_TOL = 1e-8` is compared against a *dimensionless*
+  negativity — `max(0, -min_eig) / max|eig|` — so it is scale-free, as
+  intended. It is not dtype-free: that 1e-8 was chosen against float64's
+  ~1e-16 roundoff, while float32 eps is 1.19e-7, an order of magnitude
+  **above** the tolerance. `_rdm_negativity` diagonalises in the input dtype,
+  so a legitimately rank-deficient float32 RDM reports a negativity of ~3e-8
+  from `eigvalsh` alone and trips a check built to catch a spectrum 0.8 of the
+  spectral radius below zero.
+
+  Measured on matrices that are PSD by construction (`Q diag(s) Q^T`, rank
+  `n/2`, trace-normalised, 20 trials each): worst float32 negativity 2.7e-08 at
+  `n=4` (7/20 trials tripping), 2.6e-08 at `n=16` (19/20) and 3.1e-08 at `n=64`
+  (20/20). The identical matrices in float64 give ~1e-17.
+
+  The tolerance is now floored at `32 * eps` of the input dtype — 3.8e-06 in
+  float32, 7.1e-15 in float64. Floored rather than promoted: promoting would
+  double the memory of the densified RDM to buy precision the caller did not
+  ask for. **Nothing changes on the default path**, where `import tenax` sets
+  `jax_enable_x64` and `RDM_PSD_TOL` still governs; this was latent, reachable
+  only by a caller who deliberately works in single precision. A test pins that
+  #853's real spectrum still fires in float32, so the fix cannot be met by
+  loosening the tolerance until nothing warns.
+
 - **A bond whose reduced density matrix is invalid is no longer summed into the
   energy silently** (#845, #848). `_normalise_rdm` divides by the trace, so a
   raw network that contracts to zero returns the zero matrix — correctly, since
