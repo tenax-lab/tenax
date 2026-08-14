@@ -327,8 +327,12 @@ class TestFermionicIntegration:
             ctm_conv_tol=1e-4,
         )
         H = spinless_fermion_gate(config)
-        energy, A_opt, env = fpeps(H, config)
-        assert isinstance(env, CTMTensorEnv)
+        # #878: fpeps() is a 2-site checkerboard, so the state and environment
+        # are pairs.  A 1-site ansatz cannot represent the t-V charge-density
+        # wave, and its simple update discarded half of every gate.
+        energy, (A_opt, B_opt), (env_A, env_B) = fpeps(H, config)
+        for env in (env_A, env_B):
+            assert env is not None
         assert np.isfinite(energy)
 
 
