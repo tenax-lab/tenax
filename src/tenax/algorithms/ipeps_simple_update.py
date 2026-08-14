@@ -114,6 +114,38 @@ class CheckerboardLambdas(NamedTuple):
         )
 
 
+#: Which bond shares a spectrum with which, when they are *not* independent.
+#: ``A.r<->B.l`` and ``B.r<->A.l`` are both horizontal; ``A.d<->B.u`` and
+#: ``B.d<->A.u`` are both vertical.
+_PARTNER_BOND = {"h_AB": "h_BA", "h_BA": "h_AB", "v_AB": "v_BA", "v_BA": "v_AB"}
+
+
+def _store(
+    lambdas: CheckerboardLambdas,
+    bond: str,
+    value: jax.Array,
+    independent_bonds: bool,
+) -> CheckerboardLambdas:
+    """Record a freshly computed spectrum on ``bond``.
+
+    With ``independent_bonds=False`` it is also written to the partner bond,
+    which reproduces the shared-spectrum behaviour exactly: the historical loop
+    kept one ``lam_h`` that phases 0 and 2 both wrote, so the most recent write
+    was in force on both horizontal bonds.  Mirroring it here is that same
+    thing, said out loud.
+
+    That is the default, and deliberately so -- see
+    ``IPEPSConfig.su_independent_bond_lambdas`` for the measurements.  Sharing
+    the spectrum constrains the two horizontal bonds to be equal, which is
+    wrong away from the fixed point but suppresses a dimerising direction that
+    four free bonds can otherwise follow.
+    """
+    updates = {bond: value}
+    if not independent_bonds:
+        updates[_PARTNER_BOND[bond]] = value
+    return lambdas._replace(**updates)
+
+
 def _to_physical_tensor(
     gamma: Tensor,
     *,
@@ -195,6 +227,7 @@ def _simple_update_checkerboard_sweep(
     max_D: int,
     steps: int,
     lambdas: CheckerboardLambdas | None = None,
+    independent_bonds: bool = False,
 ) -> tuple[Tensor, Tensor, CheckerboardLambdas]:
     """Run ``steps`` phases of the four-bond checkerboard simple-update sweep.
 
@@ -238,7 +271,7 @@ def _simple_update_checkerboard_sweep(
                 lam_h_far=lambdas.h_BA,
                 lam_v_other=lambdas.v_BA,
             )
-            lambdas = lambdas._replace(h_AB=h_AB)
+            lambdas = _store(lambdas, "h_AB", h_AB, independent_bonds)
         elif phase == 1:
             A, B, v_AB = _simple_update_2site_vertical_tensor(
                 A,
@@ -250,7 +283,7 @@ def _simple_update_checkerboard_sweep(
                 lam_v_far=lambdas.v_BA,
                 lam_h_other=lambdas.h_BA,
             )
-            lambdas = lambdas._replace(v_AB=v_AB)
+            lambdas = _store(lambdas, "v_AB", v_AB, independent_bonds)
         elif phase == 2:
             B, A, h_BA = _simple_update_2site_horizontal_tensor(
                 B,
@@ -262,7 +295,7 @@ def _simple_update_checkerboard_sweep(
                 lam_h_far=lambdas.h_AB,
                 lam_v_other=lambdas.v_AB,
             )
-            lambdas = lambdas._replace(h_BA=h_BA)
+            lambdas = _store(lambdas, "h_BA", h_BA, independent_bonds)
         else:
             B, A, v_BA = _simple_update_2site_vertical_tensor(
                 B,
@@ -274,7 +307,7 @@ def _simple_update_checkerboard_sweep(
                 lam_v_far=lambdas.v_AB,
                 lam_h_other=lambdas.h_AB,
             )
-            lambdas = lambdas._replace(v_BA=v_BA)
+            lambdas = _store(lambdas, "v_BA", v_BA, independent_bonds)
 
     return A, B, lambdas
 

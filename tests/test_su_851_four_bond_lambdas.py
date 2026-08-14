@@ -12,6 +12,16 @@ whole lattice::
 
 ``num_imaginary_steps`` is an ordinary convergence knob.  Nobody expects it to
 select a gauge.
+
+Independent bonds are **opt-in** (``su_independent_bond_lambdas``), and the
+tests below pass ``independent_bonds=True`` explicitly.  The default shares one
+spectrum between each pair, which is what the code always did.  That is a
+measured trade rather than an unfinished migration: on a translation-invariant
+Hamiltonian the paired bonds coincide at the fixed point, so sharing costs
+nothing at convergence -- while four free bonds can follow a dimerising
+direction that the shared spectrum projects out.  See
+``test_sharing_the_spectrum_is_the_conservative_default`` and the config
+docstring.
 """
 
 import jax
@@ -19,12 +29,18 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax.algorithms.ipeps import _wrap_as_dense_tensor
+from tenax.algorithms.ipeps import _wrap_as_dense_tensor, sublattice_rotate_gate
 from tenax.algorithms.ipeps_simple_update import (
     CheckerboardLambdas,
     _make_trotter_gate_tensor,
     _simple_update_checkerboard_sweep,
     _to_physical_pair,
+)
+from tenax.algorithms.ipeps_simple_update import (
+    _simple_update_2site_horizontal_tensor as _horizontal,
+)
+from tenax.algorithms.ipeps_simple_update import (
+    _simple_update_2site_vertical_tensor as _vertical,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -91,7 +107,9 @@ def test_the_four_checkerboard_bonds_carry_different_spectra(D):
     """
     A, B = _random_pair(D)
     gate = _make_trotter_gate_tensor(_heisenberg_gate(), 0.05, site_tensor=A)
-    _A, _B, lam = _simple_update_checkerboard_sweep(A, B, gate, D, 8)
+    _A, _B, lam = _simple_update_checkerboard_sweep(
+        A, B, gate, D, 8, independent_bonds=True
+    )
 
     assert _rel(lam.h_AB, lam.h_BA) > 1e-2, (
         f"the two horizontal bonds have the same spectrum to "
@@ -143,11 +161,15 @@ def test_the_physical_state_does_not_move_with_steps_mod_4(D):
 
     # A physically meaningful state first, so the bonds are inequivalent...
     evolve = _make_trotter_gate_tensor(_heisenberg_gate(), 0.05, site_tensor=A)
-    A, B, lam = _simple_update_checkerboard_sweep(A, B, evolve, D, 60)
+    A, B, lam = _simple_update_checkerboard_sweep(
+        A, B, evolve, D, 60, independent_bonds=True
+    )
 
     # ...then freeze the Hamiltonian off and let the gauge settle.
     identity = _make_trotter_gate_tensor(_heisenberg_gate(), 0.0, site_tensor=A)
-    A, B, lam = _simple_update_checkerboard_sweep(A, B, identity, D, 24, lam)
+    A, B, lam = _simple_update_checkerboard_sweep(
+        A, B, identity, D, 24, lam, independent_bonds=True
+    )
 
     assert _rel(lam.h_AB, lam.h_BA) > 1e-2, (
         "the AB and BA bonds coincide after the warm-up, so stamping one onto "
@@ -157,7 +179,9 @@ def test_the_physical_state_does_not_move_with_steps_mod_4(D):
     ref = None
     spreads = {}
     for extra in range(9):
-        A2, B2, lam2 = _simple_update_checkerboard_sweep(A, B, identity, D, extra, lam)
+        A2, B2, lam2 = _simple_update_checkerboard_sweep(
+            A, B, identity, D, extra, lam, independent_bonds=True
+        )
         fp = np.concatenate(
             [_bond_fingerprint(t) for t in _to_physical_pair(A2, B2, lam2)]
         )
@@ -243,3 +267,95 @@ def test_each_leg_receives_its_own_bond_spectrum():
                 f"and B mirrored; A.r and B.l are one bond and must match."
             ),
         )
+
+
+# ---------------------------------------------------------------------------
+# The default, and why it is the default.
+# ---------------------------------------------------------------------------
+
+
+def test_the_shared_default_reproduces_the_historical_loop_exactly():
+    """Off, this must be the code that shipped -- not merely close to it.
+
+    The shared mode writes each freshly computed spectrum to its partner bond
+    too, which is what one ``lam_h`` written by phases 0 and 2 did.  Asserting
+    bit-equality against a hand-rolled two-lambda loop is what makes that claim
+    checkable rather than a comment.
+    """
+    D = 3
+    A0, B0 = _random_pair(D, seed=0)
+    gate = _make_trotter_gate_tensor(_heisenberg_gate(), 0.05, site_tensor=A0)
+
+    A, B = _random_pair(D, seed=0)
+    lam_h, lam_v = jnp.ones(D), jnp.ones(D)
+    for step in range(40):
+        phase = step % 4
+        if phase == 0:
+            A, B, lam_h = _horizontal(A, B, gate, lam_h, lam_v, D)
+        elif phase == 1:
+            A, B, lam_v = _vertical(A, B, gate, lam_h, lam_v, D)
+        elif phase == 2:
+            B, A, lam_h = _horizontal(B, A, gate, lam_h, lam_v, D)
+        else:
+            B, A, lam_v = _vertical(B, A, gate, lam_h, lam_v, D)
+
+    A2, B2, lams = _simple_update_checkerboard_sweep(
+        *_random_pair(D, seed=0), gate, D, 40, independent_bonds=False
+    )
+
+    assert float((A - A2).norm()) == 0.0, "site A drifted from the shipped loop"
+    assert float((B - B2).norm()) == 0.0, "site B drifted from the shipped loop"
+    for name, want in (
+        ("h_AB", lam_h),
+        ("h_BA", lam_h),
+        ("v_AB", lam_v),
+        ("v_BA", lam_v),
+    ):
+        got = getattr(lams, name)
+        assert float(jnp.max(jnp.abs(got - want))) == 0.0, f"{name} differs"
+
+
+def test_sharing_the_spectrum_is_the_conservative_default():
+    """The default is off because four free bonds are less robust, not more.
+
+    Measured at D=3 over eight random seeds: independent bonds converged to a
+    dimerised state (``|h_AB - h_BA|`` of 10-50%, flat spectrum) on 3 of them
+    against 1 for the shared spectrum, and seed 0 -- which ``ipeps()``
+    hardcodes -- is one of the three.  This pins that seed, so the default
+    cannot be flipped without the trade being re-measured.
+    """
+    D = 3
+    A, B = _random_pair(D, seed=0)
+    # The rotated gate: the physical choice for Heisenberg, what ipeps() users
+    # pass, and what the 8-seed trade was measured on.  With the unrotated gate
+    # a random start traps *both* modes, so it cannot separate them.
+    gate = _make_trotter_gate_tensor(
+        sublattice_rotate_gate(_heisenberg_gate()), 0.05, site_tensor=A
+    )
+
+    _, _, shared = _simple_update_checkerboard_sweep(
+        *_random_pair(D, seed=0), gate, D, 400, independent_bonds=False
+    )
+    _, _, free = _simple_update_checkerboard_sweep(
+        *_random_pair(D, seed=0), gate, D, 400, independent_bonds=True
+    )
+
+    shared_min = min(float(jnp.min(v)) for v in shared)
+    free_min = min(float(jnp.min(v)) for v in free)
+    assert shared_min < 0.05, (
+        f"the shared default no longer reaches a decaying spectrum "
+        f"(min lambda {shared_min:.3e}); the trade this default encodes has "
+        f"changed and needs re-measuring"
+    )
+    assert free_min > 0.05, (
+        f"independent bonds no longer fall into the dimerised state on seed 0 "
+        f"(min lambda {free_min:.3e}). If this is a genuine improvement the "
+        f"default should be revisited -- do not just delete this assertion"
+    )
+
+
+def test_the_config_default_is_off():
+    """A one-line guard: the flag is the whole contract of this change."""
+    from tenax.algorithms.ipeps_config import iPEPSConfig
+
+    assert iPEPSConfig().su_independent_bond_lambdas is False

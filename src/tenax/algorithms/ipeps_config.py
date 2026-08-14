@@ -523,6 +523,31 @@ class iPEPSConfig:
     max_bond_dim: int = 2
     num_imaginary_steps: int = 100
     dt: float = 0.01
+    #: Track a separate Schmidt spectrum for each of the checkerboard's **four**
+    #: bonds instead of one horizontal and one vertical for all four (#851).
+    #:
+    #: Off by default, and the default is not a placeholder for "not finished
+    #: yet" -- it is a measured trade.  The four bonds are ``A.r<->B.l``,
+    #: ``B.r<->A.l``, ``A.d<->B.u`` and ``B.d<->A.u``; sharing two spectra
+    #: between them is wrong away from the fixed point, where they were measured
+    #: to differ by up to 23% (horizontal) and 31% (vertical) during the
+    #: transient.  But on a *translation-invariant* Hamiltonian they coincide at
+    #: the fixed point -- measured agreement 1.2e-06 -- so the shared spectrum
+    #: is asymptotically correct there and buys nothing at convergence.
+    #:
+    #: What it costs is robustness.  Sharing a spectrum forces the two
+    #: horizontal bonds equal, which projects out the dimerising direction; four
+    #: free bonds can follow it.  On isotropic Heisenberg at D=3 from a random
+    #: start, 3 of 8 seeds converged to a horizontally dimerised state with
+    #: ``|h_AB - h_BA|`` around 10-50% and a flat spectrum, against 1 of 8 with
+    #: the shared spectrum.  A smaller ``dt`` did not escape it.
+    #:
+    #: Turn it on for a Hamiltonian whose bonds are genuinely inequivalent
+    #: (``Jx != Jy``, or any anisotropic or dimerised model), where sharing a
+    #: spectrum is not an approximation but a wrong answer.  Prefer a physical
+    #: initial state with it: the trapped seeds converge correctly from a
+    #: Neel-like start.
+    su_independent_bond_lambdas: bool = False
     ctm: CTMConfig = field(default_factory=CTMConfig)
     svd_trunc_err: float | None = None
     gate_order: str = "sequential"

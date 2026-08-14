@@ -64,6 +64,29 @@
 
 ### Fixed
 
+- **Each checkerboard bond can now carry its own Schmidt spectrum**
+  (#851, opt-in via `su_independent_bond_lambdas`). The four-phase sweep
+  evolves `A.r<->B.l`, `A.d<->B.u`, `B.r<->A.l` and `B.d<->A.u`, but stored one
+  horizontal and one vertical spectrum for all four, so phases 0 and 2 wrote
+  the same slot and `num_imaginary_steps % 4` decided which bond's gauge was
+  stamped onto the lattice. Measured during the transient, the paired bonds
+  differ by up to 23% (horizontal) and 31% (vertical).
+
+  **Off by default, and that is a measured trade rather than a staged
+  migration.** On a translation-invariant Hamiltonian the paired bonds coincide
+  at the fixed point — agreement 1.2e-06 — so sharing costs nothing at
+  convergence, while four free bonds can follow a dimerising direction that the
+  shared spectrum projects out. At D=3 from a random start, independent bonds
+  converged to a dimerised state (`|h_AB - h_BA|` 10–50%, flat spectrum) on 3
+  of 8 seeds against 1 of 8 shared — and seed 0, which `ipeps()` hardcodes, is
+  one of the three. A smaller `dt` did not escape it.
+
+  Turn it on for a Hamiltonian whose bonds are genuinely inequivalent
+  (`Jx != Jy`, or any anisotropic or dimerised model), where sharing a spectrum
+  is not an approximation but a wrong answer, and prefer a physical initial
+  state with it. With the default off the sweep is bit-identical to the loop
+  that shipped, which a test asserts rather than assumes.
+
 - **Simple update no longer throws away the largest singular value on the
   symmetric path** (#865). The U(1)-Sz state reached *exactly* zero at step 22
   — every bond weight zero, `|A| = 0`, the RDM's trace 0 and its normalisation

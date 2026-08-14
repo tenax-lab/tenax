@@ -444,7 +444,12 @@ def ipeps(
     # ``num_imaginary_steps % 4`` decided whether the AB or the BA bond's gauge
     # was stamped onto the whole lattice.
     A, B, lambdas = _simple_update_checkerboard_sweep(
-        A, B, gate, D, config.num_imaginary_steps
+        A,
+        B,
+        gate,
+        D,
+        config.num_imaginary_steps,
+        independent_bonds=config.su_independent_bond_lambdas,
     )
 
     # The sweep keeps the state in Vidal form; the CTM contracts the physical
