@@ -56,9 +56,8 @@ from tenax.algorithms.ipeps import (  # noqa: E402
 )
 from tenax.algorithms.ipeps_simple_update import (  # noqa: E402
     _make_trotter_gate_tensor,
-    _simple_update_2site_horizontal_tensor,
-    _simple_update_2site_vertical_tensor,
-    _to_physical_tensor,
+    _simple_update_checkerboard_sweep,
+    _to_physical_pair,
 )
 from tenax.core.index import FlowDirection, TensorIndex  # noqa: E402
 from tenax.core.symmetry import U1Symmetry  # noqa: E402
@@ -107,32 +106,12 @@ def part_b_2site(D: int, chi: int, steps: int, seed: int) -> None:
     print("=== PART B: 2-site U(1)-Sz SU -> ctm_tensor_2site (KNOWN COLLAPSE) ===")
     A, B = heisenberg_u1sz_init_pair(D=D, key=jax.random.PRNGKey(seed))
     H = heisenberg_gate_u1sz()
-    lam_h = jnp.ones(D)
-    lam_v = jnp.ones(D)
     gate = _make_trotter_gate_tensor(H, 0.1, site_tensor=A)
     # All four bonds of the checkerboard, and the physical tensor rebuilt from
     # the Vidal form afterwards -- driving only (A.r<->B.l)/(A.d<->B.u) leaves
     # half the lattice bonds with no Schmidt weight (#667).
-    for step in range(steps):
-        phase = step % 4
-        if phase == 0:
-            A, B, lam_h = _simple_update_2site_horizontal_tensor(
-                A, B, gate, lam_h, lam_v, D
-            )
-        elif phase == 1:
-            A, B, lam_v = _simple_update_2site_vertical_tensor(
-                A, B, gate, lam_h, lam_v, D
-            )
-        elif phase == 2:
-            B, A, lam_h = _simple_update_2site_horizontal_tensor(
-                B, A, gate, lam_h, lam_v, D
-            )
-        else:
-            B, A, lam_v = _simple_update_2site_vertical_tensor(
-                B, A, gate, lam_h, lam_v, D
-            )
-    A = _to_physical_tensor(A, lam_h, lam_v)
-    B = _to_physical_tensor(B, lam_h, lam_v)
+    A, B, lam_h, lam_v = _simple_update_checkerboard_sweep(A, B, gate, D, steps)
+    A, B = _to_physical_pair(A, B, lam_h, lam_v)
 
     print(
         f"  after {steps} SU steps: |A|={float(A.norm()):.4f} "

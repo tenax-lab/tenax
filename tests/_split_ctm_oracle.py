@@ -65,34 +65,14 @@ def evolve_physical_site(A, gate, D, n_steps=40, dt=0.05):
     """
     from tenax.algorithms.ipeps_simple_update import (
         _make_trotter_gate_tensor,
-        _simple_update_2site_horizontal_tensor,
-        _simple_update_2site_vertical_tensor,
-        _to_physical_tensor,
+        _simple_update_checkerboard_sweep,
+        _to_physical_pair,
     )
 
     tg = _make_trotter_gate_tensor(gate, dt, site_tensor=A)
-    B = A
-    lam_h = jnp.ones(D)
-    lam_v = jnp.ones(D)
-    for step in range(n_steps):
-        phase = step % 4
-        if phase == 0:
-            A, B, lam_h = _simple_update_2site_horizontal_tensor(
-                A, B, tg, lam_h, lam_v, D
-            )
-        elif phase == 1:
-            A, B, lam_v = _simple_update_2site_vertical_tensor(
-                A, B, tg, lam_h, lam_v, D
-            )
-        elif phase == 2:
-            B, A, lam_h = _simple_update_2site_horizontal_tensor(
-                B, A, tg, lam_h, lam_v, D
-            )
-        else:
-            B, A, lam_v = _simple_update_2site_vertical_tensor(
-                B, A, tg, lam_h, lam_v, D
-            )
-    A, _ = max_abs_normalize(_to_physical_tensor(A, lam_h, lam_v))
+    A, _B, lam_h, lam_v = _simple_update_checkerboard_sweep(A, A, tg, D, n_steps)
+    A_phys, _ = _to_physical_pair(A, _B, lam_h, lam_v)
+    A, _ = max_abs_normalize(A_phys)
     return A
 
 
