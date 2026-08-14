@@ -921,9 +921,8 @@ def _build_su_neel(D=2, d=2, n_steps=80, dt=0.05):
         _wrap_as_dense_tensor,
     )
     from tenax.algorithms.ipeps_simple_update import (
-        _simple_update_2site_horizontal_tensor,
-        _simple_update_2site_vertical_tensor,
-        _to_physical_tensor,
+        _simple_update_checkerboard_sweep,
+        _to_physical_pair,
     )
 
     H = _heisenberg_gate(d)
@@ -939,37 +938,17 @@ def _build_su_neel(D=2, d=2, n_steps=80, dt=0.05):
     B = B * (1.0 / float(B.norm()))
 
     gate = _make_trotter_gate_tensor(H, dt, site_tensor=A)
-    lam_h = jnp.ones(D)
-    lam_v = jnp.ones(D)
     # All FOUR checkerboard bonds, then out of Vidal form -- the two corrections
     # #667 made to ``ipeps()``, which this fixture has to mirror or it does not
     # build the state its docstring claims.  A 2-phase loop leaves
     # (B.r<->A.l) and (B.d<->A.u) with no Schmidt weight at all, and returning
     # the bare Gamma hands the CTM a state with no bond weights on any leg.
-    for step in range(n_steps):
-        phase = step % 4
-        if phase == 0:
-            A, B, lam_h = _simple_update_2site_horizontal_tensor(
-                A, B, gate, lam_h, lam_v, D
-            )
-        elif phase == 1:
-            A, B, lam_v = _simple_update_2site_vertical_tensor(
-                A, B, gate, lam_h, lam_v, D
-            )
-        elif phase == 2:
-            B, A, lam_h = _simple_update_2site_horizontal_tensor(
-                B, A, gate, lam_h, lam_v, D
-            )
-        else:
-            B, A, lam_v = _simple_update_2site_vertical_tensor(
-                B, A, gate, lam_h, lam_v, D
-            )
-        A = A * (1.0 / float(A.norm()))
-        B = B * (1.0 / float(B.norm()))
-    return (
-        _to_physical_tensor(A, lam_h, lam_v),
-        _to_physical_tensor(B, lam_h, lam_v),
-    )
+    # This used to open-code the sweep; it was one of five copies.  The
+    # per-step renormalisation it also did is redundant -- the update routines
+    # normalise each site internally, which is why ``ipeps()`` does not repeat
+    # it.
+    A, B, lam_h, lam_v = _simple_update_checkerboard_sweep(A, B, gate, D, n_steps)
+    return _to_physical_pair(A, B, lam_h, lam_v)
 
 
 def test_split_2site_energy_matches_fused_convergent():

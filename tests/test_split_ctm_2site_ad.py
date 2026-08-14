@@ -59,9 +59,8 @@ def _build_su_xxz(delta, D=2, d=2, n_steps=80, dt=0.05, seed=7):
         _wrap_as_dense_tensor,
     )
     from tenax.algorithms.ipeps_simple_update import (
-        _simple_update_2site_horizontal_tensor,
-        _simple_update_2site_vertical_tensor,
-        _to_physical_tensor,
+        _simple_update_checkerboard_sweep,
+        _to_physical_pair,
     )
 
     H = _xxz_gate(delta, d)
@@ -76,34 +75,10 @@ def _build_su_xxz(delta, D=2, d=2, n_steps=80, dt=0.05, seed=7):
     B = B * (1.0 / float(B.norm()))
 
     gate = _make_trotter_gate_tensor(H, dt, site_tensor=A)
-    lam_h = jnp.ones(D)
-    lam_v = jnp.ones(D)
     # Four-bond checkerboard sweep + symmetric gauge, mirroring ``ipeps()``
     # after #667.  See the same comment in ``_build_su_neel``.
-    for step in range(n_steps):
-        phase = step % 4
-        if phase == 0:
-            A, B, lam_h = _simple_update_2site_horizontal_tensor(
-                A, B, gate, lam_h, lam_v, D
-            )
-        elif phase == 1:
-            A, B, lam_v = _simple_update_2site_vertical_tensor(
-                A, B, gate, lam_h, lam_v, D
-            )
-        elif phase == 2:
-            B, A, lam_h = _simple_update_2site_horizontal_tensor(
-                B, A, gate, lam_h, lam_v, D
-            )
-        else:
-            B, A, lam_v = _simple_update_2site_vertical_tensor(
-                B, A, gate, lam_h, lam_v, D
-            )
-        A = A * (1.0 / float(A.norm()))
-        B = B * (1.0 / float(B.norm()))
-    return (
-        _to_physical_tensor(A, lam_h, lam_v),
-        _to_physical_tensor(B, lam_h, lam_v),
-    )
+    A, B, lam_h, lam_v = _simple_update_checkerboard_sweep(A, B, gate, D, n_steps)
+    return _to_physical_pair(A, B, lam_h, lam_v)
 
 
 def test_converge_split_env_2site_matches_forward(su_state):

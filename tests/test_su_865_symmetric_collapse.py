@@ -41,7 +41,7 @@ from tenax.algorithms.ipeps import (
 from tenax.algorithms.ipeps_simple_update import (
     _normalise_lambda,
     _simple_update_2site_horizontal_tensor,
-    _simple_update_2site_vertical_tensor,
+    _simple_update_checkerboard_sweep,
     _truncation_base_charges,
 )
 from tenax.core.index import FlowDirection, TensorIndex
@@ -55,26 +55,7 @@ DENSE_REFERENCE_D3 = (1.0, 0.165865, 0.015641)
 
 
 def _four_phase(A, B, D, steps, gate_t):
-    lam_h, lam_v = jnp.ones(D), jnp.ones(D)
-    for step in range(steps):
-        phase = step % 4
-        if phase == 0:
-            A, B, lam_h = _simple_update_2site_horizontal_tensor(
-                A, B, gate_t, lam_h, lam_v, D
-            )
-        elif phase == 1:
-            A, B, lam_v = _simple_update_2site_vertical_tensor(
-                A, B, gate_t, lam_h, lam_v, D
-            )
-        elif phase == 2:
-            B, A, lam_h = _simple_update_2site_horizontal_tensor(
-                B, A, gate_t, lam_h, lam_v, D
-            )
-        else:
-            B, A, lam_v = _simple_update_2site_vertical_tensor(
-                B, A, gate_t, lam_h, lam_v, D
-            )
-    return A, B, lam_h, lam_v
+    return _simple_update_checkerboard_sweep(A, B, gate_t, D, steps)
 
 
 def _symmetric_run(D=3, steps=60):
