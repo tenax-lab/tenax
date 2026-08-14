@@ -25,6 +25,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms._tensor_utils import safe_inv_lambda, scale_bond_axis
+from tenax.algorithms.ipeps_simple_update import (
+    _normalise_lambda,
+    _simple_update_checkerboard_sweep,
+)
 from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
@@ -227,6 +231,30 @@ def _absorb_lambdas(
     return result
 
 
+def _to_physical_fpeps_tensor(
+    gamma: SymmetricTensor, lam_h: jax.Array, lam_v: jax.Array
+) -> SymmetricTensor:
+    """Convert a Vidal ``Gamma`` to the physical fPEPS tensor.
+
+    ``sqrt(lambda)`` on all four legs, so that every bond of the lattice picks
+    up ``sqrt(lambda) * sqrt(lambda) = lambda`` exactly once -- both ends of a
+    bond contribute.  This is the fermionic counterpart of the bosonic
+    :func:`~tenax.algorithms.ipeps_simple_update._to_physical_tensor`.
+
+    ``fpeps()`` used :func:`_absorb_lambdas` here, which applies the *full*
+    ``lambda`` to each leg, so every bond of the returned state carried
+    ``lambda**2`` (#878).
+    """
+    out = scale_bond_axis(gamma, "u", jnp.sqrt(lam_v))
+    out = scale_bond_axis(out, "d", jnp.sqrt(lam_v))
+    out = scale_bond_axis(out, "l", jnp.sqrt(lam_h))
+    out = scale_bond_axis(out, "r", jnp.sqrt(lam_h))
+    norm = float(out.norm())
+    if norm > EPS:
+        out = out * (1.0 / norm)
+    return out
+
+
 def _fpeps_simple_update_horizontal(
     A: SymmetricTensor,
     gate: SymmetricTensor,
@@ -249,12 +277,18 @@ def _fpeps_simple_update_horizontal(
     Returns:
         (A_new, lam_h_new) where A_new has labels (u, d, l, r, phys).
     """
-    # 1. Absorb all lambdas into A
+    # 1. Absorb the outer lambdas.  The shared bond's weight belongs to the
+    #    pair *once*, not once per end: ``A_abs`` carries lam_h on both l and r,
+    #    and both ends of the contracted bond come from it, so using it for both
+    #    put lam_h**2 on the shared bond (#878).  The left tensor keeps lam_h on
+    #    its ``r`` (that is the shared weight); the right tensor must not also
+    #    carry it on its ``l``.
     A_abs = _absorb_lambdas(A, lam_h, lam_v)
+    A_right = scale_bond_axis(A_abs, "l", safe_inv_lambda(lam_h))
 
     # 2. Create left and right tensors by relabeling
     A_left = A_abs.relabel("r", "shared")
-    B_right = A_abs.relabels(
+    B_right = A_right.relabels(
         {
             "u": "u_B",
             "d": "d_B",
@@ -287,16 +321,20 @@ def _fpeps_simple_update_horizontal(
     )
     # U has labels: (u, d, l, si_out, r_new)
 
-    # 6. Normalize lambda
-    lam_h_new = sigma / (jnp.max(sigma) + EPS)
+    # 6. Normalize lambda -- relative, never ``sigma / (max(sigma) + EPS)``.
+    #    An additive absolute epsilon is a no-op while max(sigma) >> EPS and
+    #    inverts the moment it is not, returning a spectrum whose maximum is
+    #    below 1 (#748, #865).
+    lam_h_new = _normalise_lambda(sigma)
 
     # 7. Transpose to (u, d, l, r_new, si_out) and relabel
     U_reordered = U.transpose((0, 1, 2, 4, 3))
     U_final = U_reordered.relabels({"r_new": "r", "si_out": "phys"})
 
-    # 8. Absorb sqrt(sigma) into the bond axis "r"
-    sqrt_sig = jnp.sqrt(sigma + EPS)
-    U_final = scale_bond_axis(U_final, "r", sqrt_sig)
+    # 8. Gamma stays BARE (#667/#878).  The shared bond's weight lives in
+    #    ``lam_h_new`` and is re-absorbed in full by step 1 of the next sweep;
+    #    absorbing sqrt(sigma) here as well made the bond carry lambda**1.5,
+    #    which drove the state to exactly zero by step 10.
 
     # 9. Remove outer lambdas: u <- lam_v^{-1}, d <- lam_v^{-1}, l <- lam_h^{-1}
     #    Pseudo-inverse (drop dead sectors) -- see _safe_inv: the naive 1/(lam+EPS)
@@ -334,12 +372,14 @@ def _fpeps_simple_update_vertical(
     Returns:
         (A_new, lam_v_new) where A_new has labels (u, d, l, r, phys).
     """
-    # 1. Absorb all lambdas into A
+    # 1. Absorb the outer lambdas.  As in the horizontal step, the shared bond
+    #    carries lam_v once for the pair, not once per end (#878).
     A_abs = _absorb_lambdas(A, lam_h, lam_v)
+    A_bottom = scale_bond_axis(A_abs, "u", safe_inv_lambda(lam_v))
 
     # 2. Create top and bottom tensors by relabeling
     A_top = A_abs.relabel("d", "shared")
-    B_bottom = A_abs.relabels(
+    B_bottom = A_bottom.relabels(
         {
             "u": "shared",
             "d": "d_B",
@@ -369,16 +409,14 @@ def _fpeps_simple_update_vertical(
     )
     # U has labels: (u, l, r, si_out, d_new)
 
-    # 6. Normalize lambda
-    lam_v_new = sigma / (jnp.max(sigma) + EPS)
+    # 6. Normalize lambda -- relative, see the horizontal step (#748, #865).
+    lam_v_new = _normalise_lambda(sigma)
 
     # 7. Transpose to (u, d_new, l, r, si_out) and relabel
     U_reordered = U.transpose((0, 4, 1, 2, 3))
     U_final = U_reordered.relabels({"d_new": "d", "si_out": "phys"})
 
-    # 8. Absorb sqrt(sigma) into the bond axis "d"
-    sqrt_sig = jnp.sqrt(sigma + EPS)
-    U_final = scale_bond_axis(U_final, "d", sqrt_sig)
+    # 8. Gamma stays BARE (#667/#878) -- see the horizontal step.
 
     # 9. Remove outer lambdas: u <- lam_v^{-1}, l <- lam_h^{-1}, r <- lam_h^{-1}
     #    Pseudo-inverse (drop dead sectors) -- see _safe_inv.
@@ -400,30 +438,81 @@ def _fpeps_simple_update(
     max_D: int,
     dt: float,
     steps: int,
-) -> tuple[SymmetricTensor, jax.Array, jax.Array]:
-    """Run simple update for a given number of steps.
+) -> tuple[SymmetricTensor, SymmetricTensor, jax.Array, jax.Array]:
+    """Run simple update for a given number of steps, on a **2-site** cell.
 
-    Alternates horizontal and vertical bond updates.
+    Runs the shared checkerboard sweep rather than the 1-site routines above,
+    which cannot be correct (#878).  On a 1-site ansatz ``A`` is *both* ends of
+    every bond, and the 1-site update kept only ``U`` from the SVD and discarded
+    ``Vh``, so ``A`` received the left/top half of every gate and never the
+    right/bottom half.  That is the asymmetry #667 identified, and it drove the
+    state to a product state independently of ``dt`` -- measured at equal
+    imaginary time, ``dt`` = 0.05 / 0.01 / 0.005 all gave ``lam_h = [1, 0]``.
+
+    The shared sweep is already fermion-capable: ``_truncation_base_charges``
+    gates the layout constraint on ``is_fermionic``, so it keeps the per-sector
+    keep counts the 1-site path needs (#558/#559/#563) while the bosonic
+    checkerboard gets the unconstrained truncation #865 restored.
+
+    **The two sublattices are returned separately, and that is not cosmetic.**
+    The t-V ground state is a charge-density wave at finite ``V`` -- charge
+    order on the checkerboard -- which no single tensor can represent. Measured
+    after 200 steps, the gauge-invariant sublattice gap (:func:`sublattice_gap`)
+    is 2.7e-01 at D=2/V=0, 5.0e-01 at D=3/V=0 and 1.4e+00 at D=2/V=4. Collapsing
+    the pair back to one tensor would hand the CTM a state the sweep never
+    produced.
 
     Args:
-        A:                fPEPS site tensor.
+        A:                Initial fPEPS site tensor; both sublattices start here.
         hamiltonian_gate: 2-site Hamiltonian (SymmetricTensor).
         max_D:            Maximum bond dimension.
         dt:               Imaginary time step.
-        steps:            Number of simple update steps.
+        steps:            Number of simple update steps.  The sweep runs four
+                          phases per step, so each of the four bonds is evolved
+                          once per step.
 
     Returns:
-        (A_opt, lam_h, lam_v) after all steps.
+        (A_opt, B_opt, lam_h, lam_v) after all steps.
     """
     gate = _trotter_gate(hamiltonian_gate, dt)
-    lam_h = jnp.ones(max_D)
-    lam_v = jnp.ones(max_D)
+    # Four phases per step, so each of the four checkerboard bonds is evolved
+    # once per step -- the same imaginary time per bond as the old two-phase
+    # loop delivered for its two.
+    return _simple_update_checkerboard_sweep(A, A, gate, max_D, 4 * steps)
 
-    for _ in range(steps):
-        A, lam_h = _fpeps_simple_update_horizontal(A, gate, lam_h, lam_v, max_D)
-        A, lam_v = _fpeps_simple_update_vertical(A, gate, lam_h, lam_v, max_D)
 
-    return A, lam_h, lam_v
+def sublattice_gap(A: SymmetricTensor, B: SymmetricTensor) -> float:
+    """How far the two checkerboard sublattices are from coinciding.
+
+    The 1-site fPEPS ansatz and :func:`fermionic_ctm` describe a
+    translation-invariant state, so representing a checkerboard result with a
+    single tensor is faithful only when the two sublattices agree.
+
+    Compared through a gauge-invariant fingerprint rather than ``||A - B||``:
+    a simple-update tensor is defined only up to a bond gauge, so the naive norm
+    measures the gauge and not the state -- it stays ~1.7 even when the two are
+    provably the same physical tensor.  The spectrum of each leg's reduced
+    matrix is invariant under that gauge freedom.
+    """
+    gaps = []
+    for leg in ("u", "d", "l", "r"):
+        sa, sb = (
+            np.sort(np.linalg.svd(_leg_matrix(t, leg), compute_uv=False))[::-1]
+            for t in (A, B)
+        )
+        scale = max(float(sa[0]), 1e-300)
+        gaps.append(float(np.linalg.norm(sa - sb) / scale))
+    return max(gaps)
+
+
+def _leg_matrix(t: SymmetricTensor, leg: str) -> np.ndarray:
+    """``M[i,j] = sum_rest T[i,rest] conj(T[j,rest])`` for one virtual leg."""
+    labels = t.labels()
+    arr = np.asarray(t.todense())
+    arr = np.moveaxis(arr, labels.index(leg), 0).reshape(
+        arr.shape[labels.index(leg)], -1
+    )
+    return arr @ arr.conj().T
 
 
 # ------------------------------------------------------------------ #
@@ -521,19 +610,35 @@ def fpeps(
     config: FPEPSConfig,
     initial_tensor: SymmetricTensor | None = None,
     key: jax.Array | None = None,
-) -> tuple[float, SymmetricTensor, object]:
+) -> tuple[float, tuple[SymmetricTensor, SymmetricTensor], object]:
     """Run fPEPS: simple update optimization + CTM energy evaluation.
+
+    **Two-site checkerboard**, end to end (#878).  The previous 1-site ansatz
+    could not be right: ``A`` was both ends of every bond, the update discarded
+    half of every gate, and the state collapsed to a product state regardless of
+    ``dt``.  It also cannot represent the charge-density wave that is the t-V
+    ground state at finite ``V``.
 
     Args:
         hamiltonian_gate: 2-site Hamiltonian as SymmetricTensor.
         config:           FPEPSConfig.
-        initial_tensor:   Optional initial site tensor. If None, random init.
+        initial_tensor:   Optional initial site tensor; both sublattices start
+                          from it.  If None, random init.
         key:              JAX random key (used if initial_tensor is None).
 
     Returns:
-        (energy, A_opt, env) where energy is a scalar, A_opt is the
-        optimized SymmetricTensor, and env is the CTMEnvironment.
+        ``(energy, (A_opt, B_opt), (env_A, env_B))``.  **Changed in #878**: the
+        state and environment are now pairs.  ``sublattice_gap(A_opt, B_opt)``
+        says how far the two sublattices are from coinciding -- it is 0.2 to 1.4
+        on the measured configurations, so the pair is carrying real structure,
+        not a duplicated tensor.
     """
+    from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor_2site
+    from tenax.algorithms._split_ctm_tensor_energy import (
+        compute_energy_split_ctm_tensor_2site,
+    )
+    from tenax.algorithms.ipeps_simple_update import _to_physical_pair
+
     if initial_tensor is not None:
         A = initial_tensor
     else:
@@ -541,7 +646,7 @@ def fpeps(
             key = jax.random.PRNGKey(0)
         A = _initialize_fpeps(config, key)
 
-    A_opt, lam_h, lam_v = _fpeps_simple_update(
+    A_opt, B_opt, lam_h, lam_v = _fpeps_simple_update(
         A,
         hamiltonian_gate,
         max_D=config.D,
@@ -549,9 +654,21 @@ def fpeps(
         steps=config.num_imaginary_steps,
     )
 
-    A_abs = _absorb_lambdas(A_opt, lam_h, lam_v)
-    A_abs = _normalize_tensor(A_abs)
-    env = fermionic_ctm(A_abs, config)
-    energy = compute_energy_fermionic_ctm(A_abs, env, hamiltonian_gate)
+    # sqrt(lambda) on each leg, so every bond of the lattice picks it up exactly
+    # once.  The old code used ``_absorb_lambdas`` (full lambda), which squared
+    # every bond weight of the returned state (#878).
+    A_phys, B_phys = _to_physical_pair(A_opt, B_opt, lam_h, lam_v)
 
-    return float(energy), A_opt, env
+    env_A, env_B = ctm_split_tensor_2site(
+        A_phys,
+        B_phys,
+        config.ctm_chi,
+        max_iter=config.ctm_max_iter,
+        conv_tol=config.ctm_conv_tol,
+    )
+    d = A_phys.indices[A_phys.labels().index("phys")].dim
+    energy = compute_energy_split_ctm_tensor_2site(
+        A_phys, B_phys, env_A, env_B, hamiltonian_gate, d=d
+    )
+
+    return float(energy), (A_opt, B_opt), (env_A, env_B)
