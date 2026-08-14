@@ -128,11 +128,14 @@ def test_the_physical_tensor_carries_each_bond_weight_once():
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "#878 is fixed at D=2 (lam_h = [1, 0.678] at 100 steps, against [1, 0] "
-        "before) but the fermionic path still degenerates at D=3: measured "
-        "[1, 2.1e-11, 1e-16].  Kept as a strict xfail rather than deleted -- it "
-        "is the remaining half of #878 and must flag the moment it starts "
-        "passing."
+        "NOT a D=3 defect -- the fermionic sweep is seed-dependent at every "
+        "bond dimension.  Surviving seeds out of 5, 600 steps, dt=0.05: D=2 "
+        "4/5, D=3 2/5, D=4 4/5, D=6 4/5.  Seed 0 (used here, and throughout "
+        "the original investigation) happens to die at D=3 and D=6 and live at "
+        "D=2 and D=4, which is what made this look like a bond-dimension bug.  "
+        "Same basin behaviour as #869 on the bosonic path, so it is fixed by "
+        "the no-stored-lambda rewrite rather than by anything local.  Strict, "
+        "so it flags the moment that lands."
     ),
 )
 def test_a_nominally_D3_state_uses_its_third_bond_direction():
@@ -140,6 +143,11 @@ def test_a_nominally_D3_state_uses_its_third_bond_direction():
 
     #667's other guard, which caught a "D=3" result that was really D=2 wearing
     a D=3 shape (lam_3 ~ 2e-6).
+
+    Pinned at seed 0 deliberately: it is a *known-dying* seed, so this is a
+    regression guard on the worst case rather than a coin flip.  Do not "fix"
+    it by choosing a luckier seed -- that is precisely the mistake that made
+    #869's diagnosis narrower than its title.
     """
     _A, lam_h, _lam_v = _run(D=3, steps=40)
 
