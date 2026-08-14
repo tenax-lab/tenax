@@ -1,6 +1,6 @@
 # Simple update without stored lambdas — design
 
-**Status:** draft for review · **Date:** 2026-08-14 · **Refs:** #667, #851, #863, #865, #869, #870, #875, #877, #392
+**Status:** draft for review · **Date:** 2026-08-14 · **Refs:** #667, #851, #863, #865, #869, #870, #875, #877, #878
 
 ## 1. Why
 
@@ -156,7 +156,7 @@ that refuses to certify a non-state). It is the starting point for
 |---|---|---|
 | bosonic dense | yes | the main path |
 | symmetric U(1)/Z_n | yes | works only since #875 |
-| fermionic (#392) | yes | SU has never worked here; see §5 |
+| fermionic (#878) | yes | currently returns **exactly zero**; see §5.4 |
 | PESS | no | different lattice; separate work |
 
 ## 5. Risks — stated, not buried
@@ -196,25 +196,59 @@ Phase 1 must prove `gauge_fix` is an exact gauge transformation on a fermionic
 state (same invariance test #870 used: re-contract and compare, expect ~1e-15)
 *before* any evolution is built on it.
 
-### 5.3 #869's divergence is initial-state-dependent
+### 5.3 #869's divergence is seed-dependent at D=3 and universal from D=4
 
-Measured this session and **not recorded in #869**: with the four-lambda scheme
-at D=3, `dt=0.05`, the unmodified baseline diverges at seed 0 (relerr 3.2e-01)
-and converges perfectly at seed 1 (3.6e-07). Every measurement in #869, and every
-one of mine before that grid, used a single seed.
+Measured this session and **not recorded in #869**. Fraction of random seeds on
+which the unmodified four-lambda baseline diverges, `dt=0.05`, 1200 steps:
 
-Consequence for this work: **any acceptance test must sweep seeds.** A single-seed
-validation of this rewrite would prove nothing, and would repeat the exact mistake
-that made #869's diagnosis narrower than its title.
+| D | seeds diverging | |
+|---|---|---|
+| 2 | 0 / 3 | never broken |
+| 3 | **1 / 3** (seed 0) | seed-dependent |
+| 4 | **3 / 3** | universal |
+| 5 | 3 / 3, flat spectra | universal |
 
-### 5.4 The fermionic module still carries a fixed bug
+Every measurement in #869, and every one of mine before this grid, used a single
+seed. That is why D=3 results looked contradictory: at D=3 whether it diverges
+is luck of the draw, while at D≥4 it always does. The failure becomes *more*
+universal with D, not less.
 
-`fermionic_ipeps.py:291` and `:373` still compute `sigma / (jnp.max(sigma) + EPS)`
-— the additive-epsilon defect that #748 and #865 identified and #875 fixed, but
-only in `ipeps_simple_update.py`. It is live on `main`.
+Consequence for this work: **acceptance tests must sweep seeds *and* D.** Either
+axis alone would have missed this — a D=3 single-seed run can pass on a broken
+implementation, and a D=4 single-seed run cannot distinguish "always broken"
+from "unlucky".
 
-This should be **filed and fixed independently**, not folded into the rewrite, so
-that the fermionic path has a known-good baseline to compare the rewrite against.
+### 5.4 The fermionic path currently returns exactly zero (#878)
+
+Filed this session as **#878**, and larger than a stale epsilon.
+
+`fpeps()` collapses to exactly zero by step 10 at D=2, `dt=0.05` — measured, not
+inferred. `min(lam_h)` falls 2.9e-01 → 2.0e-02 → 2.9e-03 → 1.1e-07 → 0, and
+`lam_h`/`lam_v` both end `[0, 0]`. The default is 200 steps, so every shipped
+`fpeps()` run is far past it.
+
+Root cause is #667 verbatim, in a module #844 never touched: `sigma` is stored
+as the new lambda at `fermionic_ipeps.py:291` *and* its square root is absorbed
+into `Gamma` at `:298`, so the next `_absorb_lambdas` scales that bond by lambda
+again and it carries `lambda**1.5`. #667's own title reads "bosonic →
+near-classical rank-3; **fermionic → zero norm**"; only the bosonic half was
+fixed, and the issue is closed.
+
+Three further defects in the same functions (see #878): the additive epsilon at
+`:291`/`:373` plus a third inside `jnp.sqrt(sigma + EPS)`; the shared bond
+receiving `lam_h` from both ends because `_absorb_lambdas` scales all four legs;
+and `fpeps()` building its physical tensor with full `lambda` rather than
+`sqrt(lambda)`, so each bond carries `lambda**2`.
+
+**Consequence for this design.** Phase 0 is a real fix, not a one-line change,
+and until it lands there is **no trustworthy fermionic baseline to validate the
+rewrite against** — the current path produces zero, so "the rewrite differs from
+the old path" carries no information there. Either Phase 0 lands first, or
+fermionic coverage waits for it.
+
+Note also `|A|` reads a healthy 1.0 the whole way down, because
+`_normalize_tensor` runs last. Any guard for this must assert a *spectrum*
+(`min(lam) > 0`) or an energy, never a norm.
 
 ## 6. Testing
 
@@ -229,9 +263,13 @@ percentage.
    MPS canonical form and the lambdas must equal the Schmidt values to machine
    precision. This is the one place we have ground truth, and tenax already has
    `FiniteMPS.canonicalize` to check against.
-3. **Reference spectra, swept over seeds.** D=3 → `[1, 0.165865, 0.015641]`,
-   D=4 → `[1, 0.168753, 0.017325, 0.012895]`, independently measured on the
-   dense path and again by the BP gauge in #870. **≥3 seeds × ≥2 dt** (§5.3).
+3. **Reference spectra, swept over seeds *and* D.** D=3 →
+   `[1, 0.165865, 0.015641]`, D=4 → `[1, 0.168753, 0.017325, 0.012895]`,
+   independently measured on the dense path and again by the BP gauge in #870.
+   **≥3 seeds × D ∈ {2,3,4}**, because §5.3 shows neither axis alone
+   discriminates. Note D≥4 needs enough imaginary time to converge: 1200 steps
+   at dt=0.01 is only 12 time units and reads as a failure that is really
+   under-convergence.
 4. **No `steps % 4` dependence.** #851's actual symptom: stopping the sweep at
    different phases must not change the physical state. The `dt = 0` identity-gate
    construction from #863 makes this exact with no tolerance to argue about.
@@ -250,12 +288,16 @@ Registered `core` where it runs without a CTM.
 
 The engine is built alongside the existing code, not in place.
 
-1. **Phase 0** — file and fix §5.4 so fermionic has a trustworthy baseline.
+1. **Phase 0** — fix **#878**, so fermionic has a baseline that is not zero.
+   Four defects, not a one-line epsilon change (§5.4). This **blocks fermionic
+   coverage**: until it lands, "the rewrite differs from the old path" carries
+   no information on that path, because the old path produces zero. It does not
+   block Phases 1–2, which are bosonic.
 2. **Phase 1** — `ipeps_gauge.py`: generalise the #870 gauge to 1-site and to
    fermionic. Prove exactness (§6.1, §6.2). **Go/no-go on §5.1.**
 3. **Phase 2** — `ipeps_su.py`: the engine, bosonic dense first, against the
-   reference spectra swept over seeds.
-4. **Phase 3** — symmetric, then fermionic.
+   reference spectra swept over seeds and D.
+4. **Phase 3** — symmetric, then fermionic (gated on Phase 0 and §5.1).
 5. **Phase 4** — migrate `ipeps()` and `fpeps()`. The seven call sites are now
    one (#877), so this is a single edit rather than seven.
 6. **Phase 5** — delete the old path, `_inv_lambda`, `safe_inv_lambda`, and the
@@ -279,4 +321,5 @@ while the new one is unproven.
    Phase 1 gate fails, or should the spec commit to one of the three options now?
 2. Should `SUState` be a new type, or should this reuse the existing iPEPS state
    container with the lambda fields removed?
-3. Phase 0 (§5.4) — fix on `main` directly as its own PR, or fold into Phase 1?
+3. Phase 0 (§5.4 / #878) — fix on `main` as its own PR before any rewrite work,
+   or run it in parallel with Phases 1–2 since those are bosonic and unblocked?
