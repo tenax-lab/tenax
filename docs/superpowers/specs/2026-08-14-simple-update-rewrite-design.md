@@ -1,6 +1,6 @@
 # Simple update without stored lambdas — design
 
-**Status:** draft for review · **Date:** 2026-08-14 · **Refs:** #667, #851, #863, #865, #869, #870, #875, #877, #878
+**Status:** draft for review · **Date:** 2026-08-14 · **Refs:** #667, #851, #863, #865, #869, #870, #875, #877, #878, #879, #881
 
 ## 1. Why
 
@@ -126,7 +126,7 @@ Three independent simple-update implementations exist today:
 | module | ansatz | notes |
 |---|---|---|
 | `ipeps_simple_update.py` | 2-site checkerboard | bosonic dense + symmetric; consolidated in #877 |
-| `fermionic_ipeps.py` | **1-site** | its own absorb/invert/truncate; `A.l` and `A.r` are the same bond |
+| `fermionic_ipeps.py` | 1-site on `main`; **2-site** in #881 | had its own absorb/invert/truncate; #881 routes it through the shared sweep |
 | `pess.py` | kagome simplex | different lattice — **out of scope** |
 
 The rewrite unifies the first two behind one engine.
@@ -156,7 +156,7 @@ that refuses to certify a non-state). It is the starting point for
 |---|---|---|
 | bosonic dense | yes | the main path |
 | symmetric U(1)/Z_n | yes | works only since #875 |
-| fermionic (#878) | yes | currently returns **exactly zero**; see §5.4 |
+| fermionic (#878/#881) | yes | returned **exactly zero**; five of six defects fixed in #881, energy still unvalidated (#879). See §5.4, §5.5 |
 | PESS | no | different lattice; separate work |
 
 ## 5. Risks — stated, not buried
@@ -218,7 +218,31 @@ axis alone would have missed this — a D=3 single-seed run can pass on a broken
 implementation, and a D=4 single-seed run cannot distinguish "always broken"
 from "unlucky".
 
-### 5.4 The fermionic path currently returns exactly zero (#878)
+#### Independently confirmed on the fermionic path
+
+The same behaviour appears in `fermionic_ipeps.py`, an implementation that
+shares **nothing** with the bosonic one except the stored-lambda state model
+(#878/#881). Seeds 0–4, 600 steps, dt=0.05, counting seeds whose bond spectrum
+survives:
+
+| D | 2 | 3 | 4 | 6 |
+|---|---|---|---|---|
+| seeds alive | 4/5 | **2/5** | 4/5 | 4/5 |
+
+Every bond dimension has both surviving and dying seeds, so "D≥3 is broken" is
+not the shape of the defect on either path. Seed 0 happens to die at D=3 and
+D=6 and live at D=2 and D=4, which is what made it look like a bond-dimension
+bug for as long as only seed 0 was measured.
+
+**This is the strongest evidence in this document.** One implementation's basin
+failure is a hypothesis about that implementation. The *same* failure arising
+independently in two implementations whose only common element is lambda carried
+across a non-unitary sweep is evidence about the state model itself — which is
+what this design removes. Four hypotheses were refuted reaching that conclusion
+on the fermionic side alone (misplaced layout pin, odd D, unbalanced virtual
+charges, "D=3 is special"), every one of them by a control arm.
+
+### 5.4 The fermionic path returned exactly zero (#878, fixed in #881)
 
 Filed this session as **#878**, and larger than a stale epsilon.
 
@@ -240,15 +264,42 @@ receiving `lam_h` from both ends because `_absorb_lambdas` scales all four legs;
 and `fpeps()` building its physical tensor with full `lambda` rather than
 `sqrt(lambda)`, so each bond carries `lambda**2`.
 
-**Consequence for this design.** Phase 0 is a real fix, not a one-line change,
-and until it lands there is **no trustworthy fermionic baseline to validate the
-rewrite against** — the current path produces zero, so "the rewrite differs from
-the old path" carries no information there. Either Phase 0 lands first, or
-fermionic coverage waits for it.
+**Status: five of the six are fixed in #881**, which also moves fPEPS to a
+2-site checkerboard — the 1-site ansatz discarded `Vh` at both SVD sites, so `A`
+received the left/top half of every gate and never the right/bottom, and no
+1-site tensor can represent the t-V charge-density wave anyway (measured
+sublattice gap 0.27 to 1.4). D=2 now gives `lam_h = [1, 0.678]` against `[1, 0]`.
+What remains is the seed-dependent basin failure in §5.3.
+
+**Consequence for this design.** Phase 0 shrinks: #881 supplies the fermionic
+baseline this document said was missing, so Phase 3 no longer waits on a fix
+that does not exist. It does *not* supply a trustworthy fermionic **energy** —
+see §5.5 — so acceptance for the fermionic path must be stated on bond spectra
+and the variational bound, not on an energy value.
 
 Note also `|A|` reads a healthy 1.0 the whole way down, because
 `_normalize_tensor` runs last. Any guard for this must assert a *spectrum*
 (`min(lam) > 0`) or an energy, never a norm.
+
+### 5.5 No fermionic CTM energy is asserted against a reference (#879)
+
+The ED machinery exists — `_build_tv_hamiltonian_2x2_pbc` plus `eigvalsh` gives
+a 4-site 2×2 PBC Jordan-Wigner ground state, **E_gs/site = −0.5** at t=1 — and
+`test_tier7_variational_bound_check` uses it properly, on 7 seeds. But it guards
+`reference_energy_2x2_pbc`, the direct contractor path. The only place the CTM
+energies meet that reference, `test_tier5_compare_to_ipeps_ctm_energy`, prints
+four numbers and asserts nothing.
+
+So `compute_energy_ctm_tensor`, `compute_energy_split_ctm_tensor` and
+`compute_energy_split_ctm_tensor_2site` can each return any finite real number
+on a fermionic state unchallenged. #881 measures ≈ −5e−5 on a healthy spectrum
+with a full-rank corner, and that **cannot currently be distinguished from a
+pre-existing defect**.
+
+**Consequence for this design.** A fermionic energy cannot be an acceptance
+criterion until #879 lands. Extending tier 7's variational bound to the three
+CTM paths is cheap and needs no new machinery; do that before Phase 3 rather
+than trusting any number those paths produce.
 
 ## 6. Testing
 
@@ -288,11 +339,12 @@ Registered `core` where it runs without a CTM.
 
 The engine is built alongside the existing code, not in place.
 
-1. **Phase 0** — fix **#878**, so fermionic has a baseline that is not zero.
-   Four defects, not a one-line epsilon change (§5.4). This **blocks fermionic
-   coverage**: until it lands, "the rewrite differs from the old path" carries
-   no information on that path, because the old path produces zero. It does not
-   block Phases 1–2, which are bosonic.
+1. **Phase 0** — land **#881** (the fermionic baseline: five of six defects, and
+   fPEPS on a 2-site checkerboard) and **#879** (a variational-bound assertion on
+   the CTM energy paths). #881 is open; #879 is not started. Neither blocks
+   Phases 1–2, which are bosonic. Phase 3 needs both: without #881 the old path
+   returns zero and comparisons carry no information, and without #879 no
+   fermionic energy can serve as an acceptance criterion (§5.4, §5.5).
 2. **Phase 1** — `ipeps_gauge.py`: generalise the #870 gauge to 1-site and to
    fermionic. Prove exactness (§6.1, §6.2). **Go/no-go on §5.1.**
 3. **Phase 2** — `ipeps_su.py`: the engine, bosonic dense first, against the
@@ -321,5 +373,6 @@ while the new one is unproven.
    Phase 1 gate fails, or should the spec commit to one of the three options now?
 2. Should `SUState` be a new type, or should this reuse the existing iPEPS state
    container with the lambda fields removed?
-3. Phase 0 (§5.4 / #878) — fix on `main` as its own PR before any rewrite work,
-   or run it in parallel with Phases 1–2 since those are bosonic and unblocked?
+3. Phase 0 — #881 is open and #879 unstarted.  Land both before any rewrite
+   work, or run them in parallel with Phases 1–2 since those are bosonic and
+   unblocked either way?
