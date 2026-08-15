@@ -81,6 +81,10 @@ Not a tunable. The gate invalidated the gauge, so the gauge is recomputed. A
 "re-gauge every N steps" knob would reintroduce exactly the staleness this
 design exists to remove, under a new name.
 
+This is the expensive choice at small D — four BP solves per cycle, ~3.7× at
+D=3 — and it is made with that cost in view rather than in ignorance of it.
+See the measurements below.
+
 ### BP tolerance: 1e-6
 
 Measured this session, dense, gauging a 60-phase SU state from its stored
@@ -99,10 +103,30 @@ cycle). An earlier version of this benchmark cycled `t % 4` over too few trials
 and let first-time compiles for phases 2 and 3 land inside the measured window;
 its ratios were wrong and are not the ones above.
 
+**The table is per BP solve; the cadence needs four of them per cycle.** §2
+re-gauges before *each bond*, and a checkerboard cycle has four, so the real
+overhead is 4× the figures above:
+
+| D | per solve @1e-6 | **per 4-bond cycle** | total slowdown |
+|---|---|---|---|
+| 2 | 21.4× | 85.6× | artefact, see below |
+| 3 | 0.67× | **2.68×** | ~3.7× |
+| 4 | 0.08× | **0.32×** | ~1.3× |
+| 6 | 0.01× | **0.04×** | ~1.04× |
+
+So the honest statement is *not* "≤8%". At **D=3 the gauge dominates the step**,
+costing about 2.7 SU cycles per cycle of evolution. It becomes cheap from D=4
+(32%) and negligible by D=6 (4%).
+
+That is still the right trade at D≥4, and D≥4 is where large-D work happens. At
+D=3 it is a real ~3.7× cost, accepted deliberately: a D=3 run is seconds either
+way, and §5.3 shows D=3 is precisely where the stored-lambda scheme is least
+trustworthy, so paying for an honest gauge there is the point rather than a
+regrettable side effect.
+
 BP iteration count is **flat-to-decreasing in D** (22, 33, 23, 15 at 1e-12;
-9, 13, 9, 6 at 1e-6), so BP is not the part that scales badly. At D≥3 — where SU
-is actually broken and where anyone cares — gauging every step costs ≤8% of an
-SU cycle. The cost objection does not survive the measurement.
+9, 13, 9, 6 at 1e-6), so BP is not the part that scales badly — the overhead
+shrinks with D because the SU cycle grows, not because BP gets cheaper.
 
 These are cold gauges (each trial re-gauges the same state), which is
 representative of the per-step cost precisely because warm ≈ cold — see below.
@@ -323,13 +347,35 @@ percentage.
    MPS canonical form and the lambdas must equal the Schmidt values to machine
    precision. This is the one place we have ground truth, and tenax already has
    `FiniteMPS.canonicalize` to check against.
-3. **Reference spectra, swept over seeds *and* D.** D=3 →
-   `[1, 0.165865, 0.015641]`, D=4 → `[1, 0.168753, 0.017325, 0.012895]`,
-   independently measured on the dense path and again by the BP gauge in #870.
-   **≥3 seeds × D ∈ {2,3,4}**, because §5.3 shows neither axis alone
-   discriminates. Note D≥4 needs enough imaginary time to converge: 1200 steps
-   at dt=0.01 is only 12 time units and reads as a failure that is really
-   under-convergence.
+3. **Acceptance is on energy and self-consistency, NOT on a reference spectrum.**
+
+   An earlier draft of this section asked the rewrite to reproduce
+   `[1, 0.165865, 0.015641]` at D=3 and `[1, 0.168753, 0.017325, 0.012895]` at
+   D=4. **Those are the stale stored spectra**, and §1 of this same document
+   says they were never the Schmidt values they were used as — BP on that state
+   reports `[1, 0.14243, 0.01130]` and `[1, 0.14534, 0.01258, 0.01017]`. Making
+   them acceptance targets would reject a correct BP-gauged result, or invite
+   tuning the rewrite back toward the behaviour it exists to delete.
+
+   Nor are the BP numbers the right target: they are the BP-consistent spectra
+   *of `main`'s converged two-lambda state*, and the rewrite converges to its own
+   fixed point. **We do not know the correct spectrum a priori, and the spec must
+   not pretend otherwise.** What can be asserted without one:
+
+   - **Energy, variationally.** Simple update is not variational, but a lower
+     converged energy on the same model at the same D is strictly better
+     evidence, and an energy *below* an ED ground state is unambiguously wrong.
+   - **Self-consistency.** The returned lambdas must equal the BP messages of
+     the returned state to the gauge tolerance. This is near-tautological by
+     construction, which is the point: it is exactly the property `main`'s
+     stored weights fail by 15–35%.
+   - **Tree ground truth** (§6.2), where the answer *is* known exactly.
+   - **Independent agreement**: dense vs symmetric vs fermionic must land on the
+     same physics at the same D.
+
+   Swept **≥3 seeds × D ∈ {2,3,4}**, because §5.3 shows neither axis alone
+   discriminates. Note D≥4 needs enough imaginary time: 1200 steps at dt=0.01 is
+   only 12 time units and reads as a failure that is really under-convergence.
 4. **No `steps % 4` dependence.** #851's actual symptom: stopping the sweep at
    different phases must not change the physical state. The `dt = 0` identity-gate
    construction from #863 makes this exact with no tolerance to argue about.
