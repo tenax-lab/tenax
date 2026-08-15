@@ -214,12 +214,24 @@ spec. Options, to be decided by measurement in Phase 1:
 
 A **go/no-go gate** at the end of Phase 1 decides which.
 
-**Decided: if none works, fermionic drops to v2.** This is authorised in advance
-rather than being a question to reopen under schedule pressure — the failure mode
-to avoid is meeting a date by shipping a fermionic path nobody has shown to be
-correct, which is how #878 came to exist. Dropping to v2 leaves the existing
-fermionic code in place (repaired by #881) and costs nothing that is working
-today.
+**Decided: if none works, fermionic drops to v2.** Authorised in advance rather
+than reopened under schedule pressure — the failure mode to avoid is meeting a
+date by shipping a fermionic path nobody has shown correct, which is how #878
+came to exist. Dropping to v2 leaves the existing code in place (repaired by
+#881) and costs nothing that works today.
+
+**Scope of that gate, precisely.** The constraint above is *1-site-specific*:
+it exists because `A.l` and `A.r` are the same bond there. #881 moves fPEPS to
+a 2-site checkerboard, where they are different bonds, so a failure of the
+1-site experiment does **not** by itself condemn the 2-site fermionic engine,
+and the v2 drop must not be triggered by it alone.
+
+There is, separately, a measured reason the 2-site fermionic path may still
+need a layout constraint: removing the pin from `_truncation_base_charges`
+collapses the 2-site sweep at **every** D tested, including the D=2 and D=4
+that otherwise work (#881). Why a 2-site path needs it, when the stated
+justification is 1-site-only, is **not understood** and is its own Phase 1
+question. That — not the 1-site experiment — is what gates fermionic v1.
 
 ### 5.2 Fermionic BP has never been run
 
@@ -330,9 +342,31 @@ with a full-rank corner, and that **cannot currently be distinguished from a
 pre-existing defect**.
 
 **Consequence for this design.** A fermionic energy cannot be an acceptance
-criterion until #879 lands. Extending tier 7's variational bound to the three
-CTM paths is cheap and needs no new machinery; do that before Phase 3 rather
-than trusting any number those paths produce.
+criterion until #879 lands.
+
+**And tier 7's bound is not the fix**, though an earlier draft of this section
+said it was. That bound is stated for a state on the *four-site 2x2 PBC torus*;
+the CTM energies are infinite-lattice quantities, and
+`test_tier5_compare_to_ipeps_ctm_energy` says so itself -- "NOT expected to
+match exactly ... the CTM energy is for the infinite lattice while the
+reference is for a 2x2 PBC torus". A valid infinite-lattice energy may lie
+*below* a finite-cluster ground state, and a finite-chi CTM contraction is not
+a strict variational bound in the first place. Applying it would reject correct
+implementations.
+
+What is applicable, in increasing strength:
+
+- **Cross-path agreement on the same state and environment.** `compute_energy_ctm_tensor`, `compute_energy_split_ctm_tensor` and
+  `compute_energy_split_ctm_tensor_2site` compute the same observable and must
+  agree to contraction accuracy. This needs no physics reference at all, and it
+  is exactly the check whose failure was #392.
+- **The finite-cluster bound on the finite-cluster path only** -- tier 7 keeps
+  guarding `reference_energy_2x2_pbc`, which is the quantity it is valid for.
+- **chi-convergence**: the CTM energy must settle as chi grows, and a value that
+  moves with chi is not yet an answer.
+- **A magnitude anchor on a state whose energy is hand-computable** (a product
+  state), which is what catches "approximately 0" -- the actual symptom in
+  #881.
 
 ## 6. Testing
 
@@ -362,9 +396,9 @@ percentage.
    fixed point. **We do not know the correct spectrum a priori, and the spec must
    not pretend otherwise.** What can be asserted without one:
 
-   - **Energy, variationally.** Simple update is not variational, but a lower
-     converged energy on the same model at the same D is strictly better
-     evidence, and an energy *below* an ED ground state is unambiguously wrong.
+   - **Energy.** A lower converged energy on the same model at the same D is
+     better evidence. Note the ED bound available here is for a *finite* 2x2
+     torus and does **not** bound an infinite-lattice CTM energy — see §5.5.
    - **Self-consistency.** The returned lambdas must equal the BP messages of
      the returned state to the gauge tolerance. This is near-tautological by
      construction, which is the point: it is exactly the property `main`'s
@@ -406,8 +440,12 @@ The engine is built alongside the existing code, not in place.
 2. **Phase 1** — `ipeps_gauge.py`: generalise the #870 gauge to 1-site and to
    fermionic. Prove exactness (§6.1, §6.2). **Go/no-go on §5.1.**
 3. **Phase 2** — `ipeps_su.py`: the engine, bosonic dense first, against the
-   reference spectra swept over seeds and D.
-4. **Phase 3** — symmetric, then fermionic (gated on Phase 0 and §5.1).
+   §6.3 criteria — energy, lambda/BP self-consistency, tree ground truth and
+   cross-path agreement — swept over seeds and D. **Not** against a reference
+   spectrum: §6.3 establishes there is no valid one, and following an earlier
+   draft of this line would reintroduce the stale targets it removed.
+4. **Phase 3** — symmetric, then fermionic (gated on Phase 0, and on the
+   *2-site* layout question in §5.1 — not on the 1-site experiment).
 5. **Phase 4** — migrate `ipeps()` and `fpeps()`. The seven call sites are now
    one (#877), so this is a single edit rather than seven.
 6. **Phase 5** — delete the old path, `_inv_lambda`, `safe_inv_lambda`, and the
@@ -430,7 +468,9 @@ while the new one is unproven.
 Resolved 2026-08-15; the reasoning is folded into the sections named.
 
 1. **Fermionic drops to v2 if the §5.1 gate fails** — authorised in advance, so
-   it is not a question reopened under schedule pressure. See §5.1.
+   it is not a question reopened under schedule pressure. Narrowed: the gate is
+   the *2-site* layout question, since the 1-site constraint is superseded by
+   #881. See §5.1.
 2. **`SUState` is a new type**, not the existing container with lambda removed.
    See §3.
 3. **Phase 0 runs in parallel with Phases 1–2**, and gates Phase 3 only. See §7.
