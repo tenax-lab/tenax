@@ -83,7 +83,9 @@ design exists to remove, under a new name.
 
 This is the expensive choice at small D — four BP solves per cycle, ~3.7× at
 D=3 — and it is made with that cost in view rather than in ignorance of it.
-See the measurements below.
+At the **default** D=2 the naive cost is ~85×, which is not acceptable and is
+not accepted: it is host-dispatch overhead in an untraced Python loop, and
+tracing it is a Phase 1 gate. See the measurements below.
 
 ### BP tolerance: 1e-6
 
@@ -109,7 +111,7 @@ overhead is 4× the figures above:
 
 | D | per solve @1e-6 | **per 4-bond cycle** | total slowdown |
 |---|---|---|---|
-| 2 | 21.4× | 85.6× | artefact, see below |
+| 2 | 21.4× | 85.6× | **default D** — see the gate below |
 | 3 | 0.67× | **2.68×** | ~3.7× |
 | 4 | 0.08× | **0.32×** | ~1.3× |
 | 6 | 0.01× | **0.04×** | ~1.04× |
@@ -134,9 +136,32 @@ representative of the per-step cost precisely because warm ≈ cold — see belo
 1e-2 is nearly free (1 iteration) and rejected: residual 1e-3..9e-3 is not an
 honest gauge, and honesty is the entire point.
 
-The D=2 ratios (6–31×) are an artefact — the D=2 SU cycle sits on the
-host-dispatch floor at 17 ms, so the ratio measures Python overhead. Absolute
-worst case there is 0.5 s, and D=2 was never the broken case.
+### D=2 is the default, and 85× is not an artefact anyone can ignore
+
+An earlier draft called the D=2 ratio an artefact of the host-dispatch floor
+and moved on. The diagnosis is right and the dismissal is not: **`D = 2` is the
+default in both `iPEPSConfig` and `FPEPSConfig`**, so this is the path most
+callers are on.
+
+The arithmetic, from this document's own numbers: four mandatory solves at
+371 ms is **1.48 s per cycle** against a 17 ms SU cycle, so a default 200-step
+run goes from **~0.9 s to ~74 s**. (The "worst case 0.5 s" in the earlier draft
+was a *single* solve, not a run.) Shipping that as the default would be a severe
+regression regardless of what the ratio is *made of*.
+
+**It is Python, and it is fixable.** BP's cost per *iteration* is flat in D —
+41 ms at D=2, 61 at D=3, 52 at D=4, 32 at D=6 — which is the signature of host
+dispatch rather than arithmetic, on tensors that at D=2 are a few dozen numbers.
+`ipeps_bp_gauge.py` today is a pure Python loop over eager ops: no `jax.jit`, no
+`lax.scan`, no `lax.while_loop`.
+
+**Phase 1 gate, therefore:** the BP iteration must be traced (`lax.while_loop`
+on the residual, or `scan` over a fixed iteration budget) before the engine is
+built on it, and the D=2 per-solve cost must come down to the point where a
+default 200-step run is within ~2× of today's. If it cannot, the cadence
+decision in §2 has to be revisited for small D rather than the cost quietly
+accepted — and that revisit is a design change requiring its own review, not an
+implementation detail.
 
 **Warm ≈ cold.** A hypothesis worth recording as refuted: re-gauging after one
 gate does *not* converge in fewer iterations than gauging from scratch (D=3:
@@ -470,12 +495,18 @@ The engine is built alongside the existing code, not in place.
 2. **Phase 1** — `ipeps_gauge.py`: generalise the #870 gauge to 1-site and to
    fermionic. Prove exactness (§6.1, §6.2). **Go/no-go on §5.1.**
 3. **Phase 2** — `ipeps_su.py`: the engine, bosonic dense first, against the
-   §6.3 criteria — energy, lambda/BP self-consistency, tree ground truth and
-   cross-path agreement — swept over seeds and D. **Not** against a reference
-   spectrum: §6.3 establishes there is no valid one, and following an earlier
-   draft of this line would reintroduce the stale targets it removed.
+   §6.3 criteria *available on one representation*: energy, lambda/BP
+   self-consistency, tree ground truth, chi-convergence, no `steps % 4`
+   dependence, not-the-product-state and rank honesty — swept over seeds and D.
+
+   **Not** cross-path agreement: that compares dense against symmetric and the
+   second representation does not exist until Phase 3, so listing it here leaves
+   Phase 2 with an unsatisfiable gate. **Not** a reference spectrum either;
+   §6.3 establishes there is no valid one.
 4. **Phase 3** — symmetric, then fermionic (gated on Phase 0, and on the
-   *2-site* layout question in §5.1 — not on the 1-site experiment).
+   *2-site* layout question in §5.1 — not on the 1-site experiment). **This is
+   where dense-vs-symmetric cross-path agreement becomes evaluable**, once a
+   second representation of the same bosonic model exists.
 5. **Phase 4** — migrate `ipeps()` and `fpeps()`. The seven call sites are now
    one (#877), so this is a single edit rather than seven. **Also export
    `gauge_fix` in `src/tenax/__init__.py` (`__all__`) and document it in
