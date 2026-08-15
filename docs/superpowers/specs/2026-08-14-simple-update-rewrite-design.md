@@ -156,16 +156,26 @@ Three independent simple-update implementations exist today:
 The rewrite unifies the first two behind one engine.
 
 ```
-ipeps_su.py                     NEW — the engine
-  su_step(state, gate, max_D)     gauge -> gate -> truncate, one bond
-  su_evolve(state, gate, ...)     drive it; no lambda in the signature
-  SUState                         site tensors + lattice topology. NO lambdas.
+ipeps_su.py                     NEW — the engine (internal, see below)
+  _su_step(state, gate, max_D)    gauge -> gate -> truncate, one bond
+  _su_evolve(state, gate, ...)    drive it; no lambda in the signature
+  _SUState                        site tensors + lattice topology. NO lambdas.
 
 ipeps_gauge.py                  BP gauge, generalised from #870
-  gauge_fix(state, tol=1e-6)      -> gauged state + BondWeights + info
+  gauge_fix(state, tol=1e-6)      PUBLIC -> gauged state + BondWeights + info
 ```
 
-`SUState` is a **new type**, not the existing iPEPS container with the lambda
+**API surface, decided:** `_su_step`, `_su_evolve` and `_SUState` are **internal**
+for v1 — hence the leading underscores above — matching the private
+`_simple_update_checkerboard_sweep` they replace — v1 is a drop-in behind
+`ipeps()` and `fpeps()`, and committing public API to an unproven engine buys
+nothing. `gauge_fix` is **public**, because it generalises the already-exported
+`bp_gauge_checkerboard`; Phase 4 therefore carries an explicit task to add it to
+`src/tenax/__init__.py` (`__all__`) and to `README.md`, per the repository rule
+that new public API must be exported and documented. Promoting the engine later
+is a deliberate decision with its own export task, not a side effect of naming.
+
+`_SUState` is a **new type**, not the existing iPEPS container with the lambda
 fields removed. Deliberately: the point of the design is that there is nowhere
 to put a stale spectrum, and a type that *used* to have lambda fields invites
 them back the first time something wants to cache one. A new type also lets the
@@ -356,10 +366,19 @@ implementations.
 
 What is applicable, in increasing strength:
 
-- **Cross-path agreement on the same state and environment.** `compute_energy_ctm_tensor`, `compute_energy_split_ctm_tensor` and
-  `compute_energy_split_ctm_tensor_2site` compute the same observable and must
-  agree to contraction accuracy. This needs no physics reference at all, and it
-  is exactly the check whose failure was #392.
+- **Cross-path agreement, between paths of the same arity.** Needs no physics
+  reference, and is exactly the check whose failure was #392 — but it only
+  means anything when both sides compute the same observable:
+  - *2-site* (the fPEPS target after #881): `compute_energy_ctm_tensor_2site`
+    against `compute_energy_split_ctm_tensor_2site`, on the same split
+    environment converted to standard form.
+  - *1-site*: `compute_energy_ctm_tensor` against
+    `compute_energy_split_ctm_tensor`, as a separate parity test.
+
+  Do **not** require the 1-site and 2-site functions to agree. The 1-site APIs
+  repeat a single tensor; on a CDW state, where `A != B` by construction and
+  the measured sublattice gap reaches 1.4 (#881), they are not computing the
+  same quantity and equality would be meaningless.
 - **The finite-cluster bound on the finite-cluster path only** -- tier 7 keeps
   guarding `reference_energy_2x2_pbc`, which is the quantity it is valid for.
 - **chi-convergence**: the CTM energy must settle as chi grows, and a value that
@@ -404,8 +423,13 @@ percentage.
      construction, which is the point: it is exactly the property `main`'s
      stored weights fail by 15–35%.
    - **Tree ground truth** (§6.2), where the answer *is* known exactly.
-   - **Independent agreement**: dense vs symmetric vs fermionic must land on the
-     same physics at the same D.
+   - **Independent agreement, within one model only**: dense vs symmetric on the
+     *bosonic Heisenberg* problem, which they both encode, must land on the same
+     physics at the same D. **Fermionic is excluded**: it evolves the spinless
+     t-V model with graded exchange statistics, so equal D does not make its
+     output comparable, and requiring agreement would reject a valid fermionic
+     result. Fermionic needs its own anchors (§5.5), and this criterion cannot
+     be evaluated in Phase 2 at all, which is dense-only.
 
    Swept **≥3 seeds × D ∈ {2,3,4}**, because §5.3 shows neither axis alone
    discriminates. Note D≥4 needs enough imaginary time: 1200 steps at dt=0.01 is
@@ -429,8 +453,14 @@ Registered `core` where it runs without a CTM.
 The engine is built alongside the existing code, not in place.
 
 1. **Phase 0** — land **#881** (the fermionic baseline: five of six defects, and
-   fPEPS on a 2-site checkerboard) and **#879** (a variational-bound assertion on
-   the CTM energy paths). #881 is open; #879 is not started.
+   fPEPS on a 2-site checkerboard) and **#879**. #881 is open; #879 is not
+   started.
+
+   #879 is **not** "a variational bound on the CTM energies" — that phrasing
+   survived here after §5.5 disclaimed it, and following it would restore the
+   invalid check. It is: 2-site cross-path agreement, chi-convergence, a
+   product-state magnitude anchor, and the finite-cluster bound left on
+   `reference_energy_2x2_pbc` alone. See §5.5.
 
    **Decided: runs in parallel with Phases 1–2**, which are bosonic and blocked
    by neither. Phase 3 still needs both — without #881 the old path returns zero
@@ -447,7 +477,9 @@ The engine is built alongside the existing code, not in place.
 4. **Phase 3** — symmetric, then fermionic (gated on Phase 0, and on the
    *2-site* layout question in §5.1 — not on the 1-site experiment).
 5. **Phase 4** — migrate `ipeps()` and `fpeps()`. The seven call sites are now
-   one (#877), so this is a single edit rather than seven.
+   one (#877), so this is a single edit rather than seven. **Also export
+   `gauge_fix` in `src/tenax/__init__.py` (`__all__`) and document it in
+   `README.md`** — it is the one public symbol this design adds (§3).
 6. **Phase 5** — delete the old path, `_inv_lambda`, `safe_inv_lambda`, and the
    absorb/divide machinery.
 
@@ -471,7 +503,8 @@ Resolved 2026-08-15; the reasoning is folded into the sections named.
    it is not a question reopened under schedule pressure. Narrowed: the gate is
    the *2-site* layout question, since the 1-site constraint is superseded by
    #881. See §5.1.
-2. **`SUState` is a new type**, not the existing container with lambda removed.
+2. **`_SUState` is a new type** (internal for v1), not the existing container
+   with lambda removed.
    See §3.
 3. **Phase 0 runs in parallel with Phases 1–2**, and gates Phase 3 only. See §7.
 
