@@ -1,6 +1,6 @@
 # Simple update without stored lambdas — design
 
-**Status:** draft for review · **Date:** 2026-08-14 · **Refs:** #667, #851, #863, #865, #869, #870, #875, #877, #878, #879, #881
+**Status:** accepted · **Date:** 2026-08-14, decisions 2026-08-15 · **Refs:** #667, #851, #863, #865, #869, #870, #875, #877, #878, #879, #881
 
 ## 1. Why
 
@@ -141,8 +141,12 @@ ipeps_gauge.py                  BP gauge, generalised from #870
   gauge_fix(state, tol=1e-6)      -> gauged state + BondWeights + info
 ```
 
-`SUState` deliberately has no lambda field. That is the design in one line: if
-there is nowhere to put a stale spectrum, there is no stale spectrum.
+`SUState` is a **new type**, not the existing iPEPS container with the lambda
+fields removed. Deliberately: the point of the design is that there is nowhere
+to put a stale spectrum, and a type that *used* to have lambda fields invites
+them back the first time something wants to cache one. A new type also lets the
+old container keep its lambdas for the real-time path, where storing them is
+legitimate, instead of forcing one container to mean two different things.
 
 `bp_gauge_checkerboard` (#870) is already verified exact to 1.3e-15 and hardened
 against the norm runaway (max-abs rescale, applied per iteration, plus a guard
@@ -184,9 +188,14 @@ spec. Options, to be decided by measurement in Phase 1:
   unconstrained truncation;
 - keep 1-site fermionic on the existing code until the above is settled.
 
-A **go/no-go gate** at the end of Phase 1 decides which. If none works, fermionic
-drops to v2 and the spec is amended rather than the schedule being met by
-shipping something unproven.
+A **go/no-go gate** at the end of Phase 1 decides which.
+
+**Decided: if none works, fermionic drops to v2.** This is authorised in advance
+rather than being a question to reopen under schedule pressure — the failure mode
+to avoid is meeting a date by shipping a fermionic path nobody has shown to be
+correct, which is how #878 came to exist. Dropping to v2 leaves the existing
+fermionic code in place (repaired by #881) and costs nothing that is working
+today.
 
 ### 5.2 Fermionic BP has never been run
 
@@ -341,10 +350,13 @@ The engine is built alongside the existing code, not in place.
 
 1. **Phase 0** — land **#881** (the fermionic baseline: five of six defects, and
    fPEPS on a 2-site checkerboard) and **#879** (a variational-bound assertion on
-   the CTM energy paths). #881 is open; #879 is not started. Neither blocks
-   Phases 1–2, which are bosonic. Phase 3 needs both: without #881 the old path
-   returns zero and comparisons carry no information, and without #879 no
-   fermionic energy can serve as an acceptance criterion (§5.4, §5.5).
+   the CTM energy paths). #881 is open; #879 is not started.
+
+   **Decided: runs in parallel with Phases 1–2**, which are bosonic and blocked
+   by neither. Phase 3 still needs both — without #881 the old path returns zero
+   so comparisons carry no information, and without #879 no fermionic energy can
+   serve as an acceptance criterion (§5.4, §5.5) — so Phase 0 is a prerequisite
+   for Phase 3, not for starting.
 2. **Phase 1** — `ipeps_gauge.py`: generalise the #870 gauge to 1-site and to
    fermionic. Prove exactness (§6.1, §6.2). **Go/no-go on §5.1.**
 3. **Phase 2** — `ipeps_su.py`: the engine, bosonic dense first, against the
@@ -367,12 +379,16 @@ while the new one is unproven.
   untouched.
 - Making SU variational. It is not, and this does not change that.
 
-## 9. Open questions for review
+## 9. Decisions
 
-1. **§5.1** is the real risk. Is dropping fermionic to v2 acceptable if the
-   Phase 1 gate fails, or should the spec commit to one of the three options now?
-2. Should `SUState` be a new type, or should this reuse the existing iPEPS state
-   container with the lambda fields removed?
-3. Phase 0 — #881 is open and #879 unstarted.  Land both before any rewrite
-   work, or run them in parallel with Phases 1–2 since those are bosonic and
-   unblocked either way?
+Resolved 2026-08-15; the reasoning is folded into the sections named.
+
+1. **Fermionic drops to v2 if the §5.1 gate fails** — authorised in advance, so
+   it is not a question reopened under schedule pressure. See §5.1.
+2. **`SUState` is a new type**, not the existing container with lambda removed.
+   See §3.
+3. **Phase 0 runs in parallel with Phases 1–2**, and gates Phase 3 only. See §7.
+
+What remains genuinely open is empirical, not a choice: whether the 1-site layout
+constraint survives removing the storage (§5.1), and whether BP is an exact gauge
+on a graded tensor network (§5.2). Both are Phase 1 measurements.
