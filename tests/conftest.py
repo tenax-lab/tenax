@@ -70,6 +70,12 @@ _FILE_MARKERS = {
     # is shared across the cases via a module fixture; the D=4 case is @slow.
     "test_su_865_symmetric_collapse.py": "core",
     "test_su_667_product_state.py": "core",
+    # The four-phase sweep had seven byte-identical copies, and #667 had to be
+    # applied to each by hand.  These are exact-equality checks on a handful of
+    # short sweeps (~18s, no CTM), and they are the only thing standing between
+    # the consolidation and a silent behaviour change, so they belong in the
+    # gate rather than in a bucket nothing runs on a PR.
+    "test_su_sweep_consolidation.py": "core",
     # Root-implicit AD wiring (#715): dispatch + guard surface only, no
     # CTM convergence, so it is milliseconds.  The production-run case it
     # also carries is explicitly @slow (#772).

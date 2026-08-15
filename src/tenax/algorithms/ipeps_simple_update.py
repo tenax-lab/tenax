@@ -106,6 +106,109 @@ def _to_physical_tensor(gamma: Tensor, lam_h: jax.Array, lam_v: jax.Array) -> Te
     return out
 
 
+def _to_physical_pair(
+    A: Tensor, B: Tensor, lam_h: jax.Array, lam_v: jax.Array
+) -> tuple[Tensor, Tensor]:
+    """Both checkerboard sites out of Vidal form.
+
+    Four of the five call sites converted ``A`` and ``B`` on adjacent lines;
+    this is those two calls, so that the site-to-bond mapping has one home.
+
+    .. note::
+        Both sites receive the *same* ``lam_h`` on their ``l`` and ``r`` legs
+        and the same ``lam_v`` on ``u`` and ``d``.  A checkerboard has **four**
+        inequivalent nearest-neighbour bonds (``A.r<->B.l``, ``B.r<->A.l``,
+        ``A.d<->B.u``, ``B.d<->A.u``), so two spectra cannot describe it and
+        ``steps % 4`` decides which bond's gauge is stamped on the lattice.
+        That is #851, and it is deliberately **not** fixed here -- this helper
+        reproduces the existing behaviour exactly.  It is written down in one
+        place so the fix lands once rather than five times.
+    """
+    return (
+        _to_physical_tensor(A, lam_h, lam_v),
+        _to_physical_tensor(B, lam_h, lam_v),
+    )
+
+
+def _simple_update_checkerboard_sweep(
+    A: Tensor,
+    B: Tensor,
+    gate: Tensor,
+    max_D: int,
+    steps: int,
+    lam_h: jax.Array | None = None,
+    lam_v: jax.Array | None = None,
+    *,
+    phase0: int = 0,
+) -> tuple[Tensor, Tensor, jax.Array, jax.Array]:
+    """Run ``steps`` phases of the four-bond checkerboard simple-update sweep.
+
+    One implementation, because there were **five** byte-identical copies of
+    this loop -- ``ipeps()``, ``examples/su_symmetric_ctm_e2e.py``,
+    ``tests/_split_ctm_oracle.py``, ``tests/test_split_ctm_2site.py`` and
+    ``tests/test_split_ctm_2site_ad.py``.  #667 had to be applied to each of
+    them by hand, which is the failure shape that also produced #828, #829 and
+    #842: a fix landing on some of N copies.
+
+    The cycle covers every bond of the unit cell exactly once per four steps::
+
+        phase 0: horizontal, left=A right=B
+        phase 1: vertical,   top=A  bottom=B
+        phase 2: horizontal, left=B right=A
+        phase 3: vertical,   top=B  bottom=A
+
+    Driving only phases 0 and 1 leaves ``B.r<->A.l`` and ``B.d<->A.u``
+    unevolved, so ``A`` is always the left/top site of every gate and half the
+    lattice bonds never acquire Schmidt weight at all -- a spuriously dimerized
+    state whose 1-site RDM is indefinite (#667).
+
+    Returns the state in Vidal form; call :func:`_to_physical_pair` for the
+    tensors a CTM should contract.
+
+    Args:
+        A, B:   Bare Vidal ``Gamma`` tensors, labels ``(u, d, l, r, phys)``.
+        gate:   Trotter gate, labels ``(si, sj, si_out, sj_out)``.
+        max_D:  Maximum bond dimension after each truncated SVD.
+        steps:  Number of phases to run (not cycles).
+        lam_h:  Horizontal spectrum to start from; ones if omitted.
+        lam_v:  Vertical spectrum to start from; ones if omitted.
+        phase0: Phase to start the cycle on.  A caller resuming a sweep must
+                pass the phase it stopped on, or the first bond is evolved
+                twice and the second never.
+
+    .. note::
+        Two spectra for four inequivalent bonds is #851; see
+        :func:`_to_physical_pair`.  This reproduces the existing behaviour
+        exactly and does not fix it.
+    """
+    labels = A.labels()
+    if lam_h is None:
+        lam_h = jnp.ones(A.indices[labels.index("r")].dim)
+    if lam_v is None:
+        lam_v = jnp.ones(A.indices[labels.index("d")].dim)
+
+    for step in range(steps):
+        phase = (phase0 + step) % 4
+        if phase == 0:
+            A, B, lam_h = _simple_update_2site_horizontal_tensor(
+                A, B, gate, lam_h, lam_v, max_D
+            )
+        elif phase == 1:
+            A, B, lam_v = _simple_update_2site_vertical_tensor(
+                A, B, gate, lam_h, lam_v, max_D
+            )
+        elif phase == 2:
+            B, A, lam_h = _simple_update_2site_horizontal_tensor(
+                B, A, gate, lam_h, lam_v, max_D
+            )
+        else:
+            B, A, lam_v = _simple_update_2site_vertical_tensor(
+                B, A, gate, lam_h, lam_v, max_D
+            )
+
+    return A, B, lam_h, lam_v
+
+
 def _simple_update_2site_horizontal_tensor(
     A: Tensor,
     B: Tensor,

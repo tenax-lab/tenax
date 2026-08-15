@@ -36,8 +36,7 @@ from tenax.algorithms.ipeps_bp_gauge import (
     bp_gauge_checkerboard,
 )
 from tenax.algorithms.ipeps_simple_update import (
-    _simple_update_2site_horizontal_tensor,
-    _simple_update_2site_vertical_tensor,
+    _simple_update_checkerboard_sweep,
 )
 from tenax.contraction.contractor import contract
 from tenax.core._tensor_utils import scale_bond_axis
@@ -112,25 +111,7 @@ def _simple_update(A, B, *, phases, rotate):
     gate_t = _make_trotter_gate_tensor(
         sublattice_rotate_gate(gate) if rotate else gate, 0.05, site_tensor=A
     )
-    lam_h, lam_v = jnp.ones(D), jnp.ones(D)
-    for step in range(phases):
-        phase = step % 4
-        if phase == 0:
-            A, B, lam_h = _simple_update_2site_horizontal_tensor(
-                A, B, gate_t, lam_h, lam_v, D
-            )
-        elif phase == 1:
-            A, B, lam_v = _simple_update_2site_vertical_tensor(
-                A, B, gate_t, lam_h, lam_v, D
-            )
-        elif phase == 2:
-            B, A, lam_h = _simple_update_2site_horizontal_tensor(
-                B, A, gate_t, lam_h, lam_v, D
-            )
-        else:
-            B, A, lam_v = _simple_update_2site_vertical_tensor(
-                B, A, gate_t, lam_h, lam_v, D
-            )
+    A, B, lam_h, lam_v = _simple_update_checkerboard_sweep(A, B, gate_t, D, phases)
     return A, B, BondWeights(h_AB=lam_h, h_BA=lam_h, v_AB=lam_v, v_BA=lam_v)
 
 
