@@ -37,6 +37,9 @@ from _ipeps_gauge_helpers import (  # tests/ is on sys.path
     _chain_middle_spectra,
     _chain_pair,
     _chain_pair_as_peps,
+    _sym_chain_middle_spectra,
+    _sym_chain_pair,
+    _sym_chain_pair_as_peps,
     _torus_2x2,
     assert_leg_split,
 )
@@ -468,8 +471,13 @@ def test_planar_witness_floor_shrinks_with_chi():
 #: is certifying; 80/100 sits at the f64 floor instead.
 _CHAIN_L_LO, _CHAIN_L_HI = 80, 100
 
-#: Both the reference's self-agreement in ``L`` and BP's agreement with it.
-#: Measured: reference 3.1e-16, BP 1.8e-15 (``h_AB``) and 3.7e-16 (``h_BA``).
+#: Both the reference's self-agreement in ``L`` and BP's agreement with it, on
+#: both arms of the anchor.  Measured, dense: reference 3.1e-16, BP 1.8e-15
+#: (``h_AB``) and 3.7e-16 (``h_BA``).  Block-sparse: reference 4.1e-15, BP
+#: 7.1e-16 and 1.0e-15.  One number rather than two because the claim is the
+#: same one -- BP is exact on a tree -- and both arms sit at the f64 floor;
+#: what differs between them is the ``L`` needed to get there, which is why
+#: that is the constant each arm has its own copy of.
 _ANCHOR_TOL = 1e-12
 
 #: ``gauge_fix``'s default ``tol=1e-6`` is a *weight* tolerance, and the weights
@@ -610,3 +618,163 @@ def test_bp_weights_are_the_chains_schmidt_values():
             f"max-normalises every weight vector, so it must be exactly 1.0; "
             f"got {float(v[0]):.17g}"
         )
+
+
+# --- the same anchor, on the block-sparse path ----------------------------
+
+#: The two chain lengths the *symmetric* reference is measured at.  Measured
+#: here, not inherited: a different state converges in ``L`` at a different
+#: rate, and this one is much faster than the dense arm's.  Drift of the larger
+#: of the two middle bonds: 28->36 6.4e-08, 36->44 2.6e-10, 44->52 1.0e-12,
+#: 52->60 4.1e-15.  44/52 would *fail* the 1e-12 gate below on its own
+#: (1.04e-12), which is the reason the pair is not 44/52; 52/60 sits at the f64
+#: floor with three orders to spare.
+_SYM_CHAIN_L_LO, _SYM_CHAIN_L_HI = 52, 60
+
+#: What each horizontal bond's charge content must still be after gauging,
+#: as ``(sectors, multiplicities)``.  Written out here from the definition
+#: rather than read off the input pair, for the reason ``_INDEPENDENT_BOND_OF``
+#: gives: an expectation copied from the object under test echoes its mistakes.
+#: ``h_AB`` is ``a.r``/``b.l``, whose MPS space is ``_SYM_VIRT_AB =
+#: [-1, -1, 0, 1]``; the flow inversion negates it to ``[1, 1, 0, -1]``, i.e.
+#: sectors ``[-1, 0, 1]`` with multiplicities ``[1, 1, 2]``.  ``h_BA`` is
+#: ``_SYM_VIRT_BA = [-1, 0, 1, 1]`` negated to ``[1, 0, -1, -1]``, i.e.
+#: ``[2, 1, 1]``.  The two differ, which is what lets this double as a second,
+#: structural read of the ``h_AB``/``h_BA`` parity the spectra are compared at.
+_SYM_BOND_SECTORS = {
+    "h_AB": ([-1, 0, 1], [1, 1, 2]),
+    "h_BA": ([-1, 0, 1], [2, 1, 1]),
+}
+
+
+@pytest.mark.core
+def test_bp_weights_are_the_symmetric_chains_schmidt_values():
+    """The chain anchor again, with every leg of the subject charged.
+
+    ``test_bp_weights_are_the_chains_schmidt_values`` is the same claim on the
+    dense path, and it is structurally blind to the defect class this project
+    keeps hitting: all of its charges are zero, so it cannot see block-sparse
+    ``contract()`` pairing legs by charge **value** where dense pairs by
+    **position** (#834), an enumeration-order versus charge-grouped bond
+    (#602), or per-sector keep counts making an SVD discard the *largest*
+    singular value (#865).  The third of those was a symmetric simple-update
+    collapse, and "dense was unaffected" turned out to be a confound.  Landing
+    the symmetric simple update on top of a gauge with no ground truth on the
+    block-sparse path repeats that setup exactly.
+
+    This is not a comparison against the dense arm and must not become one:
+    symmetric and dense are *expected* to differ exactly even for the same
+    physics (#602), so the reference is built independently on the block-sparse
+    path -- one symmetric 2-site cell, repeated into the long MPS *and* embedded
+    as the PEPS pair.
+
+    Marked ``core`` for the reason the dense anchor's docstring gives.  It
+    costs 14.3 s bare and 20.1 s under the coverage instrumentation the suite
+    runs with -- about 9.8 s of that is ``gauge_fix``'s 25 BP sweeps, which are
+    block-sparse and host-bound, and 2.4 s the two reference chains.  That is
+    2x the dense anchor and it is the largest single test in the required gate
+    that this branch adds; it buys the only ground truth the block-sparse gauge
+    has.
+
+    Six claims:
+
+    1. The reference has converged in ``L``, measured at two lengths.
+    2. BP reproduces it on **both** inequivalent horizontal bonds.
+    3. The *crossed* pairing fails, so the bond parity is pinned rather than
+       assumed.
+    4. The vertical bonds sit on dimension-1 legs and come back with shape
+       ``(1,)``.  Those legs carry charge ``+1``, not 0, so this also says no
+       charged dimension-1 sector was dropped.  (The companion "and the value
+       is 1.0" check the plan once had cannot fail -- ``lam / max(lam)`` is
+       exactly 1.0 on a length-1 vector -- so it is not repeated here.)
+    5. Every horizontal bond of the *gauged* pair still carries the charge
+       sectors and multiplicities it started with.  Nothing on the dense path
+       can make this claim, and it is the half of the bookkeeping that survives
+       ``_as_spectrum``'s sort.
+    6. ``info.converged``.
+
+    Measured on this branch (seed 30, spin-1 physical, chi=4, ``L=60``
+    reference; BP converged in 25 sweeps to residual 2.4e-15)::
+
+        h_AB vs h_AB-parity reference   7.078e-16
+        h_BA vs h_BA-parity reference   1.013e-15
+        h_AB vs h_BA-parity reference   5.595e-01   <- crossed, must fail
+        reference drift L=52 -> L=60    4.108e-15
+
+    and perturbing any single reference singular value by 1e-6 moves the
+    comparison to between 8.4e-08 and 1.0e-06, four to six orders above the
+    gate.
+    """
+    a, b, vl, vr = _sym_chain_pair()
+
+    lo = _sym_chain_middle_spectra(a, b, vl, vr, _SYM_CHAIN_L_LO)
+    hi = _sym_chain_middle_spectra(a, b, vl, vr, _SYM_CHAIN_L_HI)
+    lo_s = [_as_spectrum(s) for s in lo]
+    hi_s = [_as_spectrum(s) for s in hi]
+    drift = max(float(np.max(np.abs(x - y))) for x, y in zip(lo_s, hi_s, strict=True))
+    assert drift < _ANCHOR_TOL, (
+        f"the symmetric reference chain's middle-bond spectrum still moves "
+        f"{drift:.3e} between L={_SYM_CHAIN_L_LO} and L={_SYM_CHAIN_L_HI}, so "
+        f"it is not yet the infinite chain's and cannot certify anything at "
+        f"{_ANCHOR_TOL:.0e}.  Raise L -- do not loosen the tolerance below, "
+        f"which is the number this whole test exists to defend."
+    )
+
+    A, B = _sym_chain_pair_as_peps(a, b)
+    A_g, B_g, w, info = gauge_fix(A, B, **_ANCHOR_BP_KW)
+    assert info.converged, (
+        f"BP did not converge on a symmetric chain, where it is exact: "
+        f"{info.iterations} sweeps, residual {info.residual:.3e}"
+    )
+
+    # Bond parity as _middle_bond_pair derives it: site i is ``a`` for even i,
+    # ``mid`` is forced even, and _sym_chain_pair_as_peps sends the MPS right
+    # bond to ``r``, so the first of the two middle bonds is ``a.r <-> b.l`` ==
+    # h_AB.  Claim 5 below confirms it a second way, from the charge content.
+    ref_AB, ref_BA = hi_s
+    got_AB, got_BA = _as_spectrum(w.h_AB), _as_spectrum(w.h_BA)
+    for bond, got, want in (("h_AB", got_AB, ref_AB), ("h_BA", got_BA, ref_BA)):
+        err = float(np.max(np.abs(got - want)))
+        assert err < _ANCHOR_TOL, (
+            f"BP's {bond} is {err:.3e} away from the symmetric chain's exact "
+            f"Schmidt spectrum (BP converged in {info.iterations} sweeps to "
+            f"residual {info.residual:.3e}).  BP is exact on a tree, so this is "
+            f"not a tolerance to widen: got {np.array2string(got, precision=12)} "
+            f"want {np.array2string(want, precision=12)}"
+        )
+
+    crossed = min(
+        float(np.max(np.abs(got_AB - ref_BA))),
+        float(np.max(np.abs(got_BA - ref_AB))),
+    )
+    assert crossed > 1e-3, (
+        f"swapping the two reference bonds moves the comparison by only "
+        f"{crossed:.3e}, so the assertions above cannot tell the h_AB parity "
+        f"from the h_BA one and pass for the wrong reason.  This draw's two "
+        f"bonds have gone (nearly) degenerate -- redraw _SYM_CHAIN_SEED."
+    )
+
+    for bond in ("v_AB", "v_BA"):
+        v = np.asarray(getattr(w, bond))
+        assert v.shape == (1,), (
+            f"{bond} sits on a dimension-1 leg but came back with shape "
+            f"{v.shape}; gauge_fix has its bonds crossed"
+        )
+
+    for site, t in (("A", A_g), ("B", B_g)):
+        labels = t.labels()
+        for leg in ("l", "r"):
+            idx = t.indices[labels.index(leg)]
+            bond = _INDEPENDENT_BOND_OF[(site, leg)]
+            got_sectors = (
+                [int(q) for q in idx.sectors],
+                [int(m) for m in idx.multiplicities],
+            )
+            assert got_sectors == _SYM_BOND_SECTORS[bond], (
+                f"gauging changed the charge content of {site}.{leg} (bond "
+                f"{bond}): {got_sectors} vs {_SYM_BOND_SECTORS[bond]}.  The "
+                f"gauge is supposed to be a change of basis within each sector; "
+                f"a sector that lost or gained states means the SVD behind it "
+                f"redistributed weight across charges (#865) or the legs were "
+                f"paired by position rather than by charge value (#834)."
+            )

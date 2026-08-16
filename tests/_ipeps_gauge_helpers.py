@@ -17,7 +17,7 @@ from tenax.algorithms.ipeps import _wrap_as_dense_tensor, heisenberg_u1sz_init_p
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.mps import FiniteMPS
 from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 D = 3
 
@@ -262,39 +262,49 @@ def _trivial_index(dim: int, flow: FlowDirection, label: str) -> TensorIndex:
     )
 
 
-def _chain_mps_site(arr: np.ndarray, i: int) -> DenseTensor:
-    """``(left, phys, right)`` array as ``FiniteMPS``'s site ``i``.
+def _chain_site_labels(i: int) -> tuple[str, str, str]:
+    """``(left, phys, right)`` leg labels of ``FiniteMPS``'s site ``i``.
 
-    Labels and flows copied from ``mps._build_random_dense_tensors``: the
-    canonicalization sweeps address bonds by the names ``v{i-1}_{i}`` /
-    ``v{i}_{i+1}`` (``v_-1_0`` at the left edge), so these are not free.
+    Copied from ``mps._build_random_dense_tensors``: the canonicalization
+    sweeps address bonds by the names ``v{i-1}_{i}`` / ``v{i}_{i+1}``
+    (``v_-1_0`` at the left edge), so these are not free.  Shared by the dense
+    and the block-sparse arm of the anchor, which differ in how a site is
+    *built* but not in what its legs are called.
     """
-    left = "v_-1_0" if i == 0 else f"v{i - 1}_{i}"
+    return (
+        "v_-1_0" if i == 0 else f"v{i - 1}_{i}",
+        f"p{i}",
+        f"v{i}_{i + 1}",
+    )
+
+
+def _chain_mps_site(arr: np.ndarray, i: int) -> DenseTensor:
+    """``(left, phys, right)`` array as ``FiniteMPS``'s site ``i``."""
+    left, phys, right = _chain_site_labels(i)
     return DenseTensor(
         jnp.asarray(arr),
         (
             _trivial_index(arr.shape[0], FlowDirection.IN, left),
-            _trivial_index(arr.shape[1], FlowDirection.IN, f"p{i}"),
-            _trivial_index(arr.shape[2], FlowDirection.OUT, f"v{i}_{i + 1}"),
+            _trivial_index(arr.shape[1], FlowDirection.IN, phys),
+            _trivial_index(arr.shape[2], FlowDirection.OUT, right),
         ),
     )
 
 
-def _chain_middle_spectra(a, b, vl, vr, L: int) -> tuple[np.ndarray, np.ndarray]:
-    """Middle ``(h_AB-parity, h_BA-parity)`` bond spectra of ``a b a b ...``.
+def _middle_bond_pair(tensors: list) -> tuple[np.ndarray, np.ndarray]:
+    """The middle ``(h_AB-parity, h_BA-parity)`` bond spectra of an MPS.
 
-    Builds the ``L``-site finite MPS whose bulk alternates ``a``, ``b``, closes
-    the two open ends with ``vl``/``vr`` so it is a genuine state rather than a
-    ``chi``-dimensional family, and returns the two adjacent middle bonds from
-    :meth:`FiniteMPS.compute_singular_values`, which fills every bond and
-    normalises each to ``sum(sv**2) == 1``.  (:meth:`canonicalize` fills only
-    the centre bond and cannot be used for this.)
+    Takes the finished ``a b a b ...`` site list and returns the two adjacent
+    middle bonds from :meth:`FiniteMPS.compute_singular_values`, which fills
+    every bond and normalises each to ``sum(sv**2) == 1``.
+    (:meth:`canonicalize` fills only the centre bond and cannot be used for
+    this.)
 
     **Bond parity, derived from the construction, not fitted.**  Site ``i`` is
     ``a`` for even ``i`` and ``b`` for odd ``i``, and MPS site ``i``'s right
-    bond contracts with site ``i+1``'s left bond.  :func:`_chain_pair_as_peps`
-    sends the MPS left bond to the PEPS ``l`` leg and the right bond to ``r``,
-    so chain bond ``i`` is ``a.r <-> b.l`` for even ``i`` -- which
+    bond contracts with site ``i+1``'s left bond.  Both ``_as_peps`` builders
+    below send the MPS left bond to the PEPS ``l`` leg and the right bond to
+    ``r``, so chain bond ``i`` is ``a.r <-> b.l`` for even ``i`` -- which
     ``BondWeights`` names ``h_AB`` -- and ``b.r <-> a.l`` for odd ``i``, which
     is ``h_BA``.  ``mid`` is forced even so ``(mid, mid+1)`` is exactly one
     ``(h_AB, h_BA)`` pair, both ~``L/2`` sites from either boundary.
@@ -302,6 +312,24 @@ def _chain_middle_spectra(a, b, vl, vr, L: int) -> tuple[np.ndarray, np.ndarray]
     Getting that parity backwards is silent -- the comparison simply fails and
     looks like a BP defect -- so ``test_ipeps_gauge.py`` also asserts that the
     crossed pairing *does* fail, which pins the claim rather than assuming it.
+    On the block-sparse arm it is pinned a second, structural way: the two
+    bonds there carry *different charge multiplicities*, so the gauged pair's
+    own index metadata says which bond is which (see
+    :func:`_sym_chain_pair_as_peps`).
+    """
+    sv = FiniteMPS.from_tensors(tensors).compute_singular_values().singular_values
+    mid = 2 * (len(tensors) // 4)
+    return np.asarray(sv[mid]), np.asarray(sv[mid + 1])
+
+
+def _chain_middle_spectra(a, b, vl, vr, L: int) -> tuple[np.ndarray, np.ndarray]:
+    """Middle ``(h_AB-parity, h_BA-parity)`` bond spectra of ``a b a b ...``.
+
+    Builds the ``L``-site finite MPS whose bulk alternates ``a``, ``b`` and
+    closes the two open ends with ``vl``/``vr`` so it is a genuine state rather
+    than a ``chi``-dimensional family, then reads the two middle bonds off it
+    with :func:`_middle_bond_pair`, which is where the bond-parity argument
+    lives.
     """
     tensors = []
     for i in range(L):
@@ -311,9 +339,7 @@ def _chain_middle_spectra(a, b, vl, vr, L: int) -> tuple[np.ndarray, np.ndarray]
         if i == L - 1:
             arr = np.tensordot(arr, vr, axes=(2, 0))[..., None]
         tensors.append(_chain_mps_site(arr, i))
-    sv = FiniteMPS.from_tensors(tensors).compute_singular_values().singular_values
-    mid = 2 * (L // 4)
-    return np.asarray(sv[mid]), np.asarray(sv[mid + 1])
+    return _middle_bond_pair(tensors)
 
 
 def _chain_pair_as_peps(a, b) -> tuple[DenseTensor, DenseTensor]:
@@ -341,6 +367,260 @@ def _chain_pair_as_peps(a, b) -> tuple[DenseTensor, DenseTensor]:
                     _trivial_index(chi_l, FlowDirection.OUT, "l"),
                     _trivial_index(chi_r, FlowDirection.IN, "r"),
                     _trivial_index(d, FlowDirection.IN, "phys"),
+                ),
+            )
+        )
+    return out[0], out[1]
+
+
+# --- the same anchor on the block-sparse path (#882 Task 6b) --------------
+#
+# The chain anchor above is dense: every charge in it is zero (``_trivial_index``
+# builds nothing else), so it cannot see the one defect class this project keeps
+# hitting.  Block-sparse ``contract()`` pairs legs by charge **value** while
+# dense einsum pairs by **position** (#834); CTM env-init once emitted chi bonds
+# in enumeration order against charge-grouped ones (#602); pinned per-sector keep
+# counts made an SVD discard the *largest* singular value (#865).  All three are
+# charge bookkeeping, all three are invisible to an all-zero-charge test, and
+# #865 in particular was a symmetric simple-update collapse.  This arm repeats
+# the same anchor with every leg of the subject carrying a non-trivial charge.
+
+#: The recorded draw for the block-sparse arm.  Chosen the way ``_CHAIN_SEED``
+#: was, on the same three measured properties, over 48 seeds (the scan is in
+#: ``task-6b-report.md``):
+#:
+#: * The 2-site transfer matrix's subleading ratio (restricted to its
+#:   charge-diagonal block, which is where the environment lives) is 0.063.
+#:   That is what sets the ``L`` the reference needs; here the middle-bond
+#:   spectrum reaches the f64 floor by ``L = 60``.
+#: * Its two inequivalent bonds' spectra differ by 5.595e-01, the largest in
+#:   the scan.  The parity-swap discriminator in ``test_ipeps_gauge.py`` *is*
+#:   that number, so a seed whose two bonds nearly agreed would make it
+#:   vacuous.  (The reviewer's own probe of this task produced effectively
+#:   rank-2 bonds, which is the failure this avoids.)
+#: * Neither spectrum is degenerate -- smallest within-bond gap 1.9e-02, same
+#:   order as the dense arm's 2.6e-02 -- so sorting is well defined and
+#:   perturbing one entry is visible.
+_SYM_CHAIN_SEED = 30
+
+#: Physical charges: **spin-1**, ``2*Sz`` over ``{+1, 0, -1}``, not the spin-1/2
+#: ``[+1, -1]`` used elsewhere in this tree.  The reason is structural, not
+#: physical.  With only *odd* physical charges a virtual charge's parity flips
+#: at every site, so the 2-site transfer matrix splits into an even and an odd
+#: invariant subspace; the finite chain then picks one of them by its boundary
+#: charge while BP on the infinite chain picks whichever has the larger
+#: eigenvalue, and reference and subject would be different states with no
+#: warning.  A physical charge of 0 connects the two parities and the split
+#: disappears.  (This is why the reviewer's ``[+1, -1]`` probe came out rank-2:
+#: with virtual ``[0, 1, -1, 0]`` each bond could only hold one parity's worth
+#: of sectors.)
+_SYM_PHYS_CHARGES = np.array([1, 0, -1], dtype=np.int32)
+
+#: The two virtual spaces, one per inequivalent horizontal bond: ``_SYM_VIRT_BA``
+#: is ``a.l <-> b.r`` (which the PEPS calls ``h_BA``) and ``_SYM_VIRT_AB`` is
+#: ``a.r <-> b.l`` (``h_AB``).  Deliberately **different multisets of the same
+#: dimension**: same dimension because ``gauge_fix`` reads one ``D_h`` off
+#: ``A.r`` and hands it to both horizontal bonds, different multisets because
+#: that is what makes the two bonds structurally distinguishable -- after the
+#: flow inversion they carry multiplicities ``[1, 1, 2]`` and ``[2, 1, 1]`` over
+#: sectors ``[-1, 0, 1]``, so a transposed ``l``/``r`` is visible in the gauged
+#: pair's own index metadata and not only in the numbers.
+_SYM_VIRT_BA = np.array([-1, 0, 1, 1], dtype=np.int32)
+_SYM_VIRT_AB = np.array([-1, -1, 0, 1], dtype=np.int32)
+
+#: Charge of the dimension-1 MPS boundary caps.  Any sector of ``_SYM_VIRT_BA``
+#: works -- it fixes the chain's total charge and washes out of the bulk -- and
+#: ``+1`` is the one with multiplicity 2, so the cap contracts a genuine vector
+#: rather than a scalar.
+_SYM_EDGE_CHARGE = 1
+
+#: Charge carried by all four dimension-1 vertical legs.  A *non-zero* one on
+#: purpose: at 0 the vertical bonds would be exactly the all-zero case the dense
+#: arm already covers, and then the ``v_AB``/``v_BA`` shape check could not see
+#: a dropped charged sector.  Conservation is untouched because ``A.u`` and
+#: ``A.d`` carry the same charge with opposite flows, so their contributions
+#: cancel.
+_SYM_VERT_CHARGE = 1
+
+
+def _sym_index(charges, flow: FlowDirection, label: str) -> TensorIndex:
+    """A U(1) index over an explicit charge multiset."""
+    return TensorIndex.from_charges(
+        U1Symmetry(), np.asarray(charges, dtype=np.int32), flow, label=label
+    )
+
+
+def _sym_chain_site(rng, left, right) -> SymmetricTensor:
+    """One random U(1) MPS site tensor, legs ``(l IN, phys IN, r OUT)``.
+
+    Every symmetry-allowed block is filled: for U(1) the conservation law
+    ``q_l + q_phys - q_r == 0`` is written out here rather than taken from
+    ``_compute_valid_blocks`` so the test does not certify the block enumerator
+    with the block enumerator.
+
+    ``numpy``'s ``default_rng`` rather than ``jax.random``, for the reason
+    :func:`_chain_pair` gives: this draw is the anchor's ground truth and NEP 19
+    guarantees the PCG64 stream is stable across numpy versions.
+    """
+    li = _sym_index(left, FlowDirection.IN, "l")
+    pi = _sym_index(_SYM_PHYS_CHARGES, FlowDirection.IN, "phys")
+    ri = _sym_index(right, FlowDirection.OUT, "r")
+    blocks = {}
+    for q_l in li.sectors:
+        for q_p in pi.sectors:
+            q_r = int(q_l) + int(q_p)
+            if not ri.has_sector(q_r):
+                continue
+            shape = (
+                li.multiplicity(int(q_l)),
+                pi.multiplicity(int(q_p)),
+                ri.multiplicity(q_r),
+            )
+            blocks[(int(q_l), int(q_p), q_r)] = jnp.asarray(rng.normal(size=shape))
+    t = SymmetricTensor(blocks, (li, pi, ri))
+    return t * (1.0 / float(t.norm()))
+
+
+def _sym_chain_pair(seed: int = _SYM_CHAIN_SEED):
+    """Two symmetric MPS site tensors that tile, plus boundary vectors.
+
+    ``a`` maps ``_SYM_VIRT_BA -> _SYM_VIRT_AB`` and ``b`` maps back, so
+    ``a b a b ...`` is a consistent chain: ``a.r`` meets ``b.l`` on the
+    ``_SYM_VIRT_AB`` space and ``b.r`` meets ``a.l`` on ``_SYM_VIRT_BA``.
+
+    Returns ``(a, b, vl, vr)``; the two vectors live in the ``_SYM_EDGE_CHARGE``
+    sector of ``_SYM_VIRT_BA`` and cap the chain's two open ends.
+    """
+    rng = np.random.default_rng(seed)
+    a = _sym_chain_site(rng, _SYM_VIRT_BA, _SYM_VIRT_AB)
+    b = _sym_chain_site(rng, _SYM_VIRT_AB, _SYM_VIRT_BA)
+    n = int(np.sum(_SYM_VIRT_BA == _SYM_EDGE_CHARGE))
+    vl, vr = rng.normal(size=n), rng.normal(size=n)
+    return a, b, vl / np.linalg.norm(vl), vr / np.linalg.norm(vr)
+
+
+def _sym_chain_cap(t: SymmetricTensor, vec, axis: int) -> SymmetricTensor:
+    """Contract ``vec`` into leg ``axis`` of ``t``, leaving a dimension-1 leg.
+
+    The block-sparse counterpart of ``_chain_middle_spectra``'s
+    ``np.tensordot(vl, arr, ...)[None]``.  A symmetric leg cannot be capped by
+    an arbitrary vector: the surviving dimension-1 leg has to carry a definite
+    charge, so ``vec`` covers exactly the ``_SYM_EDGE_CHARGE`` sector and every
+    block outside it is dropped.  The retained blocks keep their key, since the
+    capped leg still carries that same charge -- which is what keeps the
+    conservation law satisfied without touching the other two legs.
+    """
+    q = _SYM_EDGE_CHARGE
+    idx = t.indices[axis]
+    blocks = {}
+    for key, blk in t.blocks.items():
+        if key[axis] != q:
+            continue
+        v = jnp.asarray(vec)
+        blocks[key] = (
+            jnp.tensordot(v, blk, axes=(0, 0))[None]
+            if axis == 0
+            else jnp.tensordot(blk, v, axes=(axis, 0))[..., None]
+        )
+    indices = list(t.indices)
+    indices[axis] = _sym_index([q], idx.flow, idx.label)
+    return SymmetricTensor(blocks, tuple(indices))
+
+
+def _sym_chain_middle_spectra(a, b, vl, vr, L: int) -> tuple[np.ndarray, np.ndarray]:
+    """Middle ``(h_AB-parity, h_BA-parity)`` bond spectra of symmetric ``a b a b``.
+
+    The block-sparse twin of :func:`_chain_middle_spectra`, sharing its bond
+    labels and its middle-bond/parity logic (:func:`_chain_site_labels`,
+    :func:`_middle_bond_pair`) and differing only where the two paths genuinely
+    do: how a site is built and how the open ends are capped.
+    """
+    tensors = []
+    for i in range(L):
+        t = a if i % 2 == 0 else b
+        if i == 0:
+            t = _sym_chain_cap(t, vl, 0)
+        if i == L - 1:
+            t = _sym_chain_cap(t, vr, 2)
+        left, phys, right = _chain_site_labels(i)
+        tensors.append(t.relabels({"l": left, "phys": phys, "r": right}))
+    return _middle_bond_pair(tensors)
+
+
+def _sym_chain_pair_as_peps(a, b) -> tuple[SymmetricTensor, SymmetricTensor]:
+    """The same two symmetric MPS tensors as a checkerboard PEPS pair.
+
+    ``u``/``d`` get dimension 1, so the 2D network factorises into decoupled
+    horizontal rows and each row is the chain ``a b a b ...`` verbatim -- the
+    state :func:`_sym_chain_middle_spectra` takes the reference from.
+
+    **The flow inversion.**  An MPS site has left IN / right OUT; the shipped
+    iPEPS convention (``ipeps._wrap_as_dense_tensor``,
+    ``ipeps.heisenberg_u1sz_init_pair``, ``fermionic_ipeps``) is ``l`` OUT /
+    ``r`` IN.  On the dense arm that swap is a no-op because every charge is
+    zero.  Here it is not, and the way to express it that leaves the state
+    alone is :meth:`TensorIndex.dual` -- flip the flow *and* negate the charges
+    -- applied to both virtual legs with the block keys rewritten to match.
+    ``flow_charge`` is then unchanged leg by leg, so every stored block still
+    satisfies the conservation law and none has to move.
+
+    Three variants were measured (numbers in ``task-6b-report.md``):
+
+    * :meth:`TensorIndex.flip_flow` -- flip the flow, keep the charges -- makes
+      the very first block violate conservation and ``SymmetricTensor``
+      raises.  Not usable, and loudly so.
+    * Dualising only *one* of the two legs still constructs, and ``gauge_fix``
+      still reports ``converged=True`` (residual 0.0 after one sweep) with bond
+      weights 9.95e-01 away from the truth.  That is #834's signature exactly:
+      a charge-value mis-pairing that collapses silently instead of raising,
+      which is what this anchor exists to catch.
+    * Skipping the inversion entirely -- keeping ``l`` IN / ``r`` OUT and only
+      adding the vertical legs -- gives the *same* answer to 1.9e-15.  That is
+      not a licence to skip it.  It happens because BP only ever contracts
+      ``r`` against ``l``, so a global flip of both is invisible, and because
+      the vertical legs here are dimension 1: on a real PEPS the vertical legs
+      are charged and the conservation law
+      ``-q_u + q_d - q_l + q_r + q_phys = 0`` is genuinely a different equation
+      under the two conventions.  The subject has to be in the convention the
+      simple update will actually be handed, which is ``l`` OUT / ``r`` IN.
+
+    Because ``dual`` negates charges, the PEPS bond spaces are the duals of the
+    MPS ones: ``h_AB`` (``A.r`` / ``B.l``) ends up with multiplicities
+    ``[1, 1, 2]`` over sectors ``[-1, 0, 1]`` and ``h_BA`` (``A.l`` / ``B.r``)
+    with ``[2, 1, 1]``.  They are different, which is the point --
+    ``test_ipeps_gauge.py`` reads them back off the *gauged* pair.
+    """
+    sym = U1Symmetry()
+
+    def dual_q(q: int) -> int:
+        # The block keys have to move exactly the way ``TensorIndex.dual``
+        # moves the sectors, so ask the symmetry rather than writing ``-q``:
+        # they agree for U(1) and would not for a group whose dual is not
+        # negation.
+        return int(sym.dual(np.array([q], dtype=np.int32))[0])
+
+    out = []
+    for t in (a, b):
+        indices = t.indices
+        blocks = {
+            (
+                _SYM_VERT_CHARGE,
+                _SYM_VERT_CHARGE,
+                dual_q(key[0]),
+                dual_q(key[2]),
+                key[1],
+            ): jnp.transpose(blk, (0, 2, 1))[None, None]
+            for key, blk in t.blocks.items()
+        }
+        out.append(
+            SymmetricTensor(
+                blocks,
+                (
+                    _sym_index([_SYM_VERT_CHARGE], FlowDirection.OUT, "u"),
+                    _sym_index([_SYM_VERT_CHARGE], FlowDirection.IN, "d"),
+                    indices[0].dual(),
+                    indices[2].dual(),
+                    indices[1],
                 ),
             )
         )
