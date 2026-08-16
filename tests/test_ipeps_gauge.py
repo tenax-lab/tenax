@@ -14,7 +14,12 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from _ipeps_gauge_helpers import _PAIRS, _torus_2x2  # tests/ is on sys.path
+from _ipeps_gauge_helpers import (  # tests/ is on sys.path
+    _INDEPENDENT_BOND_OF,
+    _PAIRS,
+    _torus_2x2,
+    assert_leg_split,
+)
 
 from tenax.algorithms.ipeps_bp_gauge import BondWeights, bp_gauge_checkerboard
 from tenax.algorithms.ipeps_gauge import absorb_weights, gauge_fix
@@ -24,6 +29,42 @@ ABSORB_TOL = 1e-13
 
 def _unit(x):
     return x / np.linalg.norm(x)
+
+
+@pytest.mark.parametrize("kind", ["dense", "symmetric"])
+@pytest.mark.parametrize("D", [2, 3])
+def test_absorb_weights_splits_each_bond_onto_both_ends_not_just_one(kind, D):
+    """The torus-based tests below cannot see an asymmetric split.
+
+    ``_torus_2x2`` is a closed loop: a diagonal weight factors arbitrarily
+    between the two ends of a bond without changing the total the torus sums
+    over, so a broken ``absorb_weights`` that dumped the *whole* weight onto
+    site A's legs and left B's legs at 1 -- a very plausible "just multiply
+    lambda into one Gamma" mistake -- would reproduce the identical torus
+    value in ``test_absorbed_form_is_the_same_state``, and would very likely
+    still reach the same BP fixed point in
+    ``test_gauge_fix_matches_the_vidal_route``, since BP-gauging is
+    insensitive to which valid gauge of the same physical state it starts
+    from. Only a check on each site's tensor in isolation, against an
+    independently-derived bond map, can catch a wrong 50/50 split.
+    """
+    A, B = _PAIRS[kind](D=D)
+    w = BondWeights(
+        h_AB=jnp.array([1.0, 0.4, 0.1][:D]),
+        h_BA=jnp.array([1.0, 0.6, 0.2][:D]),
+        v_AB=jnp.array([1.0, 0.3, 0.05][:D]),
+        v_BA=jnp.array([1.0, 0.7, 0.3][:D]),
+    )
+    Aa, Ba = absorb_weights(A, B, w)
+
+    for site, before, after in (("A", A, Aa), ("B", B, Ba)):
+        scale_of_leg = {
+            leg: np.sqrt(np.asarray(getattr(w, _INDEPENDENT_BOND_OF[(site, leg)])))
+            for leg in ("u", "d", "l", "r")
+        }
+        assert_leg_split(
+            site, before, after, scale_of_leg, ABSORB_TOL, msg=f"{kind} D={D} "
+        )
 
 
 @pytest.mark.parametrize("kind", ["dense", "symmetric"])

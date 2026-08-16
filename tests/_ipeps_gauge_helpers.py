@@ -39,6 +39,64 @@ def _udlrp(t):
     )
 
 
+_LEG_AXIS = {"u": 0, "d": 1, "l": 2, "r": 3}
+
+# Which bond sits on each leg of each site, independently re-derived from
+# BondWeights' own docstring (ipeps_simple_update.py) --
+# ``h_AB: A.r<->B.l``, ``h_BA: B.r<->A.l``, ``v_AB: A.d<->B.u``,
+# ``v_BA: B.d<->A.u`` -- rather than imported from
+# ``ipeps_bp_gauge._BOND_OF``.  If the implementation's map were ever wrong,
+# importing its own map back into the test would echo the same mistake into
+# the expectation; writing it out again from the physical definition means
+# the two have to agree independently.
+_INDEPENDENT_BOND_OF: dict[tuple[str, str], str] = {
+    ("A", "u"): "v_BA",
+    ("A", "d"): "v_AB",
+    ("A", "l"): "h_BA",
+    ("A", "r"): "h_AB",
+    ("B", "u"): "v_AB",
+    ("B", "d"): "v_BA",
+    ("B", "l"): "h_AB",
+    ("B", "r"): "h_BA",
+}
+
+
+def assert_leg_split(site, before, after, scale_of_leg, tol, msg=""):
+    """Assert ``after`` is ``before`` scaled independently along each leg.
+
+    ``_torus_2x2`` is a closed loop, so it cannot see an asymmetric split: a
+    diagonal weight factors arbitrarily between the two ends of a bond
+    without changing the total the torus sums over (``sqrt(lam)*sqrt(lam)``
+    and ``lam*1`` agree on the shared index), so a routine that dumps the
+    *whole* weight onto one site's legs and leaves the other at 1 reproduces
+    the identical torus value -- and, because BP-gauging is insensitive to
+    which valid gauge of the same state it starts from, would likely still
+    reach the same fixed point too.  This compares dense ``(u,d,l,r,phys)``
+    arrays directly instead, leg by leg, on a single tensor with no torus and
+    no BP involved, so that failure mode cannot hide.
+
+    Args:
+        site:          Label used only in the assertion message.
+        before, after: The tensor before and after the claimed scaling.
+        scale_of_leg:  ``{"u": ..., "d": ..., "l": ..., "r": ...}``, the
+                       factor expected on each leg (already at the intended
+                       power, e.g. already ``sqrt(lambda)``).
+        tol:           Max allowed elementwise abs difference.
+        msg:           Prefix for the assertion message.
+    """
+    expected = _udlrp(before)
+    for leg, axis in _LEG_AXIS.items():
+        scale = np.asarray(scale_of_leg[leg])
+        shape = [1, 1, 1, 1, 1]
+        shape[axis] = scale.shape[0]
+        expected = expected * scale.reshape(shape)
+    got = _udlrp(after)
+    d = float(np.max(np.abs(got - expected)))
+    assert d < tol, (
+        f"{msg}site {site}: leg-wise split check failed (max abs diff {d:.3e})"
+    )
+
+
 def _torus_2x2(A, B, weights):
     """The closed 2x2 checkerboard torus, physical legs open.
 

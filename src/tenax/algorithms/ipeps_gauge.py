@@ -34,6 +34,13 @@ def absorb_weights(A: Tensor, B: Tensor, weights: BondWeights) -> tuple[Tensor, 
     Vidal ``Gamma_A lambda Gamma_B`` becomes absorbed
     ``(Gamma_A sqrt(lambda)) (sqrt(lambda) Gamma_B)`` -- the same physical
     object, since ``sqrt(lam) * sqrt(lam) == lam`` on every bond exactly once.
+
+    Precondition: every entry of ``weights`` must be finite and non-negative.
+    This takes ``sqrt()`` with no validation of its own, unlike
+    :func:`bp_gauge_checkerboard`, which raises on a non-finite or
+    non-positive weight vector -- a negative entry here would silently
+    produce ``nan``.  Every real call site hands over SVD singular values,
+    which already satisfy this.
     """
     out = {"A": A, "B": B}
     for site in ("A", "B"):
