@@ -6,9 +6,10 @@ wavefunction rather than one factor of it.  Vidal form exists only
 transiently, inside this module and inside one simple-update step.
 
 That convention is what lets the simple-update engine hold no lambdas at
-all (#882 §3).  The weights this module returns are a **diagnostic** -- the
-honest Schmidt spectrum at the BP fixed point -- not part of the state.
-Dropping them loses a report, not physics.
+all (#882 §3).  The weights :func:`gauge_fix` returns are a **diagnostic** --
+the honest Schmidt spectrum at the BP fixed point, *already absorbed into the
+pair returned with them*.  Dropping them loses a report, not physics; absorbing
+them a second time loses the state, by order unity.
 """
 
 from __future__ import annotations
@@ -67,10 +68,14 @@ def gauge_fix(
 ) -> tuple[Tensor, Tensor, BondWeights, BPGaugeInfo]:
     """Re-derive the BP gauge of an **absorbed-form** pair.
 
-    Takes no incoming weights, because there are none to hand over: the pair
-    already carries them.  Internally this is ``bp_gauge_checkerboard`` with
-    ``BondWeights.ones`` -- correct precisely because the absorbed tensors
-    already *are* ``Gamma_A lambda Gamma_B``.
+    Absorbed form in, absorbed form out.  Takes no incoming weights, because
+    there are none to hand over: the pair already carries them.  Internally
+    this is ``bp_gauge_checkerboard`` with ``BondWeights.ones`` -- correct
+    precisely because the absorbed tensors already *are*
+    ``Gamma_A lambda Gamma_B`` -- followed by :func:`absorb_weights` on the
+    Vidal pair that comes back, which is what keeps the boundary convention
+    intact.  Vidal form therefore exists only *between* those two calls and is
+    never returned (#882 §3).
 
     Args:
         A, B:     Absorbed-form site tensors, labels ``(u,d,l,r,phys)``.
@@ -78,15 +83,31 @@ def gauge_fix(
         max_iter: Maximum BP sweeps.
 
     Returns:
-        ``(A, B, weights, info)``.  ``weights`` is a diagnostic: the Schmidt
-        spectrum of the returned state at the BP fixed point.
+        ``(A, B, weights, info)``.  The pair alone **is** the state: read it
+        with :meth:`BondWeights.ones`, or with nothing at all.
+
+        ``weights`` is the Schmidt spectrum of that state at the BP fixed
+        point, and it is **already absorbed into the returned pair**.  It is a
+        diagnostic and a truncation input -- dropping it loses a report, not
+        physics.  Do **not** absorb it again, and do not pass it back into a
+        contraction alongside the pair: either double-counts every bond, which
+        is the ``lambda**1.5`` mechanism of #667 verbatim.  Measured, feeding
+        it back moves the state by 9.0e-02 to 8.4e-01 depending on the pair
+        (``test_gauge_fix_returns_an_absorbed_pair_not_a_vidal_one``).
     """
     labels = A.labels()
     D_h = A.indices[labels.index("r")].dim
     D_v = A.indices[labels.index("d")].dim
-    return bp_gauge_checkerboard(
+    A_v, B_v, weights, info = bp_gauge_checkerboard(
         A, B, BondWeights.ones(D_h, D_v), tol=tol, max_iter=max_iter
     )
+    # bp_gauge_checkerboard returns Vidal ``Gamma lambda Gamma``, which is its
+    # documented and correct contract.  Converting here rather than there is
+    # deliberate: this is the boundary the spec draws, and other callers depend
+    # on the Vidal form.  Returning the raw pair moved the state by up to
+    # 1.25 (dense D=2) when read as the docstring above promises.
+    A_out, B_out = absorb_weights(A_v, B_v, weights)
+    return A_out, B_out, weights, info
 
 
 # The 2x2 torus, one entry per site copy: which edge each leg sits on.  Sites

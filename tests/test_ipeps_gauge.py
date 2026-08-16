@@ -5,6 +5,14 @@ BARE Gamma, which drops lambda.  Absorbing sqrt(lambda) into both ends first
 and then passing ones() is the same state written differently --
 A sqrt(lam) . sqrt(lam) B == A lam B -- and that is what this file proves.
 
+The convention is a contract on gauge_fix's *output* as much as its input: the
+pair it returns must already be the state, with the weights carried alongside
+as a diagnostic.  Reading a returned pair with its own weights and reading it
+with ones() cannot both be right, and only one test here distinguishes them --
+test_gauge_fix_returns_an_absorbed_pair_not_a_vidal_one.  Every other test in
+this file is blind to the difference by construction, which is how the output
+form was wrong for four commits.
+
 Runs on the symmetric path too: a flow mistake there collapses charge sectors
 rather than raising, and the dense path cannot see it.
 """
@@ -36,6 +44,25 @@ ABSORB_TOL = 1e-13
 
 def _unit(x):
     return x / np.linalg.norm(x)
+
+
+def _torus_rel(x, y):
+    """Distance between two torus readings **as states**.
+
+    Comparison convention, used by every state-equality assertion here: both
+    sides are normalised and the overall sign is free.  ``gauge_fix`` rescales
+    each site tensor by max-abs and max-normalises each weight vector -- both
+    deliberate, both unobservable -- and the torus is degree 4 in every site
+    tensor, so an overall factor is *expected* and is not a state difference.
+    Skipping the normalisation scores a reading that is exact to 1e-15 at
+    6.5e-01 instead, which is how this defect was first mis-measured.
+
+    Accepts a ``Tensor`` or an array; the torus is a ``(d,d,d,d)`` object, so
+    densifying it is cheap even on the symmetric path.
+    """
+    a = _unit(np.asarray(x.todense() if hasattr(x, "todense") else x).ravel())
+    b = _unit(np.asarray(y.todense() if hasattr(y, "todense") else y).ravel())
+    return float(min(np.linalg.norm(a - b), np.linalg.norm(a + b)))
 
 
 @pytest.mark.parametrize("kind", ["dense", "symmetric"])
@@ -104,6 +131,15 @@ def test_gauge_fix_matches_the_vidal_route(kind, D):
 
     If this fails, gauge_fix is gauging a different state than the caller
     handed it, and every acceptance criterion above it is meaningless.
+
+    The two routes are read with *different* weights, which is the point: the
+    ``bp_gauge_checkerboard`` route returns Vidal and is read with its ``w1``,
+    while ``gauge_fix`` returns absorbed and is read with ``ones``.  Both name
+    the same state.  This assertion previously read the ``gauge_fix`` route as
+    Vidal too, and passed -- because ``gauge_fix`` used to return Vidal.  It
+    was testing agreement between the routes, which is real, and not the
+    returned form, which nothing tested; see
+    ``test_gauge_fix_returns_an_absorbed_pair_not_a_vidal_one``.
     """
     A, B = _PAIRS[kind](D=D)
     w = BondWeights(
@@ -118,9 +154,8 @@ def test_gauge_fix_matches_the_vidal_route(kind, D):
 
     assert i1.converged and i2.converged
 
-    state = float(
-        np.linalg.norm(_unit(_torus_2x2(A2, B2, w2)) - _unit(_torus_2x2(A1, B1, w1)))
-    )
+    ones = BondWeights.ones(D, D)
+    state = _torus_rel(_torus_2x2(A2, B2, ones), _torus_2x2(A1, B1, w1))
     assert state < 1e-12, f"{kind} D={D}: routes reached different states ({state:.3e})"
 
     for f in BondWeights._fields:
@@ -128,6 +163,62 @@ def test_gauge_fix_matches_the_vidal_route(kind, D):
         a, b = a / jnp.max(a), b / jnp.max(b)
         d = float(jnp.max(jnp.abs(a - b)))
         assert d < 1e-10, f"{kind} D={D} bond {f}: different fixed point ({d:.3e})"
+
+
+@pytest.mark.parametrize("kind", ["dense", "symmetric"])
+@pytest.mark.parametrize("D", [2, 3])
+def test_gauge_fix_returns_an_absorbed_pair_not_a_vidal_one(kind, D):
+    """Drop the weights and the state must be unchanged.  Both directions.
+
+    This is the claim the whole absorbed-form convention rests on and it was
+    asserted nowhere: every other test in this file passes ``gauge_fix``'s
+    weights back into the torus, so all of them exercise the *Vidal* reading
+    and none of them can tell the two apart.  Phase 2's ``_su_step`` holds no
+    spectrum -- ``_SUState`` has nowhere to put one (#882 §3) -- so if the
+    returned pair is not already the state, the step silently evolves a
+    different one and reports a plausible, wrong energy.  That is #667 and
+    #865 verbatim.
+
+    The second assertion is what makes this a *discriminating* guard rather
+    than one that merely accepts an absorbed pair: feeding the weights back in
+    double-counts them, so the Vidal reading has to break.  A test that only
+    checked the first direction would still pass if ``weights`` silently
+    degenerated to all-ones, which is the trivial way to satisfy it.
+
+    Measured on this branch, before and after the fix (``gauge_fix`` output,
+    torus read the two ways, normalised and sign-free)::
+
+        pair          before: +ones    +w2  |  after: +ones      +w2
+        dense D=2         1.252e+00  4e-15  |     3.7e-15  3.983e-01
+        dense D=3         8.948e-01  2e-14  |     1.7e-14  2.776e-01
+        symmetric D=2     6.051e-01  8e-16  |     8.2e-16  8.999e-02
+        symmetric D=3     2.491e-01  6e-15  |     5.7e-15  8.444e-01
+
+    Before, the two readings were swapped: the pair alone was off by 0.25 to
+    1.25 and only the Vidal reading was exact.  The thresholds below sit
+    between the two columns with room to spare -- the tightest discriminating
+    cell is symmetric D=2 at 9.0e-02, 9x above the 1e-2 gate.
+    """
+    A, B = _PAIRS[kind](D=D)
+    ones = BondWeights.ones(D, D)
+    ref = torus_2x2_sign_free(A, B, ones)
+
+    A2, B2, w2, info = gauge_fix(A, B, tol=1e-12, max_iter=400)
+    assert info.converged
+
+    dropped = _torus_rel(torus_2x2_sign_free(A2, B2, ones), ref)
+    assert dropped < 1e-11, (
+        f"{kind} D={D}: dropping gauge_fix's weights moved the state by "
+        f"{dropped:.3e}.  The returned pair must BE the state -- the weights "
+        f"are a diagnostic, and Phase 2 has nowhere to store them."
+    )
+
+    as_vidal = _torus_rel(torus_2x2_sign_free(A2, B2, w2), ref)
+    assert as_vidal > 1e-2, (
+        f"{kind} D={D}: reading gauge_fix's output as Vidal moved the state by "
+        f"only {as_vidal:.3e}, so this guard cannot tell an absorbed pair from "
+        f"a Vidal one.  Either the weights came back trivial or the pair did."
+    )
 
 
 #: Four bond weights with **twelve distinct entries**, so that permuting any
