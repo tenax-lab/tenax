@@ -1328,3 +1328,79 @@ def test_an_indeterminate_scan_says_so_rather_than_quoting_a_floor():
     assert np.isnan(report.fd_divergence), report.summary()
     assert not report.is_resolved, report.summary()
     assert "indeterminate" in report.summary(), report.summary()
+
+
+def test_duplicate_magnitudes_are_not_convergence_evidence():
+    """``(0.5, -0.5)`` is one central difference counted twice.
+
+    Its divergence is identically zero, which would manufacture convergence
+    evidence from a single measurement. The up-front ``steps`` check cannot
+    catch this: the whole set has two separated magnitudes, but the
+    commensurable *subset* does not.
+    """
+    n = 32
+    base = np.ones(n)
+    base[0] = 1e14  # 0.5/-0.5 realise one direction, 0.125 another
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+
+    def cubic_at_base(t):
+        x = jnp.asarray(t.todense())
+        d = x - base_j
+        return jnp.sum(d**3), 3.0 * d**2  # exact, zero at base
+
+    report = measure_gradient_error(
+        cubic_at_base,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=np.ones((2, 2, 2, 2, 2)),
+        steps=(0.5, -0.5, 0.125),
+    )
+
+    assert not report.is_resolved, (
+        "a duplicated coarse step supplied its own convergence evidence and "
+        f"declared an exact gradient 100% wrong -- {report.summary()}"
+    )
+
+
+def test_resolution_is_scoped_to_the_evidence_group():
+    """A step outside the group must not inflate the spread.
+
+    ``base[0]=1e14`` puts the two coarse steps on one realised direction and
+    the fine step on another. The fine step's relative error is unrelated to
+    the reported measurement, and pooling it could mark a cleanly measured
+    error unresolved.
+    """
+    n = 32
+    base = np.ones(n)
+    # 1e12: the coarse pair agrees to 5.6e-17 in unit direction while the fine
+    # step sits 1.8e-01 away, so the group is exactly {1.0, 0.5}.
+    base[0] = 1e12
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+    weights = np.ones(n)
+    weights[0] = 100.0
+    w_j = jnp.asarray(weights.reshape((2, 2, 2, 2, 2)))
+
+    # The error lives ONLY on the coordinate the fine step freezes, so the
+    # coarse group measures it while the out-of-group step sees a correct
+    # gradient. Pooling that unrelated rel inflates the spread and blocks a
+    # cleanly measured error -- a uniform error would not show this, because
+    # every step would report the same rel.
+    wrong = np.ones(n)
+    wrong[0] = 10.0 * weights[0]
+    wrong_j = jnp.asarray(wrong.reshape((2, 2, 2, 2, 2)))
+
+    def wrong_on_the_big_coordinate(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(w_j * (x - base_j)), wrong_j
+
+    report = measure_gradient_error(
+        wrong_on_the_big_coordinate,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=np.ones((2, 2, 2, 2, 2)),
+        steps=(1.0, 0.5, 1e-4),
+    )
+
+    assert report.step in (1.0, 0.5), report.summary()
+    assert report.is_resolved, (
+        "the out-of-group fine step inflated the spread and blocked a cleanly "
+        f"measured error -- {report.summary()}"
+    )

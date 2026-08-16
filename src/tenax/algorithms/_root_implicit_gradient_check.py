@@ -616,55 +616,76 @@ def measure_gradient_error(
     # where the pairwise unit distance with a random direction degrades from
     # 5.2e-05 to 4.4e-02 as h shrinks, while any gradient can amplify that
     # difference arbitrarily.  The quantity was wrong, not the tolerance.
-    rels = [r[0] for r in results]
-    resolution = max(rels) - min(rels)
-
-    # ...but the relative errors SHARE the gradient under test, so they can
-    # agree perfectly while the finite differences have not converged at all.
-    # ``E = sum(x^3)`` at ``x = 0`` has an exact gradient of zero and every
-    # central difference proportional to ``h^2``: each ``rel`` is exactly 1, the
-    # spread is 0, and an exact gradient would be reported as a *resolved* 100%
-    # error.  So a gradient-independent convergence signal is kept alongside --
-    # do the differences themselves agree, per unit displacement?
+    # The EVIDENCE GROUP is the single source of truth for everything below:
+    # the reported step, the error spread and the convergence signal all come
+    # from the same commensurable set, so they describe one measurement rather
+    # than three different ones.
     #
-    # Only across COMMENSURABLE directions, though.  Differences taken along
-    # different realised directions are different derivatives, not a
-    # convergence sequence -- a coordinate that moves at the coarse step and
-    # freezes at the fine one gives ``fd_divergence`` 0.755 and would block a
-    # cleanly measured 50% error.  Steps are grouped by their unit direction
-    # and the largest group is used; when no two steps are commensurable there
-    # is no convergence evidence either way, and the check stands down rather
-    # than blocking on an artefact.
+    # Grouped by realised unit direction, because differences taken along
+    # different directions are different derivatives -- a coordinate that moves
+    # at the coarse step and freezes at the fine one is not a convergence
+    # sequence.  Deduplicated by |h| and required to span a factor of two,
+    # because ``(0.5, -0.5)`` is the SAME central difference counted twice: its
+    # divergence is identically zero, which would manufacture convergence
+    # evidence out of one measurement.  The up-front ``steps`` validation
+    # cannot cover this -- a subset can violate what the whole satisfies.
     units = [r[5] / max(float(np.linalg.norm(r[5])), 1e-300) for r in results]
     best_group: list[int] = []
     for anchor in range(len(units)):
-        group = [
-            j
-            for j in range(len(units))
-            if float(np.linalg.norm(units[j] - units[anchor])) <= 1e-3
-        ]
-        if len(group) > len(best_group):
-            best_group = group
-    if len(best_group) >= 2:
-        fdu = [results[j][6] for j in best_group]
+        by_magnitude: dict[float, int] = {}
+        for j in range(len(units)):
+            if float(np.linalg.norm(units[j] - units[anchor])) <= 1e-3:
+                by_magnitude.setdefault(abs(results[j][2]), j)
+        magnitudes = sorted(by_magnitude)
+        if len(magnitudes) >= 2 and magnitudes[-1] / magnitudes[0] >= 2.0:
+            members = list(by_magnitude.values())
+            if len(members) > len(best_group):
+                best_group = members
+
+    evidence = [results[j] for j in best_group] if best_group else results
+
+    # Pool the per-step RELATIVE ERRORS, not the differences themselves.  Each
+    # ``rel`` is measured against that step's own ``analytic_h``, along the
+    # direction that step actually followed, so it is dimensionless and
+    # direction-local: a gradient uniformly 5% high reads 0.05 along ANY
+    # direction.  Pooling the differences could not do that at any tolerance --
+    # raw values mixed scalings, normalising fixed the scale but not the
+    # direction, and requiring the directions to agree cannot work on float32,
+    # where the pairwise unit distance with a random direction degrades from
+    # 5.2e-05 to 4.4e-02 as h shrinks.  The quantity was wrong, not the
+    # tolerance.
+    rels = [r[0] for r in evidence]
+    resolution = max(rels) - min(rels)
+
+    # ...but the relative errors SHARE the gradient under test, so they can
+    # agree perfectly while the differences have not converged at all.
+    # ``E = sum(x^3)`` at ``x = 0`` has an exact gradient of zero and every
+    # central difference proportional to ``h^2``: each ``rel`` is exactly 1, the
+    # spread is 0, and an exact gradient would be reported as a *resolved* 100%
+    # error.  So a gradient-independent signal is kept alongside: do the
+    # differences themselves agree, per unit displacement?  ``nan`` when no
+    # group qualified -- an absence of evidence, which leaves the result
+    # unresolved rather than licensing it.
+    if best_group:
+        fdu = [r[6] for r in evidence]
         fd_divergence = (max(fdu) - min(fdu)) / max(max(abs(f) for f in fdu), 1e-300)
     else:
         fd_divergence = float("nan")
 
-    # Select from the group the evidence is about.  ``best_group`` can hold only
-    # the coarser steps while the smallest |h| sits outside it, so the reported
-    # number would be the one step the convergence check never looked at.
-    #
-    # This does not make a two-point check sound: two steps can agree by
-    # coincidence rather than convergence -- ``E(q) = q^3 - 102.4 q^5`` is
-    # constructed so h=0.5 and h=0.25 give identical normalised differences --
-    # and no pair can distinguish that from a converged sequence.  More
-    # commensurable steps reduce the chance; nothing removes it, and the
-    # docstring says so rather than implying the check is a proof.
-    evidence = [results[j] for j in best_group] if len(best_group) >= 2 else results
+    # Reported from the same group.  This does not make a two-point check
+    # sound: two steps can agree by coincidence rather than convergence --
+    # ``E(q) = q^3 - 102.4 q^5`` is constructed so h=0.5 and h=0.25 give
+    # identical normalised differences -- and no pair can distinguish that from
+    # a converged sequence.  More commensurable steps reduce the chance;
+    # nothing removes it, and the docstring says so rather than implying proof.
     best_rel, best_fd, best_h, _dist, best_analytic, _eff, _fdu = min(
         evidence, key=lambda r: abs(r[2])
     )
+
+    direction_distortion = max(r[3] for r in results)
+
+    direction_distortion = max(r[3] for r in results)
+
     # A tolerated direction distortion is a floor on what this scan can resolve.
     # Every step carries the same one, so it never shows up in their spread: a
     # 0.5% drift with a near-zero spread would otherwise report a correct
