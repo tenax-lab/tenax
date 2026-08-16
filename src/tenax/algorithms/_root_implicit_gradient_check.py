@@ -332,6 +332,24 @@ def measure_gradient_error(
         )
 
     base = np.asarray(A.todense())
+    # The STATE, not just the energies.  A non-finite coordinate the callback
+    # happens not to use passes every energy check -- an affine objective can
+    # read only the finite coordinates and return a finite gradient -- while
+    # ``realised = shifted - base`` is NaN there, carrying NaN into
+    # ``effective``, ``analytic_h`` and every ``rel``.  The scan then returns a
+    # report whose error, resolution, distortion and bound are all NaN and
+    # blames incommensurable steps, which is a wrong diagnosis of a broken
+    # input.  It also fails OPEN on the way: the separation check compares
+    # ``nan < _MIN_SPAN_RATIO``, which is False, so the scan proceeds.
+    if not np.all(np.isfinite(base)):
+        bad = int(np.count_nonzero(~np.isfinite(base)))
+        raise ValueError(
+            f"the state has {bad} non-finite entr{'y' if bad == 1 else 'ies'}, "
+            "so every displacement taken from it is undefined. Reported rather "
+            "than measured: the energies can still come back finite if the "
+            "callback does not read those coordinates, and the scan would then "
+            "return an all-NaN report blaming the steps."
+        )
     is_complex = np.iscomplexobj(base)
     v = (
         _unit_direction(base.shape, seed, complex_valued=is_complex)
@@ -730,11 +748,16 @@ def measure_gradient_error(
     # different derivatives.
     #
     # Pooling the differences could not do that at any tolerance.  Raw values
-    # mixed different scalings; normalising fixed the scale but not the
-    # direction; and requiring the directions to agree cannot work on float32,
-    # where the pairwise unit distance with a random direction degrades from
-    # 5.2e-05 to 4.4e-02 as h shrinks, while any gradient can amplify that
-    # difference arbitrarily.  The quantity was wrong, not the tolerance.
+    # mixed different scalings, and normalising fixed the scale but not the
+    # direction, while any gradient can amplify a direction difference
+    # arbitrarily.  The quantity was wrong, not the tolerance -- which is why
+    # the per-step relative errors are pooled instead, and why the tolerance
+    # on the directions themselves (``direction_tol``) is a separate matter:
+    # it decides which steps may be pooled AT ALL, not how the pooled numbers
+    # are compared.  On float32 the pairwise unit distance with a random
+    # direction degrades from 5.2e-05 to 4.4e-02 as h shrinks, so a float32
+    # scan at fine steps is genuinely indeterminate rather than merely
+    # imprecise; coarser steps still resolve.
     # The EVIDENCE GROUP is the single source of truth for everything below:
     # the reported step, the error spread and the convergence signal all come
     # from the same commensurable set, so they describe one measurement rather
@@ -752,12 +775,39 @@ def measure_gradient_error(
     # reaches that regime with ordinary-looking steps.  The up-front ``steps``
     # validation cannot cover either -- a subset can violate what the whole
     # satisfies.
+    # How closely two steps must agree in direction before either can bound the
+    # other's convergence.  ``sqrt(eps)`` of the STATE's dtype, not a fixed
+    # constant: the realised direction's error is dominated by cancellation in
+    # ``(base + h*v) - base``, which is ``O(eps * |base| / (h |v|))``, so at the
+    # step a central difference actually wants -- ``h |v| ~ sqrt(eps) |base|``
+    # -- the legitimate wobble is itself ``O(sqrt(eps))``.  A gap above that is
+    # not rounding; it is coordinates quantising differently at the two steps.
+    #
+    # The fixed 1e-3 this replaces was five orders too loose on float64, and
+    # the slack was not free.  ``fd_divergence`` cannot separate "the step
+    # changed" from "the direction changed" -- doing so needs the true
+    # gradient, which is the thing under test -- so any pooled direction gap is
+    # charged to the floor as though the differences had not converged.  With a
+    # 9.8e-04 gap (13609 of 60000 sampled mixed-scale states reach that band
+    # while still passing the separation check) an affine objective whose
+    # gradient is nearly orthogonal to the probe drives the divergence to 1.00
+    # and the bound to 1.0e+01, marking a *uniform, cleanly measured* 50% error
+    # unresolved.  Those steps now land in separate groups and the scan reports
+    # itself indeterminate, which is what actually happened.
+    #
+    # This narrows the exposure by five orders; it does not remove it. The
+    # inflation factor is ``g.delta / g.u`` for the true ``g``, unbounded for
+    # any nonzero tolerance, and no gradient-free quantity can bound it.  The
+    # residual is charged to the floor, so the failure direction is
+    # conservative: a measurable error can be left unresolved, never the
+    # reverse.
+    direction_tol = float(np.sqrt(np.finfo(base.dtype).eps))
     units = [r[5] / max(float(np.linalg.norm(r[5])), 1e-300) for r in results]
     best_group: list[int] = []
     for anchor in range(len(units)):
         by_magnitude: dict[float, int] = {}
         for j in range(len(units)):
-            if float(np.linalg.norm(units[j] - units[anchor])) <= 1e-3:
+            if float(np.linalg.norm(units[j] - units[anchor])) <= direction_tol:
                 by_magnitude.setdefault(results[j][7], j)
         magnitudes = sorted(by_magnitude)
         if len(magnitudes) >= 2 and magnitudes[-1] / magnitudes[0] >= _MIN_SPAN_RATIO:

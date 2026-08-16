@@ -539,11 +539,10 @@ print(report.summary())
 # about `unresolved_bound` (the larger of the two thresholds it is tested
 # against, so `is_resolved` is exactly `relative_error > unresolved_bound`) —
 # the good case.
-# A large one means the scan did not converge — the bound then carries that
-# divergence, so it is honest but wide. NaN means no two steps probed
-# commensurable directions, so the scan is indeterminate and the bound is
-# unconstrained: that is the one case where it can be both tiny and
-# meaningless.
+# A large one means the differences are still moving — the bound then carries
+# that, so it is honest but wide. NaN means no two steps probed commensurable
+# directions: the scan is indeterminate, and `unresolved_bound` is NaN too,
+# because nothing established a floor to report.
 
 # Quasiparticle excitations (Ponsioen et al. 2022)
 momenta = make_momentum_path("brillouin", num_points=20)

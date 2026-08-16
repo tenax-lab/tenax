@@ -1733,6 +1733,97 @@ def test_the_published_floor_is_the_threshold_that_was_applied(tol):
     )
 
 
+def test_a_non_finite_state_is_refused_even_when_the_energies_are_finite():
+    """A NaN the callback never reads still poisons every displacement.
+
+    The energy checks pass -- this objective reads only finite coordinates and
+    returns a finite gradient -- while ``shifted - base`` is NaN at the bad
+    entry, carrying NaN into the effective direction, the projection and every
+    relative error. The scan would return an all-NaN report blaming
+    incommensurable steps, and it fails open on the way: the separation check
+    compares ``nan < _MIN_SPAN_RATIO``, which is False.
+    """
+    base = np.ones((2, 2, 2, 2, 2))
+    base[0, 0, 0, 0, 0] = np.nan
+    live = np.zeros((2, 2, 2, 2, 2))
+    live[1, 1, 1, 1, 1] = 1.0
+    live_j = jnp.asarray(live)
+
+    def reads_only_the_finite_coordinate(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(live_j * x), live_j
+
+    with pytest.raises(ValueError, match="non-finite entr"):
+        measure_gradient_error(
+            reads_only_the_finite_coordinate,
+            _wrap(base),
+            direction=np.ones((2, 2, 2, 2, 2)),
+            steps=(1.0, 0.5),
+        )
+
+
+def test_a_direction_gap_is_not_reported_as_non_convergence():
+    """Steps that probe different directions cannot bound each other.
+
+    ``base[0]=7.209892e12`` with a small weight on that coordinate makes it
+    quantise at the coarse step and freeze at the fine one, so the two realised
+    unit directions differ by 9.8e-04 while the realised displacements still
+    span a clean factor of 2. Pooling them lets an objective whose gradient is
+    nearly orthogonal to the probe drive ``fd_divergence`` to 1.0 purely from
+    the direction difference -- marking a *uniform* 50% error, measured
+    identically at both steps, unresolved against a 1000% floor.
+
+    The steps are not commensurable, so the honest report is indeterminate.
+    """
+    n = 32
+    base = np.ones(n)
+    base[0] = 7.209892e12
+    raw_direction = np.ones(n)
+    raw_direction[0] = 5.380e-3
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+
+    # Nearly orthogonal to the probe, so the true directional derivative is
+    # small and the direction gap dominates it.
+    v = raw_direction / np.max(np.abs(raw_direction))
+    v = v / np.linalg.norm(v)
+    shifted = (base + v) - base
+    u = shifted / np.linalg.norm(shifted)
+    w = np.zeros(n)
+    w[0] = 1.0
+    w[1:] = -(u[0] / np.mean(u[1:])) / 31
+    w_j = jnp.asarray(w.reshape((2, 2, 2, 2, 2)))
+
+    def fifty_percent_high(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(w_j * (x - base_j)), 1.5 * w_j
+
+    report = measure_gradient_error(
+        fifty_percent_high,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=raw_direction.reshape((2, 2, 2, 2, 2)),
+        steps=(1.0, 0.5),
+    )
+
+    assert report.relative_error == pytest.approx(0.5, rel=1e-6), report.summary()
+    assert np.isnan(report.fd_divergence), (
+        "a 9.8e-04 direction gap was charged to the floor as if the "
+        f"differences had not converged -- {report.summary()}"
+    )
+    assert np.isnan(report.unresolved_bound), report.summary()
+
+
+def test_ordinary_float64_rounding_still_pools():
+    """The tighter tolerance must not make well-scaled scans indeterminate.
+
+    A float64 state at unit scale keeps its realised directions together to
+    ~1e-16, far inside ``sqrt(eps)``, so the steps still bound each other.
+    """
+    report = measure_gradient_error(_exact_pair(1.05), _quartic_state())
+
+    assert not np.isnan(report.fd_divergence), report.summary()
+    assert report.is_resolved, report.summary()
+
+
 def test_steps_that_round_onto_the_same_endpoints_are_one_measurement():
     """Distinct requested magnitudes can realise identical states.
 
