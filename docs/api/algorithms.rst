@@ -202,6 +202,8 @@ Fermionic iPEPS (fPEPS)
 
 .. autofunction:: tenax.algorithms.fermionic_ipeps.fpeps
 
+.. autofunction:: tenax.algorithms.fermionic_ipeps.sublattice_gap
+
 AutoMPO
 -------
 

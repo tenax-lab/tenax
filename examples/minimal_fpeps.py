@@ -92,15 +92,19 @@ def main() -> None:
     print(f"  fPEPS (AD, D={fcfg.D}, finite chi)  E/site = {float(E_gs): .6f}")
     print(f"  exact free-fermion E/site        = {e_exact: .6f}  (thermodynamic)")
     print("  NOTE: the AD energy is below the exact value -- finite-chi CTM is")
-    print("  not a strict variational bound, and a residual fermionic-sign")
-    print("  normalization issue (#392) likely contributes. Direction (negative,")
-    print("  descending) is correct; the absolute number is NOT yet certified.")
-    print("  Contrast: simple update (fpeps()) RISES to exactly 0 -- broken.")
+    print("  not a strict variational bound, and #392's uncertified absolute")
+    print("  energy contributes. Direction (negative, descending) is correct;")
+    print("  the absolute number is NOT yet certified.")
+    print("  On simple update: fpeps() no longer returns an all-zero state")
+    print("  (#878 fixed that, and it is now a 2-site checkerboard), but its")
+    print("  energy is still ~0 for the same #392 reason -- with no chemical")
+    print("  potential, the empty state and the polarised checkerboard are both")
+    print("  exact E=0 eigenstates. Use sublattice_gap() to see which you got.")
     print("=" * 64)
-    # Robust claim only: AD descends to a negative energy (correct direction),
-    # unlike SU which collapses to 0. We do NOT assert quantitative accuracy.
+    # Robust claim only: AD descends to a negative energy (correct direction).
+    # We do NOT assert quantitative accuracy.
     assert float(E_gs) < 0.0, f"fermionic AD energy not negative: {float(E_gs)}"
-    print("OK: AD reaches a negative, descending energy (vs SU's collapse to 0).")
+    print("OK: AD reaches a negative, descending energy.")
 
 
 if __name__ == "__main__":

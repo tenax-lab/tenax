@@ -338,6 +338,63 @@
   site's fence is defensive. Separately, the all-zero matrix does produce a NaN
   gradient there, but from the SVD backward on a fully degenerate spectrum,
   which is the #406/#750 cluster and a different defect.
+
+- **`fpeps()` returned a state that was exactly `0.0`, and now returns a 2-site
+  checkerboard** (#878). ⚠️ **Breaking**: the return is
+  `(energy, (A, B), (env_A, env_B))` — the state and environment are pairs.
+  The 1-site fermionic ansatz could not be right: `A` was both ends of every
+  bond, so the update kept only `U` from each SVD and gave `A` the left/top half
+  of every gate and never the right/bottom half. That is #667 in a module #844
+  never touched; the state went to a product state regardless of `dt` (measured
+  at equal imaginary time, `dt` = 0.05 / 0.01 / 0.005 all gave `lam_h = [1, 0]`)
+  and then to exactly zero by step 10. The shipped test only asserted
+  `isfinite(energy)`, and `0.0` is finite. The guards now assert on the bond
+  **spectrum**: `_normalize_tensor` runs last, so `|A|` reads a healthy 1.0 right
+  up to the step where it is exactly 0.
+
+  A 1-site ansatz also cannot represent the t-V ground state at finite `V`,
+  which is a checkerboard charge-density wave. `sublattice_gap(A, B, env_A,
+  env_B)` measures that charge order: the trace distance between the two
+  sublattices' one-site RDMs, traced out of the two-site RDM the energy already
+  uses, which for spinless fermions is exactly `|<n_A> - <n_B>|`. Measured at
+  D=2, 8 steps, χ=4 it tracks `V` as it should — 0.037 at `V=0` (free fermions,
+  no charge order), 0.270 at `V=1`, 0.900 at `V=2`, 1.000 at `V=4`. It is a
+  **one-body** probe: a nonzero value is evidence of charge order, but a zero
+  does *not* prove a single tensor would suffice, because a columnar-dimer or
+  bond-ordered state has identical on-site densities and still needs two. Do
+  **not** use `||A - B||` or a `T T†` leg fingerprint for this: neither is
+  invariant under the bond gauge `T -> G T`, and on one gauged pair whose
+  physical state did not move at all, the Gram fingerprint went from 0.077 to
+  27.0 while the RDM distance moved by 4e-04.
+
+  The returned pair is in physical (CTM-contractable) form and `initial_tensor`
+  now accepts an `(A, B)` pair, so `fpeps()`'s output restarts `fpeps()` —
+  though a restart is not a continuation, since the sweep always begins from
+  `BondWeights.ones` while the tensors handed back already carry `sqrt(λ)`.
+  Returning the bare Vidal `Γ` would not round-trip at all — the bond weights live
+  outside it, and a restart resets them to ones.
+
+  All four checkerboard bond spectra are carried end to end as a `BondWeights`
+  (#851), with `independent_bonds` left at the #880 default: reflection through
+  a site maps `A.r<->B.l` onto `B.r<->A.l` and leaves the CDW invariant, so the
+  paired bonds share a spectrum in the state this sweep is reaching — the CDW
+  breaks the *site* symmetry, not the bond symmetry. **On the shipped default
+  this changes no numbers**: with the spectra shared, `lambdas.h_AB is
+  lambdas.h_BA`, so the output is identical to the two-lambda code it replaces.
+  What it fixes is the plumbing — the leg-to-bond map is now written once, in
+  `_to_physical_pair`, so the #851 mix-up can no longer be re-introduced at a
+  call site — and it is what makes the numerical fix available the moment the
+  four bonds are freed.
+
+  This does **not** fix #392: the absolute energy is still not certified. With
+  no chemical potential in `H`, both the empty state and the fully polarised
+  checkerboard are `E = 0` eigenstates, and at 200 steps, D=2, `V=0` the sweep
+  reports `E ≈ -6e-05` where the half-filled answer is ≈ `-1.6t`. Survival is
+  also seed-dependent at every bond dimension (4/5, 2/5, 4/5, 4/5 over seeds 0–4
+  at D=2, 3, 4, 6, 600 steps), which `test_fpeps_878_su_collapse.py` pins with a
+  strict `xfail` on a known-dying seed rather than papering over with a luckier
+  one.
+
 ### Added
 
 - **`TENAX_STRICT_CONTRACT=1` detects block-sparse contractions that disagree
