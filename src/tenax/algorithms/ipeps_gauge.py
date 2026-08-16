@@ -141,10 +141,10 @@ def torus_2x2_sign_free(A: Tensor, B: Tensor, weights: BondWeights) -> Tensor:
         and the ``linalg`` decompositions; ``bar()`` applies none, and this
         function calls none of them.  So it is categorically sign-free, and a
         closed 2x2 torus is exactly the non-planar case that carve-out
-        excludes -- its wrap-around edges cross the interior.  Measured on a
-        ``FermionParity`` pair it is value-identical to the ``np.einsum``
-        probe it was once meant to replace (2.15e-15 relative), i.e. it adds
-        no fermionic information whatsoever.  Use
+        excludes -- its wrap-around edges cross the interior.  Measured on
+        ``FermionParity`` pairs it is value-identical to the ``np.einsum``
+        probe it was once meant to replace (2.7e-16 at D=2, 3.0e-16 at D=3),
+        i.e. it adds no fermionic information whatsoever.  Use
         :func:`ctm_rdm2x1_planar` for the fermionic case.
 
     What it *is* good for: ``contract`` is multilinear and every bond here is
