@@ -15,6 +15,14 @@ form was wrong for four commits.
 
 Runs on the symmetric path too: a flow mistake there collapses charge sectors
 rather than raising, and the dense path cannot see it.
+
+The last test in the file is a different kind of claim from the rest.  Every
+other test here -- and every acceptance criterion in Phase 1 -- is a
+*self-consistency* check: the state did not move, the two routes agree, the
+witness separates.  ``test_bp_weights_are_the_chains_schmidt_values`` compares
+BP's output against an answer known a priori, because a chain is a tree and BP
+is exact on trees.  It is the only such anchor available (#882 §6.3), so if it
+fails, nothing measured downstream of it means anything.
 """
 
 from __future__ import annotations
@@ -26,6 +34,9 @@ from _ipeps_gauge_helpers import (  # tests/ is on sys.path
     _INDEPENDENT_BOND_OF,
     _PAIRS,
     _WITNESS_PAIRS,
+    _chain_middle_spectra,
+    _chain_pair,
+    _chain_pair_as_peps,
     _torus_2x2,
     assert_leg_split,
 )
@@ -443,3 +454,147 @@ def test_planar_witness_floor_shrinks_with_chi():
         f"is flat in chi is a defect, not truncation, and it would mask exactly "
         f"the violation this witness exists to detect."
     )
+
+
+# --- the ground-truth anchor: BP on a chain -------------------------------
+
+#: The two chain lengths the reference is measured at, and cross-checked
+#: between.  20/40 -- where the task brief starts -- is nowhere near enough: on
+#: this draw the middle bond still moves 6.0e-05 between them, seven orders
+#: above the tolerance BP is then judged at.  Measured drift, largest of the two
+#: middle bonds: 20->40 6.0e-05, 40->60 2.6e-09, 60->80 1.2e-13, 80->100
+#: 3.1e-16.  60/80 would already clear the 1e-12 gate, but only by 8x, which
+#: would leave the reference's own uncertainty within one order of the answer it
+#: is certifying; 80/100 sits at the f64 floor instead.
+_CHAIN_L_LO, _CHAIN_L_HI = 80, 100
+
+#: Both the reference's self-agreement in ``L`` and BP's agreement with it.
+#: Measured: reference 3.1e-16, BP 1.8e-15 (``h_AB``) and 3.7e-16 (``h_BA``).
+_ANCHOR_TOL = 1e-12
+
+#: ``gauge_fix``'s default ``tol=1e-6`` is a *weight* tolerance, and the weights
+#: are what this test reads: at the default it converges in 14 sweeps with
+#: ``h_AB`` 2.2e-07 off the exact spectrum, which is BP stopping early, not BP
+#: being wrong.  At 1e-14 it takes 33 sweeps and lands at 1.8e-15.
+_ANCHOR_BP_KW = {"tol": 1e-14, "max_iter": 500}
+
+
+def _as_spectrum(x):
+    """A bond spectrum in the convention this comparison uses.
+
+    Sorted descending, then normalised to unit 2-norm.  Neither half is
+    cosmetic.  ``compute_singular_values`` normalises each bond to
+    ``sum(sv**2) == 1`` while ``bp_gauge_checkerboard`` max-normalises
+    (``lam / max(lam)``), so the two sides arrive on different scales and one
+    of the two conventions has to be imposed; unit 2-norm is the physical one
+    and is what the reference already uses.  The sort is because a bond weight
+    is a *multiset* -- the block-sparse path orders it by charge sector rather
+    than by size -- so its order carries nothing to preserve.
+
+    This is deliberately not ``_torus_rel``: that compares two readings of a
+    *tensor* and allows an overall sign, which is meaningless for a vector of
+    singular values.
+    """
+    v = np.sort(np.asarray(x))[::-1]
+    return v / np.linalg.norm(v)
+
+
+def test_bp_weights_are_the_chains_schmidt_values():
+    """BP's fixed-point weights ARE the Schmidt values, on the one case we know.
+
+    BP is exact on a tree, so on a 1D chain its converged bond weights are the
+    exact Schmidt spectrum -- not an approximation to it.  §6.3 of the spec
+    establishes that the loopy square lattice admits no valid reference
+    spectrum, so this is the only place in the whole rewrite where the correct
+    answer is known independently of the code being tested.
+
+    Subject and reference are the *same state* by construction: one pair of
+    random MPS tensors ``a``, ``b`` is repeated into a long finite MPS for the
+    reference and embedded as a PEPS pair with dimension-1 vertical legs for
+    the subject (see ``_ipeps_gauge_helpers``).  The plan's original version
+    compared ``gauge_fix`` against a *different* finite random MPS's middle
+    bond; those two spectra have no reason to agree and the only ways to make
+    that pass are to loosen the tolerance or to compare almost nothing.
+
+    Four claims, in order:
+
+    1. The reference has converged in ``L``.  "Far from the boundaries" is an
+       approximation and this task's whole value is that its reference is
+       exact, so it is measured rather than assumed.
+    2. BP reproduces it on **both** inequivalent horizontal bonds.  ``h_AB``
+       and ``h_BA`` carry genuinely different spectra here (they differ by
+       1.44e-01), and checking only one -- as the plan did -- leaves the other
+       unpinned.
+    3. The *crossed* pairing fails.  Comparing ``h_AB`` against the wrong-parity
+       reference bond is a silent mistake, so the parity claim is asserted, not
+       just reasoned about in a comment.
+    4. The vertical bonds, which sit on dimension-1 legs, come back as a single
+       exact 1.0.  Free, and it catches a ``gauge_fix`` that has transposed its
+       bond bookkeeping -- a defect class this project has hit twice (#834,
+       #602).
+
+    Measured on this branch (seed 10, ``d=2``, ``chi=4``, ``L=100`` reference)::
+
+        h_AB vs h_AB-parity reference   1.776e-15
+        h_BA vs h_BA-parity reference   3.712e-16
+        h_AB vs h_BA-parity reference   1.437e-01   <- crossed, must fail
+        h_BA vs h_AB-parity reference   1.437e-01   <- crossed, must fail
+
+    and perturbing a single reference singular value by 1e-6 moves the
+    comparison to between 2.2e-07 and 1.0e-06, i.e. five to six orders above
+    the gate, so the tolerance is not doing the work.
+    """
+    a, b, vl, vr = _chain_pair()
+
+    lo = _chain_middle_spectra(a, b, vl, vr, _CHAIN_L_LO)
+    hi = _chain_middle_spectra(a, b, vl, vr, _CHAIN_L_HI)
+    drift = max(float(np.max(np.abs(x - y))) for x, y in zip(lo, hi, strict=True))
+    assert drift < _ANCHOR_TOL, (
+        f"the reference chain's middle-bond spectrum still moves {drift:.3e} "
+        f"between L={_CHAIN_L_LO} and L={_CHAIN_L_HI}, so it is not yet the "
+        f"infinite chain's and cannot certify anything at {_ANCHOR_TOL:.0e}.  "
+        f"Raise L -- do not loosen the tolerance below, which is the number "
+        f"this whole test exists to defend."
+    )
+
+    A, B = _chain_pair_as_peps(a, b)
+    _, _, w, info = gauge_fix(A, B, **_ANCHOR_BP_KW)
+    assert info.converged, (
+        f"BP did not converge on a chain, where it is exact: {info.iterations} "
+        f"sweeps, residual {info.residual:.3e}"
+    )
+
+    ref_AB, ref_BA = (_as_spectrum(s) for s in hi)
+    got_AB, got_BA = _as_spectrum(w.h_AB), _as_spectrum(w.h_BA)
+    for bond, got, want in (("h_AB", got_AB, ref_AB), ("h_BA", got_BA, ref_BA)):
+        err = float(np.max(np.abs(got - want)))
+        assert err < _ANCHOR_TOL, (
+            f"BP's {bond} is {err:.3e} away from the chain's exact Schmidt "
+            f"spectrum (BP converged in {info.iterations} sweeps to residual "
+            f"{info.residual:.3e}).  BP is exact on a tree, so this is not a "
+            f"tolerance to widen: got {np.array2string(got, precision=12)} "
+            f"want {np.array2string(want, precision=12)}"
+        )
+
+    crossed = min(
+        float(np.max(np.abs(got_AB - ref_BA))),
+        float(np.max(np.abs(got_BA - ref_AB))),
+    )
+    assert crossed > 1e-3, (
+        f"swapping the two reference bonds moves the comparison by only "
+        f"{crossed:.3e}, so the assertions above cannot tell the h_AB parity "
+        f"from the h_BA one and pass for the wrong reason.  This draw's two "
+        f"bonds have gone (nearly) degenerate -- redraw _CHAIN_SEED."
+    )
+
+    for bond in ("v_AB", "v_BA"):
+        v = np.asarray(getattr(w, bond))
+        assert v.shape == (1,), (
+            f"{bond} sits on a dimension-1 leg but came back with shape "
+            f"{v.shape}; gauge_fix has its bonds crossed"
+        )
+        assert abs(float(v[0]) - 1.0) < 1e-15, (
+            f"{bond} is a single number on a dimension-1 bond and BP "
+            f"max-normalises every weight vector, so it must be exactly 1.0; "
+            f"got {float(v[0]):.17g}"
+        )

@@ -10,9 +10,14 @@ non-``test_``-prefixed helper module living in ``tests/``.
 from __future__ import annotations
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms.ipeps import _wrap_as_dense_tensor, heisenberg_u1sz_init_pair
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.mps import FiniteMPS
+from tenax.core.symmetry import U1Symmetry
+from tenax.core.tensor import DenseTensor
 
 D = 3
 
@@ -187,3 +192,156 @@ def _torus_2x2(A, B, weights):
     # B01  m  n  l  k  y
     # A11  o  p  k  l  z
     return np.einsum("nmjiw,poijx,mnlky,opklz->wxyz", a, b, b, a, optimize=True)
+
+
+# --- the 1D-chain anchor (#882 Task 6) ------------------------------------
+#
+# A chain is a tree, so BP is *exact* on it: its fixed-point bond weights are
+# the Schmidt values, to machine precision.  That makes it the one geometry in
+# this plan with an answer known a priori -- the loopy square lattice has no
+# valid reference spectrum at all (#882 §6.3), so every other criterion is a
+# self-consistency check.
+#
+# The subject and the reference have to be the *same* state, which is why both
+# are built here from one pair of MPS site tensors ``a``, ``b``:
+#
+#   reference -- repeat them into a long finite MPS ``a b a b ...`` and read the
+#                middle bonds off tenax's own ``compute_singular_values``;
+#   subject   -- embed the same two as a checkerboard PEPS pair whose vertical
+#                legs have dimension 1, and hand that to ``gauge_fix``.
+#
+# Comparing BP against a *different* finite chain's middle bond -- a fresh
+# ``FiniteMPS.random(6, 2, 4)`` -- compares two unrelated states and can only
+# be made to pass by loosening something.
+
+#: The recorded draw.  ``d``/``chi`` are the sizing the task brief starts from;
+#: only the seed was chosen, on the measurements in :func:`_chain_pair`.
+_CHAIN_SEED = 10
+_CHAIN_D = 2
+_CHAIN_CHI = 4
+
+
+def _chain_pair(seed: int = _CHAIN_SEED, d: int = _CHAIN_D, chi: int = _CHAIN_CHI):
+    """Two random MPS site tensors ``(left, phys, right)``, plus boundary vectors.
+
+    ``numpy``'s ``default_rng`` rather than ``jax.random`` -- unlike every other
+    builder in this module -- deliberately: this draw is the anchor's ground
+    truth, and NEP 19 guarantees the PCG64 stream is stable across numpy
+    versions, which is the property a *recorded* seed needs.
+
+    Seed 10 of the first twelve, picked on three measured properties (all
+    ``d=2``, ``chi=4``; the scan is in ``task-6-report.md``):
+
+    * The 2-site transfer matrix's subleading ratio ``|lam2/lam1|`` is 0.134,
+      the smallest of the twelve.  That ratio is what sets how fast the finite
+      chain's middle bond approaches the infinite chain's, hence the ``L`` the
+      reference needs: 0.134 gets to the f64 floor by ``L = 80``, where seed
+      0's 0.645 still drifts 6.9e-14 between ``L = 160`` and ``L = 200``.
+    * Its two inequivalent bonds' spectra differ by 1.44e-01, the largest of
+      the six whose spectra were computed.  The parity-swap discriminator in
+      ``test_ipeps_gauge.py`` *is* that number, so a seed whose two bonds
+      nearly agreed would make it vacuous.
+    * Neither spectrum is degenerate (smallest within-bond gap 2.6e-02), so
+      sorting is well defined and perturbing one entry is visible.
+    """
+    rng = np.random.default_rng(seed)
+    a = rng.normal(size=(chi, d, chi))
+    b = rng.normal(size=(chi, d, chi))
+    return (
+        a / np.linalg.norm(a),
+        b / np.linalg.norm(b),
+        rng.normal(size=chi),
+        rng.normal(size=chi),
+    )
+
+
+def _trivial_index(dim: int, flow: FlowDirection, label: str) -> TensorIndex:
+    """A dense (all-charges-zero) U(1) index, the convention both builders use."""
+    return TensorIndex.from_charges(
+        U1Symmetry(), np.zeros(dim, dtype=np.int32), flow, label=label
+    )
+
+
+def _chain_mps_site(arr: np.ndarray, i: int) -> DenseTensor:
+    """``(left, phys, right)`` array as ``FiniteMPS``'s site ``i``.
+
+    Labels and flows copied from ``mps._build_random_dense_tensors``: the
+    canonicalization sweeps address bonds by the names ``v{i-1}_{i}`` /
+    ``v{i}_{i+1}`` (``v_-1_0`` at the left edge), so these are not free.
+    """
+    left = "v_-1_0" if i == 0 else f"v{i - 1}_{i}"
+    return DenseTensor(
+        jnp.asarray(arr),
+        (
+            _trivial_index(arr.shape[0], FlowDirection.IN, left),
+            _trivial_index(arr.shape[1], FlowDirection.IN, f"p{i}"),
+            _trivial_index(arr.shape[2], FlowDirection.OUT, f"v{i}_{i + 1}"),
+        ),
+    )
+
+
+def _chain_middle_spectra(a, b, vl, vr, L: int) -> tuple[np.ndarray, np.ndarray]:
+    """Middle ``(h_AB-parity, h_BA-parity)`` bond spectra of ``a b a b ...``.
+
+    Builds the ``L``-site finite MPS whose bulk alternates ``a``, ``b``, closes
+    the two open ends with ``vl``/``vr`` so it is a genuine state rather than a
+    ``chi``-dimensional family, and returns the two adjacent middle bonds from
+    :meth:`FiniteMPS.compute_singular_values`, which fills every bond and
+    normalises each to ``sum(sv**2) == 1``.  (:meth:`canonicalize` fills only
+    the centre bond and cannot be used for this.)
+
+    **Bond parity, derived from the construction, not fitted.**  Site ``i`` is
+    ``a`` for even ``i`` and ``b`` for odd ``i``, and MPS site ``i``'s right
+    bond contracts with site ``i+1``'s left bond.  :func:`_chain_pair_as_peps`
+    sends the MPS left bond to the PEPS ``l`` leg and the right bond to ``r``,
+    so chain bond ``i`` is ``a.r <-> b.l`` for even ``i`` -- which
+    ``BondWeights`` names ``h_AB`` -- and ``b.r <-> a.l`` for odd ``i``, which
+    is ``h_BA``.  ``mid`` is forced even so ``(mid, mid+1)`` is exactly one
+    ``(h_AB, h_BA)`` pair, both ~``L/2`` sites from either boundary.
+
+    Getting that parity backwards is silent -- the comparison simply fails and
+    looks like a BP defect -- so ``test_ipeps_gauge.py`` also asserts that the
+    crossed pairing *does* fail, which pins the claim rather than assuming it.
+    """
+    tensors = []
+    for i in range(L):
+        arr = a if i % 2 == 0 else b
+        if i == 0:
+            arr = np.tensordot(vl, arr, axes=(0, 0))[None]
+        if i == L - 1:
+            arr = np.tensordot(arr, vr, axes=(2, 0))[..., None]
+        tensors.append(_chain_mps_site(arr, i))
+    sv = FiniteMPS.from_tensors(tensors).compute_singular_values().singular_values
+    mid = 2 * (L // 4)
+    return np.asarray(sv[mid]), np.asarray(sv[mid + 1])
+
+
+def _chain_pair_as_peps(a, b) -> tuple[DenseTensor, DenseTensor]:
+    """The same two MPS tensors as a checkerboard PEPS pair, one row of it.
+
+    ``u``/``d`` get dimension 1, so the 2D network factorises into decoupled
+    horizontal rows and each row is the chain ``a b a b ...`` verbatim -- the
+    state :func:`_chain_middle_spectra` takes the reference from.  The vertical
+    bond weights are then length-1 and must come back as exactly 1.0, which is
+    a free check on ``gauge_fix``'s bond bookkeeping.
+
+    Flows follow ``ipeps._wrap_as_dense_tensor`` (``l`` OUT, ``r`` IN) so that
+    ``A.r`` pairs with ``B.l``; that builder itself cannot be reused because it
+    assumes all four virtual legs share one dimension.
+    """
+    out = []
+    for arr in (a, b):
+        chi_l, d, chi_r = arr.shape
+        out.append(
+            DenseTensor(
+                jnp.asarray(np.transpose(np.asarray(arr), (0, 2, 1))[None, None]),
+                (
+                    _trivial_index(1, FlowDirection.OUT, "u"),
+                    _trivial_index(1, FlowDirection.IN, "d"),
+                    _trivial_index(chi_l, FlowDirection.OUT, "l"),
+                    _trivial_index(chi_r, FlowDirection.IN, "r"),
+                    _trivial_index(d, FlowDirection.IN, "phys"),
+                ),
+            )
+        )
+    return out[0], out[1]
