@@ -398,14 +398,55 @@ slow — see §2.
 
 **Converging is not being exact**, and that gap is the real Phase 1 work. A BP
 fixed point on a graded network can be self-consistent and still not be a gauge
-transformation of the original state if a Koszul sign is dropped. The invariance
-test is what decides it, and here is the obstacle: **`_torus_2x2`, the probe #870
-relies on, cannot be reused.** It calls `todense()` and contracts with
-`np.einsum`, which has no notion of exchange signs; on a fermionic state it
-computes the wrong scalar and would certify a broken gauge. Phase 1 must build
-the invariance probe out of the graded `contract()` instead, and validate the new
-probe against the old one on a *bosonic* pair first — otherwise a probe bug and a
-gauge bug are indistinguishable.
+transformation of the original state if a Koszul sign is dropped.
+
+**The obstacle is sharper than an earlier draft of this section understood, and
+it rules out the probe that draft prescribed.** `_torus_2x2` — the probe #870
+relies on — densifies and contracts with `np.einsum`, which has no notion of
+exchange signs, so on a fermionic state it computes the wrong scalar and would
+certify a broken gauge. That much is right. The prescribed remedy, "build the
+probe out of the graded `contract()` instead", is **not available**:
+
+- `contract` **does not apply Koszul signs**, by an explicit design decision
+  (`contraction/contractor.py:949-957`, #555): *"the contractor does NOT
+  auto-apply Koszul signs from leg permutations… For planar networks — the only
+  kind Tenax's CTM/RDM/energy code uses — no signs are needed… For future
+  non-planar applications an explicit `twist` primitive can be added."* No
+  `twist` primitive exists.
+- Signs enter **only** through `SymmetricTensor.transpose`, `fuse`, and the
+  `linalg` decompositions (`_koszul_sign` at `linalg.py:374, 764, 1042, 1271`).
+  `bar()` applies none (`tensor.py:302-312`).
+- A closed 2×2 torus is precisely the **non-planar** case that carve-out
+  excludes: its wrap-around edges cross the interior.
+
+So a torus built on `contract` performs no transpose, fuse or decomposition and
+is categorically sign-free. Measured on a real `FermionParity` pair, it is
+value-identical to the `np.einsum` probe it was meant to replace — 2.15e-15
+relative. Routing through `contract` buys nothing.
+
+Note the asymmetry this creates: `bp_gauge_checkerboard` **is** sign-aware,
+because it goes through `eigh`. The gauge machinery and any torus probe
+therefore use different sign conventions, and a sign-level defect in the gauge
+is exactly what such a probe cannot see.
+
+**Decided: use a planar witness instead of a closed amplitude.** Gauge
+invariance is tested by a quantity the library can already contract correctly —
+the fermionic CTM energy, or a reduced density matrix — asserted **before and
+after** the gauge. Those paths are planar, which is the regime #555 states is
+sign-correct, and they reuse machinery that is already exercised. Two properties
+make this sufficient rather than a compromise:
+
+- it is a **relative** check, so it does not depend on the absolute energy being
+  certified — which matters, because §5.5 establishes it is not (#879);
+- it is the quantity that actually matters downstream; a gauge that preserved a
+  closed amplitude but moved the energy would be useless regardless.
+
+It is weaker than a full amplitude comparison, and that is recorded here rather
+than glossed: it cannot detect a defect that leaves every planar observable
+invariant. Closing that gap needs the `twist` primitive, which is out of scope
+for v1 (§8). Any witness built this way must be validated by **mutation** — a
+deliberately mispaired gauge must make it fail — because an invariance assertion
+that has never seen a violation is not evidence of anything.
 
 ### 5.3 #869's divergence is seed-dependent at D=3 and universal from D=4
 
