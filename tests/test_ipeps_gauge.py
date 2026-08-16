@@ -22,7 +22,7 @@ from _ipeps_gauge_helpers import (  # tests/ is on sys.path
 )
 
 from tenax.algorithms.ipeps_bp_gauge import BondWeights, bp_gauge_checkerboard
-from tenax.algorithms.ipeps_gauge import absorb_weights, gauge_fix
+from tenax.algorithms.ipeps_gauge import absorb_weights, gauge_fix, torus_2x2_graded
 
 ABSORB_TOL = 1e-13
 
@@ -121,3 +121,75 @@ def test_gauge_fix_matches_the_vidal_route(kind, D):
         a, b = a / jnp.max(a), b / jnp.max(b)
         d = float(jnp.max(jnp.abs(a - b)))
         assert d < 1e-10, f"{kind} D={D} bond {f}: different fixed point ({d:.3e})"
+
+
+@pytest.mark.parametrize("kind", ["dense", "symmetric"])
+def test_graded_probe_matches_einsum_probe_on_bosonic(kind):
+    """Validate the graded probe where the einsum probe is still correct.
+
+    Without this, a fermionic gauge test is comparing two unknowns.
+    """
+    A, B = _PAIRS[kind](D=3)
+    w = BondWeights.ones(3, 3)
+    ref = _unit(np.asarray(_torus_2x2(A, B, w)).ravel())
+    got = _unit(np.asarray(torus_2x2_graded(A, B, w).todense()).ravel())
+    rel = float(np.linalg.norm(got - ref))
+    assert rel < 1e-13, (
+        f"{kind}: graded probe disagrees with the einsum probe by {rel:.3e} on a "
+        f"BOSONIC pair, where both are valid.  Fix the probe before trusting it "
+        f"on a fermionic one."
+    )
+
+
+@pytest.mark.parametrize("kind", ["dense", "symmetric"])
+def test_graded_probe_places_each_weight_on_the_right_leg(kind):
+    """The same agreement with a *distinct* weight on every bond.
+
+    ``BondWeights.ones`` above makes all four weights identical, so it cannot
+    see a probe that hangs ``h_AB`` where ``v_AB`` belongs, or that dresses
+    ``u``/``l`` instead of ``d``/``r`` -- every mis-placement multiplies the
+    same ones.  Four different, non-degenerate vectors make each of those
+    mistakes change the answer.  The weights below deliberately have no
+    repeated entry within or across bonds, so even a swap of two legs of the
+    same bond type shows up.
+    """
+    A, B = _PAIRS[kind](D=3)
+    w = BondWeights(
+        h_AB=jnp.array([1.0, 0.4, 0.1]),
+        h_BA=jnp.array([0.9, 0.6, 0.2]),
+        v_AB=jnp.array([0.8, 0.3, 0.05]),
+        v_BA=jnp.array([0.7, 0.5, 0.3]),
+    )
+    ref = _unit(np.asarray(_torus_2x2(A, B, w)).ravel())
+    got = _unit(np.asarray(torus_2x2_graded(A, B, w).todense()).ravel())
+    rel = float(np.linalg.norm(got - ref))
+    assert rel < 1e-13, (
+        f"{kind}: graded probe disagrees with the einsum probe by {rel:.3e} once "
+        f"the four bonds carry different weights -- the wiring or the weight "
+        f"placement is wrong, not the gauge"
+    )
+
+
+@pytest.mark.parametrize("kind", ["dense", "symmetric"])
+def test_graded_probe_sees_the_known_bosonic_gauge_invariance(kind):
+    """The instrument reproduces the known answer on a known-exact gauge.
+
+    ``bp_gauge_checkerboard`` is already verified exact to ~1e-15 on both
+    bosonic pair types, so a probe that cannot see that is broken.  This is
+    the calibration, not the experiment: the fermionic case -- where the
+    einsum probe is *invalid* and this one is the only witness -- is
+    deliberately left to the next task, so the instrument is fixed before the
+    measurement it is built for.
+    """
+    A, B = _PAIRS[kind](D=3)
+    ones = BondWeights.ones(3, 3)
+    A1, B1, w1, info = bp_gauge_checkerboard(A, B, ones, tol=1e-12, max_iter=400)
+    assert info.converged
+
+    before = _unit(np.asarray(torus_2x2_graded(A, B, ones).todense()).ravel())
+    after = _unit(np.asarray(torus_2x2_graded(A1, B1, w1).todense()).ravel())
+    rel = float(np.linalg.norm(after - before))
+    assert rel < 1e-12, (
+        f"{kind}: the graded probe reports a {rel:.3e} state change across a "
+        f"gauge already known exact to ~1e-15; the probe is what is wrong"
+    )
