@@ -309,6 +309,18 @@ def measure_gradient_error(
 
     _energy, grad = energy_and_grad(A)
     grad_arr = np.asarray(grad)
+    if grad_arr.shape != base.shape:
+        # ``grad_arr * v`` would happily BROADCAST a scalar or a lower-rank
+        # array, and the projection then looks right: for ``E = sum(x)`` a
+        # returned scalar ``1`` gives exactly the directional derivative of the
+        # true all-ones gradient, so a callback that never produced a
+        # tensor-shaped gradient at all is reported as perfectly accurate.
+        raise ValueError(
+            f"the gradient has shape {grad_arr.shape}, expected "
+            f"{base.shape}. A broadcast-compatible shape is not accepted: it "
+            "would project to a plausible directional derivative and hide the "
+            "fact that no gradient of the right shape was returned."
+        )
     if not np.all(np.isfinite(grad_arr)):
         # Fail closed.  ``nan > x`` is False, so letting a NaN through would set
         # ``is_resolved=False`` -- the branch documented as "the gradient is
@@ -331,6 +343,16 @@ def measure_gradient_error(
             f"the directional derivative g.v is {analytic}, so there is "
             "nothing to compare a finite difference against."
         )
+
+    class _StepUnusable(Exception):
+        """This step cannot produce a difference; others still might.
+
+        Distinct from the hard errors, which are about the *map* being broken
+        (a NaN gradient, a non-finite energy) and cannot be fixed by choosing a
+        different step.  A step that rounds away, or whose energies cancel, is
+        a property of that step against this state -- discarding the whole scan
+        for it throws away the other steps' perfectly good data.
+        """
 
     energy_dtypes: list = []
 
@@ -381,7 +403,7 @@ def measure_gradient_error(
         drifted = meaningful & (np.abs(realised - intended) > tol_abs)
         n_bad = int(np.count_nonzero(frozen | drifted))
         if n_bad:
-            raise ValueError(
+            raise _StepUnusable(
                 f"the step h={t:.1e} rounds away against this state on "
                 f"{n_bad} of {int(np.count_nonzero(meaningful))} weighted "
                 f"coordinates: the shift there is below what base can "
@@ -406,42 +428,64 @@ def measure_gradient_error(
         return out
 
     results = []
+    skipped: list[str] = []
     for h in steps:
-        e_plus, e_minus = energy_at(h), energy_at(-h)
-        # Cancellation in the SUBTRACTION, which the displacement guard above
-        # cannot see: the tensors genuinely differ, but the energies do not.
-        # Near a stationary point, or with a large constant offset, the change
-        # falls under the spacing of the energy value itself -- for
-        # E = 1e20 + sum(x^2), ULP(1e20) is 1.6e+04 and a 1e-05 change vanishes,
-        # so every difference is exactly 0, ``resolution`` is 0, and a correct
-        # gradient is reported as ~1e300 wrong with ``is_resolved=True``.
-        span = abs(e_plus - e_minus)
-        # The floor belongs to the precision the ENERGY came back in, not the
-        # state's.  A map may evaluate at float64 from a float32 state, and
-        # charging it the float32 floor rejects a scan whose span is seven
-        # orders above its real rounding: |E| ~ 1e6 gives 4.8e-01 against
-        # 8.9e-10.
-        floor = 4.0 * _energy_eps() * max(abs(e_plus), abs(e_minus))
-        if span <= floor:
-            raise ValueError(
-                f"at h={h:.1e} the two perturbed energies differ by {span:.3e}, "
-                f"at or below the {floor:.3e} rounding floor of the energy "
-                f"itself (|E| ~ {max(abs(e_plus), abs(e_minus)):.3e}), so the "
-                "difference carries no signal. This is cancellation in the "
-                "subtraction rather than in the state -- the shifted tensors "
-                "did differ. Near a stationary point, or with a large additive "
-                "constant in the energy, use a direction with more signal or "
-                "remove the offset."
-            )
-        fd = (e_plus - e_minus) / (2.0 * h)
-        if not np.isfinite(fd):
-            raise ValueError(
-                f"the finite difference at h={h:.1e} is {fd}; the energies "
-                "were finite, so this is a cancellation or overflow in the "
-                "difference itself."
-            )
-        rel = abs(fd - analytic) / max(abs(fd), 1e-300)
+        try:
+            e_plus, e_minus = energy_at(h), energy_at(-h)
+            # Cancellation in the SUBTRACTION, which the displacement guard above
+            # cannot see: the tensors genuinely differ, but the energies do not.
+            # Near a stationary point, or with a large constant offset, the change
+            # falls under the spacing of the energy value itself -- for
+            # E = 1e20 + sum(x^2), ULP(1e20) is 1.6e+04 and a 1e-05 change vanishes,
+            # so every difference is exactly 0, ``resolution`` is 0, and a correct
+            # gradient is reported as ~1e300 wrong with ``is_resolved=True``.
+            span = abs(e_plus - e_minus)
+            # The floor belongs to the precision the ENERGY came back in, not the
+            # state's.  A map may evaluate at float64 from a float32 state, and
+            # charging it the float32 floor rejects a scan whose span is seven
+            # orders above its real rounding: |E| ~ 1e6 gives 4.8e-01 against
+            # 8.9e-10.
+            floor = 4.0 * _energy_eps() * max(abs(e_plus), abs(e_minus))
+            if span <= floor:
+                raise _StepUnusable(
+                    f"at h={h:.1e} the two perturbed energies differ by {span:.3e}, "
+                    f"at or below the {floor:.3e} rounding floor of the energy "
+                    f"itself (|E| ~ {max(abs(e_plus), abs(e_minus)):.3e}), so the "
+                    "difference carries no signal. This is cancellation in the "
+                    "subtraction rather than in the state -- the shifted tensors "
+                    "did differ. Near a stationary point, or with a large additive "
+                    "constant in the energy, use a direction with more signal or "
+                    "remove the offset."
+                )
+            fd = (e_plus - e_minus) / (2.0 * h)
+            if not np.isfinite(fd):
+                raise ValueError(
+                    f"the finite difference at h={h:.1e} is {fd}; the energies "
+                    "were finite, so this is a cancellation or overflow in the "
+                    "difference itself."
+                )
+            rel = abs(fd - analytic) / max(abs(fd), 1e-300)
+        except _StepUnusable as exc:
+            # One bad step is not a bad scan.  Keep going; the survivors are
+            # checked for separation below, which is the property that actually
+            # has to hold.
+            skipped.append(f"h={h:.1e}: {exc}")
+            continue
         results.append((rel, fd, h))
+
+    surviving = sorted({abs(r[2]) for r in results})
+    if len(surviving) < 2 or surviving[-1] / surviving[0] < 2.0:
+        detail = "\n  ".join(skipped) if skipped else "(none skipped)"
+        raise ValueError(
+            f"only {len(surviving)} usable step magnitude(s) remain"
+            + (
+                f", spanning a factor {surviving[-1] / surviving[0]:.3g}"
+                if len(surviving) >= 2
+                else ""
+            )
+            + ", which cannot bound its own resolution -- at least two "
+            "magnitudes a factor 2 apart are needed. Steps dropped:\n  " + detail
+        )
 
     # Pick the step by |h| ALONE, never by how well its difference agrees with
     # the gradient.  Selecting on agreement is circular: it hands the answer to

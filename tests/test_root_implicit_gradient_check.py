@@ -703,3 +703,79 @@ def test_an_energy_returned_at_higher_precision_than_the_state_is_allowed():
     )
 
     assert report.relative_error < 1e-2, report.summary()
+
+
+# --------------------------------------------------------------------------- #
+# 10. A malformed gradient, and one bad step among good ones                    #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_broadcastable_gradient_is_refused_rather_than_projected():
+    """``grad * v`` would broadcast a scalar into a plausible answer.
+
+    For ``E = sum(x)`` the true gradient is all-ones, and a returned scalar
+    ``1`` projects to *exactly* the same directional derivative -- so a
+    callback that never produced a tensor-shaped gradient reports as perfectly
+    accurate.
+    """
+
+    def scalar_grad(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x), jnp.asarray(1.0)
+
+    with pytest.raises(ValueError, match="expected"):
+        measure_gradient_error(scalar_grad, _quartic_state())
+
+
+def test_one_unusable_step_does_not_discard_the_whole_scan():
+    """Two well-separated steps survive; the third is skipped, not fatal.
+
+    With ``E = 5e10 + sum(x**2)`` the energy floor is 4.4e-05. The spans are
+    2.3e-03 at h=1e-4 and 2.3e-04 at h=1e-5 (both usable) but 2.3e-05 at
+    h=1e-6, which falls below it. Aborting there would throw away a perfectly
+    good 10x-separated scan.
+    """
+
+    def offset_quadratic(t):
+        x = jnp.asarray(t.todense())
+        return 5e10 + jnp.sum(x**2), 2.0 * x
+
+    report = measure_gradient_error(
+        offset_quadratic,
+        _wrap(np.ones((2, 2, 2, 2, 2))),
+        direction=np.ones((2, 2, 2, 2, 2)),
+        steps=(1e-4, 1e-5, 1e-6),
+    )
+
+    assert report.step == pytest.approx(1e-5), (
+        f"h=1e-6 should have been skipped, leaving 1e-5 as the smallest "
+        f"usable magnitude; got {report.step:.1e}"
+    )
+    # The surviving span is only ~5x above the energy floor, so the difference
+    # is genuinely noisy and the scan says so.  What this test asserts is that
+    # a report exists at all and is CONSISTENT with a correct gradient -- the
+    # error sits within the scan's own resolution rather than standing clear of
+    # it.  Demanding a tight number here would be demanding precision the
+    # offset destroyed.
+    assert not report.is_resolved, report.summary()
+    assert report.relative_error <= 2.0 * report.resolution, report.summary()
+
+
+def test_the_scan_still_fails_when_too_few_steps_survive():
+    """Skipping is not the same as tolerating: two separated steps are required.
+
+    Here every step but one falls below the floor, so nothing can bound the
+    resolution and the aggregate error names each dropped step.
+    """
+
+    def big_offset(t):
+        x = jnp.asarray(t.todense())
+        return 1e18 + jnp.sum(x**2), 2.0 * x
+
+    with pytest.raises(ValueError, match="usable step magnitude"):
+        measure_gradient_error(
+            big_offset,
+            _wrap(np.ones((2, 2, 2, 2, 2))),
+            direction=np.ones((2, 2, 2, 2, 2)),
+            steps=(1e-4, 1e-5, 1e-6),
+        )
