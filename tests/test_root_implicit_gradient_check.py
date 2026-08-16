@@ -642,3 +642,64 @@ def test_well_separated_steps_are_accepted():
 
     assert report.is_resolved, report.summary()
     assert report.relative_error == pytest.approx(0.4, rel=1e-3), report.summary()
+
+
+# --------------------------------------------------------------------------- #
+# 9. The guards must not reject VALID scans                                     #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_state_with_tiny_entries_is_not_mistaken_for_rounding_away():
+    """Rounding scales with the perturbed value, not with ``base`` alone.
+
+    At ``base = 3.85e-08`` with ``h*v = 1e-05`` the realised shift is off by
+    1.69e-21 -- ordinary rounding of a sum dominated by the *step*. A bound of
+    ``4*eps*|base|`` is 3.42e-23 there, so the scan was refused as "rounds
+    away" despite being perfectly good.
+    """
+    # This value is not arbitrary: with a normalised all-ones direction and
+    # h=1e-5 it puts the realised-vs-intended drift at 2.12e-22, above the
+    # 2.87e-23 that ``4*eps*|base|`` allows and below the 1.57e-21 that
+    # ``4*eps*max(|base|, |intended|)`` allows. A value picked by eye rounds
+    # exactly and exercises nothing -- the first draft of this test did, and a
+    # mutant reverting the bound survived it.
+    tiny = np.full((2, 2, 2, 2, 2), 3.2321179903596804e-08)
+
+    # A quadratic, so the central difference is EXACT at any step and the only
+    # thing under test is whether the rounding guard lets the scan run.  With a
+    # quartic the h >> x regime is dominated by higher-order terms and the scan
+    # honestly reports "unresolvable", which would not isolate the guard.
+    def quadratic(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**2), 2.0 * x
+
+    report = measure_gradient_error(
+        quadratic,
+        _wrap(tiny),
+        direction=np.ones((2, 2, 2, 2, 2)),
+        steps=(1e-5, 1e-7),
+    )
+
+    assert report.relative_error < 1e-6, report.summary()
+
+
+def test_an_energy_returned_at_higher_precision_than_the_state_is_allowed():
+    """The cancellation floor belongs to the energy's precision, not the state's.
+
+    A float32 state whose map evaluates in float64 has a real rounding floor of
+    ~8.9e-10 at ``|E| ~ 1e6``; charging it the float32 floor of 4.8e-01 rejects
+    a span of 4e-03 that is seven orders above the noise.
+    """
+
+    def f64_energy_from_f32_state(t):
+        x = jnp.asarray(t.todense())
+        x64 = x.astype(jnp.float64)
+        return 1e6 + jnp.sum(x64**2), (2.0 * x64).astype(x.dtype)
+
+    data = np.full((2, 2, 2, 2, 2), 0.5, dtype=np.float32)
+
+    report = measure_gradient_error(
+        f64_energy_from_f32_state, _wrap(data), steps=(1e-3, 1e-4)
+    )
+
+    assert report.relative_error < 1e-2, report.summary()

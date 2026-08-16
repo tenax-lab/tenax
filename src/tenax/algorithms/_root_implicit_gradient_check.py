@@ -332,6 +332,17 @@ def measure_gradient_error(
             "nothing to compare a finite difference against."
         )
 
+    energy_dtypes: list = []
+
+    def _energy_eps() -> float:
+        """Machine epsilon of the precision the energies actually came back in."""
+        if not energy_dtypes:
+            return float(np.finfo(base.dtype).eps)
+        dt = np.result_type(*energy_dtypes)
+        if not np.issubdtype(dt, np.inexact):
+            return float(np.finfo(np.float64).eps)
+        return float(np.finfo(dt).eps)
+
     def energy_at(t: float) -> float:
         # ``v`` already carries ``base``'s precision, so this inherits it.
         # Casting here INSTEAD would leave ``analytic`` projecting along a
@@ -353,7 +364,13 @@ def measure_gradient_error(
         # must meet.  A dtype-blind threshold rejects float32 outright, where
         # ordinary rounding is already 2.5e-04 relative.
         eps = float(np.finfo(base.dtype).eps)
-        tol_abs = 4.0 * eps * np.abs(base)
+        # Rounding ``base + intended`` costs about ``eps`` times the magnitude
+        # of the SUM, so the bound has to follow whichever term dominates.
+        # Using ``|base|`` alone rejects a state with tiny nonzero entries: at
+        # ``base = 3.85e-08`` with ``h*v = 1e-05`` the realised shift is off by
+        # 1.69e-21 against a bound of 3.42e-23, and a perfectly good scan was
+        # refused as "rounds away".
+        tol_abs = 4.0 * eps * np.maximum(np.abs(base), np.abs(intended))
         # A coordinate is "frozen" when it carries real weight in the direction
         # yet is too small for ``base`` to represent: it then contributes to
         # ``g.v`` but not to the difference, so the two follow different
@@ -376,7 +393,9 @@ def measure_gradient_error(
             )
         shifted = DenseTensor(jnp.asarray(shifted_data), A.indices)
         energy, _g = energy_and_grad(shifted)
-        out = float(np.real(energy))
+        energy_arr = np.asarray(energy)
+        energy_dtypes.append(energy_arr.dtype)
+        out = float(np.real(energy_arr))
         if not np.isfinite(out):
             raise ValueError(
                 f"the energy at the perturbed state (t={t:.1e}) is {out}, so "
@@ -386,7 +405,6 @@ def measure_gradient_error(
             )
         return out
 
-    energy_eps = float(np.finfo(base.dtype).eps)
     results = []
     for h in steps:
         e_plus, e_minus = energy_at(h), energy_at(-h)
@@ -398,7 +416,12 @@ def measure_gradient_error(
         # so every difference is exactly 0, ``resolution`` is 0, and a correct
         # gradient is reported as ~1e300 wrong with ``is_resolved=True``.
         span = abs(e_plus - e_minus)
-        floor = 4.0 * energy_eps * max(abs(e_plus), abs(e_minus))
+        # The floor belongs to the precision the ENERGY came back in, not the
+        # state's.  A map may evaluate at float64 from a float32 state, and
+        # charging it the float32 floor rejects a scan whose span is seven
+        # orders above its real rounding: |E| ~ 1e6 gives 4.8e-01 against
+        # 8.9e-10.
+        floor = 4.0 * _energy_eps() * max(abs(e_plus), abs(e_minus))
         if span <= floor:
             raise ValueError(
                 f"at h={h:.1e} the two perturbed energies differ by {span:.3e}, "
