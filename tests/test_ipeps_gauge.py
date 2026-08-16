@@ -499,8 +499,20 @@ def _as_spectrum(x):
     return v / np.linalg.norm(v)
 
 
+@pytest.mark.core
 def test_bp_weights_are_the_chains_schmidt_values():
     """BP's fixed-point weights ARE the Schmidt values, on the one case we know.
+
+    Marked ``core`` deliberately, and it is the only test in this file that is.
+    ``conftest.py`` maps this file to ``algorithm``, and the required CI checks
+    run ``pytest -m core`` -- so without this marker the one test in the whole
+    rewrite with an externally known answer would land only in the non-required
+    ``fast-other`` bucket, and a Phase 2/3 change that broke the anchor would
+    leave every required check green.  The two markers coexist: the collection
+    hook only *adds* the file's bucket marker, ``-m core`` is a positive
+    selector, and the non-core buckets filter ``not core and not slow``, so
+    this moves the test into the required gate rather than duplicating it.
+    It costs 6.3 s.
 
     BP is exact on a tree, so on a 1D chain its converged bond weights are the
     exact Schmidt spectrum -- not an approximation to it.  §6.3 of the spec
