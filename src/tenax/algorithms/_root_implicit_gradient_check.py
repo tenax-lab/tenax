@@ -135,10 +135,16 @@ class GradientErrorReport(NamedTuple):
                     "scan is indeterminate and this floor is not an accuracy "
                     "claim"
                 )
-            elif self.fd_divergence > 0.25:
+            elif self.fd_divergence > 0.0 and self.fd_divergence >= self.resolution:
+                # No threshold: say so exactly when the differences, rather
+                # than the errors' own scatter, are what set the floor.  A
+                # ``0.25`` gate here would still make 0.24 and 0.26 read
+                # qualitatively differently after the classifier stopped using
+                # one.
                 verdict += (
-                    f"; the finite differences themselves disagree by "
-                    f"{self.fd_divergence:.2e}, so the scan has not converged"
+                    f"; that floor is set by the differences still moving "
+                    f"{self.fd_divergence:.2e} between steps rather than by "
+                    "the errors' own scatter"
                 )
         return (
             f"{verdict} at h={self.step:.1e} "
@@ -640,7 +646,20 @@ def measure_gradient_error(
         magnitudes = sorted(by_magnitude)
         if len(magnitudes) >= 2 and magnitudes[-1] / magnitudes[0] >= 2.0:
             members = list(by_magnitude.values())
-            if len(members) > len(best_group):
+            # Ties broken by the FINEST step, not by encounter order.  Two
+            # disjoint groups of equal size are otherwise resolved by however
+            # ``steps`` happened to be written: the same magnitudes as
+            # ``(4, 2, .25, .125)`` reported h=2 and error 0.2, reversed they
+            # reported h=.125 and 9.8e-04.  Smallest |h| also matches the
+            # documented selection policy.
+            if best_group:
+                better = (len(members), -min(magnitudes)) > (
+                    len(best_group),
+                    -min(abs(results[j][2]) for j in best_group),
+                )
+            else:
+                better = True
+            if better:
                 best_group = members
 
     evidence = [results[j] for j in best_group] if best_group else results

@@ -1146,7 +1146,7 @@ def test_an_unconverged_scan_is_not_resolved_by_agreeing_errors():
         f"relative errors agreed while the scan had not converged -- "
         f"{report.summary()}"
     )
-    assert "not converged" in report.summary(), report.summary()
+    assert "set by the differences" in report.summary(), report.summary()
 
 
 def test_a_converged_scan_is_not_blocked_by_the_convergence_signal():
@@ -1276,7 +1276,7 @@ def test_an_unconverged_bound_reflects_the_divergence():
         "the bound must carry the divergence, not sit at the relative errors' "
         f"own agreement -- {report.summary()}"
     )
-    assert "not converged" in report.summary(), report.summary()
+    assert "set by the differences" in report.summary(), report.summary()
 
 
 def test_the_reported_step_comes_from_the_group_the_evidence_is_about():
@@ -1436,4 +1436,56 @@ def test_a_partly_converged_scan_is_not_called_measured():
     assert not report.is_resolved, (
         "a scan whose derivative is still moving 17% between steps must not "
         f"yield a definitive error -- {report.summary()}"
+    )
+    # 0.167 sits below the retired 0.25 gate, so this also pins that the
+    # summary explains the floor without one: a threshold here would make
+    # 0.24 and 0.26 read qualitatively differently after the classifier
+    # stopped using a cutoff at all.
+    assert "set by the differences" in report.summary(), report.summary()
+
+
+def test_the_report_does_not_depend_on_the_order_of_steps():
+    """Equal-sized commensurable groups must not be settled by encounter order.
+
+    With ``base[0]=1e15`` the magnitudes split into two disjoint groups of the
+    same size. Retaining whichever came first made the answer depend on how
+    ``steps`` happened to be written -- ``(4, 2, .25, .125)`` reported h=2 and
+    error 0.2, reversed it reported h=.125 and 9.8e-04. Ties now go to the
+    finest step, matching the documented selection policy.
+    """
+    n = 32
+    base = np.ones(n)
+    base[0] = 1e15
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+
+    def affine(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x - base_j), 1.2 * jnp.ones((2, 2, 2, 2, 2))
+
+    kw = dict(
+        direction=np.ones((2, 2, 2, 2, 2)),
+    )
+    forward = measure_gradient_error(
+        affine,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        steps=(4.0, 2.0, 0.25, 0.125),
+        **kw,
+    )
+    reverse = measure_gradient_error(
+        affine,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        steps=(0.125, 0.25, 2.0, 4.0),
+        **kw,
+    )
+
+    assert forward.step == reverse.step, (
+        f"reordering steps changed the reported step: {forward.summary()} vs "
+        f"{reverse.summary()}"
+    )
+    assert forward.relative_error == pytest.approx(reverse.relative_error), (
+        f"reordering steps changed the answer: {forward.summary()} vs "
+        f"{reverse.summary()}"
+    )
+    assert forward.step == pytest.approx(0.125), (
+        f"ties must go to the finest step, got h={forward.step:.3g}"
     )
