@@ -536,7 +536,9 @@ report = measure_gradient_error(
 print(report.summary())
 # `relative_error` is a measurement only when `is_resolved`. When it is not,
 # check `fd_divergence`: only a SMALL value means the gradient is accurate to
-# about `unresolved_bound` (= `fd_spread_tol * resolution`) — the good case.
+# about `unresolved_bound` (the larger of the two thresholds it is tested
+# against, so `is_resolved` is exactly `relative_error > unresolved_bound`) —
+# the good case.
 # A large one means the scan did not converge — the bound then carries that
 # divergence, so it is honest but wide. NaN means no two steps probed
 # commensurable directions, so the scan is indeterminate and the bound is

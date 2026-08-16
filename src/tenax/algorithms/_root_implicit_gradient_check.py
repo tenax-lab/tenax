@@ -78,9 +78,11 @@ class GradientErrorReport(NamedTuple):
 
       - ``fd_divergence`` is a small number: the disagreement did not stand
         clear of the floor, so the gradient is accurate to about
-        ``unresolved_bound`` -- ``fd_spread_tol * resolution``, the quantity
-        actually compared against.  A tiny bound is good news; a large one
-        means the steps need adjusting.
+        ``unresolved_bound`` -- the larger of the two thresholds the error is
+        tested against, so ``is_resolved`` is exactly
+        ``relative_error > unresolved_bound`` and the published floor can never
+        sit below an error that was rejected.  A tiny bound is good news; a
+        large one means the steps need adjusting.
       - ``fd_divergence`` is large enough to dominate the floor: **the scan
         did not converge**.  The bound then carries that divergence, so it is
         honest but wide -- a 50% error left unresolved this way has a bound of
@@ -120,11 +122,11 @@ class GradientErrorReport(NamedTuple):
             verdict = f"gradient error {self.relative_error:.2e}"
         else:
             # Quote the bound that was actually compared against, not
-            # ``resolution`` alone.  ``is_resolved`` tests against
-            # ``fd_spread_tol * resolution``, so an error of 1e-02 against a
-            # resolution of 2e-03 lands here -- and saying "below 2e-03" would
-            # claim the gradient is five times better than the scan
-            # established.
+            # ``resolution`` alone: an error of 1e-02 against a resolution of
+            # 2e-03 lands here, and saying "below 2e-03" would claim the
+            # gradient is five times better than the scan established.
+            # ``unresolved_bound`` is the threshold ``is_resolved`` itself
+            # uses -- both clauses of it -- so the two cannot disagree.
             verdict = (
                 f"gradient error {self.relative_error:.2e} not resolved "
                 f"against a floor of {self.unresolved_bound:.2e}"
@@ -804,11 +806,21 @@ def measure_gradient_error(
     # semantics silently is what produced the earlier fail-open bugs here, and
     # a reader should not have to rederive it.  Its mutant is therefore an
     # equivalent one, reported rather than kept.
-    resolved = (
-        not np.isnan(fd_divergence)
-        and best_rel > fd_spread_tol * resolution
-        and best_rel > _ARTEFACT_MARGIN * fd_divergence
-    )
+    #
+    # There are now two thresholds, so the *reported* bound has to be whichever
+    # one the error failed to clear.  Quoting only the first would put the
+    # published floor BELOW an error rejected by the second: with
+    # ``fd_spread_tol=1.5`` and ``resolution == fd_divergence == 0.1``, a
+    # ``best_rel`` of 0.2 clears ``0.15`` but not ``0.3``, and a bound of 0.15
+    # would say "accurate to 1.5e-01" about a scan that measured 2.0e-01.  So
+    # ``resolved`` is defined *from* the bound rather than alongside it, and the
+    # two cannot drift apart again.  ``max`` is not used to fold in the
+    # divergence, because ``max`` with ``nan`` returns whichever argument came
+    # first -- the ordering trap this module has already been bitten by.
+    unresolved_bound = fd_spread_tol * resolution
+    if not np.isnan(fd_divergence):
+        unresolved_bound = max(unresolved_bound, _ARTEFACT_MARGIN * fd_divergence)
+    resolved = not np.isnan(fd_divergence) and best_rel > unresolved_bound
 
     return GradientErrorReport(
         relative_error=best_rel,
@@ -818,6 +830,6 @@ def measure_gradient_error(
         resolution=resolution,
         is_resolved=resolved,
         fd_divergence=fd_divergence,
-        unresolved_bound=fd_spread_tol * resolution,
+        unresolved_bound=unresolved_bound,
         direction_distortion=direction_distortion,
     )

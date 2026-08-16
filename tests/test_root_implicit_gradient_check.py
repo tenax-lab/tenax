@@ -1638,3 +1638,90 @@ def test_a_converged_scan_is_unaffected_by_the_artefact_margin():
 
     assert report.is_resolved, report.summary()
     assert report.relative_error == pytest.approx(0.5, rel=1e-3), report.summary()
+
+
+@pytest.mark.parametrize("tol", [1.05, 1.5, 2.0, 3.0, 10.0])
+def test_the_published_floor_is_the_threshold_that_was_applied(tol):
+    """``is_resolved`` is exactly ``relative_error > unresolved_bound``.
+
+    With two thresholds, reporting only the first would publish a floor
+    *below* an error the second rejected -- "accurate to 1.5e-01" about a scan
+    that measured 2.0e-01. The bound is therefore the larger of the two, and
+    the verdict is derived from it rather than computed alongside it.
+    """
+    zero_state = _wrap(np.zeros((2, 2, 2, 2, 2)))
+
+    def cubic(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**3), 3.0 * x**2
+
+    report = measure_gradient_error(
+        cubic, zero_state, steps=(1.0, 0.5), fd_spread_tol=tol
+    )
+
+    assert report.is_resolved == (report.relative_error > report.unresolved_bound), (
+        f"verdict and published floor disagree at fd_spread_tol={tol}: "
+        f"{report.summary()}"
+    )
+    assert not report.is_resolved, report.summary()
+    assert report.unresolved_bound >= report.relative_error, (
+        f"floor {report.unresolved_bound:.3e} sits below the rejected error "
+        f"{report.relative_error:.3e} at fd_spread_tol={tol}"
+    )
+
+
+def test_resolution_is_never_smaller_than_the_divergence_it_reports():
+    """The scan's floor cannot be below how much its own differences move.
+
+    ``resolution`` is published, and it also feeds ``fd_spread_tol *
+    resolution``. Folding the divergence in only while it is *small* -- capping
+    its contribution at, say, 1e-02 -- leaves a scan whose derivative moved by
+    0.75 reporting a floor of 0.00, and at ``fd_spread_tol > 3`` shrinks the
+    bound itself below what the margin would have required.
+
+    The artefact margin does not cover this: it constrains ``unresolved_bound``
+    from the other side, so a deflated ``resolution`` stops changing the
+    verdict while still misreporting the number.
+    """
+    zero_state = _wrap(np.zeros((2, 2, 2, 2, 2)))
+
+    def cubic(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**3), 3.0 * x**2
+
+    report = measure_gradient_error(cubic, zero_state, steps=(1.0, 0.5))
+
+    assert report.fd_divergence > 1e-2, (
+        "fixture no longer reaches past the capped regime it exists to probe: "
+        f"{report.summary()}"
+    )
+    assert report.resolution >= report.fd_divergence, (
+        f"floor {report.resolution:.3e} is below the {report.fd_divergence:.3e} "
+        f"the differences themselves moved -- {report.summary()}"
+    )
+
+
+def test_the_floor_carries_the_divergence_when_the_margin_binds():
+    """The margin, not the multiplier, sets the floor in its own window.
+
+    ``fd_spread_tol=1.5`` on this scan compares against ``1.5 * resolution``,
+    but the margin rejects against ``3 * fd_divergence``. Since the divergence
+    is folded into ``resolution``, the second is the larger of the two here,
+    and it -- not the multiplier's product -- is what gets published.
+    """
+    zero_state = _wrap(np.zeros((2, 2, 2, 2, 2)))
+
+    def cubic(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**3), 3.0 * x**2
+
+    report = measure_gradient_error(
+        cubic, zero_state, steps=(1.0, 0.5), fd_spread_tol=1.5
+    )
+
+    assert report.fd_divergence > 0.0, report.summary()
+    assert report.unresolved_bound == pytest.approx(3.0 * report.fd_divergence), (
+        f"expected the margin's product {3.0 * report.fd_divergence:.3e}, got "
+        f"{report.unresolved_bound:.3e} -- {report.summary()}"
+    )
+    assert report.unresolved_bound > 1.5 * report.resolution, report.summary()

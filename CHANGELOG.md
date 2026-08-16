@@ -32,12 +32,15 @@
   `relative_error`, and the `resolution` the step scan can actually resolve.
   `is_resolved` says which regime you are in, and `False` has three causes: only
   a *small* `fd_divergence` means the gradient is accurate to about
-  `unresolved_bound` (= `fd_spread_tol * resolution`), the good case and
-  deliberately not a failure; a large one means the scan did not converge; and
-  NaN means no two steps probed commensurable directions, so the scan is
-  indeterminate. In the latter two the bound is not an accuracy claim at all. Nothing calls it automatically: it
-  costs several CTM convergences, which is why #785 rejected an FD probe inside
-  the optimizer loop. Run it once on a representative state before a long run.
+  `unresolved_bound` — the good case, and deliberately not a failure; a large
+  one means the scan did not converge; and NaN means no two steps probed
+  commensurable directions, so the scan is indeterminate. In the latter two the
+  bound is not an accuracy claim at all. `unresolved_bound` is the larger of the
+  two thresholds the error is tested against, so `is_resolved` is exactly
+  `relative_error > unresolved_bound` and the published floor can never sit
+  below an error that was rejected. Nothing calls it automatically: it costs
+  several CTM convergences, which is why #785 rejected an FD probe inside the
+  optimizer loop. Run it once on a representative state before a long run.
 
   On a complex state the probe direction is complex too, and a real-*valued*
   one passed explicitly is refused — judged on the values, so a real array cast
