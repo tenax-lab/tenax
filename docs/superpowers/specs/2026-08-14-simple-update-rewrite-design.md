@@ -83,9 +83,11 @@ design exists to remove, under a new name.
 
 This is the expensive choice at small D — four BP solves per cycle, ~3.7× at
 D=3 — and it is made with that cost in view rather than in ignorance of it.
-At the **default** D=2 the naive cost is ~85×, which is not acceptable and is
-not accepted: it is host-dispatch overhead in an untraced Python loop, and
-tracing it is a Phase 1 gate. See the measurements below.
+At the **default dense** D=2 the naive cost is 85–122×, which is not acceptable
+and is not accepted: it is host-dispatch overhead in an untraced Python loop,
+and tracing it is a Phase 1 gate. The fermionic default is a separate case with
+a separate gate — its SU cycle is already 96× the dense one before any gauge is
+added. See the measurements below.
 
 ### BP tolerance: 1e-6
 
@@ -100,10 +102,17 @@ lambdas, with every JIT trace warmed before the clock starts:
 | 6 | 19.2 s | 0.03× | 0.02× | **0.01×** | 0.01× | 0.00× |
 
 Cross-check on the methodology: the D=2 SU cycle here (17.4 ms) matches an
-independently measured `ipeps()` run (0.9 s / 200 steps = 18 ms per 4-phase
+independently measured `ipeps()` run (0.9 s / 200 phases = 18 ms per 4-phase
 cycle). An earlier version of this benchmark cycled `t % 4` over too few trials
 and let first-time compiles for phases 2 and 3 land inside the measured window;
 its ratios were wrong and are not the ones above.
+
+A third measurement, taken later against a *random* pair rather than a 60-phase
+SU state, gives **12.2 ms** for the same D=2 cycle — a 1.4× spread on a quantity
+that is almost entirely host dispatch at this size. Nothing here depends on
+which end of that spread is used, but the regression claim below does, so it
+uses the smaller baseline: it is the conservative choice, and it is the one
+measured by the same method as the fermionic number it is compared against.
 
 **The table is per BP solve; the cadence needs four of them per cycle.** §2
 re-gauges before *each bond*, and a checkerboard cycle has four, so the real
@@ -111,7 +120,7 @@ overhead is 4× the figures above:
 
 | D | per solve @1e-6 | **per 4-bond cycle** | total slowdown |
 |---|---|---|---|
-| 2 | 21.4× | 85.6× | **default D** — see the gate below |
+| 2 | 21.4× | 85.6× | **default D** — 122× on the conservative baseline; see the gate below |
 | 3 | 0.67× | **2.68×** | ~3.7× |
 | 4 | 0.08× | **0.32×** | ~1.3× |
 | 6 | 0.01× | **0.04×** | ~1.04× |
@@ -136,32 +145,58 @@ representative of the per-step cost precisely because warm ≈ cold — see belo
 1e-2 is nearly free (1 iteration) and rejected: residual 1e-3..9e-3 is not an
 honest gauge, and honesty is the entire point.
 
-### D=2 is the default, and 85× is not an artefact anyone can ignore
+### D=2 is the default — and the two defaults are not the same problem
 
 An earlier draft called the D=2 ratio an artefact of the host-dispatch floor
 and moved on. The diagnosis is right and the dismissal is not: **`D = 2` is the
 default in both `iPEPSConfig` and `FPEPSConfig`**, so this is the path most
 callers are on.
 
-The arithmetic, from this document's own numbers: four mandatory solves at
-371 ms is **1.48 s per cycle** against a 17 ms SU cycle, so a default 200-step
-run goes from **~0.9 s to ~74 s**. (The "worst case 0.5 s" in the earlier draft
-was a *single* solve, not a run.) Shipping that as the default would be a severe
-regression regardless of what the ratio is *made of*.
+A second draft then projected *both* defaults from one number, and that was also
+wrong, in three separate ways: the dense default is **100** steps, not 200
+(`iPEPSConfig.num_imaginary_steps = 100`; only `FPEPSConfig` is 200); a "step"
+is one *bond*, so the dense default is 25 four-bond cycles while `fpeps()` —
+which calls the shared sweep with `4 * steps` — is **200** cycles, eight times
+as many; and the fermionic projection borrowed dense timings for a block-sparse
+path. Re-measured, all four numbers in one session by one method:
 
-**It is Python, and it is fixable.** BP's cost per *iteration* is flat in D —
-41 ms at D=2, 61 at D=3, 52 at D=4, 32 at D=6 — which is the signature of host
-dispatch rather than arithmetic, on tensors that at D=2 are a few dozen numbers.
-`ipeps_bp_gauge.py` today is a pure Python loop over eager ops: no `jax.jit`, no
-`lax.scan`, no `lax.while_loop`.
+| path | default steps | 4-bond cycles | SU cycle @D=2 | baseline run | with mandatory gauge |
+|---|---|---|---|---|---|
+| dense (`iPEPSConfig`) | 100 | 25 | 12.2 ms | **0.30 s** | 25 × 1.49 s = **37 s** (~122×) |
+| fermionic (`FPEPSConfig`) | 200 | 200 | **1167 ms** | **233 s** | not projectable — see below |
+
+**The dense default is the regression, and it is worse than the 85× figure it
+replaces** — not because the gauge got more expensive (four solves at 370 ms is
+1.48 s per cycle, unchanged) but because the baseline it is measured against is
+smaller than the earlier draft used.
+
+**The fermionic default is a different problem that this design did not
+create.** A fermionic 4-bond cycle at D=2 costs 1167 ms against dense's 12.2 ms
+— **96×** — because at D=2 the block-sparse blocks are single numbers and the
+path is pure eager host dispatch, the wall documented in #566/#618. So the
+fermionic default already takes ~233 s today, and *if* fermionic BP cost matched
+dense the run would go to ~529 s, a mere ~2.3×. That "if" is exactly the
+extrapolation this section was called out for: **the gauge is not generalised to
+fermionic yet** (Phase 1, gated on §5.1), and the SU measurement above is direct
+evidence that dense timings do not transfer to this representation. The
+fermionic number is therefore left unprojected rather than guessed, and
+measuring it is a Phase 1 deliverable.
+
+**It is Python, and on the dense path it is fixable.** BP's cost per *iteration*
+is flat in D and enormous relative to the work: 18.5 ms per iteration at D=2, on
+tensors of 32 numbers. `ipeps_bp_gauge.py` today is a pure Python loop over
+eager ops — no `jax.jit`, no `lax.scan`, no `lax.while_loop`.
 
 **Phase 1 gate, therefore:** the BP iteration must be traced (`lax.while_loop`
 on the residual, or `scan` over a fixed iteration budget) before the engine is
-built on it, and the D=2 per-solve cost must come down to the point where a
-default 200-step run is within ~2× of today's. If it cannot, the cadence
-decision in §2 has to be revisited for small D rather than the cost quietly
-accepted — and that revisit is a design change requiring its own review, not an
-implementation detail.
+built on it, and the D=2 per-solve cost must come down to the point where the
+**default dense** run is within ~2× of its 0.30 s baseline. If it cannot, the
+cadence decision in §2 has to be revisited for small D rather than the cost
+quietly accepted — and that revisit is a design change requiring its own review,
+not an implementation detail. The fermionic default gets its own gate once the
+fermionic gauge exists to measure; it is not covered by this one, and the
+block-sparse dispatch wall behind its 1167 ms cycle is a pre-existing problem
+that the rewrite neither causes nor fixes.
 
 **Warm ≈ cold.** A hypothesis worth recording as refuted: re-gauging after one
 gate does *not* converge in fewer iterations than gauging from scratch (D=3:
@@ -189,6 +224,60 @@ ipeps_su.py                     NEW — the engine (internal, see below)
 ipeps_gauge.py                  BP gauge, generalised from #870
   gauge_fix(state, tol=1e-6)      PUBLIC -> gauged state + BondWeights + info
 ```
+
+### The state is the absorbed form, and that is what makes `_SUState` complete
+
+A state with no lambdas is only a state if the site tensors already carry them.
+This has to be said explicitly, because the routine being generalised assumes
+the opposite: `bp_gauge_checkerboard` works in **Vidal form**, *requires* its
+incoming `weights`, and its docstring warns that passing `BondWeights.ones()`
+instead "discards that pair's `lambda` and re-gauges a different state". Taken
+literally, a `_SUState` holding bare `Gamma` and a `gauge_fix` handing the
+weights back *beside* it would throw away half the state on every solve.
+
+**The convention, therefore:** every tensor in `_SUState` is in **absorbed
+form** — each bond's weight split symmetrically, `sqrt(lambda)` into each of its
+two ends, exactly as `_to_physical_pair` already does for the CTM. A site tensor
+is then the wavefunction, not one factor of it. Vidal form exists only
+*transiently*: inside `gauge_fix` between its SVDs, and inside `_su_step`
+between the gate and the truncation. It is never a field, never returned as
+state, and never persists across a call boundary.
+
+Three consequences, and they are the whole point:
+
+- The `BondWeights` that `gauge_fix` returns are a **diagnostic output** — the
+  honest Schmidt spectrum of the state at the BP fixed point, used for
+  truncation and for reporting. Dropping them loses no physics, only a report.
+- `gauge_fix` needs **no incoming weights**. It gauges what it is given, and
+  what it is given is already the whole state.
+- **Truncation must restore the convention**: after the gate and its SVD, the
+  new singular values are split `sqrt(sigma)` into the two ends. A truncation
+  that left `sigma` on one side would silently reintroduce a Vidal-form state
+  under a non-Vidal type.
+
+**Measured, not assumed.** Absorbing `sqrt(lambda)` and then gauging from
+`ones()` reaches the same physical state *and* the same BP fixed point as the
+Vidal call, on both tensor types, using the `_torus_2x2` invariance probe from
+`tests/test_ipeps_bp_gauge.py`:
+
+| pair | D | absorbed input vs Vidal input | gauged output, route-to-route | fixed-point weights | BP iterations |
+|---|---|---|---|---|---|
+| dense | 2 | 2.8e-16 | 2.7e-15 | 1.2e-14 | 26 vs 26 |
+| dense | 3 | 5.4e-16 | 3.5e-14 | 1.6e-12 | 52 vs 51 |
+| symmetric | 2 | 9.3e-18 | 1.0e-15 | 3.3e-13 | 39 vs 40 |
+| symmetric | 3 | 1.2e-16 | 8.1e-16 | 4.8e-13 | 152 vs 153 |
+
+The `ones()` warning in that docstring is about passing `ones()` alongside
+*bare* `Gamma`, which drops `lambda`. Absorbing first and then passing `ones()`
+is the same state written differently — `A sqrt(lam) · sqrt(lam) B = A lam B` —
+and the table is the check that it is, on the symmetric path too, where a flow
+mistake would collapse charge sectors rather than raise.
+
+The iteration counts also say the convention is **free**: starting from `ones()`
+on absorbed tensors costs at most one extra sweep. That is the same measurement
+as "warm ≈ cold" below, seen from the other side — BP's fixed point belongs to
+the physical state, so the parameterisation it starts from moves the cost by
+about one iteration and the answer not at all.
 
 **API surface, decided:** `_su_step`, `_su_evolve` and `_SUState` are **internal**
 for v1 — hence the leading underscores above — matching the private
@@ -425,6 +514,15 @@ percentage.
    MPS canonical form and the lambdas must equal the Schmidt values to machine
    precision. This is the one place we have ground truth, and tenax already has
    `FiniteMPS.canonicalize` to check against.
+
+   **2a. The absorbed-form convention holds end to end (§3).** Two assertions,
+   both cheap and both guarding a way the state can silently become half a
+   state: gauging an absorbed pair from `ones()` reproduces the Vidal call's
+   physical state *and* fixed point (the table in §3, as a test); and a full
+   `_su_step` — gate, SVD, truncate — returns tensors whose next `gauge_fix`
+   is exact, which fails if the truncation leaves `sigma` on one side. Run on
+   the symmetric path too: a flow mistake there collapses charge sectors rather
+   than raising, and dense cannot see it.
 3. **Acceptance is on energy and self-consistency, NOT on a reference spectrum.**
 
    An earlier draft of this section asked the rewrite to reproduce
@@ -493,7 +591,11 @@ The engine is built alongside the existing code, not in place.
    serve as an acceptance criterion (§5.4, §5.5) — so Phase 0 is a prerequisite
    for Phase 3, not for starting.
 2. **Phase 1** — `ipeps_gauge.py`: generalise the #870 gauge to 1-site and to
-   fermionic. Prove exactness (§6.1, §6.2). **Go/no-go on §5.1.**
+   fermionic. Prove exactness (§6.1, §6.2). Take the absorbed-form entry point
+   (§3) — no incoming `BondWeights`, weights out as diagnostics only. **Go/no-go
+   on §5.1**, and two performance gates: trace the BP iteration until the default
+   dense run is within ~2× of its 0.30 s baseline, and **measure** the fermionic
+   gauge cost rather than projecting it from dense timings (§2).
 3. **Phase 2** — `ipeps_su.py`: the engine, bosonic dense first, against the
    §6.3 criteria *available on one representation*: energy, lambda/BP
    self-consistency, tree ground truth, chi-convergence, no `steps % 4`
