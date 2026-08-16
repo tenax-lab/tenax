@@ -1516,6 +1516,27 @@ def test_a_partly_converged_scan_is_not_called_measured():
     assert "set by the differences" in report.summary(), report.summary()
 
 
+@pytest.mark.parametrize("dtype", [np.int64, np.int32, np.bool_])
+def test_a_discrete_state_is_refused_rather_than_silently_unmoved(dtype):
+    """A finite difference needs a continuum to move in.
+
+    Every component of the normalised direction is below 1, so casting it to an
+    integer buffer truncates all of them to exactly zero: the scan would report
+    a no-signal refusal about a state that is simply of the wrong kind. A
+    sparse direction is worse -- some coordinates survive as 1, the shifted
+    states promote to floating point, and the scan measures a continuous map
+    the caller never passed, before dying inside ``np.spacing``.
+    """
+    data = np.ones((2, 2, 2, 2, 2), dtype=dtype)
+
+    def anything(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x.astype(jnp.float64)), jnp.ones((2, 2, 2, 2, 2))
+
+    with pytest.raises(ValueError, match="not a floating or complex type"):
+        measure_gradient_error(anything, _wrap(data), steps=(1e-2, 1e-3))
+
+
 def test_numpy_scalar_steps_do_not_promote_the_map():
     """The step is cast to the state's dtype, not only the direction.
 

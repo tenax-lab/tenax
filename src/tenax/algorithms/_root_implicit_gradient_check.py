@@ -382,6 +382,22 @@ def measure_gradient_error(
         )
 
     base = np.asarray(A.todense())
+    if not np.issubdtype(base.dtype, np.inexact):
+        # A finite difference needs a continuum to move in.  On an integer or
+        # boolean buffer every component of the unit direction is below 1 and
+        # the cast to ``base.dtype`` truncates all of them to zero, so the scan
+        # would report a no-signal refusal about a state that is merely of the
+        # wrong kind.  A sparse direction is worse: some coordinates survive as
+        # 1, the shifted states promote to floating point, and the scan then
+        # measures a continuous map the caller never passed -- before dying in
+        # ``np.spacing`` on an integer.
+        raise ValueError(
+            f"the state has dtype {base.dtype}, which is not a floating or "
+            "complex type. A finite difference has nothing to move in here: "
+            "the normalised direction truncates to exactly zero, and the "
+            "shifted states would either be identical to the original or "
+            "silently promoted to a different map."
+        )
     # The STATE, not just the energies.  A non-finite coordinate the callback
     # happens not to use passes every energy check -- an affine objective can
     # read only the finite coordinates and return a finite gradient -- while
