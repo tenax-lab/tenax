@@ -19,12 +19,40 @@ Reference:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+# Imported at module level rather than under ``TYPE_CHECKING``, and that is not
+# a style choice: ``SplitCTMTensorEnv`` appears in the public signatures of
+# :func:`fpeps` and :func:`sublattice_gap`.  ``from __future__ import
+# annotations`` keeps annotations as strings, so a ``TYPE_CHECKING``-only import
+# survives import and ordinary attribute access -- but anything that *evaluates*
+# them raises ``NameError``, and ``typing.get_type_hints()`` evaluates them on
+# purpose::
+#
+#     >>> typing.get_type_hints(fpeps)
+#     NameError: name 'SplitCTMTensorEnv' is not defined
+#
+# That breaks every consumer that introspects a signature: runtime validators
+# (pydantic, typeguard, beartype), ``inspect.signature(..., eval_str=True)``,
+# and any tooling that resolves hints for a public API.
+#
+# It is **not** a docs-build failure, and the tempting version of this comment
+# that says otherwise was measured and is wrong: ``docs/conf.py`` does enable
+# ``sphinx_autodoc_typehints`` with ``autodoc_typehints = "description"``, but
+# ``uv run sphinx-build -W -b html docs docs/_build/offline`` succeeds both with
+# and without this import, and the rendered ``Return type`` for both functions is
+# identical either way -- the extension falls back to the unevaluated string.
+# Fix this because the public annotations should resolve, not because the docs
+# are on fire.
+#
+# There is no cycle to avoid here: ``_split_ctm_tensor_init`` imports only
+# ``_ctm_utils`` and ``tenax.core``, and importing it does not pull this module
+# in.  If that ever changes, the fix is a qualified annotation that resolves at
+# runtime, not a retreat to ``TYPE_CHECKING``.
+from tenax.algorithms._split_ctm_tensor_init import SplitCTMTensorEnv
 from tenax.algorithms.ipeps_simple_update import (
     BondWeights,
     _simple_update_checkerboard_sweep,
@@ -34,9 +62,6 @@ from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
-
-if TYPE_CHECKING:
-    from tenax.algorithms._split_ctm_tensor_init import SplitCTMTensorEnv
 
 
 @dataclass
