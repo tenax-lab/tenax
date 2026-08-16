@@ -565,28 +565,6 @@ def measure_gradient_error(
     # and reported as perfect.  The smallest step carries the least truncation;
     # whether it was also small enough to be roundoff-dominated is exactly what
     # ``resolution`` below reports, so the honest answer survives either way.
-    # The steps must probe the SAME direction before their spread can be read
-    # as noise.  Each ``analytic_h`` now matches its own difference, but pooling
-    # differences taken along unequal effective directions measures how much
-    # those directions differ -- not how noisy the scan is.  Codex's case: a
-    # coordinate that moves at h=1 and freezes at h=0.01, weighted 100, gives
-    # ``resolution`` 0.77 and hides a 0.5 error the fine step measured exactly.
-    units = [r[5] / max(float(np.linalg.norm(r[5])), 1e-300) for r in results]
-    spread_between_directions = max(
-        (float(np.linalg.norm(a - b)) for a in units for b in units), default=0.0
-    )
-    if spread_between_directions > 5e-2:
-        raise ValueError(
-            f"the steps probe different directions (unit displacements differ "
-            f"by up to {spread_between_directions:.2e}), so their spread "
-            f"measures that difference rather than the scan's noise and cannot "
-            f"bound it. Per-step distortion from the requested direction: "
-            + ", ".join(f"h={r[2]:.1e}: {r[3]:.2e}" for r in results)
-            + ". Use steps that move the same coordinates -- a state whose "
-            "entries span many orders will freeze different ones at different "
-            "step sizes."
-        )
-
     best_rel, best_fd, best_h, _dist, best_analytic, _eff, _fdu = min(
         results, key=lambda r: abs(r[2])
     )
@@ -598,15 +576,23 @@ def measure_gradient_error(
     # is right every step lands at roundoff, and the ratio of two floor values
     # (1e-11 against 2e-10) is noise that would read as a 20x spread and report
     # an exact gradient as a failure.
-    # Pool the NORMALISED differences: the direction guard above makes the unit
-    # directions agree, and this makes their magnitudes agree too, so what is
-    # left in the spread is genuinely the scan's noise.  Pooling raw values let
-    # a rounding-induced change in the effective norm read as a 1.0e-02 floor
-    # and mark a real 5% error unresolved.
-    fds = [r[6] for r in results]
-    scale = max(abs(f) for f in fds)
-    scale = max(scale, 1e-300)
-    resolution = (max(fds) - min(fds)) / scale
+    # Pool the per-step RELATIVE ERRORS, not the differences themselves.
+    #
+    # Each ``rel`` is measured against that step's own ``analytic_h``, along the
+    # direction that step actually followed, so it is dimensionless and
+    # direction-local: a gradient that is uniformly 5% high reads 0.05 along
+    # ANY direction.  Their spread therefore answers the question resolution is
+    # for -- does the answer depend on the step? -- without ever comparing two
+    # different derivatives.
+    #
+    # Pooling the differences could not do that at any tolerance.  Raw values
+    # mixed different scalings; normalising fixed the scale but not the
+    # direction; and requiring the directions to agree cannot work on float32,
+    # where the pairwise unit distance with a random direction degrades from
+    # 5.2e-05 to 4.4e-02 as h shrinks, while any gradient can amplify that
+    # difference arbitrarily.  The quantity was wrong, not the tolerance.
+    rels = [r[0] for r in results]
+    resolution = max(rels) - min(rels)
     # A tolerated direction distortion is a floor on what this scan can resolve.
     # Every step carries the same one, so it never shows up in their spread: a
     # 0.5% drift with a near-zero spread would otherwise report a correct

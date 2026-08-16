@@ -979,41 +979,58 @@ def test_a_wrong_gradient_is_still_caught_on_a_distorted_direction():
     assert report.relative_error == pytest.approx(0.5, rel=1e-6), report.summary()
 
 
-def test_steps_probing_different_directions_cannot_bound_each_other():
-    """Pooled spread is only noise if every step moved the same coordinates.
+def test_steps_probing_different_directions_still_give_a_sound_answer():
+    """Each step is compared along its own direction, so they need not agree.
 
-    A coordinate that moves at the coarse step and freezes at the fine one
-    makes the two differences *different derivatives*. Their spread then
-    measures that difference: weighting the coordinate heavily gives a
-    ``resolution`` around 0.77 which marks a 50% error unresolved, even though
-    the fine step measured it exactly.
+    ``base[0]=1e14`` moves at h=1 and freezes at h=1e-2 -- ULP(1e14) is 1.56e-02,
+    between the two displacements -- so the steps probe genuinely different
+    directions (unit distance 1.73e-01). Pooling their *differences* was
+    unsound at any tolerance; pooling their *relative errors* is not, because
+    each is measured against its own ``analytic_h``.
     """
     n = 32
     base = np.ones(n)
-    # 1e14 is the load-bearing value: ULP(1e14) is 1.56e-02, which sits
-    # between the coarse step's displacement there (1.77e-01) and the fine
-    # step's (1.77e-03). So the coordinate moves at h=1 and freezes at h=1e-2,
-    # and the two unit directions differ by 1.73e-01. Picked by scanning --
-    # 1e12 rounds but never freezes and the pairwise distance is only 6e-03,
-    # which the guard correctly ignores.
     base[0] = 1e14
     base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
     weights = np.ones(n)
     weights[0] = 100.0
+    w_j = jnp.asarray(weights.reshape((2, 2, 2, 2, 2)))
 
     def weighted_affine(t):
         x = jnp.asarray(t.todense())
-        return jnp.sum(jnp.asarray(weights.reshape((2, 2, 2, 2, 2))) * (x - base_j)), (
-            jnp.asarray(weights.reshape((2, 2, 2, 2, 2)))
-        )
+        return jnp.sum(w_j * (x - base_j)), w_j
 
-    with pytest.raises(ValueError, match="probe different directions"):
-        measure_gradient_error(
-            weighted_affine,
-            _wrap(base.reshape((2, 2, 2, 2, 2))),
-            direction=np.ones((2, 2, 2, 2, 2)),
-            steps=(1.0, 1e-2),
-        )
+    report = measure_gradient_error(
+        weighted_affine,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=np.ones((2, 2, 2, 2, 2)),
+        steps=(1.0, 1e-2),
+    )
+
+    assert report.relative_error < 1e-9, (
+        f"a correct gradient must measure correctly even when the steps probe "
+        f"different directions -- {report.summary()}"
+    )
+
+
+def test_a_uniform_error_is_resolved_across_differing_directions():
+    """A gradient uniformly 5% high reads 0.05 along ANY direction.
+
+    That is what makes the relative errors poolable where the differences were
+    not: on float32 with the default steps the unit directions drift from
+    5.2e-05 to 4.4e-02 apart, and pooling derivatives let that drift mark the
+    real error unresolved.
+    """
+    data = np.full((2, 2, 2, 2, 2), 0.5, dtype=np.float32)
+
+    def five_percent_high(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**2), 1.05 * 2.0 * x
+
+    report = measure_gradient_error(five_percent_high, _wrap(data), steps=(1e-2, 1e-3))
+
+    assert report.relative_error == pytest.approx(0.05, rel=5e-2), report.summary()
+    assert report.is_resolved, report.summary()
 
 
 def test_ordinary_rounding_still_counts_as_the_same_direction():
@@ -1063,4 +1080,39 @@ def test_a_small_real_error_is_not_hidden_by_effective_norm_drift():
     assert report.is_resolved, (
         "a real 5% error was hidden by effective-norm drift between steps -- "
         f"{report.summary()}"
+    )
+
+
+def test_resolution_pools_relative_errors_not_differences():
+    """The pooled quantity has to be direction-local, not a derivative.
+
+    ``base = 1e8`` with steps ``(1e-4, 1e-6)`` quantises the fine step's
+    displacement, so the two effective norms differ by ~1% while the gradient
+    is uniformly 5% high. Pooling the differences reads that 1% as noise --
+    measured ``resolution`` 1.01e-02, which marks the real 5% error unresolved.
+    Pooling the relative errors gives 0.00, because each is measured against
+    its own step's projection and a uniform 5% error is 5% along any direction.
+    """
+    n = 32
+    base = np.full(n, 1e8)
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+
+    def five_percent_high(t):
+        x = jnp.asarray(t.todense())
+        d = x - base_j
+        # Algebraically sum(x^2 - base^2), written to avoid forming x^2 ~ 1e16
+        # and losing the 1e8-scale difference to cancellation -- that would put
+        # ~5.5e-02 in relative_error for reasons unrelated to the 5% error.
+        return jnp.sum(d * d + 2.0 * base_j * d), 1.05 * 2.0 * x
+
+    report = measure_gradient_error(
+        five_percent_high,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        steps=(1e-4, 1e-6),
+    )
+
+    assert report.relative_error == pytest.approx(0.05, rel=1e-3), report.summary()
+    assert report.is_resolved, (
+        "a real 5% error was marked unresolved by a floor built from the "
+        f"differences rather than the relative errors -- {report.summary()}"
     )
