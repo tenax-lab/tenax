@@ -336,27 +336,56 @@ def test_an_error_only_in_the_imaginary_part_is_detected():
         f"-- the probe direction is not seeing the imaginary half"
     )
 
-    # And the blindness is real, not hypothetical: force a real direction and
-    # the same corrupted gradient measures as perfect.
-    real_v = np.real(np.asarray(A.todense())) * 0 + np.random.RandomState(
-        1
-    ).standard_normal(A.todense().shape)
-    blind = measure_gradient_error(
-        _complex_pair(imag_scale=4.0), A, direction=real_v.astype(complex)
-    )
-    assert blind.relative_error < 1e-6, (
-        "a real direction was expected to be blind to the imaginary error; if "
-        "this now fails the blindness argument needs rechecking"
+    # And the blindness is real, not hypothetical.  Demonstrated on the
+    # arithmetic rather than through the API, which now refuses a real-valued
+    # direction outright: with real ``v`` the corrupted gradient's directional
+    # derivative still matches the finite difference exactly, so nothing in the
+    # comparison could ever notice the 4x error.
+    corrupted = _complex_pair(imag_scale=4.0)
+    x = np.asarray(A.todense())
+    real_v = np.random.RandomState(1).standard_normal(x.shape)
+    real_v = real_v / np.linalg.norm(real_v)
+
+    _E, g_bad = corrupted(A)
+    blind_analytic = float(np.real(np.sum(np.asarray(g_bad) * real_v)))
+
+    h = 1e-6
+    e_plus = float(np.real(corrupted(_wrap(x + h * real_v))[0]))
+    e_minus = float(np.real(corrupted(_wrap(x - h * real_v))[0]))
+    blind_fd = (e_plus - e_minus) / (2 * h)
+
+    assert blind_analytic == pytest.approx(blind_fd, rel=1e-6), (
+        "a real direction was expected to be blind to the imaginary error -- "
+        f"g.v={blind_analytic:.6e} against fd={blind_fd:.6e}. If these now "
+        "disagree, the blindness argument needs rechecking."
     )
 
 
-def test_a_real_direction_on_a_complex_state_is_refused():
-    with pytest.raises(ValueError, match="real but the state is complex"):
-        measure_gradient_error(
-            _complex_pair(),
-            _complex_state(),
-            direction=np.random.RandomState(2).standard_normal((2, 2, 2, 2, 2)),
-        )
+@pytest.mark.parametrize("cast_to_complex", [False, True])
+def test_a_real_valued_direction_on_a_complex_state_is_refused(cast_to_complex):
+    """Judged on the values, not the dtype.
+
+    A real-valued array cast to ``complex128`` has all-zero imaginary
+    components and is exactly as blind as a real one, so accepting it because
+    ``iscomplexobj`` is True would guard the dtype rather than the property
+    that matters.
+    """
+    v = np.random.RandomState(2).standard_normal((2, 2, 2, 2, 2))
+    if cast_to_complex:
+        v = v.astype(complex)
+
+    with pytest.raises(ValueError, match="no imaginary component"):
+        measure_gradient_error(_complex_pair(), _complex_state(), direction=v)
+
+
+def test_a_genuinely_complex_direction_is_accepted():
+    """The guard must not reject the directions it exists to require."""
+    rng = np.random.RandomState(5)
+    v = rng.standard_normal((2, 2, 2, 2, 2)) + 1j * rng.standard_normal((2, 2, 2, 2, 2))
+
+    report = measure_gradient_error(_complex_pair(), _complex_state(), direction=v)
+
+    assert report.relative_error < 1e-6, report.summary()
 
 
 # --------------------------------------------------------------------------- #

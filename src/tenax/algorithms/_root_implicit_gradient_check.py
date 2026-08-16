@@ -150,8 +150,9 @@ def measure_gradient_error(
     themselves.  ``is_resolved`` says whether the first stands clear of the
     second by ``fd_spread_tol``.
 
-    On a **complex** state the default direction is complex too, and a real one
-    passed explicitly is refused.  ``Re(sum(g * v))`` with real ``v`` pairs the
+    On a **complex** state the default direction is complex too, and a
+    real-*valued* one passed explicitly is refused -- judged on the values, so
+    a real array cast to a complex dtype is refused as well.  ``Re(sum(g * v))`` with real ``v`` pairs the
     gradient's imaginary components to exactly zero, so an arbitrarily large
     error confined to them would be reported as below the resolution -- the
     asymmetric engine takes complex states (#721), so that is reachable.  The
@@ -218,21 +219,31 @@ def measure_gradient_error(
     )
     if v.shape != base.shape:
         raise ValueError(f"direction has shape {v.shape}, expected {base.shape}")
-    if is_complex and not np.iscomplexobj(v):
-        # A real direction on a complex state is blind to the whole imaginary
-        # half of the gradient, so it is refused rather than quietly measuring
-        # less than the caller thinks.  Passing an explicitly complex-typed
-        # array of real values is allowed -- that is a deliberate choice.
-        raise ValueError(
-            "direction is real but the state is complex, so the finite "
-            "difference would sample only the real coordinates and any error "
-            "in the gradient's imaginary components would pair to exactly "
-            "zero. Pass a complex direction, or omit it for a random one."
-        )
     norm = float(np.linalg.norm(v))
     if norm == 0.0:
         raise ValueError("direction is the zero vector")
     v = v / norm
+
+    if is_complex:
+        # Judged on the VALUES, not the dtype.  A real-valued direction stored
+        # in a complex array is exactly as blind as a real one: its imaginary
+        # components are zero, so ``Re(sum(g * v))`` pairs the whole imaginary
+        # half of the gradient to zero and an error living there is reported as
+        # perfect.  Checking ``iscomplexobj`` instead was the same mistake as
+        # counting step entries rather than distinct magnitudes -- guarding an
+        # adjacent property and calling it the property.
+        imag_content = float(np.max(np.abs(v.imag))) if np.iscomplexobj(v) else 0.0
+        if imag_content < 1e-12 * float(np.max(np.abs(v))):
+            raise ValueError(
+                "direction has no imaginary component but the state is "
+                "complex, so the finite difference would sample only the real "
+                "coordinates and any error in the gradient's imaginary "
+                "components would pair to exactly zero -- a wrong gradient "
+                "would be reported as perfect. Pass a genuinely complex "
+                "direction, or omit it for a random one. (A real-valued array "
+                "cast to a complex dtype is still real-valued and is refused "
+                "for the same reason.)"
+            )
 
     _energy, grad = energy_and_grad(A)
     grad_arr = np.asarray(grad)

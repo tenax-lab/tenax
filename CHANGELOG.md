@@ -36,8 +36,9 @@
   costs several CTM convergences, which is why #785 rejected an FD probe inside
   the optimizer loop. Run it once on a representative state before a long run.
 
-  On a complex state the probe direction is complex too, and a real one passed
-  explicitly is refused: `Re(Σ g·v)` with real `v` pairs the gradient's
+  On a complex state the probe direction is complex too, and a real-*valued*
+  one passed explicitly is refused — judged on the values, so a real array cast
+  to a complex dtype is refused as well: `Re(Σ g·v)` with real `v` pairs the gradient's
   imaginary components to exactly zero, so an arbitrarily large error confined
   to them would have been reported as below the resolution. The asymmetric
   engine takes complex states (#721), so that was reachable.
