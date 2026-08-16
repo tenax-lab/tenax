@@ -1032,3 +1032,35 @@ def test_ordinary_rounding_still_counts_as_the_same_direction():
     report = measure_gradient_error(quadratic, _wrap(data), steps=(1e-3, 1e-4))
 
     assert report.relative_error < 1e-2, report.summary()
+
+
+def test_a_small_real_error_is_not_hidden_by_effective_norm_drift():
+    """Steps with parallel but differently-scaled displacements are commensurable.
+
+    The direction guard makes the unit directions agree, but rounding still
+    changes the effective *norm* between steps. Pooling raw differences then
+    reads that scaling difference as noise: on this float32 state it produced a
+    resolution of ~1.0e-02 and marked a genuine 5% error unresolved against a
+    10.4% bound, even though every per-step comparison measured exactly 5%.
+    """
+    data = np.full((2, 2, 2, 2, 2), 0.5, dtype=np.float32)
+
+    def five_percent_high(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**2), 1.05 * 2.0 * x
+
+    # Steps sized for float32: the default 1e-6 is ~3 ULPs on a 0.5 entry, so
+    # the displacement is quantised and the scan is roundoff-dominated for
+    # reasons that have nothing to do with the pooling under test.
+    report = measure_gradient_error(
+        five_percent_high,
+        _wrap(data),
+        direction=np.ones((2, 2, 2, 2, 2)),
+        steps=(1e-2, 1e-3),
+    )
+
+    assert report.relative_error == pytest.approx(0.05, rel=1e-2), report.summary()
+    assert report.is_resolved, (
+        "a real 5% error was hidden by effective-norm drift between steps -- "
+        f"{report.summary()}"
+    )

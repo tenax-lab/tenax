@@ -527,13 +527,20 @@ def measure_gradient_error(
             step_distortion = float(np.linalg.norm(effective - v)) / max(
                 float(np.linalg.norm(v)), 1e-300
             )
+            # Per unit of displacement, so steps with different effective
+            # NORMS stay commensurable.  Raw differences under different
+            # scalings are different derivatives, and pooling them reads that
+            # difference as noise.
+            eff_norm = max(float(np.linalg.norm(effective)), 1e-300)
         except _StepUnusable as exc:
             # One bad step is not a bad scan.  Keep going; the survivors are
             # checked for separation below, which is the property that actually
             # has to hold.
             skipped.append(f"h={h:.1e}: {exc}")
             continue
-        results.append((rel, fd, h, step_distortion, analytic_h, effective))
+        results.append(
+            (rel, fd, h, step_distortion, analytic_h, effective, fd / eff_norm)
+        )
 
     surviving = sorted({abs(r[2]) for r in results})
     if len(surviving) < 2 or surviving[-1] / surviving[0] < 2.0:
@@ -580,7 +587,7 @@ def measure_gradient_error(
             "step sizes."
         )
 
-    best_rel, best_fd, best_h, _dist, best_analytic, _eff = min(
+    best_rel, best_fd, best_h, _dist, best_analytic, _eff, _fdu = min(
         results, key=lambda r: abs(r[2])
     )
     direction_distortion = max(r[3] for r in results)
@@ -591,8 +598,14 @@ def measure_gradient_error(
     # is right every step lands at roundoff, and the ratio of two floor values
     # (1e-11 against 2e-10) is noise that would read as a 20x spread and report
     # an exact gradient as a failure.
-    fds = [r[1] for r in results]
-    scale = max(abs(analytic), max(abs(f) for f in fds), 1e-300)
+    # Pool the NORMALISED differences: the direction guard above makes the unit
+    # directions agree, and this makes their magnitudes agree too, so what is
+    # left in the spread is genuinely the scan's noise.  Pooling raw values let
+    # a rounding-induced change in the effective norm read as a 1.0e-02 floor
+    # and mark a real 5% error unresolved.
+    fds = [r[6] for r in results]
+    scale = max(abs(f) for f in fds)
+    scale = max(scale, 1e-300)
     resolution = (max(fds) - min(fds)) / scale
     # A tolerated direction distortion is a floor on what this scan can resolve.
     # Every step carries the same one, so it never shows up in their spread: a
